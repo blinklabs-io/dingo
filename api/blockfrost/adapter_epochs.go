@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/hex"
 	"fmt"
+	"math"
 	"strconv"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -177,7 +178,11 @@ func (a *NodeAdapter) reachedEpoch(
 		return models.Epoch{}, fmt.Errorf("get epoch %d: %w", epoch, err)
 	}
 	if row == nil || row.StartSlot > a.ledgerState.Tip().Point.Slot {
-		return models.Epoch{}, fmt.Errorf("epoch %d: %w", epoch, ErrEpochNotFound)
+		return models.Epoch{}, fmt.Errorf(
+			"epoch %d: %w",
+			epoch,
+			ErrEpochNotFound,
+		)
 	}
 	return *row, nil
 }
@@ -213,26 +218,44 @@ func epochWindow(
 	after bool,
 	params PaginationParams,
 ) (first uint64, count int, total int) {
+	var span uint64
 	if after {
 		if epoch >= current {
 			return 0, 0, 0
 		}
-		total = int(current - epoch)
+		span = current - epoch
 	} else {
-		if epoch > current {
-			epoch = current
-		}
-		total = int(epoch)
+		epoch = min(epoch, current)
+		span = epoch
 	}
+	total = saturatingInt(span)
 	offset, ok := paginationOffset(params)
 	if !ok || offset >= total {
 		return 0, 0, total
 	}
 	count = min(params.Count, total-offset)
+	skipped := nonNegativeUint64(offset)
 	if after {
-		return epoch + 1 + uint64(offset), count, total
+		return epoch + 1 + skipped, count, total
 	}
-	return epoch - 1 - uint64(offset), count, total
+	return epoch - 1 - skipped, count, total
+}
+
+// saturatingInt converts v to int, stopping at the largest value a count in
+// this API can take.
+func saturatingInt(v uint64) int {
+	if v > math.MaxInt32 {
+		return math.MaxInt32
+	}
+	return int(v) // #nosec G115 -- bounded above by math.MaxInt32
+}
+
+// nonNegativeUint64 converts a pagination offset, which is never negative.
+func nonNegativeUint64(v int) uint64 {
+	if v < 0 {
+		return 0
+	}
+	return uint64(v) // #nosec G115 -- checked non-negative above
 }
 
 func (a *NodeAdapter) epochsAround(

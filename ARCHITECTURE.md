@@ -10186,6 +10186,29 @@ through to a catch-all `404` handler instead of the root document.
 `GET /addresses/{address}/transactions` honors the inclusive `from`/`to` block
 range through the same parser as the account endpoint.
 
+The router also serves the epoch operations (`/epochs/{number}` with `next`,
+`previous`, `stakes`, `stakes/{pool_id}`, `blocks` and `blocks/{pool_id}`;
+`/epochs/latest` reports the epoch's output, fees and active stake), the pool
+history operations (`retired`, `history`, `relays`, `delegators`, `blocks`,
+`updates`, `votes`), the account history operations (`history`, `mirs`,
+`addresses/assets`, `addresses/total`) and the governance operations
+(committee and committee votes, DRep delegators, metadata, updates and votes,
+the proposal list, and every proposal's details, parameters, withdrawals, votes
+and metadata). A proposal is addressed either by transaction hash and
+certificate index or by CIP-129 governance action id. `ServeMux` cannot hold
+both forms of `.../{tx_hash}/{cert_index}` and `.../{gov_action_id}/votes`, so
+the router registers one pattern per segment count and tells the forms apart by
+whether the second segment names a part (`parameters`, `withdrawals`, `votes`,
+`metadata`).
+
+Historical answers follow what the node retains. When the per-credential rows
+behind an epoch's stakes or an account's stake history were pruned, or the block
+that cast a governance vote is not held, the endpoint answers `404` with "The
+requested history is not retained by this node" (`ErrHistoryNotRetained`)
+rather than an empty list that reads as complete. API storage mode retains
+`reward_stake_input` without bound for this reason; see "Snapshot and
+Reward-State Retention" in DATABASE.md for the storage cost.
+
 The account UTxOs, withdrawals, and transactions endpoints resolve everything
 by stake credential rather than a single address. Account UTxOs reuse the
 UTxO address-pattern query with a delegation-part-only pattern (matching
@@ -11155,7 +11178,7 @@ second sync:
   - *Core-mode pruning.* `ledger/snapshot/rotation.go`'s
     `cleanupOldSnapshots` keeps `reward_stake_input`/`reward_account_output`
     for only a rolling 4-epoch window in core storage mode (API mode retains
-    `reward_account_output` without bound instead); `reward_pool_input`/
+    both without bound instead); `reward_pool_input`/
     `reward_pool_output` are not pruned by that path at all. `DatabaseSource`
     does not race this in any special, same-transaction way — it just reads
     whatever is currently committed. What actually satisfies "available

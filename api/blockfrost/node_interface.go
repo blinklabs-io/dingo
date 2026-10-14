@@ -133,6 +133,107 @@ type BlockfrostNode interface {
 	// of matching results before pagination.
 	PoolsRetiring(context.Context, PaginationParams) ([]PoolRetiringInfo, int, error)
 
+	// GovernanceProposals returns the paginated proposal list along with the
+	// total before pagination.
+	GovernanceProposals(
+		ctx context.Context,
+		params PaginationParams,
+	) ([]GovernanceProposalInfo, int, error)
+
+	// GovernanceProposal returns a proposal, or
+	// models.ErrGovernanceProposalNotFound.
+	GovernanceProposal(
+		ctx context.Context,
+		ref GovActionRef,
+	) (GovernanceProposalDetailInfo, error)
+
+	// GovernanceProposalParameters returns the parameter update of a
+	// parameter change proposal. Any other proposal reports
+	// models.ErrGovernanceProposalNotFound.
+	GovernanceProposalParameters(
+		ctx context.Context,
+		ref GovActionRef,
+	) (GovernanceProposalParametersInfo, error)
+
+	// GovernanceProposalWithdrawals returns the treasury withdrawals of a
+	// proposal.
+	GovernanceProposalWithdrawals(
+		ctx context.Context,
+		ref GovActionRef,
+		params PaginationParams,
+	) ([]GovernanceWithdrawalInfo, int, error)
+
+	// GovernanceProposalVotes returns the votes cast on a proposal. It
+	// returns ErrHistoryNotRetained when a vote's casting transaction can no
+	// longer be located.
+	GovernanceProposalVotes(
+		ctx context.Context,
+		ref GovActionRef,
+		params PaginationParams,
+	) ([]GovernanceProposalVoteInfo, int, error)
+
+	// GovernanceProposalMetadata returns the off-chain document behind a
+	// proposal's anchor, or models.ErrGovernanceProposalNotFound when it has
+	// not been fetched.
+	GovernanceProposalMetadata(
+		ctx context.Context,
+		ref GovActionRef,
+	) (GovernanceProposalMetadataInfo, error)
+
+	// DRepDelegators returns the registered delegators of a DRep.
+	DRepDelegators(
+		ctx context.Context,
+		credential DRepCredential,
+		params PaginationParams,
+	) ([]DRepDelegatorInfo, int, error)
+
+	// DRepMetadata returns the off-chain document behind a DRep's anchor.
+	DRepMetadata(
+		ctx context.Context,
+		credential DRepCredential,
+	) (DRepAnchorInfo, error)
+
+	// DRepUpdates returns a DRep's registration, update and deregistration
+	// certificates.
+	DRepUpdates(
+		ctx context.Context,
+		credential DRepCredential,
+		params PaginationParams,
+	) ([]DRepUpdateInfo, int, error)
+
+	// DRepVotes returns the votes a DRep cast. It returns
+	// ErrHistoryNotRetained when a vote's casting transaction can no longer
+	// be located.
+	DRepVotes(
+		ctx context.Context,
+		credential DRepCredential,
+		params PaginationParams,
+	) ([]DRepVoteInfo, int, error)
+
+	// PoolVotes returns the votes a pool cast. It returns
+	// ErrHistoryNotRetained when a vote's casting transaction can no longer
+	// be located.
+	PoolVotes(
+		ctx context.Context,
+		poolID string,
+		params PaginationParams,
+	) ([]PoolVoteInfo, int, error)
+
+	// GovernanceCommittee returns the constitutional committee.
+	GovernanceCommittee(ctx context.Context) (CommitteeInfo, error)
+
+	// CommitteeVotes returns the votes cast by committee members: all of
+	// them for a nil credential, those of one hot credential, or, when cold
+	// is set, those of every hot credential the cold one authorized. It
+	// returns ErrHistoryNotRetained when a vote's casting transaction can no
+	// longer be located.
+	CommitteeVotes(
+		ctx context.Context,
+		credential *CommitteeCredentialRef,
+		cold bool,
+		params PaginationParams,
+	) ([]CommitteeVoteInfo, int, error)
+
 	// PoolsRetired returns the paginated list of pools whose retirement has
 	// taken effect, along with the total before pagination.
 	PoolsRetired(

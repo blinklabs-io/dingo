@@ -16,8 +16,10 @@ package blockfrost
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"net/http/httptest"
+	"strconv"
 )
 
 // pageStub is a canned answer for a paginated node method that also records
@@ -61,6 +63,7 @@ func (v *valueStub[T]) respond(number uint64, key string) (T, error) {
 type historyMock struct {
 	poolHistoryMock
 	accountHistoryMock
+	governanceMock
 	epochByNumber   valueStub[EpochInfo]
 	epochsAfter     pageStub[EpochInfo]
 	epochsBefore    pageStub[EpochInfo]
@@ -224,4 +227,133 @@ func (m *accountHistoryMock) AccountAddressTotal(
 	stakeAddress string,
 ) (AccountAddressTotalInfo, error) {
 	return m.accountTotal.respond(0, stakeAddress)
+}
+
+func refKey(ref GovActionRef) string {
+	return hex.EncodeToString(ref.TxHash) + "#" + strconv.Itoa(int(ref.Index))
+}
+
+// governanceMock supplies the governance half of historyMock.
+type governanceMock struct {
+	proposals           pageStub[GovernanceProposalInfo]
+	proposal            valueStub[GovernanceProposalDetailInfo]
+	proposalParams      valueStub[GovernanceProposalParametersInfo]
+	proposalWithdrawals pageStub[GovernanceWithdrawalInfo]
+	proposalVotes       pageStub[GovernanceProposalVoteInfo]
+	proposalMetadata    valueStub[GovernanceProposalMetadataInfo]
+	drepDelegators      pageStub[DRepDelegatorInfo]
+	drepMetadata        valueStub[DRepAnchorInfo]
+	drepUpdates         pageStub[DRepUpdateInfo]
+	drepVotes           pageStub[DRepVoteInfo]
+	poolVotes           pageStub[PoolVoteInfo]
+	committee           valueStub[CommitteeInfo]
+	committeeVotes      pageStub[CommitteeVoteInfo]
+	// committeeCold records the cold flag of the last CommitteeVotes call.
+	committeeCold bool
+}
+
+func (m *governanceMock) GovernanceProposals(
+	_ context.Context,
+	params PaginationParams,
+) ([]GovernanceProposalInfo, int, error) {
+	return m.proposals.respond(0, "", params)
+}
+
+func (m *governanceMock) GovernanceProposal(
+	_ context.Context,
+	ref GovActionRef,
+) (GovernanceProposalDetailInfo, error) {
+	return m.proposal.respond(0, refKey(ref))
+}
+
+func (m *governanceMock) GovernanceProposalParameters(
+	_ context.Context,
+	ref GovActionRef,
+) (GovernanceProposalParametersInfo, error) {
+	return m.proposalParams.respond(0, refKey(ref))
+}
+
+func (m *governanceMock) GovernanceProposalWithdrawals(
+	_ context.Context,
+	ref GovActionRef,
+	params PaginationParams,
+) ([]GovernanceWithdrawalInfo, int, error) {
+	return m.proposalWithdrawals.respond(0, refKey(ref), params)
+}
+
+func (m *governanceMock) GovernanceProposalVotes(
+	_ context.Context,
+	ref GovActionRef,
+	params PaginationParams,
+) ([]GovernanceProposalVoteInfo, int, error) {
+	return m.proposalVotes.respond(0, refKey(ref), params)
+}
+
+func (m *governanceMock) GovernanceProposalMetadata(
+	_ context.Context,
+	ref GovActionRef,
+) (GovernanceProposalMetadataInfo, error) {
+	return m.proposalMetadata.respond(0, refKey(ref))
+}
+
+func (m *governanceMock) DRepDelegators(
+	_ context.Context,
+	credential DRepCredential,
+	params PaginationParams,
+) ([]DRepDelegatorInfo, int, error) {
+	return m.drepDelegators.respond(0, credential.ID, params)
+}
+
+func (m *governanceMock) DRepMetadata(
+	_ context.Context,
+	credential DRepCredential,
+) (DRepAnchorInfo, error) {
+	return m.drepMetadata.respond(0, credential.ID)
+}
+
+func (m *governanceMock) DRepUpdates(
+	_ context.Context,
+	credential DRepCredential,
+	params PaginationParams,
+) ([]DRepUpdateInfo, int, error) {
+	return m.drepUpdates.respond(0, credential.ID, params)
+}
+
+func (m *governanceMock) DRepVotes(
+	_ context.Context,
+	credential DRepCredential,
+	params PaginationParams,
+) ([]DRepVoteInfo, int, error) {
+	return m.drepVotes.respond(0, credential.ID, params)
+}
+
+func (m *governanceMock) PoolVotes(
+	_ context.Context,
+	poolID string,
+	params PaginationParams,
+) ([]PoolVoteInfo, int, error) {
+	return m.poolVotes.respond(0, poolID, params)
+}
+
+func (m *governanceMock) GovernanceCommittee(
+	_ context.Context,
+) (CommitteeInfo, error) {
+	return m.committee.respond(0, "")
+}
+
+func (m *governanceMock) CommitteeVotes(
+	_ context.Context,
+	credential *CommitteeCredentialRef,
+	cold bool,
+	params PaginationParams,
+) ([]CommitteeVoteInfo, int, error) {
+	key := ""
+	if credential != nil {
+		key = hex.EncodeToString(credential.Hash)
+		if credential.HasScript {
+			key += "/script"
+		}
+	}
+	m.committeeCold = cold
+	return m.committeeVotes.respond(0, key, params)
 }

@@ -29,9 +29,12 @@ func stakeAddressPage[Item, Response any](
 	convert func(Item) Response,
 	internalMessage string,
 ) {
-	servePage(b, w, r,
-		func(params PaginationParams) ([]Item, int, error) {
-			return fetch(r.Context(), r.PathValue("stake_address"), params)
+	servePage(
+		b,
+		w,
+		r,
+		func(ctx context.Context, params PaginationParams) ([]Item, int, error) {
+			return fetch(ctx, r.PathValue("stake_address"), params)
 		},
 		convert,
 		internalMessage,

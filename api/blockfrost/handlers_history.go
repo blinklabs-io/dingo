@@ -15,6 +15,7 @@
 package blockfrost
 
 import (
+	"context"
 	"errors"
 	"net/http"
 
@@ -52,6 +53,8 @@ func (b *Blockfrost) writeHistoryError(
 			"The requested history is not retained by this node.",
 		)
 	case errors.Is(err, ErrEpochNotFound),
+		errors.Is(err, ErrDRepNotFound),
+		errors.Is(err, models.ErrGovernanceProposalNotFound),
 		errors.Is(err, models.ErrPoolNotFound),
 		errors.Is(err, models.ErrAccountNotFound):
 		writeError(
@@ -78,7 +81,7 @@ func servePage[Item, Response any](
 	b *Blockfrost,
 	w http.ResponseWriter,
 	r *http.Request,
-	fetch func(PaginationParams) ([]Item, int, error),
+	fetch func(context.Context, PaginationParams) ([]Item, int, error),
 	convert func(Item) Response,
 	internalMessage string,
 ) {
@@ -86,7 +89,7 @@ func servePage[Item, Response any](
 	if !ok {
 		return
 	}
-	items, total, err := fetch(params)
+	items, total, err := fetch(r.Context(), params)
 	if err != nil {
 		b.writeHistoryError(w, err, internalMessage)
 		return

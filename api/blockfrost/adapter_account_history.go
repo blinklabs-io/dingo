@@ -125,7 +125,10 @@ func (a *NodeAdapter) AccountStakeHistory(
 			txn.Metadata(),
 		)
 		if err != nil {
-			return nil, 0, fmt.Errorf("get earliest retained stake epoch: %w", err)
+			return nil, 0, fmt.Errorf(
+				"get earliest retained stake epoch: %w",
+				err,
+			)
 		}
 		first, err := a.accountFirstStakeLabel(account)
 		if err != nil {

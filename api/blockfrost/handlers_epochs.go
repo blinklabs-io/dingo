@@ -15,6 +15,7 @@
 package blockfrost
 
 import (
+	"context"
 	"net/http"
 	"strconv"
 )
@@ -37,18 +38,7 @@ func epochNumberOrWriteError(
 }
 
 func epochResponse(info EpochInfo) EpochResponse {
-	return EpochResponse{
-		Epoch:          info.Epoch,
-		StartTime:      info.StartTime,
-		EndTime:        info.EndTime,
-		FirstBlockTime: info.FirstBlockTime,
-		LastBlockTime:  info.LastBlockTime,
-		BlockCount:     info.BlockCount,
-		TxCount:        info.TxCount,
-		Output:         info.Output,
-		Fees:           info.Fees,
-		ActiveStake:    info.ActiveStake,
-	}
+	return EpochResponse(info)
 }
 
 // handleEpoch handles GET /api/v0/epochs/{number}.
@@ -77,9 +67,12 @@ func (b *Blockfrost) handleEpochNext(
 	if !ok {
 		return
 	}
-	servePage(b, w, r,
-		func(params PaginationParams) ([]EpochInfo, int, error) {
-			return b.node.EpochsAfter(r.Context(), epoch, params)
+	servePage(
+		b,
+		w,
+		r,
+		func(ctx context.Context, params PaginationParams) ([]EpochInfo, int, error) {
+			return b.node.EpochsAfter(ctx, epoch, params)
 		},
 		epochResponse,
 		"failed to retrieve following epochs",
@@ -95,9 +88,12 @@ func (b *Blockfrost) handleEpochPrevious(
 	if !ok {
 		return
 	}
-	servePage(b, w, r,
-		func(params PaginationParams) ([]EpochInfo, int, error) {
-			return b.node.EpochsBefore(r.Context(), epoch, params)
+	servePage(
+		b,
+		w,
+		r,
+		func(ctx context.Context, params PaginationParams) ([]EpochInfo, int, error) {
+			return b.node.EpochsBefore(ctx, epoch, params)
 		},
 		epochResponse,
 		"failed to retrieve preceding epochs",
@@ -113,9 +109,12 @@ func (b *Blockfrost) handleEpochStakes(
 	if !ok {
 		return
 	}
-	servePage(b, w, r,
-		func(params PaginationParams) ([]EpochStakeInfo, int, error) {
-			return b.node.EpochStakes(r.Context(), epoch, params)
+	servePage(
+		b,
+		w,
+		r,
+		func(ctx context.Context, params PaginationParams) ([]EpochStakeInfo, int, error) {
+			return b.node.EpochStakes(ctx, epoch, params)
 		},
 		func(item EpochStakeInfo) EpochStakeResponse {
 			return EpochStakeResponse(item)
@@ -134,10 +133,13 @@ func (b *Blockfrost) handleEpochPoolStakes(
 	if !ok {
 		return
 	}
-	servePage(b, w, r,
-		func(params PaginationParams) ([]EpochPoolStakeInfo, int, error) {
+	servePage(
+		b,
+		w,
+		r,
+		func(ctx context.Context, params PaginationParams) ([]EpochPoolStakeInfo, int, error) {
 			return b.node.EpochPoolStakes(
-				r.Context(), epoch, r.PathValue("pool_id"), params,
+				ctx, epoch, r.PathValue("pool_id"), params,
 			)
 		},
 		func(item EpochPoolStakeInfo) EpochPoolStakeResponse {
@@ -156,9 +158,12 @@ func (b *Blockfrost) handleEpochBlocks(
 	if !ok {
 		return
 	}
-	servePage(b, w, r,
-		func(params PaginationParams) ([]string, int, error) {
-			return b.node.EpochBlocks(r.Context(), epoch, params)
+	servePage(
+		b,
+		w,
+		r,
+		func(ctx context.Context, params PaginationParams) ([]string, int, error) {
+			return b.node.EpochBlocks(ctx, epoch, params)
 		},
 		func(hash string) string { return hash },
 		"failed to retrieve epoch blocks",
@@ -175,10 +180,13 @@ func (b *Blockfrost) handleEpochPoolBlocks(
 	if !ok {
 		return
 	}
-	servePage(b, w, r,
-		func(params PaginationParams) ([]string, int, error) {
+	servePage(
+		b,
+		w,
+		r,
+		func(ctx context.Context, params PaginationParams) ([]string, int, error) {
 			return b.node.EpochPoolBlocks(
-				r.Context(), epoch, r.PathValue("pool_id"), params,
+				ctx, epoch, r.PathValue("pool_id"), params,
 			)
 		},
 		func(hash string) string { return hash },

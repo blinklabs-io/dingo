@@ -14,16 +14,22 @@
 
 package blockfrost
 
-import "net/http"
+import (
+	"context"
+	"net/http"
+)
 
 // handlePoolsRetired handles GET /api/v0/pools/retired.
 func (b *Blockfrost) handlePoolsRetired(
 	w http.ResponseWriter,
 	r *http.Request,
 ) {
-	servePage(b, w, r,
-		func(params PaginationParams) ([]PoolRetiringInfo, int, error) {
-			return b.node.PoolsRetired(r.Context(), params)
+	servePage(
+		b,
+		w,
+		r,
+		func(ctx context.Context, params PaginationParams) ([]PoolRetiringInfo, int, error) {
+			return b.node.PoolsRetired(ctx, params)
 		},
 		func(item PoolRetiringInfo) PoolRetiringResponse {
 			return PoolRetiringResponse(item)
@@ -37,9 +43,12 @@ func (b *Blockfrost) handlePoolHistory(
 	w http.ResponseWriter,
 	r *http.Request,
 ) {
-	servePage(b, w, r,
-		func(params PaginationParams) ([]PoolHistoryInfo, int, error) {
-			return b.node.PoolHistory(r.Context(), r.PathValue("pool_id"), params)
+	servePage(
+		b,
+		w,
+		r,
+		func(ctx context.Context, params PaginationParams) ([]PoolHistoryInfo, int, error) {
+			return b.node.PoolHistory(ctx, r.PathValue("pool_id"), params)
 		},
 		func(item PoolHistoryInfo) PoolHistoryResponse {
 			return PoolHistoryResponse(item)
@@ -76,9 +85,12 @@ func (b *Blockfrost) handlePoolDelegators(
 	w http.ResponseWriter,
 	r *http.Request,
 ) {
-	servePage(b, w, r,
-		func(params PaginationParams) ([]PoolDelegatorInfo, int, error) {
-			return b.node.PoolDelegators(r.Context(), r.PathValue("pool_id"), params)
+	servePage(
+		b,
+		w,
+		r,
+		func(ctx context.Context, params PaginationParams) ([]PoolDelegatorInfo, int, error) {
+			return b.node.PoolDelegators(ctx, r.PathValue("pool_id"), params)
 		},
 		func(item PoolDelegatorInfo) PoolDelegatorResponse {
 			return PoolDelegatorResponse(item)
@@ -92,9 +104,12 @@ func (b *Blockfrost) handlePoolBlocks(
 	w http.ResponseWriter,
 	r *http.Request,
 ) {
-	servePage(b, w, r,
-		func(params PaginationParams) ([]string, int, error) {
-			return b.node.PoolBlocks(r.Context(), r.PathValue("pool_id"), params)
+	servePage(
+		b,
+		w,
+		r,
+		func(ctx context.Context, params PaginationParams) ([]string, int, error) {
+			return b.node.PoolBlocks(ctx, r.PathValue("pool_id"), params)
 		},
 		func(hash string) string { return hash },
 		"failed to retrieve pool blocks",
@@ -106,9 +121,12 @@ func (b *Blockfrost) handlePoolUpdates(
 	w http.ResponseWriter,
 	r *http.Request,
 ) {
-	servePage(b, w, r,
-		func(params PaginationParams) ([]PoolUpdateInfo, int, error) {
-			return b.node.PoolUpdates(r.Context(), r.PathValue("pool_id"), params)
+	servePage(
+		b,
+		w,
+		r,
+		func(ctx context.Context, params PaginationParams) ([]PoolUpdateInfo, int, error) {
+			return b.node.PoolUpdates(ctx, r.PathValue("pool_id"), params)
 		},
 		func(item PoolUpdateInfo) PoolUpdateResponse {
 			return PoolUpdateResponse(item)

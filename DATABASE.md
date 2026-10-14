@@ -184,6 +184,27 @@ retain their pagination and matching semantics. See the
 [MCP guide](docs/mcp/README.md#metadata-and-query-semantics) for page bounds and
 live-state consistency semantics.
 
+Blockfrost historical and governance reads are served from existing tables
+through `HistoryStore` (`database/plugin/metadata/history_store.go`); migration
+v43 only adds the `reward_stake_input (credential_tag, staking_key, epoch)`
+index. Epoch totals sum `utxo` outputs and transaction fees over the epoch's
+slot range, and epoch and pool block lists read `block_nonce` joined to
+`pool_opcert_sequence`. Epoch stakes, pool history and delegators, and account
+stake history read the reward snapshot tables; the snapshot labelled E is the
+distribution active in epoch E+1. Account MIRs, asset balances and address
+totals read `move_instantaneous_rewards_reward`, `asset` and `utxo`.
+A governance vote row stores the slot that last cast it but not its
+transaction. The vote endpoints locate that transaction by decoding the block
+at the slot (`database.BlockBySlot`) and taking the last valid transaction in
+it that carries a voting procedure for the same voter and proposal; the vote's
+`cert_index` is its position among the transaction's voting procedures in
+ledger map order (voter type, voter hash, then governance action id). Nothing
+is stored for this, so rows written before the endpoints existed answer the
+same way as new ones. When the block is not held, or no valid transaction in
+it carries the vote, the endpoint answers `404` "not retained by this node"
+instead of omitting the vote or inventing a transaction. Within one slot,
+votes list in insertion order, which is the order the ledger applied them.
+
 Blockfrost asset-holder pages aggregate live quantities in metadata storage.
 `utxo_address` keeps each asset-bearing UTxO's canonical rendered address as
 bytes so every backend groups exact pointer and bootstrap identities and
@@ -1901,7 +1922,7 @@ process the same pointer unless the claim expires before a result is recorded.
 | `imported_pool_block_count` | `epoch`, `pool_key_hash`, `blocks_produced`, `captured_slot` | PK `(epoch, pool_key_hash)` | Per-pool blocks minted during an epoch, taken from a bootstrap snapshot's `NewEpochState` `nesBprev` and `nesBcur` rather than counted from applied blocks. `nesBprev` fills the epoch before the snapshot's, which ended entirely below the anchor, and `nesBcur` the pre-anchor part of the snapshot's own epoch; those are exactly the performance epochs of the first two reward rounds a bootstrapped node crosses. Written by `ledgerstate.importBlocksMade` in the same transaction as the tip and the certified opcert counters, replacing the epoch's rows so a catch-up import does not leave one epoch holding counts taken at two anchors. `database.MergeImportedPoolBlockCounts` adds these to the counts observed above the anchor, for `LedgerState.rewardBlockCounts`, for the `reward_pool_input` capture at the epoch boundary (which leaves `blocks_produced` and `total_blocks_in_epoch` NULL for an epoch the anchor covers but the snapshot did not, rather than recording the post-anchor tail), and for the Blockfrost pool detail `blocks_epoch` (an error for such an epoch); Blockfrost `blocks_minted` adds the anchor epoch's and the preceding epoch's counts through `database.CountPoolBlocksLifetime`, and remains a lower bound for older epochs the node never held. The observed and imported counts are disjoint, because a bootstrap applies no block at or below its anchor and `CountPoolBlocksInSlotRange` raises its start slot past the recorded `mithril_ledger_slot`. Presence and the epoch total live in `imported_epoch_block_total`, not here, because a `BlocksMade` map with no entries writes no rows at all. Rollback removes rows above the rollback slot. Retained for the life of the database (see the retention note below). Logical join to `pool.pool_key_hash`. |
 | `imported_epoch_block_total` | `epoch`, `total_blocks`, `captured_slot` | PK `epoch` | One row per epoch whose block counts came from a bootstrap snapshot, holding the total its `imported_pool_block_count` rows sum to (the reference's `Map.foldr (+) 0` over `BlocksMade`). Written unconditionally by `ledgerstate.importBlocksMade`, including for a map with no entries: an epoch in which no pool minted a block is a state the certified snapshot asserts, and the per-pool rows alone cannot express it. The row's presence is what `LedgerState.rewardBlockCounts` reads as "these counts are known"; its absence for an epoch the anchor covers means the counts are unknown, and the reward round is declined rather than distributed at zero performance. The total is checked against the per-pool rows on every read, so a set truncated by a partial write is an error rather than a smaller self-consistent epoch that would raise every surviving pool's share of the blocks. Rollback removes rows above the rollback slot. Retained for the life of the database (see the retention note below). |
 | `reward_pool_input` | `id`, `epoch`, `pool_key_hash`, `reward_account`, `reward_account_credential_tag`, `pledge`, `delegated_stake`, `owner_stake`, `cost`, `margin`, `delegator_count`, `blocks_produced`, `total_blocks_in_epoch`, `captured_slot`, `boundary_slot` | PK `id`; unique `(epoch, pool_key_hash)`; indexes `captured_slot`, `boundary_slot` | Per-pool metadata captured by epoch rotation. Stake totals are aggregated from the captured `reward_stake_input` credentials, independently of leader-election Mark totals; pool parameters are selected as effective during the ended epoch. Owner stake counts captured key credentials named by the effective pool registration. Block counts are stored on the row at capture time. Pools with missing or invalid registration data are excluded from reward inputs without changing `pool_stake_snapshot` or `epoch_summary`. Retained for the life of the database (see the retention note below), so it is the durable per-pool reward basis for any closed epoch. Logical join to `pool.pool_key_hash`. |
-| `reward_stake_input` | `id`, `epoch`, `pool_key_hash`, `credential_tag`, `staking_key`, `stake`, `owner`, `registered`, `captured_slot`, `boundary_slot` | PK `id`; unique `(epoch, pool_key_hash, credential_tag, staking_key)`; indexes `captured_slot`, `boundary_slot` | Per-credential positive stake frozen by either authoritative or fallback reward snapshot capture. Authoritative capture copies from `reward_live_stake` for both gate states, applying the live account-expiration filter inside the exact SNAP-point transaction. A fallback that runs after the transaction tip has passed the snapshot slot reconstructs historical stake as needed. Check the matching `reward_snapshot.authoritative` value to distinguish the source snapshot. `owner` records whether the effective pool registration names the key credential as an owner. Capture defensively deduplicates by `(credential_tag, staking_key)` before deriving `reward_pool_input.delegated_stake` and `delegator_count`, so a corrupted credential cannot contribute to multiple pools and the persisted pool totals remain equal to the sum of their stake-input rows. |
+| `reward_stake_input` | `id`, `epoch`, `pool_key_hash`, `credential_tag`, `staking_key`, `stake`, `owner`, `registered`, `captured_slot`, `boundary_slot` | PK `id`; unique `(epoch, pool_key_hash, credential_tag, staking_key)`; indexes `captured_slot`, `boundary_slot`, `(credential_tag, staking_key, epoch)` (migration v43, for per-account stake history) | Per-credential positive stake frozen by either authoritative or fallback reward snapshot capture. Authoritative capture copies from `reward_live_stake` for both gate states, applying the live account-expiration filter inside the exact SNAP-point transaction. A fallback that runs after the transaction tip has passed the snapshot slot reconstructs historical stake as needed. Check the matching `reward_snapshot.authoritative` value to distinguish the source snapshot. `owner` records whether the effective pool registration names the key credential as an owner. Capture defensively deduplicates by `(credential_tag, staking_key)` before deriving `reward_pool_input.delegated_stake` and `delegator_count`, so a corrupted credential cannot contribute to multiple pools and the persisted pool totals remain equal to the sum of their stake-input rows. |
 | `reward_pool_output` | `id`, `epoch`, `pool_key_hash`, `apparent_performance`, `optimal_reward`, `total_reward`, `leader_reward`, `member_reward_total`, `owner_stake`, `undistributed`, `unspendable`, `captured_slot`, `boundary_slot` | PK `id`; unique `(epoch, pool_key_hash)`; indexes `captured_slot`, `boundary_slot` | Persisted per-pool reward-calculation results. Replacing a provisional reward snapshot invalidates rows for the same epoch. Retained for the life of the database (see the retention note below), so it is the durable per-pool reward result for any closed epoch. |
 | `reward_account_output` | `id`, `epoch`, `credential_tag`, `staking_key`, `pool_key_hash`, `reward_type`, `amount`, `spendable`, `guarded`, `captured_slot`, `boundary_slot`, `folded` | PK `id`; unique `(epoch, credential_tag, staking_key, pool_key_hash, reward_type)`; credential indexes `(credential_tag, staking_key, spendable, epoch, pool_key_hash, reward_type)` and `(credential_tag, staking_key, spendable, guarded, epoch, pool_key_hash, reward_type)`; pending index `(spendable, guarded, folded, epoch)`; indexes `captured_slot`, `boundary_slot` | Persisted per-account reward-calculation results, invalidated together with pool outputs when snapshot inputs are replaced. `spendable = false` records deregistration; `guarded = true` records a CIP-0163 expiry guard. `folded = true` records that a credited round's row has been written to `account.reward` (see "Credited reward rounds"). Credential reward-history reads require `spendable = true AND guarded = false`, and the guarded-aware index keeps that lookup bounded. |
 | `reward_credit_round` | `snapshot_epoch`, `boundary_slot` | PK `snapshot_epoch`; index `boundary_slot` | One row for a reward round applied at an epoch boundary while its per-account credits remain in `reward_account_output`. Bounded relational membership lets balance readers include all pending rounds without generating a growing SQL parameter list. Rollback removes rows by `boundary_slot`; migration 31 imports the previous `sync_state` JSON list. `Database.DeleteRewardStateAfterSlot` removes rows the same way (unfolding any already-folded `reward_account_output` row for the removed round first), and `ledgerstate.ImportLedgerState`'s post-anchor sweep (see the `epoch` row above) calls it at the anchor before any import phase runs, so a round a prior local rollover already registered above the anchor does not block `saveStakeRewardOutputs` from recomputing it after import. |
@@ -2102,15 +2123,27 @@ instead. Unlike `reward_account_output`, the Koios parity observer does not
 separately extend `pool_stake_snapshot`'s retention -- only API storage mode
 does.
 
-`reward_stake_input` is pruned to the window in every case, regardless of
-storage mode or the observer.
+`reward_stake_input` is retained WITHOUT BOUND in API storage mode, so the
+Blockfrost epoch stake and account stake-history endpoints can answer for any
+epoch the node has run in that mode. It scales with delegator count, about
+1.3M rows per epoch on mainnet, so this is a storage-retention cost of API
+mode. Core mode and the Koios parity observer still prune it to the window.
+Retention is not retroactive: the table holds only the epochs a node still
+had when it first ran with unbounded retention, so per-credential history
+begins at that epoch on an upgraded node. The Blockfrost endpoints do not
+present the missing earlier epochs as empty: an epoch whose summary reports
+delegators over no `reward_stake_input` rows, an epoch whose snapshot was
+never captured, and an account whose history predates the oldest retained
+row and has no retained row at all each answer `404` with "The requested
+history is not retained by this node". A history that is only partly retained
+lists the retained epochs.
 
 Pruned at `epoch < current-3`:
 
 | Table | Scales with | Pruned by |
 |---|---|---|
 | `pool_stake_snapshot` | pools per epoch | `DeletePoolStakeSnapshotsBeforeEpoch` (CORE mode only) |
-| `reward_stake_input` | delegators per epoch | `DeleteRewardStateBeforeEpoch` / `DeleteRewardStakeInputBeforeEpoch` |
+| `reward_stake_input` | delegators per epoch | `DeleteRewardStateBeforeEpoch` (CORE mode) / `DeleteRewardStakeInputBeforeEpoch` (Koios parity observer); never in API mode |
 | `reward_account_output` | delegators per epoch | `DeleteRewardStateBeforeEpoch` (CORE mode, observer disabled only) |
 
 Retained for the life of the database: `epoch`, `epoch_summary`,

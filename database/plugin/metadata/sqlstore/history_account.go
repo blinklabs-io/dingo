@@ -4,13 +4,14 @@
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+//	http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+//
 //nolint:rowserrcheck,sqlclosecheck // Cursors are explicitly closed and close errors are propagated before dependent queries.
 package sqlstore
 
@@ -100,7 +101,10 @@ func (s *Store) GetEarliestRewardStakeInputEpoch(
 	if err := db.QueryRowContext(
 		ctx, `SELECT MIN(epoch) FROM reward_stake_input`,
 	).Scan(&earliest); err != nil {
-		return 0, false, fmt.Errorf("get earliest reward stake input epoch: %w", err)
+		return 0, false, fmt.Errorf(
+			"get earliest reward stake input epoch: %w",
+			err,
+		)
 	}
 	if !earliest.Valid || earliest.Int64 < 0 {
 		return 0, false, nil
@@ -298,7 +302,13 @@ func (s *Store) GetAccountAddressTotals(
 		{&ret.ReceivedLovelace, `SELECT amount FROM utxo WHERE credential_tag = ? AND staking_key = ?`},
 		{&ret.SentLovelace, `SELECT amount FROM utxo WHERE credential_tag = ? AND staking_key = ? AND deleted_slot <> 0`},
 	} {
-		value, err := sumUint64Rows(ctx, db, total.query, credentialTag, stakingKey)
+		value, err := sumUint64Rows(
+			ctx,
+			db,
+			total.query,
+			credentialTag,
+			stakingKey,
+		)
 		if err != nil {
 			return ret, fmt.Errorf("sum account lovelace totals: %w", err)
 		}
@@ -344,7 +354,9 @@ WHERE credential_tag = ? AND staking_key = ?`,
 	return ret, nil
 }
 
-func sortedAssetQuantities(held map[string]*models.AssetQuantity) []models.AssetQuantity {
+func sortedAssetQuantities(
+	held map[string]*models.AssetQuantity,
+) []models.AssetQuantity {
 	ret := make([]models.AssetQuantity, 0, len(held))
 	for _, balance := range held {
 		ret = append(ret, *balance)

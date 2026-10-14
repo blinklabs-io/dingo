@@ -1789,3 +1789,15 @@ func conwayRatifyQuorum(
 	}
 	return defaultCCQuorum, nil
 }
+
+// EffectiveCommitteeQuorum returns the committee quorum currently in force:
+// the enacted threshold when there is one, else the Conway genesis one, else
+// the 2/3 default.
+func EffectiveCommitteeQuorum(
+	ctx context.Context,
+	db *database.Database,
+	txn *database.Txn,
+	genesis *conway.ConwayGenesis,
+) (*big.Rat, error) {
+	return conwayRatifyQuorum(ctx, nil, db, txn, genesis)
+}

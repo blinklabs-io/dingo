@@ -168,4 +168,59 @@ type HistoryStore interface {
 		stakingKey []byte,
 		txn types.Txn,
 	) (models.AccountAddressTotals, error)
+
+	// GetGovernanceProposalsPage pages every stored proposal in submission
+	// order, along with the unpaginated count.
+	GetGovernanceProposalsPage(
+		limit int,
+		offset int,
+		order string,
+		txn types.Txn,
+	) ([]*models.GovernanceProposal, int, error)
+
+	// GetGovernanceVotesPage pages the stored votes matching filter,
+	// ordered by the slot that cast the current vote value, along with the
+	// unpaginated count. Votes invalidated by a DRep deregistration keep
+	// their row with a deleted slot.
+	GetGovernanceVotesPage(
+		filter models.GovernanceVoteFilter,
+		limit int,
+		offset int,
+		order string,
+		txn types.Txn,
+	) ([]models.GovernanceVoteRow, int, error)
+
+	// GetDRepUpdates returns a DRep's registration, update and
+	// deregistration certificates in chain order, along with the
+	// unpaginated count.
+	GetDRepUpdates(
+		credentialTag uint8,
+		credential []byte,
+		limit int,
+		offset int,
+		order string,
+		txn types.Txn,
+	) ([]models.DRepUpdateRow, int, error)
+
+	// GetDRepDelegatorStakes returns the registered credentials delegating
+	// to a DRep with their live stake, in delegation order, along with the
+	// unpaginated count. predefined selects an always-abstain or
+	// always-no-confidence DRep, which has no credential of its own.
+	GetDRepDelegatorStakes(
+		credentialTag uint8,
+		credential []byte,
+		predefined *uint64,
+		limit int,
+		offset int,
+		order string,
+		txn types.Txn,
+	) ([]models.PoolDelegatorRow, int, error)
+
+	// GetCommitteeHotCredentials returns every hot credential a cold
+	// committee credential has authorized, across rotations.
+	GetCommitteeHotCredentials(
+		coldCredentialTag uint8,
+		coldCredential []byte,
+		txn types.Txn,
+	) ([]models.CommitteeCredential, error)
 }

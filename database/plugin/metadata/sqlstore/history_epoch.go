@@ -70,7 +70,10 @@ WHERE tx.slot >= ? AND tx.slot <= ? AND tx.valid = FALSE`,
 	} {
 		var raw any
 		if err := db.QueryRowContext(ctx, query, start, end).Scan(&raw); err != nil {
-			return 0, fmt.Errorf("sum transaction outputs in slot range: %w", err)
+			return 0, fmt.Errorf(
+				"sum transaction outputs in slot range: %w",
+				err,
+			)
 		}
 		text, err := decimalAmountText(raw)
 		if err != nil {
@@ -119,7 +122,12 @@ func (s *Store) GetPoolBlockHashesInSlotRange(
 	return s.blockHashesInSlotRange(
 		"JOIN pool_opcert_sequence pos ON pos.slot = bn.slot AND pos.pool_key_hash = ?",
 		[]any{poolKeyHash},
-		startSlot, endSlot, limit, offset, order, txn,
+		startSlot,
+		endSlot,
+		limit,
+		offset,
+		order,
+		txn,
 	)
 }
 

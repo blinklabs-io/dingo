@@ -57,11 +57,11 @@ import (
 )
 
 var (
-	ErrInvalidAddress     = errors.New("invalid address")
-	ErrAddressNotFound    = errors.New("address not found")
-	ErrInvalidBlockID     = errors.New("invalid block id")
-	ErrBlockNotFound      = errors.New("block not found")
-	ErrEpochNotFound      = errors.New("epoch not found")
+	ErrInvalidAddress  = errors.New("invalid address")
+	ErrAddressNotFound = errors.New("address not found")
+	ErrInvalidBlockID  = errors.New("invalid block id")
+	ErrBlockNotFound   = errors.New("block not found")
+	ErrEpochNotFound   = errors.New("epoch not found")
 	// ErrHistoryNotRetained reports a historical query whose source rows
 	// this node no longer holds, as opposed to a query whose answer is
 	// genuinely empty.
@@ -151,6 +151,10 @@ type NodeAdapter struct {
 	ledgerState *ledger.LedgerState
 	submitter   TransactionSubmitter
 	evaluator   transactionEvaluator
+	// slotBlocks overrides how a vote's block is loaded. Tests set it to
+	// serve transactions that carry voting procedures without building a
+	// body-hash-valid block; nil reads the block from the chain.
+	slotBlocks func(ctx context.Context, slot uint64) (*slotBlock, error)
 }
 
 // NewNodeAdapter creates a NodeAdapter that queries the

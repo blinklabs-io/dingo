@@ -172,6 +172,45 @@ func (b *Blockfrost) handler() http.Handler {
 		b.handleDRep,
 	)
 	mux.HandleFunc(
+		"GET /api/v0/governance/dreps/{drep_id}/delegators",
+		b.handleDRepDelegators,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/governance/dreps/{drep_id}/metadata",
+		b.handleDRepMetadata,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/governance/dreps/{drep_id}/updates",
+		b.handleDRepUpdates,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/governance/dreps/{drep_id}/votes",
+		b.handleDRepVotes,
+	)
+	mux.HandleFunc("GET /api/v0/governance/committee", b.handleCommittee)
+	mux.HandleFunc(
+		"GET /api/v0/governance/committee/votes",
+		b.handleCommitteeVotes,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/governance/committee/{cc_id}/votes",
+		b.handleCommitteeMemberVotes,
+	)
+	mux.HandleFunc("GET /api/v0/governance/proposals", b.handleProposals)
+	mux.HandleFunc(
+		"GET /api/v0/governance/proposals/{first}",
+		b.handleProposalByID,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/governance/proposals/{first}/{second}",
+		b.handleProposalTwoSegments,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/governance/proposals/{first}/{second}/{third}",
+		b.handleProposalThreeSegments,
+	)
+	mux.HandleFunc("GET /api/v0/pools/{pool_id}/votes", b.handlePoolVotes)
+	mux.HandleFunc(
 		"GET /api/v0/addresses/{address}",
 		b.handleAddress,
 	)

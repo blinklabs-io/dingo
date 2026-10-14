@@ -44,7 +44,11 @@ func (a *NodeAdapter) knownPool(
 		return nil, nil, fmt.Errorf("get pool %x: %w", poolKeyHash, err)
 	}
 	if pool == nil {
-		return nil, nil, fmt.Errorf("pool %x: %w", poolKeyHash, models.ErrPoolNotFound)
+		return nil, nil, fmt.Errorf(
+			"pool %x: %w",
+			poolKeyHash,
+			models.ErrPoolNotFound,
+		)
 	}
 	return poolKeyHash, pool, nil
 }
@@ -126,7 +130,11 @@ func (a *NodeAdapter) PoolHistory(
 			epochRow.StartSlot, endSlot, txn.Metadata(),
 		)
 		if err != nil {
-			return nil, 0, fmt.Errorf("count pool blocks in epoch %d: %w", epoch, err)
+			return nil, 0, fmt.Errorf(
+				"count pool blocks in epoch %d: %w",
+				epoch,
+				err,
+			)
 		}
 		activeSize := 0.0
 		if row.TotalActiveStake > 0 {
@@ -134,7 +142,7 @@ func (a *NodeAdapter) PoolHistory(
 		}
 		ret = append(ret, PoolHistoryInfo{
 			Epoch:           epoch,
-			Blocks:          int(counts[string(poolKeyHash)]),
+			Blocks:          saturatingInt(counts[string(poolKeyHash)]),
 			ActiveStake:     strconv.FormatUint(row.Stake, 10),
 			ActiveSize:      activeSize,
 			DelegatorsCount: row.DelegatorCount,

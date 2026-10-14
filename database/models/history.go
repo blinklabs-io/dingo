@@ -91,3 +91,35 @@ type AccountAddressTotals struct {
 	// TxCount is the number of distinct transactions touching the addresses.
 	TxCount int
 }
+
+// GovernanceVoteFilter selects votes. Nil and empty fields do not filter.
+type GovernanceVoteFilter struct {
+	ProposalID *uint
+	VoterType  *uint8
+	// VoterCredentials selects votes cast under any of the tagged
+	// credentials.
+	VoterCredentials []CommitteeCredential
+}
+
+// GovernanceVoteRow is a stored vote with the proposal it was cast on. The
+// vote's casting transaction is not stored; CastSlot locates its block.
+type GovernanceVoteRow struct {
+	Vote                GovernanceVote
+	ProposalTxHash      []byte
+	ProposalActionIndex uint32
+	ProposalActionType  uint8
+	// CastSlot is the slot of the block holding the transaction that cast
+	// the current vote value.
+	CastSlot uint64
+}
+
+// DRepUpdateRow is one registration, update or deregistration certificate of
+// a DRep with its position inside its transaction.
+type DRepUpdateRow struct {
+	TxHash    []byte
+	CertIndex uint32
+	// Action is "registered", "updated" or "deregistered".
+	Action string
+	// Deposit is the deposit paid or refunded; nil for an update.
+	Deposit *uint64
+}
