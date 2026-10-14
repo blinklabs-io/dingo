@@ -1236,6 +1236,12 @@ type accountRewardPoolAmount struct {
 // the same guard. It is a required parameter rather than
 // a variadic option so a caller cannot silently omit it and get the strict
 // answer for an epoch that has not been computed.
+//
+// refundsPending is the same guard for proposal_refund rows alone, taken from
+// ProposalDepositRefunds.Pending. Refunds for this earned epoch are journaled
+// when the next epoch begins, a full epoch before rewardsPending clears, so
+// holding them to rewardsPending would report a missing or wrong refund as
+// lag for that whole epoch.
 func CompareAccountEpoch(
 	network string,
 	epoch uint64,
@@ -1245,6 +1251,7 @@ func CompareAccountEpoch(
 	graceHours int,
 	epochEndTime time.Time,
 	rewardsPending bool,
+	refundsPending bool,
 ) []CheckMismatch {
 	koiosByKey, koiosMismatches := aggregateKoiosAccountRewards(
 		network,
@@ -1296,6 +1303,10 @@ func CompareAccountEpoch(
 	for _, k := range allKeys {
 		kr, koiosOK := koiosByKey[k]
 		dr, dingoOK := dingoByKey[k]
+		pending := rewardsPending
+		if k.rtype == rewardTypeProposalRefund {
+			pending = refundsPending
+		}
 		switch {
 		case koiosOK && !dingoOK:
 			// The chain-position form of the same question the grace window
@@ -1310,7 +1321,7 @@ func CompareAccountEpoch(
 				// case: a zero row is not a value the other side can publish
 				// later, so waiting cannot change the answer.
 				cat = CategoryAcctZeroRewardRow
-			case rewardsPending:
+			case pending:
 				cat = CategoryReferenceLag
 			case graceHours > 0 && !epochEndTime.IsZero() &&
 				now.Sub(epochEndTime) < time.Duration(graceHours)*time.Hour:
@@ -1342,7 +1353,7 @@ func CompareAccountEpoch(
 			case isZeroRewardAmount(dr.Amount):
 				// Symmetric with the koiosOK && !dingoOK case above.
 				cat = CategoryAcctZeroRewardRow
-			case rewardsPending:
+			case pending:
 				// Also symmetric: before the boundary a reward computed
 				// for a credential that deregisters in the meantime is
 				// still marked spendable, so Dingo holds a row Koios will
@@ -1376,7 +1387,7 @@ func CompareAccountEpoch(
 			// presence check is not would report the same epoch as both a
 			// lag and a mismatch.
 			cat := CategoryValueMismatch
-			if rewardsPending {
+			if pending {
 				cat = CategoryReferenceLag
 			}
 			switch {

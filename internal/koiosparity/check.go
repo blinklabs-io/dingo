@@ -1230,7 +1230,7 @@ func compareEpochAccounts(
 
 	var out []CheckMismatch
 	dingoRows, credentialErrs, poolErrs := creditedAccountRewards(dingoOutputs)
-	for _, refund := range refunds {
+	for _, refund := range refunds.Refunds {
 		addr, err := StakeAddressFromCredential(
 			refund.StakingKey,
 			refund.CredentialTag,
@@ -1312,6 +1312,7 @@ func compareEpochAccounts(
 			graceHours,
 			epochEndTime,
 			rewardsPending,
+			refunds.Pending,
 		)...,
 	)
 	out = append(

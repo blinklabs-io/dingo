@@ -642,6 +642,7 @@ func TestCompareAccountEpochExactMatch(t *testing.T) {
 		0,
 		time.Time{},
 		false,
+		false,
 	)
 	require.Empty(t, ms)
 	require.Equal(t, StatusPass, DetermineStatus(ms))
@@ -697,6 +698,7 @@ func TestCompareAccountEpochAggregatesSharedRewardAccounts(t *testing.T) {
 		t,
 		CompareAccountEpoch(
 			"preview", 100, koios, dingo, now, 0, time.Time{}, false,
+			false,
 		),
 	)
 
@@ -704,6 +706,7 @@ func TestCompareAccountEpochAggregatesSharedRewardAccounts(t *testing.T) {
 	koios[1].Earned = "201"
 	ms := CompareAccountEpoch(
 		"preview", 100, koios, dingo, now, 0, time.Time{}, false,
+		false,
 	)
 	require.Len(t, ms, 1)
 	require.Equal(t, CategoryValueMismatch, ms[0].Category)
@@ -750,6 +753,7 @@ func TestCompareAccountEpochSharedAccountPendingRewardsAreALag(t *testing.T) {
 
 	pending := CompareAccountEpoch(
 		"preview", 100, koios, nil, now, 24, longClosed, true,
+		true,
 	)
 	require.Len(t, pending, 1, "the aggregated key is reported once")
 	require.Equal(t, "account_reward_presence", pending[0].Field)
@@ -760,6 +764,7 @@ func TestCompareAccountEpochSharedAccountPendingRewardsAreALag(t *testing.T) {
 	// so the downgrade above is the pending flag and not the aggregation.
 	applied := CompareAccountEpoch(
 		"preview", 100, koios, nil, now, 24, longClosed, false,
+		false,
 	)
 	require.Len(t, applied, 1)
 	require.Equal(t, CategoryAcctOnlyKoios, applied[0].Category)
@@ -782,6 +787,7 @@ func TestCompareAccountEpochSharedAccountPendingRewardsAreALag(t *testing.T) {
 	}
 	dingoOnly := CompareAccountEpoch(
 		"preview", 100, nil, dingo, now, 24, longClosed, true,
+		true,
 	)
 	require.Len(t, dingoOnly, 1)
 	require.Equal(t, CategoryReferenceLag, dingoOnly[0].Category)
@@ -791,6 +797,7 @@ func TestCompareAccountEpochSharedAccountPendingRewardsAreALag(t *testing.T) {
 	dingo[1].Amount = "201"
 	differing := CompareAccountEpoch(
 		"preview", 100, koios, dingo, now, 24, longClosed, true,
+		true,
 	)
 	require.Len(t, differing, 1)
 	require.Equal(t, "account_reward_amount", differing[0].Field)
@@ -838,6 +845,7 @@ func TestCompareAccountEpochRejectsMalformedAggregatedAmount(t *testing.T) {
 
 	ms := CompareAccountEpoch(
 		"preview", 100, koios, dingo, now, 0, time.Time{}, false,
+		false,
 	)
 	require.Len(t, ms, 1)
 	require.Equal(t, CategoryDBError, ms[0].Category)
@@ -860,6 +868,7 @@ func TestCompareAccountEpochRejectsMalformedPoolID(t *testing.T) {
 		time.Now(),
 		0,
 		time.Time{},
+		false,
 		false,
 	)
 	require.Len(t, ms, 1)
@@ -891,6 +900,7 @@ func TestCompareAccountEpochRejectsMalformedDingoPoolID(t *testing.T) {
 		0,
 		time.Time{},
 		false,
+		false,
 	)
 	require.Len(t, ms, 1)
 	require.Equal(t, CategoryDBError, ms[0].Category)
@@ -920,6 +930,7 @@ func TestCompareAccountEpochZeroRewardBothSidesPasses(t *testing.T) {
 		0,
 		time.Time{},
 		false,
+		false,
 	)
 	require.Empty(t, ms)
 }
@@ -939,6 +950,7 @@ func TestCompareAccountEpochMissingFromDingo(t *testing.T) {
 		now,
 		0,
 		time.Time{},
+		false,
 		false,
 	)
 	require.Len(t, ms, 1)
@@ -962,6 +974,7 @@ func TestCompareAccountEpochMissingFromKoios(t *testing.T) {
 		now,
 		0,
 		time.Time{},
+		false,
 		false,
 	)
 	require.Len(t, ms, 1)
@@ -987,6 +1000,7 @@ func TestCompareAccountEpochMissingFromDingoWithinGraceIsReferenceLag(
 		now,
 		24,
 		recentClose,
+		false,
 		false,
 	)
 	require.Len(t, ms, 1)
@@ -1021,6 +1035,7 @@ func TestCompareAccountEpochMissingFromKoiosWithinGraceIsReferenceLag(
 		24,
 		recentClose,
 		false,
+		false,
 	)
 	require.Len(t, ms, 1)
 	require.Equal(t, CategoryReferenceLag, ms[0].Category)
@@ -1047,6 +1062,7 @@ func TestCompareAccountEpochDuplicateInKoios(t *testing.T) {
 		0,
 		time.Time{},
 		false,
+		false,
 	)
 	require.Len(t, ms, 1)
 	require.Equal(t, CategoryAcctDuplicate, ms[0].Category)
@@ -1072,6 +1088,7 @@ func TestCompareAccountEpochDuplicateInDingo(t *testing.T) {
 		now,
 		0,
 		time.Time{},
+		false,
 		false,
 	)
 	require.Len(t, ms, 1)
@@ -1105,6 +1122,7 @@ func TestCompareAccountEpochMemberAndLeaderIndependent(t *testing.T) {
 		0,
 		time.Time{},
 		false,
+		false,
 	)
 	require.Len(t, ms, 1)
 	require.Equal(t, CategoryValueMismatch, ms[0].Category)
@@ -1133,6 +1151,7 @@ func TestCompareAccountEpochAmountMismatchByOneLovelace(t *testing.T) {
 		0,
 		time.Time{},
 		false,
+		false,
 	)
 	require.Len(t, ms, 1)
 	require.Equal(t, CategoryValueMismatch, ms[0].Category)
@@ -1160,6 +1179,7 @@ func TestCompareAccountEpochOutOfScopeRewardTypesFiltered(t *testing.T) {
 		0,
 		time.Time{},
 		false,
+		false,
 	)
 	require.Empty(t, ms)
 }
@@ -1178,6 +1198,7 @@ func TestCompareAccountEpochUnknownRewardTypeIsNotDatabaseError(t *testing.T) {
 
 	ms := CompareAccountEpoch(
 		"preview", 100, koios, nil, now, 0, time.Time{}, false,
+		false,
 	)
 	require.Len(t, ms, 1)
 	require.Equal(t, CategoryRewardTypeUnmodeled, ms[0].Category)
@@ -1200,6 +1221,7 @@ func TestCompareAccountEpochUnknownRewardTypeKeepsOtherMismatches(
 	}
 	ms := CompareAccountEpoch(
 		"preview", 100, koios, nil, time.Now(), 0, time.Time{}, false,
+		false,
 	)
 	require.Len(t, ms, 2)
 	require.Equal(t, StatusFail, DetermineStatus(ms))
@@ -1230,6 +1252,7 @@ func compareRefunds(
 ) []CheckMismatch {
 	return CompareAccountEpoch(
 		"preview", 677, koios, dingo, time.Now(), 0, time.Time{}, false,
+		false,
 	)
 }
 
@@ -1710,6 +1733,7 @@ func TestCompareAccountEpochPerPoolDiscrepanciesDoNotCancel(t *testing.T) {
 	}
 	require.Empty(t, CompareAccountEpoch(
 		"preview", 100, koios, agreeing, now, 0, time.Time{}, false,
+		false,
 	))
 
 	// Equal and opposite per-pool errors: 100+200 and 200+100 both total 300.
@@ -1729,6 +1753,7 @@ func TestCompareAccountEpochPerPoolDiscrepanciesDoNotCancel(t *testing.T) {
 	}
 	ms := CompareAccountEpoch(
 		"preview", 100, koios, swapped, now, 0, time.Time{}, false,
+		false,
 	)
 	require.Len(t, ms, 1, "a cancelling pair is still a divergence")
 	require.Equal(t, "account_reward_pool_amount", ms[0].Field)
@@ -1750,6 +1775,7 @@ func TestCompareAccountEpochPerPoolDiscrepanciesDoNotCancel(t *testing.T) {
 	}
 	ms = CompareAccountEpoch(
 		"preview", 100, koios, collapsed, now, 0, time.Time{}, false,
+		false,
 	)
 	require.Len(t, ms, 1)
 	require.Equal(t, "account_reward_pool_amount", ms[0].Field)
@@ -1767,6 +1793,7 @@ func TestCompareAccountEpochPerPoolDiscrepanciesDoNotCancel(t *testing.T) {
 	require.Empty(t, CompareAccountEpoch(
 		"preview", 100, unattributedKoios, agreeing, now, 0, time.Time{},
 		false,
+		false,
 	))
 	unattributedDingo := []DingoAccountReward{{
 		StakeAddress: "stake1shared",
@@ -1775,6 +1802,7 @@ func TestCompareAccountEpochPerPoolDiscrepanciesDoNotCancel(t *testing.T) {
 	}}
 	require.Empty(t, CompareAccountEpoch(
 		"preview", 100, koios, unattributedDingo, now, 0, time.Time{}, false,
+		false,
 	))
 
 	// Pending rewards downgrade the per-pool finding exactly as they downgrade
@@ -1783,6 +1811,7 @@ func TestCompareAccountEpochPerPoolDiscrepanciesDoNotCancel(t *testing.T) {
 	longClosed := now.Add(-1388 * 24 * time.Hour)
 	pending := CompareAccountEpoch(
 		"preview", 100, koios, swapped, now, 24, longClosed, true,
+		true,
 	)
 	require.Len(t, pending, 1)
 	require.Equal(t, "account_reward_pool_amount", pending[0].Field)
@@ -1796,4 +1825,40 @@ func testPoolBech32(t *testing.T, b byte) string {
 	)
 	require.NoError(t, err)
 	return id
+}
+
+// Member and leader rows keep the reward guard; proposal_refund rows follow
+// their own, so pending rewards neither waive a refund difference nor make a
+// member difference strict.
+func TestCompareAccountEpochRefundsUseTheirOwnPendingGuard(t *testing.T) {
+	t.Parallel()
+
+	addr := "stake_test1uqfu74w3wh4gfzu8m6e7j987h4lq9r3t7ef5gaw497uu85qsqfy27"
+	koios := []KoiosAccountRewards{
+		{StakeAddress: addr, RewardType: "member", Earned: "10"},
+		{StakeAddress: addr, RewardType: "proposal_refund", Earned: "100"},
+	}
+	byType := func(ms []CheckMismatch) map[string]string {
+		out := map[string]string{}
+		for _, m := range ms {
+			out[m.KoiosValue] = m.Category
+		}
+		return out
+	}
+
+	got := byType(CompareAccountEpoch(
+		"preview", 100, koios, nil, time.Now(), 0, time.Time{}, true, false,
+	))
+	require.Equal(t, map[string]string{
+		"10 (type=member)":           CategoryReferenceLag,
+		"100 (type=proposal_refund)": CategoryAcctOnlyKoios,
+	}, got)
+
+	got = byType(CompareAccountEpoch(
+		"preview", 100, koios, nil, time.Now(), 0, time.Time{}, false, true,
+	))
+	require.Equal(t, map[string]string{
+		"10 (type=member)":           CategoryAcctOnlyKoios,
+		"100 (type=proposal_refund)": CategoryReferenceLag,
+	}, got)
 }

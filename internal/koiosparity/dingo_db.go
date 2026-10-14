@@ -1134,22 +1134,27 @@ func (d *DingoDB) GetRewardAccountOutputs(
 	return out, nil
 }
 
-// GetProposalDepositRefunds implements RewardParitySource with the same two
-// reads DatabaseSource makes, against the metadata schema directly. Both run
-// in one read-only transaction so a rollback between them cannot remove the
-// credits of proposals the first read already returned.
+// GetProposalDepositRefunds implements RewardParitySource with the same reads
+// DatabaseSource makes, against the metadata schema directly. They run in one
+// read-only transaction so a rollback between them cannot remove the credits
+// of proposals an earlier read already returned.
 func (d *DingoDB) GetProposalDepositRefunds(
 	ctx context.Context,
 	refundEpoch uint64,
-) ([]governance.ProposalDepositRefund, error) {
+) (ProposalDepositRefunds, error) {
+	var out ProposalDepositRefunds
 	tx, err := d.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
-		return nil, fmt.Errorf("begin proposal refund read: %w", err)
+		return out, fmt.Errorf("begin proposal refund read: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	out.Pending, err = d.refundsPending(ctx, tx, refundEpoch)
+	if err != nil {
+		return out, err
+	}
 	proposals, err := d.proposalsRefundedAt(ctx, tx, refundEpoch)
 	if err != nil {
-		return nil, fmt.Errorf(
+		return out, fmt.Errorf(
 			"governance proposals refunded at epoch %d: %w",
 			refundEpoch,
 			err,
@@ -1162,7 +1167,7 @@ func (d *DingoDB) GetProposalDepositRefunds(
 	) {
 		slotCredits, err := d.postSnapshotCreditEvents(ctx, tx, slot)
 		if err != nil {
-			return nil, fmt.Errorf(
+			return out, fmt.Errorf(
 				"reward credits at slot %d: %w",
 				slot,
 				err,
@@ -1170,11 +1175,51 @@ func (d *DingoDB) GetProposalDepositRefunds(
 		}
 		credits = append(credits, slotCredits...)
 	}
-	return governance.MatchProposalDepositRefunds(
+	out.Refunds, err = governance.MatchProposalDepositRefunds(
 		proposals,
 		refundEpoch,
 		credits,
 	)
+	return out, err
+}
+
+// refundsPending computes ProposalDepositRefunds.Pending with the tip and
+// epoch reads GetPoolEpochDataMap uses for DingoPoolEpochData.RewardsPending.
+func (d *DingoDB) refundsPending(
+	ctx context.Context,
+	tx *sql.Tx,
+	refundEpoch uint64,
+) (bool, error) {
+	var tipSlot sql.NullInt64
+	var tipHash []byte
+	err := tx.QueryRowContext(
+		ctx, `SELECT slot, hash FROM tip ORDER BY id DESC LIMIT 1`,
+	).Scan(&tipSlot, &tipHash)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return false, nil
+	case err != nil:
+		return false, fmt.Errorf("tip lookup: %w", err)
+	case !tipSlot.Valid || tipSlot.Int64 <= 0 || len(tipHash) == 0:
+		return false, nil
+	}
+	var startSlot sql.NullInt64
+	err = tx.QueryRowContext(
+		ctx,
+		rebind(`SELECT start_slot FROM epoch WHERE epoch_id = ?`, d.dialect),
+		refundEpoch,
+	).Scan(&startSlot)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return true, nil
+	case err != nil:
+		return false, fmt.Errorf("epoch lookup %d: %w", refundEpoch, err)
+	case !startSlot.Valid || startSlot.Int64 < 0:
+		return false, fmt.Errorf(
+			"epoch lookup %d: invalid start slot", refundEpoch,
+		)
+	}
+	return uint64(tipSlot.Int64) < uint64(startSlot.Int64), nil
 }
 
 // proposalsRefundedAt mirrors

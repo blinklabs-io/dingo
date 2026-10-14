@@ -10982,7 +10982,13 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
   `checkEpoch`'s `accountRewardsPending` requires *every* pool entry to report
   pending before it downgrades the epoch's account comparison, so one pool
   sitting before its own boundary cannot waive the rest, and an empty or
-  nil-bearing map claims nothing.
+  nil-bearing map claims nothing. `proposal_refund` rows do not use that
+  guard: refunds for earned epoch K are journaled at the boundary into K+1,
+  an epoch before the K+2 boundary that applies member and leader rewards,
+  so `ProposalDepositRefunds.Pending` is set only while the tip has not
+  reached the start of K+1, under the same absent-row and unknown-tip rules.
+  `CompareAccountEpoch` takes it as `refundsPending` and applies it to
+  `proposal_refund` keys alone.
 
   Both categories stay `ERROR`, so this only ever moves a `FAIL` to an
   `ERROR` — never to a `PASS`. `ComparePoolEpoch` applies the identical
@@ -11780,7 +11786,8 @@ never the reverse.
   `proposal_refund` rows sum on both sides instead of reporting
   `acct_duplicate`. Presence and amount differences use the ordinary
   `acct_only_*`/`value_mismatch` categories, so a missing or wrong refund
-  fails the epoch. A journal written before the refund discriminator existed
+  fails the epoch once K+1 has begun, whether or not the epoch's member and
+  leader rewards are still pending. A journal written before the refund discriminator existed
   holds only the withdrawal credit when a treasury withdrawal paid its own
   proposal's return account, because the refund under the same hash was
   dropped as a replay. The plain hash is never paired for such a proposal, so
@@ -11961,7 +11968,8 @@ never the reverse.
   even inside the grace window, because a zero row is not a value the other
   side can still publish later. Next is the chain-position trigger described
   under "Reward timing" above, for presence and amount alike, via
-  `checkEpoch`'s `accountRewardsPending`; it precedes the wall-clock grace
+  `checkEpoch`'s `accountRewardsPending` (and, for `proposal_refund` rows,
+  `ProposalDepositRefunds.Pending`); it precedes the wall-clock grace
   window because it is the form that survives a replay, where the epoch's real
   close time is years in the past and the window can never fire.
 - **Strict-mode propagation.** An account-level `FAIL` flows through

@@ -175,14 +175,14 @@ func TestDatabaseSourceGetProposalDepositRefunds(t *testing.T) {
 	require.NoError(t, err)
 	// The unregistered return account's deposit went to the treasury, which
 	// Koios does not list as a proposal_refund either.
-	requireOnlyRefunds(t, got, registered)
+	requireOnlyRefunds(t, got.Refunds, registered)
 
 	for _, epoch := range []uint64{677, 679} {
 		got, err = source.GetProposalDepositRefunds(
 			context.Background(), epoch,
 		)
 		require.NoError(t, err)
-		require.Empty(t, got, "epoch %d", epoch)
+		require.Empty(t, got.Refunds, "epoch %d", epoch)
 	}
 }
 
@@ -198,14 +198,14 @@ func TestDingoDBGetProposalDepositRefundsMatchesDatabaseSource(t *testing.T) {
 
 	got, err := dingo.GetProposalDepositRefunds(context.Background(), 678)
 	require.NoError(t, err)
-	requireOnlyRefunds(t, got, registered)
+	requireOnlyRefunds(t, got.Refunds, registered)
 
 	for _, epoch := range []uint64{677, 679} {
 		got, err = dingo.GetProposalDepositRefunds(
 			context.Background(), epoch,
 		)
 		require.NoError(t, err)
-		require.Empty(t, got, "epoch %d", epoch)
+		require.Empty(t, got.Refunds, "epoch %d", epoch)
 	}
 }
 
@@ -321,8 +321,8 @@ type failingRefundSource struct {
 func (failingRefundSource) GetProposalDepositRefunds(
 	context.Context,
 	uint64,
-) ([]governance.ProposalDepositRefund, error) {
-	return nil, errors.New("refund read failed")
+) (ProposalDepositRefunds, error) {
+	return ProposalDepositRefunds{}, errors.New("refund read failed")
 }
 
 // A failed Dingo read is the one case dingo_db_error describes, and it must
@@ -365,7 +365,7 @@ func TestProposalDepositRefundsExcludeSoftDeletedProposals(t *testing.T) {
 	} {
 		got, err := src.GetProposalDepositRefunds(context.Background(), 678)
 		require.NoError(t, err, name)
-		requireOnlyRefunds(t, got, registered[1:])
+		requireOnlyRefunds(t, got.Refunds, registered[1:])
 	}
 }
 
@@ -445,7 +445,7 @@ func TestProposalDepositRefundsSkipLegacyWithdrawalToReturnAccount(
 	} {
 		got, err := src.GetProposalDepositRefunds(context.Background(), 678)
 		require.NoError(t, err, name)
-		require.Empty(t, got, name)
+		require.Empty(t, got.Refunds, name)
 	}
 }
 
@@ -456,12 +456,12 @@ type badCredentialRefundSource struct {
 func (badCredentialRefundSource) GetProposalDepositRefunds(
 	context.Context,
 	uint64,
-) ([]governance.ProposalDepositRefund, error) {
-	return []governance.ProposalDepositRefund{{
+) (ProposalDepositRefunds, error) {
+	return ProposalDepositRefunds{Refunds: []governance.ProposalDepositRefund{{
 		CredentialTag: 7,
 		StakingKey:    bytes.Repeat([]byte{0x01}, 28),
 		Amount:        previewGovActionDeposit,
-	}}, nil
+	}}}, nil
 }
 
 // A refund credential that will not decode came from the reward-credit
@@ -500,4 +500,116 @@ func TestCompareEpochAccountsLogsRefundCredentialSource(t *testing.T) {
 	require.Contains(t, out, "proposal refund credential")
 	require.Contains(t, out, "refund_epoch=678")
 	require.NotContains(t, out, "reward_account_output")
+}
+
+// refundPendingState seeds the epoch 677 refunds and, when set, a tip at
+// tipSlot and an epoch 678 row starting at slot 678_000, the boundary at
+// which those refunds are journaled.
+func refundPendingState(
+	t *testing.T,
+	tipSlot uint64,
+	withRefundEpoch bool,
+) (*database.Database, [][]byte) {
+	t.Helper()
+	db := newTestDatabaseSourceDB(t)
+	registered, _ := seedEpoch677Refunds(t, db)
+	raw := sourceSQLDB(t, db)
+	if withRefundEpoch {
+		require.NoError(t, raw.Exec(
+			`INSERT INTO epoch (epoch_id, start_slot, length_in_slots)
+			 VALUES (?, ?, ?)`,
+			678, 678_000, 1_000,
+		).Error)
+	}
+	if tipSlot > 0 {
+		require.NoError(t, raw.Exec(
+			`INSERT INTO tip (hash, slot, block_number) VALUES (?, ?, ?)`,
+			[]byte{0x01}, tipSlot, 1,
+		).Error)
+	}
+	return db, registered
+}
+
+// Refunds for Koios earned epoch 677 are journaled when epoch 678 begins, so
+// they are pending only until then, independently of the member and leader
+// rewards of the same epoch, which are applied when 679 begins.
+func TestProposalDepositRefundsPendingUntilRefundEpochBegins(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name            string
+		tipSlot         uint64
+		withRefundEpoch bool
+		want            bool
+	}{
+		{"refund epoch begun", 678_500, true, false},
+		{"refund epoch not begun", 677_500, true, true},
+		{"refund epoch row missing", 678_500, false, true},
+		{"tip unknown", 0, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			db, _ := refundPendingState(t, tc.tipSlot, tc.withRefundEpoch)
+			source, err := NewDatabaseSource(db)
+			require.NoError(t, err)
+			dingo := &DingoDB{db: sourceSQLDB(t, db).db, dialect: "sqlite"}
+			for name, src := range map[string]RewardParitySource{
+				"database source": source,
+				"dingo db":        dingo,
+			} {
+				got, err := src.GetProposalDepositRefunds(
+					context.Background(), 678,
+				)
+				require.NoError(t, err, name)
+				require.Equal(t, tc.want, got.Pending, name)
+			}
+		})
+	}
+}
+
+// With member and leader rewards still pending, a wrong refund once the
+// refund epoch has begun is a divergence, not reference lag.
+func TestCompareEpochAccountsRefundPendingIsIndependent(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name    string
+		tipSlot uint64
+		want    string
+	}{
+		{"after refund epoch begins", 678_500, CategoryValueMismatch},
+		{"before refund epoch begins", 677_500, CategoryReferenceLag},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			db, registered := refundPendingState(t, tc.tipSlot, true)
+			source, err := NewDatabaseSource(db)
+			require.NoError(t, err)
+			dingo := &DingoDB{db: sourceSQLDB(t, db).db, dialect: "sqlite"}
+			for name, src := range map[string]RewardParitySource{
+				"database source": source,
+				"dingo db":        dingo,
+			} {
+				cache, err := openTestCache(
+					filepath.Join(t.TempDir(), "cache.db"), nil,
+				)
+				require.NoError(t, err)
+				t.Cleanup(func() { _ = cache.Close() })
+				require.NoError(t, cache.CommitAccountRewardsForEpoch(
+					"preview", 677,
+					koiosRefundRows(t, registered, "500000000000"),
+					1, true, time.Now(),
+				))
+				ms := compareEpochAccounts(
+					context.Background(), cache, src, "preview", 677, 676,
+					time.Now(), 0, time.Time{}, true,
+					slog.New(slog.DiscardHandler),
+				)
+				require.Len(t, ms, len(registered), name)
+				for _, m := range ms {
+					require.Equal(t, tc.want, m.Category, name)
+				}
+			}
+		})
+	}
 }

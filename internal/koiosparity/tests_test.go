@@ -2900,6 +2900,7 @@ func TestCompareAccountEpochPendingRewardsAreALag(t *testing.T) {
 	t.Run("not computed yet is a lag", func(t *testing.T) {
 		ms := CompareAccountEpoch(
 			"preview", 100, koios, nil, now, 24, longClosed, true,
+			true,
 		)
 		got := categories(ms)
 		require.Len(t, got, 2)
@@ -2919,6 +2920,7 @@ func TestCompareAccountEpochPendingRewardsAreALag(t *testing.T) {
 		}
 		ms := CompareAccountEpoch(
 			"preview", 100, koios[:1], dingoRows, now, 24, longClosed, true,
+			true,
 		)
 		found := false
 		for _, m := range ms {
@@ -2944,6 +2946,7 @@ func TestCompareAccountEpochPendingRewardsAreALag(t *testing.T) {
 		}
 		ms := CompareAccountEpoch(
 			"preview", 100, koios[:1], dingoRows, now, 24, longClosed, false,
+			false,
 		)
 		found := false
 		for _, m := range ms {
@@ -2965,6 +2968,7 @@ func TestCompareAccountEpochPendingRewardsAreALag(t *testing.T) {
 		}
 		ms := CompareAccountEpoch(
 			"preview", 100, nil, dingoRows, now, 24, longClosed, true,
+			true,
 		)
 		got := categories(ms)
 		require.Len(t, got, 1,
@@ -2985,6 +2989,7 @@ func TestCompareAccountEpochPendingRewardsAreALag(t *testing.T) {
 			}
 			ms := CompareAccountEpoch(
 				"preview", 100, nil, dingoRows, now, 24, longClosed, false,
+				false,
 			)
 			got := categories(ms)
 			require.Len(t, got, 1)
@@ -2996,6 +3001,7 @@ func TestCompareAccountEpochPendingRewardsAreALag(t *testing.T) {
 	t.Run("computed and still absent is a real finding", func(t *testing.T) {
 		ms := CompareAccountEpoch(
 			"preview", 100, koios, nil, now, 24, longClosed, false,
+			false,
 		)
 		got := categories(ms)
 		require.Len(t, got, 2)
@@ -3689,6 +3695,7 @@ func TestZeroEarnedKoiosRowIsNotDivergence(t *testing.T) {
 		},
 		nil,
 		now, 0, time.Time{}, false,
+		false,
 	)
 	require.Len(t, out, 1, "the row should still be reported, not dropped")
 	assert.Equal(t, CategoryAcctZeroRewardRow, out[0].Category)
@@ -3714,6 +3721,7 @@ func TestZeroAmountDingoRowIsNotDivergence(t *testing.T) {
 			},
 		},
 		now, 0, time.Time{}, false,
+		false,
 	)
 	require.Len(t, out, 1)
 	assert.Equal(t, CategoryAcctZeroRewardRow, out[0].Category)
@@ -3737,6 +3745,7 @@ func TestNonZeroKoiosOnlyRowStillFails(t *testing.T) {
 		},
 		nil,
 		now, 0, time.Time{}, false,
+		false,
 	)
 	require.Len(t, out, 1)
 	assert.Equal(t, CategoryAcctOnlyKoios, out[0].Category)
@@ -3758,6 +3767,7 @@ func TestZeroOnBothSidesReportsNothing(t *testing.T) {
 			{StakeAddress: zeroRewardAddr, RewardType: "leader", Amount: "0"},
 		},
 		now, 0, time.Time{}, false,
+		false,
 	)
 	assert.Empty(t, out)
 }
@@ -3804,6 +3814,7 @@ func TestZeroRewardRowAmountSpellings(t *testing.T) {
 				}},
 				nil,
 				time.Now(), 0, time.Time{}, false,
+				false,
 			)
 			require.Len(t, out, 1)
 			assert.Equal(t, tc.category, out[0].Category)
