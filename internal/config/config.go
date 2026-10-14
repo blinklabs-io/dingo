@@ -656,7 +656,11 @@ type Config struct {
 	RelayPort              uint      `yaml:"relayPort"                           envconfig:"port"`
 	BarkBaseUrl            string    `yaml:"barkBaseUrl"                         envconfig:"DINGO_BARK_BASE_URL"`
 	BarkBlockDownloadHosts []string  `yaml:"barkBlockDownloadHosts"              envconfig:"DINGO_BARK_BLOCK_DOWNLOAD_HOSTS"`
-	BarkPort               uint      `yaml:"barkPort"                            envconfig:"DINGO_BARK_PORT"`
+	// BarkBlockDownloadAllowPrivateAddresses permits Bark block downloads
+	// from private, loopback, and other special-use addresses. Origin,
+	// HTTPS, redirect, and proxy checks still apply. Default: false.
+	BarkBlockDownloadAllowPrivateAddresses bool `yaml:"barkBlockDownloadAllowPrivateAddresses" envconfig:"DINGO_BARK_BLOCK_DOWNLOAD_ALLOW_PRIVATE_ADDRESSES"`
+	BarkPort                               uint `yaml:"barkPort"                            envconfig:"DINGO_BARK_PORT"`
 	// LocalStateQueryViewMaxLifetime is the longest a LocalStateQuery session
 	// may hold one acquired ledger snapshot before the node closes it.
 	// Default: "5m".

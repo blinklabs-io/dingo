@@ -240,6 +240,7 @@ type Config struct {
 	outboundSourcePort, barkPort                                                        uint
 	barkBaseUrl                                                                         string
 	barkBlockDownloadHosts                                                              []string
+	barkBlockDownloadAllowPrivateAddresses                                              bool
 	barkHost                                                                            string
 	barkClientCAFilePath                                                                string
 	barkArchiveMaxConcurrentFetches                                                     int
@@ -815,6 +816,7 @@ func (c *Config) syncCompatFields() {
 	c.tlsCertFilePath, c.tlsKeyFilePath = c.cfg.TlsCertFilePath, c.cfg.TlsKeyFilePath
 	c.apiConfig = c.cfg.API
 	c.barkBaseUrl, c.barkPort, c.barkBlockDownloadHosts = c.cfg.BarkBaseUrl, c.cfg.BarkPort, c.cfg.BarkBlockDownloadHosts
+	c.barkBlockDownloadAllowPrivateAddresses = c.cfg.BarkBlockDownloadAllowPrivateAddresses
 	c.barkHost = c.cfg.BarkHost
 	c.barkClientCAFilePath = c.cfg.BarkClientCAFilePath
 	c.barkArchiveMaxConcurrentFetches = c.cfg.BarkArchiveMaxConcurrentFetches
@@ -1860,6 +1862,16 @@ func WithBarkBlockDownloadHosts(hosts []string) ConfigOptionFunc {
 	}
 }
 
+// WithBarkBlockDownloadAllowPrivateAddresses permits Bark block downloads
+// from private, loopback, and other special-use addresses, such as an
+// S3-compatible store on a private network. Allowed origins, HTTPS,
+// redirect, and proxy restrictions still apply. Disabled by default.
+func WithBarkBlockDownloadAllowPrivateAddresses(allow bool) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.BarkBlockDownloadAllowPrivateAddresses = allow
+	}
+}
+
 func WithBarkPort(port uint) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.BarkPort = port
@@ -2240,6 +2252,12 @@ func (c *Config) BarkBaseUrl() string {
 // BarkBlockDownloadHosts returns the allowed Bark block-download origins.
 func (c *Config) BarkBlockDownloadHosts() []string {
 	return c.cfg.BarkBlockDownloadHosts
+}
+
+// BarkBlockDownloadAllowPrivateAddresses reports whether Bark block downloads
+// may reach private, loopback, and other special-use addresses.
+func (c *Config) BarkBlockDownloadAllowPrivateAddresses() bool {
+	return c.cfg.BarkBlockDownloadAllowPrivateAddresses
 }
 
 // BarkOperatorCertificateFingerprints returns the SHA-256 client certificate

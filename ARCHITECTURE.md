@@ -28,6 +28,9 @@ configured port is nonzero, so core-mode nodes and disabled ports resolve
 none of them. Failures unwind providers in reverse order. Normal shutdown
 orders APIs, mempool, ledger/database, then storage.
 Database receives provider-owned stores through `database.Stores`.
+Before API providers start, API-mode database startup runs the one-time,
+cancellable backfill for rendered addresses of live asset UTxOs; a sync_state
+marker skips the scan after it completes.
 Storage lifecycle contexts cross the provider boundary. In particular, Badger
 stops scheduling value-log GC before close and prevents a successful rewrite
 from chaining another pass. Because Badger cannot cancel a rewrite already in
@@ -2970,7 +2973,7 @@ does not keep serving as if it were valid, without writing back to the row.
 `/pools/extended` needs the same classification for every active pool on a
 page, not one pool at a time, so it does not call `PoolMetadata` per pool
 (that would be one query per row). Instead `NodeAdapter.PoolsExtended`
-resolves every active pool's registered metadata URL in a single
+resolves only the requested page's registered metadata URLs in a single
 `MetadataStore.GetOffchainMetadataBatch` call, then applies the same
 pending/failed/fetched classification (including the `offchainFetchError`
 mapping and the read-time `ValidatePoolMetadata` fallback) as pure,
@@ -3008,7 +3011,9 @@ fallback:
   `barkBlockDownloadHosts` allowlist entry. An HTTP Bark RPC base anchors the
   corresponding HTTPS download origin. The same check runs on redirects,
   and every resolved address is rejected if it is private or special-use before
-  dialing. The client ignores ambient proxy settings, and response bodies are
+  dialing, unless `barkBlockDownloadAllowPrivateAddresses` is set for an
+  archive store on a private network; that default-off opt-in lifts only the
+  address check. The client ignores ambient proxy settings, and response bodies are
   capped before buffering at the largest block the chain admits for any era
   (`LedgerState.MaxBlockSize`: the live header and body limits, or the Byron
   genesis block size when larger; a 128 KiB default when neither is known).
@@ -5522,8 +5527,21 @@ Praos once the selector exits Genesis mode. Chainsync and ledger retain enough
 per-peer header ancestry for the active slot window while Genesis is active,
 then shrink back to their normal bounded history after exit. The ledger's
 peer-local ancestry stores compact header CBOR and prev-hash metadata rather
-than retaining decoded header objects, and enforces both the active window's
-entry bound and an 8 MiB per-connection byte budget. Rollback recovery
+than retaining decoded header objects, and enforces the active window's
+entry bound and an 8 MiB per-connection byte budget. Headers still ahead of
+the local tip are kept past the entry bound, up to the header queue capacity
+(`chain.MaxQueuedHeaders`) and within the byte budgets, so that after a header
+queue clear the in-flight headers of an honest peer still reach the local tip.
+Fork recovery re-queues the whole path from the local tip, so for a peer
+extending one chain, a header older than its newest `MaxQueuedHeaders` records
+lies only on paths longer than the queue.
+While a connection's oldest retained header is ahead of the tip its byte budget
+rises to 24 MiB, and all connections together are held to 64 MiB.
+These budgets hold a full 10,000-header queue of production-sized headers for
+each default chainsync client; larger headers or a deeper queue
+(`MaxQueuedHeaders` grows with the security parameter) hit the byte budget
+first, and the oldest headers are evicted. The ancestry walk covers the whole
+retained history rather than only the entry bound. Rollback recovery
 memoizes resolved ancestry within one recovery pass, keeping missing-point
 fallback work linear in the retained history while the ChainSync mutex is
 held. If a candidate fork path falls outside the retained suffix, recovery
@@ -16199,7 +16217,16 @@ chain selection skips the peer, while it holds an ingress slot that a peer at
 the tip could use. The check runs in the callback after
 `reconcileChainsyncIngressAdmission`, so an observer promoted with a cursor
 left far behind is resynced on its first header. The shared per-connection
-timer marker allows one resync per connection until it reconnects. A header
+timer marker allows one resync per connection until it reconnects. At most one
+such recycle is requested across all connections per 30 seconds
+(`claimBehindTipRecycle`), so a gap with many lagging honest peers does not
+recycle all of them at once and leave only a near-tip peer; over a sustained
+gap they are still recycled one window at a time. A connection whose
+re-intersection has fired or is already due does not take that window; a
+future-header timer with a later onset is replaced by an immediate one, since
+it withholds every header until it fires. A claim
+that schedules nothing (the connection has already left the connection
+manager) is released. A header
 within `k` of the tip (a normal rollback or fork) is not affected, and neither
 is a peer whose own tip is more than `k` behind: re-intersecting cannot bring
 it closer, so it stays attached like any other peer lagging on our chain.
