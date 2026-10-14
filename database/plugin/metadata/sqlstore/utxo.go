@@ -2080,13 +2080,15 @@ func utxoOrderingClauses(
 	return from, predicate, args, nil
 }
 
-// utxoProducerJoin joins the transaction that produced a UTxO. A collateral
-// return has no transaction_id; it belongs to the transaction named by
-// collateral_return_for_tx_id, whose position it takes.
+// utxoOrderingRanged reports whether the query bounds the producing
+// transaction position, which needs utxoProducerJoin in its FROM clause.
 func utxoOrderingRanged(query *models.UtxoWithOrderingQuery) bool {
 	return query.CreatedFrom != nil || query.CreatedTo != nil
 }
 
+// utxoProducerJoin joins the transaction that produced a UTxO. A collateral
+// return has no transaction_id; it belongs to the transaction named by
+// collateral_return_for_tx_id, whose position it takes.
 const utxoProducerJoin = `
 LEFT JOIN "transaction"
     ON COALESCE(utxo.transaction_id, utxo.collateral_return_for_tx_id)

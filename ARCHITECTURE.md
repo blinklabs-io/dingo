@@ -10305,9 +10305,11 @@ The script redeemer and reference-UTxO listings, like the address, asset and
 transaction listings, need API storage mode. Their indexes (`redeemer_script`,
 `utxo_reference_script`) are written as transactions are applied, so a database
 populated before they existed lists only the transactions and outputs applied
-afterwards. A guarding redeemer is not attributed to a script, because no
-script purpose is built for it, so a guard script's redeemer listing omits
-those executions.
+afterwards. A Dijkstra subtransaction is stored as a transaction of its own,
+so its redeemers are attributed from its own witness set and inputs and are
+listed under its own hash. A guarding redeemer is not attributed to a script,
+because no script purpose is built for it, so a guard script's redeemer
+listing omits those executions.
 
 A listing that pages from one read snapshot and then resolves each row through
 further reads (block hashes, output CBOR, transaction redeemers) releases the

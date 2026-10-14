@@ -2606,7 +2606,8 @@ type MetadataStore interface {
 	) ([]models.MintedAsset, error)
 
 	// CountMintedAssets returns the number of distinct assets
-	// ListMintedAssets would list for the same policy filter.
+	// ListMintedAssets would list for the same policy filter. API storage
+	// mode only: core mode records no mint/burn history and returns zero.
 	CountMintedAssets(policyID []byte, txn types.Txn) (int, error)
 
 	// GetAssetMintBurnHistory returns the mint and burn events of one asset
