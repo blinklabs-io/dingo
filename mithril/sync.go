@@ -1845,7 +1845,12 @@ func Sync(
 		indexRebuildElapsed,
 	)
 
-	if err := node.FinalizeBackfillPlannerStats(ctx, db, logger); err != nil {
+	if err := node.FinalizeMithrilBackfillPlannerStats(
+		ctx,
+		db,
+		logger,
+		mode == syncModeBootstrap,
+	); err != nil {
 		return SyncResult{}, err
 	}
 

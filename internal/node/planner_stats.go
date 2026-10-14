@@ -33,6 +33,31 @@ func FinalizeBackfillPlannerStats(
 	db *database.Database,
 	logger *slog.Logger,
 ) error {
+	return finalizeBackfillPlannerStats(ctx, db, logger, false)
+}
+
+// FinalizeMithrilBackfillPlannerStats permits sampled planner statistics for
+// a fresh bootstrap. Resumed databases retain the full statistics refresh.
+func FinalizeMithrilBackfillPlannerStats(
+	ctx context.Context,
+	db *database.Database,
+	logger *slog.Logger,
+	freshDatabaseBootstrap bool,
+) error {
+	return finalizeBackfillPlannerStats(
+		ctx,
+		db,
+		logger,
+		freshDatabaseBootstrap,
+	)
+}
+
+func finalizeBackfillPlannerStats(
+	ctx context.Context,
+	db *database.Database,
+	logger *slog.Logger,
+	allowIncremental bool,
+) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -67,7 +92,7 @@ func FinalizeBackfillPlannerStats(
 	)
 	started := time.Now()
 	optimized := false
-	if incremental, ok := updater.(metadata.IncrementalPlannerStatsUpdater); ok {
+	if incremental, ok := updater.(metadata.IncrementalPlannerStatsUpdater); allowIncremental && ok {
 		result, optimizeErr := incremental.OptimizePlannerStatsContext(
 			ctx,
 			types.PlannerStatsTriggerStartup,

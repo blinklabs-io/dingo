@@ -110,3 +110,35 @@ func TestFinalizeBackfillPlannerStatsSkipsIncompleteBackfill(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, marker)
 }
+
+func TestFinalizeMithrilBackfillPlannerStatsFreshBootstrap(t *testing.T) {
+	t.Parallel()
+	db := newFileTestDB(t)
+	raw, err := dbtest.RawSQLiteMetadata(t, db)
+	require.NoError(t, err)
+	_, err = raw.Exec(
+		`INSERT INTO "transaction"(id,hash,slot,fee) VALUES(1,randomblob(32),1,'0');`,
+	)
+	require.NoError(t, err)
+	now := time.Now().UTC()
+	require.NoError(t, db.Metadata().SetBackfillCheckpoint(
+		&models.BackfillCheckpoint{
+			Phase:      BackfillPhase,
+			LastSlot:   1,
+			TotalSlots: 1,
+			StartedAt:  now,
+			UpdatedAt:  now,
+			Completed:  true,
+		},
+		nil,
+	))
+	require.NoError(t, FinalizeMithrilBackfillPlannerStats(
+		t.Context(),
+		db,
+		slog.New(slog.DiscardHandler),
+		true,
+	))
+	var statRows int
+	require.NoError(t, raw.QueryRow("SELECT COUNT(*) FROM sqlite_stat1").Scan(&statRows))
+	require.Greater(t, statRows, 0)
+}
