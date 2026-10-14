@@ -184,14 +184,15 @@ type EraBound struct {
 // ParsedUTxO represents a parsed unspent transaction output ready
 // for conversion to Dingo's database model.
 type ParsedUTxO struct {
-	TxHash        []byte // 32 bytes
-	OutputIndex   uint32
-	Cbor          []byte // serialized TxOut used by ledger replay
-	Address       []byte // raw address bytes
-	PaymentKey    []byte // 28 bytes, extracted from address
-	StakingKey    []byte // 28 bytes, extracted from address
-	CredentialTag uint8  // stake credential tag: 0 key hash, 1 script hash
-	PaymentScript bool   // true when payment credential is a script hash
+	TxHash          []byte // 32 bytes
+	OutputIndex     uint32
+	Cbor            []byte // serialized TxOut used by ledger replay
+	Address         []byte // raw address bytes
+	RenderedAddress []byte // canonical address text used by metadata queries
+	PaymentKey      []byte // 28 bytes, extracted from address
+	StakingKey      []byte // 28 bytes, extracted from address
+	CredentialTag   uint8  // stake credential tag: 0 key hash, 1 script hash
+	PaymentScript   bool   // true when payment credential is a script hash
 	// Pointer is the certificate position named by a pointer address. Pointer
 	// outputs have no staking credential in their address; the stake query
 	// resolves this position against certificate history at the evaluation
@@ -314,6 +315,11 @@ type ParsedPool struct {
 	// pool is still live: it keeps its deposit, earns rewards and leads
 	// slots until the boundary, so this only schedules the retirement.
 	RetiringEpoch *uint64
+	// FutureParams is a re-registration staged in the PState
+	// futurePoolParams map: it takes effect at the next epoch boundary, so
+	// the fields above are still the parameters in force. Nil when none is
+	// pending. Its Deposit is the pool's current one.
+	FutureParams *ParsedPool
 	// LeiosKeyPublic and LeiosKeyPossessionProof are the pool's registered
 	// Dijkstra/Leios BLS voting key and its proof of possession, or nil when
 	// the snapshot's pool params carry no leiosKey field. Proof-of-possession
@@ -1023,7 +1029,8 @@ func validateImportState(cfg ImportConfig) error {
 	// Any parse warning is a rejection: a partial parse drops or zeroes
 	// entries, and the import would persist the remainder as the ledger state.
 	if state.CertStateData != nil {
-		if _, err := ParseCertState(state.CertStateData); err != nil {
+		_, err := ParseCertState(state.CertStateData)
+		if err != nil {
 			return fmt.Errorf("parsing cert state: %w", err)
 		}
 	}
@@ -1798,6 +1805,83 @@ func importAccounts(
 	return nil
 }
 
+// poolImportModels builds the pool row and the registration row for a parsed
+// pool registered at slot.
+func poolImportModels(
+	pool ParsedPool,
+	slot uint64,
+) (*models.Pool, *models.PoolRegistration) {
+	var margin *types.Rat
+	if pool.MarginDen > 0 {
+		r := new(big.Rat).SetFrac(
+			new(big.Int).SetUint64(pool.MarginNum),
+			new(big.Int).SetUint64(pool.MarginDen),
+		)
+		margin = &types.Rat{Rat: r}
+	}
+
+	model := &models.Pool{
+		PoolKeyHash:                pool.PoolKeyHash,
+		VrfKeyHash:                 pool.VrfKeyHash,
+		Pledge:                     types.Uint64(pool.Pledge),
+		Cost:                       types.Uint64(pool.Cost),
+		Margin:                     margin,
+		RewardAccount:              pool.RewardAccount,
+		RewardAccountCredentialTag: pool.RewardAccountCredentialTag,
+		LeiosKeyPublic:             pool.LeiosKeyPublic,
+		LeiosKeyPossessionProof:    pool.LeiosKeyPossessionProof,
+	}
+
+	owners := make([]models.PoolRegistrationOwner, 0, len(pool.Owners))
+	for _, owner := range pool.Owners {
+		owners = append(
+			owners,
+			models.PoolRegistrationOwner{KeyHash: owner},
+		)
+	}
+
+	relays := make([]models.PoolRegistrationRelay, 0, len(pool.Relays))
+	for _, r := range pool.Relays {
+		relay := models.PoolRegistrationRelay{
+			Port:     uint(r.Port),
+			Hostname: r.Hostname,
+		}
+		if r.IPv4 != nil {
+			ip := net.IP(r.IPv4)
+			relay.Ipv4 = &ip
+		}
+		if r.IPv6 != nil {
+			ip := net.IP(r.IPv6)
+			relay.Ipv6 = &ip
+		}
+		relays = append(relays, relay)
+	}
+
+	reg := &models.PoolRegistration{
+		PoolKeyHash:                pool.PoolKeyHash,
+		VrfKeyHash:                 pool.VrfKeyHash,
+		Pledge:                     types.Uint64(pool.Pledge),
+		Cost:                       types.Uint64(pool.Cost),
+		Margin:                     margin,
+		RewardAccount:              pool.RewardAccount,
+		RewardAccountCredentialTag: pool.RewardAccountCredentialTag,
+		LeiosKeyPublic:             pool.LeiosKeyPublic,
+		LeiosKeyPossessionProof:    pool.LeiosKeyPossessionProof,
+		LeiosKeyRegistrationAgeUnknown: (len(pool.LeiosKeyPublic) > 0 ||
+			len(pool.LeiosKeyPossessionProof) > 0) &&
+			pool.LeiosKeyRegistrationEpoch == nil,
+		LeiosKeyRegistrationEpoch: pool.LeiosKeyRegistrationEpoch,
+		AddedSlot:                 slot,
+		DepositAmount:             types.Uint64(pool.Deposit),
+		Owners:                    owners,
+		Relays:                    relays,
+		MetadataUrl:               pool.MetadataUrl,
+		MetadataHash:              pool.MetadataHash,
+	}
+
+	return model, reg
+}
+
 // importPools imports parsed pools into the metadata store.
 func importPools(
 	ctx context.Context,
@@ -1846,82 +1930,27 @@ func importPools(
 			)
 		}
 
-		var margin *types.Rat
-		if pool.MarginDen > 0 {
-			r := new(big.Rat).SetFrac(
-				new(big.Int).SetUint64(pool.MarginNum),
-				new(big.Int).SetUint64(pool.MarginDen),
-			)
-			margin = &types.Rat{Rat: r}
+		// A pool with a re-registration staged in futurePoolParams gets two
+		// registration rows, like a live re-registration: the parameters in
+		// force, then the staged ones, which the epoch boundary promotes.
+		// Stable indexes preserve this order when both synthetic rows share
+		// the snapshot anchor and make replay of the snapshot idempotent.
+		imports := []ParsedPool{pool}
+		if pool.FutureParams != nil {
+			imports = append(imports, *pool.FutureParams)
 		}
-
-		model := &models.Pool{
-			PoolKeyHash:                pool.PoolKeyHash,
-			VrfKeyHash:                 pool.VrfKeyHash,
-			Pledge:                     types.Uint64(pool.Pledge),
-			Cost:                       types.Uint64(pool.Cost),
-			Margin:                     margin,
-			RewardAccount:              pool.RewardAccount,
-			RewardAccountCredentialTag: pool.RewardAccountCredentialTag,
-			LeiosKeyPublic:             pool.LeiosKeyPublic,
-			LeiosKeyPossessionProof:    pool.LeiosKeyPossessionProof,
-		}
-
-		var owners []models.PoolRegistrationOwner
-		for _, owner := range pool.Owners {
-			owners = append(
-				owners,
-				models.PoolRegistrationOwner{KeyHash: owner},
-			)
-		}
-
-		var relays []models.PoolRegistrationRelay
-		for _, r := range pool.Relays {
-			relay := models.PoolRegistrationRelay{
-				Port:     uint(r.Port),
-				Hostname: r.Hostname,
+		for i, p := range imports {
+			model, reg := poolImportModels(p, slot)
+			reg.RegistrationIndex = uint(i)
+			if err := store.ImportPool(
+				model, reg, txn.Metadata(),
+			); err != nil {
+				return fmt.Errorf(
+					"importing pool %x: %w",
+					pool.PoolKeyHash,
+					err,
+				)
 			}
-			if r.IPv4 != nil {
-				ip := net.IP(r.IPv4)
-				relay.Ipv4 = &ip
-			}
-			if r.IPv6 != nil {
-				ip := net.IP(r.IPv6)
-				relay.Ipv6 = &ip
-			}
-			relays = append(relays, relay)
-		}
-
-		reg := &models.PoolRegistration{
-			PoolKeyHash:                pool.PoolKeyHash,
-			VrfKeyHash:                 pool.VrfKeyHash,
-			Pledge:                     types.Uint64(pool.Pledge),
-			Cost:                       types.Uint64(pool.Cost),
-			Margin:                     margin,
-			RewardAccount:              pool.RewardAccount,
-			RewardAccountCredentialTag: pool.RewardAccountCredentialTag,
-			LeiosKeyPublic:             pool.LeiosKeyPublic,
-			LeiosKeyPossessionProof:    pool.LeiosKeyPossessionProof,
-			LeiosKeyRegistrationAgeUnknown: (len(pool.LeiosKeyPublic) > 0 ||
-				len(pool.LeiosKeyPossessionProof) > 0) &&
-				pool.LeiosKeyRegistrationEpoch == nil,
-			LeiosKeyRegistrationEpoch: pool.LeiosKeyRegistrationEpoch,
-			AddedSlot:                 slot,
-			DepositAmount:             types.Uint64(pool.Deposit),
-			Owners:                    owners,
-			Relays:                    relays,
-			MetadataUrl:               pool.MetadataUrl,
-			MetadataHash:              pool.MetadataHash,
-		}
-
-		if err := store.ImportPool(
-			model, reg, txn.Metadata(),
-		); err != nil {
-			return fmt.Errorf(
-				"importing pool %x: %w",
-				pool.PoolKeyHash,
-				err,
-			)
 		}
 
 		inBatch++

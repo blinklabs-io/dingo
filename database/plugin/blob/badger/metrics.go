@@ -155,12 +155,14 @@ func (d *BlobStoreBadger) registerBlobMetrics() {
 		}, labels)
 		gcCollectors.reclaimedBytes = prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
-				Name: badgerMetricNamePrefix + "gc_reclaimed_bytes", Help: "Bytes reclaimed by the last successful Badger GC rewrite.",
+				Name: badgerMetricNamePrefix + "gc_reclaimed_bytes",
+				Help: "Bytes reclaimed in the current Badger GC cycle, " +
+					"retaining the last completed total while idle.",
 			},
 			labels,
 		)
 		gcCollectors.consecutive = prometheus.NewGaugeVec(prometheus.GaugeOpts{
-			Name: badgerMetricNamePrefix + "gc_consecutive_successes", Help: "Successful value-log GC rewrites in the current GC cycle.",
+			Name: badgerMetricNamePrefix + "gc_consecutive_successes", Help: "Successful value-log GC rewrites in the current cycle, retaining the last completed count while idle.",
 		}, labels)
 		gcCollectors.lastSuccess = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: badgerMetricNamePrefix + "gc_last_success_timestamp_seconds", Help: "Unix timestamp of the last successful value-log GC rewrite.",

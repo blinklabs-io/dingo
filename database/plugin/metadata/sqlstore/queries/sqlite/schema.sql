@@ -460,6 +460,14 @@ CREATE TABLE asset (
     UNIQUE (name, policy_id, utxo_id)
 );
 
+CREATE TABLE utxo_address (
+    utxo_id INTEGER PRIMARY KEY,
+    address BLOB NOT NULL,
+    FOREIGN KEY (utxo_id) REFERENCES utxo(id) ON DELETE CASCADE
+);
+
+CREATE INDEX idx_utxo_address_address ON utxo_address(address);
+
 CREATE TABLE asset_mint_burn (
     id INTEGER PRIMARY KEY,
     tx_hash BLOB,

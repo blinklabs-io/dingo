@@ -54,7 +54,21 @@ func referenceScriptParams(
 	eraList []eras.EraDesc,
 	pparams, prevEraPParams lcommon.ProtocolParameters,
 ) lcommon.ProtocolParameters {
-	blockEraId := uint(block.Era().Id)
+	return protocolParametersForBlockEra(
+		uint(block.Era().Id),
+		currentEra,
+		eraList,
+		pparams,
+		prevEraPParams,
+	)
+}
+
+func protocolParametersForBlockEra(
+	blockEraId uint,
+	currentEra eras.EraDesc,
+	eraList []eras.EraDesc,
+	pparams, prevEraPParams lcommon.ProtocolParameters,
+) lcommon.ProtocolParameters {
 	if blockEraId != currentEra.Id && prevEraPParams != nil &&
 		eras.IsCompatibleEraIn(eraList, blockEraId, currentEra.Id) {
 		return prevEraPParams

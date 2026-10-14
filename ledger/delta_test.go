@@ -34,6 +34,7 @@ import (
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -57,6 +58,28 @@ func (s commitFailingBlobStore) NewTransaction(readWrite bool) dbtypes.Txn {
 		return txn
 	}
 	return &commitFailingBlobTxn{Txn: txn, err: s.err}
+}
+
+func (s commitFailingBlobStore) Get(
+	txn dbtypes.Txn,
+	key []byte,
+) ([]byte, error) {
+	return s.BlobStore.Get(unwrapCommitFailingBlobTxn(txn), key)
+}
+
+func (s commitFailingBlobStore) Set(
+	txn dbtypes.Txn,
+	key []byte,
+	value []byte,
+) error {
+	return s.BlobStore.Set(unwrapCommitFailingBlobTxn(txn), key, value)
+}
+
+func (s commitFailingBlobStore) NewIterator(
+	txn dbtypes.Txn,
+	opts dbtypes.BlobIteratorOptions,
+) dbtypes.BlobIterator {
+	return s.BlobStore.NewIterator(unwrapCommitFailingBlobTxn(txn), opts)
 }
 
 func (s commitFailingBlobStore) SetTx(
@@ -200,6 +223,26 @@ func requireTransactionEvent(
 	require.Equal(t, wantIndex, txEvt.TxIndex)
 	require.False(t, txEvt.Rollback)
 	return txEvt
+}
+
+func publishGovernanceTestEpoch(
+	ls *LedgerState,
+	epochID uint64,
+	era eras.EraDesc,
+) {
+	ls.currentEra = era
+	ls.currentEpoch = models.Epoch{
+		EpochId:       epochID,
+		StartSlot:     0,
+		LengthInSlots: 10_000,
+		EraId:         era.Id,
+	}
+	ls.epochCache = []models.Epoch{ls.currentEpoch}
+	if len(ls.epochCache) == 0 {
+		ls.epochCache = []models.Epoch{{EpochId: ls.currentEpoch.EpochId, StartSlot: 0, LengthInSlots: 10_000, EraId: conway.EraIdConway}}
+		ls.currentEra = eras.ConwayEraDesc
+	}
+	ls.publishSnapshotsLocked()
 }
 
 type ledgerDeltaBatchStoreRecorder struct {
@@ -451,18 +494,43 @@ func TestProcessGovernanceAcceptsDijkstraProtocolParameters(t *testing.T) {
 	pparams := mockledger.NewMockConwayProtocolParams()
 	pparams.GovActionValidityPeriod = 20
 	pparams.DRepInactivityPeriod = 20
+	previousPParams := pparams
+	previousPParams.GovActionValidityPeriod = 6
+	previousPParams.DRepInactivityPeriod = 7
+	nextEra := eras.EraDesc{Id: eras.DijkstraEraDesc.Id + 1}
+	blockEpoch := models.Epoch{
+		EpochId:       12,
+		StartSlot:     0,
+		LengthInSlots: 1_000,
+		EraId:         eras.DijkstraEraDesc.Id,
+	}
+	currentEpoch := models.Epoch{
+		EpochId:       13,
+		StartSlot:     1_000,
+		LengthInSlots: 1_000,
+		EraId:         nextEra.Id,
+	}
 	ls := &LedgerState{
-		db: db,
-		currentEpoch: models.Epoch{
-			EpochId: 12,
-		},
+		db:           db,
+		activeEras:   []eras.EraDesc{eras.DijkstraEraDesc, nextEra},
+		currentEra:   nextEra,
+		currentEpoch: currentEpoch,
+		epochCache:   []models.Epoch{blockEpoch, currentEpoch},
 		currentPParams: &dijkstra.DijkstraProtocolParameters{
 			ConwayProtocolParameters: pparams,
+		},
+		prevEraPParams: &dijkstra.DijkstraProtocolParameters{
+			ConwayProtocolParameters: previousPParams,
 		},
 		config: LedgerStateConfig{
 			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		},
 	}
+	if len(ls.epochCache) == 0 {
+		ls.epochCache = []models.Epoch{{EpochId: ls.currentEpoch.EpochId, StartSlot: 0, LengthInSlots: 10_000, EraId: conway.EraIdConway}}
+		ls.currentEra = eras.ConwayEraDesc
+	}
+	ls.publishSnapshotsLocked()
 
 	rewardAddress, err := lcommon.NewAddressFromBytes(
 		append([]byte{0xE1}, bytes.Repeat([]byte{0xAB}, 28)...),
@@ -499,7 +567,7 @@ func TestProcessGovernanceAcceptsDijkstraProtocolParameters(t *testing.T) {
 
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return delta.processGovernance(context.Background(), ls, tx, 0, txn)
+		return delta.processGovernance(context.Background(), ls, tx, 0, txn, nil)
 	}))
 
 	got, err := db.GetGovernanceProposal(
@@ -510,7 +578,7 @@ func TestProcessGovernanceAcceptsDijkstraProtocolParameters(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.Equal(t, uint64(12), got.ProposedEpoch)
-	require.Equal(t, uint64(32), got.ExpiresEpoch)
+	require.Equal(t, uint64(18), got.ExpiresEpoch)
 }
 
 func TestLedgerDeltaUsesBabbageProtocolMajorForDRepCertificates(t *testing.T) {
@@ -559,6 +627,10 @@ func TestLedgerDeltaUsesBabbageProtocolMajorForDRepCertificates(t *testing.T) {
 	ls := &LedgerState{
 		db:             db,
 		currentPParams: &babbage.BabbageProtocolParameters{ProtocolMajor: 9},
+	}
+	if len(ls.epochCache) == 0 {
+		ls.epochCache = []models.Epoch{{EpochId: ls.currentEpoch.EpochId, StartSlot: 0, LengthInSlots: 10_000, EraId: conway.EraIdConway}}
+		ls.currentEra = eras.ConwayEraDesc
 	}
 	ls.publishSnapshotsLocked()
 	apply := func(tx lcommon.Transaction, slot uint64, marker byte) {
@@ -654,6 +726,10 @@ func TestLedgerDeltaResetsDormancyBeforeDRepRegistration(t *testing.T) {
 		config: LedgerStateConfig{
 			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		},
+	}
+	if len(ls.epochCache) == 0 {
+		ls.epochCache = []models.Epoch{{EpochId: ls.currentEpoch.EpochId, StartSlot: 0, LengthInSlots: 10_000, EraId: conway.EraIdConway}}
+		ls.currentEra = eras.ConwayEraDesc
 	}
 	ls.publishSnapshotsLocked()
 
@@ -768,6 +844,10 @@ func TestLedgerDeltaAppliesDRepVoteActivityBeforeRegistrationCertificates(t *tes
 			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		},
 	}
+	if len(ls.epochCache) == 0 {
+		ls.epochCache = []models.Epoch{{EpochId: ls.currentEpoch.EpochId, StartSlot: 0, LengthInSlots: 10_000, EraId: conway.EraIdConway}}
+		ls.currentEra = eras.ConwayEraDesc
+	}
 	ls.publishSnapshotsLocked()
 
 	var credentialHash lcommon.CredentialHash
@@ -869,8 +949,9 @@ func TestProcessGovernanceAllowsDRepDeregistrationWithoutConwayParameters(
 	)
 	defer delta.Release()
 
+	publishGovernanceTestEpoch(ls, 10, eras.ConwayEraDesc)
 	err = db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
-		return delta.processGovernance(context.Background(), ls, tx, 0, txn)
+		return delta.processGovernance(context.Background(), ls, tx, 0, txn, nil)
 	})
 	require.NoError(t, err)
 }
@@ -893,6 +974,10 @@ func TestLedgerDeltaPersistsMultipleCertificateDepositsFromOneSnapshot(
 		currentPParams: &shelley.ShelleyProtocolParameters{
 			KeyDeposit: uint(keyDeposit),
 		},
+	}
+	if len(ls.epochCache) == 0 {
+		ls.epochCache = []models.Epoch{{EpochId: ls.currentEpoch.EpochId, StartSlot: 0, LengthInSlots: 10_000, EraId: conway.EraIdConway}}
+		ls.currentEra = eras.ConwayEraDesc
 	}
 	ls.publishSnapshotsLocked()
 	secondPParams := &shelley.ShelleyProtocolParameters{KeyDeposit: 4_000_000}
@@ -948,6 +1033,10 @@ func TestLedgerDeltaPersistsMultipleCertificateDepositsFromOneSnapshot(
 					KeyDeposit: uint(keyDeposit),
 				}
 			}
+			if len(ls.epochCache) == 0 {
+				ls.epochCache = []models.Epoch{{EpochId: ls.currentEpoch.EpochId, StartSlot: 0, LengthInSlots: 10_000, EraId: conway.EraIdConway}}
+				ls.currentEra = eras.ConwayEraDesc
+			}
 			ls.publishSnapshotsLocked()
 			ls.Unlock()
 			runtime.Gosched()
@@ -1000,13 +1089,37 @@ func TestProcessGovernanceRenewsDRepFromCertificateOnly(t *testing.T) {
 
 	pparams := mockledger.NewMockConwayProtocolParams()
 	pparams.DRepInactivityPeriod = 20
-	ls := &LedgerState{
-		db: db,
-		currentEpoch: models.Epoch{
-			EpochId: 100,
-		},
-		currentPParams: &pparams,
+	previousPParams := pparams
+	previousPParams.DRepInactivityPeriod = 7
+	nextEra := eras.EraDesc{Id: eras.DijkstraEraDesc.Id + 1}
+	blockEpoch := models.Epoch{
+		EpochId:       12,
+		StartSlot:     0,
+		LengthInSlots: 1_000,
+		EraId:         eras.DijkstraEraDesc.Id,
 	}
+	currentEpoch := models.Epoch{
+		EpochId:       13,
+		StartSlot:     1_000,
+		LengthInSlots: 1_000,
+		EraId:         nextEra.Id,
+	}
+	ls := &LedgerState{
+		db:             db,
+		activeEras:     []eras.EraDesc{eras.DijkstraEraDesc, nextEra},
+		currentEra:     nextEra,
+		currentEpoch:   currentEpoch,
+		epochCache:     []models.Epoch{blockEpoch, currentEpoch},
+		currentPParams: &pparams,
+		prevEraPParams: &dijkstra.DijkstraProtocolParameters{
+			ConwayProtocolParameters: previousPParams,
+		},
+	}
+	if len(ls.epochCache) == 0 {
+		ls.epochCache = []models.Epoch{{EpochId: ls.currentEpoch.EpochId, StartSlot: 0, LengthInSlots: 10_000, EraId: conway.EraIdConway}}
+		ls.currentEra = eras.ConwayEraDesc
+	}
+	ls.publishSnapshotsLocked()
 
 	credentialBytes := bytes.Repeat([]byte{0xAB}, 28)
 	var credentialHash lcommon.CredentialHash
@@ -1021,6 +1134,7 @@ func TestProcessGovernanceRenewsDRepFromCertificateOnly(t *testing.T) {
 	}))
 
 	tx := mockledger.NewTransactionBuilder()
+	tx.WithType(gledger.TxTypeDijkstra)
 	tx.WithCertificates(&lcommon.RegistrationDrepCertificate{
 		CertType: uint(lcommon.CertificateTypeRegistrationDrep),
 		DrepCredential: lcommon.Credential{
@@ -1031,13 +1145,20 @@ func TestProcessGovernanceRenewsDRepFromCertificateOnly(t *testing.T) {
 	tx.WithValid(true)
 
 	txn := db.Transaction(context.Background(), true)
+	delta := NewLedgerDelta(
+		ocommon.NewPoint(100, bytes.Repeat([]byte{0x22}, 32)),
+		uint(dijkstra.EraIdDijkstra),
+		1,
+	)
+	defer delta.Release()
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return (&LedgerDelta{}).processGovernance(
+		return delta.processGovernance(
 			context.Background(),
 			ls,
 			tx,
 			0,
 			txn,
+			nil,
 		)
 	}))
 
@@ -1049,8 +1170,8 @@ func TestProcessGovernanceRenewsDRepFromCertificateOnly(t *testing.T) {
 		nil,
 	)
 	require.NoError(t, err)
-	require.Equal(t, uint64(100), drep.LastActivityEpoch)
-	require.Equal(t, uint64(120), drep.ExpiryEpoch)
+	require.Equal(t, uint64(12), drep.LastActivityEpoch)
+	require.Equal(t, uint64(19), drep.ExpiryEpoch)
 }
 
 func TestProcessGovernanceClearsDRepVotesAfterVotes(t *testing.T) {
@@ -1129,6 +1250,7 @@ func TestProcessGovernanceClearsDRepVotesAfterVotes(t *testing.T) {
 		currentPParams: &pparams,
 	}
 	point := ocommon.Point{Slot: 30, Hash: bytes.Repeat([]byte{0x74}, 32)}
+	publishGovernanceTestEpoch(ls, 10, eras.ConwayEraDesc)
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		if err := db.Metadata().DeactivateDreps(txn.Metadata(), []models.StakeCredentialRef{
@@ -1137,7 +1259,7 @@ func TestProcessGovernanceClearsDRepVotesAfterVotes(t *testing.T) {
 			return err
 		}
 		return (&LedgerDelta{Point: point}).processGovernance(
-			context.Background(), ls, tx, 0, txn,
+			context.Background(), ls, tx, 0, txn, nil,
 		)
 	}))
 
@@ -1193,6 +1315,7 @@ func TestProcessGovernanceClearsDRepVotesForDeregistrationOnlyTransaction(
 		},
 	})
 	ls := &LedgerState{db: db, currentEpoch: models.Epoch{EpochId: 10}}
+	publishGovernanceTestEpoch(ls, 10, eras.ConwayEraDesc)
 	point := ocommon.Point{
 		Slot: 30,
 		Hash: bytes.Repeat([]byte{0x77}, lcommon.Blake2b256Size),
@@ -1201,7 +1324,7 @@ func TestProcessGovernanceClearsDRepVotesForDeregistrationOnlyTransaction(
 	defer txn.Release()
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		return (&LedgerDelta{Point: point}).processGovernance(
-			context.Background(), ls, tx, 0, txn,
+			context.Background(), ls, tx, 0, txn, nil,
 		)
 	}))
 
@@ -1267,6 +1390,10 @@ func TestLedgerDeltaDRepDeregistrationPreservesLaterDelegation(t *testing.T) {
 		config: LedgerStateConfig{
 			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		},
+	}
+	if len(ls.epochCache) == 0 {
+		ls.epochCache = []models.Epoch{{EpochId: ls.currentEpoch.EpochId, StartSlot: 0, LengthInSlots: 10_000, EraId: conway.EraIdConway}}
+		ls.currentEra = eras.ConwayEraDesc
 	}
 	ls.publishSnapshotsLocked()
 	point := ocommon.Point{Slot: 20, Hash: bytes.Repeat([]byte{0x54}, lcommon.Blake2b256Size)}
@@ -1337,14 +1464,17 @@ func TestProcessGovernanceTypedNilPParams(t *testing.T) {
 	tests := []struct {
 		name    string
 		pparams lcommon.ProtocolParameters
+		era     eras.EraDesc
 	}{
 		{
 			name:    "conway",
 			pparams: (*conway.ConwayProtocolParameters)(nil),
+			era:     eras.ConwayEraDesc,
 		},
 		{
 			name:    "dijkstra",
 			pparams: (*dijkstra.DijkstraProtocolParameters)(nil),
+			era:     eras.DijkstraEraDesc,
 		},
 	}
 
@@ -1353,6 +1483,7 @@ func TestProcessGovernanceTypedNilPParams(t *testing.T) {
 			ls := &LedgerState{
 				currentPParams: tt.pparams,
 			}
+			publishGovernanceTestEpoch(ls, 0, tt.era)
 			tx := mockledger.NewTransactionBuilder().
 				WithProposalProcedures(nil)
 
@@ -1363,6 +1494,7 @@ func TestProcessGovernanceTypedNilPParams(t *testing.T) {
 					ls,
 					tx,
 					0,
+					nil,
 					nil,
 				)
 			})
@@ -1498,4 +1630,46 @@ func TestLedgerDeltaRecordNetworkDonationsOverflowPreservesState(t *testing.T) {
 		slot,
 		"network state slot untouched on overflow",
 	)
+}
+
+func TestClosureGovernanceUsesParentEpochBeforeAndAfterRollover(t *testing.T) {
+	t.Parallel()
+	for _, newEpochPublished := range []bool{false, true} {
+		t.Run(fmt.Sprintf("new_epoch_published_%t", newEpochPublished), func(t *testing.T) {
+			t.Parallel()
+			db := newTestDB(t)
+			pparams := mockledger.NewMockConwayProtocolParams()
+			ls := &LedgerState{db: db, currentEra: eras.ConwayEraDesc, currentPParams: &pparams}
+			parentEpoch := models.Epoch{EpochId: 5, StartSlot: 900, LengthInSlots: 100, EraId: conway.EraIdConway}
+			ls.currentEpoch = parentEpoch
+			ls.epochCache = []models.Epoch{parentEpoch}
+			if newEpochPublished {
+				ls.currentEpoch = models.Epoch{EpochId: 6, StartSlot: 1000, LengthInSlots: 100, EraId: conway.EraIdConway}
+				ls.epochCache = append(ls.epochCache, ls.currentEpoch)
+			}
+			if len(ls.epochCache) == 0 {
+				ls.epochCache = []models.Epoch{{EpochId: ls.currentEpoch.EpochId, StartSlot: 0, LengthInSlots: 10_000, EraId: conway.EraIdConway}}
+				ls.currentEra = eras.ConwayEraDesc
+			}
+			ls.publishSnapshotsLocked()
+			rewardAddress, err := lcommon.NewAddressFromBytes(append([]byte{0xe1}, bytes.Repeat([]byte{0x42}, 28)...))
+			require.NoError(t, err)
+			tx := mockledger.NewTransactionBuilder()
+			tx.WithId(bytes.Repeat([]byte{0x43}, 32))
+			tx.WithValid(true)
+			tx.WithProposalProcedures(conway.ConwayProposalProcedure{
+				PPDeposit: 1, PPRewardAccount: rewardAddress,
+				PPGovAction: conway.ConwayGovAction{Type: uint(lcommon.GovActionTypeInfo), Action: &lcommon.InfoGovAction{Type: uint(lcommon.GovActionTypeInfo)}},
+				PPAnchor:    lcommon.GovAnchor{Url: "https://example.com/closure"},
+			})
+			parentSlot := uint64(990)
+			delta := &LedgerDelta{Point: ocommon.Point{Slot: 1020}, BlockEraId: uint(conway.EraIdConway), closureContextSlot: &parentSlot}
+			require.NoError(t, db.Transaction(t.Context(), true).Do(func(txn *database.Txn) error {
+				return delta.processGovernance(t.Context(), ls, tx, 0, txn, nil)
+			}))
+			proposal, err := db.GetGovernanceProposal(t.Context(), tx.Hash().Bytes(), 0, nil)
+			require.NoError(t, err)
+			require.Equal(t, uint64(5), proposal.ProposedEpoch)
+		})
+	}
 }

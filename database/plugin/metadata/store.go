@@ -644,6 +644,10 @@ type GovernanceStore interface {
 	// registration, update, or delegation reference). Used by the
 	// Blockfrost DRep list endpoint.
 	GetDreps(types.Txn) ([]models.DrepListRow, error)
+	GetDrepsPage(
+		models.DrepListPageQuery,
+		types.Txn,
+	) ([]models.DrepListRow, int, error)
 
 	// GetPredefinedDrepFirstSeenSlots returns the earliest delegation
 	// added_slot per predefined DRep type (AlwaysAbstain,
@@ -910,6 +914,16 @@ type UtxoStore interface {
 		assetName []byte,
 		txn types.Txn,
 	) ([]models.Utxo, error)
+	GetAssetHolders(
+		models.AssetHolderQuery,
+		types.Txn,
+	) ([]models.AssetHolder, int, error)
+	GetLiveAssetUtxosMissingAddress(
+		uint,
+		int,
+		types.Txn,
+	) ([]models.Utxo, error)
+	SetUtxoAddress(uint, []byte, types.Txn) error
 
 	// GetUtxosDeletedBeforeSlot retrieves UTxOs deleted before the given slot, up to the specified limit.
 	GetUtxosDeletedBeforeSlot(
@@ -929,6 +943,12 @@ type UtxoStore interface {
 
 	// SetUtxosNotDeletedAfterSlot marks all UTxOs created after the given slot as not deleted.
 	SetUtxosNotDeletedAfterSlot(uint64, types.Txn) error
+	GetSpentAssetUtxosMissingAddressAfterSlot(
+		uint64,
+		uint,
+		int,
+		types.Txn,
+	) ([]models.Utxo, error)
 
 	// IterateLiveUtxos invokes fn once for each live UTxO row
 	// (DeletedSlot == 0) in unspecified order. fn receives a
@@ -1948,6 +1968,12 @@ type MetadataStore interface {
 		currentEpoch uint64,
 		txn types.Txn,
 	) ([]models.PoolRetiringRow, error)
+	GetRetiringPoolsPage(
+		currentEpoch uint64,
+		limit, offset int,
+		descending bool,
+		txn types.Txn,
+	) ([]models.PoolRetiringRow, int, error)
 
 	// GetPoolRegistrations retrieves all registration certificates for a pool.
 	GetPoolRegistrations(
@@ -2055,12 +2081,14 @@ type MetadataStore interface {
 		types.Txn,
 	) ([]models.PoolRegistration, error)
 
-	// GetPoolRegistrationsEffectiveForEpoch retrieves, per requested pool,
-	// the registration whose parameters the ledger's pool-params map held
-	// during the ended epoch [epochStartSlot, snapshotSlot]. Re-registrations
-	// submitted during that epoch are future params (promoted after SNAP)
-	// and excluded; pools that freshly entered the params map during the
-	// epoch use their earliest in-epoch certificate.
+	// GetPoolRegistrationsEffectiveForEpoch retrieves the registration
+	// selected for each pool by the supplied epoch window. It considers the
+	// latest registration or retirement before epochStartSlot, then uses the
+	// earliest registration in [epochStartSlot, snapshotSlot] for pools without
+	// a pre-epoch registration selected, including pools whose latest prior
+	// event is a retirement. Callers whose SNAP follows POOLREAP
+	// set epochStartSlot to the incoming boundary so registrations from the
+	// just-ended epoch are included in the pre-epoch selection.
 	GetPoolRegistrationsEffectiveForEpoch(
 		[]lcommon.PoolKeyHash,
 		uint64, // epochStartSlot
@@ -2079,13 +2107,16 @@ type MetadataStore interface {
 	// psFutureStakePoolParams until the next epoch boundary; only a pool's
 	// first-ever registration is immediate). Callers must pass the current
 	// epoch's start slot, not an arbitrary point in the past.
-	//
-	// Only the pool's latest same-epoch registration reserves its key. A
-	// key proposed earlier in the same epoch and then superseded by a
-	// later re-registration (A -> B -> C) is freed once superseded: it was
-	// never placed in psStakePools and is no longer the pending value in
-	// psFutureStakePoolParams, so a different pool may claim it.
 	GetPoolByVrfKeyHash(
+		vrfKeyHash []byte,
+		epochStartSlot uint64,
+		txn types.Txn,
+	) (*models.Pool, error)
+
+	// GetFuturePoolByVrfKeyHash retrieves the pool whose latest deferred
+	// same-epoch parameters claim the given VRF key hash. A pool's first
+	// registration is effective immediately and is therefore not future state.
+	GetFuturePoolByVrfKeyHash(
 		vrfKeyHash []byte,
 		epochStartSlot uint64,
 		txn types.Txn,
@@ -2099,6 +2130,15 @@ type MetadataStore interface {
 	// A pool is active if it has a registration and either no retirement or
 	// the retirement epoch is in the future.
 	GetActivePoolKeyHashes(types.Txn) ([][]byte, error)
+
+	// GetActivePoolKeyHashesPage returns one pool-key-ordered page of the
+	// currently active pools and the total active pool count.
+	GetActivePoolKeyHashesPage(
+		int, // limit
+		int, // offset
+		bool, // descending
+		types.Txn,
+	) ([][]byte, int, error)
 
 	// GetActivePoolKeyHashesOrdered retrieves the key hashes of all
 	// currently active pools (same active-pool semantics as

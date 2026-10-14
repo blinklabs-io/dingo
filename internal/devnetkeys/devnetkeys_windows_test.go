@@ -28,7 +28,10 @@ import (
 func TestInstallLocalTestKeysRestrictsAndReplacesFiles(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "keys")
 	require.NoError(t, os.Mkdir(dir, 0o700))
-	for _, name := range []string{"vrf.skey", "kes.skey", "opcert.cert"} {
+	for _, name := range []string{
+		"vrf.skey", "kes.skey", "opcert.cert",
+		"faucet.skey", "faucet.vkey", "faucet.addr",
+	} {
 		require.NoError(t, os.WriteFile(
 			filepath.Join(dir, name), []byte("old"), 0o600,
 		))
@@ -40,7 +43,10 @@ func TestInstallLocalTestKeysRestrictsAndReplacesFiles(t *testing.T) {
 	require.NoError(t, keystore.CheckOpenFilePermissions(dirFile))
 	require.NoError(t, dirFile.Close())
 
-	for _, name := range []string{"vrf.skey", "kes.skey", "opcert.cert"} {
+	for _, name := range []string{
+		"vrf.skey", "kes.skey", "opcert.cert",
+		"faucet.skey", "faucet.vkey", "faucet.addr",
+	} {
 		want, err := localKeys.ReadFile("keys/" + name)
 		require.NoError(t, err)
 		path := filepath.Join(dir, name)

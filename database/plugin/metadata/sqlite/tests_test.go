@@ -410,7 +410,7 @@ func runVotingPowerByType(
 //     the account-first join never reaches it;
 //   - an AlwaysAbstain account with a nonzero ExpirationEpoch, used by the
 //     boundary test below.
-func seedVotingPowerByTypeFixture(t *testing.T, store sharedDrepStore) {
+func seedVotingPowerByTypeFixture(t *testing.T, store *sqlstore.Store) {
 	t.Helper()
 	require.NoError(t, store.CreateAccount(nil, &models.Account{
 		StakingKey: []byte("abstain-one-staking-key-28by"),
@@ -498,19 +498,6 @@ func seedVotingPowerByTypeFixture(t *testing.T, store sharedDrepStore) {
 		StakingKey: []byte("expiring-abstain-staking-key1"),
 		Amount:     15,
 	}))
-}
-
-// sharedDrepStore is the subset of *sqlstore.Store this file exercises
-// directly, without going through the full drepStore interface in
-// shared_sqlstore_test.go.
-type sharedDrepStore interface {
-	CreateAccount(types.Txn, *models.Account) error
-	CreateUtxo(types.Txn, *models.Utxo) error
-	GetDRepVotingPowerByType(
-		[]uint64,
-		uint64,
-		types.Txn,
-	) (map[uint64]uint64, error)
 }
 
 func TestDRepVotingPowerByTypeUtxoJoinRewriteMatchesReference(t *testing.T) {

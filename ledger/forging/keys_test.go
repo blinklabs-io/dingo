@@ -802,18 +802,6 @@ func TestKESPeriodUpdateBackward(t *testing.T) {
 	assert.Equal(t, uint64(5), pc.kesSKey.Period)
 }
 
-func TestKESPeriodUpdateUsesOpCertStartPeriod(t *testing.T) {
-	vrfPath, kesPath, opCertPath := createTestKeys(t)
-
-	pc := NewPoolCredentials()
-	require.NoError(t, pc.LoadFromFiles(vrfPath, kesPath, opCertPath))
-
-	pc.opCert.KESPeriod = 100
-
-	require.NoError(t, pc.UpdateKESPeriod(105))
-	assert.Equal(t, uint64(5), pc.kesSKey.Period)
-}
-
 func TestKESPeriodUpdateRejectsBeforeOpCertStart(t *testing.T) {
 	vrfPath, kesPath, opCertPath := createTestKeys(t)
 
@@ -826,23 +814,6 @@ func TestKESPeriodUpdateRejectsBeforeOpCertStart(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "before opcert start")
 	assert.Equal(t, uint64(0), pc.kesSKey.Period)
-}
-
-func TestKESSignUsesRelativePeriodWithNonZeroOpCertStart(t *testing.T) {
-	vrfPath, kesPath, opCertPath := createTestKeys(t)
-
-	pc := NewPoolCredentials()
-	require.NoError(t, pc.LoadFromFiles(vrfPath, kesPath, opCertPath))
-
-	pc.opCert.KESPeriod = 100
-	require.NoError(t, pc.UpdateKESPeriod(105))
-
-	message := []byte("test message with shifted opcert period")
-	signature, err := pc.KESSign(105, message)
-	require.NoError(t, err)
-
-	ok := kes.VerifySignedKES(pc.kesVKey, 5, message, signature)
-	assert.True(t, ok, "KES signature verification failed at relative period 5")
 }
 
 func TestOpCertValidation(t *testing.T) {
@@ -902,145 +873,35 @@ func TestOpCertValidation(t *testing.T) {
 
 	remaining = pc.PeriodsRemaining(100)
 	assert.Equal(t, uint64(0), remaining)
-}
 
-func TestOpCertSignatureVerification(t *testing.T) {
-	// Generate a fresh ed25519 keypair for cold key to test signature verification
-	coldPubKey, coldPrivKey, err := ed25519.GenerateKey(rand.Reader)
-	require.NoError(t, err)
-
-	// Create test KES vkey and OpCert data
-	kesVKey := make([]byte, 32)
-	for i := range kesVKey {
-		kesVKey[i] = byte(i)
+	for _, tc := range []struct {
+		name   string
+		tamper func(*OpCert)
+	}{
+		{"issue number", func(cert *OpCert) { cert.IssueNumber++ }},
+		{"KES period", func(cert *OpCert) { cert.KESPeriod++ }},
+		{"zero signature", func(cert *OpCert) {
+			cert.Signature = make([]byte, ed25519.SignatureSize)
+		}},
+		{"KES key", func(cert *OpCert) {
+			cert.KESVKey = append([]byte(nil), cert.KESVKey...)
+			cert.KESVKey[0] ^= 0xff
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cert := *pc.opCert
+			tc.tamper(&cert)
+			credentials := &PoolCredentials{
+				kesVKey: cert.KESVKey,
+				opCert:  &cert,
+			}
+			require.ErrorContains(
+				t,
+				credentials.ValidateOpCert(),
+				"signature verification failed",
+			)
+		})
 	}
-	issueNumber := uint64(5)
-	kesPeriod := uint64(10)
-
-	// Create the cert data to sign: [KES vkey, issue number, KES period]
-	certData := []any{kesVKey, issueNumber, kesPeriod}
-	certCbor, err := cbor.Encode(certData)
-	require.NoError(t, err)
-
-	// Sign with cold private key
-	signature := ed25519.Sign(coldPrivKey, certCbor)
-
-	// Create OpCert with the signature
-	opCert := &OpCert{
-		KESVKey:     kesVKey,
-		IssueNumber: issueNumber,
-		KESPeriod:   kesPeriod,
-		Signature:   signature,
-		ColdVKey:    coldPubKey,
-	}
-
-	// Verify the signature using the verification logic
-	verifyCertData := []any{
-		opCert.KESVKey,
-		opCert.IssueNumber,
-		opCert.KESPeriod,
-	}
-	verifyCertCbor, err := cbor.Encode(verifyCertData)
-	require.NoError(t, err)
-
-	pubKey := ed25519.PublicKey(opCert.ColdVKey)
-	valid := ed25519.Verify(pubKey, verifyCertCbor, opCert.Signature)
-	assert.True(t, valid, "OpCert signature verification should succeed")
-}
-
-func TestOpCertSignatureVerificationInvalidSignature(t *testing.T) {
-	// Generate a fresh ed25519 keypair for cold key
-	coldPubKey, coldPrivKey, err := ed25519.GenerateKey(rand.Reader)
-	require.NoError(t, err)
-
-	// Create test KES vkey and OpCert data
-	kesVKey := make([]byte, 32)
-	issueNumber := uint64(5)
-	kesPeriod := uint64(10)
-
-	// Create the cert data to sign
-	certData := []any{kesVKey, issueNumber, kesPeriod}
-	certCbor, err := cbor.Encode(certData)
-	require.NoError(t, err)
-
-	// Sign with cold private key
-	signature := ed25519.Sign(coldPrivKey, certCbor)
-
-	// Create OpCert with the signature
-	opCert := &OpCert{
-		KESVKey:     kesVKey,
-		IssueNumber: issueNumber,
-		KESPeriod:   kesPeriod,
-		Signature:   signature,
-		ColdVKey:    coldPubKey,
-	}
-
-	// Verify with WRONG issue number - should fail
-	wrongCertData := []any{
-		opCert.KESVKey,
-		opCert.IssueNumber + 1,
-		opCert.KESPeriod,
-	}
-	wrongCertCbor, err := cbor.Encode(wrongCertData)
-	require.NoError(t, err)
-
-	pubKey := ed25519.PublicKey(opCert.ColdVKey)
-	valid := ed25519.Verify(pubKey, wrongCertCbor, opCert.Signature)
-	assert.False(
-		t,
-		valid,
-		"OpCert signature should fail with wrong issue number",
-	)
-
-	// Verify with WRONG KES period - should fail
-	wrongCertData2 := []any{
-		opCert.KESVKey,
-		opCert.IssueNumber,
-		opCert.KESPeriod + 1,
-	}
-	wrongCertCbor2, err := cbor.Encode(wrongCertData2)
-	require.NoError(t, err)
-
-	valid = ed25519.Verify(pubKey, wrongCertCbor2, opCert.Signature)
-	assert.False(t, valid, "OpCert signature should fail with wrong KES period")
-
-	// Verify with WRONG KES vkey - should fail
-	wrongKesVKey := make([]byte, 32)
-	wrongKesVKey[0] = 0xFF
-	wrongCertData3 := []any{wrongKesVKey, opCert.IssueNumber, opCert.KESPeriod}
-	wrongCertCbor3, err := cbor.Encode(wrongCertData3)
-	require.NoError(t, err)
-
-	valid = ed25519.Verify(pubKey, wrongCertCbor3, opCert.Signature)
-	assert.False(t, valid, "OpCert signature should fail with wrong KES vkey")
-}
-
-func TestOpCertValidationInvalidSignature(t *testing.T) {
-	// Create credentials where the OpCert signature doesn't match the cert body
-	pc := NewPoolCredentials()
-
-	kesVKey := make([]byte, 32)
-	for i := range kesVKey {
-		kesVKey[i] = byte(i)
-	}
-
-	// Generate a real cold key pair so the key is valid but the signature is wrong
-	coldPubKey, _, err := ed25519.GenerateKey(rand.Reader)
-	require.NoError(t, err)
-
-	pc.kesVKey = kesVKey
-	pc.opCert = &OpCert{
-		KESVKey:     kesVKey, // Matches KESVKey, so KES check passes
-		IssueNumber: 0,
-		KESPeriod:   0,
-		Signature:   make([]byte, 64), // Invalid signature (all zeros)
-		ColdVKey:    coldPubKey,
-	}
-
-	// Validation should fail because the signature is invalid
-	err = pc.ValidateOpCert()
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "OpCert signature verification failed")
 }
 
 func TestOpCertValidationMismatchedKESKey(t *testing.T) {
@@ -1080,6 +941,7 @@ func TestKESSignWithOpCertOffset(t *testing.T) {
 
 	// Evolve to absolute period 825 (relative period = 825 - 795 = 30)
 	require.NoError(t, pc.UpdateKESPeriod(825))
+	assert.Equal(t, uint64(30), pc.kesSKey.Period)
 
 	// Sign at absolute period 825. KESSign should convert to relative
 	// period 30 internally, which is within the valid range (0-63).
@@ -1116,23 +978,6 @@ func TestKESSignWithoutOpCert(t *testing.T) {
 	assert.True(t, ok, "KES signature should verify at period 5 without opcert")
 }
 
-func TestUpdateKESPeriodWithOpCertOffset(t *testing.T) {
-	vrfPath, kesPath, opCertPath := createTestKeys(t)
-
-	pc := NewPoolCredentials()
-	require.NoError(t, pc.LoadFromFiles(vrfPath, kesPath, opCertPath))
-
-	// Override opcert start KES period to 795
-	pc.opCert.KESPeriod = 795
-
-	// UpdateKESPeriod(825) should evolve to relative period 30
-	// (825 - 795 = 30)
-	err := pc.UpdateKESPeriod(825)
-	require.NoError(t, err)
-	assert.Equal(t, uint64(30), pc.kesSKey.Period,
-		"KES key should be at relative period 30")
-}
-
 func TestUpdateKESPeriodExhaustedWithOffset(t *testing.T) {
 	vrfPath, kesPath, opCertPath := createTestKeys(t)
 
@@ -1154,20 +999,6 @@ func TestUpdateKESPeriodExhaustedWithOffset(t *testing.T) {
 		err.Error(),
 		"failed to update KES key to period 64 (absolute 164)",
 	)
-}
-
-func TestUpdateKESPeriodBeforeOpCertStart(t *testing.T) {
-	vrfPath, kesPath, opCertPath := createTestKeys(t)
-
-	pc := NewPoolCredentials()
-	require.NoError(t, pc.LoadFromFiles(vrfPath, kesPath, opCertPath))
-
-	// Opcert start = 795. Absolute period 700 is before start — should
-	// error, not underflow.
-	pc.opCert.KESPeriod = 795
-	err := pc.UpdateKESPeriod(700)
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "before opcert start period")
 }
 
 func TestValidateKESPeriod_HappyPath(t *testing.T) {

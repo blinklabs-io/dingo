@@ -16,6 +16,8 @@ package node
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -25,6 +27,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -281,11 +284,38 @@ func newMetricsServer(cfg *config.Config) *http.Server {
 	metricsMux.Handle("/metrics", promhttp.Handler())
 	return &http.Server{
 		Addr:              cfg.MetricsListenAddress(),
-		Handler:           metricsMux,
+		Handler:           MetricsAuthHandler(cfg.MetricsAuthToken, metricsMux),
 		ReadHeaderTimeout: 60 * time.Second,
 		WriteTimeout:      30 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
+}
+
+// MetricsAuthHandler requires a configured Bearer token before serving
+// Prometheus metrics. An empty token preserves unauthenticated loopback and
+// externally protected deployments.
+func MetricsAuthHandler(token string, next http.Handler) http.Handler {
+	if token == "" {
+		return next
+	}
+	tokenHash := sha256.Sum256([]byte(token))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		scheme, provided, ok := strings.Cut(
+			r.Header.Get("Authorization"), " ",
+		)
+		ok = ok && strings.EqualFold(scheme, "Bearer")
+		provided = strings.TrimLeft(provided, " ")
+		providedHash := sha256.Sum256([]byte(provided))
+		if !ok || subtle.ConstantTimeCompare(
+			providedHash[:],
+			tokenHash[:],
+		) != 1 {
+			w.Header().Set("WWW-Authenticate", "Bearer")
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func newPprofDebugServer(cfg *config.Config) *http.Server {
@@ -372,7 +402,7 @@ func logStartupConfig(logger *slog.Logger, cfg *config.Config) {
 	logger.Debug("config", "component", "node", "config", cfg)
 }
 
-func Run(cfg *config.Config, logger *slog.Logger) error {
+func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger) error {
 	cfg.ApplyRunModeOverrides(cfg.RunMode)
 	if cfg.RunMode.IsDevMode() {
 		logger.Info("dev mode: forcing API storage and block production")
@@ -537,7 +567,9 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 			cfg.Midnight.ServerEnabled && cfg.Midnight.Port > 0,
 	)
 
-	d, err := dingo.New(
+	// Construction is synchronous and its callees have no context contract;
+	// ctx governs the long-running node lifecycle below.
+	d, err := dingo.New( //nolint:contextcheck
 		buildDingoConfig(
 			cfg,
 			logger,
@@ -582,12 +614,9 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 			"component", "node",
 		)
 	}
-	// Wait for interrupt/termination signal
-	signalCtx, signalCtxStop := signal.NotifyContext(
-		context.Background(),
-		syscall.SIGINT,
-		syscall.SIGTERM,
-	)
+	// Keep a child cancel function so a remote lifecycle request can stop the
+	// same command-owned context used by startup and the running node.
+	signalCtx, signalCtxStop := context.WithCancel(ctx)
 	defer signalCtxStop()
 	// A block producer re-reads its credential files on SIGHUP. Relays leave
 	// the signal at its default so their behaviour is unchanged.
@@ -653,7 +682,7 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 
 	// Wait for signal, remote request or error
 	req, signaled, err := waitForStop(signalCtx, errChan, d.EndShutdownRequests)
-	shutdown := func() error {
+	shutdown := func() error { //nolint:contextcheck // bounded by shutdownTimeout
 		return gracefulShutdown(
 			logger,
 			metricsServer,
@@ -688,7 +717,7 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 	logger.Error("node error", "error", err)
 	signalCtxStop()
 
-	cleanupErr := shutdownNodeResources(
+	cleanupErr := shutdownNodeResources( //nolint:contextcheck // bounded by shutdownTimeout
 		optionalShutdown(metricsServer),
 		optionalShutdown(debugServer),
 		optionalShutdown(healthServer),
@@ -794,6 +823,9 @@ func buildDingoConfig(
 		dingo.WithAPIConfig(cfg.API),
 		dingo.WithBarkBaseUrl(cfg.BarkBaseUrl),
 		dingo.WithBarkBlockDownloadHosts(cfg.BarkBlockDownloadHosts),
+		dingo.WithBarkBlockDownloadAllowPrivateAddresses(
+			cfg.BarkBlockDownloadAllowPrivateAddresses,
+		),
 		dingo.WithBarkPort(cfg.BarkPort),
 		dingo.WithBarkHost(cfg.BarkHost),
 		dingo.WithBarkClientCAFilePath(cfg.BarkClientCAFilePath),
@@ -847,9 +879,12 @@ func buildDingoConfig(
 		),
 		dingo.WithTokenRegistryConfig(
 			dingo.TokenRegistryConfig{
-				Enabled:   cfg.TokenRegistry.Enabled,
-				SourceURL: cfg.TokenRegistry.SourceURL,
-				Interval:  cfg.TokenRegistry.Interval,
+				Enabled:     cfg.TokenRegistry.Enabled,
+				SourceURL:   cfg.TokenRegistry.SourceURL,
+				ManifestURL: cfg.TokenRegistry.ManifestURL,
+				TrustedManifestKey: cfg.TokenRegistry.
+					TrustedManifestKey,
+				Interval: cfg.TokenRegistry.Interval,
 				RequestTimeout: cfg.TokenRegistry.
 					RequestTimeout,
 				UserAgent: cfg.TokenRegistry.UserAgent,
@@ -868,6 +903,7 @@ func buildDingoConfig(
 				StoreLogos: cfg.TokenRegistry.StoreLogos,
 				AllowPrivateAddresses: cfg.TokenRegistry.
 					AllowPrivateAddresses,
+				AllowRollback: cfg.TokenRegistry.AllowRollback,
 			},
 		),
 		dingo.WithMidnightConfig(dingo.MidnightConfig{
@@ -1037,6 +1073,9 @@ func buildDingoConfig(
 		),
 		dingo.WithDatabaseLifecycle(cfg.DatabaseLifecycle),
 		// Leios voting (experimental)
+		dingo.WithLeiosPersistenceRetentionSlots(
+			cfg.LeiosPersistenceRetentionSlots,
+		),
 		dingo.WithLeiosVoteSigningKeyFile(
 			cfg.LeiosVoteSigningKeyFile,
 		),
