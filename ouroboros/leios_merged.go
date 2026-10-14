@@ -998,6 +998,7 @@ func (o *Ouroboros) ValidateLeiosEndorserBlockForHeader(
 			return err
 		}
 	}
+	//nolint:contextcheck // Persistence GC is node-owned and must outlive header validation.
 	if publish := o.bindLeiosEndorserBlockSlot(
 		ebHash.Bytes(),
 		header.SlotNumber(),
