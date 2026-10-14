@@ -5191,7 +5191,7 @@ ORDER BY proposed_epoch ASC, added_slot ASC,
 validation resolves votes, parents, and potential committee members against:
 
 ```sql
-SELECT gp.*
+SELECT gp.*, gpd.dropped_epoch, gpd.dropped_slot, gpo.tx_index
 FROM governance_proposal gp
 LEFT JOIN governance_proposal_order gpo ON gpo.proposal_id = gp.id
 LEFT JOIN governance_proposal_drop gpd ON gpd.proposal_id = gp.id
@@ -5289,7 +5289,7 @@ happened, keyed by `proposal_id`:
 -- step order: a boundary reprocessed after a commit crash reruns this query
 -- against expiries the first pass already wrote, and an unbounded predicate
 -- would refund them in the epoch that expired them.
-SELECT gp.*
+SELECT gp.*, gpd.dropped_epoch, gpd.dropped_slot, gpo.tx_index
 FROM governance_proposal gp
 LEFT JOIN governance_proposal_order gpo ON gpo.proposal_id = gp.id
 LEFT JOIN governance_proposal_drop gpd ON gpd.proposal_id = gp.id
@@ -5302,7 +5302,7 @@ ORDER BY gp.proposed_epoch ASC, gp.added_slot ASC,
 
 -- GetDroppedGovernanceProposalsAt(epoch, slot): epoch-boundary replay lookup,
 -- mirroring GetEnactedGovernanceProposalsAt/GetExpiredGovernanceProposalsAt.
-SELECT gp.*
+SELECT gp.*, gpd.dropped_epoch, gpd.dropped_slot, gpo.tx_index
 FROM governance_proposal gp
 LEFT JOIN governance_proposal_order gpo ON gpo.proposal_id = gp.id
 LEFT JOIN governance_proposal_drop gpd ON gpd.proposal_id = gp.id
@@ -5319,7 +5319,7 @@ ORDER BY gp.proposed_epoch ASC, gp.added_slot ASC,
 Returns the proposals whose deposit was returned when an epoch began: enacted at the epoch (with a ratified epoch) or dropped at it, excluding soft-deleted rows. Unlike the boundary replay lookups it reads by epoch alone, for the Koios parity check, which has no boundary slot to name; each row carries its own `enacted_slot` or `dropped_slot`.
 
 ```sql
-SELECT gp.*
+SELECT gp.*, gpd.dropped_epoch, gpd.dropped_slot, gpo.tx_index
 FROM governance_proposal gp
 LEFT JOIN governance_proposal_order gpo ON gpo.proposal_id = gp.id
 LEFT JOIN governance_proposal_drop gpd ON gpd.proposal_id = gp.id

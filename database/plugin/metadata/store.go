@@ -276,10 +276,12 @@ type GovernanceStore interface {
 
 	// GetGovernanceProposalsRefundedAt returns the proposals whose deposit was
 	// returned when epoch began: those enacted at epoch and those dropped at
-	// epoch, excluding soft-deleted rows. It reads by epoch alone, unlike the
-	// replay getters above, because a reader outside the boundary has no
-	// boundary slot to name. Each returned proposal carries the slot of its
-	// own refund (EnactedSlot or DroppedSlot).
+	// epoch, excluding soft-deleted rows. Each is a refund candidate, not a
+	// credited refund: a deposit whose return account was unregistered went
+	// to the treasury and left no account credit. It reads by epoch alone,
+	// unlike the replay getters above, because a reader outside the boundary
+	// has no boundary slot to name. Each returned proposal carries the slot of
+	// its own refund (EnactedSlot or DroppedSlot).
 	GetGovernanceProposalsRefundedAt(
 		epoch uint64,
 		txn types.Txn,
