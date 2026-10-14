@@ -490,6 +490,11 @@ func parseMempackTxOut(
 	if err := extractAddressKeys(decoded.Address, result); err != nil {
 		return nil, err
 	}
+	address, err := lcommon.NewAddressFromBytes(decoded.Address)
+	if err != nil {
+		return nil, fmt.Errorf("decoding MemPack address: %w", err)
+	}
+	result.RenderedAddress = []byte(address.String())
 	if len(decoded.ScriptRef) > 0 {
 		// The script hash covers the language tag, which only the decoded
 		// output pairs with the script bytes.
@@ -621,11 +626,12 @@ func parseCborTxOut(
 	}
 
 	result := &ParsedUTxO{
-		TxHash:      txHash,
-		OutputIndex: outputIndex,
-		Cbor:        append([]byte(nil), txOutData...),
-		Address:     addrBytes,
-		Amount:      txOut.Amount().Uint64(),
+		TxHash:          txHash,
+		OutputIndex:     outputIndex,
+		Cbor:            append([]byte(nil), txOutData...),
+		Address:         addrBytes,
+		RenderedAddress: []byte(txOut.Address().String()),
+		Amount:          txOut.Amount().Uint64(),
 	}
 
 	addr := txOut.Address()
@@ -930,6 +936,7 @@ func parseIndefiniteUTxOMapWithProgressLimit(
 func UTxOToModel(u *ParsedUTxO, slot uint64) models.Utxo {
 	utxo := models.Utxo{
 		TxId:                u.TxHash,
+		Address:             u.RenderedAddress,
 		OutputIdx:           u.OutputIndex,
 		Cbor:                u.Cbor,
 		PaymentKey:          u.PaymentKey,

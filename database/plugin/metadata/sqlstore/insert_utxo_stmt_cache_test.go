@@ -33,6 +33,7 @@ func TestInsertUtxoModelCachesAssetInsert(t *testing.T) {
 	store := newMigratedSQLiteStore(t)
 
 	utxo := utxoForInsertCacheTest(10, 0, 2_000_000)
+	utxo.Address = []byte("test-address")
 	utxo.Assets = []models.Asset{
 		{
 			Name:        []byte("token"),
@@ -60,6 +61,7 @@ func TestInsertUtxoModelCachesAssetInsert(t *testing.T) {
 	)
 
 	utxo2 := utxoForInsertCacheTest(11, 0, 3_000_000)
+	utxo2.Address = []byte("test-address")
 	utxo2.Assets = []models.Asset{
 		{
 			Name:        []byte("token2"),
@@ -79,6 +81,7 @@ func TestInsertUtxoModelCachesAssetInsert(t *testing.T) {
 	require.NotEqual(t, firstAssetID, secondAssetID)
 
 	batched := utxoForInsertCacheTest(12, 0, 4_000_000)
+	batched.Address = []byte("test-address")
 	batched.Assets = []models.Asset{
 		{
 			Name:        []byte("token3"),

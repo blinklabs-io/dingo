@@ -276,13 +276,16 @@ type Utxo struct {
 	CollateralReturnForTxID *uint // Unique: a transaction has at most one collateral return output
 	TxId                    []byte
 	PaymentKey              []byte
-	StakingKey              []byte
-	CredentialTag           uint8
-	Assets                  []Asset
-	Cbor                    []byte // This is here for convenience but not represented in the metadata DB
-	DatumHash               []byte // Optional datum hash (32 bytes)
-	Datum                   []byte // Inline datum CBOR, not stored in metadata DB
-	ScriptRef               []byte // Reference script bytes, not stored in metadata DB
+	// Address is the canonical rendered output address. Metadata stores use
+	// its bytes as the exact holder identity and lexical pagination key.
+	Address       []byte
+	StakingKey    []byte
+	CredentialTag uint8
+	Assets        []Asset
+	Cbor          []byte // This is here for convenience but not represented in the metadata DB
+	DatumHash     []byte // Optional datum hash (32 bytes)
+	Datum         []byte // Inline datum CBOR, not stored in metadata DB
+	ScriptRef     []byte // Reference script bytes, not stored in metadata DB
 	// ReferenceScriptHash is the hash of the script the output carries as a
 	// reference script. It is not a utxo column; API storage mode indexes it
 	// in utxo_reference_script.
@@ -469,6 +472,7 @@ func UtxoLedgerToModel(
 	}
 	ret := Utxo{
 		TxId:      utxo.Id.Id().Bytes(),
+		Address:   []byte(outAddr.String()),
 		Cbor:      utxo.Output.Cbor(),
 		AddedSlot: slot,
 		Amount:    types.Uint64(amount),

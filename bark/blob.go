@@ -153,8 +153,9 @@ func archiveDownloadOrigins(
 }
 
 type archiveDialer struct {
-	dial   netguard.DialContextFunc
-	lookup netguard.LookupIPAddrFunc
+	dial         netguard.DialContextFunc
+	lookup       netguard.LookupIPAddrFunc
+	allowPrivate bool
 }
 
 func (d archiveDialer) DialContext(
@@ -162,12 +163,16 @@ func (d archiveDialer) DialContext(
 	network string,
 	address string,
 ) (net.Conn, error) {
+	if d.allowPrivate {
+		return d.dial(ctx, network, address)
+	}
 	return netguard.DialContext(ctx, network, address, d.dial, d.lookup)
 }
 
 func archiveDownloadHTTPClient(
 	client *http.Client,
 	allowedOrigins map[string]struct{},
+	allowPrivate bool,
 	dial netguard.DialContextFunc,
 	lookup netguard.LookupIPAddrFunc,
 ) *http.Client {
@@ -209,9 +214,11 @@ func archiveDownloadHTTPClient(
 	if lookup == nil {
 		lookup = net.DefaultResolver.LookupIPAddr
 	}
+	// The proxy stays disabled even when private addresses are allowed: a
+	// proxy would dial the origin itself, bypassing the dialer entirely.
 	securedTransport.Proxy = nil
 	securedTransport.DialContext = archiveDialer{
-		dial: dial, lookup: lookup,
+		dial: dial, lookup: lookup, allowPrivate: allowPrivate,
 	}.DialContext
 	securedTransport.Dial = nil    //nolint:staticcheck
 	securedTransport.DialTLS = nil //nolint:staticcheck
@@ -224,6 +231,11 @@ type BlobStoreBarkConfig struct {
 	BaseUrl                   string
 	HTTPClient                *http.Client
 	BlockDownloadAllowedHosts []string
+	// BlockDownloadAllowPrivateAddresses permits block downloads from
+	// private, loopback, and other special-use addresses, such as an
+	// S3-compatible store on a private network. Origin, HTTPS, redirect, and
+	// proxy restrictions still apply. Defaults to false.
+	BlockDownloadAllowPrivateAddresses bool
 	// MaxBlockSize reports the largest block, in bytes, an archive download may
 	// carry. It is read on every download, so a limit that follows the live
 	// protocol parameters stays current. A nil func, or a zero result, selects
@@ -263,6 +275,7 @@ func NewBarkBlobStore(
 	downloadHTTPClient := archiveDownloadHTTPClient(
 		archiveServiceHTTPClient,
 		allowedOrigins,
+		config.BlockDownloadAllowPrivateAddresses,
 		config.dialContext,
 		config.lookupIPAddr,
 	)

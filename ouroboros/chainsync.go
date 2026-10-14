@@ -41,6 +41,13 @@ import (
 )
 
 const (
+	// chainsyncBehindTipRecycleCooldown spaces behind-local-tip recycles
+	// across all connections. With no best peer every lagging honest peer
+	// matches the stale-cursor shape at once; recycling them together leaves
+	// only a peer whose cursor sits at the local tip, which may be a frozen
+	// dead-fork peer. Peers still behind retry on their next header.
+	chainsyncBehindTipRecycleCooldown = 30 * time.Second
+
 	chainsyncIntersectPointCount = 100
 
 	// chainsyncMaxFindIntersectPoints bounds how many points a peer may
@@ -139,30 +146,31 @@ func (o *Ouroboros) scheduleFutureHeaderResync(
 
 // scheduleHeaderResync is scheduleFutureHeaderResync with the reason the
 // recovery event carries. The winning schedule's reason is the one published.
+// It reports whether this call armed a timer.
 func (o *Ouroboros) scheduleHeaderResync(
 	connId ouroboros.ConnectionId,
 	onset time.Time,
 	reason string,
-) {
+) bool {
 	if o.chainsyncScheduleAt == nil || o.eventBus == nil || onset.IsZero() {
-		return
+		return false
 	}
 	if o.connManager != nil && o.connManager.GetConnectionById(connId) == nil {
-		return
+		return false
 	}
 	o.futureHeaderResyncMu.Lock()
 	if o.futureHeaderResyncClosed {
 		o.futureHeaderResyncMu.Unlock()
-		return
+		return false
 	}
 	if current := o.futureHeaderResyncs[connId]; current != nil {
 		if current.fired {
 			o.futureHeaderResyncMu.Unlock()
-			return
+			return false
 		}
 		if !onset.Before(current.onset) {
 			o.futureHeaderResyncMu.Unlock()
-			return
+			return false
 		}
 		current.cancel()
 	}
@@ -215,10 +223,11 @@ func (o *Ouroboros) scheduleHeaderResync(
 		delete(o.futureHeaderResyncs, connId)
 		close(armed)
 		o.futureHeaderResyncMu.Unlock()
-		return
+		return false
 	}
 	close(armed)
 	o.futureHeaderResyncMu.Unlock()
+	return true
 }
 
 func (o *Ouroboros) futureHeaderResyncPending(
@@ -227,6 +236,20 @@ func (o *Ouroboros) futureHeaderResyncPending(
 	o.futureHeaderResyncMu.Lock()
 	defer o.futureHeaderResyncMu.Unlock()
 	return o.futureHeaderResyncs[connId] != nil
+}
+
+// headerResyncDueOrFired reports whether connId has a re-intersection that
+// has fired or whose onset is not after now. A timer with a later onset is not
+// reported: scheduling an earlier onset replaces it.
+func (o *Ouroboros) headerResyncDueOrFired(
+	connId ouroboros.ConnectionId,
+	now time.Time,
+) bool {
+	o.futureHeaderResyncMu.Lock()
+	defer o.futureHeaderResyncMu.Unlock()
+	scheduled := o.futureHeaderResyncs[connId]
+	return scheduled != nil &&
+		(scheduled.fired || !now.Before(scheduled.onset))
 }
 
 func (o *Ouroboros) cancelFutureHeaderResync(
@@ -949,6 +972,10 @@ func (o *Ouroboros) chainsyncServerAwaitNext(
 // is torn down while the waiter is parked.
 var errChainsyncAwaitConnectionClosed = errors.New("connection closed")
 
+var errChainsyncCandidateRejected = errors.New(
+	"chain selection rejected peer tip",
+)
+
 // chainsyncServerServeAwaited delivers the chain iterator result that resolved
 // a post-AwaitReply wait, or drops the transport when there is nothing to
 // deliver.
@@ -1132,7 +1159,7 @@ func (o *Ouroboros) chainsyncClientRollBackward(
 	// Observe the rollback for chain selection FIRST — it trims the peer's
 	// observed frontier (ApplyRollback), which can change its corroboration
 	// status, so the apply gate below must reflect it. If the hook handles it
-	// synchronously (Genesis corroboration active), skip the async publish to
+	// synchronously (Genesis selection mode), skip the async publish to
 	// avoid a double update; otherwise publish for the async subscriber. This
 	// mirrors the roll-forward ChainsyncObservePeerTip ordering.
 	rollbackEvent := chainselection.PeerRollbackEvent{
@@ -1214,6 +1241,31 @@ func (o *Ouroboros) chainsyncCursorFarBehindLocalTip(
 		return tipBlock > blockNumber && tipBlock-blockNumber > k
 	}
 	return farBehind(headerBlockNumber) && !farBehind(peerTipBlockNumber)
+}
+
+// claimBehindTipRecycle reports whether a behind-local-tip recycle may be
+// requested at now, and records it when so. It admits one recycle per
+// chainsyncBehindTipRecycleCooldown across all connections.
+func (o *Ouroboros) claimBehindTipRecycle(now time.Time) bool {
+	o.behindTipRecycleMu.Lock()
+	defer o.behindTipRecycleMu.Unlock()
+	if !o.behindTipRecycleAt.IsZero() &&
+		now.Sub(o.behindTipRecycleAt) < chainsyncBehindTipRecycleCooldown {
+		return false
+	}
+	o.behindTipRecycleAt = now
+	return true
+}
+
+// releaseBehindTipRecycle returns the window taken by claimBehindTipRecycle at
+// now when no recycle was scheduled for it. No other claim can land inside an
+// open window, so the previous claim had already lapsed and clearing is exact.
+func (o *Ouroboros) releaseBehindTipRecycle(now time.Time) {
+	o.behindTipRecycleMu.Lock()
+	defer o.behindTipRecycleMu.Unlock()
+	if o.behindTipRecycleAt.Equal(now) {
+		o.behindTipRecycleAt = time.Time{}
+	}
 }
 
 func (o *Ouroboros) chainsyncClientRollForwardAt(
@@ -1310,6 +1362,25 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 			v.BlockNumber(),
 			tip.BlockNumber,
 		) {
+			// A connection with a due or fired re-intersection is already
+			// being recycled; its in-flight headers must not take the shared
+			// window from another stale peer. A later-onset future-header
+			// timer withholds every header until it fires, so it is replaced.
+			now := time.Now()
+			if o.headerResyncDueOrFired(ctx.ConnectionId, now) ||
+				!o.claimBehindTipRecycle(now) {
+				return nil
+			}
+			// The connection may already have left the connection manager,
+			// or another schedule may have won; neither recycles anything.
+			if !o.scheduleHeaderResync(
+				ctx.ConnectionId,
+				now,
+				event.ChainsyncResyncReasonBehindLocalTip,
+			) {
+				o.releaseBehindTipRecycle(now)
+				return nil
+			}
 			o.config.Logger.Debug(
 				"chainsync: cursor far behind the local tip",
 				"component", "ouroboros",
@@ -1317,11 +1388,6 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 				"block_number", v.BlockNumber(),
 				"peer_tip_block_number", tip.BlockNumber,
 				"connection_id", ctx.ConnectionId.String(),
-			)
-			o.scheduleHeaderResync(
-				ctx.ConnectionId,
-				time.Now(),
-				event.ChainsyncResyncReasonBehindLocalTip,
 			)
 			return nil
 		}
@@ -1424,7 +1490,6 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 				}
 			}
 		}
-		patienceGrant = ingressEligible
 		// Observe the tip for chain selection FIRST, so the apply-eligibility
 		// decision below reflects this header. Only ingress-eligible peers are
 		// observed; random inbound peers reporting ephemeral tips are filtered
@@ -1455,21 +1520,32 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 				ObservedPrevHash: v.PrevHash().Bytes(),
 				ObservedBoundary: blockType == gledger.BlockTypeByronEbb,
 			}
-			// If the hook handles it synchronously (Genesis corroboration
-			// active, so the apply gate below must reflect this header), skip
+			// If the hook handles it synchronously (Genesis selection mode,
+			// so the apply and eagerness gates below reflect this header), skip
 			// the async publish to avoid a double update; otherwise publish for
 			// the async chain-selection and peergov subscribers.
-			observedSync := false
+			disposition := chainselection.PeerTipUpdateUnhandled
 			if o.config.ChainsyncObservePeerTip != nil {
-				observedSync = o.config.ChainsyncObservePeerTip(peerTipUpdate)
+				disposition = o.config.ChainsyncObservePeerTip(peerTipUpdate)
 			}
-			if !observedSync {
+			switch disposition {
+			case chainselection.PeerTipUpdateUnhandled:
 				o.eventBus.Publish(
 					chainselection.PeerTipUpdateEventType,
 					event.NewEvent(
 						chainselection.PeerTipUpdateEventType,
 						peerTipUpdate,
 					),
+				)
+			case chainselection.PeerTipUpdatePending:
+				ingressEligible = false
+			case chainselection.PeerTipUpdateAccepted:
+			case chainselection.PeerTipUpdateRejected:
+				return errChainsyncCandidateRejected
+			default:
+				return fmt.Errorf(
+					"invalid peer tip disposition: %d",
+					disposition,
 				)
 			}
 		}
@@ -1479,11 +1555,31 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 		// blocks are withheld from the ledger.
 		applyEligible := ingressEligible &&
 			o.shouldApplyChainsyncToLedger(ctx.ConnectionId)
-		// Update tracked client cursor/tip and deduplicate headers. Record the
-		// cross-peer dedup entry ONLY for headers we will actually apply, so a
-		// header withheld from an uncorroborated peer is not permanently
-		// deduplicated — a later corroborated, apply-eligible peer can still
-		// publish the point into the ledger.
+		// Limit on Eagerness: the tip was observed above, so the limit already
+		// accounts for this header. Wait before recording cross-peer dedup state:
+		// if the connection closes while held, another peer must still be able
+		// to deliver the same header to the ledger.
+		if applyEligible && o.config.ChainsyncAwaitEagerness != nil {
+			var appliedTip func() ochainsync.Tip
+			if o.ledgerState != nil {
+				appliedTip = o.ledgerState.Tip
+			}
+			admissionCtx, cancelAdmission := chainsyncAdmissionContext(ctx)
+			err := o.config.ChainsyncAwaitEagerness(
+				admissionCtx,
+				ctx.ConnectionId,
+				v.BlockNumber(),
+				appliedTip,
+			)
+			cancelAdmission()
+			if err != nil {
+				return fmt.Errorf("wait for eagerness limit: %w", err)
+			}
+		}
+		patienceGrant = ingressEligible
+		// Record the cross-peer dedup entry only for headers we will actually
+		// apply. A header withheld from an uncorroborated peer must not suppress
+		// a later delivery from a corroborated, apply-eligible peer.
 		isNew := true
 		if o.chainsyncState != nil {
 			if applyEligible {

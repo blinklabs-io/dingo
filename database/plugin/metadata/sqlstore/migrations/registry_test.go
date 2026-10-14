@@ -280,13 +280,7 @@ func TestSQLiteRegistry(t *testing.T) {
 	require.Equal(t, 41, registry[40].Version)
 	require.Equal(t, drepDelegatorStateSchemaRelease, registry[40].Name)
 	require.Equal(t, 42, registry[41].Version)
-	require.Equal(t, scriptIndexSchemaRelease, registry[41].Name)
-	require.Len(t, registry[41].SQL["sqlite"].Expand, 4)
-	require.Contains(t, registry[41].SQL["sqlite"].Expand[0],
-		"CREATE TABLE IF NOT EXISTS `redeemer_script`")
-	require.Contains(t, registry[41].SQL["sqlite"].Expand[2],
-		"CREATE TABLE IF NOT EXISTS `utxo_reference_script`")
-	require.Empty(t, registry[41].Backfill)
+	require.Equal(t, utxoAddressIdentitySchemaRelease, registry[41].Name)
 }
 
 func TestDrepDormancySeedUsesPortableIdempotentInsert(t *testing.T) {
@@ -540,6 +534,54 @@ func TestMySQLRegistryPrefixesPoolOpCertSequenceIndex(t *testing.T) {
 		registry[0].SQL["mysql"].Expand,
 		"CREATE INDEX `idx_pool_opcert_sequence_pool_sequence` ON `pool_opcert_sequence`(`pool_key_hash`(255),`sequence`)",
 	)
+}
+
+func TestUtxoAddressIdentityMigrationTranslatesForProviders(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name          string
+		registry      func() ([]Migration, error)
+		dialect       string
+		idDefinition  string
+		addressType   string
+		foreignKey    string
+		indexFragment string
+	}{
+		{
+			name: "sqlite", registry: SQLiteRegistry, dialect: "sqlite",
+			idDefinition:  "`utxo_id` INTEGER PRIMARY KEY",
+			addressType:   "`address` BLOB NOT NULL",
+			foreignKey:    "FOREIGN KEY (`utxo_id`)",
+			indexFragment: "ON `utxo_address` (`address`)",
+		},
+		{
+			name: "postgres", registry: PostgresRegistry, dialect: "postgres",
+			idDefinition:  "\"utxo_id\" BIGINT PRIMARY KEY",
+			addressType:   "\"address\" BYTEA NOT NULL",
+			foreignKey:    "FOREIGN KEY (\"utxo_id\")",
+			indexFragment: "ON \"utxo_address\" (\"address\")",
+		},
+		{
+			name: "mysql", registry: MySQLRegistry, dialect: "mysql",
+			idDefinition:  "`utxo_id` BIGINT PRIMARY KEY",
+			addressType:   "`address` BLOB NOT NULL",
+			foreignKey:    "FOREIGN KEY (`utxo_id`)",
+			indexFragment: "ON `utxo_address` (`address`(255))",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			registry, err := tc.registry()
+			require.NoError(t, err)
+			expand := registry[41].SQL[tc.dialect].Expand
+			require.Len(t, expand, 2)
+			require.Contains(t, expand[0], tc.idDefinition)
+			require.Contains(t, expand[0], tc.addressType)
+			require.Contains(t, expand[0], tc.foreignKey)
+			require.Contains(t, expand[0], "ON DELETE CASCADE")
+			require.Contains(t, expand[1], tc.indexFragment)
+		})
+	}
 }
 
 func TestRewardCreditRoundMigrationTranslatesForProviders(t *testing.T) {

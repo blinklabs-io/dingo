@@ -28,6 +28,9 @@ configured port is nonzero, so core-mode nodes and disabled ports resolve
 none of them. Failures unwind providers in reverse order. Normal shutdown
 orders APIs, mempool, ledger/database, then storage.
 Database receives provider-owned stores through `database.Stores`.
+Before API providers start, API-mode database startup runs the one-time,
+cancellable backfill for rendered addresses of live asset UTxOs; a sync_state
+marker skips the scan after it completes.
 Storage lifecycle contexts cross the provider boundary. In particular, Badger
 stops scheduling value-log GC before close and prevents a successful rewrite
 from chaining another pass. Because Badger cannot cancel a rewrite already in
@@ -2970,7 +2973,7 @@ does not keep serving as if it were valid, without writing back to the row.
 `/pools/extended` needs the same classification for every active pool on a
 page, not one pool at a time, so it does not call `PoolMetadata` per pool
 (that would be one query per row). Instead `NodeAdapter.PoolsExtended`
-resolves every active pool's registered metadata URL in a single
+resolves only the requested page's registered metadata URLs in a single
 `MetadataStore.GetOffchainMetadataBatch` call, then applies the same
 pending/failed/fetched classification (including the `offchainFetchError`
 mapping and the read-time `ValidatePoolMetadata` fallback) as pure,
@@ -3008,7 +3011,9 @@ fallback:
   `barkBlockDownloadHosts` allowlist entry. An HTTP Bark RPC base anchors the
   corresponding HTTPS download origin. The same check runs on redirects,
   and every resolved address is rejected if it is private or special-use before
-  dialing. The client ignores ambient proxy settings, and response bodies are
+  dialing, unless `barkBlockDownloadAllowPrivateAddresses` is set for an
+  archive store on a private network; that default-off opt-in lifts only the
+  address check. The client ignores ambient proxy settings, and response bodies are
   capped before buffering at the largest block the chain admits for any era
   (`LedgerState.MaxBlockSize`: the live header and body limits, or the Byron
   genesis block size when larger; a 128 KiB default when neither is known).
@@ -5522,8 +5527,21 @@ Praos once the selector exits Genesis mode. Chainsync and ledger retain enough
 per-peer header ancestry for the active slot window while Genesis is active,
 then shrink back to their normal bounded history after exit. The ledger's
 peer-local ancestry stores compact header CBOR and prev-hash metadata rather
-than retaining decoded header objects, and enforces both the active window's
-entry bound and an 8 MiB per-connection byte budget. Rollback recovery
+than retaining decoded header objects, and enforces the active window's
+entry bound and an 8 MiB per-connection byte budget. Headers still ahead of
+the local tip are kept past the entry bound, up to the header queue capacity
+(`chain.MaxQueuedHeaders`) and within the byte budgets, so that after a header
+queue clear the in-flight headers of an honest peer still reach the local tip.
+Fork recovery re-queues the whole path from the local tip, so for a peer
+extending one chain, a header older than its newest `MaxQueuedHeaders` records
+lies only on paths longer than the queue.
+While a connection's oldest retained header is ahead of the tip its byte budget
+rises to 24 MiB, and all connections together are held to 64 MiB.
+These budgets hold a full 10,000-header queue of production-sized headers for
+each default chainsync client; larger headers or a deeper queue
+(`MaxQueuedHeaders` grows with the security parameter) hit the byte budget
+first, and the oldest headers are evicted. The ancestry walk covers the whole
+retained history rather than only the entry bound. Rollback recovery
 memoizes resolved ancestry within one recovery pass, keeping missing-point
 fallback work linear in the retained history while the ChainSync mutex is
 held. If a candidate fork path falls outside the retained suffix, recovery
@@ -5601,16 +5619,18 @@ the same pass, so the last remaining candidate is never disconnected even when
 pairwise density comparisons, each taken at its own intersection, form a
 cycle. The selector hands each peer to
 `ChainSelectorConfig.OnGenesisDensityDisconnect`; the node adds the peer's
-remote address to peer governance's deny list for ten minutes (`DenyPeer`),
-closes the connection if it is still open, logs whether the deny was applied,
+remote address to peer governance's deny list for ten minutes (`DenyPeer`)
+unless the report is a Limit on Eagerness standoff (below), closes the
+connection if it is still open, logs whether the deny was applied,
 and counts the report in `dingo_chainselection_gdd_disconnects_total`, whether
 or not a connection was left to close. Restore and truncate serialize their
 full networking-core replacement with this deny-and-close action, so a report
 that arrives during replacement is applied to the rebuilt governor and
 connection manager. Shutdown does not take that generation lock because it
 stops the retained selector while holding the lifecycle gates.
-The disconnector does not implement the Limit on Eagerness; it only removes
-sparse peers from the candidate set that cap is measured across.
+Forks held at the Limit on Eagerness are resolved by the same pass (see
+Limit on Eagerness); the disconnector itself does not apply the cap, and only
+removes peers from the candidate set that cap is measured across.
 
 The trust problem Genesis solves for **biased fast-sync sources** — e.g. a
 local shallow peer or the Genesis Sync Accelerator (GSA), which serve blocks
@@ -5860,7 +5880,117 @@ the same budget as the reference node's 100,000 tokens at 500 per second. The
 rate is lower than the reference because Dingo pipelines 10 ChainSync
 requests, so one honest peer delivers about `10/RTT` headers per second; at 5
 per second a peer with up to two seconds of round-trip time keeps a full
-bucket. The Limit on Eagerness is separate and not implemented.
+bucket.
+
+#### Limit on Eagerness
+
+`ChainSelector.EagernessLimit` caps chain selection at `k` blocks past the
+intersection of all candidate fragments, so a syncing node cannot commit to one
+peer's chain so far that a slower honest candidate can no longer win. The limit
+is computed from the candidate fragments of live, eligible, non-stale peers
+that have delivered a header, and is gated on the selection mode, which is
+Dingo's only sync-state signal (there is no Genesis State Machine equivalent):
+
+- Genesis mode (syncing): the cap is active. Before any candidate has
+  delivered a header, and before the candidates have ever shared a retained
+  point, the limit is `k` past the local tip. Otherwise it is `k` past the
+  highest point common to every fragment. When the bounded fragments later stop
+  overlapping, the limit stays `k` past the last common point; it does not fall
+  back to the local tip, which advances with the chain the limit bounds. The
+  recorded point is cleared when no candidate remains or Genesis mode ends. A
+  single candidate is its own intersection, so the cap never holds back a lone
+  peer.
+- Praos mode (caught up): the cap is disabled and `EagernessLimit().Active` is
+  false.
+
+While Genesis mode is active, the hash-bearing candidate frontier retains a
+full Genesis window plus a `k+1` suffix, so a fork point and the later headers
+needed for density and eagerness decisions remain available together. Its
+consecutive block heights let pairwise intersections use a binary search; the
+separate rollback history remains bounded to `k+1`. Peers whose block numbers
+both reach the limit are
+indistinguishable to the length comparison: Genesis density is still compared
+first, and when it is equal connection priority, then the incumbent, then
+blockfetch latency, and then connection ID break the tie in place of the Praos
+comparison. `ChainSelector.SelectedTip` returns the selected
+peer's tip truncated at the limit.
+
+The limit also gates ledger ingress. After a header's tip is observed and
+before it is handed to the ledger, the ChainSync roll-forward callback calls
+`ChainSelector.AwaitEagernessLimit` (wired as
+`OuroborosConfig.ChainsyncAwaitEagerness`). A header numbered past the limit
+blocks that peer's callback, which pauses only its header stream: nothing is
+dropped and the peer's cursor does not move, so the header is delivered once
+the limit admits it. The wait re-evaluates every 100ms because the applied
+ledger tip has no change notification. It returns when the ChainSync client is
+asked to stop or the connection begins shutting down: the callback runs on the
+protocol's receive loop, whose completion the protocol's done signal waits
+for, so the wait observes the stop request and the connection's shutdown
+signal instead. While a peer is paused it is never treated as stale and
+is not removed by stale-peer cleanup: a paused peer sends no tips, and aging it
+out would release the cap with no new evidence. The header's sender
+always counts as a candidate, even when stale, and a header from an untracked
+peer is admitted, so a lone peer is never held back. In Genesis mode the
+roll-forward and roll-backward handlers observe tips synchronously, so a new
+peer is tracked before its first header reaches the wait; an untracked sender
+is one chain selection declined. The limit does not hold
+back a rollback. Two candidates that both run more than `k` past their fork
+point each pause at the limit, and neither is dropped for being silent: see
+the standoff rule below. A held header's wait happens inside the roll-forward
+callback after the peer was charged up to the header's arrival, so the Limit
+on Patience does not charge it.
+
+A held peer delivers no headers, so a fork held at the limit cannot show the
+window-wide density the Genesis Density Disconnector compares, and the limit
+would not move. The disconnector therefore also resolves two standoffs
+(`eagernessStandoffDisconnectsLocked`), in the same pass and through the same
+`OnGenesisDensityDisconnect` callback, with `EagernessStandoff` set. A peer is
+reported once, so the last candidate is never removed. A held peer that is a
+prefix of another is not a fork and decides nothing.
+
+- Two held forks: the blocks each delivered in `(intersection, min(head
+  slots)]` are counted, which is exact for both because every header up to a
+  head was delivered. The fork with fewer blocks is disconnected. Equal counts
+  fall to the selector's transport order (connection priority, incumbent,
+  blockfetch latency, connection ID). Both forks stop at the same limit, so the
+  winner is in effect the fork that reached its last allowed block in fewer
+  slots. Unlike the provable comparison above this is a statistical heuristic,
+  not a proof: it exists because Dingo stops header download at `k` blocks
+  rather than at the forecast horizon, and a temporarily sparse honest fork can
+  lose it. Standoff losers are therefore disconnected but not deny-listed, so
+  an honest fork that lost can be redialed at once.
+- A held peer against an idle one: a peer is idle after its ordered
+  `MsgAwaitReply` observation confirms that it has no pending headers. The idle
+  peer may be a fork that stopped at an older tip. Keepalive traffic refreshes an idle peer's
+  liveness, so it is never aged out as stale, and its trailing slots keep the
+  provable comparison from excluding it; left alone it would hold the limit at
+  its fork point or tip until the stall recycler removed it. This is upstream's
+  idling rule: an idling peer loses to a rival that offers more than `k`
+  blocks past the intersection and has at least as many blocks in the Genesis
+  window. Main density comparison handles this case directly: the explicit
+  idle observation makes the peer's delivered density its upper bound. A
+  still-streaming fork keeps the conservative bound for all remaining slots.
+  A prefix remains undecidable because it is not a competing fork.
+
+The decision does not depend on which peer the chainsync client treats as
+primary.
+
+The stall recycler is coherent with this: `ChainSelector.EagernessPaused`
+marks a chainsync client the selector is holding, and every recycler path that
+closes, resyncs or removes a connection consults it. A stalled held client is
+not scheduled for recycle or removal, the local-tip plateau watchdog does not
+resync a held primary (it restarts the plateau window instead), and the
+post-plateau realignment skips held peers. Without the standoff rules those
+exemptions would stall the node; with them, a held peer leaves only by losing
+a density comparison, or by its competitor going away. A held peer is not
+exempt from those comparisons, only from the recycler. The Limit on Patience
+is separate: a held header's wait is not charged to it, as above.
+
+The limit is exported as the `dingo_chainselection_loe_block_number` and
+`dingo_chainselection_loe_intersection_slot` gauges (0 while inactive). The
+slot gauge reports the point the limit is measured from: the common point, or
+the last one the candidates shared once they stop overlapping, and 0 while the
+limit is measured from the local tip.
 
 #### Anti-flap incumbent pin
 
@@ -6116,7 +6246,7 @@ The `chainsync.State` tracks multiple concurrent chainsync clients:
 - A rollback to the cursor a peer already sits at does not refresh its stall clock or clear a stalled status (`UpdateClientRollback`). The ledger recognizes a rollback to its own tip before tracking it; it keeps a bounded `maxRollbackHistory` event history and a separate per-connection/point count window so event eviction does not hide a repeated rollback.
 - When a `chainsync.resync` event identifies affected connections, the handler clears local history and generally closes those connections so peer governance can reconnect from fresh intersect points. `LocalLedgerRollback` first attempts ledger-side recovery and leaves connections open when recovery succeeds, no connections need recovery, or the chain is already past the rollback point. Only rollback/fork-resolution failures beyond K and Mithril trust-boundary failures add a peer cooldown; `PersistentFork` does not. Header-driven requests (`requestChainsyncResync`) are coalesced per connection for `chainsyncResyncCoalesceWindow`, and closing the connection clears that record so a reconnect can begin a new resync episode.
 - Plateau detection: if the applied tip does not advance and the downloaded primary-chain tip does not change while peers are ahead, the recycler first asks ledger to reconcile any live primary-chain/ledger divergence (`ReconcileLivePrimaryChainLedgerDivergence`). Primary-chain movement, including rollback, resets the plateau clock even when ledger application is temporarily behind, avoiding a resync of an active catch-up stream. When the local repair succeeds, connection-level recovery is skipped so ledger replay can resume from the repaired tip. If no divergence is found, or the divergence's common ancestor sits more than the security parameter K behind the primary chain tip — a rewind that far is declined rather than forced through, per the bound below — the active chainsync connection is recycled — except when the primary (header) chain has already caught up to the peer and the gap is dominated by downloaded-but-not-yet-applied blocks (`isLedgerApplicationBacklog`, `internal/chainsyncrecycler/recycler.go`). That plateau is a ledger-application backlog, not a chainsync stall, so the healthy connection is left running and the condition is logged at INFO instead of recycling (recycling cannot advance the applied tip and only churns the connection). The "peers are ahead" comparison reads a peer's DELIVERED frontier. A peer that has delivered no header has that frontier pinned at the point its session intersected at, which immediately after a plateau resync is the stalled local tip itself, so comparing against it would disarm this watchdog exactly when it has just acted. While such a peer is still awaiting its first header (`PeerChainTip.AwaitingFirstHeader`, `chainselection/peer_tip.go`) the recycler therefore falls back to that peer's ADVERTISED tip, but only when the advertised tip is higher and only when the advertising peer IS the connection this plateau would recycle (`advertisesForOwnConnection`, compared by `ConnectionId` rather than by rendered address, so a replacement connection reusing a listen port does not inherit a stale peer's claim). An untrusted advertised tip can therefore only ever be spent on its own connection, and the substituted value also flows into `isLedgerApplicationBacklog` as the best-peer tip, so it sets the backlog-versus-stall classification too. "Awaiting its first header" means the `awaitingFirstHeader` flag chain selection sets only when it registers a peer from a rollback and clears on that peer's first delivered header, not a delivered block number of 0: a tracked peer that has delivered headers and then rolls back to a point outside its retained delivered-header history is also left with a block number of 0 (`ApplyRollback` keeps the point and cannot recover one), but it has delivered headers on this connection, so it is judged on its delivered frontier and its advertised tip is never substituted. That fallback is reachable only because chain selection tracks such a peer in the first place: a plateau resync closes the connection (`SubscribeChainsyncResync`, `ouroboros/chainsync.go`, closes it for every resync reason), the `ConnectionClosedEvent` subscription in `node.go` calls `ChainSelector.RemovePeer`, and the replacement's only chainsync traffic until the next block is its post-`FindIntersect` `MsgRollBackward` — registered as a peer by `registerPeerFromRollbackLocked` and made selectable with a delivered block number of 0 by the `awaitingFirstHeader` exemption in `isPeerSelectableLocked` (`chainselection/selector.go`). Without that registration `GetBestPeer()` is nil through the whole window and the plateau check returns before the fallback, so the two belong together
-- Plateau decisions are counted in `dingo_chainsync_plateau_decisions_total{outcome}`: `reconciled` (the local reconcile repaired the plateau), `backlog_not_recycled` (ledger-application backlog, stream left running) and `resync` (a chainsync resync was requested). The recycler reports each through `Config.OnPlateauDecision`, which the node wires in `buildChainsyncRecyclerConfig`. Peer tips refused as implausible are counted in `dingo_chainselection_peer_tip_rejections_total{reason}` (`observed_frontier` or `advertised_tip`, with the frontier reason taking precedence when both bounds refuse) through `ChainSelectorConfig.OnPeerTipRejected`, which runs under the selector lock and only increments a counter.
+- Plateau decisions are counted in `dingo_chainsync_plateau_decisions_total{outcome}`: `reconciled` (the local reconcile repaired the plateau), `backlog_not_recycled` (ledger-application backlog, stream left running), `resync` (a chainsync resync was requested) and `eagerness_held` (the selector holds the primary at the Limit on Eagerness, stream left running). The recycler reports each through `Config.OnPlateauDecision`, which the node wires in `buildChainsyncRecyclerConfig`. Peer tips refused as implausible are counted in `dingo_chainselection_peer_tip_rejections_total{reason}` (`observed_frontier` or `advertised_tip`, with the frontier reason taking precedence when both bounds refuse) through `ChainSelectorConfig.OnPeerTipRejected`, which runs under the selector lock and only increments a counter.
 - The recycler itself is `internal/chainsyncrecycler.Recycler`, a `Start`/`Stop` background component that owns only the stall/plateau decision logic. It never reads node fields: the node passes a `ComponentProvider` (`nodeRecyclerComponents`, `node_chainsync_recycler.go`) that hands each tick the live `LedgerSource`, `ChainsyncState`, and `ChainSelector`, plus an `EventPublisher` for the recycle/resync/client-remove requests it decides on. Those are interfaces defined in the recycler package and satisfied structurally by `ledger.LedgerState`, `chainsync.State`, `chainselection.ChainSelector`, and the `EventBus`, so the dependency only goes one way and the whole component is exercised against fakes without constructing a node
 - Every tick `TryLock`s `n.liveLifecycleMu` (the mutex a live Restore/Truncate holds for its entire quiesce-through-reinitialize duration, since those calls actually nil/rebuild `n.ledgerState`/`n.chainsyncState`) (in the provider, for the whole callback) and skips entirely on contention, rather than just nil-checking those fields once up front: they are plain, unsynchronized fields a live restore/truncate reassigns, and the tick dereferences them many more times after any initial check, so holding the lock for the whole tick — not only the check — is what actually closes the race rather than merely narrowing its window. Snapshot deliberately does *not* hold `liveLifecycleMu` (it takes a separate `snapshotMu` instead, excluding a concurrent Restore/Truncate without contending with this tick) — see `snapshotMu`'s doc comment (`node.go`) — since Snapshot never touches either field and blocking this tick for its whole local-copy-plus-cloud-upload duration would contradict Snapshot's own documented "keeps syncing normally" behavior
 - Ledger callbacks that need the replaceable chainsync state use the same lock through `withLiveChainsyncState`. Both `Run()`'s initial publication and a Restore/Truncate's replacement hold that lock while constructing and assigning the state. Callbacks skip while the lock is held instead of blocking: the lifecycle operation can be waiting for the ledger goroutine to stop, so a blocking lock would deadlock quiesce.
@@ -6124,7 +6254,7 @@ The `chainsync.State` tracks multiple concurrent chainsync clients:
 
 #### Header-Sync Strategy
 
-A configurable strategy (`chainsync.HeaderSyncStrategy`, `chainsync/strategy.go`) decides which eligible peer is permitted to drive ledger ingress when several peers offer valid next headers. The Ouroboros roll-forward handler first records the delivered cursor, tip, activity, and header count in the per-peer registry, then synchronously observes the tip when Genesis corroboration is active. This ordering lets an immediate `ChainSwitchEvent` distinguish the delivering client from a reused zero-tip connection ID. After the resulting apply-eligibility decision, admitted headers enter cross-peer deduplication and fork detection, then `State.ShouldPublishHeader` applies the strategy before a `ChainsyncEvent` is published into the ledger:
+A configurable strategy (`chainsync.HeaderSyncStrategy`, `chainsync/strategy.go`) decides which eligible peer is permitted to drive ledger ingress when several peers offer valid next headers. The Ouroboros roll-forward handler first records the delivered cursor, tip, activity, and header count in the per-peer registry, then synchronously observes the tip in Genesis selection mode, so the corroboration apply gate and the Limit on Eagerness wait both see it. This ordering lets an immediate `ChainSwitchEvent` distinguish the delivering client from a reused zero-tip connection ID. After the resulting apply-eligibility decision, admitted headers enter cross-peer deduplication and fork detection, then `State.ShouldPublishHeader` applies the strategy before a `ChainsyncEvent` is published into the ledger:
 
 - **primary** (default) — a single active peer drives ingress; new headers from any eligible peer publish, and the active peer replays a header first observed from another peer so it stays the contiguous driver. `ChainSelector` exclusively chooses replacements after a peer delivers a selectable tip; registry insertion never selects a peer, while eligibility demotion and connection removal may clear an invalid active peer but never promote a connected zero-tip fallback independently. A fallback's first valid new header can still enter the ledger queue and chain selection, whose switch event then makes that peer active. This keeps the ledger and blockfetch source aligned with the selector's liveness, eligibility, and Genesis-corroboration gates.
 - **parallel** — every eligible peer may supply headers concurrently. The first peer to report a header drives it; duplicates from other peers are deduplicated before ledger ingress (no replay), while its identity remains in the bounded cache.
@@ -16229,7 +16359,16 @@ chain selection skips the peer, while it holds an ingress slot that a peer at
 the tip could use. The check runs in the callback after
 `reconcileChainsyncIngressAdmission`, so an observer promoted with a cursor
 left far behind is resynced on its first header. The shared per-connection
-timer marker allows one resync per connection until it reconnects. A header
+timer marker allows one resync per connection until it reconnects. At most one
+such recycle is requested across all connections per 30 seconds
+(`claimBehindTipRecycle`), so a gap with many lagging honest peers does not
+recycle all of them at once and leave only a near-tip peer; over a sustained
+gap they are still recycled one window at a time. A connection whose
+re-intersection has fired or is already due does not take that window; a
+future-header timer with a later onset is replaced by an immediate one, since
+it withholds every header until it fires. A claim
+that schedules nothing (the connection has already left the connection
+manager) is released. A header
 within `k` of the tip (a normal rollback or fork) is not affected, and neither
 is a peer whose own tip is more than `k` behind: re-intersecting cannot bring
 it closer, so it stays attached like any other peer lagging on our chain.
