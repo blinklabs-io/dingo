@@ -1284,6 +1284,10 @@ type LedgerState struct {
 	// publication, so a reader waiting for the ledger to advance can block
 	// until the published state changes instead of polling it.
 	snapshotPublished atomic.Pointer[chan struct{}]
+	// txValidationSettled is closed and replaced after every snapshot
+	// publication and every finished validation transition: the two events
+	// that can turn a non-current validation session current again.
+	txValidationSettled atomic.Pointer[chan struct{}]
 	// timeConverter owns slot/wall-clock time conversion (SlotToTime,
 	// TimeToSlot, SlotToEpoch, EpochInfo) and the operational near-now
 	// fallbacks used while the applied ledger is behind the wall clock.
@@ -2310,6 +2314,31 @@ func (ls *LedgerState) snapshotPublishedChan() <-chan struct{} {
 func (ls *LedgerState) notifySnapshotPublished() {
 	next := make(chan struct{})
 	if prev := ls.snapshotPublished.Swap(&next); prev != nil {
+		close(*prev)
+	}
+	ls.notifyTxValidationSettled()
+}
+
+// txValidationSettledChan returns a channel closed by the next snapshot
+// publication or finished validation transition. Like snapshotPublishedChan,
+// a waiter must obtain it before the attempt whose staleness it waits out.
+func (ls *LedgerState) txValidationSettledChan() <-chan struct{} {
+	for {
+		if ch := ls.txValidationSettled.Load(); ch != nil {
+			return *ch
+		}
+		ch := make(chan struct{})
+		if ls.txValidationSettled.CompareAndSwap(nil, &ch) {
+			return ch
+		}
+	}
+}
+
+// notifyTxValidationSettled wakes every txValidationSettledChan waiter. It
+// must run after the state change it reports is visible.
+func (ls *LedgerState) notifyTxValidationSettled() {
+	next := make(chan struct{})
+	if prev := ls.txValidationSettled.Swap(&next); prev != nil {
 		close(*prev)
 	}
 }
@@ -14165,6 +14194,7 @@ func (ls *LedgerState) beginTxValidationTransition() func() {
 			ls.txValidationCommitMutex.Lock()
 			ls.txValidationTransitions.Add(-1)
 			ls.txValidationCommitMutex.Unlock()
+			ls.notifyTxValidationSettled()
 		})
 	}
 }
