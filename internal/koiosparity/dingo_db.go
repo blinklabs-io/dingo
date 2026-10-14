@@ -26,6 +26,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/ledger/governance"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	_ "github.com/go-sql-driver/mysql"
 	_ "github.com/jackc/pgx/v5/stdlib"
@@ -1131,6 +1132,128 @@ func (d *DingoDB) GetRewardAccountOutputs(
 		return nil, fmt.Errorf("reward_account_output epoch %d: %w", epoch, err)
 	}
 	return out, nil
+}
+
+// GetProposalDepositRefunds implements RewardParitySource with the same two
+// reads DatabaseSource makes, against the metadata schema directly.
+func (d *DingoDB) GetProposalDepositRefunds(
+	ctx context.Context,
+	refundEpoch uint64,
+) ([]governance.ProposalDepositRefund, error) {
+	proposals, err := d.proposalsRefundedAt(ctx, refundEpoch)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"governance proposals refunded at epoch %d: %w",
+			refundEpoch,
+			err,
+		)
+	}
+	var credits []*models.AccountRewardDelta
+	for _, slot := range governance.ProposalDepositRefundSlots(
+		proposals,
+		refundEpoch,
+	) {
+		slotCredits, err := d.postSnapshotCreditEvents(ctx, slot)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"reward credits at slot %d: %w",
+				slot,
+				err,
+			)
+		}
+		credits = append(credits, slotCredits...)
+	}
+	return governance.MatchProposalDepositRefunds(
+		proposals,
+		refundEpoch,
+		credits,
+	)
+}
+
+// proposalsRefundedAt mirrors
+// MetadataStore.GetGovernanceProposalsRefundedAt, reading only the columns
+// the refund pairing needs. dropped_epoch/dropped_slot live in the
+// governance_proposal_drop companion table.
+func (d *DingoDB) proposalsRefundedAt(
+	ctx context.Context,
+	epoch uint64,
+) ([]*models.GovernanceProposal, error) {
+	rows, err := d.query(
+		ctx,
+		`SELECT governance_proposal.tx_hash, governance_proposal.action_index,
+       governance_proposal.deposit, governance_proposal.return_address,
+       governance_proposal.enacted_epoch, governance_proposal.enacted_slot,
+       governance_proposal_drop.dropped_epoch,
+       governance_proposal_drop.dropped_slot
+FROM governance_proposal
+LEFT JOIN governance_proposal_drop
+  ON governance_proposal_drop.proposal_id = governance_proposal.id
+WHERE ((governance_proposal.ratified_epoch IS NOT NULL
+        AND governance_proposal.enacted_epoch = ?)
+       OR governance_proposal_drop.dropped_epoch = ?)
+  AND governance_proposal.deleted_slot IS NULL
+ORDER BY governance_proposal.id`,
+		epoch,
+		epoch,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*models.GovernanceProposal
+	for rows.Next() {
+		p := &models.GovernanceProposal{}
+		var deposit types.Uint64
+		if err := rows.Scan(
+			&p.TxHash,
+			&p.ActionIndex,
+			&deposit,
+			&p.ReturnAddress,
+			&p.EnactedEpoch,
+			&p.EnactedSlot,
+			&p.DroppedEpoch,
+			&p.DroppedSlot,
+		); err != nil {
+			return nil, err
+		}
+		p.Deposit = uint64(deposit)
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+// postSnapshotCreditEvents mirrors
+// MetadataStore.GetPostSnapshotRewardCreditEvents.
+func (d *DingoDB) postSnapshotCreditEvents(
+	ctx context.Context,
+	slot uint64,
+) ([]*models.AccountRewardDelta, error) {
+	rows, err := d.query(
+		ctx,
+		`SELECT credential_tag, staking_key, tx_hash, amount
+FROM account_reward_delta
+WHERE added_slot = ? AND post_snapshot = TRUE AND withdrawal = FALSE
+ORDER BY credential_tag, staking_key, id`,
+		slot,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*models.AccountRewardDelta
+	for rows.Next() {
+		c := &models.AccountRewardDelta{AddedSlot: slot, PostSnapshot: true}
+		if err := rows.Scan(
+			&c.CredentialTag,
+			&c.StakingKey,
+			&c.TxHash,
+			&c.Amount,
+		); err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
 }
 
 // StakeAddressFromCredential converts a reward-account credential — as

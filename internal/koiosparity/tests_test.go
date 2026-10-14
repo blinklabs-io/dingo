@@ -3633,6 +3633,12 @@ func testSchema(includePools bool) []string {
 		`CREATE TABLE pool (id INTEGER PRIMARY KEY AUTOINCREMENT, pool_key_hash BLOB NOT NULL UNIQUE)`,
 		`CREATE TABLE pool_registration (id INTEGER PRIMARY KEY AUTOINCREMENT, pool_id INTEGER NOT NULL, pool_key_hash BLOB NOT NULL, certificate_id INTEGER, added_slot INTEGER NOT NULL)`,
 		`CREATE TABLE pool_retirement (id INTEGER PRIMARY KEY AUTOINCREMENT, pool_id INTEGER NOT NULL, pool_key_hash BLOB NOT NULL, certificate_id INTEGER, epoch INTEGER NOT NULL, added_slot INTEGER NOT NULL)`,
+		// The proposal and reward-credit journal tables back
+		// DingoDB.GetProposalDepositRefunds, which every per-account
+		// comparison reads. Only the columns that read names are modeled.
+		`CREATE TABLE governance_proposal (id INTEGER PRIMARY KEY AUTOINCREMENT, tx_hash BLOB NOT NULL, action_index INTEGER NOT NULL DEFAULT 0, deposit TEXT, return_address BLOB, enacted_epoch INTEGER, enacted_slot INTEGER, ratified_epoch INTEGER, deleted_slot INTEGER)`,
+		`CREATE TABLE governance_proposal_drop (proposal_id INTEGER PRIMARY KEY, dropped_epoch INTEGER, dropped_slot INTEGER)`,
+		`CREATE TABLE account_reward_delta (id INTEGER PRIMARY KEY AUTOINCREMENT, staking_key BLOB NOT NULL, credential_tag INTEGER NOT NULL DEFAULT 0, tx_hash BLOB NOT NULL, amount TEXT, previous_reward TEXT, added_slot INTEGER NOT NULL, withdrawal NUMERIC NOT NULL DEFAULT 0, post_snapshot NUMERIC NOT NULL DEFAULT 0)`,
 		`CREATE TABLE "transaction" (id INTEGER PRIMARY KEY AUTOINCREMENT, hash BLOB, slot INTEGER, block_index INTEGER)`,
 		`CREATE TABLE certs (id INTEGER PRIMARY KEY AUTOINCREMENT, transaction_id INTEGER, slot INTEGER, cert_index INTEGER)`,
 	}

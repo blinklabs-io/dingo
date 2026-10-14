@@ -23,6 +23,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/ledger/governance"
 )
 
 // RewardParitySource is the read-only view of Dingo's committed reward state
@@ -136,6 +137,17 @@ type RewardParitySource interface {
 		ctx context.Context,
 		epoch uint64,
 	) ([]*models.RewardAccountOutput, error)
+	// GetProposalDepositRefunds returns the governance proposal deposits that
+	// were credited to a reward account when epoch refundEpoch began: those of
+	// proposals enacted or dropped at that boundary whose return account was
+	// registered. A deposit returned to the treasury because the account was
+	// not registered is absent, as it is from Koios's proposal_refund rows.
+	// Koios reporting epoch K pairs with refundEpoch K+1: Koios files a
+	// credit made at the K to K+1 boundary under earned_epoch K.
+	GetProposalDepositRefunds(
+		ctx context.Context,
+		refundEpoch uint64,
+	) ([]governance.ProposalDepositRefund, error)
 	// GetEarliestAvailableEpoch returns the earliest Koios reporting epoch
 	// this node could plausibly have genuine, locally computed
 	// reward-calculation state for, derived from its own Mithril bootstrap
@@ -280,6 +292,55 @@ func (s *DatabaseSource) GetEarliestAvailableEpoch(
 		return 0, false, nil
 	}
 	return boundaryEpoch.EpochId + 1, true, nil
+}
+
+// GetProposalDepositRefunds implements RewardParitySource from the proposal
+// and reward-credit journal tables the epoch boundary wrote.
+func (s *DatabaseSource) GetProposalDepositRefunds(
+	ctx context.Context,
+	refundEpoch uint64,
+) ([]governance.ProposalDepositRefund, error) {
+	// See GetLatestEpoch's comment on why ctx is only checked up front.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	txn := s.db.Transaction(ctx, false)
+	defer txn.Release()
+	meta := s.db.Metadata()
+	proposals, err := meta.GetGovernanceProposalsRefundedAt(
+		refundEpoch,
+		txn.Metadata(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"governance proposals refunded at epoch %d: %w",
+			refundEpoch,
+			err,
+		)
+	}
+	var credits []*models.AccountRewardDelta
+	for _, slot := range governance.ProposalDepositRefundSlots(
+		proposals,
+		refundEpoch,
+	) {
+		slotCredits, err := meta.GetPostSnapshotRewardCreditEvents(
+			slot,
+			txn.Metadata(),
+		)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"reward credits at slot %d: %w",
+				slot,
+				err,
+			)
+		}
+		credits = append(credits, slotCredits...)
+	}
+	return governance.MatchProposalDepositRefunds(
+		proposals,
+		refundEpoch,
+		credits,
+	)
 }
 
 // GetEpochData returns epoch-level aggregates for the given epoch, or nil,

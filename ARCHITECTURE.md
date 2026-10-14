@@ -10725,7 +10725,7 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
   | `/pool_history` | intentionally-incomparable | `pool_fees`, `deleg_rewards` | Koios derives these from an approximation that omits the pledge/owner-stake bonus and rounds components. |
   | `/pool_history` | unsupported | `active_stake_pct`, `saturation_pct`, `epoch_ros` | Dingo has no matching persisted pool aggregate. |
   | `/account_reward_history` | exact-match | `stake_address`, `earned_epoch` | Identifies the `(stake_address, type)` aggregate `CompareAccountEpoch` matches on; response identity must equal the requested epoch. |
-  | `/account_reward_history` | exact-match | `amount`, `type` | Exact integer lovelace equality against `reward_account_output.amount`/`reward_type` for member/leader rows, compared as per-`(stake_address, type)` totals summed across pool contributions, and then per pool contribution, so a disagreement that preserves the total (equal and opposite per-pool errors, or a total attributed to one of the pools the other side splits it between) is reported as `account_reward_pool_amount` rather than passing; a type that is neither in scope nor filtered by `koiosAccountRewardTypesOutOfScope` is `dingo_db_error`, not a parity failure. |
+  | `/account_reward_history` | exact-match | `amount`, `type` | Exact integer lovelace equality against `reward_account_output.amount`/`reward_type` (and, for `proposal_refund`, against the proposal-deposit credit in `account_reward_delta.amount`) for member/leader/proposal_refund rows, compared as per-`(stake_address, type)` totals summed across pool contributions, and then per pool contribution, so a disagreement that preserves the total (equal and opposite per-pool errors, or a total attributed to one of the pools the other side splits it between) is reported as `account_reward_pool_amount` rather than passing; repeated `proposal_refund` rows sum as separate deposits; a type that is neither modeled nor filtered by `koiosAccountRewardTypesOutOfScope` is the informational `reward_type_unmodeled`, not a parity failure. |
   | `/account_reward_history` | derived-match | `pool_id_bech32` | Decoded to `reward_account_output.pool_key_hash`'s pool ID to identify each contribution to a shared reward account; distinct pools aggregate and are then compared per pool, a repeated same-pool row is `acct_duplicate`. A side that names no pool for a key makes no per-pool statement to disagree with, so the totals are the whole verdict there. |
   | `/account_reward_history` | unsupported | `spendable_epoch` | Stored for reference only; not currently compared against Dingo's schema. |
   | `/epoch_params` | exact-match | `epoch_no` | The filtered response must contain exactly the requested reporting epoch K. |
@@ -11133,6 +11133,8 @@ per-account categories: `acct_only_dingo`,
 reward_type, pool) row within one side — a data-integrity problem, not a
 value disagreement; the same (stake_address, reward_type) from two
 different pools is a shared reward account, which aggregates instead),
+`reward_type_unmodeled` (informational: a Koios reward type with no model
+here, so nothing was compared and nothing is claimed about Dingo),
 `acct_zero_reward_row` (informational: a reward row worth zero
 lovelace present on one side only — nothing was credited either way, so the
 two sides agree about every lovelace and the one-sided row is a
@@ -11742,12 +11744,40 @@ never the reverse.
   GET can via `req.Clone`). The response's `type` enum (`member`/`leader`/
   `treasury`/`reserves`/`refund`) maps directly onto
   `models.RewardAccountOutput.RewardType`'s `"member"`/`"leader"` string
-  constants for the two types Dingo currently produces;
+  constants for the two types Dingo's reward calculation produces;
   `CompareAccountEpoch` filters `treasury`/`reserves`/`refund` rows out of
   the comparison entirely (documented via
   `koiosAccountRewardTypesOutOfScope`, not silently dropped) since Dingo's
   reward accounting does not currently track those MIR/refund mechanisms —
-  wire them in if/when it does.
+  wire them in if/when it does. A type outside all of these is reported as
+  `reward_type_unmodeled`, which is informational: no Dingo read happened and
+  nothing was compared, so it says nothing about Dingo's state and must not
+  stop a strict node. The row stays in `check_mismatches` and in the
+  mismatch metric's informational series.
+- **Proposal refunds.** `proposal_refund` is Koios's type for a governance
+  proposal deposit credited to the proposal's return account. Dingo has no
+  `reward_account_output` row for it: the epoch boundary journals the credit
+  post-snapshot in `account_reward_delta`, under a source hash derived from
+  the proposal's tx hash and action index (`proposalRewardSourceHash`, or
+  `proposalDepositRefundSourceHash` when the same proposal's treasury
+  withdrawal pays the same account). `RewardParitySource.GetProposalDepositRefunds`
+  pairs each proposal enacted or dropped at a boundary
+  (`MetadataStore.GetGovernanceProposalsRefundedAt`) with the credit it wrote
+  at its own refund slot (`MetadataStore.GetPostSnapshotRewardCreditEvents`),
+  via `governance.MatchProposalDepositRefunds`. A deposit returned to the
+  treasury because the account was not registered leaves no credit and is
+  absent, as it is from Koios. Koios files the credit made at the K to K+1
+  boundary under `earned_epoch` K (`spendable_epoch` K+1), so Koios reporting
+  epoch K pairs with proposals whose `enacted_epoch`/`dropped_epoch` is K+1
+  (`compareEpochAccounts` reads `epoch+1`). Two proposals refunded to one
+  account in one epoch are two identical Koios rows with no pool, so
+  `proposal_refund` rows sum on both sides instead of reporting
+  `acct_duplicate`. Presence and amount differences use the ordinary
+  `acct_only_*`/`value_mismatch` categories, so a missing or wrong refund
+  fails the epoch. A journal written before the refund discriminator existed
+  holds only the withdrawal credit when a treasury withdrawal paid its own
+  proposal's return account; it pairs as the refund and reads as a value
+  mismatch against Koios's deposit row.
 - **Chunking.** `FetchAccountRewardsForEpoch` (`fetch_accounts.go`) splits
   the address universe into `koiosAccountChunkSize` (100)-sized groups,
   fetched with bounded concurrency mirroring `fetchEpoch`'s per-pool worker

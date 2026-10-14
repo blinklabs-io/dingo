@@ -726,9 +726,10 @@ var koiosCoverageMatrix = []KoiosFieldCoverage{
 
 	// /account_reward_history: CompareAccountEpoch compares every
 	// reference row against reward_account_output exactly, per aggregated
-	// (stake_address, type) total — member/leader rows only, since
-	// koiosAccountRewardTypesOutOfScope filters out reward mechanisms
-	// (treasury/reserves MIR, refund) Dingo does not currently produce.
+	// (stake_address, type) total — member/leader rows, plus proposal_refund
+	// rows against the proposal deposits the epoch boundary credited. The
+	// koiosAccountRewardTypesOutOfScope types (treasury/reserves MIR, refund)
+	// are reward mechanisms Dingo does not currently produce.
 	{
 		Endpoint:   "/account_reward_history",
 		Field:      "stake_address",
@@ -753,15 +754,15 @@ var koiosCoverageMatrix = []KoiosFieldCoverage{
 		Endpoint:   "/account_reward_history",
 		Field:      "amount",
 		Class:      CoverageExactMatch,
-		DingoField: "reward_account_output.amount",
+		DingoField: "reward_account_output.amount; proposal_refund against account_reward_delta.amount",
 		Reason:     "parsed amounts are compared as aggregated totals grouped by (stake_address, reward_type), and then per pool contribution so a disagreement that preserves the total is still reported; no rounding/sampling/tolerance",
 	},
 	{
 		Endpoint:   "/account_reward_history",
 		Field:      "type",
 		Class:      CoverageExactMatch,
-		DingoField: "reward_account_output.reward_type",
-		Reason:     "validated member/leader rows are matched after aggregation; treasury/reserves/refund rows are out of scope",
+		DingoField: "reward_account_output.reward_type; proposal_refund against the post-snapshot proposal-deposit credit in account_reward_delta",
+		Reason:     "validated member/leader/proposal_refund rows are matched after aggregation, repeated proposal_refund rows summing as separate deposits; treasury/reserves/refund rows are out of scope and any other type is reported as informational reward_type_unmodeled",
 	},
 	{
 		Endpoint:   "/account_reward_history",

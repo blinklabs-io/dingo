@@ -125,6 +125,15 @@ const (
 	// false and any remaining divergence reports as a genuine
 	// value_mismatch again.
 	CategoryCostModelSynthetic = "cost_model_synthetic"
+	// CategoryRewardTypeUnmodeled marks a Koios /account_reward_history row
+	// whose type is neither compared (member, leader, proposal_refund) nor
+	// deliberately out of scope: a type Koios added that this comparer has
+	// no model for. No Dingo read happened and no Dingo value was compared,
+	// so it asserts nothing about Dingo's state and is informational: a
+	// strict node must not stop because the reference grew a vocabulary
+	// word. The row is still recorded, so the unmodeled type stays visible
+	// in check_mismatches and in the mismatch metric's informational series.
+	CategoryRewardTypeUnmodeled = "reward_type_unmodeled"
 )
 
 // AllCategories is every mismatch category above, in one place.
@@ -153,6 +162,7 @@ var AllCategories = []string{
 	CategoryAcctNewlyRegistered,
 	CategoryAcctDeregistered,
 	CategoryCostModelSynthetic,
+	CategoryRewardTypeUnmodeled,
 }
 
 // Epoch check status values.
@@ -1090,6 +1100,29 @@ func ComparePoolEpoch(
 	return out
 }
 
+// rewardTypeLeader is the operator's reward row; rewardTypeMember is declared
+// beside DingoDB.
+//
+// rewardTypeProposalRefund is the Koios /account_reward_history type for a
+// governance proposal deposit returned to its return account. It is also the
+// reward_type the Dingo-side refund rows are reported under, so one spelling
+// keys both sides.
+const (
+	rewardTypeLeader         = "leader"
+	rewardTypeProposalRefund = "proposal_refund"
+)
+
+// rewardTypeSumsRepeatedRows reports whether several rows with the same
+// (stake_address, reward_type, pool) are distinct events that add up rather
+// than a repeated row. A governance deposit refund is one event per proposal,
+// and two proposals sharing a deposit amount and a return account in one
+// epoch are two identical-looking rows on both sides (Preview publishes them
+// that way). Member and leader rewards are one row per pool per account, so
+// a repeat there is a data-integrity problem.
+func rewardTypeSumsRepeatedRows(rewardType string) bool {
+	return rewardType == rewardTypeProposalRefund
+}
+
 // koiosAccountRewardTypesOutOfScope lists Koios /account_reward_history
 // "type" enum values that Dingo's reward_account_output does not currently
 // produce (MIR/refund distribution mechanisms — treasury/reserves MIR
@@ -1618,11 +1651,14 @@ func formatAccountRewardPools(
 // (stake_address, reward_type, pool) row still is one, and is reported as
 // CategoryAcctDuplicate without contributing to the total.
 //
-// A reward type that is neither in scope nor deliberately out of scope, and a
-// pool identifier that does not decode, are reported as CategoryDBError
-// instead of being folded: either would otherwise surface as an acct_only_* or
-// a value_mismatch, both of which read as a Dingo defect rather than as
-// reference data this code cannot interpret.
+// A reward type that is neither modeled nor deliberately out of scope is
+// reported as CategoryRewardTypeUnmodeled, and a pool identifier that does not
+// decode as CategoryDBError, instead of being folded: either would otherwise
+// surface as an acct_only_* or a value_mismatch, both of which read as a Dingo
+// defect rather than as reference data this code cannot interpret.
+//
+// Repeated proposal_refund rows are summed rather than reported as
+// duplicates; see rewardTypeSumsRepeatedRows.
 func aggregateKoiosAccountRewards(
 	network string,
 	epoch uint64,
@@ -1637,14 +1673,16 @@ func aggregateKoiosAccountRewards(
 		if koiosAccountRewardTypesOutOfScope[row.RewardType] {
 			continue
 		}
-		if row.RewardType != "member" && row.RewardType != "leader" {
+		switch row.RewardType {
+		case rewardTypeMember, rewardTypeLeader, rewardTypeProposalRefund:
+		default:
 			out = append(out, side.mismatch(
 				network,
 				epoch,
 				row.StakeAddress,
 				"account_reward_type",
 				row.RewardType,
-				CategoryDBError,
+				CategoryRewardTypeUnmodeled,
 				now,
 			))
 			continue
@@ -1665,7 +1703,7 @@ func aggregateKoiosAccountRewards(
 		key := accountRewardKey{row.StakeAddress, row.RewardType}
 		source := accountRewardSourceKey{key, poolID}
 		seen[source]++
-		if seen[source] > 1 {
+		if seen[source] > 1 && !rewardTypeSumsRepeatedRows(row.RewardType) {
 			out = append(out, side.mismatch(
 				network,
 				epoch,
@@ -1731,7 +1769,7 @@ func aggregateDingoAccountRewards(
 		key := accountRewardKey{row.StakeAddress, row.RewardType}
 		source := accountRewardSourceKey{key, poolID}
 		seen[source]++
-		if seen[source] > 1 {
+		if seen[source] > 1 && !rewardTypeSumsRepeatedRows(row.RewardType) {
 			out = append(out, side.mismatch(
 				network,
 				epoch,
@@ -1882,7 +1920,8 @@ func severityOf(category string) mismatchSeverity {
 		CategoryAcctDeregistered,
 		CategoryPoolDeparted,
 		CategoryPoolZeroStake,
-		CategoryCostModelSynthetic:
+		CategoryCostModelSynthetic,
+		CategoryRewardTypeUnmodeled:
 		// Purely informational — see these categories' doc comments.
 		return severityInformational
 	default:

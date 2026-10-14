@@ -1164,7 +1164,11 @@ func TestCompareAccountEpochOutOfScopeRewardTypesFiltered(t *testing.T) {
 	require.Empty(t, ms)
 }
 
-func TestCompareAccountEpochUnknownRewardTypeIsDatabaseError(t *testing.T) {
+// TestCompareAccountEpochUnknownRewardTypeIsNotDatabaseError pins the verdict
+// for a Koios reward type the comparer has no model for. Nothing was read
+// from Dingo, so it must not claim a Dingo database failure, and it must not
+// stop a strict node: the row says nothing about what Dingo computed.
+func TestCompareAccountEpochUnknownRewardTypeIsNotDatabaseError(t *testing.T) {
 	t.Parallel()
 
 	now := time.Now()
@@ -1176,9 +1180,179 @@ func TestCompareAccountEpochUnknownRewardTypeIsDatabaseError(t *testing.T) {
 		"preview", 100, koios, nil, now, 0, time.Time{}, false,
 	)
 	require.Len(t, ms, 1)
-	require.Equal(t, CategoryDBError, ms[0].Category)
+	require.Equal(t, CategoryRewardTypeUnmodeled, ms[0].Category)
 	require.Equal(t, "account_reward_type", ms[0].Field)
 	require.Equal(t, "unexpected", ms[0].KoiosValue)
+	require.Empty(t, ms[0].DingoValue)
+	require.Equal(t, StatusPass, DetermineStatus(ms))
+	require.Zero(t, CountSignificant(ms))
+}
+
+// An unmodeled type must not mask a real divergence reported beside it.
+func TestCompareAccountEpochUnknownRewardTypeKeepsOtherMismatches(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	koios := []KoiosAccountRewards{
+		{StakeAddress: "stake1a", RewardType: "unexpected", Earned: "1"},
+		{StakeAddress: "stake1b", RewardType: "member", Earned: "5"},
+	}
+	ms := CompareAccountEpoch(
+		"preview", 100, koios, nil, time.Now(), 0, time.Time{}, false,
+	)
+	require.Len(t, ms, 2)
+	require.Equal(t, StatusFail, DetermineStatus(ms))
+	require.Equal(t, 1, CountSignificant(ms))
+}
+
+// proposalRefundRow is the Preview epoch 677 shape: a Koios proposal_refund
+// row carries the governance action deposit and no pool.
+func proposalRefundRow(address, amount string) KoiosAccountRewards {
+	return KoiosAccountRewards{
+		StakeAddress: address,
+		RewardType:   "proposal_refund",
+		Earned:       amount,
+	}
+}
+
+func dingoProposalRefund(address, amount string) DingoAccountReward {
+	return DingoAccountReward{
+		StakeAddress: address,
+		RewardType:   "proposal_refund",
+		Amount:       amount,
+	}
+}
+
+func compareRefunds(
+	koios []KoiosAccountRewards,
+	dingo []DingoAccountReward,
+) []CheckMismatch {
+	return CompareAccountEpoch(
+		"preview", 677, koios, dingo, time.Now(), 0, time.Time{}, false,
+	)
+}
+
+func TestCompareAccountEpochProposalRefundMatchPasses(t *testing.T) {
+	t.Parallel()
+
+	const deposit = "100000000000"
+	ms := compareRefunds(
+		[]KoiosAccountRewards{
+			proposalRefundRow("stake_test1a", deposit),
+			proposalRefundRow("stake_test1b", deposit),
+		},
+		[]DingoAccountReward{
+			dingoProposalRefund("stake_test1a", deposit),
+			dingoProposalRefund("stake_test1b", deposit),
+		},
+	)
+	require.Empty(t, ms)
+}
+
+func TestCompareAccountEpochProposalRefundMissingOnDingoFails(t *testing.T) {
+	t.Parallel()
+
+	ms := compareRefunds(
+		[]KoiosAccountRewards{
+			proposalRefundRow("stake_test1a", "100000000000"),
+		},
+		nil,
+	)
+	require.Len(t, ms, 1)
+	require.Equal(t, CategoryAcctOnlyKoios, ms[0].Category)
+	require.Equal(t, "stake_test1a", ms[0].StakeAddress)
+	require.Equal(t, StatusFail, DetermineStatus(ms))
+}
+
+func TestCompareAccountEpochProposalRefundMissingOnKoiosFails(t *testing.T) {
+	t.Parallel()
+
+	ms := compareRefunds(
+		nil,
+		[]DingoAccountReward{
+			dingoProposalRefund("stake_test1a", "100000000000"),
+		},
+	)
+	require.Len(t, ms, 1)
+	require.Equal(t, CategoryAcctOnlyDingo, ms[0].Category)
+	require.Equal(t, StatusFail, DetermineStatus(ms))
+}
+
+func TestCompareAccountEpochProposalRefundWrongAmountFails(t *testing.T) {
+	t.Parallel()
+
+	ms := compareRefunds(
+		[]KoiosAccountRewards{
+			proposalRefundRow("stake_test1a", "100000000000"),
+		},
+		[]DingoAccountReward{
+			dingoProposalRefund("stake_test1a", "1000000000"),
+		},
+	)
+	require.Len(t, ms, 1)
+	require.Equal(t, CategoryValueMismatch, ms[0].Category)
+	require.Equal(t, "account_reward_amount", ms[0].Field)
+	require.Equal(t, "1000000000", ms[0].DingoValue)
+	require.Equal(t, "100000000000", ms[0].KoiosValue)
+}
+
+// Two proposals refunded to one account in one epoch are two rows with equal
+// amounts and no pool on each side. They are two deposits, not a repeated
+// row, so they sum.
+func TestCompareAccountEpochProposalRefundsToOneAccountSum(t *testing.T) {
+	t.Parallel()
+
+	const deposit = "100000000000"
+	koios := []KoiosAccountRewards{
+		proposalRefundRow("stake_test1a", deposit),
+		proposalRefundRow("stake_test1a", deposit),
+	}
+
+	ms := compareRefunds(koios, []DingoAccountReward{
+		dingoProposalRefund("stake_test1a", deposit),
+		dingoProposalRefund("stake_test1a", deposit),
+	})
+	require.Empty(t, ms)
+
+	ms = compareRefunds(koios, []DingoAccountReward{
+		dingoProposalRefund("stake_test1a", deposit),
+	})
+	require.Len(t, ms, 1)
+	require.Equal(t, CategoryValueMismatch, ms[0].Category)
+	require.Equal(t, "200000000000", ms[0].KoiosValue)
+	require.Equal(t, deposit, ms[0].DingoValue)
+}
+
+// The refund must not be absorbed into the same account's member reward: the
+// two are separate (stake_address, reward_type) keys.
+func TestCompareAccountEpochProposalRefundIsKeyedApartFromMember(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	pool := testPoolBech32(t, 0x11)
+	ms := compareRefunds(
+		[]KoiosAccountRewards{
+			{
+				StakeAddress: "stake_test1a",
+				RewardType:   "member",
+				Earned:       "7",
+				PoolIDBech32: pool,
+			},
+			proposalRefundRow("stake_test1a", "100000000000"),
+		},
+		[]DingoAccountReward{
+			{
+				StakeAddress: "stake_test1a",
+				RewardType:   "member",
+				Amount:       "7",
+				PoolIDBech32: pool,
+			},
+		},
+	)
+	require.Len(t, ms, 1)
+	require.Equal(t, CategoryAcctOnlyKoios, ms[0].Category)
 }
 
 func TestLovelaceEqual(t *testing.T) {
@@ -1613,4 +1787,13 @@ func TestCompareAccountEpochPerPoolDiscrepanciesDoNotCancel(t *testing.T) {
 	require.Len(t, pending, 1)
 	require.Equal(t, "account_reward_pool_amount", pending[0].Field)
 	require.Equal(t, CategoryReferenceLag, pending[0].Category)
+}
+
+func testPoolBech32(t *testing.T, b byte) string {
+	t.Helper()
+	id, err := PoolKeyHashHexToBech32(
+		hex.EncodeToString(testPoolKeyHash(t, b)),
+	)
+	require.NoError(t, err)
+	return id
 }
