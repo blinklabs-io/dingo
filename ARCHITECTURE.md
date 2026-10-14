@@ -5214,8 +5214,8 @@ moves selection to the next:
   tip, which may send nothing for many slots. A peer with at least
   `headerMismatchResyncThreshold` blocks left before its advertised tip keeps
   streaming headers, and a cursor past the local tip then shows up in the
-  header handler as consecutive mismatches, which request a resync from
-  headers actually received. The advertised tip is untrusted, but it only
+  header handler as that connection's consecutive mismatches, which request
+  a resync from headers actually received. The advertised tip is untrusted, but it only
   withholds a close; overstating it cannot force one. A fallback connection,
   which the switch event carries no advertised tip for, is measured against
   the chain selector's sync target instead. That target never exceeds the

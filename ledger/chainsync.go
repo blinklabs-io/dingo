@@ -1512,6 +1512,7 @@ func (ls *LedgerState) handleConnectionClosedEvent(evt event.Event) {
 	delete(ls.bufferedHeaderEvents, connIdKey(e.ConnectionId))
 	ls.bufferedHeaderMutex.Unlock()
 	ls.removePeerHeaderHistory(connIdKey(e.ConnectionId))
+	ls.resetHeaderMismatches(connIdKey(e.ConnectionId))
 	// Cancel in-flight blockfetch if the dead connection owns it.
 	// Without this, chainsyncBlockfetchReadyChan stays non-nil and
 	// new headers from reconnected peers are queued behind a batch
@@ -1640,7 +1641,8 @@ func (ls *LedgerState) detectConnectionSwitch(
 				"dropped_rollbacks", ls.dropRollbackCount,
 			)
 			ls.dropRollbackCount = 0
-			ls.headerMismatchCount = 0
+			// Mismatch counts are per connection, so a switch of the active
+			// peer leaves every connection's count alone.
 			ls.chainsyncBlockfetchMutex.Lock()
 			replayConnId, err := ls.handoffPipelineOnSwitchLocked(
 				*activeConnId,
@@ -2514,7 +2516,7 @@ func (ls *LedgerState) headerAtOrImmediatelyBeforeTip(
 // This shape is normal while a from-genesis ledger catches up after restart:
 // the block store can be far ahead of the applied ledger, and a peer may
 // replay a historical header while the local chain tip has already advanced.
-// It is not a fork and must not contribute to headerMismatchCount.
+// It is not a fork and must not contribute to headerMismatchCounts.
 //
 // Only a point confirmed present in the primary-chain index suppresses fork
 // handling. A lookup failure is not evidence of a duplicate, so it is logged
@@ -2819,6 +2821,43 @@ func desiredBlockfetchBatchHeaders(
 	return min(minHeaders, maxHeaders)
 }
 
+// addHeaderMismatch counts one more consecutive mismatch for the connection
+// key and returns its new count.
+func (ls *LedgerState) addHeaderMismatch(key string) int {
+	ls.headerMismatchMu.Lock()
+	defer ls.headerMismatchMu.Unlock()
+	if ls.headerMismatchCounts == nil {
+		ls.headerMismatchCounts = make(map[string]int)
+	}
+	ls.headerMismatchCounts[key]++
+	return ls.headerMismatchCounts[key]
+}
+
+// undoHeaderMismatch reverts one addHeaderMismatch for the connection key.
+func (ls *LedgerState) undoHeaderMismatch(key string) {
+	ls.headerMismatchMu.Lock()
+	defer ls.headerMismatchMu.Unlock()
+	if ls.headerMismatchCounts[key] > 1 {
+		ls.headerMismatchCounts[key]--
+	} else {
+		delete(ls.headerMismatchCounts, key)
+	}
+}
+
+// resetHeaderMismatches drops the connection key's mismatch count.
+func (ls *LedgerState) resetHeaderMismatches(key string) {
+	ls.headerMismatchMu.Lock()
+	defer ls.headerMismatchMu.Unlock()
+	delete(ls.headerMismatchCounts, key)
+}
+
+// clearHeaderMismatches drops every connection's mismatch count.
+func (ls *LedgerState) clearHeaderMismatches() {
+	ls.headerMismatchMu.Lock()
+	defer ls.headerMismatchMu.Unlock()
+	clear(ls.headerMismatchCounts)
+}
+
 // requestChainsyncResync asks the chainsync layer to renegotiate an
 // intersection with a peer.
 //
@@ -2834,7 +2873,7 @@ func (ls *LedgerState) requestChainsyncResync(
 	reason string,
 	pending *pendingPublishes,
 ) bool {
-	ls.headerMismatchCount = 0
+	ls.resetHeaderMismatches(connIdKey(connId))
 	ls.clearRollbackHistory()
 	ls.bufferedHeaderMutex.Lock()
 	delete(ls.bufferedHeaderEvents, connIdKey(connId))
@@ -3807,14 +3846,14 @@ func (ls *LedgerState) clearRollbackHistoryForPoint(point ocommon.Point) {
 }
 
 // resetChainsyncResyncState clears chainsync-local recovery state before a
-// re-sync. It mutates rollbackHistory, headerMismatchCount, and queued
+// re-sync. It mutates rollbackHistory, headerMismatchCounts, and queued
 // chain/blockfetch state by calling chain.ClearHeaders and
 // blockfetchRequestRangeCleanup (while holding chainsyncBlockfetchMutex).
 // Callers must hold chainsyncMutex before invoking this method to avoid races
 // with other chainsync operations.
 func (ls *LedgerState) resetChainsyncResyncState() {
 	ls.clearRollbackHistory()
-	ls.headerMismatchCount = 0
+	ls.clearHeaderMismatches()
 	ls.setSelectedBlockfetchConnId(ouroboros.ConnectionId{})
 	ls.chainsyncBlockfetchMutex.Lock()
 	// clearQueuedHeaders mutates headerPipelineConnId, which every other
@@ -4606,14 +4645,17 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 			ls.chainsyncBlockfetchMutex.Lock()
 			ls.clearQueuedHeaders()
 			ls.chainsyncBlockfetchMutex.Unlock()
-			ls.headerMismatchCount++
+			// The persistent-fork threshold is per connection: another
+			// connection's mismatches must not count toward this one.
+			mismatchKey := connIdKey(e.ConnectionId)
+			mismatchCount := ls.addHeaderMismatch(mismatchKey)
 			ls.config.Logger.Debug(
 				"block header does not fit chain tip",
 				"component", "ledger",
 				"slot", e.Point.Slot,
 				"block_prev_hash", notFitErr.BlockPrevHash(),
 				"chain_tip_hash", notFitErr.TipHash(),
-				"consecutive_mismatches", ls.headerMismatchCount,
+				"consecutive_mismatches", mismatchCount,
 			)
 			// The incoming header's prevHash is the block it extends
 			// from — the common ancestor. If that block exists on our
@@ -4623,9 +4665,7 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 				e, notFitErr, pending, headerCryptoVerificationGeneration,
 			)
 			if resolveErr != nil {
-				if ls.headerMismatchCount > 0 {
-					ls.headerMismatchCount--
-				}
+				ls.undoHeaderMismatch(mismatchKey)
 				return fmt.Errorf(
 					"failed resolving fork after header mismatch: %w",
 					resolveErr,
@@ -4646,7 +4686,7 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 			// chainsync re-sync by closing the connection so the
 			// peer governance reconnects and negotiates a fresh
 			// intersection.
-			if ls.headerMismatchCount >= headerMismatchResyncThreshold &&
+			if mismatchCount >= headerMismatchResyncThreshold &&
 				ls.config.EventBus != nil {
 				ls.config.Logger.Info(
 					"persistent chain fork detected, triggering chainsync re-sync",
@@ -4655,7 +4695,7 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 					"connection_id",
 					e.ConnectionId.String(),
 					"consecutive_mismatches",
-					ls.headerMismatchCount,
+					mismatchCount,
 				)
 				ls.requestChainsyncResync(
 					e.ConnectionId,
@@ -4677,8 +4717,8 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 		}
 		return fmt.Errorf("failed adding chain block header: %w", err)
 	}
-	// Reset mismatch counter on successful header addition
-	ls.headerMismatchCount = 0
+	// A successful header resets only the connection that delivered it.
+	ls.resetHeaderMismatches(connIdKey(e.ConnectionId))
 	ls.recordAdmittedHeaderFrontier(
 		e,
 		headerTrusted,
@@ -5552,7 +5592,7 @@ func (ls *LedgerState) tryResolveFork(
 				return false, nil
 			}
 		}
-		ls.headerMismatchCount = 0
+		ls.clearHeaderMismatches()
 		ls.clearRollbackHistory()
 		if ls.config.BlockfetchRequestRangeFunc != nil &&
 			ls.chain.HeaderCount() > 0 {
@@ -5600,8 +5640,6 @@ func (ls *LedgerState) tryResolveFork(
 				"connection_id",
 				e.ConnectionId.String(),
 			)
-			ls.headerMismatchCount = 0
-			ls.clearRollbackHistory()
 			ls.requestChainsyncResync(
 				e.ConnectionId,
 				event.ChainsyncResyncReasonRollbackNotFound,
@@ -5652,9 +5690,9 @@ func (ls *LedgerState) tryResolveFork(
 				ls.chain.Tip().Point.Slot,
 				"peer_tip_slot", e.Tip.Point.Slot,
 			)
-			// Reset mismatch state so the fallback path in the
-			// caller does not fire a duplicate resync event.
-			ls.headerMismatchCount = 0
+			// Only this connection is resynced, so only its count
+			// is reset.
+			ls.resetHeaderMismatches(connIdKey(e.ConnectionId))
 			ls.clearRollbackHistory()
 			pending.add(
 				ls.config.EventBus,
@@ -5721,7 +5759,7 @@ func (ls *LedgerState) tryResolveFork(
 			return false, nil
 		}
 	}
-	ls.headerMismatchCount = 0
+	ls.clearHeaderMismatches()
 	ls.clearRollbackHistory()
 	if ls.config.BlockfetchRequestRangeFunc != nil &&
 		ls.chain.HeaderCount() > 0 {
