@@ -368,8 +368,8 @@ func TestNodeAdapterGovernanceProposalVotes(t *testing.T) {
 
 	// Slot 100: the DRep votes in tx 0xa1 and again, changing its vote, in
 	// tx 0xa2; an invalid tx 0xa3 names the same vote and must not count.
-	// Slot 200: one tx carries three procedures, which the ledger orders by
-	// voter type then hash, so the SPO sits at 1 although the map is unordered.
+	// Slot 200: one tx carries three voters' procedures; each voter's index
+	// counts only its own actions.
 	serveBlocks(fx, map[uint64]*slotBlock{
 		100: {number: 40, txs: []lcommon.Transaction{
 			newTx(0xa1, true, procedures(drep, target, uint8(0))),
@@ -400,9 +400,9 @@ func TestNodeAdapterGovernanceProposalVotes(t *testing.T) {
 		Voter: drepID, Vote: "yes", Counted: true,
 	}, rows[0], "the later transaction of the block set the stored value")
 	assert.Equal(t, GovernanceProposalVoteInfo{
-		TxHash: hexOf(fill32(0xb1)), CertIndex: 2, VoterRole: "spo",
+		TxHash: hexOf(fill32(0xb1)), CertIndex: 0, VoterRole: "spo",
 		Voter: spoID, Vote: "abstain", Counted: true,
-	}, rows[1], "voters order by type: cc, drep, spo, so the pool is third")
+	}, rows[1], "the pool's only action in the transaction")
 	assert.Equal(t, "constitutional_committee", rows[2].VoterRole)
 	assert.Equal(t, 0, rows[2].CertIndex)
 	assert.False(t, rows[2].Counted, "a deleted vote is no longer counted")
@@ -487,7 +487,7 @@ func TestNodeAdapterDRepVotesAndPoolVotes(t *testing.T) {
 	votes, total, err := fx.adapter.PoolVotes(ctx, poolID, asc)
 	require.NoError(t, err)
 	assert.Equal(t, 1, total)
-	assert.Equal(t, []PoolVoteInfo{{TxHash: hexOf(fill32(0xa1)), CertIndex: 1, Vote: "no"}}, votes)
+	assert.Equal(t, []PoolVoteInfo{{TxHash: hexOf(fill32(0xa1)), CertIndex: 0, Vote: "no"}}, votes)
 	_, _, err = fx.adapter.PoolVotes(ctx, "not-a-pool", asc)
 	assert.ErrorIs(t, err, ErrInvalidPoolID)
 }
@@ -776,4 +776,43 @@ func TestNodeAdapterCommitteeVotes(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 0, total)
 	assert.Empty(t, rows)
+}
+
+// Blockfrost's vote cert_index is db-sync's voting_procedure.index: the
+// position of the governance action among one voter's procedures in the
+// transaction, counted from 0 for each voter (db-sync numbers each voter's
+// Map.toList separately), not a position across every voter of the
+// transaction.
+func TestNodeAdapterVoteCertIndexCountsPerVoter(t *testing.T) {
+	t.Parallel()
+	fx := newEpochFixture(t)
+	ctx := context.Background()
+	first := fx.addProposal(t, 0x01, 0, lcommon.GovActionTypeInfo, []byte{0x81, 0x06}, 10)
+	second := fx.addProposal(t, 0x02, 0, lcommon.GovActionTypeInfo, []byte{0x81, 0x06}, 11)
+	poolID := fx.addPool(t, bytes32of(28, 0xa1), nil)
+	cc := voter(lcommon.VoterTypeConstitutionalCommitteeHotKeyHash, 0xcc)
+	drep := voter(lcommon.VoterTypeDRepKeyHash, 0xd1)
+	spo := voter(lcommon.VoterTypeStakingPoolKeyHash, 0xa1)
+	serveBlocks(fx, map[uint64]*slotBlock{
+		100: {number: 1, txs: []lcommon.Transaction{newTx(0xb1, true, procedures(
+			spo, govID(t, 0x01, 0), uint8(0),
+			drep, govID(t, 0x02, 0), uint8(1),
+			cc, govID(t, 0x02, 0), uint8(1),
+			drep, govID(t, 0x01, 0), uint8(0),
+			cc, govID(t, 0x01, 0), uint8(0),
+		))}},
+	})
+	fx.addVote(t, second, models.VoterTypeDRep, 0, 0xd1, models.VoteNo, 100, false)
+	fx.addVote(t, first, models.VoterTypeSPO, 0, 0xa1, models.VoteNo, 100, false)
+
+	rows, _, err := fx.adapter.GovernanceProposalVotes(ctx, GovActionRef{TxHash: fill32(0x02), Index: 0}, asc)
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	assert.Equal(t, 1, rows[0].CertIndex,
+		"the DRep's second action; the committee member's votes do not count")
+
+	votes, _, err := fx.adapter.PoolVotes(ctx, poolID, asc)
+	require.NoError(t, err)
+	require.Len(t, votes, 1)
+	assert.Equal(t, 0, votes[0].CertIndex, "the pool's only action")
 }

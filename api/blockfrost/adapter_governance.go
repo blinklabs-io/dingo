@@ -572,46 +572,39 @@ func lcommonVoterType(voterType uint8, credentialTag uint8) (uint8, bool) {
 	}
 }
 
-// voteProcedureIndex is the position of a voting procedure among a
-// transaction's, in the order of the ledger's map: voters by type then hash,
-// each voter's actions by transaction id then index.
+// voteProcedureIndex is the position of a voting procedure among the
+// voter's own procedures in the transaction, in the ledger map's order of
+// governance action id (transaction id, then index). This is db-sync's
+// voting_procedure.index, which Blockfrost serves as cert_index: it numbers
+// each voter's actions from 0, so other voters in the transaction do not
+// shift it.
 func voteProcedureIndex(
 	procedures lcommon.VotingProcedures,
 	voter lcommon.Voter,
 	action lcommon.GovActionId,
 ) (int, bool) {
-	voters := make([]*lcommon.Voter, 0, len(procedures))
-	for v := range procedures {
-		if v != nil {
-			voters = append(voters, v)
+	for v, votes := range procedures {
+		if v == nil || v.Type != voter.Type || v.Hash != voter.Hash {
+			continue
 		}
-	}
-	slices.SortFunc(voters, func(x, y *lcommon.Voter) int {
-		if x.Type != y.Type {
-			return int(x.Type) - int(y.Type)
-		}
-		return bytes.Compare(x.Hash[:], y.Hash[:])
-	})
-	index := 0
-	for _, v := range voters {
-		actions := make([]*lcommon.GovActionId, 0, len(procedures[v]))
-		for id := range procedures[v] {
+		actions := make([]*lcommon.GovActionId, 0, len(votes))
+		for id := range votes {
 			if id != nil {
 				actions = append(actions, id)
 			}
 		}
 		slices.SortFunc(actions, func(x, y *lcommon.GovActionId) int {
-			if c := bytes.Compare(x.TransactionId[:], y.TransactionId[:]); c != 0 {
+			if c := bytes.Compare(
+				x.TransactionId[:], y.TransactionId[:],
+			); c != 0 {
 				return c
 			}
 			return int(x.GovActionIdx) - int(y.GovActionIdx)
 		})
-		for _, id := range actions {
-			if v.Type == voter.Type && v.Hash == voter.Hash &&
-				id.Equal(action) {
+		for index, id := range actions {
+			if id.Equal(action) {
 				return index, true
 			}
-			index++
 		}
 	}
 	return 0, false
