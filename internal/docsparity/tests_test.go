@@ -3085,7 +3085,7 @@ func TestPipelineStagesAreOrdered(t *testing.T) {
 }
 
 // TestReleaseGatesOnGovulncheck checks that a tag cannot publish while
-// govulncheck is failing.
+// govulncheck is failing or Linux race tests have not passed.
 //
 // This was lost once already. `make govulncheck` was the last step of
 // publish.yml's `ci` job and create-draft-release needed `[ci]`, so the gate
@@ -3105,6 +3105,13 @@ func TestReleaseGatesOnGovulncheck(t *testing.T) {
 		t.Fatalf("%s has no create-draft-release job", publishPipeline)
 	}
 	needs := jobNeeds(t, publishPipeline, "create-draft-release", job)
+	if !contains(needs, "go-test-linux-race") {
+		t.Errorf(
+			"%s: create-draft-release does not need go-test-linux-race; "+
+				"a tag could publish before race tests pass",
+			publishPipeline,
+		)
+	}
 	if !contains(needs, "govulncheck") {
 		t.Errorf(
 			"%s: create-draft-release does not need govulncheck; a tag could "+
