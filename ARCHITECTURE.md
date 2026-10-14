@@ -567,6 +567,7 @@ sequenceDiagram
     LS->>LS: compute epoch nonce contributions
     LS->>LS: at an era boundary, enact source-era pparams, then translate before successor-era epoch rules and SNAP
     LS->>LS: allow at most two consecutive era transitions for a successor-header boundary block, never ahead of a configured TriggerAtEpoch
+    LS->>LS: before translating, decide the era the ledger enters from its own state, and refuse a validated boundary block encoded in any other era, in either direction
 
     Note over Peer,DB: Stage 4 — Persistence
     LS->>ChM: chain.AddBlocks(batch) — 50 blocks max
@@ -3657,7 +3658,7 @@ outcome: that shortcut fired on ordinary `ValidateHistorical=false`
 catch-up, not only a trusted-chain-dump import, so it was removed rather
 than narrowed to the trusted-import case its name implied.
 
-Era transitions run the target era's `HardForkFunc` to translate protocol parameters before persisting the new pparams. At an epoch boundary, the rollover enacts pending protocol-parameter updates in the source era first and applies the successor transitions afterward. This is required because an update submitted in the source era can contain a field removed by the successor era (for example, Alonzo's decentralization field in the Babbage update shape). The boundary block body's era is authoritative for ordinary advancement: a source-era block can advertise the next protocol major in its header without activating that successor. Header elevation is used only after the body itself advances, where it can validate the exceptional two-consecutive-era boundary path. Transitions can also rewrite ratified-but-not-yet-enacted governance action payloads into the target era's CBOR shape; the Conway to Dijkstra path translates parameter-change proposals so the Dijkstra enactment update function receives `DijkstraProtocolParameterUpdate` rather than a stale Conway update.
+Era transitions run the target era's `HardForkFunc` to translate protocol parameters before persisting the new pparams. At an epoch boundary, the rollover enacts pending protocol-parameter updates in the source era first and applies the successor transitions afterward. This is required because an update submitted in the source era can contain a field removed by the successor era (for example, Alonzo's decentralization field in the Babbage update shape). The era a boundary enters is decided by the ledger, not by the block that opens the epoch. Before the first translation (whose `HardForkFunc` rewrites the protocol version), `authorizeBoundaryEra` asks `ledgerBoundaryEra` for the era the boundary enters, following ouroboros-consensus `singleEraTransition`: an era with a configured `TriggerAtEpoch` ends at that epoch, and an era with a version trigger ends once the protocol parameters in force next epoch name the next era's major and at least `k` blocks of the ending epoch lie at or past the voting deadline (`shelleyAfterVoting >= k`, the same count `evaluateProtocolVersionBump` uses). Until the transition is known by that count, the block that opens the epoch belongs to the source era even when the major has already moved. A validated boundary block (one the node validates rather than replays unvalidated) whose body is in any other era is refused with `errBoundaryEraNotAuthorized`, the analogue of `HardForkLedgerErrorWrongEra`: a block in an era the ledger has not entered and one in an era the ledger has left are both wrong. From Conway the major moves through `HardForkInitiation`, which ENACT applies at the boundary itself, so the decision forecasts it without writing: `governance.ForecastHardForkInitiations` applies the `HardForkInitiation` proposals marked ratified and not yet enacted, and those the previous boundary's deferred RATIFY has decided but not yet written, in the order ENACT would. A refusal releases the rollover's transaction-validation transition before the block is rewound as a rejected header, and the ledger stays in its source era. The block's body era still selects the transition path: a header elevation is a header-carried protocol version, which outside mainnet is not bounded below major 12, so an elevation past the ledger's era is capped at that era, and header elevation lets a body one era short of the ledger's era carry the exceptional two-consecutive-era boundary path. A source-era block can advertise the next protocol major in its header without activating that successor. Transitions can also rewrite ratified-but-not-yet-enacted governance action payloads into the target era's CBOR shape; the Conway to Dijkstra path translates parameter-change proposals so the Dijkstra enactment update function receives `DijkstraProtocolParameterUpdate` rather than a stale Conway update.
 
 An empty from-genesis database therefore does not infer a hard-fork epoch from
 the Shelley protocol version alone. The version identifies the target era, but
@@ -4323,6 +4324,23 @@ requiring the epoch row first, which previously deadlocked a from-genesis sync
 at a normal-boundary `d` decrease. Blockfetch still defers the stateful overlay
 decision until ledger apply when even the forecast cannot resolve it; full
 historical validation and the normal leader checks remain enabled.
+
+`ProtocolParamsForSlot` is also what the forger reads to pick the era of a
+block, so for a slot in a later epoch it returns the parameters of the era the
+ledger enters at the boundary, decided by `ledgerBoundaryEra` from the
+forecast parameters and the applied tip. That is the predicate the boundary
+check applies to the first block of the epoch, so a block forged in the chosen
+era is accepted and one in the other era refused. The reference
+`hardForkForgeBlock` likewise forges in the era of the ticked ledger state. For
+a version-triggered transition the first block of the new epoch is forged in
+the new era only once `k` blocks of the ending epoch lie at or past the voting
+deadline; before that it is forged in the source era. The applied tip is read
+from the same snapshot publication as the epoch: a load that straddles a
+publication waits for the matching pair rather than pairing generations, since
+an older, higher tip can satisfy `k` for an era the matching state has not
+entered. A forecast that cannot be completed, such as an unfinished
+deferred ratification, returns no parameters so the forger skips the slot
+rather than forging in a guessed era.
 
 **Why deferring a `d=1` overlay header is a real fix, not a suppression.** With
 `d = 1` (full federation — every early Shelley epoch, and epoch 0 on every
