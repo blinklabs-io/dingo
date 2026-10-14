@@ -5527,8 +5527,21 @@ Praos once the selector exits Genesis mode. Chainsync and ledger retain enough
 per-peer header ancestry for the active slot window while Genesis is active,
 then shrink back to their normal bounded history after exit. The ledger's
 peer-local ancestry stores compact header CBOR and prev-hash metadata rather
-than retaining decoded header objects, and enforces both the active window's
-entry bound and an 8 MiB per-connection byte budget. Rollback recovery
+than retaining decoded header objects, and enforces the active window's
+entry bound and an 8 MiB per-connection byte budget. Headers still ahead of
+the local tip are kept past the entry bound, up to the header queue capacity
+(`chain.MaxQueuedHeaders`) and within the byte budgets, so that after a header
+queue clear the in-flight headers of an honest peer still reach the local tip.
+Fork recovery re-queues the whole path from the local tip, so for a peer
+extending one chain, a header older than its newest `MaxQueuedHeaders` records
+lies only on paths longer than the queue.
+While a connection's oldest retained header is ahead of the tip its byte budget
+rises to 24 MiB, and all connections together are held to 64 MiB.
+These budgets hold a full 10,000-header queue of production-sized headers for
+each default chainsync client; larger headers or a deeper queue
+(`MaxQueuedHeaders` grows with the security parameter) hit the byte budget
+first, and the oldest headers are evicted. The ancestry walk covers the whole
+retained history rather than only the entry bound. Rollback recovery
 memoizes resolved ancestry within one recovery pass, keeping missing-point
 fallback work linear in the retained history while the ChainSync mutex is
 held. If a candidate fork path falls outside the retained suffix, recovery
