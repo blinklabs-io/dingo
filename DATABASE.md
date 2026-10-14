@@ -4773,14 +4773,14 @@ live re-registration. The deposit is the same on both rows. Lookups at the
 import slot can resolve current and staged parameters by their index; earlier
 cutoffs still have the history gap.
 
-The fix lives in `electingVrfKeyHashWithCache`, not in these two queries or in
-`ImportPool`: when both lookups miss, and this is a Mithril-bootstrapped node
-(`ls.mithrilLedgerSlot != 0`) whose stake-snapshot capture slot is at or below
-that boundary, the gap is known to be exactly this bootstrap shape rather than
-a genuine missing-registration bug, so the caller falls back to the pool's
-current live registration (`GetPool(includeInactive=true)`) the same way it
-already does when `electingPoolParamsCutoffSlotWithCache` reports no snapshot
-at all (`ok == false`). An earlier version of this fix instead seeded a second,
+`electingVrfKeyHashFromSnapshotWithContext` resolves a snapshot captured at
+or below the Mithril anchor against the registration effective in the import
+epoch when historical lookups cannot answer it. When Dijkstra's parameter
+cutoff and the imported active distribution's capture both equal the anchor,
+it uses that epoch-effective lookup directly: the staged registration at the
+same slot has not been promoted yet. Later boundary snapshots retain their
+era-specific historical cutoff, so Dijkstra snapshots taken after promotion
+resolve the staged key. An earlier version of this fix instead seeded a second,
 `added_slot = 0` "floor" registration row at import time so the existing
 queries would resolve on their own; that synthetic row also satisfied
 `GetPoolRegistrationsEffectiveForEpoch`'s in-epoch registration window

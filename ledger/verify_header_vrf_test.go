@@ -725,6 +725,53 @@ func TestElectingVrfKeyHashUsesCurrentImportedParamsBeforePromotion(
 	assert.Equal(t, currentKey, gotKey.Bytes())
 }
 
+func TestElectingVrfKeyHashDefersImportedRotationInDijkstra(t *testing.T) {
+	t.Parallel()
+
+	nonce := bytes.Repeat([]byte{0x07}, 32)
+	ls, db := newEligibilityTestLedger(t, nonce)
+	ls.epochCache = musashiEpochs(29, 33, dijkstra.EraIdDijkstra, nonce)
+	const anchorSlot = 31*musashiEpochLength + 100
+	ls.mithrilLedgerSlot = anchorSlot
+	ls.publishSnapshotsLocked()
+
+	pool := lcommon.PoolKeyHash(bytes.Repeat([]byte{0x11}, 28))
+	currentKey := bytes.Repeat([]byte{0xB5}, 32)
+	futureKey := bytes.Repeat([]byte{0xC6}, 32)
+	seedPoolRegistrationAtSlotAndIndex(
+		t, db, pool[:], currentKey, anchorSlot, 0,
+	)
+	seedPoolRegistrationAtSlotAndIndex(
+		t, db, pool[:], futureKey, anchorSlot, 1,
+	)
+	seedPoolStakeSnapshotOfTypeAtSlot(t, db, 31,
+		models.PoolStakeSnapshotTypeActive, pool[:], 1_000, 10_000,
+		anchorSlot)
+	tb := createTestBlock(t, [32]byte{60}, 60, tamperNone)
+	tb.block.slot = anchorSlot + 1
+	cutoff, captured, ok, err := ls.electingPoolParamsCutoffSlot(
+		tb.block, 31, pool,
+	)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, uint64(anchorSlot), cutoff)
+	require.Equal(t, uint64(anchorSlot), captured)
+	gotKey, ok, err := ls.electingVrfKeyHash(tb.block, 31, pool)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, currentKey, gotKey.Bytes())
+
+	// A later boundary promotes the staged registration before Dijkstra SNAP.
+	seedPoolStakeSnapshotOfTypeAtSlot(t, db, 32,
+		models.PoolStakeSnapshotTypeMark, pool[:], 1_000, 10_000,
+		32*musashiEpochLength-1)
+	tb.block.slot = 33*musashiEpochLength + 1
+	gotKey, ok, err = ls.electingVrfKeyHash(tb.block, 33, pool)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, futureKey, gotKey.Bytes())
+}
+
 // TestElectingVrfKeyHashStillRejectsAPoolWithNoRegistrationAtAll pins the
 // boundary the Mithril-anchor fix must not erase: on a Mithril-bootstrapped
 // node, a

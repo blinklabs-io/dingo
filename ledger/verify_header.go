@@ -2250,11 +2250,41 @@ func (ls *LedgerState) electingVrfKeyHashFromSnapshotWithContext(
 	if ok {
 		txn := ls.db.MetadataTxn(ctx, false)
 		defer txn.Release()
-		vrfKeyHash, found, err := ls.db.Metadata().GetPoolVrfKeyHashAtSlot(
-			poolKeyHash[:],
-			cutoffSlot,
-			txn.Metadata(),
-		)
+		var vrfKeyHash []byte
+		var found bool
+		if ls.mithrilLedgerSlot != 0 && cutoffSlot == ls.mithrilLedgerSlot &&
+			capturedSlot == ls.mithrilLedgerSlot {
+			// Imported active distributions precede promotion even in Dijkstra;
+			// the two anchor rows describe current and deferred parameters.
+			mithrilEpoch, epochErr := epochForSlotInCache(
+				epochCache,
+				capturedSlot,
+			)
+			if epochErr != nil {
+				return lcommon.Blake2b256{}, false, headerStateLookupErr(
+					epochErr,
+				)
+			}
+			registrations, registrationErr := ls.db.Metadata().
+				GetPoolRegistrationsEffectiveForEpoch(
+					[]lcommon.PoolKeyHash{poolKeyHash},
+					mithrilEpoch.StartSlot,
+					mithrilEpoch.EpochId,
+					capturedSlot,
+					txn.Metadata(),
+				)
+			err = registrationErr
+			if len(registrations) == 1 {
+				vrfKeyHash = registrations[0].VrfKeyHash
+				found = true
+			}
+		} else {
+			vrfKeyHash, found, err = ls.db.Metadata().GetPoolVrfKeyHashAtSlot(
+				poolKeyHash[:],
+				cutoffSlot,
+				txn.Metadata(),
+			)
+		}
 		if err != nil {
 			return lcommon.Blake2b256{}, false, headerStateLookupErr(err)
 		}
