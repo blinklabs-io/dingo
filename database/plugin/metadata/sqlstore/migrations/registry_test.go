@@ -689,3 +689,30 @@ func TestSplitSQLPreservesCommentTokenBoundaries(t *testing.T) {
 		"SELECT 1",
 	}, statements)
 }
+
+func TestPoolRegistrationIdentityMigrationTranslatesIndexDrop(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		dialect string
+		dropSQL string
+	}{
+		{"sqlite", "DROP INDEX IF EXISTS `idx_pool_reg_pool_slot`"},
+		{"postgres", `DROP INDEX IF EXISTS "idx_pool_reg_pool_slot"`},
+		{"mysql", "DROP INDEX `idx_pool_reg_pool_slot` ON `pool_registration`"},
+	} {
+		t.Run(tc.dialect, func(t *testing.T) {
+			t.Parallel()
+			registry, err := registryForDialect(tc.dialect)
+			require.NoError(t, err)
+			migration := registry[42]
+			require.Equal(t, poolRegistrationIdentitySchemaRelease, migration.Name)
+			expand := migration.SQL[tc.dialect].Expand
+			require.Contains(t, expand, tc.dropSQL)
+			if tc.dialect == "mysql" {
+				require.Contains(t, expand[2],
+					"CREATE UNIQUE INDEX `idx_pool_reg_pool_slot_cert_index`")
+				require.Equal(t, tc.dropSQL, expand[3])
+			}
+		})
+	}
+}
