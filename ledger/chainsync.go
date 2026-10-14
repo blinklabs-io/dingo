@@ -3490,10 +3490,15 @@ func (ls *LedgerState) handleEventChainsyncRollback(
 		}
 	}
 
-	// A rollback point ahead of our local tip is invalid for the
-	// current chain view and typically indicates intersect drift.
+	// A rollback point ahead of our committed tip is invalid unless it names
+	// a queued header, which Chain.Rollback trims without touching ledger
+	// state. Any other point in that gap indicates intersect drift.
+	// Check the queue first so a header committed between the two reads is
+	// compared against the newer block tip.
 	// Trigger a chainsync re-sync instead of failing hard.
-	if e.Point.Slot > localTip.Point.Slot {
+	queuedRollback := ls.chain.HoldsQueuedHeader(e.Point)
+	committedTip := ls.chain.Tip()
+	if !queuedRollback && e.Point.Slot > committedTip.Point.Slot {
 		ls.config.Logger.Warn(
 			"received rollback point ahead of local tip, triggering chainsync re-sync",
 			"component",
@@ -3501,7 +3506,7 @@ func (ls *LedgerState) handleEventChainsyncRollback(
 			"rollback_slot",
 			e.Point.Slot,
 			"local_tip_slot",
-			localTip.Point.Slot,
+			committedTip.Point.Slot,
 			"connection_id",
 			e.ConnectionId.String(),
 		)

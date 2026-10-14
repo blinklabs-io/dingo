@@ -6406,3 +6406,84 @@ func TestSubscribeChainsyncResyncPenalizesOnlyTheResponsibleDeferredHeaderPeer(
 		20*time.Millisecond,
 	)
 }
+
+// A header from a peer whose advertised tip is a Genesis window older than the
+// wall clock is observed for chain selection but never published to the ledger,
+// so an abandoned fork cannot leave headers in the shared queue. A peer at the
+// wall clock is published as before.
+func TestChainsyncClientRollForwardWithholdsWallClockStalePeer(t *testing.T) {
+	t.Parallel()
+
+	bus := event.NewEventBus(nil, nil)
+	defer bus.Close()
+	_, ledgerCh := bus.Subscribe(ledger.ChainsyncEventType)
+
+	const wall = uint64(50000)
+	cs := chainselection.NewChainSelector(chainselection.ChainSelectorConfig{
+		GenesisMode:        true,
+		SecurityParam:      20,
+		GenesisWindowSlots: 100,
+		WallClockSlot: func() (uint64, bool) {
+			return wall, true
+		},
+		DisableEventSubscriptions: true,
+	})
+	state := dchainsync.NewState(bus, nil)
+	stale := newTestConnId("127.0.0.1:6000", "10.0.0.1:3001")
+	fresh := newTestConnId("127.0.0.1:6000", "10.0.0.2:3001")
+	require.True(t, state.AddClientConnId(stale))
+	require.True(t, state.AddClientConnId(fresh))
+
+	o := newOuroboros(OuroborosConfig{
+		EventBus: bus,
+		ChainsyncIngressEligible: func(ouroboros.ConnectionId) bool {
+			return true
+		},
+		// Models node.chainsyncObservePeerTip, which observes synchronously
+		// throughout Genesis selection (the node-level tests pin that,
+		// including with corroboration off).
+		ChainsyncObservePeerTip: cs.ObservePeerTipUpdate,
+		ChainsyncApplyEligible:  cs.ShouldApplyIngress,
+	})
+	o.chainsyncState = state
+	o.eventBus = bus
+
+	staleHeader := newTestBlockHeader(100, 1, 0xaa)
+	staleTip := ochainsync.Tip{
+		Point:       ocommon.NewPoint(200, []byte("stale-tip")),
+		BlockNumber: 2,
+	}
+	require.NoError(t, o.chainsyncClientRollForward(
+		ochainsync.CallbackContext{ConnectionId: stale},
+		0,
+		staleHeader,
+		staleTip,
+	))
+
+	freshHeader := newTestBlockHeader(101, 1, 0xbb)
+	freshTip := ochainsync.Tip{
+		Point:       ocommon.NewPoint(wall, []byte("fresh-tip")),
+		BlockNumber: 3,
+	}
+	require.NoError(t, o.chainsyncClientRollForward(
+		ochainsync.CallbackContext{ConnectionId: fresh},
+		0,
+		freshHeader,
+		freshTip,
+	))
+
+	// The stale peer's header was processed first, so the first event to
+	// arrive must be the fresh peer's; a stale event would arrive before it.
+	evt := testutil.RequireReceive(
+		t, ledgerCh, time.Second,
+		"the fresh peer's header must be published to the ledger",
+	)
+	data, ok := evt.Data.(ledger.ChainsyncEvent)
+	require.True(t, ok)
+	require.Equal(t, fresh, data.ConnectionId,
+		"a wall-clock-stale peer's header was published to the ledger")
+	testutil.RequireNoReceive(
+		t, ledgerCh, 200*time.Millisecond,
+		"no further header should be published",
+	)
+}

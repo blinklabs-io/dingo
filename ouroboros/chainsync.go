@@ -1158,10 +1158,11 @@ func (o *Ouroboros) chainsyncClientRollBackward(
 	}
 	// Observe the rollback for chain selection FIRST — it trims the peer's
 	// observed frontier (ApplyRollback), which can change its corroboration
-	// status, so the apply gate below must reflect it. If the hook handles it
-	// synchronously (Genesis selection mode), skip the async publish to
-	// avoid a double update; otherwise publish for the async subscriber. This
-	// mirrors the roll-forward ChainsyncObservePeerTip ordering.
+	// status and registers an untracked peer's tip, so the apply gate below
+	// must reflect it. If the hook handles it synchronously (Genesis selection
+	// mode), skip the async publish to avoid a double update; otherwise publish
+	// for the async subscriber. This mirrors the roll-forward
+	// ChainsyncObservePeerTip ordering.
 	rollbackEvent := chainselection.PeerRollbackEvent{
 		ConnectionId: ctx.ConnectionId,
 		Point:        point,
