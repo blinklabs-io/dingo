@@ -18,13 +18,11 @@ package gcs
 
 import (
 	"context"
-	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
-	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -33,6 +31,7 @@ import (
 
 	"cloud.google.com/go/storage"
 	"github.com/blinklabs-io/dingo/database/plugin/blob/internal/compensate"
+	"github.com/blinklabs-io/dingo/database/plugin/blob/internal/reversekey"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/blockverify"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -638,7 +637,7 @@ func (it *gcsStreamIterator) Err() error {
 type gcsReverseIterator struct {
 	store *BlobStoreGCS
 	txn   types.Txn
-	keys  *reverseKeyFile
+	keys  *reversekey.File
 	key   string
 	valid bool
 	err   error
@@ -646,7 +645,7 @@ type gcsReverseIterator struct {
 
 func (it *gcsReverseIterator) advance() {
 	for {
-		key, valid, err := it.keys.nextReverse()
+		key, valid, err := it.keys.NextReverse()
 		if err != nil {
 			it.err = err
 			it.valid = false
@@ -662,8 +661,7 @@ func (it *gcsReverseIterator) advance() {
 }
 
 func (it *gcsReverseIterator) Rewind() {
-	it.keys.pos = 0
-	it.keys.initialized = false
+	it.keys.Reset()
 	it.valid = false
 	it.advance()
 }
@@ -693,11 +691,8 @@ func (it *gcsReverseIterator) Item() types.BlobItem {
 }
 
 func (it *gcsReverseIterator) Close() {
-	if it.keys != nil && it.keys.file != nil {
-		name := it.keys.file.Name()
-		_ = it.keys.file.Close()
-		_ = os.Remove(name)
-		it.keys.file = nil
+	if it.keys != nil {
+		it.keys.Close()
 	}
 	it.valid = false
 }
@@ -1240,7 +1235,7 @@ func (i *gcsItem) ValueCopy(dst []byte) ([]byte, error) {
 
 func (d *BlobStoreGCS) listKeysToFile(
 	opts types.BlobIteratorOptions,
-) (*reverseKeyFile, error) {
+) (*reversekey.File, error) {
 	file, err := os.CreateTemp("", "dingo-gcs-iterator-")
 	if err != nil {
 		return nil, err
@@ -1269,79 +1264,11 @@ func (d *BlobStoreGCS) listKeysToFile(
 		if err != nil {
 			return nil, cleanup(err)
 		}
-		if err := writeReverseKey(file, externalKey); err != nil {
+		if err := reversekey.Write(file, externalKey); err != nil {
 			return nil, cleanup(err)
 		}
 	}
-	return &reverseKeyFile{file: file}, nil
-}
-
-type reverseKeyFile struct {
-	file        *os.File
-	pos         int64
-	initialized bool
-}
-
-func writeReverseKey(file *os.File, key string) error {
-	// len(key) is compared as int64 rather than directly against the
-	// untyped constant math.MaxUint32: on a 32-bit platform int is 32
-	// bits wide and that constant does not fit in it, so the naive
-	// comparison fails to compile.
-	if int64(len(key)) > math.MaxUint32 {
-		return fmt.Errorf("key length %d exceeds uint32 maximum", len(key))
-	}
-	length := make([]byte, 4)
-	// #nosec G115 -- length is bounds-checked against math.MaxUint32 above.
-	binary.BigEndian.PutUint32(length, uint32(len(key)))
-	if _, err := file.Write(length); err != nil {
-		return err
-	}
-	if _, err := file.WriteString(key); err != nil {
-		return err
-	}
-	_, err := file.Write(length)
-	return err
-}
-
-func (f *reverseKeyFile) nextReverse() (string, bool, error) {
-	if !f.initialized {
-		info, err := f.file.Stat()
-		if err != nil {
-			return "", false, err
-		}
-		f.pos = info.Size()
-		f.initialized = true
-	}
-	if f.pos == 0 {
-		return "", false, nil
-	}
-	// Every record has a four-byte prefix and matching trailer. Validate
-	// the frame before trusting its declared allocation size.
-	if f.pos < 8 {
-		return "", false, errors.New("truncated reverse key record")
-	}
-	trailer := make([]byte, 4)
-	if _, err := f.file.ReadAt(trailer, f.pos-4); err != nil {
-		return "", false, err
-	}
-	length := int64(binary.BigEndian.Uint32(trailer))
-	if length > f.pos-8 || length > math.MaxInt {
-		return "", false, errors.New("invalid reverse key record length")
-	}
-	start := f.pos - 8 - length
-	prefix := make([]byte, 4)
-	if _, err := f.file.ReadAt(prefix, start); err != nil {
-		return "", false, err
-	}
-	if int64(binary.BigEndian.Uint32(prefix)) != length {
-		return "", false, errors.New("reverse key record lengths do not match")
-	}
-	key := make([]byte, length)
-	if _, err := f.file.ReadAt(key, start+4); err != nil {
-		return "", false, err
-	}
-	f.pos = start
-	return string(key), true, nil
+	return reversekey.New(file), nil
 }
 
 func (d *BlobStoreGCS) init() error {

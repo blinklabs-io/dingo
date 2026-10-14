@@ -4319,6 +4319,93 @@ func pointOfBlock(b ledger.Block) ocommon.Point {
 	return ocommon.NewPoint(b.SlotNumber(), b.Hash().Bytes())
 }
 
+func TestBatchCommitFailurePreservesReconciledFork(t *testing.T) {
+	t.Parallel()
+	for _, advancePrimary := range []bool{false, true} {
+		t.Run(
+			fmt.Sprintf("advance primary=%t", advancePrimary),
+			func(t *testing.T) {
+				t.Parallel()
+				ctx := t.Context()
+				base := newTestDB(t)
+				commitErr := errors.New("injected blob commit failure")
+				armed := &atomic.Bool{}
+				db, err := database.New(ctx, base.Config(), database.Stores{
+					Blob: commitFailingBlobStore{
+						BlobStore: base.Blob(),
+						err:       commitErr,
+						armed:     armed,
+					},
+					Metadata: base.Metadata(),
+				})
+				require.NoError(t, err)
+				t.Cleanup(func() { require.NoError(t, db.Close()) })
+				cm, err := chain.NewManager(ctx, db, nil)
+				require.NoError(t, err)
+				mustSetLedger(t, cm, 5)
+				primary := cm.PrimaryChain()
+				var origin common.Blake2b256
+				blocks := generateTestChain(t, 1, origin, 20, 20, 4)
+				require.NoError(t, primary.AddBlocks(ctx, blocks[:3]))
+				fork, err := cm.NewChainFromIntersect(ctx, []ocommon.Point{
+					pointOfBlock(blocks[1]),
+				})
+				require.NoError(t, err)
+				require.NoError(t, fork.AddBlock(ctx, blocks[2], nil))
+				b := blocks[3]
+				rebased := false
+				armed.Store(true)
+				err = fork.AddRawBlocksWithCallback(ctx, []chain.RawBlock{{
+					Slot:        b.SlotNumber(),
+					Hash:        b.Hash().Bytes(),
+					BlockNumber: b.BlockNumber(),
+					Type:        uint(b.Type()),
+					PrevHash:    b.PrevHash().Bytes(),
+					Cbor:        b.Cbor(),
+				}}, func(_ chain.RawBlock, txn *database.Txn) error {
+					// The inventory gate's finish hook was registered first.
+					// Reconcile after it releases the gate, before batch recovery.
+					txn.OnFinish(func() {
+						require.NoError(
+							t,
+							primary.Rollback(ctx, pointOfBlock(blocks[0])),
+						)
+						if advancePrimary {
+							require.NoError(
+								t,
+								primary.AddBlocks(ctx, blocks[1:3]),
+							)
+						}
+						got, err := fork.BlockBeforeSlot(ctx, b.SlotNumber()+1)
+						require.NoError(t, err)
+						require.Equal(t, b.Hash().Bytes(), got.Hash)
+						rebased = true
+					})
+					return nil
+				})
+				require.ErrorIs(t, err, commitErr)
+				require.True(t, rebased)
+
+				// Retry from the last accepted fork block after the failed batch.
+				require.NoError(t, fork.Rollback(ctx, pointOfBlock(blocks[2])))
+				require.NoError(t, fork.AddBlock(ctx, b, nil))
+				iter, err := fork.FromPoint(ocommon.NewPointOrigin(), false)
+				require.NoError(t, err)
+				t.Cleanup(iter.Cancel)
+				for i, want := range blocks {
+					got, err := iter.Next(false)
+					require.NoError(t, err, "fork block %d", i)
+					require.False(t, got.Rollback)
+					require.Equal(t, want.Hash().Bytes(), got.Block.Hash,
+						"recovery must preserve the reconciled buffer offsets")
+				}
+				_, err = iter.Next(false)
+				require.ErrorIs(t, err, chain.ErrIteratorChainTip)
+			},
+		)
+	}
+}
+
 // TestAddBlocksRestoresChainStateWhenBatchFails covers the batch-failure half
 // of the staged-commit contract: addBlockLocked advances c.currentTip /
 // c.tipBlockIndex for every block it accepts, but those mutations only become

@@ -36,6 +36,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
+	"github.com/blinklabs-io/dingo/database/plugin/blob/internal/reversekey"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/blockverify"
 	"github.com/blinklabs-io/dingo/internal/test/storagetest"
@@ -755,14 +756,13 @@ func TestLegacyPrefixExcludesNamespacedObjectsFromIterators(t *testing.T) {
 			keys, err := store.listKeysToFile(types.BlobIteratorOptions{})
 			require.NoError(t, err)
 			t.Cleanup(func() {
-				_ = keys.file.Close()
-				_ = os.Remove(keys.file.Name())
+				keys.Close()
 			})
-			got, valid, err := keys.nextReverse()
+			got, valid, err := keys.NextReverse()
 			require.NoError(t, err)
 			require.True(t, valid)
 			require.Equal(t, string(legacyKey), got)
-			_, valid, err = keys.nextReverse()
+			_, valid, err = keys.NextReverse()
 			require.NoError(t, err)
 			require.False(t, valid)
 		})
@@ -809,115 +809,20 @@ func TestS3TransactionStagesAndRollsBack(t *testing.T) {
 	}
 }
 
-func TestReverseKeyFile(t *testing.T) {
-	file, err := os.CreateTemp(t.TempDir(), "reverse-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	f := &reverseKeyFile{file: file}
-	for _, key := range []string{"a", "b", "c"} {
-		if err := writeReverseKey(file, key); err != nil {
-			t.Fatal(err)
-		}
-	}
-	for _, want := range []string{"c", "b", "a"} {
-		got, valid, err := f.nextReverse()
-		if err != nil || !valid || got != want {
-			t.Fatalf("reverse key = %q, %v, %v", got, valid, err)
-		}
-	}
-	if _, valid, err := f.nextReverse(); err != nil || valid {
-		t.Fatalf(
-			"reverse iterator should be exhausted: valid=%v err=%v",
-			valid,
-			err,
-		)
-	}
-	file.Close()
-}
-
-// Corrupt local spool framing must never yield a key to the cloud iterator.
-func TestReverseKeyFileRejectsMalformedRecords(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		data []byte
-	}{
-		{"short header", []byte{0, 0, 0}},
-		{"missing prefix", []byte{0, 0, 0, 4}},
-		{"truncated payload", []byte{0, 0, 0, 2, 'a', 0, 0, 0, 2}},
-		{"mismatched lengths", []byte{0, 0, 0, 2, 'a', 0, 0, 0, 1}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			file, err := os.CreateTemp(t.TempDir(), "reverse-")
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer file.Close()
-			if _, err := file.Write(tc.data); err != nil {
-				t.Fatal(err)
-			}
-			f := &reverseKeyFile{file: file}
-			key, valid, err := f.nextReverse()
-			if err == nil || valid || key != "" {
-				t.Fatalf(
-					"malformed spool yielded key %q, valid=%v, err=%v",
-					key,
-					valid,
-					err,
-				)
-			}
-		})
-	}
-}
-
-func TestReverseKeyFileEmptyAndBinaryKeys(t *testing.T) {
-	file, err := os.CreateTemp(t.TempDir(), "reverse-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer file.Close()
-	keys := []string{
-		"",
-		string(binary.BigEndian.AppendUint32(nil, 0xffffffff)),
-		"last",
-	}
-	for _, key := range keys {
-		if err := writeReverseKey(file, key); err != nil {
-			t.Fatal(err)
-		}
-	}
-	f := &reverseKeyFile{file: file}
-	for i := len(keys) - 1; i >= 0; i-- {
-		key, valid, err := f.nextReverse()
-		if err != nil || !valid || key != keys[i] {
-			t.Fatalf(
-				"reverse key = %q, valid=%v, err=%v; want %q",
-				key,
-				valid,
-				err,
-				keys[i],
-			)
-		}
-	}
-	if _, valid, err := f.nextReverse(); err != nil || valid {
-		t.Fatalf("exhausted iterator: valid=%v err=%v", valid, err)
-	}
-}
-
 func TestReverseIteratorPropagatesSpoolCorruption(t *testing.T) {
 	file, err := os.CreateTemp(t.TempDir(), "reverse-")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer file.Close()
-	if err := writeReverseKey(file, "a"); err != nil {
+	if err := reversekey.Write(file, "a"); err != nil {
 		t.Fatal(err)
 	}
 	// The trailer still declares one byte, but the prefix declares two.
 	if _, err := file.WriteAt([]byte{0, 0, 0, 2}, 0); err != nil {
 		t.Fatal(err)
 	}
-	it := &s3ReverseIterator{keys: &reverseKeyFile{file: file}}
+	it := &s3ReverseIterator{keys: reversekey.New(file)}
 	it.Rewind()
 	if it.Err() == nil || it.Valid() || it.Item() != nil {
 		t.Fatalf(

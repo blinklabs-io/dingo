@@ -144,13 +144,26 @@ func TestProviderStorageModeRunModeDefaults(t *testing.T) {
 			wantGC:           true,
 			wantCompactBlock: true,
 		},
+		{
+			name:             "core without run mode",
+			storageMode:      "core",
+			wantBlockCache:   DefaultCoreBlockCacheSize,
+			wantIndexCache:   DefaultCoreIndexCacheSize,
+			wantCompression:  DefaultCoreCompressionEnabled,
+			wantGC:           true,
+			wantCompactBlock: false,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			store := resolveBadgerProvider(t, nil, blob.ProviderDependencies{
-				StorageMode: tt.storageMode,
-				RunMode:     tt.runMode,
-			})
+			store := resolveBadgerProvider(
+				t,
+				testutil.BadgerBlobConfig(),
+				blob.ProviderDependencies{
+					StorageMode: tt.storageMode,
+					RunMode:     tt.runMode,
+				},
+			)
 			require.Equal(t, tt.wantBlockCache, store.blockCacheSize)
 			require.Equal(t, tt.wantIndexCache, store.indexCacheSize)
 			require.Equal(t, tt.wantCompression, store.compressionEnabled)
