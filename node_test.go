@@ -2416,24 +2416,35 @@ func nodeFuncBodyForSnapshotWiring(
 	return body
 }
 
-// TestReinitializeBackgroundManagersMirrorsRunSnapshotConfig pins that a live
-// Restore/Truncate rebuilds the snapshot manager with every option Run()
-// configures. reinitializeBackgroundManagers constructs a second
-// snapshot.Manager by hand, so an option added to Run() alone is silently
-// dropped after a live lifecycle operation and the node keeps running with
-// package defaults instead of the operator's configuration -- which is
-// exactly what happened to SetDelegatorInactivity (see
-// TestLiveTruncateReinitializationPreservesSnapshotManagerDelegatorInactivityConfig)
-// and is the same gap retention setter would leave.
+func nodeSnapshotConfigurationBody(
+	t *testing.T,
+	path string,
+	decl string,
+) string {
+	t.Helper()
+	body := nodeFuncBodyForSnapshotWiring(t, path, decl)
+	configure := strings.Index(body, "n.configureSnapshotManager()")
+	start := strings.Index(body, "n.ledgerState.Start(")
+	require.GreaterOrEqual(t, configure, 0,
+		"%s must configure the snapshot manager", decl)
+	require.Greater(t, start, configure,
+		"%s must configure snapshots before ledger startup", decl)
+	shared := nodeFuncBodyForSnapshotWiring(t, "node_components.go",
+		"func (n *Node) configureSnapshotManager() error {")
+	return body + "\n" + shared
+}
+
+// Both startup paths must apply every snapshot-manager setting before the
+// ledger starts publishing epoch transitions.
 func TestReinitializeBackgroundManagersMirrorsRunSnapshotConfig(t *testing.T) {
 	t.Parallel()
 
-	runBody := nodeFuncBodyForSnapshotWiring(
+	runBody := nodeSnapshotConfigurationBody(
 		t,
 		"node.go",
 		"func (n *Node) Run(ctx context.Context) (runErr error) {",
 	)
-	reinitBody := nodeFuncBodyForSnapshotWiring(
+	reinitBody := nodeSnapshotConfigurationBody(
 		t,
 		"node_lifecycle.go",
 		"func (n *Node) reinitializeBackgroundManagers(",
@@ -2485,7 +2496,7 @@ func TestKoiosParityRetentionWiredFromConfigInBothStartupPaths(t *testing.T) {
 			decl: "func (n *Node) reinitializeBackgroundManagers(",
 		},
 	} {
-		body := nodeFuncBodyForSnapshotWiring(t, tc.path, tc.decl)
+		body := nodeSnapshotConfigurationBody(t, tc.path, tc.decl)
 		if !koiosParityRetentionWiring.MatchString(body) {
 			t.Errorf(
 				"%s does not call "+
@@ -2944,8 +2955,8 @@ func (m nodeTestSecurityParamLedger) SecurityParam() int {
 }
 
 type nodeTestLogSignalHandler struct {
-	message string
-	seen    chan struct{}
+	message  string
+	seen     chan struct{}
 	onRecord func(slog.Record)
 }
 

@@ -534,26 +534,6 @@ func TestWithMidnightConfig(t *testing.T) {
 	assert.Equal(t, midnightCfg, cfg.midnight)
 }
 
-// TestSyncCompatFieldsMidnightEnabled is a regression test for a bug where
-// syncCompatFields's mirror of internalconfig.MidnightConfig into the root
-// MidnightConfig (used by node.go's indexer-start gate) omitted Enabled,
-// leaving it permanently false and silently disabling the Midnight indexer
-// even with midnight.enabled: true configured.
-func TestSyncCompatFieldsMidnightEnabled(t *testing.T) {
-	t.Parallel()
-
-	cfg := NewConfig()
-	cfg.cfg.Midnight.Enabled = true
-
-	cfg.syncCompatFields()
-
-	assert.True(
-		t,
-		cfg.midnight.Enabled,
-		"mirrored MidnightConfig.Enabled must reflect the loaded config",
-	)
-}
-
 // TestSyncCompatFieldsMidnightAllFieldsMirrored guards against the same bug
 // class recurring for any future MidnightConfig field: it sets every field
 // of the internal internalconfig.MidnightConfig to a non-zero value, runs

@@ -17277,6 +17277,15 @@ callback in it is a closure over `n` rather than a method value, because
 `n.ouroboros`, `n.chainsyncState`, `n.connManager`, `n.ledgerState` and
 `n.chainSelector` are all replaced by a live rebuild.
 
+`node_components.go` also owns the shared database configuration, connection
+manager and peer governor construction, history-expiry and database-lifecycle
+managers, Midnight server configuration, off-chain metadata configuration,
+and stake-snapshot manager configuration. Startup and live rebuilds call these
+factories after assigning their dependencies, so each receives the current
+database and ledger instances. The callers retain responsibility for startup
+order, subscriptions, cleanup, and restart error handling. Snapshot hooks are
+configured before the ledger starts and can publish epoch transitions.
+
 The config was previously written out as two separate composite literals,
 one per path, and a field present in only one of them was a real bug three
 times over: first `MinPoolMargin`/`PledgeLeverageEnabled`/`PledgeLeverage`/
