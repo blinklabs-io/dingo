@@ -10174,7 +10174,12 @@ reserves a metadata read connection before briefly taking the commit barriers,
 keeping an exhausted-pool wait outside them. Admission remains held for the
 snapshot's lifetime and is capped at one below the provider's read-pool size,
 so client-paced `/matches` streams cannot consume the connection destructive
-rollback needs for operational reads.
+rollback needs for operational reads. The server sets no overall write
+timeout, because a fixed deadline would truncate a large stream; instead a
+30-second write deadline is re-armed before every response write. A client that
+stops reading, or reads so slowly that a single write takes longer than the
+deadline, fails its stream and releases its snapshot; a stream whose every
+write completes within the deadline is never cut off, however long it runs.
 
 Match results stream in 512-row pages through an ordering cursor, hydrate
 spending details only for the current page, check request cancellation between
