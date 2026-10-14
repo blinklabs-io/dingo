@@ -97,7 +97,9 @@ Orchestrators do not create such files by default. A Docker Swarm secret is
 mounted with mode `0444`, so set the secret's `mode` to `0400` with a `uid`, or
 to `0440` with a `gid`, matching the user Dingo runs as. A Kubernetes secret
 volume defaults to `0644`, so set `defaultMode: 0400`, or `0440` with the pod's
-`fsGroup`. On Windows the file's ACL must not grant access to broad groups.
+`fsGroup`. On Windows the rule is stricter: the file's ACL may grant access only
+to its owner, Administrators, SYSTEM, CREATOR OWNER and OWNER RIGHTS, so a grant
+to any other user or group fails, including the group access Unix allows.
 
 Setting both forms of one field is an error. Because the suffix is reserved, a
 provider field whose name ends in `File` cannot be set from the environment.

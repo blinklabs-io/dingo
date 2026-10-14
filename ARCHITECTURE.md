@@ -13832,7 +13832,9 @@ regular file of at most 64 KiB whose contents are not blank, and on Unix other
 users must have no access to it (`internal/secretfile` rejects mode bits
 `0o007`). Owner and group access is allowed, unlike a signing key: an
 orchestrator commonly grants the group, as a Kubernetes secret volume with mode
-`0440` and an `fsGroup` does. On Windows it applies the key file ACL check.
+`0440` and an `fsGroup` does. On Windows it applies the key file ACL check,
+which is stricter: the ACL may grant access only to the owner, Administrators,
+SYSTEM, CREATOR OWNER and OWNER RIGHTS, so group access fails there.
 Its contents are used as a plain string, never parsed as YAML,
 with trailing line endings removed. A literal and its file form are one
 setting: a higher-precedence source setting either replaces both, and one

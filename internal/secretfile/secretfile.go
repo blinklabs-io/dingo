@@ -32,9 +32,10 @@ import (
 const MaxBytes = 64 << 10
 
 // Read returns the contents of the file at path with trailing line endings
-// removed. The file must be a regular file that users other than its owner and
-// group cannot access, whose contents are not entirely whitespace. Errors never
-// include the file's contents.
+// removed. The file must be a regular file whose contents are not entirely
+// whitespace and that users other than its owner and group cannot access; on
+// Windows the ACL check is stricter and allows only the owner and
+// administrators. Errors never include the file's contents.
 func Read(path string) (string, error) {
 	if path == "" {
 		return "", errors.New("value file path is empty")

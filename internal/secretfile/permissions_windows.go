@@ -15,13 +15,21 @@
 package secretfile
 
 import (
+	"fmt"
 	"os"
 
 	"github.com/blinklabs-io/dingo/keystore"
 )
 
-// checkPermissions applies the key file DACL check, which rejects grants to
-// well-known broad groups.
+// checkPermissions applies the key file DACL check. It is stricter than the
+// Unix rule: the ACL may grant access only to the file's owner,
+// Administrators, SYSTEM, CREATOR OWNER and OWNER RIGHTS, so a grant to any
+// other user or group is rejected, including the group access Unix allows.
+// The shared check's own message still says "key file"; the wrapper names the
+// value file so the error points at the setting that was read.
 func checkPermissions(f *os.File) error {
-	return keystore.CheckOpenFilePermissions(f)
+	if err := keystore.CheckOpenFilePermissions(f); err != nil {
+		return fmt.Errorf("value file %s: %w", f.Name(), err)
+	}
+	return nil
 }
