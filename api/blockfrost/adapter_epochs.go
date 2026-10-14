@@ -29,8 +29,9 @@ import (
 
 // epochStakeLabel maps a Blockfrost epoch to the epoch label Dingo stamps on
 // the stake snapshot that was active during it. The snapshot labelled E is
-// the distribution captured as epoch E+1 begins, so epoch K runs on label
-// K-1. Epoch 0 has no snapshot; ok is false there.
+// captured as epoch E begins and holds the stake as of the end of epoch E-1,
+// which is active in epoch E+1, so epoch K runs on label K-1. Epoch 0 has no
+// snapshot; ok is false there.
 func epochStakeLabel(epoch uint64) (uint64, bool) {
 	if epoch == 0 {
 		return 0, false
@@ -330,6 +331,17 @@ func (a *NodeAdapter) epochStakeRows(
 	db := a.ledgerState.Database()
 	txn := db.Transaction(ctx, false)
 	defer txn.Release()
+	incomplete, err := a.ledgerState.RewardStakeInputsIncomplete(
+		txn, label, label+1,
+	)
+	if err != nil {
+		return nil, 0, fmt.Errorf("check epoch %d stakes: %w", epoch, err)
+	}
+	if incomplete {
+		return nil, 0, fmt.Errorf(
+			"stake distribution of epoch %d: %w", epoch, ErrHistoryNotRetained,
+		)
+	}
 	rows, total, err := db.Metadata().GetEpochStakes(
 		label, poolKeyHash, params.Count, offset, txn.Metadata(),
 	)

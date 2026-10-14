@@ -113,6 +113,17 @@ func (a *NodeAdapter) AccountStakeHistory(
 	txn := db.Transaction(ctx, false)
 	defer txn.Release()
 	meta := db.Metadata()
+	incomplete, err := a.ledgerState.RewardStakeInputsIncomplete(
+		txn, 0, current,
+	)
+	if err != nil {
+		return nil, 0, fmt.Errorf("check account stake history: %w", err)
+	}
+	if incomplete {
+		return nil, 0, fmt.Errorf(
+			"stake history of %s: %w", stakeAddress, ErrHistoryNotRetained,
+		)
+	}
 	rows, total, err := meta.GetAccountStakeHistory(
 		tag, key, current, params.Count, offset, params.Order,
 		txn.Metadata(),

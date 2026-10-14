@@ -347,3 +347,36 @@ func TestNodeAdapterAccountAddressAssetsAndTotal(t *testing.T) {
 	assert.Equal(t, []AddressAmountInfo{{Unit: "lovelace", Quantity: "0"}}, info.SentSum)
 	assert.Equal(t, 0, info.TxCount)
 }
+
+// A snapshot whose deferred reward_stake_input write has not finished holds
+// only part of its rows until the writer or the next reward round completes
+// it. The stake endpoints must not present those rows as the whole
+// distribution.
+func TestNodeAdapterStakeHistoryRefusesIncompleteSnapshot(t *testing.T) {
+	t.Parallel()
+	fx := newEpochFixture(t)
+	ctx := context.Background()
+	address := fx.addAccount(t, 0x01)
+	page := PaginationParams{Count: 100, Page: 1, Order: PaginationOrderAsc}
+	meta := fx.adapter.ledgerState.Database().Metadata()
+	const pendingKey = models.StakeRewardSourcePrefix + "stake-inputs-pending"
+
+	require.NoError(t, meta.SetSyncState(
+		pendingKey, `{"entries":[{"epoch":0,"boundary_slot":0}]}`, nil,
+	))
+	_, _, err := fx.adapter.EpochStakes(ctx, 1, page)
+	assert.ErrorIs(t, err, ErrHistoryNotRetained,
+		"epoch 1 runs on snapshot label 0, whose rows are incomplete")
+	_, _, err = fx.adapter.AccountStakeHistory(ctx, address, page)
+	assert.ErrorIs(t, err, ErrHistoryNotRetained,
+		"the account's history includes the incomplete label 0")
+
+	// Once the snapshot completes, both answer from its rows.
+	require.NoError(t, meta.SetSyncState(pendingKey, `{"entries":[]}`, nil))
+	_, total, err := fx.adapter.EpochStakes(ctx, 1, page)
+	require.NoError(t, err)
+	assert.Equal(t, 3, total)
+	_, total, err = fx.adapter.AccountStakeHistory(ctx, address, page)
+	require.NoError(t, err)
+	assert.Equal(t, 1, total)
+}

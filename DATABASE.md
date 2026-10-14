@@ -197,8 +197,9 @@ A governance vote row stores the slot that last cast it but not its
 transaction. The vote endpoints locate that transaction by decoding the block
 at the slot (`database.BlockBySlot`) and taking the last valid transaction in
 it that carries a voting procedure for the same voter and proposal; the vote's
-`cert_index` is its position among the transaction's voting procedures in
-ledger map order (voter type, voter hash, then governance action id). Nothing
+`cert_index` is its position among that voter's procedures in the
+transaction, ordered by governance action id and counted from 0 for each voter,
+as db-sync's `voting_procedure.index` is. Nothing
 is stored for this, so rows written before the endpoints existed answer the
 same way as new ones. When the block is not held, or no valid transaction in
 it carries the vote, the endpoint answers `404` "not retained by this node"
@@ -2136,7 +2137,10 @@ delegators over no `reward_stake_input` rows, an epoch whose snapshot was
 never captured, and an account whose history predates the oldest retained
 row and has no retained row at all each answer `404` with "The requested
 history is not retained by this node". A history that is only partly retained
-lists the retained epochs.
+lists the retained epochs. A snapshot whose deferred `reward_stake_input` write
+has not finished (`LedgerState.RewardStakeInputsIncomplete`) answers the same
+`404` until the writer or the next reward round completes it, because its rows
+are a partial distribution.
 
 Pruned at `epoch < current-3`:
 

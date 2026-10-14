@@ -16003,11 +16003,14 @@ those rows (`snapshot.Manager.SetDeferRewardStakeInputs`,
 commits, in bounded batches under `rewardPrecomputeWriteMu`
 (`queueDeferredRewardStakeInputs`). The boundary transaction records the
 snapshot epoch as pending (`dingo:stake-reward:stake-inputs-pending`) and the
-last batch clears it. Every reader of `reward_stake_input` calls
+last batch clears it. Every reward-path reader of `reward_stake_input` calls
 `ensureRewardStakeInputsReady` first: while this process is still writing the
 rows the round waits; a pending entry with no writer is completed from the
 historical reconstruction the retention path uses, checked against the
-snapshot's persisted pool inputs.
+snapshot's persisted pool inputs. The Blockfrost stake readers run read-only
+and cannot complete an entry, so they check
+`LedgerState.RewardStakeInputsIncomplete` and answer "not retained" for a
+pending snapshot instead of serving its partial rows.
 
 The application engine for a precompute without a cursor verifies the frozen
 input bundle and requires an exact pool output set, valid leader reward
