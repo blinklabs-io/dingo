@@ -200,6 +200,13 @@ type Node struct {
 	// running, which this mutex would otherwise make indistinguishable.
 	liveLifecycleMu sync.Mutex
 
+	// wallClockLedger is n.ledgerState once its Start has returned, for the
+	// chain selector's wall-clock hook, which runs on the selector's goroutine
+	// across live rebuilds. Start initializes the slot clock the hook reads,
+	// so a ledger is published only after it (publishStartedLedgerState) and
+	// withdrawn before it is replaced or closed (setLedgerState).
+	wallClockLedger atomic.Pointer[ledger.LedgerState]
+
 	// A selected-to-none transition cannot be dropped while a live database
 	// lifecycle operation holds liveLifecycleMu. One node-owned worker retains
 	// only the latest contended transition and retries until the lifecycle lock
@@ -531,21 +538,22 @@ func (n *Node) newOuroborosConfig(
 	keepAliveTimeout time.Duration,
 ) ouroborosPkg.OuroborosConfig {
 	return ouroborosPkg.OuroborosConfig{
-		Logger:                  n.config.logger,
-		EventBus:                n.eventBus,
-		ConnManager:             n.connManager,
-		LedgerState:             n.ledgerState,
-		LeiosAnnouncementLedger: n.ledgerState,
-		Mempool:                 n.mempool,
-		ChainsyncState:          n.chainsyncState,
-		PeerGov:                 n.peerGov,
-		NetworkMagic:            n.config.networkMagic,
-		PeerSharing:             n.config.peerSharing,
-		IntersectTip:            n.config.intersectTip,
-		IntersectPoints:         n.config.intersectPoints,
-		PromRegistry:            n.retainedComponentPromRegistry(),
-		ChainsyncBlockTimeout:   n.config.chainsyncStallTimeout,
-		EnableLeios:             enableLeiosNetworking,
+		Logger:                         n.config.logger,
+		EventBus:                       n.eventBus,
+		ConnManager:                    n.connManager,
+		LedgerState:                    n.ledgerState,
+		LeiosAnnouncementLedger:        n.ledgerState,
+		Mempool:                        n.mempool,
+		ChainsyncState:                 n.chainsyncState,
+		PeerGov:                        n.peerGov,
+		NetworkMagic:                   n.config.networkMagic,
+		PeerSharing:                    n.config.peerSharing,
+		IntersectTip:                   n.config.intersectTip,
+		IntersectPoints:                n.config.intersectPoints,
+		PromRegistry:                   n.retainedComponentPromRegistry(),
+		ChainsyncBlockTimeout:          n.config.chainsyncStallTimeout,
+		EnableLeios:                    enableLeiosNetworking,
+		LeiosPersistenceRetentionSlots: n.config.leiosPersistenceRetentionSlots,
 		// Bounds how long a LocalStateQuery session holds one ledger snapshot.
 		LocalStateQueryViewMaxLifetime: n.config.LocalStateQueryViewMaxLifetimeDuration(),
 		// Current prototype votes sign their announcing ranking-block hash and
@@ -614,6 +622,10 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	// goroutine may be using -- mirrors node_shutdown.go's shutdown()
 	// ledgerStateDrainConfirmed guard on the normal signal-driven path.
 	ledgerStateDrainConfirmed := true
+	// Set false if Ouroboros cannot confirm its persistence workers stopped.
+	// The DB and storage-provider cleanup below must then leave their backing
+	// storage open, just as they do for an unconfirmed ledger-state drain.
+	leiosPersistenceDrainConfirmed := true
 	defer func() {
 		if !startupGateHeld {
 			return
@@ -672,9 +684,9 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		// ledgerState.Close and db.Close stops below, so it observes
 		// ledgerStateDrainConfirmed's final value -- mirrors
 		// node_shutdown.go's shutdown() phase 3 guard on pluginHost.Stop.
-		if !ledgerStateDrainConfirmed {
+		if !ledgerStateDrainConfirmed || !leiosPersistenceDrainConfirmed {
 			n.config.logger.Error(
-				"skipping plugin host shutdown during startup-failure cleanup because ledger state drain was not confirmed",
+				"skipping plugin host shutdown during startup-failure cleanup because a storage user drain was not confirmed",
 			)
 			return
 		}
@@ -736,9 +748,9 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	// closure runs after that one in LIFO order (registered first, so
 	// stopped last), so it observes the flag's final value.
 	started = append(started, func() {
-		if !ledgerStateDrainConfirmed {
+		if !ledgerStateDrainConfirmed || !leiosPersistenceDrainConfirmed {
 			n.config.logger.Error(
-				"skipping database close during startup-failure cleanup because ledger state drain was not confirmed",
+				"skipping database close during startup-failure cleanup because a storage user drain was not confirmed",
 			)
 			return
 		}
@@ -840,14 +852,18 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	if err != nil {
 		return fmt.Errorf("failed to load state database: %w", err)
 	}
-	n.ledgerState = state
+	n.setLedgerState(state)
 	started = append(started, func() {
 		// Start can fail after launching database workers. Drain even a
 		// partially started ledger before the earlier storage cleanup runs.
 		if err := n.ledgerState.Close(); err != nil {
 			ledgerStateDrainConfirmed = false
 			runErr = errors.Join(runErr, errStorageDrainUnconfirmed, err)
-			n.config.logger.Error("ledger startup rollback did not drain; preserving storage", "error", err)
+			n.config.logger.Error(
+				"ledger startup rollback did not drain; preserving storage",
+				"error",
+				err,
+			)
 		}
 	})
 	// n.ouroboros is constructed once every dependency exists; see the
@@ -972,7 +988,11 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 			if err := n.midnightIndexer.Stop(stopCtx); err != nil {
 				ledgerStateDrainConfirmed = false
 				runErr = errors.Join(runErr, errStorageDrainUnconfirmed, err)
-				n.config.logger.Error("midnight indexer startup rollback did not drain; preserving storage", "error", err)
+				n.config.logger.Error(
+					"midnight indexer startup rollback did not drain; preserving storage",
+					"error",
+					err,
+				)
 			}
 		})
 	}
@@ -1036,6 +1056,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	if err := n.ledgerState.Start(n.ctx); err != nil { //nolint:contextcheck
 		return fmt.Errorf("failed to start ledger: %w", err)
 	}
+	n.publishStartedLedgerState()
 	// Capture genesis stake snapshot (epoch 0) so leader election works at epoch 2
 	if err := n.snapshotMgr.CaptureGenesisSnapshot(ctx); err != nil {
 		if err := n.handleGenesisSnapshotError(err); err != nil {
@@ -1215,6 +1236,13 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	// up front and validates them, so it can never be observed partially
 	// wired. This is deliberately the last construction before the peer
 	// governor and connection manager start below.
+	if err := validateLeiosPersistenceRetention(
+		n.config.leiosPersistenceRetentionSlots,
+		chainSelectorSecurityParam,
+		n.ledgerState.ActiveSlotCoeffRat(),
+	); err != nil {
+		return err
+	}
 	n.ouroborosConfig = n.newOuroborosConfig(
 		enableLeiosNetworking,
 		leiosTxFetchTailBudget,
@@ -1224,6 +1252,21 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	if err != nil {
 		return fmt.Errorf("failed to construct ouroboros: %w", err)
 	}
+	closeOuroboros := func() error {
+		closeErr := closeOuroborosInstance(ouro)
+		if errors.Is(closeErr, ouroborosPkg.ErrLeiosPersistDrainUnconfirmed) {
+			leiosPersistenceDrainConfirmed = false
+		}
+		return closeErr
+	}
+	started = append(started, func() {
+		if closeErr := closeOuroboros(); closeErr != nil {
+			n.config.logger.Error(
+				"failed to close ouroboros during startup-failure cleanup",
+				"error", closeErr,
+			)
+		}
+	})
 	// The Leios managers were started earlier in Run, before this instance
 	// existed, so their handlers are attached here rather than at their own
 	// construction. reinitializeNetworkingCore does the same after its
@@ -1232,13 +1275,6 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		return fmt.Errorf("failed to attach Leios handlers: %w", err)
 	}
 	n.ouroborosRef.Store(ouro)
-	// The asynchronous Leios endorser-block persistence writer, the EventBus
-	// subscriptions ouroboros makes on its own behalf, and its Prometheus
-	// collectors are all released by Close. Registering it on both the
-	// unwind stack and a defer covers startup failure and graceful shutdown;
-	// Close is idempotent.
-	defer func() { _ = n.ouroboros().Close() }()
-	started = append(started, func() { _ = n.ouroboros().Close() })
 	// A closure, not a method value, even though n.ouroboros already exists
 	// here: a live restore replaces the instance, and a method value would
 	// pin this subscription to the replaced one forever, so outbound
@@ -1677,6 +1713,9 @@ func (n *Node) cleanupFailedStartup(started []func()) {
 	if n.cancel != nil {
 		n.cancel()
 	}
+	// The chain selector may still be unwinding after cancellation. Withdraw
+	// the ledger before the rollback stack closes it.
+	n.wallClockLedger.Store(nil)
 	for _, stop := range slices.Backward(started) {
 		stop()
 	}
@@ -1999,7 +2038,34 @@ func (n *Node) buildChainSelectorConfig(
 		OnRollbackRegistration:     n.recordRollbackRegistration,
 		OnPeerTipRejected:          n.recordPeerTipRejection,
 		OnGenesisDensityDisconnect: n.onGenesisDensityDisconnect,
+		// The selector outlives a live Restore/Truncate and calls this under
+		// its own lock, so it reads the ledger through an atomic rather than
+		// capturing one instance or taking liveLifecycleMu.
+		WallClockSlot: func() (uint64, bool) {
+			ls := n.wallClockLedger.Load()
+			if ls == nil {
+				return 0, false
+			}
+			if ls.IsByronEra() {
+				return 0, false
+			}
+			slot, err := ls.CurrentSlot()
+			return slot, err == nil
+		},
 	}
+}
+
+// setLedgerState replaces n.ledgerState and withdraws the copy published to
+// readers that cannot take liveLifecycleMu until publishStartedLedgerState.
+func (n *Node) setLedgerState(ls *ledger.LedgerState) {
+	n.wallClockLedger.Store(nil)
+	n.ledgerState = ls
+}
+
+// publishStartedLedgerState publishes n.ledgerState to readers that cannot
+// take liveLifecycleMu. Call it only after the ledger's Start has returned.
+func (n *Node) publishStartedLedgerState() {
+	n.wallClockLedger.Store(n.ledgerState)
 }
 
 func (n *Node) setPeerGovernor(peerGov *peergov.PeerGovernor) {
