@@ -6436,13 +6436,19 @@ func TestRollbackRegisteredPeerFarBehindLocalTipIsNotSelectable(t *testing.T) {
 			})
 			_, evtCh := eventBus.Subscribe(ChainSwitchEventType)
 			cs.SetLocalTip(ochainsync.Tip{
-				Point:       ocommon.Point{Slot: localBlock, Hash: []byte("local")},
+				Point: ocommon.Point{
+					Slot: localBlock,
+					Hash: []byte("local"),
+				},
 				BlockNumber: localBlock,
 			})
 			honest := newTestConnectionId(1)
 			deadFork := newTestConnectionId(2)
 			require.True(t, cs.UpdatePeerTip(honest, ochainsync.Tip{
-				Point:       ocommon.Point{Slot: localBlock, Hash: []byte("local")},
+				Point: ocommon.Point{
+					Slot: localBlock,
+					Hash: []byte("local"),
+				},
 				BlockNumber: localBlock,
 			}, nil))
 			cs.EvaluateAndSwitch()
@@ -6488,4 +6494,78 @@ func TestRollbackRegisteredPeerFarBehindLocalTipIsNotSelectable(t *testing.T) {
 			assert.Equal(t, deadFork, *best)
 		})
 	}
+}
+
+// The evaluation path applies the same advertised-tip bound: a sole
+// rollback-registered peer advertising a tip more than k blocks behind is
+// never selected, and one already selected is dropped once the local tip
+// passes its advertised tip by more than k.
+func TestRollbackRegisteredPeerBehindLocalTipEvaluation(t *testing.T) {
+	t.Parallel()
+	const k = 10
+	const localBlock = 1000
+	newSelector := func(t *testing.T) (*ChainSelector, <-chan event.Event) {
+		eventBus := event.NewEventBus(nil, nil)
+		t.Cleanup(eventBus.Stop)
+		cs := NewChainSelector(ChainSelectorConfig{
+			EventBus:      eventBus,
+			SecurityParam: k,
+		})
+		_, noneCh := eventBus.Subscribe(ChainSelectedNoneEventType)
+		cs.SetLocalTip(ochainsync.Tip{
+			Point:       ocommon.Point{Slot: localBlock, Hash: []byte("local")},
+			BlockNumber: localBlock,
+		})
+		return cs, noneCh
+	}
+	rollback := func(
+		connId ouroboros.ConnectionId,
+		advertised uint64,
+	) event.Event {
+		return newRollbackEvent(
+			connId,
+			ocommon.Point{Slot: 400, Hash: []byte("intersect")},
+			ochainsync.Tip{
+				Point:       ocommon.Point{Slot: 5000, Hash: []byte("fork")},
+				BlockNumber: advertised,
+			},
+		)
+	}
+
+	t.Run("far behind is never selected", func(t *testing.T) {
+		t.Parallel()
+		cs, _ := newSelector(t)
+		deadFork := newTestConnectionId(1)
+		cs.HandlePeerRollbackEvent(rollback(deadFork, localBlock-k-1))
+		require.Equal(t, 1, cs.PeerCount())
+		assert.Nil(t, cs.GetBestPeer())
+		assert.Nil(t, cs.SelectBestChain())
+		assert.False(t, cs.EvaluateAndSwitch())
+		assert.Nil(t, cs.GetBestPeer())
+	})
+
+	t.Run("dropped when local tip passes advertised", func(t *testing.T) {
+		t.Parallel()
+		cs, noneCh := newSelector(t)
+		peer := newTestConnectionId(1)
+		cs.HandlePeerRollbackEvent(rollback(peer, localBlock-k))
+		require.NotNil(t, cs.GetBestPeer())
+		require.Equal(t, peer, *cs.GetBestPeer())
+
+		cs.SetLocalTip(ochainsync.Tip{
+			Point: ocommon.Point{
+				Slot: localBlock + 1,
+				Hash: []byte("local+1"),
+			},
+			BlockNumber: localBlock + 1,
+		})
+		cs.EvaluateAndSwitch()
+		assert.Nil(t, cs.GetBestPeer())
+		evt := testutil.RequireReceive(
+			t, noneCh, 2*time.Second, "ChainSelectedNoneEvent",
+		)
+		none, ok := evt.Data.(ChainSelectedNoneEvent)
+		require.True(t, ok)
+		assert.Equal(t, peer, none.PreviousConnectionId)
+	})
 }
