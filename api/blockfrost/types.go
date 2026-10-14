@@ -729,3 +729,26 @@ type AccountTransactionResponse struct {
 	BlockHeight uint64 `json:"block_height"`
 	BlockTime   int    `json:"block_time"`
 }
+
+// AccountStakeHistoryResponse is the stake an account held in one epoch.
+type AccountStakeHistoryResponse struct {
+	ActiveEpoch uint64 `json:"active_epoch"`
+	Amount      string `json:"amount"`
+	PoolID      string `json:"pool_id"`
+}
+
+// AccountMIRResponse is one Move Instantaneous Rewards payment to an
+// account.
+type AccountMIRResponse struct {
+	TxHash string `json:"tx_hash"`
+	Amount string `json:"amount"`
+}
+
+// AccountAddressTotalResponse is the lifetime received and sent totals
+// across the addresses of an account.
+type AccountAddressTotalResponse struct {
+	StakeAddress string                  `json:"stake_address"`
+	ReceivedSum  []AddressAmountResponse `json:"received_sum"`
+	SentSum      []AddressAmountResponse `json:"sent_sum"`
+	TxCount      int                     `json:"tx_count"`
+}

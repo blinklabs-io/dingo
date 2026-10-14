@@ -44,6 +44,13 @@ func (b *Blockfrost) writeHistoryError(
 			"Bad Request",
 			"Invalid stake address.",
 		)
+	case errors.Is(err, ErrHistoryNotRetained):
+		writeError(
+			w,
+			http.StatusNotFound,
+			"Not Found",
+			"The requested history is not retained by this node.",
+		)
 	case errors.Is(err, ErrEpochNotFound),
 		errors.Is(err, models.ErrPoolNotFound),
 		errors.Is(err, models.ErrAccountNotFound):

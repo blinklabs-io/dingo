@@ -62,6 +62,10 @@ var (
 	ErrInvalidBlockID     = errors.New("invalid block id")
 	ErrBlockNotFound      = errors.New("block not found")
 	ErrEpochNotFound      = errors.New("epoch not found")
+	// ErrHistoryNotRetained reports a historical query whose source rows
+	// this node no longer holds, as opposed to a query whose answer is
+	// genuinely empty.
+	ErrHistoryNotRetained = errors.New("history not retained")
 	ErrAssetNotFound      = errors.New("asset not found")
 	ErrDRepNotFound       = errors.New("drep not found")
 	ErrInvalidTransaction = errors.New("invalid transaction")

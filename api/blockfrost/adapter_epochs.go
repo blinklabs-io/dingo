@@ -21,6 +21,8 @@ import (
 	"strconv"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata"
+	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
@@ -311,7 +313,44 @@ func (a *NodeAdapter) epochStakeRows(
 	if err != nil {
 		return nil, 0, fmt.Errorf("get epoch %d stakes: %w", epoch, err)
 	}
+	if total == 0 {
+		if err := a.checkStakeHistoryRetained(
+			db.Metadata(), label, epoch, txn.Metadata(),
+		); err != nil {
+			return nil, 0, err
+		}
+	}
 	return rows, total, nil
+}
+
+// checkStakeHistoryRetained distinguishes a genuinely empty stake
+// distribution from one whose per-credential rows are gone. The epoch summary
+// is kept for every epoch while the rows are pruned outside API storage
+// mode, so a ready summary that counts delegators over an epoch with no rows
+// is pruned history. A distribution never captured is unavailable too.
+func (a *NodeAdapter) checkStakeHistoryRetained(
+	meta metadata.MetadataStore,
+	label uint64,
+	epoch uint64,
+	txn types.Txn,
+) error {
+	rows, total, err := meta.GetEpochStakes(label, nil, 1, 0, txn)
+	if err != nil {
+		return fmt.Errorf("count epoch %d stakes: %w", epoch, err)
+	}
+	if total > 0 || len(rows) > 0 {
+		return nil
+	}
+	summary, err := meta.GetEpochSummary(label, txn)
+	if err != nil {
+		return fmt.Errorf("get epoch summary %d: %w", label, err)
+	}
+	if summary != nil && summary.SnapshotReady && summary.TotalDelegators == 0 {
+		return nil
+	}
+	return fmt.Errorf(
+		"stake distribution of epoch %d: %w", epoch, ErrHistoryNotRetained,
+	)
 }
 
 func (a *NodeAdapter) stakeAddressFromTag(

@@ -117,12 +117,20 @@ type HistoryStore interface {
 		txn types.Txn,
 	) ([]models.PoolCertificateEvent, int, error)
 
+	// GetEarliestRewardStakeInputEpoch returns the oldest snapshot label
+	// that still has per-credential stake rows; ok is false when none
+	// remain. Rows below it were pruned.
+	GetEarliestRewardStakeInputEpoch(
+		txn types.Txn,
+	) (epoch uint64, ok bool, err error)
+
 	// GetAccountStakeHistory returns the stake a credential held in each
-	// retained epoch-boundary distribution it was registered and delegated
-	// in, along with the unpaginated count.
+	// retained epoch-boundary distribution below throughLabel (exclusive)
+	// it was registered and delegated in, along with the unpaginated count.
 	GetAccountStakeHistory(
 		credentialTag uint8,
 		stakingKey []byte,
+		throughLabel uint64,
 		limit int,
 		offset int,
 		order string,

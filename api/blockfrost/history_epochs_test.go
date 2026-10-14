@@ -209,6 +209,21 @@ func TestHandleEpochPoolStakes(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, get(t, node, "/api/v0/epochs/12/stakes/pool1xyz").Code)
 }
 
+func TestHandleEpochStakesNotRetained(t *testing.T) {
+	t.Parallel()
+	node := &mockNode{}
+	node.epochStakes.err = ErrHistoryNotRetained
+	node.epochPoolStakes.err = ErrHistoryNotRetained
+	for _, target := range []string{
+		"/api/v0/epochs/12/stakes",
+		"/api/v0/epochs/12/stakes/pool1xyz",
+	} {
+		recorder := get(t, node, target)
+		assert.Equal(t, http.StatusNotFound, recorder.Code, target)
+		assert.Contains(t, recorder.Body.String(), "not retained by this node", target)
+	}
+}
+
 func TestHandleEpochBlocks(t *testing.T) {
 	t.Parallel()
 	node := &mockNode{}
@@ -516,6 +531,8 @@ func TestNodeAdapterEpochStakes(t *testing.T) {
 	require.NoError(t, err)
 	poolB, err := poolIDString(fx.poolB)
 	require.NoError(t, err)
+	poolC, err := poolIDString(bytes32of(28, 0xc3))
+	require.NoError(t, err)
 
 	stakes, total, err := fx.adapter.EpochStakes(ctx, 1, PaginationParams{Count: 100, Page: 1})
 	require.NoError(t, err)
@@ -541,10 +558,34 @@ func TestNodeAdapterEpochStakes(t *testing.T) {
 		{StakeAddress: address(1, 0x02), Amount: "200"},
 	}, poolStakes)
 
+	// Label 1's summary reports three delegators yet no per-credential rows
+	// remain, which is what pruning leaves behind; an empty list would read
+	// as a complete distribution.
+	_, _, err = fx.adapter.EpochStakes(ctx, 2, PaginationParams{Count: 100, Page: 1})
+	assert.ErrorIs(t, err, ErrHistoryNotRetained)
+	_, _, err = fx.adapter.EpochPoolStakes(ctx, 2, poolA, PaginationParams{Count: 100, Page: 1})
+	assert.ErrorIs(t, err, ErrHistoryNotRetained)
+
+	// A pool with no delegators in a retained distribution is a genuine
+	// empty answer, not a pruned one.
+	poolStakes, total, err = fx.adapter.EpochPoolStakes(ctx, 1, poolC, PaginationParams{Count: 100, Page: 1})
+	require.NoError(t, err)
+	assert.Equal(t, 0, total)
+	assert.Empty(t, poolStakes)
+
+	// A captured snapshot with no delegators is a genuine empty distribution.
+	_, err = fx.raw.Exec(`UPDATE epoch_summary SET total_delegators = 0 WHERE epoch = 1`)
+	require.NoError(t, err)
 	stakes, total, err = fx.adapter.EpochStakes(ctx, 2, PaginationParams{Count: 100, Page: 1})
 	require.NoError(t, err)
-	assert.Equal(t, 0, total, "no snapshot is stored for label 1")
+	assert.Equal(t, 0, total)
 	assert.Empty(t, stakes)
+
+	// A snapshot that was never captured is unavailable, not empty.
+	_, err = fx.raw.Exec(`DELETE FROM epoch_summary WHERE epoch = 1`)
+	require.NoError(t, err)
+	_, _, err = fx.adapter.EpochStakes(ctx, 2, PaginationParams{Count: 100, Page: 1})
+	assert.ErrorIs(t, err, ErrHistoryNotRetained)
 
 	stakes, total, err = fx.adapter.EpochStakes(ctx, 0, PaginationParams{Count: 100, Page: 1})
 	require.NoError(t, err)

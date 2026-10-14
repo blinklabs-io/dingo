@@ -17,6 +17,7 @@ package sqlstore
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"fmt"
 	"math/big"
 	"slices"
@@ -28,6 +29,7 @@ import (
 func (s *Store) GetAccountStakeHistory(
 	credentialTag uint8,
 	stakingKey []byte,
+	throughLabel uint64,
 	limit int,
 	offset int,
 	order string,
@@ -41,9 +43,14 @@ func (s *Store) GetAccountStakeHistory(
 	if err != nil {
 		return nil, 0, err
 	}
+	through, err := checkedInt64(throughLabel)
+	if err != nil {
+		return nil, 0, err
+	}
 	const where = ` FROM reward_stake_input
-WHERE credential_tag = ? AND staking_key = ? AND registered = TRUE`
-	args := []any{credentialTag, stakingKey}
+WHERE credential_tag = ? AND staking_key = ? AND registered = TRUE
+  AND epoch < ?`
+	args := []any{credentialTag, stakingKey, through}
 	var total int
 	if err := db.QueryRowContext(
 		ctx, "SELECT COUNT(*)"+where, args...,
@@ -78,6 +85,27 @@ WHERE credential_tag = ? AND staking_key = ? AND registered = TRUE`
 		return nil, 0, err
 	}
 	return ret, total, nil
+}
+
+// GetEarliestRewardStakeInputEpoch returns the oldest snapshot label that
+// still has per-credential stake rows. ok is false when none remain.
+func (s *Store) GetEarliestRewardStakeInputEpoch(
+	txn types.Txn,
+) (epoch uint64, ok bool, err error) {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return 0, false, err
+	}
+	var earliest sql.NullInt64
+	if err := db.QueryRowContext(
+		ctx, `SELECT MIN(epoch) FROM reward_stake_input`,
+	).Scan(&earliest); err != nil {
+		return 0, false, fmt.Errorf("get earliest reward stake input epoch: %w", err)
+	}
+	if !earliest.Valid || earliest.Int64 < 0 {
+		return 0, false, nil
+	}
+	return uint64(earliest.Int64), true, nil
 }
 
 func (s *Store) GetAccountMIRHistory(

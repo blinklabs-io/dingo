@@ -264,6 +264,22 @@ func (b *Blockfrost) handler() http.Handler {
 		b.handleAccountAssociatedAddresses,
 	)
 	mux.HandleFunc(
+		"GET /api/v0/accounts/{stake_address}/history",
+		b.handleAccountStakeHistory,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/accounts/{stake_address}/mirs",
+		b.handleAccountMIRs,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/accounts/{stake_address}/addresses/assets",
+		b.handleAccountAddressAssets,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/accounts/{stake_address}/addresses/total",
+		b.handleAccountAddressTotal,
+	)
+	mux.HandleFunc(
 		"GET /api/v0/accounts/{stake_address}/delegations",
 		b.handleAccountDelegationHistory,
 	)

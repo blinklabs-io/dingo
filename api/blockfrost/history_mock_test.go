@@ -60,6 +60,7 @@ func (v *valueStub[T]) respond(number uint64, key string) (T, error) {
 // mockNode.
 type historyMock struct {
 	poolHistoryMock
+	accountHistoryMock
 	epochByNumber   valueStub[EpochInfo]
 	epochsAfter     pageStub[EpochInfo]
 	epochsBefore    pageStub[EpochInfo]
@@ -184,4 +185,43 @@ func (m *poolHistoryMock) PoolUpdates(
 	params PaginationParams,
 ) ([]PoolUpdateInfo, int, error) {
 	return m.poolUpdates.respond(0, poolID, params)
+}
+
+// accountHistoryMock supplies the account half of historyMock.
+type accountHistoryMock struct {
+	accountStakeHistory pageStub[AccountStakeHistoryInfo]
+	accountMIRs         pageStub[AccountMIRInfo]
+	accountAssets       pageStub[AddressAmountInfo]
+	accountTotal        valueStub[AccountAddressTotalInfo]
+}
+
+func (m *accountHistoryMock) AccountStakeHistory(
+	_ context.Context,
+	stakeAddress string,
+	params PaginationParams,
+) ([]AccountStakeHistoryInfo, int, error) {
+	return m.accountStakeHistory.respond(0, stakeAddress, params)
+}
+
+func (m *accountHistoryMock) AccountMIRs(
+	_ context.Context,
+	stakeAddress string,
+	params PaginationParams,
+) ([]AccountMIRInfo, int, error) {
+	return m.accountMIRs.respond(0, stakeAddress, params)
+}
+
+func (m *accountHistoryMock) AccountAddressAssets(
+	_ context.Context,
+	stakeAddress string,
+	params PaginationParams,
+) ([]AddressAmountInfo, int, error) {
+	return m.accountAssets.respond(0, stakeAddress, params)
+}
+
+func (m *accountHistoryMock) AccountAddressTotal(
+	_ context.Context,
+	stakeAddress string,
+) (AccountAddressTotalInfo, error) {
+	return m.accountTotal.respond(0, stakeAddress)
 }

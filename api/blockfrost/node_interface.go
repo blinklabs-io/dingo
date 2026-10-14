@@ -298,6 +298,35 @@ type BlockfrostNode interface {
 		PaginationParams,
 	) ([]AccountAssociatedAddressInfo, int, error)
 
+	// AccountStakeHistory returns the stake an account held in each retained
+	// epoch distribution. It returns ErrHistoryNotRetained when the account's
+	// history predates the oldest retained distribution and none remains.
+	AccountStakeHistory(context.Context,
+		string,
+		PaginationParams,
+	) ([]AccountStakeHistoryInfo, int, error)
+
+	// AccountMIRs returns the Move Instantaneous Rewards paid to the
+	// requested stake address.
+	AccountMIRs(context.Context,
+		string,
+		PaginationParams,
+	) ([]AccountMIRInfo, int, error)
+
+	// AccountAddressAssets returns the native assets held across the
+	// addresses of the requested stake address.
+	AccountAddressAssets(context.Context,
+		string,
+		PaginationParams,
+	) ([]AddressAmountInfo, int, error)
+
+	// AccountAddressTotal returns the received and sent totals across the
+	// addresses of the requested stake address.
+	AccountAddressTotal(
+		context.Context,
+		string,
+	) (AccountAddressTotalInfo, error)
+
 	// AccountDelegationHistory returns delegation history
 	// rows for the requested stake address.
 	AccountDelegationHistory(context.Context,
@@ -676,6 +705,28 @@ type PoolCalidusKeyInfo struct {
 	BlockHeight uint64
 	BlockTime   int64
 	Epoch       uint64
+}
+
+// AccountStakeHistoryInfo is the stake an account held in one epoch.
+type AccountStakeHistoryInfo struct {
+	ActiveEpoch uint64
+	Amount      string
+	PoolID      string
+}
+
+// AccountMIRInfo is one Move Instantaneous Rewards payment to an account.
+type AccountMIRInfo struct {
+	TxHash string
+	Amount string
+}
+
+// AccountAddressTotalInfo is the lifetime received and sent totals across
+// the addresses of an account. Each sum lists lovelace first.
+type AccountAddressTotalInfo struct {
+	StakeAddress string
+	ReceivedSum  []AddressAmountInfo
+	SentSum      []AddressAmountInfo
+	TxCount      int
 }
 
 // AddressAmountInfo holds amount data needed by address
