@@ -85,7 +85,7 @@ func (s *submitServiceServer) SubmitTx(
 	}
 	txHash := tx.Hash()
 	// Add transaction to mempool
-	err = s.utxorpc.config.Mempool.AddTransaction(txType, txRawBytes)
+	err = s.utxorpc.config.Mempool.AddTransaction(ctx, txType, txRawBytes)
 	if err != nil {
 		return nil, fmt.Errorf("failed to add tx to mempool: %w", err)
 	}
@@ -353,11 +353,14 @@ func (s *submitServiceServer) EvalTx(
 	redeemerData := redeemerPlutusDataByKey(tx)
 	tmpRedeemers := make([]*cardano.Redeemer, 0, len(redeemerExUnits))
 	for key, val := range redeemerExUnits {
+		purpose := cardano.RedeemerPurpose(key.Tag + 1)
+		if _, ok := cardano.RedeemerPurpose_name[int32(purpose)]; !ok {
+			continue
+		}
 		r := &cardano.Redeemer{
-			Purpose: cardano.RedeemerPurpose(
-				key.Tag + 1,
-			), // gouroboros tags are 0-based, cardano tags are offset by 1
-			Index: key.Index,
+			// gouroboros tags are 0-based; UTxO RPC values start at 1.
+			Purpose: purpose,
+			Index:   key.Index,
 			ExUnits: &cardano.ExUnits{
 				Steps:  uint64(val.Steps),  // nolint:gosec
 				Memory: uint64(val.Memory), // nolint:gosec

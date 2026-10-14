@@ -300,13 +300,14 @@ type VoteManagerConfig struct {
 
 // storedVote is one retained vote with its serving metadata.
 type storedVote struct {
-	vote       lcommon.LeiosVote
-	raw        cbor.RawMessage
-	originConn string // empty for locally emitted votes
-	verified   bool
-	seq        uint64
-	epoch      uint64
-	insertedAt time.Time
+	vote             lcommon.LeiosVote
+	raw              cbor.RawMessage
+	originConn       string // empty for locally emitted votes
+	announcingRbHash lcommon.Blake2b256
+	verified         bool
+	seq              uint64
+	epoch            uint64
+	insertedAt       time.Time
 }
 
 // voteRecord is the authoritative dedup and tally-accounting entry for
@@ -373,6 +374,11 @@ type pendingPrototypeVote struct {
 type acquiredEbRecord struct {
 	slot   uint64
 	epoch  uint64
+	seenAt time.Time
+}
+
+type validatedAnnouncementRecord struct {
+	ebHash lcommon.Blake2b256
 	seenAt time.Time
 }
 
@@ -503,18 +509,19 @@ type VoteManager struct {
 	// undone by an in-flight computation landing afterwards -- the rollback
 	// case derived from a pre-rollback stake snapshot, the stop case from the
 	// stopped lifecycle's providers.
-	committeeGeneration uint64
-	votesById           map[lcommon.LeiosVoteId]*storedVote
-	voteLog             []*storedVote // ascending seq order
-	voteRecords         map[lcommon.LeiosVoteId]voteRecord
-	nextSeq             uint64
-	cursors             map[string]uint64 // connection key -> next seq to serve
-	wakeCh              chan struct{}     // closed and replaced on every insert
-	tallies             map[tallyKey]*ebTally
-	announcements       map[lcommon.Blake2b256]announcementRecord
-	acquiredEbs         map[lcommon.Blake2b256]acquiredEbRecord
-	votedAnnouncements  map[lcommon.Blake2b256]struct{}
-	pendingVotes        map[lcommon.Blake2b256]map[uint64][]pendingPrototypeVote
+	committeeGeneration    uint64
+	votesById              map[lcommon.LeiosVoteId]*storedVote
+	voteLog                []*storedVote // ascending seq order
+	voteRecords            map[lcommon.LeiosVoteId]voteRecord
+	nextSeq                uint64
+	cursors                map[string]uint64 // connection key -> next seq to serve
+	wakeCh                 chan struct{}     // closed and replaced on every insert
+	tallies                map[tallyKey]*ebTally
+	announcements          map[lcommon.Blake2b256]announcementRecord
+	acquiredEbs            map[lcommon.Blake2b256]acquiredEbRecord
+	validatedAnnouncements map[lcommon.Blake2b256]validatedAnnouncementRecord
+	votedAnnouncements     map[lcommon.Blake2b256]struct{}
+	pendingVotes           map[lcommon.Blake2b256]map[uint64][]pendingPrototypeVote
 	// pendingVoteCount is the sum of all pending candidate slices;
 	// pendingVoteCountByConn partitions that same total by origin connection.
 	// Every admission and removal must update both counters together.
@@ -619,7 +626,10 @@ func NewVoteManager(cfg VoteManagerConfig) (*VoteManager, error) {
 		tallies:             make(map[tallyKey]*ebTally),
 		announcements:       make(map[lcommon.Blake2b256]announcementRecord),
 		acquiredEbs:         make(map[lcommon.Blake2b256]acquiredEbRecord),
-		votedAnnouncements:  make(map[lcommon.Blake2b256]struct{}),
+		validatedAnnouncements: make(
+			map[lcommon.Blake2b256]validatedAnnouncementRecord,
+		),
+		votedAnnouncements: make(map[lcommon.Blake2b256]struct{}),
 		pendingVotes: make(
 			map[lcommon.Blake2b256]map[uint64][]pendingPrototypeVote,
 		),
@@ -1091,7 +1101,8 @@ func (m *VoteManager) readyAnnouncementsForEpochLocked(
 		if record.epoch != currentEpoch {
 			continue
 		}
-		if _, acquired := m.acquiredEbs[record.ebHash]; !acquired {
+		validated, ok := m.validatedAnnouncements[rbHash]
+		if !ok || validated.ebHash != record.ebHash {
 			continue
 		}
 		if _, voted := m.votedAnnouncements[rbHash]; voted {
@@ -1254,6 +1265,8 @@ func (m *VoteManager) CommitteeForEpoch(epoch uint64) (*Committee, error) {
 // ValidateDijkstraCertificate verifies a Dijkstra certificate against the
 // historical committee and keys resolved for epoch. Unlike vote admission,
 // block admission is strict: every selected signer must have a verified key.
+// A verdict on the certificate wraps ErrInvalidCertificate; an error that does
+// not means the committee, its keys, or its threshold could not be resolved.
 func (m *VoteManager) ValidateDijkstraCertificate(
 	epoch uint64,
 	signers []byte,
@@ -1268,10 +1281,10 @@ func (m *VoteManager) ValidateDijkstraCertificate(
 		"Dijkstra Leios certificate aggregated signature",
 		aggregatedSignature,
 	); err != nil {
-		return err
+		return fmt.Errorf("%w: %w", ErrInvalidCertificate, err)
 	}
 	if err := lcommon.ValidateLeiosSignerBitfield(signers, entry.committee.Size()); err != nil {
-		return err
+		return fmt.Errorf("%w: %w", ErrInvalidCertificate, err)
 	}
 	var signerStake uint64
 	signerPubs := make([]*bls12381.G2Affine, 0, len(entry.committee.Members))
@@ -1281,8 +1294,15 @@ func (m *VoteManager) ValidateDijkstraCertificate(
 		}
 		pub, ok := m.resolveVoterKey(entry, member.PoolKeyHash)
 		if !ok {
-			return fmt.Errorf("leios certificate signer %d has no usable key", member.VoterId)
+			return fmt.Errorf(
+				"%w: signer %d has no usable key",
+				ErrInvalidCertificate,
+				member.VoterId,
+			)
 		}
+		// Member stakes sum to at most the snapshot's total stake, itself a
+		// uint64, so overflow means inconsistent local snapshot data rather
+		// than anything about the certificate.
 		if ^uint64(0)-signerStake < member.Stake {
 			return errors.New("leios certificate signer stake overflows uint64")
 		}
@@ -1298,10 +1318,14 @@ func (m *VoteManager) ValidateDijkstraCertificate(
 		return err
 	}
 	if !quorumMet {
-		return ErrQuorumNotMet
+		return fmt.Errorf("%w: %w", ErrInvalidCertificate, ErrQuorumNotMet)
 	}
 	if err := VerifyAggregateSignature(signerPubs, message, aggregatedSignature); err != nil {
-		return fmt.Errorf("verify Leios certificate aggregate signature: %w", err)
+		return fmt.Errorf(
+			"%w: verify aggregate signature: %w",
+			ErrInvalidCertificate,
+			err,
+		)
 	}
 	return nil
 }
@@ -2133,8 +2157,14 @@ func (m *VoteManager) prunePrototypeStateLocked(now time.Time) {
 	for rbHash, record := range m.announcements {
 		if record.seenAt.Before(cutoff) {
 			delete(m.announcements, rbHash)
+			delete(m.validatedAnnouncements, rbHash)
 			delete(m.votedAnnouncements, rbHash)
 			m.removePendingAnnouncementLocked(rbHash)
+		}
+	}
+	for rbHash, record := range m.validatedAnnouncements {
+		if record.seenAt.Before(cutoff) {
+			delete(m.validatedAnnouncements, rbHash)
 		}
 	}
 	for ebHash, record := range m.acquiredEbs {
@@ -2205,7 +2235,8 @@ func (m *VoteManager) insertVote(
 			return false
 		}
 		if originConn == "" {
-			if _, acquired := m.acquiredEbs[current.ebHash]; !acquired {
+			validated, ok := m.validatedAnnouncements[announcingRbHash]
+			if !ok || validated.ebHash != current.ebHash {
 				m.mu.Unlock()
 				return false
 			}
@@ -2278,13 +2309,14 @@ func (m *VoteManager) insertVote(
 	}
 	m.updateRecordsGaugeLocked()
 	stored := &storedVote{
-		vote:       vote,
-		raw:        raw,
-		originConn: originConn,
-		verified:   verified,
-		seq:        m.nextSeq,
-		epoch:      epoch,
-		insertedAt: now,
+		vote:             vote,
+		raw:              raw,
+		originConn:       originConn,
+		announcingRbHash: announcingRbHash,
+		verified:         verified,
+		seq:              m.nextSeq,
+		epoch:            epoch,
+		insertedAt:       now,
 	}
 	m.nextSeq++
 	m.votesById[voteId] = stored
@@ -2535,6 +2567,13 @@ func (m *VoteManager) NextVotes(
 			if sv.originConn == connKey {
 				continue
 			}
+			// Prototype votes sign the announcing ranking-block hash and are
+			// diffused inline over leios-notify. Protocol 20 carries the legacy
+			// slot-plus-EB-hash domain, so serving a prototype signature there
+			// guarantees that an honest peer rejects it.
+			if sv.announcingRbHash != (lcommon.Blake2b256{}) {
+				continue
+			}
 			collected = append(collected, sv.vote)
 			if uint64(len(collected)) == count {
 				break
@@ -2571,16 +2610,18 @@ func (m *VoteManager) VotesByIds(
 	return ret
 }
 
-// HandleEndorserBlock records acquisition. The current prototype votes only
-// after a selected ranking block announces the acquired EB.
-func (m *VoteManager) HandleEndorserBlock(
+// HandleValidatedEndorserBlock records an endorser block that passed semantic
+// validation for the named ranking-block announcement. Local votes are scoped
+// to that exact announcement.
+func (m *VoteManager) HandleValidatedEndorserBlock(
 	slot uint64,
+	rbHash lcommon.Blake2b256,
 	ebHash lcommon.Blake2b256,
 ) {
 	epoch, err := m.epochProvider.EpochForSlot(slot)
 	if err != nil {
 		m.logger.Debug(
-			"cannot resolve acquired endorser block epoch",
+			"cannot resolve validated endorser block epoch",
 			"error",
 			err,
 		)
@@ -2592,21 +2633,14 @@ func (m *VoteManager) HandleEndorserBlock(
 	m.acquiredEbs[ebHash] = acquiredEbRecord{
 		slot: slot, epoch: epoch, seenAt: now,
 	}
-	var ready []struct {
-		rbHash lcommon.Blake2b256
-		record announcementRecord
+	m.validatedAnnouncements[rbHash] = validatedAnnouncementRecord{
+		ebHash: ebHash, seenAt: now,
 	}
-	for rbHash, record := range m.announcements {
-		if record.ebHash == ebHash {
-			ready = append(ready, struct {
-				rbHash lcommon.Blake2b256
-				record announcementRecord
-			}{rbHash: rbHash, record: record})
-		}
-	}
+	record, ready := m.announcements[rbHash]
+	ready = ready && record.ebHash == ebHash
 	m.mu.Unlock()
-	for _, item := range ready {
-		m.emitPrototypeVote(item.rbHash, item.record)
+	if ready {
+		m.emitPrototypeVote(rbHash, record)
 	}
 }
 
@@ -2991,6 +3025,7 @@ func (m *VoteManager) handleChainHeaderInvalidation(
 	named := make(map[lcommon.Blake2b256]struct{}, len(evt.RbHashes))
 	for _, rbHash := range evt.RbHashes {
 		named[rbHash] = struct{}{}
+		delete(m.validatedAnnouncements, rbHash)
 	}
 	invalidated := make(map[lcommon.Blake2b256]struct{})
 	for rbHash, record := range m.announcements {
@@ -2999,6 +3034,7 @@ func (m *VoteManager) handleChainHeaderInvalidation(
 			continue
 		}
 		delete(m.announcements, rbHash)
+		delete(m.validatedAnnouncements, rbHash)
 		delete(m.votedAnnouncements, rbHash)
 		m.removePendingAnnouncementLocked(rbHash)
 		invalidated[rbHash] = struct{}{}
@@ -3051,6 +3087,9 @@ func (m *VoteManager) dropAnnouncementDerivedStateLocked(
 		if _, ok := invalidated[key.announcingRbHash]; ok {
 			delete(m.tallies, key)
 		}
+	}
+	for rbHash := range invalidated {
+		delete(m.validatedAnnouncements, rbHash)
 	}
 	if len(droppedIds) > 0 {
 		m.filterVotesLocked(func(sv *storedVote) bool {
@@ -3185,10 +3224,11 @@ func (m *VoteManager) observeAnnouncement(
 		record.headerSeq = existing.headerSeq
 	}
 	m.announcements[rbHash] = record
-	_, acquired := m.acquiredEbs[ebHash]
+	validated, ok := m.validatedAnnouncements[rbHash]
+	ready := ok && validated.ebHash == ebHash
 	pendingMap := m.removePendingAnnouncementLocked(rbHash)
 	m.mu.Unlock()
-	if acquired {
+	if ready {
 		m.emitPrototypeVote(rbHash, record)
 	}
 	for _, candidates := range pendingMap {
@@ -3247,6 +3287,7 @@ func (m *VoteManager) handleEpochTransition(
 	for rbHash, record := range m.announcements {
 		if record.epoch < keepFrom {
 			delete(m.announcements, rbHash)
+			delete(m.validatedAnnouncements, rbHash)
 			delete(m.votedAnnouncements, rbHash)
 			m.removePendingAnnouncementLocked(rbHash)
 		}
@@ -3363,6 +3404,7 @@ func (m *VoteManager) handleRollback(evt chain.ChainRollbackEvent) {
 			continue
 		}
 		delete(m.announcements, rbHash)
+		delete(m.validatedAnnouncements, rbHash)
 		delete(m.votedAnnouncements, rbHash)
 		m.removePendingAnnouncementLocked(rbHash)
 	}

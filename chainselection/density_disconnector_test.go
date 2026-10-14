@@ -173,6 +173,18 @@ func TestGDDKeepsIncompletePeerAgainstRivalWithinK(t *testing.T) {
 	assert.Empty(t, f.disconnected())
 }
 
+func TestGDDDisconnectsIncompletePeerAgainstRivalBeyondK(t *testing.T) {
+	t.Parallel()
+	f := newGDDFixture(t, true)
+	dense, slow := corrConn(1), corrConn(2)
+	f.deliver(t, dense, 0, append([]uint64{10}, slotRange(11, 51)...)...)
+	f.deliver(t, slow, 0, 10, 125)
+
+	f.evaluate()
+
+	assert.Equal(t, []ouroboros.ConnectionId{slow}, f.disconnected())
+}
+
 // Without a configured window the selector falls back to 3k slots, not 3k/f.
 // At k=40 that window averages 6 honest blocks, so a peer on an honest short
 // fork can show a complete window of 1 block against a rival's 2. Only a real
@@ -316,19 +328,107 @@ func TestGDDEvaluationIsRateLimited(t *testing.T) {
 // gain density would let any denser fork, honest or fabricated ahead of
 // local ledger verification, disconnect honest peers sitting at their own
 // tip on a short fork.
-func TestGDDKeepsIdlePeerOnShortFork(t *testing.T) {
+func TestGDDKeepsPeerAtAdvertisedTipOnShortFork(t *testing.T) {
 	t.Parallel()
 	f := newGDDFixture(t, true)
-	dense, idle := corrConn(1), corrConn(2)
+	dense, waiting := corrConn(1), corrConn(2)
 	f.deliver(t, dense, 0, append([]uint64{1000}, slotRange(1001, 1040)...)...)
-	// One block in (1000,1120], at its advertised tip (1050): idle, window
-	// not complete. Slots start at 1000 so the advertised tip does not end
-	// Genesis mode.
-	f.deliver(t, idle, 1050, 1000, 1050)
+	// One block in (1000,1120], at its advertised tip (1050), but no
+	// MsgAwaitReply has arrived. Slots start at 1000 so the advertised tip does
+	// not end Genesis mode.
+	f.deliver(t, waiting, 1050, 1000, 1050)
 
 	f.evaluate()
 
 	assert.Empty(t, f.disconnected())
+}
+
+func TestGDDUsesIdlingBoundOnlyAfterAwaitReply(t *testing.T) {
+	t.Parallel()
+
+	t.Run("advertised tip equality is not idling", func(t *testing.T) {
+		t.Parallel()
+		f := newGDDFixture(t, true)
+		dense, waiting := corrConn(1), corrConn(2)
+		f.deliver(
+			t,
+			dense,
+			0,
+			append([]uint64{1000}, slotRange(1001, 1041)...)...,
+		)
+		f.deliver(t, waiting, 1050, 1000, 1050)
+		f.cs.peerTips[waiting].Tip = cloneObservedTip(
+			f.cs.peerTips[waiting].ObservedTip,
+		)
+
+		f.evaluate()
+
+		assert.Empty(t, f.disconnected())
+	})
+
+	t.Run("await reply proves the lower bound", func(t *testing.T) {
+		t.Parallel()
+		f := newGDDFixture(t, true)
+		dense, idling := corrConn(1), corrConn(2)
+		f.deliver(
+			t,
+			dense,
+			0,
+			append([]uint64{1000}, slotRange(1001, 1041)...)...,
+		)
+		f.deliver(t, idling, 1050, 1000, 1050)
+		point := f.cs.GetPeerTip(idling).ObservedTip.Point
+		f.cs.SetPeerIdling(idling, point)
+
+		f.evaluate()
+
+		assert.Equal(t, []ouroboros.ConnectionId{idling}, f.disconnected())
+	})
+}
+
+func TestPeerIdlingTracksAwaitReplyFrontier(t *testing.T) {
+	t.Parallel()
+	f := newGDDFixture(t, true)
+	peer := corrConn(1)
+	f.deliver(t, peer, 0, 10)
+	point10 := f.cs.GetPeerTip(peer).ObservedTip.Point
+	f.cs.SetPeerIdling(peer, point10)
+	require.True(t, f.cs.peerTips[peer].isIdling())
+
+	f.deliver(t, peer, 0, 11)
+	require.False(t, f.cs.peerTips[peer].isIdling())
+
+	// A delayed AwaitReply notification for the old frontier cannot mark the
+	// advanced peer idle.
+	f.cs.SetPeerIdling(peer, point10)
+	assert.False(t, f.cs.peerTips[peer].isIdling())
+
+	point11 := f.cs.GetPeerTip(peer).ObservedTip.Point
+	f.cs.SetPeerIdling(peer, point11)
+	require.True(t, f.cs.peerTips[peer].isIdling())
+	f.cs.peerTips[peer].ApplyRollback(point10, genesisTip(20, "adv", 20))
+	assert.False(t, f.cs.peerTips[peer].isIdling())
+}
+
+func TestDensityCandidatesAreInCanonicalOrder(t *testing.T) {
+	t.Parallel()
+	f := newGDDFixture(t, true)
+	x, y, z := corrConn(1), corrConn(2), corrConn(3)
+	for _, connId := range []ouroboros.ConnectionId{z, x, y} {
+		f.deliver(t, connId, 0, 1000)
+	}
+
+	want := []ouroboros.ConnectionId{x, y, z}
+	for range 32 {
+		f.cs.mutex.Lock()
+		candidates := f.cs.densityCandidatesLocked()
+		f.cs.mutex.Unlock()
+		got := make([]ouroboros.ConnectionId, 0, len(candidates))
+		for _, candidate := range candidates {
+			got = append(got, candidate.connId)
+		}
+		assert.Equal(t, want, got)
+	}
 }
 
 // Density is compared at each pair's own intersection, so "sparser than"
@@ -338,19 +438,41 @@ func TestGDDKeepsIdlePeerOnShortFork(t *testing.T) {
 // three.
 func TestGDDKeepsOnePeerWhenDensityIsCyclic(t *testing.T) {
 	t.Parallel()
-	f := newGDDFixture(t, true)
-	x, y, z := corrConn(1), corrConn(2), corrConn(3)
-	shared := slotRange(1001, 1010)
-	// (1000,1120]: X 20, Y 21, Z 19. (1010,1130]: Y 11, Z 19.
-	f.deliver(t, x, 0, append([]uint64{1000}, slotRange(1101, 1120)...)...)
-	yslots := append([]uint64{1000}, shared...)
-	yslots = append(yslots, slotRange(1011, 1021)...)
-	f.deliver(t, y, 0, append(yslots, 1200)...)
-	zslots := append([]uint64{1000}, shared...)
-	zslots = append(zslots, slotRange(1031, 1039)...)
-	f.deliver(t, z, 0, append(zslots, slotRange(1121, 1130)...)...)
+	orders := [][]int{
+		{0, 1, 2}, {0, 2, 1}, {1, 0, 2},
+		{1, 2, 0}, {2, 0, 1}, {2, 1, 0},
+	}
+	for _, order := range orders {
+		t.Run(fmt.Sprint(order), func(t *testing.T) {
+			t.Parallel()
+			f := newGDDFixture(t, true)
+			x, y, z := corrConn(1), corrConn(2), corrConn(3)
+			shared := slotRange(1001, 1010)
+			feeds := []func(){
+				func() {
+					f.deliver(t, x, 0,
+						append([]uint64{1000}, slotRange(1101, 1120)...)...)
+				},
+				func() {
+					yslots := append([]uint64{1000}, shared...)
+					yslots = append(yslots, slotRange(1011, 1021)...)
+					f.deliver(t, y, 0, append(yslots, 1200)...)
+				},
+				func() {
+					zslots := append([]uint64{1000}, shared...)
+					zslots = append(zslots, slotRange(1031, 1039)...)
+					f.deliver(t, z, 0,
+						append(zslots, slotRange(1121, 1130)...)...)
+				},
+			}
+			for _, index := range order {
+				feeds[index]()
+			}
 
-	f.evaluate()
+			f.evaluate()
 
-	assert.Len(t, f.disconnected(), 2)
+			assert.Equal(t, []ouroboros.ConnectionId{x, y}, f.disconnected())
+			assert.NotContains(t, f.disconnected(), z)
+		})
+	}
 }

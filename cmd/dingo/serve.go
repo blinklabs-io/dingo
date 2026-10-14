@@ -79,13 +79,15 @@ func serveRun(
 		// and rebuild, repair before exposing the node so
 		// secondary-index-backed queries return correct
 		// cardinalities.
-		if err := repairDeferredIndexes(cfg, logger); err != nil {
+		if err := repairDeferredIndexes(
+			cmd.Context(), cfg, logger,
+		); err != nil {
 			return fmt.Errorf("deferred-index repair failed: %w", err)
 		}
 	}
 
 	// Run node
-	if err := node.Run(cfg, logger); err != nil {
+	if err := node.Run(cmd.Context(), cfg, logger); err != nil {
 		return err
 	}
 	return nil
@@ -279,7 +281,10 @@ func mithrilRewardRepairPending(
 		ctx, cfg, logger, 1,
 	)
 	if err != nil {
-		return false, fmt.Errorf("opening database for reward repair check: %w", err)
+		return false, fmt.Errorf(
+			"opening database for reward repair check: %w",
+			err,
+		)
 	}
 	db, err := runtimeDatabase(runtime)
 	if err != nil {
@@ -339,10 +344,12 @@ func checkMithrilInactivityCompat(
 // repairDeferredIndexes rebuilds any deferred metadata indexes left
 // outstanding by a prior interrupted bulk-load run.
 func repairDeferredIndexes(
-	cfg *config.Config, logger *slog.Logger,
+	ctx context.Context,
+	cfg *config.Config,
+	logger *slog.Logger,
 ) error {
 	runtime, err := openConfiguredDatabase(
-		context.Background(), cfg, logger, cfg.DatabaseWorkers,
+		ctx, cfg, logger, cfg.DatabaseWorkers,
 	)
 	if err != nil {
 		return fmt.Errorf("opening database: %w", err)
@@ -357,7 +364,7 @@ func repairDeferredIndexes(
 			return fmt.Errorf("opening database: %w", recoveryErr)
 		}
 	}
-	return node.RepairDeferredIndexes(db, logger)
+	return node.RepairDeferredIndexes(ctx, db, logger)
 }
 
 // resumeBackfill checks whether metadata backfill is needed and
@@ -447,7 +454,9 @@ func resumeBackfill(
 		// have completed but crashed before the critical rebuild
 		// ran. The lazy remainder is handled by background
 		// maintenance after the API starts.
-		if err := node.RepairCriticalDeferredIndexes(db, logger); err != nil {
+		if err := node.RepairCriticalDeferredIndexes(
+			ctx, db, logger,
+		); err != nil {
 			return err
 		}
 		if err := node.FinalizeBackfillPlannerStats(ctx, db, logger); err != nil {
@@ -474,7 +483,7 @@ func resumeBackfill(
 	// Rebuild critical deferred indexes before clearing sync_status so a
 	// crash between the two leaves both markers set and the next
 	// startup re-runs the rebuild.
-	if err := node.RepairCriticalDeferredIndexes(db, logger); err != nil {
+	if err := node.RepairCriticalDeferredIndexes(ctx, db, logger); err != nil {
 		return err
 	}
 	if err := node.FinalizeBackfillPlannerStats(ctx, db, logger); err != nil {
@@ -526,6 +535,12 @@ func openConfiguredDatabase(
 	logger *slog.Logger,
 	maxConnections int,
 ) (*internalplugins.DatabaseRuntime, error) {
+	genesisStakingEmpty, err := internalplugins.ResolveGenesisStakingEmpty(
+		nil, cfg.CardanoConfig, cfg.Network, cfg.NetworkMagic,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("loading cardano node config: %w", err)
+	}
 	storageMode := string(effectiveStorageMode(cfg))
 	return internalplugins.OpenDatabase(
 		ctx,
@@ -546,7 +561,8 @@ func openConfiguredDatabase(
 			Metadata: cfg.Plugins.Storage.Metadata,
 		},
 		internalplugins.StorageDependencies{
-			DataDir: cfg.DatabasePath, RunMode: string(cfg.RunMode),
+			GenesisStakingEmpty: genesisStakingEmpty,
+			DataDir:             cfg.DatabasePath, RunMode: string(cfg.RunMode),
 			StorageMode: storageMode, MaxConnections: maxConnections,
 			Logger: logger, TracingEnabled: cfg.Tracing,
 		},

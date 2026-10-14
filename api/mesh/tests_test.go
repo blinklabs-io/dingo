@@ -78,26 +78,19 @@ func TestNewServerRequiresDependencies(t *testing.T) {
 		"non-hex genesis hash": func(c *ServerConfig) {
 			c.GenesisHash = "not-hex"
 		},
-		"zero genesis start time": func(c *ServerConfig) {
-			c.GenesisStartTimeSec = 0
-		},
-		"negative genesis start time": func(c *ServerConfig) {
-			c.GenesisStartTimeSec = -1
-		},
 	}
 
 	for name, mutate := range tests {
 		t.Run(name, func(t *testing.T) {
 			deps := newTestDeps()
 			cfg := ServerConfig{
-				LedgerState:         deps.ledger,
-				Database:            deps.database,
-				Chain:               deps.chain,
-				Mempool:             deps.mempool,
-				Network:             testNetwork,
-				NetworkMagic:        testNetworkMagic,
-				GenesisHash:         testGenesisHash,
-				GenesisStartTimeSec: testGenesisStartTimeSec,
+				LedgerState:  deps.ledger,
+				Database:     deps.database,
+				Chain:        deps.chain,
+				Mempool:      deps.mempool,
+				Network:      testNetwork,
+				NetworkMagic: testNetworkMagic,
+				GenesisHash:  testGenesisHash,
 			}
 			mutate(&cfg)
 
@@ -117,16 +110,17 @@ func TestNewServerDefaults(t *testing.T) {
 
 	deps := newTestDeps()
 	srv, err := NewServer(ServerConfig{
-		LedgerState:         deps.ledger,
-		Database:            deps.database,
-		Chain:               deps.chain,
-		Mempool:             deps.mempool,
-		Network:             testNetwork,
-		GenesisHash:         testGenesisHash,
-		GenesisStartTimeSec: testGenesisStartTimeSec,
+		LedgerState: deps.ledger,
+		Database:    deps.database,
+		Chain:       deps.chain,
+		Mempool:     deps.mempool,
+		Network:     testNetwork,
+		GenesisHash: testGenesisHash,
 	})
 
-	require.NoError(t, err)
+	if err != nil {
+		t.Fatalf("Mesh constructor rejected valid dependencies with a ledger clock: %v", err)
+	}
 	require.NotNil(t, srv.logger)
 	require.Equal(t, defaultListenAddr, srv.config.ListenAddress)
 }
@@ -960,6 +954,7 @@ type fakeMempool struct {
 }
 
 func (f *fakeMempool) AddTransaction(
+	ctx context.Context,
 	txType uint,
 	txBytes []byte,
 ) error {
@@ -1036,14 +1031,13 @@ func newTestServer(
 ) *Server {
 	t.Helper()
 	cfg := ServerConfig{
-		LedgerState:         deps.ledger,
-		Database:            deps.database,
-		Chain:               deps.chain,
-		Mempool:             deps.mempool,
-		Network:             testNetwork,
-		NetworkMagic:        testNetworkMagic,
-		GenesisHash:         testGenesisHash,
-		GenesisStartTimeSec: testGenesisStartTimeSec,
+		LedgerState:  deps.ledger,
+		Database:     deps.database,
+		Chain:        deps.chain,
+		Mempool:      deps.mempool,
+		Network:      testNetwork,
+		NetworkMagic: testNetworkMagic,
+		GenesisHash:  testGenesisHash,
 	}
 	for _, opt := range opts {
 		opt(&cfg)
@@ -1327,7 +1321,7 @@ func testSimpleSignedTx(
 	bodyCbor := testTxBody(
 		t,
 		[]shelley.ShelleyTransactionInput{
-			shelley.NewShelleyTransactionInput(
+			shelley.MustNewShelleyTransactionInput(
 				hexString(testHash(0xd1)), 0,
 			),
 		},
@@ -1365,7 +1359,7 @@ func testTxBodyWithCerts(
 	body := conway.ConwayTransactionBody{
 		TxInputs: conway.NewConwayTransactionInputSet(
 			[]shelley.ShelleyTransactionInput{
-				shelley.NewShelleyTransactionInput(
+				shelley.MustNewShelleyTransactionInput(
 					hexString(testHash(0xd2)), 0,
 				),
 			},

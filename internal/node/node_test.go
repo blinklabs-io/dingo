@@ -25,6 +25,7 @@ import (
 	"maps"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"reflect"
 	"regexp"
@@ -678,6 +679,48 @@ func TestMetricsServerDisabledByZeroPort(t *testing.T) {
 	})
 	if srv != nil {
 		t.Fatalf("metricsPort 0 must start no listener, got %q", srv.Addr)
+	}
+}
+
+func TestMetricsServerAuthenticatesRemoteListener(t *testing.T) {
+	t.Parallel()
+
+	const token = "metrics-secret"
+	srv := newMetricsServer(&config.Config{
+		MetricsBindAddr:  "192.0.2.10",
+		MetricsAuthToken: token,
+		MetricsPort:      12798,
+	})
+	if srv.Addr != "192.0.2.10:12798" {
+		t.Fatalf("metrics address = %q", srv.Addr)
+	}
+
+	for _, tc := range []struct {
+		name   string
+		header string
+		want   int
+	}{
+		{name: "missing token", want: http.StatusUnauthorized},
+		{name: "wrong token", header: "Bearer wrong", want: http.StatusUnauthorized},
+		{name: "authenticated", header: "Bearer " + token, want: http.StatusOK},
+		{name: "lowercase scheme", header: "bearer " + token, want: http.StatusOK},
+		{name: "multiple spaces", header: "Bearer   " + token, want: http.StatusOK},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+			if tc.header != "" {
+				req.Header.Set("Authorization", tc.header)
+			}
+			resp := httptest.NewRecorder()
+			srv.Handler.ServeHTTP(resp, req)
+			if resp.Code != tc.want {
+				t.Fatalf("status = %d, want %d", resp.Code, tc.want)
+			}
+			if strings.Contains(resp.Body.String(), token) {
+				t.Fatal("response disclosed the metrics token")
+			}
+		})
 	}
 }
 
@@ -1476,5 +1519,31 @@ func TestBuildDingoConfigWiresTokenRegistryHeaders(t *testing.T) {
 
 	if got := built.TokenRegistry().HeaderSecrets; !maps.Equal(got, headers) {
 		t.Fatalf("token registry headers = %v, want %v", got, headers)
+	}
+}
+
+func TestBuildDingoConfigWiresBlockfetchLowWatermarkFlag(t *testing.T) {
+	t.Parallel()
+
+	logger := slog.New(slog.NewTextHandler(new(bytes.Buffer), nil))
+	for _, enabled := range []bool{false, true} {
+		built := buildDingoConfig(
+			&config.Config{BlockfetchLowWatermarkEnabled: enabled},
+			logger,
+			nil,
+			nil,
+			false,
+			dingo.StorageModeCore,
+			30*time.Second,
+			chainsync.DefaultStallTimeout,
+			chainsync.HeaderSyncStrategyPrimary,
+		)
+		if built.BlockfetchLowWatermarkEnabled() != enabled {
+			t.Fatalf(
+				"BlockfetchLowWatermarkEnabled = %v, want %v",
+				built.BlockfetchLowWatermarkEnabled(),
+				enabled,
+			)
+		}
 	}
 }

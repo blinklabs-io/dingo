@@ -1124,6 +1124,22 @@ func TestWithKoiosParityAccountsExplicitFalseDisablesEndToEnd(t *testing.T) {
 	assert.False(t, *cfg.koiosParity.Accounts)
 }
 
+func TestBarkBlockDownloadAllowPrivateAddressesReachesRuntime(t *testing.T) {
+	t.Parallel()
+
+	for _, allow := range []bool{false, true} {
+		cfg, err := NewConfigFromInternal(
+			&internalconfig.Config{
+				BarkBlockDownloadAllowPrivateAddresses: allow,
+			},
+			nil, nil, nil, nil,
+		)
+		require.NoError(t, err)
+		require.Equal(t, allow, cfg.barkBlockDownloadAllowPrivateAddresses)
+		require.Equal(t, allow, cfg.BarkBlockDownloadAllowPrivateAddresses())
+	}
+}
+
 // TestTokenRegistryConfigReachesRuntimeFromYAML covers the path YAML, env, and
 // CLI all land on: internal config only. The syncer reads the runtime mirror,
 // so without syncCompatFields carrying it across, an operator's tokenRegistry
@@ -1136,6 +1152,8 @@ func TestTokenRegistryConfigReachesRuntimeFromYAML(t *testing.T) {
 			TokenRegistry: internalconfig.TokenRegistryConfig{
 				Enabled:               true,
 				SourceURL:             "https://mirror.example.test/reg.tar.gz",
+				ManifestURL:           "https://mirror.example.test/manifest.json",
+				TrustedManifestKey:    strings.Repeat("ab", 32),
 				Interval:              2 * time.Hour,
 				RequestTimeout:        9 * time.Minute,
 				UserAgent:             "custom-agent/9",
@@ -1148,6 +1166,7 @@ func TestTokenRegistryConfigReachesRuntimeFromYAML(t *testing.T) {
 				MaxBatchBytes:         89,
 				StoreLogos:            true,
 				AllowPrivateAddresses: true,
+				AllowRollback:         true,
 			},
 		},
 		nil, nil, nil, nil,
@@ -1160,6 +1179,12 @@ func TestTokenRegistryConfigReachesRuntimeFromYAML(t *testing.T) {
 		"https://mirror.example.test/reg.tar.gz",
 		cfg.tokenRegistry.SourceURL,
 	)
+	require.Equal(
+		t,
+		"https://mirror.example.test/manifest.json",
+		cfg.tokenRegistry.ManifestURL,
+	)
+	require.Equal(t, strings.Repeat("ab", 32), cfg.tokenRegistry.TrustedManifestKey)
 	require.Equal(t, 2*time.Hour, cfg.tokenRegistry.Interval)
 	require.Equal(t, 9*time.Minute, cfg.tokenRegistry.RequestTimeout)
 	require.Equal(t, "custom-agent/9", cfg.tokenRegistry.UserAgent)
@@ -1176,6 +1201,7 @@ func TestTokenRegistryConfigReachesRuntimeFromYAML(t *testing.T) {
 	require.Equal(t, int64(89), cfg.tokenRegistry.MaxBatchBytes)
 	require.True(t, cfg.tokenRegistry.StoreLogos)
 	require.True(t, cfg.tokenRegistry.AllowPrivateAddresses)
+	require.True(t, cfg.tokenRegistry.AllowRollback)
 }
 
 // TestTokenRegistryConfigDisabledByDefault pins the deliberate default: the
@@ -1201,11 +1227,14 @@ func TestWithTokenRegistryConfigPreservesHTTPClient(t *testing.T) {
 	cfg := NewConfig(WithTokenRegistryConfig(TokenRegistryConfig{
 		Enabled:              true,
 		HTTPClient:           client,
+		ManifestURL:          "https://mirror.example.test/manifest.json",
+		TrustedManifestKey:   strings.Repeat("cd", 32),
 		UserAgent:            "programmatic/1",
 		MaxDecompressedBytes: 456,
 		MaxArchiveEntries:    67,
 		MaxAcceptedEntries:   34,
 		MaxBatchBytes:        89,
+		AllowRollback:        true,
 	}))
 
 	require.Same(t, client, cfg.tokenRegistry.HTTPClient)
@@ -1216,4 +1245,22 @@ func TestWithTokenRegistryConfigPreservesHTTPClient(t *testing.T) {
 	require.Equal(t, 67, cfg.TokenRegistry().MaxArchiveEntries)
 	require.Equal(t, 34, cfg.TokenRegistry().MaxAcceptedEntries)
 	require.Equal(t, int64(89), cfg.TokenRegistry().MaxBatchBytes)
+	require.Equal(
+		t,
+		"https://mirror.example.test/manifest.json",
+		cfg.TokenRegistry().ManifestURL,
+	)
+	require.Equal(t, strings.Repeat("cd", 32), cfg.TokenRegistry().TrustedManifestKey)
+	require.True(t, cfg.TokenRegistry().AllowRollback)
+}
+
+func TestNewConfigPlannerStatsRefreshDefaultsOnAndCanBeDisabled(t *testing.T) {
+	t.Parallel()
+	cfg := NewConfig()
+	assert.True(t, cfg.PlannerStatsRefreshEnabled())
+	off := NewConfig(WithPlannerStatsRefresh(false))
+	assert.False(t, off.PlannerStatsRefreshEnabled())
+	// A hand-built Config has no internal config and must not start the
+	// refresh.
+	assert.False(t, (&Config{}).PlannerStatsRefreshEnabled())
 }

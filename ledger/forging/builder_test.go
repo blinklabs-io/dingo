@@ -3170,16 +3170,20 @@ func TestComputeConwayBlockBodyHashProducesValidatingBlock(t *testing.T) {
 				Slot:        1001,
 				PrevHash:    lcommon.NewBlake2b256(make([]byte, 32)),
 				IssuerVkey:  lcommon.IssuerVkey{},
-				VrfKey:      []byte{},
+				VrfKey:      make([]byte, 32),
 				VrfResult: lcommon.VrfResult{
-					Output: lcommon.Blake2b256{}.Bytes(),
+					Output: make([]byte, 64),
+					Proof:  make([]byte, 80),
 				},
 				BlockBodySize: bodySize,
 				BlockBodyHash: bodyHash,
-				OpCert:        babbage.BabbageOpCert{},
-				ProtoVersion:  babbage.BabbageProtoVersion{Major: 10},
+				OpCert: babbage.BabbageOpCert{
+					HotVkey:   make([]byte, 32),
+					Signature: make([]byte, 64),
+				},
+				ProtoVersion: babbage.BabbageProtoVersion{Major: 10},
 			},
-			Signature: []byte{},
+			Signature: make([]byte, 448),
 		},
 	}
 	block := &conway.ConwayBlock{

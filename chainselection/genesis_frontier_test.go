@@ -99,7 +99,7 @@ func TestGenesisWitnessRequiresCandidateTip(t *testing.T) {
 	cs.peerTips[stale].Touch()
 	staleTip := cs.peerTips[stale]
 	fastTip := cs.peerTips[fast]
-	confirms := fastTip.confirmsRecentChain(staleTip)
+	confirms := fastTip.confirmsRecentChainWithin(staleTip, 0)
 	cs.mutex.Unlock()
 	require.False(
 		t,
@@ -279,7 +279,9 @@ func TestGenesisWitnessSuffixRejectsUnknownHeightAfterDeepRollback(
 	fast := corrConn(1)
 	witness := corrConn(2)
 	feedChain(cs, fast, "a", 2910, 3000, 10)
-	feedChain(cs, witness, "a", 2910, 3300, 10)
+	// Genesis mode retains 2k+1 delivered tips, so the witness runs more than
+	// that past the rollback point to push it out of retained history.
+	feedChain(cs, witness, "a", 2910, 3500, 10)
 	// The local tip is more than one window behind, so the mode stays Genesis
 	// and the hash frontier is tracked.
 	cs.mutex.RLock()
@@ -294,13 +296,13 @@ func TestGenesisWitnessSuffixRejectsUnknownHeightAfterDeepRollback(
 		PeerRollbackEvent{
 			ConnectionId: witness,
 			Point:        rollback.Point,
-			Tip:          genesisTip(3300, "a3300", 330),
+			Tip:          genesisTip(3500, "a3500", 350),
 		},
 	))
 	cs.mutex.RLock()
 	fastTip := cs.peerTips[fast]
 	witnessTip := cs.peerTips[witness]
-	confirms := fastTip.confirmsRecentChain(witnessTip)
+	confirms := fastTip.confirmsRecentChainWithin(witnessTip, 0)
 	witnessBlock := witnessTip.SelectionTip().BlockNumber
 	cs.mutex.RUnlock()
 	require.True(t, confirms, "the witness still holds the candidate tip")

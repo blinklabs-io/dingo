@@ -100,7 +100,9 @@ func PParamsUpdateConway(
 	// guards an already-stored malformed proposal that reaches enactment some
 	// other way (e.g. replay of pre-fix data).
 	conwayPParamsUpdate.ProtocolVersion = nil
-	conwayPParams.Update(&conwayPParamsUpdate)
+	if err := conwayPParams.ApplyUpdate(&conwayPParamsUpdate); err != nil {
+		return nil, err
+	}
 	return conwayPParams, nil
 }
 
@@ -200,7 +202,9 @@ func ValidateTxConway(
 	}
 	normalizedTx, err := normalizeScriptDataHashCbor(tx)
 	if err != nil {
-		return fmt.Errorf("normalize script data hash CBOR: %w", err)
+		return semanticRuleValidationErrorFor(
+			fmt.Errorf("normalize script data hash CBOR: %w", err),
+		)
 	}
 	tx = normalizedTx
 	// Validate TX through ledger validation rules (Phase-1).
@@ -212,25 +216,29 @@ func ValidateTxConway(
 		if err != nil {
 			errs = append(
 				errs,
-				fmt.Errorf(
+				semanticRuleValidationErrorFor(fmt.Errorf(
 					"conway utxo validation rule %d: %w",
 					validationRule.index,
 					err,
-				),
+				)),
 			)
 		}
 	}
 	if err := validateParameterChangeExcludesProtocolVersion(tx, slot, ls, pp); err != nil {
 		errs = append(
 			errs,
-			fmt.Errorf("conway parameter-change validation: %w", err),
+			semanticRuleValidationErrorFor(fmt.Errorf(
+				"conway parameter-change validation: %w", err,
+			)),
 		)
 	}
 	if err := ValidateTxFeeConway(tx, ls, tmpPparams); err != nil &&
 		(!isInputResolutionError(err) || len(errs) == 0) {
 		errs = append(
 			errs,
-			fmt.Errorf("conway fee validation: %w", err),
+			semanticRuleValidationErrorFor(fmt.Errorf(
+				"conway fee validation: %w", err,
+			)),
 		)
 	}
 	if len(errs) > 0 {
@@ -249,7 +257,9 @@ func ValidateTxConway(
 		plutusCtx.assetMint,
 		plutusCtx.redeemers,
 	); err != nil {
-		return fmt.Errorf("conway plutus redeemer validation: %w", err)
+		return semanticRuleValidationErrorFor(fmt.Errorf(
+			"conway plutus redeemer validation: %w", err,
+		))
 	}
 	if shouldSkipPhase2Validation(ls) {
 		return nil
@@ -264,7 +274,7 @@ func ValidateTxConway(
 	if phase2Err != nil {
 		phase2Err = fmt.Errorf("conway plutus validation: %w", phase2Err)
 	}
-	return validatePlutusOutcome(tx, phase2Err)
+	return semanticRuleValidationErrorFor(validatePlutusOutcome(tx, phase2Err))
 }
 
 var (
@@ -1260,7 +1270,7 @@ func evaluateConwayPlutusScript(
 		ctx := script.NewScriptContextV3(txInfoV3, redeemer, purpose)
 		costModel, err := requiredCostModel(pp.CostModels, 2, "PlutusV3")
 		if err != nil {
-			return lcommon.ExUnits{}, nil, err
+			return lcommon.ExUnits{}, nil, localRuleValidationErrorFor(err)
 		}
 		evalContext, err := plutusEvalContext(
 			txInfos.ls,
@@ -1273,7 +1283,9 @@ func evaluateConwayPlutusScript(
 			false,
 		)
 		if err != nil {
-			return lcommon.ExUnits{}, nil, fmt.Errorf("build evaluation context: %w", err)
+			return lcommon.ExUnits{}, nil, localRuleValidationErrorFor(
+				fmt.Errorf("build evaluation context: %w", err),
+			)
 		}
 		usedBudget, err := s.EvaluateContext(
 			machineCtx,
@@ -1309,7 +1321,7 @@ func evaluateConwayPlutusScript(
 		ctx := script.NewScriptContextV1V2(txInfoV2, purpose)
 		costModel, err := requiredCostModel(pp.CostModels, 1, "PlutusV2")
 		if err != nil {
-			return lcommon.ExUnits{}, nil, err
+			return lcommon.ExUnits{}, nil, localRuleValidationErrorFor(err)
 		}
 		evalContext, err := plutusEvalContext(
 			txInfos.ls,
@@ -1322,7 +1334,9 @@ func evaluateConwayPlutusScript(
 			syntheticV2CostModel,
 		)
 		if err != nil {
-			return lcommon.ExUnits{}, nil, fmt.Errorf("build evaluation context: %w", err)
+			return lcommon.ExUnits{}, nil, localRuleValidationErrorFor(
+				fmt.Errorf("build evaluation context: %w", err),
+			)
 		}
 		usedBudget, err := s.EvaluateContext(
 			machineCtx,
@@ -1350,7 +1364,7 @@ func evaluateConwayPlutusScript(
 		ctx := script.NewScriptContextV1V2(txInfoV1, purpose)
 		costModel, err := requiredCostModel(pp.CostModels, 0, "PlutusV1")
 		if err != nil {
-			return lcommon.ExUnits{}, nil, err
+			return lcommon.ExUnits{}, nil, localRuleValidationErrorFor(err)
 		}
 		evalContext, err := plutusEvalContext(
 			txInfos.ls,
@@ -1363,7 +1377,9 @@ func evaluateConwayPlutusScript(
 			false,
 		)
 		if err != nil {
-			return lcommon.ExUnits{}, nil, fmt.Errorf("build evaluation context: %w", err)
+			return lcommon.ExUnits{}, nil, localRuleValidationErrorFor(
+				fmt.Errorf("build evaluation context: %w", err),
+			)
 		}
 		usedBudget, err := s.EvaluateContext(
 			machineCtx,
@@ -1586,41 +1602,52 @@ func evaluateTxConway(
 			Index: redeemer.Index,
 		}] = usedBudget
 	}
-	// Calculate fee based on TX size and calculated ExUnits
-	txSize := TxSizeForFee(tx)
-	var pricesMem, pricesSteps *big.Rat
-	if tmpPparams.ExecutionCosts.MemPrice != nil {
-		pricesMem = tmpPparams.ExecutionCosts.MemPrice.ToBigRat()
-	}
-	if tmpPparams.ExecutionCosts.StepPrice != nil {
-		pricesSteps = tmpPparams.ExecutionCosts.StepPrice.ToBigRat()
-	}
-	fee := CalculateMinFee(
-		txSize,
-		retTotalExUnits,
-		tmpPparams.MinFeeA,
-		tmpPparams.MinFeeB,
-		pricesMem,
-		pricesSteps,
-	)
+	fee := evaluationMinFee(tx, tmpPparams, retTotalExUnits)
 	refScriptSize, err := ReferenceScriptSizeFromUtxos(
 		scriptInputs.resolvedAllInputs,
 	)
 	if err != nil {
 		return 0, lcommon.ExUnits{}, nil, err
 	}
-	var refScriptCostPerByte *big.Rat
-	if tmpPparams.MinFeeRefScriptCostPerByte != nil {
-		refScriptCostPerByte = tmpPparams.MinFeeRefScriptCostPerByte.ToBigRat()
-	}
 	fee = saturatedAddUint64(
 		fee,
 		calculateTieredRefScriptFee(
 			refScriptSize,
-			refScriptCostPerByte,
+			refScriptCostPerByteRat(tmpPparams),
 			refScriptCostStride,
 			refScriptCostMultiplier,
 		),
 	)
 	return fee, retTotalExUnits, retRedeemerExUnits, nil
+}
+
+// evaluationMinFee is the size and execution part of the minimum fee for tx
+// with exUnits as its execution units.
+func evaluationMinFee(
+	tx lcommon.Transaction,
+	pp *conway.ConwayProtocolParameters,
+	exUnits lcommon.ExUnits,
+) uint64 {
+	var pricesMem, pricesSteps *big.Rat
+	if pp.ExecutionCosts.MemPrice != nil {
+		pricesMem = pp.ExecutionCosts.MemPrice.ToBigRat()
+	}
+	if pp.ExecutionCosts.StepPrice != nil {
+		pricesSteps = pp.ExecutionCosts.StepPrice.ToBigRat()
+	}
+	return CalculateMinFee(
+		TxSizeForFee(tx),
+		exUnits,
+		pp.MinFeeA,
+		pp.MinFeeB,
+		pricesMem,
+		pricesSteps,
+	)
+}
+
+func refScriptCostPerByteRat(pp *conway.ConwayProtocolParameters) *big.Rat {
+	if pp.MinFeeRefScriptCostPerByte == nil {
+		return nil
+	}
+	return pp.MinFeeRefScriptCostPerByte.ToBigRat()
 }

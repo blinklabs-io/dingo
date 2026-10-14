@@ -237,7 +237,7 @@ func feeTestDijkstraTx(
 	if len(children) > 0 {
 		subs := []gdijkstra.DijkstraSubTransaction{}
 		for i, c := range children {
-			in := shelley.NewShelleyTransactionInput(
+			in := shelley.MustNewShelleyTransactionInput(
 				fmt.Sprintf("%02x", i+1)+strings.Repeat("ab", 31), 0,
 			)
 			sub := gdijkstra.DijkstraSubTransaction{
@@ -313,6 +313,7 @@ func TestValidateTxDijkstraFeeAggregatesChildBudgets(t *testing.T) {
 				0, newMockLedgerState(), pp,
 			)
 			assert.True(t, hasFeeTooSmall(err), "minimum-1 accepted: %v", err)
+			assert.True(t, IsSemanticRuleValidationError(err))
 			err = ValidateTxDijkstra(
 				feeTestDijkstraTx(t, minFee, tc.top, tc.children...),
 				0, newMockLedgerState(), pp,

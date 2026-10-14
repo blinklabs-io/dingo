@@ -178,15 +178,11 @@ func TestHashRejectsTamperedByronSscProof(t *testing.T) {
 
 	tampered := tamperByronSscCertificates(t, raw)
 
-	// The tamper must leave decode, hash, and slot unaffected, otherwise
-	// this test would be caught by ErrUndecodable/ErrHashMismatch/
-	// ErrSlotMismatch instead of exercising ssc_proof authentication.
-	tDecoded, err := gledger.NewBlockFromCbor(blockType, tampered)
-	require.NoError(t, err,
-		"fixture invariant: tampered block must still decode under the "+
-			"default (shape-only) ssc_proof check")
-	require.Equal(t, hash, tDecoded.Hash(),
-		"fixture invariant: tamper must not change the block hash")
+	// Byron's block hash covers only the header, so the requested hash still
+	// matches; the default decoder must reject the altered body proof.
+	_, err = gledger.NewBlockFromCbor(blockType, tampered)
+	require.Error(t, err,
+		"fixture invariant: the default decoder must authenticate ssc_proof")
 
 	_, err = Hash(blockType, decoded.SlotNumber(), tampered, hash[:])
 	require.Error(t, err,

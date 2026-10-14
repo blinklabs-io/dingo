@@ -78,9 +78,9 @@ type LedgerDelta struct {
 	expandedIndexOffset uint64
 	// skipConsumedInputRecovery applies transaction effects without the
 	// consumed-utxo recovery/repair pass (see Database.SetTransactionWithOpts).
-	// Set only for the Leios Musashi endorser-block apply, which mirrors the
-	// reference ledger's ValidateNone closure apply; false for all ranking-block
-	// deltas so their behavior is unchanged.
+	// Set only for Leios endorser-block closure application, which mirrors the
+	// reference ledger's applyLeiosClosure; false for all ranking-block deltas so
+	// their behavior is unchanged.
 	skipConsumedInputRecovery bool
 	// strictConsumedInputs refuses to recover an absent consumed-input producer
 	// from the blob store and treats it as a hard error instead.
@@ -195,6 +195,7 @@ func (d *LedgerDelta) applyWithDonationRecording(
 	appliedTxs := make([]bool, len(d.Transactions))
 	storageIndexOffset := d.expandedIndexOffset
 	for i, tr := range d.Transactions {
+		var proposalsValidated bool
 		if tr.Index < 0 || tr.Index > math.MaxUint32 {
 			return fmt.Errorf("transaction index out of range: %d", tr.Index)
 		}
@@ -335,6 +336,7 @@ func (d *LedgerDelta) applyWithDonationRecording(
 					level,
 					uint32(storageIndex), //nolint:gosec
 					txn,
+					&proposalsValidated,
 				); err != nil {
 					return fmt.Errorf("process transaction body %d governance: %w", levelIndex, err)
 				}
@@ -521,6 +523,7 @@ func (d *LedgerDelta) processGovernance(
 	tx lcommon.Transaction,
 	txIndex uint32,
 	txn *database.Txn,
+	validated *bool,
 ) error {
 	proposals := tx.ProposalProcedures()
 	votes := tx.VotingProcedures()
@@ -532,13 +535,35 @@ func (d *LedgerDelta) processGovernance(
 		return nil
 	}
 
-	// Determine current epoch and Conway protocol parameters.
-	// These are needed for proposals, votes, and DRep activity certificates;
-	// deregistration cleanup does not depend on them.
-	ls.RLock()
-	currentEpoch := ls.currentEpoch.EpochId
-	pparams := ls.currentPParams
-	ls.RUnlock()
+	// Determine the block epoch and Conway protocol parameters.
+	// These are needed for both proposals (govActionLifetime) and
+	// votes (dRepInactivityPeriod for activity tracking).
+	contextSlot := d.Point.Slot
+	if d.closureContextSlot != nil {
+		contextSlot = *d.closureContextSlot
+	}
+	snapshot := ls.loadConsensusSnapshot()
+	if snapshot == nil {
+		return errors.New("governance consensus snapshot not yet published")
+	}
+	blockEpoch, err := epochForSlotInCache(
+		snapshot.epochCache,
+		contextSlot,
+	)
+	if err != nil {
+		return fmt.Errorf(
+			"resolve governance block epoch at slot %d: %w",
+			contextSlot,
+			err,
+		)
+	}
+	pparams := protocolParametersForBlockEra(
+		d.BlockEraId,
+		snapshot.currentEra,
+		ls.eraList(),
+		snapshot.currentPParams,
+		snapshot.prevEraPParams,
+	)
 
 	if requiresConwayParameters {
 		conwayPParams := conwayProtocolParameters(pparams)
@@ -556,10 +581,12 @@ func (d *LedgerDelta) processGovernance(
 				tx,
 				d.Point,
 				txIndex,
-				currentEpoch,
+				blockEpoch.EpochId,
 				conwayPParams.GovActionValidityPeriod,
+				pparams,
 				ls.db,
 				txn,
+				validated,
 			); err != nil {
 				return fmt.Errorf("process governance proposals: %w", err)
 			}
@@ -571,7 +598,7 @@ func (d *LedgerDelta) processGovernance(
 				ctx,
 				tx,
 				d.Point,
-				currentEpoch,
+				blockEpoch.EpochId,
 				conwayPParams.DRepInactivityPeriod,
 				ls.db,
 				txn,
@@ -585,7 +612,7 @@ func (d *LedgerDelta) processGovernance(
 				ctx,
 				tx,
 				d.Point,
-				currentEpoch,
+				blockEpoch.EpochId,
 				conwayPParams.DRepInactivityPeriod,
 				uint64(conwayPParams.ProtocolVersion.Major),
 				ls.db,
@@ -600,7 +627,7 @@ func (d *LedgerDelta) processGovernance(
 			ctx,
 			tx,
 			d.Point,
-			currentEpoch,
+			blockEpoch.EpochId,
 			ls.db,
 			txn,
 		); err != nil {

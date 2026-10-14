@@ -35,7 +35,7 @@ import (
 
 func TestValidateTxDijkstraAllowsSpendReferenceOverlapWithoutPlutus(t *testing.T) {
 	t.Parallel()
-	input := shelley.NewShelleyTransactionInput(
+	input := shelley.MustNewShelleyTransactionInput(
 		"b228b482a1aae768e4a796380f49e021d9c21f70d3c12cb186b188dedfc0ee44",
 		0,
 	)
@@ -71,7 +71,7 @@ func TestValidateTxDijkstraAllowsSubtransactionSpendReferenceOverlapWithoutPlutu
 	t *testing.T,
 ) {
 	t.Parallel()
-	input := shelley.NewShelleyTransactionInput(
+	input := shelley.MustNewShelleyTransactionInput(
 		"c228b482a1aae768e4a796380f49e021d9c21f70d3c12cb186b188dedfc0ee55",
 		0,
 	)
@@ -80,7 +80,7 @@ func TestValidateTxDijkstraAllowsSubtransactionSpendReferenceOverlapWithoutPlutu
 		Body: gdijkstra.DijkstraTransactionBody{
 			TxInputs: conway.NewConwayTransactionInputSet(
 				[]shelley.ShelleyTransactionInput{
-					shelley.NewShelleyTransactionInput(
+					shelley.MustNewShelleyTransactionInput(
 						"f228b482a1aae768e4a796380f49e021d9c21f70d3c12cb186b188dedfc0ee88",
 						0,
 					),
@@ -139,11 +139,11 @@ func newDijkstraBatchChildControlFixture(
 ) (*gdijkstra.DijkstraTransaction, *mockLedgerState, *gdijkstra.DijkstraProtocolParameters, shelley.ShelleyTransactionInput) {
 	t.Helper()
 	const balance = uint64(10_000_000)
-	topInput := shelley.NewShelleyTransactionInput(
+	topInput := shelley.MustNewShelleyTransactionInput(
 		"a228b482a1aae768e4a796380f49e021d9c21f70d3c12cb186b188dedfc0ee11",
 		0,
 	)
-	childInput := shelley.NewShelleyTransactionInput(
+	childInput := shelley.MustNewShelleyTransactionInput(
 		"b228b482a1aae768e4a796380f49e021d9c21f70d3c12cb186b188dedfc0ee22",
 		0,
 	)
@@ -196,7 +196,7 @@ func TestValidateTxDijkstraAllowsSiblingSpendAndReferenceOfOriginalInput(
 	tx, state, protocolParams, childInput := newDijkstraBatchChildControlFixture(t)
 	subTransactions := tx.Body.TxSubTransactions.Items()
 	require.Len(t, subTransactions, 1)
-	secondInput := shelley.NewShelleyTransactionInput(
+	secondInput := shelley.MustNewShelleyTransactionInput(
 		"c228b482a1aae768e4a796380f49e021d9c21f70d3c12cb186b188dedfc0ee33",
 		0,
 	)
@@ -262,7 +262,7 @@ func TestValidateTxDijkstraRejectsChildOutputChaining(t *testing.T) {
 			TxId:        firstChild.Body.Id(),
 			OutputIndex: 0,
 		}
-		secondInput := shelley.NewShelleyTransactionInput(
+		secondInput := shelley.MustNewShelleyTransactionInput(
 			"d228b482a1aae768e4a796380f49e021d9c21f70d3c12cb186b188dedfc0ee44",
 			0,
 		)
@@ -447,11 +447,11 @@ func TestDijkstraPlutusValidationV3OverlapIgnoresUnusedPlutusV1AndV2Scripts(
 		[]lcommon.PlutusV2Script{unusedV2Script},
 		false,
 	)
-	unusedV1Input := shelley.NewShelleyTransactionInput(
+	unusedV1Input := shelley.MustNewShelleyTransactionInput(
 		"1128b482a1aae768e4a796380f49e021d9c21f70d3c12cb186b188dedfc0ee88",
 		0,
 	)
-	unusedV2Input := shelley.NewShelleyTransactionInput(
+	unusedV2Input := shelley.MustNewShelleyTransactionInput(
 		"1228b482a1aae768e4a796380f49e021d9c21f70d3c12cb186b188dedfc0ee88",
 		0,
 	)
@@ -549,7 +549,7 @@ func TestValidateTxDijkstraIgnoresUnusedPlutusV4ReferenceScriptForSpendReference
 		t,
 		lang.LanguageVersionV4,
 	).(lcommon.PlutusV4Script)
-	unusedV4Input := shelley.NewShelleyTransactionInput(
+	unusedV4Input := shelley.MustNewShelleyTransactionInput(
 		"f228b482a1aae768e4a796380f49e021d9c21f70d3c12cb186b188dedfc0ee88",
 		0,
 	)
@@ -578,7 +578,7 @@ func TestValidateDijkstraPlutusV4ReferenceOverlapChecksSubtransactions(
 		t,
 		lang.LanguageVersionV4,
 	).(lcommon.PlutusV4Script)
-	input := shelley.NewShelleyTransactionInput(
+	input := shelley.MustNewShelleyTransactionInput(
 		"d228b482a1aae768e4a796380f49e021d9c21f70d3c12cb186b188dedfc0ee66",
 		0,
 	)
@@ -666,11 +666,11 @@ func newDijkstraReferenceOverlapScriptTx(
 	valid bool,
 ) (*gdijkstra.DijkstraTransaction, *mockLedgerState, *gdijkstra.DijkstraProtocolParameters) {
 	t.Helper()
-	input := shelley.NewShelleyTransactionInput(
+	input := shelley.MustNewShelleyTransactionInput(
 		"d228b482a1aae768e4a796380f49e021d9c21f70d3c12cb186b188dedfc0ee66",
 		0,
 	)
-	collateralInput := shelley.NewShelleyTransactionInput(
+	collateralInput := shelley.MustNewShelleyTransactionInput(
 		"e228b482a1aae768e4a796380f49e021d9c21f70d3c12cb186b188dedfc0ee77",
 		0,
 	)

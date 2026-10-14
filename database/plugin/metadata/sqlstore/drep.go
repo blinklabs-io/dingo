@@ -1351,6 +1351,286 @@ ORDER BY COALESCE(first_seen.slot, drep.added_slot), drep.id`
 	return ret, nil
 }
 
+func (s *Store) GetDrepsPage(
+	page models.DrepListPageQuery,
+	txn types.Txn,
+) ([]models.DrepListRow, int, error) {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, 0, err
+	}
+	if page.Limit < 1 || page.Offset < 0 {
+		return []models.DrepListRow{}, 0, nil
+	}
+	currentEpoch, err := checkedInt64(page.CurrentEpoch)
+	if err != nil {
+		return nil, 0, err
+	}
+	inactivity, err := checkedInt64(page.InactivityPeriod)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	ctes := `
+WITH first_seen AS (
+    SELECT cred, tag, MIN(slot) AS slot FROM (
+        SELECT drep_credential AS cred, credential_tag AS tag,
+               MIN(added_slot) AS slot
+        FROM registration_drep GROUP BY drep_credential, credential_tag
+        UNION ALL SELECT credential, credential_tag, MIN(added_slot)
+        FROM update_drep GROUP BY credential, credential_tag
+        UNION ALL SELECT drep, drep_type, MIN(added_slot)
+        FROM vote_delegation WHERE drep_type <= 1 GROUP BY drep, drep_type
+        UNION ALL SELECT drep, drep_type, MIN(added_slot)
+        FROM stake_vote_delegation
+        WHERE drep_type <= 1 GROUP BY drep, drep_type
+        UNION ALL SELECT drep, drep_type, MIN(added_slot)
+        FROM vote_registration_delegation
+        WHERE drep_type <= 1 GROUP BY drep, drep_type
+        UNION ALL SELECT drep, drep_type, MIN(added_slot)
+        FROM stake_vote_registration_delegation
+        WHERE drep_type <= 1 GROUP BY drep, drep_type
+    ) u GROUP BY cred, tag
+),
+last_reg AS (
+    SELECT drep_credential AS cred, credential_tag AS tag,
+           MAX(added_slot) AS slot
+    FROM registration_drep
+    WHERE certificate_id IS NOT NULL AND certificate_id != 0
+    GROUP BY drep_credential, credential_tag
+),
+special_seen AS (
+    SELECT drep_type, MIN(slot) AS slot FROM (
+        SELECT drep_type, MIN(added_slot) AS slot
+        FROM vote_delegation WHERE drep_type >= 2 GROUP BY drep_type
+        UNION ALL SELECT drep_type, MIN(added_slot)
+        FROM stake_vote_delegation WHERE drep_type >= 2 GROUP BY drep_type
+        UNION ALL SELECT drep_type, MIN(added_slot)
+        FROM vote_registration_delegation WHERE drep_type >= 2 GROUP BY drep_type
+        UNION ALL SELECT drep_type, MIN(added_slot)
+        FROM stake_vote_registration_delegation
+        WHERE drep_type >= 2 GROUP BY drep_type
+    ) u GROUP BY drep_type
+),
+listed AS (
+    SELECT COALESCE(drep.anchor_url, '') anchor_url,
+           drep.credential, drep.anchor_hash, drep.id,
+           drep.added_slot, drep.credential_tag,
+           drep.last_activity_epoch, drep.expiry_epoch, drep.active,
+           COALESCE(first_seen.slot, drep.added_slot) first_seen_slot,
+           COALESCE(last_reg.slot, 0) last_registration_slot,
+           COALESCE((SELECT MAX(epoch_id) FROM epoch
+                     WHERE start_slot <= COALESCE(NULLIF(last_reg.slot, 0), drep.added_slot)), 0)
+               registration_epoch,
+           NULL predefined
+    FROM drep
+    LEFT JOIN first_seen
+      ON first_seen.cred = drep.credential
+     AND first_seen.tag = drep.credential_tag
+    LEFT JOIN last_reg
+      ON last_reg.cred = drep.credential
+     AND last_reg.tag = drep.credential_tag
+    UNION ALL
+    SELECT '', NULL, NULL, 0, 0, 0, 0, 0, TRUE,
+           slot, 0, 0, drep_type
+    FROM special_seen
+),
+classified AS (
+    SELECT *, NOT active retired,
+           CASE
+             WHEN predefined IS NOT NULL THEN FALSE
+             WHEN NOT active THEN FALSE
+             WHEN expiry_epoch > 0 THEN expiry_epoch < ?
+             WHEN ? THEN COALESCE(NULLIF(last_activity_epoch, 0), registration_epoch) + ? < ?
+             ELSE FALSE
+           END expired
+    FROM listed
+) `
+	baseArgs := []any{
+		currentEpoch,
+		page.InactivityKnown,
+		inactivity,
+		currentEpoch,
+	}
+	var whereArgs []any
+	where := " WHERE 1 = 1"
+	if page.Retired != nil {
+		where += " AND retired = ?"
+		whereArgs = append(whereArgs, *page.Retired)
+	}
+	if page.Expired != nil {
+		where += " AND expired = ?"
+		whereArgs = append(whereArgs, *page.Expired)
+	}
+	var total int
+	if err := db.QueryRowContext(
+		ctx,
+		s.dialect.Rebind(ctes+" SELECT COUNT(*) FROM classified"+where),
+		append(append([]any{}, baseArgs...), whereArgs...)...,
+	).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("count DRep list: %w", err)
+	}
+	if page.Offset >= total {
+		return []models.DrepListRow{}, total, nil
+	}
+
+	amountSelect := ", 0 amount"
+	var amountArgs, adjustmentArgs []any
+	order := " ORDER BY first_seen_slot, id, predefined"
+	if page.Descending {
+		order = " ORDER BY first_seen_slot DESC, id DESC, predefined DESC"
+	}
+	if page.OrderByAmount {
+		cast := s.pendingCreditCastType()
+		pending := s.pendingRewardCreditSubquery(
+			"account_power_source.credential_tag",
+			"account_power_source.staking_key",
+		)
+		ctes += `,
+account_power AS (
+    SELECT account_power_source.drep credential,
+           account_power_source.drep_type credential_tag,
+           SUM(CASE WHEN reward_live_stake.id IS NOT NULL
+                    THEN CAST(reward_live_stake.utxo_stake AS ` + cast + `)
+                    ELSE (SELECT COALESCE(SUM(CAST(fallback_utxo.amount AS ` + cast + `)), 0)
+                          FROM utxo fallback_utxo
+                          WHERE fallback_utxo.credential_tag = account_power_source.credential_tag
+                            AND fallback_utxo.staking_key = account_power_source.staking_key
+                            AND fallback_utxo.deleted_slot = 0)
+               END
+               + COALESCE(CAST(account_power_source.reward AS ` + cast + `), 0)
+               + ` + pending + `) amount
+    FROM account account_power_source
+    LEFT JOIN reward_live_stake
+      ON reward_live_stake.credential_tag = account_power_source.credential_tag
+     AND reward_live_stake.staking_key = account_power_source.staking_key
+     AND reward_live_stake.calculation_version = ?
+    WHERE account_power_source.active = TRUE
+      AND ((account_power_source.drep_type IN (0, 1)
+            AND account_power_source.drep IS NOT NULL)
+           OR account_power_source.drep_type IN (2, 3))
+    GROUP BY account_power_source.drep, account_power_source.drep_type
+),
+power_adjustments AS (
+    SELECT credential, credential_tag, expiry_epoch predefined,
+           last_activity_epoch amount FROM drep WHERE FALSE`
+		amountArgs = append(amountArgs, models.RewardStakeCalculationVersion)
+		for _, adjustment := range page.PowerAdjustments {
+			amount, err := checkedInt64(adjustment.Amount)
+			if err != nil {
+				return nil, 0, fmt.Errorf("DRep power adjustment: %w", err)
+			}
+			var predefined any
+			if adjustment.Predefined != nil {
+				value, err := checkedInt64(*adjustment.Predefined)
+				if err != nil {
+					return nil, 0, fmt.Errorf("predefined DRep type: %w", err)
+				}
+				predefined = value
+			}
+			adjustmentArgs = append(adjustmentArgs, adjustment.Credential,
+				adjustment.CredentialTag, predefined, amount)
+		}
+		ctes += strings.Repeat(
+			" UNION ALL SELECT ? credential, ? credential_tag, ? predefined, ? amount",
+			len(page.PowerAdjustments),
+		)
+		ctes += `),
+ranked AS (
+    SELECT classified.*,
+           COALESCE(account_power.amount, 0)
+             + COALESCE(SUM(power_adjustments.amount), 0) amount
+    FROM classified
+    LEFT JOIN account_power
+      ON (classified.predefined IS NULL
+          AND account_power.credential = classified.credential
+          AND account_power.credential_tag = classified.credential_tag)
+      OR (classified.predefined IS NOT NULL
+          AND account_power.credential_tag = classified.predefined)
+    LEFT JOIN power_adjustments
+      ON (classified.predefined IS NULL
+          AND power_adjustments.predefined IS NULL
+          AND power_adjustments.credential = classified.credential
+          AND power_adjustments.credential_tag = classified.credential_tag)
+      OR (classified.predefined IS NOT NULL
+          AND power_adjustments.predefined = classified.predefined)
+    GROUP BY classified.anchor_url, classified.credential,
+             classified.anchor_hash, classified.id, classified.added_slot,
+             classified.credential_tag, classified.last_activity_epoch,
+             classified.expiry_epoch, classified.active,
+             classified.first_seen_slot, classified.last_registration_slot,
+             classified.registration_epoch, classified.predefined,
+             classified.retired, classified.expired,
+             account_power.amount
+) `
+		amountSelect = ", amount"
+		order = " ORDER BY amount, first_seen_slot, id, predefined"
+		if page.Descending {
+			order = " ORDER BY amount DESC, first_seen_slot, id, predefined"
+		}
+	}
+
+	pageArgs := append([]any{}, baseArgs...)
+	pageArgs = append(pageArgs, amountArgs...)
+	pageArgs = append(pageArgs, adjustmentArgs...)
+	pageArgs = append(pageArgs, whereArgs...)
+	pageArgs = append(pageArgs, page.Limit, page.Offset)
+	from := "classified"
+	if page.OrderByAmount {
+		from = "ranked"
+	}
+	rows, err := db.QueryContext(
+		ctx,
+		s.dialect.Rebind(ctes+`
+SELECT anchor_url, credential, anchor_hash, id, added_slot,
+       credential_tag, last_activity_epoch, expiry_epoch, active,
+       first_seen_slot, last_registration_slot, registration_epoch,
+       predefined`+amountSelect+`
+FROM `+from+where+order+" LIMIT ? OFFSET ?"),
+		pageArgs...,
+	)
+	if err != nil {
+		return nil, 0, fmt.Errorf("get DRep page: %w", err)
+	}
+	defer rows.Close()
+	ret := make([]models.DrepListRow, 0, min(page.Limit, total-page.Offset))
+	for rows.Next() {
+		var (
+			row        models.DrepListRow
+			predefined sql.NullInt64
+			amount     int64
+		)
+		if err := rows.Scan(
+			&row.AnchorURL,
+			&row.Credential,
+			&row.AnchorHash,
+			&row.ID,
+			&row.AddedSlot,
+			&row.CredentialTag,
+			&row.LastActivityEpoch,
+			&row.ExpiryEpoch,
+			&row.Active,
+			&row.FirstSeenSlot,
+			&row.LastRegistrationSlot,
+			&row.RegistrationEpoch,
+			&predefined,
+			&amount,
+		); err != nil {
+			return nil, 0, err
+		}
+		if amount < 0 {
+			return nil, 0, fmt.Errorf("negative DRep voting power %d", amount)
+		}
+		row.Amount = uint64(amount)
+		if predefined.Valid {
+			value := uint64(predefined.Int64)
+			row.Predefined = &value
+		}
+		ret = append(ret, row)
+	}
+	return ret, total, rows.Err()
+}
+
 func (s *Store) GetPredefinedDrepFirstSeenSlots(
 	txn types.Txn,
 ) (map[uint64]uint64, error) {

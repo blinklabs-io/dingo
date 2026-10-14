@@ -28,12 +28,15 @@ import (
 const sqlitePragmaRestoreTimeout = 5 * time.Second
 
 type Runner struct {
-	DB       *sql.DB
-	Dialect  string
-	Registry []Migration
-	Locker   Locker
-	Logger   *slog.Logger
-	Now      func() time.Time
+	// BeforeUpgrade checks startup prerequisites under the migration lock,
+	// after compatibility validation and before any schema or state writes.
+	BeforeUpgrade func(context.Context, *sql.Conn) error
+	DB            *sql.DB
+	Dialect       string
+	Registry      []Migration
+	Locker        Locker
+	Logger        *slog.Logger
+	Now           func() time.Time
 	// Rebind converts ? placeholders to the dialect's own form for data-driven
 	// backfills. Leave nil to use the runner's own Dialect-derived rebinder;
 	// an identity default would feed ? straight to a dialect that rejects it.
@@ -95,15 +98,28 @@ func (r *Runner) Run(ctx context.Context) (runErr error) {
 			ErrLegacySchema,
 		)
 	}
-	if err := r.ensureStateTable(ctx, conn); err != nil {
-		return err
-	}
-	states, err := r.readStates(ctx, conn)
-	if err != nil {
-		return err
+	states := make(map[int]state)
+	if stateTableExists {
+		states, err = r.readStates(ctx, conn)
+		if err != nil {
+			return err
+		}
 	}
 	if err := r.validateDatabase(states); err != nil {
 		return err
+	}
+	if r.BeforeUpgrade != nil {
+		if err := r.BeforeUpgrade(ctx, conn); err != nil {
+			return fmt.Errorf(
+				"metadata migrations: startup prerequisites: %w",
+				err,
+			)
+		}
+	}
+	if !stateTableExists {
+		if err := r.ensureStateTable(ctx, conn); err != nil {
+			return err
+		}
 	}
 
 	target := r.Registry[len(r.Registry)-1].Version
@@ -1173,7 +1189,10 @@ func isMySQLDropAlreadyAppliedOnConn(
 	statement string,
 	err error,
 ) bool {
-	if !strings.Contains(strings.ToLower(err.Error()), "check that column/key exists") {
+	if !strings.Contains(
+		strings.ToLower(err.Error()),
+		"check that column/key exists",
+	) {
 		return false
 	}
 	if table, column, ok := parseDropColumnStatement(statement); ok {

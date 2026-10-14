@@ -906,14 +906,40 @@ func (s *Store) UpdatePoolOpCertSequence(
 	return s.withWriteTransaction(
 		txn,
 		func(db queryer, ctx context.Context) error {
-			if _, err := s.execCached(ctx, db, poolOpCertSequenceUpsertSQL,
+			result, err := s.execCached(ctx, db, poolOpCertSequenceInsertSQL,
 				poolKeyHash.Bytes(),
 				slotValue,
 				sequenceValue,
-			); err != nil {
+			)
+			if err != nil {
 				return err
 			}
-			_, err := s.execCached(ctx, db, poolUpdateLatestOpCertSequenceSQL,
+			inserted, err := result.RowsAffected()
+			if err != nil {
+				return err
+			}
+			// MySQL CLIENT_FOUND_ROWS reports one row even for a duplicate no-op,
+			// so its stored counter must be checked after every insert.
+			if inserted == 0 || s.dialect.Name() == "mysql" {
+				var storedSequence int64
+				if err := s.queryRowCached(ctx, db, poolOpCertSequenceBySlotSQL,
+					poolKeyHash.Bytes(), slotValue,
+				).Scan(&storedSequence); err != nil {
+					return err
+				}
+				if storedSequence != sequenceValue {
+					return fmt.Errorf(
+						"opcert counter conflict for pool %x at slot %d: existing %d, candidate %d",
+						poolKeyHash.Bytes(), slot, storedSequence, sequence,
+					)
+				}
+			} else if inserted != 1 {
+				return fmt.Errorf(
+					"insert opcert counter for pool %x at slot %d affected %d rows",
+					poolKeyHash.Bytes(), slot, inserted,
+				)
+			}
+			_, err = s.execCached(ctx, db, poolUpdateLatestOpCertSequenceSQL,
 				sequenceValue,
 				poolKeyHash.Bytes(),
 				sequenceValue,
@@ -923,11 +949,14 @@ func (s *Store) UpdatePoolOpCertSequence(
 	)
 }
 
-const poolOpCertSequenceUpsertSQL = `
+const poolOpCertSequenceBySlotSQL = `
+SELECT sequence FROM pool_opcert_sequence
+WHERE pool_key_hash = ? AND slot = ?`
+
+const poolOpCertSequenceInsertSQL = `
 INSERT INTO pool_opcert_sequence (pool_key_hash, slot, sequence)
 VALUES (?, ?, ?)
-ON CONFLICT (pool_key_hash, slot) DO UPDATE
-SET sequence = excluded.sequence`
+ON CONFLICT (pool_key_hash, slot) DO NOTHING`
 
 const poolUpdateLatestOpCertSequenceSQL = `
 UPDATE pool SET latest_op_cert_sequence = ?
@@ -1455,15 +1484,7 @@ WHERE NOT EXISTS (
 	)
 }
 
-func (s *Store) GetRetiringPools(
-	currentEpoch uint64,
-	txn types.Txn,
-) ([]models.PoolRetiringRow, error) {
-	db, ctx, err := s.readDBFromTxn(txn)
-	if err != nil {
-		return nil, err
-	}
-	rows, err := db.QueryContext(ctx, `
+const retiringPoolsCTE = `
 WITH latest_reg AS (
     SELECT pr.pool_key_hash, pr.added_slot,
            CASE WHEN pr.certificate_id = 0 THEN 1 ELSE 0 END synth,
@@ -1496,7 +1517,9 @@ latest_ret AS (
     LEFT JOIN certs c ON c.id = pt.certificate_id
     LEFT JOIN "transaction" t ON t.id = c.transaction_id
 )
-SELECT r.pool_key_hash, r.epoch
+`
+
+const retiringPoolsFrom = `
 FROM latest_ret r
 LEFT JOIN latest_reg g
   ON g.pool_key_hash = r.pool_key_hash AND g.rn = 1
@@ -1510,15 +1533,14 @@ WHERE r.rn = 1 AND r.epoch > ?
              = (g.added_slot, g.synth, g.block_index, g.cert_index)
           AND r.synth = 1
       )
-  )
-ORDER BY r.epoch, r.added_slot, r.block_index, r.cert_index`,
-		currentEpoch,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("get retiring pools: %w", err)
-	}
+  )`
+
+const retiringPoolsOrder = `
+ORDER BY r.epoch, r.added_slot, r.block_index, r.cert_index`
+
+func scanRetiringPools(rows *sql.Rows, capacity int) ([]models.PoolRetiringRow, error) {
 	defer rows.Close()
-	ret := []models.PoolRetiringRow{}
+	ret := make([]models.PoolRetiringRow, 0, capacity)
 	for rows.Next() {
 		var row models.PoolRetiringRow
 		if err := rows.Scan(&row.PoolKeyHash, &row.Epoch); err != nil {
@@ -1527,6 +1549,67 @@ ORDER BY r.epoch, r.added_slot, r.block_index, r.cert_index`,
 		ret = append(ret, row)
 	}
 	return ret, rows.Err()
+}
+
+func (s *Store) GetRetiringPools(
+	currentEpoch uint64,
+	txn types.Txn,
+) ([]models.PoolRetiringRow, error) {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := db.QueryContext(
+		ctx,
+		s.dialect.Rebind(retiringPoolsCTE+"SELECT r.pool_key_hash, r.epoch"+
+			retiringPoolsFrom+retiringPoolsOrder),
+		currentEpoch,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get retiring pools: %w", err)
+	}
+	return scanRetiringPools(rows, 0)
+}
+
+func (s *Store) GetRetiringPoolsPage(
+	currentEpoch uint64,
+	limit, offset int,
+	descending bool,
+	txn types.Txn,
+) ([]models.PoolRetiringRow, int, error) {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, 0, err
+	}
+	var total int
+	if err := db.QueryRowContext(
+		ctx,
+		s.dialect.Rebind(retiringPoolsCTE+"SELECT COUNT(*)"+retiringPoolsFrom),
+		currentEpoch,
+	).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("count retiring pools: %w", err)
+	}
+	if limit < 1 || offset < 0 || offset >= total {
+		return []models.PoolRetiringRow{}, total, nil
+	}
+	order := retiringPoolsOrder
+	if descending {
+		order = `
+ORDER BY r.epoch DESC, r.added_slot DESC,
+         r.block_index DESC, r.cert_index DESC`
+	}
+	rows, err := db.QueryContext(
+		ctx,
+		s.dialect.Rebind(retiringPoolsCTE+
+			"SELECT r.pool_key_hash, r.epoch"+retiringPoolsFrom+order+
+			" LIMIT ? OFFSET ?"),
+		currentEpoch, limit, offset,
+	)
+	if err != nil {
+		return nil, 0, fmt.Errorf("get retiring pool page: %w", err)
+	}
+	ret, err := scanRetiringPools(rows, min(limit, total-offset))
+	return ret, total, err
 }
 
 func (s *Store) GetActivePoolKeyHashes(
@@ -1553,6 +1636,69 @@ func (s *Store) GetActivePoolKeyHashes(
 		}
 	}
 	return s.GetActivePoolKeyHashesAtSlot(slot, txn)
+}
+
+func (s *Store) GetActivePoolKeyHashesPage(
+	limit, offset int,
+	descending bool,
+	txn types.Txn,
+) ([][]byte, int, error) {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, 0, fmt.Errorf(
+			"GetActivePoolKeyHashesPage: resolve db: %w", err,
+		)
+	}
+	slot, err := currentTipSlot(ctx, db)
+	if err != nil {
+		return nil, 0, err
+	}
+	if slot == 0 {
+		var exists bool
+		if err := db.QueryRowContext(
+			ctx,
+			"SELECT EXISTS(SELECT 1 FROM tip WHERE id = 1)",
+		).Scan(&exists); err != nil {
+			return nil, 0, err
+		}
+		if !exists {
+			return [][]byte{}, 0, nil
+		}
+	}
+	epochID, err := activePoolEpochAtSlots(ctx, db, slot, slot)
+	if err != nil {
+		return nil, 0, err
+	}
+	args := []any{slot, slot, epochID}
+	var total int
+	if err := db.QueryRowContext(
+		ctx,
+		activePoolKeyHashesAtSlotCountSQL,
+		args...,
+	).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("count active pools: %w", err)
+	}
+	if limit < 1 || offset < 0 || offset >= total {
+		return [][]byte{}, total, nil
+	}
+	query := activePoolKeyHashesAtSlotPageAscSQL
+	if descending {
+		query = activePoolKeyHashesAtSlotPageDescSQL
+	}
+	rows, err := db.QueryContext(ctx, query, slot, slot, epochID, limit, offset)
+	if err != nil {
+		return nil, 0, fmt.Errorf("get active pool page: %w", err)
+	}
+	defer rows.Close()
+	hashes := make([][]byte, 0, min(limit, total-offset))
+	for rows.Next() {
+		var hash []byte
+		if err := rows.Scan(&hash); err != nil {
+			return nil, 0, err
+		}
+		hashes = append(hashes, hash)
+	}
+	return hashes, total, rows.Err()
 }
 
 func (s *Store) GetActivePoolKeyHashesOrdered(
@@ -1855,49 +2001,7 @@ func (s *Store) GetEpochBoundaryActivePoolKeyHashes(
 	return s.getActivePoolKeyHashesAtSlots(slot, epochSlot, txn)
 }
 
-func (s *Store) getActivePoolKeyHashesAtSlots(
-	slot, epochSlot uint64,
-	txn types.Txn,
-) ([][]byte, error) {
-	db, ctx, err := s.readDBFromTxn(txn)
-	if err != nil {
-		return nil, fmt.Errorf(
-			"GetActivePoolKeyHashesAtSlot: resolve db: %w",
-			err,
-		)
-	}
-	var epochID sql.NullInt64
-	var startSlot sql.NullInt64
-	var length sql.NullInt64
-	err = db.QueryRowContext(ctx, `
-SELECT epoch_id, start_slot, length_in_slots
-FROM epoch
-WHERE start_slot <= ?
-ORDER BY start_slot DESC
-LIMIT 1`,
-		epochSlot,
-	).Scan(&epochID, &startSlot, &length)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, fmt.Errorf(
-			"GetActivePoolKeyHashesAtSlot: %w",
-			types.ErrNoEpochData,
-		)
-	}
-	if err != nil {
-		return nil, err
-	}
-	if epochID.Valid && startSlot.Valid && length.Valid && epochSlot != slot &&
-		epochSlot == uint64(startSlot.Int64+length.Int64) {
-		// The new epoch row is written after EPOCH's SNAP read.
-		epochID.Int64++
-	} else if !epochID.Valid || !startSlot.Valid || !length.Valid ||
-		epochSlot >= uint64(startSlot.Int64+length.Int64) {
-		return nil, fmt.Errorf(
-			"GetActivePoolKeyHashesAtSlot: %w",
-			types.ErrNoEpochData,
-		)
-	}
-	rows, err := db.QueryContext(ctx, `
+const activePoolKeyHashesAtSlotCTE = `
 WITH latest_reg AS (
     SELECT pr.pool_id, COALESCE((SELECT lc.slot FROM leios_transaction_context lc WHERE lc.transaction_id = t.id), pr.added_slot) AS added_slot, pr.added_slot AS ownership_slot,
            COALESCE(t.block_index, 0) blk_idx,
@@ -1930,8 +2034,9 @@ latest_ret AS (
     LEFT JOIN "transaction" t ON t.id = c.transaction_id
     WHERE COALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN certs lc_cert ON lc_cert.transaction_id = lc.transaction_id WHERE lc_cert.id = rt.certificate_id), rt.added_slot) <= ?
 )
-SELECT p.pool_key_hash
-FROM pool p
+`
+
+const activePoolKeyHashesAtSlotFromSQL = `FROM pool p
 JOIN latest_reg lr ON lr.pool_id = p.id AND lr.rn = 1
 LEFT JOIN latest_ret lrt ON lrt.pool_id = p.id AND lrt.rn = 1
 WHERE lrt.pool_id IS NULL
@@ -1941,10 +2046,74 @@ WHERE lrt.pool_id IS NULL
        AND lrt.blk_idx < lr.blk_idx)
    OR (lrt.added_slot = lr.added_slot AND lrt.ownership_slot = lr.ownership_slot AND lrt.synthetic_ret = 0
        AND lrt.blk_idx = lr.blk_idx AND lrt.cert_idx < lr.cert_idx)
-   OR lrt.epoch > ?`,
+   OR lrt.epoch > ?`
+
+const (
+	activePoolKeyHashesAtSlotCountSQL = activePoolKeyHashesAtSlotCTE +
+		"SELECT COUNT(*) " + activePoolKeyHashesAtSlotFromSQL
+	activePoolKeyHashesAtSlotPageAscSQL = activePoolKeyHashesAtSlotCTE +
+		"SELECT p.pool_key_hash " + activePoolKeyHashesAtSlotFromSQL +
+		" ORDER BY p.pool_key_hash ASC LIMIT ? OFFSET ?"
+	activePoolKeyHashesAtSlotPageDescSQL = activePoolKeyHashesAtSlotCTE +
+		"SELECT p.pool_key_hash " + activePoolKeyHashesAtSlotFromSQL +
+		" ORDER BY p.pool_key_hash DESC LIMIT ? OFFSET ?"
+)
+
+func activePoolEpochAtSlots(
+	ctx context.Context,
+	db queryer,
+	slot, epochSlot uint64,
+) (int64, error) {
+	var epochID, startSlot, length sql.NullInt64
+	err := db.QueryRowContext(ctx, `
+SELECT epoch_id, start_slot, length_in_slots
+FROM epoch
+WHERE start_slot <= ?
+ORDER BY start_slot DESC
+LIMIT 1`, epochSlot).Scan(&epochID, &startSlot, &length)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, fmt.Errorf(
+			"GetActivePoolKeyHashesAtSlot: %w", types.ErrNoEpochData,
+		)
+	}
+	if err != nil {
+		return 0, err
+	}
+	if epochID.Valid && startSlot.Valid && length.Valid && epochSlot != slot &&
+		epochSlot == uint64(startSlot.Int64+length.Int64) {
+		return epochID.Int64 + 1, nil
+	}
+	if !epochID.Valid || !startSlot.Valid || !length.Valid ||
+		epochSlot >= uint64(startSlot.Int64+length.Int64) {
+		return 0, fmt.Errorf(
+			"GetActivePoolKeyHashesAtSlot: %w", types.ErrNoEpochData,
+		)
+	}
+	return epochID.Int64, nil
+}
+
+func (s *Store) getActivePoolKeyHashesAtSlots(
+	slot, epochSlot uint64,
+	txn types.Txn,
+) ([][]byte, error) {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"GetActivePoolKeyHashesAtSlot: resolve db: %w",
+			err,
+		)
+	}
+	epochID, err := activePoolEpochAtSlots(ctx, db, slot, epochSlot)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := db.QueryContext(
+		ctx,
+		activePoolKeyHashesAtSlotCTE+"SELECT p.pool_key_hash "+
+			activePoolKeyHashesAtSlotFromSQL,
 		slot,
 		slot,
-		epochID.Int64,
+		epochID,
 	)
 	if err != nil {
 		return nil, err

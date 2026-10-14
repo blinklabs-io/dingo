@@ -300,7 +300,8 @@ func midnightYAMLFieldSet(field string) bool {
 // subsystem.
 type ChainsyncConfig struct {
 	// MaxClients is the maximum number of concurrent chainsync client
-	// connections. Default: 3.
+	// connections. Zero selects an automatic limit: at least 3 and large enough
+	// for every configured local-root access point.
 	MaxClients int `yaml:"maxClients"   envconfig:"DINGO_CHAINSYNC_MAX_CLIENTS"`
 	// StallTimeout is the duration after which a client with no
 	// activity is considered stalled. Default: "2m".
@@ -477,6 +478,12 @@ type TokenRegistryConfig struct {
 	// operators running a mirror. Empty selects by network: the Cardano
 	// Foundation registry for mainnet, the IOG testnet registry otherwise.
 	SourceURL string `yaml:"sourceUrl"             envconfig:"DINGO_TOKEN_REGISTRY_SOURCE_URL"`
+	// ManifestURL identifies the signed manifest that authenticates each
+	// snapshot. It is required when the sync is enabled.
+	ManifestURL string `yaml:"manifestUrl"           envconfig:"DINGO_TOKEN_REGISTRY_MANIFEST_URL"`
+	// TrustedManifestKey is the hex-encoded Ed25519 public key used to verify
+	// signed manifests. It is required when the sync is enabled.
+	TrustedManifestKey string `yaml:"trustedManifestKey"    envconfig:"DINGO_TOKEN_REGISTRY_TRUSTED_MANIFEST_KEY"`
 	// Interval controls how often the registry is re-checked. Each check
 	// is a conditional request, so an unchanged registry costs no download.
 	// Values below one minute are raised to it.
@@ -511,6 +518,9 @@ type TokenRegistryConfig struct {
 	// AllowPrivateAddresses permits syncing from private, loopback, and
 	// link-local addresses. Leave false for the default SSRF guard.
 	AllowPrivateAddresses bool `yaml:"allowPrivateAddresses" envconfig:"DINGO_TOKEN_REGISTRY_ALLOW_PRIVATE_ADDRESSES"`
+	// AllowRollback permits a correctly signed manifest sequence below the
+	// currently stored sequence. Accepting it lowers the stored sequence.
+	AllowRollback bool `yaml:"allowRollback"          envconfig:"DINGO_TOKEN_REGISTRY_ALLOW_ROLLBACK"`
 }
 
 // DefaultChainsyncConfig returns the default chainsync configuration.
@@ -518,7 +528,6 @@ type TokenRegistryConfig struct {
 // fallback in internal/node/node.go.
 func DefaultChainsyncConfig() ChainsyncConfig {
 	return ChainsyncConfig{
-		MaxClients:   3,
 		StallTimeout: "2m",
 		Strategy:     "primary",
 	}
@@ -651,7 +660,11 @@ type Config struct {
 	RelayPort              uint      `yaml:"relayPort"                           envconfig:"port"`
 	BarkBaseUrl            string    `yaml:"barkBaseUrl"                         envconfig:"DINGO_BARK_BASE_URL"`
 	BarkBlockDownloadHosts []string  `yaml:"barkBlockDownloadHosts"              envconfig:"DINGO_BARK_BLOCK_DOWNLOAD_HOSTS"`
-	BarkPort               uint      `yaml:"barkPort"                            envconfig:"DINGO_BARK_PORT"`
+	// BarkBlockDownloadAllowPrivateAddresses permits Bark block downloads
+	// from private, loopback, and other special-use addresses. Origin,
+	// HTTPS, redirect, and proxy checks still apply. Default: false.
+	BarkBlockDownloadAllowPrivateAddresses bool `yaml:"barkBlockDownloadAllowPrivateAddresses" envconfig:"DINGO_BARK_BLOCK_DOWNLOAD_ALLOW_PRIVATE_ADDRESSES"`
+	BarkPort                               uint `yaml:"barkPort"                            envconfig:"DINGO_BARK_PORT"`
 	// LocalStateQueryViewMaxLifetime is the longest a LocalStateQuery session
 	// may hold one acquired ledger snapshot before the node closes it.
 	// Default: "5m".
@@ -696,7 +709,11 @@ type Config struct {
 	// BindAddr; operators must set this field explicitly to expose
 	// metrics on a wildcard or remote-scrape address.
 	MetricsBindAddr string `yaml:"metricsBindAddr" envconfig:"DINGO_METRICS_BIND_ADDR"`
-	MetricsPort     uint   `yaml:"metricsPort"    split_words:"true"`
+	// MetricsAuthToken enables Bearer authentication on the Prometheus
+	// listener. It has no CLI flag because process arguments are public to
+	// other users on many systems.
+	MetricsAuthToken string `yaml:"metricsAuthToken" envconfig:"DINGO_METRICS_AUTH_TOKEN"`
+	MetricsPort      uint   `yaml:"metricsPort"    split_words:"true"`
 	// DebugBindAddr is the interface used by the unauthenticated pprof
 	// listener. It defaults to loopback independently of BindAddr and
 	// PrivateBindAddr; operators must set this field explicitly to expose
@@ -748,9 +765,17 @@ type Config struct {
 	SkipRewardLiveStakeBackfillCheck bool `yaml:"skipRewardLiveStakeBackfillCheck"                                                             split_words:"true"`
 	// Tracing enables OpenTelemetry tracing. Disabled by default: with no
 	// collector listening, the OTLP exporter logs noisy connection errors.
-	// Spans are sent via OTLP HTTP; configure the destination with the
-	// standard OTEL_EXPORTER_OTLP_* env vars.
+	// Spans are sent via OTLP HTTP; the destination defaults to the
+	// standard OTEL_EXPORTER_OTLP_* env vars unless TracingEndpoint is set.
 	Tracing bool `yaml:"tracing"                             envconfig:"DINGO_TRACING_ENABLED"`
+	// TracingEndpoint is the OTLP HTTP collector URL (for example
+	// http://localhost:4318). Setting it enables tracing; empty leaves tracing
+	// to Tracing and the destination to the OTEL_EXPORTER_OTLP_* env vars.
+	TracingEndpoint string `yaml:"tracingEndpoint"                     envconfig:"DINGO_TRACING_ENDPOINT"`
+	// TracingServiceName is the service.name resource attribute on exported spans.
+	TracingServiceName string `yaml:"tracingServiceName"                  envconfig:"DINGO_TRACING_SERVICE_NAME"`
+	// TracingSampleRatio is the fraction of new traces sampled, from 0 to 1.
+	TracingSampleRatio float64 `yaml:"tracingSampleRatio"                  envconfig:"DINGO_TRACING_SAMPLE_RATIO"`
 	// TracingStdout redirects spans to stdout instead of OTLP. Requires
 	// Tracing to also be enabled. Mostly useful for local debugging.
 	TracingStdout   bool     `yaml:"tracingStdout"                       envconfig:"DINGO_TRACING_STDOUT"`
@@ -788,6 +813,12 @@ type Config struct {
 	// setting is not consensus-affecting; it defaults off until throughput is
 	// proven. See ARCHITECTURE.md ("Block Processing Pipeline").
 	LedgerApplyRowBatchingEnabled bool `yaml:"ledgerApplyRowBatchingEnabled"       envconfig:"DINGO_LEDGER_APPLY_ROW_BATCHING_ENABLED"`
+
+	// BlockfetchLowWatermarkEnabled starts blockfetch once one blockfetch
+	// range of headers is queued while far from the peer tip, instead of
+	// waiting for four ranges. The header queue capacity is unchanged. Not
+	// consensus-affecting; off by default.
+	BlockfetchLowWatermarkEnabled bool `yaml:"blockfetchLowWatermarkEnabled"          envconfig:"DINGO_BLOCKFETCH_LOW_WATERMARK_ENABLED"`
 
 	// Peer targets (0 = use default, -1 = unlimited)
 	TargetNumberOfKnownPeers       int `yaml:"targetNumberOfKnownPeers"       envconfig:"DINGO_TARGET_KNOWN_PEERS"`
@@ -981,6 +1012,16 @@ type Config struct {
 
 	// Database lifecycle (snapshot/restore/truncate) configuration
 	DatabaseLifecycle DatabaseLifecycleConfig `yaml:"databaseLifecycle"`
+
+	// PlannerStatsRefreshEnabled runs SQLite's incremental planner-statistics
+	// maintenance (PRAGMA optimize) before block processing starts and after
+	// each epoch rollover. A database that never ran ANALYZE has no
+	// sqlite_stat1, and without it some queries scan most of a large table
+	// instead of seeking an index. The first run on a large database
+	// analyzes every table and can take minutes; later runs are near-free.
+	// Enabled by default; this is an escape hatch, not a tuning knob. Other
+	// metadata backends are unaffected.
+	PlannerStatsRefreshEnabled bool `yaml:"plannerStatsRefreshEnabled" envconfig:"DINGO_PLANNER_STATS_REFRESH_ENABLED"`
 
 	// provenance records, for gated fields only, whether their value came
 	// from an operator (CLI flag, environment variable, or YAML file) or
@@ -1409,6 +1450,8 @@ func newDefaultConfig() *Config {
 		StrictUtxoValidation:                true,
 		Tracing:                             false,
 		TracingStdout:                       false,
+		TracingServiceName:                  "dingo",
+		TracingSampleRatio:                  1,
 		Network:                             "preview",
 		NetworkMagic:                        0,
 		MetricsPort:                         12798,
@@ -1488,6 +1531,8 @@ func newDefaultConfig() *Config {
 		// Fail closed: self-validate locally-forged blocks before adoption and
 		// diffusion unless an operator explicitly opts out.
 		ValidateForgedBlock: true,
+		// SQLite planner statistics stay current unless an operator opts out.
+		PlannerStatsRefreshEnabled: true,
 	}
 }
 
@@ -1920,6 +1965,10 @@ func (c *Config) ApplyDefaults() {
 	}
 	if c.KoiosParity.GraceHours == 0 {
 		c.KoiosParity.GraceHours = 24
+	}
+	// A collector endpoint turns tracing on; see TracingEndpoint.
+	if c.TracingEndpoint != "" {
+		c.Tracing = true
 	}
 }
 

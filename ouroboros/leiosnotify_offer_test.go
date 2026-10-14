@@ -60,8 +60,7 @@ func TestLeiosForgedEBOfferSetsTransactionOfferType(t *testing.T) {
 func TestLeiosRelayForwardsVerifiedManifestAndCompleteTransactionsOnce(t *testing.T) {
 	t.Parallel()
 
-	txRaw, err := cbor.Encode([]cbor.RawMessage{mustCbor(t, "tx-body")})
-	require.NoError(t, err)
+	txRaw := testDijkstraTx(t, 0)
 	ebRaw, err := cbor.Encode(&lcommon.LeiosEndorserBlock{
 		TransactionReferences: []lcommon.LeiosTransactionReference{{
 			TransactionHash: lcommon.Blake2b256Hash(txRaw),
@@ -114,8 +113,7 @@ func TestLeiosRelayForwardsVerifiedManifestAndCompleteTransactionsOnce(t *testin
 func TestLeiosRelayOffersExistingCompleteCacheOnPeerOffer(t *testing.T) {
 	t.Parallel()
 
-	txRaw, err := cbor.Encode([]cbor.RawMessage{mustCbor(t, "tx-body")})
-	require.NoError(t, err)
+	txRaw := testDijkstraTx(t, 0)
 	ebRaw, err := cbor.Encode(&lcommon.LeiosEndorserBlock{
 		TransactionReferences: []lcommon.LeiosTransactionReference{{
 			TransactionHash: lcommon.Blake2b256Hash(txRaw),

@@ -93,7 +93,10 @@ func TestVerifySnapshotRestoresUnderSnapshotDir(t *testing.T) {
 	for _, e := range entries {
 		names = append(names, e.Name())
 	}
-	require.Equal(t, []string{created.GetSnapshotId()}, names)
+	require.ElementsMatch(t, []string{
+		".dingo-snapshot-catalog-v1.sqlite",
+		created.GetSnapshotId(),
+	}, names)
 	_, err = os.Stat(stale)
 	require.ErrorIs(t, err, os.ErrNotExist)
 }

@@ -877,7 +877,7 @@ func TestDRepsListAmountsIncludeActiveProposalDeposit(t *testing.T) {
 		),
 	)
 
-	items, total, err := adapter.DReps(DRepListParams{
+	items, total, err := adapter.DReps(context.Background(), DRepListParams{
 		Pagination: PaginationParams{
 			Count: 100,
 			Page:  1,
@@ -896,9 +896,13 @@ type listPaginationNode struct {
 	params PaginationParams
 }
 
-func (n *listPaginationNode) PoolsExtended() ([]PoolExtendedInfo, error) {
+func (n *listPaginationNode) PoolsExtended(
+	_ context.Context,
+	params PaginationParams,
+) ([]PoolExtendedInfo, int, error) {
 	n.calls++
-	return []PoolExtendedInfo{}, nil
+	n.params = params
+	return []PoolExtendedInfo{}, 0, nil
 }
 
 func (n *listPaginationNode) AccountAssociatedAddresses(ctx context.Context,
@@ -1028,9 +1032,7 @@ func TestListRoutesRejectOutOfRangePagination(t *testing.T) {
 					b.handler().ServeHTTP(recorder, request)
 					require.Equal(t, http.StatusOK, recorder.Code)
 					require.Equal(t, 1, node.calls)
-					if route != "/api/v0/pools/extended" {
-						require.Equal(t, tc.want, node.params)
-					}
+					require.Equal(t, tc.want, node.params)
 					require.JSONEq(t, `[]`, recorder.Body.String())
 				})
 			}

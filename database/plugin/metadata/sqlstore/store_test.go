@@ -835,6 +835,7 @@ func TestInsertUtxoModelBoundsTxScopedStatementRetentionInOneTransaction(
 		func(db queryer, ctx context.Context) error {
 			for i := range uint32(outputCount) {
 				utxo := utxoForInsertCacheTest(1, i, 1_000_000+uint64(i))
+				utxo.Address = []byte("test-address")
 				utxo.Assets = []models.Asset{
 					{
 						Name:     []byte("token"),

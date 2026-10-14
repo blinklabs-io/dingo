@@ -196,11 +196,13 @@ func TestIsVrfKeyInUseRejectsMalformedStoredPoolKey(t *testing.T) {
 			PoolKeyHash: shortStoredHash(lcommon.Blake2b224Size, 0x21),
 		}
 	})
-	inUse, owner, err := storedHashView(t, db).IsVrfKeyInUse(
+	lv := storedHashView(t, db)
+	inUse, owner, err := lv.IsVrfKeyInUse(
 		lcommon.Blake2b256{0x01},
 	)
 	require.ErrorContains(t, err, "VRF key owner pool key hash")
 	require.ErrorContains(t, err, "invalid blake2b-224 hash")
+	require.ErrorIs(t, storageFaultOrErr(lv, err), ErrLedgerViewStorageFault)
 	require.False(t, inUse)
 	require.Equal(t, lcommon.PoolKeyHash{}, owner)
 }

@@ -23,7 +23,6 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
-	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
@@ -151,6 +150,33 @@ func TestDurableAppliedFloorIncludesNilNonceAppliedPoint(t *testing.T) {
 	require.Equal(t, byronLike, floor)
 }
 
+func TestDurableAppliedFloorIncludesSlotZeroBlock(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	blockHash := testHashBytes("applied-slot-zero")
+	require.NoError(t, db.SetBlockNonce(blockHash, 0, nil, false, nil))
+	ls := &LedgerState{db: db}
+
+	floor, ok, err := ls.durableAppliedFloor()
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, ocommon.NewPoint(0, blockHash), floor)
+}
+
+func TestEnforceDurableTipFloorLeavesOriginUnchanged(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	require.NoError(t, db.SetBlockNonce(
+		testHashBytes("applied-slot-zero"), 0, nil, false, nil,
+	))
+	ls := &LedgerState{db: db}
+
+	require.NoError(t, ls.enforceDurableTipFloor(t.Context()))
+	require.Equal(t, ocommon.NewPointOrigin(), ls.currentTip.Point)
+}
+
 // TestReconcileDivergenceUndoesAppliedByronBlock diverges the primary chain
 // from a ledger whose applied tip is a real mainnet Byron block carrying two
 // transactions (slot 4471207). The common ancestor is also a Byron-shaped
@@ -224,7 +250,7 @@ func TestReconcileDivergenceUndoesAppliedByronBlock(t *testing.T) {
 	ls.chainsyncState = SyncingChainsyncState
 	ls.publishSnapshotsLocked()
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Stop)
 	ls.config.EventBus = bus
 	txSubID, txCh := bus.SubscribeWithBuffer(TransactionEventType, 64)

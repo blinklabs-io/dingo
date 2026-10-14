@@ -55,10 +55,9 @@ func DrepDepositKey(credentialTag uint8, credential []byte) string {
 	return string([]byte{credentialTag}) + string(credential)
 }
 
-// DrepListRow is a Drep row extended with the credential's first
-// on-chain appearance slot, as returned by GetDreps for
-// registration-order listings.
+// DrepListRow carries a DRep and its list-ordering metadata.
 type DrepListRow struct {
+	Predefined        *uint64
 	AnchorURL         string
 	Credential        []byte
 	AnchorHash        []byte
@@ -69,9 +68,31 @@ type DrepListRow struct {
 	ExpiryEpoch       uint64
 	Active            bool
 	FirstSeenSlot     uint64
+	RegistrationEpoch uint64
 	// LastRegistrationSlot is the added_slot of the most recent
 	// registration certificate, 0 when no cert history exists.
 	LastRegistrationSlot uint64
+	Amount               uint64
+}
+
+type DrepPowerAdjustment struct {
+	Credential    []byte
+	CredentialTag uint8
+	Predefined    *uint64
+	Amount        uint64
+}
+
+type DrepListPageQuery struct {
+	CurrentEpoch     uint64
+	InactivityPeriod uint64
+	InactivityKnown  bool
+	Retired          *bool
+	Expired          *bool
+	Descending       bool
+	OrderByAmount    bool
+	PowerAdjustments []DrepPowerAdjustment
+	Limit            int
+	Offset           int
 }
 
 type DeregistrationDrep struct {

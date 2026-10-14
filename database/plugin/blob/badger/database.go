@@ -345,6 +345,12 @@ type BlobStoreBadger struct {
 	deferOpen            bool // when true, Badger is opened in Start() not New()
 }
 
+// DetectsWriteConflicts reports that Badger rejects a transaction when a key
+// in its read set was changed after the transaction opened.
+func (*BlobStoreBadger) DetectsWriteConflicts() bool {
+	return true
+}
+
 // New creates a new database. When deferOpen is set (via WithDeferOpen),
 // Badger is not opened until Start() is called, allowing an injected
 // logger (via SetLogger) to be used for Badger's startup logging.
