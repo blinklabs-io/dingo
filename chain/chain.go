@@ -59,7 +59,8 @@ type Chain struct {
 	currentTip    ochainsync.Tip
 	tipBlockIndex uint64
 	// mutationGeneration counts mutations of the in-memory block state:
-	// currentTip, tipBlockIndex, and the ephemeral block buffer.
+	// currentTip, tipBlockIndex, the ephemeral block buffer, and its common
+	// block anchor.
 	// headerMutationGeneration independently counts queued-header mutations.
 	// Keeping the counters separate lets atOriginAfterMutation distinguish a
 	// fresh chain that has only queued headers while still preventing either
@@ -3254,6 +3255,7 @@ func (c *Chain) reconcile(ctx context.Context) error {
 			// Adjust our chain-local blocks and offset point from primary chain
 			c.blocks = slices.Delete(c.blocks, 0, i+1)
 			c.lastCommonBlockIndex = tmpBlock.ID
+			c.mutationGeneration++
 			return nil
 		}
 		if blockIndex == 0 {
@@ -3285,6 +3287,7 @@ func (c *Chain) reconcile(ctx context.Context) error {
 		return err
 	}
 	lastPrevHash := decodedKnownBlock.PrevHash().Bytes()
+	var lastCommonBlockIndex uint64
 	iterationCount := 0
 	for {
 		if iterationCount >= securityParam {
@@ -3307,7 +3310,7 @@ func (c *Chain) reconcile(ctx context.Context) error {
 		if err == nil &&
 			tmpBlock.Slot == primaryBlock.Slot &&
 			bytes.Equal(tmpBlock.Hash, primaryBlock.Hash) {
-			c.lastCommonBlockIndex = tmpBlock.ID
+			lastCommonBlockIndex = tmpBlock.ID
 			break
 		}
 		// Decode block and extract prev-hash
@@ -3321,13 +3324,16 @@ func (c *Chain) reconcile(ctx context.Context) error {
 			Slot: tmpBlock.Slot,
 		}
 		newBlocks = append(newBlocks, tmpPoint)
-		c.lastCommonBlockIndex--
 	}
 	// Prepend accumulated blocks in a single operation (O(K) instead of O(K²))
 	if len(newBlocks) > 0 {
 		// Reverse newBlocks since they were collected in reverse order
 		slices.Reverse(newBlocks)
 		c.blocks = slices.Concat(newBlocks, c.blocks)
+	}
+	if lastCommonBlockIndex != c.lastCommonBlockIndex || len(newBlocks) > 0 {
+		c.lastCommonBlockIndex = lastCommonBlockIndex
+		c.mutationGeneration++
 	}
 	return nil
 }

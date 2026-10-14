@@ -68,7 +68,8 @@ func (n *Node) newConnectionManager() *connmanager.ConnectionManager {
 			Logger:   n.config.logger,
 			EventBus: n.eventBus,
 			ListenersProvider: func() []connmanager.ListenerConfig {
-				return n.ouroboros().ConfigureListeners(n.ctx, n.config.listeners)
+				return n.ouroboros().
+					ConfigureListeners(n.ctx, n.config.listeners)
 			},
 			OutboundSourcePort: n.config.outboundSourcePort,
 			OutboundConnOptsProvider: func() []ouroboros.ConnectionOptionFunc {
@@ -230,9 +231,8 @@ func (n *Node) configureSnapshotManager() error {
 	// Set before CaptureGenesisSnapshot/sync; a nil hook (never set) would leave
 	// only the event-driven fallback capture.
 	// The stake read runs at the SNAP point (after MIR and before POOLREAP/
-	// enactment) and
-	// the row write at the end of the rollover, both inside the same
-	// transaction.
+	// enactment) and the row write at the end of the rollover, both inside the
+	// same transaction.
 	n.ledgerState.SetEpochBoundarySnapshotStakeHook(
 		func(txn *database.Txn, evt event.EpochTransitionEvent) error {
 			return n.snapshotMgr.ComputeEpochBoundarySnapshot(n.ctx, txn, evt)

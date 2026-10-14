@@ -48,14 +48,14 @@ package dingo
 // ledgerState, mempool, chainsyncState, peerGov, connManager, the
 // background managers, the optional API servers, and the block-producer
 // path — is stopped, discarded, and rebuilt from shared component factories
-// also used by Run(). n.ouroboros
-// is rebuilt along with them: it takes its dependencies at construction and
-// never reassigns them, so reinitializeNetworkingCore closes the outgoing
-// instance (releasing its Prometheus collectors and EventBus subscriptions,
-// both of which sit on registries that outlive it) and constructs a
-// replacement from the retained n.ouroborosConfig. Callbacks the node handed
-// to other components resolve n.ouroboros when they fire rather than binding
-// an instance, so they follow the replacement automatically.
+// also used by Run(). n.ouroboros is rebuilt along with them: it takes its
+// dependencies at construction and never reassigns them, so
+// reinitializeNetworkingCore closes the outgoing instance (releasing its
+// Prometheus collectors and EventBus subscriptions, both of which sit on
+// registries that outlive it) and constructs a replacement from the retained
+// n.ouroborosConfig. Callbacks the node handed to other components resolve
+// n.ouroboros when they fire rather than binding an instance, so they follow
+// the replacement automatically.
 
 import (
 	"context"

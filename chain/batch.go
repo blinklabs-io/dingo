@@ -83,7 +83,11 @@ func (c *Chain) restoreFailedBatch(
 	defer c.mutex.Unlock()
 	c.manager.mutex.Lock()
 	defer c.manager.mutex.Unlock()
-	if c.batchRestoreIsSafeLocked(applied.tip, applied.blockIndex, applied.generation) {
+	if c.batchRestoreIsSafeLocked(
+		applied.tip,
+		applied.blockIndex,
+		applied.generation,
+	) {
 		c.restoreBatchBlocksLocked(saved)
 		if c.headerMutationGeneration == applied.headerGeneration {
 			c.restoreBatchHeadersLocked(saved)

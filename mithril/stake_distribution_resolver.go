@@ -66,17 +66,33 @@ func ResolveStakeDistributionForCertificate(
 	result := &ResolvedStakeDistribution{Kind: kind}
 	switch kind {
 	case signedEntityTypeMithrilStakeDistribution:
-		artifact, err := resolveMithrilStakeDistribution(ctx, client, certificate, true)
+		artifact, err := resolveMithrilStakeDistribution(
+			ctx,
+			client,
+			certificate,
+			true,
+		)
 		if err != nil {
 			return nil, fmt.Errorf(
-				"resolving Mithril stake distribution for %s certificate: %w", source, err)
+				"resolving Mithril stake distribution for %s certificate: %w",
+				source,
+				err,
+			)
 		}
 		result.MithrilStakeDistribution = artifact
 	case signedEntityTypeCardanoStakeDistribution:
-		artifact, err := resolveCardanoStakeDistribution(ctx, client, certificate, true)
+		artifact, err := resolveCardanoStakeDistribution(
+			ctx,
+			client,
+			certificate,
+			true,
+		)
 		if err != nil {
 			return nil, fmt.Errorf(
-				"resolving Cardano stake distribution for %s certificate: %w", source, err)
+				"resolving Cardano stake distribution for %s certificate: %w",
+				source,
+				err,
+			)
 		}
 		result.CardanoStakeDistribution = artifact
 	}
@@ -96,13 +112,22 @@ func resolveMithrilStakeDistribution(
 	if err != nil {
 		return nil, fmt.Errorf("listing Mithril stake distributions: %w", err)
 	}
-	hash, err := stakeDistributionHash(list, leaf, epochFallback, "Mithril")
+	hash, err := stakeDistributionHash(
+		list, leaf, epochFallback, "Mithril",
+		func(item MithrilStakeDistributionListItem) (string, string, uint64) {
+			return item.Hash, item.CertificateHash, item.Epoch
+		},
+	)
 	if err != nil {
 		return nil, err
 	}
 	distribution, err := client.GetMithrilStakeDistribution(ctx, hash)
 	if err != nil {
-		return nil, fmt.Errorf("getting Mithril stake distribution %s: %w", hash, err)
+		return nil, fmt.Errorf(
+			"getting Mithril stake distribution %s: %w",
+			hash,
+			err,
+		)
 	}
 	return distribution, nil
 }
@@ -120,32 +145,42 @@ func resolveCardanoStakeDistribution(
 	if err != nil {
 		return nil, fmt.Errorf("listing Cardano stake distributions: %w", err)
 	}
-	hash, err := stakeDistributionHash(list, leaf, epochFallback, "Cardano")
+	hash, err := stakeDistributionHash(
+		list, leaf, epochFallback, "Cardano",
+		func(item CardanoStakeDistributionListItem) (string, string, uint64) {
+			return item.Hash, item.CertificateHash, item.Epoch
+		},
+	)
 	if err != nil {
 		return nil, err
 	}
 	distribution, err := client.GetCardanoStakeDistribution(ctx, hash)
 	if err != nil {
-		return nil, fmt.Errorf("getting Cardano stake distribution %s: %w", hash, err)
+		return nil, fmt.Errorf(
+			"getting Cardano stake distribution %s: %w",
+			hash,
+			err,
+		)
 	}
 	return distribution, nil
 }
 
-func stakeDistributionHash[T MithrilStakeDistributionListItem | CardanoStakeDistributionListItem](
+func stakeDistributionHash[T any](
 	list []T,
 	certificate *Certificate,
 	epochFallback bool,
 	kind string,
+	reference func(T) (hash, certificateHash string, epoch uint64),
 ) (string, error) {
 	var epochHash, epochCertificate string
 	for _, entry := range list {
-		item := MithrilStakeDistributionListItem(entry)
-		if item.CertificateHash != "" && item.CertificateHash == certificate.Hash {
-			return item.Hash, nil
+		hash, certificateHash, epoch := reference(entry)
+		if certificateHash != "" && certificateHash == certificate.Hash {
+			return hash, nil
 		}
-		if epochFallback && item.Epoch == certificate.Epoch && epochHash == "" {
-			epochHash = item.Hash
-			epochCertificate = item.CertificateHash
+		if epochFallback && epoch == certificate.Epoch && epochHash == "" {
+			epochHash = hash
+			epochCertificate = certificateHash
 		}
 	}
 	if epochHash == "" {
@@ -157,7 +192,9 @@ func stakeDistributionHash[T MithrilStakeDistributionListItem | CardanoStakeDist
 	if epochCertificate != "" && epochCertificate != certificate.Hash {
 		return "", fmt.Errorf(
 			"%s stake distribution certificate hash mismatch: distribution=%s certificate=%s",
-			strings.ToLower(kind), epochCertificate, certificate.Hash,
+			strings.ToLower(kind),
+			epochCertificate,
+			certificate.Hash,
 		)
 	}
 	return epochHash, nil
