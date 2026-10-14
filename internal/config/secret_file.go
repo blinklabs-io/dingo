@@ -115,9 +115,9 @@ func applySecretFileEnvironment(cfg *Config) error {
 				s.fileEnv,
 			)
 		case fileSet:
-			targetValue(cfg, s.field).SetString("")
+			configFieldValue(cfg, s.field).SetString("")
 		case valueSet:
-			targetValue(cfg, s.fileField).SetString("")
+			configFieldValue(cfg, s.fileField).SetString("")
 		}
 	}
 	return nil
@@ -135,9 +135,9 @@ func applySecretFileFlags(flags *pflag.FlagSet, cfg *Config) error {
 				s.fileFlag,
 			)
 		case fileSet:
-			targetValue(cfg, s.field).SetString("")
+			configFieldValue(cfg, s.field).SetString("")
 		case valueSet:
-			targetValue(cfg, s.fileField).SetString("")
+			configFieldValue(cfg, s.fileField).SetString("")
 		}
 	}
 	return nil
@@ -148,11 +148,11 @@ func applySecretFileFlags(flags *pflag.FlagSet, cfg *Config) error {
 // configuration source has been merged, before the secrets are used.
 func (c *Config) ResolveSecretFiles() error {
 	for _, s := range secretFileSettings {
-		file := targetValue(c, s.fileField)
+		file := configFieldValue(c, s.fileField)
 		if file.String() == "" {
 			continue
 		}
-		value := targetValue(c, s.field)
+		value := configFieldValue(c, s.field)
 		if value.String() != "" {
 			return fmt.Errorf(
 				"%s and %s are both set; set only one",
