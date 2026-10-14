@@ -11847,9 +11847,10 @@ never the reverse.
   existed) disables it, preserving the original immediate-`complete=true`
   behavior for any caller that does not configure grace hours.
 - **Pre-staking epochs are excluded from account fetching too.**
-  `koiosStakeEpoch`/`preStakingThroughEpoch` (`check.go`) reject epoch <= 1,
-  not just epoch == 0, so `FetchEpochAccountsWithAddrs` skips both
-  pre-staking epochs entirely instead of running a real (and meaningless)
+  `koiosStakeEpoch`/`preStakingThroughEpoch` (`check.go`) reject every epoch
+  up to the network's pre-staking boundary (1 by default, 5 on preprod, where
+  Koios reports a null `active_stake` for epochs 0-5), not just epoch == 0, so
+  `FetchEpochAccountsWithAddrs` skips all pre-staking epochs entirely instead of running a real (and meaningless)
   Koios `/account_reward_history` sweep for epoch 1 against a nonexistent
   stake epoch. Neither epoch ever gets a `koios_account_coverage` row as a
   result, so `Cache.GetEpochsMissingAccountCoverage`'s query explicitly
