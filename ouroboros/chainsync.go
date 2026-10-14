@@ -972,6 +972,10 @@ func (o *Ouroboros) chainsyncServerAwaitNext(
 // is torn down while the waiter is parked.
 var errChainsyncAwaitConnectionClosed = errors.New("connection closed")
 
+var errChainsyncCandidateRejected = errors.New(
+	"chain selection rejected peer tip",
+)
+
 // chainsyncServerServeAwaited delivers the chain iterator result that resolved
 // a post-AwaitReply wait, or drops the transport when there is nothing to
 // deliver.
@@ -1155,7 +1159,7 @@ func (o *Ouroboros) chainsyncClientRollBackward(
 	// Observe the rollback for chain selection FIRST — it trims the peer's
 	// observed frontier (ApplyRollback), which can change its corroboration
 	// status, so the apply gate below must reflect it. If the hook handles it
-	// synchronously (Genesis corroboration active), skip the async publish to
+	// synchronously (Genesis selection mode), skip the async publish to
 	// avoid a double update; otherwise publish for the async subscriber. This
 	// mirrors the roll-forward ChainsyncObservePeerTip ordering.
 	rollbackEvent := chainselection.PeerRollbackEvent{
@@ -1486,7 +1490,6 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 				}
 			}
 		}
-		patienceGrant = ingressEligible
 		// Observe the tip for chain selection FIRST, so the apply-eligibility
 		// decision below reflects this header. Only ingress-eligible peers are
 		// observed; random inbound peers reporting ephemeral tips are filtered
@@ -1517,21 +1520,32 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 				ObservedPrevHash: v.PrevHash().Bytes(),
 				ObservedBoundary: blockType == gledger.BlockTypeByronEbb,
 			}
-			// If the hook handles it synchronously (Genesis corroboration
-			// active, so the apply gate below must reflect this header), skip
+			// If the hook handles it synchronously (Genesis selection mode,
+			// so the apply and eagerness gates below reflect this header), skip
 			// the async publish to avoid a double update; otherwise publish for
 			// the async chain-selection and peergov subscribers.
-			observedSync := false
+			disposition := chainselection.PeerTipUpdateUnhandled
 			if o.config.ChainsyncObservePeerTip != nil {
-				observedSync = o.config.ChainsyncObservePeerTip(peerTipUpdate)
+				disposition = o.config.ChainsyncObservePeerTip(peerTipUpdate)
 			}
-			if !observedSync {
+			switch disposition {
+			case chainselection.PeerTipUpdateUnhandled:
 				o.eventBus.Publish(
 					chainselection.PeerTipUpdateEventType,
 					event.NewEvent(
 						chainselection.PeerTipUpdateEventType,
 						peerTipUpdate,
 					),
+				)
+			case chainselection.PeerTipUpdatePending:
+				ingressEligible = false
+			case chainselection.PeerTipUpdateAccepted:
+			case chainselection.PeerTipUpdateRejected:
+				return errChainsyncCandidateRejected
+			default:
+				return fmt.Errorf(
+					"invalid peer tip disposition: %d",
+					disposition,
 				)
 			}
 		}
@@ -1541,11 +1555,31 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 		// blocks are withheld from the ledger.
 		applyEligible := ingressEligible &&
 			o.shouldApplyChainsyncToLedger(ctx.ConnectionId)
-		// Update tracked client cursor/tip and deduplicate headers. Record the
-		// cross-peer dedup entry ONLY for headers we will actually apply, so a
-		// header withheld from an uncorroborated peer is not permanently
-		// deduplicated — a later corroborated, apply-eligible peer can still
-		// publish the point into the ledger.
+		// Limit on Eagerness: the tip was observed above, so the limit already
+		// accounts for this header. Wait before recording cross-peer dedup state:
+		// if the connection closes while held, another peer must still be able
+		// to deliver the same header to the ledger.
+		if applyEligible && o.config.ChainsyncAwaitEagerness != nil {
+			var appliedTip func() ochainsync.Tip
+			if o.ledgerState != nil {
+				appliedTip = o.ledgerState.Tip
+			}
+			admissionCtx, cancelAdmission := chainsyncAdmissionContext(ctx)
+			err := o.config.ChainsyncAwaitEagerness(
+				admissionCtx,
+				ctx.ConnectionId,
+				v.BlockNumber(),
+				appliedTip,
+			)
+			cancelAdmission()
+			if err != nil {
+				return fmt.Errorf("wait for eagerness limit: %w", err)
+			}
+		}
+		patienceGrant = ingressEligible
+		// Record the cross-peer dedup entry only for headers we will actually
+		// apply. A header withheld from an uncorroborated peer must not suppress
+		// a later delivery from a corroborated, apply-eligible peer.
 		isNew := true
 		if o.chainsyncState != nil {
 			if applyEligible {
