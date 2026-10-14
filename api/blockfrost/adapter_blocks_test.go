@@ -27,6 +27,8 @@ import (
 	testfixtures "github.com/blinklabs-io/dingo/internal/test/fixtures"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
 	"github.com/stretchr/testify/require"
 )
@@ -67,6 +69,12 @@ func TestNodeAdapterNeighborBlocks(t *testing.T) {
 	t.Parallel()
 	adapter, _, db := newDBBackedAdapter(t)
 	chain := seedChain(t, db, 5)
+	require.NoError(t, db.SetTip(ochainsync.Tip{
+		Point: ocommon.NewPoint(
+			chain[4].SlotNumber(), chain[4].Hash().Bytes(),
+		),
+		BlockNumber: 5,
+	}, nil))
 	hashOf := func(height int) string { return chain[height-1].Hash().String() }
 	ctx := context.Background()
 
@@ -83,8 +91,8 @@ func TestNodeAdapterNeighborBlocks(t *testing.T) {
 		{"next second page", "2", true, 2, 2, []uint64{5}},
 		{"next past tip", "2", true, 2, 3, []uint64{}},
 		{"next of tip", "5", true, 5, 1, []uint64{}},
-		{"previous by hash", hashOf(4), false, 2, 1, []uint64{3, 2}},
-		{"previous by height", "4", false, 2, 1, []uint64{3, 2}},
+		{"previous by hash", hashOf(4), false, 2, 1, []uint64{2, 3}},
+		{"previous by height", "4", false, 2, 1, []uint64{2, 3}},
 		{"previous second page", "4", false, 2, 2, []uint64{1}},
 		{"previous of first", "1", false, 5, 1, []uint64{}},
 		{"previous page past start", "4", false, 2, 5, []uint64{}},
@@ -92,7 +100,7 @@ func TestNodeAdapterNeighborBlocks(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			blocks, err := adapter.neighborBlocks(
+			blocks, _, err := adapter.neighborBlocks(
 				ctx,
 				tc.id,
 				PaginationParams{Count: tc.count, Page: tc.page},
@@ -105,18 +113,18 @@ func TestNodeAdapterNeighborBlocks(t *testing.T) {
 
 	t.Run("invalid id", func(t *testing.T) {
 		t.Parallel()
-		_, err := adapter.neighborBlocks(
+		_, _, err := adapter.neighborBlocks(
 			ctx, "not-a-block", PaginationParams{Count: 1, Page: 1}, true,
 		)
 		require.ErrorIs(t, err, ErrInvalidBlockID)
 	})
 	t.Run("unknown block", func(t *testing.T) {
 		t.Parallel()
-		_, err := adapter.neighborBlocks(
+		_, _, err := adapter.neighborBlocks(
 			ctx, "99", PaginationParams{Count: 1, Page: 1}, true,
 		)
 		require.ErrorIs(t, err, ErrBlockNotFound)
-		_, err = adapter.neighborBlocks(
+		_, _, err = adapter.neighborBlocks(
 			ctx,
 			hex.EncodeToString(fill32(0xee)),
 			PaginationParams{Count: 1, Page: 1},
@@ -124,9 +132,38 @@ func TestNodeAdapterNeighborBlocks(t *testing.T) {
 		)
 		require.ErrorIs(t, err, ErrBlockNotFound)
 	})
+	t.Run("descending order and totals", func(t *testing.T) {
+		t.Parallel()
+		blocks, total, err := adapter.neighborBlocks(
+			ctx,
+			"4",
+			PaginationParams{
+				Count: 2,
+				Page:  1,
+				Order: PaginationOrderDesc,
+			},
+			false,
+		)
+		require.NoError(t, err)
+		require.Equal(t, []uint64{3, 2}, heightsOf(blocks))
+		require.Equal(t, 4, total)
+		blocks, total, err = adapter.neighborBlocks(
+			ctx,
+			"2",
+			PaginationParams{
+				Count: 2,
+				Page:  1,
+				Order: PaginationOrderDesc,
+			},
+			true,
+		)
+		require.NoError(t, err)
+		require.Equal(t, []uint64{4, 3}, heightsOf(blocks))
+		require.Equal(t, 3, total)
+	})
 	t.Run("page offset overflow is empty", func(t *testing.T) {
 		t.Parallel()
-		blocks, err := adapter.neighborBlocks(
+		blocks, _, err := adapter.neighborBlocks(
 			ctx,
 			"2",
 			PaginationParams{Count: 100, Page: MaxPaginationPage},

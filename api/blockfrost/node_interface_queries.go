@@ -23,22 +23,25 @@ import (
 // BlockfrostNode. Block identifiers are 64-character hex hashes or decimal
 // heights, as for BlockByHashOrNumber.
 type BlockQueryNode interface {
-	// BlockNext returns the blocks following the identified block, nearest
-	// first, bounded by params.Count after skipping (Page-1)*Count blocks.
+	// BlockNext returns a page of the blocks following the identified
+	// block and the number of heights between it and the tip. Page one holds
+	// the nearest blocks; heights ascend within a page unless params.Order
+	// is descending.
 	BlockNext(
 		ctx context.Context,
 		id string,
 		params PaginationParams,
-	) ([]BlockInfo, error)
+	) ([]BlockInfo, int, error)
 
-	// BlockPrevious returns the blocks preceding the identified block,
-	// nearest first, bounded by params.Count after skipping
-	// (Page-1)*Count blocks.
+	// BlockPrevious returns a page of the blocks preceding the identified
+	// block and the number of heights below it. Page one holds the nearest
+	// blocks; heights ascend within a page unless params.Order is
+	// descending.
 	BlockPrevious(
 		ctx context.Context,
 		id string,
 		params PaginationParams,
-	) ([]BlockInfo, error)
+	) ([]BlockInfo, int, error)
 
 	// BlockBySlot returns the block produced in an absolute slot.
 	BlockBySlot(ctx context.Context, slot uint64) (BlockInfo, error)

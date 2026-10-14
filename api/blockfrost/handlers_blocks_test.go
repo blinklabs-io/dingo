@@ -15,6 +15,7 @@
 package blockfrost
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -58,17 +59,27 @@ func testBlockInfo(height uint64) BlockInfo {
 
 func TestHandleBlockNextAndPrevious(t *testing.T) {
 	t.Parallel()
-	for _, route := range []string{"next", "previous"} {
-		t.Run(route, func(t *testing.T) {
+	for _, tc := range []struct {
+		route  string
+		height uint64
+	}{
+		{"next", 8},
+		{"previous", 6},
+	} {
+		t.Run(tc.route, func(t *testing.T) {
 			t.Parallel()
 			node := &mockNode{}
-			node.navBlocks = []BlockInfo{testBlockInfo(8), testBlockInfo(9)}
-			w := serve(t, node, "/api/v0/blocks/7/"+route+"?count=2&page=3")
+			node.navNext = []BlockInfo{testBlockInfo(8)}
+			node.navPrevious = []BlockInfo{testBlockInfo(6)}
+			node.navExtra = 4
+			w := serve(t, node, "/api/v0/blocks/7/"+tc.route+"?count=2&page=3")
 			require.Equal(t, http.StatusOK, w.Code)
-			require.JSONEq(t, `[
-{"time":1700000008,"height":8,"hash":"hash8","slot":80,"epoch":1,"epoch_slot":8,"slot_leader":"pool1leader","size":512,"tx_count":2,"output":"1000","fees":"10","block_vrf":null,"op_cert":null,"op_cert_counter":null,"previous_block":"hash7","next_block":null,"confirmations":3},
-{"time":1700000009,"height":9,"hash":"hash9","slot":90,"epoch":1,"epoch_slot":9,"slot_leader":"pool1leader","size":512,"tx_count":2,"output":"1000","fees":"10","block_vrf":null,"op_cert":null,"op_cert_counter":null,"previous_block":"hash8","next_block":null,"confirmations":3}
-]`, w.Body.String())
+			var got []BlockResponse
+			require.NoError(t, json.Unmarshal(w.Body.Bytes(), &got))
+			require.Len(t, got, 1)
+			require.Equal(t, tc.height, got[0].Height)
+			require.Equal(t, "5", w.Header().Get("X-Pagination-Count-Total"))
+			require.Equal(t, "3", w.Header().Get("X-Pagination-Page-Total"))
 			node.mu.Lock()
 			defer node.mu.Unlock()
 			require.Equal(t, "7", node.lastBlockID)

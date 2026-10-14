@@ -27,7 +27,9 @@ import (
 type queryMock struct {
 	mu sync.Mutex
 
-	navBlocks        []BlockInfo
+	navNext          []BlockInfo
+	navPrevious      []BlockInfo
+	navExtra         int
 	navBlock         BlockInfo
 	navHashes        []string
 	navTxCBOR        []BlockTransactionCBORInfo
@@ -92,18 +94,18 @@ func (m *queryMock) BlockNext(
 	_ context.Context,
 	id string,
 	params PaginationParams,
-) ([]BlockInfo, error) {
+) ([]BlockInfo, int, error) {
 	m.recordBlock(id, params)
-	return m.navBlocks, m.navErr
+	return m.navNext, len(m.navNext) + m.navExtra, m.navErr
 }
 
 func (m *queryMock) BlockPrevious(
 	_ context.Context,
 	id string,
 	params PaginationParams,
-) ([]BlockInfo, error) {
+) ([]BlockInfo, int, error) {
 	m.recordBlock(id, params)
-	return m.navBlocks, m.navErr
+	return m.navPrevious, len(m.navPrevious) + m.navExtra, m.navErr
 }
 
 func (m *queryMock) BlockBySlot(

@@ -130,12 +130,13 @@ func (b *Blockfrost) handleBlockNeighbors(
 	id := r.PathValue("hash_or_number")
 	var (
 		infos []BlockInfo
+		total int
 		err   error
 	)
 	if forward {
-		infos, err = b.node.BlockNext(r.Context(), id, params)
+		infos, total, err = b.node.BlockNext(r.Context(), id, params)
 	} else {
-		infos, err = b.node.BlockPrevious(r.Context(), id, params)
+		infos, total, err = b.node.BlockPrevious(r.Context(), id, params)
 	}
 	if err != nil {
 		b.writeBlockQueryError(w, err, "neighboring blocks", "block", id)
@@ -145,6 +146,7 @@ func (b *Blockfrost) handleBlockNeighbors(
 	for _, info := range infos {
 		resp = append(resp, blockResponse(info))
 	}
+	SetPaginationHeaders(w, total, params)
 	writeJSON(w, http.StatusOK, resp)
 }
 

@@ -27,22 +27,39 @@ import (
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
-// neighborBlocks returns the page of blocks adjacent to the identified block:
-// the ones that follow it when forward is set, else the ones that precede it,
-// nearest first. A gap in the stored chain ends the listing.
+// neighborBlocks returns the page of blocks adjacent to the identified block
+// and the number of block heights on that side of it: the ones that follow it
+// up to the tip when forward is set, else the ones that precede it. Page one
+// holds the nearest blocks; within a page heights ascend, as Blockfrost lists
+// them, and a descending order reverses the page. A gap in the stored chain
+// ends the listing.
 func (a *NodeAdapter) neighborBlocks(
 	ctx context.Context,
 	id string,
 	params PaginationParams,
 	forward bool,
-) ([]models.Block, error) {
+) ([]models.Block, int, error) {
 	origin, err := a.resolveBlock(ctx, id)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
+	var available uint64
+	if forward {
+		tip, err := a.ledgerState.Database().GetTip(nil)
+		if err != nil {
+			return nil, 0, fmt.Errorf("get chain tip: %w", err)
+		}
+		if tip.BlockNumber > origin.Number {
+			available = tip.BlockNumber - origin.Number
+		}
+	} else {
+		available = origin.Number
+	}
+	// #nosec G115 -- clamped to MaxInt
+	total := int(min(available, uint64(math.MaxInt)))
 	offset, ok := paginationOffset(params)
 	if !ok {
-		return []models.Block{}, nil
+		return []models.Block{}, total, nil
 	}
 	// The origin is skipped as well as the pages before the requested one.
 	// offset is a non-negative int, so the sum cannot overflow a uint64.
@@ -63,7 +80,7 @@ func (a *NodeAdapter) neighborBlocks(
 			height = origin.Number - distance
 		}
 		if err := ctx.Err(); err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		block, err := a.ledgerState.Database().BlockByIndex(
 			height+database.BlockInitialIndex,
@@ -73,11 +90,14 @@ func (a *NodeAdapter) neighborBlocks(
 			if errors.Is(err, models.ErrBlockNotFound) {
 				break
 			}
-			return nil, err
+			return nil, 0, err
 		}
 		ret = append(ret, block)
 	}
-	return ret, nil
+	if forward == (params.Order == PaginationOrderDesc) {
+		slices.Reverse(ret)
+	}
+	return ret, total, nil
 }
 
 func (a *NodeAdapter) blockInfos(blocks []models.Block) ([]BlockInfo, error) {
@@ -97,13 +117,17 @@ func (a *NodeAdapter) BlockNext(
 	ctx context.Context,
 	id string,
 	params PaginationParams,
-) ([]BlockInfo, error) {
-	blocks, err := a.neighborBlocks(ctx, id, params, true)
+) ([]BlockInfo, int, error) {
+	blocks, total, err := a.neighborBlocks(ctx, id, params, true)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	//nolint:contextcheck // block aggregates are read through the ledger state, which takes no context
-	return a.blockInfos(blocks)
+	infos, err := a.blockInfos(blocks)
+	if err != nil {
+		return nil, 0, err
+	}
+	return infos, total, nil
 }
 
 // BlockPrevious returns the blocks that precede the identified block.
@@ -111,13 +135,17 @@ func (a *NodeAdapter) BlockPrevious(
 	ctx context.Context,
 	id string,
 	params PaginationParams,
-) ([]BlockInfo, error) {
-	blocks, err := a.neighborBlocks(ctx, id, params, false)
+) ([]BlockInfo, int, error) {
+	blocks, total, err := a.neighborBlocks(ctx, id, params, false)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	//nolint:contextcheck // block aggregates are read through the ledger state, which takes no context
-	return a.blockInfos(blocks)
+	infos, err := a.blockInfos(blocks)
+	if err != nil {
+		return nil, 0, err
+	}
+	return infos, total, nil
 }
 
 func (a *NodeAdapter) blockAtSlot(
