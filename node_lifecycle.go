@@ -47,16 +47,15 @@ package dingo
 // Everything else that depends on n.db or n.ledgerState — chainManager,
 // ledgerState, mempool, chainsyncState, peerGov, connManager, the
 // background managers, the optional API servers, and the block-producer
-// path — is stopped, discarded, and rebuilt from scratch, mirroring (by
-// necessity duplicating, since Run() itself is intentionally left
-// unmodified) the equivalent construction in node.go's Run(). n.ouroboros
-// is rebuilt along with them: it takes its dependencies at construction and
-// never reassigns them, so reinitializeNetworkingCore closes the outgoing
-// instance (releasing its Prometheus collectors and EventBus subscriptions,
-// both of which sit on registries that outlive it) and constructs a
-// replacement from the retained n.ouroborosConfig. Callbacks the node handed
-// to other components resolve n.ouroboros when they fire rather than binding
-// an instance, so they follow the replacement automatically.
+// path — is stopped, discarded, and rebuilt from shared component factories
+// also used by Run(). n.ouroboros is rebuilt along with them: it takes its
+// dependencies at construction and never reassigns them, so
+// reinitializeNetworkingCore closes the outgoing instance (releasing its
+// Prometheus collectors and EventBus subscriptions, both of which sit on
+// registries that outlive it) and constructs a replacement from the retained
+// n.ouroborosConfig. Callbacks the node handed to other components resolve
+// n.ouroboros when they fire rather than binding an instance, so they follow
+// the replacement automatically.
 
 import (
 	"context"
@@ -87,21 +86,16 @@ import (
 	"github.com/blinklabs-io/dingo/internal/committeeauth"
 	"github.com/blinklabs-io/dingo/internal/dblifecycle"
 	"github.com/blinklabs-io/dingo/internal/fsyncdir"
-	"github.com/blinklabs-io/dingo/internal/historyexpiry"
-	"github.com/blinklabs-io/dingo/internal/node/ledgerpeers"
 	"github.com/blinklabs-io/dingo/internal/offchainmetadata"
 	internalplugins "github.com/blinklabs-io/dingo/internal/plugins"
 	dingoversion "github.com/blinklabs-io/dingo/internal/version"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/leios"
-	"github.com/blinklabs-io/dingo/ledger/snapshot"
 	"github.com/blinklabs-io/dingo/mempool"
 	midnightindexer "github.com/blinklabs-io/dingo/midnight/indexer"
 	midnightserver "github.com/blinklabs-io/dingo/midnight/server"
 	ouroborosPkg "github.com/blinklabs-io/dingo/ouroboros"
-	"github.com/blinklabs-io/dingo/peergov"
 	"github.com/blinklabs-io/dingo/plugin"
-	ouroboros "github.com/blinklabs-io/gouroboros"
 )
 
 // quiesceForLiveLifecycleOp stops every subsystem that touches storage, or
@@ -720,16 +714,7 @@ func (n *Node) reinitializeCoreStorage(ctx context.Context) error {
 	}
 
 	if n.config.historyExpiry.Enabled {
-		prunerFreq := n.config.historyExpiry.Frequency
-		if prunerFreq <= 0 {
-			prunerFreq = time.Hour
-		}
-		n.historyExpiry = historyexpiry.NewPruner(historyexpiry.PrunerConfig{
-			LedgerState: n.ledgerState,
-			DB:          n.db,
-			Logger:      n.config.logger,
-			Frequency:   prunerFreq,
-		})
+		n.historyExpiry = n.newHistoryExpiryPruner()
 		if err := n.historyExpiry.Start(n.ctx); err != nil { //nolint:contextcheck
 			return fmt.Errorf("failed to restart history expiry: %w", err)
 		}
@@ -793,69 +778,9 @@ func (n *Node) reinitializeMidnightIndexer() error {
 // subscription exist. It then restarts the database-lifecycle manager and
 // (if enabled) the Leios vote/pipeline managers, matching Run()'s order.
 func (n *Node) reinitializeBackgroundManagers(ctx context.Context) error {
-	n.snapshotMgr = snapshot.NewManager(n.db, n.eventBus, n.config.logger)
-	// Mirror the CIP-0163 reward-account inactivity gate into snapshot
-	// capture so it matches the ledger config that drives account expiry
-	// stamping (see Run()'s identical call in node.go) -- must happen
-	// before CaptureGenesisSnapshot/Start below locks this configuration,
-	// or a live restore/truncate would silently run post-CIP-163 stake
-	// and reward snapshots with pre-CIP behavior even though the operator
-	// has it enabled.
-	if err := n.snapshotMgr.SetDelegatorInactivity(
-		n.config.delegatorInactivityEnabled,
-		n.config.delegatorInactivity,
-	); err != nil {
-		return fmt.Errorf("configuring snapshot manager: %w", err)
+	if err := n.configureSnapshotManager(); err != nil {
+		return err
 	}
-	n.snapshotMgr.SetPromRegistry(n.config.promRegistry)
-	// Mirror the Koios parity observer's enablement into the rebuilt snapshot
-	// manager too (see Run()'s identical call in node.go), or a
-	// live restore/truncate would silently drop back to CORE mode's 4-epoch
-	// reward_account_output retention even though the observer is enabled.
-	n.snapshotMgr.SetRewardAccountOutputRetentionUnbounded(
-		n.config.koiosParity.Enabled,
-	)
-	// Prune pool snapshots through the deferred-header retention guard, so a
-	// snapshot a queued/deferred header still needs for leader validation is
-	// never pruned out from under it and misread as pool absence, and the
-	// floor selection is atomic with deferred-header admission.
-	// Set before Start; the pin is released automatically as headers resolve.
-	n.snapshotMgr.SetPoolSnapshotRetentionGuard(
-		n.ledgerState.PrunePoolSnapshotsWithRetentionFloor,
-	)
-	// Reinstall both epoch-boundary hooks, in the same order and with the
-	// same bodies as Run() (node.go): the stake hook first, so the
-	// authoritative SNAP-point stake read (after MIR, before POOLREAP/
-	// enactment) is captured via ComputeEpochBoundarySnapshot, then the
-	// capture hook, which stages that snapshot atomically as part of the
-	// same rollover transaction. A live Restore/Truncate must not leave
-	// only the capture hook installed -- without the paired stake hook,
-	// the next epoch boundary would fall back to reconstructing stake
-	// instead of using the SNAP-point capture, producing snapshot/reward
-	// state inconsistent with a normal (non-restored) startup and able to
-	// trip false mismatches in the Koios parity observer/check.
-	n.ledgerState.SetEpochBoundarySnapshotStakeHook(
-		func(txn *database.Txn, evt event.EpochTransitionEvent) error {
-			return n.snapshotMgr.ComputeEpochBoundarySnapshot(n.ctx, txn, evt)
-		},
-	)
-	n.ledgerState.SetEpochBoundarySnapshotHook(
-		func(txn *database.Txn, evt event.EpochTransitionEvent) error {
-			return n.snapshotMgr.CaptureEpochBoundarySnapshot(n.ctx, txn, evt)
-		},
-	)
-	wireDeferredRewardStakeInputs(n.ledgerState, n.snapshotMgr)
-	// Reinstall governance's same-boundary SPO stake hook too --
-	// see node.go's Run() for why a production node must always have this
-	// wired alongside the other two.
-	n.ledgerState.SetCurrentBoundarySPOStakeHook(
-		func(
-			txn *database.Txn,
-			evt event.EpochTransitionEvent,
-		) ([]*models.PoolStakeSnapshot, error) {
-			return n.snapshotMgr.CurrentBoundarySPOStakeRows(n.ctx, txn, evt)
-		},
-	)
 
 	// Rebuild the Koios parity observer (if enabled) against the fresh
 	// n.db a live restore/truncate just reinitialized, and resubscribe it to
@@ -884,15 +809,7 @@ func (n *Node) reinitializeBackgroundManagers(ctx context.Context) error {
 		return fmt.Errorf("failed to restart snapshot manager: %w", err)
 	}
 
-	n.dbLifecycleMgr = dblifecycle.NewManager(
-		n.db,
-		n.eventBus,
-		n.config.databaseLifecycle,
-		n.config.pluginSelections[plugin.CapabilityStorageBlob].Provider,
-		n.config.pluginSelections[plugin.CapabilityStorageMetadata].Provider,
-		n.destinationRegistry,
-		n.config.logger,
-	)
+	n.dbLifecycleMgr = n.newDatabaseLifecycleManager()
 	if err := n.dbLifecycleMgr.Start(n.ctx); err != nil { //nolint:contextcheck
 		return fmt.Errorf(
 			"failed to restart database lifecycle manager: %w",
@@ -976,27 +893,7 @@ func (n *Node) reinitializeNetworkingCore(ctx context.Context) error {
 	// below, so every listener and outbound dial would install protocol
 	// handlers bound to a closed Ouroboros and the node would never resume
 	// syncing after the restore.
-	n.connManager = connmanager.NewConnectionManager(
-		connmanager.ConnectionManagerConfig{
-			Logger:   n.config.logger,
-			EventBus: n.eventBus,
-			ListenersProvider: func() []connmanager.ListenerConfig {
-				return n.ouroboros().
-					ConfigureListeners(n.ctx, n.config.listeners)
-			},
-			OutboundSourcePort: n.config.outboundSourcePort,
-			OutboundConnOptsProvider: func() []ouroboros.ConnectionOptionFunc {
-				return n.ouroboros().OutboundConnOpts(n.ctx)
-			},
-			PromRegistry:            n.config.promRegistry,
-			MaxConnectionsPerIP:     n.config.maxConnectionsPerIP,
-			MaxInboundConns:         n.config.maxInboundConns,
-			MaxNtCConns:             n.config.maxNtCConns,
-			MaxNtCConnectionsPerIP:  n.config.maxNtCConnectionsPerIP,
-			MaxTrustedLocalNtCConns: n.config.maxTrustedLocalNtCConns,
-			ConnClosedOwnerFunc:     n.handleConnManagerClosedOwner,
-		},
-	)
+	n.connManager = n.newConnectionManager()
 	n.connManagerRecycleSubId = n.subscribeConnectionRecycleRequests(
 		n.connManager.HandleConnectionRecycleRequestedEvent,
 	)
@@ -1009,42 +906,7 @@ func (n *Node) reinitializeNetworkingCore(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to recreate ledger relay provider: %w", err)
 	}
-	ledgerPeerProvider := ledgerpeers.NewProvider(n.poolRelayProvider)
-
-	var useLedgerAfterSlot int64 = -1
-	if n.config.topologyConfig != nil {
-		useLedgerAfterSlot = n.config.topologyConfig.UseLedgerAfterSlot
-	}
-	peerGovConfig := peergov.PeerGovernorConfig{
-		Logger:          n.config.logger,
-		EventBus:        n.eventBus,
-		ConnManager:     n.connManager,
-		DisableOutbound: n.config.isDevMode(),
-		PromRegistry:    n.config.promRegistry,
-		PeerRequestFunc: func(peer *peergov.Peer) []string {
-			return n.ouroboros().RequestPeersFromPeer(peer)
-		},
-		LedgerPeerProvider:                   ledgerPeerProvider,
-		UseLedgerAfterSlot:                   useLedgerAfterSlot,
-		LedgerPeerTarget:                     n.config.ledgerPeerTarget,
-		ActivePeersTopologyQuota:             n.config.activePeersTopologyQuota,
-		ActivePeersGossipQuota:               n.config.activePeersGossipQuota,
-		ActivePeersLedgerQuota:               n.config.activePeersLedgerQuota,
-		InboundWarmTarget:                    n.config.inboundWarmTarget,
-		InboundHotQuota:                      n.config.inboundHotQuota,
-		InboundMinTenure:                     n.config.inboundMinTenure,
-		InboundHotScoreThreshold:             n.config.inboundHotScoreThreshold,
-		InboundPruneAfter:                    n.config.inboundPruneAfter,
-		InboundDuplexOnlyForHot:              n.config.inboundDuplexOnlyForHot,
-		InboundCooldown:                      n.config.inboundCooldown,
-		MinHotPeers:                          n.config.minHotPeers,
-		ReconcileInterval:                    n.config.reconcileInterval,
-		InactivityTimeout:                    n.config.inactivityTimeout,
-		SyncProgressProvider:                 n.ledgerState,
-		BootstrapPromotionMinDiversityGroups: n.config.bootstrapPromotionMinDiversityGroups,
-	}
-	applyPeerTargets(n.config, &peerGovConfig)
-	n.setPeerGovernor(peergov.NewPeerGovernor(peerGovConfig))
+	n.setPeerGovernor(n.newPeerGovernor())
 	// Replace ouroboros. It takes its dependencies at construction and never
 	// reassigns them, so rebuilding those dependencies means rebuilding it
 	// too. Closing the old instance first is required, not merely tidy: it
@@ -1182,33 +1044,7 @@ func (n *Node) reinitializeAPIServers() error {
 	if midnightServerActive(n.config.storageMode, n.config.midnight) {
 		var err error
 		n.midnightServer, err = midnightserver.New(
-			midnightserver.Config{
-				Logger:   n.config.logger,
-				Metadata: n.db.Metadata(),
-				BlockNumberByHash: func(hash []byte) (uint64, bool, error) {
-					block, err := database.BlockByHash(
-						n.ctx,
-						n.db,
-						hash,
-					)
-					if err != nil {
-						if errors.Is(err, models.ErrBlockNotFound) {
-							return 0, false, nil
-						}
-						return 0, false, err
-					}
-					return block.Number, true, nil
-				},
-				Host:              n.config.midnight.Host,
-				Port:              n.config.midnight.Port,
-				TLSCertFilePath:   n.config.tlsCertFilePath,
-				TLSKeyFilePath:    n.config.tlsKeyFilePath,
-				ReflectionEnabled: n.config.midnight.ReflectionEnabled,
-				ShutdownTimeout:   n.config.shutdownTimeout,
-				Database:          midnightserver.NewDatabase(n.db),
-				SlotTimer:         n.ledgerState,
-				PromRegistry:      n.config.promRegistry,
-			},
+			n.midnightServerConfig(n.ctx),
 		)
 		if err != nil {
 			return fmt.Errorf(
@@ -1334,18 +1170,7 @@ func (n *Node) reinitializeAPIServers() error {
 
 	if n.config.storageMode.IsAPI() {
 		fetcher, err := offchainmetadata.New(
-			offchainmetadata.Config{
-				Logger:                n.config.logger,
-				Store:                 n.db.Metadata(),
-				HTTPClient:            n.config.offchainMetadata.HTTPClient,
-				Interval:              n.config.offchainMetadata.Interval,
-				RequestTimeout:        n.config.offchainMetadata.RequestTimeout,
-				UserAgent:             n.config.offchainMetadata.UserAgent,
-				IPFSGatewayURL:        n.config.offchainMetadata.IPFSGatewayURL,
-				BatchSize:             n.config.offchainMetadata.BatchSize,
-				MaxBytes:              n.config.offchainMetadata.MaxBytes,
-				AllowPrivateAddresses: n.config.offchainMetadata.AllowPrivateAddresses,
-			},
+			n.offchainMetadataConfig(),
 		)
 		if err != nil {
 			return fmt.Errorf("recreating off-chain metadata fetcher: %w", err)
@@ -1424,36 +1249,6 @@ func (n *Node) reinitializeBlockProducer() (retErr error) {
 	return nil
 }
 
-// databaseConfig builds the database.Config Run() itself builds inline;
-// factored out here so reinitializeCoreStorage and Truncate's temporary
-// pre-reinitialize database handle don't duplicate the literal a third
-// time (Run()'s own copy in node.go is intentionally left untouched).
-func (n *Node) databaseConfig() *database.Config {
-	return &database.Config{
-		DataDir:              n.config.dataDir,
-		Logger:               n.config.logger,
-		PromRegistry:         n.config.promRegistry,
-		StorageMode:          string(n.config.storageMode),
-		Network:              n.config.network,
-		NetworkMagic:         n.config.networkMagic,
-		StartEra:             string(n.config.startEra),
-		StrictUtxoValidation: n.config.strictUtxoValidation,
-		BlobPlugin: n.config.pluginSelections[plugin.CapabilityStorageBlob].
-			Provider,
-		MetadataPlugin: n.config.pluginSelections[plugin.CapabilityStorageMetadata].
-			Provider,
-		CacheConfig: database.CborCacheConfig{
-			BlockLRUEntries: n.config.cacheBlockLRUEntries,
-			HotUtxoEntries:  n.config.cacheHotUtxoEntries,
-			HotTxEntries:    n.config.cacheHotTxEntries,
-			HotTxMaxBytes:   n.config.cacheHotTxMaxBytes,
-		},
-		AlonzoLovelacePerUtxoWord: cardano.AlonzoLovelacePerUtxoWord(
-			n.config.cardanoNodeConfig, "", n.config.network,
-		),
-	}
-}
-
 // storageSelections returns this node's configured blob/metadata provider
 // selections, for the live-lifecycle paths that must resolve storage
 // themselves (reinitializeCoreStorage against n.pluginHost; a disposable
@@ -1467,8 +1262,8 @@ func (n *Node) storageSelections() internalplugins.StorageSelections {
 }
 
 // storageDependencies returns the shared application settings injected
-// into storage providers for dataDir, mirroring Run()'s own construction
-// (node.go) but parameterized so a temporary handle (e.g. Truncate's
+// into storage providers for dataDir. Run and live rebuilds use it, while
+// a temporary handle (e.g. Truncate's
 // tmpDB, or Restore's staging-directory validation) can target a
 // different directory than n.config.dataDir.
 func (n *Node) storageDependencies(

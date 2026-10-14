@@ -2705,6 +2705,12 @@ spool their key records up front and so do reflect iterator-creation time. Item
 values still resolve through the transaction, so a value read after the listing
 observes staged changes regardless of when the key was enumerated.
 
+Both cloud reverse iterators use `database/plugin/blob/internal/reversekey`
+for their temporary key spools. Each key has a big-endian 32-bit length
+prefix and matching trailer. The shared reader accepts empty and binary keys
+and rejects truncated, oversized, or mismatched frames before allocating the
+payload. Rewinding resets the cursor; closing removes the temporary spool.
+
 A staged zero-length write is a value, not a deletion: `Set` with an empty slice
 reads back as an empty blob inside the transaction. This matters most for a key
 that already exists in the bucket: staging it to an empty value must not make an

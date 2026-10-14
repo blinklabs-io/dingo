@@ -991,32 +991,8 @@ func (d *Database) loadAndFilterHistoricalUtxos(
 			return nil, err
 		}
 	}
-	if !models.RequiresExactAddressFilter(patterns) {
-		return utxos, nil
-	}
-	ret := make([]models.UtxoWithHistory, 0, len(utxos))
-	for i := range utxos {
-		output, err := utxos[i].Decode()
-		if err != nil {
-			return nil, fmt.Errorf(
-				"decode historical UTxO %x#%d for exact address match: %w",
-				utxos[i].TxId,
-				utxos[i].OutputIdx,
-				err,
-			)
-		}
-		match, err := models.MatchesUtxoAddressPatterns(
-			output.Address(),
-			patterns,
-		)
-		if err != nil {
-			return nil, err
-		}
-		if match {
-			ret = append(ret, utxos[i])
-		}
-	}
-	return ret, nil
+	return filterUtxoViews(utxos, patterns, "historical UTxO",
+		func(item *models.UtxoWithHistory) *models.Utxo { return &item.Utxo })
 }
 
 // GetControlledAmountByCredential returns the sum of live UTxO amounts
@@ -1466,32 +1442,38 @@ func filterUtxosByAddressPatterns(
 	utxos []models.Utxo,
 	patterns []models.UtxoAddressPattern,
 ) ([]models.Utxo, error) {
+	return filterUtxoViews(utxos, patterns, "UTxO",
+		func(item *models.Utxo) *models.Utxo { return item })
+}
+
+func filterUtxoViews[T any](
+	utxos []T,
+	patterns []models.UtxoAddressPattern,
+	description string,
+	utxo func(*T) *models.Utxo,
+) ([]T, error) {
 	if !models.RequiresExactAddressFilter(patterns) {
 		return utxos, nil
 	}
-	ret := make([]models.Utxo, 0, len(utxos))
+	result := make([]T, 0, len(utxos))
 	for i := range utxos {
-		output, err := utxos[i].Decode()
+		item := utxo(&utxos[i])
+		output, err := item.Decode()
 		if err != nil {
 			return nil, fmt.Errorf(
-				"decode UTxO %x#%d for exact address match: %w",
-				utxos[i].TxId,
-				utxos[i].OutputIdx,
-				err,
+				"decode %s %x#%d for exact address match: %w",
+				description, item.TxId, item.OutputIdx, err,
 			)
 		}
-		match, err := models.MatchesUtxoAddressPatterns(
-			output.Address(),
-			patterns,
-		)
+		match, err := models.MatchesUtxoAddressPatterns(output.Address(), patterns)
 		if err != nil {
 			return nil, err
 		}
 		if match {
-			ret = append(ret, utxos[i])
+			result = append(result, utxos[i])
 		}
 	}
-	return ret, nil
+	return result, nil
 }
 
 func (d *Database) loadAndFilterOrderedUtxos(
@@ -1504,32 +1486,8 @@ func (d *Database) loadAndFilterOrderedUtxos(
 			return nil, err
 		}
 	}
-	if !models.RequiresExactAddressFilter(patterns) {
-		return utxos, nil
-	}
-	ret := make([]models.UtxoWithOrdering, 0, len(utxos))
-	for i := range utxos {
-		output, err := utxos[i].Decode()
-		if err != nil {
-			return nil, fmt.Errorf(
-				"decode UTxO %x#%d for exact address match: %w",
-				utxos[i].TxId,
-				utxos[i].OutputIdx,
-				err,
-			)
-		}
-		match, err := models.MatchesUtxoAddressPatterns(
-			output.Address(),
-			patterns,
-		)
-		if err != nil {
-			return nil, err
-		}
-		if match {
-			ret = append(ret, utxos[i])
-		}
-	}
-	return ret, nil
+	return filterUtxoViews(utxos, patterns, "UTxO",
+		func(item *models.UtxoWithOrdering) *models.Utxo { return &item.Utxo })
 }
 
 // UtxosByAssets returns UTxOs that contain the specified assets

@@ -690,21 +690,22 @@ batch's tip is never published: no reader observes it, and no concurrent
 mutation can be overwritten by the restore. A `Commit` failure cannot be
 handled that way — `txn.Do` runs `Commit` after the closure's deferred unlocks
 — so the commit-failure path re-acquires both locks, and a mutation can have
-landed in between. Every chain mutation takes `c.mutex` and bumps
-`mutationGeneration`, which is what `batchRestoreIsSafeLocked` tests (it
+landed in between. Block mutations take `c.mutex` and bump
+`mutationGeneration`, including reconciliation that trims or expands the
+ephemeral buffer and changes its common-block anchor without moving the tip.
+An ancestor search stages the new buffer and anchor together; a failed search
+leaves both unchanged. `batchRestoreIsSafeLocked` tests that generation (it
 compares the staged fields too, as a fail-safe for a path that ever forgets to
 bump; the counter is the test that works, because a retry re-committing the
 same blocks reproduces every field exactly).
 
-The queued-header list is one of the staged fields, so a mutation that touches
-only the header queue counts as a chain mutation and bumps the counter as well:
-`addBlockHeader`, `ClearHeaders`, and `rollbackLocked`'s two queued-header
-paths. `addBlockLocked` deletes the matched header and advances the tip under a
-single increment, because one mutation is one bump rather than one per field. A
-header mutation that did not bump would be invisible to both restore guards,
-which would then write a stale queue back over it -- dropping a header the
-chain had accepted, or re-queueing one a rollback had already published a
-`HeaderInvalidationRollback` for.
+The queued-header list has its own `headerMutationGeneration`. Header-only
+changes such as `addBlockHeader`, `ClearHeaders`, and `rollbackLocked`'s queued
+header paths advance that counter independently. Adding or rolling back blocks
+advances both generations. If the block restore is safe, the commit-failure
+path restores the saved headers only when their generation still matches the
+batch's applied state. This preserves independently admitted headers and
+prevents re-queueing a header a rollback already invalidated.
 
 The rollback halves cannot be staged the same way, because they commit
 separately: `rollbackChainAndStateDeferred` truncates the primary chain first
@@ -17360,6 +17361,15 @@ fields are read at call time rather than resolved lazily — and every
 callback in it is a closure over `n` rather than a method value, because
 `n.ouroboros`, `n.chainsyncState`, `n.connManager`, `n.ledgerState` and
 `n.chainSelector` are all replaced by a live rebuild.
+
+`node_components.go` also owns the shared database configuration, connection
+manager and peer governor construction, history-expiry and database-lifecycle
+managers, Midnight server configuration, off-chain metadata configuration,
+and stake-snapshot manager configuration. Startup and live rebuilds call these
+factories; those that use database or ledger state read the instances assigned
+by the caller. The callers retain responsibility for startup order,
+subscriptions, cleanup, and restart error handling. Snapshot hooks are configured
+before the ledger starts so it can capture epoch-boundary snapshots through them.
 
 The config was previously written out as two separate composite literals,
 one per path, and a field present in only one of them was a real bug three
