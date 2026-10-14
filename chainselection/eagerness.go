@@ -62,7 +62,8 @@ func (cs *ChainSelector) EagernessLimit() EagernessLimit {
 }
 
 // computeEagernessLimitLocked derives the limit from the candidate fragments of
-// every live, eligible, non-stale peer that has delivered a header.
+// every live, eligible, non-stale peer that has delivered a header, excluding
+// peers whose advertised tip is wall-clock stale (advertisedTipStaleLocked).
 //
 // The cap is gated on the selection mode: Genesis mode is the syncing state,
 // and Praos mode means the node has caught up, where the cap is off. Dingo has
@@ -109,7 +110,11 @@ func (cs *ChainSelector) computeEagernessLimitLocked(
 		if peerTip.awaitingFirstHeader {
 			continue
 		}
-		if !cs.peerLiveEligibleNonStaleLocked(connId, peerTip) {
+		// A peer advertising a wall-clock-stale tip is never selectable, so
+		// there is no switch to it for the limit to protect; counting it would
+		// pin the limit at k past its fork point while it stays connected.
+		if !cs.peerLiveEligibleNonStaleLocked(connId, peerTip) ||
+			cs.advertisedTipStaleLocked(peerTip) {
 			if include == nil || *include != connId {
 				continue
 			}

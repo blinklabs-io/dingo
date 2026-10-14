@@ -196,6 +196,7 @@ var logPlainConfigFields = []string{
 	"KoiosParity.Strict",
 	"LedgerApplyRowBatchingEnabled",
 	"LedgerCatchupTimeout",
+	"LeiosPersistenceRetentionSlots",
 	"LedgerPrefetchAheadEnabled",
 	"LeiosVoteSigningKeyFile",
 	"LocalStateQueryViewMaxLifetime",
@@ -351,7 +352,7 @@ var providerConfigPlainKeys = []string{
 	// database/plugin/blob/badger
 	"blockcachesize", "indexcachesize", "valuelogfilesize",
 	"memtablesize", "valuethreshold", "gc", "compression",
-	"compressionlevel",
+	"compressionlevel", "gcinterval", "gcdiscardratio",
 	// mempool
 	"capacity", "evictionwatermark", "rejectionwatermark",
 	"revalidationdeltacap",

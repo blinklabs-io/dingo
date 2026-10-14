@@ -1871,9 +1871,12 @@ outlive it:
 - **EventBus subscriptions.** `Close` removes the subscriptions Ouroboros makes
   on its own behalf. A leaked one would be handled once per restore cycle,
   forever.
+- **Leios persistence workers.** `Close` stops the historical-serving writer
+  and optional retention GC before storage closes. An unconfirmed worker drain
+  prevents normal shutdown and live restore from closing storage underneath it.
 
-`Close` is idempotent, so `Run`'s deferred shutdown and an explicit restore
-teardown can both call it.
+`Close` is idempotent, so `Node.Stop` and an explicit restore teardown can both
+call it. Failed startup closes Ouroboros through `Run`'s LIFO rollback stack.
 
 Because the node's callbacks and the connection manager's providers all resolve
 the instance at call time, they follow the replacement automatically and are not
@@ -1928,8 +1931,11 @@ Phase 1: Stop accepting new work
 Phase 2: Drain and close connections
   Mempool, terminal EventBus close bounded by the shutdown deadline
   (concurrent with ConnectionManager), ConnectionManager,
-  Ouroboros (`Ouroboros.Close`: releases acquired LocalStateQuery snapshots;
-  bounded by the shutdown deadline and skipped once a phase-2 wait was abandoned)
+  Ouroboros (`Ouroboros.Close`, the only shutdown close: releases acquired
+  LocalStateQuery snapshots, drains the Leios persistence writer and
+  retention GC, detaches EventBus subscriptions and Prometheus collectors,
+  cancels validation; bounded by the shutdown deadline and skipped once a
+  phase-2 wait was abandoned)
 
 Phase 3: Flush state and close database
   LedgerState, Database
@@ -1939,12 +1945,16 @@ Phase 4: Cleanup resources
 ```
 
 The phase-1 components enumerated by `shutdownPhase1ComponentStops` each
-wait for a goroutine to exit with no deadline of their own. That list is the
-two context-owned workers followed by `quiesceComponentStops`, the set
-`quiesceForLiveLifecycleOp` stops before live restore/truncate closes storage,
-so both paths stop the same storage-facing components. Each wait is routed
-through `stopWithDeadline` with whatever remains of the one shutdown deadline,
-not a fresh timeout per component, so a goroutine that never observes
+wait for a goroutine to exit with no deadline of their own. That list starts
+with the two context-owned workers, continues with `quiesceComponentStops`,
+the set `quiesceForLiveLifecycleOp` stops before live restore/truncate closes
+storage. Ouroboros is not in this list: an NtC client can acquire a
+LocalStateQuery snapshot until its connection drains, so shutdown closes
+Ouroboros once, after phase 2, and an unconfirmed Leios persistence drain
+there skips the phase-3 storage closes like an unfinished phase-1 wait.
+Each wait is routed through `stopWithDeadline` with whatever remains of the
+one shutdown deadline, not a fresh timeout per component, so a goroutine that
+never observes
 `n.cancel()` cannot hold `Node.Stop` past the configured shutdown timeout with
 no observable error. The two workers touch node components only
 under `liveLifecycleMu`, which shutdown already holds, so bounding their wait
@@ -3808,6 +3818,31 @@ For non-certifying ranking blocks the body Leios certificate slot remains nil/pl
 
 With the Leios mini-protocols active (below), the node fetches a referenced endorser block's manifest and its transactions. On every network an endorser block's transactions reach the ledger only through a certified closure, as CIP-0164 ("EBs add transactions to the ledger only when properly certified and included via RB references") and the reference node's `Forker.applyBlock` require. A ranking block without a certificate is an ordinary Praos block and applies no endorser block, including the one its own `DijkstraBlockHeader.LeiosAnnouncement` names. A certifying ranking block (CertRB) takes the endorser block its parent announced; its certificate is verified against the committee and threshold (`LedgerStateConfig.ValidateLeiosCertificate`) before any closure is fetched or applied. A certificate that does not verify, or a CertRB whose parent announced no endorser block, is a verdict on the block, as the reference `LeiosInvalidCertificate` and `LeiosCertificateWithoutAnnouncement` are: the block takes the normal invalid-block path (a `headerValidationError`, which rewinds the chain past it and re-intersects) rather than being retried as an unavailable closure. Only a verdict rejects: `ValidateLeiosCertificate` wraps `ledger.ErrLeiosInvalidCertificate` for a malformed signature or signer bitfield, a keyless signer, a quorum shortfall or an aggregate signature that does not verify (node wiring maps `leios.ErrInvalidCertificate` to it). A certificate the node could not check — an unavailable vote manager, or a failed committee, stake-snapshot, key or parameter read — returns any other error, and the block is retried like any other local failure rather than rewound past; so is a parent whose stored bytes do not decode as a block. The closure transactions are validated in manifest order against the announcing parent state and an ordered UTxO overlay before they are applied ahead of the CertRB's own transactions with full effects. Consumed-input recovery stays disabled after validation, so the UTxO set — and the stake distribution derived from it — remains complete. A CertRB's own optional `LeiosAnnouncement` names a new, not-yet-certified endorser block that only a descendant can certify. Voting validates a closure against the announcing ranking block's state. Pending or invalid cached verdicts cannot supply a closure for application; a cache miss or reload is validated inline before any ledger effects are written. Only deterministic decode or transaction-rule failures become cached invalid verdicts; parent movement, database, snapshot, protocol-parameter, evaluation, cancellation, forecast, and other local failures return the entry to unknown so validation can retry. `ledgerProcessBlock` looks the endorser block up through `LedgerStateConfig.EndorserBlockProvider` (backed by the `ouroboros` package's fetched-EB cache, with a persistent `em`/`et` blob-store reload path on cache miss); when its full transaction set is cached or reloaded, `applyEndorserBlock` (`ledger/leios_apply.go`) decodes the standalone transactions and applies them. Every call site that consults `EndorserBlockProvider` -- this one, `ensureReferencedEndorserBlocks`, `classifyEndorserBlockFetches`'s `cached` check, `leiosBackfiller.spawn`/`awaitFetch`, and `waitForEndorserBlock` -- already knows the slot its own reference requires (`leiosEbRef` pairs them; the endorser block shares its announcing ranking block's slot), so each goes through the shared `endorserBlockAvailableAt` helper, which treats a provider result bound to a different slot as unavailable rather than trusting `ok` alone. Without this, a hash's provider result for an earlier occurrence (cached, or reloaded from the blob store, and content-addressed the same way the same hash can legitimately recur at a different slot -- see "Leios Networking") could silently satisfy a reference for a different, current occurrence, skipping the fetch and applying the wrong closure under a stale slot. `leiosEndorserBlockForApply` returns this expected slot alongside the hash -- the certifying block's resolved parent's slot -- and `ledgerProcessBlock` uses it, not the provider's own reported slot, for `applyEndorserBlock`'s `ebSlot`. Because the prototype produces an endorser block and its ranking block in the same slot and diffuses them together, the ranking block otherwise reaches `ledgerProcessBlock` a few milliseconds ahead of its endorser block and the cache lookup misses; to close this ordering gap, batch delivery is gated upstream by `ensureReferencedEndorserBlocks` (`ledger/leios_apply.go`), which — at the chain tip only (`IsAtTip`) and before the block-processing DB transaction opens — waits up to the Leios certify-by deadline for each referenced endorser block's fetch to complete. That window is `LedgerStateConfig.EndorserBlockWaitSlots`, sourced from the pipeline timing's `CertifyByDeadlineSlots` (the wire mini-protocol specs define no timeout, so the override-able `PipelineTiming` struct is the timing source) and converted to wall-clock via the Shelley slot length. The certify-by deadline is used rather than the shorter `DiffuseWindowSlots` because by the time a ranking block references an endorser block that block has already been certified, and the measured relay tx-offer delay plus fetch time exceeds the diffuse window. During historical catch-up (`IsAtTip` false) the gate instead drives backfill. `ensureReferencedEndorserBlocks` partitions its references: those well behind the chain head are handed to the `leiosBackfiller` (`ledger/leios_apply.go`), which fetches each missing endorser block by point through `LedgerStateConfig.EndorserBlockFetcher` (backed by the `ouroboros` package's `FetchEndorserBlockByPoint`) under a bounded worker pool with an in-flight dedup map keyed by (slot, hash) rather than hash alone -- the same hash can legitimately be required at two different slots concurrently, and a hash-only key let one slot's still-in-flight fetch silently suppress dispatch for the other, then let its skip-fast wait treat the first slot's completion as if it were the second's -- then waits skip-fast — returning as soon as the block is cached or the all-peers fetch completes without caching — so a tail-fetch failure on one endorser block advances the sync rather than stalling it; references at or near the head keep the original certify-by tip wait. Which settled-backlog references the backfiller receives is decided by `classifyEndorserBlockFetches` (`ledger/leios_apply.go`). The settled backlog is certificate-driven: only the endorser block a certifying ranking block certifies is fetched — the one announced by the CertRB's parent (prevHash), resolved from the in-batch announcement index or the block store — and uncertified historical announcements are skipped, since they are never applied and the relay does not reliably serve them. Near the head, current announcements are prefetched in the background for voting and later certification, and a CertRB also fetches its parent announcement, because one block may both certify and announce; only the certified closures the batch applies are waited for (`splitTipWaitByApplyDependency`). The prototype relays serve historical endorser blocks by point on demand when otherwise idle (`MsgLeiosBlockRequest` carrying the block point, then the windowed transaction fetch), so a from-scratch sync backfills the endorser-resident transactions for the chain history it replays rather than only the endorser blocks observed live. Fetched endorser-block manifests and complete transaction lists are also persisted under blob keys `em` + EB hash + slot and `et` + EB hash + slot -- keyed by (hash, slot) together, not hash alone, since the manifest is content-addressed and the same hash can be a live, independently required occurrence at more than one slot at once -- so the same node can later reload either occurrence after the 10-minute in-memory cache TTL and re-serve it to downstream peers. This persistence is asynchronous and off the leios-fetch hot path: `storeLeiosEndorserBlock` queues the write on a single background writer (`ouroboros/leios_persist.go`) that coalesces by (slot, hash), not hash alone — a complete job supersedes a manifest-only one for the same occurrence, eliding the backfiller's duplicate manifest write, while a job for a different occurrence of the same hash persists independently — and does one blob commit per occurrence via `Database.SetLeiosEB`, so the CBOR encode + commit do not serialize against block application during catch-up. It is best-effort (a queue at either of its bounds drops the historical-serving write, logged with the reason) and never affects UTxO resolution, which uses the ledger's own genesis-blob path. The queue is bounded twice, by entry count (`leiosPersistMaxPending`) and by aggregate retained bytes (`leiosPersistMaxQueueBytes`, the same 256 MiB the in-memory endorser-block cache uses, since the queue only holds a copy of what that cache already holds); the count bound alone would have let 4096 entries at the cache's 16 MiB per-entry budget retain tens of gigabytes. Admission is decided before the payload is copied: `enqueueLeiosPersist` measures the caller's own manifest and transaction slices, reserves those bytes and an entry slot under `leiosPersistMu`, and only then clones, so an endorser block the queue is going to drop costs no copy. A reservation is released on every path that does not install a job — an unwinding clone, a stopped writer, a complete job that lands for the same occurrence meanwhile — and an installed job's reservation is released when it is superseded by a replacement or popped by the drain, so the budget is a steady-state limit rather than a one-shot allowance. `startLeiosPersistWriter` resets the accounting with the pending map, so a live Restore/Truncate restart does not carry the old queue's reservations onto the new one; the writer is drained and stopped at shutdown via `StopLeiosPersistWriter`, whose drain wait is bounded by a short timeout so a stuck or slow blob store cannot hang graceful shutdown (the stop is still signalled and new enqueues are rejected once stopping, so no freshly fetched block is silently stranded). `StopLeiosPersistWriter` is a permanent, one-way stop — appropriate for process shutdown, where nothing enqueues again — but the `ouroboros.Ouroboros` object survives a live Restore/Truncate (`node_lifecycle.go`) unlike everything else it depends on, so a plain stop there would drain against the pre-operation database (fine) but then reject every enqueue forever afterward, permanently disabling EB historical persistence for the rest of the process's life. `quiesceForLiveLifecycleOp` instead calls `PauseLeiosPersistWriterForLiveLifecycleOp`, which does the same stop-and-drain against the still-open pre-operation database, then resets the writer's start-once guard so the next enqueue — once `LedgerState` has been reassigned to the reinitialized database — lazily relaunches a fresh writer against it, the same self-healing restart every other `n.ouroboros` field already gets via reassignment rather than reconstruction. This call happens last in quiesce, after connection shutdown. If that shutdown cannot be confirmed, the operation requires a supervised restart instead of replacing storage while traffic can still enqueue. `leiosPersistLifecycleMu` holds a read lock through each enqueue's reservation, copy, installation and signal, and an exclusive lock through writer stop, drain and reset. In-flight enqueues finish before the drain, and no reservation or wakeup crosses writer generations. The writer loop receives its channels as arguments. Because endorser transactions are not part of any chain block — so they have no CBOR offsets — their CBOR is persisted as a standalone blob keyed by the endorser block's `(slot, hash)` with DOFF offsets (mirroring the genesis path), and `SetTransaction`/delta apply is reused so they behave uniformly with all other transactions; their ledger effects are recorded under the *ranking* block's point so a rollback removes them. A certified closure that fails to decode, build or apply leaves its CertRB uncommitted, and once EB storage mutation starts a failure aborts the enclosing block transaction so partial EB effects cannot be committed. With the endorser-resident outputs now present, per-tx UTxO validation is run for the ranking block, including successfully resolved empty endorser blocks. Three behaviors keep this safe and fast: (1) standard profiles validate every ranking-block transaction against the state after any certified closure; an input that no applied transaction produced is a validation error rather than being skipped. Only the Musashi prototype skips ranking-block Dijkstra validation (`SkipDijkstraTxValidation`), trusting the Leios certificate; (2) standard profiles reject validation disagreements, including Plutus evaluation disagreements. Only the Musashi prototype logs and trusts a disagreement rather than rewinding the certified chain, since endorser-block availability and the certificate surface are still evolving in the prototype; (3) rollback recovery (`findPeerForkPath`) resolves fork-path ancestors with `database.BlockByHash` (hash-index only, no sequential blob-scan fallback), since the hashes probed are overwhelmingly unpersisted peer headers and the per-miss scan otherwise made recovery O(fork-depth) blob scans under the ledger lock. Blocks persisted before the hash index was added can still miss this fast lookup unless the operator backfills the index. Because historical endorser blocks are fetched by point, a from-scratch sync's UTxO set includes endorser-resident outputs from the start of the endorser-block era forward, not only from the point the node starts. The remaining dependency is relay availability: the prototype relay's by-point responses are reliable when it is idle but can turn flaky — empty manifests — when one connection also carries blockfetch, so the backfiller fetches across every connected leios-fetch peer (`connmanager.LeiosFetchConnectionIds`). Best-effort announcement prefetches may still advance when no peer fully serves an endorser block, but a certified closure is mandatory: `fetchRequired` retries a bounded number of all-peer sweeps within `leiosBackfillMaxWait`, deduplicates with any `spawn` fetch already in flight for the same (slot, hash), and returns the last fetch error when the closure remains unavailable. The block transaction is not opened until the closure is present; failure restarts the ledger pipeline with an escalating no-progress delay rather than silently omitting certified effects. `FetchEndorserBlockByPoint` (`ouroboros/leios_backfill.go`) tries the connections sequentially, ordered by `leiosBackfillConnOrder`: connections that recently served a fetch first (positive affinity), then other healthy ones, then connections cooling down from a recent failed fetch, and finally connections already diagnosed as protocol-dead. Dead connections are ordered last rather than excluded so a misdiagnosis cannot black out backfill; each partition remains round-robin-rotated per endorser block so concurrent backfills spread across proven peers. A connection already occupied by a tip-driven or backfill fetch is skipped immediately. The remaining total budget is divided across the candidates still to be tried, with `leiosBackfillPerAttemptTimeout` as the per-attempt floor when the total budget permits; the final (or only) relay receives all remaining time so a single-relay topology is not truncated at a fixed per-peer timeout. A slow-but-alive relay that keeps dribbling transactions is abandoned at its deadline (returning the contiguous prefix fetched so far), so the fetch can fail over instead of parking the whole ledger apply loop on one peer. An abandoned attempt's transactions are retained against the cached endorser block (see "Leios Networking"), so the next connection tried resumes from them rather than starting over. Fetch failures are classified before changing connection preference: a busy guard has no cooldown, and other transient failures receive an escalating cooldown. The leios-fetch protocol has no absence reply for a `Block` or `BlockTxs` request, so a peer that cannot serve an endorser block never answers: the attempt ends at its deadline as a transient failure and the fetch moves to the next candidate, and because the unanswered request leaves the client's request slot abandoned, the next request on that connection reports `ErrRequestSlotAbandoned`. Dingo's own leios-fetch server likewise returns an error for an endorser block it cannot serve, which fails that bearer. If gouroboros reports `ErrRequestSlotAbandoned` or protocol shutdown, the connection cannot complete another leios-fetch request; Dingo marks it dead and publishes exactly one `ledger.connection_recycle_requested` after releasing the fetch guard. Node wiring translates that ledger-owned event to `connmanager.connection_recycle_requested`, which closes the bearer so peer governance can dial a replacement. The per-request context from `leiosFetchRequestContext` is the only thing bounding an individual request that receives no response: gouroboros deliberately leaves the leios-fetch `Block`/`BlockTxs` states out of its protocol state timeouts, because a state timeout there fires `SendError` and tears down every mini-protocol on the shared bearer, so `WithTimeout` does not reach them. (The "partial transaction window" stalls that previously appeared even against a single idle relay were a dingo bitmap bit-order bug, not relay flakiness — see the MSB-first request bitmap under "Leios Networking" — so a single healthy relay now serves every endorser block in full and a from-genesis sync builds a complete UTxO set.)
 
+Positive retention values must cover at least the network stability window,
+`ceil(3k/f)` slots, where `k` and the exact active slot coefficient `f` come from
+the ledger's genesis parameters. Startup rejects a smaller value or unknown
+parameters before constructing the persistence workers.
+
+Leios historical-serving records are kept indefinitely unless an operator sets
+`leiosPersistenceRetentionSlots` (or
+`DINGO_LEIOS_PERSISTENCE_RETENTION_SLOTS`) to a positive value. The separate
+GC worker prunes `em`/`et` manifests and transaction bodies strictly older
+than the highest persisted Leios EB slot minus that window, first after startup
+restores the watermark and then hourly. It uses the blob namespace only;
+ordinary ledger block history and already-applied UTxO effects are unaffected.
+The Ouroboros provider also reloads EBs from these keys on a cache miss, so a
+later rollback/replay that needs pruned data must refetch it from a Leios peer;
+downstream requests outside the configured window have the same peer
+dependency. Hourly sweeps list manifests to find the highest persisted slot,
+then scan the shared Leios prefix for deletion candidates. On object stores
+this means two paginated listings plus per-key deletes, so the cost is opt-in.
+The GC worker does not share the persistence writer's queue and cannot stall
+its write drain. Live Restore/Truncate stops
+and joins both workers before storage replacement; if either worker cannot
+stop within the bounded drain window, the live operation does not proceed
+against the old database. Partial cloud-store deletes are safe to retry on the
+next sweep.
+
 When a certified endorser-block fetch has no connected leios-fetch peer, or
 startup replay reaches it before Ouroboros networking is initialized, the fetch
 is retried without increasing the deterministic-halt count. The count is
@@ -4561,7 +4596,10 @@ The `LedgerView` interface provides query access to ledger state:
   final slot of a pending action's inclusive expiry epoch so ancestry,
   hard-fork succession, proposal expiry, and security-group voting use the
   persisted Dingo state.
-- `IsVrfKeyInUse` reads `epochStartSlot`, pinned on the view at every real
+- `IsVrfKeyInUse` reserves both the epoch-effective VRF key and the latest
+  deferred key, querying the effective owner first and falling back to
+  `IsFutureVrfKeyInUse`. A superseded deferred key becomes available again.
+  Both lookups read `epochStartSlot`, pinned on the view at every real
   construction site (`NewView`, `ledgerProcessBlock`, `validateTxCore`,
   `ValidateTxWithOverlay`, `EvaluateTx`) from the same snapshot that pins
   `committeeEpoch`/`pp` alongside it -- the same `horizonAnchorSlot`
@@ -5211,8 +5249,8 @@ moves selection to the next:
   tip, which may send nothing for many slots. A peer with at least
   `headerMismatchResyncThreshold` blocks left before its advertised tip keeps
   streaming headers, and a cursor past the local tip then shows up in the
-  header handler as consecutive mismatches, which request a resync from
-  headers actually received. The advertised tip is untrusted, but it only
+  header handler as that connection's consecutive mismatches, which request
+  a resync from headers actually received. The advertised tip is untrusted, but it only
   withholds a close; overstating it cannot force one. A fallback connection,
   which the switch event carries no advertised tip for, is measured against
   the chain selector's sync target instead. That target never exceeds the
@@ -5548,6 +5586,44 @@ held. If a candidate fork path falls outside the retained suffix, recovery
 fails closed to a fresh
 ChainSync intersection instead of making a density or rollback decision from
 an incomplete path.
+
+A peer that has delivered the whole of a short abandoned fork can lead on
+observed density and delivered frontier against peers still streaming the
+longer chain. In Genesis mode the selector therefore treats a peer as stale
+when its advertised tip slot is more than one Genesis window older than the
+wall-clock slot (`advertisedTipStaleLocked`). A stale peer is not selectable,
+even when it is the only candidate (including in the selection that follows a
+disconnect), so selection waits for a fresher peer instead; it also drops out of
+the exit horizon, and its frontier is ignored when deciding whether other peers
+are behind (`bestKnownBlockNumber`) and when computing the Limit on Eagerness.
+Its headers are also not applied to the
+ledger (`ChainSelector.ShouldApplyIngress`, the apply gate in the roll-forward
+and roll-backward handlers): ingress is open to every eligible peer, not only
+the selected one, so headers admitted from a stale peer would stay in the shared
+header queue after selection moved to honest peers and make their headers look
+like a persistent fork. The gate reads the peer's tracked tip, so node
+composition observes tip and rollback updates synchronously, before the gate
+runs, whenever Genesis selection is active
+(`ChainSelector.GenesisSelectionState`); the rule can decide only in Genesis
+mode, so this is a superset of when it applies. An asynchronous observation
+would let a new stale peer's first headers through. A peer that remains
+unknown because that synchronous observation was rejected is denied by the
+gate. The bound is the wall clock, not a count of advertised tips: those are
+unverified, and colluding connections cannot make an honest peer's live tip
+older than the wall clock. The wall-clock slot comes from
+`ChainSelectorConfig.WallClockSlot`, which node composition wires to the
+current `LedgerState.CurrentSlot` through an atomic that follows live
+Restore/Truncate and is withdrawn before live-lifecycle or startup-rollback
+cleanup closes the ledger; the rule is inactive while that hook is unset or reports no
+slot, and outside Genesis mode. It deliberately uses the extrapolated
+`CurrentSlot` rather than `WallClockSlotFromConfirmedHistory`: during catch-up
+the wall clock lies past the confirmed history's forecast horizon, which is
+exactly when the rule is needed. The hook reports no slot while the applied
+ledger is still in Byron, so the Genesis stale-tip rule becomes active only
+after the applied ledger crosses into Shelley. The trade-off is that if
+the honest network stalls for longer than one Genesis window, a syncing
+Genesis-mode node waits rather than following a chain that old; a stall that
+long already violates the chain-growth assumption Genesis selection rests on.
 
 **Per-peer candidate chain fragments** (`chainselection.CandidateFragment`)
 materialize each peer's delivered-header history as a first-class value —
@@ -5888,7 +5964,10 @@ bucket.
 intersection of all candidate fragments, so a syncing node cannot commit to one
 peer's chain so far that a slower honest candidate can no longer win. The limit
 is computed from the candidate fragments of live, eligible, non-stale peers
-that have delivered a header, and is gated on the selection mode, which is
+that have delivered a header, excluding peers the Genesis stale-tip rule
+treats as stale (`advertisedTipStaleLocked`): such a peer is never selectable,
+so its fork needs no protection, and counting it would hold every other peer at
+`k` past its fork point while it stays connected. The limit is gated on the selection mode, which is
 Dingo's only sync-state signal (there is no Genesis State Machine equivalent):
 
 - Genesis mode (syncing): the cap is active. Before any candidate has
@@ -10130,7 +10209,12 @@ reserves a metadata read connection before briefly taking the commit barriers,
 keeping an exhausted-pool wait outside them. Admission remains held for the
 snapshot's lifetime and is capped at one below the provider's read-pool size,
 so client-paced `/matches` streams cannot consume the connection destructive
-rollback needs for operational reads.
+rollback needs for operational reads. The server sets no overall write
+timeout, because a fixed deadline would truncate a large stream; instead a
+30-second write deadline is re-armed before every response write. A client that
+stops reading, or reads so slowly that a single write takes longer than the
+deadline, fails its stream and releases its snapshot; a stream whose every
+write completes within the deadline is never cut off, however long it runs.
 
 Match results stream in 512-row pages through an ordering cursor, hydrate
 spending details only for the current page, check request cancellation between
