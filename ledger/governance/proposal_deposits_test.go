@@ -221,6 +221,102 @@ func TestSPOVotingPowerIncludesProposalDepositsWithoutChangingMarkStake(
 	assert.Equal(t, uint64(100), persistedPoolStake)
 }
 
+func TestSPOVotingPowerUsesSnapshotDelegationAfterPoolReap(t *testing.T) {
+	t.Parallel()
+
+	db, store := newTallyTestDB(t)
+	retiringPool := testBytes(28, 0x70)
+	otherPool := testBytes(28, 0x71)
+	seedPoolWithStake(t, store, retiringPool, testBytes(28, 0x72), 100, 6)
+	seedPoolWithStake(t, store, otherPool, testBytes(28, 0x73), 100, 6)
+
+	returnStakeCred := testBytes(28, 0x74)
+	rewardAccount := &models.Account{
+		StakingKey: returnStakeCred,
+		Pool:       retiringPool,
+		AddedSlot:  1,
+		Active:     true,
+	}
+	require.NoError(t, store.ImportAccount(rewardAccount, nil))
+	returnAddr, err := lcommon.NewAddressFromParts(
+		uint8(lcommon.AddressTypeNoneKey),
+		lcommon.AddressNetworkTestnet,
+		nil,
+		returnStakeCred,
+	)
+	require.NoError(t, err)
+	returnAddrBytes, err := returnAddr.Bytes()
+	require.NoError(t, err)
+	require.NoError(t, db.SetGovernanceProposal(
+		context.Background(),
+		&models.GovernanceProposal{
+			TxHash:        testBytes(32, 0x75),
+			ActionIndex:   0,
+			ActionType:    uint8(lcommon.GovActionTypeUpdateCommittee),
+			ProposedEpoch: 5,
+			ExpiresEpoch:  5,
+			Deposit:       100,
+			ReturnAddress: returnAddrBytes,
+			AnchorURL:     "https://example.invalid/pool-reap-deposit",
+			AnchorHash:    testBytes(32, 0x76),
+			AddedSlot:     1,
+		},
+		nil,
+	))
+
+	state, err := LoadSPOVotingState(db, nil, 6)
+	require.NoError(t, err)
+	for _, row := range state.Dist {
+		row.CapturedSlot = 9
+	}
+	require.NoError(t, store.ClearDelegationsToRetiredPool(
+		retiringPool, 10, nil,
+	))
+
+	tally := &ProposalTally{
+		ActionType:     uint8(lcommon.GovActionTypeUpdateCommittee),
+		DRepYesStake:   100,
+		DRepTotalStake: 100,
+	}
+	proposalEpoch := uint64(5)
+	require.NoError(t, tallySPOVotes(
+		context.Background(),
+		&TallyContext{
+			DB:                  db,
+			StakeEpoch:          6,
+			CurrentEpoch:        6,
+			ActiveProposalEpoch: &proposalEpoch,
+			SPOState:            state,
+		},
+		[]*models.GovernanceVote{{
+			VoterType:       models.VoterTypeSPO,
+			VoterCredential: retiringPool,
+			Vote:            models.VoteYes,
+		}},
+		tally,
+	))
+
+	assert.Equal(t, uint64(200), tally.SPOYesStake)
+	assert.Equal(t, uint64(300), tally.SPOTotalStake)
+	assert.Equal(t, big.NewRat(2, 3), tally.SPOYesRatio())
+
+	pparams := conwayPParamsFixture(10)
+	pparams.DRepVotingThresholds.CommitteeNoConfidence = newRat(60, 100)
+	pparams.PoolVotingThresholds.CommitteeNoConfidence = newRat(60, 100)
+	decision := ShouldRatify(RatifyInputs{
+		Tally:   tally,
+		PParams: pparams,
+		GovAction: &lcommon.UpdateCommitteeGovAction{
+			Type:       uint(lcommon.GovActionTypeUpdateCommittee),
+			CredEpochs: map[*lcommon.Credential]uint64{},
+		},
+		CurrentEpoch:    6,
+		CommitteeAbsent: true,
+		MajorVersion:    10,
+	})
+	assert.True(t, decision.Ratified)
+}
+
 func TestProcessEpochRatifiesWithMultipleKeyAndScriptProposalDeposits(
 	t *testing.T,
 ) {

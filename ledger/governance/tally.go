@@ -606,7 +606,32 @@ func includeActiveProposalDepositsInSPOVotingState(
 		state.proposalDepositsIncluded = true
 		return nil
 	}
-	accounts, err := accountsForProposalDeposits(ctx, db, txn, deposits)
+	// Resolve each deposit's pool delegation at the Mark capture slot. POOLREAP
+	// clears live delegations before RATIFY, while the Mark distribution still
+	// includes pools retiring at this boundary.
+	var capturedSlot uint64
+	var capturedSlotSet bool
+	for _, row := range state.Dist {
+		if row == nil {
+			continue
+		}
+		if capturedSlotSet && capturedSlot != row.CapturedSlot {
+			return fmt.Errorf(
+				"SPO voting distribution has inconsistent capture slots: %d and %d",
+				capturedSlot,
+				row.CapturedSlot,
+			)
+		}
+		capturedSlot = row.CapturedSlot
+		capturedSlotSet = true
+	}
+	if !capturedSlotSet {
+		state.proposalDepositsIncluded = true
+		return nil
+	}
+	accounts, err := accountsForProposalDepositsAtSlot(
+		ctx, db, txn, deposits, capturedSlot,
+	)
 	if err != nil {
 		return err
 	}
