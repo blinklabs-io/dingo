@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -180,7 +181,54 @@ func TestReportUnrecoverableRollbackSurfacesOperatorSignal(t *testing.T) {
 
 func TestReportUnrecoverableRollbackClearsEvidenceAfterLocalProgress(t *testing.T) {
 	t.Parallel()
+	for _, reason := range []string{
+		event.ChainsyncResyncReasonRollbackNotFound,
+		event.ChainsyncResyncReasonRollbackLoop,
+		event.ChainsyncResyncReasonRollbackExceedsK,
+		event.ChainsyncResyncReasonRollbackExceedsMithril,
+		event.ChainsyncResyncReasonRollbackBelowUtxoPruneFloor,
+	} {
+		t.Run(reason, func(t *testing.T) {
+			t.Parallel()
+			fixture := newChainsyncRollbackFixture(t)
+			key := unrecoverableRollbackKey(fixture.ancestorTip.Point)
+			fixture.ls.unrecoverableRollbacks = map[string]unrecoverableRollbackRecord{
+				key: {
+					count:    unrecoverableRollbackThreshold - 1,
+					lastSeen: time.Now(),
+					localTip: fixture.currentTip.Point,
+				},
+			}
+			nextBlock := chain.RawBlock{
+				Slot:        fixture.currentTip.Point.Slot + 1,
+				Hash:        testHashBytes("next-canonical-block"),
+				BlockNumber: fixture.currentTip.BlockNumber + 1,
+				Type:        1,
+				PrevHash:    fixture.currentTip.Point.Hash,
+				Cbor:        []byte{0x80},
+			}
+			require.NoError(t, fixture.ls.chain.AddRawBlocks(
+				t.Context(),
+				[]chain.RawBlock{nextBlock},
+			))
 
+			fixture.ls.reportUnrecoverableRollbackIfStuck(
+				fixture.ancestorTip.Point,
+				reason,
+				fixture.connId,
+			)
+			require.Zero(
+				t,
+				promtestutil.ToFloat64(fixture.ls.metrics.unrecoverableRollbacks),
+			)
+			_, tracked := fixture.ls.unrecoverableRollbacks[key]
+			require.False(t, tracked)
+		})
+	}
+}
+
+func TestReportUnrecoverableRollbackWaitsForStalledPrimaryChain(t *testing.T) {
+	t.Parallel()
 	fixture := newChainsyncRollbackFixture(t)
 	key := unrecoverableRollbackKey(fixture.ancestorTip.Point)
 	fixture.ls.unrecoverableRollbacks = map[string]unrecoverableRollbackRecord{
@@ -191,56 +239,45 @@ func TestReportUnrecoverableRollbackClearsEvidenceAfterLocalProgress(t *testing.
 			localTip:  fixture.currentTip.Point,
 		},
 	}
-	nextBlock := chain.RawBlock{
-		Slot:        fixture.currentTip.Point.Slot + 1,
-		Hash:        testHashBytes("next-canonical-block"),
-		BlockNumber: fixture.currentTip.BlockNumber + 1,
-		Type:        1,
-		PrevHash:    fixture.currentTip.Point.Hash,
-		Cbor:        []byte{0x80},
+	lookups := 0
+	fixture.ls.lookupBlockByHash = func(hash []byte) (models.Block, error) {
+		lookups++
+		return database.BlockByHash(t.Context(), fixture.ls.db, hash)
 	}
-	require.NoError(t, fixture.ls.chain.AddRawBlocks(
-		t.Context(),
-		[]chain.RawBlock{nextBlock},
-	))
+	onPrimary, err := fixture.ls.historicalPointOnPrimaryChain(
+		fixture.ancestorTip.Point,
+		fixture.ls.chain.HeaderTip(),
+	)
+	require.NoError(t, err)
+	require.True(t, onPrimary)
+	lookups = 0
 
+	for range unrecoverableRollbackThreshold + 2 {
+		fixture.ls.reportUnrecoverableRollbackIfStuck(
+			fixture.ancestorTip.Point,
+			event.ChainsyncResyncReasonRollbackLoop,
+			fixture.connId,
+		)
+	}
+	require.Zero(t, promtestutil.ToFloat64(fixture.ls.metrics.unrecoverableRollbacks))
+	require.Equal(t, 1, lookups, "primary-chain membership is cached for this tip")
+	require.True(t, fixture.ls.unrecoverableRollbacks[key].primaryChainChecked)
+	require.True(t, fixture.ls.unrecoverableRollbacks[key].onPrimaryChain)
+
+	fixture.ls.unrecoverableRollbacks[key] = unrecoverableRollbackRecord{
+		count:               unrecoverableRollbackThreshold - 1,
+		firstSeen:           time.Now().Add(-unrecoverableRollbackWindow),
+		lastSeen:            time.Now(),
+		localTip:            fixture.currentTip.Point,
+		primaryChainChecked: true,
+		onPrimaryChain:      true,
+	}
 	fixture.ls.reportUnrecoverableRollbackIfStuck(
 		fixture.ancestorTip.Point,
-		event.ChainsyncResyncReasonRollbackNotFound,
+		event.ChainsyncResyncReasonRollbackLoop,
 		fixture.connId,
 	)
-	require.Zero(
-		t,
-		promtestutil.ToFloat64(fixture.ls.metrics.unrecoverableRollbacks),
-	)
-	_, tracked := fixture.ls.unrecoverableRollbacks[key]
-	require.False(t, tracked)
-}
-
-func TestReportUnrecoverableRollbackEscalatesStalledPrimaryChain(t *testing.T) {
-	t.Parallel()
-
-	fixture := newChainsyncRollbackFixture(t)
-	key := unrecoverableRollbackKey(fixture.ancestorTip.Point)
-	fixture.ls.unrecoverableRollbacks = map[string]unrecoverableRollbackRecord{
-		key: {
-			count:     unrecoverableRollbackThreshold - 1,
-			firstSeen: time.Now().Add(-unrecoverableRollbackWindow),
-			lastSeen:  time.Now(),
-			localTip:  fixture.currentTip.Point,
-		},
-	}
-
-	fixture.ls.reportUnrecoverableRollbackIfStuck(
-		fixture.ancestorTip.Point,
-		event.ChainsyncResyncReasonRollbackBelowUtxoPruneFloor,
-		fixture.connId,
-	)
-	require.Equal(
-		t,
-		float64(1),
-		promtestutil.ToFloat64(fixture.ls.metrics.unrecoverableRollbacks),
-	)
+	require.Equal(t, float64(1), promtestutil.ToFloat64(fixture.ls.metrics.unrecoverableRollbacks))
 }
 
 func TestReportUnrecoverableRollbackRequiresAuthoritativeChain(t *testing.T) {
@@ -301,6 +338,26 @@ func TestReportProtocolConstrainedRollbackEscalatesImmediately(t *testing.T) {
 			fixture := newChainsyncRollbackFixture(t)
 			for range unrecoverableRollbackThreshold {
 				fixture.ls.reportUnrecoverableRollbackIfStuck(fixture.ancestorTip.Point, reason, fixture.connId)
+			}
+			require.Equal(t, float64(1), promtestutil.ToFloat64(fixture.ls.metrics.unrecoverableRollbacks))
+		})
+	}
+}
+
+func TestReportProtocolConstrainedRollbackAtOrigin(t *testing.T) {
+	t.Parallel()
+	for _, reason := range []string{
+		event.ChainsyncResyncReasonRollbackExceedsK,
+		event.ChainsyncResyncReasonRollbackExceedsMithril,
+		event.ChainsyncResyncReasonRollbackBelowUtxoPruneFloor,
+	} {
+		t.Run(reason, func(t *testing.T) {
+			t.Parallel()
+			fixture := newChainsyncRollbackFixture(t)
+			for range unrecoverableRollbackThreshold {
+				fixture.ls.reportUnrecoverableRollbackIfStuck(
+					ocommon.Point{}, reason, fixture.connId,
+				)
 			}
 			require.Equal(t, float64(1), promtestutil.ToFloat64(fixture.ls.metrics.unrecoverableRollbacks))
 		})
