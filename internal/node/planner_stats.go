@@ -78,7 +78,7 @@ func FinalizeBackfillPlannerStats(
 				optimizeErr,
 			)
 		}
-		optimized = result.Supported && !result.Skipped
+		optimized = result.Supported && !result.Skipped && result.Changed
 	}
 	if !optimized {
 		if contextual, ok := updater.(metadata.ContextPlannerStatsUpdater); ok {
