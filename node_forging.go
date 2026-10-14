@@ -983,6 +983,7 @@ func (n *Node) initBlockForger(
 	}
 	blockForged := n.ledgerState.RecordForgedBlock
 	if n.ouroboros() != nil {
+		//nolint:contextcheck // This observer publishes node-lifetime Leios work; Ouroboros drains its GC worker before storage replacement or Close.
 		blockForged = func(block gledger.Block, blockCbor []byte, latency time.Duration) {
 			n.ledgerState.RecordForgedBlock(block, blockCbor, latency)
 			if header, ok := block.Header().(*gdijkstra.DijkstraBlockHeader); ok {

@@ -2738,6 +2738,12 @@ spool their key records up front and so do reflect iterator-creation time. Item
 values still resolve through the transaction, so a value read after the listing
 observes staged changes regardless of when the key was enumerated.
 
+Both cloud reverse iterators use `database/plugin/blob/internal/reversekey`
+for their temporary key spools. Each key has a big-endian 32-bit length
+prefix and matching trailer. The shared reader accepts empty and binary keys
+and rejects truncated, oversized, or mismatched frames before allocating the
+payload. Rewinding resets the cursor; closing removes the temporary spool.
+
 A staged zero-length write is a value, not a deletion: `Set` with an empty slice
 reads back as an empty blob inside the transaction. This matters most for a key
 that already exists in the bucket: staging it to an empty value must not make an
@@ -2834,6 +2840,32 @@ representation is inlined into the other.
 | `dh` + `<slot>:<hash hex>` (ASCII) | A single byte; presence is the signal | Deferred-header validation in `ledger`: written by `Database.SetDeferredHeaderMarker` when blockfetch defers stateful header checks to ledger apply, before the block is added to the chain. It lives in the blob store rather than `sync_state` because the blockfetch handler writes it, and a `sync_state` write needs the single SQLite write connection that a block-apply transaction (an epoch-rollover snapshot, a hard-fork boundary transition) holds for its whole length. Apply deletes it through `Txn.AfterCommit`, so a crash between the blob and metadata commits leaves a harmless stale marker rather than an unapplied block with no marker. Repopulated into the in-memory deferred set at startup alongside any legacy `sync_state` rows. |
 | `metadata_commit_timestamp` | Big-endian timestamp integer bytes | Commit consistency check with SQL `commit_timestamp` |
 | `nodesettings/storeid` | Opaque `uuid.NewString()` bytes, minted on first use and never overwritten thereafter | This blob store's identity for the `blob_store_id` node settings gate (`Database.blobStoreID`), compared only for equality against the value latched in `node_settings_gate` |
+
+Positive retention values must cover at least the network stability window,
+`ceil(3k/f)` slots, where `k` and the exact active slot coefficient `f` come from
+the ledger's genesis parameters. Startup rejects a smaller value or unknown
+parameters before constructing the persistence workers.
+
+Leios historical-serving persistence is kept indefinitely by default. A positive
+`leiosPersistenceRetentionSlots` setting (environment variable
+`DINGO_LEIOS_PERSISTENCE_RETENTION_SLOTS`) opts into pruning records older than
+`max persisted Leios EB slot - retention slots`; the cutoff slot itself is
+retained. The asynchronous GC scans the shared `e` prefix, deletes `em` and
+`et` keys one per transaction, and runs after startup restores the Leios slot
+watermark and then hourly. It also removes legacy hash-only records when their
+embedded slot is older than the cutoff, plus unpaired legacy transaction
+records. A legacy manifest shorter than its 8-byte slot prefix has no
+trustworthy slot, so it and its paired transaction record are preserved.
+Pruning is idempotent across partial cloud-store commits. These keys support
+historical serving after the in-memory cache expires and the Ouroboros
+provider's cache-miss reload path. The GC does not delete ordinary ledger
+blocks, UTxOs, or already-applied Leios effects. A
+later rollback/replay that needs a pruned endorser block must refetch it from a
+Leios peer; downstream requests outside the configured window have the same
+peer dependency. Hourly sweeps list manifests to find the highest persisted
+slot, then list the shared Leios prefix to select deletion candidates. On S3
+and GCS this means two paginated listings plus per-key delete requests, so
+retention remains opt-in.
 
 `Database.BlockPointByIndex` resolves a `bi` entry by parsing its `bp` value
 directly into the canonical slot and hash. It deliberately does not load the

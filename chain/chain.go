@@ -59,7 +59,8 @@ type Chain struct {
 	currentTip    ochainsync.Tip
 	tipBlockIndex uint64
 	// mutationGeneration counts mutations of the in-memory block state:
-	// currentTip, tipBlockIndex, and the ephemeral block buffer.
+	// currentTip, tipBlockIndex, the ephemeral block buffer, and its common
+	// block anchor.
 	// headerMutationGeneration independently counts queued-header mutations.
 	// Keeping the counters separate lets atOriginAfterMutation distinguish a
 	// fresh chain that has only queued headers while still preventing either
@@ -1280,17 +1281,9 @@ func (c *Chain) AddBlocks(
 				return txnErr
 			}
 			var (
-				savedTip                ochainsync.Tip
-				savedTipBlockIndex      uint64
-				savedGeneration         uint64
-				savedHeaderGeneration   uint64
-				savedHeaders            []queuedHeader
-				savedBlocks             []ocommon.Point
-				batchApplied            bool
-				appliedTip              ochainsync.Tip
-				appliedTipBlockIndex    uint64
-				appliedGeneration       uint64
-				appliedHeaderGeneration uint64
+				saved        chainBatchSnapshot
+				applied      chainBatchPosition
+				batchApplied bool
 			)
 			err := txn.Do(func(txn *database.Txn) error {
 				c.mutex.Lock()
@@ -1300,14 +1293,7 @@ func (c *Chain) AddBlocks(
 				if err := c.reconcile(ctx); err != nil {
 					return fmt.Errorf("reconcile chain: %w", err)
 				}
-				savedTip = c.currentTip
-				savedTipBlockIndex = c.tipBlockIndex
-				savedGeneration = c.mutationGeneration
-				savedHeaderGeneration = c.headerMutationGeneration
-				savedHeaders = slices.Clone(c.headers)
-				if !c.persistent {
-					savedBlocks = slices.Clone(c.blocks)
-				}
+				saved = c.batchSnapshotLocked()
 				for _, tmpBlock := range blocks[batchOffset : batchOffset+batchSize] {
 					var evt event.Event
 					err := ctx.Err()
@@ -1321,14 +1307,8 @@ func (c *Chain) AddBlocks(
 						)
 					}
 					if err != nil {
-						c.currentTip = savedTip
-						c.tipBlockIndex = savedTipBlockIndex
-						c.mutationGeneration = savedGeneration
-						c.headerMutationGeneration = savedHeaderGeneration
-						c.setHeadersLocked(savedHeaders)
-						if !c.persistent {
-							c.blocks = savedBlocks
-						}
+						c.restoreBatchBlocksLocked(saved)
+						c.restoreBatchHeadersLocked(saved)
 						return err
 					}
 					if evt.Type != "" {
@@ -1336,48 +1316,12 @@ func (c *Chain) AddBlocks(
 					}
 				}
 				batchApplied = true
-				appliedTip = c.currentTip
-				appliedTipBlockIndex = c.tipBlockIndex
-				appliedGeneration = c.mutationGeneration
-				appliedHeaderGeneration = c.headerMutationGeneration
+				applied = c.batchPositionLocked()
 				return ctx.Err()
 			})
 			if err != nil && batchApplied {
-				c.mutex.Lock()
-				c.manager.mutex.Lock()
-				if c.batchRestoreIsSafeLocked(
-					appliedTip,
-					appliedTipBlockIndex,
-					appliedGeneration,
-				) {
-					c.currentTip = savedTip
-					c.tipBlockIndex = savedTipBlockIndex
-					c.mutationGeneration = savedGeneration
-					if c.headerMutationGeneration == appliedHeaderGeneration {
-						c.headerMutationGeneration = savedHeaderGeneration
-						c.setHeadersLocked(savedHeaders)
-					}
-					if !c.persistent {
-						c.blocks = savedBlocks
-					}
-				} else {
-					slog.Default().Error(
-						"skipped in-memory restore after block batch commit failure: chain moved under the batch",
-						"component", "chain",
-						"chain_id", c.id,
-						"applied_tip_block_index", appliedTipBlockIndex,
-						"tip_block_index", c.tipBlockIndex,
-						"applied_generation", appliedGeneration,
-						"mutation_generation", c.mutationGeneration,
-						"applied_tip_slot", appliedTip.Point.Slot,
-						"applied_tip_hash", hex.EncodeToString(appliedTip.Point.Hash),
-						"tip_slot", c.currentTip.Point.Slot,
-						"tip_hash", hex.EncodeToString(c.currentTip.Point.Hash),
-						"error", err,
-					)
-				}
-				c.manager.mutex.Unlock()
-				c.mutex.Unlock()
+				c.restoreFailedBatch(saved, applied, err,
+					"skipped in-memory restore after block batch commit failure: chain moved under the batch")
 			}
 			return err
 		}()
@@ -1622,17 +1566,9 @@ func (c *Chain) addRawBlocks(
 			// leaving the in-memory chain advanced. Capture the
 			// snapshot here so we can also restore on Commit failure.
 			var (
-				savedTip                ochainsync.Tip
-				savedTipBlockIndex      uint64
-				savedGeneration         uint64
-				savedHeaderGeneration   uint64
-				savedHeaders            []queuedHeader
-				savedBlocks             []ocommon.Point
-				batchApplied            bool
-				appliedTip              ochainsync.Tip
-				appliedTipBlockIndex    uint64
-				appliedGeneration       uint64
-				appliedHeaderGeneration uint64
+				saved        chainBatchSnapshot
+				applied      chainBatchPosition
+				batchApplied bool
 			)
 			err := txn.Do(func(txn *database.Txn) error {
 				batch := blocks[batchOffset : batchOffset+batchSize]
@@ -1643,14 +1579,7 @@ func (c *Chain) addRawBlocks(
 				if err := c.reconcile(ctx); err != nil {
 					return fmt.Errorf("reconcile: %w", err)
 				}
-				savedTip = c.currentTip
-				savedTipBlockIndex = c.tipBlockIndex
-				savedGeneration = c.mutationGeneration
-				savedHeaderGeneration = c.headerMutationGeneration
-				savedHeaders = slices.Clone(c.headers)
-				if !c.persistent {
-					savedBlocks = slices.Clone(c.blocks)
-				}
+				saved = c.batchSnapshotLocked()
 				for _, rb := range batch {
 					var evt event.Event
 					err := ctx.Err()
@@ -1662,14 +1591,8 @@ func (c *Chain) addRawBlocks(
 						)
 					}
 					if err != nil {
-						c.currentTip = savedTip
-						c.tipBlockIndex = savedTipBlockIndex
-						c.mutationGeneration = savedGeneration
-						c.headerMutationGeneration = savedHeaderGeneration
-						c.setHeadersLocked(savedHeaders)
-						if !c.persistent {
-							c.blocks = savedBlocks
-						}
+						c.restoreBatchBlocksLocked(saved)
+						c.restoreBatchHeadersLocked(saved)
 						return err
 					}
 					if evt.Type != "" {
@@ -1681,68 +1604,13 @@ func (c *Chain) addRawBlocks(
 				// Record what this batch leaves behind so the Commit-failure
 				// path below can tell its own state from someone else's.
 				batchApplied = true
-				appliedTip = c.currentTip
-				appliedTipBlockIndex = c.tipBlockIndex
-				appliedGeneration = c.mutationGeneration
-				appliedHeaderGeneration = c.headerMutationGeneration
+				applied = c.batchPositionLocked()
 				return ctx.Err()
 			})
 			if err != nil {
-				// Cover the Commit-failure path: closure returned nil
-				// but txn.Do's later Commit failed, so memory still
-				// reflects the post-batch tip while the DB rolled
-				// back. Re-acquire the locks and restore -- but only
-				// while the chain still shows exactly what this batch
-				// left behind.
-				//
-				// The batch-commit barrier remains held while this recovery runs, so
-				// another chain mutation cannot move the chain between the failed
-				// commit and the snapshot check. A closure-internal error already
-				// restored under the chain locks, so there is nothing left to do for
-				// it here either.
 				if batchApplied {
-					c.mutex.Lock()
-					c.manager.mutex.Lock()
-					if c.batchRestoreIsSafeLocked(
-						appliedTip,
-						appliedTipBlockIndex,
-						appliedGeneration,
-					) {
-						c.currentTip = savedTip
-						c.tipBlockIndex = savedTipBlockIndex
-						c.mutationGeneration = savedGeneration
-						if c.headerMutationGeneration == appliedHeaderGeneration {
-							c.headerMutationGeneration = savedHeaderGeneration
-							c.setHeadersLocked(savedHeaders)
-						}
-						if !c.persistent {
-							c.blocks = savedBlocks
-						}
-					} else {
-						// Skipping the restore is the correct choice -- writing
-						// the snapshot over whatever moved the chain is the
-						// divergence this guard exists to prevent -- but it
-						// leaves the in-memory chain holding a batch the commit
-						// discarded. Record it, so the missing block or inflated
-						// fork depth it later surfaces as is attributable to this
-						// commit failure instead of appearing without a cause.
-						slog.Default().Error(
-							"skipped in-memory restore after batch commit failure: chain moved under the batch",
-							"component", "chain",
-							"chain_id", c.id,
-							"applied_tip_block_index", appliedTipBlockIndex,
-							"tip_block_index", c.tipBlockIndex,
-							"applied_generation", appliedGeneration,
-							"mutation_generation", c.mutationGeneration,
-							"applied_tip_slot", appliedTip.Point.Slot,
-							"applied_tip_hash", hex.EncodeToString(appliedTip.Point.Hash),
-							"tip_slot", c.currentTip.Point.Slot,
-							"tip_hash", hex.EncodeToString(c.currentTip.Point.Hash),
-							"error", err,
-						)
-					}
-					c.manager.mutex.Unlock()
-					c.mutex.Unlock()
+					c.restoreFailedBatch(saved, applied, err,
+						"skipped in-memory restore after batch commit failure: chain moved under the batch")
 				}
 				return fmt.Errorf("add raw block batch: %w", err)
 			}
@@ -3387,6 +3255,7 @@ func (c *Chain) reconcile(ctx context.Context) error {
 			// Adjust our chain-local blocks and offset point from primary chain
 			c.blocks = slices.Delete(c.blocks, 0, i+1)
 			c.lastCommonBlockIndex = tmpBlock.ID
+			c.mutationGeneration++
 			return nil
 		}
 		if blockIndex == 0 {
@@ -3418,6 +3287,7 @@ func (c *Chain) reconcile(ctx context.Context) error {
 		return err
 	}
 	lastPrevHash := decodedKnownBlock.PrevHash().Bytes()
+	var lastCommonBlockIndex uint64
 	iterationCount := 0
 	for {
 		if iterationCount >= securityParam {
@@ -3440,7 +3310,7 @@ func (c *Chain) reconcile(ctx context.Context) error {
 		if err == nil &&
 			tmpBlock.Slot == primaryBlock.Slot &&
 			bytes.Equal(tmpBlock.Hash, primaryBlock.Hash) {
-			c.lastCommonBlockIndex = tmpBlock.ID
+			lastCommonBlockIndex = tmpBlock.ID
 			break
 		}
 		// Decode block and extract prev-hash
@@ -3454,13 +3324,16 @@ func (c *Chain) reconcile(ctx context.Context) error {
 			Slot: tmpBlock.Slot,
 		}
 		newBlocks = append(newBlocks, tmpPoint)
-		c.lastCommonBlockIndex--
 	}
 	// Prepend accumulated blocks in a single operation (O(K) instead of O(K²))
 	if len(newBlocks) > 0 {
 		// Reverse newBlocks since they were collected in reverse order
 		slices.Reverse(newBlocks)
 		c.blocks = slices.Concat(newBlocks, c.blocks)
+	}
+	if lastCommonBlockIndex != c.lastCommonBlockIndex || len(newBlocks) > 0 {
+		c.lastCommonBlockIndex = lastCommonBlockIndex
+		c.mutationGeneration++
 	}
 	return nil
 }
