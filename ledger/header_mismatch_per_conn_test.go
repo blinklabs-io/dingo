@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"sync"
 	"testing"
 
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -307,6 +308,13 @@ func TestHeaderMismatchCountsSafeAgainstBlockfetchResync(t *testing.T) {
 	const rounds = 200
 	stop := make(chan struct{})
 	done := make(chan struct{})
+	var stopOnce sync.Once
+	// A failed require exits the test goroutine through Goexit, so the worker
+	// is joined from a cleanup that runs before the fixture closes the ledger.
+	stopWorker := func() {
+		stopOnce.Do(func() { close(stop) })
+		<-done
+	}
 	go func() {
 		defer close(done)
 		for {
@@ -323,6 +331,7 @@ func TestHeaderMismatchCountsSafeAgainstBlockfetchResync(t *testing.T) {
 			pending.flush()
 		}
 	}()
+	t.Cleanup(stopWorker)
 	for i := range rounds {
 		h := declinedMismatchHeader(fmt.Sprintf("race-%d", i), fixture.currentTip)
 		fixture.ls.chainsyncMutex.Lock()
@@ -331,8 +340,7 @@ func TestHeaderMismatchCountsSafeAgainstBlockfetchResync(t *testing.T) {
 		fixture.ls.chainsyncMutex.Unlock()
 		require.NoError(t, err)
 	}
-	close(stop)
-	<-done
+	stopWorker()
 }
 
 // An active-connection switch says nothing about another connection's
