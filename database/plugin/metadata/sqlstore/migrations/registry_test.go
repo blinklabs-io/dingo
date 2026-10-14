@@ -31,7 +31,7 @@ func TestSQLiteRegistry(t *testing.T) {
 	registry, err := SQLiteRegistry()
 	require.NoError(t, err)
 	require.NoError(t, validateRegistry(registry, "sqlite"))
-	require.Len(t, registry, 44)
+	require.Len(t, registry, 45)
 
 	require.Equal(t, accountDRepClearSchemaRelease, registry[34].Name)
 	require.Contains(t, registry[34].SQL["sqlite"].Expand[0],
@@ -288,8 +288,13 @@ func TestSQLiteRegistry(t *testing.T) {
 	require.Contains(t, poolIdentitySQL,
 		"`pool_id`, `added_slot`, `certificate_id`, `registration_index`")
 	require.Equal(t, 44, registry[43].Version)
-	require.Equal(t, rewardStakeInputCredentialIndexSchemaRelease, registry[43].Name)
-	require.Contains(t, strings.Join(registry[43].SQL["sqlite"].Expand, "\n"),
+	require.Equal(t, committeeRenewalTermStartSchemaRelease, registry[43].Name)
+	require.Empty(t, registry[43].SQL["sqlite"].Expand)
+	require.NotNil(t, registry[43].Backfill)
+	require.Equal(t, "1", registry[43].BackfillRevision)
+	require.Equal(t, 45, registry[44].Version)
+	require.Equal(t, rewardStakeInputCredentialIndexSchemaRelease, registry[44].Name)
+	require.Contains(t, strings.Join(registry[44].SQL["sqlite"].Expand, "\n"),
 		"idx_reward_stake_input_cred_epoch")
 }
 
@@ -308,7 +313,7 @@ func TestDrepDormancySeedUsesPortableIdempotentInsert(t *testing.T) {
 			registry, err := tc.registry()
 			require.NoError(t, err)
 			require.NoError(t, validateRegistry(registry, tc.dialect))
-			require.Len(t, registry, 44)
+			require.Len(t, registry, 45)
 			migration := registry[39]
 			require.Equal(t, drepDormancyStateSchemaRelease, migration.Name)
 			seed := strings.Join(migration.SQL[tc.dialect].Expand, "\n")
@@ -537,7 +542,7 @@ func TestMySQLRegistryPrefixesPoolOpCertSequenceIndex(t *testing.T) {
 	registry, err := MySQLRegistry()
 	require.NoError(t, err)
 	require.NoError(t, validateRegistry(registry, "mysql"))
-	require.Len(t, registry, 44)
+	require.Len(t, registry, 45)
 
 	require.Contains(
 		t,
