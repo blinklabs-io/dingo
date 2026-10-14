@@ -269,13 +269,27 @@ func seedPoolRegistrationAtSlot(
 	vrfKeyHash []byte,
 	addedSlot uint64,
 ) {
+	seedPoolRegistrationAtSlotAndIndex(
+		t, db, poolKeyHash, vrfKeyHash, addedSlot, 0,
+	)
+}
+
+func seedPoolRegistrationAtSlotAndIndex(
+	t *testing.T,
+	db *database.Database,
+	poolKeyHash []byte,
+	vrfKeyHash []byte,
+	addedSlot uint64,
+	registrationIndex uint,
+) {
 	t.Helper()
 	require.NoError(t, db.Metadata().ImportPool(
 		&models.Pool{PoolKeyHash: poolKeyHash, VrfKeyHash: vrfKeyHash},
 		&models.PoolRegistration{
-			PoolKeyHash: poolKeyHash,
-			VrfKeyHash:  vrfKeyHash,
-			AddedSlot:   addedSlot,
+			PoolKeyHash:       poolKeyHash,
+			VrfKeyHash:        vrfKeyHash,
+			AddedSlot:         addedSlot,
+			RegistrationIndex: registrationIndex,
 		},
 		nil,
 	))
@@ -674,6 +688,88 @@ func TestElectingVrfKeyHashResolvesBelowMithrilBootstrapAnchor(t *testing.T) {
 			"in fact, always been registered")
 	require.True(t, ok)
 	assert.Equal(t, vrfKey, gotKey.Bytes())
+}
+
+// TestElectingVrfKeyHashUsesCurrentImportedParamsBeforePromotion verifies that
+// the two same-slot rows imported for current and future pool parameters retain
+// their ledger ordering during the bootstrap history fallback.
+func TestElectingVrfKeyHashUsesCurrentImportedParamsBeforePromotion(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	nonce := bytes.Repeat([]byte{0x07}, 32)
+	tb := createTestBlock(t, [32]byte{59}, 59, tamperNone)
+	ls, db := newEligibilityTestLedger(t, nonce)
+	ls.epochCache = previewEpochs(35, 39, nonce)
+
+	pool := lcommon.PoolKeyHash(bytes.Repeat([]byte{0x11}, 28))
+	currentKey := bytes.Repeat([]byte{0xB5}, 32)
+	futureKey := bytes.Repeat([]byte{0xC6}, 32)
+	const anchorSlot = 3_200_000
+	seedPoolRegistrationAtSlotAndIndex(
+		t, db, pool[:], currentKey, anchorSlot, 0,
+	)
+	seedPoolRegistrationAtSlotAndIndex(
+		t, db, pool[:], futureKey, anchorSlot, 1,
+	)
+	ls.mithrilLedgerSlot = anchorSlot
+	ls.publishSnapshotsLocked()
+
+	seedPoolStakeSnapshotOfTypeAtSlot(t, db, 37,
+		models.PoolStakeSnapshotTypeMark, pool[:], 1_000, 10_000, 3_196_799)
+
+	gotKey, ok, err := ls.electingVrfKeyHash(tb.block, 38, pool)
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, currentKey, gotKey.Bytes())
+}
+
+func TestElectingVrfKeyHashDefersImportedRotationInDijkstra(t *testing.T) {
+	t.Parallel()
+
+	nonce := bytes.Repeat([]byte{0x07}, 32)
+	ls, db := newEligibilityTestLedger(t, nonce)
+	ls.epochCache = musashiEpochs(29, 33, dijkstra.EraIdDijkstra, nonce)
+	const anchorSlot = 31*musashiEpochLength + 100
+	ls.mithrilLedgerSlot = anchorSlot
+	ls.publishSnapshotsLocked()
+
+	pool := lcommon.PoolKeyHash(bytes.Repeat([]byte{0x11}, 28))
+	currentKey := bytes.Repeat([]byte{0xB5}, 32)
+	futureKey := bytes.Repeat([]byte{0xC6}, 32)
+	seedPoolRegistrationAtSlotAndIndex(
+		t, db, pool[:], currentKey, anchorSlot, 0,
+	)
+	seedPoolRegistrationAtSlotAndIndex(
+		t, db, pool[:], futureKey, anchorSlot, 1,
+	)
+	seedPoolStakeSnapshotOfTypeAtSlot(t, db, 31,
+		models.PoolStakeSnapshotTypeActive, pool[:], 1_000, 10_000,
+		anchorSlot)
+	tb := createTestBlock(t, [32]byte{60}, 60, tamperNone)
+	tb.block.slot = anchorSlot + 1
+	cutoff, captured, ok, err := ls.electingPoolParamsCutoffSlot(
+		tb.block, 31, pool,
+	)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, uint64(anchorSlot), cutoff)
+	require.Equal(t, uint64(anchorSlot), captured)
+	gotKey, ok, err := ls.electingVrfKeyHash(tb.block, 31, pool)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, currentKey, gotKey.Bytes())
+
+	// A later boundary promotes the staged registration before Dijkstra SNAP.
+	seedPoolStakeSnapshotOfTypeAtSlot(t, db, 32,
+		models.PoolStakeSnapshotTypeMark, pool[:], 1_000, 10_000,
+		32*musashiEpochLength-1)
+	tb.block.slot = 33*musashiEpochLength + 1
+	gotKey, ok, err = ls.electingVrfKeyHash(tb.block, 33, pool)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, futureKey, gotKey.Bytes())
 }
 
 // TestElectingVrfKeyHashStillRejectsAPoolWithNoRegistrationAtAll pins the

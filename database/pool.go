@@ -254,6 +254,25 @@ func (d *Database) GetPoolByVrfKeyHash(
 	)
 }
 
+// GetFuturePoolByVrfKeyHash retrieves the pool whose pending parameters claim
+// the given VRF key hash during the current epoch.
+func (d *Database) GetFuturePoolByVrfKeyHash(
+	ctx context.Context,
+	vrfKeyHash []byte,
+	epochStartSlot uint64,
+	txn *Txn,
+) (*models.Pool, error) {
+	if txn == nil {
+		txn = d.Transaction(ctx, false)
+		defer txn.Release()
+	}
+	return d.metadata.GetFuturePoolByVrfKeyHash(
+		vrfKeyHash,
+		epochStartSlot,
+		txn.Metadata(),
+	)
+}
+
 // GetActivePoolRelays returns all relays from currently active pools.
 // This is used for ledger peer discovery.
 func (d *Database) GetActivePoolRelays(

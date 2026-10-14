@@ -1807,11 +1807,23 @@ proposals it depends on were stored, and is derived again.
 | Table | Columns | Keys / indexes | Relationships and notes |
 |---|---|---|---|
 | `pool` | `id`, `pool_key_hash`, `vrf_key_hash`, `reward_account`, `reward_account_credential_tag`, `latest_op_cert_sequence`, `pledge`, `cost`, `margin`, `leios_key_public`, `leios_key_possession_proof` | PK `id`; unique `pool_key_hash` | Current pool state. Historical registrations and retirements are separate rows. `reward_account_credential_tag`: 0 key hash, 1 script hash for the pool reward account. `leios_key_public` (96-byte BLS12-381 G2 public key) and `leios_key_possession_proof` (48-byte G1 signature) are the pool's registered Dijkstra/Leios voting key from an on-chain `leios_key` pool-cert field (migration `v2`); both are NULL only when the pool has no `leios_key`. Storage here never checks the proof -- a key with an invalid proof is still written as-is, so a value here means "seen on-chain," not "trusted." Committee verification does not read these mutable columns directly: SNAP copies the effective registration into the epoch's `pool_stake_snapshot`, and `ledger.LedgerView.GetLeiosKeys` reads that historical row. The actual proof-of-possession check happens one layer up, in `ledger/leios`'s `resolveOnChainKeys` (`VerifyLeiosKeyProofOfPossession`), which is allowed to depend on `ledger/leios`'s BLS primitives while this package is not (`internal/architecture/tests_test.go` forbids `database` importing `ledger`). |
-| `pool_registration` | `id`, `pool_id`, `pool_key_hash`, `vrf_key_hash`, `reward_account`, `reward_account_credential_tag`, `pledge`, `cost`, `margin`, `metadata_url`, `metadata_hash`, `certificate_id`, `added_slot`, `deposit_amount`, `deposit_held`, `leios_key_public`, `leios_key_possession_proof`, `leios_key_registration_age_unknown`, `leios_key_registration_epoch` | PK `id`; unique `(pool_id, added_slot)`; indexes `pool_key_hash`, `certificate_id` | Pool registration certificate. Join `pool_id -> pool.id` and `certificate_id -> certs.id`. `reward_account_credential_tag`: 0 key hash, 1 script hash. `deposit_amount` is the protocol parameter in force for that certificate; nullable `deposit_held` is the amount actually retained for the registration cycle and refunded by POOLREAP. Migration `v12` reconstructs legacy rows from registration, retirement, and epoch history, carries deposits across re-registrations, starts a new cycle after a completed reap, preserves populated values on replay, and fails closed with a resync-required error when a reap cannot be placed safely. Live certificate ingestion cannot fail block application for missing epoch history, so it preserves the pre-migration charged-amount fallback in that case. An unknown retained amount remains NULL; refund queries then use `deposit_amount` as the legacy fallback. `leios_key_public`/`leios_key_possession_proof` mirror `pool`'s columns of the same names for this specific registration (see above). `leios_key_registration_age_unknown` marks Leios key material imported without its on-chain registration slot; the import slot must not restart the protocol TTL. Migration `v27` marks existing imported registrations that have no source certificate (NULL or zero ID) and a nonzero synthetic slot. Genesis staking replay reuses the existing slot-0 row and replaces its owner/relay children from the immutable genesis configuration, making startup repair a partially-written genesis registration instead of inserting children against a missing parent. This behavior is covered by the SQLite metadata contract suite. |
+| `pool_registration` | `id`, `pool_id`, `pool_key_hash`, `vrf_key_hash`, `reward_account`, `reward_account_credential_tag`, `pledge`, `cost`, `margin`, `metadata_url`, `metadata_hash`, `certificate_id`, `registration_index`, `added_slot`, `deposit_amount`, `deposit_held`, `leios_key_public`, `leios_key_possession_proof`, `leios_key_registration_age_unknown`, `leios_key_registration_epoch` | PK `id`; unique `(pool_id, added_slot, certificate_id, registration_index)`; indexes `pool_key_hash`, `certificate_id` | Pool registration certificate. Join `pool_id -> pool.id` and `certificate_id -> certs.id`. The identity keeps multiple registration certificates from one pool in one block while making replay of the same certificate idempotent. Live certificates use registration index zero because their certificate IDs identify them. Synthetic snapshot registrations use certificate ID zero and stable indexes zero for current parameters and one for staged parameters. `reward_account_credential_tag`: 0 key hash, 1 script hash. `deposit_amount` is the protocol parameter in force for that certificate; nullable `deposit_held` is the amount actually retained for the registration cycle and refunded by POOLREAP. Migration `v12` reconstructs legacy rows from registration, retirement, and epoch history, carries deposits across re-registrations, starts a new cycle after a completed reap, preserves populated values on replay, and fails closed with a resync-required error when a reap cannot be placed safely. Live certificate ingestion cannot fail block application for missing epoch history, so it preserves the pre-migration charged-amount fallback in that case. An unknown retained amount remains NULL; refund queries then use `deposit_amount` as the legacy fallback. `leios_key_public`/`leios_key_possession_proof` mirror `pool`'s columns of the same names for this specific registration (see above). `leios_key_registration_age_unknown` marks Leios key material imported without its on-chain registration slot; the import slot must not restart the protocol TTL. Migration `v27` marks existing imported registrations that have no source certificate (NULL or zero ID) and a nonzero synthetic slot. Genesis staking replay reuses the existing slot-0 row and replaces its owner/relay children from the immutable genesis configuration, making startup repair a partially-written genesis registration instead of inserting children against a missing parent. This behavior is covered by the SQLite metadata contract suite. |
 | `pool_registration_owner` | `id`, `pool_registration_id`, `pool_id`, `key_hash` | PK `id`; indexes `pool_registration_id`, `pool_id` | Owners for a pool registration. Join `pool_registration_id -> pool_registration.id`; `pool_id -> pool.id`. |
 | `pool_registration_relay` | `id`, `pool_registration_id`, `pool_id`, `relay_type`, `ipv4`, `ipv6`, `hostname`, `port` | PK `id`; indexes `pool_registration_id`, `pool_id` | Relay addresses and their on-chain constructor for a pool registration. `relay_type` is nullable for pre-v38 rows, which retain legacy field-based inference. `GetActivePoolRelays` joins `pool` and returns each row with its pool's key hash in the transient `PoolRegistrationRelay.PoolKeyHash` field, which is not a stored column. |
 | `pool_retirement` | `id`, `pool_id`, `pool_key_hash`, `certificate_id`, `epoch`, `added_slot` | PK `id`; indexes `pool_id`, `pool_key_hash`, `certificate_id`, `added_slot` | Pool retirement certificate. Synthetic retirements written by a Mithril v2 catch-up (reconcile) or by the initial Mithril bootstrap import have `certificate_id = 0` and no `certs` row (`added_slot` is the catch-up or snapshot point; `epoch` is that same point except for the pending-retirement case below, where it is a future epoch); joins on `certificate_id` must be LEFT JOINs to keep them visible, and active-pool queries rank them ahead of certificate-backed rows at the same slot. The bootstrap case covers a pool that appears in the imported active pool distribution (`pool_stake_snapshot` `"actv"`) but is absent from the certified live pool params: it retired at the snapshot's epoch boundary yet still leads the current epoch's already-fixed schedule, so the import synthesizes a `pool`/`pool_registration` pair carrying only its pool key hash and pool-distr `vrf_key_hash` (pledge/cost/margin/reward-account left zero) plus this retirement tombstone. That keeps the producer resolvable via `GetPool(includeInactive=true)` for the header VRF-key binding check while the tombstone excludes it from active-pool and stake queries. Imported reward seeding separately intersects its shared registration fallback with each target snapshot's positive-stake delegated pool keys before the target snapshot's complete parameters overlay it. A synthesized pool that belongs only to another snapshot therefore cannot leak into this epoch's reward inputs, while an actually referenced pool remains subject to the all-or-nothing reconciliation gate if neither source supplies complete economics. This matches how a genesis-synced node retains a retired pool without treating it as active. The bootstrap import writes a second, distinct kind of `certificate_id = 0` row for a pool the snapshot shows as *pending* retirement: the PState `retiring` map schedules a live pool to retire at a later epoch, so the row carries that future `epoch` while the pool keeps its `pool_registration` economics and its `deposit_held`, and continues to earn rewards and lead slots until the boundary refunds it. Dropping these rows leaves the node holding a deposit the network has already refunded to the pool's reward account, so the two ledgers disagree about that account's balance. |
 | `pool_opcert_sequence` | `id`, `pool_key_hash`, `slot`, `sequence` | PK `id`; unique `(pool_key_hash, slot)`; index `slot`; index `(pool_key_hash, sequence)` | Observed operational certificate sequence by slot. Writes are first-write-wins for `(pool_key_hash, slot)`: replaying the same counter succeeds, while a different counter returns an `opcert counter conflict` error and rolls back the block-apply transaction. Read before write inside the block-apply transaction to enforce inbound opcert counter monotonicity; per-slot rows let rollback drop entries past the rollback slot and recompute `pool.latest_op_cert_sequence`. A Mithril restore imports the certified HeaderState counter map at its trusted tip; validation selects observations strictly after that boundary, falls back to the certified row at the boundary, and ignores stale pre-boundary rows. A pool with neither is absent from the certified map and is validated against a zero baseline, but only when some row exists at the boundary slot (`PoolOpCertSequencesExistAtSlot`): a database restored before the map was persisted has none there, and the read fails with a rebootstrap error rather than treating an unknown counter as zero. Those imported rows are counters, not blocks — a bootstrap applies no block at or below its anchor, and one slot cannot hold a block from every pool — so `CountPoolBlocksInSlotRange` and `GetPoolBlockIssuersInSlotRange`, the two readers that mean "blocks minted", raise their start slot past the recorded `mithril_ledger_slot` before reading. Without that they credit every pool holding a certified counter with a block it never minted and inflate the epoch total by the size of the pool set, which reaches pool reward performance, the `reward_pool_input` counts seeded at the epoch boundary, and Blockfrost `blocks_minted`. `LatestPoolOpCertSequenceAtOrBefore` uses the same rows to provide Leios announcement validation with the highest issuer counter no later than the selected chain's immutable-tip slot; absence by that bound is distinct from counter zero and classifies the dangling announcement as stale. Reward calculation can read the ordered raw issuer rows for an ended epoch and exclude TPraos overlay slots before deriving pool performance. Raising the start slot removes the imported counter rows, but it leaves no blocks at all for an epoch that ended below the anchor; `imported_pool_block_count` is the positive record of what those epochs actually minted. `LatestPoolOpCertSequences` reduces the whole table to one highest `sequence` per `pool_key_hash` (`GROUP BY pool_key_hash`) for the `GetChainDepState` query, and `LatestPoolOpCertSequencesAtOrBefore(slot)` answers the same question at an acquired point. A slot filter cannot use the `(pool_key_hash, sequence)` index, so it starts from the unbounded result and recomputes only the pools with a row after `slot` (`PoolOpCertSequencesChangedAfterSQL`, a range of the `slot` index; then `PoolOpCertSequenceAtOrBeforeSQL` per pool, a range of the unique `(pool_key_hash, slot)` index). For the unbounded read, because the table is keyed by issuer rather than joined to `pool`, that set includes cold keys whose pool has left the active set, which is what the chain still enforces against. That aggregate has no slot bound available to narrow it — the table takes a row per block minted, is pruned only by rollback, and holds nothing above the tip — so `(pool_key_hash, sequence)` exists to serve it from an index alone: SQLite and PostgreSQL fold it without reading a table row, and MySQL can skip through the index a pool at a time. It is declared by migration `v1alpha1`. The cost is one further index maintained per minted block. `sequence` is a signed engine integer, so the recorded counter domain is `[0, 2^63-1]` even though the reference decodes the operational certificate counter as a full-width `uint64`. That column carries the monotonicity ordering as well as the value -- the `MAX(sequence)` reads above, the `latest_op_cert_sequence < ?` guard on the denormalized `pool` maximum, and the `(pool_key_hash, sequence)` index -- so a counter above the domain would order below every smaller one. `eras.MaxPersistableOpCertCounter` names the bound; block application refuses a higher counter before applying the block, and the Mithril restore path (`ledgerstate.importOpCertCounters`) refuses it before writing the certified baseline, rather than failing this write part-way through. Every row written before that bound was named is inside it: `checkedInt64` has always refused a higher value, so no row needs rewriting. |
+
+Migration v43 adds `registration_index` to pool registrations and includes
+it in their unique identity alongside pool, slot, and certificate. MySQL
+creates the replacement index before dropping the old index so the pool
+foreign key remains indexed throughout the migration.
+
+Pool validation reads `pool_registration` history in two views. The current
+view selects the latest registration before the epoch boundary, or the pool's
+first registration when the pool first appears during the epoch. The future
+view selects the latest same-epoch re-registration and excludes that immediate
+first registration. This keeps the effective and deferred VRF-key indexes
+separate while using the same retirement precedence for both.
 
 ### DReps, Governance, and Committee
 
@@ -4740,9 +4752,10 @@ re-registration deferred, so the snapshot still carries the first one.
 A Mithril snapshot import writes a pool's registration (`ImportPool`) stamped
 at the import slot, because the snapshot carries only the pool's current
 parameters, not the certificate history that produced them. Both lookups
-above filter `added_slot <= slot`, so for any cutoff or capture slot before
-that import slot -- which the very first post-bootstrap epoch boundary's
-cutoff and capture necessarily are, since that boundary's electing snapshot
+above filter `added_slot <= slot`, so for a pool without staged parameters,
+any cutoff or capture slot before that import slot -- which the very first
+post-bootstrap epoch boundary's cutoff and capture necessarily are, since that
+boundary's electing snapshot
 was captured no later than the anchor the node just bootstrapped from --
 neither query finds a row for a pool that has in fact been continuously
 registered the whole time, and `electingVrfKeyHashWithCache`
@@ -4751,14 +4764,24 @@ unconditionally (the deferred-retry path in
 `verifyBlockHeaderStateWithCache` only covers a ledger tip still catching up,
 not this permanent gap).
 
-The fix lives in `electingVrfKeyHashWithCache`, not in these two queries or in
-`ImportPool`: when both lookups miss, and this is a Mithril-bootstrapped node
-(`ls.mithrilLedgerSlot != 0`) whose stake-snapshot capture slot is at or below
-that boundary, the gap is known to be exactly this bootstrap shape rather than
-a genuine missing-registration bug, so the caller falls back to the pool's
-current live registration (`GetPool(includeInactive=true)`) the same way it
-already does when `electingPoolParamsCutoffSlotWithCache` reports no snapshot
-at all (`ok == false`). An earlier version of this fix instead seeded a second,
+When the snapshot's PState carries a re-registration staged in
+`futurePoolParams` (made in the anchor epoch, not yet promoted), the import
+writes two registrations for that pool at the import slot. Stable registration
+indexes order the current parameters first and staged parameters second. The
+staged row is the pool's latest registration, so the next epoch boundary and a pool
+retirement refund read it, and the `pool` row holds its parameters, as after a
+live re-registration. The deposit is the same on both rows. Lookups at the
+import slot can resolve current and staged parameters by their index; earlier
+cutoffs still have the history gap.
+
+`electingVrfKeyHashFromSnapshotWithContext` resolves a snapshot captured at
+or below the Mithril anchor against the registration effective in the import
+epoch when historical lookups cannot answer it. When Dijkstra's parameter
+cutoff and the imported active distribution's capture both equal the anchor,
+it uses that epoch-effective lookup directly: the staged registration at the
+same slot has not been promoted yet. Later boundary snapshots retain their
+era-specific historical cutoff, so Dijkstra snapshots taken after promotion
+resolve the staged key. An earlier version of this fix instead seeded a second,
 `added_slot = 0` "floor" registration row at import time so the existing
 queries would resolve on their own; that synthetic row also satisfied
 `GetPoolRegistrationsEffectiveForEpoch`'s in-epoch registration window
@@ -4772,7 +4795,7 @@ consensus-critical question is actually asked, using the boundary the node
 already persists for exactly this purpose, avoids adding a row that other
 `added_slot`-scoped readers have to reason about.
 
-### `GetPoolByVrfKeyHash`
+### `GetPoolByVrfKeyHash` and `GetFuturePoolByVrfKeyHash`
 
 Backs `LedgerView.IsVrfKeyInUse`, the reverse of the pair above: given a VRF
 key hash, find whichever pool currently claims it, respecting the same
@@ -4784,20 +4807,25 @@ appear free to a different pool the moment a re-registration was applied, even
 though cardano-ledger keeps the old key reserved until the next epoch boundary
 merges `psFutureStakePoolParams` into `psStakePools`.
 
-Takes the current epoch's start slot (`epochStartSlot`) and resolves a claim
-in two tiers, checked in order:
+Both methods take the current epoch's start slot (`epochStartSlot`).
+`LedgerView.IsVrfKeyInUse` queries `GetPoolByVrfKeyHash` for the effective
+owner, then `GetFuturePoolByVrfKeyHash` for the deferred owner when the first
+lookup finds none. The shared SQL computes two claim tiers, and each method
+selects its own tier:
 
 1. **Effective owner.** The pool whose most recent registration strictly
-   before `epochStartSlot` has this key (`pre_boundary`), falling back to a
-   candidate's globally earliest registration (`earliest`) when it has none
+   before `epochStartSlot` has this key (`pre_boundary_state`), falling back to
+   a candidate's first same-epoch registration
+   (`first_same_epoch_registration`) when it has none
    before the boundary -- the same first-registration-is-immediate exception
    `GetPoolEarliestVrfKeyHashAtSlot` encodes, needed here so a pool's
    first-ever registration, submitted mid-epoch, still reserves its key
    against every other pool immediately rather than only from the next
    boundary.
 2. **Same-epoch claimant.** The pool whose *latest* registration this epoch
-   (`added_slot >= epochStartSlot`) names this key (`latest_same_epoch_registration`,
-   ranked the same way as `pre_boundary`). Consulted only when (1) finds
+   (`added_slot >= epochStartSlot`) names this key
+   (`latest_same_epoch_registration`, ranked with the same event ordering as
+   `pre_boundary_state`). Consulted only when (1) finds
    nothing. Only the current pending value in `psFutureStakePoolParams`
    reserves a key this way; a key a pool cycled through and then superseded
    within the same epoch (`A -> B -> C`) is freed the moment the later
@@ -4807,16 +4835,16 @@ in two tiers, checked in order:
    legitimate reuse of `B`).
    `IsVrfKeyInUse`'s caller (gouroboros's `validatePoolRegistration`)
    special-cases `owningPool == cert.Operator` by comparing against
-   `PoolCurrentState` (the pool's latest registration); this tier's
-   latest-only ranking is what keeps that comparison and this lookup
-   agreeing on which key is actually still pending.
+   `PoolCurrentState` (the epoch-effective registration). The deferred
+   lookup independently keeps only the latest pending registration, so
+   superseded deferred keys do not remain reserved.
 
 Both candidate sets are pre-filtered to pool IDs with *any* historical
 `pool_registration` row naming the queried key, so the query only walks a
 pool's full history when it has ever plausibly held that key.
 
-The query returns every matching pool ID ranked by tier (1 before 2, `pool_id`
-ascending within a tier), not a single winner picked by `LIMIT 1`: a long-
+Each query returns matching pool IDs from its selected tier in `pool_id`
+order, not a single winner picked by `LIMIT 1`: a long-
 retired pool's own last-ever registration can still satisfy tier 1's
 per-candidate effective-key computation (registration history and retirement
 are tracked independently, so retiring never rewrites what a pool's

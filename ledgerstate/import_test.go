@@ -3033,6 +3033,18 @@ func TestImportLedgerStateRejectsMalformedInputBeforePersisting(t *testing.T) {
 	require.NoError(t, err)
 	garbage := cbor.RawMessage{0xff}
 	partialCertState := partialCertStateData(t, fixture)
+	certParts, err := decodeRawArray(fixture.CertStateData)
+	require.NoError(t, err)
+	poolHash := bytes.Repeat([]byte{0x11}, 28)
+	params := encodeCborMap(t, poolHash, testPoolParams(0x11))
+	certParts[1] = encodeTestPState(
+		t, params, params, encodeCborMap(t),
+		encodeCborMap(t, poolHash, testPoolDeposit),
+	)
+	stagedCertState, err := cbor.Encode([]cbor.RawMessage{
+		certParts[0], certParts[1], certParts[2],
+	})
+	require.NoError(t, err)
 	snapshotParts, err := decodeRawArray(fixture.SnapShotsData)
 	require.NoError(t, err)
 	snapshotsWithFee, err := cbor.Encode([]any{
@@ -3051,6 +3063,14 @@ func TestImportLedgerStateRejectsMalformedInputBeforePersisting(t *testing.T) {
 		wantLog string
 	}{
 		{name: "valid input imports"},
+		{
+			name: "staged pool parameters at origin",
+			mutate: func(s *RawLedgerState) {
+				s.Tip.Slot = 0
+				s.Epoch = 0
+				s.CertStateData = stagedCertState
+			},
+		},
 		{
 			name:    "cert state",
 			mutate:  func(s *RawLedgerState) { s.CertStateData = garbage },
@@ -3268,4 +3288,122 @@ func TestValidateImportStateRetainsStoredPreviousParameters(t *testing.T) {
 		validateImportState(cfg),
 		"valid stored previous parameters must support catch-up reentry",
 	)
+}
+
+// A re-registration staged before the anchor must be the registration the
+// next boundary promotes: a retirement there refunds the staged reward
+// account, and the stored pool carries the staged parameters.
+func TestImportPoolsAppliesFutureParamsAtNextBoundary(t *testing.T) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
+
+	poolKeyHash := bytes.Repeat([]byte{0x81}, 28)
+	oldAccount := bytes.Repeat([]byte{0x82}, 28)
+	newAccount := bytes.Repeat([]byte{0x83}, 28)
+	deposit := uint64(500_000_000)
+	cfg := ImportConfig{
+		Database: db,
+		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+		State:    &RawLedgerState{Epoch: 659},
+	}
+	current := ParsedPool{
+		PoolKeyHash:   poolKeyHash,
+		VrfKeyHash:    bytes.Repeat([]byte{0x84}, 32),
+		RewardAccount: oldAccount,
+		Pledge:        1,
+		MarginDen:     1,
+		Deposit:       deposit,
+	}
+	staged := current
+	staged.RewardAccount = newAccount
+	staged.Pledge = 2
+	current.FutureParams = &staged
+
+	require.NoError(t, importPools(
+		context.Background(),
+		cfg,
+		[]ParsedPool{current},
+		1000,
+		map[uint64][][]byte{661: {poolKeyHash}},
+	))
+	// A restart can replay the same certified snapshot. Both synthetic rows
+	// use certificate ID zero, so their stable registration indexes must make
+	// the replay idempotent without collapsing current and staged state.
+	require.NoError(t, importPools(
+		context.Background(),
+		cfg,
+		[]ParsedPool{current},
+		1000,
+		map[uint64][][]byte{661: {poolKeyHash}},
+	))
+	currentRegs, err := db.Metadata().GetPoolRegistrationsEffectiveForEpoch(
+		[]lcommon.PoolKeyHash{testPoolKeyHash(poolKeyHash)},
+		0,
+		659,
+		1000,
+		nil,
+	)
+	require.NoError(t, err)
+	require.Len(t, currentRegs, 1)
+	require.Equal(t, oldAccount, []byte(currentRegs[0].RewardAccount))
+	promotedRegs, err := db.Metadata().GetPoolRegistrationsEffectiveForEpoch(
+		[]lcommon.PoolKeyHash{testPoolKeyHash(poolKeyHash)},
+		2000,
+		660,
+		2000,
+		nil,
+	)
+	require.NoError(t, err)
+	require.Len(t, promotedRegs, 1)
+	require.Equal(t, newAccount, []byte(promotedRegs[0].RewardAccount))
+
+	refunds, err := db.GetPoolsRetiringAtEpoch(
+		context.Background(), 661, 2000, nil,
+	)
+	require.NoError(t, err)
+	require.Len(t, refunds, 1)
+	require.Equal(t, newAccount, []byte(refunds[0].RewardAccount))
+	require.Equal(t, deposit, uint64(refunds[0].DepositHeld))
+
+	pool, err := db.Metadata().GetPool(
+		testPoolKeyHash(poolKeyHash), true, nil,
+	)
+	require.NoError(t, err)
+	require.Equal(t, newAccount, []byte(pool.RewardAccount))
+	require.NotEmpty(t, pool.Registration)
+	require.Equal(t, newAccount, []byte(pool.Registration[0].RewardAccount))
+	raw, err := dbtest.RawSQLiteMetadata(t, db)
+	require.NoError(t, err)
+	var registrations int
+	require.NoError(t, raw.QueryRow(
+		"SELECT COUNT(*) FROM pool_registration",
+	).Scan(&registrations))
+	require.Equal(t, 2, registrations)
+	rows, err := raw.Query(
+		"SELECT added_slot, registration_index FROM pool_registration " +
+			"ORDER BY registration_index",
+	)
+	require.NoError(t, err)
+	var positions [][2]uint64
+	for rows.Next() {
+		var row [2]uint64
+		require.NoError(t, rows.Scan(&row[0], &row[1]))
+		positions = append(positions, row)
+	}
+	require.NoError(t, rows.Err())
+	require.NoError(t, rows.Close())
+	require.Equal(t, [][2]uint64{{1000, 0}, {1000, 1}}, positions)
+	var earlierAccount []byte
+	var earlierSlot uint64
+	var earlierIndex uint
+	require.NoError(t, raw.QueryRow(
+		"SELECT reward_account, added_slot, registration_index "+
+			"FROM pool_registration ORDER BY registration_index LIMIT 1",
+	).Scan(&earlierAccount, &earlierSlot, &earlierIndex))
+	require.Equal(t, oldAccount, earlierAccount)
+	require.Equal(t, uint64(1000), earlierSlot)
+	require.Zero(t, earlierIndex)
 }
