@@ -31,8 +31,8 @@ const (
 )
 
 // flagSpec declares a CLI flag bound to a Config field by dotted path.
-// register installs the flag with its default read from globalConfig;
-// apply writes the parsed flag value back to cfg when the user set it.
+// register installs the flag using a configuration snapshot for defaults.
+// ApplyFlags calls apply only for explicitly set flags.
 type flagSpec struct {
 	field    string
 	name     string
@@ -68,18 +68,21 @@ var flagSpecs = []flagSpec{
 	transformStringFlag(
 		"RunMode",
 		"run-mode",
+		"",
 		"run mode: serve, load, dev, or leios",
 		normalizeRunMode,
 	),
 	transformStringFlag(
 		"StartEra",
 		"start-era",
+		"",
 		"experimental start era: dijkstra",
 		normalizeStartEra,
 	),
 	transformStringFlag(
 		"StorageMode",
 		"storage-mode",
+		"",
 		`storage mode: "core" (minimal) or "api" (full indexing)`,
 		normalizeStorageMode,
 	),
@@ -174,16 +177,16 @@ var flagSpecs = []flagSpec{
 	// An explicitly empty --network is allowed: Validate() enforces
 	// that network or networkMagic is set, so a magic-only invocation
 	// can clear a configured network name.
-	validatedStringFlag(
+	transformStringFlag(
 		"Network",
 		"network",
 		"n",
 		"Cardano network name (e.g. preview, preprod, mainnet)",
-		func(v string) error {
+		func(v string) (string, error) {
 			if v == "" {
-				return nil
+				return v, nil
 			}
-			return ValidateNetworkName(v)
+			return v, ValidateNetworkName(v)
 		},
 	),
 	uint32Flag("NetworkMagic", "network-magic", "network magic override"),
@@ -746,12 +749,14 @@ var flagSpecs = []flagSpec{
 	transformStringFlag(
 		"Logging.Format",
 		"logging-format",
+		"",
 		"log output format: text (default) or json",
 		normalizeLoggingValue,
 	),
 	transformStringFlag(
 		"Logging.Level",
 		"logging-level",
+		"",
 		"log level: debug, info (default), warn, or error",
 		normalizeLoggingValue,
 	),
@@ -940,6 +945,11 @@ var flagSpecs = []flagSpec{
 	),
 
 	// Leios voting (experimental)
+	uint64Flag(
+		"LeiosPersistenceRetentionSlots",
+		"leios-persistence-retention-slots",
+		"number of slots of Leios persistence to retain (0 keeps all history)",
+	),
 	stringFlag(
 		"LeiosVoteSigningKeyFile",
 		"leios-vote-signing-key-file",
@@ -1150,13 +1160,16 @@ func ApplyFlags(cmd *cobra.Command, cfg *Config) error {
 	flags := cmd.Root().PersistentFlags()
 	previousNetwork := cfg.Network
 	for _, spec := range flagSpecs {
+		if !flags.Changed(spec.name) {
+			continue
+		}
 		if err := spec.apply(flags, cfg); err != nil {
 			return err
 		}
 		// Only gated fields, per provenance's documented contract: this loop
 		// walks every registered flag, and recording the rest would fill the
 		// map with entries nothing reads.
-		if flags.Changed(spec.name) && isGatedField(spec.field) {
+		if isGatedField(spec.field) {
 			cfg.recordProvenance(spec.field, SourceFlag)
 		}
 	}
@@ -1185,13 +1198,7 @@ func fieldByPath(v reflect.Value, path string) reflect.Value {
 	return v
 }
 
-// defaultValue reads a field's default from the snapshot the caller took, so
-// flag registration does not clone the config once per flag.
-func defaultValue(defaults *Config, field string) reflect.Value {
-	return fieldByPath(reflect.ValueOf(defaults).Elem(), field)
-}
-
-func targetValue(cfg *Config, field string) reflect.Value {
+func configFieldValue(cfg *Config, field string) reflect.Value {
 	return fieldByPath(reflect.ValueOf(cfg).Elem(), field)
 }
 
@@ -1200,22 +1207,15 @@ func stringFlag(field, name, shorthand, help string) flagSpec {
 		field: field,
 		name:  name,
 		register: func(f *pflag.FlagSet, defaults *Config) {
-			def := defaultValue(defaults, field).String()
-			if shorthand != "" {
-				f.StringP(name, shorthand, def, help)
-				return
-			}
-			f.String(name, def, help)
+			def := configFieldValue(defaults, field).String()
+			f.StringP(name, shorthand, def, help)
 		},
 		apply: func(f *pflag.FlagSet, cfg *Config) error {
-			if !f.Changed(name) {
-				return nil
-			}
 			v, err := f.GetString(name)
 			if err != nil {
 				return err
 			}
-			targetValue(cfg, field).SetString(v)
+			configFieldValue(cfg, field).SetString(v)
 			return nil
 		},
 	}
@@ -1226,57 +1226,28 @@ func stringSliceFlag(field, name, help string) flagSpec {
 		field: field,
 		name:  name,
 		register: func(f *pflag.FlagSet, defaults *Config) {
-			def := defaultValue(defaults, field).Interface().([]string)
+			def := configFieldValue(defaults, field).Interface().([]string)
 			f.StringSlice(name, def, help)
 		},
 		apply: func(f *pflag.FlagSet, cfg *Config) error {
-			if !f.Changed(name) {
-				return nil
-			}
 			v, err := f.GetStringSlice(name)
 			if err != nil {
 				return err
 			}
-			targetValue(cfg, field).Set(reflect.ValueOf(v))
+			configFieldValue(cfg, field).Set(reflect.ValueOf(v))
 			return nil
 		},
 	}
-}
-
-// validatedStringFlag rejects invalid values but stores them verbatim.
-func validatedStringFlag(
-	field, name, shorthand, help string,
-	validate func(string) error,
-) flagSpec {
-	s := stringFlag(field, name, shorthand, help)
-	s.apply = func(f *pflag.FlagSet, cfg *Config) error {
-		if !f.Changed(name) {
-			return nil
-		}
-		v, err := f.GetString(name)
-		if err != nil {
-			return err
-		}
-		if err := validate(v); err != nil {
-			return err
-		}
-		targetValue(cfg, field).SetString(v)
-		return nil
-	}
-	return s
 }
 
 // transformStringFlag normalizes the parsed value (e.g. lowercasing)
 // and may reject it; the transformed value is stored.
 func transformStringFlag(
-	field, name, help string,
+	field, name, shorthand, help string,
 	transform func(string) (string, error),
 ) flagSpec {
-	s := stringFlag(field, name, "", help)
+	s := stringFlag(field, name, shorthand, help)
 	s.apply = func(f *pflag.FlagSet, cfg *Config) error {
-		if !f.Changed(name) {
-			return nil
-		}
 		v, err := f.GetString(name)
 		if err != nil {
 			return err
@@ -1285,7 +1256,7 @@ func transformStringFlag(
 		if err != nil {
 			return err
 		}
-		targetValue(cfg, field).SetString(out)
+		configFieldValue(cfg, field).SetString(out)
 		return nil
 	}
 	return s
@@ -1296,17 +1267,14 @@ func boolFlag(field, name, help string) flagSpec {
 		field: field,
 		name:  name,
 		register: func(f *pflag.FlagSet, defaults *Config) {
-			f.Bool(name, defaultValue(defaults, field).Bool(), help)
+			f.Bool(name, configFieldValue(defaults, field).Bool(), help)
 		},
 		apply: func(f *pflag.FlagSet, cfg *Config) error {
-			if !f.Changed(name) {
-				return nil
-			}
 			v, err := f.GetBool(name)
 			if err != nil {
 				return err
 			}
-			targetValue(cfg, field).SetBool(v)
+			configFieldValue(cfg, field).SetBool(v)
 			return nil
 		},
 	}
@@ -1324,14 +1292,11 @@ func boolPtrFlag(field, name, help string) flagSpec {
 			f.Bool(name, false, help)
 		},
 		apply: func(f *pflag.FlagSet, cfg *Config) error {
-			if !f.Changed(name) {
-				return nil
-			}
 			v, err := f.GetBool(name)
 			if err != nil {
 				return err
 			}
-			targetValue(cfg, field).Set(reflect.ValueOf(&v))
+			configFieldValue(cfg, field).Set(reflect.ValueOf(&v))
 			return nil
 		},
 	}
@@ -1352,14 +1317,11 @@ func stringPtrFlag(field, name, help string) flagSpec {
 			f.String(name, "", help)
 		},
 		apply: func(f *pflag.FlagSet, cfg *Config) error {
-			if !f.Changed(name) {
-				return nil
-			}
 			v, err := f.GetString(name)
 			if err != nil {
 				return err
 			}
-			targetValue(cfg, field).Set(reflect.ValueOf(&v))
+			configFieldValue(cfg, field).Set(reflect.ValueOf(&v))
 			return nil
 		},
 	}
@@ -1370,17 +1332,14 @@ func intFlag(field, name, help string) flagSpec {
 		field: field,
 		name:  name,
 		register: func(f *pflag.FlagSet, defaults *Config) {
-			f.Int(name, int(defaultValue(defaults, field).Int()), help)
+			f.Int(name, int(configFieldValue(defaults, field).Int()), help)
 		},
 		apply: func(f *pflag.FlagSet, cfg *Config) error {
-			if !f.Changed(name) {
-				return nil
-			}
 			v, err := f.GetInt(name)
 			if err != nil {
 				return err
 			}
-			targetValue(cfg, field).SetInt(int64(v))
+			configFieldValue(cfg, field).SetInt(int64(v))
 			return nil
 		},
 	}
@@ -1391,17 +1350,14 @@ func int64Flag(field, name, help string) flagSpec {
 		field: field,
 		name:  name,
 		register: func(f *pflag.FlagSet, defaults *Config) {
-			f.Int64(name, defaultValue(defaults, field).Int(), help)
+			f.Int64(name, configFieldValue(defaults, field).Int(), help)
 		},
 		apply: func(f *pflag.FlagSet, cfg *Config) error {
-			if !f.Changed(name) {
-				return nil
-			}
 			v, err := f.GetInt64(name)
 			if err != nil {
 				return err
 			}
-			targetValue(cfg, field).SetInt(v)
+			configFieldValue(cfg, field).SetInt(v)
 			return nil
 		},
 	}
@@ -1412,17 +1368,14 @@ func uintFlag(field, name, help string) flagSpec {
 		field: field,
 		name:  name,
 		register: func(f *pflag.FlagSet, defaults *Config) {
-			f.Uint(name, uint(defaultValue(defaults, field).Uint()), help)
+			f.Uint(name, uint(configFieldValue(defaults, field).Uint()), help)
 		},
 		apply: func(f *pflag.FlagSet, cfg *Config) error {
-			if !f.Changed(name) {
-				return nil
-			}
 			v, err := f.GetUint(name)
 			if err != nil {
 				return err
 			}
-			targetValue(cfg, field).SetUint(uint64(v))
+			configFieldValue(cfg, field).SetUint(uint64(v))
 			return nil
 		},
 	}
@@ -1435,12 +1388,9 @@ func uint32Flag(field, name, help string) flagSpec {
 		field: field,
 		name:  name,
 		register: func(f *pflag.FlagSet, defaults *Config) {
-			f.Uint(name, uint(defaultValue(defaults, field).Uint()), help)
+			f.Uint(name, uint(configFieldValue(defaults, field).Uint()), help)
 		},
 		apply: func(f *pflag.FlagSet, cfg *Config) error {
-			if !f.Changed(name) {
-				return nil
-			}
 			v, err := f.GetUint(name)
 			if err != nil {
 				return err
@@ -1451,7 +1401,7 @@ func uint32Flag(field, name, help string) flagSpec {
 					name, v, uint64(math.MaxUint32),
 				)
 			}
-			targetValue(cfg, field).SetUint(uint64(v))
+			configFieldValue(cfg, field).SetUint(uint64(v))
 			return nil
 		},
 	}
@@ -1468,23 +1418,19 @@ func uint64PtrFlag(field, name, help string) flagSpec {
 		register: func(f *pflag.FlagSet, defaults *Config) {
 			// Report the value that omitting the flag actually
 			// produces, not the zero value of the pointer. The
-			// Changed check below still lets an explicit 0 through
-			// to disable the cap.
+			// ApplyFlags still accepts an explicit 0 to disable the cap.
 			var def uint64
-			if v := defaultValue(defaults, field); !v.IsNil() {
+			if v := configFieldValue(defaults, field); !v.IsNil() {
 				def = v.Elem().Uint()
 			}
 			f.Uint64(name, def, help)
 		},
 		apply: func(f *pflag.FlagSet, cfg *Config) error {
-			if !f.Changed(name) {
-				return nil
-			}
 			v, err := f.GetUint64(name)
 			if err != nil {
 				return err
 			}
-			targetValue(cfg, field).Set(reflect.ValueOf(&v))
+			configFieldValue(cfg, field).Set(reflect.ValueOf(&v))
 			return nil
 		},
 	}
@@ -1495,17 +1441,14 @@ func uint64Flag(field, name, help string) flagSpec {
 		field: field,
 		name:  name,
 		register: func(f *pflag.FlagSet, defaults *Config) {
-			f.Uint64(name, defaultValue(defaults, field).Uint(), help)
+			f.Uint64(name, configFieldValue(defaults, field).Uint(), help)
 		},
 		apply: func(f *pflag.FlagSet, cfg *Config) error {
-			if !f.Changed(name) {
-				return nil
-			}
 			v, err := f.GetUint64(name)
 			if err != nil {
 				return err
 			}
-			targetValue(cfg, field).SetUint(v)
+			configFieldValue(cfg, field).SetUint(v)
 			return nil
 		},
 	}
@@ -1516,17 +1459,14 @@ func float64Flag(field, name, help string) flagSpec {
 		field: field,
 		name:  name,
 		register: func(f *pflag.FlagSet, defaults *Config) {
-			f.Float64(name, defaultValue(defaults, field).Float(), help)
+			f.Float64(name, configFieldValue(defaults, field).Float(), help)
 		},
 		apply: func(f *pflag.FlagSet, cfg *Config) error {
-			if !f.Changed(name) {
-				return nil
-			}
 			v, err := f.GetFloat64(name)
 			if err != nil {
 				return err
 			}
-			targetValue(cfg, field).SetFloat(v)
+			configFieldValue(cfg, field).SetFloat(v)
 			return nil
 		},
 	}
@@ -1539,19 +1479,16 @@ func durationFlag(field, name, help string) flagSpec {
 		register: func(f *pflag.FlagSet, defaults *Config) {
 			f.Duration(
 				name,
-				time.Duration(defaultValue(defaults, field).Int()),
+				time.Duration(configFieldValue(defaults, field).Int()),
 				help,
 			)
 		},
 		apply: func(f *pflag.FlagSet, cfg *Config) error {
-			if !f.Changed(name) {
-				return nil
-			}
 			v, err := f.GetDuration(name)
 			if err != nil {
 				return err
 			}
-			targetValue(cfg, field).SetInt(int64(v))
+			configFieldValue(cfg, field).SetInt(int64(v))
 			return nil
 		},
 	}

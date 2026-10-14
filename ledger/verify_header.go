@@ -2250,11 +2250,41 @@ func (ls *LedgerState) electingVrfKeyHashFromSnapshotWithContext(
 	if ok {
 		txn := ls.db.MetadataTxn(ctx, false)
 		defer txn.Release()
-		vrfKeyHash, found, err := ls.db.Metadata().GetPoolVrfKeyHashAtSlot(
-			poolKeyHash[:],
-			cutoffSlot,
-			txn.Metadata(),
-		)
+		var vrfKeyHash []byte
+		var found bool
+		if ls.mithrilLedgerSlot != 0 && cutoffSlot == ls.mithrilLedgerSlot &&
+			capturedSlot == ls.mithrilLedgerSlot {
+			// Imported active distributions precede promotion even in Dijkstra;
+			// the two anchor rows describe current and deferred parameters.
+			mithrilEpoch, epochErr := epochForSlotInCache(
+				epochCache,
+				capturedSlot,
+			)
+			if epochErr != nil {
+				return lcommon.Blake2b256{}, false, headerStateLookupErr(
+					epochErr,
+				)
+			}
+			registrations, registrationErr := ls.db.Metadata().
+				GetPoolRegistrationsEffectiveForEpoch(
+					[]lcommon.PoolKeyHash{poolKeyHash},
+					mithrilEpoch.StartSlot,
+					mithrilEpoch.EpochId,
+					capturedSlot,
+					txn.Metadata(),
+				)
+			err = registrationErr
+			if len(registrations) == 1 {
+				vrfKeyHash = registrations[0].VrfKeyHash
+				found = true
+			}
+		} else {
+			vrfKeyHash, found, err = ls.db.Metadata().GetPoolVrfKeyHashAtSlot(
+				poolKeyHash[:],
+				cutoffSlot,
+				txn.Metadata(),
+			)
+		}
 		if err != nil {
 			return lcommon.Blake2b256{}, false, headerStateLookupErr(err)
 		}
@@ -2318,25 +2348,48 @@ func (ls *LedgerState) electingVrfKeyHashFromSnapshotWithContext(
 		// in this file), so a capture at or below it is diagnostic: the
 		// snapshot that elected this pool was captured no later than the
 		// bootstrap boundary, which only a bootstrap-created gap explains.
-		// Falling back to the live registration here is the same trust
-		// electingVrfKeyHashFromSnapshot already extends when ok is false --
+		// Falling back to the registration effective at import is the same
+		// trust electingVrfKeyHashFromSnapshot already extends when ok is false --
 		// no snapshot at all -- applied to the narrower case of a snapshot
 		// whose registration history the import could not carry. It is not
 		// the general "no history found" fallback that was removed: outside
-		// this bootstrap-anchor window, a genuine gap still hard-rejects
-		// rather than resolving the pool's current (possibly rotated) key.
+		// this bootstrap-anchor window, a genuine gap still hard-rejects. The
+		// epoch-effective lookup also preserves imported future parameters as
+		// staged until their boundary instead of selecting the latest row.
 		if ls.mithrilLedgerSlot != 0 && capturedSlot <= ls.mithrilLedgerSlot {
-			pool, poolErr := ls.db.GetPool(ctx, poolKeyHash, true, nil)
-			if poolErr != nil && !errors.Is(poolErr, models.ErrPoolNotFound) {
+			mithrilEpoch, epochErr := epochForSlotInCache(
+				epochCache,
+				ls.mithrilLedgerSlot,
+			)
+			if epochErr != nil {
+				return lcommon.Blake2b256{}, false, headerStateLookupErr(epochErr)
+			}
+			registrations, registrationErr := ls.db.Metadata().
+				GetPoolRegistrationsEffectiveForEpoch(
+					[]lcommon.PoolKeyHash{poolKeyHash},
+					mithrilEpoch.StartSlot,
+					mithrilEpoch.EpochId,
+					ls.mithrilLedgerSlot,
+					txn.Metadata(),
+				)
+			if registrationErr != nil {
 				return lcommon.Blake2b256{}, false, headerStateLookupErr(
-					poolErr,
+					registrationErr,
 				)
 			}
-			hash, ok, err := registeredPoolVrfKeyHash(pool)
-			if err != nil {
-				return lcommon.Blake2b256{}, false, headerStateLookupErr(err)
-			}
-			if ok {
+			if len(registrations) == 1 && len(registrations[0].VrfKeyHash) > 0 {
+				hash, hashErr := lcommon.NewBlake2b256Checked(
+					registrations[0].VrfKeyHash,
+				)
+				if hashErr != nil {
+					return lcommon.Blake2b256{}, false, headerStateLookupErr(
+						fmt.Errorf(
+							"imported VRF key hash for pool %x: %w",
+							poolKeyHash[:],
+							hashErr,
+						),
+					)
+				}
 				return hash, true, nil
 			}
 		}

@@ -108,6 +108,7 @@ type PoolRegistration struct {
 	Pledge                         types.Uint64
 	Cost                           types.Uint64
 	CertificateID                  uint
+	RegistrationIndex              uint
 	ID                             uint
 	PoolID                         uint
 	AddedSlot                      uint64

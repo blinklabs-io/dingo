@@ -955,6 +955,7 @@ RETURNING id`,
 		decimalUint64(types.Uint64(cert.Pledge)),
 		decimalUint64(types.Uint64(cert.Cost)),
 		certificateID,
+		0,
 		poolID,
 		slot,
 		nullableDecimalUint64(deposit),
@@ -963,7 +964,7 @@ RETURNING id`,
 		nullBytes(leiosKeyPoP),
 		false,
 		nil,
-	}, poolID, slot)
+	}, poolID, slot, certificateID, 0)
 	if err != nil {
 		return 0, err
 	}

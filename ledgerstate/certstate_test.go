@@ -594,11 +594,10 @@ func TestParsePStateSelectsUTxOHDPoolMap(t *testing.T) {
 	ownerHash := bytes.Repeat([]byte{0x44}, 28)
 	metadataHash := bytes.Repeat([]byte{0x55}, 32)
 
-	// UTxO-HD Preview snapshots encode PState with a non-pool map at
+	// UTxO-HD Preview snapshots may encode PState with an empty map at
 	// index 0 and the active pool map at index 1. The active pool map
 	// omits the operator from the value because it is already the map key.
-	wrongKey := bytes.Repeat([]byte{0x99}, 32)
-	wrongMap := encodeCredentialMapEntry(t, wrongKey, uint64(1))
+	wrongMap := encodeCborMap(t)
 	poolMap := encodeCredentialMapEntry(
 		t,
 		poolHash,
@@ -1945,4 +1944,326 @@ func TestParseCertStateConwayDRepsWithEmptyDState(t *testing.T) {
 	if err == nil || len(dreps) != 0 {
 		t.Fatalf("malformed DRep accepted: %#v, %v", dreps, err)
 	}
+}
+
+// A re-registration staged in futurePoolParams must reach the importer with
+// the pool it re-registers, and leave the parameters in force untouched.
+func TestParsePStateDecodesFuturePoolParams(t *testing.T) {
+	t.Parallel()
+
+	poolHash := bytes.Repeat([]byte{0x11}, 28)
+	otherHash := bytes.Repeat([]byte{0x21}, 28)
+	current := testPoolParams(0x11)
+	staged := testPoolParams(0x11)
+	staged[4] = []any{
+		uint64(0),
+		[]any{uint64(0), bytes.Repeat([]byte{0x77}, 28)},
+	}
+
+	poolParams := encodeCborMap(
+		t,
+		poolHash, current,
+		otherHash, testPoolParams(0x21),
+	)
+	future := encodeCborMap(t, poolHash, staged)
+	deposits := encodeCborMap(
+		t,
+		poolHash, testPoolDeposit,
+		otherHash, testPoolDeposit,
+	)
+
+	pools, _, err := parsePStateWithRetirements(
+		encodeTestPState(t, poolParams, future, encodeCborMap(t), deposits),
+	)
+	require.NoError(t, err)
+	require.Len(t, pools, 2)
+
+	got := poolByHash(pools, poolHash)
+	require.NotNil(t, got)
+	require.Equal(t, bytes.Repeat([]byte{0x13}, 28), got.RewardAccount)
+	require.NotNil(t, got.FutureParams)
+	require.Equal(t, poolHash, got.FutureParams.PoolKeyHash)
+	require.Equal(t, bytes.Repeat([]byte{0x77}, 28), got.FutureParams.RewardAccount)
+	require.Equal(t, testPoolDeposit, got.FutureParams.Deposit)
+	require.Nil(t, poolByHash(pools, otherHash).FutureParams)
+}
+
+// When every pool re-registered the two maps parse to the same number of
+// pools, and the staged one can encode larger. poolParams must still win.
+func TestParsePStateFuturePoolParamsLargerThanCurrent(t *testing.T) {
+	t.Parallel()
+
+	poolHash := bytes.Repeat([]byte{0x11}, 28)
+	staged := testPoolParams(0x11)
+	staged[5] = []any{
+		bytes.Repeat([]byte{0x31}, 28),
+		bytes.Repeat([]byte{0x32}, 28),
+		bytes.Repeat([]byte{0x33}, 28),
+	}
+
+	pools, _, err := parsePStateWithRetirements(encodeTestPState(
+		t,
+		encodeCborMap(t, poolHash, testPoolParams(0x11)),
+		encodeCborMap(t, poolHash, staged),
+		encodeCborMap(t),
+		encodeCborMap(t, poolHash, testPoolDeposit),
+	))
+	require.NoError(t, err)
+	require.Len(t, pools, 1)
+	require.Len(t, pools[0].Owners, 1)
+	require.NotNil(t, pools[0].FutureParams)
+	require.Len(t, pools[0].FutureParams.Owners, 3)
+}
+
+// A staged re-registration with no registered pool cannot be applied, so the
+// parse must report it instead of dropping it.
+func TestParsePStateRejectsFuturePoolParamsForUnregisteredPool(t *testing.T) {
+	t.Parallel()
+
+	poolHash := bytes.Repeat([]byte{0x11}, 28)
+	ghostHash := bytes.Repeat([]byte{0x41}, 28)
+
+	pools, _, err := parsePStateWithRetirements(encodeTestPState(
+		t,
+		encodeCborMap(t, poolHash, testPoolParams(0x11)),
+		encodeCborMap(t, ghostHash, testPoolParams(0x41)),
+		encodeCborMap(t),
+		encodeCborMap(t, poolHash, testPoolDeposit),
+	))
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "unregistered pool")
+	require.Len(t, pools, 1)
+	require.Nil(t, pools[0].FutureParams)
+}
+
+func TestParsePStateRejectsUndecodableFuturePoolParams(t *testing.T) {
+	t.Parallel()
+	poolHash := bytes.Repeat([]byte{0x11}, 28)
+	malformed := testPoolParams(0x11)
+	malformed[5] = []any{[]byte{1}}
+	pools, _, err := parsePStateWithRetirements(encodeTestPState(
+		t,
+		encodeCborMap(t, poolHash, testPoolParams(0x11)),
+		encodeCborMap(t, poolHash, malformed),
+		encodeCborMap(t),
+		encodeCborMap(t, poolHash, testPoolDeposit),
+	))
+	require.ErrorContains(t, err, "future pool params")
+	require.Len(t, pools, 1)
+	require.Nil(t, pools[0].FutureParams)
+}
+
+func TestParsePStateDoesNotReplacePartiallyUndecodableCurrentParams(t *testing.T) {
+	t.Parallel()
+	first := bytes.Repeat([]byte{0x11}, 28)
+	second := bytes.Repeat([]byte{0x21}, 28)
+	malformed := testPoolParams(0x21)
+	malformed[5] = []any{[]byte{1}}
+	pools, _, err := parsePStateWithRetirements(encodeTestPState(
+		t,
+		encodeCborMap(t, first, testPoolParams(0x11), second, malformed),
+		encodeCborMap(t, first, testPoolParams(0x11), second, testPoolParams(0x21)),
+		encodeCborMap(t),
+		encodeCborMap(t, first, testPoolDeposit, second, testPoolDeposit),
+	))
+	require.ErrorContains(t, err, "skipped 1 of 2")
+	require.ErrorContains(t, err, "unregistered pool")
+	require.Len(t, pools, 1)
+	require.Equal(t, first, pools[0].PoolKeyHash)
+}
+
+func TestParsePStateDoesNotReplaceUndecodableCurrentParams(t *testing.T) {
+	t.Parallel()
+	poolHash := bytes.Repeat([]byte{0x11}, 28)
+	malformed := testPoolParams(0x11)
+	malformed[5] = []any{[]byte{1}}
+	pools, _, err := parsePStateWithRetirements(encodeTestPState(
+		t,
+		encodeCborMap(t, poolHash, malformed),
+		encodeCborMap(t, poolHash, testPoolParams(0x11)),
+		encodeCborMap(t),
+		encodeCborMap(t, poolHash, testPoolDeposit),
+	))
+	require.ErrorContains(t, err, "skipped 1 of 1")
+	require.ErrorContains(t, err, "unregistered pool")
+	require.Empty(t, pools)
+}
+
+func TestParsePStateRejectsShortCurrentParamsAfterNonPoolMap(t *testing.T) {
+	t.Parallel()
+	poolHash := bytes.Repeat([]byte{0x11}, 28)
+	pstate, err := cbor.Encode([]any{
+		map[uint64]uint64{},
+		cbor.RawMessage(encodeCborMap(t, poolHash, []any{uint64(1)})),
+		cbor.RawMessage(encodeCborMap(t, poolHash, testPoolParams(0x11))),
+		map[uint64]uint64{},
+	})
+	require.NoError(t, err)
+	pools, _, err := parsePStateWithRetirements(pstate)
+	require.ErrorContains(t, err, "skipped 1 of 1")
+	require.Empty(t, pools)
+}
+
+func TestParsePStateRejectsDistributionEntryAsFutureParams(t *testing.T) {
+	t.Parallel()
+	poolHash := bytes.Repeat([]byte{0x11}, 28)
+	pools, _, err := parsePStateWithRetirements(encodeTestPState(
+		t,
+		encodeCborMap(t, poolHash, testPoolParams(0x11)),
+		encodeCborMap(
+			t, poolHash,
+			[]any{bytes.Repeat([]byte{0x22}, 32)},
+		),
+		encodeCborMap(t),
+		encodeCborMap(t, poolHash, testPoolDeposit),
+	))
+	require.ErrorContains(t, err, "future pool params")
+	require.Len(t, pools, 1)
+	require.Nil(t, pools[0].FutureParams)
+}
+
+func TestParsePStateAcceptsSnapshotEntryAsFutureParams(t *testing.T) {
+	t.Parallel()
+	poolHash := bytes.Repeat([]byte{0x11}, 28)
+	vrfHash := bytes.Repeat([]byte{0x22}, 32)
+	rewardHash := bytes.Repeat([]byte{0x33}, 28)
+	ownerHash := bytes.Repeat([]byte{0x44}, 28)
+	snapshotParams := []any{
+		uint64(42),
+		[]uint64{1, 1},
+		[]any{ownerHash},
+		uint64(0),
+		vrfHash,
+		uint64(500_000_000),
+		uint64(340_000_000),
+		[]uint64{1, 20},
+		uint64(0),
+		[]any{uint64(0), rewardHash},
+	}
+	pools, _, err := parsePStateWithRetirements(encodeTestPState(
+		t,
+		encodeCborMap(t, poolHash, testPoolParams(0x11)),
+		encodeCborMap(t, poolHash, snapshotParams),
+		encodeCborMap(t),
+		encodeCborMap(t, poolHash, testPoolDeposit),
+	))
+	require.NoError(t, err)
+	require.Len(t, pools, 1)
+	require.NotNil(t, pools[0].FutureParams)
+	require.Equal(t, vrfHash, pools[0].FutureParams.VrfKeyHash)
+}
+
+func TestParsePStateRejectsInvalidFutureRewardAccount(t *testing.T) {
+	t.Parallel()
+	poolHash := bytes.Repeat([]byte{0x11}, 28)
+	malformed := testPoolParams(0x11)
+	malformed[4] = []byte{0x01}
+	pools, _, err := parsePStateWithRetirements(encodeTestPState(
+		t,
+		encodeCborMap(t, poolHash, testPoolParams(0x11)),
+		encodeCborMap(t, poolHash, malformed),
+		encodeCborMap(t),
+		encodeCborMap(t, poolHash, testPoolDeposit),
+	))
+	require.ErrorContains(t, err, "future pool params")
+	require.Len(t, pools, 1)
+	require.Nil(t, pools[0].FutureParams)
+}
+
+// The Conway PState layout is not four fields. An empty poolParams map with a
+// populated futurePoolParams map must still fail: a staged entry has no pool
+// to re-register.
+func TestParsePStateConwayRejectsFutureParamsWithoutCurrentPool(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	poolHash := bytes.Repeat([]byte{0x11}, 28)
+	emptyMap := encodeCborMap(t)
+	pstate, err := cbor.Encode([]any{
+		cbor.RawMessage(emptyMap),
+		cbor.RawMessage(emptyMap),
+		cbor.RawMessage(encodeCborMap(t, poolHash, testPoolParams(0x11))),
+		cbor.RawMessage(emptyMap),
+		cbor.RawMessage(emptyMap),
+	})
+	require.NoError(t, err)
+
+	pools, _, err := parsePStateConwayWithRetirements(pstate)
+	require.ErrorContains(t, err, "future pool params")
+	require.Empty(t, pools)
+}
+
+// futurePoolParams values carry the operator; psStakePools values do not.
+func testFuturePoolParams(poolHash []byte, seed byte) []any {
+	return append([]any{poolHash}, testPoolParams(seed)...)
+}
+
+func encodeRealPState(t *testing.T, vrf, pools, future, retiring []byte) []byte {
+	t.Helper()
+	pstate, err := cbor.Encode([]any{
+		cbor.RawMessage(vrf),
+		cbor.RawMessage(pools),
+		cbor.RawMessage(future),
+		cbor.RawMessage(retiring),
+	})
+	require.NoError(t, err)
+	return pstate
+}
+
+// The ledger's four-field PState is [psVRFKeyHashes, psStakePools,
+// psFutureStakePoolParams, psRetiring]. A staged entry with no current pool
+// must fail in either position the staged map can take.
+func TestParsePStateRejectsStagedParamsWithoutCurrentPoolInFourFieldLayouts(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	poolHash := bytes.Repeat([]byte{0x11}, 28)
+	empty := encodeCborMap(t)
+	future := encodeCborMap(t, poolHash, testFuturePoolParams(poolHash, 0x11))
+
+	for name, pstate := range map[string][]byte{
+		"staged at index 1": encodeRealPState(t, empty, future, empty, empty),
+		"staged at index 2": encodeRealPState(t, empty, empty, future, empty),
+		"older layout, staged at index 1": encodeTestPState(
+			t, empty, future, empty, empty,
+		),
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			pools, _, err := parsePStateWithRetirements(pstate)
+			require.ErrorContains(t, err, "future pool params")
+			require.Empty(t, pools)
+		})
+	}
+}
+
+// The same layout with a current pool imports it and stages the update.
+func TestParsePStateDecodesStagedParamsInRealFourFieldLayout(t *testing.T) {
+	t.Parallel()
+
+	poolHash := bytes.Repeat([]byte{0x11}, 28)
+	staged := testFuturePoolParams(poolHash, 0x11)
+	staged[5] = []any{
+		uint64(0),
+		[]any{uint64(0), bytes.Repeat([]byte{0x77}, 28)},
+	}
+
+	pools, _, err := parsePStateWithRetirements(encodeRealPState(
+		t,
+		encodeCborMap(t),
+		encodeCborMap(t, poolHash, testPoolParams(0x11)),
+		encodeCborMap(t, poolHash, staged),
+		encodeCborMap(t),
+	))
+	require.NoError(t, err)
+	require.Len(t, pools, 1)
+	require.Equal(t, bytes.Repeat([]byte{0x13}, 28), pools[0].RewardAccount)
+	require.NotNil(t, pools[0].FutureParams)
+	require.Equal(
+		t,
+		bytes.Repeat([]byte{0x77}, 28),
+		pools[0].FutureParams.RewardAccount,
+	)
 }

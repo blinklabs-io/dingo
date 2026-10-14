@@ -3085,7 +3085,7 @@ func TestPipelineStagesAreOrdered(t *testing.T) {
 }
 
 // TestReleaseGatesOnGovulncheck checks that a tag cannot publish while
-// govulncheck is failing.
+// govulncheck is failing or Linux race tests have not passed.
 //
 // This was lost once already. `make govulncheck` was the last step of
 // publish.yml's `ci` job and create-draft-release needed `[ci]`, so the gate
@@ -3105,6 +3105,13 @@ func TestReleaseGatesOnGovulncheck(t *testing.T) {
 		t.Fatalf("%s has no create-draft-release job", publishPipeline)
 	}
 	needs := jobNeeds(t, publishPipeline, "create-draft-release", job)
+	if !contains(needs, "go-test-linux-race") {
+		t.Errorf(
+			"%s: create-draft-release does not need go-test-linux-race; "+
+				"a tag could publish before race tests pass",
+			publishPipeline,
+		)
+	}
 	if !contains(needs, "govulncheck") {
 		t.Errorf(
 			"%s: create-draft-release does not need govulncheck; a tag could "+
@@ -3152,28 +3159,22 @@ func TestImageManifestRunsAfterMainBuilds(t *testing.T) {
 	}
 }
 
-// buildGates names, for each build job, every test job for its own runner OS.
-// Gating a build on its own platform and no other is what lets the Linux
-// binaries start while macOS tests are still running.
-//
-// Linux has two suites and a build must wait for both. Naming only one would
-// leave the other free to be dropped from the build's dependencies with this
-// check still green, which is exactly the hole that would let build-linux run
-// without the race suite.
+// buildGates names the normal test suite each platform's build waits for.
+// Race tests run alongside builds after the quick Linux gate passes.
 var buildGates = map[string][]string{
-	"build-linux": {"go-test-linux", "go-test-linux-race"},
+	"build-linux": {"go-test-linux"},
 	"build-macos": {"go-test-macos"},
 }
 
-// otherPlatformTests are the test jobs a given build job must NOT depend on.
-var otherPlatformTests = map[string][]string{
-	"build-linux": {"go-test-macos"},
+// independentTests are suites that run independently of each build.
+var independentTests = map[string][]string{
+	"build-linux": {"go-test-macos", "go-test-linux-race"},
 	"build-macos": {"go-test-linux", "go-test-linux-race"},
 }
 
 // TestBuildsGateOnTheirOwnPlatform checks that each build job waits for its own
-// runner OS's tests and for nothing else's. Depending on another platform is
-// what put the whole build stage behind the slowest and least predictable test
+// runner OS's normal suite without waiting for race or another platform.
+// Waiting for independent suites puts builds behind the slowest test
 // job in the pipeline; depending on none of them is what let images and
 // binaries publish from a commit no suite had covered.
 func TestBuildsGateOnTheirOwnPlatform(t *testing.T) {
@@ -3182,7 +3183,16 @@ func TestBuildsGateOnTheirOwnPlatform(t *testing.T) {
 	for _, workflow := range []string{prPipeline, publishPipeline} {
 		jobs := pipelineJobs(t, root, workflow)
 
-		for _, build := range sortedKeys(buildGates) {
+		gates := maps.Clone(buildGates)
+		independent := maps.Clone(independentTests)
+		imageBuild := "docker"
+		if workflow == publishPipeline {
+			imageBuild = "build-images"
+		}
+		gates[imageBuild] = gates["build-linux"]
+		independent[imageBuild] = independent["build-linux"]
+
+		for _, build := range sortedKeys(gates) {
 			job, ok := jobs[build]
 			if !ok {
 				t.Errorf("%s has no %s job", workflow, build)
@@ -3190,23 +3200,23 @@ func TestBuildsGateOnTheirOwnPlatform(t *testing.T) {
 			}
 			needs := jobNeeds(t, workflow, build, job)
 
-			for _, gate := range buildGates[build] {
+			for _, gate := range gates[build] {
 				if !contains(needs, gate) {
 					t.Errorf(
 						"%s: %s does not need %s; a build must not start "+
-							"until every suite for its own platform passes",
+							"until its normal platform suite passes",
 						workflow,
 						build,
 						gate,
 					)
 				}
 			}
-			for _, foreign := range otherPlatformTests[build] {
+			for _, foreign := range independent[build] {
 				if contains(needs, foreign) {
 					t.Errorf(
-						"%s: %s needs %s, a test job for another platform; "+
+						"%s: %s needs %s, an independent test job; "+
 							"that puts this build behind an unrelated "+
-							"platform's runtime",
+							"suite's runtime",
 						workflow,
 						build,
 						foreign,
