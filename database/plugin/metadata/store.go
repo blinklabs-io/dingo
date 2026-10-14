@@ -2993,9 +2993,9 @@ type MetadataStore interface {
 
 	// DeleteRewardStakeInputBeforeEpoch deletes only reward_stake_input rows
 	// older than the retained snapshot window, leaving reward_account_output
-	// intact. This is the API storage-mode pruning path, used so the
-	// Blockfrost account reward-history endpoint can serve an account's full
-	// reward history. See rewardstate.DeleteStakeInputBeforeEpoch.
+	// intact. This is the Koios-parity pruning path, used so the observer
+	// can read reward_account_output behind the tip. API storage mode prunes
+	// neither table. See rewardstate.DeleteStakeInputBeforeEpoch.
 	DeleteRewardStakeInputBeforeEpoch(uint64, types.Txn) error
 
 	// Network state methods
