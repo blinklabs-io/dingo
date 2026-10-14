@@ -3457,9 +3457,15 @@ unchanged at that boundary. Preview's genesis `d = 1` instead forces performance
 to 1 and requires the first treasury transfer; omitting the round is incorrect.
 This follows cardano-ledger's [TICK input to RUPD](https://github.com/IntersectMBO/cardano-ledger/blob/9975f3d3f36869822eee7225c8422aacafe57790/eras/shelley/impl/src/Cardano/Ledger/Shelley/Rules/Tick.hs)
 and [startStep performance calculation](https://github.com/IntersectMBO/cardano-ledger/blob/9975f3d3f36869822eee7225c8422aacafe57790/eras/shelley/impl/src/Cardano/Ledger/Shelley/LedgerState/PulsingReward.hs).
-Networks with a Byron prefix have no Shelley reward round at either boundary,
-and `applyStakeRewards`' Byron performance-epoch guard suppresses both there;
-networks that declare Shelley at genesis, such as preview, run both. Later
+Networks with a Byron prefix have no Shelley reward round at either of those
+boundaries, and `applyStakeRewards`' Byron-ended-epoch guard suppresses both
+there; networks that declare Shelley at genesis, such as preview, run both.
+The boundary after the first Shelley epoch on a Byron-prefix network still has
+a Byron performance epoch, but cardano-ledger applies the update built during
+that Shelley epoch with empty blocks-made (`translateToShelleyLedgerStateFromUtxo`).
+`applyFirstShelleyStakeRewardRound` applies it from the first Shelley epoch's
+parameters and ADA pots with no pool rewards, so with `d >= 0.8` reserves
+expand with `eta = 1` and the treasury takes its share. Later
 updates use the normal delayed E-3 snapshot, E-2 performance, and E-1 pots
 mapping.
 
