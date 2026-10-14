@@ -330,6 +330,18 @@ var flagSpecs = []flagSpec{
 		"",
 		"CIP-26 token registry tarball URL (empty = select by network)",
 	),
+	stringFlag(
+		"TokenRegistry.ManifestURL",
+		"token-registry-manifest-url",
+		"",
+		"HTTPS URL of the signed CIP-26 snapshot manifest",
+	),
+	stringFlag(
+		"TokenRegistry.TrustedManifestKey",
+		"token-registry-trusted-manifest-key",
+		"",
+		"hex-encoded Ed25519 key trusted to sign token registry manifests",
+	),
 	durationFlag(
 		"TokenRegistry.Interval",
 		"token-registry-interval",
@@ -387,6 +399,11 @@ var flagSpecs = []flagSpec{
 		"allow token registry sync from private, loopback, and link-local addresses",
 	),
 	boolFlag(
+		"TokenRegistry.AllowRollback",
+		"token-registry-allow-rollback",
+		"allow a signed token registry manifest below the stored sequence",
+	),
+	boolFlag(
 		"Midnight.Enabled",
 		"midnight-enabled",
 		`enable the Midnight indexer (requires storageMode "api")`,
@@ -419,6 +436,11 @@ var flagSpecs = []flagSpec{
 		"BarkBlockDownloadHosts",
 		"bark-block-download-hosts",
 		"allowed HTTPS origins for Bark block downloads (ports matched exactly)",
+	),
+	boolFlag(
+		"BarkBlockDownloadAllowPrivateAddresses",
+		"bark-block-download-allow-private-addresses",
+		"allow Bark block downloads from private, loopback, and special-use addresses",
 	),
 	uintFlag("BarkPort", "bark-port", "Bark RPC port"),
 	stringFlag(
@@ -912,6 +934,11 @@ var flagSpecs = []flagSpec{
 	),
 
 	// Leios voting (experimental)
+	uint64Flag(
+		"LeiosPersistenceRetentionSlots",
+		"leios-persistence-retention-slots",
+		"number of slots of Leios persistence to retain (0 keeps all history)",
+	),
 	stringFlag(
 		"LeiosVoteSigningKeyFile",
 		"leios-vote-signing-key-file",

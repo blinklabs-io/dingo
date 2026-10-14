@@ -1385,10 +1385,9 @@ func TestLocalstatequeryReopen_PinsReopenedView(t *testing.T) {
 			o.localstatequeryAcquireMutex.Unlock()
 			testutil.WaitForCondition(t, func() bool {
 				_, err := expired.Query(t.Context(), &olocalstatequery.ChainPointQuery{}, 0)
-				return errors.Is(err, ledger.ErrQueryViewClosed)
-			}, testutil.AsyncWait, "the snapshot was never closed")
-			require.Equal(t, 0, o.ledgerState.AcquiredPointPinCountForTesting(),
-				"expiry releases the session's pin")
+				return errors.Is(err, ledger.ErrQueryViewClosed) &&
+					o.ledgerState.AcquiredPointPinCountForTesting() == 0
+			}, testutil.AsyncWait, "expiry did not close the snapshot and release its pin")
 
 			_, err := queryChainPoint(t, o, ctx)
 			require.NoError(t, err)

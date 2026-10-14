@@ -322,7 +322,7 @@ func (cm *ChainManager) NewChainFromIntersect(
 	if err != nil {
 		return nil, err
 	}
-	if intersectPoint.Slot == 0 && !foundOrigin {
+	if len(intersectPoint.Hash) == 0 && !foundOrigin {
 		return nil, ErrIntersectNotFound
 	}
 	// Increment current largest chain ID for new ID
@@ -618,7 +618,7 @@ func (cm *ChainManager) removeBlockByIndex(
 	}
 	// Remove from database
 	var removedBlock models.Block
-	txn := cm.db.BlobTxn(true)
+	txn := cm.db.BlockBlobTxn()
 	err := txn.Do(func(txn *database.Txn) error {
 		tmpBlock, err := cm.db.BlockByIndex(blockIndex, txn)
 		if err != nil {

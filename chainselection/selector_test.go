@@ -6008,6 +6008,78 @@ func TestLoneFarFrontierAcceptsConnectedChain(t *testing.T) {
 	}
 }
 
+func TestFarTipDispositionRejectsJumpAfterPendingClaim(t *testing.T) {
+	t.Parallel()
+
+	c := loneFarChain{localBlock: 1_000, k: 2}
+	cs := NewChainSelector(ChainSelectorConfig{SecurityParam: c.k})
+	cs.SetLocalTip(c.tip(c.localBlock))
+	lagging := newTestConnectionId(1)
+	require.True(t, cs.UpdatePeerTip(
+		lagging,
+		c.tip(c.localBlock-500),
+		nil,
+	))
+	conn := newTestConnectionId(2)
+	first := c.first()
+	pending := c.tip(first)
+	require.Equal(t, PeerTipUpdatePending, cs.ObservePeerTipUpdate(
+		PeerTipUpdateEvent{
+			ConnectionId:     conn,
+			Tip:              c.tip(100_000),
+			ObservedTip:      pending,
+			ObservedPrevHash: c.prevHash(first),
+		},
+	))
+
+	// Move the trusted reference just beyond the local tip. The next unrelated
+	// jump is rejected before far-claim accumulation, so the older pending
+	// entry must not classify this different observation as pending.
+	require.True(t, cs.UpdatePeerTip(
+		lagging,
+		c.tip(c.localBlock+1),
+		nil,
+	))
+	jump := c.tip(first + 1_000)
+	assert.Equal(t, PeerTipUpdateRejected, cs.ObservePeerTipUpdate(
+		PeerTipUpdateEvent{
+			ConnectionId:     conn,
+			Tip:              c.tip(100_000),
+			ObservedTip:      jump,
+			ObservedPrevHash: []byte("unrelated"),
+		},
+	))
+}
+
+func TestFarTipDispositionRejectsCorroboratedImpossibleHeight(t *testing.T) {
+	t.Parallel()
+
+	c := loneFarChain{localBlock: 1_000, k: 2}
+	cs := c.newSelector(t)
+	impossible := ochainsync.Tip{
+		Point: ocommon.Point{
+			Slot: c.tip(c.localBlock).Point.Slot + 1,
+			Hash: []byte("impossible-height"),
+		},
+		BlockNumber: c.localBlock + 100,
+	}
+	for _, conn := range []ouroboros.ConnectionId{
+		newTestConnectionId(2),
+		newTestConnectionId(3),
+	} {
+		require.Equal(t, PeerTipUpdateRejected, cs.ObservePeerTipUpdate(
+			PeerTipUpdateEvent{
+				ConnectionId:     conn,
+				Tip:              c.tip(100_000),
+				ObservedTip:      impossible,
+				ObservedPrevHash: []byte("parent"),
+			},
+		))
+		assert.Nil(t, cs.GetPeerTip(conn))
+		assert.NotContains(t, cs.farTipClaims, conn)
+	}
+}
+
 // A frontier admitted from one peer's connected run is not independent
 // evidence for an unrelated peer. Losing that first peer must not leave the
 // unrelated peer with an ordinary frontier it can advance by K at a time.

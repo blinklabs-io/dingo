@@ -2944,8 +2944,8 @@ func (m nodeTestSecurityParamLedger) SecurityParam() int {
 }
 
 type nodeTestLogSignalHandler struct {
-	message string
-	seen    chan struct{}
+	message  string
+	seen     chan struct{}
 	onRecord func(slog.Record)
 }
 
@@ -4919,4 +4919,36 @@ func TestLedgerStateConfigForwardsBlockfetchLowWatermarkFlag(t *testing.T) {
 		config: NewConfig(WithBlockfetchLowWatermarkEnabled(true)),
 	}).ledgerStateConfig()
 	assert.True(t, on.BlockfetchLowWatermarkEnabled)
+}
+
+// Not t.Parallel: swaps the package-level closeOuroborosInstance seam.
+func TestRunKeepsStorageOpenWhenLeiosPersistenceDrainIsUnconfirmed(
+	t *testing.T,
+) {
+	n := newAPIPluginRuntimeNode(t)
+	probe := &apiLifecycleProbe{
+		startErr: errors.New("injected API startup failure"),
+	}
+	registerAPIProbe(
+		t,
+		n.pluginHost,
+		plugin.CapabilityAPIBlockfrost,
+		"probe",
+		probe,
+	)
+	selectAPIProbe(n, plugin.CapabilityAPIBlockfrost, "probe", 13000)
+	previous := closeOuroborosInstance
+	closeOuroborosInstance = func(*ouroborosPkg.Ouroboros) error { return ouroborosPkg.ErrLeiosPersistDrainUnconfirmed }
+	t.Cleanup(func() { closeOuroborosInstance = previous })
+	err := n.Run(context.Background())
+	require.ErrorContains(t, err, "injected API startup failure")
+	require.NotNil(t, n.db)
+	_, err = n.db.GetTip(nil)
+	require.NoError(
+		t,
+		err,
+		"startup cleanup closed storage despite an unconfirmed Leios drain",
+	)
+	require.NoError(t, n.ouroboros().Close())
+	require.NoError(t, n.db.Close())
 }

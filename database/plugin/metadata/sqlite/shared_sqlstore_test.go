@@ -5774,7 +5774,7 @@ func exerciseUtxoMutationStore(
 	}
 	imported := models.Utxo{
 		TxId: hashes[5], OutputIdx: 5, StakingKey: stakeKey,
-		Amount: 25, AddedSlot: 15,
+		Address: []byte("imported-address"), Amount: 25, AddedSlot: 15,
 		Assets: []models.Asset{{
 			Name: []byte("asset"), PolicyId: []byte("policy"), Amount: 2,
 		}},
@@ -5929,6 +5929,7 @@ func exerciseUtxoReadStore(t *testing.T, store utxoReadStore) utxoReadState {
 	for _, utxo := range []*models.Utxo{
 		{
 			TxId:          []byte("tx-live"),
+			Address:       []byte("live-address"),
 			OutputIdx:     0,
 			PaymentKey:    paymentKey,
 			StakingKey:    stakingKey,

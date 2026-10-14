@@ -24,6 +24,7 @@ import (
 	"github.com/blinklabs-io/dingo/internal/chainsyncrecycler"
 	"github.com/blinklabs-io/dingo/peergov"
 	ouroboros "github.com/blinklabs-io/gouroboros"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
@@ -36,15 +37,22 @@ const (
 // The staged value is not selectable until ledger admission promotes it.
 func (n *Node) chainsyncObservePeerTip(
 	e chainselection.PeerTipUpdateEvent,
-) bool {
+) chainselection.PeerTipUpdateDisposition {
 	if n.chainSelector == nil {
-		return false
+		return chainselection.PeerTipUpdateUnhandled
 	}
-	if !n.chainSelector.PreparePeerTipAdmission(e) {
-		return false
+	if e.AdmissionID == 0 {
+		active, _ := n.chainSelector.GenesisSelectionState()
+		if !active {
+			return chainselection.PeerTipUpdateUnhandled
+		}
+		return n.chainSelector.ObservePeerTipUpdate(e)
 	}
-	n.touchPeerByConnId(e.ConnectionId)
-	return true
+	disposition := n.chainSelector.PreparePeerTipAdmissionDisposition(e)
+	if disposition == chainselection.PeerTipUpdateAccepted {
+		n.touchPeerByConnId(e.ConnectionId)
+	}
+	return disposition
 }
 
 // chainsyncResolvePeerTip removes rejected candidates immediately and promotes
@@ -117,6 +125,25 @@ func (n *Node) chainsyncApplyEligible(
 		return true
 	}
 	return n.chainSelector.ShouldApplyIngress(connId)
+}
+
+// chainsyncAwaitEagerness pauses a peer's header stream while its next header
+// is past the Limit on Eagerness. With no chain selector wired it never waits.
+func (n *Node) chainsyncAwaitEagerness(
+	ctx context.Context,
+	connId ouroboros.ConnectionId,
+	blockNumber uint64,
+	appliedTip func() ochainsync.Tip,
+) error {
+	if n.chainSelector == nil {
+		return nil
+	}
+	return n.chainSelector.AwaitEagernessLimit(
+		ctx,
+		connId,
+		blockNumber,
+		appliedTip,
+	)
 }
 
 // chainsyncHasBestPeer reports whether chain selection has a best peer.

@@ -674,6 +674,8 @@ func (o *Ouroboros) fetchLeiosTxOffer(
 		if !ok {
 			return false
 		}
+		// Persistence belongs to the node lifecycle and must outlive this peer request.
+		//nolint:contextcheck
 		if err := o.storeLeiosEndorserBlock(
 			point,
 			respBlock.BlockRaw,
@@ -728,6 +730,8 @@ func (o *Ouroboros) fetchLeiosTxOffer(
 		)
 		return false
 	}
+	// Persistence belongs to the node lifecycle and must outlive this peer request.
+	//nolint:contextcheck
 	if err := o.storeLeiosEndorserBlock(
 		point,
 		data.blockRaw,
@@ -779,6 +783,22 @@ func newLeiosTxFetchCandidate(
 	return &leiosTxFetchCandidate{
 		connId: connId, connKey: connKey, guard: guard,
 		client: client, point: point, done: done, ctx: ctx, cancel: cancel,
+	}
+}
+
+func (c *leiosTxFetchCandidate) canceled() bool {
+	if c.ctx.Err() != nil {
+		return true
+	}
+	if c.done == nil {
+		return false
+	}
+	select {
+	case <-c.done:
+		c.cancel()
+		return true
+	default:
+		return false
 	}
 }
 
@@ -836,6 +856,9 @@ func (o *Ouroboros) watchLeiosTxFetchCandidate(
 		if candidate.state.CompareAndSwap(
 			leiosTxFetchQueued,
 			leiosTxFetchCanceled,
+		) || candidate.state.CompareAndSwap(
+			leiosTxFetchRunning,
+			leiosTxFetchCanceled,
 		) {
 			o.cancelLeiosTxFetchCandidate(key, candidate)
 		}
@@ -870,7 +893,7 @@ func (o *Ouroboros) launchLeiosTxFetchOwner(
 	if o.leiosTxFetchBeforeLaunch != nil {
 		o.leiosTxFetchBeforeLaunch()
 	}
-	if connectionDone(candidate.done) || candidate.ctx.Err() != nil {
+	if candidate.canceled() {
 		o.finishLeiosTxFetch(key, candidate, false)
 		candidate.cancel()
 		o.releaseLeiosFetch(candidate.guard)
@@ -999,7 +1022,7 @@ func nextLeiosTxFetchOwner(
 	for len(claim.waiters) > 0 {
 		next := claim.waiters[0]
 		claim.waiters = claim.waiters[1:]
-		if next.ctx.Err() == nil {
+		if !next.canceled() {
 			return next, release
 		}
 		release = append(release, next)
@@ -2444,14 +2467,23 @@ func (o *Ouroboros) recordLeiosAnnouncement(
 	// same lock (announcementsMu before leiosMu) across its own check and
 	// insertion for the same reason.
 	o.leiosAnnouncementsMu.Lock()
-	err := o.recordLeiosAnnouncementLocked(
-		raw,
-		ebHash,
-		ebSize,
-		header,
-		source,
-		relay,
-	)
+	var err error
+	if data, ok := o.lookupLeiosEndorserBlock(
+		header.SlotNumber(),
+		ebHash.Bytes(),
+	); ok && data != nil {
+		err = validateLeiosEndorserBlockBinding(header, data)
+	}
+	if err == nil {
+		err = o.recordLeiosAnnouncementLocked(
+			raw,
+			ebHash,
+			ebSize,
+			header,
+			source,
+			relay,
+		)
+	}
 	// bindLeiosEndorserBlockSlot's reconciliation runs while
 	// leiosAnnouncementsMu is still held, for the atomicity reasons above; its
 	// returned publish step runs only after the unlock below, so vote,

@@ -755,6 +755,9 @@ func TestTokenRegistryAggregateBoundsEnvAndFlags(t *testing.T) {
 	t.Setenv("DINGO_TOKEN_REGISTRY_MAX_ARCHIVE_ENTRIES", "1002")
 	t.Setenv("DINGO_TOKEN_REGISTRY_MAX_ACCEPTED_ENTRIES", "1003")
 	t.Setenv("DINGO_TOKEN_REGISTRY_MAX_BATCH_BYTES", "1004")
+	t.Setenv("DINGO_TOKEN_REGISTRY_MANIFEST_URL", "https://env.example/manifest.json")
+	t.Setenv("DINGO_TOKEN_REGISTRY_TRUSTED_MANIFEST_KEY", strings.Repeat("ab", 32))
+	t.Setenv("DINGO_TOKEN_REGISTRY_ALLOW_ROLLBACK", "true")
 	configFile := filepath.Join(t.TempDir(), "dingo.yaml")
 	require.NoError(t, os.WriteFile(configFile, nil, 0o600))
 
@@ -764,6 +767,9 @@ func TestTokenRegistryAggregateBoundsEnvAndFlags(t *testing.T) {
 	require.Equal(t, 1002, cfg.TokenRegistry.MaxArchiveEntries)
 	require.Equal(t, 1003, cfg.TokenRegistry.MaxAcceptedEntries)
 	require.Equal(t, int64(1004), cfg.TokenRegistry.MaxBatchBytes)
+	require.Equal(t, "https://env.example/manifest.json", cfg.TokenRegistry.ManifestURL)
+	require.Equal(t, strings.Repeat("ab", 32), cfg.TokenRegistry.TrustedManifestKey)
+	require.True(t, cfg.TokenRegistry.AllowRollback)
 
 	cmd := &cobra.Command{Use: "dingo"}
 	RegisterFlags(cmd)
@@ -772,12 +778,18 @@ func TestTokenRegistryAggregateBoundsEnvAndFlags(t *testing.T) {
 		"--token-registry-max-archive-entries=2002",
 		"--token-registry-max-accepted-entries=2003",
 		"--token-registry-max-batch-bytes=2004",
+		"--token-registry-manifest-url=https://flag.example/manifest.json",
+		"--token-registry-trusted-manifest-key=" + strings.Repeat("cd", 32),
+		"--token-registry-allow-rollback=false",
 	}))
 	require.NoError(t, ApplyFlags(cmd, cfg))
 	require.Equal(t, int64(2001), cfg.TokenRegistry.MaxDecompressedBytes)
 	require.Equal(t, 2002, cfg.TokenRegistry.MaxArchiveEntries)
 	require.Equal(t, 2003, cfg.TokenRegistry.MaxAcceptedEntries)
 	require.Equal(t, int64(2004), cfg.TokenRegistry.MaxBatchBytes)
+	require.Equal(t, "https://flag.example/manifest.json", cfg.TokenRegistry.ManifestURL)
+	require.Equal(t, strings.Repeat("cd", 32), cfg.TokenRegistry.TrustedManifestKey)
+	require.False(t, cfg.TokenRegistry.AllowRollback)
 }
 
 func TestTokenRegistryAggregateBoundsYAML(t *testing.T) {
@@ -790,6 +802,9 @@ tokenRegistry:
   maxArchiveEntries: 3002
   maxAcceptedEntries: 3003
   maxBatchBytes: 3004
+  manifestUrl: https://yaml.example/manifest.json
+  trustedManifestKey: `+strings.Repeat("ef", 32)+`
+  allowRollback: true
 `), 0o600))
 
 	cfg, err := LoadConfig(configFile)
@@ -799,6 +814,9 @@ tokenRegistry:
 	require.Equal(t, 3002, cfg.TokenRegistry.MaxArchiveEntries)
 	require.Equal(t, 3003, cfg.TokenRegistry.MaxAcceptedEntries)
 	require.Equal(t, int64(3004), cfg.TokenRegistry.MaxBatchBytes)
+	require.Equal(t, "https://yaml.example/manifest.json", cfg.TokenRegistry.ManifestURL)
+	require.Equal(t, strings.Repeat("ef", 32), cfg.TokenRegistry.TrustedManifestKey)
+	require.True(t, cfg.TokenRegistry.AllowRollback)
 }
 
 func TestMempoolProviderSourcePrecedence(t *testing.T) {
@@ -1619,4 +1637,67 @@ func TestPlannerStatsRefreshDefaultsOnAndHonorsEnvOverride(t *testing.T) {
 	cfg, err := LoadConfig("")
 	require.NoError(t, err)
 	require.False(t, cfg.PlannerStatsRefreshEnabled)
+}
+
+// unsetBarkAllowPrivateEnv clears both spellings LoadConfig reads, so each
+// subtest exercises its own source rather than the caller's environment.
+func unsetBarkAllowPrivateEnv(t *testing.T) {
+	t.Helper()
+	unsetEnv(t, "CARDANO_DINGO_BARK_BLOCK_DOWNLOAD_ALLOW_PRIVATE_ADDRESSES")
+	unsetEnv(t, "DINGO_BARK_BLOCK_DOWNLOAD_ALLOW_PRIVATE_ADDRESSES")
+}
+
+func TestBarkBlockDownloadAllowPrivateAddressesBindings(t *testing.T) {
+	t.Run("default", func(t *testing.T) {
+		resetGlobalConfig()
+		unsetBarkAllowPrivateEnv(t)
+		t.Setenv("HOME", t.TempDir())
+
+		cfg, err := LoadConfig("")
+		require.NoError(t, err)
+		require.False(t, cfg.BarkBlockDownloadAllowPrivateAddresses)
+	})
+
+	t.Run("yaml", func(t *testing.T) {
+		resetGlobalConfig()
+		unsetBarkAllowPrivateEnv(t)
+		t.Setenv("HOME", t.TempDir())
+		configFile := filepath.Join(t.TempDir(), "dingo.yaml")
+		require.NoError(t, os.WriteFile(
+			configFile,
+			[]byte("barkBlockDownloadAllowPrivateAddresses: true\n"),
+			0o600,
+		))
+
+		cfg, err := LoadConfig(configFile)
+		require.NoError(t, err)
+		require.True(t, cfg.BarkBlockDownloadAllowPrivateAddresses)
+	})
+
+	t.Run("environment", func(t *testing.T) {
+		resetGlobalConfig()
+		unsetBarkAllowPrivateEnv(t)
+		t.Setenv("HOME", t.TempDir())
+		t.Setenv("DINGO_BARK_BLOCK_DOWNLOAD_ALLOW_PRIVATE_ADDRESSES", "true")
+
+		cfg, err := LoadConfig("")
+		require.NoError(t, err)
+		require.True(t, cfg.BarkBlockDownloadAllowPrivateAddresses)
+	})
+
+	t.Run("flag", func(t *testing.T) {
+		resetGlobalConfig()
+		unsetBarkAllowPrivateEnv(t)
+		t.Setenv("HOME", t.TempDir())
+		cfg, err := LoadConfig("")
+		require.NoError(t, err)
+
+		cmd := &cobra.Command{Use: "dingo"}
+		RegisterFlags(cmd)
+		require.NoError(t, cmd.ParseFlags([]string{
+			"--bark-block-download-allow-private-addresses",
+		}))
+		require.NoError(t, ApplyFlags(cmd, cfg))
+		require.True(t, cfg.BarkBlockDownloadAllowPrivateAddresses)
+	})
 }

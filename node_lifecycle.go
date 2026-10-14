@@ -209,12 +209,12 @@ var componentStopsForQuiesce = (*Node).quiesceComponentStops
 // decision.
 //
 // An unfinished wait escalates to errStorageDrainUnconfirmed rather than being
-// reported as an ordinary failure, matching connManager.Stop, the leios
-// persist writer's drain, and the storage providers below. The distinction is
-// what the caller does next: a component that reports a failure has stopped,
-// while one that never returned may still be reading or writing n.db, so
-// Restore/Truncate must abandon the operation and force a supervised restart
-// instead of reopening storage underneath it.
+// reported as an ordinary failure, matching connManager.Stop, the Leios
+// persistence/GC worker drain, and the storage providers below. The
+// distinction is what the caller does next: a component reporting a failure
+// has stopped. A stop that has not returned may still be reading or writing
+// n.db. Restore/Truncate must abandon the operation and force a supervised
+// restart instead of reopening storage underneath it.
 //
 // The abandoned goroutine is deliberately left running. It cannot be
 // interrupted from here, and the escalation brings the process down anyway, so
@@ -473,8 +473,14 @@ func (n *Node) quiesceForLiveLifecycleOp(ctx context.Context) error {
 	// Unsubscribe only stops future deliveries, so a handler goroutine
 	// already dispatched before this loop runs could still be reading
 	// those fields concurrently with that teardown.
-	drainSubscription(chainsync.ClientRemoveRequestedEventType, &n.chainsyncClientRemoveSubId)
-	drainSubscription(connmanager.ConnectionRecycleRequestedEventType, &n.connManagerRecycleSubId)
+	drainSubscription(
+		chainsync.ClientRemoveRequestedEventType,
+		&n.chainsyncClientRemoveSubId,
+	)
+	drainSubscription(
+		connmanager.ConnectionRecycleRequestedEventType,
+		&n.connManagerRecycleSubId,
+	)
 	// leiosVoteManager is stopped above and rebuilt by initLeiosVoteManager
 	// (called again for a Dijkstra/Leios-enabled node during reinit), which
 	// re-subscribes a fresh handler -- without unsubscribing the old one
@@ -496,7 +502,8 @@ func (n *Node) quiesceForLiveLifecycleOp(ctx context.Context) error {
 			)
 		}
 	}
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+	if errors.Is(err, context.Canceled) ||
+		errors.Is(err, context.DeadlineExceeded) {
 		err = errors.Join(err, errStorageDrainUnconfirmed)
 	}
 
@@ -517,6 +524,9 @@ func (n *Node) closeStorageForLiveLifecycleOp(ctx context.Context) error {
 	n.health.forgetTipGap()
 
 	if n.ledgerState != nil {
+		// Withdraw the ledger from the selector's wall-clock hook before
+		// Close tears down the slot clock it reads.
+		n.wallClockLedger.Store(nil)
 		if closeErr := n.ledgerState.Close(); closeErr != nil {
 			// Fail closed: do not nil n.ledgerState, close n.db, or stop
 			// the storage plugins below -- a goroutine this Close call
@@ -530,7 +540,7 @@ func (n *Node) closeStorageForLiveLifecycleOp(ctx context.Context) error {
 				fmt.Errorf("ledger state close: %w", closeErr),
 			)
 		}
-		n.ledgerState = nil
+		n.setLedgerState(nil)
 	}
 
 	if n.deferredIndexMaintenanceDone != nil {
@@ -668,7 +678,7 @@ func (n *Node) reinitializeCoreStorage(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to reload state database: %w", err)
 	}
-	n.ledgerState = state
+	n.setLedgerState(state)
 	// n.ouroboros is rewired in one place, once every rebuilt dependency
 	// exists; see the NewOuroboros call in reinitializeNetworkingCore.
 	if err := n.chainManager.SetLedger(n.ledgerState); err != nil {
@@ -680,9 +690,10 @@ func (n *Node) reinitializeCoreStorage(ctx context.Context) error {
 
 	if n.config.barkBaseUrl != "" {
 		barkBlobStore, err := bark.NewBarkBlobStore(bark.BlobStoreBarkConfig{
-			BaseUrl:                   n.config.barkBaseUrl,
-			BlockDownloadAllowedHosts: n.config.barkBlockDownloadHosts,
-			MaxBlockSize:              state.MaxBlockSize,
+			BaseUrl:                            n.config.barkBaseUrl,
+			BlockDownloadAllowedHosts:          n.config.barkBlockDownloadHosts,
+			BlockDownloadAllowPrivateAddresses: n.config.barkBlockDownloadAllowPrivateAddresses,
+			MaxBlockSize:                       state.MaxBlockSize,
 			HTTPClient: &http.Client{
 				Timeout: 30 * time.Second,
 			},
@@ -862,6 +873,7 @@ func (n *Node) reinitializeBackgroundManagers(ctx context.Context) error {
 	if err := n.ledgerState.Start(n.ctx); err != nil { //nolint:contextcheck
 		return fmt.Errorf("failed to restart ledger: %w", err)
 	}
+	n.publishStartedLedgerState()
 
 	if err := n.snapshotMgr.CaptureGenesisSnapshot(ctx); err != nil {
 		if err := n.handleGenesisSnapshotError(err); err != nil {
@@ -893,7 +905,10 @@ func (n *Node) reinitializeBackgroundManagers(ctx context.Context) error {
 	// trigger would leave it without statistics until the next rollover.
 	n.runPlannerStatsStartup(ctx)
 	if err := n.startPlannerStatsManager(n.ctx); err != nil { //nolint:contextcheck
-		return fmt.Errorf("failed to restart planner statistics manager: %w", err)
+		return fmt.Errorf(
+			"failed to restart planner statistics manager: %w",
+			err,
+		)
 	}
 
 	if n.config.experimentalDijkstraEnabled() {
@@ -966,7 +981,8 @@ func (n *Node) reinitializeNetworkingCore(ctx context.Context) error {
 			Logger:   n.config.logger,
 			EventBus: n.eventBus,
 			ListenersProvider: func() []connmanager.ListenerConfig {
-				return n.ouroboros().ConfigureListeners(n.ctx, n.config.listeners)
+				return n.ouroboros().
+					ConfigureListeners(n.ctx, n.config.listeners)
 			},
 			OutboundSourcePort: n.config.outboundSourcePort,
 			OutboundConnOptsProvider: func() []ouroboros.ConnectionOptionFunc {
@@ -1054,6 +1070,7 @@ func (n *Node) reinitializeNetworkingCore(ctx context.Context) error {
 	ouroborosCfg.ChainsyncState = n.chainsyncState
 	ouroborosCfg.ConnManager = n.connManager
 	ouroborosCfg.PeerGov = n.peerGov
+	//nolint:contextcheck // The replacement owns its Close-bound lifecycle and must outlive this restore operation context.
 	rebuiltOuroboros, err := ouroborosPkg.NewOuroboros(ouroborosCfg)
 	if err != nil {
 		return fmt.Errorf("failed to reconstruct ouroboros: %w", err)
@@ -1063,7 +1080,11 @@ func (n *Node) reinitializeNetworkingCore(ctx context.Context) error {
 	// without this the replacement instance would silently lose Leios vote
 	// and pipeline handling. Same call Run makes after its construction.
 	if err := n.attachLeiosHandlers(rebuiltOuroboros); err != nil {
-		return err
+		closeErr := rebuiltOuroboros.Close()
+		if errors.Is(closeErr, ouroborosPkg.ErrLeiosPersistDrainUnconfirmed) {
+			closeErr = errors.Join(errStorageDrainUnconfirmed, closeErr)
+		}
+		return errors.Join(err, closeErr)
 	}
 	n.ouroborosRef.Store(rebuiltOuroboros)
 	// Re-register the chainsync resync handler: Close took the previous
@@ -1083,7 +1104,11 @@ func (n *Node) reinitializeNetworkingCore(ctx context.Context) error {
 		usePeerSnapshot := genesisSelectionMode &&
 			topologyConfig.PeerSnapshot != nil &&
 			topologyConfig.PeerSnapshot.HasRelays()
-		n.peerGov.LoadTopologyConfig(topologyConfig) //nolint:contextcheck // address normalization bounds its own DNS lookup
+		// Address normalization bounds its own DNS lookup.
+		//nolint:contextcheck
+		n.peerGov.LoadTopologyConfig(
+			topologyConfig,
+		)
 		if usePeerSnapshot {
 			added := n.peerGov.LoadPeerSnapshot(
 				ctx,
@@ -1548,7 +1573,10 @@ func (n *Node) Snapshot(
 		dingoversion.GetVersionString(),
 		n.config.pluginSelections[plugin.CapabilityStorageBlob].Provider,
 		n.config.pluginSelections[plugin.CapabilityStorageMetadata].Provider,
-		n.config.databaseLifecycle.SnapshotCloudDestination,
+		lifecycle.EffectiveCloudDestination(
+			n.config.databaseLifecycle.SnapshotCloudDestination,
+			n.config.databaseLifecycle.SnapshotCloudDestinationPrefix,
+		),
 		name,
 		description,
 		manifestOpts...,
@@ -1751,13 +1779,7 @@ func (n *Node) Restore(
 			}
 			return nil
 		},
-		lifecycle.RestoreStorageConfig{
-			Blob:     n.config.pluginSelections[plugin.CapabilityStorageBlob].Config,
-			Metadata: n.config.pluginSelections[plugin.CapabilityStorageMetadata].Config,
-			AlonzoLovelacePerUtxoWord: cardano.AlonzoLovelacePerUtxoWord(
-				n.config.cardanoNodeConfig, "", n.config.network,
-			),
-		},
+		n.restoreStorageConfig(),
 		manifestOpts...,
 	)
 	if err != nil {
@@ -1776,6 +1798,15 @@ func (n *Node) Restore(
 
 	backupDir, err := n.swapInRestoredDataDir(stagingDir)
 	if err != nil {
+		if errors.Is(err, errRestoreSwapActivated) {
+			n.cancel()
+			return lifecycle.Manifest{}, fmt.Errorf(
+				"%w (pre-restore local backup preserved at %q and remote rollback backup at %q pending a restart)",
+				err,
+				backupDir,
+				recovery.BackupDir(),
+			)
+		}
 		if rollbackErr := recovery.Rollback(ctx); rollbackErr != nil {
 			n.cancel()
 			return lifecycle.Manifest{}, errors.Join(err, rollbackErr)
@@ -1820,23 +1851,27 @@ func (n *Node) Restore(
 			recovery.BackupDir(),
 		)
 	}
-	if err := recovery.Commit(); err != nil {
+	if err := finalizeSuccessfulRestore(recovery.Commit, backupDir); err != nil {
 		n.config.logger.Warn(
-			"failed to remove remote rollback backup after a successful restore",
-			"dir",
-			recovery.BackupDir(),
+			"failed to finalize restore recovery after a successful restore",
+			"remote_recovery_dir", recovery.BackupDir(),
+			"local_backup_dir", backupDir,
 			"error",
 			err,
 		)
-	}
-	if err := os.RemoveAll(backupDir); err != nil {
-		n.config.logger.Warn(
-			"failed to remove pre-restore backup after a successful restore",
-			"dir", backupDir,
-			"error", err,
-		)
+		return manifest, nil
 	}
 	return manifest, nil
+}
+
+func finalizeSuccessfulRestore(commit func() error, backupDir string) error {
+	if err := commit(); err != nil {
+		return fmt.Errorf("commit remote restore recovery: %w", err)
+	}
+	if err := os.RemoveAll(backupDir); err != nil {
+		return fmt.Errorf("remove pre-restore backup: %w", err)
+	}
+	return nil
 }
 
 // errRestoreSwapUnrecoverable marks a swapInRestoredDataDir failure where
@@ -1847,16 +1882,20 @@ var errRestoreSwapUnrecoverable = errors.New(
 	"data directory swap left no usable data directory in place",
 )
 
+var errRestoreSwapActivated = errors.New(
+	"restored data directory was activated but its durability is unconfirmed",
+)
+
 // errStorageDrainUnconfirmed marks a quiesceForLiveLifecycleOp or
 // closeStorageForLiveLifecycleOp failure where a background goroutine could
 // not be confirmed to have exited before its bounded wait timed out —
 // currently n.ledgerState.Close()'s rollback-event/dbWorkerPool waits, the
-// leios persist writer's drain (PauseLeiosPersistWriterForLiveLifecycleOp),
-// or a storage provider whose context-bounded Stop returned before its cleanup
-// completed. Unlike every other error
-// these functions can return, this one means a goroutine may still be
-// reading/writing n.db, not merely that some cleanup step reported failure
-// after the resource was already unused. Restore/Truncate must not treat
+// Leios persistence/GC worker drain
+// (PauseLeiosPersistWriterForLiveLifecycleOp), or a storage provider whose
+// context-bounded Stop returned before its cleanup completed. Unlike every
+// other error these functions can return, this one means a goroutine may
+// still be reading/writing n.db; other errors may only report cleanup failure
+// after a resource is already unused. Restore/Truncate must not treat
 // this the way they treat every other quiesce/close-storage error (attempt
 // reinitializeAndResume against the same on-disk data): reopening storage a
 // still-running goroutine may be touching is exactly the use-after-close
@@ -1967,9 +2006,9 @@ func (n *Node) swapInRestoredDataDir(
 		return "", fmt.Errorf("activate restored data directory: %w", err)
 	}
 	if err := syncDataDirParent(parentDir); err != nil {
-		return "", fmt.Errorf(
-			"sync %q after activating restored data directory: %w",
-			parentDir, err,
+		return backupDir, fmt.Errorf(
+			"%w: sync %q after activating restored data directory: %w",
+			errRestoreSwapActivated, parentDir, err,
 		)
 	}
 	return backupDir, nil
@@ -2061,6 +2100,74 @@ func (n *Node) reconcileInterruptedLiveRestoreSwap() error {
 	}
 }
 
+func (n *Node) restoreStorageConfig() lifecycle.RestoreStorageConfig {
+	return lifecycle.RestoreStorageConfig{
+		Blob:          n.config.pluginSelections[plugin.CapabilityStorageBlob].Config,
+		Metadata:      n.config.pluginSelections[plugin.CapabilityStorageMetadata].Config,
+		ActiveDataDir: n.config.dataDir,
+		AlonzoLovelacePerUtxoWord: cardano.AlonzoLovelacePerUtxoWord(
+			n.config.cardanoNodeConfig, "", n.config.network,
+		),
+	}
+}
+
+func (n *Node) reconcileInterruptedRestore(ctx context.Context) error {
+	if err := n.reconcileInterruptedLiveRestoreSwap(); err != nil {
+		return fmt.Errorf(
+			"reconcile interrupted live restore swap: %w", err,
+		)
+	}
+	if err := n.reconcileInterruptedRemoteRestore(ctx); err != nil {
+		return fmt.Errorf("reconcile interrupted remote restore: %w", err)
+	}
+	return nil
+}
+
+var recoverInterruptedRestore = lifecycle.RecoverInterruptedRestore
+
+func (n *Node) reconcileInterruptedRemoteRestore(ctx context.Context) error {
+	dataDir := n.config.dataDir
+	stagingDir := dataDir + restoreStagingSuffix
+	recoveryDir := lifecycle.RestoreRecoveryDir(stagingDir)
+	if _, err := os.Stat(recoveryDir); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("stat remote restore recovery directory: %w", err)
+	}
+	_, dataErr := os.Stat(dataDir)
+	_, backupErr := os.Stat(dataDir + preRestoreBackupSuffix)
+	if dataErr != nil && !os.IsNotExist(dataErr) {
+		return fmt.Errorf("stat data directory during remote restore recovery: %w", dataErr)
+	}
+	if backupErr != nil && !os.IsNotExist(backupErr) {
+		return fmt.Errorf("stat backup directory during remote restore recovery: %w", backupErr)
+	}
+	if !remoteRestoreNeedsRollback(dataErr == nil, backupErr == nil) {
+		return nil
+	}
+	host, err := internalplugins.NewHost()
+	if err != nil {
+		return fmt.Errorf("build storage plugin host for restore recovery: %w", err)
+	}
+	defer host.Stop(context.WithoutCancel(ctx)) //nolint:errcheck
+	if err := recoverInterruptedRestore(
+		ctx,
+		host,
+		recoveryDir,
+		stagingDir,
+		n.restoreStorageConfig(),
+		false,
+	); err != nil {
+		return fmt.Errorf("roll back interrupted remote restore: %w", err)
+	}
+	return nil
+}
+
+func remoteRestoreNeedsRollback(dataExists, backupExists bool) bool {
+	return !dataExists || !backupExists
+}
+
 // removeConfirmedRestoreBackup removes n.config.dataDir's pre-restore
 // backup, if one is present, once Run() has fully started on dataDir --
 // the proof (matching reinitializeAndResume's role for the in-process
@@ -2069,6 +2176,41 @@ func (n *Node) reconcileInterruptedLiveRestoreSwap() error {
 func (n *Node) removeConfirmedRestoreBackup() {
 	backupDir := n.config.dataDir + preRestoreBackupSuffix
 	if _, err := os.Stat(backupDir); err != nil {
+		return
+	}
+	recoveryDir := lifecycle.RestoreRecoveryDir(
+		n.config.dataDir + restoreStagingSuffix,
+	)
+	if _, err := os.Stat(recoveryDir); err == nil {
+		host, hostErr := internalplugins.NewHost()
+		if hostErr != nil {
+			n.config.logger.Warn(
+				"failed to build storage plugin host for restore cleanup",
+				"error", hostErr,
+			)
+			return
+		}
+		cleanupErr := lifecycle.RecoverInterruptedRestore(
+			context.Background(),
+			host,
+			recoveryDir,
+			n.config.dataDir,
+			n.restoreStorageConfig(),
+			true,
+		)
+		_ = host.Stop(context.Background())
+		if cleanupErr != nil {
+			n.config.logger.Warn(
+				"failed to reclaim the prior remote blob namespace",
+				"error", cleanupErr,
+			)
+			return
+		}
+	} else if !os.IsNotExist(err) {
+		n.config.logger.Warn(
+			"failed to inspect remote restore recovery directory",
+			"error", err,
+		)
 		return
 	}
 	if err := os.RemoveAll(backupDir); err != nil {

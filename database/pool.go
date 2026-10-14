@@ -93,7 +93,9 @@ func (d *Database) ImportPool(
 }
 
 // UpdatePoolOpCertSequence records an observed op-cert sequence for a pool
-// and updates the pool's denormalized maximum.
+// and updates the pool's denormalized maximum. The first counter written for
+// a (pool, slot) wins; a different counter at that slot returns an opcert
+// counter conflict error and rolls back the write transaction.
 func (d *Database) UpdatePoolOpCertSequence(
 	ctx context.Context,
 	pkh lcommon.PoolKeyHash,
@@ -246,6 +248,25 @@ func (d *Database) GetPoolByVrfKeyHash(
 		defer txn.Release()
 	}
 	return d.metadata.GetPoolByVrfKeyHash(
+		vrfKeyHash,
+		epochStartSlot,
+		txn.Metadata(),
+	)
+}
+
+// GetFuturePoolByVrfKeyHash retrieves the pool whose pending parameters claim
+// the given VRF key hash during the current epoch.
+func (d *Database) GetFuturePoolByVrfKeyHash(
+	ctx context.Context,
+	vrfKeyHash []byte,
+	epochStartSlot uint64,
+	txn *Txn,
+) (*models.Pool, error) {
+	if txn == nil {
+		txn = d.Transaction(ctx, false)
+		defer txn.Release()
+	}
+	return d.metadata.GetFuturePoolByVrfKeyHash(
 		vrfKeyHash,
 		epochStartSlot,
 		txn.Metadata(),
