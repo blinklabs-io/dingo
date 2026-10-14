@@ -22,6 +22,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
+	"github.com/blinklabs-io/dingo/database/types"
 )
 
 // FinalizeBackfillPlannerStats refreshes statistics once per completed backfill.
@@ -65,10 +66,26 @@ func FinalizeBackfillPlannerStats(
 		cp.LastSlot,
 	)
 	started := time.Now()
-	if contextual, ok := updater.(metadata.ContextPlannerStatsUpdater); ok {
-		err = contextual.UpdatePlannerStatsContext(ctx)
-	} else {
-		err = updater.UpdatePlannerStats()
+	optimized := false
+	if incremental, ok := updater.(metadata.IncrementalPlannerStatsUpdater); ok {
+		result, optimizeErr := incremental.OptimizePlannerStatsContext(
+			ctx,
+			types.PlannerStatsTriggerStartup,
+		)
+		if optimizeErr != nil {
+			return fmt.Errorf(
+				"refresh planner statistics after backfill: %w",
+				optimizeErr,
+			)
+		}
+		optimized = result.Supported && !result.Skipped
+	}
+	if !optimized {
+		if contextual, ok := updater.(metadata.ContextPlannerStatsUpdater); ok {
+			err = contextual.UpdatePlannerStatsContext(ctx)
+		} else {
+			err = updater.UpdatePlannerStats()
+		}
 	}
 	if err != nil {
 		return fmt.Errorf("refresh planner statistics after backfill: %w", err)
@@ -76,8 +93,8 @@ func FinalizeBackfillPlannerStats(
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	// The marker follows successful ANALYZE. A crash before this write safely
-	// repeats analysis instead of allowing stale statistics through readiness.
+	// Record only completed maintenance; a crash before this write reruns it
+	// instead of declaring readiness with stale planner statistics.
 	if err := db.SetSyncState(metadata.PlannerStatsBackfillSyncKey, version, nil); err != nil {
 		return err
 	}

@@ -464,7 +464,8 @@ func TestNonSQLiteDialectsAreLeftUntouchedByOptimize(t *testing.T) {
 	require.Len(t, sqliteExec.statements, 1)
 	require.Contains(t, sqliteExec.statements[0], "PRAGMA optimize")
 
-	// The full-ANALYZE path Mithril and backfill use is unchanged.
+	// Explicit full ANALYZE remains available; Mithril prefers incremental
+	// planner-stat maintenance on supported backends.
 	pg := &recordingExecer{}
 	require.NoError(
 		t,
