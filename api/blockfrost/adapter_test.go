@@ -197,12 +197,8 @@ func TestNodeAdapterAccountUTXOsEmpty(t *testing.T) {
 }
 
 // TestNodeAdapterAddressUTXOsLargeResultSetPagination seeds one address with
-// a large number of live UTxOs and proves ascending and descending
-// pagination both return the correct window. It exercises the windowed
-// reverse in NodeAdapter.AddressUTXOs (adapter.go): descending pagination
-// used to swap-reverse the address's entire UTxO history before slicing out
-// a page; reversing only the requested window must produce the identical
-// ordering for a large result set (see dingo/3520).
+// more UTxOs than the public aggregation limit and proves ascending and
+// descending pagination both return bounded windows in the requested order.
 func TestNodeAdapterAddressUTXOsLargeResultSetPagination(t *testing.T) {
 	t.Parallel()
 
@@ -217,7 +213,7 @@ func TestNodeAdapterAddressUTXOsLargeResultSetPagination(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	const total = 250
+	const total = database.DefaultPublicUtxoResultLimit + 1
 	for i := range total {
 		txHash := make([]byte, 32)
 		binary.BigEndian.PutUint32(txHash[28:], uint32(i)+1)
@@ -258,22 +254,22 @@ func TestNodeAdapterAddressUTXOsLargeResultSetPagination(t *testing.T) {
 			PaginationParams{Count: 10, Page: 5, Order: PaginationOrderDesc},
 		)
 		require.NoError(t, err)
-		assert.Equal(t, 250, total)
+		assert.Equal(t, -1, total)
 		require.Len(t, items, 10)
 		// Descending page 5 (count 10) is the 41st-newest through the
-		// 50th-newest UTxO: amounts 210000000 down to 201000000.
-		assert.Equal(t, "210000000", items[0].Amount[0].Quantity)
-		assert.Equal(t, "201000000", items[len(items)-1].Amount[0].Quantity)
+		// 50th-newest UTxO.
+		assert.Equal(t, "961000000", items[0].Amount[0].Quantity)
+		assert.Equal(t, "952000000", items[len(items)-1].Amount[0].Quantity)
 	})
 
 	t.Run("descending page past the end is empty", func(t *testing.T) {
 		items, total, err := adapter.AddressUTXOs(
 			context.Background(),
 			addr.String(),
-			PaginationParams{Count: 10, Page: 26, Order: PaginationOrderDesc},
+			PaginationParams{Count: 10, Page: 102, Order: PaginationOrderDesc},
 		)
 		require.NoError(t, err)
-		assert.Equal(t, 250, total)
+		assert.Equal(t, 1001, total)
 		assert.Empty(t, items)
 	})
 }
@@ -332,7 +328,6 @@ func TestAddressUtxoPageRefsRejectsSparseCandidateExhaustion(t *testing.T) {
 	_, _, err := addressUtxoPageRefs(
 		refs,
 		false,
-		PaginationParams{Count: 2, Page: 1, Order: PaginationOrderAsc},
 		0,
 		2,
 	)

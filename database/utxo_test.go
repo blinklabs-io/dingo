@@ -1053,27 +1053,72 @@ func TestUtxosByAddressWithOrderingRejectsOffsetOnExactAddress(t *testing.T) {
 	require.ErrorIs(t, err, models.ErrOffsetRequiresCoarseMatch)
 }
 
-// TestUtxosByAddressWithOrderingRejectsDescendingKeyset proves Descending
-// cannot be combined with keyset (After) pagination: the After predicate's
-// comparison operators assume ascending order, so silently accepting both
-// would return rows in the wrong direction from the cursor instead of
-// failing loudly.
-func TestUtxosByAddressWithOrderingRejectsDescendingKeyset(t *testing.T) {
+func TestUtxosByAddressWithOrderingKeysetDirections(t *testing.T) {
 	t.Parallel()
 
 	db := openTestDB(t)
-
-	_, err := db.UtxosByAddressWithOrdering(
-		context.Background(),
-		&models.UtxoWithOrderingQuery{
-			MatchAllAddresses: true,
-			Descending:        true,
-			After:             &models.UtxoOrderingCursor{Slot: 1},
-			Limit:             10,
-		},
+	raw := rawSQLiteMetadataFixture(t, db)
+	payment := bytes.Repeat([]byte{0x23}, lcommon.AddressHashSize)
+	addr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyNone,
+		lcommon.AddressNetworkTestnet,
+		payment,
 		nil,
 	)
-	require.ErrorIs(t, err, models.ErrDescendingKeysetUnsupported)
+	require.NoError(t, err)
+	encoded, err := cbor.Encode(&shelley.ShelleyTransactionOutput{
+		OutputAddress: addr,
+		OutputAmount:  1_000_000,
+	})
+	require.NoError(t, err)
+	require.NoError(t, db.BlobTxn(true).Do(func(txn *Txn) error {
+		for i := 1; i <= 6; i++ {
+			txHash := make([]byte, 32)
+			txHash[31] = byte(i)
+			seedExactAddressImportedUtxo(t, raw, addr, 1, 0, txHash)
+			if err := db.Blob().SetUtxo(txn.Blob(), txHash, 0, encoded); err != nil {
+				return err
+			}
+		}
+		return nil
+	}))
+	pattern, err := models.ExactUtxoAddressPattern(addr)
+	require.NoError(t, err)
+
+	for _, test := range []struct {
+		name       string
+		descending bool
+		want       []byte
+	}{
+		{name: "ascending", want: []byte{1, 2, 3, 4, 5, 6}},
+		{name: "descending", descending: true, want: []byte{6, 5, 4, 3, 2, 1}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			query := &models.UtxoWithOrderingQuery{
+				AddressPatterns: []models.UtxoAddressPattern{pattern},
+				Descending:      test.descending,
+				Limit:           3,
+			}
+			first, err := db.UtxosByAddressWithOrdering(t.Context(), query, nil)
+			require.NoError(t, err)
+			require.Len(t, first, 3)
+			last := first[len(first)-1]
+			query.After = &models.UtxoOrderingCursor{
+				Slot:       last.TxSlot,
+				BlockIndex: last.TxBlockIndex,
+				OutputIdx:  last.OutputIdx,
+				TxId:       last.TxId,
+			}
+			second, err := db.UtxosByAddressWithOrdering(t.Context(), query, nil)
+			require.NoError(t, err)
+			require.Len(t, second, 3)
+			got := make([]byte, 0, 6)
+			for _, item := range append(first, second...) {
+				got = append(got, item.TxId[31])
+			}
+			assert.Equal(t, test.want, got)
+		})
+	}
 }
 
 // TestUtxosByAddressWithOrderingRejectsOffsetKeyset proves Offset cannot be

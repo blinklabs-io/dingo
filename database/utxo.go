@@ -1343,7 +1343,6 @@ func (d *Database) MatchingUtxoRefsByAddressWithOrderingBounded(
 	scanQuery.Limit = min(matchingUtxoRefBatchSize, maxCandidates)
 	scanQuery.SkipAssets = true
 	scanQuery.Offset = 0
-	scanQuery.Descending = false
 	refs := make([]models.UtxoId, 0, min(q.Limit, maxCandidates))
 	candidates := 0
 	cborBytes := 0

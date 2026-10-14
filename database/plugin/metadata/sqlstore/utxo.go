@@ -2077,12 +2077,6 @@ func (s *Store) GetUtxosByAddressWithOrdering(
 			"OnlyFilteredAsset requires FilterByAsset",
 		)
 	}
-	if query.After != nil && query.Descending {
-		return nil, fmt.Errorf(
-			"GetUtxosByAddressWithOrdering: %w",
-			models.ErrDescendingKeysetUnsupported,
-		)
-	}
 	if query.After != nil && query.Offset > 0 {
 		return nil, fmt.Errorf(
 			"GetUtxosByAddressWithOrdering: %w",
@@ -2118,14 +2112,18 @@ func (s *Store) GetUtxosByAddressWithOrdering(
 	slotExpr := `COALESCE("transaction".slot, utxo.added_slot)`
 	blockIndexExpr := `COALESCE("transaction".block_index, 0)`
 	if query.After != nil {
+		comparison := ">"
+		if query.Descending {
+			comparison = "<"
+		}
 		predicate += `
  AND (
-     ` + slotExpr + ` > ?
-     OR (` + slotExpr + ` = ? AND ` + blockIndexExpr + ` > ?)
+     ` + slotExpr + ` ` + comparison + ` ?
+     OR (` + slotExpr + ` = ? AND ` + blockIndexExpr + ` ` + comparison + ` ?)
      OR (` + slotExpr + ` = ? AND ` + blockIndexExpr + ` = ?
-         AND utxo.output_idx > ?)
+         AND utxo.output_idx ` + comparison + ` ?)
      OR (` + slotExpr + ` = ? AND ` + blockIndexExpr + ` = ?
-         AND utxo.output_idx = ? AND utxo.tx_id > ?)
+         AND utxo.output_idx = ? AND utxo.tx_id ` + comparison + ` ?)
  )`
 		args = append(
 			args,

@@ -3405,14 +3405,12 @@ func (a *NodeAdapter) AddressUTXOs(
 	}
 	requestedEnd := offset + params.Count
 	matchLimit := requestedEnd + 1
-	if params.Order == PaginationOrderDesc {
-		matchLimit = database.DefaultPublicUtxoResultLimit + 1
-	}
 	refs, exhausted, err := db.MatchingUtxoRefsByAddressWithOrderingBounded(
 		ctx,
 		&models.UtxoWithOrderingQuery{
 			AddressPatterns: []models.UtxoAddressPattern{pattern},
 			Limit:           matchLimit,
+			Descending:      params.Order == PaginationOrderDesc,
 		},
 		txn,
 		database.ExactAddressCandidateScanLimit,
@@ -3428,7 +3426,6 @@ func (a *NodeAdapter) AddressUTXOs(
 	pageRefs, total, err := addressUtxoPageRefs(
 		refs,
 		exhausted,
-		params,
 		offset,
 		requestedEnd,
 	)
@@ -3499,34 +3496,19 @@ func (a *NodeAdapter) AddressUTXOs(
 func addressUtxoPageRefs(
 	refs []models.UtxoId,
 	exhausted bool,
-	params PaginationParams,
 	offset int,
 	requestedEnd int,
 ) ([]models.UtxoId, int, error) {
 	total := -1
-	if params.Order == PaginationOrderDesc {
-		if !exhausted {
-			return nil, 0, models.ErrUtxoQueryBudgetExceeded
-		}
-		total = len(refs)
-		start, end := paginationRange(total, params)
-		pageRefs := append(
-			[]models.UtxoId(nil),
-			refs[total-end:total-start]...,
-		)
-		slices.Reverse(pageRefs)
-		return pageRefs, total, nil
-	} else {
-		if !exhausted && len(refs) < requestedEnd {
-			return nil, 0, models.ErrUtxoQueryBudgetExceeded
-		}
-		if exhausted {
-			total = len(refs)
-		}
-		start := min(offset, len(refs))
-		end := min(requestedEnd, len(refs))
-		return refs[start:end], total, nil
+	if !exhausted && len(refs) < requestedEnd {
+		return nil, 0, models.ErrUtxoQueryBudgetExceeded
 	}
+	if exhausted {
+		total = len(refs)
+	}
+	start := min(offset, len(refs))
+	end := min(requestedEnd, len(refs))
+	return refs[start:end], total, nil
 }
 
 // orderedUtxosByRefs fetches full UTxO rows (including assets) for refs in
