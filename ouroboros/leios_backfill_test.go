@@ -635,8 +635,16 @@ func TestLeiosFetchGuardCooldown(t *testing.T) {
 }
 
 func TestBackfillFinalRelayGetsRemainingBudgetAfterPromotion(t *testing.T) {
-	t.Parallel()
+	previousCursor := leiosBackfillConnCursor.Load()
+	leiosBackfillConnCursor.Store(2)
+	t.Cleanup(func() { leiosBackfillConnCursor.Store(previousCursor) })
 	cm, peers := newLeiosBackfillSelectorPeers(t, "active", "fallback")
+	dropped := newLeiosFetchConversationWithAddrs(
+		t,
+		fakeConnAddr("dropped-local"),
+		fakeConnAddr("dropped-remote"),
+	)
+	t.Cleanup(func() { _ = dropped.Close() })
 	state := chainsync.NewState(nil, nil)
 	state.SetClientConnId(peers[0].Id())
 	o := newOuroboros(OuroborosConfig{ConnManager: cm, ChainsyncState: state})
@@ -647,18 +655,31 @@ func TestBackfillFinalRelayGetsRemainingBudgetAfterPromotion(t *testing.T) {
 	defer cancel()
 	overall, _ := ctx.Deadline()
 	attempts := []ouroboros.ConnectionId{}
+	droppedDuringSweep := false
+	getConnection := func(id ouroboros.ConnectionId) *ouroboros.Connection {
+		if id == dropped.Id() {
+			if droppedDuringSweep {
+				return nil
+			}
+			return dropped
+		}
+		return cm.GetConnectionById(id)
+	}
 	err := o.fetchEndorserBlockWithCandidates(
 		ctx,
 		point.Slot,
 		point.Hash,
 		[]ouroboros.ConnectionId{
 			peers[0].Id(),
-			namedConnId("removed"),
+			dropped.Id(),
 			peers[1].Id(),
 		},
-		cm.GetConnectionById,
+		getConnection,
 		func(_ context.Context, id ouroboros.ConnectionId, _ *leiosfetch.Client, _ ocommon.Point, deadline time.Time) error {
 			attempts = append(attempts, id)
+			if id == peers[0].Id() {
+				droppedDuringSweep = true
+			}
 			if id == peers[1].Id() {
 				require.True(t, overall.Equal(deadline))
 			}
