@@ -3672,8 +3672,9 @@ the absolute Byron-to-Shelley boundary is part of the observed chain unless a
 test profile explicitly configures it.
 
 Byron epochs carry no protocol-parameter CBOR or Shelley reward schedule;
-their rollovers preserve timing and nonce state, and delayed rewards skip a
-Byron performance epoch until Shelley parameters exist. So
+their rollovers preserve timing and nonce state, and delayed rewards skip
+every round whose ended epoch is Byron; the round after the first Shelley
+epoch reads that epoch's parameters, as described above. So
 `GetCurrentPParams` returns nil for the whole Byron prefix: 4 epochs on
 preprod, 208 on mainnet. Any consumer that reads protocol parameters during a
 from-genesis replay must tolerate that, and the eras that follow are unaffected

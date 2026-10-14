@@ -3223,8 +3223,10 @@ func stakeRewardEpochsForApplication(
 	// reads genesis pots and empty previous block counts; epoch 1 reads the
 	// epoch-1 pots and epoch 0's blocks. Both updates must be applied, even
 	// though empty counts yield no expansion when d < 0.8. Preview's d=1
-	// requires expansion at both boundaries. The Byron performance-epoch
-	// guard in applyStakeRewards suppresses rounds before Shelley.
+	// requires expansion at both boundaries. On a network that starts in
+	// Byron, applyStakeRewardUpdate skips every round whose ended epoch is
+	// Byron and applies the round after the first Shelley epoch through
+	// applyFirstShelleyStakeRewardRound.
 	if newEpoch == 1 || newEpoch == 2 {
 		return stakeRewardEpochs{
 			snapshot:    0,
