@@ -1236,7 +1236,22 @@ func compareEpochAccounts(
 			refund.CredentialTag,
 		)
 		if err != nil {
-			credentialErrs = append(credentialErrs, err)
+			logger.Warn(
+				"koiosparity: failed to decode proposal refund credential",
+				"refund_epoch",
+				epoch+1,
+				"error",
+				err,
+			)
+			out = append(out, CheckMismatch{
+				Network:    network,
+				Epoch:      epoch,
+				Field:      "account_reward_address_decode",
+				DingoValue: fmt.Sprintf("error: %v", err),
+				KoiosValue: "",
+				Category:   CategoryDBError,
+				CheckedAt:  now,
+			})
 			continue
 		}
 		dingoRows = append(dingoRows, DingoAccountReward{

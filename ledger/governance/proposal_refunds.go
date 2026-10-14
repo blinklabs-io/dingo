@@ -20,6 +20,7 @@ import (
 	"slices"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
 // ProposalDepositRefund is a proposal deposit that an epoch boundary credited
@@ -87,9 +88,11 @@ func ProposalDepositRefundSlots(
 // treasury-withdrawal branch of EnactProposal). The discriminated credit is
 // tried first so a withdrawal credited under the plain hash is never read as
 // the refund. A journal written before the discriminator existed holds only
-// the withdrawal credit in that collision case, which is paired here as the
-// refund and so reads as a value difference against the reference, which
-// does list the deposit.
+// the withdrawal credit in that collision case, because the refund under the
+// same hash was dropped as a replay. The plain hash is therefore never tried
+// for a proposal whose withdrawal pays its return account: that deposit was
+// not credited, and pairing the withdrawal as the refund would pass parity
+// whenever the two amounts happen to be equal.
 //
 // credits must hold the journal credits at every slot returned by
 // ProposalDepositRefundSlots. Each credit pairs with at most one proposal.
@@ -136,9 +139,20 @@ func MatchProposalDepositRefunds(
 			tag, key, slot, proposalDepositRefundSourceHash(proposal),
 		)
 		if credit == nil {
-			i, credit = find(
-				tag, key, slot, proposalRewardSourceHash(proposal),
-			)
+			collides, err := refundCollidesWithWithdrawal(proposal, epoch)
+			if err != nil {
+				return nil, fmt.Errorf(
+					"proposal %s#%d: %w",
+					shortHash(proposal.TxHash),
+					proposal.ActionIndex,
+					err,
+				)
+			}
+			if !collides {
+				i, credit = find(
+					tag, key, slot, proposalRewardSourceHash(proposal),
+				)
+			}
 		}
 		if credit == nil {
 			continue
@@ -151,4 +165,30 @@ func MatchProposalDepositRefunds(
 		})
 	}
 	return out, nil
+}
+
+// refundCollidesWithWithdrawal reports whether proposal is a treasury
+// withdrawal enacted when epoch began that pays its own return account, the
+// case in which EnactProposal journals the refund under the refund
+// discriminator rather than the plain proposal hash.
+func refundCollidesWithWithdrawal(
+	proposal *models.GovernanceProposal,
+	epoch uint64,
+) (bool, error) {
+	if proposal.EnactedEpoch == nil || *proposal.EnactedEpoch != epoch ||
+		lcommon.GovActionType(proposal.ActionType) !=
+			lcommon.GovActionTypeTreasuryWithdrawal {
+		return false, nil
+	}
+	action, err := decodeGovAction(proposal.GovActionCbor, proposal.ActionType)
+	if err != nil {
+		return false, fmt.Errorf("decode treasury withdrawal: %w", err)
+	}
+	withdrawal, ok := action.(*lcommon.TreasuryWithdrawalGovAction)
+	if !ok {
+		return false, fmt.Errorf(
+			"decode treasury withdrawal: unexpected action %T", action,
+		)
+	}
+	return returnAccountReceivesWithdrawal(proposal, withdrawal)
 }

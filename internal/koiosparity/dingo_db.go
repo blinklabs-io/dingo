@@ -1135,12 +1135,19 @@ func (d *DingoDB) GetRewardAccountOutputs(
 }
 
 // GetProposalDepositRefunds implements RewardParitySource with the same two
-// reads DatabaseSource makes, against the metadata schema directly.
+// reads DatabaseSource makes, against the metadata schema directly. Both run
+// in one read-only transaction so a rollback between them cannot remove the
+// credits of proposals the first read already returned.
 func (d *DingoDB) GetProposalDepositRefunds(
 	ctx context.Context,
 	refundEpoch uint64,
 ) ([]governance.ProposalDepositRefund, error) {
-	proposals, err := d.proposalsRefundedAt(ctx, refundEpoch)
+	tx, err := d.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, fmt.Errorf("begin proposal refund read: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	proposals, err := d.proposalsRefundedAt(ctx, tx, refundEpoch)
 	if err != nil {
 		return nil, fmt.Errorf(
 			"governance proposals refunded at epoch %d: %w",
@@ -1153,7 +1160,7 @@ func (d *DingoDB) GetProposalDepositRefunds(
 		proposals,
 		refundEpoch,
 	) {
-		slotCredits, err := d.postSnapshotCreditEvents(ctx, slot)
+		slotCredits, err := d.postSnapshotCreditEvents(ctx, tx, slot)
 		if err != nil {
 			return nil, fmt.Errorf(
 				"reward credits at slot %d: %w",
@@ -1172,15 +1179,18 @@ func (d *DingoDB) GetProposalDepositRefunds(
 
 // proposalsRefundedAt mirrors
 // MetadataStore.GetGovernanceProposalsRefundedAt, reading only the columns
-// the refund pairing needs. dropped_epoch/dropped_slot live in the
-// governance_proposal_drop companion table.
+// the refund pairing needs: the action type and CBOR decide whether a
+// treasury withdrawal pays its own return account. dropped_epoch/dropped_slot
+// live in the governance_proposal_drop companion table.
 func (d *DingoDB) proposalsRefundedAt(
 	ctx context.Context,
+	tx *sql.Tx,
 	epoch uint64,
 ) ([]*models.GovernanceProposal, error) {
-	rows, err := d.query(
+	rows, err := tx.QueryContext(
 		ctx,
-		`SELECT governance_proposal.tx_hash, governance_proposal.action_index,
+		rebind(`SELECT governance_proposal.tx_hash, governance_proposal.action_index,
+       governance_proposal.action_type, governance_proposal.gov_action_cbor,
        governance_proposal.deposit, governance_proposal.return_address,
        governance_proposal.enacted_epoch, governance_proposal.enacted_slot,
        governance_proposal_drop.dropped_epoch,
@@ -1192,7 +1202,7 @@ WHERE ((governance_proposal.ratified_epoch IS NOT NULL
         AND governance_proposal.enacted_epoch = ?)
        OR governance_proposal_drop.dropped_epoch = ?)
   AND governance_proposal.deleted_slot IS NULL
-ORDER BY governance_proposal.id`,
+ORDER BY governance_proposal.id`, d.dialect),
 		epoch,
 		epoch,
 	)
@@ -1207,6 +1217,8 @@ ORDER BY governance_proposal.id`,
 		if err := rows.Scan(
 			&p.TxHash,
 			&p.ActionIndex,
+			&p.ActionType,
+			&p.GovActionCbor,
 			&deposit,
 			&p.ReturnAddress,
 			&p.EnactedEpoch,
@@ -1226,14 +1238,15 @@ ORDER BY governance_proposal.id`,
 // MetadataStore.GetPostSnapshotRewardCreditEvents.
 func (d *DingoDB) postSnapshotCreditEvents(
 	ctx context.Context,
+	tx *sql.Tx,
 	slot uint64,
 ) ([]*models.AccountRewardDelta, error) {
-	rows, err := d.query(
+	rows, err := tx.QueryContext(
 		ctx,
-		`SELECT credential_tag, staking_key, tx_hash, amount
+		rebind(`SELECT credential_tag, staking_key, tx_hash, amount
 FROM account_reward_delta
 WHERE added_slot = ? AND post_snapshot = TRUE AND withdrawal = FALSE
-ORDER BY credential_tag, staking_key, id`,
+ORDER BY credential_tag, staking_key, id`, d.dialect),
 		slot,
 	)
 	if err != nil {

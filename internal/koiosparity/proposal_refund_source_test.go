@@ -17,11 +17,14 @@ package koiosparity
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/binary"
 	"errors"
 	"log/slog"
 	"math/big"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -364,4 +367,137 @@ func TestProposalDepositRefundsExcludeSoftDeletedProposals(t *testing.T) {
 		require.NoError(t, err, name)
 		requireOnlyRefunds(t, got, registered[1:])
 	}
+}
+
+// legacyProposalSourceHash is the journal key every proposal credit carried
+// before the refund discriminator existed: the withdrawal credit and the
+// refund of the same proposal shared it, so the refund was dropped as a
+// replay of the withdrawal.
+func legacyProposalSourceHash(txHash []byte, index uint32) []byte {
+	buf := append([]byte("dingo:governance-proposal:"), txHash...)
+	buf = binary.BigEndian.AppendUint32(buf, index)
+	sum := sha256.Sum256(buf)
+	return sum[:]
+}
+
+// A treasury withdrawal that paid its own return account, journaled before the
+// refund discriminator existed, holds only the withdrawal credit. Neither
+// source may report that credit as the deposit refund.
+func TestProposalDepositRefundsSkipLegacyWithdrawalToReturnAccount(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db := newTestDatabaseSourceDB(t)
+	stakeKey := testPoolKeyHash(t, 0xb1)
+	require.NoError(t, db.Metadata().CreateAccount(nil, &models.Account{
+		StakingKey: stakeKey,
+		Active:     true,
+	}))
+	payee, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeNoneKey,
+		lcommon.AddressNetworkTestnet,
+		nil,
+		stakeKey,
+	)
+	require.NoError(t, err)
+	action, err := cbor.Encode(&lcommon.TreasuryWithdrawalGovAction{
+		Type:        uint(lcommon.GovActionTypeTreasuryWithdrawal),
+		Withdrawals: map[*lcommon.Address]uint64{&payee: previewGovActionDeposit},
+	})
+	require.NoError(t, err)
+	txHash := bytes.Repeat([]byte{0x31}, 32)
+	ratified, enacted := uint64(677), uint64(678)
+	ratifiedSlot, slot := uint64(677_500), uint64(678_000)
+	require.NoError(t, db.SetGovernanceProposal(
+		context.Background(),
+		&models.GovernanceProposal{
+			TxHash:        txHash,
+			ActionType:    uint8(lcommon.GovActionTypeTreasuryWithdrawal),
+			GovActionCbor: action,
+			ProposedEpoch: 670,
+			ExpiresEpoch:  700,
+			AnchorURL:     "https://example.invalid/withdrawal",
+			AnchorHash:    bytes.Repeat([]byte{0x01}, 32),
+			Deposit:       previewGovActionDeposit,
+			ReturnAddress: refundTestRewardAddress(t, stakeKey),
+			AddedSlot:     100,
+			RatifiedEpoch: &ratified,
+			RatifiedSlot:  &ratifiedSlot,
+			EnactedEpoch:  &enacted,
+			EnactedSlot:   &slot,
+		},
+		nil,
+	))
+	credited, err := governance.CreditRegisteredRewardAccountAfterSnapshot(
+		context.Background(), db, nil, 0, stakeKey,
+		previewGovActionDeposit, slot, legacyProposalSourceHash(txHash, 0),
+	)
+	require.NoError(t, err)
+	require.True(t, credited)
+
+	source, err := NewDatabaseSource(db)
+	require.NoError(t, err)
+	dingo := &DingoDB{db: sourceSQLDB(t, db).db, dialect: "sqlite"}
+	for name, src := range map[string]RewardParitySource{
+		"database source": source,
+		"dingo db":        dingo,
+	} {
+		got, err := src.GetProposalDepositRefunds(context.Background(), 678)
+		require.NoError(t, err, name)
+		require.Empty(t, got, name)
+	}
+}
+
+type badCredentialRefundSource struct {
+	RewardParitySource
+}
+
+func (badCredentialRefundSource) GetProposalDepositRefunds(
+	context.Context,
+	uint64,
+) ([]governance.ProposalDepositRefund, error) {
+	return []governance.ProposalDepositRefund{{
+		CredentialTag: 7,
+		StakingKey:    bytes.Repeat([]byte{0x01}, 28),
+		Amount:        previewGovActionDeposit,
+	}}, nil
+}
+
+// A refund credential that will not decode came from the reward-credit
+// journal at the refund boundary, not from reward_account_output at the stake
+// epoch, and the log must say so.
+func TestCompareEpochAccountsLogsRefundCredentialSource(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDatabaseSourceDB(t)
+	inner, err := NewDatabaseSource(db)
+	require.NoError(t, err)
+	cache, err := openTestCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = cache.Close() })
+	require.NoError(t, cache.CommitAccountRewardsForEpoch(
+		"preview", 677, nil, 1, true, time.Now(),
+	))
+	var logs strings.Builder
+	ms := compareEpochAccounts(
+		context.Background(),
+		cache,
+		badCredentialRefundSource{inner},
+		"preview",
+		677,
+		676,
+		time.Now(),
+		0,
+		time.Time{},
+		false,
+		slog.New(slog.NewTextHandler(&logs, nil)),
+	)
+	require.Len(t, ms, 1)
+	require.Equal(t, "account_reward_address_decode", ms[0].Field)
+	require.Equal(t, CategoryDBError, ms[0].Category)
+	out := logs.String()
+	require.Contains(t, out, "proposal refund credential")
+	require.Contains(t, out, "refund_epoch=678")
+	require.NotContains(t, out, "reward_account_output")
 }

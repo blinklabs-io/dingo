@@ -19,6 +19,8 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/gouroboros/cbor"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -206,6 +208,118 @@ func TestMatchProposalDepositRefundsSeparatesWithdrawalFromRefund(
 	require.NoError(t, refundProposalDepositFromSource(
 		context.Background(), db, nil, p, slot,
 		proposalDepositRefundSourceHash(p),
+	))
+
+	refunds, err := MatchProposalDepositRefunds(
+		[]*models.GovernanceProposal{p},
+		epoch,
+		refundJournal(t, store, slot),
+	)
+	require.NoError(t, err)
+	require.Len(t, refunds, 1)
+	assert.Equal(t, uint64(100), refunds[0].Amount)
+}
+
+// enactedWithdrawal returns a treasury withdrawal proposal enacted at
+// epoch/slot that pays amount to payee and returns its deposit to
+// returnAddress.
+func enactedWithdrawal(
+	t *testing.T,
+	txByte byte,
+	deposit uint64,
+	returnAddress []byte,
+	payee []byte,
+	amount uint64,
+	epoch, slot uint64,
+) *models.GovernanceProposal {
+	t.Helper()
+	payeeAddr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeNoneKey,
+		lcommon.AddressNetworkTestnet,
+		nil,
+		payee,
+	)
+	require.NoError(t, err)
+	encoded, err := cbor.Encode(&lcommon.TreasuryWithdrawalGovAction{
+		Type:        uint(lcommon.GovActionTypeTreasuryWithdrawal),
+		Withdrawals: map[*lcommon.Address]uint64{&payeeAddr: amount},
+	})
+	require.NoError(t, err)
+	return &models.GovernanceProposal{
+		TxHash:        testBytes(32, txByte),
+		ActionType:    uint8(lcommon.GovActionTypeTreasuryWithdrawal),
+		GovActionCbor: encoded,
+		Deposit:       deposit,
+		ReturnAddress: returnAddress,
+		EnactedEpoch:  new(epoch),
+		EnactedSlot:   new(slot),
+	}
+}
+
+// A journal written before the refund discriminator existed holds only the
+// withdrawal credit when a treasury withdrawal pays its own return account:
+// the refund under the same hash was dropped. That credit is the withdrawal,
+// and pairing it as the refund would pass parity whenever the two amounts
+// happen to be equal.
+func TestMatchProposalDepositRefundsSkipsLegacyWithdrawalToReturnAccount(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	const (
+		epoch = uint64(678)
+		slot  = uint64(5_000)
+	)
+	db, store := newTallyTestDB(t)
+	stakeCred := testBytes(28, 0x46)
+	require.NoError(t, store.CreateAccount(nil, &models.Account{
+		StakingKey: stakeCred,
+		Active:     true,
+	}))
+	p := enactedWithdrawal(
+		t, 0x07, 100, buildRewardAddr(t, stakeCred), stakeCred, 100,
+		epoch, slot,
+	)
+	credited, err := CreditRegisteredRewardAccountAfterSnapshot(
+		context.Background(), db, nil, 0, stakeCred, 100, slot,
+		proposalRewardSourceHash(p),
+	)
+	require.NoError(t, err)
+	require.True(t, credited)
+
+	refunds, err := MatchProposalDepositRefunds(
+		[]*models.GovernanceProposal{p},
+		epoch,
+		refundJournal(t, store, slot),
+	)
+	require.NoError(t, err)
+	assert.Empty(t, refunds)
+}
+
+// A treasury withdrawal paying another account cannot collide with its own
+// refund, which is therefore journaled under the plain proposal hash.
+func TestMatchProposalDepositRefundsPairsWithdrawalRefundToOtherAccount(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	const (
+		epoch = uint64(678)
+		slot  = uint64(5_000)
+	)
+	db, store := newTallyTestDB(t)
+	stakeCred := testBytes(28, 0x47)
+	require.NoError(t, store.CreateAccount(nil, &models.Account{
+		StakingKey: stakeCred,
+		Active:     true,
+	}))
+	p := enactedWithdrawal(
+		t, 0x08, 100, buildRewardAddr(t, stakeCred), testBytes(28, 0x48),
+		500, epoch, slot,
+	)
+	require.NoError(t, refundProposalDepositFromSource(
+		context.Background(), db, nil, p, slot,
+		proposalRewardSourceHash(p),
 	))
 
 	refunds, err := MatchProposalDepositRefunds(

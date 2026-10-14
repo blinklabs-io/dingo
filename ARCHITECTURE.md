@@ -11782,8 +11782,10 @@ never the reverse.
   `acct_only_*`/`value_mismatch` categories, so a missing or wrong refund
   fails the epoch. A journal written before the refund discriminator existed
   holds only the withdrawal credit when a treasury withdrawal paid its own
-  proposal's return account; it pairs as the refund and reads as a value
-  mismatch against Koios's deposit row.
+  proposal's return account, because the refund under the same hash was
+  dropped as a replay. The plain hash is never paired for such a proposal, so
+  that deposit is absent and fails as `acct_only_koios` rather than passing
+  whenever the withdrawal happens to equal the deposit.
 - **Chunking.** `FetchAccountRewardsForEpoch` (`fetch_accounts.go`) splits
   the address universe into `koiosAccountChunkSize` (100)-sized groups,
   fetched with bounded concurrency mirroring `fetchEpoch`'s per-pool worker
