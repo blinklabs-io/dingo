@@ -178,6 +178,39 @@ func outputAsUtxo(output lcommon.TransactionOutput) (models.Utxo, error) {
 	return utxo, nil
 }
 
+// producedOutput is an output a mempool transaction creates, with the index
+// it will carry once applied.
+type producedOutput struct {
+	output lcommon.TransactionOutput
+	index  uint32
+}
+
+// mempoolProducedOutputs returns the outputs a transaction creates if it is
+// applied as submitted. A transaction marked as failing phase 2 discards its
+// regular outputs and produces only its collateral return, which takes the
+// index after the last regular output; the flag reports that case.
+func mempoolProducedOutputs(
+	tx lcommon.Transaction,
+) ([]producedOutput, bool) {
+	if !tx.IsValid() {
+		output := tx.CollateralReturn()
+		if output == nil {
+			return nil, true
+		}
+		// #nosec G115 -- bounded by the transaction size
+		index := uint32(len(tx.Outputs()))
+		return []producedOutput{{output: output, index: index}}, true
+	}
+	ret := make([]producedOutput, 0, len(tx.Outputs()))
+	for i, output := range tx.Outputs() {
+		ret = append(ret, producedOutput{
+			output: output,
+			index:  uint32(i), // #nosec G115 -- bounded by the transaction size
+		})
+	}
+	return ret, false
+}
+
 // MempoolTransaction returns one mempool transaction in the shape of a
 // transaction that is not yet in a block.
 func (a *NodeAdapter) MempoolTransaction(
@@ -236,14 +269,16 @@ func (a *NodeAdapter) MempoolTransaction(
 		inputs = append(inputs, inputInfo(input, false, &reference))
 	}
 
-	outputs := make([]TransactionOutputInfo, 0, len(tx.Outputs()))
-	outputUtxos := make([]models.Utxo, 0, len(tx.Outputs()))
-	for i, output := range tx.Outputs() {
+	produced, collateralReturn := mempoolProducedOutputs(tx)
+	outputs := make([]TransactionOutputInfo, 0, len(produced))
+	outputUtxos := make([]models.Utxo, 0, len(produced))
+	for _, out := range produced {
+		output := out.output
 		utxo, err := outputAsUtxo(output)
 		if err != nil {
 			return MempoolTransactionInfo{}, fmt.Errorf(
 				"output %d of mempool transaction %x: %w",
-				i,
+				out.index,
 				hash,
 				err,
 			)
@@ -256,14 +291,13 @@ func (a *NodeAdapter) MempoolTransaction(
 			dataHash = &encoded
 		}
 		outputs = append(outputs, TransactionOutputInfo{
-			Address: output.Address().String(),
-			Amount:  addressAmountsFromUtxo(utxo),
-			OutputIndex: uint32(
-				i,
-			), // #nosec G115 -- bounded by the transaction size
+			Address:             output.Address().String(),
+			Amount:              addressAmountsFromUtxo(utxo),
+			OutputIndex:         out.index,
 			DataHash:            dataHash,
 			InlineDatum:         inlineDatum,
 			ReferenceScriptHash: referenceScriptHash,
+			Collateral:          collateralReturn,
 		})
 	}
 
@@ -325,7 +359,7 @@ func (a *NodeAdapter) MempoolTransaction(
 			Size:               len(entry.Cbor),
 			InvalidBefore:      invalidBefore,
 			InvalidHereafter:   invalidHereafter,
-			UtxoCount:          len(allInputs) + len(tx.Outputs()),
+			UtxoCount:          len(allInputs) + len(produced),
 			WithdrawalCount:    len(tx.Withdrawals()),
 			MirCertCount:       counts.mirCerts,
 			DelegationCount:    counts.delegations,
@@ -344,15 +378,25 @@ func (a *NodeAdapter) MempoolTransaction(
 
 // MempoolAddressTransactions returns the hashes of the mempool transactions
 // that pay to an address or spend one of its confirmed outputs, in admission
-// order.
+// order. A transaction marked as failing phase 2 pays only its collateral
+// return and spends only its collateral, as when it is applied.
 func (a *NodeAdapter) MempoolAddressTransactions(
 	ctx context.Context,
 	address string,
 	params PaginationParams,
 ) ([]string, int, error) {
-	addr, _, err := a.parseQueryAddress(address)
+	addr, isPaymentCred, err := a.parseQueryAddress(address)
 	if err != nil {
 		return nil, 0, err
+	}
+	// The endpoint takes a Bech32 address; a bare payment credential names
+	// no address to compare outputs against.
+	if isPaymentCred {
+		return nil, 0, fmt.Errorf(
+			"address %q is a payment credential: %w",
+			address,
+			ErrInvalidAddress,
+		)
 	}
 	if a.mempool == nil {
 		return nil, 0, ErrMempoolUnavailable
@@ -369,7 +413,7 @@ func (a *NodeAdapter) MempoolAddressTransactions(
 			return nil, 0, err
 		}
 		decoded = append(decoded, tx)
-		inputs = append(inputs, tx.Inputs()...)
+		inputs = append(inputs, mempoolSpentInputs(tx)...)
 	}
 	addresses, err := a.confirmedInputAddresses(ctx, inputs)
 	if err != nil {
@@ -379,14 +423,15 @@ func (a *NodeAdapter) MempoolAddressTransactions(
 	matched := make([]string, 0)
 	for i, tx := range decoded {
 		touches := false
-		for _, output := range tx.Outputs() {
-			if output.Address().String() == want {
+		produced, _ := mempoolProducedOutputs(tx)
+		for _, out := range produced {
+			if out.output.Address().String() == want {
 				touches = true
 				break
 			}
 		}
 		if !touches {
-			for _, input := range tx.Inputs() {
+			for _, input := range mempoolSpentInputs(tx) {
 				if addresses[transactionInputRef(input)] == want {
 					touches = true
 					break
@@ -400,8 +445,19 @@ func (a *NodeAdapter) MempoolAddressTransactions(
 	return orderedPage(matched, params), len(matched), nil
 }
 
+// mempoolSpentInputs returns the inputs a transaction consumes if it is
+// applied as submitted: its collateral when it is marked as failing phase 2,
+// else its regular inputs.
+func mempoolSpentInputs(tx lcommon.Transaction) []lcommon.TransactionInput {
+	if !tx.IsValid() {
+		return tx.Collateral()
+	}
+	return tx.Inputs()
+}
+
 // redeemerPurposeOrder ranks purposes by redeemer tag, the order a
 // transaction's redeemers are listed in.
 var redeemerPurposeOrder = map[string]int{
-	"spend": 0, "mint": 1, "cert": 2, "reward": 3, "vote": 4, "propose": 5,
+	"spend": 0, "mint": 1, "cert": 2, "reward": 3,
+	"voting": 4, "proposing": 5, "guarding": 6,
 }
