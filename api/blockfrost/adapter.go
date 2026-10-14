@@ -605,70 +605,7 @@ func (a *NodeAdapter) CurrentEpoch() (
 			err,
 		)
 	}
-	startTime, err := a.ledgerState.SlotToTime(tipEpoch.StartSlot)
-	if err != nil {
-		return EpochInfo{}, fmt.Errorf(
-			"get epoch start time for slot %d: %w",
-			tipEpoch.StartSlot,
-			err,
-		)
-	}
-	endTime := epochEndTime(startTime, tipEpoch)
-	blockCount, firstBlockSlot, lastBlockSlot, err := a.ledgerState.CountBlocksInSlotRange(
-		tipEpoch.StartSlot,
-		tip.Point.Slot,
-	)
-	if err != nil {
-		return EpochInfo{}, fmt.Errorf(
-			"count epoch blocks for slots %d-%d: %w",
-			tipEpoch.StartSlot,
-			tip.Point.Slot,
-			err,
-		)
-	}
-	txCount, err := a.ledgerState.CountTransactionsInSlotRange(
-		tipEpoch.StartSlot,
-		tip.Point.Slot,
-	)
-	if err != nil {
-		return EpochInfo{}, fmt.Errorf(
-			"count epoch transactions for slots %d-%d: %w",
-			tipEpoch.StartSlot,
-			tip.Point.Slot,
-			err,
-		)
-	}
-	firstBlockTime := int64(0)
-	lastBlockTime := int64(0)
-	if blockCount > 0 {
-		firstTime, err := a.ledgerState.SlotToTime(firstBlockSlot)
-		if err != nil {
-			return EpochInfo{}, fmt.Errorf(
-				"get first epoch block time for slot %d: %w",
-				firstBlockSlot,
-				err,
-			)
-		}
-		lastTime, err := a.ledgerState.SlotToTime(lastBlockSlot)
-		if err != nil {
-			return EpochInfo{}, fmt.Errorf(
-				"get last epoch block time for slot %d: %w",
-				lastBlockSlot,
-				err,
-			)
-		}
-		firstBlockTime = firstTime.Unix()
-		lastBlockTime = lastTime.Unix()
-	}
-	return EpochInfo{
-		Epoch:          tipEpoch.EpochId,
-		StartTime:      startTime.Unix(),
-		EndTime:        endTime.Unix(),
-		FirstBlockTime: firstBlockTime,
-		LastBlockTime:  lastBlockTime,
-		BlockCount:     blockCount,
-		TxCount:        txCount,
-	}, nil
+	return a.epochInfoFor(context.Background(), tipEpoch, tip.Point.Slot)
 }
 
 // CurrentProtocolParams returns the current protocol

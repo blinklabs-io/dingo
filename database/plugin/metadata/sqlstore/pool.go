@@ -1519,11 +1519,12 @@ latest_ret AS (
 )
 `
 
-const retiringPoolsFrom = `
+func retiringPoolsFrom(epochOp string) string {
+	return `
 FROM latest_ret r
 LEFT JOIN latest_reg g
   ON g.pool_key_hash = r.pool_key_hash AND g.rn = 1
-WHERE r.rn = 1 AND r.epoch > ?
+WHERE r.rn = 1 AND r.epoch ` + epochOp + ` ?
   AND (
       g.pool_key_hash IS NULL
       OR (r.added_slot, r.synth, r.block_index, r.cert_index)
@@ -1534,6 +1535,7 @@ WHERE r.rn = 1 AND r.epoch > ?
           AND r.synth = 1
       )
   )`
+}
 
 const retiringPoolsOrder = `
 ORDER BY r.epoch, r.added_slot, r.block_index, r.cert_index`
@@ -1562,7 +1564,7 @@ func (s *Store) GetRetiringPools(
 	rows, err := db.QueryContext(
 		ctx,
 		s.dialect.Rebind(retiringPoolsCTE+"SELECT r.pool_key_hash, r.epoch"+
-			retiringPoolsFrom+retiringPoolsOrder),
+			retiringPoolsFrom(">")+retiringPoolsOrder),
 		currentEpoch,
 	)
 	if err != nil {
@@ -1577,6 +1579,34 @@ func (s *Store) GetRetiringPoolsPage(
 	descending bool,
 	txn types.Txn,
 ) ([]models.PoolRetiringRow, int, error) {
+	return s.poolsByRetirementPage(
+		currentEpoch, ">", limit, offset, descending, txn,
+	)
+}
+
+// GetRetiredPoolsPage pages the pools whose latest certificate is an
+// uncancelled retirement that took effect at or before currentEpoch.
+func (s *Store) GetRetiredPoolsPage(
+	currentEpoch uint64,
+	limit, offset int,
+	descending bool,
+	txn types.Txn,
+) ([]models.PoolRetiringRow, int, error) {
+	return s.poolsByRetirementPage(
+		currentEpoch, "<=", limit, offset, descending, txn,
+	)
+}
+
+// poolsByRetirementPage keeps pools whose retirement epoch satisfies
+// "epoch <epochOp> currentEpoch". epochOp is a fixed operator chosen by the
+// two callers above, never caller text.
+func (s *Store) poolsByRetirementPage(
+	currentEpoch uint64,
+	epochOp string,
+	limit, offset int,
+	descending bool,
+	txn types.Txn,
+) ([]models.PoolRetiringRow, int, error) {
 	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, 0, err
@@ -1584,7 +1614,7 @@ func (s *Store) GetRetiringPoolsPage(
 	var total int
 	if err := db.QueryRowContext(
 		ctx,
-		s.dialect.Rebind(retiringPoolsCTE+"SELECT COUNT(*)"+retiringPoolsFrom),
+		s.dialect.Rebind(retiringPoolsCTE+"SELECT COUNT(*)"+retiringPoolsFrom(epochOp)),
 		currentEpoch,
 	).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("count retiring pools: %w", err)
@@ -1601,7 +1631,7 @@ ORDER BY r.epoch DESC, r.added_slot DESC,
 	rows, err := db.QueryContext(
 		ctx,
 		s.dialect.Rebind(retiringPoolsCTE+
-			"SELECT r.pool_key_hash, r.epoch"+retiringPoolsFrom+order+
+			"SELECT r.pool_key_hash, r.epoch"+retiringPoolsFrom(epochOp)+order+
 			" LIMIT ? OFFSET ?"),
 		currentEpoch, limit, offset,
 	)

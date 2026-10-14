@@ -939,6 +939,7 @@ func TestMetadataEndpointsDeterministicAcrossRepeatsAndKeyOrders(t *testing.T) {
 
 // mockNode implements BlockfrostNode for testing.
 type mockNode struct {
+	historyMock
 	chainTip                      ChainTipInfo
 	block                         BlockInfo
 	blockByID                     BlockInfo

@@ -1641,6 +1641,7 @@ type MetadataStore interface {
 	StakeSnapshotStore
 	TransactionStore
 	UtxoStore
+	HistoryStore
 
 	// Bulk import methods (ledger state restore from snapshot)
 

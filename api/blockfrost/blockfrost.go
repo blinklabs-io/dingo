@@ -98,6 +98,22 @@ func (b *Blockfrost) handler() http.Handler {
 		"GET /api/v0/epochs/{number}/parameters",
 		b.handleEpochParams,
 	)
+	mux.HandleFunc("GET /api/v0/epochs/{number}", b.handleEpoch)
+	mux.HandleFunc("GET /api/v0/epochs/{number}/next", b.handleEpochNext)
+	mux.HandleFunc(
+		"GET /api/v0/epochs/{number}/previous",
+		b.handleEpochPrevious,
+	)
+	mux.HandleFunc("GET /api/v0/epochs/{number}/stakes", b.handleEpochStakes)
+	mux.HandleFunc(
+		"GET /api/v0/epochs/{number}/stakes/{pool_id}",
+		b.handleEpochPoolStakes,
+	)
+	mux.HandleFunc("GET /api/v0/epochs/{number}/blocks", b.handleEpochBlocks)
+	mux.HandleFunc(
+		"GET /api/v0/epochs/{number}/blocks/{pool_id}",
+		b.handleEpochPoolBlocks,
+	)
 	mux.HandleFunc(
 		"GET /api/v0/network",
 		b.handleNetwork,
@@ -130,6 +146,15 @@ func (b *Blockfrost) handler() http.Handler {
 		"GET /api/v0/pools/retiring",
 		b.handlePoolsRetiring,
 	)
+	mux.HandleFunc("GET /api/v0/pools/retired", b.handlePoolsRetired)
+	mux.HandleFunc("GET /api/v0/pools/{pool_id}/history", b.handlePoolHistory)
+	mux.HandleFunc("GET /api/v0/pools/{pool_id}/relays", b.handlePoolRelays)
+	mux.HandleFunc(
+		"GET /api/v0/pools/{pool_id}/delegators",
+		b.handlePoolDelegators,
+	)
+	mux.HandleFunc("GET /api/v0/pools/{pool_id}/blocks", b.handlePoolBlocks)
+	mux.HandleFunc("GET /api/v0/pools/{pool_id}/updates", b.handlePoolUpdates)
 	mux.HandleFunc(
 		"GET /api/v0/pools/{pool_id}/metadata",
 		b.handlePoolMetadata,
