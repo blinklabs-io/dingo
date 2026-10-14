@@ -2119,6 +2119,14 @@ func (d *Database) TransactionsDeleteRolledback(
 		)
 	}
 
+	if err := d.restoreAssetUtxoAddressesAfterSlot(ctx, slot, txn); err != nil {
+		return fmt.Errorf(
+			"restore asset UTxO addresses before deleting transactions after slot %d: %w",
+			slot,
+			err,
+		)
+	}
+
 	err = d.transactionStore().DeleteTransactionsAfterSlot(slot, txn.Metadata())
 	if err != nil {
 		return fmt.Errorf(

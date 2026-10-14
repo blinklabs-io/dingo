@@ -6,6 +6,10 @@ scrape_configs:
   # Dingo node metrics (default port 12798)
   - job_name: dingo
     scrape_interval: 15s
+    # When metricsAuthToken is configured, set authorization.credentials_file
+    # to a file containing the same token.
+    # authorization:
+    #   credentials_file: /run/secrets/dingo-metrics-token
     static_configs:
       - targets: ['localhost:12798']
 

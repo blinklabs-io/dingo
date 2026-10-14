@@ -241,11 +241,9 @@ func TestBackupMySQLRejectsExistingDestination(t *testing.T) {
 	)
 }
 
-// TestBackupMySQLUsesSingleTransaction guards a real gap: without
-// --single-transaction, mysqldump reads InnoDB tables one at a time with
-// no shared snapshot, so a node actively writing metadata during the dump
-// can produce a backup mixing rows from different points in time.
-func TestBackupMySQLUsesSingleTransaction(t *testing.T) {
+// Not t.Parallel: this test replaces the process-wide mysqldump function.
+// Omitting CREATE DATABASE/USE lets restore target another database.
+func TestBackupMySQLDumpArguments(t *testing.T) {
 	dst := filepath.Join(t.TempDir(), "backup.sql")
 	var gotArgs []string
 	original := runMysqldump
@@ -260,35 +258,8 @@ func TestBackupMySQLUsesSingleTransaction(t *testing.T) {
 		dst,
 	))
 	require.Contains(t, gotArgs, "--single-transaction")
-}
-
-// TestBackupMySQLDoesNotUseDatabasesFlag guards a real bug found via a live
-// restore test: "mysqldump --databases <db>" embeds CREATE DATABASE/USE
-// <db> statements naming the SOURCE database into the dump itself, and
-// restoreMySQL's mysql invocation can't override that embedded USE via its
-// own connection target -- restoring such a dump into a differently-named
-// target database silently landed the data in a new database matching the
-// source's name instead, while both mysqldump and mysql reported success.
-// The dump must instead pass the database as a single trailing positional
-// argument (no --databases flag), which omits the embedded CREATE
-// DATABASE/USE and always restores into whatever database the mysql
-// client's own connection args select.
-func TestBackupMySQLDoesNotUseDatabasesFlag(t *testing.T) {
-	dst := filepath.Join(t.TempDir(), "backup.sql")
-	var gotArgs []string
-	original := runMysqldump
-	t.Cleanup(func() { runMysqldump = original })
-	runMysqldump = func(_ context.Context, _ []string, args []string, staged string) error {
-		gotArgs = args
-		return os.WriteFile(staged, []byte("dump"), 0o600)
-	}
-	require.NoError(t, backupMySQL(
-		context.Background(),
-		"alice@tcp(db.internal:3306)/mydb",
-		dst,
-	))
 	require.NotContains(t, gotArgs, "--databases")
-	require.Contains(t, gotArgs, "mydb")
+	require.Equal(t, "mydb", gotArgs[len(gotArgs)-1])
 }
 
 // TestBackupMySQLRequiresConfiguredDatabase validates that BackupTo

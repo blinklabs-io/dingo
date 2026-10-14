@@ -636,54 +636,7 @@ func (o *Observer) signalWakeAccounts() {
 // two share o.cache/o.koios and o.fail/o.fatalFired but otherwise never
 // block on each other.
 func (o *Observer) run(ctx context.Context) {
-	ticker := time.NewTicker(o.cfg.ErrorRetryDelay)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-		}
-
-		o.mu.Lock()
-		todo := make([]uint64, 0, len(o.pending))
-		for e := range o.pending {
-			delete(o.retry, e)
-			todo = append(todo, e)
-		}
-		clear(o.pending)
-		o.mu.Unlock()
-
-		if len(todo) > 0 {
-			slices.Sort(todo)
-			for _, epoch := range todo {
-				select {
-				case <-ctx.Done():
-					return
-				default:
-				}
-				o.processEpoch(ctx, epoch)
-				if o.cfg.Strict && o.stopping() {
-					return
-				}
-			}
-			continue
-		}
-
-		select {
-		case <-ctx.Done():
-			return
-		case <-o.wake:
-		case now := <-ticker.C:
-			o.mu.Lock()
-			for epoch, due := range o.retry {
-				if !now.Before(due) {
-					o.pending[epoch] = struct{}{}
-				}
-			}
-			o.mu.Unlock()
-		}
-	}
+	o.runQueue(ctx, o.pending, o.retry, o.wake, o.processEpoch)
 }
 
 // runAccounts is run's twin for the slow, rate-limited per-account queue:
@@ -691,49 +644,53 @@ func (o *Observer) run(ctx context.Context) {
 // calling processAccountEpoch instead of processEpoch. Only launched by
 // Start when cfg.AccountsEnabled.
 func (o *Observer) runAccounts(ctx context.Context) {
+	o.runQueue(ctx, o.pendingAccounts, o.retryAccounts, o.wakeAccounts,
+		o.processAccountEpoch)
+}
+
+func (o *Observer) runQueue(
+	ctx context.Context,
+	pending map[uint64]struct{},
+	retry map[uint64]time.Time,
+	wake <-chan struct{},
+	process func(context.Context, uint64),
+) {
 	ticker := time.NewTicker(o.cfg.ErrorRetryDelay)
 	defer ticker.Stop()
 	for {
-		select {
-		case <-ctx.Done():
+		if ctx.Err() != nil {
 			return
-		default:
 		}
-
 		o.mu.Lock()
-		todo := make([]uint64, 0, len(o.pendingAccounts))
-		for e := range o.pendingAccounts {
-			delete(o.retryAccounts, e)
-			todo = append(todo, e)
+		todo := make([]uint64, 0, len(pending))
+		for epoch := range pending {
+			delete(retry, epoch)
+			todo = append(todo, epoch)
 		}
-		clear(o.pendingAccounts)
+		clear(pending)
 		o.mu.Unlock()
-
 		if len(todo) > 0 {
 			slices.Sort(todo)
 			for _, epoch := range todo {
-				select {
-				case <-ctx.Done():
+				if ctx.Err() != nil {
 					return
-				default:
 				}
-				o.processAccountEpoch(ctx, epoch)
+				process(ctx, epoch)
 				if o.cfg.Strict && o.stopping() {
 					return
 				}
 			}
 			continue
 		}
-
 		select {
 		case <-ctx.Done():
 			return
-		case <-o.wakeAccounts:
+		case <-wake:
 		case now := <-ticker.C:
 			o.mu.Lock()
-			for epoch, due := range o.retryAccounts {
+			for epoch, due := range retry {
 				if !now.Before(due) {
-					o.pendingAccounts[epoch] = struct{}{}
+					pending[epoch] = struct{}{}
 				}
 			}
 			o.mu.Unlock()

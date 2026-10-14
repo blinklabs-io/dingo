@@ -74,6 +74,27 @@ type manifestConfig struct {
 	pauseNow      func() time.Time
 	pauseContext  func(context.Context) context.Context
 	pauseDeadline func(context.Context, time.Duration) (context.Context, context.CancelFunc)
+	// catalogReconcile restores provider-backed rows after a damaged local
+	// catalog has been rebuilt.
+	catalogReconcile func(context.Context, string) error
+}
+
+func withSnapshotCatalogReconcile(
+	reconcile func(context.Context, string) error,
+) ManifestOption {
+	return func(cfg *manifestConfig) { cfg.catalogReconcile = reconcile }
+}
+
+func snapshotCatalogReconcile(
+	opts []ManifestOption,
+) func(context.Context, string) error {
+	cfg := manifestConfig{}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&cfg)
+		}
+	}
+	return cfg.catalogReconcile
 }
 
 // WithManifestKey sets the operator trust root: a shared secret that
@@ -457,6 +478,15 @@ func (m Manifest) CheckCompatibility(
 // observes either the complete old manifest or the complete new one,
 // never a partial one.
 func WriteManifest(dir string, m Manifest, opts ...ManifestOption) error {
+	return writeManifest(context.Background(), dir, m, opts...)
+}
+
+func writeManifest(
+	ctx context.Context,
+	dir string,
+	m Manifest,
+	opts ...ManifestOption,
+) error {
 	limit, err := manifestByteLimit(opts)
 	if err != nil {
 		return err
@@ -521,7 +551,18 @@ func WriteManifest(dir string, m Manifest, opts ...ManifestOption) error {
 	// A file's own fsync does not guarantee its directory entry is
 	// persisted; sync dir itself so the rename above is durable too, not
 	// just atomic.
-	return fsyncdir.Sync(dir)
+	if err := fsyncdir.Sync(dir); err != nil {
+		return err
+	}
+	if err := updateSnapshotCatalogIfPresent(
+		ctx,
+		filepath.Dir(dir),
+		SnapshotEntry{ID: filepath.Base(dir), Manifest: m},
+		opts...,
+	); err != nil {
+		return fmt.Errorf("%w: %w", ErrSnapshotCatalogUpdate, err)
+	}
+	return nil
 }
 
 // ReadManifest reads and validates the manifest at dir/ManifestFileName,
@@ -596,11 +637,23 @@ func ParseManifest(data []byte, opts ...ManifestOption) (Manifest, error) {
 // CreateSnapshot RPC receives name/description in the same request but
 // Snapshot itself has no such parameters).
 func LabelSnapshot(dir string, name string, description string, opts ...ManifestOption) error {
+	return labelSnapshot(
+		context.Background(), dir, name, description, opts...,
+	)
+}
+
+func labelSnapshot(
+	ctx context.Context,
+	dir string,
+	name string,
+	description string,
+	opts ...ManifestOption,
+) error {
 	m, err := ReadManifest(dir, opts...)
 	if err != nil {
 		return err
 	}
 	m.Name = name
 	m.Description = description
-	return WriteManifest(dir, m, opts...)
+	return writeManifest(ctx, dir, m, opts...)
 }

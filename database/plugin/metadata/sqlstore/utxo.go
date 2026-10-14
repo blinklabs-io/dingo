@@ -292,6 +292,50 @@ SELECT COUNT(*) FROM utxo WHERE tx_id = ? AND output_idx = ?`,
 	)
 }
 
+func (s *Store) GetSpentAssetUtxosMissingAddressAfterSlot(
+	slot uint64,
+	afterID uint,
+	limit int,
+	txn types.Txn,
+) ([]models.Utxo, error) {
+	if limit <= 0 {
+		return nil, errors.New("missing UTxO address limit must be positive")
+	}
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, err
+	}
+	slotValue, err := checkedInt64(slot)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := db.QueryContext(ctx, s.dialect.Rebind(
+		`SELECT `+qualifiedSQLiteUtxoColumns+` FROM utxo
+WHERE utxo.deleted_slot > ?
+  AND utxo.id > ?
+  AND EXISTS (SELECT 1 FROM asset WHERE asset.utxo_id = utxo.id)
+  AND NOT EXISTS (SELECT 1 FROM utxo_address WHERE utxo_address.utxo_id = utxo.id)
+ORDER BY utxo.id LIMIT ?`,
+	), slotValue, afterID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ret := make([]models.Utxo, 0, limit)
+	for rows.Next() {
+		row, err := scanSQLiteUtxo(rows)
+		if err != nil {
+			return nil, err
+		}
+		utxo, err := utxoFromSQLite(row)
+		if err != nil {
+			return nil, err
+		}
+		ret = append(ret, *utxo)
+	}
+	return ret, rows.Err()
+}
+
 func (s *Store) SetUtxosNotDeletedAfterSlot(
 	slot uint64,
 	txn types.Txn,
@@ -2028,11 +2072,6 @@ func (s *Store) GetUtxosByAddressWithOrdering(
 			models.ErrNilUtxoWithOrderingQuery,
 		)
 	}
-	if query.OnlyFilteredAsset && !query.FilterByAsset {
-		return nil, errors.New(
-			"OnlyFilteredAsset requires FilterByAsset",
-		)
-	}
 	if query.After != nil && query.Descending {
 		return nil, fmt.Errorf(
 			"GetUtxosByAddressWithOrdering: %w",
@@ -2136,19 +2175,6 @@ ORDER BY ` + slotExpr + ` ` + orderDir + `, ` + blockIndexExpr + ` ` + orderDir 
 	}
 	for i := range ret {
 		pointers = append(pointers, &ret[i].Utxo)
-	}
-	if query.OnlyFilteredAsset {
-		if err := s.loadUtxoAssetsPointersFiltered(
-			ctx,
-			db,
-			pointers,
-			query.AssetPolicyID,
-			query.AssetName,
-			true,
-		); err != nil {
-			return nil, err
-		}
-		return ret, nil
 	}
 	if err := s.loadUtxoAssets(ctx, db, pointers); err != nil {
 		return nil, err
@@ -2570,27 +2596,41 @@ func persistUtxoAddress(
 	utxoID int64,
 	utxo *models.Utxo,
 ) error {
-	if len(utxo.Assets) == 0 {
+	address, err := assetUtxoAddress(utxo)
+	if err != nil {
+		return err
+	}
+	if len(address) == 0 {
 		return nil
+	}
+	_, err = db.ExecContext(ctx,
+		"INSERT INTO utxo_address (utxo_id, address) VALUES (?, ?) "+
+			"ON CONFLICT (utxo_id) DO UPDATE SET address = excluded.address",
+		utxoID,
+		address,
+	)
+	if err != nil {
+		return fmt.Errorf("persist UTxO address: %w", err)
+	}
+	return nil
+}
+
+func assetUtxoAddress(utxo *models.Utxo) ([]byte, error) {
+	if len(utxo.Assets) == 0 {
+		return nil, nil
 	}
 	address := utxo.Address
 	if len(address) == 0 && len(utxo.Cbor) > 0 {
 		output, err := utxo.Decode()
 		if err != nil {
-			return fmt.Errorf("decode UTxO address: %w", err)
+			return nil, fmt.Errorf("decode UTxO address: %w", err)
 		}
 		address = []byte(output.Address().String())
 	}
 	if len(address) == 0 {
-		return errors.New("persist asset UTxO address: address is unavailable")
+		return nil, errors.New("persist asset UTxO address: address is unavailable")
 	}
-	_, err := db.ExecContext(ctx, `
-INSERT INTO utxo_address (utxo_id, address) VALUES (?, ?)
-ON CONFLICT (utxo_id) DO UPDATE SET address = excluded.address`, utxoID, address)
-	if err != nil {
-		return fmt.Errorf("persist UTxO address: %w", err)
-	}
-	return nil
+	return address, nil
 }
 
 func (s *Store) GetLiveAssetUtxosMissingAddress(
@@ -2883,24 +2923,6 @@ func (s *Store) loadUtxoAssetsPointers(
 	db queryer,
 	utxos []*models.Utxo,
 ) error {
-	return s.loadUtxoAssetsPointersFiltered(
-		ctx,
-		db,
-		utxos,
-		nil,
-		nil,
-		false,
-	)
-}
-
-func (s *Store) loadUtxoAssetsPointersFiltered(
-	ctx context.Context,
-	db queryer,
-	utxos []*models.Utxo,
-	policyID []byte,
-	assetName []byte,
-	filtered bool,
-) error {
 	if len(utxos) == 0 {
 		return nil
 	}
@@ -2920,35 +2942,17 @@ func (s *Store) loadUtxoAssetsPointersFiltered(
 		}
 		byID[utxo.ID] = append(byID[utxo.ID], utxo)
 	}
-	filterArgs := 0
-	if filtered {
-		filterArgs = 1
-		if assetName != nil {
-			filterArgs++
+	for start := 0; start < len(ids); start += s.dialect.ParameterLimit() {
+		end := min(start+s.dialect.ParameterLimit(), len(ids))
+		args := make([]any, end-start)
+		for i, id := range ids[start:end] {
+			args[i] = id
 		}
-	}
-	chunkSize := s.dialect.ParameterLimit() - filterArgs
-	for start := 0; start < len(ids); start += chunkSize {
-		end := min(start+chunkSize, len(ids))
-		args := make([]any, 0, end-start+filterArgs)
-		for _, id := range ids[start:end] {
-			args = append(args, id)
-		}
-		statement := "SELECT name, policy_id, fingerprint, id, utxo_id, amount FROM asset WHERE utxo_id IN (" + bindPlaceholders(end-start) + ")"
-		if filtered {
-			statement += " AND policy_id = ?"
-			args = append(args, policyID)
-			if assetName != nil {
-				statement += " AND name = ?"
-				args = append(args, assetName)
-			}
-		}
-		statement += " ORDER BY id"
-		rows, err := db.QueryContext(
-			ctx,
-			s.dialect.Rebind(statement),
-			args...,
-		)
+		rows, err := db.QueryContext(ctx, s.dialect.Rebind(
+			"SELECT name, policy_id, fingerprint, id, utxo_id, amount FROM asset WHERE utxo_id IN ("+bindPlaceholders(
+				end-start,
+			)+") ORDER BY id",
+		), args...)
 		if err != nil {
 			return err
 		}

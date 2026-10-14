@@ -115,7 +115,7 @@ INSERT INTO utxo (
 		require.NoError(t, err)
 		_, err = metadataTxn.Exec(`
 INSERT INTO asset (name, policy_id, utxo_id, amount)
-VALUES (?, ?, ?, '1')`, []byte("asset"), []byte("policy"), utxoID)
+VALUES ('asset', 'policy', ?, '1')`, utxoID)
 		require.NoError(t, err)
 		if outputCbor != nil {
 			require.NoError(t, db.Blob().SetUtxo(
@@ -129,6 +129,7 @@ VALUES (?, ?, ?, '1')`, []byte("asset"), []byte("policy"), utxoID)
 
 func TestBackfillLiveAssetUtxoAddressesBatchesAndResumes(t *testing.T) {
 	db := openTestDB(t)
+	db.config.StorageMode = types.StorageModeAPI
 	raw := rawSQLiteMetadataFixture(t, db)
 	addr, err := lcommon.NewAddressFromParts(
 		lcommon.AddressTypeKeyNone,
@@ -189,6 +190,7 @@ func TestBackfillLiveAssetUtxoAddressesFailsClosed(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			db := openTestDB(t)
+			db.config.StorageMode = types.StorageModeAPI
 			raw := rawSQLiteMetadataFixture(t, db)
 			seedLegacyAssetUtxosWithoutAddress(t, db, raw, 1, tc.outputCbor)
 
@@ -310,6 +312,36 @@ UPDATE utxo SET deleted_slot = 20, spent_at_tx_id = ?`, spenderHash)
 			assert.Equal(t, addr.String(), string(holders[0].Address))
 		})
 	}
+}
+
+func TestBackfillLiveAssetUtxoAddressesSkipsCoreMode(t *testing.T) {
+	db := openTestDB(t)
+	raw := rawSQLiteMetadataFixture(t, db)
+	seedLegacyAssetUtxosWithoutAddress(t, db, raw, 1, []byte{0xff})
+
+	require.NoError(t, db.backfillLiveAssetUtxoAddresses(context.Background()))
+	var count int
+	require.NoError(t, raw.QueryRow(
+		"SELECT COUNT(*) FROM utxo_address",
+	).Scan(&count))
+	require.Zero(t, count)
+}
+
+func TestBackfillLiveAssetUtxoAddressesSkipsCompletedMarker(t *testing.T) {
+	db := openTestDB(t)
+	db.config.StorageMode = types.StorageModeAPI
+	raw := rawSQLiteMetadataFixture(t, db)
+	seedLegacyAssetUtxosWithoutAddress(t, db, raw, 1, []byte{0xff})
+	require.NoError(t, db.SetSyncState(
+		assetUtxoAddressBackfillSyncKey, "true", nil,
+	))
+
+	require.NoError(t, db.backfillLiveAssetUtxoAddresses(context.Background()))
+	var count int
+	require.NoError(t, raw.QueryRow(
+		"SELECT COUNT(*) FROM utxo_address",
+	).Scan(&count))
+	require.Zero(t, count)
 }
 
 func TestCreateAssetUtxoRequiresAddressIdentity(t *testing.T) {
@@ -2627,4 +2659,87 @@ func TestTransactionsByAddressHonorSlotRange(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, page, 1)
 	assert.Equal(t, byte(0x04), page[0].Hash[0])
+}
+
+func TestRollbackTransactionDeletionRestoresLegacyAssetAddress(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		outputCbor func(t *testing.T) ([]byte, string)
+		wantErr    bool
+	}{
+		{
+			name: "restores address before transaction deletion",
+			outputCbor: func(t *testing.T) ([]byte, string) {
+				addr, err := lcommon.NewAddressFromParts(
+					lcommon.AddressTypeKeyNone,
+					lcommon.AddressNetworkTestnet,
+					bytes.Repeat([]byte{0x52}, lcommon.AddressHashSize),
+					nil,
+				)
+				require.NoError(t, err)
+				outputCbor, err := cbor.Encode(&shelley.ShelleyTransactionOutput{
+					OutputAddress: addr,
+					OutputAmount:  1,
+				})
+				require.NoError(t, err)
+				return outputCbor, addr.String()
+			},
+		},
+		{
+			name: "fails before unspending when CBOR is unavailable",
+			outputCbor: func(_ *testing.T) ([]byte, string) {
+				return nil, ""
+			},
+			wantErr: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := openTestDB(t)
+			raw := rawSQLiteMetadataFixture(t, db)
+			outputCbor, wantAddress := tc.outputCbor(t)
+			seedLegacyAssetUtxosWithoutAddress(t, db, raw, 1, outputCbor)
+			consumerHash := bytes.Repeat([]byte{0xe1}, 32)
+			_, err := raw.Exec(`
+INSERT INTO "transaction" (hash, slot, valid) VALUES (?, 10, TRUE)`,
+				consumerHash)
+			require.NoError(t, err)
+			_, err = raw.Exec(`
+UPDATE utxo SET deleted_slot = 10, spent_at_tx_id = ?`, consumerHash)
+			require.NoError(t, err)
+
+			err = db.Transaction(context.Background(), true).Do(func(txn *Txn) error {
+				if err := db.TransactionsDeleteRolledback(
+					context.Background(), 5, txn,
+				); err != nil {
+					return err
+				}
+				return db.UtxosUnspend(context.Background(), 5, txn)
+			})
+			if tc.wantErr {
+				require.Error(t, err)
+				var deletedSlot uint64
+				require.NoError(t, raw.QueryRow(
+					`SELECT deleted_slot FROM utxo`,
+				).Scan(&deletedSlot))
+				require.Equal(t, uint64(10), deletedSlot)
+				var txCount int
+				require.NoError(t, raw.QueryRow(
+					`SELECT COUNT(*) FROM "transaction" WHERE hash = ?`, consumerHash,
+				).Scan(&txCount))
+				require.Equal(t, 1, txCount)
+				return
+			}
+			require.NoError(t, err)
+			var gotAddress []byte
+			require.NoError(t, raw.QueryRow(
+				`SELECT address FROM utxo_address`,
+			).Scan(&gotAddress))
+			require.Equal(t, wantAddress, string(gotAddress))
+			var deletedSlot uint64
+			require.NoError(t, raw.QueryRow(
+				`SELECT deleted_slot FROM utxo`,
+			).Scan(&deletedSlot))
+			require.Zero(t, deletedSlot)
+		})
+	}
 }

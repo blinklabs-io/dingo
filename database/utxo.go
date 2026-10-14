@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
@@ -67,6 +68,8 @@ const exactAddressCandidateScanLimit = ExactAddressCandidateScanLimit
 var errExactAddressCandidateScanLimit = errors.New(
 	"exact address candidate scan limit reached",
 )
+
+const assetUtxoAddressBackfillSyncKey = "dingo:asset-utxo-addresses:backfilled"
 
 // deleteUtxoBlobs deletes blob data for the given [models.Utxo] entries.
 // Metadata remains the authoritative source of truth; blob deletions are
@@ -1062,32 +1065,8 @@ func (d *Database) loadAndFilterHistoricalUtxos(
 			return nil, err
 		}
 	}
-	if !models.RequiresExactAddressFilter(patterns) {
-		return utxos, nil
-	}
-	ret := make([]models.UtxoWithHistory, 0, len(utxos))
-	for i := range utxos {
-		output, err := utxos[i].Decode()
-		if err != nil {
-			return nil, fmt.Errorf(
-				"decode historical UTxO %x#%d for exact address match: %w",
-				utxos[i].TxId,
-				utxos[i].OutputIdx,
-				err,
-			)
-		}
-		match, err := models.MatchesUtxoAddressPatterns(
-			output.Address(),
-			patterns,
-		)
-		if err != nil {
-			return nil, err
-		}
-		if match {
-			ret = append(ret, utxos[i])
-		}
-	}
-	return ret, nil
+	return filterUtxoViews(utxos, patterns, "historical UTxO",
+		func(item *models.UtxoWithHistory) *models.Utxo { return &item.Utxo })
 }
 
 // GetControlledAmountByCredential returns the sum of live UTxO amounts
@@ -1509,8 +1488,25 @@ func (d *Database) AssetHolders(
 }
 
 func (d *Database) backfillLiveAssetUtxoAddresses(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if d.StorageMode() != types.StorageModeAPI {
+		return nil
+	}
+	complete, err := d.GetSyncState(assetUtxoAddressBackfillSyncKey, nil)
+	if err != nil {
+		return err
+	}
+	if complete == "true" {
+		return nil
+	}
+
 	const batchSize = 128
 	var afterID uint
+	var processed, lastLogged int
+	started := time.Now()
+	d.logger.Info("starting live asset UTxO address backfill")
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -1523,9 +1519,27 @@ func (d *Database) backfillLiveAssetUtxoAddresses(ctx context.Context) error {
 		}
 		afterID = nextID
 		if count == 0 {
-			return nil
+			break
+		}
+		processed += count
+		if processed-lastLogged >= 10_000 {
+			d.logger.Info(
+				"live asset UTxO address backfill progress",
+				"utxos", processed,
+				"last_utxo_id", afterID,
+			)
+			lastLogged = processed
 		}
 	}
+	if err := d.SetSyncState(assetUtxoAddressBackfillSyncKey, "true", nil); err != nil {
+		return err
+	}
+	d.logger.Info(
+		"completed live asset UTxO address backfill",
+		"utxos", processed,
+		"duration", time.Since(started),
+	)
+	return nil
 }
 
 type utxoAddressRow struct {
@@ -1618,32 +1632,38 @@ func filterUtxosByAddressPatterns(
 	utxos []models.Utxo,
 	patterns []models.UtxoAddressPattern,
 ) ([]models.Utxo, error) {
+	return filterUtxoViews(utxos, patterns, "UTxO",
+		func(item *models.Utxo) *models.Utxo { return item })
+}
+
+func filterUtxoViews[T any](
+	utxos []T,
+	patterns []models.UtxoAddressPattern,
+	description string,
+	utxo func(*T) *models.Utxo,
+) ([]T, error) {
 	if !models.RequiresExactAddressFilter(patterns) {
 		return utxos, nil
 	}
-	ret := make([]models.Utxo, 0, len(utxos))
+	result := make([]T, 0, len(utxos))
 	for i := range utxos {
-		output, err := utxos[i].Decode()
+		item := utxo(&utxos[i])
+		output, err := item.Decode()
 		if err != nil {
 			return nil, fmt.Errorf(
-				"decode UTxO %x#%d for exact address match: %w",
-				utxos[i].TxId,
-				utxos[i].OutputIdx,
-				err,
+				"decode %s %x#%d for exact address match: %w",
+				description, item.TxId, item.OutputIdx, err,
 			)
 		}
-		match, err := models.MatchesUtxoAddressPatterns(
-			output.Address(),
-			patterns,
-		)
+		match, err := models.MatchesUtxoAddressPatterns(output.Address(), patterns)
 		if err != nil {
 			return nil, err
 		}
 		if match {
-			ret = append(ret, utxos[i])
+			result = append(result, utxos[i])
 		}
 	}
-	return ret, nil
+	return result, nil
 }
 
 func (d *Database) loadAndFilterOrderedUtxos(
@@ -1656,32 +1676,8 @@ func (d *Database) loadAndFilterOrderedUtxos(
 			return nil, err
 		}
 	}
-	if !models.RequiresExactAddressFilter(patterns) {
-		return utxos, nil
-	}
-	ret := make([]models.UtxoWithOrdering, 0, len(utxos))
-	for i := range utxos {
-		output, err := utxos[i].Decode()
-		if err != nil {
-			return nil, fmt.Errorf(
-				"decode UTxO %x#%d for exact address match: %w",
-				utxos[i].TxId,
-				utxos[i].OutputIdx,
-				err,
-			)
-		}
-		match, err := models.MatchesUtxoAddressPatterns(
-			output.Address(),
-			patterns,
-		)
-		if err != nil {
-			return nil, err
-		}
-		if match {
-			ret = append(ret, utxos[i])
-		}
-	}
-	return ret, nil
+	return filterUtxoViews(utxos, patterns, "UTxO",
+		func(item *models.UtxoWithOrdering) *models.Utxo { return &item.Utxo })
 }
 
 // UtxosByAssets returns UTxOs that contain the specified assets
@@ -1859,6 +1855,60 @@ func (d *Database) UtxosDeleteRolledback(
 	}
 
 	return nil
+}
+
+func (d *Database) restoreAssetUtxoAddressesAfterSlot(
+	ctx context.Context,
+	slot uint64,
+	txn *Txn,
+) error {
+	const batchSize = 128
+	loadTxn := txn
+	if txn.Blob() == nil {
+		var cleanup func()
+		loadTxn, cleanup = txn.withBlobForRecovery()
+		defer cleanup()
+	}
+	var afterID uint
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		utxos, err := d.utxoStore().GetSpentAssetUtxosMissingAddressAfterSlot(
+			slot, afterID, batchSize, txn.Metadata(),
+		)
+		if err != nil {
+			return err
+		}
+		for i := range utxos {
+			if err := loadCbor(&utxos[i], loadTxn); err != nil {
+				return fmt.Errorf(
+					"load rollback UTxO %x#%d: %w",
+					utxos[i].TxId, utxos[i].OutputIdx, err,
+				)
+			}
+			output, err := utxos[i].Decode()
+			if err != nil {
+				return fmt.Errorf(
+					"decode rollback UTxO %x#%d: %w",
+					utxos[i].TxId, utxos[i].OutputIdx, err,
+				)
+			}
+			address := []byte(output.Address().String())
+			if len(address) == 0 {
+				return errors.New("decoded rollback UTxO address is empty")
+			}
+			if err := d.utxoStore().SetUtxoAddress(
+				utxos[i].ID, address, txn.Metadata(),
+			); err != nil {
+				return err
+			}
+			afterID = utxos[i].ID
+		}
+		if len(utxos) < batchSize {
+			return nil
+		}
+	}
 }
 
 func (d *Database) UtxosUnspend(

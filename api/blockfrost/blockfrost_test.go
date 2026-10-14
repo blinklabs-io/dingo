@@ -24,6 +24,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -1112,10 +1113,24 @@ func (m *mockNode) Genesis() (
 	return m.genesis, m.genesisErr
 }
 
-func (m *mockNode) PoolsExtended() (
-	[]PoolExtendedInfo, error,
+func (m *mockNode) PoolsExtended(
+	_ context.Context,
+	params PaginationParams,
+) (
+	[]PoolExtendedInfo, int, error,
 ) {
-	return m.pools, m.poolsErr
+	pools := slices.Clone(m.pools)
+	slices.SortFunc(pools, func(a, b PoolExtendedInfo) int {
+		return strings.Compare(a.Hex, b.Hex)
+	})
+	if params.Order == PaginationOrderDesc {
+		slices.Reverse(pools)
+	}
+	offset, ok := paginationOffset(params)
+	if !ok || offset >= len(pools) {
+		return []PoolExtendedInfo{}, len(pools), m.poolsErr
+	}
+	return pools[offset:min(offset+params.Count, len(pools))], len(pools), m.poolsErr
 }
 
 func (m *mockNode) PoolsList(ctx context.Context,
@@ -1126,6 +1141,7 @@ func (m *mockNode) PoolsList(ctx context.Context,
 }
 
 func (m *mockNode) PoolsRetiring(
+	_ context.Context,
 	_ PaginationParams,
 ) ([]PoolRetiringInfo, int, error) {
 	return m.poolsRetiring, m.poolsRetiringTotal, m.poolsRetiringErr
@@ -1170,6 +1186,7 @@ func (m *mockNode) DRep(
 }
 
 func (m *mockNode) DReps(
+	_ context.Context,
 	params DRepListParams,
 ) ([]DRepListItemInfo, int, error) {
 	m.drepListParams = params
@@ -2411,7 +2428,7 @@ INSERT INTO drep (
 		require.NoError(t, err)
 	}
 
-	items, total, err := adapter.DReps(DRepListParams{
+	items, total, err := adapter.DReps(context.Background(), DRepListParams{
 		Pagination: PaginationParams{
 			Count: 100,
 			Page:  1,

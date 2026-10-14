@@ -62,7 +62,9 @@ type BlockfrostNode interface {
 
 	// PoolsExtended returns the current active pools with
 	// extended details.
-	PoolsExtended() ([]PoolExtendedInfo, error)
+	PoolsExtended(context.Context, PaginationParams) (
+		[]PoolExtendedInfo, int, error,
+	)
 
 	// PoolsList returns the paginated list of registered (active,
 	// non-retired) stake pool IDs, along with the total number of
@@ -76,7 +78,7 @@ type BlockfrostNode interface {
 	// PoolsRetiring returns the paginated list of pools with a
 	// pending retirement announcement, along with the total number
 	// of matching results before pagination.
-	PoolsRetiring(PaginationParams) ([]PoolRetiringInfo, int, error)
+	PoolsRetiring(context.Context, PaginationParams) ([]PoolRetiringInfo, int, error)
 
 	// PoolMetadata returns the registered metadata for a pool.
 	PoolMetadata(poolID string) (PoolMetadataInfo, error)
@@ -192,7 +194,7 @@ type BlockfrostNode interface {
 
 	// DReps returns the paginated DRep list along with the total
 	// number of matching results before pagination.
-	DReps(DRepListParams) ([]DRepListItemInfo, int, error)
+	DReps(context.Context, DRepListParams) ([]DRepListItemInfo, int, error)
 
 	// Account returns stake-account information for the
 	// requested stake address.

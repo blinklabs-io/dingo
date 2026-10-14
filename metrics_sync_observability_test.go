@@ -42,6 +42,7 @@ func TestSyncDecisionCountersPreMaterializeLabels(t *testing.T) {
 		string(chainsyncrecycler.PlateauOutcomeReconciled):         0,
 		string(chainsyncrecycler.PlateauOutcomeBacklogNotRecycled): 0,
 		string(chainsyncrecycler.PlateauOutcomeResync):             0,
+		string(chainsyncrecycler.PlateauOutcomeEagernessHeld):      0,
 	}, counterValues(
 		t, registry, "dingo_chainsync_plateau_decisions_total",
 	))
