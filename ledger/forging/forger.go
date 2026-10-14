@@ -4426,7 +4426,7 @@ func buildLeiosEB(
 		totalBytes += txBytes
 		// Bounded above by the MaxUint16 check on len(tx.Cbor) above. Kept
 		// on one line so the directive stays attached to the conversion.
-		size := uint16(len(tx.Cbor)) // #nosec G115
+		size := uint32(len(tx.Cbor)) // #nosec G115
 		refs = append(refs, lcommon.LeiosTransactionReference{
 			TransactionHash: lcommon.Blake2b256Hash(tx.Cbor),
 			TransactionSize: size,

@@ -654,15 +654,6 @@ func (ls *LedgerState) markAdmissionVerified(
 	}
 }
 
-// admissionVerifiedSlot reports whether a block at slot has an admission
-// record. It does not consume it.
-func (ls *LedgerState) admissionVerifiedSlot(slot uint64) bool {
-	ls.admissionVerifiedMu.Lock()
-	record, ok := ls.admissionVerified[slot]
-	ls.admissionVerifiedMu.Unlock()
-	return ok && ls.headerCryptoVerificationGenerationCurrent(record.generation)
-}
-
 // consumeAdmissionVerified removes any record for point's slot and reports
 // whether it was for exactly this point. A record for another hash at the same
 // slot is dropped without vouching for point.

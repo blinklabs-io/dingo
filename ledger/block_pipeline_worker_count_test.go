@@ -122,10 +122,7 @@ func runPipelineThroughput(
 	t.Helper()
 	pl := pipeline.NewBlockPipeline(
 		pipeline.WithDecodeWorkers(workers),
-		pipeline.WithValidateWorkers(workers),
-		pipeline.WithEta0(epochNonceHex),
-		pipeline.WithSlotsPerKesPeriod(slotsPerKesPeriod),
-		pipeline.WithVerifyConfig(productionValidateVerifyConfig),
+		pipeline.WithTrustedDecodeOnly(),
 	)
 	require.NoError(t, pl.Start(t.Context()))
 	defer func() { require.NoError(t, pl.Stop()) }()

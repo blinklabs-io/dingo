@@ -363,7 +363,7 @@ func TestServeForgedEndorserBlockTxs(t *testing.T) {
 	for i, b := range bodies {
 		refs[i] = lcommon.LeiosTransactionReference{
 			TransactionHash: lcommon.Blake2b256Hash(b),
-			TransactionSize: uint16(len(b)), //nolint:gosec // small test bodies
+			TransactionSize: uint32(len(b)), //nolint:gosec // small test bodies
 		}
 	}
 	ebCbor, err := lcommon.LeiosEndorserBlock{

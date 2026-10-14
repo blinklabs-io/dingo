@@ -979,7 +979,7 @@ func TestPeerOfferedStoreWithheldUntilAnnouncementBindsIt(t *testing.T) {
 	txRaw := testDijkstraTx(t, 9)
 	ref := lcommon.LeiosTransactionReference{
 		TransactionHash: lcommon.Blake2b256Hash(txRaw),
-		TransactionSize: uint16(len(txRaw)),
+		TransactionSize: uint32(len(txRaw)),
 	}
 	blockRaw, err := cbor.Encode(&lcommon.LeiosEndorserBlock{
 		TransactionReferences: []lcommon.LeiosTransactionReference{ref},
@@ -1050,7 +1050,7 @@ func TestPeerOfferedLedgerInvalidEndorserBlockIsNotVoted(t *testing.T) {
 	txRaw := testDijkstraTx(t, 10)
 	ref := lcommon.LeiosTransactionReference{
 		TransactionHash: lcommon.Blake2b256Hash(txRaw),
-		TransactionSize: uint16(len(txRaw)),
+		TransactionSize: uint32(len(txRaw)),
 	}
 	blockRaw, err := cbor.Encode(&lcommon.LeiosEndorserBlock{
 		TransactionReferences: []lcommon.LeiosTransactionReference{ref},
@@ -1117,7 +1117,7 @@ func TestPeerOfferedEndorserBlockLocalValidationFailureRemainsRetryable(
 	txRaw := testDijkstraTx(t, 0)
 	ref := lcommon.LeiosTransactionReference{
 		TransactionHash: lcommon.Blake2b256Hash(txRaw),
-		TransactionSize: uint16(len(txRaw)),
+		TransactionSize: uint32(len(txRaw)),
 	}
 	blockRaw, err := cbor.Encode(&lcommon.LeiosEndorserBlock{
 		TransactionReferences: []lcommon.LeiosTransactionReference{ref},
@@ -2215,58 +2215,36 @@ func (h *recordingLeiosPipelineHandler) ObserveEndorserBlock(
 //     backfill can retry against other peers) rather than the misleading decode
 // invariant failure that made look like a consensus/decode defect.
 
-// bareRefMapFromArrayWrapped strips the single-element array wrapper produced by
-// LeiosEndorserBlock.MarshalCBOR (0x81 || refMap) to yield the bare {hash=>size}
-// references map, i.e. the IOG Leios prototype wire shape (CBOR major type 5).
-func bareRefMapFromArrayWrapped(t *testing.T, arrayWrapped []byte) []byte {
-	t.Helper()
-	require.GreaterOrEqual(t, len(arrayWrapped), 2)
-	// Definite one-element array header for a single map element.
-	require.Equalf(
-		t,
-		byte(0x81),
-		arrayWrapped[0],
-		"expected single-element array wrapper, got 0x%x",
-		arrayWrapped[0],
-	)
-	return arrayWrapped[1:]
-}
-
 // TestLeiosEndorserBlockLargeMapDecodesAllRefs proves the manifest decoder reads
 // every reference of a large map. 1200 refs requires a 2-byte CBOR map-header
 // length (0xb9 || uint16); 300 also needs the multi-byte branch. If the header
 // parsing dropped or mis-counted refs for large maps (the "decode to zero"
-// hypothesis), these would fail.
+// hypothesis), these would fail. The decoder accepts only a bare definite map.
 func TestLeiosEndorserBlockLargeMapDecodesAllRefs(t *testing.T) {
 	t.Parallel()
 
 	for _, refCount := range []int{24, 256, 300, 715, 1200, 1604} {
-		_, arrayWrapped := testLeiosEndorserBlockRawWithRefs(t, 42, refCount)
+		_, raw := testLeiosEndorserBlockRawWithRefs(t, 42, refCount)
 
-		// Array-wrapped shape (CIP-0164 / dingo).
-		decoded, err := lcommon.NewLeiosEndorserBlockFromCbor(arrayWrapped)
-		require.NoErrorf(
-			t,
-			err,
-			"array-wrapped decode failed for %d refs",
-			refCount,
-		)
+		// An endorser block is a bare definite-length map.
+		decoded, err := lcommon.NewLeiosEndorserBlockFromCbor(raw)
+		require.NoErrorf(t, err, "decode failed for %d refs", refCount)
 		require.Lenf(
 			t,
 			decoded.TransactionReferences,
 			refCount,
-			"array-wrapped: expected %d refs", refCount,
+			"expected %d refs", refCount,
 		)
 
-		// Bare-map shape (IOG Leios prototype).
-		bareMap := bareRefMapFromArrayWrapped(t, arrayWrapped)
-		decodedBare, err := lcommon.NewLeiosEndorserBlockFromCbor(bareMap)
-		require.NoErrorf(t, err, "bare-map decode failed for %d refs", refCount)
-		require.Lenf(
+		// The earlier array-wrapped shape is no longer accepted.
+		_, err = lcommon.NewLeiosEndorserBlockFromCbor(
+			append([]byte{0x81}, raw...),
+		)
+		require.ErrorContainsf(
 			t,
-			decodedBare.TransactionReferences,
-			refCount,
-			"bare-map: expected %d refs", refCount,
+			err,
+			"expected map",
+			"array-wrapped shape for %d refs", refCount,
 		)
 	}
 }
@@ -2283,21 +2261,17 @@ func TestLeiosEndorserBlockZeroRefsErrorOnlyFromEmptyManifest(t *testing.T) {
 	_, err := lcommon.NewLeiosEndorserBlockFromCbor([]byte{0xa0})
 	require.ErrorContains(t, err, zeroRefsMsg)
 
-	// Array-wrapped empty map: [ {} ] = 0x81 0xa0.
+	// An array-wrapped empty map is a different shape and is rejected as one,
+	// not as an empty manifest.
 	_, err = lcommon.NewLeiosEndorserBlockFromCbor([]byte{0x81, 0xa0})
-	require.ErrorContains(t, err, zeroRefsMsg)
+	require.ErrorContains(t, err, "expected map")
 
 	// A large, non-empty manifest of the size reported in (~1000 refs is
-	// ~35 KB) does NOT produce the zero-refs error in either wire shape.
-	_, arrayWrapped := testLeiosEndorserBlockRawWithRefs(t, 15, 1000)
-	require.Greater(t, len(arrayWrapped), 30000, "manifest should be ~35 KB")
+	// ~35 KB) does NOT produce the zero-refs error.
+	_, raw := testLeiosEndorserBlockRawWithRefs(t, 15, 1000)
+	require.Greater(t, len(raw), 30000, "manifest should be ~35 KB")
 
-	_, err = lcommon.NewLeiosEndorserBlockFromCbor(arrayWrapped)
-	require.NoError(t, err)
-
-	_, err = lcommon.NewLeiosEndorserBlockFromCbor(
-		bareRefMapFromArrayWrapped(t, arrayWrapped),
-	)
+	_, err = lcommon.NewLeiosEndorserBlockFromCbor(raw)
 	require.NoError(t, err)
 }
 
@@ -2725,7 +2699,7 @@ func haskellEncodeBlockTxs(
 	txs []cbor.RawMessage,
 ) ([]byte, error) {
 	out := []byte{0x84}
-	out = append(out, haskellCborUint(0, 3)...)
+	out = append(out, haskellCborUint(0, leiosfetch.MessageTypeBlockTxs)...)
 	out = append(out, 0x82)
 	out = append(out, haskellCborUint(0, point.Slot)...)
 	out = append(out, haskellCborBytes(point.Hash)...)
@@ -2918,7 +2892,7 @@ func (r *diffusingBlockTxsRequester) BlockTxsRequest(
 		}
 		txs = append(txs, enc)
 	}
-	return leiosfetch.NewMsgBlockTxsFull(point, served, txs), nil
+	return leiosfetch.NewMsgBlockTxs(point, served, txs), nil
 }
 
 // A fetch that runs out of diffused transactions must retain what it already
@@ -3518,8 +3492,9 @@ func TestLeiosServeWaiterNotRegisteredForClosedConnection(t *testing.T) {
 // transactions per BlockTxsRequest — a prefix of the requested ascending
 // indices, mirroring the prototype relay's per-message size cap. Each returned
 // transaction's CBOR encodes its absolute index so callers can verify ordering.
-// includeBitmaps toggles whether the response echoes the served bitmaps (the
-// prototype's 4-element form) or omits them (forcing the prefix fallback).
+// includeBitmaps toggles whether the response carries the served bitmaps or
+// leaves them empty (forcing the prefix fallback). A decoded response always
+// carries bitmaps, so the empty form only exists for in-process callers.
 type cappingBlockTxsRequester struct {
 	maxPerResp     int // <= 0 means no cap (serve all requested)
 	serveNothing   bool
@@ -3557,9 +3532,9 @@ func (r *cappingBlockTxsRequester) BlockTxsRequest(
 		txs = append(txs, enc)
 	}
 	if r.includeBitmaps {
-		return leiosfetch.NewMsgBlockTxsFull(point, served, txs), nil
+		return leiosfetch.NewMsgBlockTxs(point, served, txs), nil
 	}
-	return leiosfetch.NewMsgBlockTxs(txs), nil
+	return leiosfetch.NewMsgBlockTxs(point, nil, txs), nil
 }
 
 func requireTxsInIndexOrder(t *testing.T, txs []cbor.RawMessage, want int) {
@@ -3821,7 +3796,7 @@ func (r *servingBlockTxsRequester) BlockTxsRequest(
 	if err != nil {
 		return nil, err
 	}
-	return leiosfetch.NewMsgBlockTxsFull(point, served, txs), nil
+	return leiosfetch.NewMsgBlockTxs(point, served, txs), nil
 }
 
 // oversizedBitmapRequester serves a legitimate-looking response for a small
@@ -3848,7 +3823,7 @@ func (r *oversizedBitmapRequester) BlockTxsRequest(
 	if r.extraWindow != 0 {
 		served[r.extraWindow] = r.extraMask
 	}
-	return leiosfetch.NewMsgBlockTxsFull(point, served, txs), nil
+	return leiosfetch.NewMsgBlockTxs(point, served, txs), nil
 }
 
 // TestFetchLeiosEbTxsBatchedRejectsOversizedResponseBitmap simulates a relay

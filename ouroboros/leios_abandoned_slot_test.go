@@ -120,7 +120,7 @@ func TestLeiosBlockTxsAbandonedSlotFailsOverAndBecomesAvailable(t *testing.T) {
 				ProtocolId: leiosfetch.ProtocolId,
 				IsResponse: true,
 				Messages: []protocol.Message{
-					leiosfetch.NewMsgBlockTxsFull(
+					leiosfetch.NewMsgBlockTxs(
 						point,
 						bitmap,
 						[]cbor.RawMessage{tx},

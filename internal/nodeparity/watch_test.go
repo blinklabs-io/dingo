@@ -119,13 +119,18 @@ func newTestChainSyncServer(
 // in production, but the exact intersect point does not matter here.
 func (s *testChainSyncServer) findIntersect(
 	_ chainsync.CallbackContext,
-	_ []pcommon.Point,
+	points []pcommon.Point,
 ) (pcommon.Point, chainsync.Tip, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.rolledBack = false
 	s.cursor = 0
-	return csmock.OriginPoint(), s.chain.Tip(), nil
+	if len(points) == 0 {
+		return pcommon.Point{}, s.chain.Tip(), chainsync.ErrIntersectNotFound
+	}
+	// Report the first offered point: a client rejects an intersection it
+	// did not offer, and where the feed starts does not matter here.
+	return points[0], s.chain.Tip(), nil
 }
 
 // requestNext follows the real node convention csmock's own example

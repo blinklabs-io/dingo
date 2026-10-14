@@ -371,7 +371,7 @@ func TestLeiosFetchServerVotesRequestWithoutHandler(t *testing.T) {
 	assert.Empty(t, votesMsg.VotesRaw)
 	wire, err := cbor.Encode(votesMsg)
 	require.NoError(t, err)
-	assert.Equal(t, []byte{0x82, 0x05, 0x80}, wire)
+	assert.Equal(t, []byte{0x82, oleiosfetch.MessageTypeVotes, 0x80}, wire)
 }
 
 func TestStoreLeiosEndorserBlockNotifiesVoteHandler(t *testing.T) {

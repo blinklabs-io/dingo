@@ -1769,11 +1769,10 @@ type LedgerState struct {
 	// started. See drainBlockPipelineErrors's doc comment for why this
 	// goroutine exists: gouroboros' pipeline pushes every stage error onto
 	// a fixed-size errorsChan before forwarding the item onward, and never
-	// drains it itself -- without a permanent reader, errorsChan fills
-	// (deterministically, on real chain sync, from expected per-block
-	// Byron-era validate-stage errors -- see blockPipelineEta0Provider) and
-	// every validate worker permanently blocks on `errors <- err`,
-	// cascading into an unrecoverable Submit deadlock.
+	// drains it itself -- without a permanent reader, errorsChan fills (for
+	// example with the decode errors of a run of undecodable blocks) and
+	// every worker permanently blocks on `errors <- err`, cascading into an
+	// unrecoverable Submit deadlock.
 	blockPipelineErrorsDone chan struct{}
 	// blockPipelineGatherMutex serializes ledgerReadChainIterator's
 	// gather-then-submit sequence (collecting raw blocks via iter.Next(),
@@ -2188,46 +2187,17 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 		// bump makes any of them fail, revisit the decision rather than
 		// the test.
 		workerCount := blockPipelineWorkerCount()
+		// Blocks read back from the chain were verified when they were
+		// stored, so the pipeline only decodes them. In validate mode the
+		// header cryptography is checked by decodeReadChainBatch, which can
+		// defer an unavailable nonce instead of failing the pipeline.
 		pipelineOpts := []pipeline.PipelineOption{
 			pipeline.WithDecodeWorkers(workerCount),
-		}
-		if cfg.BlockPipelineValidateEnabled {
-			// Wire header-crypto validation (phase 3). Eta0Provider reads the
-			// published epoch cache without forecasting or mutation; a
-			// missing nonce is handled by the serial-equivalence gate in
-			// decodeReadChainBatch.
-			//
-			// VerifyConfig scopes gouroboros' generic stage to
-			// VRF/KES/OpCert-signature checks. decodeReadChainBatch
-			// supplements a successful result with verifyOpCertHeaderCrypto,
-			// which repeats the OpCert cold-key signature check and adds the
-			// OpCert expiry check. Body/transaction and registered-pool state
-			// validation remain in their existing ledger paths.
-			pipelineOpts = append(
-				pipelineOpts,
-				pipeline.WithValidateWorkers(workerCount),
-				pipeline.WithEta0Provider(ls.blockPipelineEta0Provider),
-				pipeline.WithSlotsPerKesPeriod(ls.SlotsPerKESPeriod()),
-				pipeline.WithVerifyConfig(blockPipelineVerifyConfig()),
-			)
+			pipeline.WithTrustedDecodeOnly(),
 		}
 		ls.blockPipeline = pipeline.NewBlockPipeline(pipelineOpts...)
 	}
 	return ls, nil
-}
-
-// blockPipelineVerifyConfig scopes gouroboros' generic validate stage to the
-// header crypto. The stage is given no protocol parameters or ledger state,
-// so every body rule it could run -- including the block-wide limits and the
-// Conway reference-script total -- belongs to the ledger apply path, which
-// has both.
-func blockPipelineVerifyConfig() lcommon.VerifyConfig {
-	return lcommon.VerifyConfig{
-		SkipBodyHashValidation:    true,
-		SkipTransactionValidation: true,
-		SkipStakePoolValidation:   true,
-		SkipBlockLimitsValidation: true,
-	}
 }
 
 func cloneSnapshotBytes(value []byte) []byte {
@@ -7027,10 +6997,9 @@ func (ls *LedgerState) ledgerReadChainIterator(
 // observability: gouroboros' StageWorkerPool.worker pushes every non-nil
 // stage error onto errorsChan *before* forwarding the item onward to
 // Results(), unconditionally and regardless of whether the error is
-// "expected" for this item (e.g. blockPipelineEta0Provider can fail while
-// cached epoch nonce state is unavailable, which decodeReadChainBatch
-// deliberately defers when it later reads the same item back from Results()
-// -- but by then the error has already been pushed here). errorsChan's
+// "expected" for this item (a decode error that decodeReadChainBatch later
+// reads back from Results() and reports itself -- but by then the error has
+// already been pushed here). errorsChan's
 // capacity is bounded
 // (PipelineConfig.PrefetchBufferSize, 1000 by default) with nothing else in
 // this codebase ever reading from it; during a long interval without cached
@@ -7096,12 +7065,6 @@ func (ls *LedgerState) recordBlockPipelineError(err error) {
 		ls.metrics.incBlockPipelineExpectedEta0Error()
 		ls.config.Logger.Debug(
 			"block-processing pipeline: cached epoch has no Praos nonce for validate stage",
-			"error",
-			err,
-		)
-	case errors.Is(err, errBlockPipelineAdmissionVerified):
-		ls.config.Logger.Debug(
-			"block-processing pipeline: validate stage skipped for a header verified at admission",
 			"error",
 			err,
 		)
@@ -7335,38 +7298,33 @@ func (ls *LedgerState) decodeReadChainBatchWithError(
 		admissionVerified := ls.config.BlockPipelineValidateEnabled &&
 			ls.consumeAdmissionVerified(point)
 		// Byron-era blocks have no VRF/KES fields and no Praos epoch nonce
-		// to validate against (blockPipelineEta0Provider always fails the
-		// nonce lookup for them), matching the serial path's
+		// to validate against, matching the serial path's
 		// verifyBlockHeaderHex, which explicitly skips Byron blocks rather
-		// than trying to validate them. Ignore any validation outcome for
-		// them here for the same reason.
+		// than trying to validate them. Skip them here for the same reason.
+		//
+		// Header cryptography is verified here, not in the pipeline: the
+		// pipeline's validate stage treats any failure, including a nonce
+		// that is not yet known, as fatal to ordered processing, whereas
+		// this loop defers a missing nonce to the authoritative apply-time
+		// check and reports a genuinely invalid header without stopping the
+		// pipeline shared across attempts.
 		if ls.config.BlockPipelineValidateEnabled &&
 			block.Era().Id != byron.EraIdByron &&
 			ls.shouldEnforceBlockPipelineCrypto(block.SlotNumber()) {
-			// Admission already verified this exact header; the nonce
-			// provider told the validate stage to skip it.
+			// Admission already verified this exact header.
 			if admissionVerified {
 				decoded = append(decoded, block)
 				continue
 			}
-			valErr := item.ValidationError()
-			if errors.Is(valErr, errBlockPipelineAdmissionVerified) {
-				// The slot's admission record was for a different hash, so
-				// the validate stage did not check this block.
-				_, _, valErr = ls.verifyBlockHeaderStatelessCryptoWithCache(
-					ctx,
-					block,
-					false,
-				)
-				if valErr == nil {
-					decoded = append(decoded, block)
-					continue
-				}
-			}
+			_, _, valErr := ls.verifyBlockHeaderStatelessCryptoWithCache(
+				ctx,
+				block,
+				false,
+			)
 			if valErr != nil {
 				// The validation-state snapshot can change between the gate
-				// above and the provider's lookup. A missing/deferred nonce is
-				// not evidence that the block is invalid; admission or the
+				// above and the lookup. A missing/deferred nonce is not
+				// evidence that the block is invalid; admission or the
 				// deferred apply-time check remains authoritative.
 				if errors.Is(valErr, errBlockPipelineEta0Unavailable) ||
 					errors.Is(valErr, errHeaderVerificationDeferred) {
@@ -7383,41 +7341,6 @@ func (ls *LedgerState) decodeReadChainBatchWithError(
 					Cause: fmt.Errorf(
 						"block pipeline header crypto validation: %w",
 						valErr,
-					),
-					Source: ls.deferredHeaderSource(point),
-				}
-				continue
-			}
-			if !item.IsValid() {
-				ls.config.Logger.Error(
-					"block failed pipeline header crypto validation",
-					"slot", block.SlotNumber(),
-				)
-				retErr = &headerValidationError{
-					BlockPoint: point,
-					Cause: errors.New(
-						"block failed pipeline header crypto validation",
-					),
-					Source: ls.deferredHeaderSource(point),
-				}
-				continue
-			}
-			if opCertErr := verifyOpCertHeaderCrypto(
-				block.Header(),
-				block.SlotNumber(),
-				ls.SlotsPerKESPeriod(),
-				ls.maxKESEvolutions(),
-			); opCertErr != nil {
-				ls.config.Logger.Error(
-					"failed to validate block operational certificate",
-					"error", opCertErr,
-					"slot", block.SlotNumber(),
-				)
-				retErr = &headerValidationError{
-					BlockPoint: point,
-					Cause: fmt.Errorf(
-						"block pipeline operational certificate validation: %w",
-						opCertErr,
 					),
 					Source: ls.deferredHeaderSource(point),
 				}

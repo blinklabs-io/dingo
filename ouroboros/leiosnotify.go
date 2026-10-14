@@ -2128,6 +2128,7 @@ func leiosForgedEBOffer(entry *leiosForgedEBEntry) protocol.Message {
 		return oleiosnotify.NewMsgBlockTxsOffer(*entry.txOffer)
 	case entry.announcement != nil:
 		return oleiosnotify.NewMsgBlockAnnouncement(
+			uint(gdijkstra.EraIdDijkstra),
 			cbor.RawMessage(entry.announcement),
 		)
 	case entry.vote != nil:

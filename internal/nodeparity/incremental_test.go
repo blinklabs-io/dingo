@@ -190,11 +190,29 @@ func newFakeProtocolParams() *conway.ConwayProtocolParameters {
 // needs: RunIncremental never runs a Sync loop against dingo, only Check's
 // one-shot tip read.
 func (s *fakeLSQState) findIntersect(
-	_ chainsync.CallbackContext, _ []pcommon.Point,
+	_ chainsync.CallbackContext, points []pcommon.Point,
 ) (pcommon.Point, chainsync.Tip, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return csmock.OriginPoint(), s.tip, nil
+	return intersectOrNotFound(points, s.tip)
+}
+
+// intersectOrNotFound answers a FindIntersect the way a real node does: an
+// IntersectFound only for a point the client offered, and otherwise
+// IntersectNotFound carrying the node's tip, which is what ChainSync's
+// GetCurrentTip (an empty point list) reads. The client rejects an
+// IntersectFound for a point it did not offer.
+func intersectOrNotFound(
+	points []pcommon.Point,
+	tip chainsync.Tip,
+) (pcommon.Point, chainsync.Tip, error) {
+	origin := csmock.OriginPoint()
+	for _, p := range points {
+		if p.Slot == origin.Slot && bytes.Equal(p.Hash, origin.Hash) {
+			return origin, tip, nil
+		}
+	}
+	return pcommon.Point{}, tip, chainsync.ErrIntersectNotFound
 }
 
 func (s *fakeLSQState) snapshot() (
@@ -340,6 +358,26 @@ func (s *fakeLSQState) config() localstatequery.Config {
 						return []any{pp}, nil
 					case *localstatequery.ShelleyStakeDistributionQuery:
 						return []any{dist}, nil
+					case *localstatequery.ShelleyStakeDistribution2Query:
+						// From node-to-client version 21 the pool stake
+						// distribution is a one-field wrapper around each
+						// pool's [fraction, pool stake, VRF hash] and the
+						// total active stake.
+						pools := make(
+							map[ledger.PoolId]localstatequery.IndividualPoolStake,
+							len(dist),
+						)
+						for poolID, entry := range dist {
+							pools[poolID] = localstatequery.IndividualPoolStake{
+								StakeFraction: entry.StakeFraction,
+								VrfHash:       entry.VrfHash,
+							}
+						}
+						return localstatequery.StakeDistribution2Result{
+							Distribution: localstatequery.PoolDistribution{
+								Pools: pools,
+							},
+						}, nil
 					case *localstatequery.ShelleyUtxoByTxinQuery:
 						return []any{
 							map[localstatequery.UtxoId]ledger.TransactionOutput{},
@@ -479,8 +517,8 @@ func (s *fakeCardanoServer) findIntersect(
 	// it -- see baselineTipIndex's own doc comment for why.
 	if len(points) == 0 {
 		s.cursor = s.baselineTipIndex + 1
-		return s.chain.Points[s.baselineTipIndex],
-			s.chain.Tips[s.baselineTipIndex], nil
+		return pcommon.Point{}, s.chain.Tips[s.baselineTipIndex],
+			chainsync.ErrIntersectNotFound
 	}
 	// Otherwise intersect at whatever point the client asked for (its
 	// cursor), not always origin: incrementalSession always Syncs from its
@@ -493,7 +531,7 @@ func (s *fakeCardanoServer) findIntersect(
 		}
 	}
 	s.cursor = 0
-	return csmock.OriginPoint(), s.chain.Tip(), nil
+	return intersectOrNotFound(points, s.chain.Tip())
 }
 
 func (s *fakeCardanoServer) requestNext(ctx chainsync.CallbackContext) error {

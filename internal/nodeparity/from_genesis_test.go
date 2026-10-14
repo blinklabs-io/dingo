@@ -876,7 +876,7 @@ func (s *genesisFakeServer) findIntersect(
 		}
 	}
 	s.cursor = 0
-	return csmock.OriginPoint(), s.chain.Tip(), nil
+	return intersectOrNotFound(points, s.chain.Tip())
 }
 
 // requestNext mirrors fakeCardanoServer.requestNext's three-branch shape
@@ -978,8 +978,10 @@ func (s *genesisFakeServer) lsqConfig() localstatequery.Config {
 					case *localstatequery.ShelleyCurrentProtocolParamsQuery:
 						return []any{pp}, nil
 					case *localstatequery.ShelleyPoolDistr2Query:
-						return localstatequery.PoolDistr2Result{
-							Pools: map[ledger.PoolId]localstatequery.PoolDistr2IndividualStake{},
+						return localstatequery.StakeDistribution2Result{
+							Distribution: localstatequery.PoolDistr2Result{
+								Pools: map[ledger.PoolId]localstatequery.PoolDistr2IndividualStake{},
+							},
 						}, nil
 					case *localstatequery.ShelleyUtxoWholeQuery:
 						s.mu.Lock()
