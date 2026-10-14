@@ -2107,7 +2107,6 @@ type MetadataStore interface {
 	// psFutureStakePoolParams until the next epoch boundary; only a pool's
 	// first-ever registration is immediate). Callers must pass the current
 	// epoch's start slot, not an arbitrary point in the past.
-	//
 	GetPoolByVrfKeyHash(
 		vrfKeyHash []byte,
 		epochStartSlot uint64,

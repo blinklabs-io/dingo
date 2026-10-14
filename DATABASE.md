@@ -4813,16 +4813,18 @@ lookup finds none. The shared SQL computes two claim tiers, and each method
 selects its own tier:
 
 1. **Effective owner.** The pool whose most recent registration strictly
-   before `epochStartSlot` has this key (`pre_boundary`), falling back to a
-   candidate's globally earliest registration (`earliest`) when it has none
+   before `epochStartSlot` has this key (`pre_boundary_state`), falling back to
+   a candidate's first same-epoch registration
+   (`first_same_epoch_registration`) when it has none
    before the boundary -- the same first-registration-is-immediate exception
    `GetPoolEarliestVrfKeyHashAtSlot` encodes, needed here so a pool's
    first-ever registration, submitted mid-epoch, still reserves its key
    against every other pool immediately rather than only from the next
    boundary.
 2. **Same-epoch claimant.** The pool whose *latest* registration this epoch
-   (`added_slot >= epochStartSlot`) names this key (`latest_same_epoch_registration`,
-   ranked the same way as `pre_boundary`). Consulted only when (1) finds
+   (`added_slot >= epochStartSlot`) names this key
+   (`latest_same_epoch_registration`, ranked with the same event ordering as
+   `pre_boundary_state`). Consulted only when (1) finds
    nothing. Only the current pending value in `psFutureStakePoolParams`
    reserves a key this way; a key a pool cycled through and then superseded
    within the same epoch (`A -> B -> C`) is freed the moment the later
