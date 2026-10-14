@@ -229,8 +229,12 @@ func (a *NodeAdapter) AddressTotal(
 	}
 	var pattern models.UtxoAddressPattern
 	if isPaymentCred {
+		// Key and script hashes share one namespace; the credential's
+		// prefix says which one it names.
+		paymentScript := models.PaymentScriptFromAddress(addr)
 		pattern = models.UtxoAddressPattern{
-			PaymentPart: addr.PaymentKeyHash().Bytes(),
+			PaymentPart:   addr.PaymentKeyHash().Bytes(),
+			PaymentScript: &paymentScript,
 		}
 	} else {
 		pattern, err = models.ExactUtxoAddressPattern(addr)

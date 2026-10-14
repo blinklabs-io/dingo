@@ -345,3 +345,72 @@ VALUES (?, ?, ?, ?, 5, '1', 0)`, mint.Hash, policy, nft, []byte("fp"))
 	_, err = adapter.AddressExtended(cancelled, addr.String())
 	require.ErrorIs(t, err, context.Canceled)
 }
+
+// Key and script hashes share one namespace, so a bare credential counts only
+// the outputs locked by the kind of credential it names.
+func TestNodeAdapterAddressTotalSeparatesKeyAndScriptCredentials(
+	t *testing.T,
+) {
+	t.Parallel()
+	adapter, raw, db := newDBBackedAdapter(t)
+	keyAddr, payment, _ := testKeyAddress(t, 0x85, 0)
+	scriptAddr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeScriptNone,
+		lcommon.AddressNetworkTestnet,
+		payment,
+		nil,
+	)
+	require.NoError(t, err)
+	seedAddressOutput(t, raw, db, keyAddr, fill32(0x31), 10, 2_000_000,
+		nil, nil)
+	seedAddressOutput(t, raw, db, scriptAddr, fill32(0x32), 11, 9_000_000,
+		nil, nil)
+	_, err = raw.Exec(
+		`UPDATE utxo SET payment_script = 1 WHERE tx_id = ?`,
+		fill32(0x32),
+	)
+	require.NoError(t, err)
+
+	conv, err := bech32.ConvertBits(payment, 8, 5, true)
+	require.NoError(t, err)
+	for _, tc := range []struct {
+		hrp  string
+		want string
+	}{
+		{"addr_vkh", "2000000"},
+		{"script", "9000000"},
+	} {
+		cred, err := bech32.Encode(tc.hrp, conv)
+		require.NoError(t, err)
+		got, err := adapter.AddressTotal(context.Background(), cred)
+		require.NoError(t, err, tc.hrp)
+		require.Equal(t, tc.want, got.ReceivedSum[0].Quantity, tc.hrp)
+	}
+}
+
+// Every UTxO listing matches the exact address, so a foreign-network address
+// is rejected rather than listing nothing.
+func TestNodeAdapterAddressUTXOsRejectForeignNetwork(t *testing.T) {
+	t.Parallel()
+	adapter, _, _ := newDBBackedAdapter(t)
+	mainnet, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyNone,
+		lcommon.AddressNetworkMainnet,
+		bytes.Repeat([]byte{0x86}, lcommon.AddressHashSize),
+		nil,
+	)
+	require.NoError(t, err)
+	page := PaginationParams{Count: 10, Page: 1, Order: PaginationOrderAsc}
+	_, _, err = adapter.AddressUTXOs(
+		context.Background(), mainnet.String(), page,
+	)
+	require.ErrorIs(t, err, ErrInvalidAddress)
+	_, _, err = adapter.AddressAssetUTXOs(
+		context.Background(),
+		mainnet.String(),
+		hex.EncodeToString(bytes.Repeat([]byte{0x87}, lcommon.AddressHashSize)),
+		[]byte("A"),
+		page,
+	)
+	require.ErrorIs(t, err, ErrInvalidAddress)
+}

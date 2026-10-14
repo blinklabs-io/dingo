@@ -3447,6 +3447,15 @@ func (a *NodeAdapter) addressUTXOs(ctx context.Context,
 			err,
 		)
 	}
+	// The match is on the exact address, so a foreign-network address would
+	// list nothing rather than being rejected as Blockfrost does.
+	if addr.NetworkId() != uint(a.networkID()) {
+		return nil, 0, fmt.Errorf(
+			"address %q network mismatch: %w",
+			address,
+			ErrInvalidAddress,
+		)
+	}
 
 	pattern, err := models.ExactUtxoAddressPattern(addr)
 	if err != nil {
