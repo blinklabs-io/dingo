@@ -51,6 +51,15 @@ func seedProposalReturnAccountWithTag(
 	account.StakingKey = stakeCred
 	account.CredentialTag = credentialTag
 	require.NoError(t, store.CreateAccount(nil, account))
+	return proposalReturnAddress(t, stakeCred, credentialTag)
+}
+
+func proposalReturnAddress(
+	t *testing.T,
+	stakeCred []byte,
+	credentialTag uint8,
+) []byte {
+	t.Helper()
 	addressType := uint8(lcommon.AddressTypeNoneKey)
 	if credentialTag == 1 {
 		addressType = uint8(lcommon.AddressTypeNoneScript)
@@ -221,7 +230,7 @@ func TestSPOVotingPowerIncludesProposalDepositsWithoutChangingMarkStake(
 	assert.Equal(t, uint64(100), persistedPoolStake)
 }
 
-func TestSPOVotingPowerUsesSnapshotDelegationAfterPoolReap(t *testing.T) {
+func TestSPOVotingPowerUsesSnapshotPoolForLiveReturnAccounts(t *testing.T) {
 	t.Parallel()
 
 	db, store := newTallyTestDB(t)
@@ -272,6 +281,37 @@ func TestSPOVotingPowerUsesSnapshotDelegationAfterPoolReap(t *testing.T) {
 	require.NoError(t, store.ClearDelegationsToRetiredPool(
 		retiringPool, 10, nil,
 	))
+
+	deregisteredStakeCred := testBytes(28, 0x77)
+	deregisteredAccount := &models.Account{
+		StakingKey: deregisteredStakeCred,
+		Pool:       retiringPool,
+		AddedSlot:  1,
+		Active:     true,
+	}
+	require.NoError(t, store.ImportAccount(deregisteredAccount, nil))
+	deregisteredAddr := proposalReturnAddress(t, deregisteredStakeCred, 0)
+	require.NoError(t, db.SetGovernanceProposal(
+		context.Background(),
+		&models.GovernanceProposal{
+			TxHash:        testBytes(32, 0x78),
+			ActionIndex:   0,
+			ActionType:    uint8(lcommon.GovActionTypeUpdateCommittee),
+			ProposedEpoch: 5,
+			ExpiresEpoch:  5,
+			Deposit:       100,
+			ReturnAddress: deregisteredAddr,
+			AnchorURL:     "https://example.invalid/deregistered-deposit",
+			AnchorHash:    testBytes(32, 0x79),
+			AddedSlot:     1,
+		},
+		nil,
+	))
+	_, err = store.raw.Exec(`
+UPDATE account
+SET active = FALSE, pool = NULL, added_slot = 10
+WHERE credential_tag = 0 AND staking_key = ?`, deregisteredStakeCred)
+	require.NoError(t, err)
 
 	tally := &ProposalTally{
 		ActionType:     uint8(lcommon.GovActionTypeUpdateCommittee),

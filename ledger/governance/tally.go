@@ -629,7 +629,11 @@ func includeActiveProposalDepositsInSPOVotingState(
 		state.proposalDepositsIncluded = true
 		return nil
 	}
-	accounts, err := accountsForProposalDepositsAtSlot(
+	liveAccounts, err := accountsForProposalDeposits(ctx, db, txn, deposits)
+	if err != nil {
+		return err
+	}
+	snapshotAccounts, err := accountsForProposalDepositsAtSlot(
 		ctx, db, txn, deposits, capturedSlot,
 	)
 	if err != nil {
@@ -647,13 +651,13 @@ func includeActiveProposalDepositsInSPOVotingState(
 	}
 	depositsByPool := make(map[string]uint64)
 	for credential, deposit := range deposits {
-		account := accounts[credential]
-		if account == nil ||
-			!proposalDepositAccountActive(account, expiryEpoch) ||
-			len(account.Pool) == 0 {
+		liveAccount := liveAccounts[credential]
+		snapshotAccount := snapshotAccounts[credential]
+		if !proposalDepositAccountActive(liveAccount, expiryEpoch) ||
+			snapshotAccount == nil || len(snapshotAccount.Pool) == 0 {
 			continue
 		}
-		poolKey := string(account.Pool)
+		poolKey := string(snapshotAccount.Pool)
 		poolRow, hasVotingStake := rowsByPool[poolKey]
 		if !hasVotingStake || poolRow == nil {
 			// The Conway pulser adds proposal deposits only to a pool already
