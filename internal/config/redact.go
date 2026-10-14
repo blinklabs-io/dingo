@@ -196,6 +196,7 @@ var logPlainConfigFields = []string{
 	"KoiosParity.Strict",
 	"LedgerApplyRowBatchingEnabled",
 	"LedgerCatchupTimeout",
+	"LeiosPersistenceRetentionSlots",
 	"LedgerPrefetchAheadEnabled",
 	"LeiosVoteSigningKeyFile",
 	"LocalStateQueryViewMaxLifetime",
