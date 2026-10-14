@@ -152,6 +152,13 @@ type ChainSelectorConfig struct {
 	SecurityParam      uint64
 	GenesisMode        bool
 	GenesisWindowSlots uint64
+	// WallClockSlot returns the current wall-clock slot and whether it is
+	// known. In Genesis mode a peer whose advertised tip slot plus the
+	// Genesis window is below the wall-clock slot is treated as serving an
+	// abandoned fork: it is not selectable and its headers are not applied.
+	// Other peers' tips play no part in the decision. Optional; the rule is
+	// inactive while nil or while it reports false.
+	WallClockSlot func() (uint64, bool)
 	// MinCorroboratingPeers is the number of distinct other eligible peers
 	// that must report the same recent blocks as a candidate before that
 	// candidate can drive chain selection in Genesis mode. It implements the
@@ -535,6 +542,58 @@ func (cs *ChainSelector) bestKnownGenesisSlotLocked(
 		}
 	}
 	return best
+}
+
+// advertisedTipStaleLocked reports whether, in Genesis mode, this peer's
+// advertised tip is older than the wall clock by more than a Genesis window.
+// Such a peer holds a chain the network has stopped extending (an abandoned
+// fork): it can lead on delivered density and frontier because its whole chain
+// is short, so it must not be selected (which also keeps it out of the Genesis
+// exit horizon, built from selectable peers), must not define the delivered
+// frontier other peers are measured against, and must not have its headers
+// applied to the ledger (see ShouldApplyIngress).
+//
+// The bound is the wall clock alone, not other peers' claims. Advertised tips
+// are unverified, so any rule that counts them can be tipped by colluding
+// connections into excluding the one honest peer. A live chain's tip is always
+// near the wall clock and no peer can make it older, so peers cannot move the
+// verdict on an honest peer. A stale peer is excluded even when it is the only
+// candidate: letting it through then is exactly how an abandoned fork gets
+// selected while honest peers reconnect, or after they all disconnect.
+//
+// The trade-off is that if the honest network stalls for longer than one
+// Genesis window, a syncing Genesis-mode node waits for a fresher peer instead
+// of following a chain that old; a stall that long already violates the
+// chain-growth assumption Genesis selection rests on. The rule is inactive
+// without a wall-clock source, while the clock reports no slot, and outside
+// Genesis mode.
+func (cs *ChainSelector) advertisedTipStaleLocked(
+	peerTip *PeerChainTip,
+) bool {
+	if peerTip == nil {
+		return false
+	}
+	wall, ok := cs.staleTipRuleWallSlotLocked()
+	if !ok {
+		return false
+	}
+	return safeAddUint64(
+		peerTip.Tip.Point.Slot,
+		cs.genesisWindowSlotsLocked(),
+	) < wall
+}
+
+// staleTipRuleWallSlotLocked returns the wall-clock slot the stale-tip rule
+// measures against, and false while the rule cannot decide. It reports true
+// only in Genesis mode, and node composition observes tips synchronously
+// throughout Genesis selection, so the apply gate never reads a tracked tip
+// that predates the header it is admitting.
+func (cs *ChainSelector) staleTipRuleWallSlotLocked() (uint64, bool) {
+	if cs.mode != SelectionModeGenesis || cs.securityParam == 0 ||
+		cs.config.WallClockSlot == nil {
+		return 0, false
+	}
+	return cs.config.WallClockSlot()
 }
 
 func (cs *ChainSelector) shouldExitGenesisModeLocked(
@@ -1794,6 +1853,19 @@ func (cs *ChainSelector) isPeerSelectableWithBestKnownBlockLocked(
 		}
 		return false
 	}
+	if cs.advertisedTipStaleLocked(peerTip) {
+		if logSkip {
+			wallSlot, _ := cs.staleTipRuleWallSlotLocked()
+			cs.config.Logger.Debug(
+				"skipping peer advertising a tip older than the wall clock",
+				"connection_id", connId.String(),
+				"advertised_tip_slot", peerTip.Tip.Point.Slot,
+				"wall_clock_slot", wallSlot,
+				"genesis_window_slots", cs.genesisWindowSlotsLocked(),
+			)
+		}
+		return false
+	}
 	selectionTip := peerTip.SelectionTip()
 	// The two behind-filters below compare delivered block numbers. A peer
 	// registered from a rollback has not delivered a header yet, so its
@@ -1987,6 +2059,9 @@ func (cs *ChainSelector) bestKnownBlockNumber() uint64 {
 	}
 	frontiers := make([]frontier, 0, len(cs.peerTips))
 	for connId, pt := range cs.peerTips {
+		if cs.advertisedTipStaleLocked(pt) {
+			continue
+		}
 		if blockNumber := pt.SelectionTip().BlockNumber; blockNumber > 0 {
 			frontiers = append(frontiers, frontier{connId, pt, blockNumber})
 		}

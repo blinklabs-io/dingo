@@ -2006,7 +2006,11 @@ type LedgerState struct {
 	lastActiveConnId *ouroboros.ConnectionId // tracks active connection for switch detection
 
 	// Header mismatch tracking for fork detection and re-sync
-	headerMismatchCount       int // consecutive header mismatch count
+	// headerMismatchMu guards headerMismatchCounts. The header handler
+	// counts under chainsyncMutex, but blockfetch paths reset a count through
+	// requestChainsyncResync holding only chainsyncBlockfetchMutex.
+	headerMismatchMu          sync.Mutex
+	headerMismatchCounts      map[string]int // consecutive header mismatches keyed by connIdKey
 	bufferedHeaderEvents      map[string][]ChainsyncEvent
 	peerHeaderHistory         map[string]*peerHeaderChain
 	peerHeaderHistoryBytes    int
@@ -13156,6 +13160,11 @@ func (ls *LedgerState) forecastPendingPParamUpdate(
 // CurrentEpoch returns the current epoch number.
 func (ls *LedgerState) CurrentEpoch() uint64 {
 	return ls.loadConsensusSnapshot().currentEpoch.EpochId
+}
+
+// IsByronEra reports whether the applied ledger is still in the Byron era.
+func (ls *LedgerState) IsByronEra() bool {
+	return ls.loadConsensusSnapshot().currentEra.Id == eras.ByronEraDesc.Id
 }
 
 // ConsensusModeForEpoch returns the Praos consensus variant that

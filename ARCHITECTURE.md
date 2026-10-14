@@ -4561,7 +4561,10 @@ The `LedgerView` interface provides query access to ledger state:
   final slot of a pending action's inclusive expiry epoch so ancestry,
   hard-fork succession, proposal expiry, and security-group voting use the
   persisted Dingo state.
-- `IsVrfKeyInUse` reads `epochStartSlot`, pinned on the view at every real
+- `IsVrfKeyInUse` reserves both the epoch-effective VRF key and the latest
+  deferred key, querying the effective owner first and falling back to
+  `IsFutureVrfKeyInUse`. A superseded deferred key becomes available again.
+  Both lookups read `epochStartSlot`, pinned on the view at every real
   construction site (`NewView`, `ledgerProcessBlock`, `validateTxCore`,
   `ValidateTxWithOverlay`, `EvaluateTx`) from the same snapshot that pins
   `committeeEpoch`/`pp` alongside it -- the same `horizonAnchorSlot`
@@ -5211,8 +5214,8 @@ moves selection to the next:
   tip, which may send nothing for many slots. A peer with at least
   `headerMismatchResyncThreshold` blocks left before its advertised tip keeps
   streaming headers, and a cursor past the local tip then shows up in the
-  header handler as consecutive mismatches, which request a resync from
-  headers actually received. The advertised tip is untrusted, but it only
+  header handler as that connection's consecutive mismatches, which request
+  a resync from headers actually received. The advertised tip is untrusted, but it only
   withholds a close; overstating it cannot force one. A fallback connection,
   which the switch event carries no advertised tip for, is measured against
   the chain selector's sync target instead. That target never exceeds the
@@ -5548,6 +5551,44 @@ held. If a candidate fork path falls outside the retained suffix, recovery
 fails closed to a fresh
 ChainSync intersection instead of making a density or rollback decision from
 an incomplete path.
+
+A peer that has delivered the whole of a short abandoned fork can lead on
+observed density and delivered frontier against peers still streaming the
+longer chain. In Genesis mode the selector therefore treats a peer as stale
+when its advertised tip slot is more than one Genesis window older than the
+wall-clock slot (`advertisedTipStaleLocked`). A stale peer is not selectable,
+even when it is the only candidate (including in the selection that follows a
+disconnect), so selection waits for a fresher peer instead; it also drops out of
+the exit horizon, and its frontier is ignored when deciding whether other peers
+are behind (`bestKnownBlockNumber`) and when computing the Limit on Eagerness.
+Its headers are also not applied to the
+ledger (`ChainSelector.ShouldApplyIngress`, the apply gate in the roll-forward
+and roll-backward handlers): ingress is open to every eligible peer, not only
+the selected one, so headers admitted from a stale peer would stay in the shared
+header queue after selection moved to honest peers and make their headers look
+like a persistent fork. The gate reads the peer's tracked tip, so node
+composition observes tip and rollback updates synchronously, before the gate
+runs, whenever Genesis selection is active
+(`ChainSelector.GenesisSelectionState`); the rule can decide only in Genesis
+mode, so this is a superset of when it applies. An asynchronous observation
+would let a new stale peer's first headers through. A peer that remains
+unknown because that synchronous observation was rejected is denied by the
+gate. The bound is the wall clock, not a count of advertised tips: those are
+unverified, and colluding connections cannot make an honest peer's live tip
+older than the wall clock. The wall-clock slot comes from
+`ChainSelectorConfig.WallClockSlot`, which node composition wires to the
+current `LedgerState.CurrentSlot` through an atomic that follows live
+Restore/Truncate and is withdrawn before live-lifecycle or startup-rollback
+cleanup closes the ledger; the rule is inactive while that hook is unset or reports no
+slot, and outside Genesis mode. It deliberately uses the extrapolated
+`CurrentSlot` rather than `WallClockSlotFromConfirmedHistory`: during catch-up
+the wall clock lies past the confirmed history's forecast horizon, which is
+exactly when the rule is needed. The hook reports no slot while the applied
+ledger is still in Byron, so the Genesis stale-tip rule becomes active only
+after the applied ledger crosses into Shelley. The trade-off is that if
+the honest network stalls for longer than one Genesis window, a syncing
+Genesis-mode node waits rather than following a chain that old; a stall that
+long already violates the chain-growth assumption Genesis selection rests on.
 
 **Per-peer candidate chain fragments** (`chainselection.CandidateFragment`)
 materialize each peer's delivered-header history as a first-class value —
@@ -5888,7 +5929,10 @@ bucket.
 intersection of all candidate fragments, so a syncing node cannot commit to one
 peer's chain so far that a slower honest candidate can no longer win. The limit
 is computed from the candidate fragments of live, eligible, non-stale peers
-that have delivered a header, and is gated on the selection mode, which is
+that have delivered a header, excluding peers the Genesis stale-tip rule
+treats as stale (`advertisedTipStaleLocked`): such a peer is never selectable,
+so its fork needs no protection, and counting it would hold every other peer at
+`k` past its fork point while it stays connected. The limit is gated on the selection mode, which is
 Dingo's only sync-state signal (there is no Genesis State Machine equivalent):
 
 - Genesis mode (syncing): the cap is active. Before any candidate has
@@ -10130,7 +10174,12 @@ reserves a metadata read connection before briefly taking the commit barriers,
 keeping an exhausted-pool wait outside them. Admission remains held for the
 snapshot's lifetime and is capped at one below the provider's read-pool size,
 so client-paced `/matches` streams cannot consume the connection destructive
-rollback needs for operational reads.
+rollback needs for operational reads. The server sets no overall write
+timeout, because a fixed deadline would truncate a large stream; instead a
+30-second write deadline is re-armed before every response write. A client that
+stops reading, or reads so slowly that a single write takes longer than the
+deadline, fails its stream and releases its snapshot; a stream whose every
+write completes within the deadline is never cut off, however long it runs.
 
 Match results stream in 512-row pages through an ordering cursor, hydrate
 spending details only for the current page, check request cancellation between
