@@ -20,7 +20,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"math"
 	"net/http"
 	"slices"
 	"strconv"
@@ -73,7 +72,7 @@ func (s *Server) handleAccountBalance(
 				r.Context(),
 				addr,
 				point.slot,
-				math.MaxInt,
+				database.DefaultPublicUtxoResultLimit,
 				database.DefaultPublicUtxoCborBudget,
 			)
 	} else {

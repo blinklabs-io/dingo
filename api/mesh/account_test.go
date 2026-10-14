@@ -16,7 +16,6 @@ package mesh
 
 import (
 	"errors"
-	"math"
 	"net/http"
 	"testing"
 
@@ -237,7 +236,7 @@ func TestAccountBalanceHistoricalByIndex(t *testing.T) {
 	rec := postJSON(t, h, "/account/balance", req)
 	require.Equal(
 		t,
-		math.MaxInt,
+		database.DefaultPublicUtxoResultLimit,
 		deps.ledger.historicalMaxResults,
 	)
 	require.Equal(
