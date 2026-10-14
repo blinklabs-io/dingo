@@ -120,7 +120,9 @@ func TestRewardStakeUpgradeStartCertifiesBeforeMigrations(t *testing.T) {
 		db.QueryRowContext(t.Context(), `SELECT MAX(version) FROM schema_migrations`).
 			Scan(&version),
 	)
-	require.Equal(t, 44, version)
+	registry, err := migrations.SQLiteRegistry()
+	require.NoError(t, err)
+	require.Equal(t, len(registry), version)
 	for _, table := range []string{"pool_stake_snapshot", "reward_snapshot"} {
 		require.NoError(
 			t,
