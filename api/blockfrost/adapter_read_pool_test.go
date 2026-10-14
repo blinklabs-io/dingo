@@ -101,6 +101,19 @@ SELECT id, ? FROM utxo WHERE tx_id = ?`,
 		tx.Hash,
 	)
 	require.NoError(t, err)
+	// The redeemer resolves through a read of its transaction, which holds
+	// no CBOR here; the listing has to return, whatever that read reports.
+	_, err = raw.Exec(
+		`INSERT INTO redeemer_script
+    (transaction_id, tag, "index", script_hash, slot, tx_index)
+VALUES (?, ?, 0, ?, ?, ?)`,
+		tx.ID,
+		lcommon.RedeemerTagSpend,
+		script,
+		tx.Slot,
+		tx.BlockIndex,
+	)
+	require.NoError(t, err)
 	require.NoError(t, db.SetTip(ochainsync.Tip{BlockNumber: 1}, nil))
 
 	ctx := context.Background()
@@ -118,6 +131,10 @@ SELECT id, ? FROM utxo WHERE tx_id = ?`,
 	require.NoError(t, err2)
 	require.Equal(t, 1, total)
 	require.Equal(t, 1, count)
+	requireCompletes(t, "ScriptRedeemers", func() {
+		_, _, err2 = adapter.ScriptRedeemers(ctx, script, page)
+	})
+	require.ErrorContains(t, err2, "get redeemers of transaction")
 	requireCompletes(t, "AssetUTXOs", func() {
 		var rows []AssetUTXOInfo
 		rows, total, err2 = adapter.AssetUTXOs(

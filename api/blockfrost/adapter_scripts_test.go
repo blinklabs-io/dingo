@@ -27,8 +27,8 @@ import (
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
-	"github.com/blinklabs-io/plutigo/data"
 	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
+	"github.com/blinklabs-io/plutigo/data"
 	"github.com/stretchr/testify/require"
 )
 
