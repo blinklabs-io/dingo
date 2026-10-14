@@ -380,6 +380,10 @@ func (a *NodeAdapter) ScriptRedeemers(
 	if err != nil {
 		return nil, 0, fmt.Errorf("get script redeemers: %w", err)
 	}
+	// Each redeemer resolves through reads of its own; holding this
+	// snapshot's connection across them lets concurrent requests exhaust the
+	// read pool waiting on each other.
+	txn.Release()
 	infos, err := buildScriptRedeemerInfos(refs, a)
 	if err != nil {
 		return nil, 0, err
@@ -427,6 +431,10 @@ func (a *NodeAdapter) ScriptUTXOs(
 	if err != nil {
 		return nil, 0, fmt.Errorf("get script UTxOs: %w", err)
 	}
+	// Block hashes and output CBOR resolve through reads of their own; holding
+	// this snapshot's connection across them lets concurrent requests exhaust
+	// the read pool waiting on each other.
+	txn.Release()
 	page := make([]models.UtxoWithOrdering, 0, len(utxos))
 	for _, utxo := range utxos {
 		page = append(page, models.UtxoWithOrdering{Utxo: utxo})

@@ -521,3 +521,74 @@ func decodeBabbageOutputAt(
 	require.NoError(t, err)
 	return output
 }
+
+// A collateral return has no transaction_id; the block range compares the
+// position of the transaction it belongs to, not block index zero.
+func TestNodeAdapterAssetUTXOsRangeUsesCollateralReturnPosition(t *testing.T) {
+	t.Parallel()
+	adapter, raw, db := newSlotTimeDBBackedAdapter(t)
+	policy := bytes.Repeat([]byte{0xe5}, lcommon.AddressHashSize)
+	policyHex := hex.EncodeToString(policy)
+	addr, _, _ := testKeyAddress(t, 0xe6, 0)
+	held := func() []models.Asset {
+		return []models.Asset{{PolicyId: policy, Name: []byte("C"), Amount: 1}}
+	}
+
+	valid := seedAssetTransaction(t, raw, db, fill32(0x11), 5, 50, 1)
+	insertAdapterUtxo(t, raw, &models.Utxo{
+		TransactionID: &valid.ID,
+		TxId:          valid.Hash,
+		PaymentKey:    addr.PaymentKeyHash().Bytes(),
+		AddedSlot:     valid.Slot,
+		Amount:        types.Uint64(1_000_000),
+		Assets:        held(),
+	})
+	storePointerOutputCbor(t, db, valid.Hash, 0, addr, 1_000_000)
+	failed := &models.Transaction{
+		Hash:       fill32(0x12),
+		BlockHash:  valid.BlockHash,
+		Slot:       50,
+		BlockIndex: 2,
+		Valid:      false,
+		CollateralReturn: &models.Utxo{
+			TxId:       fill32(0x12),
+			OutputIdx:  1,
+			PaymentKey: addr.PaymentKeyHash().Bytes(),
+			AddedSlot:  50,
+			Amount:     types.Uint64(2_000_000),
+			Assets:     held(),
+		},
+	}
+	insertAdapterTransaction(t, raw, failed)
+	storePointerOutputCbor(t, db, failed.Hash, 1, addr, 2_000_000)
+	require.NoError(t, db.SetTip(ochainsync.Tip{BlockNumber: 5}, nil))
+
+	index := uint32(2)
+	params := TransactionRangeParams{
+		Pagination: PaginationParams{
+			Count: 10,
+			Page:  1,
+			Order: PaginationOrderAsc,
+		},
+		From: &BlockRangePosition{Block: 5, Index: &index},
+	}
+	rows, total, err := adapter.AssetUTXOs(
+		context.Background(), policyHex, []byte("C"), params,
+	)
+	require.NoError(t, err)
+	require.Equal(t, 1, total)
+	require.Len(t, rows, 1)
+	require.Equal(t, hex.EncodeToString(failed.Hash), rows[0].TxHash)
+	require.Equal(t, uint32(1), rows[0].OutputIndex)
+
+	index = 1
+	params.From = nil
+	params.To = &BlockRangePosition{Block: 5, Index: &index}
+	rows, total, err = adapter.AssetUTXOs(
+		context.Background(), policyHex, []byte("C"), params,
+	)
+	require.NoError(t, err)
+	require.Equal(t, 1, total)
+	require.Len(t, rows, 1)
+	require.Equal(t, hex.EncodeToString(valid.Hash), rows[0].TxHash)
+}

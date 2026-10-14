@@ -18,11 +18,9 @@ import (
 	"context"
 	"encoding/hex"
 	"fmt"
-	"slices"
 	"strconv"
 	"strings"
 
-	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	dbtypes "github.com/blinklabs-io/dingo/database/types"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
@@ -296,6 +294,9 @@ func (a *NodeAdapter) AssetTransactions(
 	if err != nil {
 		return nil, 0, fmt.Errorf("get asset transactions: %w", err)
 	}
+	// Block lookups below run outside this snapshot; release its connection
+	// first so concurrent requests cannot exhaust the read pool.
+	txn.Release()
 	infos, err := a.transactionPositionInfos(ctx, txs)
 	if err != nil {
 		return nil, 0, err
@@ -307,30 +308,9 @@ func (a *NodeAdapter) AssetTransactions(
 	return ret, total, nil
 }
 
-// positionInRange reports whether a producing transaction position lies
-// inside the resolved inclusive range.
-func positionInRange(
-	slot uint64,
-	index uint32,
-	from *models.AddressTransactionPosition,
-	to *models.AddressTransactionPosition,
-) bool {
-	if from != nil &&
-		(slot < from.Slot || (slot == from.Slot && index < from.TxIndex)) {
-		return false
-	}
-	if to != nil &&
-		(slot > to.Slot || (slot == to.Slot && index > to.TxIndex)) {
-		return false
-	}
-	return true
-}
-
 // AssetUTXOs returns the current UTxOs holding an asset in producing order.
-// Without a block range the page is cut in SQL. A range filters on the
-// producing transaction's position, which the SQL page does not express, so
-// the matching outputs are listed by reference first and only the requested
-// page is loaded in full.
+// A block range bounds the producing transaction's position; the count and
+// the page are both cut in SQL.
 func (a *NodeAdapter) AssetUTXOs(
 	ctx context.Context,
 	policyID string,
@@ -365,77 +345,28 @@ func (a *NodeAdapter) AssetUTXOs(
 		FilterByAsset:     true,
 		AssetPolicyID:     policy[:],
 		AssetName:         nonNilAssetName(assetName),
+		CreatedFrom:       from,
+		CreatedTo:         to,
 	}
-	descending := params.Pagination.Order == PaginationOrderDesc
 	var (
 		page  []models.UtxoWithOrdering
 		total int
 	)
-	switch {
-	case !fromSatisfiable || !toSatisfiable:
-	case from == nil && to == nil:
+	if fromSatisfiable && toSatisfiable {
 		total, err = db.CountUtxosByAddressWithOrdering(ctx, &query, txn)
 		if err != nil {
 			return nil, 0, fmt.Errorf("count asset UTxOs: %w", err)
 		}
-		offset, ok := paginationOffset(params.Pagination)
-		if !ok || offset >= total {
-			break
-		}
-		paged := query
-		paged.Limit = params.Pagination.Count
-		paged.Offset = offset
-		paged.Descending = descending
-		page, err = db.UtxosByAddressWithOrdering(ctx, &paged, txn)
-		if err != nil {
-			return nil, 0, fmt.Errorf("get asset UTxOs: %w", err)
-		}
-	default:
-		scan := query
-		scan.SkipAssets = true
-		all, err := db.UtxosByAddressWithOrdering(ctx, &scan, txn)
-		if err != nil {
-			return nil, 0, fmt.Errorf("get asset UTxOs: %w", err)
-		}
-		inRange := make([]models.UtxoWithOrdering, 0, len(all))
-		for _, utxo := range all {
-			if positionInRange(utxo.TxSlot, utxo.TxBlockIndex, from, to) {
-				inRange = append(inRange, utxo)
-			}
-		}
-		total = len(inRange)
-		if descending {
-			slices.Reverse(inRange)
-		}
-		offset, ok := paginationOffset(params.Pagination)
-		if !ok || offset >= total {
-			break
-		}
-		window := inRange[offset:min(offset+params.Pagination.Count, total)]
-		refs := make([]models.UtxoId, 0, len(window))
-		slots := make(map[database.UtxoRef]models.UtxoWithOrdering, len(window))
-		for _, utxo := range window {
-			refs = append(
-				refs,
-				models.UtxoId{Hash: utxo.TxId, Idx: utxo.OutputIdx},
-			)
-			ref, err := utxoRef(utxo.Utxo)
+		if offset, ok := paginationOffset(params.Pagination); ok &&
+			offset < total {
+			paged := query
+			paged.Limit = params.Pagination.Count
+			paged.Offset = offset
+			paged.Descending = params.Pagination.Order == PaginationOrderDesc
+			page, err = db.UtxosByAddressWithOrdering(ctx, &paged, txn)
 			if err != nil {
-				return nil, 0, err
+				return nil, 0, fmt.Errorf("get asset UTxOs: %w", err)
 			}
-			slots[ref] = utxo
-		}
-		page, err = a.orderedUtxosByRefs(ctx, refs, txn)
-		if err != nil {
-			return nil, 0, fmt.Errorf("get asset UTxOs: %w", err)
-		}
-		for i := range page {
-			ref, err := utxoRef(page[i].Utxo)
-			if err != nil {
-				return nil, 0, err
-			}
-			page[i].TxSlot = slots[ref].TxSlot
-			page[i].TxBlockIndex = slots[ref].TxBlockIndex
 		}
 	}
 	if total == 0 {
@@ -452,6 +383,10 @@ func (a *NodeAdapter) AssetUTXOs(
 			)
 		}
 	}
+	// The response rows resolve block hashes and output CBOR through reads of
+	// their own; holding this snapshot's connection across them lets
+	// concurrent requests exhaust the read pool waiting on each other.
+	txn.Release()
 	infos, err := a.assetUTXOInfos(ctx, page)
 	if err != nil {
 		return nil, 0, err

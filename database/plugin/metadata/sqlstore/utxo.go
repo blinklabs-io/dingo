@@ -2004,7 +2004,9 @@ func (s *Store) utxosByAddressPatterns(
 // GetUtxosByAddressWithOrdering and CountUtxosByAddressWithOrdering. The
 // returned args follow the placeholders in from, then predicate. The
 // predicate excludes any keyset (query.After) bound, which only
-// GetUtxosByAddressWithOrdering applies.
+// GetUtxosByAddressWithOrdering applies. A CreatedFrom/CreatedTo range
+// compares the producing transaction position, so from then also joins that
+// transaction.
 func utxoOrderingClauses(
 	query *models.UtxoWithOrderingQuery,
 	disqualifyLivenessIndex bool,
@@ -2060,8 +2062,40 @@ func utxoOrderingClauses(
 			args = append(args, assetArgs...)
 		}
 	}
+	if utxoOrderingRanged(query) {
+		from += utxoProducerJoin
+	}
+	if from := query.CreatedFrom; from != nil {
+		predicate += " AND (" + utxoOrderingSlotExpr + " > ? OR (" +
+			utxoOrderingSlotExpr + " = ? AND " +
+			utxoOrderingBlockIndexExpr + " >= ?))"
+		args = append(args, from.Slot, from.Slot, from.TxIndex)
+	}
+	if to := query.CreatedTo; to != nil {
+		predicate += " AND (" + utxoOrderingSlotExpr + " < ? OR (" +
+			utxoOrderingSlotExpr + " = ? AND " +
+			utxoOrderingBlockIndexExpr + " <= ?))"
+		args = append(args, to.Slot, to.Slot, to.TxIndex)
+	}
 	return from, predicate, args, nil
 }
+
+// utxoProducerJoin joins the transaction that produced a UTxO. A collateral
+// return has no transaction_id; it belongs to the transaction named by
+// collateral_return_for_tx_id, whose position it takes.
+func utxoOrderingRanged(query *models.UtxoWithOrderingQuery) bool {
+	return query.CreatedFrom != nil || query.CreatedTo != nil
+}
+
+const utxoProducerJoin = `
+LEFT JOIN "transaction"
+    ON COALESCE(utxo.transaction_id, utxo.collateral_return_for_tx_id)
+       = "transaction".id`
+
+const (
+	utxoOrderingSlotExpr       = `COALESCE("transaction".slot, utxo.added_slot)`
+	utxoOrderingBlockIndexExpr = `COALESCE("transaction".block_index, 0)`
+)
 
 func countUtxosOrderingStatement(
 	query *models.UtxoWithOrderingQuery,
@@ -2121,8 +2155,11 @@ func (s *Store) GetUtxosByAddressWithOrdering(
 	if err != nil {
 		return nil, fmt.Errorf("GetUtxosByAddressWithOrdering: %w", err)
 	}
-	slotExpr := `COALESCE("transaction".slot, utxo.added_slot)`
-	blockIndexExpr := `COALESCE("transaction".block_index, 0)`
+	if !utxoOrderingRanged(query) {
+		from += utxoProducerJoin
+	}
+	slotExpr := utxoOrderingSlotExpr
+	blockIndexExpr := utxoOrderingBlockIndexExpr
 	if query.After != nil {
 		predicate += `
  AND (
@@ -2155,7 +2192,6 @@ func (s *Store) GetUtxosByAddressWithOrdering(
 SELECT ` + qualifiedSQLiteUtxoColumns + `,
        ` + slotExpr + `, ` + blockIndexExpr + `
 FROM ` + from + `
-LEFT JOIN "transaction" ON utxo.transaction_id = "transaction".id
 WHERE ` + predicate + `
 ORDER BY ` + slotExpr + ` ` + orderDir + `, ` + blockIndexExpr + ` ` + orderDir + `,
          utxo.output_idx ` + orderDir + `, utxo.tx_id ` + orderDir

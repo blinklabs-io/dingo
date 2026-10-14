@@ -57,10 +57,16 @@ var (
 // query API. Fields within one pattern are ANDed; multiple patterns are ORed.
 // ExactAddress is the complete serialized address, while PaymentPart and
 // DelegationPart deliberately match credentials across address forms.
+//
+// PaymentScript, when set alongside PaymentPart, restricts the match to
+// script (true) or key (false) payment credentials. Key and script hashes
+// share one 28-byte namespace, so a bare credential lookup needs it to keep
+// the two apart.
 type UtxoAddressPattern struct {
 	ExactAddress   []byte
 	PaymentPart    []byte
 	DelegationPart []byte
+	PaymentScript  *bool
 }
 
 // ExactUtxoAddressPattern builds an exact pattern from a decoded address.
@@ -167,6 +173,10 @@ func AppendUtxoAddressPatternOrBranch(
 		}
 		ands = append(ands, "utxo.payment_key = ?")
 		branchArgs = append(branchArgs, pattern.PaymentPart)
+		if pattern.PaymentScript != nil {
+			ands = append(ands, "utxo.payment_script = ?")
+			branchArgs = append(branchArgs, *pattern.PaymentScript)
+		}
 	}
 	if len(pattern.DelegationPart) > 0 {
 		if len(pattern.DelegationPart) != lcommon.AddressHashSize {
@@ -388,7 +398,8 @@ type UtxoHistoryQuery struct {
 //
 // Text form (non-empty): slot:block_index:output_idx:tx_id.
 // GetUtxosByAddressWithOrdering uses the producing transaction position for
-// ordering. Snapshot-imported UTxOs without a producing transaction use
+// ordering; a collateral return takes the position of the transaction it
+// belongs to. Snapshot-imported UTxOs without a producing transaction use
 // AddedSlot and block index zero. TxId makes the cursor unique when those
 // fallback fields collide.
 type UtxoOrderingCursor struct {
@@ -444,6 +455,11 @@ type UtxoAddressPage struct {
 //
 // FilterByAsset: when true, AssetPolicyID is required; AssetName nil matches any name under
 // the policy (same semantics as GetUtxosByAssets).
+//
+// CreatedFrom / CreatedTo: inclusive bounds on the producing transaction
+// position (slot, block index), the same position the ordering uses. Nil
+// leaves that side open. Both GetUtxosByAddressWithOrdering and
+// CountUtxosByAddressWithOrdering apply them, so a ranged listing pages in SQL.
 type UtxoWithOrderingQuery struct {
 	MatchAllAddresses bool
 	AddressPatterns   []UtxoAddressPattern
@@ -455,6 +471,8 @@ type UtxoWithOrderingQuery struct {
 	FilterByAsset     bool
 	AssetPolicyID     []byte
 	AssetName         []byte
+	CreatedFrom       *AddressTransactionPosition
+	CreatedTo         *AddressTransactionPosition
 }
 
 func (u *Utxo) Decode() (ledger.TransactionOutput, error) {
