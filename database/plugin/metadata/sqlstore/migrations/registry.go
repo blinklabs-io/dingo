@@ -79,6 +79,7 @@ const (
 	accountDRepClearSchemaRelease                       = "account-drep-clear-history"
 	committeeHotAuthorizationPruneOrderSchemaRelease    = "committee-hot-authorization-prune-order"
 	poolRelayTypeSchemaRelease                          = "pool-relay-type"
+	scriptIndexSchemaRelease                            = "script-redeemer-reference-index"
 	midnightRollbackJournalSchemaRelease                = "midnight-rollback-journal"
 )
 
@@ -226,6 +227,7 @@ var schemaVersions = []struct {
 	{Version: 40, Name: drepDormancyStateSchemaRelease, Dir: "v40"},
 	{Version: 41, Name: drepDelegatorStateSchemaRelease, Dir: "v41"},
 	{Version: 42, Name: utxoAddressIdentitySchemaRelease, Dir: "v42"},
+	{Version: 43, Name: scriptIndexSchemaRelease, Dir: "v43"},
 }
 
 // SQLiteRegistry returns the checked-in SQLite migration registry.

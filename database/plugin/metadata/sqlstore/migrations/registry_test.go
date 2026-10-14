@@ -31,7 +31,7 @@ func TestSQLiteRegistry(t *testing.T) {
 	registry, err := SQLiteRegistry()
 	require.NoError(t, err)
 	require.NoError(t, validateRegistry(registry, "sqlite"))
-	require.Len(t, registry, 42)
+	require.Len(t, registry, 43)
 
 	require.Equal(t, accountDRepClearSchemaRelease, registry[34].Name)
 	require.Contains(t, registry[34].SQL["sqlite"].Expand[0],
@@ -281,6 +281,14 @@ func TestSQLiteRegistry(t *testing.T) {
 	require.Equal(t, drepDelegatorStateSchemaRelease, registry[40].Name)
 	require.Equal(t, 42, registry[41].Version)
 	require.Equal(t, utxoAddressIdentitySchemaRelease, registry[41].Name)
+	require.Equal(t, 43, registry[42].Version)
+	require.Equal(t, scriptIndexSchemaRelease, registry[42].Name)
+	require.Len(t, registry[42].SQL["sqlite"].Expand, 4)
+	require.Contains(t, registry[42].SQL["sqlite"].Expand[0],
+		"CREATE TABLE IF NOT EXISTS `redeemer_script`")
+	require.Contains(t, registry[42].SQL["sqlite"].Expand[2],
+		"CREATE TABLE IF NOT EXISTS `utxo_reference_script`")
+	require.Empty(t, registry[42].Backfill)
 }
 
 func TestDrepDormancySeedUsesPortableIdempotentInsert(t *testing.T) {
@@ -298,7 +306,7 @@ func TestDrepDormancySeedUsesPortableIdempotentInsert(t *testing.T) {
 			registry, err := tc.registry()
 			require.NoError(t, err)
 			require.NoError(t, validateRegistry(registry, tc.dialect))
-			require.Len(t, registry, 42)
+			require.Len(t, registry, 43)
 			migration := registry[39]
 			require.Equal(t, drepDormancyStateSchemaRelease, migration.Name)
 			seed := strings.Join(migration.SQL[tc.dialect].Expand, "\n")
@@ -527,7 +535,7 @@ func TestMySQLRegistryPrefixesPoolOpCertSequenceIndex(t *testing.T) {
 	registry, err := MySQLRegistry()
 	require.NoError(t, err)
 	require.NoError(t, validateRegistry(registry, "mysql"))
-	require.Len(t, registry, 42)
+	require.Len(t, registry, 43)
 
 	require.Contains(
 		t,
