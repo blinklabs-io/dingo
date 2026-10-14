@@ -823,7 +823,7 @@ func TestTryRecoverFromTxValidationErrorRejectsReplayBelowMithrilBoundary(
 		),
 	)
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(func() { bus.Stop() })
 	resyncCh := make(chan event.ChainsyncResyncEvent, 1)
 	subId := bus.SubscribeFunc(
@@ -1399,7 +1399,7 @@ func TestTryRecoverFromTxValidationErrorAtTipRejectsRewindBelowMithrilBoundary(
 		),
 	)
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(func() { bus.Stop() })
 	resyncCh := make(chan event.ChainsyncResyncEvent, 1)
 	subId := bus.SubscribeFunc(
@@ -1928,7 +1928,7 @@ func TestTryRecoverFromTxValidationErrorFallsBackToSecurityParamWindow(
 	})
 	require.NoError(t, err)
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(func() { bus.Stop() })
 
 	cm, err := chain.NewManager(context.Background(), db, bus)
@@ -2107,7 +2107,7 @@ func TestTryRecoverFromTxValidationErrorReplayFallbackStopsNonConvergingRewinds(
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(func() { bus.Stop() })
 
 	cm, err := chain.NewManager(context.Background(), db, bus)
@@ -2304,6 +2304,15 @@ func TestTryRecoverFromTxValidationErrorReplayFallbackStopsNonConvergingRewinds(
 	)
 }
 
+func TestReplayRecoveryHoldDoesNotAdvanceOriginToSlotZeroFloor(t *testing.T) {
+	t.Parallel()
+
+	require.False(t, replayHoldUsesDurableFloor(
+		ocommon.NewPointOrigin(),
+		ocommon.NewPoint(0, testHashBytes("applied-slot-zero")),
+	))
+}
+
 // newReplayRecoveryAuditLedger builds the fallback topology with an
 // unresolved producer. When primaryAhead is false, the primary chain is
 // already below the ledger tip, matching the held-recovery path.
@@ -2448,7 +2457,7 @@ func TestReplayRecoveryRefusesBelowPruneFloorBeforeChainRewind(t *testing.T) {
 	const pruneFloorSyncKey = database.ConsumedUtxoPruneFloorSyncKey
 	require.NoError(t, ls.db.SetSyncState(pruneFloorSyncKey, "120", nil))
 	chainTipBefore := ls.chain.Tip().Point
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Close)
 	resyncCh := make(chan event.ChainsyncResyncEvent, 1)
 	resyncSubID := bus.SubscribeFunc(
@@ -2503,7 +2512,7 @@ func TestReplayRecoveryRejectsDeterministicDuplicateInput(t *testing.T) {
 	ls.config.GetActiveConnectionFunc = func() *ouroboros.ConnectionId {
 		return &activeConnId
 	}
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Close)
 	resyncCh := make(chan event.ChainsyncResyncEvent, 1)
 	resyncSubID := bus.SubscribeFunc(
@@ -2601,7 +2610,7 @@ func TestReplayRecoveryHaltsRepeatedRewardWithdrawalMismatch(t *testing.T) {
 	t.Parallel()
 
 	ls := newReplayRecoveryAuditLedger(t, true)
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Close)
 	resyncCh := deterministicResyncChannel(t, ls, bus)
 	ls.config.EventBus = bus
@@ -2715,7 +2724,7 @@ func TestReplayRecoveryRejectsRepeatedIncorrectWithdrawalAmount(t *testing.T) {
 	t.Parallel()
 
 	ls := newReplayRecoveryAuditLedger(t, true)
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Close)
 	resyncCh := deterministicResyncChannel(t, ls, bus)
 	validation := func() *txValidationError {
@@ -2786,7 +2795,7 @@ func TestReplayRecoveryRejectsDeterministicPlutusFailure(t *testing.T) {
 	t.Parallel()
 
 	ls := newReplayRecoveryAuditLedger(t, true)
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Close)
 	resyncCh := deterministicResyncChannel(t, ls, bus)
 
@@ -2839,7 +2848,7 @@ func TestReplayRecoveryRejectsDeterministicMalformedReferenceScripts(
 	t.Parallel()
 
 	ls := newReplayRecoveryAuditLedger(t, true)
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Close)
 	resyncCh := deterministicResyncChannel(t, ls, bus)
 
@@ -2884,7 +2893,7 @@ func TestReplayRecoveryRejectsDeterministicMalformedScriptWitnesses(
 	t.Parallel()
 
 	ls := newReplayRecoveryAuditLedger(t, true)
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Close)
 	resyncCh := deterministicResyncChannel(t, ls, bus)
 
@@ -2920,6 +2929,112 @@ func TestReplayRecoveryRejectsDeterministicMalformedScriptWitnesses(
 	assert.Equal(t, ls.Tip().Point, resync.Point)
 }
 
+// A proposal return-account failure reads reward-account registration, so
+// resolving one of the transaction's UTxO inputs cannot change the verdict.
+func TestReplayRecoveryRejectsDeterministicProposalReturnAccountDoesNotExist(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	ls := newReplayRecoveryAuditLedger(t, true)
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Close)
+	resyncCh := deterministicResyncChannel(t, ls, bus)
+
+	badAddr, err := lcommon.NewAddress(
+		"stake_test1ur03nykas2c79sl38zwwsqrsrnzfxqx70nn3k7h40j60ajsle7at7",
+	)
+	require.NoError(t, err)
+
+	recovered, err := ls.tryRecoverFromTxValidationError(&txValidationError{
+		BlockPoint: ocommon.NewPoint(
+			160,
+			testHashBytes("proposal-return-account-block"),
+		),
+		TxHash: testHashBytes("proposal-return-account-tx"),
+		Inputs: []lcommon.TransactionInput{
+			&replayRecoveryInput{txId: testHashBytes("unresolved-producer")},
+		},
+		Cause: fmt.Errorf(
+			"conway utxo validation rule 8: %w",
+			conway.ProposalReturnAccountDoesNotExistError{Address: badAddr},
+		),
+	})
+	require.NoError(t, err)
+	require.True(
+		t,
+		recovered,
+		"a proposal return account rejection must rewind past the block rather than search for a missing-input producer",
+	)
+	assert.Equal(t, uint64(140), ls.Tip().Point.Slot)
+	assert.Equal(t, ls.Tip().Point, ls.chain.Tip().Point)
+	assert.Nil(t, ls.lastAtTipRecovery)
+
+	resync := testutil.RequireReceive(
+		t,
+		resyncCh,
+		2*time.Second,
+		"a proposal return account rejection must request a fresh ChainSync intersection",
+	)
+	assert.Equal(t, ls.Tip().Point, resync.Point)
+}
+
+func TestIsConwayGovPredFailureError(t *testing.T) {
+	t.Parallel()
+
+	addr, err := lcommon.NewAddress(
+		"stake_test1ur03nykas2c79sl38zwwsqrsrnzfxqx70nn3k7h40j60ajsle7at7",
+	)
+	require.NoError(t, err)
+
+	verdicts := []error{
+		conway.ProtocolParameterUpdateEmptyError{},
+		conway.ProtocolParameterUpdateFieldZeroError{},
+		conway.ConwayProtocolParameterUpdateError{},
+		conway.CommitteeMemberAlreadyExpiredError{},
+		conway.EmptyTreasuryWithdrawalsError{},
+		conway.ZeroTreasuryWithdrawalAmountError{},
+		conway.BootstrapDisallowedGovActionError{},
+		conway.WrongNetworkProposalAddressError{},
+		conway.MalformedGovActionError{},
+		conway.ConflictingCommitteeUpdateError{},
+		conway.InvalidGuardrailsScriptHashError{},
+		conway.BadHardForkProtocolVersionError{},
+		conway.ProposalDepositIncorrectError{},
+		conway.ProposalReturnAccountDoesNotExistError{Address: addr},
+		conway.TreasuryWithdrawalReturnAccountsDoNotExistError{},
+		conway.UnknownGovActionIdError{},
+		conway.UnknownVoterError{},
+		conway.VotingOnExpiredGovActionError{},
+		conway.BootstrapVotingRestrictionError{},
+		conway.StakePoolVotingRestrictionError{},
+		conway.CCVotingRestrictionError{},
+		conway.UnelectedCommitteeVoterError{},
+	}
+	for _, verdict := range verdicts {
+		assert.True(t, isConwayGovPredFailureError(verdict), "%T", verdict)
+	}
+	assert.True(
+		t,
+		isConwayGovPredFailureError(fmt.Errorf("wrapped: %w", verdicts[0])),
+	)
+
+	stateErrors := []error{
+		conway.CommitteeExpiryEpochUnavailableError{},
+		conway.ConstitutionLookupError{},
+		conway.MalformedConstitutionError{},
+		conway.CommitteeMemberLookupError{},
+		conway.CommitteeStateUnavailableError{},
+		conway.InvalidGovActionAncestorError{},
+		conway.ConstitutionLookupError{
+			Err: conway.MalformedGovActionError{},
+		},
+	}
+	for _, stateErr := range stateErrors {
+		assert.False(t, isConwayGovPredFailureError(stateErr), "%T", stateErr)
+	}
+}
+
 // A duplicate-input failure reaching the deterministic branch while the node
 // is at tip takes that branch rather than recoverAtTipFromTxValidationError's
 // escalating-depth schedule. Deepening the rewind cannot change a verdict that
@@ -2934,7 +3049,7 @@ func TestReplayRecoveryDeterministicDuplicateAtTipSkipsDescentSchedule(
 	ls := newReplayRecoveryAuditLedger(t, true)
 	ls.reachedTip.Store(true)
 	require.True(t, ls.IsAtTip())
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Close)
 	resyncCh := deterministicResyncChannel(t, ls, bus)
 
@@ -2989,7 +3104,7 @@ func TestReplayRecoveryDeterministicLatchIsPerFailingBlock(t *testing.T) {
 	t.Parallel()
 
 	ls := newReplayRecoveryAuditLedger(t, true)
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Close)
 	resyncCh := deterministicResyncChannel(t, ls, bus)
 	duplicate := shelley.DuplicateInputError{
@@ -3105,7 +3220,7 @@ func TestReplayRecoveryRejectsDeterministicByronUnknownAttributes(
 	t.Parallel()
 
 	ls := newReplayRecoveryAuditLedger(t, true)
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Close)
 	resyncCh := make(chan event.ChainsyncResyncEvent, 1)
 	resyncSubID := bus.SubscribeFunc(
@@ -3636,7 +3751,7 @@ func requireMissingRedeemerRecovery(
 ) {
 	t.Helper()
 	ls := newReplayRecoveryAuditLedger(t, true)
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Close)
 	resyncCh := deterministicResyncChannel(t, ls, bus)
 
@@ -3716,7 +3831,7 @@ func TestReplayRecoveryKeepsBadInputsOnTheRewindPath(t *testing.T) {
 	t.Parallel()
 
 	ls := newReplayRecoveryAuditLedger(t, true)
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Close)
 	resyncCh := deterministicResyncChannel(t, ls, bus)
 
@@ -3806,7 +3921,7 @@ func newTrustWindowLedger(
 		}),
 	)
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Stop)
 	// Observe the bus-owned subscriber channel directly. Publish hands an
 	// event to this channel before it returns, so draining after a recovery
@@ -4285,7 +4400,7 @@ func TestDeterministicTxRecoveryHaltsOnUnreachableRewind(t *testing.T) {
 	require.NoError(t, cm.SetLedger(testSecurityParamLedger{securityParam: 2}))
 	raw := seedTestChain(t, cm.PrimaryChain(), "halt-on-unreachable", 5)
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Stop)
 
 	ls, err := NewLedgerState(LedgerStateConfig{
@@ -4350,7 +4465,7 @@ func TestRecoveryRewindHaltBudgetResetsOnTipProgress(t *testing.T) {
 	require.NoError(t, cm.SetLedger(testSecurityParamLedger{securityParam: 2}))
 	raw := seedTestChain(t, cm.PrimaryChain(), "halt-budget-reset", 5)
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Stop)
 
 	ls, err := NewLedgerState(LedgerStateConfig{
@@ -4425,7 +4540,7 @@ func TestRecoveryRewindHaltsThoughTargetMovesAndDepthGrows(t *testing.T) {
 	pc := cm.PrimaryChain()
 	raw := seedTestChain(t, pc, "moving-target", startingChain)
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Stop)
 
 	ls, err := NewLedgerState(LedgerStateConfig{
@@ -4565,7 +4680,7 @@ func TestWindowedRewindRefusesRecoveryTargetTheChainDoesNotHold(t *testing.T) {
 	pc := cm.PrimaryChain()
 	raw := seedTestChain(t, pc, "target-not-on-chain", blockCount)
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Stop)
 
 	ls, err := NewLedgerState(LedgerStateConfig{
@@ -4645,7 +4760,7 @@ func TestWindowedRewindRefusesSlotZeroTargetTheStoreDoesNotHold(t *testing.T) {
 	pc := cm.PrimaryChain()
 	seedTestChain(t, pc, "slot-zero-target", blockCount)
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Stop)
 
 	ls, err := NewLedgerState(LedgerStateConfig{

@@ -861,6 +861,7 @@ case "${1:-}" in
     printf 'DINGO_RUN_MODE=%s\n' "${DEVNET_DINGO_RUN_MODE:-}" >>"${FAKE_DOCKER_LOG}"
     printf 'DINGO_START_ERA=%s\n' "${DEVNET_DINGO_START_ERA:-}" >>"${FAKE_DOCKER_LOG}"
     printf 'TXPUMP_TRANSACTION_ERA=%s\n' "${DEVNET_TXPUMP_TRANSACTION_ERA:-}" >>"${FAKE_DOCKER_LOG}"
+    printf 'TXPUMP_START_DELAY=%s\n' "${DEVNET_TXPUMP_START_DELAY_SECONDS:-0}" >>"${FAKE_DOCKER_LOG}"
     case " $* " in
       *" ps --status running --quiet "*) printf 'fake-container\n' ;;
       *" exec -T "*) printf '1 0 0\n' ;;
@@ -973,6 +974,7 @@ func TestRunTestsLeiosSelectsItsFullDijkstraScenario(t *testing.T) {
 	require.Contains(t, result.dockerLog, "DINGO_START_ERA=dijkstra\n")
 	require.Contains(t, result.dockerLog, "TXPUMP_TRANSACTION_ERA=dijkstra\n")
 	require.Contains(t, result.dockerLog, "TXPUMP_WINDOW=1000\n")
+	require.Contains(t, result.dockerLog, "TXPUMP_START_DELAY=330\n")
 	require.Contains(t, result.dockerLog, "GO_ARGS=test -tags devnet")
 	require.Contains(t, result.dockerLog, "-timeout 12m")
 	require.Contains(t, result.dockerLog,

@@ -188,8 +188,12 @@ func addDijkstraFailingScriptSpend(
 	}
 	params, ok := fx.ls.currentPParams.(*gdijkstra.DijkstraProtocolParameters)
 	require.True(t, ok)
+	costModel := make([]int64, len(lang.GetParamNamesForVersion(lang.LanguageVersionV3)))
+	for i := range costModel {
+		costModel[i] = 1
+	}
 	params.CostModels = map[uint][]int64{
-		2: make([]int64, len(lang.GetParamNamesForVersion(lang.LanguageVersionV3))),
+		2: costModel,
 	}
 	params.ExecutionCosts = lcommon.ExUnitPrice{
 		MemPrice:  &cbor.Rat{Rat: big.NewRat(1, 1000)},
@@ -381,12 +385,12 @@ func TestDijkstraBlockApplicationScopesGovernanceToDeclaredValidity(
 	t.Run("replay and rollback reapply", func(t *testing.T) {
 		t.Parallel()
 		valid := newDijkstraHardForkReplayFixture(t, true)
-		var badVersion conway.BadHardForkProtocolVersionError
-		require.ErrorAs(
+		require.ErrorIs(
 			t,
 			replayDijkstraHardForkBlock(t, valid),
-			&badVersion,
+			errRestartLedgerPipeline,
 		)
+		require.True(t, pointMatches(valid.ls.chain.Tip().Point, ocommon.Point{}))
 
 		invalid := newDijkstraHardForkReplayFixture(t, false)
 		require.NoError(t, replayDijkstraHardForkBlock(t, invalid))

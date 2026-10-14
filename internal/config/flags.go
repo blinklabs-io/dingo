@@ -147,6 +147,23 @@ var flagSpecs = []flagSpec{
 		"tracing",
 		"enable OpenTelemetry tracing (configure destination with OTEL_EXPORTER_OTLP_* env vars)",
 	),
+	stringFlag(
+		"TracingEndpoint",
+		"tracing-endpoint",
+		"",
+		"OTLP HTTP collector URL for spans; setting it enables tracing (default: OTEL_EXPORTER_OTLP_* env vars)",
+	),
+	stringFlag(
+		"TracingServiceName",
+		"tracing-service-name",
+		"",
+		"service.name resource attribute on exported spans",
+	),
+	float64Flag(
+		"TracingSampleRatio",
+		"tracing-sample-ratio",
+		"fraction of new traces sampled, from 0 to 1",
+	),
 	boolFlag(
 		"TracingStdout",
 		"tracing-stdout",
@@ -313,6 +330,18 @@ var flagSpecs = []flagSpec{
 		"",
 		"CIP-26 token registry tarball URL (empty = select by network)",
 	),
+	stringFlag(
+		"TokenRegistry.ManifestURL",
+		"token-registry-manifest-url",
+		"",
+		"HTTPS URL of the signed CIP-26 snapshot manifest",
+	),
+	stringFlag(
+		"TokenRegistry.TrustedManifestKey",
+		"token-registry-trusted-manifest-key",
+		"",
+		"hex-encoded Ed25519 key trusted to sign token registry manifests",
+	),
 	durationFlag(
 		"TokenRegistry.Interval",
 		"token-registry-interval",
@@ -370,6 +399,11 @@ var flagSpecs = []flagSpec{
 		"allow token registry sync from private, loopback, and link-local addresses",
 	),
 	boolFlag(
+		"TokenRegistry.AllowRollback",
+		"token-registry-allow-rollback",
+		"allow a signed token registry manifest below the stored sequence",
+	),
+	boolFlag(
 		"Midnight.Enabled",
 		"midnight-enabled",
 		`enable the Midnight indexer (requires storageMode "api")`,
@@ -402,6 +436,11 @@ var flagSpecs = []flagSpec{
 		"BarkBlockDownloadHosts",
 		"bark-block-download-hosts",
 		"allowed HTTPS origins for Bark block downloads (ports matched exactly)",
+	),
+	boolFlag(
+		"BarkBlockDownloadAllowPrivateAddresses",
+		"bark-block-download-allow-private-addresses",
+		"allow Bark block downloads from private, loopback, and special-use addresses",
 	),
 	uintFlag("BarkPort", "bark-port", "Bark RPC port"),
 	stringFlag(
@@ -749,6 +788,12 @@ var flagSpecs = []flagSpec{
 		"in core storage mode, write the deltas of blocks that are not validated with multi-row batched inserts instead of per-row statements, as API mode always does (not consensus-affecting; default off)",
 	),
 
+	boolFlag(
+		"BlockfetchLowWatermarkEnabled",
+		"blockfetch-low-watermark-enabled",
+		"start blockfetch once one range of headers is queued while far from the peer tip, instead of waiting for four ranges; the header queue capacity is unchanged (not consensus-affecting; default off)",
+	),
+
 	// Block production
 	boolFlag("BlockProducer", "block-producer", "enable block production mode"),
 	stringFlag(
@@ -840,6 +885,11 @@ var flagSpecs = []flagSpec{
 		"ValidateForgedBlock",
 		"validate-forged-block",
 		"validate forged blocks before adoption and diffusion (header crypto, body hash, per-tx ledger rules)",
+	),
+	boolFlag(
+		"PlannerStatsRefreshEnabled",
+		"planner-stats-refresh-enabled",
+		"keep SQLite planner statistics current with PRAGMA optimize at startup and after each epoch rollover",
 	),
 
 	// CIP-23 minimum pool margin / minimum variable fee (consensus-affecting; default 0 = off)

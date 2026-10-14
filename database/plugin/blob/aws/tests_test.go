@@ -703,6 +703,72 @@ func TestRegisterProvider(t *testing.T) {
 	})
 }
 
+func TestProviderScopesObjectsToDataDirNamespace(t *testing.T) {
+	t.Parallel()
+	dataDir := t.TempDir()
+	namespace := "0123456789abcdef0123456789abcdef"
+	require.NoError(t, blob.WriteNamespace(dataDir, namespace))
+	for _, configured := range []string{"configured", "configured/"} {
+		prefix, err := objectPrefix(configured, dataDir)
+		require.NoError(t, err)
+		require.Equal(
+			t,
+			"configured/.dingo-namespaces/"+namespace+"/",
+			prefix,
+		)
+	}
+}
+
+func TestLegacyPrefixExcludesNamespacedObjectsFromIterators(t *testing.T) {
+	t.Parallel()
+	for _, prefix := range []string{"", "dingo"} {
+		t.Run(prefix, func(t *testing.T) {
+			t.Parallel()
+			legacyKey := []byte("legacy-key")
+			namespaceRoot := strings.TrimSuffix(prefix, "/")
+			if namespaceRoot != "" {
+				namespaceRoot += "/"
+			}
+			fake := &fakeS3List{keys: []string{
+				namespaceRoot +
+					".dingo-namespaces/0123456789abcdef0123456789abcdef/00",
+				prefix + hex.EncodeToString(legacyKey),
+			}}
+			sort.Strings(fake.keys)
+			srv := httptest.NewServer(http.HandlerFunc(fake.handler))
+			defer srv.Close()
+			store := storeOnFake(t, srv)
+			store.prefix = prefix
+
+			txn := store.NewTransaction(false)
+			it := store.NewIterator(txn, types.BlobIteratorOptions{})
+			require.NotNil(t, it)
+			it.Rewind()
+			require.True(t, it.Valid())
+			require.Equal(t, legacyKey, it.Item().Key())
+			it.Next()
+			require.False(t, it.Valid())
+			require.NoError(t, it.Err())
+			it.Close()
+			require.NoError(t, txn.Rollback())
+
+			keys, err := store.listKeysToFile(types.BlobIteratorOptions{})
+			require.NoError(t, err)
+			t.Cleanup(func() {
+				_ = keys.file.Close()
+				_ = os.Remove(keys.file.Name())
+			})
+			got, valid, err := keys.nextReverse()
+			require.NoError(t, err)
+			require.True(t, valid)
+			require.Equal(t, string(legacyKey), got)
+			_, valid, err = keys.nextReverse()
+			require.NoError(t, err)
+			require.False(t, valid)
+		})
+	}
+}
+
 func TestReadBlobBodyWithLimit(t *testing.T) {
 	data, err := readBlobBodyWithLimit(strings.NewReader("123"), 3)
 	if err != nil || string(data) != "123" {

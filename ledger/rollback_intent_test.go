@@ -27,7 +27,6 @@ import (
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/event"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
@@ -190,7 +189,7 @@ func TestRollbackUndoSurvivesMetadataTruncationFailure(t *testing.T) {
 		cm.PrimaryChain().AddRawBlocks(context.Background(), raw),
 	)
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Stop)
 	txSubID, txCh := bus.SubscribeWithBuffer(TransactionEventType, 64)
 	require.NotZero(t, txSubID)
@@ -264,7 +263,7 @@ func TestRollbackUndoSurvivesMetadataTruncationFailure(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, cm.SetLedger(testSecurityParamLedger{securityParam: 2}))
 
-	recoveryBus := event.NewEventBus(nil, nil)
+	recoveryBus := newTestEventBus(t, nil)
 	t.Cleanup(recoveryBus.Stop)
 	recoverySubID, recoveryCh := recoveryBus.SubscribeWithBuffer(
 		TransactionEventType,
@@ -322,7 +321,7 @@ func TestRecoverRollbackIntentAheadOfLedgerDeliversUndo(t *testing.T) {
 	require.NoError(t, cm.SetLedger(testSecurityParamLedger{securityParam: 2}))
 
 	blocks := loadTestBlocksWithTxs(t, 2)
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Stop)
 	subID, txCh := bus.SubscribeWithBuffer(TransactionEventType, 64)
 	require.NotZero(t, subID)
@@ -397,7 +396,7 @@ func TestEnsureRollbackIntentRetainsSupersededPayload(t *testing.T) {
 		cm.PrimaryChain().AddRawBlocks(context.Background(), raw),
 	)
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Stop)
 	subID, _ := bus.SubscribeWithBuffer(TransactionEventType, 64)
 	require.NotZero(t, subID)

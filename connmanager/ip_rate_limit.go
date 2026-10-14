@@ -14,7 +14,10 @@
 
 package connmanager
 
-import "net"
+import (
+	"net"
+	"strings"
+)
 
 // ipKeyFromAddr extracts a rate-limit key from a net.Addr. For IPv4
 // addresses the key is the bare IP string.  For IPv6 addresses the key
@@ -26,12 +29,21 @@ func ipKeyFromAddr(addr net.Addr) string {
 	if addr == nil {
 		return ""
 	}
-	host, _, err := net.SplitHostPort(addr.String())
-	if err != nil {
-		// Address may not have a port (e.g. Unix sockets)
-		return ""
+	var ip net.IP
+	switch typedAddr := addr.(type) {
+	case *net.TCPAddr:
+		ip = typedAddr.IP
+	case *net.UDPAddr:
+		ip = typedAddr.IP
+	default:
+		host, _, err := net.SplitHostPort(addr.String())
+		if err != nil {
+			// Address may not have a port (e.g. Unix sockets)
+			return ""
+		}
+		host, _, _ = strings.Cut(host, "%")
+		ip = net.ParseIP(host)
 	}
-	ip := net.ParseIP(host)
 	if ip == nil {
 		return ""
 	}

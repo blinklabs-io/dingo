@@ -19,10 +19,24 @@ import (
 	"errors"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/stretchr/testify/require"
 )
+
+func TestBlockSlotToTimeError(t *testing.T) {
+	t.Parallel()
+	deps := newTestDeps()
+	deps.ledger.slotToTime = func(uint64) (time.Time, error) {
+		return time.Time{}, errors.New("epoch unavailable")
+	}
+	deps.database.blockByIndex = func(uint64) (models.Block, error) {
+		return models.Block{Hash: testHash(1), Number: 1, Slot: 10}, nil
+	}
+	rec := postJSON(t, newTestHandler(t, deps), "/block", blockRequest(byIndex(1)))
+	requireMeshError(t, rec, ErrInternal, http.StatusInternalServerError)
+}
 
 // blockRequest builds a /block request for the given identifier.
 func blockRequest(id *PartialBlockIdentifier) BlockRequest {

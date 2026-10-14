@@ -1299,7 +1299,7 @@ func leiosParentBlock(
 		issuerVkey,
 		make([]byte, 32),
 		lcommon.VrfResult{
-			Output: []byte{},
+			Output: make([]byte, 64),
 			Proof:  make([]byte, 80),
 		},
 		uint64(len(bodyCbor)),
@@ -1579,4 +1579,53 @@ func TestForgedBlockValidatorPreservesCallerContext(t *testing.T) {
 			require.Equal(t, ctx, state.ctx)
 		})
 	}
+}
+
+func TestClassifyLeiosAnnouncementValidationError(t *testing.T) {
+	t.Parallel()
+
+	unexpected := errors.New("endorser closure changed during validation")
+	for _, test := range []struct {
+		name       string
+		err        error
+		wantMarker error
+	}{
+		{
+			name:       "semantic invalidity",
+			err:        ledger.ErrInvalidLeiosEndorserBlockTransactions,
+			wantMarker: forging.ErrInvalidLeiosAnnouncement,
+		},
+		{
+			name:       "parent unavailable",
+			err:        ledger.ErrLeiosValidationParentUnavailable,
+			wantMarker: forging.ErrLeiosAnnouncementUnavailable,
+		},
+		{
+			name:       "parent superseded",
+			err:        ledger.ErrLeiosValidationParentSuperseded,
+			wantMarker: forging.ErrLeiosAnnouncementUnavailable,
+		},
+		{
+			name:       "storage fault",
+			err:        ledger.ErrLedgerViewStorageFault,
+			wantMarker: forging.ErrLeiosAnnouncementUnavailable,
+		},
+		{
+			name:       "unexpected failure",
+			err:        unexpected,
+			wantMarker: unexpected,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			got := classifyLeiosAnnouncementValidationError(test.err)
+			require.ErrorIs(t, got, test.err)
+			require.ErrorIs(t, got, test.wantMarker)
+			if errors.Is(test.err, unexpected) {
+				require.NotErrorIs(t, got, forging.ErrInvalidLeiosAnnouncement)
+				require.NotErrorIs(t, got, forging.ErrLeiosAnnouncementUnavailable)
+			}
+		})
+	}
+	require.NoError(t, classifyLeiosAnnouncementValidationError(nil))
 }

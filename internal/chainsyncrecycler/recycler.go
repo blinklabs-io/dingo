@@ -74,6 +74,9 @@ type ChainSelector interface {
 	SetSecurityParam(k uint64)
 	GetBestPeer() *ouroboros.ConnectionId
 	GetPeerTip(connId ouroboros.ConnectionId) *chainselection.PeerChainTip
+	// EagernessPaused reports whether the selector is holding the peer's
+	// header stream at the Limit on Eagerness.
+	EagernessPaused(connId ouroboros.ConnectionId) bool
 }
 
 // EventPublisher publishes the recovery requests the recycler decides on.
@@ -104,6 +107,26 @@ type ComponentProvider interface {
 	WithLiveComponents(fn func(LiveComponents)) bool
 }
 
+// PlateauOutcome names what the local-tip plateau watchdog did when it fired.
+// The values are bounded so the composition layer can use them as a metric
+// label.
+type PlateauOutcome string
+
+const (
+	// PlateauOutcomeReconciled means the local ledger reconcile repaired a
+	// primary-chain/ledger divergence and the connection was left alone.
+	PlateauOutcomeReconciled PlateauOutcome = "reconciled"
+	// PlateauOutcomeBacklogNotRecycled means the plateau was classified as a
+	// ledger-application backlog and the chainsync stream was left running.
+	PlateauOutcomeBacklogNotRecycled PlateauOutcome = "backlog_not_recycled"
+	// PlateauOutcomeResync means the watchdog requested a chainsync resync of
+	// the selected connection.
+	PlateauOutcomeResync PlateauOutcome = "resync"
+	// PlateauOutcomeEagernessHeld means the selector holds the selected
+	// connection at the Limit on Eagerness, so the stream was left running.
+	PlateauOutcomeEagernessHeld PlateauOutcome = "eagerness_held"
+)
+
 // Config holds the recycler's dependencies and timing policy.
 type Config struct {
 	// Components supplies the live node components each tick reads.
@@ -119,6 +142,10 @@ type Config struct {
 	Grace time.Duration
 	// Cooldown is the minimum spacing between recycles of one connection.
 	Cooldown time.Duration
+	// OnPlateauDecision, when set, is called once for every plateau the
+	// watchdog acts on, with what it did. It runs on the tick goroutine and
+	// must not block or call back into the recycler.
+	OnPlateauDecision func(PlateauOutcome)
 }
 
 // Recycler is the chainsync stall recycler background component.
@@ -405,6 +432,13 @@ func isLedgerApplicationBacklog(
 	return applyBacklog >= headerGap
 }
 
+// notePlateauDecision reports a plateau outcome to the configured hook.
+func (r *Recycler) notePlateauDecision(outcome PlateauOutcome) {
+	if r.config.OnPlateauDecision != nil {
+		r.config.OnPlateauDecision(outcome)
+	}
+}
+
 // tick runs one stall check against the live components.
 func (r *Recycler) tick(
 	now time.Time,
@@ -444,14 +478,25 @@ func (r *Recycler) tick(
 		len(trackedClients),
 	)
 	eligibleCount := 0
+	recyclable := make([]chainsync.TrackedClient, 0, len(trackedClients))
 	for _, conn := range trackedClients {
 		connKey := conn.ConnId.String()
-		trackedByID[connKey] = conn
-		if conn.Status != chainsync.ClientStatusStalled {
-			delete(st.recycleAt, connKey)
-		}
 		if !conn.ObservabilityOnly {
 			eligibleCount++
+		}
+		// The selector paused this peer at the Limit on Eagerness, which is
+		// why it sent nothing. Closing it for that would pick the fork to
+		// release by whether it happened to be primary; the selector resolves
+		// the standoff by density instead.
+		if conn.Status == chainsync.ClientStatusStalled &&
+			isEagernessHeld(live.ChainSelector, conn.ConnId) {
+			delete(st.recycleAt, connKey)
+			continue
+		}
+		trackedByID[connKey] = conn
+		recyclable = append(recyclable, conn)
+		if conn.Status != chainsync.ClientStatusStalled {
+			delete(st.recycleAt, connKey)
 		}
 	}
 	// Prune expired cooldown entries so this map does not grow without bound
@@ -472,7 +517,7 @@ func (r *Recycler) tick(
 		effectivePlateau,
 		effectiveCooldown,
 	)
-	r.scheduleStalledRecycles(now, st, trackedClients, effectiveGrace)
+	r.scheduleStalledRecycles(now, st, recyclable, effectiveGrace)
 	r.processDueRecycles(
 		now,
 		st,
@@ -481,6 +526,17 @@ func (r *Recycler) tick(
 		eligibleCount,
 		effectiveCooldown,
 	)
+}
+
+// isEagernessHeld reports whether the selector is holding connId's header
+// stream at the Limit on Eagerness. Every path here that closes, resyncs or
+// removes a connection must consult it, so a held peer is never released by
+// the recycler's own timing.
+func isEagernessHeld(
+	selector ChainSelector,
+	connId ouroboros.ConnectionId,
+) bool {
+	return selector != nil && selector.EagernessPaused(connId)
 }
 
 // checkLocalTipPlateau is the safety net for a local tip that has not moved for
@@ -615,6 +671,7 @@ func (r *Recycler) checkLocalTipPlateau(
 		// next tick before forward application has had a chance to advance the
 		// ledger.
 		st.lastProgressAt = now
+		r.notePlateauDecision(PlateauOutcomeReconciled)
 		st.lastRecycled[connKey] = now
 		// Reconciliation reset the plateau clock and recorded cooldown above.
 		// Give ledger replay a chance to resume from the repaired tip before
@@ -658,6 +715,25 @@ func (r *Recycler) checkLocalTipPlateau(
 		// drains.
 		st.lastProgressAt = now
 		delete(st.recycleAt, connKey)
+		r.notePlateauDecision(PlateauOutcomeBacklogNotRecycled)
+		return
+	}
+	// A primary the selector holds at the Limit on Eagerness is why the local
+	// tip stopped, not a fault in its stream, and a fresh connection would be
+	// held at the same point. The selector resolves the hold by density.
+	if isEagernessHeld(live.ChainSelector, *targetConn) {
+		r.logger.Info(
+			"local tip plateau is a hold at the Limit on Eagerness, not resyncing chainsync",
+			"connection_id",
+			connKey,
+			"local_tip_slot",
+			localTipSlot,
+			"plateau_duration",
+			now.Sub(st.lastProgressAt),
+		)
+		st.lastProgressAt = now
+		delete(st.recycleAt, connKey)
+		r.notePlateauDecision(PlateauOutcomeEagernessHeld)
 		return
 	}
 	// The local reconcile found nothing to repair (or failed), so the stall is
@@ -699,6 +775,7 @@ func (r *Recycler) checkLocalTipPlateau(
 	// a no-op.
 	if eligibleCount > 1 {
 		r.realignOtherPeersAfterPlateau(
+			live.ChainSelector,
 			*targetConn,
 			trackedClients,
 			localTipSlot,
@@ -707,6 +784,7 @@ func (r *Recycler) checkLocalTipPlateau(
 	delete(st.recycleAt, connKey)
 	st.lastRecycled[connKey] = now
 	st.lastProgressAt = now
+	r.notePlateauDecision(PlateauOutcomeResync)
 }
 
 // scheduleStalledRecycles gives every newly stalled client a guarded recycle
@@ -883,6 +961,7 @@ func (r *Recycler) publishConnectionRecycle(
 // Realigning candidate peers' cursors to the current local tip lets whichever
 // peer is promoted next deliver headers from local-tip+1 onward.
 func (r *Recycler) realignOtherPeersAfterPlateau(
+	selector ChainSelector,
 	closedConnId ouroboros.ConnectionId,
 	trackedClients []chainsync.TrackedClient,
 	localTipSlot uint64,
@@ -895,7 +974,8 @@ func (r *Recycler) realignOtherPeersAfterPlateau(
 		if conn.ConnId.String() == closedKey {
 			continue
 		}
-		if conn.Cursor.Slot <= localTipSlot {
+		if conn.Cursor.Slot <= localTipSlot ||
+			isEagernessHeld(selector, conn.ConnId) {
 			continue
 		}
 		r.logger.Info(

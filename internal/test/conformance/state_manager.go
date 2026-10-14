@@ -869,15 +869,15 @@ func (m *DingoStateManager) certDepositsFor(
 		case *common.StakeRegistrationCertificate:
 			deposits[i] = keyDeposit
 		case *common.RegistrationCertificate:
-			deposits[i] = depositAmount(c.Amount)
+			deposits[i] = c.Amount
 		case *common.StakeRegistrationDelegationCertificate:
-			deposits[i] = depositAmount(c.Amount)
+			deposits[i] = c.Amount
 		case *common.StakeVoteRegistrationDelegationCertificate:
-			deposits[i] = depositAmount(c.Amount)
+			deposits[i] = c.Amount
 		case *common.VoteRegistrationDelegationCertificate:
-			deposits[i] = depositAmount(c.Amount)
+			deposits[i] = c.Amount
 		case *common.RegistrationDrepCertificate:
-			deposits[i] = depositAmount(c.Amount)
+			deposits[i] = c.Amount
 		case *common.PoolRegistrationCertificate:
 			deposits[i] = poolDeposit
 		}
@@ -903,16 +903,6 @@ func (m *DingoStateManager) initialStakeDepositLocked() *types.Uint64 {
 	}
 	deposit := types.Uint64(conwayPP.KeyDeposit)
 	return &deposit
-}
-
-// depositAmount converts a certificate's signed deposit amount (gouroboros
-// models it as int64) to the unsigned form the metadata store expects.
-// Deposit amounts are always non-negative on chain.
-func depositAmount(amount int64) uint64 {
-	if amount < 0 {
-		return 0
-	}
-	return uint64(amount)
 }
 
 // ApplyTransaction implements conformance.StateManager.ApplyTransaction.
@@ -969,6 +959,7 @@ func (m *DingoStateManager) ApplyTransaction(
 		return fmt.Errorf("resolve protocol major: %w", err)
 	}
 
+	var proposalsValidated bool
 	for levelIndex, level := range levels {
 		storageIndex := idx + uint32(levelIndex) //nolint:gosec
 		if err := governance.ResetDormantDRepExpiryBeforeCertificates(
@@ -1055,6 +1046,8 @@ func (m *DingoStateManager) ApplyTransaction(
 			protocolMajor,
 			m.db,
 			txn,
+			m.protocolParams,
+			&proposalsValidated,
 		); err != nil {
 			return fmt.Errorf("process transaction body %d governance effects: %w", levelIndex, err)
 		}
@@ -1314,13 +1307,13 @@ func (m *DingoStateManager) updateStakeDepositForCertificate(
 			deposit = uint64(pp.KeyDeposit)
 		}
 	case *common.RegistrationCertificate:
-		credential, deposit, registered = c.StakeCredential, depositAmount(c.Amount), true
+		credential, deposit, registered = c.StakeCredential, c.Amount, true
 	case *common.StakeRegistrationDelegationCertificate:
-		credential, deposit, registered = c.StakeCredential, depositAmount(c.Amount), true
+		credential, deposit, registered = c.StakeCredential, c.Amount, true
 	case *common.VoteRegistrationDelegationCertificate:
-		credential, deposit, registered = c.StakeCredential, depositAmount(c.Amount), true
+		credential, deposit, registered = c.StakeCredential, c.Amount, true
 	case *common.StakeVoteRegistrationDelegationCertificate:
-		credential, deposit, registered = c.StakeCredential, depositAmount(c.Amount), true
+		credential, deposit, registered = c.StakeCredential, c.Amount, true
 	case *common.StakeDeregistrationCertificate:
 		delete(m.stakeDeposits, rewardAccountKey(c.StakeCredential))
 		return

@@ -37,7 +37,47 @@ func (a fakeConnAddr) Network() string { return "test" }
 func (a fakeConnAddr) String() string  { return string(a) }
 
 func namedConnId(name string) ouroboros.ConnectionId {
-	return ouroboros.ConnectionId{RemoteAddr: fakeConnAddr(name)}
+	return ouroboros.ConnectionId{
+		LocalAddr:  fakeConnAddr("local"),
+		RemoteAddr: fakeConnAddr(name),
+	}
+}
+
+func TestPreferLeiosBackfillOfferSource(t *testing.T) {
+	t.Parallel()
+	first := namedConnId("first")
+	offered := namedConnId("offered")
+	last := namedConnId("last")
+	guards := map[ouroboros.ConnectionId]*leiosFetchGuard{
+		first: {}, offered: {}, last: {},
+	}
+	guardFor := func(id ouroboros.ConnectionId) *leiosFetchGuard {
+		return guards[id]
+	}
+
+	order := []ouroboros.ConnectionId{first, offered, last}
+	require.Equal(
+		t,
+		[]ouroboros.ConnectionId{offered, first, last},
+		preferLeiosBackfillOfferSource(
+			order,
+			leiosConnectionIdString(offered),
+			guardFor,
+		),
+	)
+
+	guards[offered].protocolDead.Store(true)
+	order = []ouroboros.ConnectionId{first, last, offered}
+	require.Equal(
+		t,
+		[]ouroboros.ConnectionId{first, last, offered},
+		preferLeiosBackfillOfferSource(
+			order,
+			leiosConnectionIdString(offered),
+			guardFor,
+		),
+		"an unusable offered connection remains last",
+	)
 }
 
 // TestLeiosFetchGuardRecentlySucceeded verifies the positive-affinity signal

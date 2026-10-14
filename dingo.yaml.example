@@ -19,8 +19,11 @@
 # cardanoConfig: "./config/cardano/preview/config.json"
 
 # Longest a node-to-client LocalStateQuery session may hold one acquired
-# ledger snapshot. A snapshot past this age is closed and the session's next
-# query fails. Each held snapshot pins a database read transaction.
+# ledger snapshot. A snapshot past this age is closed, and the session's next
+# query reopens one at the same block. If that block was rolled back, or has
+# fallen behind a retention floor, while the snapshot was closed, the query
+# fails and the client's connection is closed. Each held snapshot pins a
+# database read transaction.
 # Default: "5m"
 # CLI: --local-state-query-view-max-lifetime
 # Env: DINGO_LOCAL_STATE_QUERY_VIEW_MAX_LIFETIME
@@ -178,13 +181,21 @@
 # CLI: --metrics-port
 # metricsPort: 12798
 
-# Address for the unauthenticated Prometheus listener. This is deliberately
-# independent of bindAddr and stays on loopback by default. Set a wildcard or
-# remote-reachable address only when scrapers need it and an external network
-# control protects the endpoint. The container image sets
-# DINGO_METRICS_BIND_ADDR=0.0.0.0, which takes precedence over this setting.
+# Address for the Prometheus listener. This is deliberately independent of
+# bindAddr and stays on loopback by default. Set a wildcard or remote-reachable
+# address only when scrapers need it; the environment variable takes precedence
+# over this setting.
 # CLI: --metrics-bind-addr  Env: DINGO_METRICS_BIND_ADDR
 # metricsBindAddr: "127.0.0.1"
+
+# Optional Bearer token required by the Prometheus listener. Prefer the
+# environment variable so the token does not live in a shared config file.
+# There is no CLI flag because arguments may be visible to other users.
+# Remote traffic remains plain HTTP. Require a TLS reverse proxy or an
+# authenticated encrypted tunnel to protect the token in transit; use network
+# isolation as an additional access control.
+# Env: DINGO_METRICS_AUTH_TOKEN
+# metricsAuthToken: ""
 
 # TCP port for the liveness/readiness probe listener. 0 disables it.
 # Binds bindAddr, like the relay listener: a kubelet or
@@ -248,6 +259,20 @@
 # CLI: --tracing-stdout  Env: DINGO_TRACING_STDOUT
 # tracingStdout: false
 
+# OTLP HTTP collector URL for spans, for example http://localhost:4318.
+# Setting it enables tracing. Empty leaves tracing to the tracing setting and
+# the destination to the OTEL_EXPORTER_OTLP_* env vars.
+# CLI: --tracing-endpoint  Env: DINGO_TRACING_ENDPOINT
+# tracingEndpoint: ""
+
+# service.name resource attribute on exported spans.
+# CLI: --tracing-service-name  Env: DINGO_TRACING_SERVICE_NAME
+# tracingServiceName: dingo
+
+# Fraction of new traces sampled, from 0 to 1.
+# CLI: --tracing-sample-ratio  Env: DINGO_TRACING_SAMPLE_RATIO
+# tracingSampleRatio: 1
+
 # Internal/private address to bind for listening for Ouroboros NtC
 # privateBindAddr: "127.0.0.1"
 
@@ -289,6 +314,15 @@
 # Can be overridden with DINGO_BARK_BASE_URL
 # CLI: --bark-url
 # barkBaseUrl: ""
+
+# Allow Bark block downloads from private, loopback, and other special-use
+# addresses, for example an S3-compatible store such as MinIO on a private
+# network. Download origins must still be barkBaseUrl or a
+# barkBlockDownloadHosts entry, use HTTPS, and pass the same checks on every
+# redirect; ambient proxy settings stay ignored.
+# Can be overridden with DINGO_BARK_BLOCK_DOWNLOAD_ALLOW_PRIVATE_ADDRESSES
+# CLI: --bark-block-download-allow-private-addresses
+# barkBlockDownloadAllowPrivateAddresses: false
 
 # TCP port bind for listening for Bark RPC calls. Enable this on archive nodes.
 # Can be overridden with DINGO_BARK_PORT
@@ -385,6 +419,17 @@
   # Can be overridden with DINGO_TOKEN_REGISTRY_SOURCE_URL
   # CLI: --token-registry-source-url
   # sourceUrl: ""
+  # Signed manifest URL. Required when enabled. The manifest authenticates
+  # the snapshot URL, exact compressed size, BLAKE2b-256 digest, and monotonic
+  # sequence. HTTPS is required for the manifest, snapshot, and every redirect.
+  # Can be overridden with DINGO_TOKEN_REGISTRY_MANIFEST_URL
+  # CLI: --token-registry-manifest-url
+  # manifestUrl: ""
+  # Hex-encoded Ed25519 public key trusted to sign manifests. Required when
+  # enabled. Key rotation is an explicit configuration change.
+  # Can be overridden with DINGO_TOKEN_REGISTRY_TRUSTED_MANIFEST_KEY
+  # CLI: --token-registry-trusted-manifest-key
+  # trustedManifestKey: ""
   # How often the registry is re-checked. Each check is a conditional
   # request, so an unchanged registry costs no download. Values below one
   # minute are raised to it: polling a source that serves a roughly 240MB
@@ -446,6 +491,12 @@
   # Can be overridden with DINGO_TOKEN_REGISTRY_ALLOW_PRIVATE_ADDRESSES
   # CLI: --token-registry-allow-private-addresses
   # allowPrivateAddresses: false
+  # Permit a valid signed manifest below the currently stored sequence.
+  # Accepting it lowers the stored sequence. Leave false except for an
+  # intentional publisher rollback.
+  # Can be overridden with DINGO_TOKEN_REGISTRY_ALLOW_ROLLBACK
+  # CLI: --token-registry-allow-rollback
+  # allowRollback: false
 
 # Optional in-process Koios reward-parity observer (dingo #3098). When
 # enabled, Dingo subscribes an observer to its own epoch.transition EventBus
@@ -695,6 +746,16 @@
 # CLI: --ledger-apply-row-batching-enabled
 # ledgerApplyRowBatchingEnabled: false
 
+# While the header is far from the peer tip, start blockfetch once one
+# blockfetch range (500) of headers is queued instead of waiting for four
+# ranges (2000). The header queue capacity is unchanged (default: false). Not
+# consensus-affecting.
+#
+# Can be overridden with the DINGO_BLOCKFETCH_LOW_WATERMARK_ENABLED
+# environment variable
+# CLI: --blockfetch-low-watermark-enabled
+# blockfetchLowWatermarkEnabled: false
+
 # Error out (instead of silently skipping) when a consumed UTxO cannot be
 # found or recovered for a block past the recorded Mithril sync boundary.
 # A non-genesis chainsync intersection without a Mithril snapshot may set this
@@ -881,9 +942,9 @@
 # Multi-client ChainSync (header synchronization) configuration
 # chainsync:
   # Maximum number of concurrent ChainSync client connections
-  # Default: 3
+  # Default: 0 (automatic: at least 3, and one per local-root access point)
   # CLI: --chainsync-max-clients  Env: DINGO_CHAINSYNC_MAX_CLIENTS
-  # maxClients: 3
+  # maxClients: 0
   # Duration with no activity after which a ChainSync client is
   # considered stalled and eligible for failover/recycling
   # Default: "2m"
@@ -1091,6 +1152,15 @@
 # `dingo database snapshot|restore|truncate` CLI commands, and — when
 # bark is enabled (barkPort > 0) — the base directory bark's
 # DatabaseService CreateSnapshot/Restore RPCs use.
+# SQLite only: keep planner statistics current with PRAGMA optimize, run
+# before block processing starts and after each epoch rollover. A database
+# synced from genesis otherwise never has statistics and some queries scan most
+# of a large table. The first run on a large database can take minutes; later
+# runs are near-free. Escape hatch only.
+# Default: true
+# CLI: --planner-stats-refresh-enabled  Env: DINGO_PLANNER_STATS_REFRESH_ENABLED
+# plannerStatsRefreshEnabled: true
+
 # databaseLifecycle:
   # Capture automatic database snapshots at epoch boundaries. Unsupported
   # when the primary blob provider is s3 or gcs: their remote-object backup

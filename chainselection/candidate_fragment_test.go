@@ -34,6 +34,11 @@ func TestCandidateFragment_EmptyFragmentIsZeroValue(t *testing.T) {
 	assert.False(t, ok)
 }
 
+func TestPeerCandidateFragmentWithoutDeliveredHistoryIsEmpty(t *testing.T) {
+	fragment := (&PeerChainTip{}).CandidateFragment()
+	assert.Equal(t, 0, fragment.Len())
+}
+
 // TestCandidateFragment_AnchorAndHeadPointReturnDefensiveCopies ensures a
 // caller mutating the Hash returned by Anchor or HeadPoint cannot corrupt the
 // fragment's own backing bytes, which would otherwise change later Points()
@@ -41,10 +46,10 @@ func TestCandidateFragment_EmptyFragmentIsZeroValue(t *testing.T) {
 func TestCandidateFragment_AnchorAndHeadPointReturnDefensiveCopies(
 	t *testing.T,
 ) {
-	fragment := CandidateFragment{entries: []ochainsync.Tip{
-		{Point: ocommon.Point{Slot: 100, Hash: []byte("anchor-hash")}},
-		{Point: ocommon.Point{Slot: 200, Hash: []byte("head-hash")}},
-	}}
+	fragment := CandidateFragment{points: []ocommon.Point{
+		{Slot: 100, Hash: []byte("anchor-hash")},
+		{Slot: 200, Hash: []byte("head-hash")},
+	}, baseBlock: 1}
 
 	anchor := fragment.Anchor()
 	for i := range anchor.Hash {
@@ -60,9 +65,9 @@ func TestCandidateFragment_AnchorAndHeadPointReturnDefensiveCopies(
 	assert.Equal(t, "anchor-hash", string(points[0].Hash))
 	assert.Equal(t, "head-hash", string(points[1].Hash))
 
-	other := CandidateFragment{entries: []ochainsync.Tip{
-		{Point: ocommon.Point{Slot: 100, Hash: []byte("anchor-hash")}},
-	}}
+	other := CandidateFragment{points: []ocommon.Point{
+		{Slot: 100, Hash: []byte("anchor-hash")},
+	}, baseBlock: 1}
 	point, ok := fragment.Intersect(other)
 	require.True(t, ok)
 	assert.Equal(t, "anchor-hash", string(point.Hash))
@@ -97,15 +102,15 @@ func TestCandidateFragment_AnchorAndHeadPoint(t *testing.T) {
 
 func TestCandidateFragment_IntersectFindsHighestCommonPoint(t *testing.T) {
 	shared := ocommon.Point{Slot: 200, Hash: []byte("shared")}
-	a := CandidateFragment{entries: []ochainsync.Tip{
-		{Point: ocommon.Point{Slot: 100, Hash: []byte("a100")}},
-		{Point: shared},
-		{Point: ocommon.Point{Slot: 300, Hash: []byte("a300")}},
-	}}
-	b := CandidateFragment{entries: []ochainsync.Tip{
-		{Point: shared},
-		{Point: ocommon.Point{Slot: 250, Hash: []byte("b250")}},
-	}}
+	a := CandidateFragment{points: []ocommon.Point{
+		{Slot: 100, Hash: []byte("a100")},
+		shared,
+		{Slot: 300, Hash: []byte("a300")},
+	}, baseBlock: 1}
+	b := CandidateFragment{points: []ocommon.Point{
+		shared,
+		{Slot: 250, Hash: []byte("b250")},
+	}, baseBlock: 2}
 
 	point, ok := a.Intersect(b)
 	require.True(t, ok)
@@ -121,13 +126,13 @@ func TestCandidateFragment_IntersectFindsHighestCommonPoint(t *testing.T) {
 func TestCandidateFragment_IntersectSameSlotDifferentHashIsNotAMatch(
 	t *testing.T,
 ) {
-	a := CandidateFragment{entries: []ochainsync.Tip{
-		{Point: ocommon.Point{Slot: 100, Hash: []byte("shared")}},
-		{Point: ocommon.Point{Slot: 200, Hash: []byte("a-fork")}},
+	a := CandidateFragment{points: []ocommon.Point{
+		{Slot: 100, Hash: []byte("shared")},
+		{Slot: 200, Hash: []byte("a-fork")},
 	}}
-	b := CandidateFragment{entries: []ochainsync.Tip{
-		{Point: ocommon.Point{Slot: 100, Hash: []byte("shared")}},
-		{Point: ocommon.Point{Slot: 200, Hash: []byte("b-fork")}},
+	b := CandidateFragment{points: []ocommon.Point{
+		{Slot: 100, Hash: []byte("shared")},
+		{Slot: 200, Hash: []byte("b-fork")},
 	}}
 
 	point, ok := a.Intersect(b)
@@ -137,26 +142,32 @@ func TestCandidateFragment_IntersectSameSlotDifferentHashIsNotAMatch(
 }
 
 func TestCandidateFragment_IntersectNoCommonPointReturnsFalse(t *testing.T) {
-	a := CandidateFragment{entries: []ochainsync.Tip{
-		{Point: ocommon.Point{Slot: 100, Hash: []byte("a100")}},
+	a := CandidateFragment{points: []ocommon.Point{
+		{Slot: 100, Hash: []byte("a100")},
 	}}
-	b := CandidateFragment{entries: []ochainsync.Tip{
-		{Point: ocommon.Point{Slot: 200, Hash: []byte("b200")}},
+	b := CandidateFragment{points: []ocommon.Point{
+		{Slot: 200, Hash: []byte("b200")},
 	}}
 
 	_, ok := a.Intersect(b)
 	assert.False(t, ok)
 }
 
-// TestCandidateFragment_BoundedByK asserts the fragment length is bounded to
-// k+1 entries, the same bound recordObservedTipHistory documents: enough to
-// resolve any valid rollback within k, but never unbounded.
-func TestCandidateFragment_BoundedByK(t *testing.T) {
+// TestCandidateFragment_BoundedByGenesisWindow asserts Genesis retains one
+// full density window plus the k-block eagerness suffix, while staying bounded.
+func TestCandidateFragment_BoundedByGenesisWindow(t *testing.T) {
 	const k = 5
-	cs := NewChainSelector(ChainSelectorConfig{SecurityParam: k})
+	const window = 15
+	cs := NewChainSelector(ChainSelectorConfig{
+		GenesisMode:           true,
+		SecurityParam:         k,
+		GenesisWindowSlots:    window,
+		MinCorroboratingPeers: 1,
+	})
 	connId := newTestConnectionId(1)
 
-	for slot := uint64(1); slot <= 3*k; slot++ {
+	const delivered = 40
+	for slot := uint64(1); slot <= delivered; slot++ {
 		cs.UpdatePeerTip(connId, ochainsync.Tip{
 			Point: ocommon.Point{
 				Slot: slot,
@@ -168,10 +179,33 @@ func TestCandidateFragment_BoundedByK(t *testing.T) {
 
 	fragment, ok := cs.GetCandidateFragment(connId)
 	require.True(t, ok)
-	assert.Equal(t, k+1, fragment.Len())
-	// The retained suffix is the most recent k+1 delivered points.
-	assert.Equal(t, uint64(3*k-k), fragment.Anchor().Slot)
-	assert.Equal(t, uint64(3*k), fragment.HeadPoint().Slot)
+	assert.Equal(t, window+k+1, fragment.Len())
+	assert.Equal(t, uint64(delivered-(window+k)), fragment.Anchor().Slot)
+	assert.Equal(t, uint64(delivered), fragment.HeadPoint().Slot)
+	assert.Equal(t, uint64(delivered-(window+k)), fragment.baseBlock)
+}
+
+func TestCandidateFragment_DerivedWindowKeepsEagernessSuffix(t *testing.T) {
+	const k = 5
+	cs := NewChainSelector(ChainSelectorConfig{
+		GenesisMode:           true,
+		SecurityParam:         k,
+		MinCorroboratingPeers: 1,
+	})
+	connId := newTestConnectionId(1)
+	for block := uint64(1); block <= 40; block++ {
+		cs.UpdatePeerTip(connId, ochainsync.Tip{
+			Point: ocommon.Point{
+				Slot: block,
+				Hash: []byte(fmt.Sprintf("h%d", block)),
+			},
+			BlockNumber: block,
+		}, nil)
+	}
+
+	fragment, ok := cs.GetCandidateFragment(connId)
+	require.True(t, ok)
+	assert.Equal(t, int(3*k+k+1), fragment.Len())
 }
 
 // TestCandidateFragment_RemovedOnDisconnect covers the acceptance criterion

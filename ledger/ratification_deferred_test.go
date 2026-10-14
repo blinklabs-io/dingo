@@ -663,7 +663,7 @@ INSERT INTO auth_committee_hot (
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
-	snapshotMgr := snapshot.NewManager(db, event.NewEventBus(nil, nil), nil)
+	snapshotMgr := snapshot.NewManager(db, newTestEventBus(t, nil), nil)
 	s.snapshotMgr = snapshotMgr
 	// Production reads the SNAP-point stake inside the boundary.
 	s.ls.SetEpochBoundarySnapshotStakeHook(

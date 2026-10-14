@@ -51,6 +51,7 @@ type BlobStoreGCS struct {
 	bucket        *storage.BucketHandle
 	startupCancel context.CancelFunc
 	bucketName    string
+	prefix        string
 	timeout       time.Duration
 }
 
@@ -131,15 +132,23 @@ func NewWithOptions(opts ...BlobStoreGCSOptionFunc) (*BlobStoreGCS, error) {
 }
 
 func (d *BlobStoreGCS) fullKey(key string) string {
-	return hex.EncodeToString([]byte(key))
+	return d.prefix + hex.EncodeToString([]byte(key))
 }
 
 func (d *BlobStoreGCS) externalKey(key string) (string, error) {
+	key, ok := strings.CutPrefix(key, d.prefix)
+	if !ok {
+		return "", fmt.Errorf("object key %q is outside configured prefix", key)
+	}
 	b, err := hex.DecodeString(key)
 	if err != nil {
 		return "", fmt.Errorf("failed decoding hex key %q: %w", key, err)
 	}
 	return string(b), nil
+}
+
+func (d *BlobStoreGCS) isNamespacedObject(key string) bool {
+	return d.prefix == "" && strings.HasPrefix(key, ".dingo-namespaces/")
 }
 
 func (d *BlobStoreGCS) object(key []byte) *storage.ObjectHandle {
@@ -563,6 +572,9 @@ func (it *gcsStreamIterator) advance() {
 			it.err = err
 			it.valid = false
 			return
+		}
+		if it.store.isNamespacedObject(objAttrs.Name) {
+			continue
 		}
 		key, err := it.store.externalKey(objAttrs.Name)
 		if err != nil {
@@ -1248,6 +1260,9 @@ func (d *BlobStoreGCS) listKeysToFile(
 		}
 		if err != nil {
 			return nil, cleanup(err)
+		}
+		if d.isNamespacedObject(objAttrs.Name) {
+			continue
 		}
 
 		externalKey, err := d.externalKey(objAttrs.Name)

@@ -41,6 +41,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/chainselection"
+	dchainsync "github.com/blinklabs-io/dingo/chainsync"
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/consensus/praos"
 	"github.com/blinklabs-io/dingo/database"
@@ -113,6 +114,161 @@ func buildBodySizedChain(
 		prevHash = hash
 	}
 	return testChain
+}
+
+func TestAwaitChainsyncHeaderCapacityBoundsAdmittedWork(t *testing.T) {
+	t.Parallel()
+
+	const admittedHeadroom = ChainsyncEventBufferSize + 1 +
+		dchainsync.DefaultMaxClients
+	capacity := BlockfetchBatchSize * 4
+	belowLimit := &LedgerState{
+		chain: buildBodySizedChain(t, capacity-1, 1),
+	}
+	initialFillCtx, cancelInitialFill := context.WithTimeout(
+		t.Context(),
+		time.Second,
+	)
+	defer cancelInitialFill()
+	require.NoError(t, belowLimit.AwaitChainsyncHeaderCapacity(
+		initialFillCtx,
+		admittedHeadroom,
+	))
+
+	chainManager, err := chain.NewManager(context.Background(), nil, nil)
+	require.NoError(t, err)
+	atLimitChain := chainManager.PrimaryChain()
+	blocks, err := testfixtures.GenerateConwayChain(capacity - admittedHeadroom)
+	require.NoError(t, err)
+	for _, block := range blocks {
+		require.NoError(t, atLimitChain.AddBlockHeader(
+			context.Background(),
+			block.Header(),
+		))
+	}
+	atLimit := &LedgerState{chain: atLimitChain, activeBlockfetchRequestDone: make(chan struct{})}
+	done := make(chan error, 1)
+	go func() {
+		done <- atLimit.AwaitChainsyncHeaderCapacity(
+			context.Background(),
+			admittedHeadroom,
+		)
+	}()
+	testutil.RequireNoReceive(
+		t,
+		done,
+		50*time.Millisecond,
+		"capacity gate should stop work at the bounded threshold",
+	)
+	for i := range BlockfetchBatchSize - 1 {
+		require.NoError(t, atLimitChain.AddBlock(
+			context.Background(),
+			blocks[i],
+			nil,
+		))
+	}
+	testutil.RequireNoReceive(
+		t,
+		done,
+		50*time.Millisecond,
+		"capacity gate should retain one-batch hysteresis",
+	)
+	require.NoError(t, atLimitChain.AddBlock(
+		context.Background(),
+		blocks[BlockfetchBatchSize-1],
+		nil,
+	))
+	require.NoError(t, testutil.RequireReceive(
+		t,
+		done,
+		time.Second,
+		"a drained header batch should resume ChainSync",
+	))
+}
+
+func TestAwaitChainsyncHeaderCapacityResumesAfterFetchCleanup(t *testing.T) {
+	t.Parallel()
+	ls := &LedgerState{
+		chain:                       buildBodySizedChain(t, BlockfetchBatchSize*4, 1),
+		activeBlockfetchRequestDone: make(chan struct{}),
+	}
+	done := make(chan error, 1)
+	go func() { done <- ls.AwaitChainsyncHeaderCapacity(t.Context(), ChainsyncEventBufferSize+1) }()
+	testutil.WaitForCondition(t, func() bool {
+		ls.chainsyncBlockfetchMutex.Lock()
+		defer ls.chainsyncBlockfetchMutex.Unlock()
+		return ls.chainsyncCapacityChanged != nil
+	}, time.Second, "capacity waiter registered")
+	ls.chainsyncBlockfetchMutex.Lock()
+	ls.blockfetchRequestRangeCleanup()
+	ls.chainsyncBlockfetchMutex.Unlock()
+	require.NoError(t, testutil.RequireReceive(t, done, time.Second, "abandoned fetch releases capacity waiter"))
+	require.NoError(t, ls.AwaitChainsyncHeaderCapacity(t.Context(), ChainsyncEventBufferSize+1))
+}
+
+func TestAwaitChainsyncHeaderCapacityRejectsExhaustedBudget(t *testing.T) {
+	t.Parallel()
+
+	ls := &LedgerState{chain: &chain.Chain{}}
+	capacity := chain.DefaultMaxQueuedHeaders - BlockfetchBatchSize*4
+	require.ErrorContains(t, ls.AwaitChainsyncHeaderCapacity(
+		context.Background(),
+		capacity+1,
+	), "must be between 0")
+	require.NoError(t, ls.AwaitChainsyncHeaderCapacity(
+		context.Background(),
+		capacity,
+	))
+}
+
+func TestChainsyncEventSubscriberBackpressuresAtProtocolWindow(t *testing.T) {
+	t.Parallel()
+
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Close)
+	release := make(chan struct{})
+	t.Cleanup(func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	})
+	entered := make(chan struct{})
+	var enteredOnce sync.Once
+	ls := &LedgerState{config: LedgerStateConfig{EventBus: bus}}
+	ls.subscribeChainsyncEvents(func(event.Event) {
+		enteredOnce.Do(func() { close(entered) })
+		<-release
+	})
+	evt := event.NewEvent(ChainsyncEventType, ChainsyncEvent{})
+	require.NoError(t, bus.PublishBlocking(ChainsyncEventType, evt))
+	testutil.RequireReceive(
+		t,
+		entered,
+		time.Second,
+		"chainsync handler should consume the first event",
+	)
+	for range ChainsyncEventBufferSize {
+		require.NoError(t, bus.PublishBlocking(ChainsyncEventType, evt))
+	}
+	blocked := make(chan error, 1)
+	go func() {
+		blocked <- bus.PublishBlocking(ChainsyncEventType, evt)
+	}()
+	testutil.RequireNoReceive(
+		t,
+		blocked,
+		50*time.Millisecond,
+		"the event after one active handler and a full protocol window must block",
+	)
+	close(release)
+	require.NoError(t, testutil.RequireReceive(
+		t,
+		blocked,
+		time.Second,
+		"draining the subscriber should release its publisher",
+	))
 }
 
 func TestStartQueuedBlockfetchCutsRangesByEstimatedBytes(t *testing.T) {
@@ -832,7 +988,7 @@ func newNoBlocksLedgerState(
 	require.Equal(t, 1, testChain.HeaderCount())
 
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	eventBus := event.NewEventBus(nil, logger)
+	eventBus := newTestEventBus(t, logger)
 	resyncChan := make(chan event.ChainsyncResyncEvent, 8)
 	eventBus.SubscribeFunc(
 		event.ChainsyncResyncEventType,
@@ -1244,7 +1400,7 @@ func TestHandleEventBlockfetchBatchDoneStopsRepeatingEmptyBatches(
 
 	connId := testChainsyncConnId(6100, 3001)
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	eventBus := event.NewEventBus(nil, logger)
+	eventBus := newTestEventBus(t, logger)
 	resyncChan := make(chan event.ChainsyncResyncEvent, 4)
 	eventBus.SubscribeFunc(
 		event.ChainsyncResyncEventType,
@@ -1613,9 +1769,10 @@ func TestBatchDoneTransportRangeErrKeepsHeadersAcrossLargeTipGap(
 // dispatch on the returned channel.
 func requestIdTestLedger(
 	t *testing.T,
-	connId ouroboros.ConnectionId,
+	connIds ...ouroboros.ConnectionId,
 ) (*LedgerState, <-chan uint64, []lcommon.Blake2b256) {
 	t.Helper()
+	require.NotEmpty(t, connIds)
 	headerCount := BlockfetchBatchSize + 50
 	testChain, hashes := buildDeepCatchupChain(t, headerCount)
 	dispatched := make(chan uint64, 16)
@@ -1630,7 +1787,7 @@ func requestIdTestLedger(
 				_ ocommon.Point,
 				_ ocommon.Point,
 			) (uint64, error) {
-				require.Equal(t, connId, gotConnId)
+				require.Contains(t, connIds, gotConnId)
 				mu.Lock()
 				nextId++
 				id := nextId
@@ -1752,7 +1909,7 @@ func TestBlockfetchRefusedPromotionKeepsQueuedRequestReserved(
 // TestBlockfetchLateTerminalEventReleasesOnlyItsOwnRequest covers the
 // force-release side: a timeout teardown releases the active and pre-queued
 // requests' reservations while both are still outstanding with the peer and
-// redispatches on the same connection. Their late terminal events must not
+// redispatches on an alternate connection. Their late terminal events must not
 // release the replacement requests' reservations, and the timed-out active
 // request's terminal event must not open the discard latch armed for the
 // pre-queued request, whose blocks would then be accepted as the
@@ -1763,7 +1920,16 @@ func TestBlockfetchLateTerminalEventReleasesOnlyItsOwnRequest(
 	t.Parallel()
 
 	connId := testChainsyncConnId(6321, 3001)
-	ls, dispatched, hashes := requestIdTestLedger(t, connId)
+	retryConnId := testChainsyncConnId(6321, 3002)
+	ls, dispatched, hashes := requestIdTestLedger(t, connId, retryConnId)
+	ls.config.SelectBlockfetchRetryPeerFunc = func(
+		excluded []ouroboros.ConnectionId,
+		_ ocommon.Point,
+		_ time.Duration,
+	) (ouroboros.ConnectionId, bool, bool) {
+		require.Equal(t, []ouroboros.ConnectionId{connId}, excluded)
+		return retryConnId, true, true
+	}
 
 	ls.chainsyncBlockfetchMutex.Lock()
 	require.NoError(t, ls.startQueuedBlockfetchLocked(connId, nil))
@@ -1774,10 +1940,10 @@ func TestBlockfetchLateTerminalEventReleasesOnlyItsOwnRequest(
 	receiveDispatches(t, dispatched, 3, 4)
 
 	ls.chainsyncBlockfetchMutex.Lock()
-	require.Equal(t, 2, blockfetchReservationsLocked(ls, connId))
+	require.Equal(t, 2, blockfetchReservationsLocked(ls, retryConnId))
 	replacement := append(
 		[]chan struct{}(nil),
-		ls.blockfetchRequestsInFlight[connIdKey(connId)]...,
+		ls.blockfetchRequestsInFlight[connIdKey(retryConnId)]...,
 	)
 	for _, id := range []uint64{1, 2} {
 		require.NoError(t, ls.handleEventBlockfetchBatchDone(BlockfetchEvent{
@@ -1788,7 +1954,7 @@ func TestBlockfetchLateTerminalEventReleasesOnlyItsOwnRequest(
 		assert.Equal(
 			t,
 			2,
-			blockfetchReservationsLocked(ls, connId),
+			blockfetchReservationsLocked(ls, retryConnId),
 			"late terminal event for force-released request %d released "+
 				"a replacement request's reservation",
 			id,
@@ -1927,12 +2093,16 @@ type blockfetchRollbackFixture struct {
 	resyncCh  chan event.ChainsyncResyncEvent
 	forkAHash lcommon.Blake2b256
 	forkBHash lcommon.Blake2b256
+	// holdRequestReservation leaves each request reserved until its BatchDone
+	// releases it, as the production callback does for a request still
+	// outstanding with the peer.
+	holdRequestReservation bool
 }
 
 func newBlockfetchRollbackFixture(t *testing.T) *blockfetchRollbackFixture {
 	t.Helper()
 	base := newChainsyncRollbackFixture(t)
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Close)
 	base.ls.config.EventBus = bus
 
@@ -1990,6 +2160,9 @@ func newBlockfetchRollbackFixture(t *testing.T) *blockfetchRollbackFixture {
 		_ ocommon.Point,
 	) (uint64, error) {
 		f.requests = append(f.requests, start)
+		if f.holdRequestReservation {
+			return 0, nil
+		}
 		// The production callback returns after BatchDone has been emitted.
 		// This synthetic callback has no protocol event, so release the
 		// request reservation before returning to the ledger.
@@ -2206,6 +2379,154 @@ func TestForkRestartDropsAbandonedBodyArrivingAfterRestart(t *testing.T) {
 
 	require.Len(t, f.ls.pendingBlockfetchEvents, 1)
 	require.Equal(t, point, f.ls.pendingBlockfetchEvents[0].Point)
+}
+
+// With the far-from-tip low watermark a range is requested about three ranges
+// of headers earlier than the default four-range threshold, so a rollback more
+// often lands while that request is in flight. The rollback must discard the
+// queued headers and the bodies the abandoned request already buffered, and
+// bodies it delivers afterwards must not reach the chain or the ledger.
+//
+// The rollback target is the current chain tip, so the abandoned bodies still
+// fit the chain by parent hash; only the rollback generation check stops them.
+func TestFarFromTipLowWatermarkRollbackDiscardsInFlightBatch(t *testing.T) {
+	f := newBlockfetchRollbackFixture(t)
+	f.ls.config.BlockfetchLowWatermarkEnabled = true
+	f.holdRequestReservation = true
+	reservations := func() int {
+		f.ls.chainsyncBlockfetchMutex.Lock()
+		defer f.ls.chainsyncBlockfetchMutex.Unlock()
+		return blockfetchReservationsLocked(f.ls, f.connId)
+	}
+
+	farTip := ochainsync.Tip{
+		Point:       ocommon.NewPoint(100_000_000, []byte("far-tip")),
+		BlockNumber: 10_000_000,
+	}
+	prev := lcommon.NewBlake2b256(f.currentTip.Point.Hash)
+	blocks := make([]*blockfetchTestBlock, 0, BlockfetchBatchSize)
+	for i := range BlockfetchBatchSize {
+		hash := lcommon.NewBlake2b256(
+			testHashBytes(fmt.Sprintf("far-lowmark-%d", i)),
+		)
+		block := &blockfetchTestBlock{
+			hash:        hash,
+			prevHash:    prev,
+			slot:        f.currentTip.Point.Slot + uint64(i) + 1,
+			blockNumber: f.currentTip.BlockNumber + uint64(i) + 1,
+		}
+		blocks = append(blocks, block)
+		prev = hash
+		if i == BlockfetchBatchSize-1 {
+			require.Empty(
+				t,
+				f.requests,
+				"no request may start before one range of headers is queued",
+			)
+		}
+		require.NoError(t, f.ls.handleEventChainsyncBlockHeader(
+			ChainsyncEvent{
+				ConnectionId: f.connId,
+				BlockHeader: mockHeader{
+					hash:        block.hash,
+					prevHash:    block.prevHash,
+					blockNumber: block.blockNumber,
+					slot:        block.slot,
+				},
+				Point: ocommon.NewPoint(block.slot, block.hash.Bytes()),
+				Tip:   farTip,
+			},
+		))
+	}
+	require.Len(
+		t,
+		f.requests,
+		1,
+		"the low watermark must start the first range at one range of headers",
+	)
+	require.Equal(
+		t,
+		ocommon.NewPoint(blocks[0].slot, blocks[0].hash.Bytes()),
+		f.requests[0],
+	)
+	require.Equal(t, BlockfetchBatchSize, f.ls.chain.HeaderCount())
+	require.Equal(t, 1, reservations(), "the range must be outstanding")
+
+	blockEvent := func(b *blockfetchTestBlock) event.Event {
+		return event.NewEvent(
+			BlockfetchEventType,
+			BlockfetchEvent{
+				ConnectionId: f.connId,
+				Point:        ocommon.NewPoint(b.slot, b.hash.Bytes()),
+				Type:         1,
+				Block:        b,
+			},
+		)
+	}
+	f.ls.handleEventBlockfetch(blockEvent(blocks[0]))
+	require.Len(
+		t,
+		f.ls.pendingBlockfetchEvents,
+		1,
+		"the first body of the in-flight range must be buffered",
+	)
+
+	f.ls.chainsyncMutex.Lock()
+	var pending pendingPublishes
+	err := f.ls.handleEventChainsyncRollback(
+		ChainsyncEvent{
+			ConnectionId: f.connId,
+			Rollback:     true,
+			Point:        f.currentTip.Point,
+		},
+		&pending,
+	)
+	f.ls.chainsyncMutex.Unlock()
+	pending.flush()
+	require.NoError(t, err)
+	require.Equal(t, f.currentTip.Point, f.ls.chain.Tip().Point)
+	require.Zero(
+		t,
+		f.ls.chain.HeaderCount(),
+		"the rollback must discard the headers the in-flight range was for",
+	)
+	require.Equal(
+		t,
+		1,
+		reservations(),
+		"the rollback cannot cancel the outstanding request",
+	)
+
+	// The request cannot be cancelled: its remaining bodies and BatchDone
+	// still arrive after the rollback.
+	f.ls.handleEventBlockfetch(blockEvent(blocks[1]))
+	f.ls.handleEventBlockfetch(event.NewEvent(
+		BlockfetchEventType,
+		BlockfetchEvent{ConnectionId: f.connId, BatchDone: true},
+	))
+
+	assert.Empty(
+		t,
+		f.ls.pendingBlockfetchEvents,
+		"no body of the abandoned range may stay buffered",
+	)
+	assert.Equal(
+		t,
+		f.currentTip.Point,
+		f.ls.chain.Tip().Point,
+		"no block past the rollback point may reach the chain",
+	)
+	assert.LessOrEqual(
+		t,
+		f.ls.currentTip.Point.Slot,
+		f.currentTip.Point.Slot,
+		"no block past the rollback point may be applied to the ledger",
+	)
+	assert.Zero(
+		t,
+		reservations(),
+		"BatchDone of the abandoned range must release its reservation",
+	)
 }
 
 // The bounded-recovery case: a batch that delivered bodies but
@@ -2563,7 +2884,7 @@ func TestCompareIncomingHeaderToLocalTip_ByronEBBBeatsRegularTip(t *testing.T) {
 func TestBlockfetchContinuationPublishesHeaderInvalidationOnFailure(
 	t *testing.T,
 ) {
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Stop)
 	cm, err := chain.NewManager(context.Background(), nil, bus)
 	require.NoError(t, err)
@@ -3385,7 +3706,7 @@ func TestRecoverBlockfetchRestartFailureRetriesLiveActiveConnection(t *testing.T
 		return 0, nil
 	}
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Stop)
 	ls.config.EventBus = bus
 	resyncCh := make(chan event.ChainsyncResyncEvent, 4)
@@ -3450,7 +3771,7 @@ func TestRecoverBlockfetchRestartFailureFallsBackToResyncWithoutLiveConnection(
 		return 0, nil
 	}
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Stop)
 	ls.config.EventBus = bus
 	resyncCh := make(chan event.ChainsyncResyncEvent, 4)
@@ -3603,7 +3924,9 @@ func TestRecordPeerHeaderHistoryBoundsRetainedBytes(t *testing.T) {
 				hash:        lcommon.NewBlake2b256(hash),
 				prevHash:    lcommon.NewBlake2b256(prevHash),
 				blockNumber: fixture.currentTip.BlockNumber + uint64(i) + 1,
-				slot:        fixture.currentTip.Point.Slot + uint64(i) + 1,
+				// At the tip, so the history is applied and gets only the
+				// per-connection budget.
+				slot: fixture.currentTip.Point.Slot,
 			},
 			cbor: bytes.Repeat([]byte{0x01}, 2048),
 		}
@@ -3663,7 +3986,9 @@ func TestPeerHeaderHistoryGlobalBudgetRetiresOldestPeerDeterministically(
 	ls := fixture.ls
 	ls.peerHeaderHistory = make(map[string]*peerHeaderChain)
 	const retainedPerRecord = 32 << 10
-	for peer := range 4 {
+	peerCount := maxPeerHeaderHistoryBytesTotal /
+		(minPeerHeaderHistoryRecords * retainedPerRecord)
+	for peer := range peerCount {
 		key := fmt.Sprintf("peer-%d", peer)
 		history := &peerHeaderChain{
 			order:  make([]string, 0, minPeerHeaderHistoryRecords),
@@ -3687,7 +4012,7 @@ func TestPeerHeaderHistoryGlobalBudgetRetiresOldestPeerDeterministically(
 
 	require.True(t, ls.makePeerHeaderHistoryRoom(1<<20, "new-peer"))
 	assert.Nil(t, ls.peerHeaderHistory["peer-0"], "oldest peer retires first")
-	for _, key := range []string{"peer-1", "peer-2", "peer-3"} {
+	for _, key := range []string{"peer-1", "peer-2", "peer-3", "peer-4", "peer-5", "peer-6", "peer-7"} {
 		require.Len(t, ls.peerHeaderHistory[key].order, minPeerHeaderHistoryRecords)
 	}
 	assert.LessOrEqual(t, ls.peerHeaderHistoryBytes, maxPeerHeaderHistoryBytesTotal)
@@ -3700,10 +4025,12 @@ func TestPeerHeaderHistoryEvictsExtraRecordsBeforeRetiringPeer(t *testing.T) {
 	ls := fixture.ls
 	ls.peerHeaderHistory = make(map[string]*peerHeaderChain)
 	const retainedPerRecord = 32 << 10
-	for peer := range 4 {
+	peerCount := maxPeerHeaderHistoryBytesTotal /
+		(minPeerHeaderHistoryRecords * retainedPerRecord)
+	for peer := range peerCount {
 		key := fmt.Sprintf("peer-%d", peer)
 		count := minPeerHeaderHistoryRecords
-		if peer == 3 {
+		if peer == peerCount-1 {
 			count++
 		}
 		history := &peerHeaderChain{
@@ -3714,7 +4041,7 @@ func TestPeerHeaderHistoryEvictsExtraRecordsBeforeRetiringPeer(t *testing.T) {
 			ls.peerHeaderHistorySequence++
 			hash := fmt.Sprintf("%s-header-%d", key, idx)
 			bytes := retainedPerRecord
-			if peer == 3 && idx >= count-2 {
+			if peer == peerCount-1 && idx >= count-2 {
 				bytes = 16 << 10
 			}
 			record := peerHeaderRecord{
@@ -3732,8 +4059,8 @@ func TestPeerHeaderHistoryEvictsExtraRecordsBeforeRetiringPeer(t *testing.T) {
 
 	require.True(t, ls.makePeerHeaderHistoryRoom(1<<20, "new-peer"))
 	assert.Nil(t, ls.peerHeaderHistory["peer-0"], "retire the oldest peer only after excess records are gone")
-	require.NotNil(t, ls.peerHeaderHistory["peer-3"])
-	assert.Len(t, ls.peerHeaderHistory["peer-3"].order, minPeerHeaderHistoryRecords)
+	require.NotNil(t, ls.peerHeaderHistory["peer-7"])
+	assert.Len(t, ls.peerHeaderHistory["peer-7"].order, minPeerHeaderHistoryRecords)
 	assert.LessOrEqual(t, ls.peerHeaderHistoryBytes, maxPeerHeaderHistoryBytesTotal)
 	assertPeerHeaderHistoryByteAccounting(t, ls)
 }
@@ -3751,8 +4078,18 @@ func TestPeerHeaderHistoryRehydratesWireHeader(t *testing.T) {
 			Slot:          slot,
 			PrevHash:      lcommon.NewBlake2b256([]byte("parent")),
 			BlockBodyHash: lcommon.NewBlake2b256([]byte("body")),
-			ProtoVersion:  babbage.BabbageProtoVersion{Major: 8},
+			VrfKey:        make([]byte, 32),
+			VrfResult: lcommon.VrfResult{
+				Output: make([]byte, 64),
+				Proof:  make([]byte, 80),
+			},
+			OpCert: babbage.BabbageOpCert{
+				HotVkey:   make([]byte, 32),
+				Signature: make([]byte, 64),
+			},
+			ProtoVersion: babbage.BabbageProtoVersion{Major: 8},
 		},
+		Signature: make([]byte, 448),
 	}
 	headerCbor, err := cbor.Encode(header)
 	require.NoError(t, err)
@@ -3839,7 +4176,7 @@ func TestTryResolveForkExtensionRestartsBlockfetchAfterQueueOverflow(
 		},
 	}
 
-	resolved, err := fixture.ls.tryResolveFork(evt, notFitErr, nil, false)
+	resolved, err := fixture.ls.tryResolveFork(evt, notFitErr, nil, 0)
 	require.NoError(t, err)
 	require.False(
 		t,
@@ -3910,7 +4247,7 @@ func TestEnsureBlockfetchDrainingAfterForkQueueFailureRecoversWhenStartFails(
 		return 0, errors.New("simulated blockfetch request failure")
 	}
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Stop)
 	fixture.ls.config.EventBus = bus
 	resyncSubID, resyncCh := bus.SubscribeWithBuffer(
@@ -3941,7 +4278,7 @@ func TestEnsureBlockfetchDrainingAfterForkQueueFailureRecoversWhenStartFails(
 	// nil pending: pendingPublishes.add publishes immediately on a nil
 	// receiver, which is what lets the subscription above observe the
 	// resync request synchronously.
-	resolved, err := fixture.ls.tryResolveFork(evt, notFitErr, nil, false)
+	resolved, err := fixture.ls.tryResolveFork(evt, notFitErr, nil, 0)
 	require.NoError(t, err)
 	require.False(t, resolved)
 
@@ -4063,7 +4400,7 @@ func TestTryResolveForkExtensionDoesNotThrashAlreadyRunningBlockfetch(
 		},
 	}
 
-	resolved, err := fixture.ls.tryResolveFork(evt, notFitErr, nil, false)
+	resolved, err := fixture.ls.tryResolveFork(evt, notFitErr, nil, 0)
 	require.NoError(t, err)
 	require.False(t, resolved)
 
@@ -4320,7 +4657,7 @@ func TestCanonicalFrontierCrossingDoesNotCloseAPeerAheadOfLocalTip(
 		},
 	}
 
-	selectorBus := event.NewEventBus(nil, nil)
+	selectorBus := newTestEventBus(t, nil)
 	t.Cleanup(selectorBus.Stop)
 	_, switchCh := selectorBus.Subscribe(chainselection.ChainSwitchEventType)
 
@@ -5079,7 +5416,7 @@ func TestHandleEventChainsyncRollbackToBlockTipDoesNotPublishLedgerRollback(
 	t.Parallel()
 
 	fixture := newChainsyncRollbackFixture(t)
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(func() { bus.Stop() })
 	fixture.ls.config.EventBus = bus
 
@@ -5160,7 +5497,7 @@ func TestRollbackAtCurrentTipIsNoop(t *testing.T) {
 	t.Parallel()
 
 	fixture := newChainsyncRollbackFixture(t)
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(func() { bus.Stop() })
 	fixture.ls.config.EventBus = bus
 
@@ -5450,18 +5787,27 @@ func newTestDijkstraBlockCbor(
 	header := &dijkstra.DijkstraBlockHeader{
 		BabbageBlockHeader: babbage.BabbageBlockHeader{
 			Body: babbage.BabbageBlockHeaderBody{
-				BlockNumber:   blockNumber,
-				Slot:          slot,
-				IssuerVkey:    issuer,
-				VrfResult:     lcommon.VrfResult{Output: vrfOutput},
+				BlockNumber: blockNumber,
+				Slot:        slot,
+				IssuerVkey:  issuer,
+				VrfResult: lcommon.VrfResult{
+					Output: vrfOutput,
+					Proof:  make([]byte, 80),
+				},
+				VrfKey:        make([]byte, 32),
 				BlockBodyHash: body.Hash(),
+				OpCert: babbage.BabbageOpCert{
+					HotVkey:        make([]byte, 32),
+					SequenceNumber: opCertSeqNo,
+					Signature:      make([]byte, 64),
+				},
+				ProtoVersion: babbage.BabbageProtoVersion{
+					Major: dijkstra.MinProtocolVersionDijkstra,
+				},
 			},
+			Signature: make([]byte, 448),
 		},
 	}
-	setOpCertSequenceNumber(
-		&header.Body.OpCert.SequenceNumber,
-		opCertSeqNo,
-	)
 	block := &dijkstra.DijkstraBlock{BlockHeader: header, BlockBody: body}
 	cborData, err := block.MarshalCBOR()
 	require.NoError(t, err)
@@ -5613,7 +5959,7 @@ func testRecycleConnId() ouroboros.ConnectionId {
 func TestChainsyncHeaderVerificationFailurePublishesRecycleEvent(t *testing.T) {
 	t.Parallel()
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Stop)
 	connId := testRecycleConnId()
 
@@ -5662,12 +6008,167 @@ func TestChainsyncHeaderVerificationFailurePublishesRecycleEvent(t *testing.T) {
 	assert.Equal(t, "header_verification_failure", got.Reason)
 }
 
+func TestChainsyncHeaderVerificationReusesIngressVerdict(t *testing.T) {
+	t.Parallel()
+
+	cm, err := chain.NewManager(context.Background(), nil, nil)
+	require.NoError(t, err)
+	testChain := cm.PrimaryChain()
+	header := mockHeader{slot: 1000, blockNumber: 100}
+	point := ocommon.NewPoint(header.SlotNumber(), header.Hash().Bytes())
+	ls := &LedgerState{
+		validationEnabled: true,
+		chain:             testChain,
+		epochCache: []models.Epoch{{
+			EpochId:       0,
+			StartSlot:     0,
+			LengthInSlots: 2_000,
+			Nonce:         make([]byte, 32),
+		}},
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			BlockfetchRequestRangeFunc: func(
+				ouroboros.ConnectionId,
+				ocommon.Point,
+				ocommon.Point,
+			) (uint64, error) {
+				return 0, nil
+			},
+		},
+	}
+	ls.publishSnapshotsLocked()
+	verificationGeneration := ls.loadConsensusSnapshot().generation
+	t.Cleanup(func() {
+		if ls.chainsyncBlockfetchTimeoutTimer != nil {
+			ls.chainsyncBlockfetchTimeoutTimer.Stop()
+		}
+	})
+
+	require.NoError(t, ls.handleEventChainsyncBlockHeader(ChainsyncEvent{
+		ConnectionId:                       testRecycleConnId(),
+		BlockHeader:                        header,
+		HeaderCryptoVerificationGeneration: verificationGeneration,
+		Point:                              point,
+		Tip: ochainsync.Tip{
+			Point: ocommon.NewPoint(
+				point.Slot+1,
+				[]byte("unbound-tip"),
+			),
+			BlockNumber: header.BlockNumber() + 1,
+		},
+	}))
+	require.Equal(t, 1, testChain.HeaderCount())
+	require.True(t, testChain.FirstHeaderMatchesPoint(point))
+	require.True(t, testChain.FirstVerifiedHeaderMatchesPoint(point))
+	require.True(t, ls.queuedHeaderCryptoVerdictCurrent(point))
+	ls.publishSnapshotsLocked()
+	require.False(
+		t,
+		ls.queuedHeaderCryptoVerdictCurrent(point),
+		"a later ledger publication must invalidate the queued verdict",
+	)
+}
+
+func TestChainsyncHeaderVerificationRejectsStaleIngressVerdict(t *testing.T) {
+	t.Parallel()
+
+	cm, err := chain.NewManager(context.Background(), nil, nil)
+	require.NoError(t, err)
+	header := mockHeader{slot: 1000, blockNumber: 100}
+	ls := &LedgerState{
+		validationEnabled: true,
+		chain:             cm.PrimaryChain(),
+		epochCache: []models.Epoch{{
+			EpochId:       0,
+			StartSlot:     0,
+			LengthInSlots: 2_000,
+			Nonce:         make([]byte, 32),
+		}},
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			BlockfetchRequestRangeFunc: func(
+				ouroboros.ConnectionId,
+				ocommon.Point,
+				ocommon.Point,
+			) (uint64, error) {
+				return 0, nil
+			},
+		},
+	}
+	ls.publishSnapshotsLocked()
+	verificationGeneration := ls.loadConsensusSnapshot().generation
+	t.Cleanup(func() {
+		if ls.chainsyncBlockfetchTimeoutTimer != nil {
+			ls.chainsyncBlockfetchTimeoutTimer.Stop()
+		}
+	})
+
+	event := ChainsyncEvent{
+		ConnectionId:                       testRecycleConnId(),
+		BlockHeader:                        header,
+		HeaderCryptoVerificationGeneration: verificationGeneration,
+		Point: ocommon.NewPoint(
+			header.SlotNumber(),
+			header.Hash().Bytes(),
+		),
+	}
+	// A rollback or concurrent block apply publishes a new verification
+	// context before the asynchronous event reaches ledger admission.
+	ls.publishSnapshotsLocked()
+
+	err = ls.handleEventChainsyncBlockHeader(event)
+	require.ErrorContains(t, err, "block header crypto verification failed")
+
+	event.HeaderCryptoVerificationGeneration = ls.loadConsensusSnapshot().generation
+	finishTransition := ls.beginTxValidationTransition()
+	err = ls.handleEventChainsyncBlockHeader(event)
+	finishTransition()
+	require.NoError(t, err)
+	require.False(
+		t,
+		ls.chain.FirstVerifiedHeaderMatchesPoint(event.Point),
+		"a durable state transition without a publication must queue the header unverified",
+	)
+}
+
+func TestChainsyncHeaderVerificationRejectsMismatchedIngressVerdict(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	header := mockHeader{slot: 1000, blockNumber: 100}
+	ls := &LedgerState{
+		validationEnabled: true,
+		epochCache: []models.Epoch{{
+			EpochId:       0,
+			StartSlot:     0,
+			LengthInSlots: 2_000,
+			Nonce:         make([]byte, 32),
+		}},
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+	ls.publishSnapshotsLocked()
+
+	err := ls.handleEventChainsyncBlockHeader(ChainsyncEvent{
+		ConnectionId:                       testRecycleConnId(),
+		BlockHeader:                        header,
+		HeaderCryptoVerificationGeneration: ls.loadConsensusSnapshot().generation,
+		Point: ocommon.NewPoint(
+			header.SlotNumber(),
+			[]byte("different-header-hash"),
+		),
+	})
+	require.ErrorContains(t, err, "block header crypto verification failed")
+}
+
 func TestChainsyncHeaderVerificationMissingEpochDefersToBlockfetch(
 	t *testing.T,
 ) {
 	t.Parallel()
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Stop)
 	connId := testRecycleConnId()
 
@@ -5739,7 +6240,7 @@ func TestChainsyncHeaderVerificationEmptyEpochNonceDefersToBlockfetch(
 ) {
 	t.Parallel()
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Stop)
 	connId := testRecycleConnId()
 
@@ -5864,7 +6365,7 @@ func TestBlockfetchHeaderVerificationFailurePublishesRecycleEvent(
 ) {
 	t.Parallel()
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Stop)
 	connId := testRecycleConnId()
 
@@ -6050,7 +6551,14 @@ func TestBlockfetchSkipsHeaderCryptoForVerifiedNonHeadQueuedHeader(
 			}
 			require.NoError(t, ls.chain.AddVerifiedBlockHeader(context.Background(), head))
 			if tc.verified {
-				require.NoError(t, ls.chain.AddVerifiedBlockHeader(context.Background(), fetched))
+				require.NoError(
+					t,
+					ls.chain.AddBlockHeaderWithCryptoVerificationGeneration(
+						context.Background(),
+						fetched,
+						ls.loadConsensusSnapshot().generation,
+					),
+				)
 			} else {
 				require.NoError(t, ls.chain.AddBlockHeader(context.Background(), fetched))
 			}
@@ -6215,7 +6723,7 @@ func TestNoteNonExtendingBlockRejectionPublishesRecycleAtThreshold(
 ) {
 	t.Parallel()
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Stop)
 	connId := testRecycleConnId()
 
@@ -6269,7 +6777,7 @@ func TestNoteNonExtendingBlockRejectionPublishesRecycleAtThreshold(
 func TestNoteNonExtendingBlockRejectionResetsOnAcceptedBlock(t *testing.T) {
 	t.Parallel()
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Stop)
 	connId := testRecycleConnId()
 
@@ -6326,7 +6834,7 @@ func TestNoteNonExtendingBlockRejectionResetsOnAcceptedBlock(t *testing.T) {
 func TestNoteNonExtendingBlockRejectionPerConnectionIndependent(t *testing.T) {
 	t.Parallel()
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Stop)
 	floodConn := testRecycleConnId()
 	healthyConn := ouroboros.ConnectionId{
@@ -6425,7 +6933,7 @@ func TestFlushPendingBlockfetchNonExtendingFloodRecyclesConnection(
 
 	fixture := newChainsyncRollbackFixture(t)
 	ls := fixture.ls
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Stop)
 	ls.config.EventBus = bus
 
@@ -6504,7 +7012,7 @@ func TestFlushPendingBlockfetchNonExtendingHandfulNotRecycled(t *testing.T) {
 
 	fixture := newChainsyncRollbackFixture(t)
 	ls := fixture.ls
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Stop)
 	ls.config.EventBus = bus
 
@@ -6685,7 +7193,7 @@ func runResyncDeferredPublishScenario(
 ) {
 	t.Helper()
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	defer bus.Stop()
 
 	ls := &LedgerState{
@@ -6993,7 +7501,7 @@ func TestHandleEventChainsyncRollbackRejectsBelowMithrilBoundary(
 	t.Parallel()
 
 	fixture := newChainsyncRollbackFixture(t)
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(func() { bus.Stop() })
 	fixture.ls.config.EventBus = bus
 	fixture.ls.mithrilLedgerSlot = fixture.currentTip.Point.Slot
@@ -7301,7 +7809,7 @@ func TestHandleEventChainsyncRollbackExceedsKDeclinesReconcilingDivergedLedgerTi
 	fixture := newChainsyncRollbackFixture(t)
 	putPrimaryChainOnForkBeyondK(t, fixture, "live-rollback")
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(func() { bus.Stop() })
 	fixture.ls.config.EventBus = bus
 
@@ -7435,7 +7943,7 @@ func TestHandleEventChainsyncRollbackReconcileFindsMithrilBoundaryAncestor(
 	// fire.
 	fixture.ls.mithrilLedgerSlot = fixture.ancestorTip.Point.Slot + 1
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(func() { bus.Stop() })
 	fixture.ls.config.EventBus = bus
 
@@ -7489,7 +7997,7 @@ func TestLedgerReadChainRequestsResyncOnOverKReconcile(t *testing.T) {
 	fixture := newChainsyncRollbackFixture(t)
 	putPrimaryChainOnForkBeyondK(t, fixture, "ledger-read-chain-resync")
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(func() { bus.Stop() })
 	fixture.ls.config.EventBus = bus
 
@@ -7565,7 +8073,7 @@ func TestLedgerReadChainRequestsResyncOnMithrilBoundaryReconcile(
 	)
 	fixture.ls.mithrilLedgerSlot = fixture.ancestorTip.Point.Slot + 1
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(func() { bus.Stop() })
 	fixture.ls.config.EventBus = bus
 
@@ -7632,7 +8140,7 @@ func TestLedgerProcessBlocksRetriesInsteadOfHaltingOnOverKReconcile(
 	fixture := newChainsyncRollbackFixture(t)
 	putPrimaryChainOnForkBeyondK(t, fixture, "pipeline-retry-over-k")
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(func() { bus.Stop() })
 	fixture.ls.config.EventBus = bus
 	resyncCh := subscribeChainsyncResync(t, bus)
@@ -7732,7 +8240,7 @@ func TestTryResolveForkSynchronizesLedgerTip(t *testing.T) {
 		},
 		notFitErr,
 		nil,
-		false,
+		0,
 	)
 	require.NoError(t, err)
 	require.True(t, resolved)
@@ -7834,7 +8342,7 @@ func TestTryResolveForkGenesisRejectsLongerSparseCandidate(t *testing.T) {
 		},
 		notFitErr,
 		nil,
-		false,
+		0,
 	)
 
 	require.NoError(t, err)
@@ -7953,7 +8461,7 @@ func TestTryResolveForkUsesPraosAfterGenesisExit(t *testing.T) {
 		},
 		notFitErr,
 		nil,
-		false,
+		0,
 	)
 
 	require.NoError(t, err)
@@ -8095,7 +8603,7 @@ func TestTryResolveForkExceedsKDeclinesReconcilingDivergedLedgerTip(
 	fixture := newChainsyncRollbackFixture(t)
 	putPrimaryChainOnForkBeyondK(t, fixture, "live-fork-resolution")
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(func() { bus.Stop() })
 	fixture.ls.config.EventBus = bus
 
@@ -8131,7 +8639,7 @@ func TestTryResolveForkExceedsKDeclinesReconcilingDivergedLedgerTip(
 		},
 		notFitErr,
 		nil,
-		false,
+		0,
 	)
 	require.NoError(t, err)
 	// The not-fit error was handled (a resync was requested), even though
@@ -8208,7 +8716,7 @@ func TestTryResolveForkPropagatesAncestorLookupError(t *testing.T) {
 		},
 		notFitErr,
 		nil,
-		false,
+		0,
 	)
 
 	require.False(t, resolved)
@@ -8265,7 +8773,7 @@ func TestTryResolveForkDoesNotAdvanceLaggingLedgerTip(t *testing.T) {
 	t.Parallel()
 
 	fixture := newChainsyncRollbackFixture(t)
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(func() { bus.Stop() })
 	fixture.ls.config.EventBus = bus
 
@@ -8349,7 +8857,7 @@ func TestTryResolveForkDoesNotAdvanceLaggingLedgerTip(t *testing.T) {
 		},
 		notFitErr,
 		nil,
-		false,
+		0,
 	)
 	require.NoError(t, err)
 	require.True(t, resolved)
@@ -8429,7 +8937,7 @@ func TestTryResolveForkQueuesKnownPeerForkSegment(t *testing.T) {
 		},
 		notFitErr,
 		nil,
-		false,
+		0,
 	)
 	require.NoError(t, err)
 	require.True(t, resolved)
@@ -8518,7 +9026,7 @@ func TestTryResolveForkUsesObservedPeerHistoryFallback(t *testing.T) {
 		},
 		notFitErr,
 		nil,
-		false,
+		0,
 	)
 	require.NoError(t, err)
 	require.True(t, resolved)
@@ -8540,7 +9048,7 @@ func TestHandleEventChainsyncBlockHeaderMissingAncestorRequestsResync(
 	t.Parallel()
 
 	fixture := newChainsyncRollbackFixture(t)
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(func() { bus.Stop() })
 	fixture.ls.config.EventBus = bus
 
@@ -8627,7 +9135,7 @@ func TestRollbackPublishesChainsyncResyncAtRollbackPoint(t *testing.T) {
 	t.Parallel()
 
 	fixture := newChainsyncRollbackFixture(t)
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(func() { bus.Stop() })
 	fixture.ls.config.EventBus = bus
 
@@ -9252,7 +9760,7 @@ func TestHandleEventChainsyncBlockHeaderIgnoresStaleRollForwardBehindTip(
 	t.Parallel()
 
 	fixture := newChainsyncRollbackFixture(t)
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(func() { bus.Stop() })
 	fixture.ls.config.EventBus = bus
 
@@ -9491,7 +9999,7 @@ func TestReconcileLivePrimaryChainLedgerDivergenceRequestsMithrilResync(
 	)
 	fixture.ls.mithrilLedgerSlot = fixture.ancestorTip.Point.Slot + 1
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(func() { bus.Stop() })
 	fixture.ls.config.EventBus = bus
 	resyncCh := subscribeChainsyncResync(t, bus)
@@ -9636,7 +10144,7 @@ func TestProcessChainIteratorRollbackAppliesMatchingRollback(t *testing.T) {
 	)
 	require.NoError(t, err)
 	removedBlock.Cbor = []byte{0xff}
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Stop)
 	fixture.ls.config.EventBus = bus
 	errSubID, errCh := bus.Subscribe(LedgerErrorEventType)
@@ -10000,6 +10508,20 @@ func TestHeaderAlreadyOnPrimaryChainAcceptsSlotZeroBlock(t *testing.T) {
 	localTip := ls.chain.Tip()
 	require.Equal(t, uint64(0), localTip.Point.Slot)
 	require.Equal(t, genesisHash, localTip.Point.Hash)
+	ls.currentTip = localTip
+	ls.publishSnapshotsLocked()
+	intersect, err := ls.GetIntersectPoint(
+		t.Context(),
+		[]ocommon.Point{ocommon.NewPoint(0, genesisHash)},
+	)
+	require.NoError(t, err)
+	require.Equal(t, ocommon.NewPoint(0, genesisHash), *intersect)
+	abandonedIntersect, err := ls.GetIntersectPoint(
+		t.Context(),
+		[]ocommon.Point{ocommon.NewPoint(0, abandonedHash)},
+	)
+	require.NoError(t, err)
+	require.Nil(t, abandonedIntersect)
 
 	assert.True(t, ls.headerAlreadyOnPrimaryChain(
 		ChainsyncEvent{Point: ocommon.NewPoint(0, genesisHash)},
@@ -10285,7 +10807,7 @@ func TestHandleEventChainsyncRollbackClassifiesStalePeerBelowMithrilBoundary(
 	t.Parallel()
 
 	fixture := newChainsyncRollbackFixture(t)
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(func() { bus.Stop() })
 	fixture.ls.config.EventBus = bus
 	fixture.ls.mithrilLedgerSlot = fixture.currentTip.Point.Slot
@@ -10346,7 +10868,7 @@ func TestHandleEventChainsyncRollbackRejectsDivergentPeerTipAboveMithrilBoundary
 	t.Parallel()
 
 	fixture := newChainsyncRollbackFixture(t)
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(func() { bus.Stop() })
 	fixture.ls.config.EventBus = bus
 	fixture.ls.mithrilLedgerSlot = fixture.currentTip.Point.Slot
@@ -11715,7 +12237,7 @@ func TestHandleChainSwitchEventRequestsFreshCursorWhenPeerAheadWithoutHeaders(
 ) {
 	t.Parallel()
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(func() { bus.Stop() })
 	_, resyncCh := bus.Subscribe(event.ChainsyncResyncEventType)
 	connId1 := ouroboros.ConnectionId{
@@ -11771,7 +12293,7 @@ func TestHandleChainSwitchEventDoesNotRepeatFreshCursorBeforeHeaders(
 ) {
 	t.Parallel()
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(func() { bus.Stop() })
 	_, resyncCh := bus.Subscribe(event.ChainsyncResyncEventType)
 	previousConnId := testChainsyncConnId(6000, 3001)
@@ -11963,7 +12485,7 @@ func TestHandleChainSwitchEventCyclingPeersRequestsOneFreshCursorEach(
 ) {
 	t.Parallel()
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(func() { bus.Stop() })
 	_, resyncCh := bus.Subscribe(event.ChainsyncResyncEventType)
 	logs := &syncSafeBuffer{}
@@ -12119,7 +12641,7 @@ func TestHandleChainSwitchEventCoalescedFreshCursorIsNotRecorded(
 ) {
 	t.Parallel()
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(func() { bus.Stop() })
 	_, resyncCh := bus.Subscribe(event.ChainsyncResyncEventType)
 	previousConnId := testChainsyncConnId(6000, 3001)
@@ -12289,7 +12811,7 @@ func newChainSwitchFallbackFixture(
 	t *testing.T,
 ) chainSwitchFallbackFixture {
 	t.Helper()
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(func() { bus.Stop() })
 	_, resyncCh := bus.Subscribe(event.ChainsyncResyncEventType)
 
@@ -12452,7 +12974,7 @@ func TestHandleChainSwitchEventDoesNotResyncInitialPeerSelection(
 ) {
 	t.Parallel()
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(func() { bus.Stop() })
 	_, resyncCh := bus.Subscribe(event.ChainsyncResyncEventType)
 	connId := ouroboros.ConnectionId{
@@ -13808,6 +14330,13 @@ func TestHandleBlockfetchTimeoutLocked_RetriesQueuedRangeUsingActivePeer(
 		},
 		config: LedgerStateConfig{
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			SelectBlockfetchRetryPeerFunc: func(
+				[]ouroboros.ConnectionId,
+				ocommon.Point,
+				time.Duration,
+			) (ouroboros.ConnectionId, bool, bool) {
+				return connId2, true, true
+			},
 			GetActiveConnectionFunc: func() *ouroboros.ConnectionId {
 				return &connId2
 			},
@@ -13901,6 +14430,13 @@ func TestHandleBlockfetchTimeoutLocked_RetryRetargetsSelection(
 		selectedBlockfetchConnId: connId1,
 		config: LedgerStateConfig{
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			SelectBlockfetchRetryPeerFunc: func(
+				[]ouroboros.ConnectionId,
+				ocommon.Point,
+				time.Duration,
+			) (ouroboros.ConnectionId, bool, bool) {
+				return connId2, true, true
+			},
 			GetActiveConnectionFunc: func() *ouroboros.ConnectionId {
 				return &connId2
 			},
@@ -13983,9 +14519,29 @@ func TestHandleBlockfetchTimeoutLocked_RetryFailureUsesAlternateSelectedPeer(
 	ls := &LedgerState{
 		chain:                    testChain,
 		activeBlockfetchConnId:   connId1,
-		selectedBlockfetchConnId: connId3,
+		selectedBlockfetchConnId: connId1,
 		config: LedgerStateConfig{
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			SelectBlockfetchRetryPeerFunc: func(
+				excluded []ouroboros.ConnectionId,
+				_ ocommon.Point,
+				_ time.Duration,
+			) (ouroboros.ConnectionId, bool, bool) {
+				switch len(excluded) {
+				case 1:
+					assert.Equal(t, []ouroboros.ConnectionId{connId1}, excluded)
+					return connId2, true, true
+				case 2:
+					assert.Equal(
+						t,
+						[]ouroboros.ConnectionId{connId1, connId2},
+						excluded,
+					)
+					return connId3, true, true
+				default:
+					return ouroboros.ConnectionId{}, false, true
+				}
+			},
 			GetActiveConnectionFunc: func() *ouroboros.ConnectionId {
 				return &connId2
 			},
@@ -14015,6 +14571,59 @@ func TestHandleBlockfetchTimeoutLocked_RetryFailureUsesAlternateSelectedPeer(
 	assert.Equal(t, connId3, ls.activeBlockfetchConnId)
 	require.NotNil(t, ls.chainsyncBlockfetchReadyChan)
 	assert.Equal(t, 1, testChain.HeaderCount())
+	ls.chainsyncBlockfetchMutex.Lock()
+	ls.blockfetchRequestRangeCleanup()
+	ls.chainsyncBlockfetchMutex.Unlock()
+}
+
+func TestHandleBlockfetchTimeoutLocked_RetryFailureWithoutHolderResyncs(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	ls, _ := newForkExtensionRestartFixture(t)
+	stalled := testChainsyncConnId(6000, 3001)
+	retry := testChainsyncConnId(6000, 3002)
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Stop)
+	_, resyncCh := bus.Subscribe(event.ChainsyncResyncEventType)
+	ls.activeBlockfetchConnId = stalled
+	ls.config.EventBus = bus
+	ls.config.SelectBlockfetchRetryPeerFunc = func(
+		excluded []ouroboros.ConnectionId,
+		_ ocommon.Point,
+		_ time.Duration,
+	) (ouroboros.ConnectionId, bool, bool) {
+		if len(excluded) == 1 {
+			return retry, true, true
+		}
+		return ouroboros.ConnectionId{}, false, true
+	}
+	ls.config.BlockfetchRequestRangeFunc = func(
+		ouroboros.ConnectionId,
+		ocommon.Point,
+		ocommon.Point,
+	) (uint64, error) {
+		return 0, errors.New("retry failed")
+	}
+
+	var pending pendingPublishes
+	handleBlockfetchTimeoutForTest(ls, stalled, &pending)
+	pending.flush()
+	evt := testutil.RequireReceive(
+		t,
+		resyncCh,
+		testutil.AsyncWait,
+		"resync after the last retry holder fails",
+	)
+	resync, ok := evt.Data.(event.ChainsyncResyncEvent)
+	require.True(t, ok)
+	assert.Equal(t, retry, resync.ConnectionId)
+	assert.Equal(
+		t,
+		event.ChainsyncResyncReasonBlockfetchTimeoutRetryFailed,
+		resync.Reason,
+	)
 }
 
 // TestChainSwitchNewObservedTipKeysOnPresenceNotZeroValue covers the
@@ -15031,7 +15640,7 @@ type mockForgedBlockChecker struct {
 func TestCheckSlotBattle_DetectsConflict(t *testing.T) {
 	t.Parallel()
 
-	eventBus := event.NewEventBus(nil, nil)
+	eventBus := newTestEventBus(t, nil)
 	defer eventBus.Stop()
 
 	localHash := []byte{0x01, 0x02, 0x03, 0x04}
@@ -15084,7 +15693,7 @@ func TestCheckSlotBattle_DetectsConflict(t *testing.T) {
 func TestCheckSlotBattle_RemoteWinsWhenAccepted(t *testing.T) {
 	t.Parallel()
 
-	eventBus := event.NewEventBus(nil, nil)
+	eventBus := newTestEventBus(t, nil)
 	defer eventBus.Stop()
 
 	localHash := []byte{0x01, 0x02, 0x03, 0x04}
@@ -15132,7 +15741,7 @@ func TestCheckSlotBattle_RemoteWinsWhenAccepted(t *testing.T) {
 func TestCheckSlotBattle_NoConflictDifferentSlot(t *testing.T) {
 	t.Parallel()
 
-	eventBus := event.NewEventBus(nil, nil)
+	eventBus := newTestEventBus(t, nil)
 	defer eventBus.Stop()
 
 	checker := &mockForgedBlockChecker{
@@ -15172,7 +15781,7 @@ func TestCheckSlotBattle_NoConflictDifferentSlot(t *testing.T) {
 func TestCheckSlotBattle_SameHashIsNotBattle(t *testing.T) {
 	t.Parallel()
 
-	eventBus := event.NewEventBus(nil, nil)
+	eventBus := newTestEventBus(t, nil)
 	defer eventBus.Stop()
 
 	blockHash := []byte{0x01, 0x02, 0x03, 0x04}
@@ -15213,7 +15822,7 @@ func TestCheckSlotBattle_SameHashIsNotBattle(t *testing.T) {
 func TestCheckSlotBattle_NilCheckerSkips(t *testing.T) {
 	t.Parallel()
 
-	eventBus := event.NewEventBus(nil, nil)
+	eventBus := newTestEventBus(t, nil)
 	defer eventBus.Stop()
 
 	ls := &LedgerState{
@@ -15279,7 +15888,7 @@ func TestCheckSlotBattle_NilEventBus(t *testing.T) {
 func TestCheckSlotBattle_UnderWriteLock(t *testing.T) {
 	t.Parallel()
 
-	eventBus := event.NewEventBus(nil, nil)
+	eventBus := newTestEventBus(t, nil)
 	defer eventBus.Stop()
 
 	localHash := []byte{0x01, 0x02, 0x03, 0x04}
@@ -17313,23 +17922,16 @@ func constitutionRowCount(t *testing.T, db *database.Database) int {
 	return count
 }
 
-// TestCreateGenesisBlockSkipsGenesisStakingAfterMithrilBootstrap is the
-// same-bug-class regression test the PR review recommended: it
-// found that SetGenesisStaking (and SetGenesisGovernance, covered by
-// TestCreateGenesisBlockSkipsGenesisGovernanceAfterMithrilBootstrap below)
-// weren't gated by the same bootstrappedFromMithril guard as genesis UTxO
-// insertion. Both upsert current-state rows (ON CONFLICT ... DO UPDATE),
-// and a Mithril-bootstrapped node's imported ledger snapshot
-// (ledgerstate/import.go's importCertState) already reflects the correct
-// current pool/delegation state as of the bootstrap point -- reapplying
-// stale genesis-config values would silently resurrect a pool genuinely
-// retired (or a delegation genuinely changed) before the bootstrap point.
+// TestCreateGenesisBlockSkipsGenesisStakingAtSlotZeroBlock verifies that a
+// real slot-zero block is treated as existing chain state. Reapplying the
+// genesis staking configuration would overwrite pool parameters and stake
+// delegations that the block changed.
 //
 // Uses the embedded devnet config, the only bundled network that declares
 // a nonzero genesis pool + stake delegation (mainnet/preview/preprod/
 // musashi all declare zero, so the bug was unreachable there, but live on
 // devnet).
-func TestCreateGenesisBlockSkipsGenesisStakingAfterMithrilBootstrap(
+func TestCreateGenesisBlockSkipsGenesisStakingAtSlotZeroBlock(
 	t *testing.T,
 ) {
 	t.Parallel()
@@ -17372,10 +17974,13 @@ func TestCreateGenesisBlockSkipsGenesisStakingAfterMithrilBootstrap(
 			),
 		},
 	}
-	// Same bootstrap shape as
-	// TestCreateGenesisBlockSkipsUtxoInsertionAfterMithrilBootstrap: a
-	// currentTip past slot 0 with no genesis CBOR yet stored.
-	ls.currentTip.Point.Slot = 42
+	// A real slot-zero block has a hash and is distinct from origin. Restarting
+	// there must preserve state written by the block instead of applying the
+	// genesis staking configuration again.
+	ls.currentTip.Point = ocommon.NewPoint(
+		0,
+		testHashBytes("existing-slot-zero-block"),
+	)
 	require.NoError(t, ls.createGenesisBlock(context.Background()))
 
 	_, err = db.GetPool(context.Background(), lcommon.PoolKeyHash(poolKeyHash), true, nil)
@@ -17810,8 +18415,10 @@ func TestCreateGenesisBlockSkipsUtxoInsertionAfterMithrilBootstrap(
 	ls.currentTip.Point.Slot = 42
 	require.NoError(t, ls.createGenesisBlock(context.Background()))
 
+	hasGenesis, genesisErr := db.HasGenesisCbor(0, genesisHash[:])
+	require.NoError(t, genesisErr)
 	require.True(
-		t, db.HasGenesisCbor(0, genesisHash[:]),
+		t, hasGenesis,
 		"the synthetic genesis block CBOR must still be created "+
 			"structurally, even though its UTxOs are not inserted as live",
 	)
@@ -18041,7 +18648,7 @@ type headerStreamFixture struct {
 
 func newHeaderStreamLedger(t *testing.T) *headerStreamFixture {
 	t.Helper()
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Stop)
 	cm, err := chain.NewManager(context.Background(), nil, bus)
 	require.NoError(t, err)
@@ -18166,28 +18773,23 @@ func TestChainsyncHeaderAdmissionAnnouncesOnlyWhenCryptoVerified(
 	})
 }
 
-// TestForkResolutionAnnouncesOnlyTheVerifiedIncomingHeader covers the second
-// way an announcing header reaches the header queue. A header that does not
-// fit the current tip is queued by tryResolveFork rather than by the direct
-// admission path, and that branch returns before the caller's ordinary
-// bookkeeping runs. Emitting from the chain's own header-queue mutation is
-// what keeps this path covered.
+// TestForkResolutionInvalidatesTheIncomingHeaderVerdict covers the second way
+// an announcing header reaches the header queue. A header that does not fit
+// the current tip is queued by tryResolveFork after the rollback publishes a
+// new ledger generation, so its pre-rollback verdict must not arm a vote.
 //
 // tryResolveFork re-queues a whole fork path: the header this event delivered,
 // plus earlier headers replayed from recorded peer history. Only the delivered
-// one carries a crypto verdict, so only it may be admitted verified, and only
-// a verified admission announces (see addForkPathHeader). Both halves are
-// asserted here at that composition site.
-func TestForkResolutionAnnouncesOnlyTheVerifiedIncomingHeader(t *testing.T) {
+// one carries a pre-rollback crypto verdict, which is stale by the time the
+// path is queued. Both a stale and an absent verdict are asserted here.
+func TestForkResolutionInvalidatesTheIncomingHeaderVerdict(t *testing.T) {
 	for _, tc := range []struct {
 		name           string
 		cryptoVerified bool
-		wantAnnounce   bool
 	}{
 		{
-			name:           "verified incoming header announces",
+			name:           "pre-rollback verdict does not announce",
 			cryptoVerified: true,
-			wantAnnounce:   true,
 		},
 		{
 			name:           "unverified incoming header does not announce",
@@ -18195,7 +18797,7 @@ func TestForkResolutionAnnouncesOnlyTheVerifiedIncomingHeader(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			bus := event.NewEventBus(nil, nil)
+			bus := newTestEventBus(t, nil)
 			t.Cleanup(bus.Stop)
 			fixture := newChainsyncRollbackFixtureWithBus(t, bus)
 			subId, ch := bus.Subscribe(chain.ChainHeaderEventType)
@@ -18204,13 +18806,12 @@ func TestForkResolutionAnnouncesOnlyTheVerifiedIncomingHeader(t *testing.T) {
 			// needed.
 			fixture.ls.chainsyncBlockfetchReadyChan = make(chan struct{})
 
-			ebHash := lcommon.NewBlake2b256([]byte("fork-announced-eb"))
 			header := announcingHeader(
 				fixture.currentTip.Point.Slot+10,
 				"fork-announcing-header",
 				lcommon.NewBlake2b256(fixture.ancestorTip.Point.Hash),
 				fixture.ancestorTip.BlockNumber+1,
-				ebHash,
+				lcommon.NewBlake2b256([]byte("fork-announced-eb")),
 			)
 			// The header does not fit the current tip; that failure is the
 			// condition tryResolveFork exists to handle.
@@ -18221,6 +18822,10 @@ func TestForkResolutionAnnouncesOnlyTheVerifiedIncomingHeader(t *testing.T) {
 				&notFitErr,
 			)
 			advertisedSlot := ^uint64(0)
+			verificationGeneration := uint64(0)
+			if tc.cryptoVerified {
+				verificationGeneration = fixture.ls.loadConsensusSnapshot().generation
+			}
 
 			resolved, err := fixture.ls.tryResolveFork(
 				ChainsyncEvent{
@@ -18240,7 +18845,7 @@ func TestForkResolutionAnnouncesOnlyTheVerifiedIncomingHeader(t *testing.T) {
 				},
 				notFitErr,
 				nil,
-				tc.cryptoVerified,
+				verificationGeneration,
 			)
 			require.NoError(t, err)
 			require.True(t, resolved)
@@ -18259,34 +18864,11 @@ func TestForkResolutionAnnouncesOnlyTheVerifiedIncomingHeader(t *testing.T) {
 			require.True(t, ok, "got %T", invalidation.Data)
 			assert.Equal(t, chain.HeaderInvalidationRollback, invalid.Reason)
 
-			if !tc.wantAnnounce {
-				testutil.RequireNoReceive(
-					t,
-					ch,
-					500*time.Millisecond,
-					"an unverified fork header must not arm a vote",
-				)
-				return
-			}
-
-			announcement := testutil.RequireReceive(
-				t, ch, testutil.AsyncWait, "announcement from fork resolution",
-			)
-			announced, ok := announcement.Data.(chain.ChainHeaderAnnouncementEvent)
-			require.True(t, ok, "got %T", announcement.Data)
-			assert.Equal(t, header.hash, announced.RbHash)
-			assert.Equal(t, ebHash, announced.EbHash)
-			assert.Greater(
-				t,
-				announced.Seq,
-				invalid.Seq,
-				"the fork header is admitted after the rollback that made room for it",
-			)
 			testutil.RequireNoReceive(
 				t,
 				ch,
-				300*time.Millisecond,
-				"the incoming fork header must be announced exactly once",
+				500*time.Millisecond,
+				"an unverified fork header must not arm a vote",
 			)
 		})
 	}
@@ -18631,7 +19213,7 @@ func TestRollbackIsAppliableRejectsBelowConsumedUtxoPruneFloor(t *testing.T) {
 // chain and ask for a fresh intersection, exactly as the Mithril boundary does.
 func TestHandleEventChainsyncRollbackRejectsBelowPruneFloor(t *testing.T) {
 	fixture := newChainsyncRollbackFixture(t)
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(func() { bus.Stop() })
 	fixture.ls.config.EventBus = bus
 
@@ -18904,7 +19486,7 @@ func TestHandleEventChainsyncBlockHeaderCoalescesResyncPerConnection(
 	t.Parallel()
 
 	fixture := newChainsyncRollbackFixture(t)
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(func() { bus.Stop() })
 	fixture.ls.config.EventBus = bus
 
@@ -18967,7 +19549,7 @@ func TestRequestChainsyncResyncCoalescesPerConnectionWithinWindow(
 	t.Parallel()
 
 	fixture := newChainsyncRollbackFixture(t)
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(func() { bus.Stop() })
 	fixture.ls.config.EventBus = bus
 	var published atomic.Int32

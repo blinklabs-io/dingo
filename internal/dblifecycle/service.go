@@ -114,6 +114,12 @@ func (s *Service) SetLiveNode(n LiveNode) {
 func (s *Service) openDatabase(
 	ctx context.Context,
 ) (*internalplugins.DatabaseRuntime, error) {
+	genesisStakingEmpty, err := internalplugins.ResolveGenesisStakingEmpty(
+		nil, s.cfg.CardanoConfig, s.cfg.Network, s.cfg.NetworkMagic,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("loading cardano node config: %w", err)
+	}
 	runtime, err := internalplugins.OpenDatabase(
 		ctx,
 		&database.Config{
@@ -134,11 +140,12 @@ func (s *Service) openDatabase(
 			Metadata: s.cfg.Plugins.Storage.Metadata,
 		},
 		internalplugins.StorageDependencies{
-			DataDir:        s.cfg.DatabasePath,
-			StorageMode:    s.cfg.StorageMode,
-			MaxConnections: s.cfg.DatabaseWorkers,
-			Logger:         s.logger,
-			TracingEnabled: s.cfg.Tracing,
+			GenesisStakingEmpty: genesisStakingEmpty,
+			DataDir:             s.cfg.DatabasePath,
+			StorageMode:         s.cfg.StorageMode,
+			MaxConnections:      s.cfg.DatabaseWorkers,
+			Logger:              s.logger,
+			TracingEnabled:      s.cfg.Tracing,
 		},
 	)
 	if err != nil {
@@ -182,7 +189,12 @@ func (s *Service) Snapshot(
 	if err != nil {
 		return lifecycle.Manifest{}, err
 	}
-	manifestOpts = append(manifestOpts, lifecycle.WithMaxCommitPause(s.cfg.DatabaseLifecycle.SnapshotMaxCommitPause))
+	manifestOpts = append(
+		manifestOpts,
+		lifecycle.WithMaxCommitPause(
+			s.cfg.DatabaseLifecycle.SnapshotMaxCommitPause,
+		),
+	)
 	return lifecycle.SnapshotToCloud(
 		ctx,
 		s.destinationRegistry,
@@ -192,7 +204,10 @@ func (s *Service) Snapshot(
 		version.GetVersionString(),
 		s.cfg.Plugins.Storage.Blob.Provider,
 		s.cfg.Plugins.Storage.Metadata.Provider,
-		s.cfg.DatabaseLifecycle.SnapshotCloudDestination,
+		lifecycle.EffectiveCloudDestination(
+			s.cfg.DatabaseLifecycle.SnapshotCloudDestination,
+			s.cfg.DatabaseLifecycle.SnapshotCloudDestinationPrefix,
+		),
 		name,
 		description,
 		manifestOpts...,

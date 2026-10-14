@@ -676,13 +676,12 @@ func (s *Store) setTransactionBatched(
 	)
 }
 
-// SetTransactionLeiosClosure records a transaction on the Leios endorser-block
-// closure path (the Musashi/Haskell-conformant ValidateNone apply). It behaves
+// SetTransactionLeiosClosure records a validated transaction on the Leios
+// endorser-block closure path. It behaves
 // like SetTransaction except that a consumed input already spent by a
 // *different* transaction is treated as a no-op instead of ErrUtxoConflict,
 // matching the reference ledger's applyLeiosClosure: two certified endorser
-// blocks may legitimately name the same input across blocks, and the canonical
-// chain folds the closure without re-validation rather than rejecting it. Do
+// blocks may legitimately name the same input across blocks. Do
 // not use this for ranking-block application, where a real double-spend must
 // still fail.
 func (s *Store) SetTransactionLeiosClosure(
@@ -718,9 +717,9 @@ func (s *Store) setTransaction(
 	historicalBackfill bool,
 	// tolerateConsumedInputConflict makes a consumed input that is already
 	// spent by a *different* transaction a no-op instead of ErrUtxoConflict.
-	// Set only on the Leios endorser-block closure path (ValidateNone), where
+	// Set only on the validated Leios endorser-block closure path, where
 	// the reference ledger's applyLeiosClosure folds the certified closure onto
-	// the UTxO set without re-validation: re-consuming an input an earlier
+	// the UTxO set: re-consuming an input an earlier
 	// certified endorser-block transaction already spent is Map.delete on a
 	// missing key (a no-op), not a fault. Two certified endorser blocks can name
 	// the same input across blocks (a legitimate cross-EB double-consume the
@@ -1680,6 +1679,9 @@ func (s *Store) persistUtxoRelations(
 	id uint,
 ) error {
 	utxo.ID = id
+	if err := persistUtxoAddress(ctx, db, int64(id), utxo); err != nil {
+		return err
+	}
 	if err := persistUtxoPointer(ctx, db, int64(id), utxo.Pointer); err != nil {
 		return err
 	}
@@ -1720,6 +1722,13 @@ func (s *Store) persistUtxoRelationsWithDeferredAssets(
 	rows *rowBatch,
 ) error {
 	utxo.ID = id
+	address, err := assetUtxoAddress(utxo)
+	if err != nil {
+		return err
+	}
+	if len(address) > 0 {
+		rows.add(assetUtxoAddressShape, int64(id), address)
+	}
 	if err := persistUtxoPointer(ctx, db, int64(id), utxo.Pointer); err != nil {
 		return err
 	}

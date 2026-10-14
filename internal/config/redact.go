@@ -61,6 +61,8 @@ const (
 var logSecretConfigFields = []string{
 	// Koios Bearer token.
 	"KoiosParity.APIKey",
+	// Prometheus listener Bearer token.
+	"MetricsAuthToken",
 	// Outbound registry headers, typically Authorization.
 	"TokenRegistry.HeaderSecrets",
 }
@@ -79,7 +81,9 @@ var logURIConfigFields = []string{
 	"Mithril.Server.PublicBaseURL",
 	"Mithril.Server.RedirectBaseURL",
 	"OffchainMetadata.IPFSGatewayURL",
+	"TokenRegistry.ManifestURL",
 	"TokenRegistry.SourceURL",
+	"TracingEndpoint",
 }
 
 // logProviderConfigFields are Config field paths holding a plugin
@@ -113,6 +117,7 @@ var logPlainConfigFields = []string{
 	"ActivePeersTopologyQuota",
 	"BackfillBatchSize",
 	"BarkArchiveMaxConcurrentFetches",
+	"BarkBlockDownloadAllowPrivateAddresses",
 	"BarkClientCAFilePath",
 	"BarkHost",
 	"BarkLifecycleEnabled",
@@ -123,6 +128,7 @@ var logPlainConfigFields = []string{
 	"BlockPipelineEnabled",
 	"BlockPipelineValidateEnabled",
 	"BlockProducer",
+	"BlockfetchLowWatermarkEnabled",
 	"CORSAllowedOrigins",
 	"Cache.BlockLRUEntries",
 	"Cache.HotTxEntries",
@@ -261,6 +267,7 @@ var logPlainConfigFields = []string{
 	"Plugins.Mempool.Provider",
 	"Plugins.Storage.Blob.Provider",
 	"Plugins.Storage.Metadata.Provider",
+	"PlannerStatsRefreshEnabled",
 	"PrivateBindAddr",
 	"PrivatePort",
 	"ReconcileInterval",
@@ -290,6 +297,7 @@ var logPlainConfigFields = []string{
 	"TlsCertFilePath",
 	"TlsKeyFilePath",
 	"TokenRegistry.AllowPrivateAddresses",
+	"TokenRegistry.AllowRollback",
 	"TokenRegistry.Enabled",
 	"TokenRegistry.Interval",
 	"TokenRegistry.MaxAcceptedEntries",
@@ -300,9 +308,12 @@ var logPlainConfigFields = []string{
 	"TokenRegistry.MaxEntryBytes",
 	"TokenRegistry.RequestTimeout",
 	"TokenRegistry.StoreLogos",
+	"TokenRegistry.TrustedManifestKey",
 	"TokenRegistry.UserAgent",
 	"Topology",
 	"Tracing",
+	"TracingServiceName",
+	"TracingSampleRatio",
 	"TracingStdout",
 	"UnsafeFullPotRewardsOnStandardNetworks",
 	"ValidateForgedBlock",

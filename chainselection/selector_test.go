@@ -5572,6 +5572,78 @@ func TestLoneFarFrontierAcceptsConnectedChain(t *testing.T) {
 	}
 }
 
+func TestFarTipDispositionRejectsJumpAfterPendingClaim(t *testing.T) {
+	t.Parallel()
+
+	c := loneFarChain{localBlock: 1_000, k: 2}
+	cs := NewChainSelector(ChainSelectorConfig{SecurityParam: c.k})
+	cs.SetLocalTip(c.tip(c.localBlock))
+	lagging := newTestConnectionId(1)
+	require.True(t, cs.UpdatePeerTip(
+		lagging,
+		c.tip(c.localBlock-500),
+		nil,
+	))
+	conn := newTestConnectionId(2)
+	first := c.first()
+	pending := c.tip(first)
+	require.Equal(t, PeerTipUpdatePending, cs.ObservePeerTipUpdate(
+		PeerTipUpdateEvent{
+			ConnectionId:     conn,
+			Tip:              c.tip(100_000),
+			ObservedTip:      pending,
+			ObservedPrevHash: c.prevHash(first),
+		},
+	))
+
+	// Move the trusted reference just beyond the local tip. The next unrelated
+	// jump is rejected before far-claim accumulation, so the older pending
+	// entry must not classify this different observation as pending.
+	require.True(t, cs.UpdatePeerTip(
+		lagging,
+		c.tip(c.localBlock+1),
+		nil,
+	))
+	jump := c.tip(first + 1_000)
+	assert.Equal(t, PeerTipUpdateRejected, cs.ObservePeerTipUpdate(
+		PeerTipUpdateEvent{
+			ConnectionId:     conn,
+			Tip:              c.tip(100_000),
+			ObservedTip:      jump,
+			ObservedPrevHash: []byte("unrelated"),
+		},
+	))
+}
+
+func TestFarTipDispositionRejectsCorroboratedImpossibleHeight(t *testing.T) {
+	t.Parallel()
+
+	c := loneFarChain{localBlock: 1_000, k: 2}
+	cs := c.newSelector(t)
+	impossible := ochainsync.Tip{
+		Point: ocommon.Point{
+			Slot: c.tip(c.localBlock).Point.Slot + 1,
+			Hash: []byte("impossible-height"),
+		},
+		BlockNumber: c.localBlock + 100,
+	}
+	for _, conn := range []ouroboros.ConnectionId{
+		newTestConnectionId(2),
+		newTestConnectionId(3),
+	} {
+		require.Equal(t, PeerTipUpdateRejected, cs.ObservePeerTipUpdate(
+			PeerTipUpdateEvent{
+				ConnectionId:     conn,
+				Tip:              c.tip(100_000),
+				ObservedTip:      impossible,
+				ObservedPrevHash: []byte("parent"),
+			},
+		))
+		assert.Nil(t, cs.GetPeerTip(conn))
+		assert.NotContains(t, cs.farTipClaims, conn)
+	}
+}
+
 // A frontier admitted from one peer's connected run is not independent
 // evidence for an unrelated peer. Losing that first peer must not leave the
 // unrelated peer with an ordinary frontier it can advance by K at a time.
@@ -6325,4 +6397,86 @@ func TestChainSelectorStaleBestPeerReportsRollbackPoint(t *testing.T) {
 	require.NotNil(t, switchEvt.RollbackPoint, "rollback point missing")
 	assert.Equal(t, uint64(2), switchEvt.RollbackPoint.Slot)
 	assert.Equal(t, []byte("c2"), switchEvt.RollbackPoint.Hash)
+}
+
+func TestUpdatePeerTipReportsObservedFrontierRejection(t *testing.T) {
+	t.Parallel()
+	var reasons []PeerTipRejection
+	cs := NewChainSelector(ChainSelectorConfig{
+		SecurityParam:             2160,
+		DisableEventSubscriptions: true,
+		OnPeerTipRejected: func(r PeerTipRejection) {
+			reasons = append(reasons, r)
+		},
+	})
+	cs.SetLocalTip(ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 100000, Hash: []byte("local")},
+		BlockNumber: 50000,
+	})
+	require.True(t, cs.UpdatePeerTip(
+		newTestConnectionId(2),
+		ochainsync.Tip{
+			Point:       ocommon.Point{Slot: 100500, Hash: []byte("ok")},
+			BlockNumber: 50500,
+		},
+		nil,
+	))
+	assert.Empty(t, reasons, "an accepted tip must not be reported")
+
+	accepted := cs.UpdatePeerTip(
+		newTestConnectionId(1),
+		ochainsync.Tip{
+			Point: ocommon.Point{
+				Slot: math.MaxUint64,
+				Hash: []byte("spoof"),
+			},
+			BlockNumber: math.MaxUint64,
+		},
+		nil,
+	)
+
+	require.False(t, accepted)
+	assert.Equal(
+		t,
+		[]PeerTipRejection{PeerTipRejectedObservedFrontier},
+		reasons,
+	)
+}
+
+func TestHandlePeerRollbackReportsAdvertisedTipRejection(t *testing.T) {
+	t.Parallel()
+	var reasons []PeerTipRejection
+	cs := NewChainSelector(ChainSelectorConfig{
+		SecurityParam:             10,
+		DisableEventSubscriptions: true,
+		OnPeerTipRejected: func(r PeerTipRejection) {
+			reasons = append(reasons, r)
+		},
+	})
+	require.True(t, cs.UpdatePeerTip(
+		newTestConnectionId(1),
+		ochainsync.Tip{
+			Point:       ocommon.Point{Slot: 100, Hash: []byte("bootstrap")},
+			BlockNumber: 100,
+		},
+		nil,
+	))
+
+	cs.HandlePeerRollbackEvent(newRollbackEvent(
+		newTestConnectionId(2),
+		ocommon.Point{Slot: 100, Hash: []byte("bootstrap")},
+		ochainsync.Tip{
+			Point: ocommon.Point{
+				Slot: 9_000_000,
+				Hash: []byte("inflated"),
+			},
+			BlockNumber: 9_000_000,
+		},
+	))
+
+	assert.Equal(
+		t,
+		[]PeerTipRejection{PeerTipRejectedAdvertisedTip},
+		reasons,
+	)
 }

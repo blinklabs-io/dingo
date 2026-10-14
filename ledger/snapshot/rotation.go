@@ -36,6 +36,18 @@ var errRewardInputEpochUnavailable = errors.New(
 	"reward input epoch metadata unavailable",
 )
 
+func poolRegistrationSnapshotWindow(
+	evt event.EpochTransitionEvent,
+	previousEpochStartSlot uint64,
+) (uint64, uint64) {
+	if evt.ProtocolVersion >= lcommon.ProtocolVersionDijkstra {
+		// Dijkstra promotes pool parameters before SNAP, so the new epoch's
+		// boundary window represents the registration state being captured.
+		return evt.BoundarySlot, evt.NewEpoch
+	}
+	return previousEpochStartSlot, evt.PreviousEpoch
+}
+
 // errFallbackSupersededByAuthoritative is returned internally by
 // saveSnapshotInTxn (never to an outside caller — saveSnapshot translates it
 // into saved=false, nil) when a fallback, non-authoritative write's
@@ -404,10 +416,14 @@ func (m *Manager) snapshotLeiosKeys(
 	for poolKey := range distribution.PoolStakes {
 		poolKeys = append(poolKeys, poolKey)
 	}
+	registrationStartSlot, registrationEpoch := poolRegistrationSnapshotWindow(
+		evt,
+		endedEpoch.StartSlot,
+	)
 	registrations, err := meta.GetPoolRegistrationsEffectiveForEpoch(
 		poolKeys,
-		endedEpoch.StartSlot,
-		evt.PreviousEpoch,
+		registrationStartSlot,
+		registrationEpoch,
 		distribution.Slot,
 		metaTxn,
 	)
@@ -877,15 +893,14 @@ func (m *Manager) rewardInputs(
 			evt.PreviousEpoch,
 		)
 	}
-	// SNAP snapshots the pool params active DURING the ended epoch:
-	// re-registrations submitted within it are future params promoted only
-	// after SNAP (in POOLREAP), so the latest cert at the snapshot slot
-	// would be one epoch early for any pool that changed its params
-	// mid-epoch.
+	registrationStartSlot, registrationEpoch := poolRegistrationSnapshotWindow(
+		evt,
+		endedEpoch.StartSlot,
+	)
 	registrations, err := meta.GetPoolRegistrationsEffectiveForEpoch(
 		poolKeys,
-		endedEpoch.StartSlot,
-		evt.PreviousEpoch,
+		registrationStartSlot,
+		registrationEpoch,
 		distribution.Slot,
 		metaTxn,
 	)

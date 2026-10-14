@@ -644,6 +644,10 @@ type GovernanceStore interface {
 	// registration, update, or delegation reference). Used by the
 	// Blockfrost DRep list endpoint.
 	GetDreps(types.Txn) ([]models.DrepListRow, error)
+	GetDrepsPage(
+		models.DrepListPageQuery,
+		types.Txn,
+	) ([]models.DrepListRow, int, error)
 
 	// GetPredefinedDrepFirstSeenSlots returns the earliest delegation
 	// added_slot per predefined DRep type (AlwaysAbstain,
@@ -910,6 +914,16 @@ type UtxoStore interface {
 		assetName []byte,
 		txn types.Txn,
 	) ([]models.Utxo, error)
+	GetAssetHolders(
+		models.AssetHolderQuery,
+		types.Txn,
+	) ([]models.AssetHolder, int, error)
+	GetLiveAssetUtxosMissingAddress(
+		uint,
+		int,
+		types.Txn,
+	) ([]models.Utxo, error)
+	SetUtxoAddress(uint, []byte, types.Txn) error
 
 	// GetUtxosDeletedBeforeSlot retrieves UTxOs deleted before the given slot, up to the specified limit.
 	GetUtxosDeletedBeforeSlot(
@@ -929,6 +943,12 @@ type UtxoStore interface {
 
 	// SetUtxosNotDeletedAfterSlot marks all UTxOs created after the given slot as not deleted.
 	SetUtxosNotDeletedAfterSlot(uint64, types.Txn) error
+	GetSpentAssetUtxosMissingAddressAfterSlot(
+		uint64,
+		uint,
+		int,
+		types.Txn,
+	) ([]models.Utxo, error)
 
 	// IterateLiveUtxos invokes fn once for each live UTxO row
 	// (DeletedSlot == 0) in unspecified order. fn receives a
@@ -1948,6 +1968,12 @@ type MetadataStore interface {
 		currentEpoch uint64,
 		txn types.Txn,
 	) ([]models.PoolRetiringRow, error)
+	GetRetiringPoolsPage(
+		currentEpoch uint64,
+		limit, offset int,
+		descending bool,
+		txn types.Txn,
+	) ([]models.PoolRetiringRow, int, error)
 
 	// GetPoolRegistrations retrieves all registration certificates for a pool.
 	GetPoolRegistrations(
@@ -2055,12 +2081,14 @@ type MetadataStore interface {
 		types.Txn,
 	) ([]models.PoolRegistration, error)
 
-	// GetPoolRegistrationsEffectiveForEpoch retrieves, per requested pool,
-	// the registration whose parameters the ledger's pool-params map held
-	// during the ended epoch [epochStartSlot, snapshotSlot]. Re-registrations
-	// submitted during that epoch are future params (promoted after SNAP)
-	// and excluded; pools that freshly entered the params map during the
-	// epoch use their earliest in-epoch certificate.
+	// GetPoolRegistrationsEffectiveForEpoch retrieves the registration
+	// selected for each pool by the supplied epoch window. It considers the
+	// latest registration or retirement before epochStartSlot, then uses the
+	// earliest registration in [epochStartSlot, snapshotSlot] for pools without
+	// a pre-epoch registration selected, including pools whose latest prior
+	// event is a retirement. Callers whose SNAP follows POOLREAP
+	// set epochStartSlot to the incoming boundary so registrations from the
+	// just-ended epoch are included in the pre-epoch selection.
 	GetPoolRegistrationsEffectiveForEpoch(
 		[]lcommon.PoolKeyHash,
 		uint64, // epochStartSlot
@@ -2099,6 +2127,15 @@ type MetadataStore interface {
 	// A pool is active if it has a registration and either no retirement or
 	// the retirement epoch is in the future.
 	GetActivePoolKeyHashes(types.Txn) ([][]byte, error)
+
+	// GetActivePoolKeyHashesPage returns one pool-key-ordered page of the
+	// currently active pools and the total active pool count.
+	GetActivePoolKeyHashesPage(
+		int, // limit
+		int, // offset
+		bool, // descending
+		types.Txn,
+	) ([][]byte, int, error)
 
 	// GetActivePoolKeyHashesOrdered retrieves the key hashes of all
 	// currently active pools (same active-pool semantics as
@@ -3169,6 +3206,18 @@ type PlannerStatsUpdater interface {
 // ContextPlannerStatsUpdater refreshes planner statistics with cancellation.
 type ContextPlannerStatsUpdater interface {
 	UpdatePlannerStatsContext(context.Context) error
+}
+
+// IncrementalPlannerStatsUpdater is an optional interface for metadata stores
+// whose planner statistics can be maintained incrementally while the node
+// runs. trigger labels the run for metrics ("startup" or "epoch"). A store
+// that does not implement it, or whose backend has no incremental form,
+// leaves statistics untouched.
+type IncrementalPlannerStatsUpdater interface {
+	OptimizePlannerStatsContext(
+		ctx context.Context,
+		trigger string,
+	) (types.PlannerStatsResult, error)
 }
 
 // PlannerStatsBackfillSyncKey records the completed backfill whose planner

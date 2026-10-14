@@ -789,7 +789,7 @@ func TestVoteManagerVotesFromHeaderArrivalBeforeRankingBlockApplies(
 
 	// The announced endorser block is acquired one slot later.
 	slots.setSlot(headerArmingEbAcquiredAt)
-	fixture.mgr.HandleEndorserBlock(headerArmingRbSlot, ebHash)
+	fixture.mgr.HandleValidatedEndorserBlock(headerArmingRbSlot, rbHash, ebHash)
 
 	emittedEvent := testutil.RequireReceive(
 		t,
@@ -832,6 +832,49 @@ func TestVoteManagerVotesFromHeaderArrivalBeforeRankingBlockApplies(
 	)
 }
 
+func TestVoteManagerVotesOnlyForValidatedAnnouncement(t *testing.T) {
+	slots := &fakeSlotProvider{slot: headerArmingEbAcquiredAt}
+	fixture := newHeaderArmingFixture(t, slots)
+	subId, emittedCh := fixture.eventBus.Subscribe(VoteEmittedEventType)
+	defer fixture.eventBus.Unsubscribe(VoteEmittedEventType, subId)
+
+	ebHash := lcommon.NewBlake2b256([]byte("shared-eb"))
+	validatedRbHash := lcommon.NewBlake2b256([]byte("validated-rb"))
+	otherRbHash := lcommon.NewBlake2b256([]byte("other-rb"))
+
+	fixture.mgr.HandleValidatedEndorserBlock(
+		headerArmingRbSlot,
+		validatedRbHash,
+		ebHash,
+	)
+	fixture.mgr.ObserveAnnouncement(
+		headerArmingRbSlot,
+		otherRbHash,
+		ebHash,
+	)
+	testutil.RequireNoReceive(
+		t,
+		emittedCh,
+		300*time.Millisecond,
+		"vote for an announcement that was not semantically validated",
+	)
+
+	fixture.mgr.ObserveAnnouncement(
+		headerArmingRbSlot,
+		validatedRbHash,
+		ebHash,
+	)
+	emitted := testutil.RequireReceive(
+		t,
+		emittedCh,
+		testutil.AsyncWait,
+		"vote for the validated announcement",
+	)
+	vote, ok := emitted.Data.(VoteEmittedEvent)
+	require.True(t, ok)
+	assert.Equal(t, validatedRbHash, vote.Vote.AnnouncingRbHash)
+}
+
 // TestVoteManagerHeaderAndApplyArmingDoNotDoubleVote pins the idempotency of
 // arming the same announcement twice. Both observations happen while the vote
 // window is open, so only the per-ranking-block dedup can prevent the second
@@ -845,7 +888,7 @@ func TestVoteManagerHeaderAndApplyArmingDoNotDoubleVote(t *testing.T) {
 	ebHash := lcommon.NewBlake2b256([]byte("announced-eb"))
 	rbHash := lcommon.NewBlake2b256([]byte("announcing-rb"))
 
-	fixture.mgr.HandleEndorserBlock(headerArmingRbSlot, ebHash)
+	fixture.mgr.HandleValidatedEndorserBlock(headerArmingRbSlot, rbHash, ebHash)
 	publishHeaderAnnouncement(fixture, headerArmingRbSlot, rbHash, ebHash, 1)
 	testutil.RequireReceive(
 		t,
@@ -858,7 +901,7 @@ func TestVoteManagerHeaderAndApplyArmingDoNotDoubleVote(t *testing.T) {
 	// window, and both an EB re-acquisition and a repeated header
 	// observation land on top of it.
 	fixture.mgr.ObserveAnnouncement(headerArmingRbSlot, rbHash, ebHash)
-	fixture.mgr.HandleEndorserBlock(headerArmingRbSlot, ebHash)
+	fixture.mgr.HandleValidatedEndorserBlock(headerArmingRbSlot, rbHash, ebHash)
 	publishHeaderAnnouncement(fixture, headerArmingRbSlot, rbHash, ebHash, 2)
 	testutil.RequireNoReceive(
 		t,
@@ -918,7 +961,7 @@ func TestVoteManagerRolledBackHeaderAnnouncementDoesNotVote(t *testing.T) {
 
 	// The endorser block arrives after the rollback. The announcement it
 	// would have satisfied is gone, so nothing is emitted.
-	fixture.mgr.HandleEndorserBlock(headerArmingRbSlot, ebHash)
+	fixture.mgr.HandleValidatedEndorserBlock(headerArmingRbSlot, rbHash, ebHash)
 	testutil.RequireNoReceive(
 		t,
 		emittedCh,
@@ -959,7 +1002,7 @@ func TestVoteManagerSlotWindowDeclineIsCountedAndWarned(t *testing.T) {
 	// An announcement whose ranking block slot is far behind the wall clock,
 	// exactly what the apply-driven path used to hand the emitter.
 	staleSlot := uint64(1000 - headerArmingVoteWindow - 100)
-	fixture.mgr.HandleEndorserBlock(staleSlot, ebHash)
+	fixture.mgr.HandleValidatedEndorserBlock(staleSlot, rbHash, ebHash)
 	fixture.mgr.ObserveAnnouncement(staleSlot, rbHash, ebHash)
 
 	assert.Empty(t, fixture.mgr.VotesByIds([]lcommon.LeiosVoteId{{
@@ -1029,7 +1072,7 @@ func TestVoteManagerNonSeatedOutsideWindowUsesNotSeatedReason(t *testing.T) {
 	ebHash := lcommon.NewBlake2b256([]byte("unseated-eb"))
 	rbHash := lcommon.NewBlake2b256([]byte("unseated-rb"))
 	staleSlot := uint64(1000 - headerArmingVoteWindow - 100)
-	fixture.mgr.HandleEndorserBlock(staleSlot, ebHash)
+	fixture.mgr.HandleValidatedEndorserBlock(staleSlot, rbHash, ebHash)
 	fixture.mgr.ObserveAnnouncement(staleSlot, rbHash, ebHash)
 
 	assert.Equal(t, float64(1), promtestutil.ToFloat64(
@@ -1065,7 +1108,7 @@ func TestVoteManagerVotesNotEmittedCountsMissingKey(t *testing.T) {
 	)
 	ebHash := lcommon.NewBlake2b256([]byte("announced-eb"))
 	rbHash := lcommon.NewBlake2b256([]byte("announcing-rb"))
-	fixture.mgr.HandleEndorserBlock(headerArmingRbSlot, ebHash)
+	fixture.mgr.HandleValidatedEndorserBlock(headerArmingRbSlot, rbHash, ebHash)
 	fixture.mgr.ObserveAnnouncement(headerArmingRbSlot, rbHash, ebHash)
 	assert.Equal(
 		t,
@@ -1147,7 +1190,7 @@ func TestVoteManagerInvalidatedHeaderAnnouncementDoesNotVote(t *testing.T) {
 		return fixture.mgr.lastHeaderStreamSeq >= 2
 	}, testutil.AsyncWait, "invalidation applied")
 
-	fixture.mgr.HandleEndorserBlock(headerArmingRbSlot, ebHash)
+	fixture.mgr.HandleValidatedEndorserBlock(headerArmingRbSlot, rbHash, ebHash)
 	testutil.RequireNoReceive(
 		t,
 		emittedCh,
@@ -1193,7 +1236,7 @@ func TestVoteManagerLateRollbackDoesNotDropRearmedAnnouncement(t *testing.T) {
 		Seq:   7,
 	})
 
-	fixture.mgr.HandleEndorserBlock(headerArmingRbSlot, ebHash)
+	fixture.mgr.HandleValidatedEndorserBlock(headerArmingRbSlot, rbHash, ebHash)
 	emitted := testutil.RequireReceive(
 		t,
 		emittedCh,
@@ -1222,7 +1265,7 @@ func TestVoteManagerUnsequencedRollbackStillPrunes(t *testing.T) {
 	fixture.mgr.handleRollback(chain.ChainRollbackEvent{
 		Point: ocommon.Point{Slot: headerArmingRbSlot - 1},
 	})
-	fixture.mgr.HandleEndorserBlock(headerArmingRbSlot, ebHash)
+	fixture.mgr.HandleValidatedEndorserBlock(headerArmingRbSlot, rbHash, ebHash)
 	testutil.RequireNoReceive(
 		t,
 		emittedCh,
@@ -1272,7 +1315,7 @@ func TestVoteManagerHeaderStreamRecoversFromClosedChannel(t *testing.T) {
 	ebHash := lcommon.NewBlake2b256([]byte("announced-eb"))
 	rbHash := lcommon.NewBlake2b256([]byte("announcing-rb"))
 	publishHeaderAnnouncement(fixture, headerArmingRbSlot, rbHash, ebHash, 3)
-	fixture.mgr.HandleEndorserBlock(headerArmingRbSlot, ebHash)
+	fixture.mgr.HandleValidatedEndorserBlock(headerArmingRbSlot, rbHash, ebHash)
 	emitted := testutil.RequireReceive(
 		t,
 		emittedCh,
@@ -1346,7 +1389,7 @@ func armAndVote(
 	t.Helper()
 	publishHeaderAnnouncement(fixture, slot, rbHash, ebHash, seq)
 	waitForAnnouncement(t, fixture, rbHash)
-	fixture.mgr.HandleEndorserBlock(slot, ebHash)
+	fixture.mgr.HandleValidatedEndorserBlock(slot, rbHash, ebHash)
 	emitted := testutil.RequireReceive(
 		t, emittedCh, testutil.AsyncWait, "local vote emitted",
 	)
@@ -1641,7 +1684,7 @@ func TestVoteManagerRollbackDeliveredBeforeHeaderStreamIsSafe(t *testing.T) {
 		return fixture.mgr.lastHeaderStreamSeq >= 4
 	}, testutil.AsyncWait, "header stream drained")
 
-	fixture.mgr.HandleEndorserBlock(headerArmingRbSlot, ebHash)
+	fixture.mgr.HandleValidatedEndorserBlock(headerArmingRbSlot, rbHash, ebHash)
 	testutil.RequireNoReceive(
 		t,
 		emittedCh,
@@ -1800,7 +1843,7 @@ func TestVoteManagerSameSlotLocalForgeStillVotes(t *testing.T) {
 	require.Len(t, fixture.mgr.VotesByIds([]lcommon.LeiosVoteId{voteId}), 1)
 
 	// The local block's endorser block is already in hand when it is forged.
-	fixture.mgr.HandleEndorserBlock(headerArmingRbSlot, localEb)
+	fixture.mgr.HandleValidatedEndorserBlock(headerArmingRbSlot, localRb, localEb)
 
 	// The apply-driven backstop arms the forged block first, while the id is
 	// still held by the peer vote. The attempt is rejected, but it must not
@@ -1882,7 +1925,7 @@ func TestVoteManagerRejectedEmissionDoesNotMarkAnnouncementVoted(t *testing.T) {
 	localEb := lcommon.NewBlake2b256([]byte("local-eb"))
 
 	armAndVote(t, fixture, emittedCh, headerArmingRbSlot, peerRb, peerEb, 1)
-	fixture.mgr.HandleEndorserBlock(headerArmingRbSlot, localEb)
+	fixture.mgr.HandleValidatedEndorserBlock(headerArmingRbSlot, localRb, localEb)
 	fixture.mgr.ObserveAnnouncement(headerArmingRbSlot, localRb, localEb)
 
 	fixture.mgr.mu.Lock()
@@ -2056,7 +2099,7 @@ func TestOrderingDemoAnnouncementThenRollback(t *testing.T) {
 	}, testutil.AsyncWait, "both header events applied, in order")
 
 	// The endorser block finally arrives. There is nothing left to vote for.
-	fixture.mgr.HandleEndorserBlock(demoSlot, eb)
+	fixture.mgr.HandleValidatedEndorserBlock(demoSlot, rb, eb)
 	testutil.RequireNoReceive(
 		t, votes, 500*time.Millisecond,
 		"no vote for a ranking block that left our chain",
@@ -2084,7 +2127,7 @@ func TestOrderingDemoRollbackThenLateHeader(t *testing.T) {
 	publishHeaderAnnouncement(fixture, demoSlot, rb, eb, 8)
 	waitForAnnouncement(t, fixture, rb)
 
-	fixture.mgr.HandleEndorserBlock(demoSlot, eb)
+	fixture.mgr.HandleValidatedEndorserBlock(demoSlot, rb, eb)
 	requireVoteFor(t, votes, rb, "the replacement chain is voted for")
 
 	// Only now does mutation 7's rollback reach the other topic. It must not
@@ -2121,13 +2164,13 @@ func TestOrderingDemoLocalForgeDisplacingQueuedHeader(t *testing.T) {
 	// The peer's header wins first and takes the vote id.
 	publishHeaderAnnouncement(fixture, demoSlot, peerRb, peerEb, 1)
 	waitForAnnouncement(t, fixture, peerRb)
-	fixture.mgr.HandleEndorserBlock(demoSlot, peerEb)
+	fixture.mgr.HandleValidatedEndorserBlock(demoSlot, peerRb, peerEb)
 	requireVoteFor(t, votes, peerRb, "the peer header is voted for first")
 
 	// We forge at the same slot with our own endorser block in hand. The
 	// apply-driven backstop arms it early, while the id is still taken; the
 	// attempt is refused and must stay retryable.
-	fixture.mgr.HandleEndorserBlock(demoSlot, localEb)
+	fixture.mgr.HandleValidatedEndorserBlock(demoSlot, localRb, localEb)
 	fixture.mgr.ObserveAnnouncement(demoSlot, localRb, localEb)
 	testutil.RequireNoReceive(
 		t, votes, 300*time.Millisecond,
@@ -2173,7 +2216,7 @@ func TestOrderingDemoHeaderQueueDiscardedOnStall(t *testing.T) {
 
 	publishHeaderAnnouncement(fixture, demoSlot, stalledRb, stalledEb, 1)
 	waitForAnnouncement(t, fixture, stalledRb)
-	fixture.mgr.HandleEndorserBlock(demoSlot, stalledEb)
+	fixture.mgr.HandleValidatedEndorserBlock(demoSlot, stalledRb, stalledEb)
 	requireVoteFor(t, votes, stalledRb, "the admitted header is voted for")
 
 	// The peer stalls; the header queue is discarded back to the block tip.
@@ -2198,7 +2241,7 @@ func TestOrderingDemoHeaderQueueDiscardedOnStall(t *testing.T) {
 	nextEb := lcommon.NewBlake2b256([]byte("next-eb"))
 	publishHeaderAnnouncement(fixture, demoSlot, nextRb, nextEb, 3)
 	waitForAnnouncement(t, fixture, nextRb)
-	fixture.mgr.HandleEndorserBlock(demoSlot, nextEb)
+	fixture.mgr.HandleValidatedEndorserBlock(demoSlot, nextRb, nextEb)
 	requireVoteFor(t, votes, nextRb, "the slot can be voted on again")
 }
 
@@ -2637,35 +2680,35 @@ func TestVoteManagerValidatesDijkstraCertificateStrictly(t *testing.T) {
 		message,
 	))
 
-	require.Error(t, fixture.mgr.ValidateDijkstraCertificate(
+	require.ErrorIs(t, fixture.mgr.ValidateDijkstraCertificate(
 		5,
 		signers,
 		aggregatedSignature,
 		[]byte("wrong message"),
-	))
-	require.Error(t, fixture.mgr.ValidateDijkstraCertificate(
+	), ErrInvalidCertificate)
+	require.ErrorIs(t, fixture.mgr.ValidateDijkstraCertificate(
 		5,
 		signers[:1],
 		aggregatedSignature,
 		message,
-	))
+	), ErrInvalidCertificate)
 
 	wrongSizeAggregate := make([]byte, lcommon.LeiosBlsSignatureSize)
-	require.Error(t, fixture.mgr.ValidateDijkstraCertificate(
+	require.ErrorIs(t, fixture.mgr.ValidateDijkstraCertificate(
 		5,
 		signers,
 		wrongSizeAggregate,
 		message,
-	))
+	), ErrInvalidCertificate)
 
 	highBits := append([]byte(nil), signers...)
 	highBits[len(highBits)-1] |= 1
-	require.Error(t, fixture.mgr.ValidateDijkstraCertificate(
+	require.ErrorIs(t, fixture.mgr.ValidateDijkstraCertificate(
 		5,
 		highBits,
 		aggregatedSignature,
 		message,
-	))
+	), ErrInvalidCertificate)
 
 	belowQuorum := make([]byte, lcommon.LeiosSignerBitfieldSize(10))
 	belowQuorum[1] = 1 << 6 // only voter 9, with 10 of 550 active stake
@@ -2679,6 +2722,12 @@ func TestVoteManagerValidatesDijkstraCertificateStrictly(t *testing.T) {
 		belowQuorumAggregate,
 		message,
 	), ErrQuorumNotMet)
+	require.ErrorIs(t, fixture.mgr.ValidateDijkstraCertificate(
+		5,
+		belowQuorum,
+		belowQuorumAggregate,
+		message,
+	), ErrInvalidCertificate)
 }
 
 func TestVoteManagerRejectsKeylessDijkstraCertificateSigner(t *testing.T) {
@@ -2709,12 +2758,70 @@ func TestVoteManagerRejectsKeylessDijkstraCertificateSigner(t *testing.T) {
 	}
 	aggregatedSignature, err := AggregateSignatures(signatures)
 	require.NoError(t, err)
-	require.ErrorContains(t, fixture.mgr.ValidateDijkstraCertificate(
+	err = fixture.mgr.ValidateDijkstraCertificate(
 		5,
 		signers,
 		aggregatedSignature,
 		message,
-	), "no usable key")
+	)
+	require.ErrorContains(t, err, "no usable key")
+	require.ErrorIs(t, err, ErrInvalidCertificate)
+}
+
+// A committee that cannot be resolved, including from an empty stake
+// snapshot, means the certificate was never checked. Neither may read as a
+// verdict, which would reject a certifying block that may be valid.
+func TestVoteManagerDijkstraCertificateLocalFailureIsNotVerdict(t *testing.T) {
+	t.Parallel()
+	message := []byte("certificate message")
+	signers := make([]byte, lcommon.LeiosSignerBitfieldSize(10))
+	signers[0] = 0x80
+	key, err := ParseVoteSigningKey(fmt.Sprintf("%064x", 1))
+	require.NoError(t, err)
+	aggregatedSignature, err := SignVote(key, message)
+	require.NoError(t, err)
+
+	t.Run("stake snapshot unavailable", func(t *testing.T) {
+		t.Parallel()
+		fixture := newManagerFixture(t)
+		readErr := errors.New("stake snapshot read failed")
+		fixture.stake.setError(readErr)
+		err := fixture.mgr.ValidateDijkstraCertificate(
+			5, signers, aggregatedSignature, message,
+		)
+		require.ErrorIs(t, err, readErr)
+		require.NotErrorIs(t, err, ErrInvalidCertificate)
+	})
+	t.Run("leios keys unavailable", func(t *testing.T) {
+		t.Parallel()
+		readErr := errors.New("leios key read failed")
+		fixture := newManagerFixture(
+			t,
+			func(_ *managerFixture, cfg *VoteManagerConfig) {
+				cfg.KeyProvider = &fakeLeiosKeyProvider{err: readErr}
+			},
+		)
+		err := fixture.mgr.ValidateDijkstraCertificate(
+			5, signers, aggregatedSignature, message,
+		)
+		require.ErrorIs(t, err, readErr)
+		require.NotErrorIs(t, err, ErrInvalidCertificate)
+	})
+	t.Run("empty stake snapshot", func(t *testing.T) {
+		t.Parallel()
+		fixture := newManagerFixture(
+			t,
+			func(f *managerFixture, _ *VoteManagerConfig) {
+				f.stake.pools = map[string]uint64{}
+				f.stake.total = 0
+			},
+		)
+		err := fixture.mgr.ValidateDijkstraCertificate(
+			5, nil, aggregatedSignature, message,
+		)
+		require.ErrorContains(t, err, "empty stake distribution")
+		require.NotErrorIs(t, err, ErrInvalidCertificate)
+	})
 }
 
 type nextVotesResult struct {
@@ -3478,7 +3585,7 @@ func TestVoteManagerOwnVoteEmission(t *testing.T) {
 
 	ebHash := lcommon.NewBlake2b256([]byte("eb"))
 	rbHash := lcommon.NewBlake2b256([]byte("announcing-rb"))
-	fixture.mgr.HandleEndorserBlock(577, ebHash)
+	fixture.mgr.HandleValidatedEndorserBlock(577, rbHash, ebHash)
 	testutil.RequireNoReceive(
 		t,
 		emittedCh,
@@ -3518,25 +3625,62 @@ func TestVoteManagerOwnVoteEmission(t *testing.T) {
 	)
 
 	// Exactly one vote per EB per voter
-	fixture.mgr.HandleEndorserBlock(577, ebHash)
+	fixture.mgr.HandleValidatedEndorserBlock(577, rbHash, ebHash)
 	fixture.mgr.ObserveAnnouncement(577, rbHash, ebHash)
 	raws = fixture.mgr.VotesByIds(
 		[]lcommon.LeiosVoteId{{SlotNo: 577, VoterId: 3}},
 	)
 	assert.Len(t, raws, 1)
 
-	// The local vote is served to peers
+	// Prototype votes are diffused over leios-notify and must not be served
+	// through protocol 20, whose signature domain is slot plus EB hash.
 	done := make(chan struct{})
-	defer close(done)
-	result := testutil.RequireReceive(
+	resultCh := startNextVotes(fixture, done, "conn-b", 1)
+	testutil.RequireNoReceive(
 		t,
-		startNextVotes(fixture, done, "conn-b", 1),
-		testutil.AsyncWait,
-		"own vote served to peers",
+		resultCh,
+		300*time.Millisecond,
+		"local prototype vote must stay off the legacy protocol",
 	)
+	close(done)
+	result := testutil.RequireReceive(
+		t, resultCh, testutil.AsyncWait, "aborted NextVotes returns",
+	)
+	assert.Error(t, result.err)
+}
+
+func TestVoteManagerNextVotesExcludesReceivedPrototypeVotes(t *testing.T) {
+	t.Parallel()
+
+	fixture := newManagerFixture(t)
+	rbHash := lcommon.NewBlake2b256([]byte("prototype-rb"))
+	ebHash := lcommon.NewBlake2b256([]byte("prototype-eb"))
+	fixture.mgr.ObserveAnnouncement(577, rbHash, ebHash)
+	received := fixture.makePrototypeVote(t, 3, rbHash)
+	require.NoError(t, fixture.mgr.HandlePrototypeVote("conn-a", received))
+
+	done := make(chan struct{})
+	resultCh := startNextVotes(fixture, done, "conn-b", 1)
+	testutil.RequireNoReceive(
+		t,
+		resultCh,
+		300*time.Millisecond,
+		"received prototype vote must stay off the legacy protocol",
+	)
+
+	legacy := fixture.makeVote(
+		t,
+		4,
+		578,
+		lcommon.NewBlake2b256([]byte("legacy-eb")),
+	)
+	require.NoError(t, fixture.mgr.HandleVote("conn-a", legacy))
+	result := testutil.RequireReceive(
+		t, resultCh, testutil.AsyncWait, "legacy vote served after prototype",
+	)
+	close(done)
 	require.NoError(t, result.err)
-	require.Len(t, result.votes, 1)
-	assert.Equal(t, uint64(3), result.votes[0].VoterId)
+	require.Equal(t, []lcommon.LeiosVote{legacy}, result.votes)
 }
 
 func TestVoteManagerDoesNotEmitVoteAfterVotingReconfiguredDuringSigning(
@@ -3594,7 +3738,7 @@ func TestVoteManagerDoesNotEmitVoteAfterVotingReconfiguredDuringSigning(
 	fixture.mgr.mu.Unlock()
 	ebHash := lcommon.NewBlake2b256([]byte("reconfigured-signing-eb"))
 	rbHash := lcommon.NewBlake2b256([]byte("reconfigured-signing-rb"))
-	fixture.mgr.HandleEndorserBlock(501, ebHash)
+	fixture.mgr.HandleValidatedEndorserBlock(501, rbHash, ebHash)
 	observeDone := make(chan struct{})
 	go func() {
 		fixture.mgr.ObserveAnnouncement(501, rbHash, ebHash)
@@ -4009,7 +4153,7 @@ func TestVoteManagerPrototypeUsesRegisteredKey(t *testing.T) {
 	))
 	rbHash := lcommon.NewBlake2b256([]byte("registered-key-rb"))
 	ebHash := lcommon.NewBlake2b256([]byte("registered-key-eb"))
-	fixture.mgr.HandleEndorserBlock(577, ebHash)
+	fixture.mgr.HandleValidatedEndorserBlock(577, rbHash, ebHash)
 	fixture.mgr.ObserveAnnouncement(577, rbHash, ebHash)
 	signature, err := SignVote(key, PrototypeVoteMessageBytes(rbHash))
 	require.NoError(t, err)
@@ -4457,18 +4601,18 @@ func TestVoteManagerDeferredVotingReplaysCurrentEpochAnnouncementsInOrder(
 	fixture.mgr.mu.Unlock()
 	staleEB := lcommon.NewBlake2b256([]byte("stale-eb"))
 	staleRB := lcommon.NewBlake2b256([]byte("stale-rb"))
-	fixture.mgr.HandleEndorserBlock(599, staleEB)
+	fixture.mgr.HandleValidatedEndorserBlock(599, staleRB, staleEB)
 	fixture.mgr.ObserveAnnouncement(599, staleRB, staleEB)
 
 	// Record eligible announcements in inverse slot order so replay cannot
 	// accidentally inherit the announcements map's iteration order.
 	laterEB := lcommon.NewBlake2b256([]byte("later-eb"))
 	laterRB := lcommon.NewBlake2b256([]byte("later-rb"))
-	fixture.mgr.HandleEndorserBlock(602, laterEB)
+	fixture.mgr.HandleValidatedEndorserBlock(602, laterRB, laterEB)
 	fixture.mgr.ObserveAnnouncement(602, laterRB, laterEB)
 	earlierEB := lcommon.NewBlake2b256([]byte("earlier-eb"))
 	earlierRB := lcommon.NewBlake2b256([]byte("earlier-rb"))
-	fixture.mgr.HandleEndorserBlock(601, earlierEB)
+	fixture.mgr.HandleValidatedEndorserBlock(601, earlierRB, earlierEB)
 	fixture.mgr.ObserveAnnouncement(601, earlierRB, earlierEB)
 
 	unacquiredEB := lcommon.NewBlake2b256([]byte("unacquired-eb"))
@@ -4529,7 +4673,7 @@ func TestVoteManagerDeferredVotingReplaysCurrentEpochAnnouncementsInOrder(
 	assert.Equal(t, CommitteeSnapshotEpoch(6), keyProvider.snapshotEpoch)
 	keyProvider.mu.Unlock()
 
-	fixture.mgr.HandleEndorserBlock(603, unacquiredEB)
+	fixture.mgr.HandleValidatedEndorserBlock(603, unacquiredRB, unacquiredEB)
 	emittedEvent := testutil.RequireReceive(
 		t,
 		emittedCh,
@@ -4574,7 +4718,7 @@ func TestVoteManagerConfigureVotingReplaysPreloadedAnnouncements(
 	defer fixture.eventBus.Unsubscribe(VoteEmittedEventType, subID)
 	ebHash := lcommon.NewBlake2b256([]byte("preloaded-eb"))
 	rbHash := lcommon.NewBlake2b256([]byte("preloaded-rb"))
-	fixture.mgr.HandleEndorserBlock(501, ebHash)
+	fixture.mgr.HandleValidatedEndorserBlock(501, rbHash, ebHash)
 	fixture.mgr.ObserveAnnouncement(501, rbHash, ebHash)
 
 	status, err := fixture.mgr.ConfigureVoting(poolKeyHash, key)
@@ -4662,7 +4806,7 @@ func TestVoteManagerConfigureVotingDiscardsStaleLookupAfterActivation(
 			defer fixture.eventBus.Unsubscribe(VoteEmittedEventType, subID)
 			ebHash := lcommon.NewBlake2b256([]byte("overlap-eb"))
 			rbHash := lcommon.NewBlake2b256([]byte("overlap-rb"))
-			fixture.mgr.HandleEndorserBlock(601, ebHash)
+			fixture.mgr.HandleValidatedEndorserBlock(601, rbHash, ebHash)
 			fixture.mgr.ObserveAnnouncement(601, rbHash, ebHash)
 
 			type configureResult struct {
@@ -4948,7 +5092,7 @@ func TestVoteManagerConfigureVotingDiscardsStaleLookupAfterDeferredRetry(
 				keyProvider.currentFailCall = 2
 				ebHash := lcommon.NewBlake2b256([]byte("overlap-deferred-eb"))
 				rbHash := lcommon.NewBlake2b256([]byte("overlap-deferred-rb"))
-				fixture.mgr.HandleEndorserBlock(601, ebHash)
+				fixture.mgr.HandleValidatedEndorserBlock(601, rbHash, ebHash)
 				fixture.mgr.ObserveAnnouncement(601, rbHash, ebHash)
 			}
 
@@ -5120,7 +5264,7 @@ func TestVoteManagerConfigureVotingReportsReplayPreparationFailure(
 	defer fixture.eventBus.Unsubscribe(VoteEmittedEventType, subID)
 	ebHash := lcommon.NewBlake2b256([]byte("failed-preparation-eb"))
 	rbHash := lcommon.NewBlake2b256([]byte("failed-preparation-rb"))
-	fixture.mgr.HandleEndorserBlock(501, ebHash)
+	fixture.mgr.HandleValidatedEndorserBlock(501, rbHash, ebHash)
 	fixture.mgr.ObserveAnnouncement(501, rbHash, ebHash)
 
 	status, err := fixture.mgr.ConfigureVoting(poolKeyHash, key)
@@ -5163,7 +5307,7 @@ func TestVoteManagerDeferredVotingRetriesFailedReplayLookup(
 	defer fixture.eventBus.Unsubscribe(VoteEmittedEventType, subID)
 	ebHash := lcommon.NewBlake2b256([]byte("replay-provider-eb"))
 	rbHash := lcommon.NewBlake2b256([]byte("replay-provider-rb"))
-	fixture.mgr.HandleEndorserBlock(501, ebHash)
+	fixture.mgr.HandleValidatedEndorserBlock(501, rbHash, ebHash)
 	fixture.mgr.ObserveAnnouncement(501, rbHash, ebHash)
 
 	proof, err := signWithDST(key, key.PublicKeyBytes(), LeiosPoPDST)
@@ -5307,7 +5451,7 @@ func TestVoteManagerDeferredVotingRetryRetainsMismatchedKeyUntilRecovery(
 	defer fixture.eventBus.Unsubscribe(VoteEmittedEventType, subID)
 	firstEB := lcommon.NewBlake2b256([]byte("mismatch-first-eb"))
 	firstRB := lcommon.NewBlake2b256([]byte("mismatch-first-rb"))
-	fixture.mgr.HandleEndorserBlock(601, firstEB)
+	fixture.mgr.HandleValidatedEndorserBlock(601, firstRB, firstEB)
 	fixture.mgr.ObserveAnnouncement(601, firstRB, firstEB)
 
 	mismatchedKey := testSigningKey(t, 211)
@@ -5343,7 +5487,7 @@ func TestVoteManagerDeferredVotingRetryRetainsMismatchedKeyUntilRecovery(
 
 	secondEB := lcommon.NewBlake2b256([]byte("mismatch-recovery-eb"))
 	secondRB := lcommon.NewBlake2b256([]byte("mismatch-recovery-rb"))
-	fixture.mgr.HandleEndorserBlock(701, secondEB)
+	fixture.mgr.HandleValidatedEndorserBlock(701, secondRB, secondEB)
 	fixture.mgr.ObserveAnnouncement(701, secondRB, secondEB)
 	validProof, err := signWithDST(key, key.PublicKeyBytes(), LeiosPoPDST)
 	require.NoError(t, err)
@@ -5397,7 +5541,7 @@ func TestVoteManagerDeferredVotingRetryRetainsProviderFailureUntilRecovery(
 	defer fixture.eventBus.Unsubscribe(VoteEmittedEventType, subID)
 	firstEB := lcommon.NewBlake2b256([]byte("provider-first-eb"))
 	firstRB := lcommon.NewBlake2b256([]byte("provider-first-rb"))
-	fixture.mgr.HandleEndorserBlock(601, firstEB)
+	fixture.mgr.HandleValidatedEndorserBlock(601, firstRB, firstEB)
 	fixture.mgr.ObserveAnnouncement(601, firstRB, firstEB)
 	keyProvider.mu.Lock()
 	keyProvider.err = errors.New("store temporarily unavailable")
@@ -5424,7 +5568,7 @@ func TestVoteManagerDeferredVotingRetryRetainsProviderFailureUntilRecovery(
 
 	secondEB := lcommon.NewBlake2b256([]byte("provider-recovery-eb"))
 	secondRB := lcommon.NewBlake2b256([]byte("provider-recovery-rb"))
-	fixture.mgr.HandleEndorserBlock(701, secondEB)
+	fixture.mgr.HandleValidatedEndorserBlock(701, secondRB, secondEB)
 	fixture.mgr.ObserveAnnouncement(701, secondRB, secondEB)
 	validProof, err := signWithDST(key, key.PublicKeyBytes(), LeiosPoPDST)
 	require.NoError(t, err)
@@ -5689,7 +5833,9 @@ func TestVoteManagerOwnVoteRequiresCommitteeMembership(t *testing.T) {
 	fixture.mgr.EnableVoting(poolKeyHash, key)
 
 	ebHash := lcommon.NewBlake2b256([]byte("eb"))
-	fixture.mgr.HandleEndorserBlock(577, ebHash)
+	rbHash := lcommon.NewBlake2b256([]byte("announcing-rb"))
+	fixture.mgr.HandleValidatedEndorserBlock(577, rbHash, ebHash)
+	fixture.mgr.ObserveAnnouncement(577, rbHash, ebHash)
 	for voterId := range uint64(10) {
 		raws := fixture.mgr.VotesByIds(
 			[]lcommon.LeiosVoteId{{SlotNo: 577, VoterId: voterId}},
@@ -5703,7 +5849,9 @@ func TestVoteManagerNoVoteWithoutVotingEnabled(t *testing.T) {
 
 	fixture := newManagerFixture(t)
 	ebHash := lcommon.NewBlake2b256([]byte("eb"))
-	fixture.mgr.HandleEndorserBlock(577, ebHash)
+	rbHash := lcommon.NewBlake2b256([]byte("announcing-rb"))
+	fixture.mgr.HandleValidatedEndorserBlock(577, rbHash, ebHash)
+	fixture.mgr.ObserveAnnouncement(577, rbHash, ebHash)
 	for voterId := range uint64(10) {
 		raws := fixture.mgr.VotesByIds(
 			[]lcommon.LeiosVoteId{{SlotNo: 577, VoterId: voterId}},
@@ -5864,8 +6012,8 @@ func TestVoteManagerEpochTransitionPrunesPrototypeStateAndCounts(t *testing.T) {
 		slot: 577, epoch: 5, ebHash: currentEb, seenAt: now,
 	}
 	fixture.mgr.mu.Unlock()
-	fixture.mgr.HandleEndorserBlock(350, oldEb)
-	fixture.mgr.HandleEndorserBlock(577, currentEb)
+	fixture.mgr.HandleValidatedEndorserBlock(350, oldRb, oldEb)
+	fixture.mgr.HandleValidatedEndorserBlock(577, currentRb, currentEb)
 
 	fixture.mgr.handleEpochTransition(event.EpochTransitionEvent{
 		PreviousEpoch: 5,
@@ -6034,12 +6182,9 @@ func TestVoteManagerParamsValidationFailureSurfaces(t *testing.T) {
 	key := fixture.keys[3]
 	require.NotNil(t, key)
 	fixture.mgr.EnableVoting(poolKeyHash, key)
-	fixture.mgr.HandleEndorserBlock(577, ebHash)
-	fixture.mgr.ObserveAnnouncement(
-		577,
-		lcommon.NewBlake2b256([]byte("announcing-rb")),
-		ebHash,
-	)
+	rbHash := lcommon.NewBlake2b256([]byte("announcing-rb"))
+	fixture.mgr.HandleValidatedEndorserBlock(577, rbHash, ebHash)
+	fixture.mgr.ObserveAnnouncement(577, rbHash, ebHash)
 	assert.Empty(
 		t,
 		fixture.mgr.VotesByIds(
@@ -6510,12 +6655,9 @@ func TestVoteManagerLocalVoteBypassesRecordCapacity(t *testing.T) {
 	key := fixture.keys[3]
 	require.NotNil(t, key)
 	fixture.mgr.EnableVoting(poolKeyHash, key)
-	fixture.mgr.HandleEndorserBlock(577, ebHash)
-	fixture.mgr.ObserveAnnouncement(
-		577,
-		lcommon.NewBlake2b256([]byte("announcing-rb")),
-		ebHash,
-	)
+	rbHash := lcommon.NewBlake2b256([]byte("announcing-rb"))
+	fixture.mgr.HandleValidatedEndorserBlock(577, rbHash, ebHash)
+	fixture.mgr.ObserveAnnouncement(577, rbHash, ebHash)
 	assert.Len(
 		t,
 		fixture.mgr.VotesByIds(
@@ -6577,7 +6719,9 @@ func TestVoteManagerSlotWindowRejects(t *testing.T) {
 	require.NotNil(t, key)
 	fixture.mgr.EnableVoting(poolKeyHash, key)
 	oldSlot := uint64(1000 - voteWindow - 100)
-	fixture.mgr.HandleEndorserBlock(oldSlot, ebHash)
+	rbHash := lcommon.NewBlake2b256([]byte("old-announcing-rb"))
+	fixture.mgr.HandleValidatedEndorserBlock(oldSlot, rbHash, ebHash)
+	fixture.mgr.ObserveAnnouncement(oldSlot, rbHash, ebHash)
 	assert.Empty(
 		t,
 		fixture.mgr.VotesByIds(
@@ -6662,7 +6806,7 @@ func TestVoteManagerRollbackRejectsInFlightLocalPrototypeVote(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		fixture.mgr.HandleEndorserBlock(577, ebHash)
+		fixture.mgr.HandleValidatedEndorserBlock(577, rbHash, ebHash)
 	}()
 	testutil.RequireReceive(
 		t,

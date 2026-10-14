@@ -83,6 +83,14 @@ func readBlobBodyWithLimit(r io.Reader, maxBytes int64) ([]byte, error) {
 	return data, nil
 }
 
+func (d *BlobStoreS3) isNamespacedObject(key string) bool {
+	namespacePrefix := strings.TrimSuffix(d.prefix, "/")
+	if namespacePrefix != "" {
+		namespacePrefix += "/"
+	}
+	return strings.HasPrefix(key, namespacePrefix+".dingo-namespaces/")
+}
+
 // s3Txn stages S3 operations until commit. Commit applies the staged object
 // changes in a deterministic order and compensates already-applied changes if
 // a later cloud operation fails.
@@ -504,11 +512,12 @@ func (it *s3StreamIterator) advance(ctx context.Context) {
 			// with an out-of-range index on an empty page.
 			continue
 		}
-		objectKey := strings.TrimPrefix(
-			aws.ToString(it.page[it.pageIdx].Key),
-			it.store.prefix,
-		)
+		fullObjectKey := aws.ToString(it.page[it.pageIdx].Key)
 		it.pageIdx++
+		if it.store.isNamespacedObject(fullObjectKey) {
+			continue
+		}
+		objectKey := strings.TrimPrefix(fullObjectKey, it.store.prefix)
 		externalKey, err := hex.DecodeString(objectKey)
 		if err != nil {
 			it.err = fmt.Errorf("error decoding s3 key: %w", err)
@@ -1230,7 +1239,11 @@ func (d *BlobStoreS3) listKeysToFile(
 			return nil, cleanup(err)
 		}
 		for _, obj := range page.Contents {
-			key := strings.TrimPrefix(aws.ToString(obj.Key), d.prefix)
+			fullObjectKey := aws.ToString(obj.Key)
+			if d.isNamespacedObject(fullObjectKey) {
+				continue
+			}
+			key := strings.TrimPrefix(fullObjectKey, d.prefix)
 			externalKey, err := hex.DecodeString(key)
 			if err != nil {
 				return nil, cleanup(

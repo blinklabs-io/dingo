@@ -357,7 +357,7 @@ WHERE credential_tag = ? AND staking_key = ?`,
 // case (commit cee516017).
 //
 // This is a method (rather than the free function it used to be) so it can
-// reach s.lookupCachedStmt: profiling a synced node found this single query
+// reach s.borrowCachedStmt: profiling a synced node found this single query
 // -- called on every UTxO a stake credential gains or loses, via
 // refreshRewardLiveStakeAggregate -- was 17.55% of total process CPU, the
 // largest single hotspot found. It was already the single-aggregate rewrite

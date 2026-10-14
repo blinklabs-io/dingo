@@ -19,10 +19,13 @@ import (
 	"context"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -344,6 +347,7 @@ func TestArchiveHTTPClientValidatesRedirectOrigin(t *testing.T) {
 	client := archiveDownloadHTTPClient(
 		&http.Client{Transport: &http.Transport{}},
 		allowedOrigins,
+		false,
 		func(context.Context, string, string) (net.Conn, error) {
 			return nil, errors.New("not used")
 		},
@@ -382,7 +386,9 @@ func TestArchiveHTTPClientValidatesRedirectAfterCallerPolicy(t *testing.T) {
 		&http.Client{
 			Transport: &http.Transport{},
 			CheckRedirect: func(req *http.Request, _ []*http.Request) error {
-				redirectURL, parseErr := url.Parse("https://evil.example.com/block")
+				redirectURL, parseErr := url.Parse(
+					"https://evil.example.com/block",
+				)
 				if parseErr != nil {
 					return parseErr
 				}
@@ -391,6 +397,7 @@ func TestArchiveHTTPClientValidatesRedirectAfterCallerPolicy(t *testing.T) {
 			},
 		},
 		allowedOrigins,
+		false,
 		func(context.Context, string, string) (net.Conn, error) {
 			return nil, errors.New("not used")
 		},
@@ -424,7 +431,13 @@ func TestArchiveHTTPClientReplacesCustomTransport(t *testing.T) {
 	)
 	require.NoError(t, err)
 	original := &http.Client{Transport: customRoundTripper{}}
-	client := archiveDownloadHTTPClient(original, allowedOrigins, nil, nil)
+	client := archiveDownloadHTTPClient(
+		original,
+		allowedOrigins,
+		false,
+		nil,
+		nil,
+	)
 
 	transport, ok := client.Transport.(*http.Transport)
 	require.True(t, ok)
@@ -445,6 +458,7 @@ func TestArchiveHTTPClientRejectsPrivateResolvedAddress(t *testing.T) {
 	client := archiveDownloadHTTPClient(
 		&http.Client{Transport: &http.Transport{}},
 		allowedOrigins,
+		false,
 		func(context.Context, string, string) (net.Conn, error) {
 			dialed = true
 			return nil, errors.New("unexpected dial")
@@ -473,8 +487,11 @@ func TestArchiveHTTPClientDisablesProxy(t *testing.T) {
 	)
 	require.NoError(t, err)
 	client := archiveDownloadHTTPClient(
-		&http.Client{Transport: &http.Transport{Proxy: http.ProxyFromEnvironment}},
+		&http.Client{
+			Transport: &http.Transport{Proxy: http.ProxyFromEnvironment},
+		},
 		allowedOrigins,
+		false,
 		func(context.Context, string, string) (net.Conn, error) {
 			return nil, errors.New("not used")
 		},
@@ -506,6 +523,7 @@ func TestArchiveDownloadHTTPClientDiscardsCallerDialer(t *testing.T) {
 			},
 		}},
 		allowedOrigins,
+		false,
 		nil,
 		func(context.Context, string) ([]net.IPAddr, error) {
 			return []net.IPAddr{{IP: net.ParseIP("93.184.216.34")}}, nil
@@ -521,6 +539,89 @@ func TestArchiveDownloadHTTPClientDiscardsCallerDialer(t *testing.T) {
 	require.Error(t, err)
 	assert.ErrorIs(t, err, context.Canceled)
 	assert.False(t, callerDialed)
+}
+
+func TestArchiveHTTPClientAllowPrivateKeepsOtherChecks(t *testing.T) {
+	t.Parallel()
+
+	allowedOrigins, err := archiveDownloadOrigins(
+		"https://archive.example.com",
+		nil,
+	)
+	require.NoError(t, err)
+	var dialedAddress string
+	client := archiveDownloadHTTPClient(
+		&http.Client{
+			Transport: &http.Transport{Proxy: http.ProxyFromEnvironment},
+		},
+		allowedOrigins,
+		true,
+		func(_ context.Context, _ string, address string) (net.Conn, error) {
+			dialedAddress = address
+			return nil, errors.New("dial reached")
+		},
+		func(context.Context, string) ([]net.IPAddr, error) {
+			return []net.IPAddr{{IP: net.ParseIP("10.0.0.5")}}, nil
+		},
+	)
+	transport := client.Transport.(*http.Transport)
+	assert.Nil(t, transport.Proxy)
+
+	_, err = transport.DialContext(
+		context.Background(),
+		"tcp",
+		"archive.example.com:443",
+	)
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, netguard.ErrBlockedDestination)
+	assert.Equal(t, "archive.example.com:443", dialedAddress)
+
+	for _, target := range []string{
+		"https://other.example.com/block",
+		"http://archive.example.com/block",
+	} {
+		redirect, err := http.NewRequest(http.MethodGet, target, nil)
+		require.NoError(t, err)
+		err = client.CheckRedirect(redirect, nil)
+		require.Error(t, err, target)
+		assert.Contains(t, err.Error(), "unsafe archive redirect", target)
+	}
+}
+
+// TestGetBlock_PrivateArchiveDownloadRequiresOptIn serves the archive and its
+// download origin from loopback, the shape of a private S3-compatible store.
+func TestGetBlock_PrivateArchiveDownloadRequiresOptIn(t *testing.T) {
+	t.Parallel()
+
+	block := archiveBlockFixtures(t, 2)[1]
+	hash := block.Hash()
+	for _, allowPrivate := range []bool{false, true} {
+		t.Run(fmt.Sprintf("allowPrivate=%t", allowPrivate), func(t *testing.T) {
+			t.Parallel()
+
+			db := newTestDB(t)
+			blocks, configure := serveArchiveBlock(t, block)
+			baseURL, fakeArch, httpClient := startFakeArchive(t, blocks)
+			configure(fakeArch)
+			store, err := NewBarkBlobStore(BlobStoreBarkConfig{
+				BaseUrl:                            baseURL,
+				HTTPClient:                         httpClient,
+				BlockDownloadAllowPrivateAddresses: allowPrivate,
+			}, db.Blob())
+			require.NoError(t, err)
+			rTxn := store.NewTransaction(false)
+			t.Cleanup(func() { _ = rTxn.Rollback() })
+
+			cbor, _, err := store.GetBlock(rTxn, block.SlotNumber(), hash[:])
+			if !allowPrivate {
+				require.Error(t, err)
+				assert.ErrorIs(t, err, netguard.ErrBlockedDestination)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, block.Cbor(), cbor)
+		})
+	}
 }
 
 func TestArchiveServiceClientAllowsConfiguredLocalEndpoint(t *testing.T) {
@@ -954,7 +1055,11 @@ func TestGetBlock_AcceptsArchiveBlockTypeMismatch(t *testing.T) {
 			rTxn := store.NewTransaction(false)
 			t.Cleanup(func() { _ = rTxn.Rollback() })
 
-			cbor, meta, err := store.GetBlock(rTxn, decoded.SlotNumber(), hash[:])
+			cbor, meta, err := store.GetBlock(
+				rTxn,
+				decoded.SlotNumber(),
+				hash[:],
+			)
 			require.NoError(t, err)
 			assert.Equal(t, raw, cbor)
 			assert.Equal(t, tc.claimedN, meta.Type)
@@ -962,22 +1067,20 @@ func TestGetBlock_AcceptsArchiveBlockTypeMismatch(t *testing.T) {
 	}
 }
 
-// TestGetBlock_RejectsByronMainArchiveBlock covers the one era whose body
-// cannot be fully bound to its header.
-//
-// gouroboros validates a Byron main block's transaction, delegation, and
-// update proofs but not ssc_proof, so an alteration confined to the SSC
-// payload changes no value this package checks: the hash, slot, height, and
-// previous hash all come from the untouched header. Rather than serve bytes
-// whose body is only partly authenticated, the fetch is refused.
-func TestGetBlock_RejectsByronMainArchiveBlock(t *testing.T) {
+// TestGetBlock_AcceptsByronMainArchiveBlock verifies that the decoded body,
+// including its SSC proof, is authenticated before archive data is served.
+func TestGetBlock_AcceptsByronMainArchiveBlock(t *testing.T) {
 	t.Parallel()
 
-	raw, trueType := realEraBlock(t, "Block_Byron_regular")
-	require.Equal(t, uint(gledger.BlockTypeByronMain), trueType,
-		"fixture must be a Byron main block")
+	raw, err := os.ReadFile(filepath.Join(
+		"..", "ledger", "testdata", "mainnet-byron-4471207.cbor",
+	))
+	require.NoError(t, err)
+	trueType := uint(gledger.BlockTypeByronMain)
 	decoded, err := gledger.NewBlockFromCbor(trueType, raw)
 	require.NoError(t, err)
+	require.EqualValues(t, 4_471_207, decoded.SlotNumber())
+	require.Len(t, decoded.Transactions(), 2)
 	hash := decoded.Hash()
 
 	db := newTestDB(t)
@@ -993,14 +1096,18 @@ func TestGetBlock_RejectsByronMainArchiveBlock(t *testing.T) {
 	rTxn := store.NewTransaction(false)
 	t.Cleanup(func() { _ = rTxn.Rollback() })
 
-	_, _, err = store.GetBlock(rTxn, decoded.SlotNumber(), hash[:])
-	require.ErrorIs(t, err, ErrArchiveBlockNotFullyAuthenticated)
+	blockCbor, meta, err := store.GetBlock(
+		rTxn, decoded.SlotNumber(), hash[:],
+	)
+	require.NoError(t, err)
+	assert.Equal(t, raw, blockCbor)
+	assert.Equal(t, uint(gledger.BlockTypeByronMain), meta.Type)
+	assert.Equal(t, decoded.BlockNumber(), meta.Height)
+	assert.Equal(t, prevHash[:], meta.PrevHash)
 }
 
-// TestGetBlock_AcceptsByronEpochBoundaryArchiveBlock is the boundary of that
-// restriction. An epoch boundary block carries no transactions and no SSC
-// payload, so a single body hash covers the whole body and the block is fully
-// bound to its header. Refusing it too would give up history for no gain.
+// TestGetBlock_AcceptsByronEpochBoundaryArchiveBlock verifies that archive
+// decoding also authenticates Byron epoch boundary blocks.
 func TestGetBlock_AcceptsByronEpochBoundaryArchiveBlock(t *testing.T) {
 	t.Parallel()
 

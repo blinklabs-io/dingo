@@ -31,6 +31,7 @@ import (
 	"github.com/blinklabs-io/dingo/ledger"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
+	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/blinklabs-io/gouroboros/protocol"
@@ -306,6 +307,8 @@ type leiosEndorserBlockData struct {
 	txsRaw                   []cbor.RawMessage
 	announcementHeaderRaw    []byte
 	semanticValidationStatus uint8
+	semanticValidationParent []byte
+	semanticValidationDone   chan struct{}
 	// partialTxs retains an incomplete fetch: a txCount-long slice whose nil
 	// entries are the transactions still missing (the same representation
 	// leiosNeededBitmap turns into a request bitmap). The relay diffuses an
@@ -327,6 +330,12 @@ type leiosEndorserBlockData struct {
 	relayOfferRequested      bool
 	relayManifestOffered     bool
 	relayTransactionsOffered bool
+	// relayOfferSource identifies the most recent live connection that offered
+	// this exact occurrence. LeiosFetch has no not-found response, so a
+	// by-point request to a peer that never advertised the occurrence closes
+	// the shared bearer. Keeping one bounded source lets historical backfill
+	// try a peer known to hold the requested point first.
+	relayOfferSource string
 	// seq is a monotonic insertion sequence assigned while leiosMu is held
 	// (see Ouroboros.leiosEndorserBlockSeq), used to order eviction instead of
 	// insertedAt. insertedAt is a wall-clock timestamp captured before the
@@ -347,6 +356,11 @@ type leiosEndorserBlockData struct {
 	// (bindLeiosEndorserBlockSlot) replaces it with a new, distinct value
 	// under the lock rather than flipping this field on the shared one.
 	slotVerified bool
+}
+
+type selectedLeiosHeader struct {
+	raw  []byte
+	refs uint64
 }
 
 // leiosStoreOrigin records whether a store's point is already authoritative.
@@ -370,10 +384,8 @@ const (
 // independently required occurrence at more than one slot at once (two
 // elections producing an identical transaction-reference set), and a
 // hash-only key could hold only one of them at a time -- silently evicting
-// or masking the other. The same composite identity is
-// used for leiosFetchInProgress's in-flight dedup and leiosClosureWaiters'
-// wait keys, so all three stay consistent about what "the same occurrence"
-// means.
+// or masking the other. Pending fetches and closure waiters use the same
+// composite identity so each path agrees on what "the same occurrence" means.
 func leiosBlockKey(slot uint64, hash []byte) string {
 	return fmt.Sprintf("%d:%s", slot, hash)
 }
@@ -461,6 +473,31 @@ func validateLeiosEndorserBlockTx(
 	return nil
 }
 
+func validateLeiosEndorserBlockTxStructure(
+	index int,
+	raw cbor.RawMessage,
+) error {
+	txCbor, err := leiosEndorserBlockTxCbor(raw)
+	if err != nil {
+		return fmt.Errorf("decode endorser tx %d envelope: %w", index, err)
+	}
+	if _, err := safedecode.Transaction(gledger.TxTypeDijkstra, txCbor); err != nil {
+		return fmt.Errorf("decode endorser tx %d: %w", index, err)
+	}
+	return nil
+}
+
+func validateLeiosEndorserBlockTxStructures(
+	txsRaw []cbor.RawMessage,
+) error {
+	for i, raw := range txsRaw {
+		if err := validateLeiosEndorserBlockTxStructure(i, raw); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func leiosEndorserBlockTxCbor(raw cbor.RawMessage) ([]byte, error) {
 	txCbor := []byte(raw)
 	if len(txCbor) > 0 && txCbor[0]>>5 == 2 {
@@ -544,6 +581,15 @@ func (o *Ouroboros) storeLeiosEndorserBlock(
 	if !slices.Equal(blockHash.Bytes(), point.Hash) {
 		return errors.New("leios endorser block cache: point hash mismatch")
 	}
+	block, err := decodeLeiosEndorserBlock(blockRaw)
+	if err != nil {
+		return fmt.Errorf("decode leios endorser block: %w", err)
+	}
+	if len(txsRaw) == len(block.TransactionReferences) {
+		if err := validateLeiosEndorserBlockTxStructures(txsRaw); err != nil {
+			return fmt.Errorf("leios endorser block cache: %w", err)
+		}
+	}
 	// Bind the entry to the slot its announcement actually vouched for. A
 	// peer-offered point is only that connection's claim: the manifest is
 	// content-addressed, so an authentic endorser block can be replayed under
@@ -573,15 +619,6 @@ func (o *Ouroboros) storeLeiosEndorserBlock(
 	o.leiosAnnouncementsMu.Lock()
 	verified := origin == leiosStoreAuthoritative ||
 		o.leiosAnnouncementBindsSlotLocked(point.Hash, point.Slot)
-	// leiosAnnouncementsMu is released by explicit Unlock calls on this path,
-	// not by a defer, so this decode must fail by returning rather than by
-	// unwinding: a panic here would leave the lock held for the life of the
-	// process. As an error it takes the branch below, which unlocks.
-	block, err := decodeLeiosEndorserBlock(blockRaw)
-	if err != nil {
-		o.leiosAnnouncementsMu.Unlock()
-		return fmt.Errorf("decode leios endorser block: %w", err)
-	}
 	cacheKeys := []string{leiosBlockKey(point.Slot, point.Hash)}
 	data := &leiosEndorserBlockData{
 		point:                    point,
@@ -596,6 +633,12 @@ func (o *Ouroboros) storeLeiosEndorserBlock(
 		semanticValidationStatus: leiosEBValidationUnknown,
 	}
 	o.leiosMu.Lock()
+	if !data.slotVerified {
+		if selectedHeader := o.selectedLeiosHeaderForDataLocked(data); len(selectedHeader) > 0 {
+			data.slotVerified = true
+			data.announcementHeaderRaw = selectedHeader
+		}
+	}
 	if o.leiosEndorserBlocks == nil {
 		o.leiosEndorserBlocks = make(map[string]*leiosEndorserBlockData)
 	}
@@ -631,9 +674,14 @@ func (o *Ouroboros) storeLeiosEndorserBlock(
 		data.partialTxs = existing.partialTxs
 		data.relayOfferRequested = data.relayOfferRequested ||
 			existing.relayOfferRequested
+		data.relayOfferSource = existing.relayOfferSource
 		data.relayManifestOffered = existing.relayManifestOffered
 		data.relayTransactionsOffered = existing.relayTransactionsOffered
 		data.semanticValidationStatus = existing.semanticValidationStatus
+		data.semanticValidationParent = slices.Clone(
+			existing.semanticValidationParent,
+		)
+		data.semanticValidationDone = existing.semanticValidationDone
 		if len(data.announcementHeaderRaw) == 0 {
 			data.announcementHeaderRaw = slices.Clone(
 				existing.announcementHeaderRaw,
@@ -780,21 +828,52 @@ func (o *Ouroboros) enqueueLeiosRelayOffers(
 	o.leiosMu.Unlock()
 }
 
-// markLeiosEndorserBlockRelayOffer records that a peer offered an occurrence
-// already present in cache. This handles the common case where chain sync
-// completed the EB before its separate LeiosNotify offers arrived.
+// markLeiosEndorserBlockRelayOffer records that a peer offered an occurrence.
+// An intent-only entry preserves an offer that arrives before the manifest;
+// it shares the cache's entry and TTL bounds and is merged by a later store.
 func (o *Ouroboros) markLeiosEndorserBlockRelayOffer(
 	point ocommon.Point,
 ) {
+	o.markLeiosEndorserBlockRelayOfferFrom(point, "")
+}
+
+func (o *Ouroboros) markLeiosEndorserBlockRelayOfferFrom(
+	point ocommon.Point,
+	connectionID string,
+) {
+	if len(point.Hash) != lcommon.Blake2b256Size {
+		return
+	}
 	key := leiosBlockKey(point.Slot, point.Hash)
 	o.leiosMu.Lock()
+	if o.leiosEndorserBlocks == nil {
+		o.leiosEndorserBlocks = make(map[string]*leiosEndorserBlockData)
+	}
+	now := time.Now()
+	o.pruneLeiosEndorserBlockCacheLocked(now)
 	current := o.leiosEndorserBlocks[key]
 	if current == nil {
+		o.leiosEndorserBlockSeq++
+		o.leiosEndorserBlocks[key] = &leiosEndorserBlockData{
+			point: ocommon.Point{
+				Slot: point.Slot,
+				Hash: slices.Clone(point.Hash),
+			},
+			cacheKeys:           []string{key},
+			insertedAt:          now,
+			relayOfferRequested: true,
+			relayOfferSource:    connectionID,
+			seq:                 o.leiosEndorserBlockSeq,
+		}
+		o.pruneLeiosEndorserBlockCacheLocked(now)
 		o.leiosMu.Unlock()
 		return
 	}
 	updated := *current
 	updated.relayOfferRequested = true
+	if connectionID != "" {
+		updated.relayOfferSource = connectionID
+	}
 	for _, cacheKey := range current.cacheKeys {
 		if o.leiosEndorserBlocks[cacheKey] == current {
 			o.leiosEndorserBlocks[cacheKey] = &updated
@@ -813,7 +892,11 @@ func (o *Ouroboros) scheduleLeiosEndorserBlockValidation(
 	}
 	blockHash := lcommon.Blake2b256Hash(data.blockRaw)
 	if !o.config.EnableLeios {
-		o.publishValidatedLeiosEndorserBlock(point.Slot, blockHash)
+		o.publishValidatedLeiosEndorserBlock(
+			point.Slot,
+			lcommon.Blake2b256{},
+			blockHash,
+		)
 		return
 	}
 	if !data.completeTxCache() ||
@@ -843,8 +926,20 @@ func (o *Ouroboros) scheduleLeiosEndorserBlockValidation(
 		o.leiosValidationMu.Unlock()
 		return
 	}
+	header, err := gdijkstra.NewDijkstraBlockHeaderFromCbor(
+		current.announcementHeaderRaw,
+	)
+	if err != nil {
+		o.leiosMu.Unlock()
+		<-o.leiosValidationSlots
+		o.leiosValidationMu.Unlock()
+		return
+	}
+	parentHash := ledger.LeiosValidationParentHash(header)
 	pending := *current
 	pending.semanticValidationStatus = leiosEBValidationPending
+	pending.semanticValidationParent = slices.Clone(parentHash)
+	pending.semanticValidationDone = make(chan struct{})
 	for _, cacheKey := range current.cacheKeys {
 		if o.leiosEndorserBlocks[cacheKey] == current {
 			o.leiosEndorserBlocks[cacheKey] = &pending
@@ -857,6 +952,264 @@ func (o *Ouroboros) scheduleLeiosEndorserBlockValidation(
 	go o.validateLeiosEndorserBlock(key, pending)
 }
 
+// ValidateLeiosEndorserBlockForHeader waits through the configured diffusion
+// window for the exact endorser block announced by header, then validates it
+// synchronously while header's parent is still the applied ledger tip. Callers
+// use this at the selected block's apply boundary, or before adopting a locally
+// forged block, so validation cannot race the ranking block past the parent
+// state it names. Endorser-block bodies arrive independently on asynchronous
+// Leios fetch workers.
+func (o *Ouroboros) ValidateLeiosEndorserBlockForHeader(
+	ctx context.Context,
+	header lcommon.BlockHeader,
+) error {
+	if header == nil {
+		return errors.New("nil Leios announcing header")
+	}
+	announcer, ok := header.(interface {
+		LeiosAnnouncement() (lcommon.Blake2b256, uint64, bool)
+	})
+	if !ok {
+		return nil
+	}
+	ebHash, _, announced := announcer.LeiosAnnouncement()
+	if !announced {
+		return nil
+	}
+	if isNilInterface(o.leiosAnnouncementLedger) {
+		return errors.New("leios announcement ledger unavailable")
+	}
+	if o.ledgerState != nil && !slices.Equal(
+		o.ledgerState.Tip().Point.Hash,
+		ledger.LeiosValidationParentHash(header),
+	) {
+		return ledger.ErrLeiosValidationParentUnavailable
+	}
+	releaseAuthority, err := o.retainSelectedLeiosHeader(header)
+	if err != nil {
+		return err
+	}
+	defer releaseAuthority()
+	if data, ok := o.lookupLeiosEndorserBlock(
+		header.SlotNumber(),
+		ebHash.Bytes(),
+	); ok && data != nil {
+		if err := validateLeiosEndorserBlockBinding(header, data); err != nil {
+			return err
+		}
+	}
+	if publish := o.bindLeiosEndorserBlockSlot(
+		ebHash.Bytes(),
+		header.SlotNumber(),
+	); publish != nil {
+		publish()
+	}
+	waitCtx := ctx
+	cancel := func() {}
+	timeout := o.config.LeiosTxFetchTailBudget
+	if timeout > 0 {
+		waitCtx, cancel = context.WithTimeout(ctx, timeout)
+	}
+	defer cancel()
+	if timeout <= 0 {
+		key := leiosBlockKey(header.SlotNumber(), ebHash.Bytes())
+		o.leiosMu.RLock()
+		complete := o.leiosClosureCompleteLocked(key)
+		o.leiosMu.RUnlock()
+		if !complete {
+			return errors.New(
+				"leios endorser closure unavailable with tail retry disabled",
+			)
+		}
+	} else if !o.waitForLeiosEndorserClosure(
+		waitCtx,
+		header.SlotNumber(),
+		ebHash.Bytes(),
+	) {
+		if err := waitCtx.Err(); err != nil {
+			return fmt.Errorf("wait for Leios endorser closure: %w", err)
+		}
+		return errors.New("leios endorser closure unavailable")
+	}
+	key := leiosBlockKey(header.SlotNumber(), ebHash.Bytes())
+	data, ok := o.lookupLeiosEndorserBlock(
+		header.SlotNumber(),
+		ebHash.Bytes(),
+	)
+	if !ok || data == nil || !data.completeTxCache() || !data.slotVerified {
+		return errors.New("leios endorser closure unavailable after wakeup")
+	}
+	if err := validateLeiosEndorserBlockBinding(header, data); err != nil {
+		return err
+	}
+	validationParent := ledger.LeiosValidationParentHash(header)
+	var pending leiosEndorserBlockData
+	for {
+		o.leiosMu.Lock()
+		current := o.leiosEndorserBlocks[key]
+		if current == nil {
+			o.leiosMu.Unlock()
+			return errors.New("leios endorser closure changed before validation")
+		}
+		sameParent := slices.Equal(
+			current.semanticValidationParent,
+			validationParent,
+		)
+		switch {
+		case current.semanticValidationStatus == leiosEBValidationValid &&
+			sameParent:
+			o.leiosMu.Unlock()
+			return nil
+		case current.semanticValidationStatus == leiosEBValidationInvalid &&
+			sameParent:
+			o.leiosMu.Unlock()
+			return fmt.Errorf(
+				"%w: leios endorser closure failed semantic validation",
+				ledger.ErrInvalidLeiosEndorserBlockTransactions,
+			)
+		case current.semanticValidationStatus == leiosEBValidationPending &&
+			sameParent:
+			done := current.semanticValidationDone
+			o.leiosMu.Unlock()
+			select {
+			case <-done:
+				continue
+			case <-waitCtx.Done():
+				return fmt.Errorf(
+					"wait for Leios endorser validation: %w",
+					waitCtx.Err(),
+				)
+			}
+		}
+		pending = *current
+		pending.semanticValidationStatus = leiosEBValidationPending
+		pending.semanticValidationParent = slices.Clone(validationParent)
+		pending.semanticValidationDone = make(chan struct{})
+		for _, cacheKey := range current.cacheKeys {
+			if o.leiosEndorserBlocks[cacheKey] == current {
+				o.leiosEndorserBlocks[cacheKey] = &pending
+			}
+		}
+		o.leiosMu.Unlock()
+		break
+	}
+
+	txCbors := make([][]byte, len(pending.txsRaw))
+	err = nil
+	for i, raw := range pending.txsRaw {
+		txCbors[i], err = leiosEndorserBlockTxCbor(raw)
+		if err != nil {
+			err = fmt.Errorf(
+				"%w: decode endorser transaction %d: %w",
+				ledger.ErrInvalidLeiosEndorserBlockTransactions,
+				i,
+				err,
+			)
+			break
+		}
+	}
+	if err == nil {
+		err = o.leiosAnnouncementLedger.ValidateLeiosEndorserBlockTransactions(
+			ctx,
+			header,
+			txCbors,
+		)
+	}
+	status := leiosEndorserBlockValidationStatus(err)
+	validated := o.updateLeiosEndorserBlockValidation(
+		key,
+		validationParent,
+		pending.semanticValidationDone,
+		status,
+	)
+	if err != nil {
+		return err
+	}
+	if validated == nil {
+		return errors.New("leios endorser closure changed during validation")
+	}
+	o.publishValidatedLeiosEndorserBlock(
+		validated.point.Slot,
+		header.Hash(),
+		lcommon.Blake2b256Hash(validated.blockRaw),
+	)
+	return nil
+}
+
+func (o *Ouroboros) retainSelectedLeiosHeader(
+	header lcommon.BlockHeader,
+) (func(), error) {
+	announcer := header.(interface {
+		LeiosAnnouncement() (lcommon.Blake2b256, uint64, bool)
+	})
+	ebHash, _, announced := announcer.LeiosAnnouncement()
+	if !announced || len(header.Cbor()) == 0 {
+		return nil, errors.New("selected Leios header has no preserved CBOR")
+	}
+	key := leiosBlockKey(header.SlotNumber(), ebHash.Bytes())
+	parentKey := string(ledger.LeiosValidationParentHash(header))
+	raw := slices.Clone(header.Cbor())
+	rawKey := string(raw)
+	o.leiosMu.Lock()
+	if o.leiosSelectedHeaders == nil {
+		o.leiosSelectedHeaders = make(
+			map[string]map[string]map[string]selectedLeiosHeader,
+		)
+	}
+	byParent := o.leiosSelectedHeaders[key]
+	if byParent == nil {
+		byParent = make(map[string]map[string]selectedLeiosHeader)
+		o.leiosSelectedHeaders[key] = byParent
+	}
+	byRaw := byParent[parentKey]
+	if byRaw == nil {
+		byRaw = make(map[string]selectedLeiosHeader)
+		byParent[parentKey] = byRaw
+	}
+	selected := byRaw[rawKey]
+	selected.raw = raw
+	selected.refs++
+	byRaw[rawKey] = selected
+	o.leiosMu.Unlock()
+	return func() {
+		o.leiosMu.Lock()
+		if current := o.leiosSelectedHeaders[key]; current != nil {
+			currentByRaw := current[parentKey]
+			selected := currentByRaw[rawKey]
+			if selected.refs > 1 {
+				selected.refs--
+				currentByRaw[rawKey] = selected
+			} else {
+				delete(currentByRaw, rawKey)
+				if len(currentByRaw) == 0 {
+					delete(current, parentKey)
+				}
+			}
+			if len(current) == 0 {
+				delete(o.leiosSelectedHeaders, key)
+			}
+		}
+		o.leiosMu.Unlock()
+	}, nil
+}
+
+func (o *Ouroboros) selectedLeiosHeaderForDataLocked(
+	data *leiosEndorserBlockData,
+) []byte {
+	for _, byRaw := range o.leiosSelectedHeaders[leiosBlockKey(
+		data.point.Slot,
+		data.point.Hash,
+	)] {
+		for _, selected := range byRaw {
+			header, err := gdijkstra.NewDijkstraBlockHeaderFromCbor(selected.raw)
+			if err == nil && validateLeiosEndorserBlockBinding(header, data) == nil {
+				return slices.Clone(selected.raw)
+			}
+		}
+	}
+	return nil
+}
+
 func (o *Ouroboros) validateLeiosEndorserBlock(
 	key string,
 	data leiosEndorserBlockData,
@@ -866,14 +1219,20 @@ func (o *Ouroboros) validateLeiosEndorserBlock(
 	header, err := gdijkstra.NewDijkstraBlockHeaderFromCbor(
 		data.announcementHeaderRaw,
 	)
+	if err != nil {
+		err = fmt.Errorf(
+			"%w: decode Leios announcing header: %w",
+			ledger.ErrInvalidLeiosEndorserBlockTransactions,
+			err,
+		)
+	} else if header == nil {
+		err = fmt.Errorf(
+			"%w: decoded Leios announcing header is nil",
+			ledger.ErrInvalidLeiosEndorserBlockTransactions,
+		)
+	}
 	if err == nil {
-		announcedHash, _, ok := header.LeiosAnnouncement()
-		if !ok || header.SlotNumber() != data.point.Slot ||
-			!slices.Equal(announcedHash.Bytes(), data.point.Hash) {
-			err = errors.New(
-				"leios announcing header does not bind the cached endorser block",
-			)
-		}
+		err = validateLeiosEndorserBlockBinding(header, &data)
 	}
 	var txCbors [][]byte
 	if err == nil {
@@ -881,7 +1240,12 @@ func (o *Ouroboros) validateLeiosEndorserBlock(
 		for i, raw := range data.txsRaw {
 			txCbors[i], err = leiosEndorserBlockTxCbor(raw)
 			if err != nil {
-				err = fmt.Errorf("decode endorser transaction %d: %w", i, err)
+				err = fmt.Errorf(
+					"%w: decode endorser transaction %d: %w",
+					ledger.ErrInvalidLeiosEndorserBlockTransactions,
+					i,
+					err,
+				)
 				break
 			}
 		}
@@ -896,61 +1260,140 @@ func (o *Ouroboros) validateLeiosEndorserBlock(
 	if o.leiosValidationCtx.Err() != nil {
 		err = o.leiosValidationCtx.Err()
 	}
-	status := leiosEBValidationInvalid
+	status := leiosEBValidationUnknown
 	switch {
 	case err == nil:
 		status = leiosEBValidationValid
-	case errors.Is(err, ledger.ErrLeiosValidationParentUnavailable),
-		errors.Is(err, context.Canceled),
-		errors.Is(err, context.DeadlineExceeded):
-		status = leiosEBValidationUnknown
-	default:
+	case errors.Is(err, ledger.ErrInvalidLeiosEndorserBlockTransactions):
+		status = leiosEBValidationInvalid
 		o.config.Logger.Debug(
 			"rejecting semantically invalid Leios endorser block",
 			"slot", data.point.Slot,
 			"hash", hex.EncodeToString(data.point.Hash),
 			"error", err,
 		)
+	case errors.Is(err, ledger.ErrLeiosValidationParentUnavailable),
+		errors.Is(err, ledger.ErrLeiosValidationParentSuperseded),
+		errors.Is(err, context.Canceled),
+		errors.Is(err, context.DeadlineExceeded):
+		status = leiosEBValidationUnknown
+	default:
+		o.config.Logger.Debug(
+			"deferring Leios endorser block validation after local failure",
+			"slot", data.point.Slot,
+			"hash", hex.EncodeToString(data.point.Hash),
+			"error", err,
+		)
 	}
-	validated := o.updateLeiosEndorserBlockValidation(key, status)
+	validated := o.updateLeiosEndorserBlockValidation(
+		key,
+		data.semanticValidationParent,
+		data.semanticValidationDone,
+		status,
+	)
 	if status == leiosEBValidationValid && validated != nil {
 		o.publishValidatedLeiosEndorserBlock(
 			validated.point.Slot,
+			header.Hash(),
 			lcommon.Blake2b256Hash(validated.blockRaw),
 		)
 	}
 }
 
+func validateLeiosEndorserBlockBinding(
+	header lcommon.BlockHeader,
+	data *leiosEndorserBlockData,
+) error {
+	dijkstraHeader, ok := header.(*gdijkstra.DijkstraBlockHeader)
+	if !ok {
+		return fmt.Errorf(
+			"%w: header has no Leios announcement",
+			ledger.ErrInvalidLeiosEndorserBlockTransactions,
+		)
+	}
+	if dijkstraHeader == nil {
+		return fmt.Errorf(
+			"%w: Leios announcing header is nil",
+			ledger.ErrInvalidLeiosEndorserBlockTransactions,
+		)
+	}
+	announcedHash, announcedSize, announced := dijkstraHeader.LeiosAnnouncement()
+	if !announced || dijkstraHeader.SlotNumber() != data.point.Slot ||
+		!slices.Equal(announcedHash.Bytes(), data.point.Hash) {
+		return fmt.Errorf(
+			"%w: leios announcing header does not bind the cached endorser block",
+			ledger.ErrInvalidLeiosEndorserBlockTransactions,
+		)
+	}
+	if uint64(len(data.blockRaw)) != announcedSize {
+		return fmt.Errorf(
+			"%w: Leios endorser block size %d does not match announcement size %d",
+			ledger.ErrInvalidLeiosEndorserBlockTransactions,
+			len(data.blockRaw),
+			announcedSize,
+		)
+	}
+	return nil
+}
+
+func leiosEndorserBlockValidationStatus(err error) uint8 {
+	switch {
+	case err == nil:
+		return leiosEBValidationValid
+	case errors.Is(err, ledger.ErrLedgerViewStorageFault):
+		return leiosEBValidationUnknown
+	case errors.Is(err, ledger.ErrInvalidLeiosEndorserBlockTransactions):
+		return leiosEBValidationInvalid
+	default:
+		return leiosEBValidationUnknown
+	}
+}
+
 func (o *Ouroboros) updateLeiosEndorserBlockValidation(
 	key string,
+	parentHash []byte,
+	done chan struct{},
 	status uint8,
 ) *leiosEndorserBlockData {
 	o.leiosMu.Lock()
-	defer o.leiosMu.Unlock()
 	current := o.leiosEndorserBlocks[key]
 	if current == nil ||
-		current.semanticValidationStatus != leiosEBValidationPending {
+		current.semanticValidationStatus != leiosEBValidationPending ||
+		!slices.Equal(current.semanticValidationParent, parentHash) ||
+		current.semanticValidationDone != done {
+		o.leiosMu.Unlock()
+		close(done)
 		return nil
 	}
 	updated := *current
 	updated.semanticValidationStatus = status
+	updated.semanticValidationDone = nil
 	for _, cacheKey := range current.cacheKeys {
 		if o.leiosEndorserBlocks[cacheKey] == current {
 			o.leiosEndorserBlocks[cacheKey] = &updated
 		}
 	}
+	o.leiosMu.Unlock()
+	close(done)
 	return &updated
 }
 
 func (o *Ouroboros) retryLeiosEndorserBlockValidations() {
+	blocks := o.retryableLeiosEndorserBlocks()
+	for _, data := range blocks {
+		o.scheduleLeiosEndorserBlockValidation(data.point, data)
+	}
+}
+
+func (o *Ouroboros) retryableLeiosEndorserBlocks() []*leiosEndorserBlockData {
 	o.leiosMu.RLock()
 	blocks := make([]*leiosEndorserBlockData, 0, len(o.leiosEndorserBlocks))
-	seen := make(map[string]struct{}, len(o.leiosEndorserBlocks))
-	for key, data := range o.leiosEndorserBlocks {
-		if _, ok := seen[key]; ok {
+	seen := make(map[*leiosEndorserBlockData]struct{}, len(o.leiosEndorserBlocks))
+	for _, data := range o.leiosEndorserBlocks {
+		if _, ok := seen[data]; ok {
 			continue
 		}
-		seen[key] = struct{}{}
+		seen[data] = struct{}{}
 		if data != nil && data.semanticValidationStatus == leiosEBValidationUnknown &&
 			data.slotVerified && data.completeTxCache() &&
 			len(data.announcementHeaderRaw) > 0 {
@@ -958,19 +1401,24 @@ func (o *Ouroboros) retryLeiosEndorserBlockValidations() {
 		}
 	}
 	o.leiosMu.RUnlock()
-	for _, data := range blocks {
-		o.scheduleLeiosEndorserBlockValidation(data.point, data)
-	}
+	slices.SortFunc(blocks, func(a, b *leiosEndorserBlockData) int {
+		if order := cmp.Compare(b.point.Slot, a.point.Slot); order != 0 {
+			return order
+		}
+		return slices.Compare(a.point.Hash, b.point.Hash)
+	})
+	return blocks
 }
 
 func (o *Ouroboros) publishValidatedLeiosEndorserBlock(
 	slot uint64,
+	rbHash lcommon.Blake2b256,
 	blockHash lcommon.Blake2b256,
 ) {
 	// Trigger local vote emission for the stored block, outside the
 	// cache lock
-	if o.leiosVotes != nil {
-		o.leiosVotes.HandleEndorserBlock(slot, blockHash)
+	if o.leiosVotes != nil && rbHash != (lcommon.Blake2b256{}) {
+		o.leiosVotes.HandleValidatedEndorserBlock(slot, rbHash, blockHash)
 	}
 	// Register the block into the Leios pipeline for stage/timing
 	// tracking and EB equivocation detection
@@ -1084,19 +1532,57 @@ func (o *Ouroboros) bindLeiosEndorserBlockSlot(
 ) func() {
 	// lookupLeiosEndorserBlock, not a direct map read: an entry may exist
 	// only in the blob store (evicted from memory by TTL, or never loaded
-	// this run). The lookup is keyed by (slot, hash), so a result found here
-	// is necessarily this exact occurrence -- a cached entry for a different
-	// slot of the same hash lives under its own key and is simply not found,
-	// left untouched rather than evicted.
-	data, ok := o.lookupLeiosEndorserBlock(slot, ebHash)
-	if !ok || data == nil {
-		return nil
-	}
+	// this run). A result found there is necessarily this exact occurrence.
+	// When it is absent, the authoritative binding below may reuse complete
+	// content cached for the same hash while keeping the occurrences separate.
+	key := leiosBlockKey(slot, ebHash)
+	_, _ = o.lookupLeiosEndorserBlock(slot, ebHash)
 	o.leiosMu.Lock()
-	cur, ok := o.leiosEndorserBlocks[leiosBlockKey(slot, ebHash)]
-	if !ok || cur != data {
-		// Superseded (or evicted) by a concurrent update since the lookup
-		// above; nothing to promote.
+	now := time.Now()
+	o.pruneLeiosEndorserBlockCacheLocked(now)
+	data := o.leiosEndorserBlocks[key]
+	contentChanged := false
+	if data == nil || !data.completeTxCache() {
+		// The manifest is content-addressed, so a complete cached occurrence
+		// supplies the same bytes and transaction bodies. The announcement is
+		// the authority for the new slot. Keep any exact-slot intent and trust
+		// state while filling its content from the other occurrence.
+		for _, candidate := range o.leiosEndorserBlocks {
+			if candidate == nil || candidate.expired(now) ||
+				!candidate.completeTxCache() ||
+				!slices.Equal(candidate.point.Hash, ebHash) {
+				continue
+			}
+			if data == nil {
+				o.leiosEndorserBlockSeq++
+				data = &leiosEndorserBlockData{
+					point: ocommon.Point{
+						Slot: slot,
+						Hash: slices.Clone(ebHash),
+					},
+					cacheKeys:  []string{key},
+					insertedAt: now,
+					seq:        o.leiosEndorserBlockSeq,
+				}
+			}
+			completed := *data
+			completed.blockRaw = slices.Clone(candidate.blockRaw)
+			completed.txsRaw = cloneRawMessages(candidate.txsRaw)
+			completed.partialTxs = nil
+			completed.txCount = candidate.txCount
+			completed.semanticValidationStatus = leiosEBValidationUnknown
+			for _, cacheKey := range data.cacheKeys {
+				if current := o.leiosEndorserBlocks[cacheKey]; current == data ||
+					current == nil {
+					o.leiosEndorserBlocks[cacheKey] = &completed
+				}
+			}
+			data = &completed
+			contentChanged = true
+			break
+		}
+	}
+	if data == nil {
 		o.leiosMu.Unlock()
 		return nil
 	}
@@ -1106,7 +1592,7 @@ func (o *Ouroboros) bindLeiosEndorserBlockSlot(
 	// read of the same field. Publish a copy instead, the same pattern
 	// retainLeiosPartialTxs uses.
 	verified := *data
-	changed := false
+	changed := contentChanged
 	if !verified.slotVerified {
 		verified.slotVerified = true
 		changed = true
@@ -1136,6 +1622,7 @@ func (o *Ouroboros) bindLeiosEndorserBlockSlot(
 			o.signalLeiosClosureWaitersLocked(key)
 		}
 	}
+	o.pruneLeiosEndorserBlockCacheLocked(time.Now())
 	o.leiosMu.Unlock()
 	return func() {
 		o.publishLeiosEndorserBlock(
@@ -1156,7 +1643,11 @@ func (o *Ouroboros) leiosDatabase() *database.Database {
 }
 
 func (data *leiosEndorserBlockData) completeTxCache() bool {
-	return data != nil && len(data.txsRaw) == data.txCount
+	return data != nil && data.hasManifest() && len(data.txsRaw) == data.txCount
+}
+
+func (data *leiosEndorserBlockData) hasManifest() bool {
+	return data != nil && len(data.blockRaw) > 0
 }
 
 // approxBytes estimates the memory retained by one cache entry: the manifest
@@ -1384,17 +1875,32 @@ func (o *Ouroboros) pruneLeiosEndorserBlockCacheLocked(now time.Time) {
 	for data := range uniqueBlocks {
 		blocks = append(blocks, data)
 	}
-	// Sort by seq, not insertedAt: insertedAt is a wall-clock timestamp
-	// captured before leiosMu is acquired, so a delayed goroutine can carry an
-	// earlier timestamp into the map after a goroutine that actually won the
-	// lock and inserted first. seq is assigned while the lock is held, so it
-	// reflects true insertion order.
+	// Evict intent-only entries first, then peer-fetched manifests whose slots
+	// have not been corroborated. Unauthenticated network input must not
+	// displace content bound to an authoritative slot from the shared cache.
+	// Within each class, sort by seq rather than insertedAt:
+	// insertedAt is a wall-clock timestamp captured before leiosMu is acquired,
+	// so a delayed goroutine can carry an earlier timestamp into the map after a
+	// goroutine that actually won the lock and inserted first. seq is assigned
+	// while the lock is held, so it reflects true insertion order.
 	slices.SortFunc(blocks, func(a, b *leiosEndorserBlockData) int {
+		if a.hasManifest() != b.hasManifest() {
+			if a.hasManifest() {
+				return 1
+			}
+			return -1
+		}
+		if a.slotVerified != b.slotVerified {
+			if a.slotVerified {
+				return 1
+			}
+			return -1
+		}
 		return cmp.Compare(a.seq, b.seq)
 	})
-	// Evict oldest-inserted entries first until both the entry-count and the
-	// aggregate byte budget are satisfied. totalBytes is updated as each
-	// victim is chosen instead of being recomputed from scratch.
+	// Evict in the priority order above until both the entry-count and aggregate
+	// byte budget are satisfied. totalBytes is updated as each victim is chosen
+	// instead of being recomputed from scratch.
 	evict := 0
 	for evict < len(blocks) &&
 		(len(blocks)-evict > leiosEndorserBlockCacheMaxEntries ||
@@ -1454,6 +1960,9 @@ func (o *Ouroboros) lookupLeiosEndorserBlock(
 	}
 	if !data.expired(now) {
 		o.leiosMu.RUnlock()
+		if !data.hasManifest() {
+			return o.loadLeiosEBFromDB(slot, hash)
+		}
 		return data, true
 	}
 	o.leiosMu.RUnlock()
@@ -1470,6 +1979,9 @@ func (o *Ouroboros) lookupLeiosEndorserBlock(
 		return o.loadLeiosEBFromDB(slot, hash)
 	}
 	o.leiosMu.Unlock()
+	if !data.hasManifest() {
+		return o.loadLeiosEBFromDB(slot, hash)
+	}
 	return data, true
 }
 
@@ -1523,13 +2035,18 @@ func (o *Ouroboros) loadLeiosEBFromDB(
 		return nil, false
 	}
 	if len(txsRaw) > 0 {
-		if err := validateLeiosEndorserBlockTxs(manifestRaw, txsRaw); err != nil {
+		err := validateLeiosEndorserBlockTxs(manifestRaw, txsRaw)
+		if err == nil {
+			err = validateLeiosEndorserBlockTxStructures(txsRaw)
+		}
+		if err != nil {
 			// Transaction blobs written before manifest binding was enforced (or
-			// corrupted afterward) are only a historical-serving cache. Keep the
-			// content-addressed manifest, but discard the untrusted bodies so the
-			// normal by-point path fetches and persists a verified replacement.
+			// structural decoding was enforced), or corrupted afterward, are only
+			// a historical-serving cache. Keep the content-addressed manifest, but
+			// discard the untrusted bodies so the normal by-point path fetches and
+			// persists a verified replacement.
 			o.config.Logger.Debug(
-				"discarding leios EB txs that mismatch persisted manifest",
+				"discarding invalid persisted leios EB txs",
 				"component", "network",
 				"hash", hex.EncodeToString(hash),
 				"error", err,
@@ -1582,9 +2099,14 @@ func (o *Ouroboros) loadLeiosEBFromDB(
 		o.leiosEndorserBlocks = make(map[string]*leiosEndorserBlockData)
 	}
 	// Only cache if no fresher entry has appeared while we were loading.
+	now := time.Now()
 	if existing := o.leiosEndorserBlocks[cacheKeys[0]]; existing == nil ||
-		existing.expired(time.Now()) {
-		o.pruneLeiosEndorserBlockCacheLocked(time.Now())
+		existing.expired(now) || !existing.hasManifest() {
+		if existing != nil && !existing.expired(now) {
+			data.relayOfferRequested = existing.relayOfferRequested
+			data.relayOfferSource = existing.relayOfferSource
+		}
+		o.pruneLeiosEndorserBlockCacheLocked(now)
 		o.leiosEndorserBlockSeq++
 		data.seq = o.leiosEndorserBlockSeq
 		for _, key := range cacheKeys {
@@ -1594,11 +2116,12 @@ func (o *Ouroboros) loadLeiosEBFromDB(
 		// budget but pushes the aggregate over its budget is evicted
 		// promptly, the same way storeLeiosEndorserBlock prunes both before
 		// and after admitting an entry.
-		o.pruneLeiosEndorserBlockCacheLocked(time.Now())
+		o.pruneLeiosEndorserBlockCacheLocked(now)
 	} else {
 		data = existing
 	}
 	o.leiosMu.Unlock()
+	o.enqueueLeiosRelayOffers(data.point, data)
 	return data, true
 }
 
@@ -1624,6 +2147,28 @@ func leiosTxsFromBitmap(
 		ret = append(ret, slices.Clone(tx))
 	}
 	return ret
+}
+
+func leiosAvailableTxsFromBitmap(
+	txs []cbor.RawMessage,
+	requested map[uint16]uint64,
+) (map[uint16]uint64, []cbor.RawMessage) {
+	available := make(map[uint16]uint64)
+	for idx, tx := range txs {
+		if tx == nil {
+			continue
+		}
+		bucket := idx / 64
+		if bucket > math.MaxUint16 {
+			break
+		}
+		mask := uint64(1) << uint(63-(idx%64))
+		if requested[uint16(bucket)]&mask == 0 { // #nosec G115 -- checked above
+			continue
+		}
+		available[uint16(bucket)] |= mask // #nosec G115 -- checked above
+	}
+	return available, leiosTxsFromBitmap(txs, available)
 }
 
 func validateLeiosTxBitmap(count int, bitmaps map[uint16]uint64) error {
@@ -1668,10 +2213,34 @@ func (o *Ouroboros) EndorserBlockTxsByHash(
 	ebSlot uint64,
 ) ([]cbor.RawMessage, bool) {
 	data, ok := o.lookupLeiosEndorserBlock(ebSlot, ebHash)
-	if !ok || !data.completeTxCache() || !data.slotVerified {
+	if !ok || !data.completeTxCache() || !data.slotVerified ||
+		data.semanticValidationStatus == leiosEBValidationPending ||
+		data.semanticValidationStatus == leiosEBValidationInvalid {
 		return nil, false
 	}
 	return cloneRawMessages(data.txsRaw), true
+}
+
+// EndorserBlockValidation reports the cached semantic verdict for an endorser
+// block occurrence.
+func (o *Ouroboros) EndorserBlockValidation(
+	ebHash []byte,
+	ebSlot uint64,
+) ledger.EndorserBlockValidationStatus {
+	data, ok := o.lookupLeiosEndorserBlock(ebSlot, ebHash)
+	if !ok {
+		return ledger.EndorserBlockValidationUnknown
+	}
+	switch data.semanticValidationStatus {
+	case leiosEBValidationPending:
+		return ledger.EndorserBlockValidationPending
+	case leiosEBValidationValid:
+		return ledger.EndorserBlockValidationValid
+	case leiosEBValidationInvalid:
+		return ledger.EndorserBlockValidationInvalid
+	default:
+		return ledger.EndorserBlockValidationUnknown
+	}
 }
 
 // EndorserBlockTxHashesByHash returns the manifest-order transaction hashes of

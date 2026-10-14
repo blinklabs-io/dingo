@@ -41,9 +41,12 @@ type LeiosVoteHandler interface {
 	// VotesByIds returns raw CBOR for the requested votes, omitting
 	// unknown ids.
 	VotesByIds(ids []lcommon.LeiosVoteId) []cbor.RawMessage
-	// HandleEndorserBlock triggers local vote emission for a stored
-	// endorser block.
-	HandleEndorserBlock(slot uint64, ebHash lcommon.Blake2b256)
+	// HandleValidatedEndorserBlock triggers local vote emission for an
+	// endorser block validated against the named ranking block.
+	HandleValidatedEndorserBlock(
+		slot uint64,
+		rbHash, ebHash lcommon.Blake2b256,
+	)
 	// RemoveConnection drops per-connection vote serving state.
 	RemoveConnection(connKey string)
 }
