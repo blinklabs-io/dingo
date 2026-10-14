@@ -1759,7 +1759,28 @@ func (cs *ChainSelector) isPeerSelectableWithBestKnownBlockLocked(
 	// exists to avoid. Such a peer still never outranks one with a real
 	// delivered frontier: block 0 loses every Praos comparison, so it can only
 	// be selected when nothing better is tracked.
-	if !peerTip.awaitingFirstHeader {
+	//
+	// The advertised tip is still an upper bound on what the peer can
+	// deliver, so a peer advertising a tip more than k blocks behind the local
+	// tip can never extend the local chain and is rejected here. An inflated
+	// advertisement only passes this check and is bounded at registration.
+	if peerTip.awaitingFirstHeader {
+		if cs.securityParam > 0 && cs.localTip.BlockNumber > 0 &&
+			safeAddUint64(peerTip.Tip.BlockNumber, cs.securityParam) <
+				cs.localTip.BlockNumber {
+			if logSkip {
+				cs.config.Logger.Debug(
+					"skipping rollback-registered peer advertising a tip "+
+						"far behind local tip",
+					"connection_id", connId.String(),
+					"advertised_block_number", peerTip.Tip.BlockNumber,
+					"local_block_number", cs.localTip.BlockNumber,
+					"security_param", cs.securityParam,
+				)
+			}
+			return false
+		}
+	} else {
 		if cs.securityParam > 0 && cs.localTip.BlockNumber > 0 &&
 			safeAddUint64(selectionTip.BlockNumber, cs.securityParam) <
 				cs.localTip.BlockNumber {
