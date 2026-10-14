@@ -161,7 +161,8 @@ func TestQueueClearDoesNotCascadeIntoPersistentFork(t *testing.T) {
 			for _, h := range canon[queued:] {
 				require.NoError(t, fixture.ls.handleEventChainsyncBlockHeader(
 					queueClearEvent(fixture.connId, h, advertised)))
-				maxCount = max(maxCount, fixture.ls.headerMismatchCount)
+				maxCount = max(maxCount,
+					fixture.ls.headerMismatchCounts[connIdKey(fixture.connId)])
 			}
 			for _, e := range rec.drain(t) {
 				require.Falsef(

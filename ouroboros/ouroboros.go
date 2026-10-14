@@ -366,7 +366,13 @@ type Ouroboros struct {
 	leiosPersistStopOnce    sync.Once
 	leiosPersistStarted     atomic.Bool
 	leiosPersistMu          sync.Mutex
-	leiosPersistPending     map[string]*leiosPersistJob
+	leiosPersistClosed      bool // guarded by leiosPersistMu; permanent after Close
+	leiosPersistStoreMu     sync.Mutex
+	// leiosPersistPruneBeforeSlot is the active store's retention frontier.
+	// Writers hold leiosPersistStoreMu through SetLeiosEB; GC publishes its
+	// frontier under the same lock, then scans and prunes without holding it.
+	leiosPersistPruneBeforeSlot uint64
+	leiosPersistPending         map[string]*leiosPersistJob
 	// leiosPersistBytes is the aggregate reserved size of the queue: the sum
 	// of leiosPersistPending's job sizes plus every reservation whose payload
 	// copy is still in flight. leiosPersistReserved counts those in-flight
@@ -379,6 +385,15 @@ type Ouroboros struct {
 	leiosPersistStop     chan struct{}
 	leiosPersistDone     chan struct{}
 	leiosPersistDropped  atomic.Uint64
+	// The optional blob-store GC has its own worker so full prefix scans never
+	// stall persistence writes. It is paused with the writer before live storage
+	// replacement and restarted after the next persisted endorser block.
+	leiosPersistGCOnce     sync.Once
+	leiosPersistGCStopOnce sync.Once
+	leiosPersistGCStarted  atomic.Bool
+	leiosPersistGCMu       sync.Mutex
+	leiosPersistGCStop     chan struct{}
+	leiosPersistGCDone     chan struct{}
 	// leiosPersistAfterReserve, when non-nil, runs between the byte
 	// reservation and the payload copy. Tests use it to unwind or to stall
 	// inside that window, which allocation failure alone would reach only
@@ -491,6 +506,10 @@ type OuroborosConfig struct {
 	ChainsyncObservePeerRollback func(chainselection.PeerRollbackEvent) bool
 	// Enable experimental Leios protocol support
 	EnableLeios bool
+	// LeiosPersistenceRetentionSlots optionally prunes historical-serving
+	// Leios endorser-block records older than this many slots behind the
+	// highest persisted endorser block. Zero retains all history.
+	LeiosPersistenceRetentionSlots uint64
 	// LocalStateQueryViewMaxLifetime bounds how long a connection may hold
 	// one acquired LocalStateQuery ledger snapshot before it is forcibly
 	// closed. Values of 0 or below use the default of five minutes.

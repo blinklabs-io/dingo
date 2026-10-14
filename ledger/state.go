@@ -2006,7 +2006,11 @@ type LedgerState struct {
 	lastActiveConnId *ouroboros.ConnectionId // tracks active connection for switch detection
 
 	// Header mismatch tracking for fork detection and re-sync
-	headerMismatchCount       int // consecutive header mismatch count
+	// headerMismatchMu guards headerMismatchCounts. The header handler
+	// counts under chainsyncMutex, but blockfetch paths reset a count through
+	// requestChainsyncResync holding only chainsyncBlockfetchMutex.
+	headerMismatchMu          sync.Mutex
+	headerMismatchCounts      map[string]int // consecutive header mismatches keyed by connIdKey
 	bufferedHeaderEvents      map[string][]ChainsyncEvent
 	peerHeaderHistory         map[string]*peerHeaderChain
 	peerHeaderHistoryBytes    int
@@ -3127,37 +3131,84 @@ func (ls *LedgerState) Chain() *chain.Chain {
 	return ls.chain
 }
 
-// PoolRegistrationVRFKeyHash returns the VRF key hash recorded on the
-// most recent active pool registration certificate for the given pool.
-// found is false when the pool has no on-chain registration yet — that
-// is informational, not an error condition, since operators commonly
-// stage credentials before the registration certificate is on chain.
-//
-// Used by the block-producer credential check at startup to confirm the
-// loaded VRF key matches what the chain has on file.
+// PoolRegistrationVRFKeyHash returns the VRF key hash required by the elected
+// stake snapshot at the applied ledger tip. Without an electing snapshot, it
+// uses the epoch-effective registration. found is false for an unregistered
+// pool.
 func (ls *LedgerState) PoolRegistrationVRFKeyHash(
 	poolID [28]byte,
 ) (vrfHash [32]byte, found bool, err error) {
+	ctx := context.Background()
+	consensusState, tipState := ls.loadStateSnapshots()
+	txn := ls.db.MetadataTxn(ctx, false)
+	defer txn.Release()
 	pkh := lcommon.PoolKeyHash(lcommon.NewBlake2b224(poolID[:]))
-	pool, err := ls.db.GetPool(context.Background(), pkh, false, nil)
+	pool, err := ls.db.GetPool(ctx, pkh, true, txn)
 	if err != nil {
 		if errors.Is(err, models.ErrPoolNotFound) {
-			return [32]byte{}, false, nil
+			return vrfHash, false, nil
 		}
-		return [32]byte{}, false, err
+		return vrfHash, false, err
 	}
 	if pool == nil {
-		return [32]byte{}, false, nil
+		return vrfHash, false, nil
 	}
-	registeredVrfHash, ok, err := registeredPoolVrfKeyHash(pool)
+	slot := tipState.currentTip.Point.Slot
+	epoch, err := epochForSlotInCache(consensusState.epochCache, slot)
 	if err != nil {
-		return [32]byte{}, false, err
+		return vrfHash, false, err
 	}
-	if !ok {
-		return [32]byte{}, false, nil
+	var snap electingSnapshot
+	if slot != 0 && slot == ls.mithrilLedgerSlot {
+		// At the bootstrap anchor, startup needs the imported active
+		// distribution that elects the first uncovered headers.
+		row, rowErr := ls.db.Metadata().GetPoolStakeSnapshot(
+			epoch.EpochId, models.PoolStakeSnapshotTypeActive,
+			pkh[:], txn.Metadata(),
+		)
+		snap = electingSnapshot{
+			epoch:      epoch.EpochId,
+			kind:       models.PoolStakeSnapshotTypeActive,
+			epochCache: consensusState.epochCache,
+			row:        row,
+			rowErr:     headerStateLookupErr(rowErr),
+		}
+	} else {
+		snap = ls.resolveElectingSnapshotAtSlot(
+			slot, epoch.EpochId, pkh, consensusState.epochCache, txn.Metadata(),
+		)
 	}
-	copy(vrfHash[:], registeredVrfHash[:])
-	return vrfHash, true, nil
+	if snap.selErr != nil {
+		return vrfHash, false, snap.selErr
+	}
+	if snap.rowErr != nil {
+		return vrfHash, false, snap.rowErr
+	}
+	if snap.row != nil && snap.row.CapturedSlot != 0 {
+		hash, ok, lookupErr := ls.electingVrfKeyHashFromSnapshotWithTxn(
+			ctx, pkh, consensusState.epochCache, snap, txn,
+		)
+		return [32]byte(hash), ok, lookupErr
+	}
+	registrations, err := ls.db.Metadata().
+		GetPoolRegistrationsEffectiveForEpoch(
+			[]lcommon.PoolKeyHash{pkh},
+			epoch.StartSlot,
+			epoch.EpochId,
+			slot,
+			txn.Metadata(),
+		)
+	if err != nil {
+		return vrfHash, false, err
+	}
+	if len(registrations) == 0 || len(registrations[0].VrfKeyHash) == 0 {
+		return vrfHash, false, nil
+	}
+	hash, err := lcommon.NewBlake2b256Checked(registrations[0].VrfKeyHash)
+	if err != nil {
+		return vrfHash, false, err
+	}
+	return [32]byte(hash), true, nil
 }
 
 // LatestOpCertSequence returns the highest opcert issue-number counter
@@ -13156,6 +13207,11 @@ func (ls *LedgerState) forecastPendingPParamUpdate(
 // CurrentEpoch returns the current epoch number.
 func (ls *LedgerState) CurrentEpoch() uint64 {
 	return ls.loadConsensusSnapshot().currentEpoch.EpochId
+}
+
+// IsByronEra reports whether the applied ledger is still in the Byron era.
+func (ls *LedgerState) IsByronEra() bool {
+	return ls.loadConsensusSnapshot().currentEra.Id == eras.ByronEraDesc.Id
 }
 
 // ConsensusModeForEpoch returns the Praos consensus variant that

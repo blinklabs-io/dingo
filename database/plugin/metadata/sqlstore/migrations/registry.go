@@ -74,6 +74,7 @@ const (
 	drepExpiryHistorySchemaRelease                      = "drep-expiry-history"
 	drepDormancyStateSchemaRelease                      = "drep-dormancy-state"
 	drepDelegatorStateSchemaRelease                     = "drep-delegator-state"
+	poolRegistrationIdentitySchemaRelease               = "pool-registration-identity"
 	utxoAddressIdentitySchemaRelease                    = "utxo-address-identity"
 	rewardStakeInputCredentialIndexSchemaRelease        = "reward-stake-input-credential-index"
 	governanceProposalOrderSchemaRelease                = "governance-proposal-order"
@@ -227,10 +228,11 @@ var schemaVersions = []struct {
 	{Version: 40, Name: drepDormancyStateSchemaRelease, Dir: "v40"},
 	{Version: 41, Name: drepDelegatorStateSchemaRelease, Dir: "v41"},
 	{Version: 42, Name: utxoAddressIdentitySchemaRelease, Dir: "v42"},
+	{Version: 43, Name: poolRegistrationIdentitySchemaRelease, Dir: "v43"},
 	{
-		Version: 43,
+		Version: 44,
 		Name:    rewardStakeInputCredentialIndexSchemaRelease,
-		Dir:     "v43",
+		Dir:     "v44",
 	},
 }
 

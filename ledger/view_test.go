@@ -5280,24 +5280,16 @@ func TestLedgerViewIsVrfKeyInUseIgnoresConcurrentSnapshotRepublish(
 	assert.True(t, inUse,
 		"keyB is still claimed by P's own same-epoch pending registration "+
 			"per this view's pinned boundary, regardless of the live one")
+	assert.Equal(t, poolKeyHash, owner)
 
 	require.NoError(t, dbtest.CloseDatabase(db))
 }
 
-// TestLedgerViewIsVrfKeyInUseRejectsSameOperatorReuseOfSupersededFutureKey
-// is the LedgerView-level regression test for the PV11+ follow-up:
-// pool P cycles A -> B -> C within one epoch, then attempts to
-// reuse B again. IsVrfKeyInUse must report B as still claimed by P (even
-// though B is neither P's effective key, A, nor its current pending key,
-// C), which is the signal gouroboros's validatePoolRegistration needs to
-// compare against PoolCurrentState and reject the reuse: PoolCurrentState
-// returns P's latest registration (C), which does not equal the requested
-// key (B).
-// TestLedgerViewIsVrfKeyInUseFreesSupersededFutureKey pins release of a
-// superseded future VRF key at the LedgerView production entry point: once a
-// pool's same-epoch registration is itself superseded by a later same-epoch
-// registration, IsVrfKeyInUse must report it free, not still claimed.
-func TestLedgerViewIsVrfKeyInUseFreesSupersededFutureKey(
+// TestLedgerViewSeparatesCurrentAndFuturePoolState pins the state split used
+// by the pool rule: the epoch-effective registration stays current while the
+// latest same-epoch re-registration is future state, including when it
+// restores the current key.
+func TestLedgerViewSeparatesCurrentAndFuturePoolState(
 	t *testing.T,
 ) {
 	t.Parallel()
@@ -5317,7 +5309,6 @@ func TestLedgerViewIsVrfKeyInUseFreesSupersededFutureKey(
 	)
 	keyA := lcommon.NewBlake2b256([]byte{0xd2, 0x01})
 	keyB := lcommon.NewBlake2b256([]byte{0xd2, 0x02})
-	keyC := lcommon.NewBlake2b256([]byte{0xd2, 0x03})
 
 	applyRegistration := func(
 		slot uint64,
@@ -5369,7 +5360,6 @@ func TestLedgerViewIsVrfKeyInUseFreesSupersededFutureKey(
 
 	applyRegistration(10, 0x01, keyA) // pre-epoch: P's active key
 	applyRegistration(50, 0x02, keyB) // this epoch: P: A -> B
-	applyRegistration(70, 0x03, keyC) // this epoch: P: B -> C, supersedes B
 
 	// Pinned directly on the view, mirroring how real validation call
 	// sites (NewView, ledgerProcessBlock, validateTxCore) pin
@@ -5377,18 +5367,44 @@ func TestLedgerViewIsVrfKeyInUseFreesSupersededFutureKey(
 	// IsVrfKeyInUse to re-read ls.loadConsensusSnapshot() live.
 	lv.epochStartSlot = 30
 
-	inUse, _, err := lv.IsVrfKeyInUse(keyB)
-	require.NoError(t, err)
-	assert.False(t, inUse,
-		"a superseded same-epoch future key must be freed once a "+
-			"later same-epoch registration replaces it")
-
-	// P's current (latest) registration is genuinely C, not B: B was
-	// never P's effective key and is no longer its pending one.
 	current, _, err := lv.PoolCurrentState(poolKeyHash)
 	require.NoError(t, err)
 	require.NotNil(t, current)
-	assert.Equal(t, keyC, current.VrfKeyHash)
+	assert.Equal(t, keyA, current.VrfKeyHash)
+
+	// Another pool registering B must be rejected, so IsVrfKeyInUse reports
+	// P as B's owner even though B is only P's deferred key.
+	inUse, owner, err := lv.IsVrfKeyInUse(keyB)
+	require.NoError(t, err)
+	assert.True(t, inUse)
+	assert.Equal(t, poolKeyHash, owner)
+
+	inUse, owner, err = lv.IsFutureVrfKeyInUse(keyB)
+	require.NoError(t, err)
+	assert.True(t, inUse)
+	assert.Equal(t, poolKeyHash, owner)
+
+	// Restoring A supersedes B in future state without changing the
+	// epoch-effective registration.
+	applyRegistration(70, 0x03, keyA)
+
+	current, _, err = lv.PoolCurrentState(poolKeyHash)
+	require.NoError(t, err)
+	require.NotNil(t, current)
+	assert.Equal(t, keyA, current.VrfKeyHash)
+
+	inUse, _, err = lv.IsFutureVrfKeyInUse(keyB)
+	require.NoError(t, err)
+	assert.False(t, inUse)
+
+	inUse, _, err = lv.IsVrfKeyInUse(keyB)
+	require.NoError(t, err)
+	assert.False(t, inUse, "a superseded deferred key must be freed")
+
+	inUse, owner, err = lv.IsFutureVrfKeyInUse(keyA)
+	require.NoError(t, err)
+	assert.True(t, inUse)
+	assert.Equal(t, poolKeyHash, owner)
 
 	require.NoError(t, dbtest.CloseDatabase(db))
 }
@@ -5439,13 +5455,6 @@ func newUnwrittenDijkstraPoolRegistrationTx(
 	return tx
 }
 
-// TestValidateTxDijkstraRejectsDifferentPoolClaimingActiveKeyDuringDeferral
-// is the full end-to-end proof of the acceptance criterion "reject a
-// different pool registering the active key during the deferral window":
-// not just that IsVrfKeyInUse reports the right owner, but that the real
-// validation entry point actually returns a rejection for it. Protocol
-// version 12 (Dijkstra) is required: DuplicateVrfKeysDisallowed only
-// applies the check for major > 10.
 func TestValidateTxDijkstraRejectsDifferentPoolClaimingActiveKeyDuringDeferral(
 	t *testing.T,
 ) {
@@ -5493,31 +5502,26 @@ func TestValidateTxDijkstraRejectsDifferentPoolClaimingActiveKeyDuringDeferral(
 	// IsVrfKeyInUse to re-read ls.loadConsensusSnapshot() live.
 	lv.epochStartSlot = 30
 
-	// Q attempts to claim key A, which is still P's active key during the
-	// deferral window. Not written to the database -- this is the
-	// certificate under validation, not setup.
-	conflictingTx := newUnwrittenDijkstraPoolRegistrationTx(t, 0x03, poolQ, keyA)
-	err := eras.ValidateTxDijkstra(
-		conflictingTx,
-		60,
-		lv,
-		dijkstraTestProtocolParameters(),
-	)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "already registered")
+	for name, key := range map[string]lcommon.VrfKeyHash{
+		"effective key": keyA,
+		"pending key":   keyB,
+	} {
+		t.Run(name, func(t *testing.T) {
+			conflictingTx := newUnwrittenDijkstraPoolRegistrationTx(
+				t, 0x03, poolQ, key,
+			)
+			err := eras.ValidateTxDijkstra(
+				conflictingTx,
+				60,
+				lv,
+				dijkstraTestProtocolParameters(),
+			)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "already registered")
+		})
+	}
 }
 
-// TestValidateTxDijkstraRejectsSameOperatorReuseOfSupersededFutureKey is
-// the full end-to-end proof of the PV11+ follow-up: pool P cycles
-// A -> B -> C within one epoch, then attempts to reuse B again. This
-// proves the actual rejection fires through the real validation entry
-// point, not just that IsVrfKeyInUse and PoolCurrentState individually
-// return the values the rejection depends on.
-// TestValidateTxDijkstraAllowsReuseOfSupersededFutureKey pins release of a
-// superseded future VRF key
-// through the full production validation entry point: a key a pool cycled
-// through and then superseded within the same epoch is free for any pool
-// (including the pool that originally proposed it) to register.
 func TestValidateTxDijkstraAllowsReuseOfSupersededFutureKey(
 	t *testing.T,
 ) {
