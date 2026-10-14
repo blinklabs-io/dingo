@@ -1018,6 +1018,74 @@ func TestRun_ResumeStopsAtRecordedMithrilAnchor(t *testing.T) {
 	testRun_ResumeStopsAtRecordedMithrilAnchor(t, newTestDB)
 }
 
+func TestRun_ConsumedInputRecoveryDependsOnFreshBootstrap(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name                   string
+		freshDatabaseBootstrap bool
+		lastSlot               uint64
+		wantSkippedInputs      bool
+	}{
+		{
+			name:                   "fresh bootstrap",
+			freshDatabaseBootstrap: true,
+			wantSkippedInputs:      true,
+		},
+		{name: "resume uses recovery"},
+		{
+			name:                   "bootstrap with committed progress uses recovery",
+			freshDatabaseBootstrap: true,
+			lastSlot:               2,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			db := newTestDB(t)
+			blocks, err := testfixtures.GenerateConwayChainWithTransactions(2)
+			require.NoError(t, err)
+			for _, block := range blocks {
+				require.NoError(t, db.BlockCreate(models.Block{
+					Slot:   block.SlotNumber(),
+					Hash:   block.Hash().Bytes(),
+					Number: block.BlockNumber(),
+					Cbor:   block.Cbor(),
+					Type:   uint(block.Type()),
+				}, nil))
+			}
+
+			now := time.Now()
+			require.NoError(t, db.Metadata().SetBackfillCheckpoint(
+				&models.BackfillCheckpoint{
+					Phase:     BackfillPhase,
+					LastSlot:  tc.lastSlot,
+					StartedAt: now,
+					UpdatedAt: now,
+				},
+				nil,
+			))
+
+			var progress []BackfillProgress
+			bf := NewBackfill(
+				db, nil, slog.New(slog.NewTextHandler(io.Discard, nil)),
+			)
+			bf.SetFreshDatabaseBootstrap(tc.freshDatabaseBootstrap)
+			bf.SetProgressFunc(func(p BackfillProgress) {
+				progress = append(progress, p)
+			})
+			require.NoError(t, bf.Run(context.Background()))
+			require.NotEmpty(t, progress)
+			skipped := progress[len(progress)-1].Stats.SkippedInputRecovery
+			if tc.wantSkippedInputs {
+				assert.Greater(t, skipped, uint64(0))
+			} else {
+				assert.Zero(t, skipped)
+			}
+		})
+	}
+}
+
 func testRun_ResumeStopsAtRecordedMithrilAnchor(
 	t *testing.T,
 	newDB func(*testing.T) *database.Database,

@@ -1778,6 +1778,7 @@ func Sync(
 			)
 		}
 		bf := node.NewBackfill(db, nodeCfg, logger)
+		bf.SetFreshDatabaseBootstrap(mode == syncModeBootstrap)
 		// mithrilSyncRunE (cmd/dingo/mithril.go) already refuses to reach this
 		// point with the delegator-inactivity gate enabled
 		// (errMithrilInactivityIncompatible), so the CIP-0163 witness write is
