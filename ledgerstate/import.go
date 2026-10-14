@@ -184,14 +184,15 @@ type EraBound struct {
 // ParsedUTxO represents a parsed unspent transaction output ready
 // for conversion to Dingo's database model.
 type ParsedUTxO struct {
-	TxHash        []byte // 32 bytes
-	OutputIndex   uint32
-	Cbor          []byte // serialized TxOut used by ledger replay
-	Address       []byte // raw address bytes
-	PaymentKey    []byte // 28 bytes, extracted from address
-	StakingKey    []byte // 28 bytes, extracted from address
-	CredentialTag uint8  // stake credential tag: 0 key hash, 1 script hash
-	PaymentScript bool   // true when payment credential is a script hash
+	TxHash          []byte // 32 bytes
+	OutputIndex     uint32
+	Cbor            []byte // serialized TxOut used by ledger replay
+	Address         []byte // raw address bytes
+	RenderedAddress []byte // canonical address text used by metadata queries
+	PaymentKey      []byte // 28 bytes, extracted from address
+	StakingKey      []byte // 28 bytes, extracted from address
+	CredentialTag   uint8  // stake credential tag: 0 key hash, 1 script hash
+	PaymentScript   bool   // true when payment credential is a script hash
 	// Pointer is the certificate position named by a pointer address. Pointer
 	// outputs have no staking credential in their address; the stake query
 	// resolves this position against certificate history at the evaluation

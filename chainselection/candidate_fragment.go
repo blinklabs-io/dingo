@@ -19,6 +19,7 @@ import (
 	"sort"
 
 	ouroboros "github.com/blinklabs-io/gouroboros"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
@@ -103,6 +104,31 @@ func (f CandidateFragment) Intersect(
 		return ocommon.Point{}, false
 	}
 	return clonePoint(point), true
+}
+
+// intersectTip is Intersect with the common point's block number. Candidate
+// fragments store consecutive block heights, so the common point's offset in
+// either aligned frontier determines its height without scanning the fragment.
+func (f CandidateFragment) intersectTip(
+	other CandidateFragment,
+) (ochainsync.Tip, bool) {
+	point, ok := intersectPointFrontiers(
+		f.points,
+		f.baseBlock,
+		other.points,
+		other.baseBlock,
+	)
+	if !ok {
+		return ochainsync.Tip{}, false
+	}
+	idx := sort.Search(len(f.points), func(i int) bool {
+		return f.points[i].Slot >= point.Slot
+	})
+	// #nosec G115 -- idx is bounded by the retained fragment length.
+	return ochainsync.Tip{
+		Point:       clonePoint(point),
+		BlockNumber: f.baseBlock + uint64(idx),
+	}, true
 }
 
 // intersectPointFrontiers returns the highest common point in two contiguous

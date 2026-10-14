@@ -224,9 +224,15 @@ const (
 	// K-sized history where possible; when pressure requires retiring a peer,
 	// fork recovery falls back to a fresh intersection.
 	maxPeerHeaderHistoryBytesPerConn = 8 << 20
-	maxPeerHeaderHistoryBytesTotal   = 32 << 20
-	minPeerHeaderHistoryRecords      = maxPeerHeaderHistoryPerConn
-	peerHeaderHistoryRecordOverhead  = 512
+	// A connection whose oldest retained header is still ahead of the local
+	// tip may exceed the per-connection budget up to this bound, sized to
+	// hold a full header queue (chain.DefaultMaxQueuedHeaders records of about
+	// 1.5 KiB each with record overhead) so a queue clear never leaves
+	// in-flight headers with an ancestry the walk cannot reach.
+	maxPeerHeaderHistoryUnappliedBytesPerConn = 24 << 20
+	maxPeerHeaderHistoryBytesTotal            = 64 << 20
+	minPeerHeaderHistoryRecords               = maxPeerHeaderHistoryPerConn
+	peerHeaderHistoryRecordOverhead           = 512
 
 	// Match ouroboros-consensus' default maximum permissible clock skew. A
 	// header within this window is held until its slot begins; an earlier
@@ -2260,8 +2266,9 @@ func (ls *LedgerState) recordPeerHeaderHistory(e ChainsyncEvent) {
 		return
 	}
 	for len(history.order) > 0 &&
-		(history.retainedBytes+recordBytes > maxPeerHeaderHistoryBytesPerConn ||
-			len(history.order) >= ls.peerHeaderHistoryLimit()) {
+		(history.retainedBytes+recordBytes > ls.peerHeaderHistoryByteBudget(history) ||
+			(len(history.order) >= ls.peerHeaderHistoryLimit() &&
+				!ls.oldestPeerHeaderUnapplied(history))) {
 		if !ls.evictOldestPeerHeaderRecord(key) {
 			return
 		}
@@ -2300,6 +2307,49 @@ func (ls *LedgerState) recordPeerHeaderHistory(e ChainsyncEvent) {
 	history.byHash[hashKey] = record
 	history.retainedBytes += recordBytes
 	ls.peerHeaderHistoryBytes += recordBytes
+}
+
+// oldestPeerHeaderUnapplied reports whether the connection's oldest retained
+// header is still ahead of the local chain tip and the history is within the
+// header queue's own capacity. A header queue can be deeper than the count
+// limit; if the oldest of those headers were evicted, clearing the queue would
+// leave in-flight headers whose ancestry walk can no longer reach the local
+// tip, and the honest connection would be resynced. The byte budgets still
+// bound the total retained, and MaxQueuedHeaders bounds the count: fork
+// recovery re-queues the whole path from the local tip, so while a peer
+// extends one chain, a header older than its newest MaxQueuedHeaders records
+// lies only on paths the queue cannot hold. That includes the header a full
+// queue rejects after it was recorded here.
+func (ls *LedgerState) oldestPeerHeaderUnapplied(
+	history *peerHeaderChain,
+) bool {
+	return ls.chain != nil &&
+		len(history.order) < ls.chain.MaxQueuedHeaders() &&
+		ls.oldestPeerHeaderAheadOfTip(history)
+}
+
+// oldestPeerHeaderAheadOfTip reports whether the oldest retained header is
+// still ahead of the local chain tip.
+func (ls *LedgerState) oldestPeerHeaderAheadOfTip(
+	history *peerHeaderChain,
+) bool {
+	if ls.chain == nil || len(history.order) == 0 {
+		return false
+	}
+	oldest, ok := history.byHash[history.order[0]]
+	return ok && oldest.event.Point.Slot > ls.chain.Tip().Point.Slot
+}
+
+// peerHeaderHistoryByteBudget returns the byte budget for one connection's
+// history: the larger unapplied budget only while the history still holds
+// headers ahead of the local tip.
+func (ls *LedgerState) peerHeaderHistoryByteBudget(
+	history *peerHeaderChain,
+) int {
+	if ls.oldestPeerHeaderAheadOfTip(history) {
+		return maxPeerHeaderHistoryUnappliedBytesPerConn
+	}
+	return maxPeerHeaderHistoryBytesPerConn
 }
 
 func (ls *LedgerState) evictOldestPeerHeaderRecord(historyKey string) bool {
@@ -2561,6 +2611,9 @@ func (ls *LedgerState) findPeerForkPath(
 		hex.EncodeToString(e.Point.Hash): {},
 	}
 	limit := ls.peerHeaderHistoryLimit()
+	if history != nil {
+		limit = max(limit, len(history.order))
+	}
 	for depth := 0; depth < limit &&
 		len(prevHash) > 0; depth++ {
 		// Resolve the ancestor by O(1) hash index only: database.BlockByHash
@@ -3990,6 +4043,9 @@ func (ls *LedgerState) findPeerForkPathCached(
 	steps := make([]peerHeaderHistoryPathStep, 0)
 	visited := make(map[string]struct{})
 	limit := ls.peerHeaderHistoryLimit()
+	if history != nil {
+		limit = max(limit, len(history.order))
+	}
 	for depth := 0; depth < limit && len(prevHash) > 0; depth++ {
 		key := hex.EncodeToString(prevHash)
 		if _, seen := visited[key]; seen {

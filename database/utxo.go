@@ -20,6 +20,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
@@ -55,6 +56,8 @@ const exactAddressCandidateScanLimit = 10_000
 var errExactAddressCandidateScanLimit = errors.New(
 	"exact address candidate scan limit reached",
 )
+
+const assetUtxoAddressBackfillSyncKey = "dingo:asset-utxo-addresses:backfilled"
 
 // deleteUtxoBlobs deletes blob data for the given [models.Utxo] entries.
 // Metadata remains the authoritative source of truth; blob deletions are
@@ -1319,6 +1322,146 @@ func (d *Database) UtxosByAddressAtSlot(
 	})
 }
 
+// AssetHolders returns one exact metadata-aggregated holder page.
+func (d *Database) AssetHolders(
+	ctx context.Context,
+	query models.AssetHolderQuery,
+	txn *Txn,
+) ([]models.AssetHolder, int, error) {
+	if ctx == nil {
+		return nil, 0, errors.New("asset holders: context must not be nil")
+	}
+	if txn == nil {
+		txn = d.Transaction(ctx, false)
+		defer txn.Release()
+	}
+	return d.utxoStore().GetAssetHolders(query, txn.Metadata())
+}
+
+func (d *Database) backfillLiveAssetUtxoAddresses(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if d.StorageMode() != types.StorageModeAPI {
+		return nil
+	}
+	complete, err := d.GetSyncState(assetUtxoAddressBackfillSyncKey, nil)
+	if err != nil {
+		return err
+	}
+	if complete == "true" {
+		return nil
+	}
+
+	const batchSize = 128
+	var afterID uint
+	var processed, lastLogged int
+	started := time.Now()
+	d.logger.Info("starting live asset UTxO address backfill")
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		nextID, count, err := d.backfillLiveAssetUtxoAddressBatch(
+			ctx, afterID, batchSize,
+		)
+		if err != nil {
+			return err
+		}
+		afterID = nextID
+		if count == 0 {
+			break
+		}
+		processed += count
+		if processed-lastLogged >= 10_000 {
+			d.logger.Info(
+				"live asset UTxO address backfill progress",
+				"utxos", processed,
+				"last_utxo_id", afterID,
+			)
+			lastLogged = processed
+		}
+	}
+	if err := d.SetSyncState(assetUtxoAddressBackfillSyncKey, "true", nil); err != nil {
+		return err
+	}
+	d.logger.Info(
+		"completed live asset UTxO address backfill",
+		"utxos", processed,
+		"duration", time.Since(started),
+	)
+	return nil
+}
+
+func (d *Database) backfillLiveAssetUtxoAddressBatch(
+	ctx context.Context,
+	afterID uint,
+	limit int,
+) (uint, int, error) {
+	type addressRow struct {
+		id      uint
+		address []byte
+	}
+	rows := make([]addressRow, 0, limit)
+	err := d.Transaction(ctx, false).Do(func(txn *Txn) error {
+		utxos, err := d.utxoStore().GetLiveAssetUtxosMissingAddress(
+			afterID,
+			limit,
+			txn.Metadata(),
+		)
+		if err != nil {
+			return err
+		}
+		for i := range utxos {
+			if err := loadCbor(&utxos[i], txn); err != nil {
+				return fmt.Errorf(
+					"load UTxO %x#%d: %w",
+					utxos[i].TxId,
+					utxos[i].OutputIdx,
+					err,
+				)
+			}
+			output, err := utxos[i].Decode()
+			if err != nil {
+				return fmt.Errorf(
+					"decode UTxO %x#%d: %w",
+					utxos[i].TxId,
+					utxos[i].OutputIdx,
+					err,
+				)
+			}
+			address := []byte(output.Address().String())
+			if len(address) == 0 {
+				return errors.New("decoded UTxO address is empty")
+			}
+			rows = append(rows, addressRow{id: utxos[i].ID, address: address})
+		}
+		return nil
+	})
+	if err != nil {
+		return afterID, 0, err
+	}
+	if len(rows) == 0 {
+		return afterID, 0, nil
+	}
+	err = d.Transaction(ctx, true).Do(func(txn *Txn) error {
+		for _, row := range rows {
+			if err := d.utxoStore().SetUtxoAddress(
+				row.id,
+				row.address,
+				txn.Metadata(),
+			); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return afterID, 0, err
+	}
+	return rows[len(rows)-1].id, len(rows), nil
+}
+
 func filterUtxosByAddressPatterns(
 	utxos []models.Utxo,
 	patterns []models.UtxoAddressPattern,
@@ -1564,6 +1707,60 @@ func (d *Database) UtxosDeleteRolledback(
 	}
 
 	return nil
+}
+
+func (d *Database) restoreAssetUtxoAddressesAfterSlot(
+	ctx context.Context,
+	slot uint64,
+	txn *Txn,
+) error {
+	const batchSize = 128
+	loadTxn := txn
+	if txn.Blob() == nil {
+		var cleanup func()
+		loadTxn, cleanup = txn.withBlobForRecovery()
+		defer cleanup()
+	}
+	var afterID uint
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		utxos, err := d.utxoStore().GetSpentAssetUtxosMissingAddressAfterSlot(
+			slot, afterID, batchSize, txn.Metadata(),
+		)
+		if err != nil {
+			return err
+		}
+		for i := range utxos {
+			if err := loadCbor(&utxos[i], loadTxn); err != nil {
+				return fmt.Errorf(
+					"load rollback UTxO %x#%d: %w",
+					utxos[i].TxId, utxos[i].OutputIdx, err,
+				)
+			}
+			output, err := utxos[i].Decode()
+			if err != nil {
+				return fmt.Errorf(
+					"decode rollback UTxO %x#%d: %w",
+					utxos[i].TxId, utxos[i].OutputIdx, err,
+				)
+			}
+			address := []byte(output.Address().String())
+			if len(address) == 0 {
+				return errors.New("decoded rollback UTxO address is empty")
+			}
+			if err := d.utxoStore().SetUtxoAddress(
+				utxos[i].ID, address, txn.Metadata(),
+			); err != nil {
+				return err
+			}
+			afterID = utxos[i].ID
+		}
+		if len(utxos) < batchSize {
+			return nil
+		}
+	}
 }
 
 func (d *Database) UtxosUnspend(

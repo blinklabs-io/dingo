@@ -40,6 +40,7 @@ func TestGetAssetByPolicyAndNameRecoversExternalNameHex(t *testing.T) {
 	policyID := bytes.Repeat([]byte{0x77}, 28)
 	assetName := []byte("asset")
 	utxo := utxoForInsertCacheTest(30, 0, 1_000_000)
+	utxo.Address = []byte("test-address")
 	utxo.Assets = []models.Asset{
 		{
 			Name:        assetName,
@@ -79,6 +80,7 @@ func TestAssetAmountAndFingerprintReadCorrectlyWithoutIndexes(t *testing.T) {
 	const wantAmount = uint64(123_456_789)
 
 	utxo := utxoForInsertCacheTest(31, 0, 2_000_000)
+	utxo.Address = []byte("test-address")
 	utxo.Assets = []models.Asset{
 		{
 			Name:        assetName,

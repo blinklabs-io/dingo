@@ -1638,3 +1638,66 @@ func TestPlannerStatsRefreshDefaultsOnAndHonorsEnvOverride(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, cfg.PlannerStatsRefreshEnabled)
 }
+
+// unsetBarkAllowPrivateEnv clears both spellings LoadConfig reads, so each
+// subtest exercises its own source rather than the caller's environment.
+func unsetBarkAllowPrivateEnv(t *testing.T) {
+	t.Helper()
+	unsetEnv(t, "CARDANO_DINGO_BARK_BLOCK_DOWNLOAD_ALLOW_PRIVATE_ADDRESSES")
+	unsetEnv(t, "DINGO_BARK_BLOCK_DOWNLOAD_ALLOW_PRIVATE_ADDRESSES")
+}
+
+func TestBarkBlockDownloadAllowPrivateAddressesBindings(t *testing.T) {
+	t.Run("default", func(t *testing.T) {
+		resetGlobalConfig()
+		unsetBarkAllowPrivateEnv(t)
+		t.Setenv("HOME", t.TempDir())
+
+		cfg, err := LoadConfig("")
+		require.NoError(t, err)
+		require.False(t, cfg.BarkBlockDownloadAllowPrivateAddresses)
+	})
+
+	t.Run("yaml", func(t *testing.T) {
+		resetGlobalConfig()
+		unsetBarkAllowPrivateEnv(t)
+		t.Setenv("HOME", t.TempDir())
+		configFile := filepath.Join(t.TempDir(), "dingo.yaml")
+		require.NoError(t, os.WriteFile(
+			configFile,
+			[]byte("barkBlockDownloadAllowPrivateAddresses: true\n"),
+			0o600,
+		))
+
+		cfg, err := LoadConfig(configFile)
+		require.NoError(t, err)
+		require.True(t, cfg.BarkBlockDownloadAllowPrivateAddresses)
+	})
+
+	t.Run("environment", func(t *testing.T) {
+		resetGlobalConfig()
+		unsetBarkAllowPrivateEnv(t)
+		t.Setenv("HOME", t.TempDir())
+		t.Setenv("DINGO_BARK_BLOCK_DOWNLOAD_ALLOW_PRIVATE_ADDRESSES", "true")
+
+		cfg, err := LoadConfig("")
+		require.NoError(t, err)
+		require.True(t, cfg.BarkBlockDownloadAllowPrivateAddresses)
+	})
+
+	t.Run("flag", func(t *testing.T) {
+		resetGlobalConfig()
+		unsetBarkAllowPrivateEnv(t)
+		t.Setenv("HOME", t.TempDir())
+		cfg, err := LoadConfig("")
+		require.NoError(t, err)
+
+		cmd := &cobra.Command{Use: "dingo"}
+		RegisterFlags(cmd)
+		require.NoError(t, cmd.ParseFlags([]string{
+			"--bark-block-download-allow-private-addresses",
+		}))
+		require.NoError(t, ApplyFlags(cmd, cfg))
+		require.True(t, cfg.BarkBlockDownloadAllowPrivateAddresses)
+	})
+}

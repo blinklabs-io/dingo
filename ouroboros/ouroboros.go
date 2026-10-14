@@ -224,6 +224,10 @@ type Ouroboros struct {
 	// chainsyncHasBestPeer reports whether chain selection currently has a
 	// best peer. Nil means none. Tests override it without a node.
 	chainsyncHasBestPeer func() bool
+	// behindTipRecycleAt is when a behind-local-tip recycle was last
+	// requested on any connection; see claimBehindTipRecycle.
+	behindTipRecycleMu sync.Mutex
+	behindTipRecycleAt time.Time
 	// chainSelectionShouldVerifyHeaderCrypto and chainSelectionVerifyHeaderCrypto
 	// gate whether a peer-reported header may influence Genesis chain-selection
 	// density or corroboration before its VRF/KES cryptography (and, once local
@@ -442,15 +446,32 @@ type OuroborosConfig struct {
 	// is observed but cannot steer the ledger. When nil, every ingress-
 	// eligible peer is apply-eligible (no behavior change).
 	ChainsyncApplyEligible func(ouroboros.ConnectionId) bool
-	// ChainsyncObservePeerTip observes a peer tip update. It returns true if it
-	// handled the observation synchronously, in which case the caller MUST NOT
-	// also publish the async PeerTipUpdateEvent (avoids a double update). This
+	// ChainsyncAwaitEagerness blocks until a header numbered blockNumber from
+	// connId is within the Limit on Eagerness, and returns an error if ctx is
+	// cancelled first. The roll-forward callback blocks on it after the header's
+	// tip has been observed and before the header is handed to the ledger, so a
+	// peer running past the limit is paused rather than having headers dropped.
+	// appliedTip, when non-nil, reads the live applied ledger tip. When the
+	// hook is nil, no limit applies.
+	ChainsyncAwaitEagerness func(
+		ctx context.Context,
+		connId ouroboros.ConnectionId,
+		blockNumber uint64,
+		appliedTip func() ochainsync.Tip,
+	) error
+	// ChainsyncObservePeerTip observes a peer tip update and reports its
+	// disposition. A synchronously handled update MUST NOT also publish the async
+	// PeerTipUpdateEvent (avoids a double update). This
 	// lets the node update chain-selection state synchronously before the
-	// ChainsyncApplyEligible gate runs, so an apply decision reflects the header
-	// currently being admitted (closing the race where an async tip update that
-	// revokes corroboration is not yet processed). Returning false (or nil hook)
-	// falls back to the async PeerTipUpdateEvent path.
-	ChainsyncObservePeerTip func(chainselection.PeerTipUpdateEvent) bool
+	// ChainsyncApplyEligible gate and the ChainsyncAwaitEagerness wait run, so
+	// both reflect the header currently being admitted (closing the race where
+	// an async tip update that revokes corroboration, or that first registers
+	// the peer with the Limit on Eagerness, is not yet processed). Returning
+	// PeerTipUpdateUnhandled falls back to the async PeerTipUpdateEvent path.
+	// Pending far-tip claims advance the protocol cursor but remain withheld
+	// from ledger ingress. Rejected candidates terminate the protocol. A nil
+	// hook uses the async path.
+	ChainsyncObservePeerTip func(chainselection.PeerTipUpdateEvent) chainselection.PeerTipUpdateDisposition
 	// ChainsyncObserveAwaitReply records the peer's explicit protocol-idle
 	// frontier. It runs after gouroboros fences preceding pipelined updates.
 	ChainsyncObserveAwaitReply func(ouroboros.ConnectionId, ocommon.Point)

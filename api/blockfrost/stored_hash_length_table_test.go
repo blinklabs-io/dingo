@@ -18,8 +18,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/hex"
+	"errors"
 	"io"
 	"log/slog"
+	"slices"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/chain"
@@ -37,10 +39,17 @@ import (
 // behind each blockfrost path under test; a nil field keeps the real read.
 type malformedHashStore struct {
 	metadata.MetadataStore
-	retiring       []models.PoolRetiringRow
-	activePools    [][]byte
-	delegations    []models.AccountDelegationHistoryRow
-	delegationSize int
+	retiring        []models.PoolRetiringRow
+	activePools     [][]byte
+	activePoolPage  [][]byte
+	activePoolTotal int
+	pageOverride    bool
+	pageLimit       int
+	pageOffset      int
+	pageDescending  bool
+	stakePoolCount  int
+	delegations     []models.AccountDelegationHistoryRow
+	delegationSize  int
 }
 
 func (s *malformedHashStore) GetRetiringPools(
@@ -53,6 +62,28 @@ func (s *malformedHashStore) GetRetiringPools(
 	return s.retiring, nil
 }
 
+func (s *malformedHashStore) GetRetiringPoolsPage(
+	currentEpoch uint64,
+	limit, offset int,
+	descending bool,
+	txn types.Txn,
+) ([]models.PoolRetiringRow, int, error) {
+	if s.retiring == nil {
+		return s.MetadataStore.GetRetiringPoolsPage(
+			currentEpoch, limit, offset, descending, txn,
+		)
+	}
+	rows := slices.Clone(s.retiring)
+	if descending {
+		slices.Reverse(rows)
+	}
+	total := len(rows)
+	if offset >= total {
+		return []models.PoolRetiringRow{}, total, nil
+	}
+	return rows[offset:min(offset+limit, total)], total, nil
+}
+
 func (s *malformedHashStore) GetActivePoolKeyHashes(
 	txn types.Txn,
 ) ([][]byte, error) {
@@ -60,6 +91,98 @@ func (s *malformedHashStore) GetActivePoolKeyHashes(
 		return s.MetadataStore.GetActivePoolKeyHashes(txn)
 	}
 	return s.activePools, nil
+}
+
+func (s *malformedHashStore) GetActivePoolKeyHashesPage(
+	limit, offset int,
+	descending bool,
+	txn types.Txn,
+) ([][]byte, int, error) {
+	if !s.pageOverride {
+		if s.activePools != nil {
+			return s.activePools, len(s.activePools), nil
+		}
+		return s.MetadataStore.GetActivePoolKeyHashesPage(
+			limit, offset, descending, txn,
+		)
+	}
+	s.pageLimit = limit
+	s.pageOffset = offset
+	s.pageDescending = descending
+	return s.activePoolPage, s.activePoolTotal, nil
+}
+
+func TestPoolsExtendedPaginatesBeforeEnrichment(t *testing.T) {
+	t.Parallel()
+	pool := bytes.Repeat([]byte{0x61}, lcommon.Blake2b224Size)
+	allPools := make([][]byte, 100)
+	for i := range allPools {
+		allPools[i] = pool
+	}
+
+	t.Run("small page", func(t *testing.T) {
+		t.Parallel()
+		store := &malformedHashStore{
+			activePools:     allPools,
+			activePoolPage:  [][]byte{pool},
+			activePoolTotal: 100,
+			pageOverride:    true,
+		}
+		adapter := newMalformedHashAdapter(t, store, nil)
+		_, _, err := adapter.PoolsExtended(
+			context.Background(),
+			PaginationParams{Count: 1, Page: 2, Order: PaginationOrderDesc},
+		)
+		require.ErrorContains(t, err, "stop after stake probe")
+		require.Equal(t, 1, store.stakePoolCount)
+		require.Equal(t, 1, store.pageLimit)
+		require.Equal(t, 1, store.pageOffset)
+		require.True(t, store.pageDescending)
+	})
+
+	t.Run("out of range", func(t *testing.T) {
+		t.Parallel()
+		store := &malformedHashStore{
+			activePools:     allPools,
+			activePoolPage:  [][]byte{},
+			activePoolTotal: 100,
+			pageOverride:    true,
+		}
+		adapter := newMalformedHashAdapter(t, store, nil)
+		pools, total, err := adapter.PoolsExtended(
+			context.Background(),
+			PaginationParams{Count: 10, Page: 11, Order: PaginationOrderAsc},
+		)
+		require.NoError(t, err)
+		require.Empty(t, pools)
+		require.Equal(t, 100, total)
+		require.Zero(t, store.stakePoolCount)
+		require.Equal(t, 100, store.pageOffset)
+	})
+
+	t.Run("cancelled request", func(t *testing.T) {
+		t.Parallel()
+		store := &malformedHashStore{}
+		adapter := newMalformedHashAdapter(t, store, nil)
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		_, _, err := adapter.PoolsExtended(
+			ctx,
+			PaginationParams{Count: 1, Page: 1, Order: PaginationOrderAsc},
+		)
+		require.ErrorIs(t, err, context.Canceled)
+	})
+}
+
+func (s *malformedHashStore) GetStakeByPools(
+	poolKeyHashes [][]byte,
+	txn types.Txn,
+) (map[string]uint64, map[string]uint64, error) {
+	if !s.pageOverride {
+		return s.MetadataStore.GetStakeByPools(poolKeyHashes, txn)
+	}
+	s.stakePoolCount = len(poolKeyHashes)
+	return nil, nil, errors.New("stop after stake probe")
 }
 
 func (s *malformedHashStore) CountAccountDelegationHistoryByCredential(
@@ -183,7 +306,7 @@ func TestBlockfrostRejectsMalformedStoredHashes(t *testing.T) {
 				Epoch:       5,
 			}}},
 			call: func(_ *testing.T, a *NodeAdapter) error {
-				_, _, err := a.PoolsRetiring(page)
+				_, _, err := a.PoolsRetiring(context.Background(), page)
 				return err
 			},
 			want: "retiring pool key hash",
@@ -192,7 +315,7 @@ func TestBlockfrostRejectsMalformedStoredHashes(t *testing.T) {
 			name:  "PoolsExtended",
 			store: &malformedHashStore{activePools: [][]byte{short}},
 			call: func(_ *testing.T, a *NodeAdapter) error {
-				_, err := a.PoolsExtended()
+				_, _, err := a.PoolsExtended(context.Background(), page)
 				return err
 			},
 			want: "active pool key hash",

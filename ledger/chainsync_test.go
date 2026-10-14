@@ -3924,7 +3924,9 @@ func TestRecordPeerHeaderHistoryBoundsRetainedBytes(t *testing.T) {
 				hash:        lcommon.NewBlake2b256(hash),
 				prevHash:    lcommon.NewBlake2b256(prevHash),
 				blockNumber: fixture.currentTip.BlockNumber + uint64(i) + 1,
-				slot:        fixture.currentTip.Point.Slot + uint64(i) + 1,
+				// At the tip, so the history is applied and gets only the
+				// per-connection budget.
+				slot: fixture.currentTip.Point.Slot,
 			},
 			cbor: bytes.Repeat([]byte{0x01}, 2048),
 		}
@@ -3984,7 +3986,9 @@ func TestPeerHeaderHistoryGlobalBudgetRetiresOldestPeerDeterministically(
 	ls := fixture.ls
 	ls.peerHeaderHistory = make(map[string]*peerHeaderChain)
 	const retainedPerRecord = 32 << 10
-	for peer := range 4 {
+	peerCount := maxPeerHeaderHistoryBytesTotal /
+		(minPeerHeaderHistoryRecords * retainedPerRecord)
+	for peer := range peerCount {
 		key := fmt.Sprintf("peer-%d", peer)
 		history := &peerHeaderChain{
 			order:  make([]string, 0, minPeerHeaderHistoryRecords),
@@ -4008,7 +4012,7 @@ func TestPeerHeaderHistoryGlobalBudgetRetiresOldestPeerDeterministically(
 
 	require.True(t, ls.makePeerHeaderHistoryRoom(1<<20, "new-peer"))
 	assert.Nil(t, ls.peerHeaderHistory["peer-0"], "oldest peer retires first")
-	for _, key := range []string{"peer-1", "peer-2", "peer-3"} {
+	for _, key := range []string{"peer-1", "peer-2", "peer-3", "peer-4", "peer-5", "peer-6", "peer-7"} {
 		require.Len(t, ls.peerHeaderHistory[key].order, minPeerHeaderHistoryRecords)
 	}
 	assert.LessOrEqual(t, ls.peerHeaderHistoryBytes, maxPeerHeaderHistoryBytesTotal)
@@ -4021,10 +4025,12 @@ func TestPeerHeaderHistoryEvictsExtraRecordsBeforeRetiringPeer(t *testing.T) {
 	ls := fixture.ls
 	ls.peerHeaderHistory = make(map[string]*peerHeaderChain)
 	const retainedPerRecord = 32 << 10
-	for peer := range 4 {
+	peerCount := maxPeerHeaderHistoryBytesTotal /
+		(minPeerHeaderHistoryRecords * retainedPerRecord)
+	for peer := range peerCount {
 		key := fmt.Sprintf("peer-%d", peer)
 		count := minPeerHeaderHistoryRecords
-		if peer == 3 {
+		if peer == peerCount-1 {
 			count++
 		}
 		history := &peerHeaderChain{
@@ -4035,7 +4041,7 @@ func TestPeerHeaderHistoryEvictsExtraRecordsBeforeRetiringPeer(t *testing.T) {
 			ls.peerHeaderHistorySequence++
 			hash := fmt.Sprintf("%s-header-%d", key, idx)
 			bytes := retainedPerRecord
-			if peer == 3 && idx >= count-2 {
+			if peer == peerCount-1 && idx >= count-2 {
 				bytes = 16 << 10
 			}
 			record := peerHeaderRecord{
@@ -4053,8 +4059,8 @@ func TestPeerHeaderHistoryEvictsExtraRecordsBeforeRetiringPeer(t *testing.T) {
 
 	require.True(t, ls.makePeerHeaderHistoryRoom(1<<20, "new-peer"))
 	assert.Nil(t, ls.peerHeaderHistory["peer-0"], "retire the oldest peer only after excess records are gone")
-	require.NotNil(t, ls.peerHeaderHistory["peer-3"])
-	assert.Len(t, ls.peerHeaderHistory["peer-3"].order, minPeerHeaderHistoryRecords)
+	require.NotNil(t, ls.peerHeaderHistory["peer-7"])
+	assert.Len(t, ls.peerHeaderHistory["peer-7"].order, minPeerHeaderHistoryRecords)
 	assert.LessOrEqual(t, ls.peerHeaderHistoryBytes, maxPeerHeaderHistoryBytesTotal)
 	assertPeerHeaderHistoryByteAccounting(t, ls)
 }

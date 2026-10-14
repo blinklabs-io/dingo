@@ -87,6 +87,22 @@ type PeerTipUpdateEvent struct {
 	ObservedBoundary bool
 }
 
+// PeerTipUpdateDisposition describes synchronous handling of a delivered peer
+// tip at the ChainSync admission boundary.
+type PeerTipUpdateDisposition uint8
+
+const (
+	// PeerTipUpdateUnhandled leaves the update on the asynchronous event path.
+	PeerTipUpdateUnhandled PeerTipUpdateDisposition = iota
+	// PeerTipUpdateAccepted records the update as a selectable candidate.
+	PeerTipUpdateAccepted
+	// PeerTipUpdatePending retains a connected far-tip claim without making it
+	// selectable until enough consecutive headers establish plausibility.
+	PeerTipUpdatePending
+	// PeerTipUpdateRejected refuses an update that cannot become a candidate.
+	PeerTipUpdateRejected
+)
+
 // PeerActivityEvent is published when a peer has recent protocol activity
 // (for example, a keepalive response) without a tip change. This refreshes
 // selector liveness for healthy but temporarily quiet peers.

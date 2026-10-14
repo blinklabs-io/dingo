@@ -1324,7 +1324,7 @@ func readRestoreRecovery(dir string) (restoreRollback, Manifest, error) {
 			"restore recovery record is missing provider names",
 		)
 	}
-	return restoreRollback{
+	rollback := restoreRollback{
 		dir:              dir,
 		metadataPath:     filepath.Join(dir, MetadataBackupFileName),
 		newBlobNamespace: record.NewBlobNamespace,
@@ -1333,11 +1333,13 @@ func readRestoreRecovery(dir string) (restoreRollback, Manifest, error) {
 		metadataMutated:  record.MetadataMutated,
 		blobMutated:      record.CloudBlob,
 		durable:          true,
-	}, Manifest{
+	}
+	manifest := Manifest{
 		BlobPlugin:     record.BlobPlugin,
 		MetadataPlugin: record.MetadataPlugin,
 		StorageMode:    record.StorageMode,
-	}, nil
+	}
+	return rollback, manifest, nil
 }
 
 // RecoverInterruptedRestore disposes a durable live-restore recovery record.

@@ -94,6 +94,7 @@ type Node struct {
 	chainsyncState          *chainsync.State
 	chainSelector           *chainselection.ChainSelector
 	chainSelectionMetrics   *chainSelectionMetrics
+	chainSelectorForGauges  atomic.Pointer[chainselection.ChainSelector]
 	equivocation            *equivocationDetector
 	eventBus                *event.EventBus
 	pluginHost              *plugin.Host
@@ -574,6 +575,7 @@ func (n *Node) newOuroborosConfig(
 		ChainsyncIngressEligible:     n.isChainsyncIngressEligible,
 		ChainsyncHasBestPeer:         n.chainsyncHasBestPeer,
 		ChainsyncApplyEligible:       n.chainsyncApplyEligible,
+		ChainsyncAwaitEagerness:      n.chainsyncAwaitEagerness,
 		ChainsyncObservePeerTip:      n.chainsyncObservePeerTip,
 		ChainsyncObserveAwaitReply:   n.chainsyncObserveAwaitReply,
 		ChainsyncSyncTarget:          n.chainsyncSyncTarget,
@@ -890,9 +892,10 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 
 	if n.config.barkBaseUrl != "" {
 		barkBlobStore, err := bark.NewBarkBlobStore(bark.BlobStoreBarkConfig{
-			BaseUrl:                   n.config.barkBaseUrl,
-			BlockDownloadAllowedHosts: n.config.barkBlockDownloadHosts,
-			MaxBlockSize:              state.MaxBlockSize,
+			BaseUrl:                            n.config.barkBaseUrl,
+			BlockDownloadAllowedHosts:          n.config.barkBlockDownloadHosts,
+			BlockDownloadAllowPrivateAddresses: n.config.barkBlockDownloadAllowPrivateAddresses,
+			MaxBlockSize:                       state.MaxBlockSize,
 			HTTPClient: &http.Client{
 				Timeout: 30 * time.Second,
 			},
@@ -1276,6 +1279,9 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	// local tip as block zero until the recycler's first tick, leaving a
 	// startup window in which stale peer references cannot enter catch-up mode.
 	n.chainSelector.SetLocalTip(n.ledgerState.Tip())
+	// Published after the seed, so a scrape never reads a limit measured from
+	// block zero.
+	n.chainSelectorForGauges.Store(n.chainSelector)
 	if genesisSelectionMode {
 		n.config.logger.Info(
 			"Genesis chain selection enabled",

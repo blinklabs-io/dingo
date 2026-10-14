@@ -683,9 +683,10 @@ func (n *Node) reinitializeCoreStorage(ctx context.Context) error {
 
 	if n.config.barkBaseUrl != "" {
 		barkBlobStore, err := bark.NewBarkBlobStore(bark.BlobStoreBarkConfig{
-			BaseUrl:                   n.config.barkBaseUrl,
-			BlockDownloadAllowedHosts: n.config.barkBlockDownloadHosts,
-			MaxBlockSize:              state.MaxBlockSize,
+			BaseUrl:                            n.config.barkBaseUrl,
+			BlockDownloadAllowedHosts:          n.config.barkBlockDownloadHosts,
+			BlockDownloadAllowPrivateAddresses: n.config.barkBlockDownloadAllowPrivateAddresses,
+			MaxBlockSize:                       state.MaxBlockSize,
 			HTTPClient: &http.Client{
 				Timeout: 30 * time.Second,
 			},

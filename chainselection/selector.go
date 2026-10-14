@@ -327,6 +327,24 @@ type ChainSelector struct {
 	// lock-free read never observes a stale pair for longer than one such
 	// update.
 	genesisSelection atomic.Pointer[genesisSelectionSnapshot]
+
+	// eagerness caches the Limit on Eagerness for one evaluation. It is set
+	// and cleared under mutex by beginEagernessLocked/endEagernessLocked; nil
+	// means comparisons apply no cap.
+	eagerness *EagernessLimit
+
+	// eagernessAnchor is the last point every candidate fragment shared. The
+	// limit stays k past it when the bounded fragments later stop overlapping,
+	// instead of falling back to the applied tip, which advances with the
+	// chain the limit bounds. It has its own mutex because the limit is
+	// computed under the read lock.
+	eagernessAnchorMu sync.Mutex
+	eagernessAnchor   *eagernessAnchor
+}
+
+type eagernessAnchor struct {
+	point       ocommon.Point
+	blockNumber uint64
 }
 
 // genesisSelectionSnapshot is the immutable pair GenesisSelectionState
@@ -701,6 +719,19 @@ func (cs *ChainSelector) updatePeerTipObservedLinked(
 	praosView PraosTiebreakerView,
 	link deliveredLink,
 ) bool {
+	return cs.updatePeerTipObservedLinkedDisposition(
+		connId, tip, observedTip, vrfOutput, praosView, link,
+	) == PeerTipUpdateAccepted
+}
+
+func (cs *ChainSelector) updatePeerTipObservedLinkedDisposition(
+	connId ouroboros.ConnectionId,
+	tip ochainsync.Tip,
+	observedTip ochainsync.Tip,
+	vrfOutput []byte,
+	praosView PraosTiebreakerView,
+	link deliveredLink,
+) PeerTipUpdateDisposition {
 	if cs.config.ConnectionLive != nil &&
 		!cs.config.ConnectionLive(connId) {
 		cs.config.Logger.Debug(
@@ -709,10 +740,10 @@ func (cs *ChainSelector) updatePeerTipObservedLinked(
 			"block_number", tip.BlockNumber,
 			"slot", tip.Point.Slot,
 		)
-		return false
+		return PeerTipUpdateRejected
 	}
 	shouldEvaluate := false
-	accepted := true
+	disposition := PeerTipUpdateAccepted
 	var evictedConn *ouroboros.ConnectionId
 	var modeChanged bool
 	var revoke bool
@@ -723,13 +754,20 @@ func (cs *ChainSelector) updatePeerTipObservedLinked(
 
 		if cs.loneFrontierBrokenLocked(connId, observedTip, link) {
 			revoke = true
-			accepted = false
+			disposition = PeerTipUpdateRejected
 			return
 		}
 		if !cs.checkPeerTipPlausibleLocked(
 			connId, tip, observedTip, link,
 		) {
-			accepted = false
+			disposition = PeerTipUpdateRejected
+			if claim, ok := cs.farTipClaims[connId]; ok &&
+				claim.block == observedTip.BlockNumber &&
+				claim.slot == observedTip.Point.Slot &&
+				bytes.Equal(claim.hash, observedTip.Point.Hash) &&
+				claim.boundary == link.boundary {
+				disposition = PeerTipUpdatePending
+			}
 			return
 		}
 
@@ -756,7 +794,7 @@ func (cs *ChainSelector) updatePeerTipObservedLinked(
 			var ok bool
 			evictedConn, ok = cs.makeRoomForNewPeerLocked(connId)
 			if !ok {
-				accepted = false
+				disposition = PeerTipUpdateRejected
 				return
 			}
 			peerTip := &PeerChainTip{
@@ -790,6 +828,9 @@ func (cs *ChainSelector) updatePeerTipObservedLinked(
 		if !trackHashes {
 			modeChanged = cs.advanceSelectionModeLocked()
 		}
+		// Record the common point while every window still holds it, whether
+		// or not anyone is waiting on the limit.
+		cs.computeEagernessLimitLocked(nil, cs.localTip)
 
 		cs.config.Logger.Debug(
 			"updated peer tip",
@@ -834,15 +875,15 @@ func (cs *ChainSelector) updatePeerTipObservedLinked(
 	if revoke {
 		cs.RemovePeer(connId)
 	}
-	if !accepted {
-		return false
+	if disposition != PeerTipUpdateAccepted {
+		return disposition
 	}
 
 	if shouldEvaluate {
 		cs.EvaluateAndSwitch()
 	}
 
-	return true
+	return PeerTipUpdateAccepted
 }
 
 // checkPeerTipPlausibleLocked reports whether a tip observation from connId
@@ -1071,6 +1112,10 @@ func (cs *ChainSelector) corroborateFarTipClaimLocked(
 	observedTip ochainsync.Tip,
 	link deliveredLink,
 ) bool {
+	if !cs.blockWithinSlotDistanceLocked(observedTip) {
+		delete(cs.farTipClaims, connId)
+		return false
+	}
 	claimed := observedTip.BlockNumber
 	if cs.farTipClaims == nil {
 		cs.farTipClaims = make(map[ouroboros.ConnectionId]farTipClaim)
@@ -1090,7 +1135,6 @@ func (cs *ChainSelector) corroborateFarTipClaimLocked(
 		run:          1,
 	}
 	switch {
-	case !cs.blockWithinSlotDistanceLocked(observedTip):
 	case !exists:
 	case len(observedTip.Point.Hash) > 0 &&
 		bytes.Equal(observedTip.Point.Hash, prev.hash):
@@ -1912,9 +1956,10 @@ func (cs *ChainSelector) isPeerSelectableWithBestKnownBlockLocked(
 }
 
 func (cs *ChainSelector) selectBestChainLocked() *ouroboros.ConnectionId {
-	return cs.selectBestChainWithBestKnownBlockLocked(
-		cs.prepareSelectionLocked(),
-	)
+	// Advance the mode before caching the limit: the limit is gated on it.
+	bestKnownBlock := cs.prepareSelectionLocked()
+	defer cs.endEagernessLocked(cs.beginEagernessLocked())
+	return cs.selectBestChainWithBestKnownBlockLocked(bestKnownBlock)
 }
 
 // prepareSelectionLocked advances the selection mode and returns the best known
@@ -2134,7 +2179,9 @@ func (cs *ChainSelector) connectionPriority(
 }
 
 func (cs *ChainSelector) isPeerTipStale(peerTip *PeerChainTip) bool {
-	return peerTip != nil &&
+	// A peer held at the Limit on Eagerness sends no tips because the pause
+	// stops them, so the silence is not evidence that it is gone.
+	return peerTip != nil && peerTip.eagernessPaused == 0 &&
 		peerTip.IsStale(cs.config.StaleTipThreshold)
 }
 
@@ -2157,6 +2204,14 @@ func (cs *ChainSelector) comparePeerTips(
 		if densityB > densityA {
 			return ChainBBetter
 		}
+	}
+	// The limit replaces only the length comparison: density is what tells
+	// apart two forks that both run past it, so it must be decided first.
+	if cs.indistinguishableUnderEagernessLocked(
+		peerTipA.SelectionTip(),
+		peerTipB.SelectionTip(),
+	) {
+		return cs.compareTransportLocked(connIdA, connIdB, true)
 	}
 	return cs.comparePeerTipsPraos(
 		connIdA,
@@ -2189,40 +2244,60 @@ func (cs *ChainSelector) comparePeerTipsPraos(
 		}
 		// The chains are the same block. The remaining checks choose a
 		// peer transport for that block, not a different chain.
-		priorityA := cs.connectionPriority(connIdA)
-		priorityB := cs.connectionPriority(connIdB)
-		if priorityA > priorityB {
-			return ChainABetter
-		}
-		if priorityB > priorityA {
-			return ChainBBetter
-		}
-		// Latency tiebreaker: prefer the peer with lower blockfetch
-		// EWMA when VRF and SelectionTip are equal. Only fires when
-		// both peers have at least one sample; otherwise fall through
-		// to the connId string tiebreaker.
-		if cs.config.BlockfetchLatency != nil {
-			latencyA, okA := cs.config.BlockfetchLatency(connIdA)
-			latencyB, okB := cs.config.BlockfetchLatency(connIdB)
-			if okA && okB {
-				if latencyA < latencyB {
-					return ChainABetter
-				}
-				if latencyB < latencyA {
-					return ChainBBetter
-				}
-			}
-		}
-		if connIdA.String() < connIdB.String() {
-			return ChainABetter
-		}
-		if connIdB.String() < connIdA.String() {
-			return ChainBBetter
-		}
-		return ChainEqual
+		return cs.compareTransportLocked(connIdA, connIdB, false)
 	default:
 		return ChainComparisonUnknown
 	}
+}
+
+// compareTransportLocked orders two peers whose chains are equivalent for
+// selection: connection priority, then (optionally) the incumbent, then
+// blockfetch latency, then connection ID. The incumbent is preferred only when
+// the equivalence is the Limit on Eagerness, where the peers' tips differ and
+// would otherwise swap places on every evaluation.
+func (cs *ChainSelector) compareTransportLocked(
+	connIdA, connIdB ouroboros.ConnectionId,
+	preferIncumbent bool,
+) ChainComparisonResult {
+	priorityA := cs.connectionPriority(connIdA)
+	priorityB := cs.connectionPriority(connIdB)
+	if priorityA > priorityB {
+		return ChainABetter
+	}
+	if priorityB > priorityA {
+		return ChainBBetter
+	}
+	if preferIncumbent && cs.bestPeerConn != nil {
+		if *cs.bestPeerConn == connIdA {
+			return ChainABetter
+		}
+		if *cs.bestPeerConn == connIdB {
+			return ChainBBetter
+		}
+	}
+	// Latency tiebreaker: prefer the peer with lower blockfetch
+	// EWMA when VRF and SelectionTip are equal. Only fires when
+	// both peers have at least one sample; otherwise fall through
+	// to the connId string tiebreaker.
+	if cs.config.BlockfetchLatency != nil {
+		latencyA, okA := cs.config.BlockfetchLatency(connIdA)
+		latencyB, okB := cs.config.BlockfetchLatency(connIdB)
+		if okA && okB {
+			if latencyA < latencyB {
+				return ChainABetter
+			}
+			if latencyB < latencyA {
+				return ChainBBetter
+			}
+		}
+	}
+	if connIdA.String() < connIdB.String() {
+		return ChainABetter
+	}
+	if connIdB.String() < connIdA.String() {
+		return ChainBBetter
+	}
+	return ChainEqual
 }
 
 func sameSelectionTip(a, b ochainsync.Tip) bool {
@@ -2665,6 +2740,7 @@ func (cs *ChainSelector) evaluateBestPeerLocked() (
 	// reports why the densest fast source was denied.
 	corroborationEvent := cs.genesisCorroborationFailureLocked()
 
+	defer cs.endEagernessLocked(cs.beginEagernessLocked())
 	newBest := cs.selectBestChainWithBestKnownBlockLocked(bestKnownBlock)
 	if newBest == nil {
 		// Selection stalled. Stage an explicit selected-to-none transition when
@@ -2869,7 +2945,21 @@ func (cs *ChainSelector) HandlePeerTipUpdateEvent(evt event.Event) {
 		)
 		return
 	}
-	cs.updatePeerTipObservedLinked(
+	cs.AcceptPeerTipUpdate(e)
+}
+
+// AcceptPeerTipUpdate synchronously applies a peer tip update and reports
+// whether the selector accepted the candidate.
+func (cs *ChainSelector) AcceptPeerTipUpdate(e PeerTipUpdateEvent) bool {
+	return cs.ObservePeerTipUpdate(e) == PeerTipUpdateAccepted
+}
+
+// ObservePeerTipUpdate synchronously applies a peer tip update and reports
+// whether it was accepted, retained as a pending far-tip claim, or rejected.
+func (cs *ChainSelector) ObservePeerTipUpdate(
+	e PeerTipUpdateEvent,
+) PeerTipUpdateDisposition {
+	return cs.updatePeerTipObservedLinkedDisposition(
 		e.ConnectionId,
 		e.Tip,
 		e.ObservedTip,
@@ -2990,6 +3080,7 @@ func (cs *ChainSelector) applyRollbackToTrackedPeer(e PeerRollbackEvent) bool {
 		return false
 	}
 	peerTip.ApplyRollback(e.Point, e.Tip)
+	cs.computeEagernessLimitLocked(nil, cs.localTip)
 	return true
 }
 
@@ -3209,7 +3300,8 @@ func (cs *ChainSelector) cleanupStalePeers() {
 			// skipped from selection after StaleTipThreshold, but we keep them
 			// tracked for an additional period in case they reconnect or update.
 			// After 2x the threshold, we consider them truly gone and remove them.
-			if peerTip.IsStale(cs.config.StaleTipThreshold * 2) {
+			if peerTip.eagernessPaused == 0 &&
+				peerTip.IsStale(cs.config.StaleTipThreshold*2) {
 				cs.config.Logger.Debug(
 					"removing very stale peer",
 					"connection_id", connId.String(),

@@ -96,6 +96,7 @@ func writeBlockInventory(
 func scanBlockInventory(
 	store blob.BlobStore,
 	txn types.Txn,
+	writer *blockInventoryIndexWriter,
 ) (blockInventory, error) {
 	iterOpts := types.BlobIteratorOptions{
 		Prefix: []byte(types.BlockBlobKeyPrefix),
@@ -138,7 +139,11 @@ func scanBlockInventory(
 		if err != nil {
 			return blockInventory{}, err
 		}
-		if err := store.Set(txn, indexKey, nil); err != nil {
+		wtxn, err := writer.txnFor(len(indexKey))
+		if err != nil {
+			return blockInventory{}, err
+		}
+		if err := store.Set(wtxn, indexKey, nil); err != nil {
 			return blockInventory{}, fmt.Errorf(
 				"index retained block for inventory: %w", err,
 			)
@@ -149,6 +154,87 @@ func scanBlockInventory(
 		return blockInventory{}, err
 	}
 	return ret, nil
+}
+
+// blockInventoryIndexWriter places the index mutations of an inventory
+// rebuild. The rebuild touches one index key per retained block, which on a
+// synced network is far more than one badger transaction accepts. When the
+// store reports a per-transaction budget (blob.TxnBudget), the writer stages
+// into transactions of its own and commits each one before it fills. A store
+// that reports no budget has none to exhaust, so everything is staged into
+// the caller's transaction as before.
+//
+// The inventory record is written by the caller after the writer is flushed,
+// so an interrupted rebuild leaves index entries without a record, which the
+// next initialization clears and rebuilds.
+type blockInventoryIndexWriter struct {
+	store  blob.BlobStore
+	budget blob.TxnBudget
+	outer  types.Txn
+	cur    types.Txn
+}
+
+func newBlockInventoryIndexWriter(
+	store blob.BlobStore,
+	outer types.Txn,
+) *blockInventoryIndexWriter {
+	w := &blockInventoryIndexWriter{store: store, outer: outer}
+	if budget, ok := store.(blob.TxnBudget); ok {
+		if _, ok := budget.RemainingTxnEntries(outer, 0); ok {
+			w.budget = budget
+		}
+	}
+	return w
+}
+
+// batched reports whether index mutations go to the writer's own
+// transactions rather than the caller's.
+func (w *blockInventoryIndexWriter) batched() bool {
+	return w.budget != nil
+}
+
+// txnFor returns the transaction to stage one mutation of a keyLen-byte key
+// into, committing the current batch first when it has no room left.
+func (w *blockInventoryIndexWriter) txnFor(keyLen int) (types.Txn, error) {
+	if w.budget == nil {
+		return w.outer, nil
+	}
+	if w.cur != nil {
+		remaining, ok := w.budget.RemainingTxnEntries(w.cur, keyLen)
+		if ok && remaining > 0 {
+			return w.cur, nil
+		}
+		if err := w.flush(); err != nil {
+			return nil, err
+		}
+	}
+	w.cur = w.store.NewTransaction(true)
+	if w.cur == nil {
+		return nil, errors.New("block inventory index transaction is nil")
+	}
+	return w.cur, nil
+}
+
+// flush commits the current batch, if any.
+func (w *blockInventoryIndexWriter) flush() error {
+	if w.cur == nil {
+		return nil
+	}
+	cur := w.cur
+	w.cur = nil
+	if err := cur.Commit(); err != nil {
+		_ = cur.Rollback()
+		return fmt.Errorf("commit block inventory index batch: %w", err)
+	}
+	return nil
+}
+
+// abort discards the current, uncommitted batch.
+func (w *blockInventoryIndexWriter) abort() {
+	if w.cur != nil {
+		_ = w.cur.Rollback()
+		w.cur = nil
+	}
 }
 
 func blockInventoryIndexKey(slot uint64, hash []byte) ([]byte, error) {
@@ -182,7 +268,11 @@ func blockInventoryIndexSlot(key []byte) (uint64, error) {
 	return slot, nil
 }
 
-func clearBlockInventoryIndex(store blob.BlobStore, txn types.Txn) error {
+func clearBlockInventoryIndex(
+	store blob.BlobStore,
+	txn types.Txn,
+	writer *blockInventoryIndexWriter,
+) error {
 	it := store.NewIterator(txn, types.BlobIteratorOptions{
 		Prefix: blockInventoryIndexPrefix,
 	})
@@ -195,7 +285,12 @@ func clearBlockInventoryIndex(store blob.BlobStore, txn types.Txn) error {
 		if item == nil {
 			continue
 		}
-		if err := store.Delete(txn, item.Key()); err != nil {
+		key := item.Key()
+		wtxn, err := writer.txnFor(len(key))
+		if err != nil {
+			return err
+		}
+		if err := store.Delete(wtxn, key); err != nil {
 			return fmt.Errorf("clear block inventory index: %w", err)
 		}
 	}
@@ -255,11 +350,30 @@ func (d *Database) initBlockInventory() error {
 	} else if !errors.Is(err, types.ErrBlobKeyNotFound) {
 		return fmt.Errorf("read block inventory: %w", err)
 	}
-	if err := clearBlockInventoryIndex(store, txn.Blob()); err != nil {
+	writer := newBlockInventoryIndexWriter(store, txn.Blob())
+	defer writer.abort()
+	// Batched index writes commit outside txn. Iterating the index and the
+	// blocks through txn would put the keys those batches write into txn's
+	// read set, so the scan reads from a snapshot of its own. txn still
+	// holds the block inventory gate for the whole rebuild, so no block
+	// mutation runs between the batches.
+	scanTxn := txn.Blob()
+	if writer.batched() {
+		readTxn := store.NewTransaction(false)
+		if readTxn == nil {
+			return errors.New("block inventory scan transaction is nil")
+		}
+		defer readTxn.Rollback() //nolint:errcheck
+		scanTxn = readTxn
+	}
+	if err := clearBlockInventoryIndex(store, scanTxn, writer); err != nil {
 		return fmt.Errorf("clear block inventory index: %w", err)
 	}
-	inventory, err := scanBlockInventory(store, txn.Blob())
+	inventory, err := scanBlockInventory(store, scanTxn, writer)
 	if err != nil {
+		return fmt.Errorf("initialize block inventory: %w", err)
+	}
+	if err := writer.flush(); err != nil {
 		return fmt.Errorf("initialize block inventory: %w", err)
 	}
 	if err := writeBlockInventory(store, txn.Blob(), inventory); err != nil {

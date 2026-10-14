@@ -61,7 +61,7 @@ func TestChainsyncObservePeerTipSyncWhenStaleRuleActive(t *testing.T) {
 	require.False(t, n.chainSelector.GenesisCorroborationActive(),
 		"fixture: corroboration must be off")
 
-	handled := n.chainsyncObservePeerTip(chainselection.PeerTipUpdateEvent{
+	disposition := n.chainsyncObservePeerTip(chainselection.PeerTipUpdateEvent{
 		ConnectionId: conn,
 		Tip: ochainsync.Tip{
 			Point:       ocommon.NewPoint(200, []byte("stale-tip")),
@@ -73,7 +73,7 @@ func TestChainsyncObservePeerTipSyncWhenStaleRuleActive(t *testing.T) {
 		},
 	})
 
-	assert.True(t, handled,
+	assert.NotEqual(t, chainselection.PeerTipUpdateUnhandled, disposition,
 		"tip observation was left asynchronous while the stale rule is active")
 	assert.False(t, n.chainsyncApplyEligible(conn),
 		"a wall-clock-stale peer's header passes the apply gate")
@@ -104,11 +104,11 @@ func TestChainsyncObservePeerRollbackSyncWhenStaleRuleActive(t *testing.T) {
 func TestChainsyncObservePeerTipAsyncOutsideGenesis(t *testing.T) {
 	t.Parallel()
 	n := newStaleObserveNode(false, 50000)
-	handled := n.chainsyncObservePeerTip(chainselection.PeerTipUpdateEvent{
+	disposition := n.chainsyncObservePeerTip(chainselection.PeerTipUpdateEvent{
 		ConnectionId: staleObserveConnId(),
 	})
-	assert.False(t, handled)
-	handled = n.chainsyncObservePeerRollback(chainselection.PeerRollbackEvent{
+	assert.Equal(t, chainselection.PeerTipUpdateUnhandled, disposition)
+	handled := n.chainsyncObservePeerRollback(chainselection.PeerRollbackEvent{
 		ConnectionId: staleObserveConnId(),
 	})
 	assert.False(t, handled)
