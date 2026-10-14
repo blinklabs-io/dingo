@@ -298,9 +298,10 @@ func CheckEpoch(
 // mark/set/go derivation).
 const defaultPreStakingThroughEpoch = 1
 
-// preStakingThroughEpochByNetwork holds networks whose Koios epoch_info
-// reports a null active_stake for longer than the mark/set/go derivation
-// alone implies. Preprod reports null for epochs 0 through 5.
+// preStakingThroughEpochByNetwork holds networks that do not start in a
+// staking era at epoch 0. Preprod runs Byron for epochs 0-3 and enters
+// Shelley at epoch 4, so the mark/set/go derivation first yields a valid
+// snapshot at epoch 6 and Koios reports a null active_stake for epochs 0-5.
 var preStakingThroughEpochByNetwork = map[string]uint64{
 	"preprod": 5,
 }
@@ -363,7 +364,10 @@ func IsPreStakingEpoch(network string, epoch uint64) bool {
 // epoch 0 and keeps the first epochs from being treated as having a real
 // stakeEpoch, which previously let the account-fetch path wastefully run
 // Koios requests for a pre-staking epoch).
-func koiosStakeEpoch(network string, koiosEpoch uint64) (epoch uint64, ok bool) {
+func koiosStakeEpoch(
+	network string,
+	koiosEpoch uint64,
+) (epoch uint64, ok bool) {
 	if koiosEpoch <= preStakingThroughEpoch(network) {
 		return 0, false
 	}
