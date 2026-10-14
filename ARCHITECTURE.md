@@ -1236,6 +1236,16 @@ The block production pipeline from leader election through broadcast.
 The producer validates its credentials before starting and only advertises
 blocks it has durably adopted:
 
+- **Validate the elected pool VRF key.** The startup credential check shares
+  header validation's VRF lookup, using the stake snapshot that elects blocks
+  in the applied tip's epoch. A matching published tip and epoch cache and one
+  metadata read transaction keep the lookup consistent. Imported active
+  distributions apply at the Mithril anchor too. Pending re-registrations do
+  not replace the key until they enter the elected snapshot. For a pool with
+  no electing snapshot yet, startup checks its epoch-effective registration;
+  a first registration is active immediately, and re-registrations remain
+  deferred until the next epoch.
+
 - **Validate the producer counter for the active era.** Before the node starts
   block production, `node_forging.go` checks the loaded OpCert issue number
   against the observed on-chain counter, or against zero when the pool has
