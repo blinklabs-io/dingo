@@ -425,3 +425,51 @@ func TestGenesisIncumbentTurnsWallClockStale(t *testing.T) {
 	assert.Nil(t, cs.SelectBestChain(),
 		"the incumbent stays selectable after its tip went stale")
 }
+
+// newForkedDeadForkSelector is newDeadForkSelector with a shared prefix, so
+// the dead fork and the honest chain intersect at slot 1100 (block 110).
+func newForkedDeadForkSelector(t *testing.T) (
+	*ChainSelector,
+	ouroboros.ConnectionId,
+	[]ouroboros.ConnectionId,
+) {
+	t.Helper()
+	cs := newGenesisWallClockSelector(deadForkHonestTipSlot)
+	cs.SetLocalTip(genesisTip(1000, "c1000", 100))
+	dead := corrConn(1)
+	deadTip := genesisTip(2000, "dead-tip", 200)
+	feedAdvertising(t, cs, dead, deadTip, "c", 1000, 1100, 10)
+	feedAdvertising(t, cs, dead, deadTip, "d", 1110, 1900, 10)
+	var honest []ouroboros.ConnectionId
+	for i := range deadForkHonestPeers {
+		conn := corrConn(10 + i)
+		honest = append(honest, conn)
+		adv := genesisTip(
+			deadForkHonestTipSlot,
+			"honest-tip",
+			deadForkHonestTipSlot/10,
+		)
+		feedAdvertising(t, cs, conn, adv, "c", 1000, 1100, 10)
+		feedAdvertising(t, cs, conn, adv, "h", 1110, 1400, 10)
+	}
+	return cs, dead, honest
+}
+
+// A wall-clock-stale peer is never selectable, so the Limit on Eagerness has
+// no switch to it to protect. Counting its fragment would pin the limit at k
+// past its fork point and hold every honest peer there while it stays
+// connected.
+func TestGenesisEagernessLimitIgnoresWallClockStalePeer(t *testing.T) {
+	t.Parallel()
+	cs, dead, honest := newForkedDeadForkSelector(t)
+
+	limit := cs.EagernessLimit()
+	require.True(t, limit.Active)
+	assert.Equal(t, uint64(160), limit.BlockNumber,
+		"a wall-clock-stale fork pinned the Limit on Eagerness")
+	assert.True(t, cs.withinEagernessLimit(honest[0], 131, nil),
+		"an honest header past the stale fork point plus k was held")
+	cs.RemovePeer(dead)
+	assert.Equal(t, limit, cs.EagernessLimit(),
+		"the limit must not depend on whether the stale peer is connected")
+}

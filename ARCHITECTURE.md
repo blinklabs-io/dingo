@@ -5557,7 +5557,8 @@ wall-clock slot (`advertisedTipStaleLocked`). A stale peer is not selectable,
 even when it is the only candidate (including in the selection that follows a
 disconnect), so selection waits for a fresher peer instead; it also drops out of
 the exit horizon, and its frontier is ignored when deciding whether other peers
-are behind (`bestKnownBlockNumber`). Its headers are also not applied to the
+are behind (`bestKnownBlockNumber`) and when computing the Limit on Eagerness.
+Its headers are also not applied to the
 ledger (`ChainSelector.ShouldApplyIngress`, the apply gate in the roll-forward
 and roll-backward handlers): ingress is open to every eligible peer, not only
 the selected one, so headers admitted from a stale peer would stay in the shared
@@ -5925,7 +5926,10 @@ bucket.
 intersection of all candidate fragments, so a syncing node cannot commit to one
 peer's chain so far that a slower honest candidate can no longer win. The limit
 is computed from the candidate fragments of live, eligible, non-stale peers
-that have delivered a header, and is gated on the selection mode, which is
+that have delivered a header, excluding peers the Genesis stale-tip rule
+treats as stale (`advertisedTipStaleLocked`): such a peer is never selectable,
+so its fork needs no protection, and counting it would hold every other peer at
+`k` past its fork point while it stays connected. The limit is gated on the selection mode, which is
 Dingo's only sync-state signal (there is no Genesis State Machine equivalent):
 
 - Genesis mode (syncing): the cap is active. Before any candidate has
