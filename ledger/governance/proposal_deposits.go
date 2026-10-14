@@ -71,43 +71,17 @@ func accountsForProposalDeposits(
 	txn *database.Txn,
 	deposits map[string]activeProposalDeposit,
 ) (map[string]*models.Account, error) {
-	// An inactive reward account has no DRep or SPO voting power, deposits
-	// included, matching the account-state checks in Conway's pulser.
-	accounts, err := db.GetAccountsByCredential(
-		ctx, proposalDepositCredentials(deposits), false, txn,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("get proposal return accounts: %w", err)
-	}
-	return accounts, nil
-}
-
-func accountsForProposalDepositsAtSlot(
-	ctx context.Context,
-	db *database.Database,
-	txn *database.Txn,
-	deposits map[string]activeProposalDeposit,
-	slot uint64,
-) (map[string]*models.Account, error) {
-	accounts, err := db.GetAccountsByCredentialAtSlot(
-		ctx, proposalDepositCredentials(deposits), slot, txn,
-	)
-	if err != nil {
-		return nil, fmt.Errorf(
-			"get proposal return accounts at slot %d: %w", slot, err,
-		)
-	}
-	return accounts, nil
-}
-
-func proposalDepositCredentials(
-	deposits map[string]activeProposalDeposit,
-) []models.StakeCredentialRef {
 	refs := make([]models.StakeCredentialRef, 0, len(deposits))
 	for _, deposit := range deposits {
 		refs = append(refs, deposit.Credential)
 	}
-	return refs
+	// An inactive reward account has no DRep or SPO voting power, deposits
+	// included, matching the account-state checks in Conway's pulser.
+	accounts, err := db.GetAccountsByCredential(ctx, refs, false, txn)
+	if err != nil {
+		return nil, fmt.Errorf("get proposal return accounts: %w", err)
+	}
+	return accounts, nil
 }
 
 func proposalDepositAccountActive(

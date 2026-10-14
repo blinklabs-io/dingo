@@ -1194,7 +1194,6 @@ func seedPoolWithStake(
 		SnapshotType: "mark",
 		PoolKeyHash:  poolKeyHash,
 		TotalStake:   types.Uint64(stake),
-		CapturedSlot: epoch,
 	}, nil))
 }
 
