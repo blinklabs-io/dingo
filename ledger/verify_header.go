@@ -775,6 +775,7 @@ func (ls *LedgerState) verifyBlockHeaderStateWithCache(
 	); err != nil {
 		return err
 	}
+	//nolint:contextcheck // the overlay fallback forecasts parameters without a request context
 	if handled, err := ls.verifyGenesisDelegateHeader(
 		block,
 		allowStateDefer,
