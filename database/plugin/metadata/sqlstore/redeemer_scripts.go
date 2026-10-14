@@ -76,7 +76,9 @@ func (s *Store) redeemerScriptHashes(
 			nil,
 			0,
 		)
-		if err != nil {
+		// A purpose that cannot be built leaves the redeemer unattributed
+		// rather than failing the block that carries it.
+		if err != nil || purpose == nil {
 			continue
 		}
 		if hash := purpose.ScriptHash(); hash != zero {

@@ -267,8 +267,28 @@ func TestGetAssetTransactionsCoversMintCreateAndSpend(t *testing.T) {
 	// create produces an output holding the asset which spend consumes; the
 	// mint transaction's own output is not recorded here.
 	f.output(t, create, createID, true, spend, false)
-	// A different asset must not match, and neither must an output without it.
+	// A different asset must not match, and neither must an output without it:
+	// unrelated holds and mints the same name under another policy, and
+	// another name under this policy.
 	f.output(t, unrelated, unrelatedID, false, nil, false)
+	var unrelatedUtxo int64
+	require.NoError(t, db.QueryRow(
+		`SELECT id FROM utxo WHERE tx_id = ?`, unrelated,
+	).Scan(&unrelatedUtxo))
+	for _, other := range []struct {
+		policy []byte
+		name   string
+	}{
+		{assetPolicy(0x42), "N"},
+		{f.policy, "M"},
+	} {
+		_, err := db.Exec(`
+INSERT INTO asset (name, policy_id, fingerprint, utxo_id, amount)
+VALUES (?, ?, ?, ?, '1')`, []byte(other.name), other.policy, []byte("fp"),
+			unrelatedUtxo)
+		require.NoError(t, err)
+		insertMintBurn(t, db, unrelated, other.policy, other.name, 15, 0, "1")
+	}
 	// An asset-bearing collateral return belongs to the failed transaction.
 	f.output(t, collateralTx, collateralID, true, nil, true)
 	// A second UTxO of the same transaction does not duplicate the row.

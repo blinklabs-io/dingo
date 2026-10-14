@@ -1448,7 +1448,7 @@ post-Mithril-boundary strictness (see below).
 | `address_transaction` | `id`, `payment_key`, `credential_tag`, `staking_key`, `transaction_id`, `slot`, `tx_index` | PK `id`; indexes `payment_key`, `transaction_id`, `slot`; composite `(credential_tag, staking_key, slot, tx_index, payment_key)` | API-mode address-to-transaction index. Join to `transaction.id`. `credential_tag`: 0 key hash, 1 script hash for stake-bearing addresses. The composite index supports credential-scoped pagination and its leading columns cover simple credential lookups. The slot, stake-position, and payment query indexes are deferred during bulk import. The transaction-id index remains resident because SetTransaction clears address history by transaction_id on replays. |
 | `transaction_metadata_label` | `id`, `transaction_id`, `label`, `slot`, `cbor_value`, `json_value` | PK `id`; unique `(transaction_id, label)`; indexes `label`, `slot` | API-mode per-label metadata index. Join to `transaction.id`. The label and slot indexes are deferred during bulk import and restored before API or rollback traffic; the unique key remains for idempotent inserts. |
 | `key_witness` | `id`, `transaction_id`, `type`, `vkey`, `signature`, `public_key`, `chain_code`, `attributes` | PK `id`; indexes `transaction_id`, `type` | API-mode vkey/bootstrap witnesses. Join to `transaction.id`. The type index is deferred and rebuilt before API traffic; transaction_id remains resident because SetTransaction clears witness rows on replays. |
-| `redeemer_script` | `transaction_id`, `tag`, `index`, `script_hash`, `slot`, `tx_index` | PK (`transaction_id`, `tag`, `index`); FK `transaction_id -> transaction.id` `ON DELETE CASCADE`; index `idx_redeemer_script_position` (`script_hash`, `slot`, `tx_index`, `tag`, `index`) | API-mode index of the script each redeemer executes, one row per attributed redeemer pointer, written by `storeRedeemerScripts` next to the `redeemer` rows. A redeemer pointer does not name its script: it resolves through the transaction body -- the spent input's address for a spend (the index points into the inputs sorted by transaction id and output index, not their body order; the address is read from the stored output's `payment_key` and `payment_script`), the sorted mint policy for a mint, the certificate or withdrawal credential, the voter, the proposal guardrail. A pointer that cannot be resolved (an input the index never saw, a spend of an output no script locks) has no row rather than failing the block. `slot` and `tx_index` repeat the transaction position so a script's redeemers page in chain order straight off the index; replaying a transaction deletes and rewrites its rows, and the cascade is how rollback reaches them. |
+| `redeemer_script` | `transaction_id`, `tag`, `index`, `script_hash`, `slot`, `tx_index` | PK (`transaction_id`, `tag`, `index`); FK `transaction_id -> transaction.id` `ON DELETE CASCADE`; index `idx_redeemer_script_position` (`script_hash`, `slot`, `tx_index`, `tag`, `index`) | API-mode index of the script each redeemer executes, one row per attributed redeemer pointer, written by `storeRedeemerScripts` next to the `redeemer` rows. A redeemer pointer does not name its script: it resolves through the transaction body -- the spent input's address for a spend (the index points into the inputs sorted by transaction id and output index, not their body order; the address is read from the stored output's `payment_key` and `payment_script`), the sorted mint policy for a mint, the certificate or withdrawal credential, the voter, the proposal guardrail. A pointer that cannot be resolved (an input the index never saw, a spend of an output no script locks) has no row rather than failing the block; a guarding redeemer has none either, because no script purpose is built for it. `slot` and `tx_index` repeat the transaction position so a script's redeemers page in chain order straight off the index; replaying a transaction deletes and rewrites its rows, and the cascade is how rollback reaches them. |
 | `witness_scripts` | `id`, `transaction_id`, `script_hash`, `type` | PK `id`; indexes `transaction_id`, `script_hash`, `type` | API-mode witness-script references. Join `script_hash = script.hash`. The script-hash and type indexes are deferred and rebuilt before API traffic; transaction_id remains resident because SetTransaction clears witness rows on replays. |
 | `script` | `id`, `hash`, `content`, `created_slot`, `type` | PK `id`; unique/index `hash`; index `type` | API-mode de-duplicated script content by hash. The type index is unused by live query predicates and is rebuilt by background maintenance. |
 | `plutus_data` | `id`, `transaction_id`, `data` | PK `id`; index `transaction_id` | API-mode Plutus data from witness sets. Join to `transaction.id`. Its transaction-id index remains resident because SetTransaction clears Plutus data on replays. |
@@ -3834,17 +3834,17 @@ asset or mint/burn lookup and a transaction matching several appears once;
 the inclusive `from`/`to` range filters on the transaction's
 `(slot, block_index)`. The `/assets/{asset}/utxos` listing reuses
 `GetUtxosByAddressWithOrdering` with `MatchAllAddresses` and the asset filter,
-cutting the page in SQL; with a block range the matches are listed by producing
-position first, because the SQL page does not express the range.
+cutting the page in SQL; a block range sets `CreatedFrom`/`CreatedTo`, so the
+ranged count and page are cut in SQL as well.
 
-The script endpoints read the API script indexes. `ListScriptHashes` and
-`CountScripts` order `script` by `id`. `GetScriptRedeemers` and
-`CountScriptRedeemers` read `redeemer_script` for one `script_hash` in
-`(slot, tx_index, tag, index)` order, and the adapter resolves each reference
-through the transaction's stored redeemers for the execution units, fee and
-datum hash. `GetScriptReferenceUtxos` and `CountScriptReferenceUtxos` select
-live `utxo` rows whose `id` is in `utxo_reference_script` for the hash, ordered
-by `utxo.id`. Datum and script JSON/CBOR come from `datum.raw_datum` and
+The script endpoints read the API script indexes. `ListScriptHashes` lists
+`script` by `id` and `CountScripts` counts its rows. `GetScriptRedeemers` reads
+`redeemer_script` for one `script_hash` in `(slot, tx_index, tag, index)` order
+and `CountScriptRedeemers` counts the same rows; the adapter resolves each
+reference through the transaction's stored redeemers for the execution units,
+fee and datum hash. `GetScriptReferenceUtxos` selects live `utxo` rows whose
+`id` is in `utxo_reference_script` for the hash, ordered by `utxo.id`, and
+`CountScriptReferenceUtxos` counts them. Datum and script JSON/CBOR come from `datum.raw_datum` and
 `script.content`: a Plutus script's `cbor` is the stored content and its
 `serialised_size` is that content's length, and a datum's JSON is the detailed
 Plutus data schema of `raw_datum`.
@@ -3860,7 +3860,12 @@ a ledger-state snapshot count as received with no producing transaction.
 snapshot even though those rows have no `transaction_id` or historical
 `transaction` row. Its ordering join is therefore a left join. Transaction-
 backed UTxOs use the producing transaction's `(slot, block_index, output_idx)`;
-snapshot-only UTxOs use `(utxo.added_slot, 0, output_idx)`. SQLite, MySQL, and
+a collateral return joins through `collateral_return_for_tx_id` and takes the
+position of the transaction it belongs to; snapshot-only UTxOs use
+`(utxo.added_slot, 0, output_idx)`. `UtxoWithOrderingQuery.CreatedFrom` and
+`.CreatedTo` bound that same position inclusively, and
+`CountUtxosByAddressWithOrdering` applies them too, so a ranged listing counts
+and pages in SQL. SQLite, MySQL, and
 Postgres implement the same fallback. Keyset cursors and ordering use the
 complete `(slot, block_index, output_idx, tx_id)` tuple; the transaction hash
 is the final key that makes the cursor unique when snapshot fallback fields
@@ -3869,7 +3874,8 @@ collide.
 UTxO address queries carry an explicit `UtxoAddressPattern`. A complete
 `ExactAddress` is distinct from credential-scoped `PaymentPart` and
 `DelegationPart` fields; fields in one pattern are ANDed and multiple patterns
-are ORed. SQLite, MySQL, and Postgres use the stored credential columns only to
+are ORed. `PaymentScript`, when set with `PaymentPart`, also matches
+`utxo.payment_script`, because key and script hashes share one namespace. SQLite, MySQL, and Postgres use the stored credential columns only to
 narrow candidates. The coordinated database layer resolves output CBOR and
 compares the complete address bytes for exact patterns, which distinguishes
 enterprise addresses, pointer payloads, network IDs, and other address forms

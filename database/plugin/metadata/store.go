@@ -2608,7 +2608,8 @@ type MetadataStore interface {
 
 	// GetAssetMintBurnHistory returns the mint and burn events of one asset
 	// in chain order (oldest first, or newest first when descending). A limit
-	// of zero or less applies no limit.
+	// of zero or less applies no limit. API storage mode only: the mint/burn
+	// history is not recorded in core mode, which returns no events.
 	GetAssetMintBurnHistory(
 		policyID lcommon.Blake2b224,
 		assetName []byte,
@@ -2619,7 +2620,8 @@ type MetadataStore interface {
 	) ([]models.AssetMintBurn, error)
 
 	// CountAssetMintBurnHistory returns the number of mint and burn events
-	// of one asset.
+	// of one asset. API storage mode only: core mode records none and
+	// returns zero.
 	CountAssetMintBurnHistory(
 		policyID lcommon.Blake2b224,
 		assetName []byte,

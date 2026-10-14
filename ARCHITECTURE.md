@@ -10197,24 +10197,39 @@ literal `slot` of `/blocks/slot/{slot_number}`),
 `/assets/policy/{policy_id}`) and `/scripts/{script_hash}/{section}` (with the
 literal `datum` of `/scripts/datum/{datum_hash}`). An unknown section falls
 through to the catch-all. Block navigation walks the block index from the
-identified block, bounded by the page size; the transaction, CBOR and address
-listings of one block decode that block once and page its transactions, which
-the block size bounds. A block's addresses come from the decoded outputs plus
-the stored UTxOs its transactions consumed (collateral inputs and the
-collateral return for a transaction that failed phase 2). The mempool
-endpoints reach the pool through an optional read interface the submitter
-satisfies, so an ascending page reads only the prefix it needs from
-`TransactionsBounded`, a descending page and the address filter read the pool
-whole (its capacity bounds it), and a node whose submitter does not expose the
-pool answers 503. Mempool inputs resolve to an address only when they name a
-stored unspent output; the input of another mempool transaction is listed
-without one.
+identified block, bounded by the page size: page one holds the nearest blocks,
+heights ascend within a page as Blockfrost lists them (a descending order
+reverses the page), and the pagination headers count the heights between the
+block and the tip, or below it. The transaction, CBOR and address listings of
+one block decode that block once and page its transactions, which the block
+size bounds. A block's addresses come from what its transactions produced and
+spent: a valid transaction's decoded outputs and consumed inputs, and for a
+transaction that failed phase 2 its collateral return output and its consumed
+collateral inputs. The mempool endpoints reach the pool through an optional
+read interface the submitter satisfies, so an ascending page reads only the
+prefix it needs from `TransactionsBounded`, a descending page and the address
+filter read the pool whole (its capacity bounds it), and a node whose submitter
+does not expose the pool answers 503. A mempool transaction marked as failing
+phase 2 is described by the effects it would have when applied: its collateral
+return is its only output and its collateral its only spent inputs, both for
+the transaction view and for the address filter. The address filter takes a
+Bech32 address and rejects a bare payment credential. Mempool inputs resolve to
+an address only when they name a stored unspent output; the input of another
+mempool transaction is listed without one.
 
 The script redeemer and reference-UTxO listings, like the address, asset and
 transaction listings, need API storage mode. Their indexes (`redeemer_script`,
 `utxo_reference_script`) are written as transactions are applied, so a database
 populated before they existed lists only the transactions and outputs applied
-afterwards.
+afterwards. A guarding redeemer is not attributed to a script, because no
+script purpose is built for it, so a guard script's redeemer listing omits
+those executions.
+
+A listing that pages from one read snapshot and then resolves each row through
+further reads (block hashes, output CBOR, transaction redeemers) releases the
+snapshot first. Those reads take connections of their own, so holding the
+snapshot across them lets concurrent requests exhaust the metadata read pool
+while each waits on another.
 
 The account UTxOs, withdrawals, and transactions endpoints resolve everything
 by stake credential rather than a single address. Account UTxOs reuse the
