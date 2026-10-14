@@ -115,7 +115,7 @@ INSERT INTO utxo (
 		require.NoError(t, err)
 		_, err = metadataTxn.Exec(`
 INSERT INTO asset (name, policy_id, utxo_id, amount)
-VALUES ('asset', 'policy', ?, '1')`, utxoID)
+VALUES (?, ?, ?, '1')`, []byte("asset"), []byte("policy"), utxoID)
 		require.NoError(t, err)
 		if outputCbor != nil {
 			require.NoError(t, db.Blob().SetUtxo(
