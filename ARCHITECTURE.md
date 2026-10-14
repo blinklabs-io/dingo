@@ -13743,8 +13743,12 @@ not appear in a process listing or environment. `koiosParity.apiKeyFile`
 (`DINGO_KOIOS_PARITY_API_KEY_FILE`, `--koios-parity-api-key-file`) pairs with
 `koiosParity.apiKey`, and any generic plugin config field accepts a
 `DINGO_PLUGINS_<CAPABILITY>_CONFIG_<FIELD>_FILE` variable. The file must be a
-regular file accessible only to its owner, of at most 64 KiB, whose contents
-are not blank; its contents are used as a plain string, never parsed as YAML,
+regular file of at most 64 KiB whose contents are not blank, and on Unix other
+users must have no access to it (`internal/secretfile` rejects mode bits
+`0o007`). Owner and group access is allowed, unlike a signing key: an
+orchestrator commonly grants the group, as a Kubernetes secret volume with mode
+`0440` and an `fsGroup` does. On Windows it applies the key file ACL check.
+Its contents are used as a plain string, never parsed as YAML,
 with trailing line endings removed. A literal and its file form are one
 setting: a higher-precedence source setting either replaces both, and one
 source setting both fails startup.

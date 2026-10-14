@@ -85,13 +85,19 @@ DINGO_PLUGINS_STORAGE_BLOB_CONFIG_BUCKET=blocks
 A `_FILE` suffix sets the field to the contents of a file instead, so a secret
 such as a password need not appear in the environment. The contents are used
 as a plain string, never parsed as YAML, with trailing line endings removed.
-The file must be a regular file accessible only to its owner, of at most
-64 KiB, whose contents are not blank; anything else fails configuration
-loading:
+The file must be a regular file of at most 64 KiB whose contents are not
+blank, and on Unix other users must have no access to it (owner and group
+access is allowed); anything else fails configuration loading:
 
 ```text
 DINGO_PLUGINS_STORAGE_METADATA_CONFIG_PASSWORD_FILE=/run/secrets/db-password
 ```
+
+Orchestrators do not create such files by default. A Docker Swarm secret is
+mounted with mode `0444`, so set the secret's `mode` to `0400` with a `uid`, or
+to `0440` with a `gid`, matching the user Dingo runs as. A Kubernetes secret
+volume defaults to `0644`, so set `defaultMode: 0400`, or `0440` with the pod's
+`fsGroup`. On Windows the file's ACL must not grant access to broad groups.
 
 Setting both forms of one field is an error. Because the suffix is reserved, a
 provider field whose name ends in `File` cannot be set from the environment.

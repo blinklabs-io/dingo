@@ -20,6 +20,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -65,5 +66,57 @@ func TestReadRejectsDevice(t *testing.T) {
 	_, err := Read("/dev/null")
 	if !errors.Is(err, keystore.ErrNotRegularFile) {
 		t.Fatalf("Read(device) error = %v", err)
+	}
+}
+
+// A value file may be shared with its group, as an orchestrator delivers it
+// (a Kubernetes secret volume with mode 0440 and an fsGroup), but never with
+// other users. The mode is set after writing so the umask cannot change it.
+func TestReadPermissionModes(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		mode   os.FileMode
+		accept bool
+	}{
+		{mode: 0o400, accept: true},
+		{mode: 0o600, accept: true},
+		{mode: 0o440, accept: true},
+		{mode: 0o640, accept: true},
+		{mode: 0o444},
+		{mode: 0o644},
+		{mode: 0o604},
+		{mode: 0o602},
+		{mode: 0o601},
+		{mode: 0o666},
+	} {
+		t.Run(tc.mode.String(), func(t *testing.T) {
+			t.Parallel()
+			path := filepath.Join(t.TempDir(), "secret")
+			if err := os.WriteFile(path, []byte("s3cret\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(path, tc.mode); err != nil {
+				t.Fatal(err)
+			}
+			got, err := Read(path)
+			if tc.accept {
+				if err != nil {
+					t.Fatalf("Read(mode %04o) error = %v", tc.mode, err)
+				}
+				if got != "s3cret" {
+					t.Fatalf("Read(mode %04o) = %q", tc.mode, got)
+				}
+				return
+			}
+			if !errors.Is(err, keystore.ErrInsecureFileMode) {
+				t.Fatalf("Read(mode %04o) error = %v", tc.mode, err)
+			}
+			if strings.Contains(err.Error(), "s3cret") {
+				t.Fatalf("Read(mode %04o) error leaks contents: %v", tc.mode, err)
+			}
+			if strings.Contains(err.Error(), "key file") {
+				t.Fatalf("Read(mode %04o) error names a key file: %v", tc.mode, err)
+			}
+		})
 	}
 }
