@@ -119,6 +119,7 @@ func (p poolCertPosition) before(other poolCertPosition) bool {
 func poolPositionPredicate(
 	table string,
 	at poolCertPosition,
+	blockIndex string,
 ) (string, []any) {
 	args := []any{
 		at.slot,
@@ -128,12 +129,16 @@ func poolPositionPredicate(
 	return `(
       ` + table + `.added_slot < ?
       OR (` + table + `.added_slot = ?
-          AND COALESCE(t.block_index, 0) < ?)
+          AND ` + blockIndex + ` < ?)
       OR (` + table + `.added_slot = ?
-          AND COALESCE(t.block_index, 0) = ?
+          AND ` + blockIndex + ` = ?
           AND COALESCE(c.cert_index, 0) < ?)
   )`, args
 }
+
+const poolRegistrationBlockIndex = `COALESCE((
+    SELECT tx.block_index FROM "transaction" tx WHERE tx.id = c.transaction_id
+), 0)`
 
 // poolRegistrationDepositHeld returns the deposit the pool registration being
 // written at `at` retains, given the `charged` amount the block era's
@@ -231,7 +236,9 @@ func latestPoolRegistrationBefore(
 	poolID int64,
 	at poolCertPosition,
 ) (poolRegistrationDepositRow, bool, error) {
-	predicate, args := poolPositionPredicate("pr", at)
+	predicate, args := poolPositionPredicate(
+		"pr", at, poolRegistrationBlockIndex,
+	)
 	var (
 		row       poolRegistrationDepositRow
 		held      sql.NullString
@@ -242,13 +249,12 @@ func latestPoolRegistrationBefore(
 	)
 	err := db.QueryRowContext(ctx, `
 SELECT pr.deposit_held, pr.deposit_amount, pr.added_slot,
-       COALESCE(t.block_index, 0), COALESCE(c.cert_index, 0)
+       `+poolRegistrationBlockIndex+`, COALESCE(c.cert_index, 0)
 FROM pool_registration pr
 LEFT JOIN certs c ON c.id = pr.certificate_id
-LEFT JOIN "transaction" t ON t.id = c.transaction_id
 WHERE pr.pool_id = ?
   AND `+predicate+`
-ORDER BY pr.added_slot DESC, COALESCE(t.block_index, 0) DESC,
+ORDER BY pr.added_slot DESC, `+poolRegistrationBlockIndex+` DESC,
          COALESCE(c.cert_index, 0) DESC, pr.registration_index DESC
 LIMIT 1`,
 		append([]any{poolID}, args...)...,
@@ -294,7 +300,9 @@ func latestPoolRetirementBefore(
 	poolID int64,
 	at poolCertPosition,
 ) (poolRetirementPositionRow, bool, error) {
-	predicate, args := poolPositionPredicate("rt", at)
+	predicate, args := poolPositionPredicate(
+		"rt", at, "COALESCE(t.block_index, 0)",
+	)
 	var (
 		row       poolRetirementPositionRow
 		epoch     int64
