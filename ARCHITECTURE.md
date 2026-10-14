@@ -4186,8 +4186,10 @@ era is accepted and one in the other era refused. The reference
 a version-triggered transition the first block of the new epoch is forged in
 the new era only once `k` blocks of the ending epoch lie at or past the voting
 deadline; before that it is forged in the source era. The applied tip is read
-from the same snapshot publication as the epoch, retrying a load that straddles
-a publication, and a forecast that cannot be completed, such as an unfinished
+from the same snapshot publication as the epoch: a load that straddles a
+publication waits for the matching pair rather than pairing generations, since
+an older, higher tip can satisfy `k` for an era the matching state has not
+entered. A forecast that cannot be completed, such as an unfinished
 deferred ratification, returns no parameters so the forger skips the slot
 rather than forging in a guessed era.
 

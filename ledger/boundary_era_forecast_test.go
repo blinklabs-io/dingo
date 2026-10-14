@@ -17,11 +17,15 @@ package ledger
 import (
 	"os"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	"github.com/stretchr/testify/require"
 )
 
@@ -35,7 +39,11 @@ func TestProtocolParamsForSlotForecastsVersionTriggeredEra(t *testing.T) {
 	// The epoch is 100 slots and the stability window 30, so the voting
 	// deadline is slot 40 and k=1 block must lie at or past it.
 	const firstSlotOfEpoch1 = 100
-	newLedger := func(t *testing.T, tipIndex int, bump bool) *LedgerState {
+	newLedger := func(
+		t *testing.T,
+		tipIndex int,
+		bump bool,
+	) (*LedgerState, []ochainsync.Tip) {
 		t.Helper()
 		cfg := newBabbageQuorum1Cfg(t)
 		genesis, err := os.Open("../config/cardano/preview/conway-genesis.json")
@@ -52,29 +60,57 @@ func TestProtocolParamsForSlotForecastsVersionTriggeredEra(t *testing.T) {
 		ls.chain = testChain
 		ls.currentTip = tips[tipIndex]
 		ls.publishSnapshotsLocked()
-		return ls
+		return ls, tips
 	}
 
 	t.Run("conway pparams once k blocks follow the voting deadline", func(t *testing.T) {
 		t.Parallel()
-		got := newLedger(t, 1, true).ProtocolParamsForSlot(firstSlotOfEpoch1)
+		ls, _ := newLedger(t, 1, true)
+		got := ls.ProtocolParamsForSlot(firstSlotOfEpoch1)
 		pparams, ok := got.(*conway.ConwayProtocolParameters)
 		require.Truef(t, ok, "forged era must be Conway, got %T", got)
 		require.Equal(t, uint(9), pparams.ProtocolVersion.Major)
 	})
 	t.Run("babbage pparams before k blocks follow the deadline", func(t *testing.T) {
 		t.Parallel()
-		got := newLedger(t, 0, true).ProtocolParamsForSlot(firstSlotOfEpoch1)
+		ls, _ := newLedger(t, 0, true)
+		got := ls.ProtocolParamsForSlot(firstSlotOfEpoch1)
 		pparams, ok := got.(*babbage.BabbageProtocolParameters)
 		require.Truef(t, ok, "forged era must stay Babbage, got %T", got)
 		require.Equal(t, uint(9), pparams.ProtocolMajor)
 	})
 	t.Run("babbage pparams without a pending bump", func(t *testing.T) {
 		t.Parallel()
-		got := newLedger(t, 1, false).ProtocolParamsForSlot(firstSlotOfEpoch1)
+		ls, _ := newLedger(t, 1, false)
+		got := ls.ProtocolParamsForSlot(firstSlotOfEpoch1)
 		pparams, ok := got.(*babbage.BabbageProtocolParameters)
 		require.Truef(t, ok, "forged era must stay Babbage, got %T", got)
 		require.Equal(t, uint(8), pparams.ProtocolMajor)
+	})
+	t.Run("waits out an interrupted publication", func(t *testing.T) {
+		t.Parallel()
+		// The published state counts no block past the deadline, so its
+		// forecast is Babbage. A tip from another generation that does count
+		// one, as an older higher tip does across a rollback, would select
+		// Conway if the forecast paired it with this state.
+		ls, tips := newLedger(t, 0, true)
+		matching := ls.loadTipSnapshot()
+		ls.tip.Store(&tipSnapshot{
+			generation: matching.generation - 1,
+			currentTip: tips[1],
+		})
+		result := make(chan lcommon.ProtocolParameters, 1)
+		go func() {
+			result <- ls.ProtocolParamsForSlot(firstSlotOfEpoch1)
+		}()
+		testutil.RequireNoReceive(t, result, 200*time.Millisecond,
+			"forecast returned while the publication was interrupted")
+		ls.tip.Store(matching)
+		got := testutil.RequireReceive(t, result, 5*time.Second,
+			"forecast after the publication completed")
+		pparams, ok := got.(*babbage.BabbageProtocolParameters)
+		require.Truef(t, ok, "forged era must stay Babbage, got %T", got)
+		require.Equal(t, uint(9), pparams.ProtocolMajor)
 	})
 }
 

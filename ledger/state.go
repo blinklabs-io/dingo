@@ -2155,15 +2155,17 @@ func (ls *LedgerState) loadTipSnapshot() *tipSnapshot {
 	return ls.tip.Load()
 }
 
-// loadConsensusAndTipSnapshots returns a consensus snapshot and the tip
-// published with it. The two are stored one after the other, so a load that
-// straddles a publication is retried. A forecast that counts blocks of the
-// snapshot's epoch from a tip of another epoch would count the wrong blocks.
+// loadConsensusAndTipSnapshots is loadStateSnapshots for a ledger that may
+// not have published a tip yet, which only a bare test ledger lacks. It never
+// returns a mixed pair, however long a publisher pauses between its two
+// stores: a forecast counting blocks of the snapshot's epoch from a tip of
+// another generation counts the wrong blocks, and across a rollback an older,
+// higher tip can satisfy k for an era the matching state has not entered.
 func (ls *LedgerState) loadConsensusAndTipSnapshots() (
 	*consensusSnapshot,
 	*tipSnapshot,
 ) {
-	for range 8 {
+	for {
 		consensus := ls.loadConsensusSnapshot()
 		tip := ls.loadTipSnapshot()
 		if consensus == nil || tip == nil ||
@@ -2171,7 +2173,6 @@ func (ls *LedgerState) loadConsensusAndTipSnapshots() (
 			return consensus, tip
 		}
 	}
-	return ls.loadConsensusSnapshot(), ls.loadTipSnapshot()
 }
 
 // SetTipForTesting replaces the in-memory tip and publishes a matching
