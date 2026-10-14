@@ -286,6 +286,7 @@ func mergeConfigSources(
 	if err := cfg.ResolveSecretFiles(); err != nil {
 		return nil, fmt.Errorf("reading secret files: %w", err)
 	}
+	config.PublishConfig(cfg)
 	return cfg, nil
 }
 

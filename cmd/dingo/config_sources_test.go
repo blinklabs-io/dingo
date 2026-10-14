@@ -58,4 +58,9 @@ func TestMergeConfigSourcesReadsSecretFiles(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "from-file", cfg.KoiosParity.APIKey)
 	require.Empty(t, cfg.KoiosParity.APIKeyFile)
+	// Readers of the process-wide snapshot must see the resolved value, not
+	// the file path the merge consumed.
+	published := config.GetConfig()
+	require.Equal(t, "from-file", published.KoiosParity.APIKey)
+	require.Empty(t, published.KoiosParity.APIKeyFile)
 }
