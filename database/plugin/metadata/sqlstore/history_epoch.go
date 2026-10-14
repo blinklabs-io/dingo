@@ -35,8 +35,10 @@ func orderDirection(order string) string {
 
 // SumTransactionOutputsInSlotRange totals the lovelace each transaction in
 // the slot range put on chain: the outputs of a valid transaction, or the
-// collateral return of a phase-2 invalid one. This is the per-block rule, so
-// an epoch total equals the sum of its blocks.
+// collateral return of a phase-2 invalid one. A Leios closure transaction is
+// stored at its certifying block's slot but counts at the slot it executes
+// in (leios_transaction_context), as SumTransactionFeesInSlotRange counts its
+// fee, so an epoch's outputs and fees cover the same transactions.
 func (s *Store) SumTransactionOutputsInSlotRange(
 	startSlot uint64,
 	endSlot uint64,
@@ -62,11 +64,15 @@ func (s *Store) SumTransactionOutputsInSlotRange(
 		`SELECT COALESCE(SUM(CAST(u.amount AS ` + s.pendingCreditCastType() + `)), 0)
 FROM utxo u
 JOIN "transaction" tx ON tx.id = u.transaction_id
-WHERE tx.slot >= ? AND tx.slot <= ? AND tx.valid = TRUE`,
+LEFT JOIN leios_transaction_context lc ON lc.transaction_id = tx.id
+WHERE COALESCE(lc.slot, tx.slot) >= ? AND COALESCE(lc.slot, tx.slot) <= ?
+  AND tx.valid = TRUE`,
 		`SELECT COALESCE(SUM(CAST(u.amount AS ` + s.pendingCreditCastType() + `)), 0)
 FROM utxo u
 JOIN "transaction" tx ON tx.id = u.collateral_return_for_tx_id
-WHERE tx.slot >= ? AND tx.slot <= ? AND tx.valid = FALSE`,
+LEFT JOIN leios_transaction_context lc ON lc.transaction_id = tx.id
+WHERE COALESCE(lc.slot, tx.slot) >= ? AND COALESCE(lc.slot, tx.slot) <= ?
+  AND tx.valid = FALSE`,
 	} {
 		var raw any
 		if err := db.QueryRowContext(ctx, query, start, end).Scan(&raw); err != nil {

@@ -626,3 +626,31 @@ func TestEpochWindow(t *testing.T) {
 		})
 	}
 }
+
+// A Leios closure transaction is stored at the certifying block's slot but
+// executes at its context slot; its outputs count in the epoch it executed
+// in, as its fee does.
+func TestNodeAdapterEpochOutputUsesLeiosExecutionSlot(t *testing.T) {
+	t.Parallel()
+	fx := newEpochFixture(t)
+	ctx := context.Background()
+	tx := &models.Transaction{
+		Hash: fill32(0x41), Slot: 172805, Valid: true, Fee: 3,
+		Outputs: []models.Utxo{{TxId: fill32(0x41), Amount: 40}},
+	}
+	insertAdapterTransaction(t, fx.raw, tx)
+	_, err := fx.raw.Exec(
+		`INSERT INTO leios_transaction_context (transaction_id, slot) VALUES (?, 172700)`,
+		tx.ID,
+	)
+	require.NoError(t, err)
+
+	info, err := fx.adapter.Epoch(ctx, 1)
+	require.NoError(t, err)
+	assert.Equal(t, "38", info.Fees)
+	assert.Equal(t, "690", info.Output)
+	info, err = fx.adapter.Epoch(ctx, 2)
+	require.NoError(t, err)
+	assert.Equal(t, "7", info.Fees)
+	assert.Equal(t, "70", info.Output)
+}

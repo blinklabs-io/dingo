@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"strconv"
 
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
@@ -125,7 +126,7 @@ func (a *NodeAdapter) PoolHistory(
 			return nil, 0, fmt.Errorf("get epoch %d: %w", epoch, err)
 		}
 		endSlot := epochRow.StartSlot + uint64(epochRow.LengthInSlots) - 1
-		counts, _, err := db.Metadata().CountPoolBlocksInSlotRange(
+		counts, total, err := db.Metadata().CountPoolBlocksInSlotRange(
 			[]lcommon.PoolKeyHash{lcommon.PoolKeyHash(poolKeyHash)},
 			epochRow.StartSlot, endSlot, txn.Metadata(),
 		)
@@ -134,6 +135,29 @@ func (a *NodeAdapter) PoolHistory(
 				"count pool blocks in epoch %d: %w",
 				epoch,
 				err,
+			)
+		}
+		// Blocks at or below a bootstrap anchor are not observed; they come
+		// from the snapshot's imported counts, or are unknown.
+		counts, _, known, err := database.MergeImportedPoolBlockCounts(
+			db.Metadata(), txn.Metadata(), epoch, epochRow.StartSlot,
+			counts, total,
+		)
+		if err != nil {
+			return nil, 0, fmt.Errorf(
+				"merge imported pool blocks in epoch %d: %w",
+				epoch,
+				err,
+			)
+		}
+		if !known {
+			return nil, 0, fmt.Errorf(
+				"blocks of epoch %d: %w", epoch, ErrHistoryNotRetained,
+			)
+		}
+		if !row.TotalActiveStakeKnown {
+			return nil, 0, fmt.Errorf(
+				"active stake of epoch %d: %w", epoch, ErrHistoryNotRetained,
 			)
 		}
 		activeSize := 0.0

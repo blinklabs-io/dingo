@@ -10195,19 +10195,27 @@ history operations (`retired`, `history`, `relays`, `delegators`, `blocks`,
 (committee and committee votes, DRep delegators, metadata, updates and votes,
 the proposal list, and every proposal's details, parameters, withdrawals, votes
 and metadata). A proposal is addressed either by transaction hash and
-certificate index or by CIP-129 governance action id. `ServeMux` cannot hold
-both forms of `.../{tx_hash}/{cert_index}` and `.../{gov_action_id}/votes`, so
-the router registers one pattern per segment count and tells the forms apart by
-whether the second segment names a part (`parameters`, `withdrawals`, `votes`,
-`metadata`).
+certificate index or by CIP-129 governance action id. The router registers one
+pattern per segment count under `/governance/proposals/` and tells the forms
+apart by whether the second segment names a part (`parameters`,
+`withdrawals`, `votes`, `metadata`), so both forms share one identifier parser
+and one error path.
 
-Historical answers follow what the node retains. When the per-credential rows
-behind an epoch's stakes or an account's stake history were pruned, or the block
-that cast a governance vote is not held, the endpoint answers `404` with "The
-requested history is not retained by this node" (`ErrHistoryNotRetained`)
-rather than an empty list that reads as complete. API storage mode retains
-`reward_stake_input` without bound for this reason; see "Snapshot and
-Reward-State Retention" in DATABASE.md for the storage cost.
+Historical answers follow what the node retains. The endpoint answers `404`
+with "The requested history is not retained by this node"
+(`ErrHistoryNotRetained`) rather than an empty or partial answer that reads as
+complete when an epoch's stake distribution was pruned or is still being
+written, when an account has no retained stake-history row although its history
+predates the oldest retained snapshot (an account with some retained rows lists
+those), when the block that cast a governance vote is not held, and when a pool
+history epoch has no ready epoch summary or lies at or below a Mithril anchor
+without imported block counts. A votes page releases its read transaction
+before decoding the blocks that cast its votes, since each block read takes a
+pooled read connection of its own. API storage mode
+retains `reward_stake_input`, non-checkpoint `block_nonce` rows and superseded
+`auth_committee_hot` rows without bound for these endpoints; see "Snapshot and
+Reward-State Retention" and "Committee Hot-Key Authorization Retention" in
+DATABASE.md for the storage cost.
 
 The account UTxOs, withdrawals, and transactions endpoints resolve everything
 by stake credential rather than a single address. Account UTxOs reuse the
@@ -14696,9 +14704,10 @@ from the epoch-window prune and retained for the life of the database instead,
 so the Blockfrost account reward-history endpoint
 (`NodeAdapter.AccountRewardHistory`, `GET /accounts/{stake_address}/rewards`)
 can answer for any epoch rather than only the trailing four; `core` mode is
-unchanged. `RewardStakeInput` is pruned to the same four-epoch window in both
-modes regardless — it is not a Blockfrost-visible table and remains too large
-to retain unconditionally. The rollback path, `DeleteRewardStateAfterSlot`, is
+unchanged. `RewardStakeInput` is likewise retained without bound in `api` mode,
+for the Blockfrost epoch stake and account stake-history endpoints, and pruned
+to the four-epoch window in `core` mode (and by the Koios parity observer,
+which needs only `RewardAccountOutput`). The rollback path, `DeleteRewardStateAfterSlot`, is
 unaffected: it does not consult storage mode and always removes reward-state
 rows (including `RewardAccountOutput`) above the rollback slot in every mode.
 

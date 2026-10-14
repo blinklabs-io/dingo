@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/hex"
 	"errors"
+	"math"
 	"net/http"
 	"testing"
 
@@ -379,4 +380,44 @@ func TestNodeAdapterStakeHistoryRefusesIncompleteSnapshot(t *testing.T) {
 	_, total, err = fx.adapter.AccountStakeHistory(ctx, address, page)
 	require.NoError(t, err)
 	assert.Equal(t, 1, total)
+}
+
+// Lifetime lovelace totals sum UTxO amounts, which can exceed uint64 together
+// even though each fits.
+func TestNodeAdapterAccountAddressTotalExceedsUint64(t *testing.T) {
+	t.Parallel()
+	fx := newEpochFixture(t)
+	address := fx.addAccount(t, 0x01)
+	fx.addAccountOutput(t, 0xe1, 0x01, math.MaxUint64, 0)
+	fx.addAccountOutput(t, 0xe2, 0x01, math.MaxUint64, 60)
+
+	info, err := fx.adapter.AccountAddressTotal(context.Background(), address)
+	require.NoError(t, err)
+	assert.Equal(t, AddressAmountInfo{Unit: "lovelace", Quantity: "36893488147419103230"}, info.ReceivedSum[0])
+	assert.Equal(t, AddressAmountInfo{Unit: "lovelace", Quantity: "18446744073709551615"}, info.SentSum[0])
+}
+
+// An incomplete snapshot captured before the account existed cannot hold any
+// of its stake, so it does not make the account's history unavailable.
+func TestNodeAdapterStakeHistoryIgnoresIncompleteSnapshotBeforeAccount(t *testing.T) {
+	t.Parallel()
+	fx := newEpochFixture(t)
+	ctx := context.Background()
+	key := bytes32of(28, 0x09)
+	require.NoError(t, fx.adapter.ledgerState.Database().CreateAccount(
+		ctx, nil, &models.Account{
+			CredentialTag: 0, StakingKey: key, Active: true,
+			AddedSlot: 172810, CreatedSlot: 172810,
+		},
+	))
+	address := newRewardHistoryStakeAddress(t, key)
+	const pendingKey = models.StakeRewardSourcePrefix + "stake-inputs-pending"
+	require.NoError(t, fx.adapter.ledgerState.Database().Metadata().SetSyncState(
+		pendingKey, `{"entries":[{"epoch":0,"boundary_slot":0}]}`, nil,
+	))
+
+	rows, total, err := fx.adapter.AccountStakeHistory(ctx, address, PaginationParams{Count: 100, Page: 1, Order: PaginationOrderAsc})
+	require.NoError(t, err, "label 0 predates an account created in epoch 2")
+	assert.Equal(t, 0, total)
+	assert.Empty(t, rows)
 }

@@ -346,7 +346,10 @@ func (a *NodeAdapter) GovernanceCommittee(
 	}
 	credentials := make([]models.CommitteeCredential, 0, len(order))
 	for _, key := range order {
-		member := latest[key]
+		member, ok := latest[key]
+		if !ok || member == nil {
+			continue
+		}
 		credentials = append(credentials, models.CommitteeCredential{
 			CredentialTag: member.ColdCredentialTag,
 			Credential:    member.ColdCredHash,
@@ -360,7 +363,10 @@ func (a *NodeAdapter) GovernanceCommittee(
 
 	ret := CommitteeInfo{Members: make([]CommitteeMemberInfo, 0, len(order))}
 	for _, key := range order {
-		member := latest[key]
+		member, ok := latest[key]
+		if !ok || member == nil {
+			continue
+		}
 		cold := member.ColdCredHash
 		coldScript := member.ColdCredentialTag == 1
 		info := CommitteeMemberInfo{
@@ -445,20 +451,13 @@ func (a *NodeAdapter) CommitteeVotes(
 		if credential.HasScript {
 			tag = 1
 		}
-		if !cold {
-			filter.VoterCredentials = []models.CommitteeCredential{
-				{CredentialTag: tag, Credential: credential.Hash},
-			}
+		selected := models.CommitteeCredential{
+			CredentialTag: tag, Credential: credential.Hash,
+		}
+		if cold {
+			filter.AuthorizedBy = &selected
 		} else {
-			hot, err := a.ledgerState.Database().Metadata().
-				GetCommitteeHotCredentials(tag, credential.Hash, nil)
-			if err != nil {
-				return nil, 0, fmt.Errorf("get committee hot credentials: %w", err)
-			}
-			if len(hot) == 0 {
-				return []CommitteeVoteInfo{}, 0, nil
-			}
-			filter.VoterCredentials = hot
+			filter.VoterCredentials = []models.CommitteeCredential{selected}
 		}
 	}
 	rows, casts, total, err := a.votesPage(ctx, filter, params)

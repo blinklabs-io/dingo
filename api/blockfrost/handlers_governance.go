@@ -80,8 +80,8 @@ func (b *Blockfrost) handleProposalByID(
 // handleProposalTwoSegments handles
 // GET /api/v0/governance/proposals/{first}/{second}: either a proposal by
 // transaction hash and certificate index, or a part of a proposal by
-// governance action identifier. ServeMux cannot hold both routes, as they
-// overlap with neither more specific.
+// governance action identifier. One route serves both forms so they share
+// the identifier parsing and its error path.
 func (b *Blockfrost) handleProposalTwoSegments(
 	w http.ResponseWriter,
 	r *http.Request,

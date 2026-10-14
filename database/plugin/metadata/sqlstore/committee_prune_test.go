@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/migrations"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -1269,4 +1270,34 @@ func TestGetCommitteeAuthorizedCountCountsOnlyAuthorizedMembers(t *testing.T) {
 		t, seated, 4,
 		"the unauthorized and resigned members stay seated",
 	)
+}
+
+// In API storage mode every authorization is history the Blockfrost
+// committee vote endpoints read, so neither pruning path removes one.
+func TestCommitteeHotPruningRetainsHistoryInAPIMode(t *testing.T) {
+	t.Parallel()
+	store := newManagementTestStore(t)
+	store.storageMode = types.StorageModeAPI
+	const coldTag = uint8(lcommon.CredentialTypeAddrKeyHash)
+	cold := credentialHash(0xc5)
+	for i := 1; i <= 3; i++ {
+		seedAuthorization(
+			t, store, coldTag, cold,
+			uint8(lcommon.CredentialTypeAddrKeyHash), hotHash(0x73, i),
+			uint64(i), uint64(i), // #nosec G115
+		)
+	}
+	require.NoError(t, store.SetTip(ochainsync.Tip{
+		Point: ocommon.Point{Slot: preprodTipSlot, Hash: []byte("tip")},
+	}, nil))
+
+	require.NoError(t, store.pruneCommitteeHotAuthorizationsMaintenance(
+		context.Background(),
+	))
+	pruned, err := store.pruneCommitteeHotAuthorizations(
+		context.Background(), store.writeDB, coldTag, cold, preprodTipSlot,
+	)
+	require.NoError(t, err)
+	require.Zero(t, pruned)
+	require.Equal(t, 3, authRowCountFor(t, store, coldTag, cold))
 }

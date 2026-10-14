@@ -37,6 +37,9 @@ type PoolHistoryRow struct {
 	MemberRewards     uint64
 	LeaderRewards     uint64
 	RewardsCalculated bool
+	// TotalActiveStakeKnown is false when the epoch has no ready summary, so
+	// TotalActiveStake is unknown rather than zero.
+	TotalActiveStakeKnown bool
 }
 
 // PoolDelegatorRow is one registered delegator of a pool with its live stake.
@@ -84,8 +87,10 @@ type AssetQuantity struct {
 // AccountAddressTotals are the lifetime totals across every address that
 // carries a stake credential.
 type AccountAddressTotals struct {
-	ReceivedLovelace uint64
-	SentLovelace     uint64
+	// ReceivedLovelace and SentLovelace are unbounded: each output fits in
+	// uint64, but a lifetime sum of them need not.
+	ReceivedLovelace *big.Int
+	SentLovelace     *big.Int
 	ReceivedAssets   []AssetQuantity
 	SentAssets       []AssetQuantity
 	// TxCount is the number of distinct transactions touching the addresses.
@@ -99,6 +104,9 @@ type GovernanceVoteFilter struct {
 	// VoterCredentials selects votes cast under any of the tagged
 	// credentials.
 	VoterCredentials []CommitteeCredential
+	// AuthorizedBy selects votes cast under any hot credential the cold
+	// committee credential has authorized, superseded ones included.
+	AuthorizedBy *CommitteeCredential
 }
 
 // GovernanceVoteRow is a stored vote with the proposal it was cast on. The

@@ -117,6 +117,20 @@ WHERE 1 = 1`
 		}
 		where += " AND (" + strings.Join(predicates, " OR ") + ")"
 	}
+	if filter.AuthorizedBy != nil {
+		// A subquery, not a list of the member's hot credentials: a member
+		// that rotates on a schedule authorizes thousands, and an OR chain
+		// that long exceeds SQLite's expression depth.
+		where += ` AND EXISTS (SELECT 1 FROM auth_committee_hot a
+WHERE a.cold_credential_tag = ? AND a.cold_credential = ?
+  AND a.hot_credential_tag = v.voter_credential_tag
+  AND a.host_credential = v.voter_credential)`
+		args = append(
+			args,
+			filter.AuthorizedBy.CredentialTag,
+			filter.AuthorizedBy.Credential,
+		)
+	}
 	var total int
 	if err := db.QueryRowContext(
 		ctx, "SELECT COUNT(*)"+from+where, args...,
@@ -329,40 +343,4 @@ WHERE d.drep_credential_tag = ? AND d.drep_credential = ?
 		return nil, 0, err
 	}
 	return ret, total, nil
-}
-
-// GetCommitteeHotCredentials returns every hot credential a cold committee
-// credential has authorized, across rotations.
-func (s *Store) GetCommitteeHotCredentials(
-	coldCredentialTag uint8,
-	coldCredential []byte,
-	txn types.Txn,
-) ([]models.CommitteeCredential, error) {
-	ret := []models.CommitteeCredential{}
-	db, ctx, err := s.readDBFromTxn(txn)
-	if err != nil {
-		return nil, err
-	}
-	rows, err := db.QueryContext(
-		ctx,
-		`SELECT DISTINCT hot_credential_tag, host_credential
-FROM auth_committee_hot
-WHERE cold_credential_tag = ? AND cold_credential = ?
-ORDER BY hot_credential_tag, host_credential`,
-		coldCredentialTag, coldCredential,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("query committee hot credentials: %w", err)
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var credential models.CommitteeCredential
-		if err := rows.Scan(
-			&credential.CredentialTag, &credential.Credential,
-		); err != nil {
-			return nil, err
-		}
-		ret = append(ret, credential)
-	}
-	return ret, rows.Err()
 }

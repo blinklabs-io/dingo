@@ -25,6 +25,7 @@ import (
 // pageStub is a canned answer for a paginated node method that also records
 // the arguments of its last call.
 type pageStub[T any] struct {
+	calls  int
 	items  []T
 	total  int
 	err    error
@@ -38,6 +39,7 @@ func (p *pageStub[T]) respond(
 	key string,
 	params PaginationParams,
 ) ([]T, int, error) {
+	p.calls++
 	p.number = number
 	p.key = key
 	p.params = params
@@ -46,6 +48,7 @@ func (p *pageStub[T]) respond(
 
 // valueStub is a canned answer for a single-value node method.
 type valueStub[T any] struct {
+	calls  int
 	value  T
 	err    error
 	number uint64
@@ -53,6 +56,7 @@ type valueStub[T any] struct {
 }
 
 func (v *valueStub[T]) respond(number uint64, key string) (T, error) {
+	v.calls++
 	v.number = number
 	v.key = key
 	return v.value, v.err

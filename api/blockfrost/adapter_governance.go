@@ -709,6 +709,9 @@ func voterID(row models.GovernanceVoteRow) (string, error) {
 }
 
 // votesPage reads one page of votes and locates their casting transactions.
+// The page's read transaction is released before the blocks are loaded:
+// each block load takes its own read transaction, and holding a pooled
+// connection across them lets concurrent requests exhaust the read pool.
 func (a *NodeAdapter) votesPage(
 	ctx context.Context,
 	filter models.GovernanceVoteFilter,
@@ -716,14 +719,14 @@ func (a *NodeAdapter) votesPage(
 ) ([]models.GovernanceVoteRow, []castTransaction, int, error) {
 	offset, ok := paginationOffset(params)
 	if !ok {
-		return nil, nil, 0, nil
+		return []models.GovernanceVoteRow{}, []castTransaction{}, 0, nil
 	}
 	db := a.ledgerState.Database()
 	txn := db.Transaction(ctx, false)
-	defer txn.Release()
 	rows, total, err := db.Metadata().GetGovernanceVotesPage(
 		filter, params.Count, offset, params.Order, txn.Metadata(),
 	)
+	txn.Release()
 	if err != nil {
 		return nil, nil, 0, fmt.Errorf("get governance votes: %w", err)
 	}

@@ -321,8 +321,10 @@ func TestGovernanceListsRejectInvalidPaginationBeforeQuery(t *testing.T) {
 		for _, query := range []string{"count=0", "count=101", "page=0", "order=sideways"} {
 			t.Run(path+"?"+query, func(t *testing.T) {
 				t.Parallel()
-				recorder := get(t, &mockNode{}, path+"?"+query)
+				node := &mockNode{}
+				recorder := get(t, node, path+"?"+query)
 				assert.Equal(t, http.StatusBadRequest, recorder.Code)
+				assert.Equal(t, &mockNode{}, node, "the node was queried")
 			})
 		}
 	}

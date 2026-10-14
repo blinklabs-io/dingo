@@ -23,9 +23,11 @@ import (
 // endpoints: slot-range aggregates and per-epoch distributions that a
 // paginated API needs without materializing the full result set.
 //
-// Every list method takes limit/offset and reports the unpaginated total so
-// the caller can set pagination headers from a single consistent read. order
-// is "asc" or "desc"; any other value is treated as "asc".
+// A method that takes limit/offset reports the unpaginated total so the
+// caller can set pagination headers from a single consistent read. Where a
+// method takes order, it is "asc" or "desc"; any other value is treated as
+// "asc". GetEpochStakes has a fixed order, as the endpoint it serves takes
+// none.
 type HistoryStore interface {
 	// SumTransactionOutputsInSlotRange returns the total lovelace the
 	// transactions in the inclusive slot range put on chain: the outputs of a
@@ -215,12 +217,4 @@ type HistoryStore interface {
 		order string,
 		txn types.Txn,
 	) ([]models.PoolDelegatorRow, int, error)
-
-	// GetCommitteeHotCredentials returns every hot credential a cold
-	// committee credential has authorized, across rotations.
-	GetCommitteeHotCredentials(
-		coldCredentialTag uint8,
-		coldCredential []byte,
-		txn types.Txn,
-	) ([]models.CommitteeCredential, error)
 }

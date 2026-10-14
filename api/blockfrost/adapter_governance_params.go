@@ -140,7 +140,7 @@ func proposalParameters(
 		ret.DvtPPGovGroup = ratValueFloat(thresholds.PpGovGroup)
 		ret.DvtTreasuryWithdrawal = ratValueFloat(thresholds.TreasuryWithdrawal)
 	}
-	if len(update.CostModels) > 0 {
+	if update.CostModels != nil {
 		names := map[uint]string{0: "PlutusV1", 1: "PlutusV2", 2: "PlutusV3"}
 		models := make(map[string][]int64, len(update.CostModels))
 		for language, costs := range update.CostModels {

@@ -296,13 +296,13 @@ func (s *Store) GetAccountAddressTotals(
 		return ret, err
 	}
 	for _, total := range []struct {
-		dest  *uint64
+		dest  **big.Int
 		query string
 	}{
 		{&ret.ReceivedLovelace, `SELECT amount FROM utxo WHERE credential_tag = ? AND staking_key = ?`},
 		{&ret.SentLovelace, `SELECT amount FROM utxo WHERE credential_tag = ? AND staking_key = ? AND deleted_slot <> 0`},
 	} {
-		value, err := sumUint64Rows(
+		value, err := sumSignedRows(
 			ctx,
 			db,
 			total.query,

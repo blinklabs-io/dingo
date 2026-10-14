@@ -3096,3 +3096,24 @@ func TestDecideRatificationOnReadOnlySnapshotMatchesBoundary(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, child.ExpiredEpoch)
 }
+
+// The quorum is shared configuration; a caller mutating the returned value
+// must not change what later ratification reads.
+// Not t.Parallel: without the copy the default-quorum case writes the
+// package-level defaultCCQuorum.
+func TestEffectiveCommitteeQuorumReturnsCopy(t *testing.T) {
+	t.Cleanup(func() { defaultCCQuorum.SetFrac64(2, 3) })
+	genesis := &conway.ConwayGenesis{}
+	genesis.Committee.Threshold = &cbor.Rat{Rat: big.NewRat(3, 5)}
+	quorum, err := EffectiveCommitteeQuorum(context.Background(), nil, nil, genesis)
+	require.NoError(t, err)
+	quorum.SetInt64(1)
+	assert.Zero(t, genesis.Committee.Threshold.Cmp(big.NewRat(3, 5)))
+
+	quorum, err = EffectiveCommitteeQuorum(context.Background(), nil, nil, nil)
+	require.NoError(t, err)
+	quorum.SetInt64(0)
+	quorum, err = EffectiveCommitteeQuorum(context.Background(), nil, nil, nil)
+	require.NoError(t, err)
+	assert.Zero(t, quorum.Cmp(big.NewRat(2, 3)))
+}

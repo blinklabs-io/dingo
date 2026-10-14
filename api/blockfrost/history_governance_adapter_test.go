@@ -17,6 +17,7 @@ package blockfrost
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"math/big"
 	"testing"
 	"time"
@@ -343,7 +344,7 @@ func (fx *epochFixture) addVote(
 		VoterCredential: bytes32of(28, key), Vote: vote,
 		AddedSlot: slot, VoteUpdatedSlot: &updated,
 	}
-	if tag == models.VoterTypeCC {
+	if voterType == models.VoterTypeCC {
 		row.AnchorURL, row.AnchorHash = "https://example.com/vote.json", fill32(0x6b)
 	}
 	require.NoError(t, fx.adapter.ledgerState.Database().Metadata().SetGovernanceVote(row, nil))
@@ -815,4 +816,95 @@ func TestNodeAdapterVoteCertIndexCountsPerVoter(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, votes, 1)
 	assert.Equal(t, 0, votes[0].CertIndex, "the pool's only action")
+}
+
+// A committee vote reports metadata only when it carries an anchor, whatever
+// the hot credential's kind.
+func TestNodeAdapterCommitteeVotesReportOnlyRecordedAnchors(t *testing.T) {
+	t.Parallel()
+	fx := newEpochFixture(t)
+	ctx := context.Background()
+	proposal := fx.addProposal(t, 0x01, 0, lcommon.GovActionTypeInfo, []byte{0x81, 0x06}, 10)
+	script := voter(lcommon.VoterTypeConstitutionalCommitteeHotScriptHash, 0x1d)
+	key := voter(lcommon.VoterTypeConstitutionalCommitteeHotKeyHash, 0x1e)
+	serveBlocks(fx, map[uint64]*slotBlock{
+		100: {number: 1, txs: []lcommon.Transaction{newTx(0xa1, true, procedures(script, govID(t, 0x01, 0), uint8(1)))}},
+		200: {number: 2, txs: []lcommon.Transaction{newTx(0xa2, true, procedures(key, govID(t, 0x01, 0), uint8(0)))}},
+	})
+	fx.addVote(t, proposal, models.VoterTypeCC, 1, 0x1d, models.VoteYes, 100, false)
+	slot := uint64(200)
+	require.NoError(t, fx.adapter.ledgerState.Database().Metadata().SetGovernanceVote(&models.GovernanceVote{
+		ProposalID: proposal.ID, VoterType: models.VoterTypeCC, VoterCredentialTag: 0,
+		VoterCredential: bytes32of(28, 0x1e), Vote: models.VoteNo,
+		AddedSlot: slot, VoteUpdatedSlot: &slot,
+	}, nil))
+
+	rows, total, err := fx.adapter.CommitteeVotes(ctx, nil, false, asc)
+	require.NoError(t, err)
+	assert.Equal(t, 2, total)
+	require.Len(t, rows, 2)
+	require.NotNil(t, rows[0].MetadataURL, "a script hot credential's anchored vote")
+	assert.Equal(t, "https://example.com/vote.json", *rows[0].MetadataURL)
+	assert.Nil(t, rows[1].MetadataURL, "a vote without an anchor")
+	assert.Nil(t, rows[1].MetadataHash)
+}
+
+// An update that sets cost models to an empty map still sets them; only an
+// update that leaves them alone reports null.
+func TestProposalParametersKeepEmptyCostModels(t *testing.T) {
+	t.Parallel()
+	ret, err := proposalParameters(mustCbor(t, map[uint]any{18: map[uint][]int64{}}), 1)
+	require.NoError(t, err)
+	encoded, err := json.Marshal(ret)
+	require.NoError(t, err)
+	assert.Contains(t, string(encoded), `"cost_models":{}`)
+
+	ret, err = proposalParameters(mustCbor(t, map[uint]any{0: uint(44)}), 1)
+	require.NoError(t, err)
+	encoded, err = json.Marshal(ret)
+	require.NoError(t, err)
+	assert.Contains(t, string(encoded), `"cost_models":null`)
+}
+
+// A member that re-authorizes on a schedule accumulates hot credentials
+// without bound in API storage mode, so the cold-credential vote filter must
+// not grow with them.
+func TestNodeAdapterCommitteeVotesColdWithManyHotCredentials(t *testing.T) {
+	t.Parallel()
+	fx := newEpochFixture(t)
+	proposal := fx.addProposal(t, 0x01, 0, lcommon.GovActionTypeInfo, []byte{0x81, 0x06}, 10)
+	const rotations = 1500
+	stmt, err := fx.raw.Prepare(
+		`INSERT INTO auth_committee_hot (cold_credential_tag, cold_credential, hot_credential_tag, host_credential, certificate_id, added_slot) VALUES (0, ?, 0, ?, 0, ?)`,
+	)
+	require.NoError(t, err)
+	defer stmt.Close()
+	cold := bytes32of(28, 0x0a)
+	for i := range rotations {
+		hot := bytes32of(28, 0x1a)
+		hot[0], hot[1] = byte(i), byte(i>>8)
+		_, err := stmt.Exec(cold, hot, 20+i)
+		require.NoError(t, err)
+	}
+	last := bytes32of(28, 0x1a)
+	lastIndex := rotations - 1
+	last[0], last[1] = byte(lastIndex), byte(lastIndex>>8)
+	hotVoter := &lcommon.Voter{Type: lcommon.VoterTypeConstitutionalCommitteeHotKeyHash, Hash: [28]byte(last)}
+	serveBlocks(fx, map[uint64]*slotBlock{
+		5000: {number: 1, txs: []lcommon.Transaction{newTx(0xa1, true, procedures(hotVoter, govID(t, 0x01, 0), uint8(1)))}},
+	})
+	slot := uint64(5000)
+	require.NoError(t, fx.adapter.ledgerState.Database().Metadata().SetGovernanceVote(&models.GovernanceVote{
+		ProposalID: proposal.ID, VoterType: models.VoterTypeCC,
+		VoterCredential: last, Vote: models.VoteYes,
+		AddedSlot: slot, VoteUpdatedSlot: &slot,
+	}, nil))
+
+	rows, total, err := fx.adapter.CommitteeVotes(
+		context.Background(), &CommitteeCredentialRef{Hash: cold}, true, asc,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, 1, total)
+	require.Len(t, rows, 1)
+	assert.Equal(t, hexOf(fill32(0xa1)), rows[0].TxHash)
 }

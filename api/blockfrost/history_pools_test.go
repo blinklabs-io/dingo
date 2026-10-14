@@ -432,3 +432,87 @@ func TestNodeAdapterPoolsRetired(t *testing.T) {
 	require.Len(t, retiring, 1)
 	assert.Equal(t, uint64(5), retiring[0].Epoch)
 }
+
+// Retirements recorded at the same point, as a bootstrap import writes them,
+// tie on every ordering column but the pool, so pages must still partition
+// the list and the two orders must reverse each other.
+func TestNodeAdapterPoolsRetiredOrderTiedRetirementsByPool(t *testing.T) {
+	t.Parallel()
+	fx := newEpochFixture(t)
+	ctx := context.Background()
+	var ids []string
+	for _, pool := range [][]byte{bytes32of(28, 0xc2), bytes32of(28, 0xc1)} {
+		ids = append(ids, fx.addPool(t, pool, nil))
+		_, err := fx.raw.Exec(
+			`INSERT INTO pool_retirement (pool_key_hash, certificate_id, pool_id, epoch, added_slot) VALUES (?, 0, 1, 1, 100)`,
+			pool,
+		)
+		require.NoError(t, err)
+	}
+	page := func(number int, order string) string {
+		rows, total, err := fx.adapter.PoolsRetired(ctx, PaginationParams{Count: 1, Page: number, Order: order})
+		require.NoError(t, err)
+		require.Equal(t, 2, total)
+		require.Len(t, rows, 1)
+		return rows[0].PoolID
+	}
+	first, second := page(1, PaginationOrderAsc), page(2, PaginationOrderAsc)
+	assert.Equal(t, ids[1], first, "ties order by pool key hash")
+	assert.Equal(t, ids[0], second)
+	assert.Equal(t, second, page(1, PaginationOrderDesc))
+	assert.Equal(t, first, page(2, PaginationOrderDesc))
+}
+
+func (fx *epochFixture) addMarkSnapshot(t *testing.T, label uint64, stake string) {
+	t.Helper()
+	_, err := fx.raw.Exec(
+		`INSERT INTO pool_stake_snapshot (epoch, snapshot_type, pool_key_hash, total_stake, delegator_count, captured_slot) VALUES (?, 'mark', ?, ?, 1, 0)`,
+		label, fx.poolA, stake,
+	)
+	require.NoError(t, err)
+}
+
+// An epoch at or below a bootstrap anchor has its blocks in the imported
+// counts, not in the blocks this node observed.
+func TestNodeAdapterPoolHistoryMergesImportedBlockCounts(t *testing.T) {
+	t.Parallel()
+	fx := newEpochFixture(t)
+	ctx := context.Background()
+	poolID := fx.addPool(t, fx.poolA, nil)
+	fx.addMarkSnapshot(t, 0, "700")
+	meta := fx.adapter.ledgerState.Database().Metadata()
+	// The anchor sits between epoch 1's two blocks of pool A.
+	require.NoError(t, meta.SetSyncState("mithril_ledger_slot", "100000", nil))
+	require.NoError(t, meta.SaveImportedPoolBlockCounts([]models.ImportedPoolBlockCount{{
+		Epoch: 1, PoolKeyHash: fx.poolA, BlocksProduced: 4, CapturedSlot: 100000,
+	}}, nil))
+	require.NoError(t, meta.SaveImportedEpochBlockTotal(1, 4, 100000, nil))
+
+	history, _, err := fx.adapter.PoolHistory(ctx, poolID, asc)
+	require.NoError(t, err)
+	require.Len(t, history, 1)
+	assert.Equal(t, 5, history[0].Blocks, "4 imported plus the one observed above the anchor")
+
+	// Without imported counts for that epoch its blocks are unknown.
+	require.NoError(t, meta.DeleteImportedPoolBlockCountsForEpoch(1, nil))
+	_, _, err = fx.adapter.PoolHistory(ctx, poolID, asc)
+	assert.ErrorIs(t, err, ErrHistoryNotRetained)
+}
+
+// A pool's active size divides by the epoch's total active stake, which is
+// known only once the epoch summary is ready.
+func TestNodeAdapterPoolHistoryRefusesUnreadySummary(t *testing.T) {
+	t.Parallel()
+	fx := newEpochFixture(t)
+	poolID := fx.addPool(t, fx.poolA, nil)
+	fx.addMarkSnapshot(t, 0, "700")
+	_, err := fx.raw.Exec(`UPDATE epoch_summary SET snapshot_ready = FALSE WHERE epoch = 0`)
+	require.NoError(t, err)
+	_, _, err = fx.adapter.PoolHistory(context.Background(), poolID, asc)
+	assert.ErrorIs(t, err, ErrHistoryNotRetained)
+
+	_, err = fx.raw.Exec(`DELETE FROM epoch_summary WHERE epoch = 0`)
+	require.NoError(t, err)
+	_, _, err = fx.adapter.PoolHistory(context.Background(), poolID, asc)
+	assert.ErrorIs(t, err, ErrHistoryNotRetained, "a missing summary is not a zero total")
+}

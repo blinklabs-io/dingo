@@ -64,8 +64,8 @@ func assetAmounts(assets []models.AssetQuantity) []AddressAmountInfo {
 }
 
 // accountFirstStakeLabel is the oldest snapshot label that can hold the
-// account's stake: the one captured at the boundary after the epoch it was
-// created in.
+// account's stake: the one captured at the boundary that ends the epoch it
+// was created in, which carries that epoch's number.
 func (a *NodeAdapter) accountFirstStakeLabel(
 	account *models.Account,
 ) (uint64, error) {
@@ -77,7 +77,7 @@ func (a *NodeAdapter) accountFirstStakeLabel(
 	if err != nil {
 		return 0, fmt.Errorf("get epoch for account slot %d: %w", slot, err)
 	}
-	return epoch.EpochId + 1, nil
+	return epoch.EpochId, nil
 }
 
 // AccountStakeHistory returns the stake an account held in each retained
@@ -109,12 +109,18 @@ func (a *NodeAdapter) AccountStakeHistory(
 	if !ok {
 		return []AccountStakeHistoryInfo{}, 0, nil
 	}
+	first, err := a.accountFirstStakeLabel(account)
+	if err != nil {
+		return nil, 0, err
+	}
 	db := a.ledgerState.Database()
 	txn := db.Transaction(ctx, false)
 	defer txn.Release()
 	meta := db.Metadata()
+	// A snapshot captured before the account existed holds none of its
+	// stake, so only labels from first on can leave its history partial.
 	incomplete, err := a.ledgerState.RewardStakeInputsIncomplete(
-		txn, 0, current,
+		txn, first, current,
 	)
 	if err != nil {
 		return nil, 0, fmt.Errorf("check account stake history: %w", err)
@@ -140,10 +146,6 @@ func (a *NodeAdapter) AccountStakeHistory(
 				"get earliest retained stake epoch: %w",
 				err,
 			)
-		}
-		first, err := a.accountFirstStakeLabel(account)
-		if err != nil {
-			return nil, 0, err
 		}
 		if retained && first < min(earliest, current) {
 			return nil, 0, fmt.Errorf(
@@ -252,11 +254,15 @@ func (a *NodeAdapter) AccountAddressTotal(
 			"get account address totals: %w", err,
 		)
 	}
-	amounts := func(lovelace uint64, assets []models.AssetQuantity) []AddressAmountInfo {
+	amounts := func(lovelace *big.Int, assets []models.AssetQuantity) []AddressAmountInfo {
+		quantity := "0"
+		if lovelace != nil {
+			quantity = lovelace.String()
+		}
 		return append(
 			[]AddressAmountInfo{{
 				Unit:     "lovelace",
-				Quantity: strconv.FormatUint(lovelace, 10),
+				Quantity: quantity,
 			}},
 			assetAmounts(assets)...,
 		)

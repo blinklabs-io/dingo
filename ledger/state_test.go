@@ -14368,3 +14368,42 @@ func TestLeiosApplySnapshotIsReadAfterAnnouncementWait(t *testing.T) {
 	require.Equal(t, newTip, snapshot.tip,
 		"the canonical apply snapshot must observe state published during the wait")
 }
+
+// Non-checkpoint block nonces older than the nonce window are read only by
+// the API's epoch and pool block lists, so API storage mode retains them
+// while core mode prunes them.
+func TestCleanupBlockNoncesRetainsHistoryInAPIMode(t *testing.T) {
+	t.Parallel()
+	for _, mode := range []string{types.StorageModeCore, types.StorageModeAPI} {
+		t.Run(mode, func(t *testing.T) {
+			t.Parallel()
+			db := newTestDBForCleanup(t, mode)
+			for _, nonce := range []struct {
+				slot       uint64
+				checkpoint bool
+			}{{10, true}, {20, false}, {2000, false}} {
+				require.NoError(t, db.SetBlockNonce(
+					testHashBytes(fmt.Sprintf("nonce-%d", nonce.slot)),
+					nonce.slot, nil, nonce.checkpoint, nil,
+				))
+			}
+			ls := &LedgerState{db: db, config: LedgerStateConfig{
+				Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			}}
+			ls.cleanupBlockNoncesBefore(t.Context(), 1000)
+			rows, err := db.GetBlockNoncesInSlotRange(0, 3000, nil)
+			require.NoError(t, err)
+			var slots []uint64
+			for _, row := range rows {
+				slots = append(slots, row.Slot)
+			}
+			if mode == types.StorageModeAPI {
+				require.Equal(t, []uint64{10, 20, 2000}, slots,
+					"API mode keeps the old block")
+			} else {
+				require.Equal(t, []uint64{10, 2000}, slots,
+					"core mode prunes the old block but not its checkpoint")
+			}
+		})
+	}
+}

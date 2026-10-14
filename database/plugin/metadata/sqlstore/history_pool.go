@@ -61,7 +61,8 @@ WHERE s.pool_key_hash = ? AND s.snapshot_type = 'mark' AND s.epoch < ?`
 	}
 	query, queryArgs := addLimitOffset(
 		`SELECT s.epoch, s.total_stake, s.delegator_count,
-       (SELECT es.total_active_stake FROM epoch_summary es WHERE es.epoch = s.epoch),
+       (SELECT es.total_active_stake FROM epoch_summary es
+        WHERE es.epoch = s.epoch AND es.snapshot_ready = TRUE),
        o.member_reward_total, o.leader_reward`+from+
 			" ORDER BY s.epoch "+orderDirection(order),
 		args, limit, offset,
@@ -85,6 +86,7 @@ WHERE s.pool_key_hash = ? AND s.snapshot_type = 'mark' AND s.epoch < ?`
 			return nil, 0, err
 		}
 		if totalActive.Valid {
+			row.TotalActiveStakeKnown = true
 			if row.TotalActiveStake, err = parseUint64(
 				"pool history total active stake", totalActive.String,
 			); err != nil {

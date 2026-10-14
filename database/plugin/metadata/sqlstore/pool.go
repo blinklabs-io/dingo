@@ -1537,8 +1537,11 @@ WHERE r.rn = 1 AND r.epoch ` + epochOp + ` ?
   )`
 }
 
+// Synthetic retirements a bootstrap import writes share a slot and carry no
+// certificate position, so the pool key hash is the final tie-breaker that
+// keeps pages disjoint and the two directions mirror images.
 const retiringPoolsOrder = `
-ORDER BY r.epoch, r.added_slot, r.block_index, r.cert_index`
+ORDER BY r.epoch, r.added_slot, r.block_index, r.cert_index, r.pool_key_hash`
 
 func scanRetiringPools(rows *sql.Rows, capacity int) ([]models.PoolRetiringRow, error) {
 	defer rows.Close()
@@ -1626,7 +1629,7 @@ func (s *Store) poolsByRetirementPage(
 	if descending {
 		order = `
 ORDER BY r.epoch DESC, r.added_slot DESC,
-         r.block_index DESC, r.cert_index DESC`
+         r.block_index DESC, r.cert_index DESC, r.pool_key_hash DESC`
 	}
 	rows, err := db.QueryContext(
 		ctx,
