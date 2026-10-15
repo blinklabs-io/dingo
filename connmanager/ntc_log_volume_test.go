@@ -21,6 +21,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -53,7 +54,13 @@ func acceptedNtCLog(t *testing.T, level slog.Level) string {
 		})),
 	}, listener)
 	connectNtCAdmissionClient(t, listener)
-	requireNtCAdmissionCount(t, manager, 1)
+	// The connection is registered after the accepted-connection line is
+	// logged, so its presence means that line has been written or skipped.
+	require.Eventually(t, func() bool {
+		manager.connectionsMutex.Lock()
+		defer manager.connectionsMutex.Unlock()
+		return len(manager.connections) == 1
+	}, 2*time.Second, time.Millisecond)
 	return out.String()
 }
 
@@ -61,6 +68,7 @@ func acceptedNtCLog(t *testing.T, level slog.Level) string {
 // accepted connection is routine and belongs at debug level: at info level a
 // transaction generator alone produced thousands of lines a minute.
 func TestAcceptedNtCConnectionIsNotLoggedAtInfo(t *testing.T) {
+	t.Parallel()
 	const msg = "listener: accepted NtC connection"
 	require.NotContains(t, acceptedNtCLog(t, slog.LevelInfo), msg)
 	require.True(

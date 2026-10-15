@@ -1794,8 +1794,7 @@ func taintValue(relaxed bool) string {
 // local client hanging up is routine, and tools that connect per request do
 // it many times a second; anything else that ends a connection is a warning.
 func ntcCloseLogLevel(err error) slog.Level {
-	var closed *muxer.ConnectionClosedError
-	if errors.As(err, &closed) {
+	if _, ok := errors.AsType[*muxer.ConnectionClosedError](err); ok {
 		return slog.LevelDebug
 	}
 	return slog.LevelWarn
