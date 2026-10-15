@@ -148,9 +148,7 @@ func (cl *clientLimiter) scheduleExpiryLocked(now time.Time) {
 			continue
 		}
 		delay := oldest.lastSeen.Add(cl.idleTTL).Sub(now)
-		if delay < 0 {
-			delay = 0
-		}
+		delay = max(delay, 0)
 		cl.timer = time.AfterFunc(delay, cl.expireIdle)
 		return
 	}
