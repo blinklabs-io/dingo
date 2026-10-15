@@ -704,7 +704,8 @@
 # An https:// value, or http:// on loopback for local development, names a
 # remote ImmutableDB root serving NNNNN.chunk, NNNNN.primary, NNNNN.secondary
 # and tip.json; chunks download into <databasePath>/immutable-download and load
-# as they arrive in order. Non-loopback HTTP is rejected.
+# as they arrive in order. Non-loopback HTTP and private or special-use HTTPS
+# destinations are rejected, including after redirects and DNS resolution.
 #
 # Can be overridden with the DINGO_IMMUTABLE_DB_PATH environment variable
 # CLI: --immutable-db-path

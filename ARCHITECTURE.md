@@ -9511,7 +9511,16 @@ complete file nor a resumed partial can cross source roots. Each response is
 bounded by the configured initial-era chunk layout: primary-index slots come
 from the initial epoch size, the primary index fixes the exact secondary-index
 length, and the block file is bounded by the number of possible block entries
-times the block-fetch protocol's encoded-block limit. Loading stops after the
+times the block-fetch protocol's encoded-block limit. One import-wide budget
+also counts bytes across retries and workers. Its transfer bound follows the
+requested `tip.json` chunk range, the bounded prefetch window, the retry count,
+and those format limits; its active cache bound covers the worker window plus
+the retained ready chunk. Writes check free space on the cache filesystem and
+leave one maximum block-fetch message available. Staging is removed after all
+workers stop on success or error. The HTTP transport ignores proxy settings,
+checks every initial and redirected URL, and checks all DNS answers again when
+dialing. Private and special-use destinations fail closed; loopback HTTP uses a
+separate local policy that accepts only loopback resolutions. Loading stops after the
 chunk that reaches the `tip.json`
 slot, whose hash must then match the loaded block, or at the first chunk the
 root does not publish; a chunk whose `.chunk` exists without its indexes is an
