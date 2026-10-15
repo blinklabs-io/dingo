@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -230,11 +231,12 @@ type leiosForgedEBLogItem struct {
 // The wake channel is closed and replaced on every append so all server
 // goroutines waiting for new entries unblock at once.
 type leiosForgedEBLog struct {
-	mu      sync.Mutex
-	items   []leiosForgedEBLogItem
-	base    int            // oldest retained logical index
-	tail    int            // logical index assigned to the next append
-	cursors map[string]int // connKey → next logical index to serve
+	mu             sync.Mutex
+	items          []leiosForgedEBLogItem
+	base           int            // oldest retained logical index
+	tail           int            // logical index assigned to the next append
+	transientCount int            // retained vote and ranking-block announcements
+	cursors        map[string]int // connKey → next logical index to serve
 	// owners distinguish connection lifetimes that reuse an address pair.
 	owners map[string]*oleiosnotify.Server
 	// reservations are entries returned to RequestNext but not yet confirmed
@@ -275,6 +277,9 @@ func (l *leiosForgedEBLog) append(entry leiosForgedEBEntry) {
 		index: l.tail,
 		entry: entry,
 	})
+	if !entry.isEndorserBlockOffer() {
+		l.transientCount++
+	}
 	l.tail++
 	// A caught-up origin already has the entry, so do not retain it waiting
 	// for that connection to issue another RequestNext. Origins that are
@@ -295,13 +300,7 @@ func (l *leiosForgedEBLog) append(entry leiosForgedEBEntry) {
 // recoverable only while their separately bounded cache entry remains, so
 // transient traffic must not consume their retention budget.
 func (l *leiosForgedEBLog) transientEntriesLocked() int {
-	count := 0
-	for _, item := range l.items {
-		if !item.entry.isEndorserBlockOffer() {
-			count++
-		}
-	}
-	return count
+	return l.transientCount
 }
 
 // evictOldestTransientLocked removes one vote or ranking-block announcement
@@ -319,6 +318,9 @@ func (l *leiosForgedEBLog) evictOldestTransientLocked() {
 }
 
 func (l *leiosForgedEBLog) removeItemLocked(offset, index int) {
+	if !l.items[offset].entry.isEndorserBlockOffer() {
+		l.transientCount--
+	}
 	clear(l.items[offset : offset+1])
 	l.items = append(l.items[:offset], l.items[offset+1:]...)
 	delete(l.retries, index)
@@ -345,10 +347,11 @@ func (l *leiosForgedEBLog) updateBaseLocked() {
 func (l *leiosForgedEBLog) itemAtOrAfterLocked(
 	index int,
 ) (leiosForgedEBLogItem, bool) {
-	for _, item := range l.items {
-		if item.index >= index {
-			return item, true
-		}
+	offset := sort.Search(len(l.items), func(i int) bool {
+		return l.items[i].index >= index
+	})
+	if offset < len(l.items) {
+		return l.items[offset], true
 	}
 	return leiosForgedEBLogItem{}, false
 }
@@ -605,6 +608,7 @@ const (
 func (l *leiosForgedEBLog) pruneLocked() {
 	if len(l.items) == 0 {
 		l.base = l.tail
+		l.transientCount = 0
 		return
 	}
 	// Start at the tail: if no cursors constrain it, prune the full log.
@@ -641,6 +645,11 @@ func (l *leiosForgedEBLog) pruneLocked() {
 	}
 	if prunable <= 0 {
 		return
+	}
+	for _, item := range l.items[:prunable] {
+		if !item.entry.isEndorserBlockOffer() {
+			l.transientCount--
+		}
 	}
 	// Zero pruned slots so the GC can reclaim the point.Hash []byte
 	// backing arrays before the backing slice is eventually reallocated.
