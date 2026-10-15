@@ -1,4 +1,4 @@
-//go:build !windows
+//go:build !windows && !freebsd
 
 // Copyright 2026 Blink Labs Software
 //
@@ -31,8 +31,9 @@ func availableDiskBytes(path string) (uint64, error) {
 	if stat.Bsize <= 0 {
 		return 0, errors.New("filesystem reported an invalid block size")
 	}
-	if stat.Bavail > math.MaxUint64/uint64(stat.Bsize) {
+	availableBlocks := uint64(stat.Bavail)
+	if availableBlocks > math.MaxUint64/uint64(stat.Bsize) {
 		return math.MaxUint64, nil
 	}
-	return stat.Bavail * uint64(stat.Bsize), nil
+	return availableBlocks * uint64(stat.Bsize), nil
 }
