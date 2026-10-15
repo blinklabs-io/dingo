@@ -16492,8 +16492,10 @@ mode acceptance-equivalent to serial mode instead of turning an unavailable
 nonce into a rejected chain.
 
 The pipeline's bounded `errorsChan` is continuously drained by
-`drainBlockPipelineErrors` for the lifetime of `LedgerState`; otherwise the
-workers would deadlock after enough failing blocks, such as undecodable ones.
+`drainBlockPipelineErrors` for the lifetime of `LedgerState`. Workers report
+errors without blocking and drop one when the channel is full, so the drain
+keeps failing blocks, such as undecodable ones, counted and logged; the
+counters are best effort and not an exact tally.
 The drain classifies `errBlockPipelineEta0Unavailable`,
 `errHeaderVerificationDeferred`, and a stage worker's own `context.Canceled`/`context.DeadlineExceeded` at
 debug level, each under its own counter, and reports other stage errors at

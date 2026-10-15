@@ -155,23 +155,15 @@ func buildUndecodableBatch(numBlocks int) []models.Block {
 	return batch
 }
 
-// TestDecodeReadChainBatchDoesNotDeadlockOnManyDecodeErrors is a regression
-// test for the block-processing-pipeline deadlock: gouroboros'
-// pipeline.StageWorkerPool.worker pushes every non-nil stage error onto a
-// fixed-size errorsChan (default capacity 1000,
-// PipelineConfig.PrefetchBufferSize) *before* forwarding the item onward.
-// Without a permanent reader draining that channel, submitting more than
-// PrefetchBufferSize failing blocks fills it, and every worker then blocks
-// forever on `errors <- err`, cascading backpressure back through the stage
-// channels into blockPipeline.Submit() -- which decodeReadChainBatch calls
-// with a background context specifically so it runs to completion once
-// started, so it hangs forever with no error and no timeout.
-//
-// drainBlockPipelineErrors (started here exactly as Start() starts it for a
-// real LedgerState) is what prevents that: it continuously reads
-// blockPipeline.Errors() for the pipeline's full lifetime. This test submits
-// well over PrefetchBufferSize (1000) undecodable blocks and asserts
-// decodeReadChainBatch returns within a bounded timeout instead of hanging.
+// TestDecodeReadChainBatchDoesNotDeadlockOnManyDecodeErrors guards against a
+// batch of more than PrefetchBufferSize (1000) undecodable blocks stalling
+// decodeReadChainBatch. gouroboros' pipeline.StageWorkerPool.worker reports
+// each stage error on a fixed-size errorsChan and drops it when the channel
+// is full, so an undrained channel loses errors instead of blocking workers.
+// drainBlockPipelineErrors (started here as Start() starts it for a real
+// LedgerState) reads that channel for the pipeline's lifetime. The test
+// asserts decodeReadChainBatch returns within a bounded timeout and that
+// drained errors are counted.
 func TestDecodeReadChainBatchDoesNotDeadlockOnManyDecodeErrors(
 	t *testing.T,
 ) {
@@ -219,15 +211,20 @@ func TestDecodeReadChainBatchDoesNotDeadlockOnManyDecodeErrors(
 	// the assertions below run.
 	stopAndDrain()
 
-	require.Equal(
+	// The pipeline reports worker errors without blocking and drops one when
+	// errorsChan is full, so the count is best effort: at least the first
+	// buffered errors are counted, and never more than were produced.
+	unexpected := promtestutil.ToFloat64(
+		ls.metrics.blockPipelineUnexpectedErrors,
+	)
+	require.Positive(
 		t,
-		float64(numBlocks),
-		promtestutil.ToFloat64(ls.metrics.blockPipelineUnexpectedErrors),
-		"every undecodable block's error should have been drained and "+
-			"counted; ERROR log records captured from "+
-			"recordBlockPipelineError:%s",
+		unexpected,
+		"drained decode errors should have been counted; ERROR log "+
+			"records captured from recordBlockPipelineError:%s",
 		errLog.summary(),
 	)
+	require.LessOrEqual(t, unexpected, float64(numBlocks))
 	require.Zero(
 		t,
 		promtestutil.ToFloat64(ls.metrics.blockPipelineExpectedEta0Errors),

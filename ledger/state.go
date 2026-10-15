@@ -6995,25 +6995,15 @@ func (ls *LedgerState) ledgerReadChainIterator(
 // drainBlockPipelineErrors continuously reads ls.blockPipeline.Errors() for
 // the pipeline's full lifetime, from just after Start() until the channel
 // closes (inside Stop(), once every stage has fully drained -- see
-// BlockPipeline.Stop). This is required for correctness, not just
-// observability: gouroboros' StageWorkerPool.worker pushes every non-nil
-// stage error onto errorsChan *before* forwarding the item onward to
-// Results(), unconditionally and regardless of whether the error is
-// "expected" for this item (a decode error that decodeReadChainBatch later
-// reads back from Results() and reports itself -- but by then the error has
-// already been pushed here). errorsChan's
-// capacity is bounded
-// (PipelineConfig.PrefetchBufferSize, 1000 by default) with nothing else in
-// this codebase ever reading from it; a run of undecodable blocks fills it
-// permanently after roughly that many, and every decode worker then blocks
-// forever on `errors <- err` inside worker(),
-// cascading backpressure through decodedChan/submitChan into
-// ls.blockPipeline.Submit() -- which decodeReadChainBatch calls with
-// context.Background() deliberately, so it also blocks forever with no log
-// line, no error, and no timeout. This goroutine is what prevents that:
-// as long as it is running for the pipeline's entire lifetime, errorsChan
-// never fills regardless of how many expected-to-fail items flow through
-// the decode stage.
+// BlockPipeline.Stop). gouroboros' StageWorkerPool.worker reports every
+// non-nil stage error on errorsChan, including errors that are expected for
+// the item (a decode error that decodeReadChainBatch later reads back from
+// Results() and reports itself). The send does not block: an error is dropped
+// when errorsChan, whose capacity is bounded
+// (PipelineConfig.PrefetchBufferSize, 1000 by default), is full. Draining
+// continuously keeps these reports observable as the
+// blockPipelineUnexpectedErrors counter and ERROR log records rather than
+// lost to a full channel; it is not required to keep Submit() from blocking.
 func (ls *LedgerState) drainBlockPipelineErrors() {
 	defer close(ls.blockPipelineErrorsDone)
 	for err := range ls.blockPipeline.Errors() {
