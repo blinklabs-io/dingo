@@ -448,9 +448,6 @@ type UtxoWithOrderingQuery struct {
 	Descending        bool
 	SkipAssets        bool
 	FilterByAsset     bool
-	// OnlyFilteredAsset loads only the asset selected by AssetPolicyID and
-	// AssetName. It requires FilterByAsset and is ignored with SkipAssets.
-	OnlyFilteredAsset bool
 	AssetPolicyID     []byte
 	AssetName         []byte
 }
@@ -541,7 +538,7 @@ func PaymentScriptFromAddress(addr ledger.Address) bool {
 	return addr.Type()&lcommon.AddressTypeScriptBit == lcommon.AddressTypeScriptBit
 }
 
-// AddressBalance holds SQL-aggregated live-UTxO balances for an address.
+// AddressBalance holds SQL-aggregated UTxO balances for an address.
 type AddressBalance struct {
 	Lovelace  uint64
 	UtxoCount int64

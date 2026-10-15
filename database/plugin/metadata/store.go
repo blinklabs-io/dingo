@@ -867,6 +867,13 @@ type UtxoStore interface {
 		models.UtxoAddressMatchMode,
 		types.Txn,
 	) (models.AddressBalance, error)
+	// GetUtxoBalanceByAddressAtSlot aggregates an exact address balance from
+	// retained UTxOs that existed at the requested slot.
+	GetUtxoBalanceByAddressAtSlot(
+		[]byte,
+		uint64,
+		types.Txn,
+	) (models.AddressBalance, error)
 
 	// GetUtxosByAddressWithOrdering runs q against live UTxOs with ordering
 	// metadata. Snapshot-imported UTxOs without a producing transaction use
@@ -918,7 +925,7 @@ type UtxoStore interface {
 		models.AssetHolderQuery,
 		types.Txn,
 	) ([]models.AssetHolder, int, error)
-	GetLiveAssetUtxosMissingAddress(
+	GetUtxosMissingAddress(
 		uint,
 		int,
 		types.Txn,
@@ -943,7 +950,7 @@ type UtxoStore interface {
 
 	// SetUtxosNotDeletedAfterSlot marks all UTxOs created after the given slot as not deleted.
 	SetUtxosNotDeletedAfterSlot(uint64, types.Txn) error
-	GetSpentAssetUtxosMissingAddressAfterSlot(
+	GetSpentUtxosMissingAddressAfterSlot(
 		uint64,
 		uint,
 		int,

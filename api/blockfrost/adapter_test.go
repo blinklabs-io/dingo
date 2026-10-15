@@ -348,7 +348,7 @@ func TestNodeAdapterAssetAddressesHonorsCancellation(t *testing.T) {
 	require.ErrorIs(t, err, context.Canceled)
 }
 
-func TestNodeAdapterAssetAddressesHydratesFilteredAssets(t *testing.T) {
+func TestNodeAdapterAssetAddressesHydratesCompleteAssets(t *testing.T) {
 	t.Parallel()
 
 	adapter, store, db := newDBBackedAdapter(t)
@@ -392,7 +392,6 @@ func TestNodeAdapterAssetAddressesHydratesFilteredAssets(t *testing.T) {
 			MatchAllAddresses: true,
 			Limit:             10,
 			FilterByAsset:     true,
-			OnlyFilteredAsset: true,
 			AssetPolicyID:     policyID,
 			AssetName:         assetName,
 		},
@@ -400,24 +399,7 @@ func TestNodeAdapterAssetAddressesHydratesFilteredAssets(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.Len(t, filtered, 1)
-	require.Len(t, filtered[0].Assets, 1)
-	assert.Equal(t, policyID, filtered[0].Assets[0].PolicyId)
-	assert.Equal(t, assetName, filtered[0].Assets[0].Name)
-	assert.Equal(t, types.Uint64(9), filtered[0].Assets[0].Amount)
-	unfiltered, err := db.UtxosByAddressWithOrdering(
-		context.Background(),
-		&models.UtxoWithOrderingQuery{
-			MatchAllAddresses: true,
-			Limit:             10,
-			FilterByAsset:     true,
-			AssetPolicyID:     policyID,
-			AssetName:         assetName,
-		},
-		nil,
-	)
-	require.NoError(t, err)
-	require.Len(t, unfiltered, 1)
-	require.Len(t, unfiltered[0].Assets, 2)
+	require.Len(t, filtered[0].Assets, 2)
 
 	holders, total, err := adapter.AssetAddresses(
 		context.Background(),

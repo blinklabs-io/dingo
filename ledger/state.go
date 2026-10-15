@@ -13938,6 +13938,18 @@ func (ls *LedgerState) UtxosByAddressAtSlotBounded(
 	return utxos, nil
 }
 
+// UtxoBalanceByAddressAtSlot aggregates a historical address balance without
+// materializing its UTxO set.
+func (ls *LedgerState) UtxoBalanceByAddressAtSlot(
+	ctx context.Context,
+	addr lcommon.Address,
+	slot uint64,
+) (models.AddressBalance, error) {
+	txn := database.NewTxnContext(ctx, ls.db, false)
+	defer txn.Release()
+	return ls.db.UtxoBalanceByAddressAtSlot(ctx, addr, slot, txn)
+}
+
 // UtxoByRefIncludingSpent returns a UTxO by reference, including
 // spent outputs. This is needed for APIs that must resolve consumed
 // inputs to display source address and amount.

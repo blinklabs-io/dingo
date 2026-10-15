@@ -184,17 +184,17 @@ retain their pagination and matching semantics. See the
 [MCP guide](docs/mcp/README.md#metadata-and-query-semantics) for page bounds and
 live-state consistency semantics.
 
-Blockfrost asset-holder pages aggregate live quantities in metadata storage.
-`utxo_address` keeps each asset-bearing UTxO's canonical rendered address as
-bytes so every backend groups exact pointer and bootstrap identities and
-orders equal quantities with the same bytewise address order as the API.
-Migration v42 adds
-the table; API-mode startup backfills only live asset-bearing UTxOs in
-cancellable batches before APIs become available, records completion in
-sync_state, and logs progress. Startup fails if an output CBOR cannot be
+Blockfrost asset-holder pages aggregate live quantities in metadata storage,
+and historical Mesh balances aggregate address balances without materializing
+the matching UTxOs. `utxo_address` keeps each UTxO's canonical rendered address
+as bytes so exact pointer and bootstrap identities are available to both
+queries. Migration v42 adds the table; API-mode startup backfills all retained
+UTxOs in cancellable batches before APIs become available, records completion
+in sync_state, and logs progress. Startup fails if an output CBOR cannot be
 resolved. A failed backfill leaves completion unset, so the next startup
 resumes from rows still missing an address. Core-mode nodes skip the backfill.
-New UTxO writes persist the address in the same metadata transaction.
+API-mode UTxO writes persist the address in the same metadata transaction;
+core-mode writes omit this API-only relation.
 SQLite uses an exact unsigned 64-bit aggregate that returns a fixed-width
 decimal key; PostgreSQL and MySQL use decimal aggregation with an explicit
 overflow check. Holder count and LIMIT/OFFSET page reads share the request's
@@ -3720,6 +3720,12 @@ by the API adapter, which compares each candidate output's decoded
 address bytes, because the pointer payload is not represented in the
 `utxo` table.
 
+Historical Mesh balance uses the exact rendered address stored in
+`utxo_address`, together with `added_slot <= requested_slot` and
+`deleted_slot = 0 OR deleted_slot > requested_slot`, and aggregates ADA and
+assets in metadata storage. This avoids materializing a potentially large
+historical UTxO set in the API process.
+
 ### `GetUtxosByAddress`, `GetUtxosByAddressAsOf`, `GetUtxosByAddressAtSlot`, and `GetControlledAmountByCredential`
 
 `GetUtxosByAddress` accepts multiple address patterns and OR-joins their coarse
@@ -5458,7 +5464,7 @@ floor. `TruncateAfterSlot` restores spent UTxOs with an update. The
 `database/lifecycle.Truncate` refuses a target below the floor before
 `TruncateAfterSlot` begins, because already-deleted rows cannot be restored.
 Before a rollback marks retained spent UTxOs live again, it fills any missing
-`utxo_address` identity for asset-bearing rows from their retained output CBOR.
+`utxo_address` identity from their retained output CBOR.
 The address restoration and unspend update share the rollback transaction.
 
 # At-tip recovery repair

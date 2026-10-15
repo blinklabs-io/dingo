@@ -88,7 +88,7 @@ var (
 		columns: []string{"name", "policy_id", "fingerprint", "utxo_id", "amount"},
 		suffix:  "ON CONFLICT (name, policy_id, utxo_id) DO NOTHING",
 	}
-	assetUtxoAddressShape = rowShape{
+	utxoAddressShape = rowShape{
 		table:   "utxo_address",
 		columns: []string{"utxo_id", "address"},
 		suffix:  "ON CONFLICT (utxo_id) DO UPDATE SET address = excluded.address",

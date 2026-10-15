@@ -1679,7 +1679,7 @@ func (s *Store) persistUtxoRelations(
 	id uint,
 ) error {
 	utxo.ID = id
-	if err := persistUtxoAddress(ctx, db, int64(id), utxo); err != nil {
+	if err := s.persistUtxoAddress(ctx, db, int64(id), utxo); err != nil {
 		return err
 	}
 	if err := persistUtxoPointer(ctx, db, int64(id), utxo.Pointer); err != nil {
@@ -1722,12 +1722,14 @@ func (s *Store) persistUtxoRelationsWithDeferredAssets(
 	rows *rowBatch,
 ) error {
 	utxo.ID = id
-	address, err := assetUtxoAddress(utxo)
-	if err != nil {
-		return err
-	}
-	if len(address) > 0 {
-		rows.add(assetUtxoAddressShape, int64(id), address)
+	if s.storageMode == types.StorageModeAPI || len(utxo.Assets) > 0 {
+		address, err := utxoAddress(utxo)
+		if err != nil {
+			return err
+		}
+		if s.storageMode == types.StorageModeAPI {
+			rows.add(utxoAddressShape, int64(id), address)
+		}
 	}
 	if err := persistUtxoPointer(ctx, db, int64(id), utxo.Pointer); err != nil {
 		return err
