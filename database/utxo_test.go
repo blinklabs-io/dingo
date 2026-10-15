@@ -571,6 +571,41 @@ VALUES (?, 1, 0, '1', 0, FALSE)`, txID)
 	}}, got.Assets)
 }
 
+func TestHistoricalAddressBalanceEnforcesAssetRowLimit(t *testing.T) {
+	t.Parallel()
+
+	db := openTestDBWithStorageMode(t, types.StorageModeAPI)
+	raw := rawSQLiteMetadataFixture(t, db)
+	address := []byte("addr_test1_asset_budget")
+	result, err := raw.Exec(`
+INSERT INTO utxo (tx_id, added_slot, deleted_slot, amount, output_idx, payment_script)
+VALUES (?, 1, 0, '1', 0, FALSE)`, bytes.Repeat([]byte{0x49}, 32))
+	require.NoError(t, err)
+	utxoID, err := result.LastInsertId()
+	require.NoError(t, err)
+	_, err = raw.Exec(
+		`INSERT INTO utxo_address (utxo_id, address) VALUES (?, ?)`,
+		utxoID,
+		address,
+	)
+	require.NoError(t, err)
+	for assetName := range 3 {
+		_, err = raw.Exec(`
+INSERT INTO asset (name, policy_id, utxo_id, amount)
+VALUES (?, ?, ?, '1')`,
+			[]byte{byte(assetName)},
+			bytes.Repeat([]byte{0x4a}, 28),
+			utxoID,
+		)
+		require.NoError(t, err)
+	}
+
+	_, err = db.utxoStore().GetUtxoBalanceByAddressAtSlot(
+		address, 1, 2, nil,
+	)
+	require.ErrorIs(t, err, models.ErrTooManyUtxoResults)
+}
+
 func TestUtxoAddressQueriesPreserveExactIdentityAndPagination(t *testing.T) {
 	t.Parallel()
 

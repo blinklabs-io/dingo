@@ -16,6 +16,7 @@
 package sqlstore
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/hex"
@@ -660,20 +661,30 @@ WHERE ` + predicate
 	if ret.UtxoCount == 0 {
 		return ret, nil
 	}
-	rows, err = db.QueryContext(ctx, s.dialect.Rebind(`
+	query = `
 SELECT asset.policy_id, asset.name, asset.amount
 FROM utxo
 JOIN utxo_address ON utxo_address.utxo_id = utxo.id
 JOIN asset ON asset.utxo_id = utxo.id
-WHERE `+predicate+`
-ORDER BY asset.policy_id, asset.name`), args...)
+WHERE ` + predicate
+	queryArgs = args
+	if maxResults > 0 {
+		query += " LIMIT ?"
+		queryArgs = append(append([]any(nil), args...), maxResults+1)
+	}
+	rows, err = db.QueryContext(ctx, s.dialect.Rebind(query), queryArgs...)
 	if err != nil {
 		return ret, fmt.Errorf("query UTxO asset balances: %w", err)
 	}
 	defer rows.Close()
 	type assetKey struct{ policy, name string }
 	assetIndexes := make(map[assetKey]int)
+	assetRows := 0
 	for rows.Next() {
+		assetRows++
+		if maxResults > 0 && assetRows > maxResults {
+			return ret, models.ErrTooManyUtxoResults
+		}
 		var asset models.AssetBalance
 		var raw sql.NullString
 		if err := rows.Scan(&asset.PolicyId, &asset.Name, &raw); err != nil {
@@ -699,7 +710,16 @@ ORDER BY asset.policy_id, asset.name`), args...)
 		}
 		ret.Assets[idx].Amount += amount
 	}
-	return ret, rows.Err()
+	if err := rows.Err(); err != nil {
+		return ret, err
+	}
+	slices.SortFunc(ret.Assets, func(a, b models.AssetBalance) int {
+		if result := bytes.Compare(a.PolicyId, b.PolicyId); result != 0 {
+			return result
+		}
+		return bytes.Compare(a.Name, b.Name)
+	})
+	return ret, nil
 }
 
 func (s *Store) importUtxos(

@@ -1387,7 +1387,7 @@ func (d *Database) UtxoBalanceByAddressAtSlot(
 		)
 	}
 	return d.utxoStore().GetUtxoBalanceByAddressAtSlot(
-		[]byte(address.String()), slot, MaxUtxosByAddressResults,
+		[]byte(address.String()), slot, ExactAddressCandidateScanLimit,
 		txn.Metadata(),
 	)
 }
