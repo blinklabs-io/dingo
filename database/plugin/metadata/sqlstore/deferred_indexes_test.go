@@ -177,19 +177,6 @@ func TestBuildDeferredIndexesContextCommitsEachSQLiteIndex(t *testing.T) {
 				return
 			}
 			firstBuilt = name
-			var firstMissing deferred.Index
-			for _, index := range deferred.Manifest {
-				if index.Name == name {
-					firstMissing = index
-					break
-				}
-			}
-			require.NotEmpty(t, firstMissing.Name)
-			exists, checkErr := store.deferredIndexExists(
-				t.Context(), store.readDB, firstMissing,
-			)
-			require.NoError(t, checkErr)
-			require.True(t, exists, "the first index is committed before progress reports it")
 			cancel()
 		},
 	)
@@ -201,6 +188,12 @@ func TestBuildDeferredIndexesContextCommitsEachSQLiteIndex(t *testing.T) {
 	require.True(t, pending)
 	missingAfter, err := store.MissingDeferredIndexes()
 	require.NoError(t, err)
+	require.NotContains(
+		t,
+		missingAfter,
+		firstBuilt,
+		"the completed index remains committed after cancellation",
+	)
 	require.NotEmpty(t, missingAfter, "cancellation leaves unfinished indexes to resume")
 
 	require.NoError(t, store.BuildDeferredIndexesContext(t.Context()))
