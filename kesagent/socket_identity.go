@@ -19,7 +19,7 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"strings"
+	"path/filepath"
 )
 
 var (
@@ -29,13 +29,27 @@ var (
 
 type socketIdentity struct {
 	info     os.FileInfo
+	parent   os.FileInfo
 	ownerUID uint32
 	abstract bool
 }
 
 func inspectSocketIdentity(path string) (socketIdentity, error) {
-	if strings.HasPrefix(path, "@") {
+	if isAbstractSocketPath(path) {
 		return socketIdentity{abstract: true}, nil
+	}
+	parent, err := os.Stat(filepath.Dir(path))
+	if err != nil {
+		return socketIdentity{}, fmt.Errorf(
+			"kesagent: inspect service socket directory: %w",
+			err,
+		)
+	}
+	if !parent.IsDir() || parent.Mode().Perm()&0o022 != 0 {
+		return socketIdentity{}, fmt.Errorf(
+			"%w: service socket directory is not protected from group or other writes",
+			errUnsafeSocket,
+		)
 	}
 	info, err := os.Lstat(path)
 	if err != nil {
@@ -60,7 +74,7 @@ func inspectSocketIdentity(path string) (socketIdentity, error) {
 	if err != nil {
 		return socketIdentity{}, err
 	}
-	return socketIdentity{info: info, ownerUID: ownerUID}, nil
+	return socketIdentity{info: info, parent: parent, ownerUID: ownerUID}, nil
 }
 
 func authenticateSocketPeer(
@@ -86,7 +100,9 @@ func authenticateSocketPeer(
 		if err != nil {
 			return 0, err
 		}
-		if after.abstract || !os.SameFile(before.info, after.info) {
+		if after.abstract ||
+			!os.SameFile(before.info, after.info) ||
+			!os.SameFile(before.parent, after.parent) {
 			return 0, fmt.Errorf(
 				"%w: service socket path changed while connecting",
 				errUnsafeSocket,

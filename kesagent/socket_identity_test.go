@@ -45,6 +45,31 @@ func TestClientRejectsWorldWritableServiceSocket(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestClientRejectsWritableServiceSocketDirectory(t *testing.T) {
+	t.Parallel()
+	testutil.SkipIfBlockProducerUnsupported(t)
+
+	ln, socketPath := listenUnix(t)
+	parent := filepath.Dir(socketPath)
+	info, err := os.Stat(parent)
+	require.NoError(t, err)
+	require.NoError(t, os.Chmod(parent, 0o777))
+	t.Cleanup(func() { _ = os.Chmod(parent, info.Mode().Perm()) })
+
+	client, err := NewClient(Config{SocketPath: socketPath})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = client.Close() })
+
+	err = client.CheckReady()
+	require.ErrorIs(t, err, errUnsafeSocket)
+
+	// The untrusted directory is rejected before a connection reaches the
+	// listener, so an attacker cannot establish the first pinned identity.
+	require.NoError(t, ln.(*net.UnixListener).SetDeadline(testDeadline()))
+	_, err = ln.Accept()
+	require.Error(t, err)
+}
+
 func TestClientRejectsSymlinkedServiceSocket(t *testing.T) {
 	t.Parallel()
 	testutil.SkipIfBlockProducerUnsupported(t)
@@ -84,9 +109,10 @@ func TestPinnedServerOwnerRejectsSubstitutedPeer(t *testing.T) {
 	require.NoError(t, client.CheckReady())
 
 	client.mu.Lock()
-	require.True(t, client.serverUIDSet)
+	serverUIDSet := client.serverUIDSet
 	client.serverUID++
 	client.mu.Unlock()
+	require.True(t, serverUIDSet)
 
 	err = client.CheckReady()
 	require.ErrorIs(t, err, errWrongPeer)

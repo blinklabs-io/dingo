@@ -18,7 +18,6 @@ package kesagent
 
 import (
 	"errors"
-	"fmt"
 	"net"
 	"os"
 	"syscall"
@@ -64,7 +63,7 @@ func unixPeerUID(conn net.Conn) (uint32, error) {
 		return 0, credErr
 	}
 	if cred == nil || cred.Uid == ^uint32(0) {
-		return 0, fmt.Errorf("peer credentials did not contain a user ID")
+		return 0, errors.New("peer credentials did not contain a user ID")
 	}
 	return cred.Uid, nil
 }
