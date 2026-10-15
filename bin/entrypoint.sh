@@ -28,6 +28,7 @@
 #   CARDANO_DATABASE_PATH - Database storage location (default: /data/db)
 #   DINGO_SOCKET_PATH     - Unix socket path for NtC (default: /ipc/dingo.socket)
 #   DINGO_DEBUG           - Set to any value to enable debug logging and set -x
+#                           (tracing stops before the dingo command line is built)
 #   DINGO_LOG_FILE        - Optional file receiving dingo stdout/stderr
 #   RESTORE_SNAPSHOT      - Set to any value to bootstrap from Mithril snapshot on first run
 
@@ -64,6 +65,55 @@ export CARDANO_SOCKET_PATH="${DINGO_SOCKET_PATH}"
 log()  { echo "[entrypoint] $*"; }
 warn() { echo "[entrypoint] WARNING: $*" >&2; }
 die()  { echo "[entrypoint] ERROR: $*" >&2; exit 1; }
+
+# Secret-bearing flags are matched by the last word of the flag name, so
+# --koios-parity-api-key is redacted but --token-registry-interval and
+# file-path flags such as --shelley-kes-key are not.
+SECRET_FLAG_PATTERN='^--?[A-Za-z0-9_.-]*(token|secret|password|passwd|passphrase|api-?key|bearer|credentials?)$'
+URL_USERINFO_PATTERN='^([A-Za-z][A-Za-z0-9+.-]*://)[^/@[:space:]]+@(.*)$'
+AUTH_VALUE_PATTERN='^(.*(authorization|bearer)[:= ]+)(.*)$'
+
+# redact_value masks credentials embedded in a free-form value: URL userinfo
+# (scheme://user:pass@host) and "Authorization:"/"Bearer" header values.
+redact_value() {
+  local value="$1"
+  if [[ "${value}" =~ ${URL_USERINFO_PATTERN} ]]; then
+    value="${BASH_REMATCH[1]}<redacted>@${BASH_REMATCH[2]}"
+  fi
+  if [[ "${value}" =~ ${AUTH_VALUE_PATTERN} ]]; then
+    value="${BASH_REMATCH[1]}<redacted>"
+  fi
+  printf '%s' "${value}"
+}
+
+# redact_args prints its arguments space-separated with the values of
+# secret-bearing flags replaced by "<redacted>". Both "--flag value" and
+# "--flag=value" forms are handled, and credentials embedded in any other
+# argument are masked.
+redact_args() {
+  local out=() arg name redact_next="false"
+  shopt -s nocasematch
+  for arg in "$@"; do
+    if [[ "${redact_next}" == "true" ]]; then
+      out+=("<redacted>")
+      redact_next="false"
+    elif [[ "${arg}" == -*=* ]]; then
+      name="${arg%%=*}"
+      if [[ "${name}" =~ ${SECRET_FLAG_PATTERN} ]]; then
+        out+=("${name}=<redacted>")
+      else
+        out+=("${name}=$(redact_value "${arg#*=}")")
+      fi
+    elif [[ "${arg}" =~ ${SECRET_FLAG_PATTERN} ]]; then
+      out+=("${arg}")
+      redact_next="true"
+    else
+      out+=("$(redact_value "${arg}")")
+    fi
+  done
+  shopt -u nocasematch
+  echo "${out[*]}"
+}
 
 # --------------------------------------------------------------------------- #
 # Managed child and signal handling
@@ -311,6 +361,11 @@ trap 'forward_signal SIGINT 130' SIGINT
 # Run Mithril bootstrap if applicable
 bootstrap_if_needed
 
+# Command-line arguments may carry secrets, and xtrace would print them while
+# they are expanded below and at launch. Stop tracing here; the bootstrap and
+# setup steps above have already been traced.
+{ set +x; } 2>/dev/null
+
 # Build the dingo command arguments
 DINGO_ARGS=()
 
@@ -326,7 +381,7 @@ else
   DINGO_ARGS+=("$@")
 fi
 
-log "Starting dingo ${DINGO_ARGS[*]}"
+log "Starting dingo $(redact_args "${DINGO_ARGS[@]}")"
 
 # Persist structured output for test harnesses when requested, while keeping
 # stdout as the default for normal deployments.
