@@ -179,7 +179,7 @@ func FormatMarkdownTable(columns []string, rows [][]string) string {
 			if i > 0 {
 				sb.WriteString(" | ")
 			}
-			sb.WriteString(formatMarkdownCell(cell, 0))
+			sb.WriteString(FormatCell(cell))
 		}
 		sb.WriteString(" |\n")
 	}

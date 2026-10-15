@@ -173,14 +173,7 @@ ORDER BY m.name, p.cid`)
 		if err := rows.Scan(&table, &column, &columnType); err != nil {
 			return "", err
 		}
-		if len(data) == 0 || data[len(data)-1][0] != table {
-			data = append(data, []string{table, descriptions[table], ""})
-		}
-		row := data[len(data)-1]
-		if row[2] != "" {
-			row[2] += ", "
-		}
-		row[2] += column + " " + columnType
+		data = append(data, []string{table, descriptions[table], column, columnType})
 	}
 	if err := rows.Err(); err != nil {
 		return "", err
@@ -188,7 +181,7 @@ ORDER BY m.name, p.cid`)
 	return heading + "Columns and declared types are read from the connected SQLite database. " +
 		"Read dingo://schema/table/<table> for DDL, keys and constraints.\n\n" +
 		FormatMarkdownTable(
-			[]string{"Table", "Description", "Columns (declared types)"},
+			[]string{"Table", "Description", "Column", "Declared type"},
 			data,
 		), nil
 }

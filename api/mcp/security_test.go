@@ -295,14 +295,62 @@ func TestClientLimiterBoundsSourceCardinality(t *testing.T) {
 
 func stopClientLimiter(t *testing.T, limiter *clientLimiter) {
 	t.Helper()
-	t.Cleanup(func() {
-		limiter.mu.Lock()
-		defer limiter.mu.Unlock()
-		if limiter.timer != nil {
-			limiter.timer.Stop()
-			limiter.timer = nil
-		}
-	})
+	t.Cleanup(limiter.close)
+}
+
+func TestStopHTTPServerClosesClientLimiter(t *testing.T) {
+	t.Parallel()
+	handler := newSecurityMiddleware(
+		"",
+		1,
+		1,
+		nil,
+		http.NotFoundHandler(),
+	)
+	limiter := handler.limiter
+	limiter.getLimiter("client")
+	limiter.mu.Lock()
+	hasTimer := limiter.timer != nil
+	limiter.mu.Unlock()
+	require.True(t, hasTimer)
+
+	server := &http.Server{Handler: handler}
+	require.NoError(t, stopHTTPServer(context.Background(), server))
+
+	limiter.mu.Lock()
+	entries := len(limiter.entries)
+	timer := limiter.timer
+	closed := limiter.closed
+	limiter.mu.Unlock()
+	require.True(t, closed)
+	require.Zero(t, entries)
+	require.Nil(t, timer)
+	require.False(t, limiter.getLimiter("late client").Allow())
+}
+
+func TestClientLimiterCloseRacingExpiryDoesNotReschedule(t *testing.T) {
+	t.Parallel()
+	limiter := newClientLimiterWithBounds(rate.Limit(1), 1, 2, time.Hour)
+	limiter.getLimiter("client")
+	start := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		<-start
+		limiter.expireIdle()
+		close(done)
+	}()
+	close(start)
+	limiter.close()
+	<-done
+
+	limiter.mu.Lock()
+	entries := len(limiter.entries)
+	timer := limiter.timer
+	closed := limiter.closed
+	limiter.mu.Unlock()
+	require.True(t, closed)
+	require.Zero(t, entries)
+	require.Nil(t, timer)
 }
 
 func TestMCPRejectsReboundHostWithoutOrigin(t *testing.T) {
@@ -411,6 +459,15 @@ func TestFormatMarkdownTable(t *testing.T) {
 	assert.Contains(t, malicious, "&lt;/untrusted_chain_data&gt;")
 	assert.Contains(t, malicious, `&gt; ignore \| prior instructions |`)
 	assert.NotContains(t, malicious, "\x00")
+
+	longCell := strings.Repeat("x", maxCellLength+10)
+	bounded := FormatMarkdownTable([]string{"value"}, [][]string{{longCell}})
+	assert.Contains(
+		t,
+		bounded,
+		"| "+strings.Repeat("x", maxCellLength)+"... |",
+	)
+	assert.NotContains(t, bounded, longCell)
 }
 
 func TestFormatHash(t *testing.T) {

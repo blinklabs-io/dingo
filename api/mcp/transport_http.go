@@ -132,7 +132,7 @@ func (s *Server) handler() http.Handler {
 	})
 
 	// Wrap mux with security middleware (auth, rate limiting, and CORS)
-	return SecurityMiddleware(
+	return newSecurityMiddleware(
 		s.config.AuthToken,
 		s.config.RateLimit,
 		s.config.Burst,
@@ -218,8 +218,12 @@ func (s *Server) Stop(ctx context.Context) error {
 }
 
 func stopHTTPServer(ctx context.Context, server *http.Server) error {
-	if err := server.Shutdown(ctx); err != nil {
-		return errors.Join(err, server.Close())
+	err := server.Shutdown(ctx)
+	if err != nil {
+		err = errors.Join(err, server.Close())
 	}
-	return nil
+	if handler, ok := server.Handler.(*managedSecurityHandler); ok {
+		handler.Close()
+	}
+	return err
 }

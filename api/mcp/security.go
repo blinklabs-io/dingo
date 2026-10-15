@@ -50,6 +50,7 @@ type clientLimiter struct {
 	maxEntries int
 	idleTTL    time.Duration
 	timer      *time.Timer
+	closed     bool
 }
 
 func newClientLimiter(r rate.Limit, burst int) *clientLimiter {
@@ -79,6 +80,9 @@ func newClientLimiterWithBounds(
 func (cl *clientLimiter) getLimiter(ip string) *rate.Limiter {
 	cl.mu.Lock()
 	defer cl.mu.Unlock()
+	if cl.closed {
+		return rate.NewLimiter(0, 0)
+	}
 
 	now := time.Now()
 	cl.evictExpiredLocked(now)
@@ -155,6 +159,9 @@ func (cl *clientLimiter) scheduleExpiryLocked(now time.Time) {
 func (cl *clientLimiter) expireIdle() {
 	cl.mu.Lock()
 	defer cl.mu.Unlock()
+	if cl.closed {
+		return
+	}
 	cl.timer = nil
 	now := time.Now()
 	cl.evictExpiredLocked(now)
@@ -169,6 +176,16 @@ func SecurityMiddleware(
 	allowedOrigins []string,
 	next http.Handler,
 ) http.Handler {
+	return newSecurityMiddleware(authToken, reqPerSec, burst, allowedOrigins, next)
+}
+
+func newSecurityMiddleware(
+	authToken string,
+	reqPerSec float64,
+	burst int,
+	allowedOrigins []string,
+	next http.Handler,
+) *managedSecurityHandler {
 	var limiter *clientLimiter
 	if reqPerSec > 0 {
 		if burst <= 0 {
@@ -177,7 +194,7 @@ func SecurityMiddleware(
 		limiter = newClientLimiter(rate.Limit(reqPerSec), burst)
 	}
 
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Add("Vary", "Origin")
 		origins, present := r.Header["Origin"]
 		if present {
@@ -249,6 +266,7 @@ func SecurityMiddleware(
 
 		next.ServeHTTP(w, r)
 	})
+	return &managedSecurityHandler{handler: handler, limiter: limiter}
 }
 
 func trustedOrigin(origin string, r *http.Request, allowed []string) bool {

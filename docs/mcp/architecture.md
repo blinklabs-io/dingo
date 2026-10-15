@@ -228,7 +228,7 @@ wildcard is ignored for MCP. Native clients without Origin remain supported.
 `DINGO_MCP_AUTH_TOKEN` is a compatibility alias below the canonical plugin
 environment setting in precedence. HTTP has no absolute write deadline because
 SSE responses span client sessions. The limiter's idle-expiry timer reclaims
-entries even when no requests arrive.
+entries even when no requests arrive and is stopped when its server shuts down.
 
 ### Upstream references
 
