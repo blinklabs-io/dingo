@@ -20,7 +20,6 @@ import (
 	"log/slog"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database/models"
@@ -74,14 +73,10 @@ func blockCarryingTx(t *testing.T, txBytes []byte) models.Block {
 	return models.Block{Type: gledger.BlockTypeConway, Cbor: raw, Slot: 100}
 }
 
-// A block that confirms a pending transaction must evict it as confirmed.
-// Without that, the transaction is only removed when full-pool revalidation
-// finds its inputs spent, and it is logged as an invalid transaction that was
-// dropped.
-func TestChainUpdateEvictsConfirmedTransactionWithoutDropWarning(
+func newConfirmedBlockMempool(
 	t *testing.T,
-) {
-	t.Parallel()
+) (*Mempool, *mockValidator, *lockedBuffer, []byte, string) {
+	t.Helper()
 	logs := &lockedBuffer{}
 	v := newMockValidator()
 	m, err := NewMempool(MempoolConfig{
@@ -110,41 +105,52 @@ func TestChainUpdateEvictsConfirmedTransactionWithoutDropWarning(
 		uint(conway.EraIdConway), txBytes,
 	)
 	require.NoError(t, err)
-	hash := tx.Hash().String()
+	return m, v, logs, txBytes, tx.Hash().String()
+}
+
+func chainUpdate(data any) event.Event {
+	return event.NewEvent(chain.ChainUpdateEventType, data)
+}
+
+// A block that confirms a pending transaction must evict it as confirmed.
+// Without that, the transaction is only removed when full-pool revalidation
+// finds its inputs spent, and it is logged as an invalid transaction that was
+// dropped.
+func TestChainUpdateEvictsConfirmedTransactionWithoutDropWarning(
+	t *testing.T,
+) {
+	t.Parallel()
+	m, v, logs, txBytes, hash := newConfirmedBlockMempool(t)
 	// The ledger has applied the block, so the inputs are gone.
 	v.mu.Lock()
 	v.failHashes[hash] = true
 	v.mu.Unlock()
-	testutil.WaitForCondition(
-		t,
-		func() bool {
-			return m.eventBus.HasSubscribers(chain.ChainUpdateEventType)
-		},
-		time.Second,
-		"chain worker subscribes",
-	)
 
-	block := blockCarryingTx(t, txBytes)
-	m.eventBus.Publish(
-		chain.ChainUpdateEventType,
-		event.NewEvent(
-			chain.ChainUpdateEventType,
-			chain.ChainBlockEvent{Block: block},
-		),
-	)
+	m.noteChainUpdate(chainUpdate(chain.ChainBlockEvent{
+		Block: blockCarryingTx(t, txBytes),
+	}))
+	require.NoError(t, m.rebuildAfterChainUpdate(context.Background()))
 
-	testutil.WaitForCondition(
-		t,
-		func() bool {
-			_, ok := m.GetTransaction(hash)
-			return !ok
-		},
-		2*time.Second,
-		"confirmed transaction leaves the pool",
-	)
-	// The rebuild runs after the eviction on the same worker.
-	time.Sleep(200 * time.Millisecond)
+	_, ok := m.GetTransaction(hash)
+	require.False(t, ok)
 	out := logs.String()
 	require.Contains(t, out, "confirmed transaction")
 	require.NotContains(t, out, "failed re-validation")
+}
+
+// A block applied and then rolled back before the pool is rebuilt confirms
+// nothing, so its transactions stay pending.
+func TestChainUpdateKeepsTransactionOfARolledBackBlock(t *testing.T) {
+	t.Parallel()
+	m, _, _, txBytes, hash := newConfirmedBlockMempool(t)
+	block := blockCarryingTx(t, txBytes)
+
+	m.noteChainUpdate(chainUpdate(chain.ChainBlockEvent{Block: block}))
+	m.noteChainUpdate(chainUpdate(chain.ChainRollbackEvent{
+		RolledBackBlocks: []models.Block{block},
+	}))
+	require.NoError(t, m.rebuildAfterChainUpdate(context.Background()))
+
+	_, ok := m.GetTransaction(hash)
+	require.True(t, ok)
 }
