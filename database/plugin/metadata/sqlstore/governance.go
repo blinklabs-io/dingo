@@ -590,6 +590,32 @@ WHERE v.proposal_id = ? AND v.added_slot <= ?
 	return ret, rows.Err()
 }
 
+const governanceVotePreviousQuery = `
+SELECT vote, anchor_url, anchor_hash
+FROM governance_vote
+WHERE proposal_id = ? AND voter_type = ? AND voter_credential_tag = ?
+    AND voter_credential = ?`
+
+const governanceVoteUpsertQuery = `
+INSERT INTO governance_vote (
+    proposal_id, voter_type, voter_credential_tag, voter_credential, vote,
+    anchor_url, anchor_hash, added_slot, vote_updated_slot, deleted_slot
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT (
+    proposal_id, voter_type, voter_credential_tag, voter_credential
+) DO UPDATE SET
+    vote = excluded.vote,
+    anchor_url = excluded.anchor_url,
+    anchor_hash = excluded.anchor_hash,
+    vote_updated_slot = excluded.vote_updated_slot,
+    deleted_slot = excluded.deleted_slot
+RETURNING id`
+
+const governanceVoteHistoryInsertQuery = `
+INSERT INTO governance_vote_history (
+    vote_id, transition_slot, vote, anchor_url, anchor_hash
+) VALUES (?, ?, ?, ?, ?)`
+
 func (s *Store) SetGovernanceVote(
 	vote *models.GovernanceVote,
 	txn types.Txn,
@@ -603,11 +629,10 @@ func (s *Store) SetGovernanceVote(
 			var previousVote sql.NullByte
 			var previousAnchorURL sql.NullString
 			var previousAnchorHash []byte
-			previousErr := db.QueryRowContext(ctx, `
-SELECT vote, anchor_url, anchor_hash
-FROM governance_vote
-WHERE proposal_id = ? AND voter_type = ? AND voter_credential_tag = ?
-    AND voter_credential = ?`,
+			previousErr := s.queryRowCached(
+				ctx,
+				db,
+				governanceVotePreviousQuery,
 				vote.ProposalID,
 				vote.VoterType,
 				vote.VoterCredentialTag,
@@ -618,20 +643,10 @@ WHERE proposal_id = ? AND voter_type = ? AND voter_credential_tag = ?
 			}
 
 			var id uint
-			err := db.QueryRowContext(ctx, `
-INSERT INTO governance_vote (
-    proposal_id, voter_type, voter_credential_tag, voter_credential, vote,
-    anchor_url, anchor_hash, added_slot, vote_updated_slot, deleted_slot
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT (
-    proposal_id, voter_type, voter_credential_tag, voter_credential
-) DO UPDATE SET
-    vote = excluded.vote,
-    anchor_url = excluded.anchor_url,
-    anchor_hash = excluded.anchor_hash,
-    vote_updated_slot = excluded.vote_updated_slot,
-    deleted_slot = excluded.deleted_slot
-RETURNING id`,
+			err := s.queryRowCached(
+				ctx,
+				db,
+				governanceVoteUpsertQuery,
 				vote.ProposalID,
 				vote.VoterType,
 				vote.VoterCredentialTag,
@@ -665,10 +680,10 @@ RETURNING id`,
 			if vote.VoteUpdatedSlot != nil {
 				transitionSlot = *vote.VoteUpdatedSlot
 			}
-			_, err = db.ExecContext(ctx, `
-INSERT INTO governance_vote_history (
-    vote_id, transition_slot, vote, anchor_url, anchor_hash
-) VALUES (?, ?, ?, ?, ?)`,
+			_, err = s.execCached(
+				ctx,
+				db,
+				governanceVoteHistoryInsertQuery,
 				id,
 				transitionSlot,
 				vote.Vote,

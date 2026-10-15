@@ -459,10 +459,14 @@ func TestGetPoolByVrfKeyHashPreservesActiveKeyDuringDeferredReRegistration(
 	// effective). Reporting P here -- not nil -- is what lets
 	// gouroboros's caller compare against PoolCurrentState and correctly
 	// still allow P to keep using its own pending key.
-	got, err = store.GetPoolByVrfKeyHash(newVrfKey, epochStartSlot, nil)
+	got, err = store.GetFuturePoolByVrfKeyHash(newVrfKey, epochStartSlot, nil)
 	require.NoError(t, err)
 	require.NotNil(t, got)
 	require.Equal(t, poolKey, got.PoolKeyHash)
+
+	got, err = store.GetPoolByVrfKeyHash(newVrfKey, epochStartSlot, nil)
+	require.NoError(t, err)
+	require.Nil(t, got)
 }
 
 // TestGetPoolByVrfKeyHashAllowsSamePoolRevertingToItsOwnKey is the control
@@ -512,6 +516,11 @@ func TestGetPoolByVrfKeyHashAllowsSamePoolRevertingToItsOwnKey(
 
 	const epochStartSlot = 30
 	got, err := store.GetPoolByVrfKeyHash(keyA, epochStartSlot, nil)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	require.Equal(t, poolKey, got.PoolKeyHash)
+
+	got, err = store.GetFuturePoolByVrfKeyHash(keyA, epochStartSlot, nil)
 	require.NoError(t, err)
 	require.NotNil(t, got)
 	require.Equal(t, poolKey, got.PoolKeyHash)
@@ -584,6 +593,14 @@ func TestGetPoolByVrfKeyHashActivatesAndReleasesAtEpochBoundary(
 	require.NoError(t, err)
 	require.NotNil(t, got)
 	require.Equal(t, poolQ, got.PoolKeyHash)
+
+	got, err = store.GetFuturePoolByVrfKeyHash(
+		keyA,
+		postBoundaryEpochStartSlot,
+		nil,
+	)
+	require.NoError(t, err)
+	require.Nil(t, got, "a first registration is current, not future state")
 }
 
 // TestGetPoolByVrfKeyHashClaimsSupersededSameEpochFutureKey is the
@@ -649,11 +666,8 @@ func TestGetPoolByVrfKeyHashFreesSupersededSameEpochKey(
 
 	const epochStartSlot = 30
 
-	// Sanity check on the mechanism the caller relies on: P's current
-	// (latest) registration is genuinely C, not B, which is exactly what
-	// makes B a superseded, not merely an older, same-epoch key. This
-	// mirrors how ledger.LedgerView.PoolCurrentState picks the latest
-	// registration by AddedSlot.
+	// The stored latest registration is C, which makes B superseded rather
+	// than the current pending value.
 	fullPool, err := store.GetPool(
 		lcommon.PoolKeyHash(lcommon.NewBlake2b224(poolKey)),
 		true,
@@ -688,7 +702,7 @@ func TestGetPoolByVrfKeyHashFreesSupersededSameEpochKey(
 	require.NotNil(t, got)
 	require.Equal(t, poolKey, got.PoolKeyHash)
 
-	got, err = store.GetPoolByVrfKeyHash(keyC, epochStartSlot, nil)
+	got, err = store.GetFuturePoolByVrfKeyHash(keyC, epochStartSlot, nil)
 	require.NoError(t, err)
 	require.NotNil(t, got)
 	require.Equal(t, poolKey, got.PoolKeyHash)
@@ -745,7 +759,7 @@ func TestGetPoolByVrfKeyHashRestoresPendingKeyAfterRollback(
 	const epochStartSlot = 30
 
 	// Before rollback: C supersedes B, so B is free (the main fix behavior).
-	got, err := store.GetPoolByVrfKeyHash(keyB, epochStartSlot, nil)
+	got, err := store.GetFuturePoolByVrfKeyHash(keyB, epochStartSlot, nil)
 	require.NoError(t, err)
 	require.Nil(t, got, "B must start out free, superseded by C")
 
@@ -755,7 +769,7 @@ func TestGetPoolByVrfKeyHashRestoresPendingKeyAfterRollback(
 
 	// After rollback: B is once again P's latest same-epoch registration,
 	// so it must be reserved again.
-	got, err = store.GetPoolByVrfKeyHash(keyB, epochStartSlot, nil)
+	got, err = store.GetFuturePoolByVrfKeyHash(keyB, epochStartSlot, nil)
 	require.NoError(t, err)
 	require.NotNil(
 		t,
@@ -846,7 +860,7 @@ func TestGetPoolByVrfKeyHashFreesSupersededKeyWrittenInOneTransaction(
 	require.NotNil(t, got)
 	require.Equal(t, poolKey, got.PoolKeyHash)
 
-	got, err = store.GetPoolByVrfKeyHash(keyC, epochStartSlot, nil)
+	got, err = store.GetFuturePoolByVrfKeyHash(keyC, epochStartSlot, nil)
 	require.NoError(t, err)
 	require.NotNil(t, got)
 	require.Equal(t, poolKey, got.PoolKeyHash)
@@ -901,7 +915,7 @@ func TestGetPoolByVrfKeyHashReservesActiveAndSoleSameEpochPendingKey(
 
 	// B remains claimed: it is P's latest (and only) same-epoch pending
 	// key, not yet superseded by anything.
-	got, err = store.GetPoolByVrfKeyHash(keyB, epochStartSlot, nil)
+	got, err = store.GetFuturePoolByVrfKeyHash(keyB, epochStartSlot, nil)
 	require.NoError(t, err)
 	require.NotNil(t, got)
 	require.Equal(t, poolKey, got.PoolKeyHash)
@@ -980,6 +994,100 @@ func TestGetPoolByVrfKeyHashFreesKeyAfterRetirementThenDifferentKeyReRegistratio
 			"must not resurrect as active via a later, different-key "+
 			"re-registration",
 	)
+}
+
+func TestGetPoolByVrfKeyHashClaimsFreshPostRetirementRegistration(
+	t *testing.T,
+) {
+	t.Parallel()
+	store := newDepositHeldStore(t)
+	depositHeldEpochs(t, store, 3)
+	pool := depositHeldPoolKey(0xe1)
+	keyA := lcommon.VrfKeyHash(lcommon.NewBlake2b256([]byte{0xa1}))
+	keyB := lcommon.VrfKeyHash(lcommon.NewBlake2b256([]byte{0xb1}))
+	regA := depositHeldRegistration(pool)
+	regA.VrfKeyHash = keyA
+	regB := depositHeldRegistration(pool)
+	regB.VrfKeyHash = keyB
+
+	writeDepositHeldCert(t, store, 100, 0, regA, 500)
+	writeDepositHeldCert(t, store, 200, 0,
+		depositHeldRetirement(pool, 1), 0)
+	writeDepositHeldCert(t, store, 1_100, 0, regB, 500)
+
+	got, err := store.GetPoolByVrfKeyHash(keyB.Bytes(), 1_000, nil)
+	require.NoError(t, err)
+	require.NotNil(t, got,
+		"a post-retirement first registration must reserve its current key")
+	require.Equal(t, pool.Bytes(), got.PoolKeyHash)
+
+	got, err = store.GetFuturePoolByVrfKeyHash(keyB.Bytes(), 1_000, nil)
+	require.NoError(t, err)
+	require.Nil(t, got,
+		"a post-retirement first registration is current, not future state")
+}
+
+func TestPoolRegistrationPersistenceKeepsSameBlockFirstAndFutureState(
+	t *testing.T,
+) {
+	t.Parallel()
+	store := newDepositHeldStore(t)
+	depositHeldEpochs(t, store, 2)
+	pool := depositHeldPoolKey(0xe2)
+	keyA := lcommon.VrfKeyHash(lcommon.NewBlake2b256([]byte{0xa2}))
+	keyB := lcommon.VrfKeyHash(lcommon.NewBlake2b256([]byte{0xb2}))
+	regA := depositHeldRegistration(pool)
+	regA.VrfKeyHash = keyA
+	regB := depositHeldRegistration(pool)
+	regB.VrfKeyHash = keyB
+
+	writeDepositHeldCert(t, store, 100, 0, regA, 500)
+	writeDepositHeldCert(t, store, 100, 1, regB, 0)
+
+	current, err := store.GetPoolByVrfKeyHash(keyA.Bytes(), 0, nil)
+	require.NoError(t, err)
+	require.NotNil(t, current)
+	require.Equal(t, pool.Bytes(), current.PoolKeyHash)
+	future, err := store.GetFuturePoolByVrfKeyHash(keyB.Bytes(), 0, nil)
+	require.NoError(t, err)
+	require.NotNil(t, future,
+		"the second same-block registration must survive as future state")
+	require.Equal(t, pool.Bytes(), future.PoolKeyHash)
+}
+
+func TestPoolRegistrationPersistenceKeepsLatestSameBlockFutureState(
+	t *testing.T,
+) {
+	t.Parallel()
+	store := newDepositHeldStore(t)
+	depositHeldEpochs(t, store, 3)
+	pool := depositHeldPoolKey(0xe3)
+	keyA := lcommon.VrfKeyHash(lcommon.NewBlake2b256([]byte{0xa3}))
+	keyB := lcommon.VrfKeyHash(lcommon.NewBlake2b256([]byte{0xb3}))
+	keyC := lcommon.VrfKeyHash(lcommon.NewBlake2b256([]byte{0xc3}))
+	regA := depositHeldRegistration(pool)
+	regA.VrfKeyHash = keyA
+	regB := depositHeldRegistration(pool)
+	regB.VrfKeyHash = keyB
+	regC := depositHeldRegistration(pool)
+	regC.VrfKeyHash = keyC
+
+	writeDepositHeldCert(t, store, 100, 0, regA, 500)
+	writeDepositHeldCert(t, store, 1_100, 0, regB, 0)
+	writeDepositHeldCert(t, store, 1_100, 1, regC, 0)
+
+	current, err := store.GetPoolByVrfKeyHash(keyA.Bytes(), 1_000, nil)
+	require.NoError(t, err)
+	require.NotNil(t, current)
+	require.Equal(t, pool.Bytes(), current.PoolKeyHash)
+	future, err := store.GetFuturePoolByVrfKeyHash(keyC.Bytes(), 1_000, nil)
+	require.NoError(t, err)
+	require.NotNil(t, future)
+	require.Equal(t, pool.Bytes(), future.PoolKeyHash)
+	released, err := store.GetFuturePoolByVrfKeyHash(keyB.Bytes(), 1_000, nil)
+	require.NoError(t, err)
+	require.Nil(t, released,
+		"the first same-block future key must be released by its replacement")
 }
 
 func TestCommitTimestamp(t *testing.T) {

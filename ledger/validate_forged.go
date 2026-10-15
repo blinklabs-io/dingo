@@ -15,16 +15,20 @@
 package ledger
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/ledger/forging"
 	"github.com/blinklabs-io/dingo/utxoref"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
 // ValidateForgedBlock validates a locally-forged block before it is adopted
@@ -106,10 +110,37 @@ func (ls *LedgerState) validateForgedBodyHash(block ledger.Block) error {
 	return nil
 }
 
+const (
+	forgedValidationWaitMsg = "forged block self-validation waiting for the ledger state to settle"
+	// forgedValidationMaxAttempts bounds the sessions one forged block may
+	// open while the ledger keeps changing under it. Every attempt after the
+	// first waits for a publication or a finished transition, so the cap
+	// only binds on a ledger that transitions without pause within the
+	// forged slot, which bounds the wait on its own.
+	forgedValidationMaxAttempts = 8
+)
+
+// errForgedValidationNotCurrent marks a validation session that stopped
+// being current before it reached a verdict.
+var errForgedValidationNotCurrent = errors.New(
+	"forged transaction validation session is not current",
+)
+
 // validateForgedTxs validates each transaction in the block against the
 // current ledger state using an intra-block UTxO overlay. The overlay
 // accumulates outputs produced by earlier transactions so that later
 // transactions in the same block can spend them correctly.
+//
+// A session that a block apply, rollover or rollback makes non-current has
+// judged nothing, and on a producer one is often in flight -- typically the
+// apply of the forged block's own parent. Validation therefore waits for
+// that transition to publish and starts again, for as long as the forged
+// slot lasts and the ledger tip stays the one validation started from, is
+// the block's parent, or lies on the primary chain while that chain still
+// ends at the parent. Any other tip is a chain the block does not extend.
+// When no session can complete, the result wraps
+// forging.ErrForgedBlockStateChanged: the block is dropped unjudged, never
+// adopted.
 func (ls *LedgerState) validateForgedTxs(
 	ctx context.Context,
 	block ledger.Block,
@@ -123,6 +154,102 @@ func (ls *LedgerState) validateForgedTxs(
 		return err
 	}
 
+	parentHash := LeiosValidationParentHash(block.Header())
+	_, startTip := ls.loadStateSnapshots()
+	startHash := startTip.currentTip.Point.Hash
+	slotEnd, slotEndErr := ls.SlotToTime(block.SlotNumber() + 1)
+	for attempt := 1; ; attempt++ {
+		// Taken before the attempt, so a change that lands during it
+		// closes this channel and the wait below cannot miss it.
+		settled := ls.txValidationSettledChan()
+		err := ls.validateForgedTxsOnce(ctx, block, txs)
+		if !errors.Is(err, errForgedValidationNotCurrent) {
+			return err
+		}
+		if attempt >= forgedValidationMaxAttempts {
+			return fmt.Errorf(
+				"%w: no current ledger state after %d attempts",
+				forging.ErrForgedBlockStateChanged,
+				attempt,
+			)
+		}
+		// Waiting is bounded by the end of the forged slot. A slot whose
+		// end cannot be placed gets no wait at all, so a transition that
+		// never finishes cannot hold the forger.
+		if slotEndErr != nil {
+			return fmt.Errorf(
+				"%w: end of slot %d unknown: %w",
+				forging.ErrForgedBlockStateChanged,
+				block.SlotNumber(),
+				slotEndErr,
+			)
+		}
+		slotEnded := fmt.Errorf(
+			"%w: slot %d ended before the ledger state settled",
+			forging.ErrForgedBlockStateChanged,
+			block.SlotNumber(),
+		)
+		remaining := time.Until(slotEnd)
+		if remaining <= 0 {
+			return slotEnded
+		}
+		timer := time.NewTimer(remaining)
+		ls.config.Logger.Debug(
+			forgedValidationWaitMsg,
+			"component", "ledger",
+			"slot", block.SlotNumber(),
+			"attempt", attempt,
+		)
+		var waitErr error
+		select {
+		case <-settled:
+		case <-timer.C:
+			waitErr = slotEnded
+		case <-ctx.Done():
+			waitErr = ctx.Err()
+		}
+		timer.Stop()
+		if waitErr != nil {
+			return waitErr
+		}
+		_, tip := ls.loadStateSnapshots()
+		tipHash := tip.currentTip.Point.Hash
+		if !bytes.Equal(tipHash, startHash) &&
+			!bytes.Equal(tipHash, parentHash) &&
+			//nolint:contextcheck // chain.TipRelation takes no context; it reads one locked chain snapshot
+			!ls.forgedParentChainHolds(tip.currentTip.Point, parentHash) {
+			return fmt.Errorf(
+				"%w: ledger tip %x is not the forged block's parent %x",
+				forging.ErrForgedBlockStateChanged,
+				tipHash,
+				parentHash,
+			)
+		}
+	}
+}
+
+// forgedParentChainHolds reports whether tip lies on the primary chain while
+// that chain still ends at the forged block's parent. The forger admits a
+// slot while the ledger trails the primary chain by a few blocks, so the
+// ledger can apply an unapplied block between the tip validation started
+// from and the parent; that tip is on the block's own chain, not a rival.
+func (ls *LedgerState) forgedParentChainHolds(
+	tip ocommon.Point,
+	parentHash []byte,
+) bool {
+	primaryTip, _, ancestor, err := ls.PrimaryChainTipRelation(tip)
+	return err == nil && ancestor &&
+		bytes.Equal(primaryTip.Point.Hash, parentHash)
+}
+
+// validateForgedTxsOnce runs one validation session over txs. It returns
+// errForgedValidationNotCurrent when the session stopped being current
+// before every transaction was judged.
+func (ls *LedgerState) validateForgedTxsOnce(
+	ctx context.Context,
+	block ledger.Block,
+	txs []ledger.Transaction,
+) error {
 	// consumedUtxos: inputs spent within this block (prevents intra-block
 	// double-spend).
 	// createdUtxos: outputs produced within this block and not yet in the
@@ -150,9 +277,7 @@ func (ls *LedgerState) validateForgedTxs(
 					return err
 				}
 				if !stillCurrent() {
-					return errors.New(
-						"ledger state changed during forged transaction validation",
-					)
+					return errForgedValidationNotCurrent
 				}
 				if err := validate(
 					tx,
@@ -160,6 +285,11 @@ func (ls *LedgerState) validateForgedTxs(
 					createdUtxos,
 					pendingAccounts,
 				); err != nil {
+					// A rule failure judged against state that moved
+					// during the call is not a verdict on the block.
+					if !stillCurrent() {
+						return errForgedValidationNotCurrent
+					}
 					return fmt.Errorf(
 						"tx %s in forged block at slot %d: %w",
 						tx.Hash(),

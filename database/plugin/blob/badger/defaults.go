@@ -14,6 +14,8 @@
 
 package badger
 
+import "time"
+
 // Default cache and value sizes for BadgerDB, in bytes.
 const (
 	DefaultBlockCacheSize         = 268435456
@@ -28,7 +30,11 @@ const (
 	DefaultAPIIndexCacheSize      = DefaultIndexCacheSize
 	DefaultAPICompressionEnabled  = true
 	DefaultCompressionLevel       = 1
+	DefaultGCDiscardRatio         = 0.5
 )
+
+// DefaultGCInterval is how often the background value-log GC runs.
+const DefaultGCInterval = 5 * time.Minute
 
 func useCompactBlockMetadata(runMode, storageMode string) bool {
 	return (runMode == "serve" || runMode == "leios") && storageMode == "core"

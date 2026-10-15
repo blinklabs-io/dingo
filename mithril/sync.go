@@ -1246,7 +1246,12 @@ func Sync(
 	// Enable bulk-load optimizations before launching parallel
 	// goroutines so both importLedgerState and LoadBlobsWithDB
 	// share the same pragma settings without racing.
-	defer node.WithBulkLoadPragmas(db, logger)()
+	cleanupBulkLoadPragmas := node.WithBulkLoadPragmas(db, logger)
+	defer func() {
+		if err := cleanupBulkLoadPragmas(); err != nil {
+			logger.Error("failed to restore normal settings", "error", err)
+		}
+	}()
 
 	// A rejected pre-existing gap must be cleared before importing an
 	// ancillary state beyond ImmutableDB: cleanup rolls back UTxO rows by
@@ -1274,7 +1279,7 @@ func Sync(
 	// clears sync_status — so a crash between drop and rebuild
 	// leaves sync_status set and triggers the recovery path on
 	// the next startup.
-	deferredIndexes := node.WithDeferredIndexes(db, logger)
+	deferredIndexes := node.WithDeferredIndexes(ctx, db, logger)
 
 	// The Mithril certificate commits to ImmutableDB content. Ancillary ledger
 	// states can be newer than that certified point because they come from the
@@ -1778,6 +1783,7 @@ func Sync(
 			)
 		}
 		bf := node.NewBackfill(db, nodeCfg, logger)
+		bf.SetFreshDatabaseBootstrap(mode == syncModeBootstrap)
 		// mithrilSyncRunE (cmd/dingo/mithril.go) already refuses to reach this
 		// point with the delegator-inactivity gate enabled
 		// (errMithrilInactivityIncompatible), so the CIP-0163 witness write is
@@ -1844,7 +1850,18 @@ func Sync(
 		indexRebuildElapsed,
 	)
 
-	if err := node.FinalizeBackfillPlannerStats(ctx, db, logger); err != nil {
+	if err := cleanupBulkLoadPragmas(); err != nil {
+		return SyncResult{}, fmt.Errorf(
+			"restoring normal metadata settings: %w", err,
+		)
+	}
+
+	if err := node.FinalizeMithrilBackfillPlannerStats(
+		ctx,
+		db,
+		logger,
+		mode == syncModeBootstrap,
+	); err != nil {
 		return SyncResult{}, err
 	}
 

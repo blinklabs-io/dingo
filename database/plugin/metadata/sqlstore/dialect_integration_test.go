@@ -117,6 +117,44 @@ func TestMySQLRewardLiveStakeBatchBoundaries(t *testing.T) {
 	)
 }
 
+func TestMySQLOpCertConflictWithClientFoundRows(t *testing.T) {
+	dsn, database := newMySQLIntegrationDatabase(t)
+	store := newIntegrationSQLStore(
+		t,
+		"mysql",
+		mysqlDSNWithClientFoundRows(t, dsn),
+		"mysql",
+		database,
+	)
+	poolKeyHash := lcommon.PoolKeyHash{1}
+	_, err := store.writeDB.ExecContext(
+		t.Context(),
+		"INSERT INTO pool (pool_key_hash, latest_op_cert_sequence) VALUES (?, ?)",
+		poolKeyHash.Bytes(),
+		0,
+	)
+	require.NoError(t, err)
+	require.NoError(t, store.UpdatePoolOpCertSequence(poolKeyHash, 2, 10, nil))
+
+	err = store.UpdatePoolOpCertSequence(poolKeyHash, 3, 10, nil)
+	require.ErrorContains(t, err, "opcert counter conflict")
+
+	var latest, recorded uint64
+	require.NoError(t, store.writeDB.QueryRowContext(
+		t.Context(),
+		"SELECT latest_op_cert_sequence FROM pool WHERE pool_key_hash = ?",
+		poolKeyHash.Bytes(),
+	).Scan(&latest))
+	require.NoError(t, store.writeDB.QueryRowContext(
+		t.Context(),
+		"SELECT sequence FROM pool_opcert_sequence WHERE pool_key_hash = ? AND slot = ?",
+		poolKeyHash.Bytes(),
+		10,
+	).Scan(&recorded))
+	require.Equal(t, uint64(2), latest)
+	require.Equal(t, latest, recorded)
+}
+
 func TestMySQLClearDanglingDRepDelegations(t *testing.T) {
 	dsn, database := newMySQLIntegrationDatabase(t)
 	store := newIntegrationSQLStore(t, "mysql", dsn, "mysql", database)
@@ -613,5 +651,29 @@ func testBatchedTransactionWrites(t *testing.T, store *Store) {
 		require.NoError(t, err)
 		require.NoError(t, store.FlushBatch(batch, txn))
 		require.NoError(t, txn.Commit())
+	}
+}
+
+func TestPostgresDrepAmountPageAdjustmentTyping(t *testing.T) {
+	dsn, schema := newPostgresIntegrationSchema(t)
+	store := newIntegrationSQLStore(t, "pgx", dsn, "postgres", schema)
+	credential := bytes.Repeat([]byte{0xd7}, 28)
+	require.NoError(t, store.CreateDrep(nil, &models.Drep{
+		Credential: credential,
+		AddedSlot:  1,
+		Active:     true,
+	}))
+	for _, adjustments := range [][]models.DrepPowerAdjustment{
+		nil,
+		{{Credential: credential, Amount: 1}},
+	} {
+		page, total, err := store.GetDrepsPage(models.DrepListPageQuery{
+			OrderByAmount:    true,
+			PowerAdjustments: adjustments,
+			Limit:            1,
+		}, nil)
+		require.NoError(t, err)
+		require.Equal(t, 1, total)
+		require.Len(t, page, 1)
 	}
 }

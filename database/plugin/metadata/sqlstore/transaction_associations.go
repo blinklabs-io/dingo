@@ -167,16 +167,34 @@ func (s *Store) collateralInputsBatch(
 	db queryer,
 	hashes []any,
 ) (map[string][]models.Utxo, error) {
+	return s.transactionInputAssociations(ctx, db, hashes, "utxo_collateral_input")
+}
+
+// referenceInputsBatch reads the durable many-to-many reference-input edges.
+// The legacy UTxO column remains populated for compatibility, but cannot
+// represent two transactions referencing the same output.
+func (s *Store) referenceInputsBatch(
+	ctx context.Context,
+	db queryer,
+	hashes []any,
+) (map[string][]models.Utxo, error) {
+	return s.transactionInputAssociations(ctx, db, hashes, "utxo_reference_input")
+}
+
+// table is an internal association-table name, never a query input.
+func (s *Store) transactionInputAssociations(
+	ctx context.Context,
+	db queryer,
+	hashes []any,
+	table string,
+) (map[string][]models.Utxo, error) {
 	result := make(map[string][]models.Utxo)
-	if len(hashes) == 0 {
-		return result, nil
-	}
 	for start := 0; start < len(hashes); start += s.dialect.ParameterLimit() {
 		end := min(start+s.dialect.ParameterLimit(), len(hashes))
-		query := `SELECT ` + qualifiedSQLiteUtxoColumns + `, c.transaction_hash
+		query := `SELECT ` + qualifiedSQLiteUtxoColumns + `, input.transaction_hash
 FROM utxo AS utxo
-JOIN utxo_collateral_input AS c ON c.utxo_id = utxo.id
-WHERE c.transaction_hash IN (` + bindPlaceholders(end-start) + `) ORDER BY utxo.id`
+JOIN ` + table + ` AS input ON input.utxo_id = utxo.id
+WHERE input.transaction_hash IN (` + bindPlaceholders(end-start) + `) ORDER BY utxo.id`
 		rows, err := db.QueryContext(ctx, s.dialect.Rebind(query), hashes[start:end]...)
 		if err != nil {
 			return nil, err
@@ -193,58 +211,6 @@ WHERE c.transaction_hash IN (` + bindPlaceholders(end-start) + `) ORDER BY utxo.
 				return nil, err
 			}
 			result[string(row.reference)] = append(result[string(row.reference)], *item)
-		}
-		if err := rows.Err(); err != nil {
-			rows.Close()
-			return nil, err
-		}
-		if err := rows.Close(); err != nil {
-			return nil, err
-		}
-	}
-	return result, nil
-}
-
-// referenceInputsBatch reads the durable many-to-many reference-input edges.
-// The legacy UTxO column remains populated for compatibility, but cannot
-// represent two transactions referencing the same output.
-func (s *Store) referenceInputsBatch(
-	ctx context.Context,
-	db queryer,
-	hashes []any,
-) (map[string][]models.Utxo, error) {
-	result := make(map[string][]models.Utxo)
-	if len(hashes) == 0 {
-		return result, nil
-	}
-	for start := 0; start < len(hashes); start += s.dialect.ParameterLimit() {
-		end := min(start+s.dialect.ParameterLimit(), len(hashes))
-		query := `SELECT ` + qualifiedSQLiteUtxoColumns + `, r.transaction_hash
-FROM utxo AS utxo
-JOIN utxo_reference_input AS r ON r.utxo_id = utxo.id
-WHERE r.transaction_hash IN (` + bindPlaceholders(end-start) + `) ORDER BY utxo.id`
-		rows, err := db.QueryContext(
-			ctx,
-			s.dialect.Rebind(query),
-			hashes[start:end]...)
-		if err != nil {
-			return nil, err
-		}
-		for rows.Next() {
-			row, err := scanSQLiteUtxoWithReference(rows)
-			if err != nil {
-				rows.Close()
-				return nil, err
-			}
-			item, err := utxoFromSQLite(row.utxo)
-			if err != nil {
-				rows.Close()
-				return nil, err
-			}
-			result[string(row.reference)] = append(
-				result[string(row.reference)],
-				*item,
-			)
 		}
 		if err := rows.Err(); err != nil {
 			rows.Close()

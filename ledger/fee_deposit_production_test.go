@@ -838,7 +838,8 @@ type conwayDepositProdVariant struct {
 	setup           func(t *testing.T, fx *feeProdFixture)
 	// incorrect is the error target an isValid=true body with the wrong
 	// amount is rejected with.
-	incorrect func() any
+	incorrect      func() any
+	replayRecovers bool
 }
 
 // An isValid=false Conway transaction whose script genuinely fails, so the
@@ -959,10 +960,11 @@ func TestConwayPhase2InvalidDepositAccountingOnBlockPaths(t *testing.T) {
 			},
 		},
 		{
-			name:      "proposal deposit",
-			incorrect: func() any { return &conway.ProposalDepositIncorrectError{} },
-			required:  govDeposit,
-			wrong:     understated,
+			name:           "proposal deposit",
+			incorrect:      func() any { return &conway.ProposalDepositIncorrectError{} },
+			replayRecovers: true,
+			required:       govDeposit,
+			wrong:          understated,
 			extra: func(fx *feeProdFixture, amount uint64) map[uint]any {
 				rewardAccount := append(
 					[]byte{0xe0 | lcommon.AddressNetworkTestnet},
@@ -1097,6 +1099,10 @@ func TestConwayPhase2InvalidDepositAccountingOnBlockPaths(t *testing.T) {
 				func(t *testing.T) {
 					t.Parallel()
 					err := path.run(t, build(t, v, v.wrong, true, false))
+					if path.name == feeProdReplay.name && v.replayRecovers {
+						require.ErrorIs(t, err, errRestartLedgerPipeline)
+						return
+					}
 					require.ErrorAs(t, err, v.incorrect())
 				},
 			)

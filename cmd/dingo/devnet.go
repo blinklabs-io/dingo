@@ -275,6 +275,11 @@ func prepareDevnetState(
 		}
 		return initializeDevnetState(runDir, startTime)
 	}
+	if err := devnetkeys.InstallLocalTestFaucet(
+		filepath.Join(runDir, "cardano", "keys"),
+	); err != nil {
+		return fmt.Errorf("refreshing local DevNet faucet: %w", err)
+	}
 	return writeLocalDevnetConfig(
 		filepath.Join(runDir, "dingo.yaml"),
 		filepath.Join(runDir, "cardano"),

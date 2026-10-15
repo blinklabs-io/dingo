@@ -1063,34 +1063,75 @@ func (m *Mempool) processChainEvents(
 	defer func() {
 		m.eventBus.Unsubscribe(chain.ChainUpdateEventType, chainUpdateSubId)
 	}()
-	lastValidationTime := time.Now()
-	var ok bool
-	for {
-		select {
-		case _, ok = <-chainUpdateChan:
-			if !ok {
+	runChainUpdateWorker(
+		ctx,
+		m.done,
+		chainUpdateChan,
+		30*time.Second,
+		func() error {
+			return m.rebuildOverlay(ctx)
+		},
+		func(err error) {
+			if errors.Is(err, errValidationSnapshotChanged) {
+				m.logger.Debug(
+					"mempool overlay rebuild deferred after ledger update",
+					"component", "mempool",
+					"error", err,
+				)
 				return
 			}
-		case <-m.done:
-			return
-		case <-ctx.Done():
-			return
-		}
-		// Only purge once every 30 seconds when there are more blocks available
-		if time.Since(lastValidationTime) < 30*time.Second &&
-			len(chainUpdateChan) > 0 {
-			continue
-		}
-		// Rebuild overlay: re-validate each pending TX in order against
-		// a fresh overlay, removing TXs that no longer validate. Log
-		// and continue on error — the next chain update will try
-		// again rather than crashing the node.
-		if err := m.rebuildOverlay(ctx); err != nil {
 			m.logger.Error(
 				"mempool overlay rebuild failed",
 				"component", "mempool",
 				"error", err,
 			)
+		},
+	)
+}
+
+func runChainUpdateWorker(
+	ctx context.Context,
+	done <-chan struct{},
+	chainUpdateChan <-chan event.Event,
+	revalidationInterval time.Duration,
+	rebuild func() error,
+	onError func(error),
+) {
+	lastValidationTime := time.Now()
+	var retryTimer *time.Timer
+	var retryTimerChan <-chan time.Time
+	defer func() {
+		if retryTimer != nil {
+			retryTimer.Stop()
+		}
+	}()
+	for {
+		select {
+		case _, ok := <-chainUpdateChan:
+			if !ok {
+				return
+			}
+			if retryTimerChan != nil {
+				continue
+			}
+			// Preserve the queue-drain behavior on healthy rebuilds, while a
+			// failed rebuild is retried only after its cooldown expires.
+			if time.Since(lastValidationTime) < revalidationInterval &&
+				len(chainUpdateChan) > 0 {
+				continue
+			}
+		case <-retryTimerChan:
+			retryTimer = nil
+			retryTimerChan = nil
+		case <-done:
+			return
+		case <-ctx.Done():
+			return
+		}
+		if err := rebuild(); err != nil {
+			onError(err)
+			retryTimer = time.NewTimer(revalidationInterval)
+			retryTimerChan = retryTimer.C
 		}
 		lastValidationTime = time.Now()
 	}
