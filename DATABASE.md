@@ -1867,6 +1867,13 @@ view selects the latest same-epoch re-registration and excludes that immediate
 first registration. This keeps the effective and deferred VRF-key indexes
 separate while using the same retirement precedence for both.
 
+The `pool_opcert_sequence` row is also covered by rollback and by the
+`ledgerstate.ImportLedgerState` post-anchor sweep: both remove observations
+after their target, then recompute `pool.latest_op_cert_sequence` from the
+remaining history. This lets replay record a new counter at a slot previously
+written by discarded local state while preserving the first-write-wins rule
+for a surviving `(pool_key_hash, slot)` row.
+
 ### DReps, Governance, and Committee
 
 DRep activity updates reject epoch-plus-inactivity overflow before addition and
@@ -1900,6 +1907,36 @@ When an enacted treasury withdrawal credits a proposal return account that also
 receives a deposit refund at the same boundary, `account_reward_delta` records
 separate event discriminators for the withdrawal and refund so both credits
 remain distinct and rollbackable.
+
+### Catch-up import rollback
+
+`ledgerstate.ImportLedgerState` clears metadata written by local replay after
+the imported anchor before applying snapshot state. In addition to the `epoch`
+row's sweep list, it restores or removes post-anchor `account`, `drep`, and
+`pool` state; removes post-anchor `governance_proposal`, `governance_vote`,
+`constitution`, `committee_member`, and `committee_quorum` rows; and deletes
+post-anchor `pparams` and `pparam_update` rows. These operations share the
+atomic pre-import metadata transaction. For accounts deleted because they did
+not exist at the anchor, post-anchor `account_reward_delta` and
+`account_withdrawal_witness` rows are deleted without reversing balances;
+snapshot-imported accounts have their journal rows cleared after their anchor
+balances are written. Replay can then recreate the same accounts and apply
+their later reward changes once.
+
+The schema-table entries above have these additional catch-up import effects:
+
+| Table | Catch-up import effect |
+|---|---|
+| `account` | `RestoreAccountStateAtSlot` removes accounts absent at the anchor and restores surviving account state. Reward-delta and withdrawal-witness rows for removed accounts are cleared in the same transaction. |
+| `pool` | `RestorePoolStateAtSlot` removes pools registered after the anchor and restores surviving pool parameters from the last registration at or before it. |
+| `drep` | `RestoreDrepStateAtSlot` restores DRep state to the imported anchor. |
+| `governance_proposal` | The pre-import sweep deletes proposal rows added after the anchor. |
+| `governance_vote` | The pre-import sweep deletes vote rows added after the anchor. |
+| `constitution` | The pre-import sweep deletes constitution rows added after the anchor. |
+| `committee_member` | The pre-import sweep removes committee state added after the anchor. |
+| `committee_quorum` | The pre-import sweep removes quorum rows added after the anchor. |
+| `pparams` | The pre-import sweep deletes parameter rows added after the anchor before snapshot parameters are written. |
+| `pparam_update` | The pre-import sweep deletes parameter-update rows added after the anchor. |
 
 ### Off-chain Metadata Cache
 
