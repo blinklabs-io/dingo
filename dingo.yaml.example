@@ -918,8 +918,9 @@
   # cnightPolicyId: ""
   # cnightAssetName: ""
   # mappingValidatorAddress: ""
-  # Auth token policy ID (28-byte / 56 hex char). When set, only tokens minted
-  # under this exact policy are accepted as registration auth tokens.
+  # Auth token policy ID (28-byte / 56 hex char) and hex asset name. Set both
+  # or neither: only tokens with this asset name minted under this exact
+  # policy are accepted as registration auth tokens.
   # authTokenPolicyId: ""
   # authTokenAssetName: ""
   # committeeCandidateAddress: ""

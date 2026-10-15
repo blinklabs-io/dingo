@@ -68,8 +68,8 @@ type Config struct {
 	CNightPolicyID          string
 	CNightAssetName         string
 	MappingValidatorAddress string
-	// AuthTokenPolicyID scopes auth-token matching to a specific policy.
-	// When empty, any policy carrying AuthTokenAssetName is accepted.
+	// AuthTokenPolicyID and AuthTokenAssetName identify the auth token and
+	// must be set together; New rejects one without the other.
 	AuthTokenPolicyID  string
 	AuthTokenAssetName string
 	// BlockIterator iterates stored blocks in [startSlot, endSlot).
@@ -220,10 +220,7 @@ type Indexer struct {
 	cnightAssetName []byte
 	cnightEnabled   bool
 	// Parsed auth token parameters; valid only when authEnabled is true.
-	// authPolicyID is the zero value (all-zeros) when not configured, in
-	// which case hasAuthToken matches any policy.
 	authPolicyID  lcommon.Blake2b224
-	authPolicySet bool
 	authAssetName []byte
 	authEnabled   bool
 	// checkpointSlot is the slot of the last block fully processed by
@@ -283,27 +280,30 @@ func New(cfg Config) (*Indexer, error) {
 		idx.cnightEnabled = true
 	}
 
+	if (cfg.AuthTokenPolicyID == "") != (cfg.AuthTokenAssetName == "") {
+		return nil, errors.New(
+			"auth_token_policy_id and auth_token_asset_name must be set " +
+				"together: an asset name alone matches any minting policy",
+		)
+	}
 	if cfg.AuthTokenAssetName != "" {
 		assetNameBytes, err := hex.DecodeString(cfg.AuthTokenAssetName)
 		if err != nil {
 			return nil, fmt.Errorf("invalid auth_token_asset_name: %w", err)
 		}
-		idx.authAssetName = assetNameBytes
-		idx.authEnabled = true
-		if cfg.AuthTokenPolicyID != "" {
-			policyBytes, err := hex.DecodeString(cfg.AuthTokenPolicyID)
-			if err != nil {
-				return nil, fmt.Errorf("invalid auth_token_policy_id: %w", err)
-			}
-			if len(policyBytes) != 28 {
-				return nil, fmt.Errorf(
-					"invalid auth_token_policy_id: must be 56 hex characters (28 bytes), got %d bytes",
-					len(policyBytes),
-				)
-			}
-			idx.authPolicyID = lcommon.NewBlake2b224(policyBytes)
-			idx.authPolicySet = true
+		policyBytes, err := hex.DecodeString(cfg.AuthTokenPolicyID)
+		if err != nil {
+			return nil, fmt.Errorf("invalid auth_token_policy_id: %w", err)
 		}
+		if len(policyBytes) != 28 {
+			return nil, fmt.Errorf(
+				"invalid auth_token_policy_id: must be 56 hex characters (28 bytes), got %d bytes",
+				len(policyBytes),
+			)
+		}
+		idx.authAssetName = assetNameBytes
+		idx.authPolicyID = lcommon.NewBlake2b224(policyBytes)
+		idx.authEnabled = true
 	}
 
 	// Initialise governance state; parseGovernanceConfig populates the
@@ -1787,8 +1787,7 @@ func (idx *Indexer) recordAriadneRollback(
 }
 
 // hasAuthToken returns true if the output assets contain at least one unit of
-// the configured auth token. When AuthTokenPolicyID is set the check is
-// policy-scoped; otherwise any policy carrying the asset name is accepted.
+// the configured auth token, matched by both policy ID and asset name.
 func (idx *Indexer) hasAuthToken(out lcommon.TransactionOutput) bool {
 	if !idx.authEnabled {
 		return false
@@ -1797,21 +1796,8 @@ func (idx *Indexer) hasAuthToken(out lcommon.TransactionOutput) bool {
 	if assets == nil {
 		return false
 	}
-	if idx.authPolicySet {
-		qty := assets.Asset(idx.authPolicyID, idx.authAssetName)
-		return qty != nil && qty.Cmp(new(big.Int)) > 0
-	}
-	for _, policyID := range assets.Policies() {
-		for _, name := range assets.Assets(policyID) {
-			if string(name) == string(idx.authAssetName) {
-				qty := assets.Asset(policyID, name)
-				if qty != nil && qty.Cmp(new(big.Int)) > 0 {
-					return true
-				}
-			}
-		}
-	}
-	return false
+	qty := assets.Asset(idx.authPolicyID, idx.authAssetName)
+	return qty != nil && qty.Cmp(new(big.Int)) > 0
 }
 
 // advanceEpochLocked snapshots all intermediate epochs between the current
