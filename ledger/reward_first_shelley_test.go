@@ -46,7 +46,7 @@ func TestApplyStakeRewardsAppliesFirstShelleyRoundOnByronStart(t *testing.T) {
 	ls, db := newRewardCalculationTestLedger(t)
 	meta := db.Metadata()
 
-	for epoch := uint64(0); epoch < byronEpochs; epoch++ {
+	for epoch := range uint64(byronEpochs) {
 		require.NoError(t, meta.SetEpoch(
 			epoch*epochLength, epoch, nil, nil, nil, nil,
 			eras.ByronEraDesc.Id, 1, epochLength, nil,
