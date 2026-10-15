@@ -109,6 +109,26 @@ func (a *dmqStakeAuthority) CurrentKESPeriod() (uint64, error) {
 	return slot / slotsPerKESPeriod, nil
 }
 
+func (a *dmqStakeAuthority) CurrentSlot() (uint64, error) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if a.ledgerState == nil {
+		return 0, errors.New("ledger state unavailable")
+	}
+	return a.ledgerState.CurrentSlot()
+}
+
+func (a *dmqStakeAuthority) PoolOpCertIssueNumber(
+	pool ocommon.PoolKeyHash,
+) (uint64, bool, error) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if a.ledgerState == nil {
+		return 0, false, errors.New("ledger state unavailable")
+	}
+	return a.ledgerState.LatestOpCertSequence(pool)
+}
+
 // startDMQ starts the DMQ stack when it is enabled. Its collectors register
 // against the retained registry because the stack is not rebuilt by a live
 // restore, which unregisters everything the rebuildable wrapper holds.
@@ -120,10 +140,12 @@ func (n *Node) startDMQ() error {
 	n.dmqStake.setLedgerState(n.ledgerState)
 	authenticator, err := ocommon.NewMessageAuthenticator(
 		ocommon.MessageAuthenticatorConfig{
-			StakeAuthority:    &n.dmqStake,
-			SlotsPerKESPeriod: n.ledgerState.SlotsPerKESPeriod(),
-			MaxKESEvolutions:  n.config.MaxKESEvolutions(),
-			Logger:            n.config.logger,
+			StakeAuthority:        &n.dmqStake,
+			CurrentSlot:           n.dmqStake.CurrentSlot,
+			PoolOpCertIssueNumber: n.dmqStake.PoolOpCertIssueNumber,
+			SlotsPerKESPeriod:     n.ledgerState.SlotsPerKESPeriod(),
+			MaxKESEvolutions:      n.config.MaxKESEvolutions(),
+			Logger:                n.config.logger,
 		},
 	)
 	if err != nil {

@@ -233,7 +233,15 @@ func metricValue(
 func newNoStakeAuthenticator(t *testing.T) *ocommon.MessageAuthenticator {
 	t.Helper()
 	auth, err := ocommon.NewMessageAuthenticator(
-		ocommon.MessageAuthenticatorConfig{StakeAuthority: noStake{}},
+		ocommon.MessageAuthenticatorConfig{
+			StakeAuthority: noStake{},
+			CurrentSlot: func() (uint64, error) {
+				return 0, nil
+			},
+			PoolOpCertIssueNumber: func(ocommon.PoolKeyHash) (uint64, bool, error) {
+				return 0, false, nil
+			},
+		},
 	)
 	require.NoError(t, err)
 	return auth

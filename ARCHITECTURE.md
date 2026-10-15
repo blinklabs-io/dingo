@@ -7728,16 +7728,15 @@ identity before paying for an ed25519 verify and a KES verify. Expiry is a
 separate concern, handled by gouroboros' `TTLValidator` before
 `VerifyMessage` is called.
 
-Pool authorization is injected through `protocol/common.StakeAuthority`
-(`PoolActiveStake(poolKeyHash [28]byte) (uint64, error)`) at construction --
-`NewMessageAuthenticator` returns `ErrAuthenticatorMisconfigured` without
-one. Nothing adapts `ledger.LedgerView.GetPoolStake` to it yet; an adapter
-following the pattern `node_leios.go`'s stake adapters use for Leios
-committee formation would keep this codebase's ledger/database access out of
-gouroboros' dependency graph. The opcert issue-number cache has no automatic
-eviction; `RemoveKESOpCertCacheEntry` lets a caller drop a pool's baseline
-when it is no longer registered or active, mirroring
-`MessageMempool.RemovePeer`.
+The node's lock-protected `dmqStakeAuthority` supplies all three authoritative
+lookups required by `MessageAuthenticator`: active pool stake, current chain
+slot, and the latest on-chain opcert issue number. The callbacks resolve the
+replaceable ledger state while holding the authority's read lock, so a live
+restore or truncate cannot leave the long-lived DMQ stack reading a closed
+ledger. `NewMessageAuthenticator` rejects construction if any required lookup
+is missing. The authenticator's opcert issue-number cache has no automatic
+eviction; `RemoveKESOpCertCacheEntry` lets a caller drop a pool's baseline when
+it is no longer registered or active, mirroring `MessageMempool.RemovePeer`.
 
 ## Block Production
 
