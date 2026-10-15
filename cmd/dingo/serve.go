@@ -471,7 +471,11 @@ func resumeBackfill(
 
 	// Enable bulk-load optimizations for the backfill.
 	cleanup := node.WithBulkLoadPragmas(db, logger)
-	defer cleanup()
+	defer func() {
+		if err := cleanup(); err != nil {
+			logger.Error("failed to restore normal settings", "error", err)
+		}
+	}()
 
 	logger.Info(
 		"running metadata backfill",

@@ -457,6 +457,17 @@ type BlockValidator interface {
 	ValidateForgedBlock(ctx context.Context, block ledger.Block, blockCbor []byte) error
 }
 
+// ErrForgedBlockStateChanged is returned, wrapped, by a BlockValidator that
+// could not reach a verdict because the ledger state it validates against
+// kept changing until the forged slot ended, or moved to a tip that is
+// neither the one validation started from nor the block's parent. It says
+// nothing about the block's validity. The forger still drops the block, but
+// logs a skip rather than a self-validation failure and does not count it on
+// dingo_forge_validation_failed_total.
+var ErrForgedBlockStateChanged = errors.New(
+	"ledger state changed during forged block validation",
+)
+
 // LeiosProduceChecker is the forge-loop seam into the Leios pipeline.
 // It reports whether the slot leader may produce an endorser block for
 // the given slot (respects the single-EB-per-slot rule and produce window).
@@ -2016,6 +2027,22 @@ func (f *BlockForger) checkAndForgeProduction(ctx context.Context) error {
 		}
 		if validationErr != nil {
 			f.incCouldNotForge()
+			if errors.Is(validationErr, ErrForgedBlockStateChanged) {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+				// No verdict was reached, so the block is dropped as
+				// unverified, not as invalid: the slot is lost the way a
+				// build attempt the chain moved under is.
+				f.logger.Warn(
+					"forge skip: ledger state kept changing during self-validation, dropping block",
+					"slot", currentSlot,
+					"hash", blockHashStr,
+					"validation_duration", validationDuration,
+					"error", validationErr,
+				)
+				return nil
+			}
 			if f.metrics != nil {
 				f.metrics.forgeValidationFailed.Inc()
 			}

@@ -738,11 +738,11 @@ func FetchEpochAccountsWithAddrs(
 	forceRefresh bool,
 	logger *slog.Logger,
 ) (int, error) {
-	stakeEpoch, ok := koiosStakeEpoch(epoch)
+	stakeEpoch, ok := koiosStakeEpoch(network, epoch)
 	if !ok {
-		// Pre-staking epoch (0 or 1, see preStakingThroughEpoch) — no valid
+		// Pre-staking epoch (see preStakingThroughEpoch) — no valid
 		// stake epoch, and fetchEpoch's own PreStaking-marker path never
-		// reaches this for epochs 0-1 in practice. Nothing to fetch — and no
+		// reaches this for these epochs in practice. Nothing to fetch — and no
 		// koios_account_coverage row is written, matching how these epochs
 		// never get a real account fetch attempt; GetEpochsMissingAccountCoverage
 		// explicitly excludes pre_staking epochs so this never causes a
