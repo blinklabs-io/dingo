@@ -1156,17 +1156,20 @@ func (cs *ChainSelector) appendPeerTipAdmissionFrontierLocked(
 
 func (cs *ChainSelector) rebuildPendingAdmissionStateLocked() {
 	type staged struct {
-		connId ouroboros.ConnectionId
-		index  int
-		id     uint64
+		connId  ouroboros.ConnectionId
+		connKey string
+		index   int
+		id      uint64
 	}
 	var stagedUpdates []staged
 	for connId, pending := range cs.pendingPeerTips {
+		connKey := connId.String()
 		for i, candidate := range pending {
 			stagedUpdates = append(stagedUpdates, staged{
-				connId: connId,
-				index:  i,
-				id:     candidate.update.AdmissionID,
+				connId:  connId,
+				connKey: connKey,
+				index:   i,
+				id:      candidate.update.AdmissionID,
 			})
 		}
 	}
@@ -1174,7 +1177,7 @@ func (cs *ChainSelector) rebuildPendingAdmissionStateLocked() {
 		if result := cmp.Compare(a.id, b.id); result != 0 {
 			return result
 		}
-		return cmp.Compare(a.connId.String(), b.connId.String())
+		return cmp.Compare(a.connKey, b.connKey)
 	})
 	previousFrontiers := cs.pendingPeerTipFrontiers
 	cs.pendingPeerTipFrontiers = make(

@@ -118,3 +118,45 @@ func BenchmarkPreparePeerTipAdmission(b *testing.B) {
 		cs.mutex.Unlock()
 	}
 }
+
+func BenchmarkRebuildPendingPeerTipAdmissions(b *testing.B) {
+	cs, _ := admissionCostFixture(2161)
+	benchmarkRebuildPendingPeerTipAdmissions(b, cs)
+}
+
+func BenchmarkRebuildPendingPeerTipAdmissionsMaxBacklog(b *testing.B) {
+	cs, _ := admissionCostFixture(2161)
+	for peer := 0; peer < admissionCostPeerCount-1; peer++ {
+		connID := newTestConnectionId(100 + peer)
+		baseBlock := uint64(10_000 + peer)
+		for admissionID := uint64(2); admissionID <= maxPendingPeerTipAdmissions; admissionID++ {
+			block := baseBlock + admissionID
+			update := PeerTipUpdateEvent{
+				ConnectionId: connID,
+				AdmissionID:  admissionID,
+				Tip: ochainsync.Tip{
+					Point:       ocommon.Point{Slot: block, Hash: []byte("next")},
+					BlockNumber: block,
+				},
+				ObservedTip: ochainsync.Tip{
+					Point:       ocommon.Point{Slot: block, Hash: []byte("next")},
+					BlockNumber: block,
+				},
+			}
+			if !cs.PreparePeerTipAdmission(update) {
+				b.Fatal("failed to build pending-admission benchmark fixture")
+			}
+		}
+	}
+	benchmarkRebuildPendingPeerTipAdmissions(b, cs)
+}
+
+func benchmarkRebuildPendingPeerTipAdmissions(b *testing.B, cs *ChainSelector) {
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		cs.mutex.Lock()
+		cs.rebuildPendingAdmissionStateLocked()
+		cs.mutex.Unlock()
+	}
+}
