@@ -58,3 +58,63 @@ func TestTrustedReplayOpCertCounterCachePromotesOnlyCommittedState(t *testing.T)
 	committedTxn.promote()
 	require.Equal(t, uint64(4), committed[pool].sequence)
 }
+
+func TestTrustedReplayOpCertCounterCacheSeedsOnMiss(t *testing.T) {
+	t.Parallel()
+
+	pool := lcommon.PoolKeyHash{1}
+	cache := &trustedReplayOpCertCounterCache{
+		committed: make(map[lcommon.PoolKeyHash]opCertCounterSnapshot),
+		staged:    make(map[lcommon.PoolKeyHash]opCertCounterSnapshot),
+	}
+
+	cache.advance(pool, 7)
+	counter, ok := cache.lookup(pool)
+	require.True(t, ok)
+	require.True(t, counter.found)
+	require.Equal(t, uint64(7), counter.sequence)
+}
+
+func TestTrimTrustedReplayOpCertCountersBoundsCache(t *testing.T) {
+	t.Parallel()
+
+	counters := make(
+		map[lcommon.PoolKeyHash]opCertCounterSnapshot,
+		trustedReplayOpCertCounterCacheLimit+32,
+	)
+	for idx := range trustedReplayOpCertCounterCacheLimit + 32 {
+		counters[lcommon.PoolKeyHash{
+			byte(idx >> 16), byte(idx >> 8), byte(idx),
+		}] = opCertCounterSnapshot{sequence: uint64(idx), found: true}
+	}
+
+	trimTrustedReplayOpCertCounters(counters)
+	require.Len(t, counters, trustedReplayOpCertCounterCacheLimit)
+}
+
+func TestTrustedReplayBoundaryCounterStateCachesPerSlot(t *testing.T) {
+	t.Parallel()
+
+	state := &trustedReplayBoundaryCounterState{}
+	checks := 0
+	check := func() (bool, error) {
+		checks++
+		return false, nil
+	}
+
+	imported, err := state.hasCountersAtSlot(42, check)
+	require.NoError(t, err)
+	require.False(t, imported)
+	imported, err = state.hasCountersAtSlot(42, check)
+	require.NoError(t, err)
+	require.False(t, imported)
+	require.Equal(t, 1, checks)
+
+	imported, err = state.hasCountersAtSlot(43, func() (bool, error) {
+		checks++
+		return true, nil
+	})
+	require.NoError(t, err)
+	require.True(t, imported)
+	require.Equal(t, 2, checks)
+}

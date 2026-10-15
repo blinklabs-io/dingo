@@ -73,8 +73,7 @@ help: ## Show this help
 	@awk 'BEGIN {FS = ":.*?## "; printf "\nUsage:\n  make \033[36m<target>\033[0m\n\nTargets:\n"} /^[a-zA-Z_-]+:.*?## / {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
 # Build target
-build: mod-tidy ## Run mod-tidy, then build every command binary
-	$(MAKE) $(BINARIES)
+build: mod-tidy $(BINARIES) ## Run mod-tidy, then build every command binary
 
 # Builds and installs binary in ~/.local/bin
 install: build ## Run build, then install the binaries to ~/.local/bin
@@ -219,6 +218,10 @@ test-devnet: ## Run the default all-Dingo DevNet integration tests
 
 # Build our program binaries
 # Depends on GO_FILES to determine when rebuild is needed
+# This order-only prerequisite keeps mod-tidy ahead of direct binary builds
+# without making the phony target force every binary to rebuild.
+$(BINARIES): | mod-tidy
+
 $(BINARIES): $(GO_FILES) go.mod go.sum
 	CGO_ENABLED=$(CGO_ENABLED) \
 	go build \

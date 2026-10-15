@@ -3255,6 +3255,7 @@ func (ls *LedgerState) LatestOpCertSequence(
 		pkh,
 		ls.mithrilLedgerSlotSnapshot(),
 		nil,
+		nil,
 	)
 }
 
@@ -7913,11 +7914,13 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 	var delta *LedgerDelta
 	var deltaBatch *LedgerDeltaBatch
 	var trustedReplayOpCertCounters map[lcommon.PoolKeyHash]opCertCounterSnapshot
+	var trustedReplayBoundaryCounters *trustedReplayBoundaryCounterState
 	var trustedReplayUtxos map[utxoref.Key]lcommon.Utxo
 	if ls.config.TrustedReplay {
 		trustedReplayOpCertCounters = make(
 			map[lcommon.PoolKeyHash]opCertCounterSnapshot,
 		)
+		trustedReplayBoundaryCounters = &trustedReplayBoundaryCounterState{}
 	}
 	completeReadResult := func() {
 		if currentReadResultDone != nil {
@@ -8510,6 +8513,8 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 						return fmt.Errorf("process rollback: %w", err)
 					}
 					clear(trustedReplayOpCertCounters)
+					clear(trustedReplayUtxos)
+					trustedReplayUtxos = nil
 					completeReadResult()
 					continue
 				}
@@ -8767,6 +8772,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 					if trustedReplayOpCertCounters != nil {
 						transactionOpCertCounters = &trustedReplayOpCertCounterCache{
 							committed: trustedReplayOpCertCounters,
+							boundary:  trustedReplayBoundaryCounters,
 							staged: make(
 								map[lcommon.PoolKeyHash]opCertCounterSnapshot,
 							),
@@ -10044,7 +10050,10 @@ func (ls *LedgerState) latestOpCertCounterForValidation(
 	poolKeyHash lcommon.PoolKeyHash,
 	txn *database.Txn,
 ) (uint64, bool, error) {
-	if cache := trustedReplayOpCertCounterCacheFrom(ctx); cache != nil {
+	cache := trustedReplayOpCertCounterCacheFrom(ctx)
+	var boundaryCounters *trustedReplayBoundaryCounterState
+	if cache != nil {
+		boundaryCounters = cache.boundary
 		if counter, ok := cache.lookup(poolKeyHash); ok {
 			return counter.sequence, counter.found, nil
 		}
@@ -10054,13 +10063,12 @@ func (ls *LedgerState) latestOpCertCounterForValidation(
 		poolKeyHash,
 		ls.mithrilLedgerSlotSnapshot(),
 		txn,
+		boundaryCounters,
 	)
-	if err == nil {
-		if cache := trustedReplayOpCertCounterCacheFrom(ctx); cache != nil {
-			cache.staged[poolKeyHash] = opCertCounterSnapshot{
-				sequence: sequence,
-				found:    found,
-			}
+	if err == nil && cache != nil {
+		cache.staged[poolKeyHash] = opCertCounterSnapshot{
+			sequence: sequence,
+			found:    found,
 		}
 	}
 	return sequence, found, err
@@ -10074,6 +10082,35 @@ type opCertCounterSnapshot struct {
 type trustedReplayOpCertCounterCache struct {
 	committed map[lcommon.PoolKeyHash]opCertCounterSnapshot
 	staged    map[lcommon.PoolKeyHash]opCertCounterSnapshot
+	boundary  *trustedReplayBoundaryCounterState
+}
+
+const trustedReplayOpCertCounterCacheLimit = 65_536
+
+type trustedReplayBoundaryCounterState struct {
+	slot     uint64
+	checked  bool
+	imported bool
+}
+
+func (c *trustedReplayBoundaryCounterState) hasCountersAtSlot(
+	slot uint64,
+	check func() (bool, error),
+) (bool, error) {
+	if c == nil {
+		return check()
+	}
+	if c.checked && c.slot == slot {
+		return c.imported, nil
+	}
+	imported, err := check()
+	if err != nil {
+		return false, err
+	}
+	c.slot = slot
+	c.imported = imported
+	c.checked = true
+	return imported, nil
 }
 
 type trustedReplayOpCertCounterCacheContextKey struct{}
@@ -10117,6 +10154,10 @@ func (c *trustedReplayOpCertCounterCache) advance(
 ) {
 	counter, ok := c.lookup(poolKeyHash)
 	if !ok {
+		c.staged[poolKeyHash] = opCertCounterSnapshot{
+			sequence: sequence,
+			found:    true,
+		}
 		return
 	}
 	if !counter.found || sequence > counter.sequence {
@@ -10131,6 +10172,18 @@ func (c *trustedReplayOpCertCounterCache) promote() {
 		return
 	}
 	maps.Copy(c.committed, c.staged)
+	trimTrustedReplayOpCertCounters(c.committed)
+}
+
+func trimTrustedReplayOpCertCounters(
+	counters map[lcommon.PoolKeyHash]opCertCounterSnapshot,
+) {
+	for poolKeyHash := range counters {
+		if len(counters) <= trustedReplayOpCertCounterCacheLimit {
+			return
+		}
+		delete(counters, poolKeyHash)
+	}
 }
 
 // latestOpCertCounterAfterMithril is the Mithril-boundary-aware resolver
@@ -10154,6 +10207,7 @@ func (ls *LedgerState) latestOpCertCounterAfterMithril(
 	poolKeyHash lcommon.PoolKeyHash,
 	mithrilLedgerSlot uint64,
 	txn *database.Txn,
+	boundaryCounters *trustedReplayBoundaryCounterState,
 ) (uint64, bool, error) {
 	if mithrilLedgerSlot > 0 {
 		sequence, found, err := ls.db.LatestPoolOpCertSequenceAfter(
@@ -10174,10 +10228,15 @@ func (ls *LedgerState) latestOpCertCounterAfterMithril(
 		if err != nil || found {
 			return sequence, found, err
 		}
-		imported, err := ls.db.PoolOpCertSequencesExistAtSlot(
-			ctx,
+		imported, err := boundaryCounters.hasCountersAtSlot(
 			mithrilLedgerSlot,
-			txn,
+			func() (bool, error) {
+				return ls.db.PoolOpCertSequencesExistAtSlot(
+					ctx,
+					mithrilLedgerSlot,
+					txn,
+				)
+			},
 		)
 		if err != nil {
 			return 0, false, fmt.Errorf(

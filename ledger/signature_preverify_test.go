@@ -46,7 +46,9 @@ func TestPreverifyTransactionSignaturesBindsEveryResult(t *testing.T) {
 	require.Len(t, results, len(transactions))
 	ctx := withPreverifiedSignatures(context.Background(), results)
 	for _, tx := range transactions {
-		require.Same(t, results[tx.Hash()], preverifiedSignaturesFrom(ctx, tx))
+		preverified := preverifiedSignaturesFrom(ctx, tx)
+		require.NotNil(t, preverified)
+		require.Same(t, results[tx.Hash()], preverified)
 	}
 	require.Nil(
 		t,

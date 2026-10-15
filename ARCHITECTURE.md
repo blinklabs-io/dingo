@@ -4038,14 +4038,15 @@ block on any network.
 During accepted block replay, Alonzo-and-newer validation runs the UTXO/Phase 1 rule set and keeps declared ExUnit limit checks. Plutus Phase 2 execution now always runs whenever per-tx validation runs at all, including for blocks at or before the immutable tip: the previous shortcut that trusted the block producer's `isValid` flag as authoritative for those blocks fired more broadly than intended -- on ordinary `ValidateHistorical=false` catch-up, not only a trusted-chain-dump import -- and was removed rather than narrowed. Volatile block replay, local transaction validation for mempool submission, and forging continue to run Plutus execution as before.
 
 Trusted immutable replay reduces repeated work without weakening that validation.
-It prefetches each committed chunk's referenced UTxOs and retains a bounded
-cross-transaction cache, preverifies transaction signatures in parallel and
+It prefetches each committed chunk's referenced UTxOs and retains bounded
+cross-transaction caches, preverifies transaction signatures in parallel and
 binds each result back into the ordinary transaction-scoped signature rule,
 and batches metadata rows whose intermediate values are not validation inputs.
 Stake deltas still flush at transaction boundaries because later transactions
 can depend on them. Op-cert and UTxO cache updates become reusable only after
-the enclosing database transaction commits; a failed transaction clears the
-UTxO cache and discards staged op-cert counters.
+the enclosing database transaction commits; op-cert cache misses fall back to
+storage, and a failed transaction or rollback clears the UTxO cache. The
+Mithril-boundary op-cert presence check is memoized for one replay.
 
 Restrictive Phase 2 validation runs the CEK machine against the protocol's
 per-transaction `MaxTxExUnits` limit and compares the complete measured cost
