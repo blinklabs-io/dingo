@@ -296,8 +296,6 @@ func TestSnapshotBackupFailureCancelsPeerAndReleasesBarrier(t *testing.T) {
 }
 
 func TestSnapshotCallerCancellationDoesNotPublishSuccessfulBackups(t *testing.T) {
-	t.Parallel()
-
 	started := make(chan struct{}, 2)
 	hooks := &backupHooks{
 		blob: func(ctx context.Context, w io.Writer) error {
@@ -377,8 +375,6 @@ func TestSnapshotWithoutMaxCommitPauseIsUnbounded(t *testing.T) {
 }
 
 func TestSnapshotMaxCommitPauseExcludesBarrierWait(t *testing.T) {
-	t.Parallel()
-
 	const (
 		barrierWait = 10 * time.Minute
 		backupHold  = time.Second
@@ -528,8 +524,6 @@ func TestSnapshotReleasesBarrierWhenBackupFails(t *testing.T) {
 }
 
 func TestSnapshotReleasesBarrierOnCancellation(t *testing.T) {
-	t.Parallel()
-
 	started := make(chan struct{}, 2)
 	waitForCancellation := func(ctx context.Context) error {
 		started <- struct{}{}
@@ -601,8 +595,6 @@ func TestSnapshotRecordsCommitPauseAndBytesMetrics(t *testing.T) {
 }
 
 func TestSnapshotCommitPauseMetricExcludesBarrierWait(t *testing.T) {
-	t.Parallel()
-
 	const (
 		barrierWait = 10 * time.Minute
 		backupHold  = 10 * time.Second
