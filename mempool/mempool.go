@@ -1068,6 +1068,7 @@ func (m *Mempool) processChainEvents(
 		m.done,
 		chainUpdateChan,
 		30*time.Second,
+		m.evictConfirmed,
 		func() error {
 			return m.rebuildOverlay(ctx)
 		},
@@ -1089,11 +1090,46 @@ func (m *Mempool) processChainEvents(
 	)
 }
 
+// evictConfirmed removes the transactions a newly added block confirms. Only
+// a node that forged the block removes them itself; on every other node the
+// block has already consumed their inputs, so leaving them to full-pool
+// revalidation reports each one as an invalid transaction that was dropped.
+// Descendants stay: they are judged against the ledger, which now holds the
+// confirmed parent's outputs.
+func (m *Mempool) evictConfirmed(evt event.Event) {
+	blockEvt, ok := evt.Data.(chain.ChainBlockEvent)
+	if !ok || len(blockEvt.Block.Cbor) == 0 {
+		return
+	}
+	m.RLock()
+	empty := len(m.transactions) == 0
+	m.RUnlock()
+	if empty {
+		return
+	}
+	block, err := blockEvt.Block.Decode()
+	if err != nil {
+		m.logger.Debug(
+			"could not decode block to evict confirmed transactions",
+			"component", "mempool",
+			"error", err,
+		)
+		return
+	}
+	txs := block.Transactions()
+	hashes := make([]string, 0, len(txs))
+	for _, tx := range txs {
+		hashes = append(hashes, tx.Hash().String())
+	}
+	m.RemoveTxsByHash(hashes)
+}
+
 func runChainUpdateWorker(
 	ctx context.Context,
 	done <-chan struct{},
 	chainUpdateChan <-chan event.Event,
 	revalidationInterval time.Duration,
+	onUpdate func(event.Event),
 	rebuild func() error,
 	onError func(error),
 ) {
@@ -1107,9 +1143,14 @@ func runChainUpdateWorker(
 	}()
 	for {
 		select {
-		case _, ok := <-chainUpdateChan:
+		case evt, ok := <-chainUpdateChan:
 			if !ok {
 				return
+			}
+			// Every update is seen here, including the ones the rebuild
+			// below skips, so no block's transactions are left for it.
+			if onUpdate != nil {
+				onUpdate(evt)
 			}
 			if retryTimerChan != nil {
 				continue

@@ -7487,6 +7487,10 @@ on both the submit endpoint and the evaluation endpoints, where
 an open per-era set of gouroboros types with no shared marker, so the
 complement cannot be enumerated: an unrecognized error stays a rejection.
 
+Each chain update first evicts the transactions its block confirms
+(`RemoveTxsByHash`), on every node and before any rebuild, so a block produced
+elsewhere is not reported as invalid transactions dropped by revalidation.
+
 Ordinary mutations are serialized by a dedicated mutation gate, but chain-update
 revalidation does not hold that gate while it validates the whole pool. Both
 backends briefly snapshot their live state, build a private candidate while
