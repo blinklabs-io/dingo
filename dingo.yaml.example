@@ -1237,8 +1237,12 @@
   # destination is configured, and every node that restores another node's
   # snapshots must use the same secret. Local-only snapshots and restores
   # may use the unkeyed checksum only when this setting is unset. The file
-  # must be a regular, non-symlink file no larger than 1 KiB, owned by the
-  # node user, and inaccessible to group and other users where supported.
+  # must be a regular, non-symlink file no larger than 1 KiB. Unix requires
+  # ownership by the node user with no group or other access. Windows accepts
+  # the current user or BUILTIN Administrators (when the process belongs to
+  # that group) as owner. Its DACL allows the owner, Administrators, SYSTEM,
+  # Creator Owner, and Owner Rights, plus the restricted local Administrator
+  # ACE when Administrators owns the file.
   # Can be overridden with DINGO_DB_LIFECYCLE_SNAPSHOT_TRUST_KEY_FILE
   # CLI: --db-snapshot-trust-key-file
   # snapshotTrustKeyFile: ""
