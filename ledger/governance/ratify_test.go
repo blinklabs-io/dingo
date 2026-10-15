@@ -139,6 +139,14 @@ func TestShouldRatify_DijkstraParameterGroupsMatchPV12(
 	txsSize := uint32(16_384)
 	exUnits := lcommon.ExUnits{Memory: 100, Steps: 200}
 	maxRefPerEndorser := uint32(4_096)
+	perasMinCandidateAge := uint32(90)
+	perasHealingFactor := newRat(1, 2)
+	perasCertBoost := uint16(15)
+	perasCommitteeSize := uint16(100)
+	perasBootstrapRound := uint32(42)
+	perasSafetyMargin := newRat(1, 10)
+	refInputPolicyCost := uint64(2)
+	refInputDatumCost := uint64(3)
 	actions := []struct {
 		name         string
 		update       gdijkstra.DijkstraProtocolParameterUpdate
@@ -268,6 +276,71 @@ func TestShouldRatify_DijkstraParameterGroupsMatchPV12(
 			wantSecurity: true,
 			update: gdijkstra.DijkstraProtocolParameterUpdate{
 				MaxRefScriptSizePerEndorserBlock: &maxRefPerEndorser,
+			},
+		},
+		{
+			name:         "key-49",
+			wantGroups:   drepParameterGroupNetwork,
+			wantSecurity: true,
+			update: gdijkstra.DijkstraProtocolParameterUpdate{
+				PerasMinCandidateBlockAge: &perasMinCandidateAge,
+			},
+		},
+		{
+			name:         "key-50",
+			wantGroups:   drepParameterGroupNetwork,
+			wantSecurity: true,
+			update: gdijkstra.DijkstraProtocolParameterUpdate{
+				PerasHealingFactor: &perasHealingFactor,
+			},
+		},
+		{
+			name:         "key-51",
+			wantGroups:   drepParameterGroupNetwork,
+			wantSecurity: true,
+			update: gdijkstra.DijkstraProtocolParameterUpdate{
+				PerasCertBoost: &perasCertBoost,
+			},
+		},
+		{
+			name:         "key-52",
+			wantGroups:   drepParameterGroupNetwork,
+			wantSecurity: true,
+			update: gdijkstra.DijkstraProtocolParameterUpdate{
+				PerasTargetCommitteeSize: &perasCommitteeSize,
+			},
+		},
+		{
+			name:         "key-53",
+			wantGroups:   drepParameterGroupNetwork,
+			wantSecurity: true,
+			update: gdijkstra.DijkstraProtocolParameterUpdate{
+				PerasBootstrapRound:    &perasBootstrapRound,
+				PerasBootstrapRoundSet: true,
+			},
+		},
+		{
+			name:         "key-54",
+			wantGroups:   drepParameterGroupNetwork,
+			wantSecurity: true,
+			update: gdijkstra.DijkstraProtocolParameterUpdate{
+				PerasQuorumThresholdSafetyMargin: &perasSafetyMargin,
+			},
+		},
+		{
+			name:         "key-55",
+			wantGroups:   drepParameterGroupEconomic,
+			wantSecurity: true,
+			update: gdijkstra.DijkstraProtocolParameterUpdate{
+				RefInputsCostPerMultiAssetPolicy: &refInputPolicyCost,
+			},
+		},
+		{
+			name:         "key-56",
+			wantGroups:   drepParameterGroupEconomic,
+			wantSecurity: true,
+			update: gdijkstra.DijkstraProtocolParameterUpdate{
+				RefInputsCostPerDatumByte: &refInputDatumCost,
 			},
 		},
 	}
