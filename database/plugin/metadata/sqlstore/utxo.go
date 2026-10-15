@@ -615,32 +615,33 @@ WHERE `+predicate), args...)
 	if err != nil {
 		return ret, fmt.Errorf("query UTxO balance: %w", err)
 	}
-	for rows.Next() {
-		ret.UtxoCount++
-		var raw sql.NullString
-		if err := rows.Scan(&raw); err != nil {
-			rows.Close()
-			return ret, err
-		}
-		if raw.Valid && raw.String != "" {
-			amount, err := parseUint64("utxo amount", raw.String)
-			if err != nil {
-				rows.Close()
-				return ret, err
+	queryErr := func() (queryErr error) {
+		defer func() {
+			if closeErr := rows.Close(); queryErr == nil {
+				queryErr = closeErr
 			}
-			if ^uint64(0)-ret.Lovelace < amount {
-				rows.Close()
-				return ret, errors.New("utxo balance overflow")
+		}()
+		for rows.Next() {
+			ret.UtxoCount++
+			var raw sql.NullString
+			if err := rows.Scan(&raw); err != nil {
+				return err
 			}
-			ret.Lovelace += amount
+			if raw.Valid && raw.String != "" {
+				amount, err := parseUint64("utxo amount", raw.String)
+				if err != nil {
+					return err
+				}
+				if ^uint64(0)-ret.Lovelace < amount {
+					return errors.New("utxo balance overflow")
+				}
+				ret.Lovelace += amount
+			}
 		}
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return ret, err
-	}
-	if err := rows.Close(); err != nil {
-		return ret, err
+		return rows.Err()
+	}()
+	if queryErr != nil {
+		return ret, queryErr
 	}
 	if ret.UtxoCount == 0 {
 		return ret, nil
