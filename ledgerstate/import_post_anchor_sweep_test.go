@@ -241,6 +241,10 @@ func TestImportLedgerStateSweepsPostAnchorLedgerState(t *testing.T) {
 		AnchorHash: bytes.Repeat([]byte{0x87}, 32),
 		AddedSlot:  aboveSlot,
 	}, nil))
+	require.NoError(t, store.SetPParams([]byte{0x80}, aboveSlot, 101, EraConway, nil))
+	require.NoError(t, store.SetPParamUpdate(
+		bytes.Repeat([]byte{0x88}, 28), []byte{0x80}, aboveSlot, 100, nil,
+	))
 
 	nonce := make([]byte, 32)
 	require.NoError(t, ImportLedgerState(ctx, ImportConfig{
@@ -277,6 +281,8 @@ func TestImportLedgerStateSweepsPostAnchorLedgerState(t *testing.T) {
 		{"committee_member", "SELECT COUNT(*) FROM committee_member"},
 		{"committee_quorum", "SELECT COUNT(*) FROM committee_quorum"},
 		{"constitution", "SELECT COUNT(*) FROM constitution"},
+		{"pparams", "SELECT COUNT(*) FROM pparams"},
+		{"pparam_update", "SELECT COUNT(*) FROM pparam_update"},
 	} {
 		var count int
 		require.NoError(t, raw.QueryRow(check.query).Scan(&count))

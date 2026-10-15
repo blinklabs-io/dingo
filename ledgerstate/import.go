@@ -671,6 +671,16 @@ func ImportLedgerState(
 		if err := cfg.Database.RestoreAccountStateAtSlot(ctx, slot, txn); err != nil {
 			return fmt.Errorf("restoring post-anchor account state: %w", err)
 		}
+		if err := cfg.Database.DeletePParamsAfterSlot(
+			ctx, slot, txn,
+		); err != nil {
+			return fmt.Errorf("deleting post-anchor protocol parameters: %w", err)
+		}
+		if err := cfg.Database.DeletePParamUpdatesAfterSlot(
+			ctx, slot, txn,
+		); err != nil {
+			return fmt.Errorf("deleting post-anchor protocol parameter updates: %w", err)
+		}
 		if err := cfg.Database.RestoreDrepStateAtSlot(ctx, slot, txn); err != nil {
 			return fmt.Errorf("restoring post-anchor DRep state: %w", err)
 		}

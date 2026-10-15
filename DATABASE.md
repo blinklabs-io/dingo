@@ -1819,6 +1819,21 @@ receives a deposit refund at the same boundary, `account_reward_delta` records
 separate event discriminators for the withdrawal and refund so both credits
 remain distinct and rollbackable.
 
+### Catch-up import rollback
+
+`ledgerstate.ImportLedgerState` clears metadata written by local replay after
+the imported anchor before applying snapshot state. In addition to the `epoch`
+row's sweep list, it restores or removes post-anchor `account`, `drep`, and
+`pool` state; removes post-anchor `governance_proposal`, `governance_vote`,
+`constitution`, `committee_member`, and `committee_quorum` rows; and deletes
+post-anchor `pparams` and `pparam_update` rows. These operations share the
+atomic pre-import metadata transaction. For accounts deleted because they did
+not exist at the anchor, post-anchor `account_reward_delta` and
+`account_withdrawal_witness` rows are deleted without reversing balances;
+snapshot-imported accounts have their journal rows cleared after their anchor
+balances are written. Replay can then recreate the same accounts and apply
+their later reward changes once.
+
 ### Off-chain Metadata Cache
 
 | Table | Columns | Keys / indexes | Relationships and notes |
