@@ -17,15 +17,21 @@ package dblifecycle
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"os"
 
 	"github.com/blinklabs-io/dingo/database/lifecycle"
 	"github.com/blinklabs-io/dingo/internal/config"
+	"github.com/blinklabs-io/dingo/keystore"
 )
 
 // minTrustKeyBytes is the shortest shared secret accepted as a manifest trust
 // key.
 const minTrustKeyBytes = 16
+
+// maxTrustKeyFileBytes leaves ample room for an operator-generated HMAC key
+// and surrounding whitespace while bounding every read from configuration.
+const maxTrustKeyFileBytes int64 = 1024
 
 // ManifestOptions returns the manifest options cfg selects: a trust key read
 // from SnapshotTrustKeyFile, if one is configured. The file is read on every
@@ -38,7 +44,7 @@ func ManifestOptions(
 	if cfg.SnapshotTrustKeyFile == "" {
 		return nil, nil
 	}
-	raw, err := os.ReadFile(cfg.SnapshotTrustKeyFile)
+	raw, err := readSnapshotTrustKeyFile(cfg.SnapshotTrustKeyFile)
 	if err != nil {
 		return nil, fmt.Errorf("read snapshot trust key file: %w", err)
 	}
@@ -50,4 +56,40 @@ func ManifestOptions(
 		)
 	}
 	return []lifecycle.ManifestOption{lifecycle.WithManifestKey(key)}, nil
+}
+
+func readSnapshotTrustKeyFile(path string) ([]byte, error) {
+	f, err := keystore.OpenRegularFileNoFollow(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close() //nolint:errcheck // read-only handle
+	if err := keystore.CheckOpenFileOwnerAndPermissions(f); err != nil {
+		return nil, err
+	}
+	return readOpenSnapshotTrustKeyFile(f, path)
+}
+
+func readOpenSnapshotTrustKeyFile(f *os.File, path string) ([]byte, error) {
+	info, err := f.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("stat snapshot trust key file %q: %w", path, err)
+	}
+	if info.Size() > maxTrustKeyFileBytes {
+		return nil, fmt.Errorf(
+			"snapshot trust key file %q exceeds %d bytes",
+			path, maxTrustKeyFileBytes,
+		)
+	}
+	raw, err := io.ReadAll(io.LimitReader(f, maxTrustKeyFileBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("read snapshot trust key file %q: %w", path, err)
+	}
+	if int64(len(raw)) > maxTrustKeyFileBytes {
+		return nil, fmt.Errorf(
+			"snapshot trust key file %q exceeds %d bytes",
+			path, maxTrustKeyFileBytes,
+		)
+	}
+	return raw, nil
 }

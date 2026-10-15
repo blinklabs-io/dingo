@@ -1236,7 +1236,9 @@
   # destination cannot substitute payloads. It is required when a cloud
   # destination is configured, and every node that restores another node's
   # snapshots must use the same secret. Local-only snapshots and restores
-  # may use the unkeyed checksum only when this setting is unset.
+  # may use the unkeyed checksum only when this setting is unset. The file
+  # must be a regular, non-symlink file no larger than 1 KiB, owned by the
+  # node user, and inaccessible to group and other users where supported.
   # Can be overridden with DINGO_DB_LIFECYCLE_SNAPSHOT_TRUST_KEY_FILE
   # CLI: --db-snapshot-trust-key-file
   # snapshotTrustKeyFile: ""

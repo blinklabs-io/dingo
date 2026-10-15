@@ -17,10 +17,13 @@ package dblifecycle
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/lifecycle"
 	"github.com/blinklabs-io/dingo/internal/config"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
+	"github.com/blinklabs-io/dingo/keystore"
 	"github.com/stretchr/testify/require"
 )
 
@@ -40,6 +43,7 @@ func TestManifestOptionsReadsTrustKeyFile(t *testing.T) {
 			t,
 			os.WriteFile(path, []byte("0123456789abcdef0123\n"), 0o600),
 		)
+		testutil.RestrictFileToCurrentUser(t, path)
 		opts, err := ManifestOptions(config.DatabaseLifecycleConfig{
 			SnapshotTrustKeyFile: path,
 		})
@@ -64,6 +68,13 @@ func TestManifestOptionsReadsTrustKeyFile(t *testing.T) {
 		})
 		require.Error(t, err)
 	})
+	t.Run("directory is an error", func(t *testing.T) {
+		t.Parallel()
+		_, err := ManifestOptions(config.DatabaseLifecycleConfig{
+			SnapshotTrustKeyFile: t.TempDir(),
+		})
+		require.ErrorIs(t, err, keystore.ErrNotRegularFile)
+	})
 	t.Run("short secret is an error", func(t *testing.T) {
 		t.Parallel()
 		path := filepath.Join(t.TempDir(), "trust.key")
@@ -72,5 +83,15 @@ func TestManifestOptionsReadsTrustKeyFile(t *testing.T) {
 			SnapshotTrustKeyFile: path,
 		})
 		require.ErrorContains(t, err, "at least")
+	})
+	t.Run("oversized secret is an error", func(t *testing.T) {
+		t.Parallel()
+		path := filepath.Join(t.TempDir(), "trust.key")
+		require.NoError(t, os.WriteFile(path, []byte(strings.Repeat("a", 1025)), 0o600))
+		testutil.RestrictFileToCurrentUser(t, path)
+		_, err := ManifestOptions(config.DatabaseLifecycleConfig{
+			SnapshotTrustKeyFile: path,
+		})
+		require.ErrorContains(t, err, "exceeds")
 	})
 }
