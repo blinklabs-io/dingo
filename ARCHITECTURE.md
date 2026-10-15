@@ -12784,8 +12784,16 @@ Koios. The UTxO side is a running reconstruction seeded from Dingo at the
 start point and advanced by Koios's own `/tx_info` answers for every
 transaction on the chain, so it stays independent of Dingo after its seed; a
 rollback re-baselines it and marks that epoch's UTxO verdict "not run" rather
-than reporting a comparison that would trivially match. `--koios-cache-path`
-makes those lookups cache-first against a `koios-parity` `cache.db`, which
+than reporting a comparison that would trivially match.
+
+Every session opens with a rollback to the origin, which Dingo refuses to
+acquire; the origin is epoch 0, so the tool does not ask. A chain that starts
+in Byron (preprod, epochs 0-3) has points Dingo cannot answer for -- no
+protocol parameters or stake there, and Koios holds none either -- so the tool
+skips blocks until Dingo first answers, logs where validation starts, and
+treats any later refusal as a real failure that ends the session.
+
+`--koios-cache-path` makes those lookups cache-first against a `koios-parity` `cache.db`, which
 may be the one a dingo instance's own embedded observer is writing, provided
 its recorded Koios API root matches `--koios-base-url`.
 

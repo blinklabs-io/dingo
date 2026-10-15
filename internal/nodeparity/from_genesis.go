@@ -615,6 +615,55 @@ func RunFromGenesis(
 		utxoTaintedThisEpoch bool
 	)
 
+	// acquirable becomes true once Dingo has answered for a point. Until
+	// then a refusal as too old is expected, not an error: Dingo cannot answer
+	// for the chain's earliest points. A network that starts in Byron, such as
+	// preprod, has no protocol parameters or stake distribution there, and
+	// Koios holds none either, so nothing in those epochs can be compared.
+	// Blocks are skipped until Dingo answers, which starts validation at the
+	// first epoch it can. A refusal after that is a real failure and ends the
+	// session as before.
+	var (
+		acquirable    bool
+		skippedBlocks int
+		lastRefusal   error
+	)
+	// epochAt resolves point's epoch from Dingo. skip is true when Dingo
+	// refused point as too old before ever answering: the caller consumes the
+	// block without checking it.
+	epochAt := func(point pcommon.Point) (epoch uint64, skip bool, err error) {
+		epoch, err = currentEpochNo(ctx, dingoAddr, magic, point)
+		if err == nil {
+			if !acquirable {
+				acquirable = true
+				if skippedBlocks > 0 {
+					logf(
+						"nodeparity: validation starts at slot %d (epoch %d): "+
+							"Dingo could not answer for the %d earlier block(s), "+
+							"so they are not compared against Koios (last "+
+							"refusal: %v)",
+						point.Slot, epoch, skippedBlocks, lastRefusal,
+					)
+				}
+			}
+			return epoch, false, nil
+		}
+		if !acquirable &&
+			errors.Is(err, localstatequery.ErrAcquireFailurePointTooOld) {
+			skippedBlocks++
+			lastRefusal = err
+			if skippedBlocks == 1 {
+				logf(
+					"nodeparity: Dingo cannot answer for the point at slot %d; "+
+						"skipping blocks until it can: %v",
+					point.Slot, err,
+				)
+			}
+			return 0, true, nil
+		}
+		return 0, false, err
+	}
+
 	// flushPendingTxInfos applies every buffered transaction hash's
 	// input/output changes to utxoRefs. Hashes accumulate across blocks
 	// rather than being fetched per block: the cost of a /tx_info lookup is
@@ -817,7 +866,7 @@ func RunFromGenesis(
 							}
 						}
 
-						epoch, err := currentEpochNo(ctx, dingoAddr, magic, point)
+						epoch, skip, err := epochAt(point)
 						if err != nil {
 							// callbackErr, not fmt.Errorf: GetEpochNo's own
 							// connection dying returns an error wrapping
@@ -830,6 +879,9 @@ func RunFromGenesis(
 							)
 						}
 						progressed = true
+						if skip {
+							return nil
+						}
 						if haveLastEpoch && epoch <= lastEpoch {
 							return nil
 						}
@@ -1011,14 +1063,30 @@ func RunFromGenesis(
 						// typical bulk-replay rollback depth) must retreat it
 						// too, or a re-crossing of that same boundary on the
 						// new fork would be silently skipped as already seen.
-						epoch, err := currentEpochNo(ctx, dingoAddr, magic, point)
-						if err != nil {
-							// callbackErr for the same reason as the
-							// roll-forward callback above.
-							return callbackErr(
-								"determine current epoch at rollback slot %d: %w",
-								point.Slot, err,
+						// Every session opens with a RollBackward to the origin
+						// when it starts from genesis. Dingo refuses to acquire
+						// that point -- slot 0 reads as "live" in its query
+						// model -- and the origin lies in epoch 0 by definition,
+						// so it is not asked.
+						var epoch uint64
+						if point.Slot != 0 || len(point.Hash) != 0 {
+							var (
+								skip bool
+								err  error
 							)
+							epoch, skip, err = epochAt(point)
+							if err != nil {
+								// callbackErr for the same reason as the
+								// roll-forward callback above.
+								return callbackErr(
+									"determine current epoch at rollback slot %d: %w",
+									point.Slot, err,
+								)
+							}
+							if skip {
+								progressed = true
+								return nil
+							}
 						}
 						progressed = true
 						// Retreat only. Raising lastEpoch here would skip an

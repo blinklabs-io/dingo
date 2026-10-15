@@ -299,6 +299,224 @@ func TestRunFromGenesis_EpochNoFailureDoesNotSkipEpoch(t *testing.T) {
 	}
 }
 
+// TestRunFromGenesis_DoesNotAcquireChainOrigin proves a from-genesis run does
+// not depend on acquiring the chain origin. Every session opens with a
+// RollBackward to origin, and Dingo refuses to acquire that point, so asking
+// it which epoch the origin is in failed the session before any block was
+// checked and the reconnect loop repeated that failure indefinitely.
+func TestRunFromGenesis_DoesNotAcquireChainOrigin(t *testing.T) {
+	const magic = 42
+	const blockCount = 3
+
+	server := newGenesisFakeServer(t, blockCount)
+	server.refuseOriginAcquire = true
+	server.initialRollbackToOrigin = true
+	server.epochBySlot = map[uint64]int{
+		server.chain.Points[0].Slot: 0,
+		server.chain.Points[1].Slot: 1,
+		server.chain.Points[2].Slot: 2,
+	}
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = listener.Close() })
+	server.serve(t, listener, magic)
+
+	koiosSrv := httptest.NewServer(http.NotFoundHandler())
+	t.Cleanup(koiosSrv.Close)
+	koios, err := NewKoiosClient("preview", "", koiosSrv.URL, true, true)
+	require.NoError(t, err)
+
+	logs := newLogCollector()
+	results := make(chan EpochResult, 8)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- RunFromGenesis(
+			ctx, listener.Addr().String(), "preview", magic, koios, nil,
+			func(r EpochResult) { results <- r },
+			logs.logf, nil,
+		)
+	}()
+
+	require.False(
+		t,
+		logs.waitFor("point too old", 2*time.Second),
+		"the session ended asking Dingo to acquire the chain origin; logs: %v",
+		logs.all(),
+	)
+
+	server.allowStep(t)
+	server.allowStep(t)
+	server.allowStep(t)
+
+	select {
+	case r := <-results:
+		assert.Equal(t, uint64(1), r.Epoch)
+	case <-time.After(20 * time.Second):
+		t.Fatalf(
+			"no epoch was reported; the run never got past the origin; logs: %v",
+			logs.all(),
+		)
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		assert.True(t, err == nil || errors.Is(err, context.Canceled))
+	case <-time.After(10 * time.Second):
+		t.Fatal("RunFromGenesis did not exit after ctx cancellation")
+	}
+}
+
+// TestRunFromGenesis_StartsValidatingAtFirstAnswerablePoint covers a chain
+// whose earliest points Dingo cannot answer for, as preprod's Byron epochs
+// are: it has no protocol parameters or stake there and Koios holds none
+// either. Those blocks are skipped, and validation starts at the first point
+// Dingo answers for rather than the run failing on its first block.
+func TestRunFromGenesis_StartsValidatingAtFirstAnswerablePoint(t *testing.T) {
+	const magic = 42
+	const blockCount = 5
+
+	server := newGenesisFakeServer(t, blockCount)
+	server.initialRollbackToOrigin = true
+	server.epochBySlot = map[uint64]int{
+		server.chain.Points[0].Slot: 0,
+		server.chain.Points[1].Slot: 1,
+		server.chain.Points[2].Slot: 2,
+		server.chain.Points[3].Slot: 3,
+		server.chain.Points[4].Slot: 4,
+	}
+	firstAnswerable := server.chain.Points[3].Slot
+	server.refuseAcquireFn = func(p pcommon.Point) bool {
+		return p.Slot < firstAnswerable
+	}
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = listener.Close() })
+	server.serve(t, listener, magic)
+
+	koiosSrv := httptest.NewServer(http.NotFoundHandler())
+	t.Cleanup(koiosSrv.Close)
+	koios, err := NewKoiosClient("preview", "", koiosSrv.URL, true, true)
+	require.NoError(t, err)
+
+	logs := newLogCollector()
+	results := make(chan EpochResult, 8)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- RunFromGenesis(
+			ctx, listener.Addr().String(), "preview", magic, koios, nil,
+			func(r EpochResult) { results <- r },
+			logs.logf, nil,
+		)
+	}()
+
+	for range blockCount {
+		server.allowStep(t)
+	}
+
+	recv := func() EpochResult {
+		t.Helper()
+		select {
+		case r := <-results:
+			return r
+		case <-time.After(20 * time.Second):
+			t.Fatalf("timed out waiting for an epoch result; logs: %v", logs.all())
+			return EpochResult{}
+		}
+	}
+	assert.Equal(t, uint64(3), recv().Epoch,
+		"validation must start at the first point Dingo answers for")
+	assert.Equal(t, uint64(4), recv().Epoch)
+	assert.True(t, logs.waitFor("validation starts at slot", 5*time.Second),
+		"the skipped epochs must be reported; logs: %v", logs.all())
+	assert.False(t, logs.waitFor("chainsync session ended", 500*time.Millisecond),
+		"skipping must not end the session; logs: %v", logs.all())
+
+	cancel()
+	select {
+	case err := <-done:
+		assert.True(t, err == nil || errors.Is(err, context.Canceled))
+	case <-time.After(10 * time.Second):
+		t.Fatal("RunFromGenesis did not exit after ctx cancellation")
+	}
+}
+
+// TestRunFromGenesis_RefusalAfterValidationStartsStillFails proves skipping
+// is limited to the start of the run. Once Dingo has answered for a point, a
+// later refusal is a real fault -- a retention floor overtaking the walk, for
+// instance -- and must end the session, not be skipped silently.
+func TestRunFromGenesis_RefusalAfterValidationStartsStillFails(t *testing.T) {
+	const magic = 42
+	const blockCount = 3
+
+	server := newGenesisFakeServer(t, blockCount)
+	server.epochBySlot = map[uint64]int{
+		server.chain.Points[0].Slot: 1,
+		server.chain.Points[1].Slot: 2,
+		server.chain.Points[2].Slot: 3,
+	}
+	refused := server.chain.Points[2].Slot
+	server.refuseAcquireFn = func(p pcommon.Point) bool {
+		return p.Slot == refused
+	}
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = listener.Close() })
+	server.serve(t, listener, magic)
+
+	koiosSrv := httptest.NewServer(http.NotFoundHandler())
+	t.Cleanup(koiosSrv.Close)
+	koios, err := NewKoiosClient("preview", "", koiosSrv.URL, true, true)
+	require.NoError(t, err)
+
+	logs := newLogCollector()
+	results := make(chan EpochResult, 8)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- RunFromGenesis(
+			ctx, listener.Addr().String(), "preview", magic, koios, nil,
+			func(r EpochResult) { results <- r },
+			logs.logf, nil,
+		)
+	}()
+
+	for range blockCount {
+		server.allowStep(t)
+	}
+	select {
+	case r := <-results:
+		assert.Equal(t, uint64(2), r.Epoch)
+	case <-time.After(20 * time.Second):
+		t.Fatalf("no epoch was reported; logs: %v", logs.all())
+	}
+	require.True(
+		t,
+		logs.waitFor("chainsync session ended", 20*time.Second),
+		"a refusal after validation started was skipped; logs: %v",
+		logs.all(),
+	)
+
+	cancel()
+	select {
+	case err := <-done:
+		assert.True(t, err == nil || errors.Is(err, context.Canceled))
+	case <-time.After(10 * time.Second):
+		t.Fatal("RunFromGenesis did not exit after ctx cancellation")
+	}
+}
+
 // TestIsRetryableDingoConnErr pins the exact classification
 // runProtocolParamsAndStake's retry decision depends on: a connection-death
 // shaped error (protocol.ErrProtocolShuttingDown, bare or wrapped, or a raw
@@ -738,6 +956,24 @@ type genesisFakeServer struct {
 	// which is the whole point: see
 	// TestRunFromGenesis_EpochNoFailureDoesNotHangSession.
 	failEpochNoAtSlot map[uint64]int
+
+	// refuseOriginAcquire makes an Acquire of the chain origin (slot 0, no
+	// hash) fail with ErrAcquireFailurePointTooOld, as Dingo does: its query
+	// model reads slot 0 as "live", so it refuses an origin point rather than
+	// answer the live state for it.
+	refuseOriginAcquire bool
+
+	// initialRollbackToOrigin makes a session that intersected at the origin
+	// open with a RollBackward to the origin, as Dingo's ChainSync server
+	// does, instead of to the first block. Off by default so the other tests'
+	// epoch bookkeeping, which counts the first block as that rollback's
+	// point, is unchanged.
+	initialRollbackToOrigin bool
+
+	// refuseAcquireFn, when set, makes an Acquire of any point it returns
+	// true for fail with ErrAcquireFailurePointTooOld, as Dingo does for a
+	// point it cannot answer for.
+	refuseAcquireFn func(pcommon.Point) bool
 }
 
 // failEpochNoOnce arranges for the next ShelleyEpochNoQuery Acquired at slot
@@ -888,6 +1124,11 @@ func (s *genesisFakeServer) requestNext(ctx chainsync.CallbackContext) error {
 	if !s.rolledBack {
 		s.rolledBack = true
 		defer s.mu.Unlock()
+		if s.initialRollbackToOrigin && s.cursor == 0 {
+			return ctx.Server.RollBackward(
+				csmock.OriginPoint(), s.chain.Tip(),
+			)
+		}
 		return ctx.Server.RollBackward(
 			s.chain.Points[max(s.cursor-1, 0)], s.chain.Tip(),
 		)
@@ -948,6 +1189,13 @@ func (s *genesisFakeServer) lsqConfig() localstatequery.Config {
 				_ bool,
 			) error {
 				if sp, ok := target.(localstatequery.AcquireSpecificPoint); ok {
+					if s.refuseOriginAcquire &&
+						sp.Point.Slot == 0 && len(sp.Point.Hash) == 0 {
+						return localstatequery.ErrAcquireFailurePointTooOld
+					}
+					if s.refuseAcquireFn != nil && s.refuseAcquireFn(sp.Point) {
+						return localstatequery.ErrAcquireFailurePointTooOld
+					}
 					s.mu.Lock()
 					s.lastAcquiredSlot = sp.Point.Slot
 					s.mu.Unlock()
