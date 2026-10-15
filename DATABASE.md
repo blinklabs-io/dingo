@@ -1053,12 +1053,17 @@ flowchart LR
 `dingo load` from an HTTPS ImmutableDB root, or HTTP on loopback for local
 development, keeps a source-keyed download cache under
 `<databasePath>/immutable-download`.
-Non-loopback HTTP is rejected. `staging/` holds chunk triads
+Non-loopback HTTP and private or special-use HTTPS destinations are rejected
+for the initial request, every redirect, and every resolved dial target. The
+downloader does not use proxy settings. `staging/` holds chunk triads
 in flight, each file written as `<name>.part` and renamed when complete;
 `ready/` holds the contiguous chunks the loader reads. A copied chunk leaves
 `ready/` once a later chunk holding a block is copied, so the cache keeps the
 chunk holding the chain tip, which the next run resumes from. Source keys keep
-completed and partial files from one root out of another root's replay.
+completed files from one root out of another root's replay. Aggregate transfer
+and cache bounds follow the requested chunk range and format limits. Each write
+also preserves free space on the cache filesystem; an unsuccessful import
+removes its staging files after all fetch workers stop.
 
 ## SQL Conventions
 

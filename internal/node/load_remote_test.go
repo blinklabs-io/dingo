@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -36,9 +37,18 @@ import (
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database/immutable"
 	"github.com/blinklabs-io/dingo/internal/config"
+	"github.com/blinklabs-io/dingo/internal/netguard"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/stretchr/testify/require"
 )
+
+type remoteImmutableRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f remoteImmutableRoundTripFunc) RoundTrip(
+	req *http.Request,
+) (*http.Response, error) {
+	return f(req)
+}
 
 func TestClassifyRemoteImmutableSource(t *testing.T) {
 	t.Parallel()
@@ -100,8 +110,116 @@ func TestRemoteImmutableRedirectRejectsHTTPSDowngrade(t *testing.T) {
 		}),
 		"requires HTTPS",
 	)
-	req.URL.Scheme = "https"
+	req.URL = &url.URL{Scheme: "https", Host: "cdn.example"}
 	require.NoError(t, checkRemoteImmutableRedirect(req, nil))
+}
+
+func TestRemoteImmutableRedirectRejectsPrivateHTTPS(t *testing.T) {
+	t.Parallel()
+	req := &http.Request{URL: &url.URL{
+		Scheme: "https",
+		Host:   "127.0.0.1",
+	}}
+	err := checkRemoteImmutableRedirect(req, []*http.Request{{URL: &url.URL{
+		Scheme: "https",
+		Host:   "cdn.example",
+	}}})
+	require.ErrorIs(t, err, netguard.ErrBlockedDestination)
+}
+
+func TestRemoteImmutableDialRejectsPrivateDNSAnswer(t *testing.T) {
+	t.Parallel()
+	called := false
+	policy := remoteImmutableNetworkPolicy{
+		dial: func(context.Context, string, string) (net.Conn, error) {
+			called = true
+			return nil, errors.New("unexpected dial")
+		},
+		lookup: func(context.Context, string) ([]net.IPAddr, error) {
+			return []net.IPAddr{{IP: net.ParseIP("10.0.0.1")}}, nil
+		},
+	}
+	_, err := policy.dialContext(
+		context.Background(), "tcp", "cdn.example:443",
+	)
+	require.ErrorIs(t, err, netguard.ErrBlockedDestination)
+	require.False(t, called)
+}
+
+func TestRemoteImmutableClientDisablesProxy(t *testing.T) {
+	t.Parallel()
+	client, err := newRemoteImmutableHTTPClient("https://cdn.example/immutable")
+	require.NoError(t, err)
+	transport, ok := client.Transport.(*http.Transport)
+	require.True(t, ok)
+	require.Nil(t, transport.Proxy)
+	require.NotNil(t, transport.DialContext)
+}
+
+func TestRemoteImmutableAggregateLimitsFollowRequestedRange(t *testing.T) {
+	t.Parallel()
+	limits := remoteImmutableLimits{
+		primary: 2, secondary: 3, chunk: 5,
+		concurrent: 2, chunkSlots: 10,
+	}
+	got, err := limits.withImportRange(1, 29)
+	require.NoError(t, err)
+	require.Equal(t, int64(120), got.imported)
+	require.Equal(t, int64(30), got.cache)
+	require.Equal(t, int64(remoteImmutableStagingOverhead), got.minFree)
+}
+
+func TestRemoteImmutableBudgetPreservesFreeSpace(t *testing.T) {
+	t.Parallel()
+	budget := &remoteImmutableBudget{
+		files: make(map[string]int64),
+		limits: remoteImmutableLimits{
+			imported: 10, cache: 10, minFree: 5, concurrent: 1,
+		},
+		freeDisk: func(string) (uint64, error) { return 5, nil },
+	}
+	err := budget.reserveWrite(filepath.Join(t.TempDir(), "part"), 1)
+	require.ErrorIs(t, err, errRemoteImmutableFreeSpace)
+	require.Zero(t, budget.total)
+	require.Zero(t, budget.active)
+}
+
+func TestRemoteImmutableBudgetKeepsFailedTruncateAccounted(t *testing.T) {
+	t.Parallel()
+	partPath := t.TempDir()
+	info, err := os.Stat(partPath)
+	require.NoError(t, err)
+	require.Positive(t, info.Size())
+
+	client := &http.Client{Transport: remoteImmutableRoundTripFunc(func(
+		req *http.Request,
+	) (*http.Response, error) {
+		return &http.Response{
+			Status:        http.StatusText(http.StatusOK),
+			StatusCode:    http.StatusOK,
+			Body:          http.NoBody,
+			ContentLength: 0,
+			Request:       req,
+		}, nil
+	})}
+
+	budget := &remoteImmutableBudget{
+		total:  info.Size(),
+		active: info.Size(),
+		files:  map[string]int64{partPath: info.Size()},
+		limits: remoteImmutableLimits{
+			imported: 1 << 20, cache: 1 << 20, concurrent: 1,
+		},
+		freeDisk: func(string) (uint64, error) { return 1 << 20, nil },
+	}
+	err = fetchRemoteFileOnceWithClient(
+		context.Background(), client, budget,
+		"https://cdn.example/chunk", partPath, 1<<20,
+	)
+	require.Error(t, err)
+	require.Equal(t, info.Size(), budget.total)
+	require.Equal(t, info.Size(), budget.active)
+	require.Equal(t, info.Size(), budget.files[partPath])
 }
 
 func TestRemoteImmutableRedirectPreservesLimitAndLoopbackHTTP(t *testing.T) {
@@ -114,12 +232,13 @@ func TestRemoteImmutableRedirectPreservesLimitAndLoopbackHTTP(t *testing.T) {
 		Scheme: "http",
 		Host:   "localhost:8080",
 	}}}
-	require.NoError(t, checkRemoteImmutableRedirect(req, via))
+	policy := remoteImmutableNetworkPolicy{allowLoopback: true}
+	require.NoError(t, policy.checkRedirect(req, via))
 
 	for len(via) < 10 {
 		via = append(via, via[0])
 	}
-	require.ErrorContains(t, checkRemoteImmutableRedirect(req, via), "10 redirects")
+	require.ErrorContains(t, policy.checkRedirect(req, via), "10 redirects")
 }
 
 // remoteRoot serves chunk triads copied from the immutable testdata, plus a
@@ -342,6 +461,38 @@ func TestCopyBlocksRemoteStopsAtTheLastPublishedChunk(t *testing.T) {
 	require.Equal(
 		t, 1, load.log.count("remote ImmutableDB publishes no further chunks"),
 	)
+}
+
+func TestCopyBlocksRemoteEnforcesAggregateImportBudgetAndCleansStaging(
+	t *testing.T,
+) {
+	t.Parallel()
+	root := newRemoteRoot(t, 2)
+	triadSize := func(chunk uint64) int64 {
+		var total int64
+		for _, ext := range []string{".primary", ".secondary", ".chunk"} {
+			info, err := os.Stat(filepath.Join(
+				root.dir, immutable.ChunkName(chunk)+ext,
+			))
+			require.NoError(t, err)
+			total += info.Size()
+		}
+		return total
+	}
+	load := newRemoteLoad(t)
+	load.limits.concurrent = 2
+	limits, err := load.limits.withChunkCount(2)
+	require.NoError(t, err)
+	limits.imported = max(triadSize(0), triadSize(1)) + 1
+	load.limits = limits
+	rootURL := root.serve(t)
+	_, err = load.run(context.Background(), rootURL)
+	require.ErrorIs(t, err, errRemoteImmutableImportBudget)
+
+	sourceCache, cacheErr := remoteImmutableSourceCache(load.cacheDir, rootURL)
+	require.NoError(t, cacheErr)
+	_, statErr := os.Stat(filepath.Join(sourceCache, "staging"))
+	require.ErrorIs(t, statErr, os.ErrNotExist)
 }
 
 // TestCopyBlocksRemoteHoldsChunksCompletedOutOfOrder holds chunk 0 until
