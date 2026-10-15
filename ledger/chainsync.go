@@ -22,6 +22,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"net"
 	"net/netip"
@@ -1081,9 +1082,7 @@ func (ls *LedgerState) repopulateDeferredHeaderValidation() error {
 			map[string]ouroboros.ConnectionId, len(restoredSources),
 		)
 	}
-	for mapKey, source := range restoredSources {
-		ls.deferredHeaderValidation[mapKey] = source
-	}
+	maps.Copy(ls.deferredHeaderValidation, restoredSources)
 	ls.deferredHeaderValidationMu.Unlock()
 	restored := len(restoredSources)
 	if restored > 0 {
@@ -1242,8 +1241,8 @@ func (ls *LedgerState) deferredHeaderValidationRequired(
 
 // deferredHeaderMarkerValue encodes a persisted deferred marker. The value is
 // the bare marker for an unattributed block, and the marker followed by the
-// supplying peer's remote address otherwise, so a reader that only checks the
-// prefix still recognizes it.
+// supplying peer's remote address otherwise. Startup rebuilds legacy
+// in-memory markers from the key scan when downgrading.
 func deferredHeaderMarkerValue(source ouroboros.ConnectionId) string {
 	if source.RemoteAddr == nil {
 		return deferredHeaderValidationSyncStateValue

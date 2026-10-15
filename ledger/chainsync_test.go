@@ -19945,7 +19945,7 @@ func TestDeferredHeaderMarkerReadFailureFailsStartup(t *testing.T) {
 	key := deferredHeaderValidationSyncStateKey(point)
 	db, err := dbtest.NewDatabaseWithMetadataWrapper(
 		t,
-		dbtest.Options{},
+		dbtest.Options{Config: &database.Config{DataDir: t.TempDir()}},
 		func(store metadata.MetadataStore) metadata.MetadataStore {
 			return syncStateReadFailingMetadataStore{
 				MetadataStore: store,
