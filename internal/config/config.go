@@ -328,10 +328,11 @@ type GenesisBootstrapConfig struct {
 	// the same recent blocks before a fast (shallow) block source may drive
 	// Genesis-mode chain selection. This is the Ouroboros Genesis trust control
 	// for biased fast-sync sources: an uncorroborated or divergent fast source
-	// is denied selection and stalls rather than steering the local chain. A
-	// zero value disables the selection gate (density-only Genesis selection);
-	// a peer's frontier still needs one independent witness before it can
-	// exclude other candidates as behind.
+	// is denied selection and stalls rather than steering the local chain.
+	// The default is one independent peer. An explicitly configured zero
+	// disables the selection gate (density-only Genesis selection); a peer's
+	// frontier still needs one independent witness before it can exclude other
+	// candidates as behind.
 	CorroborationPeers int `yaml:"corroborationPeers"          envconfig:"DINGO_GENESIS_BOOTSTRAP_CORROBORATION_PEERS"`
 	// LimitOnPatienceEnabled turns on the Genesis Limit on Patience: while
 	// Genesis selection is syncing, a ChainSync peer that delivers its
@@ -534,6 +535,7 @@ func DefaultChainsyncConfig() ChainsyncConfig {
 func DefaultGenesisBootstrapConfig() GenesisBootstrapConfig {
 	return GenesisBootstrapConfig{
 		Enabled:                true,
+		CorroborationPeers:     1,
 		LimitOnPatienceEnabled: true,
 	}
 }

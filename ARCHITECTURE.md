@@ -5853,11 +5853,12 @@ it. Dingo implements this as a **corroboration gate**
   A best-peer → none transition publishes `chainselection.selected_none` for
   observability of the stall; peer governance may also subscribe to the
   corroboration-failure event to react.
-- `corroborationPeers = 0` disables the gate (density-only Genesis selection,
-  the historical default), preserving prior behavior for nodes that do not opt
-  into the Genesis trust model. The per-peer hash frontier is tracked in every
-  Genesis mode (the trusted-frontier rule above needs it) and dropped in Praos,
-  so normal Praos operation carries no extra state.
+- `corroborationPeers` defaults to 1, so a fresh node needs one independent
+  witness before a fast source can drive Genesis selection. Setting it to 0
+  explicitly disables the gate and trusts every configured source for fork
+  choice (density-only Genesis selection). The per-peer hash frontier is
+  tracked in every Genesis mode (the trusted-frontier rule above needs it) and
+  dropped in Praos, so normal Praos operation carries no extra state.
 - **Header-crypto verification gates observation, independent of
   corroboration.** Density and the corroboration hash frontier are both
   populated from `recordObservedPoint`, driven by `PeerTipUpdateEvent`

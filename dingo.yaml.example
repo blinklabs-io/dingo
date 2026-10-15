@@ -877,8 +877,9 @@
   # Genesis Sync Accelerator: an uncorroborated or divergent fast source is
   # denied selection and stalls rather than steering the local chain. Pair it
   # with a trustable localRoots peer plus a ledger peer snapshot in the topology
-  # file. 0 disables corroboration (density-only Genesis selection).
-  # corroborationPeers: 0
+  # file. The default is 1. Set 0 explicitly only when every configured source
+  # is trusted for fork choice (density-only Genesis selection).
+  # corroborationPeers: 1
   # Genesis Limit on Patience: while Genesis selection is active, disconnect a
   # ChainSync peer that delivers its advertised progress more slowly than
   # limitOnPatienceRate headers per second, beyond a limitOnPatienceCapacity

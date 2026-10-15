@@ -263,7 +263,8 @@ mithril:
 			Enabled:                     false,
 			WindowSlots:                 4321,
 			PromotionMinDiversityGroups: 4,
-			// Unset in the file, so the default survives.
+			CorroborationPeers:          1,
+			// Unset in the file, so the defaults survive.
 			LimitOnPatienceEnabled: true,
 		},
 		HistoryExpiry: DefaultHistoryExpiryConfig(),
@@ -498,6 +499,30 @@ func TestLoad_GenesisBootstrapEnvVars(t *testing.T) {
 			cfg.GenesisBootstrap.CorroborationPeers,
 		)
 	}
+}
+
+func TestLoad_GenesisCorroborationDefaultsSecurely(t *testing.T) {
+	// Not t.Parallel: LoadConfig and resetGlobalConfig replace process-global
+	// configuration state.
+	unsetEnv(t, "DINGO_GENESIS_BOOTSTRAP_CORROBORATION_PEERS")
+	unsetEnv(t, "CARDANO_DINGO_GENESIS_BOOTSTRAP_CORROBORATION_PEERS")
+
+	emptyConfig := filepath.Join(t.TempDir(), "empty.yaml")
+	require.NoError(t, os.WriteFile(emptyConfig, nil, 0o600))
+	resetGlobalConfig()
+	cfg, err := LoadConfig(emptyConfig)
+	require.NoError(t, err)
+	require.Equal(t, 1, cfg.GenesisBootstrap.CorroborationPeers)
+
+	explicitDisable := filepath.Join(t.TempDir(), "disable.yaml")
+	require.NoError(t, os.WriteFile(explicitDisable, []byte(`
+genesisBootstrap:
+  corroborationPeers: 0
+`), 0o600))
+	resetGlobalConfig()
+	cfg, err = LoadConfig(explicitDisable)
+	require.NoError(t, err)
+	require.Zero(t, cfg.GenesisBootstrap.CorroborationPeers)
 }
 
 func TestLoad_HistoryExpiryConfig(t *testing.T) {
