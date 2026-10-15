@@ -70,7 +70,7 @@ die()  { echo "[entrypoint] ERROR: $*" >&2; exit 1; }
 # --koios-parity-api-key is redacted but --token-registry-interval and
 # file-path flags such as --shelley-kes-key are not.
 SECRET_FLAG_PATTERN='^--?[A-Za-z0-9_.-]*(token|secret|password|passwd|passphrase|api-?key|bearer|credentials?)$'
-URL_USERINFO_PATTERN='^([A-Za-z][A-Za-z0-9+.-]*://)[^/@[:space:]]+@(.*)$'
+URL_USERINFO_PATTERN='^([A-Za-z][A-Za-z0-9+.-]*://)[^/?#@[:space:]]+@(.*)$'
 AUTH_VALUE_PATTERN='^(.*(authorization|bearer)[:= ]+)(.*)$'
 
 # redact_value masks credentials embedded in a free-form value: URL userinfo
@@ -95,8 +95,14 @@ redact_args() {
   shopt -s nocasematch
   for arg in "$@"; do
     if [[ "${redact_next}" == "true" ]]; then
-      out+=("<redacted>")
-      redact_next="false"
+      # A secret flag followed by another secret flag has no value of its own;
+      # keep the pending redaction for the next flag's value.
+      if [[ "${arg}" =~ ${SECRET_FLAG_PATTERN} ]]; then
+        out+=("${arg}")
+      else
+        out+=("<redacted>")
+        redact_next="false"
+      fi
     elif [[ "${arg}" == -*=* ]]; then
       name="${arg%%=*}"
       if [[ "${name}" =~ ${SECRET_FLAG_PATTERN} ]]; then

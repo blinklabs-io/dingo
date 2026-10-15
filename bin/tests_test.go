@@ -285,6 +285,26 @@ func TestRedactArgsEdgeCases(t *testing.T) {
 			"https://<redacted>@host/path",
 		},
 		{
+			"secret flag followed by secret flag",
+			[]string{"--api-key", "--bearer", "real-secret", "serve"},
+			"--api-key --bearer <redacted> serve",
+		},
+		{
+			"url query with at sign untouched",
+			[]string{"https://host?email=user@example.com"},
+			"https://host?email=user@example.com",
+		},
+		{
+			"url fragment with at sign untouched",
+			[]string{"https://host#user@example.com"},
+			"https://host#user@example.com",
+		},
+		{
+			"url userinfo before query redacted",
+			[]string{"https://u:pw@host?x=y@z"},
+			"https://<redacted>@host?x=y@z",
+		},
+		{
 			"url without userinfo untouched",
 			[]string{"https://host/path@x"},
 			"https://host/path@x",
