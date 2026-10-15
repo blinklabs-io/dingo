@@ -121,7 +121,7 @@ func TestLeiosRelayForwardsCompletedBackfillOnce(t *testing.T) {
 	ebRaw, err := cbor.Encode(&lcommon.LeiosEndorserBlock{
 		TransactionReferences: []lcommon.LeiosTransactionReference{{
 			TransactionHash: lcommon.Blake2b256Hash(txRaw),
-			TransactionSize: uint16(len(txRaw)), //nolint:gosec // short test transaction
+			TransactionSize: uint32(len(txRaw)), //nolint:gosec // short test transaction
 		}},
 	})
 	require.NoError(t, err)

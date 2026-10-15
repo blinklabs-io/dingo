@@ -104,12 +104,11 @@ func buildValidatedPipelineThroughputBlocks(
 	return blocks, epochNonceHex, slotsPerKesPeriod
 }
 
-// runPipelineThroughput submits every block in blocks through a freshly
-// constructed pipeline.BlockPipeline configured as NewLedgerState wires
-// production (trusted decode-only), with the given decode worker count, and
-// returns blocks-processed-per-second. It fails the test if any block fails
-// to decode -- every generated block is genuinely valid, so an
-// error here means the harness (not the worker count) is broken.
+// runPipelineThroughput submits every block through a freshly constructed
+// pipeline.BlockPipeline with decode and header validation enabled, and
+// returns blocks-processed-per-second. It fails if any block fails to decode
+// or validate; every generated block is genuinely valid, so an error means
+// the harness (not the worker count) is broken.
 func runPipelineThroughput(
 	t *testing.T,
 	blocks []models.Block,
@@ -120,7 +119,15 @@ func runPipelineThroughput(
 	t.Helper()
 	pl := pipeline.NewBlockPipeline(
 		pipeline.WithDecodeWorkers(workers),
-		pipeline.WithTrustedDecodeOnly(),
+		pipeline.WithValidateWorkers(workers),
+		pipeline.WithHeaderOnly(),
+		pipeline.WithBlockTypeResolver(
+			func(context.Context, []byte) (uint, error) {
+				return gledger.BlockTypeConway, nil
+			},
+		),
+		pipeline.WithEta0(epochNonceHex),
+		pipeline.WithSlotsPerKesPeriod(slotsPerKesPeriod),
 	)
 	require.NoError(t, pl.Start(t.Context()))
 	defer func() { require.NoError(t, pl.Stop()) }()
@@ -147,10 +154,10 @@ func runPipelineThroughput(
 }
 
 // TestBlockPipelineWorkerCountThroughput asserts the correctness property the
-// CPU-scaled worker count puts at risk -- that decoding still produces a
-// clean result for every block once more than two workers share the
-// stage -- and reports decode throughput at the prior
-// fixed count and at this host's scaled count alongside it. Blocks are
+// CPU-scaled worker count puts at risk -- that decoding and header validation
+// still produce a clean result for every block once more than two workers
+// share each stage -- and reports decode-plus-validation throughput at the
+// prior fixed count and this host's scaled count. Blocks are
 // genuinely valid and everything runs in-process, so neither the correctness
 // check nor the reported numbers depend on peer availability, block density,
 // or disk state.
@@ -193,7 +200,7 @@ func TestBlockPipelineWorkerCountThroughput(t *testing.T) {
 	newAvg := newTotal / repetitions
 
 	t.Logf(
-		"pipeline throughput on GOMAXPROCS(0)=%d: workers=%d avg=%.0f blocks/sec, workers=%d avg=%.0f blocks/sec, ratio=%.2fx",
+		"pipeline decode+validation throughput on GOMAXPROCS(0)=%d: workers=%d avg=%.0f blocks/sec, workers=%d avg=%.0f blocks/sec, ratio=%.2fx",
 		runtime.GOMAXPROCS(0),
 		oldWorkers,
 		oldAvg,

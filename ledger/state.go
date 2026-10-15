@@ -2687,11 +2687,8 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 		if err := ls.blockPipeline.Start(ctx); err != nil {
 			return fmt.Errorf("failed to start block-decode pipeline: %w", err)
 		}
-		// Launched immediately, before the goroutine below (or anything
-		// else) can submit a single block to the pipeline: see
-		// drainBlockPipelineErrors's doc comment on why an undrained
-		// errorsChan deadlocks the pipeline once enough validate-stage
-		// errors (e.g. Byron-era blocks) have flowed through it.
+		// Start draining best-effort decode-stage error reports before any
+		// blocks are submitted so failures remain observable.
 		ls.blockPipelineErrorsDone = make(chan struct{})
 		go ls.drainBlockPipelineErrors()
 	}
