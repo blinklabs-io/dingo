@@ -364,6 +364,21 @@ CREATE TABLE midnight_ariadne_rollbacks (
     UNIQUE (block_number, epoch)
 );
 
+CREATE TABLE midnight_candidate_removals (
+    id INTEGER PRIMARY KEY,
+    block_number INTEGER NOT NULL,
+    tx_hash BLOB NOT NULL,
+    output_index INTEGER NOT NULL,
+    datum BLOB,
+    UNIQUE (block_number, tx_hash, output_index)
+);
+
+CREATE TABLE midnight_epoch_transitions (
+    block_number INTEGER PRIMARY KEY,
+    previous_epoch INTEGER NOT NULL,
+    previous_exists INTEGER NOT NULL
+);
+
 CREATE TABLE midnight_epoch_candidates (
     id INTEGER PRIMARY KEY,
     epoch INTEGER NOT NULL UNIQUE,
@@ -445,6 +460,14 @@ CREATE TABLE asset (
     UNIQUE (name, policy_id, utxo_id)
 );
 
+CREATE TABLE utxo_address (
+    utxo_id INTEGER PRIMARY KEY,
+    address BLOB NOT NULL,
+    FOREIGN KEY (utxo_id) REFERENCES utxo(id) ON DELETE CASCADE
+);
+
+CREATE INDEX idx_utxo_address_address ON utxo_address(address);
+
 CREATE TABLE asset_mint_burn (
     id INTEGER PRIMARY KEY,
     tx_hash BLOB,
@@ -484,6 +507,10 @@ CREATE TABLE drep (
     expiry_epoch INTEGER DEFAULT 0,
     active BOOLEAN DEFAULT TRUE,
     UNIQUE (credential_tag, credential)
+);
+
+CREATE TABLE drep_expiry_epoch_event (
+    added_slot INTEGER PRIMARY KEY
 );
 
 CREATE TABLE registration_drep (
@@ -554,3 +581,27 @@ CREATE UNIQUE INDEX IF NOT EXISTS `idx_drep_expiry_history_credential_slot`
     ON `drep_expiry_history`(`credential_tag`,`credential`,`added_slot`);
 CREATE INDEX IF NOT EXISTS `idx_drep_expiry_history_added_slot`
     ON `drep_expiry_history`(`added_slot`);
+CREATE TABLE IF NOT EXISTS `drep_dormancy_state` (
+    `id` integer PRIMARY KEY CHECK (`id` = 1),
+    `dormant_epochs` integer NOT NULL
+);
+CREATE TABLE IF NOT EXISTS `drep_dormancy_history` (
+    `id` integer PRIMARY KEY AUTOINCREMENT,
+    `added_slot` integer NOT NULL,
+    `previous_dormant_epochs` integer NOT NULL
+);
+CREATE INDEX IF NOT EXISTS `idx_drep_dormancy_history_slot`
+    ON `drep_dormancy_history`(`added_slot`);
+CREATE TABLE IF NOT EXISTS `drep_delegator` (
+    `id` integer PRIMARY KEY AUTOINCREMENT,
+    `drep_credential_tag` integer NOT NULL,
+    `drep_credential` blob NOT NULL,
+    `stake_credential_tag` integer NOT NULL,
+    `stake_credential` blob NOT NULL,
+    `added_slot` integer NOT NULL,
+    `removed_slot` integer
+);
+CREATE INDEX IF NOT EXISTS `idx_drep_delegator_active`
+    ON `drep_delegator`(`drep_credential_tag`,`drep_credential`,`removed_slot`);
+CREATE INDEX IF NOT EXISTS `idx_drep_delegator_rollback`
+    ON `drep_delegator`(`added_slot`,`removed_slot`);

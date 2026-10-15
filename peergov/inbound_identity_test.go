@@ -141,9 +141,9 @@ func TestInboundHostDenialDoesNotRefuseArrival(t *testing.T) {
 	)
 }
 
-// A host that flaps is not refused either: refusal also cuts off a
-// downstream that reconnects because this node closed its sessions.
-func TestInboundFlappingHostIsNotRefused(t *testing.T) {
+// A disconnected inbound peer does not capture an unrelated arrival from a
+// different source port on the same NAT gateway.
+func TestInboundDisconnectedPeerDoesNotCaptureSharedNATArrival(t *testing.T) {
 	t.Parallel()
 	pg := newInboundIdentityGovernor(t)
 	pg.mu.Lock()
@@ -162,17 +162,17 @@ func TestInboundFlappingHostIsNotRefused(t *testing.T) {
 
 	assert.Equal(t, float64(0), deniedInboundCount(pg))
 	peers := pg.GetPeers()
-	require.Equal(t, 1, len(peers))
+	require.Equal(t, 2, len(peers))
 	assert.False(
 		t,
-		peers[0].InboundConnectedAt.IsZero(),
-		"the arrival must be attributed to the host's record",
+		peers[1].InboundConnectedAt.IsZero(),
+		"the arrival must get an identity distinct from another NAT peer",
 	)
 }
 
-// A reconnect from a new source port reuses the host's disconnected record, so
-// its short-session history is not reset by port rotation.
-func TestInboundRecordReuseKeepsShortSessionHistory(t *testing.T) {
+// A reconnect from the same transport identity reuses its disconnected record,
+// so its short-session history remains effective.
+func TestInboundExactRecordReuseKeepsShortSessionHistory(t *testing.T) {
 	t.Parallel()
 	pg := newInboundIdentityGovernor(t)
 	pg.mu.Lock()
@@ -187,7 +187,7 @@ func TestInboundRecordReuseKeepsShortSessionHistory(t *testing.T) {
 	})
 	pg.mu.Unlock()
 
-	pg.handleInboundConnectionEvent(inboundArrival(t, "44.0.0.1:51001"))
+	pg.handleInboundConnectionEvent(inboundArrival(t, "44.0.0.1:51000"))
 
 	peers := pg.GetPeers()
 	require.Equal(t, 1, len(peers))
@@ -197,13 +197,14 @@ func TestInboundRecordReuseKeepsShortSessionHistory(t *testing.T) {
 func closeInbound(
 	t *testing.T,
 	pg *PeerGovernor,
+	peerIdx int,
 	arrival event.Event,
 	closeErr error,
 ) {
 	t.Helper()
 	connId := arrival.Data.(connmanager.InboundConnectionEvent).ConnectionId
 	pg.mu.Lock()
-	pg.peers[0].Connection = &PeerConnection{Id: connId, IsClient: true}
+	pg.peers[peerIdx].Connection = &PeerConnection{Id: connId, IsClient: true}
 	pg.mu.Unlock()
 	pg.handleConnectionClosedEvent(event.Event{
 		Type: connmanager.ConnectionClosedEventType,
@@ -221,10 +222,10 @@ func closeInbound(
 func TestInboundShortSessionCleanCloseIsCounted(t *testing.T) {
 	t.Parallel()
 	pg := newInboundIdentityGovernor(t)
-	for port := 51000; port < 51004; port++ {
-		arrival := inboundArrival(t, fmt.Sprintf("44.0.0.1:%d", port))
+	for range 4 {
+		arrival := inboundArrival(t, "44.0.0.1:51000")
 		pg.handleInboundConnectionEvent(arrival)
-		closeInbound(t, pg, arrival, nil)
+		closeInbound(t, pg, 0, arrival, nil)
 	}
 	peers := pg.GetPeers()
 	require.Equal(t, 1, len(peers))
@@ -235,19 +236,154 @@ func TestInboundShortSessionCleanCloseIsCounted(t *testing.T) {
 func TestInboundShortSessionEndedByPeerErrorIsCounted(t *testing.T) {
 	t.Parallel()
 	pg := newInboundIdentityGovernor(t)
-	for port := 51000; port < 51003; port++ {
-		arrival := inboundArrival(t, fmt.Sprintf("44.0.0.1:%d", port))
+	for range 3 {
+		arrival := inboundArrival(t, "44.0.0.1:51000")
 		pg.handleInboundConnectionEvent(arrival)
-		closeInbound(t, pg, arrival, io.ErrUnexpectedEOF)
+		closeInbound(t, pg, 0, arrival, io.ErrUnexpectedEOF)
 	}
 	peers := pg.GetPeers()
 	require.Equal(t, 1, len(peers))
 	assert.Equal(t, uint32(3), peers[0].InboundShortLivedCount)
 }
 
-// Pruning a flapping warm peer keeps the host cooldown and escalation even
-// when its next connection uses a different source port.
-func TestInboundFlappingPruneKeepsHostHistory(t *testing.T) {
+func TestInboundShortSessionPortRotationHitsHostBackstop(t *testing.T) {
+	t.Parallel()
+	pg := newInboundIdentityGovernor(t)
+	limit := pg.inboundHostChurnLimit()
+	hostKey := inboundFlapHostKey("44.0.0.1:51000")
+	pg.mu.Lock()
+	pg.inboundHostChurn[hostKey] = inboundHostChurnRecord{
+		shortLivedCount: uint32(limit - 1),
+		windowStarted:   time.Now(),
+		expiresAt:       time.Now().Add(pg.config.InboundCooldown),
+	}
+	pg.mu.Unlock()
+
+	arrival := inboundArrival(t, "44.0.0.1:51000")
+	pg.handleInboundConnectionEvent(arrival)
+	closeInbound(t, pg, 0, arrival, nil)
+	pg.handleInboundConnectionEvent(inboundArrival(t, "44.0.0.1:51001"))
+
+	assert.Equal(t, float64(1), deniedInboundCount(pg))
+	require.Len(t, pg.GetPeers(), 1)
+}
+
+func TestInboundIPv6RotationWithinPrefixHitsHostBackstop(t *testing.T) {
+	t.Parallel()
+	pg := newInboundIdentityGovernor(t)
+	limit := pg.inboundHostChurnLimit()
+	hostKey := inboundFlapHostKey("[2001:db8:1::1]:51000")
+	pg.mu.Lock()
+	pg.inboundHostChurn[hostKey] = inboundHostChurnRecord{
+		shortLivedCount: uint32(limit - 1),
+		windowStarted:   time.Now(),
+		expiresAt:       time.Now().Add(pg.config.InboundCooldown),
+	}
+	pg.mu.Unlock()
+
+	arrival := inboundArrival(t, "[2001:db8:1::2]:51001")
+	pg.handleInboundConnectionEvent(arrival)
+	closeInbound(t, pg, 0, arrival, nil)
+	pg.handleInboundConnectionEvent(
+		inboundArrival(t, "[2001:db8:1::1]:51002"),
+	)
+
+	assert.Equal(t, float64(1), deniedInboundCount(pg))
+	require.Len(t, pg.GetPeers(), 1)
+}
+
+func TestInboundHostChurnActiveCooldownSurvivesWindowExpiry(t *testing.T) {
+	t.Parallel()
+	pg := newInboundIdentityGovernor(t)
+	now := time.Now()
+	hostKey := inboundFlapHostKey("44.0.0.1:51000")
+	windowStarted := now.Add(-2 * pg.config.InboundCooldown)
+	pg.inboundHostChurn[hostKey] = inboundHostChurnRecord{
+		shortLivedCount: uint32(pg.inboundHostChurnLimit()),
+		windowStarted:   windowStarted,
+		cooldownUntil:   now.Add(pg.config.InboundCooldown / 2),
+		expiresAt:       now.Add(pg.config.InboundCooldown / 2),
+	}
+
+	pg.rememberInboundHostChurnLocked(&Peer{
+		NormalizedAddress: "44.0.0.1:51000",
+	}, now)
+
+	record := pg.inboundHostChurn[hostKey]
+	assert.Equal(t, windowStarted, record.windowStarted)
+	assert.Equal(
+		t,
+		uint32(pg.inboundHostChurnLimit()+1),
+		record.shortLivedCount,
+	)
+	assert.Equal(t, now.Add(pg.config.InboundCooldown), record.cooldownUntil)
+}
+
+func TestInboundHostChurnCapacityFailsClosed(t *testing.T) {
+	t.Parallel()
+	now := time.Now()
+	pg := newInboundIdentityGovernor(t)
+	pg.mu.Lock()
+	for i := range pg.maxPeerListSize() {
+		pg.inboundHostChurn[fmt.Sprintf("host-%d", i)] =
+			inboundHostChurnRecord{expiresAt: now.Add(time.Minute)}
+	}
+	pg.mu.Unlock()
+
+	pg.handleInboundConnectionEvent(inboundArrival(t, "44.0.0.1:51000"))
+	assert.Equal(t, float64(1), deniedInboundCount(pg))
+	assert.Empty(t, pg.GetPeers())
+
+	pg.mu.Lock()
+	expired := pg.inboundHostChurn["host-0"]
+	expired.expiresAt = time.Now().Add(-time.Second)
+	pg.inboundHostChurn["host-0"] = expired
+	pg.mu.Unlock()
+	pg.handleInboundConnectionEvent(inboundArrival(t, "44.0.0.2:51000"))
+	assert.Equal(t, float64(1), deniedInboundCount(pg))
+	require.Len(t, pg.GetPeers(), 1)
+
+	topologyPG := newInboundIdentityGovernor(t)
+	topologyPG.mu.Lock()
+	for i := range topologyPG.maxPeerListSize() {
+		topologyPG.inboundHostChurn[fmt.Sprintf("host-%d", i)] =
+			inboundHostChurnRecord{expiresAt: now.Add(time.Minute)}
+	}
+	topologyPG.mu.Unlock()
+	seedTopologyPeer(
+		topologyPG, "44.0.0.3:3001", "44.0.0.3:3001",
+		"local-root-0", PeerSourceTopologyLocalRoot,
+	)
+	topologyPG.handleInboundConnectionEvent(
+		inboundArrival(t, "44.0.0.3:51000"),
+	)
+	assert.Equal(t, float64(0), deniedInboundCount(topologyPG))
+	require.Len(t, topologyPG.GetPeers(), 1)
+}
+
+func TestInboundStableNATPeerDoesNotSpendHostBackstop(t *testing.T) {
+	t.Parallel()
+	pg := newInboundIdentityGovernor(t)
+	arrival := inboundArrival(t, "44.0.0.1:51000")
+	pg.handleInboundConnectionEvent(arrival)
+	pg.mu.Lock()
+	pg.peers[0].InboundConnectedAt = time.Now().Add(
+		-minStableConnectionDuration,
+	)
+	pg.mu.Unlock()
+	closeInbound(t, pg, 0, arrival, nil)
+
+	pg.mu.Lock()
+	_, tracked := pg.inboundHostChurn[inboundFlapHostKey("44.0.0.1:51000")]
+	pg.mu.Unlock()
+	assert.False(t, tracked)
+	pg.handleInboundConnectionEvent(inboundArrival(t, "44.0.0.1:51001"))
+	assert.Equal(t, float64(0), deniedInboundCount(pg))
+}
+
+// Pruning a flapping warm peer cools down that transport identity without
+// refusing another peer that arrives through the same NAT gateway.
+func TestInboundFlappingPruneDoesNotCooldownSharedNAT(t *testing.T) {
 	t.Parallel()
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -274,31 +410,35 @@ func TestInboundFlappingPruneKeepsHostHistory(t *testing.T) {
 	require.Equal(t, 0, len(pg.GetPeers()), "flapping peer is pruned")
 
 	pg.handleInboundConnectionEvent(inboundArrival(t, "44.0.0.1:51001"))
+	assert.Equal(t, float64(0), deniedInboundCount(pg))
+	require.Len(t, pg.GetPeers(), 1)
+
+	pg.handleInboundConnectionEvent(inboundArrival(t, "44.0.0.1:51000"))
 	assert.Equal(t, float64(1), deniedInboundCount(pg))
-	assert.Empty(t, pg.GetPeers())
+	require.Len(t, pg.GetPeers(), 1)
 
 	pg.mu.Lock()
-	hostKey := inboundFlapHostKey("44.0.0.1:51001")
-	history := pg.inboundFlapHistory[hostKey]
+	flapKey := "44.0.0.1:51000"
+	history := pg.inboundFlapHistory[flapKey]
 	require.Equal(t, uint32(4), history.shortLivedCount)
 	history.cooldownUntil = time.Now().Add(-time.Second)
-	pg.inboundFlapHistory[hostKey] = history
+	pg.inboundFlapHistory[flapKey] = history
+	pg.denyList["44.0.0.1:51000"] = time.Now().Add(-time.Second)
 	pg.mu.Unlock()
 
-	arrival := inboundArrival(t, "44.0.0.1:51002")
+	arrival := inboundArrival(t, "44.0.0.1:51000")
 	pg.handleInboundConnectionEvent(arrival)
 	peers := pg.GetPeers()
-	require.Len(t, peers, 1)
-	assert.Equal(t, uint32(4), peers[0].InboundShortLivedCount)
+	require.Len(t, peers, 2)
+	assert.Equal(t, uint32(4), peers[1].InboundShortLivedCount)
 	pg.mu.Lock()
-	flapping, _ := pg.inboundFlappingStateLocked(pg.peers[0], time.Now())
+	flapping, _ := pg.inboundFlappingStateLocked(pg.peers[1], time.Now())
 	pg.mu.Unlock()
 	assert.False(t, flapping, "the admitted session can prove stability")
-	closeInbound(t, pg, arrival, nil)
+	closeInbound(t, pg, 1, arrival, nil)
 	peers = pg.GetPeers()
-	require.Len(t, peers, 1)
-	assert.Equal(t, uint32(5), peers[0].InboundShortLivedCount)
-
+	require.Len(t, peers, 2)
+	assert.Equal(t, uint32(5), peers[1].InboundShortLivedCount)
 }
 
 // A denied topology peer that reconnects from a new source port keeps its

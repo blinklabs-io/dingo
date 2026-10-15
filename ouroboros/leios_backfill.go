@@ -298,8 +298,45 @@ func (o *Ouroboros) FetchEndorserBlockByPoint(
 	}
 	connIds := o.connManager.LeiosFetchConnectionIds()
 	if len(connIds) == 0 {
-		return errors.New("leios backfill: no leios-fetch connection available")
+		return fmt.Errorf(
+			"leios backfill: %w",
+			ledger.ErrEndorserBlockFetchNoPeer,
+		)
 	}
+	return o.fetchEndorserBlockByPointWithConnections(
+		ctx,
+		ebSlot,
+		ebHash,
+		connIds,
+		o.connManager.GetConnectionById,
+	)
+}
+
+func (o *Ouroboros) fetchEndorserBlockByPointWithConnections(
+	ctx context.Context,
+	ebSlot uint64,
+	ebHash []byte,
+	connIds []ouroboros.ConnectionId,
+	getConnection func(ouroboros.ConnectionId) *ouroboros.Connection,
+) error {
+	return o.fetchEndorserBlockWithCandidates(
+		ctx,
+		ebSlot,
+		ebHash,
+		connIds,
+		getConnection,
+		o.fetchEndorserBlockOnConn,
+	)
+}
+
+func (o *Ouroboros) fetchEndorserBlockWithCandidates(
+	ctx context.Context,
+	ebSlot uint64,
+	ebHash []byte,
+	connIds []ouroboros.ConnectionId,
+	getConnection func(ouroboros.ConnectionId) *ouroboros.Connection,
+	fetch func(context.Context, ouroboros.ConnectionId, *oleiosfetch.Client, ocommon.Point, time.Time) error,
+) error {
 	overall, hasDeadline := ctx.Deadline()
 	if !hasDeadline {
 		overall = time.Now().Add(leiosBackfillTotalBudget)
@@ -313,28 +350,58 @@ func (o *Ouroboros) FetchEndorserBlockByPoint(
 	// partition kept in round-robin order so concurrent backfills still spread. A
 	// cooled or dead connection is still eventually tried, so a transiently-flaky
 	// one is skipped, not starved.
-	order := leiosBackfillConnOrder(
+	candidates := o.leiosBackfillConnCandidatesForPoint(
 		connIds,
 		start,
+		point,
 		time.Now(),
-		leiosBackfillAffinityWindow,
-		o.leiosFetchGuardFor,
 	)
 	var lastErr, busyErr error
-	remainingCandidates := len(order)
-	for _, connId := range order {
-		remainingCandidates--
+	usableConnection := false
+	remainingCandidates := len(connIds)
+	counted := make(map[ouroboros.ConnectionId]bool, len(connIds))
+	var preferredConn *ouroboros.Connection
+	if len(candidates) > 0 {
+		preferredConn = candidates[0].conn
+	}
+	preferredInFallback := false
+	if preferredConn != nil {
+		for _, id := range connIds {
+			if id == preferredConn.Id() {
+				preferredInFallback = true
+				break
+			}
+		}
+		if !preferredInFallback {
+			remainingCandidates++
+		}
+	}
+	for _, candidate := range candidates {
+		connId := candidate.connId
 		if err := ctx.Err(); err != nil {
 			if lastErr == nil {
 				lastErr = err
 			}
 			break
 		}
-		conn := o.connManager.GetConnectionById(connId)
+		conn := o.leiosBackfillCandidateConn(candidate, preferredConn, getConnection)
+		// A reconnected peer remains eligible at its fallback position; only
+		// the exact already-promoted connection is a duplicate.
+		if candidate.conn != nil && conn == nil {
+			if !preferredInFallback {
+				remainingCandidates--
+			}
+			continue
+		}
+		if !counted[connId] {
+			remainingCandidates--
+			counted[connId] = true
+		}
 		if conn == nil || conn.LeiosFetch() == nil ||
 			conn.LeiosFetch().Client == nil {
 			continue
 		}
+		usableConnection = true
 		// now anchors both remaining and attemptDeadline below to a single
 		// clock read, so a last/only candidate's attemptDeadline is computed
 		// as now.Add(overall.Sub(now)) -- algebraically exactly overall, with
@@ -367,7 +434,7 @@ func (o *Ouroboros) FetchEndorserBlockByPoint(
 		// their cooldown state in fetch-completion order. Doing it here, after
 		// the guard is released, would let a slow failure's mark land after a
 		// newer success's mark and wrongly cool down a healthy connection.
-		err := o.fetchEndorserBlockOnConn(
+		err := fetch(
 			ctx,
 			connId,
 			conn.LeiosFetch().Client,
@@ -404,10 +471,53 @@ func (o *Ouroboros) FetchEndorserBlockByPoint(
 	if lastErr == nil {
 		lastErr = busyErr
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if !usableConnection {
+		return fmt.Errorf(
+			"leios backfill: %w",
+			ledger.ErrEndorserBlockFetchNoPeer,
+		)
+	}
 	if lastErr == nil {
 		lastErr = errors.New("leios backfill: fetch failed")
 	}
 	return lastErr
+}
+
+func (o *Ouroboros) leiosEndorserBlockRelayOfferSource(
+	point ocommon.Point,
+) string {
+	o.leiosMu.RLock()
+	defer o.leiosMu.RUnlock()
+	data := o.leiosEndorserBlocks[leiosBlockKey(point.Slot, point.Hash)]
+	if data == nil {
+		return ""
+	}
+	return data.relayOfferSource
+}
+
+func preferLeiosBackfillOfferSource(
+	order []ouroboros.ConnectionId,
+	connectionID string,
+	guardFor func(ouroboros.ConnectionId) *leiosFetchGuard,
+) []ouroboros.ConnectionId {
+	if connectionID == "" {
+		return order
+	}
+	for idx, connID := range order {
+		if leiosConnectionIdString(connID) != connectionID ||
+			guardFor(connID).isProtocolDead() {
+			continue
+		}
+		if idx > 0 {
+			copy(order[1:idx+1], order[:idx])
+			order[0] = connID
+		}
+		break
+	}
+	return order
 }
 
 // requestLeiosFetchConnRecycle asks the connection manager to close a
@@ -539,11 +649,12 @@ func (o *Ouroboros) fetchEndorserBlockOnConn(
 				resp,
 			)
 		}
+		//nolint:contextcheck // Persistence is handed to the Ouroboros-owned worker and must outlive this bounded backfill request.
 		if err := o.storeLeiosEndorserBlock(
 			point,
 			blk.BlockRaw,
 			nil,
-			leiosStoreAuthoritative,
+			leiosStoreBackfill,
 		); err != nil {
 			return fmt.Errorf("store manifest: %w", err)
 		}
@@ -560,6 +671,7 @@ func (o *Ouroboros) fetchEndorserBlockOnConn(
 		// otherwise return nil on every connection this backfill tries
 		// without any of them ever verifying the entry, since none would
 		// take the !ok branch above.
+		//nolint:contextcheck // Publication may enqueue Ouroboros-lifetime persistence beyond this request's deadline.
 		if publish := o.bindLeiosEndorserBlockSlot(point.Hash, point.Slot); publish != nil {
 			publish()
 		}
@@ -592,11 +704,12 @@ func (o *Ouroboros) fetchEndorserBlockOnConn(
 	if err := validateLeiosEndorserBlockTxs(data.blockRaw, txs); err != nil {
 		return fmt.Errorf("validate tx references: %w", err)
 	}
+	//nolint:contextcheck // Persistence is handed to the Ouroboros-owned worker and must outlive this bounded backfill request.
 	if err := o.storeLeiosEndorserBlock(
 		point,
 		data.blockRaw,
 		txs,
-		leiosStoreAuthoritative,
+		leiosStoreBackfill,
 	); err != nil {
 		return fmt.Errorf("store txs: %w", err)
 	}
@@ -653,4 +766,67 @@ func leiosBackfillConnOrder(
 	order = append(order, cooled...)
 	order = append(order, dead...)
 	return order
+}
+
+type leiosBackfillConnCandidate struct {
+	connId ouroboros.ConnectionId
+	conn   *ouroboros.Connection
+}
+
+func (o *Ouroboros) leiosBackfillCandidateConn(
+	candidate leiosBackfillConnCandidate,
+	preferred *ouroboros.Connection,
+	getConnection func(ouroboros.ConnectionId) *ouroboros.Connection,
+) *ouroboros.Connection {
+	if candidate.conn != nil {
+		if getConnection(candidate.connId) != candidate.conn {
+			return nil
+		}
+		return candidate.conn
+	}
+	conn := getConnection(candidate.connId)
+	if conn == preferred {
+		return nil
+	}
+	return conn
+}
+
+func (o *Ouroboros) leiosBackfillConnCandidatesForPoint(
+	connIds []ouroboros.ConnectionId,
+	start int,
+	point ocommon.Point,
+	now time.Time,
+) []leiosBackfillConnCandidate {
+	order := leiosBackfillConnOrder(
+		connIds,
+		start,
+		now,
+		leiosBackfillAffinityWindow,
+		o.leiosFetchGuardFor,
+	)
+	order = preferLeiosBackfillOfferSource(
+		order,
+		o.leiosEndorserBlockRelayOfferSource(point),
+		o.leiosFetchGuardFor,
+	)
+	candidates := make([]leiosBackfillConnCandidate, 0, len(order)+1)
+	if len(order) > 0 && o.chainsyncState != nil {
+		active := o.chainsyncState.GetClientConnId()
+		if active != nil {
+			activeConn := o.leiosBackfillSourceConn(point, *active)
+			if activeConn != nil {
+				g := o.leiosFetchGuardFor(*active)
+				if !g.isProtocolDead() && !g.inCooldown(now) {
+					candidates = append(candidates, leiosBackfillConnCandidate{
+						connId: *active,
+						conn:   activeConn,
+					})
+				}
+			}
+		}
+	}
+	for _, connId := range order {
+		candidates = append(candidates, leiosBackfillConnCandidate{connId: connId})
+	}
+	return candidates
 }

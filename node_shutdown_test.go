@@ -16,15 +16,18 @@ package dingo
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/dblifecycle"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
@@ -34,9 +37,50 @@ import (
 	"github.com/blinklabs-io/dingo/ledger/leader"
 	"github.com/blinklabs-io/dingo/ledger/leios"
 	"github.com/blinklabs-io/dingo/ledger/snapshot"
+	midnightindexer "github.com/blinklabs-io/dingo/midnight/indexer"
+	ouroborosPkg "github.com/blinklabs-io/dingo/ouroboros"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestShutdownReportsMidnightDrainFailure(t *testing.T) {
+	t.Parallel()
+	for _, blocked := range []bool{false, true} {
+		t.Run(fmt.Sprintf("blocked=%t", blocked), func(t *testing.T) {
+			db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+			require.NoError(t, err)
+			bus := event.NewEventBus(nil, nil)
+			defer bus.Close()
+			entered, release := make(chan struct{}), make(chan struct{})
+			defer close(release)
+			idx, err := midnightindexer.New(midnightindexer.Config{
+				EventBus: bus, Metadata: db.Metadata(),
+				FatalErrorFunc: func(error) { close(entered); <-release },
+			})
+			require.NoError(t, err)
+			require.NoError(t, idx.Start())
+			if blocked {
+				bus.Publish(ledger.BlockEventType, event.NewEvent(ledger.BlockEventType,
+					ledger.BlockEvent{Action: ledger.BlockActionApply, Block: models.Block{}}))
+				testutil.RequireReceive(t, entered, time.Second, "indexer handler did not start")
+			}
+			// The indexer's independently owned bus isolates its drain result.
+			n := &Node{config: NewConfig(WithShutdownTimeout(time.Second)), db: db, midnightIndexer: idx}
+			n.config.logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+			err = n.Stop()
+			if blocked {
+				if !errors.Is(err, errStorageDrainUnconfirmed) {
+					t.Fatalf("shutdown omitted the indexer drain sentinel: %v", err)
+				}
+				require.ErrorIs(t, err, context.DeadlineExceeded)
+				_, readErr := db.Metadata().GetBackfillCheckpoint("midnight", nil)
+				require.NoError(t, readErr, "storage must remain open while the indexer is using it")
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
 
 // TestShutdownPhase1ComponentStopsCoverEveryUnboundedStop pins the set of
 // phase-1 components routed through stopWithDeadline. Each of these has a
@@ -199,6 +243,107 @@ func TestNodeStopSkipsDatabaseCloseWhenPhase1DrainUnconfirmed(t *testing.T) {
 	// mutually exclusive with calling n.db.Close: its presence is direct
 	// proof the close branch did not run.
 	assert.ErrorContains(t, stopErr, "database close skipped")
+}
+
+// Not t.Parallel: swaps the package-level closeOuroborosInstance seam.
+func TestNodeStopSkipsStorageCloseWhenLeiosPersistenceDrainUnconfirmed(
+	t *testing.T,
+) {
+	n, _ := newLiveLifecycleTestNode(t, 1)
+	previous := closeOuroborosInstance
+	closeOuroborosInstance = func(*ouroborosPkg.Ouroboros) error {
+		return ouroborosPkg.ErrLeiosPersistDrainUnconfirmed
+	}
+	t.Cleanup(func() { closeOuroborosInstance = previous })
+
+	stopErr := n.Stop()
+	require.ErrorIs(t, stopErr, errStorageDrainUnconfirmed)
+	require.ErrorContains(
+		t, stopErr,
+		"database close skipped: storage-user drain unconfirmed",
+	)
+	_, err := n.db.GetTip(nil)
+	require.NoError(
+		t, err,
+		"database must remain usable after an unconfirmed Leios worker drain",
+	)
+	require.NoError(t, n.ouroboros().Close())
+}
+
+// Not t.Parallel: swaps the package-level closeOuroborosInstance seam.
+//
+// Ouroboros.Close releases acquired LocalStateQuery snapshots, and nothing
+// stops an NtC client from acquiring a new one while connections are still
+// open. Shutdown must therefore close Ouroboros exactly once, after phase 2
+// has drained connections and before phase 3 closes the database.
+func TestNodeStopClosesOuroborosOnceAfterConnectionsDrain(t *testing.T) {
+	n, _ := newLiveLifecycleTestNode(t, 1)
+	order := &shutdownOrderLogHandler{}
+	n.config.logger = slog.New(order)
+	previous := closeOuroborosInstance
+	closeOuroborosInstance = func(ouro *ouroborosPkg.Ouroboros) error {
+		order.add("ouroboros close")
+		return previous(ouro)
+	}
+	t.Cleanup(func() { closeOuroborosInstance = previous })
+
+	require.NoError(t, n.Stop())
+
+	closes := order.indexes("ouroboros close")
+	require.Len(t, closes, 1, "shutdown must close Ouroboros exactly once")
+	phase2 := order.indexes("shutdown phase 2 complete")
+	phase3 := order.indexes("shutdown phase 3: flushing state")
+	require.Len(t, phase2, 1)
+	require.Len(t, phase3, 1)
+	assert.Greater(t, closes[0], phase2[0],
+		"Ouroboros must close after connections drain")
+	assert.Less(t, closes[0], phase3[0],
+		"Ouroboros must close before the database closes")
+}
+
+// shutdownOrderLogHandler records log messages, plus markers a test adds, in
+// the order they happen.
+type shutdownOrderLogHandler struct {
+	mu      sync.Mutex
+	entries []string
+}
+
+func (h *shutdownOrderLogHandler) add(entry string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.entries = append(h.entries, entry)
+}
+
+func (h *shutdownOrderLogHandler) indexes(entry string) []int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	var ret []int
+	for i, e := range h.entries {
+		if e == entry {
+			ret = append(ret, i)
+		}
+	}
+	return ret
+}
+
+func (h *shutdownOrderLogHandler) Enabled(context.Context, slog.Level) bool {
+	return true
+}
+
+func (h *shutdownOrderLogHandler) Handle(
+	_ context.Context,
+	record slog.Record,
+) error {
+	h.add(record.Message)
+	return nil
+}
+
+func (h *shutdownOrderLogHandler) WithAttrs([]slog.Attr) slog.Handler {
+	return h
+}
+
+func (h *shutdownOrderLogHandler) WithGroup(string) slog.Handler {
+	return h
 }
 
 // shutdownTestResourceLogHandler counts closeWithShutdownTimeout's log records

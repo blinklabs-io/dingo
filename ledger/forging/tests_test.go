@@ -2906,9 +2906,10 @@ func TestForgeDropsStaleAnnouncementWhenParentChanges(t *testing.T) {
 			slotsPerKESPeriod: 100,
 			slotEnd:           time.Now().Add(time.Hour),
 		},
-		LeiosProduceChecker: &forgerTestLeiosChecker{allowed: true},
-		LeiosEBBroadcaster:  &forgerTestLeiosCaster{},
-		LeiosTxValidator:    &sessionMockTxValidator{},
+		LeiosProduceChecker:        &forgerTestLeiosChecker{allowed: true},
+		LeiosEBBroadcaster:         &forgerTestLeiosCaster{},
+		LeiosTxValidator:           &sessionMockTxValidator{},
+		LeiosAnnouncementValidator: acceptLeiosAnnouncement,
 		LeiosMempool: forgerTestMempoolProvider{
 			txs: leiosAnnouncementTxs(t),
 		},
@@ -3018,6 +3019,10 @@ func leiosAnnouncementTxs(t *testing.T) []MempoolTransaction {
 	}
 }
 
+func acceptLeiosAnnouncement(context.Context, ledger.BlockHeader) error {
+	return nil
+}
+
 // TestForgeReResolvesLeiosDataForEmptyFallback closes the same hole on the
 // other recovery path. The empty-body fallback is a fresh build against
 // whatever the chain tip is now, so it needs its Leios payload resolved
@@ -3118,9 +3123,10 @@ func TestForgeKeepsAnnouncementWhenParentIsUnchanged(t *testing.T) {
 			slotsPerKESPeriod: 100,
 			slotEnd:           time.Now().Add(time.Hour),
 		},
-		LeiosProduceChecker: &forgerTestLeiosChecker{allowed: true},
-		LeiosEBBroadcaster:  &forgerTestLeiosCaster{},
-		LeiosTxValidator:    &sessionMockTxValidator{},
+		LeiosProduceChecker:        &forgerTestLeiosChecker{allowed: true},
+		LeiosEBBroadcaster:         &forgerTestLeiosCaster{},
+		LeiosTxValidator:           &sessionMockTxValidator{},
+		LeiosAnnouncementValidator: acceptLeiosAnnouncement,
 		LeiosMempool: forgerTestMempoolProvider{
 			txs: leiosAnnouncementTxs(t),
 		},
@@ -3213,6 +3219,7 @@ func TestForgeReResolvesLeiosDataWhenParentChangesBeforeTheFirstBuild(
 		LeiosEBBroadcaster:              &forgerTestLeiosCaster{},
 		LeiosMempool:                    forgerTestMempoolProvider{},
 		LeiosTxValidator:                &mockTxValidator{},
+		LeiosAnnouncementValidator:      acceptLeiosAnnouncement,
 		PromRegistry:                    prometheus.NewRegistry(),
 	})
 	require.NoError(t, err)
@@ -4824,13 +4831,14 @@ type leiosOverlayValidator struct {
 }
 
 func (v *leiosOverlayValidator) ValidateTx(tx ledger.Transaction) error {
-	return v.ValidateTxWithOverlay(tx, nil, nil)
+	return v.ValidateTxWithOverlay(tx, nil, nil, nil)
 }
 
 func (v *leiosOverlayValidator) ValidateTxWithOverlay(
 	tx ledger.Transaction,
 	consumed map[utxoref.Key]struct{},
 	created map[utxoref.Key]lcommon.Utxo,
+	accounts *utxoref.StateOverlay,
 ) error {
 	if _, reject := v.reject[tx.Hash().String()]; reject {
 		return errors.New("rejected parent")
@@ -5045,9 +5053,10 @@ func TestCheckAndForgeProductionAppliesEBRefCap(t *testing.T) {
 			slotsPerKESPeriod: 100,
 			slotEnd:           time.Now().Add(time.Hour),
 		},
-		LeiosProduceChecker: &forgerTestLeiosChecker{allowed: true},
-		LeiosEBBroadcaster:  leiosCaster,
-		LeiosTxValidator:    &sessionMockTxValidator{},
+		LeiosProduceChecker:        &forgerTestLeiosChecker{allowed: true},
+		LeiosEBBroadcaster:         leiosCaster,
+		LeiosTxValidator:           &sessionMockTxValidator{},
+		LeiosAnnouncementValidator: acceptLeiosAnnouncement,
 		LeiosMempool: forgerTestMempoolProvider{
 			txs: leiosCandidateTxs(t, 12),
 		},
@@ -5389,10 +5398,11 @@ func TestCheckAndForgeProductionBoundsEBSelectionWithoutASlotClock(
 			// A slot clock that cannot report the next slot boundary.
 			slotEnd: time.Time{},
 		},
-		LeiosProduceChecker:     &forgerTestLeiosChecker{allowed: true},
-		LeiosEBBroadcaster:      leiosCaster,
-		LeiosTxValidator:        validator,
-		ForgeEBSelectionReserve: 300 * time.Millisecond,
+		LeiosProduceChecker:        &forgerTestLeiosChecker{allowed: true},
+		LeiosEBBroadcaster:         leiosCaster,
+		LeiosTxValidator:           validator,
+		LeiosAnnouncementValidator: acceptLeiosAnnouncement,
+		ForgeEBSelectionReserve:    300 * time.Millisecond,
 		LeiosMempool: forgerTestMempoolProvider{
 			txs: leiosCandidateTxs(t, 20),
 		},
@@ -5607,10 +5617,11 @@ func TestCheckAndForgeProductionSkipsEBWhenSlotIsOver(t *testing.T) {
 			// The slot has already ended.
 			slotEnd: time.Now(),
 		},
-		LeiosProduceChecker:     &forgerTestLeiosChecker{allowed: true},
-		LeiosEBBroadcaster:      leiosCaster,
-		LeiosTxValidator:        validator,
-		ForgeEBSelectionReserve: 300 * time.Millisecond,
+		LeiosProduceChecker:        &forgerTestLeiosChecker{allowed: true},
+		LeiosEBBroadcaster:         leiosCaster,
+		LeiosTxValidator:           validator,
+		LeiosAnnouncementValidator: acceptLeiosAnnouncement,
+		ForgeEBSelectionReserve:    300 * time.Millisecond,
 		LeiosMempool: forgerTestMempoolProvider{
 			txs: leiosCandidateTxs(t, 20),
 		},
@@ -5679,18 +5690,19 @@ func newEBTimingForger(
 	t.Helper()
 	block := newForgerTestBlock(10, 2)
 	forger, err := NewBlockForger(ForgerConfig{
-		Mode:                ModeProduction,
-		Logger:              slog.New(slog.NewJSONHandler(logs, nil)),
-		Credentials:         setupTestCredentials(t),
-		LeaderChecker:       forgerTestLeader{},
-		BlockBuilder:        &forgerTestBuilder{block: block, cbor: block.cbor},
-		BlockBroadcaster:    broadcaster,
-		SlotClock:           clock,
-		LeiosProduceChecker: &forgerTestLeiosChecker{allowed: true},
-		LeiosEBBroadcaster:  caster,
-		LeiosTxValidator:    validator,
-		LeiosMempool:        forgerTestMempoolProvider{txs: txs},
-		PromRegistry:        prometheus.NewRegistry(),
+		Mode:                       ModeProduction,
+		Logger:                     slog.New(slog.NewJSONHandler(logs, nil)),
+		Credentials:                setupTestCredentials(t),
+		LeaderChecker:              forgerTestLeader{},
+		BlockBuilder:               &forgerTestBuilder{block: block, cbor: block.cbor},
+		BlockBroadcaster:           broadcaster,
+		SlotClock:                  clock,
+		LeiosProduceChecker:        &forgerTestLeiosChecker{allowed: true},
+		LeiosEBBroadcaster:         caster,
+		LeiosTxValidator:           validator,
+		LeiosAnnouncementValidator: acceptLeiosAnnouncement,
+		LeiosMempool:               forgerTestMempoolProvider{txs: txs},
+		PromRegistry:               prometheus.NewRegistry(),
 	})
 	require.NoError(t, err)
 	return forger

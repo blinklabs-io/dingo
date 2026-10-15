@@ -594,11 +594,10 @@ func TestParsePStateSelectsUTxOHDPoolMap(t *testing.T) {
 	ownerHash := bytes.Repeat([]byte{0x44}, 28)
 	metadataHash := bytes.Repeat([]byte{0x55}, 32)
 
-	// UTxO-HD Preview snapshots encode PState with a non-pool map at
+	// UTxO-HD Preview snapshots may encode PState with an empty map at
 	// index 0 and the active pool map at index 1. The active pool map
 	// omits the operator from the value because it is already the map key.
-	wrongKey := bytes.Repeat([]byte{0x99}, 32)
-	wrongMap := encodeCredentialMapEntry(t, wrongKey, uint64(1))
+	wrongMap := encodeCborMap(t)
 	poolMap := encodeCredentialMapEntry(
 		t,
 		poolHash,
@@ -920,6 +919,60 @@ func TestParseCommitteeVStatePreservesTaggedAuthorizations(t *testing.T) {
 	}
 }
 
+func TestParseVStateAddsDormantEpochsToDRepExpiry(t *testing.T) {
+	t.Parallel()
+
+	credential, err := cbor.Encode([]any{
+		uint64(CredentialTypeKey),
+		bytes.Repeat([]byte{0x44}, 28),
+	})
+	require.NoError(t, err)
+	state, err := cbor.Encode([]any{uint64(10), nil, uint64(500)})
+	require.NoError(t, err)
+	drepMap := append([]byte{0xa1}, credential...)
+	drepMap = append(drepMap, state...)
+	encodedVState, err := cbor.Encode([]any{cbor.RawMessage(drepMap), map[any]any{}, uint64(3)})
+	require.NoError(t, err)
+
+	dreps, _, _, dormant, err := parseVState(encodedVState)
+	require.NoError(t, err)
+	require.Equal(t, uint64(3), dormant)
+	require.Len(t, dreps, 1)
+	require.Equal(t, uint64(13), dreps[0].ExpiryEpoch)
+}
+
+func TestParseVStateReadsDormancyAfterFlattenedCommitteeState(t *testing.T) {
+	t.Parallel()
+
+	credential, err := cbor.Encode([]any{
+		uint64(CredentialTypeKey),
+		bytes.Repeat([]byte{0x47}, 28),
+	})
+	require.NoError(t, err)
+	drepState, err := cbor.Encode([]any{uint64(10), nil, uint64(500)})
+	require.NoError(t, err)
+	drepMap := append([]byte{0xa1}, credential...)
+	drepMap = append(drepMap, drepState...)
+	_, resignMap := committeeVStateFixture(t)
+	hotMap := []byte{0xa0}
+
+	encodedVState, err := cbor.Encode([]any{
+		cbor.RawMessage(drepMap),
+		cbor.RawMessage(hotMap),
+		cbor.RawMessage(resignMap),
+		uint64(3),
+	})
+	require.NoError(t, err)
+
+	dreps, hotKeys, resignations, dormant, err := parseVState(encodedVState)
+	require.NoError(t, err)
+	require.Equal(t, uint64(3), dormant)
+	require.Len(t, dreps, 1)
+	require.Equal(t, uint64(13), dreps[0].ExpiryEpoch)
+	require.Empty(t, hotKeys)
+	require.Len(t, resignations, 1)
+}
+
 func toFixed28(src []byte) [28]byte {
 	var dst [28]byte
 	copy(dst[:], src)
@@ -999,7 +1052,9 @@ func TestParseCertStateConwayRecoversCommitteeState(t *testing.T) {
 		t.Fatal(err)
 	}
 	drepMap := append([]byte{0xa1}, drepCredential...)
-	drepMap = append(drepMap, 0x80)
+	drepState, err := cbor.Encode([]any{uint64(0), nil, uint64(0)})
+	require.NoError(t, err)
+	drepMap = append(drepMap, drepState...)
 
 	// DState must be the largest credential-keyed map so it is identified
 	// ahead of the DRep and committee maps.
@@ -1054,6 +1109,191 @@ func TestParseCertStateConwayRecoversCommitteeState(t *testing.T) {
 			result.CommitteeResignations[0],
 		)
 	}
+}
+
+func TestParseDRepMapPreservesReverseDelegators(t *testing.T) {
+	t.Parallel()
+
+	drepHash := bytes.Repeat([]byte{0x49}, 28)
+	delegatorKey := bytes.Repeat([]byte{0x4a}, 28)
+	delegatorScript := bytes.Repeat([]byte{0x4b}, 28)
+	drepCredential, err := cbor.Encode([]any{uint64(CredentialTypeKey), drepHash})
+	require.NoError(t, err)
+	delegatorKeyCredential, err := cbor.Encode([]any{uint64(CredentialTypeKey), delegatorKey})
+	require.NoError(t, err)
+	delegatorScriptCredential, err := cbor.Encode([]any{uint64(CredentialTypeScript), delegatorScript})
+	require.NoError(t, err)
+	drepState, err := cbor.Encode([]any{
+		uint64(50), nil, uint64(500),
+		[]cbor.RawMessage{delegatorKeyCredential, delegatorScriptCredential},
+	})
+	require.NoError(t, err)
+	drepMap := append([]byte{0xa1}, drepCredential...)
+	drepMap = append(drepMap, drepState...)
+
+	dreps, err := parseDRepMap(drepMap)
+	require.NoError(t, err)
+	require.Len(t, dreps, 1)
+	require.Equal(t, uint64(CredentialTypeKey), dreps[0].Credential.Type)
+	require.Equal(t, drepHash, dreps[0].Credential.Hash)
+	require.Equal(t, []Credential{
+		{Type: CredentialTypeKey, Hash: delegatorKey},
+		{Type: CredentialTypeScript, Hash: delegatorScript},
+	}, dreps[0].Delegators)
+}
+
+func TestParseDRepMapRejectsMalformedStateFields(t *testing.T) {
+	t.Parallel()
+	credential, err := cbor.Encode([]any{
+		uint64(CredentialTypeKey), bytes.Repeat([]byte{0x41}, 28),
+	})
+	require.NoError(t, err)
+	for name, state := range map[string][]any{
+		"expiry":                {"10", nil, uint64(500)},
+		"anchor":                {uint64(10), "invalid", uint64(500)},
+		"anchor hash too short": {uint64(10), []any{"url", bytes.Repeat([]byte{0x55}, 31)}, uint64(500)},
+		"deposit":               {uint64(10), nil, "500"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			rawState, encodeErr := cbor.Encode(state)
+			require.NoError(t, encodeErr)
+			drepMap := append([]byte{0xa1}, credential...)
+			drepMap = append(drepMap, rawState...)
+			_, parseErr := parseDRepMap(drepMap)
+			require.Error(t, parseErr)
+		})
+	}
+}
+
+// TestParseCertStateConwayAddsFlattenedDormancyToDRepExpiry pins the
+// flattened Mithril CertState layout where the dormant count follows the
+// nested committee state after the DRep map.
+func TestParseCertStateConwayAddsFlattenedDormancyToDRepExpiry(t *testing.T) {
+	t.Parallel()
+
+	credential, err := cbor.Encode([]any{
+		uint64(CredentialTypeKey),
+		bytes.Repeat([]byte{0x44}, 28),
+	})
+	require.NoError(t, err)
+	drepState, err := cbor.Encode([]any{uint64(10), nil, uint64(500)})
+	require.NoError(t, err)
+	drepMap := append([]byte{0xa1}, credential...)
+	drepMap = append(drepMap, drepState...)
+
+	hotMap, resignMap := committeeVStateFixture(t)
+	committeeState := append([]byte{0x82}, hotMap...)
+	committeeState = append(committeeState, resignMap...)
+	poolState := []byte{0x87, 0xa0, 0xa0, 0xa0, 0xa0, 0xa0, 0xa0, 0xa0}
+	dstate := []byte{0xa2}
+	for _, tag := range []byte{0x77, 0x78} {
+		delegator, encodeErr := cbor.Encode(
+			[]any{uint64(CredentialTypeKey), bytes.Repeat([]byte{tag}, 28)},
+		)
+		require.NoError(t, encodeErr)
+		dstate = append(dstate, delegator...)
+		dstate = append(dstate, 0x80)
+	}
+
+	result, err := parseCertStateConway([][]byte{
+		drepMap,
+		committeeState,
+		{0x03},
+		poolState,
+		dstate,
+		{0x00},
+	})
+	if err != nil {
+		t.Logf("parse warnings: %v", err)
+	}
+	require.NotNil(t, result)
+	require.Equal(t, uint64(3), result.DormantEpochs)
+	require.Len(t, result.DReps, 1)
+	require.Equal(t, uint64(13), result.DReps[0].ExpiryEpoch)
+}
+
+func TestParseCertStateConwayRejectsMalformedDRepDelegators(t *testing.T) {
+	t.Parallel()
+
+	credential, err := cbor.Encode([]any{
+		uint64(CredentialTypeKey),
+		bytes.Repeat([]byte{0x46}, 28),
+	})
+	require.NoError(t, err)
+	drepState, err := cbor.Encode([]any{
+		uint64(10), nil, uint64(500), "malformed delegator list",
+	})
+	require.NoError(t, err)
+	drepMap := append([]byte{0xa1}, credential...)
+	drepMap = append(drepMap, drepState...)
+	dstate := []byte{0xa4}
+	for i := range 4 {
+		accountMapEntry := encodeCredentialMapEntry(
+			t,
+			[]any{
+				uint64(CredentialTypeKey),
+				bytes.Repeat([]byte{byte(0x50 + i)}, 28),
+			},
+			[]any{uint64(0), uint64(0)},
+		)
+		dstate = append(dstate, accountMapEntry[1:]...)
+	}
+	poolState := []byte{0x87, 0xa0, 0xa0, 0xa0, 0xa0, 0xa0, 0xa0, 0xa0}
+
+	certStateCBOR, err := cbor.Encode([]any{
+		cbor.RawMessage(drepMap),
+		cbor.RawMessage([]byte{0xa0}),
+		uint64(3),
+		cbor.RawMessage(poolState),
+		cbor.RawMessage(dstate),
+		uint64(0),
+	})
+	require.NoError(t, err)
+
+	result, err := ParseCertState(certStateCBOR)
+	require.ErrorContains(t, err, "decoding DRep delegators")
+	require.Nil(t, result, "a malformed selected DRep map must not yield partial imported state")
+}
+
+func TestParseCertStateConwayIgnoresUnrelatedIntegerAfterDRepMap(t *testing.T) {
+	t.Parallel()
+
+	credential, err := cbor.Encode([]any{
+		uint64(CredentialTypeKey),
+		bytes.Repeat([]byte{0x45}, 28),
+	})
+	require.NoError(t, err)
+	drepState, err := cbor.Encode([]any{uint64(10), nil, uint64(500)})
+	require.NoError(t, err)
+	drepMap := append([]byte{0xa1}, credential...)
+	drepMap = append(drepMap, drepState...)
+	dstate := []byte{0xa2}
+	for _, tag := range []byte{0x76, 0x77} {
+		delegator, encodeErr := cbor.Encode([]any{
+			uint64(CredentialTypeKey),
+			bytes.Repeat([]byte{tag}, 28),
+		})
+		require.NoError(t, encodeErr)
+		dstate = append(dstate, delegator...)
+		dstate = append(dstate, 0x80)
+	}
+	poolState := []byte{0x87, 0xa0, 0xa0, 0xa0, 0xa0, 0xa0, 0xa0, 0xa0}
+
+	result, err := parseCertStateConway([][]byte{
+		drepMap,
+		{0x00}, // unrelated field; the following integer is not VState dormancy
+		{0x03},
+		poolState,
+		dstate,
+		{0x00},
+	})
+	if err != nil {
+		t.Logf("parse warnings: %v", err)
+	}
+	require.NotNil(t, result)
+	require.Zero(t, result.DormantEpochs)
+	require.Len(t, result.DReps, 1)
+	require.Equal(t, uint64(10), result.DReps[0].ExpiryEpoch)
 }
 
 // DState and ccHotKeys are both credential-keyed, so picking DState by map size
@@ -1704,4 +1944,326 @@ func TestParseCertStateConwayDRepsWithEmptyDState(t *testing.T) {
 	if err == nil || len(dreps) != 0 {
 		t.Fatalf("malformed DRep accepted: %#v, %v", dreps, err)
 	}
+}
+
+// A re-registration staged in futurePoolParams must reach the importer with
+// the pool it re-registers, and leave the parameters in force untouched.
+func TestParsePStateDecodesFuturePoolParams(t *testing.T) {
+	t.Parallel()
+
+	poolHash := bytes.Repeat([]byte{0x11}, 28)
+	otherHash := bytes.Repeat([]byte{0x21}, 28)
+	current := testPoolParams(0x11)
+	staged := testPoolParams(0x11)
+	staged[4] = []any{
+		uint64(0),
+		[]any{uint64(0), bytes.Repeat([]byte{0x77}, 28)},
+	}
+
+	poolParams := encodeCborMap(
+		t,
+		poolHash, current,
+		otherHash, testPoolParams(0x21),
+	)
+	future := encodeCborMap(t, poolHash, staged)
+	deposits := encodeCborMap(
+		t,
+		poolHash, testPoolDeposit,
+		otherHash, testPoolDeposit,
+	)
+
+	pools, _, err := parsePStateWithRetirements(
+		encodeTestPState(t, poolParams, future, encodeCborMap(t), deposits),
+	)
+	require.NoError(t, err)
+	require.Len(t, pools, 2)
+
+	got := poolByHash(pools, poolHash)
+	require.NotNil(t, got)
+	require.Equal(t, bytes.Repeat([]byte{0x13}, 28), got.RewardAccount)
+	require.NotNil(t, got.FutureParams)
+	require.Equal(t, poolHash, got.FutureParams.PoolKeyHash)
+	require.Equal(t, bytes.Repeat([]byte{0x77}, 28), got.FutureParams.RewardAccount)
+	require.Equal(t, testPoolDeposit, got.FutureParams.Deposit)
+	require.Nil(t, poolByHash(pools, otherHash).FutureParams)
+}
+
+// When every pool re-registered the two maps parse to the same number of
+// pools, and the staged one can encode larger. poolParams must still win.
+func TestParsePStateFuturePoolParamsLargerThanCurrent(t *testing.T) {
+	t.Parallel()
+
+	poolHash := bytes.Repeat([]byte{0x11}, 28)
+	staged := testPoolParams(0x11)
+	staged[5] = []any{
+		bytes.Repeat([]byte{0x31}, 28),
+		bytes.Repeat([]byte{0x32}, 28),
+		bytes.Repeat([]byte{0x33}, 28),
+	}
+
+	pools, _, err := parsePStateWithRetirements(encodeTestPState(
+		t,
+		encodeCborMap(t, poolHash, testPoolParams(0x11)),
+		encodeCborMap(t, poolHash, staged),
+		encodeCborMap(t),
+		encodeCborMap(t, poolHash, testPoolDeposit),
+	))
+	require.NoError(t, err)
+	require.Len(t, pools, 1)
+	require.Len(t, pools[0].Owners, 1)
+	require.NotNil(t, pools[0].FutureParams)
+	require.Len(t, pools[0].FutureParams.Owners, 3)
+}
+
+// A staged re-registration with no registered pool cannot be applied, so the
+// parse must report it instead of dropping it.
+func TestParsePStateRejectsFuturePoolParamsForUnregisteredPool(t *testing.T) {
+	t.Parallel()
+
+	poolHash := bytes.Repeat([]byte{0x11}, 28)
+	ghostHash := bytes.Repeat([]byte{0x41}, 28)
+
+	pools, _, err := parsePStateWithRetirements(encodeTestPState(
+		t,
+		encodeCborMap(t, poolHash, testPoolParams(0x11)),
+		encodeCborMap(t, ghostHash, testPoolParams(0x41)),
+		encodeCborMap(t),
+		encodeCborMap(t, poolHash, testPoolDeposit),
+	))
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "unregistered pool")
+	require.Len(t, pools, 1)
+	require.Nil(t, pools[0].FutureParams)
+}
+
+func TestParsePStateRejectsUndecodableFuturePoolParams(t *testing.T) {
+	t.Parallel()
+	poolHash := bytes.Repeat([]byte{0x11}, 28)
+	malformed := testPoolParams(0x11)
+	malformed[5] = []any{[]byte{1}}
+	pools, _, err := parsePStateWithRetirements(encodeTestPState(
+		t,
+		encodeCborMap(t, poolHash, testPoolParams(0x11)),
+		encodeCborMap(t, poolHash, malformed),
+		encodeCborMap(t),
+		encodeCborMap(t, poolHash, testPoolDeposit),
+	))
+	require.ErrorContains(t, err, "future pool params")
+	require.Len(t, pools, 1)
+	require.Nil(t, pools[0].FutureParams)
+}
+
+func TestParsePStateDoesNotReplacePartiallyUndecodableCurrentParams(t *testing.T) {
+	t.Parallel()
+	first := bytes.Repeat([]byte{0x11}, 28)
+	second := bytes.Repeat([]byte{0x21}, 28)
+	malformed := testPoolParams(0x21)
+	malformed[5] = []any{[]byte{1}}
+	pools, _, err := parsePStateWithRetirements(encodeTestPState(
+		t,
+		encodeCborMap(t, first, testPoolParams(0x11), second, malformed),
+		encodeCborMap(t, first, testPoolParams(0x11), second, testPoolParams(0x21)),
+		encodeCborMap(t),
+		encodeCborMap(t, first, testPoolDeposit, second, testPoolDeposit),
+	))
+	require.ErrorContains(t, err, "skipped 1 of 2")
+	require.ErrorContains(t, err, "unregistered pool")
+	require.Len(t, pools, 1)
+	require.Equal(t, first, pools[0].PoolKeyHash)
+}
+
+func TestParsePStateDoesNotReplaceUndecodableCurrentParams(t *testing.T) {
+	t.Parallel()
+	poolHash := bytes.Repeat([]byte{0x11}, 28)
+	malformed := testPoolParams(0x11)
+	malformed[5] = []any{[]byte{1}}
+	pools, _, err := parsePStateWithRetirements(encodeTestPState(
+		t,
+		encodeCborMap(t, poolHash, malformed),
+		encodeCborMap(t, poolHash, testPoolParams(0x11)),
+		encodeCborMap(t),
+		encodeCborMap(t, poolHash, testPoolDeposit),
+	))
+	require.ErrorContains(t, err, "skipped 1 of 1")
+	require.ErrorContains(t, err, "unregistered pool")
+	require.Empty(t, pools)
+}
+
+func TestParsePStateRejectsShortCurrentParamsAfterNonPoolMap(t *testing.T) {
+	t.Parallel()
+	poolHash := bytes.Repeat([]byte{0x11}, 28)
+	pstate, err := cbor.Encode([]any{
+		map[uint64]uint64{},
+		cbor.RawMessage(encodeCborMap(t, poolHash, []any{uint64(1)})),
+		cbor.RawMessage(encodeCborMap(t, poolHash, testPoolParams(0x11))),
+		map[uint64]uint64{},
+	})
+	require.NoError(t, err)
+	pools, _, err := parsePStateWithRetirements(pstate)
+	require.ErrorContains(t, err, "skipped 1 of 1")
+	require.Empty(t, pools)
+}
+
+func TestParsePStateRejectsDistributionEntryAsFutureParams(t *testing.T) {
+	t.Parallel()
+	poolHash := bytes.Repeat([]byte{0x11}, 28)
+	pools, _, err := parsePStateWithRetirements(encodeTestPState(
+		t,
+		encodeCborMap(t, poolHash, testPoolParams(0x11)),
+		encodeCborMap(
+			t, poolHash,
+			[]any{bytes.Repeat([]byte{0x22}, 32)},
+		),
+		encodeCborMap(t),
+		encodeCborMap(t, poolHash, testPoolDeposit),
+	))
+	require.ErrorContains(t, err, "future pool params")
+	require.Len(t, pools, 1)
+	require.Nil(t, pools[0].FutureParams)
+}
+
+func TestParsePStateAcceptsSnapshotEntryAsFutureParams(t *testing.T) {
+	t.Parallel()
+	poolHash := bytes.Repeat([]byte{0x11}, 28)
+	vrfHash := bytes.Repeat([]byte{0x22}, 32)
+	rewardHash := bytes.Repeat([]byte{0x33}, 28)
+	ownerHash := bytes.Repeat([]byte{0x44}, 28)
+	snapshotParams := []any{
+		uint64(42),
+		[]uint64{1, 1},
+		[]any{ownerHash},
+		uint64(0),
+		vrfHash,
+		uint64(500_000_000),
+		uint64(340_000_000),
+		[]uint64{1, 20},
+		uint64(0),
+		[]any{uint64(0), rewardHash},
+	}
+	pools, _, err := parsePStateWithRetirements(encodeTestPState(
+		t,
+		encodeCborMap(t, poolHash, testPoolParams(0x11)),
+		encodeCborMap(t, poolHash, snapshotParams),
+		encodeCborMap(t),
+		encodeCborMap(t, poolHash, testPoolDeposit),
+	))
+	require.NoError(t, err)
+	require.Len(t, pools, 1)
+	require.NotNil(t, pools[0].FutureParams)
+	require.Equal(t, vrfHash, pools[0].FutureParams.VrfKeyHash)
+}
+
+func TestParsePStateRejectsInvalidFutureRewardAccount(t *testing.T) {
+	t.Parallel()
+	poolHash := bytes.Repeat([]byte{0x11}, 28)
+	malformed := testPoolParams(0x11)
+	malformed[4] = []byte{0x01}
+	pools, _, err := parsePStateWithRetirements(encodeTestPState(
+		t,
+		encodeCborMap(t, poolHash, testPoolParams(0x11)),
+		encodeCborMap(t, poolHash, malformed),
+		encodeCborMap(t),
+		encodeCborMap(t, poolHash, testPoolDeposit),
+	))
+	require.ErrorContains(t, err, "future pool params")
+	require.Len(t, pools, 1)
+	require.Nil(t, pools[0].FutureParams)
+}
+
+// The Conway PState layout is not four fields. An empty poolParams map with a
+// populated futurePoolParams map must still fail: a staged entry has no pool
+// to re-register.
+func TestParsePStateConwayRejectsFutureParamsWithoutCurrentPool(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	poolHash := bytes.Repeat([]byte{0x11}, 28)
+	emptyMap := encodeCborMap(t)
+	pstate, err := cbor.Encode([]any{
+		cbor.RawMessage(emptyMap),
+		cbor.RawMessage(emptyMap),
+		cbor.RawMessage(encodeCborMap(t, poolHash, testPoolParams(0x11))),
+		cbor.RawMessage(emptyMap),
+		cbor.RawMessage(emptyMap),
+	})
+	require.NoError(t, err)
+
+	pools, _, err := parsePStateConwayWithRetirements(pstate)
+	require.ErrorContains(t, err, "future pool params")
+	require.Empty(t, pools)
+}
+
+// futurePoolParams values carry the operator; psStakePools values do not.
+func testFuturePoolParams(poolHash []byte, seed byte) []any {
+	return append([]any{poolHash}, testPoolParams(seed)...)
+}
+
+func encodeRealPState(t *testing.T, vrf, pools, future, retiring []byte) []byte {
+	t.Helper()
+	pstate, err := cbor.Encode([]any{
+		cbor.RawMessage(vrf),
+		cbor.RawMessage(pools),
+		cbor.RawMessage(future),
+		cbor.RawMessage(retiring),
+	})
+	require.NoError(t, err)
+	return pstate
+}
+
+// The ledger's four-field PState is [psVRFKeyHashes, psStakePools,
+// psFutureStakePoolParams, psRetiring]. A staged entry with no current pool
+// must fail in either position the staged map can take.
+func TestParsePStateRejectsStagedParamsWithoutCurrentPoolInFourFieldLayouts(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	poolHash := bytes.Repeat([]byte{0x11}, 28)
+	empty := encodeCborMap(t)
+	future := encodeCborMap(t, poolHash, testFuturePoolParams(poolHash, 0x11))
+
+	for name, pstate := range map[string][]byte{
+		"staged at index 1": encodeRealPState(t, empty, future, empty, empty),
+		"staged at index 2": encodeRealPState(t, empty, empty, future, empty),
+		"older layout, staged at index 1": encodeTestPState(
+			t, empty, future, empty, empty,
+		),
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			pools, _, err := parsePStateWithRetirements(pstate)
+			require.ErrorContains(t, err, "future pool params")
+			require.Empty(t, pools)
+		})
+	}
+}
+
+// The same layout with a current pool imports it and stages the update.
+func TestParsePStateDecodesStagedParamsInRealFourFieldLayout(t *testing.T) {
+	t.Parallel()
+
+	poolHash := bytes.Repeat([]byte{0x11}, 28)
+	staged := testFuturePoolParams(poolHash, 0x11)
+	staged[5] = []any{
+		uint64(0),
+		[]any{uint64(0), bytes.Repeat([]byte{0x77}, 28)},
+	}
+
+	pools, _, err := parsePStateWithRetirements(encodeRealPState(
+		t,
+		encodeCborMap(t),
+		encodeCborMap(t, poolHash, testPoolParams(0x11)),
+		encodeCborMap(t, poolHash, staged),
+		encodeCborMap(t),
+	))
+	require.NoError(t, err)
+	require.Len(t, pools, 1)
+	require.Equal(t, bytes.Repeat([]byte{0x13}, 28), pools[0].RewardAccount)
+	require.NotNil(t, pools[0].FutureParams)
+	require.Equal(
+		t,
+		bytes.Repeat([]byte{0x77}, 28),
+		pools[0].FutureParams.RewardAccount,
+	)
 }

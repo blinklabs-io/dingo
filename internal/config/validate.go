@@ -15,6 +15,7 @@
 package config
 
 import (
+	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -86,6 +87,38 @@ func ValidateKESAgentSignTimeout(timeout time.Duration) error {
 			timeout,
 			maxKESAgentSignTimeout,
 		)
+	}
+	return nil
+}
+
+// ValidateMithrilPublicBaseURL accepts an absolute public origin. Plain HTTP
+// is restricted to loopback so artifact locations are HTTPS for normal
+// bootstrap clients.
+func ValidateMithrilPublicBaseURL(value string) error {
+	u, err := url.Parse(value)
+	if err != nil {
+		return fmt.Errorf("invalid URL: %w", err)
+	}
+	scheme := strings.ToLower(u.Scheme)
+	if scheme != "https" && scheme != "http" {
+		return errors.New("must use HTTPS (HTTP is allowed only on loopback)")
+	}
+	if u.Host == "" || u.Hostname() == "" || u.User != nil || u.Opaque != "" ||
+		(u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.ForceQuery ||
+		strings.Contains(value, "#") {
+		return errors.New(
+			"must be an origin without credentials, a path, query, or fragment",
+		)
+	}
+	if scheme == "http" {
+		host := strings.ToLower(u.Hostname())
+		addr, parseErr := netip.ParseAddr(host)
+		if host != "localhost" &&
+			(parseErr != nil || !addr.Unmap().IsLoopback()) {
+			return errors.New(
+				"plain HTTP public URL is allowed only on loopback",
+			)
+		}
 	}
 	return nil
 }
@@ -205,6 +238,7 @@ func MusashiPrototypeNetwork(network string, networkMagic uint32) bool {
 // the configured runMode, so cmd/dingo passes the mode reflecting what
 // the command does. It governs which listeners and sources are required.
 func (c *Config) Validate(effectiveMode RunMode) error {
+	c.ApplyRunModeOverrides(effectiveMode)
 	return c.validate(effectiveMode, minBindablePort())
 }
 
@@ -299,6 +333,13 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		))
 	}
 
+	if !(c.TracingSampleRatio >= 0 && c.TracingSampleRatio <= 1) {
+		errs = append(errs, fmt.Errorf(
+			"invalid tracingSampleRatio: %v (must be between 0 and 1)",
+			c.TracingSampleRatio,
+		))
+	}
+
 	// SQLite without a data directory is a shared-cache in-memory store whose
 	// table locks block the ledger's writes while any read transaction is
 	// open, which an acquired LocalStateQuery snapshot always holds.
@@ -336,10 +377,10 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 	//     has the container replaced mid-download;
 	//   - bark: serving modes only (not storage-gated);
 	//   - UTxORPC, Blockfrost, Kupo, Mesh, Midnight: serving modes under API
-	//     storage. Dev mode forces API storage on at startup, and node.Run
-	//     keys that off the *configured* runMode — `dingo serve` with
-	//     runMode "dev" still runs dev — so the configured mode is
-	//     consulted alongside the effective one.
+	//     storage. ApplyRunModeOverrides forces API storage for a serving
+	//     dev-mode config before validation; `dingo serve` with runMode "dev"
+	//     still runs dev, so the configured mode is consulted alongside the
+	//     effective one.
 	// The load and read-only Mithril invocations start no listeners, so
 	// their ports may be unset (0) and are not checked.
 	serving := effectiveMode.RequiresListeners()
@@ -361,8 +402,8 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 	}
 	// Each entry's host is the bind address the listener actually uses
 	// at runtime: bindAddr for public listeners, privateBindAddr for the
-	// private listener, debugBindAddr for pprof, midnight.host for Midnight,
-	// and BarkHost for bark.
+	// private listener, debugBindAddr for pprof, metricsBindAddr for
+	// Prometheus, midnight.host for Midnight, and BarkHost for bark.
 	ports := []struct {
 		setting  string
 		host     string
@@ -372,7 +413,13 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 	}{
 		{"port (relay/NtN)", c.BindAddr, c.RelayPort, serving, serving},
 		{"privatePort", c.PrivateBindAddr, c.PrivatePort, serving, serving},
-		{"metricsPort", c.BindAddr, c.MetricsPort, auxListeners, serving},
+		{
+			"metricsPort",
+			c.MetricsBindAddr,
+			c.MetricsPort,
+			auxListeners,
+			false,
+		},
 		{"debugPort", c.DebugBindAddr, c.DebugPort, auxListeners, false},
 		{"healthPort", c.BindAddr, c.HealthPort, auxListeners, false},
 		{"barkPort", c.BarkHost, c.BarkPort, serving, false},
@@ -487,6 +534,13 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		string(apiconfig.TLSModeDisabled), string(apiconfig.TLSModeServer),
 	); err != nil {
 		errs = append(errs, err)
+	}
+
+	if c.BarkArchiveMaxConcurrentFetches < 0 {
+		errs = append(errs, fmt.Errorf(
+			"invalid barkArchiveMaxConcurrentFetches %d: must not be negative",
+			c.BarkArchiveMaxConcurrentFetches,
+		))
 	}
 
 	// Bark's DatabaseService is mounted whenever bark is enabled with a snapshot
@@ -633,6 +687,47 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 			c.TokenRegistry.MaxBatchBytes,
 			c.TokenRegistry.MaxEntryBytes,
 		))
+	}
+	if c.TokenRegistry.Enabled &&
+		strings.TrimSpace(c.TokenRegistry.ManifestURL) == "" {
+		errs = append(errs, errors.New(
+			"tokenRegistry.manifestUrl is required when token registry sync is enabled",
+		))
+	}
+	if raw := strings.TrimSpace(c.TokenRegistry.ManifestURL); raw != "" {
+		parsed, err := url.Parse(raw)
+		if err != nil || parsed.Scheme != "https" || parsed.Host == "" ||
+			parsed.User != nil {
+			errs = append(errs, errors.New(
+				"tokenRegistry.manifestUrl must be an absolute HTTPS URL",
+			))
+		}
+	}
+	if raw := strings.TrimSpace(c.TokenRegistry.SourceURL); raw != "" {
+		parsed, err := url.Parse(raw)
+		if err != nil || parsed.Scheme != "https" || parsed.Host == "" ||
+			parsed.User != nil {
+			errs = append(errs, errors.New(
+				"tokenRegistry.sourceUrl must be an absolute HTTPS URL",
+			))
+		}
+	}
+	trustedManifestKey := strings.TrimSpace(
+		c.TokenRegistry.TrustedManifestKey,
+	)
+	if c.TokenRegistry.Enabled && trustedManifestKey == "" {
+		errs = append(errs, errors.New(
+			"tokenRegistry.trustedManifestKey is required when token registry sync is enabled",
+		))
+	}
+	if trustedManifestKey != "" {
+		decoded, err := hex.DecodeString(trustedManifestKey)
+		if err != nil || len(decoded) != ed25519.PublicKeySize {
+			errs = append(errs, fmt.Errorf(
+				"tokenRegistry.trustedManifestKey must be a %d-byte Ed25519 public key encoded as hexadecimal",
+				ed25519.PublicKeySize,
+			))
+		}
 	}
 
 	// Block production needs all three credential paths
@@ -822,6 +917,69 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		))
 	}
 
+	if c.Mithril.Server.KeepSnapshots < 0 {
+		errs = append(errs, fmt.Errorf(
+			"invalid mithril.server.keepSnapshots %d (must not be negative; "+
+				"0 keeps every snapshot)",
+			c.Mithril.Server.KeepSnapshots,
+		))
+	}
+	// The server settings are read only by `dingo mithril serve`; other
+	// commands sharing the configuration file never bind its port.
+	if effectiveMode == RunModeMithrilServe {
+		if c.Mithril.Server.PublicBaseURL != "" {
+			if err := ValidateMithrilPublicBaseURL(
+				c.Mithril.Server.PublicBaseURL,
+			); err != nil {
+				errs = append(errs, fmt.Errorf(
+					"invalid mithril.server.publicBaseUrl: %w", err,
+				))
+			}
+		}
+		if err := validatePort(
+			"mithril.server.port", c.Mithril.Server.Port, false, minBindable,
+		); err != nil {
+			errs = append(errs, err)
+		}
+		if agg := c.Mithril.Server.Aggregator; agg.Enabled {
+			if agg.Epoch < 1 {
+				errs = append(errs, errors.New(
+					"invalid mithril.server.aggregator.epoch: must be at least 1",
+				))
+			}
+			if agg.K == 0 || agg.M == 0 || agg.K > agg.M {
+				errs = append(errs, errors.New(
+					"mithril.server.aggregator.k and mithril.server.aggregator.m "+
+						"must be positive and k must not exceed m",
+				))
+			}
+			if !(agg.PhiF > 0 && agg.PhiF <= 1) {
+				errs = append(errs, fmt.Errorf(
+					"invalid mithril.server.aggregator.phiF %v: must be in (0, 1]",
+					agg.PhiF,
+				))
+			}
+			if agg.GenesisSigningKeyFile == "" {
+				errs = append(errs, errors.New(
+					"mithril.server.aggregator.genesisSigningKeyFile is required "+
+						"when the aggregator is enabled",
+				))
+			}
+			if agg.OperatorTokenFile == "" {
+				errs = append(errs, errors.New(
+					"mithril.server.aggregator.operatorTokenFile is required "+
+						"when the aggregator is enabled",
+				))
+			}
+			if !isLoopbackListenHost(c.BindAddr) &&
+				!c.Mithril.Server.TLSEnabled {
+				errs = append(errs, errors.New(
+					"mithril.server.tlsEnabled is required when the aggregator "+
+						"uses a non-loopback bindAddr",
+				))
+			}
+		}
+	}
 	if c.Mithril.DownloadMaxBytes < 0 {
 		errs = append(errs, fmt.Errorf(
 			"invalid mithril.downloadMaxBytes %d: must not be negative",
@@ -911,16 +1069,19 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		))
 	}
 	if dest := c.DatabaseLifecycle.SnapshotCloudDestination; dest != "" {
+		if c.DatabaseLifecycle.SnapshotTrustKeyFile == "" {
+			errs = append(errs, errors.New(
+				"databaseLifecycle.snapshotTrustKeyFile is required when databaseLifecycle.snapshotCloudDestination is configured",
+			))
+		}
 		u, err := url.Parse(dest)
 		if err != nil || u.Scheme == "" || u.Host == "" {
-			errs = append(errs, fmt.Errorf(
-				"invalid databaseLifecycle.snapshotCloudDestination %q: must be a URI like s3://bucket/prefix or gcs://bucket/prefix",
-				dest,
+			errs = append(errs, errors.New(
+				"invalid databaseLifecycle.snapshotCloudDestination: must be a URI like s3://bucket/prefix or gcs://bucket/prefix",
 			))
 		} else if !snapshotCloudSchemeSupported(u.Scheme) {
 			errs = append(errs, fmt.Errorf(
-				"invalid databaseLifecycle.snapshotCloudDestination %q: cloud scheme %q is unavailable in this build (s3/gcs require -tags dingo_extra_plugins)",
-				dest,
+				"invalid databaseLifecycle.snapshotCloudDestination: cloud scheme %q is unavailable in this build (s3/gcs require -tags dingo_extra_plugins)",
 				u.Scheme,
 			))
 		}
@@ -1047,6 +1208,12 @@ func normalizeBindAddr(addr string) string {
 		return addr
 	}
 	return parsed.Unmap().String()
+}
+
+func isLoopbackListenHost(host string) bool {
+	literal := strings.TrimSuffix(strings.TrimPrefix(host, "["), "]")
+	addr, err := netip.ParseAddr(literal)
+	return err == nil && addr.Unmap().IsLoopback()
 }
 
 // isWildcardAddr reports whether a bind address selects all interfaces. The

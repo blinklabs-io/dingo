@@ -95,7 +95,7 @@ func (stalledBlockSubscriber) Close() {}
 func TestPublishBlockEventIgnoresOptionalSubscriberDetachment(t *testing.T) {
 	t.Parallel()
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Stop)
 	require.NotZero(
 		t,
@@ -132,7 +132,7 @@ func TestChainUpdateHandlerPublishesNoTransactionEvents(t *testing.T) {
 
 	blocks := loadTestBlocksWithTxs(t, 2)
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Stop)
 
 	txSubID, txCh := bus.SubscribeWithBuffer(TransactionEventType, 4096)
@@ -184,7 +184,7 @@ func TestRollbackTxEventsPrecedeLaterForwardTxEvents(t *testing.T) {
 	// Newest first, as readBlocksAboveSlot yields them.
 	undoOrder := []models.Block{blocks[1], blocks[0]}
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Stop)
 
 	subID, txCh := bus.SubscribeWithBuffer(TransactionEventType, 4096)
@@ -283,7 +283,7 @@ func TestRollbackWaitsForCommittedApplyPublication(t *testing.T) {
 	fixture := newChainsyncRollbackFixture(t)
 	ls := fixture.ls
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Stop)
 	ls.config.EventBus = bus
 	subID, txCh := bus.SubscribeWithBuffer(TransactionEventType, 64)
@@ -491,7 +491,7 @@ func TestRollbackAndForwardTxEventsStayOrderedAcrossRepeatedCycles(
 	require.NotEmpty(t, cycleTxs)
 	txsPerRollback := len(cycleTxs)
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Stop)
 
 	subID, txCh := bus.SubscribeWithBuffer(
@@ -569,7 +569,7 @@ func TestRollbackChainAndStateEmitsUndoEventsBeforeTruncating(t *testing.T) {
 	fixture := newChainsyncRollbackFixture(t)
 	ls := fixture.ls
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Stop)
 	ls.config.EventBus = bus
 
@@ -614,7 +614,7 @@ func TestRejectedRollbackEmitsNoUndoEvents(t *testing.T) {
 	fixture := newChainsyncRollbackFixture(t)
 	ls := fixture.ls
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Stop)
 	ls.config.EventBus = bus
 
@@ -673,7 +673,7 @@ func TestReconciliationUndoBlocksCoversConcurrentlyAppliedBlock(t *testing.T) {
 	fixture := newChainsyncRollbackFixture(t)
 	ls := fixture.ls
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Stop)
 	ls.config.EventBus = bus
 
@@ -801,7 +801,7 @@ func TestReconcilePrimaryChainTipWithLedgerTipEmitsUndoEventsBeforeTruncating(
 	fixture := newChainsyncRollbackFixture(t)
 	ls := fixture.ls
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Stop)
 	ls.config.EventBus = bus
 
@@ -885,7 +885,7 @@ func TestReconciliationUndoDegradesGracefullyAfterRestart(t *testing.T) {
 	fixture := newChainsyncRollbackFixture(t)
 	ls := fixture.ls
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Stop)
 	ls.config.EventBus = bus
 
@@ -994,7 +994,7 @@ func TestReconcilePrimaryChainTipWithLedgerTipRecoversUndoAfterCrashBetweenRewin
 	fixture := newChainsyncRollbackFixture(t)
 	ls := fixture.ls
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Close)
 	ls.config.EventBus = bus
 
@@ -1071,7 +1071,7 @@ func TestReconcileKeepsIntentWhenMetadataRollbackFailsAfterChainRewind(
 
 	fixture := newChainsyncRollbackFixture(t)
 	ls := fixture.ls
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Stop)
 	ls.config.EventBus = bus
 	txSubID, _ := bus.SubscribeWithBuffer(TransactionEventType, 8)
@@ -1120,7 +1120,7 @@ func TestRollbackRetainsIntentUntilOrderedDelivery(t *testing.T) {
 
 	fixture := newChainsyncRollbackFixture(t)
 	ls := fixture.ls
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Stop)
 	ls.config.EventBus = bus
 
@@ -1239,7 +1239,7 @@ func TestReconcilePrimaryChainTipWithLedgerTipDeclinesMithrilBoundaryWithoutEmit
 	fixture := newChainsyncRollbackFixture(t)
 	ls := fixture.ls
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Stop)
 	ls.config.EventBus = bus
 
@@ -1328,7 +1328,7 @@ func TestReconcileDeclinesPruneFloorWithoutRewindingOrPersistingIntent(
 		nil,
 	))
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Stop)
 	ls.config.EventBus = bus
 	txSubID, txCh := bus.SubscribeWithBuffer(TransactionEventType, 8)
@@ -1356,7 +1356,7 @@ func TestReconciliationUndoBlocksIncludesNilNonceRecords(t *testing.T) {
 	fixture := newChainsyncRollbackFixture(t)
 	ls := fixture.ls
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Stop)
 	ls.config.EventBus = bus
 	txSubID, _ := bus.SubscribeWithBuffer(TransactionEventType, 64)
@@ -1428,7 +1428,7 @@ func TestReconciliationUndoBlocksDetectsMissingBlockNonceRecords(t *testing.T) {
 	fixture := newChainsyncRollbackFixture(t)
 	ls := fixture.ls
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Stop)
 	ls.config.EventBus = bus
 	txSubID, _ := bus.SubscribeWithBuffer(TransactionEventType, 64)
@@ -1539,7 +1539,7 @@ func TestBlocksAboveSlotServesLedgerErrorOnlySubscribers(t *testing.T) {
 	fixture := newChainsyncRollbackFixture(t)
 	ls := fixture.ls
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Stop)
 	ls.config.EventBus = bus
 
@@ -1606,7 +1606,7 @@ func TestRejectedWindowedRollbackEmitsNoUndoEvents(t *testing.T) {
 		cm.PrimaryChain().AddRawBlocks(context.Background(), raw),
 	)
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(bus.Stop)
 
 	ls, err := NewLedgerState(LedgerStateConfig{
@@ -1669,7 +1669,7 @@ func TestEmitTransactionRollbackEvents_decodeFailureEmitsLedgerErrorPerBlock(
 ) {
 	t.Parallel()
 
-	bus := event.NewEventBus(nil, nil)
+	bus := newTestEventBus(t, nil)
 	t.Cleanup(func() { bus.Stop() })
 
 	subID, errCh := bus.Subscribe(LedgerErrorEventType)

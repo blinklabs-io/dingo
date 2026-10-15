@@ -22,8 +22,10 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"reflect"
 	"regexp"
@@ -638,6 +640,112 @@ func TestPprofDebugServerUsesDedicatedBindAddress(t *testing.T) {
 	}
 }
 
+func TestMetricsServerUsesDedicatedBindAddress(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name     string
+		bindAddr string
+		want     string
+	}{
+		{"loopback", "127.0.0.1", "127.0.0.1:12798"},
+		{"default loopback", "", "127.0.0.1:12798"},
+		{"wildcard opt-in", "0.0.0.0", "0.0.0.0:12798"},
+		{"remote address opt-in", "10.0.0.5", "10.0.0.5:12798"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// BindAddr stays wildcard to show the metrics listener does
+			// not inherit it.
+			srv := newMetricsServer(&config.Config{
+				BindAddr:        "0.0.0.0",
+				MetricsBindAddr: tc.bindAddr,
+				MetricsPort:     12798,
+			})
+			if srv.Addr != tc.want {
+				t.Fatalf("metrics address = %q, want %q", srv.Addr, tc.want)
+			}
+		})
+	}
+}
+
+func TestMetricsServerDisabledByZeroPort(t *testing.T) {
+	t.Parallel()
+
+	srv := newMetricsServer(&config.Config{
+		MetricsBindAddr: "0.0.0.0",
+		MetricsPort:     0,
+	})
+	if srv != nil {
+		t.Fatalf("metricsPort 0 must start no listener, got %q", srv.Addr)
+	}
+}
+
+func TestMetricsServerAuthenticatesRemoteListener(t *testing.T) {
+	t.Parallel()
+
+	const token = "metrics-secret"
+	srv := newMetricsServer(&config.Config{
+		MetricsBindAddr:  "192.0.2.10",
+		MetricsAuthToken: token,
+		MetricsPort:      12798,
+	})
+	if srv.Addr != "192.0.2.10:12798" {
+		t.Fatalf("metrics address = %q", srv.Addr)
+	}
+
+	for _, tc := range []struct {
+		name   string
+		header string
+		want   int
+	}{
+		{name: "missing token", want: http.StatusUnauthorized},
+		{name: "wrong token", header: "Bearer wrong", want: http.StatusUnauthorized},
+		{name: "authenticated", header: "Bearer " + token, want: http.StatusOK},
+		{name: "lowercase scheme", header: "bearer " + token, want: http.StatusOK},
+		{name: "multiple spaces", header: "Bearer   " + token, want: http.StatusOK},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+			if tc.header != "" {
+				req.Header.Set("Authorization", tc.header)
+			}
+			resp := httptest.NewRecorder()
+			srv.Handler.ServeHTTP(resp, req)
+			if resp.Code != tc.want {
+				t.Fatalf("status = %d, want %d", resp.Code, tc.want)
+			}
+			if strings.Contains(resp.Body.String(), token) {
+				t.Fatal("response disclosed the metrics token")
+			}
+		})
+	}
+}
+
+func TestShutdownNodeResourcesSkipsDisabledMetrics(t *testing.T) {
+	t.Parallel()
+
+	stopped := false
+	err := shutdownNodeResources(
+		optionalShutdown(newMetricsServer(&config.Config{})),
+		nil,
+		nil,
+		func() error {
+			stopped = true
+			return nil
+		},
+		time.Second,
+	)
+	if err != nil {
+		t.Fatalf("unexpected shutdown error: %v", err)
+	}
+	if !stopped {
+		t.Fatal("node must stop when metrics are disabled")
+	}
+}
+
 func TestWaitForSignalOrErrorReturnsSignalWithoutQueuedError(t *testing.T) {
 	t.Parallel()
 
@@ -1048,6 +1156,32 @@ func TestBuildDingoConfigWiresBlockPipelineFlags(t *testing.T) {
 	}
 }
 
+func TestBuildDingoConfigWiresLedgerPrefetchAheadFlag(t *testing.T) {
+	t.Parallel()
+
+	logger := slog.New(slog.NewTextHandler(new(bytes.Buffer), nil))
+	for _, enabled := range []bool{false, true} {
+		built := buildDingoConfig(
+			&config.Config{LedgerPrefetchAheadEnabled: enabled},
+			logger,
+			nil,
+			nil,
+			false,
+			dingo.StorageModeCore,
+			30*time.Second,
+			chainsync.DefaultStallTimeout,
+			chainsync.HeaderSyncStrategyPrimary,
+		)
+		if built.LedgerPrefetchAheadEnabled() != enabled {
+			t.Fatalf(
+				"LedgerPrefetchAheadEnabled = %v, want %v",
+				built.LedgerPrefetchAheadEnabled(),
+				enabled,
+			)
+		}
+	}
+}
+
 // TestBuildDingoConfigForwardsScalarConfigFields is recurrence-prevention
 // coverage for the defect class of the block pipeline flags, not just the
 // single field it reported: buildDingoConfig hand-lists roughly 85 individual
@@ -1331,5 +1465,85 @@ func TestBuildDingoConfigForwardsScalarConfigFields(t *testing.T) {
 			name,
 			reason,
 		)
+	}
+}
+
+func TestBuildDingoConfigWiresLedgerApplyRowBatching(t *testing.T) {
+	t.Parallel()
+
+	logger := slog.New(slog.NewTextHandler(new(bytes.Buffer), nil))
+	for _, enabled := range []bool{false, true} {
+		built := buildDingoConfig(
+			&config.Config{LedgerApplyRowBatchingEnabled: enabled},
+			logger,
+			nil,
+			nil,
+			false,
+			dingo.StorageModeCore,
+			30*time.Second,
+			chainsync.DefaultStallTimeout,
+			chainsync.HeaderSyncStrategyPrimary,
+		)
+		if built.LedgerApplyRowBatchingEnabled() != enabled {
+			t.Fatalf(
+				"LedgerApplyRowBatchingEnabled: want %v, got %v",
+				enabled,
+				built.LedgerApplyRowBatchingEnabled(),
+			)
+		}
+	}
+}
+
+// TestBuildDingoConfigWiresTokenRegistryHeaders pins the composition step a
+// loaded header secret takes on its way to the registry sync.
+func TestBuildDingoConfigWiresTokenRegistryHeaders(t *testing.T) {
+	t.Parallel()
+
+	headers := map[string]string{"Authorization": "Bearer wired"}
+	cfg := &config.Config{
+		TokenRegistry: config.TokenRegistryConfig{HeaderSecrets: headers},
+	}
+	logger := slog.New(slog.NewTextHandler(new(bytes.Buffer), nil))
+
+	built := buildDingoConfig(
+		cfg,
+		logger,
+		nil,
+		nil,
+		false,
+		dingo.StorageModeCore,
+		30*time.Second,
+		chainsync.DefaultStallTimeout,
+		chainsync.HeaderSyncStrategyPrimary,
+	)
+
+	if got := built.TokenRegistry().HeaderSecrets; !maps.Equal(got, headers) {
+		t.Fatalf("token registry headers = %v, want %v", got, headers)
+	}
+}
+
+func TestBuildDingoConfigWiresBlockfetchLowWatermarkFlag(t *testing.T) {
+	t.Parallel()
+
+	logger := slog.New(slog.NewTextHandler(new(bytes.Buffer), nil))
+	for _, enabled := range []bool{false, true} {
+		built := buildDingoConfig(
+			&config.Config{BlockfetchLowWatermarkEnabled: enabled},
+			logger,
+			nil,
+			nil,
+			false,
+			dingo.StorageModeCore,
+			30*time.Second,
+			chainsync.DefaultStallTimeout,
+			chainsync.HeaderSyncStrategyPrimary,
+		)
+		if built.BlockfetchLowWatermarkEnabled() != enabled {
+			t.Fatalf(
+				"BlockfetchLowWatermarkEnabled = %v, want %v",
+				built.BlockfetchLowWatermarkEnabled(),
+				enabled,
+			)
+		}
 	}
 }

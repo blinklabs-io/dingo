@@ -31,8 +31,8 @@ const (
 )
 
 // flagSpec declares a CLI flag bound to a Config field by dotted path.
-// register installs the flag with its default read from globalConfig;
-// apply writes the parsed flag value back to cfg when the user set it.
+// register installs the flag using a configuration snapshot for defaults.
+// ApplyFlags calls apply only for explicitly set flags.
 type flagSpec struct {
 	field    string
 	name     string
@@ -68,18 +68,21 @@ var flagSpecs = []flagSpec{
 	transformStringFlag(
 		"RunMode",
 		"run-mode",
+		"",
 		"run mode: serve, load, dev, or leios",
 		normalizeRunMode,
 	),
 	transformStringFlag(
 		"StartEra",
 		"start-era",
+		"",
 		"experimental start era: dijkstra",
 		normalizeStartEra,
 	),
 	transformStringFlag(
 		"StorageMode",
 		"storage-mode",
+		"",
 		`storage mode: "core" (minimal) or "api" (full indexing)`,
 		normalizeStorageMode,
 	),
@@ -147,6 +150,23 @@ var flagSpecs = []flagSpec{
 		"tracing",
 		"enable OpenTelemetry tracing (configure destination with OTEL_EXPORTER_OTLP_* env vars)",
 	),
+	stringFlag(
+		"TracingEndpoint",
+		"tracing-endpoint",
+		"",
+		"OTLP HTTP collector URL for spans; setting it enables tracing (default: OTEL_EXPORTER_OTLP_* env vars)",
+	),
+	stringFlag(
+		"TracingServiceName",
+		"tracing-service-name",
+		"",
+		"service.name resource attribute on exported spans",
+	),
+	float64Flag(
+		"TracingSampleRatio",
+		"tracing-sample-ratio",
+		"fraction of new traces sampled, from 0 to 1",
+	),
 	boolFlag(
 		"TracingStdout",
 		"tracing-stdout",
@@ -157,16 +177,16 @@ var flagSpecs = []flagSpec{
 	// An explicitly empty --network is allowed: Validate() enforces
 	// that network or networkMagic is set, so a magic-only invocation
 	// can clear a configured network name.
-	validatedStringFlag(
+	transformStringFlag(
 		"Network",
 		"network",
 		"n",
 		"Cardano network name (e.g. preview, preprod, mainnet)",
-		func(v string) error {
+		func(v string) (string, error) {
 			if v == "" {
-				return nil
+				return v, nil
 			}
-			return ValidateNetworkName(v)
+			return v, ValidateNetworkName(v)
 		},
 	),
 	uint32Flag("NetworkMagic", "network-magic", "network magic override"),
@@ -178,6 +198,12 @@ var flagSpecs = []flagSpec{
 		"private bind address",
 	),
 	uintFlag("PrivatePort", "private-port", "private/NtC port"),
+	stringFlag(
+		"MetricsBindAddr",
+		"metrics-bind-addr",
+		"",
+		"metrics bind address (wildcard exposure requires an explicit override)",
+	),
 	uintFlag("MetricsPort", "metrics-port", "metrics port"),
 	stringFlag(
 		"DebugBindAddr",
@@ -307,6 +333,18 @@ var flagSpecs = []flagSpec{
 		"",
 		"CIP-26 token registry tarball URL (empty = select by network)",
 	),
+	stringFlag(
+		"TokenRegistry.ManifestURL",
+		"token-registry-manifest-url",
+		"",
+		"HTTPS URL of the signed CIP-26 snapshot manifest",
+	),
+	stringFlag(
+		"TokenRegistry.TrustedManifestKey",
+		"token-registry-trusted-manifest-key",
+		"",
+		"hex-encoded Ed25519 key trusted to sign token registry manifests",
+	),
 	durationFlag(
 		"TokenRegistry.Interval",
 		"token-registry-interval",
@@ -364,6 +402,11 @@ var flagSpecs = []flagSpec{
 		"allow token registry sync from private, loopback, and link-local addresses",
 	),
 	boolFlag(
+		"TokenRegistry.AllowRollback",
+		"token-registry-allow-rollback",
+		"allow a signed token registry manifest below the stored sequence",
+	),
+	boolFlag(
 		"Midnight.Enabled",
 		"midnight-enabled",
 		`enable the Midnight indexer (requires storageMode "api")`,
@@ -397,6 +440,11 @@ var flagSpecs = []flagSpec{
 		"bark-block-download-hosts",
 		"allowed HTTPS origins for Bark block downloads (ports matched exactly)",
 	),
+	boolFlag(
+		"BarkBlockDownloadAllowPrivateAddresses",
+		"bark-block-download-allow-private-addresses",
+		"allow Bark block downloads from private, loopback, and special-use addresses",
+	),
 	uintFlag("BarkPort", "bark-port", "Bark RPC port"),
 	stringFlag(
 		"BarkHost",
@@ -409,6 +457,11 @@ var flagSpecs = []flagSpec{
 		"bark-client-ca-file-path",
 		"",
 		"path to a PEM CA bundle; client certs verified against it authenticate every Bark DatabaseService RPC (required whenever the database lifecycle service is enabled)",
+	),
+	intFlag(
+		"BarkArchiveMaxConcurrentFetches",
+		"bark-archive-max-concurrent-fetches",
+		"maximum concurrent Bark ArchiveService FetchBlock requests; requests over the limit are refused (0 = default of 16)",
 	),
 	stringSliceFlag(
 		"BarkOperatorCertificateFingerprints",
@@ -690,12 +743,14 @@ var flagSpecs = []flagSpec{
 	transformStringFlag(
 		"Logging.Format",
 		"logging-format",
+		"",
 		"log output format: text (default) or json",
 		normalizeLoggingValue,
 	),
 	transformStringFlag(
 		"Logging.Level",
 		"logging-level",
+		"",
 		"log level: debug, info (default), warn, or error",
 		normalizeLoggingValue,
 	),
@@ -725,6 +780,23 @@ var flagSpecs = []flagSpec{
 		"BlockPipelineValidateEnabled",
 		"block-pipeline-validate-enabled",
 		"also VRF/KES-validate blocks in the block-pipeline replay loop with a parallel worker pool (requires block-pipeline-enabled; default off)",
+	),
+	boolFlag(
+		"LedgerPrefetchAheadEnabled",
+		"ledger-prefetch-ahead-enabled",
+		"prefetch the next block's input UTxOs from a read-only transaction while the current block applies, for validated blocks only (not consensus-affecting; default off)",
+	),
+
+	boolFlag(
+		"LedgerApplyRowBatchingEnabled",
+		"ledger-apply-row-batching-enabled",
+		"in core storage mode, write the deltas of blocks that are not validated with multi-row batched inserts instead of per-row statements, as API mode always does (not consensus-affecting; default off)",
+	),
+
+	boolFlag(
+		"BlockfetchLowWatermarkEnabled",
+		"blockfetch-low-watermark-enabled",
+		"start blockfetch once one range of headers is queued while far from the peer tip, instead of waiting for four ranges; the header queue capacity is unchanged (not consensus-affecting; default off)",
 	),
 
 	// Block production
@@ -819,6 +891,11 @@ var flagSpecs = []flagSpec{
 		"validate-forged-block",
 		"validate forged blocks before adoption and diffusion (header crypto, body hash, per-tx ledger rules)",
 	),
+	boolFlag(
+		"PlannerStatsRefreshEnabled",
+		"planner-stats-refresh-enabled",
+		"keep SQLite planner statistics current with PRAGMA optimize at startup and after each epoch rollover",
+	),
 
 	// CIP-23 minimum pool margin / minimum variable fee (consensus-affecting; default 0 = off)
 	uintFlag(
@@ -862,6 +939,11 @@ var flagSpecs = []flagSpec{
 	),
 
 	// Leios voting (experimental)
+	uint64Flag(
+		"LeiosPersistenceRetentionSlots",
+		"leios-persistence-retention-slots",
+		"number of slots of Leios persistence to retain (0 keeps all history)",
+	),
 	stringFlag(
 		"LeiosVoteSigningKeyFile",
 		"leios-vote-signing-key-file",
@@ -930,6 +1012,83 @@ var flagSpecs = []flagSpec{
 		"allow plain-HTTP Mithril aggregator/artifact URLs (local dev/test only)",
 	),
 
+	uintFlag(
+		"Mithril.Server.Port",
+		"mithril-server-port",
+		"port for the Mithril snapshot artifact server",
+	),
+	stringFlag(
+		"Mithril.Server.PublicBaseURL",
+		"mithril-server-public-base-url",
+		"",
+		"public HTTPS origin used in snapshot locations (HTTP only on loopback)",
+	),
+	stringFlag(
+		"Mithril.Server.ArtifactStore",
+		"mithril-server-artifact-store",
+		"",
+		"Mithril artifact store: directory, s3://bucket/prefix or gcs://bucket/prefix",
+	),
+	stringFlag(
+		"Mithril.Server.RedirectBaseURL",
+		"mithril-server-redirect-base-url",
+		"",
+		"redirect Mithril archive requests to this base URL instead of streaming them",
+	),
+	intFlag(
+		"Mithril.Server.KeepSnapshots",
+		"mithril-server-keep-snapshots",
+		"newest Mithril snapshots to keep after producing one (0 keeps all)",
+	),
+	stringFlag(
+		"Mithril.Server.AncillarySigningKeyFile",
+		"mithril-server-ancillary-signing-key-file",
+		"",
+		"path to the Ed25519 key signing produced ancillary manifests",
+	),
+	boolFlag(
+		"Mithril.Server.TLSEnabled",
+		"mithril-server-tls-enabled",
+		"serve the Mithril artifact server over HTTPS with the shared TLS certificate",
+	),
+	boolFlag(
+		"Mithril.Server.Aggregator.Enabled",
+		"mithril-aggregator-enabled",
+		"collect signer registrations and signatures and certify stored snapshots",
+	),
+	uint64Flag(
+		"Mithril.Server.Aggregator.Epoch",
+		"mithril-aggregator-epoch",
+		"epoch Mithril signers register for",
+	),
+	uint64Flag(
+		"Mithril.Server.Aggregator.K",
+		"mithril-aggregator-k",
+		"Mithril STM quorum of lottery indices",
+	),
+	uint64Flag(
+		"Mithril.Server.Aggregator.M",
+		"mithril-aggregator-m",
+		"Mithril STM lottery size",
+	),
+	float64Flag(
+		"Mithril.Server.Aggregator.PhiF",
+		"mithril-aggregator-phi-f",
+		"Mithril STM lottery win probability",
+	),
+	stringFlag(
+		"Mithril.Server.Aggregator.GenesisSigningKeyFile",
+		"mithril-aggregator-genesis-signing-key-file",
+		"",
+		"file holding the Ed25519 Mithril genesis signing key",
+	),
+	stringFlag(
+		"Mithril.Server.Aggregator.OperatorTokenFile",
+		"mithril-aggregator-operator-token-file",
+		"",
+		"file holding the bearer token for aggregator signer registration",
+	),
+
 	// Database lifecycle (snapshot/restore/truncate)
 	boolFlag(
 		"DatabaseLifecycle.SnapshotEnabled",
@@ -964,10 +1123,16 @@ var flagSpecs = []flagSpec{
 		"db-snapshot-every-n-epochs",
 		"capture an automatic snapshot every N epoch boundaries",
 	),
+	stringFlag(
+		"DatabaseLifecycle.SnapshotTrustKeyFile",
+		"db-snapshot-trust-key-file",
+		"",
+		"file holding the shared secret that authenticates snapshot manifests; snapshots are signed with it and restores require it to verify",
+	),
 	durationFlag(
 		"DatabaseLifecycle.SnapshotMaxCommitPause",
 		"db-snapshot-max-commit-pause",
-		"cancel a snapshot still holding the commit barrier after this long (0 = no bound)",
+		"cancel a snapshot still holding the commit barrier after this long (default 30s; 0 = no bound)",
 	),
 }
 
@@ -989,13 +1154,16 @@ func ApplyFlags(cmd *cobra.Command, cfg *Config) error {
 	flags := cmd.Root().PersistentFlags()
 	previousNetwork := cfg.Network
 	for _, spec := range flagSpecs {
+		if !flags.Changed(spec.name) {
+			continue
+		}
 		if err := spec.apply(flags, cfg); err != nil {
 			return err
 		}
 		// Only gated fields, per provenance's documented contract: this loop
 		// walks every registered flag, and recording the rest would fill the
 		// map with entries nothing reads.
-		if flags.Changed(spec.name) && isGatedField(spec.field) {
+		if isGatedField(spec.field) {
 			cfg.recordProvenance(spec.field, SourceFlag)
 		}
 	}
@@ -1021,13 +1189,7 @@ func fieldByPath(v reflect.Value, path string) reflect.Value {
 	return v
 }
 
-// defaultValue reads a field's default from the snapshot the caller took, so
-// flag registration does not clone the config once per flag.
-func defaultValue(defaults *Config, field string) reflect.Value {
-	return fieldByPath(reflect.ValueOf(defaults).Elem(), field)
-}
-
-func targetValue(cfg *Config, field string) reflect.Value {
+func configFieldValue(cfg *Config, field string) reflect.Value {
 	return fieldByPath(reflect.ValueOf(cfg).Elem(), field)
 }
 
@@ -1036,22 +1198,15 @@ func stringFlag(field, name, shorthand, help string) flagSpec {
 		field: field,
 		name:  name,
 		register: func(f *pflag.FlagSet, defaults *Config) {
-			def := defaultValue(defaults, field).String()
-			if shorthand != "" {
-				f.StringP(name, shorthand, def, help)
-				return
-			}
-			f.String(name, def, help)
+			def := configFieldValue(defaults, field).String()
+			f.StringP(name, shorthand, def, help)
 		},
 		apply: func(f *pflag.FlagSet, cfg *Config) error {
-			if !f.Changed(name) {
-				return nil
-			}
 			v, err := f.GetString(name)
 			if err != nil {
 				return err
 			}
-			targetValue(cfg, field).SetString(v)
+			configFieldValue(cfg, field).SetString(v)
 			return nil
 		},
 	}
@@ -1062,57 +1217,28 @@ func stringSliceFlag(field, name, help string) flagSpec {
 		field: field,
 		name:  name,
 		register: func(f *pflag.FlagSet, defaults *Config) {
-			def := defaultValue(defaults, field).Interface().([]string)
+			def := configFieldValue(defaults, field).Interface().([]string)
 			f.StringSlice(name, def, help)
 		},
 		apply: func(f *pflag.FlagSet, cfg *Config) error {
-			if !f.Changed(name) {
-				return nil
-			}
 			v, err := f.GetStringSlice(name)
 			if err != nil {
 				return err
 			}
-			targetValue(cfg, field).Set(reflect.ValueOf(v))
+			configFieldValue(cfg, field).Set(reflect.ValueOf(v))
 			return nil
 		},
 	}
-}
-
-// validatedStringFlag rejects invalid values but stores them verbatim.
-func validatedStringFlag(
-	field, name, shorthand, help string,
-	validate func(string) error,
-) flagSpec {
-	s := stringFlag(field, name, shorthand, help)
-	s.apply = func(f *pflag.FlagSet, cfg *Config) error {
-		if !f.Changed(name) {
-			return nil
-		}
-		v, err := f.GetString(name)
-		if err != nil {
-			return err
-		}
-		if err := validate(v); err != nil {
-			return err
-		}
-		targetValue(cfg, field).SetString(v)
-		return nil
-	}
-	return s
 }
 
 // transformStringFlag normalizes the parsed value (e.g. lowercasing)
 // and may reject it; the transformed value is stored.
 func transformStringFlag(
-	field, name, help string,
+	field, name, shorthand, help string,
 	transform func(string) (string, error),
 ) flagSpec {
-	s := stringFlag(field, name, "", help)
+	s := stringFlag(field, name, shorthand, help)
 	s.apply = func(f *pflag.FlagSet, cfg *Config) error {
-		if !f.Changed(name) {
-			return nil
-		}
 		v, err := f.GetString(name)
 		if err != nil {
 			return err
@@ -1121,7 +1247,7 @@ func transformStringFlag(
 		if err != nil {
 			return err
 		}
-		targetValue(cfg, field).SetString(out)
+		configFieldValue(cfg, field).SetString(out)
 		return nil
 	}
 	return s
@@ -1132,17 +1258,14 @@ func boolFlag(field, name, help string) flagSpec {
 		field: field,
 		name:  name,
 		register: func(f *pflag.FlagSet, defaults *Config) {
-			f.Bool(name, defaultValue(defaults, field).Bool(), help)
+			f.Bool(name, configFieldValue(defaults, field).Bool(), help)
 		},
 		apply: func(f *pflag.FlagSet, cfg *Config) error {
-			if !f.Changed(name) {
-				return nil
-			}
 			v, err := f.GetBool(name)
 			if err != nil {
 				return err
 			}
-			targetValue(cfg, field).SetBool(v)
+			configFieldValue(cfg, field).SetBool(v)
 			return nil
 		},
 	}
@@ -1160,14 +1283,11 @@ func boolPtrFlag(field, name, help string) flagSpec {
 			f.Bool(name, false, help)
 		},
 		apply: func(f *pflag.FlagSet, cfg *Config) error {
-			if !f.Changed(name) {
-				return nil
-			}
 			v, err := f.GetBool(name)
 			if err != nil {
 				return err
 			}
-			targetValue(cfg, field).Set(reflect.ValueOf(&v))
+			configFieldValue(cfg, field).Set(reflect.ValueOf(&v))
 			return nil
 		},
 	}
@@ -1188,14 +1308,11 @@ func stringPtrFlag(field, name, help string) flagSpec {
 			f.String(name, "", help)
 		},
 		apply: func(f *pflag.FlagSet, cfg *Config) error {
-			if !f.Changed(name) {
-				return nil
-			}
 			v, err := f.GetString(name)
 			if err != nil {
 				return err
 			}
-			targetValue(cfg, field).Set(reflect.ValueOf(&v))
+			configFieldValue(cfg, field).Set(reflect.ValueOf(&v))
 			return nil
 		},
 	}
@@ -1206,17 +1323,14 @@ func intFlag(field, name, help string) flagSpec {
 		field: field,
 		name:  name,
 		register: func(f *pflag.FlagSet, defaults *Config) {
-			f.Int(name, int(defaultValue(defaults, field).Int()), help)
+			f.Int(name, int(configFieldValue(defaults, field).Int()), help)
 		},
 		apply: func(f *pflag.FlagSet, cfg *Config) error {
-			if !f.Changed(name) {
-				return nil
-			}
 			v, err := f.GetInt(name)
 			if err != nil {
 				return err
 			}
-			targetValue(cfg, field).SetInt(int64(v))
+			configFieldValue(cfg, field).SetInt(int64(v))
 			return nil
 		},
 	}
@@ -1227,17 +1341,14 @@ func int64Flag(field, name, help string) flagSpec {
 		field: field,
 		name:  name,
 		register: func(f *pflag.FlagSet, defaults *Config) {
-			f.Int64(name, defaultValue(defaults, field).Int(), help)
+			f.Int64(name, configFieldValue(defaults, field).Int(), help)
 		},
 		apply: func(f *pflag.FlagSet, cfg *Config) error {
-			if !f.Changed(name) {
-				return nil
-			}
 			v, err := f.GetInt64(name)
 			if err != nil {
 				return err
 			}
-			targetValue(cfg, field).SetInt(v)
+			configFieldValue(cfg, field).SetInt(v)
 			return nil
 		},
 	}
@@ -1248,17 +1359,14 @@ func uintFlag(field, name, help string) flagSpec {
 		field: field,
 		name:  name,
 		register: func(f *pflag.FlagSet, defaults *Config) {
-			f.Uint(name, uint(defaultValue(defaults, field).Uint()), help)
+			f.Uint(name, uint(configFieldValue(defaults, field).Uint()), help)
 		},
 		apply: func(f *pflag.FlagSet, cfg *Config) error {
-			if !f.Changed(name) {
-				return nil
-			}
 			v, err := f.GetUint(name)
 			if err != nil {
 				return err
 			}
-			targetValue(cfg, field).SetUint(uint64(v))
+			configFieldValue(cfg, field).SetUint(uint64(v))
 			return nil
 		},
 	}
@@ -1271,12 +1379,9 @@ func uint32Flag(field, name, help string) flagSpec {
 		field: field,
 		name:  name,
 		register: func(f *pflag.FlagSet, defaults *Config) {
-			f.Uint(name, uint(defaultValue(defaults, field).Uint()), help)
+			f.Uint(name, uint(configFieldValue(defaults, field).Uint()), help)
 		},
 		apply: func(f *pflag.FlagSet, cfg *Config) error {
-			if !f.Changed(name) {
-				return nil
-			}
 			v, err := f.GetUint(name)
 			if err != nil {
 				return err
@@ -1287,7 +1392,7 @@ func uint32Flag(field, name, help string) flagSpec {
 					name, v, uint64(math.MaxUint32),
 				)
 			}
-			targetValue(cfg, field).SetUint(uint64(v))
+			configFieldValue(cfg, field).SetUint(uint64(v))
 			return nil
 		},
 	}
@@ -1304,23 +1409,19 @@ func uint64PtrFlag(field, name, help string) flagSpec {
 		register: func(f *pflag.FlagSet, defaults *Config) {
 			// Report the value that omitting the flag actually
 			// produces, not the zero value of the pointer. The
-			// Changed check below still lets an explicit 0 through
-			// to disable the cap.
+			// ApplyFlags still accepts an explicit 0 to disable the cap.
 			var def uint64
-			if v := defaultValue(defaults, field); !v.IsNil() {
+			if v := configFieldValue(defaults, field); !v.IsNil() {
 				def = v.Elem().Uint()
 			}
 			f.Uint64(name, def, help)
 		},
 		apply: func(f *pflag.FlagSet, cfg *Config) error {
-			if !f.Changed(name) {
-				return nil
-			}
 			v, err := f.GetUint64(name)
 			if err != nil {
 				return err
 			}
-			targetValue(cfg, field).Set(reflect.ValueOf(&v))
+			configFieldValue(cfg, field).Set(reflect.ValueOf(&v))
 			return nil
 		},
 	}
@@ -1331,17 +1432,14 @@ func uint64Flag(field, name, help string) flagSpec {
 		field: field,
 		name:  name,
 		register: func(f *pflag.FlagSet, defaults *Config) {
-			f.Uint64(name, defaultValue(defaults, field).Uint(), help)
+			f.Uint64(name, configFieldValue(defaults, field).Uint(), help)
 		},
 		apply: func(f *pflag.FlagSet, cfg *Config) error {
-			if !f.Changed(name) {
-				return nil
-			}
 			v, err := f.GetUint64(name)
 			if err != nil {
 				return err
 			}
-			targetValue(cfg, field).SetUint(v)
+			configFieldValue(cfg, field).SetUint(v)
 			return nil
 		},
 	}
@@ -1352,17 +1450,14 @@ func float64Flag(field, name, help string) flagSpec {
 		field: field,
 		name:  name,
 		register: func(f *pflag.FlagSet, defaults *Config) {
-			f.Float64(name, defaultValue(defaults, field).Float(), help)
+			f.Float64(name, configFieldValue(defaults, field).Float(), help)
 		},
 		apply: func(f *pflag.FlagSet, cfg *Config) error {
-			if !f.Changed(name) {
-				return nil
-			}
 			v, err := f.GetFloat64(name)
 			if err != nil {
 				return err
 			}
-			targetValue(cfg, field).SetFloat(v)
+			configFieldValue(cfg, field).SetFloat(v)
 			return nil
 		},
 	}
@@ -1375,19 +1470,16 @@ func durationFlag(field, name, help string) flagSpec {
 		register: func(f *pflag.FlagSet, defaults *Config) {
 			f.Duration(
 				name,
-				time.Duration(defaultValue(defaults, field).Int()),
+				time.Duration(configFieldValue(defaults, field).Int()),
 				help,
 			)
 		},
 		apply: func(f *pflag.FlagSet, cfg *Config) error {
-			if !f.Changed(name) {
-				return nil
-			}
 			v, err := f.GetDuration(name)
 			if err != nil {
 				return err
 			}
-			targetValue(cfg, field).SetInt(int64(v))
+			configFieldValue(cfg, field).SetInt(int64(v))
 			return nil
 		},
 	}

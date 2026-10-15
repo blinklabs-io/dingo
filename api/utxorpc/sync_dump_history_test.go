@@ -95,6 +95,7 @@ func TestCollectDumpHistoryPage_FullPageHasNextToken(t *testing.T) {
 		&fakeDumpHistoryIter{queue: queue},
 		2,
 		DefaultMaxHistoryItems,
+		DefaultMaxHistoryBytes,
 	)
 	require.NoError(t, err)
 	require.Len(t, out, 2)
@@ -125,6 +126,7 @@ func TestCollectDumpHistoryPage_PartialPageNoNextToken(t *testing.T) {
 		&fakeDumpHistoryIter{queue: queue},
 		10,
 		DefaultMaxHistoryItems,
+		DefaultMaxHistoryBytes,
 	)
 	require.NoError(t, err)
 	require.Len(t, out, 2)
@@ -155,6 +157,7 @@ func TestCollectDumpHistoryPage_MaxAllowedZeroReturnsEmpty(t *testing.T) {
 		&fakeDumpHistoryIter{queue: queue},
 		0,
 		0,
+		DefaultMaxHistoryBytes,
 	)
 	require.NoError(t, err)
 	require.Empty(t, out)
@@ -177,6 +180,7 @@ func TestCollectDumpHistoryPage_OmittedMaxItemsUsesMaxAllowed(t *testing.T) {
 		&fakeDumpHistoryIter{queue: queue},
 		0,
 		DefaultMaxHistoryItems,
+		DefaultMaxHistoryBytes,
 	)
 	require.NoError(t, err)
 	require.Len(t, out, 1)
@@ -207,6 +211,7 @@ func TestCollectDumpHistoryPage_SkipsRollback(t *testing.T) {
 		&fakeDumpHistoryIter{queue: queue},
 		2,
 		DefaultMaxHistoryItems,
+		DefaultMaxHistoryBytes,
 	)
 	require.NoError(t, err)
 	require.Len(t, out, 2)

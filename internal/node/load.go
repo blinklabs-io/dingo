@@ -224,9 +224,16 @@ func ensureDB(
 	cfg *config.Config,
 	logger *slog.Logger,
 	db *database.Database,
+	nodeCfg *cardano.CardanoNodeConfig,
 ) (*database.Database, func(), error) {
 	if db != nil {
 		return db, func() {}, nil
+	}
+	genesisStakingEmpty, err := internalplugins.ResolveGenesisStakingEmpty(
+		nodeCfg, cfg.CardanoConfig, cfg.Network, cfg.NetworkMagic,
+	)
+	if err != nil {
+		return nil, nil, fmt.Errorf("loading cardano node config: %w", err)
 	}
 	dbConfig := &database.Config{
 		DataDir: cfg.DatabasePath, Logger: logger,
@@ -251,6 +258,7 @@ func ensureDB(
 			DataDir: cfg.DatabasePath, RunMode: string(cfg.RunMode),
 			StorageMode: cfg.StorageMode, MaxConnections: cfg.DatabaseWorkers,
 			Logger: logger, TracingEnabled: cfg.Tracing,
+			GenesisStakingEmpty: genesisStakingEmpty,
 		},
 	)
 	if err != nil {
@@ -307,30 +315,37 @@ func captureLoadGenesisSnapshot(
 }
 
 // WithBulkLoadPragmas enables bulk-load optimizations on the metadata
-// store if it implements BulkLoadOptimizer. The returned cleanup
-// function restores normal pragmas and must be deferred by the caller.
+// store if it implements BulkLoadOptimizer. The caller should defer the
+// returned cleanup and may call it earlier when normal pragmas are needed.
 func WithBulkLoadPragmas(
 	db *database.Database,
 	logger *slog.Logger,
-) func() {
+) func() error {
 	optimizer, ok := db.Metadata().(metadata.BulkLoadOptimizer)
 	if !ok {
-		return func() {}
+		return func() error { return nil }
 	}
 	if err := optimizer.SetBulkLoadPragmas(); err != nil {
 		logger.Warn(
 			"failed to set bulk-load optimizations",
 			"error", err,
 		)
-		return func() {}
+		return func() error { return nil }
 	}
-	return func() {
+	restored := false
+	return func() error {
+		if restored {
+			return nil
+		}
 		if err := optimizer.RestoreNormalPragmas(); err != nil {
 			logger.Error(
 				"failed to restore normal settings",
 				"error", err,
 			)
+			return err
 		}
+		restored = true
+		return nil
 	}
 }
 
@@ -354,13 +369,18 @@ func RunPlannerStats(db *database.Database, logger *slog.Logger) error {
 type DeferredIndexRebuilder struct {
 	manager metadata.DeferredIndexManager
 	logger  *slog.Logger
+	ctx     context.Context
 }
 
 func (r *DeferredIndexRebuilder) BuildCritical() error {
 	if r == nil || r.manager == nil {
 		return nil
 	}
-	if err := r.manager.BuildCriticalDeferredIndexes(); err != nil {
+	logger := r.logger
+	if logger == nil {
+		logger = slog.New(slog.DiscardHandler)
+	}
+	if err := ensureCriticalDeferredIndexes(r.ctx, r.manager, logger); err != nil {
 		return fmt.Errorf("rebuilding critical deferred indexes: %w", err)
 	}
 	return nil
@@ -374,7 +394,9 @@ func (r *DeferredIndexRebuilder) BuildAll() error {
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
-	if err := ensureAllDeferredIndexes(r.manager, logger); err != nil {
+	if err := ensureAllDeferredIndexes(
+		r.ctx, r.manager, logger,
+	); err != nil {
 		return fmt.Errorf("rebuilding deferred indexes: %w", err)
 	}
 	return nil
@@ -391,6 +413,7 @@ func (r *DeferredIndexRebuilder) BuildAll() error {
 // maintenance; it clears the pending marker once the full manifest
 // exists.
 func WithDeferredIndexes(
+	ctx context.Context,
 	db *database.Database,
 	logger *slog.Logger,
 ) *DeferredIndexRebuilder {
@@ -398,15 +421,25 @@ func WithDeferredIndexes(
 	if !ok {
 		return &DeferredIndexRebuilder{}
 	}
-	if err := manager.DropDeferredIndexes(); err != nil {
+	rebuilder := &DeferredIndexRebuilder{
+		manager: manager,
+		logger:  logger,
+		ctx:     ctx,
+	}
+	var err error
+	if dropper, ok := manager.(metadata.ContextDeferredIndexDropper); ok {
+		err = dropper.DropDeferredIndexesContext(ctx)
+	} else {
+		err = manager.DropDeferredIndexes()
+	}
+	if err != nil {
 		logger.Warn(
 			"failed to drop deferred metadata indexes; "+
 				"continuing and repairing during rebuild phases",
 			"error", err,
 		)
-		return &DeferredIndexRebuilder{manager: manager, logger: logger}
 	}
-	return &DeferredIndexRebuilder{manager: manager, logger: logger}
+	return rebuilder
 }
 
 // criticalIndexRebuildLogThreshold is how long the critical-index check
@@ -438,10 +471,11 @@ const criticalIndexRebuildLogThreshold = time.Second
 // catalog lookup per entry on a healthy database, and it never touches the
 // marker.
 func ensureCriticalDeferredIndexes(
+	ctx context.Context,
 	manager metadata.DeferredIndexManager,
 	logger *slog.Logger,
 ) error {
-	missing, listed := missingCriticalDeferredIndexes(manager, logger)
+	missing, listed := missingCriticalDeferredIndexes(ctx, manager, logger)
 	if listed && len(missing) > 0 {
 		// Logged before the build: building one index on a
 		// multi-million-row table takes minutes, and the rebuild itself
@@ -453,7 +487,13 @@ func ensureCriticalDeferredIndexes(
 		)
 	}
 	start := time.Now()
-	if err := manager.BuildCriticalDeferredIndexes(); err != nil {
+	var err error
+	if builder, ok := manager.(metadata.ContextCriticalDeferredIndexBuilder); ok {
+		err = builder.BuildCriticalDeferredIndexesContext(ctx)
+	} else {
+		err = manager.BuildCriticalDeferredIndexes()
+	}
+	if err != nil {
 		return err
 	}
 	elapsed := time.Since(start)
@@ -492,10 +532,11 @@ func ensureCriticalDeferredIndexes(
 // all for however long the remaining entries take on a multi-million-row
 // table.
 func ensureAllDeferredIndexes(
+	ctx context.Context,
 	manager metadata.DeferredIndexManager,
 	logger *slog.Logger,
 ) error {
-	missing, listed := missingDeferredIndexes(manager, logger)
+	missing, listed := missingDeferredIndexes(ctx, manager, logger)
 	if listed && len(missing) > 0 {
 		logger.Info(
 			"rebuilding missing deferred metadata indexes",
@@ -504,7 +545,13 @@ func ensureAllDeferredIndexes(
 		)
 	}
 	start := time.Now()
-	if err := manager.BuildDeferredIndexes(); err != nil {
+	var err error
+	if builder, ok := manager.(metadata.ContextDeferredIndexBuilder); ok {
+		err = builder.BuildDeferredIndexesContext(ctx)
+	} else {
+		err = manager.BuildDeferredIndexes()
+	}
+	if err != nil {
 		return err
 	}
 	elapsed := time.Since(start)
@@ -527,14 +574,19 @@ func ensureAllDeferredIndexes(
 // The second return reports whether the store could answer, on the same terms
 // as missingCriticalDeferredIndexes.
 func missingDeferredIndexes(
+	ctx context.Context,
 	manager metadata.DeferredIndexManager,
 	logger *slog.Logger,
 ) ([]string, bool) {
-	lister, ok := manager.(metadata.MissingDeferredIndexLister)
-	if !ok {
+	var missing []string
+	var err error
+	if lister, ok := manager.(metadata.ContextMissingDeferredIndexLister); ok {
+		missing, err = lister.MissingDeferredIndexesContext(ctx)
+	} else if lister, ok := manager.(metadata.MissingDeferredIndexLister); ok {
+		missing, err = lister.MissingDeferredIndexes()
+	} else {
 		return nil, false
 	}
-	missing, err := lister.MissingDeferredIndexes()
 	if err != nil {
 		logger.Warn(
 			"could not list missing deferred metadata indexes; "+
@@ -552,14 +604,19 @@ func missingDeferredIndexes(
 // query, fall back to logging after the rebuild rather than failing a startup
 // over a log line.
 func missingCriticalDeferredIndexes(
+	ctx context.Context,
 	manager metadata.DeferredIndexManager,
 	logger *slog.Logger,
 ) ([]string, bool) {
-	lister, ok := manager.(metadata.MissingCriticalDeferredIndexLister)
-	if !ok {
+	var missing []string
+	var err error
+	if lister, ok := manager.(metadata.ContextMissingCriticalDeferredIndexLister); ok {
+		missing, err = lister.MissingCriticalDeferredIndexesContext(ctx)
+	} else if lister, ok := manager.(metadata.MissingCriticalDeferredIndexLister); ok {
+		missing, err = lister.MissingCriticalDeferredIndexes()
+	} else {
 		return nil, false
 	}
-	missing, err := lister.MissingCriticalDeferredIndexes()
 	if err != nil {
 		logger.Warn(
 			"could not list missing critical deferred metadata indexes; "+
@@ -576,6 +633,7 @@ func missingCriticalDeferredIndexes(
 // rebuilds only the API/rollback-critical subset so RepairDeferredIndexes can
 // finish the lazy remainder later.
 func RepairCriticalDeferredIndexes(
+	ctx context.Context,
 	db *database.Database,
 	logger *slog.Logger,
 ) error {
@@ -592,15 +650,15 @@ func RepairCriticalDeferredIndexes(
 			"critical deferred metadata indexes pending from a prior run; " +
 				"rebuilding before serving API traffic",
 		)
-		return ensureCriticalDeferredIndexes(manager, logger)
+		return ensureCriticalDeferredIndexes(ctx, manager, logger)
 	}
 	// A clear marker means no bulk-load cycle is active. Restore copies can
 	// still be missing any manifest entry because their recorded migrations do
 	// not re-run, so finish the whole manifest before accepting traffic.
-	if err := ensureCriticalDeferredIndexes(manager, logger); err != nil {
+	if err := ensureCriticalDeferredIndexes(ctx, manager, logger); err != nil {
 		return err
 	}
-	return ensureAllDeferredIndexes(manager, logger)
+	return ensureAllDeferredIndexes(ctx, manager, logger)
 }
 
 // RepairDeferredIndexes rebuilds any deferred indexes that were
@@ -611,6 +669,7 @@ func RepairCriticalDeferredIndexes(
 // With no cycle outstanding it restores the complete manifest because a
 // restored database can have recorded migrations but missing index entries.
 func RepairDeferredIndexes(
+	ctx context.Context,
 	db *database.Database,
 	logger *slog.Logger,
 ) error {
@@ -626,16 +685,16 @@ func RepairDeferredIndexes(
 		// A restore can carry missing deferred indexes without the pending
 		// marker. Rebuild the complete manifest before any rollback or query
 		// runs; BuildDeferredIndexes is idempotent on a healthy database.
-		if err := ensureCriticalDeferredIndexes(manager, logger); err != nil {
+		if err := ensureCriticalDeferredIndexes(ctx, manager, logger); err != nil {
 			return err
 		}
-		return ensureAllDeferredIndexes(manager, logger)
+		return ensureAllDeferredIndexes(ctx, manager, logger)
 	}
 	logger.Warn(
 		"deferred metadata indexes pending from a prior run; " +
 			"rebuilding before continuing",
 	)
-	return ensureAllDeferredIndexes(manager, logger)
+	return ensureAllDeferredIndexes(ctx, manager, logger)
 }
 
 // LoadWithDB loads immutable DB blocks into the chain. If db is nil,
@@ -717,13 +776,19 @@ func LoadWithDB(
 		"config", nodeCfg,
 	)
 	// Load database (open new one if not provided)
-	db, closeDB, err := ensureDB(cfg, logger, db) //nolint:contextcheck
+	db, closeDB, err := ensureDB(cfg, logger, db, nodeCfg) //nolint:contextcheck
 	if err != nil {
 		return err
 	}
 	defer closeDB()
 	// Enable bulk-load optimizations if the metadata store supports them
-	defer WithBulkLoadPragmas(db, logger)()
+	cleanupBulkLoadPragmas := WithBulkLoadPragmas(db, logger)
+	defer func() {
+		if err := cleanupBulkLoadPragmas(); err != nil {
+			logger.Error("failed to restore normal settings", "error", err)
+		}
+	}()
+	deferredIndexes := WithDeferredIndexes(ctx, db, logger)
 	// Immutable load replays trusted block batches directly into the ledger, so
 	// it does not need the event-driven reread path here.
 	cm, err := chain.NewManager(
@@ -776,6 +841,8 @@ func LoadWithDB(
 			// must match serve mode (node.go) on replay of the same DB.
 			DelegatorInactivityEnabled: cfg.DelegatorInactivityEnabled,
 			DelegatorInactivity:        cfg.DelegatorInactivity,
+			// Load replays unvalidated blocks, the path this setting batches.
+			ApplyRowBatchingEnabled: cfg.LedgerApplyRowBatchingEnabled,
 			DatabaseWorkerPoolConfig: ledger.DatabaseWorkerPoolConfig{
 				WorkerPoolSize: cfg.DatabaseWorkers,
 				TaskQueueSize:  cfg.DatabaseQueueSize,
@@ -881,7 +948,9 @@ func LoadWithDB(
 					"remote ImmutableDB requires a valid Byron security parameter",
 				)
 			}
-			regularSlots = uint64(byronGenesis.ProtocolConsts.K) * 10 //nolint:gosec
+			regularSlots = uint64(
+				byronGenesis.ProtocolConsts.K,
+			) * 10 //nolint:gosec
 			canContainEBB = true
 		} else if shelleyGenesis := nodeCfg.ShelleyGenesis(); shelleyGenesis != nil &&
 			shelleyGenesis.EpochLength > 0 {
@@ -935,6 +1004,12 @@ func LoadWithDB(
 	// the database missing mark/reward snapshots for those epochs.
 	if err := captureFailures.err(); err != nil {
 		return err
+	}
+	if err := deferredIndexes.BuildCritical(); err != nil {
+		return fmt.Errorf(
+			"rebuilding critical metadata indexes after immutable load: %w",
+			err,
+		)
 	}
 	return nil
 }
@@ -1029,7 +1104,7 @@ func LoadBlobsWithDB(
 	}
 	// Load database (open new one if not provided)
 	callerProvidedDB := db != nil
-	db, closeDB, err := ensureDB(cfg, logger, db) //nolint:contextcheck
+	db, closeDB, err := ensureDB(cfg, logger, db, nil) //nolint:contextcheck
 	if err != nil {
 		return nil, err
 	}
@@ -1039,7 +1114,12 @@ func LoadBlobsWithDB(
 	// management (avoids concurrent pragma modification if
 	// multiple goroutines share the same database).
 	if !callerProvidedDB {
-		defer WithBulkLoadPragmas(db, logger)()
+		cleanupBulkLoadPragmas := WithBulkLoadPragmas(db, logger)
+		defer func() {
+			if err := cleanupBulkLoadPragmas(); err != nil {
+				logger.Error("failed to restore normal settings", "error", err)
+			}
+		}()
 	}
 	// Load chain without event bus (no ledger processing)
 	cm, err := chain.NewManager(ctx, db, nil)

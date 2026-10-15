@@ -28,6 +28,7 @@ import (
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/consensus/leaderthreshold"
 	"github.com/blinklabs-io/dingo/consensus/praos"
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/ledger/eras"
@@ -131,6 +132,16 @@ var (
 	errHeaderLocalConfiguration = errors.New(
 		"header local configuration invalid",
 	)
+)
+
+// ErrHeaderBeyondForecastHorizon marks a header whose slot lies past the
+// ledger's forecast horizon. Such an error also satisfies
+// IsHeaderVerificationDeferred, but unlike the other deferred causes the
+// header cannot be validated at all until the applied ledger advances, so it
+// must not count for chain selection or reach blockfetch before then
+// (ouroboros-consensus ChainSync.Client, OutsideForecastRange).
+var ErrHeaderBeyondForecastHorizon = errors.New(
+	"header beyond the ledger forecast horizon",
 )
 
 // headerStateLookupErr marks err, a failure reading local state, with
@@ -277,6 +288,50 @@ func (ls *LedgerState) ValidateChainSelectionHeaderCrypto(
 		return fmt.Errorf("%w: %w", errHeaderVerificationDeferred, err)
 	}
 	return err
+}
+
+// ValidateChainSelectionHeaderCryptoWithGeneration validates a header and
+// returns the immutable ledger-state generation used by that validation. A
+// concurrent publication makes the verdict non-reusable and is reported as a
+// deferred result so callers can retry it at ledger admission.
+func (ls *LedgerState) ValidateChainSelectionHeaderCryptoWithGeneration(
+	header ledger.BlockHeader,
+) (uint64, error) {
+	return ls.withStableHeaderVerificationContext(func() error {
+		return ls.ValidateChainSelectionHeaderCrypto(header)
+	})
+}
+
+func (ls *LedgerState) withStableHeaderVerificationContext(
+	verify func() error,
+) (uint64, error) {
+	beforeConsensus := ls.loadConsensusSnapshot()
+	beforeTip := ls.loadTipSnapshot()
+	if ls.txValidationTransitions.Load() != 0 ||
+		beforeConsensus == nil || beforeTip == nil ||
+		beforeConsensus.generation != beforeTip.generation {
+		return 0, fmt.Errorf(
+			"%w: ledger verification context is unavailable",
+			errHeaderVerificationDeferred,
+		)
+	}
+	if err := verify(); err != nil {
+		return 0, err
+	}
+	ls.txValidationCommitMutex.RLock()
+	defer ls.txValidationCommitMutex.RUnlock()
+	afterConsensus := ls.loadConsensusSnapshot()
+	afterTip := ls.loadTipSnapshot()
+	if ls.txValidationTransitions.Load() != 0 ||
+		beforeConsensus != afterConsensus || beforeTip != afterTip ||
+		afterConsensus == nil || afterTip == nil ||
+		afterConsensus.generation != afterTip.generation {
+		return 0, fmt.Errorf(
+			"%w: ledger verification context changed",
+			errHeaderVerificationDeferred,
+		)
+	}
+	return beforeConsensus.generation, nil
 }
 
 // headerApplied reports whether the ledger has applied header: its point is on
@@ -597,11 +652,13 @@ func (ls *LedgerState) headerVerificationEpoch(
 				// peer. Recycling on past-horizon starves the peer pool the
 				// block and Leios endorser-block fetch depend on and deadlocks
 				// catch-up at epoch boundaries; the chainsync recycle paths skip
-				// deferred errors.
+				// deferred errors. ErrHeaderBeyondForecastHorizon lets
+				// chainsync tell this cause apart and hold the header back.
 				return models.Epoch{}, fmt.Errorf(
-					"%w: block header verification deferred past era horizon "+
-						"at slot %d: %w",
+					"%w: %w: block header verification deferred past era "+
+						"horizon at slot %d: %w",
 					errHeaderVerificationDeferred,
+					ErrHeaderBeyondForecastHorizon,
 					blockSlot,
 					err,
 				)
@@ -718,6 +775,7 @@ func (ls *LedgerState) verifyBlockHeaderStateWithCache(
 	); err != nil {
 		return err
 	}
+	//nolint:contextcheck // the overlay fallback forecasts parameters without a request context
 	if handled, err := ls.verifyGenesisDelegateHeader(
 		block,
 		allowStateDefer,
@@ -1794,14 +1852,25 @@ func (ls *LedgerState) resolveElectingSnapshot(
 	poolKeyHash lcommon.PoolKeyHash,
 	epochCache []models.Epoch,
 ) electingSnapshot {
+	return ls.resolveElectingSnapshotAtSlot(
+		block.SlotNumber(), epochId, poolKeyHash, epochCache, nil,
+	)
+}
+
+func (ls *LedgerState) resolveElectingSnapshotAtSlot(
+	slot, epochId uint64,
+	poolKeyHash lcommon.PoolKeyHash,
+	epochCache []models.Epoch,
+	txn types.Txn,
+) electingSnapshot {
 	snap := electingSnapshot{
 		epoch: praos.StakeSnapshotEpoch(epochId),
 		kind:  models.PoolStakeSnapshotTypeMark,
 
 		epochCache: epochCache,
 	}
-	useImportedActive, err := ls.shouldUseImportedActivePoolDistributionWithCache(
-		block,
+	useImportedActive, err := ls.shouldUseImportedActivePoolDistributionAtSlot(
+		slot,
 		epochId,
 		epochCache,
 	)
@@ -1817,7 +1886,7 @@ func (ls *LedgerState) resolveElectingSnapshot(
 		snap.epoch,
 		snap.kind,
 		poolKeyHash[:],
-		nil,
+		txn,
 	)
 	snap.row, snap.rowErr = row, headerStateLookupErr(err)
 	return snap
@@ -2110,7 +2179,7 @@ func (ls *LedgerState) shouldSkipPostMithrilMarkEligibilityWithCache(
 	return false
 }
 
-// shouldUseImportedActivePoolDistributionWithCache resolves the Mithril trust
+// shouldUseImportedActivePoolDistributionAtSlot resolves the Mithril trust
 // boundary against a caller-supplied epoch cache.
 //
 // This selection decides *which* snapshot elects the block, and both halves of
@@ -2119,12 +2188,12 @@ func (ls *LedgerState) shouldSkipPostMithrilMarkEligibilityWithCache(
 // disagree about the electing snapshot across an epoch rollover or a rollback,
 // which is the divergence threading epochId through this path exists to
 // prevent.
-func (ls *LedgerState) shouldUseImportedActivePoolDistributionWithCache(
-	block ledger.Block,
+func (ls *LedgerState) shouldUseImportedActivePoolDistributionAtSlot(
+	slot uint64,
 	epochId uint64,
 	epochCache []models.Epoch,
 ) (bool, error) {
-	if ls.mithrilLedgerSlot == 0 || block.SlotNumber() <= ls.mithrilLedgerSlot {
+	if ls.mithrilLedgerSlot == 0 || slot <= ls.mithrilLedgerSlot {
 		return false, nil
 	}
 	mithrilEpoch, err := epochForSlotInCache(epochCache, ls.mithrilLedgerSlot)
@@ -2132,7 +2201,7 @@ func (ls *LedgerState) shouldUseImportedActivePoolDistributionWithCache(
 		return false, fmt.Errorf(
 			"block header verification rejected at slot %d: "+
 				"resolve Mithril trust boundary epoch: %w",
-			block.SlotNumber(),
+			slot,
 			err,
 		)
 	}
@@ -2184,6 +2253,20 @@ func (ls *LedgerState) electingVrfKeyHashFromSnapshotWithContext(
 	epochCache []models.Epoch,
 	snap electingSnapshot,
 ) (lcommon.Blake2b256, bool, error) {
+	txn := ls.db.MetadataTxn(ctx, false)
+	defer txn.Release()
+	return ls.electingVrfKeyHashFromSnapshotWithTxn(
+		ctx, poolKeyHash, epochCache, snap, txn,
+	)
+}
+
+func (ls *LedgerState) electingVrfKeyHashFromSnapshotWithTxn(
+	ctx context.Context,
+	poolKeyHash lcommon.PoolKeyHash,
+	epochCache []models.Epoch,
+	snap electingSnapshot,
+	txn *database.Txn,
+) (lcommon.Blake2b256, bool, error) {
 	cutoffSlot, capturedSlot, ok, err := ls.electingPoolParamsCutoffSlotFromSnapshot(
 		snap,
 		epochCache,
@@ -2192,13 +2275,41 @@ func (ls *LedgerState) electingVrfKeyHashFromSnapshotWithContext(
 		return lcommon.Blake2b256{}, false, err
 	}
 	if ok {
-		txn := ls.db.MetadataTxn(ctx, false)
-		defer txn.Release()
-		vrfKeyHash, found, err := ls.db.Metadata().GetPoolVrfKeyHashAtSlot(
-			poolKeyHash[:],
-			cutoffSlot,
-			txn.Metadata(),
-		)
+		var vrfKeyHash []byte
+		var found bool
+		if ls.mithrilLedgerSlot != 0 && cutoffSlot == ls.mithrilLedgerSlot &&
+			capturedSlot == ls.mithrilLedgerSlot {
+			// Imported active distributions precede promotion even in Dijkstra;
+			// the two anchor rows describe current and deferred parameters.
+			mithrilEpoch, epochErr := epochForSlotInCache(
+				epochCache,
+				capturedSlot,
+			)
+			if epochErr != nil {
+				return lcommon.Blake2b256{}, false, headerStateLookupErr(
+					epochErr,
+				)
+			}
+			registrations, registrationErr := ls.db.Metadata().
+				GetPoolRegistrationsEffectiveForEpoch(
+					[]lcommon.PoolKeyHash{poolKeyHash},
+					mithrilEpoch.StartSlot,
+					mithrilEpoch.EpochId,
+					capturedSlot,
+					txn.Metadata(),
+				)
+			err = registrationErr
+			if len(registrations) == 1 {
+				vrfKeyHash = registrations[0].VrfKeyHash
+				found = true
+			}
+		} else {
+			vrfKeyHash, found, err = ls.db.Metadata().GetPoolVrfKeyHashAtSlot(
+				poolKeyHash[:],
+				cutoffSlot,
+				txn.Metadata(),
+			)
+		}
 		if err != nil {
 			return lcommon.Blake2b256{}, false, headerStateLookupErr(err)
 		}
@@ -2262,25 +2373,48 @@ func (ls *LedgerState) electingVrfKeyHashFromSnapshotWithContext(
 		// in this file), so a capture at or below it is diagnostic: the
 		// snapshot that elected this pool was captured no later than the
 		// bootstrap boundary, which only a bootstrap-created gap explains.
-		// Falling back to the live registration here is the same trust
-		// electingVrfKeyHashFromSnapshot already extends when ok is false --
+		// Falling back to the registration effective at import is the same
+		// trust electingVrfKeyHashFromSnapshot already extends when ok is false --
 		// no snapshot at all -- applied to the narrower case of a snapshot
 		// whose registration history the import could not carry. It is not
 		// the general "no history found" fallback that was removed: outside
-		// this bootstrap-anchor window, a genuine gap still hard-rejects
-		// rather than resolving the pool's current (possibly rotated) key.
+		// this bootstrap-anchor window, a genuine gap still hard-rejects. The
+		// epoch-effective lookup also preserves imported future parameters as
+		// staged until their boundary instead of selecting the latest row.
 		if ls.mithrilLedgerSlot != 0 && capturedSlot <= ls.mithrilLedgerSlot {
-			pool, poolErr := ls.db.GetPool(ctx, poolKeyHash, true, nil)
-			if poolErr != nil && !errors.Is(poolErr, models.ErrPoolNotFound) {
+			mithrilEpoch, epochErr := epochForSlotInCache(
+				epochCache,
+				ls.mithrilLedgerSlot,
+			)
+			if epochErr != nil {
+				return lcommon.Blake2b256{}, false, headerStateLookupErr(epochErr)
+			}
+			registrations, registrationErr := ls.db.Metadata().
+				GetPoolRegistrationsEffectiveForEpoch(
+					[]lcommon.PoolKeyHash{poolKeyHash},
+					mithrilEpoch.StartSlot,
+					mithrilEpoch.EpochId,
+					ls.mithrilLedgerSlot,
+					txn.Metadata(),
+				)
+			if registrationErr != nil {
 				return lcommon.Blake2b256{}, false, headerStateLookupErr(
-					poolErr,
+					registrationErr,
 				)
 			}
-			hash, ok, err := registeredPoolVrfKeyHash(pool)
-			if err != nil {
-				return lcommon.Blake2b256{}, false, headerStateLookupErr(err)
-			}
-			if ok {
+			if len(registrations) == 1 && len(registrations[0].VrfKeyHash) > 0 {
+				hash, hashErr := lcommon.NewBlake2b256Checked(
+					registrations[0].VrfKeyHash,
+				)
+				if hashErr != nil {
+					return lcommon.Blake2b256{}, false, headerStateLookupErr(
+						fmt.Errorf(
+							"imported VRF key hash for pool %x: %w",
+							poolKeyHash[:],
+							hashErr,
+						),
+					)
+				}
 				return hash, true, nil
 			}
 		}
@@ -2292,7 +2426,7 @@ func (ls *LedgerState) electingVrfKeyHashFromSnapshotWithContext(
 			poolKeyHash[:],
 		)
 	}
-	pool, err := ls.db.GetPool(ctx, poolKeyHash, true, nil)
+	pool, err := ls.db.GetPool(ctx, poolKeyHash, true, txn)
 	if err != nil {
 		return lcommon.Blake2b256{}, false, headerStateLookupErr(err)
 	}
@@ -2303,9 +2437,9 @@ func (ls *LedgerState) electingVrfKeyHashFromSnapshotWithContext(
 // electingPoolParamsCutoffSlot reports the slot up to which pool registrations
 // were in force in the snapshot that elected this block's producer.
 //
-// Which slot that is depends on the era in force during the epoch the snapshot
-// was captured in, because the two rules involved run in the opposite order on
-// either side of the Dijkstra hard fork. The merge of psFutureStakePoolParams
+// Which slot that is depends on the era whose EPOCH rule produced the snapshot,
+// because the two rules involved run in the opposite order on either side of
+// the Dijkstra hard fork. The merge of psFutureStakePoolParams
 // into psStakePools -- where a re-registration submitted during the epoch
 // waits -- lives in cardano-ledger's POOLREAP rule; SNAP is what freezes the
 // snapshot. The EPOCH rule sequences them:
@@ -2387,7 +2521,17 @@ func (ls *LedgerState) electingPoolParamsCutoffSlotFromSnapshot(
 		// exists.
 		return 0, 0, false, nil //nolint:nilerr // unplaceable capture is "unavailable", not an error
 	}
-	if poolParamsMergedBeforeSnapshot(capturedEpoch.EraId) {
+	var snapshotEpoch *models.Epoch
+	for i := range epochCache {
+		if epochCache[i].EpochId == snap.epoch {
+			snapshotEpoch = &epochCache[i]
+			break
+		}
+	}
+	if snapshotEpoch == nil {
+		return 0, 0, false, nil
+	}
+	if poolParamsMergedBeforeSnapshot(snapshotEpoch.EraId) {
 		// POOLREAP ran before SNAP, so the capture already carries every
 		// registration accepted through the end of the captured epoch.
 		// Returning the capture slot for both values also makes the
@@ -2405,15 +2549,13 @@ func (ls *LedgerState) electingPoolParamsCutoffSlotFromSnapshot(
 	return capturedEpoch.StartSlot - 1, snapshot.CapturedSlot, true, nil
 }
 
-// poolParamsMergedBeforeSnapshot reports whether the EPOCH rule in force
-// during the epoch a stake snapshot was captured in merges
+// poolParamsMergedBeforeSnapshot reports whether the EPOCH rule that produced
+// a stake snapshot merges
 // psFutureStakePoolParams into psStakePools before SNAP freezes the snapshot.
 //
-// The era to ask about is the captured epoch's own, not the validated block's:
-// the EPOCH transition out of epoch N runs under the protocol version in force
-// during N, and HARDFORK is a sub-rule of that same transition. A block two
-// epochs after a hard fork into Dijkstra can therefore be elected by a
-// snapshot that Conway's ordering froze.
+// The hard-fork combinator translates the state at the era bound before TICK,
+// so a snapshot made at a transition boundary follows the incoming epoch's
+// EPOCH rule even though its CapturedSlot is the outgoing epoch's final slot.
 func poolParamsMergedBeforeSnapshot(eraId uint) bool {
 	return eraId >= dijkstra.EraIdDijkstra
 }

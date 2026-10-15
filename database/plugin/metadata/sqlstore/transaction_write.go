@@ -21,8 +21,10 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"strconv"
+	"strings"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/labelcodec"
@@ -64,7 +66,92 @@ type transactionBatchAccumulator struct {
 	// rows holds API-mode detail rows queued by SetTransactionBatched until
 	// FlushBatch writes them as multi-row inserts.
 	rows rowBatch
+	// stakeDeltas coalesces credential changes until the batch is flushed.
+	stakeDeltas     map[string]pendingStakeCredentialDelta
+	stakeDeltaOrder []string
 }
+
+type pendingStakeCredentialDelta struct {
+	ref   models.StakeCredentialRef
+	delta int64
+	slot  uint64
+}
+
+type transactionBatchCheckpoint struct {
+	rows            rowBatch
+	stakeDeltas     map[string]pendingStakeCredentialDelta
+	stakeDeltaOrder []string
+}
+
+func (a *transactionBatchAccumulator) addStakeDeltas(
+	deltas []stakeCredentialDelta,
+	slot uint64,
+) error {
+	for _, delta := range deltas {
+		if len(delta.ref.Key) == 0 {
+			continue
+		}
+		key := delta.ref.MapKey()
+		pending, exists := a.stakeDeltas[key]
+		if !exists {
+			if a.stakeDeltas == nil {
+				a.stakeDeltas = make(map[string]pendingStakeCredentialDelta)
+			}
+			pending = pendingStakeCredentialDelta{
+				ref: models.NewStakeCredentialRef(
+					delta.ref.Tag, append([]byte(nil), delta.ref.Key...),
+				),
+				slot: slot,
+			}
+			a.stakeDeltaOrder = append(a.stakeDeltaOrder, key)
+		} else if (delta.delta > 0 && pending.delta > math.MaxInt64-delta.delta) ||
+			(delta.delta < 0 && pending.delta < math.MinInt64-delta.delta) {
+			return errors.New("reward live stake delta overflow")
+		}
+		pending.delta += delta.delta
+		if slot > pending.slot {
+			pending.slot = slot
+		}
+		a.stakeDeltas[key] = pending
+	}
+	return nil
+}
+
+func (a *transactionBatchAccumulator) checkpoint() transactionBatchCheckpoint {
+	checkpoint := transactionBatchCheckpoint{
+		rows:            a.rows.clone(),
+		stakeDeltaOrder: append([]string(nil), a.stakeDeltaOrder...),
+	}
+	if len(a.stakeDeltas) > 0 {
+		checkpoint.stakeDeltas = make(
+			map[string]pendingStakeCredentialDelta,
+			len(a.stakeDeltas),
+		)
+		maps.Copy(checkpoint.stakeDeltas, a.stakeDeltas)
+	}
+	return checkpoint
+}
+
+func (a *transactionBatchAccumulator) restore(
+	checkpoint transactionBatchCheckpoint,
+) {
+	a.Reset()
+	a.rows = checkpoint.rows.clone()
+	a.stakeDeltaOrder = append([]string(nil), checkpoint.stakeDeltaOrder...)
+	if len(checkpoint.stakeDeltas) > 0 {
+		a.stakeDeltas = make(
+			map[string]pendingStakeCredentialDelta,
+			len(checkpoint.stakeDeltas),
+		)
+		maps.Copy(a.stakeDeltas, checkpoint.stakeDeltas)
+	}
+}
+
+// getUtxoSpendStateQuery reads back a consumed input that the spend UPDATE
+// did not mark, to tell an already-spent input from a missing one.
+const getUtxoSpendStateQuery = `
+SELECT deleted_slot, spent_at_tx_id
+FROM utxo WHERE tx_id = ? AND output_idx = ?`
 
 const transactionInsertSQL = `
 INSERT INTO "transaction" (
@@ -78,11 +165,280 @@ ON CONFLICT (hash) DO UPDATE SET
     collateral_fee = excluded.collateral_fee
 RETURNING id`
 
+// The batched path needs to distinguish a fresh ID from a replay so it can
+// skip child-table cleanup only when those rows cannot already exist.
+const transactionBatchInsertSQL = `
+INSERT INTO "transaction" (
+    hash, block_hash, metadata, slot, type, fee, collateral_fee, ttl,
+    block_index, valid
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT (hash) DO NOTHING
+RETURNING id`
+
+const transactionBatchConflictUpdateSQL = `
+UPDATE "transaction"
+SET block_hash = ?, block_index = ?, slot = ?, collateral_fee = ?
+WHERE hash = ?`
+
+const transactionBatchConflictIDSQL = `
+SELECT id FROM "transaction" WHERE hash = ?`
+
+const consumeUtxoSQL = `
+UPDATE utxo
+SET deleted_slot = ?, spent_at_tx_id = ?
+WHERE tx_id = ? AND output_idx = ?
+  AND deleted_slot = 0 AND spent_at_tx_id IS NULL`
+
+const consumeUtxoSQLiteReturningSQL = `
+UPDATE utxo
+SET deleted_slot = ?, spent_at_tx_id = ?
+WHERE tx_id = ? AND output_idx = ?
+  AND deleted_slot = 0 AND spent_at_tx_id IS NULL
+RETURNING tx_id, output_idx, credential_tag, staking_key, amount`
+
+func insertUtxoBatchQuery(rowCount int) string {
+	row := "(" + strings.TrimSuffix(strings.Repeat("?,", 15), ",") + ")"
+	values := strings.TrimSuffix(strings.Repeat(row+",", rowCount), ",")
+	return `INSERT INTO utxo (
+    transaction_id, collateral_return_for_tx_id, tx_id, payment_key,
+    staking_key, credential_tag, datum_hash, spent_at_tx_id,
+    referenced_by_tx_id, collateral_by_tx_id, added_slot, deleted_slot,
+    amount, output_idx, payment_script
+) VALUES ` + values + `
+ON CONFLICT (tx_id, output_idx) DO NOTHING
+RETURNING id, tx_id, output_idx`
+}
+
+const repairConflictedUtxoQuery = `
+UPDATE utxo
+SET transaction_id = COALESCE(transaction_id, ?),
+    collateral_return_for_tx_id = COALESCE(collateral_return_for_tx_id, ?)
+WHERE tx_id = ? AND output_idx = ?
+RETURNING id`
+
+// consumeUtxosBatchQuery builds the SQLite batched spend for rowCount inputs.
+// Each input is its own "tx_id = ? AND output_idx = ?" arm of an id subquery,
+// the shape of consumeUtxoSQLiteReturningSQL, so SQLite resolves it through
+// the unique tx_id_output_idx index whatever its statistics say.
+//
+// A row-value "(tx_id, output_idx) IN (...)" list or a join against VALUES
+// does not hold that plan. "deleted_slot = 0" and "spent_at_tx_id IS NULL"
+// match every live row, but spent rows carry many distinct values with few
+// rows each, so sqlite_stat1 reports both columns as selective and SQLite
+// drives the statement from a deleted_slot-leading index, visiting every live
+// UTxO per transaction. The liveness predicates stay inside each arm, where
+// the fully bound unique key already pins the plan; the outer statement
+// carries none, because any predicate on deleted_slot there lets the planner
+// choose that index again (see markUtxosDeletedQuery).
+//
+// Arguments are the two SET values followed by tx_id, output_idx per input.
+func consumeUtxosBatchQuery(rowCount int, returnStake bool) string {
+	const arm = "SELECT id FROM utxo WHERE tx_id = ? AND output_idx = ? " +
+		"AND deleted_slot = 0 AND spent_at_tx_id IS NULL"
+	arms := strings.TrimSuffix(
+		strings.Repeat(arm+" UNION ALL ", rowCount),
+		" UNION ALL ",
+	)
+	returning := "tx_id, output_idx"
+	if returnStake {
+		returning += ", credential_tag, staking_key, amount"
+	}
+	return `UPDATE utxo
+SET deleted_slot = ?, spent_at_tx_id = ?
+WHERE id IN (` + arms + `)
+RETURNING ` + returning
+}
+
+func scanConsumedUtxoRows(
+	rows *sql.Rows,
+	returnStake bool,
+) (map[string]struct{}, []stakeCredentialDelta, error) {
+	updated := make(map[string]struct{})
+	var deltas []stakeCredentialDelta
+	for rows.Next() {
+		var (
+			txID      []byte
+			outputIdx uint32
+			tag       int64
+			key       []byte
+			amount    sql.NullString
+		)
+		if returnStake {
+			if err := rows.Scan(
+				&txID, &outputIdx, &tag, &key, &amount,
+			); err != nil {
+				_ = rows.Close()
+				return nil, nil, err
+			}
+			delta, ok, err := consumedUtxoStakeDelta(tag, key, amount)
+			if err != nil {
+				_ = rows.Close()
+				return nil, nil, err
+			}
+			if ok {
+				deltas = append(deltas, delta)
+			}
+		} else if err := rows.Scan(&txID, &outputIdx); err != nil {
+			_ = rows.Close()
+			return nil, nil, err
+		}
+		updated[utxoIdentityKey(txID, outputIdx)] = struct{}{}
+	}
+	rowsErr := rows.Err()
+	closeErr := rows.Close()
+	if rowsErr != nil {
+		return nil, nil, rowsErr
+	}
+	if closeErr != nil {
+		return nil, nil, closeErr
+	}
+	return updated, deltas, nil
+}
+
+func utxoIdentityKey(txID []byte, outputIdx uint32) string {
+	return string(txID) + ":" + strconv.FormatUint(uint64(outputIdx), 10)
+}
+
+const utxoBatchSize = 8
+
+func (s *Store) insertUtxoModelsChecked(
+	ctx context.Context,
+	db queryer,
+	utxos []*models.Utxo,
+	ignoreConflict bool,
+	deferredRows *rowBatch,
+) ([]bool, error) {
+	inserted := make([]bool, len(utxos))
+	if len(utxos) < 2 || s.dialect.Name() != "sqlite" || !ignoreConflict {
+		for i, utxo := range utxos {
+			created, err := s.insertUtxoModelCheckedWithRows(
+				ctx, db, utxo, ignoreConflict, deferredRows,
+			)
+			if err != nil {
+				return nil, err
+			}
+			inserted[i] = created
+		}
+		return inserted, nil
+	}
+
+	for start := 0; start < len(utxos); start += utxoBatchSize {
+		end := min(start+utxoBatchSize, len(utxos))
+		batch := utxos[start:end]
+		query := insertUtxoBatchQuery(len(batch))
+		args := make([]any, 0, len(batch)*15)
+		for _, utxo := range batch {
+			params, err := createUtxoParams(utxo)
+			if err != nil {
+				return nil, err
+			}
+			args = append(args,
+				params.TransactionID,
+				params.CollateralReturnForTxID,
+				params.TxID,
+				params.PaymentKey,
+				params.StakingKey,
+				params.CredentialTag,
+				params.DatumHash,
+				nullBytes(params.SpentAtTxID),
+				nullBytes(params.ReferencedByTxID),
+				nullBytes(params.CollateralByTxID),
+				params.AddedSlot,
+				params.DeletedSlot,
+				params.Amount,
+				params.OutputIdx,
+				params.PaymentScript,
+			)
+		}
+
+		rows, err := s.queryRowsCached(ctx, db, query, args...)
+		if err != nil {
+			return nil, err
+		}
+		createdIDs := make(map[string]uint, len(batch))
+		for rows.Next() {
+			var (
+				id        uint
+				txID      []byte
+				outputIdx uint32
+			)
+			if err := rows.Scan(&id, &txID, &outputIdx); err != nil {
+				_ = rows.Close()
+				return nil, err
+			}
+			createdIDs[utxoIdentityKey(txID, outputIdx)] = id
+		}
+		rowsErr := rows.Err()
+		closeErr := rows.Close()
+		if rowsErr != nil {
+			return nil, rowsErr
+		}
+		if closeErr != nil {
+			return nil, closeErr
+		}
+
+		processed := make(map[string]struct{}, len(batch))
+		for i, utxo := range batch {
+			key := utxoIdentityKey(utxo.TxId, utxo.OutputIdx)
+			if _, duplicate := processed[key]; duplicate {
+				if err := s.repairConflictedUtxo(ctx, db, utxo); err != nil {
+					return nil, err
+				}
+				continue
+			}
+			processed[key] = struct{}{}
+			id, created := createdIDs[key]
+			if !created {
+				if err := s.repairConflictedUtxo(ctx, db, utxo); err != nil {
+					return nil, err
+				}
+				continue
+			}
+			utxo.ID = id
+			inserted[start+i] = true
+			var err error
+			if deferredRows != nil {
+				err = s.persistUtxoRelationsWithDeferredAssets(
+					ctx, db, utxo, id, deferredRows,
+				)
+			} else {
+				err = s.persistUtxoRelations(ctx, db, utxo, id)
+			}
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+	return inserted, nil
+}
+
+func (s *Store) repairConflictedUtxo(
+	ctx context.Context,
+	db queryer,
+	utxo *models.Utxo,
+) error {
+	params, err := createUtxoParams(utxo)
+	if err != nil {
+		return err
+	}
+	var id int64
+	if err := s.queryRowCached(ctx, db, repairConflictedUtxoQuery,
+		params.TransactionID,
+		params.CollateralReturnForTxID,
+		params.TxID,
+		params.OutputIdx,
+	).Scan(&id); err != nil {
+		return err
+	}
+	utxo.ID = uint(id)
+	return s.persistUtxoRelations(ctx, db, utxo, uint(id))
+}
+
 func (a *transactionBatchAccumulator) insertTransaction(
 	ctx context.Context,
 	db queryer,
 	args ...any,
-) (uint, error) {
+) (uint, bool, error) {
 	if a.transactionInsert == nil {
 		// unwrapDialectQueryer, not a bare type assertion: whenever
 		// Config.PromRegistry is set, Store.instrumentedQueryer wraps every
@@ -94,32 +450,58 @@ func (a *transactionBatchAccumulator) insertTransaction(
 		if dialect, ok := unwrapDialectQueryer(db); ok {
 			a.mysql = dialect.dialect == "mysql"
 		}
-		stmt, err := db.PrepareContext(ctx, transactionInsertSQL)
+		query := transactionBatchInsertSQL
+		if a.mysql {
+			query = transactionInsertSQL
+		}
+		stmt, err := db.PrepareContext(ctx, query)
 		if err != nil {
-			return 0, err
+			return 0, false, err
 		}
 		a.transactionInsert = stmt
 	}
 	if a.sqlOperations != nil {
-		op, _ := classifySQLStatement(transactionInsertSQL)
+		op, _ := classifySQLStatement(transactionBatchInsertSQL)
 		a.sqlOperations.WithLabelValues(op).Inc()
 	}
 	if a.mysql {
 		result, err := a.transactionInsert.ExecContext(ctx, args...)
 		if err != nil {
-			return 0, err
+			return 0, false, err
 		}
 		id, err := result.LastInsertId()
 		if err != nil {
-			return 0, err
+			return 0, false, err
 		}
-		return uint(id), nil
+		return uint(id), false, nil
 	}
 	var id int64
-	if err := a.transactionInsert.QueryRowContext(ctx, args...).Scan(&id); err != nil {
-		return 0, err
+	if err := a.transactionInsert.QueryRowContext(ctx, args...).Scan(&id); err == nil {
+		return uint(id), true, nil
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return 0, false, err
 	}
-	return uint(id), nil
+	if len(args) != 10 {
+		return 0, false, fmt.Errorf(
+			"update existing transaction: got %d insert arguments, want 10",
+			len(args),
+		)
+	}
+	if _, err := db.ExecContext(
+		ctx,
+		transactionBatchConflictUpdateSQL,
+		args[1], args[8], args[3], args[6], args[0],
+	); err != nil {
+		return 0, false, fmt.Errorf("update existing transaction: %w", err)
+	}
+	if err := db.QueryRowContext(
+		ctx,
+		transactionBatchConflictIDSQL,
+		args[0],
+	).Scan(&id); err != nil {
+		return 0, false, fmt.Errorf("find existing transaction: %w", err)
+	}
+	return uint(id), false, nil
 }
 
 func (a *transactionBatchAccumulator) resetStatement() {
@@ -132,6 +514,8 @@ func (a *transactionBatchAccumulator) resetStatement() {
 func (a *transactionBatchAccumulator) Reset() {
 	a.resetStatement()
 	a.rows.reset()
+	a.stakeDeltas = nil
+	a.stakeDeltaOrder = nil
 }
 
 func (s *Store) NewBatchAccumulator() types.MetadataBatchAccumulator {
@@ -154,19 +538,70 @@ func (s *Store) FlushBatch(
 			return err
 		}
 	}
-	if !batched.rows.empty() {
+	if !batched.rows.empty() || len(batched.stakeDeltaOrder) > 0 {
 		if err := s.withWriteTransaction(
 			txn,
 			func(db queryer, ctx context.Context) error {
-				return batched.rows.flush(
+				if err := batched.rows.flush(
 					ctx, db, s.dialect.ParameterLimit(),
-				)
+				); err != nil {
+					return err
+				}
+				for _, key := range batched.stakeDeltaOrder {
+					pending := batched.stakeDeltas[key]
+					if err := s.refreshRewardLiveStakeAggregateDelta(
+						ctx, db, pending.ref, pending.slot, pending.delta,
+					); err != nil {
+						return err
+					}
+				}
+				return nil
 			},
 		); err != nil {
 			return err
 		}
 	}
 	accumulator.Reset()
+	return nil
+}
+
+func (s *Store) FlushBatchStakeDeltas(
+	accumulator types.MetadataBatchAccumulator,
+	txn types.Txn,
+) error {
+	batched, ok := accumulator.(*transactionBatchAccumulator)
+	if !ok {
+		return fmt.Errorf(
+			"sqlstore FlushBatchStakeDeltas: wrong accumulator type %T",
+			accumulator,
+		)
+	}
+	if len(batched.stakeDeltaOrder) == 0 {
+		return nil
+	}
+	if transaction, ok := txn.(*sqlTxn); ok {
+		if err := transaction.bindBatch(batched); err != nil {
+			return err
+		}
+	}
+	if err := s.withWriteTransaction(
+		txn,
+		func(db queryer, ctx context.Context) error {
+			for _, key := range batched.stakeDeltaOrder {
+				pending := batched.stakeDeltas[key]
+				if err := s.refreshRewardLiveStakeAggregateDelta(
+					ctx, db, pending.ref, pending.slot, pending.delta,
+				); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+	); err != nil {
+		return err
+	}
+	batched.stakeDeltas = nil
+	batched.stakeDeltaOrder = nil
 	return nil
 }
 
@@ -178,6 +613,7 @@ func (s *Store) SetTransactionBatched(
 	skipWithdrawalWitness bool,
 	accumulator types.MetadataBatchAccumulator,
 	txn types.Txn,
+	protocolMajor uint64,
 ) error {
 	if _, ok := accumulator.(*transactionBatchAccumulator); !ok {
 		return fmt.Errorf(
@@ -195,6 +631,7 @@ func (s *Store) SetTransactionBatched(
 		false,
 		accumulator,
 		txn,
+		protocolMajor,
 	)
 }
 
@@ -211,6 +648,7 @@ func (s *Store) SetTransactionBatchedHistorical(
 	historicalBackfill bool,
 	accumulator types.MetadataBatchAccumulator,
 	txn types.Txn,
+	protocolMajor uint64,
 ) error {
 	if _, ok := accumulator.(*transactionBatchAccumulator); !ok {
 		return fmt.Errorf(
@@ -221,7 +659,7 @@ func (s *Store) SetTransactionBatchedHistorical(
 	return s.setTransactionBatched(
 		transaction, point, index, certDeposits,
 		skipWithdrawalWitness, historicalBackfill, false,
-		accumulator, txn,
+		accumulator, txn, protocolMajor,
 	)
 }
 
@@ -232,10 +670,11 @@ func (s *Store) SetTransaction(
 	certDeposits map[int]uint64,
 	skipWithdrawalWitness bool,
 	txn types.Txn,
+	protocolMajor uint64,
 ) error {
 	return s.setTransaction(
 		transaction, point, index, certDeposits,
-		skipWithdrawalWitness, false, false, txn,
+		skipWithdrawalWitness, false, false, txn, protocolMajor,
 	)
 }
 
@@ -249,21 +688,21 @@ func (s *Store) setTransactionBatched(
 	tolerateConsumedInputConflict bool,
 	accumulator types.MetadataBatchAccumulator,
 	txn types.Txn,
+	protocolMajor uint64,
 ) error {
 	return s.setTransactionWithAccumulator(
 		transaction, point, index, certDeposits,
 		skipWithdrawalWitness, historicalBackfill,
-		tolerateConsumedInputConflict, accumulator, nil, txn,
+		tolerateConsumedInputConflict, accumulator, nil, txn, protocolMajor,
 	)
 }
 
-// SetTransactionLeiosClosure records a transaction on the Leios endorser-block
-// closure path (the Musashi/Haskell-conformant ValidateNone apply). It behaves
+// SetTransactionLeiosClosure records a validated transaction on the Leios
+// endorser-block closure path. It behaves
 // like SetTransaction except that a consumed input already spent by a
 // *different* transaction is treated as a no-op instead of ErrUtxoConflict,
 // matching the reference ledger's applyLeiosClosure: two certified endorser
-// blocks may legitimately name the same input across blocks, and the canonical
-// chain folds the closure without re-validation rather than rejecting it. Do
+// blocks may legitimately name the same input across blocks. Do
 // not use this for ranking-block application, where a real double-spend must
 // still fail.
 func (s *Store) SetTransactionLeiosClosure(
@@ -273,20 +712,21 @@ func (s *Store) SetTransactionLeiosClosure(
 	certDeposits map[int]uint64,
 	skipWithdrawalWitness bool,
 	txn types.Txn,
+	protocolMajor uint64,
 ) error {
 	return s.setTransaction(
 		transaction, point, index, certDeposits,
-		skipWithdrawalWitness, false, true, txn,
+		skipWithdrawalWitness, false, true, txn, protocolMajor,
 	)
 }
 
 // SetTransactionLeiosClosureInContext records the execution context before
 // certificates are applied, so epoch-dependent effects use the unticked state.
-func (s *Store) SetTransactionLeiosClosureInContext(transaction lcommon.Transaction, point ocommon.Point, index uint32, certDeposits map[int]uint64, skipWithdrawalWitness bool, slot uint64, txn types.Txn) error {
+func (s *Store) SetTransactionLeiosClosureInContext(transaction lcommon.Transaction, point ocommon.Point, index uint32, certDeposits map[int]uint64, skipWithdrawalWitness bool, slot uint64, txn types.Txn, protocolMajor uint64) error {
 	if slot >= point.Slot {
 		return errors.New("closure context must precede its certifying block")
 	}
-	return s.setTransactionWithAccumulator(transaction, point, index, certDeposits, skipWithdrawalWitness, false, true, nil, &slot, txn)
+	return s.setTransactionWithAccumulator(transaction, point, index, certDeposits, skipWithdrawalWitness, false, true, nil, &slot, txn, protocolMajor)
 }
 
 func (s *Store) setTransaction(
@@ -298,9 +738,9 @@ func (s *Store) setTransaction(
 	historicalBackfill bool,
 	// tolerateConsumedInputConflict makes a consumed input that is already
 	// spent by a *different* transaction a no-op instead of ErrUtxoConflict.
-	// Set only on the Leios endorser-block closure path (ValidateNone), where
+	// Set only on the validated Leios endorser-block closure path, where
 	// the reference ledger's applyLeiosClosure folds the certified closure onto
-	// the UTxO set without re-validation: re-consuming an input an earlier
+	// the UTxO set: re-consuming an input an earlier
 	// certified endorser-block transaction already spent is Map.delete on a
 	// missing key (a no-op), not a fault. Two certified endorser blocks can name
 	// the same input across blocks (a legitimate cross-EB double-consume the
@@ -309,11 +749,12 @@ func (s *Store) setTransaction(
 	// double-spend still fails.
 	tolerateConsumedInputConflict bool,
 	txn types.Txn,
+	protocolMajor uint64,
 ) error {
 	return s.setTransactionWithAccumulator(
 		transaction, point, index, certDeposits,
 		skipWithdrawalWitness, historicalBackfill,
-		tolerateConsumedInputConflict, nil, nil, txn,
+		tolerateConsumedInputConflict, nil, nil, txn, protocolMajor,
 	)
 }
 
@@ -328,6 +769,7 @@ func (s *Store) setTransactionWithAccumulator(
 	accumulator types.MetadataBatchAccumulator,
 	ledgerContextSlot *uint64,
 	txn types.Txn,
+	protocolMajor uint64,
 ) error {
 	if transaction == nil {
 		return errors.New("set transaction: nil transaction")
@@ -363,6 +805,10 @@ func (s *Store) setTransactionWithAccumulator(
 	var (
 		staged        rowBatch
 		transactionID int64
+		// A fresh auto-generated transaction ID cannot have child detail rows.
+		// The API write path uses this to avoid empty replay-cleanup deletes.
+		transactionIsNew   bool
+		batchedStakeDeltas []stakeCredentialDelta
 	)
 	err := s.withWriteTransaction(
 		txn,
@@ -377,7 +823,7 @@ func (s *Store) setTransactionWithAccumulator(
 			}
 			if batched, ok := accumulator.(*transactionBatchAccumulator); ok {
 				var id uint
-				id, err = batched.insertTransaction(ctx, db,
+				id, transactionIsNew, err = batched.insertTransaction(ctx, db,
 					hash,
 					point.Hash,
 					metadataValue,
@@ -391,7 +837,7 @@ func (s *Store) setTransactionWithAccumulator(
 				)
 				transactionID = int64(id)
 			} else {
-				transactionID, err = queryReturnedID(ctx, db, transactionInsertSQL,
+				err = s.queryRowCached(ctx, db, transactionInsertSQL,
 					hash,
 					point.Hash,
 					metadataValue,
@@ -402,7 +848,7 @@ func (s *Store) setTransactionWithAccumulator(
 					decimalUint64(types.Uint64(transaction.TTL())),
 					index,
 					transaction.IsValid(),
-				)
+				).Scan(&transactionID)
 			}
 			if err != nil {
 				return fmt.Errorf("create transaction %x: %w", hash, err)
@@ -418,16 +864,13 @@ func (s *Store) setTransactionWithAccumulator(
 				point.Slot,
 				metadataLabels,
 			)
-			if err := s.applyTransactionAssetMintBurn(
-				ctx,
-				db,
+			s.applyTransactionAssetMintBurn(
 				transaction,
 				hash,
 				point.Slot,
 				index,
-			); err != nil {
-				return err
-			}
+				&staged,
+			)
 			// Collected here and merged with this transaction's UTxO-driven
 			// refresh below rather than refreshed immediately: see the
 			// mergeStakeCredentialRefs call beside stakeRefs for why.
@@ -454,6 +897,8 @@ func (s *Store) setTransactionWithAccumulator(
 					index,
 					certDeposits,
 					requireKnownDeposits,
+					transactionIsNew,
+					protocolMajor,
 				)
 				if err != nil {
 					return err
@@ -465,7 +910,6 @@ func (s *Store) setTransactionWithAccumulator(
 				0,
 				len(transaction.Produced()),
 			)
-			producedStakeDeltas := make([]stakeCredentialDelta, 0)
 			for _, produced := range transaction.Produced() {
 				model, err := models.UtxoLedgerToModel(produced, point.Slot)
 				if err != nil {
@@ -483,24 +927,31 @@ func (s *Store) setTransactionWithAccumulator(
 					id := uint(transactionID)
 					model.TransactionID = &id
 				}
-				inserted, err := s.insertUtxoModelChecked(
-					ctx, db, &model, true,
-				)
-				if err != nil {
-					return fmt.Errorf(
-						"create output %x#%d: %w",
-						model.TxId,
-						model.OutputIdx,
-						err,
-					)
-				}
 				producedModels = append(producedModels, model)
+			}
+			producedModelPtrs := make([]*models.Utxo, len(producedModels))
+			for i := range producedModels {
+				producedModelPtrs[i] = &producedModels[i]
+			}
+			var deferredRows *rowBatch
+			if batchedAccumulator != nil {
+				deferredRows = &staged
+			}
+			producedInserted, err := s.insertUtxoModelsChecked(
+				ctx, db, producedModelPtrs, true, deferredRows,
+			)
+			if err != nil {
+				return fmt.Errorf("create transaction outputs: %w", err)
+			}
+			producedStakeDeltas := make([]stakeCredentialDelta, 0)
+			for i := range producedModels {
+				model := &producedModels[i]
 				if len(model.StakingKey) > 0 {
 					gain, err := producedStakeCredentialDelta(
 						model.CredentialTag,
 						model.StakingKey,
 						model.Amount,
-						inserted,
+						producedInserted[i],
 					)
 					if err != nil {
 						return err
@@ -517,6 +968,7 @@ func (s *Store) setTransactionWithAccumulator(
 				index,
 				producedModels,
 				&staged,
+				transactionIsNew,
 			); err != nil {
 				return err
 			}
@@ -536,105 +988,157 @@ func (s *Store) setTransactionWithAccumulator(
 			// the utxo table, so they contribute no delta; they
 			// are still refreshed at zero delta so the set of credentials this
 			// write touches is unchanged from the full-scan path.
-			spentRefs := make([]models.UtxoId, 0, len(transaction.Consumed()))
+			var spentRefs []models.UtxoId
+			if s.dialect.Name() != "sqlite" && !historicalBackfill {
+				spentRefs = make([]models.UtxoId, 0, len(transaction.Consumed()))
+			}
 			var skippedRefs []models.UtxoId
+			var consumedStakeDeltas []stakeCredentialDelta
+			if !historicalBackfill {
+				consumedStakeDeltas = make(
+					[]stakeCredentialDelta, 0, len(transaction.Consumed()),
+				)
+			}
 			seenConsumed := make(
 				map[string]struct{},
 				len(transaction.Consumed()),
 			)
+			uniqueConsumed := make(
+				[]models.UtxoId,
+				0,
+				len(transaction.Consumed()),
+			)
 			for _, input := range transaction.Consumed() {
-				refKey := fmt.Sprintf(
-					"%x:%d",
-					input.Id().Bytes(),
-					input.Index(),
-				)
+				refKey := utxoIdentityKey(input.Id().Bytes(), input.Index())
 				if _, ok := seenConsumed[refKey]; ok {
 					continue
 				}
 				seenConsumed[refKey] = struct{}{}
-				utxoID := models.UtxoId{
+				uniqueConsumed = append(uniqueConsumed, models.UtxoId{
 					Hash: input.Id().Bytes(),
 					Idx:  input.Index(),
+				})
+			}
+			for start := 0; start < len(uniqueConsumed); start += utxoBatchSize {
+				end := min(start+utxoBatchSize, len(uniqueConsumed))
+				batch := uniqueConsumed[start:end]
+				updated := make(map[string]struct{}, len(batch))
+				if s.dialect.Name() == "sqlite" && len(batch) > 1 {
+					query := consumeUtxosBatchQuery(
+						len(batch), !historicalBackfill,
+					)
+					args := make([]any, 0, 2+len(batch)*2)
+					args = append(args, point.Slot, hash)
+					for _, ref := range batch {
+						args = append(args, ref.Hash, ref.Idx)
+					}
+					rows, err := s.queryRowsCached(ctx, db, query, args...)
+					if err != nil {
+						return err
+					}
+					updatedRows, deltas, scanErr := scanConsumedUtxoRows(
+						rows, !historicalBackfill,
+					)
+					if scanErr != nil {
+						return scanErr
+					}
+					updated = updatedRows
+					consumedStakeDeltas = append(consumedStakeDeltas, deltas...)
+				} else if s.dialect.Name() == "sqlite" && !historicalBackfill {
+					rows, err := s.queryRowsCached(
+						ctx, db, consumeUtxoSQLiteReturningSQL,
+						point.Slot, hash, batch[0].Hash, batch[0].Idx,
+					)
+					if err != nil {
+						return err
+					}
+					updatedRows, deltas, scanErr := scanConsumedUtxoRows(
+						rows, true,
+					)
+					if scanErr != nil {
+						return scanErr
+					}
+					updated = updatedRows
+					consumedStakeDeltas = append(consumedStakeDeltas, deltas...)
+				} else {
+					for _, ref := range batch {
+						result, err := s.execCached(
+							ctx, db, consumeUtxoSQL,
+							point.Slot, hash, ref.Hash, ref.Idx,
+						)
+						if err != nil {
+							return err
+						}
+						affected, err := result.RowsAffected()
+						if err != nil {
+							return err
+						}
+						if affected > 0 {
+							updated[utxoIdentityKey(ref.Hash, ref.Idx)] = struct{}{}
+						}
+					}
 				}
-				result, err := db.ExecContext(ctx, `
-UPDATE utxo
-SET deleted_slot = ?, spent_at_tx_id = ?
-WHERE tx_id = ? AND output_idx = ?
-  AND deleted_slot = 0 AND spent_at_tx_id IS NULL`,
-					point.Slot,
-					hash,
-					input.Id().Bytes(),
-					input.Index(),
-				)
-				if err != nil {
-					return err
-				}
-				affected, err := result.RowsAffected()
-				if err != nil {
-					return err
-				}
-				if affected > 0 {
-					spentRefs = append(spentRefs, utxoID)
-					continue
-				}
-				skippedRefs = append(skippedRefs, utxoID)
-				var (
-					deletedSlot uint64
-					spentBy     []byte
-				)
-				err = db.QueryRowContext(ctx, `
-SELECT deleted_slot, spent_at_tx_id
-FROM utxo WHERE tx_id = ? AND output_idx = ?`,
-					input.Id().Bytes(),
-					input.Index(),
-				).Scan(&deletedSlot, &spentBy)
-				if errors.Is(err, sql.ErrNoRows) {
-					// Gap/partial-history ingestion intentionally tolerates a
-					// missing producer output.
-					continue
-				}
-				if err != nil {
-					return err
-				}
-				if bytes.Equal(spentBy, hash) {
-					continue
-				}
-				if deletedSlot == 0 && len(spentBy) == 0 {
+
+				for _, utxoID := range batch {
+					if _, ok := updated[utxoIdentityKey(utxoID.Hash, utxoID.Idx)]; ok {
+						if s.dialect.Name() != "sqlite" {
+							spentRefs = append(spentRefs, utxoID)
+						}
+						continue
+					}
+					if !historicalBackfill {
+						skippedRefs = append(skippedRefs, utxoID)
+					}
+					var (
+						deletedSlot uint64
+						spentBy     []byte
+					)
+					err = s.queryRowCached(ctx, db, getUtxoSpendStateQuery,
+						utxoID.Hash,
+						utxoID.Idx,
+					).Scan(&deletedSlot, &spentBy)
+					if errors.Is(err, sql.ErrNoRows) {
+						continue
+					}
+					if err != nil {
+						return err
+					}
+					if bytes.Equal(spentBy, hash) {
+						continue
+					}
+					if deletedSlot == 0 && len(spentBy) == 0 {
+						return fmt.Errorf(
+							"consume UTxO %x#%d: row was not updated",
+							utxoID.Hash,
+							utxoID.Idx,
+						)
+					}
+					if tolerateConsumedInputConflict {
+						continue
+					}
 					return fmt.Errorf(
-						"consume UTxO %x#%d: row was not updated",
-						input.Id().Bytes(),
-						input.Index(),
+						"%w: %x:%d (already spent_by=%x deleted_slot=%d, this_tx=%x)",
+						types.ErrUtxoConflict,
+						utxoID.Hash,
+						utxoID.Idx,
+						spentBy,
+						deletedSlot,
+						hash,
 					)
 				}
-				// Leios closure path: the input is already spent by an earlier
-				// certified endorser-block transaction. The reference ledger
-				// treats this re-consume as a no-op (applyLeiosClosure folds the
-				// closure without re-validation), so skip this input instead of
-				// wedging the pipeline. The produced outputs and the remaining
-				// consumed inputs of this transaction are still applied.
-				if tolerateConsumedInputConflict {
-					continue
-				}
-				return fmt.Errorf(
-					"%w: %x:%d (already spent_by=%x deleted_slot=%d, this_tx=%x)",
-					types.ErrUtxoConflict,
-					input.Id().Bytes(),
-					input.Index(),
-					spentBy,
-					deletedSlot,
-					hash,
-				)
 			}
 			if historicalBackfill {
 				return nil
 			}
-			consumedStakeDeltas, err := queryUtxoStakeConsumedDeltas(
-				ctx,
-				db,
-				spentRefs,
-			)
-			if err != nil {
-				return err
+			if s.dialect.Name() != "sqlite" {
+				consumedStakeDeltas, err = s.queryUtxoStakeConsumedDeltas(
+					ctx,
+					db,
+					spentRefs,
+				)
+				if err != nil {
+					return err
+				}
 			}
 			// An input this write did not actually spend still names a
 			// credential the full-scan path would have refreshed, so keep it
@@ -665,20 +1169,26 @@ FROM utxo WHERE tx_id = ? AND output_idx = ?`,
 			// after all of this transaction's mutations would find (see
 			// TestSetTransactionRefreshesSharedCredentialOnce and
 			// TestSetTransactionIncrementalDeltaMatchesFullScan).
+			batchedStakeDeltas = mergeStakeCredentialDeltas(
+				refsToStakeCredentialDeltas(certificateRefs),
+				consumedStakeDeltas,
+				skippedStakeDeltas,
+				producedStakeDeltas,
+			)
+			if batchedAccumulator != nil {
+				return nil
+			}
 			return s.refreshRewardLiveStakeDeltas(
-				ctx,
-				db,
-				mergeStakeCredentialDeltas(
-					refsToStakeCredentialDeltas(certificateRefs),
-					consumedStakeDeltas,
-					skippedStakeDeltas,
-					producedStakeDeltas,
-				),
-				point.Slot,
+				ctx, db, batchedStakeDeltas, point.Slot,
 			)
 		},
 	)
 	if err != nil || batchedAccumulator == nil {
+		return err
+	}
+	if err := batchedAccumulator.addStakeDeltas(
+		batchedStakeDeltas, point.Slot,
+	); err != nil {
 		return err
 	}
 	// The per-transaction cleanup deletes only reach flushed rows, so rows
@@ -695,6 +1205,7 @@ func (s *Store) SetGapBlockTransaction(
 	index uint32,
 	certDeposits map[int]uint64,
 	txn types.Txn,
+	protocolMajor uint64,
 ) error {
 	// Gap ingestion intentionally has no available input state, so this is
 	// equivalent to SetTransaction with the consumed-input update suppressed.
@@ -749,7 +1260,7 @@ RETURNING id`,
 				var err error
 				certificateRefs, err = s.applyTransactionCertificates(
 					ctx, db, transactionID, transaction.Certificates(),
-					point, index, certDeposits, allowUnknownDeposits,
+					point, index, certDeposits, allowUnknownDeposits, false, protocolMajor,
 				)
 				if err != nil {
 					return err
@@ -1059,12 +1570,8 @@ INSERT INTO asset (
 ON CONFLICT (name, policy_id, utxo_id) DO NOTHING
 `
 
-// getAssetIDQuery looks up the id of the asset row insertUtxoModel's
-// ImportAsset call just created (or matched via its own ON CONFLICT), so
-// utxo.Assets[i].ID can be populated for the caller. It carries no RETURNING
-// clause, so unlike insertUtxoQuery/insertUtxoQueryIgnoreConflict it needs no
-// dialect-specific handling and is always safe to route through the
-// hot-statement cache.
+// getAssetIDQuery resolves the caller-visible asset row ID after an
+// insert that may have been skipped by its conflict clause.
 const getAssetIDQuery = `
 SELECT id FROM asset
 WHERE utxo_id = ? AND policy_id = ? AND name = ?
@@ -1096,6 +1603,18 @@ func (s *Store) insertUtxoModelChecked(
 	db queryer,
 	utxo *models.Utxo,
 	ignoreConflict bool,
+) (bool, error) {
+	return s.insertUtxoModelCheckedWithRows(
+		ctx, db, utxo, ignoreConflict, nil,
+	)
+}
+
+func (s *Store) insertUtxoModelCheckedWithRows(
+	ctx context.Context,
+	db queryer,
+	utxo *models.Utxo,
+	ignoreConflict bool,
+	deferredRows *rowBatch,
 ) (bool, error) {
 	inserted := true
 	params, err := createUtxoParams(utxo)
@@ -1160,24 +1679,48 @@ WHERE id = ?`,
 	// resolved when stake is computed. This runs on the
 	// conflict path too: an output a snapshot import created before its
 	// producing transaction was replayed has no pointer row yet.
-	if err := persistUtxoPointer(ctx, db, id, utxo.Pointer); err != nil {
-		return false, err
+	var relationErr error
+	if deferredRows != nil && inserted {
+		relationErr = s.persistUtxoRelationsWithDeferredAssets(
+			ctx, db, utxo, uint(id), deferredRows,
+		)
+	} else {
+		relationErr = s.persistUtxoRelations(ctx, db, utxo, uint(id))
+	}
+	if relationErr != nil {
+		return false, relationErr
+	}
+	return inserted, nil
+}
+
+func (s *Store) persistUtxoRelations(
+	ctx context.Context,
+	db queryer,
+	utxo *models.Utxo,
+	id uint,
+) error {
+	utxo.ID = id
+	if err := persistUtxoAddress(ctx, db, int64(id), utxo); err != nil {
+		return err
+	}
+	if err := persistUtxoPointer(ctx, db, int64(id), utxo.Pointer); err != nil {
+		return err
 	}
 	for i := range utxo.Assets {
 		asset := &utxo.Assets[i]
-		asset.UtxoID = utxo.ID
-		_, err := s.execCached(ctx, db, importAssetQuery,
+		asset.UtxoID = id
+		asset.ID = 0
+		if _, err := s.execCached(ctx, db, importAssetQuery,
 			asset.Name,
 			asset.PolicyId,
 			asset.Fingerprint,
-			sql.NullInt64{Int64: id, Valid: true},
+			sql.NullInt64{Int64: int64(id), Valid: true},
 			sql.NullString{
 				String: decimalUint64(asset.Amount),
 				Valid:  true,
 			},
-		)
-		if err != nil {
-			return false, err
+		); err != nil {
+			return err
 		}
 		var assetID uint
 		if err := s.queryRowCached(ctx, db, getAssetIDQuery,
@@ -1185,11 +1728,48 @@ WHERE id = ?`,
 			asset.PolicyId,
 			asset.Name,
 		).Scan(&assetID); err != nil {
-			return false, err
+			return err
 		}
 		asset.ID = assetID
 	}
-	return inserted, nil
+	return nil
+}
+
+func (s *Store) persistUtxoRelationsWithDeferredAssets(
+	ctx context.Context,
+	db queryer,
+	utxo *models.Utxo,
+	id uint,
+	rows *rowBatch,
+) error {
+	utxo.ID = id
+	address, err := assetUtxoAddress(utxo)
+	if err != nil {
+		return err
+	}
+	if len(address) > 0 {
+		rows.add(assetUtxoAddressShape, int64(id), address)
+	}
+	if err := persistUtxoPointer(ctx, db, int64(id), utxo.Pointer); err != nil {
+		return err
+	}
+	for i := range utxo.Assets {
+		asset := &utxo.Assets[i]
+		asset.UtxoID = id
+		asset.ID = 0
+		rows.add(
+			assetShape,
+			asset.Name,
+			asset.PolicyId,
+			asset.Fingerprint,
+			sql.NullInt64{Int64: int64(id), Valid: true},
+			sql.NullString{
+				String: decimalUint64(asset.Amount),
+				Valid:  true,
+			},
+		)
+	}
+	return nil
 }
 
 func collateralFeeForTransaction(

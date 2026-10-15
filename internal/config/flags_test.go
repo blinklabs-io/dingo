@@ -121,6 +121,7 @@ func TestRegisterFlags_CoversAllExportedConfigFields(t *testing.T) {
 
 	specFields := map[string]string{}
 	yamlOnlyFields := map[string]struct{}{
+		"MetricsAuthToken":                     {},
 		"Plugins.Storage.Blob.Config":          {},
 		"Plugins.Storage.Metadata.Config":      {},
 		"Plugins.Mempool.Config":               {},
@@ -128,6 +129,7 @@ func TestRegisterFlags_CoversAllExportedConfigFields(t *testing.T) {
 		"Plugins.API.Kupo.Config":              {},
 		"Plugins.API.Mesh.Config":              {},
 		"Plugins.API.Utxorpc.Config":           {},
+		"TokenRegistry.HeaderSecrets":          {},
 		"Plugins.API.Mcp.Config":               {},
 		"Midnight.CNightPolicyID":              {},
 		"Midnight.CNightAssetName":             {},
@@ -203,6 +205,56 @@ func TestPledgeLeverageEnvBinding(t *testing.T) {
 			cfg.PledgeLeverage,
 		)
 	}
+}
+
+func TestMithrilAggregatorOperatorTokenFileEnvBinding(t *testing.T) {
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv(
+		"DINGO_MITHRIL_AGGREGATOR_OPERATOR_TOKEN_FILE",
+		"/run/secrets/mithril-operator-token",
+	)
+
+	cfg, err := LoadConfig("")
+	require.NoError(t, err)
+	require.Equal(
+		t,
+		"/run/secrets/mithril-operator-token",
+		cfg.Mithril.Server.Aggregator.OperatorTokenFile,
+	)
+}
+
+func TestMithrilServerPublicBaseURLBindings(t *testing.T) {
+	t.Run("environment", func(t *testing.T) {
+		resetGlobalConfig()
+		t.Setenv("HOME", t.TempDir())
+		t.Setenv(
+			"DINGO_MITHRIL_SERVER_PUBLIC_BASE_URL",
+			"https://snapshots.example.org",
+		)
+
+		cfg, err := LoadConfig("")
+		require.NoError(t, err)
+		require.Equal(
+			t, "https://snapshots.example.org", cfg.Mithril.Server.PublicBaseURL,
+		)
+	})
+
+	t.Run("flag", func(t *testing.T) {
+		resetGlobalConfig()
+		cfg, err := LoadConfig("")
+		require.NoError(t, err)
+
+		cmd := &cobra.Command{Use: "dingo"}
+		RegisterFlags(cmd)
+		require.NoError(t, cmd.ParseFlags([]string{
+			"--mithril-server-public-base-url=https://snapshots.example.org",
+		}))
+		require.NoError(t, ApplyFlags(cmd, cfg))
+		require.Equal(
+			t, "https://snapshots.example.org", cfg.Mithril.Server.PublicBaseURL,
+		)
+	})
 }
 
 func TestDebugBindAddressDefaultsToLoopback(t *testing.T) {
@@ -290,6 +342,75 @@ func TestDebugBindAddressExplicitOverridePrecedence(t *testing.T) {
 	require.Equal(t, "0.0.0.0:6060", cfg.DebugListenAddress())
 }
 
+func TestMetricsBindAddressDefaultsToLoopback(t *testing.T) {
+	resetGlobalConfig()
+	unsetMetricsBindAddrEnv(t)
+	t.Setenv("HOME", t.TempDir())
+
+	cfg, err := LoadConfig("")
+	require.NoError(t, err)
+	cfg.ApplyDefaults()
+	require.Equal(t, "0.0.0.0", cfg.BindAddr)
+	require.Equal(t, DefaultMetricsBindAddr, cfg.MetricsBindAddr)
+	require.Equal(t, "127.0.0.1:12798", cfg.MetricsListenAddress())
+
+	// A manually built or explicitly empty value must not fall back to the
+	// public wildcard bind.
+	cfg.MetricsBindAddr = ""
+	cfg.ApplyDefaults()
+	require.Equal(t, DefaultMetricsBindAddr, cfg.MetricsBindAddr)
+}
+
+func TestMetricsBindAddressExplicitOverridePrecedence(t *testing.T) {
+	resetGlobalConfig()
+	unsetMetricsBindAddrEnv(t)
+	t.Setenv("HOME", t.TempDir())
+	configFile := filepath.Join(t.TempDir(), "dingo.yaml")
+	require.NoError(t, os.WriteFile(
+		configFile,
+		[]byte("metricsBindAddr: 10.0.0.5\nmetricsPort: 9100\n"),
+		0o600,
+	))
+	cfg, err := LoadConfig(configFile)
+	require.NoError(t, err)
+	require.Equal(t, "10.0.0.5:9100", cfg.MetricsListenAddress())
+
+	t.Setenv("DINGO_METRICS_BIND_ADDR", "127.0.0.3")
+	cfg, err = LoadConfig(configFile)
+	require.NoError(t, err)
+	require.Equal(t, "127.0.0.3", cfg.MetricsBindAddr)
+
+	cmd := &cobra.Command{Use: "dingo"}
+	RegisterFlags(cmd)
+	require.NoError(t, cmd.ParseFlags([]string{
+		"--metrics-bind-addr=0.0.0.0",
+	}))
+	require.NoError(t, ApplyFlags(cmd, cfg))
+	require.Equal(t, "0.0.0.0:9100", cfg.MetricsListenAddress())
+}
+
+func TestMetricsAuthTokenLoadsFromYAMLAndEnvironment(t *testing.T) {
+	resetGlobalConfig()
+	unsetEnv(t, "CARDANO_DINGO_METRICS_AUTH_TOKEN")
+	unsetEnv(t, "DINGO_METRICS_AUTH_TOKEN")
+	t.Setenv("HOME", t.TempDir())
+	configFile := filepath.Join(t.TempDir(), "dingo.yaml")
+	require.NoError(t, os.WriteFile(
+		configFile,
+		[]byte("metricsAuthToken: yaml-token\n"),
+		0o600,
+	))
+
+	cfg, err := LoadConfig(configFile)
+	require.NoError(t, err)
+	require.Equal(t, "yaml-token", cfg.MetricsAuthToken)
+
+	t.Setenv("DINGO_METRICS_AUTH_TOKEN", "environment-token")
+	cfg, err = LoadConfig(configFile)
+	require.NoError(t, err)
+	require.Equal(t, "environment-token", cfg.MetricsAuthToken)
+}
+
 func TestFullPotRewardsEnvBinding(t *testing.T) {
 	resetGlobalConfig()
 	t.Setenv("HOME", t.TempDir())
@@ -331,6 +452,26 @@ func TestBlockPipelineEnabledEnvBinding(t *testing.T) {
 	}
 	if !cfg.BlockPipelineEnabled {
 		t.Fatal("expected env var to enable the block-decode pipeline")
+	}
+}
+
+func TestLedgerPrefetchAheadEnabledEnvBinding(t *testing.T) {
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("DINGO_LEDGER_PREFETCH_AHEAD_ENABLED", "true")
+
+	tmpDir := t.TempDir()
+	configFile := filepath.Join(tmpDir, "dingo.yaml")
+	if err := os.WriteFile(configFile, []byte(""), 0o600); err != nil {
+		t.Fatalf("failed to write temp config file: %v", err)
+	}
+
+	cfg, err := LoadConfig(configFile)
+	if err != nil {
+		t.Fatalf("failed to load config: %v", err)
+	}
+	if !cfg.LedgerPrefetchAheadEnabled {
+		t.Fatal("expected env var to enable next-block UTxO prefetch")
 	}
 }
 
@@ -614,6 +755,9 @@ func TestTokenRegistryAggregateBoundsEnvAndFlags(t *testing.T) {
 	t.Setenv("DINGO_TOKEN_REGISTRY_MAX_ARCHIVE_ENTRIES", "1002")
 	t.Setenv("DINGO_TOKEN_REGISTRY_MAX_ACCEPTED_ENTRIES", "1003")
 	t.Setenv("DINGO_TOKEN_REGISTRY_MAX_BATCH_BYTES", "1004")
+	t.Setenv("DINGO_TOKEN_REGISTRY_MANIFEST_URL", "https://env.example/manifest.json")
+	t.Setenv("DINGO_TOKEN_REGISTRY_TRUSTED_MANIFEST_KEY", strings.Repeat("ab", 32))
+	t.Setenv("DINGO_TOKEN_REGISTRY_ALLOW_ROLLBACK", "true")
 	configFile := filepath.Join(t.TempDir(), "dingo.yaml")
 	require.NoError(t, os.WriteFile(configFile, nil, 0o600))
 
@@ -623,6 +767,9 @@ func TestTokenRegistryAggregateBoundsEnvAndFlags(t *testing.T) {
 	require.Equal(t, 1002, cfg.TokenRegistry.MaxArchiveEntries)
 	require.Equal(t, 1003, cfg.TokenRegistry.MaxAcceptedEntries)
 	require.Equal(t, int64(1004), cfg.TokenRegistry.MaxBatchBytes)
+	require.Equal(t, "https://env.example/manifest.json", cfg.TokenRegistry.ManifestURL)
+	require.Equal(t, strings.Repeat("ab", 32), cfg.TokenRegistry.TrustedManifestKey)
+	require.True(t, cfg.TokenRegistry.AllowRollback)
 
 	cmd := &cobra.Command{Use: "dingo"}
 	RegisterFlags(cmd)
@@ -631,12 +778,18 @@ func TestTokenRegistryAggregateBoundsEnvAndFlags(t *testing.T) {
 		"--token-registry-max-archive-entries=2002",
 		"--token-registry-max-accepted-entries=2003",
 		"--token-registry-max-batch-bytes=2004",
+		"--token-registry-manifest-url=https://flag.example/manifest.json",
+		"--token-registry-trusted-manifest-key=" + strings.Repeat("cd", 32),
+		"--token-registry-allow-rollback=false",
 	}))
 	require.NoError(t, ApplyFlags(cmd, cfg))
 	require.Equal(t, int64(2001), cfg.TokenRegistry.MaxDecompressedBytes)
 	require.Equal(t, 2002, cfg.TokenRegistry.MaxArchiveEntries)
 	require.Equal(t, 2003, cfg.TokenRegistry.MaxAcceptedEntries)
 	require.Equal(t, int64(2004), cfg.TokenRegistry.MaxBatchBytes)
+	require.Equal(t, "https://flag.example/manifest.json", cfg.TokenRegistry.ManifestURL)
+	require.Equal(t, strings.Repeat("cd", 32), cfg.TokenRegistry.TrustedManifestKey)
+	require.False(t, cfg.TokenRegistry.AllowRollback)
 }
 
 func TestTokenRegistryAggregateBoundsYAML(t *testing.T) {
@@ -649,6 +802,9 @@ tokenRegistry:
   maxArchiveEntries: 3002
   maxAcceptedEntries: 3003
   maxBatchBytes: 3004
+  manifestUrl: https://yaml.example/manifest.json
+  trustedManifestKey: `+strings.Repeat("ef", 32)+`
+  allowRollback: true
 `), 0o600))
 
 	cfg, err := LoadConfig(configFile)
@@ -658,6 +814,9 @@ tokenRegistry:
 	require.Equal(t, 3002, cfg.TokenRegistry.MaxArchiveEntries)
 	require.Equal(t, 3003, cfg.TokenRegistry.MaxAcceptedEntries)
 	require.Equal(t, int64(3004), cfg.TokenRegistry.MaxBatchBytes)
+	require.Equal(t, "https://yaml.example/manifest.json", cfg.TokenRegistry.ManifestURL)
+	require.Equal(t, strings.Repeat("ef", 32), cfg.TokenRegistry.TrustedManifestKey)
+	require.True(t, cfg.TokenRegistry.AllowRollback)
 }
 
 func TestMempoolProviderSourcePrecedence(t *testing.T) {
@@ -1359,4 +1518,186 @@ func TestMinPoolMarginEnvBinding(t *testing.T) {
 			cfg.MinPoolMargin,
 		)
 	}
+}
+
+func TestLedgerApplyRowBatchingEnabledEnvBinding(t *testing.T) {
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("DINGO_LEDGER_APPLY_ROW_BATCHING_ENABLED", "true")
+
+	tmpDir := t.TempDir()
+	configFile := filepath.Join(tmpDir, "dingo.yaml")
+	if err := os.WriteFile(configFile, []byte(""), 0o600); err != nil {
+		t.Fatalf("failed to write temp config file: %v", err)
+	}
+
+	cfg, err := LoadConfig(configFile)
+	if err != nil {
+		t.Fatalf("failed to load config: %v", err)
+	}
+	if !cfg.LedgerApplyRowBatchingEnabled {
+		t.Fatal("expected env var to enable batched ledger apply")
+	}
+}
+
+func TestTokenRegistryHeadersLoadFromYAMLAndEnvironment(t *testing.T) {
+	resetGlobalConfig()
+	unsetEnv(t, "DINGO_TOKEN_REGISTRY_HEADER_SECRETS")
+	t.Setenv("HOME", t.TempDir())
+	configFile := filepath.Join(t.TempDir(), "dingo.yaml")
+	require.NoError(t, os.WriteFile(
+		configFile,
+		[]byte(
+			"tokenRegistry:\n  headerSecrets:\n    Authorization: Bearer yaml\n",
+		),
+		0o600,
+	))
+	cfg, err := LoadConfig(configFile)
+	require.NoError(t, err)
+	require.Equal(
+		t,
+		map[string]string{"Authorization": "Bearer yaml"},
+		cfg.TokenRegistry.HeaderSecrets,
+	)
+
+	t.Setenv("DINGO_TOKEN_REGISTRY_HEADER_SECRETS", "X-Api-Key:from-env")
+	cfg, err = LoadConfig(configFile)
+	require.NoError(t, err)
+	require.Equal(
+		t,
+		map[string]string{"X-Api-Key": "from-env"},
+		cfg.TokenRegistry.HeaderSecrets,
+	)
+}
+
+func TestHeaderSecretsEnvErrorsOmitValues(t *testing.T) {
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+	configFile := filepath.Join(t.TempDir(), "dingo.yaml")
+	require.NoError(t, os.WriteFile(configFile, []byte("{}\n"), 0o600))
+
+	// A value may itself contain colons; only the first separates the name.
+	t.Setenv(
+		"DINGO_TOKEN_REGISTRY_HEADER_SECRETS",
+		"Authorization:Basic user:pass,X-Api-Key:k:v",
+	)
+	cfg, err := LoadConfig(configFile)
+	require.NoError(t, err)
+	require.Equal(
+		t,
+		map[string]string{
+			"Authorization": "Basic user:pass",
+			"X-Api-Key":     "k:v",
+		},
+		cfg.TokenRegistry.HeaderSecrets,
+	)
+
+	for _, value := range []string{
+		"Authorization:Basic s3cr3t,s3cr3t-without-name",
+		":s3cr3t",
+	} {
+		t.Setenv("DINGO_TOKEN_REGISTRY_HEADER_SECRETS", value)
+		_, err = LoadConfig(configFile)
+		require.Error(t, err)
+		require.Contains(
+			t, err.Error(), "DINGO_TOKEN_REGISTRY_HEADER_SECRETS",
+		)
+		require.NotContains(t, err.Error(), "s3cr3t")
+	}
+}
+
+func TestBlockfetchLowWatermarkEnabledEnvBinding(t *testing.T) {
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("DINGO_BLOCKFETCH_LOW_WATERMARK_ENABLED", "true")
+
+	tmpDir := t.TempDir()
+	configFile := filepath.Join(tmpDir, "dingo.yaml")
+	if err := os.WriteFile(configFile, []byte(""), 0o600); err != nil {
+		t.Fatalf("failed to write temp config file: %v", err)
+	}
+
+	cfg, err := LoadConfig(configFile)
+	if err != nil {
+		t.Fatalf("failed to load config: %v", err)
+	}
+	if !cfg.BlockfetchLowWatermarkEnabled {
+		t.Fatal("expected env var to enable the blockfetch low watermark")
+	}
+}
+
+// Not t.Parallel: LoadConfig reads package-level globalConfig and the test
+// sets environment variables.
+func TestPlannerStatsRefreshDefaultsOnAndHonorsEnvOverride(t *testing.T) {
+	require.True(t, newDefaultConfig().PlannerStatsRefreshEnabled)
+
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("DINGO_PLANNER_STATS_REFRESH_ENABLED", "false")
+	cfg, err := LoadConfig("")
+	require.NoError(t, err)
+	require.False(t, cfg.PlannerStatsRefreshEnabled)
+}
+
+// unsetBarkAllowPrivateEnv clears both spellings LoadConfig reads, so each
+// subtest exercises its own source rather than the caller's environment.
+func unsetBarkAllowPrivateEnv(t *testing.T) {
+	t.Helper()
+	unsetEnv(t, "CARDANO_DINGO_BARK_BLOCK_DOWNLOAD_ALLOW_PRIVATE_ADDRESSES")
+	unsetEnv(t, "DINGO_BARK_BLOCK_DOWNLOAD_ALLOW_PRIVATE_ADDRESSES")
+}
+
+func TestBarkBlockDownloadAllowPrivateAddressesBindings(t *testing.T) {
+	t.Run("default", func(t *testing.T) {
+		resetGlobalConfig()
+		unsetBarkAllowPrivateEnv(t)
+		t.Setenv("HOME", t.TempDir())
+
+		cfg, err := LoadConfig("")
+		require.NoError(t, err)
+		require.False(t, cfg.BarkBlockDownloadAllowPrivateAddresses)
+	})
+
+	t.Run("yaml", func(t *testing.T) {
+		resetGlobalConfig()
+		unsetBarkAllowPrivateEnv(t)
+		t.Setenv("HOME", t.TempDir())
+		configFile := filepath.Join(t.TempDir(), "dingo.yaml")
+		require.NoError(t, os.WriteFile(
+			configFile,
+			[]byte("barkBlockDownloadAllowPrivateAddresses: true\n"),
+			0o600,
+		))
+
+		cfg, err := LoadConfig(configFile)
+		require.NoError(t, err)
+		require.True(t, cfg.BarkBlockDownloadAllowPrivateAddresses)
+	})
+
+	t.Run("environment", func(t *testing.T) {
+		resetGlobalConfig()
+		unsetBarkAllowPrivateEnv(t)
+		t.Setenv("HOME", t.TempDir())
+		t.Setenv("DINGO_BARK_BLOCK_DOWNLOAD_ALLOW_PRIVATE_ADDRESSES", "true")
+
+		cfg, err := LoadConfig("")
+		require.NoError(t, err)
+		require.True(t, cfg.BarkBlockDownloadAllowPrivateAddresses)
+	})
+
+	t.Run("flag", func(t *testing.T) {
+		resetGlobalConfig()
+		unsetBarkAllowPrivateEnv(t)
+		t.Setenv("HOME", t.TempDir())
+		cfg, err := LoadConfig("")
+		require.NoError(t, err)
+
+		cmd := &cobra.Command{Use: "dingo"}
+		RegisterFlags(cmd)
+		require.NoError(t, cmd.ParseFlags([]string{
+			"--bark-block-download-allow-private-addresses",
+		}))
+		require.NoError(t, ApplyFlags(cmd, cfg))
+		require.True(t, cfg.BarkBlockDownloadAllowPrivateAddresses)
+	})
 }

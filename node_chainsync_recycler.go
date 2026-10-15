@@ -24,6 +24,8 @@ import (
 	"github.com/blinklabs-io/dingo/internal/chainsyncrecycler"
 	"github.com/blinklabs-io/dingo/peergov"
 	ouroboros "github.com/blinklabs-io/gouroboros"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
 const (
@@ -32,55 +34,69 @@ const (
 )
 
 // chainsyncObservePeerTip synchronously feeds a peer tip update into chain
-// selection (and peergov) when the Genesis corroboration gate is active, so the
-// ChainsyncApplyEligible check that immediately follows in the roll-forward
-// handler reflects the header currently being admitted. This closes the race
-// where the apply gate would otherwise read corroboration state that predates
-// this header (the tip update is normally delivered asynchronously). It returns
-// true when it handled the observation synchronously, so the ouroboros layer
-// skips the async PeerTipUpdateEvent publish to avoid a double update.
+// selection (and peergov) when Genesis selection is active. This keeps the
+// density frontier ordered before a later AwaitReply and ensures the
+// ChainsyncApplyEligible check immediately following a roll-forward sees the
+// header currently being admitted. It returns true when it handled the
+// observation synchronously, so the ouroboros layer skips the async
+// PeerTipUpdateEvent publish to avoid a double update.
 //
-// When corroboration is inactive the async path is used unchanged (returns
-// false), so normal high-throughput sync keeps its parallelism.
+// Outside Genesis selection the async path is used unchanged (returns false),
+// so normal high-throughput sync keeps its parallelism.
 func (n *Node) chainsyncObservePeerTip(
 	e chainselection.PeerTipUpdateEvent,
-) bool {
-	if n.chainSelector == nil ||
-		!n.chainSelector.GenesisCorroborationActive() {
-		return false
+) chainselection.PeerTipUpdateDisposition {
+	if n.chainSelector == nil {
+		return chainselection.PeerTipUpdateUnhandled
 	}
-	n.chainSelector.HandlePeerTipUpdateEvent(
-		event.NewEvent(chainselection.PeerTipUpdateEventType, e),
-	)
-	n.touchPeerByConnId(e.ConnectionId)
-	return true
+	genesisActive, _ := n.chainSelector.GenesisSelectionState()
+	if !genesisActive {
+		return chainselection.PeerTipUpdateUnhandled
+	}
+	disposition := n.chainSelector.ObservePeerTipUpdate(e)
+	if disposition == chainselection.PeerTipUpdateAccepted {
+		n.touchPeerByConnId(e.ConnectionId)
+	}
+	return disposition
 }
 
 // chainsyncObservePeerRollback synchronously applies a peer rollback into chain
-// selection when the Genesis corroboration gate is active, so the
-// ChainsyncApplyEligible check that immediately follows in the roll-backward
-// handler reflects the post-rollback corroboration state. A rollback trims the
-// peer's observed frontier (ApplyRollback), which can change its corroboration
-// status; delivering that observation asynchronously would let the apply gate
-// read pre-trim state and forward a rollback for a peer that the rollback has
-// just made uncorroborated. It returns true when handled
-// synchronously, so the ouroboros layer skips the async PeerRollbackEvent
-// publish to avoid a double update. Unlike chainsyncObservePeerTip there is no
-// peergov touch: only the chain selector subscribes to PeerRollbackEvent.
+// selection when Genesis selection is active. This keeps the density frontier
+// ordered before a later AwaitReply and ensures the ChainsyncApplyEligible
+// check immediately following a roll-backward sees the post-rollback state. It
+// returns true when handled synchronously, so the ouroboros layer skips the
+// async PeerRollbackEvent publish to avoid a double update. Unlike
+// chainsyncObservePeerTip there is no peergov touch: only the chain selector
+// subscribes to PeerRollbackEvent.
 //
-// When corroboration is inactive the async path is used unchanged (returns
-// false).
+// Outside Genesis selection the async path is used unchanged (returns false).
 func (n *Node) chainsyncObservePeerRollback(
 	e chainselection.PeerRollbackEvent,
 ) bool {
-	if n.chainSelector == nil ||
-		!n.chainSelector.GenesisCorroborationActive() {
+	if n.chainSelector == nil {
+		return false
+	}
+	genesisActive, _ := n.chainSelector.GenesisSelectionState()
+	if !genesisActive {
 		return false
 	}
 	n.chainSelector.HandlePeerRollbackEvent(
 		event.NewEvent(chainselection.PeerRollbackEventType, e),
 	)
 	return true
+}
+
+// chainsyncObserveAwaitReply records the explicit ChainSync idle frontier in
+// the selector. The nil check keeps standalone Ouroboros config construction
+// safe before Run has built the selector.
+func (n *Node) chainsyncObserveAwaitReply(
+	connId ouroboros.ConnectionId,
+	point ocommon.Point,
+) {
+	if n.chainSelector == nil {
+		return
+	}
+	n.chainSelector.SetPeerIdling(connId, point)
 }
 
 // chainsyncApplyEligible gates whether a peer's headers/rollbacks are APPLIED to
@@ -97,6 +113,30 @@ func (n *Node) chainsyncApplyEligible(
 		return true
 	}
 	return n.chainSelector.ShouldApplyIngress(connId)
+}
+
+// chainsyncAwaitEagerness pauses a peer's header stream while its next header
+// is past the Limit on Eagerness. With no chain selector wired it never waits.
+func (n *Node) chainsyncAwaitEagerness(
+	ctx context.Context,
+	connId ouroboros.ConnectionId,
+	blockNumber uint64,
+	appliedTip func() ochainsync.Tip,
+) error {
+	if n.chainSelector == nil {
+		return nil
+	}
+	return n.chainSelector.AwaitEagernessLimit(
+		ctx,
+		connId,
+		blockNumber,
+		appliedTip,
+	)
+}
+
+// chainsyncHasBestPeer reports whether chain selection has a best peer.
+func (n *Node) chainsyncHasBestPeer() bool {
+	return n.chainSelector != nil && n.chainSelector.GetBestPeer() != nil
 }
 
 func (n *Node) isChainsyncIngressEligible(
@@ -422,15 +462,16 @@ func (n *Node) recyclerComponents() chainsyncrecycler.ComponentProvider {
 // lifecycle work holds liveLifecycleMu while it discards and rebuilds the
 // state, and blocking a background ledger callback there can deadlock the
 // quiesce that waits for the callback's goroutine to exit.
-func (n *Node) withLiveChainsyncState(fn func(*chainsync.State)) {
+func (n *Node) withLiveChainsyncState(fn func(*chainsync.State)) bool {
 	if !n.liveLifecycleMu.TryLock() {
-		return
+		return false
 	}
 	defer n.liveLifecycleMu.Unlock()
 	if n.chainsyncState == nil {
-		return
+		return false
 	}
 	fn(n.chainsyncState)
+	return true
 }
 
 // WithLiveComponents runs fn against the node's current ledger, chainsync
@@ -481,20 +522,29 @@ func (n *Node) startChainsyncStallRecycler(
 	chainsyncCfg chainsync.Config,
 ) error {
 	n.chainsyncStallRecycler = chainsyncrecycler.New(
-		chainsyncrecycler.Config{
-			Components:   n.recyclerComponents(),
-			EventBus:     n.eventBus,
-			Logger:       n.config.logger,
-			StallTimeout: chainsyncCfg.StallTimeout,
-			Interval: min(
-				max(chainsyncCfg.StallTimeout/2, 10*time.Second),
-				30*time.Second,
-			),
-			Grace:    max(chainsyncCfg.StallTimeout, 30*time.Second),
-			Cooldown: max(2*chainsyncCfg.StallTimeout, 2*time.Minute),
-		},
+		n.buildChainsyncRecyclerConfig(chainsyncCfg),
 	)
 	return n.chainsyncStallRecycler.Start(ctx)
+}
+
+// buildChainsyncRecyclerConfig assembles the recycler's configuration, the
+// single composition site for its dependencies and hooks.
+func (n *Node) buildChainsyncRecyclerConfig(
+	chainsyncCfg chainsync.Config,
+) chainsyncrecycler.Config {
+	return chainsyncrecycler.Config{
+		Components:   n.recyclerComponents(),
+		EventBus:     n.eventBus,
+		Logger:       n.config.logger,
+		StallTimeout: chainsyncCfg.StallTimeout,
+		Interval: min(
+			max(chainsyncCfg.StallTimeout/2, 10*time.Second),
+			30*time.Second,
+		),
+		Grace:             max(chainsyncCfg.StallTimeout, 30*time.Second),
+		Cooldown:          max(2*chainsyncCfg.StallTimeout, 2*time.Minute),
+		OnPlateauDecision: n.recordPlateauDecision,
+	}
 }
 
 // waitChainsyncStallRecycler stops the recycler and waits for it to exit.

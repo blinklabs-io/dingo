@@ -68,13 +68,17 @@ type BackfillProgress struct {
 // It is triggered automatically during Mithril sync when
 // storageMode is "api".
 type Backfill struct {
-	db             *database.Database
-	nodeCfg        *cardano.CardanoNodeConfig
-	logger         *slog.Logger
-	epochs         []models.Epoch
-	pparamsCache   map[uint64]lcommon.ProtocolParameters
-	batchSize      int
-	computeOffsets func(
+	db           *database.Database
+	nodeCfg      *cardano.CardanoNodeConfig
+	logger       *slog.Logger
+	epochs       []models.Epoch
+	pparamsCache map[uint64]lcommon.ProtocolParameters
+	batchSize    int
+	// freshDatabaseBootstrap records the sync caller's state classification.
+	// Mithril seeds a zero-slot checkpoint before import, so checkpoint
+	// presence alone cannot tell a fresh bootstrap from a resumed backfill.
+	freshDatabaseBootstrap bool
+	computeOffsets         func(
 		uint64,
 		[]byte,
 		[]byte,
@@ -176,6 +180,14 @@ func NewBackfill(
 // never be assumed safe for a new call site.
 func (b *Backfill) SetDelegatorInactivityEnabled(enabled bool) {
 	b.delegatorInactivityEnabled = enabled
+}
+
+// SetFreshDatabaseBootstrap enables the monotonic replay fast path when the
+// caller has classified this run as a bootstrap of an empty database. Resume
+// callers must leave it false so interrupted batches retain consumed-input
+// recovery.
+func (b *Backfill) SetFreshDatabaseBootstrap(enabled bool) {
+	b.freshDatabaseBootstrap = enabled
 }
 
 // SetBatchSize overrides the number of processed blocks accumulated before
@@ -642,6 +654,24 @@ func (b *Backfill) getPParams(
 	return b.currentPParams
 }
 
+// blockEraParams returns the era and protocol parameters that apply to a
+// block of blockEraId in epoch epochId, which is recorded as era eraId. A
+// block of the previous era in an epoch recorded with its successor takes the
+// parameters of its own era's last epoch, as transaction validation does.
+func (b *Backfill) blockEraParams(
+	epochId uint64,
+	eraId, blockEraId uint,
+) (uint, lcommon.ProtocolParameters) {
+	if prev, ok := dledger.PreviousEraEpoch(
+		b.epochs, epochId, eraId, blockEraId,
+	); ok {
+		if pp, cached := b.pparamsCache[prev.EpochId]; cached {
+			return prev.EraId, pp
+		}
+	}
+	return eraId, b.getPParams(epochId)
+}
+
 // calculateCertDeposits computes deposit amounts for each
 // certificate in the transaction.
 //
@@ -709,58 +739,40 @@ func (b *Backfill) processBlockGovernanceLevel(
 	point ocommon.Point,
 	txIndex uint32,
 	epochId uint64,
-	conwayPP *conway.ConwayProtocolParameters,
+	pp lcommon.ProtocolParameters,
 	txn *database.Txn,
+	validated *bool,
 ) error {
 	if !tx.IsValid() {
 		return nil
 	}
-	proposals := tx.ProposalProcedures()
-	votes := tx.VotingProcedures()
-	hasDRepActivityCerts := governance.HasDRepActivityCertificates(tx)
-	if len(proposals) == 0 && len(votes) == 0 && !hasDRepActivityCerts {
+	if !governance.TransactionHasGovernanceEffects(tx) {
 		return nil
 	}
-	if conwayPP == nil {
+	conwayPP := backfillConwayProtocolParameters(pp)
+	if conwayPP == nil &&
+		governance.HistoricalTransactionRequiresConwayParameters(tx) {
 		return errors.New(
 			"missing Conway protocol parameters for governance backfill",
 		)
 	}
-	if len(proposals) > 0 {
-		if err := governance.ProcessHistoricalProposals(
-			ctx,
-			tx, point, txIndex, epochId,
-			conwayPP.GovActionValidityPeriod,
-			b.db, txn,
-		); err != nil {
-			return fmt.Errorf(
-				"governance proposals: %w", err,
-			)
-		}
+	var proposalLifetime uint64
+	if conwayPP != nil {
+		proposalLifetime = conwayPP.GovActionValidityPeriod
 	}
-	if len(votes) > 0 {
-		if err := governance.ProcessHistoricalVotes(
-			ctx,
-			tx, point, epochId,
-			b.db, txn,
-		); err != nil {
-			return fmt.Errorf(
-				"governance votes: %w", err,
-			)
-		}
-	}
-	if hasDRepActivityCerts {
-		if err := governance.ProcessHistoricalDRepActivityCertificates(
-			ctx,
-			tx,
-			epochId,
-			b.db,
-			txn,
-		); err != nil {
-			return fmt.Errorf(
-				"DRep activity certificates: %w", err,
-			)
-		}
+	if err := governance.ProcessHistoricalTransactionEffects(
+		ctx,
+		tx,
+		point,
+		txIndex,
+		epochId,
+		proposalLifetime,
+		b.db,
+		txn,
+		pp,
+		validated,
+	); err != nil {
+		return fmt.Errorf("governance transaction effects: %w", err)
 	}
 	return nil
 }
@@ -891,11 +903,16 @@ func (b *Backfill) Run(ctx context.Context) error {
 
 	var startSlot uint64
 	now := time.Now()
-	// Track whether this is a fresh backfill start (not resumed). The
-	// consumed-input recovery optimization is only safe when the metadata
-	// store is in a pristine, monotonic state. Resumed runs may have
-	// inconsistencies from interrupted batches that need repair.
-	isFreshStart := cp == nil
+	// Mithril pre-seeds a zero-slot checkpoint before importing a fresh
+	// database, so the caller's bootstrap classification is also needed to
+	// distinguish it from a resumed run. The consumed-input recovery
+	// optimization is safe only for this monotonic replay; resumed runs may
+	// have inconsistencies from interrupted batches that need repair.
+	isFreshStart := cp == nil ||
+		(b.freshDatabaseBootstrap && cp.LastSlot == 0)
+	// The bootstrap classification applies only to the first attempt. A retry,
+	// even before checkpoint progress, must run consumed-input recovery.
+	b.freshDatabaseBootstrap = false
 	if cp == nil {
 		cp = &models.BackfillCheckpoint{
 			Phase:      BackfillPhase,
@@ -1090,8 +1107,6 @@ func (b *Backfill) Run(ctx context.Context) error {
 			b.processEpochBoundary(epochId, eraId)
 		}
 
-		pp := b.getPParams(epochId)
-
 		var blockTxCount int
 
 		parsedBlock, parseErr := models.DecodeBlockCbor(
@@ -1127,6 +1142,9 @@ func (b *Backfill) Run(ctx context.Context) error {
 
 			txs := parsedBlock.Transactions()
 			if len(txs) > 0 {
+				txEraId, pp := b.blockEraParams(
+					epochId, eraId, uint(parsedBlock.Era().Id),
+				)
 				offsetStart := time.Now()
 				offsets, oErr := b.computeBlockOffsets(
 					blk.Slot, blk.Hash, blk.Cbor, parsedBlock,
@@ -1143,8 +1161,7 @@ func (b *Backfill) Run(ctx context.Context) error {
 					// Store transaction metadata into the shared batch
 					// instead of committing once per block.
 					if pErr := b.processBlockTxsBatched(
-						ctx,
-						txs, point, epochId, eraId,
+						ctx, txs, point, epochId, txEraId,
 						pp, offsets, acc, batchTxn,
 						&intervalStats, isFreshStart,
 					); pErr != nil {
@@ -1332,6 +1349,7 @@ func (b *Backfill) processBlockTxsBatched(
 	}
 	var storageIndexOffset uint64
 	for txIndex, tx := range txs {
+		var proposalsValidated bool
 		levels := dledger.TransactionLevelsForApply(tx)
 		childCount := uint64(len(levels)) - 1
 		storageBaseIndex := uint64(txIndex) + storageIndexOffset
@@ -1346,6 +1364,10 @@ func (b *Backfill) processBlockTxsBatched(
 		for levelIndex, level := range levels {
 			storageIndex := storageBaseIndex + uint64(levelIndex)
 			updateEpoch, paramUpdates := level.ProtocolParameterUpdates()
+			protocolMajor := uint64(0)
+			if versioned, ok := pp.(lcommon.PoolRuleProtocolParameters); ok {
+				protocolMajor = uint64(versioned.ProtocolMajorVersion())
+			}
 			if opts.SkipProducedUtxoOffsetWrites {
 				b.skippedUtxoRefs += uint64(len(level.Produced()))
 			}
@@ -1361,6 +1383,7 @@ func (b *Backfill) processBlockTxsBatched(
 					Stats:                        stats,
 					SkipWithdrawalWitnessWrite:   !b.delegatorInactivityEnabled,
 					HistoricalBackfill:           true,
+					ProtocolMajor:                protocolMajor,
 				},
 			); err != nil {
 				return fmt.Errorf(
@@ -1380,8 +1403,9 @@ func (b *Backfill) processBlockTxsBatched(
 				point,
 				uint32(storageIndex), //nolint:gosec
 				epochId,
-				backfillConwayProtocolParameters(pp),
+				pp,
 				txn,
+				&proposalsValidated,
 			); err != nil {
 				return fmt.Errorf(
 					"governance at slot %d tx %d body %d: %w",

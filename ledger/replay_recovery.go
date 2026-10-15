@@ -275,9 +275,7 @@ func (ls *LedgerState) tryRecoverFromTxValidationError(
 						ferr,
 					)
 				}
-				if onChain && (floor.Slot < rewindPoint.Slot ||
-					(floor.Slot == rewindPoint.Slot &&
-						!bytes.Equal(floor.Hash, rewindPoint.Hash))) {
+				if onChain && replayHoldUsesDurableFloor(rewindPoint, floor) {
 					rewindPoint = floor
 				}
 			}
@@ -399,6 +397,15 @@ func (ls *LedgerState) tryRecoverFromTxValidationError(
 		ls.armContinuationAudit(ls.lifecycleContext(), rewindPoint, "replay recovery rewind")
 	}
 	return true, nil
+}
+
+func replayHoldUsesDurableFloor(rewindPoint, floor ocommon.Point) bool {
+	if rewindPoint.Slot == 0 && len(rewindPoint.Hash) == 0 {
+		return false
+	}
+	return floor.Slot < rewindPoint.Slot ||
+		(floor.Slot == rewindPoint.Slot &&
+			!bytes.Equal(floor.Hash, rewindPoint.Hash))
 }
 
 // checkReplayRecoveryRollbackFloor preserves the refuse-before-chain-moves
@@ -576,6 +583,9 @@ func isDeterministicTxValidationError(err error) bool {
 	if isRewardWithdrawalMismatch(err) {
 		return true
 	}
+	if isConwayGovPredFailureError(err) {
+		return true
+	}
 	if _, ok := errors.AsType[eras.TxTooLargeByronError](err); ok {
 		return true
 	}
@@ -586,6 +596,46 @@ func isDeterministicTxValidationError(err error) bool {
 		return true
 	}
 	_, ok := errors.AsType[eras.UnknownAddressAttributesByronError](err)
+	return ok
+}
+
+// isConwayGovPredFailureError identifies final governance predicate verdicts
+// whose validation rules do not resolve transaction inputs. State access and
+// availability errors are deliberately excluded.
+func isConwayGovPredFailureError(err error) bool {
+	if errorIsType[conway.CommitteeExpiryEpochUnavailableError](err) ||
+		errorIsType[conway.ConstitutionLookupError](err) ||
+		errorIsType[conway.MalformedConstitutionError](err) ||
+		errorIsType[conway.CommitteeMemberLookupError](err) ||
+		errorIsType[conway.CommitteeStateUnavailableError](err) {
+		return false
+	}
+	return errorIsType[conway.ProtocolParameterUpdateEmptyError](err) ||
+		errorIsType[conway.ProtocolParameterUpdateFieldZeroError](err) ||
+		errorIsType[conway.ConwayProtocolParameterUpdateError](err) ||
+		errorIsType[conway.CommitteeMemberAlreadyExpiredError](err) ||
+		errorIsType[conway.EmptyTreasuryWithdrawalsError](err) ||
+		errorIsType[conway.ZeroTreasuryWithdrawalAmountError](err) ||
+		errorIsType[conway.BootstrapDisallowedGovActionError](err) ||
+		errorIsType[conway.WrongNetworkProposalAddressError](err) ||
+		errorIsType[conway.MalformedGovActionError](err) ||
+		errorIsType[conway.ConflictingCommitteeUpdateError](err) ||
+		errorIsType[conway.InvalidGuardrailsScriptHashError](err) ||
+		errorIsType[conway.BadHardForkProtocolVersionError](err) ||
+		errorIsType[conway.ProposalDepositIncorrectError](err) ||
+		errorIsType[conway.ProposalReturnAccountDoesNotExistError](err) ||
+		errorIsType[conway.TreasuryWithdrawalReturnAccountsDoNotExistError](err) ||
+		errorIsType[conway.UnknownGovActionIdError](err) ||
+		errorIsType[conway.UnknownVoterError](err) ||
+		errorIsType[conway.VotingOnExpiredGovActionError](err) ||
+		errorIsType[conway.BootstrapVotingRestrictionError](err) ||
+		errorIsType[conway.StakePoolVotingRestrictionError](err) ||
+		errorIsType[conway.CCVotingRestrictionError](err) ||
+		errorIsType[conway.UnelectedCommitteeVoterError](err)
+}
+
+func errorIsType[T error](err error) bool {
+	_, ok := errors.AsType[T](err)
 	return ok
 }
 
@@ -1482,8 +1532,8 @@ func (ls *LedgerState) rejectReplayRecoveryAtMithrilBoundary(
 // the ledger has made forward progress past the failing region. Called from the
 // block-apply success path when the tip advances beyond the last recorded
 // at-tip failure slot, so a later, unrelated at-tip failure starts with a fresh
-// recovery budget instead of inheriting a stale hold or same-failure rewind
-// depth. Same-tip replay preserves both schedules. Runs on the ledger pipeline
+// recovery budget instead of inheriting a stale hold, same-failure rewind
+// depth, or spent epoch-boundary crossing. Same-tip replay preserves both schedules. Runs on the ledger pipeline
 // goroutine, the same goroutine that mutates these fields during recovery, so
 // no additional locking is required.
 func (ls *LedgerState) resetAtTipRecoveryDescent(newTipSlot uint64) {
@@ -1496,6 +1546,7 @@ func (ls *LedgerState) resetAtTipRecoveryDescent(newTipSlot uint64) {
 	ls.atTipRecoveryLastFailSlot = 0
 	ls.atTipRecoveryDescentCount = 0
 	ls.atTipRecoveryHolding = false
+	ls.atTipRecoveryCrossedEpochStart = 0
 	ls.lastAtTipRecovery = nil
 }
 
@@ -1594,6 +1645,12 @@ func (ls *LedgerState) recoverAtTipFromTxValidationError(
 			}
 		}
 	}
+	rewindPoint = ls.clampRecoveryRewindToEpochBoundary(
+		rewindPoint,
+		ledgerTip.Point,
+		validationErr,
+		attempts,
+	)
 	// Never target a point below the consumed-UTxO prune floor. The sweep
 	// hard-deletes spent rows at or below tip-stabilityWindow, while each
 	// escalating attempt rewinds a further stability window below the
@@ -1964,6 +2021,68 @@ func (ls *LedgerState) rejectRecoveryAtMithrilBoundary(
 		)
 	}
 	return nil
+}
+
+// clampRecoveryRewindToEpochBoundary keeps an at-tip recovery rewind from
+// discarding an epoch rollover that has already completed. When the ledger
+// tip or the failing block is in the current epoch and the target lies before
+// that epoch's start slot, re-delivery would recompute the whole rollover
+// before reaching the same failing block, so the target moves to the first
+// block at or after the boundary, or to the ledger tip when none is applied.
+// The failing block counts because the rollover commits before the first
+// block of the epoch applies, leaving the tip in the previous epoch. The final
+// scheduled attempt may cross the boundary once per epoch until the ledger
+// applies past the failing block, so a failure that only a different
+// pre-boundary history can repair still gets the deepest rewind. Any lookup failure holds at the ledger tip.
+func (ls *LedgerState) clampRecoveryRewindToEpochBoundary(
+	rewindPoint ocommon.Point,
+	ledgerTip ocommon.Point,
+	validationErr *txValidationError,
+	attempts int,
+) ocommon.Point {
+	ls.RLock()
+	boundary := ls.currentEpoch.StartSlot
+	ls.RUnlock()
+	if boundary == 0 ||
+		max(ledgerTip.Slot, validationErr.BlockPoint.Slot) < boundary ||
+		rewindPoint.Slot >= boundary ||
+		pointMatches(rewindPoint, ledgerTip) {
+		return rewindPoint
+	}
+	logger := ls.config.Logger.With(
+		"component", "ledger",
+		"failing_block_slot", validationErr.BlockPoint.Slot,
+		"epoch_boundary_slot", boundary,
+		"requested_rewind_slot", rewindPoint.Slot,
+		"ledger_tip_slot", ledgerTip.Slot,
+		"attempt", attempts,
+	)
+	if attempts >= maxAtTipRecoveryAttempts &&
+		ls.atTipRecoveryCrossedEpochStart != boundary {
+		ls.atTipRecoveryCrossedEpochStart = boundary
+		logger.Warn(
+			"at-tip recovery rewinding across epoch boundary, the rollover will be recomputed",
+		)
+		return rewindPoint
+	}
+	clamped := ledgerTip
+	block, err := database.FirstBlockAtOrAfterSlot(
+		ls.lifecycleContext(), ls.db, boundary,
+	)
+	if err == nil && block.Slot <= ledgerTip.Slot {
+		clamped = ocommon.Point{Slot: block.Slot, Hash: block.Hash}
+	} else if err != nil {
+		logger.Warn(
+			"epoch boundary block lookup failed, using ledger tip",
+			"error", err.Error(),
+		)
+	}
+	ls.metrics.atTipRecoveryEpochBoundaryClamped.Inc()
+	logger.Warn(
+		"at-tip recovery rewind target is below the completed epoch boundary, clamping to avoid recomputing the rollover",
+		"clamped_rewind_slot", clamped.Slot,
+	)
+	return clamped
 }
 
 // findRewindPoint returns the highest committed chain point at or

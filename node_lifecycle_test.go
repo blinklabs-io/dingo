@@ -108,6 +108,23 @@ func newLiveLifecycleTestNodeWithGenesis(
 	workerPoolCfg ledger.DatabaseWorkerPoolConfig,
 ) (*Node, []ocommon.Point) {
 	t.Helper()
+	return newLiveLifecycleTestNodeWithStorageMode(
+		t, numBlocks, cardanoNodeCfgOverride, workerPoolCfg, StorageModeCore,
+	)
+}
+
+// newLiveLifecycleTestNodeWithStorageMode is newLiveLifecycleTestNodeWithGenesis
+// with the storage mode chosen up front. The mode is persisted with the
+// database and a live restore or truncate refuses to reopen it under another,
+// so API-only subsystems need the database created in API mode.
+func newLiveLifecycleTestNodeWithStorageMode(
+	t *testing.T,
+	numBlocks int,
+	cardanoNodeCfgOverride *cardano.CardanoNodeConfig,
+	workerPoolCfg ledger.DatabaseWorkerPoolConfig,
+	storageMode StorageMode,
+) (*Node, []ocommon.Point) {
+	t.Helper()
 
 	tmpDir := t.TempDir()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -122,13 +139,18 @@ func newLiveLifecycleTestNodeWithGenesis(
 		context.Background(),
 		pluginHost,
 		storageSelections,
-		internalplugins.StorageDependencies{DataDir: tmpDir, Logger: logger},
+		internalplugins.StorageDependencies{
+			DataDir:     tmpDir,
+			Logger:      logger,
+			StorageMode: string(storageMode),
+		},
 	)
 	require.NoError(t, err)
 	db, err := database.New(context.Background(), &database.Config{
-		DataDir: tmpDir,
-		Logger:  logger,
-		Network: "preview",
+		DataDir:     tmpDir,
+		Logger:      logger,
+		Network:     "preview",
+		StorageMode: string(storageMode),
 	}, stores)
 	require.NoError(t, err)
 
@@ -166,6 +188,10 @@ func newLiveLifecycleTestNodeWithGenesis(
 			storageSelections.Metadata,
 		),
 		WithDatabaseWorkerPoolConfig(workerPoolCfg),
+		WithStorageMode(storageMode),
+		WithBlockfrostPort(0),
+		WithMeshPort(0),
+		WithUtxorpcPort(0),
 	)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -188,7 +214,7 @@ func newLiveLifecycleTestNodeWithGenesis(
 	// the field under test.
 	ledgerState, err := ledger.NewLedgerState(n.ledgerStateConfig())
 	require.NoError(t, err)
-	n.ledgerState = ledgerState
+	n.setLedgerState(ledgerState)
 	// Build the harness ouroboros the way Run() does: every dependency up
 	// front, through the validating constructor, so the live-restore
 	// reconstruction assertions below exercise the production path rather
@@ -224,6 +250,7 @@ func newLiveLifecycleTestNodeWithGenesis(
 	n.ouroborosConfig = ouroborosCfg
 	n.ouroborosRef.Store(ouro)
 	require.NoError(t, ledgerState.Start(context.Background()))
+	n.publishStartedLedgerState()
 	t.Cleanup(func() {
 		cancel()
 		if n.pluginHost != nil {
@@ -1113,7 +1140,8 @@ func TestLiveTruncateCancelsWhenStorageProviderDrainIsUnconfirmed(
 	// Once drain is confirmed, a scratch runtime opening the same data
 	// directory must succeed deterministically -- the old Badger lock is
 	// guaranteed released, so this is a single attempt, not a poll.
-	deps := n.storageDependencies(n.config.dataDir)
+	deps, err := n.storageDependencies(n.config.dataDir)
+	require.NoError(t, err)
 	deps.PromRegistry = n.config.promRegistry
 	runtime, openErr := internalplugins.OpenDatabase(
 		context.Background(),
@@ -1249,7 +1277,7 @@ func TestLiveTruncateCancelsInsteadOfResumingWhenStorageDrainUnconfirmed(
 	require.ErrorContains(
 		t,
 		shutdownErr,
-		"database close skipped: ledger state drain unconfirmed",
+		"database close skipped: storage-user drain unconfirmed",
 	)
 
 	// The node must have been brought down for a supervised restart, not
@@ -1366,7 +1394,7 @@ func TestLiveTruncateRecoveryRechecksAlonzoPParamsUnit(t *testing.T) {
 		alonzo.EraIdAlonzo,
 		nil,
 	))
-	require.NoError(t, n.db.Metadata().SetNodeSettingsGates(context.Background(), 
+	require.NoError(t, n.db.Metadata().SetNodeSettingsGates(context.Background(),
 		nodesettings.Values{
 			nodesettings.AlonzoPParamsUnitGateName: nodesettings.AlonzoPParamsUnitLegacyByteV0,
 		},
@@ -1667,6 +1695,137 @@ func requireNoDir(t *testing.T, dir string) {
 	require.Truef(t, os.IsNotExist(err), "expected %q to not exist", dir)
 }
 
+func TestFinalizeSuccessfulRestorePreservesBackupWhenCommitFails(t *testing.T) {
+	t.Parallel()
+	backupDir := filepath.Join(t.TempDir(), "backup")
+	require.NoError(t, os.MkdirAll(backupDir, 0o700))
+	marker := filepath.Join(backupDir, "marker")
+	require.NoError(t, os.WriteFile(marker, []byte("original"), 0o600))
+	wantErr := errors.New("cleanup failed")
+
+	err := finalizeSuccessfulRestore(func() error { return wantErr }, backupDir)
+	require.ErrorIs(t, err, wantErr)
+	require.FileExists(t, marker)
+}
+
+func TestInterruptedRemoteRestoreDisposition(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name         string
+		dataExists   bool
+		backupExists bool
+		wantRollback bool
+	}{
+		{name: "before swap", dataExists: true, wantRollback: true},
+		{name: "between renames", backupExists: true, wantRollback: true},
+		{name: "before target creation", wantRollback: true},
+		{
+			name:         "activated replacement",
+			dataExists:   true,
+			backupExists: true,
+			wantRollback: false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(
+				t,
+				tc.wantRollback,
+				remoteRestoreNeedsRollback(tc.dataExists, tc.backupExists),
+			)
+		})
+	}
+}
+
+func TestInterruptedRestoreReconcilesLocalSwapBeforeRemoteState(t *testing.T) {
+	originalRecover := recoverInterruptedRestore
+	recoverInterruptedRestore = func(
+		_ context.Context,
+		_ *plugin.Host,
+		recoveryDir string,
+		targetDataDir string,
+		_ lifecycle.RestoreStorageConfig,
+		_ bool,
+	) error {
+		if err := os.MkdirAll(targetDataDir, 0o755); err != nil {
+			return err
+		}
+		if err := os.WriteFile(
+			filepath.Join(targetDataDir, "remote-recovery"),
+			[]byte("marker"),
+			0o600,
+		); err != nil {
+			return err
+		}
+		return os.RemoveAll(recoveryDir)
+	}
+	t.Cleanup(func() { recoverInterruptedRestore = originalRecover })
+
+	tests := []struct {
+		name         string
+		dataMarker   string
+		backupMarker string
+		wantMarker   string
+		wantDataDir  bool
+		wantRecovery bool
+	}{
+		{
+			name: "before swap", dataMarker: "original",
+			wantMarker: "original", wantDataDir: true,
+		},
+		{
+			name: "between renames", backupMarker: "original",
+			wantMarker: "original", wantDataDir: true,
+		},
+		{
+			name: "before target creation",
+		},
+		{
+			name: "activated replacement", dataMarker: "restored",
+			backupMarker: "original", wantMarker: "restored",
+			wantDataDir: true, wantRecovery: true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			base := t.TempDir()
+			dataDir := filepath.Join(base, "data")
+			backupDir := dataDir + preRestoreBackupSuffix
+			stagingDir := dataDir + restoreStagingSuffix
+			if tc.dataMarker != "" {
+				writeMarkerFile(t, dataDir, tc.dataMarker)
+			}
+			if tc.backupMarker != "" {
+				writeMarkerFile(t, backupDir, tc.backupMarker)
+			}
+			recoveryDir := lifecycle.RestoreRecoveryDir(stagingDir)
+			require.NoError(t, os.MkdirAll(recoveryDir, 0o700))
+
+			n := newSwapTestNode(t, dataDir)
+			require.NoError(t, n.reconcileInterruptedRestore(
+				context.Background(),
+			))
+
+			if tc.wantDataDir {
+				requireMarkerFile(t, dataDir, tc.wantMarker)
+				require.NoFileExists(
+					t,
+					filepath.Join(dataDir, "remote-recovery"),
+				)
+			} else {
+				requireNoDir(t, dataDir)
+			}
+			_, err := os.Stat(recoveryDir)
+			if tc.wantRecovery {
+				require.NoError(t, err)
+			} else {
+				require.True(t, os.IsNotExist(err))
+			}
+		})
+	}
+}
+
 // TestSwapInRestoredDataDirRetainsBackupUntilCallerConfirms guards the
 // core fix: a directory swap succeeding is not by itself proof the
 // restored data actually works, so swapInRestoredDataDir must never
@@ -1695,15 +1854,9 @@ func TestSwapInRestoredDataDirRetainsBackupUntilCallerConfirms(t *testing.T) {
 	requireNoDir(t, stagingDir)
 }
 
-// withInjectedFirstSyncFailure replaces syncDataDirParent for the calling
-// test's duration so its very first invocation returns injectErr (and runs
-// beforeReturn, if non-nil, immediately before returning it) while every
-// later invocation behaves like the real fsyncdir.Sync -- used to simulate
-// an fsync failure landing exactly between swapInRestoredDataDir's first
-// rename and its rollback, without needing real filesystem-level fault
-// injection.
-func withInjectedFirstSyncFailure(
+func withInjectedSyncFailure(
 	t *testing.T,
+	failAt int,
 	injectErr error,
 	beforeReturn func(),
 ) {
@@ -1713,7 +1866,7 @@ func withInjectedFirstSyncFailure(
 	calls := 0
 	syncDataDirParent = func(path string) error {
 		calls++
-		if calls == 1 {
+		if calls == failAt {
 			if beforeReturn != nil {
 				beforeReturn()
 			}
@@ -1732,7 +1885,7 @@ func withInjectedFirstSyncFailure(
 // assumes it's still in place. swapInRestoredDataDir must roll the first
 // rename back and report a normal (recoverable) error when that rollback
 // succeeds.
-// Not t.Parallel: withInjectedFirstSyncFailure swaps a package-level sync
+// Not t.Parallel: withInjectedSyncFailure swaps a package-level sync
 // seam that every concurrent restore in this package would observe.
 func TestSwapInRestoredDataDirRollsBackWhenFirstSyncFails(t *testing.T) {
 	base := t.TempDir()
@@ -1741,7 +1894,7 @@ func TestSwapInRestoredDataDirRollsBackWhenFirstSyncFails(t *testing.T) {
 	writeMarkerFile(t, dataDir, "original")
 	writeMarkerFile(t, stagingDir, "restored")
 
-	withInjectedFirstSyncFailure(t, errors.New("injected sync failure"), nil)
+	withInjectedSyncFailure(t, 1, errors.New("injected sync failure"), nil)
 
 	n := newSwapTestNode(t, dataDir)
 	_, err := n.swapInRestoredDataDir(stagingDir)
@@ -1787,8 +1940,9 @@ func TestSwapInRestoredDataDirUnrecoverableWhenFirstSyncFailsAndRollbackFails(
 	// directly inside base, which a read-only base refuses -- made
 	// read-only right as the injected sync failure is reported, so the
 	// first rename (which already succeeded by then) is unaffected.
-	withInjectedFirstSyncFailure(
+	withInjectedSyncFailure(
 		t,
+		1,
 		errors.New("injected sync failure"),
 		func() {
 			require.NoError(t, os.Chmod(base, 0o500))
@@ -1799,6 +1953,28 @@ func TestSwapInRestoredDataDirUnrecoverableWhenFirstSyncFailsAndRollbackFails(
 	_, err := n.swapInRestoredDataDir(stagingDir)
 	require.Error(t, err)
 	require.ErrorIs(t, err, errRestoreSwapUnrecoverable)
+}
+
+// Not t.Parallel: withInjectedSyncFailure swaps the package-level sync seam.
+func TestSwapInRestoredDataDirPreservesActivatedSwapWhenSecondSyncFails(
+	t *testing.T,
+) {
+	base := t.TempDir()
+	dataDir := filepath.Join(base, "data")
+	stagingDir := dataDir + restoreStagingSuffix
+	writeMarkerFile(t, dataDir, "original")
+	writeMarkerFile(t, stagingDir, "restored")
+
+	withInjectedSyncFailure(t, 2, errors.New("injected sync failure"), nil)
+
+	n := newSwapTestNode(t, dataDir)
+	backupDir, err := n.swapInRestoredDataDir(stagingDir)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "durability is unconfirmed")
+	require.Equal(t, dataDir+preRestoreBackupSuffix, backupDir)
+	requireMarkerFile(t, dataDir, "restored")
+	requireMarkerFile(t, backupDir, "original")
+	requireNoDir(t, stagingDir)
 }
 
 // TestReconcileInterruptedLiveRestoreSwapNoOpWithoutInterruption verifies
@@ -1951,30 +2127,60 @@ func smallEpochGenesisCfgForLifecycleTest(
 	return cfg
 }
 
-// addBlocksSerially adds each block one at a time, waiting for the
-// ledger's committed tip to actually reach it before adding the next.
-//
-// A tight back-to-back loop of AddBlock calls that crosses more than one
-// epoch boundary fires several epoch-transition EventBus events with no
-// synchronization between them, each spawning its own concurrent async
-// handler (reward precompute, stake/reward snapshots, and automatic database
-// lifecycle snapshots). Adding blocks one at a time both keeps this test
-// deterministic and more accurately simulates blocks arriving live instead
-// of as an instantaneous burst.
-func addBlocksSerially(t *testing.T, n *Node, blocks []gledger.Block) {
+// addBlocksSerially waits for each block-based epoch transition to commit
+// before entering the next epoch. This orders ledger commits only; snapshot
+// events run in their own serial loop and reward precomputation coalesces
+// pending epochs independently.
+func addBlocksSerially(
+	t *testing.T,
+	n *Node,
+	blocks []gledger.Block,
+	epochLength uint64,
+) {
 	t.Helper()
+	subID, epochEvents := n.eventBus.SubscribeWithBuffer(
+		event.EpochTransitionEventType,
+		len(blocks),
+	)
+	require.NotZero(t, subID)
+	require.NotNil(t, epochEvents)
+	defer func() {
+		n.eventBus.Unsubscribe(event.EpochTransitionEventType, subID)
+	}()
+	waitForEpoch := func(targetEpoch uint64) {
+		t.Helper()
+		timer := time.NewTimer(5 * time.Second)
+		defer timer.Stop()
+		for {
+			select {
+			case evt, ok := <-epochEvents:
+				require.True(t, ok, "epoch transition subscription closed")
+				epochEvent, ok := evt.Data.(event.EpochTransitionEvent)
+				if ok && epochEvent.NewEpoch == targetEpoch &&
+					len(epochEvent.EpochNonce) > 0 {
+					return
+				}
+			case <-timer.C:
+				t.Fatalf(
+					"timeout waiting for block-based epoch transition %d",
+					targetEpoch,
+				)
+			}
+		}
+	}
+	currentEpoch := n.ledgerState.Tip().Point.Slot / epochLength
 	for _, b := range blocks {
 		require.NoError(
 			t,
 			n.chainManager.PrimaryChain().
 				AddBlock(context.Background(), b, nil),
 		)
-		targetSlot := b.SlotNumber()
-		require.Eventually(t, func() bool {
-			tip, err := n.db.GetTip(nil)
-			return err == nil && tip.Point.Slot == targetSlot
-		}, 5*time.Second, 10*time.Millisecond,
-			"tip did not advance to slot %d after adding its block", targetSlot)
+		targetEpoch := b.SlotNumber() / epochLength
+		if targetEpoch <= currentEpoch {
+			continue
+		}
+		waitForEpoch(targetEpoch)
+		currentEpoch = targetEpoch
 	}
 }
 
@@ -1993,20 +2199,25 @@ func addBlocksSerially(t *testing.T, n *Node, blocks []gledger.Block) {
 func TestSecondLiveTruncateResumesTipAdvancement(t *testing.T) {
 	t.Parallel()
 
-	const numBlocks = 20
+	const (
+		numBlocks   = 21
+		epochLength = 100
+	)
 	n, points := newLiveLifecycleTestNodeWithGenesis(
 		t, numBlocks, smallEpochGenesisCfgForLifecycleTest(t),
 		disabledLiveLifecycleTestWorkerPoolCfg,
 	)
 	// Re-loaded separately (not added to any chain yet) so they can be fed
 	// back in one at a time after each truncate, simulating new blocks
-	// arriving live — reusing the real, already-validated blocks 10-19
+	// arriving live — reusing the real, already-validated blocks 10-20
 	// keeps their prev-hash chain correct without fabricating new ones.
-	tailBlocks := loadRawLiveLifecycleTestBlocks(t, numBlocks)[10:20]
+	tailBlocks := loadRawLiveLifecycleTestBlocks(t, numBlocks)[10:21]
 
-	// First truncate: back to block 9 (slot 180, epoch 1), removing blocks
-	// 10-19. Re-adding them crosses epoch 1->2 (block 10, slot 200) and
-	// epoch 2->3 (block 15, slot 300).
+	// First truncate: back to block 9 (slot 182, epoch 1), removing blocks
+	// 10-20. Re-adding them crosses epoch 1->2 (block 10, slot 202),
+	// epoch 2->3 (block 15, slot 302), and ends by crossing epoch 3->4
+	// (block 20, slot 402), whose block-based epoch event confirms every
+	// preceding block committed.
 	target1 := points[9].Slot
 	_, err := n.Truncate(
 		context.Background(),
@@ -2014,11 +2225,12 @@ func TestSecondLiveTruncateResumesTipAdvancement(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	addBlocksSerially(t, n, tailBlocks)
+	addBlocksSerially(t, n, tailBlocks, epochLength)
 
-	// Second truncate: back to block 14 (slot 280, epoch 2), removing
-	// blocks 15-19. Re-adding them crosses epoch 2->3 (block 15, slot 300)
-	// again — this time on storage rebuilt by a SECOND live truncate.
+	// Second truncate: back to block 14 (slot 282, epoch 2), removing
+	// blocks 15-20. Re-adding them crosses epoch 2->3 (block 15, slot 302)
+	// and epoch 3->4 (block 20, slot 402) again — this time on storage
+	// rebuilt by a SECOND live truncate.
 	target2 := points[14].Slot
 	_, err = n.Truncate(
 		context.Background(),
@@ -2026,5 +2238,79 @@ func TestSecondLiveTruncateResumesTipAdvancement(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	addBlocksSerially(t, n, tailBlocks[5:])
+	addBlocksSerially(t, n, tailBlocks[5:], epochLength)
+}
+
+// A live truncate or restore replaces the database handle, possibly with one
+// that was never analyzed. The rebuilt planner statistics manager must run
+// its startup pass on the new handle rather than wait for the next epoch
+// rollover, so a further pass right after finds nothing to change.
+func TestLiveTruncateRunsPlannerStatsStartupOnReplacementHandle(t *testing.T) {
+	t.Parallel()
+
+	const numBlocks = 20
+	n, points := newLiveLifecycleTestNode(t, numBlocks)
+	targetSlot := points[numBlocks/2].Slot
+
+	_, err := n.Truncate(context.Background(), dblifecycle.TruncateTarget{
+		Slot: &targetSlot,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, n.plannerStatsMgr)
+
+	result, err := n.plannerStatsMgr.RunStartup(context.Background())
+	require.NoError(t, err)
+	require.True(t, result.Supported)
+	require.False(
+		t,
+		result.Changed,
+		"the replacement handle must already have been optimized",
+	)
+}
+
+func TestStorageDependenciesResolveGenesisCertificate(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		network string
+		magic   uint32
+		want    bool
+		wantErr bool
+	}{
+		{name: "named preview", network: "preview", want: true},
+		{name: "preview magic", magic: 2, want: true},
+		{name: "unknown identity"},
+		{name: "invalid explicit network", network: "invalid-network", wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			n := &Node{config: NewConfig(
+				WithNetwork(tc.network), WithNetworkMagic(tc.magic),
+			)}
+			deps, err := n.storageDependencies(t.TempDir())
+			if tc.wantErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, tc.want, deps.GenesisStakingEmpty)
+		})
+	}
+}
+
+func TestStorageDependenciesWithoutInternalConfig(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		config Config
+		want   bool
+	}{
+		{name: "unknown identity"},
+		{name: "named preview", config: Config{network: "preview"}, want: true},
+		{name: "preview magic", config: Config{networkMagic: 2}, want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			n := &Node{config: tc.config}
+			deps, err := n.storageDependencies(t.TempDir())
+			require.NoError(t, err)
+			require.Equal(t, tc.want, deps.GenesisStakingEmpty)
+		})
+	}
 }

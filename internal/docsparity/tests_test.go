@@ -2827,7 +2827,8 @@ const (
 	publishPipeline = ".github/workflows/publish.yml"
 )
 
-// pipelineStages are the jobs both pipelines must define identically. They are
+// pipelineStages share their execution steps; only PRs have a docs-only gate.
+// They are
 // duplicated between the files rather than factored into a reusable workflow
 // because `needs:` cannot cross workflow files, and a called workflow would
 // rename every check context that branch protection matches on. The price of
@@ -2902,12 +2903,12 @@ func jobNeeds(t *testing.T, workflow, name string, job any) []string {
 	}
 }
 
-// TestPipelineStagesMatch checks that every shared stage is defined the same
-// way in both pipelines. A fix applied to the pull-request pipeline and not to
-// the publish one means main is tested differently from the change that was
-// reviewed, which is the failure mode the old split between go-test.yml and
-// publish.yml's `ci` job actually produced: the release gate drifted into
-// running commands no pull request had run.
+// TestPipelineStagesMatch checks that every shared stage runs the same steps
+// in both pipelines, allowing only the PR documentation gate. A fix applied
+// only to the pull-request pipeline means main is tested differently from the
+// reviewed change. The old split between go-test.yml and publish.yml's `ci`
+// job caused that failure: the release gate drifted into running commands no
+// pull request had run.
 func TestPipelineStagesMatch(t *testing.T) {
 	root := repoRoot(t)
 	prJobs := pipelineJobs(t, root, prPipeline)
@@ -2924,6 +2925,17 @@ func TestPipelineStagesMatch(t *testing.T) {
 			t.Errorf("%s has no %s job", publishPipeline, stage)
 			continue
 		}
+		// PRs may skip documentation-only changes; release validation always runs.
+		if stage == "lint" || stage == "govulncheck" {
+			fields := pr.(map[string]any)
+			if !reflect.DeepEqual(fields["needs"], []any{"changes"}) ||
+				fields["if"] != "${{ !cancelled() && "+
+					"needs.changes.outputs.run-ci != 'false' }}" {
+				t.Errorf("%s must use the documentation-only changes gate", stage)
+			}
+			delete(fields, "needs")
+			delete(fields, "if")
+		}
 		if !reflect.DeepEqual(pr, published) {
 			t.Errorf(
 				"job %s differs between %s and %s; the stages are duplicated "+
@@ -2933,6 +2945,91 @@ func TestPipelineStagesMatch(t *testing.T) {
 				prPipeline,
 				publishPipeline,
 			)
+		}
+	}
+}
+
+func TestPullRequestChangeGateRunsDocsParity(t *testing.T) {
+	root := repoRoot(t)
+	jobs := pipelineJobs(t, root, prPipeline)
+	changes, ok := jobs["changes"].(map[string]any)
+	if !ok {
+		t.Fatalf("%s changes job is missing or not a mapping", prPipeline)
+	}
+	steps, ok := changes["steps"].([]any)
+	if !ok {
+		t.Fatalf("%s changes job has no steps", prPipeline)
+	}
+	for _, step := range steps {
+		fields, ok := step.(map[string]any)
+		if ok && fields["run"] == "make docs-parity" {
+			return
+		}
+	}
+	t.Errorf("%s changes job does not run make docs-parity", prPipeline)
+}
+
+func TestPullRequestChangeGateUsesTrustedClassifier(t *testing.T) {
+	root := repoRoot(t)
+	jobs := pipelineJobs(t, root, prPipeline)
+	changes, ok := jobs["changes"].(map[string]any)
+	if !ok {
+		t.Fatalf("%s changes job is missing or not a mapping", prPipeline)
+	}
+	steps, ok := changes["steps"].([]any)
+	if !ok {
+		t.Fatalf("%s changes job has no steps", prPipeline)
+	}
+
+	pullRequestCheckout := -1
+	trustedCheckout := -1
+	detect := -1
+	for idx, step := range steps {
+		fields, ok := step.(map[string]any)
+		if !ok {
+			continue
+		}
+		with, _ := fields["with"].(map[string]any)
+		uses, _ := fields["uses"].(string)
+		if strings.HasPrefix(uses, "actions/checkout@") &&
+			with["path"] == "pull-request" && with["fetch-depth"] == 0 {
+			pullRequestCheckout = idx
+		}
+		if strings.HasPrefix(uses, "actions/checkout@") &&
+			with["path"] == "trusted-ci" &&
+			with["ref"] == "${{ github.event.pull_request.base.sha || github.sha }}" {
+			trustedCheckout = idx
+		}
+		if fields["id"] == "detect" {
+			detect = idx
+			if fields["working-directory"] != "pull-request" ||
+				fields["run"] != `if [[ -f ../trusted-ci/.github/scripts/ci-changes.sh ]]; then
+  bash ../trusted-ci/.github/scripts/ci-changes.sh
+else
+  echo "run-ci=true" >> "$GITHUB_OUTPUT"
+fi
+` {
+				t.Errorf("%s change detector must run trusted-ci's classifier against the pull-request checkout", prPipeline)
+			}
+		}
+	}
+	if pullRequestCheckout < 0 {
+		t.Errorf("%s changes job does not check out PR history into pull-request", prPipeline)
+	}
+	if trustedCheckout < 0 {
+		t.Errorf("%s changes job does not check out the trusted base revision into trusted-ci", prPipeline)
+	}
+	if detect < 0 {
+		t.Errorf("%s changes job has no detect step", prPipeline)
+	} else if pullRequestCheckout > detect || trustedCheckout > detect {
+		t.Errorf("%s changes job runs the classifier before its checkouts", prPipeline)
+	}
+	for _, name := range []string{"docs-parity", "test-change-selection"} {
+		for idx, step := range steps {
+			fields, ok := step.(map[string]any)
+			if ok && fields["name"] == name && idx < detect {
+				t.Errorf("%s changes job runs %s before the trusted classifier", prPipeline, name)
+			}
 		}
 	}
 }
@@ -2988,7 +3085,7 @@ func TestPipelineStagesAreOrdered(t *testing.T) {
 }
 
 // TestReleaseGatesOnGovulncheck checks that a tag cannot publish while
-// govulncheck is failing.
+// govulncheck is failing or Linux race tests have not passed.
 //
 // This was lost once already. `make govulncheck` was the last step of
 // publish.yml's `ci` job and create-draft-release needed `[ci]`, so the gate
@@ -3008,6 +3105,13 @@ func TestReleaseGatesOnGovulncheck(t *testing.T) {
 		t.Fatalf("%s has no create-draft-release job", publishPipeline)
 	}
 	needs := jobNeeds(t, publishPipeline, "create-draft-release", job)
+	if !contains(needs, "go-test-linux-race") {
+		t.Errorf(
+			"%s: create-draft-release does not need go-test-linux-race; "+
+				"a tag could publish before race tests pass",
+			publishPipeline,
+		)
+	}
 	if !contains(needs, "govulncheck") {
 		t.Errorf(
 			"%s: create-draft-release does not need govulncheck; a tag could "+
@@ -3018,28 +3122,59 @@ func TestReleaseGatesOnGovulncheck(t *testing.T) {
 	}
 }
 
-// buildGates names, for each build job, every test job for its own runner OS.
-// Gating a build on its own platform and no other is what lets the Linux
-// binaries start while macOS tests are still running.
-//
-// Linux has two suites and a build must wait for both. Naming only one would
-// leave the other free to be dropped from the build's dependencies with this
-// check still green, which is exactly the hole that would let build-linux run
-// without the race suite.
+// TestImageManifestRunsAfterMainBuilds checks the explicit condition that
+// keeps the manifest job runnable on main. The image builds have a skipped
+// release-only dependency on main, and GitHub otherwise propagates that skip
+// through the successful image-build job to its dependents.
+func TestImageManifestRunsAfterMainBuilds(t *testing.T) {
+	root := repoRoot(t)
+	jobs := pipelineJobs(t, root, publishPipeline)
+
+	job, ok := jobs["build-image-manifest"]
+	if !ok {
+		t.Fatalf("%s has no build-image-manifest job", publishPipeline)
+	}
+	fields, ok := job.(map[string]any)
+	if !ok {
+		t.Fatalf(
+			"%s job build-image-manifest is not a mapping",
+			publishPipeline,
+		)
+	}
+	condition, ok := fields["if"].(string)
+	if !ok {
+		t.Fatalf(
+			"%s: build-image-manifest has no job condition",
+			publishPipeline,
+		)
+	}
+	const expected = "always() && needs.build-images.result == 'success'"
+	if condition != expected {
+		t.Errorf(
+			"%s: build-image-manifest condition %q, want %q",
+			publishPipeline,
+			condition,
+			expected,
+		)
+	}
+}
+
+// buildGates names the normal test suite each platform's build waits for.
+// Race tests run alongside builds after the quick Linux gate passes.
 var buildGates = map[string][]string{
-	"build-linux": {"go-test-linux", "go-test-linux-race"},
+	"build-linux": {"go-test-linux"},
 	"build-macos": {"go-test-macos"},
 }
 
-// otherPlatformTests are the test jobs a given build job must NOT depend on.
-var otherPlatformTests = map[string][]string{
-	"build-linux": {"go-test-macos"},
+// independentTests are suites that run independently of each build.
+var independentTests = map[string][]string{
+	"build-linux": {"go-test-macos", "go-test-linux-race"},
 	"build-macos": {"go-test-linux", "go-test-linux-race"},
 }
 
 // TestBuildsGateOnTheirOwnPlatform checks that each build job waits for its own
-// runner OS's tests and for nothing else's. Depending on another platform is
-// what put the whole build stage behind the slowest and least predictable test
+// runner OS's normal suite without waiting for race or another platform.
+// Waiting for independent suites puts builds behind the slowest test
 // job in the pipeline; depending on none of them is what let images and
 // binaries publish from a commit no suite had covered.
 func TestBuildsGateOnTheirOwnPlatform(t *testing.T) {
@@ -3048,7 +3183,16 @@ func TestBuildsGateOnTheirOwnPlatform(t *testing.T) {
 	for _, workflow := range []string{prPipeline, publishPipeline} {
 		jobs := pipelineJobs(t, root, workflow)
 
-		for _, build := range sortedKeys(buildGates) {
+		gates := maps.Clone(buildGates)
+		independent := maps.Clone(independentTests)
+		imageBuild := "docker"
+		if workflow == publishPipeline {
+			imageBuild = "build-images"
+		}
+		gates[imageBuild] = gates["build-linux"]
+		independent[imageBuild] = independent["build-linux"]
+
+		for _, build := range sortedKeys(gates) {
 			job, ok := jobs[build]
 			if !ok {
 				t.Errorf("%s has no %s job", workflow, build)
@@ -3056,23 +3200,23 @@ func TestBuildsGateOnTheirOwnPlatform(t *testing.T) {
 			}
 			needs := jobNeeds(t, workflow, build, job)
 
-			for _, gate := range buildGates[build] {
+			for _, gate := range gates[build] {
 				if !contains(needs, gate) {
 					t.Errorf(
 						"%s: %s does not need %s; a build must not start "+
-							"until every suite for its own platform passes",
+							"until its normal platform suite passes",
 						workflow,
 						build,
 						gate,
 					)
 				}
 			}
-			for _, foreign := range otherPlatformTests[build] {
+			for _, foreign := range independent[build] {
 				if contains(needs, foreign) {
 					t.Errorf(
-						"%s: %s needs %s, a test job for another platform; "+
+						"%s: %s needs %s, an independent test job; "+
 							"that puts this build behind an unrelated "+
-							"platform's runtime",
+							"suite's runtime",
 						workflow,
 						build,
 						foreign,
@@ -3556,6 +3700,374 @@ func TestServiceContainersRelaxDurability(t *testing.T) {
 					workflow,
 					want.imagePrefix,
 				)
+			}
+		}
+	}
+}
+
+// jobSteps returns a job's steps as plain mappings.
+func jobSteps(t *testing.T, workflow, name string, job any) []map[string]any {
+	t.Helper()
+
+	fields, ok := job.(map[string]any)
+	if !ok {
+		t.Fatalf("%s job %s is not a mapping", workflow, name)
+	}
+	raw, ok := fields["steps"].([]any)
+	if !ok {
+		t.Fatalf("%s job %s has no steps", workflow, name)
+	}
+	steps := make([]map[string]any, 0, len(raw))
+	for _, entry := range raw {
+		step, ok := entry.(map[string]any)
+		if !ok {
+			t.Fatalf("%s job %s has a non-mapping step", workflow, name)
+		}
+		steps = append(steps, step)
+	}
+	return steps
+}
+
+var (
+	fullSHAActionRe = regexp.MustCompile(`@[0-9a-f]{40}$`)
+	buildTagsRe     = regexp.MustCompile(`(?m)^BUILD_TAGS \?= (\S+)$`)
+)
+
+// TestGovulncheckRunsThroughPinnedAction checks that CI reaches govulncheck
+// through a commit-pinned action instead of fetching and executing an
+// unpinned module with `go run ...@latest`.
+func TestGovulncheckRunsThroughPinnedAction(t *testing.T) {
+	t.Parallel()
+	root := repoRoot(t)
+
+	tags := buildTagsRe.FindStringSubmatch(readRepoFile(t, root, "Makefile"))
+	if tags == nil {
+		t.Fatal("Makefile does not set BUILD_TAGS")
+	}
+	wantGoflags := "-tags=" + tags[1]
+
+	for _, workflow := range []string{prPipeline, publishPipeline} {
+		job, ok := pipelineJobs(t, root, workflow)["govulncheck"]
+		if !ok {
+			t.Fatalf("%s has no govulncheck job", workflow)
+		}
+		found := false
+		for _, step := range jobSteps(t, workflow, "govulncheck", job) {
+			if run, _ := step["run"].(string); strings.Contains(run, "@latest") ||
+				strings.Contains(run, "make govulncheck") {
+				t.Errorf(
+					"%s: govulncheck step runs %q instead of the pinned action",
+					workflow,
+					run,
+				)
+			}
+			uses, _ := step["uses"].(string)
+			if !strings.HasPrefix(uses, "golang/govulncheck-action@") {
+				continue
+			}
+			found = true
+			if !fullSHAActionRe.MatchString(uses) {
+				t.Errorf("%s: %s is not pinned to a full commit SHA", workflow, uses)
+			}
+			// The action has no build-tags input, so GOFLAGS is the only
+			// route for the tags `make govulncheck` scans with; without it
+			// CI silently skips every tag-gated package.
+			env, _ := step["env"].(map[string]any)
+			if got := env["GOFLAGS"]; got != wantGoflags {
+				t.Errorf(
+					"%s: govulncheck GOFLAGS is %v, want %q to match make govulncheck",
+					workflow,
+					got,
+					wantGoflags,
+				)
+			}
+			if got := env["GOTOOLCHAIN"]; got != "auto" {
+				t.Errorf(
+					"%s: govulncheck GOTOOLCHAIN is %v, want auto",
+					workflow,
+					got,
+				)
+			}
+			with, _ := step["with"].(map[string]any)
+			for input, want := range map[string]string{
+				"go-package": "./...",
+				"work-dir":   ".",
+			} {
+				if got, set := with[input]; set && got != want {
+					t.Errorf(
+						"%s: govulncheck %s is %v, make govulncheck scans %q",
+						workflow,
+						input,
+						got,
+						want,
+					)
+				}
+			}
+		}
+		if !found {
+			t.Errorf("%s: govulncheck job does not use golang/govulncheck-action", workflow)
+		}
+	}
+}
+
+// TestReleaseRefreshesModuleProxy checks that finalizing a tagged release asks
+// the Go module proxy for the new version, with a bounded request, and that
+// the retired disabled step stays removed.
+func TestReleaseRefreshesModuleProxy(t *testing.T) {
+	t.Parallel()
+	root := repoRoot(t)
+
+	if raw := readRepoFile(t, root, publishPipeline); strings.Contains(raw, "go-proxy-pull-action") {
+		t.Errorf("%s still references the disabled go-proxy-pull-action step", publishPipeline)
+	}
+
+	job, ok := pipelineJobs(t, root, publishPipeline)["finalize-release"]
+	if !ok {
+		t.Fatalf("%s has no finalize-release job", publishPipeline)
+	}
+	for _, step := range jobSteps(t, publishPipeline, "finalize-release", job) {
+		run, _ := step["run"].(string)
+		if !strings.Contains(run, "proxy.golang.org") {
+			continue
+		}
+		if !strings.Contains(run, "/@v/") || !strings.Contains(run, "--max-time") {
+			t.Errorf("proxy refresh must request /@v/<tag>.info with --max-time: %q", run)
+		}
+		if step["continue-on-error"] != true {
+			t.Errorf("proxy refresh must not fail a published release")
+		}
+		if step["if"] != "github.ref_type == 'tag'" {
+			t.Errorf("proxy refresh must run for tags only, got %v", step["if"])
+		}
+		return
+	}
+	t.Errorf("%s finalize-release has no Go module proxy refresh step", publishPipeline)
+}
+
+// TestPullRequestPipelineRunsBlockPipelineDevnet checks that the pull-request
+// pipeline runs the accelerated DevNet with the block pipeline and its
+// validate stage enabled, the only integration exercise of that stage.
+func TestPullRequestPipelineRunsBlockPipelineDevnet(t *testing.T) {
+	t.Parallel()
+	root := repoRoot(t)
+
+	job, ok := pipelineJobs(t, root, prPipeline)["devnet"]
+	if !ok {
+		t.Fatalf("%s has no devnet job", prPipeline)
+	}
+	found := false
+	for _, step := range jobSteps(t, prPipeline, "devnet", job) {
+		run, _ := step["run"].(string)
+		if !strings.Contains(run, "run-tests.sh") {
+			continue
+		}
+		found = true
+		if !strings.Contains(run, "--accelerated") {
+			t.Errorf("devnet step must run the accelerated profile: %q", run)
+		}
+		env, _ := step["env"].(map[string]any)
+		for _, name := range []string{
+			"DEVNET_BLOCK_PIPELINE_ENABLED",
+			"DEVNET_BLOCK_PIPELINE_VALIDATE_ENABLED",
+		} {
+			if env[name] != "true" {
+				t.Errorf("devnet step must set %s=true, got %v", name, env[name])
+			}
+		}
+	}
+	if !found {
+		t.Errorf("%s devnet job never runs run-tests.sh", prPipeline)
+	}
+}
+
+// analyzerGoflagsRe matches the Makefile variable that carries BUILD_TAGS to
+// nilaway and modernize. Both accept -tags but document it as "no effect";
+// the package loader reads build tags only from GOFLAGS.
+var analyzerGoflagsRe = regexp.MustCompile(
+	`(?m)^ANALYZER_GOFLAGS\s*=.*-tags=.*\$\(BUILD_TAGS\)`,
+)
+
+// TestLintGatesNilawayAndModernize checks that nilaway and modernize fail
+// `make lint` on any finding, analyze the BUILD_TAGS-gated files, and that the
+// lint job of both pipelines runs them from floating installs. A findings exit
+// tolerated in the Makefile, tags passed where the tools ignore them, or a
+// pipeline that never runs the tools lets the baseline grow again.
+func TestLintGatesNilawayAndModernize(t *testing.T) {
+	t.Parallel()
+	root := repoRoot(t)
+	makefile := readRepoFile(t, root, "Makefile")
+	if !analyzerGoflagsRe.MatchString(makefile) {
+		t.Error("Makefile does not set ANALYZER_GOFLAGS to -tags=$(BUILD_TAGS)")
+	}
+	const analyzerEnv = `GOFLAGS="$(ANALYZER_GOFLAGS)" `
+
+	recipes := map[string][]string{}
+	current := ""
+	for _, line := range strings.Split(makefile, "\n") {
+		switch {
+		case strings.HasPrefix(line, "\t"):
+			if current != "" {
+				recipes[current] = append(
+					recipes[current],
+					strings.TrimPrefix(line, "\t"),
+				)
+			}
+		case line == "" || strings.HasPrefix(line, "#"):
+		default:
+			current, _, _ = strings.Cut(line, ":")
+		}
+	}
+
+	for _, tool := range []string{"nilaway", "modernize"} {
+		found := false
+		for _, line := range recipes[tool] {
+			cmd, hasEnv := strings.CutPrefix(line, analyzerEnv)
+			if !strings.HasPrefix(cmd, tool+" ") {
+				continue
+			}
+			found = true
+			if !hasEnv {
+				t.Errorf(
+					"make %s does not set GOFLAGS; %s ignores -tags and skips tag-gated files: %q",
+					tool,
+					tool,
+					line,
+				)
+			}
+			if strings.Contains(line, "||") || strings.Contains(line, "-eq") {
+				t.Errorf("make %s tolerates a failing exit: %q", tool, line)
+			}
+		}
+		if !found {
+			t.Errorf("make %s never runs %s", tool, tool)
+		}
+		ran := false
+		for _, line := range recipes["lint"] {
+			if strings.HasPrefix(line, "$(MAKE)") &&
+				strings.Contains(line, tool) &&
+				!strings.Contains(line, "||") {
+				ran = true
+			}
+		}
+		if !ran {
+			t.Errorf("make lint does not run %s as a gate", tool)
+		}
+	}
+
+	installs := map[string]string{
+		"nilaway":   "go.uber.org/nilaway/cmd/nilaway@",
+		"modernize": "golang.org/x/tools/go/analysis/passes/modernize/cmd/modernize@",
+	}
+	for _, workflow := range lintWorkflows {
+		job, ok := pipelineJobs(t, root, workflow)["lint"]
+		if !ok {
+			t.Fatalf("%s has no lint job", workflow)
+		}
+		var runs []string
+		for _, step := range jobSteps(t, workflow, "lint", job) {
+			run, _ := step["run"].(string)
+			runs = append(runs, run)
+		}
+		all := strings.Join(runs, "\n")
+		for tool, pkg := range installs {
+			if !strings.Contains(all, "make "+tool) {
+				t.Errorf("%s lint job never runs `make %s`", workflow, tool)
+			}
+			_, version, ok := strings.Cut(all, pkg)
+			if !ok {
+				t.Errorf("%s lint job never installs %s", workflow, tool)
+				continue
+			}
+			version, _, _ = strings.Cut(version, "\n")
+			// Scanners float like golangci-lint, so a new release's findings
+			// are fixed when it lands rather than parked behind a stale pin.
+			if version != "latest" {
+				t.Errorf(
+					"%s installs %s at %q, want latest",
+					workflow,
+					tool,
+					version,
+				)
+			}
+		}
+	}
+
+	for _, doc := range []string{"AGENTS.md", "CLAUDE.md"} {
+		if strings.Contains(readRepoFile(t, root, doc), "advisory") {
+			t.Errorf("%s calls a lint analyzer advisory", doc)
+		}
+	}
+}
+
+// TestGitignoreCoversLocalSecretsAndKeepsTrackedFixtures pins both halves of
+// the secret-file patterns: names that carry local credentials are ignored,
+// and every tracked fixture that matches one of them is un-ignored explicitly,
+// so an intentional fixture is never one `git add -f` away from looking like
+// a leak.
+func TestGitignoreCoversLocalSecretsAndKeepsTrackedFixtures(t *testing.T) {
+	t.Parallel()
+
+	root := repoRoot(t)
+	if err := exec.Command(
+		"git", "-C", root, "rev-parse", "--git-dir",
+	).Run(); err != nil {
+		t.Skip("not a git checkout")
+	}
+
+	for _, name := range []string{
+		".env",
+		"payment.skey",
+		"payment.vkey",
+		"node.key",
+		"tls/server.pem",
+		"credentials.json",
+		"dingo.yaml",
+	} {
+		// --no-index judges the pattern alone, whether or not the path exists
+		// or is tracked.
+		err := exec.Command(
+			"git", "-C", root, "check-ignore", "--no-index", "-q", name,
+		).Run()
+		if err != nil {
+			t.Errorf("%s is not ignored: %v", name, err)
+		}
+	}
+
+	tracked, err := exec.Command(
+		"git", "-C", root, "ls-files", "-ci", "--exclude-standard",
+	).Output()
+	if err != nil {
+		t.Fatalf("listing ignored tracked files: %v", err)
+	}
+	if got := strings.TrimSpace(string(tracked)); got != "" {
+		t.Errorf(
+			"tracked files match an ignore pattern without a negation:\n%s",
+			got,
+		)
+	}
+}
+
+// TestDockerfilesKeepMetricsLoopbackByDefault keeps an image from overriding
+// the binary's safe metrics default. EXPOSE documents a port; it does not need
+// the process inside the image to bind every interface.
+func TestDockerfilesKeepMetricsLoopbackByDefault(t *testing.T) {
+	t.Parallel()
+
+	root := repoRoot(t)
+	for _, rel := range dockerfiles(t, root) {
+		for line := range strings.SplitSeq(readRepoFile(t, root, rel), "\n") {
+			fields := strings.Fields(line)
+			if len(fields) < 2 {
+				continue
+			}
+			if !strings.EqualFold(fields[0], "ENV") {
+				continue
+			}
+			for _, field := range fields[1:] {
+				if field == "DINGO_METRICS_BIND_ADDR" ||
+					strings.HasPrefix(field, "DINGO_METRICS_BIND_ADDR=") {
+					t.Errorf("%s overrides the safe metrics bind default", rel)
+				}
 			}
 		}
 	}

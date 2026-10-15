@@ -113,6 +113,7 @@ type TxValidator interface {
 		tx ledger.Transaction,
 		consumedUtxos map[utxoref.Key]struct{},
 		createdUtxos map[utxoref.Key]lcommon.Utxo,
+		accounts *utxoref.StateOverlay,
 	) error
 }
 
@@ -120,6 +121,7 @@ type TxValidationFunc = func(
 	tx ledger.Transaction,
 	consumedUtxos map[utxoref.Key]struct{},
 	createdUtxos map[utxoref.Key]lcommon.Utxo,
+	accounts *utxoref.StateOverlay,
 ) error
 
 // TxValidationSessionProvider pins an ordered validation pass to one ledger
@@ -128,6 +130,7 @@ type TxValidationSessionProvider interface {
 	WithTxValidationSession(context.Context, func(
 		validate TxValidationFunc,
 		stillCurrent func() bool,
+		commitIfCurrent func(func() error) (bool, error),
 	) error) error
 }
 
@@ -165,7 +168,13 @@ func withTxValidationSession(ctx context.Context,
 		return err
 	}
 	if provider, ok := validator.(TxValidationSessionProvider); ok {
-		return provider.WithTxValidationSession(ctx, fn)
+		return provider.WithTxValidationSession(ctx, func(
+			validate TxValidationFunc,
+			stillCurrent func() bool,
+			_ func(func() error) (bool, error),
+		) error {
+			return fn(validate, stillCurrent)
+		})
 	}
 	return fn(validator.ValidateTxWithOverlay, func() bool { return true })
 }
@@ -487,12 +496,10 @@ func (b *DefaultBlockBuilder) buildBlock(ctx context.Context,
 		)
 	}
 
-	// Get protocol parameters for the slot being forged. This
-	// projects forward through any scheduled fork (TriggerAtEpoch)
-	// whose epoch lies at or before the slot, so the forger
-	// produces an era-correct block at a fork boundary even when
-	// the in-memory rollover has not yet seen a post-fork peer
-	// block.
+	// Get protocol parameters for the slot being forged. For a slot
+	// past the next epoch boundary these are the parameters of the era
+	// the ledger enters there, so the first block of a new era is
+	// forged in that era before the rollover has run.
 	pparams := b.pparamsProvider.ProtocolParamsForSlot(slot)
 	if pparams == nil {
 		return nil, nil, errors.New("failed to get protocol parameters")
@@ -567,9 +574,10 @@ func (b *DefaultBlockBuilder) buildBlock(ctx context.Context,
 		// transactions; node-to-client later inlines the certified EB txs.
 	case leios.Announcement != nil:
 		// An announcing slot carries either the endorser block or ranking-block
-		// transactions, never both. The endorser block is applied before its
-		// ranking block, so putting any mempool transaction in the RB would make
-		// both transaction sets apply at the same slot.
+		// transactions, never both. The two are selected from the mempool
+		// separately, so carrying both could put one transaction in each set,
+		// and the endorser block would then fail closure validation against the
+		// announcing block's state, which already spent its inputs.
 	default:
 		mempoolTxs = b.mempool.Transactions()
 	}
@@ -587,6 +595,9 @@ func (b *DefaultBlockBuilder) buildBlock(ctx context.Context,
 	// Passed to ValidateTxWithOverlay so later transactions in the
 	// same block can spend outputs from earlier intra-block txs.
 	createdOutputs := make(map[utxoref.Key]lcommon.Utxo)
+	// Track reward-account effects of already-selected transactions so a
+	// later transaction is validated against the balances they leave.
+	pendingAccounts := utxoref.NewStateOverlay()
 
 	// selectTransactions iterates mempoolTxs and adds them to the block
 	// candidate lists (closed over below) until a limit is hit. It runs
@@ -760,7 +771,12 @@ func (b *DefaultBlockBuilder) buildBlock(ctx context.Context,
 			// withTxValidationSession above/below), so every
 			// transaction in this candidate is checked against the
 			// same UTxO set and protocol parameters.
-			if err := validate(fullTx, consumedInputs, createdOutputs); err != nil {
+			if err := validate(
+				fullTx,
+				consumedInputs,
+				createdOutputs,
+				pendingAccounts,
+			); err != nil {
 				b.logger.Debug(
 					"skipping transaction - failed re-validation",
 					"component", "forging",
@@ -932,6 +948,7 @@ func (b *DefaultBlockBuilder) buildBlock(ctx context.Context,
 			for _, utxo := range fullTx.Produced() {
 				createdOutputs[utxoref.ForUtxo(utxo)] = utxo
 			}
+			pendingAccounts.Apply(fullTx)
 
 			b.logger.Debug(
 				"added transaction to block candidate lists",
@@ -984,6 +1001,7 @@ func (b *DefaultBlockBuilder) buildBlock(ctx context.Context,
 				_ ledger.Transaction,
 				_ map[utxoref.Key]struct{},
 				_ map[utxoref.Key]lcommon.Utxo,
+				_ *utxoref.StateOverlay,
 			) error {
 				return nil
 			},

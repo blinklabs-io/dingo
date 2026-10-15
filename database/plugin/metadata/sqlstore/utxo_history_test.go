@@ -88,6 +88,7 @@ INSERT INTO transaction_metadata_label (
 		row := &models.Utxo{
 			TransactionID: &transactionID,
 			TxId:          createdHashes[i],
+			Address:       []byte{byte(i + 1)},
 			PaymentKey:    paymentA,
 			AddedSlot:     uint64((i + 1) * 10),
 			Amount:        types.Uint64(1_000_000 + i),

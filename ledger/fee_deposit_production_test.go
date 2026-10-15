@@ -385,7 +385,7 @@ var (
 				defer cancel()
 				require.NoError(t, pool.Stop(ctx))
 			})
-			err = pool.AddTransaction(c.txType, c.txCbor)
+			err = pool.AddTransaction(context.Background(), c.txType, c.txCbor)
 			if err != nil {
 				require.Empty(t, pool.Transactions())
 				return err
@@ -624,7 +624,7 @@ func dijkstraFeeProdBatch(
 	keyAddr, err := lcommon.NewAddressFromBytes(fx.keyAddr)
 	require.NoError(t, err)
 	input := func(id []byte) shelley.ShelleyTransactionInput {
-		return shelley.NewShelleyTransactionInput(hex.EncodeToString(id), 0)
+		return shelley.MustNewShelleyTransactionInput(hex.EncodeToString(id), 0)
 	}
 	output := func(amount uint64) gdijkstra.DijkstraTransactionOutput {
 		return gdijkstra.DijkstraTransactionOutput{
@@ -838,7 +838,8 @@ type conwayDepositProdVariant struct {
 	setup           func(t *testing.T, fx *feeProdFixture)
 	// incorrect is the error target an isValid=true body with the wrong
 	// amount is rejected with.
-	incorrect func() any
+	incorrect      func() any
+	replayRecovers bool
 }
 
 // An isValid=false Conway transaction whose script genuinely fails, so the
@@ -959,10 +960,11 @@ func TestConwayPhase2InvalidDepositAccountingOnBlockPaths(t *testing.T) {
 			},
 		},
 		{
-			name:      "proposal deposit",
-			incorrect: func() any { return &conway.ProposalDepositIncorrectError{} },
-			required:  govDeposit,
-			wrong:     understated,
+			name:           "proposal deposit",
+			incorrect:      func() any { return &conway.ProposalDepositIncorrectError{} },
+			replayRecovers: true,
+			required:       govDeposit,
+			wrong:          understated,
 			extra: func(fx *feeProdFixture, amount uint64) map[uint]any {
 				rewardAccount := append(
 					[]byte{0xe0 | lcommon.AddressNetworkTestnet},
@@ -1097,6 +1099,10 @@ func TestConwayPhase2InvalidDepositAccountingOnBlockPaths(t *testing.T) {
 				func(t *testing.T) {
 					t.Parallel()
 					err := path.run(t, build(t, v, v.wrong, true, false))
+					if path.name == feeProdReplay.name && v.replayRecovers {
+						require.ErrorIs(t, err, errRestartLedgerPipeline)
+						return
+					}
 					require.ErrorAs(t, err, v.incorrect())
 				},
 			)

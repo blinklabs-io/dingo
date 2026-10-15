@@ -164,7 +164,7 @@ func TestLeiosNotifyBlockTxsOfferFetchesSameHashAtDifferentSlot(t *testing.T) {
 	require.NoError(t, o.storeLeiosEndorserBlock(
 		ocommon.NewPoint(staleSlot, offeredPoint.Hash),
 		blockRaw,
-		[]cbor.RawMessage{mustCbor(t, "tx0")},
+		[]cbor.RawMessage{testDijkstraTx(t, 0)},
 		leiosStoreAuthoritative,
 	))
 

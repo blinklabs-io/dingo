@@ -16,6 +16,7 @@ package governance
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"math/big"
@@ -53,6 +54,50 @@ func testConwayProtocolParameters() *conway.ConwayProtocolParameters {
 	pparams.GovActionValidityPeriod = 20
 	pparams.DRepInactivityPeriod = 20
 	return &pparams
+}
+
+func TestDormantDRepBoundaryUsesNewEpochProposalSet(t *testing.T) {
+	t.Parallel()
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: t.TempDir(),
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	require.NoError(t, err)
+	defer dbtest.CloseDatabase(db)
+
+	drepCredential := testHash28("dormant-boundary-drep")
+	require.NoError(t, db.CreateDrep(context.Background(), nil, &models.Drep{
+		Credential:  drepCredential,
+		Active:      true,
+		ExpiryEpoch: 20,
+	}))
+	require.NoError(t, db.SetGovernanceProposal(context.Background(), &models.GovernanceProposal{
+		TxHash:        testHash32("expires-at-boundary"),
+		ActionIndex:   0,
+		ActionType:    uint8(lcommon.GovActionTypeInfo),
+		ProposedEpoch: 1,
+		ExpiresEpoch:  4,
+		AnchorURL:     "https://example.invalid/expired",
+		AnchorHash:    testHash32("dormant-boundary-anchor"),
+	},
+		nil,
+	))
+
+	previous, err := db.GetActiveGovernanceProposals(context.Background(), 4, nil)
+	require.NoError(t, err)
+	require.Len(t, previous, 1)
+	current, err := db.GetActiveGovernanceProposals(context.Background(), 5, nil)
+	require.NoError(t, err)
+	require.Empty(t, current)
+
+	txn := db.MetadataTxn(context.Background(), true)
+	defer txn.Release()
+	require.NoError(t, BumpDormantDRepExpiryAtEpochBoundary(context.Background(), db, 5, 500, txn))
+	require.NoError(t, txn.Commit())
+	drep, err := db.GetDrepByCredential(context.Background(), 0, drepCredential, true, nil)
+	require.NoError(t, err)
+	require.NotNil(t, drep)
+	assert.Equal(t, uint64(21), drep.ExpiryEpoch)
 }
 
 func TestEpochContainsSlot(t *testing.T) {
@@ -124,18 +169,18 @@ func TestProcessProposalsRejectsExpiredCommitteeAdditions(t *testing.T) {
 			tx.WithId(txHash)
 			tx.WithProposalProcedures(procedure)
 
-			err = ProcessProposals(
-				context.Background(),
+			err = ProcessProposals(context.Background(),
 				tx,
 				ocommon.Point{Slot: 100},
 				0,
 				100,
 				20,
+				testConwayProtocolParameters(),
 				db,
 				nil,
+				nil,
 			)
-			stored, getErr := db.GetGovernanceProposal(
-				context.Background(),
+			stored, getErr := db.GetGovernanceProposal(context.Background(),
 				txHash,
 				0,
 				nil,
@@ -156,6 +201,97 @@ func TestProcessProposalsRejectsExpiredCommitteeAdditions(t *testing.T) {
 				require.Equal(t, test.expiry, expiryEpoch)
 			}
 		})
+	}
+}
+
+func TestGovernanceEffectsRejectOverwideCostModelLanguageIDs(t *testing.T) {
+	t.Parallel()
+
+	// These paths isolate cost-model key width from the enclosing transaction rule.
+	validated := true
+	type applyFunc func(*database.Database, lcommon.Transaction) error
+	paths := map[string]applyFunc{
+		"persistence core": func(db *database.Database, tx lcommon.Transaction) error {
+			return persistGovernanceProposals(t.Context(), tx, ocommon.Point{Slot: 100}, 0, 1, 20, false, db, nil)
+		},
+		"live proposals": func(db *database.Database, tx lcommon.Transaction) error {
+			return ProcessProposals(t.Context(), tx, ocommon.Point{Slot: 100}, 0, 1, 20, nil, db, nil, &validated)
+		},
+		"historical proposals": func(db *database.Database, tx lcommon.Transaction) error {
+			return ProcessHistoricalProposals(t.Context(), tx, ocommon.Point{Slot: 100}, 0, 1, 20, nil, db, nil, &validated)
+		},
+		"live transaction effects": func(db *database.Database, tx lcommon.Transaction) error {
+			return ProcessTransactionEffects(t.Context(), tx, ocommon.Point{Slot: 100}, 0, 1, 20, 20, 9, db, nil, nil, &validated)
+		},
+		"historical transaction effects": func(db *database.Database, tx lcommon.Transaction) error {
+			return ProcessHistoricalTransactionEffects(t.Context(), tx, ocommon.Point{Slot: 100}, 0, 1, 20, db, nil, nil, &validated)
+		},
+	}
+	rewardAccount, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeNoneKey,
+		lcommon.AddressNetworkTestnet,
+		nil,
+		testHash28("cost-model-language-reward"),
+	)
+	require.NoError(t, err)
+
+	for _, era := range []string{"Conway", "Dijkstra"} {
+		for _, languageID := range []uint{255, 256} {
+			for path, apply := range paths {
+				name := fmt.Sprintf("%s/language-%d/%s", era, languageID, path)
+				t.Run(name, func(t *testing.T) {
+					t.Parallel()
+					db, err := dbtest.NewDatabase(t, &database.Config{
+						DataDir: t.TempDir(),
+						Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+					})
+					require.NoError(t, err)
+					t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
+
+					var proposal lcommon.ProposalProcedure
+					if era == "Conway" {
+						proposal = conway.ConwayProposalProcedure{
+							PPRewardAccount: rewardAccount,
+							PPGovAction: conway.ConwayGovAction{
+								Type: uint(lcommon.GovActionTypeParameterChange),
+								Action: &conway.ConwayParameterChangeGovAction{
+									ParamUpdate: conway.ConwayProtocolParameterUpdate{
+										CostModels: map[uint][]int64{languageID: {1}},
+									},
+								},
+							},
+						}
+					} else {
+						proposal = gdijkstra.DijkstraProposalProcedure{
+							PPRewardAccount: rewardAccount,
+							PPGovAction: gdijkstra.DijkstraGovAction{
+								Type: uint(lcommon.GovActionTypeParameterChange),
+								Action: &gdijkstra.DijkstraParameterChangeGovAction{
+									ParamUpdate: gdijkstra.DijkstraProtocolParameterUpdate{
+										CostModels: map[uint][]int64{languageID: {1}},
+									},
+								},
+							},
+						}
+					}
+					txHash := testHash32(name)
+					tx := mockledger.NewTransactionBuilder()
+					tx.WithId(txHash)
+					tx.WithValid(true)
+					tx.WithProposalProcedures(proposal)
+
+					err = apply(db, tx)
+					_, getErr := db.GetGovernanceProposal(t.Context(), txHash, 0, nil)
+					if languageID == 256 {
+						require.ErrorContains(t, err, "exceeds Word8 maximum 255")
+						require.ErrorIs(t, getErr, models.ErrGovernanceProposalNotFound)
+						return
+					}
+					require.NoError(t, err)
+					require.NoError(t, getErr)
+				})
+			}
+		}
 	}
 }
 
@@ -234,8 +370,8 @@ func TestProcessDRepActivityCertificates(t *testing.T) {
 	}))
 
 	tx := mockledger.NewTransactionBuilder().WithCertificates(
-		&lcommon.RegistrationDrepCertificate{
-			CertType: uint(lcommon.CertificateTypeRegistrationDrep),
+		&lcommon.UpdateDrepCertificate{
+			CertType: uint(lcommon.CertificateTypeUpdateDrep),
 			DrepCredential: lcommon.Credential{
 				CredType:   lcommon.CredentialTypeAddrKeyHash,
 				Credential: credentialHash,
@@ -250,23 +386,23 @@ func TestProcessDRepActivityCertificates(t *testing.T) {
 		},
 	)
 	require.True(t, HasDRepActivityCertificates(tx))
+	require.NoError(t, db.SetImportedDormantDRepEpochs(context.Background(), 3, nil))
 
 	txn := db.Transaction(context.Background(), true)
 	defer txn.Release()
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return ProcessDRepActivityCertificates(
-			context.Background(),
+		return ProcessDRepActivityCertificates(context.Background(),
 			tx,
-			ocommon.NewPoint(5000, nil),
+			ocommon.Point{Slot: 1},
 			100,
 			20,
+			9,
 			db,
 			txn,
 		)
 	}))
 
-	keyDRep, err := db.GetDrepByCredential(
-		context.Background(),
+	keyDRep, err := db.GetDrepByCredential(context.Background(),
 		0,
 		credentialBytes,
 		true,
@@ -276,8 +412,7 @@ func TestProcessDRepActivityCertificates(t *testing.T) {
 	assert.Equal(t, uint64(100), keyDRep.LastActivityEpoch)
 	assert.Equal(t, uint64(120), keyDRep.ExpiryEpoch)
 
-	scriptDRep, err := db.GetDrepByCredential(
-		context.Background(),
+	scriptDRep, err := db.GetDrepByCredential(context.Background(),
 		1,
 		credentialBytes,
 		true,
@@ -290,6 +425,87 @@ func TestProcessDRepActivityCertificates(t *testing.T) {
 	expired, err := db.GetExpiredDReps(context.Background(), 100, nil)
 	require.NoError(t, err)
 	assert.Empty(t, expired)
+}
+
+func TestPV9DRepRegistrationUsesProposalDormancyReset(t *testing.T) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: t.TempDir(),
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	require.NoError(t, err)
+	defer dbtest.CloseDatabase(db)
+
+	drepCredential := testHash28("drep-ordering-voter")
+	var drepHash lcommon.CredentialHash
+	copy(drepHash[:], drepCredential)
+	require.NoError(t, db.SetImportedDormantDRepEpochs(context.Background(), 3, nil))
+
+	rewardAddress, err := lcommon.NewAddressFromBytes(
+		append([]byte{0xE1}, testHash28("new-proposal-return")...),
+	)
+	require.NoError(t, err)
+	proposal := conway.ConwayProposalProcedure{
+		PPDeposit:       1,
+		PPRewardAccount: rewardAddress,
+		PPGovAction: conway.ConwayGovAction{
+			Type:   uint(lcommon.GovActionTypeInfo),
+			Action: &lcommon.InfoGovAction{Type: uint(lcommon.GovActionTypeInfo)},
+		},
+		PPAnchor: lcommon.GovAnchor{
+			Url:      "https://example.com/new",
+			DataHash: [32]byte(testHash32("new-proposal-anchor")),
+		},
+	}
+	registration := &lcommon.RegistrationDrepCertificate{
+		CertType: uint(lcommon.CertificateTypeRegistrationDrep),
+		Amount:   500,
+		DrepCredential: lcommon.Credential{
+			CredType:   lcommon.CredentialTypeAddrKeyHash,
+			Credential: drepHash,
+		},
+	}
+	tx := mockledger.NewTransactionBuilder()
+	tx.WithId(testHash32("drep-ordering-tx"))
+	tx.WithValid(true)
+	tx.WithCertificates(registration)
+	tx.WithProposalProcedures(proposal)
+	point := ocommon.Point{Slot: 100, Hash: testHash32("drep-ordering-block")}
+
+	txn := db.Transaction(context.Background(), true)
+	defer txn.Release()
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		if err := ResetDormantDRepExpiryBeforeCertificates(context.Background(), tx,
+			point,
+			db,
+			txn,
+		); err != nil {
+			return err
+		}
+		if err := db.SetTransactionMetadataOnly(context.Background(), tx,
+			point,
+			0,
+			map[int]uint64{0: 500},
+			txn,
+			9,
+		); err != nil {
+			return err
+		}
+		if err := ProcessDRepActivityCertificates(context.Background(), tx, point, 100, 20, 9, db, txn); err != nil {
+			return err
+		}
+		return ProcessProposals(context.Background(), tx, point, 0, 100, 20, nil, db, txn, nil)
+	}))
+
+	drep, err := db.GetDrepByCredential(context.Background(), 0, drepCredential, true, nil)
+	require.NoError(t, err)
+	require.NotNil(t, drep)
+	assert.Equal(t, uint64(100), drep.LastActivityEpoch)
+	assert.Equal(t, uint64(120), drep.ExpiryEpoch)
+	dormantEpochs, err := db.GetDormantDRepEpochs(context.Background(), nil)
+	require.NoError(t, err)
+	assert.Zero(t, dormantEpochs)
 }
 
 func TestExtractGovActionInfo_ParameterChange(t *testing.T) {
@@ -490,8 +706,7 @@ func TestProcessVotesRepairsMissingDRepRow(t *testing.T) {
 	returnAddress := append([]byte{0xE1}, testHash28("reward-account")...)
 	require.NoError(
 		t,
-		db.SetGovernanceProposal(
-			context.Background(),
+		db.SetGovernanceProposal(context.Background(),
 			&models.GovernanceProposal{
 				TxHash:        proposalTxHash,
 				ActionIndex:   0,
@@ -507,8 +722,7 @@ func TestProcessVotesRepairsMissingDRepRow(t *testing.T) {
 			nil,
 		),
 	)
-	proposal, err := db.GetGovernanceProposal(
-		context.Background(),
+	proposal, err := db.GetGovernanceProposal(context.Background(),
 		proposalTxHash,
 		0,
 		nil,
@@ -712,8 +926,7 @@ func TestProcessVotesRepairsMissingGovernanceProposal(t *testing.T) {
 		Hash: testHash32("vote-block"),
 	}
 
-	_, err = db.GetGovernanceProposal(
-		context.Background(),
+	_, err = db.GetGovernanceProposal(context.Background(),
 		proposalTxHash.Bytes(),
 		0,
 		nil,
@@ -747,7 +960,7 @@ func TestProcessVotesRepairsMissingGovernanceProposal(t *testing.T) {
 				0,
 				nil,
 				offsets,
-				txn,
+				txn, 0,
 			); err != nil {
 				return err
 			}
@@ -763,8 +976,7 @@ func TestProcessVotesRepairsMissingGovernanceProposal(t *testing.T) {
 		}),
 	)
 
-	proposal, err := db.GetGovernanceProposal(
-		context.Background(),
+	proposal, err := db.GetGovernanceProposal(context.Background(),
 		proposalTxHash.Bytes(),
 		0,
 		nil,
@@ -922,8 +1134,7 @@ func TestProcessVotesRepairsMissingDijkstraGovernanceProposal(t *testing.T) {
 		Hash: testHash32("dijkstra-vote-block"),
 	}
 
-	_, err = db.GetGovernanceProposal(
-		context.Background(),
+	_, err = db.GetGovernanceProposal(context.Background(),
 		proposalTxHash.Bytes(),
 		0,
 		nil,
@@ -951,7 +1162,7 @@ func TestProcessVotesRepairsMissingDijkstraGovernanceProposal(t *testing.T) {
 			0,
 			nil,
 			offsets,
-			txn,
+			txn, 0,
 		); err != nil {
 			return err
 		}
@@ -966,8 +1177,7 @@ func TestProcessVotesRepairsMissingDijkstraGovernanceProposal(t *testing.T) {
 		)
 	}))
 
-	proposal, err := db.GetGovernanceProposal(
-		context.Background(),
+	proposal, err := db.GetGovernanceProposal(context.Background(),
 		proposalTxHash.Bytes(),
 		0,
 		nil,
@@ -1131,7 +1341,7 @@ func TestProcessHistoricalVotesSettlesRebuiltProposal(t *testing.T) {
 				}
 				if err := db.SetGapBlockTransaction(
 					context.Background(),
-					proposalTx, proposalPoint, 0, nil, offsets, txn,
+					proposalTx, proposalPoint, 0, nil, offsets, txn, 0,
 				); err != nil {
 					return err
 				}

@@ -15,6 +15,7 @@
 package lifecycle_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -177,11 +178,13 @@ func (s *remoteTestMetadataStore) stop(ctx context.Context) error {
 // compensating rollback and succeeds.
 type remoteTestBlobStore struct {
 	*badger.BlobStoreBadger
-	control *remoteBlobRestoreControl
+	control             *remoteBlobRestoreControl
+	legacyNamespaceRoot string
 }
 
 type remoteBlobRestoreControl struct {
 	failRestores    atomic.Int32
+	failResets      atomic.Int32
 	cancelOnRestore atomic.Bool
 	cancel          context.CancelFunc
 }
@@ -194,7 +197,34 @@ func (s *remoteTestBlobStore) Reset(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	return s.DB().DropAll()
+	for {
+		remaining := s.control.failResets.Load()
+		if remaining == 0 {
+			break
+		}
+		if s.control.failResets.CompareAndSwap(remaining, remaining-1) {
+			return errors.New("injected remote blob reset failure")
+		}
+	}
+	if err := s.DB().DropAll(); err != nil {
+		return err
+	}
+	if s.legacyNamespaceRoot == "" {
+		return nil
+	}
+	entries, err := os.ReadDir(s.legacyNamespaceRoot)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() || len(entry.Name()) != 32 {
+			continue
+		}
+		if err := os.RemoveAll(filepath.Join(s.legacyNamespaceRoot, entry.Name())); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *remoteTestBlobStore) Restore(ctx context.Context, r io.Reader) error {
@@ -218,6 +248,18 @@ func newRemoteRestoreHost(
 	t *testing.T,
 	dataRoot string,
 	control *remoteBlobRestoreControl,
+) *plugin.Host {
+	return newRemoteRestoreHostWithBlobName(
+		t, dataRoot, control, remoteBlobProviderName, false,
+	)
+}
+
+func newRemoteRestoreHostWithBlobName(
+	t *testing.T,
+	dataRoot string,
+	control *remoteBlobRestoreControl,
+	blobProviderName string,
+	namespaceAware bool,
 ) *plugin.Host {
 	t.Helper()
 	metadataDir := filepath.Join(dataRoot, "metadata")
@@ -254,16 +296,29 @@ func newRemoteRestoreHost(
 		host,
 		plugin.Descriptor{
 			Capability: plugin.CapabilityStorageBlob,
-			Name:       remoteBlobProviderName,
+			Name:       blobProviderName,
 		},
 		func() struct{} { return struct{}{} },
 		func(
 			_ context.Context,
 			_ struct{},
-			_ blob.ProviderDependencies,
+			deps blob.ProviderDependencies,
 		) (blob.BlobStore, plugin.Instance, error) {
+			resolvedBlobDir := blobDir
+			if namespaceAware {
+				marker, err := os.ReadFile(filepath.Join(
+					deps.DataDir, ".dingo-blob-namespace",
+				))
+				if err != nil && !errors.Is(err, os.ErrNotExist) {
+					return nil, nil, err
+				}
+				namespace := strings.TrimSpace(string(marker))
+				if namespace != "" {
+					resolvedBlobDir = filepath.Join(blobDir, namespace)
+				}
+			}
 			store, err := badger.New(
-				badger.WithDataDir(blobDir),
+				badger.WithDataDir(resolvedBlobDir),
 				badger.WithDeferOpen(),
 				badger.WithGc(false),
 				badger.WithValueLogFileSize(
@@ -277,6 +332,9 @@ func newRemoteRestoreHost(
 			remote := &remoteTestBlobStore{
 				BlobStoreBadger: store,
 				control:         control,
+			}
+			if namespaceAware && resolvedBlobDir == blobDir {
+				remote.legacyNamespaceRoot = blobDir
 			}
 			return remote, plugin.Lifecycle{
 				StartFunc: func(context.Context) error { return remote.Start() },
@@ -298,9 +356,21 @@ func openRemoteTestDatabase(
 	t *testing.T,
 	dataRoot string,
 ) *remoteTestDatabase {
+	return openRemoteTestDatabaseInNamespace(t, dataRoot, "")
+}
+
+func openRemoteTestDatabaseInNamespace(
+	t *testing.T,
+	dataRoot string,
+	namespace string,
+) *remoteTestDatabase {
 	t.Helper()
+	blobDir := filepath.Join(dataRoot, "blob")
+	if namespace != "" {
+		blobDir = filepath.Join(blobDir, namespace)
+	}
 	blobStore, err := badger.New(
-		badger.WithDataDir(filepath.Join(dataRoot, "blob")),
+		badger.WithDataDir(blobDir),
 		badger.WithGc(false),
 		badger.WithValueLogFileSize(testutil.TestBadgerValueLogFileSize),
 		badger.WithMemTableSize(testutil.TestBadgerMemTableSize),
@@ -321,6 +391,43 @@ func openRemoteTestDatabase(
 	return &remoteTestDatabase{
 		db: db, blob: blobStore, metadata: metadataStore,
 	}
+}
+
+func readRemoteBlobNamespace(
+	t *testing.T,
+	dataRoot string,
+	namespace string,
+) map[string][]byte {
+	t.Helper()
+	dir := filepath.Join(dataRoot, "blob")
+	if namespace != "" {
+		dir = filepath.Join(dir, namespace)
+	}
+	store, err := badger.New(
+		badger.WithDataDir(dir),
+		badger.WithGc(false),
+		badger.WithValueLogFileSize(testutil.TestBadgerValueLogFileSize),
+		badger.WithMemTableSize(testutil.TestBadgerMemTableSize),
+	)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, store.Close()) }()
+	txn := store.NewTransaction(false)
+	defer txn.Rollback() //nolint:errcheck
+	it := store.NewIterator(txn, types.BlobIteratorOptions{})
+	require.NotNil(t, it)
+	defer it.Close()
+	ret := map[string][]byte{}
+	for it.Valid() {
+		item := it.Item()
+		if item != nil {
+			value, err := item.ValueCopy(nil)
+			require.NoError(t, err)
+			ret[string(item.Key())] = value
+		}
+		it.Next()
+	}
+	require.NoError(t, it.Err())
+	return ret
 }
 
 func (d *remoteTestDatabase) close(t *testing.T) {
@@ -538,6 +645,407 @@ func TestRestoreFailureRollsBackPopulatedRemoteStoresExactly(t *testing.T) {
 			true,
 		)
 	})
+}
+
+func TestCloudRestoreFailureNeverMutatesActiveBlobNamespace(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	remoteDir := filepath.Join(t.TempDir(), "remote")
+	original := openRemoteTestDatabase(t, remoteDir)
+	require.NoError(t, original.db.BlockCreate(testBlock(1, 0x11), nil))
+	originalBlobs := readBlobContents(t, original.db)
+	original.close(t)
+
+	incoming := newTestDB(t)
+	require.NoError(t, incoming.BlockCreate(testBlock(1, 0x99), nil))
+	snapshotDir := filepath.Join(t.TempDir(), "incoming")
+	_, err := lifecycle.Snapshot(
+		ctx,
+		incoming,
+		snapshotDir,
+		lifecycle.TriggerManual,
+		"test",
+		"badger",
+		"sqlite",
+	)
+	require.NoError(t, err)
+	manifest, err := lifecycle.ReadManifest(snapshotDir)
+	require.NoError(t, err)
+	manifest.BlobPlugin = "s3"
+	manifest.MetadataPlugin = remoteMetadataProviderName
+	require.NoError(t, lifecycle.WriteManifest(snapshotDir, manifest))
+
+	control := &remoteBlobRestoreControl{}
+	// Cleanup must reset the isolated namespace without restoring into the
+	// active namespace.
+	control.failRestores.Store(2)
+	host := newRemoteRestoreHostWithBlobName(
+		t, remoteDir, control, "s3", true,
+	)
+	_, err = lifecycle.RestoreValidated(
+		metadata.AllowResetOfPopulatedTarget(ctx),
+		host,
+		nil,
+		snapshotDir,
+		filepath.Join(t.TempDir(), "target"),
+		nil,
+		lifecycle.RestoreStorageConfig{}, // restoreconfig:zero-value-required
+	)
+	require.ErrorIs(t, err, errInjectedRemoteBlobRestore)
+	require.NotErrorIs(t, err, lifecycle.ErrRestoreRollbackPending)
+	require.Equal(t, int32(1), control.failRestores.Load())
+
+	restored := openRemoteTestDatabase(t, remoteDir)
+	require.Equal(t, originalBlobs, readBlobContents(t, restored.db))
+	block, err := restored.db.BlockByIndex(1, nil)
+	require.NoError(t, err)
+	require.Equal(t, testBlock(1, 0x11).Hash, block.Hash)
+	restored.close(t)
+}
+
+func makeCloudRestoreSnapshot(
+	t *testing.T,
+	fill byte,
+) (string, map[string][]byte) {
+	t.Helper()
+	db := newTestDB(t)
+	require.NoError(t, db.BlockCreate(testBlock(1, fill), nil))
+	blobs := readBlobContents(t, db)
+	dir := filepath.Join(t.TempDir(), "snapshot")
+	_, err := lifecycle.Snapshot(
+		context.Background(),
+		db,
+		dir,
+		lifecycle.TriggerManual,
+		"test",
+		"badger",
+		"sqlite",
+	)
+	require.NoError(t, err)
+	manifest, err := lifecycle.ReadManifest(dir)
+	require.NoError(t, err)
+	manifest.BlobPlugin = "s3"
+	manifest.MetadataPlugin = remoteMetadataProviderName
+	require.NoError(t, lifecycle.WriteManifest(dir, manifest))
+	return dir, blobs
+}
+
+func TestCloudRestoreCommitReclaimsSupersededNamespaces(t *testing.T) {
+	t.Parallel()
+
+	ctx := metadata.AllowResetOfPopulatedTarget(context.Background())
+	remoteDir := filepath.Join(t.TempDir(), "remote")
+	activeDir := filepath.Join(t.TempDir(), "active")
+	oldNamespace := strings.Repeat("1", 32)
+	require.NoError(t, blob.WriteNamespace(activeDir, oldNamespace))
+	original := openRemoteTestDatabaseInNamespace(t, remoteDir, oldNamespace)
+	require.NoError(t, original.db.BlockCreate(testBlock(1, 0x11), nil))
+	originalBlobs := readBlobContents(t, original.db)
+	original.close(t)
+
+	firstSnapshot, firstBlobs := makeCloudRestoreSnapshot(t, 0x55)
+	firstTarget := filepath.Join(t.TempDir(), "first")
+	firstHost := newRemoteRestoreHostWithBlobName(
+		t, remoteDir, &remoteBlobRestoreControl{}, "s3", true,
+	)
+	_, firstRecovery, err := lifecycle.RestoreRecoverable(
+		ctx,
+		firstHost,
+		nil,
+		firstSnapshot,
+		firstTarget,
+		nil,
+		lifecycle.RestoreStorageConfig{ActiveDataDir: activeDir}, // restoreconfig:zero-value-required
+	)
+	require.NoError(t, err)
+	firstNamespace, err := blob.ReadNamespace(firstTarget)
+	require.NoError(t, err)
+	require.NotEqual(t, oldNamespace, firstNamespace)
+	require.Equal(t, originalBlobs, readRemoteBlobNamespace(t, remoteDir, oldNamespace))
+	require.Equal(t, firstBlobs, readRemoteBlobNamespace(t, remoteDir, firstNamespace))
+	require.NoError(t, firstRecovery.Commit())
+	require.Empty(t, readRemoteBlobNamespace(t, remoteDir, oldNamespace))
+
+	secondSnapshot, secondBlobs := makeCloudRestoreSnapshot(t, 0x77)
+	secondTarget := filepath.Join(t.TempDir(), "second")
+	secondHost := newRemoteRestoreHostWithBlobName(
+		t, remoteDir, &remoteBlobRestoreControl{}, "s3", true,
+	)
+	_, secondRecovery, err := lifecycle.RestoreRecoverable(
+		ctx,
+		secondHost,
+		nil,
+		secondSnapshot,
+		secondTarget,
+		nil,
+		lifecycle.RestoreStorageConfig{ActiveDataDir: firstTarget}, // restoreconfig:zero-value-required
+	)
+	require.NoError(t, err)
+	secondNamespace, err := blob.ReadNamespace(secondTarget)
+	require.NoError(t, err)
+	require.NotEqual(t, firstNamespace, secondNamespace)
+	require.NoError(t, secondHost.Stop(context.Background()))
+	restartHost := newRemoteRestoreHostWithBlobName(
+		t, remoteDir, &remoteBlobRestoreControl{}, "s3", true,
+	)
+	require.NoError(t, lifecycle.RecoverInterruptedRestore(
+		ctx,
+		restartHost,
+		secondRecovery.BackupDir(),
+		secondTarget,
+		lifecycle.RestoreStorageConfig{ActiveDataDir: firstTarget},
+		true,
+	))
+	require.Empty(t, readRemoteBlobNamespace(t, remoteDir, firstNamespace))
+	require.Equal(t, secondBlobs, readRemoteBlobNamespace(t, remoteDir, secondNamespace))
+}
+
+func TestCloudRestoreRetryDisposesFailedCommitRecovery(t *testing.T) {
+	t.Parallel()
+
+	ctx := metadata.AllowResetOfPopulatedTarget(context.Background())
+	remoteDir := filepath.Join(t.TempDir(), "remote")
+	activeDir := filepath.Join(t.TempDir(), "active")
+	oldNamespace := strings.Repeat("4", 32)
+	require.NoError(t, blob.WriteNamespace(activeDir, oldNamespace))
+	original := openRemoteTestDatabaseInNamespace(t, remoteDir, oldNamespace)
+	require.NoError(t, original.db.BlockCreate(testBlock(1, 0x11), nil))
+	original.close(t)
+
+	targetDir := filepath.Join(t.TempDir(), "restore-staging")
+	firstSnapshot, _ := makeCloudRestoreSnapshot(t, 0x55)
+	control := &remoteBlobRestoreControl{}
+	host := newRemoteRestoreHostWithBlobName(t, remoteDir, control, "s3", true)
+	_, firstRecovery, err := lifecycle.RestoreRecoverable(
+		ctx,
+		host,
+		nil,
+		firstSnapshot,
+		targetDir,
+		nil,
+		lifecycle.RestoreStorageConfig{ActiveDataDir: activeDir}, // restoreconfig:zero-value-required
+	)
+	require.NoError(t, err)
+	firstNamespace, err := blob.ReadNamespace(targetDir)
+	require.NoError(t, err)
+	require.NoError(t, os.RemoveAll(targetDir))
+	require.NoError(t, os.RemoveAll(activeDir))
+	require.NoError(t, blob.WriteNamespace(activeDir, firstNamespace))
+
+	control.failResets.Store(1)
+	require.Error(t, firstRecovery.Commit())
+	require.DirExists(t, firstRecovery.BackupDir())
+
+	secondSnapshot, _ := makeCloudRestoreSnapshot(t, 0x77)
+	_, secondRecovery, err := lifecycle.RestoreRecoverable(
+		ctx,
+		host,
+		nil,
+		secondSnapshot,
+		targetDir,
+		nil,
+		lifecycle.RestoreStorageConfig{ActiveDataDir: activeDir}, // restoreconfig:zero-value-required
+	)
+	require.NoError(t, err)
+	require.Empty(t, readRemoteBlobNamespace(t, remoteDir, oldNamespace))
+	require.NoError(t, secondRecovery.Commit())
+}
+
+func TestCloudRestoreCommitPreservesNewNamespaceAfterLegacyStore(t *testing.T) {
+	t.Parallel()
+
+	ctx := metadata.AllowResetOfPopulatedTarget(context.Background())
+	remoteDir := filepath.Join(t.TempDir(), "remote")
+	activeDir := filepath.Join(t.TempDir(), "active")
+	require.NoError(t, os.MkdirAll(activeDir, 0o700))
+	original := openRemoteTestDatabase(t, remoteDir)
+	require.NoError(t, original.db.BlockCreate(testBlock(1, 0x11), nil))
+	legacyBlobs := readBlobContents(t, original.db)
+	original.close(t)
+
+	snapshotDir, incomingBlobs := makeCloudRestoreSnapshot(t, 0x66)
+	targetDir := filepath.Join(t.TempDir(), "target")
+	host := newRemoteRestoreHostWithBlobName(
+		t, remoteDir, &remoteBlobRestoreControl{}, "s3", true,
+	)
+	_, recovery, err := lifecycle.RestoreRecoverable(
+		ctx,
+		host,
+		nil,
+		snapshotDir,
+		targetDir,
+		nil,
+		lifecycle.RestoreStorageConfig{ActiveDataDir: activeDir}, // restoreconfig:zero-value-required
+	)
+	require.NoError(t, err)
+	newNamespace, err := blob.ReadNamespace(targetDir)
+	require.NoError(t, err)
+	require.NoError(t, recovery.Commit())
+	require.Equal(t, legacyBlobs, readRemoteBlobNamespace(t, remoteDir, ""))
+	require.Equal(t, incomingBlobs, readRemoteBlobNamespace(t, remoteDir, newNamespace))
+}
+
+func TestInterruptedCloudRestoreCanRecoverOriginalPair(t *testing.T) {
+	t.Parallel()
+
+	ctx := metadata.AllowResetOfPopulatedTarget(context.Background())
+	remoteDir := filepath.Join(t.TempDir(), "remote")
+	activeDir := filepath.Join(t.TempDir(), "active")
+	oldNamespace := strings.Repeat("2", 32)
+	require.NoError(t, blob.WriteNamespace(activeDir, oldNamespace))
+	original := openRemoteTestDatabaseInNamespace(t, remoteDir, oldNamespace)
+	require.NoError(t, original.db.BlockCreate(testBlock(1, 0x22), nil))
+	originalBlobs := readBlobContents(t, original.db)
+	original.close(t)
+
+	snapshotDir, _ := makeCloudRestoreSnapshot(t, 0x99)
+	targetDir := filepath.Join(t.TempDir(), "target")
+	host := newRemoteRestoreHostWithBlobName(
+		t, remoteDir, &remoteBlobRestoreControl{}, "s3", true,
+	)
+	_, recovery, err := lifecycle.RestoreRecoverable(
+		ctx,
+		host,
+		nil,
+		snapshotDir,
+		targetDir,
+		nil,
+		lifecycle.RestoreStorageConfig{ActiveDataDir: activeDir}, // restoreconfig:zero-value-required
+	)
+	require.NoError(t, err)
+	newNamespace, err := blob.ReadNamespace(targetDir)
+	require.NoError(t, err)
+	require.NoError(t, host.Stop(context.Background()))
+
+	recoveryHost := newRemoteRestoreHostWithBlobName(
+		t, remoteDir, &remoteBlobRestoreControl{}, "s3", true,
+	)
+	require.NoError(t, lifecycle.RecoverInterruptedRestore(
+		ctx,
+		recoveryHost,
+		recovery.BackupDir(),
+		activeDir,
+		lifecycle.RestoreStorageConfig{ActiveDataDir: activeDir}, // restoreconfig:zero-value-required
+		false,
+	))
+	require.Equal(t, originalBlobs, readRemoteBlobNamespace(t, remoteDir, oldNamespace))
+	require.Empty(t, readRemoteBlobNamespace(t, remoteDir, newNamespace))
+	restored := openRemoteTestDatabaseInNamespace(t, remoteDir, oldNamespace)
+	block, err := restored.db.BlockByIndex(1, nil)
+	require.NoError(t, err)
+	require.Equal(t, testBlock(1, 0x22).Hash, block.Hash)
+	restored.close(t)
+}
+
+func TestCloudRestoreRollbackReactivatesOriginalNamespace(t *testing.T) {
+	t.Parallel()
+
+	ctx := metadata.AllowResetOfPopulatedTarget(context.Background())
+	remoteDir := filepath.Join(t.TempDir(), "remote")
+	activeDir := filepath.Join(t.TempDir(), "active")
+	oldNamespace := strings.Repeat("3", 32)
+	require.NoError(t, blob.WriteNamespace(activeDir, oldNamespace))
+	original := openRemoteTestDatabaseInNamespace(t, remoteDir, oldNamespace)
+	require.NoError(t, original.db.BlockCreate(testBlock(1, 0x33), nil))
+	originalBlobs := readBlobContents(t, original.db)
+	original.close(t)
+
+	snapshotDir, _ := makeCloudRestoreSnapshot(t, 0xaa)
+	targetDir := filepath.Join(t.TempDir(), "target")
+	host := newRemoteRestoreHostWithBlobName(
+		t, remoteDir, &remoteBlobRestoreControl{}, "s3", true,
+	)
+	_, recovery, err := lifecycle.RestoreRecoverable(
+		ctx,
+		host,
+		nil,
+		snapshotDir,
+		targetDir,
+		nil,
+		lifecycle.RestoreStorageConfig{ActiveDataDir: activeDir}, // restoreconfig:zero-value-required
+	)
+	require.NoError(t, err)
+	require.NoError(t, recovery.Rollback(context.Background()))
+	restoredNamespace, err := blob.ReadNamespace(targetDir)
+	require.NoError(t, err)
+	require.Equal(t, oldNamespace, restoredNamespace)
+	require.Equal(t, originalBlobs, readRemoteBlobNamespace(t, remoteDir, restoredNamespace))
+	restored := openRemoteTestDatabaseInNamespace(t, remoteDir, restoredNamespace)
+	block, err := restored.db.BlockByIndex(1, nil)
+	require.NoError(t, err)
+	require.Equal(t, testBlock(1, 0x33).Hash, block.Hash)
+	restored.close(t)
+}
+
+func TestCloudRestoreRollbackRecreatesAbsentLegacyTarget(t *testing.T) {
+	t.Parallel()
+
+	ctx := metadata.AllowResetOfPopulatedTarget(context.Background())
+	remoteDir := filepath.Join(t.TempDir(), "remote")
+	activeDir := filepath.Join(t.TempDir(), "active")
+	require.NoError(t, os.MkdirAll(activeDir, 0o700))
+	original := openRemoteTestDatabase(t, remoteDir)
+	require.NoError(t, original.db.BlockCreate(testBlock(1, 0x44), nil))
+	originalBlobs := readBlobContents(t, original.db)
+	original.close(t)
+
+	snapshotDir, _ := makeCloudRestoreSnapshot(t, 0xbb)
+	targetDir := filepath.Join(t.TempDir(), "target")
+	host := newRemoteRestoreHostWithBlobName(
+		t, remoteDir, &remoteBlobRestoreControl{}, "s3", true,
+	)
+	_, recovery, err := lifecycle.RestoreRecoverable(
+		ctx,
+		host,
+		nil,
+		snapshotDir,
+		targetDir,
+		nil,
+		lifecycle.RestoreStorageConfig{ActiveDataDir: activeDir}, // restoreconfig:zero-value-required
+	)
+	require.NoError(t, err)
+	require.NoError(t, os.RemoveAll(targetDir))
+	require.NoError(t, recovery.Rollback(context.Background()))
+	require.DirExists(t, targetDir)
+	restoredNamespace, err := blob.ReadNamespace(targetDir)
+	require.NoError(t, err)
+	require.Empty(t, restoredNamespace)
+	require.Equal(t, originalBlobs, readRemoteBlobNamespace(t, remoteDir, ""))
+}
+
+func TestInterruptedRestoreRejectsOversizedRecoveryRecord(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(
+		filepath.Join(dir, "recovery.json"),
+		bytes.Repeat([]byte{'x'}, 4097),
+		0o600,
+	))
+	err := lifecycle.RecoverInterruptedRestore(
+		context.Background(),
+		plugin.NewHost(),
+		dir,
+		t.TempDir(),
+		lifecycle.RestoreStorageConfig{},
+		false,
+	)
+	require.ErrorContains(t, err, "exceeds 4096 bytes")
+}
+
+func TestInterruptedRestoreRemovesRecoveryWithoutRecord(t *testing.T) {
+	t.Parallel()
+	recoveryDir := filepath.Join(t.TempDir(), "recovery")
+	require.NoError(t, os.MkdirAll(recoveryDir, 0o700))
+	require.NoError(t, lifecycle.RecoverInterruptedRestore(
+		context.Background(),
+		plugin.NewHost(),
+		recoveryDir,
+		t.TempDir(),
+		lifecycle.RestoreStorageConfig{}, // restoreconfig:zero-value-required
+		true,
+	))
+	require.NoDirExists(t, recoveryDir)
 }
 
 func TestRestoreSuccessfulRemoteReplacementRemainsRecoverableUntilCommit(
@@ -1121,7 +1629,7 @@ func TestRestoreRejectsMismatchedTipBlockNumber(t *testing.T) {
 }
 
 // manifestOnlyCloudDestination implements CloudManifestFetcher but fails
-// UploadDir/DownloadDir outright -- used to prove a caller went through
+// UploadDir/DownloadFiles outright -- used to prove a caller went through
 // the lightweight FetchManifest path and never attempted a full
 // directory download at all, rather than merely happening to succeed
 // either way.
@@ -1138,12 +1646,13 @@ func (d *manifestOnlyCloudDestination) UploadDir(
 	)
 }
 
-func (d *manifestOnlyCloudDestination) DownloadDir(
+func (d *manifestOnlyCloudDestination) DownloadFiles(
 	context.Context,
 	string,
+	[]lifecycle.DownloadFile,
 ) error {
 	return errors.New(
-		"manifestOnlyCloudDestination: DownloadDir must never be called",
+		"manifestOnlyCloudDestination: DownloadFiles must never be called",
 	)
 }
 
@@ -1153,7 +1662,20 @@ func (d *manifestOnlyCloudDestination) FetchManifest(
 	return d.manifest, nil
 }
 
-var _ lifecycle.CloudManifestFetcher = &manifestOnlyCloudDestination{}
+func (d *manifestOnlyCloudDestination) FetchManifestWithOptions(
+	_ context.Context,
+	opts ...lifecycle.ManifestOption,
+) (lifecycle.Manifest, error) {
+	if err := d.manifest.Authenticate(opts...); err != nil {
+		return lifecycle.Manifest{}, err
+	}
+	return d.manifest, nil
+}
+
+var (
+	_ lifecycle.CloudManifestFetcher             = &manifestOnlyCloudDestination{}
+	_ lifecycle.ConfigurableCloudManifestFetcher = &manifestOnlyCloudDestination{}
+)
 
 // Registered directly on the package's shared testDestinationRegistry
 // (defined in destination_test.go) — package-level var initializers all
@@ -1181,24 +1703,39 @@ var manifestOnlyFixture = lifecycle.Manifest{
 // cloud snapshotDir whose destination type supports fetching just the
 // one manifest.json object via CloudManifestFetcher -- downloading the
 // (possibly very large) blob/metadata backups alongside it just to read
-// its manifest. This uses a destination whose UploadDir/DownloadDir both
+// its manifest. This uses a destination whose UploadDir/DownloadFiles both
 // fail outright, so this test only passes if PeekManifest actually took
-// the lightweight FetchCloudManifest path and never called DownloadDir
+// the lightweight FetchCloudManifest path and never called DownloadFiles
 // at all.
 func TestPeekManifestUsesLightweightCloudFetchWithoutDownloading(t *testing.T) {
 	t.Parallel()
+	dir := t.TempDir()
+	fixture := manifestOnlyFixture
+	require.NoError(t, lifecycle.WriteManifest(
+		dir, fixture, lifecycle.WithManifestKey(testTrustKey),
+	))
+	fixture, err := lifecycle.ReadManifest(dir)
+	require.NoError(t, err)
+	registry := lifecycle.NewDestinationRegistry()
+	registry.Register(
+		"faketest-manifestonly-authenticated",
+		func(*url.URL) (lifecycle.CloudDestination, error) {
+			return &manifestOnlyCloudDestination{manifest: fixture}, nil
+		},
+	)
 
 	m, err := lifecycle.PeekManifest(
 		context.Background(),
-		testDestinationRegistry,
-		"faketest-manifestonly://bucket/prefix",
+		registry,
+		"faketest-manifestonly-authenticated://bucket/prefix",
+		lifecycle.WithManifestKey(testTrustKey),
 	)
 	require.NoError(t, err)
-	require.Equal(t, manifestOnlyFixture, m)
+	require.Equal(t, fixture, m)
 }
 
 // noManifestFetcherCloudDestination forwards to a real fakeCloudDestination
-// for UploadDir/DownloadDir but deliberately does not embed it or expose a
+// for UploadDir/DownloadFiles but deliberately does not embed it or expose a
 // FetchManifest method of its own -- unlike this package's "faketest"
 // scheme, whose fakeCloudDestination DOES implement CloudManifestFetcher.
 // A test resolving a destination through THIS wrapper's scheme instead
@@ -1218,11 +1755,12 @@ func (d *noManifestFetcherCloudDestination) UploadDir(
 	return d.inner.UploadDir(ctx, localDir)
 }
 
-func (d *noManifestFetcherCloudDestination) DownloadDir(
+func (d *noManifestFetcherCloudDestination) DownloadFiles(
 	ctx context.Context,
 	localDir string,
+	files []lifecycle.DownloadFile,
 ) error {
-	return d.inner.DownloadDir(ctx, localDir)
+	return d.inner.DownloadFiles(ctx, localDir, files)
 }
 
 var _ lifecycle.CloudDestination = &noManifestFetcherCloudDestination{}
@@ -1283,12 +1821,14 @@ func TestPeekManifestFallsBackToDownloadWhenCloudDestinationLacksManifestFetcher
 		lifecycle.TriggerManual, "test-version", "badger", "sqlite",
 		"faketest-nomanifestfetcher://bucket/prefix",
 		"", "",
+		lifecycle.WithManifestKey(testTrustKey),
 	)
 	require.NoError(t, err)
 
 	peeked, err := lifecycle.PeekManifest(
 		context.Background(), testDestinationRegistry,
 		"faketest-nomanifestfetcher://bucket/prefix/snap-peek",
+		lifecycle.WithManifestKey(testTrustKey),
 	)
 	require.NoError(t, err)
 	require.Equal(t, m.CommitTimestamp, peeked.CommitTimestamp)

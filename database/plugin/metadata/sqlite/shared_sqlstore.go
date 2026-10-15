@@ -17,10 +17,12 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"math/big"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -35,12 +37,107 @@ import (
 	sqlite3 "modernc.org/sqlite/lib"
 )
 
+type uint64Sum struct {
+	total big.Int
+}
+
+func (s *uint64Sum) Step(
+	_ *driversqlite.FunctionContext,
+	args []driver.Value,
+) error {
+	value, ok := args[0].(string)
+	if !ok {
+		return fmt.Errorf("uint64 sum expects text, got %T", args[0])
+	}
+	var item big.Int
+	if _, ok := item.SetString(value, 10); !ok || item.Sign() < 0 || item.BitLen() > 64 {
+		return fmt.Errorf("invalid uint64 amount %q", value)
+	}
+	s.total.Add(&s.total, &item)
+	return nil
+}
+
+func (s *uint64Sum) WindowInverse(
+	_ *driversqlite.FunctionContext,
+	args []driver.Value,
+) error {
+	value, ok := args[0].(string)
+	if !ok {
+		return fmt.Errorf("uint64 sum expects text, got %T", args[0])
+	}
+	var item big.Int
+	if _, ok := item.SetString(value, 10); !ok {
+		return fmt.Errorf("invalid uint64 amount %q", value)
+	}
+	s.total.Sub(&s.total, &item)
+	return nil
+}
+
+func (s *uint64Sum) WindowValue(
+	_ *driversqlite.FunctionContext,
+) (driver.Value, error) {
+	if s.total.Sign() < 0 || s.total.BitLen() > 64 {
+		return nil, errors.New("asset holder quantity overflow")
+	}
+	value := s.total.String()
+	return strings.Repeat("0", 20-len(value)) + value, nil
+}
+
+func (*uint64Sum) Final(_ *driversqlite.FunctionContext) {}
+
+func init() {
+	driversqlite.MustRegisterFunction("dingo_uint64_sum", &driversqlite.FunctionImpl{
+		NArgs:         1,
+		Deterministic: true,
+		MakeAggregate: func(driversqlite.FunctionContext) (driversqlite.AggregateFunction, error) {
+			return &uint64Sum{}, nil
+		},
+	})
+}
+
 var sharedMemoryDBSequence atomic.Uint64
 
 const maxVacuumIntervalSeconds uint64 = uint64(
 	(1<<63 - 1) / int64(time.Second),
 )
 
+// openMaintenanceDB opens a single-connection pool that is neither writeDB nor
+// readDB, for work that must not occupy writeDB's sole connection. SQLite
+// tracks locks per database file rather than per database/sql connection, so
+// it still contends with the pools at the SQLite level.
+func openMaintenanceDB(
+	databaseURI string,
+	busyTimeout time.Duration,
+) (*sql.DB, error) {
+	db, err := sqlstore.OpenDB(
+		"sqlite",
+		fmt.Sprintf(
+			"%s?_pragma=busy_timeout(%d)",
+			databaseURI,
+			busyTimeout.Milliseconds(),
+		),
+		"sqlite",
+		false, // short-lived per-run connection; not worth tracing
+	)
+	if err != nil {
+		return nil, err
+	}
+	db.SetMaxOpenConns(1)
+	return db, nil
+}
+
+// vacuumChunkPages bounds how many free pages one incremental vacuum step
+// releases, and therefore how long that step holds SQLite's write lock.
+const vacuumChunkPages = 1000
+
+// sqliteVacuum returns the optional periodic space-reclaim callback.
+//
+// A full VACUUM rewrites the whole file under SQLite's database-wide write
+// lock, and no connection choice avoids that lock. Issued on any connection
+// outside writeDB, a ledger write waits in SQLite's busy handler and fails
+// with SQLITE_BUSY once its busy_timeout elapses, which ledger code does not
+// retry. The callback therefore runs on writeDB, where writers queue in Go
+// until it finishes or yields, and keeps each hold short: see vacuumWith.
 func sqliteVacuum(
 	writeDB *sql.DB,
 	intervalSeconds uint64,
@@ -55,9 +152,82 @@ func sqliteVacuum(
 		)
 	}
 	return func(ctx context.Context) error {
-		_, err := writeDB.ExecContext(ctx, "VACUUM")
-		return err
+		return vacuumWith(ctx, writeDB, vacuumChunkPages, nil)
 	}, time.Duration(intervalSeconds) * time.Second, nil // #nosec G115 -- bounded above by maxVacuumIntervalSeconds
+}
+
+// vacuumWith reclaims free pages in bounded steps. A database whose
+// auto_vacuum mode is not INCREMENTAL is converted first, which needs one
+// full VACUUM; after that each step releases at most chunkPages pages and
+// returns the write connection to the pool, so queued ledger writes run
+// between steps instead of waiting for the whole file to be rewritten.
+// afterChunk, when set, runs after each step with the connection released.
+func vacuumWith(
+	ctx context.Context,
+	writeDB *sql.DB,
+	chunkPages int,
+	afterChunk func(),
+) error {
+	const autoVacuumIncremental = 2
+	var mode int
+	if err := writeDB.QueryRowContext(
+		ctx,
+		"PRAGMA auto_vacuum",
+	).Scan(&mode); err != nil {
+		return fmt.Errorf("read auto_vacuum mode: %w", err)
+	}
+	if mode != autoVacuumIncremental {
+		conn, err := writeDB.Conn(ctx)
+		if err != nil {
+			return fmt.Errorf("acquire write connection: %w", err)
+		}
+		// The new mode only takes effect through the VACUUM that follows
+		// it, on the same connection.
+		_, err = conn.ExecContext(ctx, "PRAGMA auto_vacuum = INCREMENTAL")
+		if err == nil {
+			_, err = conn.ExecContext(ctx, "VACUUM")
+		}
+		closeErr := conn.Close()
+		if err != nil {
+			return errors.Join(
+				fmt.Errorf("convert to incremental auto_vacuum: %w", err),
+				closeErr,
+			)
+		}
+		if closeErr != nil {
+			return closeErr
+		}
+	}
+	previousFree := -1
+	for {
+		var free int
+		if err := writeDB.QueryRowContext(
+			ctx,
+			"PRAGMA freelist_count",
+		).Scan(&free); err != nil {
+			return fmt.Errorf("read freelist_count: %w", err)
+		}
+		if free == 0 {
+			return nil
+		}
+		if previousFree >= 0 && free >= previousFree {
+			return fmt.Errorf(
+				"incremental vacuum made no progress: freelist_count was %d and is now %d",
+				previousFree,
+				free,
+			)
+		}
+		previousFree = free
+		if _, err := writeDB.ExecContext(
+			ctx,
+			fmt.Sprintf("PRAGMA incremental_vacuum(%d)", chunkPages),
+		); err != nil {
+			return fmt.Errorf("incremental vacuum: %w", err)
+		}
+		if afterChunk != nil {
+			afterChunk()
+		}
+	}
 }
 
 // sqliteCommonPragmas is the DSN fragment applied to both the write and read
@@ -193,23 +363,13 @@ func checkpointWAL(
 	logger *slog.Logger,
 ) func(context.Context) error {
 	return func(ctx context.Context) error {
-		db, err := sqlstore.OpenDB(
-			"sqlite",
-			fmt.Sprintf(
-				"%s?_pragma=busy_timeout(%d)",
-				databaseURI,
-				checkpointBusyTimeout.Milliseconds(),
-			),
-			"sqlite",
-			false, // short-lived per-tick connection; not worth tracing
-		)
+		db, err := openMaintenanceDB(databaseURI, checkpointBusyTimeout)
 		if err != nil {
 			return fmt.Errorf("open WAL checkpoint connection: %w", err)
 		}
 		defer func() {
 			_ = db.Close()
 		}()
-		db.SetMaxOpenConns(1)
 
 		return checkpointWALWith(
 			ctx,
@@ -496,6 +656,7 @@ func openSQLStore(
 	}
 
 	store, err := sqlstore.New(sqlstore.Config{
+		GenesisStakingEmpty: dependencies.GenesisStakingEmpty,
 		SQLitePath:          databasePath,
 		WriteDB:             writeDB,
 		ReadDB:              readDB,
@@ -543,7 +704,8 @@ const sqliteDiskSizeQueryTimeout = 5 * time.Second
 // against writeDB or readDB. This mirrors checkpointWAL's own dedicated
 // connection above. An earlier version queried readDB directly: one gauge
 // read left a connection idled back into that shared pool indefinitely
-// (neither pool sets SetConnMaxIdleTime/SetConnMaxLifetime), confirmed by
+// (no idle timeout on either pool; the read pool's five-minute lifetime still
+// outlasts a gauge interval), confirmed by
 // inspecting readDB's own sql.DB.Stats().OpenConnections after a single
 // DiskSize() call (see TestDiskSizeDoesNotLeaveReadDBConnectionOpen). Against
 // live containers running the perf branch,

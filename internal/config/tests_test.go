@@ -15,6 +15,7 @@
 package config
 
 import (
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -585,6 +586,17 @@ func TestDefaultLoggingConfig(t *testing.T) {
 	}
 }
 
+func TestDefaultSnapshotMaxCommitPause(t *testing.T) {
+	t.Parallel()
+
+	defaults := newDefaultConfig()
+	require.Equal(
+		t,
+		defaultSnapshotMaxCommitPause,
+		defaults.DatabaseLifecycle.SnapshotMaxCommitPause,
+	)
+}
+
 func TestLoad_LoggingEnvVars(t *testing.T) {
 	resetGlobalConfig()
 	// Avoid picking up a real ~/.dingo/dingo.yaml on the dev machine.
@@ -631,6 +643,48 @@ func TestLoad_LoggingFromYAML(t *testing.T) {
 	if cfg.Logging.Level != "error" {
 		t.Errorf("Logging.Level = %q, want error", cfg.Logging.Level)
 	}
+}
+
+// Not t.Parallel: resets package-global config and controls process environment.
+func TestLoadLeiosPersistenceRetentionSlots(t *testing.T) {
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("DINGO_LEIOS_PERSISTENCE_RETENTION_SLOTS", "")
+	t.Setenv("CARDANO_DINGO_LEIOS_PERSISTENCE_RETENTION_SLOTS", "")
+	os.Unsetenv("DINGO_LEIOS_PERSISTENCE_RETENTION_SLOTS")
+	os.Unsetenv("CARDANO_DINGO_LEIOS_PERSISTENCE_RETENTION_SLOTS")
+
+	emptyConfig := filepath.Join(t.TempDir(), "empty.yaml")
+	require.NoError(t, os.WriteFile(emptyConfig, nil, 0o600))
+	defaults, err := LoadConfig(emptyConfig)
+	require.NoError(t, err)
+	assert.Zero(t, defaults.LeiosPersistenceRetentionSlots)
+
+	configFile := filepath.Join(t.TempDir(), "dingo.yaml")
+	require.NoError(t, os.WriteFile(configFile, []byte(
+		"leiosPersistenceRetentionSlots: 7200\n",
+	), 0o600))
+	t.Setenv("DINGO_LEIOS_PERSISTENCE_RETENTION_SLOTS", "3600")
+
+	fromEnv, err := LoadConfig(configFile)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(3600), fromEnv.LeiosPersistenceRetentionSlots)
+
+	t.Setenv("DINGO_LEIOS_PERSISTENCE_RETENTION_SLOTS", "")
+	t.Setenv("CARDANO_DINGO_LEIOS_PERSISTENCE_RETENTION_SLOTS", "")
+	os.Unsetenv("DINGO_LEIOS_PERSISTENCE_RETENTION_SLOTS")
+	os.Unsetenv("CARDANO_DINGO_LEIOS_PERSISTENCE_RETENTION_SLOTS")
+	fromYAML, err := LoadConfig(configFile)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(7200), fromYAML.LeiosPersistenceRetentionSlots)
+
+	cmd := &cobra.Command{Use: "dingo"}
+	RegisterFlags(cmd)
+	require.NoError(t, cmd.ParseFlags([]string{
+		"--leios-persistence-retention-slots=900",
+	}))
+	require.NoError(t, ApplyFlags(cmd, fromYAML))
+	assert.Equal(t, uint64(900), fromYAML.LeiosPersistenceRetentionSlots)
 }
 
 // defaultMithrilBackendAtInit captures the production default before
@@ -982,4 +1036,47 @@ func TestValidateAllowsUnambiguousNetworks(t *testing.T) {
 			require.NoError(t, cfg.Validate(RunModeServe))
 		})
 	}
+}
+
+func TestValidateTracingSampleRatio(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name    string
+		ratio   float64
+		wantErr bool
+	}{
+		{name: "zero", ratio: 0},
+		{name: "fraction", ratio: 0.25},
+		{name: "one", ratio: 1},
+		{name: "negative", ratio: -0.1, wantErr: true},
+		{name: "above one", ratio: 1.5, wantErr: true},
+		{name: "nan", ratio: math.NaN(), wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := newDefaultConfig()
+			cfg.DatabasePath = t.TempDir()
+			cfg.TracingSampleRatio = tc.ratio
+			err := cfg.Validate(RunModeServe)
+			if tc.wantErr {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "tracingSampleRatio")
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
+}
+
+func TestApplyDefaultsTracingEndpointEnablesTracing(t *testing.T) {
+	t.Parallel()
+
+	cfg := &Config{}
+	cfg.ApplyDefaults()
+	require.False(t, cfg.Tracing)
+
+	cfg = &Config{TracingEndpoint: "http://localhost:4318"}
+	cfg.ApplyDefaults()
+	require.True(t, cfg.Tracing)
 }

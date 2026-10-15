@@ -28,7 +28,6 @@ import (
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
-	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/pipeline"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/blinklabs-io/ouroboros-mock/fixtures"
@@ -36,14 +35,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// productionValidateVerifyConfig mirrors the generic header-crypto portion of
+// productionValidateVerifyConfig is the generic header-crypto portion of
 // NewLedgerState's pipeline wiring. Dingo adds OpCert KES-period expiry after
 // the generic VRF/KES/OpCert-signature stage succeeds.
-var productionValidateVerifyConfig = lcommon.VerifyConfig{
-	SkipBodyHashValidation:    true,
-	SkipTransactionValidation: true,
-	SkipStakePoolValidation:   true,
-}
+var productionValidateVerifyConfig = blockPipelineVerifyConfig()
 
 func TestNewLedgerStateRejectsPipelineValidationWithoutKesConfig(
 	t *testing.T,
@@ -65,6 +60,30 @@ func TestNewLedgerStateRejectsPipelineValidationWithoutKesConfig(
 	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "slotsPerKESPeriod")
+}
+
+func TestByronBlockBodyValidationErrorClassification(t *testing.T) {
+	t.Parallel()
+
+	for _, blockType := range []uint{
+		gledger.BlockTypeByronMain,
+		gledger.BlockTypeByronEbb,
+	} {
+		require.True(
+			t,
+			isByronBlockBodyValidationError(
+				blockType,
+				byron.ErrMalformedBodyProof,
+			),
+		)
+	}
+	require.False(
+		t,
+		isByronBlockBodyValidationError(
+			gledger.BlockTypeConway,
+			byron.ErrMalformedBodyProof,
+		),
+	)
 }
 
 // buildValidatedTestModelsBlock wraps testutil.BuildValidatedConwayBlockBytes
@@ -865,7 +884,7 @@ func TestDecodeReadChainBatchSkipsCryptoForAdmissionVerifiedBlock(
 	t.Run("admission verified is skipped", func(t *testing.T) {
 		t.Parallel()
 		ls := newAdmissionSkipTestLedger(t, vb, false)
-		ls.markAdmissionVerified(point)
+		ls.markAdmissionVerified(point, ls.loadConsensusSnapshot().generation)
 
 		decoded, ok := ls.decodeReadChainBatch(
 			t.Context(), []models.Block{block},
@@ -889,11 +908,28 @@ func TestDecodeReadChainBatchSkipsCryptoForAdmissionVerifiedBlock(
 			"block without an admission record must be verified",
 		)
 	})
+	t.Run("stale admission verdict is verified", func(t *testing.T) {
+		t.Parallel()
+		ls := newAdmissionSkipTestLedger(t, vb, false)
+		ls.markAdmissionVerified(
+			point,
+			ls.loadConsensusSnapshot().generation,
+		)
+		ls.publishSnapshotsLocked()
+
+		_, ok := ls.decodeReadChainBatch(t.Context(), []models.Block{block})
+		assert.False(
+			t,
+			ok,
+			"a verdict from an older ledger generation must not skip verification",
+		)
+	})
 	t.Run("same slot different hash is verified", func(t *testing.T) {
 		t.Parallel()
 		ls := newAdmissionSkipTestLedger(t, vb, false)
 		ls.markAdmissionVerified(
 			ocommon.NewPoint(block.Slot, bytes.Repeat([]byte{0xAB}, 32)),
+			ls.loadConsensusSnapshot().generation,
 		)
 
 		_, ok := ls.decodeReadChainBatch(t.Context(), []models.Block{block})
@@ -910,6 +946,7 @@ func TestDecodeReadChainBatchSkipsCryptoForAdmissionVerifiedBlock(
 			ls := newAdmissionSkipTestLedger(t, vb, true)
 			ls.markAdmissionVerified(
 				ocommon.NewPoint(block.Slot, bytes.Repeat([]byte{0xAB}, 32)),
+				ls.loadConsensusSnapshot().generation,
 			)
 
 			decoded, ok := ls.decodeReadChainBatch(
@@ -931,7 +968,10 @@ func TestAdmissionVerifiedSetIsBounded(t *testing.T) {
 	ls := &LedgerState{maxAdmissionVerified: limit}
 	ls.publishSnapshotsLocked()
 	for slot := uint64(10); slot < 10+limit+3; slot++ {
-		ls.markAdmissionVerified(ocommon.NewPoint(slot, []byte{byte(slot)}))
+		ls.markAdmissionVerified(
+			ocommon.NewPoint(slot, []byte{byte(slot)}),
+			ls.loadConsensusSnapshot().generation,
+		)
 	}
 	ls.admissionVerifiedMu.Lock()
 	assert.Len(t, ls.admissionVerified, limit)
@@ -940,7 +980,7 @@ func TestAdmissionVerifiedSetIsBounded(t *testing.T) {
 	ls.currentTip.Point.Slot = 100
 	ls.publishSnapshotsLocked()
 	late := ocommon.NewPoint(200, []byte{0xCC})
-	ls.markAdmissionVerified(late)
+	ls.markAdmissionVerified(late, ls.loadConsensusSnapshot().generation)
 	assert.True(t, ls.consumeAdmissionVerified(late))
 }
 
@@ -963,7 +1003,10 @@ func TestBlockPipelineEta0ProviderSkipsAdmissionVerifiedSlot(t *testing.T) {
 		},
 	}
 	ls.publishSnapshotsLocked()
-	ls.markAdmissionVerified(ocommon.NewPoint(1000, []byte{0x01}))
+	ls.markAdmissionVerified(
+		ocommon.NewPoint(1000, []byte{0x01}),
+		ls.loadConsensusSnapshot().generation,
+	)
 
 	_, err := ls.blockPipelineEta0Provider(1000)
 	require.ErrorIs(t, err, errBlockPipelineAdmissionVerified)

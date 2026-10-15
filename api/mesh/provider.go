@@ -43,17 +43,16 @@ func providerDefaults() ProviderConfig {
 }
 
 type ProviderDependencies struct {
-	Logger              *slog.Logger
-	LedgerState         MeshLedgerState
-	Database            MeshDatabase
-	Chain               MeshChain
-	Mempool             MeshMempool
-	Host                string
-	Network             string
-	NetworkMagic        uint32
-	GenesisHash         string
-	GenesisStartTimeSec int64
-	CORSAllowedOrigins  []string
+	Logger             *slog.Logger
+	LedgerState        MeshLedgerState
+	Database           MeshDatabase
+	Chain              MeshChain
+	Mempool            MeshMempool
+	Host               string
+	Network            string
+	NetworkMagic       uint32
+	GenesisHash        string
+	CORSAllowedOrigins []string
 }
 
 func RegisterProvider(host *plugin.Host) error {
@@ -78,7 +77,7 @@ func RegisterProvider(host *plugin.Host) error {
 					strconv.FormatUint(uint64(cfg.Port), 10),
 				),
 				Network: deps.Network, NetworkMagic: deps.NetworkMagic,
-				GenesisHash: deps.GenesisHash, GenesisStartTimeSec: deps.GenesisStartTimeSec,
+				GenesisHash:        deps.GenesisHash,
 				CORSAllowedOrigins: deps.CORSAllowedOrigins,
 				TLS:                tls,
 			})

@@ -15,14 +15,140 @@
 package lifecycle
 
 import (
+	"bytes"
 	"context"
+	"errors"
+	"io"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
+
+type credentialEchoDestination struct{ message string }
+
+type credentialBearingProviderError struct {
+	message string
+	cause   error
+}
+
+func (e *credentialBearingProviderError) Error() string { return e.message }
+func (e *credentialBearingProviderError) Unwrap() error { return e.cause }
+
+func (d credentialEchoDestination) UploadDir(context.Context, string) error {
+	return errors.New(d.message)
+}
+func (d credentialEchoDestination) DownloadFiles(context.Context, string, []DownloadFile) error {
+	return errors.New(d.message)
+}
+func (d credentialEchoDestination) ListSnapshots(context.Context, ...ManifestOption) ([]SnapshotEntry, error) {
+	return nil, errors.New(d.message)
+}
+func (d credentialEchoDestination) FetchManifest(context.Context) (Manifest, error) {
+	return Manifest{}, errors.New(d.message)
+}
+func (d credentialEchoDestination) Delete(context.Context) error {
+	return errors.New(d.message)
+}
+
+func TestCloudDestinationDisplayAndErrorsHideCredentials(t *testing.T) {
+	t.Parallel()
+	const raw = "leaky://user:secret@bucket/prefix?token=private#fragment"
+	require.Equal(t, "leaky://bucket/prefix", CloudDestinationDisplay(raw))
+	assertSafe := func(err error) {
+		t.Helper()
+		require.Error(t, err)
+		for _, secret := range []string{"user", "secret", "private", "fragment"} {
+			require.NotContains(t, err.Error(), secret)
+		}
+	}
+
+	factoryRegistry := NewDestinationRegistry()
+	factoryRegistry.Register("leaky", func(uri *url.URL) (CloudDestination, error) {
+		return nil, errors.New(uri.String())
+	})
+	_, err := ParseCloudDestination(factoryRegistry, raw)
+	assertSafe(err)
+	encodedFragmentRegistry := NewDestinationRegistry()
+	encodedFragmentRegistry.Register("encoded", func(uri *url.URL) (CloudDestination, error) {
+		return nil, errors.New(uri.EscapedFragment())
+	})
+	_, err = ParseCloudDestination(
+		encodedFragmentRegistry,
+		"encoded://bucket/prefix#encoded%2Fsecret",
+	)
+	require.Error(t, err)
+	require.NotContains(t, err.Error(), "encoded%2Fsecret")
+	require.NotContains(t, err.Error(), "encoded/secret")
+	require.NotContains(t, err.Error(), "secret")
+
+	registry := NewDestinationRegistry()
+	registry.Register("leaky", func(uri *url.URL) (CloudDestination, error) {
+		return credentialEchoDestination{message: uri.String()}, nil
+	})
+	_, _, err = ListCloudSnapshots(t.Context(), registry, raw)
+	assertSafe(err)
+	_, _, err = FetchCloudManifest(t.Context(), registry, raw)
+	assertSafe(err)
+	_, err = DeleteCloudSnapshot(t.Context(), registry, raw)
+	assertSafe(err)
+	_, cleanup, err := downloadCloudFiles(
+		t.Context(), registry, raw, "",
+		[]DownloadFile{{Name: ManifestFileName, MaxBytes: MaxManifestBytes}},
+	)
+	if cleanup != nil {
+		cleanup()
+	}
+	assertSafe(err)
+	_, err = parseCloudDestinationURL("%zz-secret")
+	assertSafe(err)
+}
+
+func TestSanitizedCloudErrorDoesNotExposeProviderError(t *testing.T) {
+	t.Parallel()
+	const raw = "leaky://user:secret@bucket/prefix?token=private#fragment"
+	providerSentinel := errors.New("provider sentinel")
+	providerErr := &credentialBearingProviderError{
+		message: raw,
+		cause:   errors.Join(providerSentinel, context.Canceled),
+	}
+	err := sanitizeCloudError(raw, providerErr)
+	require.Error(t, err)
+	require.NotContains(t, err.Error(), "user")
+	require.NotContains(t, err.Error(), "secret")
+	require.NotContains(t, err.Error(), "private")
+	require.NotContains(t, err.Error(), "fragment")
+	require.Nil(t, errors.Unwrap(err))
+	var recovered *credentialBearingProviderError
+	require.False(t, errors.As(err, &recovered))
+	require.Nil(t, recovered)
+	require.ErrorIs(t, err, providerSentinel)
+	require.ErrorIs(t, err, context.Canceled)
+}
+
+func TestCloudDestinationIdentityDistinguishesProviderVisibleComponents(t *testing.T) {
+	t.Parallel()
+	base := "s3://user:secret@bucket/prefix?region=us-east-1#one"
+	got, err := cloudDestinationIdentity(base)
+	require.NoError(t, err)
+	require.True(t, strings.HasPrefix(got, "v1:sha256:"))
+	require.NotContains(t, got, "user")
+	require.NotContains(t, got, "secret")
+	for _, distinct := range []string{
+		"s3://other:secret@bucket/prefix?region=us-east-1#one",
+		"s3://user:secret@bucket/prefix?region=us-west-2#one",
+		"s3://user:secret@bucket/prefix?region=us-east-1#two",
+		"s3://user:secret@bucket/other?region=us-east-1#one",
+	} {
+		identity, err := cloudDestinationIdentity(distinct)
+		require.NoError(t, err)
+		require.NotEqual(t, got, identity, distinct)
+	}
+}
 
 // TestOrderEntriesManifestLastSortsManifestToEnd guards against a real
 // invariant: a snapshot's manifest.json must never upload before every
@@ -104,13 +230,42 @@ func TestJoinCloudURIPreservesQueryAndFragment(t *testing.T) {
 	require.Equal(t, "s3://bucket/prefix/abc123", got)
 }
 
+func TestFetchCloudSnapshotEntryRejectsUnsafeIDBeforeFetch(t *testing.T) {
+	t.Parallel()
+	for _, id := range []string{"", ".", "..", "../escape", `..\escape`, "a/b"} {
+		fetches := 0
+		_, err := fetchCloudSnapshotEntry(
+			t.Context(), id,
+			func(context.Context, string) (Manifest, error) {
+				fetches++
+				return Manifest{}, nil
+			},
+		)
+		require.Error(t, err, id)
+		require.Zero(t, fetches, "unsafe ID %q reached manifest fetch", id)
+	}
+
+	fetches := 0
+	entry, err := fetchCloudSnapshotEntry(
+		t.Context(), "safe-id",
+		func(_ context.Context, id string) (Manifest, error) {
+			fetches++
+			require.Equal(t, "safe-id", id)
+			return Manifest{CreatedAt: time.Unix(1, 0)}, nil
+		},
+	)
+	require.NoError(t, err)
+	require.Equal(t, 1, fetches)
+	require.Equal(t, "safe-id", entry.ID)
+}
+
 // TestParseCloudDestinationCleansNoncanonicalPath guards against a real
 // bug: destination_s3.go/destination_gcs.go derive their upload prefix
 // from the parsed URI's Path via path.Join (which cleans it), but their
 // list/download/delete prefix matching compares against that same Path
 // left uncleaned — so a URI with repeated slashes or "."/".." segments
 // would make UploadDir write under one (cleaned) key while
-// ListSnapshots/DownloadDir/Delete search under a different, uncleaned
+// ListSnapshots/DownloadFiles/Delete search under a different, uncleaned
 // prefix, even though both derive from the exact same configured
 // destination string. ParseCloudDestination must canonicalize u.Path
 // before ever handing it to a registered factory.
@@ -155,9 +310,10 @@ func (*fakeInternalCloudDestination) UploadDir(
 	return nil
 }
 
-func (*fakeInternalCloudDestination) DownloadDir(
+func (*fakeInternalCloudDestination) DownloadFiles(
 	context.Context,
 	string,
+	[]DownloadFile,
 ) error {
 	return nil
 }
@@ -179,4 +335,59 @@ func TestDestinationRegistryRegisterNilReceiverIsNoOp(t *testing.T) {
 			return nil, nil
 		})
 	})
+}
+
+type boundaryFailureReader struct {
+	data    *bytes.Reader
+	failure error
+}
+
+func (r boundaryFailureReader) Read(p []byte) (int, error) {
+	if r.data.Len() == 0 {
+		return 0, r.failure
+	}
+	return r.data.Read(p)
+}
+
+func TestCopyBoundedPropagatesBoundaryReadFailure(t *testing.T) {
+	t.Parallel()
+	failure := errors.New("transfer failed")
+	err := copyBounded(io.Discard, boundaryFailureReader{bytes.NewReader([]byte("abc")), failure}, 3, "payload")
+	require.ErrorIs(t, err, failure)
+}
+
+func TestWriteBoundedFilePreservesExistingOutput(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "payload")
+	require.NoError(t, os.WriteFile(path, []byte("original"), 0o600))
+	require.Error(t, writeBoundedFile(path, bytes.NewReader([]byte("oversized")), DownloadFile{Name: "payload", MaxBytes: 1}))
+	got, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.Equal(t, "original", string(got))
+}
+
+func TestFetchLocalPayloadsUsesIndependentBoundedCopies(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	for _, name := range []string{BlobBackupFileName, MetadataBackupFileName} {
+		require.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte("original"), 0o600))
+	}
+	copied, cleanup, err := fetchPayloads(context.Background(), nil, dir, t.TempDir(), Manifest{BlobBytes: 8, MetadataBytes: 8})
+	require.NoError(t, err)
+	t.Cleanup(cleanup)
+	require.NotEqual(t, dir, copied)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, BlobBackupFileName), []byte("replaced"), 0o600))
+	got, err := os.ReadFile(filepath.Join(copied, BlobBackupFileName))
+	require.NoError(t, err)
+	require.Equal(t, "original", string(got))
+}
+
+func TestHashFileContextRejectsCancellation(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "payload")
+	require.NoError(t, os.WriteFile(path, []byte("payload"), 0o600))
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, _, err := hashFileContext(ctx, path)
+	require.ErrorIs(t, err, context.Canceled)
 }

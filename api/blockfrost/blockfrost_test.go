@@ -24,6 +24,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -33,7 +34,6 @@ import (
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
-	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	bfgo "github.com/blockfrost/blockfrost-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -977,6 +977,7 @@ type mockNode struct {
 	transaction                   TransactionInfo
 	transactionSubmitHash         string
 	transactionEvaluation         TransactionEvaluationResponse
+	transactionEvaluationCtx      context.Context
 	transactionEvaluateCbor       []byte
 	transactionCBOR               []byte
 	transactionMetadata           []TransactionMetadataInfo
@@ -1002,7 +1003,8 @@ type mockNode struct {
 	accountUTXOs                  []AccountUTXOInfo
 	accountWithdrawals            []AccountWithdrawalInfo
 	accountTransactions           []AccountTransactionInfo
-	lastAccountTransactionsParams AccountTransactionsParams
+	lastAccountTransactionsParams TransactionRangeParams
+	lastAddressTransactionsParams TransactionRangeParams
 	chainTipErr                   error
 	blockErr                      error
 	blockByIDErr                  error
@@ -1111,10 +1113,24 @@ func (m *mockNode) Genesis() (
 	return m.genesis, m.genesisErr
 }
 
-func (m *mockNode) PoolsExtended() (
-	[]PoolExtendedInfo, error,
+func (m *mockNode) PoolsExtended(
+	_ context.Context,
+	params PaginationParams,
+) (
+	[]PoolExtendedInfo, int, error,
 ) {
-	return m.pools, m.poolsErr
+	pools := slices.Clone(m.pools)
+	slices.SortFunc(pools, func(a, b PoolExtendedInfo) int {
+		return strings.Compare(a.Hex, b.Hex)
+	})
+	if params.Order == PaginationOrderDesc {
+		slices.Reverse(pools)
+	}
+	offset, ok := paginationOffset(params)
+	if !ok || offset >= len(pools) {
+		return []PoolExtendedInfo{}, len(pools), m.poolsErr
+	}
+	return pools[offset:min(offset+params.Count, len(pools))], len(pools), m.poolsErr
 }
 
 func (m *mockNode) PoolsList(ctx context.Context,
@@ -1125,6 +1141,7 @@ func (m *mockNode) PoolsList(ctx context.Context,
 }
 
 func (m *mockNode) PoolsRetiring(
+	_ context.Context,
 	_ PaginationParams,
 ) ([]PoolRetiringInfo, int, error) {
 	return m.poolsRetiring, m.poolsRetiringTotal, m.poolsRetiringErr
@@ -1150,6 +1167,7 @@ func (m *mockNode) Asset(
 }
 
 func (m *mockNode) AssetAddresses(
+	_ context.Context,
 	policyID string,
 	assetName []byte,
 	params PaginationParams,
@@ -1168,6 +1186,7 @@ func (m *mockNode) DRep(
 }
 
 func (m *mockNode) DReps(
+	_ context.Context,
 	params DRepListParams,
 ) ([]DRepListItemInfo, int, error) {
 	m.drepListParams = params
@@ -1188,9 +1207,11 @@ func (m *mockNode) AddressUTXOs(ctx context.Context,
 }
 
 func (m *mockNode) AddressTransactions(
+	_ context.Context,
 	_ string,
-	_ PaginationParams,
+	params TransactionRangeParams,
 ) ([]AddressTransactionInfo, int, error) {
+	m.lastAddressTransactionsParams = params
 	return m.addressTransactions, m.addressTxsTotal, m.addressTransactionsErr
 }
 
@@ -1215,14 +1236,17 @@ func (m *mockNode) Transaction(
 }
 
 func (m *mockNode) TransactionSubmit(
+	_ context.Context,
 	_ []byte,
 ) (string, error) {
 	return m.transactionSubmitHash, m.transactionSubmitErr
 }
 
 func (m *mockNode) TransactionEvaluate(
+	ctx context.Context,
 	txCbor []byte,
 ) (TransactionEvaluationResponse, error) {
+	m.transactionEvaluationCtx = ctx
 	m.transactionEvaluateCbor = txCbor
 	return m.transactionEvaluation, m.transactionEvaluationErr
 }
@@ -1424,7 +1448,7 @@ func (m *mockNode) AccountWithdrawals(ctx context.Context,
 
 func (m *mockNode) AccountTransactions(ctx context.Context,
 	_ string,
-	params AccountTransactionsParams,
+	params TransactionRangeParams,
 ) ([]AccountTransactionInfo, int, error) {
 	m.lastAccountTransactionsParams = params
 	rows, total := mockPage(
@@ -1978,48 +2002,6 @@ func TestHandleAssetAddressesNoHolders(t *testing.T) {
 	assert.Equal(t, "The requested asset could not be found.", resp.Message)
 }
 
-func TestAssetHoldersFromUtxosPreservesPointerAddress(t *testing.T) {
-	t.Parallel()
-
-	paymentHash := bytes.Repeat([]byte{0xab}, lcommon.AddressHashSize)
-	policyID := bytes.Repeat([]byte{0xcd}, lcommon.AddressHashSize)
-	assetName := []byte("TOKEN")
-	addrBytes := []byte{
-		(lcommon.AddressTypeKeyPointer << 4) |
-			lcommon.AddressNetworkTestnet,
-	}
-	addrBytes = append(addrBytes, paymentHash...)
-	addrBytes = append(addrBytes, 0x01, 0x00, 0x00)
-	addr, err := lcommon.NewAddressFromBytes(addrBytes)
-	require.NoError(t, err)
-
-	output := shelley.ShelleyTransactionOutput{
-		OutputAddress: addr,
-		OutputAmount:  1_000_000,
-	}
-	outputCbor, err := cbor.Encode(&output)
-	require.NoError(t, err)
-	holders, err := assetHoldersFromUtxos(
-		policyID,
-		assetName,
-		[]models.Utxo{{
-			TxId:      bytes.Repeat([]byte{0x01}, 32),
-			OutputIdx: 0,
-			Cbor:      outputCbor,
-			Assets: []models.Asset{{
-				PolicyId: policyID,
-				Name:     assetName,
-				Amount:   types.Uint64(7),
-			}},
-		}},
-		PaginationParams{Count: 100, Page: 1, Order: "asc"},
-	)
-	require.NoError(t, err)
-	require.Len(t, holders, 1)
-	assert.Equal(t, addr.String(), holders[0].Address)
-	assert.Equal(t, "7", holders[0].Quantity)
-}
-
 func TestHandlePoolsRetiring(t *testing.T) {
 	t.Parallel()
 
@@ -2445,7 +2427,7 @@ INSERT INTO drep (
 		require.NoError(t, err)
 	}
 
-	items, total, err := adapter.DReps(DRepListParams{
+	items, total, err := adapter.DReps(context.Background(), DRepListParams{
 		Pagination: PaginationParams{
 			Count: 100,
 			Page:  1,
@@ -4822,4 +4804,51 @@ func TestHandleMetadataTransactionsInvalidLabel(t *testing.T) {
 	err := json.NewDecoder(w.Body).Decode(&resp)
 	require.NoError(t, err)
 	assert.Equal(t, "Invalid metadata label.", resp.Message)
+}
+
+func TestHandleAddressTransactionsRange(t *testing.T) {
+	t.Parallel()
+
+	mock := &mockNode{}
+	b := newTestBlockfrost(mock)
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/v0/addresses/a/transactions?from=100:2&to=200",
+		nil,
+	)
+	req.SetPathValue("address", "a")
+	w := httptest.NewRecorder()
+	b.handleAddressTransactions(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	got := mock.lastAddressTransactionsParams
+	require.NotNil(t, got.From)
+	require.NotNil(t, got.To)
+	assert.EqualValues(t, 100, got.From.Block)
+	require.NotNil(t, got.From.Index)
+	assert.EqualValues(t, 2, *got.From.Index)
+	assert.EqualValues(t, 200, got.To.Block)
+	assert.Nil(t, got.To.Index)
+}
+
+func TestHandleAddressTransactionsRangeRejectsBadBounds(t *testing.T) {
+	t.Parallel()
+
+	for _, query := range []string{
+		"from=abc", "to=1:x", "from=5&to=4", "from=5:3&to=5:2",
+	} {
+		t.Run(query, func(t *testing.T) {
+			t.Parallel()
+			b := newTestBlockfrost(&mockNode{})
+			req := httptest.NewRequest(
+				http.MethodGet,
+				"/api/v0/addresses/a/transactions?"+query,
+				nil,
+			)
+			req.SetPathValue("address", "a")
+			w := httptest.NewRecorder()
+			b.handleAddressTransactions(w, req)
+			assert.Equal(t, http.StatusBadRequest, w.Code)
+		})
+	}
 }

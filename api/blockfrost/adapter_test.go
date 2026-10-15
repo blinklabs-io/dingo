@@ -24,6 +24,7 @@ import (
 	"log/slog"
 	"math"
 	"math/big"
+	"slices"
 	"strconv"
 	"testing"
 
@@ -38,6 +39,7 @@ import (
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	"github.com/blinklabs-io/plutigo/data"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -328,6 +330,66 @@ func TestNodeAdapterAddressUTXOsAssetsSurviveRefFetch(t *testing.T) {
 		items[0].Amount[1].Unit,
 	)
 	assert.Equal(t, "9", items[0].Amount[1].Quantity)
+}
+
+func seedAssetHolderRows(
+	t *testing.T,
+	raw *sql.DB,
+	policyID []byte,
+	assetName []byte,
+	addresses []string,
+) {
+	t.Helper()
+	txn, err := raw.Begin()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = txn.Rollback() })
+	for i := range addresses {
+		txID := make([]byte, 32)
+		binary.BigEndian.PutUint64(txID[24:], uint64(i+1))
+		result, err := txn.Exec(`
+INSERT INTO utxo (tx_id, added_slot, deleted_slot, amount, output_idx, payment_script)
+VALUES (?, 1, 0, '1', 0, FALSE)`, txID)
+		require.NoError(t, err)
+		utxoID, err := result.LastInsertId()
+		require.NoError(t, err)
+		_, err = txn.Exec(
+			`INSERT INTO utxo_address (utxo_id, address) VALUES (?, ?)`,
+			utxoID, []byte(addresses[i]),
+		)
+		require.NoError(t, err)
+		_, err = txn.Exec(`
+INSERT INTO asset (name, policy_id, utxo_id, amount) VALUES (?, ?, ?, '7')`,
+			assetName, policyID, utxoID,
+		)
+		require.NoError(t, err)
+	}
+	require.NoError(t, txn.Commit())
+}
+
+func TestNodeAdapterAssetAddressesPagesInMetadata(t *testing.T) {
+	t.Parallel()
+	adapter, raw, _ := newDBBackedAdapter(t)
+	policyID := bytes.Repeat([]byte{0xcd}, lcommon.AddressHashSize)
+	assetName := []byte("TOKEN")
+	addresses := make([]string, 257)
+	for i := range addresses {
+		payment := make([]byte, lcommon.AddressHashSize)
+		binary.BigEndian.PutUint64(payment[20:], uint64(i+1))
+		addr := testPointerAddress(t, payment, byte(i%128))
+		addresses[i] = addr.String()
+	}
+	seedAssetHolderRows(t, raw, policyID, assetName, addresses)
+	slices.Sort(addresses)
+
+	holders, total, err := adapter.AssetAddresses(
+		context.Background(), hex.EncodeToString(policyID), assetName,
+		PaginationParams{Count: 2, Page: 2, Order: PaginationOrderAsc},
+	)
+	require.NoError(t, err)
+	require.Equal(t, len(addresses), total)
+	require.Len(t, holders, 2)
+	assert.Equal(t, addresses[2], holders[0].Address)
+	assert.Equal(t, addresses[3], holders[1].Address)
 }
 
 // newDBBackedAdapter builds a NodeAdapter over a real, in-package LedgerState
@@ -817,6 +879,124 @@ func TestNodeAdapterNextBlockHash(t *testing.T) {
 	assert.Nil(t, next)
 }
 
+func TestResolveBlockRangeUpperBoundInSparseChain(t *testing.T) {
+	t.Parallel()
+	adapter, _, db := newDBBackedAdapter(t)
+	for _, block := range []struct{ height, slot uint64 }{{1, 10}, {3, 30}} {
+		require.NoError(t, db.BlockCreate(models.Block{
+			Hash: fill32(byte(block.height)), Slot: block.slot,
+			Number: block.height, ID: block.height + database.BlockInitialIndex,
+			Type: 0, Cbor: []byte{byte(block.height)},
+		}, nil))
+	}
+	require.NoError(t, db.SetTip(ochainsync.Tip{BlockNumber: 3}, nil))
+
+	bound, ok, err := adapter.resolveBlockRangeBound(
+		context.Background(), &BlockRangePosition{Block: 2}, false,
+	)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.NotNil(t, bound)
+	require.Equal(t, uint64(10), bound.Slot)
+	require.Equal(t, uint32(math.MaxUint32), bound.TxIndex)
+
+	bound, ok, err = adapter.resolveBlockRangeBound(
+		context.Background(), &BlockRangePosition{Block: 0}, false,
+	)
+	require.NoError(t, err)
+	require.False(t, ok)
+	require.Nil(t, bound)
+}
+
+func TestAddressTransactionsApplyResolvedBoundsToCountAndPage(t *testing.T) {
+	t.Parallel()
+
+	nodeConfig, err := cardano.NewCardanoNodeConfigFromEmbedFS(
+		cardano.EmbeddedConfigFS,
+		cardano.EmbeddedConfigPath("mainnet"),
+	)
+	require.NoError(t, err)
+	adapter, raw, db := newDBBackedAdapter(t, nodeConfig)
+	payment := bytes.Repeat([]byte{0x31}, lcommon.AddressHashSize)
+	addr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyNone,
+		lcommon.AddressNetworkTestnet,
+		payment,
+		nil,
+	)
+	require.NoError(t, err)
+
+	blocks := []struct {
+		height uint64
+		slot   uint64
+		hash   []byte
+		txHash []byte
+	}{
+		{height: 1, slot: 10, hash: fill32(0x41), txHash: fill32(0x51)},
+		{height: 3, slot: 30, hash: fill32(0x43), txHash: fill32(0x53)},
+	}
+	for i, block := range blocks {
+		require.NoError(t, db.BlockCreate(models.Block{
+			Hash: block.hash, Slot: block.slot, Number: block.height,
+			ID:   block.height + database.BlockInitialIndex,
+			Type: 0, Cbor: []byte{byte(block.height)},
+		}, nil))
+		// The association row below supplies the chain slot used for range
+		// filtering; slot zero keeps unrelated time conversion at genesis.
+		tx := &models.Transaction{
+			Hash: block.txHash, BlockHash: block.hash, Slot: 0,
+			BlockIndex: 0, Valid: true,
+			Outputs: []models.Utxo{{
+				TxId: block.txHash, OutputIdx: 0, PaymentKey: payment,
+				AddedSlot: block.slot, Amount: types.Uint64(1_000_000),
+			}},
+		}
+		insertAdapterTransaction(t, raw, tx)
+		storePointerOutputCbor(t, db, block.txHash, 0, addr, 1_000_000)
+		_, err := raw.Exec(`
+INSERT INTO address_transaction (
+    payment_key, staking_key, credential_tag, transaction_id, slot, tx_index
+) VALUES (?, NULL, 0, ?, ?, 0)`, payment, tx.ID, block.slot)
+		require.NoError(t, err)
+		if i == len(blocks)-1 {
+			require.NoError(t, db.SetTip(
+				ochainsync.Tip{BlockNumber: block.height}, nil,
+			))
+		}
+	}
+
+	rows, total, err := adapter.AddressTransactions(
+		context.Background(),
+		addr.String(),
+		TransactionRangeParams{
+			Pagination: PaginationParams{
+				Count: 10, Page: 1, Order: PaginationOrderAsc,
+			},
+			From: &BlockRangePosition{Block: 1},
+			To:   &BlockRangePosition{Block: 2},
+		},
+	)
+	require.NoError(t, err)
+	assert.Equal(t, 1, total)
+	require.Len(t, rows, 1)
+	assert.Equal(t, hex.EncodeToString(blocks[0].txHash), rows[0].TxHash)
+	assert.Equal(t, uint64(1), rows[0].BlockHeight)
+
+	rows, total, err = adapter.AddressTransactions(
+		context.Background(),
+		addr.String(),
+		TransactionRangeParams{
+			Pagination: PaginationParams{
+				Count: 10, Page: 1, Order: PaginationOrderAsc,
+			},
+			To: &BlockRangePosition{Block: 999},
+		},
+	)
+	require.NoError(t, err)
+	assert.Equal(t, 2, total)
+	require.Len(t, rows, 2)
+}
+
 // TestNodeAdapterPoolMetadataOffchainStoreError guards the error path at the
 // PoolMetadata boundary: a failing off-chain metadata store query must
 // propagate as an error rather than degrade into a successful URL/hash-only
@@ -1093,6 +1273,8 @@ func TestBlockfrostAdaptersHonorCancelledContext(t *testing.T) {
 	require.ErrorIs(t, err, context.Canceled)
 	_, _, err = adapter.AccountWithdrawals(ctx, stakeAddr, PaginationParams{})
 	require.ErrorIs(t, err, context.Canceled)
-	_, _, err = adapter.AccountTransactions(ctx, stakeAddr, AccountTransactionsParams{})
+	_, _, err = adapter.AccountTransactions(ctx, stakeAddr, TransactionRangeParams{})
+	require.ErrorIs(t, err, context.Canceled)
+	_, _, err = adapter.AddressTransactions(ctx, stakeAddr, TransactionRangeParams{})
 	require.ErrorIs(t, err, context.Canceled)
 }

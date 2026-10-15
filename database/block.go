@@ -17,9 +17,11 @@ package database
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -95,7 +97,7 @@ func BlockByHashStats() (hits, misses uint64) {
 func (d *Database) BlockCreate(block models.Block, txn *Txn) error {
 	owned := false
 	if txn == nil {
-		txn = d.BlobTxn(true)
+		txn = d.BlockBlobTxn()
 		owned = true
 		defer txn.Rollback() //nolint:errcheck
 	}
@@ -106,6 +108,14 @@ func (d *Database) BlockCreate(block models.Block, txn *Txn) error {
 	blob := txn.BlobStore()
 	if blob == nil {
 		return types.ErrBlobStoreUnavailable
+	}
+	if err := txn.holdBlockInventory(); err != nil {
+		return err
+	}
+	blockKey := types.BlockBlobKey(block.Slot, block.Hash)
+	retained, err := retainedBlockExists(blob, blobTxn, blockKey)
+	if err != nil {
+		return err
 	}
 	// Set index if not provided
 	if block.ID == 0 {
@@ -122,6 +132,11 @@ func (d *Database) BlockCreate(block models.Block, txn *Txn) error {
 	// Use the new SetBlock method
 	if err := blob.SetBlock(blobTxn, block.Slot, block.Hash, block.Cbor, block.ID, block.Type, block.Number, block.PrevHash); err != nil {
 		return err
+	}
+	if !retained {
+		if err := addRetainedBlock(blob, txn, block.Slot, block.Hash); err != nil {
+			return err
+		}
 	}
 	if owned {
 		if err := txn.Commit(); err != nil {
@@ -144,7 +159,7 @@ func (d *Database) SetGenesisCbor(
 ) error {
 	owned := false
 	if txn == nil {
-		txn = d.BlobTxn(true)
+		txn = d.BlockBlobTxn()
 		owned = true
 		defer txn.Rollback() //nolint:errcheck
 	}
@@ -156,9 +171,16 @@ func (d *Database) SetGenesisCbor(
 	if blob == nil {
 		return types.ErrBlobStoreUnavailable
 	}
+	if err := txn.holdBlockInventory(); err != nil {
+		return err
+	}
 	// Store CBOR data at the block key (allows GetBlock to find it)
 	// but don't create an index entry (prevents chain iterator from finding it)
 	key := types.BlockBlobKey(slot, hash)
+	retained, err := retainedBlockExists(blob, blobTxn, key)
+	if err != nil {
+		return err
+	}
 	if err := blob.Set(blobTxn, key, cborData); err != nil {
 		return fmt.Errorf("SetGenesisCbor: failed to set block CBOR: %w", err)
 	}
@@ -180,6 +202,11 @@ func (d *Database) SetGenesisCbor(
 			err,
 		)
 	}
+	if !retained {
+		if err := addRetainedBlock(blob, txn, slot, hash); err != nil {
+			return err
+		}
+	}
 	if owned {
 		if err := txn.Commit(); err != nil {
 			return fmt.Errorf("SetGenesisCbor: failed to commit txn: %w", err)
@@ -195,31 +222,49 @@ func (d *Database) SetGenesisCbor(
 	return nil
 }
 
+func retainedBlockExists(
+	store blob.BlobStore,
+	txn types.Txn,
+	key []byte,
+) (bool, error) {
+	_, err := store.Get(txn, key)
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, types.ErrBlobKeyNotFound) ||
+		errors.Is(err, types.ErrHistoryExpired) {
+		return false, nil
+	}
+	return false, fmt.Errorf("check existing block for inventory: %w", err)
+}
+
 // HasGenesisCbor checks whether genesis CBOR data exists at the expected
 // blob key for the given slot and hash. This is used to validate that
 // existing chain data matches the current genesis configuration.
-func (d *Database) HasGenesisCbor(slot uint64, hash []byte) bool {
+func (d *Database) HasGenesisCbor(slot uint64, hash []byte) (bool, error) {
 	txn := d.BlobTxn(false)
 	defer txn.Rollback() //nolint:errcheck
 	blob := txn.BlobStore()
 	if blob == nil {
-		return false
+		return false, types.ErrBlobStoreUnavailable
 	}
 	key := types.BlockBlobKey(slot, hash)
 	_, err := blob.Get(txn.Blob(), key)
-	return err == nil
+	if errors.Is(err, types.ErrBlobKeyNotFound) {
+		return false, nil
+	}
+	return err == nil, err
 }
 
 // HasAnyGenesisCbor checks whether any genesis CBOR data exists at the
-// given slot, regardless of hash. This is used to distinguish between
-// "no genesis CBOR" (e.g., after Mithril bootstrap) and "genesis CBOR
-// exists but with a different hash" (true network mismatch).
-func (d *Database) HasAnyGenesisCbor(slot uint64) bool {
+// given slot, regardless of hash. Only ID-zero synthetic records qualify;
+// genuine Byron slot-zero blocks do not identify the configured genesis.
+func (d *Database) HasAnyGenesisCbor(slot uint64) (bool, error) {
 	txn := d.BlobTxn(false)
 	defer txn.Rollback() //nolint:errcheck
 	blob := txn.BlobStore()
 	if blob == nil {
-		return false
+		return false, types.ErrBlobStoreUnavailable
 	}
 	prefix := slices.Concat(
 		[]byte(types.BlockBlobKeyPrefix),
@@ -228,25 +273,31 @@ func (d *Database) HasAnyGenesisCbor(slot uint64) bool {
 	opts := types.BlobIteratorOptions{Prefix: prefix}
 	it := blob.NewIterator(txn.Blob(), opts)
 	if it == nil {
-		return false
+		return false, errors.New("genesis CBOR iterator unavailable")
 	}
 	defer it.Close()
 	for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
 		item := it.Item()
 		if item == nil {
-			continue
+			return false, errors.New("genesis CBOR iterator returned a nil item")
 		}
 		key := item.Key()
 		if key == nil {
-			continue
+			return false, errors.New("genesis CBOR iterator returned a nil key")
 		}
 		// Skip the metadata key
 		if strings.HasSuffix(string(key), types.BlockBlobMetadataKeySuffix) {
 			continue
 		}
-		return true
+		metadata, err := blockMetadataByKey(txn, key)
+		if err != nil {
+			return false, fmt.Errorf("reading genesis candidate: %w", err)
+		}
+		if metadata.ID == 0 {
+			return true, nil
+		}
 	}
-	return false
+	return false, it.Err()
 }
 
 func BlockDeleteTxn(txn *Txn, block models.Block) error {
@@ -261,8 +312,56 @@ func BlockDeleteTxn(txn *Txn, block models.Block) error {
 	if blob == nil {
 		return types.ErrBlobStoreUnavailable
 	}
-	// Use the new DeleteBlock method
-	return blob.DeleteBlock(blobTxn, block.Slot, block.Hash, block.ID)
+	if err := txn.holdBlockInventory(); err != nil {
+		return err
+	}
+	_, existingErr := blob.Get(blobTxn, types.BlockBlobKey(block.Slot, block.Hash))
+	retained := existingErr == nil
+	if existingErr != nil &&
+		!errors.Is(existingErr, types.ErrBlobKeyNotFound) &&
+		!errors.Is(existingErr, types.ErrHistoryExpired) {
+		return fmt.Errorf("check deleted block for inventory: %w", existingErr)
+	}
+	if err := blob.DeleteBlock(blobTxn, block.Slot, block.Hash, block.ID); err != nil {
+		return err
+	}
+	if retained {
+		return removeRetainedBlock(blob, txn, block.Slot, block.Hash)
+	}
+	return nil
+}
+
+// tombstoneBlockTxn expires retained block content and updates the maintained
+// block inventory in the same blob transaction.
+func (d *Database) tombstoneBlockTxn(
+	txn *Txn,
+	slot uint64,
+	hash []byte,
+) error {
+	if txn == nil || txn.Blob() == nil {
+		return types.ErrNilTxn
+	}
+	store := txn.BlobStore()
+	if store == nil {
+		return types.ErrBlobStoreUnavailable
+	}
+	if err := txn.holdBlockInventory(); err != nil {
+		return err
+	}
+	_, existingErr := store.Get(txn.Blob(), types.BlockBlobKey(slot, hash))
+	retained := existingErr == nil
+	if existingErr != nil &&
+		!errors.Is(existingErr, types.ErrBlobKeyNotFound) &&
+		!errors.Is(existingErr, types.ErrHistoryExpired) {
+		return fmt.Errorf("check tombstoned block for inventory: %w", existingErr)
+	}
+	if err := store.TombstoneBlock(txn.Blob(), slot, hash); err != nil {
+		return err
+	}
+	if retained {
+		return removeRetainedBlock(store, txn, slot, hash)
+	}
+	return nil
 }
 
 func BlockByPoint(
@@ -691,13 +790,10 @@ func BlockBySlot(
 // the highest block currently indexed.
 //
 // It is a value a caller resolves and carries, rather than something each
-// lookup rediscovers, because resolving it is the expensive half. Reading
-// the highest indexed block means a reverse iteration over the block-index
-// ("bi") prefix, and the s3 and gcs blob plugins implement a reverse
-// iterator by listing every object under the prefix into a temporary file
-// with no early break (listKeysToFile). One resolution is therefore a full
-// enumeration of every block-index object in the bucket. A caller resolving
-// more than one block number -- the bark archive service answers up to
+// lookup rediscovers, because resolving it is the expensive half: it takes
+// up to 64 probes into the block-index ("bi") prefix, each one a bounded
+// listing on the s3 and gcs blob plugins. A caller resolving more than one
+// block number -- the bark archive service answers up to
 // DefaultMaxFetchBlockRefs of them per unauthenticated request -- must
 // resolve the bound once and reuse it for the whole batch.
 type BlockNumberBound struct {
@@ -736,69 +832,63 @@ func ResolveBlockNumberBound(
 // ResolveBlockNumberBoundTxn resolves the bound within an existing
 // transaction. It reads only the ordered block-index entries and the small
 // per-block metadata object of the newest one, never block CBOR.
+//
+// The highest entry is found by bisecting the ID space with forward seeks
+// (blockIndexEntryAtOrAfterTxn) rather than by a reverse iteration: the s3
+// and gcs reverse iterators list the whole index prefix, so that read cost
+// grew with the archive, while a forward seek is one bounded listing. The
+// search narrows [lo, hi] around the highest ID, where lo is an ID known to
+// be indexed and nothing indexed lies above hi, so it ends after at most 64
+// probes for each candidate. Metadata is checked only at the highest candidate;
+// a stale tail candidate restarts the search below that ID.
 func ResolveBlockNumberBoundTxn(txn *Txn) (BlockNumberBound, error) {
 	if txn == nil {
 		return BlockNumberBound{}, types.ErrNilTxn
 	}
-	blobTxn := txn.Blob()
-	if blobTxn == nil {
-		return BlockNumberBound{}, types.ErrNilTxn
-	}
-	blob := txn.BlobStore()
-	if blob == nil {
-		return BlockNumberBound{}, types.ErrBlobStoreUnavailable
-	}
-	prefix := []byte(types.BlockBlobIndexKeyPrefix)
-	it := blob.NewIterator(blobTxn, types.BlobIteratorOptions{
-		Reverse: true,
-		Prefix:  prefix,
-	})
-	if it == nil {
-		return BlockNumberBound{}, errors.New("blob iterator is nil")
-	}
-	defer it.Close()
-	// 0xff sorts after any index key, so reverse iteration from it starts
-	// at the newest block. Same seek BlocksRecentTxn uses.
-	seek := append(slices.Clone(prefix), 0xff)
-	for it.Seek(seek); it.ValidForPrefix(prefix); it.Next() {
-		item := it.Item()
-		if item == nil {
-			continue
-		}
-		indexKey := item.Key()
-		if indexKey == nil {
-			continue
-		}
-		blockKey, err := item.ValueCopy(nil)
+	upper := uint64(math.MaxUint64)
+	for {
+		// Search raw index keys first. Checking liveness while seeking from
+		// zero walks every stale entry left below the retained history.
+		highest, err := blockIndexSeekTxn(txn, 0, false)
 		if err != nil {
-			return BlockNumberBound{}, err
-		}
-		metadata, err := blockMetadataByKey(txn, blockKey)
-		if err != nil {
-			// A stale index entry pointing at a block that is gone is
-			// skipped rather than fatal, so the bound and the forward
-			// search that uses it agree about which entries count.
 			if errors.Is(err, models.ErrBlockNotFound) {
-				continue
+				return BlockNumberBound{}, nil
 			}
 			return BlockNumberBound{}, err
 		}
-		// The index value is an indirection to the block blob, so a stale
-		// mapping can resolve to a block filed under a different ID. Only
-		// trust an entry whose block agrees with the index key.
-		if !bytes.Equal(indexKey, types.BlockBlobIndexKey(metadata.ID)) {
-			continue
+		if highest.id > upper {
+			return BlockNumberBound{}, nil
 		}
-		return BlockNumberBound{
-			HighestID:     metadata.ID,
-			HighestNumber: metadata.Height,
-			Resolved:      true,
-		}, nil
+		hi := upper
+		for highest.id < hi {
+			span := hi - highest.id
+			mid := highest.id + span/2 + span%2
+			entry, err := blockIndexSeekTxn(txn, mid, false)
+			if err != nil || entry.id > upper {
+				if err != nil && !errors.Is(err, models.ErrBlockNotFound) {
+					return BlockNumberBound{}, err
+				}
+				hi = mid - 1
+				continue
+			}
+			highest = entry
+		}
+		metadata, err := blockMetadataByKey(txn, highest.blockKey)
+		if err == nil && metadata.ID == highest.id {
+			return BlockNumberBound{
+				HighestID:     highest.id,
+				HighestNumber: metadata.Height,
+				Resolved:      true,
+			}, nil
+		}
+		if err != nil && !errors.Is(err, models.ErrBlockNotFound) {
+			return BlockNumberBound{}, err
+		}
+		if highest.id == 0 {
+			return BlockNumberBound{}, nil
+		}
+		upper = highest.id - 1
 	}
-	if err := it.Err(); err != nil {
-		return BlockNumberBound{}, err
-	}
-	return BlockNumberBound{}, nil
 }
 
 // BlockByNumber resolves the block carrying the given chain block number
@@ -947,6 +1037,10 @@ func blockIndexEntryAtOrAfterTxn(
 	txn *Txn,
 	blockIndex uint64,
 ) (blockIndexEntry, error) {
+	return blockIndexSeekTxn(txn, blockIndex, true)
+}
+
+func blockIndexSeekTxn(txn *Txn, blockIndex uint64, validate bool) (blockIndexEntry, error) {
 	blobTxn := txn.Blob()
 	if blobTxn == nil {
 		return blockIndexEntry{}, types.ErrNilTxn
@@ -979,6 +1073,12 @@ func blockIndexEntryAtOrAfterTxn(
 		blockKey, err := item.ValueCopy(nil)
 		if err != nil {
 			return blockIndexEntry{}, err
+		}
+		if !validate {
+			if len(indexKey) != len(prefix)+8 {
+				return blockIndexEntry{}, fmt.Errorf("invalid block index key: %x", indexKey)
+			}
+			return blockIndexEntry{id: binary.BigEndian.Uint64(indexKey[len(prefix):]), blockKey: blockKey}, nil
 		}
 		metadata, err := blockMetadataByKey(txn, blockKey)
 		if err != nil {
@@ -1381,6 +1481,68 @@ func (d *Database) BlockAtOrAfterIndex(
 	return models.Block{}, models.ErrBlockNotFound
 }
 
+// BlockAtOrBeforeIndex returns the last indexed block at or before blockIndex.
+// It binary-searches forward index seeks so object-store backends do not need
+// to enumerate the entire block index for a reverse seek.
+func (d *Database) BlockAtOrBeforeIndex(
+	ctx context.Context,
+	blockIndex uint64,
+	txn *Txn,
+) (models.Block, error) {
+	if txn == nil {
+		txn = d.Transaction(ctx, false)
+		defer txn.Rollback() //nolint:errcheck
+	}
+	if err := ctx.Err(); err != nil {
+		return models.Block{}, err
+	}
+	block, err := d.BlockByIndex(blockIndex, txn)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return models.Block{}, ctxErr
+	}
+	if err == nil {
+		return block, nil
+	}
+	if !errors.Is(err, models.ErrBlockNotFound) {
+		return models.Block{}, err
+	}
+
+	low := BlockInitialIndex
+	high := blockIndex
+	found := false
+	var previous models.Block
+	for low <= high {
+		if err := ctx.Err(); err != nil {
+			return models.Block{}, err
+		}
+		mid := low + (high-low)/2
+		candidate, err := d.BlockAtOrAfterIndex(mid, txn)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return models.Block{}, ctxErr
+		}
+		if err != nil && !errors.Is(err, models.ErrBlockNotFound) {
+			return models.Block{}, err
+		}
+		if err == nil && candidate.ID <= blockIndex {
+			previous = candidate
+			found = true
+			if candidate.ID == blockIndex {
+				return candidate, nil
+			}
+			low = mid + 1
+			continue
+		}
+		if mid == 0 {
+			break
+		}
+		high = mid - 1
+	}
+	if !found {
+		return models.Block{}, models.ErrBlockNotFound
+	}
+	return previous, nil
+}
+
 func BlocksRecent(
 	ctx context.Context,
 	db *Database,
@@ -1537,6 +1699,66 @@ func BlockBeforeSlotTxn(txn *Txn, slotNumber uint64) (models.Block, error) {
 	return models.Block{}, models.ErrBlockNotFound
 }
 
+// FirstBlockAtOrAfterSlot returns the lowest-slot ranking block whose slot is
+// at or above slotNumber, or models.ErrBlockNotFound when there is none.
+func FirstBlockAtOrAfterSlot(
+	ctx context.Context,
+	db *Database,
+	slotNumber uint64,
+) (models.Block, error) {
+	var ret models.Block
+	txn := db.Transaction(ctx, false)
+	err := txn.Do(func(txn *Txn) error {
+		blobTxn := txn.Blob()
+		if blobTxn == nil {
+			return types.ErrNilTxn
+		}
+		blob := txn.BlobStore()
+		if blob == nil {
+			return types.ErrBlobStoreUnavailable
+		}
+		it := blob.NewIterator(
+			blobTxn,
+			types.BlobIteratorOptions{Prefix: []byte(types.BlockBlobKeyPrefix)},
+		)
+		if it == nil {
+			return errors.New("blob iterator is nil")
+		}
+		defer it.Close()
+		seek := slices.Concat(
+			[]byte(types.BlockBlobKeyPrefix),
+			types.BlockBlobKeyUint64ToBytes(slotNumber),
+		)
+		for it.Seek(seek); it.ValidForPrefix([]byte(types.BlockBlobKeyPrefix)); it.Next() {
+			item := it.Item()
+			if item == nil {
+				continue
+			}
+			k := item.Key()
+			if k == nil ||
+				strings.HasSuffix(string(k), types.BlockBlobMetadataKeySuffix) {
+				continue
+			}
+			blk, err := blockByKey(txn, k)
+			if err != nil {
+				return err
+			}
+			// Synthetic blobs (genesis CBOR, Leios endorser blocks) carry
+			// ID 0 and are not ranking blocks; see BlockBeforeSlotTxn.
+			if blk.ID == 0 {
+				continue
+			}
+			ret = blk
+			return nil
+		}
+		if err := it.Err(); err != nil {
+			return err
+		}
+		return models.ErrBlockNotFound
+	})
+	return ret, err
+}
+
 // BlocksAfterSlotTxn returns all blocks after the specified slot; keep txn valid until results are consumed.
 func BlocksAfterSlotTxn(txn *Txn, slotNumber uint64) ([]models.Block, error) {
 	if txn == nil {
@@ -1595,92 +1817,12 @@ func BlocksAfterSlotTxn(txn *Txn, slotNumber uint64) ([]models.Block, error) {
 	return ret, nil
 }
 
-// CountBlocksAndOldestSlot iterates every block-content ("bp") key in the
-// blob store once, returning the total count of retained blocks and the
-// smallest slot among them. Block-content keys sort in ascending slot
-// order, so the oldest slot is simply whichever one is seen first — no
-// separate MIN pass is needed. A tombstoned entry (history-expiry pruned
-// its content, keeping only the bp key alive so hash/index lookups still
-// resolve — see TombstoneBlock) is excluded from both: its data isn't
-// actually retained, so counting it would misrepresent both how much
-// history is available and how far back it goes. The blob plugin's own
-// ValueCopy already turns a tombstoned entry's read into
-// types.ErrHistoryExpired (matching GetBlock's convention) rather than
-// handing back the raw marker bytes, so that error — not a hand-rolled
-// magic-byte check — is what this treats as "skip, don't count". Reading
-// each entry's value at all (to tell a tombstone from a real block) is
-// the dominant cost of this scan — negligible if history-expiry is
-// disabled (no block is ever tombstoned), non-trivial on a large chain
-// otherwise.
-//
-// There is no maintained counter for either value, so this is a genuine
-// full scan of the block-index keyspace: appropriate for an
-// operator-facing diagnostic (bark's GetDatabaseInfo RPC) called
-// occasionally, not a hot path.
+// CountBlocksAndOldestSlot returns the maintained count and oldest slot of
+// retained block content without walking the block keyspace.
 func (d *Database) CountBlocksAndOldestSlot(
 	txn *Txn,
 ) (count uint64, oldestSlot uint64, err error) {
-	owned := false
-	if txn == nil {
-		txn = d.BlobTxn(false)
-		owned = true
-		defer func() {
-			if owned {
-				txn.Rollback() //nolint:errcheck
-			}
-		}()
-	}
-	blobTxn := txn.Blob()
-	if blobTxn == nil {
-		return 0, 0, types.ErrNilTxn
-	}
-	blob := txn.BlobStore()
-	if blob == nil {
-		return 0, 0, types.ErrBlobStoreUnavailable
-	}
-
-	iterOpts := types.BlobIteratorOptions{
-		Prefix: []byte(types.BlockBlobKeyPrefix),
-	}
-	it := blob.NewIterator(blobTxn, iterOpts)
-	if it == nil {
-		return 0, 0, errors.New("blob iterator is nil")
-	}
-	defer it.Close()
-
-	first := true
-	for it.Seek([]byte(types.BlockBlobKeyPrefix)); it.ValidForPrefix([]byte(types.BlockBlobKeyPrefix)); it.Next() {
-		item := it.Item()
-		if item == nil {
-			continue
-		}
-		key := item.Key()
-		if key == nil ||
-			strings.HasSuffix(string(key), types.BlockBlobMetadataKeySuffix) {
-			continue
-		}
-		slot, _, parseErr := types.ParseBlockBlobKey(key)
-		if parseErr != nil {
-			continue
-		}
-		if _, valErr := item.ValueCopy(nil); valErr != nil {
-			if errors.Is(valErr, types.ErrHistoryExpired) {
-				continue
-			}
-			return count, oldestSlot, fmt.Errorf(
-				"read block content for count: %w", valErr,
-			)
-		}
-		count++
-		if first {
-			oldestSlot = slot
-			first = false
-		}
-	}
-	if err := it.Err(); err != nil {
-		return count, oldestSlot, err
-	}
-	return count, oldestSlot, nil
+	return d.blockInventory(txn)
 }
 
 // BlockBlobKeyToPoint extracts slot and hash from a block blob key.

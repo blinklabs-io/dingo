@@ -60,7 +60,7 @@ const defaultMaxChainsyncClients = chainsync.DefaultMaxClients
 // Mempool is the protocol-facing subset of the backend-neutral mempool. Keeping
 // this interface local prevents networking from depending on FIFO internals.
 type Mempool interface {
-	AddTransaction(txType uint, txBytes []byte) error
+	AddTransaction(ctx context.Context, txType uint, txBytes []byte) error
 	Transactions() []mempool.MempoolTransaction
 	CapacityBytes() int64
 	AddConsumer(connId ouroboros.ConnectionId) mempool.RelayConsumer
@@ -150,8 +150,10 @@ type Ouroboros struct {
 	// receive goroutine while the requester is still between that return and
 	// its blockFetchStarts insert. The insert consumes the marker instead of
 	// adding an entry that nothing would ever delete, since the request's
-	// one and only terminal callback has already run.
-	blockFetchDoneEarly map[blockFetchKey]struct{}
+	// one and only terminal callback has already run. The value is the
+	// terminal result, which the insert counts in
+	// dingo_blockfetch_requests_completed_total.
+	blockFetchDoneEarly map[blockFetchKey]error
 	blockFetchMutex     sync.Mutex
 	// blockfetchForward holds, per connection, the blockfetch events
 	// received but not yet published to the ledger; see
@@ -195,8 +197,8 @@ type Ouroboros struct {
 	// localstatequeryAcquireMutex.
 	localstatequeryRequests map[ouroboros.ConnectionId][]*localstatequeryRequest
 	// localstatequeryVerifyHook and localstatequeryVerifiedHook, when set,
-	// run just before Acquire verifies its point and just after the
-	// verified view opens. Tests use them to act at those exact moments.
+	// run just before Acquire or a reopen verifies its point and just after
+	// the verified view opens. Tests use them to act at those exact moments.
 	localstatequeryVerifyHook   func()
 	localstatequeryVerifiedHook func()
 	localstatequeryAcquireMutex sync.Mutex
@@ -213,8 +215,19 @@ type Ouroboros struct {
 	// any observed-tip, dedup, or ledger mutation. Resync timers recover the
 	// protocol cursor after a deliberate beyond-skew drop without recycling
 	// the connection; one earliest-onset timer is retained per connection.
-	chainsyncHeaderAdmission chainsyncHeaderAdmissionFunc
-	chainsyncHeaderSlotTime  func(uint64) (time.Time, error)
+	chainsyncHeaderBackpressure func(context.Context, int) error
+	chainsyncHeaderAdmission    chainsyncHeaderAdmissionFunc
+	chainsyncHeaderSlotTime     func(uint64) (time.Time, error)
+	// chainsyncLocalTipBlock returns the local tip's block number and the
+	// security parameter k. Tests override it without a LedgerState.
+	chainsyncLocalTipBlock func() (tipBlock, k uint64)
+	// chainsyncHasBestPeer reports whether chain selection currently has a
+	// best peer. Nil means none. Tests override it without a node.
+	chainsyncHasBestPeer func() bool
+	// behindTipRecycleAt is when a behind-local-tip recycle was last
+	// requested on any connection; see claimBehindTipRecycle.
+	behindTipRecycleMu sync.Mutex
+	behindTipRecycleAt time.Time
 	// chainSelectionShouldVerifyHeaderCrypto and chainSelectionVerifyHeaderCrypto
 	// gate whether a peer-reported header may influence Genesis chain-selection
 	// density or corroboration before its VRF/KES cryptography (and, once local
@@ -223,7 +236,7 @@ type Ouroboros struct {
 	// tests exercising a single protocol handler can override either seam
 	// directly instead of standing up a full LedgerState.
 	chainSelectionShouldVerifyHeaderCrypto func(slot uint64) bool
-	chainSelectionVerifyHeaderCrypto       func(header gledger.BlockHeader) error
+	chainSelectionVerifyHeaderCrypto       func(header gledger.BlockHeader) (uint64, error)
 	chainsyncScheduleAt                    chainsyncScheduleAtFunc
 	// chainsyncArrivalNow is an instance-local clock seam for deterministic
 	// arrival-order tests. Production instances use time.Now.
@@ -239,7 +252,12 @@ type Ouroboros struct {
 	// ChainSync serve merged RB+EB blocks without coupling the chain
 	// package to Leios prototype protocols.
 	leiosEndorserBlocks map[string]*leiosEndorserBlockData
-	leiosMu             sync.RWMutex
+	// leiosSelectedHeaders retains the exact selected announcing header while
+	// ledger apply waits for its independently fetched endorser body. It is
+	// keyed by occurrence and parent so overlapping validations cannot replace
+	// one another's authority.
+	leiosSelectedHeaders map[string]map[string]map[string]selectedLeiosHeader
+	leiosMu              sync.RWMutex
 	// leiosMaxVerifiedEbSlot is the highest slot for which an endorser block
 	// has been corroborated -- see publishLeiosEndorserBlock. It is proof that
 	// a ranking block exists at that slot, which the forge gate uses as a
@@ -283,20 +301,27 @@ type Ouroboros struct {
 	// serialized; running them off the leios-notify handler keeps a
 	// multi-second EB fetch from head-of-line blocking every later offer on
 	// the connection.
-	leiosFetchGuards sync.Map // ouroboros.ConnectionId → *leiosFetchGuard
-	// (slot, EB hash) occurrences with a transaction-offer fetch in progress,
-	// deduplicating that work across all connections (it is
-	// offered on every connection). Keyed by slot and hash together, not hash
-	// alone, so an in-flight fetch for one occurrence does not suppress a
-	// legitimate offer of the same content-addressed hash recurring at a
-	// different slot.
-	leiosFetchInProgress sync.Map // leiosBlockKey(point.Slot, point.Hash) → struct{}
+	leiosFetchGuards     sync.Map // ouroboros.ConnectionId → *leiosFetchGuard
+	leiosTxFetchClaimsMu sync.Mutex
+	leiosTxFetchClaims   map[string]*leiosTxFetchClaim
+	// leiosTxFetchAttemptTimeoutOverride shortens the fixed attempt budget in
+	// tests. Values above the production budget are ignored.
+	leiosTxFetchAttemptTimeoutOverride time.Duration
+	// leiosTxFetchBeforeLaunch is an instance-local test seam for the
+	// owner-selection to worker-launch cancellation boundary.
+	leiosTxFetchBeforeLaunch func()
 	// Manifest offers have their own claim: a pending manifest fetch must not
 	// suppress a transaction offer needed to complete the same occurrence.
 	leiosManifestFetchInProgress sync.Map // leiosBlockKey(point.Slot, point.Hash) → struct{}
 	// leiosFetchClaimPublished is an instance-local test seam used to hold a
-	// claimed offer before dispatch and expose admission ordering deterministically.
+	// claimed manifest before dispatch and expose admission ordering deterministically.
 	leiosFetchClaimPublished func()
+	// Exact-point peer provenance used by historical backfill. Entries share
+	// the endorser-block cache's retention horizon and are owner-bound so a
+	// replacement connection cannot inherit an earlier connection's offer.
+	leiosBackfillSourcesMu sync.Mutex
+	leiosBackfillSources   map[string]*leiosBackfillPointSources
+	leiosBackfillSourceSeq uint64
 
 	// Locally-forged EB broadcast log (cursors are owned by the log).
 	leiosEBLog *leiosForgedEBLog
@@ -340,11 +365,20 @@ type Ouroboros struct {
 	// elides the backfiller's duplicate manifest write, while two live
 	// occurrences of the same hash at different slots persist independently.
 	// Lazily started on first enqueue; stopped via StopLeiosPersistWriter.
-	leiosPersistOnce     sync.Once
-	leiosPersistStopOnce sync.Once
-	leiosPersistStarted  atomic.Bool
-	leiosPersistMu       sync.Mutex
-	leiosPersistPending  map[string]*leiosPersistJob
+	// leiosPersistLifecycleMu keeps each enqueue reservation, copy and signal
+	// in one writer generation while stop and reset hold the exclusive lock.
+	leiosPersistLifecycleMu sync.RWMutex
+	leiosPersistOnce        sync.Once
+	leiosPersistStopOnce    sync.Once
+	leiosPersistStarted     atomic.Bool
+	leiosPersistMu          sync.Mutex
+	leiosPersistClosed      bool // guarded by leiosPersistMu; permanent after Close
+	leiosPersistStoreMu     sync.Mutex
+	// leiosPersistPruneBeforeSlot is the active store's retention frontier.
+	// Writers hold leiosPersistStoreMu through SetLeiosEB; GC publishes its
+	// frontier under the same lock, then scans and prunes without holding it.
+	leiosPersistPruneBeforeSlot uint64
+	leiosPersistPending         map[string]*leiosPersistJob
 	// leiosPersistBytes is the aggregate reserved size of the queue: the sum
 	// of leiosPersistPending's job sizes plus every reservation whose payload
 	// copy is still in flight. leiosPersistReserved counts those in-flight
@@ -357,6 +391,15 @@ type Ouroboros struct {
 	leiosPersistStop     chan struct{}
 	leiosPersistDone     chan struct{}
 	leiosPersistDropped  atomic.Uint64
+	// The optional blob-store GC has its own worker so full prefix scans never
+	// stall persistence writes. It is paused with the writer before live storage
+	// replacement and restarted after the next persisted endorser block.
+	leiosPersistGCOnce     sync.Once
+	leiosPersistGCStopOnce sync.Once
+	leiosPersistGCStarted  atomic.Bool
+	leiosPersistGCMu       sync.Mutex
+	leiosPersistGCStop     chan struct{}
+	leiosPersistGCDone     chan struct{}
 	// leiosPersistAfterReserve, when non-nil, runs between the byte
 	// reservation and the payload copy. Tests use it to unwind or to stall
 	// inside that window, which allocation failure alone would reach only
@@ -410,6 +453,11 @@ type OuroborosConfig struct {
 	// keep inbound/public noise out of ledger ingress while still
 	// tracking peer tips separately for selection and observability.
 	ChainsyncIngressEligible func(ouroboros.ConnectionId) bool
+	// ChainsyncHasBestPeer reports whether chain selection currently has a
+	// selected best peer. It runs on the ChainSync callback goroutine for
+	// every roll-forward, so it must not wait on locks held across a call back
+	// into this package. When nil, no best peer is assumed.
+	ChainsyncHasBestPeer func() bool
 	// ChainsyncApplyEligible reports whether a peer's chainsync headers
 	// and rollbacks may be APPLIED to the ledger. It is a second gate,
 	// stricter than ChainsyncIngressEligible: a peer can be ingress-
@@ -419,15 +467,35 @@ type OuroborosConfig struct {
 	// is observed but cannot steer the ledger. When nil, every ingress-
 	// eligible peer is apply-eligible (no behavior change).
 	ChainsyncApplyEligible func(ouroboros.ConnectionId) bool
-	// ChainsyncObservePeerTip observes a peer tip update. It returns true if it
-	// handled the observation synchronously, in which case the caller MUST NOT
-	// also publish the async PeerTipUpdateEvent (avoids a double update). This
+	// ChainsyncAwaitEagerness blocks until a header numbered blockNumber from
+	// connId is within the Limit on Eagerness, and returns an error if ctx is
+	// cancelled first. The roll-forward callback blocks on it after the header's
+	// tip has been observed and before the header is handed to the ledger, so a
+	// peer running past the limit is paused rather than having headers dropped.
+	// appliedTip, when non-nil, reads the live applied ledger tip. When the
+	// hook is nil, no limit applies.
+	ChainsyncAwaitEagerness func(
+		ctx context.Context,
+		connId ouroboros.ConnectionId,
+		blockNumber uint64,
+		appliedTip func() ochainsync.Tip,
+	) error
+	// ChainsyncObservePeerTip observes a peer tip update and reports its
+	// disposition. A synchronously handled update MUST NOT also publish the async
+	// PeerTipUpdateEvent (avoids a double update). This
 	// lets the node update chain-selection state synchronously before the
-	// ChainsyncApplyEligible gate runs, so an apply decision reflects the header
-	// currently being admitted (closing the race where an async tip update that
-	// revokes corroboration is not yet processed). Returning false (or nil hook)
-	// falls back to the async PeerTipUpdateEvent path.
-	ChainsyncObservePeerTip func(chainselection.PeerTipUpdateEvent) bool
+	// ChainsyncApplyEligible gate and the ChainsyncAwaitEagerness wait run, so
+	// both reflect the header currently being admitted (closing the race where
+	// an async tip update that revokes corroboration, or that first registers
+	// the peer with the Limit on Eagerness, is not yet processed). Returning
+	// PeerTipUpdateUnhandled falls back to the async PeerTipUpdateEvent path.
+	// Pending far-tip claims advance the protocol cursor but remain withheld
+	// from ledger ingress. Rejected candidates terminate the protocol. A nil
+	// hook uses the async path.
+	ChainsyncObservePeerTip func(chainselection.PeerTipUpdateEvent) chainselection.PeerTipUpdateDisposition
+	// ChainsyncObserveAwaitReply records the peer's explicit protocol-idle
+	// frontier. It runs after gouroboros fences preceding pipelined updates.
+	ChainsyncObserveAwaitReply func(ouroboros.ConnectionId, ocommon.Point)
 	// ChainsyncSyncTarget snapshots the policy-bounded target for one observed
 	// peer-tip event. Its result is carried with that event into ledger
 	// admission; ledger must not reread mutable selector state.
@@ -444,6 +512,10 @@ type OuroborosConfig struct {
 	ChainsyncObservePeerRollback func(chainselection.PeerRollbackEvent) bool
 	// Enable experimental Leios protocol support
 	EnableLeios bool
+	// LeiosPersistenceRetentionSlots optionally prunes historical-serving
+	// Leios endorser-block records older than this many slots behind the
+	// highest persisted endorser block. Zero retains all history.
+	LeiosPersistenceRetentionSlots uint64
 	// LocalStateQueryViewMaxLifetime bounds how long a connection may hold
 	// one acquired LocalStateQuery ledger snapshot before it is forcibly
 	// closed. Values of 0 or below use the default of five minutes.
@@ -560,6 +632,19 @@ type blockfetchMetrics struct {
 	// forwardOverflows counts connections closed because their forward
 	// queue reached blockfetchForwardMaxBytes or blockfetchForwardMaxEvents.
 	forwardOverflows prometheus.Counter
+	// requestsIssued counts range requests accepted by a peer's blockfetch
+	// client, and requestsCompleted the terminal outcomes reported through
+	// RangeDoneFunc for those requests only, by result ("ok" or "error"), so
+	// completed never exceeds issued. Neither is labelled by
+	// connection: those series would grow without bound with reconnects.
+	// Together with lastRequestUnixNano they tell a node that is fetching
+	// from one that has headers queued and is not.
+	requestsIssued       prometheus.Counter
+	requestsCompletedOK  prometheus.Counter
+	requestsCompletedErr prometheus.Counter
+	// lastRequestUnixNano is when the most recent request was issued, or
+	// zero before the first. One atomic store per request.
+	lastRequestUnixNano atomic.Int64
 }
 
 // NewOuroboros builds a fully-wired Ouroboros. Every dependency is supplied up
@@ -579,6 +664,11 @@ type blockfetchMetrics struct {
 func NewOuroboros(cfg OuroborosConfig) (*Ouroboros, error) {
 	if err := cfg.validateDependencies(); err != nil {
 		return nil, err
+	}
+	maxClients := cfg.ChainsyncState.MaxClients()
+	admittedHeadroom := ledger.ChainsyncEventBufferSize + 1 + maxClients
+	if err := ledger.ValidateChainsyncHeaderCapacity(admittedHeadroom); err != nil {
+		return nil, fmt.Errorf("invalid chainsync capacity: %w", err)
 	}
 	return newOuroboros(cfg), nil
 }
@@ -615,7 +705,7 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 		chainsyncState:          cfg.ChainsyncState,
 		peerGov:                 cfg.PeerGov,
 		blockFetchStarts:        make(map[blockFetchKey]time.Time),
-		blockFetchDoneEarly:     make(map[blockFetchKey]struct{}),
+		blockFetchDoneEarly:     make(map[blockFetchKey]error),
 		localstatequeryAcquiredPoints: make(
 			map[ouroboros.ConnectionId]ledger.QueryPoint,
 		),
@@ -644,7 +734,11 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 		headerDecodeCache: newDecodeCacheWithByteLimit[gledger.BlockHeader](
 			headerDecodeCacheMaxBytes,
 		),
-		leiosEndorserBlocks: make(map[string]*leiosEndorserBlockData),
+		leiosEndorserBlocks:  make(map[string]*leiosEndorserBlockData),
+		leiosBackfillSources: make(map[string]*leiosBackfillPointSources),
+		leiosSelectedHeaders: make(
+			map[string]map[string]map[string]selectedLeiosHeader,
+		),
 		leiosClosureWaiters: make(map[string][]chan struct{}),
 		leiosServeWaiters: make(
 			map[ouroboros.ConnectionId][]leiosServeWaiter,
@@ -668,13 +762,19 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 		cfg.BlockfetchMaxRangesGlobal,
 	)
 	o.blockfetchConnClient = o.blockfetchConnClientLive
+	o.chainsyncHasBestPeer = cfg.ChainsyncHasBestPeer
 	o.blockfetchRangeBytes = func(ocommon.Point, ocommon.Point) uint64 { return 0 }
 	if o.ledgerState != nil {
 		o.blockfetchRangeBytes = o.ledgerState.BlockfetchRangeExpectedBytes
+		o.chainsyncHeaderBackpressure = o.ledgerState.AwaitChainsyncHeaderCapacity
 		o.chainsyncHeaderAdmission = o.ledgerState.AwaitChainsyncHeaderAdmission
 		o.chainsyncHeaderSlotTime = o.ledgerState.SlotToTime
+		o.chainsyncLocalTipBlock = func() (uint64, uint64) {
+			k := max(o.ledgerState.SecurityParam(), 0)
+			return o.ledgerState.Tip().BlockNumber, uint64(k)
+		}
 		o.chainSelectionShouldVerifyHeaderCrypto = o.ledgerState.ShouldVerifyChainSelectionHeaderCrypto
-		o.chainSelectionVerifyHeaderCrypto = o.ledgerState.ValidateChainSelectionHeaderCrypto
+		o.chainSelectionVerifyHeaderCrypto = o.ledgerState.ValidateChainSelectionHeaderCryptoWithGeneration
 	}
 	// Initialize per-peer TxSubmission rate limiter
 	txRate := cfg.MaxTxSubmissionsPerSecond
@@ -743,7 +843,7 @@ func (o *Ouroboros) initBlockfetchMetrics() {
 	o.blockfetchMetrics.stageDuration = promautoFactory.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name: "dingo_blockfetch_stage_duration_seconds",
-			Help: "wall-clock time spent in each blockfetch-owned stage of per-block processing, by stage: decode (CBOR-decoding one fetched block's raw bytes, on a decode-cache miss only)",
+			Help: "wall-clock time spent in each blockfetch-owned stage of per-block processing, by stage: decode (CBOR-decoding one fetched block's raw bytes, on a decode-cache miss only), enqueue (handing a received block or batch-done marker to the connection's forward queue) and ledger_publish (delivering it to the ledger). Observed only for events received through blockfetch, so it does not move while no range is being fetched",
 			// 100us to ~419s, matching
 			// dingo_ledger_block_stage_duration_seconds's bucket range (see
 			// its doc comment for why) so the two histograms stay
@@ -774,6 +874,36 @@ func (o *Ouroboros) initBlockfetchMetrics() {
 		prometheus.CounterOpts{
 			Name: "dingo_blockfetch_forward_overflow_total",
 			Help: "connections closed because their queue of blockfetch events awaiting the ledger reached its byte or event limit",
+		},
+	)
+	o.blockfetchMetrics.requestsIssued = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_blockfetch_requests_issued_total",
+			Help: "blockfetch range requests accepted by a peer's blockfetch client; flat while headers are queued means no new request is being accepted, though one already accepted may still be delivering (compare dingo_blockfetch_requests_completed_total)",
+		},
+	)
+	requestsCompleted := promautoFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "dingo_blockfetch_requests_completed_total",
+			Help: "blockfetch range requests counted in dingo_blockfetch_requests_issued_total that reached a terminal outcome, by result: ok, or error (NoBlocks or any transport or protocol failure); never exceeds the issued count",
+		},
+		[]string{"result"},
+	)
+	o.blockfetchMetrics.requestsCompletedOK = requestsCompleted.
+		WithLabelValues("ok")
+	o.blockfetchMetrics.requestsCompletedErr = requestsCompleted.
+		WithLabelValues("error")
+	promautoFactory.NewGaugeFunc(
+		prometheus.GaugeOpts{
+			Name: "dingo_blockfetch_last_request_timestamp_seconds",
+			Help: "unix time the most recent blockfetch range request was issued, or 0 when none has been issued since start",
+		},
+		func() float64 {
+			nanos := o.blockfetchMetrics.lastRequestUnixNano.Load()
+			if nanos == 0 {
+				return 0
+			}
+			return float64(nanos) / float64(time.Second)
 		},
 	)
 }
@@ -1107,8 +1237,13 @@ func (o *Ouroboros) HandleConnClosedEvent(evt event.Event) {
 	if o.leiosVotes != nil {
 		o.leiosVotes.RemoveConnection(leiosConnectionIdString(connId))
 	}
+	o.dropDeferredLeiosAnnouncements(leiosConnectionIdString(connId))
 	// Drop the per-connection leios-fetch guard. In-flight fetch goroutines
 	// hold their own reference, so they finish safely after this.
+	if guard, ok := o.leiosFetchGuards.Load(connId); ok {
+		guard.(*leiosFetchGuard).cancelPendingLeiosFetches()
+	}
+	o.cancelLeiosTxFetchWaiters(connId)
 	o.leiosFetchGuards.Delete(connId)
 }
 

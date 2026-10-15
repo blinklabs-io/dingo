@@ -62,7 +62,9 @@ type BlockfrostNode interface {
 
 	// PoolsExtended returns the current active pools with
 	// extended details.
-	PoolsExtended() ([]PoolExtendedInfo, error)
+	PoolsExtended(context.Context, PaginationParams) (
+		[]PoolExtendedInfo, int, error,
+	)
 
 	// PoolsList returns the paginated list of registered (active,
 	// non-retired) stake pool IDs, along with the total number of
@@ -76,7 +78,7 @@ type BlockfrostNode interface {
 	// PoolsRetiring returns the paginated list of pools with a
 	// pending retirement announcement, along with the total number
 	// of matching results before pagination.
-	PoolsRetiring(PaginationParams) ([]PoolRetiringInfo, int, error)
+	PoolsRetiring(context.Context, PaginationParams) ([]PoolRetiringInfo, int, error)
 
 	// PoolMetadata returns the registered metadata for a pool.
 	PoolMetadata(poolID string) (PoolMetadataInfo, error)
@@ -96,11 +98,13 @@ type BlockfrostNode interface {
 	) ([]AddressUTXOInfo, int, error)
 
 	// AddressTransactions returns the paginated transaction
-	// history for an address along with the total number of
-	// matching results before pagination.
+	// history for an address, optionally restricted to an
+	// inclusive from/to block-range position, along with the total
+	// number of matching results before pagination.
 	AddressTransactions(
+		ctx context.Context,
 		address string,
-		params PaginationParams,
+		params TransactionRangeParams,
 	) ([]AddressTransactionInfo, int, error)
 
 	// MetadataTransactions returns the paginated transactions
@@ -121,11 +125,11 @@ type BlockfrostNode interface {
 	Transaction(hash []byte) (TransactionInfo, error)
 
 	// TransactionSubmit submits raw signed transaction CBOR to the mempool.
-	TransactionSubmit(txCbor []byte) (string, error)
+	TransactionSubmit(ctx context.Context, txCbor []byte) (string, error)
 
 	// TransactionEvaluate evaluates script execution units for raw transaction
 	// CBOR without submitting the transaction.
-	TransactionEvaluate(txCbor []byte) (TransactionEvaluationResponse, error)
+	TransactionEvaluate(context.Context, []byte) (TransactionEvaluationResponse, error)
 
 	// TransactionCBOR returns raw signed transaction CBOR bytes.
 	TransactionCBOR(hash []byte) ([]byte, error)
@@ -177,6 +181,7 @@ type BlockfrostNode interface {
 	// AssetAddresses returns paginated addresses currently holding the given
 	// asset, along with the total holder count before pagination.
 	AssetAddresses(
+		ctx context.Context,
 		policyID string,
 		assetName []byte,
 		params PaginationParams,
@@ -188,7 +193,7 @@ type BlockfrostNode interface {
 
 	// DReps returns the paginated DRep list along with the total
 	// number of matching results before pagination.
-	DReps(DRepListParams) ([]DRepListItemInfo, int, error)
+	DReps(context.Context, DRepListParams) ([]DRepListItemInfo, int, error)
 
 	// Account returns stake-account information for the
 	// requested stake address.
@@ -242,7 +247,7 @@ type BlockfrostNode interface {
 	// inclusive from/to block-range position.
 	AccountTransactions(context.Context,
 		string,
-		AccountTransactionsParams,
+		TransactionRangeParams,
 	) ([]AccountTransactionInfo, int, error)
 }
 
@@ -889,7 +894,7 @@ type AccountWithdrawalInfo struct {
 	BlockHeight int64
 }
 
-// BlockRangePosition holds a parsed Blockfrost account-transactions
+// BlockRangePosition holds a parsed Blockfrost account or address transactions
 // from/to query value: a block number and an optional transaction
 // index within that block (the "block:index" form).
 type BlockRangePosition struct {
@@ -897,10 +902,10 @@ type BlockRangePosition struct {
 	Index *uint32
 }
 
-// AccountTransactionsParams holds query parameters for the account
-// transactions endpoint: standard pagination plus the optional
+// TransactionRangeParams holds query parameters for the account and
+// address transaction endpoints: standard pagination plus the optional
 // inclusive from/to block-range filter.
-type AccountTransactionsParams struct {
+type TransactionRangeParams struct {
 	Pagination PaginationParams
 	From       *BlockRangePosition
 	To         *BlockRangePosition

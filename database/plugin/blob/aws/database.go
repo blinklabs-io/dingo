@@ -19,17 +19,14 @@ package aws
 import (
 	"bytes"
 	"context"
-	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
-	"math"
 	"net/http"
 	"net/url"
 	"os"
-	"sort"
 	"strings"
 	"time"
 
@@ -40,6 +37,7 @@ import (
 	"github.com/aws/smithy-go"
 	smithyhttp "github.com/aws/smithy-go/transport/http"
 	"github.com/blinklabs-io/dingo/database/plugin/blob/internal/compensate"
+	"github.com/blinklabs-io/dingo/database/plugin/blob/internal/reversekey"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/blockverify"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -82,6 +80,14 @@ func readBlobBodyWithLimit(r io.Reader, maxBytes int64) ([]byte, error) {
 		)
 	}
 	return data, nil
+}
+
+func (d *BlobStoreS3) isNamespacedObject(key string) bool {
+	namespacePrefix := strings.TrimSuffix(d.prefix, "/")
+	if namespacePrefix != "" {
+		namespacePrefix += "/"
+	}
+	return strings.HasPrefix(key, namespacePrefix+".dingo-namespaces/")
 }
 
 // s3Txn stages S3 operations until commit. Commit applies the staged object
@@ -505,11 +511,12 @@ func (it *s3StreamIterator) advance(ctx context.Context) {
 			// with an out-of-range index on an empty page.
 			continue
 		}
-		objectKey := strings.TrimPrefix(
-			aws.ToString(it.page[it.pageIdx].Key),
-			it.store.prefix,
-		)
+		fullObjectKey := aws.ToString(it.page[it.pageIdx].Key)
 		it.pageIdx++
+		if it.store.isNamespacedObject(fullObjectKey) {
+			continue
+		}
+		objectKey := strings.TrimPrefix(fullObjectKey, it.store.prefix)
 		externalKey, err := hex.DecodeString(objectKey)
 		if err != nil {
 			it.err = fmt.Errorf("error decoding s3 key: %w", err)
@@ -580,7 +587,7 @@ func (it *s3StreamIterator) Err() error {
 type s3ReverseIterator struct {
 	store *BlobStoreS3
 	txn   types.Txn
-	keys  *reverseKeyFile
+	keys  *reversekey.File
 	key   string
 	valid bool
 	err   error
@@ -588,7 +595,7 @@ type s3ReverseIterator struct {
 
 func (it *s3ReverseIterator) advance() {
 	for {
-		key, valid, err := it.keys.nextReverse()
+		key, valid, err := it.keys.NextReverse()
 		if err != nil {
 			it.err = err
 			it.valid = false
@@ -604,8 +611,7 @@ func (it *s3ReverseIterator) advance() {
 }
 
 func (it *s3ReverseIterator) Rewind() {
-	it.keys.pos = 0
-	it.keys.initialized = false
+	it.keys.Reset()
 	it.valid = false
 	it.advance()
 }
@@ -635,11 +641,8 @@ func (it *s3ReverseIterator) Item() types.BlobItem {
 }
 
 func (it *s3ReverseIterator) Close() {
-	if it.keys != nil && it.keys.file != nil {
-		name := it.keys.file.Name()
-		_ = it.keys.file.Close()
-		_ = os.Remove(name)
-		it.keys.file = nil
+	if it.keys != nil {
+		it.keys.Close()
 	}
 	it.valid = false
 }
@@ -922,7 +925,14 @@ func (t *s3Txn) Commit() error {
 	for key := range t.pending {
 		keys = append(keys, key)
 	}
-	sort.Strings(keys)
+	// The expiry marker goes last so a reader never sees a block expired while
+	// data rewritten for that expiry is still pending.
+	keys = compensate.ApplyOrder(keys, func(key string) bool {
+		change := t.pending[key]
+		return !change.deleted &&
+			strings.HasPrefix(key, types.BlockBlobKeyPrefix) &&
+			types.IsBlockTombstone(change.value)
+	})
 
 	// Build the compensation log before applying anything. Existence is probed
 	// with HeadObject rather than a full GET, and a prior value is downloaded
@@ -991,7 +1001,7 @@ func (t *s3Txn) Commit() error {
 			undoCtx, undoCancel := t.store.opContext()
 			defer undoCancel()
 			undoErr := comp.Undo(
-				i,
+				i+1,
 				func(key string, value *io.SectionReader, size int64) error {
 					return t.store.putStream(undoCtx, key, value, size)
 				},
@@ -1196,7 +1206,7 @@ func isS3NotFound(err error) bool {
 
 func (d *BlobStoreS3) listKeysToFile(
 	opts types.BlobIteratorOptions,
-) (*reverseKeyFile, error) {
+) (*reversekey.File, error) {
 	file, err := os.CreateTemp("", "dingo-s3-iterator-")
 	if err != nil {
 		return nil, err
@@ -1224,87 +1234,23 @@ func (d *BlobStoreS3) listKeysToFile(
 			return nil, cleanup(err)
 		}
 		for _, obj := range page.Contents {
-			key := strings.TrimPrefix(aws.ToString(obj.Key), d.prefix)
+			fullObjectKey := aws.ToString(obj.Key)
+			if d.isNamespacedObject(fullObjectKey) {
+				continue
+			}
+			key := strings.TrimPrefix(fullObjectKey, d.prefix)
 			externalKey, err := hex.DecodeString(key)
 			if err != nil {
 				return nil, cleanup(
 					fmt.Errorf("error decoding s3 key: %w", err),
 				)
 			}
-			if err := writeReverseKey(file, string(externalKey)); err != nil {
+			if err := reversekey.Write(file, string(externalKey)); err != nil {
 				return nil, cleanup(err)
 			}
 		}
 	}
-	return &reverseKeyFile{file: file}, nil
-}
-
-type reverseKeyFile struct {
-	file        *os.File
-	pos         int64
-	initialized bool
-}
-
-func writeReverseKey(file *os.File, key string) error {
-	// len(key) is compared as int64 rather than directly against the
-	// untyped constant math.MaxUint32: on a 32-bit platform int is 32
-	// bits wide and that constant does not fit in it, so the naive
-	// comparison fails to compile.
-	if int64(len(key)) > math.MaxUint32 {
-		return fmt.Errorf("key length %d exceeds uint32 maximum", len(key))
-	}
-	length := make([]byte, 4)
-	// #nosec G115 -- length is bounds-checked against math.MaxUint32 above.
-	binary.BigEndian.PutUint32(length, uint32(len(key)))
-	if _, err := file.Write(length); err != nil {
-		return err
-	}
-	if _, err := file.WriteString(key); err != nil {
-		return err
-	}
-	_, err := file.Write(length)
-	return err
-}
-
-func (f *reverseKeyFile) nextReverse() (string, bool, error) {
-	if !f.initialized {
-		info, err := f.file.Stat()
-		if err != nil {
-			return "", false, err
-		}
-		f.pos = info.Size()
-		f.initialized = true
-	}
-	if f.pos == 0 {
-		return "", false, nil
-	}
-	// Every record has a four-byte prefix and matching trailer. Validate
-	// the frame before trusting its declared allocation size.
-	if f.pos < 8 {
-		return "", false, errors.New("truncated reverse key record")
-	}
-	trailer := make([]byte, 4)
-	if _, err := f.file.ReadAt(trailer, f.pos-4); err != nil {
-		return "", false, err
-	}
-	length := int64(binary.BigEndian.Uint32(trailer))
-	if length > f.pos-8 || length > math.MaxInt {
-		return "", false, errors.New("invalid reverse key record length")
-	}
-	start := f.pos - 8 - length
-	prefix := make([]byte, 4)
-	if _, err := f.file.ReadAt(prefix, start); err != nil {
-		return "", false, err
-	}
-	if int64(binary.BigEndian.Uint32(prefix)) != length {
-		return "", false, errors.New("reverse key record lengths do not match")
-	}
-	key := make([]byte, length)
-	if _, err := f.file.ReadAt(key, start+4); err != nil {
-		return "", false, err
-	}
-	f.pos = start
-	return string(key), true, nil
+	return reversekey.New(file), nil
 }
 
 func (d *BlobStoreS3) init() error {

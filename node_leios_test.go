@@ -282,11 +282,15 @@ func testLeiosPParamRat() cbor.Rat {
 func TestLeiosCommitteeParamsFromPParamsRejectsMissingValues(t *testing.T) {
 	t.Parallel()
 
-	_, _, err := leiosCommitteeParamsFromPParams(&gdijkstra.DijkstraProtocolParameters{})
+	_, _, err := leiosCommitteeParamsFromPParams(
+		&gdijkstra.DijkstraProtocolParameters{},
+	)
 	require.ErrorContains(t, err, "committee size")
-	_, _, err = leiosCommitteeParamsFromPParams(&gdijkstra.DijkstraProtocolParameters{
-		LeiosCommitteeSize: 900,
-	})
+	_, _, err = leiosCommitteeParamsFromPParams(
+		&gdijkstra.DijkstraProtocolParameters{
+			LeiosCommitteeSize: 900,
+		},
+	)
 	require.ErrorContains(t, err, "quorum stake threshold is missing")
 }
 
@@ -508,7 +512,7 @@ func TestEnableLeiosVotingRetriesFailedImmediateReplay(t *testing.T) {
 	defer eventBus.Unsubscribe(leios.VoteEmittedEventType, subID)
 	ebHash := lcommon.NewBlake2b256([]byte("startup-replay-eb"))
 	rbHash := lcommon.NewBlake2b256([]byte("startup-replay-rb"))
-	voteManager.HandleEndorserBlock(501, ebHash)
+	voteManager.HandleValidatedEndorserBlock(501, rbHash, ebHash)
 	voteManager.ObserveAnnouncement(501, rbHash, ebHash)
 
 	n := &Node{
@@ -607,16 +611,45 @@ func TestInitLeiosVoteManagerUnsubscribesAcrossLiveLifecycleCycles(
 		leios.VoteEmittedEvent{Vote: lcommon.LeiosPrototypeVote{}},
 	))
 
-	// A single require.Eventually asserting the exact count (not >= 1)
-	// both waits for delivery and stays red if a stale, over-counted
-	// subscription pushes the count past 1: EventBus dispatches every
-	// live subscriber for one Publish call around the same time, so if a
-	// duplicate delivery were going to happen, it already would have by
-	// the time any poll first observes the count reaching 1 -- no
-	// additional settle-time sleep is needed to catch it.
+	// Eventually returns at the first observation, so on its own it cannot
+	// see a duplicate delivery from a stale subscription that lands a moment
+	// later. Wait for the first vote, then require the count to stay at one.
 	require.Eventually(t, func() bool {
-		return n.ouroboros().LeiosVoteEnqueueCount() == 1
+		return n.ouroboros().LeiosVoteEnqueueCount() >= 1
 	}, 2*time.Second, 10*time.Millisecond,
+		"the published event must enqueue a vote")
+	require.Never(t, func() bool {
+		return n.ouroboros().LeiosVoteEnqueueCount() != 1
+	}, 250*time.Millisecond, 10*time.Millisecond,
 		"exactly one vote must be enqueued for the single published event, "+
 			"not once per accumulated live-lifecycle cycle")
+}
+
+func TestLeiosPersistenceRetentionRequiresStabilityWindow(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name      string
+		retention uint64
+		coeff     *big.Rat
+		valid     bool
+	}{
+		{"disabled", 0, nil, true},
+		{"below rollback window", 129599, big.NewRat(1, 20), false},
+		{"at rollback window", 129600, big.NewRat(1, 20), true},
+		{"above rollback window", 129601, big.NewRat(1, 20), true},
+		{"unknown coefficient", 1, nil, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateLeiosPersistenceRetention(
+				tc.retention,
+				2160,
+				tc.coeff,
+			)
+			if tc.valid {
+				require.NoError(t, err)
+			} else {
+				require.Error(t, err)
+			}
+		})
+	}
 }

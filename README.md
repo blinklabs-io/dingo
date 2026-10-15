@@ -59,7 +59,24 @@ Use Go 1.26 or later and `make`:
 ```sh
 make build
 ./dingo --help
+./dingo devnet
+
+# Keep the chain between runs, then reset it when needed:
+./dingo devnet --data-dir ./.dingo-devnet
+./dingo devnet --data-dir ./.dingo-devnet --reset
 ```
+
+The npm package supports the same commands, including
+`npx @blinklabs/dingo devnet --data-dir ./.dingo-devnet`.
+
+`dingo devnet` writes test funding credentials to `cardano/keys/` under its
+state directory: `faucet.skey`, `faucet.vkey`, and `faucet.addr`. The faucet
+address starts with 900,000 test ADA; use its signing key to make transactions
+on network magic `42`. With the persistent command above, read the address with
+`cat ./.dingo-devnet/cardano/keys/faucet.addr`. Without `--data-dir`, the files
+are in the temporary directory printed at startup and are removed on exit.
+These public test keys must never hold real funds. See the
+[local DevNet guide](docs/devnet.md) for details.
 
 Run the test suite with race detection using `make test`. See the
 [development guide](docs/development.md) for repository checks, integration

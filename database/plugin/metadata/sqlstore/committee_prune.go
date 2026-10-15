@@ -143,6 +143,17 @@ WHERE added_slot <= ?
 ORDER BY cold_credential_tag, cold_credential
 LIMIT ?`
 
+const committeeHotAuthSupersededIDsQuery = `
+SELECT id
+FROM auth_committee_hot
+WHERE cold_credential_tag = ?
+  AND cold_credential = ?
+  AND added_slot <= ?
+ORDER BY added_slot DESC, certificate_id DESC
+LIMIT ? OFFSET 1`
+
+const committeeHotAuthorizationDeleteIDQuery = "DELETE FROM auth_committee_hot WHERE id = ?"
+
 type committeeAuthIdentity struct {
 	tag        uint8
 	credential []byte
@@ -254,41 +265,81 @@ func (s *Store) pruneCommitteeHotAuthorizations(
 	if s.committeeAuthPruneLocked != nil {
 		s.committeeAuthPruneLocked()
 	}
-	// The inner ORDER BY ... LIMIT ? OFFSET 1 is the rule: skip the single
-	// newest row at or below the horizon, take up to a batch of the rest. The
-	// extra SELECT wrapper materializes a derived table, which MySQL requires
-	// both to reference the table being deleted from and to allow LIMIT
-	// inside an IN subquery.
-	result, err := db.ExecContext(ctx, `
-DELETE FROM auth_committee_hot
-WHERE id IN (
-    SELECT id FROM (
-        SELECT id
-        FROM auth_committee_hot
-        WHERE cold_credential_tag = ?
-          AND cold_credential = ?
-          AND added_slot <= ?
-        ORDER BY added_slot DESC, certificate_id DESC
-        LIMIT ? OFFSET 1
-    ) superseded
-)`,
-		coldCredentialTag,
-		coldCredential,
-		horizon,
-		committeeAuthPruneBatch,
-	)
-	if err != nil {
-		return 0, fmt.Errorf(
-			"prune superseded committee hot authorizations: %w",
-			err,
+	ids, err := func() (ids []int64, err error) {
+		rows, err := db.QueryContext(ctx, committeeHotAuthSupersededIDsQuery,
+			coldCredentialTag,
+			coldCredential,
+			horizon,
+			committeeAuthPruneBatch,
 		)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"select superseded committee hot authorizations: %w",
+				err,
+			)
+		}
+		defer rows.Close()
+		ids = make([]int64, 0, committeeAuthPruneBatch)
+		for rows.Next() {
+			var id int64
+			if err := rows.Scan(&id); err != nil {
+				return nil, fmt.Errorf(
+					"read superseded committee hot authorization id: %w",
+					err,
+				)
+			}
+			ids = append(ids, id)
+		}
+		if err := rows.Err(); err != nil {
+			return nil, fmt.Errorf(
+				"read superseded committee hot authorization ids: %w",
+				err,
+			)
+		}
+		return ids, nil
+	}()
+	if err != nil {
+		return 0, err
 	}
-	pruned, err := result.RowsAffected()
-	if err != nil {
-		return 0, fmt.Errorf(
-			"prune superseded committee hot authorizations: row count: %w",
-			err,
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	if s.dialect.Name() != "sqlite" {
+		args := make([]any, len(ids))
+		for i, id := range ids {
+			args[i] = id
+		}
+		result, err := s.execCached(ctx, db,
+			`DELETE FROM auth_committee_hot WHERE id IN (`+bindPlaceholders(len(ids))+`)`,
+			args...,
 		)
+		if err != nil {
+			return 0, fmt.Errorf("prune superseded committee hot authorizations: %w", err)
+		}
+		pruned, err := result.RowsAffected()
+		if err != nil {
+			return 0, fmt.Errorf("prune superseded committee hot authorizations: row count: %w", err)
+		}
+		return pruned, nil
+	}
+	var pruned int64
+	for _, id := range ids {
+		result, err := s.execCached(
+			ctx, db, committeeHotAuthorizationDeleteIDQuery, id,
+		)
+		if err != nil {
+			return 0, fmt.Errorf(
+				"prune superseded committee hot authorizations (id %d): %w", id, err,
+			)
+		}
+		rowsAffected, err := result.RowsAffected()
+		if err != nil {
+			return 0, fmt.Errorf(
+				"prune superseded committee hot authorizations: row count: %w",
+				err,
+			)
+		}
+		pruned += rowsAffected
 	}
 	return pruned, nil
 }

@@ -43,6 +43,17 @@ var errNoValidTxRefs = errors.New(
 	"no valid transaction references for endorser block",
 )
 
+// ErrInvalidLeiosAnnouncement marks a confirmed semantic failure in a locally
+// built announcement, distinct from unavailable validation state.
+var ErrInvalidLeiosAnnouncement = errors.New("invalid Leios announcement")
+
+// ErrLeiosAnnouncementUnavailable marks parent or storage state that cannot
+// currently validate a locally built announcement. The ranking block remains
+// eligible for adoption because the announcement does not apply ledger effects.
+var ErrLeiosAnnouncementUnavailable = errors.New(
+	"leios announcement validation unavailable",
+)
+
 // Mode represents the forging mode.
 type Mode int
 
@@ -249,12 +260,13 @@ type BlockForger struct {
 	fenceLoaded    bool
 
 	// Optional Leios EB forging (nil = relay or pre-Dijkstra era)
-	leiosChecker   LeiosProduceChecker
-	leiosEBCaster  EndorserBlockBroadcaster
-	leiosMempool   MempoolProvider
-	leiosValidator TxValidator
-	leiosCerts     LeiosCertificateProvider
-	leiosParent    LeiosParentAnnouncementProvider
+	leiosChecker               LeiosProduceChecker
+	leiosEBCaster              EndorserBlockBroadcaster
+	leiosMempool               MempoolProvider
+	leiosValidator             TxValidator
+	leiosAnnouncementValidator func(context.Context, ledger.BlockHeader) error
+	leiosCerts                 LeiosCertificateProvider
+	leiosParent                LeiosParentAnnouncementProvider
 
 	// Prometheus metrics
 	metrics *forgingMetrics
@@ -444,6 +456,17 @@ type BlockForgedObserver func(
 type BlockValidator interface {
 	ValidateForgedBlock(ctx context.Context, block ledger.Block, blockCbor []byte) error
 }
+
+// ErrForgedBlockStateChanged is returned, wrapped, by a BlockValidator that
+// could not reach a verdict because the ledger state it validates against
+// kept changing until the forged slot ended, or moved to a tip that is
+// neither the one validation started from nor the block's parent. It says
+// nothing about the block's validity. The forger still drops the block, but
+// logs a skip rather than a self-validation failure and does not count it on
+// dingo_forge_validation_failed_total.
+var ErrForgedBlockStateChanged = errors.New(
+	"ledger state changed during forged block validation",
+)
 
 // LeiosProduceChecker is the forge-loop seam into the Leios pipeline.
 // It reports whether the slot leader may produce an endorser block for
@@ -636,6 +659,13 @@ type ForgerConfig struct {
 	// coherent ledger snapshot before the EB is broadcast. Production wiring
 	// supplies LedgerState; nil preserves compatibility for test embedders.
 	LeiosTxValidator TxValidator
+	// LeiosAnnouncementValidator validates a locally built announcement
+	// against the exact signed ranking-block header before that block advances
+	// the ledger past its parent. Nil disables the pre-adoption check.
+	// A confirmed semantic failure must wrap ErrInvalidLeiosAnnouncement.
+	// Parent or storage unavailability must wrap
+	// ErrLeiosAnnouncementUnavailable; every other error rejects the forge.
+	LeiosAnnouncementValidator func(context.Context, ledger.BlockHeader) error
 	// LeiosCertificateProvider supplies certified EBs for Dijkstra CertRBs.
 	LeiosCertificateProvider LeiosCertificateProvider
 	// LeiosParentAnnouncementProvider supplies the EB hash announced by the
@@ -771,29 +801,30 @@ func NewBlockForger(cfg ForgerConfig) (*BlockForger, error) {
 	}
 
 	f := &BlockForger{
-		mode:             cfg.Mode,
-		logger:           cfg.Logger,
-		slotDuration:     cfg.SlotDuration,
-		creds:            cfg.Credentials,
-		leaderChecker:    cfg.LeaderChecker,
-		blockBuilder:     cfg.BlockBuilder,
-		blockBroadcaster: cfg.BlockBroadcaster,
-		confirmedTxs:     cfg.ConfirmedTxs,
-		blockForged:      cfg.BlockForged,
-		slotClock:        cfg.SlotClock,
-		slotTracker:      NewSlotTracker(),
-		leiosChecker:     cfg.LeiosProduceChecker,
-		leiosEBCaster:    cfg.LeiosEBBroadcaster,
-		leiosMempool:     cfg.LeiosMempool,
-		leiosValidator:   cfg.LeiosTxValidator,
-		leiosCerts:       cfg.LeiosCertificateProvider,
-		leiosParent:      cfg.LeiosParentAnnouncementProvider,
-		blockValidator:   cfg.BlockValidator,
-		fenceStore:       cfg.ForgeFence,
-		opCertLedgerView: cfg.OpCertLedgerView,
-		eraParams:        cfg.EraParams,
-		chainContext:     cfg.ChainContext,
-		siblingAdopter:   cfg.SiblingAdopter,
+		mode:                       cfg.Mode,
+		logger:                     cfg.Logger,
+		slotDuration:               cfg.SlotDuration,
+		creds:                      cfg.Credentials,
+		leaderChecker:              cfg.LeaderChecker,
+		blockBuilder:               cfg.BlockBuilder,
+		blockBroadcaster:           cfg.BlockBroadcaster,
+		confirmedTxs:               cfg.ConfirmedTxs,
+		blockForged:                cfg.BlockForged,
+		slotClock:                  cfg.SlotClock,
+		slotTracker:                NewSlotTracker(),
+		leiosChecker:               cfg.LeiosProduceChecker,
+		leiosEBCaster:              cfg.LeiosEBBroadcaster,
+		leiosMempool:               cfg.LeiosMempool,
+		leiosValidator:             cfg.LeiosTxValidator,
+		leiosAnnouncementValidator: cfg.LeiosAnnouncementValidator,
+		leiosCerts:                 cfg.LeiosCertificateProvider,
+		leiosParent:                cfg.LeiosParentAnnouncementProvider,
+		blockValidator:             cfg.BlockValidator,
+		fenceStore:                 cfg.ForgeFence,
+		opCertLedgerView:           cfg.OpCertLedgerView,
+		eraParams:                  cfg.EraParams,
+		chainContext:               cfg.ChainContext,
+		siblingAdopter:             cfg.SiblingAdopter,
 	}
 	if cfg.ForgeSyncToleranceSlots == 0 {
 		cfg.ForgeSyncToleranceSlots = forgeSyncToleranceSlots
@@ -867,6 +898,11 @@ func NewBlockForger(cfg ForgerConfig) (*BlockForger, error) {
 		if cfg.LeiosProduceChecker != nil && cfg.LeiosTxValidator == nil {
 			return nil, errors.New(
 				"production Leios forging requires transaction validator",
+			)
+		}
+		if cfg.LeiosProduceChecker != nil && cfg.LeiosAnnouncementValidator == nil {
+			return nil, errors.New(
+				"production Leios forging requires announcement validator",
 			)
 		}
 	}
@@ -1991,6 +2027,22 @@ func (f *BlockForger) checkAndForgeProduction(ctx context.Context) error {
 		}
 		if validationErr != nil {
 			f.incCouldNotForge()
+			if errors.Is(validationErr, ErrForgedBlockStateChanged) {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+				// No verdict was reached, so the block is dropped as
+				// unverified, not as invalid: the slot is lost the way a
+				// build attempt the chain moved under is.
+				f.logger.Warn(
+					"forge skip: ledger state kept changing during self-validation, dropping block",
+					"slot", currentSlot,
+					"hash", blockHashStr,
+					"validation_duration", validationDuration,
+					"error", validationErr,
+				)
+				return nil
+			}
 			if f.metrics != nil {
 				f.metrics.forgeValidationFailed.Inc()
 			}
@@ -2012,6 +2064,27 @@ func (f *BlockForger) checkAndForgeProduction(ctx context.Context) error {
 			"hash", blockHashStr,
 			"validation_duration", validationDuration,
 		)
+	}
+	if leiosState.data.Announcement != nil &&
+		f.leiosAnnouncementValidator != nil {
+		if err := f.leiosAnnouncementValidator(ctx, block.Header()); err != nil {
+			if errors.Is(err, ErrLeiosAnnouncementUnavailable) {
+				f.logger.Warn(
+					"locally forged Leios announcement is not vote-eligible",
+					"slot", currentSlot,
+					"error", err,
+				)
+			} else {
+				f.incCouldNotForge()
+				if f.metrics != nil {
+					f.metrics.forgeValidationFailed.Inc()
+				}
+				return fmt.Errorf(
+					"forged Leios announcement failed validation: %w",
+					err,
+				)
+			}
+		}
 	}
 
 	// Block forged successfully
@@ -4227,6 +4300,7 @@ func selectValidLeiosTransactions(ctx context.Context,
 		) error {
 			consumed := make(map[utxoref.Key]struct{})
 			created := make(map[utxoref.Key]lcommon.Utxo)
+			accounts := utxoref.NewStateOverlay()
 			for _, mempoolTx := range txs {
 				if err := ctx.Err(); err != nil {
 					return err
@@ -4256,7 +4330,7 @@ func selectValidLeiosTransactions(ctx context.Context,
 					continue
 				}
 				tx, err := decodeMempoolTx(mempoolTx)
-				if err != nil || validate(tx, consumed, created) != nil {
+				if err != nil || validate(tx, consumed, created, accounts) != nil {
 					continue
 				}
 				selected = append(selected, mempoolTx)
@@ -4266,6 +4340,7 @@ func selectValidLeiosTransactions(ctx context.Context,
 				for _, utxo := range tx.Produced() {
 					created[utxoref.ForUtxo(utxo)] = utxo
 				}
+				accounts.Apply(tx)
 			}
 			if err := ctx.Err(); err != nil {
 				return err

@@ -114,6 +114,12 @@ func (s *Service) SetLiveNode(n LiveNode) {
 func (s *Service) openDatabase(
 	ctx context.Context,
 ) (*internalplugins.DatabaseRuntime, error) {
+	genesisStakingEmpty, err := internalplugins.ResolveGenesisStakingEmpty(
+		nil, s.cfg.CardanoConfig, s.cfg.Network, s.cfg.NetworkMagic,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("loading cardano node config: %w", err)
+	}
 	runtime, err := internalplugins.OpenDatabase(
 		ctx,
 		&database.Config{
@@ -134,11 +140,12 @@ func (s *Service) openDatabase(
 			Metadata: s.cfg.Plugins.Storage.Metadata,
 		},
 		internalplugins.StorageDependencies{
-			DataDir:        s.cfg.DatabasePath,
-			StorageMode:    s.cfg.StorageMode,
-			MaxConnections: s.cfg.DatabaseWorkers,
-			Logger:         s.logger,
-			TracingEnabled: s.cfg.Tracing,
+			GenesisStakingEmpty: genesisStakingEmpty,
+			DataDir:             s.cfg.DatabasePath,
+			StorageMode:         s.cfg.StorageMode,
+			MaxConnections:      s.cfg.DatabaseWorkers,
+			Logger:              s.logger,
+			TracingEnabled:      s.cfg.Tracing,
 		},
 	)
 	if err != nil {
@@ -178,6 +185,16 @@ func (s *Service) Snapshot(
 		return lifecycle.Manifest{}, err
 	}
 	defer db.Close(ctx)
+	manifestOpts, err := s.ManifestOptions()
+	if err != nil {
+		return lifecycle.Manifest{}, err
+	}
+	manifestOpts = append(
+		manifestOpts,
+		lifecycle.WithMaxCommitPause(
+			s.cfg.DatabaseLifecycle.SnapshotMaxCommitPause,
+		),
+	)
 	return lifecycle.SnapshotToCloud(
 		ctx,
 		s.destinationRegistry,
@@ -187,12 +204,13 @@ func (s *Service) Snapshot(
 		version.GetVersionString(),
 		s.cfg.Plugins.Storage.Blob.Provider,
 		s.cfg.Plugins.Storage.Metadata.Provider,
-		s.cfg.DatabaseLifecycle.SnapshotCloudDestination,
+		lifecycle.EffectiveCloudDestination(
+			s.cfg.DatabaseLifecycle.SnapshotCloudDestination,
+			s.cfg.DatabaseLifecycle.SnapshotCloudDestinationPrefix,
+		),
 		name,
 		description,
-		lifecycle.WithMaxCommitPause(
-			s.cfg.DatabaseLifecycle.SnapshotMaxCommitPause,
-		),
+		manifestOpts...,
 	)
 }
 
@@ -228,6 +246,10 @@ func (s *Service) Restore(
 		)
 	}
 	defer host.Stop(context.WithoutCancel(ctx)) //nolint:errcheck
+	manifestOpts, err := s.ManifestOptions()
+	if err != nil {
+		return lifecycle.Manifest{}, err
+	}
 	manifest, err := lifecycle.RestoreValidated(
 		ctx,
 		host,
@@ -250,11 +272,22 @@ func (s *Service) Restore(
 			return nil
 		},
 		s.RestoreStorageConfig(),
+		manifestOpts...,
 	)
 	if err != nil {
 		return lifecycle.Manifest{}, err
 	}
 	return manifest, nil
+}
+
+// ManifestOptions returns the manifest options this Service's configuration
+// selects, for a caller that snapshots or restores through database/lifecycle
+// directly against the same configuration.
+func (s *Service) ManifestOptions() ([]lifecycle.ManifestOption, error) {
+	if s == nil || s.cfg == nil {
+		return nil, nil
+	}
+	return ManifestOptions(s.cfg.DatabaseLifecycle)
 }
 
 // RestoreStorageConfig is the restore-time storage configuration this

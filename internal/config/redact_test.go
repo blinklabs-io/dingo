@@ -120,11 +120,13 @@ func TestConfigLogClassesAreUnambiguous(t *testing.T) {
 // below. None of them may appear in a rendered log line.
 var sentinelSecrets = []string{
 	"SENTINEL-KOIOS-API-KEY",
+	"SENTINEL-METRICS-AUTH-TOKEN",
 	"SENTINEL-BARK-PASSWORD",
 	"SENTINEL-BARK-HOST-PASSWORD",
 	"SENTINEL-MITHRIL-KEY",
 	"SENTINEL-S3-SECRET-KEY",
 	"SENTINEL-TOKEN-REGISTRY-PASSWORD",
+	"SENTINEL-TOKEN-REGISTRY-HEADER",
 	"SENTINEL-IPFS-PASSWORD",
 	"SENTINEL-PG-PASSWORD",
 	"SENTINEL-DSN-PASSWORD",
@@ -132,6 +134,7 @@ var sentinelSecrets = []string{
 	"SENTINEL-UNKNOWN-PROVIDER-KEY",
 	"SENTINEL-NESTED-PROVIDER-SECRET",
 	"SENTINEL-MEMPOOL-LIST-SECRET",
+	"SENTINEL-ARTIFACT-STORE-PASSWORD",
 	// An AWS access key ID is half of a credential pair, and
 	// "accessKeyId" is exactly the spelling a left-anchored
 	// access[-_]?key pattern cannot reach past the "Id" suffix.
@@ -155,7 +158,8 @@ func sentinelSecretConfig() *Config {
 			Enabled: true,
 			APIKey:  "SENTINEL-KOIOS-API-KEY",
 		},
-		BarkBaseUrl: "https://bark:SENTINEL-BARK-PASSWORD@bark.example/api",
+		MetricsAuthToken: "SENTINEL-METRICS-AUTH-TOKEN",
+		BarkBaseUrl:      "https://bark:SENTINEL-BARK-PASSWORD@bark.example/api",
 		BarkBlockDownloadHosts: []string{
 			"https://blocks:SENTINEL-BARK-HOST-PASSWORD@blocks.example",
 			"https://plain.example",
@@ -163,11 +167,18 @@ func sentinelSecretConfig() *Config {
 		Mithril: MithrilConfig{
 			AggregatorURL: "https://aggregator.example/aggregator" +
 				"?apiKey='prefix'SENTINEL-MITHRIL-KEY&network=preview",
+			Server: MithrilServerConfig{
+				ArtifactStore: "s3://producer:SENTINEL-ARTIFACT-STORE-PASSWORD" +
+					"@snapshots.example/dingo?network=preview",
+			},
 		},
 		TokenRegistry: TokenRegistryConfig{
 			SourceURL: "https://reg:SENTINEL-TOKEN-REGISTRY-PASSWORD" +
 				"@registry.example/registry.tar.gz" +
 				"?apiKey='prefix'SENTINEL-TOKEN-REGISTRY-PASSWORD",
+			HeaderSecrets: map[string]string{
+				"Authorization": "Bearer SENTINEL-TOKEN-REGISTRY-HEADER",
+			},
 		},
 		OffchainMetadata: OffchainMetadataConfig{
 			IPFSGatewayURL: "https://ipfs:SENTINEL-IPFS-PASSWORD" +
@@ -285,6 +296,7 @@ func TestConfigLogValueRedactsSentinelSecrets(t *testing.T) {
 				"dingo",
 				"require",
 				"aggregator.example",
+				"snapshots.example",
 				"registry.example",
 				"blocks.example",
 				"plain.example",

@@ -154,10 +154,10 @@ func TestConnectionTeardownReleasesChainsyncAndMempoolWaiters(t *testing.T) {
 
 	fixture := txsubmissionTestFixtures(t)[0]
 	o, _ := newTxSubmissionTestOuroboros(t, func(cfg *mempool.MempoolConfig) {
-		cfg.MempoolCapacity = int64(len(fixture.body))
+		cfg.MempoolCapacity = txsubmissionRetainedSize(t, fixture.body)
 	})
 	fifo := o.mempool.(*mempool.FIFO)
-	require.NoError(t, fifo.Mempool.AddTransaction(txsubmissionRelayTestEraId, fixture.body))
+	require.NoError(t, fifo.Mempool.AddTransaction(context.Background(), txsubmissionRelayTestEraId, fixture.body))
 	headroom, ok := o.mempool.(mempool.AdmissionHeadroom)
 	require.True(t, ok)
 	require.Zero(t, headroom.AdmissionHeadroomBytes())

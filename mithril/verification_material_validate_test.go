@@ -22,142 +22,60 @@ import (
 
 func TestValidateVerificationMaterial(t *testing.T) {
 	t.Parallel()
-
 	g1Hex := testBLSG1Hex(t)
 	g2Hex := testBLSG2Hex(t)
-	err := ValidateVerificationMaterial(&VerificationMaterial{
-		CertificateChain: &CertificateChainVerificationResult{
-			LeafCertificate: &Certificate{
-				Hash:                     "leaf",
-				Epoch:                    270,
-				AggregateVerificationKey: g2Hex,
-				MultiSignature:           g1Hex,
-				Metadata: CertificateMetadata{
-					Signers: []StakeDistributionParty{
-						{PartyID: "pool1abc", Stake: 42},
+	for _, tt := range []struct {
+		name         string
+		signerStake  uint64
+		signerKey    string
+		cardanoEpoch uint64
+		wantError    string
+	}{
+		{"matching distributions", 42, g2Hex, 270, ""},
+		{"stake mismatch is ignored", 99, g2Hex, 270, ""},
+		{"invalid signer key", 42, "%%%", 270, "verification key is invalid"},
+		{
+			"cardano epoch mismatch", 42, g2Hex, 271,
+			"cardano stake distribution epoch mismatch",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := ValidateVerificationMaterial(&VerificationMaterial{
+				CertificateChain: &CertificateChainVerificationResult{
+					LeafCertificate: &Certificate{
+						Hash:                     "leaf",
+						Epoch:                    270,
+						AggregateVerificationKey: g2Hex,
+						MultiSignature:           g1Hex,
+						Metadata: CertificateMetadata{
+							Signers: []StakeDistributionParty{
+								{PartyID: "pool1abc", Stake: 42},
+							},
+						},
 					},
 				},
-			},
-		},
-		MithrilStakeDistribution: &MithrilStakeDistribution{
-			Epoch:           270,
-			CertificateHash: "leaf",
-			Signers: []MithrilStakeDistributionParty{
-				{PartyID: "pool1abc", Stake: 42, VerificationKey: g2Hex},
-			},
-		},
-		CardanoStakeDistribution: &CardanoStakeDistribution{
-			Epoch:           270,
-			CertificateHash: "leaf",
-		},
-	})
-	require.NoError(t, err)
-}
-
-func TestValidateVerificationMaterialIgnoresStakeMismatch(t *testing.T) {
-	t.Parallel()
-
-	g1Hex := testBLSG1Hex(t)
-	g2Hex := testBLSG2Hex(t)
-	err := ValidateVerificationMaterial(&VerificationMaterial{
-		CertificateChain: &CertificateChainVerificationResult{
-			LeafCertificate: &Certificate{
-				Hash:                     "leaf",
-				Epoch:                    270,
-				AggregateVerificationKey: g2Hex,
-				MultiSignature:           g1Hex,
-				Metadata: CertificateMetadata{
-					Signers: []StakeDistributionParty{
-						{PartyID: "pool1abc", Stake: 42},
+				MithrilStakeDistribution: &MithrilStakeDistribution{
+					Epoch:           270,
+					CertificateHash: "leaf",
+					Signers: []MithrilStakeDistributionParty{
+						{
+							PartyID:         "pool1abc",
+							Stake:           tt.signerStake,
+							VerificationKey: tt.signerKey,
+						},
 					},
 				},
-			},
-		},
-		MithrilStakeDistribution: &MithrilStakeDistribution{
-			Epoch:           270,
-			CertificateHash: "leaf",
-			Signers: []MithrilStakeDistributionParty{
-				{PartyID: "pool1abc", Stake: 99, VerificationKey: g2Hex},
-			},
-		},
-		CardanoStakeDistribution: &CardanoStakeDistribution{
-			Epoch:           270,
-			CertificateHash: "leaf",
-		},
-	})
-	require.NoError(t, err)
-}
-
-func TestValidateVerificationMaterialInvalidSignerKey(t *testing.T) {
-	t.Parallel()
-
-	g1Hex := testBLSG1Hex(t)
-	g2Hex := testBLSG2Hex(t)
-	err := ValidateVerificationMaterial(&VerificationMaterial{
-		CertificateChain: &CertificateChainVerificationResult{
-			LeafCertificate: &Certificate{
-				Hash:                     "leaf",
-				Epoch:                    270,
-				AggregateVerificationKey: g2Hex,
-				MultiSignature:           g1Hex,
-				Metadata: CertificateMetadata{
-					Signers: []StakeDistributionParty{
-						{PartyID: "pool1abc", Stake: 42},
-					},
+				CardanoStakeDistribution: &CardanoStakeDistribution{
+					Epoch:           tt.cardanoEpoch,
+					CertificateHash: "leaf",
 				},
-			},
-		},
-		MithrilStakeDistribution: &MithrilStakeDistribution{
-			Epoch:           270,
-			CertificateHash: "leaf",
-			Signers: []MithrilStakeDistributionParty{
-				{PartyID: "pool1abc", Stake: 42, VerificationKey: "%%%"},
-			},
-		},
-		CardanoStakeDistribution: &CardanoStakeDistribution{
-			Epoch:           270,
-			CertificateHash: "leaf",
-		},
-	})
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "verification key is invalid")
-}
-
-func TestValidateVerificationMaterialCardanoDistributionMismatch(t *testing.T) {
-	t.Parallel()
-
-	g1Hex := testBLSG1Hex(t)
-	g2Hex := testBLSG2Hex(t)
-	err := ValidateVerificationMaterial(&VerificationMaterial{
-		CertificateChain: &CertificateChainVerificationResult{
-			LeafCertificate: &Certificate{
-				Hash:                     "leaf",
-				Epoch:                    270,
-				AggregateVerificationKey: g2Hex,
-				MultiSignature:           g1Hex,
-				Metadata: CertificateMetadata{
-					Signers: []StakeDistributionParty{
-						{PartyID: "pool1abc", Stake: 42},
-					},
-				},
-			},
-		},
-		MithrilStakeDistribution: &MithrilStakeDistribution{
-			Epoch:           270,
-			CertificateHash: "leaf",
-			Signers: []MithrilStakeDistributionParty{
-				{PartyID: "pool1abc", Stake: 42, VerificationKey: g2Hex},
-			},
-		},
-		CardanoStakeDistribution: &CardanoStakeDistribution{
-			Epoch:           271,
-			CertificateHash: "leaf",
-		},
-	})
-	require.Error(t, err)
-	require.Contains(
-		t,
-		err.Error(),
-		"cardano stake distribution epoch mismatch",
-	)
+			})
+			if tt.wantError != "" {
+				require.ErrorContains(t, err, tt.wantError)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
 }

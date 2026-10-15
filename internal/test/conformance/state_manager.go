@@ -611,6 +611,16 @@ func initialDRepDeposit(pp common.ProtocolParameters) (uint64, error) {
 	return deposit.Uint64(), nil
 }
 
+func stateManagerProtocolMajor(
+	pp common.ProtocolParameters,
+) (uint64, error) {
+	versioned, ok := pp.(common.PoolRuleProtocolParameters)
+	if !ok {
+		return 0, errors.New("protocol parameters do not define a protocol version")
+	}
+	return uint64(versioned.ProtocolMajorVersion()), nil
+}
+
 func stateManagerConwayProtocolParameters(
 	pp common.ProtocolParameters,
 ) *conway.ConwayProtocolParameters {
@@ -693,9 +703,13 @@ func (m *DingoStateManager) seedAuthCommitteeHot(
 		return fmt.Errorf("build synthetic auth-committee-hot tx: %w", err)
 	}
 	point := ocommon.Point{Slot: 0, Hash: syntheticBlockHash(0)}
+	protocolMajor, err := stateManagerProtocolMajor(m.protocolParams)
+	if err != nil {
+		return fmt.Errorf("resolve protocol major: %w", err)
+	}
 	if err := m.db.SetTransactionMetadataOnly(
 		context.Background(),
-		tx, point, 0, map[int]uint64{}, txn,
+		tx, point, 0, map[int]uint64{}, txn, protocolMajor,
 	); err != nil {
 		return fmt.Errorf("seed auth committee hot: %w", err)
 	}
@@ -855,15 +869,15 @@ func (m *DingoStateManager) certDepositsFor(
 		case *common.StakeRegistrationCertificate:
 			deposits[i] = keyDeposit
 		case *common.RegistrationCertificate:
-			deposits[i] = depositAmount(c.Amount)
+			deposits[i] = c.Amount
 		case *common.StakeRegistrationDelegationCertificate:
-			deposits[i] = depositAmount(c.Amount)
+			deposits[i] = c.Amount
 		case *common.StakeVoteRegistrationDelegationCertificate:
-			deposits[i] = depositAmount(c.Amount)
+			deposits[i] = c.Amount
 		case *common.VoteRegistrationDelegationCertificate:
-			deposits[i] = depositAmount(c.Amount)
+			deposits[i] = c.Amount
 		case *common.RegistrationDrepCertificate:
-			deposits[i] = depositAmount(c.Amount)
+			deposits[i] = c.Amount
 		case *common.PoolRegistrationCertificate:
 			deposits[i] = poolDeposit
 		}
@@ -889,16 +903,6 @@ func (m *DingoStateManager) initialStakeDepositLocked() *types.Uint64 {
 	}
 	deposit := types.Uint64(conwayPP.KeyDeposit)
 	return &deposit
-}
-
-// depositAmount converts a certificate's signed deposit amount (gouroboros
-// models it as int64) to the unsigned form the metadata store expects.
-// Deposit amounts are always non-negative on chain.
-func depositAmount(amount int64) uint64 {
-	if amount < 0 {
-		return 0
-	}
-	return uint64(amount)
 }
 
 // ApplyTransaction implements conformance.StateManager.ApplyTransaction.
@@ -945,13 +949,28 @@ func (m *DingoStateManager) ApplyTransaction(
 	)
 	govActionLifetime := defaultGovActionLifetime
 	drepInactivityPeriod := defaultDRepInactivityPeriod
-	if conwayPP := stateManagerConwayProtocolParameters(m.protocolParams); conwayPP != nil {
+	conwayPP := stateManagerConwayProtocolParameters(m.protocolParams)
+	if conwayPP != nil {
 		govActionLifetime = conwayPP.GovActionValidityPeriod
 		drepInactivityPeriod = conwayPP.DRepInactivityPeriod
 	}
+	protocolMajor, err := stateManagerProtocolMajor(m.protocolParams)
+	if err != nil {
+		return fmt.Errorf("resolve protocol major: %w", err)
+	}
 
+	var proposalsValidated bool
 	for levelIndex, level := range levels {
 		storageIndex := idx + uint32(levelIndex) //nolint:gosec
+		if err := governance.ResetDormantDRepExpiryBeforeCertificates(
+			context.Background(),
+			level,
+			point,
+			m.db,
+			txn,
+		); err != nil {
+			return fmt.Errorf("reset DRep dormancy before certificates: %w", err)
+		}
 		if err := m.spendUtxos(txn, level.Inputs(), slot); err != nil {
 			return fmt.Errorf(
 				"spend transaction body %d inputs: %w",
@@ -982,6 +1001,7 @@ func (m *DingoStateManager) ApplyTransaction(
 			storageIndex,
 			m.certDepositsFor(level.Certificates()),
 			txn,
+			protocolMajor,
 		); err != nil {
 			return fmt.Errorf(
 				"store transaction body %d metadata: %w",
@@ -1015,59 +1035,27 @@ func (m *DingoStateManager) ApplyTransaction(
 			)
 		}
 
+		if err := governance.ProcessTransactionEffects(
+			context.Background(),
+			level,
+			point,
+			storageIndex,
+			m.currentEpoch,
+			drepInactivityPeriod,
+			govActionLifetime,
+			protocolMajor,
+			m.db,
+			txn,
+			m.protocolParams,
+			&proposalsValidated,
+		); err != nil {
+			return fmt.Errorf("process transaction body %d governance effects: %w", levelIndex, err)
+		}
 		if proposals := level.ProposalProcedures(); len(proposals) > 0 {
-			if err := governance.ProcessProposals(
-				context.Background(),
-				level,
-				point,
-				storageIndex,
-				m.currentEpoch,
-				govActionLifetime,
-				m.db,
-				txn,
-			); err != nil {
-				return fmt.Errorf(
-					"process transaction body %d proposals: %w",
-					levelIndex,
-					err,
-				)
-			}
 			m.recordProposalsInGovState(level, govActionLifetime)
 		}
 		if votes := level.VotingProcedures(); len(votes) > 0 {
-			if err := governance.ProcessVotes(
-				context.Background(),
-				level,
-				point,
-				m.currentEpoch,
-				drepInactivityPeriod,
-				m.db,
-				txn,
-			); err != nil {
-				return fmt.Errorf(
-					"process transaction body %d votes: %w",
-					levelIndex,
-					err,
-				)
-			}
 			m.recordVotesInGovState(level)
-		}
-		if governance.HasDRepActivityCertificates(level) {
-			if err := governance.ProcessDRepActivityCertificates(
-				context.Background(),
-				level,
-				point,
-				m.currentEpoch,
-				drepInactivityPeriod,
-				m.db,
-				txn,
-			); err != nil {
-				return fmt.Errorf(
-					"process transaction body %d DRep activity: %w",
-					levelIndex,
-					err,
-				)
-			}
 		}
 	}
 
@@ -1319,13 +1307,13 @@ func (m *DingoStateManager) updateStakeDepositForCertificate(
 			deposit = uint64(pp.KeyDeposit)
 		}
 	case *common.RegistrationCertificate:
-		credential, deposit, registered = c.StakeCredential, depositAmount(c.Amount), true
+		credential, deposit, registered = c.StakeCredential, c.Amount, true
 	case *common.StakeRegistrationDelegationCertificate:
-		credential, deposit, registered = c.StakeCredential, depositAmount(c.Amount), true
+		credential, deposit, registered = c.StakeCredential, c.Amount, true
 	case *common.VoteRegistrationDelegationCertificate:
-		credential, deposit, registered = c.StakeCredential, depositAmount(c.Amount), true
+		credential, deposit, registered = c.StakeCredential, c.Amount, true
 	case *common.StakeVoteRegistrationDelegationCertificate:
-		credential, deposit, registered = c.StakeCredential, depositAmount(c.Amount), true
+		credential, deposit, registered = c.StakeCredential, c.Amount, true
 	case *common.StakeDeregistrationCertificate:
 		delete(m.stakeDeposits, rewardAccountKey(c.StakeCredential))
 		return

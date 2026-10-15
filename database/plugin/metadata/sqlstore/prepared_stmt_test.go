@@ -472,12 +472,6 @@ func TestTxScopedStmtDoesNotLeakAcrossConcurrentEviction(t *testing.T) {
 	)
 }
 
-// TestCacheableForDialect is a table-driven unit test of the pure predicate
-// prepareHotStatements now consults before caching a hot statement. The only
-// case that must come back false is a RETURNING-id query on MySQL (see
-// insertUtxoQuery's doc comment); every other dialect/query combination,
-// including a RETURNING-id query on PostgreSQL (which supports RETURNING
-// natively) and a non-RETURNING query on MySQL, must come back true.
 func TestCacheableForDialect(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -507,12 +501,24 @@ func TestCacheableForDialect(t *testing.T) {
 			"mysql", insertUtxoQuery, false,
 		},
 		{
+			"mysql conflict-tolerant asset insert",
+			"mysql", importAssetQuery, true,
+		},
+		{
 			"mysql plain select, no returning",
 			"mysql", getAssetIDQuery, true,
 		},
 		{
 			"mysql reward account select, no returning",
 			"mysql", rewardLiveStakeAccountQuery, true,
+		},
+		{
+			"mysql governance vote upsert with returning",
+			"mysql", governanceVoteUpsertQuery, false,
+		},
+		{
+			"mysql governance vote lookup",
+			"mysql", governanceVotePreviousQuery, true,
 		},
 	}
 	for _, tc := range cases {
@@ -523,6 +529,26 @@ func TestCacheableForDialect(t *testing.T) {
 				tc.want,
 				cacheableForDialect(tc.dialect, tc.query),
 			)
+		})
+	}
+}
+
+func TestCacheableConsumeUtxosForDialect(t *testing.T) {
+	t.Parallel()
+	for _, dialect := range []string{"sqlite", "mysql", "postgres"} {
+		t.Run(dialect, func(t *testing.T) {
+			t.Parallel()
+			require.True(t, cacheableForDialect(dialect, consumeUtxoSQL))
+			for rowCount := 2; rowCount <= utxoBatchSize; rowCount++ {
+				for _, returnStake := range []bool{false, true} {
+					require.Equal(t, dialect == "sqlite",
+						cacheableForDialect(dialect,
+							consumeUtxosBatchQuery(rowCount, returnStake)),
+						"batch size %d, return stake %t", rowCount, returnStake)
+				}
+			}
+			require.Equal(t, dialect == "sqlite",
+				cacheableForDialect(dialect, consumeUtxoSQLiteReturningSQL))
 		})
 	}
 }
@@ -566,12 +592,43 @@ func TestPrepareHotStatementsSkipsReturningIDQueryOnMySQL(t *testing.T) {
 		"expected insertUtxoQueryIgnoreConflict to be uncached on MySQL",
 	)
 
+	for _, query := range []string{
+		consumeUtxoSQLiteReturningSQL,
+		consumeUtxosBatchQuery(2, false),
+		consumeUtxosBatchQuery(2, true),
+	} {
+		_, cached := mysqlStore.lookupCachedStmt(query)
+		require.False(
+			t,
+			cached,
+			"SQLite consume query must be uncached on MySQL",
+		)
+	}
+
 	_, ok = mysqlStore.lookupCachedStmt(getAssetIDQuery)
 	require.True(
 		t,
 		ok,
 		"expected a non-RETURNING hot statement to still be cached on MySQL",
 	)
+	_, ok = mysqlStore.lookupCachedStmt(governanceVoteUpsertQuery)
+	require.False(t, ok, "expected governanceVoteUpsertQuery to be uncached on MySQL")
+}
+
+func TestSetGovernanceVoteStatementsAreCached(t *testing.T) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+
+	statements := []string{
+		governanceVotePreviousQuery,
+		governanceVoteUpsertQuery,
+		governanceVoteHistoryInsertQuery,
+	}
+	for _, query := range statements {
+		stmt, ok := store.lookupCachedStmt(query)
+		require.True(t, ok, "expected governance vote statement to be cached")
+		require.NotNil(t, stmt)
+	}
 }
 
 // TestRefreshRewardLiveStakeAggregateCachesAccountAndUpsertStatements proves

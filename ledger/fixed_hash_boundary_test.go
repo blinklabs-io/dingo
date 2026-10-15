@@ -44,6 +44,19 @@ func (s *fixedHashMetadataStore) GetPool(
 	return s.pool, nil
 }
 
+func (s *fixedHashMetadataStore) GetPoolRegistrationsEffectiveForEpoch(
+	_ []lcommon.PoolKeyHash,
+	_ uint64,
+	_ uint64,
+	_ uint64,
+	_ types.Txn,
+) ([]models.PoolRegistration, error) {
+	if s.pool == nil {
+		return nil, nil
+	}
+	return s.pool.Registration, nil
+}
+
 func (s *fixedHashMetadataStore) GetActiveDreps(
 	_ types.Txn,
 ) ([]*models.Drep, error) {
@@ -93,6 +106,8 @@ func TestLedgerViewPoolCurrentStateRejectsMalformedHashes(t *testing.T) {
 				VrfKeyHash:    make([]byte, lcommon.Blake2b256Size),
 				RewardAccount: make([]byte, lcommon.Blake2b224Size),
 				Registration: []models.PoolRegistration{{
+					VrfKeyHash:    make([]byte, lcommon.Blake2b256Size),
+					RewardAccount: make([]byte, lcommon.Blake2b224Size),
 					Owners: []models.PoolRegistrationOwner{{
 						KeyHash: make([]byte, lcommon.Blake2b224Size),
 					}},
@@ -102,9 +117,11 @@ func TestLedgerViewPoolCurrentStateRejectsMalformedHashes(t *testing.T) {
 			case "operator":
 				pool.PoolKeyHash = pool.PoolKeyHash[:lcommon.Blake2b224Size-1]
 			case "vrf":
-				pool.VrfKeyHash = pool.VrfKeyHash[:lcommon.Blake2b256Size-1]
+				reg := &pool.Registration[0]
+				reg.VrfKeyHash = reg.VrfKeyHash[:lcommon.Blake2b256Size-1]
 			case "reward account":
-				pool.RewardAccount = pool.RewardAccount[:lcommon.Blake2b224Size-1]
+				reg := &pool.Registration[0]
+				reg.RewardAccount = reg.RewardAccount[:lcommon.Blake2b224Size-1]
 			case "owner":
 				ownerKeyHash := pool.Registration[0].Owners[0].KeyHash
 				pool.Registration[0].Owners[0].KeyHash =
@@ -169,7 +186,7 @@ func TestPoolVrfKeyHashesRejectsMalformedReturnedPoolKey(t *testing.T) {
 	ls := &LedgerState{db: db}
 
 	_, err := ls.poolVrfKeyHashes(
-		[]lcommon.PoolKeyHash{lcommon.PoolKeyHash{}},
+		[]lcommon.PoolKeyHash{{}},
 		nil,
 		nil,
 	)
