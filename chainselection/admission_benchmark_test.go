@@ -126,7 +126,7 @@ func BenchmarkRebuildPendingPeerTipAdmissions(b *testing.B) {
 
 func BenchmarkRebuildPendingPeerTipAdmissionsMaxBacklog(b *testing.B) {
 	cs, _ := admissionCostFixture(2161)
-	for peer := 0; peer < admissionCostPeerCount-1; peer++ {
+	for peer := range admissionCostPeerCount - 1 {
 		connID := newTestConnectionId(100 + peer)
 		baseBlock := uint64(10_000 + peer)
 		for admissionID := uint64(2); admissionID <= maxPendingPeerTipAdmissions; admissionID++ {
