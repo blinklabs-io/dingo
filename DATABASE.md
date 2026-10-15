@@ -111,13 +111,6 @@ full planner-statistics update runs instead. Resumed Mithril imports and other
 completed backfills retain the full update path. PostgreSQL and MySQL report
 the operation unsupported and use that fallback.
 
-Statistics recorded at startup can understate tables that block application
-then fills, and stay that way until the next epoch rollover. The account
-registration and delegation history queries therefore read the certificate's
-`transaction` columns through primary-key lookups in scalar subqueries rather
-than a `JOIN`, so a stale `transaction` row count cannot make the planner scan
-that table once per matching certificate.
-
 A run counts as having changed statistics when a 64-bit FNV-1a hash of every
 `sqlite_stat1` row (`tbl`, `idx` and `stat`, in order) differs before and
 after. Only then does the store refresh state that keeps the old

@@ -739,18 +739,6 @@ GROUP BY credential_tag, staking_key`,
 	return ret, nil
 }
 
-// certTxColumn selects one column of the transaction a certificate belongs to
-// by primary-key lookup. A JOIN lets the planner choose a full scan of
-// "transaction" whenever sqlite_stat1 records it as nearly empty, which is
-// the state after a Mithril bootstrap until the next epoch rollover; the
-// lookup is a rowid seek whatever the statistics say. A certificate row
-// always has its transaction row, so the lookup never yields NULL where the
-// join would have dropped the row.
-func certTxColumn(column string) string {
-	return `(SELECT tx.` + column + ` FROM "transaction" tx ` +
-		`WHERE tx.id = certs.transaction_id)`
-}
-
 func accountDelegationHistoryQuery(
 	credentialTag uint8,
 	stakingKey []byte,
@@ -760,20 +748,17 @@ func accountDelegationHistoryQuery(
 	for _, source := range accountDelegationHistorySources {
 		parts = append(parts, fmt.Sprintf(`
 SELECT %[1]s.added_slot AS added_slot,
-       %[2]s AS block_index,
+       tx.block_index AS block_index,
        certs.cert_index AS cert_index,
-       %[3]s AS tx_hash,
+       tx.hash AS tx_hash,
        %[1]s.pool_key_hash AS pool_key_hash,
-       %[4]s AS tx_slot,
-       %[5]s AS block_hash
+       tx.slot AS tx_slot,
+       tx.block_hash AS block_hash
 FROM %[1]s
 JOIN certs ON certs.id = %[1]s.certificate_id AND certs.cert_type = ?
+JOIN "transaction" tx ON tx.id = certs.transaction_id
 WHERE %[1]s.credential_tag = ? AND %[1]s.staking_key = ?`,
 			source.table,
-			certTxColumn("block_index"),
-			certTxColumn("hash"),
-			certTxColumn("slot"),
-			certTxColumn("block_hash"),
 		))
 		args = append(args, source.certType, credentialTag, stakingKey)
 	}
@@ -805,22 +790,19 @@ func accountRegistrationHistoryQuery(
 		}
 		parts = append(parts, fmt.Sprintf(`
 SELECT %[1]s.added_slot AS added_slot,
-       %[3]s AS block_index,
+       tx.block_index AS block_index,
        certs.cert_index AS cert_index,
-       %[4]s AS tx_hash,
+       tx.hash AS tx_hash,
        ? AS action,
        %[2]s AS deposit,
-       %[5]s AS tx_slot,
-       %[6]s AS block_hash
+       tx.slot AS tx_slot,
+       tx.block_hash AS block_hash
 FROM %[1]s
 JOIN certs ON certs.id = %[1]s.certificate_id AND certs.cert_type = ?
+JOIN "transaction" tx ON tx.id = certs.transaction_id
 WHERE %[1]s.credential_tag = ? AND %[1]s.staking_key = ?`,
 			source.table,
 			deposit,
-			certTxColumn("block_index"),
-			certTxColumn("hash"),
-			certTxColumn("slot"),
-			certTxColumn("block_hash"),
 		))
 		args = append(
 			args,
