@@ -320,7 +320,9 @@ func TestPeriodicTickDoesNotOverlapEpochRun(t *testing.T) {
 	t.Parallel()
 	u := newFakeUpdater()
 	m := newTestManager(u, event.NewEventBus(nil, nil))
-	tick := make(chan time.Time)
+	// Buffered like time.Ticker's channel, so the tick is pending for the
+	// whole window below rather than racing a sender goroutine.
+	tick := make(chan time.Time, 1)
 	m.newTick = func() (<-chan time.Time, func()) {
 		return tick, func() {}
 	}
@@ -332,12 +334,7 @@ func TestPeriodicTickDoesNotOverlapEpochRun(t *testing.T) {
 
 	m.handleEpochTransition(epochEvent([]byte{1}))
 	require.Equal(t, "epoch", receive(t, u.entered, "epoch run"))
-	go func() {
-		select {
-		case tick <- time.Time{}:
-		case <-time.After(testWait):
-		}
-	}()
+	tick <- time.Time{}
 	require.Never(t, func() bool { return u.calls.Load() > 1 },
 		200*time.Millisecond, 10*time.Millisecond,
 		"a tick must wait for the run in flight")

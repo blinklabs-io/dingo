@@ -126,16 +126,13 @@ func TestPeriodicTickReanalyzesGrownTables(t *testing.T) {
 		)
 		require.NoError(t, err)
 	}
-	utxoStat := func() string {
+	utxoStat := func() (string, error) {
 		var stat string
 		err := probe.QueryRow(
 			"SELECT stat FROM sqlite_stat1 WHERE tbl = 'utxo' " +
 				"ORDER BY idx LIMIT 1",
 		).Scan(&stat)
-		if err != nil {
-			return ""
-		}
-		return stat
+		return stat, err
 	}
 
 	insertUtxos(1, 10)
@@ -148,20 +145,28 @@ func TestPeriodicTickReanalyzesGrownTables(t *testing.T) {
 	plannerstats.SetTickSource(manager, tick)
 	_, err = manager.RunStartup(context.Background())
 	require.NoError(t, err)
-	recorded := utxoStat()
+	recorded, err := utxoStat()
+	require.NoError(t, err, "the startup run must record utxo")
 	require.NotEmpty(t, recorded, "the startup run must record utxo")
 
 	require.NoError(t, manager.Start(t.Context()))
 	defer func() { require.NoError(t, manager.Stop()) }()
 	insertUtxos(11, 2000)
-	require.Equal(t, recorded, utxoStat(), "statistics must still be stale")
+	stale, err := utxoStat()
+	require.NoError(t, err)
+	require.Equal(t, recorded, stale, "statistics must still be stale")
 
 	select {
 	case tick <- time.Time{}:
 	case <-time.After(30 * time.Second):
 		t.Fatal("timed out handing the periodic tick to the worker")
 	}
-	require.Eventually(t, func() bool { return utxoStat() != recorded },
+	// A failed read is not a changed statistic; only a readable, different
+	// row proves the re-analysis.
+	require.Eventually(t, func() bool {
+		stat, err := utxoStat()
+		return err == nil && stat != recorded
+	},
 		30*time.Second, 20*time.Millisecond,
 		"the periodic run must re-analyze the grown utxo table")
 }
