@@ -224,24 +224,21 @@ func listRuleSamples(root, rule string) ([]sample, error) {
 	}
 	var files []sample
 	for _, entry := range entries {
-		if entry.Name() == "expected" {
+		switch entry.Name() {
+		case "expected":
 			if !entry.IsDir() {
 				return nil, fmt.Errorf("expected output path is not a directory: %s", filepath.Join(ruleDir, entry.Name()))
 			}
-			continue
-		}
-		if entry.Name() == "valid" {
+		case "valid":
 			if !entry.IsDir() {
 				return nil, fmt.Errorf("valid sample path is not a directory: %s", filepath.Join(ruleDir, entry.Name()))
 			}
-			validFiles, err := listCategoryFiles(root, rule, "valid")
+			validFiles, err := listCategoryFiles(root, rule, "valid", "valid")
 			if err != nil {
 				return nil, err
 			}
 			files = append(files, validFiles...)
-			continue
-		}
-		if entry.Name() == "invalid" {
+		case "invalid":
 			if !entry.IsDir() {
 				return nil, fmt.Errorf("invalid sample path is not a directory: %s", filepath.Join(ruleDir, entry.Name()))
 			}
@@ -253,15 +250,28 @@ func listRuleSamples(root, rule string) ([]sample, error) {
 				if !zapEntry.IsDir() || !validZapCategory(zapEntry.Name()) {
 					return nil, fmt.Errorf("unexpected invalid category for %s: %s", rule, zapEntry.Name())
 				}
-				zapFiles, err := listCategoryFiles(root, rule, filepath.Join("invalid", zapEntry.Name()))
+				category := filepath.Join("invalid", zapEntry.Name())
+				zapFiles, err := listCategoryFiles(root, rule, category, category)
 				if err != nil {
 					return nil, err
 				}
 				files = append(files, zapFiles...)
 			}
-			continue
+		default:
+			if !entry.IsDir() || !strings.HasPrefix(entry.Name(), "invalid-") {
+				return nil, fmt.Errorf("unexpected entry in rule directory %s: %s", rule, entry.Name())
+			}
+			zapCategory := strings.TrimPrefix(entry.Name(), "invalid-")
+			if !validZapCategory(zapCategory) {
+				return nil, fmt.Errorf("unexpected invalid category for %s: %s", rule, entry.Name())
+			}
+			category := filepath.Join("invalid", zapCategory)
+			zapFiles, err := listCategoryFiles(root, rule, entry.Name(), category)
+			if err != nil {
+				return nil, err
+			}
+			files = append(files, zapFiles...)
 		}
-		return nil, fmt.Errorf("unexpected entry in rule directory %s: %s", rule, entry.Name())
 	}
 	return files, nil
 }
@@ -270,26 +280,46 @@ func validZapCategory(name string) bool {
 	return name == "zap-0" || name == "zap-1" || name == "zap-2" || name == "zap-3"
 }
 
-func listCategoryFiles(root, rule, category string) ([]sample, error) {
-	categoryDir := filepath.Join(root, rule, category)
+func listCategoryFiles(root, rule, sourceCategory, category string) ([]sample, error) {
+	categoryDir := filepath.Join(root, rule, sourceCategory)
 	entries, err := os.ReadDir(categoryDir)
 	if err != nil {
 		return nil, fmt.Errorf("read sample category %s/%s: %w", rule, category, err)
 	}
 	files := make([]sample, 0, len(entries))
 	for _, entry := range entries {
-		if entry.IsDir() || filepath.Ext(entry.Name()) != ".cbor" {
+		if entry.IsDir() {
 			return nil, fmt.Errorf("unexpected sample entry in %s/%s: %s", rule, category, entry.Name())
 		}
-		name := filepath.ToSlash(filepath.Join(rule, category, strings.TrimSuffix(entry.Name(), ".cbor")))
-		file := sample{
-			rule:     rule,
-			category: filepath.ToSlash(category),
-			name:     name,
-			path:     filepath.Join(categoryDir, entry.Name()),
+		filename := entry.Name()
+		var sampleName string
+		var expectPath string
+		switch {
+		case strings.HasSuffix(filename, ".expected.cbor"):
+			if category != "valid" {
+				return nil, fmt.Errorf("unexpected sample entry in %s/%s: %s", rule, category, filename)
+			}
+			continue
+		case strings.HasSuffix(filename, ".input.cbor"):
+			sampleName = strings.TrimSuffix(filename, ".input.cbor")
+			if category == "valid" {
+				expectPath = filepath.Join(categoryDir, sampleName+".expected.cbor")
+			}
+		case strings.HasSuffix(filename, ".cbor"):
+			sampleName = strings.TrimSuffix(filename, ".cbor")
+			if category == "valid" {
+				expectPath = filepath.Join(root, rule, "expected", filename)
+			}
+		default:
+			return nil, fmt.Errorf("unexpected sample entry in %s/%s: %s", rule, category, filename)
 		}
-		if category == "valid" {
-			file.expectPath = filepath.Join(root, rule, "expected", entry.Name())
+		name := filepath.ToSlash(filepath.Join(rule, category, sampleName))
+		file := sample{
+			rule:       rule,
+			category:   filepath.ToSlash(category),
+			name:       name,
+			path:       filepath.Join(categoryDir, filename),
+			expectPath: expectPath,
 		}
 		files = append(files, file)
 	}

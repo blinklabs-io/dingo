@@ -536,8 +536,8 @@ jobs:
         if: github.ref_type == 'tag'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
         with:
-          repository: etorreborre/cardano-cbor-dataset
-          ref: 94260f96bc419bf66be0b5d1dd121695e889662e
+          repository: r2rationality/cardano-cbor-dataset
+          ref: main
           path: .conformance/cardano-cbor-dataset
           persist-credentials: false
       - name: Generate CBOR conformance report
@@ -548,7 +548,7 @@ jobs:
           report_date="$(date -u +%Y%m%d)"
           report_name="dingo-${RELEASE_TAG#v}-${report_date}-cbor-conformance.json"
           go run ./internal/cborconformance/cmd \
-            -dataset .conformance/cardano-cbor-dataset/dataset/conway-123-100 \
+            -dataset .conformance/cardano-cbor-dataset/dataset/conway \
             -output "dist/${report_name}"
       - name: Upload release assets
         if: github.ref_type == 'tag'

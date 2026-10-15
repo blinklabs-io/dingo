@@ -58,6 +58,54 @@ func TestGenerateReport(t *testing.T) {
 	}
 }
 
+func TestGenerateReportPrimaryDatasetLayout(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	corpus := filepath.Join(root, "conway")
+	validDir := filepath.Join(corpus, "credential", "valid")
+	zapZeroDir := filepath.Join(corpus, "credential", "invalid-zap-0")
+	zapOneDir := filepath.Join(corpus, "credential", "invalid-zap-1")
+	for _, dir := range []string{validDir, zapZeroDir, zapOneDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	valid, err := hex.DecodeString("8200581c00000000000000000000000000000000000000000000000000000000")
+	if err != nil {
+		t.Fatal(err)
+	}
+	write := func(path string, data []byte) {
+		t.Helper()
+		if err := os.WriteFile(path, data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(filepath.Join(validDir, "00001-valid.input.cbor"), valid)
+	write(filepath.Join(validDir, "00001-valid.expected.cbor"), valid)
+	write(filepath.Join(zapZeroDir, "00001-invalid.input.cbor"), []byte{0xf6})
+	write(filepath.Join(zapOneDir, "00001-mutation.input.cbor"), []byte{0x80})
+
+	report, err := GenerateReport(corpus)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !report.Successful {
+		t.Fatalf("report has failures: %+v", report.Failures)
+	}
+	want := Outcome{
+		GeneratedTotal:                    2,
+		GeneratedDecodedReencodedExpected: 1,
+		GeneratedDecodedReencodedActual:   1,
+		GeneratedMustBeRejectedExpected:   1,
+		GeneratedMustBeRejectedActual:     1,
+		ZapMustBeRejectedExpected:         1,
+		ZapMustBeRejectedActual:           1,
+	}
+	if report.Totals != want {
+		t.Fatalf("totals = %+v, want %+v", report.Totals, want)
+	}
+}
+
 func TestGenerateReportClassifiesAcceptedMutation(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
