@@ -892,14 +892,31 @@ func (m *mockRedeemers) Indexes(
 	return nil
 }
 
+// Value and Iter return the configured redeemers. One without data gets an
+// empty constructor, because the evaluator rejects a nil PlutusData argument.
 func (m *mockRedeemers) Value(
-	_ uint,
-	_ lcommon.RedeemerTag,
+	index uint,
+	tag lcommon.RedeemerTag,
 ) lcommon.RedeemerValue {
+	value := lcommon.RedeemerValue{}
 	if m.valueOverride != nil {
-		return *m.valueOverride
+		value = *m.valueOverride
+	} else {
+		for _, entry := range m.entries {
+			if uint(entry.key.Index) == index && entry.key.Tag == tag {
+				value = entry.val
+				break
+			}
+		}
 	}
-	return lcommon.RedeemerValue{}
+	return withRedeemerData(value)
+}
+
+func withRedeemerData(value lcommon.RedeemerValue) lcommon.RedeemerValue {
+	if value.Data.Data == nil {
+		value.Data = lcommon.Datum{Data: data.NewConstr(0)}
+	}
+	return value
 }
 
 func (m *mockRedeemers) Iter() iter.Seq2[lcommon.RedeemerKey, lcommon.RedeemerValue] {
@@ -907,7 +924,7 @@ func (m *mockRedeemers) Iter() iter.Seq2[lcommon.RedeemerKey, lcommon.RedeemerVa
 		yield func(lcommon.RedeemerKey, lcommon.RedeemerValue) bool,
 	) {
 		for _, e := range m.entries {
-			if !yield(e.key, e.val) {
+			if !yield(e.key, withRedeemerData(e.val)) {
 				return
 			}
 		}
