@@ -2700,16 +2700,7 @@ WHERE p.id IN (`+bindPlaceholders(len(args))+`)`,
 	return ret, nil
 }
 
-// GetPoolRegistrations reconstructs the ledger certificates for a pool.
-func (s *Store) GetPoolRegistrations(
-	poolKeyHash lcommon.PoolKeyHash,
-	txn types.Txn,
-) ([]lcommon.PoolRegistrationCertificate, error) {
-	db, ctx, err := s.readDBFromTxn(txn)
-	if err != nil {
-		return nil, err
-	}
-	rows, err := db.QueryContext(ctx, `
+const poolRegistrationsSQL = `
 	SELECT p.margin, p.metadata_url, p.vrf_key_hash, p.pool_key_hash, p.reward_account,
 	       p.reward_account_credential_tag, p.metadata_hash, p.pledge, p.cost,
 	       p.certificate_id, p.id, p.pool_id, p.added_slot, p.deposit_amount,
@@ -2723,7 +2714,18 @@ LEFT JOIN "transaction" tx ON tx.id = c.transaction_id
 WHERE p.pool_key_hash = ?
 ORDER BY p.added_slot DESC, COALESCE(tx.block_index, 0) DESC,
          COALESCE(c.cert_index, 0) DESC, p.registration_index DESC,
-         p.id DESC`,
+         p.id DESC`
+
+// GetPoolRegistrations reconstructs the ledger certificates for a pool.
+func (s *Store) GetPoolRegistrations(
+	poolKeyHash lcommon.PoolKeyHash,
+	txn types.Txn,
+) ([]lcommon.PoolRegistrationCertificate, error) {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := db.QueryContext(ctx, poolRegistrationsSQL,
 		poolKeyHash.Bytes(),
 	)
 	if err != nil {

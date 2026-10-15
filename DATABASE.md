@@ -100,7 +100,11 @@ plans as a scan of `idx_utxo_deleted_payment_script (deleted_slot=?)` instead
 of a seek on `tx_id_output_idx`. `Store.OptimizePlannerStatsContext` runs
 `PRAGMA optimize(0x10002)` (every table, exact rather than sampled statistics)
 on the write connection, outside any transaction, at startup before block
-processing begins and after each epoch rollover commits. Tables without
+processing begins, after each epoch rollover commits, and once a minute in
+between: statistics recorded at startup can understate tables that block
+application then fills (a node bootstrapped from Mithril records `transaction`
+and `certs` at almost no rows), and every query that reaches `transaction`
+through `certs` then plans a full scan per lookup until the next run. Tables without
 statistics are always analyzed; tables with them only after roughly 25-fold
 growth, so a repeat run is near-free, while the first run on a large database
 analyzes every table and takes minutes. The write pool has one connection, so
