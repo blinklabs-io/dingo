@@ -25,6 +25,7 @@ import (
 	"reflect"
 	"runtime"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/ledger/hardfork"
@@ -460,6 +461,25 @@ func TestEraUtxoValidationRuleCompositions(t *testing.T) {
 			for _, rule := range era.built {
 				byIndex[rule.index] = rule.validationFunc
 			}
+			for index, descriptor := range era.descriptors {
+				if descriptor.Id != lcommon.UtxoValidationRuleSignatures {
+					continue
+				}
+				require.Contains(
+					t,
+					byIndex,
+					index,
+					"signature rule must still run",
+				)
+				require.True(
+					t,
+					strings.Contains(
+						utxoValidationRuleName(byIndex[index]),
+						"reusePreverifiedSignatures",
+					),
+					"signature rule must use the preverification-aware wrapper",
+				)
+			}
 
 			for index, id := range replacedIndexes {
 				replacement := era.replaced[id]
@@ -489,12 +509,15 @@ func TestEraUtxoValidationRuleCompositions(t *testing.T) {
 					index,
 					"upstream rule %s must still run", id,
 				)
-				require.Equal(
-					t,
-					utxoValidationRuleName(era.upstream[index]),
-					utxoValidationRuleName(byIndex[index]),
-					"upstream rule %s must run the upstream implementation", id,
-				)
+				if id != lcommon.UtxoValidationRuleSignatures {
+					require.Equal(
+						t,
+						utxoValidationRuleName(era.upstream[index]),
+						utxoValidationRuleName(byIndex[index]),
+						"upstream rule %s must run the upstream implementation",
+						id,
+					)
+				}
 			}
 		})
 	}
@@ -619,6 +642,78 @@ type mockTransaction struct {
 	lcommon.Transaction
 	cbor   []byte
 	txType int
+}
+
+type preverifiedMockLedgerState struct {
+	*mockLedgerState
+	signatures *lcommon.PreverifiedSignatures
+}
+
+func (s *preverifiedMockLedgerState) PreverifiedSignatures() *lcommon.PreverifiedSignatures {
+	return s.signatures
+}
+
+func TestReusePreverifiedSignaturesScopesAndUnwrapsRule(t *testing.T) {
+	t.Parallel()
+
+	tx := &conway.ConwayTransaction{}
+	bodyCbor, err := cbor.Encode(&tx.Body)
+	require.NoError(t, err)
+	tx.Body.SetCbor(bodyCbor)
+	sentinel := errors.New("signature rule failed")
+
+	t.Run("matching result uses transaction-scoped state", func(t *testing.T) {
+		t.Parallel()
+		state := &preverifiedMockLedgerState{
+			mockLedgerState: &mockLedgerState{},
+			signatures:      lcommon.PreverifySignatures(tx),
+		}
+		rule := reusePreverifiedSignatures(func(
+			_ lcommon.Transaction,
+			_ uint64,
+			ls lcommon.LedgerState,
+			_ lcommon.ProtocolParameters,
+		) error {
+			require.NotSame(t, state, ls)
+			require.Same(t, state, lcommon.UnwrapLedgerState(ls))
+			return nil
+		})
+		require.NoError(t, rule(tx, 10, state, nil))
+	})
+
+	t.Run("rule error retains its original identity", func(t *testing.T) {
+		t.Parallel()
+		state := &preverifiedMockLedgerState{
+			mockLedgerState: &mockLedgerState{},
+			signatures:      lcommon.PreverifySignatures(tx),
+		}
+		rule := reusePreverifiedSignatures(func(
+			lcommon.Transaction,
+			uint64,
+			lcommon.LedgerState,
+			lcommon.ProtocolParameters,
+		) error {
+			return sentinel
+		})
+		require.ErrorIs(t, rule(tx, 10, state, nil), sentinel)
+	})
+
+	t.Run("nil result keeps the ordinary rule path", func(t *testing.T) {
+		t.Parallel()
+		state := &preverifiedMockLedgerState{
+			mockLedgerState: &mockLedgerState{},
+		}
+		rule := reusePreverifiedSignatures(func(
+			_ lcommon.Transaction,
+			_ uint64,
+			ls lcommon.LedgerState,
+			_ lcommon.ProtocolParameters,
+		) error {
+			require.Same(t, state, ls)
+			return sentinel
+		})
+		require.ErrorIs(t, rule(tx, 10, state, nil), sentinel)
+	})
 }
 
 func (m *mockTransaction) Cbor() []byte {
