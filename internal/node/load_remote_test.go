@@ -50,6 +50,20 @@ func (f remoteImmutableRoundTripFunc) RoundTrip(
 	return f(req)
 }
 
+func newRemoteImmutableTestClientAndBudget(
+	t *testing.T,
+	rootURL string,
+	dir string,
+	limits remoteImmutableLimits,
+) (*http.Client, *remoteImmutableBudget) {
+	t.Helper()
+	client, err := newRemoteImmutableHTTPClient(rootURL)
+	require.NoError(t, err)
+	budget, err := newRemoteImmutableBudget(dir, limits)
+	require.NoError(t, err)
+	return client, budget
+}
+
 func TestClassifyRemoteImmutableSource(t *testing.T) {
 	t.Parallel()
 	for source, want := range map[string]bool{
@@ -104,14 +118,14 @@ func TestRemoteImmutableRedirectRejectsHTTPSDowngrade(t *testing.T) {
 	require.NoError(t, err)
 	require.ErrorContains(
 		t,
-		checkRemoteImmutableRedirect(req, []*http.Request{
+		(remoteImmutableNetworkPolicy{}).checkRedirect(req, []*http.Request{
 			{URL: &url.URL{Scheme: "http", Host: "localhost:8080"}},
 			{URL: &url.URL{Scheme: "https", Host: "cdn.example"}},
 		}),
 		"requires HTTPS",
 	)
 	req.URL = &url.URL{Scheme: "https", Host: "cdn.example"}
-	require.NoError(t, checkRemoteImmutableRedirect(req, nil))
+	require.NoError(t, (remoteImmutableNetworkPolicy{}).checkRedirect(req, nil))
 }
 
 func TestRemoteImmutableRedirectRejectsPrivateHTTPS(t *testing.T) {
@@ -120,7 +134,7 @@ func TestRemoteImmutableRedirectRejectsPrivateHTTPS(t *testing.T) {
 		Scheme: "https",
 		Host:   "127.0.0.1",
 	}}
-	err := checkRemoteImmutableRedirect(req, []*http.Request{{URL: &url.URL{
+	err := (remoteImmutableNetworkPolicy{}).checkRedirect(req, []*http.Request{{URL: &url.URL{
 		Scheme: "https",
 		Host:   "cdn.example",
 	}}})
@@ -182,6 +196,48 @@ func TestRemoteImmutableBudgetPreservesFreeSpace(t *testing.T) {
 	require.ErrorIs(t, err, errRemoteImmutableFreeSpace)
 	require.Zero(t, budget.total)
 	require.Zero(t, budget.active)
+}
+
+func TestRemoteImmutableBudgetReservesFreeSpaceForOutstandingWrites(
+	t *testing.T,
+) {
+	t.Parallel()
+	budget := &remoteImmutableBudget{
+		files: make(map[string]int64),
+		limits: remoteImmutableLimits{
+			imported: 10, cache: 10, minFree: 5, concurrent: 2,
+		},
+		freeDisk: func(string) (uint64, error) { return 9, nil },
+	}
+	path := filepath.Join(t.TempDir(), "part")
+	require.NoError(t, budget.reserveWrite(path, 4))
+	require.EqualValues(t, 4, budget.reserved)
+	require.ErrorIs(t, budget.reserveWrite(path+"-other", 1), errRemoteImmutableFreeSpace)
+	require.EqualValues(t, 4, budget.reserved)
+
+	budget.completeWrite(path, 4, 4)
+	require.Zero(t, budget.reserved)
+	require.EqualValues(t, 4, budget.active)
+}
+
+func TestRemoteImmutableBudgetRenameReplacesExistingAccounting(t *testing.T) {
+	t.Parallel()
+	budget := &remoteImmutableBudget{
+		active: 10,
+		total:  10,
+		files: map[string]int64{
+			"staging/part": 4,
+			"ready/chunk":  6,
+		},
+	}
+
+	budget.rename("staging/part", "ready/chunk")
+
+	require.EqualValues(t, 4, budget.active)
+	require.EqualValues(t, 10, budget.total)
+	require.EqualValues(t, 4, budget.files["ready/chunk"])
+	_, exists := budget.files["staging/part"]
+	require.False(t, exists)
 }
 
 func TestRemoteImmutableBudgetKeepsFailedTruncateAccounted(t *testing.T) {
@@ -495,6 +551,29 @@ func TestCopyBlocksRemoteEnforcesAggregateImportBudgetAndCleansStaging(
 	require.ErrorIs(t, statErr, os.ErrNotExist)
 }
 
+func TestCopyBlocksRemoteCleansStagingWhenBudgetInitializationFails(
+	t *testing.T,
+) {
+	t.Parallel()
+	root := newRemoteRoot(t, 1)
+	load := newRemoteLoad(t)
+	load.limits.imported = 1
+	load.limits.cache = 1
+	rootURL := root.serve(t)
+	sourceCache, err := remoteImmutableSourceCache(load.cacheDir, rootURL)
+	require.NoError(t, err)
+	stagingDir := filepath.Join(sourceCache, "staging")
+	require.NoError(t, os.MkdirAll(stagingDir, 0o750))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(stagingDir, "stale.part"), []byte("stale"), 0o600,
+	))
+
+	_, err = load.run(context.Background(), rootURL)
+	require.ErrorIs(t, err, errRemoteImmutableCacheBudget)
+	_, statErr := os.Stat(stagingDir)
+	require.ErrorIs(t, statErr, os.ErrNotExist)
+}
+
 // TestCopyBlocksRemoteHoldsChunksCompletedOutOfOrder holds chunk 0 until
 // chunk 2 has downloaded, and chunk 1 until chunk 0 is copied, so chunk 2 is
 // complete while chunk 1 is not. Copying must not see chunk 2 before chunk 1.
@@ -583,9 +662,15 @@ func TestFetchRemoteChunkValidatesIndexesBeforeChunkBody(t *testing.T) {
 	require.NoError(t, os.WriteFile(primary, data, 0o600))
 	limits, err := remoteImmutableLimitsForSlots(4_320, true)
 	require.NoError(t, err)
-	err = fetchRemoteChunk(
-		context.Background(), strings.TrimRight(root.serve(t), "/"),
-		t.TempDir(), 0, limits,
+	rootURL := strings.TrimRight(root.serve(t), "/")
+	limits, err = limits.withChunkCount(1)
+	require.NoError(t, err)
+	dir := t.TempDir()
+	client, budget := newRemoteImmutableTestClientAndBudget(
+		t, rootURL, dir, limits,
+	)
+	err = fetchRemoteChunkWithClient(
+		context.Background(), client, budget, rootURL, dir, 0, limits,
 	)
 	require.ErrorContains(t, err, "unsupported primary index version")
 	require.False(t, root.requested("00000.chunk"))
@@ -722,8 +807,14 @@ func TestFetchRemoteFileOnceRejectsBodyPastFormatLimit(t *testing.T) {
 	))
 	t.Cleanup(server.Close)
 	partPath := filepath.Join(t.TempDir(), "00000.chunk.part")
-	err := fetchRemoteFileOnce(
-		context.Background(), server.URL+"/00000.chunk", partPath, limit,
+	client, budget := newRemoteImmutableTestClientAndBudget(
+		t, server.URL, filepath.Dir(partPath), remoteImmutableLimits{
+			imported: limit + 1, cache: limit + 1, concurrent: 1,
+		},
+	)
+	err := fetchRemoteFileOnceWithClient(
+		context.Background(), client, budget,
+		server.URL+"/00000.chunk", partPath, limit,
 	)
 	require.ErrorIs(t, err, errRemoteImmutableFileTooLarge)
 	_, statErr := os.Stat(partPath)
@@ -741,9 +832,14 @@ func TestFetchRemoteFileOnceRedactsURLCredentials(t *testing.T) {
 	u, err := url.Parse(server.URL + "/00000.chunk")
 	require.NoError(t, err)
 	u.User = url.UserPassword("archive-user", "archive-secret")
-	err = fetchRemoteFileOnce(
-		context.Background(), u.String(),
-		filepath.Join(t.TempDir(), "00000.chunk.part"), 16,
+	partPath := filepath.Join(t.TempDir(), "00000.chunk.part")
+	client, budget := newRemoteImmutableTestClientAndBudget(
+		t, server.URL, filepath.Dir(partPath), remoteImmutableLimits{
+			imported: 17, cache: 17, concurrent: 1,
+		},
+	)
+	err = fetchRemoteFileOnceWithClient(
+		context.Background(), client, budget, u.String(), partPath, 16,
 	)
 	require.Error(t, err)
 	require.NotContains(t, err.Error(), "archive-user")
@@ -772,12 +868,8 @@ func TestRemoteImmutableMalformedURLsRedactCredentials(t *testing.T) {
 	const malformed = "https://archive-user:archive-secret@example.invalid/%zz"
 	_, classifyErr := classifyRemoteImmutableSource(malformed)
 	_, canonicalErr := canonicalRemoteImmutableRoot(malformed)
-	_, tipErr := fetchRemoteImmutableTip(context.Background(), malformed)
-	fileErr := fetchRemoteFileOnce(
-		context.Background(), malformed,
-		filepath.Join(t.TempDir(), "00000.chunk.part"), 16,
-	)
-	for _, err := range []error{classifyErr, canonicalErr, tipErr, fileErr} {
+	_, clientErr := newRemoteImmutableHTTPClient(malformed)
+	for _, err := range []error{classifyErr, canonicalErr, clientErr} {
 		require.Error(t, err)
 		require.NotContains(t, err.Error(), "archive-user")
 		require.NotContains(t, err.Error(), "archive-secret")

@@ -117,12 +117,19 @@ func (l remoteImmutableLimits) withImportRange(
 func (l remoteImmutableLimits) withChunkCount(
 	requested uint64,
 ) (remoteImmutableLimits, error) {
-	if requested > math.MaxUint64-uint64(l.concurrent) {
+	if l.concurrent <= 0 || l.concurrent > remoteImmutablePrefetch ||
+		l.primary <= 0 || l.secondary <= 0 || l.chunk <= 0 {
+		return remoteImmutableLimits{}, errors.New(
+			"invalid remote ImmutableDB chunk limits",
+		)
+	}
+	concurrent := uint64(l.concurrent) //nolint:gosec // positive and bounded above
+	if requested > math.MaxUint64-concurrent {
 		return remoteImmutableLimits{}, errors.New(
 			"remote ImmutableDB import range overflows uint64",
 		)
 	}
-	fetched := requested + uint64(l.concurrent)
+	fetched := requested + concurrent
 	if l.primary > math.MaxInt64-l.secondary ||
 		l.primary+l.secondary > math.MaxInt64-l.chunk {
 		return remoteImmutableLimits{}, errors.New(
@@ -131,7 +138,8 @@ func (l remoteImmutableLimits) withChunkCount(
 	}
 	triad := l.primary + l.secondary + l.chunk
 	if fetched > uint64(math.MaxInt64)/uint64(remoteImmutableAttempts) ||
-		fetched*uint64(remoteImmutableAttempts) > uint64(math.MaxInt64/triad) {
+		fetched*uint64(remoteImmutableAttempts) >
+			uint64(math.MaxInt64/triad) { //nolint:gosec // triad is positive above
 		return remoteImmutableLimits{}, errors.New(
 			"remote ImmutableDB aggregate import limit overflows int64",
 		)
@@ -152,6 +160,7 @@ type remoteImmutableBudget struct {
 	mu       sync.Mutex
 	total    int64
 	active   int64
+	reserved int64
 	files    map[string]int64
 	limits   remoteImmutableLimits
 	freeDisk func(string) (uint64, error)
@@ -224,27 +233,36 @@ func (b *remoteImmutableBudget) reserveWrite(path string, size int) error {
 	if err != nil {
 		return fmt.Errorf("checking remote ImmutableDB free disk space: %w", err)
 	}
-	required := uint64(n) //nolint:gosec // n is positive above
-	if uint64(b.limits.minFree) > math.MaxUint64-required ||
-		free < uint64(b.limits.minFree)+required { //nolint:gosec // minFree is validated
+	required := uint64(n)               //nolint:gosec // n is positive above
+	minFree := uint64(b.limits.minFree) //nolint:gosec // minFree is validated
+	reserved := uint64(b.reserved)      //nolint:gosec // reservations are positive
+	if minFree > math.MaxUint64-required ||
+		reserved > math.MaxUint64-minFree-required ||
+		free < minFree+required+reserved {
 		return fmt.Errorf(
-			"%w: %d bytes available, %d bytes must remain",
-			errRemoteImmutableFreeSpace, free, b.limits.minFree,
+			"%w: %d bytes available; this write, outstanding writes, and the free-space reserve do not fit",
+			errRemoteImmutableFreeSpace, free,
 		)
 	}
 	b.total += n
 	b.active += n
+	b.reserved += n
 	b.files[path] += n
 	return nil
 }
 
-func (b *remoteImmutableBudget) rollbackActive(path string, size int64) {
-	if size <= 0 {
-		return
-	}
+func (b *remoteImmutableBudget) completeWrite(
+	path string,
+	reserved int64,
+	written int64,
+) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	size = min(size, b.files[path])
+	b.reserved -= reserved
+	if written >= reserved {
+		return
+	}
+	size := min(reserved-written, b.files[path])
 	b.files[path] -= size
 	b.active -= size
 	if b.files[path] == 0 {
@@ -264,7 +282,8 @@ func (b *remoteImmutableBudget) rename(oldPath, newPath string) {
 	defer b.mu.Unlock()
 	size := b.files[oldPath]
 	delete(b.files, oldPath)
-	b.files[newPath] += size
+	b.active -= b.files[newPath]
+	b.files[newPath] = size
 }
 
 type remoteImmutableBudgetWriter struct {
@@ -278,9 +297,7 @@ func (w remoteImmutableBudgetWriter) Write(data []byte) (int, error) {
 		return 0, err
 	}
 	n, err := w.file.Write(data)
-	if n < len(data) {
-		w.budget.rollbackActive(w.path, int64(len(data)-n))
-	}
+	w.budget.completeWrite(w.path, int64(len(data)), int64(n))
 	return n, err
 }
 
@@ -534,13 +551,6 @@ func (p remoteImmutableNetworkPolicy) dialContext(
 	return nil, lastErr
 }
 
-func checkRemoteImmutableRedirect(
-	req *http.Request,
-	via []*http.Request,
-) error {
-	return (remoteImmutableNetworkPolicy{}).checkRedirect(req, via)
-}
-
 // remoteImmutableTip is the tip.json document a Genesis Sync Accelerator
 // style root publishes beside its chunk files.
 type remoteImmutableTip struct {
@@ -609,6 +619,9 @@ func copyBlocksRemote(
 			return 0, 0, err
 		}
 	}
+	defer func() {
+		_ = os.RemoveAll(stagingDir)
+	}()
 	for _, dir := range []string{stagingDir, readyDir} {
 		if err := os.MkdirAll(dir, 0o750); err != nil {
 			return 0, 0, fmt.Errorf("creating remote chunk cache: %w", err)
@@ -618,9 +631,6 @@ func copyBlocksRemote(
 	if err != nil {
 		return 0, 0, err
 	}
-	defer func() {
-		_ = os.RemoveAll(stagingDir)
-	}()
 
 	fetchCtx, cancelFetch := context.WithCancel(ctx)
 	pending := make([]chan error, 0, remoteImmutablePrefetch)
@@ -710,17 +720,6 @@ func copyBlocksRemote(
 	return blocksCopied, tip.Slot, nil
 }
 
-func fetchRemoteImmutableTip(
-	ctx context.Context,
-	rootURL string,
-) (remoteImmutableTip, error) {
-	client, err := newRemoteImmutableHTTPClient(rootURL)
-	if err != nil {
-		return remoteImmutableTip{}, err
-	}
-	return fetchRemoteImmutableTipWithClient(ctx, rootURL, client)
-}
-
 func fetchRemoteImmutableTipWithClient(
 	ctx context.Context,
 	rootURL string,
@@ -758,32 +757,6 @@ func fetchRemoteImmutableTipWithClient(
 // fetchRemoteChunk downloads one chunk triad into dir. A file already present
 // under its final name is complete, because it is only renamed into place
 // after a full download.
-func fetchRemoteChunk(
-	ctx context.Context,
-	rootURL string,
-	dir string,
-	chunk uint64,
-	limits remoteImmutableLimits,
-) error {
-	client, err := newRemoteImmutableHTTPClient(rootURL)
-	if err != nil {
-		return err
-	}
-	if limits.imported == 0 {
-		limits, err = limits.withChunkCount(1)
-		if err != nil {
-			return err
-		}
-	}
-	budget, err := newRemoteImmutableBudget(dir, limits)
-	if err != nil {
-		return err
-	}
-	return fetchRemoteChunkWithClient(
-		ctx, client, budget, rootURL, dir, chunk, limits,
-	)
-}
-
 func fetchRemoteChunkWithClient(
 	ctx context.Context,
 	client *http.Client,
@@ -834,14 +807,6 @@ func fetchRemoteChunkWithClient(
 		return err
 	}
 	return nil
-}
-
-func remoteImmutableFilePublished(ctx context.Context, fileURL string) (bool, error) {
-	client, err := newRemoteImmutableHTTPClient(fileURL)
-	if err != nil {
-		return false, err
-	}
-	return remoteImmutableFilePublishedWithClient(ctx, client, fileURL)
 }
 
 func remoteImmutableFilePublishedWithClient(
@@ -899,32 +864,6 @@ func remoteSecondarySize(primaryPath string, primaryLimit int64) (int64, error) 
 		return 0, errors.New("secondary index exceeds primary slot count")
 	}
 	return int64(offset), nil
-}
-
-func fetchRemoteFile(
-	ctx context.Context,
-	rootURL string,
-	dir string,
-	filename string,
-	maxBytes int64,
-	exactBytes int64,
-) error {
-	client, err := newRemoteImmutableHTTPClient(rootURL)
-	if err != nil {
-		return err
-	}
-	limits := remoteImmutableLimits{
-		imported:   max(maxBytes, 1),
-		cache:      max(maxBytes, 1),
-		concurrent: 1,
-	}
-	budget, err := newRemoteImmutableBudget(dir, limits)
-	if err != nil {
-		return err
-	}
-	return fetchRemoteFileWithClient(
-		ctx, client, budget, rootURL, dir, filename, maxBytes, exactBytes,
-	)
 }
 
 func fetchRemoteFileWithClient(
@@ -995,33 +934,6 @@ func validateRemoteFileSize(size, maxBytes, exactBytes int64) error {
 		)
 	}
 	return nil
-}
-
-// fetchRemoteFileOnce appends to a partial file left by an interrupted
-// attempt when the server honours the range, and restarts it otherwise.
-func fetchRemoteFileOnce(
-	ctx context.Context,
-	fileURL string,
-	partPath string,
-	maxBytes int64,
-) error {
-	client, err := newRemoteImmutableHTTPClient(fileURL)
-	if err != nil {
-		return err
-	}
-	limit := max(maxBytes, int64(1))
-	if limit < math.MaxInt64 {
-		limit++
-	}
-	budget, err := newRemoteImmutableBudget(filepath.Dir(partPath), remoteImmutableLimits{
-		imported: limit, cache: limit, concurrent: 1,
-	})
-	if err != nil {
-		return err
-	}
-	return fetchRemoteFileOnceWithClient(
-		ctx, client, budget, fileURL, partPath, maxBytes,
-	)
 }
 
 func fetchRemoteFileOnceWithClient(
