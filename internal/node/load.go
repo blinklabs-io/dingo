@@ -782,7 +782,12 @@ func LoadWithDB(
 	}
 	defer closeDB()
 	// Enable bulk-load optimizations if the metadata store supports them
-	defer WithBulkLoadPragmas(db, logger)()
+	cleanupBulkLoadPragmas := WithBulkLoadPragmas(db, logger)
+	defer func() {
+		if err := cleanupBulkLoadPragmas(); err != nil {
+			logger.Error("failed to restore normal settings", "error", err)
+		}
+	}()
 	deferredIndexes := WithDeferredIndexes(ctx, db, logger)
 	// Immutable load replays trusted block batches directly into the ledger, so
 	// it does not need the event-driven reread path here.
@@ -1109,7 +1114,12 @@ func LoadBlobsWithDB(
 	// management (avoids concurrent pragma modification if
 	// multiple goroutines share the same database).
 	if !callerProvidedDB {
-		defer WithBulkLoadPragmas(db, logger)()
+		cleanupBulkLoadPragmas := WithBulkLoadPragmas(db, logger)
+		defer func() {
+			if err := cleanupBulkLoadPragmas(); err != nil {
+				logger.Error("failed to restore normal settings", "error", err)
+			}
+		}()
 	}
 	// Load chain without event bus (no ledger processing)
 	cm, err := chain.NewManager(ctx, db, nil)

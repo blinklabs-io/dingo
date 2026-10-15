@@ -1247,7 +1247,11 @@ func Sync(
 	// goroutines so both importLedgerState and LoadBlobsWithDB
 	// share the same pragma settings without racing.
 	cleanupBulkLoadPragmas := node.WithBulkLoadPragmas(db, logger)
-	defer cleanupBulkLoadPragmas()
+	defer func() {
+		if err := cleanupBulkLoadPragmas(); err != nil {
+			logger.Error("failed to restore normal settings", "error", err)
+		}
+	}()
 
 	// A rejected pre-existing gap must be cleared before importing an
 	// ancillary state beyond ImmutableDB: cleanup rolls back UTxO rows by
