@@ -319,6 +319,24 @@ func (o *Ouroboros) fetchEndorserBlockByPointWithConnections(
 	connIds []ouroboros.ConnectionId,
 	getConnection func(ouroboros.ConnectionId) *ouroboros.Connection,
 ) error {
+	return o.fetchEndorserBlockWithCandidates(
+		ctx,
+		ebSlot,
+		ebHash,
+		connIds,
+		getConnection,
+		o.fetchEndorserBlockOnConn,
+	)
+}
+
+func (o *Ouroboros) fetchEndorserBlockWithCandidates(
+	ctx context.Context,
+	ebSlot uint64,
+	ebHash []byte,
+	connIds []ouroboros.ConnectionId,
+	getConnection func(ouroboros.ConnectionId) *ouroboros.Connection,
+	fetch func(context.Context, ouroboros.ConnectionId, *oleiosfetch.Client, ocommon.Point, time.Time) error,
+) error {
 	overall, hasDeadline := ctx.Deadline()
 	if !hasDeadline {
 		overall = time.Now().Add(leiosBackfillTotalBudget)
@@ -329,34 +347,56 @@ func (o *Ouroboros) fetchEndorserBlockByPointWithConnections(
 	// Order the connections for this attempt: recently-successful ones first
 	// (positive affinity), then other healthy ones, then ones cooling down from a
 	// recent failed fetch, then ones whose leios-fetch protocol is dead, each
-	// partition kept in round-robin order so concurrent backfills still spread.
-	// A live connection that offered this exact point is then moved first because
-	// leios-fetch has no not-found response. A cooled or dead connection is still
-	// eventually tried, so a transiently-flaky one is skipped, not starved.
-	order := leiosBackfillConnOrder(
+	// partition kept in round-robin order so concurrent backfills still spread. A
+	// cooled or dead connection is still eventually tried, so a transiently-flaky
+	// one is skipped, not starved.
+	candidates := o.leiosBackfillConnCandidatesForPoint(
 		connIds,
 		start,
+		point,
 		time.Now(),
-		leiosBackfillAffinityWindow,
-		o.leiosFetchGuardFor,
-	)
-	order = preferLeiosBackfillOfferSource(
-		order,
-		o.leiosEndorserBlockRelayOfferSource(point),
-		o.leiosFetchGuardFor,
 	)
 	var lastErr, busyErr error
 	usableConnection := false
-	remainingCandidates := len(order)
-	for _, connId := range order {
-		remainingCandidates--
+	remainingCandidates := len(connIds)
+	counted := make(map[ouroboros.ConnectionId]bool, len(connIds))
+	var preferredConn *ouroboros.Connection
+	if len(candidates) > 0 {
+		preferredConn = candidates[0].conn
+	}
+	preferredInFallback := false
+	if preferredConn != nil {
+		for _, id := range connIds {
+			if id == preferredConn.Id() {
+				preferredInFallback = true
+				break
+			}
+		}
+		if !preferredInFallback {
+			remainingCandidates++
+		}
+	}
+	for _, candidate := range candidates {
+		connId := candidate.connId
 		if err := ctx.Err(); err != nil {
 			if lastErr == nil {
 				lastErr = err
 			}
 			break
 		}
-		conn := getConnection(connId)
+		conn := o.leiosBackfillCandidateConn(candidate, preferredConn, getConnection)
+		// A reconnected peer remains eligible at its fallback position; only
+		// the exact already-promoted connection is a duplicate.
+		if candidate.conn != nil && conn == nil {
+			if !preferredInFallback {
+				remainingCandidates--
+			}
+			continue
+		}
+		if !counted[connId] {
+			remainingCandidates--
+			counted[connId] = true
+		}
 		if conn == nil || conn.LeiosFetch() == nil ||
 			conn.LeiosFetch().Client == nil {
 			continue
@@ -394,7 +434,7 @@ func (o *Ouroboros) fetchEndorserBlockByPointWithConnections(
 		// their cooldown state in fetch-completion order. Doing it here, after
 		// the guard is released, would let a slow failure's mark land after a
 		// newer success's mark and wrongly cool down a healthy connection.
-		err := o.fetchEndorserBlockOnConn(
+		err := fetch(
 			ctx,
 			connId,
 			conn.LeiosFetch().Client,
@@ -614,7 +654,7 @@ func (o *Ouroboros) fetchEndorserBlockOnConn(
 			point,
 			blk.BlockRaw,
 			nil,
-			leiosStoreAuthoritative,
+			leiosStoreBackfill,
 		); err != nil {
 			return fmt.Errorf("store manifest: %w", err)
 		}
@@ -669,7 +709,7 @@ func (o *Ouroboros) fetchEndorserBlockOnConn(
 		point,
 		data.blockRaw,
 		txs,
-		leiosStoreAuthoritative,
+		leiosStoreBackfill,
 	); err != nil {
 		return fmt.Errorf("store txs: %w", err)
 	}
@@ -726,4 +766,67 @@ func leiosBackfillConnOrder(
 	order = append(order, cooled...)
 	order = append(order, dead...)
 	return order
+}
+
+type leiosBackfillConnCandidate struct {
+	connId ouroboros.ConnectionId
+	conn   *ouroboros.Connection
+}
+
+func (o *Ouroboros) leiosBackfillCandidateConn(
+	candidate leiosBackfillConnCandidate,
+	preferred *ouroboros.Connection,
+	getConnection func(ouroboros.ConnectionId) *ouroboros.Connection,
+) *ouroboros.Connection {
+	if candidate.conn != nil {
+		if getConnection(candidate.connId) != candidate.conn {
+			return nil
+		}
+		return candidate.conn
+	}
+	conn := getConnection(candidate.connId)
+	if conn == preferred {
+		return nil
+	}
+	return conn
+}
+
+func (o *Ouroboros) leiosBackfillConnCandidatesForPoint(
+	connIds []ouroboros.ConnectionId,
+	start int,
+	point ocommon.Point,
+	now time.Time,
+) []leiosBackfillConnCandidate {
+	order := leiosBackfillConnOrder(
+		connIds,
+		start,
+		now,
+		leiosBackfillAffinityWindow,
+		o.leiosFetchGuardFor,
+	)
+	order = preferLeiosBackfillOfferSource(
+		order,
+		o.leiosEndorserBlockRelayOfferSource(point),
+		o.leiosFetchGuardFor,
+	)
+	candidates := make([]leiosBackfillConnCandidate, 0, len(order)+1)
+	if len(order) > 0 && o.chainsyncState != nil {
+		active := o.chainsyncState.GetClientConnId()
+		if active != nil {
+			activeConn := o.leiosBackfillSourceConn(point, *active)
+			if activeConn != nil {
+				g := o.leiosFetchGuardFor(*active)
+				if !g.isProtocolDead() && !g.inCooldown(now) {
+					candidates = append(candidates, leiosBackfillConnCandidate{
+						connId: *active,
+						conn:   activeConn,
+					})
+				}
+			}
+		}
+	}
+	for _, connId := range order {
+		candidates = append(candidates, leiosBackfillConnCandidate{connId: connId})
+	}
+	return candidates
 }
