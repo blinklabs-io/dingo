@@ -1917,6 +1917,21 @@ snapshot-imported accounts have their journal rows cleared after their anchor
 balances are written. Replay can then recreate the same accounts and apply
 their later reward changes once.
 
+The schema-table entries above have these additional catch-up import effects:
+
+| Table | Catch-up import effect |
+|---|---|
+| `account` | `RestoreAccountStateAtSlot` removes accounts absent at the anchor and restores surviving account state. Reward-delta and withdrawal-witness rows for removed accounts are cleared in the same transaction. |
+| `pool` | `RestorePoolStateAtSlot` removes pools registered after the anchor and restores surviving pool parameters from the last registration at or before it. |
+| `drep` | `RestoreDrepStateAtSlot` restores DRep state to the imported anchor. |
+| `governance_proposal` | The pre-import sweep deletes proposal rows added after the anchor. |
+| `governance_vote` | The pre-import sweep deletes vote rows added after the anchor. |
+| `constitution` | The pre-import sweep deletes constitution rows added after the anchor. |
+| `committee_member` | The pre-import sweep removes committee state added after the anchor. |
+| `committee_quorum` | The pre-import sweep removes quorum rows added after the anchor. |
+| `pparams` | The pre-import sweep deletes parameter rows added after the anchor before snapshot parameters are written. |
+| `pparam_update` | The pre-import sweep deletes parameter-update rows added after the anchor. |
+
 ### Off-chain Metadata Cache
 
 | Table | Columns | Keys / indexes | Relationships and notes |
