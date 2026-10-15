@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -223,6 +224,54 @@ func TestReportUnrecoverableRollbackClearsEvidenceAfterLocalProgress(t *testing.
 			)
 			_, tracked := fixture.ls.unrecoverableRollbacks[key]
 			require.False(t, tracked)
+		})
+	}
+}
+
+func TestProtocolConstrainedRollbackProgressDoesNotAccumulate(t *testing.T) {
+	t.Parallel()
+	for _, reason := range []string{
+		event.ChainsyncResyncReasonRollbackExceedsK,
+		event.ChainsyncResyncReasonRollbackExceedsMithril,
+		event.ChainsyncResyncReasonRollbackBelowUtxoPruneFloor,
+	} {
+		t.Run(reason, func(t *testing.T) {
+			t.Parallel()
+			fixture := newChainsyncRollbackFixture(t)
+			key := unrecoverableRollbackKey(fixture.ancestorTip.Point)
+			for attempt := range unrecoverableRollbackThreshold + 2 {
+				if attempt > 0 {
+					localTip := fixture.ls.chain.HeaderTip()
+					nextBlock := chain.RawBlock{
+						Slot:        localTip.Point.Slot + 1,
+						Hash:        testHashBytes(fmt.Sprintf("progress-%s-%d", reason, attempt)),
+						BlockNumber: localTip.BlockNumber + 1,
+						Type:        1,
+						PrevHash:    localTip.Point.Hash,
+						Cbor:        []byte{0x80},
+					}
+					require.NoError(t, fixture.ls.chain.AddRawBlocks(
+						t.Context(),
+						[]chain.RawBlock{nextBlock},
+					))
+				}
+
+				fixture.ls.reportUnrecoverableRollbackIfStuck(
+					fixture.ancestorTip.Point,
+					reason,
+					fixture.connId,
+				)
+				require.Zero(
+					t,
+					promtestutil.ToFloat64(
+						fixture.ls.metrics.unrecoverableRollbacks,
+					),
+					"canonical progress between failures must reset escalation evidence",
+				)
+				if record, tracked := fixture.ls.unrecoverableRollbacks[key]; tracked {
+					require.Equal(t, 1, record.count)
+				}
+			}
 		})
 	}
 }
