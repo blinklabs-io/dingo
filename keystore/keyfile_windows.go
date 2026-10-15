@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
@@ -62,7 +63,15 @@ func checkOpenFilePermissions(f *os.File) error {
 			err,
 		)
 	}
+	defer freeSecurityDescriptor(sd)
 	return checkOpenSecurityDescriptor(f.Name(), sd)
+}
+
+func freeSecurityDescriptor(sd *windows.SECURITY_DESCRIPTOR) {
+	if sd == nil {
+		return
+	}
+	_, _ = windows.LocalFree(windows.Handle(unsafe.Pointer(sd)))
 }
 
 func checkOpenSecurityDescriptor(

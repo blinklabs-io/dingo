@@ -79,6 +79,7 @@ func TestManifestOptionsReadsTrustKeyFile(t *testing.T) {
 		t.Parallel()
 		path := filepath.Join(t.TempDir(), "trust.key")
 		require.NoError(t, os.WriteFile(path, []byte("short"), 0o600))
+		testutil.RestrictFileToCurrentUser(t, path)
 		_, err := ManifestOptions(config.DatabaseLifecycleConfig{
 			SnapshotTrustKeyFile: path,
 		})

@@ -32,6 +32,7 @@ func checkOpenFileOwner(f *os.File) error {
 	if err != nil {
 		return fmt.Errorf("get key file %q owner: %w", f.Name(), err)
 	}
+	defer freeSecurityDescriptor(sd)
 	owner, _, err := sd.Owner()
 	if err != nil || owner == nil {
 		return fmt.Errorf(
@@ -46,17 +47,36 @@ func checkOpenFileOwner(f *os.File) error {
 	if windows.EqualSid(owner, user.User.Sid) {
 		return nil
 	}
-	member, err := token.IsMember(owner)
+	adminSID, err := windows.CreateWellKnownSid(
+		windows.WinBuiltinAdministratorsSid,
+	)
 	if err != nil {
-		return fmt.Errorf(
-			"compare key file %q owner with current process: %w", f.Name(), err,
-		)
+		return fmt.Errorf("get administrators SID for key file %q: %w", f.Name(), err)
 	}
-	if !member {
+	adminMember := false
+	if windows.EqualSid(owner, adminSID) {
+		adminMember, err = token.IsMember(adminSID)
+		if err != nil {
+			return fmt.Errorf(
+				"compare key file %q owner with current process: %w", f.Name(), err,
+			)
+		}
+	}
+	if !keyFileOwnerAllowed(owner, user.User.Sid, adminSID, adminMember) {
 		return fmt.Errorf(
 			"key file %q owner %s does not control the current process: %w",
 			f.Name(), owner.String(), ErrInsecureFileOwner,
 		)
 	}
 	return nil
+}
+
+func keyFileOwnerAllowed(
+	owner *windows.SID,
+	currentUser *windows.SID,
+	administrators *windows.SID,
+	processInAdministrators bool,
+) bool {
+	return windows.EqualSid(owner, currentUser) ||
+		(processInAdministrators && windows.EqualSid(owner, administrators))
 }

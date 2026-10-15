@@ -35,7 +35,7 @@ func checkOpenFileOwner(f *os.File) error {
 		)
 	}
 	uid := uint64(stat.Uid)
-	euid := uint64(os.Geteuid())
+	euid := uint64(os.Geteuid()) // #nosec G115 -- Effective UIDs are nonnegative.
 	if uid != euid {
 		return fmt.Errorf(
 			"key file %q is owned by UID %d, current UID is %d: %w",
