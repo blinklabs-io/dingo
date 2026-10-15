@@ -11318,8 +11318,8 @@ second sync:
     one-time historical backfill on first attach, since anything it
     undershoots by a small margin is still covered by the live event
     subscription going forward). `preStakingThroughEpoch` is not a seed
-    bound: on a genesis-synced node epochs 0-1 are still queued, and
-    `checkEpoch`'s `PreStaking` branch is what records their
+    bound: on a genesis-synced node the pre-staking epochs are still queued,
+    and `checkEpoch`'s `PreStaking` branch is what records their
     PASS-with-nothing-compared verdict. No separate checkpoint file exists:
     the cache's own persisted `check_epoch_status`/`koios_epoch_info` rows
     are the sole resumable state, so only the minimal checkpoint state a
@@ -11863,13 +11863,16 @@ never the reverse.
   existed) disables it, preserving the original immediate-`complete=true`
   behavior for any caller that does not configure grace hours.
 - **Pre-staking epochs are excluded from account fetching too.**
-  `koiosStakeEpoch`/`preStakingThroughEpoch` (`check.go`) reject epoch <= 1,
-  not just epoch == 0, so `FetchEpochAccountsWithAddrs` skips both
-  pre-staking epochs entirely instead of running a real (and meaningless)
-  Koios `/account_reward_history` sweep for epoch 1 against a nonexistent
-  stake epoch. Neither epoch ever gets a `koios_account_coverage` row as a
-  result, so `Cache.GetEpochsMissingAccountCoverage`'s query explicitly
-  filters `k.pre_staking = 0` — without it, epochs 0-1 (which do get a
+  `koiosStakeEpoch`/`preStakingThroughEpoch` (`check.go`) reject every epoch
+  up to the network's pre-staking boundary (1 by default, 5 on preprod, whose
+  Byron epochs 0-3 precede Shelley and for which Koios reports a null
+  `active_stake` for epochs 0-5), not just epoch == 0, so
+  `FetchEpochAccountsWithAddrs` skips all pre-staking epochs entirely instead
+  of running a real (and meaningless) Koios `/account_reward_history` sweep
+  against a nonexistent stake epoch. No pre-staking epoch ever gets a
+  `koios_account_coverage` row as a result, so
+  `Cache.GetEpochsMissingAccountCoverage`'s query explicitly filters
+  `k.pre_staking = 0` — without it, those epochs (which do get a
   `koios_epoch_info` row via the `pre_staking` marker) would be
   re-proposed for account backfill on every future `fetch` run forever.
   `Cache.GetEpochsNeedingCheck` applies the same filter to its account-

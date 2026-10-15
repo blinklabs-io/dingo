@@ -646,7 +646,7 @@ func CheckStakeDistribution(
 	// found. A KoiosFault entry keeps the epoch unverified (from-genesis
 	// counts any fault as incomplete) AND keeps those findings reportable.
 	if t := compareTotalActiveStake(
-		total, infoErr, epoch, pools,
+		total, infoErr, network, epoch, pools,
 	); t != nil {
 		mismatches = append(mismatches, *t)
 	}
@@ -776,15 +776,16 @@ func koiosActiveStakeForEpoch(
 func compareTotalActiveStake(
 	koiosTotal string,
 	fetchErr error,
+	network string,
 	epoch uint64,
 	pools []poolStake,
 ) *StakeMismatch {
 	// Koios has no active_stake for these epochs permanently and
 	// correctly, because no valid "go" stake snapshot exists yet -- an
 	// epoch with nothing to compare, not a fault, and not worth a request.
-	// Reporting it as one would make the first two stake checks of every
+	// Reporting it as one would make the first stake checks of every
 	// from-genesis replay look degraded.
-	if koiosparity.IsPreStakingEpoch(epoch) {
+	if koiosparity.IsPreStakingEpoch(network, epoch) {
 		return nil
 	}
 
