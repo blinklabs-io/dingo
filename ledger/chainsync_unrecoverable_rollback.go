@@ -153,6 +153,9 @@ func (ls *LedgerState) reportUnrecoverableRollbackIfStuck(
 		ls.emitUnrecoverableRollback(point, reason, connId, count)
 		return
 	}
+	if len(point.Hash) == 0 {
+		return
+	}
 	if rec.primaryChainChecked {
 		if rec.onPrimaryChain && time.Since(rec.firstSeen) < unrecoverableRollbackWindow {
 			return
