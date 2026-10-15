@@ -62,8 +62,15 @@ type PeerChainTip struct {
 	// remaining entries are consecutive block numbers, which lets density
 	// comparisons align two frontiers without scanning a full Genesis window.
 	observedPointBaseBlock uint64
-	observedTipHistory     []ochainsync.Tip
-	idling                 bool
+	// observedPointRewrites counts changes to observedPoints other than
+	// appending a newer point or dropping the oldest ones: rollbacks, resets,
+	// and replacing the tail. A corroboration result verified over a frontier
+	// stays valid across appends and front trims, and only across them, so the
+	// counter tells a cached result whether it can be extended or must be
+	// recomputed.
+	observedPointRewrites uint64
+	observedTipHistory    []ochainsync.Tip
+	idling                bool
 	// nowFn is the owning ChainSelector's clock, so LastUpdated and IsStale
 	// share one time source with the selector. Nil for a PeerChainTip built
 	// by NewPeerChainTip, which then uses time.Now.
@@ -190,6 +197,7 @@ func (p *PeerChainTip) ApplyRollback(
 		return
 	}
 	previousObservedTip := p.ObservedTip
+	p.observedPointRewrites++
 	p.Tip = tip
 	p.ObservedTip = ochainsync.Tip{Point: clonePoint(point)}
 	p.observedTipSet = true
@@ -320,6 +328,7 @@ func (p *PeerChainTip) recordObservedPoint(
 		return
 	}
 	if !trackHashes {
+		p.observedPointRewrites++
 		p.observedPoints = nil
 		p.observedPointBaseBlock = 0
 	} else if maxPoints == 0 {
@@ -327,6 +336,7 @@ func (p *PeerChainTip) recordObservedPoint(
 	}
 	slot := point.Slot
 	if slot == 0 {
+		p.observedPointRewrites++
 		p.observedSlots = nil
 		p.observedPoints = nil
 		p.observedPointBaseBlock = 0
@@ -358,6 +368,7 @@ func (p *PeerChainTip) recordObservedPoint(
 			p.observedPoints = append(p.observedPoints, clonePoint(point))
 		case p.observedPoints[len(p.observedPoints)-1].Slot == slot &&
 			blockNumber == tailBlock:
+			p.observedPointRewrites++
 			p.observedPoints[len(p.observedPoints)-1] = clonePoint(point)
 		case p.observedPoints[len(p.observedPoints)-1].Slot < slot &&
 			blockNumber > p.observedPointBaseBlock &&
@@ -368,6 +379,7 @@ func (p *PeerChainTip) recordObservedPoint(
 			// A height gap or non-tail replacement cannot be represented by one
 			// base height. Start a new contiguous frontier so intersection is
 			// undecidable until enough linked headers have been observed again.
+			p.observedPointRewrites++
 			clear(p.observedPoints)
 			p.observedPoints = p.observedPoints[:0]
 			p.observedPointBaseBlock = blockNumber
@@ -457,8 +469,8 @@ func (p *PeerChainTip) observedHistoryConflictsAt(point ocommon.Point) bool {
 	return false
 }
 
-// confirmsRecentChain reports whether witness confirms this peer's (candidate's)
-// chain. Within the slot range of the candidate's observed frontier, every
+// confirmsRecentChainFrom reports whether witness confirms this peer's
+// (candidate's) chain. Within the slot range of the candidate's observed frontier, every
 // witness-observed point must match the candidate, and the witness must have
 // independently delivered the candidate's current point.
 //
@@ -477,13 +489,26 @@ func (p *PeerChainTip) observedHistoryConflictsAt(point ocommon.Point) bool {
 // relies on the observed frontier being populated per header (dense) during
 // chainsync, so two peers on the same chain share every block in their
 // overlap.
-func (p *PeerChainTip) confirmsRecentChainWithin(
+//
+// Witness points at or below verifiedThrough are skipped (0 verifies
+// everything). The caller must
+// only pass a nonzero verifiedThrough that an earlier call reported as
+// consistent for these two frontiers while neither had been rewritten since; appends and
+// front trims preserve that result for the points it covered, because a point
+// compared once is compared against the same candidate point again, and the
+// candidate window only moves forward. Besides the result it reports whether
+// no witness point in range conflicted with the candidate (true even when the
+// witness has simply not delivered the candidate's tip yet, so a lagging
+// witness keeps its verified prefix), the highest witness slot known to match,
+// and how many witness points it compared.
+func (p *PeerChainTip) confirmsRecentChainFrom(
 	witness *PeerChainTip,
 	window uint64,
-) bool {
+	verifiedThrough uint64,
+) (confirmed, consistent bool, through uint64, compared int) {
 	if p == nil || witness == nil ||
 		len(p.observedPoints) == 0 || len(witness.observedPoints) == 0 {
-		return false
+		return false, false, 0, 0
 	}
 	candidate := p.observedPoints
 	if window > 0 {
@@ -498,30 +523,50 @@ func (p *PeerChainTip) confirmsRecentChainWithin(
 	}
 	lo := candidate[0].Slot
 	hi := candidate[len(candidate)-1].Slot
+	from := max(lo, verifiedThrough+1)
 	witnessPoints := witness.observedPoints
 	witnessPoints = witnessPoints[sort.Search(len(witnessPoints), func(i int) bool {
-		return witnessPoints[i].Slot >= lo
+		return witnessPoints[i].Slot >= from
 	}):]
-	i := 0
-	tipMatched := false
+	i := sort.Search(len(candidate), func(j int) bool {
+		return len(witnessPoints) == 0 ||
+			candidate[j].Slot >= witnessPoints[0].Slot
+	})
 	for _, w := range witnessPoints {
 		if w.Slot > hi {
 			break
 		}
+		compared++
 		for i < len(candidate) && candidate[i].Slot < w.Slot {
 			i++
 		}
 		if i < len(candidate) && candidate[i].Slot == w.Slot &&
 			len(w.Hash) > 0 && bytes.Equal(candidate[i].Hash, w.Hash) {
-			tipMatched = i == len(candidate)-1
+			through = w.Slot
 			continue
 		}
 		// The witness observed a block within the candidate's range that the
 		// candidate does not have (or a conflicting hash at the same slot):
 		// they are on different chains, so this witness does not confirm.
-		return false
+		return false, false, 0, compared
 	}
-	return tipMatched
+	through = max(through, verifiedThrough)
+	// The witness must have delivered the candidate's current point. Every
+	// witness point in range matched, so the last one in range is that point
+	// exactly when it sits at the candidate's last slot.
+	last := sort.Search(len(witness.observedPoints), func(j int) bool {
+		return witness.observedPoints[j].Slot > hi
+	}) - 1
+	if last < 0 {
+		return false, true, through, compared
+	}
+	w := witness.observedPoints[last]
+	tip := candidate[len(candidate)-1]
+	if w.Slot != tip.Slot || len(w.Hash) == 0 ||
+		!bytes.Equal(w.Hash, tip.Hash) {
+		return false, true, through, compared
+	}
+	return true, true, through, compared
 }
 
 func (p *PeerChainTip) observedDensity(window uint64) uint64 {
