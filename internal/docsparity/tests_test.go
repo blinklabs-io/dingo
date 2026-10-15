@@ -3808,6 +3808,7 @@ func TestLintGatesNilawayAndModernize(t *testing.T) {
 		"nilaway":   "go.uber.org/nilaway/cmd/nilaway@",
 		"modernize": "golang.org/x/tools/go/analysis/passes/modernize/cmd/modernize@",
 	}
+
 	for _, workflow := range lintWorkflows {
 		job, ok := pipelineJobs(t, root, workflow)["lint"]
 		if !ok {
@@ -3822,6 +3823,7 @@ func TestLintGatesNilawayAndModernize(t *testing.T) {
 		for tool, pkg := range installs {
 			if !strings.Contains(all, "make "+tool) {
 				t.Errorf("%s lint job never runs `make %s`", workflow, tool)
+				continue
 			}
 			_, version, ok := strings.Cut(all, pkg)
 			if !ok {
@@ -3829,15 +3831,8 @@ func TestLintGatesNilawayAndModernize(t *testing.T) {
 				continue
 			}
 			version, _, _ = strings.Cut(version, "\n")
-			// Scanners float like golangci-lint, so a new release's findings
-			// are fixed when it lands rather than parked behind a stale pin.
 			if version != "latest" {
-				t.Errorf(
-					"%s installs %s at %q, want latest",
-					workflow,
-					tool,
-					version,
-				)
+				t.Errorf("%s installs %s at %q, want latest", workflow, tool, version)
 			}
 		}
 	}
