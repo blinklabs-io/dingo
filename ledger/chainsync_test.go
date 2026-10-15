@@ -8371,7 +8371,9 @@ func TestTryResolveForkSynchronizesLedgerTip(t *testing.T) {
 	assert.Equal(t, fixture.ancestorTip, dbTip)
 }
 
-func TestHandleEventChainsyncForkRecordsAdmittedHeaderFrontier(t *testing.T) {
+func TestHandleEventChainsyncDeferredForkDoesNotRollbackCanonicalChain(
+	t *testing.T,
+) {
 	t.Parallel()
 
 	fixture := newChainsyncRollbackFixture(t)
@@ -8405,19 +8407,12 @@ func TestHandleEventChainsyncForkRecordsAdmittedHeaderFrontier(t *testing.T) {
 		}),
 	)
 
-	assert.Equal(t, fixture.ancestorTip, fixture.ls.chain.Tip())
-	require.Equal(t, 1, fixture.ls.chain.HeaderCount())
-	assert.Equal(t, header.slot, fixture.ls.chain.HeaderTip().Point.Slot)
-	// mockHeader carries no real VRF/KES material to verify, and this fork's
-	// rollback target (the ancestor tip) sits behind the header's own slot,
-	// so it cannot be exempted as Mithril-covered either (that would forbid
-	// the very rollback this fork resolution performs). An unverified fork
-	// header is still admitted onto the local header chain -- that's
-	// ordinary, safe chain-shape bookkeeping -- but requires
-	// genuine trust (real verification or a Mithril certificate) before it
-	// may advance the shared "trusted sync progress" frontier
-	// (recordAdmittedHeaderFrontier), so syncUpstreamTipSlot must stay at
-	// its zero value here.
+	assert.Equal(t, fixture.currentTip, fixture.ls.chain.Tip())
+	assert.Equal(t, fixture.currentTip, fixture.ls.currentTip)
+	require.Zero(t, fixture.ls.chain.HeaderCount())
+	history := fixture.ls.peerHeaderHistory[connIdKey(fixture.connId)]
+	require.NotNil(t, history)
+	assert.Contains(t, history.byHash, hex.EncodeToString(forkHash))
 	assert.Zero(t, fixture.ls.syncUpstreamTipSlot.Load())
 }
 
@@ -8527,8 +8522,10 @@ func TestTryResolveForkGenesisAcceptsDenserShorterCandidate(t *testing.T) {
 	err := fixture.ls.handleEventChainsyncBlockHeader(
 		ChainsyncEvent{
 			ConnectionId: fixture.connId,
-			Point:        ocommon.NewPoint(header2.slot, forkHash2),
-			BlockHeader:  header2,
+			HeaderCryptoVerificationGeneration: fixture.ls.
+				loadConsensusSnapshot().generation,
+			Point:       ocommon.NewPoint(header2.slot, forkHash2),
+			BlockHeader: header2,
 			Tip: ochainsync.Tip{
 				Point:       ocommon.NewPoint(header2.slot, forkHash2),
 				BlockNumber: header2.blockNumber,
@@ -8862,6 +8859,8 @@ func TestHandleEventChainsyncBlockHeaderRestoresMismatchCountOnAncestorLookupErr
 	err := fixture.ls.handleEventChainsyncBlockHeader(
 		ChainsyncEvent{
 			ConnectionId: fixture.connId,
+			HeaderCryptoVerificationGeneration: fixture.ls.
+				loadConsensusSnapshot().generation,
 			Point: ocommon.NewPoint(
 				header.SlotNumber(),
 				header.Hash().Bytes(),
@@ -9211,6 +9210,8 @@ func TestHandleEventChainsyncBlockHeaderMissingAncestorRequestsResync(
 
 	err := fixture.ls.handleEventChainsyncBlockHeader(ChainsyncEvent{
 		ConnectionId: fixture.connId,
+		HeaderCryptoVerificationGeneration: fixture.ls.
+			loadConsensusSnapshot().generation,
 		Point: ocommon.NewPoint(
 			header.SlotNumber(),
 			header.Hash().Bytes(),
@@ -11367,7 +11368,9 @@ func TestHandleEventChainsyncBlockHeaderRoutesSlotBattleToForkResolution(
 	// stale-drop early return.
 	err := fixture.ls.handleEventChainsyncBlockHeader(ChainsyncEvent{
 		ConnectionId: fixture.connId,
-		BlockHeader:  competingHeader,
+		HeaderCryptoVerificationGeneration: fixture.ls.
+			loadConsensusSnapshot().generation,
+		BlockHeader: competingHeader,
 		Point: ocommon.NewPoint(
 			competingHeader.SlotNumber(),
 			competingHeader.Hash().Bytes(),
@@ -19631,8 +19634,10 @@ func TestHandleEventChainsyncBlockHeaderCoalescesResyncPerConnection(
 		require.NoError(t, fixture.ls.handleEventChainsyncBlockHeader(
 			ChainsyncEvent{
 				ConnectionId: fixture.connId,
-				Point:        point,
-				BlockHeader:  header,
+				HeaderCryptoVerificationGeneration: fixture.ls.
+					loadConsensusSnapshot().generation,
+				Point:       point,
+				BlockHeader: header,
 				Tip: ochainsync.Tip{
 					Point:       point,
 					BlockNumber: header.BlockNumber(),

@@ -1417,13 +1417,13 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 		// historical/catch-up loading toggle no longer exempts it, so a
 		// Mithril-restored bootstrap is unaffected but ordinary fast sync is
 		// not. A deferred result (local state has not caught up to this
-		// header's slot yet) also leaves the header eligible -- that is the
-		// normal shape of a peer legitimately racing ahead of local ledger
-		// application, not a peer fault. The exception is a header past the
-		// forecast horizon, which cannot be validated at all yet: it is
-		// withheld without penalty until the ledger can forecast its slot.
-		// Only a definite crypto/eligibility failure excludes the header from
-		// observation and recycles the connection.
+		// header's slot yet) withholds the header from chain selection without
+		// penalizing the peer. The ledger may retain it for later validation,
+		// but missing producer-authorization state cannot authorize a canonical
+		// rollback. A header past the forecast horizon cannot reach blockfetch
+		// yet and is re-intersected separately. A definite crypto/eligibility
+		// failure excludes the header and recycles the connection.
+		selectionEligible := ingressEligible
 		if ingressEligible && o.chainSelectionShouldVerifyHeaderCrypto != nil &&
 			o.chainSelectionShouldVerifyHeaderCrypto(blockSlot) {
 			verificationGeneration, verifyErr := o.chainSelectionVerifyHeaderCrypto(v)
@@ -1456,14 +1456,16 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 			}
 			if verifyErr != nil {
 				if ledger.IsHeaderVerificationDeferred(verifyErr) {
+					selectionEligible = false
 					o.config.Logger.Debug(
-						"chainsync: header verification deferred for chain selection",
+						"chainsync: withholding deferred header from chain selection",
 						"component", "ouroboros",
 						"slot", blockSlot,
 						"connection_id", ctx.ConnectionId.String(),
 						"error", verifyErr,
 					)
 				} else {
+					selectionEligible = false
 					o.config.Logger.Warn(
 						"chainsync: excluding header from chain selection after verification failure",
 						"component", "ouroboros",
@@ -1499,7 +1501,7 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 			Point:       point,
 			BlockNumber: v.BlockNumber(),
 		}
-		if ingressEligible {
+		if selectionEligible {
 			// Update the tracked tip before synchronous chain selection. Genesis
 			// corroboration can select this peer from the callback, and the
 			// resulting switch must see a delivered tip.

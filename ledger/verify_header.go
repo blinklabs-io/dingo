@@ -241,7 +241,8 @@ func (ls *LedgerState) ValidateBlockHeaderCrypto(
 // returns false for is never re-verified. ValidateChainSelectionHeaderCrypto
 // already handles a not-yet-available epoch by returning a deferred error
 // (see IsHeaderVerificationDeferred) rather than failing, so it's always
-// safe to attempt verification here and let the verifier decide.
+// safe to attempt verification here and let the verifier decide. A deferred
+// result must remain outside chain selection until a later header verifies.
 func (ls *LedgerState) ShouldVerifyChainSelectionHeaderCrypto(
 	slot uint64,
 ) bool {
@@ -262,8 +263,8 @@ func (ls *LedgerState) ShouldVerifyChainSelectionHeaderCrypto(
 // up to the header's slot: that is the normal condition for a peer
 // legitimately racing ahead of local ledger application during fast sync or
 // Genesis bootstrap. Use IsHeaderVerificationDeferred to distinguish that
-// case (the header must still be treated as eligible) from a header this
-// node can already prove is invalid.
+// case (the peer is not at fault, but the header is not selection-eligible)
+// from a header this node can already prove is invalid.
 func (ls *LedgerState) ValidateChainSelectionHeaderCrypto(
 	header ledger.BlockHeader,
 ) error {

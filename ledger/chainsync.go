@@ -4470,6 +4470,7 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 	// it may not be fully computed yet) defers verification rather than
 	// skipping it outright.
 	headerCryptoVerificationGeneration := e.HeaderCryptoVerificationGeneration
+	producerAuthorizationGeneration := e.HeaderCryptoVerificationGeneration
 	headerCryptoVerified := e.BlockHeader != nil &&
 		pointMatches(e.Point, ocommon.NewPoint(
 			e.BlockHeader.SlotNumber(),
@@ -4580,6 +4581,9 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 		e.BlockHeader,
 		headerCryptoVerificationGeneration,
 	)
+	producerAuthorized := headerTrusted || (producerAuthorizationGeneration != 0 &&
+		headerCryptoVerified &&
+		producerAuthorizationGeneration == headerCryptoVerificationGeneration)
 	if headerCryptoVerified {
 		headerTrusted = true
 	}
@@ -4631,6 +4635,15 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 					"component", "ledger",
 					"slot", e.Point.Slot,
 					"local_tip_slot", localTip.Point.Slot,
+					"connection_id", e.ConnectionId.String(),
+				)
+				return nil
+			}
+			if !producerAuthorized {
+				ls.config.Logger.Debug(
+					"retaining deferred fork header without canonical rollback",
+					"component", "ledger",
+					"slot", e.Point.Slot,
 					"connection_id", e.ConnectionId.String(),
 				)
 				return nil

@@ -1286,18 +1286,17 @@ func TestChainsyncClientRollForwardExcludesHeaderFailingCryptoVerification(
 	}
 }
 
-// TestChainsyncClientRollForwardObservesHeaderWithDeferredCryptoVerification
+// TestChainsyncClientRollForwardWithholdsHeaderWithDeferredCryptoVerification
 // proves that a header this node cannot yet confirm (ValidateChainSelection-
 // HeaderCrypto returns a deferred error, e.g. because local ledger state has
-// not caught up to it) is still observed for chain selection. This preserves
-// legitimate fast-sync/Genesis-bootstrap behavior, where an honest peer
-// racing ahead of local ledger application must not be excluded.
+// not caught up to it) still reaches the ledger for later validation without
+// entering chain selection first.
 //
 // The verifier here is the real ledger.LedgerState.ValidateChainSelection-
 // HeaderCrypto (not a fake), driven into its deferred path by a bare ledger
 // with no cached epoch/nonce data -- proving the actual ledger method, not
 // just the branching around it.
-func TestChainsyncClientRollForwardObservesHeaderWithDeferredCryptoVerification(
+func TestChainsyncClientRollForwardWithholdsHeaderWithDeferredCryptoVerification(
 	t *testing.T,
 ) {
 	t.Parallel()
@@ -1353,18 +1352,12 @@ func TestChainsyncClientRollForwardObservesHeaderWithDeferredCryptoVerification(
 		tip,
 	))
 
-	select {
-	case evt := <-tipCh:
-		_, ok := evt.Data.(chainselection.PeerTipUpdateEvent)
-		require.True(
-			t,
-			ok,
-			"a deferred verification result must still leave the header "+
-				"eligible for chain-selection observation",
-		)
-	case <-time.After(time.Second):
-		t.Fatal("expected PeerTipUpdateEvent despite deferred verification")
-	}
+	testutil.RequireNoReceive(
+		t,
+		tipCh,
+		200*time.Millisecond,
+		"a deferred verification result must not enter chain selection",
+	)
 	select {
 	case <-recycleCh:
 		t.Fatal(
