@@ -189,3 +189,39 @@ func TestCorroborationCacheInvalidatedByCandidateTailReplacement(t *testing.T) {
 		"a stale verified prefix must not hide the replaced candidate tail",
 	)
 }
+
+// A removed peer's pairs must leave the cache: each entry pins both peers'
+// frontiers, so keeping them would retain a disconnected peer's window of
+// points until unrelated churn filled the cache.
+func TestCorroborationCacheDropsRemovedPeer(t *testing.T) {
+	t.Parallel()
+	cs := NewChainSelector(ChainSelectorConfig{
+		GenesisMode:           true,
+		SecurityParam:         20,
+		GenesisWindowSlots:    500,
+		MinCorroboratingPeers: 1,
+	})
+	conns := []ouroboros.ConnectionId{corrConn(1), corrConn(2), corrConn(3)}
+	for slot := uint64(600); slot <= 700; slot++ {
+		for _, conn := range conns {
+			cs.UpdatePeerTip(
+				conn,
+				genesisTip(slot, fmt.Sprintf("a%d", slot), slot),
+				nil,
+			)
+		}
+	}
+	for _, conn := range conns {
+		require.Equal(t, len(conns)-1, cs.corroboratingPeers(conn))
+	}
+
+	cs.RemovePeer(conns[0])
+
+	cs.corroborationCache.mu.Lock()
+	defer cs.corroborationCache.mu.Unlock()
+	require.NotEmpty(t, cs.corroborationCache.verified)
+	for pair := range cs.corroborationCache.verified {
+		assert.NotEqual(t, conns[0], pair.candidate)
+		assert.NotEqual(t, conns[0], pair.witness)
+	}
+}

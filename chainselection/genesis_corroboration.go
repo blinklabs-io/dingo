@@ -213,6 +213,19 @@ func (c *corroborationCache) confirms(
 	return ok
 }
 
+// forget drops every pair involving conn. Entries pin both peers' frontiers,
+// so a disconnected peer's would otherwise outlive it until the bound resets
+// the cache.
+func (c *corroborationCache) forget(conn ouroboros.ConnectionId) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for pair := range c.verified {
+		if pair.candidate == conn || pair.witness == conn {
+			delete(c.verified, pair)
+		}
+	}
+}
+
 // corroboratingPeersLocked counts the distinct witness identities whose chain
 // confirms the candidate's recent chain within the Genesis window and reaches
 // its suffix. Any witness sharing the candidate's own identity is excluded, so

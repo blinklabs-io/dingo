@@ -1502,6 +1502,7 @@ func (cs *ChainSelector) deletePeerLocked(connId ouroboros.ConnectionId) {
 	delete(cs.recentlyLeft, connId)
 	delete(cs.farTipClaims, connId)
 	delete(cs.genesisDensityDisconnected, connId)
+	cs.corroborationCache.forget(connId)
 }
 
 // RemovePeer removes a peer from tracking.
