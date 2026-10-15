@@ -232,17 +232,25 @@ type protocolParametersDoc struct {
 
 // GenerateReport evaluates every versioned ledger-rule fixture against
 // Dingo's Conway transaction validator and returns schema-compatible results.
-func GenerateReport(root string, generatedAt time.Time) (Report, []Failure, error) {
+func GenerateReport(
+	root string,
+	generatedAt time.Time,
+) (Report, []Failure, error) {
 	root, err := filepath.Abs(root)
 	if err != nil {
-		return Report{}, nil, fmt.Errorf("resolve ledger fixture directory: %w", err)
+		return Report{}, nil, fmt.Errorf(
+			"resolve ledger fixture directory: %w",
+			err,
+		)
 	}
 	files, err := filepath.Glob(filepath.Join(root, "scenarios", "*.json"))
 	if err != nil {
 		return Report{}, nil, fmt.Errorf("find ledger fixtures: %w", err)
 	}
 	if len(files) == 0 {
-		return Report{}, nil, errors.New("ledger fixture directory contains no scenarios")
+		return Report{}, nil, errors.New(
+			"ledger fixture directory contains no scenarios",
+		)
 	}
 	sort.Strings(files)
 
@@ -257,15 +265,26 @@ func GenerateReport(root string, generatedAt time.Time) (Report, []Failure, erro
 	for _, path := range files {
 		manager, err := conformance.NewDingoStateManager()
 		if err != nil {
-			return Report{}, failures, fmt.Errorf("create Dingo ledger state manager: %w", err)
+			return Report{}, failures, fmt.Errorf(
+				"create Dingo ledger state manager: %w",
+				err,
+			)
 		}
 		outcome, failure, err := runFixture(root, path, manager)
 		closeErr := manager.Close()
 		if err != nil {
-			return Report{}, failures, fmt.Errorf("run fixture %s: %w", path, err)
+			return Report{}, failures, fmt.Errorf(
+				"run fixture %s: %w",
+				path,
+				err,
+			)
 		}
 		if closeErr != nil {
-			return Report{}, failures, fmt.Errorf("close ledger state manager after %s: %w", path, closeErr)
+			return Report{}, failures, fmt.Errorf(
+				"close ledger state manager after %s: %w",
+				path,
+				closeErr,
+			)
 		}
 		report.Scenarios = append(report.Scenarios, outcome)
 		report.Totals.Total++
@@ -308,12 +327,18 @@ func runFixture(
 	}
 	id := filepath.Base(path)
 	if len(id) < 5 {
-		return CaseOutcome{}, nil, fmt.Errorf("fixture name has no five-digit id: %s", path)
+		return CaseOutcome{}, nil, fmt.Errorf(
+			"fixture name has no five-digit id: %s",
+			path,
+		)
 	}
 	id = id[:5]
 	for _, digit := range id {
 		if digit < '0' || digit > '9' {
-			return CaseOutcome{}, nil, fmt.Errorf("fixture name has no five-digit id: %s", path)
+			return CaseOutcome{}, nil, fmt.Errorf(
+				"fixture name has no five-digit id: %s",
+				path,
+			)
 		}
 	}
 
@@ -324,7 +349,10 @@ func runFixture(
 	if expected.DecodingFailure {
 		transactionCBOR, err := hex.DecodeString(fixture.Transaction)
 		if err != nil {
-			return CaseOutcome{}, nil, fmt.Errorf("decode transaction hex: %w", err)
+			return CaseOutcome{}, nil, fmt.Errorf(
+				"decode transaction hex: %w",
+				err,
+			)
 		}
 		if transactionFailsToDecode(transactionCBOR) {
 			return CaseOutcome{ID: id, Result: "pass"}, nil, nil
@@ -332,7 +360,10 @@ func runFixture(
 		return mismatch(id, expected, "transaction decoded successfully")
 	}
 
-	protocolParameters, err := loadProtocolParameters(root, fixture.ProtocolParameters)
+	protocolParameters, err := loadProtocolParameters(
+		root,
+		fixture.ProtocolParameters,
+	)
 	if err != nil {
 		return CaseOutcome{}, nil, err
 	}
@@ -340,16 +371,26 @@ func runFixture(
 	if err != nil {
 		return CaseOutcome{}, nil, err
 	}
-	initialState, metadata, err := parseInitialState(fixture.InitialState, eraHistory, fixture.Point.Slot)
+	initialState, metadata, err := parseInitialState(
+		fixture.InitialState,
+		eraHistory,
+		fixture.Point.Slot,
+	)
 	if err != nil {
 		return CaseOutcome{}, nil, err
 	}
 	pp, err := protocolParametersToLedger(protocolParameters)
 	if err != nil {
-		return CaseOutcome{}, nil, fmt.Errorf("decode protocol parameters: %w", err)
+		return CaseOutcome{}, nil, fmt.Errorf(
+			"decode protocol parameters: %w",
+			err,
+		)
 	}
 	if err := manager.LoadLedgerRulesInitialState(initialState, pp, metadata); err != nil {
-		return CaseOutcome{}, nil, fmt.Errorf("seed initial ledger state: %w", err)
+		return CaseOutcome{}, nil, fmt.Errorf(
+			"seed initial ledger state: %w",
+			err,
+		)
 	}
 
 	transactionCBOR, err := hex.DecodeString(fixture.Transaction)
@@ -358,7 +399,11 @@ func runFixture(
 	}
 	tx, err := conway.NewConwayTransactionFromCbor(transactionCBOR)
 	if err != nil {
-		return mismatch(id, expected, "transaction decoding failure: "+err.Error())
+		return mismatch(
+			id,
+			expected,
+			"transaction decoding failure: "+err.Error(),
+		)
 	}
 	provider := conformance.NewDingoStateProvider(manager)
 	provider.SetForecastHorizon(fixture.Point.Slot, eraHistory.StabilityWindow)
@@ -388,7 +433,11 @@ func transactionFailsToDecode(transactionCBOR []byte) bool {
 	return err != nil
 }
 
-func mismatch(id string, expected expectedDoc, observed string) (CaseOutcome, *Failure, error) {
+func mismatch(
+	id string,
+	expected expectedDoc,
+	observed string,
+) (CaseOutcome, *Failure, error) {
 	expectedText := "Pass"
 	if expected.DecodingFailure {
 		expectedText = "decoding_failure"
@@ -418,7 +467,9 @@ func parseExpected(raw json.RawMessage) (expectedDoc, error) {
 		return expectedDoc{}, fmt.Errorf("decode expected result: %w", err)
 	}
 	if expected.DecodingFailure == (expected.Predicate != "") {
-		return expectedDoc{}, errors.New("expected result must name one predicate or a decoding failure")
+		return expectedDoc{}, errors.New(
+			"expected result must name one predicate or a decoding failure",
+		)
 	}
 	return expected, nil
 }
@@ -445,87 +496,195 @@ func predicateMatches(err error, expected expectedDoc) bool {
 }
 
 var ledgerPredicateErrorPatterns = map[string][]string{
-	"BabbageNonDisjointRefInputs":                {"non-disjoint reference inputs"},
-	"BabbageOutputTooSmallUTxO":                  {"output too small"},
-	"BadInputsUTxO":                              {"bad input(s)", "failed to resolve input", "failed to resolve reference input", "utxo not found for collateral input"},
-	"CommitteeHasPreviouslyResigned":             {"committee member already resigned", "resigned cc member"},
-	"CommitteeIsUnknown":                         {"not a cc member"},
-	"ConflictingMetadataHash":                    {"conflicting metadata hash"},
-	"ConwayTreasuryValueMismatch":                {"current treasury value mismatch"},
-	"ConwayTxRefScriptsSizeTooBig":               {"reference-script size per transaction too large"},
-	"ConwayWdrlNotDelegatedToDRep":               {"withdrawal is not delegated to a drep"},
-	"DelegateeDRepNotRegistered":                 {"vote delegation to unregistered drep"},
-	"DelegateeStakePoolNotRegistered":            {"delegation to unregistered pool"},
-	"DisallowedVoters":                           {"voting restriction"},
-	"DRepAlreadyRegistered":                      {"drep already registered"},
-	"ExtraneousScriptWitnessesUTXOW":             {"extraneous script witness"},
-	"FeeTooSmallUTxO":                            {"less than the calculated minimum fee"},
-	"IncorrectDepositDELEG":                      {"incorrect deposit for certificate type"},
-	"IncorrectTotalCollateralField":              {"incorrect total collateral field"},
-	"InputSetEmptyUTxO":                          {"input set empty"},
-	"InsufficientCollateral":                     {"insufficient collateral"},
-	"InvalidGuardrailsScriptHash":                {"invalid guardrails script hash"},
-	"InvalidPrevGovActionId":                     {"previous governance action", "prev gov action", "invalid governance action ancestor"},
-	"InvalidWitnessesUTXOW":                      {"invalid vkey signature", "invalid bootstrap signature"},
-	"MalformedReferenceScripts":                  {"malformed reference scripts"},
-	"OutsideForecast":                            {"outsideforecast"},
-	"MalformedScriptWitnesses":                   {"malformed script witnesses"},
-	"MaxTxSizeUTxO":                              {"transaction size too large"},
-	"MissingScriptWitnessesUTXOW":                {"missing script witness"},
-	"MissingTxBodyMetadataHash":                  {"missing transaction auxiliary data hash"},
-	"MissingTxMetadata":                          {"missing transaction metadata"},
-	"MissingVerificationKeyWitnessesUTXOW":       {"missing vkey witness", "missing required vkey witness", "missing bootstrap witness"},
-	"NoCollateralInputs":                         {"no collateral inputs"},
-	"OutsideValidityIntervalUTxO":                {"outside validity interval"},
-	"OutputTooBigUTxO":                           {"output value too large", "output bootstrap address attributes too big"},
-	"ProposalCantFollow":                         {"cannot follow current protocol version"},
-	"ProposalReturnAccountDoesNotExist":          {"proposal return account does not exist"},
-	"ProposalProcedureNetworkIdMismatch":         {"wrong network id in proposal address"},
-	"ScriptsNotPaidUTxO":                         {"collateral input must be key-locked"},
-	"StakeCredentialInvalidPoolDelegation":       {"delegation from unregistered stake credential"},
-	"StakeKeyHasNonZeroAccountBalance":           {"stake credential has nonzero reward balance"},
-	"StakeKeyRegistered":                         {"stake credential already registered"},
-	"StakePoolCostTooLowPOOL":                    {"below minimum"},
-	"StakePoolNotRegisteredOnKeyPOOL":            {"stake pool not registered"},
-	"StakePoolRetirementWrongEpochPOOL":          {"retirement epoch", "outside allowed range"},
-	"TreasuryWithdrawalReturnAccountsDoNotExist": {"treasury withdrawal return account does not exist", "treasury withdrawal return account(s) do not exist"},
-	"TreasuryWithdrawalsAllZeros":                {"treasury withdrawals are all zero", "treasury withdrawal governance action has zero withdrawal amount"},
-	"TooManyCollateralInputs":                    {"too many collateral inputs"},
-	"ValidationTagMismatch:FailedUnexpectedly":   {"plutus script failed"},
-	"ValidationTagMismatch:PassedUnexpectedly":   {"transaction declared invalid but plutus scripts succeeded", "transaction marked as invalid but has no plutus scripts requiring phase-2 validation"},
-	"ValueNotConservedUTxO":                      {"value not conserved"},
-	"VotersDoNotExist":                           {"vote cast by unknown voter"},
-	"VotingOnExpiredGovAction":                   {"voting on expired governance action", "vote cast on expired governance action"},
-	"GovActionsDoNotExist":                       {"vote references unknown governance action id"},
-	"WithdrawalsNotInRewardsCERTS":               {"withdrawal from unregistered reward account", "incorrect withdrawal amount"},
-	"WrongNetworkInTxBody":                       {"wrong transaction network id"},
-	"WrongNetworkInTxOutput":                     {"wrong network: addr"},
-	"WrongNetworkPOOL":                           {"reward account network"},
-	"WrongNetworkWithdrawal":                     {"wrong network withdrawals"},
+	"BabbageNonDisjointRefInputs": {
+		"non-disjoint reference inputs",
+	},
+	"BabbageOutputTooSmallUTxO": {"output too small"},
+	"BadInputsUTxO": {
+		"bad input(s)",
+		"failed to resolve input",
+		"failed to resolve reference input",
+		"utxo not found for collateral input",
+	},
+	"CommitteeHasPreviouslyResigned": {
+		"committee member already resigned",
+		"resigned cc member",
+	},
+	"CommitteeIsUnknown":      {"not a cc member"},
+	"ConflictingMetadataHash": {"conflicting metadata hash"},
+	"ConwayTreasuryValueMismatch": {
+		"current treasury value mismatch",
+	},
+	"ConwayTxRefScriptsSizeTooBig": {
+		"reference-script size per transaction too large",
+	},
+	"ConwayWdrlNotDelegatedToDRep": {
+		"withdrawal is not delegated to a drep",
+	},
+	"DelegateeDRepNotRegistered": {
+		"vote delegation to unregistered drep",
+	},
+	"DelegateeStakePoolNotRegistered": {
+		"delegation to unregistered pool",
+	},
+	"DisallowedVoters":               {"voting restriction"},
+	"DRepAlreadyRegistered":          {"drep already registered"},
+	"ExtraneousScriptWitnessesUTXOW": {"extraneous script witness"},
+	"FeeTooSmallUTxO": {
+		"less than the calculated minimum fee",
+	},
+	"IncorrectDepositDELEG": {
+		"incorrect deposit for certificate type",
+	},
+	"IncorrectTotalCollateralField": {
+		"incorrect total collateral field",
+	},
+	"InputSetEmptyUTxO":      {"input set empty"},
+	"InsufficientCollateral": {"insufficient collateral"},
+	"InvalidGuardrailsScriptHash": {
+		"invalid guardrails script hash",
+	},
+	"InvalidPrevGovActionId": {
+		"previous governance action",
+		"prev gov action",
+		"invalid governance action ancestor",
+	},
+	"InvalidWitnessesUTXOW": {
+		"invalid vkey signature",
+		"invalid bootstrap signature",
+	},
+	"MalformedReferenceScripts": {
+		"malformed reference scripts",
+	},
+	"OutsideForecast": {"outside forecast"},
+	"MalformedScriptWitnesses": {
+		"malformed script witnesses",
+	},
+	"MaxTxSizeUTxO": {
+		"transaction size too large",
+	},
+	"MissingScriptWitnessesUTXOW": {"missing script witness"},
+	"MissingTxBodyMetadataHash": {
+		"missing transaction auxiliary data hash",
+	},
+	"MissingTxMetadata": {
+		"missing transaction metadata",
+	},
+	"MissingVerificationKeyWitnessesUTXOW": {
+		"missing vkey witness",
+		"missing required vkey witness",
+		"missing bootstrap witness",
+	},
+	"NoCollateralInputs":          {"no collateral inputs"},
+	"OutsideValidityIntervalUTxO": {"outside validity interval"},
+	"OutputTooBigUTxO": {
+		"output value too large",
+		"output bootstrap address attributes too big",
+	},
+	"ProposalCantFollow": {
+		"cannot follow current protocol version",
+	},
+	"ProposalReturnAccountDoesNotExist": {
+		"proposal return account does not exist",
+	},
+	"ProposalProcedureNetworkIdMismatch": {
+		"wrong network id in proposal address",
+	},
+	"ScriptsNotPaidUTxO": {
+		"collateral input must be key-locked",
+	},
+	"StakeCredentialInvalidPoolDelegation": {
+		"delegation from unregistered stake credential",
+	},
+	"StakeKeyHasNonZeroAccountBalance": {
+		"stake credential has nonzero reward balance",
+	},
+	"StakeKeyRegistered": {
+		"stake credential already registered",
+	},
+	"StakePoolCostTooLowPOOL":         {"below minimum"},
+	"StakePoolNotRegisteredOnKeyPOOL": {"stake pool not registered"},
+	"StakePoolRetirementWrongEpochPOOL": {
+		"retirement epoch",
+		"outside allowed range",
+	},
+	"TreasuryWithdrawalReturnAccountsDoNotExist": {
+		"treasury withdrawal return account does not exist",
+		"treasury withdrawal return account(s) do not exist",
+	},
+	"TreasuryWithdrawalsAllZeros": {
+		"treasury withdrawals are all zero",
+		"treasury withdrawal governance action has zero withdrawal amount",
+	},
+	"TooManyCollateralInputs": {
+		"too many collateral inputs",
+	},
+	"ValidationTagMismatch:FailedUnexpectedly": {"plutus script failed"},
+	"ValidationTagMismatch:PassedUnexpectedly": {
+		"transaction declared invalid but plutus scripts succeeded",
+		"transaction marked as invalid but has no plutus scripts requiring phase-2 validation",
+	},
+	"ValueNotConservedUTxO": {"value not conserved"},
+	"VotersDoNotExist": {
+		"vote cast by unknown voter",
+	},
+	"VotingOnExpiredGovAction": {
+		"voting on expired governance action",
+		"vote cast on expired governance action",
+	},
+	"GovActionsDoNotExist": {
+		"vote references unknown governance action id",
+	},
+	"WithdrawalsNotInRewardsCERTS": {
+		"withdrawal from unregistered reward account",
+		"incorrect withdrawal amount",
+	},
+	"WrongNetworkInTxBody": {
+		"wrong transaction network id",
+	},
+	"WrongNetworkInTxOutput": {"wrong network: addr"},
+	"WrongNetworkPOOL":       {"reward account network"},
+	"WrongNetworkWithdrawal": {"wrong network withdrawals"},
 }
 
-func loadProtocolParameters(root string, raw json.RawMessage) (protocolParametersDoc, error) {
+func loadProtocolParameters(
+	root string,
+	raw json.RawMessage,
+) (protocolParametersDoc, error) {
 	resolved, err := resolveReferencedObject(root, raw)
 	if err != nil {
-		return protocolParametersDoc{}, fmt.Errorf("load protocol parameters: %w", err)
+		return protocolParametersDoc{}, fmt.Errorf(
+			"load protocol parameters: %w",
+			err,
+		)
 	}
 	data, err := json.Marshal(resolved)
 	if err != nil {
-		return protocolParametersDoc{}, fmt.Errorf("encode protocol parameters: %w", err)
+		return protocolParametersDoc{}, fmt.Errorf(
+			"encode protocol parameters: %w",
+			err,
+		)
 	}
 	var parameters protocolParametersDoc
 	if err := json.Unmarshal(data, &parameters); err != nil {
-		return protocolParametersDoc{}, fmt.Errorf("decode protocol parameters: %w", err)
+		return protocolParametersDoc{}, fmt.Errorf(
+			"decode protocol parameters: %w",
+			err,
+		)
 	}
 	return parameters, nil
 }
 
-func protocolParametersToLedger(doc protocolParametersDoc) (*conway.ConwayProtocolParameters, error) {
+func protocolParametersToLedger(
+	doc protocolParametersDoc,
+) (*conway.ConwayProtocolParameters, error) {
 	ratPtr := func(value ratioDoc) (*cbor.Rat, error) {
 		if value.Denominator <= 0 {
 			return nil, errors.New("ratio denominator must be positive")
 		}
-		return &cbor.Rat{Rat: big.NewRat(value.Numerator, value.Denominator)}, nil
+		return &cbor.Rat{
+			Rat: big.NewRat(value.Numerator, value.Denominator),
+		}, nil
 	}
 	rat := func(value ratioDoc) (cbor.Rat, error) {
 		converted, err := ratPtr(value)
@@ -539,11 +698,26 @@ func protocolParametersToLedger(doc protocolParametersDoc) (*conway.ConwayProtoc
 		target *cbor.Rat
 		value  ratioDoc
 	}{
-		{&poolThresholds.MotionNoConfidence, doc.StakePoolVotingThresholds.MotionNoConfidence},
-		{&poolThresholds.CommitteeNormal, doc.StakePoolVotingThresholds.CommitteeNormal},
-		{&poolThresholds.CommitteeNoConfidence, doc.StakePoolVotingThresholds.CommitteeNoConfidence},
-		{&poolThresholds.HardForkInitiation, doc.StakePoolVotingThresholds.HardForkInitiation},
-		{&poolThresholds.PpSecurityGroup, doc.StakePoolVotingThresholds.SecurityVotingThreshold},
+		{
+			&poolThresholds.MotionNoConfidence,
+			doc.StakePoolVotingThresholds.MotionNoConfidence,
+		},
+		{
+			&poolThresholds.CommitteeNormal,
+			doc.StakePoolVotingThresholds.CommitteeNormal,
+		},
+		{
+			&poolThresholds.CommitteeNoConfidence,
+			doc.StakePoolVotingThresholds.CommitteeNoConfidence,
+		},
+		{
+			&poolThresholds.HardForkInitiation,
+			doc.StakePoolVotingThresholds.HardForkInitiation,
+		},
+		{
+			&poolThresholds.PpSecurityGroup,
+			doc.StakePoolVotingThresholds.SecurityVotingThreshold,
+		},
 	}
 	for _, pair := range thresholdPairs {
 		value, err := rat(pair.value)
@@ -557,16 +731,46 @@ func protocolParametersToLedger(doc protocolParametersDoc) (*conway.ConwayProtoc
 		target *cbor.Rat
 		value  ratioDoc
 	}{
-		{&drepThresholds.MotionNoConfidence, doc.DRepVotingThresholds.MotionNoConfidence},
-		{&drepThresholds.CommitteeNormal, doc.DRepVotingThresholds.CommitteeNormal},
-		{&drepThresholds.CommitteeNoConfidence, doc.DRepVotingThresholds.CommitteeNoConfidence},
-		{&drepThresholds.UpdateToConstitution, doc.DRepVotingThresholds.UpdateConstitution},
-		{&drepThresholds.HardForkInitiation, doc.DRepVotingThresholds.HardForkInitiation},
-		{&drepThresholds.PpNetworkGroup, doc.DRepVotingThresholds.PpNetworkGroup},
-		{&drepThresholds.PpEconomicGroup, doc.DRepVotingThresholds.PpEconomicGroup},
-		{&drepThresholds.PpTechnicalGroup, doc.DRepVotingThresholds.PpTechnicalGroup},
-		{&drepThresholds.PpGovGroup, doc.DRepVotingThresholds.PpGovernanceGroup},
-		{&drepThresholds.TreasuryWithdrawal, doc.DRepVotingThresholds.TreasuryWithdrawal},
+		{
+			&drepThresholds.MotionNoConfidence,
+			doc.DRepVotingThresholds.MotionNoConfidence,
+		},
+		{
+			&drepThresholds.CommitteeNormal,
+			doc.DRepVotingThresholds.CommitteeNormal,
+		},
+		{
+			&drepThresholds.CommitteeNoConfidence,
+			doc.DRepVotingThresholds.CommitteeNoConfidence,
+		},
+		{
+			&drepThresholds.UpdateToConstitution,
+			doc.DRepVotingThresholds.UpdateConstitution,
+		},
+		{
+			&drepThresholds.HardForkInitiation,
+			doc.DRepVotingThresholds.HardForkInitiation,
+		},
+		{
+			&drepThresholds.PpNetworkGroup,
+			doc.DRepVotingThresholds.PpNetworkGroup,
+		},
+		{
+			&drepThresholds.PpEconomicGroup,
+			doc.DRepVotingThresholds.PpEconomicGroup,
+		},
+		{
+			&drepThresholds.PpTechnicalGroup,
+			doc.DRepVotingThresholds.PpTechnicalGroup,
+		},
+		{
+			&drepThresholds.PpGovGroup,
+			doc.DRepVotingThresholds.PpGovernanceGroup,
+		},
+		{
+			&drepThresholds.TreasuryWithdrawal,
+			doc.DRepVotingThresholds.TreasuryWithdrawal,
+		},
 	}
 	for _, pair := range drepPairs {
 		value, err := rat(pair.value)
@@ -600,25 +804,41 @@ func protocolParametersToLedger(doc protocolParametersDoc) (*conway.ConwayProtoc
 		return nil, fmt.Errorf("reference script price: %w", err)
 	}
 	return &conway.ConwayProtocolParameters{
-		MinFeeA:                    doc.MinFeeCoefficient,
-		MinFeeB:                    doc.MinFeeConstant,
-		MaxBlockBodySize:           doc.MaxBlockBodySize,
-		MaxTxSize:                  doc.MaxTransactionSize,
-		MaxBlockHeaderSize:         doc.MaxBlockHeaderSize,
-		KeyDeposit:                 doc.StakeCredentialDeposit,
-		PoolDeposit:                doc.StakePoolDeposit,
-		MaxEpoch:                   doc.StakePoolRetirementEpochBound,
-		NOpt:                       doc.DesiredNumberOfStakePools,
-		A0:                         a0,
-		Rho:                        rho,
-		Tau:                        tau,
-		ProtocolVersion:            common.ProtocolParametersProtocolVersion{Major: doc.Version.Major, Minor: doc.Version.Minor},
-		MinPoolCost:                doc.MinStakePoolCost,
-		AdaPerUtxoByte:             doc.MinUtxoDepositCoefficient,
-		CostModels:                 map[uint][]int64{0: doc.PlutusCostModels.V1, 1: doc.PlutusCostModels.V2, 2: doc.PlutusCostModels.V3},
-		ExecutionCosts:             common.ExUnitPrice{MemPrice: memPrice, StepPrice: stepPrice},
-		MaxTxExUnits:               common.ExUnits{Memory: doc.MaxExecutionUnitsPerTransaction.Memory, Steps: doc.MaxExecutionUnitsPerTransaction.Steps},
-		MaxBlockExUnits:            common.ExUnits{Memory: doc.MaxExecutionUnitsPerBlock.Memory, Steps: doc.MaxExecutionUnitsPerBlock.Steps},
+		MinFeeA:            doc.MinFeeCoefficient,
+		MinFeeB:            doc.MinFeeConstant,
+		MaxBlockBodySize:   doc.MaxBlockBodySize,
+		MaxTxSize:          doc.MaxTransactionSize,
+		MaxBlockHeaderSize: doc.MaxBlockHeaderSize,
+		KeyDeposit:         doc.StakeCredentialDeposit,
+		PoolDeposit:        doc.StakePoolDeposit,
+		MaxEpoch:           doc.StakePoolRetirementEpochBound,
+		NOpt:               doc.DesiredNumberOfStakePools,
+		A0:                 a0,
+		Rho:                rho,
+		Tau:                tau,
+		ProtocolVersion: common.ProtocolParametersProtocolVersion{
+			Major: doc.Version.Major,
+			Minor: doc.Version.Minor,
+		},
+		MinPoolCost:    doc.MinStakePoolCost,
+		AdaPerUtxoByte: doc.MinUtxoDepositCoefficient,
+		CostModels: map[uint][]int64{
+			0: doc.PlutusCostModels.V1,
+			1: doc.PlutusCostModels.V2,
+			2: doc.PlutusCostModels.V3,
+		},
+		ExecutionCosts: common.ExUnitPrice{
+			MemPrice:  memPrice,
+			StepPrice: stepPrice,
+		},
+		MaxTxExUnits: common.ExUnits{
+			Memory: doc.MaxExecutionUnitsPerTransaction.Memory,
+			Steps:  doc.MaxExecutionUnitsPerTransaction.Steps,
+		},
+		MaxBlockExUnits: common.ExUnits{
+			Memory: doc.MaxExecutionUnitsPerBlock.Memory,
+			Steps:  doc.MaxExecutionUnitsPerBlock.Steps,
+		},
 		MaxValueSize:               doc.MaxValueSize,
 		CollateralPercentage:       doc.CollateralPercentage,
 		MaxCollateralInputs:        doc.MaxCollateralInputs,
@@ -650,10 +870,19 @@ func loadEraHistory(root string, raw json.RawMessage) (eraHistoryDoc, error) {
 	return history, nil
 }
 
-func resolveReferencedObject(root string, raw json.RawMessage) (map[string]json.RawMessage, error) {
+func resolveReferencedObject(
+	root string,
+	raw json.RawMessage,
+) (map[string]json.RawMessage, error) {
 	var object map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &object); err != nil {
 		return nil, fmt.Errorf("expected JSON object: %w", err)
+	}
+	var overrides map[string]json.RawMessage
+	if overrideRaw, ok := object["$override"]; ok {
+		if err := json.Unmarshal(overrideRaw, &overrides); err != nil {
+			return nil, fmt.Errorf("decode $override: %w", err)
+		}
 	}
 	var ref string
 	if refRaw, ok := object["$ref"]; ok {
@@ -669,16 +898,14 @@ func resolveReferencedObject(root string, raw json.RawMessage) (map[string]json.
 			return nil, fmt.Errorf("read referenced document %q: %w", ref, err)
 		}
 		if err := json.Unmarshal(data, &object); err != nil {
-			return nil, fmt.Errorf("decode referenced document %q: %w", ref, err)
+			return nil, fmt.Errorf(
+				"decode referenced document %q: %w",
+				ref,
+				err,
+			)
 		}
 	}
-	var overrides map[string]json.RawMessage
-	if overrideRaw, ok := object["$override"]; ok {
-		if err := json.Unmarshal(overrideRaw, &overrides); err != nil {
-			return nil, fmt.Errorf("decode $override: %w", err)
-		}
-		delete(object, "$override")
-	}
+	delete(object, "$override")
 	maps.Copy(object, overrides)
 	delete(object, "$ref")
 	return object, nil
@@ -686,10 +913,14 @@ func resolveReferencedObject(root string, raw json.RawMessage) (map[string]json.
 
 func resolveFixturePath(root, ref string) (string, error) {
 	if filepath.IsAbs(ref) {
-		return "", fmt.Errorf("referenced fixture path must be relative: %q", ref)
+		return "", fmt.Errorf(
+			"referenced fixture path must be relative: %q",
+			ref,
+		)
 	}
 	clean := filepath.Clean(filepath.FromSlash(ref))
-	if clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+	if clean == ".." ||
+		strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
 		return "", fmt.Errorf("referenced fixture path escapes corpus: %q", ref)
 	}
 	candidates := []string{filepath.Join(root, clean)}
@@ -701,7 +932,11 @@ func resolveFixturePath(root, ref string) (string, error) {
 			return candidate, nil
 		}
 	}
-	return "", fmt.Errorf("referenced fixture %q was not found under %s", ref, root)
+	return "", fmt.Errorf(
+		"referenced fixture %q was not found under %s",
+		ref,
+		root,
+	)
 }
 
 func parseInitialState(
@@ -710,26 +945,56 @@ func parseInitialState(
 	slot uint64,
 ) (*mockconformance.ParsedInitialState, conformance.LedgerRulesMetadata, error) {
 	state := &mockconformance.ParsedInitialState{
-		Utxos:                            make(map[string]mockconformance.ParsedUtxo),
-		StakeRegistrations:               make(map[common.Blake2b224]bool),
-		StakeRegistrationsByCredential:   make(map[mockledger.RewardAccountKey]bool),
-		RewardAccounts:                   make(map[common.Blake2b224]uint64),
-		RewardAccountBalances:            make(map[mockledger.RewardAccountKey]uint64),
-		StakeCredentialDeposits:          make(map[mockledger.RewardAccountKey]uint64),
-		PoolRegistrations:                make(map[common.Blake2b224]bool),
-		PoolDelegationsByCredential:      make(map[mockledger.RewardAccountKey]common.PoolKeyHash),
-		CommitteeMembers:                 make(map[common.Blake2b224]uint64),
-		CommitteeMembersByCredential:     make(map[mockledger.RewardAccountKey]uint64),
-		DRepDeposits:                     make(map[mockledger.RewardAccountKey]uint64),
-		DRepRegistrationsByCredential:    make(map[mockledger.RewardAccountKey]bool),
-		DRepExpiries:                     make(map[mockledger.RewardAccountKey]uint64),
-		DRepDelegations:                  make(map[common.Blake2b224]common.Drep),
-		DRepDelegationsByCredential:      make(map[mockledger.RewardAccountKey]common.Drep),
-		HotKeyAuthorizations:             make(map[common.Blake2b224]common.Blake2b224),
-		HotKeyAuthorizationsByCredential: make(map[mockledger.RewardAccountKey]common.Credential),
-		CommitteeResignations:            make(map[mockledger.RewardAccountKey]bool),
-		Proposals:                        make(map[string]mockconformance.GovActionInfo),
-		CostModels:                       make(map[uint][]int64),
+		Utxos: make(
+			map[string]mockconformance.ParsedUtxo,
+		),
+		StakeRegistrations: make(map[common.Blake2b224]bool),
+		StakeRegistrationsByCredential: make(
+			map[mockledger.RewardAccountKey]bool,
+		),
+		RewardAccounts: make(map[common.Blake2b224]uint64),
+		RewardAccountBalances: make(
+			map[mockledger.RewardAccountKey]uint64,
+		),
+		StakeCredentialDeposits: make(
+			map[mockledger.RewardAccountKey]uint64,
+		),
+		PoolRegistrations: make(map[common.Blake2b224]bool),
+		PoolDelegationsByCredential: make(
+			map[mockledger.RewardAccountKey]common.PoolKeyHash,
+		),
+		CommitteeMembers: make(map[common.Blake2b224]uint64),
+		CommitteeMembersByCredential: make(
+			map[mockledger.RewardAccountKey]uint64,
+		),
+		DRepDeposits: make(
+			map[mockledger.RewardAccountKey]uint64,
+		),
+		DRepRegistrationsByCredential: make(
+			map[mockledger.RewardAccountKey]bool,
+		),
+		DRepExpiries: make(
+			map[mockledger.RewardAccountKey]uint64,
+		),
+		DRepDelegations: make(
+			map[common.Blake2b224]common.Drep,
+		),
+		DRepDelegationsByCredential: make(
+			map[mockledger.RewardAccountKey]common.Drep,
+		),
+		HotKeyAuthorizations: make(
+			map[common.Blake2b224]common.Blake2b224,
+		),
+		HotKeyAuthorizationsByCredential: make(
+			map[mockledger.RewardAccountKey]common.Credential,
+		),
+		CommitteeResignations: make(
+			map[mockledger.RewardAccountKey]bool,
+		),
+		Proposals: make(
+			map[string]mockconformance.GovActionInfo,
+		),
+		CostModels: make(map[uint][]int64),
 	}
 	metadata := conformance.LedgerRulesMetadata{
 		GovActionCbor: make(map[string][]byte),
@@ -742,19 +1007,31 @@ func parseInitialState(
 	for _, item := range doc.UTxO {
 		inputData, err := hex.DecodeString(item.Input)
 		if err != nil {
-			return nil, conformance.LedgerRulesMetadata{}, fmt.Errorf("decode UTxO input hex: %w", err)
+			return nil, conformance.LedgerRulesMetadata{}, fmt.Errorf(
+				"decode UTxO input hex: %w",
+				err,
+			)
 		}
 		var input shelley.ShelleyTransactionInput
 		if _, err := cbor.DecodeExact(inputData, &input); err != nil {
-			return nil, conformance.LedgerRulesMetadata{}, fmt.Errorf("decode UTxO input CBOR: %w", err)
+			return nil, conformance.LedgerRulesMetadata{}, fmt.Errorf(
+				"decode UTxO input CBOR: %w",
+				err,
+			)
 		}
 		outputData, err := hex.DecodeString(item.Output)
 		if err != nil {
-			return nil, conformance.LedgerRulesMetadata{}, fmt.Errorf("decode UTxO output hex: %w", err)
+			return nil, conformance.LedgerRulesMetadata{}, fmt.Errorf(
+				"decode UTxO output hex: %w",
+				err,
+			)
 		}
 		output, err := babbage.NewBabbageTransactionOutputFromCbor(outputData)
 		if err != nil {
-			return nil, conformance.LedgerRulesMetadata{}, fmt.Errorf("decode UTxO output CBOR: %w", err)
+			return nil, conformance.LedgerRulesMetadata{}, fmt.Errorf(
+				"decode UTxO output CBOR: %w",
+				err,
+			)
 		}
 		id := fmt.Sprintf("%x#%d", input.TxId, input.OutputIndex)
 		state.Utxos[id] = mockconformance.ParsedUtxo{
@@ -766,14 +1043,20 @@ func parseInitialState(
 	for _, poolID := range doc.Pools {
 		hash, err := decodeHash28(poolID)
 		if err != nil {
-			return nil, conformance.LedgerRulesMetadata{}, fmt.Errorf("decode pool id: %w", err)
+			return nil, conformance.LedgerRulesMetadata{}, fmt.Errorf(
+				"decode pool id: %w",
+				err,
+			)
 		}
 		state.PoolRegistrations[hash] = true
 	}
 	for _, account := range doc.Accounts {
 		credential, key, err := decodeCredential(account.Credential)
 		if err != nil {
-			return nil, conformance.LedgerRulesMetadata{}, fmt.Errorf("decode stake account credential: %w", err)
+			return nil, conformance.LedgerRulesMetadata{}, fmt.Errorf(
+				"decode stake account credential: %w",
+				err,
+			)
 		}
 		state.StakeRegistrationsByCredential[key] = true
 		state.RewardAccountBalances[key] = account.Rewards
@@ -781,18 +1064,29 @@ func parseInitialState(
 		if account.Pool != nil {
 			poolHash, err := decodeHash28(account.Pool.ID)
 			if err != nil {
-				return nil, conformance.LedgerRulesMetadata{}, fmt.Errorf("decode delegated pool id: %w", err)
+				return nil, conformance.LedgerRulesMetadata{}, fmt.Errorf(
+					"decode delegated pool id: %w",
+					err,
+				)
 			}
-			state.PoolDelegationsByCredential[key] = common.PoolKeyHash(poolHash)
+			state.PoolDelegationsByCredential[key] = common.PoolKeyHash(
+				poolHash,
+			)
 		}
 		if account.DRep != nil {
 			drepData, err := hex.DecodeString(account.DRep.ID)
 			if err != nil {
-				return nil, conformance.LedgerRulesMetadata{}, fmt.Errorf("decode delegated DRep hex: %w", err)
+				return nil, conformance.LedgerRulesMetadata{}, fmt.Errorf(
+					"decode delegated DRep hex: %w",
+					err,
+				)
 			}
 			var drep common.Drep
 			if _, err := cbor.DecodeExact(drepData, &drep); err != nil {
-				return nil, conformance.LedgerRulesMetadata{}, fmt.Errorf("decode delegated DRep CBOR: %w", err)
+				return nil, conformance.LedgerRulesMetadata{}, fmt.Errorf(
+					"decode delegated DRep CBOR: %w",
+					err,
+				)
 			}
 			state.DRepDelegationsByCredential[key] = drep
 		}
@@ -804,19 +1098,28 @@ func parseInitialState(
 	for _, drep := range doc.DReps {
 		credential, key, err := decodeCredential(drep.Credential)
 		if err != nil {
-			return nil, conformance.LedgerRulesMetadata{}, fmt.Errorf("decode DRep credential: %w", err)
+			return nil, conformance.LedgerRulesMetadata{}, fmt.Errorf(
+				"decode DRep credential: %w",
+				err,
+			)
 		}
 		state.DRepRegistrationsByCredential[key] = true
 		state.DRepDeposits[key] = drep.Deposit
 		state.DRepExpiries[key] = drep.ValidUntil
 		if credential.CredType == common.CredentialTypeAddrKeyHash {
-			state.DRepRegistrations = append(state.DRepRegistrations, credential.Credential)
+			state.DRepRegistrations = append(
+				state.DRepRegistrations,
+				credential.Credential,
+			)
 		}
 	}
 	for _, member := range doc.Committee {
 		cold, key, err := decodeCredential(member.ColdCredential)
 		if err != nil {
-			return nil, conformance.LedgerRulesMetadata{}, fmt.Errorf("decode committee cold credential: %w", err)
+			return nil, conformance.LedgerRulesMetadata{}, fmt.Errorf(
+				"decode committee cold credential: %w",
+				err,
+			)
 		}
 		var expiry uint64
 		if member.ValidUntil != nil {
@@ -835,45 +1138,70 @@ func parseInitialState(
 			continue
 		}
 		var status string
-		if err := json.Unmarshal(member.Status, &status); err == nil && status == "resigned" {
+		if err := json.Unmarshal(member.Status, &status); err == nil &&
+			status == "resigned" {
 			state.CommitteeResignations[key] = true
 			continue
 		}
 		var hot common.Credential
 		if err := json.Unmarshal(member.Status, &status); err != nil {
-			return nil, conformance.LedgerRulesMetadata{}, fmt.Errorf("decode committee status: %w", err)
+			return nil, conformance.LedgerRulesMetadata{}, fmt.Errorf(
+				"decode committee status: %w",
+				err,
+			)
 		}
 		statusCBOR, err := hex.DecodeString(status)
 		if err != nil {
-			return nil, conformance.LedgerRulesMetadata{}, fmt.Errorf("decode committee hot credential hex: %w", err)
+			return nil, conformance.LedgerRulesMetadata{}, fmt.Errorf(
+				"decode committee hot credential hex: %w",
+				err,
+			)
 		}
 		if _, err := cbor.DecodeExact(statusCBOR, &hot); err != nil {
-			return nil, conformance.LedgerRulesMetadata{}, fmt.Errorf("decode committee hot credential CBOR: %w", err)
+			return nil, conformance.LedgerRulesMetadata{}, fmt.Errorf(
+				"decode committee hot credential CBOR: %w",
+				err,
+			)
 		}
 		state.HotKeyAuthorizationsByCredential[key] = hot
-		if cold.CredType == common.CredentialTypeAddrKeyHash && hot.CredType == common.CredentialTypeAddrKeyHash {
+		if cold.CredType == common.CredentialTypeAddrKeyHash &&
+			hot.CredType == common.CredentialTypeAddrKeyHash {
 			state.HotKeyAuthorizations[cold.Credential] = hot.Credential
 		}
 	}
 	for _, proposal := range doc.Proposals {
 		if len(proposal) != 3 {
-			return nil, conformance.LedgerRulesMetadata{}, errors.New("proposal entry must have three values")
+			return nil, conformance.LedgerRulesMetadata{}, errors.New(
+				"proposal entry must have three values",
+			)
 		}
 		var id proposalIDDoc
 		var kind string
 		var expires uint64
 		if err := json.Unmarshal(proposal[0], &id); err != nil {
-			return nil, conformance.LedgerRulesMetadata{}, fmt.Errorf("decode proposal id: %w", err)
+			return nil, conformance.LedgerRulesMetadata{}, fmt.Errorf(
+				"decode proposal id: %w",
+				err,
+			)
 		}
 		if err := json.Unmarshal(proposal[1], &kind); err != nil {
-			return nil, conformance.LedgerRulesMetadata{}, fmt.Errorf("decode proposal kind: %w", err)
+			return nil, conformance.LedgerRulesMetadata{}, fmt.Errorf(
+				"decode proposal kind: %w",
+				err,
+			)
 		}
 		if err := json.Unmarshal(proposal[2], &expires); err != nil {
-			return nil, conformance.LedgerRulesMetadata{}, fmt.Errorf("decode proposal expiry: %w", err)
+			return nil, conformance.LedgerRulesMetadata{}, fmt.Errorf(
+				"decode proposal expiry: %w",
+				err,
+			)
 		}
 		txHash, err := decodeHash32(id.TransactionID)
 		if err != nil {
-			return nil, conformance.LedgerRulesMetadata{}, fmt.Errorf("decode proposal transaction id: %w", err)
+			return nil, conformance.LedgerRulesMetadata{}, fmt.Errorf(
+				"decode proposal transaction id: %w",
+				err,
+			)
 		}
 		proposalKey := fmt.Sprintf("%x#%d", txHash, id.ProposalIndex)
 		state.Proposals[proposalKey] = mockconformance.GovActionInfo{
@@ -893,7 +1221,11 @@ func parseInitialState(
 	for purpose, id := range doc.ProposalRoots {
 		txHash, err := decodeHash32(id.TransactionID)
 		if err != nil {
-			return nil, conformance.LedgerRulesMetadata{}, fmt.Errorf("decode %s proposal root: %w", purpose, err)
+			return nil, conformance.LedgerRulesMetadata{}, fmt.Errorf(
+				"decode %s proposal root: %w",
+				purpose,
+				err,
+			)
 		}
 		proposalKey := fmt.Sprintf("%x#%d", txHash, id.ProposalIndex)
 		root := &proposalKey
@@ -907,13 +1239,19 @@ func parseInitialState(
 		case "constitution":
 			state.ProposalRoots.Constitution = root
 		default:
-			return nil, conformance.LedgerRulesMetadata{}, fmt.Errorf("unknown proposal root purpose %q", purpose)
+			return nil, conformance.LedgerRulesMetadata{}, fmt.Errorf(
+				"unknown proposal root purpose %q",
+				purpose,
+			)
 		}
 	}
 	if doc.GuardrailScript != nil && *doc.GuardrailScript != "" {
 		guardrail, err := decodeHash28(*doc.GuardrailScript)
 		if err != nil {
-			return nil, conformance.LedgerRulesMetadata{}, fmt.Errorf("decode guardrail script hash: %w", err)
+			return nil, conformance.LedgerRulesMetadata{}, fmt.Errorf(
+				"decode guardrail script hash: %w",
+				err,
+			)
 		}
 		state.Constitution = &mockconformance.ConstitutionInfo{
 			// The scenario projects only the active policy hash. Dingo's
@@ -952,10 +1290,16 @@ func proposalActionCbor(kind string) ([]byte, error) {
 		}
 		return cbor.Encode(action)
 	case strings.HasPrefix(kind, "HardFork("):
-		version := strings.TrimSuffix(strings.TrimPrefix(kind, "HardFork("), ")")
+		version := strings.TrimSuffix(
+			strings.TrimPrefix(kind, "HardFork("),
+			")",
+		)
 		major, minorText, ok := strings.Cut(version, ".")
 		if !ok {
-			return nil, fmt.Errorf("invalid hard-fork protocol version %q", kind)
+			return nil, fmt.Errorf(
+				"invalid hard-fork protocol version %q",
+				kind,
+			)
 		}
 		majorVersion, err := strconv.ParseUint(major, 10, 32)
 		if err != nil {
@@ -993,7 +1337,9 @@ func epochForSlot(history eraHistoryDoc, slot uint64) (uint64, error) {
 	return 0, fmt.Errorf("slot %d is outside the supplied era history", slot)
 }
 
-func decodeCredential(value string) (common.Credential, mockledger.RewardAccountKey, error) {
+func decodeCredential(
+	value string,
+) (common.Credential, mockledger.RewardAccountKey, error) {
 	data, err := hex.DecodeString(value)
 	if err != nil {
 		return common.Credential{}, mockledger.RewardAccountKey{}, err
@@ -1020,7 +1366,10 @@ func decodeHash32(value string) ([32]byte, error) {
 		return hash, err
 	}
 	if len(data) != len(hash) {
-		return hash, fmt.Errorf("expected 32-byte hash, got %d bytes", len(data))
+		return hash, fmt.Errorf(
+			"expected 32-byte hash, got %d bytes",
+			len(data),
+		)
 	}
 	copy(hash[:], data)
 	return hash, nil

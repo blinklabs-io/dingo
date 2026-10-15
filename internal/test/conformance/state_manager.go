@@ -438,7 +438,8 @@ func (m *DingoStateManager) LoadInitialState(
 		}
 		if drep, delegated := state.DRepDelegationsByCredential[credential]; delegated {
 			account.Drep = append([]byte(nil), drep.Credential...)
-			account.DrepType = uint64(drep.Type) //nolint:gosec // conformance DRep types are bounded ledger enums.
+			//nolint:gosec // conformance DRep types are bounded ledger enums.
+			account.DrepType = uint64(drep.Type)
 		}
 		if err := m.db.Metadata().ImportAccount(
 			account,
@@ -531,6 +532,9 @@ func (m *DingoStateManager) LoadInitialState(
 			CredentialTag: credentialTag,
 			Active:        true,
 		}
+		if expiry, ok := state.DRepExpiries[credential]; ok {
+			drep.ExpiryEpoch = expiry
+		}
 		registration := &models.RegistrationDrep{
 			DrepCredential: drep.Credential,
 			CredentialTag:  credentialTag,
@@ -541,7 +545,8 @@ func (m *DingoStateManager) LoadInitialState(
 		}
 	}
 
-	if len(state.CommitteeMembers) > 0 || len(state.CommitteeMembersByCredential) > 0 {
+	if len(state.CommitteeMembers) > 0 ||
+		len(state.CommitteeMembersByCredential) > 0 {
 		membersByCredential := make(map[string]*models.CommitteeMember)
 		for coldKey, expiry := range state.CommitteeMembers {
 			key := string(append([]byte{0}, coldKey[:]...))
@@ -559,7 +564,9 @@ func (m *DingoStateManager) LoadInitialState(
 			if err != nil {
 				return fmt.Errorf("seed committee credential tag: %w", err)
 			}
-			key := string(append([]byte{credentialTag}, coldCredential.Credential[:]...))
+			key := string(
+				append([]byte{credentialTag}, coldCredential.Credential[:]...),
+			)
 			membersByCredential[key] = &models.CommitteeMember{
 				ColdCredentialTag: credentialTag,
 				ColdCredHash:      coldCredential.Credential[:],
@@ -649,7 +656,9 @@ func stateManagerProtocolMajor(
 ) (uint64, error) {
 	versioned, ok := pp.(common.PoolRuleProtocolParameters)
 	if !ok {
-		return 0, errors.New("protocol parameters do not define a protocol version")
+		return 0, errors.New(
+			"protocol parameters do not define a protocol version",
+		)
 	}
 	return uint64(versioned.ProtocolMajorVersion()), nil
 }
@@ -1047,7 +1056,10 @@ func (m *DingoStateManager) ApplyTransaction(
 			m.db,
 			txn,
 		); err != nil {
-			return fmt.Errorf("reset DRep dormancy before certificates: %w", err)
+			return fmt.Errorf(
+				"reset DRep dormancy before certificates: %w",
+				err,
+			)
 		}
 		if err := m.spendUtxos(txn, level.Inputs(), slot); err != nil {
 			return fmt.Errorf(
@@ -1059,8 +1071,10 @@ func (m *DingoStateManager) ApplyTransaction(
 		levelHash := level.Hash()
 		for outIdx, output := range level.Outputs() {
 			input := &dingoTransactionInput{
-				txId:  levelHash,
-				index: uint32(outIdx), //nolint:gosec // idx bounded by tx outputs
+				txId: levelHash,
+				index: uint32(
+					outIdx,
+				), //nolint:gosec // idx bounded by tx outputs
 			}
 			utxo := common.Utxo{Id: input, Output: output}
 			if err := m.createUtxo(txn, utxo, slot); err != nil {
@@ -1127,7 +1141,11 @@ func (m *DingoStateManager) ApplyTransaction(
 			m.protocolParams,
 			&proposalsValidated,
 		); err != nil {
-			return fmt.Errorf("process transaction body %d governance effects: %w", levelIndex, err)
+			return fmt.Errorf(
+				"process transaction body %d governance effects: %w",
+				levelIndex,
+				err,
+			)
 		}
 		if proposals := level.ProposalProcedures(); len(proposals) > 0 {
 			m.recordProposalsInGovState(level, govActionLifetime)
@@ -1824,7 +1842,8 @@ func (m *DingoStateManager) committeeActionRatified(
 
 	decision := governance.ShouldRatify(governance.RatifyInputs{
 		Tally: &governance.ProposalTally{
-			ActionType:     uint8(proposal.ActionType), //nolint:gosec // bounded by the small fixed set of GovActionType values
+			//nolint:gosec // bounded by the small fixed set of GovActionType values
+			ActionType:     uint8(proposal.ActionType),
 			DRepYesStake:   drepYes,
 			DRepTotalStake: drepTotal,
 			SPOYesStake:    spoYes,
@@ -2215,15 +2234,19 @@ func (m *DingoStateManager) persistEnactment(
 	if dijkstraPP, ok := m.protocolParams.(*dijkstra.DijkstraProtocolParameters); ok {
 		enactmentPP = dijkstraPP
 	}
-	result, err := governance.EnactProposal(context.Background(), &governance.EnactmentContext{
-		DB:                 m.db,
-		Txn:                txn,
-		Epoch:              m.currentEpoch,
-		Slot:               boundarySlot,
-		PrevEpochStartSlot: m.committeeEpochStartSlot,
-		PParams:            enactmentPP,
-		UpdateFn:           stateManagerPParamsUpdateFunc(m.protocolParams),
-	}, dbProposal)
+	result, err := governance.EnactProposal(
+		context.Background(),
+		&governance.EnactmentContext{
+			DB:                 m.db,
+			Txn:                txn,
+			Epoch:              m.currentEpoch,
+			Slot:               boundarySlot,
+			PrevEpochStartSlot: m.committeeEpochStartSlot,
+			PParams:            enactmentPP,
+			UpdateFn:           stateManagerPParamsUpdateFunc(m.protocolParams),
+		},
+		dbProposal,
+	)
 	if err != nil {
 		return fmt.Errorf("enact governance proposal: %w", err)
 	}

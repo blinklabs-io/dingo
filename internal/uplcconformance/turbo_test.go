@@ -15,6 +15,7 @@
 package uplcconformance
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/json"
 	"os"
@@ -68,13 +69,16 @@ func TestGenerateTurboReportMeasuresFlatPrograms(t *testing.T) {
 	if report.Scenario != "uplc-turbo" || report.Setup.SampleCount != 2 {
 		t.Fatalf("report metadata = %+v / %+v", report.Scenario, report.Setup)
 	}
-	if len(report.Benchmarks) != 1 || report.Benchmarks[0].SizeBytes != len(encoded) {
+	if len(report.Benchmarks) != 1 ||
+		report.Benchmarks[0].SizeBytes != len(encoded) {
 		t.Fatalf("benchmarks = %+v", report.Benchmarks)
 	}
-	if report.Benchmarks[0].BudgetCPU == nil || report.Benchmarks[0].BudgetMem == nil {
+	if report.Benchmarks[0].BudgetCPU == nil ||
+		report.Benchmarks[0].BudgetMem == nil {
 		t.Fatalf("consumed budget is missing: %+v", report.Benchmarks[0])
 	}
-	if len(report.Summary) != 1 || report.Summary[0].Group != "V1" || report.Summary[0].Samples != 2 {
+	if len(report.Summary) != 1 || report.Summary[0].Group != "V1" ||
+		report.Summary[0].Samples != 2 {
 		t.Fatalf("summary = %+v", report.Summary)
 	}
 	reportPath := filepath.Join(t.TempDir(), "report.json")
@@ -87,6 +91,13 @@ func TestGenerateTurboReportMeasuresFlatPrograms(t *testing.T) {
 	}
 	if !json.Valid(reportJSON) {
 		t.Fatal("turbo report is not valid JSON")
+	}
+	if bytes.Contains(reportJSON, []byte(`"passed"`)) ||
+		bytes.Contains(reportJSON, []byte(`"failed"`)) {
+		t.Fatalf(
+			"performance report exposes conformance outcomes: %s",
+			reportJSON,
+		)
 	}
 }
 
@@ -101,10 +112,10 @@ func TestTurboRepresentativeIndexGroupsNearDuplicatePrograms(t *testing.T) {
 	}
 	second := append([]byte(nil), first...)
 	second[256] ^= 1
-	if err := os.WriteFile(firstPath, first, 0o600); err != nil {
+	if err := writeTurboTestProgram(firstPath, first); err != nil {
 		t.Fatalf("write first Flat program: %v", err)
 	}
-	if err := os.WriteFile(secondPath, second, 0o600); err != nil {
+	if err := writeTurboTestProgram(secondPath, second); err != nil {
 		t.Fatalf("write second Flat program: %v", err)
 	}
 
@@ -159,7 +170,7 @@ func TestTurboRepresentativeIndexKeepsDissimilarProgramsSeparate(t *testing.T) {
 	firstPath := filepath.Join(root, "first.flat")
 	secondPath := filepath.Join(root, "second.flat")
 	for path, program := range map[string][]byte{firstPath: first, secondPath: second} {
-		if err := os.WriteFile(path, program, 0o600); err != nil {
+		if err := writeTurboTestProgram(path, program); err != nil {
 			t.Fatalf("write Flat program %s: %v", path, err)
 		}
 	}
@@ -189,4 +200,12 @@ func TestTurboRepresentativeIndexKeepsDissimilarProgramsSeparate(t *testing.T) {
 	if got := len(index.representatives); got != 2 {
 		t.Fatalf("representatives = %d, want 2 for dissimilar programs", got)
 	}
+}
+
+func writeTurboTestProgram(path string, program []byte) error {
+	encoded, err := cbor.Marshal(program)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, encoded, 0o600)
 }

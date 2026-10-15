@@ -17,7 +17,6 @@ package conformance
 import (
 	"context"
 	"fmt"
-	"strconv"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/gouroboros/ledger/common"
@@ -35,7 +34,9 @@ type LedgerRulesMetadata struct {
 }
 
 func committeeCredentialKey(credential common.Credential) string {
-	return strconv.FormatUint(uint64(credential.CredType), 10) + ":" +
+	//nolint:gosec // credential tags are bounded ledger enums.
+	tag := uint8(credential.CredType)
+	return string([]byte{tag}) +
 		string(credential.Credential[:])
 }
 
@@ -50,7 +51,10 @@ func (m *DingoStateManager) LoadLedgerRulesInitialState(
 	if err := m.LoadInitialState(state, pp); err != nil {
 		return err
 	}
-	m.unelectedCommitteeMembers = make(map[string]struct{}, len(metadata.UnelectedCommitteeCredentials))
+	m.unelectedCommitteeMembers = make(
+		map[string]struct{},
+		len(metadata.UnelectedCommitteeCredentials),
+	)
 	for _, credential := range metadata.UnelectedCommitteeCredentials {
 		m.unelectedCommitteeMembers[committeeCredentialKey(credential)] = struct{}{}
 	}
@@ -89,10 +93,22 @@ func (m *DingoStateManager) LoadLedgerRulesInitialState(
 		id         *string
 		actionType uint8
 	}{
-		{state.ProposalRoots.ProtocolParameters, uint8(common.GovActionTypeParameterChange)},
-		{state.ProposalRoots.HardFork, uint8(common.GovActionTypeHardForkInitiation)},
-		{state.ProposalRoots.ConstitutionalCommittee, uint8(common.GovActionTypeUpdateCommittee)},
-		{state.ProposalRoots.Constitution, uint8(common.GovActionTypeNewConstitution)},
+		{
+			state.ProposalRoots.ProtocolParameters,
+			uint8(common.GovActionTypeParameterChange),
+		},
+		{
+			state.ProposalRoots.HardFork,
+			uint8(common.GovActionTypeHardForkInitiation),
+		},
+		{
+			state.ProposalRoots.ConstitutionalCommittee,
+			uint8(common.GovActionTypeUpdateCommittee),
+		},
+		{
+			state.ProposalRoots.Constitution,
+			uint8(common.GovActionTypeNewConstitution),
+		},
 	}
 	for _, root := range roots {
 		if root.id == nil {
@@ -126,7 +142,11 @@ func (m *DingoStateManager) LoadLedgerRulesInitialState(
 			txn,
 		)
 		if err != nil {
-			return fmt.Errorf("load proposal %s for action contents: %w", id, err)
+			return fmt.Errorf(
+				"load proposal %s for action contents: %w",
+				id,
+				err,
+			)
 		}
 		proposal.GovActionCbor = append([]byte(nil), actionCbor...)
 		if err := m.db.SetGovernanceProposal(

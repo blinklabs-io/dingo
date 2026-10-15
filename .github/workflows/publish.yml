@@ -555,7 +555,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
         with:
           repository: pragma-org/amaru
-          ref: main
+          ref: ceda0c57a10d95b30a9338454e209582d62318e8
           path: .conformance/amaru
           sparse-checkout: crates/amaru-uplc/tests
           persist-credentials: false
@@ -564,7 +564,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
         with:
           repository: pragma-org/node-diversity-conformance
-          ref: main
+          ref: fc4713f2e8f10925becc4a17a1567a559cf27918
           path: .conformance/node-diversity-conformance
           sparse-checkout: scenarios/ledger-rules/fixtures
           persist-credentials: false

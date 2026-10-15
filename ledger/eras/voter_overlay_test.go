@@ -59,7 +59,10 @@ func (s *committeeVotingTestState) CommitteeCredentialIsElected(
 	return s.elected[taggedCommitteeCredentialKey(cold)], nil
 }
 
-func TestValidateTxConwayPV11UnknownVotersRequireElectedCommittee(t *testing.T) {
+func TestValidateTxConwayPV11UnknownVotersRequireElectedCommittee(
+	t *testing.T,
+) {
+	t.Parallel()
 	var coldHash, hotHash lcommon.Blake2b224
 	coldHash[0] = 0x11
 	hotHash[0] = 0x22
@@ -94,7 +97,9 @@ func TestValidateTxConwayPV11UnknownVotersRequireElectedCommittee(t *testing.T) 
 
 	validate := func(major uint) error {
 		return ValidateTxConway(tx, 0, state, &conway.ConwayProtocolParameters{
-			ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{Major: major},
+			ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
+				Major: major,
+			},
 		})
 	}
 
@@ -120,6 +125,7 @@ func TestValidateTxConwayPV11UnknownVotersRequireElectedCommittee(t *testing.T) 
 }
 
 func TestValidateTxConwayPV11UnknownVoterRequiresCommitteeState(t *testing.T) {
+	t.Parallel()
 	var hotHash lcommon.Blake2b224
 	hotHash[0] = 0x33
 	voter := &lcommon.Voter{

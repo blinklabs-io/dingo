@@ -25,12 +25,28 @@ import (
 
 func main() {
 	corpusPath := flag.String("corpus", "", "path to the UPLC turbo corpus")
-	corpusID := flag.String("corpus-id", "amaru-uplc/turbo", "identifier for the benchmark corpus")
-	corpusHash := flag.String("corpus-digest", "", "SHA-256 digest of the downloaded corpus archive")
-	implementationVersion := flag.String("version", "unknown", "Dingo implementation version")
+	corpusID := flag.String(
+		"corpus-id",
+		"amaru-uplc/turbo",
+		"identifier for the benchmark corpus",
+	)
+	corpusHash := flag.String(
+		"corpus-digest",
+		"",
+		"SHA-256 digest of the downloaded corpus archive",
+	)
+	implementationVersion := flag.String(
+		"version",
+		"unknown",
+		"Dingo implementation version",
+	)
 	outputPath := flag.String("output", "", "path for the JSON report")
 	samples := flag.Int("samples", 10, "number of timed samples per program")
-	maxPrograms := flag.Int("max-programs", 0, "measure only this many evenly spaced programs; 0 measures all")
+	maxPrograms := flag.Int(
+		"max-programs",
+		0,
+		"measure only this many evenly spaced programs; 0 measures all",
+	)
 	flag.Parse()
 	if *corpusPath == "" || *outputPath == "" {
 		flag.Usage()
@@ -54,17 +70,11 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	var passed, failed int
-	for _, summary := range report.Summary {
-		passed += summary.Passed
-		failed += summary.Failed
-	}
 	fmt.Fprintf(
 		os.Stderr,
-		"wrote %s: %d programs, %d within tolerance, %d outside tolerance\n",
+		"wrote %s: %d programs across %d groups\n",
 		*outputPath,
 		len(report.Benchmarks),
-		passed,
-		failed,
+		len(report.Summary),
 	)
 }

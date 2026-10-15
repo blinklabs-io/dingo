@@ -267,14 +267,20 @@ func costModels(used map[costModelKey]struct{}) []CostModel {
 		}
 		models = append(models, model)
 	}
-	sort.Slice(models, func(i, j int) bool { return models[i].ID < models[j].ID })
+	sort.Slice(
+		models,
+		func(i, j int) bool { return models[i].ID < models[j].ID },
+	)
 	return models
 }
 
 // slug lowercases s and replaces every run of non-alphanumeric characters with
 // the separator.
 func slug(s, separator string) string {
-	return strings.Trim(slugPattern.ReplaceAllString(strings.ToLower(s), separator), separator)
+	return strings.Trim(
+		slugPattern.ReplaceAllString(strings.ToLower(s), separator),
+		separator,
+	)
 }
 
 // discoverMainCases finds every vector directory under "conformance". The
@@ -283,42 +289,45 @@ func slug(s, separator string) string {
 func discoverMainCases(root string) ([]testCase, error) {
 	mainRoot := filepath.Join(root, mainCorpusDir)
 	var cases []testCase
-	err := filepath.WalkDir(mainRoot, func(p string, entry os.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return fmt.Errorf("walk %q: %w", p, walkErr)
-		}
-		if entry.IsDir() || filepath.Ext(p) != ".uplc" {
-			return nil
-		}
-		rel, err := filepath.Rel(root, p)
-		if err != nil {
-			return fmt.Errorf("make corpus path for %q: %w", p, err)
-		}
-		rel = filepath.ToSlash(rel)
-		dir := strings.TrimPrefix(path.Dir(rel), mainCorpusDir+"/")
-		parts := strings.Split(dir, "/")
-		segments := make([]string, len(parts))
-		for i, part := range parts {
-			segments[i] = slug(part, "_")
-		}
-		group := ""
-		if len(parts) > 1 {
-			group = strings.Join(parts[:len(parts)-1], "/")
-		}
-		cases = append(cases, testCase{
-			program:  rel,
-			id:       strings.Join(segments, "_"),
-			group:    group,
-			title:    slug(parts[len(parts)-1], " "),
-			language: lang.LanguageVersionV3,
-			protocol: defaultProtocol,
-			costs: costModelKey{
+	err := filepath.WalkDir(
+		mainRoot,
+		func(p string, entry os.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return fmt.Errorf("walk %q: %w", p, walkErr)
+			}
+			if entry.IsDir() || filepath.Ext(p) != ".uplc" {
+				return nil
+			}
+			rel, err := filepath.Rel(root, p)
+			if err != nil {
+				return fmt.Errorf("make corpus path for %q: %w", p, err)
+			}
+			rel = filepath.ToSlash(rel)
+			dir := strings.TrimPrefix(path.Dir(rel), mainCorpusDir+"/")
+			parts := strings.Split(dir, "/")
+			segments := make([]string, len(parts))
+			for i, part := range parts {
+				segments[i] = slug(part, "_")
+			}
+			group := ""
+			if len(parts) > 1 {
+				group = strings.Join(parts[:len(parts)-1], "/")
+			}
+			cases = append(cases, testCase{
+				program:  rel,
+				id:       strings.Join(segments, "_"),
+				group:    group,
+				title:    slug(parts[len(parts)-1], " "),
 				language: lang.LanguageVersionV3,
 				protocol: defaultProtocol,
-			},
-		})
-		return nil
-	})
+				costs: costModelKey{
+					language: lang.LanguageVersionV3,
+					protocol: defaultProtocol,
+				},
+			})
+			return nil
+		},
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -356,14 +365,26 @@ func discoverRegressionCases(corpusFS *os.Root) ([]testCase, []int64, error) {
 			}
 			parsed, err := strconv.ParseUint(match[4], 10, 32)
 			if err != nil {
-				return nil, nil, fmt.Errorf("regression %s protocol version: %w", name, err)
+				return nil, nil, fmt.Errorf(
+					"regression %s protocol version: %w",
+					name,
+					err,
+				)
 			}
 			protocol = uint(parsed)
 		}
+		program = path.Clean(program)
 		if !strings.HasPrefix(program, regressionCorpusDir+"/") {
-			return nil, nil, fmt.Errorf("regression %s path %q is outside %s", name, program, regressionCorpusDir)
+			return nil, nil, fmt.Errorf(
+				"regression %s path %q is outside %s",
+				name,
+				program,
+				regressionCorpusDir,
+			)
 		}
-		caseDir := path.Dir(strings.TrimPrefix(program, regressionCorpusDir+"/"))
+		caseDir := path.Dir(
+			strings.TrimPrefix(program, regressionCorpusDir+"/"),
+		)
 		key := costModelKey{language: language, protocol: protocol}
 		if language == lang.LanguageVersionV3 && protocol < defaultProtocol {
 			key.protocol10 = true
@@ -384,7 +405,9 @@ func discoverRegressionCases(corpusFS *os.Root) ([]testCase, []int64, error) {
 func parseProtocol10Costs(manifest string) ([]int64, error) {
 	match := protocol10CostsPattern.FindStringSubmatch(manifest)
 	if match == nil {
-		return nil, errors.New("regression manifest has no protocol-10 V3 cost parameters")
+		return nil, errors.New(
+			"regression manifest has no protocol-10 V3 cost parameters",
+		)
 	}
 	fields := strings.FieldsFunc(match[1], func(r rune) bool {
 		return r == ',' || r == ' ' || r == '\n' || r == '\t' || r == '\r'
@@ -393,7 +416,11 @@ func parseProtocol10Costs(manifest string) ([]int64, error) {
 	for _, field := range fields {
 		value, err := strconv.ParseInt(field, 10, 64)
 		if err != nil {
-			return nil, fmt.Errorf("protocol-10 V3 cost parameter %q: %w", field, err)
+			return nil, fmt.Errorf(
+				"protocol-10 V3 cost parameter %q: %w",
+				field,
+				err,
+			)
 		}
 		costs = append(costs, value)
 	}
@@ -409,7 +436,10 @@ func languageFromDigit(digit string) (lang.LanguageVersion, error) {
 	case "3":
 		return lang.LanguageVersionV3, nil
 	default:
-		return lang.LanguageVersion{}, fmt.Errorf("unsupported Plutus version %q", digit)
+		return lang.LanguageVersion{}, fmt.Errorf(
+			"unsupported Plutus version %q",
+			digit,
+		)
 	}
 }
 
@@ -435,7 +465,11 @@ func (c *evalContexts) get(key costModelKey) (*cek.EvalContext, error) {
 		var err error
 		ctx, err = cek.NewEvalContext(key.language, protocol, c.protocol10Costs)
 		if err != nil {
-			return nil, fmt.Errorf("build %s evaluation context: %w", key.id(), err)
+			return nil, fmt.Errorf(
+				"build %s evaluation context: %w",
+				key.id(),
+				err,
+			)
 		}
 	} else {
 		ctx = cek.NewDefaultEvalContext(key.language, protocol)
@@ -450,7 +484,10 @@ func readCorpusFile(corpusFS *os.Root, rel string) ([]byte, error) {
 
 // readExpectations returns the expected result and the expected budget of a
 // program. A vector without an expected budget has none to compare.
-func readExpectations(corpusFS *os.Root, program string) (expected, budget string, budgetFound bool, err error) {
+func readExpectations(
+	corpusFS *os.Root,
+	program string,
+) (expected, budget string, budgetFound bool, err error) {
 	expectedBytes, err := readCorpusFile(corpusFS, program+".expected")
 	if err != nil {
 		return "", "", false, fmt.Errorf("read expected result: %w", err)
@@ -462,15 +499,26 @@ func readExpectations(corpusFS *os.Root, program string) (expected, budget strin
 		}
 		return "", "", false, fmt.Errorf("read expected budget: %w", err)
 	}
-	return strings.TrimSpace(string(expectedBytes)), strings.TrimSpace(string(budgetBytes)), true, nil
+	return strings.TrimSpace(
+			string(expectedBytes),
+		), strings.TrimSpace(
+			string(budgetBytes),
+		), true, nil
 }
 
-func runCase(corpusFS *os.Root, contexts *evalContexts, testCase testCase) (CaseResult, error) {
+func runCase(
+	corpusFS *os.Root,
+	contexts *evalContexts,
+	testCase testCase,
+) (CaseResult, error) {
 	contents, err := readCorpusFile(corpusFS, testCase.program)
 	if err != nil {
 		return CaseResult{}, fmt.Errorf("read program: %w", err)
 	}
-	expectedText, expectedBudget, budgetFound, err := readExpectations(corpusFS, testCase.program)
+	expectedText, expectedBudget, budgetFound, err := readExpectations(
+		corpusFS,
+		testCase.program,
+	)
 	if err != nil {
 		return CaseResult{}, err
 	}
@@ -502,7 +550,12 @@ func runCase(corpusFS *os.Root, contexts *evalContexts, testCase testCase) (Case
 		evalExpected = syn.PrettyTerm[syn.DeBruijn](expectedDeBruijn.Term)
 	}
 
-	result, consumed, stage, runErr := evaluate(string(contents), testCase.language, testCase.protocol, evalCtx)
+	result, consumed, stage, runErr := evaluate(
+		string(contents),
+		testCase.language,
+		testCase.protocol,
+		evalCtx,
+	)
 	var evalActual string
 	switch stage {
 	case parseFailure:
@@ -512,7 +565,15 @@ func runCase(corpusFS *os.Root, contexts *evalContexts, testCase testCase) (Case
 	case noFailure:
 		evalActual = syn.PrettyTerm[syn.DeBruijn](result)
 	}
-	evalPassed := compareEvaluation(expectedStage, evalExpected, evalActual, stage)
+	evalPassed := compareEvaluation(
+		expectedStage,
+		evalExpected,
+		evalActual,
+		stage,
+	)
+	if exhaustsBudget {
+		evalPassed = compareBudgetExhaustion(stage, runErr)
+	}
 	caseResult := CaseResult{
 		ID:              testCase.id,
 		Title:           testCase.title,
@@ -534,7 +595,10 @@ func runCase(corpusFS *os.Root, contexts *evalContexts, testCase testCase) (Case
 
 	if exhaustsBudget {
 		caseResult.Budget = Outcome{
-			Expected: map[string]string{"cpu": budgetMatch[1], "mem": budgetMatch[2]},
+			Expected: map[string]string{
+				"cpu": budgetMatch[1],
+				"mem": budgetMatch[2],
+			},
 		}
 	} else if budgetFound && expectedStage == noFailure {
 		if len(budgetMatch) != 3 {
@@ -571,11 +635,19 @@ func expectedFailure(expected string) failureStage {
 	}
 }
 
-func compareEvaluation(expectedStage failureStage, expected, actual string, stage failureStage) bool {
+func compareEvaluation(
+	expectedStage failureStage,
+	expected, actual string,
+	stage failureStage,
+) bool {
 	if expectedStage != noFailure {
 		return expectedStage == stage
 	}
 	return stage == noFailure && expected == actual
+}
+
+func compareBudgetExhaustion(stage failureStage, err error) bool {
+	return stage == evaluationFailure && cek.IsBudgetError(err)
 }
 
 // evaluate parses, validates and runs a program for the given ledger language
@@ -591,7 +663,10 @@ func evaluate(
 	if _, err := syn.Parse(text); err != nil {
 		return nil, cek.ExBudget{}, parseFailure, err
 	}
-	programContext := syn.ProgramContext{LedgerLanguage: language, ProtocolMajor: protocol}
+	programContext := syn.ProgramContext{
+		LedgerLanguage: language,
+		ProtocolMajor:  protocol,
+	}
 	program, err := syn.ParseWithContext(text, programContext)
 	if err != nil {
 		return nil, cek.ExBudget{}, evaluationFailure, err

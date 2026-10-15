@@ -76,8 +76,6 @@ type TurboSummary struct {
 	Group        string  `json:"group"`
 	Scripts      int     `json:"scripts"`
 	Samples      int     `json:"samples"`
-	Passed       int     `json:"passed"`
-	Failed       int     `json:"failed"`
 	CPUMeanNS    float64 `json:"cpu_mean_ns"`
 	CPUMaxNS     float64 `json:"cpu_max_ns"`
 	MemMeanBytes float64 `json:"mem_mean_bytes"`
@@ -141,8 +139,13 @@ type maxUint64Heap []uint64
 
 func (h *maxUint64Heap) Len() int           { return len(*h) }
 func (h *maxUint64Heap) Less(i, j int) bool { return (*h)[i] > (*h)[j] }
-func (h *maxUint64Heap) Swap(i, j int)      { (*h)[i], (*h)[j] = (*h)[j], (*h)[i] }
-func (h *maxUint64Heap) Push(value any)     { *h = append(*h, value.(uint64)) }
+
+func (h *maxUint64Heap) Swap(
+	i, j int,
+) {
+	(*h)[i], (*h)[j] = (*h)[j], (*h)[i]
+}
+func (h *maxUint64Heap) Push(value any) { *h = append(*h, value.(uint64)) }
 func (h *maxUint64Heap) Pop() any {
 	last := len(*h) - 1
 	value := (*h)[last]
@@ -157,7 +160,11 @@ func (h *maxUint64Heap) Pop() any {
 // A positive maxPrograms measures an evenly spaced, name-ordered subset of
 // that size, so the selection is the same on every run; zero measures the
 // whole corpus.
-func GenerateTurboReport(root, corpusID, corpusDigest, implementationVersion string, samples, maxPrograms int, generatedAt time.Time) (TurboReport, error) {
+func GenerateTurboReport(
+	root, corpusID, corpusDigest, implementationVersion string,
+	samples, maxPrograms int,
+	generatedAt time.Time,
+) (TurboReport, error) {
 	if samples < 1 {
 		return TurboReport{}, errors.New("sample count must be positive")
 	}
@@ -165,25 +172,35 @@ func GenerateTurboReport(root, corpusID, corpusDigest, implementationVersion str
 		return TurboReport{}, errors.New("program limit must not be negative")
 	}
 	if runtime.GOOS != "linux" {
-		return TurboReport{}, errors.New("UPLC turbo reports can only be generated on Linux")
+		return TurboReport{}, errors.New(
+			"UPLC turbo reports can only be generated on Linux",
+		)
 	}
 	root, err := filepath.Abs(root)
 	if err != nil {
-		return TurboReport{}, fmt.Errorf("resolve turbo corpus directory: %w", err)
+		return TurboReport{}, fmt.Errorf(
+			"resolve turbo corpus directory: %w",
+			err,
+		)
 	}
 	info, err := os.Stat(root)
 	if err != nil {
 		return TurboReport{}, fmt.Errorf("stat turbo corpus directory: %w", err)
 	}
 	if !info.IsDir() {
-		return TurboReport{}, fmt.Errorf("turbo corpus path is not a directory: %s", root)
+		return TurboReport{}, fmt.Errorf(
+			"turbo corpus path is not a directory: %s",
+			root,
+		)
 	}
 	cases, err := discoverTurboCases(root)
 	if err != nil {
 		return TurboReport{}, err
 	}
 	if len(cases) == 0 {
-		return TurboReport{}, errors.New("turbo corpus contains no versioned Flat programs")
+		return TurboReport{}, errors.New(
+			"turbo corpus contains no versioned Flat programs",
+		)
 	}
 	measurement := "Flat decode + evaluation + evaluator arena reset wall-clock time"
 	if maxPrograms > 0 && len(cases) > maxPrograms {
@@ -202,10 +219,13 @@ func GenerateTurboReport(root, corpusID, corpusDigest, implementationVersion str
 		implementationVersion = "unknown"
 	}
 	report := TurboReport{
-		SchemaVersion:   turboSchemaVersion,
-		Scenario:        "uplc-turbo",
-		GeneratedAt:     generatedAt.UTC().Format(time.RFC3339),
-		Implementation:  map[string]string{"name": "dingo", "version": implementationVersion},
+		SchemaVersion: turboSchemaVersion,
+		Scenario:      "uplc-turbo",
+		GeneratedAt:   generatedAt.UTC().Format(time.RFC3339),
+		Implementation: map[string]string{
+			"name":    "dingo",
+			"version": implementationVersion,
+		},
 		Corpus:          corpusID,
 		ProtocolVersion: turboProtocolVersion,
 		Setup: TurboSetup{
@@ -232,13 +252,21 @@ func GenerateTurboReport(root, corpusID, corpusDigest, implementationVersion str
 	for _, tc := range cases {
 		programBytes, err := readTurboProgram(tc.path)
 		if err != nil {
-			return TurboReport{}, fmt.Errorf("read CBOR-wrapped Flat program %q: %w", tc.path, err)
+			return TurboReport{}, fmt.Errorf(
+				"read CBOR-wrapped Flat program %q: %w",
+				tc.path,
+				err,
+			)
 		}
 		measurements, err := measureTurboCase(tc, programBytes, samples)
 		if err != nil {
 			return TurboReport{}, fmt.Errorf("benchmark %s: %w", tc.name, err)
 		}
-		benchmark, err := makeTurboBenchmark(tc, len(programBytes), measurements)
+		benchmark, err := makeTurboBenchmark(
+			tc,
+			len(programBytes),
+			measurements,
+		)
 		if err != nil {
 			return TurboReport{}, fmt.Errorf("benchmark %s: %w", tc.name, err)
 		}
@@ -255,7 +283,11 @@ func GenerateTurboReport(root, corpusID, corpusDigest, implementationVersion str
 			medianMem: medianTurboMemory(measurements),
 		}
 		if err := representativeIndex.add(candidate, programBytes); err != nil {
-			return TurboReport{}, fmt.Errorf("classify representative %s: %w", tc.name, err)
+			return TurboReport{}, fmt.Errorf(
+				"classify representative %s: %w",
+				tc.name,
+				err,
+			)
 		}
 	}
 	report.Summary = summarizeTurbo(report.Benchmarks, samples)
@@ -287,41 +319,56 @@ func readTurboProgram(path string) ([]byte, error) {
 
 func discoverTurboCases(root string) ([]turboCase, error) {
 	var cases []turboCase
-	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return fmt.Errorf("walk %q: %w", path, walkErr)
-		}
-		if entry.IsDir() || filepath.Ext(path) != ".flat" {
+	err := filepath.WalkDir(
+		root,
+		func(path string, entry os.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return fmt.Errorf("walk %q: %w", path, walkErr)
+			}
+			if entry.IsDir() || filepath.Ext(path) != ".flat" {
+				return nil
+			}
+			match := turboVersionSuffix.FindStringSubmatch(filepath.Base(path))
+			if len(match) != 2 {
+				return fmt.Errorf(
+					"flat program name has no Plutus version suffix: %s",
+					path,
+				)
+			}
+			versionNumber := match[1]
+			version := lang.LanguageVersionV1
+			switch versionNumber {
+			case "2":
+				version = lang.LanguageVersionV2
+			case "3":
+				version = lang.LanguageVersionV3
+			}
+			cases = append(cases, turboCase{
+				path: path,
+				name: filepath.ToSlash(
+					strings.TrimPrefix(path, root+string(filepath.Separator)),
+				),
+				version: version,
+				group:   "V" + versionNumber,
+			})
 			return nil
-		}
-		match := turboVersionSuffix.FindStringSubmatch(filepath.Base(path))
-		if len(match) != 2 {
-			return fmt.Errorf("flat program name has no Plutus version suffix: %s", path)
-		}
-		versionNumber := match[1]
-		version := lang.LanguageVersionV1
-		switch versionNumber {
-		case "2":
-			version = lang.LanguageVersionV2
-		case "3":
-			version = lang.LanguageVersionV3
-		}
-		cases = append(cases, turboCase{
-			path:    path,
-			name:    filepath.ToSlash(strings.TrimPrefix(path, root+string(filepath.Separator))),
-			version: version,
-			group:   "V" + versionNumber,
-		})
-		return nil
-	})
+		},
+	)
 	if err != nil {
 		return nil, err
 	}
-	sort.Slice(cases, func(i, j int) bool { return cases[i].name < cases[j].name })
+	sort.Slice(
+		cases,
+		func(i, j int) bool { return cases[i].name < cases[j].name },
+	)
 	return cases, nil
 }
 
-func measureTurboCase(tc turboCase, programBytes []byte, samples int) ([]turboSample, error) {
+func measureTurboCase(
+	tc turboCase,
+	programBytes []byte,
+	samples int,
+) ([]turboSample, error) {
 	machine := cek.NewMachine[syn.DeBruijn](
 		tc.version,
 		200,
@@ -329,19 +376,21 @@ func measureTurboCase(tc turboCase, programBytes []byte, samples int) ([]turboSa
 	)
 	measurements := make([]turboSample, 0, samples)
 	for range samples {
-		start := time.Now()
+		decodeStart := time.Now()
 		program, err := syn.Decode[syn.DeBruijn](programBytes)
 		if err != nil {
 			return nil, fmt.Errorf("decode Flat program: %w", err)
 		}
+		decodeDuration := time.Since(decodeStart)
 		var before, after runtime.MemStats
 		runtime.ReadMemStats(&before)
 		initial := cek.ExBudget{Cpu: math.MaxInt64, Mem: math.MaxInt64}
 		machine.ExBudget = initial
+		evaluationStart := time.Now()
 		if _, err := machine.Run(program.Term); err != nil {
 			return nil, fmt.Errorf("evaluate Flat program: %w", err)
 		}
-		duration := time.Since(start)
+		duration := decodeDuration + time.Since(evaluationStart)
 		runtime.ReadMemStats(&after)
 		measurements = append(measurements, turboSample{
 			duration: duration,
@@ -389,14 +438,21 @@ func makeTurboBenchmark(
 		BudgetMem:     new(firstBudget.Mem),
 		Group:         tc.group,
 		CPUMaxNS:      float64(maxDuration.Nanoseconds()),
-		CPUMeanNS:     float64(totalDuration.Nanoseconds()) / float64(len(samples)),
-		MemMeanBytes:  float64(totalMemory) / float64(len(samples)),
-		MemMaxBytes:   float64(maxMemory),
-		SizeBytes:     size,
+		CPUMeanNS: float64(
+			totalDuration.Nanoseconds(),
+		) / float64(
+			len(samples),
+		),
+		MemMeanBytes: float64(totalMemory) / float64(len(samples)),
+		MemMaxBytes:  float64(maxMemory),
+		SizeBytes:    size,
 	}, nil
 }
 
-func summarizeTurbo(benchmarks []TurboBenchmark, sampleCount int) []TurboSummary {
+func summarizeTurbo(
+	benchmarks []TurboBenchmark,
+	sampleCount int,
+) []TurboSummary {
 	byGroup := make(map[string]TurboSummary)
 	for _, benchmark := range benchmarks {
 		summary := byGroup[benchmark.Group]
@@ -410,11 +466,6 @@ func summarizeTurbo(benchmarks []TurboBenchmark, sampleCount int) []TurboSummary
 		summary.MemMeanBytes += benchmark.MemMeanBytes
 		if benchmark.MemMaxBytes > summary.MemMaxBytes {
 			summary.MemMaxBytes = benchmark.MemMaxBytes
-		}
-		if withinTurboTolerance(benchmark) {
-			summary.Passed++
-		} else {
-			summary.Failed++
 		}
 		byGroup[benchmark.Group] = summary
 	}
@@ -431,18 +482,6 @@ func summarizeTurbo(benchmarks []TurboBenchmark, sampleCount int) []TurboSummary
 		result = append(result, summary)
 	}
 	return result
-}
-
-func withinTurboTolerance(benchmark TurboBenchmark) bool {
-	if benchmark.BudgetCPU != nil &&
-		benchmark.CPUMaxNS > float64(*benchmark.BudgetCPU)*turboCPUUnitNanosecond*turboDeviationLimit {
-		return false
-	}
-	if benchmark.BudgetMem != nil &&
-		benchmark.MemMaxBytes > float64(*benchmark.BudgetMem)*turboDeviationLimit {
-		return false
-	}
-	return true
 }
 
 func (index *turboRepresentativeIndex) add(
@@ -488,9 +527,13 @@ func (index *turboRepresentativeIndex) add(
 		if candidate.hash == representative.hash {
 			return nil
 		}
-		representativeProgram, err := os.ReadFile(representative.path)
+		representativeProgram, err := readTurboProgram(representative.path)
 		if err != nil {
-			return fmt.Errorf("read representative Flat program %q: %w", representative.path, err)
+			return fmt.Errorf(
+				"read representative Flat program %q: %w",
+				representative.path,
+				err,
+			)
 		}
 		if byteSimilarity(program, representativeProgram) >= 0.90 {
 			return nil
@@ -540,7 +583,9 @@ func turboMinHashes(program []byte) ([turboMinHashCount]uint64, bool) {
 	values := make(maxUint64Heap, 0, turboMinHashCount)
 	seen := make(map[uint64]struct{}, turboMinHashCount)
 	for offset := 0; offset <= len(program)-2; offset++ {
-		value := mixTurboHash(uint64(binary.LittleEndian.Uint16(program[offset : offset+2])))
+		value := mixTurboHash(
+			uint64(binary.LittleEndian.Uint16(program[offset : offset+2])),
+		)
 		if _, exists := seen[value]; exists {
 			continue
 		}
