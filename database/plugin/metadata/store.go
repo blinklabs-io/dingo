@@ -868,10 +868,12 @@ type UtxoStore interface {
 		types.Txn,
 	) (models.AddressBalance, error)
 	// GetUtxoBalanceByAddressAtSlot aggregates an exact address balance from
-	// retained UTxOs that existed at the requested slot.
+	// retained UTxOs that existed at the requested slot. It returns
+	// models.ErrTooManyUtxoResults when more than maxResults UTxOs match.
 	GetUtxoBalanceByAddressAtSlot(
 		[]byte,
 		uint64,
+		int,
 		types.Txn,
 	) (models.AddressBalance, error)
 

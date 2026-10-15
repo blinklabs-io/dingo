@@ -585,21 +585,26 @@ ORDER BY asset.policy_id, asset.name`),
 func (s *Store) GetUtxoBalanceByAddressAtSlot(
 	address []byte,
 	slot uint64,
+	maxResults int,
 	txn types.Txn,
 ) (models.AddressBalance, error) {
 	if len(address) == 0 {
 		return models.AddressBalance{}, errors.New("UTxO address must not be empty")
 	}
+	if maxResults <= 0 || maxResults == math.MaxInt {
+		return models.AddressBalance{}, errors.New("UTxO balance result limit must be positive")
+	}
 	return s.getUtxoBalanceByPredicate(
 		"utxo_address.address = ? AND utxo.added_slot <= ? AND "+
 			"(utxo.deleted_slot = 0 OR utxo.deleted_slot > ?)",
-		[]any{address, slot, slot}, txn,
+		[]any{address, slot, slot}, maxResults, txn,
 	)
 }
 
 func (s *Store) getUtxoBalanceByPredicate(
 	predicate string,
 	args []any,
+	maxResults int,
 	txn types.Txn,
 ) (models.AddressBalance, error) {
 	var ret models.AddressBalance
@@ -607,11 +612,17 @@ func (s *Store) getUtxoBalanceByPredicate(
 	if err != nil {
 		return ret, fmt.Errorf("resolve DB for UTxO balance: %w", err)
 	}
-	rows, err := db.QueryContext(ctx, s.dialect.Rebind(`
+	query := `
 SELECT utxo.amount
 FROM utxo
 JOIN utxo_address ON utxo_address.utxo_id = utxo.id
-WHERE `+predicate), args...)
+WHERE ` + predicate
+	queryArgs := args
+	if maxResults > 0 {
+		query += " LIMIT ?"
+		queryArgs = append(append([]any(nil), args...), maxResults+1)
+	}
+	rows, err := db.QueryContext(ctx, s.dialect.Rebind(query), queryArgs...)
 	if err != nil {
 		return ret, fmt.Errorf("query UTxO balance: %w", err)
 	}
@@ -642,6 +653,9 @@ WHERE `+predicate), args...)
 	}()
 	if queryErr != nil {
 		return ret, queryErr
+	}
+	if maxResults > 0 && ret.UtxoCount > int64(maxResults) {
+		return ret, models.ErrTooManyUtxoResults
 	}
 	if ret.UtxoCount == 0 {
 		return ret, nil

@@ -189,9 +189,12 @@ live-state consistency semantics.
 
 Blockfrost asset-holder pages aggregate live quantities in metadata storage,
 and historical Mesh balances aggregate address balances without materializing
-the matching UTxOs. `utxo_address` keeps each UTxO's canonical rendered address
-as bytes so exact pointer and bootstrap identities are available to both
-queries. Migration v42 adds the table; API-mode startup backfills all retained
+the matching UTxOs. Historical balance queries scan at most
+`MaxUtxosByAddressResults + 1` matching rows and return
+`ErrTooManyUtxoResults` when the address exceeds that bound. `utxo_address`
+keeps each UTxO's canonical rendered address as bytes so exact pointer and
+bootstrap identities are available to both queries. Migration v42 adds the
+table; API-mode startup backfills all retained
 UTxOs in cancellable batches before APIs become available, records completion
 in sync_state, and logs progress. Startup fails if an output CBOR cannot be
 resolved. A failed backfill leaves completion unset, so the next startup

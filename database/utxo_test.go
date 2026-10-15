@@ -552,6 +552,12 @@ VALUES (?, 1, 0, '1', 0, FALSE)`, txID)
 	require.NoError(t, txn.Commit())
 	require.NoError(t, db.SetSyncState(utxoAddressBackfillSyncKey, "true", nil))
 
+	limited, err := db.utxoStore().GetUtxoBalanceByAddressAtSlot(
+		[]byte(addr.String()), 1, 1000, nil,
+	)
+	require.ErrorIs(t, err, models.ErrTooManyUtxoResults)
+	require.EqualValues(t, 1001, limited.UtxoCount)
+
 	got, err := db.UtxoBalanceByAddressAtSlot(
 		context.Background(), addr, 1, nil,
 	)
