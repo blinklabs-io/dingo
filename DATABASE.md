@@ -1457,6 +1457,12 @@ rebuilding the rest of the deferred manifest. The durable `sync_state` marker
 still covers the complete cycle and is cleared only after all rebuildable
 indexes are present.
 
+SQLite commits each missing index in its own transaction so
+`wal_autocheckpoint` can run between builds. An interrupted rebuild leaves
+completed indexes in place for the next run to skip; the marker is cleared only
+after a final transaction confirms the requested set is present. PostgreSQL and
+MySQL retain the single-transaction rebuild path.
+
 The batched API import path skips replay-cleanup deletes when a transaction
 hash inserts a fresh transaction row: its generated ID cannot yet have detail
 rows. Replays still run the deletes to preserve idempotency. Transaction-detail
