@@ -365,6 +365,9 @@ chain reindex/resync before it can be represented in this table.
 The v1alpha1 schema also includes
 `idx_pool_opcert_sequence_pool_sequence` (see `pool_opcert_sequence` below).
 It is created as part of the initial schema on fresh databases.
+Trusted replay can defer the pool-op-cert sequence lookup indexes during bulk
+loads. MySQL rebuilds the composite index with the schema's
+`pool_key_hash(255)` prefix.
 
 Migration `v2` (`leios-key-registration`, integer version 2) is the first
 real post-release migration: it additively (`ALTER TABLE ... ADD COLUMN`)
