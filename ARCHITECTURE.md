@@ -5894,7 +5894,9 @@ it. Dingo implements this as a **corroboration gate**
   `current-3` (`errPoolSnapshotPruned`, non-API storage modes only) is
   deferred rather than rejected, because the node no longer holds the state
   to evaluate it; a pool absent from a populated snapshot still rejects.
-  A definite failure also publishes `ledger.ConnectionRecycleRequestedEventType`
+  Deferred headers are withheld from selection but retained as peer ancestry;
+  definite verification failures are excluded from observation and instead
+  publish `ledger.ConnectionRecycleRequestedEventType`
   (`"header_verification_failure"`, translated to a connmanager recycle by
   node composition, the same as the ledger's own header-queue failures).
   The check is two derived closures on `Ouroboros`

@@ -148,16 +148,30 @@ func TestDeadForkSharedMismatchCounterDoesNotBlameHonestPeer(t *testing.T) {
 	}
 	for i := range headerMismatchResyncThreshold - 1 {
 		h := declinedMismatchHeader(fmt.Sprintf("fork-%d", i), fixture.currentTip)
-		require.NoError(t, fixture.ls.handleEventChainsyncBlockHeader(
-			deadForkEvent(fixture.ls.loadConsensusSnapshot().generation, forkConn, h, advertised)))
+		require.NoError(
+			t,
+			fixture.ls.handleEventChainsyncBlockHeader(deadForkEvent(
+				fixture.ls.loadConsensusSnapshot().generation,
+				forkConn,
+				h,
+				advertised,
+			)),
+		)
 	}
 	require.Equal(t, headerMismatchResyncThreshold-1,
 		fixture.ls.headerMismatchCounts[connIdKey(forkConn)],
 		"fork peer's mismatches must accumulate for the scenario to hold")
 
 	h := declinedMismatchHeader("honest-0", fixture.currentTip)
-	require.NoError(t, fixture.ls.handleEventChainsyncBlockHeader(
-		deadForkEvent(fixture.ls.loadConsensusSnapshot().generation, honestConn, h, advertised)))
+	require.NoError(
+		t,
+		fixture.ls.handleEventChainsyncBlockHeader(deadForkEvent(
+			fixture.ls.loadConsensusSnapshot().generation,
+			honestConn,
+			h,
+			advertised,
+		)),
+	)
 
 	for _, e := range rec.drain(t) {
 		require.Falsef(t, sameConnectionId(e.ConnectionId, honestConn),
