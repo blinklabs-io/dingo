@@ -68,13 +68,17 @@ type BackfillProgress struct {
 // It is triggered automatically during Mithril sync when
 // storageMode is "api".
 type Backfill struct {
-	db             *database.Database
-	nodeCfg        *cardano.CardanoNodeConfig
-	logger         *slog.Logger
-	epochs         []models.Epoch
-	pparamsCache   map[uint64]lcommon.ProtocolParameters
-	batchSize      int
-	computeOffsets func(
+	db           *database.Database
+	nodeCfg      *cardano.CardanoNodeConfig
+	logger       *slog.Logger
+	epochs       []models.Epoch
+	pparamsCache map[uint64]lcommon.ProtocolParameters
+	batchSize    int
+	// freshDatabaseBootstrap records the sync caller's state classification.
+	// Mithril seeds a zero-slot checkpoint before import, so checkpoint
+	// presence alone cannot tell a fresh bootstrap from a resumed backfill.
+	freshDatabaseBootstrap bool
+	computeOffsets         func(
 		uint64,
 		[]byte,
 		[]byte,
@@ -176,6 +180,14 @@ func NewBackfill(
 // never be assumed safe for a new call site.
 func (b *Backfill) SetDelegatorInactivityEnabled(enabled bool) {
 	b.delegatorInactivityEnabled = enabled
+}
+
+// SetFreshDatabaseBootstrap enables the monotonic replay fast path when the
+// caller has classified this run as a bootstrap of an empty database. Resume
+// callers must leave it false so interrupted batches retain consumed-input
+// recovery.
+func (b *Backfill) SetFreshDatabaseBootstrap(enabled bool) {
+	b.freshDatabaseBootstrap = enabled
 }
 
 // SetBatchSize overrides the number of processed blocks accumulated before
@@ -891,11 +903,16 @@ func (b *Backfill) Run(ctx context.Context) error {
 
 	var startSlot uint64
 	now := time.Now()
-	// Track whether this is a fresh backfill start (not resumed). The
-	// consumed-input recovery optimization is only safe when the metadata
-	// store is in a pristine, monotonic state. Resumed runs may have
-	// inconsistencies from interrupted batches that need repair.
-	isFreshStart := cp == nil
+	// Mithril pre-seeds a zero-slot checkpoint before importing a fresh
+	// database, so the caller's bootstrap classification is also needed to
+	// distinguish it from a resumed run. The consumed-input recovery
+	// optimization is safe only for this monotonic replay; resumed runs may
+	// have inconsistencies from interrupted batches that need repair.
+	isFreshStart := cp == nil ||
+		(b.freshDatabaseBootstrap && cp.LastSlot == 0)
+	// The bootstrap classification applies only to the first attempt. A retry,
+	// even before checkpoint progress, must run consumed-input recovery.
+	b.freshDatabaseBootstrap = false
 	if cp == nil {
 		cp = &models.BackfillCheckpoint{
 			Phase:      BackfillPhase,

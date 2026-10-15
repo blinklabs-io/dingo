@@ -603,3 +603,102 @@ func TestFetchBackfillsParamsWithoutRefetchingPoolData(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, got, "the parameter row must be committed")
 }
+
+const nullActiveStakeEpochInfoTmpl = `[{"epoch_no":%s,"era":"shelley","out_sum":"100","fees":"10",` +
+	`"tx_count":1,"blk_count":1,"start_time":1000,"end_time":2000,` +
+	`"first_block_time":1000,"last_block_time":1999,"active_stake":null,` +
+	`"total_rewards":null,"avg_blk_reward":"1"}]`
+
+// TestFetchPreStakingBoundaryIsPerNetwork guards the network-specific
+// boundary: Koios reports a null active_stake for Preprod epochs 0 through 5
+// but only for Preview epochs 0 and 1, so a null on Preprod epoch 2 is a
+// permanent pre-staking marker while the same null on Preview epoch 2 stays
+// a retryable failure.
+func TestFetchPreStakingBoundaryIsPerNetwork(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name       string
+		network    string
+		epoch      uint64
+		wantMarked bool
+	}{
+		{"preprod epoch 2", "preprod", 2, true},
+		{"preprod epoch 5", "preprod", 5, true},
+		{"preprod epoch 6", "preprod", 6, false},
+		{"preview epoch 2", "preview", 2, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			srv := httptest.NewServer(
+				http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					switch r.URL.Path {
+					case "/tip":
+						_, _ = w.Write([]byte(`[{"epoch_no":100}]`))
+					case "/pool_list", "/pool_updates":
+						_, _ = w.Write([]byte(`[]`))
+					case "/epoch_info":
+						_, _ = fmt.Fprintf(
+							w,
+							nullActiveStakeEpochInfoTmpl,
+							r.URL.Query().Get("_epoch_no"),
+						)
+					default:
+						t.Errorf("unexpected request path %s", r.URL.Path)
+						w.WriteHeader(http.StatusNotFound)
+					}
+				}),
+			)
+			defer srv.Close()
+
+			cachePath := filepath.Join(t.TempDir(), "cache.db")
+			result, err := Fetch(context.Background(), FetchConfig{
+				BaseURL:               srv.URL,
+				AllowInsecureHTTP:     true,
+				AllowPrivateAddresses: true,
+				Network:               tc.network,
+				CachePath:             cachePath,
+				Concurrency:           1,
+				FromEpoch:             tc.epoch,
+				ThroughEpoch:          tc.epoch,
+			}, slog.New(slog.DiscardHandler))
+			if !tc.wantMarked {
+				require.ErrorContains(t, err, "null active_stake unexpectedly",
+					"a null active_stake above the boundary must stay an error")
+				return
+			}
+			require.NoError(t, err)
+			require.NotNil(t, result)
+			require.Empty(t, result.FailedEpochs,
+				"a null active_stake at or below the network's pre-staking "+
+					"boundary is not a failure")
+			cache, err := openTestCache(cachePath, nil)
+			require.NoError(t, err)
+			defer cache.Close() //nolint:errcheck
+			info, err := cache.GetEpochInfo(tc.network, tc.epoch)
+			require.NoError(t, err)
+			require.NotNil(t, info)
+			require.True(t, info.PreStaking)
+		})
+	}
+}
+
+func TestIsPreStakingEpochIsPerNetwork(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		network string
+		epoch   uint64
+		want    bool
+	}{
+		{"preview", 1, true},
+		{"preview", 2, false},
+		{"preprod", 5, true},
+		{"preprod", 6, false},
+		{"mainnet", 1, true},
+		{"mainnet", 2, false},
+	} {
+		require.Equal(t, tc.want, IsPreStakingEpoch(tc.network, tc.epoch),
+			"%s epoch %d", tc.network, tc.epoch)
+	}
+}
