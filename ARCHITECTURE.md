@@ -8703,6 +8703,12 @@ Insertion rejects a closed source and releases closed entries under the
 deferral mutex; a delayed close event removes only closed lifetimes, preserving
 announcements from a replacement connection with the same address pair.
 
+LeiosNotify's announcement payload is CBOR `any`, so a well-formed item is not
+necessarily a Dijkstra ranking-block header. Dingo drops an unsupported item
+without applying the invalid-announcement penalty; malformed CBOR remains
+subject to the bounded per-connection penalty. This keeps an opaque announcement
+from closing the shared bearer and canceling ChainSync.
+
 After header validation, at most two distinct ranking-block announcements are
 retained for each slot/issuer election within the announcement retention window.
 The election budget is shared across relay sources and reconnects; a connection
