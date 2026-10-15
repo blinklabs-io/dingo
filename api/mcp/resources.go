@@ -587,7 +587,7 @@ func registerResources(
 								} else {
 									row := make([]string, len(cols))
 									for i, v := range vals {
-										row[i] = FormatCell(v)
+										row[i] = cellText(v)
 									}
 									tableData = append(tableData, row)
 								}

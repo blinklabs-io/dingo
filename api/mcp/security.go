@@ -34,6 +34,7 @@ const (
 )
 
 type clientLimiterEntry struct {
+	key      string
 	limiter  *rate.Limiter
 	lastSeen time.Time
 	element  *list.Element
@@ -92,10 +93,11 @@ func (cl *clientLimiter) getLimiter(ip string) *rate.Limiter {
 		cl.removeOldestLocked()
 	}
 	entry := &clientLimiterEntry{
+		key:      ip,
 		limiter:  rate.NewLimiter(cl.rate, cl.burst),
 		lastSeen: now,
 	}
-	entry.element = cl.order.PushBack(ip)
+	entry.element = cl.order.PushBack(entry)
 	cl.entries[ip] = entry
 	cl.scheduleExpiryLocked(now)
 	return entry.limiter
@@ -106,7 +108,10 @@ func (cl *clientLimiter) removeOldestLocked() {
 	if oldest == nil {
 		return
 	}
-	delete(cl.entries, oldest.Value.(string))
+	entry, ok := oldest.Value.(*clientLimiterEntry)
+	if ok && entry != nil {
+		delete(cl.entries, entry.key)
+	}
 	cl.order.Remove(oldest)
 }
 
@@ -116,7 +121,11 @@ func (cl *clientLimiter) evictExpiredLocked(now time.Time) {
 		if oldest == nil {
 			return
 		}
-		entry := cl.entries[oldest.Value.(string)]
+		entry, ok := oldest.Value.(*clientLimiterEntry)
+		if !ok || entry == nil {
+			cl.removeOldestLocked()
+			continue
+		}
 		if now.Before(entry.lastSeen.Add(cl.idleTTL)) {
 			return
 		}
@@ -125,15 +134,22 @@ func (cl *clientLimiter) evictExpiredLocked(now time.Time) {
 }
 
 func (cl *clientLimiter) scheduleExpiryLocked(now time.Time) {
-	if cl.timer != nil || cl.order.Len() == 0 {
+	if cl.timer != nil {
 		return
 	}
-	oldest := cl.entries[cl.order.Front().Value.(string)]
-	delay := oldest.lastSeen.Add(cl.idleTTL).Sub(now)
-	if delay < 0 {
-		delay = 0
+	for cl.order.Len() > 0 {
+		oldest, ok := cl.order.Front().Value.(*clientLimiterEntry)
+		if !ok || oldest == nil {
+			cl.removeOldestLocked()
+			continue
+		}
+		delay := oldest.lastSeen.Add(cl.idleTTL).Sub(now)
+		if delay < 0 {
+			delay = 0
+		}
+		cl.timer = time.AfterFunc(delay, cl.expireIdle)
+		return
 	}
-	cl.timer = time.AfterFunc(delay, cl.expireIdle)
 }
 
 func (cl *clientLimiter) expireIdle() {

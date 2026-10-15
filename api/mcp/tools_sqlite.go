@@ -165,7 +165,7 @@ func RegisterSQLiteTools(
 
 			rowFormatted := make([]string, len(cols))
 			for i, val := range rowValues {
-				rowFormatted[i] = FormatCell(val)
+				rowFormatted[i] = cellText(val)
 			}
 			resultRows = append(resultRows, rowFormatted)
 			count++
@@ -263,7 +263,7 @@ func RegisterSQLiteTools(
 			if err := rows.Scan(valuePtrs...); err == nil {
 				rowFormatted := make([]string, len(cols))
 				for i, val := range rowValues {
-					rowFormatted[i] = FormatCell(val)
+					rowFormatted[i] = cellText(val)
 				}
 				planRows = append(planRows, rowFormatted)
 			}
@@ -381,7 +381,7 @@ func RegisterSQLiteTools(
 			} else {
 				rowFormatted := make([]string, len(cols))
 				for i, val := range rowValues {
-					rowFormatted[i] = FormatCell(val)
+					rowFormatted[i] = cellText(val)
 				}
 				colRows = append(colRows, rowFormatted)
 			}
@@ -424,7 +424,7 @@ func RegisterSQLiteTools(
 				} else {
 					rowFormatted := make([]string, len(idxCols))
 					for i, val := range idxVal {
-						rowFormatted[i] = FormatCell(val)
+						rowFormatted[i] = cellText(val)
 					}
 					idxData = append(idxData, rowFormatted)
 				}
