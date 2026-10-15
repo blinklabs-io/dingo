@@ -298,34 +298,42 @@ func stopClientLimiter(t *testing.T, limiter *clientLimiter) {
 	t.Cleanup(limiter.close)
 }
 
-func TestStopHTTPServerClosesClientLimiter(t *testing.T) {
+func TestHTTPServerShutdownClosesClientLimiter(t *testing.T) {
 	t.Parallel()
-	handler := newSecurityMiddleware(
-		"",
-		1,
-		1,
-		nil,
-		http.NotFoundHandler(),
-	)
-	limiter := handler.limiter
-	limiter.getLimiter("client")
-	limiter.mu.Lock()
-	hasTimer := limiter.timer != nil
-	limiter.mu.Unlock()
-	require.True(t, hasTimer)
+	for name, shutdown := range map[string]func(context.Context, *http.Server) error{
+		"graceful": stopHTTPServer,
+		"forced":   closeHTTPServer,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			handler := newSecurityMiddleware(
+				"",
+				1,
+				1,
+				nil,
+				http.NotFoundHandler(),
+			)
+			limiter := handler.limiter
+			limiter.getLimiter("client")
+			limiter.mu.Lock()
+			hasTimer := limiter.timer != nil
+			limiter.mu.Unlock()
+			require.True(t, hasTimer)
 
-	server := &http.Server{Handler: handler}
-	require.NoError(t, stopHTTPServer(context.Background(), server))
+			server := &http.Server{Handler: handler}
+			require.NoError(t, shutdown(context.Background(), server))
 
-	limiter.mu.Lock()
-	entries := len(limiter.entries)
-	timer := limiter.timer
-	closed := limiter.closed
-	limiter.mu.Unlock()
-	require.True(t, closed)
-	require.Zero(t, entries)
-	require.Nil(t, timer)
-	require.False(t, limiter.getLimiter("late client").Allow())
+			limiter.mu.Lock()
+			entries := len(limiter.entries)
+			timer := limiter.timer
+			closed := limiter.closed
+			limiter.mu.Unlock()
+			require.True(t, closed)
+			require.Zero(t, entries)
+			require.Nil(t, timer)
+			require.False(t, limiter.getLimiter("late client").Allow())
+		})
+	}
 }
 
 func TestClientLimiterCloseRacingExpiryDoesNotReschedule(t *testing.T) {

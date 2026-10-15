@@ -233,9 +233,11 @@ func newSecurityMiddleware(
 				w.Header().Set("Content-Type", "application/json")
 				w.Header().Set("Retry-After", "1")
 				w.WriteHeader(http.StatusTooManyRequests)
-				_ = json.NewEncoder(w).Encode(map[string]string{
+				if err := json.NewEncoder(w).Encode(map[string]string{
 					"error": "too many requests: rate limit exceeded",
-				})
+				}); err != nil {
+					return
+				}
 				return
 			}
 		}
@@ -257,9 +259,11 @@ func newSecurityMiddleware(
 			) != 1 {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusUnauthorized)
-				_ = json.NewEncoder(w).Encode(map[string]string{
+				if err := json.NewEncoder(w).Encode(map[string]string{
 					"error": "unauthorized: missing or invalid authentication token",
-				})
+				}); err != nil {
+					return
+				}
 				return
 			}
 		}
