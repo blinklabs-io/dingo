@@ -24,7 +24,7 @@ name: publish
 # The difference between a main push and a release tag is signing and
 # publishing the final artifacts. Both run every stage above and both push
 # branch- or version-tagged images; only a tag creates a GitHub release,
-# uploads binary archives and a CBOR conformance report, attests the binaries,
+# uploads binary archives and the conformance reports, attests the binaries,
 # and finalizes the release.
 #
 # The stages are duplicated from go-test.yml rather than factored into a
@@ -550,6 +550,32 @@ jobs:
           go run ./internal/cborconformance/cmd \
             -dataset .conformance/cardano-cbor-dataset/dataset/conway-123-100 \
             -output "dist/${report_name}"
+      - name: Checkout UPLC conformance corpus
+        if: github.ref_type == 'tag'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
+        with:
+          repository: pragma-org/amaru
+          ref: main
+          path: .conformance/amaru
+          sparse-checkout: crates/amaru-uplc/tests
+          persist-credentials: false
+      - name: Checkout ledger-rules fixtures
+        if: github.ref_type == 'tag'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
+        with:
+          repository: pragma-org/node-diversity-conformance
+          ref: main
+          path: .conformance/node-diversity-conformance
+          sparse-checkout: scenarios/ledger-rules/fixtures
+          persist-credentials: false
+      - name: Generate conformance reports
+        if: github.ref_type == 'tag'
+        timeout-minutes: 30
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          TURBO_URL: https://pub-2239d82d9a074482b2eb2c886191cb4e.r2.dev/turbo.tar.xz
+          TURBO_SHA256: fffe2e959fb8bdb47ee4834008dcceb89fcde53afb659a454beca26cf95507cc
+        run: .github/scripts/generate-conformance-reports.sh
       - name: Upload release assets
         if: github.ref_type == 'tag'
         env:
