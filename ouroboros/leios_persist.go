@@ -415,18 +415,25 @@ func (o *Ouroboros) startLeiosPersistenceGC(
 		o.leiosPersistGCStarted.Store(true)
 		o.leiosPersistMu.Unlock()
 		o.leiosPersistGCMu.Unlock()
-		go o.leiosPersistGCLoop(stop, done, initialMaxSlot, initialMaxKnown)
+		go o.leiosPersistGCLoop(
+			o.leiosValidationCtx,
+			stop,
+			done,
+			initialMaxSlot,
+			initialMaxKnown,
+		)
 	})
 }
 
 func (o *Ouroboros) leiosPersistGCLoop(
+	parentCtx context.Context,
 	stop <-chan struct{},
 	done chan<- struct{},
 	initialMaxSlot uint64,
 	initialMaxKnown bool,
 ) {
 	defer close(done)
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(parentCtx)
 	watcherDone := make(chan struct{})
 	go func() {
 		select {

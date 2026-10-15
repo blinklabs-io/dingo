@@ -567,6 +567,7 @@ sequenceDiagram
     LS->>LS: compute epoch nonce contributions
     LS->>LS: at an era boundary, enact source-era pparams, then translate before successor-era epoch rules and SNAP
     LS->>LS: allow at most two consecutive era transitions for a successor-header boundary block, never ahead of a configured TriggerAtEpoch
+    LS->>LS: before translating, decide the era the ledger enters from its own state, and refuse a validated boundary block encoded in any other era, in either direction
 
     Note over Peer,DB: Stage 4 — Persistence
     LS->>ChM: chain.AddBlocks(batch) — 50 blocks max
@@ -1236,6 +1237,16 @@ The block production pipeline from leader election through broadcast.
 
 The producer validates its credentials before starting and only advertises
 blocks it has durably adopted:
+
+- **Validate the elected pool VRF key.** The startup credential check shares
+  header validation's VRF lookup, using the stake snapshot that elects blocks
+  in the applied tip's epoch. A matching published tip and epoch cache and one
+  metadata read transaction keep the lookup consistent. Imported active
+  distributions apply at the Mithril anchor too. Pending re-registrations do
+  not replace the key until they enter the elected snapshot. For a pool with
+  no electing snapshot yet, startup checks its epoch-effective registration;
+  a first registration is active immediately, and re-registrations remain
+  deferred until the next epoch.
 
 - **Validate the producer counter for the active era.** Before the node starts
   block production, `node_forging.go` checks the loaded OpCert issue number
@@ -3647,7 +3658,7 @@ outcome: that shortcut fired on ordinary `ValidateHistorical=false`
 catch-up, not only a trusted-chain-dump import, so it was removed rather
 than narrowed to the trusted-import case its name implied.
 
-Era transitions run the target era's `HardForkFunc` to translate protocol parameters before persisting the new pparams. At an epoch boundary, the rollover enacts pending protocol-parameter updates in the source era first and applies the successor transitions afterward. This is required because an update submitted in the source era can contain a field removed by the successor era (for example, Alonzo's decentralization field in the Babbage update shape). The boundary block body's era is authoritative for ordinary advancement: a source-era block can advertise the next protocol major in its header without activating that successor. Header elevation is used only after the body itself advances, where it can validate the exceptional two-consecutive-era boundary path. Transitions can also rewrite ratified-but-not-yet-enacted governance action payloads into the target era's CBOR shape; the Conway to Dijkstra path translates parameter-change proposals so the Dijkstra enactment update function receives `DijkstraProtocolParameterUpdate` rather than a stale Conway update.
+Era transitions run the target era's `HardForkFunc` to translate protocol parameters before persisting the new pparams. At an epoch boundary, the rollover enacts pending protocol-parameter updates in the source era first and applies the successor transitions afterward. This is required because an update submitted in the source era can contain a field removed by the successor era (for example, Alonzo's decentralization field in the Babbage update shape). The era a boundary enters is decided by the ledger, not by the block that opens the epoch. Before the first translation (whose `HardForkFunc` rewrites the protocol version), `authorizeBoundaryEra` asks `ledgerBoundaryEra` for the era the boundary enters, following ouroboros-consensus `singleEraTransition`: an era with a configured `TriggerAtEpoch` ends at that epoch, and an era with a version trigger ends once the protocol parameters in force next epoch name the next era's major and at least `k` blocks of the ending epoch lie at or past the voting deadline (`shelleyAfterVoting >= k`, the same count `evaluateProtocolVersionBump` uses). Until the transition is known by that count, the block that opens the epoch belongs to the source era even when the major has already moved. A validated boundary block (one the node validates rather than replays unvalidated) whose body is in any other era is refused with `errBoundaryEraNotAuthorized`, the analogue of `HardForkLedgerErrorWrongEra`: a block in an era the ledger has not entered and one in an era the ledger has left are both wrong. From Conway the major moves through `HardForkInitiation`, which ENACT applies at the boundary itself, so the decision forecasts it without writing: `governance.ForecastHardForkInitiations` applies the `HardForkInitiation` proposals marked ratified and not yet enacted, and those the previous boundary's deferred RATIFY has decided but not yet written, in the order ENACT would. A refusal releases the rollover's transaction-validation transition before the block is rewound as a rejected header, and the ledger stays in its source era. The block's body era still selects the transition path: a header elevation is a header-carried protocol version, which outside mainnet is not bounded below major 12, so an elevation past the ledger's era is capped at that era, and header elevation lets a body one era short of the ledger's era carry the exceptional two-consecutive-era boundary path. A source-era block can advertise the next protocol major in its header without activating that successor. Transitions can also rewrite ratified-but-not-yet-enacted governance action payloads into the target era's CBOR shape; the Conway to Dijkstra path translates parameter-change proposals so the Dijkstra enactment update function receives `DijkstraProtocolParameterUpdate` rather than a stale Conway update.
 
 An empty from-genesis database therefore does not infer a hard-fork epoch from
 the Shelley protocol version alone. The version identifies the target era, but
@@ -4313,6 +4324,23 @@ requiring the epoch row first, which previously deadlocked a from-genesis sync
 at a normal-boundary `d` decrease. Blockfetch still defers the stateful overlay
 decision until ledger apply when even the forecast cannot resolve it; full
 historical validation and the normal leader checks remain enabled.
+
+`ProtocolParamsForSlot` is also what the forger reads to pick the era of a
+block, so for a slot in a later epoch it returns the parameters of the era the
+ledger enters at the boundary, decided by `ledgerBoundaryEra` from the
+forecast parameters and the applied tip. That is the predicate the boundary
+check applies to the first block of the epoch, so a block forged in the chosen
+era is accepted and one in the other era refused. The reference
+`hardForkForgeBlock` likewise forges in the era of the ticked ledger state. For
+a version-triggered transition the first block of the new epoch is forged in
+the new era only once `k` blocks of the ending epoch lie at or past the voting
+deadline; before that it is forged in the source era. The applied tip is read
+from the same snapshot publication as the epoch: a load that straddles a
+publication waits for the matching pair rather than pairing generations, since
+an older, higher tip can satisfy `k` for an era the matching state has not
+entered. A forecast that cannot be completed, such as an unfinished
+deferred ratification, returns no parameters so the forger skips the slot
+rather than forging in a guessed era.
 
 **Why deferring a `d=1` overlay header is a real fix, not a suppression.** With
 `d = 1` (full federation — every early Shelley epoch, and epoch 0 on every
@@ -8297,6 +8325,8 @@ Endorser-block transaction selection is bounded by the slot it belongs to. Every
 #### Self-Validation (`DINGO_VALIDATE_FORGED_BLOCK`)
 
 The node always validates the aggregate reference-script budget between steps 5 and 7, before adoption or diffusion, via `newForgedBlockValidator`'s mandatory `ValidateBlockReferenceScripts` call. Unless `validateForgedBlock` is explicitly disabled in config (enabled by default, fail closed), that same call additionally runs full self-validation: (a) VRF proof and KES signature verification of the block header, (b) body-hash non-zero guard, and (c) per-transaction ledger rule validation against the current UTxO state with an intra-block overlay so outputs created by earlier transactions in the same block are visible to later ones. A failing block is logged, counted in `dingo_forge_validation_failed_total`, and dropped without being adopted or diffused. Validation wall-clock time is recorded in the `dingo_forge_validation_duration_seconds` histogram. An operator may set `validateForgedBlock: false` to skip the full self-validation and accept that risk in exchange for lower forge-to-diffusion latency; the aggregate reference-script budget check still runs regardless, and retains the explicit Musashi prototype bypass.
+
+The per-transaction step runs in a transaction-validation session, which stops being current when a block apply, epoch rollover or rollback is in flight or publishes a new snapshot generation (`stillCurrent` reports false). A non-current session has judged nothing, and on a producer one is routinely in flight: often the apply of the forged block's own parent. `ValidateForgedBlock` therefore waits for the next snapshot publication or finished transition and opens a new session, as long as the ledger tip is still the one validation started from, has become the block's parent, or lies on the primary chain while that chain still ends at the parent. The last case is the trailing ledger the forger's tip gates admit: the block is built on the primary chain tip while the ledger may still have up to two blocks to apply, and applying one of them moves the ledger along the block's own chain. It gives up when the forged slot ends or its end cannot be placed, after a fixed number of attempts, or when the tip moves anywhere else, a chain the block does not extend, and returns `forging.ErrForgedBlockStateChanged`. The forger drops such a block unjudged: it is never adopted or diffused, `Forge_could_not_forge_int` moves, and the skip is logged at Warn without counting on `dingo_forge_validation_failed_total`, which stays reserved for a block self-validation found invalid.
 
 ### Pool Credentials (`ledger/forging/keys.go`, `keystore/`)
 
@@ -13797,7 +13827,9 @@ writer marks a validation transition under `txValidationCommitMutex` before
 starting the durable transaction and clears it only after publication. A
 validation session may continue
 its read-only work during the interval, but `stillCurrent` reports false and
-`commitIfCurrent` rejects its final mempool or forging mutation. Starting a
+`commitIfCurrent` rejects its final mempool or forging mutation.
+Finishing a transition, like publishing a snapshot, wakes callers that wait to
+retry a non-current session; forged-block self-validation is one. Starting a
 transition also waits for any commit callback already holding the mutex, so a
 writer cannot make database state durable midway through that callback.
 
