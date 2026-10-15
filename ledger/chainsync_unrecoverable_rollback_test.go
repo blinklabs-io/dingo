@@ -227,6 +227,44 @@ func TestReportUnrecoverableRollbackClearsEvidenceAfterLocalProgress(t *testing.
 	}
 }
 
+func TestReportUnrecoverableRollbackClearsProgressBeforeFuturePointReturn(t *testing.T) {
+	t.Parallel()
+	fixture := newChainsyncRollbackFixture(t)
+	point := ocommon.NewPoint(
+		fixture.currentTip.Point.Slot+5,
+		testHashBytes("future-rollback-point"),
+	)
+	key := unrecoverableRollbackKey(point)
+	fixture.ls.unrecoverableRollbacks = map[string]unrecoverableRollbackRecord{
+		key: {
+			count:     unrecoverableRollbackThreshold - 1,
+			firstSeen: time.Now(),
+			lastSeen:  time.Now(),
+			localTip:  fixture.currentTip.Point,
+		},
+	}
+	nextBlock := chain.RawBlock{
+		Slot:        fixture.currentTip.Point.Slot + 1,
+		Hash:        testHashBytes("next-canonical-block"),
+		BlockNumber: fixture.currentTip.BlockNumber + 1,
+		Type:        1,
+		PrevHash:    fixture.currentTip.Point.Hash,
+		Cbor:        []byte{0x80},
+	}
+	require.NoError(t, fixture.ls.chain.AddRawBlocks(
+		t.Context(),
+		[]chain.RawBlock{nextBlock},
+	))
+
+	fixture.ls.reportUnrecoverableRollbackIfStuck(
+		point,
+		event.ChainsyncResyncReasonRollbackBelowUtxoPruneFloor,
+		fixture.connId,
+	)
+	_, tracked := fixture.ls.unrecoverableRollbacks[key]
+	require.False(t, tracked)
+}
+
 func TestReportUnrecoverableRollbackWaitsForStalledPrimaryChain(t *testing.T) {
 	t.Parallel()
 	fixture := newChainsyncRollbackFixture(t)

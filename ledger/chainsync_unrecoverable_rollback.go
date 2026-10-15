@@ -125,13 +125,13 @@ func (ls *LedgerState) reportUnrecoverableRollbackIfStuck(
 		return
 	}
 	localTip := ls.chain.HeaderTip()
-	if point.Slot > localTip.Point.Slot {
-		return
-	}
 	key := unrecoverableRollbackKey(point)
 	rec := ls.unrecoverableRollbacks[key]
 	if rec.count > 0 && !pointMatches(rec.localTip, localTip.Point) {
 		delete(ls.unrecoverableRollbacks, key)
+		return
+	}
+	if point.Slot > localTip.Point.Slot {
 		return
 	}
 	count, stuck := ls.noteUnrecoverableRollback(point)
