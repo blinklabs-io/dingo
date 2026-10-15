@@ -787,12 +787,28 @@ func (o *Ouroboros) localstatequeryRequestContext(callback olocalstatequery.Call
 			o.localstatequeryRequests[callback.ConnectionId] = requests
 		}
 	}
-	// Register before checking liveness so a simultaneous connection close
+	// Register before observing shutdown so a simultaneous connection close
 	// cannot fall between the check and registration and strand the read.
-	if o.connManager != nil {
-		conn := o.connManager.GetConnectionById(callback.ConnectionId)
-		if conn == nil || conn.LocalStateQuery() == nil || conn.LocalStateQuery().Server != callback.Server {
+	//
+	// The server's own stop signal is the liveness test, not a lookup by
+	// connection ID: the connection manager registers an inbound connection
+	// only after its protocols are running, so a client that acquires as soon
+	// as it connects reaches this callback while the manager does not know it
+	// yet, and that lookup would cancel a live request. StopChan, unlike
+	// DoneChan, can be observed from a callback on the protocol loop.
+	if callback.Server != nil {
+		stopped := callback.Server.StopChan()
+		select {
+		case <-stopped:
 			cleanup()
+		default:
+			go func() {
+				select {
+				case <-stopped:
+					cleanup()
+				case <-ctx.Done():
+				}
+			}()
 		}
 	}
 	return ctx, cleanup

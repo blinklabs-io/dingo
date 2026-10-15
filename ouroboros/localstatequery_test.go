@@ -25,8 +25,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger"
@@ -1351,6 +1353,42 @@ func TestLocalstatequeryProtocol_QueryAfterRollbackKeepsConnection(
 	require.NoError(t, client.AcquireVolatileTip(),
 		"the connection must still be usable")
 	require.NoError(t, client.Release())
+}
+
+// TestLocalstatequeryAcquireBeforeConnectionRegistered covers a client whose
+// Acquire is handled before the connection manager has registered its
+// connection. The manager registers an inbound connection only after the
+// connection's protocols are running, so a client that dials and acquires at
+// once can reach the callback in that gap. The request must not be cancelled
+// for it: the manager's lookup by ID is not evidence the connection is gone.
+func TestLocalstatequeryAcquireBeforeConnectionRegistered(t *testing.T) {
+	t.Parallel()
+
+	o, _, _ := newSnapshotTestOuroboros(t, OuroborosConfig{})
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	bus := event.NewEventBus(nil, logger)
+	t.Cleanup(bus.Close)
+	o.connManager = connmanager.NewConnectionManager(
+		connmanager.ConnectionManagerConfig{EventBus: bus, Logger: logger},
+	)
+	t.Cleanup(func() {
+		// Not t.Context(): it is cancelled before cleanups run.
+		stopCtx, cancel := context.WithTimeout(
+			context.Background(), 5*time.Second,
+		)
+		defer cancel()
+		require.NoError(t, o.connManager.Stop(stopCtx))
+	})
+	ctx := olocalstatequery.CallbackContext{
+		ConnectionId: ouroboros.ConnectionId{},
+		Server:       olocalstatequery.NewServer(protocol.ProtocolOptions{}, nil),
+	}
+	require.Nil(t, o.connManager.GetConnectionById(ctx.ConnectionId),
+		"the connection must not be registered yet")
+
+	require.NoError(t, o.localstatequeryServerAcquire(
+		ctx, olocalstatequery.AcquireVolatileTip{}, false,
+	), "an Acquire from a connection that is not registered yet must succeed")
 }
 
 // TestLocalstatequeryReopen_PinsReopenedView proves a reopened view holds a
