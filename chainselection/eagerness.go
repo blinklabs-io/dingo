@@ -381,14 +381,14 @@ func (cs *ChainSelector) pauseEagerness(
 ) func() {
 	cs.mutex.Lock()
 	peerTip, ok := cs.admissionPeerTipLocked(connId)
-	if ok {
+	if ok && peerTip != nil {
 		peerTip.eagernessPaused++
 		if committed := cs.peerTips[connId]; committed != nil && committed != peerTip {
 			committed.eagernessPaused++
 		}
 	}
 	cs.mutex.Unlock()
-	if !ok {
+	if !ok || peerTip == nil {
 		return func() {}
 	}
 	return func() {
