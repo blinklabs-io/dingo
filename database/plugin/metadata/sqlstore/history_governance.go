@@ -19,6 +19,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -78,10 +79,10 @@ func (s *Store) GetGovernanceProposalsPage(
 	return ret, total, nil
 }
 
-// GetGovernanceVotesPage pages the stored votes matching filter, ordered by
-// the slot that cast the current vote value then insertion order, along with
-// the unpaginated count. Votes invalidated by a DRep deregistration keep
-// their row with a deleted slot.
+// GetGovernanceVotesPage pages every recorded cast of the votes matching
+// filter, ordered by the slot that cast it then recording order, along with
+// the unpaginated count. A revote keeps its earlier casts, and votes
+// invalidated by a DRep deregistration keep theirs with a deleted slot.
 func (s *Store) GetGovernanceVotesPage(
 	filter models.GovernanceVoteFilter,
 	limit int,
@@ -94,7 +95,8 @@ func (s *Store) GetGovernanceVotesPage(
 	if err != nil {
 		return nil, 0, err
 	}
-	const from = ` FROM governance_vote v
+	const from = ` FROM governance_vote_history h
+JOIN governance_vote v ON v.id = h.vote_id
 JOIN governance_proposal p ON p.id = v.proposal_id AND p.deleted_slot IS NULL
 WHERE 1 = 1`
 	where := ""
@@ -144,11 +146,16 @@ WHERE a.cold_credential_tag = ? AND a.cold_credential = ?
 	dir := orderDirection(order)
 	query, queryArgs := addLimitOffset(
 		`SELECT v.id, v.proposal_id, v.voter_type, v.voter_credential_tag,
-v.voter_credential, v.vote, v.anchor_url, v.anchor_hash, v.added_slot,
+v.voter_credential, h.vote, h.anchor_url, h.anchor_hash, v.added_slot,
 v.vote_updated_slot, v.deleted_slot, p.tx_hash, p.action_index, p.action_type,
-COALESCE(v.vote_updated_slot, v.added_slot)`+from+where+
-			" ORDER BY COALESCE(v.vote_updated_slot, v.added_slot) "+dir+
-			", v.id "+dir,
+h.transition_slot, h.tx_hash, h.cert_index,
+CASE WHEN v.deleted_slot IS NULL AND NOT EXISTS (
+    SELECT 1 FROM governance_vote_history later
+    WHERE later.vote_id = h.vote_id
+      AND (later.transition_slot > h.transition_slot
+        OR (later.transition_slot = h.transition_slot AND later.id > h.id))
+) THEN 1 ELSE 0 END`+from+where+
+			" ORDER BY h.transition_slot "+dir+", h.id "+dir,
 		args, limit, offset,
 	)
 	rows, err := db.QueryContext(ctx, query, queryArgs...)
@@ -159,6 +166,8 @@ COALESCE(v.vote_updated_slot, v.added_slot)`+from+where+
 	for rows.Next() {
 		var row models.GovernanceVoteRow
 		var anchorURL sql.NullString
+		var certIndex sql.NullInt64
+		var counted int64
 		if err := rows.Scan(
 			&row.Vote.ID, &row.Vote.ProposalID, &row.Vote.VoterType,
 			&row.Vote.VoterCredentialTag, &row.Vote.VoterCredential,
@@ -166,10 +175,20 @@ COALESCE(v.vote_updated_slot, v.added_slot)`+from+where+
 			&row.Vote.AddedSlot, &row.Vote.VoteUpdatedSlot,
 			&row.Vote.DeletedSlot, &row.ProposalTxHash,
 			&row.ProposalActionIndex, &row.ProposalActionType, &row.CastSlot,
+			&row.CastTxHash, &certIndex, &counted,
 		); err != nil {
 			return nil, 0, err
 		}
 		row.Vote.AnchorURL = anchorURL.String
+		if certIndex.Valid {
+			if certIndex.Int64 < 0 || certIndex.Int64 > math.MaxUint32 {
+				return nil, 0, fmt.Errorf(
+					"vote cast index %d out of range", certIndex.Int64,
+				)
+			}
+			row.CastCertIndex = uint32(certIndex.Int64)
+		}
+		row.Counted = counted != 0
 		ret = append(ret, row)
 	}
 	if err := rows.Err(); err != nil {

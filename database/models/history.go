@@ -117,8 +117,16 @@ type GovernanceVoteRow struct {
 	ProposalActionIndex uint32
 	ProposalActionType  uint8
 	// CastSlot is the slot of the block holding the transaction that cast
-	// the current vote value.
+	// this vote. Vote carries the value and anchor of this cast.
 	CastSlot uint64
+	// CastTxHash and CastCertIndex locate the casting voting procedure.
+	// CastTxHash is nil for a cast recorded before the history kept them.
+	CastTxHash    []byte
+	CastCertIndex uint32
+	// Counted reports whether the cast counts toward the tally: it is the
+	// voter's latest cast on the proposal and was not invalidated by its
+	// DRep deregistering.
+	Counted bool
 }
 
 // DRepUpdateRow is one registration, update or deregistration certificate of

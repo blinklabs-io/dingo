@@ -609,12 +609,12 @@ func voteProcedureIndex(
 	return 0, false
 }
 
-// castTransactions locates the transaction that cast each vote by decoding
-// the block at the slot the vote was last cast in. The vote row holds only
-// that slot, so the last valid transaction of the block voting for the same
-// proposal as the same voter is the one that set the stored value. A vote
-// whose block is not held reports ErrHistoryNotRetained rather than a made-up
-// transaction.
+// castTransactions locates the transaction behind each cast. A cast recorded
+// with its position needs only its block's height. One recorded before the
+// history kept positions is found by decoding the block at its slot: the last
+// valid transaction of the block voting for the same proposal as the same
+// voter is the one that set the recorded value. A cast whose block is not
+// held reports ErrHistoryNotRetained rather than a made-up transaction.
 func (a *NodeAdapter) castTransactions(
 	ctx context.Context,
 	rows []models.GovernanceVoteRow,
@@ -630,6 +630,14 @@ func (a *NodeAdapter) castTransactions(
 				return nil, err
 			}
 			blocks[row.CastSlot] = block
+		}
+		if len(row.CastTxHash) > 0 {
+			ret = append(ret, castTransaction{
+				txHash:      hex.EncodeToString(row.CastTxHash),
+				certIndex:   int(row.CastCertIndex),
+				blockHeight: block.number,
+			})
+			continue
 		}
 		voterType, ok := lcommonVoterType(
 			row.Vote.VoterType, row.Vote.VoterCredentialTag,
@@ -758,7 +766,7 @@ func (a *NodeAdapter) GovernanceProposalVotes(
 			VoterRole: voterRole(row.Vote.VoterType),
 			Voter:     voter,
 			Vote:      voteName(row.Vote.Vote),
-			Counted:   row.Vote.DeletedSlot == nil,
+			Counted:   row.Counted,
 		})
 	}
 	return ret, total, nil

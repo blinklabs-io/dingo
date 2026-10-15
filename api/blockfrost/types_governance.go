@@ -76,7 +76,8 @@ type GovernanceProposalVoteInfo struct {
 	Voter     string
 	// Vote is yes, no or abstain.
 	Vote string
-	// Counted is false for a vote invalidated by its DRep deregistering.
+	// Counted is true only for the voter's latest cast on the proposal, and
+	// false once its DRep deregistering invalidates the vote.
 	Counted bool
 }
 

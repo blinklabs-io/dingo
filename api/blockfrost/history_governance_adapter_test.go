@@ -980,3 +980,55 @@ func TestNodeAdapterCommitteeVotesColdWithManyHotCredentials(t *testing.T) {
 	require.Len(t, rows, 1)
 	assert.Equal(t, hexOf(fill32(0xa1)), rows[0].TxHash)
 }
+
+// A revote keeps the earlier cast: every cast is listed with its own
+// transaction, including two in one block, and only the latest counts.
+func TestNodeAdapterVotesListEveryCast(t *testing.T) {
+	t.Parallel()
+	fx := newEpochFixture(t)
+	ctx := context.Background()
+	proposal := fx.addProposal(t, 0x01, 0, lcommon.GovActionTypeInfo, []byte{0x81, 0x06}, 10)
+	// The blocks hold no transactions: a recorded cast is located by its
+	// stored position alone.
+	serveBlocks(fx, map[uint64]*slotBlock{100: {number: 40}, 200: {number: 41}})
+	cast := func(vote uint8, slot uint64, tx byte, index uint32) {
+		t.Helper()
+		updated := slot
+		require.NoError(t, fx.adapter.ledgerState.Database().Metadata().SetGovernanceVote(
+			&models.GovernanceVote{
+				ProposalID: proposal.ID, VoterType: models.VoterTypeDRep,
+				VoterCredential: bytes32of(28, 0xd1), Vote: vote,
+				AddedSlot: slot, VoteUpdatedSlot: &updated,
+				CastTxHash: fill32(tx), CastCertIndex: index,
+			}, nil))
+	}
+	cast(models.VoteNo, 100, 0xa1, 1)
+	cast(models.VoteYes, 200, 0xb1, 0)
+	cast(models.VoteYes, 200, 0xb2, 2)
+
+	drepID := voter(lcommon.VoterTypeDRepKeyHash, 0xd1).String()
+	rows, total, err := fx.adapter.GovernanceProposalVotes(
+		ctx, GovActionRef{TxHash: fill32(0x01), Index: 0}, asc,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, 3, total)
+	assert.Equal(t, []GovernanceProposalVoteInfo{
+		{TxHash: hexOf(fill32(0xa1)), CertIndex: 1, VoterRole: "drep", Voter: drepID, Vote: "no"},
+		{TxHash: hexOf(fill32(0xb1)), CertIndex: 0, VoterRole: "drep", Voter: drepID, Vote: "yes"},
+		{TxHash: hexOf(fill32(0xb2)), CertIndex: 2, VoterRole: "drep", Voter: drepID, Vote: "yes", Counted: true},
+	}, rows)
+
+	require.NoError(t, fx.adapter.ledgerState.Database().Metadata().CreateDrep(nil, &models.Drep{
+		Credential: bytes32of(28, 0xd1), CredentialTag: 0, Active: true, AddedSlot: 5,
+	}))
+	drepVotes, total, err := fx.adapter.DRepVotes(
+		ctx,
+		DRepCredential{ID: hexOf(bytes32of(28, 0xd1)), Hash: bytes32of(28, 0xd1)},
+		asc,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, 3, total)
+	require.Len(t, drepVotes, 3)
+	assert.Equal(t, "no", drepVotes[0].Vote)
+	assert.Equal(t, hexOf(fill32(0xb2)), drepVotes[2].TxHash)
+}

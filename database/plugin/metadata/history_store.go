@@ -195,10 +195,10 @@ type HistoryStore interface {
 	// and a cold-credential vote list cannot be complete while one exists.
 	HasUnattributedCommitteeVotes(txn types.Txn) (bool, error)
 
-	// GetGovernanceVotesPage pages the stored votes matching filter,
-	// ordered by the slot that cast the current vote value, along with the
-	// unpaginated count. Votes invalidated by a DRep deregistration keep
-	// their row with a deleted slot.
+	// GetGovernanceVotesPage pages every recorded cast of the votes
+	// matching filter, ordered by the slot that cast it, along with the
+	// unpaginated count. A revote keeps its earlier casts, and votes
+	// invalidated by a DRep deregistration keep theirs with a deleted slot.
 	GetGovernanceVotesPage(
 		filter models.GovernanceVoteFilter,
 		limit int,

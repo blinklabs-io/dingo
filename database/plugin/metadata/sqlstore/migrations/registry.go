@@ -78,6 +78,7 @@ const (
 	poolRegistrationIdentitySchemaRelease               = "pool-registration-identity"
 	utxoAddressIdentitySchemaRelease                    = "utxo-address-identity"
 	rewardStakeInputCredentialIndexSchemaRelease        = "reward-stake-input-credential-index"
+	governanceVoteCastSchemaRelease                     = "governance-vote-cast"
 	governanceProposalOrderSchemaRelease                = "governance-proposal-order"
 	accountDRepClearSchemaRelease                       = "account-drep-clear-history"
 	committeeHotAuthorizationPruneOrderSchemaRelease    = "committee-hot-authorization-prune-order"
@@ -241,6 +242,7 @@ var schemaVersions = []struct {
 		Name:    rewardStakeInputCredentialIndexSchemaRelease,
 		Dir:     "v45",
 	},
+	{Version: 46, Name: governanceVoteCastSchemaRelease, Dir: "v46"},
 }
 
 // SQLiteRegistry returns the checked-in SQLite migration registry.
