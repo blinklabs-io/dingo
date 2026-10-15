@@ -137,7 +137,7 @@ another connection, not for the write connection.
 `dingo_database_sql_planner_stats_runs_total{trigger,result}`,
 `dingo_database_sql_planner_stats_duration_seconds{trigger}` and
 `dingo_database_sql_planner_stats_errors_total` report runs
-(`trigger` is `startup` or `epoch`; `result` is `changed`, `unchanged`,
+(`trigger` is `startup`, `epoch` or `periodic`; `result` is `changed`, `unchanged`,
 `skipped` or `error`). `plannerStatsRefreshEnabled` (environment
 `DINGO_PLANNER_STATS_REFRESH_ENABLED`, default true) disables the whole
 mechanism and exists only as an escape hatch.

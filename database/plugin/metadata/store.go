@@ -3213,9 +3213,9 @@ type ContextPlannerStatsUpdater interface {
 
 // IncrementalPlannerStatsUpdater is an optional interface for metadata stores
 // whose planner statistics can be maintained incrementally while the node
-// runs. trigger labels the run for metrics ("startup" or "epoch"). A store
-// that does not implement it, or whose backend has no incremental form,
-// leaves statistics untouched.
+// runs. trigger labels the run for metrics ("startup", "epoch" or
+// "periodic"). A store that does not implement it, or whose backend has no
+// incremental form, leaves statistics untouched.
 type IncrementalPlannerStatsUpdater interface {
 	OptimizePlannerStatsContext(
 		ctx context.Context,
