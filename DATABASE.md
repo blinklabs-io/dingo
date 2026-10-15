@@ -2515,7 +2515,9 @@ transactions to overlap.
 Explicit bulk mode, used by Mithril ledger-state import, pauses this scheduled
 checkpoint callback. Entering bulk mode first drains an in-flight callback, so
 the dedicated checkpoint connection cannot overlap the import's metadata
-writes; restoring normal pragmas re-enables the ticker. Writer-owned
+writes; restoring normal pragmas re-enables the ticker. Bulk mode also caps
+SQLite auxiliary sorter threads at `min(4, GOMAXPROCS-1)` for index builds;
+normal-mode restore resets the setting to zero. Writer-owned
 `wal_autocheckpoint` remains active at 10000 pages throughout the import, so
 WAL frames are still backfilled while only the independent TRUNCATE attempts
 are postponed until the bulk phase completes. If the caller's final pragma
