@@ -3941,6 +3941,7 @@ INSERT INTO transaction_metadata_label (
 	require.NoError(t, err)
 	gotPaymentCount, err := store.CountTransactionsByPaymentCred(
 		[]byte("pay-a"),
+		false,
 		nil,
 	)
 	require.NoError(t, err)
@@ -3976,6 +3977,7 @@ INSERT INTO transaction_metadata_label (
 	)
 	gotAddressCountAfter, err := store.CountTransactionsByPaymentCred(
 		[]byte("pay-a"),
+		false,
 		nil,
 	)
 	require.NoError(t, err)

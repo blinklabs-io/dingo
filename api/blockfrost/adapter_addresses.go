@@ -293,6 +293,7 @@ func (a *NodeAdapter) AddressTotal(
 		txCount, err = db.CountTransactionsByPaymentCred(
 			ctx,
 			addr.PaymentKeyHash().Bytes(),
+			models.PaymentScriptFromAddress(addr),
 			txn,
 		)
 	} else {

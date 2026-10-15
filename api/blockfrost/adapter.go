@@ -3353,6 +3353,7 @@ func (a *NodeAdapter) addressSummary(
 			txCount, err = db.CountTransactionsByPaymentCred(
 				ctx,
 				addr.PaymentKeyHash().Bytes(),
+				models.PaymentScriptFromAddress(addr),
 				txn,
 			)
 			hasTransactions = txCount > 0

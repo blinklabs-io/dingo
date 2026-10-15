@@ -361,15 +361,17 @@ func TestNodeAdapterAddressTotalSeparatesKeyAndScriptCredentials(
 		nil,
 	)
 	require.NoError(t, err)
-	seedAddressOutput(t, raw, db, keyAddr, fill32(0x31), 10, 2_000_000,
-		nil, nil)
-	seedAddressOutput(t, raw, db, scriptAddr, fill32(0x32), 11, 9_000_000,
-		nil, nil)
+	keyTx := seedAddressOutput(t, raw, db, keyAddr, fill32(0x31), 10,
+		2_000_000, nil, nil)
+	scriptTx := seedAddressOutput(t, raw, db, scriptAddr, fill32(0x32), 11,
+		9_000_000, nil, nil)
 	_, err = raw.Exec(
 		`UPDATE utxo SET payment_script = 1 WHERE tx_id = ?`,
 		fill32(0x32),
 	)
 	require.NoError(t, err)
+	linkAddressTransaction(t, raw, keyAddr, keyTx.ID, 10)
+	linkAddressTransaction(t, raw, scriptAddr, scriptTx.ID, 11)
 
 	conv, err := bech32.ConvertBits(payment, 8, 5, true)
 	require.NoError(t, err)
@@ -385,7 +387,31 @@ func TestNodeAdapterAddressTotalSeparatesKeyAndScriptCredentials(
 		got, err := adapter.AddressTotal(context.Background(), cred)
 		require.NoError(t, err, tc.hrp)
 		require.Equal(t, tc.want, got.ReceivedSum[0].Quantity, tc.hrp)
+		require.Equal(t, 1, got.TxCount, tc.hrp)
 	}
+
+	// A hash used only as a key credential has no script history, so its
+	// spent-out key transactions do not make the script form resolve.
+	spentKeyAddr, spentPayment, _ := testKeyAddress(t, 0x87, 0)
+	spender := &models.Transaction{Hash: fill32(0x34), Slot: 13, Valid: true}
+	insertAdapterTransaction(t, raw, spender)
+	spentTx := seedAddressOutput(t, raw, db, spentKeyAddr, fill32(0x33), 12,
+		3_000_000, nil, fill32(0x34))
+	linkAddressTransaction(t, raw, spentKeyAddr, spentTx.ID, 12)
+	linkAddressTransaction(t, raw, spentKeyAddr, spender.ID, 13)
+	conv, err = bech32.ConvertBits(spentPayment, 8, 5, true)
+	require.NoError(t, err)
+	keyCred, err := bech32.Encode("addr_vkh", conv)
+	require.NoError(t, err)
+	got, err := adapter.AddressTotal(context.Background(), keyCred)
+	require.NoError(t, err)
+	require.Equal(t, 2, got.TxCount)
+	scriptCred, err := bech32.Encode("script", conv)
+	require.NoError(t, err)
+	_, err = adapter.AddressTotal(context.Background(), scriptCred)
+	require.ErrorIs(t, err, ErrAddressNotFound)
+	_, err = adapter.Address(scriptCred)
+	require.ErrorIs(t, err, ErrAddressNotFound)
 }
 
 // Every UTxO listing matches the exact address, so a foreign-network address

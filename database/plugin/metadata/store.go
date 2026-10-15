@@ -1093,10 +1093,13 @@ type TransactionStore interface {
 
 	// CountTransactionsByPaymentCred returns the total number of
 	// transactions involving the provided payment credential across every
-	// address that carries it, regardless of staking part. Used by the
-	// Blockfrost payment-credential (addr_vkh/script) address lookups.
+	// address that carries it, regardless of staking part. paymentScript
+	// selects a script credential rather than a key credential sharing the
+	// hash. Used by the Blockfrost payment-credential (addr_vkh/script)
+	// address lookups.
 	CountTransactionsByPaymentCred(
 		[]byte, // paymentKey
+		bool, // paymentScript
 		types.Txn,
 	) (int, error)
 

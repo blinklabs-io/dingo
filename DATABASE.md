@@ -3679,6 +3679,14 @@ FROM address_transaction atx
 WHERE atx.payment_key = decode($1, 'hex');
 ```
 
+Key and script hashes share one namespace and `address_transaction` does not
+record which one a row's `payment_key` names. The query above runs only while no
+`utxo` row of the other kind (`payment_script`) carries the hash. Otherwise the
+count keeps only transactions that create, spend (`spent_at_tx_id`), use as
+collateral (`utxo_collateral_input`) or reference (`utxo_reference_input`) an
+output of the requested kind, so a key-only hash looked up as a script counts
+nothing.
+
 ### `GetAddressesByCredential`
 
 ```sql
@@ -3929,7 +3937,9 @@ Plutus data schema of `raw_datum`.
 `GET /api/v0/addresses/{address}/total` sums every output ever paid to the
 address, spent or not, as `received_sum`, and the spent ones as `sent_sum`,
 keyset-paging `UtxosWithHistory` over the retained spent-output history; its
-`tx_count` is the `address_transaction` count. API mode retains spent outputs,
+`tx_count` is the `address_transaction` count, restricted for a bare
+credential to its key or script kind as `CountTransactionsByPaymentCred`
+describes. API mode retains spent outputs,
 so the totals are exact for what the database holds, and outputs imported from
 a ledger-state snapshot count as received with no producing transaction.
 

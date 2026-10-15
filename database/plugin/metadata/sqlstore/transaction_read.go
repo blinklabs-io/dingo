@@ -253,8 +253,40 @@ func (s *Store) GetTransactionHashesAfterSlot(
 	return ret, nil
 }
 
+// Key and script hashes share one namespace and address_transaction does not
+// record which one a row's payment_key names, so the outputs decide: a
+// transaction belongs to the credential kind whose output it creates, spends,
+// collateralizes or references.
+const countTransactionsByPaymentCredLinkedSQL = `
+SELECT COUNT(DISTINCT at.transaction_id)
+FROM address_transaction at
+JOIN "transaction" tx ON tx.id = at.transaction_id
+WHERE at.payment_key = ?
+  AND tx.hash IN (
+    SELECT u.tx_id FROM utxo u
+    WHERE u.payment_key = ? AND u.payment_script = ?
+    UNION
+    SELECT u.spent_at_tx_id FROM utxo u
+    WHERE u.payment_key = ? AND u.payment_script = ?
+      AND u.spent_at_tx_id IS NOT NULL
+    UNION
+    SELECT c.transaction_hash FROM utxo_collateral_input c
+    JOIN utxo u ON u.id = c.utxo_id
+    WHERE u.payment_key = ? AND u.payment_script = ?
+    UNION
+    SELECT r.transaction_hash FROM utxo_reference_input r
+    JOIN utxo u ON u.id = r.utxo_id
+    WHERE u.payment_key = ? AND u.payment_script = ?
+  )`
+
+const hasPaymentCredOutputSQL = `
+SELECT EXISTS (
+  SELECT 1 FROM utxo WHERE payment_key = ? AND payment_script = ?
+)`
+
 func (s *Store) CountTransactionsByPaymentCred(
 	paymentKey []byte,
+	paymentScript bool,
 	txn types.Txn,
 ) (int, error) {
 	if len(paymentKey) == 0 {
@@ -264,12 +296,36 @@ func (s *Store) CountTransactionsByPaymentCred(
 	if err != nil {
 		return 0, err
 	}
-	q := s.operationalQueries(db)
-	count, err := q.CountTransactionsByPaymentCred(
+	// While no output of the other kind shares the hash, every indexed row
+	// belongs to this kind. That keeps rows whose outputs were pruned, and
+	// the regular inputs of a phase-2 failure, which no output records.
+	var otherKindSeen bool
+	if err := db.QueryRowContext(
 		ctx,
+		s.dialect.Rebind(hasPaymentCredOutputSQL),
 		paymentKey,
-	)
-	if err != nil {
+		!paymentScript,
+	).Scan(&otherKindSeen); err != nil {
+		return 0, fmt.Errorf("check payment cred kind: %w", err)
+	}
+	if !otherKindSeen {
+		q := s.operationalQueries(db)
+		count, err := q.CountTransactionsByPaymentCred(ctx, paymentKey)
+		if err != nil {
+			return 0, fmt.Errorf("count txs by payment cred: %w", err)
+		}
+		return int(count), nil
+	}
+	var count int64
+	if err := db.QueryRowContext(
+		ctx,
+		s.dialect.Rebind(countTransactionsByPaymentCredLinkedSQL),
+		paymentKey,
+		paymentKey, paymentScript,
+		paymentKey, paymentScript,
+		paymentKey, paymentScript,
+		paymentKey, paymentScript,
+	).Scan(&count); err != nil {
 		return 0, fmt.Errorf("count txs by payment cred: %w", err)
 	}
 	return int(count), nil
