@@ -762,7 +762,7 @@ var koiosCoverageMatrix = []KoiosFieldCoverage{
 		Field:      "type",
 		Class:      CoverageExactMatch,
 		DingoField: "reward_account_output.reward_type; proposal_refund against the post-snapshot proposal-deposit credit in account_reward_delta",
-		Reason:     "validated member/leader/proposal_refund rows are matched after aggregation, repeated proposal_refund rows summing as separate deposits; treasury/reserves/refund rows are out of scope and any other type is reported as informational reward_type_unmodeled",
+		Reason:     "validated member/leader/proposal_refund rows are matched after aggregation, repeated proposal_refund rows summing as separate deposits; treasury/reserves/refund rows are out of scope and any other type is reported as reward_type_unmodeled, which is ERROR",
 	},
 	{
 		Endpoint:   "/account_reward_history",

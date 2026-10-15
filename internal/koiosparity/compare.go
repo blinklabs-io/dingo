@@ -129,10 +129,10 @@ const (
 	// whose type is neither compared (member, leader, proposal_refund) nor
 	// deliberately out of scope: a type Koios added that this comparer has
 	// no model for. No Dingo read happened and no Dingo value was compared,
-	// so it asserts nothing about Dingo's state and is informational: a
-	// strict node must not stop because the reference grew a vocabulary
-	// word. The row is still recorded, so the unmodeled type stays visible
-	// in check_mismatches and in the mismatch metric's informational series.
+	// so it is not a Dingo/Koios disagreement, but the account's rewards were
+	// only partly validated. It is therefore ERROR rather than informational:
+	// an unrecognized reward mechanism must never let an account check pass,
+	// and a strict node stops on it (it is not reference_lag).
 	CategoryRewardTypeUnmodeled = "reward_type_unmodeled"
 )
 
@@ -1923,7 +1923,8 @@ func severityOf(category string) mismatchSeverity {
 	case CategoryDBError,
 		CategoryDBMissing,
 		CategoryReferenceLag,
-		CategoryAcctCoverageIncomplete:
+		CategoryAcctCoverageIncomplete,
+		CategoryRewardTypeUnmodeled:
 		return severityError
 	case CategoryAcctZeroReward,
 		CategoryAcctZeroRewardRow,
@@ -1931,8 +1932,7 @@ func severityOf(category string) mismatchSeverity {
 		CategoryAcctDeregistered,
 		CategoryPoolDeparted,
 		CategoryPoolZeroStake,
-		CategoryCostModelSynthetic,
-		CategoryRewardTypeUnmodeled:
+		CategoryCostModelSynthetic:
 		// Purely informational — see these categories' doc comments.
 		return severityInformational
 	default:
@@ -1981,9 +1981,10 @@ func CountSignificant(mismatches []CheckMismatch) int {
 // entry and every significant entry is reference_lag. That is the one
 // non-pass result a strict-mode observer does not treat as fatal: Koios's
 // data for the epoch is not yet complete, which is not evidence that Dingo
-// is wrong. dingo_db_missing, dingo_db_error and acct_coverage_incomplete
-// share reference_lag's ERROR severity but are not covered here, so a row
-// Dingo never wrote past the grace window still stops a strict node.
+// is wrong. dingo_db_missing, dingo_db_error, acct_coverage_incomplete and
+// reward_type_unmodeled share reference_lag's ERROR severity but are not
+// covered here, so a row Dingo never wrote past the grace window, or a reward
+// type nothing validated, still stops a strict node.
 func referenceLagOnly(mismatches []CheckMismatch) bool {
 	lag := false
 	for _, m := range mismatches {
@@ -2024,7 +2025,9 @@ func isZeroRewardAmount(amount string) bool {
 //     reference_lag (Koios data may be incomplete for a recent epoch), or
 //     acct_coverage_incomplete (the Koios account-reward fetch for this
 //     epoch never completed across every chunk, so there is no complete
-//     reference set to compare against yet).
+//     reference set to compare against yet), or reward_type_unmodeled (a
+//     Koios reward type with no model here, so the account was not fully
+//     validated).
 //   - PASS: no mismatches.
 func DetermineStatus(mismatches []CheckMismatch) string {
 	hasError := false

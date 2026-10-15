@@ -10725,7 +10725,7 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
   | `/pool_history` | intentionally-incomparable | `pool_fees`, `deleg_rewards` | Koios derives these from an approximation that omits the pledge/owner-stake bonus and rounds components. |
   | `/pool_history` | unsupported | `active_stake_pct`, `saturation_pct`, `epoch_ros` | Dingo has no matching persisted pool aggregate. |
   | `/account_reward_history` | exact-match | `stake_address`, `earned_epoch` | Identifies the `(stake_address, type)` aggregate `CompareAccountEpoch` matches on; response identity must equal the requested epoch. |
-  | `/account_reward_history` | exact-match | `amount`, `type` | Exact integer lovelace equality against `reward_account_output.amount`/`reward_type` (and, for `proposal_refund`, against the proposal-deposit credit in `account_reward_delta.amount`) for member/leader/proposal_refund rows, compared as per-`(stake_address, type)` totals summed across pool contributions, and then per pool contribution, so a disagreement that preserves the total (equal and opposite per-pool errors, or a total attributed to one of the pools the other side splits it between) is reported as `account_reward_pool_amount` rather than passing; repeated `proposal_refund` rows sum as separate deposits; a type that is neither modeled nor filtered by `koiosAccountRewardTypesOutOfScope` is the informational `reward_type_unmodeled`, not a parity failure. |
+  | `/account_reward_history` | exact-match | `amount`, `type` | Exact integer lovelace equality against `reward_account_output.amount`/`reward_type` (and, for `proposal_refund`, against the proposal-deposit credit in `account_reward_delta.amount`) for member/leader/proposal_refund rows, compared as per-`(stake_address, type)` totals summed across pool contributions, and then per pool contribution, so a disagreement that preserves the total (equal and opposite per-pool errors, or a total attributed to one of the pools the other side splits it between) is reported as `account_reward_pool_amount` rather than passing; repeated `proposal_refund` rows sum as separate deposits; a type that is neither modeled nor filtered by `koiosAccountRewardTypesOutOfScope` is `reward_type_unmodeled`, an ERROR rather than a parity failure, so the account check cannot pass. |
   | `/account_reward_history` | derived-match | `pool_id_bech32` | Decoded to `reward_account_output.pool_key_hash`'s pool ID to identify each contribution to a shared reward account; distinct pools aggregate and are then compared per pool, a repeated same-pool row is `acct_duplicate`. A side that names no pool for a key makes no per-pool statement to disagree with, so the totals are the whole verdict there. |
   | `/account_reward_history` | unsupported | `spendable_epoch` | Stored for reference only; not currently compared against Dingo's schema. |
   | `/epoch_params` | exact-match | `epoch_no` | The filtered response must contain exactly the requested reporting epoch K. |
@@ -11139,8 +11139,8 @@ per-account categories: `acct_only_dingo`,
 reward_type, pool) row within one side — a data-integrity problem, not a
 value disagreement; the same (stake_address, reward_type) from two
 different pools is a shared reward account, which aggregates instead),
-`reward_type_unmodeled` (informational: a Koios reward type with no model
-here, so nothing was compared and nothing is claimed about Dingo),
+`reward_type_unmodeled` (ERROR: a Koios reward type with no model here, so
+the account's rewards were not fully validated and the epoch cannot pass),
 `acct_zero_reward_row` (informational: a reward row worth zero
 lovelace present on one side only — nothing was credited either way, so the
 two sides agree about every lovelace and the one-sided row is a
@@ -11345,7 +11345,8 @@ second sync:
     never stops either queue. The other ERROR-severity
     categories stay fatal: `dingo_db_missing` past the grace window,
     `dingo_db_error`, and `acct_coverage_incomplete` all mean Dingo's side or
-    the reference set is unusable, which strict mode exists to surface.
+    the reference set is unusable, and `reward_type_unmodeled` means a Koios
+    reward type was never validated, which strict mode exists to surface.
     `fail` checks eligibility before the `fatalFired` compare-and-swap, so a
     non-fatal call cannot consume the exactly-once slot. The node records the
     fatal error before cancellation and returns it from `Run`, so the CLI exits
@@ -11762,10 +11763,10 @@ never the reverse.
   `koiosAccountRewardTypesOutOfScope`, not silently dropped) since Dingo's
   reward accounting does not currently track those MIR/refund mechanisms —
   wire them in if/when it does. A type outside all of these is reported as
-  `reward_type_unmodeled`, which is informational: no Dingo read happened and
-  nothing was compared, so it says nothing about Dingo's state and must not
-  stop a strict node. The row stays in `check_mismatches` and in the
-  mismatch metric's informational series.
+  `reward_type_unmodeled`, which is ERROR severity: no Dingo read happened,
+  so it is not a parity failure, but an unrecognized reward mechanism leaves
+  the account only partly validated and must not produce a passing check. It
+  is not `reference_lag`, so a strict node stops on it.
 - **Proposal refunds.** `proposal_refund` is Koios's type for a governance
   proposal deposit credited to the proposal's return account. Dingo has no
   `reward_account_output` row for it: the epoch boundary journals the credit

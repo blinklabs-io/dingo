@@ -3391,6 +3391,11 @@ func TestReferenceLagOnly(t *testing.T) {
 			false,
 		},
 		{"db missing only", []string{CategoryDBMissing}, false},
+		{
+			"lag plus unmodeled reward type",
+			[]string{CategoryReferenceLag, CategoryRewardTypeUnmodeled},
+			false,
+		},
 	}
 	for _, tc := range cases {
 		mismatches := make([]CheckMismatch, 0, len(tc.categories))

@@ -1186,8 +1186,9 @@ func TestCompareAccountEpochOutOfScopeRewardTypesFiltered(t *testing.T) {
 
 // TestCompareAccountEpochUnknownRewardTypeIsNotDatabaseError pins the verdict
 // for a Koios reward type the comparer has no model for. Nothing was read
-// from Dingo, so it must not claim a Dingo database failure, and it must not
-// stop a strict node: the row says nothing about what Dingo computed.
+// from Dingo, so it must not claim a Dingo database failure. It must not pass
+// either: the account's rewards were only partly validated, so the epoch is
+// ERROR and a strict node stops rather than accepting the gap.
 func TestCompareAccountEpochUnknownRewardTypeIsNotDatabaseError(t *testing.T) {
 	t.Parallel()
 
@@ -1205,8 +1206,10 @@ func TestCompareAccountEpochUnknownRewardTypeIsNotDatabaseError(t *testing.T) {
 	require.Equal(t, "account_reward_type", ms[0].Field)
 	require.Equal(t, "unexpected", ms[0].KoiosValue)
 	require.Empty(t, ms[0].DingoValue)
-	require.Equal(t, StatusPass, DetermineStatus(ms))
-	require.Zero(t, CountSignificant(ms))
+	require.Equal(t, StatusError, DetermineStatus(ms))
+	require.Equal(t, 1, CountSignificant(ms))
+	require.False(t, referenceLagOnly(ms),
+		"an unmodeled reward type must stop a strict node")
 }
 
 // An unmodeled type must not mask a real divergence reported beside it.
@@ -1225,7 +1228,7 @@ func TestCompareAccountEpochUnknownRewardTypeKeepsOtherMismatches(
 	)
 	require.Len(t, ms, 2)
 	require.Equal(t, StatusFail, DetermineStatus(ms))
-	require.Equal(t, 1, CountSignificant(ms))
+	require.Equal(t, 2, CountSignificant(ms))
 }
 
 // proposalRefundRow is the Preview epoch 677 shape: a Koios proposal_refund
