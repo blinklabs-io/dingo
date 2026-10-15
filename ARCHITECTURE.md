@@ -16145,12 +16145,13 @@ workers set by `blockPipelineWorkerCount()` (`ledger/state.go`) — the host's
 `GOMAXPROCS`, floored at `blockPipelineMinWorkers` (2, the prior fixed count)
 and capped at `blockPipelineMaxWorkers` (8). The pipeline runs in
 gouroboros' trusted decode-only mode, which gives the persisted blocks the
-ledger reads back from the chain no validation or apply stage; with
+ledger reads back from the chain no validation or ledger-apply stage, while
+the pipeline still re-sequences decoded results into submission order; with
 `BlockPipelineValidateEnabled` the header cryptography is checked by
 `decodeReadChainBatch` itself (see Phase 3 below). Each gathered batch
 of raw blocks (`decodeReadChainBatch`) is submitted to the pipeline from a
 separate goroutine while the caller drains `Results()` in submission order —
-the pipeline's apply stage guarantees this ordering regardless of which
+the pipeline's re-sequencing guarantees this ordering regardless of which
 worker decodes first. Draining concurrently is required: `Submit` waits once
 `MaxPendingBlocks` sequences are outstanding, and once the `Results()`
 buffer is full the apply stage completes no further sequences until results
@@ -16977,8 +16978,8 @@ on the first three below, as they now stand.
 1. **A normal pipeline can only run with ledger apply wired in.** A pipeline
    that applies blocks requires an era resolver, nonce and KES settings, a
    verification-config provider, a chain-context validator and an `ApplyFunc`,
-   and refuses to start without them. The modes dingo uses cannot carry an
-   `ApplyFunc`: trusted decode-only and header-only both reject one at start.
+   and refuses to start without them. The mode dingo uses cannot carry an
+   `ApplyFunc`: trusted decode-only rejects one at start.
    Using the pipeline for decode therefore means leaving apply out.
    (`TestPipelineModesRejectAnApplyFunc`.)
 2. **A rejected item stops ordered processing.** A decode or validation

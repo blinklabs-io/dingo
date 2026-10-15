@@ -15,6 +15,8 @@
 package ledger
 
 import (
+	"context"
+	"strings"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
@@ -122,4 +124,49 @@ func TestPipelineRejectedDecodeIsNotFatalInTrustedMode(t *testing.T) {
 	)
 	require.NoError(t, second.DecodeError())
 	require.Equal(t, good.Slot, second.Block().SlotNumber())
+}
+
+// Outside trusted decode-only mode a rejected item ends the pipeline's
+// ordered stage: the rejection is reported by a fence and every later Submit
+// fails, so one bad block is fatal to a pipeline shared by every attempt.
+func TestPipelineRejectedItemStopsOrderedProcessing(t *testing.T) {
+	t.Parallel()
+
+	p := pipeline.NewBlockPipeline(
+		pipeline.WithHeaderOnly(),
+		pipeline.WithValidateWorkers(1),
+		pipeline.WithBlockTypeResolver(
+			func(context.Context, []byte) (uint, error) {
+				return gledger.BlockTypeConway, nil
+			},
+		),
+		pipeline.WithEta0(strings.Repeat("00", 32)),
+		pipeline.WithSlotsPerKesPeriod(129600),
+	)
+	require.NoError(t, p.Start(t.Context()))
+	t.Cleanup(func() { _ = p.Stop() })
+	go func() {
+		//nolint:revive // draining is the point; the values are unused
+		for range p.Errors() {
+		}
+	}()
+
+	tip := func(slot uint64) ocommon.Tip {
+		return ocommon.Tip{
+			Point:       ocommon.NewPoint(slot, []byte{byte(slot)}),
+			BlockNumber: slot,
+		}
+	}
+	require.NoError(t, p.Submit(
+		t.Context(), gledger.BlockTypeConway, []byte{0xff}, tip(1),
+	))
+	require.ErrorIs(
+		t,
+		p.Fence(t.Context()),
+		pipeline.ErrPipelineItemRejected,
+	)
+	good, _ := buildDecodableTestBlock(t, 20, 2)
+	require.Error(t, p.Submit(
+		t.Context(), gledger.BlockTypeConway, good.Cbor, tip(2),
+	))
 }

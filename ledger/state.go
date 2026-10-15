@@ -135,9 +135,10 @@ const (
 // Both stages remain purely a scheduling change per their existing
 // documentation (BlockPipelineEnabled/BlockPipelineValidateEnabled's config
 // doc comments): this does not alter validation or apply behavior, only how
-// many goroutines share the decode/VRF/KES work before
+// many goroutines share the decode work before
 // ledgerProcessBlocksFromSource's single-threaded apply consumes it in
-// submission order.
+// submission order. Header cryptography is not part of that work: it is
+// checked serially by decodeReadChainBatch.
 func blockPipelineWorkerCount() int {
 	n := runtime.GOMAXPROCS(0)
 	switch {
@@ -1020,8 +1021,9 @@ type LedgerStateConfig struct {
 	// applied after the rollback. See ARCHITECTURE.md ("Phase 5: rollback
 	// coordination").
 	BlockPipelineEnabled bool
-	// BlockPipelineValidateEnabled adds parallel header-crypto validation to the
-	// decode pipeline. The generic stage covers VRF, KES,
+	// BlockPipelineValidateEnabled checks header cryptography serially in
+	// decodeReadChainBatch for blocks read back during replay; the pipeline
+	// itself only decodes. The check covers VRF, KES,
 	// and the OpCert cold-key signature; Dingo's supplement re-runs that
 	// cold-key signature check as defense in depth and adds the
 	// state-dependent MaxKESEvolutions expiry check the generic verifier
@@ -7002,16 +7004,16 @@ func (ls *LedgerState) ledgerReadChainIterator(
 // already been pushed here). errorsChan's
 // capacity is bounded
 // (PipelineConfig.PrefetchBufferSize, 1000 by default) with nothing else in
-// this codebase ever reading from it; during a long interval without cached
-// nonce state it fills permanently after roughly that many blocks, and every
-// validate worker then blocks forever on `errors <- err` inside worker(),
-// cascading backpressure through validatedChan/decodedChan/submitChan into
+// this codebase ever reading from it; a run of undecodable blocks fills it
+// permanently after roughly that many, and every decode worker then blocks
+// forever on `errors <- err` inside worker(),
+// cascading backpressure through decodedChan/submitChan into
 // ls.blockPipeline.Submit() -- which decodeReadChainBatch calls with
 // context.Background() deliberately, so it also blocks forever with no log
 // line, no error, and no timeout. This goroutine is what prevents that:
 // as long as it is running for the pipeline's entire lifetime, errorsChan
 // never fills regardless of how many expected-to-fail items flow through
-// the validate stage.
+// the decode stage.
 func (ls *LedgerState) drainBlockPipelineErrors() {
 	defer close(ls.blockPipelineErrorsDone)
 	for err := range ls.blockPipeline.Errors() {

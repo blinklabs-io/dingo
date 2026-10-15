@@ -664,7 +664,7 @@ func TestLedgerReadChainIteratorPipelineValidateMatchesSerial(t *testing.T) {
 	seed1[0], seed2[0], seed3[0] = 10, 11, 12
 	const nonceSeed = 42
 
-	block1, _ := buildValidatedTestModelsBlock(t, seed1, nonceSeed, 100, 1)
+	block1, vb1 := buildValidatedTestModelsBlock(t, seed1, nonceSeed, 100, 1)
 	block2, _ := buildValidatedTestModelsBlock(t, seed2, nonceSeed, 500, 2)
 	block3, _ := buildValidatedTestModelsBlock(t, seed3, nonceSeed, 900, 3)
 
@@ -702,20 +702,9 @@ func TestLedgerReadChainIteratorPipelineValidateMatchesSerial(t *testing.T) {
 	serialLS := &LedgerState{config: LedgerStateConfig{Logger: testLogger()}}
 	serialBlocks := run(t, serialLS)
 
-	pipelineLS := &LedgerState{
-		config: LedgerStateConfig{
-			Logger:                       testLogger(),
-			BlockPipelineValidateEnabled: true,
-		},
-	}
-	pipelineLS.blockPipeline = pipeline.NewBlockPipeline(
-		pipeline.WithDecodeWorkers(2),
-		pipeline.WithTrustedDecodeOnly(),
-	)
-	require.NoError(t, pipelineLS.blockPipeline.Start(t.Context()))
-	defer func() {
-		require.NoError(t, pipelineLS.blockPipeline.Stop())
-	}()
+	// The ledger carries the epoch nonce and Shelley genesis, so the header
+	// check is enforced rather than skipped.
+	pipelineLS := newValidatedPipelineTestLedger(t, vb1)
 	pipelineBlocks := run(t, pipelineLS)
 
 	require.Len(t, serialBlocks, len(pipelineBlocks))

@@ -70,8 +70,7 @@ func TestBlockPipelineWorkerCount(t *testing.T) {
 }
 
 // buildValidatedPipelineThroughputBlocks generates n genuinely VRF/KES-valid
-// Conway blocks sharing one epoch nonce (so a single pipeline instance's
-// ValidateStage can check all of them), for measuring pipeline decode+validate
+// Conway blocks sharing one epoch nonce, for measuring pipeline decode
 // throughput without any network or database involved. Generation itself
 // (real VRF/KES/cold-key material per block) is excluded from the caller's
 // timed section.
@@ -106,11 +105,10 @@ func buildValidatedPipelineThroughputBlocks(
 }
 
 // runPipelineThroughput submits every block in blocks through a freshly
-// constructed pipeline.BlockPipeline configured exactly as NewLedgerState
-// wires production (productionValidateVerifyConfig, decode plus VRF/KES
-// validate), with the given worker count for both stages, and returns
-// blocks-processed-per-second. It fails the test if any block fails to
-// decode or validate -- every generated block is genuinely valid, so an
+// constructed pipeline.BlockPipeline configured as NewLedgerState wires
+// production (trusted decode-only), with the given decode worker count, and
+// returns blocks-processed-per-second. It fails the test if any block fails
+// to decode -- every generated block is genuinely valid, so an
 // error here means the harness (not the worker count) is broken.
 func runPipelineThroughput(
 	t *testing.T,
@@ -149,9 +147,9 @@ func runPipelineThroughput(
 }
 
 // TestBlockPipelineWorkerCountThroughput asserts the correctness property the
-// CPU-scaled worker count puts at risk -- that decode and VRF/KES validation
-// still produce a clean result for every block once more than two workers
-// share the stages -- and reports decode+validate throughput at the prior
+// CPU-scaled worker count puts at risk -- that decoding still produces a
+// clean result for every block once more than two workers share the
+// stage -- and reports decode throughput at the prior
 // fixed count and at this host's scaled count alongside it. Blocks are
 // genuinely valid and everything runs in-process, so neither the correctness
 // check nor the reported numbers depend on peer availability, block density,
