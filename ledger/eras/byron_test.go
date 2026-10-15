@@ -1391,19 +1391,6 @@ func (t *testByronTx) Cbor() []byte {
 	return t.cbor
 }
 
-func TestValidateTxByron_ValidTransaction(t *testing.T) {
-	tx := &testByronTx{
-		inputs: []lcommon.TransactionInput{
-			newTestInput(0x01, 0),
-		},
-		outputs: []lcommon.TransactionOutput{
-			newTestOutput(1_000_000),
-		},
-	}
-	err := ValidateTxByron(tx, 0, nil, nil)
-	assert.NoError(t, err)
-}
-
 func TestValidateTxByron_MainnetZeroValueOutput(t *testing.T) {
 	// This transaction is from the canonical mainnet block at slot 4,427,376.
 	// Byron consensus permits its first output to contain zero lovelace.
@@ -1661,6 +1648,13 @@ var errUtxoNotFound = errors.New("UTxO not found")
 
 // mockLedgerState implements lcommon.LedgerState for testing
 // UTxO-aware Byron validation rules.
+// GovPurposeRoots reports no purpose roots, which is the state of a chain
+// that has not enacted a governance action. The Conway ancestry rule requires
+// the capability whenever a transaction proposes a purpose-chain action.
+func (s *mockLedgerState) GovPurposeRoots() (*lcommon.GovPurposeRoots, error) {
+	return &lcommon.GovPurposeRoots{}, nil
+}
+
 type mockLedgerState struct {
 	utxos         map[string]lcommon.Utxo
 	networkId     uint

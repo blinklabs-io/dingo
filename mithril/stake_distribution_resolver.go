@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 )
 
 // ResolvedStakeDistribution bundles the stake-distribution artifact selected
@@ -41,84 +42,61 @@ func ResolveStakeDistributionForCertificate(
 	if verification == nil || verification.LeafCertificate == nil {
 		return nil, errors.New("certificate verification result is incomplete")
 	}
-
-	// Try direct match first based on signed entity kind.
-	switch verification.SignedEntityKind {
+	certificate := verification.LeafCertificate
+	kind := verification.SignedEntityKind
+	source := "leaf"
+	if kind != signedEntityTypeMithrilStakeDistribution &&
+		kind != signedEntityTypeCardanoStakeDistribution {
+		source = "chain"
+		certificate = certificateForSignedEntityKind(verification,
+			signedEntityTypeMithrilStakeDistribution)
+		kind = signedEntityTypeMithrilStakeDistribution
+		if certificate == nil {
+			certificate = certificateForSignedEntityKind(verification,
+				signedEntityTypeCardanoStakeDistribution)
+			kind = signedEntityTypeCardanoStakeDistribution
+		}
+		if certificate == nil {
+			return nil, fmt.Errorf(
+				"no stake distribution artifact found for signed entity kind %q",
+				verification.SignedEntityKind,
+			)
+		}
+	}
+	result := &ResolvedStakeDistribution{Kind: kind}
+	switch kind {
 	case signedEntityTypeMithrilStakeDistribution:
 		artifact, err := resolveMithrilStakeDistribution(
-			ctx, client, verification.LeafCertificate, true,
+			ctx,
+			client,
+			certificate,
+			true,
 		)
 		if err != nil {
 			return nil, fmt.Errorf(
-				"resolving Mithril stake distribution for leaf certificate: %w",
+				"resolving Mithril stake distribution for %s certificate: %w",
+				source,
 				err,
 			)
 		}
-		return &ResolvedStakeDistribution{
-			Kind:                     signedEntityTypeMithrilStakeDistribution,
-			MithrilStakeDistribution: artifact,
-		}, nil
+		result.MithrilStakeDistribution = artifact
 	case signedEntityTypeCardanoStakeDistribution:
 		artifact, err := resolveCardanoStakeDistribution(
-			ctx, client, verification.LeafCertificate, true,
+			ctx,
+			client,
+			certificate,
+			true,
 		)
 		if err != nil {
 			return nil, fmt.Errorf(
-				"resolving Cardano stake distribution for leaf certificate: %w",
+				"resolving Cardano stake distribution for %s certificate: %w",
+				source,
 				err,
 			)
 		}
-		return &ResolvedStakeDistribution{
-			Kind:                     signedEntityTypeCardanoStakeDistribution,
-			CardanoStakeDistribution: artifact,
-		}, nil
+		result.CardanoStakeDistribution = artifact
 	}
-
-	// For non-stake-distribution entity kinds (e.g., CardanoImmutableFilesFull),
-	// scan the certificate chain for supporting stake distribution certificates.
-	mithrilCert := certificateForSignedEntityKind(
-		verification,
-		signedEntityTypeMithrilStakeDistribution,
-	)
-	if mithrilCert != nil {
-		artifact, err := resolveMithrilStakeDistribution(
-			ctx, client, mithrilCert, true,
-		)
-		if err != nil {
-			return nil, fmt.Errorf(
-				"resolving Mithril stake distribution for chain certificate: %w",
-				err,
-			)
-		}
-		return &ResolvedStakeDistribution{
-			Kind:                     signedEntityTypeMithrilStakeDistribution,
-			MithrilStakeDistribution: artifact,
-		}, nil
-	}
-	cardanoCert := certificateForSignedEntityKind(
-		verification,
-		signedEntityTypeCardanoStakeDistribution,
-	)
-	if cardanoCert != nil {
-		artifact, err := resolveCardanoStakeDistribution(
-			ctx, client, cardanoCert, true,
-		)
-		if err != nil {
-			return nil, fmt.Errorf(
-				"resolving Cardano stake distribution for chain certificate: %w",
-				err,
-			)
-		}
-		return &ResolvedStakeDistribution{
-			Kind:                     signedEntityTypeCardanoStakeDistribution,
-			CardanoStakeDistribution: artifact,
-		}, nil
-	}
-
-	return nil, fmt.Errorf(
-		"no stake distribution artifact found for signed entity kind %q",
-		verification.SignedEntityKind,
-	)
+	return result, nil
 }
 
 // resolveMithrilStakeDistribution looks up the Mithril stake distribution
@@ -132,50 +110,26 @@ func resolveMithrilStakeDistribution(
 ) (*MithrilStakeDistribution, error) {
 	list, err := client.ListMithrilStakeDistributions(ctx)
 	if err != nil {
+		return nil, fmt.Errorf("listing Mithril stake distributions: %w", err)
+	}
+	hash, err := stakeDistributionHash(
+		list, leaf, epochFallback, "Mithril",
+		func(item MithrilStakeDistributionListItem) (string, string, uint64) {
+			return item.Hash, item.CertificateHash, item.Epoch
+		},
+	)
+	if err != nil {
+		return nil, err
+	}
+	distribution, err := client.GetMithrilStakeDistribution(ctx, hash)
+	if err != nil {
 		return nil, fmt.Errorf(
-			"listing Mithril stake distributions: %w", err,
+			"getting Mithril stake distribution %s: %w",
+			hash,
+			err,
 		)
 	}
-	var epochMatchHash, epochMatchCertHash string
-	for _, item := range list {
-		if item.CertificateHash != "" && item.CertificateHash == leaf.Hash {
-			dist, err := client.GetMithrilStakeDistribution(ctx, item.Hash)
-			if err != nil {
-				return nil, fmt.Errorf(
-					"getting Mithril stake distribution %s: %w",
-					item.Hash, err,
-				)
-			}
-			return dist, nil
-		}
-		if epochFallback && item.Epoch == leaf.Epoch && epochMatchHash == "" {
-			epochMatchHash = item.Hash
-			epochMatchCertHash = item.CertificateHash
-		}
-	}
-	if epochMatchHash != "" {
-		if epochMatchCertHash != "" &&
-			epochMatchCertHash != leaf.Hash {
-			return nil, fmt.Errorf(
-				"mithril stake distribution certificate hash mismatch: distribution=%s certificate=%s",
-				epochMatchCertHash,
-				leaf.Hash,
-			)
-		}
-		dist, err := client.GetMithrilStakeDistribution(ctx, epochMatchHash)
-		if err != nil {
-			return nil, fmt.Errorf(
-				"getting Mithril stake distribution %s: %w",
-				epochMatchHash, err,
-			)
-		}
-		return dist, nil
-	}
-	return nil, fmt.Errorf(
-		"no Mithril stake distribution found for certificate %s at epoch %d",
-		leaf.Hash,
-		leaf.Epoch,
-	)
+	return distribution, nil
 }
 
 // resolveCardanoStakeDistribution looks up the Cardano stake distribution
@@ -189,48 +143,59 @@ func resolveCardanoStakeDistribution(
 ) (*CardanoStakeDistribution, error) {
 	list, err := client.ListCardanoStakeDistributions(ctx)
 	if err != nil {
+		return nil, fmt.Errorf("listing Cardano stake distributions: %w", err)
+	}
+	hash, err := stakeDistributionHash(
+		list, leaf, epochFallback, "Cardano",
+		func(item CardanoStakeDistributionListItem) (string, string, uint64) {
+			return item.Hash, item.CertificateHash, item.Epoch
+		},
+	)
+	if err != nil {
+		return nil, err
+	}
+	distribution, err := client.GetCardanoStakeDistribution(ctx, hash)
+	if err != nil {
 		return nil, fmt.Errorf(
-			"listing Cardano stake distributions: %w", err,
+			"getting Cardano stake distribution %s: %w",
+			hash,
+			err,
 		)
 	}
-	var epochMatchHash, epochMatchCertHash string
-	for _, item := range list {
-		if item.CertificateHash != "" && item.CertificateHash == leaf.Hash {
-			dist, err := client.GetCardanoStakeDistribution(ctx, item.Hash)
-			if err != nil {
-				return nil, fmt.Errorf(
-					"getting Cardano stake distribution %s: %w",
-					item.Hash, err,
-				)
-			}
-			return dist, nil
+	return distribution, nil
+}
+
+func stakeDistributionHash[T any](
+	list []T,
+	certificate *Certificate,
+	epochFallback bool,
+	kind string,
+	reference func(T) (hash, certificateHash string, epoch uint64),
+) (string, error) {
+	var epochHash, epochCertificate string
+	for _, entry := range list {
+		hash, certificateHash, epoch := reference(entry)
+		if certificateHash != "" && certificateHash == certificate.Hash {
+			return hash, nil
 		}
-		if epochFallback && item.Epoch == leaf.Epoch && epochMatchHash == "" {
-			epochMatchHash = item.Hash
-			epochMatchCertHash = item.CertificateHash
+		if epochFallback && epoch == certificate.Epoch && epochHash == "" {
+			epochHash = hash
+			epochCertificate = certificateHash
 		}
 	}
-	if epochMatchHash != "" {
-		if epochMatchCertHash != "" &&
-			epochMatchCertHash != leaf.Hash {
-			return nil, fmt.Errorf(
-				"cardano stake distribution certificate hash mismatch: distribution=%s certificate=%s",
-				epochMatchCertHash,
-				leaf.Hash,
-			)
-		}
-		dist, err := client.GetCardanoStakeDistribution(ctx, epochMatchHash)
-		if err != nil {
-			return nil, fmt.Errorf(
-				"getting Cardano stake distribution %s: %w",
-				epochMatchHash, err,
-			)
-		}
-		return dist, nil
+	if epochHash == "" {
+		return "", fmt.Errorf(
+			"no %s stake distribution found for certificate %s at epoch %d",
+			kind, certificate.Hash, certificate.Epoch,
+		)
 	}
-	return nil, fmt.Errorf(
-		"no Cardano stake distribution found for certificate %s at epoch %d",
-		leaf.Hash,
-		leaf.Epoch,
-	)
+	if epochCertificate != "" && epochCertificate != certificate.Hash {
+		return "", fmt.Errorf(
+			"%s stake distribution certificate hash mismatch: distribution=%s certificate=%s",
+			strings.ToLower(kind),
+			epochCertificate,
+			certificate.Hash,
+		)
+	}
+	return epochHash, nil
 }

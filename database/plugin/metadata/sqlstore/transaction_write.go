@@ -209,6 +209,13 @@ ON CONFLICT (tx_id, output_idx) DO NOTHING
 RETURNING id, tx_id, output_idx`
 }
 
+const repairConflictedUtxoQuery = `
+UPDATE utxo
+SET transaction_id = COALESCE(transaction_id, ?),
+    collateral_return_for_tx_id = COALESCE(collateral_return_for_tx_id, ?)
+WHERE tx_id = ? AND output_idx = ?
+RETURNING id`
+
 // consumeUtxosBatchQuery builds the SQLite batched spend for rowCount inputs.
 // Each input is its own "tx_id = ? AND output_idx = ?" arm of an id subquery,
 // the shape of consumeUtxoSQLiteReturningSQL, so SQLite resolves it through
@@ -292,7 +299,11 @@ func utxoIdentityKey(txID []byte, outputIdx uint32) string {
 	return string(txID) + ":" + strconv.FormatUint(uint64(outputIdx), 10)
 }
 
-const utxoBatchSize = 8
+const (
+	// 32 UTxOs use 480 bind parameters, below SQLite's conservative limit.
+	utxoInsertBatchSize = 32
+	utxoSpendBatchSize  = 8
+)
 
 func (s *Store) insertUtxoModelsChecked(
 	ctx context.Context,
@@ -315,8 +326,8 @@ func (s *Store) insertUtxoModelsChecked(
 		return inserted, nil
 	}
 
-	for start := 0; start < len(utxos); start += utxoBatchSize {
-		end := min(start+utxoBatchSize, len(utxos))
+	for start := 0; start < len(utxos); start += utxoInsertBatchSize {
+		end := min(start+utxoInsertBatchSize, len(utxos))
 		batch := utxos[start:end]
 		query := insertUtxoBatchQuery(len(batch))
 		args := make([]any, 0, len(batch)*15)
@@ -374,25 +385,17 @@ func (s *Store) insertUtxoModelsChecked(
 		for i, utxo := range batch {
 			key := utxoIdentityKey(utxo.TxId, utxo.OutputIdx)
 			if _, duplicate := processed[key]; duplicate {
-				wasCreated, err := s.insertUtxoModelCheckedWithRows(
-					ctx, db, utxo, true, deferredRows,
-				)
-				if err != nil {
+				if err := s.repairConflictedUtxo(ctx, db, utxo); err != nil {
 					return nil, err
 				}
-				inserted[start+i] = wasCreated
 				continue
 			}
 			processed[key] = struct{}{}
 			id, created := createdIDs[key]
 			if !created {
-				wasCreated, err := s.insertUtxoModelCheckedWithRows(
-					ctx, db, utxo, true, deferredRows,
-				)
-				if err != nil {
+				if err := s.repairConflictedUtxo(ctx, db, utxo); err != nil {
 					return nil, err
 				}
-				inserted[start+i] = wasCreated
 				continue
 			}
 			utxo.ID = id
@@ -411,6 +414,28 @@ func (s *Store) insertUtxoModelsChecked(
 		}
 	}
 	return inserted, nil
+}
+
+func (s *Store) repairConflictedUtxo(
+	ctx context.Context,
+	db queryer,
+	utxo *models.Utxo,
+) error {
+	params, err := createUtxoParams(utxo)
+	if err != nil {
+		return err
+	}
+	var id int64
+	if err := s.queryRowCached(ctx, db, repairConflictedUtxoQuery,
+		params.TransactionID,
+		params.CollateralReturnForTxID,
+		params.TxID,
+		params.OutputIdx,
+	).Scan(&id); err != nil {
+		return err
+	}
+	utxo.ID = uint(id)
+	return s.persistUtxoRelations(ctx, db, utxo, uint(id))
 }
 
 func (a *transactionBatchAccumulator) insertTransaction(
@@ -998,8 +1023,8 @@ func (s *Store) setTransactionWithAccumulator(
 					Idx:  input.Index(),
 				})
 			}
-			for start := 0; start < len(uniqueConsumed); start += utxoBatchSize {
-				end := min(start+utxoBatchSize, len(uniqueConsumed))
+			for start := 0; start < len(uniqueConsumed); start += utxoSpendBatchSize {
+				end := min(start+utxoSpendBatchSize, len(uniqueConsumed))
 				batch := uniqueConsumed[start:end]
 				updated := make(map[string]struct{}, len(batch))
 				if s.dialect.Name() == "sqlite" && len(batch) > 1 {
@@ -1679,6 +1704,9 @@ func (s *Store) persistUtxoRelations(
 	id uint,
 ) error {
 	utxo.ID = id
+	if err := persistUtxoAddress(ctx, db, int64(id), utxo); err != nil {
+		return err
+	}
 	if err := persistUtxoPointer(ctx, db, int64(id), utxo.Pointer); err != nil {
 		return err
 	}
@@ -1719,6 +1747,13 @@ func (s *Store) persistUtxoRelationsWithDeferredAssets(
 	rows *rowBatch,
 ) error {
 	utxo.ID = id
+	address, err := assetUtxoAddress(utxo)
+	if err != nil {
+		return err
+	}
+	if len(address) > 0 {
+		rows.add(assetUtxoAddressShape, int64(id), address)
+	}
 	if err := persistUtxoPointer(ctx, db, int64(id), utxo.Pointer); err != nil {
 		return err
 	}

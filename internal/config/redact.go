@@ -61,6 +61,8 @@ const (
 var logSecretConfigFields = []string{
 	// Koios Bearer token.
 	"KoiosParity.APIKey",
+	// Prometheus listener Bearer token.
+	"MetricsAuthToken",
 	// Outbound registry headers, typically Authorization.
 	"TokenRegistry.HeaderSecrets",
 }
@@ -79,6 +81,7 @@ var logURIConfigFields = []string{
 	"Mithril.Server.PublicBaseURL",
 	"Mithril.Server.RedirectBaseURL",
 	"OffchainMetadata.IPFSGatewayURL",
+	"TokenRegistry.ManifestURL",
 	"TokenRegistry.SourceURL",
 	"TracingEndpoint",
 }
@@ -114,6 +117,7 @@ var logPlainConfigFields = []string{
 	"ActivePeersTopologyQuota",
 	"BackfillBatchSize",
 	"BarkArchiveMaxConcurrentFetches",
+	"BarkBlockDownloadAllowPrivateAddresses",
 	"BarkClientCAFilePath",
 	"BarkHost",
 	"BarkLifecycleEnabled",
@@ -192,6 +196,7 @@ var logPlainConfigFields = []string{
 	"KoiosParity.Strict",
 	"LedgerApplyRowBatchingEnabled",
 	"LedgerCatchupTimeout",
+	"LeiosPersistenceRetentionSlots",
 	"LedgerPrefetchAheadEnabled",
 	"LeiosVoteSigningKeyFile",
 	"LocalStateQueryViewMaxLifetime",
@@ -299,6 +304,7 @@ var logPlainConfigFields = []string{
 	"TlsCertFilePath",
 	"TlsKeyFilePath",
 	"TokenRegistry.AllowPrivateAddresses",
+	"TokenRegistry.AllowRollback",
 	"TokenRegistry.Enabled",
 	"TokenRegistry.Interval",
 	"TokenRegistry.MaxAcceptedEntries",
@@ -309,6 +315,7 @@ var logPlainConfigFields = []string{
 	"TokenRegistry.MaxEntryBytes",
 	"TokenRegistry.RequestTimeout",
 	"TokenRegistry.StoreLogos",
+	"TokenRegistry.TrustedManifestKey",
 	"TokenRegistry.UserAgent",
 	"Topology",
 	"Tracing",
@@ -351,7 +358,7 @@ var providerConfigPlainKeys = []string{
 	// database/plugin/blob/badger
 	"blockcachesize", "indexcachesize", "valuelogfilesize",
 	"memtablesize", "valuethreshold", "gc", "compression",
-	"compressionlevel",
+	"compressionlevel", "gcinterval", "gcdiscardratio",
 	// mempool
 	"capacity", "evictionwatermark", "rejectionwatermark",
 	"revalidationdeltacap",

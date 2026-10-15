@@ -38,15 +38,18 @@ var hotStatements = func() []string {
 		rewardLiveStakeUtxoStakeQuery,
 		insertUtxoQuery,
 		insertUtxoQueryIgnoreConflict,
+		repairConflictedUtxoQuery,
 		importAssetQuery,
 		getAssetIDQuery,
 		getLiveUtxoByRefQuery,
 		getUtxoIncludingSpentByRefQuery,
 		transactionInsertSQL,
+		committeeHotAuthorizationDeleteIDQuery,
 		consumeUtxoSQL,
 		consumeUtxoSQLiteReturningSQL,
 		getUtxoSpendStateQuery,
-		poolOpCertSequenceUpsertSQL,
+		poolOpCertSequenceInsertSQL,
+		poolOpCertSequenceBySlotSQL,
 		poolUpdateLatestOpCertSequenceSQL,
 		transactionCertificateInsertSQL,
 		hasSpecializedCertificatesSQL,
@@ -54,6 +57,9 @@ var hotStatements = func() []string {
 		deletePoolRegistrationRelaysSQL,
 		deleteMIRRewardsSQL,
 		deleteAddressTransactionSQL,
+		governanceVotePreviousQuery,
+		governanceVoteUpsertQuery,
+		governanceVoteHistoryInsertQuery,
 		poolByKeyHashQuery,
 		sqlitequery.GetAccountByCredentialQuery,
 		sqlitequery.GetActiveAccountByCredentialQuery,
@@ -70,9 +76,11 @@ var hotStatements = func() []string {
 		utxoStakeConsumedDeltaQuery(256),
 		utxoStakeConsumedDeltaQuery(400),
 	}
-	for rowCount := 2; rowCount <= utxoBatchSize; rowCount++ {
+	for rowCount := 2; rowCount <= utxoInsertBatchSize; rowCount++ {
+		queries = append(queries, insertUtxoBatchQuery(rowCount))
+	}
+	for rowCount := 2; rowCount <= utxoSpendBatchSize; rowCount++ {
 		queries = append(queries,
-			insertUtxoBatchQuery(rowCount),
 			consumeUtxosBatchQuery(rowCount, false),
 			consumeUtxosBatchQuery(rowCount, true),
 		)

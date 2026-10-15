@@ -15,6 +15,7 @@
 package config
 
 import (
+	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -687,6 +688,47 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 			c.TokenRegistry.MaxEntryBytes,
 		))
 	}
+	if c.TokenRegistry.Enabled &&
+		strings.TrimSpace(c.TokenRegistry.ManifestURL) == "" {
+		errs = append(errs, errors.New(
+			"tokenRegistry.manifestUrl is required when token registry sync is enabled",
+		))
+	}
+	if raw := strings.TrimSpace(c.TokenRegistry.ManifestURL); raw != "" {
+		parsed, err := url.Parse(raw)
+		if err != nil || parsed.Scheme != "https" || parsed.Host == "" ||
+			parsed.User != nil {
+			errs = append(errs, errors.New(
+				"tokenRegistry.manifestUrl must be an absolute HTTPS URL",
+			))
+		}
+	}
+	if raw := strings.TrimSpace(c.TokenRegistry.SourceURL); raw != "" {
+		parsed, err := url.Parse(raw)
+		if err != nil || parsed.Scheme != "https" || parsed.Host == "" ||
+			parsed.User != nil {
+			errs = append(errs, errors.New(
+				"tokenRegistry.sourceUrl must be an absolute HTTPS URL",
+			))
+		}
+	}
+	trustedManifestKey := strings.TrimSpace(
+		c.TokenRegistry.TrustedManifestKey,
+	)
+	if c.TokenRegistry.Enabled && trustedManifestKey == "" {
+		errs = append(errs, errors.New(
+			"tokenRegistry.trustedManifestKey is required when token registry sync is enabled",
+		))
+	}
+	if trustedManifestKey != "" {
+		decoded, err := hex.DecodeString(trustedManifestKey)
+		if err != nil || len(decoded) != ed25519.PublicKeySize {
+			errs = append(errs, fmt.Errorf(
+				"tokenRegistry.trustedManifestKey must be a %d-byte Ed25519 public key encoded as hexadecimal",
+				ed25519.PublicKeySize,
+			))
+		}
+	}
 
 	// Block production needs all three credential paths
 	if c.BlockProducer {
@@ -1076,14 +1118,12 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		}
 		u, err := url.Parse(dest)
 		if err != nil || u.Scheme == "" || u.Host == "" {
-			errs = append(errs, fmt.Errorf(
-				"invalid databaseLifecycle.snapshotCloudDestination %q: must be a URI like s3://bucket/prefix or gcs://bucket/prefix",
-				dest,
+			errs = append(errs, errors.New(
+				"invalid databaseLifecycle.snapshotCloudDestination: must be a URI like s3://bucket/prefix or gcs://bucket/prefix",
 			))
 		} else if !snapshotCloudSchemeSupported(u.Scheme) {
 			errs = append(errs, fmt.Errorf(
-				"invalid databaseLifecycle.snapshotCloudDestination %q: cloud scheme %q is unavailable in this build (s3/gcs require -tags dingo_extra_plugins)",
-				dest,
+				"invalid databaseLifecycle.snapshotCloudDestination: cloud scheme %q is unavailable in this build (s3/gcs require -tags dingo_extra_plugins)",
 				u.Scheme,
 			))
 		}

@@ -43,6 +43,28 @@ recreates those Dingo-managed paths; other files in the directory are kept.
 Dingo rejects another invocation using the same directory, including attempts
 to reset it while its node is running. Copied state directories are rebound to
 their new database, config, and key paths when reused.
+
+The state directory also contains transaction funding credentials:
+
+| File | Purpose |
+| --- | --- |
+| `cardano/keys/faucet.skey` | Payment signing key for spending faucet funds |
+| `cardano/keys/faucet.vkey` | Corresponding payment verification key |
+| `cardano/keys/faucet.addr` | Bech32 payment address, funded with 900,000 test ADA at genesis |
+
+For persistent state, read the address with:
+
+```sh
+cat ./.dingo-devnet/cardano/keys/faucet.addr
+```
+
+Use `faucet.skey` to sign transactions spending that address's UTxOs, and use
+network magic `42` when querying or submitting with Cardano tooling. The
+allocation is the initial balance; restarting a retained chain does not refill
+spent funds. Resuming an older state directory also installs these files without
+resetting the chain. Without `--data-dir`, they live in the temporary directory
+printed at startup and are removed on exit along with the rest of the state.
+
 These keys and this network are for local testing and must not be used with
 real funds.
 

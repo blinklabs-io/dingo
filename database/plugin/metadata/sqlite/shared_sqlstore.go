@@ -17,10 +17,12 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"math/big"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -34,6 +36,64 @@ import (
 	driversqlite "modernc.org/sqlite"
 	sqlite3 "modernc.org/sqlite/lib"
 )
+
+type uint64Sum struct {
+	total big.Int
+}
+
+func (s *uint64Sum) Step(
+	_ *driversqlite.FunctionContext,
+	args []driver.Value,
+) error {
+	value, ok := args[0].(string)
+	if !ok {
+		return fmt.Errorf("uint64 sum expects text, got %T", args[0])
+	}
+	var item big.Int
+	if _, ok := item.SetString(value, 10); !ok || item.Sign() < 0 || item.BitLen() > 64 {
+		return fmt.Errorf("invalid uint64 amount %q", value)
+	}
+	s.total.Add(&s.total, &item)
+	return nil
+}
+
+func (s *uint64Sum) WindowInverse(
+	_ *driversqlite.FunctionContext,
+	args []driver.Value,
+) error {
+	value, ok := args[0].(string)
+	if !ok {
+		return fmt.Errorf("uint64 sum expects text, got %T", args[0])
+	}
+	var item big.Int
+	if _, ok := item.SetString(value, 10); !ok {
+		return fmt.Errorf("invalid uint64 amount %q", value)
+	}
+	s.total.Sub(&s.total, &item)
+	return nil
+}
+
+func (s *uint64Sum) WindowValue(
+	_ *driversqlite.FunctionContext,
+) (driver.Value, error) {
+	if s.total.Sign() < 0 || s.total.BitLen() > 64 {
+		return nil, errors.New("asset holder quantity overflow")
+	}
+	value := s.total.String()
+	return strings.Repeat("0", 20-len(value)) + value, nil
+}
+
+func (*uint64Sum) Final(_ *driversqlite.FunctionContext) {}
+
+func init() {
+	driversqlite.MustRegisterFunction("dingo_uint64_sum", &driversqlite.FunctionImpl{
+		NArgs:         1,
+		Deterministic: true,
+		MakeAggregate: func(driversqlite.FunctionContext) (driversqlite.AggregateFunction, error) {
+			return &uint64Sum{}, nil
+		},
+	})
+}
 
 var sharedMemoryDBSequence atomic.Uint64
 

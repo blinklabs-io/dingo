@@ -752,13 +752,19 @@ func announceTestEndorserBlock(
 	slot uint64,
 	ebHash lcommon.Blake2b256,
 	ebSize int,
-) {
+) lcommon.Blake2b256 {
 	t.Helper()
+	headerRaw := testDijkstraAnnouncementHeaderRawFor(
+		t, slot, ebHash, uint64(ebSize),
+	)
 	recordTestLeiosAnnouncement(
 		t,
 		o,
-		testDijkstraAnnouncementHeaderRawFor(t, slot, ebHash, uint64(ebSize)),
+		headerRaw,
 	)
+	header, err := gdijkstra.NewDijkstraBlockHeaderFromCbor(headerRaw)
+	require.NoError(t, err)
+	return header.Hash()
 }
 
 func testEbHash(point ocommon.Point) lcommon.Blake2b256 {
@@ -783,7 +789,7 @@ func TestStoreLeiosEndorserBlockAcceptsDifferentSlotOfSameHashWhileFirstIsLive(
 
 	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 7, 1)
 	second := ocommon.Point{Slot: point.Slot + 1, Hash: point.Hash}
-	txsRaw := []cbor.RawMessage{mustCbor(t, "tx0")}
+	txsRaw := []cbor.RawMessage{testDijkstraTx(t, 0)}
 
 	// This test covers announcement lock ordering; the injected validation
 	// gate is tested separately.
@@ -970,10 +976,10 @@ func TestStoreLeiosEndorserBlockCrossConnectionDifferentSlotsCoexistRegardlessOf
 func TestPeerOfferedStoreWithheldUntilAnnouncementBindsIt(t *testing.T) {
 	t.Parallel()
 
-	txRaw := cbor.RawMessage{0x82, 0xa0, 0xa0}
+	txRaw := testDijkstraTx(t, 9)
 	ref := lcommon.LeiosTransactionReference{
 		TransactionHash: lcommon.Blake2b256Hash(txRaw),
-		TransactionSize: uint16(len(txRaw)),
+		TransactionSize: uint32(len(txRaw)),
 	}
 	blockRaw, err := cbor.Encode(&lcommon.LeiosEndorserBlock{
 		TransactionReferences: []lcommon.LeiosTransactionReference{ref},
@@ -1041,10 +1047,10 @@ func TestPeerOfferedStoreWithheldUntilAnnouncementBindsIt(t *testing.T) {
 func TestPeerOfferedLedgerInvalidEndorserBlockIsNotVoted(t *testing.T) {
 	t.Parallel()
 
-	txRaw := cbor.RawMessage{0x82, 0xa0, 0xa0}
+	txRaw := testDijkstraTx(t, 10)
 	ref := lcommon.LeiosTransactionReference{
 		TransactionHash: lcommon.Blake2b256Hash(txRaw),
-		TransactionSize: uint16(len(txRaw)),
+		TransactionSize: uint32(len(txRaw)),
 	}
 	blockRaw, err := cbor.Encode(&lcommon.LeiosEndorserBlock{
 		TransactionReferences: []lcommon.LeiosTransactionReference{ref},
@@ -1108,10 +1114,10 @@ func TestPeerOfferedEndorserBlockLocalValidationFailureRemainsRetryable(
 ) {
 	t.Parallel()
 
-	txRaw := cbor.RawMessage{0x82, 0xa0, 0xa0}
+	txRaw := testDijkstraTx(t, 0)
 	ref := lcommon.LeiosTransactionReference{
 		TransactionHash: lcommon.Blake2b256Hash(txRaw),
-		TransactionSize: uint16(len(txRaw)),
+		TransactionSize: uint32(len(txRaw)),
 	}
 	blockRaw, err := cbor.Encode(&lcommon.LeiosEndorserBlock{
 		TransactionReferences: []lcommon.LeiosTransactionReference{ref},
@@ -1230,7 +1236,7 @@ func TestEndorserBlockTxsByHashWithholdsUnverifiedSlotFromLedger(
 	t.Parallel()
 
 	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 21, 1)
-	txsRaw := []cbor.RawMessage{mustCbor(t, "tx0")}
+	txsRaw := []cbor.RawMessage{testDijkstraTx(t, 0)}
 
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 	require.NoError(t, o.storeLeiosEndorserBlock(
@@ -1607,7 +1613,7 @@ func TestEndorserBlockTxHashesByHashWithholdsUnverifiedSlot(t *testing.T) {
 	t.Parallel()
 
 	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 22, 1)
-	txsRaw := []cbor.RawMessage{mustCbor(t, "tx0")}
+	txsRaw := []cbor.RawMessage{testDijkstraTx(t, 0)}
 
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 	require.NoError(t, o.storeLeiosEndorserBlock(
@@ -1656,7 +1662,7 @@ func TestLeiosClosureCompleteLockedWithholdsUnverifiedEntry(t *testing.T) {
 	require.NoError(t, o.storeLeiosEndorserBlock(
 		point,
 		blockRaw,
-		[]cbor.RawMessage{mustCbor(t, "tx0")},
+		[]cbor.RawMessage{testDijkstraTx(t, 0)},
 		leiosStorePeerOffered,
 	))
 	data, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
@@ -1726,7 +1732,8 @@ func TestLeiosClosureCompleteLockedWithholdsUnverifiedEntry(t *testing.T) {
 	)
 }
 
-// lockProbingVoteHandler's HandleEndorserBlock acquires leiosAnnouncementsMu
+// lockProbingVoteHandler's HandleValidatedEndorserBlock acquires
+// leiosAnnouncementsMu
 // itself before delegating, the way a real handler could legitimately need
 // to (e.g. to cross-check announcement state). If bindLeiosEndorserBlockSlot's
 // publish step still ran while recordLeiosAnnouncement held that same lock,
@@ -1736,13 +1743,14 @@ type lockProbingVoteHandler struct {
 	o *Ouroboros
 }
 
-func (l *lockProbingVoteHandler) HandleEndorserBlock(
+func (l *lockProbingVoteHandler) HandleValidatedEndorserBlock(
 	slot uint64,
+	rbHash lcommon.Blake2b256,
 	ebHash lcommon.Blake2b256,
 ) {
 	l.o.leiosAnnouncementsMu.Lock()
 	l.o.leiosAnnouncementsMu.Unlock()
-	l.fakeLeiosVoteHandler.HandleEndorserBlock(slot, ebHash)
+	l.fakeLeiosVoteHandler.HandleValidatedEndorserBlock(slot, rbHash, ebHash)
 }
 
 // TestRecordLeiosAnnouncementPublishesAfterReleasingAnnouncementsLock verifies
@@ -1759,8 +1767,13 @@ func TestRecordLeiosAnnouncementPublishesAfterReleasingAnnouncementsLock(
 ) {
 	t.Parallel()
 
-	point, blockRaw := testLeiosEndorserBlockRaw(t, 250)
-	o := newOuroboros(OuroborosConfig{EnableLeios: false})
+	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 250, 1)
+	txsRaw := []cbor.RawMessage{testDijkstraTx(t, 0)}
+	o := newOuroboros(OuroborosConfig{
+		EnableLeios:             true,
+		LeiosAnnouncementLedger: &fakeLeiosAnnouncementLedger{},
+	})
+	defer func() { require.NoError(t, o.Close()) }()
 	votes := &lockProbingVoteHandler{
 		fakeLeiosVoteHandler: &fakeLeiosVoteHandler{},
 		o:                    o,
@@ -1770,7 +1783,7 @@ func TestRecordLeiosAnnouncementPublishesAfterReleasingAnnouncementsLock(
 	require.NoError(t, o.storeLeiosEndorserBlock(
 		point,
 		blockRaw,
-		nil,
+		txsRaw,
 		leiosStorePeerOffered,
 	))
 
@@ -1780,6 +1793,8 @@ func TestRecordLeiosAnnouncementPublishesAfterReleasingAnnouncementsLock(
 		testEbHash(point),
 		uint64(len(blockRaw)),
 	)
+	header, err := gdijkstra.NewDijkstraBlockHeaderFromCbor(headerRaw)
+	require.NoError(t, err)
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- recordTestLeiosAnnouncementNoFail(o, headerRaw)
@@ -1794,7 +1809,11 @@ func TestRecordLeiosAnnouncementPublishesAfterReleasingAnnouncementsLock(
 				"releasing leiosAnnouncementsMu",
 		)
 	}
-	require.Len(t, votes.ebs, 1)
+	requireHandledEndorserBlock(t, votes.fakeLeiosVoteHandler, handledEb{
+		slot:   point.Slot,
+		rbHash: header.Hash(),
+		ebHash: testEbHash(point),
+	})
 }
 
 // fixedBlockRequester returns a fixed manifest body for every BlockRequest,
@@ -1874,15 +1893,19 @@ func TestFetchAndValidateLeiosEbManifestRejectsSizeMismatch(t *testing.T) {
 // Not t.Parallel: withLowerLeiosEndorserBlockCacheBudgets swaps the
 // package-level cache budgets, which every concurrent Leios test observes.
 func TestStoreLeiosEndorserBlockRejectsOversizedEntry(t *testing.T) {
-	withLowerLeiosEndorserBlockCacheBudgets(t, 1<<10, 1<<20) // 1 KiB / 1 MiB
 	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 7000, 1)
-	oversizedTx := cbor.RawMessage(make([]byte, 2<<10)) // 2 KiB > 1 KiB cap
+	tx := testDijkstraTx(t, 0)
+	entryBytes := (&leiosEndorserBlockData{
+		blockRaw: blockRaw,
+		txsRaw:   []cbor.RawMessage{tx},
+	}).approxBytes()
+	withLowerLeiosEndorserBlockCacheBudgets(t, entryBytes-1, 1<<20)
 
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 	err := o.storeLeiosEndorserBlock(
 		point,
 		blockRaw,
-		[]cbor.RawMessage{oversizedTx},
+		[]cbor.RawMessage{tx},
 		leiosStoreAuthoritative,
 	)
 	require.ErrorContains(t, err, "exceeds max")
@@ -1895,9 +1918,13 @@ func TestStoreLeiosEndorserBlockRejectsOversizedEntry(t *testing.T) {
 // the oldest-inserted entries first -- the same policy already used for the
 // entry-count cap -- until the remaining entries fit the budget.
 func TestLeiosEndorserBlockCacheEvictsOldestFirstAtByteBudget(t *testing.T) {
-	// Each entry retains one ~600-byte transaction body; five fit comfortably
-	// under a 1500-byte aggregate budget, but not all five at once.
-	withLowerLeiosEndorserBlockCacheBudgets(t, 1<<20, 1500)
+	_, sampleRaw := testLeiosEndorserBlockRaw(t, 1)
+	sampleTx := testDijkstraTx(t, 0)
+	entryBytes := (&leiosEndorserBlockData{
+		blockRaw: sampleRaw,
+		txsRaw:   []cbor.RawMessage{sampleTx},
+	}).approxBytes()
+	withLowerLeiosEndorserBlockCacheBudgets(t, 1<<20, 2*entryBytes)
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 
 	const entries = 5
@@ -1905,13 +1932,12 @@ func TestLeiosEndorserBlockCacheEvictsOldestFirstAtByteBudget(t *testing.T) {
 	for i := range entries {
 		point, blockRaw := testLeiosEndorserBlockRaw(t, i+1)
 		points[i] = point
-		tx := cbor.RawMessage(make([]byte, 600))
 		require.NoError(
 			t,
 			o.storeLeiosEndorserBlock(
 				point,
 				blockRaw,
-				[]cbor.RawMessage{tx},
+				[]cbor.RawMessage{testDijkstraTx(t, byte(i))},
 				leiosStoreAuthoritative,
 			),
 		)
@@ -1923,7 +1949,7 @@ func TestLeiosEndorserBlockCacheEvictsOldestFirstAtByteBudget(t *testing.T) {
 		totalBytes += data.approxBytes()
 	}
 	o.leiosMu.RUnlock()
-	require.LessOrEqual(t, totalBytes, 1500)
+	require.LessOrEqual(t, totalBytes, 2*entryBytes)
 
 	// The oldest entries were evicted; the most recently stored one survives.
 	_, ok := o.lookupLeiosEndorserBlock(points[0].Slot, points[0].Hash)
@@ -1941,17 +1967,31 @@ func TestLeiosEndorserBlockCacheEvictsOldestFirstAtByteBudget(t *testing.T) {
 // insertedAt than a goroutine that actually inserted first; sorting by seq
 // instead keeps the truly-older entry as the eviction victim.
 func TestLeiosEndorserBlockCacheEvictionOrdersBySeqNotInsertedAt(t *testing.T) {
-	withLowerLeiosEndorserBlockCacheBudgets(t, 1<<20, 300)
-	o := newOuroboros(OuroborosConfig{EnableLeios: true})
-	tx := func() cbor.RawMessage { return cbor.RawMessage(make([]byte, 200)) }
-
 	firstPoint, firstRaw := testLeiosEndorserBlockRaw(t, 1)
+	secondPoint, secondRaw := testLeiosEndorserBlockRaw(t, 2)
+	firstTx := testDijkstraTx(t, 1)
+	secondTx := testDijkstraTx(t, 2)
+	firstBytes := (&leiosEndorserBlockData{
+		blockRaw: firstRaw,
+		txsRaw:   []cbor.RawMessage{firstTx},
+	}).approxBytes()
+	secondBytes := (&leiosEndorserBlockData{
+		blockRaw: secondRaw,
+		txsRaw:   []cbor.RawMessage{secondTx},
+	}).approxBytes()
+	withLowerLeiosEndorserBlockCacheBudgets(
+		t,
+		1<<20,
+		firstBytes+secondBytes-1,
+	)
+	o := newOuroboros(OuroborosConfig{EnableLeios: true})
+
 	require.NoError(
 		t,
 		o.storeLeiosEndorserBlock(
 			firstPoint,
 			firstRaw,
-			[]cbor.RawMessage{tx()},
+			[]cbor.RawMessage{firstTx},
 			leiosStoreAuthoritative,
 		),
 	)
@@ -1965,18 +2005,17 @@ func TestLeiosEndorserBlockCacheEvictionOrdersBySeqNotInsertedAt(t *testing.T) {
 	first.insertedAt = time.Now().Add(time.Hour)
 	o.leiosMu.Unlock()
 
-	secondPoint, secondRaw := testLeiosEndorserBlockRaw(t, 2)
 	require.NoError(
 		t,
 		o.storeLeiosEndorserBlock(
 			secondPoint,
 			secondRaw,
-			[]cbor.RawMessage{tx()},
+			[]cbor.RawMessage{secondTx},
 			leiosStoreAuthoritative,
 		),
 	)
 
-	// Both entries together exceed the 300-byte aggregate budget, forcing one
+	// Both entries together exceed the aggregate budget, forcing one
 	// eviction. Despite "first" appearing newest by insertedAt, it holds the
 	// lower seq (it was actually inserted first) and must be the one evicted.
 	_, firstStillCached := o.lookupLeiosEndorserBlock(
@@ -2176,58 +2215,36 @@ func (h *recordingLeiosPipelineHandler) ObserveEndorserBlock(
 //     backfill can retry against other peers) rather than the misleading decode
 // invariant failure that made look like a consensus/decode defect.
 
-// bareRefMapFromArrayWrapped strips the single-element array wrapper produced by
-// LeiosEndorserBlock.MarshalCBOR (0x81 || refMap) to yield the bare {hash=>size}
-// references map, i.e. the IOG Leios prototype wire shape (CBOR major type 5).
-func bareRefMapFromArrayWrapped(t *testing.T, arrayWrapped []byte) []byte {
-	t.Helper()
-	require.GreaterOrEqual(t, len(arrayWrapped), 2)
-	// Definite one-element array header for a single map element.
-	require.Equalf(
-		t,
-		byte(0x81),
-		arrayWrapped[0],
-		"expected single-element array wrapper, got 0x%x",
-		arrayWrapped[0],
-	)
-	return arrayWrapped[1:]
-}
-
 // TestLeiosEndorserBlockLargeMapDecodesAllRefs proves the manifest decoder reads
 // every reference of a large map. 1200 refs requires a 2-byte CBOR map-header
 // length (0xb9 || uint16); 300 also needs the multi-byte branch. If the header
 // parsing dropped or mis-counted refs for large maps (the "decode to zero"
-// hypothesis), these would fail.
+// hypothesis), these would fail. The decoder accepts only a bare definite map.
 func TestLeiosEndorserBlockLargeMapDecodesAllRefs(t *testing.T) {
 	t.Parallel()
 
 	for _, refCount := range []int{24, 256, 300, 715, 1200, 1604} {
-		_, arrayWrapped := testLeiosEndorserBlockRawWithRefs(t, 42, refCount)
+		_, raw := testLeiosEndorserBlockRawWithRefs(t, 42, refCount)
 
-		// Array-wrapped shape (CIP-0164 / dingo).
-		decoded, err := lcommon.NewLeiosEndorserBlockFromCbor(arrayWrapped)
-		require.NoErrorf(
-			t,
-			err,
-			"array-wrapped decode failed for %d refs",
-			refCount,
-		)
+		// An endorser block is a bare definite-length map.
+		decoded, err := lcommon.NewLeiosEndorserBlockFromCbor(raw)
+		require.NoErrorf(t, err, "decode failed for %d refs", refCount)
 		require.Lenf(
 			t,
 			decoded.TransactionReferences,
 			refCount,
-			"array-wrapped: expected %d refs", refCount,
+			"expected %d refs", refCount,
 		)
 
-		// Bare-map shape (IOG Leios prototype).
-		bareMap := bareRefMapFromArrayWrapped(t, arrayWrapped)
-		decodedBare, err := lcommon.NewLeiosEndorserBlockFromCbor(bareMap)
-		require.NoErrorf(t, err, "bare-map decode failed for %d refs", refCount)
-		require.Lenf(
+		// The earlier array-wrapped shape is no longer accepted.
+		_, err = lcommon.NewLeiosEndorserBlockFromCbor(
+			append([]byte{0x81}, raw...),
+		)
+		require.ErrorContainsf(
 			t,
-			decodedBare.TransactionReferences,
-			refCount,
-			"bare-map: expected %d refs", refCount,
+			err,
+			"expected map",
+			"array-wrapped shape for %d refs", refCount,
 		)
 	}
 }
@@ -2244,21 +2261,17 @@ func TestLeiosEndorserBlockZeroRefsErrorOnlyFromEmptyManifest(t *testing.T) {
 	_, err := lcommon.NewLeiosEndorserBlockFromCbor([]byte{0xa0})
 	require.ErrorContains(t, err, zeroRefsMsg)
 
-	// Array-wrapped empty map: [ {} ] = 0x81 0xa0.
+	// An array-wrapped empty map is a different shape and is rejected as one,
+	// not as an empty manifest.
 	_, err = lcommon.NewLeiosEndorserBlockFromCbor([]byte{0x81, 0xa0})
-	require.ErrorContains(t, err, zeroRefsMsg)
+	require.ErrorContains(t, err, "expected map")
 
 	// A large, non-empty manifest of the size reported in (~1000 refs is
-	// ~35 KB) does NOT produce the zero-refs error in either wire shape.
-	_, arrayWrapped := testLeiosEndorserBlockRawWithRefs(t, 15, 1000)
-	require.Greater(t, len(arrayWrapped), 30000, "manifest should be ~35 KB")
+	// ~35 KB) does NOT produce the zero-refs error.
+	_, raw := testLeiosEndorserBlockRawWithRefs(t, 15, 1000)
+	require.Greater(t, len(raw), 30000, "manifest should be ~35 KB")
 
-	_, err = lcommon.NewLeiosEndorserBlockFromCbor(arrayWrapped)
-	require.NoError(t, err)
-
-	_, err = lcommon.NewLeiosEndorserBlockFromCbor(
-		bareRefMapFromArrayWrapped(t, arrayWrapped),
-	)
+	_, err = lcommon.NewLeiosEndorserBlockFromCbor(raw)
 	require.NoError(t, err)
 }
 
@@ -2686,7 +2699,7 @@ func haskellEncodeBlockTxs(
 	txs []cbor.RawMessage,
 ) ([]byte, error) {
 	out := []byte{0x84}
-	out = append(out, haskellCborUint(0, 3)...)
+	out = append(out, haskellCborUint(0, leiosfetch.MessageTypeBlockTxs)...)
 	out = append(out, 0x82)
 	out = append(out, haskellCborUint(0, point.Slot)...)
 	out = append(out, haskellCborBytes(point.Hash)...)
@@ -2846,7 +2859,7 @@ func TestLeiosFetchHaskellEncodedBlockTxsIsConsumed(t *testing.T) {
 // diffused the first `available` transactions of the endorser block, so it
 // serves requested indices below that watermark and nothing above it. Raising
 // `available` between fetch attempts models the relay finishing diffusion
-// before it re-offers the block. Each served transaction's CBOR encodes its
+// before it re-offers the block. Each served transaction's fee encodes its
 // absolute index so callers can verify ordering, and every requested index is
 // recorded so a test can prove a resumed fetch asks only for the missing tail.
 type diffusingBlockTxsRequester struct {
@@ -2873,13 +2886,13 @@ func (r *diffusingBlockTxsRequester) BlockTxsRequest(
 		served[uint16(idx/64)] |= 1 << uint(
 			63-(idx%64),
 		) // MSB-first, see leiosWindowNeededMask
-		enc, err := cbor.Encode(idx)
+		enc, err := dijkstraTestTx(idx)
 		if err != nil {
 			return nil, err
 		}
-		txs = append(txs, cbor.RawMessage(enc))
+		txs = append(txs, enc)
 	}
-	return leiosfetch.NewMsgBlockTxsFull(point, served, txs), nil
+	return leiosfetch.NewMsgBlockTxs(point, served, txs), nil
 }
 
 // A fetch that runs out of diffused transactions must retain what it already
@@ -3055,13 +3068,13 @@ func TestRetainLeiosPartialTxsUnionsAcrossAttempts(t *testing.T) {
 	head := make([]cbor.RawMessage, txCount)
 	tail := make([]cbor.RawMessage, txCount)
 	for i := range txCount {
-		enc, err := cbor.Encode(i)
+		enc, err := dijkstraTestTx(i)
 		require.NoError(t, err)
 		if i < 60 {
-			head[i] = cbor.RawMessage(enc)
+			head[i] = enc
 		}
 		if i >= 40 {
-			tail[i] = cbor.RawMessage(enc)
+			tail[i] = enc
 		}
 	}
 	o.retainLeiosPartialTxs(point.Slot, point.Hash, head, nil)
@@ -3212,9 +3225,9 @@ func TestStoreLeiosEndorserBlockPartialDoesNotRefreshCacheTTL(t *testing.T) {
 	// the same lifetime any freshly fetched endorser block gets.
 	full := make([]cbor.RawMessage, txCount)
 	for i := range full {
-		enc, err := cbor.Encode(i)
+		enc, err := dijkstraTestTx(i)
 		require.NoError(t, err)
-		full[i] = cbor.RawMessage(enc)
+		full[i] = enc
 	}
 	require.NoError(
 		t,
@@ -3479,8 +3492,9 @@ func TestLeiosServeWaiterNotRegisteredForClosedConnection(t *testing.T) {
 // transactions per BlockTxsRequest — a prefix of the requested ascending
 // indices, mirroring the prototype relay's per-message size cap. Each returned
 // transaction's CBOR encodes its absolute index so callers can verify ordering.
-// includeBitmaps toggles whether the response echoes the served bitmaps (the
-// prototype's 4-element form) or omits them (forcing the prefix fallback).
+// includeBitmaps toggles whether the response carries the served bitmaps or
+// leaves them empty (forcing the prefix fallback). A decoded response always
+// carries bitmaps, so the empty form only exists for in-process callers.
 type cappingBlockTxsRequester struct {
 	maxPerResp     int // <= 0 means no cap (serve all requested)
 	serveNothing   bool
@@ -3511,26 +3525,40 @@ func (r *cappingBlockTxsRequester) BlockTxsRequest(
 		served[uint16(idx/64)] |= 1 << uint(
 			63-(idx%64),
 		) // MSB-first, see leiosWindowNeededMask
-		enc, err := cbor.Encode(idx)
+		enc, err := dijkstraTestTx(idx)
 		if err != nil {
 			return nil, err
 		}
-		txs = append(txs, cbor.RawMessage(enc))
+		txs = append(txs, enc)
 	}
 	if r.includeBitmaps {
-		return leiosfetch.NewMsgBlockTxsFull(point, served, txs), nil
+		return leiosfetch.NewMsgBlockTxs(point, served, txs), nil
 	}
-	return leiosfetch.NewMsgBlockTxs(txs), nil
+	return leiosfetch.NewMsgBlockTxs(point, nil, txs), nil
 }
 
 func requireTxsInIndexOrder(t *testing.T, txs []cbor.RawMessage, want int) {
 	t.Helper()
 	require.Len(t, txs, want)
 	for i, raw := range txs {
-		var idx int
-		_, err := cbor.Decode(raw, &idx)
+		var tx []cbor.RawMessage
+		_, err := cbor.Decode(raw, &tx)
 		require.NoError(t, err)
-		require.Equalf(t, i, idx, "tx at position %d encodes index %d", i, idx)
+		require.Len(t, tx, 4)
+		var body map[uint]cbor.RawMessage
+		_, err = cbor.Decode(tx[0], &body)
+		require.NoError(t, err)
+		var fee uint64
+		_, err = cbor.Decode(body[2], &fee)
+		require.NoError(t, err)
+		require.Equalf(
+			t,
+			100_000+uint64(i),
+			fee,
+			"tx at position %d encodes fee %d",
+			i,
+			fee,
+		)
 	}
 }
 
@@ -3722,8 +3750,8 @@ func TestLeiosNeededBitmap(t *testing.T) {
 
 // buildBitmapResponseTxs serves every index named by bitmaps: it decodes them
 // in ascending order, sets the matching bit of the served response bitmap for
-// each (MSB-first, see leiosWindowNeededMask), and encodes each transaction's
-// absolute index as its CBOR body (see requireTxsInIndexOrder). It is the
+// each (MSB-first, see leiosWindowNeededMask), and encodes the absolute index
+// in each transaction's fee (see requireTxsInIndexOrder). It is the
 // single source of truth for "serve everything requested, in full", shared by
 // every fake relay below that needs that baseline behavior.
 func buildBitmapResponseTxs(
@@ -3737,11 +3765,11 @@ func buildBitmapResponseTxs(
 		served[uint16(idx/64)] |= 1 << uint(
 			63-(idx%64),
 		) // MSB-first, see leiosWindowNeededMask
-		enc, err := cbor.Encode(idx)
+		enc, err := dijkstraTestTx(idx)
 		if err != nil {
 			return nil, nil, err
 		}
-		txs = append(txs, cbor.RawMessage(enc))
+		txs = append(txs, enc)
 	}
 	return served, txs, nil
 }
@@ -3768,7 +3796,7 @@ func (r *servingBlockTxsRequester) BlockTxsRequest(
 	if err != nil {
 		return nil, err
 	}
-	return leiosfetch.NewMsgBlockTxsFull(point, served, txs), nil
+	return leiosfetch.NewMsgBlockTxs(point, served, txs), nil
 }
 
 // oversizedBitmapRequester serves a legitimate-looking response for a small
@@ -3795,7 +3823,7 @@ func (r *oversizedBitmapRequester) BlockTxsRequest(
 	if r.extraWindow != 0 {
 		served[r.extraWindow] = r.extraMask
 	}
-	return leiosfetch.NewMsgBlockTxsFull(point, served, txs), nil
+	return leiosfetch.NewMsgBlockTxs(point, served, txs), nil
 }
 
 // TestFetchLeiosEbTxsBatchedRejectsOversizedResponseBitmap simulates a relay

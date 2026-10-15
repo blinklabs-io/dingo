@@ -420,6 +420,11 @@ func TestValidateTxDijkstraSubTransactionCommitteeVoterEligibility(
 			actionID := storeCommitteeVotingTarget(
 				t, db, 0x64, lcommon.GovActionTypeInfo,
 			)
+			// Validation derives the action's expiry from its proposed epoch.
+			require.NoError(
+				t,
+				db.SetEpoch(0, 0, nil, nil, nil, nil, 0, 1, 100, nil),
+			)
 
 			// Each Dijkstra UTxO level needs its own spend and witnesses for
 			// full transaction validation.

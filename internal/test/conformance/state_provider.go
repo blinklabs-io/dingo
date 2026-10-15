@@ -397,7 +397,10 @@ func latestPoolRegistrationRow(pool *models.Pool) *models.PoolRegistration {
 		reg := &pool.Registration[i]
 		if reg.AddedSlot > latest.AddedSlot ||
 			(reg.AddedSlot == latest.AddedSlot &&
-				reg.CertificateID > latest.CertificateID) {
+				reg.CertificateID > latest.CertificateID) ||
+			(reg.AddedSlot == latest.AddedSlot &&
+				reg.CertificateID == latest.CertificateID &&
+				reg.RegistrationIndex > latest.RegistrationIndex) {
 			latest = reg
 		}
 	}
