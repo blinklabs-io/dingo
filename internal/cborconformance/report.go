@@ -107,10 +107,16 @@ func GenerateReport(datasetDir string) (Report, error) {
 	var files []sample
 	for _, entry := range entries {
 		if !entry.IsDir() {
-			return Report{}, fmt.Errorf("unexpected file in dataset root: %s", entry.Name())
+			return Report{}, fmt.Errorf(
+				"unexpected file in dataset root: %s",
+				entry.Name(),
+			)
 		}
 		if _, ok := known[entry.Name()]; !ok {
-			return Report{}, fmt.Errorf("unknown Conway rule directory: %s", entry.Name())
+			return Report{}, fmt.Errorf(
+				"unknown Conway rule directory: %s",
+				entry.Name(),
+			)
 		}
 		ruleFiles, err := listRuleSamples(root, entry.Name())
 		if err != nil {
@@ -147,7 +153,11 @@ func GenerateReport(datasetDir string) (Report, error) {
 
 		input, err := os.ReadFile(file.path)
 		if err != nil {
-			report.addFailure(file, sampleUnreadable, "cannot read sample: "+err.Error())
+			report.addFailure(
+				file,
+				sampleUnreadable,
+				"cannot read sample: "+err.Error(),
+			)
 			report.Rules[file.rule] = outcome
 			continue
 		}
@@ -172,37 +182,61 @@ func GenerateReport(datasetDir string) (Report, error) {
 			continue
 		}
 		if err != nil {
-			report.addFailure(file, decodeFailed, "deserialization or re-encoding failed: "+err.Error())
+			report.addFailure(
+				file,
+				decodeFailed,
+				"deserialization or re-encoding failed: "+err.Error(),
+			)
 			report.Rules[file.rule] = outcome
 			continue
 		}
 
 		if isByteExactRule(file.rule) && !bytes.Equal(reencoded, input) {
-			report.addFailure(file, byteExactMismatch, "reserialization differs from the original bytes, which this rule hashes")
+			report.addFailure(
+				file,
+				byteExactMismatch,
+				"reserialization differs from the original bytes, which this rule hashes",
+			)
 			report.Rules[file.rule] = outcome
 			continue
 		}
 		if file.expectPath == "" {
-			report.addFailure(file, referenceUnreadable, "sample was accepted but has no reference encoding")
+			report.addFailure(
+				file,
+				referenceUnreadable,
+				"sample was accepted but has no reference encoding",
+			)
 			report.Rules[file.rule] = outcome
 			continue
 		}
 		reference, err := os.ReadFile(file.expectPath)
 		if err != nil {
-			report.addFailure(file, referenceUnreadable, "cannot read expected output: "+err.Error())
+			report.addFailure(
+				file,
+				referenceUnreadable,
+				"cannot read expected output: "+err.Error(),
+			)
 			report.Rules[file.rule] = outcome
 			continue
 		}
 		if !isByteExactRule(file.rule) {
 			reencoded, err = NormalizeCBOR(reencoded)
 			if err != nil {
-				report.addFailure(file, decodeFailed, "normalize re-encoding failed: "+err.Error())
+				report.addFailure(
+					file,
+					decodeFailed,
+					"normalize re-encoding failed: "+err.Error(),
+				)
 				report.Rules[file.rule] = outcome
 				continue
 			}
 		}
 		if !bytes.Equal(reencoded, reference) {
-			report.addFailure(file, referenceMismatch, "normalized reserialization differs from the expected output")
+			report.addFailure(
+				file,
+				referenceMismatch,
+				"normalized reserialization differs from the expected output",
+			)
 		} else {
 			outcome.GeneratedDecodedReencodedActual++
 		}
@@ -227,11 +261,17 @@ func listRuleSamples(root, rule string) ([]sample, error) {
 		switch entry.Name() {
 		case "expected":
 			if !entry.IsDir() {
-				return nil, fmt.Errorf("expected output path is not a directory: %s", filepath.Join(ruleDir, entry.Name()))
+				return nil, fmt.Errorf(
+					"expected output path is not a directory: %s",
+					filepath.Join(ruleDir, entry.Name()),
+				)
 			}
 		case "valid":
 			if !entry.IsDir() {
-				return nil, fmt.Errorf("valid sample path is not a directory: %s", filepath.Join(ruleDir, entry.Name()))
+				return nil, fmt.Errorf(
+					"valid sample path is not a directory: %s",
+					filepath.Join(ruleDir, entry.Name()),
+				)
 			}
 			validFiles, err := listCategoryFiles(root, rule, "valid", "valid")
 			if err != nil {
@@ -240,18 +280,34 @@ func listRuleSamples(root, rule string) ([]sample, error) {
 			files = append(files, validFiles...)
 		case "invalid":
 			if !entry.IsDir() {
-				return nil, fmt.Errorf("invalid sample path is not a directory: %s", filepath.Join(ruleDir, entry.Name()))
+				return nil, fmt.Errorf(
+					"invalid sample path is not a directory: %s",
+					filepath.Join(ruleDir, entry.Name()),
+				)
 			}
 			zapEntries, err := os.ReadDir(filepath.Join(ruleDir, "invalid"))
 			if err != nil {
-				return nil, fmt.Errorf("read invalid samples for %s: %w", rule, err)
+				return nil, fmt.Errorf(
+					"read invalid samples for %s: %w",
+					rule,
+					err,
+				)
 			}
 			for _, zapEntry := range zapEntries {
 				if !zapEntry.IsDir() || !validZapCategory(zapEntry.Name()) {
-					return nil, fmt.Errorf("unexpected invalid category for %s: %s", rule, zapEntry.Name())
+					return nil, fmt.Errorf(
+						"unexpected invalid category for %s: %s",
+						rule,
+						zapEntry.Name(),
+					)
 				}
 				category := filepath.Join("invalid", zapEntry.Name())
-				zapFiles, err := listCategoryFiles(root, rule, category, category)
+				zapFiles, err := listCategoryFiles(
+					root,
+					rule,
+					category,
+					category,
+				)
 				if err != nil {
 					return nil, err
 				}
@@ -259,14 +315,27 @@ func listRuleSamples(root, rule string) ([]sample, error) {
 			}
 		default:
 			if !entry.IsDir() || !strings.HasPrefix(entry.Name(), "invalid-") {
-				return nil, fmt.Errorf("unexpected entry in rule directory %s: %s", rule, entry.Name())
+				return nil, fmt.Errorf(
+					"unexpected entry in rule directory %s: %s",
+					rule,
+					entry.Name(),
+				)
 			}
 			zapCategory := strings.TrimPrefix(entry.Name(), "invalid-")
 			if !validZapCategory(zapCategory) {
-				return nil, fmt.Errorf("unexpected invalid category for %s: %s", rule, entry.Name())
+				return nil, fmt.Errorf(
+					"unexpected invalid category for %s: %s",
+					rule,
+					entry.Name(),
+				)
 			}
 			category := filepath.Join("invalid", zapCategory)
-			zapFiles, err := listCategoryFiles(root, rule, entry.Name(), category)
+			zapFiles, err := listCategoryFiles(
+				root,
+				rule,
+				entry.Name(),
+				category,
+			)
 			if err != nil {
 				return nil, err
 			}
@@ -277,19 +346,42 @@ func listRuleSamples(root, rule string) ([]sample, error) {
 }
 
 func validZapCategory(name string) bool {
-	return name == "zap-0" || name == "zap-1" || name == "zap-2" || name == "zap-3"
+	return name == "zap-0" || name == "zap-1" || name == "zap-2" ||
+		name == "zap-3"
 }
 
-func listCategoryFiles(root, rule, sourceCategory, category string) ([]sample, error) {
+func listCategoryFiles(
+	root, rule, sourceCategory, category string,
+) ([]sample, error) {
 	categoryDir := filepath.Join(root, rule, sourceCategory)
 	entries, err := os.ReadDir(categoryDir)
 	if err != nil {
-		return nil, fmt.Errorf("read sample category %s/%s: %w", rule, category, err)
+		return nil, fmt.Errorf(
+			"read sample category %s/%s: %w",
+			rule,
+			category,
+			err,
+		)
 	}
 	files := make([]sample, 0, len(entries))
+	inputNames := make(map[string]struct{}, len(entries))
+	if category == "valid" {
+		for _, entry := range entries {
+			if entry.IsDir() ||
+				!strings.HasSuffix(entry.Name(), ".input.cbor") {
+				continue
+			}
+			inputNames[strings.TrimSuffix(entry.Name(), ".input.cbor")] = struct{}{}
+		}
+	}
 	for _, entry := range entries {
 		if entry.IsDir() {
-			return nil, fmt.Errorf("unexpected sample entry in %s/%s: %s", rule, category, entry.Name())
+			return nil, fmt.Errorf(
+				"unexpected sample entry in %s/%s: %s",
+				rule,
+				category,
+				entry.Name(),
+			)
 		}
 		filename := entry.Name()
 		var sampleName string
@@ -297,13 +389,28 @@ func listCategoryFiles(root, rule, sourceCategory, category string) ([]sample, e
 		switch {
 		case strings.HasSuffix(filename, ".expected.cbor"):
 			if category != "valid" {
-				return nil, fmt.Errorf("unexpected sample entry in %s/%s: %s", rule, category, filename)
+				return nil, fmt.Errorf(
+					"unexpected sample entry in %s/%s: %s",
+					rule,
+					category,
+					filename,
+				)
+			}
+			sampleName := strings.TrimSuffix(filename, ".expected.cbor")
+			if _, ok := inputNames[sampleName]; !ok {
+				return nil, fmt.Errorf(
+					"expected output has no matching input: %s",
+					filepath.Join(categoryDir, filename),
+				)
 			}
 			continue
 		case strings.HasSuffix(filename, ".input.cbor"):
 			sampleName = strings.TrimSuffix(filename, ".input.cbor")
 			if category == "valid" {
-				expectPath = filepath.Join(categoryDir, sampleName+".expected.cbor")
+				expectPath = filepath.Join(
+					categoryDir,
+					sampleName+".expected.cbor",
+				)
 			}
 		case strings.HasSuffix(filename, ".cbor"):
 			sampleName = strings.TrimSuffix(filename, ".cbor")
@@ -311,7 +418,12 @@ func listCategoryFiles(root, rule, sourceCategory, category string) ([]sample, e
 				expectPath = filepath.Join(root, rule, "expected", filename)
 			}
 		default:
-			return nil, fmt.Errorf("unexpected sample entry in %s/%s: %s", rule, category, filename)
+			return nil, fmt.Errorf(
+				"unexpected sample entry in %s/%s: %s",
+				rule,
+				category,
+				filename,
+			)
 		}
 		name := filepath.ToSlash(filepath.Join(rule, category, sampleName))
 		file := sample{

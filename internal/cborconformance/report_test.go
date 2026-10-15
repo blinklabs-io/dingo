@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -22,7 +23,9 @@ func TestGenerateReport(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	valid, err := hex.DecodeString("8200581c00000000000000000000000000000000000000000000000000000000")
+	valid, err := hex.DecodeString(
+		"8200581c00000000000000000000000000000000000000000000000000000000",
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,7 +73,9 @@ func TestGenerateReportPrimaryDatasetLayout(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	valid, err := hex.DecodeString("8200581c00000000000000000000000000000000000000000000000000000000")
+	valid, err := hex.DecodeString(
+		"8200581c00000000000000000000000000000000000000000000000000000000",
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,6 +111,39 @@ func TestGenerateReportPrimaryDatasetLayout(t *testing.T) {
 	}
 }
 
+func TestGenerateReportRejectsOrphanExpectedOutput(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	corpus := filepath.Join(root, "conway")
+	validDir := filepath.Join(corpus, "credential", "valid")
+	if err := os.MkdirAll(validDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	valid, err := hex.DecodeString(
+		"8200581c00000000000000000000000000000000000000000000000000000000",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for filename, data := range map[string][]byte{
+		"paired.input.cbor":    valid,
+		"paired.expected.cbor": valid,
+		"orphan.expected.cbor": valid,
+	} {
+		if err := os.WriteFile(filepath.Join(validDir, filename), data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	_, err = GenerateReport(corpus)
+	if err == nil || !strings.Contains(err.Error(), "orphan.expected.cbor") {
+		t.Fatalf(
+			"GenerateReport error = %v, want orphan expected output error",
+			err,
+		)
+	}
+}
+
 func TestGenerateReportClassifiesAcceptedMutation(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
@@ -114,7 +152,9 @@ func TestGenerateReportClassifiesAcceptedMutation(t *testing.T) {
 	if err := os.MkdirAll(mutationDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	valid, err := hex.DecodeString("8200581c00000000000000000000000000000000000000000000000000000000")
+	valid, err := hex.DecodeString(
+		"8200581c00000000000000000000000000000000000000000000000000000000",
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
