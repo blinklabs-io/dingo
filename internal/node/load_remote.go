@@ -108,9 +108,7 @@ func (l remoteImmutableLimits) withImportRange(
 		)
 	}
 	last := tipSlot / l.chunkSlots
-	if last < first {
-		last = first
-	}
+	last = max(last, first)
 	return l.withChunkCount(last - first + 1)
 }
 
