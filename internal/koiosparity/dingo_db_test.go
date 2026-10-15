@@ -288,7 +288,7 @@ func TestGetPoolEpochDataMapAlignsRewardScheduleEpochs(t *testing.T) {
 	}).Error)
 
 	koiosEpoch := uint64(10)
-	stakeEpoch, ok := koiosStakeEpoch(koiosEpoch)
+	stakeEpoch, ok := koiosStakeEpoch("preview", koiosEpoch)
 	require.True(t, ok)
 	require.Equal(t, uint64(9), stakeEpoch)
 	paramEpoch := koiosParamEpoch(koiosEpoch)
@@ -448,7 +448,7 @@ func TestGetEpochDataStakeEpochOffset(t *testing.T) {
 	}).Error)
 
 	koiosEpoch := uint64(10)
-	stakeEpoch, ok := koiosStakeEpoch(koiosEpoch)
+	stakeEpoch, ok := koiosStakeEpoch("preview", koiosEpoch)
 	require.True(t, ok)
 
 	data, err := dingo.GetEpochData(context.Background(), stakeEpoch)
@@ -525,7 +525,7 @@ func TestGetPoolEpochDataMapTracksChangingPoolParams(t *testing.T) {
 	defer dingo.Close() //nolint:errcheck
 
 	const koiosEpoch = uint64(13)
-	stakeEpoch, ok := koiosStakeEpoch(koiosEpoch)
+	stakeEpoch, ok := koiosStakeEpoch("preview", koiosEpoch)
 	require.True(t, ok)
 	paramEpoch := koiosParamEpoch(koiosEpoch)
 

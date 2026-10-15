@@ -1076,8 +1076,8 @@ func TestLeiosTxsOfferOtherPathCompletionRelaysTransactionsOnce(t *testing.T) {
 	defer o.leiosEBLog.mu.Unlock()
 	txOffers := 0
 	for _, entry := range o.leiosEBLog.items {
-		if entry.txOffer != nil && entry.txOffer.Slot == point.Slot &&
-			bytes.Equal(entry.txOffer.Hash, point.Hash) {
+		if entry.entry.txOffer != nil && entry.entry.txOffer.Slot == point.Slot &&
+			bytes.Equal(entry.entry.txOffer.Hash, point.Hash) {
 			txOffers++
 		}
 	}
@@ -1139,8 +1139,8 @@ func TestLeiosTxsOfferCacheMissIntentSurvivesOwnerCancellation(t *testing.T) {
 	defer o.leiosEBLog.mu.Unlock()
 	txOffers := 0
 	for _, entry := range o.leiosEBLog.items {
-		if entry.txOffer != nil && entry.txOffer.Slot == point.Slot &&
-			bytes.Equal(entry.txOffer.Hash, point.Hash) {
+		if entry.entry.txOffer != nil && entry.entry.txOffer.Slot == point.Slot &&
+			bytes.Equal(entry.entry.txOffer.Hash, point.Hash) {
 			txOffers++
 		}
 	}
@@ -1282,8 +1282,8 @@ func TestLeiosRelayOfferIntentMergesWithPersistedCacheReload(t *testing.T) {
 	defer o.leiosEBLog.mu.Unlock()
 	txOffers := 0
 	for _, entry := range o.leiosEBLog.items {
-		if entry.txOffer != nil && entry.txOffer.Slot == point.Slot &&
-			bytes.Equal(entry.txOffer.Hash, point.Hash) {
+		if entry.entry.txOffer != nil && entry.entry.txOffer.Slot == point.Slot &&
+			bytes.Equal(entry.entry.txOffer.Hash, point.Hash) {
 			txOffers++
 		}
 	}
