@@ -104,9 +104,12 @@ processing begins and after each epoch rollover commits. Tables without
 statistics are always analyzed; tables with them only after roughly 25-fold
 growth, so a repeat run is near-free, while the first run on a large database
 analyzes every table and takes minutes. The write pool has one connection, so
-writers wait for the run. The run is skipped during a bulk load, and the
-Mithril and backfill `ANALYZE` paths are unchanged. PostgreSQL and MySQL
-report the operation unsupported and are untouched.
+writers wait for the run. The run is skipped during a bulk load. A fresh
+Mithril bootstrap restores normal pragmas after rebuilding critical indexes,
+then uses this optimizer; if the backend does not support it or skips it, the
+full planner-statistics update runs instead. Resumed Mithril imports and other
+completed backfills retain the full update path. PostgreSQL and MySQL report
+the operation unsupported and use that fallback.
 
 A run counts as having changed statistics when a 64-bit FNV-1a hash of every
 `sqlite_stat1` row (`tbl`, `idx` and `stat`, in order) differs before and

@@ -575,9 +575,23 @@ func TestInsertUtxoBatchConflictAvoidsPerRowInsertAndSelect(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	store := newMigratedSQLiteStoreWithRegistry(t, reg)
 	conflictTxID := bytes.Repeat([]byte{0x51}, 32)
+	conflictCollateralTxID := bytes.Repeat([]byte{0x53}, 32)
 	newTxID := bytes.Repeat([]byte{0x52}, 32)
+	var transactionID, collateralReturnID uint
+	require.NoError(t, store.writeDB.QueryRowContext(
+		context.Background(),
+		`INSERT INTO "transaction" (hash) VALUES (?) RETURNING id`,
+		conflictTxID,
+	).Scan(&transactionID))
+	require.NoError(t, store.writeDB.QueryRowContext(
+		context.Background(),
+		`INSERT INTO "transaction" (hash) VALUES (?) RETURNING id`,
+		conflictCollateralTxID,
+	).Scan(&collateralReturnID))
 	require.NoError(t, store.ImportUtxos([]models.Utxo{{
 		TxId: conflictTxID, Amount: types.Uint64(1), OutputIdx: 0,
+	}, {
+		TxId: conflictCollateralTxID, Amount: types.Uint64(1), OutputIdx: 0,
 	}}, nil))
 
 	beforeInserts := counterValue(t, reg, "insert")
@@ -587,14 +601,25 @@ func TestInsertUtxoBatchConflictAvoidsPerRowInsertAndSelect(t *testing.T) {
 		func(db queryer, ctx context.Context) error {
 			var err error
 			inserted, err = store.insertUtxoModelsChecked(ctx, db, []*models.Utxo{
-				{TxId: conflictTxID, Amount: types.Uint64(1), OutputIdx: 0},
+				{
+					TxId:          conflictTxID,
+					Amount:        types.Uint64(1),
+					OutputIdx:     0,
+					TransactionID: &transactionID,
+				},
+				{
+					TxId:                    conflictCollateralTxID,
+					Amount:                  types.Uint64(1),
+					OutputIdx:               0,
+					CollateralReturnForTxID: &collateralReturnID,
+				},
 				{TxId: newTxID, Amount: types.Uint64(2), OutputIdx: 0},
 			}, true, nil)
 			return err
 		},
 	))
 
-	require.Equal(t, []bool{false, true}, inserted)
+	require.Equal(t, []bool{false, false, true}, inserted)
 	require.Equal(
 		t,
 		beforeInserts+1,
@@ -607,6 +632,12 @@ func TestInsertUtxoBatchConflictAvoidsPerRowInsertAndSelect(t *testing.T) {
 		counterValue(t, reg, "select"),
 		"the UPDATE RETURNING path should not SELECT the conflicting row ID",
 	)
+	repaired, err := store.GetUtxo(conflictTxID, 0, nil)
+	require.NoError(t, err)
+	require.Equal(t, &transactionID, repaired.TransactionID)
+	repairedCollateral, err := store.GetUtxo(conflictCollateralTxID, 0, nil)
+	require.NoError(t, err)
+	require.Equal(t, &collateralReturnID, repairedCollateral.CollateralReturnForTxID)
 }
 
 // TestSetTransactionReapplyAppliesNoSecondDelta covers the invariant the

@@ -91,28 +91,9 @@ func finalizeBackfillPlannerStats(
 		cp.LastSlot,
 	)
 	started := time.Now()
-	optimized := false
-	if incremental, ok := updater.(metadata.IncrementalPlannerStatsUpdater); allowIncremental && ok {
-		result, optimizeErr := incremental.OptimizePlannerStatsContext(
-			ctx,
-			types.PlannerStatsTriggerStartup,
-		)
-		if optimizeErr != nil {
-			return fmt.Errorf(
-				"refresh planner statistics after backfill: %w",
-				optimizeErr,
-			)
-		}
-		optimized = result.Supported && !result.Skipped && result.Changed
-	}
-	if !optimized {
-		if contextual, ok := updater.(metadata.ContextPlannerStatsUpdater); ok {
-			err = contextual.UpdatePlannerStatsContext(ctx)
-		} else {
-			err = updater.UpdatePlannerStats()
-		}
-	}
-	if err != nil {
+	if err := updatePlannerStatsAfterBackfill(
+		ctx, updater, allowIncremental,
+	); err != nil {
 		return fmt.Errorf("refresh planner statistics after backfill: %w", err)
 	}
 	if err := ctx.Err(); err != nil {
@@ -131,4 +112,27 @@ func finalizeBackfillPlannerStats(
 		time.Since(started),
 	)
 	return nil
+}
+
+func updatePlannerStatsAfterBackfill(
+	ctx context.Context,
+	updater metadata.PlannerStatsUpdater,
+	allowIncremental bool,
+) error {
+	if incremental, ok := updater.(metadata.IncrementalPlannerStatsUpdater); allowIncremental && ok {
+		result, err := incremental.OptimizePlannerStatsContext(
+			ctx,
+			types.PlannerStatsTriggerStartup,
+		)
+		if err != nil {
+			return err
+		}
+		if result.Supported && !result.Skipped {
+			return nil
+		}
+	}
+	if contextual, ok := updater.(metadata.ContextPlannerStatsUpdater); ok {
+		return contextual.UpdatePlannerStatsContext(ctx)
+	}
+	return updater.UpdatePlannerStats()
 }

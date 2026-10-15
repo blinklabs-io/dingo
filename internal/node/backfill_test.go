@@ -1086,6 +1086,63 @@ func TestRun_ConsumedInputRecoveryDependsOnFreshBootstrap(t *testing.T) {
 	}
 }
 
+func TestRun_FailedFreshBootstrapRetryEnablesConsumedInputRecovery(t *testing.T) {
+	t.Parallel()
+	db := newTestDB(t)
+	blocks, err := testfixtures.GenerateConwayChainWithTransactions(2)
+	require.NoError(t, err)
+	for i, block := range blocks {
+		require.NoError(t, db.BlockCreate(models.Block{
+			ID:     database.BlockInitialIndex + uint64(i),
+			Slot:   block.SlotNumber(),
+			Hash:   block.Hash().Bytes(),
+			Number: block.BlockNumber(),
+			Cbor:   block.Cbor(),
+			Type:   uint(block.Type()),
+		}, nil))
+	}
+	firstBlock := blocks[0]
+	now := time.Now()
+	require.NoError(t, db.Metadata().SetBackfillCheckpoint(
+		&models.BackfillCheckpoint{
+			Phase:     BackfillPhase,
+			StartedAt: now,
+			UpdatedAt: now,
+		},
+		nil,
+	))
+
+	bf := NewBackfill(
+		db, nil, slog.New(slog.NewTextHandler(io.Discard, nil)),
+	)
+	bf.SetFreshDatabaseBootstrap(true)
+	require.NoError(t, db.BlockCreate(models.Block{
+		ID:     database.BlockInitialIndex,
+		Slot:   firstBlock.SlotNumber(),
+		Hash:   firstBlock.Hash().Bytes(),
+		Number: firstBlock.BlockNumber(),
+		Cbor:   []byte{0xff},
+		Type:   uint(firstBlock.Type()),
+	}, nil))
+	require.ErrorContains(t, bf.Run(context.Background()), "parsing block")
+	require.NoError(t, db.BlockCreate(models.Block{
+		ID:     database.BlockInitialIndex,
+		Slot:   firstBlock.SlotNumber(),
+		Hash:   firstBlock.Hash().Bytes(),
+		Number: firstBlock.BlockNumber(),
+		Cbor:   firstBlock.Cbor(),
+		Type:   uint(firstBlock.Type()),
+	}, nil))
+
+	var progress []BackfillProgress
+	bf.SetProgressFunc(func(p BackfillProgress) {
+		progress = append(progress, p)
+	})
+	require.NoError(t, bf.Run(context.Background()))
+	require.NotEmpty(t, progress)
+	assert.Zero(t, progress[len(progress)-1].Stats.SkippedInputRecovery)
+}
+
 func testRun_ResumeStopsAtRecordedMithrilAnchor(
 	t *testing.T,
 	newDB func(*testing.T) *database.Database,

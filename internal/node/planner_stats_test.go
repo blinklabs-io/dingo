@@ -22,9 +22,69 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/stretchr/testify/require"
 )
+
+type plannerStatsUpdaterStub struct {
+	result           types.PlannerStatsResult
+	incrementalCalls int
+	fullUpdateCalls  int
+}
+
+func (s *plannerStatsUpdaterStub) UpdatePlannerStats() error {
+	s.fullUpdateCalls++
+	return nil
+}
+
+func (s *plannerStatsUpdaterStub) OptimizePlannerStatsContext(
+	context.Context,
+	string,
+) (types.PlannerStatsResult, error) {
+	s.incrementalCalls++
+	return s.result, nil
+}
+
+func TestUpdatePlannerStatsAfterBackfillUsesIncrementalCompletion(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name           string
+		result         types.PlannerStatsResult
+		wantFullUpdate int
+	}{
+		{
+			name: "unchanged supported result is complete",
+			result: types.PlannerStatsResult{
+				Supported: true,
+			},
+		},
+		{
+			name: "skipped result falls back to full update",
+			result: types.PlannerStatsResult{
+				Supported: true,
+				Skipped:   true,
+			},
+			wantFullUpdate: 1,
+		},
+		{
+			name:           "unsupported result falls back to full update",
+			wantFullUpdate: 1,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			updater := &plannerStatsUpdaterStub{result: tc.result}
+			require.NoError(t, updatePlannerStatsAfterBackfill(
+				t.Context(), updater, true,
+			))
+			require.Equal(t, 1, updater.incrementalCalls)
+			require.Equal(t, tc.wantFullUpdate, updater.fullUpdateCalls)
+		})
+	}
+}
 
 func TestFinalizeBackfillPlannerStatsRepairsAndResumes(t *testing.T) {
 	t.Parallel()

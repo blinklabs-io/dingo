@@ -1246,7 +1246,8 @@ func Sync(
 	// Enable bulk-load optimizations before launching parallel
 	// goroutines so both importLedgerState and LoadBlobsWithDB
 	// share the same pragma settings without racing.
-	defer node.WithBulkLoadPragmas(db, logger)()
+	cleanupBulkLoadPragmas := node.WithBulkLoadPragmas(db, logger)
+	defer cleanupBulkLoadPragmas()
 
 	// A rejected pre-existing gap must be cleared before importing an
 	// ancillary state beyond ImmutableDB: cleanup rolls back UTxO rows by
@@ -1844,6 +1845,12 @@ func Sync(
 		"duration",
 		indexRebuildElapsed,
 	)
+
+	if err := cleanupBulkLoadPragmas(); err != nil {
+		return SyncResult{}, fmt.Errorf(
+			"restoring normal metadata settings: %w", err,
+		)
+	}
 
 	if err := node.FinalizeMithrilBackfillPlannerStats(
 		ctx,

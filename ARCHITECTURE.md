@@ -9872,6 +9872,11 @@ context through `ContextPlannerStatsUpdater`. Subsequent starts skip analysis
 when the checkpoint identity matches. This prevents pre-backfill row-count
 estimates from driving expensive query plans on the completed database.
 
+A fresh Mithril bootstrap restores normal SQLite pragmas after rebuilding
+critical indexes, then uses the startup planner optimizer. Unsupported or
+skipped optimization falls back to the full planner-statistics update. Resumed
+imports and other backfills keep the full update path.
+
 MCP node status inspects SQLite's index catalog and sync state to distinguish
 critical index readiness from pending background maintenance. Neither a complete
 index catalog nor a recorded statistics refresh establishes ledger readiness.

@@ -910,6 +910,9 @@ func (b *Backfill) Run(ctx context.Context) error {
 	// have inconsistencies from interrupted batches that need repair.
 	isFreshStart := cp == nil ||
 		(b.freshDatabaseBootstrap && cp.LastSlot == 0)
+	// The bootstrap classification applies only to the first attempt. A retry,
+	// even before checkpoint progress, must run consumed-input recovery.
+	b.freshDatabaseBootstrap = false
 	if cp == nil {
 		cp = &models.BackfillCheckpoint{
 			Phase:      BackfillPhase,
