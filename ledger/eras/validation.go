@@ -423,7 +423,9 @@ func validateUnknownVoters(
 		}
 		return conway.UtxoValidateUnknownVoters(tx, slot, ls, pp)
 	}
-	overlay := newVoterOverlay(ls, state)
+	requireElectedCommitteeVoters := protocolMajorVersion(pp) >=
+		lcommon.ProtocolVersionVanRossem
+	overlay := newVoterOverlay(ls, state, requireElectedCommitteeVoters)
 	for _, level := range governanceLevels(tx) {
 		overlay.applyCertificates(level.certificates)
 		if err := overlay.validateVoters(level.votes); err != nil {

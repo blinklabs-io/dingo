@@ -58,11 +58,12 @@ func governanceLevels(tx lcommon.Transaction) []governanceLevel {
 // voterOverlay answers voter existence after the certificates applied so far,
 // deferring to the ledger state for anything they did not touch.
 type voterOverlay struct {
-	ls        lcommon.LedgerState
-	committee CommitteeCredentialState
-	voting    lcommon.CommitteeVotingState
-	dreps     map[committeeCredentialKey]bool
-	pools     map[lcommon.PoolKeyHash]struct{}
+	ls             lcommon.LedgerState
+	committee      CommitteeCredentialState
+	voting         lcommon.CommitteeVotingState
+	requireElected bool
+	dreps          map[committeeCredentialKey]bool
+	pools          map[lcommon.PoolKeyHash]struct{}
 	// coldHot records, for each cold credential a certificate touched, the
 	// hot credential it now authorizes, or nil after a resignation.
 	coldHot map[committeeCredentialKey]*committeeCredentialKey
@@ -74,15 +75,17 @@ type voterOverlay struct {
 func newVoterOverlay(
 	ls lcommon.LedgerState,
 	committee CommitteeCredentialState,
+	requireElected bool,
 ) *voterOverlay {
 	voting, _ := stateCapability[lcommon.CommitteeVotingState](ls)
 	return &voterOverlay{
-		ls:        ls,
-		committee: committee,
-		voting:    voting,
-		dreps:     make(map[committeeCredentialKey]bool),
-		pools:     make(map[lcommon.PoolKeyHash]struct{}),
-		coldHot:   make(map[committeeCredentialKey]*committeeCredentialKey),
+		ls:             ls,
+		committee:      committee,
+		voting:         voting,
+		requireElected: requireElected,
+		dreps:          make(map[committeeCredentialKey]bool),
+		pools:          make(map[lcommon.PoolKeyHash]struct{}),
+		coldHot:        make(map[committeeCredentialKey]*committeeCredentialKey),
 	}
 }
 
@@ -183,14 +186,15 @@ func (o *voterOverlay) voterKnown(voter *lcommon.Voter) (bool, error) {
 }
 
 // committeeHotKnown reports whether any cold credential authorizes hot after
-// the applied certificates. When the committee state is not authoritative
-// (see ledger.LedgerView.CommitteeStateAvailable), a hot credential that no
-// applied certificate authorizes cannot be shown unknown and is accepted.
+// the applied certificates. At PV11 and later, the credential must also be
+// elected in the enacted committee.
 func (o *voterOverlay) committeeHotKnown(hot lcommon.Credential) (bool, error) {
 	hotKey := committeeCredentialKeyFor(hot)
-	for _, current := range o.coldHot {
-		if current != nil && *current == hotKey {
-			return true, nil
+	if !o.requireElected {
+		for _, current := range o.coldHot {
+			if current != nil && *current == hotKey {
+				return true, nil
+			}
 		}
 	}
 	if !o.availabilityKnown {
@@ -201,7 +205,30 @@ func (o *voterOverlay) committeeHotKnown(hot lcommon.Credential) (bool, error) {
 		o.available, o.availabilityKnown = available, true
 	}
 	if !o.available {
+		if o.requireElected {
+			return false, conway.CommitteeStateUnavailableError{}
+		}
+		for _, current := range o.coldHot {
+			if current != nil && *current == hotKey {
+				return true, nil
+			}
+		}
 		return true, nil
+	}
+	if o.requireElected && o.voting == nil {
+		return false, conway.CommitteeStateUnavailableError{}
+	}
+	for cold, current := range o.coldHot {
+		if current == nil || *current != hotKey {
+			continue
+		}
+		elected, err := o.committeeColdCredentialIsElected(cold)
+		if err != nil {
+			return false, err
+		}
+		if elected {
+			return true, nil
+		}
 	}
 	if o.voting != nil {
 		coldCredentials, err := o.voting.CommitteeHotCredentialColdCredentials(
@@ -211,11 +238,22 @@ func (o *voterOverlay) committeeHotKnown(hot lcommon.Credential) (bool, error) {
 			return false, err
 		}
 		for _, cold := range coldCredentials {
-			if _, touched := o.coldHot[committeeCredentialKeyFor(cold)]; !touched {
+			coldKey := committeeCredentialKeyFor(cold)
+			if _, touched := o.coldHot[coldKey]; touched {
+				continue
+			}
+			elected, err := o.committeeColdCredentialIsElected(coldKey)
+			if err != nil {
+				return false, err
+			}
+			if elected {
 				return true, nil
 			}
 		}
 		return false, nil
+	}
+	if o.requireElected {
+		return false, conway.CommitteeStateUnavailableError{}
 	}
 	member, err := o.committee.CommitteeHotCredentialMember(hot)
 	if err != nil {
@@ -233,4 +271,19 @@ func (o *voterOverlay) committeeHotKnown(hot lcommon.Credential) (bool, error) {
 		}
 	}
 	return true, nil
+}
+
+func (o *voterOverlay) committeeColdCredentialIsElected(
+	cold committeeCredentialKey,
+) (bool, error) {
+	if !o.requireElected {
+		return true, nil
+	}
+	if o.voting == nil {
+		return false, conway.CommitteeStateUnavailableError{}
+	}
+	return o.voting.CommitteeCredentialIsElected(lcommon.Credential{
+		CredType:   cold.credType,
+		Credential: cold.credential,
+	})
 }
