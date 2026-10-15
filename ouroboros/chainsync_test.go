@@ -562,7 +562,10 @@ func TestChainsyncHeaderBackpressurePrecedesAdmissionAndCrypto(t *testing.T) {
 	}
 	var cryptoCalls atomic.Int32
 	o.chainSelectionShouldVerifyHeaderCrypto = func(uint64) bool { return true }
-	o.chainSelectionVerifyHeaderCrypto = func(gledger.BlockHeader) (uint64, error) {
+	o.chainSelectionVerifyHeaderCrypto = func(
+		ouroboros.ConnectionId,
+		gledger.BlockHeader,
+	) (uint64, error) {
 		cryptoCalls.Add(1)
 		return 0, nil
 	}
@@ -1231,6 +1234,7 @@ func TestChainsyncClientRollForwardExcludesHeaderFailingCryptoVerification(
 
 	_, tipCh := bus.Subscribe(chainselection.PeerTipUpdateEventType)
 	_, recycleCh := bus.Subscribe(ledger.ConnectionRecycleRequestedEventType)
+	_, awaitCh := bus.Subscribe(ledger.ChainsyncAwaitReplyEventType)
 	state := dchainsync.NewState(bus, nil)
 	conn := newTestConnId("127.0.0.1:6010", "1.1.1.2:3001")
 	require.True(t, state.AddClientConnId(conn))
@@ -1246,6 +1250,10 @@ func TestChainsyncClientRollForwardExcludesHeaderFailingCryptoVerification(
 	})
 	o.chainsyncState = state
 	o.eventBus = bus
+	awaitObserved := false
+	o.config.ChainsyncObserveAwaitReply = func(ouroboros.ConnectionId, ocommon.Point) {
+		awaitObserved = true
+	}
 	o.chainSelectionShouldVerifyHeaderCrypto = func(uint64) bool { return true }
 	var verifiedConn ouroboros.ConnectionId
 	verificationCalls := 0
@@ -2722,7 +2730,8 @@ func TestRollForwardGrantsNoPatienceForRejectedHeaders(t *testing.T) {
 		tc := f.state.GetTrackedClient(f.conn)
 		require.Zero(t, tc.Patience.BestBlockNumber)
 		require.InDelta(t, 60, tc.Patience.Tokens, 1e-9)
-		require.True(t, tc.Patience.Paused)
+		require.False(t, tc.Patience.Paused,
+			"a rejected eligible header resumes the patience leak")
 	})
 	t.Run("sender removed while awaiting eagerness", func(t *testing.T) {
 		t.Parallel()
@@ -2744,7 +2753,8 @@ func TestRollForwardGrantsNoPatienceForRejectedHeaders(t *testing.T) {
 		tc := f.state.GetTrackedClient(f.conn)
 		require.Zero(t, tc.Patience.BestBlockNumber)
 		require.InDelta(t, 60, tc.Patience.Tokens, 1e-9)
-		require.True(t, tc.Patience.Paused)
+		require.False(t, tc.Patience.Paused,
+			"a withheld eligible header resumes the patience leak")
 	})
 }
 

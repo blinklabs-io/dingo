@@ -1329,6 +1329,7 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 			ctx.ConnectionId,
 			o.shouldPublishChainsyncToLedger(ctx.ConnectionId),
 		)
+		patienceResume = ingressEligible
 		if ingressEligible && o.chainsyncHeaderBackpressure != nil {
 			admissionCtx, cancelAdmission := chainsyncAdmissionContext(ctx)
 			defer cancelAdmission()
@@ -1477,6 +1478,7 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 					)
 				} else {
 					selectionEligible = false
+					patienceResume = false
 					o.config.Logger.Warn(
 						"chainsync: excluding header from chain selection after verification failure",
 						"component", "ouroboros",
@@ -1501,8 +1503,6 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 				}
 			}
 		}
-		patienceGrant = selectionEligible
-		patienceResume = ingressEligible
 		// Observe the tip for chain selection FIRST, so the apply-eligibility
 		// decision below reflects this header. Only ingress-eligible peers are
 		// observed; random inbound peers reporting ephemeral tips are filtered
@@ -1589,7 +1589,7 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 				return fmt.Errorf("wait for eagerness limit: %w", err)
 			}
 		}
-		patienceGrant = ingressEligible
+		patienceGrant = selectionEligible && ingressEligible
 		// Record the cross-peer dedup entry only for headers we will actually
 		// apply. A header withheld from an uncorroborated peer must not suppress
 		// a later delivery from a corroborated, apply-eligible peer.

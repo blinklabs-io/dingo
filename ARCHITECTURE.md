@@ -5873,15 +5873,17 @@ it. Dingo implements this as a **corroboration gate**
   header-queue verification (that only runs for headers actually applied).
   For a competing fork, verification follows the retained headers for that
   peer back to a primary-chain intersection and folds their nonce
-  contributions through the source epoch's stability cutoff. This supplies
+  contributions through the source epoch's stability cutoff. A per-connection
+  nonce-prefix cache resumes folding at the first newly added header, keyed by
+  the last folded hash, source epoch, cutoff, and source nonce. This supplies
   the fork's frozen candidate nonce at the next epoch boundary while retaining
   the same pool-key, leader-eligibility, size, KES, and operational-certificate
   checks for every folded header. Hash links, slots, block numbers, and era
   order are validated across the reconstructed path before it can affect
   selection. The verifier receives the ChainSync connection identity so
   ancestry from one peer cannot be used for another peer's header. A per-connection
-  path cache reuses a resolved ancestor only while the held tip is unchanged and
-  the next header directly extends the cached path; disconnects discard it.
+  path cache reuses a resolved ancestor only while the applied tip is unchanged
+  and the next header directly extends the cached path; disconnects discard it.
   Verification is skipped only for a slot an imported Mithril snapshot
   already covers, the same exemption the ledger's own header-queue path
   applies; a result showing local state has not caught up to
@@ -5890,8 +5892,11 @@ it. Dingo implements this as a **corroboration gate**
   fork ancestry excludes the header from observation and schedules
   re-intersection without recycling the peer. Headers past the forecast
   horizon are likewise excluded from observation until admission can forecast
-  their slots. Bounded-history exhaustion and multi-epoch extensions
-  of the held tip defer verification until block application catches up.
+  their slots. Bounded-history exhaustion defers verification so later retries
+  can resolve the ancestry as the applied tip advances. A multi-epoch fork that
+  intersects at the applied tip uses the normal local-chain verifier; other
+  multi-epoch forks remain withheld because their intermediate epoch nonce
+  cannot be reconstructed from the retained candidate path.
   A header whose
   point (slot and hash) is on the chain (`Chain.HoldsPoint`) at or below the
   ledger tip returns success without re-verification: it was fully verified
