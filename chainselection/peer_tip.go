@@ -470,9 +470,9 @@ func (p *PeerChainTip) observedHistoryConflictsAt(point ocommon.Point) bool {
 }
 
 // confirmsRecentChainFrom reports whether witness confirms this peer's
-// (candidate's) chain. Within the slot range of the candidate's observed frontier, every
-// witness-observed point must match the candidate, and the witness must have
-// independently delivered the candidate's current point.
+// (candidate's) chain. Within the slot range of the candidate's observed
+// frontier, every witness-observed point must match the candidate, and the
+// witness must have independently delivered the candidate's current point.
 //
 // This is deliberately stronger than "share any common point": a fast source
 // that shares only an old ancestor and then diverges for every later block is
@@ -491,16 +491,16 @@ func (p *PeerChainTip) observedHistoryConflictsAt(point ocommon.Point) bool {
 // overlap.
 //
 // Witness points at or below verifiedThrough are skipped (0 verifies
-// everything). The caller must
-// only pass a nonzero verifiedThrough that an earlier call reported as
-// consistent for these two frontiers while neither had been rewritten since; appends and
-// front trims preserve that result for the points it covered, because a point
-// compared once is compared against the same candidate point again, and the
-// candidate window only moves forward. Besides the result it reports whether
-// no witness point in range conflicted with the candidate (true even when the
-// witness has simply not delivered the candidate's tip yet, so a lagging
-// witness keeps its verified prefix), the highest witness slot known to match,
-// and how many witness points it compared.
+// everything). The caller must only pass a nonzero verifiedThrough that an
+// earlier call with the same window reported as consistent for these two
+// frontiers while neither had been rewritten since. Appends and front trims
+// preserve that result for the points it covered, because a point compared
+// once is compared against the same candidate point again, and with a fixed
+// window the candidate range only moves forward. Besides the result it reports
+// whether no witness point in range conflicted with the candidate (true even
+// when the witness has simply not delivered the candidate's tip yet, so a
+// lagging witness keeps its verified prefix), the highest witness slot known
+// to match, and how many witness points it compared.
 func (p *PeerChainTip) confirmsRecentChainFrom(
 	witness *PeerChainTip,
 	window uint64,
