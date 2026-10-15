@@ -1648,6 +1648,13 @@ var errUtxoNotFound = errors.New("UTxO not found")
 
 // mockLedgerState implements lcommon.LedgerState for testing
 // UTxO-aware Byron validation rules.
+// GovPurposeRoots reports no purpose roots, which is the state of a chain
+// that has not enacted a governance action. The Conway ancestry rule requires
+// the capability whenever a transaction proposes a purpose-chain action.
+func (s *mockLedgerState) GovPurposeRoots() (*lcommon.GovPurposeRoots, error) {
+	return &lcommon.GovPurposeRoots{}, nil
+}
+
 type mockLedgerState struct {
 	utxos         map[string]lcommon.Utxo
 	networkId     uint

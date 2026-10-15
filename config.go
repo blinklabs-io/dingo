@@ -1806,9 +1806,10 @@ func WithBlockPipelineEnabled(enabled bool) ConfigOptionFunc {
 	}
 }
 
-// WithBlockPipelineValidateEnabled adds a parallel VRF/KES and OpCert
-// validate stage to the block-decode pipeline (phase 3 of the pipeline). Off by
-// default; requires WithBlockPipelineEnabled. See
+// WithBlockPipelineValidateEnabled checks VRF/KES and OpCert header
+// cryptography serially for blocks read back during replay, ahead of the
+// decode pipeline's results. Off by default; requires
+// WithBlockPipelineEnabled. See
 // LedgerStateConfig.BlockPipelineValidateEnabled.
 func WithBlockPipelineValidateEnabled(enabled bool) ConfigOptionFunc {
 	return func(c *Config) {
@@ -2728,8 +2729,8 @@ func (c *Config) BlockPipelineEnabled() bool {
 	return c.cfg.BlockPipelineEnabled
 }
 
-// BlockPipelineValidateEnabled returns whether the parallel VRF/KES and
-// OpCert validate stage of the block-decode pipeline is enabled.
+// BlockPipelineValidateEnabled returns whether VRF/KES and OpCert header
+// cryptography is checked during block-pipeline replay.
 func (c *Config) BlockPipelineValidateEnabled() bool {
 	return c.cfg.BlockPipelineValidateEnabled
 }

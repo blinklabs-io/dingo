@@ -47,10 +47,7 @@ func TestDecodeReadChainBatchValidatesBlockWithTransactions(t *testing.T) {
 	require.NoError(t, ls.blockPipeline.Stop())
 	ls.blockPipeline = pipeline.NewBlockPipeline(
 		pipeline.WithDecodeWorkers(1),
-		pipeline.WithValidateWorkers(1),
-		pipeline.WithEta0(vb.EpochNonceHex),
-		pipeline.WithSlotsPerKesPeriod(vb.SlotsPerKesPeriod),
-		pipeline.WithVerifyConfig(blockPipelineVerifyConfig()),
+		pipeline.WithTrustedDecodeOnly(),
 	)
 	require.NoError(t, ls.blockPipeline.Start(t.Context()))
 

@@ -261,7 +261,7 @@ func TestFetchEndorserBlockByPointRecyclesDeadConnectionAndFailsOver(
 				ProtocolId: leiosfetch.ProtocolId,
 				IsResponse: true,
 				Messages: []protocol.Message{
-					leiosfetch.NewMsgBlockTxsFull(
+					leiosfetch.NewMsgBlockTxs(
 						point,
 						bitmap,
 						[]cbor.RawMessage{tx},
@@ -577,7 +577,7 @@ func TestFetchEndorserBlockByPointPrefersExactOfferSource(t *testing.T) {
 				ProtocolId: leiosfetch.ProtocolId,
 				IsResponse: true,
 				Messages: []protocol.Message{
-					leiosfetch.NewMsgBlockTxsFull(
+					leiosfetch.NewMsgBlockTxs(
 						point,
 						bitmap,
 						[]cbor.RawMessage{wrongTx},
@@ -598,7 +598,7 @@ func TestFetchEndorserBlockByPointPrefersExactOfferSource(t *testing.T) {
 				ProtocolId: leiosfetch.ProtocolId,
 				IsResponse: true,
 				Messages: []protocol.Message{
-					leiosfetch.NewMsgBlockTxsFull(
+					leiosfetch.NewMsgBlockTxs(
 						point,
 						bitmap,
 						[]cbor.RawMessage{tx},
@@ -1125,7 +1125,7 @@ func TestFetchEndorserBlockByPointRotatesPastPeerThatNeverAnswers(
 				ProtocolId: leiosfetch.ProtocolId,
 				IsResponse: true,
 				Messages: []protocol.Message{
-					leiosfetch.NewMsgBlockTxsFull(
+					leiosfetch.NewMsgBlockTxs(
 						point,
 						bitmap,
 						[]cbor.RawMessage{tx},

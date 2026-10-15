@@ -101,6 +101,7 @@ func TestDecodeReadChainBatchSerialAndPipelineAgree(t *testing.T) {
 
 	pipelineLS := &LedgerState{config: LedgerStateConfig{Logger: testLogger()}}
 	pipelineLS.blockPipeline = pipeline.NewBlockPipeline(
+		pipeline.WithTrustedDecodeOnly(),
 		pipeline.WithDecodeWorkers(2),
 	)
 	require.NoError(t, pipelineLS.blockPipeline.Start(ctx))
@@ -149,6 +150,7 @@ func TestDecodeReadChainBatchPropagatesDecodeErrorBothModes(t *testing.T) {
 
 	pipelineLS := &LedgerState{config: LedgerStateConfig{Logger: testLogger()}}
 	pipelineLS.blockPipeline = pipeline.NewBlockPipeline(
+		pipeline.WithTrustedDecodeOnly(),
 		pipeline.WithDecodeWorkers(2),
 	)
 	require.NoError(t, pipelineLS.blockPipeline.Start(ctx))
@@ -249,6 +251,7 @@ func TestLedgerReadChainIteratorPipelineMatchesSerial(t *testing.T) {
 
 	pipelineLS := &LedgerState{config: LedgerStateConfig{Logger: testLogger()}}
 	pipelineLS.blockPipeline = pipeline.NewBlockPipeline(
+		pipeline.WithTrustedDecodeOnly(),
 		pipeline.WithDecodeWorkers(2),
 	)
 	require.NoError(t, pipelineLS.blockPipeline.Start(t.Context()))
@@ -324,6 +327,7 @@ func TestLedgerReadChainIteratorRollbackTrimMatchesBothModes(t *testing.T) {
 
 	pipelineLS := &LedgerState{config: LedgerStateConfig{Logger: testLogger()}}
 	pipelineLS.blockPipeline = pipeline.NewBlockPipeline(
+		pipeline.WithTrustedDecodeOnly(),
 		pipeline.WithDecodeWorkers(2),
 	)
 	require.NoError(t, pipelineLS.blockPipeline.Start(t.Context()))
@@ -361,6 +365,7 @@ func TestBlockPipelineLifecycleNoGoroutineLeak(t *testing.T) {
 	for i := range iterations {
 		ls := &LedgerState{config: LedgerStateConfig{Logger: testLogger()}}
 		ls.blockPipeline = pipeline.NewBlockPipeline(
+			pipeline.WithTrustedDecodeOnly(),
 			pipeline.WithDecodeWorkers(2),
 		)
 		ctx := t.Context()
@@ -474,6 +479,7 @@ func TestLedgerProcessBlocksRetryDoesNotMixBlocksAcrossAttempts(t *testing.T) {
 	for iter := range iterations {
 		ls := &LedgerState{config: LedgerStateConfig{Logger: testLogger()}}
 		ls.blockPipeline = pipeline.NewBlockPipeline(
+			pipeline.WithTrustedDecodeOnly(),
 			pipeline.WithDecodeWorkers(2),
 		)
 		require.NoError(t, ls.blockPipeline.Start(t.Context()))
@@ -623,7 +629,7 @@ func TestBlockPipelineLifecycleNoGoroutineLeakWithValidation(t *testing.T) {
 		var seed [32]byte
 		seed[0] = byte(i + 1)      //nolint:gosec
 		nonceSeed := byte(100 + i) //nolint:gosec
-		block, vb := buildValidatedTestModelsBlock(
+		block, _ := buildValidatedTestModelsBlock(
 			t,
 			seed,
 			nonceSeed,
@@ -639,10 +645,7 @@ func TestBlockPipelineLifecycleNoGoroutineLeakWithValidation(t *testing.T) {
 		}
 		ls.blockPipeline = pipeline.NewBlockPipeline(
 			pipeline.WithDecodeWorkers(2),
-			pipeline.WithValidateWorkers(2),
-			pipeline.WithEta0(vb.EpochNonceHex),
-			pipeline.WithSlotsPerKesPeriod(vb.SlotsPerKesPeriod),
-			pipeline.WithVerifyConfig(productionValidateVerifyConfig),
+			pipeline.WithTrustedDecodeOnly(),
 		)
 		ctx := t.Context()
 		require.NoError(t, ls.blockPipeline.Start(ctx))
@@ -693,7 +696,7 @@ func TestLedgerReadChainIteratorRollbackTrimMatchesValidateEnabled(
 	seed1[0], seed2[0] = 21, 22
 	const nonceSeed = 55
 
-	block1, vb1 := buildValidatedTestModelsBlock(t, seed1, nonceSeed, 100, 1)
+	block1, _ := buildValidatedTestModelsBlock(t, seed1, nonceSeed, 100, 1)
 	block2, _ := buildValidatedTestModelsBlock(t, seed2, nonceSeed, 500, 2)
 	point1 := ocommon.Point{Slot: block1.Slot, Hash: block1.Hash}
 	point2 := ocommon.Point{Slot: block2.Slot, Hash: block2.Hash}
@@ -743,10 +746,7 @@ func TestLedgerReadChainIteratorRollbackTrimMatchesValidateEnabled(
 	}
 	validateLS.blockPipeline = pipeline.NewBlockPipeline(
 		pipeline.WithDecodeWorkers(2),
-		pipeline.WithValidateWorkers(2),
-		pipeline.WithEta0(vb1.EpochNonceHex),
-		pipeline.WithSlotsPerKesPeriod(vb1.SlotsPerKesPeriod),
-		pipeline.WithVerifyConfig(productionValidateVerifyConfig),
+		pipeline.WithTrustedDecodeOnly(),
 	)
 	require.NoError(t, validateLS.blockPipeline.Start(t.Context()))
 	defer func() {
@@ -815,7 +815,7 @@ func TestDrainBlockPipelineBeforeRollbackWaitsForPendingWork(t *testing.T) {
 
 	var seed0 [32]byte
 	seed0[0] = 1
-	firstBlock, vb := buildValidatedTestModelsBlock(t, seed0, 200, 100, 1)
+	firstBlock, _ := buildValidatedTestModelsBlock(t, seed0, 200, 100, 1)
 
 	blocks := make([]models.Block, 0, numBlocks)
 	blocks = append(blocks, firstBlock)
@@ -840,10 +840,7 @@ func TestDrainBlockPipelineBeforeRollbackWaitsForPendingWork(t *testing.T) {
 	}
 	ls.blockPipeline = pipeline.NewBlockPipeline(
 		pipeline.WithDecodeWorkers(1),
-		pipeline.WithValidateWorkers(1),
-		pipeline.WithEta0(vb.EpochNonceHex),
-		pipeline.WithSlotsPerKesPeriod(vb.SlotsPerKesPeriod),
-		pipeline.WithVerifyConfig(productionValidateVerifyConfig),
+		pipeline.WithTrustedDecodeOnly(),
 	)
 	ctx := t.Context()
 	require.NoError(t, ls.blockPipeline.Start(ctx))
@@ -916,6 +913,7 @@ func TestProcessChainIteratorRollbackMatchesWithAndWithoutBlockPipeline(
 		fixture := newChainsyncRollbackFixture(t)
 		if attachPipeline {
 			fixture.ls.blockPipeline = pipeline.NewBlockPipeline(
+				pipeline.WithTrustedDecodeOnly(),
 				pipeline.WithDecodeWorkers(2),
 			)
 			require.NoError(t, fixture.ls.blockPipeline.Start(t.Context()))

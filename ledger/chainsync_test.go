@@ -5817,7 +5817,7 @@ func TestHandleEventBlockfetchBlockRecordsAdmissionVerification(t *testing.T) {
 			assert.Equal(
 				t,
 				tc.wantVerified,
-				ls.admissionVerifiedSlot(tb.block.SlotNumber()),
+				ls.hasAdmissionVerifiedRecord(tb.block.SlotNumber()),
 			)
 			if !tc.wantVerified {
 				assert.Equal(
@@ -19736,4 +19736,13 @@ func TestEnsureGenesisCommitteeWarnsWithoutConwayGenesis(t *testing.T) {
 		logs.String(),
 		"level=WARN msg=\"conway genesis not configured, genesis committee not seeded\"",
 	)
+}
+
+// hasAdmissionVerifiedRecord reports whether a block at slot has a current
+// admission record, without consuming it.
+func (ls *LedgerState) hasAdmissionVerifiedRecord(slot uint64) bool {
+	ls.admissionVerifiedMu.Lock()
+	record, ok := ls.admissionVerified[slot]
+	ls.admissionVerifiedMu.Unlock()
+	return ok && ls.headerCryptoVerificationGenerationCurrent(record.generation)
 }
