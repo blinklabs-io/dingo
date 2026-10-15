@@ -10046,8 +10046,10 @@ The canonical plugin auth-token environment setting overrides the compatibility
 same-origin on loopback or explicitly listed in `corsAllowedOrigins`; the root wildcard
 does not grant access to MCP. Rejected origins receive HTTP 403 before any
 transport or preflight handling. Native clients can omit Origin. Streaming
-responses have no absolute write timeout. The rate limiter reclaims stale entries
-on requests and starts no background worker. It runs before authentication, so
+responses have no absolute write timeout. The pre-authentication rate limiter
+keeps at most 4096 client identities in least-recently-used order. A single
+expiry timer removes identities after 30 idle minutes without waiting for more
+traffic. It runs before authentication, so
 failed credentials consume capacity; preflight and both health aliases bypass
 it. Negative or non-finite rate limits fail construction. Stopping MCP prevents
 new starts and closes its owned pool after listener shutdown; a timed-out start
@@ -10076,6 +10078,9 @@ canceled requests cannot accumulate workers.
 Arbitrary SQLite queries borrow one connection, enable `query_only`, and apply
 SQLite size limits before execution. The original settings are restored before
 the connection returns to an injected pool.
+Markdown tables wrap their sanitized cells in explicit untrusted-chain-data
+delimiters. Chain-controlled text is HTML-escaped before rendering so it cannot
+terminate that envelope.
 
 See [MCP architecture](docs/mcp/architecture.md) for tool semantics and upstream
 protocol references.

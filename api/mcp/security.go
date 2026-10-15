@@ -15,6 +15,7 @@
 package mcp
 
 import (
+	"container/list"
 	"crypto/subtle"
 	"encoding/json"
 	"net"
@@ -27,25 +28,51 @@ import (
 	"golang.org/x/time/rate"
 )
 
-// clientLimiter tracks rate limiters for client IP addresses.
+const (
+	clientLimiterMaxEntries = 4096
+	clientLimiterIdleTTL    = 30 * time.Minute
+)
+
+type clientLimiterEntry struct {
+	limiter  *rate.Limiter
+	lastSeen time.Time
+	element  *list.Element
+}
+
+// clientLimiter tracks a bounded set of rate limiters for client IP addresses.
 type clientLimiter struct {
-	mu          sync.Mutex
-	limiters    map[string]*rate.Limiter
-	lastSeen    map[string]time.Time
-	rate        rate.Limit
-	burst       int
-	nextCleanup time.Time
+	mu         sync.Mutex
+	entries    map[string]*clientLimiterEntry
+	order      list.List
+	rate       rate.Limit
+	burst      int
+	maxEntries int
+	idleTTL    time.Duration
+	timer      *time.Timer
 }
 
 func newClientLimiter(r rate.Limit, burst int) *clientLimiter {
-	cl := &clientLimiter{
-		limiters: make(map[string]*rate.Limiter),
-		lastSeen: make(map[string]time.Time),
-		rate:     r,
-		burst:    burst,
-	}
+	return newClientLimiterWithBounds(
+		r,
+		burst,
+		clientLimiterMaxEntries,
+		clientLimiterIdleTTL,
+	)
+}
 
-	return cl
+func newClientLimiterWithBounds(
+	r rate.Limit,
+	burst int,
+	maxEntries int,
+	idleTTL time.Duration,
+) *clientLimiter {
+	return &clientLimiter{
+		entries:    make(map[string]*clientLimiterEntry),
+		rate:       r,
+		burst:      burst,
+		maxEntries: maxEntries,
+		idleTTL:    idleTTL,
+	}
 }
 
 func (cl *clientLimiter) getLimiter(ip string) *rate.Limiter {
@@ -53,24 +80,69 @@ func (cl *clientLimiter) getLimiter(ip string) *rate.Limiter {
 	defer cl.mu.Unlock()
 
 	now := time.Now()
-	// Reclaim idle clients on requests so retired handlers own no goroutines.
-	if !now.Before(cl.nextCleanup) {
-		for ip, last := range cl.lastSeen {
-			if last.Before(now.Add(-30 * time.Minute)) {
-				delete(cl.limiters, ip)
-				delete(cl.lastSeen, ip)
-			}
-		}
-		cl.nextCleanup = now.Add(10 * time.Minute)
+	cl.evictExpiredLocked(now)
+	if entry, ok := cl.entries[ip]; ok {
+		entry.lastSeen = now
+		cl.order.MoveToBack(entry.element)
+		cl.scheduleExpiryLocked(now)
+		return entry.limiter
 	}
 
-	limiter, exists := cl.limiters[ip]
-	if !exists {
-		limiter = rate.NewLimiter(cl.rate, cl.burst)
-		cl.limiters[ip] = limiter
+	if len(cl.entries) >= cl.maxEntries {
+		cl.removeOldestLocked()
 	}
-	cl.lastSeen[ip] = time.Now()
-	return limiter
+	entry := &clientLimiterEntry{
+		limiter:  rate.NewLimiter(cl.rate, cl.burst),
+		lastSeen: now,
+	}
+	entry.element = cl.order.PushBack(ip)
+	cl.entries[ip] = entry
+	cl.scheduleExpiryLocked(now)
+	return entry.limiter
+}
+
+func (cl *clientLimiter) removeOldestLocked() {
+	oldest := cl.order.Front()
+	if oldest == nil {
+		return
+	}
+	delete(cl.entries, oldest.Value.(string))
+	cl.order.Remove(oldest)
+}
+
+func (cl *clientLimiter) evictExpiredLocked(now time.Time) {
+	for {
+		oldest := cl.order.Front()
+		if oldest == nil {
+			return
+		}
+		entry := cl.entries[oldest.Value.(string)]
+		if now.Before(entry.lastSeen.Add(cl.idleTTL)) {
+			return
+		}
+		cl.removeOldestLocked()
+	}
+}
+
+func (cl *clientLimiter) scheduleExpiryLocked(now time.Time) {
+	if cl.timer != nil || cl.order.Len() == 0 {
+		return
+	}
+	oldest := cl.entries[cl.order.Front().Value.(string)]
+	delay := oldest.lastSeen.Add(cl.idleTTL).Sub(now)
+	if delay < 0 {
+		delay = 0
+	}
+	cl.timer = time.AfterFunc(delay, cl.expireIdle)
+}
+
+func (cl *clientLimiter) expireIdle() {
+	cl.mu.Lock()
+	defer cl.mu.Unlock()
+	cl.timer = nil
+	now := time.Now()
+	cl.evictExpiredLocked(now)
+	cl.scheduleExpiryLocked(now)
 }
 
 // SecurityMiddleware wraps an HTTP handler with optional authentication, rate limiting, and CORS.

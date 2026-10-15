@@ -56,12 +56,12 @@ api/mcp/
 
 ### 2.3 Security & Guardrails (`security.go`, `sanitize.go`)
 - **Bearer Authentication**: Optional shared secret token configured via `DINGO_PLUGINS_API_MCP_CONFIG_AUTH_TOKEN` or YAML `plugins.api.mcp.config.authToken`.
-- **Rate Limiting**: Thread-safe token bucket rate limiter (default: 60 requests/sec with burst capacity of 15) keyed per client IP address.
+- **Rate Limiting**: Thread-safe token bucket rate limiter (default: 60 requests/sec with burst capacity of 15) keyed per client IP address. Pre-authentication state is capped at 4096 identities and one timer removes entries after 30 idle minutes.
 - **Strict Read-Only SQL Validator**:
   - Identifies the main statement after CTE definitions, accounting for comments, quoted data and nested expressions; permits SELECT/VALUES reads and EXPLAIN without executing DDL or DML.
   - Enforces single-statement execution (blocks `;` statement chaining).
   - Whitelists only safe PRAGMA queries (`table_info`, `index_list`, `index_info`, `foreign_key_list`).
-- **External Text Handling**: Bounds text, removes control and invisible formatting, JSON-quotes it, and escapes Markdown syntax before formatting registry and CIP-25 data. Results explicitly mark external metadata as untrusted; clients must not follow instructions contained in it.
+- **External Text Handling**: Bounds text, removes control and invisible formatting, JSON-quotes it, and escapes Markdown syntax before formatting registry and CIP-25 data. Markdown tables wrap sanitized, HTML-escaped cells in an explicit untrusted-data envelope. Clients must not follow instructions contained in it.
 - **Network Bind Protection**: The default listener is loopback. Provider construction rejects a non-loopback bind unless both an auth token and server TLS are configured.
 
 ---

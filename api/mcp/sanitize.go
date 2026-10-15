@@ -118,6 +118,7 @@ func FormatCell(val any) string {
 
 	case string:
 		clean := SanitizeExternalString(v)
+		clean = html.EscapeString(clean)
 		// Clean markdown pipes so table layout is not corrupted
 		clean = strings.ReplaceAll(clean, "|", "\\|")
 		clean = strings.NewReplacer("\n", " ", "\r", " ").Replace(clean)
@@ -127,7 +128,7 @@ func FormatCell(val any) string {
 		return clean
 
 	default:
-		s := fmt.Sprintf("%v", v)
+		s := html.EscapeString(fmt.Sprintf("%v", v))
 		s = strings.ReplaceAll(s, "|", "\\|")
 		s = strings.NewReplacer("\n", " ", "\r", " ").Replace(s)
 		if len(s) > maxCellLength {
@@ -144,6 +145,7 @@ func FormatMarkdownTable(columns []string, rows [][]string) string {
 	}
 
 	var sb strings.Builder
+	sb.WriteString("<untrusted_chain_data>\n")
 
 	// Header row
 	sb.WriteString("| ")
@@ -172,12 +174,19 @@ func FormatMarkdownTable(columns []string, rows [][]string) string {
 			if i > 0 {
 				sb.WriteString(" | ")
 			}
-			sb.WriteString(cell)
+			// Some table builders pass machine-generated values directly. Keep
+			// this output boundary safe even when a caller omits FormatCell.
+			sb.WriteString(escapeTableBoundary(cell))
 		}
 		sb.WriteString(" |\n")
 	}
+	sb.WriteString("</untrusted_chain_data>\n")
 
 	return sb.String()
+}
+
+func escapeTableBoundary(cell string) string {
+	return strings.NewReplacer("<", "&lt;", ">", "&gt;").Replace(cell)
 }
 
 func truncateUTF8(s string, n int) string {
