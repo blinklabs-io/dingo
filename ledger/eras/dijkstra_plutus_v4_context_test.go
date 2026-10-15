@@ -292,21 +292,23 @@ func requireV4ScriptFailure(t *testing.T, err error) {
 	require.True(t, ok, "expected a Plutus script failure, got: %v", err)
 }
 
-func TestValidateTxDijkstraPlutusV4TopLevelContextOmitsSubTxIxAndTopTxInfo(
+func TestValidateTxDijkstraPlutusV4TopLevelContextSubTxIxAndTopTxInfo(
 	t *testing.T,
 ) {
 	t.Parallel()
 	for _, test := range []struct {
 		name string
 		sel  func(ctx plutusv4script.Term) plutusv4script.Term
+		// tag is the Maybe constructor the script sees: 0 is Just, 1 Nothing.
+		tag int64
 	}{
-		{"txInfoSubTxIx", plutusv4script.TxInfoSubTxIx},
-		{"guarding TopTxInfo", plutusv4script.GuardingTopTxInfo},
+		{"txInfoSubTxIx is Nothing", plutusv4script.TxInfoSubTxIx, 1},
+		{"guarding TopTxInfo is Just", plutusv4script.GuardingTopTxInfo, 0},
 	} {
-		t.Run(test.name+" is Nothing", func(t *testing.T) {
+		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 			spec := v4ContextSpec{
-				topScript: plutusv4script.MaybeScript(t, test.sel, 1),
+				topScript: plutusv4script.MaybeScript(t, test.sel, test.tag),
 			}
 			fixture := newV4ContextFixture(t, spec)
 			tx := fixture.wire(t, spec)
@@ -315,10 +317,10 @@ func TestValidateTxDijkstraPlutusV4TopLevelContextOmitsSubTxIxAndTopTxInfo(
 				ValidateTxDijkstra(tx, 0, fixture.state, fixture.params),
 			)
 		})
-		t.Run(test.name+" is not Just", func(t *testing.T) {
+		t.Run(test.name+" rejects the other constructor", func(t *testing.T) {
 			t.Parallel()
 			spec := v4ContextSpec{
-				topScript: plutusv4script.MaybeScript(t, test.sel, 0),
+				topScript: plutusv4script.MaybeScript(t, test.sel, 1-test.tag),
 			}
 			fixture := newV4ContextFixture(t, spec)
 			tx := fixture.wire(t, spec)
@@ -330,22 +332,25 @@ func TestValidateTxDijkstraPlutusV4TopLevelContextOmitsSubTxIxAndTopTxInfo(
 	}
 }
 
-func TestValidateTxDijkstraPlutusV4ChildContextOmitsSubTxIxAndTopTxInfo(
+func TestValidateTxDijkstraPlutusV4ChildContextSubTxIxAndTopTxInfo(
 	t *testing.T,
 ) {
 	t.Parallel()
 	for _, test := range []struct {
 		name string
 		sel  func(ctx plutusv4script.Term) plutusv4script.Term
+		// tag is the Maybe constructor the script sees: 0 is Just, 1 Nothing.
+		tag int64
 	}{
-		{"txInfoSubTxIx", plutusv4script.TxInfoSubTxIx},
-		{"guarding TopTxInfo", plutusv4script.GuardingTopTxInfo},
+		{"txInfoSubTxIx is Just", plutusv4script.TxInfoSubTxIx, 0},
+		{"guarding TopTxInfo is Nothing", plutusv4script.GuardingTopTxInfo, 1},
 	} {
-		t.Run(test.name+" is Nothing for every child", func(t *testing.T) {
+		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
-			nothing := plutusv4script.MaybeScript(t, test.sel, 1)
 			spec := v4ContextSpec{
-				childScripts: []lcommon.PlutusV4Script{nothing},
+				childScripts: []lcommon.PlutusV4Script{
+					plutusv4script.MaybeScript(t, test.sel, test.tag),
+				},
 			}
 			fixture := newV4ContextFixture(t, spec)
 			tx := fixture.wire(t, spec)
@@ -354,11 +359,11 @@ func TestValidateTxDijkstraPlutusV4ChildContextOmitsSubTxIxAndTopTxInfo(
 				ValidateTxDijkstra(tx, 0, fixture.state, fixture.params),
 			)
 		})
-		t.Run(test.name+" is not Just for a child", func(t *testing.T) {
+		t.Run(test.name+" rejects the other constructor", func(t *testing.T) {
 			t.Parallel()
 			spec := v4ContextSpec{
 				childScripts: []lcommon.PlutusV4Script{
-					plutusv4script.MaybeScript(t, test.sel, 0),
+					plutusv4script.MaybeScript(t, test.sel, 1-test.tag),
 				},
 			}
 			fixture := newV4ContextFixture(t, spec)
@@ -445,10 +450,11 @@ func TestValidateTxDijkstraRequiredTopLevelGuardsTopLevelBody(t *testing.T) {
 
 func TestValidateTxDijkstraRequiredTopLevelGuardsChildBody(t *testing.T) {
 	t.Parallel()
+	// A child sees its own sub-transaction index, so the script expects Just.
 	childScript := plutusv4script.MaybeScript(
 		t,
 		plutusv4script.TxInfoSubTxIx,
-		1,
+		0,
 	)
 	_, key := v4RequiredGuards(childScript)
 	required := gdijkstra.DijkstraRequiredTopLevelGuards{&key: nil}

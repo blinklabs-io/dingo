@@ -241,7 +241,7 @@ func testLeiosEndorserBlockRawWithRefs(
 		binary.BigEndian.PutUint32(hashSeed[8:], uint32(refIdx))
 		refs[refIdx] = lcommon.LeiosTransactionReference{
 			TransactionHash: lcommon.Blake2b256Hash(hashSeed[:]),
-			TransactionSize: uint16(refIdx + 1),
+			TransactionSize: uint32(refIdx + 1),
 		}
 	}
 	block := lcommon.LeiosEndorserBlock{
@@ -411,7 +411,12 @@ func TestLeiosFetchServerBlockTxsServesAvailableBodiesWhileIncomplete(t *testing
 	require.NoError(t, err)
 	response, ok = msg.(*oleiosfetch.MsgBlockTxs)
 	require.True(t, ok)
-	require.Nil(t, response.Bitmaps)
+	require.Equal(t, point, response.Point)
+	require.Equal(
+		t,
+		map[uint16]uint64{0: (1 << 63) | (1 << 62)},
+		response.Bitmaps,
+	)
 	require.Equal(t, []cbor.RawMessage{tx0, tx1}, response.TxsRaw)
 }
 
@@ -545,12 +550,18 @@ func TestLeiosNotifyBlockAnnouncementIsConsumedAndDeduplicated(t *testing.T) {
 	o.leiosEBLog.registerConn("test", nil, nil)
 	err = o.leiosnotifyClientNotification(
 		oleiosnotify.CallbackContext{ConnectionId: conn.Id()},
-		oleiosnotify.NewMsgBlockAnnouncement(headerRaw),
+		oleiosnotify.NewMsgBlockAnnouncement(
+			uint(gdijkstra.EraIdDijkstra),
+			headerRaw,
+		),
 	)
 	require.NoError(t, err)
 	err = o.leiosnotifyClientNotification(
 		oleiosnotify.CallbackContext{ConnectionId: conn.Id()},
-		oleiosnotify.NewMsgBlockAnnouncement(headerRaw),
+		oleiosnotify.NewMsgBlockAnnouncement(
+			uint(gdijkstra.EraIdDijkstra),
+			headerRaw,
+		),
 	)
 	require.NoError(t, err)
 	entry, _ := o.leiosEBLog.next("test")
@@ -673,6 +684,7 @@ func TestLeiosNotifyAnnouncementOCINVerdictControlsDiffusion(t *testing.T) {
 			err = o.leiosnotifyClientNotification(
 				oleiosnotify.CallbackContext{ConnectionId: conn.Id()},
 				oleiosnotify.NewMsgBlockAnnouncement(
+					uint(gdijkstra.EraIdDijkstra),
 					testDijkstraAnnouncementHeaderRaw(t),
 				),
 			)
@@ -1330,8 +1342,8 @@ func testLeiosManifestTx(
 	require.NotEmpty(t, txElems)
 	wrapped, err := cbor.Encode([]byte(txCbor))
 	require.NoError(t, err)
-	// Test fixture is small, so the length fits in uint16.
-	txSize := uint16(len(txCbor)) //nolint:gosec // G115
+	// Test fixture is small, so the length fits in uint32.
+	txSize := uint32(len(txCbor)) //nolint:gosec // G115
 	return cbor.RawMessage(wrapped), lcommon.LeiosTransactionReference{
 		TransactionHash: lcommon.Blake2b256Hash(txCbor),
 		TransactionSize: txSize,
@@ -1444,7 +1456,7 @@ func TestStoreLeiosEndorserBlockRejectsMalformedCompleteBodyBeforePublication(
 	blockRaw, err := lcommon.LeiosEndorserBlock{
 		TransactionReferences: []lcommon.LeiosTransactionReference{{
 			TransactionHash: lcommon.Blake2b256Hash(txRaw),
-			TransactionSize: uint16(len(txRaw)),
+			TransactionSize: uint32(len(txRaw)),
 		}},
 	}.MarshalCBOR()
 	require.NoError(t, err)
@@ -1539,7 +1551,7 @@ func (r manifestTxRequester) BlockTxsRequest(
 			txs = append(txs, r.txs[index])
 		}
 	}
-	return oleiosfetch.NewMsgBlockTxsFull(point, bitmaps, txs), nil
+	return oleiosfetch.NewMsgBlockTxs(point, bitmaps, txs), nil
 }
 
 type recordingManifestTxRequester struct {
@@ -1560,7 +1572,7 @@ func (r *recordingManifestTxRequester) BlockTxsRequest(
 			txs = append(txs, r.txs[index])
 		}
 	}
-	return oleiosfetch.NewMsgBlockTxsFull(point, bitmaps, txs), nil
+	return oleiosfetch.NewMsgBlockTxs(point, bitmaps, txs), nil
 }
 
 func TestFetchLeiosEbTxsBatchedRefetchesMismatchedRetainedPartial(
@@ -1715,7 +1727,7 @@ func TestLoadLeiosEBFromDBRejectsMalformedCompleteTransactions(
 	manifestRaw, err := lcommon.LeiosEndorserBlock{
 		TransactionReferences: []lcommon.LeiosTransactionReference{{
 			TransactionHash: lcommon.Blake2b256Hash(malformedTx),
-			TransactionSize: uint16(len(malformedTx)),
+			TransactionSize: uint32(len(malformedTx)),
 		}},
 	}.MarshalCBOR()
 	require.NoError(t, err)
@@ -2204,7 +2216,7 @@ func TestValidateLeiosEndorserBlockForHeaderWaitsForRemoteBody(t *testing.T) {
 	txRaw := testDijkstraTx(t, 0)
 	ref := lcommon.LeiosTransactionReference{
 		TransactionHash: lcommon.Blake2b256Hash(txRaw),
-		TransactionSize: uint16(len(txRaw)),
+		TransactionSize: uint32(len(txRaw)),
 	}
 	blockRaw, err := cbor.Encode(&lcommon.LeiosEndorserBlock{
 		TransactionReferences: []lcommon.LeiosTransactionReference{ref},
@@ -2277,7 +2289,7 @@ func TestValidateLeiosEndorserBlockForHeaderKeepsCallerValidationBudget(
 	blockRaw, err := cbor.Encode(&lcommon.LeiosEndorserBlock{
 		TransactionReferences: []lcommon.LeiosTransactionReference{{
 			TransactionHash: lcommon.Blake2b256Hash(txRaw),
-			TransactionSize: uint16(len(txRaw)),
+			TransactionSize: uint32(len(txRaw)),
 		}},
 	})
 	require.NoError(t, err)
@@ -2330,7 +2342,7 @@ func TestValidateLeiosEndorserBlockForHeaderAcceptsForgedGenesisParent(
 	blockRaw, err := cbor.Encode(&lcommon.LeiosEndorserBlock{
 		TransactionReferences: []lcommon.LeiosTransactionReference{{
 			TransactionHash: lcommon.Blake2b256Hash(txRaw),
-			TransactionSize: uint16(len(txRaw)),
+			TransactionSize: uint32(len(txRaw)),
 		}},
 	})
 	require.NoError(t, err)
@@ -2431,7 +2443,7 @@ func TestValidateLeiosEndorserBlockForHeaderBindsBodyArrivingAfterWait(
 	blockRaw, err := cbor.Encode(&lcommon.LeiosEndorserBlock{
 		TransactionReferences: []lcommon.LeiosTransactionReference{{
 			TransactionHash: lcommon.Blake2b256Hash(txRaw),
-			TransactionSize: uint16(len(txRaw)),
+			TransactionSize: uint32(len(txRaw)),
 		}},
 	})
 	require.NoError(t, err)
@@ -2649,7 +2661,7 @@ func TestValidateLeiosEndorserBlockForHeaderRejectsSizeBeforePublication(
 	blockRaw, err := cbor.Encode(&lcommon.LeiosEndorserBlock{
 		TransactionReferences: []lcommon.LeiosTransactionReference{{
 			TransactionHash: lcommon.Blake2b256Hash(txRaw),
-			TransactionSize: uint16(len(txRaw)),
+			TransactionSize: uint32(len(txRaw)),
 		}},
 	})
 	require.NoError(t, err)
@@ -2735,7 +2747,7 @@ func TestValidateLeiosEndorserBlockForHeaderRetriesStorageFault(t *testing.T) {
 	txRaw := testDijkstraTx(t, 0)
 	ref := lcommon.LeiosTransactionReference{
 		TransactionHash: lcommon.Blake2b256Hash(txRaw),
-		TransactionSize: uint16(len(txRaw)),
+		TransactionSize: uint32(len(txRaw)),
 	}
 	blockRaw, err := cbor.Encode(&lcommon.LeiosEndorserBlock{
 		TransactionReferences: []lcommon.LeiosTransactionReference{ref},
@@ -2814,7 +2826,7 @@ func TestValidateLeiosEndorserBlockForHeaderPreservesCachedInvalidVerdict(
 	blockRaw, err := cbor.Encode(&lcommon.LeiosEndorserBlock{
 		TransactionReferences: []lcommon.LeiosTransactionReference{{
 			TransactionHash: lcommon.Blake2b256Hash(txRaw),
-			TransactionSize: uint16(len(txRaw)),
+			TransactionSize: uint32(len(txRaw)),
 		}},
 	})
 	require.NoError(t, err)
@@ -2864,7 +2876,7 @@ func TestValidateLeiosEndorserBlockForHeaderRevalidatesDistinctParent(
 	txRaw := testDijkstraTx(t, 0)
 	ref := lcommon.LeiosTransactionReference{
 		TransactionHash: lcommon.Blake2b256Hash(txRaw),
-		TransactionSize: uint16(len(txRaw)),
+		TransactionSize: uint32(len(txRaw)),
 	}
 	blockRaw, err := cbor.Encode(&lcommon.LeiosEndorserBlock{
 		TransactionReferences: []lcommon.LeiosTransactionReference{ref},
@@ -2975,7 +2987,7 @@ func TestScheduleLeiosEndorserBlockValidationUsesCurrentHeaderParent(
 	blockRaw, err := cbor.Encode(&lcommon.LeiosEndorserBlock{
 		TransactionReferences: []lcommon.LeiosTransactionReference{{
 			TransactionHash: lcommon.Blake2b256Hash(txRaw),
-			TransactionSize: uint16(len(txRaw)),
+			TransactionSize: uint32(len(txRaw)),
 		}},
 	})
 	require.NoError(t, err)

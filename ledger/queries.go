@@ -1236,8 +1236,8 @@ func (ls *LedgerState) queryShelley(ctx context.Context, query *olocalstatequery
 //
 // Point-pinning coverage audit (every case below, classified):
 //
-// Honors at today: ShelleyStakeDistributionQuery and ShelleyPoolDistr2Query
-// (both via PoolStakeDistribution, resolving at to its epoch and reading
+// Honors at today: ShelleyStakeDistributionQuery, ShelleyStakeDistribution2Query
+// and ShelleyPoolDistr2Query (the last two via PoolStakeDistribution, resolving at to its epoch and reading
 // that epoch's persisted mark snapshot; StakeDistribution's circulating-
 // supply denominator additionally resolves historically via
 // GetNetworkStateAsOfSlot), ShelleyCurrentProtocolParamsQuery
@@ -1365,6 +1365,8 @@ func (ls *LedgerState) queryShelleyLeaf(ctx context.Context, query any,
 		return ls.queryShelleyPoolDistr2(ctx, q, at, txn)
 	case *olocalstatequery.ShelleyStakeDistributionQuery:
 		return ls.queryShelleyStakeDistribution(ctx, at, txn)
+	case *olocalstatequery.ShelleyStakeDistribution2Query:
+		return ls.queryShelleyStakeDistribution2(ctx, at, txn)
 	case *olocalstatequery.ShelleyUtxoWholeQuery:
 		return ls.queryShelleyUtxoWhole(ctx, at, txn)
 	case *olocalstatequery.ShelleyLedgerTipQuery:
@@ -1469,7 +1471,8 @@ func (ls *LedgerState) queryShelleyCbor(ctx context.Context, q *olocalstatequery
 	var content any = values
 	switch q.Query.(type) {
 	case *olocalstatequery.ShelleyPoolDistr2Query,
-		*olocalstatequery.ShelleyStakeDistributionQuery:
+		*olocalstatequery.ShelleyStakeDistributionQuery,
+		*olocalstatequery.ShelleyStakeDistribution2Query:
 		// content stays the whole slice; see comment above.
 	default:
 		if len(values) == 1 {

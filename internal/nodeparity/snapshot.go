@@ -173,15 +173,49 @@ func queryProtocolParamsAndStakeDistribution(
 		return nil, nil, err
 	}
 
-	sd, err := client.GetStakeDistribution()
+	stakeDist, err := queryStakeDistribution(client)
 	if err != nil {
 		return nil, nil, fmt.Errorf("stake distribution query: %w", err)
 	}
+	return ppProto, stakeDist, nil
+}
+
+// queryStakeDistribution returns each pool's stake fraction and VRF key hash.
+// GetStakeDistribution is not available from node-to-client version 21, where
+// GetStakeDistribution2 replaces it, so the old query is tried first and the
+// new one used only when the negotiated version does not support it.
+func queryStakeDistribution(
+	client *localstatequery.Client,
+) (map[lcommon.PoolId]StakeDistributionEntry, error) {
+	sd, err := client.GetStakeDistribution()
+	if err == nil {
+		stakeDist := make(
+			map[lcommon.PoolId]StakeDistributionEntry,
+			len(sd.Results),
+		)
+		for poolID, entry := range sd.Results {
+			if entry.StakeFraction == nil {
+				continue
+			}
+			stakeDist[poolID] = StakeDistributionEntry{
+				StakeFraction: entry.StakeFraction.Rat,
+				VrfHash:       entry.VrfHash,
+			}
+		}
+		return stakeDist, nil
+	}
+	if !errors.Is(err, localstatequery.ErrQueryUnsupportedVersion) {
+		return nil, err
+	}
+	sd2, err := client.GetStakeDistribution2()
+	if err != nil {
+		return nil, err
+	}
 	stakeDist := make(
 		map[lcommon.PoolId]StakeDistributionEntry,
-		len(sd.Results),
+		len(sd2.Distribution.Pools),
 	)
-	for poolID, entry := range sd.Results {
+	for poolID, entry := range sd2.Distribution.Pools {
 		if entry.StakeFraction == nil {
 			continue
 		}
@@ -190,7 +224,7 @@ func queryProtocolParamsAndStakeDistribution(
 			VrfHash:       entry.VrfHash,
 		}
 	}
-	return ppProto, stakeDist, nil
+	return stakeDist, nil
 }
 
 // utxoByTxInBatchSize bounds how many UTxO refs QueryReferenceUTxOSnapshot

@@ -5818,7 +5818,7 @@ func TestHandleEventBlockfetchBlockRecordsAdmissionVerification(t *testing.T) {
 			assert.Equal(
 				t,
 				tc.wantVerified,
-				ls.admissionVerifiedSlot(tb.block.SlotNumber()),
+				ls.hasAdmissionVerifiedRecord(tb.block.SlotNumber()),
 			)
 			if !tc.wantVerified {
 				assert.Equal(
@@ -6630,6 +6630,7 @@ func TestBlockfetchStatefulHeaderVerificationDefersUntilLedgerApply(
 	)
 	require.NoError(t, err)
 	require.True(t, found)
+	assert.Equal(t, []byte("true@127.0.0.1:3001"), payload)
 	source, err := deferredHeaderMarkerBlobSource(payload)
 	require.NoError(t, err)
 	require.NotNil(t, source.RemoteAddr)
@@ -19855,17 +19856,12 @@ func TestDeferredHeaderLegacyMarkerRestoresWithoutSource(t *testing.T) {
 	assert.Equal(t, ouroboros.ConnectionId{}, source)
 }
 
-// A persisted key with a malformed value cannot silently restore without its
-// peer attribution. Startup must stop so the source cannot evade the cooldown
-// through damaged marker state.
-func TestDeferredHeaderMalformedMarkerFailsStartup(t *testing.T) {
+// The legacy sync_state format is an exact bare marker. Unknown values fail
+// closed instead of being interpreted as an unsupported attribution format.
+func TestDeferredHeaderMalformedLegacyMarkerFailsClosed(t *testing.T) {
 	t.Parallel()
 
-	for _, value := range []string{
-		"true@",
-		"true@not-an-address",
-		"truejunk",
-	} {
+	for _, value := range []string{"true@10.0.0.1:3001", "truejunk"} {
 		t.Run(value, func(t *testing.T) {
 			t.Parallel()
 			tb := createTestBlock(t, [32]byte{52}, 0, tamperNone)
@@ -19881,10 +19877,37 @@ func TestDeferredHeaderMalformedMarkerFailsStartup(t *testing.T) {
 			))
 
 			err := ls.repopulateDeferredHeaderValidation()
-			require.ErrorContains(t, err, "decode deferred-header marker")
+			require.ErrorContains(t, err, "invalid legacy value")
 			assert.Equal(t, ouroboros.ConnectionId{}, ls.deferredHeaderSource(point))
+			required, source, err := ls.deferredHeaderValidationRequired(
+				point,
+				nil,
+			)
+			require.ErrorContains(t, err, "invalid legacy value")
+			assert.False(t, required)
+			assert.Equal(t, ouroboros.ConnectionId{}, source)
 		})
 	}
+}
+
+func TestDeferredHeaderValidationPrefersLiveSource(t *testing.T) {
+	t.Parallel()
+
+	tb := createTestBlock(t, [32]byte{55}, 0, tamperNone)
+	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
+	point := ocommon.NewPoint(tb.block.SlotNumber(), tb.block.Hash().Bytes())
+	liveSource := testRecycleConnId()
+	ls.markDeferredHeaderValidationFrom(point, liveSource)
+	require.NoError(t, db.SetDeferredHeaderMarkerWithValue(
+		headerValidationPointKey(point),
+		[]byte("true@127.0.0.1:3002"),
+	))
+
+	required, source, err := ls.deferredHeaderValidationRequired(point, nil)
+	require.NoError(t, err)
+	assert.True(t, required)
+	require.NotNil(t, source.RemoteAddr)
+	assert.Equal(t, "127.0.0.1:3001", source.RemoteAddr.String())
 }
 
 func TestDeferredHeaderMalformedBlobMarkerFailsStartup(t *testing.T) {
@@ -20005,4 +20028,13 @@ func TestEnsureGenesisCommitteeWarnsWithoutConwayGenesis(t *testing.T) {
 		logs.String(),
 		"level=WARN msg=\"conway genesis not configured, genesis committee not seeded\"",
 	)
+}
+
+// hasAdmissionVerifiedRecord reports whether a block at slot has a current
+// admission record, without consuming it.
+func (ls *LedgerState) hasAdmissionVerifiedRecord(slot uint64) bool {
+	ls.admissionVerifiedMu.Lock()
+	record, ok := ls.admissionVerified[slot]
+	ls.admissionVerifiedMu.Unlock()
+	return ok && ls.headerCryptoVerificationGenerationCurrent(record.generation)
 }

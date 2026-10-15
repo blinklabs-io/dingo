@@ -658,15 +658,6 @@ func (ls *LedgerState) markAdmissionVerified(
 	}
 }
 
-// admissionVerifiedSlot reports whether a block at slot has an admission
-// record. It does not consume it.
-func (ls *LedgerState) admissionVerifiedSlot(slot uint64) bool {
-	ls.admissionVerifiedMu.Lock()
-	record, ok := ls.admissionVerified[slot]
-	ls.admissionVerifiedMu.Unlock()
-	return ok && ls.headerCryptoVerificationGenerationCurrent(record.generation)
-}
-
 // consumeAdmissionVerified removes any record for point's slot and reports
 // whether it was for exactly this point. A record for another hash at the same
 // slot is dropped without vouching for point.
@@ -1008,7 +999,6 @@ func (ls *LedgerState) repopulateDeferredHeaderValidation() error {
 		keys = append(keys, marker.Key)
 		blobValues[marker.Key] = marker.Value
 	}
-	legacyKeys := make(map[string]struct{})
 	// Markers and the eviction floor an earlier version wrote to sync_state
 	// are still honoured.
 	if ls.db.Metadata() != nil {
@@ -1027,8 +1017,24 @@ func (ls *LedgerState) repopulateDeferredHeaderValidation() error {
 				syncKey,
 				deferredHeaderValidationSyncStatePrefix,
 			)
-			keys = append(keys, mapKey)
-			legacyKeys[mapKey] = struct{}{}
+			value, err := ls.db.GetSyncState(syncKey, nil)
+			if err != nil {
+				return fmt.Errorf(
+					"read deferred-header marker %q: %w", syncKey, err,
+				)
+			}
+			// Earlier releases wrote only the exact bare marker to sync_state.
+			// Reject unknown values rather than interpreting an unsupported
+			// address-bearing format or silently dropping a persisted marker.
+			if value == deferredHeaderValidationSyncStateValue {
+				keys = append(keys, mapKey)
+			} else if value != "" {
+				return fmt.Errorf(
+					"decode deferred-header marker %q: invalid legacy value %q",
+					syncKey,
+					value,
+				)
+			}
 		}
 		floorValue, err := ls.db.GetSyncState(
 			deferredHeaderValidationFloorSyncStateKey,
@@ -1065,32 +1071,6 @@ func (ls *LedgerState) repopulateDeferredHeaderValidation() error {
 				return fmt.Errorf(
 					"decode deferred-header marker %q: %w", mapKey, err,
 				)
-			}
-		}
-		if _, isLegacy := legacyKeys[mapKey]; isLegacy {
-			syncKey := deferredHeaderValidationSyncStatePrefix + mapKey
-			value, err := ls.db.GetSyncState(syncKey, nil)
-			if err != nil {
-				return fmt.Errorf(
-					"read deferred-header marker %q: %w", syncKey, err,
-				)
-			}
-			if value != "" {
-				legacySource, err := deferredHeaderMarkerSource(value)
-				if err != nil {
-					return fmt.Errorf(
-						"decode deferred-header marker %q: %w", syncKey, err,
-					)
-				}
-				if source.RemoteAddr == nil {
-					source = legacySource
-				} else if legacySource.RemoteAddr != nil &&
-					source.RemoteAddr.String() != legacySource.RemoteAddr.String() {
-					return fmt.Errorf(
-						"deferred-header marker %q has conflicting peer addresses",
-						mapKey,
-					)
-				}
 			}
 		}
 		restoredSources[mapKey] = source
@@ -1235,11 +1215,6 @@ func (ls *LedgerState) deferredHeaderValidationRequired(
 		}
 		if source.RemoteAddr == nil {
 			source = persistedSource
-		} else if persistedSource.RemoteAddr != nil &&
-			source.RemoteAddr.String() != persistedSource.RemoteAddr.String() {
-			return false, source, errors.New(
-				"deferred header validation markers have conflicting peer addresses",
-			)
 		}
 	}
 	if ls.db.Metadata() == nil {
@@ -1255,18 +1230,12 @@ func (ls *LedgerState) deferredHeaderValidationRequired(
 			err,
 		)
 	}
-	marked := value != ""
-	if marked {
-		persistedSource, err := deferredHeaderMarkerSource(value)
-		if err != nil {
-			return false, source, fmt.Errorf(
-				"decode deferred header validation marker: %w",
-				err,
-			)
-		}
-		if source == (ouroboros.ConnectionId{}) {
-			source = persistedSource
-		}
+	marked := value == deferredHeaderValidationSyncStateValue
+	if value != "" && !marked {
+		return false, source, fmt.Errorf(
+			"decode deferred header validation marker: invalid legacy value %q",
+			value,
+		)
 	}
 	return required || persisted || marked, source, nil
 }

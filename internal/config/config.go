@@ -789,8 +789,8 @@ type Config struct {
 	// defaults off until throughput and stability are proven (phase 1 of the
 	// pipeline rollout). See ARCHITECTURE.md ("Block Processing Pipeline").
 	BlockPipelineEnabled bool `yaml:"blockPipelineEnabled"                envconfig:"DINGO_BLOCK_PIPELINE_ENABLED"`
-	// BlockPipelineValidateEnabled adds parallel VRF/KES and OpCert checks to
-	// block-pipeline replay (phase 3 of the pipeline rollout). It requires
+	// BlockPipelineValidateEnabled checks VRF/KES and OpCert header
+	// cryptography serially during block-pipeline replay. It requires
 	// BlockPipelineEnabled. Admission-time header validation remains the
 	// authoritative gate because ls.chain is visible to downstream readers
 	// before replay reaches this stage. See ARCHITECTURE.md ("Block Processing
