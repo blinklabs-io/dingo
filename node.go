@@ -69,6 +69,7 @@ import (
 	"github.com/blinklabs-io/dingo/peergov"
 	"github.com/blinklabs-io/dingo/plugin"
 	ouroboros "github.com/blinklabs-io/gouroboros"
+	"github.com/blinklabs-io/gouroboros/muxer"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	okeepalive "github.com/blinklabs-io/gouroboros/protocol/keepalive"
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
@@ -1810,6 +1811,16 @@ func taintValue(relaxed bool) string {
 	return nodesettings.LatchOff
 }
 
+// ntcCloseLogLevel is the level for a closed node-to-client connection. A
+// local client hanging up is routine, and tools that connect per request do
+// it many times a second; anything else that ends a connection is a warning.
+func ntcCloseLogLevel(err error) slog.Level {
+	if _, ok := errors.AsType[*muxer.ConnectionClosedError](err); ok {
+		return slog.LevelDebug
+	}
+	return slog.LevelWarn
+}
+
 func (n *Node) handleConnManagerClosedOwner(
 	conn *ouroboros.Connection,
 	isNtC bool,
@@ -1819,7 +1830,9 @@ func (n *Node) handleConnManagerClosedOwner(
 		return
 	}
 	if isNtC && err != nil && n.config.logger != nil {
-		n.config.logger.Warn(
+		n.config.logger.Log(
+			context.Background(),
+			ntcCloseLogLevel(err),
 			"node-to-client connection closed",
 			"connection_id", conn.Id().String(),
 			"error", err,
