@@ -325,15 +325,15 @@ func WithBulkLoadPragmas(
 	if !ok {
 		return func() error { return nil }
 	}
-	if err := optimizer.SetBulkLoadPragmas(); err != nil {
-		logger.Warn(
-			"failed to set bulk-load optimizations",
-			"error", err,
-		)
-		return func() error { return nil }
-	}
+	return withBulkLoadPragmas(optimizer, logger)
+}
+
+func withBulkLoadPragmas(
+	optimizer metadata.BulkLoadOptimizer,
+	logger *slog.Logger,
+) func() error {
 	restored := false
-	return func() error {
+	cleanup := func() error {
 		if restored {
 			return nil
 		}
@@ -347,6 +347,14 @@ func WithBulkLoadPragmas(
 		restored = true
 		return nil
 	}
+	if err := optimizer.SetBulkLoadPragmas(); err != nil {
+		logger.Warn(
+			"failed to set bulk-load optimizations",
+			"error", err,
+		)
+		return cleanup
+	}
+	return cleanup
 }
 
 // RunPlannerStats collects query-planner statistics on the metadata store
