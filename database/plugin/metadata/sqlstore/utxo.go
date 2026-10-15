@@ -2759,10 +2759,6 @@ func (s *Store) persistUtxoAddress(
 	utxo *models.Utxo,
 ) error {
 	if s.storageMode != types.StorageModeAPI {
-		if len(utxo.Assets) > 0 {
-			_, err := utxoAddress(utxo)
-			return err
-		}
 		return nil
 	}
 	return persistUtxoAddress(ctx, db, utxoID, utxo)

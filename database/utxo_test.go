@@ -357,8 +357,8 @@ func TestBackfillUtxoAddressesSkipsCompletedMarker(t *testing.T) {
 	require.Zero(t, count)
 }
 
-func TestCreateAssetUtxoRequiresAddressIdentity(t *testing.T) {
-	db := openTestDB(t)
+func TestAPIModeAssetUtxoRequiresAddressIdentity(t *testing.T) {
+	db := openTestDBWithStorageMode(t, types.StorageModeAPI)
 	raw := rawSQLiteMetadataFixture(t, db)
 	utxo := &models.Utxo{
 		TxId: bytes.Repeat([]byte{0x61}, 32),
@@ -387,6 +387,32 @@ func TestCreateAssetUtxoRequiresAddressIdentity(t *testing.T) {
 	)
 	require.NoError(t, raw.QueryRow(
 		`SELECT COUNT(*) FROM utxo WHERE tx_id = ?`, imported.TxId,
+	).Scan(&count))
+	require.Zero(t, count)
+}
+
+func TestCoreModeAssetUtxoSkipsAddressIdentity(t *testing.T) {
+	db := openTestDB(t)
+	raw := rawSQLiteMetadataFixture(t, db)
+	newUtxo := func(txID byte) models.Utxo {
+		return models.Utxo{
+			TxId: bytes.Repeat([]byte{txID}, 32),
+			Assets: []models.Asset{{
+				Name: []byte("asset"), PolicyId: []byte("policy"), Amount: 1,
+			}},
+		}
+	}
+
+	created := newUtxo(0x63)
+	require.NoError(t, db.CreateUtxo(context.Background(), nil, &created))
+	imported := newUtxo(0x64)
+	require.NoError(t, db.utxoStore().ImportUtxos([]models.Utxo{imported}, nil))
+
+	var count int
+	require.NoError(t, raw.QueryRow(`SELECT COUNT(*) FROM utxo`).Scan(&count))
+	require.Equal(t, 2, count)
+	require.NoError(t, raw.QueryRow(
+		`SELECT COUNT(*) FROM utxo_address`,
 	).Scan(&count))
 	require.Zero(t, count)
 }
