@@ -275,9 +275,7 @@ func (ls *LedgerState) tryRecoverFromTxValidationError(
 						ferr,
 					)
 				}
-				if onChain && (floor.Slot < rewindPoint.Slot ||
-					(floor.Slot == rewindPoint.Slot &&
-						!bytes.Equal(floor.Hash, rewindPoint.Hash))) {
+				if onChain && replayHoldUsesDurableFloor(rewindPoint, floor) {
 					rewindPoint = floor
 				}
 			}
@@ -399,6 +397,15 @@ func (ls *LedgerState) tryRecoverFromTxValidationError(
 		ls.armContinuationAudit(ls.lifecycleContext(), rewindPoint, "replay recovery rewind")
 	}
 	return true, nil
+}
+
+func replayHoldUsesDurableFloor(rewindPoint, floor ocommon.Point) bool {
+	if rewindPoint.Slot == 0 && len(rewindPoint.Hash) == 0 {
+		return false
+	}
+	return floor.Slot < rewindPoint.Slot ||
+		(floor.Slot == rewindPoint.Slot &&
+			!bytes.Equal(floor.Hash, rewindPoint.Hash))
 }
 
 // checkReplayRecoveryRollbackFloor preserves the refuse-before-chain-moves

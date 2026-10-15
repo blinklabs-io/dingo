@@ -656,7 +656,11 @@ type Config struct {
 	RelayPort              uint      `yaml:"relayPort"                           envconfig:"port"`
 	BarkBaseUrl            string    `yaml:"barkBaseUrl"                         envconfig:"DINGO_BARK_BASE_URL"`
 	BarkBlockDownloadHosts []string  `yaml:"barkBlockDownloadHosts"              envconfig:"DINGO_BARK_BLOCK_DOWNLOAD_HOSTS"`
-	BarkPort               uint      `yaml:"barkPort"                            envconfig:"DINGO_BARK_PORT"`
+	// BarkBlockDownloadAllowPrivateAddresses permits Bark block downloads
+	// from private, loopback, and other special-use addresses. Origin,
+	// HTTPS, redirect, and proxy checks still apply. Default: false.
+	BarkBlockDownloadAllowPrivateAddresses bool `yaml:"barkBlockDownloadAllowPrivateAddresses" envconfig:"DINGO_BARK_BLOCK_DOWNLOAD_ALLOW_PRIVATE_ADDRESSES"`
+	BarkPort                               uint `yaml:"barkPort"                            envconfig:"DINGO_BARK_PORT"`
 	// LocalStateQueryViewMaxLifetime is the longest a LocalStateQuery session
 	// may hold one acquired ledger snapshot before the node closes it.
 	// Default: "5m".
@@ -975,6 +979,12 @@ type Config struct {
 	// inactivity).
 	DelegatorInactivityEnabled bool   `yaml:"delegatorInactivityEnabled"             envconfig:"DINGO_DELEGATOR_INACTIVITY_ENABLED"`
 	DelegatorInactivity        uint64 `yaml:"delegatorInactivity"                    envconfig:"DINGO_DELEGATOR_INACTIVITY"`
+
+	// Leios persistence retention (experimental, leios runMode only).
+	// LeiosPersistenceRetentionSlots bounds how far behind the highest
+	// persisted Leios endorser block historical-serving records are kept.
+	// Zero retains all history; positive values must cover the stability window.
+	LeiosPersistenceRetentionSlots uint64 `yaml:"leiosPersistenceRetentionSlots" envconfig:"DINGO_LEIOS_PERSISTENCE_RETENTION_SLOTS"`
 
 	// Leios voting configuration (experimental, leios runMode only).
 	// LeiosVoteSigningKeyFile is the path to a Cardano text-envelope

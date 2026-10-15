@@ -567,3 +567,8 @@ type Utxo struct {
 	OutputIdx               sql.NullInt64
 	PaymentScript           sql.NullBool
 }
+
+type UtxoAddress struct {
+	UtxoID  int64
+	Address []byte
+}

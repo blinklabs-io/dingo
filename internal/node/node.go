@@ -402,7 +402,7 @@ func logStartupConfig(logger *slog.Logger, cfg *config.Config) {
 	logger.Debug("config", "component", "node", "config", cfg)
 }
 
-func Run(cfg *config.Config, logger *slog.Logger) error {
+func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger) error {
 	cfg.ApplyRunModeOverrides(cfg.RunMode)
 	if cfg.RunMode.IsDevMode() {
 		logger.Info("dev mode: forcing API storage and block production")
@@ -567,7 +567,9 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 			cfg.Midnight.ServerEnabled && cfg.Midnight.Port > 0,
 	)
 
-	d, err := dingo.New(
+	// Construction is synchronous and its callees have no context contract;
+	// ctx governs the long-running node lifecycle below.
+	d, err := dingo.New( //nolint:contextcheck
 		buildDingoConfig(
 			cfg,
 			logger,
@@ -612,12 +614,9 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 			"component", "node",
 		)
 	}
-	// Wait for interrupt/termination signal
-	signalCtx, signalCtxStop := signal.NotifyContext(
-		context.Background(),
-		syscall.SIGINT,
-		syscall.SIGTERM,
-	)
+	// Keep a child cancel function so a remote lifecycle request can stop the
+	// same command-owned context used by startup and the running node.
+	signalCtx, signalCtxStop := context.WithCancel(ctx)
 	defer signalCtxStop()
 	// A block producer re-reads its credential files on SIGHUP. Relays leave
 	// the signal at its default so their behaviour is unchanged.
@@ -683,7 +682,7 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 
 	// Wait for signal, remote request or error
 	req, signaled, err := waitForStop(signalCtx, errChan, d.EndShutdownRequests)
-	shutdown := func() error {
+	shutdown := func() error { //nolint:contextcheck // bounded by shutdownTimeout
 		return gracefulShutdown(
 			logger,
 			metricsServer,
@@ -718,7 +717,7 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 	logger.Error("node error", "error", err)
 	signalCtxStop()
 
-	cleanupErr := shutdownNodeResources(
+	cleanupErr := shutdownNodeResources( //nolint:contextcheck // bounded by shutdownTimeout
 		optionalShutdown(metricsServer),
 		optionalShutdown(debugServer),
 		optionalShutdown(healthServer),
@@ -824,6 +823,9 @@ func buildDingoConfig(
 		dingo.WithAPIConfig(cfg.API),
 		dingo.WithBarkBaseUrl(cfg.BarkBaseUrl),
 		dingo.WithBarkBlockDownloadHosts(cfg.BarkBlockDownloadHosts),
+		dingo.WithBarkBlockDownloadAllowPrivateAddresses(
+			cfg.BarkBlockDownloadAllowPrivateAddresses,
+		),
 		dingo.WithBarkPort(cfg.BarkPort),
 		dingo.WithBarkHost(cfg.BarkHost),
 		dingo.WithBarkClientCAFilePath(cfg.BarkClientCAFilePath),
@@ -1071,6 +1073,9 @@ func buildDingoConfig(
 		),
 		dingo.WithDatabaseLifecycle(cfg.DatabaseLifecycle),
 		// Leios voting (experimental)
+		dingo.WithLeiosPersistenceRetentionSlots(
+			cfg.LeiosPersistenceRetentionSlots,
+		),
 		dingo.WithLeiosVoteSigningKeyFile(
 			cfg.LeiosVoteSigningKeyFile,
 		),

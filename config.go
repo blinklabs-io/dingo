@@ -240,6 +240,7 @@ type Config struct {
 	outboundSourcePort, barkPort                                                        uint
 	barkBaseUrl                                                                         string
 	barkBlockDownloadHosts                                                              []string
+	barkBlockDownloadAllowPrivateAddresses                                              bool
 	barkHost                                                                            string
 	barkClientCAFilePath                                                                string
 	barkArchiveMaxConcurrentFetches                                                     int
@@ -294,6 +295,7 @@ type Config struct {
 	fullPotRewardsEnabled, unsafeFullPotRewardsOnStandardNetworks                       bool
 	delegatorInactivityEnabled                                                          bool
 	delegatorInactivity                                                                 uint64
+	leiosPersistenceRetentionSlots                                                      uint64
 	leiosVoteSigningKeyFile                                                             string
 	midnight                                                                            MidnightConfig
 	chainsyncMaxClients                                                                 int
@@ -815,6 +817,7 @@ func (c *Config) syncCompatFields() {
 	c.tlsCertFilePath, c.tlsKeyFilePath = c.cfg.TlsCertFilePath, c.cfg.TlsKeyFilePath
 	c.apiConfig = c.cfg.API
 	c.barkBaseUrl, c.barkPort, c.barkBlockDownloadHosts = c.cfg.BarkBaseUrl, c.cfg.BarkPort, c.cfg.BarkBlockDownloadHosts
+	c.barkBlockDownloadAllowPrivateAddresses = c.cfg.BarkBlockDownloadAllowPrivateAddresses
 	c.barkHost = c.cfg.BarkHost
 	c.barkClientCAFilePath = c.cfg.BarkClientCAFilePath
 	c.barkArchiveMaxConcurrentFetches = c.cfg.BarkArchiveMaxConcurrentFetches
@@ -945,6 +948,7 @@ func (c *Config) syncCompatFields() {
 	c.minPoolMargin, c.pledgeLeverageEnabled, c.pledgeLeverage = c.cfg.MinPoolMargin, c.cfg.PledgeLeverageEnabled, c.cfg.PledgeLeverage
 	c.fullPotRewardsEnabled, c.unsafeFullPotRewardsOnStandardNetworks = c.cfg.FullPotRewardsEnabled, c.cfg.UnsafeFullPotRewardsOnStandardNetworks
 	c.delegatorInactivityEnabled, c.delegatorInactivity = c.cfg.DelegatorInactivityEnabled, c.cfg.DelegatorInactivity
+	c.leiosPersistenceRetentionSlots = c.cfg.LeiosPersistenceRetentionSlots
 	c.leiosVoteSigningKeyFile = c.cfg.LeiosVoteSigningKeyFile
 	c.cacheBlockLRUEntries, c.cacheHotUtxoEntries, c.cacheHotTxEntries, c.cacheHotTxMaxBytes = c.cfg.Cache.BlockLRUEntries, c.cfg.Cache.HotUtxoEntries, c.cfg.Cache.HotTxEntries, c.cfg.Cache.HotTxMaxBytes
 	c.pluginSelections = map[hostplugin.Capability]hostplugin.Selection{
@@ -1664,6 +1668,15 @@ func WithLeiosVoteSigningKeyFile(path string) ConfigOptionFunc {
 	}
 }
 
+// WithLeiosPersistenceRetentionSlots sets the number of slots of persisted
+// Leios endorser-block history retained for historical serving. Zero keeps all
+// persisted history.
+func WithLeiosPersistenceRetentionSlots(slots uint64) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.LeiosPersistenceRetentionSlots = slots
+	}
+}
+
 // WithLeiosPipelineTiming overrides the provisional Leios pipeline stage
 // timing windows. CIP-0164 has not finalized these parameters, so they are
 // kept off-chain and overridable here rather than as protocol parameters.
@@ -1857,6 +1870,16 @@ func WithBarkBaseUrl(baseUrl string) ConfigOptionFunc {
 func WithBarkBlockDownloadHosts(hosts []string) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.BarkBlockDownloadHosts = slices.Clone(hosts)
+	}
+}
+
+// WithBarkBlockDownloadAllowPrivateAddresses permits Bark block downloads
+// from private, loopback, and other special-use addresses, such as an
+// S3-compatible store on a private network. Allowed origins, HTTPS,
+// redirect, and proxy restrictions still apply. Disabled by default.
+func WithBarkBlockDownloadAllowPrivateAddresses(allow bool) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.BarkBlockDownloadAllowPrivateAddresses = allow
 	}
 }
 
@@ -2240,6 +2263,12 @@ func (c *Config) BarkBaseUrl() string {
 // BarkBlockDownloadHosts returns the allowed Bark block-download origins.
 func (c *Config) BarkBlockDownloadHosts() []string {
 	return c.cfg.BarkBlockDownloadHosts
+}
+
+// BarkBlockDownloadAllowPrivateAddresses reports whether Bark block downloads
+// may reach private, loopback, and other special-use addresses.
+func (c *Config) BarkBlockDownloadAllowPrivateAddresses() bool {
+	return c.cfg.BarkBlockDownloadAllowPrivateAddresses
 }
 
 // BarkOperatorCertificateFingerprints returns the SHA-256 client certificate
@@ -2726,6 +2755,12 @@ func (c *Config) BlockfetchLowWatermarkEnabled() bool {
 // LeiosVoteSigningKeyFile returns the path to the Leios vote signing key.
 func (c *Config) LeiosVoteSigningKeyFile() string {
 	return c.cfg.LeiosVoteSigningKeyFile
+}
+
+// LeiosPersistenceRetentionSlots returns the configured Leios historical-
+// serving retention window. Zero means keep all history.
+func (c *Config) LeiosPersistenceRetentionSlots() uint64 {
+	return c.cfg.LeiosPersistenceRetentionSlots
 }
 
 // PeerSharing returns the peer sharing configuration.

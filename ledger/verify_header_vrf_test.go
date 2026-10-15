@@ -17,6 +17,7 @@ package ledger
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
@@ -269,13 +270,27 @@ func seedPoolRegistrationAtSlot(
 	vrfKeyHash []byte,
 	addedSlot uint64,
 ) {
+	seedPoolRegistrationAtSlotAndIndex(
+		t, db, poolKeyHash, vrfKeyHash, addedSlot, 0,
+	)
+}
+
+func seedPoolRegistrationAtSlotAndIndex(
+	t *testing.T,
+	db *database.Database,
+	poolKeyHash []byte,
+	vrfKeyHash []byte,
+	addedSlot uint64,
+	registrationIndex uint,
+) {
 	t.Helper()
 	require.NoError(t, db.Metadata().ImportPool(
 		&models.Pool{PoolKeyHash: poolKeyHash, VrfKeyHash: vrfKeyHash},
 		&models.PoolRegistration{
-			PoolKeyHash: poolKeyHash,
-			VrfKeyHash:  vrfKeyHash,
-			AddedSlot:   addedSlot,
+			PoolKeyHash:       poolKeyHash,
+			VrfKeyHash:        vrfKeyHash,
+			AddedSlot:         addedSlot,
+			RegistrationIndex: registrationIndex,
 		},
 		nil,
 	))
@@ -676,6 +691,88 @@ func TestElectingVrfKeyHashResolvesBelowMithrilBootstrapAnchor(t *testing.T) {
 	assert.Equal(t, vrfKey, gotKey.Bytes())
 }
 
+// TestElectingVrfKeyHashUsesCurrentImportedParamsBeforePromotion verifies that
+// the two same-slot rows imported for current and future pool parameters retain
+// their ledger ordering during the bootstrap history fallback.
+func TestElectingVrfKeyHashUsesCurrentImportedParamsBeforePromotion(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	nonce := bytes.Repeat([]byte{0x07}, 32)
+	tb := createTestBlock(t, [32]byte{59}, 59, tamperNone)
+	ls, db := newEligibilityTestLedger(t, nonce)
+	ls.epochCache = previewEpochs(35, 39, nonce)
+
+	pool := lcommon.PoolKeyHash(bytes.Repeat([]byte{0x11}, 28))
+	currentKey := bytes.Repeat([]byte{0xB5}, 32)
+	futureKey := bytes.Repeat([]byte{0xC6}, 32)
+	const anchorSlot = 3_200_000
+	seedPoolRegistrationAtSlotAndIndex(
+		t, db, pool[:], currentKey, anchorSlot, 0,
+	)
+	seedPoolRegistrationAtSlotAndIndex(
+		t, db, pool[:], futureKey, anchorSlot, 1,
+	)
+	ls.mithrilLedgerSlot = anchorSlot
+	ls.publishSnapshotsLocked()
+
+	seedPoolStakeSnapshotOfTypeAtSlot(t, db, 37,
+		models.PoolStakeSnapshotTypeMark, pool[:], 1_000, 10_000, 3_196_799)
+
+	gotKey, ok, err := ls.electingVrfKeyHash(tb.block, 38, pool)
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, currentKey, gotKey.Bytes())
+}
+
+func TestElectingVrfKeyHashDefersImportedRotationInDijkstra(t *testing.T) {
+	t.Parallel()
+
+	nonce := bytes.Repeat([]byte{0x07}, 32)
+	ls, db := newEligibilityTestLedger(t, nonce)
+	ls.epochCache = musashiEpochs(29, 33, dijkstra.EraIdDijkstra, nonce)
+	const anchorSlot = 31*musashiEpochLength + 100
+	ls.mithrilLedgerSlot = anchorSlot
+	ls.publishSnapshotsLocked()
+
+	pool := lcommon.PoolKeyHash(bytes.Repeat([]byte{0x11}, 28))
+	currentKey := bytes.Repeat([]byte{0xB5}, 32)
+	futureKey := bytes.Repeat([]byte{0xC6}, 32)
+	seedPoolRegistrationAtSlotAndIndex(
+		t, db, pool[:], currentKey, anchorSlot, 0,
+	)
+	seedPoolRegistrationAtSlotAndIndex(
+		t, db, pool[:], futureKey, anchorSlot, 1,
+	)
+	seedPoolStakeSnapshotOfTypeAtSlot(t, db, 31,
+		models.PoolStakeSnapshotTypeActive, pool[:], 1_000, 10_000,
+		anchorSlot)
+	tb := createTestBlock(t, [32]byte{60}, 60, tamperNone)
+	tb.block.slot = anchorSlot + 1
+	cutoff, captured, ok, err := ls.electingPoolParamsCutoffSlot(
+		tb.block, 31, pool,
+	)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, uint64(anchorSlot), cutoff)
+	require.Equal(t, uint64(anchorSlot), captured)
+	gotKey, ok, err := ls.electingVrfKeyHash(tb.block, 31, pool)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, currentKey, gotKey.Bytes())
+
+	// A later boundary promotes the staged registration before Dijkstra SNAP.
+	seedPoolStakeSnapshotOfTypeAtSlot(t, db, 32,
+		models.PoolStakeSnapshotTypeMark, pool[:], 1_000, 10_000,
+		32*musashiEpochLength-1)
+	tb.block.slot = 33*musashiEpochLength + 1
+	gotKey, ok, err = ls.electingVrfKeyHash(tb.block, 33, pool)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, futureKey, gotKey.Bytes())
+}
+
 // TestElectingVrfKeyHashStillRejectsAPoolWithNoRegistrationAtAll pins the
 // boundary the Mithril-anchor fix must not erase: on a Mithril-bootstrapped
 // node, a
@@ -749,4 +846,173 @@ func TestElectingVrfKeyHashDoesNotFallBackWithoutAMithrilBoundary(
 		errors.Is(err, errVrfKeyRegistrationHistoryUnavailable),
 		"got %v", err,
 	)
+}
+
+func TestStartupVrfKeyUsesEpochEffectiveRegistration(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name        string
+		currentSlot uint64
+		futureIndex uint
+	}{
+		{name: "imported", currentSlot: 31*musashiEpochLength + 100, futureIndex: 1},
+		{name: "registered before epoch", currentSlot: 31*musashiEpochLength - 100},
+		{name: "first registration in epoch", currentSlot: 31*musashiEpochLength + 50},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			nonce := bytes.Repeat([]byte{0x07}, 32)
+			ls, db := newEligibilityTestLedger(t, nonce)
+			ls.epochCache = musashiEpochs(29, 33, dijkstra.EraIdDijkstra, nonce)
+			const anchorSlot = 31*musashiEpochLength + 100
+			ls.currentTip.Point.Slot = anchorSlot
+			ls.publishSnapshotsLocked()
+			pool := lcommon.PoolKeyHash(bytes.Repeat([]byte{0x11}, 28))
+			currentKey := bytes.Repeat([]byte{0xB5}, 32)
+			futureKey := bytes.Repeat([]byte{0xC6}, 32)
+			seedPoolRegistrationAtSlotAndIndex(
+				t, db, pool[:], currentKey, tc.currentSlot, 0,
+			)
+			seedPoolRegistrationAtSlotAndIndex(
+				t, db, pool[:], futureKey, anchorSlot, tc.futureIndex,
+			)
+			got, found, err := ls.PoolRegistrationVRFKeyHash([28]byte(pool))
+			require.NoError(t, err)
+			require.True(t, found)
+			require.Equal(t, currentKey, got[:])
+
+			ls.currentTip.Point.Slot = 32*musashiEpochLength + 1
+			ls.publishSnapshotsLocked()
+			got, found, err = ls.PoolRegistrationVRFKeyHash([28]byte(pool))
+			require.NoError(t, err)
+			require.True(t, found)
+			require.Equal(t, futureKey, got[:])
+		})
+	}
+}
+
+func TestStartupVrfKeyRequiresEpochForRegisteredPool(t *testing.T) {
+	t.Parallel()
+	ls, db := newEligibilityTestLedger(t, bytes.Repeat([]byte{0x07}, 32))
+	ls.epochCache = nil
+	ls.currentTip.Point.Slot = 100
+	ls.publishSnapshotsLocked()
+	pool := lcommon.PoolKeyHash(bytes.Repeat([]byte{0x11}, 28))
+	_, found, err := ls.PoolRegistrationVRFKeyHash([28]byte(pool))
+	require.NoError(t, err)
+	require.False(t, found)
+
+	seedPoolRegistrationAtSlot(
+		t,
+		db,
+		pool[:],
+		bytes.Repeat([]byte{0xB5}, 32),
+		50,
+	)
+	_, found, err = ls.PoolRegistrationVRFKeyHash([28]byte(pool))
+	require.Error(t, err)
+	require.False(t, found)
+}
+
+func TestStartupVrfKeyRetirementUsesAppliedTip(t *testing.T) {
+	t.Parallel()
+	nonce := bytes.Repeat([]byte{0x07}, 32)
+	ls, db := newEligibilityTestLedger(t, nonce)
+	ls.epochCache = musashiEpochs(29, 33, dijkstra.EraIdDijkstra, nonce)
+	const tipSlot = 31*musashiEpochLength + 100
+	ls.currentTip.Point.Slot = tipSlot
+	ls.publishSnapshotsLocked()
+	pool := lcommon.PoolKeyHash(bytes.Repeat([]byte{0x11}, 28))
+	key := bytes.Repeat([]byte{0xB5}, 32)
+	seedPoolRegistrationAtSlot(t, db, pool[:], key, tipSlot-50)
+	require.NoError(
+		t,
+		db.Metadata().RetirePools(nil, [][]byte{pool[:]}, 32, tipSlot+1),
+	)
+	require.NoError(
+		t,
+		db.Metadata().
+			SetEpoch(32*musashiEpochLength, 32, nil, nil, nil, nil, dijkstra.EraIdDijkstra, 1, musashiEpochLength, nil),
+	)
+	databaseTip := ls.Tip()
+	databaseTip.Point.Slot = 32*musashiEpochLength + 1
+	require.NoError(t, db.Metadata().SetTip(databaseTip, nil))
+	got, found, err := ls.PoolRegistrationVRFKeyHash([28]byte(pool))
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, key, got[:])
+
+	ls.currentTip.Point.Slot = 32*musashiEpochLength + 1
+	ls.publishSnapshotsLocked()
+	_, found, err = ls.PoolRegistrationVRFKeyHash([28]byte(pool))
+	require.NoError(t, err)
+	require.False(t, found)
+}
+
+func TestStartupVrfKeyUsesElectingSnapshot(t *testing.T) {
+	t.Parallel()
+	for _, era := range []uint{conway.EraIdConway, dijkstra.EraIdDijkstra} {
+		t.Run(fmt.Sprintf("era %d", era), func(t *testing.T) {
+			t.Parallel()
+			nonce := bytes.Repeat([]byte{0x07}, 32)
+			ls, db := newEligibilityTestLedger(t, nonce)
+			ls.epochCache = musashiEpochs(29, 34, era, nonce)
+			const anchor = 31*musashiEpochLength + 100
+			ls.mithrilLedgerSlot = anchor
+			pool := lcommon.PoolKeyHash(bytes.Repeat([]byte{0x11}, 28))
+			currentKey := bytes.Repeat([]byte{0xB5}, 32)
+			futureKey := bytes.Repeat([]byte{0xC6}, 32)
+			seedPoolRegistrationAtSlotAndIndex(
+				t,
+				db,
+				pool[:],
+				currentKey,
+				anchor,
+				0,
+			)
+			seedPoolRegistrationAtSlotAndIndex(
+				t,
+				db,
+				pool[:],
+				futureKey,
+				anchor,
+				1,
+			)
+			seedPoolStakeSnapshotOfTypeAtSlot(
+				t,
+				db,
+				31,
+				models.PoolStakeSnapshotTypeActive,
+				pool[:],
+				1,
+				1,
+				anchor,
+			)
+			for _, epoch := range []uint64{31, 32, 33} {
+				seedPoolStakeSnapshotOfTypeAtSlot(
+					t,
+					db,
+					epoch,
+					models.PoolStakeSnapshotTypeMark,
+					pool[:],
+					1,
+					1,
+					epoch*musashiEpochLength-1,
+				)
+			}
+			for _, slot := range []uint64{anchor, anchor + 1, 32*musashiEpochLength + 1, 33*musashiEpochLength + 1, 34*musashiEpochLength + 1} {
+				ls.currentTip.Point.Slot = slot
+				ls.publishSnapshotsLocked()
+				want := currentKey
+				if slot >= 34*musashiEpochLength ||
+					(era == dijkstra.EraIdDijkstra && slot >= 33*musashiEpochLength) {
+					want = futureKey
+				}
+				got, found, err := ls.PoolRegistrationVRFKeyHash([28]byte(pool))
+				require.NoError(t, err, "slot %d", slot)
+				require.True(t, found, "slot %d", slot)
+				require.Equal(t, want, got[:], "slot %d", slot)
+			}
+		})
+	}
 }

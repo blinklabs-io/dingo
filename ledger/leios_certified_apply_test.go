@@ -26,7 +26,6 @@ import (
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
-	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
@@ -142,32 +141,17 @@ func (f *leiosCertApplyFixture) block(
 		announcement = leiosTestRaw(t, []any{f.ebHash.Bytes(), uint64(4096)})
 	}
 	block := &dijkstra.DijkstraBlock{
-		BlockHeader: &dijkstra.DijkstraBlockHeader{
-			BabbageBlockHeader: babbage.BabbageBlockHeader{
-				Body: babbage.BabbageBlockHeaderBody{
-					BlockNumber: number,
-					Slot:        slot,
-					PrevHash:    lcommon.NewBlake2b256(prevHash),
-					VrfKey:      make([]byte, 32),
-					VrfResult: lcommon.VrfResult{
-						Output: make([]byte, 64),
-						Proof:  make([]byte, 80),
-					},
-					OpCert: babbage.BabbageOpCert{
-						HotVkey:   make([]byte, 32),
-						Signature: make([]byte, 64),
-					},
-					ProtoVersion: babbage.BabbageProtoVersion{
-						Major: dijkstra.MinProtocolVersionDijkstra,
-					},
-				},
-				Signature: make([]byte, 448),
-			},
-			LeiosHeaderExtension: []cbor.RawMessage{
-				leiosTestRaw(t, certified),
-				announcement,
-			},
-		},
+		BlockHeader: dijkstraTestBlockHeader(
+			number,
+			slot,
+			lcommon.NewBlake2b256(prevHash),
+			lcommon.Blake2b256{},
+			0,
+		),
+	}
+	block.BlockHeader.LeiosHeaderExtension = []cbor.RawMessage{
+		leiosTestRaw(t, certified),
+		announcement,
 	}
 	if certified {
 		block.BlockBody.LeiosCertificate = &dijkstra.DijkstraLeiosCertificate{

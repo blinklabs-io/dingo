@@ -49,7 +49,13 @@ func TestCompareTotalActiveStakeDetectsADroppedPool(t *testing.T) {
 		{bech32: "pool1bbb", stake: 200},
 		// pool1ccc, stake 300, dropped by Dingo.
 	}
-	got := compareTotalActiveStake("600", nil, totalTestEpoch, reported)
+	got := compareTotalActiveStake(
+		"600",
+		nil,
+		"preview",
+		totalTestEpoch,
+		reported,
+	)
 	require.NotNil(t, got, "a dropped pool carrying stake must be reported")
 	require.Equal(t, ReasonTotalActiveStakeMismatch, got.Reason)
 	require.Empty(t, got.PoolIDBech32,
@@ -72,9 +78,17 @@ func TestCompareTotalActiveStakeQuietWhenTotalsAgree(t *testing.T) {
 		{bech32: "pool1bbb", stake: 200},
 		{bech32: "pool1ccc", stake: 300},
 	}
-	require.Nil(t,
-		compareTotalActiveStake("600", nil, totalTestEpoch, reported),
-		"agreeing totals must not be reported as a divergence")
+	require.Nil(
+		t,
+		compareTotalActiveStake(
+			"600",
+			nil,
+			"preview",
+			totalTestEpoch,
+			reported,
+		),
+		"agreeing totals must not be reported as a divergence",
+	)
 }
 
 // TestCompareTotalActiveStakeReportsADingoSurplus pins the other direction.
@@ -91,7 +105,13 @@ func TestCompareTotalActiveStakeReportsADingoSurplus(t *testing.T) {
 		{bech32: "pool1ccc", stake: 300},
 		{bech32: "pool1ddd", stake: 150}, // Koios's total covers only 600.
 	}
-	got := compareTotalActiveStake("600", nil, totalTestEpoch, reported)
+	got := compareTotalActiveStake(
+		"600",
+		nil,
+		"preview",
+		totalTestEpoch,
+		reported,
+	)
 	require.NotNil(t, got,
 		"a dingo surplus must be reported, not only a shortfall")
 	require.Equal(t, ReasonTotalActiveStakeMismatch, got.Reason)
@@ -106,8 +126,13 @@ func TestCompareTotalActiveStakeReportsADingoSurplus(t *testing.T) {
 // nothing from one that never ran.
 func TestCompareTotalActiveStakeFlagsAnUnusableKoiosValueAsAFault(t *testing.T) {
 	t.Parallel()
-	got := compareTotalActiveStake("not-a-number", nil, totalTestEpoch,
-		[]poolStake{{bech32: "pool1aaa", stake: 100}})
+	got := compareTotalActiveStake(
+		"not-a-number",
+		nil,
+		"preview",
+		totalTestEpoch,
+		[]poolStake{{bech32: "pool1aaa", stake: 100}},
+	)
 	require.NotNil(t, got, "an unusable Koios value must still be reported")
 	require.True(t, got.KoiosFault,
 		"an unusable Koios value is not a Dingo divergence")
@@ -123,8 +148,13 @@ func TestCompareTotalActiveStakeFlagsAnUnusableKoiosValueAsAFault(t *testing.T) 
 // endpoint would hide a pool divergence the per-pool half had found.
 func TestCompareTotalActiveStakeFlagsAFetchFailure(t *testing.T) {
 	t.Parallel()
-	got := compareTotalActiveStake("", errors.New("koios down"),
-		totalTestEpoch, []poolStake{{bech32: "pool1aaa", stake: 100}})
+	got := compareTotalActiveStake(
+		"",
+		errors.New("koios down"),
+		"preview",
+		totalTestEpoch,
+		[]poolStake{{bech32: "pool1aaa", stake: 100}},
+	)
 	require.NotNil(t, got,
 		"a failed epoch_info fetch must not read as a match")
 	require.True(t, got.KoiosFault,
@@ -138,7 +168,7 @@ func TestCompareTotalActiveStakeFlagsAFetchFailure(t *testing.T) {
 // should have one.
 func TestCompareTotalActiveStakeFlagsAMissingKoiosTotal(t *testing.T) {
 	t.Parallel()
-	got := compareTotalActiveStake("", nil, totalTestEpoch,
+	got := compareTotalActiveStake("", nil, "preview", totalTestEpoch,
 		[]poolStake{{bech32: "pool1aaa", stake: 100}})
 	require.NotNil(t, got)
 	require.Equal(t, ReasonNoKoiosActiveStake, got.Reason)
@@ -169,7 +199,7 @@ func TestCompareTotalActiveStakeSkipsPreStakingEpochs(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := compareTotalActiveStake("", nil, tc.epoch,
+			got := compareTotalActiveStake("", nil, "preview", tc.epoch,
 				[]poolStake{{bech32: "pool1aaa", stake: 100}})
 			if !tc.wantFault {
 				require.Nil(t, got,
@@ -274,4 +304,17 @@ func TestKoiosActiveStakeForEpochDoesNotClobberCachedEpochInfo(t *testing.T) {
 		"the observer's epoch end time must survive this check")
 	require.Equal(t, "777", after.TotalRewards,
 		"the observer's reward columns must survive this check")
+}
+
+// TestCompareTotalActiveStakePreprodBoundary: Koios reports a null
+// active_stake for Preprod epochs 0 through 5, so epoch 2 is not a fault
+// there while epoch 6 is.
+func TestCompareTotalActiveStakePreprodBoundary(t *testing.T) {
+	t.Parallel()
+	pools := []poolStake{{bech32: "pool1aaa", stake: 100}}
+	require.Nil(t, compareTotalActiveStake("", nil, "preprod", 2, pools))
+	require.Nil(t, compareTotalActiveStake("", nil, "preprod", 5, pools))
+	got := compareTotalActiveStake("", nil, "preprod", 6, pools)
+	require.NotNil(t, got)
+	require.Equal(t, ReasonNoKoiosActiveStake, got.Reason)
 }

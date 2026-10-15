@@ -132,6 +132,39 @@ func TestBatchRestoreIsSafeLocked(t *testing.T) {
 	}
 }
 
+func TestReconcileFailurePreservesForkAnchor(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
+	cm, err := NewManager(ctx, db, nil)
+	require.NoError(t, err)
+	cm.securityParam = 1
+	primary := cm.PrimaryChain()
+	blocks, err := testfixtures.GenerateConwayChain(3)
+	require.NoError(t, err)
+	for _, block := range blocks {
+		require.NoError(t, primary.AddBlock(ctx, block, nil))
+	}
+	fork, err := cm.NewChainFromIntersect(ctx, []ocommon.Point{
+		ocommon.NewPoint(blocks[2].SlotNumber(), blocks[2].Hash().Bytes()),
+	})
+	require.NoError(t, err)
+	anchorBefore := fork.lastCommonBlockIndex
+	generationBefore := fork.mutationGeneration
+	require.NoError(t, primary.RollbackUnbounded(ctx, ocommon.NewPoint(
+		blocks[0].SlotNumber(), blocks[0].Hash().Bytes(),
+	)))
+
+	_, err = fork.BlockBeforeSlot(ctx, blocks[2].SlotNumber()+1)
+	require.ErrorIs(t, err, models.ErrBlockNotFound)
+	require.Equal(t, anchorBefore, fork.lastCommonBlockIndex,
+		"an exhausted ancestor search must not partially rebase the buffer")
+	require.Empty(t, fork.blocks)
+	require.Equal(t, generationBefore, fork.mutationGeneration)
+}
+
 // TestBlockNumberContiguous covers the block-number continuity rule that binds a
 // header's self-reported block number to its parent, preventing a forged
 // (inflated) number from entering the chain and winning chain selection.

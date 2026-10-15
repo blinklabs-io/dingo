@@ -534,26 +534,6 @@ func TestWithMidnightConfig(t *testing.T) {
 	assert.Equal(t, midnightCfg, cfg.midnight)
 }
 
-// TestSyncCompatFieldsMidnightEnabled is a regression test for a bug where
-// syncCompatFields's mirror of internalconfig.MidnightConfig into the root
-// MidnightConfig (used by node.go's indexer-start gate) omitted Enabled,
-// leaving it permanently false and silently disabling the Midnight indexer
-// even with midnight.enabled: true configured.
-func TestSyncCompatFieldsMidnightEnabled(t *testing.T) {
-	t.Parallel()
-
-	cfg := NewConfig()
-	cfg.cfg.Midnight.Enabled = true
-
-	cfg.syncCompatFields()
-
-	assert.True(
-		t,
-		cfg.midnight.Enabled,
-		"mirrored MidnightConfig.Enabled must reflect the loaded config",
-	)
-}
-
 // TestSyncCompatFieldsMidnightAllFieldsMirrored guards against the same bug
 // class recurring for any future MidnightConfig field: it sets every field
 // of the internal internalconfig.MidnightConfig to a non-zero value, runs
@@ -1122,6 +1102,22 @@ func TestWithKoiosParityAccountsExplicitFalseDisablesEndToEnd(t *testing.T) {
 	assert.False(t, cfg.cfg.KoiosParity.Accounts)
 	require.NotNil(t, cfg.koiosParity.Accounts)
 	assert.False(t, *cfg.koiosParity.Accounts)
+}
+
+func TestBarkBlockDownloadAllowPrivateAddressesReachesRuntime(t *testing.T) {
+	t.Parallel()
+
+	for _, allow := range []bool{false, true} {
+		cfg, err := NewConfigFromInternal(
+			&internalconfig.Config{
+				BarkBlockDownloadAllowPrivateAddresses: allow,
+			},
+			nil, nil, nil, nil,
+		)
+		require.NoError(t, err)
+		require.Equal(t, allow, cfg.barkBlockDownloadAllowPrivateAddresses)
+		require.Equal(t, allow, cfg.BarkBlockDownloadAllowPrivateAddresses())
+	}
 }
 
 // TestTokenRegistryConfigReachesRuntimeFromYAML covers the path YAML, env, and

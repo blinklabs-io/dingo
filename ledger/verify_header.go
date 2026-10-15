@@ -28,6 +28,7 @@ import (
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/consensus/leaderthreshold"
 	"github.com/blinklabs-io/dingo/consensus/praos"
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/ledger/eras"
@@ -905,6 +906,7 @@ func (ls *LedgerState) verifyBlockHeaderStateWithCache(
 	); err != nil {
 		return err
 	}
+	//nolint:contextcheck // the overlay fallback forecasts parameters without a request context
 	if handled, err := ls.verifyGenesisDelegateHeader(
 		block,
 		allowStateDefer,
@@ -1981,14 +1983,25 @@ func (ls *LedgerState) resolveElectingSnapshot(
 	poolKeyHash lcommon.PoolKeyHash,
 	epochCache []models.Epoch,
 ) electingSnapshot {
+	return ls.resolveElectingSnapshotAtSlot(
+		block.SlotNumber(), epochId, poolKeyHash, epochCache, nil,
+	)
+}
+
+func (ls *LedgerState) resolveElectingSnapshotAtSlot(
+	slot, epochId uint64,
+	poolKeyHash lcommon.PoolKeyHash,
+	epochCache []models.Epoch,
+	txn types.Txn,
+) electingSnapshot {
 	snap := electingSnapshot{
 		epoch: praos.StakeSnapshotEpoch(epochId),
 		kind:  models.PoolStakeSnapshotTypeMark,
 
 		epochCache: epochCache,
 	}
-	useImportedActive, err := ls.shouldUseImportedActivePoolDistributionWithCache(
-		block,
+	useImportedActive, err := ls.shouldUseImportedActivePoolDistributionAtSlot(
+		slot,
 		epochId,
 		epochCache,
 	)
@@ -2004,7 +2017,7 @@ func (ls *LedgerState) resolveElectingSnapshot(
 		snap.epoch,
 		snap.kind,
 		poolKeyHash[:],
-		nil,
+		txn,
 	)
 	snap.row, snap.rowErr = row, headerStateLookupErr(err)
 	return snap
@@ -2297,7 +2310,7 @@ func (ls *LedgerState) shouldSkipPostMithrilMarkEligibilityWithCache(
 	return false
 }
 
-// shouldUseImportedActivePoolDistributionWithCache resolves the Mithril trust
+// shouldUseImportedActivePoolDistributionAtSlot resolves the Mithril trust
 // boundary against a caller-supplied epoch cache.
 //
 // This selection decides *which* snapshot elects the block, and both halves of
@@ -2306,12 +2319,12 @@ func (ls *LedgerState) shouldSkipPostMithrilMarkEligibilityWithCache(
 // disagree about the electing snapshot across an epoch rollover or a rollback,
 // which is the divergence threading epochId through this path exists to
 // prevent.
-func (ls *LedgerState) shouldUseImportedActivePoolDistributionWithCache(
-	block ledger.Block,
+func (ls *LedgerState) shouldUseImportedActivePoolDistributionAtSlot(
+	slot uint64,
 	epochId uint64,
 	epochCache []models.Epoch,
 ) (bool, error) {
-	if ls.mithrilLedgerSlot == 0 || block.SlotNumber() <= ls.mithrilLedgerSlot {
+	if ls.mithrilLedgerSlot == 0 || slot <= ls.mithrilLedgerSlot {
 		return false, nil
 	}
 	mithrilEpoch, err := epochForSlotInCache(epochCache, ls.mithrilLedgerSlot)
@@ -2319,7 +2332,7 @@ func (ls *LedgerState) shouldUseImportedActivePoolDistributionWithCache(
 		return false, fmt.Errorf(
 			"block header verification rejected at slot %d: "+
 				"resolve Mithril trust boundary epoch: %w",
-			block.SlotNumber(),
+			slot,
 			err,
 		)
 	}
@@ -2371,6 +2384,20 @@ func (ls *LedgerState) electingVrfKeyHashFromSnapshotWithContext(
 	epochCache []models.Epoch,
 	snap electingSnapshot,
 ) (lcommon.Blake2b256, bool, error) {
+	txn := ls.db.MetadataTxn(ctx, false)
+	defer txn.Release()
+	return ls.electingVrfKeyHashFromSnapshotWithTxn(
+		ctx, poolKeyHash, epochCache, snap, txn,
+	)
+}
+
+func (ls *LedgerState) electingVrfKeyHashFromSnapshotWithTxn(
+	ctx context.Context,
+	poolKeyHash lcommon.PoolKeyHash,
+	epochCache []models.Epoch,
+	snap electingSnapshot,
+	txn *database.Txn,
+) (lcommon.Blake2b256, bool, error) {
 	cutoffSlot, capturedSlot, ok, err := ls.electingPoolParamsCutoffSlotFromSnapshot(
 		snap,
 		epochCache,
@@ -2379,13 +2406,41 @@ func (ls *LedgerState) electingVrfKeyHashFromSnapshotWithContext(
 		return lcommon.Blake2b256{}, false, err
 	}
 	if ok {
-		txn := ls.db.MetadataTxn(ctx, false)
-		defer txn.Release()
-		vrfKeyHash, found, err := ls.db.Metadata().GetPoolVrfKeyHashAtSlot(
-			poolKeyHash[:],
-			cutoffSlot,
-			txn.Metadata(),
-		)
+		var vrfKeyHash []byte
+		var found bool
+		if ls.mithrilLedgerSlot != 0 && cutoffSlot == ls.mithrilLedgerSlot &&
+			capturedSlot == ls.mithrilLedgerSlot {
+			// Imported active distributions precede promotion even in Dijkstra;
+			// the two anchor rows describe current and deferred parameters.
+			mithrilEpoch, epochErr := epochForSlotInCache(
+				epochCache,
+				capturedSlot,
+			)
+			if epochErr != nil {
+				return lcommon.Blake2b256{}, false, headerStateLookupErr(
+					epochErr,
+				)
+			}
+			registrations, registrationErr := ls.db.Metadata().
+				GetPoolRegistrationsEffectiveForEpoch(
+					[]lcommon.PoolKeyHash{poolKeyHash},
+					mithrilEpoch.StartSlot,
+					mithrilEpoch.EpochId,
+					capturedSlot,
+					txn.Metadata(),
+				)
+			err = registrationErr
+			if len(registrations) == 1 {
+				vrfKeyHash = registrations[0].VrfKeyHash
+				found = true
+			}
+		} else {
+			vrfKeyHash, found, err = ls.db.Metadata().GetPoolVrfKeyHashAtSlot(
+				poolKeyHash[:],
+				cutoffSlot,
+				txn.Metadata(),
+			)
+		}
 		if err != nil {
 			return lcommon.Blake2b256{}, false, headerStateLookupErr(err)
 		}
@@ -2449,25 +2504,48 @@ func (ls *LedgerState) electingVrfKeyHashFromSnapshotWithContext(
 		// in this file), so a capture at or below it is diagnostic: the
 		// snapshot that elected this pool was captured no later than the
 		// bootstrap boundary, which only a bootstrap-created gap explains.
-		// Falling back to the live registration here is the same trust
-		// electingVrfKeyHashFromSnapshot already extends when ok is false --
+		// Falling back to the registration effective at import is the same
+		// trust electingVrfKeyHashFromSnapshot already extends when ok is false --
 		// no snapshot at all -- applied to the narrower case of a snapshot
 		// whose registration history the import could not carry. It is not
 		// the general "no history found" fallback that was removed: outside
-		// this bootstrap-anchor window, a genuine gap still hard-rejects
-		// rather than resolving the pool's current (possibly rotated) key.
+		// this bootstrap-anchor window, a genuine gap still hard-rejects. The
+		// epoch-effective lookup also preserves imported future parameters as
+		// staged until their boundary instead of selecting the latest row.
 		if ls.mithrilLedgerSlot != 0 && capturedSlot <= ls.mithrilLedgerSlot {
-			pool, poolErr := ls.db.GetPool(ctx, poolKeyHash, true, nil)
-			if poolErr != nil && !errors.Is(poolErr, models.ErrPoolNotFound) {
+			mithrilEpoch, epochErr := epochForSlotInCache(
+				epochCache,
+				ls.mithrilLedgerSlot,
+			)
+			if epochErr != nil {
+				return lcommon.Blake2b256{}, false, headerStateLookupErr(epochErr)
+			}
+			registrations, registrationErr := ls.db.Metadata().
+				GetPoolRegistrationsEffectiveForEpoch(
+					[]lcommon.PoolKeyHash{poolKeyHash},
+					mithrilEpoch.StartSlot,
+					mithrilEpoch.EpochId,
+					ls.mithrilLedgerSlot,
+					txn.Metadata(),
+				)
+			if registrationErr != nil {
 				return lcommon.Blake2b256{}, false, headerStateLookupErr(
-					poolErr,
+					registrationErr,
 				)
 			}
-			hash, ok, err := registeredPoolVrfKeyHash(pool)
-			if err != nil {
-				return lcommon.Blake2b256{}, false, headerStateLookupErr(err)
-			}
-			if ok {
+			if len(registrations) == 1 && len(registrations[0].VrfKeyHash) > 0 {
+				hash, hashErr := lcommon.NewBlake2b256Checked(
+					registrations[0].VrfKeyHash,
+				)
+				if hashErr != nil {
+					return lcommon.Blake2b256{}, false, headerStateLookupErr(
+						fmt.Errorf(
+							"imported VRF key hash for pool %x: %w",
+							poolKeyHash[:],
+							hashErr,
+						),
+					)
+				}
 				return hash, true, nil
 			}
 		}
@@ -2479,7 +2557,7 @@ func (ls *LedgerState) electingVrfKeyHashFromSnapshotWithContext(
 			poolKeyHash[:],
 		)
 	}
-	pool, err := ls.db.GetPool(ctx, poolKeyHash, true, nil)
+	pool, err := ls.db.GetPool(ctx, poolKeyHash, true, txn)
 	if err != nil {
 		return lcommon.Blake2b256{}, false, headerStateLookupErr(err)
 	}

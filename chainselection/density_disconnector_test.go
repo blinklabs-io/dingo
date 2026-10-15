@@ -410,6 +410,27 @@ func TestPeerIdlingTracksAwaitReplyFrontier(t *testing.T) {
 	assert.False(t, f.cs.peerTips[peer].isIdling())
 }
 
+func TestDensityCandidatesAreInCanonicalOrder(t *testing.T) {
+	t.Parallel()
+	f := newGDDFixture(t, true)
+	x, y, z := corrConn(1), corrConn(2), corrConn(3)
+	for _, connId := range []ouroboros.ConnectionId{z, x, y} {
+		f.deliver(t, connId, 0, 1000)
+	}
+
+	want := []ouroboros.ConnectionId{x, y, z}
+	for range 32 {
+		f.cs.mutex.Lock()
+		candidates := f.cs.densityCandidatesLocked()
+		f.cs.mutex.Unlock()
+		got := make([]ouroboros.ConnectionId, 0, len(candidates))
+		for _, candidate := range candidates {
+			got = append(got, candidate.connId)
+		}
+		assert.Equal(t, want, got)
+	}
+}
+
 // Density is compared at each pair's own intersection, so "sparser than"
 // is not transitive: X loses to Y and Z at slot 1000, while Z beats Y at their
 // later fork (1010). Every peer then has a rival in the same pass, and a pass
@@ -417,19 +438,41 @@ func TestPeerIdlingTracksAwaitReplyFrontier(t *testing.T) {
 // three.
 func TestGDDKeepsOnePeerWhenDensityIsCyclic(t *testing.T) {
 	t.Parallel()
-	f := newGDDFixture(t, true)
-	x, y, z := corrConn(1), corrConn(2), corrConn(3)
-	shared := slotRange(1001, 1010)
-	// (1000,1120]: X 20, Y 21, Z 19. (1010,1130]: Y 11, Z 19.
-	f.deliver(t, x, 0, append([]uint64{1000}, slotRange(1101, 1120)...)...)
-	yslots := append([]uint64{1000}, shared...)
-	yslots = append(yslots, slotRange(1011, 1021)...)
-	f.deliver(t, y, 0, append(yslots, 1200)...)
-	zslots := append([]uint64{1000}, shared...)
-	zslots = append(zslots, slotRange(1031, 1039)...)
-	f.deliver(t, z, 0, append(zslots, slotRange(1121, 1130)...)...)
+	orders := [][]int{
+		{0, 1, 2}, {0, 2, 1}, {1, 0, 2},
+		{1, 2, 0}, {2, 0, 1}, {2, 1, 0},
+	}
+	for _, order := range orders {
+		t.Run(fmt.Sprint(order), func(t *testing.T) {
+			t.Parallel()
+			f := newGDDFixture(t, true)
+			x, y, z := corrConn(1), corrConn(2), corrConn(3)
+			shared := slotRange(1001, 1010)
+			feeds := []func(){
+				func() {
+					f.deliver(t, x, 0,
+						append([]uint64{1000}, slotRange(1101, 1120)...)...)
+				},
+				func() {
+					yslots := append([]uint64{1000}, shared...)
+					yslots = append(yslots, slotRange(1011, 1021)...)
+					f.deliver(t, y, 0, append(yslots, 1200)...)
+				},
+				func() {
+					zslots := append([]uint64{1000}, shared...)
+					zslots = append(zslots, slotRange(1031, 1039)...)
+					f.deliver(t, z, 0,
+						append(zslots, slotRange(1121, 1130)...)...)
+				},
+			}
+			for _, index := range order {
+				feeds[index]()
+			}
 
-	f.evaluate()
+			f.evaluate()
 
-	assert.Len(t, f.disconnected(), 2)
+			assert.Equal(t, []ouroboros.ConnectionId{x, y}, f.disconnected())
+			assert.NotContains(t, f.disconnected(), z)
+		})
+	}
 }
