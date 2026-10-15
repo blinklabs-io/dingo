@@ -8511,6 +8511,19 @@ agent and local paths.
 Every value read off the agent socket is treated as untrusted input, since the
 socket is attacker-reachable whenever its filesystem path is:
 
+- Before dialing a filesystem socket, the client requires an actual socket in
+  a directory that is not group- or other-writable, and refuses other-write
+  access on the socket itself. After the dial it verifies that the socket and
+  its parent directory still identify the inspected filesystem objects,
+  authenticates the process UID from kernel peer credentials, and pins that
+  UID across reconnects. The protected directory prevents an untrusted local
+  user from choosing the first process whose UID becomes pinned. On Linux, an
+  `@`-prefixed address is an abstract socket with no filesystem metadata, so
+  its kernel-authenticated peer UID must match the node's effective UID. On
+  macOS, `@` is an ordinary filename character and the filesystem checks
+  apply. Protocol and mode checks still apply after transport authentication;
+  a later valid block signature is data integrity evidence, not the peer
+  identity check.
 - The initial handshake (`Client` dial + `Hello` read) is bounded by
   `HelloTimeout` (default 5s) in both size (`MaxHelloFrameLen`) and time.
 - The two halves of a frame are bounded separately. Waiting for a length
@@ -8562,7 +8575,9 @@ one absolute path before the first connection, then reuses that path for every
 reconnect; changing the process working directory cannot redirect later
 connections to another local agent. Absolute filesystem paths are cleaned,
 and Linux abstract socket addresses use Go's `@name` form and are kept as
-configured. Literal NUL-prefixed addresses are rejected as nonportable. The
+configured; because they lack an owner and mode, they are accepted only from
+the node's own effective UID. Literal NUL-prefixed addresses are rejected as
+nonportable. The
 client rejects an over-long resolved path at block-producer startup with an
 error that states the length and the limit.
 

@@ -121,6 +121,9 @@ type Client struct {
 
 	closed bool
 
+	serverUID    uint32
+	serverUIDSet bool
+
 	backoff       time.Duration
 	nextDialAfter time.Time
 }
@@ -180,6 +183,8 @@ func (c *Client) CheckReady() error {
 	c.mu.Lock()
 	closed := c.closed
 	cfg := c.cfg
+	serverUID := c.serverUID
+	serverUIDSet := c.serverUIDSet
 	c.mu.Unlock()
 	if closed {
 		return ErrClosed
@@ -190,10 +195,27 @@ func (c *Client) CheckReady() error {
 	if err != nil {
 		return err
 	}
+	probe.serverUID = serverUID
+	probe.serverUIDSet = serverUIDSet
 	defer probe.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.HelloTimeout)
 	defer cancel()
-	return probe.connectLocked(ctx)
+	if err := probe.connectLocked(ctx); err != nil {
+		return err
+	}
+	c.mu.Lock()
+	if !c.serverUIDSet {
+		c.serverUID = probe.serverUID
+		c.serverUIDSet = probe.serverUIDSet
+	} else if probe.serverUIDSet && c.serverUID != probe.serverUID {
+		c.mu.Unlock()
+		return fmt.Errorf(
+			"%w: service owner changed while readiness was checked",
+			errWrongPeer,
+		)
+	}
+	c.mu.Unlock()
+	return nil
 }
 
 // Close closes the current connection, if any, and marks the client closed;
@@ -272,6 +294,12 @@ func (c *Client) connectLocked(ctx context.Context) error {
 		)
 	}
 
+	socketIdentity, err := inspectSocketIdentity(c.cfg.SocketPath)
+	if err != nil {
+		c.recordDialFailureLocked()
+		return err
+	}
+
 	dialCtx, cancel := context.WithTimeout(ctx, c.cfg.HelloTimeout)
 	defer cancel()
 	var d net.Dialer
@@ -279,6 +307,18 @@ func (c *Client) connectLocked(ctx context.Context) error {
 	if err != nil {
 		c.recordDialFailureLocked()
 		return fmt.Errorf("kesagent: dial %s: %w", c.cfg.SocketPath, err)
+	}
+	peerUID, err := authenticateSocketPeer(
+		conn,
+		c.cfg.SocketPath,
+		socketIdentity,
+		c.serverUID,
+		c.serverUIDSet,
+	)
+	if err != nil {
+		_ = conn.Close()
+		c.recordDialFailureLocked()
+		return err
 	}
 
 	// The Hello read is one-shot, not the idle-between-messages wait a
@@ -325,6 +365,10 @@ func (c *Client) connectLocked(ctx context.Context) error {
 		return fmt.Errorf("kesagent: clear hello deadline: %w", err)
 	}
 
+	if !c.serverUIDSet {
+		c.serverUID = peerUID
+		c.serverUIDSet = true
+	}
 	c.conn = conn
 	c.cfg.Metrics.setConnected(true)
 	return nil
