@@ -23,6 +23,7 @@ import (
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
+	"github.com/blinklabs-io/plutigo/data"
 	"github.com/blinklabs-io/plutigo/lang"
 	"github.com/blinklabs-io/plutigo/syn"
 	"github.com/stretchr/testify/require"
@@ -79,6 +80,12 @@ func witnessSetWithScript(
 	script lcommon.Script,
 	redeemers map[lcommon.RedeemerKey]lcommon.RedeemerValue,
 ) gdijkstra.DijkstraTransactionWitnessSet {
+	for key, redeemer := range redeemers {
+		if redeemer.Data.Data == nil {
+			redeemer.Data = lcommon.Datum{Data: data.NewConstr(0)}
+			redeemers[key] = redeemer
+		}
+	}
 	ws := gdijkstra.DijkstraTransactionWitnessSet{
 		WsRedeemers: gdijkstra.DijkstraRedeemers{Redeemers: redeemers},
 	}

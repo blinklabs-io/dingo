@@ -634,10 +634,15 @@ func copyBlocksRemote(
 	pending := make([]chan error, 0, remoteImmutablePrefetch)
 	defer func() {
 		cancelFetch()
-		// Waiting only keeps a cancelled fetch from outliving the
-		// import; its error is moot once the import has returned.
 		for _, done := range pending {
-			<-done //nolint:errcheck // drained after cancellation
+			if err := <-done; err != nil &&
+				!errors.Is(err, context.Canceled) &&
+				!errors.Is(err, errRemoteChunkNotPublished) {
+				logger.Warn(
+					"remote ImmutableDB prefetch failed during shutdown",
+					"error", err,
+				)
+			}
 		}
 	}()
 	next := first
