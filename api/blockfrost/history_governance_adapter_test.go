@@ -869,7 +869,7 @@ func TestNodeAdapterVoteCertIndexCountsPerVoter(t *testing.T) {
 	serveBlocks(fx, map[uint64]*slotBlock{
 		100: {number: 1, txs: []lcommon.Transaction{newTx(0xb1, true, procedures(
 			spo, govID(t, 0x01, 0), uint8(0),
-			drep, govID(t, 0x02, 0), uint8(1),
+			drep, govID(t, 0x02, 0), uint8(0),
 			cc, govID(t, 0x02, 0), uint8(1),
 			drep, govID(t, 0x01, 0), uint8(0),
 			cc, govID(t, 0x01, 0), uint8(0),
@@ -1031,4 +1031,32 @@ func TestNodeAdapterVotesListEveryCast(t *testing.T) {
 	require.Len(t, drepVotes, 3)
 	assert.Equal(t, "no", drepVotes[0].Vote)
 	assert.Equal(t, hexOf(fill32(0xb2)), drepVotes[2].TxHash)
+}
+
+func TestNodeAdapterVotesListLegacySameBlockCasts(t *testing.T) {
+	t.Parallel()
+	fx := newEpochFixture(t)
+	ctx := context.Background()
+	proposal := fx.addProposal(t, 0x01, 0, lcommon.GovActionTypeInfo, []byte{0x81, 0x06}, 10)
+	fx.addVote(t, proposal, models.VoterTypeDRep, 0, 0xd1, models.VoteNo, 100, false)
+	fx.addVote(t, proposal, models.VoterTypeDRep, 0, 0xd1, models.VoteYes, 100, false)
+	drep := voter(lcommon.VoterTypeDRepKeyHash, 0xd1)
+	action := govID(t, 0x01, 0)
+	serveBlocks(fx, map[uint64]*slotBlock{
+		100: {number: 40, txs: []lcommon.Transaction{
+			newTx(0xa1, true, procedures(drep, action, uint8(models.VoteNo))),
+			newTx(0xb1, true, procedures(drep, action, uint8(models.VoteYes))),
+		}},
+	})
+
+	rows, total, err := fx.adapter.GovernanceProposalVotes(
+		ctx, GovActionRef{TxHash: fill32(0x01), Index: 0}, asc,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, 2, total)
+	require.Len(t, rows, 2)
+	assert.Equal(t, hexOf(fill32(0xa1)), rows[0].TxHash)
+	assert.Equal(t, "no", rows[0].Vote)
+	assert.Equal(t, hexOf(fill32(0xb1)), rows[1].TxHash)
+	assert.Equal(t, "yes", rows[1].Vote)
 }

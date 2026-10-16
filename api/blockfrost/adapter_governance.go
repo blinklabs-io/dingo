@@ -581,6 +581,7 @@ func voteProcedureIndex(
 	procedures lcommon.VotingProcedures,
 	voter lcommon.Voter,
 	action lcommon.GovActionId,
+	vote uint8,
 ) (int, bool) {
 	for v, votes := range procedures {
 		if v == nil || v.Type != voter.Type || v.Hash != voter.Hash {
@@ -601,7 +602,8 @@ func voteProcedureIndex(
 			return int(x.GovActionIdx) - int(y.GovActionIdx)
 		})
 		for index, id := range actions {
-			if id.Equal(action) {
+			procedure, exists := votes[id]
+			if id.Equal(action) && exists && procedure.Vote == vote {
 				return index, true
 			}
 		}
@@ -662,6 +664,7 @@ func (a *NodeAdapter) castTransactions(
 				tx.VotingProcedures(),
 				voter,
 				action,
+				row.Vote.Vote,
 			)
 			if !matched {
 				continue
