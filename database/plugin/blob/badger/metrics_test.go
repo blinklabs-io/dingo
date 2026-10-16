@@ -15,10 +15,13 @@
 package badger
 
 import (
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 
+	badgerdb "github.com/dgraph-io/badger/v4"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
@@ -89,64 +92,50 @@ func TestValueLogGCMetricsReportReclaimedBytes(t *testing.T) {
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
-	populateGCFixture(t, store)
-	runValueLogGC := store.runValueLogGC
-	var wantReclaimed float64
-	store.runValueLogGC = func(ratio float64) error {
-		beforeLSM, beforeVlog, err := store.onDiskSize()
-		if err != nil {
-			return err
+	// The injected GC removes this file so the test covers byte accounting
+	// without relying on Badger's rewrite selection.
+	const reclaimedFileSize = 4 << 10
+	reclaimedFile := filepath.Join(store.dataDir, "blob", "metrics-reclaimed.vlog")
+	require.NoError(t, os.WriteFile(reclaimedFile, make([]byte, reclaimedFileSize), 0o600))
+	var reclaimedFileRemoved bool
+	store.runValueLogGC = func(float64) error {
+		if reclaimedFileRemoved {
+			return badgerdb.ErrNoRewrite
 		}
-		gcErr := runValueLogGC(ratio)
-		afterLSM, afterVlog, sizeErr := store.onDiskSize()
-		if sizeErr != nil {
-			return sizeErr
-		}
-		before := beforeLSM + beforeVlog
-		after := afterLSM + afterVlog
-		if gcErr == nil && before > after {
-			wantReclaimed += float64(before - after)
-		}
-		return gcErr
+		reclaimedFileRemoved = true
+		return os.Remove(reclaimedFile)
 	}
 
 	ticks := make(chan time.Time, 1)
 	stop := make(chan struct{})
 	var stopOnce sync.Once
-	// Registered after the store's Close cleanup so it runs first: Close waits
-	// for this goroutine, and an assertion failure would otherwise hang it.
+	// Cleanup runs before the store cleanup above, which waits for gcWg.
 	t.Cleanup(func() { stopOnce.Do(func() { close(stop) }) })
 	store.gcWg.Add(1)
 	go store.blobGc(ticks, stop)
-	// Badger samples a value-log file at random, so a cycle can end in
-	// ErrNoRewrite without any rewrite. Tick until one cycle rewrites.
-	for cycle := 1.0; testutil.ToFloat64(store.gcMetrics.successes) == 0; cycle++ {
-		require.LessOrEqual(t, cycle, 20.0, "no GC cycle rewrote a value-log file")
-		attemptsBefore := testutil.ToFloat64(store.gcMetrics.attempts)
-		errorsBefore := testutil.ToFloat64(store.gcMetrics.errors)
-		ticks <- time.Time{}
+	var completedCycles float64
+	gcDeadline := time.Now().Add(time.Minute)
+	waitForNoRewrite := func(after float64) {
+		remaining := time.Until(gcDeadline)
+		if remaining <= 0 {
+			t.Fatal("Badger GC did not finish within one minute")
+		}
 		require.Eventually(t, func() bool {
-			attempts := testutil.ToFloat64(store.gcMetrics.attempts)
-			successes := testutil.ToFloat64(store.gcMetrics.successes)
-			noRewrite := testutil.ToFloat64(store.gcMetrics.noRewrite)
-			errors := testutil.ToFloat64(store.gcMetrics.errors)
-			cycleComplete := attempts > attemptsBefore &&
-				attempts == successes+noRewrite+errors
-			return cycleComplete &&
-				(successes > 0 || noRewrite >= cycle || errors > errorsBefore)
-		}, time.Minute, 10*time.Millisecond)
+			return testutil.ToFloat64(store.gcMetrics.noRewrite) > after
+		}, remaining, 10*time.Millisecond)
 	}
+	ticks <- time.Time{}
+	waitForNoRewrite(completedCycles)
+	require.Equal(t, float64(1), testutil.ToFloat64(store.gcMetrics.successes))
 	require.Positive(t, testutil.ToFloat64(store.gcMetrics.consecutive))
 	require.Equal(
 		t,
-		wantReclaimed,
+		float64(reclaimedFileSize),
 		testutil.ToFloat64(store.gcMetrics.reclaimedBytes),
 	)
-	cycles := testutil.ToFloat64(store.gcMetrics.noRewrite)
+	completedCycles = testutil.ToFloat64(store.gcMetrics.noRewrite)
 	ticks <- time.Time{}
-	require.Eventually(t, func() bool {
-		return testutil.ToFloat64(store.gcMetrics.noRewrite) > cycles
-	}, time.Minute, 10*time.Millisecond)
+	waitForNoRewrite(completedCycles)
 	stopOnce.Do(func() { close(stop) })
 	store.gcWg.Wait()
 	require.Zero(t, testutil.ToFloat64(store.gcMetrics.consecutive))
