@@ -113,7 +113,7 @@ type PeerSnapshotLedgerPool struct {
 const supportedPeerSnapshotVersion = 23
 
 // Validate checks that a peer snapshot is a supported, internally consistent
-// source of TCP relay endpoints for the configured network.
+// source of relay endpoints for the configured network.
 func (s *PeerSnapshotConfig) Validate(networkMagic uint32) error {
 	if s == nil {
 		return nil
@@ -187,11 +187,6 @@ func validatePeerSnapshotRelay(relay TopologyConfigP2PAccessPoint) error {
 	if relay.Address == "" {
 		return errors.New("address must not be empty")
 	}
-	if relay.Port == 0 {
-		return errors.New(
-			"SRV relay mode is not supported; port must be specified",
-		)
-	}
 	if uint64(relay.Port) > math.MaxUint16 {
 		return fmt.Errorf("port %d is outside the TCP port range", relay.Port)
 	}
@@ -202,6 +197,9 @@ func validatePeerSnapshotRelay(relay TopologyConfigP2PAccessPoint) error {
 				relay.Address,
 			)
 		}
+		if relay.Port == 0 {
+			return errors.New("port must be specified for IP relay")
+		}
 		return nil
 	}
 	if !validPeerSnapshotHostname(relay.Address) {
@@ -210,6 +208,8 @@ func validatePeerSnapshotRelay(relay TopologyConfigP2PAccessPoint) error {
 			relay.Address,
 		)
 	}
+	// A zero port on a DNS relay marks Cardano's MultiHostName form. Peer
+	// governance resolves its port from SRV records.
 	return nil
 }
 
