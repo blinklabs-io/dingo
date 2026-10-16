@@ -61,15 +61,10 @@ var ErrRewardStateRepairWaitingForSnapshot = errors.New(
 // file of their own over a verified one — never leaving the directory the
 // handle refers to — and the copy loads what they wrote.
 //
-// v2 always carries them. v1 does not: it certifies one archive rather than the
-// files inside it, so after extraction there is nothing to re-check against and
-// its reads are bound to the directory alone.
-//
-// The absence of a map, not its emptiness, is what selects that unverified
-// read. A map that is present but empty is a v2 result that lost its digests,
-// and treating it as v1 would answer "verify nothing" to a question nobody
-// asked — reachable by removing something, which is the direction a fail-open
-// always comes from. NewFromRootVerified refuses it instead.
+// A result without digests is refused for the same reason: reading unverified
+// bytes would answer "verify nothing" to a question nobody asked, and a missing
+// map is the direction a fail-open always comes from. An empty map is refused
+// by NewFromRootVerified.
 func openBootstrappedImmutable(
 	result *BootstrapResult,
 ) (*immutable.ImmutableDb, error) {
@@ -80,15 +75,16 @@ func openBootstrappedImmutable(
 			result.ImmutableDir,
 		)
 	}
-	var imm *immutable.ImmutableDb
-	var err error
-	if result.ImmutableDigests != nil {
-		imm, err = immutable.NewFromRootVerified(
-			result.ImmutableRoot, result.ImmutableDigests, "",
+	if result.ImmutableDigests == nil {
+		return nil, fmt.Errorf(
+			"opening certified ImmutableDB %s: bootstrap result carries no "+
+				"certified file digests",
+			result.ImmutableDir,
 		)
-	} else {
-		imm, err = immutable.NewFromRoot(result.ImmutableRoot)
 	}
+	imm, err := immutable.NewFromRootVerified(
+		result.ImmutableRoot, result.ImmutableDigests, "",
+	)
 	if err != nil {
 		return nil, fmt.Errorf(
 			"opening certified ImmutableDB: %w", err,

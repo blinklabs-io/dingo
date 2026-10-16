@@ -324,14 +324,13 @@ type v2FixtureOptions struct {
 	// immutable location templates, the way cloud-storage locations carry
 	// their credentials. The mux routes on path only, so it changes nothing
 	// but what an error is at risk of quoting.
-	signedImmutableQuery       bool
-	missingAncillary           bool
-	validImmutable             bool
-	fallbackLedgerState        bool
-	fallbackLedgerStateSlot    uint64
-	fallbackLedgerStateUTxOMap cbor.RawMessage
-	ancillaryLedgerState       []byte
-	ancillaryLedgerSlot        uint64
+	signedImmutableQuery    bool
+	validImmutable          bool
+	validLedgerState        bool
+	validLedgerStateSlot    uint64
+	validLedgerStateUTxOMap cbor.RawMessage
+	ancillaryLedgerState    []byte
+	ancillaryLedgerSlot     uint64
 	// ancillaryHonorsRange serves the ancillary archive with Range support,
 	// so resuming a fully cached file yields 416 with the total size, the way
 	// object storage does.
@@ -388,6 +387,7 @@ func newV2Fixture(t *testing.T, opts v2FixtureOptions) *v2Fixture {
 	baseURL := fixture.server.URL
 
 	// Immutable trios and their digest entries
+	var validLedgerStateBytes []byte
 	for num := uint64(0); num <= opts.immutableFileNumber; num++ {
 		files := map[string][]byte{}
 		for _, ext := range []string{"chunk", "primary", "secondary"} {
@@ -396,8 +396,8 @@ func newV2Fixture(t *testing.T, opts v2FixtureOptions) *v2Fixture {
 			if opts.validImmutable && num == 0 {
 				var blockHash []byte
 				files, blockHash = validImmutableFiles(t, 1000)
-				if opts.fallbackLedgerState {
-					stateSlot := opts.fallbackLedgerStateSlot
+				if opts.validLedgerState {
+					stateSlot := opts.validLedgerStateSlot
 					if stateSlot == 0 {
 						stateSlot = 1000
 					}
@@ -405,13 +405,13 @@ func newV2Fixture(t *testing.T, opts v2FixtureOptions) *v2Fixture {
 					if stateSlot == 999 {
 						stateHash = files["immutable/00000.secondary"][16:48]
 					}
-					files["ledger/100/state"] = minimalLedgerState(
+					validLedgerStateBytes = minimalLedgerState(
 						t, stateSlot, stateHash,
 					)
-					if opts.fallbackLedgerStateUTxOMap != nil {
-						files["ledger/100/state"] = minimalLedgerStateWithUTxOMap(
+					if opts.validLedgerStateUTxOMap != nil {
+						validLedgerStateBytes = minimalLedgerStateWithUTxOMap(
 							t, stateSlot, stateHash,
-							opts.fallbackLedgerStateUTxOMap,
+							opts.validLedgerStateUTxOMap,
 						)
 					}
 				}
@@ -492,6 +492,9 @@ func newV2Fixture(t *testing.T, opts v2FixtureOptions) *v2Fixture {
 	ancillaryLedgerState := []byte("ledger state data")
 	if len(opts.ancillaryLedgerState) > 0 {
 		ancillaryLedgerState = opts.ancillaryLedgerState
+	}
+	if validLedgerStateBytes != nil {
+		ancillaryLedgerState = validLedgerStateBytes
 	}
 	ancillaryLedgerSlot := opts.ancillaryLedgerSlot
 	if ancillaryLedgerSlot == 0 {
@@ -576,18 +579,13 @@ func newV2Fixture(t *testing.T, opts v2FixtureOptions) *v2Fixture {
 		},
 		Ancillary: CardanoDatabaseAncillary{
 			SizeUncompressed: int64(len(fixture.ancillaryArchive)),
-			Locations: func() []CardanoDatabaseLocation {
-				if opts.missingAncillary {
-					return nil
-				}
-				return []CardanoDatabaseLocation{
-					{
-						Type:                 locationTypeCloudStorage,
-						URI:                  baseURL + "/files/ancillary.tar.zst",
-						CompressionAlgorithm: "zstandard",
-					},
-				}
-			}(),
+			Locations: []CardanoDatabaseLocation{
+				{
+					Type:                 locationTypeCloudStorage,
+					URI:                  baseURL + "/files/ancillary.tar.zst",
+					CompressionAlgorithm: "zstandard",
+				},
+			},
 		},
 		CardanoNodeVersion: "11.0.1",
 		CreatedAt:          "2026-06-12T00:00:00.000000000Z",
@@ -961,28 +959,6 @@ func TestBootstrapV2NoCertVerification(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, hasChunkFiles(result.ImmutableDir))
 	require.NotEmpty(t, result.AncillaryDir)
-}
-
-func TestSyncV2NoCertVerificationUsesExtractDirLedgerState(t *testing.T) {
-	t.Parallel()
-
-	fixture := newV2Fixture(t, v2FixtureOptions{
-		missingAncillary:    true,
-		validImmutable:      true,
-		fallbackLedgerState: true,
-	})
-	result, err := Sync(context.Background(), SyncConfig{
-		Network:           "preprod",
-		DataDir:           t.TempDir(),
-		StorageMode:       "core",
-		Backend:           BackendV2,
-		AggregatorURL:     fixture.server.URL,
-		AllowInsecureHTTP: true,
-		VerifyCertChain:   false,
-		CleanupAfterLoad:  false,
-	})
-	require.NoError(t, err)
-	assert.Equal(t, uint64(1000), result.LedgerSlot)
 }
 
 func TestSyncV2SerializesMetadataWriterPhases(t *testing.T) {

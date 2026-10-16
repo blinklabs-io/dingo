@@ -84,9 +84,8 @@ func immutableDownloadBudget(cfg BootstrapConfig) (*semaphore.Weighted, int64) {
 }
 
 // immutableArchiveLimits admits an immutable archive's own certified trio, and
-// hashes each file as it is written. The ledger tree is also admitted because
-// v1-layout archives keep the ledger state there and the extraction directory
-// is searched for it when no ancillary archive is usable.
+// hashes each file as it is written. The ledger tree is also admitted, though
+// the ledger state is imported from the ancillary archive only.
 func immutableArchiveLimits(
 	num uint64,
 	digests map[string]string,
@@ -157,9 +156,8 @@ var immutableFileExtensions = []string{"chunk", "primary", "secondary"}
 // bootstrapV2 restores a node database from Mithril CardanoDatabase
 // (v2) artifacts: per-immutable-file archives verified against the
 // certified merkle root, plus an ancillary archive carrying the
-// ledger state verified via the signed ancillary manifest. It
-// produces the same BootstrapResult shape as the v1 flow so that
-// downstream loading is backend-agnostic.
+// ledger state verified via the signed ancillary manifest. Its
+// result carries the verified immutable and ancillary handles.
 func bootstrapV2(
 	ctx context.Context,
 	cfg BootstrapConfig,
@@ -319,7 +317,7 @@ func bootstrapV2(
 		}
 	}()
 
-	// Unlike v1, the ancillary download and the immutable archive
+	// The ancillary download and the immutable archive
 	// pool report progress concurrently. Downstream OnProgress
 	// callbacks are not required to be thread-safe, so serialize
 	// emissions here.
@@ -608,7 +606,6 @@ func verifyArtifactCertificateV2(
 		ctx,
 		client,
 		artifact.CertificateHash,
-		"", // v2 leaf binding uses cardano_database_merkle_root below
 		VerificationModeSTM,
 	)
 	if err != nil {
@@ -1650,8 +1647,7 @@ func downloadAncillaryV2(
 		// there for Cleanup to remove.
 		//
 		// Asked of the downloader rather than assembled here, so the two
-		// cannot name different files — see downloadAncillary for what that
-		// costs when the aggregator picks the network name.
+		// cannot name different files.
 		dest := downloadDestinationPath(DownloadConfig{
 			DestDir:  downloadDir,
 			Filename: ancillaryFilename,

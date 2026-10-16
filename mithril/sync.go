@@ -559,7 +559,7 @@ type SyncConfig struct {
 	DownloadIdleTimeout    string                     // optional; passed to BootstrapConfig
 	DownloadMaxIdleRetries int                        // must be >= 0
 	DownloadMaxBytes       int64                      // per compressed object; zero uses DefaultMaxDownloadBytes
-	PinnedDigest           string                     // optional exact artifact identity for a fresh bootstrap (v1 snapshot digest; v2 database hash)
+	PinnedDigest           string                     // optional exact artifact identity for a fresh bootstrap (database hash)
 	VerifyCertChain        bool
 	CleanupAfterLoad       bool
 	// RepairLegacyRewardState forces a same-chain Mithril reconciliation for
@@ -1221,7 +1221,7 @@ func Sync(
 	}
 
 	// Backstop the in-progress marker for paths that did not pipeline a copy
-	// (for example the v1 backend, which has no per-chunk hook). Idempotent
+	// (for example a run with no per-chunk hook). Idempotent
 	// when the pipelined copy already set it. Set after a successful bootstrap
 	// and before any post-bootstrap write or deferred-index drop.
 	if err := markSyncInProgress(

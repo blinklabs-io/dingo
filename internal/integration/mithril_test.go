@@ -16,7 +16,6 @@ package integration
 
 import (
 	"context"
-	"errors"
 	"log/slog"
 	"os"
 	"testing"
@@ -81,9 +80,6 @@ func TestImportLedgerStateFromMithril(t *testing.T) {
 			},
 		},
 	)
-	if errors.Is(err, mithril.ErrNoSnapshotsAvailable) {
-		t.Skipf("Mithril aggregator has no snapshots: %v", err)
-	}
 	require.NoError(t, err, "bootstrapping from Mithril")
 	t.Logf(
 		"snapshot extracted: epoch=%d, immutable=%s",
@@ -91,14 +87,11 @@ func TestImportLedgerStateFromMithril(t *testing.T) {
 		result.ImmutableDir,
 	)
 
-	// Search for ledger state in ancillary dir first, then extract dir,
-	// through the directory handles the bootstrap vetted — the same discovery
-	// the import performs. Searching by pathname here would leave the
+	// Search for ledger state in the ancillary dir through the directory
+	// handle the bootstrap vetted — the same discovery the import performs. Searching by pathname here would leave the
 	// integration coverage on a code path production no longer takes.
 	var snapshot *ledgerstate.SnapshotFiles
-	for _, root := range []*os.Root{
-		result.AncillaryRoot, result.ExtractRoot,
-	} {
+	for _, root := range []*os.Root{result.AncillaryRoot} {
 		if root == nil {
 			continue
 		}

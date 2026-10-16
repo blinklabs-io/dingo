@@ -91,8 +91,7 @@ func hostileAggregator(t *testing.T) string {
 		`"immutables":{"locations":[]},"ancillary":{"locations":[]}}`
 	server := httptest.NewServer(http.HandlerFunc(
 		func(w http.ResponseWriter, r *http.Request) {
-			if strings.HasSuffix(r.URL.Path, "snapshots") ||
-				strings.HasSuffix(r.URL.Path, "cardano-database") {
+			if strings.HasSuffix(r.URL.Path, "cardano-database") {
 				_, _ = w.Write([]byte("[" + snap + "]"))
 				return
 			}
@@ -106,7 +105,7 @@ func hostileAggregator(t *testing.T) string {
 // Not t.Parallel: captureStdout swaps the process-global os.Stdout.
 func TestMithrilListShowEscapeAggregatorText(t *testing.T) {
 	url := hostileAggregator(t)
-	for _, backend := range []string{"v1", "v2"} {
+	for _, backend := range []string{"v2"} {
 		for _, tc := range []struct {
 			name string
 			cmd  func() *cobra.Command
