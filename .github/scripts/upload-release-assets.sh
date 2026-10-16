@@ -30,7 +30,7 @@ DIST_DIR="${DIST_DIR:-dist}"
 
 shopt -s nullglob
 archives=("${DIST_DIR}"/*.tar.gz)
-reports=("${DIST_DIR}/${APPLICATION_NAME}"-*-cbor-conformance.json)
+reports=("${DIST_DIR}/${APPLICATION_NAME}"-*-cbor-conformance.json.gz)
 shopt -u nullglob
 
 if [ "${#archives[@]}" -eq 0 ]; then
@@ -54,7 +54,7 @@ upload_asset() {
   name="$(basename "$asset")"
   content_type="application/octet-stream"
   case "$name" in
-    *.json) content_type="application/json" ;;
+    *.json.gz) content_type="application/gzip" ;;
   esac
   echo "uploading ${name}"
   curl \

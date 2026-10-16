@@ -46,6 +46,9 @@ on:
 permissions:
   contents: read
 
+env:
+  CBOR_DATASET_REVISION: '6cd8c928665bbafe90e02066ebb4620e38f051de'
+
 concurrency:
   # A new push to the branch cancels the run for the commit it replaced, so a
   # force-push or a rapid series of pushes cannot accumulate runners.
@@ -277,6 +280,41 @@ jobs:
         # friends and t.Skip when unset, so this replays vectors against SQLite
         # only. go-test (Linux) and go-test (Linux, race) below cover the rest.
         run: go test -tags dingo_extra_plugins -ldflags="-s -w" -timeout 30m ./...
+      - name: Checkout CBOR conformance corpus
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
+        with:
+          repository: r2rationality/cardano-cbor-dataset
+          ref: ${{ env.CBOR_DATASET_REVISION }}
+          path: .conformance/cardano-cbor-dataset
+          persist-credentials: false
+      - name: Generate CBOR conformance report
+        run: |
+          set -euo pipefail
+          dataset_dir=.conformance/cardano-cbor-dataset
+          dataset_revision="$(git -C "$dataset_dir" rev-parse HEAD)"
+          if [ "$dataset_revision" != "$CBOR_DATASET_REVISION" ]; then
+            echo "CBOR dataset checkout does not match the pinned revision" >&2
+            exit 1
+          fi
+          report_version=ci
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            report_version="${GITHUB_REF_NAME#v}"
+          fi
+          report_date="$(date -u +%Y%m%d)"
+          report_name="dingo-${report_version}-${report_date}-cbor-conformance.json"
+          mkdir -p dist
+          go run ./internal/cborconformance/cmd \
+            -dataset "$dataset_dir/dataset/conway" \
+            -corpus-revision "$dataset_revision" \
+            -output "dist/${report_name}"
+          gzip -n "dist/${report_name}"
+      - name: Upload CBOR conformance report
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2 https://github.com/actions/upload-artifact/releases/tag/v7.0.2
+        with:
+          name: dingo-cbor-conformance-report
+          path: dist/*-cbor-conformance.json.gz
+          if-no-files-found: error
+          retention-days: 14
 
   # Stage 3. Linux with Postgres, MySQL and MinIO (fake s3) services.
   #
