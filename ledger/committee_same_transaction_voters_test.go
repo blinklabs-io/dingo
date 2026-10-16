@@ -409,6 +409,10 @@ func TestValidateTxDijkstraSubTransactionCommitteeVoterEligibility(
 			t.Parallel()
 			pparams := committeeVotingDijkstra.pparams(tc.protocolVersion)
 			lv, db := committeeTestView(t, pparams)
+			require.NoError(
+				t,
+				db.SetEpoch(0, 0, nil, nil, nil, nil, 0, 1, 100, nil),
+			)
 			seatedCold := committeeTestCredential(0x61)
 			voterCold := seatedCold
 			if !tc.elected {

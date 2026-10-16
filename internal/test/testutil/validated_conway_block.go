@@ -238,6 +238,11 @@ func buildValidatedConwayBlockBytes(
 		bodyComps, bodyHash, bodySize = minimalTransactionBody(t)
 	}
 	activeSlotCoeff := big.NewRat(99, 100)
+	eligibility, err := consensus.NewLeaderEligibility(
+		1_000_000_000, 1_000_000_000, activeSlotCoeff,
+		consensus.ConsensusModeCPraos,
+	)
+	require.NoError(t, err)
 
 	// currentKesSk/currentKesPeriod track the KES key actually used to
 	// sign, evolved forward (never backward -- KES evolution is
@@ -264,12 +269,9 @@ func buildValidatedConwayBlockBytes(
 		if proveErr != nil {
 			continue
 		}
-		threshold := consensus.CertifiedNatThreshold(
-			1_000_000_000,
-			1_000_000_000,
-			activeSlotCoeff,
-		)
-		if !consensus.IsVRFOutputBelowThreshold(vrfOutput, threshold) {
+		eligible, eligibilityErr := eligibility.CheckVRFOutput(vrfOutput)
+		require.NoError(t, eligibilityErr)
+		if !eligible {
 			continue
 		}
 
