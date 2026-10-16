@@ -25,23 +25,8 @@ import (
 
 func main() {
 	corpusPath := flag.String("corpus", "", "path to the UPLC turbo corpus")
-	corpusID := flag.String(
-		"corpus-id",
-		"amaru-uplc/turbo",
-		"identifier for the benchmark corpus",
-	)
-	corpusHash := flag.String(
-		"corpus-digest",
-		"",
-		"SHA-256 digest of the downloaded corpus archive",
-	)
-	implementationVersion := flag.String(
-		"version",
-		"unknown",
-		"Dingo implementation version",
-	)
 	outputPath := flag.String("output", "", "path for the JSON report")
-	samples := flag.Int("samples", 10, "number of timed samples per program")
+	samples := flag.Int("samples", 50, "number of timed samples per program")
 	maxPrograms := flag.Int(
 		"max-programs",
 		0,
@@ -53,28 +38,33 @@ func main() {
 		os.Exit(2)
 	}
 
-	report, err := uplcconformance.GenerateTurboReport(
-		*corpusPath,
-		*corpusID,
-		*corpusHash,
-		*implementationVersion,
-		*samples,
-		*maxPrograms,
-		time.Now(),
-	)
-	if err != nil {
+	if err := generateReport(*corpusPath, *outputPath, *samples, *maxPrograms); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	if err := uplcconformance.WriteTurboReport(*outputPath, report); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+}
+
+func generateReport(corpusPath, outputPath string, samples, maxPrograms int) error {
+	report, err := uplcconformance.GenerateTurboReport(
+		corpusPath,
+		samples,
+		maxPrograms,
+		time.Now(),
+	)
+	if report.Scenario != "" {
+		if writeErr := uplcconformance.WriteTurboReport(outputPath, report); writeErr != nil {
+			return writeErr
+		}
+	}
+	if err != nil {
+		return err
 	}
 	fmt.Fprintf(
 		os.Stderr,
 		"wrote %s: %d programs across %d groups\n",
-		*outputPath,
+		outputPath,
 		len(report.Benchmarks),
 		len(report.Summary),
 	)
+	return nil
 }

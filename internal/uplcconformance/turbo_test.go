@@ -21,9 +21,12 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/plutigo/cek"
 	"github.com/blinklabs-io/plutigo/syn"
 	"github.com/fxamacker/cbor/v2"
 )
@@ -50,15 +53,16 @@ func TestGenerateTurboReportMeasuresFlatPrograms(t *testing.T) {
 	if err != nil {
 		t.Fatalf("wrap Flat program in CBOR: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(root, "addInteger-v1.flat"), wrapped, 0o600); err != nil {
+	epochDir := filepath.Join(root, "484")
+	if err := os.MkdirAll(epochDir, 0o700); err != nil {
+		t.Fatalf("create epoch directory: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(epochDir, "addInteger-v1.flat"), wrapped, 0o600); err != nil {
 		t.Fatalf("write Flat program: %v", err)
 	}
 
 	report, err := GenerateTurboReport(
 		root,
-		"test/turbo",
-		"",
-		"v0.0.0-test",
 		2,
 		0,
 		time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC),
@@ -72,6 +76,9 @@ func TestGenerateTurboReportMeasuresFlatPrograms(t *testing.T) {
 	if len(report.Benchmarks) != 1 ||
 		report.Benchmarks[0].SizeBytes != len(encoded) {
 		t.Fatalf("benchmarks = %+v", report.Benchmarks)
+	}
+	if report.Benchmarks[0].ProtocolVersion != "8.0" {
+		t.Fatalf("protocol version = %q, want 8.0 for epoch 484", report.Benchmarks[0].ProtocolVersion)
 	}
 	if report.Benchmarks[0].BudgetCPU == nil ||
 		report.Benchmarks[0].BudgetMem == nil {
@@ -92,6 +99,55 @@ func TestGenerateTurboReportMeasuresFlatPrograms(t *testing.T) {
 	if !json.Valid(reportJSON) {
 		t.Fatal("turbo report is not valid JSON")
 	}
+	reportFields := assertTurboJSONFields(
+		t,
+		reportJSON,
+		"schema_version",
+		"scenario",
+		"generated_at",
+		"implementation",
+		"machine",
+		"benchmarks",
+	)
+	var implementation json.RawMessage
+	if err := json.Unmarshal(reportFields["implementation"], &implementation); err != nil {
+		t.Fatalf("decode implementation: %v", err)
+	}
+	assertTurboJSONFields(t, implementation, "name", "language")
+	var machine json.RawMessage
+	if err := json.Unmarshal(reportFields["machine"], &machine); err != nil {
+		t.Fatalf("decode machine: %v", err)
+	}
+	assertTurboJSONFields(t, machine, "os", "architecture", "logical_cores")
+	var benchmarks []json.RawMessage
+	if err := json.Unmarshal(reportFields["benchmarks"], &benchmarks); err != nil {
+		t.Fatalf("decode benchmarks: %v", err)
+	}
+	if len(benchmarks) != 1 {
+		t.Fatalf("benchmarks = %d, want 1", len(benchmarks))
+	}
+	benchmarkFields := assertTurboJSONFields(
+		t,
+		benchmarks[0],
+		"bench",
+		"plutus_version",
+		"protocol_version",
+		"budget_cpu",
+		"budget_mem",
+		"cpu_us",
+		"flat_us",
+		"mem_bytes",
+		"size_bytes",
+	)
+	for _, field := range []string{"cpu_us", "flat_us", "mem_bytes"} {
+		var value float64
+		if err := json.Unmarshal(benchmarkFields[field], &value); err != nil {
+			t.Fatalf("decode benchmark %s: %v", field, err)
+		}
+		if value < 0 {
+			t.Fatalf("benchmark %s = %v, want non-negative", field, value)
+		}
+	}
 	if bytes.Contains(reportJSON, []byte(`"passed"`)) ||
 		bytes.Contains(reportJSON, []byte(`"failed"`)) {
 		t.Fatalf(
@@ -101,66 +157,185 @@ func TestGenerateTurboReportMeasuresFlatPrograms(t *testing.T) {
 	}
 }
 
-func TestGenerateTurboReportSkipsUndecodablePrograms(t *testing.T) {
+func assertTurboJSONFields(
+	t *testing.T,
+	raw json.RawMessage,
+	expected ...string,
+) map[string]json.RawMessage {
+	t.Helper()
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		t.Fatalf("decode object: %v", err)
+	}
+	if len(fields) != len(expected) {
+		t.Fatalf("object fields = %v, want exactly %v", fields, expected)
+	}
+	for _, field := range expected {
+		if _, ok := fields[field]; !ok {
+			t.Fatalf("object is missing field %q", field)
+		}
+	}
+	return fields
+}
+
+func TestMakeTurboBenchmarkSeparatesEvaluationAndFlatTimes(t *testing.T) {
+	budget := cek.ExBudget{Cpu: 100, Mem: 20}
+	benchmark, err := makeTurboBenchmark(
+		turboCase{name: "example-v1.flat", group: "V1", protocolMajor: 8},
+		42,
+		[]turboSample{
+			{
+				duration:           3 * time.Millisecond,
+				evaluationDuration: 2 * time.Millisecond,
+				flatDuration:       time.Millisecond,
+				memBytes:           100,
+				budget:             budget,
+			},
+			{
+				duration:           7 * time.Millisecond,
+				evaluationDuration: 6 * time.Millisecond,
+				flatDuration:       time.Millisecond,
+				memBytes:           200,
+				budget:             budget,
+			},
+		},
+	)
+	if err != nil {
+		t.Fatalf("make turbo benchmark: %v", err)
+	}
+	if benchmark.CPUUS == nil || *benchmark.CPUUS != 4_000 ||
+		benchmark.FlatUS == nil || *benchmark.FlatUS != 1_000 {
+		t.Fatalf(
+			"cpu/flat times = %v/%v us, want 4000/1000 us",
+			benchmark.CPUUS,
+			benchmark.FlatUS,
+		)
+	}
+}
+
+func TestTurboProtocolMajorByEpoch(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		epoch int
+		want  int
+	}{
+		{epoch: 0, want: 8},
+		{epoch: 506, want: 8},
+		{epoch: 507, want: 9},
+		{epoch: 536, want: 9},
+		{epoch: 537, want: 10},
+		{epoch: 643, want: 10},
+		{epoch: 644, want: 11},
+	} {
+		t.Run(strconv.Itoa(test.epoch), func(t *testing.T) {
+			t.Parallel()
+			if got := protocolMajorForEpoch(test.epoch); got != test.want {
+				t.Fatalf("protocol major = %d, want %d", got, test.want)
+			}
+		})
+	}
+}
+
+func TestMakeTurboBenchmarkUsesBestThirtySamples(t *testing.T) {
+	t.Parallel()
+	budget := cek.ExBudget{Cpu: 100, Mem: 20}
+	samples := make([]turboSample, 50)
+	for i := range samples {
+		duration := time.Duration(i+1) * time.Millisecond
+		samples[i] = turboSample{
+			duration:           duration,
+			evaluationDuration: duration,
+			flatDuration:       0,
+			budget:             budget,
+		}
+	}
+	benchmark, err := makeTurboBenchmark(
+		turboCase{name: "example-v1.flat", group: "V1", protocolMajor: 8},
+		42,
+		samples,
+	)
+	if err != nil {
+		t.Fatalf("make turbo benchmark: %v", err)
+	}
+	if benchmark.CPUUS == nil || *benchmark.CPUUS != 15_500 {
+		t.Fatalf("cpu time = %v us, want mean of best 30 samples (15500 us)", benchmark.CPUUS)
+	}
+}
+
+func TestGenerateTurboReportKeepsFailedBenchmarks(t *testing.T) {
 	t.Parallel()
 	if runtime.GOOS != "linux" {
 		t.Skip("UPLC turbo reports are Linux-only")
 	}
 	root := t.TempDir()
-	named, err := syn.Parse(referenceAddInteger)
-	if err != nil {
-		t.Fatalf("parse source program: %v", err)
+	epochDir := filepath.Join(root, "484")
+	if err := os.MkdirAll(epochDir, 0o700); err != nil {
+		t.Fatalf("create epoch directory: %v", err)
 	}
-	program, err := syn.NameToDeBruijn(named)
-	if err != nil {
-		t.Fatalf("convert source program: %v", err)
-	}
-	encoded, err := syn.Encode(program)
-	if err != nil {
-		t.Fatalf("encode Flat program: %v", err)
-	}
-	if err := writeTurboTestProgram(
-		filepath.Join(root, "good-v1.flat"),
-		encoded,
-	); err != nil {
-		t.Fatalf("write Flat program: %v", err)
-	}
-	if err := writeTurboTestProgram(
-		filepath.Join(root, "bad-v1.flat"),
-		[]byte{0xff, 0xff, 0xff},
-	); err != nil {
+	path := filepath.Join(epochDir, "invalid-v1.flat")
+	if err := writeTurboTestProgram(path, []byte{0xff, 0xff}); err != nil {
 		t.Fatalf("write invalid Flat program: %v", err)
 	}
 	if err := os.WriteFile(
-		filepath.Join(root, "unwrapped-v1.flat"),
+		filepath.Join(epochDir, "unwrapped-v1.flat"),
 		[]byte{0xff},
 		0o600,
 	); err != nil {
 		t.Fatalf("write invalid CBOR wrapper: %v", err)
 	}
-	generatedAt := time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)
 
-	report, err := GenerateTurboReport(root, "", "", "", 1, 0, generatedAt)
-	if err != nil {
-		t.Fatalf("generate turbo report: %v", err)
+	report, err := GenerateTurboReport(
+		root,
+		1,
+		0,
+		time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC),
+	)
+	if err == nil {
+		t.Fatal("generate turbo report succeeded for an invalid Flat program")
 	}
-	if len(report.Benchmarks) != 1 || report.Benchmarks[0].Bench != "good-v1.flat" {
-		t.Fatalf("benchmarks = %+v", report.Benchmarks)
+	if len(report.Benchmarks) != 2 {
+		t.Fatalf("benchmarks = %d, want both failed benchmarks in report", len(report.Benchmarks))
 	}
-	if len(report.Skipped) != 2 ||
-		report.Skipped[0].Bench != "bad-v1.flat" ||
-		report.Skipped[1].Bench != "unwrapped-v1.flat" ||
-		report.Skipped[0].Reason == "" || report.Skipped[1].Reason == "" {
-		t.Fatalf("skipped = %+v", report.Skipped)
+	for i, benchmark := range report.Benchmarks {
+		if benchmark.BudgetCPU != nil || benchmark.BudgetMem != nil ||
+			benchmark.FlatUS != nil || benchmark.MemBytes != nil || benchmark.CPUUS != nil ||
+			benchmark.Error == "" || strings.Contains(benchmark.Error, root) {
+			t.Fatalf("failed benchmark %d contains measurements: %+v", i, benchmark)
+		}
 	}
-
-	if err := os.Remove(filepath.Join(root, "good-v1.flat")); err != nil {
-		t.Fatalf("remove valid program: %v", err)
+	if !strings.Contains(report.Benchmarks[0].Error, "decode Flat program") ||
+		!strings.Contains(report.Benchmarks[1].Error, "decode CBOR byte string") {
+		t.Fatalf("benchmark errors = %q / %q", report.Benchmarks[0].Error, report.Benchmarks[1].Error)
 	}
-	if _, err := GenerateTurboReport(
-		root, "", "", "", 1, 0, generatedAt,
-	); err == nil {
-		t.Fatal("report with no measurable program must be an error")
+	reportPath := filepath.Join(t.TempDir(), "report.json")
+	if writeErr := WriteTurboReport(reportPath, report); writeErr != nil {
+		t.Fatalf("write partial turbo report: %v", writeErr)
+	}
+	reportJSON, readErr := os.ReadFile(reportPath)
+	if readErr != nil {
+		t.Fatalf("read partial turbo report: %v", readErr)
+	}
+	var decoded struct {
+		Benchmarks []map[string]json.RawMessage `json:"benchmarks"`
+	}
+	if unmarshalErr := json.Unmarshal(reportJSON, &decoded); unmarshalErr != nil {
+		t.Fatalf("decode partial turbo report: %v", unmarshalErr)
+	}
+	if len(decoded.Benchmarks) != 2 {
+		t.Fatalf("failed benchmark JSON = %s", reportJSON)
+	}
+	for i, benchmark := range decoded.Benchmarks {
+		if string(benchmark["cpu_us"]) != "null" ||
+			string(benchmark["flat_us"]) != "null" ||
+			string(benchmark["mem_bytes"]) != "null" ||
+			string(benchmark["budget_cpu"]) != "null" {
+			t.Fatalf("failed benchmark JSON = %s", reportJSON)
+		}
+		var failureReason string
+		if err := json.Unmarshal(benchmark["error"], &failureReason); err != nil ||
+			failureReason == "" || strings.Contains(failureReason, root) {
+			t.Fatalf("failed benchmark %d error = %q, err = %v", i, failureReason, err)
+		}
 	}
 }
 

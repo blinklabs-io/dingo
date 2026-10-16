@@ -28,6 +28,7 @@ import (
 	"regexp"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -39,8 +40,7 @@ import (
 
 const (
 	turboSchemaVersion     = "1"
-	turboProtocolVersion   = "10.0"
-	turboDefaultSamples    = 10
+	turboBestSamples       = 30
 	turboDeviationLimit    = 1.5
 	turboCPUUnitNanosecond = 0.001 // one picosecond per execution unit
 )
@@ -52,21 +52,20 @@ type TurboReport struct {
 	Scenario        string            `json:"scenario"`
 	GeneratedAt     string            `json:"generated_at"`
 	Implementation  map[string]string `json:"implementation"`
-	Corpus          string            `json:"corpus"`
-	ProtocolVersion string            `json:"protocol_version"`
-	Setup           TurboSetup        `json:"setup"`
-	Summary         []TurboSummary    `json:"summary"`
+	Machine         TurboMachine      `json:"machine"`
+	Corpus          string            `json:"-"`
+	ProtocolVersion string            `json:"-"`
+	Setup           TurboSetup        `json:"-"`
+	Summary         []TurboSummary    `json:"-"`
 	Benchmarks      []TurboBenchmark  `json:"benchmarks"`
-	Representatives []TurboBenchmark  `json:"representatives"`
-	WorstCases      []TurboBenchmark  `json:"worst_cases"`
-	Skipped         []TurboSkipped    `json:"skipped,omitempty"`
+	Representatives []TurboBenchmark  `json:"-"`
+	WorstCases      []TurboBenchmark  `json:"-"`
 }
 
-// TurboSkipped names a program that could not be measured, with the decode or
-// evaluation error that excluded it.
-type TurboSkipped struct {
-	Bench  string `json:"bench"`
-	Reason string `json:"reason"`
+type TurboMachine struct {
+	OS           string `json:"os,omitempty"`
+	Architecture string `json:"architecture,omitempty"`
+	LogicalCores int    `json:"logical_cores,omitempty"`
 }
 
 type TurboSetup struct {
@@ -91,29 +90,37 @@ type TurboSummary struct {
 }
 
 type TurboBenchmark struct {
-	Bench         string  `json:"bench"`
-	PlutusVersion string  `json:"plutus_version"`
-	BudgetCPU     *int64  `json:"budget_cpu"`
-	BudgetMem     *int64  `json:"budget_mem"`
-	Group         string  `json:"group"`
-	CPUMaxNS      float64 `json:"cpu_max_ns"`
-	CPUMeanNS     float64 `json:"cpu_mean_ns"`
-	MemMeanBytes  float64 `json:"mem_mean_bytes"`
-	MemMaxBytes   float64 `json:"mem_max_bytes"`
-	SizeBytes     int     `json:"size_bytes"`
+	Bench           string   `json:"bench"`
+	PlutusVersion   string   `json:"plutus_version"`
+	ProtocolVersion string   `json:"protocol_version"`
+	BudgetCPU       *int64   `json:"budget_cpu"`
+	BudgetMem       *int64   `json:"budget_mem"`
+	CPUUS           *float64 `json:"cpu_us"`
+	FlatUS          *float64 `json:"flat_us"`
+	MemBytes        *float64 `json:"mem_bytes"`
+	SizeBytes       int      `json:"size_bytes"`
+	Error           string   `json:"error,omitempty"`
+	Group           string   `json:"-"`
+	CPUMaxNS        float64  `json:"-"`
+	CPUMeanNS       float64  `json:"-"`
+	MemMeanBytes    float64  `json:"-"`
+	MemMaxBytes     float64  `json:"-"`
 }
 
 type turboSample struct {
-	duration time.Duration
-	memBytes uint64
-	budget   cek.ExBudget
+	duration           time.Duration
+	evaluationDuration time.Duration
+	flatDuration       time.Duration
+	memBytes           uint64
+	budget             cek.ExBudget
 }
 
 type turboCase struct {
-	path    string
-	name    string
-	version lang.LanguageVersion
-	group   string
+	path          string
+	name          string
+	version       lang.LanguageVersion
+	group         string
+	protocolMajor int
 }
 
 const turboMinHashCount = 16
@@ -169,7 +176,7 @@ func (h *maxUint64Heap) Pop() any {
 // that size, so the selection is the same on every run; zero measures the
 // whole corpus.
 func GenerateTurboReport(
-	root, corpusID, corpusDigest, implementationVersion string,
+	root string,
 	samples, maxPrograms int,
 	generatedAt time.Time,
 ) (TurboReport, error) {
@@ -220,28 +227,25 @@ func GenerateTurboReport(
 		cases = evenlySpaced(cases, maxPrograms)
 	}
 
-	if corpusID == "" {
-		corpusID = "amaru-uplc/turbo"
-	}
-	if implementationVersion == "" {
-		implementationVersion = "unknown"
-	}
 	report := TurboReport{
 		SchemaVersion: turboSchemaVersion,
 		Scenario:      "uplc-turbo",
 		GeneratedAt:   generatedAt.UTC().Format(time.RFC3339),
 		Implementation: map[string]string{
-			"name":    "dingo",
-			"version": implementationVersion,
+			"name":     "dingo",
+			"language": "Go",
 		},
-		Corpus:          corpusID,
-		ProtocolVersion: turboProtocolVersion,
+		Machine: TurboMachine{
+			OS:           runtime.GOOS,
+			Architecture: runtime.GOARCH,
+			LogicalCores: runtime.NumCPU(),
+		},
+		Corpus: "amaru-uplc/turbo",
 		Setup: TurboSetup{
 			SampleCount:        samples,
 			Measurement:        measurement,
 			IncludesReset:      true,
-			CostModel:          "Default Plutus cost model for each script language version at protocol version 10",
-			CorpusDigest:       corpusDigest,
+			CostModel:          "Default Plutus cost model for each script language version at the epoch's protocol version",
 			DeviationTolerance: turboDeviationLimit,
 			DeviationUnits:     "CPU: 1 unit = 1 picosecond; memory: 1 unit = 1 byte",
 			MemoryMeasurement:  "Go heap allocation bytes during evaluation, excluding Flat decoding",
@@ -257,20 +261,20 @@ func GenerateTurboReport(
 		groupIndexes: make(map[string][]int),
 		unindexed:    make(map[string][]int),
 	}
+	var benchmarkErrors []error
 	for _, tc := range cases {
 		programBytes, err := readTurboProgram(tc.path)
-		var measurements []turboSample
-		if err == nil {
-			measurements, err = measureTurboCase(tc, programBytes, samples)
-		}
 		if err != nil {
-			// The corpus can hold programs that are unreadable or that a
-			// conforming decoder rejects. They have no timing to report, so
-			// list them rather than losing the whole run to one.
-			report.Skipped = append(
-				report.Skipped,
-				TurboSkipped{Bench: tc.name, Reason: err.Error()},
-			)
+			failure := turboBenchmarkError(tc, fmt.Errorf("read CBOR-wrapped Flat program: %w", err))
+			benchmarkErrors = append(benchmarkErrors, failure)
+			report.Benchmarks = append(report.Benchmarks, failedTurboBenchmark(tc, 0, failure))
+			continue
+		}
+		measurements, err := measureTurboCase(tc, programBytes, samples)
+		if err != nil {
+			failure := turboBenchmarkError(tc, err)
+			benchmarkErrors = append(benchmarkErrors, failure)
+			report.Benchmarks = append(report.Benchmarks, failedTurboBenchmark(tc, len(programBytes), failure))
 			continue
 		}
 		benchmark, err := makeTurboBenchmark(
@@ -279,7 +283,10 @@ func GenerateTurboReport(
 			measurements,
 		)
 		if err != nil {
-			return TurboReport{}, fmt.Errorf("benchmark %s: %w", tc.name, err)
+			failure := turboBenchmarkError(tc, err)
+			benchmarkErrors = append(benchmarkErrors, failure)
+			report.Benchmarks = append(report.Benchmarks, failedTurboBenchmark(tc, len(programBytes), failure))
+			continue
 		}
 		report.Benchmarks = append(report.Benchmarks, benchmark)
 		minHashes, indexed := turboMinHashes(programBytes)
@@ -294,24 +301,17 @@ func GenerateTurboReport(
 			medianMem: medianTurboMemory(measurements),
 		}
 		if err := representativeIndex.add(candidate, programBytes); err != nil {
-			return TurboReport{}, fmt.Errorf(
+			benchmarkErrors = append(benchmarkErrors, fmt.Errorf(
 				"classify representative %s: %w",
 				tc.name,
 				err,
-			)
+			))
 		}
-	}
-	if len(report.Benchmarks) == 0 {
-		return TurboReport{}, fmt.Errorf(
-			"no turbo program could be measured; first skipped: %s: %s",
-			report.Skipped[0].Bench,
-			report.Skipped[0].Reason,
-		)
 	}
 	report.Summary = summarizeTurbo(report.Benchmarks, samples)
 	report.Representatives = representativeIndex.benchmarks()
 	report.WorstCases = turboWorstCases(report.Benchmarks, 10)
-	return report, nil
+	return report, errors.Join(benchmarkErrors...)
 }
 
 // evenlySpaced returns count cases spread across the ordered input.
@@ -335,6 +335,37 @@ func readTurboProgram(path string) ([]byte, error) {
 	return program, nil
 }
 
+func failedTurboBenchmark(tc turboCase, size int, err error) TurboBenchmark {
+	return TurboBenchmark{
+		Bench:           tc.name,
+		PlutusVersion:   tc.group,
+		ProtocolVersion: fmt.Sprintf("%d.0", tc.protocolMajor),
+		SizeBytes:       size,
+		Error:           err.Error(),
+		Group:           tc.group,
+	}
+}
+
+func turboBenchmarkError(tc turboCase, err error) error {
+	if pathErr, ok := errors.AsType[*os.PathError](err); ok {
+		err = pathErr.Err
+	}
+	return fmt.Errorf("benchmark %s: %w", tc.name, err)
+}
+
+func protocolMajorForEpoch(epoch int) int {
+	switch {
+	case epoch >= 644:
+		return 11
+	case epoch >= 537:
+		return 10
+	case epoch >= 507:
+		return 9
+	default:
+		return 8
+	}
+}
+
 func discoverTurboCases(root string) ([]turboCase, error) {
 	var cases []turboCase
 	err := filepath.WalkDir(
@@ -354,6 +385,18 @@ func discoverTurboCases(root string) ([]turboCase, error) {
 				)
 			}
 			versionNumber := match[1]
+			relativePath, err := filepath.Rel(root, path)
+			if err != nil {
+				return fmt.Errorf("resolve turbo corpus path %q: %w", path, err)
+			}
+			pathParts := strings.Split(relativePath, string(filepath.Separator))
+			if len(pathParts) < 2 {
+				return fmt.Errorf("turbo program is not inside an epoch directory: %s", path)
+			}
+			epoch, err := strconv.Atoi(pathParts[0])
+			if err != nil || epoch < 0 {
+				return fmt.Errorf("turbo program has an invalid epoch directory: %s", path)
+			}
 			version := lang.LanguageVersionV1
 			switch versionNumber {
 			case "2":
@@ -366,8 +409,9 @@ func discoverTurboCases(root string) ([]turboCase, error) {
 				name: filepath.ToSlash(
 					strings.TrimPrefix(path, root+string(filepath.Separator)),
 				),
-				version: version,
-				group:   "V" + versionNumber,
+				version:       version,
+				group:         "V" + versionNumber,
+				protocolMajor: protocolMajorForEpoch(epoch),
 			})
 			return nil
 		},
@@ -390,7 +434,7 @@ func measureTurboCase(
 	machine := cek.NewMachine[syn.DeBruijn](
 		tc.version,
 		200,
-		cek.NewDefaultEvalContext(tc.version, cek.ProtoVersion{Major: 10}),
+		cek.NewDefaultEvalContext(tc.version, cek.ProtoVersion{Major: uint(tc.protocolMajor)}),
 	)
 	measurements := make([]turboSample, 0, samples)
 	for range samples {
@@ -408,12 +452,15 @@ func measureTurboCase(
 		if _, err := machine.Run(program.Term); err != nil {
 			return nil, fmt.Errorf("evaluate Flat program: %w", err)
 		}
-		duration := decodeDuration + time.Since(evaluationStart)
+		evaluationDuration := time.Since(evaluationStart)
+		duration := decodeDuration + evaluationDuration
 		runtime.ReadMemStats(&after)
 		measurements = append(measurements, turboSample{
-			duration: duration,
-			memBytes: after.TotalAlloc - before.TotalAlloc,
-			budget:   initial.Sub(&machine.ExBudget),
+			duration:           duration,
+			evaluationDuration: evaluationDuration,
+			flatDuration:       decodeDuration,
+			memBytes:           after.TotalAlloc - before.TotalAlloc,
+			budget:             initial.Sub(&machine.ExBudget),
 		})
 	}
 	return measurements, nil
@@ -428,11 +475,7 @@ func makeTurboBenchmark(
 		return TurboBenchmark{}, errors.New("no samples measured")
 	}
 	firstBudget := samples[0].budget
-	var totalDuration time.Duration
-	var totalMemory uint64
-	var maxDuration time.Duration
-	var maxMemory uint64
-	for _, sample := range samples {
+	for _, sample := range samples[1:] {
 		if sample.budget != firstBudget {
 			return TurboBenchmark{}, fmt.Errorf(
 				"execution budget changed between samples: first %v, got %v",
@@ -440,7 +483,18 @@ func makeTurboBenchmark(
 				sample.budget,
 			)
 		}
+	}
+	samples = bestTurboSamples(samples)
+	var totalDuration time.Duration
+	var totalEvaluation time.Duration
+	var totalFlat time.Duration
+	var totalMemory uint64
+	var maxDuration time.Duration
+	var maxMemory uint64
+	for _, sample := range samples {
 		totalDuration += sample.duration
+		totalEvaluation += sample.evaluationDuration
+		totalFlat += sample.flatDuration
 		totalMemory += sample.memBytes
 		if sample.duration > maxDuration {
 			maxDuration = sample.duration
@@ -449,13 +503,21 @@ func makeTurboBenchmark(
 			maxMemory = sample.memBytes
 		}
 	}
+	flatUS := float64(totalFlat.Nanoseconds()) / 1_000 / float64(len(samples))
+	memBytes := float64(totalMemory) / float64(len(samples))
+	cpuUS := float64(totalEvaluation.Nanoseconds()) / 1_000 / float64(len(samples))
 	return TurboBenchmark{
-		Bench:         tc.name,
-		PlutusVersion: tc.group,
-		BudgetCPU:     new(firstBudget.Cpu),
-		BudgetMem:     new(firstBudget.Mem),
-		Group:         tc.group,
-		CPUMaxNS:      float64(maxDuration.Nanoseconds()),
+		Bench:           tc.name,
+		PlutusVersion:   tc.group,
+		ProtocolVersion: fmt.Sprintf("%d.0", tc.protocolMajor),
+		BudgetCPU:       new(firstBudget.Cpu),
+		BudgetMem:       new(firstBudget.Mem),
+		CPUUS:           &cpuUS,
+		FlatUS:          &flatUS,
+		MemBytes:        &memBytes,
+		SizeBytes:       size,
+		Group:           tc.group,
+		CPUMaxNS:        float64(maxDuration.Nanoseconds()),
 		CPUMeanNS: float64(
 			totalDuration.Nanoseconds(),
 		) / float64(
@@ -463,8 +525,18 @@ func makeTurboBenchmark(
 		),
 		MemMeanBytes: float64(totalMemory) / float64(len(samples)),
 		MemMaxBytes:  float64(maxMemory),
-		SizeBytes:    size,
 	}, nil
+}
+
+func bestTurboSamples(samples []turboSample) []turboSample {
+	if len(samples) <= turboBestSamples {
+		return samples
+	}
+	best := append([]turboSample(nil), samples...)
+	sort.SliceStable(best, func(i, j int) bool {
+		return best[i].duration < best[j].duration
+	})
+	return best[:turboBestSamples]
 }
 
 func summarizeTurbo(

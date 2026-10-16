@@ -64,9 +64,10 @@ uploaded; the release step requires all four reports to exist. Report
 generation never stops a release: when a generator crashes or its inputs
 cannot be prepared, an `error` report naming the scenario and the cause is
 uploaded in its place. The turbo report measures an evenly spaced sample of
-`TURBO_MAX_PROGRAMS` programs (10,000 by default) and records the sample size
-in its setup. Programs that cannot be decoded or evaluated are listed under
-`skipped` instead of being measured.
+`TURBO_MAX_PROGRAMS` programs (10,000 by default) using 50 samples per program
+and the mean of the best 30. A program that cannot be decoded or evaluated
+remains in the report with null measurements and an `error` reason; it counts
+as a failed benchmark.
 
 ## Local development workflows
 

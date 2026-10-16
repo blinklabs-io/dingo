@@ -21,7 +21,7 @@
 #   CBOR_DATASET_REVISION required, the pinned dataset commit
 #   TURBO_URL             required, the turbo corpus archive
 #   TURBO_SHA256          required, digest of that archive
-#   TURBO_SAMPLES         optional, timed samples per program, defaults to 10
+#   TURBO_SAMPLES         optional, timed samples per program, defaults to 50
 #   TURBO_MAX_PROGRAMS    optional, programs measured, defaults to 10000
 
 set -euo pipefail
@@ -34,7 +34,7 @@ set -euo pipefail
 
 DIST_DIR="${DIST_DIR:-dist}"
 CONFORMANCE_DIR="${CONFORMANCE_DIR:-.conformance}"
-TURBO_SAMPLES="${TURBO_SAMPLES:-10}"
+TURBO_SAMPLES="${TURBO_SAMPLES:-50}"
 TURBO_MAX_PROGRAMS="${TURBO_MAX_PROGRAMS:-10000}"
 
 version="${RELEASE_TAG#v}"
@@ -48,12 +48,17 @@ write_error_report() {
   jq -n \
     --arg scenario "$scenario" \
     --arg generated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-    --arg version "$version" \
     --arg error "$message" \
     '{schema_version: "1", scenario: $scenario, generated_at: $generated_at,
-      implementation: {name: "dingo", version: $version}, error: $error}' \
+      implementation: {name: "dingo", language: "Go"}, error: $error}' \
     >"$report"
   echo "::warning::${scenario} report could not be generated: ${message}" >&2
+}
+
+# redact_log
+# Removes workspace and temporary paths from public report diagnostics.
+redact_log() {
+  sed "s|$PWD|<workspace>|g; s|${TMPDIR:-/tmp}/[^[:space:]]*|<temporary>|g; s|/tmp/[^[:space:]]*|<temporary>|g"
 }
 
 # log_excerpt FILE
@@ -61,9 +66,9 @@ write_error_report() {
 # the end of a long one.
 log_excerpt() {
   if [ "$(wc -l <"$1")" -gt 8 ]; then
-    { head -n 3 "$1"; echo ...; tail -n 5 "$1"; } | tr '\n' ' '
+    { head -n 3 "$1"; echo ...; tail -n 5 "$1"; } | redact_log | tr '\n' ' '
   else
-    tr '\n' ' ' <"$1"
+    redact_log <"$1" | tr '\n' ' '
   fi
 }
 
@@ -78,7 +83,7 @@ run_generator() {
   local log status=0
   log="$(mktemp)"
   "$@" 2>"$log" || status=$?
-  cat "$log" >&2
+  redact_log <"$log" >&2
   if [ ! -s "$report" ]; then
     write_error_report "$report" "$scenario" \
       "generator exited ${status} without writing a report: $(log_excerpt "$log")"
@@ -117,6 +122,7 @@ else
   write_error_report "${prefix}-cbor-conformance.json" cbor-decoding \
     "CBOR dataset checkout does not match the pinned revision ${CBOR_DATASET_REVISION}"
 fi
+rm -f "$dataset_log"
 
 run_generator "${prefix}-ledger-rules.json" ledger-rules \
   go run ./internal/ledgerrulesconformance/cmd \
@@ -134,8 +140,6 @@ if prepare_turbo_corpus "$turbo_dir" 2>"${turbo_dir}/prepare.log"; then
   run_generator "${prefix}-uplc-turbo.json" uplc-turbo \
     go run ./internal/uplcconformance/turbocmd \
     -corpus "${turbo_dir}/corpus" \
-    -corpus-digest "$TURBO_SHA256" \
-    -version "$version" \
     -samples "$TURBO_SAMPLES" \
     -max-programs "$TURBO_MAX_PROGRAMS" \
     -output "${prefix}-uplc-turbo.json"
