@@ -235,6 +235,7 @@ var stakeSnapshotStoreMethods = []string{
 	"SavePoolStakeSnapshots",
 	"GetPoolStakeSnapshot",
 	"GetPoolStakeSnapshotsByEpoch",
+	"GetPoolStakeSnapshotsByEpochBounded",
 	"GetPoolStakeSnapshotsForPools",
 	"GetTotalActiveStake",
 	"SaveEpochSummary",
