@@ -289,6 +289,46 @@ func TestGenerateReportSeparatesEvaluationAndBudget(t *testing.T) {
 	}
 }
 
+func TestGenerateReportPreservesUint32ProtocolVersion(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	writeManifest(t, root, baselineManifest+`regression_case!(
+    max_protocol_version_regression,
+    "conformance_extra/textual/protocol/max-uint32/max-uint32.uplc",
+    PlutusVersion::V2,
+    PROTOCOL_VERSION_4294967295
+);
+`)
+	addBaselineVectors(t, root)
+	writeVector(
+		t,
+		root,
+		regressionCorpusDir,
+		"textual/protocol",
+		"max-uint32",
+		referenceAddInteger,
+		referenceResult,
+		"",
+	)
+
+	const maxUint32 = uint64(1<<32 - 1)
+	report := generate(t, root)
+	scenario := scenarioByID(t, report, "max_protocol_version_regression")
+	if got := uint64(scenario.ProtocolVersion); got != maxUint32 {
+		t.Fatalf("scenario protocol version = %d, want %d", got, maxUint32)
+	}
+
+	for _, model := range report.CostModels {
+		if model.ID == "v2-pv4294967295-default" {
+			if got := uint64(model.ProtocolVersion); got != maxUint32 {
+				t.Fatalf("cost model protocol version = %d, want %d", got, maxUint32)
+			}
+			return
+		}
+	}
+	t.Fatal("cost model for protocol version 4294967295 not found")
+}
+
 func TestGenerateReportKeepsEvaluationFailuresVisible(t *testing.T) {
 	t.Parallel()
 	root := newCorpus(t)

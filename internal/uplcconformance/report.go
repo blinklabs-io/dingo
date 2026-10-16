@@ -87,7 +87,7 @@ type CostModel struct {
 	ID              string `json:"id"`
 	Description     string `json:"description"`
 	PlutusVersion   string `json:"plutus_version"`
-	ProtocolVersion int    `json:"protocol_version"`
+	ProtocolVersion uint   `json:"protocol_version"`
 	Source          string `json:"source"`
 }
 
@@ -116,7 +116,7 @@ type CaseResult struct {
 	Title           string  `json:"title"`
 	Group           string  `json:"group"`
 	PlutusVersion   string  `json:"plutus_version"`
-	ProtocolVersion int     `json:"protocol_version"`
+	ProtocolVersion uint    `json:"protocol_version"`
 	CostModelID     string  `json:"cost_model_id"`
 	Evaluation      Outcome `json:"evaluation"`
 	Budget          Outcome `json:"budget"`
@@ -253,7 +253,7 @@ func costModels(used map[costModelKey]struct{}) []CostModel {
 		model := CostModel{
 			ID:              key.id(),
 			PlutusVersion:   versionName(key.language),
-			ProtocolVersion: int(key.protocol),
+			ProtocolVersion: key.protocol,
 			Source:          "github.com/blinklabs-io/plutigo/cek.NewDefaultEvalContext",
 			Description: fmt.Sprintf(
 				"Plutigo default Plutus %s cost model at protocol version %d",
@@ -579,7 +579,7 @@ func runCase(
 		Title:           testCase.title,
 		Group:           testCase.group,
 		PlutusVersion:   versionName(testCase.language),
-		ProtocolVersion: int(testCase.protocol),
+		ProtocolVersion: testCase.protocol,
 		CostModelID:     testCase.costs.id(),
 		Evaluation: Outcome{
 			Expected: evalExpected,
