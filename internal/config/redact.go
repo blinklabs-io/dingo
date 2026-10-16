@@ -21,6 +21,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"unicode"
 )
 
 // redactedPlaceholder replaces a secret-bearing value in a rendered log.
@@ -547,7 +548,7 @@ func mappedValue(
 	transform func(string) string,
 	fallback func(reflect.Value) slog.Value,
 ) slog.Value {
-	switch v.Kind() { //nolint:exhaustive // reflect.Kind default is intended
+	switch v.Kind() {
 	case reflect.String:
 		return slog.StringValue(transform(v.String()))
 	case reflect.Slice, reflect.Array:
@@ -573,6 +574,14 @@ func mappedValue(
 			))
 		}
 		return slog.GroupValue(attrs...)
+	case reflect.Invalid, reflect.Bool,
+		reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64,
+		reflect.Uintptr, reflect.Float32, reflect.Float64,
+		reflect.Complex64, reflect.Complex128,
+		reflect.Chan, reflect.Func, reflect.Interface, reflect.Pointer,
+		reflect.Struct, reflect.UnsafePointer:
+		return fallback(v)
 	default:
 		return fallback(v)
 	}
@@ -695,7 +704,7 @@ func redactURICredentials(s string) string {
 }
 
 func redactURLCredentialsOrPath(s string) string {
-	leading := len(s) - len(strings.TrimLeft(s, " \t\r\n"))
+	leading := len(s) - len(strings.TrimLeftFunc(s, unicode.IsSpace))
 	value := s[leading:]
 	if !strings.HasPrefix(strings.ToLower(value), "http://") &&
 		!strings.HasPrefix(strings.ToLower(value), "https://") {

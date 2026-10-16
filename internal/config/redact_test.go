@@ -919,6 +919,7 @@ func TestImmutableDbPathRedactsRemoteCredentialsAndPreservesLocalPath(
 
 	for _, path := range []string{
 		" https://credential-name:password@example.test/db",
+		"\u00a0https://credential-name:password@example.test/db",
 		"https:///db?apiKey=query-secret",
 	} {
 		cfg.ImmutableDbPath = path
