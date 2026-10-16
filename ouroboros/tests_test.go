@@ -1898,6 +1898,16 @@ func withLowerLeiosEndorserBlockCacheBudgets(
 	})
 }
 
+func retainedLeiosTestEntryBytes(
+	blockRaw []byte,
+	txsRaw []cbor.RawMessage,
+) int {
+	return (&leiosEndorserBlockData{
+		blockRaw: slices.Clone(blockRaw),
+		txsRaw:   cloneRawMessages(txsRaw),
+	}).approxBytes()
+}
+
 // Valid case: the fetched manifest's length matches what the offer declared,
 // so the fetch is accepted and the bytes are returned unchanged.
 func TestFetchAndValidateLeiosEbManifestAcceptsMatchingSize(t *testing.T) {
@@ -1943,10 +1953,10 @@ func TestFetchAndValidateLeiosEbManifestRejectsSizeMismatch(t *testing.T) {
 func TestStoreLeiosEndorserBlockRejectsOversizedEntry(t *testing.T) {
 	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 7000, 1)
 	tx := testDijkstraTx(t, 0)
-	entryBytes := (&leiosEndorserBlockData{
-		blockRaw: blockRaw,
-		txsRaw:   []cbor.RawMessage{tx},
-	}).approxBytes()
+	entryBytes := retainedLeiosTestEntryBytes(
+		blockRaw,
+		[]cbor.RawMessage{tx},
+	)
 	withLowerLeiosEndorserBlockCacheBudgets(t, entryBytes-1, 1<<20)
 
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
@@ -1968,10 +1978,10 @@ func TestStoreLeiosEndorserBlockRejectsOversizedEntry(t *testing.T) {
 func TestLeiosEndorserBlockCacheEvictsOldestFirstAtByteBudget(t *testing.T) {
 	_, sampleRaw := testLeiosEndorserBlockRaw(t, 1)
 	sampleTx := testDijkstraTx(t, 0)
-	entryBytes := (&leiosEndorserBlockData{
-		blockRaw: sampleRaw,
-		txsRaw:   []cbor.RawMessage{sampleTx},
-	}).approxBytes()
+	entryBytes := retainedLeiosTestEntryBytes(
+		sampleRaw,
+		[]cbor.RawMessage{sampleTx},
+	)
 	withLowerLeiosEndorserBlockCacheBudgets(t, 1<<20, 2*entryBytes)
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 
@@ -2009,6 +2019,50 @@ func TestLeiosEndorserBlockCacheEvictsOldestFirstAtByteBudget(t *testing.T) {
 	require.True(t, ok)
 }
 
+func TestLeiosEndorserBlockCacheCountsSparseTransactionStorage(t *testing.T) {
+	const txCount = 128
+	point1, blockRaw1 := testLeiosEndorserBlockRawWithRefs(t, 1, txCount)
+	point2, blockRaw2 := testLeiosEndorserBlockRawWithRefs(t, 2, txCount)
+	manifest1Bytes := cap(slices.Clone(blockRaw1))
+	manifest2Bytes := cap(slices.Clone(blockRaw2))
+	partialBytes := txCount*rawMessageHeaderBytes + 1
+	entry1Bytes := manifest1Bytes + partialBytes
+	entry2Bytes := manifest2Bytes + partialBytes
+	withLowerLeiosEndorserBlockCacheBudgets(
+		t,
+		max(entry1Bytes, entry2Bytes),
+		entry1Bytes+manifest2Bytes,
+	)
+	o := newOuroboros(OuroborosConfig{EnableLeios: true})
+
+	require.NoError(t, o.storeLeiosEndorserBlock(
+		point1,
+		blockRaw1,
+		nil,
+		leiosStoreAuthoritative,
+	))
+	partial1 := make([]cbor.RawMessage, txCount)
+	partial1[0] = cbor.RawMessage{1}
+	o.retainLeiosPartialTxs(point1.Slot, point1.Hash, partial1, nil)
+
+	require.NoError(t, o.storeLeiosEndorserBlock(
+		point2,
+		blockRaw2,
+		nil,
+		leiosStoreAuthoritative,
+	))
+	partial2 := make([]cbor.RawMessage, txCount)
+	partial2[0] = cbor.RawMessage{2}
+	o.retainLeiosPartialTxs(point2.Slot, point2.Hash, partial2, nil)
+
+	_, firstCached := o.lookupLeiosEndorserBlock(point1.Slot, point1.Hash)
+	second, secondCached := o.lookupLeiosEndorserBlock(point2.Slot, point2.Hash)
+	require.False(t, firstCached)
+	require.True(t, secondCached)
+	require.Equal(t, partialBytes, rawMessagesRetainedBytes(second.partialTxs))
+	require.Equal(t, entry2Bytes, second.approxBytes())
+}
+
 // Eviction correctness: eviction order must follow actual insertion order
 // (seq), not the wall-clock insertedAt captured before leiosMu is acquired. A
 // delayed goroutine can win the lock later while still carrying an earlier
@@ -2019,14 +2073,14 @@ func TestLeiosEndorserBlockCacheEvictionOrdersBySeqNotInsertedAt(t *testing.T) {
 	secondPoint, secondRaw := testLeiosEndorserBlockRaw(t, 2)
 	firstTx := testDijkstraTx(t, 1)
 	secondTx := testDijkstraTx(t, 2)
-	firstBytes := (&leiosEndorserBlockData{
-		blockRaw: firstRaw,
-		txsRaw:   []cbor.RawMessage{firstTx},
-	}).approxBytes()
-	secondBytes := (&leiosEndorserBlockData{
-		blockRaw: secondRaw,
-		txsRaw:   []cbor.RawMessage{secondTx},
-	}).approxBytes()
+	firstBytes := retainedLeiosTestEntryBytes(
+		firstRaw,
+		[]cbor.RawMessage{firstTx},
+	)
+	secondBytes := retainedLeiosTestEntryBytes(
+		secondRaw,
+		[]cbor.RawMessage{secondTx},
+	)
 	withLowerLeiosEndorserBlockCacheBudgets(
 		t,
 		1<<20,
@@ -2187,7 +2241,7 @@ func TestLoadLeiosEBFromDBPrunesAggregateBudgetAfterReload(t *testing.T) {
 	point1, manifest1, txs1 := leiosPersistedTestEntry(t, 1, 0, 10)
 	point2, manifest2, txs2 := leiosPersistedTestEntry(t, 2, 100, 10)
 
-	withLowerLeiosEndorserBlockCacheBudgets(t, 1<<20, 1500)
+	withLowerLeiosEndorserBlockCacheBudgets(t, 1<<20, 1<<20)
 	o := newTestOuroborosWithLeiosDB(t)
 	db := o.leiosDatabase()
 	require.NotNil(t, db)
@@ -2196,14 +2250,20 @@ func TestLoadLeiosEBFromDBPrunesAggregateBudgetAfterReload(t *testing.T) {
 
 	data1, ok := o.lookupLeiosEndorserBlock(point1.Slot, point1.Hash)
 	require.True(t, ok)
-	require.LessOrEqual(t, data1.approxBytes(), 1500)
-
 	data2, ok := o.lookupLeiosEndorserBlock(point2.Slot, point2.Hash)
 	require.True(t, ok)
-	require.LessOrEqual(t, data2.approxBytes(), 1500)
-	require.Greater(t, data1.approxBytes()+data2.approxBytes(), 1500)
+	maxBytes := max(data1.approxBytes(), data2.approxBytes())
+	leiosEndorserBlockCacheMaxBytes = maxBytes
+	o.leiosMu.Lock()
+	o.leiosEndorserBlocks = make(map[string]*leiosEndorserBlockData)
+	o.leiosMu.Unlock()
 
-	// Both entries together exceed the 1500-byte aggregate budget: the older
+	_, ok = o.lookupLeiosEndorserBlock(point1.Slot, point1.Hash)
+	require.True(t, ok)
+	_, ok = o.lookupLeiosEndorserBlock(point2.Slot, point2.Hash)
+	require.True(t, ok)
+
+	// Both entries together exceed the one-entry aggregate budget: the older
 	// (point1) reload must have been evicted by the post-insert prune when
 	// point2 was admitted, and total retained bytes stay within budget.
 	o.leiosMu.RLock()
@@ -2216,7 +2276,7 @@ func TestLoadLeiosEBFromDBPrunesAggregateBudgetAfterReload(t *testing.T) {
 	o.leiosMu.RUnlock()
 	require.False(t, point1Cached)
 	require.True(t, point2Cached)
-	require.LessOrEqual(t, totalBytes, 1500)
+	require.LessOrEqual(t, totalBytes, maxBytes)
 }
 
 type recordingLeiosPipelineHandler struct {
