@@ -1360,8 +1360,8 @@ func TestChainsyncClientRollForwardExcludesHeaderFailingCryptoVerification(
 }
 
 // TestChainsyncClientRollForwardWithholdsHeaderWithDeferredCryptoVerification
-// proves that a header this node cannot yet confirm is retained only as
-// bounded raw ancestry until a later strict verification succeeds.
+// proves that a header this node cannot yet confirm stays out of trusted
+// history until a later strict verification succeeds.
 //
 // The verifier here is the real ledger.LedgerState.ValidateChainSelection-
 // HeaderCrypto (not a fake), driven into its deferred path by a bare ledger
@@ -1451,7 +1451,7 @@ func TestChainsyncClientRollForwardWithholdsHeaderWithDeferredCryptoVerification
 		"a deferred header must not enter the ledger queue",
 	)
 	_, _, retained := state.LookupObservedHeader(conn, header.Hash().Bytes())
-	require.True(t, retained, "bounded raw ancestry should be retained")
+	require.False(t, retained, "deferred header must not enter trusted history")
 	require.Contains(t, o.deferredHeaderRecovery, conn)
 
 	baseline := ls.Tip().Point

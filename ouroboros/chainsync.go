@@ -1578,21 +1578,10 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 			}
 		}
 		if deferredVerification {
-			// Retain only bounded, connection-scoped raw ancestry. Do not
-			// advance peer cursors/dedup state or publish to selector/ledger
-			// until this header passes strict verification.
-			if o.chainsyncState != nil {
-				o.chainsyncState.RecordObservedHeader(
-					chainsync.ObservedHeader{
-						ConnectionId: ctx.ConnectionId,
-						Point:        point,
-						Type:         blockType,
-						BlockHeader:  v,
-						ArrivalTime:  arrivalTime,
-						Tip:          tip,
-					},
-				)
-			}
+			// Do not advance peer cursors, history, dedup state, or publish to
+			// selector/ledger until this header passes strict verification.
+			// Observed history is trusted by fork-density and rollback-replay
+			// paths, so it must contain only independently verified headers.
 			o.markDeferredHeaderRecovery(ctx.ConnectionId)
 			o.updateChainsyncMetrics(ctx.ConnectionId, tip)
 			return nil
