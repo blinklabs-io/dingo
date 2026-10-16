@@ -1757,6 +1757,12 @@ type LedgerState struct {
 	// one attempt's reader goroutine ever submits to it at a time -- see the
 	// loop's doc comment.
 	blockPipeline *pipeline.BlockPipeline
+	// Crypto outcomes are interpreted by our ordered ledger validator, not
+	// an authoritative pipeline's fatal-rejection path.
+	blockPipelineValidation        *pipeline.ValidateStage
+	blockPipelineValidationWorkers int
+	blockPipelineValidationWindow  int
+	blockPipelineValidationMetrics *pipeline.PipelineMetrics
 	// blockPipelineSubmit, when non-nil, replaces blockPipeline.Submit in
 	// decodeReadChainBatchWithError. Test seam: a real Submit fails only on
 	// pipeline shutdown, which also closes Results(), so the drain of an
@@ -2181,27 +2187,27 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 		//
 		// This is a recorded decision, not an unfinished pipeline phase:
 		// see ARCHITECTURE.md, "Why dingo's ledger apply is not wired into
-		// pipeline.ApplyFunc". In short, pipeline.ApplyStage
-		// applies one block at a time and keeps going after a failure --
-		// a failed or undecodable block only records its own error and
-		// consumes its sequence slot, and every later block is applied
-		// anyway. A ledger cannot do that, and the failure never reaches
-		// the submitter synchronously, so errRestartLedgerPipeline /
-		// errStaleChainIterator cannot be expressed through it. Those
-		// upstream properties are pinned by the contract tests in
-		// ledger/block_pipeline_apply_contract_test.go; if a gouroboros
-		// bump makes any of them fail, revisit the decision rather than
-		// the test.
+		// pipeline.ApplyFunc". Although the library now stops on rejection,
+		// its per-item callback still cannot express Dingo's batch transaction,
+		// epoch rollover, and synchronous retry contract.
 		workerCount := blockPipelineWorkerCount()
-		// Blocks read back from the chain were verified when they were
-		// stored, so the pipeline only decodes them. In validate mode the
-		// header cryptography is checked by decodeReadChainBatch, which can
-		// defer an unavailable nonce instead of failing the pipeline.
-		pipelineOpts := []pipeline.PipelineOption{
+		ls.blockPipeline = pipeline.NewBlockPipeline(
 			pipeline.WithDecodeWorkers(workerCount),
 			pipeline.WithTrustedDecodeOnly(),
+		)
+		if cfg.BlockPipelineValidateEnabled {
+			ls.blockPipelineValidation = pipeline.NewValidateStage(
+				pipeline.ValidateStageConfig{
+					BlockLocal:        true,
+					Eta0Provider:      ls.blockPipelineEta0Provider,
+					SlotsPerKesPeriod: ls.SlotsPerKESPeriod(),
+				},
+			)
+			ls.blockPipelineValidationWorkers = workerCount
+			ls.blockPipelineValidationMetrics = pipeline.NewPipelineMetrics(0)
+			ls.blockPipelineValidationWindow =
+				pipeline.DefaultMaxPendingBlocks + 1
 		}
-		ls.blockPipeline = pipeline.NewBlockPipeline(pipelineOpts...)
 	}
 	return ls, nil
 }
@@ -5240,22 +5246,20 @@ func (ls *LedgerState) rollbackWithBlocksAndIntent(
 // (handleEventChainsyncRollback, tryResolveFork), never from
 // ledgerProcessBlocks itself. Chain-selection can decide to abandon a fork
 // while the reader goroutine has already gathered and submitted a batch of
-// blocks -- from that very fork -- to the pipeline's decode/validate
-// workers and is blocked draining Results() for it. Without this wait,
-// ls.chain.Rollback can delete those blocks' rows out from under a
-// validate-stage worker still processing them, and -- more importantly --
-// ledgerProcessBlocksFromSource can go on to apply that already-decoded
+// blocks -- from that very fork -- to the persisted decoder and is blocked
+// draining Results() for it. Without this wait, decoding from an abandoned
+// fork can overlap rollback and ledgerProcessBlocksFromSource can go on to
+// apply that already-decoded
 // batch to ls.currentTip immediately afterward, momentarily re-advancing
 // the ledger tip onto a fork chain-selection has already discarded.
 //
-// What this does NOT do: it only waits for ls.blockPipeline's own decode/
-// validate stages (PendingCount) to empty, not for
-// ledgerProcessBlocksFromSource's subsequent DB-apply of a batch already
-// drained from the pipeline before this call started -- that step runs
-// entirely outside blockPipeline (wiring real ledger apply into
-// gouroboros' pipeline.ApplyFunc is deliberately deferred; see this file's
-// other doc comments on that decision). A rollback landing exactly in that
-// narrower window can still leave ls.currentTip transiently re-advanced onto an
+// What this does NOT do: it waits for accepted persisted-decode work to
+// finish ordered processing, not the subsequent bounded header-crypto batch or
+// ledgerProcessBlocksFromSource's DB apply. Those remain behind the reader's
+// in-order result handshake and all crypto workers join before reader exit.
+// Real ledger apply remains deliberately outside pipeline.ApplyFunc; see this
+// file's other doc comments on that decision. A rollback in that narrower
+// window can still leave ls.currentTip transiently re-advanced onto an
 // abandoned block. This is not a new failure mode introduced by the pipeline:
 // processChainIteratorRollback's stale-tip detection (a direct, uncached
 // database.BlockByPoint lookup) already exists specifically to self-heal
@@ -7038,6 +7042,43 @@ func (ls *LedgerState) ledgerReadChainIterator(
 	}
 }
 
+// errBlockPipelineAdmissionVerified tells the crypto workers to skip a slot
+// already verified at admission. Ordered replay still checks the exact hash.
+var errBlockPipelineAdmissionVerified = errors.New(
+	"block-processing pipeline: header verified at admission",
+)
+
+// blockPipelineEta0Provider reads only published state: parallel replay workers
+// must not forecast epochs or rebuild the hard-fork summary. Missing nonces
+// remain deferrable outcomes for the authoritative ordered apply path.
+func (ls *LedgerState) blockPipelineEta0Provider(slot uint64) (string, error) {
+	ls.admissionVerifiedMu.Lock()
+	record, ok := ls.admissionVerified[slot]
+	ls.admissionVerifiedMu.Unlock()
+	if ok && ls.headerCryptoVerificationGenerationCurrent(record.generation) {
+		return "", errBlockPipelineAdmissionVerified
+	}
+	epoch, err := ls.epochForSlot(slot)
+	if err != nil {
+		return "", fmt.Errorf(
+			"%w: block-processing pipeline nonce lookup for slot %d: %w",
+			errHeaderVerificationDeferred,
+			slot,
+			err,
+		)
+	}
+	if len(epoch.Nonce) == 0 {
+		return "", fmt.Errorf(
+			"%w: %w: epoch %d has no nonce for slot %d",
+			errBlockPipelineEta0Unavailable,
+			errEpochNonceUnavailable,
+			epoch.EpochId,
+			slot,
+		)
+	}
+	return ls.epochNonceHex(epoch.EpochId, epoch.Nonce), nil
+}
+
 // drainBlockPipelineErrors continuously reads ls.blockPipeline.Errors() for
 // the pipeline's full lifetime, from just after Start() until the channel
 // closes (inside Stop(), once every stage has fully drained -- see
@@ -7050,6 +7091,8 @@ func (ls *LedgerState) ledgerReadChainIterator(
 // continuously keeps these reports observable as the
 // blockPipelineUnexpectedErrors counter and ERROR log records rather than
 // lost to a full channel; it is not required to keep Submit() from blocking.
+// Header-crypto batch workers report directly through recordBlockPipelineError,
+// independently of the decoder's error channel.
 func (ls *LedgerState) drainBlockPipelineErrors() {
 	defer close(ls.blockPipelineErrorsDone)
 	for err := range ls.blockPipeline.Errors() {
@@ -7057,9 +7100,8 @@ func (ls *LedgerState) drainBlockPipelineErrors() {
 	}
 }
 
-// recordBlockPipelineError classifies and reports a single error read off
-// ls.blockPipeline.Errors(). errorsChan carries a bare error with no item or
-// era context (see drainBlockPipelineErrors), so classification here keys on
+// recordBlockPipelineError classifies and reports a single pipeline error.
+// Classification keys on
 // error identity rather than era -- decodeReadChainBatch is the path with
 // access to the decoded block, and it independently gates enforcement on
 // block.Era().Id, so this function's classification only affects operator
@@ -7099,6 +7141,10 @@ func (ls *LedgerState) recordBlockPipelineError(err error) {
 		return
 	}
 	switch {
+	case errors.Is(err, errBlockPipelineAdmissionVerified):
+		// An optimisation, not a validation failure. The ordered reader
+		// consumes the admission record and checks its exact block hash.
+		return
 	case errors.Is(err, errBlockPipelineEta0Unavailable):
 		ls.metrics.incBlockPipelineExpectedEta0Error()
 		ls.config.Logger.Debug(
@@ -7210,8 +7256,16 @@ func (ls *LedgerState) decodeReadChainBatchWithError(
 	// success or failure, so a batch that aborts partway through (decode or
 	// validation error) still reports the errors it accumulated.
 	defer func() {
-		ls.metrics.updateBlockPipelineStats(ls.blockPipeline.Stats())
+		stats := ls.blockPipeline.Stats()
+		if ls.blockPipelineValidationMetrics != nil {
+			validation := ls.blockPipelineValidationMetrics.Stats()
+			stats.BlocksValidated = validation.BlocksValidated
+			stats.ValidationErrors = validation.ValidationErrors
+			stats.ValidateTimings = validation.ValidateTimings
+		}
+		ls.metrics.updateBlockPipelineStats(stats)
 	}()
+	items := make([]*pipeline.BlockItem, 0, len(rawBatch))
 	// submitCtx is deliberately not ctx (attemptCtx) -- see the doc comment
 	// above.
 	submitCtx, cancelSubmit := context.WithCancel(context.WithoutCancel(ctx))
@@ -7312,6 +7366,19 @@ func (ls *LedgerState) decodeReadChainBatchWithError(
 			)
 		}
 		read++
+		items = append(items, item)
+	}
+	if submitErr != nil {
+		return nil, errors.Join(retErr, submitErr)
+	}
+	// Submission and all crypto work drain before returning, including after
+	// a per-attempt cancellation. No worker can outlive the reader attempt.
+	if err := ls.validateReadChainBatch(
+		context.WithoutCancel(ctx), items,
+	); err != nil {
+		return nil, err
+	}
+	for _, item := range items {
 		if retErr != nil {
 			continue
 		}
@@ -7338,27 +7405,33 @@ func (ls *LedgerState) decodeReadChainBatchWithError(
 		// Byron-era blocks have no VRF/KES fields and no Praos epoch nonce
 		// to validate against, matching the serial path's
 		// verifyBlockHeaderHex, which explicitly skips Byron blocks rather
-		// than trying to validate them. Skip them here for the same reason.
-		//
-		// Header cryptography is verified here, not in the pipeline: the
-		// pipeline's validate stage treats any failure, including a nonce
-		// that is not yet known, as fatal to ordered processing, whereas
-		// this loop defers a missing nonce to the authoritative apply-time
-		// check and reports a genuinely invalid header without stopping the
-		// pipeline shared across attempts.
+		// than trying to validate them. Ignore any worker outcome for them
+		// here for the same reason. The independent crypto workers retain
+		// failures per item, leaving this ordered policy to defer missing
+		// nonces without stopping the decoder shared across retry attempts.
 		if ls.config.BlockPipelineValidateEnabled &&
 			block.Era().Id != byron.EraIdByron &&
 			ls.shouldEnforceBlockPipelineCrypto(block.SlotNumber()) {
-			// Admission already verified this exact header.
+			// Admission already verified this exact header; the nonce
+			// provider told the crypto worker to skip it.
 			if admissionVerified {
 				decoded = append(decoded, block)
 				continue
 			}
-			_, _, valErr := ls.verifyBlockHeaderStatelessCryptoWithCache(
-				ctx,
-				block,
-				false,
-			)
+			valErr := item.ValidationError()
+			if errors.Is(valErr, errBlockPipelineAdmissionVerified) {
+				// The slot's admission record was for a different hash, so
+				// the worker did not check this block.
+				_, _, valErr = ls.verifyBlockHeaderStatelessCryptoWithCache(
+					context.WithoutCancel(ctx),
+					block,
+					false,
+				)
+				if valErr == nil {
+					decoded = append(decoded, block)
+					continue
+				}
+			}
 			if valErr != nil {
 				// The validation-state snapshot can change between the gate
 				// above and the lookup. A missing/deferred nonce is not
@@ -7384,16 +7457,101 @@ func (ls *LedgerState) decodeReadChainBatchWithError(
 				}
 				continue
 			}
+			if !item.IsValid() {
+				ls.config.Logger.Error(
+					"block failed pipeline header crypto validation",
+					"slot", block.SlotNumber(),
+				)
+				retErr = &headerValidationError{
+					BlockPoint: point,
+					Cause: errors.New(
+						"block failed pipeline header crypto validation",
+					),
+					Source: ls.deferredHeaderSource(point),
+				}
+				continue
+			}
+			if opCertErr := verifyOpCertHeaderCrypto(
+				block.Header(),
+				block.SlotNumber(),
+				ls.SlotsPerKESPeriod(),
+				ls.maxKESEvolutions(),
+			); opCertErr != nil {
+				ls.config.Logger.Error(
+					"failed to validate block operational certificate",
+					"error", opCertErr,
+					"slot", block.SlotNumber(),
+				)
+				retErr = &headerValidationError{
+					BlockPoint: point,
+					Cause: fmt.Errorf(
+						"block pipeline operational certificate validation: %w",
+						opCertErr,
+					),
+					Source: ls.deferredHeaderSource(point),
+				}
+				continue
+			}
 		}
 		decoded = append(decoded, block)
-	}
-	if submitErr != nil {
-		return nil, errors.Join(retErr, submitErr)
 	}
 	if retErr != nil {
 		return nil, retErr
 	}
 	return decoded, nil
+}
+
+// validateReadChainBatch runs block-local crypto without certifying ledger
+// state. Workers retain per-item failures for the ordered policy above,
+// including unavailable nonces and admission-verified headers. Windows bound
+// work ahead of a stalled item; every worker is joined before returning.
+func (ls *LedgerState) validateReadChainBatch(
+	ctx context.Context,
+	items []*pipeline.BlockItem,
+) error {
+	if ls.blockPipelineValidation == nil || len(items) == 0 {
+		return nil
+	}
+	window := ls.blockPipelineValidationWindow
+	if window <= 0 {
+		window = len(items)
+	}
+	for start := 0; start < len(items); start += window {
+		end := min(start+window, len(items))
+		size := end - start
+		input := make(chan *pipeline.BlockItem, size)
+		output := make(chan *pipeline.BlockItem, size)
+		stageErrors := make(chan error, size)
+		workers := pipeline.NewStageWorkerPool(pipeline.StageWorkerPoolConfig{
+			Stage:      ls.blockPipelineValidation,
+			NumWorkers: min(ls.blockPipelineValidationWorkers, size),
+			Input:      input,
+			Output:     output,
+			Errors:     stageErrors,
+			RecordMetrics: pipeline.ValidateMetricsRecorder(
+				ls.blockPipelineValidationMetrics,
+			),
+			ShouldRecord: pipeline.RecordIfDecoded,
+		})
+		for _, item := range items[start:end] {
+			input <- item
+		}
+		close(input)
+		workers.Start(ctx)
+		workers.Stop()
+		close(stageErrors)
+		var fatalErr error
+		for err := range stageErrors {
+			ls.recordBlockPipelineError(err)
+			if errors.Is(err, pipeline.ErrStagePanic) {
+				fatalErr = errors.Join(fatalErr, err)
+			}
+		}
+		if fatalErr != nil {
+			return fatalErr
+		}
+	}
+	return nil
 }
 
 // noProgressBackoffBase/Max bound the delay applied when consecutive

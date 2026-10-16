@@ -28,6 +28,7 @@ import (
 	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/blinklabs-io/gouroboros/ledger/mary"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
+	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
 	"github.com/blinklabs-io/plutigo/lang"
 	"github.com/blinklabs-io/plutigo/syn"
 	"github.com/stretchr/testify/require"
@@ -143,6 +144,9 @@ func newDijkstraGuardrailsTx(
 	require.NoError(t, err)
 
 	state := newMockLedgerState()
+	state.governanceState = mockledger.NewLedgerStateBuilder().
+		WithGovPurposeRootsValue(&lcommon.GovPurposeRoots{}).
+		Build()
 	state.networkId = uint(lcommon.AddressNetworkTestnet)
 	state.stakeRegistered = map[lcommon.Blake2b224]bool{
 		lcommon.Blake2b224(paymentHash): true,

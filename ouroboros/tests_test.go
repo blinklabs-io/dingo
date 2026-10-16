@@ -36,6 +36,7 @@ import (
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	dledger "github.com/blinklabs-io/dingo/ledger"
+
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gconnection "github.com/blinklabs-io/gouroboros/connection"
@@ -264,6 +265,7 @@ type replayAdapter struct {
 	conns      map[uint64]ouroboros.ConnectionId
 	capture    *format.ConsensusCapture
 	tipCh      <-chan event.Event
+	ledgerCh   <-chan event.Event
 	switchCh   <-chan event.Event
 	switches   []format.SwitchEvent
 	downstream []format.ServedMessage
@@ -302,6 +304,10 @@ func newReplayAdapter(
 	_, tipCh := bus.SubscribeWithBuffer(
 		chainselection.PeerTipUpdateEventType, tipEventBuffer,
 	)
+	_, ledgerCh := bus.SubscribeWithBuffer(
+		dledger.ChainsyncEventType,
+		tipEventBuffer,
+	)
 	_, switchCh := bus.SubscribeWithBuffer(
 		chainselection.ChainSwitchEventType, switchEventBuffer,
 	)
@@ -313,6 +319,22 @@ func newReplayAdapter(
 		ChainsyncIngressEligible: func(ouroboros.ConnectionId) bool {
 			return true
 		},
+		ChainsyncObservePeerTip: func(
+			update chainselection.PeerTipUpdateEvent,
+		) chainselection.PeerTipUpdateDisposition {
+			cs.PreparePeerTipAdmission(update)
+			return chainselection.PeerTipUpdateAccepted
+		},
+		ChainsyncResolvePeerTip: func(
+			update chainselection.PeerTipUpdateEvent,
+			admitted bool,
+		) {
+			if admitted {
+				cs.CommitPeerTipAdmission(update)
+				return
+			}
+			cs.RejectPeerTipAdmission(update)
+		},
 	})
 	o.eventBus = bus
 	return &replayAdapter{
@@ -323,6 +345,7 @@ func newReplayAdapter(
 		conns:    make(map[uint64]ouroboros.ConnectionId),
 		capture:  capture,
 		tipCh:    tipCh,
+		ledgerCh: ledgerCh,
 		switchCh: switchCh,
 	}
 }
@@ -339,6 +362,27 @@ func (a *replayAdapter) RollForward(
 		era, hdr, toGouroborosTip(tip),
 	); err != nil {
 		return err
+	}
+	ledgerEvent := testutil.RequireReceive(
+		a.t,
+		a.ledgerCh,
+		time.Second,
+		"ledger header event",
+	)
+	chainsyncEvent, ok := ledgerEvent.Data.(dledger.ChainsyncEvent)
+	if !ok {
+		return fmt.Errorf("unexpected ledger event data %T", ledgerEvent.Data)
+	}
+	if chainsyncEvent.PeerTipAdmission != nil {
+		chainsyncEvent.PeerTipAdmission(true)
+	}
+	if chainsyncEvent.PeerTipUpdate != nil {
+		update := *chainsyncEvent.PeerTipUpdate
+		update.Admitted = true
+		a.bus.Publish(
+			chainselection.PeerTipUpdateEventType,
+			event.NewEvent(chainselection.PeerTipUpdateEventType, update),
+		)
 	}
 	a.headersFed++
 	return nil
@@ -357,6 +401,12 @@ func (a *replayAdapter) RollBackward(
 	); err != nil {
 		return err
 	}
+	testutil.RequireReceive(
+		a.t,
+		a.ledgerCh,
+		time.Second,
+		"ledger rollback event",
+	)
 	a.cs.HandlePeerRollbackEvent(event.NewEvent(
 		chainselection.PeerRollbackEventType,
 		chainselection.PeerRollbackEvent{
@@ -370,15 +420,13 @@ func (a *replayAdapter) RollBackward(
 
 func (a *replayAdapter) Stabilize() {
 	a.t.Helper()
-	// Drain queued peer-tip updates into the selector, force a synchronous
-	// evaluation, then collect any switch decisions it emitted. No sleeps
-	// and no polling.
+	// Drain accepted peer-tip updates into the selector, force a synchronous
+	// evaluation, then collect any switch decisions it emitted. No sleeps and
+	// no polling.
 	//
-	// chainselection.peer_tip_update is still published inline, on this
-	// goroutine, by chainsyncClientRollForward, so every tip update is
-	// already queued by the time Stabilize runs and a non-blocking drain
-	// sees all of them. Chain switches are not: they go through an ordered
-	// lane, so they need the barrier below.
+	// The adapter simulates ledger acceptance for each captured header and
+	// publishes the resulting tip update inline before Stabilize runs.
+	// Chain switches use an ordered lane, so they need the barrier below.
 	drainEvents(a.tipCh, func(evt event.Event) {
 		a.tipEventsSeen++
 		a.cs.HandlePeerTipUpdateEvent(evt)
@@ -2195,19 +2243,14 @@ func (h *recordingLeiosPipelineHandler) ObserveEndorserBlock(
 // These tests establish, without a node, WHERE the zero-refs failure can come
 // from. They prove:
 //
-//  1. The gouroboros manifest decoder correctly handles large reference maps
-//     (multi-byte CBOR map headers), in both the array-wrapped (CIP-0164/dingo)
-//     and bare-map (IOG prototype) wire shapes. A large, non-empty manifest
-//     therefore NEVER decodes to zero refs. This disproves the "hand-rolled
-//     header length mis-parse" hypothesis.
+//  1. The gouroboros manifest decoder correctly handles large bare reference
+//     maps with multi-byte CBOR map headers. The obsolete array-wrapped shape
+//     is rejected rather than silently decoding to zero references.
 //
 //  2. The exact "must contain at least one transaction reference" error is
-//     produced ONLY by a manifest that is genuinely an empty references map
-//     (0xa0 or [{}]). A real 35-65 KB manifest cannot produce it. So the bytes
-//     handed to the decoder in the field are an empty/truncated/wrong manifest,
-//     i.e. a FETCH/serving problem, not a decode bug on authentic bytes. This
-//     matches the in-tree note (ledger/leios_apply.go leiosBackfiller) that the
-//     prototype relay "returns empty manifests when hammered".
+//     produced by a genuinely empty references map (0xa0). A real 35-65 KB
+//     manifest cannot produce it. This distinguishes empty peer responses
+//     from failures to decode authentic manifests.
 //
 //  3. With the fix in storeLeiosEndorserBlock (verify the manifest hash before
 //     decoding), a peer that serves an empty manifest for a valid endorser-block
@@ -2818,15 +2861,9 @@ func (o *Ouroboros) fetchLeiosEbTxsBatched(
 	)
 }
 
-// TestLeiosFetchHaskellEncodedBlockTxsIsConsumed is an interoperability
-// regression for the Haskell reference node's leios-fetch encoding.
-// The endorser block has 70 transactions, so the fetch spans two 64-tx bitmap
-// windows. Its manifest, point hash and MsgLeiosBlockTxs response are encoded
-// the way the reference node encodes them. Dingo must send a request the
-// reference node accepts, decode the response, and bind every returned
-// transaction to the manifest. Manifest references hash the full transaction
-// CBOR, so validating by transaction-body hash rejects every tx
-// ("endorser tx 0 hash mismatch").
+// TestLeiosFetchHaskellEncodedBlockTxsIsConsumed exercises independently
+// encoded reference-node manifests, request bitmaps and responses through the
+// SDK wire decoder and Dingo's complete-transaction hash validation.
 func TestLeiosFetchHaskellEncodedBlockTxsIsConsumed(t *testing.T) {
 	t.Parallel()
 
@@ -2836,7 +2873,6 @@ func TestLeiosFetchHaskellEncodedBlockTxsIsConsumed(t *testing.T) {
 		txs[i] = testDijkstraTx(t, byte(i))
 	}
 	manifestRaw := haskellEncodeLeiosEb(txs)
-	// hashLeiosEb: the EB hash is Blake2b-256 of the encoded manifest.
 	point := ocommon.NewPoint(
 		3623,
 		lcommon.Blake2b256Hash(manifestRaw).Bytes(),
@@ -2853,6 +2889,40 @@ func TestLeiosFetchHaskellEncodedBlockTxsIsConsumed(t *testing.T) {
 	require.Len(t, got, txCount)
 	require.NotZero(t, peer.requests)
 	require.NoError(t, validateLeiosEndorserBlockTxs(manifestRaw, got))
+}
+
+// malformedBlockTxsRequester bypasses the SDK wire decoder to exercise the
+// same bitmap cardinality invariant at the in-process requester boundary.
+type malformedBlockTxsRequester struct {
+	response *leiosfetch.MsgBlockTxs
+}
+
+func (r malformedBlockTxsRequester) BlockTxsRequest(
+	context.Context,
+	ocommon.Point,
+	map[uint16]uint64,
+) (protocol.Message, error) {
+	return r.response, nil
+}
+
+func TestFetchLeiosEbTxsBatchedRejectsBitmapCardinalityMismatch(t *testing.T) {
+	t.Parallel()
+
+	point := ocommon.NewPoint(100, []byte{0x01})
+	for _, bitmaps := range []map[uint16]uint64{
+		nil,
+		{0: uint64(3) << 62},
+	} {
+		requester := malformedBlockTxsRequester{
+			response: leiosfetch.NewMsgBlockTxs(
+				point, bitmaps, []cbor.RawMessage{testDijkstraTx(t, 0)},
+			),
+		}
+		o := &Ouroboros{}
+		txs, err := o.fetchLeiosEbTxsBatched(requester, point, 2, nil)
+		require.ErrorContains(t, err, "leios-fetch response bitmap selects")
+		require.Empty(t, txs)
+	}
 }
 
 // diffusingBlockTxsRequester simulates the relay near the live tip: it has only
@@ -3492,14 +3562,10 @@ func TestLeiosServeWaiterNotRegisteredForClosedConnection(t *testing.T) {
 // transactions per BlockTxsRequest — a prefix of the requested ascending
 // indices, mirroring the prototype relay's per-message size cap. Each returned
 // transaction's CBOR encodes its absolute index so callers can verify ordering.
-// includeBitmaps toggles whether the response carries the served bitmaps or
-// leaves them empty (forcing the prefix fallback). A decoded response always
-// carries bitmaps, so the empty form only exists for in-process callers.
 type cappingBlockTxsRequester struct {
-	maxPerResp     int // <= 0 means no cap (serve all requested)
-	serveNothing   bool
-	includeBitmaps bool
-	calls          int
+	maxPerResp   int // <= 0 means no cap (serve all requested)
+	serveNothing bool
+	calls        int
 }
 
 func (r *cappingBlockTxsRequester) BlockTxsRequest(
@@ -3531,10 +3597,7 @@ func (r *cappingBlockTxsRequester) BlockTxsRequest(
 		}
 		txs = append(txs, enc)
 	}
-	if r.includeBitmaps {
-		return leiosfetch.NewMsgBlockTxs(point, served, txs), nil
-	}
-	return leiosfetch.NewMsgBlockTxs(point, nil, txs), nil
+	return leiosfetch.NewMsgBlockTxs(point, served, txs), nil
 }
 
 func requireTxsInIndexOrder(t *testing.T, txs []cbor.RawMessage, want int) {
@@ -3570,30 +3633,13 @@ func TestFetchLeiosEbTxsBatchedReRequestsUntilComplete(t *testing.T) {
 	// 639 txs across 10 windows; relay caps each response at 50, so most
 	// windows need multiple rounds. Response echoes served bitmaps.
 	txs, err := o.fetchLeiosEbTxsBatched(
-		&cappingBlockTxsRequester{maxPerResp: 50, includeBitmaps: true},
+		&cappingBlockTxsRequester{maxPerResp: 50},
 		point,
 		639,
 		nil,
 	)
 	require.NoError(t, err)
 	requireTxsInIndexOrder(t, txs, 639)
-}
-
-func TestFetchLeiosEbTxsBatchedPrefixFallback(t *testing.T) {
-	t.Parallel()
-
-	o := &Ouroboros{}
-	point := ocommon.Point{Slot: 100, Hash: []byte{0x01, 0x02}}
-	// Response omits bitmaps, so the fetch must assume a served prefix of the
-	// requested ascending indices. Cap of 40 (< 64) forces re-requests.
-	txs, err := o.fetchLeiosEbTxsBatched(
-		&cappingBlockTxsRequester{maxPerResp: 40, includeBitmaps: false},
-		point,
-		116,
-		nil,
-	)
-	require.NoError(t, err)
-	requireTxsInIndexOrder(t, txs, 116)
 }
 
 func TestFetchLeiosEbTxsBatchedFullResponse(t *testing.T) {
@@ -3603,7 +3649,7 @@ func TestFetchLeiosEbTxsBatchedFullResponse(t *testing.T) {
 	point := ocommon.Point{Slot: 1, Hash: []byte{0x09}}
 	// No cap: every window served whole in one round.
 	txs, err := o.fetchLeiosEbTxsBatched(
-		&cappingBlockTxsRequester{maxPerResp: 0, includeBitmaps: true},
+		&cappingBlockTxsRequester{},
 		point,
 		200,
 		nil,
@@ -3620,7 +3666,7 @@ func TestFetchLeiosEbTxsBatchedNoProgressErrors(t *testing.T) {
 	// A relay that serves nothing must not loop forever; it returns an error
 	// with whatever prefix was gathered (none here).
 	txs, err := o.fetchLeiosEbTxsBatched(
-		&cappingBlockTxsRequester{serveNothing: true, includeBitmaps: true},
+		&cappingBlockTxsRequester{serveNothing: true},
 		point,
 		10,
 		nil,
@@ -3897,10 +3943,6 @@ func TestFetchLeiosEbTxsBatchedAcceptsExactBoundaryResponseBitmap(
 	require.NoError(t, err)
 	requireTxsInIndexOrder(t, txs, 64)
 }
-
-// TestFetchLeiosEbTxsBatchedPrefixFallback above already covers the empty
-// (bitmaps omitted) response case: it falls back to the prefix assumption
-// rather than being rejected as malformed.
 
 func TestFetchLeiosEbTxsBatchedBatchesWindowsPerRequest(t *testing.T) {
 	t.Parallel()

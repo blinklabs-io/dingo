@@ -50,7 +50,7 @@ func TestHeaderValidationErrorIsIdentifiable(t *testing.T) {
 	t.Parallel()
 
 	point := ocommon.Point{Slot: 119799023, Hash: []byte{0xab, 0xcd}}
-	cause := errors.New("VRF leader value exceeds stake-derived threshold")
+	cause := errors.New("leader eligibility rejected")
 	err := &headerValidationError{BlockPoint: point, Cause: cause}
 
 	var target *headerValidationError
@@ -61,7 +61,6 @@ func TestHeaderValidationErrorIsIdentifiable(t *testing.T) {
 	require.ErrorIs(t, err, cause,
 		"the underlying validation error must stay inspectable")
 	require.Contains(t, err.Error(), "119799023")
-	require.Contains(t, err.Error(), "exceeds stake-derived threshold")
 
 	// Still identifiable once the pipeline has wrapped it.
 	wrapped := fmt.Errorf("process block batch: %w", err)

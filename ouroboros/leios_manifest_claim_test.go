@@ -873,6 +873,38 @@ func TestLeiosTxsOfferCancellationBeforeWorkerLaunch(t *testing.T) {
 	}, 5*time.Second, "canceled owner launched or retained its fetch claim")
 }
 
+func TestLeiosTxFetchLaunchChecksConnectionBeforeDispatch(t *testing.T) {
+	t.Parallel()
+
+	o := newOuroboros(OuroborosConfig{})
+	t.Cleanup(func() { require.NoError(t, o.Close()) })
+	o.leiosTxFetchClaims = make(map[string]*leiosTxFetchClaim)
+	done := make(chan any)
+	guard := &leiosFetchGuard{}
+	guard.inflight.Store(1)
+	guard.mu.Lock()
+	point := ocommon.NewPoint(463, []byte{0x47, 0x48})
+	candidate := newLeiosTxFetchCandidate(
+		gouroboros.ConnectionId{}, "", guard, nil, point, done,
+	)
+	candidate.ctx = context.Background()
+	candidate.cancel = func() {}
+	candidate.attemptCtx = context.Background()
+	candidate.attemptDone = func() {}
+	close(done)
+	defer func() {
+		candidate.state.Store(leiosTxFetchCanceled)
+		guard.mu.Unlock()
+	}()
+	key := leiosBlockKey(point.Slot, point.Hash)
+	o.leiosTxFetchClaims[key] = &leiosTxFetchClaim{owner: candidate}
+
+	o.launchLeiosTxFetchOwner(key, candidate)
+
+	require.Zero(t, guard.inflight.Load())
+	require.NotContains(t, o.leiosTxFetchClaims, key)
+}
+
 func TestLeiosTxsOfferOwnerDisconnectHandsOffToWaiter(t *testing.T) {
 	t.Parallel()
 	tx, ref := testLeiosManifestTx(t, 0x48)

@@ -19,6 +19,7 @@ import (
 	"cmp"
 	"context"
 	"errors"
+	"iter"
 	"slices"
 	"time"
 
@@ -31,6 +32,35 @@ import (
 // when its header reaches the Limit on Eagerness gate. The caller must discard
 // the header.
 var ErrEagernessPeerUntracked = errors.New("eagerness peer untracked")
+
+// peerTipsIncludingCandidatesLocked lets admission gates see staged headers
+// without promoting them into the selectable peer set.
+func (cs *ChainSelector) peerTipsIncludingCandidatesLocked() iter.Seq2[ouroboros.ConnectionId, *PeerChainTip] {
+	return func(yield func(ouroboros.ConnectionId, *PeerChainTip) bool) {
+		for connId, committed := range cs.peerTips {
+			peerTip := cs.latestPeerTipCandidateLocked(connId)
+			if peerTip == nil {
+				peerTip = committed
+			}
+			if !yield(connId, peerTip) {
+				return
+			}
+		}
+		for connId, peerTip := range cs.pendingPeerTipFrontiers {
+			if _, exists := cs.peerTips[connId]; !exists && !yield(connId, peerTip) {
+				return
+			}
+		}
+	}
+}
+
+func (cs *ChainSelector) admissionPeerTipLocked(connId ouroboros.ConnectionId) (*PeerChainTip, bool) {
+	if peerTip := cs.latestPeerTipCandidateLocked(connId); peerTip != nil {
+		return peerTip, true
+	}
+	peerTip, ok := cs.peerTips[connId]
+	return peerTip, ok
+}
 
 // EagernessLimit is the Limit on Eagerness: the highest block number chain
 // selection may reach while the cap is active.
@@ -106,7 +136,7 @@ func (cs *ChainSelector) computeEagernessLimitLocked(
 	// the anchor is the last point the live candidates shared, and a forced
 	// lone fragment's head was never shared with any of them.
 	forced := false
-	for connId, peerTip := range cs.peerTips {
+	for connId, peerTip := range cs.peerTipsIncludingCandidatesLocked() {
 		if peerTip.awaitingFirstHeader {
 			continue
 		}
@@ -350,17 +380,25 @@ func (cs *ChainSelector) pauseEagerness(
 	connId ouroboros.ConnectionId,
 ) func() {
 	cs.mutex.Lock()
-	peerTip, ok := cs.peerTips[connId]
-	if ok {
+	peerTip, ok := cs.admissionPeerTipLocked(connId)
+	if ok && peerTip != nil {
 		peerTip.eagernessPaused++
+		if committed := cs.peerTips[connId]; committed != nil && committed != peerTip {
+			committed.eagernessPaused++
+		}
 	}
 	cs.mutex.Unlock()
-	if !ok {
+	if !ok || peerTip == nil {
 		return func() {}
 	}
 	return func() {
 		cs.mutex.Lock()
-		peerTip.eagernessPaused--
+		if current, exists := cs.admissionPeerTipLocked(connId); exists && current.eagernessPaused > 0 {
+			current.eagernessPaused--
+			if committed := cs.peerTips[connId]; committed != nil && committed != current && committed.eagernessPaused > 0 {
+				committed.eagernessPaused--
+			}
+		}
 		cs.mutex.Unlock()
 	}
 }
@@ -370,7 +408,7 @@ func (cs *ChainSelector) pauseEagerness(
 func (cs *ChainSelector) EagernessPaused(connId ouroboros.ConnectionId) bool {
 	cs.mutex.RLock()
 	defer cs.mutex.RUnlock()
-	peerTip, ok := cs.peerTips[connId]
+	peerTip, ok := cs.admissionPeerTipLocked(connId)
 	return ok && peerTip != nil && peerTip.eagernessPaused > 0
 }
 
@@ -393,7 +431,7 @@ func (cs *ChainSelector) eagernessAdmissionStatus(
 	if !limit.Active {
 		return true, true
 	}
-	if _, tracked := cs.peerTips[connId]; !tracked {
+	if _, tracked := cs.admissionPeerTipLocked(connId); !tracked {
 		return false, false
 	}
 	return blockNumber <= limit.BlockNumber, true

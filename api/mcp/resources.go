@@ -249,7 +249,7 @@ During Ouroboros network protocol handshakes:
 Dingo exports Prometheus metrics with the ` + "`dingo_`" + ` prefix:
 - ` + "`dingo_forge_blocks_forged_total`" + `: Total blocks successfully minted.
 - ` + "`dingo_forge_slots_elected_total`" + `: Slots won in leader election.
-- ` + "`dingo_ledger_leader_threshold_margin`" + `: Margin between VRF output and leader threshold.
+- ` + "`dingo_ledger_leader_threshold_rejections_total`" + `: Headers rejected by finite E34 leader eligibility.
 `
 
 const docsFAQContent = `# Dingo Frequently Asked Questions (FAQ)
