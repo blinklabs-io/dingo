@@ -627,6 +627,10 @@ var ledgerPredicateErrorPatterns = map[string][]string{
 	"ValueNotConservedUTxO": {"value not conserved"},
 	"VotersDoNotExist": {
 		"vote cast by unknown voter",
+		"committee voter is not elected",
+	},
+	"UnelectedCommitteeVoters": {
+		"committee voter is not elected",
 	},
 	"VotingOnExpiredGovAction": {
 		"voting on expired governance action",

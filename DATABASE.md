@@ -100,7 +100,11 @@ plans as a scan of `idx_utxo_deleted_payment_script (deleted_slot=?)` instead
 of a seek on `tx_id_output_idx`. `Store.OptimizePlannerStatsContext` runs
 `PRAGMA optimize(0x10002)` (every table, exact rather than sampled statistics)
 on the write connection, outside any transaction, at startup before block
-processing begins and after each epoch rollover commits. Tables without
+processing begins, after each epoch rollover commits, and once a minute in
+between: statistics recorded at startup can understate tables that block
+application then fills (a node bootstrapped from Mithril records `transaction`
+and `certs` at almost no rows), and every query that reaches `transaction`
+through `certs` then plans a full scan per lookup until the next run. Tables without
 statistics are always analyzed; tables with them only after roughly 25-fold
 growth, so a repeat run is near-free, while the first run on a large database
 analyzes every table and takes minutes. The write pool has one connection, so
@@ -133,7 +137,7 @@ another connection, not for the write connection.
 `dingo_database_sql_planner_stats_runs_total{trigger,result}`,
 `dingo_database_sql_planner_stats_duration_seconds{trigger}` and
 `dingo_database_sql_planner_stats_errors_total` report runs
-(`trigger` is `startup` or `epoch`; `result` is `changed`, `unchanged`,
+(`trigger` is `startup`, `epoch` or `periodic`; `result` is `changed`, `unchanged`,
 `skipped` or `error`). `plannerStatsRefreshEnabled` (environment
 `DINGO_PLANNER_STATS_REFRESH_ENABLED`, default true) disables the whole
 mechanism and exists only as an escape hatch.
@@ -189,7 +193,7 @@ live-state consistency semantics.
 
 Blockfrost historical and governance reads are served from existing tables
 through `HistoryStore` (`database/plugin/metadata/history_store.go`); migration
-v45 only adds the `reward_stake_input (credential_tag, staking_key, epoch)`
+v47 only adds the `reward_stake_input (credential_tag, staking_key, epoch)`
 index. Epoch totals sum `utxo` outputs and transaction fees over the epoch's
 slot range, counting a Leios closure transaction at its
 `leios_transaction_context` slot, and epoch and pool block lists read
@@ -209,12 +213,12 @@ totals read `move_instantaneous_rewards_reward`, `asset` and `utxo`.
 The vote endpoints list every cast, not only each voter's current vote: one
 row per `governance_vote_history` entry, so a revote keeps its earlier casts.
 A cast counts toward the tally (`counted`) only when it is the voter's latest
-on the proposal and its DRep has not deregistered. Since v46,
+on the proposal and its DRep has not deregistered. Since v48,
 `SetGovernanceVote` records each cast's transaction hash and `cert_index` in
 the history, including a revote that repeats the value; a cast's `cert_index`
 is its position among that voter's procedures in the transaction, ordered by
 governance action id and counted from 0 for each voter, as db-sync's
-`voting_procedure.index` is. A history entry written before v46 carries
+`voting_procedure.index` is. A history entry written before v48 carries
 neither, so the endpoint decodes the block at the entry's slot
 (`database.BlockBySlot`) and matches it to the voter's valid casts on the
 proposal there. Those older entries record a cast only when it changed the
@@ -230,14 +234,14 @@ final cast, and that block's earlier casts are not listed. A seed is told
 apart from transition history when its block holds more than one run of
 value, or when its slot is after the vote's `added_slot`; a single run of
 repeated casts in the vote's first block fits both and answers `404` "not
-retained". A revote that repeated the value before v46 is not
+retained". A revote that repeated the value before v48 is not
 listed. When the block is not held, or no valid
 transaction in it carries the vote, the endpoint answers `404` "not retained
 by this node" instead of omitting the vote or inventing a transaction. Within
 one slot, casts list in insertion order, which is the order the ledger
 applied them.
 
-Migration `v46` (`governance-vote-cast`) adds the nullable `tx_hash` and
+Migration `v48` (`governance-vote-cast`) adds the nullable `tx_hash` and
 `cert_index` columns to `governance_vote_history`; it backfills nothing, so
 entries written before it leave both `NULL`.
 
@@ -697,6 +701,13 @@ slot and the closing epoch's first slot, a credential new to the committee or
 rejoining was stamped with the proposal's `added_slot` alone. v44 does not
 repair those rows, and a renewal chain it repairs inherits that start, so such
 terms still differ from a replay until the database is resynced.
+
+Migration `v45` (`script-redeemer-reference-index`, integer version 45) adds
+`redeemer_script` and `utxo_reference_script`, which back the Blockfrost script
+redeemer and reference-UTxO listings. Both exist only in API storage mode and
+are filled as transactions are applied, so a database that predates the
+migration lists only the transactions and outputs applied after it, until a
+historical backfill replays the older ones.
 
 The upgrade runner owns a `schema_migrations` row per contiguous integer version with
 `version`, stable `name`, SHA-256 `checksum`, `phase`, opaque `cursor`, `dirty`,
@@ -1546,11 +1557,13 @@ post-Mithril-boundary strictness (see below).
 | `utxo` | `id`, `transaction_id`, `collateral_return_for_tx_id`, `tx_id`, `output_idx`, `payment_key`, `credential_tag`, `staking_key`, `datum_hash`, `spent_at_tx_id`, `referenced_by_tx_id`, `collateral_by_tx_id`, `added_slot`, `deleted_slot`, `amount`, `payment_script` | PK `id`; unique `(tx_id, output_idx)`; unique `collateral_return_for_tx_id`; indexes `transaction_id`, `payment_key`, `staking_key`, spend/reference/collateral tx hashes, and `added_slot`; composites `idx_utxo_deleted_staking_amount` (`deleted_slot`, `credential_tag`, `staking_key`, `amount`), `idx_utxo_staking_deleted_amount` (`credential_tag`, `staking_key`, `deleted_slot`, `amount`), and `idx_utxo_deleted_payment_script` (`deleted_slot`, `payment_script`, `amount`) | Produced outputs use `transaction_id -> transaction.id`. Collateral returns use `collateral_return_for_tx_id -> transaction.id`. Inputs/reference/collateral joins are logical: `spent_at_tx_id`, `referenced_by_tx_id`, and `collateral_by_tx_id` store transaction hashes. `credential_tag`: 0 key hash, 1 script hash for stake-bearing outputs. `deleted_slot = 0` is the live-output sentinel; a nonzero value and `spent_at_tx_id` identify a spent output and back Kupo's spent-output history. The `(credential_tag, staking_key, deleted_slot, amount)` composite backs stake-credential live UTxO sums such as DRep voting-power tallying. `payment_script` is a bool set at index time from the output address type (true when the payment credential is a script hash); the `(deleted_slot, payment_script, amount)` composite backs the network script-locked supply sum (blockfrost `/network` `supply.locked`). It is derived only at write time, so a database synced before this column existed reports script-locked supply only for UTxOs created after the upgrade until it is rebuilt from chain data. |
 | `utxo_collateral_input` | `utxo_id`, `transaction_hash` | PK `(utxo_id, transaction_hash)`; index `transaction_hash` | Authoritative many-to-many collateral relationship. Migration `v14` backfills one edge from each non-NULL legacy `utxo.collateral_by_tx_id`; apply and rollback maintain edges independently. |
 | `utxo_pointer` | `utxo_id`, `ptr_slot`, `ptr_tx_index`, `ptr_cert_index` | PK `utxo_id`; FK `utxo_id -> utxo.id` `ON DELETE CASCADE`; index `idx_utxo_pointer_target` (`ptr_slot`, `ptr_tx_index`, `ptr_cert_index`) | One row per output at a pointer address (address types 4 and 5). Such an address names the position of a stake registration certificate -- `(slot, transaction index in block, certificate index in transaction)` -- instead of carrying a stake credential, so the `utxo` row has no `staking_key` and the position is recorded here. The credential is resolved when stake is computed, not at write time, because it is a function of the certificate history at the slot being evaluated: a pointer may name a position no certificate occupies yet, de-registration removes the reference permanently, and Conway stops counting pointer stake altogether. The cascade is how rollback reaches these rows. Nothing validates an address's pointer payload, so a component above `int64` is dropped rather than stored or raised: no certificate can occupy such a position, and failing the write would stall ingestion of a block the network accepted. |
+| `utxo_reference_script` | `utxo_id`, `script_hash` | PK `utxo_id`; FK `utxo_id -> utxo.id` `ON DELETE CASCADE`; index `idx_utxo_reference_script_hash` (`script_hash`) | API-mode index of the script an output carries as a reference script, written when the output is created from its decoded `script_ref`, and when it is imported from a ledger-state snapshot, recovered as a consumed input, or created through `CreateUtxo`. The script is a property of the output, so re-applying it overwrites the row. Spent outputs keep their row; listings join `utxo` and keep `deleted_slot = 0`. The cascade is how rollback reaches these rows. Outputs created before migration `v45` have no row. |
 | `asset` | `id`, `utxo_id`, `policy_id`, `name`, `fingerprint`, `amount` | PK `id`; unique `(name, policy_id, utxo_id)`; named index `idx_asset_policy_id` on `policy_id` | Multi-asset quantities attached to `utxo.id`. The unique key backs ledger-state import `ON CONFLICT`; the policy-id query index can be deferred during bulk load. Use `utxo.deleted_slot = 0` for live balances. Migration `v19` drops `name_hex` (`hex.EncodeToString(name)`, stored and indexed at write time): every asset lookup keys on `policy_id`/`name`, so nothing ever filtered on it, and `api/blockfrost`'s `NodeAdapter.Asset` and `api/mesh`'s `appendUtxoOps` already recompute the hex encoding from `name` on demand. Migration `v21` drops `idx_asset_fingerprint` and `idx_asset_amount`: a real WAL-frame-churn measurement during genesis sync found `idx_asset_amount` alone responsible for 23.4% of all frame writes to the metadata database -- the single largest contributor of any index or table -- and `idx_asset_fingerprint` for 3.4%, and neither backs a `WHERE`/`JOIN`/`ORDER BY` predicate anywhere in the tree. Unlike `name_hex`, the `fingerprint` and `amount` columns themselves are genuinely read and returned via the blockfrost/mesh API adapters, so only the indexes are dropped. |
 | `asset_mint_burn` | `id`, `tx_hash`, `policy_id`, `name`, `fingerprint`, `slot`, `quantity`, `tx_index` | PK `id`; unique `(tx_hash, policy_id, name)` (`idx_asset_mint_burn_unique`); composite `(policy_id, name, slot)` (`idx_asset_mint_burn_lookup`); indexes `fingerprint`, `slot` | API-mode-only mint/burn history: one row per `(transaction, asset)` for every tx that mints or burns the asset. Populated from `tx.AssetMint()` during indexing; `quantity` is a signed decimal string (negative for burns). Unlike `asset` (live holdings), this preserves full history so Blockfrost `/assets/{asset}` can derive `initial_mint_tx_hash` (earliest event by `(slot, tx_index, id)`) and `mint_or_burn_count` (row count). The unique key makes re-applying a transaction after a rollback idempotent. The lookup and slot indexes are deferred during bulk import and restored before API or rollback traffic; the fingerprint index is rebuilt by background maintenance. Rows with `slot > rollback_slot` are deleted alongside `transaction` on rollback. |
-| `address_transaction` | `id`, `payment_key`, `credential_tag`, `staking_key`, `transaction_id`, `slot`, `tx_index` | PK `id`; indexes `payment_key`, `transaction_id`, `slot`; composite `(credential_tag, staking_key, slot, tx_index, payment_key)` | API-mode address-to-transaction index. Join to `transaction.id`. `credential_tag`: 0 key hash, 1 script hash for stake-bearing addresses. The composite index supports credential-scoped pagination and its leading columns cover simple credential lookups. The slot, stake-position, and payment query indexes are deferred during bulk import. The transaction-id index remains resident because SetTransaction clears address history by transaction_id on replays. |
+| `address_transaction` | `id`, `payment_key`, `payment_script`, `credential_tag`, `staking_key`, `transaction_id`, `slot`, `tx_index` | PK `id`; indexes `payment_key`, `transaction_id`, `slot`; composite `(credential_tag, staking_key, slot, tx_index, payment_key)` | API-mode address-to-transaction index. Join to `transaction.id`. `payment_script` distinguishes key hashes from script hashes, which share one byte namespace. `credential_tag`: 0 key hash, 1 script hash for stake-bearing addresses. The composite index supports credential-scoped pagination and its leading columns cover simple credential lookups. The slot, stake-position, and payment query indexes are deferred during bulk import. The transaction-id index remains resident because SetTransaction clears address history by transaction_id on replays. Migration `v46` stages the old transaction inventory and reconstructs typed rows from retained blocks before API startup; startup fails if required block or input history is unavailable. The rebuild finds each transaction row by hash, not by `block_index`: a valid Dijkstra transaction stores each sub-transaction as its own row ahead of itself, so `block_index` counts those levels, and a certified Leios closure transaction is stored under its ranking block while its transaction offset names the endorser block's standalone blob, from which only its body is read, its stored `valid` deciding whether it produced its outputs or only its collateral return. |
 | `transaction_metadata_label` | `id`, `transaction_id`, `label`, `slot`, `cbor_value`, `json_value` | PK `id`; unique `(transaction_id, label)`; indexes `label`, `slot` | API-mode per-label metadata index. Join to `transaction.id`. The label and slot indexes are deferred during bulk import and restored before API or rollback traffic; the unique key remains for idempotent inserts. |
 | `key_witness` | `id`, `transaction_id`, `type`, `vkey`, `signature`, `public_key`, `chain_code`, `attributes` | PK `id`; indexes `transaction_id`, `type` | API-mode vkey/bootstrap witnesses. Join to `transaction.id`. The type index is deferred and rebuilt before API traffic; transaction_id remains resident because SetTransaction clears witness rows on replays. |
+| `redeemer_script` | `transaction_id`, `tag`, `index`, `script_hash`, `slot`, `tx_index` | PK (`transaction_id`, `tag`, `index`); FK `transaction_id -> transaction.id` `ON DELETE CASCADE`; index `idx_redeemer_script_position` (`script_hash`, `slot`, `tx_index`, `tag`, `index`) | API-mode index of the script each redeemer executes, one row per attributed redeemer pointer, written by `storeRedeemerScripts` next to the `redeemer` rows. A redeemer pointer does not name its script: it resolves through the transaction body -- the spent input's address for a spend (the index points into the inputs sorted by transaction id and output index, not their body order; the address is read from the stored output's `payment_key` and `payment_script`), the sorted mint policy for a mint, the certificate or withdrawal credential, the voter, the proposal guardrail. A pointer that cannot be resolved (an input the index never saw, a spend of an output no script locks) has no row rather than failing the block; a guarding redeemer has none either, because no script purpose is built for it. `slot` and `tx_index` repeat the transaction position so a script's redeemers page in chain order straight off the index; replaying a transaction deletes and rewrites its rows, and the cascade is how rollback reaches them. |
 | `witness_scripts` | `id`, `transaction_id`, `script_hash`, `type` | PK `id`; indexes `transaction_id`, `script_hash`, `type` | API-mode witness-script references. Join `script_hash = script.hash`. The script-hash and type indexes are deferred and rebuilt before API traffic; transaction_id remains resident because SetTransaction clears witness rows on replays. |
 | `script` | `id`, `hash`, `content`, `created_slot`, `type` | PK `id`; unique/index `hash`; index `type` | API-mode de-duplicated script content by hash. The type index is unused by live query predicates and is rebuilt by background maintenance. |
 | `plutus_data` | `id`, `transaction_id`, `data` | PK `id`; index `transaction_id` | API-mode Plutus data from witness sets. Join to `transaction.id`. Its transaction-id index remains resident because SetTransaction clears Plutus data on replays. |
@@ -1652,6 +1665,24 @@ A missing slot timer, conversion error, or negative timestamp fails the
 block; backfill also fails on undecodable block data. The checkpoint remains
 at the last successfully indexed block so restart can retry the failed block.
 Synthetic storage blobs with ID zero are excluded from the chain-block scan.
+Registration rebuilds and ordinary block indexing follow each transaction's
+applied `Consumed()` inputs and `Produced()` UTxOs, not its declared body
+inputs and outputs. For a phase-2-invalid transaction this means collateral
+inputs and an optional collateral-return output; the produced UTxO's index is
+used for the persisted registration identity.
+
+When the mapping-validator auth-token policy fingerprint changes, startup
+preflights the primary-chain block index from block number zero through the
+applied tip. It checks decoded block metadata, previous-hash links, block-number
+continuity (including Byron EBBs), and the exact tip before clearing
+`midnight_registrations` and `midnight_deregistrations`. The clear and pending
+marker commit together. A restart with a pending marker repeats the clear and
+replay; completion is recorded only after replay reaches the validated tip.
+Missing, expired, or discontinuous retained history fails before existing rows
+are changed. This rebuild is scoped to registration state; other Midnight
+tables are not cleared or replayed by the migration. It uses a dedicated
+registration-rebuild checkpoint so the ordinary Midnight backfill checkpoint
+is preserved.
 
 | Table | Columns | Keys / indexes | Relationships and notes |
 |---|---|---|---|
@@ -1971,7 +2002,7 @@ updates preserve the previous activity and expiry epochs.
 | `governance_proposal_drop` | `proposal_id`, `dropped_epoch`, `dropped_slot` | PK `proposal_id`; indexes `dropped_epoch`, `dropped_slot` | Companion table recording when an expired proposal's deposit was actually returned and the proposal reached final consideration. cardano-ledger does not refund an expired action's deposit in the same epoch it is marked expired -- that happens one full epoch later, the same one-epoch delay ratification has before enactment. A separate table rather than columns on `governance_proposal` avoids widening a table v16 (`governance-proposal-optional-anchor`) already rebuilds via rename-and-recreate with an unqualified `SELECT *`, which cannot tolerate columns added after it. FK `proposal_id` references `governance_proposal.id` with cascade deletion. A row's absence means the proposal, if expired, is still awaiting its drop. The v17 backfill stamps every proposal an upgraded database had already expired, because the pre-v17 tick refunded at expiry; without it the new drop step would return each of those deposits a second time at the first boundary after the upgrade. |
 | `governance_proposal_ratification_history` | `id`, `proposal_id`, `transition_slot`, `ratified_epoch`, `ratified_slot` | PK `id`; indexes `transition_slot`, `(proposal_id, transition_slot, id)` | Rollback journal for proposal ratification lifecycle. A paired epoch/slot records ratification; NULL marker values record an explicit return to pending. FK `proposal_id` references `governance_proposal.id` with cascade deletion. Rollback deletes transitions above the target and restores the latest remaining state, with `id` breaking ties between transitions at the same slot. |
 | `governance_vote` | `id`, `proposal_id`, `voter_type`, `voter_credential_tag`, `voter_credential`, `vote`, `anchor_url`, `anchor_hash`, `added_slot`, `vote_updated_slot`, `deleted_slot` | PK `id`; unique `(proposal_id, voter_type, voter_credential_tag, voter_credential)`; indexes proposal/voter/lifecycle slots | Vote on a governance proposal. `voter_type`: 0 committee, 1 DRep, 2 SPO. `voter_credential_tag`: 0 key hash, 1 script hash for committee/DRep voters; 0 for SPO key hashes. `vote`: 0 No, 1 Yes, 2 Abstain. `SetGovernanceVote` upserts by the unique voter/proposal key, so a replaced vote overwrites `vote`/`anchor_url`/`anchor_hash`/`vote_updated_slot` in place; `governance_vote_history` is what lets rollback recover the value that predated a replacement. |
-| `governance_vote_history` | `id`, `vote_id`, `transition_slot`, `vote`, `anchor_url`, `anchor_hash`, `tx_hash`, `cert_index` | PK `id`; indexes `transition_slot`, `(vote_id, transition_slot, id)` | Rollback journal for vote replacement, mirroring `governance_proposal_ratification_history`'s pattern. `SetGovernanceVote` appends a row here for every cast located by its transaction (`tx_hash`, and `cert_index`, the procedure's position among the voter's own procedures in it; migration v46), skipping one whose `(vote_id, tx_hash, cert_index)` is already recorded so a replayed block adds nothing, and for a write without that position only when the effective `vote`/`anchor_url`/`anchor_hash` changes, including a voter's first cast, keyed by the slot the new value took effect (`vote_updated_slot`, falling back to `added_slot` on a first cast). FK `vote_id` references `governance_vote.id` with cascade deletion, so a vote created after the rollback target is removed along with its own history. For a vote that existed before the rollback target but was later replaced, rollback restores `vote`/`anchor_url`/`anchor_hash`/`vote_updated_slot` from the latest surviving history entry (`transition_slot` at or before the target) rather than deleting the row outright -- the prior behavior lost the vote entirely when a rollback landed between two replacements, since the row itself carries only the current value. Migration `v22` backfills one history row per pre-existing vote from its current value; a replacement that happened before the upgrade cannot be reconstructed, matching `v6`'s ratification-history backfill limitation. A vote whose only surviving history is that single backfilled row, if a rollback deletes it, has no history left to restore from; rollback falls back to deleting that vote outright (the pre-history behavior) instead of writing `NULL` into `vote`'s `NOT NULL` column. |
+| `governance_vote_history` | `id`, `vote_id`, `transition_slot`, `vote`, `anchor_url`, `anchor_hash`, `tx_hash`, `cert_index` | PK `id`; indexes `transition_slot`, `(vote_id, transition_slot, id)` | Rollback journal for vote replacement, mirroring `governance_proposal_ratification_history`'s pattern. `SetGovernanceVote` appends a row here for every cast located by its transaction (`tx_hash`, and `cert_index`, the procedure's position among the voter's own procedures in it; migration v48), skipping one whose `(vote_id, tx_hash, cert_index)` is already recorded so a replayed block adds nothing, and for a write without that position only when the effective `vote`/`anchor_url`/`anchor_hash` changes, including a voter's first cast, keyed by the slot the new value took effect (`vote_updated_slot`, falling back to `added_slot` on a first cast). FK `vote_id` references `governance_vote.id` with cascade deletion, so a vote created after the rollback target is removed along with its own history. For a vote that existed before the rollback target but was later replaced, rollback restores `vote`/`anchor_url`/`anchor_hash`/`vote_updated_slot` from the latest surviving history entry (`transition_slot` at or before the target) rather than deleting the row outright -- the prior behavior lost the vote entirely when a rollback landed between two replacements, since the row itself carries only the current value. Migration `v22` backfills one history row per pre-existing vote from its current value; a replacement that happened before the upgrade cannot be reconstructed, matching `v6`'s ratification-history backfill limitation. A vote whose only surviving history is that single backfilled row, if a rollback deletes it, has no history left to restore from; rollback falls back to deleting that vote outright (the pre-history behavior) instead of writing `NULL` into `vote`'s `NOT NULL` column. |
 | `constitution` | `id`, `anchor_url`, `anchor_hash`, `policy_hash`, `added_slot`, `deleted_slot` | PK `id`; unique `added_slot`; index `deleted_slot` | Current or historical constitution references. |
 | `committee_member` | `id`, `cold_credential_tag`, `cold_cred_hash`, `expires_epoch`, `term_start_slot`, `term_start_slot_set`, `added_slot`, `deleted_slot` | PK `id`; unique `(cold_credential_tag, cold_cred_hash, added_slot)`; indexes `added_slot`, `deleted_slot` | Snapshot-imported and enacted committee state. Credential tag 0 is a key hash and 1 is a script hash. `term_start_slot` bounds the authorization and resignation certificates that apply to this membership term; `term_start_slot_set` preserves an explicit slot-zero start. An `UpdateCommittee` enactment preserves the existing `term_start_slot` of a credential that is already a seated member and stamps a fresh one only for a credential new to the committee or rejoining after removal: the later of the proposal's `added_slot` and the first slot of the epoch the enactment boundary closes, because cardano-ledger drops a non-member's committee state at each epoch boundary. Migration v44 repairs renewal rows written before this rule; a new or rejoining member's term written before the epoch-boundary rule still needs a resync. Re-election creates a new historical row; soft deletion and rollback match the full tagged identity and mutation slot. |
 | `committee_quorum` | `id`, `quorum`, `added_slot` | PK `id`; unique `added_slot` | Enacted committee quorum threshold. `quorum` is stored through `types.Rat`; zero is a valid threshold, while SQL NULL marks a cleared quorum. Migration v23 converts legacy zero clear markers to NULL. |
@@ -2067,7 +2098,7 @@ process the same pointer unless the claim expires before a result is recorded.
 | `imported_pool_block_count` | `epoch`, `pool_key_hash`, `blocks_produced`, `captured_slot` | PK `(epoch, pool_key_hash)` | Per-pool blocks minted during an epoch, taken from a bootstrap snapshot's `NewEpochState` `nesBprev` and `nesBcur` rather than counted from applied blocks. `nesBprev` fills the epoch before the snapshot's, which ended entirely below the anchor, and `nesBcur` the pre-anchor part of the snapshot's own epoch; those are exactly the performance epochs of the first two reward rounds a bootstrapped node crosses. Written by `ledgerstate.importBlocksMade` in the same transaction as the tip and the certified opcert counters, replacing the epoch's rows so a catch-up import does not leave one epoch holding counts taken at two anchors. `database.MergeImportedPoolBlockCounts` adds these to the counts observed above the anchor, for `LedgerState.rewardBlockCounts`, for the `reward_pool_input` capture at the epoch boundary (which leaves `blocks_produced` and `total_blocks_in_epoch` NULL for an epoch the anchor covers but the snapshot did not, rather than recording the post-anchor tail), and for the Blockfrost pool detail `blocks_epoch` (an error for such an epoch); Blockfrost `blocks_minted` adds the anchor epoch's and the preceding epoch's counts through `database.CountPoolBlocksLifetime`, and remains a lower bound for older epochs the node never held. The observed and imported counts are disjoint, because a bootstrap applies no block at or below its anchor and `CountPoolBlocksInSlotRange` raises its start slot past the recorded `mithril_ledger_slot`. Presence and the epoch total live in `imported_epoch_block_total`, not here, because a `BlocksMade` map with no entries writes no rows at all. Rollback removes rows above the rollback slot. Retained for the life of the database (see the retention note below). Logical join to `pool.pool_key_hash`. |
 | `imported_epoch_block_total` | `epoch`, `total_blocks`, `captured_slot` | PK `epoch` | One row per epoch whose block counts came from a bootstrap snapshot, holding the total its `imported_pool_block_count` rows sum to (the reference's `Map.foldr (+) 0` over `BlocksMade`). Written unconditionally by `ledgerstate.importBlocksMade`, including for a map with no entries: an epoch in which no pool minted a block is a state the certified snapshot asserts, and the per-pool rows alone cannot express it. The row's presence is what `LedgerState.rewardBlockCounts` reads as "these counts are known"; its absence for an epoch the anchor covers means the counts are unknown, and the reward round is declined rather than distributed at zero performance. The total is checked against the per-pool rows on every read, so a set truncated by a partial write is an error rather than a smaller self-consistent epoch that would raise every surviving pool's share of the blocks. Rollback removes rows above the rollback slot. Retained for the life of the database (see the retention note below). |
 | `reward_pool_input` | `id`, `epoch`, `pool_key_hash`, `reward_account`, `reward_account_credential_tag`, `pledge`, `delegated_stake`, `owner_stake`, `cost`, `margin`, `delegator_count`, `blocks_produced`, `total_blocks_in_epoch`, `captured_slot`, `boundary_slot` | PK `id`; unique `(epoch, pool_key_hash)`; indexes `captured_slot`, `boundary_slot` | Per-pool metadata captured by epoch rotation. Stake totals are aggregated from the captured `reward_stake_input` credentials, independently of leader-election Mark totals; pool parameters are selected as effective during the ended epoch. Owner stake counts captured key credentials named by the effective pool registration. Block counts are stored on the row at capture time. Pools with missing or invalid registration data are excluded from reward inputs without changing `pool_stake_snapshot` or `epoch_summary`. Retained for the life of the database (see the retention note below), so it is the durable per-pool reward basis for any closed epoch. Logical join to `pool.pool_key_hash`. |
-| `reward_stake_input` | `id`, `epoch`, `pool_key_hash`, `credential_tag`, `staking_key`, `stake`, `owner`, `registered`, `captured_slot`, `boundary_slot` | PK `id`; unique `(epoch, pool_key_hash, credential_tag, staking_key)`; indexes `captured_slot`, `boundary_slot`, `(credential_tag, staking_key, epoch)` (migration v45, for per-account stake history) | Per-credential positive stake frozen by either authoritative or fallback reward snapshot capture. Authoritative capture copies from `reward_live_stake` for both gate states, applying the live account-expiration filter inside the exact SNAP-point transaction. A fallback that runs after the transaction tip has passed the snapshot slot reconstructs historical stake as needed. Check the matching `reward_snapshot.authoritative` value to distinguish the source snapshot. `owner` records whether the effective pool registration names the key credential as an owner. Capture defensively deduplicates by `(credential_tag, staking_key)` before deriving `reward_pool_input.delegated_stake` and `delegator_count`, so a corrupted credential cannot contribute to multiple pools and the persisted pool totals remain equal to the sum of their stake-input rows. |
+| `reward_stake_input` | `id`, `epoch`, `pool_key_hash`, `credential_tag`, `staking_key`, `stake`, `owner`, `registered`, `captured_slot`, `boundary_slot` | PK `id`; unique `(epoch, pool_key_hash, credential_tag, staking_key)`; indexes `captured_slot`, `boundary_slot`, `(credential_tag, staking_key, epoch)` (migration v47, for per-account stake history) | Per-credential positive stake frozen by either authoritative or fallback reward snapshot capture. Authoritative capture copies from `reward_live_stake` for both gate states, applying the live account-expiration filter inside the exact SNAP-point transaction. A fallback that runs after the transaction tip has passed the snapshot slot reconstructs historical stake as needed. Check the matching `reward_snapshot.authoritative` value to distinguish the source snapshot. `owner` records whether the effective pool registration names the key credential as an owner. Capture defensively deduplicates by `(credential_tag, staking_key)` before deriving `reward_pool_input.delegated_stake` and `delegator_count`, so a corrupted credential cannot contribute to multiple pools and the persisted pool totals remain equal to the sum of their stake-input rows. |
 | `reward_pool_output` | `id`, `epoch`, `pool_key_hash`, `apparent_performance`, `optimal_reward`, `total_reward`, `leader_reward`, `member_reward_total`, `owner_stake`, `undistributed`, `unspendable`, `captured_slot`, `boundary_slot` | PK `id`; unique `(epoch, pool_key_hash)`; indexes `captured_slot`, `boundary_slot` | Persisted per-pool reward-calculation results. Replacing a provisional reward snapshot invalidates rows for the same epoch. Retained for the life of the database (see the retention note below), so it is the durable per-pool reward result for any closed epoch. |
 | `reward_account_output` | `id`, `epoch`, `credential_tag`, `staking_key`, `pool_key_hash`, `reward_type`, `amount`, `spendable`, `guarded`, `captured_slot`, `boundary_slot`, `folded` | PK `id`; unique `(epoch, credential_tag, staking_key, pool_key_hash, reward_type)`; credential indexes `(credential_tag, staking_key, spendable, epoch, pool_key_hash, reward_type)` and `(credential_tag, staking_key, spendable, guarded, epoch, pool_key_hash, reward_type)`; pending index `(spendable, guarded, folded, epoch)`; indexes `captured_slot`, `boundary_slot` | Persisted per-account reward-calculation results, invalidated together with pool outputs when snapshot inputs are replaced. `spendable = false` records deregistration; `guarded = true` records a CIP-0163 expiry guard. `folded = true` records that a credited round's row has been written to `account.reward` (see "Credited reward rounds"). Credential reward-history reads require `spendable = true AND guarded = false`, and the guarded-aware index keeps that lookup bounded. |
 | `reward_credit_round` | `snapshot_epoch`, `boundary_slot` | PK `snapshot_epoch`; index `boundary_slot` | One row for a reward round applied at an epoch boundary while its per-account credits remain in `reward_account_output`. Bounded relational membership lets balance readers include all pending rounds without generating a growing SQL parameter list. Rollback removes rows by `boundary_slot`; migration 31 imports the previous `sync_state` JSON list. `Database.DeleteRewardStateAfterSlot` removes rows the same way (unfolding any already-folded `reward_account_output` row for the removed round first), and `ledgerstate.ImportLedgerState`'s post-anchor sweep (see the `epoch` row above) calls it at the anchor before any import phase runs, so a round a prior local rollover already registered above the anchor does not block `saveStakeRewardOutputs` from recomputing it after import. |
@@ -3817,8 +3848,16 @@ it, regardless of staking part. Used by the Blockfrost payment-credential
 ```sql
 SELECT COUNT(DISTINCT atx.transaction_id) AS tx_count
 FROM address_transaction atx
-WHERE atx.payment_key = decode($1, 'hex');
+WHERE atx.payment_key = decode($1, 'hex')
+  AND atx.payment_script = $2;
 ```
+
+The query is restricted to the requested credential kind with
+`payment_script = $2`. This matters because key and script hashes share one byte
+namespace. Invalid transactions also contribute their regular inputs to
+address history even though they do not spend those outputs, so the count uses
+the typed address index directly rather than inferring credential kind from
+spend relationships.
 
 ### `GetAddressesByCredential`
 
@@ -4034,11 +4073,58 @@ quantities by that address. Decoding CBOR is required because some valid
 addresses, such as pointer addresses, cannot be reconstructed from the
 metadata credential-hash columns alone.
 
+The asset listing endpoints read the mint/burn history rather than live holdings.
+`ListMintedAssets` lists distinct assets with
+`GROUP BY policy_id, name ORDER BY MIN(id)`: ids follow application order, so
+that is each asset's first recorded event, oldest first, and a policy filter
+adds `WHERE policy_id = ?` on `idx_asset_mint_burn_lookup`. `CountMintedAssets`
+counts the same groups. The aggregate visits every event row of the requested
+policy (or of the table) per request, which is the price of Blockfrost's
+chronological asset order. The quantity of each listed asset is its live
+holdings, as in `/assets/{asset}`. `GetAssetMintBurnHistory` orders one asset's
+rows by `(slot, tx_index, id)`; a negative `quantity` is a burn.
+`GetAssetTransactions` lists the transactions that mint or burn an asset
+(`asset_mint_burn.tx_hash`), produce an output holding it (`utxo.transaction_id`
+or `collateral_return_for_tx_id` through `asset.utxo_id`), or spend one
+(`utxo.spent_at_tx_id`). The branches are UNIONed so each starts from an indexed
+asset or mint/burn lookup and a transaction matching several appears once;
+the inclusive `from`/`to` range filters on the transaction's
+`(slot, block_index)`. The `/assets/{asset}/utxos` listing reuses
+`GetUtxosByAddressWithOrdering` with `MatchAllAddresses` and the asset filter,
+cutting the page in SQL; a block range sets `CreatedFrom`/`CreatedTo`, so the
+ranged count and page are cut in SQL as well.
+
+The script endpoints read the API script indexes. `ListScriptHashes` lists
+`script` by `id` and `CountScripts` counts its rows. `GetScriptRedeemers` reads
+`redeemer_script` for one `script_hash` in `(slot, tx_index, tag, index)` order
+and `CountScriptRedeemers` counts the same rows; the adapter resolves each
+reference through the transaction's stored redeemers for the execution units,
+fee and datum hash. `GetScriptReferenceUtxos` selects live `utxo` rows whose
+`id` is in `utxo_reference_script` for the hash, ordered by `utxo.id`, and
+`CountScriptReferenceUtxos` counts them. Datum and script JSON/CBOR come from `datum.raw_datum` and
+`script.content`: a Plutus script's `cbor` is the stored content and its
+`serialised_size` is that content's length, and a datum's JSON is the detailed
+Plutus data schema of `raw_datum`.
+
+`GET /api/v0/addresses/{address}/total` sums every output ever paid to the
+address, spent or not, as `received_sum`, and the spent ones as `sent_sum`,
+keyset-paging `UtxosWithHistory` over the retained spent-output history; its
+`tx_count` is the `address_transaction` count, restricted for a bare
+credential to its key or script kind as `CountTransactionsByPaymentCred`
+describes. API mode retains spent outputs,
+so the totals are exact for what the database holds, and outputs imported from
+a ledger-state snapshot count as received with no producing transaction.
+
 `GetUtxosByAddressWithOrdering` includes live UTxOs imported from a ledger-state
 snapshot even though those rows have no `transaction_id` or historical
 `transaction` row. Its ordering join is therefore a left join. Transaction-
 backed UTxOs use the producing transaction's `(slot, block_index, output_idx)`;
-snapshot-only UTxOs use `(utxo.added_slot, 0, output_idx)`. SQLite, MySQL, and
+a collateral return joins through `collateral_return_for_tx_id` and takes the
+position of the transaction it belongs to; snapshot-only UTxOs use
+`(utxo.added_slot, 0, output_idx)`. `UtxoWithOrderingQuery.CreatedFrom` and
+`.CreatedTo` bound that same position inclusively, and
+`CountUtxosByAddressWithOrdering` applies them too, so a ranged listing counts
+and pages in SQL. SQLite, MySQL, and
 Postgres implement the same fallback. Keyset cursors and ordering use the
 complete `(slot, block_index, output_idx, tx_id)` tuple; the transaction hash
 is the final key that makes the cursor unique when snapshot fallback fields
@@ -4047,7 +4133,8 @@ collide.
 UTxO address queries carry an explicit `UtxoAddressPattern`. A complete
 `ExactAddress` is distinct from credential-scoped `PaymentPart` and
 `DelegationPart` fields; fields in one pattern are ANDed and multiple patterns
-are ORed. SQLite, MySQL, and Postgres use the stored credential columns only to
+are ORed. `PaymentScript`, when set with `PaymentPart`, also matches
+`utxo.payment_script`, because key and script hashes share one namespace. SQLite, MySQL, and Postgres use the stored credential columns only to
 narrow candidates. The coordinated database layer resolves output CBOR and
 compares the complete address bytes for exact patterns, which distinguishes
 enterprise addresses, pointer payloads, network IDs, and other address forms

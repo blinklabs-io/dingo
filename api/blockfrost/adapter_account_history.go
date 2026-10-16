@@ -46,9 +46,9 @@ func (a *NodeAdapter) knownAccount(
 	return tag, key, account, nil
 }
 
-// assetUnit renders a native asset as its Blockfrost unit: the policy id
+// assetQuantityUnit renders a native asset as its Blockfrost unit: the policy id
 // followed by the asset name, both hex.
-func assetUnit(asset models.AssetQuantity) string {
+func assetQuantityUnit(asset models.AssetQuantity) string {
 	return hex.EncodeToString(asset.PolicyID) + hex.EncodeToString(asset.Name)
 }
 
@@ -56,7 +56,7 @@ func assetAmounts(assets []models.AssetQuantity) []AddressAmountInfo {
 	ret := make([]AddressAmountInfo, 0, len(assets))
 	for _, asset := range assets {
 		ret = append(ret, AddressAmountInfo{
-			Unit:     assetUnit(asset),
+			Unit:     assetQuantityUnit(asset),
 			Quantity: asset.Quantity.String(),
 		})
 	}

@@ -940,6 +940,7 @@ func TestMetadataEndpointsDeterministicAcrossRepeatsAndKeyOrders(t *testing.T) {
 // mockNode implements BlockfrostNode for testing.
 type mockNode struct {
 	historyMock
+	queryMock
 	chainTip                      ChainTipInfo
 	block                         BlockInfo
 	blockByID                     BlockInfo
@@ -4338,8 +4339,8 @@ func TestNodeAdapterAddressPaymentCredTransactionFallback(t *testing.T) {
 	// with a zero lovelace balance.
 	_, err = store.Exec(`
 INSERT INTO address_transaction (
-    payment_key, staking_key, transaction_id, slot
-) VALUES (?, ?, ?, ?)`,
+    payment_key, payment_script, staking_key, transaction_id, slot
+) VALUES (?, FALSE, ?, ?, ?)`,
 		paymentKey,
 		bytes.Repeat([]byte{0x33}, lcommon.AddressHashSize),
 		1,

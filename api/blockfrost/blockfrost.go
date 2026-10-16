@@ -83,8 +83,24 @@ func (b *Blockfrost) handler() http.Handler {
 		b.handleLatestBlockTxs,
 	)
 	mux.HandleFunc(
+		"GET /api/v0/blocks/latest/txs/cbor",
+		b.handleLatestBlockTransactionsCBOR,
+	)
+	mux.HandleFunc(
 		"GET /api/v0/blocks/{hash_or_number}",
 		b.handleBlock,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/blocks/{hash_or_number}/{section}",
+		b.handleBlockSection,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/blocks/{hash_or_number}/txs/cbor",
+		b.handleBlockTransactionsCBOR,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/blocks/epoch/{epoch_number}/slot/{slot_number}",
+		b.handleBlockByEpochSlot,
 	)
 	mux.HandleFunc(
 		"GET /api/v0/epochs/latest",
@@ -131,8 +147,40 @@ func (b *Blockfrost) handler() http.Handler {
 		b.handleAsset,
 	)
 	mux.HandleFunc(
-		"GET /api/v0/assets/{asset}/addresses",
-		b.handleAssetAddresses,
+		"GET /api/v0/assets",
+		b.handleAssets,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/assets/{asset}/{section}",
+		b.handleAssetSection,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/scripts",
+		b.handleScripts,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/scripts/{script_hash}",
+		b.handleScript,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/scripts/{script_hash}/{section}",
+		b.handleScriptSection,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/scripts/datum/{datum_hash}/cbor",
+		b.handleDatumCBOR,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/mempool",
+		b.handleMempool,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/mempool/{hash}",
+		b.handleMempoolTransaction,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/mempool/addresses/{address}",
+		b.handleMempoolAddress,
 	)
 	mux.HandleFunc(
 		"GET /api/v0/pools",
@@ -221,6 +269,22 @@ func (b *Blockfrost) handler() http.Handler {
 	mux.HandleFunc(
 		"GET /api/v0/addresses/{address}/transactions",
 		b.handleAddressTransactions,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/addresses/{address}/txs",
+		b.handleAddressTransactionHashes,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/addresses/{address}/extended",
+		b.handleAddressExtended,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/addresses/{address}/total",
+		b.handleAddressTotal,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/addresses/{address}/utxos/{asset}",
+		b.handleAddressAssetUTXOs,
 	)
 	mux.HandleFunc(
 		"GET /api/v0/metadata/txs/labels/{label}",

@@ -51,7 +51,7 @@ func (s *Store) GetGovernanceProposalsPage(
 	}
 	submission := governanceProposalSubmissionOrderSQL
 	ordering := "added_slot ASC," + submission
-	if orderDirection(order) == "DESC" {
+	if orderDirectionFromString(order) == "DESC" {
 		ordering = "added_slot DESC," +
 			"CASE WHEN governance_proposal_order.tx_index IS NULL THEN 1 ELSE 0 END ASC," +
 			"governance_proposal_order.tx_index DESC, tx_hash DESC, action_index DESC"
@@ -143,7 +143,7 @@ WHERE a.cold_credential_tag = ? AND a.cold_credential = ?
 	if total == 0 {
 		return ret, 0, nil
 	}
-	dir := orderDirection(order)
+	dir := orderDirectionFromString(order)
 	query, queryArgs := addLimitOffset(
 		`SELECT v.id, v.proposal_id, v.voter_type, v.voter_credential_tag,
 v.voter_credential, h.vote, h.anchor_url, h.anchor_hash, v.added_slot,
@@ -287,7 +287,7 @@ func (s *Store) GetDRepUpdates(
 	if total == 0 {
 		return ret, 0, nil
 	}
-	dir := orderDirection(order)
+	dir := orderDirectionFromString(order)
 	query, queryArgs := addLimitOffset(
 		"SELECT tx_hash, cert_index, action, deposit FROM ("+drepUpdatesQuery+
 			") events ORDER BY added_slot "+dir+", block_index "+dir+
@@ -376,7 +376,7 @@ WHERE d.drep_credential_tag = ? AND d.drep_credential = ?
 	}
 	query, queryArgs := addLimitOffset(
 		"SELECT a.credential_tag, a.staking_key, rls.total_stake"+from+
-			" ORDER BY "+fmt.Sprintf(orderBy, orderDirection(order)),
+			" ORDER BY "+fmt.Sprintf(orderBy, orderDirectionFromString(order)),
 		args, limit, offset,
 	)
 	rows, err := db.QueryContext(ctx, query, queryArgs...)

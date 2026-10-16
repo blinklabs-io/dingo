@@ -64,7 +64,7 @@ WHERE s.pool_key_hash = ? AND s.snapshot_type = 'mark' AND s.epoch < ?`
        (SELECT es.total_active_stake FROM epoch_summary es
         WHERE es.epoch = s.epoch AND es.snapshot_ready = TRUE),
        o.member_reward_total, o.leader_reward`+from+
-			" ORDER BY s.epoch "+orderDirection(order),
+			" ORDER BY s.epoch "+orderDirectionFromString(order),
 		args, limit, offset,
 	)
 	rows, err := db.QueryContext(ctx, query, queryArgs...)
@@ -140,7 +140,7 @@ func (s *Store) GetPoolDelegators(
 	if total == 0 {
 		return ret, 0, nil
 	}
-	dir := orderDirection(order)
+	dir := orderDirectionFromString(order)
 	query, queryArgs := addLimitOffset(
 		"SELECT credential_tag, staking_key, total_stake"+where+
 			" ORDER BY pool_delegation_slot "+dir+
@@ -212,7 +212,7 @@ func (s *Store) GetPoolCertificateEvents(
 	if total == 0 {
 		return ret, 0, nil
 	}
-	dir := orderDirection(order)
+	dir := orderDirectionFromString(order)
 	query, queryArgs := addLimitOffset(
 		poolCertificateEventsQuery+" ORDER BY added_slot "+dir+
 			", block_index "+dir+", cert_index "+dir+", tx_hash "+dir,

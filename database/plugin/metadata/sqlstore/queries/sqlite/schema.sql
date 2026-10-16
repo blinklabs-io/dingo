@@ -543,11 +543,16 @@ CREATE TABLE "transaction" (
 CREATE TABLE address_transaction (
     id INTEGER PRIMARY KEY,
     payment_key BLOB,
+    payment_script BOOLEAN,
     staking_key BLOB,
     credential_tag INTEGER NOT NULL DEFAULT 0,
     transaction_id INTEGER,
     slot INTEGER,
     tx_index INTEGER
+);
+
+CREATE TABLE address_transaction_rebuild_source (
+    transaction_id INTEGER PRIMARY KEY
 );
 
 CREATE TABLE transaction_metadata_label (

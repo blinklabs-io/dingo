@@ -155,6 +155,14 @@ type NodeAdapter struct {
 	// serve transactions that carry voting procedures without building a
 	// body-hash-valid block; nil reads the block from the chain.
 	slotBlocks func(ctx context.Context, slot uint64) (*slotBlock, error)
+	// slotTime overrides the ledger's slot-to-time conversion. It is nil in
+	// production. The ledger converter needs the epoch cache a running node
+	// builds, which a store-backed test adapter has no way to populate.
+	slotTime func(slot uint64) (time.Time, error)
+	// mempool serves the mempool read endpoints. It is nil when the
+	// submitter does not expose the pool, which those endpoints report as
+	// ErrMempoolUnavailable.
+	mempool mempoolReader
 }
 
 // NewNodeAdapter creates a NodeAdapter that queries the
@@ -168,10 +176,12 @@ func NewNodeAdapter(
 			"new node adapter: ledger state must not be nil",
 		)
 	}
+	reader, _ := submitter.(mempoolReader)
 	return &NodeAdapter{
 		ledgerState: ls,
 		submitter:   submitter,
 		evaluator:   ls,
+		mempool:     reader,
 	}, nil
 }
 
@@ -304,41 +314,53 @@ func (a *NodeAdapter) LatestBlock() (
 func (a *NodeAdapter) BlockByHashOrNumber(
 	id string,
 ) (BlockInfo, error) {
-	var block models.Block
+	block, err := a.resolveBlock(context.Background(), id)
+	if err != nil {
+		return BlockInfo{}, err
+	}
+	return a.blockInfoFromBlock(block)
+}
+
+// resolveBlock loads the block named by a 64-character hex hash or a decimal
+// height. Errors wrap ErrInvalidBlockID for a malformed identifier and
+// ErrBlockNotFound for one that names no stored block.
+func (a *NodeAdapter) resolveBlock(
+	ctx context.Context,
+	id string,
+) (models.Block, error) {
 	if len(id) == 64 {
 		hash, err := hex.DecodeString(id)
 		if err != nil {
-			return BlockInfo{}, fmt.Errorf(
+			return models.Block{}, fmt.Errorf(
 				"decode block hash %q: %w",
 				id,
 				ErrInvalidBlockID,
 			)
 		}
-		var getErr error
-		block, getErr = a.ledgerState.BlockByHash(context.Background(), hash)
-		if getErr != nil {
-			if errors.Is(getErr, models.ErrBlockNotFound) {
-				return BlockInfo{}, fmt.Errorf(
+		block, err := a.ledgerState.BlockByHash(ctx, hash)
+		if err != nil {
+			if errors.Is(err, models.ErrBlockNotFound) {
+				return models.Block{}, fmt.Errorf(
 					"block %s: %w",
 					id,
 					ErrBlockNotFound,
 				)
 			}
-			return BlockInfo{}, getErr
+			return models.Block{}, err
 		}
-		return a.blockInfoFromBlock(block)
+		return block, nil
 	}
 
 	height, err := strconv.ParseUint(id, 10, 64)
 	if err != nil {
-		return BlockInfo{}, fmt.Errorf(
+		return models.Block{}, fmt.Errorf(
 			"parse block height %q: %w",
 			id,
 			ErrInvalidBlockID,
 		)
 	}
 	if height > math.MaxUint64-database.BlockInitialIndex {
-		return BlockInfo{}, fmt.Errorf(
+		return models.Block{}, fmt.Errorf(
 			"block height %q overflows internal index: %w",
 			id,
 			ErrInvalidBlockID,
@@ -347,21 +369,21 @@ func (a *NodeAdapter) BlockByHashOrNumber(
 	// Blockfrost accepts Cardano block height here. Dingo's blob block index
 	// is 1-based while Cardano block heights are 0-based, so translate height
 	// to the internal index before lookup.
-	block, err = a.ledgerState.Database().BlockByIndex(
+	block, err := a.ledgerState.Database().BlockByIndex(
 		height+database.BlockInitialIndex,
 		nil,
 	)
 	if err != nil {
 		if errors.Is(err, models.ErrBlockNotFound) {
-			return BlockInfo{}, fmt.Errorf(
+			return models.Block{}, fmt.Errorf(
 				"block %s: %w",
 				id,
 				ErrBlockNotFound,
 			)
 		}
-		return BlockInfo{}, err
+		return models.Block{}, err
 	}
-	return a.blockInfoFromBlock(block)
+	return block, nil
 }
 
 func (a *NodeAdapter) blockInfoFromBlock(
@@ -1012,6 +1034,7 @@ func (a *NodeAdapter) Asset(
 	if len(initialMintTxHash) > 0 {
 		info.InitialMintTxHash = hex.EncodeToString(initialMintTxHash)
 		if err := a.populateAssetOnchainMetadata(
+			context.Background(),
 			&info,
 			initialMintTxHash,
 			policyID,
@@ -1037,13 +1060,14 @@ func (a *NodeAdapter) Asset(
 // info. A mint transaction without (matching) metadata is not an error; the
 // fields are simply left unset.
 func (a *NodeAdapter) populateAssetOnchainMetadata(
+	ctx context.Context,
 	info *AssetInfo,
 	initialMintTxHash []byte,
 	policyID string,
 	assetName []byte,
 ) error {
 	metadataCbor, err := a.ledgerState.Database().
-		GetTransactionMetadataByHash(context.Background(), initialMintTxHash, nil)
+		GetTransactionMetadataByHash(ctx, initialMintTxHash, nil)
 	if err != nil {
 		return fmt.Errorf(
 			"get initial mint tx %x metadata for asset %s%x: %w",
@@ -3120,6 +3144,7 @@ func parseAddressOrPaymentCred(
 // exactAddressBalance aggregates balances after the database layer has
 // compared each candidate's complete decoded output address.
 func (a *NodeAdapter) exactAddressBalance(
+	ctx context.Context,
 	addr lcommon.Address,
 	txn *database.Txn,
 ) (models.AddressBalance, error) {
@@ -3131,7 +3156,7 @@ func (a *NodeAdapter) exactAddressBalance(
 
 	candidates, err := a.ledgerState.Database().
 		UtxosByAddressWithOrdering(
-			context.Background(),
+			ctx,
 			&models.UtxoWithOrderingQuery{
 				AddressPatterns: []models.UtxoAddressPattern{pattern},
 			},
@@ -3191,12 +3216,19 @@ func (a *NodeAdapter) exactAddressBalance(
 func (a *NodeAdapter) Address(
 	address string,
 ) (AddressInfo, error) {
+	return a.addressSummary(context.Background(), address)
+}
+
+// parseQueryAddress parses an address or bare payment credential for an
+// address query and rejects one encoded for another network. ErrInvalidAddress
+// drives the HTTP 400 mapping (errors.Is in the handler); the parse error is
+// kept alongside it so logs retain the reason.
+func (a *NodeAdapter) parseQueryAddress(
+	address string,
+) (lcommon.Address, bool, error) {
 	addr, isPaymentCred, err := parseAddressOrPaymentCred(address)
 	if err != nil {
-		// ErrInvalidAddress drives the HTTP 400 mapping
-		// (errors.Is in the handler); the parse error is kept
-		// alongside it so logs retain the reason.
-		return AddressInfo{}, fmt.Errorf(
+		return lcommon.Address{}, false, fmt.Errorf(
 			"parse address %q: %w: %w",
 			address,
 			ErrInvalidAddress,
@@ -3208,17 +3240,28 @@ func (a *NodeAdapter) Address(
 	// this check a foreign-network address would return this network's
 	// balances. Bare payment credentials carry no network id.
 	if !isPaymentCred && addr.NetworkId() != uint(a.networkID()) {
-		return AddressInfo{}, fmt.Errorf(
+		return lcommon.Address{}, false, fmt.Errorf(
 			"address %q network mismatch: %w",
 			address,
 			ErrInvalidAddress,
 		)
 	}
+	return addr, isPaymentCred, nil
+}
+
+func (a *NodeAdapter) addressSummary(
+	ctx context.Context,
+	address string,
+) (AddressInfo, error) {
+	addr, isPaymentCred, err := a.parseQueryAddress(address)
+	if err != nil {
+		return AddressInfo{}, err
+	}
 
 	// Read every query from one snapshot so a block committed
 	// mid-request cannot mix two chain states in the response.
 	db := a.ledgerState.Database()
-	txn := db.Transaction(context.Background(), false)
+	txn := db.Transaction(ctx, false)
 	defer txn.Release()
 
 	// Full addresses use exact matching so UTxOs at other address
@@ -3234,7 +3277,7 @@ func (a *NodeAdapter) Address(
 				txn.Metadata(),
 			)
 	} else {
-		balance, err = a.exactAddressBalance(addr, txn)
+		balance, err = a.exactAddressBalance(ctx, addr, txn)
 	}
 	if err != nil {
 		return AddressInfo{}, fmt.Errorf(
@@ -3253,13 +3296,14 @@ func (a *NodeAdapter) Address(
 			// address carrying the payment credential.
 			var txCount int
 			txCount, err = db.CountTransactionsByPaymentCred(
-				context.Background(),
+				ctx,
 				addr.PaymentKeyHash().Bytes(),
+				models.PaymentScriptFromAddress(addr),
 				txn,
 			)
 			hasTransactions = txCount > 0
 		} else {
-			hasTransactions, err = db.HasTransactionsByAddress(context.Background(), addr, txn)
+			hasTransactions, err = db.HasTransactionsByAddress(ctx, addr, txn)
 		}
 		if err != nil {
 			return AddressInfo{}, fmt.Errorf(
@@ -3326,6 +3370,20 @@ func (a *NodeAdapter) AddressUTXOs(ctx context.Context,
 	address string,
 	params PaginationParams,
 ) ([]AddressUTXOInfo, int, error) {
+	return a.addressUTXOs(ctx, address, params, nil)
+}
+
+// assetFilter restricts a UTxO listing to outputs holding one asset.
+type assetFilter struct {
+	policyID  []byte
+	assetName []byte
+}
+
+func (a *NodeAdapter) addressUTXOs(ctx context.Context,
+	address string,
+	params PaginationParams,
+	filter *assetFilter,
+) ([]AddressUTXOInfo, int, error) {
 	addr, err := lcommon.NewAddress(address)
 	if err != nil {
 		return nil, 0, fmt.Errorf(
@@ -3333,6 +3391,15 @@ func (a *NodeAdapter) AddressUTXOs(ctx context.Context,
 			address,
 			ErrInvalidAddress,
 			err,
+		)
+	}
+	// The match is on the exact address, so a foreign-network address would
+	// list nothing rather than being rejected as Blockfrost does.
+	if addr.NetworkId() != uint(a.networkID()) {
+		return nil, 0, fmt.Errorf(
+			"address %q network mismatch: %w",
+			address,
+			ErrInvalidAddress,
 		)
 	}
 
@@ -3353,14 +3420,16 @@ func (a *NodeAdapter) AddressUTXOs(ctx context.Context,
 	// references (no assets, no full rows) for that pass, and materialize
 	// full UTxO data via UtxosByRefs for just the requested page, instead
 	// of loading the address's entire UTxO history in full.
+	query := &models.UtxoWithOrderingQuery{
+		AddressPatterns: []models.UtxoAddressPattern{pattern},
+	}
+	if filter != nil {
+		query.FilterByAsset = true
+		query.AssetPolicyID = filter.policyID
+		query.AssetName = filter.assetName
+	}
 	refs, err := a.ledgerState.Database().
-		MatchingUtxoRefsByAddressWithOrdering(
-			ctx,
-			&models.UtxoWithOrderingQuery{
-				AddressPatterns: []models.UtxoAddressPattern{pattern},
-			},
-			txn,
-		)
+		MatchingUtxoRefsByAddressWithOrdering(ctx, query, txn)
 	if err != nil {
 		return nil, 0, fmt.Errorf(
 			"get address UTxOs for %q: %w",
@@ -3618,6 +3687,19 @@ func (a *NodeAdapter) AddressTransactions(
 		)
 	}
 
+	ret, err := a.transactionPositionInfos(ctx, txs)
+	if err != nil {
+		return nil, 0, err
+	}
+	return ret, total, nil
+}
+
+// transactionPositionInfos resolves the block height and block time of each
+// transaction. Heights are looked up once per distinct block.
+func (a *NodeAdapter) transactionPositionInfos(
+	ctx context.Context,
+	txs []models.Transaction,
+) ([]AddressTransactionInfo, error) {
 	blockNumbers := make(map[string]uint64, len(txs))
 	ret := make([]AddressTransactionInfo, 0, len(txs))
 	for _, tx := range txs {
@@ -3626,7 +3708,7 @@ func (a *NodeAdapter) AddressTransactions(
 		if !ok {
 			block, err := a.ledgerState.BlockByHash(ctx, tx.BlockHash)
 			if err != nil {
-				return nil, 0, fmt.Errorf(
+				return nil, fmt.Errorf(
 					"get block for transaction %x: %w",
 					tx.Hash,
 					err,
@@ -3638,7 +3720,7 @@ func (a *NodeAdapter) AddressTransactions(
 
 		blockTime, err := a.transactionBlockTime(tx)
 		if err != nil {
-			return nil, 0, fmt.Errorf(
+			return nil, fmt.Errorf(
 				"get block time for transaction %x: %w",
 				tx.Hash,
 				err,
@@ -3651,7 +3733,7 @@ func (a *NodeAdapter) AddressTransactions(
 			BlockTime:   blockTime,
 		})
 	}
-	return ret, total, nil
+	return ret, nil
 }
 
 // MetadataTransactions returns paginated transaction metadata values for the
@@ -4995,6 +5077,9 @@ func (a *NodeAdapter) transactionRedeemerMetadata(
 		mint = *decodedTx.AssetMint()
 	}
 
+	// A spend redeemer indexes the inputs in ledger set order, which a body
+	// need not list them in.
+	spendInputs := gscript.SortInputs(decodedTx.Inputs())
 	for _, redeemer := range tx.Redeemers {
 		key := lcommon.RedeemerKey{
 			Tag:   lcommon.RedeemerTag(redeemer.Tag),
@@ -5003,7 +5088,7 @@ func (a *NodeAdapter) transactionRedeemerMetadata(
 		purpose, err := gscript.BuildScriptPurpose(
 			key,
 			resolvedInputs,
-			decodedTx.Inputs(),
+			spendInputs,
 			mint,
 			decodedTx.Certificates(),
 			decodedTx.Withdrawals(),
@@ -5463,10 +5548,17 @@ func (a *NodeAdapter) protocolParamsForSlot(
 	return pparams, nil
 }
 
+func (a *NodeAdapter) slotToTime(slot uint64) (time.Time, error) {
+	if a.slotTime != nil {
+		return a.slotTime(slot)
+	}
+	return a.ledgerState.SlotToTime(slot)
+}
+
 func (a *NodeAdapter) transactionBlockTime(
 	tx models.Transaction,
 ) (int64, error) {
-	blockTime, err := a.ledgerState.SlotToTime(tx.Slot)
+	blockTime, err := a.slotToTime(tx.Slot)
 	if err != nil {
 		return 0, fmt.Errorf(
 			"convert slot %d to block time for transaction %x: %w",

@@ -25,9 +25,9 @@ import (
 	"github.com/blinklabs-io/dingo/database/types"
 )
 
-// orderDirection normalizes a pagination order to an SQL keyword. Anything
+// orderDirectionFromString normalizes a pagination order to an SQL keyword. Anything
 // but "desc" sorts ascending, so a caller cannot inject a clause through it.
-func orderDirection(order string) string {
+func orderDirectionFromString(order string) string {
 	if strings.EqualFold(order, "desc") {
 		return "DESC"
 	}
@@ -206,7 +206,7 @@ func (s *Store) blockHashesInSlotRange(
 	if total == 0 {
 		return ret, 0, nil
 	}
-	dir := orderDirection(order)
+	dir := orderDirectionFromString(order)
 	query, queryArgs := addLimitOffset(
 		"SELECT bn.hash"+from+" ORDER BY bn.slot "+dir+", bn.id "+dir,
 		args, limit, offset,

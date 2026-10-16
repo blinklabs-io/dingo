@@ -63,7 +63,7 @@ WHERE credential_tag = ? AND staking_key = ? AND registered = TRUE
 	}
 	query, queryArgs := addLimitOffset(
 		"SELECT epoch, pool_key_hash, stake"+where+
-			" ORDER BY epoch "+orderDirection(order),
+			" ORDER BY epoch "+orderDirectionFromString(order),
 		args, limit, offset,
 	)
 	rows, err := db.QueryContext(ctx, query, queryArgs...)
@@ -143,7 +143,7 @@ WHERE reward.credential_tag = ? AND reward.credential = ?`
 	if total == 0 {
 		return ret, 0, nil
 	}
-	dir := orderDirection(order)
+	dir := orderDirectionFromString(order)
 	query, queryArgs := addLimitOffset(
 		"SELECT tx.hash, reward.amount, tx.slot, tx.block_index, tx.block_hash"+
 			from+" ORDER BY mir.added_slot "+dir+", tx.block_index "+dir+
@@ -199,7 +199,7 @@ WHERE u.credential_tag = ? AND u.staking_key = ?`
 	if liveOnly {
 		query += " AND u.deleted_slot = 0"
 	}
-	dir := orderDirection(order)
+	dir := orderDirectionFromString(order)
 	query += " ORDER BY a.policy_id " + dir + ", a.name " + dir
 	rows, err := db.QueryContext(ctx, query, credentialTag, stakingKey)
 	if err != nil {

@@ -1661,7 +1661,18 @@ When `Node.Run()` is called, components are initialized in this order:
     Runs synchronously before LedgerState starts so no
     BlockActionApply events are missed. The epoch cache is prepared first,
     inside a startup-only transaction, so backfill can resolve
-    Ariadne/candidate epoch keys without falling back to epoch 0. Backfill
+    Ariadne/candidate epoch keys without falling back to epoch 0. Before
+    ordinary backfill, startup checks whether the auth-token policy fingerprint
+    requires a registration-state rebuild and verifies complete
+    retained primary-chain history from block number zero through the applied
+    tip using the canonical block index, decoded block metadata, parent hashes,
+    and Byron EBB-aware block-number continuity. It then atomically marks the
+    rebuild pending while clearing only registration/deregistration rows and
+    resetting a dedicated registration-rebuild checkpoint. The regular
+    Midnight checkpoint is preserved. After ordinary backfill, replay uses a
+    registration-only path. A pending rebuild repeats from clean state after
+    interruption; stale registration UTxOs are not exposed to the gRPC server
+    before this startup step completes.
     iterates stored blocks from the last checkpoint slot through the applied
     ledger tip read from metadata (`Config.LedgerTipSlot`, wired to
     `database.Database.GetTip`; `LedgerState.Tip()` is not usable here because
@@ -1769,7 +1780,11 @@ When `Node.Run()` is called, components are initialized in this order:
     replacement database. The manager is then started and subscribes to
     `epoch.transition` (a post-Byron event without an epoch nonce, the slot
     clock's duplicate, is ignored; Byron rollovers carry no nonce and still
-    trigger a run).
+    trigger a run). Its worker also runs the pass every
+    `plannerstats.DefaultRefreshInterval` (one minute), so tables filled by
+    block application after the startup pass are re-analyzed once they have
+    grown roughly 25-fold, not only at the next rollover; the tick shares the
+    worker with the epoch trigger, so runs never overlap.
     A one-slot pending signal coalesces transitions arriving during a run into
     at most one follow-up, and the run executes on its own worker after the
     rollover transaction has committed, never inside it. `Stop` cancels a run in
@@ -5032,7 +5047,7 @@ chain per row, so each chunk costs `O(active rows × refs)` and the
 "batched" read becomes slower than the per-item loop it replaced as the
 account table grows. Outside Mithril sync and metadata backfill, SQLite
 statistics come from `internal/plannerstats.Manager`'s incremental
-`PRAGMA optimize` at startup and after each epoch rollover (see DATABASE.md),
+`PRAGMA optimize` at startup, after each epoch rollover and every minute (see DATABASE.md),
 so a genesis-synced node has them once its first run completes — and even with
 statistics present, the grouped-IN form is still measurably cheaper. `GetStakeSnapshots`' pool-side primitive
 (`GetPoolStakeSnapshotsForPools`) does not share this hazard: a
@@ -10496,10 +10511,13 @@ submits the transaction nor requires it to be fully valid and balanced.
 Evaluation resolves inputs from the ledger's own UTxO set, so a non-empty
 `additionalUtxoSet` is rejected rather than silently ignored, and the
 `version` query parameter accepts only Blockfrost's default of `5`. The
-current router includes health/root, blocks,
-epochs/parameters, network/eras, genesis, assets, pools list, pools/extended,
-retiring pools, pool detail, pool metadata, governance DRep list and lookup, address
-summary, address UTxOs and transactions, metadata label JSON/CBOR,
+current router includes health/root, blocks (lookup, navigation, slot and
+epoch-slot lookup, transaction hashes and CBOR, affected addresses),
+epochs/parameters, network/eras, genesis, assets (lookup, listings, history,
+transactions, UTxOs, holders), scripts and datums, the mempool, pools list,
+pools/extended, retiring pools, pool detail, pool metadata, governance DRep list
+and lookup, address summary, extended details, totals, UTxOs (optionally of one
+asset) and transactions, metadata label JSON/CBOR,
 transaction content/CBOR/metadata/UTxOs/certificates/redeemers/required
 signers, and account/delegation/registration/reward/UTxOs/withdrawals/
 transactions endpoints. It uses an adapter pattern to translate between
@@ -10550,6 +10568,50 @@ retains `reward_stake_input`, non-checkpoint `block_nonce` rows and superseded
 `auth_committee_hot` rows without bound for these endpoints; see "Snapshot and
 Reward-State Retention" and "Committee Hot-Key Authorization Retention" in
 DATABASE.md for the storage cost.
+
+Go's `ServeMux` rejects two patterns that neither contains the other, so the
+routes whose literal segment overlaps a wildcard are served by one pattern that
+dispatches on the segment: `/blocks/{hash_or_number}/{section}` (with the
+literal `slot` of `/blocks/slot/{slot_number}`),
+`/assets/{asset}/{section}` (with the literal `policy` of
+`/assets/policy/{policy_id}`) and `/scripts/{script_hash}/{section}` (with the
+literal `datum` of `/scripts/datum/{datum_hash}`). An unknown section falls
+through to the catch-all. Block navigation walks the block index from the
+identified block, bounded by the page size: page one holds the nearest blocks,
+heights ascend within a page as Blockfrost lists them (a descending order
+reverses the page), and the pagination headers count the heights between the
+block and the tip, or below it. The transaction, CBOR and address listings of
+one block decode that block once and page its transactions, which the block
+size bounds. A block's addresses come from what its transactions produced and
+spent: a valid transaction's decoded outputs and consumed inputs, and for a
+transaction that failed phase 2 its collateral return output and its consumed
+collateral inputs. The mempool endpoints reach the pool through an optional
+read interface the submitter satisfies, so an ascending page reads only the
+prefix it needs from `TransactionsBounded`, a descending page and the address
+filter read the pool whole (its capacity bounds it), and a node whose submitter
+does not expose the pool answers 503. A mempool transaction marked as failing
+phase 2 is described by the effects it would have when applied: its collateral
+return is its only output and its collateral its only spent inputs, both for
+the transaction view and for the address filter. The address filter takes a
+Bech32 address and rejects a bare payment credential. Mempool inputs resolve to
+an address only when they name a stored unspent output; the input of another
+mempool transaction is listed without one.
+
+The script redeemer and reference-UTxO listings, like the address, asset and
+transaction listings, need API storage mode. Their indexes (`redeemer_script`,
+`utxo_reference_script`) are written as transactions are applied, so a database
+populated before they existed lists only the transactions and outputs applied
+afterwards. A Dijkstra subtransaction is stored as a transaction of its own,
+so its redeemers are attributed from its own witness set and inputs and are
+listed under its own hash. A guarding redeemer is not attributed to a script,
+because no script purpose is built for it, so a guard script's redeemer
+listing omits those executions.
+
+A listing that pages from one read snapshot and then resolves each row through
+further reads (block hashes, output CBOR, transaction redeemers) releases the
+snapshot first. Those reads take connections of their own, so holding the
+snapshot across them lets concurrent requests exhaust the metadata read pool
+while each waits on another.
 
 The account UTxOs, withdrawals, and transactions endpoints resolve everything
 by stake credential rather than a single address. Account UTxOs reuse the
@@ -13727,7 +13789,11 @@ Live restore/truncate bounds all subscription drains by the shutdown budget;
 an unfinished drain requires a supervised restart before storage can reopen.
 
 Once eligible to run, it subscribes to `ledger.block`
-(`ledger.BlockEventType`) and for each applied block scans every transaction:
+(`ledger.BlockEventType`) and scans each transaction's applied `Consumed()`
+inputs and `Produced()` UTxOs rather than the body-declared inputs and outputs.
+For a phase-2-invalid transaction, this indexes consumed collateral and its
+optional collateral return, preserving that produced UTxO's actual output
+index:
 
 - **cNIGHT create**: an output carrying the configured `cnight_policy_id` +
   `cnight_asset_name` token writes a `midnight_asset_creates` row and adds
