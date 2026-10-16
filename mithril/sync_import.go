@@ -358,8 +358,8 @@ func selectLedgerStateSnapshot(
 }
 
 // importLedgerState finds, parses, and imports the ledger state
-// from the extracted Mithril snapshot. It searches both the main
-// extract directory and the ancillary directory for the state file.
+// from the extracted Mithril snapshot. It searches the ancillary directory
+// for the state file.
 func importLedgerState(
 	ctx context.Context,
 	db *database.Database,

@@ -722,6 +722,11 @@ mithril:
 
 func TestMithrilBackendV1Rejected(t *testing.T) {
 	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("DINGO_MITHRIL_BACKEND", "")
+	t.Setenv("CARDANO_DINGO_MITHRIL_BACKEND", "")
+	os.Unsetenv("DINGO_MITHRIL_BACKEND")
+	os.Unsetenv("CARDANO_DINGO_MITHRIL_BACKEND")
 	tmpFile := writeMithrilBackendTestConfig(t, `
 network: "preview"
 mithril:

@@ -196,8 +196,7 @@ type ContiguousChunk struct {
 type VerificationMode uint8
 
 const (
-	// VerificationModeStructural verifies certificate chain linkage and leaf
-	// binding to the requested snapshot digest.
+	// VerificationModeStructural verifies certificate chain linkage.
 	VerificationModeStructural VerificationMode = iota + 1
 	// VerificationModeSTM verifies the structural certificate chain and the
 	// aggregate multi-signature of each non-genesis certificate.
@@ -239,7 +238,7 @@ type BootstrapResult struct {
 	// handle refers to the directory that was vetted, and keeps referring to it
 	// however the name is repointed.
 	//
-	// Both bootstrap paths set it. A result without it did not come from a
+	// The bootstrap always sets it. A result without it did not come from a
 	// vetted lookup, and loading refuses rather than falling back to the
 	// pathname — a silent fallback would reinstate exactly the open this
 	// replaces.
@@ -302,11 +301,9 @@ type BootstrapResult struct {
 	TempDir string
 }
 
-// Bootstrap orchestrates the full Mithril bootstrap flow:
-//  1. Fetch the latest snapshot from the aggregator
-//  2. Download the snapshot archive
-//  3. Extract the archive to obtain the ImmutableDB files
-//  4. Return the path for loading with existing immutable DB logic
+// Bootstrap validates cfg, resolves the aggregator URL, and delegates to the
+// v2 backend, which restores the ImmutableDB trio files and the ancillary
+// ledger state from the aggregator's incremental database artifacts.
 //
 // The caller is responsible for invoking the immutable DB load using
 // the returned ImmutableDir path. If CleanupAfterLoad is true, the
@@ -456,7 +453,8 @@ func (r *BootstrapResult) CloseHandles() {
 
 // VerifyCertificateChain walks the Mithril certificate chain from
 // the given hash back to the genesis certificate. This verifies
-// the chain is unbroken. It does not verify STM cryptographic signatures (Phase 2).
+// the chain is unbroken. It does not verify STM cryptographic signatures
+// (Phase 2).
 func VerifyCertificateChain(
 	ctx context.Context,
 	client *Client,

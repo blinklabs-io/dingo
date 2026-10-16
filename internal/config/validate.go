@@ -917,7 +917,7 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		))
 	} else if !slices.Contains(AcceptedMithrilBackends, c.Mithril.Backend) {
 		errs = append(errs, fmt.Errorf(
-			"invalid mithril.backend %q: must be \"v2\"",
+			"invalid mithril.backend %q: must be empty or \"v2\"",
 			c.Mithril.Backend,
 		))
 	}

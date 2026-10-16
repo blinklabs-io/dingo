@@ -1222,8 +1222,9 @@ func Sync(
 
 	// Backstop the in-progress marker for paths that did not pipeline a copy:
 	// catch-up runs and runs with certificate-chain verification enabled, both
-	// of which clear the chunk hook above. Idempotent when the pipelined copy already set it. Set after a successful bootstrap
-	// and before any post-bootstrap write or deferred-index drop.
+	// of which clear the chunk hook above. Idempotent when the pipelined copy
+	// already set it. Set after a successful bootstrap and before any
+	// post-bootstrap write or deferred-index drop.
 	if err := markSyncInProgress(
 		db, cfg.StorageMode, cfg.RepairLegacyRewardState,
 	); err != nil {

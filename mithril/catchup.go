@@ -46,14 +46,14 @@ var ErrRewardStateRepairWaitingForSnapshot = errors.New(
 // loaded is then the tree the bootstrap accepted, not whatever holds its name
 // by the time the load runs.
 //
-// A result without that handle is refused rather than opened by pathname. Both
-// bootstrap paths set it, so a missing one means the result did not come from a
-// vetted lookup — and falling back would silently reinstate the name-resolved
+// A result without that handle is refused rather than opened by pathname. The
+// bootstrap always sets it, so a missing one means the result did not come from
+// a vetted lookup — and falling back would silently reinstate the name-resolved
 // open this exists to replace, which is the kind of downgrade nobody notices
 // until it matters.
 //
-// Where the result also carries per-file digests, every file is checked against
-// them as it is opened, from the descriptor the read then goes through. The
+// Every file is checked against the result's per-file digests as it is opened,
+// from the descriptor the read then goes through. The
 // handle and the digests answer different questions: the handle says the tip
 // read, the catch-up check and the blob copy are about the directory the
 // bootstrap vetted, and the digests say the bytes in it are the certified

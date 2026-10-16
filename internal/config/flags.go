@@ -993,7 +993,7 @@ var flagSpecs = []flagSpec{
 		"Mithril.Backend",
 		"mithril-backend",
 		"",
-		"Mithril artifact backend: v2 (incremental database, the only supported value)",
+		"Mithril artifact backend: v2 (incremental database; empty selects v2)",
 	),
 	stringFlag(
 		"Mithril.PinnedDigest",

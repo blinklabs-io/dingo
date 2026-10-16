@@ -494,6 +494,11 @@ func newV2Fixture(t *testing.T, opts v2FixtureOptions) *v2Fixture {
 		ancillaryLedgerState = opts.ancillaryLedgerState
 	}
 	if validLedgerStateBytes != nil {
+		require.Empty(
+			t,
+			opts.ancillaryLedgerState,
+			"validLedgerState and ancillaryLedgerState are mutually exclusive",
+		)
 		ancillaryLedgerState = validLedgerStateBytes
 	}
 	ancillaryLedgerSlot := opts.ancillaryLedgerSlot
