@@ -154,3 +154,61 @@ func TestValidateTxConwayPV11UnknownVoterRequiresCommitteeState(t *testing.T) {
 	var unknown conway.UnknownVoterError
 	require.False(t, errors.As(err, &unknown))
 }
+
+func TestValidateUnknownVotersSeesPriorCommitteeAuthorizationInBlock(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	var coldHash, hotHash lcommon.Blake2b224
+	coldHash[0] = 0x45
+	hotHash[0] = 0x67
+	cold := lcommon.Credential{
+		CredType:   lcommon.CredentialTypeAddrKeyHash,
+		Credential: coldHash,
+	}
+	hot := lcommon.Credential{
+		CredType:   lcommon.CredentialTypeAddrKeyHash,
+		Credential: hotHash,
+	}
+	base := &committeeVotingTestState{
+		mockLedgerState: newMockLedgerState(),
+		available:       true,
+		authorizations:  map[string][]lcommon.Credential{},
+		elected: map[string]bool{
+			taggedCommitteeCredentialKey(cold): true,
+		},
+	}
+	pp := &conway.ConwayProtocolParameters{
+		ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
+			Major: lcommon.ProtocolVersionVanRossem,
+		},
+	}
+	pending := lcommon.NewBlockLedgerState(base)
+	predecessor := &conway.ConwayTransaction{
+		TxIsValid: true,
+		Body: conway.ConwayTransactionBody{
+			TxCertificates: []lcommon.CertificateWrapper{{
+				Type: uint(lcommon.CertificateTypeAuthCommitteeHot),
+				Certificate: &lcommon.AuthCommitteeHotCertificate{
+					CertType:       uint(lcommon.CertificateTypeAuthCommitteeHot),
+					ColdCredential: cold,
+					HotCredential:  hot,
+				},
+			}},
+		},
+	}
+	require.NoError(t, pending.ApplyTransaction(predecessor, pp))
+
+	voter := &lcommon.Voter{
+		Type: lcommon.VoterTypeConstitutionalCommitteeHotKeyHash,
+		Hash: [28]byte(hotHash),
+	}
+	tx := &conway.ConwayTransaction{
+		TxIsValid: true,
+		Body: conway.ConwayTransactionBody{
+			TxVotingProcedures: lcommon.VotingProcedures{voter: {}},
+		},
+	}
+	require.NoError(t, validateUnknownVoters(tx, 0, pending, pp))
+}

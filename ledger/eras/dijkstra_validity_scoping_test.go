@@ -42,6 +42,18 @@ type dijkstraScopingState struct {
 
 func (s *dijkstraScopingState) MinPoolMargin() *big.Rat { return s.floor }
 
+func (*dijkstraScopingState) CommitteeHotCredentialColdCredentials(
+	lcommon.Credential,
+) ([]lcommon.Credential, error) {
+	return nil, nil
+}
+
+func (*dijkstraScopingState) CommitteeCredentialIsElected(
+	lcommon.Credential,
+) (bool, error) {
+	return false, nil
+}
+
 // dijkstraScopingFailingV3Script is a Plutus V3 script that fails when applied
 // to its single script-context argument.
 func dijkstraScopingFailingV3Script(t *testing.T) lcommon.Script {
