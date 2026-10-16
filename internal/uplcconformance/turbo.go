@@ -15,14 +15,10 @@
 package uplcconformance
 
 import (
-	"container/heap"
-	"crypto/sha256"
-	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
-	"math/bits"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -39,54 +35,25 @@ import (
 )
 
 const (
-	turboSchemaVersion     = "1"
-	turboBestSamples       = 30
-	turboDeviationLimit    = 1.5
-	turboCPUUnitNanosecond = 0.001 // one picosecond per execution unit
+	turboSchemaVersion = "1"
+	turboBestSamples   = 30
 )
 
 var turboVersionSuffix = regexp.MustCompile(`(?i)-v([123])\.flat$`)
 
 type TurboReport struct {
-	SchemaVersion   string            `json:"schema_version"`
-	Scenario        string            `json:"scenario"`
-	GeneratedAt     string            `json:"generated_at"`
-	Implementation  map[string]string `json:"implementation"`
-	Machine         TurboMachine      `json:"machine"`
-	Corpus          string            `json:"-"`
-	ProtocolVersion string            `json:"-"`
-	Setup           TurboSetup        `json:"-"`
-	Summary         []TurboSummary    `json:"-"`
-	Benchmarks      []TurboBenchmark  `json:"benchmarks"`
-	Representatives []TurboBenchmark  `json:"-"`
-	WorstCases      []TurboBenchmark  `json:"-"`
+	SchemaVersion  string            `json:"schema_version"`
+	Scenario       string            `json:"scenario"`
+	GeneratedAt    string            `json:"generated_at"`
+	Implementation map[string]string `json:"implementation"`
+	Machine        TurboMachine      `json:"machine"`
+	Benchmarks     []TurboBenchmark  `json:"benchmarks"`
 }
 
 type TurboMachine struct {
 	OS           string `json:"os,omitempty"`
 	Architecture string `json:"architecture,omitempty"`
 	LogicalCores int    `json:"logical_cores,omitempty"`
-}
-
-type TurboSetup struct {
-	SampleCount        int     `json:"sample_count"`
-	Measurement        string  `json:"measurement"`
-	IncludesReset      bool    `json:"includes_reset"`
-	CostModel          string  `json:"cost_model"`
-	CorpusDigest       string  `json:"corpus_digest,omitempty"`
-	DeviationTolerance float64 `json:"deviation_tolerance"`
-	DeviationUnits     string  `json:"deviation_units"`
-	MemoryMeasurement  string  `json:"memory_measurement"`
-}
-
-type TurboSummary struct {
-	Group        string  `json:"group"`
-	Scripts      int     `json:"scripts"`
-	Samples      int     `json:"samples"`
-	CPUMeanNS    float64 `json:"cpu_mean_ns"`
-	CPUMaxNS     float64 `json:"cpu_max_ns"`
-	MemMeanBytes float64 `json:"mem_mean_bytes"`
-	MemMaxBytes  float64 `json:"mem_max_bytes"`
 }
 
 type TurboBenchmark struct {
@@ -100,11 +67,6 @@ type TurboBenchmark struct {
 	MemBytes        *float64 `json:"mem_bytes"`
 	SizeBytes       int      `json:"size_bytes"`
 	Error           string   `json:"error,omitempty"`
-	Group           string   `json:"-"`
-	CPUMaxNS        float64  `json:"-"`
-	CPUMeanNS       float64  `json:"-"`
-	MemMeanBytes    float64  `json:"-"`
-	MemMaxBytes     float64  `json:"-"`
 }
 
 type turboSample struct {
@@ -121,51 +83,6 @@ type turboCase struct {
 	version       lang.LanguageVersion
 	group         string
 	protocolMajor int
-}
-
-const turboMinHashCount = 16
-
-type turboRepresentativeCandidate struct {
-	benchmark TurboBenchmark
-	path      string
-	size      int
-	hash      [sha256.Size]byte
-	minHashes [turboMinHashCount]uint64
-	indexed   bool
-	medianCPU float64
-	medianMem float64
-}
-
-type turboBandKey struct {
-	group  string
-	band   uint8
-	first  uint64
-	second uint64
-}
-
-type turboRepresentativeIndex struct {
-	representatives []turboRepresentativeCandidate
-	bands           map[turboBandKey][]int
-	groupIndexes    map[string][]int
-	unindexed       map[string][]int
-}
-
-type maxUint64Heap []uint64
-
-func (h *maxUint64Heap) Len() int           { return len(*h) }
-func (h *maxUint64Heap) Less(i, j int) bool { return (*h)[i] > (*h)[j] }
-
-func (h *maxUint64Heap) Swap(
-	i, j int,
-) {
-	(*h)[i], (*h)[j] = (*h)[j], (*h)[i]
-}
-func (h *maxUint64Heap) Push(value any) { *h = append(*h, value.(uint64)) }
-func (h *maxUint64Heap) Pop() any {
-	last := len(*h) - 1
-	value := (*h)[last]
-	*h = (*h)[:last]
-	return value
 }
 
 // GenerateTurboReport measures flat UPLC programs. Memory is measured as Go
@@ -217,13 +134,7 @@ func GenerateTurboReport(
 			"turbo corpus contains no versioned Flat programs",
 		)
 	}
-	measurement := "Flat decode + evaluation + evaluator arena reset wall-clock time"
 	if maxPrograms > 0 && len(cases) > maxPrograms {
-		measurement += fmt.Sprintf(
-			"; %d of %d programs, evenly spaced in name order",
-			maxPrograms,
-			len(cases),
-		)
 		cases = evenlySpaced(cases, maxPrograms)
 	}
 
@@ -240,31 +151,16 @@ func GenerateTurboReport(
 			Architecture: runtime.GOARCH,
 			LogicalCores: runtime.NumCPU(),
 		},
-		Corpus: "amaru-uplc/turbo",
-		Setup: TurboSetup{
-			SampleCount:        samples,
-			Measurement:        measurement,
-			IncludesReset:      true,
-			CostModel:          "Default Plutus cost model for each script language version at the epoch's protocol version",
-			DeviationTolerance: turboDeviationLimit,
-			DeviationUnits:     "CPU: 1 unit = 1 picosecond; memory: 1 unit = 1 byte",
-			MemoryMeasurement:  "Go heap allocation bytes during evaluation, excluding Flat decoding",
-		},
-		Summary:         []TurboSummary{},
-		Benchmarks:      make([]TurboBenchmark, 0, len(cases)),
-		Representatives: make([]TurboBenchmark, 0, len(cases)),
-		WorstCases:      []TurboBenchmark{},
+		Benchmarks: make([]TurboBenchmark, 0, len(cases)),
 	}
 
-	representativeIndex := turboRepresentativeIndex{
-		bands:        make(map[turboBandKey][]int),
-		groupIndexes: make(map[string][]int),
-		unindexed:    make(map[string][]int),
-	}
 	var benchmarkErrors []error
 	for _, tc := range cases {
 		programBytes, err := readTurboProgram(tc.path)
 		if err != nil {
+			if _, ok := errors.AsType[*os.PathError](err); ok {
+				return TurboReport{}, fmt.Errorf("read turbo program %s: %w", tc.name, err)
+			}
 			failure := turboBenchmarkError(tc, fmt.Errorf("read CBOR-wrapped Flat program: %w", err))
 			benchmarkErrors = append(benchmarkErrors, failure)
 			report.Benchmarks = append(report.Benchmarks, failedTurboBenchmark(tc, 0, failure))
@@ -289,28 +185,7 @@ func GenerateTurboReport(
 			continue
 		}
 		report.Benchmarks = append(report.Benchmarks, benchmark)
-		minHashes, indexed := turboMinHashes(programBytes)
-		candidate := turboRepresentativeCandidate{
-			benchmark: benchmark,
-			path:      tc.path,
-			size:      len(programBytes),
-			hash:      sha256.Sum256(programBytes),
-			minHashes: minHashes,
-			indexed:   indexed,
-			medianCPU: medianTurboCPU(measurements),
-			medianMem: medianTurboMemory(measurements),
-		}
-		if err := representativeIndex.add(candidate, programBytes); err != nil {
-			benchmarkErrors = append(benchmarkErrors, fmt.Errorf(
-				"classify representative %s: %w",
-				tc.name,
-				err,
-			))
-		}
 	}
-	report.Summary = summarizeTurbo(report.Benchmarks, samples)
-	report.Representatives = representativeIndex.benchmarks()
-	report.WorstCases = turboWorstCases(report.Benchmarks, 10)
 	return report, errors.Join(benchmarkErrors...)
 }
 
@@ -342,7 +217,6 @@ func failedTurboBenchmark(tc turboCase, size int, err error) TurboBenchmark {
 		ProtocolVersion: fmt.Sprintf("%d.0", tc.protocolMajor),
 		SizeBytes:       size,
 		Error:           err.Error(),
-		Group:           tc.group,
 	}
 }
 
@@ -485,23 +359,13 @@ func makeTurboBenchmark(
 		}
 	}
 	samples = bestTurboSamples(samples)
-	var totalDuration time.Duration
 	var totalEvaluation time.Duration
 	var totalFlat time.Duration
 	var totalMemory uint64
-	var maxDuration time.Duration
-	var maxMemory uint64
 	for _, sample := range samples {
-		totalDuration += sample.duration
 		totalEvaluation += sample.evaluationDuration
 		totalFlat += sample.flatDuration
 		totalMemory += sample.memBytes
-		if sample.duration > maxDuration {
-			maxDuration = sample.duration
-		}
-		if sample.memBytes > maxMemory {
-			maxMemory = sample.memBytes
-		}
 	}
 	flatUS := float64(totalFlat.Nanoseconds()) / 1_000 / float64(len(samples))
 	memBytes := float64(totalMemory) / float64(len(samples))
@@ -516,15 +380,6 @@ func makeTurboBenchmark(
 		FlatUS:          &flatUS,
 		MemBytes:        &memBytes,
 		SizeBytes:       size,
-		Group:           tc.group,
-		CPUMaxNS:        float64(maxDuration.Nanoseconds()),
-		CPUMeanNS: float64(
-			totalDuration.Nanoseconds(),
-		) / float64(
-			len(samples),
-		),
-		MemMeanBytes: float64(totalMemory) / float64(len(samples)),
-		MemMaxBytes:  float64(maxMemory),
 	}, nil
 }
 
@@ -537,284 +392,6 @@ func bestTurboSamples(samples []turboSample) []turboSample {
 		return best[i].duration < best[j].duration
 	})
 	return best[:turboBestSamples]
-}
-
-func summarizeTurbo(
-	benchmarks []TurboBenchmark,
-	sampleCount int,
-) []TurboSummary {
-	byGroup := make(map[string]TurboSummary)
-	for _, benchmark := range benchmarks {
-		summary := byGroup[benchmark.Group]
-		summary.Group = benchmark.Group
-		summary.Scripts++
-		summary.Samples += sampleCount
-		summary.CPUMeanNS += benchmark.CPUMeanNS
-		if benchmark.CPUMaxNS > summary.CPUMaxNS {
-			summary.CPUMaxNS = benchmark.CPUMaxNS
-		}
-		summary.MemMeanBytes += benchmark.MemMeanBytes
-		if benchmark.MemMaxBytes > summary.MemMaxBytes {
-			summary.MemMaxBytes = benchmark.MemMaxBytes
-		}
-		byGroup[benchmark.Group] = summary
-	}
-	groups := make([]string, 0, len(byGroup))
-	for group := range byGroup {
-		groups = append(groups, group)
-	}
-	sort.Strings(groups)
-	result := make([]TurboSummary, 0, len(groups))
-	for _, group := range groups {
-		summary := byGroup[group]
-		summary.CPUMeanNS /= float64(summary.Scripts)
-		summary.MemMeanBytes /= float64(summary.Scripts)
-		result = append(result, summary)
-	}
-	return result
-}
-
-func (index *turboRepresentativeIndex) add(
-	candidate turboRepresentativeCandidate,
-	program []byte,
-) error {
-	candidateIndexes := make(map[int]struct{})
-	if candidate.indexed {
-		for band := range turboMinHashCount / 2 {
-			key := turboBandKey{
-				group:  candidate.benchmark.Group,
-				band:   uint8(band),
-				first:  candidate.minHashes[band*2],
-				second: candidate.minHashes[band*2+1],
-			}
-			for _, candidateIndex := range index.bands[key] {
-				candidateIndexes[candidateIndex] = struct{}{}
-			}
-		}
-		for _, candidateIndex := range index.unindexed[candidate.benchmark.Group] {
-			candidateIndexes[candidateIndex] = struct{}{}
-		}
-	} else {
-		for _, candidateIndex := range index.groupIndexes[candidate.benchmark.Group] {
-			candidateIndexes[candidateIndex] = struct{}{}
-		}
-	}
-	orderedIndexes := make([]int, 0, len(candidateIndexes))
-	for candidateIndex := range candidateIndexes {
-		orderedIndexes = append(orderedIndexes, candidateIndex)
-	}
-	sort.Ints(orderedIndexes)
-
-	for _, candidateIndex := range orderedIndexes {
-		representative := index.representatives[candidateIndex]
-		if !withinNinetyPercentSize(candidate.size, representative.size) {
-			continue
-		}
-		if !withinTenPercent(candidate.medianCPU, representative.medianCPU) ||
-			!withinTenPercent(candidate.medianMem, representative.medianMem) {
-			continue
-		}
-		if candidate.hash == representative.hash {
-			return nil
-		}
-		representativeProgram, err := readTurboProgram(representative.path)
-		if err != nil {
-			return fmt.Errorf(
-				"read representative Flat program %q: %w",
-				representative.path,
-				err,
-			)
-		}
-		if byteSimilarity(program, representativeProgram) >= 0.90 {
-			return nil
-		}
-	}
-
-	candidateIndex := len(index.representatives)
-	index.representatives = append(index.representatives, candidate)
-	index.groupIndexes[candidate.benchmark.Group] = append(
-		index.groupIndexes[candidate.benchmark.Group], candidateIndex,
-	)
-	if candidate.indexed {
-		for band := range turboMinHashCount / 2 {
-			key := turboBandKey{
-				group:  candidate.benchmark.Group,
-				band:   uint8(band),
-				first:  candidate.minHashes[band*2],
-				second: candidate.minHashes[band*2+1],
-			}
-			index.bands[key] = append(index.bands[key], candidateIndex)
-		}
-	} else {
-		index.unindexed[candidate.benchmark.Group] = append(
-			index.unindexed[candidate.benchmark.Group], candidateIndex,
-		)
-	}
-	return nil
-}
-
-func (index *turboRepresentativeIndex) benchmarks() []TurboBenchmark {
-	result := make([]TurboBenchmark, 0, len(index.representatives))
-	for _, representative := range index.representatives {
-		result = append(result, representative.benchmark)
-	}
-	return result
-}
-
-func turboMinHashes(program []byte) ([turboMinHashCount]uint64, bool) {
-	var result [turboMinHashCount]uint64
-	for i := range result {
-		result[i] = math.MaxUint64
-	}
-	if len(program) < 2 {
-		return result, false
-	}
-
-	values := make(maxUint64Heap, 0, turboMinHashCount)
-	seen := make(map[uint64]struct{}, turboMinHashCount)
-	for offset := 0; offset <= len(program)-2; offset++ {
-		value := mixTurboHash(
-			uint64(binary.LittleEndian.Uint16(program[offset : offset+2])),
-		)
-		if _, exists := seen[value]; exists {
-			continue
-		}
-		if len(values) == turboMinHashCount && value >= values[0] {
-			continue
-		}
-		if len(values) == turboMinHashCount {
-			removed := heap.Pop(&values).(uint64)
-			delete(seen, removed)
-		}
-		heap.Push(&values, value)
-		seen[value] = struct{}{}
-	}
-	copy(result[:], values)
-	sort.Slice(result[:len(values)], func(i, j int) bool {
-		return result[i] < result[j]
-	})
-	return result, len(values) == turboMinHashCount
-}
-
-func mixTurboHash(value uint64) uint64 {
-	value ^= value >> 30
-	value *= 0xbf58476d1ce4e5b9
-	value ^= value >> 27
-	value *= 0x94d049bb133111eb
-	return value ^ (value >> 31)
-}
-
-func withinNinetyPercentSize(a, b int) bool {
-	if a == 0 || b == 0 {
-		return a == b
-	}
-	smaller, larger := min(a, b), max(a, b)
-	return float64(smaller)/float64(larger) >= 0.90
-}
-
-func byteSimilarity(a, b []byte) float64 {
-	if len(a) == 0 || len(b) == 0 {
-		return 0
-	}
-	if len(a) > len(b) {
-		a, b = b, a
-	}
-	wordCount := (len(a) + 63) / 64
-	positions := make([][]uint64, 256)
-	for character := range positions {
-		positions[character] = make([]uint64, wordCount)
-	}
-	for position, character := range a {
-		positions[character][position/64] |= uint64(1) << uint(position%64)
-	}
-	state := make([]uint64, wordCount)
-	for _, character := range b {
-		carryShift := uint64(1)
-		borrow := uint64(0)
-		for wordIndex, stateWord := range state {
-			x := positions[character][wordIndex] | stateWord
-			y := stateWord<<1 | carryShift
-			carryShift = stateWord >> 63
-			difference := x - y
-			borrowFromY := uint64(0)
-			if x < y {
-				borrowFromY = 1
-			}
-			differenceWithBorrow := difference - borrow
-			borrowFromPrior := uint64(0)
-			if difference < borrow {
-				borrowFromPrior = 1
-			}
-			borrow = borrowFromY | borrowFromPrior
-			state[wordIndex] = x &^ differenceWithBorrow
-		}
-	}
-	var lcsLength int
-	for _, word := range state {
-		lcsLength += bits.OnesCount64(word)
-	}
-	return float64(lcsLength) / float64(max(len(a), len(b)))
-}
-
-func medianTurboCPU(samples []turboSample) float64 {
-	values := make([]float64, len(samples))
-	for i, sample := range samples {
-		values[i] = float64(sample.duration.Nanoseconds())
-	}
-	return medianFloat64(values)
-}
-
-func medianTurboMemory(samples []turboSample) float64 {
-	values := make([]float64, len(samples))
-	for i, sample := range samples {
-		values[i] = float64(sample.memBytes)
-	}
-	return medianFloat64(values)
-}
-
-func medianFloat64(values []float64) float64 {
-	if len(values) == 0 {
-		return 0
-	}
-	sortedValues := append([]float64(nil), values...)
-	sort.Float64s(sortedValues)
-	middle := len(sortedValues) / 2
-	if len(sortedValues)%2 != 0 {
-		return sortedValues[middle]
-	}
-	return (sortedValues[middle-1] + sortedValues[middle]) / 2
-}
-
-func withinTenPercent(a, b float64) bool {
-	if a == 0 || b == 0 {
-		return a == b
-	}
-	return math.Abs(a-b)/math.Max(a, b) <= 0.10
-}
-
-func turboWorstCases(benchmarks []TurboBenchmark, limit int) []TurboBenchmark {
-	result := append([]TurboBenchmark(nil), benchmarks...)
-	sort.Slice(result, func(i, j int) bool {
-		return turboDeviationScore(result[i]) > turboDeviationScore(result[j])
-	})
-	if len(result) > limit {
-		result = result[:limit]
-	}
-	return result
-}
-
-func turboDeviationScore(benchmark TurboBenchmark) float64 {
-	score := 0.0
-	if benchmark.BudgetCPU != nil && *benchmark.BudgetCPU > 0 {
-		score = benchmark.CPUMaxNS / (float64(*benchmark.BudgetCPU) * turboCPUUnitNanosecond)
-	}
-	if benchmark.BudgetMem != nil && *benchmark.BudgetMem > 0 {
-		memoryScore := benchmark.MemMaxBytes / float64(*benchmark.BudgetMem)
-		if memoryScore > score {
-			score = memoryScore
-		}
-	}
-	return score
 }
 
 // WriteTurboReport writes the turbo report as indented JSON.

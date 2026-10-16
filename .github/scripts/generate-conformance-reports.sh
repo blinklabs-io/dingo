@@ -22,7 +22,7 @@
 #   TURBO_URL             required, the turbo corpus archive
 #   TURBO_SHA256          required, digest of that archive
 #   TURBO_SAMPLES         optional, timed samples per program, defaults to 50
-#   TURBO_MAX_PROGRAMS    optional, programs measured, defaults to 10000
+#   TURBO_MAX_PROGRAMS    optional, programs measured, defaults to 500
 
 set -euo pipefail
 
@@ -35,7 +35,7 @@ set -euo pipefail
 DIST_DIR="${DIST_DIR:-dist}"
 CONFORMANCE_DIR="${CONFORMANCE_DIR:-.conformance}"
 TURBO_SAMPLES="${TURBO_SAMPLES:-50}"
-TURBO_MAX_PROGRAMS="${TURBO_MAX_PROGRAMS:-10000}"
+TURBO_MAX_PROGRAMS="${TURBO_MAX_PROGRAMS:-500}"
 
 # The report step has a 30-minute limit. Generator budgets total 23 minutes;
 # corpus preparation is capped at three minutes, leaving time for compression.
@@ -80,6 +80,50 @@ log_excerpt() {
   fi
 }
 
+# valid_report REPORT SCENARIO
+# Rejects incomplete generator output before it can replace a report error.
+valid_report() {
+  local report="$1" scenario="$2"
+  jq -e -s --arg scenario "$scenario" '
+    def common:
+      .schema_version == "1" and
+      .scenario == $scenario and
+      (.generated_at | type == "string" and length > 0);
+    length == 1 and
+    (.[0] as $report |
+      ($report | common) and
+      if ($report.error | type) == "string" then
+        ($report.error | length > 0) and
+        ($report.implementation.name | type == "string" and length > 0) and
+        (["benchmarks", "scenarios", "failures", "totals"] |
+          all(. as $key | $report | has($key) | not))
+      else
+        ($report | if $scenario == "cbor-decoding" then
+          (.corpus | type == "string" and length > 0) and
+          (.corpus_revision | type == "string" and length > 0) and
+          (.protocol_version | type == "string" and length > 0) and
+          (.successful | type == "boolean") and
+          (.totals | type == "object") and
+          (.rules | type == "object") and
+          (.failures | type == "array")
+        elif $scenario == "ledger-rules" then
+          (.corpus | type == "string" and length > 0) and
+          (.totals | type == "object") and
+          (.scenarios | type == "array")
+        elif $scenario == "uplc-conformance" then
+          (.protocol_version | type == "string" and length > 0) and
+          (.cost_models | type == "array") and
+          (.totals | type == "object") and
+          (.scenarios | type == "array")
+        elif $scenario == "uplc-turbo" then
+          (.implementation.name | type == "string" and length > 0) and
+          (.machine | type == "object") and
+          (.benchmarks | type == "array")
+        else false end)
+      end)
+  ' "$report" >/dev/null 2>&1
+}
+
 # run_generator REPORT SCENARIO TIMEOUT_SECONDS COMMAND...
 # Runs a generator that writes REPORT. A non-zero exit with the report written
 # is a report of failures and is kept. Without a report, an error report is
@@ -103,7 +147,7 @@ run_generator() {
   elif [ ! -s "$report" ]; then
     write_error_report "$report" "$scenario" \
       "generator exited ${status} without writing a report: $(log_excerpt "$log")"
-  elif ! jq -e -s 'length == 1 and (.[0] | type == "object")' "$report" >/dev/null 2>&1; then
+  elif ! valid_report "$report" "$scenario"; then
     write_error_report "$report" "$scenario" \
       "generator exited ${status} with an invalid report: $(log_excerpt "$log")"
   elif [ "$status" -ne 0 ]; then

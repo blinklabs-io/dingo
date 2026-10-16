@@ -61,10 +61,9 @@ func generateReport(corpusPath, outputPath string, samples, maxPrograms int) err
 	}
 	fmt.Fprintf(
 		os.Stderr,
-		"wrote %s: %d programs across %d groups\n",
+		"wrote %s: %d program benchmarks\n",
 		outputPath,
 		len(report.Benchmarks),
-		len(report.Summary),
 	)
 	return nil
 }

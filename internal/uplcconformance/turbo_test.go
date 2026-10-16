@@ -16,7 +16,6 @@ package uplcconformance
 
 import (
 	"bytes"
-	"crypto/sha256"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -70,8 +69,8 @@ func TestGenerateTurboReportMeasuresFlatPrograms(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generate turbo report: %v", err)
 	}
-	if report.Scenario != "uplc-turbo" || report.Setup.SampleCount != 2 {
-		t.Fatalf("report metadata = %+v / %+v", report.Scenario, report.Setup)
+	if report.Scenario != "uplc-turbo" {
+		t.Fatalf("report scenario = %q, want uplc-turbo", report.Scenario)
 	}
 	if len(report.Benchmarks) != 1 ||
 		report.Benchmarks[0].SizeBytes != len(encoded) {
@@ -83,10 +82,6 @@ func TestGenerateTurboReportMeasuresFlatPrograms(t *testing.T) {
 	if report.Benchmarks[0].BudgetCPU == nil ||
 		report.Benchmarks[0].BudgetMem == nil {
 		t.Fatalf("consumed budget is missing: %+v", report.Benchmarks[0])
-	}
-	if len(report.Summary) != 1 || report.Summary[0].Group != "V1" ||
-		report.Summary[0].Samples != 2 {
-		t.Fatalf("summary = %+v", report.Summary)
 	}
 	reportPath := filepath.Join(t.TempDir(), "report.json")
 	if err := WriteTurboReport(reportPath, report); err != nil {
@@ -336,107 +331,6 @@ func TestGenerateTurboReportKeepsFailedBenchmarks(t *testing.T) {
 			failureReason == "" || strings.Contains(failureReason, root) {
 			t.Fatalf("failed benchmark %d error = %q, err = %v", i, failureReason, err)
 		}
-	}
-}
-
-func TestTurboRepresentativeIndexGroupsNearDuplicatePrograms(t *testing.T) {
-	t.Parallel()
-	root := t.TempDir()
-	firstPath := filepath.Join(root, "first.flat")
-	secondPath := filepath.Join(root, "second.flat")
-	first := make([]byte, 512)
-	for i := range first {
-		first[i] = byte(i)
-	}
-	second := append([]byte(nil), first...)
-	second[256] ^= 1
-	if err := writeTurboTestProgram(firstPath, first); err != nil {
-		t.Fatalf("write first Flat program: %v", err)
-	}
-	if err := writeTurboTestProgram(secondPath, second); err != nil {
-		t.Fatalf("write second Flat program: %v", err)
-	}
-
-	index := turboRepresentativeIndex{
-		bands:        make(map[turboBandKey][]int),
-		groupIndexes: make(map[string][]int),
-		unindexed:    make(map[string][]int),
-	}
-	firstHashes, firstIndexed := turboMinHashes(first)
-	firstCandidate := turboRepresentativeCandidate{
-		benchmark: TurboBenchmark{Bench: "first", Group: "V1"},
-		path:      firstPath,
-		size:      len(first),
-		hash:      sha256.Sum256(first),
-		minHashes: firstHashes,
-		indexed:   firstIndexed,
-		medianCPU: 100,
-		medianMem: 200,
-	}
-	if err := index.add(firstCandidate, first); err != nil {
-		t.Fatalf("add first representative: %v", err)
-	}
-
-	secondHashes, secondIndexed := turboMinHashes(second)
-	secondCandidate := turboRepresentativeCandidate{
-		benchmark: TurboBenchmark{Bench: "second", Group: "V1"},
-		path:      secondPath,
-		size:      len(second),
-		hash:      sha256.Sum256(second),
-		minHashes: secondHashes,
-		indexed:   secondIndexed,
-		medianCPU: 105,
-		medianMem: 190,
-	}
-	if err := index.add(secondCandidate, second); err != nil {
-		t.Fatalf("add second representative: %v", err)
-	}
-	if got := len(index.representatives); got != 1 {
-		t.Fatalf("representatives = %d, want 1 for 99%% byte similarity", got)
-	}
-}
-
-func TestTurboRepresentativeIndexKeepsDissimilarProgramsSeparate(t *testing.T) {
-	t.Parallel()
-	root := t.TempDir()
-	first := make([]byte, 512)
-	second := make([]byte, len(first))
-	for i := range first {
-		first[i] = byte(i)
-		second[i] = byte(255 - i)
-	}
-	firstPath := filepath.Join(root, "first.flat")
-	secondPath := filepath.Join(root, "second.flat")
-	for path, program := range map[string][]byte{firstPath: first, secondPath: second} {
-		if err := writeTurboTestProgram(path, program); err != nil {
-			t.Fatalf("write Flat program %s: %v", path, err)
-		}
-	}
-
-	index := turboRepresentativeIndex{
-		bands:        make(map[turboBandKey][]int),
-		groupIndexes: make(map[string][]int),
-		unindexed:    make(map[string][]int),
-	}
-	for name, program := range map[string][]byte{"first": first, "second": second} {
-		path := filepath.Join(root, name+".flat")
-		hashes, indexed := turboMinHashes(program)
-		candidate := turboRepresentativeCandidate{
-			benchmark: TurboBenchmark{Bench: name, Group: "V1"},
-			path:      path,
-			size:      len(program),
-			hash:      sha256.Sum256(program),
-			minHashes: hashes,
-			indexed:   indexed,
-			medianCPU: 100,
-			medianMem: 200,
-		}
-		if err := index.add(candidate, program); err != nil {
-			t.Fatalf("add %s representative: %v", name, err)
-		}
-	}
-	if got := len(index.representatives); got != 2 {
-		t.Fatalf("representatives = %d, want 2 for dissimilar programs", got)
 	}
 }
 

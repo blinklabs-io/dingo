@@ -67,7 +67,7 @@ uploaded in its place. Generator and turbo corpus preparation deadlines leave
 time to write all four reports and compress them within the 30-minute report
 step.
 The turbo report measures an evenly spaced sample of
-`TURBO_MAX_PROGRAMS` programs (10,000 by default) using 50 samples per program
+`TURBO_MAX_PROGRAMS` programs (500 by default) using 50 samples per program
 and the mean of the best 30. A program that cannot be decoded or evaluated
 remains in the report with null measurements and an `error` reason; it counts
 as a failed benchmark.
