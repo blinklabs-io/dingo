@@ -258,7 +258,7 @@ func GenerateReport(
 		SchemaVersion: schemaVersion,
 		Scenario:      "ledger-rules",
 		GeneratedAt:   generatedAt.UTC().Format(time.RFC3339),
-		Corpus:        "pragma-org/node-diversity-conformance/ledger-rules-v1",
+		Corpus:        "pragma-org/node-diversity-conformance/ledger-rules-v2",
 		Scenarios:     make([]CaseOutcome, 0, len(files)),
 	}
 	failures := make([]Failure, 0)
@@ -556,7 +556,7 @@ var ledgerPredicateErrorPatterns = map[string][]string{
 	"MalformedReferenceScripts": {
 		"malformed reference scripts",
 	},
-	"OutsideForecast": {"outside forecast"},
+	"OutsideForecast": {"outside forecast", "OutsideForecast"},
 	"MalformedScriptWitnesses": {
 		"malformed script witnesses",
 	},

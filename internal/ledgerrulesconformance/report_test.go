@@ -24,11 +24,19 @@ import (
 
 func TestOutsideForecastMatchesExpectedMessage(t *testing.T) {
 	t.Parallel()
-	if !predicateMatches(
-		errors.New("outside forecast"),
-		expectedDoc{Predicate: "OutsideForecast"},
-	) {
-		t.Fatal("OutsideForecast did not match its ledger error text")
+	for _, message := range []string{
+		"outside forecast",
+		"OutsideForecast (Slot 500000)",
+	} {
+		t.Run(message, func(t *testing.T) {
+			t.Parallel()
+			if !predicateMatches(
+				errors.New(message),
+				expectedDoc{Predicate: "OutsideForecast"},
+			) {
+				t.Fatalf("OutsideForecast did not match %q", message)
+			}
+		})
 	}
 }
 
