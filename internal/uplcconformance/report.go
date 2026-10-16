@@ -571,7 +571,7 @@ func runCase(
 		evalActual,
 		stage,
 	)
-	if exhaustsBudget {
+	if exhaustsBudget || expectedText == "out of budget" {
 		evalPassed = compareBudgetExhaustion(stage, runErr)
 	}
 	caseResult := CaseResult{

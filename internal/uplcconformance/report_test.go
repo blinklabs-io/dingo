@@ -666,3 +666,14 @@ func TestGenerateReportRejectsDuplicateIDs(t *testing.T) {
 		t.Fatal("expected duplicate scenario ids to fail")
 	}
 }
+
+func TestGenerateReportOutOfBudgetRequiresBudgetExhaustion(t *testing.T) {
+	t.Parallel()
+	root := newCorpus(t)
+	writeVector(t, root, mainCorpusDir, "term/free", "free-variable", "(program 1.0.0 x)", "out of budget", "out of budget")
+
+	report := generate(t, root)
+	if scenarioByID(t, report, "term_free_free_variable").Passed {
+		t.Fatal("an unrelated evaluation failure satisfied an out-of-budget expectation")
+	}
+}
