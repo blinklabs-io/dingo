@@ -202,7 +202,10 @@ func TestNodeAdapterAccountUTXOsEmpty(t *testing.T) {
 func TestNodeAdapterAddressUTXOsLargeResultSetPagination(t *testing.T) {
 	t.Parallel()
 
-	adapter, raw, db := newDBBackedAdapter(t)
+	adapter, raw, db := newDBBackedAdapterWithStorageMode(
+		t,
+		types.StorageModeAPI,
+	)
 
 	payment := bytes.Repeat([]byte{0x99}, lcommon.AddressHashSize)
 	addr, err := lcommon.NewAddressFromParts(
@@ -213,7 +216,7 @@ func TestNodeAdapterAddressUTXOsLargeResultSetPagination(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	const total = database.DefaultPublicUtxoResultLimit + 1
+	const total = database.ExactAddressCandidateScanLimit + 1
 	for i := range total {
 		txHash := make([]byte, 32)
 		binary.BigEndian.PutUint32(txHash[28:], uint32(i)+1)
@@ -227,6 +230,7 @@ func TestNodeAdapterAddressUTXOsLargeResultSetPagination(t *testing.T) {
 				TxId:       txHash,
 				OutputIdx:  0,
 				PaymentKey: payment,
+				Address:    []byte(addr.String()),
 				AddedSlot:  slot,
 				Amount:     types.Uint64(amount),
 			}},
@@ -235,42 +239,58 @@ func TestNodeAdapterAddressUTXOsLargeResultSetPagination(t *testing.T) {
 	}
 
 	t.Run("ascending page stops at the requested window", func(t *testing.T) {
-		items, total, err := adapter.AddressUTXOs(
+		items, gotTotal, err := adapter.AddressUTXOs(
 			context.Background(),
 			addr.String(),
 			PaginationParams{Count: 10, Page: 3, Order: PaginationOrderAsc},
 		)
 		require.NoError(t, err)
-		assert.Equal(t, -1, total)
+		assert.Equal(t, total, gotTotal)
 		require.Len(t, items, 10)
 		assert.Equal(t, "21000000", items[0].Amount[0].Quantity)
 		assert.Equal(t, "30000000", items[len(items)-1].Amount[0].Quantity)
 	})
 
 	t.Run("descending page matches a full-history reverse", func(t *testing.T) {
-		items, total, err := adapter.AddressUTXOs(
+		items, gotTotal, err := adapter.AddressUTXOs(
 			context.Background(),
 			addr.String(),
 			PaginationParams{Count: 10, Page: 5, Order: PaginationOrderDesc},
 		)
 		require.NoError(t, err)
-		assert.Equal(t, -1, total)
+		assert.Equal(t, total, gotTotal)
 		require.Len(t, items, 10)
 		// Descending page 5 (count 10) is the 41st-newest through the
 		// 50th-newest UTxO.
-		assert.Equal(t, "961000000", items[0].Amount[0].Quantity)
-		assert.Equal(t, "952000000", items[len(items)-1].Amount[0].Quantity)
+		assert.Equal(t, "9961000000", items[0].Amount[0].Quantity)
+		assert.Equal(t, "9952000000", items[len(items)-1].Amount[0].Quantity)
 	})
 
 	t.Run("descending page past the end is empty", func(t *testing.T) {
-		items, total, err := adapter.AddressUTXOs(
+		items, gotTotal, err := adapter.AddressUTXOs(
 			context.Background(),
 			addr.String(),
-			PaginationParams{Count: 10, Page: 102, Order: PaginationOrderDesc},
+			PaginationParams{Count: 10, Page: 1002, Order: PaginationOrderDesc},
 		)
 		require.NoError(t, err)
-		assert.Equal(t, 1001, total)
+		assert.Equal(t, total, gotTotal)
 		assert.Empty(t, items)
+	})
+
+	t.Run("ascending page beyond candidate scan limit", func(t *testing.T) {
+		items, gotTotal, err := adapter.AddressUTXOs(
+			context.Background(),
+			addr.String(),
+			PaginationParams{
+				Count: 1,
+				Page:  database.ExactAddressCandidateScanLimit + 1,
+				Order: PaginationOrderAsc,
+			},
+		)
+		require.NoError(t, err)
+		assert.Equal(t, total, gotTotal)
+		require.Len(t, items, 1)
+		assert.Equal(t, "10001000000", items[0].Amount[0].Quantity)
 	})
 }
 
@@ -750,9 +770,22 @@ func newDBBackedAdapter(
 	t *testing.T,
 	nodeConfig ...*cardano.CardanoNodeConfig,
 ) (*NodeAdapter, *sql.DB, *database.Database) {
+	return newDBBackedAdapterWithStorageMode(
+		t,
+		types.StorageModeCore,
+		nodeConfig...,
+	)
+}
+
+func newDBBackedAdapterWithStorageMode(
+	t *testing.T,
+	storageMode string,
+	nodeConfig ...*cardano.CardanoNodeConfig,
+) (*NodeAdapter, *sql.DB, *database.Database) {
 	t.Helper()
 	db, err := dbtest.NewDatabase(t, &database.Config{
-		DataDir: t.TempDir(),
+		DataDir:     t.TempDir(),
+		StorageMode: storageMode,
 	})
 	require.NoError(t, err)
 

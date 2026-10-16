@@ -2143,25 +2143,36 @@ func utxoOrderingClauses(
 		predicate = "+utxo.deleted_slot = 0"
 	}
 	args := []any{}
-	switch {
-	case query.MatchAllAddresses:
-	case len(query.AddressPatterns) == 0:
-		predicate += " AND 1 = 0"
-	default:
-		branches := []string{}
-		for _, pattern := range query.AddressPatterns {
-			if err := models.AppendUtxoAddressPatternOrBranch(
-				&branches,
-				&args,
-				pattern,
-			); err != nil {
-				return "", "", nil, err
-			}
+	if len(query.IndexedExactAddress) > 0 {
+		if query.MatchAllAddresses || len(query.AddressPatterns) != 0 {
+			return "", "", nil, errors.New(
+				"indexed exact address cannot be combined with address patterns",
+			)
 		}
-		if len(branches) == 0 {
+		from += " JOIN utxo_address ON utxo_address.utxo_id = utxo.id"
+		predicate += " AND utxo_address.address = ?"
+		args = append(args, query.IndexedExactAddress)
+	} else {
+		switch {
+		case query.MatchAllAddresses:
+		case len(query.AddressPatterns) == 0:
 			predicate += " AND 1 = 0"
-		} else {
-			predicate += " AND (" + strings.Join(branches, " OR ") + ")"
+		default:
+			branches := []string{}
+			for _, pattern := range query.AddressPatterns {
+				if err := models.AppendUtxoAddressPatternOrBranch(
+					&branches,
+					&args,
+					pattern,
+				); err != nil {
+					return "", "", nil, err
+				}
+			}
+			if len(branches) == 0 {
+				predicate += " AND 1 = 0"
+			} else {
+				predicate += " AND (" + strings.Join(branches, " OR ") + ")"
+			}
 		}
 	}
 	if query.FilterByAsset {

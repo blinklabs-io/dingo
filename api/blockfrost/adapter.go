@@ -3405,32 +3405,45 @@ func (a *NodeAdapter) AddressUTXOs(
 	}
 	requestedEnd := offset + params.Count
 	matchLimit := requestedEnd + 1
-	refs, exhausted, err := db.MatchingUtxoRefsByAddressWithOrderingBounded(
+	pageRefs, total, indexed, err := db.UtxoRefsByIndexedAddressPage(
 		ctx,
-		&models.UtxoWithOrderingQuery{
-			AddressPatterns: []models.UtxoAddressPattern{pattern},
-			Limit:           matchLimit,
-			Descending:      params.Order == PaginationOrderDesc,
-		},
-		txn,
-		database.ExactAddressCandidateScanLimit,
-		database.DefaultPublicUtxoCborBudget,
-	)
-	if err != nil {
-		return nil, 0, fmt.Errorf(
-			"get address UTxOs for %q: %w",
-			address,
-			err,
-		)
-	}
-	pageRefs, total, err := addressUtxoPageRefs(
-		refs,
-		exhausted,
+		addr,
+		params.Order == PaginationOrderDesc,
 		offset,
-		requestedEnd,
+		params.Count,
+		txn,
 	)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, fmt.Errorf("get address UTxOs for %q: %w", address, err)
+	}
+	if !indexed {
+		refs, exhausted, scanErr := db.MatchingUtxoRefsByAddressWithOrderingBounded(
+			ctx,
+			&models.UtxoWithOrderingQuery{
+				AddressPatterns: []models.UtxoAddressPattern{pattern},
+				Limit:           matchLimit,
+				Descending:      params.Order == PaginationOrderDesc,
+			},
+			txn,
+			database.ExactAddressCandidateScanLimit,
+			database.DefaultPublicUtxoCborBudget,
+		)
+		if scanErr != nil {
+			return nil, 0, fmt.Errorf(
+				"get address UTxOs for %q: %w",
+				address,
+				scanErr,
+			)
+		}
+		pageRefs, total, err = addressUtxoPageRefs(
+			refs,
+			exhausted,
+			offset,
+			requestedEnd,
+		)
+		if err != nil {
+			return nil, 0, err
+		}
 	}
 
 	paged, err := a.orderedUtxosByRefs(ctx, pageRefs, txn)

@@ -189,7 +189,11 @@ live-state consistency semantics.
 
 Blockfrost asset-holder pages aggregate live quantities in metadata storage,
 and historical Mesh balances aggregate address balances without materializing
-the matching UTxOs. Historical balance queries scan at most
+the matching UTxOs. Blockfrost address-list pages use the exact address index
+for SQL ordering, offset, and total count after API-mode startup backfill,
+avoiding CBOR scans of earlier outputs on deep pages. If that index is not
+available, address listing retains the bounded CBOR candidate scan. Historical
+balance queries scan at most
 `ExactAddressCandidateScanLimit + 1` matching rows and return
 `ErrTooManyUtxoResults` when the address exceeds that bound. `utxo_address`
 keeps each UTxO's canonical rendered address as bytes so exact pointer and

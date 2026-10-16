@@ -900,10 +900,10 @@ type UtxoStore interface {
 	) ([]models.UtxoWithHistory, error)
 
 	// CountUtxosByAddressWithOrdering returns the number of live UTxOs
-	// matching q's coarse SQL predicate, without materializing rows. It
-	// errors if q's address patterns require CBOR-based exact-address
-	// filtering (see models.RequiresExactAddressFilter), since the coarse
-	// predicate alone would over-count. See models.UtxoWithOrderingQuery.
+	// matching q's SQL predicate, without materializing rows. It errors if
+	// q's address patterns require CBOR-based exact-address filtering (see
+	// models.RequiresExactAddressFilter), since that coarse predicate alone
+	// would over-count. IndexedExactAddress is counted exactly in SQL.
 	CountUtxosByAddressWithOrdering(
 		*models.UtxoWithOrderingQuery,
 		types.Txn,

@@ -497,6 +497,54 @@ INSERT INTO address_transaction (
 	return row
 }
 
+func TestUtxoRefsByIndexedAddressPageUsesExactIdentityAndOrdering(t *testing.T) {
+	t.Parallel()
+
+	db := openTestDBWithStorageMode(t, types.StorageModeAPI)
+	raw := rawSQLiteMetadataFixture(t, db)
+	payment := bytes.Repeat([]byte{0x4a}, lcommon.AddressHashSize)
+	enterprise, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyNone,
+		lcommon.AddressNetworkTestnet,
+		payment,
+		nil,
+	)
+	require.NoError(t, err)
+	pointer := exactAddressTestPointer(t, payment, 0x01)
+	first := seedExactAddressUtxo(t, db, raw, enterprise, 10, 0x4b)
+	seedExactAddressUtxo(t, db, raw, pointer, 11, 0x4c)
+	last := seedExactAddressUtxo(t, db, raw, enterprise, 12, 0x4d)
+	require.NoError(t, db.SetSyncState(utxoAddressBackfillSyncKey, "", nil))
+	require.NoError(t, db.backfillUtxoAddresses(context.Background()))
+
+	refs, total, indexed, err := db.UtxoRefsByIndexedAddressPage(
+		t.Context(), enterprise, false, 1, 1, nil,
+	)
+	require.NoError(t, err)
+	require.True(t, indexed)
+	assert.Equal(t, 2, total)
+	require.Len(t, refs, 1)
+	assert.Equal(t, last.TxId, refs[0].Hash)
+
+	refs, total, indexed, err = db.UtxoRefsByIndexedAddressPage(
+		t.Context(), enterprise, true, 0, 1, nil,
+	)
+	require.NoError(t, err)
+	require.True(t, indexed)
+	assert.Equal(t, 2, total)
+	require.Len(t, refs, 1)
+	assert.Equal(t, last.TxId, refs[0].Hash)
+
+	refs, total, indexed, err = db.UtxoRefsByIndexedAddressPage(
+		t.Context(), enterprise, false, 10, 1, nil,
+	)
+	require.NoError(t, err)
+	require.True(t, indexed)
+	assert.Equal(t, 2, total)
+	assert.Empty(t, refs)
+	assert.NotEqual(t, first.TxId, last.TxId)
+}
+
 func TestHistoricalAddressBalanceUsesExactIdentityAndSlot(t *testing.T) {
 	t.Parallel()
 

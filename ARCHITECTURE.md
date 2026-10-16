@@ -10381,12 +10381,13 @@ coarse candidates before forming a limited page, preserving continuation-token
 correctness. Blockfrost address-transaction reads apply the same CBOR-backed
 exact check over credential-index candidates and paginate the exact matches.
 Public exact-address UTxO reads carry request cancellation into their
-coordinated transaction and cap both candidate count and decoded CBOR bytes.
-Ascending and descending Blockfrost pages stop after the requested window;
-totals are emitted only when that bounded scan proves exhaustion. Asset-holder
-pages group live asset quantities by canonical address in metadata storage and
-hydrate no output CBOR. Historical Mesh balance aggregates from the same exact
-address index and slot membership in metadata storage. API-mode startup
+coordinated transaction. API-mode Blockfrost address pages use the completed
+canonical-address index for exact SQL ordering, offset, and total count; when
+that index is unavailable, the CBOR candidate fallback remains bounded by
+candidate count and decoded bytes. Asset-holder pages group live asset
+quantities by canonical address in metadata storage and hydrate no output
+CBOR. Historical Mesh balance aggregates from the same exact address index and
+slot membership in metadata storage. API-mode startup
 backfills missing address rows for all retained UTxOs in cancellable batches;
 core-mode nodes skip both the backfill and address writes.
 

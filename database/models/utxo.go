@@ -415,6 +415,8 @@ type UtxoAddressPage struct {
 //     a predicate was given but no Cardano address parts could be decoded).
 //   - MatchAllAddresses false and len(AddressPatterns) > 0: match UTxOs that
 //     satisfy any pattern. Fields within a pattern are ANDed; patterns are ORed.
+// IndexedExactAddress is an alternative exact match using a completed API-mode
+// address index; it cannot be combined with MatchAllAddresses or patterns.
 //
 // After + Limit: keyset pagination; Limit <= 0 means no SQL LIMIT. SearchUtxos sets Limit to
 // effective page size + 1. After follows the selected ascending or descending order and is
@@ -442,14 +444,18 @@ type UtxoAddressPage struct {
 type UtxoWithOrderingQuery struct {
 	MatchAllAddresses bool
 	AddressPatterns   []UtxoAddressPattern
-	After             *UtxoOrderingCursor
-	Limit             int
-	Offset            int
-	Descending        bool
-	SkipAssets        bool
-	FilterByAsset     bool
-	AssetPolicyID     []byte
-	AssetName         []byte
+	// IndexedExactAddress applies an exact rendered-address predicate through
+	// the API-mode utxo_address index. It is mutually exclusive with
+	// MatchAllAddresses and AddressPatterns.
+	IndexedExactAddress []byte
+	After               *UtxoOrderingCursor
+	Limit               int
+	Offset              int
+	Descending          bool
+	SkipAssets          bool
+	FilterByAsset       bool
+	AssetPolicyID       []byte
+	AssetName           []byte
 }
 
 func (u *Utxo) Decode() (ledger.TransactionOutput, error) {

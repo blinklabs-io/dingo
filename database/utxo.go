@@ -1286,11 +1286,76 @@ func (d *Database) MatchingUtxoRefsByAddressWithOrderingBounded(
 	return refs, false, nil
 }
 
+// UtxoRefsByIndexedAddressPage returns an exact-address page and total from
+// the API-mode address index. indexed is false when the index is unavailable
+// or its startup backfill has not completed, allowing callers to use their
+// bounded CBOR scan instead.
+func (d *Database) UtxoRefsByIndexedAddressPage(
+	ctx context.Context,
+	address lcommon.Address,
+	descending bool,
+	offset int,
+	limit int,
+	txn *Txn,
+) ([]models.UtxoId, int, bool, error) {
+	if ctx == nil {
+		return nil, 0, false, errors.New("indexed address page context is nil")
+	}
+	if offset < 0 || limit <= 0 {
+		return nil, 0, false, errors.New("indexed address page bounds must be positive")
+	}
+	if txn == nil {
+		txn = d.Transaction(ctx, false)
+		defer txn.Release()
+	}
+	if d.StorageMode() != types.StorageModeAPI {
+		return nil, 0, false, nil
+	}
+	complete, err := d.GetSyncState(utxoAddressBackfillSyncKey, txn)
+	if err != nil {
+		return nil, 0, false, err
+	}
+	if complete != "true" {
+		return nil, 0, false, nil
+	}
+	query := &models.UtxoWithOrderingQuery{
+		IndexedExactAddress: []byte(address.String()),
+		Limit:               limit,
+		Offset:              offset,
+		Descending:          descending,
+		SkipAssets:          true,
+	}
+	rows, err := d.utxoStore().GetUtxosByAddressWithOrdering(
+		query,
+		txn.Metadata(),
+	)
+	if err != nil {
+		return nil, 0, false, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, 0, false, err
+	}
+	countQuery := *query
+	countQuery.Limit = 0
+	countQuery.Offset = 0
+	total, err := d.utxoStore().CountUtxosByAddressWithOrdering(
+		&countQuery,
+		txn.Metadata(),
+	)
+	if err != nil {
+		return nil, 0, false, err
+	}
+	refs := make([]models.UtxoId, len(rows))
+	for i := range rows {
+		refs[i] = models.UtxoId{Hash: rows[i].TxId, Idx: rows[i].OutputIdx}
+	}
+	return refs, total, true, nil
+}
+
 // CountUtxosByAddressWithOrdering returns the number of live UTxOs matching
-// q's coarse SQL predicate. See MetadataStore.CountUtxosByAddressWithOrdering:
-// it errors if q's address patterns require CBOR-based exact-address
-// filtering, since Dingo has no cheap way to compute an exact-address total
-// without decoding every coarse candidate's output CBOR.
+// q's SQL predicate. Exact-address patterns that require CBOR filtering are
+// rejected; callers can use IndexedExactAddress when the API address index is
+// complete.
 func (d *Database) CountUtxosByAddressWithOrdering(
 	ctx context.Context,
 	q *models.UtxoWithOrderingQuery,
