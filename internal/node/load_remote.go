@@ -634,8 +634,10 @@ func copyBlocksRemote(
 	pending := make([]chan error, 0, remoteImmutablePrefetch)
 	defer func() {
 		cancelFetch()
+		// Waiting only keeps a cancelled fetch from outliving the
+		// import; its error is moot once the import has returned.
 		for _, done := range pending {
-			<-done
+			<-done //nolint:errcheck // drained after cancellation
 		}
 	}()
 	next := first
