@@ -32,10 +32,12 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database/immutable"
+	"github.com/blinklabs-io/dingo/internal/netguard"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/protocol/blockfetch"
 )
@@ -53,6 +55,10 @@ const (
 	// remoteImmutableFileTimeout bounds one request, so a stalled connection
 	// becomes a retry instead of a hang.
 	remoteImmutableFileTimeout = 10 * time.Minute
+	// Leave one maximum block-fetch message of headroom while staging. The
+	// aggregate import and cache bounds are derived from the requested chunk
+	// range and the format limits below.
+	remoteImmutableStagingOverhead = blockfetch.StreamingMaxPendingMessageBytes
 )
 
 // errRemoteChunkNotPublished reports that the remote root serves no .chunk
@@ -63,6 +69,18 @@ var errRemoteImmutableFileTooLarge = errors.New(
 	"remote ImmutableDB file exceeds its format limit",
 )
 
+var (
+	errRemoteImmutableImportBudget = errors.New(
+		"remote ImmutableDB import byte budget exhausted",
+	)
+	errRemoteImmutableCacheBudget = errors.New(
+		"remote ImmutableDB temporary disk budget exhausted",
+	)
+	errRemoteImmutableFreeSpace = errors.New(
+		"remote ImmutableDB requires more free disk space",
+	)
+)
+
 const (
 	remotePrimaryIndexVersionBytes = 1
 	remotePrimaryIndexOffsetBytes  = 4
@@ -70,8 +88,215 @@ const (
 )
 
 type remoteImmutableLimits struct {
-	primary int64
-	chunk   int64
+	primary    int64
+	secondary  int64
+	chunk      int64
+	imported   int64
+	cache      int64
+	minFree    int64
+	concurrent int
+	chunkSlots uint64
+}
+
+func (l remoteImmutableLimits) withImportRange(
+	first uint64,
+	tipSlot uint64,
+) (remoteImmutableLimits, error) {
+	if l.chunkSlots == 0 || l.concurrent <= 0 {
+		return remoteImmutableLimits{}, errors.New(
+			"invalid remote ImmutableDB import range limits",
+		)
+	}
+	last := tipSlot / l.chunkSlots
+	last = max(last, first)
+	return l.withChunkCount(last - first + 1)
+}
+
+func (l remoteImmutableLimits) withChunkCount(
+	requested uint64,
+) (remoteImmutableLimits, error) {
+	if l.concurrent <= 0 || l.concurrent > remoteImmutablePrefetch ||
+		l.primary <= 0 || l.secondary <= 0 || l.chunk <= 0 {
+		return remoteImmutableLimits{}, errors.New(
+			"invalid remote ImmutableDB chunk limits",
+		)
+	}
+	concurrent := uint64(l.concurrent) //nolint:gosec // positive and bounded above
+	if requested > math.MaxUint64-concurrent {
+		return remoteImmutableLimits{}, errors.New(
+			"remote ImmutableDB import range overflows uint64",
+		)
+	}
+	fetched := requested + concurrent
+	if l.primary > math.MaxInt64-l.secondary ||
+		l.primary+l.secondary > math.MaxInt64-l.chunk {
+		return remoteImmutableLimits{}, errors.New(
+			"remote ImmutableDB triad limit overflows int64",
+		)
+	}
+	triad := l.primary + l.secondary + l.chunk
+	if fetched > uint64(math.MaxInt64)/uint64(remoteImmutableAttempts) ||
+		fetched*uint64(remoteImmutableAttempts) >
+			uint64(math.MaxInt64/triad) { //nolint:gosec // triad is positive above
+		return remoteImmutableLimits{}, errors.New(
+			"remote ImmutableDB aggregate import limit overflows int64",
+		)
+	}
+	activeChunks := int64(l.concurrent + 1)
+	if triad > math.MaxInt64/activeChunks {
+		return remoteImmutableLimits{}, errors.New(
+			"remote ImmutableDB aggregate cache limit overflows int64",
+		)
+	}
+	l.imported = int64(fetched) * remoteImmutableAttempts * triad //nolint:gosec
+	l.cache = activeChunks * triad
+	l.minFree = remoteImmutableStagingOverhead
+	return l, nil
+}
+
+type remoteImmutableBudget struct {
+	mu       sync.Mutex
+	total    int64
+	active   int64
+	reserved int64
+	files    map[string]int64
+	limits   remoteImmutableLimits
+	freeDisk func(string) (uint64, error)
+}
+
+func newRemoteImmutableBudget(
+	cacheDir string,
+	limits remoteImmutableLimits,
+) (*remoteImmutableBudget, error) {
+	if limits.imported <= 0 || limits.cache <= 0 || limits.minFree < 0 ||
+		limits.concurrent <= 0 || limits.concurrent > remoteImmutablePrefetch {
+		return nil, errors.New("invalid remote ImmutableDB aggregate limits")
+	}
+	b := &remoteImmutableBudget{
+		files:    make(map[string]int64),
+		limits:   limits,
+		freeDisk: availableDiskBytes,
+	}
+	err := filepath.WalkDir(cacheDir, func(
+		path string,
+		entry os.DirEntry,
+		err error,
+	) error {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if info.Size() < 0 || b.active > limits.cache-info.Size() {
+			return errRemoteImmutableCacheBudget
+		}
+		b.files[path] = info.Size()
+		b.active += info.Size()
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("measuring remote ImmutableDB cache: %w", err)
+	}
+	return b, nil
+}
+
+func (b *remoteImmutableBudget) reserveWrite(path string, size int) error {
+	if size <= 0 {
+		return nil
+	}
+	n := int64(size)
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.total > b.limits.imported-n {
+		return fmt.Errorf(
+			"%w: maximum %d bytes", errRemoteImmutableImportBudget,
+			b.limits.imported,
+		)
+	}
+	if b.active > b.limits.cache-n {
+		return fmt.Errorf(
+			"%w: maximum %d bytes", errRemoteImmutableCacheBudget,
+			b.limits.cache,
+		)
+	}
+	free, err := b.freeDisk(filepath.Dir(path))
+	if err != nil {
+		return fmt.Errorf("checking remote ImmutableDB free disk space: %w", err)
+	}
+	required := uint64(n)               //nolint:gosec // n is positive above
+	minFree := uint64(b.limits.minFree) //nolint:gosec // minFree is validated
+	reserved := uint64(b.reserved)      //nolint:gosec // reservations are positive
+	if minFree > math.MaxUint64-required ||
+		reserved > math.MaxUint64-minFree-required ||
+		free < minFree+required+reserved {
+		return fmt.Errorf(
+			"%w: %d bytes available; this write, outstanding writes, and the free-space reserve do not fit",
+			errRemoteImmutableFreeSpace, free,
+		)
+	}
+	b.total += n
+	b.active += n
+	b.reserved += n
+	b.files[path] += n
+	return nil
+}
+
+func (b *remoteImmutableBudget) completeWrite(
+	path string,
+	reserved int64,
+	written int64,
+) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.reserved -= reserved
+	if written >= reserved {
+		return
+	}
+	size := min(reserved-written, b.files[path])
+	b.files[path] -= size
+	b.active -= size
+	if b.files[path] == 0 {
+		delete(b.files, path)
+	}
+}
+
+func (b *remoteImmutableBudget) release(path string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.active -= b.files[path]
+	delete(b.files, path)
+}
+
+func (b *remoteImmutableBudget) rename(oldPath, newPath string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	size := b.files[oldPath]
+	delete(b.files, oldPath)
+	b.active -= b.files[newPath]
+	b.files[newPath] = size
+}
+
+type remoteImmutableBudgetWriter struct {
+	file   *os.File
+	path   string
+	budget *remoteImmutableBudget
+}
+
+func (w remoteImmutableBudgetWriter) Write(data []byte) (int, error) {
+	if err := w.budget.reserveWrite(w.path, len(data)); err != nil {
+		return 0, err
+	}
+	n, err := w.file.Write(data)
+	w.budget.completeWrite(w.path, int64(len(data)), int64(n))
+	return n, err
 }
 
 func remoteImmutableLimitsForSlots(
@@ -111,13 +336,11 @@ func remoteImmutableLimitsForSlots(
 			int64(slots+1)*remotePrimaryIndexOffsetBytes, //nolint:gosec
 		// Every secondary entry names one block or EBB. The block-fetch wire
 		// budget is an upper bound on the encoded block stored in the chunk.
-		chunk: int64(slots) * blockfetch.StreamingMaxPendingMessageBytes, //nolint:gosec
+		secondary:  int64(slots) * remoteSecondaryIndexEntryBytes,             //nolint:gosec
+		chunk:      int64(slots) * blockfetch.StreamingMaxPendingMessageBytes, //nolint:gosec
+		concurrent: remoteImmutablePrefetch,
+		chunkSlots: regularSlots,
 	}, nil
-}
-
-var remoteImmutableClient = &http.Client{
-	Timeout:       remoteImmutableFileTimeout,
-	CheckRedirect: checkRemoteImmutableRedirect,
 }
 
 // remoteImmutableRetryDelay is a variable so tests do not wait it out.
@@ -193,24 +416,137 @@ func isLoopbackRemoteURL(u *url.URL) bool {
 	return strings.EqualFold(host, "localhost") || ip != nil && ip.IsLoopback()
 }
 
-func checkRemoteImmutableRedirect(
+type remoteImmutableNetworkPolicy struct {
+	allowLoopback bool
+	dial          netguard.DialContextFunc
+	lookup        netguard.LookupIPAddrFunc
+}
+
+func newRemoteImmutableHTTPClient(rootURL string) (*http.Client, error) {
+	u, err := url.Parse(rootURL)
+	if err != nil {
+		return nil, errors.New("invalid remote ImmutableDB source URL")
+	}
+	policy := remoteImmutableNetworkPolicy{
+		allowLoopback: strings.EqualFold(u.Scheme, "http") &&
+			isLoopbackRemoteURL(u),
+		dial: (&net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		lookup: net.DefaultResolver.LookupIPAddr,
+	}
+	if err := policy.validateURL(u); err != nil {
+		return nil, err
+	}
+	base, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		return nil, errors.New("remote ImmutableDB HTTP transport is unavailable")
+	}
+	transport := base.Clone()
+	transport.Proxy = nil
+	transport.DialContext = policy.dialContext
+	transport.Dial = nil    //nolint:staticcheck
+	transport.DialTLS = nil //nolint:staticcheck
+	transport.DialTLSContext = nil
+	transport.MaxConnsPerHost = remoteImmutablePrefetch
+	return &http.Client{
+		Timeout:       remoteImmutableFileTimeout,
+		Transport:     transport,
+		CheckRedirect: policy.checkRedirect,
+	}, nil
+}
+
+func (p remoteImmutableNetworkPolicy) validateURL(u *url.URL) error {
+	if u == nil || u.Hostname() == "" {
+		return errors.New("remote ImmutableDB destination requires a host")
+	}
+	if u.User != nil {
+		return errors.New("remote ImmutableDB destination must not contain credentials")
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "https":
+	case "http":
+		if !p.allowLoopback || !isLoopbackRemoteURL(u) {
+			return errors.New("remote ImmutableDB destination requires HTTPS")
+		}
+	default:
+		return errors.New("remote ImmutableDB destination requires HTTP or HTTPS")
+	}
+	host := u.Hostname()
+	if netguard.IsBlockedHost(host) {
+		if p.allowLoopback && isLoopbackRemoteURL(u) {
+			return nil
+		}
+		return fmt.Errorf(
+			"remote ImmutableDB host %q is not allowed: %w",
+			host, netguard.ErrBlockedDestination,
+		)
+	}
+	if ip := net.ParseIP(host); ip != nil && netguard.IsBlockedIP(ip) {
+		if p.allowLoopback && ip.IsLoopback() {
+			return nil
+		}
+		return fmt.Errorf(
+			"remote ImmutableDB IP %s is not allowed: %w",
+			ip, netguard.ErrBlockedDestination,
+		)
+	}
+	return nil
+}
+
+func (p remoteImmutableNetworkPolicy) checkRedirect(
 	req *http.Request,
 	via []*http.Request,
 ) error {
 	if len(via) >= 10 {
 		return errors.New("remote ImmutableDB stopped after 10 redirects")
 	}
-	if strings.EqualFold(req.URL.Scheme, "https") {
-		return nil
+	return p.validateURL(req.URL)
+}
+
+func (p remoteImmutableNetworkPolicy) dialContext(
+	ctx context.Context,
+	network string,
+	address string,
+) (net.Conn, error) {
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return nil, err
 	}
-	if strings.EqualFold(req.URL.Scheme, "http") && len(via) > 0 {
-		previous := via[len(via)-1]
-		if strings.EqualFold(previous.URL.Scheme, "http") &&
-			isLoopbackRemoteURL(previous.URL) && isLoopbackRemoteURL(req.URL) {
-			return nil
+	loopback := strings.EqualFold(host, "localhost")
+	if ip := net.ParseIP(host); ip != nil {
+		loopback = ip.IsLoopback()
+	}
+	if !p.allowLoopback || !loopback {
+		return netguard.DialContext(ctx, network, address, p.dial, p.lookup)
+	}
+	addrs, err := p.lookup(ctx, host)
+	if err != nil {
+		return nil, err
+	}
+	if len(addrs) == 0 {
+		return nil, fmt.Errorf("%w for host %q", netguard.ErrNoAddresses, host)
+	}
+	for _, addr := range addrs {
+		if addr.IP == nil || !addr.IP.IsLoopback() {
+			return nil, fmt.Errorf(
+				"resolved IP %s is not allowed: %w",
+				addr.IP, netguard.ErrBlockedDestination,
+			)
 		}
 	}
-	return errors.New("remote ImmutableDB redirect requires HTTPS")
+	var lastErr error
+	for _, addr := range addrs {
+		conn, dialErr := p.dial(
+			ctx, network, net.JoinHostPort(addr.IP.String(), port),
+		)
+		if dialErr == nil {
+			return conn, nil
+		}
+		lastErr = dialErr
+	}
+	return nil, lastErr
 }
 
 // remoteImmutableTip is the tip.json document a Genesis Sync Accelerator
@@ -248,7 +584,11 @@ func copyBlocksRemote(
 	if err != nil {
 		return 0, 0, fmt.Errorf("canonicalizing remote ImmutableDB source: %w", err)
 	}
-	tip, err := fetchRemoteImmutableTip(ctx, rootURL)
+	client, err := newRemoteImmutableHTTPClient(rootURL)
+	if err != nil {
+		return 0, 0, fmt.Errorf("validating remote ImmutableDB source: %w", err)
+	}
+	tip, err := fetchRemoteImmutableTipWithClient(ctx, rootURL, client)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -271,10 +611,23 @@ func copyBlocksRemote(
 	} else if ok {
 		first = lowest
 	}
+	if limits.imported == 0 {
+		limits, err = limits.withImportRange(first, tip.Slot)
+		if err != nil {
+			return 0, 0, err
+		}
+	}
+	defer func() {
+		_ = os.RemoveAll(stagingDir)
+	}()
 	for _, dir := range []string{stagingDir, readyDir} {
 		if err := os.MkdirAll(dir, 0o750); err != nil {
 			return 0, 0, fmt.Errorf("creating remote chunk cache: %w", err)
 		}
+	}
+	budget, err := newRemoteImmutableBudget(sourceCache, limits)
+	if err != nil {
+		return 0, 0, err
 	}
 
 	fetchCtx, cancelFetch := context.WithCancel(ctx)
@@ -282,21 +635,28 @@ func copyBlocksRemote(
 	defer func() {
 		cancelFetch()
 		for _, done := range pending {
-			<-done
+			if err := <-done; err != nil &&
+				!errors.Is(err, context.Canceled) &&
+				!errors.Is(err, errRemoteChunkNotPublished) {
+				logger.Warn(
+					"remote ImmutableDB prefetch failed during shutdown",
+					"error", err,
+				)
+			}
 		}
 	}()
 	next := first
 	fetchNext := func() {
 		done := make(chan error, 1)
 		go func(chunk uint64) {
-			done <- fetchRemoteChunk(
-				fetchCtx, rootURL, stagingDir, chunk, limits,
+			done <- fetchRemoteChunkWithClient(
+				fetchCtx, client, budget, rootURL, stagingDir, chunk, limits,
 			)
 		}(next)
 		pending = append(pending, done)
 		next++
 	}
-	for range remoteImmutablePrefetch {
+	for range limits.concurrent {
 		fetchNext()
 	}
 
@@ -323,7 +683,9 @@ func copyBlocksRemote(
 			return blocksCopied, tip.Slot, err
 		}
 		fetchNext()
-		if err := moveRemoteChunk(stagingDir, readyDir, chunk); err != nil {
+		if err := moveRemoteChunk(
+			stagingDir, readyDir, chunk, budget,
+		); err != nil {
 			return blocksCopied, tip.Slot, err
 		}
 		copied, _, err := copyBlocksDirect(
@@ -335,7 +697,7 @@ func copyBlocksRemote(
 				"chunk %s: %w", immutable.ChunkName(chunk), err,
 			)
 		}
-		if err := evictRemoteChunksBefore(readyDir, chunk); err != nil {
+		if err := evictRemoteChunksBefore(readyDir, chunk, budget); err != nil {
 			return blocksCopied, tip.Slot, err
 		}
 		chainTip := c.Tip().Point
@@ -363,9 +725,10 @@ func copyBlocksRemote(
 	return blocksCopied, tip.Slot, nil
 }
 
-func fetchRemoteImmutableTip(
+func fetchRemoteImmutableTipWithClient(
 	ctx context.Context,
 	rootURL string,
+	client *http.Client,
 ) (remoteImmutableTip, error) {
 	var tip remoteImmutableTip
 	req, err := http.NewRequestWithContext(
@@ -377,7 +740,7 @@ func fetchRemoteImmutableTip(
 			redactRemoteImmutableURL(rootURL+"/tip.json"),
 		)
 	}
-	resp, err := remoteImmutableClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return tip, remoteImmutableRequestError(
 			"fetching remote ImmutableDB tip", rootURL+"/tip.json", err,
@@ -399,8 +762,10 @@ func fetchRemoteImmutableTip(
 // fetchRemoteChunk downloads one chunk triad into dir. A file already present
 // under its final name is complete, because it is only renamed into place
 // after a full download.
-func fetchRemoteChunk(
+func fetchRemoteChunkWithClient(
 	ctx context.Context,
+	client *http.Client,
+	budget *remoteImmutableBudget,
 	rootURL string,
 	dir string,
 	chunk uint64,
@@ -408,12 +773,12 @@ func fetchRemoteChunk(
 ) error {
 	name := immutable.ChunkName(chunk)
 	primaryName := name + ".primary"
-	if err := fetchRemoteFile(
-		ctx, rootURL, dir, primaryName, limits.primary, 0,
+	if err := fetchRemoteFileWithClient(
+		ctx, client, budget, rootURL, dir, primaryName, limits.primary, 0,
 	); err != nil {
 		if errors.Is(err, errRemoteChunkNotPublished) {
-			published, probeErr := remoteImmutableFilePublished(
-				ctx, rootURL+"/"+name+".chunk",
+			published, probeErr := remoteImmutableFilePublishedWithClient(
+				ctx, client, rootURL+"/"+name+".chunk",
 			)
 			if probeErr != nil {
 				return probeErr
@@ -432,23 +797,28 @@ func fetchRemoteChunk(
 		return fmt.Errorf("remote chunk %s primary index: %w", name, err)
 	}
 	secondaryName := name + ".secondary"
-	if err := fetchRemoteFile(
-		ctx, rootURL, dir, secondaryName, secondarySize, secondarySize,
+	if err := fetchRemoteFileWithClient(
+		ctx, client, budget, rootURL, dir,
+		secondaryName, secondarySize, secondarySize,
 	); err != nil {
 		if errors.Is(err, errRemoteChunkNotPublished) {
 			return fmt.Errorf("remote chunk %s is missing .secondary", name)
 		}
 		return err
 	}
-	if err := fetchRemoteFile(
-		ctx, rootURL, dir, name+".chunk", limits.chunk, 0,
+	if err := fetchRemoteFileWithClient(
+		ctx, client, budget, rootURL, dir, name+".chunk", limits.chunk, 0,
 	); err != nil {
 		return err
 	}
 	return nil
 }
 
-func remoteImmutableFilePublished(ctx context.Context, fileURL string) (bool, error) {
+func remoteImmutableFilePublishedWithClient(
+	ctx context.Context,
+	client *http.Client,
+	fileURL string,
+) (bool, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fileURL, nil)
 	if err != nil {
 		return false, fmt.Errorf(
@@ -457,7 +827,7 @@ func remoteImmutableFilePublished(ctx context.Context, fileURL string) (bool, er
 		)
 	}
 	req.Header.Set("Range", "bytes=0-0")
-	resp, err := remoteImmutableClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return false, remoteImmutableRequestError("probing", fileURL, err)
 	}
@@ -501,8 +871,10 @@ func remoteSecondarySize(primaryPath string, primaryLimit int64) (int64, error) 
 	return int64(offset), nil
 }
 
-func fetchRemoteFile(
+func fetchRemoteFileWithClient(
 	ctx context.Context,
+	client *http.Client,
+	budget *remoteImmutableBudget,
 	rootURL string,
 	dir string,
 	filename string,
@@ -522,8 +894,9 @@ func fetchRemoteFile(
 			case <-time.After(remoteImmutableRetryDelay):
 			}
 		}
-		err = fetchRemoteFileOnce(
-			ctx, rootURL+"/"+filename, target+".part", maxBytes,
+		err = fetchRemoteFileOnceWithClient(
+			ctx, client, budget, rootURL+"/"+filename,
+			target+".part", maxBytes,
 		)
 		if err == nil {
 			info, statErr := os.Stat(target + ".part")
@@ -535,10 +908,17 @@ func fetchRemoteFile(
 			); sizeErr != nil {
 				return sizeErr
 			}
-			return os.Rename(target+".part", target)
+			if renameErr := os.Rename(target+".part", target); renameErr != nil {
+				return renameErr
+			}
+			budget.rename(target+".part", target)
+			return nil
 		}
 		if errors.Is(err, errRemoteChunkNotPublished) ||
-			errors.Is(err, errRemoteImmutableFileTooLarge) || ctx.Err() != nil {
+			errors.Is(err, errRemoteImmutableFileTooLarge) ||
+			errors.Is(err, errRemoteImmutableImportBudget) ||
+			errors.Is(err, errRemoteImmutableCacheBudget) ||
+			errors.Is(err, errRemoteImmutableFreeSpace) || ctx.Err() != nil {
 			return err
 		}
 	}
@@ -561,10 +941,10 @@ func validateRemoteFileSize(size, maxBytes, exactBytes int64) error {
 	return nil
 }
 
-// fetchRemoteFileOnce appends to a partial file left by an interrupted
-// attempt when the server honours the range, and restarts it otherwise.
-func fetchRemoteFileOnce(
+func fetchRemoteFileOnceWithClient(
 	ctx context.Context,
+	client *http.Client,
+	budget *remoteImmutableBudget,
 	fileURL string,
 	partPath string,
 	maxBytes int64,
@@ -586,7 +966,7 @@ func fetchRemoteFileOnce(
 	if offset > 0 {
 		req.Header.Set("Range", "bytes="+strconv.FormatInt(offset, 10)+"-")
 	}
-	resp, err := remoteImmutableClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return remoteImmutableRequestError("fetching", fileURL, err)
 	}
@@ -629,12 +1009,22 @@ func fetchRemoteFileOnce(
 	if err != nil {
 		return err
 	}
-	written, copyErr := io.Copy(file, io.LimitReader(resp.Body, remaining+1))
+	if flags&os.O_TRUNC != 0 && offset > 0 {
+		budget.release(partPath)
+	}
+	written, copyErr := io.CopyBuffer(
+		remoteImmutableBudgetWriter{
+			file: file, path: partPath, budget: budget,
+		},
+		io.LimitReader(resp.Body, remaining+1),
+		make([]byte, 1<<20),
+	)
 	closeErr := file.Close()
 	if copyErr != nil || closeErr != nil {
 		return errors.Join(copyErr, closeErr)
 	}
 	if written > remaining {
+		budget.release(partPath)
 		_ = os.Remove(partPath)
 		return fmt.Errorf(
 			"%w: response exceeded %d remaining bytes",
@@ -647,15 +1037,20 @@ func fetchRemoteFileOnce(
 // moveRemoteChunk moves a downloaded triad into the ready directory, .chunk
 // last: the reader lists chunks by their .chunk file, so a crash part way
 // through never exposes a chunk without its indexes.
-func moveRemoteChunk(stagingDir, readyDir string, chunk uint64) error {
+func moveRemoteChunk(
+	stagingDir string,
+	readyDir string,
+	chunk uint64,
+	budget *remoteImmutableBudget,
+) error {
 	name := immutable.ChunkName(chunk)
 	for _, ext := range []string{".primary", ".secondary", ".chunk"} {
-		if err := os.Rename(
-			filepath.Join(stagingDir, name+ext),
-			filepath.Join(readyDir, name+ext),
-		); err != nil {
+		oldPath := filepath.Join(stagingDir, name+ext)
+		newPath := filepath.Join(readyDir, name+ext)
+		if err := os.Rename(oldPath, newPath); err != nil {
 			return fmt.Errorf("moving remote chunk %s: %w", name, err)
 		}
+		budget.rename(oldPath, newPath)
 	}
 	return nil
 }
@@ -663,7 +1058,11 @@ func moveRemoteChunk(stagingDir, readyDir string, chunk uint64) error {
 // evictRemoteChunksBefore removes the copied chunks below chunk once chunk
 // itself holds a block. An empty chunk evicts nothing, so the ready set keeps
 // the chunk that holds the chain tip, which the next copy starts from.
-func evictRemoteChunksBefore(readyDir string, chunk uint64) error {
+func evictRemoteChunksBefore(
+	readyDir string,
+	chunk uint64,
+	budget *remoteImmutableBudget,
+) error {
 	imm, err := immutable.New(readyDir)
 	if err != nil {
 		return err
@@ -679,11 +1078,11 @@ func evictRemoteChunksBefore(readyDir string, chunk uint64) error {
 	for _, entry := range entries {
 		number, ok := chunkNumber(entry.Name())
 		if ok && number < chunk {
-			if err := os.Remove(
-				filepath.Join(readyDir, entry.Name()),
-			); err != nil {
+			path := filepath.Join(readyDir, entry.Name())
+			if err := os.Remove(path); err != nil {
 				return fmt.Errorf("evicting remote chunk: %w", err)
 			}
+			budget.release(path)
 		}
 	}
 	return nil

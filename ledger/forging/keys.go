@@ -1558,8 +1558,9 @@ func (pc *PoolCredentials) ArmKesProtocolLifetime(
 // interface so the package itself stays free of a ledger dependency, and
 // tests can drive the logic with a fake.
 type LedgerView interface {
-	// PoolRegistrationVRFKeyHash returns the VRF key hash recorded on
-	// the most recent active pool registration certificate for poolID.
+	// PoolRegistrationVRFKeyHash returns the elected VRF key hash for
+	// poolID at the applied ledger tip, or the epoch-effective key when
+	// no electing snapshot exists.
 	// found is false when the pool has no on-chain registration yet.
 	PoolRegistrationVRFKeyHash(
 		poolID [28]byte,

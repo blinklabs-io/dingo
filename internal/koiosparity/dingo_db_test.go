@@ -16,6 +16,7 @@ package koiosparity
 
 import (
 	"context"
+	"database/sql"
 	"encoding/hex"
 	"fmt"
 	"math/big"
@@ -194,6 +195,25 @@ func openTestDingoDB(t *testing.T) (*DingoDB, *testDB) {
 	return &DingoDB{db: gdb.db, dialect: "sqlite"}, gdb
 }
 
+func TestProposalRefundReadTxOptions(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		dialect   string
+		isolation sql.IsolationLevel
+	}{
+		{dialect: "sqlite", isolation: sql.LevelDefault},
+		{dialect: "postgres", isolation: sql.LevelRepeatableRead},
+		{dialect: "mysql", isolation: sql.LevelRepeatableRead},
+	} {
+		t.Run(tc.dialect, func(t *testing.T) {
+			t.Parallel()
+			options := proposalRefundReadTxOptions(tc.dialect)
+			require.Equal(t, tc.isolation, options.Isolation)
+			assert.True(t, options.ReadOnly)
+		})
+	}
+}
+
 func testPoolKeyHash(t *testing.T, b byte) []byte {
 	t.Helper()
 	h := make([]byte, 28)
@@ -288,7 +308,7 @@ func TestGetPoolEpochDataMapAlignsRewardScheduleEpochs(t *testing.T) {
 	}).Error)
 
 	koiosEpoch := uint64(10)
-	stakeEpoch, ok := koiosStakeEpoch(koiosEpoch)
+	stakeEpoch, ok := koiosStakeEpoch("preview", koiosEpoch)
 	require.True(t, ok)
 	require.Equal(t, uint64(9), stakeEpoch)
 	paramEpoch := koiosParamEpoch(koiosEpoch)
@@ -448,7 +468,7 @@ func TestGetEpochDataStakeEpochOffset(t *testing.T) {
 	}).Error)
 
 	koiosEpoch := uint64(10)
-	stakeEpoch, ok := koiosStakeEpoch(koiosEpoch)
+	stakeEpoch, ok := koiosStakeEpoch("preview", koiosEpoch)
 	require.True(t, ok)
 
 	data, err := dingo.GetEpochData(context.Background(), stakeEpoch)
@@ -525,7 +545,7 @@ func TestGetPoolEpochDataMapTracksChangingPoolParams(t *testing.T) {
 	defer dingo.Close() //nolint:errcheck
 
 	const koiosEpoch = uint64(13)
-	stakeEpoch, ok := koiosStakeEpoch(koiosEpoch)
+	stakeEpoch, ok := koiosStakeEpoch("preview", koiosEpoch)
 	require.True(t, ok)
 	paramEpoch := koiosParamEpoch(koiosEpoch)
 

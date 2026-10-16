@@ -1221,11 +1221,15 @@ func (s *wiringFakeLSQServer) config() localstatequery.Config {
 							)
 						}
 						if poolDistr == nil {
-							return localstatequery.PoolDistr2Result{
-								Pools: map[ledger.PoolId]localstatequery.PoolDistr2IndividualStake{},
+							return localstatequery.StakeDistribution2Result{
+								Distribution: localstatequery.PoolDistr2Result{
+									Pools: map[ledger.PoolId]localstatequery.PoolDistr2IndividualStake{},
+								},
 							}, nil
 						}
-						return *poolDistr, nil
+						return localstatequery.StakeDistribution2Result{
+							Distribution: *poolDistr,
+						}, nil
 					default:
 						return nil, fmt.Errorf("unexpected shelley query %T", inner.Query)
 					}

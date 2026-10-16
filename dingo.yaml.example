@@ -315,11 +315,12 @@
 # CLI: --bark-url
 # barkBaseUrl: ""
 
-# Allow Bark block downloads from private, loopback, and other special-use
-# addresses, for example an S3-compatible store such as MinIO on a private
-# network. Download origins must still be barkBaseUrl or a
-# barkBlockDownloadHosts entry, use HTTPS, and pass the same checks on every
-# redirect; ambient proxy settings stay ignored.
+# Allow Bark RPC and block downloads from private, loopback, and other
+# special-use addresses, for example a Bark service and S3-compatible store
+# such as MinIO on a private network. Download origins must still be
+# barkBaseUrl or a barkBlockDownloadHosts entry, use HTTPS, and pass the same
+# checks on every redirect. Bark RPC redirects stay on the configured origin,
+# and ambient proxy settings stay ignored for both request paths.
 # Can be overridden with DINGO_BARK_BLOCK_DOWNLOAD_ALLOW_PRIVATE_ADDRESSES
 # CLI: --bark-block-download-allow-private-addresses
 # barkBlockDownloadAllowPrivateAddresses: false
@@ -712,7 +713,8 @@
 # An https:// value, or http:// on loopback for local development, names a
 # remote ImmutableDB root serving NNNNN.chunk, NNNNN.primary, NNNNN.secondary
 # and tip.json; chunks download into <databasePath>/immutable-download and load
-# as they arrive in order. Non-loopback HTTP is rejected.
+# as they arrive in order. Non-loopback HTTP and private or special-use HTTPS
+# destinations are rejected, including after redirects and DNS resolution.
 #
 # Can be overridden with the DINGO_IMMUTABLE_DB_PATH environment variable
 # CLI: --immutable-db-path
@@ -895,6 +897,29 @@
   # limitOnPatienceEnabled: true
   # limitOnPatienceCapacity: 0
   # limitOnPatienceRate: 0
+
+# DMQ (CIP-0137 Decentralized Message Queue) runs alongside the Cardano stack
+# in the same process, on its own Unix socket and network magic. It serves
+# local message submission and notification only.
+# CLI: --dmq-enabled, --dmq-topic, --dmq-network-magic, --dmq-socket-path,
+#   --dmq-message-ttl, --dmq-max-mempool-size
+# Env: DINGO_DMQ_ENABLED, DINGO_DMQ_TOPIC, DINGO_DMQ_NETWORK_MAGIC,
+#   DINGO_DMQ_SOCKET_PATH, DINGO_DMQ_MESSAGE_TTL, DINGO_DMQ_MAX_MEMPOOL_SIZE
+# dmq:
+  # Start the DMQ stack. Default: false.
+  # enabled: false
+  # DMQ topic. Only "mithril" is supported. Default: "mithril".
+  # topic: "mithril"
+  # DMQ network magic. Left unset, it is derived from the topic and network
+  # (mithril: mainnet 2912307721, preprod 2147483649, preview 2147483650).
+  # networkMagic: 0
+  # Unix socket for local submission and notification. Must differ from
+  # socketPath. Default: "dingo-dmq.socket".
+  # socketPath: "dingo-dmq.socket"
+  # Longest expiry, in seconds, a submitted message may claim. Default: 1800.
+  # messageTtl: 1800
+  # Message pool size limit in megabytes. Default: 128.
+  # maxMempoolSize: 128
 
 # Midnight indexer configuration
 # Indexing requires BOTH enabled: true AND API storage mode; either alone is

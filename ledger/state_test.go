@@ -6379,6 +6379,7 @@ func TestCloseStopsDecodePipelineBeforeWaitingForBlockProcessing(t *testing.T) {
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 		blockPipeline: pipeline.NewBlockPipeline(
+			pipeline.WithTrustedDecodeOnly(),
 			pipeline.WithDecodeWorkers(1),
 		),
 	}

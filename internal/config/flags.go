@@ -432,6 +432,33 @@ var flagSpecs = []flagSpec{
 		"",
 		"Midnight gRPC listen address",
 	),
+	boolFlag(
+		"DMQ.Enabled",
+		"dmq-enabled",
+		"run the CIP-0137 DMQ stack alongside the Cardano stack",
+	),
+	stringFlag("DMQ.Topic", "dmq-topic", "", "DMQ topic (only mithril)"),
+	uint32Flag(
+		"DMQ.NetworkMagic",
+		"dmq-network-magic",
+		"DMQ network magic override",
+	),
+	stringFlag(
+		"DMQ.SocketPath",
+		"dmq-socket-path",
+		"",
+		"Unix socket for local DMQ message submission and notification",
+	),
+	uintFlag(
+		"DMQ.MessageTTL",
+		"dmq-message-ttl",
+		"longest message expiry accepted, in seconds",
+	),
+	uintFlag(
+		"DMQ.MaxMempoolSize",
+		"dmq-max-mempool-size",
+		"DMQ message pool size limit, in megabytes",
+	),
 
 	// Bark
 	stringFlag("BarkBaseUrl", "bark-url", "", "Bark archive fallback base URL"),
@@ -443,7 +470,7 @@ var flagSpecs = []flagSpec{
 	boolFlag(
 		"BarkBlockDownloadAllowPrivateAddresses",
 		"bark-block-download-allow-private-addresses",
-		"allow Bark block downloads from private, loopback, and special-use addresses",
+		"allow Bark RPC and block downloads from private, loopback, and special-use addresses",
 	),
 	uintFlag("BarkPort", "bark-port", "Bark RPC port"),
 	stringFlag(
@@ -1402,6 +1429,9 @@ func uint32Flag(field, name, help string) flagSpec {
 				)
 			}
 			configFieldValue(cfg, field).SetUint(uint64(v))
+			if field == "DMQ.NetworkMagic" {
+				cfg.DMQ.networkMagicSet = true
+			}
 			return nil
 		},
 	}

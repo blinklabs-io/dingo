@@ -457,6 +457,17 @@ type BlockValidator interface {
 	ValidateForgedBlock(ctx context.Context, block ledger.Block, blockCbor []byte) error
 }
 
+// ErrForgedBlockStateChanged is returned, wrapped, by a BlockValidator that
+// could not reach a verdict because the ledger state it validates against
+// kept changing until the forged slot ended, or moved to a tip that is
+// neither the one validation started from nor the block's parent. It says
+// nothing about the block's validity. The forger still drops the block, but
+// logs a skip rather than a self-validation failure and does not count it on
+// dingo_forge_validation_failed_total.
+var ErrForgedBlockStateChanged = errors.New(
+	"ledger state changed during forged block validation",
+)
+
 // LeiosProduceChecker is the forge-loop seam into the Leios pipeline.
 // It reports whether the slot leader may produce an endorser block for
 // the given slot (respects the single-EB-per-slot rule and produce window).
@@ -2016,6 +2027,22 @@ func (f *BlockForger) checkAndForgeProduction(ctx context.Context) error {
 		}
 		if validationErr != nil {
 			f.incCouldNotForge()
+			if errors.Is(validationErr, ErrForgedBlockStateChanged) {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+				// No verdict was reached, so the block is dropped as
+				// unverified, not as invalid: the slot is lost the way a
+				// build attempt the chain moved under is.
+				f.logger.Warn(
+					"forge skip: ledger state kept changing during self-validation, dropping block",
+					"slot", currentSlot,
+					"hash", blockHashStr,
+					"validation_duration", validationDuration,
+					"error", validationErr,
+				)
+				return nil
+			}
 			if f.metrics != nil {
 				f.metrics.forgeValidationFailed.Inc()
 			}
@@ -2572,7 +2599,8 @@ func (f *BlockForger) evaluateTipGates(r forgeTipReading) forgeTipGates {
 	if r.upstreamBlockNumber > r.appliedTipBlockNumber {
 		g.peerHeightGap = r.upstreamBlockNumber - r.appliedTipBlockNumber
 	}
-	peerHeightBound := uint64(r.securityParam) //nolint:gosec // checked positive by readTipEvidence
+	// readTipEvidence establishes securityParam > 0.
+	peerHeightBound := uint64(r.securityParam) //nolint:gosec
 	// How far the corroborated endorser block leads the APPLIED tip.
 	// Measured against ebSlot alone rather than effectiveGap so this
 	// refusal can only ever be caused by endorser-block evidence:
@@ -4407,7 +4435,7 @@ func buildLeiosEB(
 		// peer fetching a locally forged EB validates it instead of rejecting
 		// every tx.
 		if !validLeiosTransactionHash(tx.Hash) ||
-			len(tx.Cbor) == 0 || len(tx.Cbor) > math.MaxUint16 {
+			!validLeiosTransactionSize(len(tx.Cbor)) {
 			continue
 		}
 		// Apply the manifest caps to references that would otherwise be
@@ -4424,9 +4452,9 @@ func buildLeiosEB(
 			break
 		}
 		totalBytes += txBytes
-		// Bounded above by the MaxUint16 check on len(tx.Cbor) above. Kept
+		// Bounded above by the MaxUint32 check on len(tx.Cbor) above. Kept
 		// on one line so the directive stays attached to the conversion.
-		size := uint16(len(tx.Cbor)) // #nosec G115
+		size := uint32(len(tx.Cbor)) // #nosec G115
 		refs = append(refs, lcommon.LeiosTransactionReference{
 			TransactionHash: lcommon.Blake2b256Hash(tx.Cbor),
 			TransactionSize: size,
@@ -4451,8 +4479,14 @@ func validLeiosTransactionHash(hash string) bool {
 }
 
 func validLeiosTransactionReference(tx MempoolTransaction) bool {
-	return validLeiosTransactionHash(tx.Hash) && len(tx.Cbor) > 0 &&
-		len(tx.Cbor) <= math.MaxUint16
+	return validLeiosTransactionHash(tx.Hash) &&
+		validLeiosTransactionSize(len(tx.Cbor))
+}
+
+// validLeiosTransactionSize reports whether n fits the manifest reference's
+// 32-bit size field and is non-empty.
+func validLeiosTransactionSize(n int) bool {
+	return n > 0 && uint64(n) <= math.MaxUint32
 }
 
 // modeString returns a string representation of the forging mode.

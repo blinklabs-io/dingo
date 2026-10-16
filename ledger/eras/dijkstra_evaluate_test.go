@@ -24,6 +24,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
+	"github.com/blinklabs-io/plutigo/data"
 	"github.com/blinklabs-io/plutigo/lang"
 	"github.com/stretchr/testify/require"
 )
@@ -62,6 +63,7 @@ func newDijkstraTopLevelMintFromSubTx(
 			WsRedeemers: gdijkstra.DijkstraRedeemers{
 				Redeemers: map[lcommon.RedeemerKey]lcommon.RedeemerValue{
 					{Tag: lcommon.RedeemerTagMint, Index: 0}: {
+						Data:    lcommon.Datum{Data: data.NewConstr(0)},
 						ExUnits: v4TestBudget,
 					},
 				},
@@ -408,7 +410,9 @@ func TestEvaluateTxDijkstraFeeUsesRefScriptCostParameters(t *testing.T) {
 		WitnessSet: gdijkstra.DijkstraTransactionWitnessSet{
 			WsRedeemers: gdijkstra.DijkstraRedeemers{
 				Redeemers: map[lcommon.RedeemerKey]lcommon.RedeemerValue{
-					{Tag: lcommon.RedeemerTagMint}: {},
+					{Tag: lcommon.RedeemerTagMint}: {
+						Data: lcommon.Datum{Data: data.NewConstr(0)},
+					},
 				},
 			},
 		},
