@@ -3456,17 +3456,26 @@ latest AS (
 // recomputing it for every pool in the table. It returns the total number of
 // pool rows updated across all chunks.
 //
-// Chunked over dialect.ParameterLimit(): an unbounded disaster-recovery
-// truncate (database/lifecycle) can affect far more pools in one call than a
-// live, security-parameter-bounded rollback ever would.
+// Chunked to stay within dialect.ParameterLimit(), reserving one parameter
+// for the zero fallback: an unbounded disaster-recovery truncate
+// (database/lifecycle) can affect far more pools in one call than a live,
+// security-parameter-bounded rollback ever would.
 func (s *Store) restorePoolLatestOpCertSequence(
 	ctx context.Context,
 	db queryer,
 	poolKeyHashes [][]byte,
 ) (int64, error) {
 	var total int64
-	for start := 0; start < len(poolKeyHashes); start += s.dialect.ParameterLimit() {
-		end := min(start+s.dialect.ParameterLimit(), len(poolKeyHashes))
+	parameterLimit := s.dialect.ParameterLimit()
+	if len(poolKeyHashes) > 0 && parameterLimit < 2 {
+		return total, fmt.Errorf(
+			"SQL parameter limit %d cannot restore pool op-cert sequences",
+			parameterLimit,
+		)
+	}
+	batchSize := parameterLimit - 1
+	for start := 0; start < len(poolKeyHashes); start += batchSize {
+		end := min(start+batchSize, len(poolKeyHashes))
 		batch := poolKeyHashes[start:end]
 		args := make([]any, 1, len(batch)+1)
 		args[0] = encodeOpCertSequence(0)

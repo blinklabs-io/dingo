@@ -25,9 +25,7 @@ import (
 // TestValidateOpCertCounterMaxUint64DoesNotWrap pins the era rule's gap
 // comparison at the top of the counter domain: an unchanged counter at
 // math.MaxUint64 must not be misread as gapped by a stored+1 that wrapped to
-// zero. The rule is evaluated over the full unsigned range even though the
-// forging and storage paths refuse to record a counter that large, because it
-// is the chain rule over its complete wire-format domain.
+// zero. Forging and persistence preserve this full unsigned wire domain.
 func TestValidateOpCertCounterMaxUint64DoesNotWrap(t *testing.T) {
 	require.NoError(
 		t,

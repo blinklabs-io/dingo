@@ -40,12 +40,14 @@ func TestCommitteeRenewalTermStartUpgradeRestoresHotKey(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "metadata.sqlite")
 	registry, err := migrations.SQLiteRegistry()
 	require.NoError(t, err)
-	index := len(registry) - 1
-	require.Equal(
-		t,
-		"committee-renewal-term-start-repair",
-		registry[index].Name,
-	)
+	index := -1
+	for i, migration := range registry {
+		if migration.Name == "committee-renewal-term-start-repair" {
+			index = i
+			break
+		}
+	}
+	require.NotEqual(t, -1, index)
 	locker := migrations.NewFileLocker(path + ".migrate.lock")
 	openStore := func(versions []migrations.Migration) (*Store, *sql.DB) {
 		t.Helper()

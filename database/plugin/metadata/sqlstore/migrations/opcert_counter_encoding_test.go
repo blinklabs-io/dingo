@@ -96,4 +96,17 @@ SELECT latest_op_cert_sequence FROM pool WHERE pool_key_hash = ?`,
 		poolKeyHash,
 	).Scan(&latest))
 	require.Equal(t, int64(-1), latest)
+	rows, err = db.QueryContext(ctx, `
+SELECT sequence FROM pool_opcert_sequence
+WHERE pool_key_hash = ? ORDER BY sequence`, poolKeyHash)
+	require.NoError(t, err)
+	var replayed []int64
+	for rows.Next() {
+		var sequence int64
+		require.NoError(t, rows.Scan(&sequence))
+		replayed = append(replayed, sequence)
+	}
+	require.NoError(t, rows.Err())
+	require.NoError(t, rows.Close())
+	require.Equal(t, want, replayed)
 }

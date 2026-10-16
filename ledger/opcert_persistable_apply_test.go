@@ -95,9 +95,9 @@ func TestLedgerProcessBlockRecordsCounterAboveMaxInt64(
 		})
 	require.NoError(t, err)
 
-	var poolID [28]byte
-	copy(poolID[:], pkh.Bytes())
-	sequence, found, err := ls.LatestOpCertSequence(poolID)
+	sequence, found, err := db.LatestPoolOpCertSequence(
+		context.Background(), pkh, nil,
+	)
 	require.NoError(t, err)
 	require.True(t, found)
 	require.Equal(t, uint64(math.MaxInt64)+1, sequence)
