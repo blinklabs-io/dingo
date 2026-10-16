@@ -3890,11 +3890,12 @@ like CIP-68 (`onchain_metadata_extra`) datum-based metadata, is returned as
 `null` to match the Blockfrost response shape.
 
 The Blockfrost-compatible `GET /api/v0/assets/{asset}/addresses` endpoint
-uses `GetUtxosByAssets` for live candidate UTxOs, decodes each UTxO CBOR value
-to recover the exact original address, then aggregates matching asset
-quantities by that address. Decoding CBOR is required because some valid
-addresses, such as pointer addresses, cannot be reconstructed from the
-metadata credential-hash columns alone.
+groups live asset quantities by canonical address in metadata storage. The
+`utxo_address` index stores each UTxO's rendered address, including pointer
+payloads and bootstrap identities that cannot be reconstructed from credential
+columns alone. API-mode startup backfills missing address rows before exposing
+the API; core-mode nodes do not maintain this API-only index. See the
+historical Mesh balance notes above for its separate bounded row scan.
 
 `GetUtxosByAddressWithOrdering` includes live UTxOs imported from a ledger-state
 snapshot even though those rows have no `transaction_id` or historical
