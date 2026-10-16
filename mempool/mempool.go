@@ -1135,14 +1135,18 @@ func (m *Mempool) noteChainUpdate(evt event.Event) {
 				map[string]MempoolTransaction, len(transactions),
 			)
 		}
+		newOrder := make([]string, 0, len(transactions))
 		for _, tx := range transactions {
 			delete(m.pendingConfirmed, tx.Hash)
 			if _, ok := m.pendingRolledBack[tx.Hash]; !ok {
-				m.pendingRolledBackOrder = append(
-					m.pendingRolledBackOrder, tx.Hash,
-				)
+				newOrder = append(newOrder, tx.Hash)
 			}
 			m.pendingRolledBack[tx.Hash] = tx
+		}
+		if len(newOrder) > 0 {
+			m.pendingRolledBackOrder = append(
+				newOrder, m.pendingRolledBackOrder...,
+			)
 		}
 	}
 }

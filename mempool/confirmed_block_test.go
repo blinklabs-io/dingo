@@ -133,6 +133,64 @@ func TestChainUpdateRestoresRolledBackTransactionsInLedgerOrder(t *testing.T) {
 	}
 }
 
+func TestCoalescedRollbacksRestoreTransactionsInLedgerOrder(t *testing.T) {
+	t.Parallel()
+	validator := newMockValidator()
+	m, err := NewMempool(MempoolConfig{
+		Logger:          slog.Default(),
+		EventBus:        event.NewEventBus(nil, nil),
+		PromRegistry:    prometheus.NewRegistry(),
+		Validator:       validator,
+		MempoolCapacity: 1024 * 1024,
+	})
+	require.NoError(t, err)
+	require.NoError(t, m.Start(context.Background()))
+	t.Cleanup(func() {
+		require.NoError(t, m.Stop(context.Background()))
+		m.eventBus.Close()
+	})
+
+	first, firstHash, err := buildBenchmarkTransaction(
+		benchmarkSeedHash(31, 1), 0, 1, 1,
+	)
+	require.NoError(t, err)
+	second, secondHash, err := buildBenchmarkTransaction(
+		benchmarkSeedHash(31, 2), 0, 2, 1,
+	)
+	require.NoError(t, err)
+	third, thirdHash, err := buildBenchmarkTransaction(
+		benchmarkSeedHash(31, 3), 0, 3, 1,
+	)
+	require.NoError(t, err)
+	fourth, fourthHash, err := buildBenchmarkTransaction(
+		benchmarkSeedHash(31, 4), 0, 4, 1,
+	)
+	require.NoError(t, err)
+
+	// The first event removes the newer blocks. The next rollback extends
+	// farther back, so its transactions must precede those already queued.
+	m.noteChainUpdate(chainUpdate(chain.ChainRollbackEvent{
+		RolledBackBlocks: []models.Block{
+			blockCarryingTxs(t, 103, fourth),
+			blockCarryingTxs(t, 102, third),
+		},
+	}))
+	m.noteChainUpdate(chainUpdate(chain.ChainRollbackEvent{
+		RolledBackBlocks: []models.Block{
+			blockCarryingTxs(t, 101, second),
+			blockCarryingTxs(t, 100, first),
+		},
+	}))
+
+	wantOrder := []string{firstHash, secondHash, thirdHash, fourthHash}
+	require.NoError(t, m.rebuildAfterChainUpdate(context.Background()))
+	transactions := m.Transactions()
+	require.Len(t, transactions, len(wantOrder))
+	for i, hash := range wantOrder {
+		require.Equal(t, hash, transactions[i].Hash)
+	}
+}
+
 func newConfirmedBlockMempool(
 	t *testing.T,
 ) (*Mempool, *mockValidator, *lockedBuffer, []byte, string) {

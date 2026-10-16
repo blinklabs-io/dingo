@@ -320,6 +320,14 @@ func TestShouldRatify_DijkstraParameterGroupsMatchPV12(
 			},
 		},
 		{
+			name:         "key-53-clear",
+			wantGroups:   drepParameterGroupNetwork,
+			wantSecurity: true,
+			update: gdijkstra.DijkstraProtocolParameterUpdate{
+				PerasBootstrapRoundSet: true,
+			},
+		},
+		{
 			name:         "key-54",
 			wantGroups:   drepParameterGroupNetwork,
 			wantSecurity: true,
