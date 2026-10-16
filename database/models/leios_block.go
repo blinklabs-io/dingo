@@ -59,11 +59,34 @@ func DecodeConwayPeerBlock(raw []byte) (ledger.Block, error) {
 	if err == nil {
 		return block, nil
 	}
+	if !hasConwayLeiosExtendedHeader(raw) {
+		return nil, err
+	}
 	if extBlock, extErr := decodeLeiosExtendedConwayBlock(raw); extErr == nil {
 		return extBlock, nil
 	} else {
 		return nil, fmt.Errorf("%w; Leios extension decode: %w", err, extErr)
 	}
+}
+
+// hasConwayLeiosExtendedHeader limits the compatibility decoder to the
+// supported 12-field header, preserving strict Conway errors for other blocks.
+func hasConwayLeiosExtendedHeader(raw []byte) bool {
+	var components []cbor.RawMessage
+	if _, err := cbor.Decode(raw, &components); err != nil ||
+		len(components) != conwayBlockComponentCount {
+		return false
+	}
+	var headerParts []cbor.RawMessage
+	if _, err := cbor.Decode(components[0], &headerParts); err != nil ||
+		len(headerParts) != 2 {
+		return false
+	}
+	var bodyElems []cbor.RawMessage
+	if _, err := cbor.Decode(headerParts[0], &bodyElems); err != nil {
+		return false
+	}
+	return len(bodyElems) == babbageHeaderBodyFieldCount+leiosHeaderExtraFields
 }
 
 // hasDijkstraLeiosShape gates the storage fallback on the historical Musashi

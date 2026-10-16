@@ -196,6 +196,20 @@ func (s *Store) GetDroppedGovernanceProposalsAt(
 	)
 }
 
+func (s *Store) GetGovernanceProposalsRefundedAt(
+	epoch uint64,
+	txn types.Txn,
+) ([]*models.GovernanceProposal, error) {
+	return s.queryGovernanceProposals(
+		txn,
+		"((ratified_epoch IS NOT NULL AND enacted_epoch = ?) "+
+			"OR dropped_epoch = ?) AND deleted_slot IS NULL",
+		governanceProposalOrderSQL,
+		epoch,
+		epoch,
+	)
+}
+
 func (s *Store) GetRatifiedGovernanceProposals(
 	txn types.Txn,
 ) ([]*models.GovernanceProposal, error) {
