@@ -3031,8 +3031,8 @@ func TestCBORConformanceReportRunsOnlyForLinuxRelease(t *testing.T) {
 		case "Checkout ledger-rules fixtures":
 			if step["if"] != "github.ref_type == 'tag'" ||
 				with["repository"] != "pragma-org/node-diversity-conformance" ||
-				with["ref"] != "fc4713f2e8f10925becc4a17a1567a559cf27918" {
-				t.Error("Linux release checks out the wrong ledger-rules fixtures")
+				with["ref"] != "main" {
+				t.Error("Linux release does not use the current ledger-rules fixtures")
 			}
 		case "Generate conformance reports":
 			reportGeneration++
