@@ -21,10 +21,12 @@ import (
 	"log/slog"
 	"math/big"
 	"testing"
+	"time"
 
 	"connectrpc.com/connect"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
@@ -59,6 +61,28 @@ type readStateLedgerStub struct {
 	// tipCalls proves the handler does not sample the live tip when building
 	// the reply; the point must come from the distribution read instead.
 	tipCalls int
+}
+
+type blockingReadStateLedgerStub struct {
+	UtxorpcLedgerState
+	started chan struct{}
+	release chan struct{}
+	dist    *ledger.PoolStakeDistribution
+}
+
+func (s *blockingReadStateLedgerStub) PoolStakeDistribution(
+	ctx context.Context,
+	_ []lcommon.PoolKeyHash,
+	_ ledger.QueryPoint,
+	_ *database.Txn,
+) (*ledger.PoolStakeDistribution, error) {
+	close(s.started)
+	select {
+	case <-s.release:
+		return s.dist, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 }
 
 func (s *readStateLedgerStub) Tip() ochainsync.Tip {
@@ -200,6 +224,76 @@ func TestReadState_ReportsStakePoolDistribution(t *testing.T) {
 	assert.Equal(t, uint64(1234), tip.GetSlot())
 	assert.Equal(t, []byte{0xDE, 0xAD}, tip.GetHash())
 	assert.Equal(t, uint64(77), tip.GetHeight())
+}
+
+func TestReadState_UsesBulkAdmission(t *testing.T) {
+	t.Parallel()
+	stub := &blockingReadStateLedgerStub{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+		dist:    &ledger.PoolStakeDistribution{},
+	}
+	u := NewUtxorpc(UtxorpcConfig{
+		Logger:                    discardLogger(),
+		LedgerState:               stub,
+		MaxConcurrentBulkRequests: 1,
+	})
+	srv := &betaQueryServiceServer{utxorpc: u}
+	firstErr := make(chan error, 1)
+	go func() {
+		_, err := srv.ReadState(t.Context(), stakePoolDistributionRequest())
+		firstErr <- err
+	}()
+	testutil.RequireReceive(
+		t, stub.started, testutil.AsyncWait, "first ReadState must enter ledger",
+	)
+
+	_, err := srv.ReadState(t.Context(), stakePoolDistributionRequest())
+	require.Error(t, err)
+	require.Equal(t, connect.CodeResourceExhausted, connect.CodeOf(err))
+	close(stub.release)
+	require.NoError(t, testutil.RequireReceive(
+		t, firstErr, testutil.AsyncWait, "first ReadState must complete",
+	))
+}
+
+func TestReadState_BoundsResponseBytes(t *testing.T) {
+	t.Parallel()
+	stub := &readStateLedgerStub{dist: &ledger.PoolStakeDistribution{
+		Pools: []ledger.PoolStakeShare{{
+			PoolKeyHash:   testPoolKeyHash(0xAA),
+			StakeFraction: &cbor.Rat{Rat: big.NewRat(1, 1)},
+			VrfKeyHash:    testVrfKeyHash(0xBB),
+		}},
+	}}
+	u := NewUtxorpc(UtxorpcConfig{
+		Logger:           discardLogger(),
+		LedgerState:      stub,
+		MaxResponseBytes: 1,
+	})
+	srv := &betaQueryServiceServer{utxorpc: u}
+
+	_, err := srv.ReadState(t.Context(), stakePoolDistributionRequest())
+	require.Error(t, err)
+	require.Equal(t, connect.CodeResourceExhausted, connect.CodeOf(err))
+}
+
+func TestReadState_HasServerDeadline(t *testing.T) {
+	t.Parallel()
+	stub := &blockingReadStateLedgerStub{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	u := NewUtxorpc(UtxorpcConfig{
+		Logger:        discardLogger(),
+		LedgerState:   stub,
+		ServerTimeout: time.Nanosecond,
+	})
+	srv := &betaQueryServiceServer{utxorpc: u}
+
+	_, err := srv.ReadState(t.Context(), stakePoolDistributionRequest())
+	require.Error(t, err)
+	require.Equal(t, connect.CodeDeadlineExceeded, connect.CodeOf(err))
 }
 
 // TestReadState_EmptyPoolFilterMeansEveryPool pins the proto's own rule:

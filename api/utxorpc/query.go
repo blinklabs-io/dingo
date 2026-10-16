@@ -630,27 +630,24 @@ func (s *queryServiceServer) SearchUtxos(
 		AssetName:         assetName,
 	}
 
-	utxos, err := s.utxorpc.config.LedgerState.UtxosByAddressWithOrdering(utxoQ)
+	page, err := s.utxorpc.config.LedgerState.UtxosByAddressBoundedPage(
+		ctx,
+		utxoQ,
+		int(maxAllowed)+1,
+		s.utxorpc.config.MaxResponseBytes,
+	)
 	if err != nil {
 		return nil, err
 	}
+	utxos := page.Utxos
 
 	pageCap := int(effectiveMax)
-	hasMore := len(utxos) > pageCap
+	hasMore := page.Next != nil
 	if hasMore {
-		utxos = utxos[:pageCap]
+		utxos = utxos[:min(len(utxos), pageCap)]
 	}
-	budget := byteBudget{limit: s.utxorpc.config.MaxResponseBytes}
 	items := make([]*query.AnyUtxoData, 0, len(utxos))
 	for i := range utxos {
-		if !budget.fits(len(utxos[i].Cbor)) {
-			// Truncate the page here; the token below resumes after the
-			// last item that fit.
-			utxos = utxos[:i]
-			hasMore = true
-			break
-		}
-		budget.add(len(utxos[i].Cbor))
 		aud, err := searchUtxoModelToAnyData(&utxos[i])
 		if err != nil {
 			return nil, err
@@ -658,14 +655,21 @@ func (s *queryServiceServer) SearchUtxos(
 		items = append(items, aud)
 	}
 	resp.Items = items
-	if hasMore && len(utxos) > 0 {
-		last := utxos[len(utxos)-1]
+	if hasMore {
+		cursor := page.Next
+		if len(utxos) > 0 {
+			last := utxos[len(utxos)-1]
+			cursor = &models.UtxoOrderingCursor{
+				Slot: last.TxSlot, BlockIndex: last.TxBlockIndex,
+				OutputIdx: last.OutputIdx, TxId: last.TxId,
+			}
+		}
 		resp.NextToken = fmt.Sprintf(
 			"%d:%d:%d:%x",
-			last.TxSlot,
-			last.TxBlockIndex,
-			last.OutputIdx,
-			last.TxId,
+			cursor.Slot,
+			cursor.BlockIndex,
+			cursor.OutputIdx,
+			cursor.TxId,
 		)
 	}
 

@@ -15,13 +15,19 @@
 package ledger
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"sort"
 	"sync"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
 )
@@ -58,6 +64,131 @@ import (
 // connection at all on the common path.
 const utxoWholeResolveWorkers = 16
 
+const (
+	maxUtxoWholeItems         = 50_000
+	maxUtxoWholeRetainedBytes = 32 << 20
+	maxUtxoWholeResponseBytes = 32 << 20
+	utxoWholeQueryTimeout     = 30 * time.Second
+)
+
+var errUtxoWholeLimitExceeded = errors.New(
+	"whole UTxO query resource limit exceeded",
+)
+
+type utxoWholeLimits struct {
+	maxItems         int
+	maxRetainedBytes int64
+	maxResponseBytes int64
+	timeout          time.Duration
+}
+
+func defaultUtxoWholeLimits() utxoWholeLimits {
+	return utxoWholeLimits{
+		maxItems:         maxUtxoWholeItems,
+		maxRetainedBytes: maxUtxoWholeRetainedBytes,
+		maxResponseBytes: maxUtxoWholeResponseBytes,
+		timeout:          utxoWholeQueryTimeout,
+	}
+}
+
+// utxoWholeResult caches the checked wire representation. LocalStateQuery's
+// server encoder calls MarshalCBOR after the query callback returns, so keeping
+// the bounded encoding avoids rebuilding the full response outside the query's
+// execution deadline.
+type utxoWholeResult struct {
+	encoded []byte
+}
+
+func (r *utxoWholeResult) MarshalCBOR() ([]byte, error) {
+	return r.encoded, nil
+}
+
+type encodedUtxoWholeEntry struct {
+	key   []byte
+	value []byte
+}
+
+func appendCborHead(dst []byte, major byte, value uint64) []byte {
+	switch {
+	case value < 24:
+		return append(dst, major<<5|byte(value))
+	case value <= 0xff:
+		return append(dst, major<<5|24, byte(value))
+	case value <= 0xffff:
+		dst = append(dst, major<<5|25, 0, 0)
+		binary.BigEndian.PutUint16(dst[len(dst)-2:], uint16(value))
+		return dst
+	case value <= 0xffffffff:
+		dst = append(dst, major<<5|26, 0, 0, 0, 0)
+		binary.BigEndian.PutUint32(dst[len(dst)-4:], uint32(value))
+		return dst
+	default:
+		dst = append(dst, major<<5|27, 0, 0, 0, 0, 0, 0, 0, 0)
+		binary.BigEndian.PutUint64(dst[len(dst)-8:], value)
+		return dst
+	}
+}
+
+func encodeUtxoWholeResult(
+	ctx context.Context,
+	utxos map[olocalstatequery.UtxoId]ledger.TransactionOutput,
+	maxBytes int64,
+) ([]byte, error) {
+	entries := make([]encodedUtxoWholeEntry, 0, len(utxos))
+	for id, txOut := range utxos {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		key, err := id.MarshalCBOR()
+		if err != nil {
+			return nil, fmt.Errorf("encode whole UTxO key: %w", err)
+		}
+		value := txOut.Cbor()
+		if len(value) == 0 {
+			value, err = cbor.Encode(txOut)
+			if err != nil {
+				return nil, fmt.Errorf("encode whole UTxO output: %w", err)
+			}
+		}
+		entries = append(entries, encodedUtxoWholeEntry{key: key, value: value})
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	// gouroboros uses fxamacker's Core Deterministic mode, which orders map
+	// keys by their encoded bytes. Preserve that wire representation while
+	// assembling the response one bounded entry at a time.
+	sort.Slice(entries, func(i, j int) bool {
+		return bytes.Compare(entries[i].key, entries[j].key) < 0
+	})
+
+	encoded := appendCborHead(nil, 4, 1)
+	encoded = appendCborHead(encoded, 5, uint64(len(entries)))
+	if int64(len(encoded)) > maxBytes {
+		return nil, fmt.Errorf(
+			"%w: encoded response exceeds %d bytes",
+			errUtxoWholeLimitExceeded,
+			maxBytes,
+		)
+	}
+	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		entryBytes := int64(len(entry.key)) + int64(len(entry.value))
+		if int64(len(encoded)) > maxBytes-entryBytes {
+			return nil, fmt.Errorf(
+				"%w: encoded response exceeds %d bytes",
+				errUtxoWholeLimitExceeded,
+				maxBytes,
+			)
+		}
+		encoded = append(encoded, entry.key...)
+		encoded = append(encoded, entry.value...)
+	}
+	return encoded, nil
+}
+
 // queryShelleyUtxoWhole answers GetUTxOWhole: every UTxO live as of right
 // now (or, for a pinned at, as of that exact point).
 //
@@ -73,12 +204,11 @@ const utxoWholeResolveWorkers = 16
 // i.e. it was created after the point this reply claimed to answer for.
 //
 // cardano-cli's own client-side guidance is that a whole-UTxO dump
-// ("query utxo --whole-utxo") is only practical against a small network;
-// Dingo does not impose an additional limit here, but callers on a
-// mainnet-scale chain should expect this to be slow and to return a large
-// reply. This exists primarily to support LocalStateQuery-based tooling
-// (e.g. the devnet cross-node ledger-state comparison)
-// rather than as a query aimed at a busy chain. A pinned at is slower still:
+// ("query utxo --whole-utxo") is only practical against a small network.
+// Dingo enforces item, retained-CBOR, encoded-response, and execution-time
+// limits before returning a result. This keeps the query useful for devnet
+// comparison without allowing one request to retain mainnet-scale state. A
+// pinned at is slower still:
 // IterateUtxosAsOf has no indexed shortcut for "added_slot <= X" against an X
 // near the live tip (it matches nearly every row ever created, live or already
 // spent), unlike IterateLiveUtxos' indexed deleted_slot = 0 filter -- accepted
@@ -94,25 +224,31 @@ const utxoWholeResolveWorkers = 16
 // block, so resolving them one at a time serializes millions of
 // independent blob-store reads with no data dependency between them.
 //
-// Measured against a real Preview node (3.17M live UTxOs): the
-// row-at-a-time path took roughly 5 minutes and exceeded gouroboros' NtC
-// mux read timeout (120s) before completing; the node-parity tool surfaced
-// this. An 8-worker pool measured
-// ~127s -- real, but still over the ceiling. Two further tuning attempts
-// (grouping lookups by originating block via the batch resolve API;
-// avoiding hot-cache writes for entries this one-shot query never
-// rereads) did not produce a reliable further improvement. A later,
-// controlled worker-count sweep (see utxoWholeResolveWorkers' doc
-// comment) resolved that inconsistency: 16 workers is reliably faster
-// than 8 (~113s mean resolve time, best single trial ~124s total), but
-// every trial from 4 to 24 workers still finished over 120s -- the
-// remaining cost is badger's own per-lookup block-index seek, which a
-// worker pool cannot parallelize away. This is not yet a complete fix;
-// see the linked issue for the full investigation and a recommended next
-// step (streaming the reply instead of fully materializing it).
+// The worker count is based on the measured cold-blob path described above;
+// the aggregate limits are independent of that tuning and stop enumeration or
+// resolution before the complete chain state can accumulate.
 func (ls *LedgerState) queryShelleyUtxoWhole(ctx context.Context, at QueryPoint,
 	txn *database.Txn,
 ) (any, error) {
+	return ls.queryShelleyUtxoWholeWithLimits(
+		ctx,
+		at,
+		txn,
+		defaultUtxoWholeLimits(),
+	)
+}
+
+func (ls *LedgerState) queryShelleyUtxoWholeWithLimits(
+	ctx context.Context,
+	at QueryPoint,
+	txn *database.Txn,
+	limits utxoWholeLimits,
+) (any, error) {
+	if limits.timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, limits.timeout)
+		defer cancel()
+	}
 	if txn == nil {
 		txn = ls.db.Transaction(ctx, false)
 		defer txn.Release()
@@ -134,6 +270,13 @@ func (ls *LedgerState) queryShelleyUtxoWhole(ctx context.Context, at QueryPoint,
 	// worker-side blob-only-txn design exists to stop starving.
 	var live []database.UtxoRef
 	collect := func(u *models.Utxo) error {
+		if len(live) >= limits.maxItems {
+			return fmt.Errorf(
+				"%w: UTxO count exceeds %d",
+				errUtxoWholeLimitExceeded,
+				limits.maxItems,
+			)
+		}
 		txID, err := ledger.NewBlake2b256Checked(u.TxId)
 		if err != nil {
 			return fmt.Errorf("utxo ref tx id: %w", err)
@@ -163,9 +306,10 @@ func (ls *LedgerState) queryShelleyUtxoWhole(ctx context.Context, at QueryPoint,
 	}
 
 	type resolved struct {
-		id    olocalstatequery.UtxoId
-		txOut ledger.TransactionOutput
-		err   error
+		id            olocalstatequery.UtxoId
+		txOut         ledger.TransactionOutput
+		retainedBytes int
+		err           error
 	}
 	// resolveRow resolves and decodes one row, recovering any panic from
 	// either step into an ordinary error result instead of letting it
@@ -234,7 +378,9 @@ func (ls *LedgerState) queryShelleyUtxoWhole(ctx context.Context, at QueryPoint,
 			return resolved{err: err}
 		}
 		txOut, err := decodeUtxoWholeCborFunc(ref, cborBytes)
-		return resolved{id: id, txOut: txOut, err: err}
+		return resolved{
+			id: id, txOut: txOut, retainedBytes: len(cborBytes), err: err,
+		}
 	}
 
 	jobs := make(chan database.UtxoRef)
@@ -316,6 +462,7 @@ func (ls *LedgerState) queryShelleyUtxoWhole(ctx context.Context, at QueryPoint,
 	// one of several unresolvable rows across runs), so nothing is lost
 	// except which specific ref is named first.
 	var firstErr error
+	var retainedBytes int64
 	// Drain every result after cancellation so workers release their blob
 	// transactions before this call returns.
 	for r := range results {
@@ -330,6 +477,16 @@ func (ls *LedgerState) queryShelleyUtxoWhole(ctx context.Context, at QueryPoint,
 			continue
 		}
 		if ctx.Err() == nil && firstErr == nil {
+			if retainedBytes+int64(r.retainedBytes) > limits.maxRetainedBytes {
+				firstErr = fmt.Errorf(
+					"%w: retained CBOR exceeds %d bytes",
+					errUtxoWholeLimitExceeded,
+					limits.maxRetainedBytes,
+				)
+				close(done)
+				continue
+			}
+			retainedBytes += int64(r.retainedBytes)
 			ret[r.id] = r.txOut
 		}
 	}
@@ -339,7 +496,11 @@ func (ls *LedgerState) queryShelleyUtxoWhole(ctx context.Context, at QueryPoint,
 	if firstErr != nil {
 		return nil, firstErr
 	}
-	return []any{ret}, nil
+	encoded, err := encodeUtxoWholeResult(ctx, ret, limits.maxResponseBytes)
+	if err != nil {
+		return nil, fmt.Errorf("encode whole UTxO result: %w", err)
+	}
+	return &utxoWholeResult{encoded: encoded}, nil
 }
 
 // decodeUtxoWholeCborFunc is decodeUtxoWholeCbor by default. resolveRow

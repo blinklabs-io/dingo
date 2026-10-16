@@ -79,9 +79,12 @@ type UtxorpcLedgerState interface {
 	TransactionByHash(ctx context.Context, hash []byte) (*models.Transaction, error)
 	UtxoByRef(txId []byte, outputIdx uint32) (*models.Utxo, error)
 	UtxosByRefs(refs []models.UtxoId) ([]models.Utxo, error)
-	UtxosByAddressWithOrdering(
+	UtxosByAddressBoundedPage(
+		ctx context.Context,
 		q *models.UtxoWithOrderingQuery,
-	) ([]models.UtxoWithOrdering, error)
+		maxCandidates int,
+		maxBytes int64,
+	) (models.UtxoAddressPage, error)
 }
 
 // UtxorpcMempool is the subset of mempool.Mempool needed by the UTxO RPC
