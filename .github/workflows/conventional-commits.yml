@@ -9,4 +9,4 @@ permissions:
 
 jobs:
   orchestrate:
-    uses: blinklabs-io/actions/.github/workflows/reuseable-conventional-commits.yml@main
+    uses: blinklabs-io/actions/.github/workflows/reuseable-conventional-commits.yml@2b1bfffc6d04dad1fd40ca753e8d01a410de054f
