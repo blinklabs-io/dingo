@@ -3042,8 +3042,11 @@ fallback:
   and every resolved address is rejected if it is private or special-use before
   dialing, unless `barkBlockDownloadAllowPrivateAddresses` is set for an
   archive store on a private network; that default-off opt-in lifts only the
-  address check. The client ignores ambient proxy settings, and response bodies are
-  capped before buffering at the largest block the chain admits for any era
+  address check. The Bark RPC client applies the same resolved-address policy,
+  keeps redirects on the configured RPC origin, ignores ambient proxy settings,
+  and caps each decoded Connect response at 1 MiB. Block download response
+  bodies are capped before buffering at the largest block the chain admits for
+  any era
   (`LedgerState.MaxBlockSize`: the live header and body limits, or the Byron
   genesis block size when larger; a 128 KiB default when neither is known).
   This wrapper can be used with or without local History Expiry. It is

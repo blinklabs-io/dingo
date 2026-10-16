@@ -3328,8 +3328,11 @@ older than the ledger stability window:
   applies after each redirect. Every resolved address must be public before
   dialing unless `barkBlockDownloadAllowPrivateAddresses` is enabled, and the
   download transport ignores ambient proxy settings either way. The
-  operator-configured Bark RPC client remains separate so an explicitly chosen
-  internal service endpoint is still reachable. Downloads are also size-limited
+  Bark RPC client uses the same default-deny resolved-address check as block
+  downloads, restricted to the configured RPC origin and without ambient proxy
+  settings. Setting `barkBlockDownloadAllowPrivateAddresses` opts both Bark RPC
+  and block downloads into private or special-use addresses; it does not relax
+  origin, redirect, or proxy restrictions. Downloads are also size-limited
   to the largest block the chain admits for any era (`LedgerState.MaxBlockSize`:
   the live header and body limits, or the Byron genesis block size when larger;
   a 128 KiB default when neither is known). Downloaded bytes are then verified locally
