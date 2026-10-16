@@ -5773,6 +5773,11 @@ it. Dingo implements this as a **corroboration gate**
   deliberately stronger than "share any common point": a fast source that agrees on one old ancestor and then produces different blocks for
   the rest of the window is **not** confirmed, because the witness observed
   recent blocks the candidate lacks (or a conflicting hash at the same slot).
+  Because this runs on every delivered header, the selector keeps the verified
+  prefix of each (candidate, witness) pair and compares only the witness points
+  appended since. A rollback, reset or tail replacement on either frontier, or a
+  change of the Genesis window, discards the prefix and the pair is compared in
+  full again.
 - A witness must also **reach the candidate's suffix**: it must have delivered
   the candidate's current point, and its delivered frontier block number must
   remain within the `securityParam` bound (`witnessSupportsSuffixLocked`). A

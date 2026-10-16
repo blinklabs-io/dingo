@@ -247,8 +247,13 @@ type ChainSelector struct {
 	// Guarded by mutex.
 	farTipClaims map[ouroboros.ConnectionId]farTipClaim
 	mutex        sync.RWMutex
-	ctx          context.Context
-	cancel       context.CancelFunc
+	// corroborationCache memoizes confirmed (candidate, witness) pairs so a
+	// header that appends one point to each frontier re-verifies only that
+	// point. It has its own mutex because corroboration is also evaluated
+	// under the read lock.
+	corroborationCache corroborationCache
+	ctx                context.Context
+	cancel             context.CancelFunc
 
 	// Anti-flap incumbent pin state (guarded by mutex).
 	//
@@ -637,6 +642,7 @@ func (cs *ChainSelector) advanceSelectionModeWithBestKnownBlockLocked(
 	// Corroboration no longer applies in Praos; drop the per-peer hash
 	// frontier so it does not linger for the full window on every tracked peer.
 	for _, peerTip := range cs.peerTips {
+		peerTip.observedPointRewrites++
 		peerTip.observedPoints = nil
 		peerTip.observedPointBaseBlock = 0
 	}
@@ -1496,6 +1502,7 @@ func (cs *ChainSelector) deletePeerLocked(connId ouroboros.ConnectionId) {
 	delete(cs.recentlyLeft, connId)
 	delete(cs.farTipClaims, connId)
 	delete(cs.genesisDensityDisconnected, connId)
+	cs.corroborationCache.forget(connId)
 }
 
 // RemovePeer removes a peer from tracking.

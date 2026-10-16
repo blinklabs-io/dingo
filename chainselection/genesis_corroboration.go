@@ -16,6 +16,8 @@ package chainselection
 
 import (
 	"net"
+	"sync"
+	"sync/atomic"
 
 	"github.com/blinklabs-io/dingo/event"
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -127,6 +129,103 @@ func (cs *ChainSelector) witnessSupportsSuffixLocked(
 	) >= candidateTip.SelectionTip().BlockNumber
 }
 
+// maxCorroborationCacheEntries bounds the pair cache. A node tracks a few
+// dozen peers at most, so reaching the bound means connection churn left dead
+// pairs behind and starting over costs one full scan per live pair.
+const maxCorroborationCacheEntries = 4096
+
+type corroborationPair struct {
+	candidate ouroboros.ConnectionId
+	witness   ouroboros.ConnectionId
+}
+
+// corroborationVerified records that no witness point up to verifiedThrough
+// conflicts with candidate, when the two frontiers had the given
+// rewrite counts and the Genesis window had the given size. The tip pointers
+// pin the identity of the frontiers the counts belong to.
+type corroborationVerified struct {
+	candidate         *PeerChainTip
+	witness           *PeerChainTip
+	candidateRewrites uint64
+	witnessRewrites   uint64
+	window            uint64
+	verifiedThrough   uint64
+}
+
+// corroborationCache extends a confirmed pair's result by the points appended
+// since it was verified, instead of re-comparing the whole Genesis window for
+// every delivered header. What is cached is the verified prefix: a witness
+// still catching up to the candidate's tip does not confirm yet but keeps its
+// prefix, while a witness that conflicts with the candidate is recomputed each
+// time.
+type corroborationCache struct {
+	mu       sync.Mutex
+	verified map[corroborationPair]corroborationVerified
+	// compared counts witness points examined by confirmations. It exists so
+	// tests can observe that a cache hit does not rescan the window.
+	compared atomic.Uint64
+}
+
+func (c *corroborationCache) confirms(
+	candidateConn ouroboros.ConnectionId,
+	candidate *PeerChainTip,
+	witnessConn ouroboros.ConnectionId,
+	witness *PeerChainTip,
+	window uint64,
+) bool {
+	if candidate == nil || witness == nil {
+		return false
+	}
+	key := corroborationPair{candidate: candidateConn, witness: witnessConn}
+	c.mu.Lock()
+	prev, hit := c.verified[key]
+	c.mu.Unlock()
+	var resume uint64
+	if hit && prev.candidate == candidate && prev.witness == witness &&
+		prev.candidateRewrites == candidate.observedPointRewrites &&
+		prev.witnessRewrites == witness.observedPointRewrites &&
+		prev.window == window {
+		resume = prev.verifiedThrough
+	}
+	ok, consistent, through, compared := candidate.confirmsRecentChainFrom(
+		witness,
+		window,
+		resume,
+	)
+	c.compared.Add(uint64(compared)) // #nosec G115 -- compared is non-negative.
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !consistent {
+		delete(c.verified, key)
+		return false
+	}
+	if c.verified == nil || len(c.verified) >= maxCorroborationCacheEntries {
+		c.verified = make(map[corroborationPair]corroborationVerified)
+	}
+	c.verified[key] = corroborationVerified{
+		candidate:         candidate,
+		witness:           witness,
+		candidateRewrites: candidate.observedPointRewrites,
+		witnessRewrites:   witness.observedPointRewrites,
+		window:            window,
+		verifiedThrough:   through,
+	}
+	return ok
+}
+
+// forget drops every pair involving conn. Entries pin both peers' frontiers,
+// so a disconnected peer's would otherwise outlive it until the bound resets
+// the cache.
+func (c *corroborationCache) forget(conn ouroboros.ConnectionId) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for pair := range c.verified {
+		if pair.candidate == conn || pair.witness == conn {
+			delete(c.verified, pair)
+		}
+	}
+}
+
 // corroboratingPeersLocked counts the distinct witness identities whose chain
 // confirms the candidate's recent chain within the Genesis window and reaches
 // its suffix. Any witness sharing the candidate's own identity is excluded, so
@@ -152,7 +251,10 @@ func (cs *ChainSelector) corroboratingPeersLocked(
 		if !cs.peerCanCorroborateLocked(connId, peerTip) {
 			continue
 		}
-		if !candidateTip.confirmsRecentChainWithin(
+		if !cs.corroborationCache.confirms(
+			candidate,
+			candidateTip,
+			connId,
 			peerTip,
 			cs.genesisWindowSlotsLocked(),
 		) ||
