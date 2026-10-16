@@ -415,6 +415,7 @@ type UtxoAddressPage struct {
 //     a predicate was given but no Cardano address parts could be decoded).
 //   - MatchAllAddresses false and len(AddressPatterns) > 0: match UTxOs that
 //     satisfy any pattern. Fields within a pattern are ANDed; patterns are ORed.
+//
 // IndexedExactAddress is an alternative exact match using a completed API-mode
 // address index; it cannot be combined with MatchAllAddresses or patterns.
 //
