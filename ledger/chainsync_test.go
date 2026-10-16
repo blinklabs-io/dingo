@@ -6343,9 +6343,9 @@ func TestChainsyncHeaderVerificationMissingEpochDefersToBlockfetch(
 		100*time.Millisecond,
 		"missing epoch should defer header verification, not recycle peer",
 	)
-	assert.False(t, testChain.FirstHeaderMatchesPoint(point))
+	assert.True(t, testChain.FirstHeaderMatchesPoint(point))
 	assert.False(t, testChain.FirstVerifiedHeaderMatchesPoint(point))
-	assert.Zero(t, testChain.HeaderCount())
+	assert.Equal(t, 1, testChain.HeaderCount())
 	assert.Zero(t, ls.syncUpstreamTipSlot.Load())
 }
 
@@ -6419,11 +6419,15 @@ func TestChainsyncHeaderVerificationEmptyEpochNonceDefersToBlockfetch(
 	})
 	require.NoError(t, err)
 
-	testutil.RequireNoReceive(
+	assert.Equal(
 		t,
-		requested,
-		100*time.Millisecond,
-		"a deferred header must not start blockfetch",
+		point,
+		testutil.RequireReceive(
+			t,
+			requested,
+			testutil.AsyncWait,
+			"blockfetch must retrieve the deferred header body",
+		),
 	)
 	testutil.RequireNoReceive(
 		t,
@@ -6431,7 +6435,7 @@ func TestChainsyncHeaderVerificationEmptyEpochNonceDefersToBlockfetch(
 		100*time.Millisecond,
 		"empty nonce should defer header verification, not recycle peer",
 	)
-	assert.False(t, testChain.FirstHeaderMatchesPoint(point))
+	assert.True(t, testChain.FirstHeaderMatchesPoint(point))
 	assert.False(t, testChain.FirstVerifiedHeaderMatchesPoint(point))
 	assert.Zero(t, ls.syncUpstreamTipSlot.Load())
 }

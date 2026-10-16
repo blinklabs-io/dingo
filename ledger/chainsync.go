@@ -4505,8 +4505,9 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 	// verified by the certificate chain during import, and the restored
 	// database intentionally does not keep every historical epoch nonce.
 	// A missing epoch nonce for any other slot (e.g. Byron->Shelley, where
-	// it may not be fully computed yet) is handled by the strict verifier as a
-	// deferral; such a header must not enter the queue until a later retry.
+	// it may not be fully computed yet) defers producer authorization. The
+	// header may still be queued for block-fetch, whose body path retries
+	// verification before applying it.
 	headerCryptoVerificationGeneration := e.HeaderCryptoVerificationGeneration
 	producerAuthorizationGeneration := e.HeaderCryptoVerificationGeneration
 	headerCryptoVerified := e.BlockHeader != nil &&
@@ -4537,7 +4538,6 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 					"error",
 					err,
 				)
-				return nil
 			} else {
 				if ls.config.EventBus != nil {
 					ls.config.Logger.Warn(
@@ -5344,8 +5344,9 @@ func localForkAnchor(intersectionSlot, tipSlot uint64) (uint64, bool) {
 }
 
 // chainsyncHeaderCryptoPolicy distinguishes headers trusted by Mithril
-// coverage from all other headers, which require strict producer
-// authorization before they can enter shared sync state.
+// coverage from headers whose producer authorization can be checked now.
+// Headers with unavailable epoch state may enter the block-fetch queue, but
+// cannot advance the admitted frontier or cause a competing-fork rollback.
 //
 // Header VRF/KES/OpCert crypto is the check that makes sync trustless in the
 // first place, so unlike per-tx ledger validation
@@ -5353,16 +5354,23 @@ func localForkAnchor(intersectionSlot, tipSlot uint64) (uint64, bool) {
 // re-deriving the UTxO set for blocks the network already delivered, this is
 // not gated on ValidateHistorical/validationEnabled: a coarse
 // historical-sync toggle must not disable this entire group of checks.
-// The only narrower, deliberate exemption is a slot a Mithril
-// certificate already covers -- those slots were authenticated by the
-// certificate chain during import, and the restored database intentionally
-// does not retain every historical epoch nonce needed to re-verify them.
+// Mithril-covered slots are trusted because their certificate chain was
+// verified during import; the restored database intentionally does not
+// retain every historical epoch nonce needed to re-verify them. Other
+// missing nonces defer authorization to block-fetch, which verifies the body
+// before applying it.
 func (ls *LedgerState) chainsyncHeaderCryptoPolicy(
 	slot uint64,
 ) (verifyNow bool, trustedWithoutVerification bool) {
 	mithrilLedgerSlot := ls.mithrilLedgerSlotSnapshot()
 	if mithrilLedgerSlot != 0 && slot <= mithrilLedgerSlot {
 		return false, true
+	}
+	// Queue admission can safely defer producer authorization to block-fetch,
+	// which verifies the body before application. Chain selection has a
+	// separate strict gate and must not treat a deferred header as eligible.
+	if !ls.hasCachedEpochNonceForSlot(slot) {
+		return false, false
 	}
 	return true, false
 }
