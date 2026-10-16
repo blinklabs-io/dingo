@@ -306,9 +306,21 @@ func procedures(votes ...any) lcommon.VotingProcedures {
 		if ret[v] == nil {
 			ret[v] = map[*lcommon.GovActionId]lcommon.VotingProcedure{}
 		}
-		ret[v][votes[i+1].(*lcommon.GovActionId)] = lcommon.VotingProcedure{Vote: votes[i+2].(uint8)}
+		procedure, ok := votes[i+2].(lcommon.VotingProcedure)
+		if !ok {
+			procedure = lcommon.VotingProcedure{Vote: votes[i+2].(uint8)}
+		}
+		ret[v][votes[i+1].(*lcommon.GovActionId)] = procedure
 	}
 	return ret
+}
+
+// anchored is a procedure carrying the anchor addVote records for a
+// committee vote.
+func anchored(vote uint8) lcommon.VotingProcedure {
+	return lcommon.VotingProcedure{Vote: vote, Anchor: &lcommon.GovAnchor{
+		Url: "https://example.com/vote.json", DataHash: [32]byte(fill32(0x6b)),
+	}}
 }
 
 func newTx(hash byte, valid bool, p lcommon.VotingProcedures) votingTx {
@@ -381,7 +393,7 @@ func TestNodeAdapterGovernanceProposalVotes(t *testing.T) {
 			newTx(0xb1, true, procedures(
 				spo, target, uint8(2),
 				drep, elsewhere, uint8(1),
-				cc, target, uint8(1),
+				cc, target, anchored(1),
 			)),
 		}},
 	})
@@ -460,7 +472,7 @@ func TestNodeAdapterVotesConvertBlockTimeOnlyForCommitteeVotes(t *testing.T) {
 	serveBlocks(fx, map[uint64]*slotBlock{
 		farSlot: {number: 9, txs: []lcommon.Transaction{newTx(0xa1, true, procedures(
 			voter(lcommon.VoterTypeDRepKeyHash, 0xd1), target, uint8(1),
-			voter(lcommon.VoterTypeConstitutionalCommitteeHotKeyHash, 0xcc), target, uint8(1),
+			voter(lcommon.VoterTypeConstitutionalCommitteeHotKeyHash, 0xcc), target, anchored(1),
 		))}},
 	})
 	fx.addVote(t, proposal, models.VoterTypeDRep, 0, 0xd1, models.VoteYes, farSlot, false)
@@ -755,9 +767,9 @@ func TestNodeAdapterCommitteeVotes(t *testing.T) {
 	hotB := voter(lcommon.VoterTypeConstitutionalCommitteeHotKeyHash, 0x1b)
 	hotC := voter(lcommon.VoterTypeConstitutionalCommitteeHotKeyHash, 0x1c)
 	serveBlocks(fx, map[uint64]*slotBlock{
-		100: {number: 7, txs: []lcommon.Transaction{newTx(0xa1, true, procedures(hotA, govID(t, 0x01, 0), uint8(1)))}},
-		200: {number: 8, txs: []lcommon.Transaction{newTx(0xa2, true, procedures(hotB, govID(t, 0x02, 1), uint8(0)))}},
-		300: {number: 9, txs: []lcommon.Transaction{newTx(0xa3, true, procedures(hotC, govID(t, 0x01, 0), uint8(2)))}},
+		100: {number: 7, txs: []lcommon.Transaction{newTx(0xa1, true, procedures(hotA, govID(t, 0x01, 0), anchored(1)))}},
+		200: {number: 8, txs: []lcommon.Transaction{newTx(0xa2, true, procedures(hotB, govID(t, 0x02, 1), anchored(0)))}},
+		300: {number: 9, txs: []lcommon.Transaction{newTx(0xa3, true, procedures(hotC, govID(t, 0x01, 0), anchored(2)))}},
 	})
 	fx.addVote(t, proposal, models.VoterTypeCC, 0, 0x1a, models.VoteYes, 100, false)
 	fx.addVote(t, second, models.VoterTypeCC, 0, 0x1b, models.VoteNo, 200, false)
@@ -825,8 +837,8 @@ func TestNodeAdapterCommitteeColdVotesRefusePrunedAuthorizations(t *testing.T) {
 	hotA := voter(lcommon.VoterTypeConstitutionalCommitteeHotKeyHash, 0x1a)
 	hotB := voter(lcommon.VoterTypeConstitutionalCommitteeHotKeyHash, 0x1b)
 	serveBlocks(fx, map[uint64]*slotBlock{
-		100: {number: 7, txs: []lcommon.Transaction{newTx(0xa1, true, procedures(hotA, govID(t, 0x01, 0), uint8(1)))}},
-		200: {number: 8, txs: []lcommon.Transaction{newTx(0xa2, true, procedures(hotB, govID(t, 0x01, 0), uint8(0)))}},
+		100: {number: 7, txs: []lcommon.Transaction{newTx(0xa1, true, procedures(hotA, govID(t, 0x01, 0), anchored(1)))}},
+		200: {number: 8, txs: []lcommon.Transaction{newTx(0xa2, true, procedures(hotB, govID(t, 0x01, 0), anchored(0)))}},
 	})
 	fx.addVote(t, proposal, models.VoterTypeCC, 0, 0x1a, models.VoteYes, 100, false)
 	fx.addVote(t, proposal, models.VoterTypeCC, 0, 0x1b, models.VoteNo, 200, false)
@@ -869,13 +881,13 @@ func TestNodeAdapterVoteCertIndexCountsPerVoter(t *testing.T) {
 	serveBlocks(fx, map[uint64]*slotBlock{
 		100: {number: 1, txs: []lcommon.Transaction{newTx(0xb1, true, procedures(
 			spo, govID(t, 0x01, 0), uint8(0),
-			drep, govID(t, 0x02, 0), uint8(0),
+			drep, govID(t, 0x02, 0), uint8(1),
 			cc, govID(t, 0x02, 0), uint8(1),
 			drep, govID(t, 0x01, 0), uint8(0),
 			cc, govID(t, 0x01, 0), uint8(0),
 		))}},
 	})
-	fx.addVote(t, second, models.VoterTypeDRep, 0, 0xd1, models.VoteNo, 100, false)
+	fx.addVote(t, second, models.VoterTypeDRep, 0, 0xd1, models.VoteYes, 100, false)
 	fx.addVote(t, first, models.VoterTypeSPO, 0, 0xa1, models.VoteNo, 100, false)
 
 	rows, _, err := fx.adapter.GovernanceProposalVotes(ctx, GovActionRef{TxHash: fill32(0x02), Index: 0}, asc)
@@ -900,7 +912,7 @@ func TestNodeAdapterCommitteeVotesReportOnlyRecordedAnchors(t *testing.T) {
 	script := voter(lcommon.VoterTypeConstitutionalCommitteeHotScriptHash, 0x1d)
 	key := voter(lcommon.VoterTypeConstitutionalCommitteeHotKeyHash, 0x1e)
 	serveBlocks(fx, map[uint64]*slotBlock{
-		100: {number: 1, txs: []lcommon.Transaction{newTx(0xa1, true, procedures(script, govID(t, 0x01, 0), uint8(1)))}},
+		100: {number: 1, txs: []lcommon.Transaction{newTx(0xa1, true, procedures(script, govID(t, 0x01, 0), anchored(1)))}},
 		200: {number: 2, txs: []lcommon.Transaction{newTx(0xa2, true, procedures(key, govID(t, 0x01, 0), uint8(0)))}},
 	})
 	fx.addVote(t, proposal, models.VoterTypeCC, 1, 0x1d, models.VoteYes, 100, false)
@@ -1033,6 +1045,75 @@ func TestNodeAdapterVotesListEveryCast(t *testing.T) {
 	assert.Equal(t, hexOf(fill32(0xb2)), drepVotes[2].TxHash)
 }
 
+// History recorded before casts kept their position holds one entry per
+// change of value, so two casts in one block are matched to their own
+// transactions, and a block's first cast repeating the earlier value is the
+// one left unrecorded.
+func TestNodeAdapterVotesMatchUnpositionedCastsInOneBlock(t *testing.T) {
+	t.Parallel()
+	fx := newEpochFixture(t)
+	ctx := context.Background()
+	proposal := fx.addProposal(t, 0x01, 0, lcommon.GovActionTypeInfo, []byte{0x81, 0x06}, 10)
+	drep := voter(lcommon.VoterTypeDRepKeyHash, 0xd1)
+	target := govID(t, 0x01, 0)
+	serveBlocks(fx, map[uint64]*slotBlock{
+		100: {number: 40, txs: []lcommon.Transaction{
+			newTx(0xa1, true, procedures(drep, target, uint8(models.VoteNo))),
+			newTx(0xa2, true, procedures(drep, target, uint8(models.VoteYes))),
+			newTx(0xa3, true, procedures(drep, target, uint8(models.VoteYes))),
+		}},
+		200: {number: 41, txs: []lcommon.Transaction{
+			newTx(0xb1, true, procedures(drep, target, uint8(models.VoteYes))),
+			newTx(0xb2, true, procedures(drep, target, uint8(models.VoteAbstain))),
+		}},
+	})
+	for _, cast := range []struct {
+		vote uint8
+		slot uint64
+	}{
+		{models.VoteNo, 100},
+		{models.VoteYes, 100},
+		{models.VoteYes, 100},
+		{models.VoteYes, 200},
+		{models.VoteAbstain, 200},
+	} {
+		fx.addVote(t, proposal, models.VoterTypeDRep, 0, 0xd1, cast.vote, cast.slot, false)
+	}
+
+	drepID := drep.String()
+	rows, total, err := fx.adapter.GovernanceProposalVotes(
+		ctx, GovActionRef{TxHash: fill32(0x01), Index: 0}, asc,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, 3, total, "only changes of value were recorded")
+	assert.Equal(t, []GovernanceProposalVoteInfo{
+		{TxHash: hexOf(fill32(0xa1)), VoterRole: "drep", Voter: drepID, Vote: "no"},
+		{TxHash: hexOf(fill32(0xa2)), VoterRole: "drep", Voter: drepID, Vote: "yes"},
+		{TxHash: hexOf(fill32(0xb2)), VoterRole: "drep", Voter: drepID, Vote: "abstain", Counted: true},
+	}, rows)
+
+	// A page holding only part of a slot's entries still places each one.
+	rows, _, err = fx.adapter.GovernanceProposalVotes(
+		ctx, GovActionRef{TxHash: fill32(0x01), Index: 0},
+		PaginationParams{Count: 1, Page: 2, Order: PaginationOrderAsc},
+	)
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	assert.Equal(t, hexOf(fill32(0xa2)), rows[0].TxHash)
+
+	// An entry its block cannot account for is not retained, not guessed.
+	serveBlocks(fx, map[uint64]*slotBlock{
+		100: {number: 40, txs: []lcommon.Transaction{
+			newTx(0xa1, true, procedures(drep, target, uint8(models.VoteYes))),
+		}},
+		200: {number: 41},
+	})
+	_, _, err = fx.adapter.GovernanceProposalVotes(
+		ctx, GovActionRef{TxHash: fill32(0x01), Index: 0}, asc,
+	)
+	assert.ErrorIs(t, err, ErrHistoryNotRetained)
+}
+
 func TestNodeAdapterVotesListLegacySameBlockCasts(t *testing.T) {
 	t.Parallel()
 	fx := newEpochFixture(t)
@@ -1059,4 +1140,43 @@ func TestNodeAdapterVotesListLegacySameBlockCasts(t *testing.T) {
 	assert.Equal(t, "no", rows[0].Vote)
 	assert.Equal(t, hexOf(fill32(0xb1)), rows[1].TxHash)
 	assert.Equal(t, "yes", rows[1].Vote)
+}
+
+// A value repeated within one block is told apart by recording order: no,
+// yes, no in one block records three entries, each its own transaction.
+func TestNodeAdapterVotesMatchRepeatedUnpositionedValues(t *testing.T) {
+	t.Parallel()
+	fx := newEpochFixture(t)
+	ctx := context.Background()
+	proposal := fx.addProposal(t, 0x01, 0, lcommon.GovActionTypeInfo, []byte{0x81, 0x06}, 10)
+	drep := voter(lcommon.VoterTypeDRepKeyHash, 0xd1)
+	action := govID(t, 0x01, 0)
+	serveBlocks(fx, map[uint64]*slotBlock{
+		100: {number: 40, txs: []lcommon.Transaction{
+			newTx(0xa1, true, procedures(drep, action, uint8(models.VoteNo))),
+			newTx(0xa2, true, procedures(drep, action, uint8(models.VoteYes))),
+			newTx(0xa3, true, procedures(drep, action, uint8(models.VoteNo))),
+		}},
+	})
+	for _, vote := range []uint8{models.VoteNo, models.VoteYes, models.VoteNo} {
+		fx.addVote(t, proposal, models.VoterTypeDRep, 0, 0xd1, vote, 100, false)
+	}
+	ref := GovActionRef{TxHash: fill32(0x01), Index: 0}
+	rows, total, err := fx.adapter.GovernanceProposalVotes(ctx, ref, asc)
+	require.NoError(t, err)
+	assert.Equal(t, 3, total)
+	require.Len(t, rows, 3)
+	for i, tx := range []byte{0xa1, 0xa2, 0xa3} {
+		assert.Equal(t, hexOf(fill32(tx)), rows[i].TxHash, "row %d", i)
+	}
+	assert.Equal(t, "no", rows[0].Vote)
+	assert.True(t, rows[2].Counted)
+
+	rows, _, err = fx.adapter.GovernanceProposalVotes(ctx, ref, PaginationParams{
+		Count: 1, Page: 1, Order: PaginationOrderAsc,
+	})
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	assert.Equal(t, hexOf(fill32(0xa1)), rows[0].TxHash,
+		"the first no, alone on its page")
 }

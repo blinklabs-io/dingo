@@ -212,11 +212,15 @@ the history, including a revote that repeats the value; a cast's `cert_index`
 is its position among that voter's procedures in the transaction, ordered by
 governance action id and counted from 0 for each voter, as db-sync's
 `voting_procedure.index` is. A history entry written before v46 carries
-neither, so the endpoint locates its transaction by decoding the block at the
-entry's slot (`database.BlockBySlot`) and taking the last valid transaction in
-it that carries a voting procedure for the same voter and proposal. Those
-older entries record only changes of value, so an earlier revote that
-repeated the value is not listed. When the block is not held, or no valid
+neither, so the endpoint decodes the block at the entry's slot
+(`database.BlockBySlot`) and matches it to the voter's valid casts on the
+proposal there. Those older entries record a cast only when it changed the
+value or anchor, so the casts fall into runs of one value, of which only each
+run's first cast was recorded, and the first run goes unrecorded when it
+repeats the value from before the block: the vote's entries at a slot are the
+first casts of its last runs, in recording order, and each must carry the
+value its cast did. A revote that repeated the value before v46 is not
+listed. When the block is not held, or no valid
 transaction in it carries the vote, the endpoint answers `404` "not retained
 by this node" instead of omitting the vote or inventing a transaction. Within
 one slot, casts list in insertion order, which is the order the ledger

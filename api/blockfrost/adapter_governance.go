@@ -581,7 +581,6 @@ func voteProcedureIndex(
 	procedures lcommon.VotingProcedures,
 	voter lcommon.Voter,
 	action lcommon.GovActionId,
-	vote uint8,
 ) (int, bool) {
 	for v, votes := range procedures {
 		if v == nil || v.Type != voter.Type || v.Hash != voter.Hash {
@@ -602,8 +601,7 @@ func voteProcedureIndex(
 			return int(x.GovActionIdx) - int(y.GovActionIdx)
 		})
 		for index, id := range actions {
-			procedure, exists := votes[id]
-			if id.Equal(action) && exists && procedure.Vote == vote {
+			if id.Equal(action) {
 				return index, true
 			}
 		}
@@ -613,10 +611,9 @@ func voteProcedureIndex(
 
 // castTransactions locates the transaction behind each cast. A cast recorded
 // with its position needs only its block's height. One recorded before the
-// history kept positions is found by decoding the block at its slot: the last
-// valid transaction of the block voting for the same proposal as the same
-// voter is the one that set the recorded value. A cast whose block is not
-// held reports ErrHistoryNotRetained rather than a made-up transaction.
+// history kept positions is matched to the block's casts by
+// legacyCastTransaction. A cast whose block is not held, or that matches no
+// cast in it, reports ErrHistoryNotRetained rather than a made-up transaction.
 func (a *NodeAdapter) castTransactions(
 	ctx context.Context,
 	rows []models.GovernanceVoteRow,
@@ -641,49 +638,126 @@ func (a *NodeAdapter) castTransactions(
 			})
 			continue
 		}
-		voterType, ok := lcommonVoterType(
-			row.Vote.VoterType, row.Vote.VoterCredentialTag,
-		)
-		if !ok || len(row.Vote.VoterCredential) != 28 {
-			return nil, fmt.Errorf("vote %d has an invalid voter", row.Vote.ID)
-		}
-		voter := lcommon.Voter{Type: voterType}
-		copy(voter.Hash[:], row.Vote.VoterCredential)
-		action, err := lcommon.NewGovActionId(
-			row.ProposalTxHash, row.ProposalActionIndex,
-		)
+		cast, err := legacyCastTransaction(row, block)
 		if err != nil {
 			return nil, err
 		}
-		var found *castTransaction
-		for _, tx := range block.txs {
-			if !tx.IsValid() {
-				continue
-			}
-			index, matched := voteProcedureIndex(
-				tx.VotingProcedures(),
-				voter,
-				action,
-				row.Vote.Vote,
-			)
-			if !matched {
-				continue
-			}
-			found = &castTransaction{
-				txHash:      hex.EncodeToString(tx.Hash().Bytes()),
-				certIndex:   index,
-				blockHeight: block.number,
-			}
-		}
-		if found == nil {
-			return nil, fmt.Errorf(
-				"transaction casting vote %d at slot %d: %w",
-				row.Vote.ID, row.CastSlot, ErrHistoryNotRetained,
-			)
-		}
-		ret = append(ret, *found)
+		ret = append(ret, cast)
 	}
 	return ret, nil
+}
+
+// blockCast is one valid voting procedure in a block by the voter of a
+// history entry, on its proposal.
+type blockCast struct {
+	txHash     string
+	certIndex  int
+	vote       uint8
+	anchorURL  string
+	anchorHash []byte
+}
+
+// legacyCastTransaction matches a history entry recorded without its position
+// to a cast in its block. Such history recorded a cast only when it changed
+// the vote's value or anchor, so the block's casts by the voter on the
+// proposal fall into runs of one value, and only a run's first cast was
+// recorded. The first run goes unrecorded when it repeats the value from
+// before the block, so the vote's entries at the slot are the first casts of
+// its last CastSlotCount runs, in order. The value the entry recorded must
+// match the cast it lands on.
+func legacyCastTransaction(
+	row models.GovernanceVoteRow,
+	block *slotBlock,
+) (castTransaction, error) {
+	notRetained := fmt.Errorf(
+		"transaction casting vote %d at slot %d: %w",
+		row.Vote.ID, row.CastSlot, ErrHistoryNotRetained,
+	)
+	voterType, ok := lcommonVoterType(
+		row.Vote.VoterType, row.Vote.VoterCredentialTag,
+	)
+	if !ok || len(row.Vote.VoterCredential) != 28 {
+		return castTransaction{}, fmt.Errorf(
+			"vote %d has an invalid voter", row.Vote.ID,
+		)
+	}
+	voter := lcommon.Voter{Type: voterType}
+	copy(voter.Hash[:], row.Vote.VoterCredential)
+	action, err := lcommon.NewGovActionId(
+		row.ProposalTxHash, row.ProposalActionIndex,
+	)
+	if err != nil {
+		return castTransaction{}, err
+	}
+	var runs []blockCast
+	for _, tx := range block.txs {
+		if !tx.IsValid() {
+			continue
+		}
+		procedures := tx.VotingProcedures()
+		index, matched := voteProcedureIndex(procedures, voter, action)
+		if !matched {
+			continue
+		}
+		cast := blockCast{
+			txHash:    hex.EncodeToString(tx.Hash().Bytes()),
+			certIndex: index,
+		}
+		if procedure, ok := voterProcedure(procedures, voter, action); ok {
+			cast.vote = procedure.Vote
+			if procedure.Anchor != nil {
+				cast.anchorURL = procedure.Anchor.Url
+				cast.anchorHash = procedure.Anchor.DataHash[:]
+			}
+		}
+		if len(runs) > 0 && sameCastValue(runs[len(runs)-1], cast) {
+			continue
+		}
+		runs = append(runs, cast)
+	}
+	count := row.CastSlotCount
+	if count < 1 || row.CastSlotRank < 0 || row.CastSlotRank >= count ||
+		count > len(runs) || count < len(runs)-1 {
+		return castTransaction{}, notRetained
+	}
+	cast := runs[len(runs)-count+row.CastSlotRank]
+	recorded := blockCast{
+		vote:       row.Vote.Vote,
+		anchorURL:  row.Vote.AnchorURL,
+		anchorHash: row.Vote.AnchorHash,
+	}
+	if !sameCastValue(cast, recorded) {
+		return castTransaction{}, notRetained
+	}
+	return castTransaction{
+		txHash:      cast.txHash,
+		certIndex:   cast.certIndex,
+		blockHeight: block.number,
+	}, nil
+}
+
+func sameCastValue(a, b blockCast) bool {
+	return a.vote == b.vote && a.anchorURL == b.anchorURL &&
+		bytes.Equal(a.anchorHash, b.anchorHash)
+}
+
+// voterProcedure returns the voter's procedure on action in procedures.
+func voterProcedure(
+	procedures lcommon.VotingProcedures,
+	voter lcommon.Voter,
+	action lcommon.GovActionId,
+) (lcommon.VotingProcedure, bool) {
+	for v, votes := range procedures {
+		if v == nil || v.Type != voter.Type || v.Hash != voter.Hash {
+			continue
+		}
+		for id, procedure := range votes {
+			if id != nil && id.Equal(action) {
+				return procedure, true
+			}
+		}
+	}
+	return lcommon.VotingProcedure{}, false
 }
 
 func voterRole(voterType uint8) string {

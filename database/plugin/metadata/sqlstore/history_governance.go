@@ -149,6 +149,11 @@ WHERE a.cold_credential_tag = ? AND a.cold_credential = ?
 v.voter_credential, h.vote, h.anchor_url, h.anchor_hash, v.added_slot,
 v.vote_updated_slot, v.deleted_slot, p.tx_hash, p.action_index, p.action_type,
 h.transition_slot, h.tx_hash, h.cert_index,
+(SELECT COUNT(*) FROM governance_vote_history same
+ WHERE same.vote_id = h.vote_id AND same.transition_slot = h.transition_slot
+   AND same.id < h.id),
+(SELECT COUNT(*) FROM governance_vote_history same
+ WHERE same.vote_id = h.vote_id AND same.transition_slot = h.transition_slot),
 CASE WHEN v.deleted_slot IS NULL AND NOT EXISTS (
     SELECT 1 FROM governance_vote_history later
     WHERE later.vote_id = h.vote_id
@@ -175,7 +180,8 @@ CASE WHEN v.deleted_slot IS NULL AND NOT EXISTS (
 			&row.Vote.AddedSlot, &row.Vote.VoteUpdatedSlot,
 			&row.Vote.DeletedSlot, &row.ProposalTxHash,
 			&row.ProposalActionIndex, &row.ProposalActionType, &row.CastSlot,
-			&row.CastTxHash, &certIndex, &counted,
+			&row.CastTxHash, &certIndex, &row.CastSlotRank,
+			&row.CastSlotCount, &counted,
 		); err != nil {
 			return nil, 0, err
 		}

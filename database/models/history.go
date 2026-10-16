@@ -123,6 +123,11 @@ type GovernanceVoteRow struct {
 	// CastTxHash is nil for a cast recorded before the history kept them.
 	CastTxHash    []byte
 	CastCertIndex uint32
+	// CastSlotRank and CastSlotCount place this entry among the vote's
+	// history entries at CastSlot, in recording order: a cast with no
+	// recorded position is matched to the block's casts by them.
+	CastSlotRank  int
+	CastSlotCount int
 	// Counted reports whether the cast counts toward the tally: it is the
 	// voter's latest cast on the proposal and was not invalidated by its
 	// DRep deregistering.
