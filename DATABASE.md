@@ -1582,6 +1582,11 @@ A missing slot timer, conversion error, or negative timestamp fails the
 block; backfill also fails on undecodable block data. The checkpoint remains
 at the last successfully indexed block so restart can retry the failed block.
 Synthetic storage blobs with ID zero are excluded from the chain-block scan.
+Registration rebuilds and ordinary block indexing follow each transaction's
+applied `Consumed()` inputs and `Produced()` UTxOs, not its declared body
+inputs and outputs. For a phase-2-invalid transaction this means collateral
+inputs and an optional collateral-return output; the produced UTxO's index is
+used for the persisted registration identity.
 
 When the mapping-validator auth-token policy fingerprint changes, startup
 preflights the primary-chain block index from block number zero through the

@@ -13568,7 +13568,11 @@ Live restore/truncate bounds all subscription drains by the shutdown budget;
 an unfinished drain requires a supervised restart before storage can reopen.
 
 Once eligible to run, it subscribes to `ledger.block`
-(`ledger.BlockEventType`) and for each applied block scans every transaction:
+(`ledger.BlockEventType`) and scans each transaction's applied `Consumed()`
+inputs and `Produced()` UTxOs rather than the body-declared inputs and outputs.
+For a phase-2-invalid transaction, this indexes consumed collateral and its
+optional collateral return, preserving that produced UTxO's actual output
+index:
 
 - **cNIGHT create**: an output carrying the configured `cnight_policy_id` +
   `cnight_asset_name` token writes a `midnight_asset_creates` row and adds

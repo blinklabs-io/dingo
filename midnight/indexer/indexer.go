@@ -746,7 +746,7 @@ func (idx *Indexer) processRegistrationBlock(
 
 	for txIndex, tx := range txs {
 		txHash := tx.Id().Bytes()
-		for _, input := range tx.Inputs() {
+		for _, input := range tx.Consumed() {
 			inputHash := input.Id().Bytes()
 			key := utxoKey{TxHash: hex.EncodeToString(inputHash), Index: input.Index()}
 			idx.mu.RLock()
@@ -773,7 +773,9 @@ func (idx *Indexer) processRegistrationBlock(
 		if idx.config.MappingValidatorAddress == "" {
 			continue
 		}
-		for outputIndex, output := range tx.Outputs() {
+		for _, produced := range tx.Produced() {
+			outputIndex := produced.Id.Index()
+			output := produced.Output
 			if output.Address().String() != idx.config.MappingValidatorAddress || !idx.hasAuthToken(output) {
 				continue
 			}
@@ -1706,7 +1708,7 @@ func (idx *Indexer) processTx(
 	// We peek with a read-lock, write the DB row, then remove from memory
 	// only on success so that a transient write failure leaves the in-memory
 	// state intact and the UTxO reloadable from the DB on restart.
-	for _, inp := range tx.Inputs() {
+	for _, inp := range tx.Consumed() {
 		inpHashBytes := inp.Id().Bytes()
 		inpHashHex := hex.EncodeToString(inpHashBytes)
 		inpIdx := inp.Index()
@@ -1811,7 +1813,7 @@ func (idx *Indexer) processTx(
 			return txInputsCbor, nil
 		}
 		var err error
-		txInputsCbor, err = EncodeCandidateInputsCbor(tx.Inputs())
+		txInputsCbor, err = EncodeCandidateInputsCbor(tx.Consumed())
 		if err != nil {
 			return nil, fmt.Errorf(
 				"encode candidate tx inputs tx=%s: %w",
@@ -1823,15 +1825,15 @@ func (idx *Indexer) processTx(
 	}
 
 	// Scan outputs for cNIGHT creates, registration outputs, and governance.
-	for outIdx, out := range tx.Outputs() {
+	for _, produced := range tx.Produced() {
 		if err := idx.processOutput(
 			block,
 			txHashBytes,
-			uint32(outIdx), //nolint:gosec
+			produced.Id.Index(),
 			txIdx,
 			timestampMs,
 			govEpoch,
-			out,
+			produced.Output,
 			txn,
 			journal,
 			txInputsCborOnce,

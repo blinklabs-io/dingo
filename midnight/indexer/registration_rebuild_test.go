@@ -12,8 +12,23 @@ import (
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
 	"github.com/stretchr/testify/require"
 )
+
+type transactionWithAppliedEffects struct {
+	lcommon.Transaction
+	consumed []lcommon.TransactionInput
+	produced []lcommon.Utxo
+}
+
+func (tx transactionWithAppliedEffects) Consumed() []lcommon.TransactionInput {
+	return tx.consumed
+}
+
+func (tx transactionWithAppliedEffects) Produced() []lcommon.Utxo {
+	return tx.produced
+}
 
 func registrationRebuildConfig(store *testStore) Config {
 	return Config{
@@ -189,6 +204,89 @@ func TestRegistrationRebuildValidatesAndReplaysCanonicalHistory(t *testing.T) {
 	require.NotNil(t, registrationCheckpoint)
 	require.Equal(t, uint64(100), registrationCheckpoint.LastSlot)
 	require.Zero(t, idx.checkpointSlot, "registration rebuild must not rewind the regular Midnight checkpoint")
+}
+
+func TestRegistrationRebuildUsesAppliedTransactionEffects(t *testing.T) {
+	t.Parallel()
+	store := setupTestStore(t)
+	block := validRegistrationHistoryBlock(t)
+	cfg := registrationRebuildConfig(store)
+	cfg.LedgerTipBlock = func() (*models.Block, error) { return &block, nil }
+	cfg.CanonicalBlockIterator = func(_, _ uint64, fn func(models.Block) error) error {
+		return fn(block)
+	}
+
+	datum := simpleDatumCbor(t)
+	validHash := pad32("ab000001")
+	invalidHash := pad32("ab000002")
+	validRegistration := buildTx(t, validHash,
+		[]lcommon.TransactionInput{buildInput(t, pad32("ab000003"), 0)},
+		[]lcommon.TransactionOutput{
+			buildAuthOutput(t, testAuthPolicyID, testAuthAssetNameHex, datum),
+		},
+	)
+	require.Len(t, validRegistration.Produced(), 1)
+	invalidBodyInput := buildInput(t, validHash, 0)
+	collateralInput := buildInput(t, pad32("ab000004"), 0)
+	invalidOutput := buildAuthOutput(t, testAuthPolicyID, testAuthAssetNameHex, datum)
+	collateralReturn := buildAuthOutput(t, testAuthPolicyID, testAuthAssetNameHex, datum)
+	invalidBuilder := mockledger.NewTransactionBuilder()
+	invalidBuilder.WithId(validHashBytes(t, invalidHash)).
+		WithInputs(invalidBodyInput).
+		WithOutputs(invalidOutput).
+		WithValid(false)
+	invalidBuilder.WithCollateral(collateralInput).
+		WithCollateralReturn(collateralReturn)
+	invalidBody, err := invalidBuilder.Build()
+	require.NoError(t, err)
+	invalidTx := transactionWithAppliedEffects{
+		Transaction: invalidBody,
+		consumed:    []lcommon.TransactionInput{collateralInput},
+		produced: []lcommon.Utxo{{
+			Id:     buildInput(t, invalidHash, 1),
+			Output: collateralReturn,
+		}},
+	}
+	cfg.blockDecoder = func(models.Block) ([]lcommon.Transaction, error) {
+		return []lcommon.Transaction{validRegistration, invalidTx}, nil
+	}
+	idx, err := New(cfg)
+	require.NoError(t, err)
+	require.True(t, idx.hasAuthToken(validRegistration.Produced()[0].Output))
+	require.NoError(t, idx.rebuildRegistrationStateIfNeeded())
+
+	var registrationCount, deregistrationCount, invalidBodyOutputCount int
+	require.NoError(t, store.raw.QueryRow(
+		"SELECT COUNT(*) FROM midnight_registrations",
+	).Scan(&registrationCount))
+	require.NoError(t, store.raw.QueryRow(
+		"SELECT COUNT(*) FROM midnight_deregistrations",
+	).Scan(&deregistrationCount))
+	require.NoError(t, store.raw.QueryRow(
+		"SELECT COUNT(*) FROM midnight_registrations WHERE tx_hash = ? AND output_index = 0",
+		validHashBytes(t, invalidHash),
+	).Scan(&invalidBodyOutputCount))
+	require.Equal(t, 2, registrationCount)
+	require.Zero(t, deregistrationCount)
+	require.Zero(t, invalidBodyOutputCount)
+	idx.mu.RLock()
+	_, validTracked := idx.regUTxOs[utxoKey{TxHash: validHash, Index: 0}]
+	_, invalidOutputTracked := idx.regUTxOs[utxoKey{TxHash: invalidHash, Index: 0}]
+	_, collateralReturnTracked := idx.regUTxOs[utxoKey{TxHash: invalidHash, Index: 1}]
+	idx.mu.RUnlock()
+	require.True(t, validTracked)
+	require.False(t, invalidOutputTracked)
+	require.True(t, collateralReturnTracked)
+
+	require.NoError(t, idx.processBlock(block, []lcommon.Transaction{validRegistration, invalidTx}, 100))
+	require.NoError(t, store.raw.QueryRow(
+		"SELECT COUNT(*) FROM midnight_registrations",
+	).Scan(&registrationCount))
+	require.NoError(t, store.raw.QueryRow(
+		"SELECT COUNT(*) FROM midnight_deregistrations",
+	).Scan(&deregistrationCount))
+	require.Equal(t, 2, registrationCount)
+	require.Zero(t, deregistrationCount)
 }
 
 func TestRegistrationRebuildRetriesAfterInterruptedReplay(t *testing.T) {
