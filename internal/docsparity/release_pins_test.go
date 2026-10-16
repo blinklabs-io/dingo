@@ -72,6 +72,7 @@ func TestExecutableReleaseInputsPinned(t *testing.T) {
 		t.Fatal(err)
 	}
 	sha := regexp.MustCompile(`@[a-f0-9]{40}$`)
+	const readOnlyConventionalWorkflow = "blinklabs-io/actions/.github/workflows/reuseable-conventional-commits.yml@main"
 	for _, path := range paths {
 		content, err := os.ReadFile(path)
 		if err != nil {
@@ -89,7 +90,7 @@ func TestExecutableReleaseInputsPinned(t *testing.T) {
 				continue
 			}
 			value := strings.Fields(strings.TrimSpace(strings.TrimPrefix(line, "uses:")))[0]
-			if !strings.HasPrefix(value, "./") && !sha.MatchString(value) {
+			if !strings.HasPrefix(value, "./") && !sha.MatchString(value) && value != readOnlyConventionalWorkflow {
 				t.Errorf("%s: action is not SHA pinned: %s", filepath.Base(path), value)
 			}
 		}
