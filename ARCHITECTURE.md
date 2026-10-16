@@ -11014,7 +11014,7 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
   | `/pool_history` | intentionally-incomparable | `pool_fees`, `deleg_rewards` | Koios derives these from an approximation that omits the pledge/owner-stake bonus and rounds components. |
   | `/pool_history` | unsupported | `active_stake_pct`, `saturation_pct`, `epoch_ros` | Dingo has no matching persisted pool aggregate. |
   | `/account_reward_history` | exact-match | `stake_address`, `earned_epoch` | Identifies the `(stake_address, type)` aggregate `CompareAccountEpoch` matches on; response identity must equal the requested epoch. |
-  | `/account_reward_history` | exact-match | `amount`, `type` | Exact integer lovelace equality against `reward_account_output.amount`/`reward_type` for member/leader rows, compared as per-`(stake_address, type)` totals summed across pool contributions, and then per pool contribution, so a disagreement that preserves the total (equal and opposite per-pool errors, or a total attributed to one of the pools the other side splits it between) is reported as `account_reward_pool_amount` rather than passing; a type that is neither in scope nor filtered by `koiosAccountRewardTypesOutOfScope` is `dingo_db_error`, not a parity failure. |
+  | `/account_reward_history` | exact-match | `amount`, `type` | Exact integer lovelace equality against `reward_account_output.amount`/`reward_type` (and, for `proposal_refund`, against the proposal-deposit credit in `account_reward_delta.amount`) for member/leader/proposal_refund rows, compared as per-`(stake_address, type)` totals summed across pool contributions, and then per pool contribution, so a disagreement that preserves the total (equal and opposite per-pool errors, or a total attributed to one of the pools the other side splits it between) is reported as `account_reward_pool_amount` rather than passing; repeated `proposal_refund` rows sum as separate deposits; a type that is neither modeled nor filtered by `koiosAccountRewardTypesOutOfScope` is `reward_type_unmodeled`, an ERROR rather than a parity failure, so the account check cannot pass. |
   | `/account_reward_history` | derived-match | `pool_id_bech32` | Decoded to `reward_account_output.pool_key_hash`'s pool ID to identify each contribution to a shared reward account; distinct pools aggregate and are then compared per pool, a repeated same-pool row is `acct_duplicate`. A side that names no pool for a key makes no per-pool statement to disagree with, so the totals are the whole verdict there. |
   | `/account_reward_history` | unsupported | `spendable_epoch` | Stored for reference only; not currently compared against Dingo's schema. |
   | `/epoch_params` | exact-match | `epoch_no` | The filtered response must contain exactly the requested reporting epoch K. |
@@ -11271,7 +11271,13 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
   `checkEpoch`'s `accountRewardsPending` requires *every* pool entry to report
   pending before it downgrades the epoch's account comparison, so one pool
   sitting before its own boundary cannot waive the rest, and an empty or
-  nil-bearing map claims nothing.
+  nil-bearing map claims nothing. `proposal_refund` rows do not use that
+  guard: refunds for earned epoch K are journaled at the boundary into K+1,
+  an epoch before the K+2 boundary that applies member and leader rewards,
+  so `ProposalDepositRefunds.Pending` is set only while the tip has not
+  reached the start of K+1, under the same absent-row and unknown-tip rules.
+  `CompareAccountEpoch` takes it as `refundsPending` and applies it to
+  `proposal_refund` keys alone.
 
   Both categories stay `ERROR`, so this only ever moves a `FAIL` to an
   `ERROR` — never to a `PASS`. `ComparePoolEpoch` applies the identical
@@ -11422,6 +11428,8 @@ per-account categories: `acct_only_dingo`,
 reward_type, pool) row within one side — a data-integrity problem, not a
 value disagreement; the same (stake_address, reward_type) from two
 different pools is a shared reward account, which aggregates instead),
+`reward_type_unmodeled` (ERROR: a Koios reward type with no model here, so
+the account's rewards were not fully validated and the epoch cannot pass),
 `acct_zero_reward_row` (informational: a reward row worth zero
 lovelace present on one side only — nothing was credited either way, so the
 two sides agree about every lovelace and the one-sided row is a
@@ -11526,6 +11534,12 @@ second sync:
   metadata export. `GetRewardAccountOutputs` is what the per-account
   exact-parity comparison (`compareEpochAccounts`, "Per-account exact parity"
   below) reads Dingo's committed reward state through.
+  `GetProposalDepositRefunds` reads `governance_proposal`,
+  `governance_proposal_drop` and the `account_reward_delta` journal through
+  `GetGovernanceProposalsRefundedAt` and `GetPostSnapshotRewardCreditEvents`
+  (see "Proposal refunds" below). Those tables are deleted only above a
+  rollback or truncate slot, never by age or storage mode, so unlike
+  `reward_account_output` a refund read does not age out.
   - *Core-mode pruning.* `ledger/snapshot/rotation.go`'s
     `cleanupOldSnapshots` keeps `reward_stake_input`/`reward_account_output`
     for only a rolling 4-epoch window in core storage mode (API mode retains
@@ -11620,7 +11634,8 @@ second sync:
     never stops either queue. The other ERROR-severity
     categories stay fatal: `dingo_db_missing` past the grace window,
     `dingo_db_error`, and `acct_coverage_incomplete` all mean Dingo's side or
-    the reference set is unusable, which strict mode exists to surface.
+    the reference set is unusable, and `reward_type_unmodeled` means a Koios
+    reward type was never validated, which strict mode exists to surface.
     `fail` checks eligibility before the `fatalFired` compare-and-swap, so a
     non-fatal call cannot consume the exactly-once slot. The node records the
     fatal error before cancellation and returns it from `Run`, so the CLI exits
@@ -12031,12 +12046,43 @@ never the reverse.
   GET can via `req.Clone`). The response's `type` enum (`member`/`leader`/
   `treasury`/`reserves`/`refund`) maps directly onto
   `models.RewardAccountOutput.RewardType`'s `"member"`/`"leader"` string
-  constants for the two types Dingo currently produces;
+  constants for the two types Dingo's reward calculation produces;
   `CompareAccountEpoch` filters `treasury`/`reserves`/`refund` rows out of
   the comparison entirely (documented via
   `koiosAccountRewardTypesOutOfScope`, not silently dropped) since Dingo's
   reward accounting does not currently track those MIR/refund mechanisms —
-  wire them in if/when it does.
+  wire them in if/when it does. A type outside all of these is reported as
+  `reward_type_unmodeled`, which is ERROR severity: no Dingo read happened,
+  so it is not a parity failure, but an unrecognized reward mechanism leaves
+  the account only partly validated and must not produce a passing check. It
+  is not `reference_lag`, so a strict node stops on it.
+- **Proposal refunds.** `proposal_refund` is Koios's type for a governance
+  proposal deposit credited to the proposal's return account. Dingo has no
+  `reward_account_output` row for it: the epoch boundary journals the credit
+  post-snapshot in `account_reward_delta`, under a source hash derived from
+  the proposal's tx hash and action index (`proposalRewardSourceHash`, or
+  `proposalDepositRefundSourceHash` when the same proposal's treasury
+  withdrawal pays the same account). `RewardParitySource.GetProposalDepositRefunds`
+  pairs each proposal enacted or dropped at a boundary
+  (`MetadataStore.GetGovernanceProposalsRefundedAt`) with the credit it wrote
+  at its own refund slot (`MetadataStore.GetPostSnapshotRewardCreditEvents`),
+  via `governance.MatchProposalDepositRefunds`. A deposit returned to the
+  treasury because the account was not registered leaves no credit and is
+  absent, as it is from Koios. Koios files the credit made at the K to K+1
+  boundary under `earned_epoch` K (`spendable_epoch` K+1), so Koios reporting
+  epoch K pairs with proposals whose `enacted_epoch`/`dropped_epoch` is K+1
+  (`compareEpochAccounts` reads `epoch+1`). Two proposals refunded to one
+  account in one epoch are two identical Koios rows with no pool, so
+  `proposal_refund` rows sum on both sides instead of reporting
+  `acct_duplicate`. Presence and amount differences use the ordinary
+  `acct_only_*`/`value_mismatch` categories, so a missing or wrong refund
+  fails the epoch once K+1 has begun, whether or not the epoch's member and
+  leader rewards are still pending. A journal written before the refund discriminator existed
+  holds only the withdrawal credit when a treasury withdrawal paid its own
+  proposal's return account, because the refund under the same hash was
+  dropped as a replay. The plain hash is never paired for such a proposal, so
+  that deposit is absent and fails as `acct_only_koios` rather than passing
+  whenever the withdrawal happens to equal the deposit.
 - **Chunking.** `FetchAccountRewardsForEpoch` (`fetch_accounts.go`) splits
   the address universe into `koiosAccountChunkSize` (100)-sized groups,
   fetched with bounded concurrency mirroring `fetchEpoch`'s per-pool worker
@@ -12215,7 +12261,8 @@ never the reverse.
   even inside the grace window, because a zero row is not a value the other
   side can still publish later. Next is the chain-position trigger described
   under "Reward timing" above, for presence and amount alike, via
-  `checkEpoch`'s `accountRewardsPending`; it precedes the wall-clock grace
+  `checkEpoch`'s `accountRewardsPending` (and, for `proposal_refund` rows,
+  `ProposalDepositRefunds.Pending`); it precedes the wall-clock grace
   window because it is the form that survives a replay, where the epoch's real
   close time is years in the past and the window can never fire.
 - **Strict-mode propagation.** An account-level `FAIL` flows through
