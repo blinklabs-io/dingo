@@ -42,10 +42,12 @@ The policy syntax is a comma-separated list:
 | `5m/0.5`, `15m/0.5` | Exercise the production background worker with the named interval and ratio. |
 | `50ms/0.5` | Controlled scaled-interval mode used to expose interference and no-rewrite attempts in a short run. It is not a proposed operator value. |
 
-The adaptive candidate is deliberately limited to the benchmark. Its two
-signals establish that compaction can consolidate versions and that the value
-log has grown by at least one configured file. Forced compaction is a
-substantial extra operation, so the candidate must still show an end-to-end
+The adaptive candidate is deliberately limited to the benchmark. Multiple
+SSTables and a value log larger than one configured file are heuristics that
+indicate consolidation might help; they do not prove that obsolete versions
+exist. An append-only workload with unique keys can satisfy both signals
+without creating versions for compaction to consolidate. Forced compaction is
+a substantial extra operation, so the candidate must still show an end-to-end
 benefit before it becomes production behavior.
 
 ### Calibrate the method
