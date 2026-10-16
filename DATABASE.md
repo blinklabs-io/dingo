@@ -1611,6 +1611,24 @@ A missing slot timer, conversion error, or negative timestamp fails the
 block; backfill also fails on undecodable block data. The checkpoint remains
 at the last successfully indexed block so restart can retry the failed block.
 Synthetic storage blobs with ID zero are excluded from the chain-block scan.
+Registration rebuilds and ordinary block indexing follow each transaction's
+applied `Consumed()` inputs and `Produced()` UTxOs, not its declared body
+inputs and outputs. For a phase-2-invalid transaction this means collateral
+inputs and an optional collateral-return output; the produced UTxO's index is
+used for the persisted registration identity.
+
+When the mapping-validator auth-token policy fingerprint changes, startup
+preflights the primary-chain block index from block number zero through the
+applied tip. It checks decoded block metadata, previous-hash links, block-number
+continuity (including Byron EBBs), and the exact tip before clearing
+`midnight_registrations` and `midnight_deregistrations`. The clear and pending
+marker commit together. A restart with a pending marker repeats the clear and
+replay; completion is recorded only after replay reaches the validated tip.
+Missing, expired, or discontinuous retained history fails before existing rows
+are changed. This rebuild is scoped to registration state; other Midnight
+tables are not cleared or replayed by the migration. It uses a dedicated
+registration-rebuild checkpoint so the ordinary Midnight backfill checkpoint
+is preserved.
 
 | Table | Columns | Keys / indexes | Relationships and notes |
 |---|---|---|---|
