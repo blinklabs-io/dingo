@@ -417,7 +417,7 @@ RETURNING id`,
 				pool.PoolKeyHash,
 				pool.VrfKeyHash,
 				pool.RewardAccount,
-				pool.LatestOpCertSequence,
+				encodeOpCertSequence(pool.LatestOpCertSequence),
 				pool.RewardAccountCredentialTag,
 				decimalUint64(pool.Pledge),
 				decimalUint64(pool.Cost),
@@ -947,10 +947,7 @@ func (s *Store) UpdatePoolOpCertSequence(
 	slot uint64,
 	txn types.Txn,
 ) error {
-	sequenceValue, err := checkedInt64(sequence)
-	if err != nil {
-		return err
-	}
+	sequenceValue := encodeOpCertSequence(sequence)
 	slotValue, err := checkedInt64(slot)
 	if err != nil {
 		return err
@@ -982,7 +979,8 @@ func (s *Store) UpdatePoolOpCertSequence(
 				if storedSequence != sequenceValue {
 					return fmt.Errorf(
 						"opcert counter conflict for pool %x at slot %d: existing %d, candidate %d",
-						poolKeyHash.Bytes(), slot, storedSequence, sequence,
+						poolKeyHash.Bytes(), slot,
+						decodeOpCertSequence(storedSequence), sequence,
 					)
 				}
 			} else if inserted != 1 {
@@ -1015,10 +1013,7 @@ func (s *Store) UpdatePoolOpCertSequenceBatched(
 			accumulator,
 		)
 	}
-	sequenceValue, err := checkedInt64(sequence)
-	if err != nil {
-		return err
-	}
+	sequenceValue := encodeOpCertSequence(sequence)
 	slotValue, err := checkedInt64(slot)
 	if err != nil {
 		return err
@@ -1106,7 +1101,7 @@ ON CONFLICT (pool_key_hash, slot) DO NOTHING`
 						"opcert counter conflict for pool %x at slot %d: existing %d, candidate %d",
 						queued.key.poolKeyHash.Bytes(),
 						queued.key.slot,
-						storedSequence,
+						decodeOpCertSequence(storedSequence),
 						queued.sequence,
 					)
 				}
@@ -1181,7 +1176,10 @@ FROM pool_opcert_sequence
 WHERE pool_key_hash = ?`,
 		poolKeyHash.Bytes(),
 	).Scan(&sequence)
-	return uint64(sequence.Int64), sequence.Valid, err
+	if err != nil || !sequence.Valid {
+		return 0, false, err
+	}
+	return decodeOpCertSequence(sequence.Int64), true, nil
 }
 
 // LatestPoolOpCertSequenceAfter returns the highest sequence recorded for a
@@ -1205,7 +1203,10 @@ WHERE pool_key_hash = ? AND slot > ?`,
 		poolKeyHash.Bytes(),
 		afterSlot,
 	).Scan(&sequence, &count)
-	return uint64(sequence), count > 0, err
+	if err != nil || count == 0 {
+		return 0, false, err
+	}
+	return decodeOpCertSequence(sequence), true, nil
 }
 
 // PoolOpCertSequencesExistAtSlot reports whether any pool_opcert_sequence row
@@ -1261,7 +1262,10 @@ WHERE pool_key_hash = ? AND slot <= ?`,
 		poolKeyHash.Bytes(),
 		slotValue,
 	).Scan(&sequence, &count)
-	return uint64(sequence), count > 0, err
+	if err != nil || count == 0 {
+		return 0, false, err
+	}
+	return decodeOpCertSequence(sequence), true, nil
 }
 
 // LatestPoolOpCertSequencesSQL is the statement LatestPoolOpCertSequences
@@ -1305,11 +1309,7 @@ func (s *Store) LatestPoolOpCertSequences(
 		if err := rows.Scan(&poolKeyHash, &sequence); err != nil {
 			return nil, err
 		}
-		value, err := opCertSequenceValue(sequence)
-		if err != nil {
-			return nil, err
-		}
-		ret[string(poolKeyHash)] = value
+		ret[string(poolKeyHash)] = decodeOpCertSequence(sequence)
 	}
 	return ret, rows.Err()
 }
@@ -1394,22 +1394,19 @@ func (s *Store) LatestPoolOpCertSequencesAtOrBefore(
 			delete(ret, string(poolKeyHash))
 			continue
 		}
-		value, err := opCertSequenceValue(sequence.Int64)
-		if err != nil {
-			return nil, err
-		}
-		ret[string(poolKeyHash)] = value
+		ret[string(poolKeyHash)] = decodeOpCertSequence(sequence.Int64)
 	}
 	return ret, nil
 }
 
-// opCertSequenceValue converts a stored op-cert sequence, failing on a
-// negative one rather than wrapping it into a huge counter.
-func opCertSequenceValue(sequence int64) (uint64, error) {
-	if sequence < 0 {
-		return 0, fmt.Errorf("negative op-cert sequence %d", sequence)
-	}
-	return uint64(sequence), nil
+// encodeOpCertSequence flips the sign bit so signed SQL ordering matches the
+// complete uint64 ordering used by the ledger.
+func encodeOpCertSequence(sequence uint64) int64 {
+	return int64(sequence ^ (uint64(1) << 63))
+}
+
+func decodeOpCertSequence(sequence int64) uint64 {
+	return uint64(sequence) ^ (uint64(1) << 63)
 }
 
 // mithrilTrustBoundarySyncKey mirrors database.mithrilLedgerSlotSyncKey and
@@ -1524,14 +1521,16 @@ ORDER BY slot ASC, pool_key_hash ASC`,
 	ret := []models.PoolOpCertSequence{}
 	for rows.Next() {
 		var row models.PoolOpCertSequence
+		var sequence int64
 		if err := rows.Scan(
 			&row.PoolKeyHash,
 			&row.ID,
 			&row.Slot,
-			&row.Sequence,
+			&sequence,
 		); err != nil {
 			return nil, err
 		}
+		row.Sequence = decodeOpCertSequence(sequence)
 		ret = append(ret, row)
 	}
 	return ret, rows.Err()
@@ -3469,16 +3468,17 @@ func (s *Store) restorePoolLatestOpCertSequence(
 	for start := 0; start < len(poolKeyHashes); start += s.dialect.ParameterLimit() {
 		end := min(start+s.dialect.ParameterLimit(), len(poolKeyHashes))
 		batch := poolKeyHashes[start:end]
-		args := make([]any, len(batch))
-		for i, hash := range batch {
-			args[i] = hash
+		args := make([]any, 1, len(batch)+1)
+		args[0] = encodeOpCertSequence(0)
+		for _, hash := range batch {
+			args = append(args, hash)
 		}
 		result, err := db.ExecContext(ctx, `
 UPDATE pool
 SET latest_op_cert_sequence = COALESCE((
     SELECT MAX(sequence) FROM pool_opcert_sequence sequence
     WHERE sequence.pool_key_hash = pool.pool_key_hash
-), 0)
+), ?)
 WHERE pool_key_hash IN (`+bindPlaceholders(len(batch))+`)`,
 			args...,
 		)
@@ -3598,7 +3598,9 @@ func scanPool(row rowScanner) (*models.Pool, error) {
 	if err != nil {
 		return nil, err
 	}
-	pool.LatestOpCertSequence = uint64(latest.Int64)
+	if latest.Valid {
+		pool.LatestOpCertSequence = decodeOpCertSequence(latest.Int64)
+	}
 	pool.RewardAccountCredentialTag = uint8(credentialTag)
 	pool.Pledge = types.Uint64(pledgeValue)
 	pool.Cost = types.Uint64(costValue)

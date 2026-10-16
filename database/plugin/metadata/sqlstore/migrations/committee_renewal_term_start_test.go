@@ -144,7 +144,14 @@ func runCommitteeRenewalTermStartBackfill(
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
 	registry, err := SQLiteRegistry()
 	require.NoError(t, err)
-	index := len(registry) - 1
+	index := -1
+	for i := range registry {
+		if registry[i].Name == committeeRenewalTermStartSchemaRelease {
+			index = i
+			break
+		}
+	}
+	require.NotEqual(t, -1, index)
 	require.Equal(t, committeeRenewalTermStartSchemaRelease, registry[index].Name)
 	// One credential per batch, so the cursor is resumed between every
 	// credential and a renewal chain is never split.

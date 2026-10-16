@@ -83,6 +83,7 @@ const (
 	poolRelayTypeSchemaRelease                          = "pool-relay-type"
 	midnightRollbackJournalSchemaRelease                = "midnight-rollback-journal"
 	committeeRenewalTermStartSchemaRelease              = "committee-renewal-term-start-repair"
+	opCertCounterEncodingSchemaRelease                  = "opcert-counter-unsigned-order"
 )
 
 const mithrilRewardRepairPendingKey = "mithril_reward_repair_pending"
@@ -235,6 +236,7 @@ var schemaVersions = []struct {
 		Name:    committeeRenewalTermStartSchemaRelease,
 		Dir:     "v44",
 	},
+	{Version: 45, Name: opCertCounterEncodingSchemaRelease, Dir: "v45"},
 }
 
 // SQLiteRegistry returns the checked-in SQLite migration registry.
