@@ -115,12 +115,6 @@ var (
 	errBlockPipelineEta0Unavailable = errors.New(
 		"block-processing pipeline: epoch nonce unavailable",
 	)
-	// errBlockPipelineAdmissionVerified is returned by the pipeline's nonce
-	// provider for a slot whose block passed full header verification at
-	// admission, so the validate stage skips the repeat VRF/KES work.
-	errBlockPipelineAdmissionVerified = errors.New(
-		"block-processing pipeline: header verified at admission",
-	)
 	// errHeaderStateLookupFailed marks a failure to read the local state a
 	// stateful header check needs. It says nothing about the header, so it
 	// must never be attributed to the peer that supplied it.
@@ -393,10 +387,14 @@ func verifyBlockHeaderHex(
 	//   parameters which are handled elsewhere
 	// - Stake pool validation requires pool registration lookups
 	//   which are handled elsewhere
+	// - Block-wide limits need protocol parameters, which this stateless
+	//   check is not given, and gouroboros fails closed when limits are
+	//   required without them; the ledger apply path checks them
 	config := lcommon.VerifyConfig{
 		SkipBodyHashValidation:    true,
 		SkipTransactionValidation: true,
 		SkipStakePoolValidation:   true,
+		SkipBlockLimitsValidation: true,
 	}
 
 	header, err := normalizeHeaderVrfFieldsFromBodyCbor(block.Header())
@@ -2784,51 +2782,6 @@ func (ls *LedgerState) epochNonceHex(epochId uint64, nonce []byte) string {
 		hex:   nonceHex,
 	}
 	return nonceHex
-}
-
-// blockPipelineEta0Provider implements gouroboros' pipeline.Eta0Provider for
-// the block-processing pipeline's validate stage. It
-// reads only the already-published epoch cache. Unlike the admission path it
-// must neither forecast nor rebuild the hard-fork summary: validate workers
-// run concurrently over blocks already committed to ls.chain, and a missing
-// cached nonce means this later validation is deferred under the same gate as
-// the serial path. Avoiding headerVerificationEpoch here also keeps the hot
-// path O(logical cache scan) instead of rebuilding the full era summary for
-// every block.
-//
-// Byron-era slots have no Praos epoch nonce. Callers skip VRF/KES validation
-// for decoded Byron blocks, exactly as the serial path's verifyBlockHeaderHex
-// does. A missing nonce for any decoded post-Byron block is handled by the
-// same validation-state gate as admission rather than treated as a
-// cryptographic rejection.
-//
-// An epoch without a nonce is wrapped in errBlockPipelineEta0Unavailable.
-// A slot outside the published cache is wrapped in
-// errHeaderVerificationDeferred, so the error drain and enforcement path can
-// distinguish missing state from a cryptographic rejection.
-func (ls *LedgerState) blockPipelineEta0Provider(slot uint64) (string, error) {
-	if ls.admissionVerifiedSlot(slot) {
-		return "", errBlockPipelineAdmissionVerified
-	}
-	epoch, err := ls.epochForSlot(slot)
-	if err != nil {
-		return "", fmt.Errorf(
-			"%w: block-processing pipeline nonce lookup for slot %d: %w",
-			errHeaderVerificationDeferred,
-			slot,
-			err,
-		)
-	}
-	if len(epoch.Nonce) == 0 {
-		return "", fmt.Errorf(
-			"%w: %w: epoch %d has no nonce for slot %d",
-			errBlockPipelineEta0Unavailable,
-			errEpochNonceUnavailable,
-			epoch.EpochId,
-			slot,
-		)
-	}
-	return ls.epochNonceHex(epoch.EpochId, epoch.Nonce), nil
 }
 
 // epochForSlot searches the currently published epoch-cache snapshot for the

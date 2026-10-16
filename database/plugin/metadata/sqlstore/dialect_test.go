@@ -18,6 +18,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"runtime"
 	"testing"
 
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -28,27 +29,28 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// TestSQLiteRestoreModeKeepsRaisedWALAutocheckpoint guards against
-// RestoreNormalMode silently undoing the checkpoint-threshold fix in
-// database/plugin/metadata/sqlite/shared_sqlstore.go's sqliteCommonPragmas:
-// a bulk load (SetBulkMode) must leave a connection at the same
-// wal_autocheckpoint every ordinary connection already runs with, not
-// SQLite's much smaller compiled-in default, once RestoreNormalMode runs
-// after it.
-func TestSQLiteRestoreModeKeepsRaisedWALAutocheckpoint(t *testing.T) {
+// TestSQLiteBulkModeTunesAndRestoresConnectionPragmas guards the bulk-only
+// sorter limit and restores the writer's raised checkpoint threshold.
+func TestSQLiteBulkModeTunesAndRestoresConnectionPragmas(t *testing.T) {
 	t.Parallel()
 	db, err := sql.Open("sqlite", "file::memory:?cache=shared")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
+	db.SetMaxOpenConns(1)
 
 	dialect := SQLiteDialect()
 	ctx := context.Background()
 	require.NoError(t, dialect.SetBulkMode(ctx, db))
+	var workerThreads int
+	require.NoError(t, db.QueryRow("PRAGMA threads").Scan(&workerThreads))
+	require.Equal(t, min(4, max(0, runtime.GOMAXPROCS(0)-1)), workerThreads)
 	require.NoError(t, dialect.RestoreNormalMode(ctx, db))
 
 	var pages int
 	require.NoError(t, db.QueryRow("PRAGMA wal_autocheckpoint").Scan(&pages))
 	require.Equal(t, 10000, pages)
+	require.NoError(t, db.QueryRow("PRAGMA threads").Scan(&workerThreads))
+	require.Zero(t, workerThreads)
 }
 
 func TestPostgresRebind(t *testing.T) {

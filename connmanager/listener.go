@@ -481,7 +481,7 @@ func (c *ConnectionManager) setupAcceptedConnection(
 		peerAddr = conn.RemoteAddr().String()
 	}
 	if l.UseNtC {
-		c.config.Logger.Info(
+		c.config.Logger.Debug(
 			"listener: accepted NtC connection",
 			"remote_addr",
 			peerAddr,

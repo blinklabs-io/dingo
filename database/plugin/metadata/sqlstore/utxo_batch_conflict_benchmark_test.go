@@ -22,7 +22,7 @@ import (
 )
 
 func BenchmarkInsertUtxoBatchConflicts(b *testing.B) {
-	const batchSize = 8
+	const batchSize = utxoInsertBatchSize
 	store := newMigratedSQLiteStore(b)
 	snapshotUtxos := make([]models.Utxo, batchSize)
 	batch := make([]*models.Utxo, batchSize)

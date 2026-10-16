@@ -1056,12 +1056,17 @@ flowchart LR
 `dingo load` from an HTTPS ImmutableDB root, or HTTP on loopback for local
 development, keeps a source-keyed download cache under
 `<databasePath>/immutable-download`.
-Non-loopback HTTP is rejected. `staging/` holds chunk triads
+Non-loopback HTTP and private or special-use HTTPS destinations are rejected
+for the initial request, every redirect, and every resolved dial target. The
+downloader does not use proxy settings. `staging/` holds chunk triads
 in flight, each file written as `<name>.part` and renamed when complete;
 `ready/` holds the contiguous chunks the loader reads. A copied chunk leaves
 `ready/` once a later chunk holding a block is copied, so the cache keeps the
 chunk holding the chain tip, which the next run resumes from. Source keys keep
-completed and partial files from one root out of another root's replay.
+completed files from one root out of another root's replay. Aggregate transfer
+and cache bounds follow the requested chunk range and format limits. Each write
+also preserves free space on the cache filesystem; an unsuccessful import
+removes its staging files after all fetch workers stop.
 
 ## SQL Conventions
 
@@ -1490,6 +1495,12 @@ rebuilding the rest of the deferred manifest. The durable `sync_state` marker
 still covers the complete cycle and is cleared only after all rebuildable
 indexes are present.
 
+SQLite commits each missing index in its own transaction so
+`wal_autocheckpoint` can run between builds. An interrupted rebuild leaves
+completed indexes in place for the next run to skip; the marker is cleared only
+after a final transaction confirms the requested set is present. PostgreSQL and
+MySQL retain the single-transaction rebuild path.
+
 The batched API import path skips replay-cleanup deletes when a transaction
 hash inserts a fresh transaction row: its generated ID cannot yet have detail
 rows. Replays still run the deletes to preserve idempotency. Transaction-detail
@@ -1861,6 +1872,13 @@ view selects the latest same-epoch re-registration and excludes that immediate
 first registration. This keeps the effective and deferred VRF-key indexes
 separate while using the same retirement precedence for both.
 
+The `pool_opcert_sequence` row is also covered by rollback and by the
+`ledgerstate.ImportLedgerState` post-anchor sweep: both remove observations
+after their target, then recompute `pool.latest_op_cert_sequence` from the
+remaining history. This lets replay record a new counter at a slot previously
+written by discarded local state while preserving the first-write-wins rule
+for a surviving `(pool_key_hash, slot)` row.
+
 ### DReps, Governance, and Committee
 
 DRep activity updates reject epoch-plus-inactivity overflow before addition and
@@ -1894,6 +1912,36 @@ When an enacted treasury withdrawal credits a proposal return account that also
 receives a deposit refund at the same boundary, `account_reward_delta` records
 separate event discriminators for the withdrawal and refund so both credits
 remain distinct and rollbackable.
+
+### Catch-up import rollback
+
+`ledgerstate.ImportLedgerState` clears metadata written by local replay after
+the imported anchor before applying snapshot state. In addition to the `epoch`
+row's sweep list, it restores or removes post-anchor `account`, `drep`, and
+`pool` state; removes post-anchor `governance_proposal`, `governance_vote`,
+`constitution`, `committee_member`, and `committee_quorum` rows; and deletes
+post-anchor `pparams` and `pparam_update` rows. These operations share the
+atomic pre-import metadata transaction. For accounts deleted because they did
+not exist at the anchor, post-anchor `account_reward_delta` and
+`account_withdrawal_witness` rows are deleted without reversing balances;
+snapshot-imported accounts have their journal rows cleared after their anchor
+balances are written. Replay can then recreate the same accounts and apply
+their later reward changes once.
+
+The schema-table entries above have these additional catch-up import effects:
+
+| Table | Catch-up import effect |
+|---|---|
+| `account` | `RestoreAccountStateAtSlot` removes accounts absent at the anchor and restores surviving account state. Reward-delta and withdrawal-witness rows for removed accounts are cleared in the same transaction. |
+| `pool` | `RestorePoolStateAtSlot` removes pools registered after the anchor and restores surviving pool parameters from the last registration at or before it. |
+| `drep` | `RestoreDrepStateAtSlot` restores DRep state to the imported anchor. |
+| `governance_proposal` | The pre-import sweep deletes proposal rows added after the anchor. |
+| `governance_vote` | The pre-import sweep deletes vote rows added after the anchor. |
+| `constitution` | The pre-import sweep deletes constitution rows added after the anchor. |
+| `committee_member` | The pre-import sweep removes committee state added after the anchor. |
+| `committee_quorum` | The pre-import sweep removes quorum rows added after the anchor. |
+| `pparams` | The pre-import sweep deletes parameter rows added after the anchor before snapshot parameters are written. |
+| `pparam_update` | The pre-import sweep deletes parameter-update rows added after the anchor. |
 
 ### Off-chain Metadata Cache
 
@@ -2542,7 +2590,9 @@ transactions to overlap.
 Explicit bulk mode, used by Mithril ledger-state import, pauses this scheduled
 checkpoint callback. Entering bulk mode first drains an in-flight callback, so
 the dedicated checkpoint connection cannot overlap the import's metadata
-writes; restoring normal pragmas re-enables the ticker. Writer-owned
+writes; restoring normal pragmas re-enables the ticker. Bulk mode also caps
+SQLite auxiliary sorter threads at `min(4, GOMAXPROCS-1)` for index builds;
+normal-mode restore resets the setting to zero. Writer-owned
 `wal_autocheckpoint` remains active at 10000 pages throughout the import, so
 WAL frames are still backfilled while only the independent TRUNCATE attempts
 are postponed until the bulk phase completes. If the caller's final pragma

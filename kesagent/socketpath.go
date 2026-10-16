@@ -54,16 +54,16 @@ func socketPathLimit(path string) int {
 }
 
 func isAbstractSocketPath(path string) bool {
-	return strings.HasPrefix(path, "@")
+	return runtime.GOOS == "linux" && strings.HasPrefix(path, "@")
 }
 
 // resolveSocketPath fixes a named socket to one filesystem location before
-// the client starts reconnecting. Abstract socket names are already complete
-// kernel addresses and must not be interpreted as filesystem paths.
+// the client starts reconnecting. Linux abstract socket names are already
+// complete kernel addresses and must not be interpreted as filesystem paths.
 func resolveSocketPath(path string) (string, error) {
 	if strings.HasPrefix(path, "\x00") {
 		return "", errors.New(
-			"kesagent: NUL-prefixed socket addresses are not portable; use the @ prefix for a Linux abstract socket",
+			"kesagent: NUL-prefixed socket addresses are not portable; use the @ prefix on Linux for an abstract socket",
 		)
 	}
 	if isAbstractSocketPath(path) {

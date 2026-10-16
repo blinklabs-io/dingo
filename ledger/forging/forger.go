@@ -4434,7 +4434,7 @@ func buildLeiosEB(
 		// peer fetching a locally forged EB validates it instead of rejecting
 		// every tx.
 		if !validLeiosTransactionHash(tx.Hash) ||
-			len(tx.Cbor) == 0 || len(tx.Cbor) > math.MaxUint16 {
+			!validLeiosTransactionSize(len(tx.Cbor)) {
 			continue
 		}
 		// Apply the manifest caps to references that would otherwise be
@@ -4451,9 +4451,9 @@ func buildLeiosEB(
 			break
 		}
 		totalBytes += txBytes
-		// Bounded above by the MaxUint16 check on len(tx.Cbor) above. Kept
+		// Bounded above by the MaxUint32 check on len(tx.Cbor) above. Kept
 		// on one line so the directive stays attached to the conversion.
-		size := uint16(len(tx.Cbor)) // #nosec G115
+		size := uint32(len(tx.Cbor)) // #nosec G115
 		refs = append(refs, lcommon.LeiosTransactionReference{
 			TransactionHash: lcommon.Blake2b256Hash(tx.Cbor),
 			TransactionSize: size,
@@ -4478,8 +4478,14 @@ func validLeiosTransactionHash(hash string) bool {
 }
 
 func validLeiosTransactionReference(tx MempoolTransaction) bool {
-	return validLeiosTransactionHash(tx.Hash) && len(tx.Cbor) > 0 &&
-		len(tx.Cbor) <= math.MaxUint16
+	return validLeiosTransactionHash(tx.Hash) &&
+		validLeiosTransactionSize(len(tx.Cbor))
+}
+
+// validLeiosTransactionSize reports whether n fits the manifest reference's
+// 32-bit size field and is non-empty.
+func validLeiosTransactionSize(n int) bool {
+	return n > 0 && uint64(n) <= math.MaxUint32
 }
 
 // modeString returns a string representation of the forging mode.
