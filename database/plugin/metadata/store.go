@@ -1106,10 +1106,13 @@ type TransactionStore interface {
 
 	// CountTransactionsByPaymentCred returns the total number of
 	// transactions involving the provided payment credential across every
-	// address that carries it, regardless of staking part. Used by the
-	// Blockfrost payment-credential (addr_vkh/script) address lookups.
+	// address that carries it, regardless of staking part. paymentScript
+	// selects a script credential rather than a key credential sharing the
+	// hash. Used by the Blockfrost payment-credential (addr_vkh/script)
+	// address lookups.
 	CountTransactionsByPaymentCred(
 		[]byte, // paymentKey
+		bool, // paymentScript
 		types.Txn,
 	) (int, error)
 
@@ -2623,6 +2626,123 @@ type MetadataStore interface {
 		types.Txn,
 	) (initialMintTxHash []byte, mintOrBurnCount int, err error)
 
+	// ListMintedAssets returns the distinct assets with a recorded mint or
+	// burn event, ordered by their first event (oldest first, or newest first
+	// when descending) and restricted to one policy when policyID is not nil.
+	// A limit of zero or less applies no limit. API storage mode only: the
+	// mint/burn history is not recorded in core mode.
+	ListMintedAssets(
+		policyID []byte,
+		limit int,
+		offset int,
+		descending bool,
+		txn types.Txn,
+	) ([]models.MintedAsset, error)
+
+	// CountMintedAssets returns the number of distinct assets
+	// ListMintedAssets would list for the same policy filter. API storage
+	// mode only: core mode records no mint/burn history and returns zero.
+	CountMintedAssets(policyID []byte, txn types.Txn) (int, error)
+
+	// GetAssetMintBurnHistory returns the mint and burn events of one asset
+	// in chain order (oldest first, or newest first when descending). A limit
+	// of zero or less applies no limit. API storage mode only: the mint/burn
+	// history is not recorded in core mode, which returns no events.
+	GetAssetMintBurnHistory(
+		policyID lcommon.Blake2b224,
+		assetName []byte,
+		limit int,
+		offset int,
+		descending bool,
+		txn types.Txn,
+	) ([]models.AssetMintBurn, error)
+
+	// CountAssetMintBurnHistory returns the number of mint and burn events
+	// of one asset. API storage mode only: core mode records none and
+	// returns zero.
+	CountAssetMintBurnHistory(
+		policyID lcommon.Blake2b224,
+		assetName []byte,
+		txn types.Txn,
+	) (int, error)
+
+	// GetAssetTransactions returns the transactions that mint or burn an
+	// asset, create an output holding it, or spend such an output, in chain
+	// order (oldest first, or newest first when descending), optionally
+	// restricted to an inclusive (slot, block index) range. Only the hash,
+	// block hash, slot and block index of each transaction are populated. A
+	// limit of zero or less applies no limit.
+	GetAssetTransactions(
+		policyID lcommon.Blake2b224,
+		assetName []byte,
+		from *models.AddressTransactionPosition,
+		to *models.AddressTransactionPosition,
+		limit int,
+		offset int,
+		descending bool,
+		txn types.Txn,
+	) ([]models.Transaction, error)
+
+	// CountAssetTransactions returns the number of transactions
+	// GetAssetTransactions would list for the same range.
+	CountAssetTransactions(
+		policyID lcommon.Blake2b224,
+		assetName []byte,
+		from *models.AddressTransactionPosition,
+		to *models.AddressTransactionPosition,
+		txn types.Txn,
+	) (int, error)
+
+	// ListScriptHashes returns the hashes of the stored scripts in the order
+	// they were first recorded (oldest first, or newest first when
+	// descending). A limit of zero or less applies no limit.
+	ListScriptHashes(
+		limit int,
+		offset int,
+		descending bool,
+		txn types.Txn,
+	) ([][]byte, error)
+
+	// CountScripts returns the number of stored scripts.
+	CountScripts(txn types.Txn) (int, error)
+
+	// GetScriptRedeemers returns the redeemers that executed a script in
+	// chain order (oldest first, or newest first when descending). API
+	// storage mode only, and only for transactions applied after the
+	// redeemer_script index existed. A limit of zero or less applies no
+	// limit.
+	GetScriptRedeemers(
+		hash lcommon.ScriptHash,
+		limit int,
+		offset int,
+		descending bool,
+		txn types.Txn,
+	) ([]models.ScriptRedeemerRef, error)
+
+	// CountScriptRedeemers returns the number of redeemers that executed a
+	// script.
+	CountScriptRedeemers(hash lcommon.ScriptHash, txn types.Txn) (int, error)
+
+	// GetScriptReferenceUtxos returns the live UTxOs carrying the script as a
+	// reference script, in the order the outputs were recorded (oldest
+	// first, or newest first when descending). API storage mode only, and
+	// only for outputs recorded after the utxo_reference_script index
+	// existed. A limit of zero or less applies no limit.
+	GetScriptReferenceUtxos(
+		hash lcommon.ScriptHash,
+		limit int,
+		offset int,
+		descending bool,
+		txn types.Txn,
+	) ([]models.Utxo, error)
+
+	// CountScriptReferenceUtxos returns the number of live UTxOs carrying the
+	// script as a reference script.
+	CountScriptReferenceUtxos(
+		hash lcommon.ScriptHash,
+		txn types.Txn,
+	) (int, error)
+
 	// GetScript retrieves a script by its hash.
 	GetScript(
 		lcommon.ScriptHash,
@@ -3220,6 +3340,17 @@ type MetadataStore interface {
 		[][]byte,
 		types.Txn,
 	) ([]models.MidnightCommitteeCandidateRegistration, error)
+}
+
+// AddressTransactionIndexRebuilder upgrades the API-mode address index when
+// persisted rows predate payment-credential kind tracking. The callback must
+// reconstruct one transaction's complete address associations from retained
+// ledger data; an error leaves the index unavailable for retry on next start.
+type AddressTransactionIndexRebuilder interface {
+	RebuildAddressTransactionIndex(
+		context.Context,
+		func(context.Context, models.Transaction) ([]models.AddressTransaction, error),
+	) error
 }
 
 // BulkLoadOptimizer is an optional interface that metadata stores can

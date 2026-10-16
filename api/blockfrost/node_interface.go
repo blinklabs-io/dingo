@@ -24,6 +24,12 @@ import (
 // decouples the HTTP server from the concrete Node struct
 // and enables testing with mock implementations.
 type BlockfrostNode interface {
+	BlockQueryNode
+	AddressQueryNode
+	AssetQueryNode
+	ScriptQueryNode
+	MempoolQueryNode
+
 	// ChainTip returns the current chain tip info.
 	ChainTip() (ChainTipInfo, error)
 
