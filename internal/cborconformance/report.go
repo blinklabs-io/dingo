@@ -4,17 +4,26 @@ package cborconformance
 
 import (
 	"bytes"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 )
 
 const (
-	protocolVersion = "11.0"
+	schemaVersion    = "1"
+	scenario         = "cbor-decoding"
+	protocolVersion  = "11.0"
+	maxCorpusSamples = 100_000
+	maxSampleBytes   = int64(16 << 20)
 
 	decodeFailed        = "decoding failed"
 	decodeSucceeded     = "decoding succeeded but the sample must be rejected"
@@ -41,13 +50,36 @@ type Failure struct {
 	Reason string `json:"reason"`
 }
 
+type WaivedSample struct {
+	Sample string `json:"sample"`
+	Rule   string `json:"rule"`
+	Kind   string `json:"kind"`
+	Reason string `json:"reason"`
+}
+
 type Report struct {
+	SchemaVersion   string             `json:"schema_version"`
+	Scenario        string             `json:"scenario"`
+	GeneratedAt     time.Time          `json:"generated_at"`
 	Corpus          string             `json:"corpus"`
+	CorpusRevision  string             `json:"corpus_revision"`
 	ProtocolVersion string             `json:"protocol_version"`
 	Successful      bool               `json:"successful"`
 	Totals          Outcome            `json:"totals"`
 	Rules           map[string]Outcome `json:"rules"`
 	Failures        []Failure          `json:"failures"`
+	WaivedSamples   []WaivedSample     `json:"waived_samples"`
+}
+
+type corpusMetadata struct {
+	Waivers []corpusWaiver `json:"waivers"`
+}
+
+type corpusWaiver struct {
+	Rule    string   `json:"rule"`
+	Kind    string   `json:"kind"`
+	Reason  string   `json:"reason"`
+	Samples []string `json:"samples"`
 }
 
 type expectation uint8
@@ -58,21 +90,31 @@ const (
 )
 
 type sample struct {
-	rule       string
-	category   string
-	name       string
-	path       string
-	expectPath string
+	rule        string
+	category    string
+	name        string
+	path        string
+	expectPath  string
+	expectation expectation
+	mutation    bool
 }
 
 // GenerateReport evaluates the Conway CBOR corpus using Dingo's ledger
 // decoders and encoders. The report follows the cardano-cbor-dataset schema.
-func GenerateReport(datasetDir string) (Report, error) {
+func GenerateReport(datasetDir, corpusRevision string) (Report, error) {
+	if err := validateCorpusRevision(corpusRevision); err != nil {
+		return Report{}, err
+	}
 	root, err := filepath.Abs(datasetDir)
 	if err != nil {
 		return Report{}, fmt.Errorf("resolve dataset directory: %w", err)
 	}
-	info, err := os.Stat(root)
+	corpusRoot, err := os.OpenRoot(root)
+	if err != nil {
+		return Report{}, fmt.Errorf("open dataset directory: %w", err)
+	}
+	defer func() { _ = corpusRoot.Close() }()
+	info, err := corpusRoot.Stat(".")
 	if err != nil {
 		return Report{}, fmt.Errorf("stat dataset directory: %w", err)
 	}
@@ -80,7 +122,7 @@ func GenerateReport(datasetDir string) (Report, error) {
 		return Report{}, fmt.Errorf("dataset path is not a directory: %s", root)
 	}
 
-	entries, err := os.ReadDir(root)
+	entries, err := fs.ReadDir(corpusRoot.FS(), ".")
 	if err != nil {
 		return Report{}, fmt.Errorf("read dataset directory: %w", err)
 	}
@@ -95,18 +137,32 @@ func GenerateReport(datasetDir string) (Report, error) {
 	}
 
 	report := Report{
+		SchemaVersion:   schemaVersion,
+		Scenario:        scenario,
+		GeneratedAt:     time.Now().UTC(),
 		Corpus:          filepath.Base(root),
+		CorpusRevision:  corpusRevision,
 		ProtocolVersion: protocolVersion,
-		Rules:           make(map[string]Outcome, len(knownRules)),
+		Rules:           make(map[string]Outcome, len(entries)),
 		Failures:        []Failure{},
-	}
-	for _, rule := range knownRules {
-		report.Rules[rule] = Outcome{}
 	}
 
 	var files []sample
+	metadataPresent := false
+	presentRules := make(map[string]struct{}, len(knownRules))
 	for _, entry := range entries {
 		if !entry.IsDir() {
+			if entry.Name() == "corpus.json" {
+				metadataPresent = true
+				info, err := corpusRoot.Lstat(entry.Name())
+				if err != nil {
+					return Report{}, fmt.Errorf("stat corpus metadata: %w", err)
+				}
+				if !info.Mode().IsRegular() {
+					return Report{}, errors.New("corpus.json is not a regular file")
+				}
+				continue
+			}
 			return Report{}, fmt.Errorf(
 				"unexpected file in dataset root: %s",
 				entry.Name(),
@@ -118,12 +174,36 @@ func GenerateReport(datasetDir string) (Report, error) {
 				entry.Name(),
 			)
 		}
-		ruleFiles, err := listRuleSamples(root, entry.Name())
+		presentRules[entry.Name()] = struct{}{}
+		report.Rules[entry.Name()] = Outcome{}
+		ruleFiles, err := listRuleSamples(corpusRoot, entry.Name())
 		if err != nil {
 			return Report{}, err
 		}
+		if len(ruleFiles) == 0 {
+			return Report{}, fmt.Errorf(
+				"conway rule directory %s contains no CBOR samples",
+				entry.Name(),
+			)
+		}
 		files = append(files, ruleFiles...)
+		if len(files) > maxCorpusSamples {
+			return Report{}, fmt.Errorf(
+				"dataset exceeds %d CBOR samples",
+				maxCorpusSamples,
+			)
+		}
 	}
+	for _, rule := range knownRules {
+		if _, ok := presentRules[rule]; !ok {
+			return Report{}, fmt.Errorf("dataset is missing Conway rule directory: %s", rule)
+		}
+	}
+	waivedSamples, err := loadSampleWaivers(corpusRoot, metadataPresent, files)
+	if err != nil {
+		return Report{}, err
+	}
+	report.WaivedSamples = waivedSamples
 	if len(files) == 0 {
 		return Report{}, errors.New("dataset contains no CBOR samples")
 	}
@@ -131,27 +211,28 @@ func GenerateReport(datasetDir string) (Report, error) {
 		return files[i].name < files[j].name
 	})
 
+	waived := make(map[string]struct{}, len(waivedSamples))
+	for _, sample := range waivedSamples {
+		waived[sample.Sample] = struct{}{}
+	}
 	for _, file := range files {
+		if _, ok := waived[file.name]; ok {
+			continue
+		}
 		outcome := report.Rules[file.rule]
-		want := mustDecode
-		if file.category == "invalid/zap-0" {
-			want = mustReject
-		}
-		if want == mustDecode || want == mustReject {
-			if file.category == "valid" || file.category == "invalid/zap-0" {
-				outcome.GeneratedTotal++
-			}
-		}
-		switch file.category {
-		case "valid":
-			outcome.GeneratedDecodedReencodedExpected++
-		case "invalid/zap-0":
-			outcome.GeneratedMustBeRejectedExpected++
-		default:
+		if file.mutation {
 			outcome.ZapMustBeRejectedExpected++
+		} else {
+			outcome.GeneratedTotal++
+		}
+		switch {
+		case file.expectation == mustDecode:
+			outcome.GeneratedDecodedReencodedExpected++
+		case !file.mutation:
+			outcome.GeneratedMustBeRejectedExpected++
 		}
 
-		input, err := os.ReadFile(file.path)
+		input, err := readCorpusFile(corpusRoot, file.path)
 		if err != nil {
 			report.addFailure(
 				file,
@@ -163,18 +244,13 @@ func GenerateReport(datasetDir string) (Report, error) {
 		}
 
 		reencoded, err := reencode(file.rule, input)
-		if want == mustReject {
+		if file.expectation == mustReject {
 			if err != nil {
-				outcome.GeneratedMustBeRejectedActual++
-			} else {
-				report.addFailure(file, decodeSucceeded, "deserialization unexpectedly succeeded")
-			}
-			report.Rules[file.rule] = outcome
-			continue
-		}
-		if file.category != "valid" {
-			if err != nil {
-				outcome.ZapMustBeRejectedActual++
+				if file.mutation {
+					outcome.ZapMustBeRejectedActual++
+				} else {
+					outcome.GeneratedMustBeRejectedActual++
+				}
 			} else {
 				report.addFailure(file, decodeSucceeded, "deserialization unexpectedly succeeded")
 			}
@@ -209,7 +285,7 @@ func GenerateReport(datasetDir string) (Report, error) {
 			report.Rules[file.rule] = outcome
 			continue
 		}
-		reference, err := os.ReadFile(file.expectPath)
+		reference, err := readCorpusFile(corpusRoot, file.expectPath)
 		if err != nil {
 			report.addFailure(
 				file,
@@ -219,17 +295,15 @@ func GenerateReport(datasetDir string) (Report, error) {
 			report.Rules[file.rule] = outcome
 			continue
 		}
-		if !isByteExactRule(file.rule) {
-			reencoded, err = NormalizeCBOR(reencoded)
-			if err != nil {
-				report.addFailure(
-					file,
-					decodeFailed,
-					"normalize re-encoding failed: "+err.Error(),
-				)
-				report.Rules[file.rule] = outcome
-				continue
-			}
+		reencoded, err = NormalizeCBOR(reencoded)
+		if err != nil {
+			report.addFailure(
+				file,
+				decodeFailed,
+				"normalize re-encoding failed: "+err.Error(),
+			)
+			report.Rules[file.rule] = outcome
+			continue
 		}
 		if !bytes.Equal(reencoded, reference) {
 			report.addFailure(
@@ -250,9 +324,87 @@ func GenerateReport(datasetDir string) (Report, error) {
 	return report, nil
 }
 
-func listRuleSamples(root, rule string) ([]sample, error) {
-	ruleDir := filepath.Join(root, rule)
-	entries, err := os.ReadDir(ruleDir)
+func loadSampleWaivers(
+	root *os.Root,
+	metadataPresent bool,
+	files []sample,
+) ([]WaivedSample, error) {
+	if !metadataPresent {
+		return nil, nil
+	}
+	data, err := readCorpusFile(root, "corpus.json")
+	if err != nil {
+		return nil, fmt.Errorf("read corpus metadata: %w", err)
+	}
+	var metadata corpusMetadata
+	if err := json.Unmarshal(data, &metadata); err != nil {
+		return nil, fmt.Errorf("decode corpus metadata: %w", err)
+	}
+
+	sampleRules := make(map[string]string, len(files))
+	for _, file := range files {
+		sampleRules[file.name] = file.rule
+	}
+	waived := make(map[string]WaivedSample)
+	for _, waiver := range metadata.Waivers {
+		if len(waiver.Samples) == 0 {
+			continue
+		}
+		if waiver.Rule == "" || waiver.Kind == "" || strings.TrimSpace(waiver.Reason) == "" {
+			return nil, errors.New("sample waiver must include rule, kind, and reason")
+		}
+		for _, sampleName := range waiver.Samples {
+			rule, ok := sampleRules[sampleName]
+			if !ok {
+				return nil, fmt.Errorf("sample waiver references unknown sample %q", sampleName)
+			}
+			if rule != waiver.Rule {
+				return nil, fmt.Errorf(
+					"sample waiver for %q names rule %q, sample belongs to %q",
+					sampleName,
+					waiver.Rule,
+					rule,
+				)
+			}
+			entry := WaivedSample{
+				Sample: sampleName,
+				Rule:   waiver.Rule,
+				Kind:   waiver.Kind,
+				Reason: waiver.Reason,
+			}
+			if previous, exists := waived[sampleName]; exists {
+				if previous.Rule != entry.Rule || previous.Kind != entry.Kind || previous.Reason != entry.Reason {
+					return nil, fmt.Errorf("sample %q has conflicting waiver metadata", sampleName)
+				}
+				continue
+			}
+			waived[sampleName] = entry
+		}
+	}
+
+	result := make([]WaivedSample, 0, len(waived))
+	for _, sample := range waived {
+		result = append(result, sample)
+	}
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].Sample < result[j].Sample
+	})
+	return result, nil
+}
+
+func validateCorpusRevision(revision string) error {
+	if len(revision) != 40 || strings.ToLower(revision) != revision {
+		return errors.New("corpus revision must be a lowercase full commit SHA")
+	}
+	if _, err := hex.DecodeString(revision); err != nil {
+		return errors.New("corpus revision must be a lowercase full commit SHA")
+	}
+	return nil
+}
+
+func listRuleSamples(root *os.Root, rule string) ([]sample, error) {
+	ruleDir := rule
+	entries, err := fs.ReadDir(root.FS(), ruleDir)
 	if err != nil {
 		return nil, fmt.Errorf("read rule directory %s: %w", rule, err)
 	}
@@ -263,14 +415,14 @@ func listRuleSamples(root, rule string) ([]sample, error) {
 			if !entry.IsDir() {
 				return nil, fmt.Errorf(
 					"expected output path is not a directory: %s",
-					filepath.Join(ruleDir, entry.Name()),
+					path.Join(ruleDir, entry.Name()),
 				)
 			}
 		case "valid":
 			if !entry.IsDir() {
 				return nil, fmt.Errorf(
 					"valid sample path is not a directory: %s",
-					filepath.Join(ruleDir, entry.Name()),
+					path.Join(ruleDir, entry.Name()),
 				)
 			}
 			validFiles, err := listCategoryFiles(root, rule, "valid", "valid")
@@ -282,10 +434,10 @@ func listRuleSamples(root, rule string) ([]sample, error) {
 			if !entry.IsDir() {
 				return nil, fmt.Errorf(
 					"invalid sample path is not a directory: %s",
-					filepath.Join(ruleDir, entry.Name()),
+					path.Join(ruleDir, entry.Name()),
 				)
 			}
-			zapEntries, err := os.ReadDir(filepath.Join(ruleDir, "invalid"))
+			zapEntries, err := fs.ReadDir(root.FS(), path.Join(ruleDir, "invalid"))
 			if err != nil {
 				return nil, fmt.Errorf(
 					"read invalid samples for %s: %w",
@@ -301,7 +453,7 @@ func listRuleSamples(root, rule string) ([]sample, error) {
 						zapEntry.Name(),
 					)
 				}
-				category := filepath.Join("invalid", zapEntry.Name())
+				category := path.Join("invalid", zapEntry.Name())
 				zapFiles, err := listCategoryFiles(
 					root,
 					rule,
@@ -313,6 +465,23 @@ func listRuleSamples(root, rule string) ([]sample, error) {
 				}
 				files = append(files, zapFiles...)
 			}
+		case "manual-valid", "manual-invalid":
+			if !entry.IsDir() {
+				return nil, fmt.Errorf(
+					"manual sample path is not a directory: %s",
+					path.Join(ruleDir, entry.Name()),
+				)
+			}
+			manualFiles, err := listCategoryFiles(
+				root,
+				rule,
+				entry.Name(),
+				entry.Name(),
+			)
+			if err != nil {
+				return nil, err
+			}
+			files = append(files, manualFiles...)
 		default:
 			if !entry.IsDir() || !strings.HasPrefix(entry.Name(), "invalid-") {
 				return nil, fmt.Errorf(
@@ -329,7 +498,7 @@ func listRuleSamples(root, rule string) ([]sample, error) {
 					entry.Name(),
 				)
 			}
-			category := filepath.Join("invalid", zapCategory)
+			category := path.Join("invalid", zapCategory)
 			zapFiles, err := listCategoryFiles(
 				root,
 				rule,
@@ -351,10 +520,15 @@ func validZapCategory(name string) bool {
 }
 
 func listCategoryFiles(
-	root, rule, sourceCategory, category string,
+	root *os.Root,
+	rule, sourceCategory, category string,
 ) ([]sample, error) {
-	categoryDir := filepath.Join(root, rule, sourceCategory)
-	entries, err := os.ReadDir(categoryDir)
+	expectation, mutation, err := classifyCategory(category)
+	if err != nil {
+		return nil, err
+	}
+	categoryDir := path.Join(rule, sourceCategory)
+	entries, err := fs.ReadDir(root.FS(), categoryDir)
 	if err != nil {
 		return nil, fmt.Errorf(
 			"read sample category %s/%s: %w",
@@ -365,7 +539,7 @@ func listCategoryFiles(
 	}
 	files := make([]sample, 0, len(entries))
 	inputNames := make(map[string]struct{}, len(entries))
-	if category == "valid" {
+	if expectation == mustDecode {
 		for _, entry := range entries {
 			if entry.IsDir() ||
 				!strings.HasSuffix(entry.Name(), ".input.cbor") {
@@ -388,7 +562,7 @@ func listCategoryFiles(
 		var expectPath string
 		switch {
 		case strings.HasSuffix(filename, ".expected.cbor"):
-			if category != "valid" {
+			if expectation != mustDecode {
 				return nil, fmt.Errorf(
 					"unexpected sample entry in %s/%s: %s",
 					rule,
@@ -400,22 +574,22 @@ func listCategoryFiles(
 			if _, ok := inputNames[sampleName]; !ok {
 				return nil, fmt.Errorf(
 					"expected output has no matching input: %s",
-					filepath.Join(categoryDir, filename),
+					path.Join(categoryDir, filename),
 				)
 			}
 			continue
 		case strings.HasSuffix(filename, ".input.cbor"):
 			sampleName = strings.TrimSuffix(filename, ".input.cbor")
-			if category == "valid" {
-				expectPath = filepath.Join(
+			if expectation == mustDecode {
+				expectPath = path.Join(
 					categoryDir,
 					sampleName+".expected.cbor",
 				)
 			}
 		case strings.HasSuffix(filename, ".cbor"):
 			sampleName = strings.TrimSuffix(filename, ".cbor")
-			if category == "valid" {
-				expectPath = filepath.Join(root, rule, "expected", filename)
+			if expectation == mustDecode {
+				expectPath = path.Join(rule, "expected", filename)
 			}
 		default:
 			return nil, fmt.Errorf(
@@ -425,17 +599,79 @@ func listCategoryFiles(
 				filename,
 			)
 		}
-		name := filepath.ToSlash(filepath.Join(rule, category, sampleName))
+		name := path.Join(rule, category, sampleName)
 		file := sample{
-			rule:       rule,
-			category:   filepath.ToSlash(category),
-			name:       name,
-			path:       filepath.Join(categoryDir, filename),
-			expectPath: expectPath,
+			rule:        rule,
+			category:    filepath.ToSlash(category),
+			name:        name,
+			path:        path.Join(categoryDir, filename),
+			expectPath:  expectPath,
+			expectation: expectation,
+			mutation:    mutation,
 		}
 		files = append(files, file)
 	}
 	return files, nil
+}
+
+func classifyCategory(category string) (expectation, bool, error) {
+	switch category {
+	case "valid", "manual-valid":
+		return mustDecode, false, nil
+	case "manual-invalid", "invalid/zap-0":
+		return mustReject, false, nil
+	case "invalid/zap-1", "invalid/zap-2", "invalid/zap-3":
+		return mustReject, true, nil
+	default:
+		return mustReject, false, fmt.Errorf("unknown Conway sample category: %s", category)
+	}
+}
+
+func readCorpusFile(root *os.Root, name string) ([]byte, error) {
+	info, err := root.Lstat(name)
+	if err != nil {
+		return nil, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("%s is a symbolic link", name)
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s is not a regular file", name)
+	}
+	if info.Size() > maxSampleBytes {
+		return nil, fmt.Errorf(
+			"%s exceeds the %d-byte sample limit",
+			name,
+			maxSampleBytes,
+		)
+	}
+	file, err := root.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = file.Close() }()
+	openedInfo, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !openedInfo.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s is not a regular file", name)
+	}
+	if !os.SameFile(info, openedInfo) {
+		return nil, fmt.Errorf("%s changed while it was opened", name)
+	}
+	data, err := io.ReadAll(io.LimitReader(file, maxSampleBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > maxSampleBytes {
+		return nil, fmt.Errorf(
+			"%s exceeds the %d-byte sample limit",
+			name,
+			maxSampleBytes,
+		)
+	}
+	return data, nil
 }
 
 func (r *Report) addFailure(file sample, class, reason string) {
