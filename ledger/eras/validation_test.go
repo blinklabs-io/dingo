@@ -38,6 +38,7 @@ import (
 	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/blinklabs-io/gouroboros/ledger/mary"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
+	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
 	"github.com/blinklabs-io/plutigo/data"
 	"github.com/blinklabs-io/plutigo/lang"
 	"github.com/blinklabs-io/plutigo/syn"
@@ -3496,6 +3497,9 @@ func TestValidateTxConwayRejectsExpiredCommitteeAdditions(t *testing.T) {
 				TxIsValid: true,
 			}
 			baseState := newMockLedgerState()
+			baseState.governanceState = mockledger.NewLedgerStateBuilder().
+				WithGovPurposeRootsValue(&lcommon.GovPurposeRoots{}).
+				Build()
 			baseState.skipPhase2Validation = true
 			baseState.addUtxo(input, output)
 			state := &mockCommitteeEpochState{

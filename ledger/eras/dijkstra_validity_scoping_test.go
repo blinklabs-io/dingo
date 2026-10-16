@@ -27,6 +27,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
+	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
 	"github.com/blinklabs-io/plutigo/lang"
 	"github.com/blinklabs-io/plutigo/syn"
 	"github.com/stretchr/testify/require"
@@ -42,14 +43,15 @@ type dijkstraScopingState struct {
 
 func (s *dijkstraScopingState) MinPoolMargin() *big.Rat { return s.floor }
 
-func (*dijkstraScopingState) CommitteeHotCredentialColdCredentials(
-	lcommon.Credential,
+// The scoping fixture has an authoritative empty elected committee.
+func (s *dijkstraScopingState) CommitteeHotCredentialColdCredentials(
+	_ lcommon.Credential,
 ) ([]lcommon.Credential, error) {
 	return nil, nil
 }
 
-func (*dijkstraScopingState) CommitteeCredentialIsElected(
-	lcommon.Credential,
+func (s *dijkstraScopingState) CommitteeCredentialIsElected(
+	_ lcommon.Credential,
 ) (bool, error) {
 	return false, nil
 }
@@ -133,6 +135,9 @@ func newDijkstraScopingTx(
 		tx.Body.TxOutputs[0].Output = output
 	}
 	refreshDijkstraTransactionBodyAndSignature(t, tx)
+	base.governanceState = mockledger.NewLedgerStateBuilder().
+		WithGovPurposeRootsValue(&lcommon.GovPurposeRoots{}).
+		Build()
 	state := &dijkstraScopingState{
 		taggedCommitteeLedgerState: &taggedCommitteeLedgerState{
 			mockLedgerState: base,

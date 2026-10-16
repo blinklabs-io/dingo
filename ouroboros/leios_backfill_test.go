@@ -470,7 +470,7 @@ func TestFetchLeiosEbTxsBatchedUntilPastDeadline(t *testing.T) {
 	o := &Ouroboros{}
 	o.config.LeiosTxFetchTailBudget = time.Minute // would otherwise keep retrying
 	point := ocommon.Point{Slot: 100, Hash: []byte{0x01, 0x02}}
-	requester := &cappingBlockTxsRequester{maxPerResp: 50, includeBitmaps: true}
+	requester := &cappingBlockTxsRequester{maxPerResp: 50}
 
 	txs, err := o.fetchLeiosEbTxsBatchedUntil(
 		context.Background(),
@@ -586,7 +586,7 @@ func TestFetchLeiosEbTxsBatchedNoDeadlineStillCompletes(t *testing.T) {
 	point := ocommon.Point{Slot: 100, Hash: []byte{0x0b}}
 	txs, err := o.fetchLeiosEbTxsBatchedUntil(
 		context.Background(),
-		&cappingBlockTxsRequester{maxPerResp: 50, includeBitmaps: true},
+		&cappingBlockTxsRequester{maxPerResp: 50},
 		point,
 		200,
 		nil,
