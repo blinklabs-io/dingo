@@ -202,6 +202,38 @@ type indexedUtxoValidationRule struct {
 	validationFunc lcommon.UtxoValidationRuleFunc
 }
 
+type preverifiedSignaturesProvider interface {
+	PreverifiedSignatures() *lcommon.PreverifiedSignatures
+}
+
+func reusePreverifiedSignatures(
+	validationFunc lcommon.UtxoValidationRuleFunc,
+) lcommon.UtxoValidationRuleFunc {
+	return func(
+		tx lcommon.Transaction,
+		slot uint64,
+		ls lcommon.LedgerState,
+		pp lcommon.ProtocolParameters,
+	) error {
+		provider, ok := stateCapability[preverifiedSignaturesProvider](ls)
+		if !ok || provider.PreverifiedSignatures() == nil {
+			return validationFunc(tx, slot, ls, pp)
+		}
+		err := lcommon.VerifyTransactionWithSignatures(
+			tx,
+			slot,
+			ls,
+			pp,
+			[]lcommon.UtxoValidationRuleFunc{validationFunc},
+			provider.PreverifiedSignatures(),
+		)
+		if err == nil {
+			return nil
+		}
+		return errors.Unwrap(err)
+	}
+}
+
 const (
 	noUtxoValidationRuleIndex = -1
 
@@ -660,6 +692,9 @@ func buildIndexedUtxoValidationRulesWithSkips(
 	for idx, validationFunc := range rules {
 		if _, ok := skipIndexes[idx]; ok {
 			continue
+		}
+		if descriptors[idx].Id == lcommon.UtxoValidationRuleSignatures {
+			validationFunc = reusePreverifiedSignatures(validationFunc)
 		}
 		ret = append(ret, indexedUtxoValidationRule{
 			index:          idx,
