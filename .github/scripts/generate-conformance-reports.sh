@@ -37,6 +37,14 @@ CONFORMANCE_DIR="${CONFORMANCE_DIR:-.conformance}"
 TURBO_SAMPLES="${TURBO_SAMPLES:-50}"
 TURBO_MAX_PROGRAMS="${TURBO_MAX_PROGRAMS:-10000}"
 
+# The report step has a 30-minute limit. Generator budgets total 23 minutes;
+# corpus preparation is capped at three minutes, leaving time for compression.
+CBOR_GENERATOR_TIMEOUT_SECONDS=120
+LEDGER_GENERATOR_TIMEOUT_SECONDS=120
+UPLC_GENERATOR_TIMEOUT_SECONDS=240
+TURBO_GENERATOR_TIMEOUT_SECONDS=900
+TURBO_CORPUS_TIMEOUT_SECONDS=180
+
 version="${RELEASE_TAG#v}"
 report_date="$(date -u +%Y%m%d)"
 prefix="${DIST_DIR}/dingo-${version}-${report_date}"
@@ -72,19 +80,27 @@ log_excerpt() {
   fi
 }
 
-# run_generator REPORT SCENARIO COMMAND...
+# run_generator REPORT SCENARIO TIMEOUT_SECONDS COMMAND...
 # Runs a generator that writes REPORT. A non-zero exit with the report written
 # is a report of failures and is kept. Without a report, an error report is
-# written instead.
+# written instead. Timed-out generators always get an error report, even if
+# they left behind a syntactically valid partial report.
 run_generator() {
   local report="$1" scenario="$2"
-  shift 2
+  local timeout_seconds="$3"
+  shift 3
   rm -f "$report"
   local log status=0
   log="$(mktemp)"
-  "$@" 2>"$log" || status=$?
+  timeout --signal=TERM --kill-after=5s "${timeout_seconds}s" "$@" 2>"$log" || status=$?
   redact_log <"$log" >&2
-  if [ ! -s "$report" ]; then
+  if [ "$status" -eq 124 ]; then
+    write_error_report "$report" "$scenario" \
+      "generator exceeded its ${timeout_seconds}s time limit (exit ${status}): $(log_excerpt "$log")"
+  elif [ "$status" -eq 137 ]; then
+    write_error_report "$report" "$scenario" \
+      "generator ended with exit 137 (SIGKILL) before completing: $(log_excerpt "$log")"
+  elif [ ! -s "$report" ]; then
     write_error_report "$report" "$scenario" \
       "generator exited ${status} without writing a report: $(log_excerpt "$log")"
   elif ! jq -e -s 'length == 1 and (.[0] | type == "object")' "$report" >/dev/null 2>&1; then
@@ -100,10 +116,17 @@ run_generator() {
 # Downloads, verifies and unpacks the turbo corpus into DIR/corpus.
 prepare_turbo_corpus() {
   local dir="$1"
-  curl --fail --silent --show-error --location --retry 3 -o "${dir}/turbo.tar.xz" "$TURBO_URL" &&
-    echo "${TURBO_SHA256}  ${dir}/turbo.tar.xz" | sha256sum --check --strict &&
-    mkdir "${dir}/corpus" &&
-    tar -xf "${dir}/turbo.tar.xz" -C "${dir}/corpus"
+  timeout --signal=TERM --kill-after=5s "${TURBO_CORPUS_TIMEOUT_SECONDS}s" \
+    bash -s -- "$dir" "$TURBO_URL" "$TURBO_SHA256" <<'PREPARE_TURBO_CORPUS'
+set -euo pipefail
+dir="$1"
+url="$2"
+sha256="$3"
+curl --fail --silent --show-error --location --retry 3 -o "${dir}/turbo.tar.xz" "$url"
+echo "${sha256}  ${dir}/turbo.tar.xz" | sha256sum --check --strict
+mkdir "${dir}/corpus"
+tar -xf "${dir}/turbo.tar.xz" -C "${dir}/corpus"
+PREPARE_TURBO_CORPUS
 }
 
 mkdir -p "$DIST_DIR"
@@ -113,7 +136,7 @@ if ! dataset_revision="$(git -C "$CBOR_DATASET_DIR" rev-parse HEAD 2>"$dataset_l
   write_error_report "${prefix}-cbor-conformance.json" cbor-decoding \
     "cannot read the CBOR dataset revision: $(log_excerpt "$dataset_log")"
 elif [ "$dataset_revision" = "$CBOR_DATASET_REVISION" ]; then
-  run_generator "${prefix}-cbor-conformance.json" cbor-decoding \
+  run_generator "${prefix}-cbor-conformance.json" cbor-decoding "$CBOR_GENERATOR_TIMEOUT_SECONDS" \
     go run ./internal/cborconformance/cmd \
     -dataset "${CBOR_DATASET_DIR}/dataset/conway" \
     -corpus-revision "$dataset_revision" \
@@ -124,12 +147,12 @@ else
 fi
 rm -f "$dataset_log"
 
-run_generator "${prefix}-ledger-rules.json" ledger-rules \
+run_generator "${prefix}-ledger-rules.json" ledger-rules "$LEDGER_GENERATOR_TIMEOUT_SECONDS" \
   go run ./internal/ledgerrulesconformance/cmd \
   -fixtures "${CONFORMANCE_DIR}/node-diversity-conformance/scenarios/ledger-rules/fixtures" \
   -output "${prefix}-ledger-rules.json"
 
-run_generator "${prefix}-uplc-conformance.json" uplc-conformance \
+run_generator "${prefix}-uplc-conformance.json" uplc-conformance "$UPLC_GENERATOR_TIMEOUT_SECONDS" \
   go run ./internal/uplcconformance/cmd \
   -corpus "${CONFORMANCE_DIR}/amaru/crates/amaru-uplc/tests" \
   -output "${prefix}-uplc-conformance.json"
@@ -137,15 +160,21 @@ run_generator "${prefix}-uplc-conformance.json" uplc-conformance \
 turbo_dir="$(mktemp -d)"
 trap 'rm -rf "$turbo_dir"' EXIT
 if prepare_turbo_corpus "$turbo_dir" 2>"${turbo_dir}/prepare.log"; then
-  run_generator "${prefix}-uplc-turbo.json" uplc-turbo \
+  run_generator "${prefix}-uplc-turbo.json" uplc-turbo "$TURBO_GENERATOR_TIMEOUT_SECONDS" \
     go run ./internal/uplcconformance/turbocmd \
     -corpus "${turbo_dir}/corpus" \
     -samples "$TURBO_SAMPLES" \
     -max-programs "$TURBO_MAX_PROGRAMS" \
     -output "${prefix}-uplc-turbo.json"
 else
+  prepare_status=$?
+  if [ "$prepare_status" -eq 124 ] || [ "$prepare_status" -eq 137 ]; then
+    prepare_error="turbo corpus preparation exceeded its ${TURBO_CORPUS_TIMEOUT_SECONDS}s time limit (exit ${prepare_status})"
+  else
+    prepare_error="turbo corpus could not be downloaded, verified or unpacked (exit ${prepare_status})"
+  fi
   write_error_report "${prefix}-uplc-turbo.json" uplc-turbo \
-    "turbo corpus could not be downloaded, verified or unpacked: $(log_excerpt "${turbo_dir}/prepare.log")"
+    "${prepare_error}: $(log_excerpt "${turbo_dir}/prepare.log")"
 fi
 
 shopt -s nullglob
