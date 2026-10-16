@@ -736,6 +736,7 @@ func NewConfig(opts ...ConfigOptionFunc) Config {
 			KoiosParity:         internalconfig.DefaultKoiosParityConfig(),
 			Logging:             internalconfig.DefaultLoggingConfig(),
 			Midnight:            internalconfig.DefaultMidnightConfig(),
+			DMQ:                 internalconfig.DefaultDMQConfig(),
 			CORSAllowedOrigins:  []string{"*"},
 
 			// SQLite planner statistics stay current unless an operator
@@ -1806,9 +1807,10 @@ func WithBlockPipelineEnabled(enabled bool) ConfigOptionFunc {
 	}
 }
 
-// WithBlockPipelineValidateEnabled adds a parallel VRF/KES and OpCert
-// validate stage to the block-decode pipeline (phase 3 of the pipeline). Off by
-// default; requires WithBlockPipelineEnabled. See
+// WithBlockPipelineValidateEnabled checks VRF/KES and OpCert header
+// cryptography serially for blocks read back during replay, ahead of the
+// decode pipeline's results. Off by default; requires
+// WithBlockPipelineEnabled. See
 // LedgerStateConfig.BlockPipelineValidateEnabled.
 func WithBlockPipelineValidateEnabled(enabled bool) ConfigOptionFunc {
 	return func(c *Config) {
@@ -2074,6 +2076,20 @@ func WithMidnightConfig(cfg MidnightConfig) ConfigOptionFunc {
 			PermissionedCandidatePolicy: cfg.PermissionedCandidatePolicy,
 		}
 		c.midnight = cfg
+	}
+}
+
+// DMQConfig configures the CIP-0137 Decentralized Message Queue stack.
+type DMQConfig = internalconfig.DMQConfig
+
+// WithDMQConfig configures the DMQ stack that runs alongside the Cardano
+// stack when enabled.
+func WithDMQConfig(cfg DMQConfig) ConfigOptionFunc {
+	return func(c *Config) {
+		if c.cfg == nil {
+			*c = NewConfig()
+		}
+		c.cfg.DMQ = cfg
 	}
 }
 
@@ -2627,6 +2643,11 @@ func (c *Config) Midnight() internalconfig.MidnightConfig {
 	return c.cfg.Midnight
 }
 
+// DMQ returns the DMQ stack configuration.
+func (c *Config) DMQ() internalconfig.DMQConfig {
+	return c.cfg.DMQ
+}
+
 // CORSAllowedOrigins returns the CORS allowed origins list.
 func (c *Config) CORSAllowedOrigins() []string {
 	return c.cfg.CORSAllowedOrigins
@@ -2728,8 +2749,8 @@ func (c *Config) BlockPipelineEnabled() bool {
 	return c.cfg.BlockPipelineEnabled
 }
 
-// BlockPipelineValidateEnabled returns whether the parallel VRF/KES and
-// OpCert validate stage of the block-decode pipeline is enabled.
+// BlockPipelineValidateEnabled returns whether VRF/KES and OpCert header
+// cryptography is checked during block-pipeline replay.
 func (c *Config) BlockPipelineValidateEnabled() bool {
 	return c.cfg.BlockPipelineValidateEnabled
 }

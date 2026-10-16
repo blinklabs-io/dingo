@@ -1994,6 +1994,13 @@ type MetadataStore interface {
 		uint64, // slot
 		types.Txn,
 	) error
+	UpdatePoolOpCertSequenceBatched(
+		lcommon.PoolKeyHash,
+		uint64, // sequence
+		uint64, // slot
+		types.MetadataBatchAccumulator,
+		types.Txn,
+	) error
 
 	LatestPoolOpCertSequence(
 		lcommon.PoolKeyHash,

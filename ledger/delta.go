@@ -168,6 +168,35 @@ func (d *LedgerDelta) applyWithoutRecordingDonations(
 	return d.applyWithDonationRecording(ctx, ls, txn, false, nil)
 }
 
+func (d *LedgerDelta) applyWithoutRecordingDonationsWithAccumulator(
+	ctx context.Context,
+	ls *LedgerState,
+	txn *database.Txn,
+	acc database.BatchAccumulator,
+) error {
+	return d.applyWithDonationRecording(ctx, ls, txn, false, acc)
+}
+
+type validatedReplayAccumulatorContextKey struct{}
+
+func withValidatedReplayAccumulator(
+	ctx context.Context,
+	acc database.BatchAccumulator,
+) context.Context {
+	return context.WithValue(
+		ctx,
+		validatedReplayAccumulatorContextKey{},
+		acc,
+	)
+}
+
+func validatedReplayAccumulatorFrom(
+	ctx context.Context,
+) database.BatchAccumulator {
+	acc, _ := ctx.Value(validatedReplayAccumulatorContextKey{}).(database.BatchAccumulator)
+	return acc
+}
+
 func (d *LedgerDelta) applyWithAccumulator(
 	ctx context.Context,
 	ls *LedgerState,
@@ -393,30 +422,32 @@ func (d *LedgerDelta) applyWithDonationRecording(
 	// callbacks in registration order, and this callback walks transactions in
 	// index order before handing each event to the ledger.tx ordered lane. See
 	// publishTransactionEvent.
-	applyEvents := make([]TransactionEvent, 0, len(d.Transactions))
-	for i, tr := range d.Transactions {
-		if !appliedTxs[i] {
-			continue
+	if d.stageApplyEvents != nil || ls.config.EventBus != nil {
+		applyEvents := make([]TransactionEvent, 0, len(d.Transactions))
+		for i, tr := range d.Transactions {
+			if !appliedTxs[i] {
+				continue
+			}
+			applyEvents = append(applyEvents, TransactionEvent{
+				Transaction: tr.Tx,
+				Point:       d.Point,
+				BlockNumber: d.BlockNumber,
+				TxIndex:     uint32(tr.Index), //nolint:gosec
+				Rollback:    false,
+			})
 		}
-		applyEvents = append(applyEvents, TransactionEvent{
-			Transaction: tr.Tx,
-			Point:       d.Point,
-			BlockNumber: d.BlockNumber,
-			TxIndex:     uint32(tr.Index), //nolint:gosec
-			Rollback:    false,
-		})
-	}
-	if len(applyEvents) > 0 && d.stageApplyEvents != nil {
-		d.stageApplyEvents(applyEvents)
-	} else if len(applyEvents) > 0 {
-		txn.AfterCommit(func() {
-			if ls.beforeTransactionApplyPublish != nil {
-				ls.beforeTransactionApplyPublish()
-			}
-			for _, evt := range applyEvents {
-				ls.publishTransactionEvent(ctx, evt)
-			}
-		})
+		if len(applyEvents) > 0 && d.stageApplyEvents != nil {
+			d.stageApplyEvents(applyEvents)
+		} else if len(applyEvents) > 0 {
+			txn.AfterCommit(func() {
+				if ls.beforeTransactionApplyPublish != nil {
+					ls.beforeTransactionApplyPublish()
+				}
+				for _, evt := range applyEvents {
+					ls.publishTransactionEvent(ctx, evt)
+				}
+			})
+		}
 	}
 
 	return nil

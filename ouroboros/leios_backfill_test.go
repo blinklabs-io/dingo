@@ -470,7 +470,7 @@ func TestFetchLeiosEbTxsBatchedUntilPastDeadline(t *testing.T) {
 	o := &Ouroboros{}
 	o.config.LeiosTxFetchTailBudget = time.Minute // would otherwise keep retrying
 	point := ocommon.Point{Slot: 100, Hash: []byte{0x01, 0x02}}
-	requester := &cappingBlockTxsRequester{maxPerResp: 50, includeBitmaps: true}
+	requester := &cappingBlockTxsRequester{maxPerResp: 50}
 
 	txs, err := o.fetchLeiosEbTxsBatchedUntil(
 		context.Background(),
@@ -522,7 +522,7 @@ func (r *dribbleBlockTxsRequester) BlockTxsRequest(
 	requested := leiosBitmapTxIndices(bitmaps)
 	slices.Sort(requested)
 	if len(requested) == 0 {
-		return leiosfetch.NewMsgBlockTxsFull(
+		return leiosfetch.NewMsgBlockTxs(
 			point,
 			map[uint16]uint64{},
 			nil,
@@ -534,7 +534,7 @@ func (r *dribbleBlockTxsRequester) BlockTxsRequest(
 	if err != nil {
 		return nil, err
 	}
-	return leiosfetch.NewMsgBlockTxsFull(
+	return leiosfetch.NewMsgBlockTxs(
 		point,
 		served,
 		[]cbor.RawMessage{cbor.RawMessage(enc)},
@@ -586,7 +586,7 @@ func TestFetchLeiosEbTxsBatchedNoDeadlineStillCompletes(t *testing.T) {
 	point := ocommon.Point{Slot: 100, Hash: []byte{0x0b}}
 	txs, err := o.fetchLeiosEbTxsBatchedUntil(
 		context.Background(),
-		&cappingBlockTxsRequester{maxPerResp: 50, includeBitmaps: true},
+		&cappingBlockTxsRequester{maxPerResp: 50},
 		point,
 		200,
 		nil,

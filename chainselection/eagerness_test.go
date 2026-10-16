@@ -509,6 +509,20 @@ func TestAwaitEagernessLimitPauseDoesNotAgePeersStale(t *testing.T) {
 	cs.SetLocalTip(loeTip("c", 10))
 	require.Equal(t, uint64(10+loeTestK), cs.EagernessLimit().BlockNumber)
 
+	for i, connId := range []ouroboros.ConnectionId{a, b} {
+		prefix := "a"
+		if connId == b {
+			prefix = "b"
+		}
+		tip := loeTip(prefix, 17)
+		require.True(t, cs.PreparePeerTipAdmission(PeerTipUpdateEvent{
+			ConnectionId: connId,
+			AdmissionID: uint64(i + 1),
+			Tip: tip,
+			ObservedTip: tip,
+		}))
+	}
+
 	doneA := awaitAsync(t.Context(), cs, a, 16)
 	doneB := awaitAsync(t.Context(), cs, b, 16)
 	require.Eventually(t, func() bool {

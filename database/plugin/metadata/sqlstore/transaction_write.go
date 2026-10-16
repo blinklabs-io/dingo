@@ -69,6 +69,20 @@ type transactionBatchAccumulator struct {
 	// stakeDeltas coalesces credential changes until the batch is flushed.
 	stakeDeltas     map[string]pendingStakeCredentialDelta
 	stakeDeltaOrder []string
+	opCertSequences map[poolOpCertSequenceKey]queuedPoolOpCertSequence
+	opCertOrder     []poolOpCertSequenceKey
+}
+
+type poolOpCertSequenceKey struct {
+	poolKeyHash lcommon.PoolKeyHash
+	slot        uint64
+}
+
+type queuedPoolOpCertSequence struct {
+	key           poolOpCertSequenceKey
+	sequence      uint64
+	slotValue     int64
+	sequenceValue int64
 }
 
 type pendingStakeCredentialDelta struct {
@@ -81,6 +95,8 @@ type transactionBatchCheckpoint struct {
 	rows            rowBatch
 	stakeDeltas     map[string]pendingStakeCredentialDelta
 	stakeDeltaOrder []string
+	opCertSequences map[poolOpCertSequenceKey]queuedPoolOpCertSequence
+	opCertOrder     []poolOpCertSequenceKey
 }
 
 func (a *transactionBatchAccumulator) addStakeDeltas(
@@ -121,6 +137,7 @@ func (a *transactionBatchAccumulator) checkpoint() transactionBatchCheckpoint {
 	checkpoint := transactionBatchCheckpoint{
 		rows:            a.rows.clone(),
 		stakeDeltaOrder: append([]string(nil), a.stakeDeltaOrder...),
+		opCertOrder:     append([]poolOpCertSequenceKey(nil), a.opCertOrder...),
 	}
 	if len(a.stakeDeltas) > 0 {
 		checkpoint.stakeDeltas = make(
@@ -128,6 +145,9 @@ func (a *transactionBatchAccumulator) checkpoint() transactionBatchCheckpoint {
 			len(a.stakeDeltas),
 		)
 		maps.Copy(checkpoint.stakeDeltas, a.stakeDeltas)
+	}
+	if len(a.opCertSequences) > 0 {
+		checkpoint.opCertSequences = maps.Clone(a.opCertSequences)
 	}
 	return checkpoint
 }
@@ -138,12 +158,16 @@ func (a *transactionBatchAccumulator) restore(
 	a.Reset()
 	a.rows = checkpoint.rows.clone()
 	a.stakeDeltaOrder = append([]string(nil), checkpoint.stakeDeltaOrder...)
+	a.opCertOrder = append([]poolOpCertSequenceKey(nil), checkpoint.opCertOrder...)
 	if len(checkpoint.stakeDeltas) > 0 {
 		a.stakeDeltas = make(
 			map[string]pendingStakeCredentialDelta,
 			len(checkpoint.stakeDeltas),
 		)
 		maps.Copy(a.stakeDeltas, checkpoint.stakeDeltas)
+	}
+	if len(checkpoint.opCertSequences) > 0 {
+		a.opCertSequences = maps.Clone(checkpoint.opCertSequences)
 	}
 }
 
@@ -299,7 +323,11 @@ func utxoIdentityKey(txID []byte, outputIdx uint32) string {
 	return string(txID) + ":" + strconv.FormatUint(uint64(outputIdx), 10)
 }
 
-const utxoBatchSize = 8
+const (
+	// 32 UTxOs use 480 bind parameters, below SQLite's conservative limit.
+	utxoInsertBatchSize = 32
+	utxoSpendBatchSize  = 8
+)
 
 func (s *Store) insertUtxoModelsChecked(
 	ctx context.Context,
@@ -322,8 +350,8 @@ func (s *Store) insertUtxoModelsChecked(
 		return inserted, nil
 	}
 
-	for start := 0; start < len(utxos); start += utxoBatchSize {
-		end := min(start+utxoBatchSize, len(utxos))
+	for start := 0; start < len(utxos); start += utxoInsertBatchSize {
+		end := min(start+utxoInsertBatchSize, len(utxos))
 		batch := utxos[start:end]
 		query := insertUtxoBatchQuery(len(batch))
 		args := make([]any, 0, len(batch)*15)
@@ -516,6 +544,8 @@ func (a *transactionBatchAccumulator) Reset() {
 	a.rows.reset()
 	a.stakeDeltas = nil
 	a.stakeDeltaOrder = nil
+	a.opCertSequences = nil
+	a.opCertOrder = nil
 }
 
 func (s *Store) NewBatchAccumulator() types.MetadataBatchAccumulator {
@@ -538,10 +568,14 @@ func (s *Store) FlushBatch(
 			return err
 		}
 	}
-	if !batched.rows.empty() || len(batched.stakeDeltaOrder) > 0 {
+	if !batched.rows.empty() || len(batched.stakeDeltaOrder) > 0 ||
+		len(batched.opCertOrder) > 0 {
 		if err := s.withWriteTransaction(
 			txn,
 			func(db queryer, ctx context.Context) error {
+				if err := s.flushPoolOpCertSequences(ctx, db, batched); err != nil {
+					return err
+				}
 				if err := batched.rows.flush(
 					ctx, db, s.dialect.ParameterLimit(),
 				); err != nil {
@@ -1019,8 +1053,8 @@ func (s *Store) setTransactionWithAccumulator(
 					Idx:  input.Index(),
 				})
 			}
-			for start := 0; start < len(uniqueConsumed); start += utxoBatchSize {
-				end := min(start+utxoBatchSize, len(uniqueConsumed))
+			for start := 0; start < len(uniqueConsumed); start += utxoSpendBatchSize {
+				end := min(start+utxoSpendBatchSize, len(uniqueConsumed))
 				batch := uniqueConsumed[start:end]
 				updated := make(map[string]struct{}, len(batch))
 				if s.dialect.Name() == "sqlite" && len(batch) > 1 {

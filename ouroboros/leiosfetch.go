@@ -173,9 +173,11 @@ func (o *Ouroboros) leiosfetchServerBlockTxsRequest(
 			available,
 			txBitmap,
 		)
-		return oleiosfetch.NewMsgBlockTxsFull(point, servedBitmap, txs), nil
+		return oleiosfetch.NewMsgBlockTxs(point, servedBitmap, txs), nil
 	}
 	return oleiosfetch.NewMsgBlockTxs(
+		point,
+		txBitmap,
 		leiosTxsFromBitmap(data.txsRaw, txBitmap),
 	), nil
 }

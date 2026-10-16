@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/safedecode"
 	"github.com/blinklabs-io/dingo/internal/tracing"
@@ -185,7 +186,11 @@ type MempoolConfig struct {
 }
 
 type Mempool struct {
-	metrics struct {
+	// pendingConfirmed holds the hashes of transactions in blocks added since
+	// the last rebuild, under confirmedMu.
+	confirmedMu      sync.Mutex
+	pendingConfirmed map[string]struct{}
+	metrics          struct {
 		txsProcessedNum prometheus.Counter
 		txsInMempool    prometheus.Gauge
 		mempoolBytes    prometheus.Gauge
@@ -1068,8 +1073,9 @@ func (m *Mempool) processChainEvents(
 		m.done,
 		chainUpdateChan,
 		30*time.Second,
+		m.noteChainUpdate,
 		func() error {
-			return m.rebuildOverlay(ctx)
+			return m.rebuildAfterChainUpdate(ctx)
 		},
 		func(err error) {
 			if errors.Is(err, errValidationSnapshotChanged) {
@@ -1089,11 +1095,92 @@ func (m *Mempool) processChainEvents(
 	)
 }
 
+// noteChainUpdate records the transactions a newly added block confirms, and
+// forgets those of blocks a rollback removes. They are evicted when the pool
+// is next rebuilt, not here: a block can be rolled back before the rebuild, in
+// which case it confirms nothing and its transactions must stay pending.
+func (m *Mempool) noteChainUpdate(evt event.Event) {
+	switch data := evt.Data.(type) {
+	case chain.ChainBlockEvent:
+		hashes := m.blockTxHashes(data.Block)
+		if len(hashes) == 0 {
+			return
+		}
+		m.confirmedMu.Lock()
+		defer m.confirmedMu.Unlock()
+		if m.pendingConfirmed == nil {
+			m.pendingConfirmed = make(map[string]struct{}, len(hashes))
+		}
+		for _, h := range hashes {
+			m.pendingConfirmed[h] = struct{}{}
+		}
+	case chain.ChainRollbackEvent:
+		m.confirmedMu.Lock()
+		empty := len(m.pendingConfirmed) == 0
+		m.confirmedMu.Unlock()
+		if empty {
+			return
+		}
+		var hashes []string
+		for _, block := range data.RolledBackBlocks {
+			hashes = append(hashes, m.blockTxHashes(block)...)
+		}
+		m.confirmedMu.Lock()
+		defer m.confirmedMu.Unlock()
+		for _, h := range hashes {
+			delete(m.pendingConfirmed, h)
+		}
+	}
+}
+
+func (m *Mempool) blockTxHashes(b models.Block) []string {
+	if len(b.Cbor) == 0 {
+		return nil
+	}
+	block, err := b.Decode()
+	if err != nil {
+		m.logger.Debug(
+			"could not decode block to evict confirmed transactions",
+			"component", "mempool",
+			"error", err,
+		)
+		return nil
+	}
+	txs := block.Transactions()
+	hashes := make([]string, 0, len(txs))
+	for _, tx := range txs {
+		hashes = append(hashes, tx.Hash().String())
+	}
+	return hashes
+}
+
+// rebuildAfterChainUpdate evicts the transactions confirmed since the last
+// rebuild, then rebuilds the pool. Only a node that forged a block removes its
+// transactions itself; on every other node the block has already consumed
+// their inputs, so leaving them to full-pool revalidation reports each one as
+// an invalid transaction that was dropped. Descendants stay: they are judged
+// against the ledger, which now holds the confirmed parent's outputs.
+func (m *Mempool) rebuildAfterChainUpdate(ctx context.Context) error {
+	m.confirmedMu.Lock()
+	pending := m.pendingConfirmed
+	m.pendingConfirmed = nil
+	m.confirmedMu.Unlock()
+	if len(pending) > 0 {
+		hashes := make([]string, 0, len(pending))
+		for h := range pending {
+			hashes = append(hashes, h)
+		}
+		m.RemoveTxsByHash(hashes)
+	}
+	return m.rebuildOverlay(ctx)
+}
+
 func runChainUpdateWorker(
 	ctx context.Context,
 	done <-chan struct{},
 	chainUpdateChan <-chan event.Event,
 	revalidationInterval time.Duration,
+	onUpdate func(event.Event),
 	rebuild func() error,
 	onError func(error),
 ) {
@@ -1107,9 +1194,14 @@ func runChainUpdateWorker(
 	}()
 	for {
 		select {
-		case _, ok := <-chainUpdateChan:
+		case evt, ok := <-chainUpdateChan:
 			if !ok {
 				return
+			}
+			// Every update is seen here, including the ones the rebuild
+			// below skips, so no block's transactions are missed.
+			if onUpdate != nil {
+				onUpdate(evt)
 			}
 			if retryTimerChan != nil {
 				continue
