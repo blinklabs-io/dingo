@@ -315,11 +315,12 @@
 # CLI: --bark-url
 # barkBaseUrl: ""
 
-# Allow Bark block downloads from private, loopback, and other special-use
-# addresses, for example an S3-compatible store such as MinIO on a private
-# network. Download origins must still be barkBaseUrl or a
-# barkBlockDownloadHosts entry, use HTTPS, and pass the same checks on every
-# redirect; ambient proxy settings stay ignored.
+# Allow Bark RPC and block downloads from private, loopback, and other
+# special-use addresses, for example a Bark service and S3-compatible store
+# such as MinIO on a private network. Download origins must still be
+# barkBaseUrl or a barkBlockDownloadHosts entry, use HTTPS, and pass the same
+# checks on every redirect. Bark RPC redirects stay on the configured origin,
+# and ambient proxy settings stay ignored for both request paths.
 # Can be overridden with DINGO_BARK_BLOCK_DOWNLOAD_ALLOW_PRIVATE_ADDRESSES
 # CLI: --bark-block-download-allow-private-addresses
 # barkBlockDownloadAllowPrivateAddresses: false

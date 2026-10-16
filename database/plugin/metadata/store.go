@@ -274,6 +274,19 @@ type GovernanceStore interface {
 		txn types.Txn,
 	) ([]*models.GovernanceProposal, error)
 
+	// GetGovernanceProposalsRefundedAt returns the proposals whose deposit was
+	// returned when epoch began: those enacted at epoch and those dropped at
+	// epoch, excluding soft-deleted rows. Each is a refund candidate, not a
+	// credited refund: a deposit whose return account was unregistered went
+	// to the treasury and left no account credit. It reads by epoch alone,
+	// unlike the replay getters above, because a reader outside the boundary
+	// has no boundary slot to name. Each returned proposal carries the slot of
+	// its own refund (EnactedSlot or DroppedSlot).
+	GetGovernanceProposalsRefundedAt(
+		epoch uint64,
+		txn types.Txn,
+	) ([]*models.GovernanceProposal, error)
+
 	// GetLastEnactedGovernanceProposal returns the most recently enacted
 	// proposal whose action_type is in the given set, or nil if none
 	// exist. Callers pass the set of action types that share a chain
@@ -2002,6 +2015,13 @@ type MetadataStore interface {
 		uint64, // slot
 		types.Txn,
 	) error
+	UpdatePoolOpCertSequenceBatched(
+		lcommon.PoolKeyHash,
+		uint64, // sequence
+		uint64, // slot
+		types.MetadataBatchAccumulator,
+		types.Txn,
+	) error
 
 	LatestPoolOpCertSequence(
 		lcommon.PoolKeyHash,
@@ -2281,6 +2301,17 @@ type MetadataStore interface {
 	// the credits recorded at slot and marked AccountRewardDelta.PostSnapshot:
 	// what a boundary at slot credited after its SNAP point.
 	GetPostSnapshotRewardCredits(
+		slot uint64,
+		txn types.Txn,
+	) ([]*models.AccountRewardDelta, error)
+
+	// GetPostSnapshotRewardCreditEvents returns every credit recorded at slot
+	// and marked AccountRewardDelta.PostSnapshot as its own row, with the
+	// source hash that identifies the event. Unlike
+	// GetPostSnapshotRewardCredits it does not total per credential, which
+	// loses the distinction between a deposit refund, a treasury withdrawal
+	// and a pool deposit refund credited to the same account at one boundary.
+	GetPostSnapshotRewardCreditEvents(
 		slot uint64,
 		txn types.Txn,
 	) ([]*models.AccountRewardDelta, error)

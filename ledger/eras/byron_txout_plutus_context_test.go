@@ -131,7 +131,7 @@ func TestByronTxOutInPlutusContext(t *testing.T) {
 						// The script succeeds exactly when the context holds
 						// no output, which is the case only when a Byron
 						// output is dropped from the context.
-						outputs := []lcommon.TransactionOutput{newTestOutput(1_000_000)}
+						outputs := []lcommon.TransactionOutput{newTestOutputWithAddress(1_000_000, newTestKeyAddress(t))}
 						script := txInfoOutputCountScript(t, version, 1, false)
 						if placement == "output" {
 							outputs = []lcommon.TransactionOutput{
@@ -141,7 +141,7 @@ func TestByronTxOutInPlutusContext(t *testing.T) {
 						}
 						tx, input := newContextMintTx(t, script, valid, outputs, nil, nil)
 						ls := newMockLedgerState()
-						spent := lcommon.TransactionOutput(newTestOutput(10_000_000))
+						spent := lcommon.TransactionOutput(newTestOutputWithAddress(10_000_000, newTestKeyAddress(t)))
 						if placement == "input" {
 							spent = newTestOutputWithAddress(10_000_000, byronAddr)
 						}
