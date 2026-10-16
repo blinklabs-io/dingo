@@ -93,3 +93,80 @@ func TestEpochTransitionCreatesStat1OnGenesisStyleDatabase(t *testing.T) {
 	require.True(t, result.Supported)
 	require.False(t, result.Changed)
 }
+
+// Block application grows tables after the startup run recorded them. With
+// the real store and no epoch transition, a periodic tick must re-analyze a
+// table that has since grown far past its recorded cardinality.
+func TestPeriodicTickReanalyzesGrownTables(t *testing.T) {
+	t.Parallel()
+	dataDir := t.TempDir()
+	store, err := sqlite.NewSQLStore(
+		sqlite.Config{DataDir: dataDir},
+		metadata.ProviderDependencies{},
+	)
+	require.NoError(t, err)
+	require.NoError(t, store.Start(t.Context()))
+	defer func() { require.NoError(t, store.Close()) }()
+
+	probe, err := sql.Open(
+		"sqlite",
+		filepath.Join(dataDir, "metadata.sqlite")+
+			"?_pragma=busy_timeout(30000)&_pragma=synchronous(OFF)",
+	)
+	require.NoError(t, err)
+	defer probe.Close()
+	insertUtxos := func(from, to int) {
+		_, err := probe.Exec(
+			"WITH RECURSIVE c(i) AS (SELECT ? UNION ALL SELECT i+1 FROM c "+
+				"WHERE i < ?) INSERT INTO utxo (tx_id, output_idx, "+
+				"staking_key, credential_tag, added_slot, deleted_slot, "+
+				"amount) SELECT randomblob(32), i % 4, randomblob(28), 0, "+
+				"i, 0, '1' FROM c",
+			from, to,
+		)
+		require.NoError(t, err)
+	}
+	utxoStat := func() (string, error) {
+		var stat string
+		err := probe.QueryRow(
+			"SELECT stat FROM sqlite_stat1 WHERE tbl = 'utxo' " +
+				"ORDER BY idx LIMIT 1",
+		).Scan(&stat)
+		return stat, err
+	}
+
+	insertUtxos(1, 10)
+	tick := make(chan time.Time)
+	manager := plannerstats.NewManager(
+		store,
+		event.NewEventBus(nil, nil),
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+	)
+	plannerstats.SetTickSource(manager, tick)
+	_, err = manager.RunStartup(context.Background())
+	require.NoError(t, err)
+	recorded, err := utxoStat()
+	require.NoError(t, err, "the startup run must record utxo")
+	require.NotEmpty(t, recorded, "the startup run must record utxo")
+
+	require.NoError(t, manager.Start(t.Context()))
+	defer func() { require.NoError(t, manager.Stop()) }()
+	insertUtxos(11, 2000)
+	stale, err := utxoStat()
+	require.NoError(t, err)
+	require.Equal(t, recorded, stale, "statistics must still be stale")
+
+	select {
+	case tick <- time.Time{}:
+	case <-time.After(30 * time.Second):
+		t.Fatal("timed out handing the periodic tick to the worker")
+	}
+	// A failed read is not a changed statistic; only a readable, different
+	// row proves the re-analysis.
+	require.Eventually(t, func() bool {
+		stat, err := utxoStat()
+		return err == nil && stat != recorded
+	},
+		30*time.Second, 20*time.Millisecond,
+		"the periodic run must re-analyze the grown utxo table")
+}

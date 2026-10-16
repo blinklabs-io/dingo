@@ -1769,7 +1769,11 @@ When `Node.Run()` is called, components are initialized in this order:
     replacement database. The manager is then started and subscribes to
     `epoch.transition` (a post-Byron event without an epoch nonce, the slot
     clock's duplicate, is ignored; Byron rollovers carry no nonce and still
-    trigger a run).
+    trigger a run). Its worker also runs the pass every
+    `plannerstats.DefaultRefreshInterval` (one minute), so tables filled by
+    block application after the startup pass are re-analyzed once they have
+    grown roughly 25-fold, not only at the next rollover; the tick shares the
+    worker with the epoch trigger, so runs never overlap.
     A one-slot pending signal coalesces transitions arriving during a run into
     at most one follow-up, and the run executes on its own worker after the
     rollover transaction has committed, never inside it. `Stop` cancels a run in
@@ -5032,7 +5036,7 @@ chain per row, so each chunk costs `O(active rows × refs)` and the
 "batched" read becomes slower than the per-item loop it replaced as the
 account table grows. Outside Mithril sync and metadata backfill, SQLite
 statistics come from `internal/plannerstats.Manager`'s incremental
-`PRAGMA optimize` at startup and after each epoch rollover (see DATABASE.md),
+`PRAGMA optimize` at startup, after each epoch rollover and every minute (see DATABASE.md),
 so a genesis-synced node has them once its first run completes — and even with
 statistics present, the grouped-IN form is still measurably cheaper. `GetStakeSnapshots`' pool-side primitive
 (`GetPoolStakeSnapshotsForPools`) does not share this hazard: a
