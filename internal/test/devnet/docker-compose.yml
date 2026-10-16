@@ -122,6 +122,9 @@ services:
       CARDANO_SHELLEY_VRF_KEY: /configs/keys/vrf.skey
       CARDANO_SHELLEY_KES_KEY: /configs/keys/kes.skey
       CARDANO_SHELLEY_OPERATIONAL_CERTIFICATE: /configs/keys/opcert.cert
+      # These controlled fixtures start without shared chain history; the
+      # corroboration rule is exercised directly by chain-selection tests.
+      DINGO_GENESIS_BOOTSTRAP_CORROBORATION_PEERS: "0"
       DINGO_PLEDGE_LEVERAGE_ENABLED: "${DEVNET_DINGO_PLEDGE_LEVERAGE_ENABLED:-false}"
       DINGO_PLEDGE_LEVERAGE: "${DEVNET_DINGO_PLEDGE_LEVERAGE:-100}"
       DINGO_MIN_POOL_MARGIN: "${DEVNET_DINGO_MIN_POOL_MARGIN:-0}"
@@ -308,6 +311,7 @@ services:
       CARDANO_SHELLEY_VRF_KEY: /configs/keys/vrf.skey
       CARDANO_SHELLEY_KES_KEY: /configs/keys/kes.skey
       CARDANO_SHELLEY_OPERATIONAL_CERTIFICATE: /configs/keys/opcert.cert
+      DINGO_GENESIS_BOOTSTRAP_CORROBORATION_PEERS: "0"
       DINGO_BLOCK_PIPELINE_ENABLED: "${DEVNET_BLOCK_PIPELINE_ENABLED:-false}"
       DINGO_BLOCK_PIPELINE_VALIDATE_ENABLED: "${DEVNET_BLOCK_PIPELINE_VALIDATE_ENABLED:-false}"
       # Expose node-to-client over TCP (private port 3002) on all interfaces
