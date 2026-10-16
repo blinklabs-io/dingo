@@ -44,28 +44,32 @@ func TestDijkstraPlutusV4ContextThroughProductionPaths(t *testing.T) {
 				}
 				return pathTx{children: []pathLevel{{script: script}}}
 			}
-			t.Run(field.name+"/"+level+" is Nothing", func(t *testing.T) {
+			// A child sees its own sub-transaction index (Just) and no
+			// TopTxInfo (Nothing); a top-level guard sees no index (Nothing)
+			// and the TopTxInfo of its batch (Just).
+			want := v4MaybeTag(field.name, level)
+			t.Run(field.name+"/"+level+" matches the context", func(t *testing.T) {
 				t.Parallel()
 				runPathScenario(t, pathScenario{
 					txs: []pathTx{
-						guarded(plutusv4script.MaybeScript(t, field.sel, 1)),
+						guarded(plutusv4script.MaybeScript(t, field.sel, want)),
 					},
 				})
 			})
-			t.Run(field.name+"/"+level+" is not Just", func(t *testing.T) {
+			t.Run(field.name+"/"+level+" rejects the other constructor", func(t *testing.T) {
 				t.Parallel()
 				runPathScenario(t, pathScenario{
 					txs: []pathTx{
-						guarded(plutusv4script.MaybeScript(t, field.sel, 0)),
+						guarded(plutusv4script.MaybeScript(t, field.sel, 1-want)),
 					},
 					reject: scriptFailed,
 				})
 			})
 		}
 	}
-	t.Run("every child of one batch is Nothing", func(t *testing.T) {
+	t.Run("every child of one batch sees its index and no TopTxInfo", func(t *testing.T) {
 		t.Parallel()
-		script := plutusv4script.MaybeScript(t, plutusv4script.TxInfoSubTxIx, 1)
+		script := plutusv4script.MaybeScript(t, plutusv4script.TxInfoSubTxIx, 0)
 		runPathScenario(t, pathScenario{
 			txs: []pathTx{{children: []pathLevel{
 				{script: script},
@@ -80,7 +84,7 @@ func TestDijkstraPlutusV4ContextThroughProductionPaths(t *testing.T) {
 		runPathScenario(t, pathScenario{
 			txs: []pathTx{{children: []pathLevel{
 				{script: plutusv4script.MaybeScript(
-					t, plutusv4script.TxInfoSubTxIx, 1,
+					t, plutusv4script.TxInfoSubTxIx, 0,
 				)},
 				{script: plutusv4script.MaybeScript(
 					t, plutusv4script.GuardingTopTxInfo, 0,
@@ -89,6 +93,18 @@ func TestDijkstraPlutusV4ContextThroughProductionPaths(t *testing.T) {
 			reject: scriptFailed,
 		})
 	})
+}
+
+// v4MaybeTag is the Maybe constructor a V4 script sees for field at level: 0
+// is Just and 1 is Nothing.
+func v4MaybeTag(field, level string) int64 {
+	switch {
+	case field == "txInfoSubTxIx" && level == "child",
+		field == "guarding TopTxInfo" && level == "top-level":
+		return 0
+	default:
+		return 1
+	}
 }
 
 // The TxInfo maps that carry reward accounts and guards follow the

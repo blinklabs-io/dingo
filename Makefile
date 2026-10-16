@@ -73,7 +73,7 @@ help: ## Show this help
 	@awk 'BEGIN {FS = ":.*?## "; printf "\nUsage:\n  make \033[36m<target>\033[0m\n\nTargets:\n"} /^[a-zA-Z_-]+:.*?## / {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
 # Build target
-build: $(BINARIES) ## Run mod-tidy, then build every command binary
+build: mod-tidy $(BINARIES) ## Run mod-tidy, then build every command binary
 
 # Builds and installs binary in ~/.local/bin
 install: build ## Run build, then install the binaries to ~/.local/bin
@@ -208,7 +208,7 @@ test-load-log: build ## Run build, then load test data and capture log output
 	rm -rf .dingo dingo.log
 	./dingo load database/immutable/testdata 2>&1 | tee dingo.log
 
-test-load-profile: build ## Run build, then load test data with CPU/memory profiling
+test-load-profile: dingo ## Build Dingo, then load test data with CPU/memory profiling
 	rm -rf .dingo
 	./dingo --cpuprofile=cpu.prof --memprofile=mem.prof load database/immutable/testdata
 	@echo "Profiling complete. Run 'go tool pprof cpu.prof' or 'go tool pprof mem.prof' to analyze"
@@ -218,7 +218,11 @@ test-devnet: ## Run the default all-Dingo DevNet integration tests
 
 # Build our program binaries
 # Depends on GO_FILES to determine when rebuild is needed
-$(BINARIES): mod-tidy $(GO_FILES)
+# This order-only prerequisite keeps mod-tidy ahead of direct binary builds
+# without making the phony target force every binary to rebuild.
+$(BINARIES): | mod-tidy
+
+$(BINARIES): $(GO_FILES) go.mod go.sum
 	CGO_ENABLED=$(CGO_ENABLED) \
 	go build \
 		$(GO_TAG_FLAGS) \

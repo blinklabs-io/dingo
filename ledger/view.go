@@ -161,6 +161,18 @@ type LedgerView struct {
 	// first recorded error is kept, matching the single LedgerView built per
 	// ValidateTxFunc/EvaluateTxFunc call. See ErrLedgerViewStorageFault.
 	storageErr error
+	// preverifiedSignatures is the transaction-bound result of the trusted
+	// replay pipeline's parallel witness verification. Era validation still
+	// runs the signature rule, including witness-presence and input-witness
+	// checks, and the binding in gouroboros rejects a result for any other
+	// transaction body or witness set.
+	preverifiedSignatures *lcommon.PreverifiedSignatures
+}
+
+// PreverifiedSignatures exposes a transaction-bound signature result to the
+// era validation composition. It is nil outside trusted replay.
+func (lv *LedgerView) PreverifiedSignatures() *lcommon.PreverifiedSignatures {
+	return lv.preverifiedSignatures
 }
 
 // EvaluationContext returns the context governing this ledger operation.

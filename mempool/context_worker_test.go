@@ -81,6 +81,7 @@ func TestChainUpdateWorkerRateLimitsFailedRebuilds(t *testing.T) {
 			nil,
 			updates,
 			revalidationInterval,
+			nil,
 			func() error {
 				calls++
 				select {

@@ -25,7 +25,6 @@ import (
 	"slices"
 	"sync"
 
-	"github.com/blinklabs-io/dingo/consensus/leaderthreshold"
 	"github.com/blinklabs-io/gouroboros/consensus"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/vrf"
@@ -36,14 +35,14 @@ import (
 // are computed (e.g. the consensus mode threading added with the
 // per-era TPraos/CPraos split, the epoch slot range becoming era-aware, or
 // the active slot coefficient switching from a float64 approximation to the
-// exact Shelley genesis rational, or the protocol-correct leader threshold):
-// older persisted schedules then fail
+// exact Shelley genesis rational, or finite E34 leader eligibility). Older
+// persisted schedules then fail
 // validatePersistedSchedule and are recomputed from scratch instead of being
 // silently reused with stale assumptions. validatePersistedSchedule re-checks
 // the epoch nonce and both sigma inputs but not the active slot coefficient,
 // so the version bump is the only thing that retires a schedule computed with
 // a different f.
-const ScheduleFormatVersion = 4
+const ScheduleFormatVersion = 5
 
 // EpochSlotRange identifies the absolute slot range covered by an epoch.
 // StartSlot is inclusive and SlotCount is the number of slots to evaluate.
@@ -62,15 +61,6 @@ type Schedule struct {
 	TotalStake    uint64              // Total active stake from active snapshot
 	EpochNonce    []byte              // Epoch nonce for VRF
 	LeaderSlots   []uint64            // Slots where pool is leader, ascending-sorted
-
-	// Threshold is the integer comparison threshold every slot in this epoch
-	// was compared against: ceil(2^bits * (1 - (1-f)^sigma)).
-	// It is written once by CalculateSchedule before the schedule is published
-	// to any other goroutine and is read-only afterwards, so it needs no lock.
-	// It is deliberately NOT persisted: a reloaded schedule carries only the
-	// inputs validatePersistedSchedule re-checks. Callers must treat a nil
-	// Threshold as "not recorded" (e.g. a schedule restored from the store).
-	Threshold *big.Int
 
 	mu sync.RWMutex
 }
@@ -155,18 +145,9 @@ type Calculator struct {
 	// in the Shelley genesis. When non-nil it is used verbatim and
 	// ActiveSlotCoeff is ignored.
 	//
-	// Prefer this over ActiveSlotCoeff. The genesis value is an exact rational
-	// (gouroboros decodes "activeSlotsCoeff": 0.05 to 1/20), and the reference
-	// node's leader check uses that exact rational. Routing it through float64
-	// perturbs it: 1/20 becomes 3602879701896397/2^56, which is strictly
-	// larger, so every per-slot threshold comes out strictly larger and the
-	// node's eligible-slot set becomes a strict superset of the reference's.
-	// The perturbation is ~5.6e-17 relative and so cannot by itself move a
-	// real epoch's leader count, but a leader check must not disagree with the
-	// reference at all, and dingo's own header verification
-	// (LedgerState.verifyLeaderEligibility) already uses the exact genesis
-	// rational — a schedule computed from the float64 form could forge at a
-	// slot dingo itself would then reject.
+	// Prefer this over ActiveSlotCoeff: finite E34 preparation must use the
+	// exact genesis rational, not its binary64 approximation. Unsupported
+	// positive rationals are rejected by the node-domain validation.
 	ActiveSlotCoeffRat *big.Rat
 
 	// ActiveSlotCoeff (f) determines block production rate.
@@ -234,15 +215,14 @@ func (c *Calculator) activeSlotCoeffRat() (*big.Rat, error) {
 //   - Consensus mode (TPraos for Shelley/Allegra/Mary/Alonzo,
 //     CPraos for Babbage/Conway)
 //
-// A pool is leader if: VRF_output(slot) < threshold(sigma).
+// Each slot is checked with one immutable, prepared finite E34 predicate.
 //
 // The consensus mode is era-specific and MUST be passed correctly. TPraos
 // and CPraos differ in two independent ways: the VRF input construction
 // (TPraos folds the SeedL constant via vrf.MkSeedTPraos; CPraos uses
-// vrf.MkInputVrf directly) and the leader-value/threshold derivation
-// (TPraos compares the raw 64-byte VRF output against 2^512·T;
-// CPraos compares BLAKE2b-256("L"||output) against 2^256·T). The two
-// modes select independent leader-slot sets for the same key+nonce, so
+// vrf.MkInputVrf directly) and certified-natural derivation (TPraos uses
+// the raw 512-bit output; CPraos uses BLAKE2b-256("L"||output), 256 bits).
+// The modes select independent leader-slot sets for the same key+nonce, so
 // computing the schedule with the wrong mode yields a leader list that
 // disagrees with cardano-node's view of the same epoch. Forging at one
 // of those wrongly-marked slots produces a header that cardano-node
@@ -290,24 +270,27 @@ func (c *Calculator) CalculateSchedule(
 		return nil, fmt.Errorf("invalid active slot coefficient: %w", err)
 	}
 
-	// Precompute the leadership threshold once. It depends only on
-	// poolStake, totalStake, activeSlotCoeff, and mode — all constant
-	// for the epoch — so computing it inside the per-slot loop (which
-	// is what IsSlotLeaderWithMode does) wastes two 20-term big.Rat
-	// Taylor series and a 2^N multiply per slot.
-	threshold, err := leaderthreshold.Threshold(
-		poolStake,
-		totalStake,
-		activeSlotCoeff,
-		mode,
+	// Prepare once for the epoch; no logarithm or cache lookup per slot.
+	eligibility, err := consensus.NewLeaderEligibility(
+		poolStake, totalStake, activeSlotCoeff, mode,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("compute leadership threshold: %w", err)
+		return nil, fmt.Errorf("prepare leader eligibility: %w", err)
 	}
-	// Record the exact threshold every slot below is compared against so the
-	// sigma inputs of a computed schedule are auditable from one log line
-	// without recomputing anything.
-	schedule.Threshold = threshold
+	// Zero-pool policy is separate from the primitive (which accepts f=1).
+	// Validate nonce and the entire slot interval before returning empty.
+	if poolStake == 0 {
+		if _, err := vrfInputForMode(mode, epochStartSlot, epochNonce); err != nil {
+			return nil, fmt.Errorf("check slot %d: %w", epochStartSlot, err)
+		}
+		if epochEndSlot-1 > math.MaxInt64 {
+			return nil, fmt.Errorf(
+				"slot %d exceeds maximum int64 value for VRF input",
+				epochEndSlot-1,
+			)
+		}
+		return schedule, nil
+	}
 
 	for slot := epochStartSlot; slot < epochEndSlot; slot++ {
 		vrfInput, err := vrfInputForMode(mode, slot, epochNonce)
@@ -318,15 +301,11 @@ func (c *Calculator) CalculateSchedule(
 		if err != nil {
 			return nil, fmt.Errorf("check slot %d: %w", slot, err)
 		}
-		belowThreshold, err := consensus.IsVRFOutputBelowThresholdWithMode(
-			output,
-			threshold,
-			mode,
-		)
+		eligible, err := eligibility.CheckVRFOutput(output)
 		if err != nil {
-			return nil, fmt.Errorf("check slot %d: %w", slot, err)
+			return nil, fmt.Errorf("check VRF leader eligibility: %w", err)
 		}
-		if belowThreshold {
+		if eligible {
 			schedule.AddLeaderSlot(slot)
 		}
 	}
@@ -364,30 +343,4 @@ func vrfInputForMode(
 	default:
 		return nil, fmt.Errorf("unknown consensus mode: %d", mode)
 	}
-}
-
-// Threshold calculates the leadership probability for a given stake ratio as
-// a float64 approximation. This is provided for backward compatibility; the
-// actual leader election uses arbitrary-precision arithmetic via
-// leaderthreshold.Threshold.
-//
-// threshold(sigma) = 1 - (1-f)^sigma
-// where f is the active slot coefficient and sigma is the relative stake.
-// Returns 0 if any input is invalid (NaN, Inf, out of range).
-func (c *Calculator) Threshold(stakeRatio float64) float64 {
-	if math.IsNaN(stakeRatio) || math.IsInf(stakeRatio, 0) {
-		return 0
-	}
-	if stakeRatio <= 0 {
-		return 0
-	}
-	f := c.ActiveSlotCoeff
-	if math.IsNaN(f) || math.IsInf(f, 0) || f <= 0 || f > 1 {
-		return 0
-	}
-	if stakeRatio >= 1 {
-		return f
-	}
-	// threshold(sigma) = 1 - (1-f)^sigma
-	return 1 - math.Pow(1-f, stakeRatio)
 }

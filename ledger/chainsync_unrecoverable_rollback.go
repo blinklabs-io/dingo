@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/blinklabs-io/dingo/event"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
@@ -46,9 +47,12 @@ const (
 // unrecoverableRollbackRecord counts how often a single rollback point has
 // failed to apply locally within the detection window.
 type unrecoverableRollbackRecord struct {
-	count     int
-	firstSeen time.Time
-	lastSeen  time.Time
+	count               int
+	firstSeen           time.Time
+	lastSeen            time.Time
+	localTip            ocommon.Point
+	primaryChainChecked bool
+	onPrimaryChain      bool
 }
 
 func unrecoverableRollbackKey(point ocommon.Point) string {
@@ -107,6 +111,9 @@ func (ls *LedgerState) clearUnrecoverableRollbacks() {
 // cycles, surfaces the stuck-divergence condition as a throttled
 // operator-facing error plus a metric, rather than only the per-attempt
 // WARN that otherwise repeats indefinitely with zero forward progress.
+// Any local-tip progress discards the point's accumulated failures. For
+// peer-fork failures, a point retained on the local primary chain is only
+// diagnosed as stuck when the local tip remains unchanged for the full window.
 //
 // Callers must hold chainsyncMutex.
 func (ls *LedgerState) reportUnrecoverableRollbackIfStuck(
@@ -114,10 +121,80 @@ func (ls *LedgerState) reportUnrecoverableRollbackIfStuck(
 	reason string,
 	connId ouroboros.ConnectionId,
 ) {
+	if ls.chain == nil || ls.db == nil {
+		return
+	}
+	localTip := ls.chain.HeaderTip()
+	key := unrecoverableRollbackKey(point)
+	rec := ls.unrecoverableRollbacks[key]
+	if rec.count > 0 && !pointMatches(rec.localTip, localTip.Point) {
+		delete(ls.unrecoverableRollbacks, key)
+		return
+	}
+	if point.Slot > localTip.Point.Slot {
+		return
+	}
 	count, stuck := ls.noteUnrecoverableRollback(point)
+	rec = ls.unrecoverableRollbacks[key]
+	if rec.count == 1 {
+		rec.localTip = ocommon.NewPoint(
+			localTip.Point.Slot,
+			append([]byte(nil), localTip.Point.Hash...),
+		)
+		ls.unrecoverableRollbacks[key] = rec
+	}
 	if !stuck {
 		return
 	}
+	protocolConstrained := reason == event.ChainsyncResyncReasonRollbackExceedsK ||
+		reason == event.ChainsyncResyncReasonRollbackExceedsMithril ||
+		reason == event.ChainsyncResyncReasonRollbackBelowUtxoPruneFloor
+	if protocolConstrained {
+		ls.emitUnrecoverableRollback(point, reason, connId, count)
+		return
+	}
+	if len(point.Hash) == 0 {
+		return
+	}
+	if rec.primaryChainChecked {
+		if rec.onPrimaryChain && time.Since(rec.firstSeen) < unrecoverableRollbackWindow {
+			return
+		}
+		ls.emitUnrecoverableRollback(point, reason, connId, count)
+		return
+	}
+	onPrimary, err := ls.historicalPointOnPrimaryChain(point, localTip)
+	if err != nil {
+		if ls.config.Logger != nil {
+			ls.config.Logger.Debug(
+				"could not classify failed rollback point against primary chain",
+				"component",
+				"ledger",
+				"slot",
+				point.Slot,
+				"hash",
+				hex.EncodeToString(point.Hash),
+				"error",
+				err,
+			)
+		}
+		return
+	}
+	rec.primaryChainChecked = true
+	rec.onPrimaryChain = onPrimary
+	ls.unrecoverableRollbacks[key] = rec
+	if onPrimary && time.Since(rec.firstSeen) < unrecoverableRollbackWindow {
+		return
+	}
+	ls.emitUnrecoverableRollback(point, reason, connId, count)
+}
+
+func (ls *LedgerState) emitUnrecoverableRollback(
+	point ocommon.Point,
+	reason string,
+	connId ouroboros.ConnectionId,
+	count int,
+) {
 	if ls.metrics.unrecoverableRollbacks != nil {
 		ls.metrics.unrecoverableRollbacks.Inc()
 	}

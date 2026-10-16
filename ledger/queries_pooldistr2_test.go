@@ -103,8 +103,8 @@ func seedPoolDistr2Fixture(
 // decodePoolDistr2Result round-trips a handler's returned []any through CBOR
 // the way the wire actually does: encoded by the server exactly as
 // protocol/localstatequery/server.go encodes it, then decoded by the real
-// gouroboros client-side type. Client.GetPoolDistr2 decodes straight into a
-// PoolDistr2Result with no wrapping, so asserting against that decoded value
+// gouroboros client-side type. Client.GetPoolDistr2 decodes into a
+// StakeDistribution2Result, so asserting against that decoded value
 // (rather than a raw type assertion on the handler's own []any) is what would
 // have caught the handler double-wrapping its result before it shipped.
 func decodePoolDistr2Result(
@@ -114,10 +114,10 @@ func decodePoolDistr2Result(
 	t.Helper()
 	encoded, err := cbor.Encode(&result)
 	require.NoError(t, err)
-	var decoded olocalstatequery.PoolDistr2Result
+	var decoded olocalstatequery.StakeDistribution2Result
 	_, err = cbor.Decode(encoded, &decoded)
 	require.NoError(t, err)
-	return decoded
+	return decoded.Distribution
 }
 
 // TestQueryShelleyPoolDistr2_ReportsStakeFractionAndVrf covers GetPoolDistr2,
@@ -827,9 +827,10 @@ func TestQueryShelleyPoolDistr2_ViaGetCBOR(t *testing.T) {
 	// The tag-24 content must decode via the same real client-side type a
 	// direct (non-GetCBOR) GetPoolDistr2 reply does: proof that GetCBOR
 	// carries the identical value, just CBOR-in-CBOR encoded.
-	var distr olocalstatequery.PoolDistr2Result
-	_, err = cbor.Decode(content, &distr)
-	require.NoError(t, err, "tag-24 content must decode as a PoolDistr2Result")
+	var wrapped olocalstatequery.StakeDistribution2Result
+	_, err = cbor.Decode(content, &wrapped)
+	require.NoError(t, err, "tag-24 content must decode as a StakeDistribution2Result")
+	distr := wrapped.Distribution
 
 	entryA, ok := distr.Pools[lcommon.PoolId(pkhA)]
 	require.True(t, ok, "pool missing from the GetCBOR-wrapped distribution")

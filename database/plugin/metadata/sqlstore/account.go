@@ -1233,6 +1233,24 @@ FROM account WHERE added_slot > ?`,
 					return err
 				}
 				if state.absent {
+					slotValue, err := checkedInt64(slot)
+					if err != nil {
+						return err
+					}
+					for _, table := range []string{
+						"account_reward_delta",
+						"account_withdrawal_witness",
+					} {
+						if _, err := db.ExecContext(ctx,
+							s.dialect.Rebind("DELETE FROM "+table+
+								" WHERE added_slot > ? AND credential_tag = ? AND staking_key = ?"),
+							slotValue,
+							account.tag,
+							account.key,
+						); err != nil {
+							return err
+						}
+					}
 					if _, err := db.ExecContext(ctx, `
 DELETE FROM account
 WHERE credential_tag = ? AND staking_key = ?`,
