@@ -3017,7 +3017,9 @@ trusts its own on-disk storage and is not changed.
 Musashi/Leios prototype's extended 12-field header body (see
 `models.DecodeConwayBlock`) is accepted the same way the rest of the
 storage stack already accepts it, instead of this check alone rejecting it
-as undecodable.
+as undecodable. `models.DecodeBlockCbor` converts panics from every era-specific
+decoder to `safedecode.ErrDecodePanic`, so malformed remote objects fail as
+undecodable instead of terminating the process.
 
 `blockverify.Hash`, like bark's `GetBlock` (`bark/blob.go`), does not
 independently re-derive the type recorded in `bp..._metadata` from the

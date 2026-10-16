@@ -13349,7 +13349,10 @@ local blocks expire; `internal/historyexpiry.Pruner` owns that lifecycle when
 Because the archive controls both the download URL and the response body, the
 client re-establishes block identity locally rather than trusting the response.
 Downloaded bytes are decoded with body validation enabled, and the block's
-computed hash and slot must match the point that was requested.
+computed hash and slot must match the point that was requested. All storage
+block decoding passes through `models.DecodeBlockCbor`, which converts any
+panic raised by an era-specific decoder to `safedecode.ErrDecodePanic` on the
+ordinary decode-error path.
 
 The default gouroboros decoder validates each Byron main block body-proof
 component against its payload, including `ssc_proof`. This binds archived SSC
