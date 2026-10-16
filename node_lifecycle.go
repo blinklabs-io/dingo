@@ -126,6 +126,15 @@ type namedStop struct {
 // manager stops last.
 func (n *Node) quiesceComponentStops() []namedStop {
 	var stops []namedStop
+	// The DMQ stack keeps serving, so its stake lookups are detached from the
+	// ledger state about to be closed. Detaching waits for a lookup in flight,
+	// which reads storage without a context of its own.
+	if n.dmqStake.attached() {
+		stops = append(stops, namedStop{
+			name: "dmq stake lookups",
+			stop: func() error { n.dmqStake.setLedgerState(nil); return nil },
+		})
+	}
 	if n.blockForger != nil {
 		stops = append(stops, namedStop{
 			name: "block forger",
@@ -673,6 +682,7 @@ func (n *Node) reinitializeCoreStorage(ctx context.Context) error {
 		return fmt.Errorf("failed to reload state database: %w", err)
 	}
 	n.setLedgerState(state)
+	n.dmqStake.setLedgerState(state)
 	// n.ouroboros is rewired in one place, once every rebuilt dependency
 	// exists; see the NewOuroboros call in reinitializeNetworkingCore.
 	if err := n.chainManager.SetLedger(n.ledgerState); err != nil {
