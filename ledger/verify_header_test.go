@@ -2374,6 +2374,86 @@ func TestVerifyBlockHeaderState_GenesisDelegateSkipsPoolChecks(
 	require.NoError(t, err)
 }
 
+func TestValidateChainSelectionHeaderCryptoSameEpochBeforeTip(t *testing.T) {
+	t.Parallel()
+
+	tb := createTestBlock(t, [32]byte{52}, 0, tamperNone)
+	ls, _ := newEligibilityTestLedger(t, tb.epochNonce)
+	epoch := models.Epoch{
+		EpochId:       5,
+		StartSlot:     0,
+		SlotLength:    1_000,
+		LengthInSlots: 1_000_000,
+		EraId:         eras.ShelleyEraDesc.Id,
+		Nonce:         tb.epochNonce,
+	}
+	ls.currentEpoch = epoch
+	ls.currentEra = eras.ShelleyEraDesc
+	ls.currentPParams = &shelley.ShelleyProtocolParameters{
+		Decentralization: &cbor.Rat{Rat: big.NewRat(1, 1)},
+	}
+	delegateHash := tb.block.IssuerVkey().Hash()
+	vrfKey, ok, err := headerVrfKeyFromBodyCbor(tb.block.Header())
+	require.NoError(t, err)
+	require.True(t, ok)
+	vrfHash := lcommon.Blake2b256Hash(vrfKey)
+	ls.config.CardanoNodeConfig = newGenesisDelegateShelleyGenesisCfg(
+		t,
+		hex.EncodeToString(delegateHash.Bytes()),
+		hex.EncodeToString(vrfHash.Bytes()),
+	)
+	ls.publishSnapshotsLocked()
+	require.Less(
+		t,
+		ls.loadTipSnapshot().currentTip.Point.Slot,
+		tb.block.SlotNumber(),
+	)
+
+	require.NoError(t, ls.ValidateChainSelectionHeaderCrypto(tb.block.Header()))
+}
+
+func TestGenesisOverlayStateDefersAcrossEpochs(t *testing.T) {
+	t.Parallel()
+
+	tb := createTestBlock(t, [32]byte{53}, 0, tamperNone)
+	ls, _ := newEligibilityTestLedger(t, tb.epochNonce)
+	firstEpoch := models.Epoch{
+		EpochId:       5,
+		StartSlot:     0,
+		SlotLength:    1_000,
+		LengthInSlots: 1_000_000,
+		EraId:         eras.ShelleyEraDesc.Id,
+		Nonce:         tb.epochNonce,
+	}
+	ls.epochCache = append(ls.epochCache, models.Epoch{
+		EpochId:       6,
+		StartSlot:     1_000_000,
+		SlotLength:    1_000,
+		LengthInSlots: 1_000_000,
+		EraId:         eras.ShelleyEraDesc.Id,
+		Nonce:         tb.epochNonce,
+	})
+	ls.currentEpoch = firstEpoch
+	ls.currentEra = eras.ShelleyEraDesc
+	ls.currentPParams = &shelley.ShelleyProtocolParameters{
+		Decentralization: &cbor.Rat{Rat: big.NewRat(1, 1)},
+	}
+	ls.config.CardanoNodeConfig = newGenesisDelegateShelleyGenesisCfg(
+		t,
+		hex.EncodeToString(tb.block.IssuerVkey().Hash().Bytes()),
+		strings.Repeat("22", lcommon.Blake2b256Size),
+	)
+	ls.publishSnapshotsLocked()
+
+	handled, err := ls.verifyGenesisDelegateHeader(
+		&mockBabbageBlock{slot: uint64(firstEpoch.LengthInSlots) + 1},
+		true,
+	)
+	require.True(t, handled)
+	require.Error(t, err)
+	require.True(t, IsHeaderVerificationDeferred(err))
+}
+
 func TestVerifyBlockHeaderState_GenesisDelegateVRFMismatchFails(
 	t *testing.T,
 ) {

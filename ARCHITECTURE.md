@@ -5865,7 +5865,11 @@ it. Dingo implements this as a **corroboration gate**
   the header in bounded peer ancestry or queue it when it extends the current
   header chain, but a competing deferred header cannot clear the queue or
   trigger canonical rollback. A later header can reuse the retained ancestry
-  once producer authorization succeeds. A header past the forecast horizon
+  once producer authorization succeeds. Genesis-overlay parameters remain
+  authoritative for later slots within the applied epoch and era, so a tip
+  earlier within that epoch does not by itself defer the overlay decision;
+  headers requiring a different epoch or era's parameters remain deferred
+  until those parameters are applied. A header past the forecast horizon
   (`ledger.ErrHeaderBeyondForecastHorizon`),
   which ChainSync admission holds back until the ledger can forecast its slot,
   so it never counts for selection, Genesis density, or corroboration before
