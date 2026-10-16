@@ -513,6 +513,8 @@ jobs:
     timeout-minutes: 60
     env:
       CBOR_DATASET_REVISION: '6cd8c928665bbafe90e02066ebb4620e38f051de'
+      AMARU_UPLC_REVISION: '03acfc01807e5e2a8a5466541ad22c856f3de99c'
+      NDC_LEDGER_REVISION: '4fed8790fb81164f9d7a53414acc5f78aaf65422'
     permissions:
       attestations: write
       contents: write
@@ -554,7 +556,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
         with:
           repository: pragma-org/amaru
-          ref: ceda0c57a10d95b30a9338454e209582d62318e8
+          ref: ${{ env.AMARU_UPLC_REVISION }}
           path: .conformance/amaru
           sparse-checkout: crates/amaru-uplc/tests
           persist-credentials: false
@@ -563,7 +565,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
         with:
           repository: pragma-org/node-diversity-conformance
-          ref: fc4713f2e8f10925becc4a17a1567a559cf27918
+          ref: ${{ env.NDC_LEDGER_REVISION }}
           path: .conformance/node-diversity-conformance
           sparse-checkout: scenarios/ledger-rules/fixtures
           persist-credentials: false
