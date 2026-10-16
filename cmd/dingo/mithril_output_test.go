@@ -105,22 +105,20 @@ func hostileAggregator(t *testing.T) string {
 // Not t.Parallel: captureStdout swaps the process-global os.Stdout.
 func TestMithrilListShowEscapeAggregatorText(t *testing.T) {
 	url := hostileAggregator(t)
-	for _, backend := range []string{"v2"} {
-		for _, tc := range []struct {
-			name string
-			cmd  func() *cobra.Command
-			args []string
-		}{
-			{"list", mithrilListCommand, nil},
-			{"show", mithrilShowCommand, []string{"abc"}},
-		} {
-			t.Run(backend+"/"+tc.name, func(t *testing.T) {
-				out := runMithrilCommand(
-					t, tc.cmd(), backend, url, tc.args...,
-				)
-				require.Contains(t, out, `\x1b[2J`)
-				requireNoControlBytes(t, out)
-			})
-		}
+	for _, tc := range []struct {
+		name string
+		cmd  func() *cobra.Command
+		args []string
+	}{
+		{"list", mithrilListCommand, nil},
+		{"show", mithrilShowCommand, []string{"abc"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out := runMithrilCommand(
+				t, tc.cmd(), "v2", url, tc.args...,
+			)
+			require.Contains(t, out, `\x1b[2J`)
+			requireNoControlBytes(t, out)
+		})
 	}
 }

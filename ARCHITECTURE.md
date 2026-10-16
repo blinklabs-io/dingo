@@ -8936,14 +8936,15 @@ also carry completed/total archive counts. Bootstrap logs add the phase,
 artifact, snapshot identity, and archive/destination paths so interleaved
 download and extraction output remains attributable to one operation.
 
-Compressed downloads have a per-object limit: 1 GiB per immutable archive, 256 MiB for the digest list and
-64 GiB for the ancillary archive. Operators set `mithril.downloadMaxBytes`
-(`--mithril-download-max-bytes`, `DINGO_MITHRIL_DOWNLOAD_MAX_BYTES`); library
-callers can set `SyncConfig.DownloadMaxBytes`, `BootstrapConfig.DownloadMaxBytes`,
-or `DownloadConfig.MaxBytes`. Zero selects the built-in limit and negatives
-fail validation. A positive value replaces the limit of every
-object. `ExpectedSize`, when positive, remains
-an exact-size requirement and cannot exceed the configured maximum.
+Compressed downloads have a per-object limit: 1 GiB per immutable archive,
+256 MiB for the digest list and 64 GiB for the ancillary archive. Operators set
+`mithril.downloadMaxBytes` (`--mithril-download-max-bytes`,
+`DINGO_MITHRIL_DOWNLOAD_MAX_BYTES`); library callers can set
+`SyncConfig.DownloadMaxBytes`, `BootstrapConfig.DownloadMaxBytes`, or
+`DownloadConfig.MaxBytes`. Zero selects the built-in limit and negatives fail
+validation. A positive value replaces the limit of every object.
+`ExpectedSize`, when positive, remains an exact-size requirement and cannot
+exceed the configured maximum.
 Resumed prefixes count against the limit; responses without Content-Length
 are bounded while streaming. An extra byte is read only as an overflow
 probe and is never written. Size-limit errors are terminal for the downloader.
@@ -8968,10 +8969,12 @@ cap (directories and empty files count), per-member and aggregate expanded-byte
 caps, and an expansion bound of 256 times the compressed bytes read plus a
 64 MiB floor. Each archive type admits only the
 members its consumer reads, and a refused member is never created. An
-immutable archive admits its own certified trio (plus a `ledger/` tree, which is
-not read: the ledger state is imported from the ancillary archive only). Its
-expanded-byte limits allow 8 GiB per member and 1 TiB in total; each trio file is
-SHA-256-checked against the certified digest list as it is written, so a
+immutable archive admits only its own certified trio under `immutable/`; any
+other member, including a `ledger/` tree, fails extraction with
+`ErrExtractUnexpectedMember` and nothing outside `immutable/` is written,
+because the ledger state is imported from the ancillary archive only. Its
+expanded-byte limits allow 8 GiB per member and 1 TiB in total; each trio file
+is SHA-256-checked against the certified digest list as it is written, so a
 mismatching file is removed before the pool moves on. The digest list archive
 admits one top-level JSON file of at most 64 MiB. The ancillary
 archive admits the signed manifest, the `ledger/` tree and the next immutable
@@ -8984,8 +8987,8 @@ ancillary ledger-state directory, synthesized snapshot metadata).
 
 `artifact.Network`/`Hash` arrive from the aggregator before certificate/hash
 verification runs, so `bootstrap.go`'s `validateSnapshotIdentity` rejects them
-before the backend derives a filesystem path from them. The network must be either
-one of the default networks (`AcceptedNetworks()`, mirroring
+before the backend derives a filesystem path from them. The network must be
+either one of the default networks (`AcceptedNetworks()`, mirroring
 `AcceptedBackends()`) or an exact match for the operator's own configured
 `BootstrapConfig.Network` — trusted because it's already restricted to
 alphanumeric/hyphen/underscore by `internal/config`'s `ValidateNetworkName`
@@ -9145,11 +9148,11 @@ and a failed trio is removed through that handle. Removing
 to the file, so a symlink there would make a failed download unlink somebody
 else's files.
 
-The same rule governs the cache-reuse fast paths — the `chunkDirUnder` lookup
-and the ancillary "already extracted, skipping" checks — which decide whether a
-previous run left a usable tree and, when they say yes, skip extraction
-entirely. A candidate reached through a symlink is refused and the snapshot
-reported absent. Extraction never creates a symlink, so one in an extracted
+The same rule governs the cache-reuse fast paths — the `chunkDirUnder`
+lookup and the ancillary "already extracted, skipping" checks — which decide
+whether a previous run left a usable tree and, when they say yes, skip
+extraction entirely. A candidate reached through a symlink is refused and the
+snapshot reported absent. Extraction never creates a symlink, so one in an extracted
 tree is evidence of tampering rather than something this node produced;
 treating the tree as absent re-extracts it from the verified archive, which
 discards it. Accepting it would load the chain from a directory somebody else

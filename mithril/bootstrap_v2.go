@@ -83,9 +83,10 @@ func immutableDownloadBudget(cfg BootstrapConfig) (*semaphore.Weighted, int64) {
 	return semaphore.NewWeighted(max(immutableInflightBytes, weight)), weight
 }
 
-// immutableArchiveLimits admits an immutable archive's own certified trio, and
-// hashes each file as it is written. The ledger tree is also admitted, though
-// the ledger state is imported from the ancillary archive only.
+// immutableArchiveLimits admits only an immutable archive's own certified
+// trio under immutable/, and hashes each file as it is written. Any other
+// member, including a ledger/ tree, is refused: the ledger state is imported
+// from the ancillary archive only.
 func immutableArchiveLimits(
 	num uint64,
 	digests map[string]string,
@@ -106,8 +107,7 @@ func immutableArchiveLimits(
 			if _, ok := own[name]; ok {
 				return true
 			}
-			return name == "immutable" || name == "ledger" ||
-				strings.HasPrefix(name, "ledger/")
+			return name == "immutable"
 		},
 	}
 }
