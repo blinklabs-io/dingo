@@ -1875,10 +1875,11 @@ func WithBarkBlockDownloadHosts(hosts []string) ConfigOptionFunc {
 	}
 }
 
-// WithBarkBlockDownloadAllowPrivateAddresses permits Bark block downloads
-// from private, loopback, and other special-use addresses, such as an
-// S3-compatible store on a private network. Allowed origins, HTTPS,
-// redirect, and proxy restrictions still apply. Disabled by default.
+// WithBarkBlockDownloadAllowPrivateAddresses permits Bark RPC and block
+// downloads from private, loopback, and other special-use addresses, such as
+// an archive and S3-compatible store on a private network. Allowed origins,
+// HTTPS download, redirect, and proxy restrictions still apply. Disabled by
+// default.
 func WithBarkBlockDownloadAllowPrivateAddresses(allow bool) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.BarkBlockDownloadAllowPrivateAddresses = allow
