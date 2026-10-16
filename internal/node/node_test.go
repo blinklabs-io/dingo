@@ -169,7 +169,7 @@ func startHealthListener(
 	listener, port := reservedTCPListener(t, "127.0.0.1")
 	cfg.HealthPort = port
 
-	srv := NewHealthServer(cfg, tipGap)
+	srv := NewHealthServer(cfg, tipGap, nil)
 	if srv == nil {
 		t.Fatal("expected an enabled health listener")
 	}
@@ -426,7 +426,7 @@ func TestNewHealthServerDisabledOnZeroPort(t *testing.T) {
 	t.Parallel()
 
 	cfg := &config.Config{BindAddr: "127.0.0.1", HealthPort: 0}
-	if srv := NewHealthServer(cfg, nil); srv != nil {
+	if srv := NewHealthServer(cfg, nil, nil); srv != nil {
 		t.Fatalf("healthPort 0 must disable the listener, got %+v", srv)
 	}
 }
@@ -439,7 +439,7 @@ func TestHealthServerBindsPublicBindAddr(t *testing.T) {
 	t.Parallel()
 
 	cfg := &config.Config{BindAddr: "0.0.0.0", HealthPort: 12799}
-	srv := NewHealthServer(cfg, nil)
+	srv := NewHealthServer(cfg, nil, nil)
 	if srv == nil {
 		t.Fatal("expected an enabled health listener")
 	}
@@ -470,7 +470,7 @@ func TestHealthServerBracketsIPv6BindAddr(t *testing.T) {
 				BindAddr:   test.bindAddr,
 				HealthPort: 12799,
 			}
-			srv := NewHealthServer(cfg, nil)
+			srv := NewHealthServer(cfg, nil, nil)
 			if srv == nil {
 				t.Fatal("expected an enabled health listener")
 			}
@@ -507,7 +507,11 @@ func TestHealthListenerBindsIPv6Loopback(t *testing.T) {
 	}
 
 	cfg := &config.Config{HealthPort: uint(port), BindAddr: "::1"}
-	srv := NewHealthServer(cfg, func() (uint64, bool) { return 4, true })
+	srv := NewHealthServer(
+		cfg,
+		func() (uint64, bool) { return 4, true },
+		nil,
+	)
 	if srv == nil {
 		t.Fatal("expected an enabled health listener")
 	}

@@ -15,10 +15,13 @@
 package health_test
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/internal/health"
@@ -110,7 +113,7 @@ func TestMuxProbeCodes(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
-			mux := health.NewMux(test.tipGap, 1000)
+			mux := health.NewMux(nil, test.tipGap, 1000)
 			rec := httptest.NewRecorder()
 			mux.ServeHTTP(
 				rec,
@@ -130,7 +133,7 @@ func TestMuxProbeCodes(t *testing.T) {
 func TestMuxRejectsWrites(t *testing.T) {
 	t.Parallel()
 
-	mux := health.NewMux(gap(0), 1000)
+	mux := health.NewMux(nil, gap(0), 1000)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(
 		rec,
@@ -145,7 +148,7 @@ func TestMuxRejectsWrites(t *testing.T) {
 func TestMuxServesOnlyProbePaths(t *testing.T) {
 	t.Parallel()
 
-	mux := health.NewMux(gap(0), 1000)
+	mux := health.NewMux(nil, gap(0), 1000)
 	for _, path := range []string{
 		"/",
 		"/metrics",
@@ -163,7 +166,7 @@ func TestMuxServesOnlyProbePaths(t *testing.T) {
 func TestMuxHeadCarriesStatusWithoutBody(t *testing.T) {
 	t.Parallel()
 
-	mux := health.NewMux(unknownGap, 1000)
+	mux := health.NewMux(nil, unknownGap, 1000)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(
 		rec,
@@ -191,21 +194,21 @@ func TestChecksGateTheProbesTheyBelongTo(t *testing.T) {
 		checks    []health.Check
 		wantLive  int
 		wantReady int
-		wantMsg   string
+		wantReason string
 	}{
 		{
 			name:      "missing readiness callback",
 			checks:    []health.Check{{}},
 			wantLive:  200,
 			wantReady: 503,
-			wantMsg:   "callback is unavailable",
+			wantReason: "health_check_failed",
 		},
 		{
 			name:      "missing liveness callback",
 			checks:    []health.Check{{Liveness: true}},
 			wantLive:  503,
 			wantReady: 503,
-			wantMsg:   "callback is unavailable",
+			wantReason: "health_check_failed",
 		},
 		{
 			name: "passing checks change nothing",
@@ -218,35 +221,48 @@ func TestChecksGateTheProbesTheyBelongTo(t *testing.T) {
 		},
 		{
 			name:      "failing readiness check holds readiness only",
-			checks:    []health.Check{{Fn: failing("database read failed")}},
+			checks: []health.Check{{
+				Reason: "database_unavailable",
+				Fn:     failing("database read failed"),
+			}},
 			wantLive:  200,
 			wantReady: 503,
-			wantMsg:   "database read failed",
+			wantReason: "database_unavailable",
 		},
 		{
 			name: "failing liveness check fails both",
 			checks: []health.Check{
-				{Liveness: true, Fn: failing("slot ticks have stopped")},
+				{
+					Liveness: true,
+					Reason:   "event_loop_unresponsive",
+					Fn:       failing("slot ticks have stopped"),
+				},
 			},
 			wantLive:  503,
 			wantReady: 503,
-			wantMsg:   "slot ticks have stopped",
+			wantReason: "event_loop_unresponsive",
 		},
 		{
 			name: "first failing readiness check names the reason",
 			checks: []health.Check{
-				{Fn: failing("block forger is not running")},
-				{Fn: failing("database read failed")},
+				{
+					Reason: "block_producer_unavailable",
+					Fn:     failing("block forger is not running"),
+				},
+				{
+					Reason: "database_unavailable",
+					Fn:     failing("database read failed"),
+				},
 			},
 			wantLive:  200,
 			wantReady: 503,
-			wantMsg:   "block forger is not running",
+			wantReason: "block_producer_unavailable",
 		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
-			mux := health.NewMux(gap(0), 1000, test.checks...)
+			mux := health.NewMux(nil, gap(0), 1000, test.checks...)
 			for path, want := range map[string]int{
 				health.PathLive:   test.wantLive,
 				health.PathHealth: test.wantLive,
@@ -259,11 +275,39 @@ func TestChecksGateTheProbesTheyBelongTo(t *testing.T) {
 				)
 				assert.Equal(t, want, rec.Code, "path %s", path)
 				if want != http.StatusOK {
-					assert.Contains(t, decode(t, rec).Reason, test.wantMsg)
+					assert.Equal(t, test.wantReason, decode(t, rec).Reason)
 				}
 			}
 		})
 	}
+}
+
+func TestProbeReturnsStableReasonAndLogsDiagnosticOnce(t *testing.T) {
+	t.Parallel()
+
+	const diagnostic = "database /private/path failed with signer key details"
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
+	mux := health.NewMux(
+		logger,
+		gap(0),
+		1000,
+		health.Check{
+			Reason: "database_unavailable",
+			Fn:     failing(diagnostic),
+		},
+	)
+	for range 2 {
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(
+			rec,
+			httptest.NewRequest(http.MethodGet, health.PathReady, nil),
+		)
+		status := decode(t, rec)
+		assert.Equal(t, "database_unavailable", status.Reason)
+		assert.NotContains(t, rec.Body.String(), diagnostic)
+	}
+	assert.Equal(t, 1, strings.Count(logs.String(), diagnostic))
 }
 
 // TestReadinessChecksWaitForTheTipGap pins that a check never turns a node
@@ -275,5 +319,5 @@ func TestReadinessChecksWaitForTheTipGap(t *testing.T) {
 		gap(5000), 1000, health.Check{Fn: passing},
 	)
 	assert.False(t, status.Ready)
-	assert.Contains(t, status.Reason, "tip gap")
+	assert.Equal(t, "tip_gap_exceeded", status.Reason)
 }

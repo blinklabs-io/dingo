@@ -103,6 +103,7 @@ func TestConfigLogClassesAreUnambiguous(t *testing.T) {
 		logPlainConfigFields,
 		logSecretConfigFields,
 		logURIConfigFields,
+		logURLOrPathConfigFields,
 		logProviderConfigFields,
 	} {
 		for _, path := range paths {
@@ -502,9 +503,10 @@ func TestRedactURICredentials(t *testing.T) {
 			want: "https://api.example/v1?tokenFilePath=/etc/dingo/t",
 		},
 		{
-			name: "fragment is not scanned as a query parameter",
+			name: "credential fragment is redacted",
 			in:   "https://api.example/v1?page=2#apiKey=abc123",
-			want: "https://api.example/v1?page=2#apiKey=abc123",
+			want: "https://api.example/v1?page=2#apiKey=" +
+				redactedPlaceholder,
 		},
 		{
 			name: "no credentials is unchanged",
@@ -831,6 +833,7 @@ func TestConfigFieldClassesAgreeWithClassifier(t *testing.T) {
 	for _, path := range slices.Concat(
 		logPlainConfigFields,
 		logURIConfigFields,
+		logURLOrPathConfigFields,
 		logProviderConfigFields,
 	) {
 		leaf := path
@@ -875,6 +878,30 @@ func TestConfigFieldClassesAgreeWithClassifier(t *testing.T) {
 				keyNameWords(leaf),
 			)
 		}
+	}
+}
+
+func TestImmutableDbPathRedactsRemoteCredentialsAndPreservesLocalPath(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	cfg := Config{ImmutableDbPath: "https://dingo:password@example.test/db?" +
+		"apiKey=query-secret#access_token=fragment-secret"}
+	rendered := fmt.Sprint(cfg.LogValue())
+	for _, secret := range []string{"password", "query-secret", "fragment-secret"} {
+		if strings.Contains(rendered, secret) {
+			t.Errorf("ImmutableDbPath leaks %q: %s", secret, rendered)
+		}
+	}
+	if !strings.Contains(rendered, "example.test/db") {
+		t.Errorf("ImmutableDbPath dropped the remote host and path: %s", rendered)
+	}
+
+	cfg.ImmutableDbPath = "/var/lib/dingo/password=ordinary-path"
+	rendered = fmt.Sprint(cfg.LogValue())
+	if !strings.Contains(rendered, cfg.ImmutableDbPath) {
+		t.Errorf("ImmutableDbPath changed a local path: %s", rendered)
 	}
 }
 
