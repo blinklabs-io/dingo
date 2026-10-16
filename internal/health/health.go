@@ -183,8 +183,11 @@ func evaluate(
 type diagnosticReporter struct {
 	logger *slog.Logger
 	mu     sync.Mutex
-	last   string
+	recent map[string]struct{}
+	order  []string
 }
+
+const maxRememberedDiagnostics = 128
 
 func (r *diagnosticReporter) report(result evaluation) {
 	if r == nil || r.logger == nil {
@@ -195,11 +198,20 @@ func (r *diagnosticReporter) report(result evaluation) {
 		key = result.status.Reason + "\x00" + result.diagnostic.Error()
 	}
 	r.mu.Lock()
-	if key == r.last {
+	if r.recent == nil {
+		r.recent = make(map[string]struct{})
+	}
+	if _, exists := r.recent[key]; exists {
 		r.mu.Unlock()
 		return
 	}
-	r.last = key
+	if len(r.order) == maxRememberedDiagnostics {
+		delete(r.recent, r.order[0])
+		copy(r.order, r.order[1:])
+		r.order = r.order[:len(r.order)-1]
+	}
+	r.recent[key] = struct{}{}
+	r.order = append(r.order, key)
 	r.mu.Unlock()
 	if result.diagnostic != nil {
 		r.logger.Warn(

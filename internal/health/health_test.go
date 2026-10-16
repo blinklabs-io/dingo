@@ -190,24 +190,24 @@ func TestChecksGateTheProbesTheyBelongTo(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name      string
-		checks    []health.Check
-		wantLive  int
-		wantReady int
+		name       string
+		checks     []health.Check
+		wantLive   int
+		wantReady  int
 		wantReason string
 	}{
 		{
-			name:      "missing readiness callback",
-			checks:    []health.Check{{}},
-			wantLive:  200,
-			wantReady: 503,
+			name:       "missing readiness callback",
+			checks:     []health.Check{{}},
+			wantLive:   200,
+			wantReady:  503,
 			wantReason: "health_check_failed",
 		},
 		{
-			name:      "missing liveness callback",
-			checks:    []health.Check{{Liveness: true}},
-			wantLive:  503,
-			wantReady: 503,
+			name:       "missing liveness callback",
+			checks:     []health.Check{{Liveness: true}},
+			wantLive:   503,
+			wantReady:  503,
 			wantReason: "health_check_failed",
 		},
 		{
@@ -220,13 +220,13 @@ func TestChecksGateTheProbesTheyBelongTo(t *testing.T) {
 			wantReady: 200,
 		},
 		{
-			name:      "failing readiness check holds readiness only",
+			name: "failing readiness check holds readiness only",
 			checks: []health.Check{{
 				Reason: "database_unavailable",
 				Fn:     failing("database read failed"),
 			}},
-			wantLive:  200,
-			wantReady: 503,
+			wantLive:   200,
+			wantReady:  503,
 			wantReason: "database_unavailable",
 		},
 		{
@@ -238,8 +238,8 @@ func TestChecksGateTheProbesTheyBelongTo(t *testing.T) {
 					Fn:       failing("slot ticks have stopped"),
 				},
 			},
-			wantLive:  503,
-			wantReady: 503,
+			wantLive:   503,
+			wantReady:  503,
 			wantReason: "event_loop_unresponsive",
 		},
 		{
@@ -254,8 +254,8 @@ func TestChecksGateTheProbesTheyBelongTo(t *testing.T) {
 					Fn:     failing("database read failed"),
 				},
 			},
-			wantLive:  200,
-			wantReady: 503,
+			wantLive:   200,
+			wantReady:  503,
 			wantReason: "block_producer_unavailable",
 		},
 	}
@@ -286,6 +286,8 @@ func TestProbeReturnsStableReasonAndLogsDiagnosticOnce(t *testing.T) {
 	t.Parallel()
 
 	const diagnostic = "database /private/path failed with signer key details"
+	sequence := []error{errors.New(diagnostic), errors.New("other"), errors.New(diagnostic)}
+	call := 0
 	var logs bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&logs, nil))
 	mux := health.NewMux(
@@ -294,10 +296,14 @@ func TestProbeReturnsStableReasonAndLogsDiagnosticOnce(t *testing.T) {
 		1000,
 		health.Check{
 			Reason: "database_unavailable",
-			Fn:     failing(diagnostic),
+			Fn: func() error {
+				err := sequence[call]
+				call++
+				return err
+			},
 		},
 	)
-	for range 2 {
+	for range len(sequence) {
 		rec := httptest.NewRecorder()
 		mux.ServeHTTP(
 			rec,

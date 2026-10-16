@@ -886,10 +886,12 @@ func TestImmutableDbPathRedactsRemoteCredentialsAndPreservesLocalPath(
 ) {
 	t.Parallel()
 
-	cfg := Config{ImmutableDbPath: "https://dingo:password@example.test/db?" +
+	cfg := Config{ImmutableDbPath: "https://credential-name:password@example.test/db?" +
 		"apiKey=query-secret#access_token=fragment-secret"}
 	rendered := fmt.Sprint(cfg.LogValue())
-	for _, secret := range []string{"password", "query-secret", "fragment-secret"} {
+	for _, secret := range []string{
+		"credential-name", "password", "query-secret", "fragment-secret",
+	} {
 		if strings.Contains(rendered, secret) {
 			t.Errorf("ImmutableDbPath leaks %q: %s", secret, rendered)
 		}
@@ -902,6 +904,32 @@ func TestImmutableDbPathRedactsRemoteCredentialsAndPreservesLocalPath(
 	rendered = fmt.Sprint(cfg.LogValue())
 	if !strings.Contains(rendered, cfg.ImmutableDbPath) {
 		t.Errorf("ImmutableDbPath changed a local path: %s", rendered)
+	}
+
+	cfg.ImmutableDbPath = "https://credential-name:pass%zz@example.test/db"
+	rendered = fmt.Sprint(cfg.LogValue())
+	for _, secret := range []string{"credential-name", "pass%zz"} {
+		if strings.Contains(rendered, secret) {
+			t.Errorf("malformed ImmutableDbPath leaks %q: %s", secret, rendered)
+		}
+	}
+	if !strings.Contains(rendered, "example.test/db") {
+		t.Errorf("malformed ImmutableDbPath dropped the remote host and path: %s", rendered)
+	}
+
+	for _, path := range []string{
+		" https://credential-name:password@example.test/db",
+		"https:///db?apiKey=query-secret",
+	} {
+		cfg.ImmutableDbPath = path
+		rendered = fmt.Sprint(cfg.LogValue())
+		for _, secret := range []string{
+			"credential-name", "password", "query-secret",
+		} {
+			if strings.Contains(rendered, secret) {
+				t.Errorf("ImmutableDbPath %q leaks %q: %s", path, secret, rendered)
+			}
+		}
 	}
 }
 

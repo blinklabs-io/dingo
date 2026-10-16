@@ -695,13 +695,32 @@ func redactURICredentials(s string) string {
 }
 
 func redactURLCredentialsOrPath(s string) string {
-	parsed, err := url.Parse(s)
-	if err != nil || parsed.Host == "" ||
-		(!strings.EqualFold(parsed.Scheme, "http") &&
-			!strings.EqualFold(parsed.Scheme, "https")) {
+	leading := len(s) - len(strings.TrimLeft(s, " \t\r\n"))
+	value := s[leading:]
+	if !strings.HasPrefix(strings.ToLower(value), "http://") &&
+		!strings.HasPrefix(strings.ToLower(value), "https://") {
 		return s
 	}
-	return redactURICredentials(s)
+	return s[:leading] + redactURLUserinfo(redactCredentialParams(value))
+}
+
+// redactURLUserinfo removes the entire userinfo component. Unlike generic
+// database DSNs, an ImmutableDB URL's username can itself be a credential.
+func redactURLUserinfo(s string) string {
+	start := strings.Index(s, "://")
+	if start < 0 {
+		return s
+	}
+	start += len("://")
+	end := len(s)
+	if i := strings.IndexAny(s[start:], "/?#"); i >= 0 {
+		end = start + i
+	}
+	at := strings.LastIndex(s[start:end], "@")
+	if at < 0 {
+		return s
+	}
+	return s[:start] + redactedPlaceholder + s[start+at:]
 }
 
 // redactCredentialParams redacts the value of every credential-named

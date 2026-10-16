@@ -626,6 +626,7 @@ func forceCloseUtxorpc(server *http.Server, shutdownErr <-chan error) error {
 			"force-close after graceful shutdown failed: %w", err,
 		)
 	}
+	//nolint:errcheck // Drain the shutdown goroutine after Close has taken over.
 	<-shutdownErr
 	return nil
 }

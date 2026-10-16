@@ -635,6 +635,7 @@ func copyBlocksRemote(
 	defer func() {
 		cancelFetch()
 		for _, done := range pending {
+			//nolint:errcheck // The caller has already chosen its return path.
 			<-done
 		}
 	}()
