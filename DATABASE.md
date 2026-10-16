@@ -876,6 +876,16 @@ Configuration validation is build-aware: a non-empty `databaseLifecycle.snapshot
 
 **Interrupted truncate marker.** Before `lifecycle.Truncate` begins its batched blob deletion, it records `database_lifecycle_truncate_pending` in `sync_state`, including the target ID/slot/hash, original blob-tip ID/slot/hash, Mithril floor, and a checksum covering the complete marker. The checksum prevents a damaged deletion bound from being resumed; the original blob tip cannot simply be required to remain present because an interrupted attempt may already have deleted it, and it may legitimately be ahead of the applied metadata tip. Recovery therefore accepts a current blob tip below the recorded tip as partial delete progress, requires an equal tip to match the recorded slot/hash, and fails closed if the current blob tip is newer than the authenticated upper bound. Tip identity is read directly from the highest `bi` index entry rather than by resolving its referenced block object: an irreversible cloud delete can fail after removing the block object but before removing that index, and the remaining authenticated index must be allowed to drive idempotent cleanup on retry. This prevents a stale-but-valid marker from deleting only its old blob range while metadata truncation removes state through a subsequently advanced tip. The marker remains durable if cancellation or a storage error lands after one or more blob batches commit, making the intermediate state detectable rather than leaving metadata silently referencing already-deleted block blobs. A subsequent truncate validates the marker, resumes the recorded operation (missing blobs are idempotently skipped), performs metadata truncation, and clears the marker in the same metadata transaction. Normal node startup refuses to serve while this marker exists and directs the operator to rerun truncate; the offline lifecycle service can open the database and complete that recovery.
 
+**Leader schedules.** Keys `leader_schedule:<pool-id-hex>:<epoch>` in
+`sync_state` hold JSON fields `format_version`, `epoch`, `pool_id`,
+`pool_stake`, `total_stake`, `epoch_nonce`, and `leader_slots`. Version 5
+identifies finite E34 eligibility. Election reload rejects version-4 and
+unversioned records rather than reusing their ideal-cutoff slot lists;
+freshly computed schedules are saved as version 5. A valid version-5 record
+can be reused after checking its epoch, nonce, stake inputs, and slot range.
+The evaluator is not serialized, and the version change needs no SQL schema
+migration.
+
 **Rollback notification outbox.** `ledger.rollback.pending` is a version-1
 JSON record in `sync_state` containing `format_version`, the target `slot` and
 hex `hash`, and a newest-first `blocks` array. Each block uses explicit JSON

@@ -113,24 +113,23 @@ func newTestChainSyncServer(
 	return s
 }
 
-// findIntersect always intersects at origin and serves the whole chain from
-// the start, which is all a test that only cares about receiving
-// RollForward events needs -- WatchBlocks always starts from "current tip"
-// in production, but the exact intersect point does not matter here.
+// findIntersect reports origin until the gated block feed starts. This lets
+// WatchBlocks sync from its advertised current tip and receive the whole
+// chain without accepting an intersection point the client never offered.
 func (s *testChainSyncServer) findIntersect(
 	_ chainsync.CallbackContext,
 	points []pcommon.Point,
 ) (pcommon.Point, chainsync.Tip, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if len(points) == 0 {
+		return pcommon.Point{}, chainsync.Tip{
+			Point: csmock.OriginPoint(),
+		}, chainsync.ErrIntersectNotFound
+	}
 	s.rolledBack = false
 	s.cursor = 0
-	if len(points) == 0 {
-		return pcommon.Point{}, s.chain.Tip(), chainsync.ErrIntersectNotFound
-	}
-	// Report the first offered point: a client rejects an intersection it
-	// did not offer, and where the feed starts does not matter here.
-	return points[0], s.chain.Tip(), nil
+	return intersectOrNotFound(points, s.chain.Tip())
 }
 
 // requestNext follows the real node convention csmock's own example
