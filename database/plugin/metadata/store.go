@@ -34,6 +34,10 @@ import (
 // model-specific error when the public method contract requires one.
 var ErrNotFound = errors.New("metadata not found")
 
+// ErrSyncStateTooLarge reports a sync_state value above the caller's byte
+// limit. The value is not read.
+var ErrSyncStateTooLarge = errors.New("sync state value exceeds size limit")
+
 // The interfaces below are the compiled-in metadata provider contract
 // (database/plugin/PLUGIN_DEVELOPMENT.md). A provider maintained outside this
 // repository builds against a pinned module version, so adding a method or a
@@ -3110,6 +3114,12 @@ type MetadataStore interface {
 	// GetSyncState retrieves a sync state value by key.
 	// Returns empty string if the key does not exist.
 	GetSyncState(string, types.Txn) (string, error)
+
+	// GetSyncStateBounded retrieves a sync state value by key only when its
+	// size is at most maxBytes; a larger value is not read and the call fails
+	// with ErrSyncStateTooLarge. Returns empty string if the key does not
+	// exist.
+	GetSyncStateBounded(string, int, types.Txn) (string, error)
 
 	// SetSyncState stores or updates a sync state value.
 	SetSyncState(string, string, types.Txn) error

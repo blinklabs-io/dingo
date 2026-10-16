@@ -80,6 +80,22 @@ func TestPostgresPParamUpdateOrdering(t *testing.T) {
 	)
 }
 
+func TestPostgresGetSyncStateBounded(t *testing.T) {
+	dsn, schema := newPostgresIntegrationSchema(t)
+	testGetSyncStateBounded(
+		t,
+		newIntegrationSQLStore(t, "pgx", dsn, "postgres", schema),
+	)
+}
+
+func TestMySQLGetSyncStateBounded(t *testing.T) {
+	dsn, database := newMySQLIntegrationDatabase(t)
+	testGetSyncStateBounded(
+		t,
+		newIntegrationSQLStore(t, "mysql", dsn, "mysql", database),
+	)
+}
+
 func TestMySQLPParamUpdateOrdering(t *testing.T) {
 	dsn, database := newMySQLIntegrationDatabase(t)
 	testPParamUpdateOrdering(
