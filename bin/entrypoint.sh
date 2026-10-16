@@ -183,8 +183,14 @@ redact_args() {
   shopt -s nocasematch
   for arg in "$@"; do
     if [[ "${redact_next}" == "true" ]]; then
-      out+=("<redacted>")
-      redact_next="false"
+      # A secret flag followed by another secret flag has no value of its own;
+      # keep the pending redaction for the next flag's value.
+      if [[ "${arg}" != *=* ]] && is_secret_flag "${arg}"; then
+        out+=("${arg}")
+      else
+        out+=("<redacted>")
+        redact_next="false"
+      fi
     elif [[ "${arg}" == -*=* ]]; then
       name="${arg%%=*}"
       if is_secret_flag "${name}"; then

@@ -287,7 +287,7 @@ func TestRedactArgsEdgeCases(t *testing.T) {
 		{
 			"flag shaped secret value",
 			[]string{"--api-key", "--bearer", "real-secret", "serve"},
-			"--api-key <redacted> real-secret serve",
+			"--api-key --bearer <redacted> serve",
 		},
 		{
 			"url query credential",
@@ -370,6 +370,7 @@ func TestEntrypointRedactsSecretArguments(t *testing.T) {
 		secretC = "url-pass-ccc"
 		secretD = "header-secret-ddd"
 		secretE = "query-secret-eee"
+		secretF = "pending-secret-fff"
 	)
 	for _, debug := range []string{"", "1"} {
 		t.Run("debug="+debug, func(t *testing.T) {
@@ -388,7 +389,7 @@ func TestEntrypointRedactsSecretArguments(t *testing.T) {
 				"--api-secret=" + secretB,
 				"--mithril-aggregator-url=https://user:" + secretC + "@agg.example/api",
 				"--header", "Authorization: Bearer " + secretD,
-				"--api-key", "--bearer",
+				"--api-key", "--bearer", secretF,
 				"--tracing-endpoint=https://collector.example/v1/traces?api_key=" +
 					secretE + "&service=dingo",
 				"--token-registry-enabled",
@@ -406,14 +407,14 @@ func TestEntrypointRedactsSecretArguments(t *testing.T) {
 			require.NotContains(t, logs, secretC)
 			require.NotContains(t, logs, secretD)
 			require.NotContains(t, logs, secretE)
-			require.NotContains(t, logs, "--bearer")
+			require.NotContains(t, logs, secretF)
 			require.Contains(
 				t,
 				logs,
 				"serve --koios-parity-api-key <redacted> --api-secret=<redacted> "+
 					"--mithril-aggregator-url=https://<redacted>@agg.example/api "+
 					"--header Authorization: Bearer <redacted> "+
-					"--api-key <redacted> "+
+					"--api-key --bearer <redacted> "+
 					"--tracing-endpoint=https://collector.example/v1/traces"+
 					"?api_key=<redacted>&service=dingo "+
 					"--token-registry-enabled --network devnet",
