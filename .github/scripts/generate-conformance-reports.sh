@@ -3,9 +3,11 @@
 # Generate the CBOR, ledger-rules, UPLC conformance and UPLC turbo reports for
 # a release tag.
 #
-# A report is published even when it records failures: the generators exit
-# non-zero for those, so success is the report file existing rather than the
-# exit status. A generator that wrote no report is a real error.
+# Reporting never stops a release. A generator exits non-zero when it records
+# failures, and that is fine: the report file is what counts. When a generator
+# crashes or its inputs cannot be prepared, an error report naming the scenario
+# and the cause is written in its place so every report kind is still
+# published.
 #
 # The UPLC turbo run is Linux-only and measures an evenly spaced subset of the
 # corpus, because the whole archive takes hours.
@@ -19,8 +21,8 @@
 #   CBOR_DATASET_REVISION required, the pinned dataset commit
 #   TURBO_URL             required, the turbo corpus archive
 #   TURBO_SHA256          required, digest of that archive
-#   TURBO_SAMPLES         optional, timed samples per program, defaults to 10
-#   TURBO_MAX_PROGRAMS    optional, programs measured, defaults to 10000
+#   TURBO_SAMPLES         optional, timed samples per program, defaults to 50
+#   TURBO_MAX_PROGRAMS    optional, programs measured, defaults to 500
 
 set -euo pipefail
 
@@ -32,70 +34,192 @@ set -euo pipefail
 
 DIST_DIR="${DIST_DIR:-dist}"
 CONFORMANCE_DIR="${CONFORMANCE_DIR:-.conformance}"
-TURBO_SAMPLES="${TURBO_SAMPLES:-10}"
-TURBO_MAX_PROGRAMS="${TURBO_MAX_PROGRAMS:-10000}"
+TURBO_SAMPLES="${TURBO_SAMPLES:-50}"
+TURBO_MAX_PROGRAMS="${TURBO_MAX_PROGRAMS:-500}"
+
+# The report step has a 30-minute limit. Generator budgets total 23 minutes;
+# corpus preparation is capped at three minutes, leaving time for compression.
+CBOR_GENERATOR_TIMEOUT_SECONDS=120
+LEDGER_GENERATOR_TIMEOUT_SECONDS=120
+UPLC_GENERATOR_TIMEOUT_SECONDS=240
+TURBO_GENERATOR_TIMEOUT_SECONDS=900
+TURBO_CORPUS_TIMEOUT_SECONDS=180
 
 version="${RELEASE_TAG#v}"
 report_date="$(date -u +%Y%m%d)"
 prefix="${DIST_DIR}/dingo-${version}-${report_date}"
 
-# run_generator REPORT COMMAND...
-# Runs a generator that writes REPORT, tolerating a non-zero exit when the
-# report was written.
-run_generator() {
-  local report="$1"
-  shift
-  rm -f "$report"
-  local status=0
-  "$@" || status=$?
-  if [ ! -s "$report" ]; then
-    echo "generator exited ${status} without writing ${report}" >&2
-    exit 1
+# write_error_report REPORT SCENARIO MESSAGE
+# Writes a report that carries no results, only the reason there are none.
+write_error_report() {
+  local report="$1" scenario="$2" message="$3"
+  jq -n \
+    --arg scenario "$scenario" \
+    --arg generated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --arg error "$message" \
+    '{schema_version: "1", scenario: $scenario, generated_at: $generated_at,
+      implementation: {name: "dingo", language: "Go"}, error: $error}' \
+    >"$report"
+  echo "::warning::${scenario} report could not be generated: ${message}" >&2
+}
+
+# redact_log
+# Removes workspace and temporary paths from public report diagnostics.
+redact_log() {
+  sed "s|$PWD|<workspace>|g; s|${TMPDIR:-/tmp}/[^[:space:]]*|<temporary>|g; s|/tmp/[^[:space:]]*|<temporary>|g"
+}
+
+# log_excerpt FILE
+# Prints a log on one line, keeping the start, where a panic message is, and
+# the end of a long one.
+log_excerpt() {
+  if [ "$(wc -l <"$1")" -gt 8 ]; then
+    { head -n 3 "$1"; echo ...; tail -n 5 "$1"; } | redact_log | tr '\n' ' '
+  else
+    redact_log <"$1" | tr '\n' ' '
   fi
-  if [ "$status" -ne 0 ]; then
+}
+
+# valid_report REPORT SCENARIO
+# Rejects incomplete generator output before it can replace a report error.
+valid_report() {
+  local report="$1" scenario="$2"
+  jq -e -s --arg scenario "$scenario" '
+    def common:
+      .schema_version == "1" and
+      .scenario == $scenario and
+      (.generated_at | type == "string" and length > 0);
+    length == 1 and
+    (.[0] as $report |
+      ($report | common) and
+      if ($report.error | type) == "string" then
+        ($report.error | length > 0) and
+        ($report.implementation.name | type == "string" and length > 0) and
+        (["benchmarks", "scenarios", "failures", "totals"] |
+          all(. as $key | $report | has($key) | not))
+      else
+        ($report | if $scenario == "cbor-decoding" then
+          (.corpus | type == "string" and length > 0) and
+          (.corpus_revision | type == "string" and length > 0) and
+          (.protocol_version | type == "string" and length > 0) and
+          (.successful | type == "boolean") and
+          (.totals | type == "object") and
+          (.rules | type == "object") and
+          (.failures | type == "array")
+        elif $scenario == "ledger-rules" then
+          (.corpus | type == "string" and length > 0) and
+          (.totals | type == "object") and
+          (.scenarios | type == "array")
+        elif $scenario == "uplc-conformance" then
+          (.protocol_version | type == "string" and length > 0) and
+          (.cost_models | type == "array") and
+          (.totals | type == "object") and
+          (.scenarios | type == "array")
+        elif $scenario == "uplc-turbo" then
+          (.implementation.name | type == "string" and length > 0) and
+          (.machine | type == "object") and
+          (.benchmarks | type == "array")
+        else false end)
+      end)
+  ' "$report" >/dev/null 2>&1
+}
+
+# run_generator REPORT SCENARIO TIMEOUT_SECONDS COMMAND...
+# Runs a generator that writes REPORT. A non-zero exit with the report written
+# is a report of failures and is kept. Without a report, an error report is
+# written instead. Timed-out generators always get an error report, even if
+# they left behind a syntactically valid partial report.
+run_generator() {
+  local report="$1" scenario="$2"
+  local timeout_seconds="$3"
+  shift 3
+  rm -f "$report"
+  local log status=0
+  log="$(mktemp)"
+  timeout --signal=TERM --kill-after=5s "${timeout_seconds}s" "$@" 2>"$log" || status=$?
+  redact_log <"$log" >&2
+  if [ "$status" -eq 124 ]; then
+    write_error_report "$report" "$scenario" \
+      "generator exceeded its ${timeout_seconds}s time limit (exit ${status}): $(log_excerpt "$log")"
+  elif [ "$status" -eq 137 ]; then
+    write_error_report "$report" "$scenario" \
+      "generator ended with exit 137 (SIGKILL) before completing: $(log_excerpt "$log")"
+  elif [ ! -s "$report" ]; then
+    write_error_report "$report" "$scenario" \
+      "generator exited ${status} without writing a report: $(log_excerpt "$log")"
+  elif ! valid_report "$report" "$scenario"; then
+    write_error_report "$report" "$scenario" \
+      "generator exited ${status} with an invalid report: $(log_excerpt "$log")"
+  elif [ "$status" -ne 0 ]; then
     echo "generator reported failures (exit ${status}); keeping ${report}" >&2
   fi
+  rm -f "$log"
+}
+
+# prepare_turbo_corpus DIR
+# Downloads, verifies and unpacks the turbo corpus into DIR/corpus.
+prepare_turbo_corpus() {
+  local dir="$1"
+  timeout --signal=TERM --kill-after=5s "${TURBO_CORPUS_TIMEOUT_SECONDS}s" \
+    bash -s -- "$dir" "$TURBO_URL" "$TURBO_SHA256" <<'PREPARE_TURBO_CORPUS'
+set -euo pipefail
+dir="$1"
+url="$2"
+sha256="$3"
+curl --fail --silent --show-error --location --retry 3 -o "${dir}/turbo.tar.xz" "$url"
+echo "${sha256}  ${dir}/turbo.tar.xz" | sha256sum --check --strict
+mkdir "${dir}/corpus"
+tar -xf "${dir}/turbo.tar.xz" -C "${dir}/corpus"
+PREPARE_TURBO_CORPUS
 }
 
 mkdir -p "$DIST_DIR"
 
-dataset_revision="$(git -C "$CBOR_DATASET_DIR" rev-parse HEAD)"
-if [ "$dataset_revision" != "$CBOR_DATASET_REVISION" ]; then
-  echo "CBOR dataset checkout does not match the pinned revision" >&2
-  exit 1
+dataset_log="$(mktemp)"
+if ! dataset_revision="$(git -C "$CBOR_DATASET_DIR" rev-parse HEAD 2>"$dataset_log")"; then
+  write_error_report "${prefix}-cbor-conformance.json" cbor-decoding \
+    "cannot read the CBOR dataset revision: $(log_excerpt "$dataset_log")"
+elif [ "$dataset_revision" = "$CBOR_DATASET_REVISION" ]; then
+  run_generator "${prefix}-cbor-conformance.json" cbor-decoding "$CBOR_GENERATOR_TIMEOUT_SECONDS" \
+    go run ./internal/cborconformance/cmd \
+    -dataset "${CBOR_DATASET_DIR}/dataset/conway" \
+    -corpus-revision "$dataset_revision" \
+    -output "${prefix}-cbor-conformance.json"
+else
+  write_error_report "${prefix}-cbor-conformance.json" cbor-decoding \
+    "CBOR dataset checkout does not match the pinned revision ${CBOR_DATASET_REVISION}"
 fi
+rm -f "$dataset_log"
 
-run_generator "${prefix}-cbor-conformance.json" \
-  go run ./internal/cborconformance/cmd \
-  -dataset "${CBOR_DATASET_DIR}/dataset/conway" \
-  -corpus-revision "$dataset_revision" \
-  -output "${prefix}-cbor-conformance.json"
-
-run_generator "${prefix}-ledger-rules.json" \
+run_generator "${prefix}-ledger-rules.json" ledger-rules "$LEDGER_GENERATOR_TIMEOUT_SECONDS" \
   go run ./internal/ledgerrulesconformance/cmd \
   -fixtures "${CONFORMANCE_DIR}/node-diversity-conformance/scenarios/ledger-rules/fixtures" \
   -output "${prefix}-ledger-rules.json"
 
-run_generator "${prefix}-uplc-conformance.json" \
+run_generator "${prefix}-uplc-conformance.json" uplc-conformance "$UPLC_GENERATOR_TIMEOUT_SECONDS" \
   go run ./internal/uplcconformance/cmd \
   -corpus "${CONFORMANCE_DIR}/amaru/crates/amaru-uplc/tests" \
   -output "${prefix}-uplc-conformance.json"
 
 turbo_dir="$(mktemp -d)"
 trap 'rm -rf "$turbo_dir"' EXIT
-curl --fail --show-error --location --retry 3 -o "${turbo_dir}/turbo.tar.xz" "$TURBO_URL"
-echo "${TURBO_SHA256}  ${turbo_dir}/turbo.tar.xz" | sha256sum --check --strict
-mkdir "${turbo_dir}/corpus"
-tar -xf "${turbo_dir}/turbo.tar.xz" -C "${turbo_dir}/corpus"
-
-run_generator "${prefix}-uplc-turbo.json" \
-  go run ./internal/uplcconformance/turbocmd \
-  -corpus "${turbo_dir}/corpus" \
-  -corpus-digest "$TURBO_SHA256" \
-  -version "$version" \
-  -samples "$TURBO_SAMPLES" \
-  -max-programs "$TURBO_MAX_PROGRAMS" \
-  -output "${prefix}-uplc-turbo.json"
+if prepare_turbo_corpus "$turbo_dir" 2>"${turbo_dir}/prepare.log"; then
+  run_generator "${prefix}-uplc-turbo.json" uplc-turbo "$TURBO_GENERATOR_TIMEOUT_SECONDS" \
+    go run ./internal/uplcconformance/turbocmd \
+    -corpus "${turbo_dir}/corpus" \
+    -samples "$TURBO_SAMPLES" \
+    -max-programs "$TURBO_MAX_PROGRAMS" \
+    -output "${prefix}-uplc-turbo.json"
+else
+  prepare_status=$?
+  if [ "$prepare_status" -eq 124 ] || [ "$prepare_status" -eq 137 ]; then
+    prepare_error="turbo corpus preparation exceeded its ${TURBO_CORPUS_TIMEOUT_SECONDS}s time limit (exit ${prepare_status})"
+  else
+    prepare_error="turbo corpus could not be downloaded, verified or unpacked (exit ${prepare_status})"
+  fi
+  write_error_report "${prefix}-uplc-turbo.json" uplc-turbo \
+    "${prepare_error}: $(log_excerpt "${turbo_dir}/prepare.log")"
+fi
 
 shopt -s nullglob
 for report in "${DIST_DIR}"/dingo-*.json; do

@@ -60,9 +60,17 @@ The Linux tag workflow generates four conformance reports and uploads them as
 dated JSON release assets: Conway CBOR decoding, ledger rules, UPLC
 conformance and UPLC turbo performance. Each input corpus is pinned by commit,
 and the turbo archive by SHA-256. A report that records failures is still
-uploaded; the release step requires all four reports to exist. The turbo report
-measures an evenly spaced sample of `TURBO_MAX_PROGRAMS` programs (10,000 by
-default) and records the sample size in its setup.
+uploaded; the release step requires all four reports to exist. Report
+generation never stops a release: when a generator crashes or its inputs
+cannot be prepared, an `error` report naming the scenario and the cause is
+uploaded in its place. Generator and turbo corpus preparation deadlines leave
+time to write all four reports and compress them within the 30-minute report
+step.
+The turbo report measures an evenly spaced sample of
+`TURBO_MAX_PROGRAMS` programs (500 by default) using 50 samples per program
+and the mean of the best 30. A program that cannot be decoded or evaluated
+remains in the report with null measurements and an `error` reason; it counts
+as a failed benchmark.
 
 ## Local development workflows
 
