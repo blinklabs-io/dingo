@@ -14000,18 +14000,61 @@ func TestVerifyPointQueryable_UtxoFloorOnly_Rejected(t *testing.T) {
 func TestEvaluateTxRefusesWhenEvaluationSlotsAreInUse(t *testing.T) {
 	t.Parallel()
 
-	ls := &LedgerState{evalSlots: make(chan struct{}, 2)}
-	ls.evalSlots <- struct{}{}
-	ls.evalSlots <- struct{}{}
+	limiter := newEvaluationLimiter(2)
+	releaseA, err := limiter.acquire(WithEvaluationSource(t.Context(), "a:1"))
+	require.NoError(t, err)
+	defer releaseA()
+	releaseB, err := limiter.acquire(WithEvaluationSource(t.Context(), "b:1"))
+	require.NoError(t, err)
+	defer releaseB()
+	ls := &LedgerState{evalAdmission: limiter}
 
 	// The refusal happens before the transaction is looked at.
-	var err error
 	require.NotPanics(t, func() {
 		_, _, _, err = ls.EvaluateTx(nil)
 	}, "admission must be checked before any evaluation work starts")
 
 	require.ErrorIs(t, err, ErrEvaluationBusy)
-	require.Len(t, ls.evalSlots, 2, "a refused call must not take a slot")
+	require.Equal(t, 2, limiter.total, "a refused call must not take a slot")
+}
+
+func TestEvaluationAdmissionPreservesCapacityAcrossSources(t *testing.T) {
+	t.Parallel()
+
+	limiter := newEvaluationLimiter(4)
+	ctxA := WithEvaluationSource(t.Context(), "192.0.2.1:1000")
+	releaseA1, err := limiter.acquire(ctxA)
+	require.NoError(t, err)
+	defer releaseA1()
+	releaseA2, err := limiter.acquire(
+		WithEvaluationSource(t.Context(), "192.0.2.1:2000"),
+	)
+	require.NoError(t, err)
+	defer releaseA2()
+
+	_, err = limiter.acquire(ctxA)
+	require.ErrorIs(t, err, ErrEvaluationBusy)
+
+	releaseB, err := limiter.acquire(
+		WithEvaluationSource(t.Context(), "192.0.2.2:1000"),
+	)
+	require.NoError(t, err)
+	releaseB()
+}
+
+func TestEvaluationCapacityReservesConsensusProcessor(t *testing.T) {
+	t.Parallel()
+
+	require.Equal(
+		t,
+		max(runtime.GOMAXPROCS(0)-1, 1),
+		evaluationCapacity(LedgerStateConfig{}),
+	)
+	require.Equal(
+		t,
+		7,
+		evaluationCapacity(LedgerStateConfig{MaxConcurrentEvaluations: 7}),
+	)
 }
 
 func TestNewLedgerStateRejectsNegativeEvaluationCapacity(t *testing.T) {

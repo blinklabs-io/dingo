@@ -16,7 +16,6 @@ package ledger
 
 import (
 	"bytes"
-	"cmp"
 	"context"
 	"encoding/binary"
 	"encoding/hex"
@@ -27,6 +26,7 @@ import (
 	"math"
 	"math/big"
 	"math/bits"
+	"net"
 	"runtime"
 	"runtime/debug"
 	"slices"
@@ -842,7 +842,8 @@ type GenesisSelectionStateFunc func() (active bool, window uint64)
 
 type LedgerStateConfig struct {
 	// MaxConcurrentEvaluations bounds transaction evaluations running at
-	// once across every API front end (0 = GOMAXPROCS).
+	// once across every API front end. Zero leaves one logical processor for
+	// consensus work when possible.
 	MaxConcurrentEvaluations int
 	PromRegistry             prometheus.Registerer
 	Logger                   *slog.Logger
@@ -1277,11 +1278,12 @@ type tipSnapshot struct {
 }
 
 type LedgerState struct {
-	// evalSlots bounds concurrent EvaluateTx calls; nil means unbounded.
-	evalSlots chan struct{}
-	metrics   stateMetrics
-	consensus atomic.Pointer[consensusSnapshot]
-	tip       atomic.Pointer[tipSnapshot]
+	// evalAdmission bounds concurrent EvaluateTx calls globally and per remote
+	// source. Nil means unbounded.
+	evalAdmission *evaluationLimiter
+	metrics       stateMetrics
+	consensus     atomic.Pointer[consensusSnapshot]
+	tip           atomic.Pointer[tipSnapshot]
 	// snapshotPublished is closed and replaced after every snapshot
 	// publication, so a reader waiting for the ledger to advance can block
 	// until the published state changes instead of polling it.
@@ -2139,10 +2141,7 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 		validationEnabled:  cfg.ValidateHistorical,
 		plutusEvalCtxCache: eras.NewPlutusEvalContextCache(),
 		byronPBFT:          byronPBFT,
-		evalSlots: make(
-			chan struct{},
-			cmp.Or(cfg.MaxConcurrentEvaluations, runtime.GOMAXPROCS(0)),
-		),
+		evalAdmission:      newEvaluationLimiter(evaluationCapacity(cfg)),
 	}
 	ls.publishCtx, ls.publishCancel = context.WithCancel(context.Background())
 	ls.timeConverter = ls.newTimeConverter()
@@ -14822,6 +14821,63 @@ func (ls *LedgerState) ValidateTxWithOverlay(
 // outright rather than queued.
 var ErrEvaluationBusy = errors.New("transaction evaluation capacity exhausted")
 
+type evaluationSourceContextKey struct{}
+
+// WithEvaluationSource identifies the remote host that initiated an API
+// transaction evaluation. Ports are discarded so reconnecting cannot create a
+// new admission identity.
+func WithEvaluationSource(ctx context.Context, peerAddr string) context.Context {
+	if host, _, err := net.SplitHostPort(peerAddr); err == nil {
+		peerAddr = host
+	}
+	return context.WithValue(ctx, evaluationSourceContextKey{}, peerAddr)
+}
+
+type evaluationLimiter struct {
+	mu           sync.Mutex
+	total        int
+	perSource    map[string]int
+	maxTotal     int
+	maxPerSource int
+}
+
+func evaluationCapacity(cfg LedgerStateConfig) int {
+	if cfg.MaxConcurrentEvaluations > 0 {
+		return cfg.MaxConcurrentEvaluations
+	}
+	return max(runtime.GOMAXPROCS(0)-1, 1)
+}
+
+func newEvaluationLimiter(maxTotal int) *evaluationLimiter {
+	return &evaluationLimiter{
+		perSource:    make(map[string]int),
+		maxTotal:     maxTotal,
+		maxPerSource: maxTotal/2 + maxTotal%2,
+	}
+}
+
+func (l *evaluationLimiter) acquire(ctx context.Context) (func(), error) {
+	source, _ := ctx.Value(evaluationSourceContextKey{}).(string)
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.total >= l.maxTotal || l.perSource[source] >= l.maxPerSource {
+		return nil, ErrEvaluationBusy
+	}
+	l.total++
+	l.perSource[source]++
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			l.mu.Lock()
+			defer l.mu.Unlock()
+			l.total--
+			if l.perSource[source]--; l.perSource[source] == 0 {
+				delete(l.perSource, source)
+			}
+		})
+	}, nil
+}
+
 // EvaluateTx evaluates the scripts in the provided transaction and returns the calculated
 // fee, per-redeemer ExUnits, and total ExUnits.
 //
@@ -14841,13 +14897,12 @@ func (ls *LedgerState) EvaluateTxContext(
 	if err := ctx.Err(); err != nil {
 		return 0, lcommon.ExUnits{}, nil, err
 	}
-	if ls.evalSlots != nil {
-		select {
-		case ls.evalSlots <- struct{}{}:
-			defer func() { <-ls.evalSlots }()
-		default:
-			return 0, lcommon.ExUnits{}, nil, ErrEvaluationBusy
+	if ls.evalAdmission != nil {
+		release, err := ls.evalAdmission.acquire(ctx)
+		if err != nil {
+			return 0, lcommon.ExUnits{}, nil, err
 		}
+		defer release()
 	}
 	// Snapshot mutable state from the lock-free consensus snapshot
 	consensusState := ls.loadConsensusSnapshot()
