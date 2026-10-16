@@ -635,7 +635,7 @@ func copyBlocksRemote(
 	defer func() {
 		cancelFetch()
 		for _, done := range pending {
-			<-done
+			<-done //nolint:errcheck // draining cancelled fetches
 		}
 	}()
 	next := first
