@@ -142,7 +142,8 @@ func (s *Store) addressTransactionRebuildPage(
 	cursor int64,
 ) ([]models.Transaction, error) {
 	rows, err := s.readDB.QueryContext(ctx, s.dialect.Rebind(`
-SELECT source.transaction_id, tx.hash, tx.block_hash, tx.slot, tx.block_index
+SELECT source.transaction_id, tx.hash, tx.block_hash, tx.slot, tx.block_index,
+       tx.valid
 FROM address_transaction_rebuild_source source
 LEFT JOIN "transaction" tx ON tx.id = source.transaction_id
 WHERE source.transaction_id > ?
@@ -160,8 +161,9 @@ LIMIT ?`), cursor, addressTransactionRebuildBatchSize)
 			blockHash []byte
 			slot      sql.NullInt64
 			index     sql.NullInt64
+			valid     sql.NullBool
 		)
-		if err := rows.Scan(&id, &hash, &blockHash, &slot, &index); err != nil {
+		if err := rows.Scan(&id, &hash, &blockHash, &slot, &index, &valid); err != nil {
 			return nil, err
 		}
 		if len(hash) == 0 || len(blockHash) == 0 || !slot.Valid || !index.Valid ||
@@ -175,6 +177,7 @@ LIMIT ?`), cursor, addressTransactionRebuildBatchSize)
 			BlockHash:  blockHash,
 			Slot:       uint64(slot.Int64),
 			BlockIndex: uint32(index.Int64),
+			Valid:      valid.Bool,
 		})
 	}
 	if err := rows.Err(); err != nil {
