@@ -15,6 +15,7 @@
 package badger
 
 import (
+	"sync"
 	"testing"
 	"time"
 
@@ -81,6 +82,8 @@ func TestValueLogGCMetricsReportReclaimedBytes(t *testing.T) {
 	store, err := New(
 		WithDataDir(t.TempDir()),
 		WithGc(false),
+		// Keep the fixture's discardable values eligible for a rewrite.
+		WithGcDiscardRatio(0.01),
 		WithPromRegistry(registry),
 		WithValueThreshold(1),
 		WithValueLogFileSize(1<<20),
@@ -111,12 +114,22 @@ func TestValueLogGCMetricsReportReclaimedBytes(t *testing.T) {
 
 	ticks := make(chan time.Time, 1)
 	stop := make(chan struct{})
+	var stopOnce sync.Once
+	// Cleanup runs before the store cleanup above, which waits for gcWg.
+	t.Cleanup(func() { stopOnce.Do(func() { close(stop) }) })
 	store.gcWg.Add(1)
 	go store.blobGc(ticks, stop)
-	ticks <- time.Time{}
-	require.Eventually(t, func() bool {
-		return testutil.ToFloat64(store.gcMetrics.noRewrite) > 0
-	}, time.Minute, 10*time.Millisecond)
+	const maxGCCycles = 32
+	var completedCycles float64
+	for cycle := 0; cycle < maxGCCycles &&
+		testutil.ToFloat64(store.gcMetrics.successes) == 0; cycle++ {
+		ticks <- time.Time{}
+		require.Eventually(t, func() bool {
+			return testutil.ToFloat64(store.gcMetrics.noRewrite) >
+				completedCycles
+		}, time.Minute, 10*time.Millisecond)
+		completedCycles = testutil.ToFloat64(store.gcMetrics.noRewrite)
+	}
 	require.Positive(t, testutil.ToFloat64(store.gcMetrics.successes))
 	require.Positive(t, testutil.ToFloat64(store.gcMetrics.consecutive))
 	require.Equal(
@@ -124,11 +137,12 @@ func TestValueLogGCMetricsReportReclaimedBytes(t *testing.T) {
 		wantReclaimed,
 		testutil.ToFloat64(store.gcMetrics.reclaimedBytes),
 	)
+	completedCycles = testutil.ToFloat64(store.gcMetrics.noRewrite)
 	ticks <- time.Time{}
 	require.Eventually(t, func() bool {
-		return testutil.ToFloat64(store.gcMetrics.noRewrite) > 1
+		return testutil.ToFloat64(store.gcMetrics.noRewrite) > completedCycles
 	}, time.Minute, 10*time.Millisecond)
-	close(stop)
+	stopOnce.Do(func() { close(stop) })
 	store.gcWg.Wait()
 	require.Zero(t, testutil.ToFloat64(store.gcMetrics.consecutive))
 	require.Zero(t, testutil.ToFloat64(store.gcMetrics.reclaimedBytes))
