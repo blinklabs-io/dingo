@@ -619,6 +619,74 @@ func (i *ImmutableDb) getChunk(chunkName string) (*chunk, error) {
 	return chunk, nil
 }
 
+// ValidateChunkBlockSpans checks every block boundary in a chunk without
+// reading block bodies. Remote loaders use this before publishing a downloaded
+// chunk, so an untrusted index cannot make the normal iterator allocate an
+// oversized block buffer.
+func (i *ImmutableDb) ValidateChunkBlockSpans(
+	chunkName string,
+) (retErr error) {
+	secondary, err := i.getChunkSecondaryIndex(chunkName)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		retErr = errors.Join(retErr, secondary.Close())
+	}()
+	chunkFileName := chunkName + chunkFileExtension
+	f, err := i.openEntry(chunkFileName)
+	if err != nil {
+		return fmt.Errorf(
+			"failed to read chunk: %s: %w",
+			i.entryPath(chunkFileName),
+			err,
+		)
+	}
+	defer func() {
+		retErr = errors.Join(retErr, f.Close())
+	}()
+	fileSize, err := f.Size()
+	if err != nil {
+		return err
+	}
+	if fileSize < 0 {
+		return fmt.Errorf(
+			"%w: negative chunk size %d",
+			ErrInvalidChunkOffset,
+			fileSize,
+		)
+	}
+	var current *secondaryIndexEntry
+	for {
+		next, err := secondary.Next()
+		if err != nil {
+			return err
+		}
+		if next == nil {
+			break
+		}
+		if current != nil {
+			if _, _, err := validBlockSpan(
+				current.BlockOffset,
+				next.BlockOffset,
+				fileSize,
+			); err != nil {
+				return err
+			}
+		}
+		current = next
+	}
+	if current == nil {
+		return nil
+	}
+	_, _, err = validBlockSpan(
+		current.BlockOffset,
+		uint64(fileSize), // #nosec G115 -- negative sizes are rejected above
+		fileSize,
+	)
+	return err
+}
+
 func (i *ImmutableDb) GetTip() (*ocommon.Point, error) {
 	chunkNames, err := i.getChunkNames()
 	if err != nil {
