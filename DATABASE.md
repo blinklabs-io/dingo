@@ -1583,6 +1583,19 @@ block; backfill also fails on undecodable block data. The checkpoint remains
 at the last successfully indexed block so restart can retry the failed block.
 Synthetic storage blobs with ID zero are excluded from the chain-block scan.
 
+When the mapping-validator auth-token policy fingerprint changes, startup
+preflights the primary-chain block index from block number zero through the
+applied tip. It checks decoded block metadata, previous-hash links, block-number
+continuity (including Byron EBBs), and the exact tip before clearing
+`midnight_registrations` and `midnight_deregistrations`. The clear and pending
+marker commit together. A restart with a pending marker repeats the clear and
+replay; completion is recorded only after replay reaches the validated tip.
+Missing, expired, or discontinuous retained history fails before existing rows
+are changed. This rebuild is scoped to registration state; other Midnight
+tables are not cleared or replayed by the migration. It uses a dedicated
+registration-rebuild checkpoint so the ordinary Midnight backfill checkpoint
+is preserved.
+
 | Table | Columns | Keys / indexes | Relationships and notes |
 |---|---|---|---|
 | `midnight_asset_creates` | `id`, `address`, `quantity`, `tx_hash`, `output_index`, `block_number`, `block_hash`, `tx_index`, `block_timestamp_ms` | PK `id`; composite index `(block_number, tx_index)`; **unique** composite index `(tx_hash, output_index)` (`idx_midnight_asset_creates_utxo_lookup`) | cNIGHT UTxO creations. The unique index enforces one create row per UTxO and makes `Create*` idempotent (ON CONFLICT DO NOTHING) for safe backfill replay. |

@@ -1765,6 +1765,14 @@ type MetadataStore interface {
 	// set on startup.
 	FindUnspentMidnightRegistrations() ([]models.MidnightRegistration, error)
 
+	// ResetMidnightRegistrationState clears registration and deregistration
+	// history. The caller supplies a transaction so the clear can be committed
+	// atomically with a pending rebuild marker.
+	ResetMidnightRegistrationState(types.Txn) error
+	// MidnightRegistrationStateExists reports whether either registration table
+	// contains rows.
+	MidnightRegistrationStateExists(types.Txn) (bool, error)
+
 	// DeleteMidnightAssetCreatesByBlock removes all cNIGHT create rows for
 	// the given block number and returns them so the caller can update the
 	// in-memory tracked-UTxO set. Used during chain rollback.

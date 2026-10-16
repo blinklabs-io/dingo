@@ -1661,7 +1661,18 @@ When `Node.Run()` is called, components are initialized in this order:
     Runs synchronously before LedgerState starts so no
     BlockActionApply events are missed. The epoch cache is prepared first,
     inside a startup-only transaction, so backfill can resolve
-    Ariadne/candidate epoch keys without falling back to epoch 0. Backfill
+    Ariadne/candidate epoch keys without falling back to epoch 0. Before
+    ordinary backfill, startup checks whether the auth-token policy fingerprint
+    requires a registration-state rebuild and verifies complete
+    retained primary-chain history from block number zero through the applied
+    tip using the canonical block index, decoded block metadata, parent hashes,
+    and Byron EBB-aware block-number continuity. It then atomically marks the
+    rebuild pending while clearing only registration/deregistration rows and
+    resetting a dedicated registration-rebuild checkpoint. The regular
+    Midnight checkpoint is preserved. After ordinary backfill, replay uses a
+    registration-only path. A pending rebuild repeats from clean state after
+    interruption; stale registration UTxOs are not exposed to the gRPC server
+    before this startup step completes.
     iterates stored blocks from the last checkpoint slot through the applied
     ledger tip read from metadata (`Config.LedgerTipSlot`, wired to
     `database.Database.GetTip`; `LedgerState.Tip()` is not usable here because
