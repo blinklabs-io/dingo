@@ -22,6 +22,8 @@ import (
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
+// The transaction ID omits witnesses, so the full transaction distinguishes
+// preverification results for identical bodies with different signature sets.
 type preverifiedSignatureSet map[lcommon.Blake2b256]*lcommon.PreverifiedSignatures
 
 func preverifyTransactionSignatures(
@@ -49,7 +51,7 @@ func preverifyTransactionSignatures(
 
 	ret := make(preverifiedSignatureSet, len(transactions))
 	for idx, transaction := range transactions {
-		ret[transaction.Hash()] = results[idx]
+		ret[transaction.LeiosHash()] = results[idx]
 	}
 	return ret
 }
@@ -71,5 +73,5 @@ func preverifiedSignaturesFrom(
 	transaction lcommon.Transaction,
 ) *lcommon.PreverifiedSignatures {
 	signatures, _ := ctx.Value(preverifiedSignaturesContextKey{}).(preverifiedSignatureSet)
-	return signatures[transaction.Hash()]
+	return signatures[transaction.LeiosHash()]
 }
