@@ -282,7 +282,11 @@ func copyBlocksRemote(
 	defer func() {
 		cancelFetch()
 		for _, done := range pending {
-			<-done
+			if err := <-done; err != nil &&
+				!errors.Is(err, context.Canceled) &&
+				!errors.Is(err, errRemoteChunkNotPublished) {
+				logger.Warn("remote prefetch cleanup failed", "error", err)
+			}
 		}
 	}()
 	next := first
