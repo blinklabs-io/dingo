@@ -171,6 +171,15 @@ func validateDijkstraProtocolParameterDomains(
 		MaxEndorserBlockTxsSize:          &p.MaxEndorserBlockTxsSize,
 		MaxEndorserBlockExUnits:          &p.MaxEndorserBlockExUnits,
 		MaxRefScriptSizePerEndorserBlock: &p.MaxRefScriptSizePerEndorserBlock,
+		PerasMinCandidateBlockAge:        &p.PerasMinCandidateBlockAge,
+		PerasHealingFactor:               p.PerasHealingFactor,
+		PerasCertBoost:                   &p.PerasCertBoost,
+		PerasTargetCommitteeSize:         &p.PerasTargetCommitteeSize,
+		PerasBootstrapRound:              p.PerasBootstrapRound,
+		PerasBootstrapRoundSet:           p.PerasBootstrapRound != nil,
+		PerasQuorumThresholdSafetyMargin: p.PerasQuorumThresholdSafetyMargin,
+		RefInputsCostPerMultiAssetPolicy: &p.RefInputsCostPerMultiAssetPolicy,
+		RefInputsCostPerDatumByte:        &p.RefInputsCostPerDatumByte,
 	}
 	if genesis == nil {
 		return check.ApplyUpdate(&update)
@@ -299,7 +308,15 @@ func isEmptyDijkstraGenesis(genesis *gdijkstra.DijkstraGenesis) bool {
 		genesis.MaxEndorserBlockReferencesSize != 0 ||
 		genesis.MaxEndorserBlockTxsSize != 0 ||
 		genesis.MaxEndorserBlockExUnits != (lcommon.ExUnits{}) ||
-		genesis.MaxRefScriptSizePerEndorserBlock != 0 {
+		genesis.MaxRefScriptSizePerEndorserBlock != 0 ||
+		genesis.PerasMinCandidateBlockAge != 0 ||
+		genesis.PerasHealingFactor != nil ||
+		genesis.PerasCertBoost != 0 ||
+		genesis.PerasTargetCommitteeSize != 0 ||
+		genesis.PerasBootstrapRound != nil ||
+		genesis.PerasQuorumThresholdSafetyMargin != nil ||
+		genesis.RefInputsCostPerMultiAssetPolicy != 0 ||
+		genesis.RefInputsCostPerDatumByte != 0 {
 		return false
 	}
 	return isEmptyConwayGenesis(&genesis.ConwayGenesis)

@@ -46,6 +46,16 @@ func CloneGovernanceProtocolParameters(
 			&p.ConwayProtocolParameters,
 		)
 		ret.RefScriptCostMultiplier = cloneRat(p.RefScriptCostMultiplier)
+		ret.MaxPledgeLeverage = cloneRat(p.MaxPledgeLeverage)
+		ret.MinPoolMargin = cloneRat(p.MinPoolMargin)
+		ret.LeiosQuorumStakeThreshold = cloneRat(
+			p.LeiosQuorumStakeThreshold,
+		)
+		ret.PerasHealingFactor = cloneRat(p.PerasHealingFactor)
+		ret.PerasBootstrapRound = cloneUint32(p.PerasBootstrapRound)
+		ret.PerasQuorumThresholdSafetyMargin = cloneRat(
+			p.PerasQuorumThresholdSafetyMargin,
+		)
 		ret.CommitteeStakeCoverage = cloneRat(p.CommitteeStakeCoverage)
 		ret.QuorumStakeThreshold = cloneRat(p.QuorumStakeThreshold)
 		return &ret, nil
@@ -138,4 +148,12 @@ func cloneRatValue(value cbor.Rat) cbor.Rat {
 		return cbor.Rat{}
 	}
 	return cbor.Rat{Rat: new(big.Rat).Set(value.Rat)}
+}
+
+func cloneUint32(value *uint32) *uint32 {
+	if value == nil {
+		return nil
+	}
+	ret := *value
+	return &ret
 }

@@ -1803,6 +1803,13 @@ journal and replayed in bounded batches before the candidate is published. A
 busy pass that cannot catch up leaves the live pool unchanged and is retried
 after a later chain update; it is not a failed admission or a partial swap.
 
+The chain-update worker coalesces confirmed-transaction removals and
+rolled-back transaction restores before rebuilding. Rollback events list blocks
+newest first, so each event is traversed oldest first; if more rollback events
+arrive before the rebuild, their older transactions are placed ahead of the
+already queued restores. Revalidation therefore sees transactions in ledger
+order.
+
 Mempool admission, revalidation, block-candidate selection and forged-block
 validation each validate a transaction against the UTxO overlay and a state
 overlay (`utxoref.StateOverlay`) holding the earlier pending or selected
