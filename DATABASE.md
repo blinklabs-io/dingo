@@ -222,10 +222,15 @@ value or anchor, so the casts fall into runs of one value, of which only each
 run's first cast was recorded, and the first run goes unrecorded when it
 repeats the value from before the block: the vote's entries at a slot are the
 first casts of its last runs, in recording order, and each must carry the
-value its cast did. The exception is the entry migration v22 seeded for a vote
-that predated it, which held only the vote's value at the upgrade: as the
-vote's earliest entry it may stand for fewer runs than its block holds, and
-lands on the last one, so that block's earlier casts are not listed. A revote that repeated the value before v46 is not
+value its cast did. A vote's earliest entries have no earlier value, so they
+record every run. The exception is the entry migration v22 seeded for a vote
+that predated it, which copied the vote's state after its last cast: it is the
+vote's earliest entry and the only one at its slot, it lands on its block's
+final cast, and that block's earlier casts are not listed. A seed is told
+apart from transition history when its block holds more than one run of
+value, or when its slot is after the vote's `added_slot`; a single run of
+repeated casts in the vote's first block fits both and answers `404` "not
+retained". A revote that repeated the value before v46 is not
 listed. When the block is not held, or no valid
 transaction in it carries the vote, the endpoint answers `404` "not retained
 by this node" instead of omitting the vote or inventing a transaction. Within

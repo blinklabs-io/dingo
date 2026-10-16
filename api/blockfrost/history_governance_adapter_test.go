@@ -1230,3 +1230,66 @@ FROM governance_vote WHERE id = ?`, voteID)
 	assert.Equal(t, "no", rows[0].Vote)
 	assert.True(t, rows[0].Counted)
 }
+
+// A v22 seed copies the vote's state after its last cast, so it lands on the
+// block's final cast even when that cast repeats the value before it. A seed
+// is recognised by its block holding more than one run, or by sitting after
+// the vote's first block; a single repeated run in the vote's first block fits
+// a first-cast transition entry as well, and is not retained.
+func TestNodeAdapterVotesResolveV22SeedToFinalCast(t *testing.T) {
+	t.Parallel()
+	drep := voter(lcommon.VoterTypeDRepKeyHash, 0xd1)
+	for _, tc := range []struct {
+		name      string
+		votes     []uint8
+		addedSlot uint64
+		seed      uint8
+		want      byte
+	}{
+		{"repeated final value", []uint8{models.VoteNo, models.VoteYes, models.VoteNo, models.VoteNo}, 100, models.VoteNo, 0xa4},
+		{"cast again after its first block", []uint8{models.VoteYes, models.VoteYes}, 50, models.VoteYes, 0xa2},
+		{"one run in its first block", []uint8{models.VoteYes, models.VoteYes}, 100, models.VoteYes, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			fx := newEpochFixture(t)
+			proposal := fx.addProposal(t, 0x01, 0, lcommon.GovActionTypeInfo, []byte{0x81, 0x06}, 10)
+			action := govID(t, 0x01, 0)
+			txs := make([]lcommon.Transaction, 0, len(tc.votes))
+			for i, vote := range tc.votes {
+				txs = append(txs, newTx(0xa1+byte(i), true, procedures(drep, action, vote)))
+			}
+			serveBlocks(fx, map[uint64]*slotBlock{100: {number: 40, txs: txs}})
+			result, err := fx.raw.Exec(`
+INSERT INTO governance_vote (
+    proposal_id, voter_type, voter_credential_tag, voter_credential, vote,
+    added_slot, vote_updated_slot
+) VALUES (?, ?, 0, ?, ?, ?, 100)`,
+				proposal.ID, models.VoterTypeDRep, bytes32of(28, 0xd1), tc.seed,
+				tc.addedSlot,
+			)
+			require.NoError(t, err)
+			voteID, err := result.LastInsertId()
+			require.NoError(t, err)
+			_, err = fx.raw.Exec(`
+INSERT INTO governance_vote_history (
+    vote_id, transition_slot, vote, anchor_url, anchor_hash
+)
+SELECT id, COALESCE(vote_updated_slot, added_slot), vote, anchor_url,
+    anchor_hash
+FROM governance_vote WHERE id = ?`, voteID)
+			require.NoError(t, err)
+
+			rows, _, err := fx.adapter.GovernanceProposalVotes(
+				context.Background(), GovActionRef{TxHash: fill32(0x01), Index: 0}, asc,
+			)
+			if tc.want == 0 {
+				require.ErrorIs(t, err, ErrHistoryNotRetained)
+				return
+			}
+			require.NoError(t, err)
+			require.Len(t, rows, 1)
+			assert.Equal(t, hexOf(fill32(tc.want)), rows[0].TxHash)
+		})
+	}
+}

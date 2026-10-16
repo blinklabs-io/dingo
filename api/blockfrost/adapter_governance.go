@@ -658,16 +658,25 @@ type blockCast struct {
 }
 
 // legacyCastTransaction matches a history entry recorded without its position
-// to a cast in its block. Such history recorded a cast only when it changed
-// the vote's value or anchor, so the block's casts by the voter on the
-// proposal fall into runs of one value, and only a run's first cast was
-// recorded. The first run goes unrecorded when it repeats the value from
-// before the block, so the vote's entries at the slot are the first casts of
-// its last CastSlotCount runs, in order. The one exception is the entry
-// migration v22 seeded for a vote that predates it: the vote's earliest
-// entry, holding only the value current at the upgrade, so the block's
-// earlier runs have no entry and it lands on the last run. The value the
-// entry recorded must match the cast it lands on.
+// to a cast in its block. Such history comes in two kinds.
+//
+// Transition history recorded a cast only when it changed the vote's value or
+// anchor, so the block's casts by the voter on the proposal fall into runs of
+// one value and only a run's first cast was recorded. The first run goes
+// unrecorded when it repeats the value from before the block, so the vote's
+// entries at the slot are the first casts of its last CastSlotCount runs, in
+// order; a vote's earliest entries have no earlier value, so they record every
+// run.
+//
+// Migration v22 instead seeded one entry per vote that predated it, copying
+// the vote's state after its last cast, so a seed stands for the block's final
+// cast. A seed is the vote's earliest entry and the only one at its slot; it
+// is told apart from transition history when its block holds more than one
+// run, or when it sits after the slot the vote was first cast in. A single
+// run of repeated casts in the vote's first block fits both kinds, the first
+// cast and the last, and is reported as not retained rather than guessed.
+//
+// The value the entry recorded must match the cast it lands on.
 func legacyCastTransaction(
 	row models.GovernanceVoteRow,
 	block *slotBlock,
@@ -692,7 +701,9 @@ func legacyCastTransaction(
 	if err != nil {
 		return castTransaction{}, err
 	}
-	var runs []blockCast
+	casts := make([]blockCast, 0, len(block.txs))
+	// runStarts holds the index in casts of each run's first cast.
+	runStarts := make([]int, 0, len(block.txs))
 	for _, tx := range block.txs {
 		if !tx.IsValid() {
 			continue
@@ -713,18 +724,28 @@ func legacyCastTransaction(
 				cast.anchorHash = procedure.Anchor.DataHash[:]
 			}
 		}
-		if len(runs) > 0 && sameCastValue(runs[len(runs)-1], cast) {
-			continue
+		if len(casts) == 0 || !sameCastValue(casts[len(casts)-1], cast) {
+			runStarts = append(runStarts, len(casts))
 		}
-		runs = append(runs, cast)
+		casts = append(casts, cast)
 	}
-	count := row.CastSlotCount
-	if count < 1 || row.CastSlotRank < 0 || row.CastSlotRank >= count ||
-		count > len(runs) ||
-		(count < len(runs)-1 && !row.CastSlotEarliest) {
+	count, runs := row.CastSlotCount, len(runStarts)
+	if runs == 0 || count < 1 || row.CastSlotRank < 0 ||
+		row.CastSlotRank >= count {
 		return castTransaction{}, notRetained
 	}
-	cast := runs[len(runs)-count+row.CastSlotRank]
+	var cast blockCast
+	single := row.CastSlotEarliest && count == 1
+	switch {
+	case single && (runs > 1 || row.CastSlot > row.Vote.AddedSlot):
+		cast = casts[len(casts)-1]
+	case single && len(casts) > 1:
+		return castTransaction{}, notRetained
+	case count == runs, count == runs-1 && !row.CastSlotEarliest:
+		cast = casts[runStarts[runs-count+row.CastSlotRank]]
+	default:
+		return castTransaction{}, notRetained
+	}
 	recorded := blockCast{
 		vote:       row.Vote.Vote,
 		anchorURL:  row.Vote.AnchorURL,
