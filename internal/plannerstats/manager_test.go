@@ -287,3 +287,62 @@ func asyncStop(m *Manager) <-chan error {
 	go func() { ch <- m.Stop() }()
 	return ch
 }
+
+// The periodic trigger runs the updater with no epoch transition published,
+// so a table filled between rollovers is re-analyzed without waiting for one.
+func TestPeriodicTickTriggersRun(t *testing.T) {
+	t.Parallel()
+	u := newFakeUpdater()
+	close(u.release)
+	m := newTestManager(u, event.NewEventBus(nil, nil))
+	tick := make(chan time.Time)
+	m.newTick = func() (<-chan time.Time, func()) {
+		return tick, func() {}
+	}
+	require.NoError(t, m.Start(t.Context()))
+	defer func() { require.NoError(t, m.Stop()) }()
+
+	select {
+	case tick <- time.Time{}:
+	case <-time.After(testWait):
+		t.Fatal("timed out handing the periodic tick to the worker")
+	}
+	require.Equal(
+		t,
+		types.PlannerStatsTriggerPeriodic,
+		receive(t, u.entered, "run for the periodic tick"),
+	)
+}
+
+// A tick that arrives while a run is in flight waits for it: runs never
+// overlap, because the tick shares the worker with the epoch trigger.
+func TestPeriodicTickDoesNotOverlapEpochRun(t *testing.T) {
+	t.Parallel()
+	u := newFakeUpdater()
+	m := newTestManager(u, event.NewEventBus(nil, nil))
+	// Buffered like time.Ticker's channel, so the tick is pending for the
+	// whole window below rather than racing a sender goroutine.
+	tick := make(chan time.Time, 1)
+	m.newTick = func() (<-chan time.Time, func()) {
+		return tick, func() {}
+	}
+	require.NoError(t, m.Start(t.Context()))
+	defer func() { require.NoError(t, m.Stop()) }()
+	var once sync.Once
+	releaseOnce := func() { once.Do(func() { close(u.release) }) }
+	defer releaseOnce() // runs before Stop, so a failing test cannot hang it
+
+	m.handleEpochTransition(epochEvent([]byte{1}))
+	require.Equal(t, "epoch", receive(t, u.entered, "epoch run"))
+	tick <- time.Time{}
+	require.Never(t, func() bool { return u.calls.Load() > 1 },
+		200*time.Millisecond, 10*time.Millisecond,
+		"a tick must wait for the run in flight")
+	releaseOnce()
+	require.Equal(
+		t,
+		types.PlannerStatsTriggerPeriodic,
+		receive(t, u.entered, "periodic run after the epoch run"),
+	)
+	require.Equal(t, int64(1), u.maxSeen.Load(), "runs must never overlap")
+}
