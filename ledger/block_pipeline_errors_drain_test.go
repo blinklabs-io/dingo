@@ -169,19 +169,12 @@ func TestDecodeReadChainBatchDoesNotDeadlockOnManyDecodeErrors(
 ) {
 	t.Parallel()
 
-	// A full deadlock needs more than just >1000 failing items: it needs
-	// enough to fill errorsChan (1000) and jam every decode worker mid-item,
-	// then fill submitChan (1000) behind the now-stuck decode stage, before
-	// Submit() itself blocks forever. 4000 clears that with margin.
+	// Exceed both the decoder's error-channel capacity and admission window.
 	const numBlocks = 4000
 
 	ls, errLog, stopAndDrain := newNoNonceValidatePipelineLedger(
 		t,
-		// Submit waits once MaxPendingBlocks sequences are outstanding past
-		// the last completed one, and completion stalls while nothing reads
-		// Results(), so the default 2160 would block Submit before errorsChan
-		// could fill. Disabling it leaves errorsChan as the only thing that
-		// can stop this batch.
+		// Exercise the test configuration with no admission/window limit.
 		pipeline.WithMaxPendingBlocks(0),
 	)
 	defer stopAndDrain()
@@ -232,6 +225,41 @@ func TestDecodeReadChainBatchDoesNotDeadlockOnManyDecodeErrors(
 	)
 }
 
+// Deferred crypto failures are independent of the decoder's best-effort
+// Errors channel: bounded batch workers retain and classify every outcome.
+func TestDecodeReadChainBatchDoesNotDeadlockOnManyValidationErrors(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	const numBlocks = 4000
+	ls, errLog, stopAndDrain := newNoNonceValidatePipelineLedger(t)
+	defer stopAndDrain()
+
+	result := testutil.RequireReceive(
+		t,
+		goDecodeBatch(t, ls, buildNoNonceValidateBatch(t, numBlocks)),
+		testutil.AsyncWait,
+		"deferred crypto outcomes blocked the batch workers",
+	)
+	require.NoError(t, result.err)
+	require.Len(t, result.decoded, numBlocks)
+	stopAndDrain()
+
+	require.Equal(
+		t,
+		float64(numBlocks),
+		promtestutil.ToFloat64(ls.metrics.blockPipelineExpectedEta0Errors),
+		"every deferred crypto outcome must be classified exactly once",
+	)
+	require.Zero(
+		t,
+		promtestutil.ToFloat64(ls.metrics.blockPipelineUnexpectedErrors),
+		"deferred crypto outcomes are expected; captured errors:%s",
+		errLog.summary(),
+	)
+}
+
 // newNoNonceValidatePipelineLedger returns a LedgerState whose started block
 // pipeline, built with opts appended to the defaults, validates blocks
 // against an epoch with no cached Praos nonce, so every eta0 lookup fails.
@@ -262,10 +290,12 @@ func newNoNonceValidatePipelineLedger(
 	ls.metrics.init(prometheus.NewRegistry())
 	ls.publishSnapshotsLocked()
 
-	ls.blockPipeline = pipeline.NewBlockPipeline(
+	ls.blockPipeline = newTestReplayPipeline(ls,
 		append([]pipeline.PipelineOption{
 			pipeline.WithDecodeWorkers(2),
-			pipeline.WithTrustedDecodeOnly(),
+			pipeline.WithValidateWorkers(2),
+			pipeline.WithEta0Provider(ls.blockPipelineEta0Provider),
+			pipeline.WithSlotsPerKesPeriod(129600),
 		}, opts...)...,
 	)
 	require.NoError(t, ls.blockPipeline.Start(t.Context()))
@@ -512,6 +542,117 @@ func stopAndDrainBlockPipeline(
 	}
 }
 
+// TestDecodeReadChainBatchStalledSequenceBoundsValidation holds the first
+// crypto lookup while its siblings finish. At most the configured window may
+// run ahead; the next window must wait for every worker in this one to join.
+func TestDecodeReadChainBatchStalledSequenceBoundsValidation(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	const (
+		numBlocks  = 512
+		maxPending = 8
+	)
+
+	errLog := &capturedErrorLog{}
+	ls := &LedgerState{
+		epochCache: []models.Epoch{
+			{
+				EpochId:       0,
+				StartSlot:     0,
+				LengthInSlots: 432000,
+				Nonce:         nil, // no Praos nonce -- every eta0 lookup fails
+			},
+		},
+		config: LedgerStateConfig{
+			CardanoNodeConfig:            newTestShelleyGenesisCfg(t),
+			Logger:                       errLog.logger(),
+			BlockPipelineValidateEnabled: true,
+		},
+	}
+	ls.metrics.init(prometheus.NewRegistry())
+	ls.publishSnapshotsLocked()
+
+	held := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(held) }) }
+	var others atomic.Int64
+	eta0Provider := func(slot uint64) (string, error) {
+		if slot != 0 {
+			others.Add(1)
+			return ls.blockPipelineEta0Provider(slot)
+		}
+		select {
+		case <-held:
+		case <-t.Context().Done():
+		}
+		return ls.blockPipelineEta0Provider(slot)
+	}
+
+	ls.blockPipeline = newTestReplayPipeline(ls,
+		pipeline.WithDecodeWorkers(2),
+		pipeline.WithValidateWorkers(2),
+		pipeline.WithEta0Provider(eta0Provider),
+		pipeline.WithSlotsPerKesPeriod(129600),
+		pipeline.WithMaxPendingBlocks(maxPending),
+	)
+	require.NoError(t, ls.blockPipeline.Start(t.Context()))
+	ls.blockPipelineErrorsDone = make(chan struct{})
+	go ls.drainBlockPipelineErrors()
+	stopAndDrain := stopAndDrainBlockPipeline(t, ls)
+	defer stopAndDrain()
+	// Always release the batch worker on test failure, before teardown.
+	defer release()
+
+	rawBatch := buildNoNonceValidateBatch(t, numBlocks)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = ls.decodeReadChainBatch(t.Context(), rawBatch)
+	}()
+
+	// The held item plus maxPending siblings form one validation window.
+	require.Eventually(
+		t,
+		func() bool { return others.Load() >= maxPending },
+		testutil.AsyncWait,
+		5*time.Millisecond,
+		"blocks behind the held one should reach the validate stage",
+	)
+	require.Never(
+		t,
+		func() bool { return others.Load() > maxPending },
+		100*time.Millisecond,
+		5*time.Millisecond,
+		"validation ran beyond the bounded window behind a stalled item",
+	)
+	release()
+	testutil.RequireReceive(
+		t,
+		done,
+		testutil.AsyncWait,
+		"decodeReadChainBatch did not finish after the held block was "+
+			"released",
+	)
+	stopAndDrain()
+
+	require.Zero(
+		t,
+		promtestutil.ToFloat64(ls.metrics.blockPipelineUnexpectedErrors),
+		"a stalled sequence must not surface a pipeline error; ERROR log "+
+			"records captured from recordBlockPipelineError:%s",
+		errLog.summary(),
+	)
+	require.Equal(
+		t,
+		float64(numBlocks),
+		promtestutil.ToFloat64(ls.metrics.blockPipelineExpectedEta0Errors),
+		"the eta0-unavailable classification must be unaffected",
+	)
+}
+
 // TestRecordBlockPipelineErrorClassificationDeferredIsNotUnexpected is a
 // regression test for an observability gap:
 // errHeaderVerificationDeferred (the pipeline's epoch cache has not yet
@@ -723,4 +864,77 @@ func TestRecordBlockPipelineErrorClassificationShutdownIsNotUnexpected(
 		float64(2),
 		promtestutil.ToFloat64(ls.metrics.blockPipelineShutdownErrors),
 	)
+}
+
+func TestDecodeReadChainBatchJoinsCryptoAfterAttemptCancellation(t *testing.T) {
+	t.Parallel()
+
+	ls, _, stopAndDrain := newNoNonceValidatePipelineLedger(t)
+	defer stopAndDrain()
+	entered := make(chan struct{})
+	held := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(held) }) }
+	defer release()
+	ls.blockPipelineValidation = pipeline.NewValidateStage(
+		pipeline.ValidateStageConfig{
+			BlockLocal: true,
+			Eta0Provider: func(slot uint64) (string, error) {
+				if slot == 0 {
+					close(entered)
+					<-held
+				}
+				return ls.blockPipelineEta0Provider(slot)
+			},
+			SlotsPerKesPeriod: 129600,
+		},
+	)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	batch := buildNoNonceValidateBatch(t, 20)
+	done := make(chan decodeBatchResult, 1)
+	var completed atomic.Bool
+	go func() {
+		decoded, err := ls.decodeReadChainBatchWithError(ctx, batch)
+		done <- decodeBatchResult{decoded: decoded, err: err}
+		completed.Store(true)
+	}()
+	testutil.RequireReceive(t, entered, testutil.AsyncWait, "crypto lookup")
+	cancel()
+	require.Never(t, completed.Load, 100*time.Millisecond, time.Millisecond,
+		"reader returned before its crypto worker was joined")
+	release()
+	result := testutil.RequireReceive(
+		t, done, testutil.AsyncWait, "cancelled attempt crypto drain",
+	)
+	require.NoError(t, result.err)
+	require.Len(t, result.decoded, len(batch))
+	// The caller discards a cancelled attempt, but decoder results must not
+	// contaminate the next attempt.
+	decoded, err := ls.decodeReadChainBatchWithError(
+		t.Context(), batch[1:],
+	)
+	require.NoError(t, err)
+	require.Len(t, decoded, len(batch)-1)
+}
+
+func TestDecodeReadChainBatchRejectsCryptoStagePanic(t *testing.T) {
+	t.Parallel()
+
+	ls, _, stopAndDrain := newNoNonceValidatePipelineLedger(t)
+	defer stopAndDrain()
+	ls.blockPipelineValidation = pipeline.NewValidateStage(
+		pipeline.ValidateStageConfig{
+			BlockLocal: true,
+			Eta0Provider: func(uint64) (string, error) {
+				panic("crypto provider failed")
+			},
+			SlotsPerKesPeriod: 129600,
+		},
+	)
+	decoded, err := ls.decodeReadChainBatchWithError(
+		t.Context(), buildNoNonceValidateBatch(t, 3),
+	)
+	require.ErrorIs(t, err, pipeline.ErrStagePanic)
+	require.Nil(t, decoded, "panic must reject even without a cached nonce")
 }

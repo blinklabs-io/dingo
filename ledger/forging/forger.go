@@ -2599,7 +2599,8 @@ func (f *BlockForger) evaluateTipGates(r forgeTipReading) forgeTipGates {
 	if r.upstreamBlockNumber > r.appliedTipBlockNumber {
 		g.peerHeightGap = r.upstreamBlockNumber - r.appliedTipBlockNumber
 	}
-	peerHeightBound := uint64(r.securityParam) //nolint:gosec // checked positive by readTipEvidence
+	// readTipEvidence establishes securityParam > 0.
+	peerHeightBound := uint64(r.securityParam) //nolint:gosec
 	// How far the corroborated endorser block leads the APPLIED tip.
 	// Measured against ebSlot alone rather than effectiveGap so this
 	// refusal can only ever be caused by endorser-block evidence:

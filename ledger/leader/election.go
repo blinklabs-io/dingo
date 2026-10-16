@@ -110,7 +110,7 @@ type StakeDistributionProvider interface {
 // Dingo relies on the same invariant, maintained at the same point: see
 // ledger/poolreap.go, which calls ClearDelegationsToRetiredPool for each
 // reaped pool (failing to clear inflates the total active
-// stake above the network's and makes every other pool's threshold too
+// stake above the network's and makes every other pool's eligibility region too
 // small). Dingo also runs its SNAP stake read before POOLREAP, matching
 // EPOCH's sub-rule order (Conway/Rules/Epoch.hs:289-294; dingo
 // ledger/chainsync.go epoch-rollover step list).
@@ -159,7 +159,7 @@ type EpochInfoProvider interface {
 	// ConsensusModeForEpoch returns the consensus mode (TPraos or
 	// CPraos) governing leader eligibility for the given epoch. The
 	// schedule calculator threads this into VRF input construction
-	// and threshold derivation; passing the wrong mode produces a
+	// and finite E34 eligibility; passing the wrong mode produces a
 	// leader-slot list that cardano-node will reject.
 	//
 	// It returns an error when the mode cannot be resolved for the
@@ -180,13 +180,9 @@ type EpochInfoProvider interface {
 // and logs the coefficient actually used so a fallback to the float64 form is
 // visible in the "leader schedule calculated" record.
 //
-// The distinction matters because the reference node derives its leadership
-// threshold from the exact genesis rational. A float64 round trip of 1/20
-// yields 3602879701896397/2^56, which is strictly larger, so every per-slot
-// threshold is strictly larger and the resulting eligible-slot set is a strict
-// superset of the reference's. dingo's own header verification already uses the
-// exact rational, so the float64 form also let the forge path disagree with
-// dingo's own validation path. See Calculator.ActiveSlotCoeffRat.
+// The finite E34 predicate is prepared from the exact genesis rational.
+// A binary64 round trip changes that input and can also leave the node's
+// PositiveUnitInterval domain. See Calculator.ActiveSlotCoeffRat.
 type ActiveSlotCoeffRatProvider interface {
 	// ActiveSlotCoeffRat returns the exact active slot coefficient, or nil
 	// when the genesis value is unavailable.
@@ -218,16 +214,6 @@ func consensusModeName(mode consensus.ConsensusMode) string {
 	default:
 		return fmt.Sprintf("unknown(%d)", int(mode))
 	}
-}
-
-// thresholdHex renders a leadership threshold for logging. The threshold is a
-// 256- or 512-bit integer, so hex keeps the record compact and directly
-// comparable against a certified-natural VRF value.
-func thresholdHex(threshold *big.Int) string {
-	if threshold == nil {
-		return ""
-	}
-	return threshold.Text(16)
 }
 
 // maxCachedSchedules is the number of epoch schedules to keep in memory.
@@ -984,7 +970,6 @@ func (e *Election) computeSchedule(
 		"stake_ratio", schedule.StakeRatio(),
 		"active_slot_coeff", activeSlotCoeff.RatString(),
 		"consensus_mode", consensusModeName(mode),
-		"leader_threshold", thresholdHex(schedule.Threshold),
 		"leader_slots", schedule.SlotCount(),
 		"leader_slot_list", schedule.LeaderSlotsSnapshot(),
 	)

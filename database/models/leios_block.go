@@ -59,11 +59,34 @@ func DecodeConwayPeerBlock(raw []byte) (ledger.Block, error) {
 	if err == nil {
 		return block, nil
 	}
+	if !hasConwayLeiosExtendedHeader(raw) {
+		return nil, err
+	}
 	if extBlock, extErr := decodeLeiosExtendedConwayBlock(raw); extErr == nil {
 		return extBlock, nil
 	} else {
 		return nil, fmt.Errorf("%w; Leios extension decode: %w", err, extErr)
 	}
+}
+
+// hasConwayLeiosExtendedHeader limits the compatibility decoder to the
+// supported 12-field header, preserving strict Conway errors for other blocks.
+func hasConwayLeiosExtendedHeader(raw []byte) bool {
+	var components []cbor.RawMessage
+	if _, err := cbor.Decode(raw, &components); err != nil ||
+		len(components) != conwayBlockComponentCount {
+		return false
+	}
+	var headerParts []cbor.RawMessage
+	if _, err := cbor.Decode(components[0], &headerParts); err != nil ||
+		len(headerParts) != 2 {
+		return false
+	}
+	var bodyElems []cbor.RawMessage
+	if _, err := cbor.Decode(headerParts[0], &bodyElems); err != nil {
+		return false
+	}
+	return len(bodyElems) == babbageHeaderBodyFieldCount+leiosHeaderExtraFields
 }
 
 // hasDijkstraLeiosShape gates the storage fallback on the historical Musashi
@@ -100,8 +123,18 @@ func hasDijkstraLeiosShape(raw []byte) bool {
 // components.
 func decodeLeiosExtendedConwayBlock(raw []byte) (*conway.ConwayBlock, error) {
 	var components []cbor.RawMessage
-	if _, err := cbor.Decode(raw, &components); err != nil {
+	consumed, err := cbor.Decode(raw, &components)
+	if err != nil {
 		return nil, fmt.Errorf("decode Conway block components: %w", err)
+	}
+	// block.SetCbor(raw) below stores the original input, so bytes past the
+	// first CBOR item would be persisted and re-served as part of the block.
+	if consumed != len(raw) {
+		return nil, fmt.Errorf(
+			"trailing data after Conway block: %d of %d bytes consumed",
+			consumed,
+			len(raw),
+		)
 	}
 	if len(components) != conwayBlockComponentCount {
 		return nil, fmt.Errorf(

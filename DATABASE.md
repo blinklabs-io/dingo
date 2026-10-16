@@ -365,6 +365,9 @@ chain reindex/resync before it can be represented in this table.
 The v1alpha1 schema also includes
 `idx_pool_opcert_sequence_pool_sequence` (see `pool_opcert_sequence` below).
 It is created as part of the initial schema on fresh databases.
+Trusted replay can defer the pool-op-cert sequence lookup indexes during bulk
+loads. MySQL rebuilds the composite index with the schema's
+`pool_key_hash(255)` prefix.
 
 Migration `v2` (`leios-key-registration`, integer version 2) is the first
 real post-release migration: it additively (`ALTER TABLE ... ADD COLUMN`)
@@ -874,6 +877,16 @@ Configuration validation is build-aware: a non-empty `databaseLifecycle.snapshot
 
 **Interrupted truncate marker.** Before `lifecycle.Truncate` begins its batched blob deletion, it records `database_lifecycle_truncate_pending` in `sync_state`, including the target ID/slot/hash, original blob-tip ID/slot/hash, Mithril floor, and a checksum covering the complete marker. The checksum prevents a damaged deletion bound from being resumed; the original blob tip cannot simply be required to remain present because an interrupted attempt may already have deleted it, and it may legitimately be ahead of the applied metadata tip. Recovery therefore accepts a current blob tip below the recorded tip as partial delete progress, requires an equal tip to match the recorded slot/hash, and fails closed if the current blob tip is newer than the authenticated upper bound. Tip identity is read directly from the highest `bi` index entry rather than by resolving its referenced block object: an irreversible cloud delete can fail after removing the block object but before removing that index, and the remaining authenticated index must be allowed to drive idempotent cleanup on retry. This prevents a stale-but-valid marker from deleting only its old blob range while metadata truncation removes state through a subsequently advanced tip. The marker remains durable if cancellation or a storage error lands after one or more blob batches commit, making the intermediate state detectable rather than leaving metadata silently referencing already-deleted block blobs. A subsequent truncate validates the marker, resumes the recorded operation (missing blobs are idempotently skipped), performs metadata truncation, and clears the marker in the same metadata transaction. Normal node startup refuses to serve while this marker exists and directs the operator to rerun truncate; the offline lifecycle service can open the database and complete that recovery.
 
+**Leader schedules.** Keys `leader_schedule:<pool-id-hex>:<epoch>` in
+`sync_state` hold JSON fields `format_version`, `epoch`, `pool_id`,
+`pool_stake`, `total_stake`, `epoch_nonce`, and `leader_slots`. Version 5
+identifies finite E34 eligibility. Election reload rejects version-4 and
+unversioned records rather than reusing their ideal-cutoff slot lists;
+freshly computed schedules are saved as version 5. A valid version-5 record
+can be reused after checking its epoch, nonce, stake inputs, and slot range.
+The evaluator is not serialized, and the version change needs no SQL schema
+migration.
+
 **Rollback notification outbox.** `ledger.rollback.pending` is a version-1
 JSON record in `sync_state` containing `format_version`, the target `slot` and
 hex `hash`, and a newest-first `blocks` array. Each block uses explicit JSON
@@ -904,7 +917,10 @@ prevent startup.
 boundary whose RATIFY decision or mark snapshot has not been written yet. `GetPostSnapshotRewardCredits(slot)` returns
 each stake credential's total of the `account_reward_delta` credits at `slot`
 with `post_snapshot` set, which the deferred mark snapshot subtracts from the
-live stake read to recover the SNAP point. The boundary
+live stake read to recover the SNAP point. `GetPostSnapshotRewardCreditEvents(slot)`
+returns the same credits one row each with their `tx_hash` source hash, which
+the Koios parity check pairs with proposals to find the deposit refunds a
+boundary credited. The boundary
 transaction writes it; the transaction that writes the decision's ratified and
 expired marks -- the background ratification job's, or the next boundary's --
 deletes it. A rollback below `boundary_slot` deletes it in the rollback
@@ -1056,12 +1072,17 @@ flowchart LR
 `dingo load` from an HTTPS ImmutableDB root, or HTTP on loopback for local
 development, keeps a source-keyed download cache under
 `<databasePath>/immutable-download`.
-Non-loopback HTTP is rejected. `staging/` holds chunk triads
+Non-loopback HTTP and private or special-use HTTPS destinations are rejected
+for the initial request, every redirect, and every resolved dial target. The
+downloader does not use proxy settings. `staging/` holds chunk triads
 in flight, each file written as `<name>.part` and renamed when complete;
 `ready/` holds the contiguous chunks the loader reads. A copied chunk leaves
 `ready/` once a later chunk holding a block is copied, so the cache keeps the
 chunk holding the chain tip, which the next run resumes from. Source keys keep
-completed and partial files from one root out of another root's replay.
+completed files from one root out of another root's replay. Aggregate transfer
+and cache bounds follow the requested chunk range and format limits. Each write
+also preserves free space on the cache filesystem; an unsuccessful import
+removes its staging files after all fetch workers stop.
 
 ## SQL Conventions
 
@@ -1853,7 +1874,7 @@ proposals it depends on were stored, and is derived again.
 | `pool_registration_owner` | `id`, `pool_registration_id`, `pool_id`, `key_hash` | PK `id`; indexes `pool_registration_id`, `pool_id` | Owners for a pool registration. Join `pool_registration_id -> pool_registration.id`; `pool_id -> pool.id`. |
 | `pool_registration_relay` | `id`, `pool_registration_id`, `pool_id`, `relay_type`, `ipv4`, `ipv6`, `hostname`, `port` | PK `id`; indexes `pool_registration_id`, `pool_id` | Relay addresses and their on-chain constructor for a pool registration. `relay_type` is nullable for pre-v38 rows, which retain legacy field-based inference. `GetActivePoolRelays` joins `pool` and returns each row with its pool's key hash in the transient `PoolRegistrationRelay.PoolKeyHash` field, which is not a stored column. |
 | `pool_retirement` | `id`, `pool_id`, `pool_key_hash`, `certificate_id`, `epoch`, `added_slot` | PK `id`; indexes `pool_id`, `pool_key_hash`, `certificate_id`, `added_slot` | Pool retirement certificate. Synthetic retirements written by a Mithril v2 catch-up (reconcile) or by the initial Mithril bootstrap import have `certificate_id = 0` and no `certs` row (`added_slot` is the catch-up or snapshot point; `epoch` is that same point except for the pending-retirement case below, where it is a future epoch); joins on `certificate_id` must be LEFT JOINs to keep them visible, and active-pool queries rank them ahead of certificate-backed rows at the same slot. The bootstrap case covers a pool that appears in the imported active pool distribution (`pool_stake_snapshot` `"actv"`) but is absent from the certified live pool params: it retired at the snapshot's epoch boundary yet still leads the current epoch's already-fixed schedule, so the import synthesizes a `pool`/`pool_registration` pair carrying only its pool key hash and pool-distr `vrf_key_hash` (pledge/cost/margin/reward-account left zero) plus this retirement tombstone. That keeps the producer resolvable via `GetPool(includeInactive=true)` for the header VRF-key binding check while the tombstone excludes it from active-pool and stake queries. Imported reward seeding separately intersects its shared registration fallback with each target snapshot's positive-stake delegated pool keys before the target snapshot's complete parameters overlay it. A synthesized pool that belongs only to another snapshot therefore cannot leak into this epoch's reward inputs, while an actually referenced pool remains subject to the all-or-nothing reconciliation gate if neither source supplies complete economics. This matches how a genesis-synced node retains a retired pool without treating it as active. The bootstrap import writes a second, distinct kind of `certificate_id = 0` row for a pool the snapshot shows as *pending* retirement: the PState `retiring` map schedules a live pool to retire at a later epoch, so the row carries that future `epoch` while the pool keeps its `pool_registration` economics and its `deposit_held`, and continues to earn rewards and lead slots until the boundary refunds it. Dropping these rows leaves the node holding a deposit the network has already refunded to the pool's reward account, so the two ledgers disagree about that account's balance. |
-| `pool_opcert_sequence` | `id`, `pool_key_hash`, `slot`, `sequence` | PK `id`; unique `(pool_key_hash, slot)`; index `slot`; index `(pool_key_hash, sequence)` | Observed operational certificate sequence by slot. Writes are first-write-wins for `(pool_key_hash, slot)`: replaying the same counter succeeds, while a different counter returns an `opcert counter conflict` error and rolls back the block-apply transaction. Read before write inside the block-apply transaction to enforce inbound opcert counter monotonicity; per-slot rows let rollback drop entries past the rollback slot and recompute `pool.latest_op_cert_sequence`. A Mithril restore imports the certified HeaderState counter map at its trusted tip; validation selects observations strictly after that boundary, falls back to the certified row at the boundary, and ignores stale pre-boundary rows. A pool with neither is absent from the certified map and is validated against a zero baseline, but only when some row exists at the boundary slot (`PoolOpCertSequencesExistAtSlot`): a database restored before the map was persisted has none there, and the read fails with a rebootstrap error rather than treating an unknown counter as zero. Those imported rows are counters, not blocks — a bootstrap applies no block at or below its anchor, and one slot cannot hold a block from every pool — so `CountPoolBlocksInSlotRange` and `GetPoolBlockIssuersInSlotRange`, the two readers that mean "blocks minted", raise their start slot past the recorded `mithril_ledger_slot` before reading. Without that they credit every pool holding a certified counter with a block it never minted and inflate the epoch total by the size of the pool set, which reaches pool reward performance, the `reward_pool_input` counts seeded at the epoch boundary, and Blockfrost `blocks_minted`. `LatestPoolOpCertSequenceAtOrBefore` uses the same rows to provide Leios announcement validation with the highest issuer counter no later than the selected chain's immutable-tip slot; absence by that bound is distinct from counter zero and classifies the dangling announcement as stale. Reward calculation can read the ordered raw issuer rows for an ended epoch and exclude TPraos overlay slots before deriving pool performance. Raising the start slot removes the imported counter rows, but it leaves no blocks at all for an epoch that ended below the anchor; `imported_pool_block_count` is the positive record of what those epochs actually minted. `LatestPoolOpCertSequences` reduces the whole table to one highest `sequence` per `pool_key_hash` (`GROUP BY pool_key_hash`) for the `GetChainDepState` query, and `LatestPoolOpCertSequencesAtOrBefore(slot)` answers the same question at an acquired point. A slot filter cannot use the `(pool_key_hash, sequence)` index, so it starts from the unbounded result and recomputes only the pools with a row after `slot` (`PoolOpCertSequencesChangedAfterSQL`, a range of the `slot` index; then `PoolOpCertSequenceAtOrBeforeSQL` per pool, a range of the unique `(pool_key_hash, slot)` index). For the unbounded read, because the table is keyed by issuer rather than joined to `pool`, that set includes cold keys whose pool has left the active set, which is what the chain still enforces against. That aggregate has no slot bound available to narrow it — the table takes a row per block minted, is pruned only by rollback, and holds nothing above the tip — so `(pool_key_hash, sequence)` exists to serve it from an index alone: SQLite and PostgreSQL fold it without reading a table row, and MySQL can skip through the index a pool at a time. It is declared by migration `v1alpha1`. The cost is one further index maintained per minted block. `sequence` is a signed engine integer, so the recorded counter domain is `[0, 2^63-1]` even though the reference decodes the operational certificate counter as a full-width `uint64`. That column carries the monotonicity ordering as well as the value -- the `MAX(sequence)` reads above, the `latest_op_cert_sequence < ?` guard on the denormalized `pool` maximum, and the `(pool_key_hash, sequence)` index -- so a counter above the domain would order below every smaller one. `eras.MaxPersistableOpCertCounter` names the bound; block application refuses a higher counter before applying the block, and the Mithril restore path (`ledgerstate.importOpCertCounters`) refuses it before writing the certified baseline, rather than failing this write part-way through. Every row written before that bound was named is inside it: `checkedInt64` has always refused a higher value, so no row needs rewriting. |
+| `pool_opcert_sequence` | `id`, `pool_key_hash`, `slot`, `sequence` | PK `id`; unique `(pool_key_hash, slot)`; index `slot`; index `(pool_key_hash, sequence)` | Observed operational certificate sequence by slot. Writes are first-write-wins for `(pool_key_hash, slot)`: replaying the same counter succeeds, while a different counter returns an `opcert counter conflict` error and rolls back the block-apply transaction. Read before write inside the block-apply transaction to enforce inbound opcert counter monotonicity; per-slot rows let rollback drop entries past the rollback slot and recompute `pool.latest_op_cert_sequence`. Trusted replay queues these observations in its metadata accumulator, inserts them in parameter-bounded batches, checks every duplicate against the stored sequence, and advances each pool's denormalized maximum before commit. Its in-memory counter view stages reads and advances per database transaction, promoting them only after commit. Fresh bulk loads may defer both read-oriented indexes and rebuild them before success; ordinary writes keep them resident. A Mithril restore imports the certified HeaderState counter map at its trusted tip; validation selects observations strictly after that boundary, falls back to the certified row at the boundary, and ignores stale pre-boundary rows. A pool with neither is absent from the certified map and is validated against a zero baseline, but only when some row exists at the boundary slot (`PoolOpCertSequencesExistAtSlot`): a database restored before the map was persisted has none there, and the read fails with a rebootstrap error rather than treating an unknown counter as zero. Those imported rows are counters, not blocks — a bootstrap applies no block at or below its anchor, and one slot cannot hold a block from every pool — so `CountPoolBlocksInSlotRange` and `GetPoolBlockIssuersInSlotRange`, the two readers that mean "blocks minted", raise their start slot past the recorded `mithril_ledger_slot` before reading. Without that they credit every pool holding a certified counter with a block it never minted and inflate the epoch total by the size of the pool set, which reaches pool reward performance, the `reward_pool_input` counts seeded at the epoch boundary, and Blockfrost `blocks_minted`. `LatestPoolOpCertSequenceAtOrBefore` uses the same rows to provide Leios announcement validation with the highest issuer counter no later than the selected chain's immutable-tip slot; absence by that bound is distinct from counter zero and classifies the dangling announcement as stale. Reward calculation can read the ordered raw issuer rows for an ended epoch and exclude TPraos overlay slots before deriving pool performance. Raising the start slot removes the imported counter rows, but it leaves no blocks at all for an epoch that ended below the anchor; `imported_pool_block_count` is the positive record of what those epochs actually minted. `LatestPoolOpCertSequences` reduces the whole table to one highest `sequence` per `pool_key_hash` (`GROUP BY pool_key_hash`) for the `GetChainDepState` query, and `LatestPoolOpCertSequencesAtOrBefore(slot)` answers the same question at an acquired point. A slot filter cannot use the `(pool_key_hash, sequence)` index, so it starts from the unbounded result and recomputes only the pools with a row after `slot` (`PoolOpCertSequencesChangedAfterSQL`, a range of the `slot` index; then `PoolOpCertSequenceAtOrBeforeSQL` per pool, a range of the unique `(pool_key_hash, slot)` index). For the unbounded read, because the table is keyed by issuer rather than joined to `pool`, that set includes cold keys whose pool has left the active set, which is what the chain still enforces against. That aggregate has no slot bound available to narrow it — the table takes a row per block minted, is pruned only by rollback, and holds nothing above the tip — so `(pool_key_hash, sequence)` exists to serve it from an index alone: SQLite and PostgreSQL fold it without reading a table row, and MySQL can skip through the index a pool at a time. It is declared by migration `v1alpha1`. The cost is one further index maintained per minted block. `sequence` is a signed engine integer, so the recorded counter domain is `[0, 2^63-1]` even though the reference decodes the operational certificate counter as a full-width `uint64`. That column carries the monotonicity ordering as well as the value -- the `MAX(sequence)` reads above, the `latest_op_cert_sequence < ?` guard on the denormalized `pool` maximum, and the `(pool_key_hash, sequence)` index -- so a counter above the domain would order below every smaller one. `eras.MaxPersistableOpCertCounter` names the bound; block application refuses a higher counter before applying the block, and the Mithril restore path (`ledgerstate.importOpCertCounters`) refuses it before writing the certified baseline, rather than failing this write part-way through. Every row written before that bound was named is inside it: `checkedInt64` has always refused a higher value, so no row needs rewriting. |
 
 Migration v43 adds `registration_index` to pool registrations and includes
 it in their unique identity alongside pool, slot, and certificate. MySQL
@@ -1866,6 +1887,13 @@ first registration when the pool first appears during the epoch. The future
 view selects the latest same-epoch re-registration and excludes that immediate
 first registration. This keeps the effective and deferred VRF-key indexes
 separate while using the same retirement precedence for both.
+
+The `pool_opcert_sequence` row is also covered by rollback and by the
+`ledgerstate.ImportLedgerState` post-anchor sweep: both remove observations
+after their target, then recompute `pool.latest_op_cert_sequence` from the
+remaining history. This lets replay record a new counter at a slot previously
+written by discarded local state while preserving the first-write-wins rule
+for a surviving `(pool_key_hash, slot)` row.
 
 ### DReps, Governance, and Committee
 
@@ -1900,6 +1928,36 @@ When an enacted treasury withdrawal credits a proposal return account that also
 receives a deposit refund at the same boundary, `account_reward_delta` records
 separate event discriminators for the withdrawal and refund so both credits
 remain distinct and rollbackable.
+
+### Catch-up import rollback
+
+`ledgerstate.ImportLedgerState` clears metadata written by local replay after
+the imported anchor before applying snapshot state. In addition to the `epoch`
+row's sweep list, it restores or removes post-anchor `account`, `drep`, and
+`pool` state; removes post-anchor `governance_proposal`, `governance_vote`,
+`constitution`, `committee_member`, and `committee_quorum` rows; and deletes
+post-anchor `pparams` and `pparam_update` rows. These operations share the
+atomic pre-import metadata transaction. For accounts deleted because they did
+not exist at the anchor, post-anchor `account_reward_delta` and
+`account_withdrawal_witness` rows are deleted without reversing balances;
+snapshot-imported accounts have their journal rows cleared after their anchor
+balances are written. Replay can then recreate the same accounts and apply
+their later reward changes once.
+
+The schema-table entries above have these additional catch-up import effects:
+
+| Table | Catch-up import effect |
+|---|---|
+| `account` | `RestoreAccountStateAtSlot` removes accounts absent at the anchor and restores surviving account state. Reward-delta and withdrawal-witness rows for removed accounts are cleared in the same transaction. |
+| `pool` | `RestorePoolStateAtSlot` removes pools registered after the anchor and restores surviving pool parameters from the last registration at or before it. |
+| `drep` | `RestoreDrepStateAtSlot` restores DRep state to the imported anchor. |
+| `governance_proposal` | The pre-import sweep deletes proposal rows added after the anchor. |
+| `governance_vote` | The pre-import sweep deletes vote rows added after the anchor. |
+| `constitution` | The pre-import sweep deletes constitution rows added after the anchor. |
+| `committee_member` | The pre-import sweep removes committee state added after the anchor. |
+| `committee_quorum` | The pre-import sweep removes quorum rows added after the anchor. |
+| `pparams` | The pre-import sweep deletes parameter rows added after the anchor before snapshot parameters are written. |
+| `pparam_update` | The pre-import sweep deletes parameter-update rows added after the anchor. |
 
 ### Off-chain Metadata Cache
 
@@ -3273,8 +3331,11 @@ older than the ledger stability window:
   applies after each redirect. Every resolved address must be public before
   dialing unless `barkBlockDownloadAllowPrivateAddresses` is enabled, and the
   download transport ignores ambient proxy settings either way. The
-  operator-configured Bark RPC client remains separate so an explicitly chosen
-  internal service endpoint is still reachable. Downloads are also size-limited
+  Bark RPC client uses the same default-deny resolved-address check as block
+  downloads, restricted to the configured RPC origin and without ambient proxy
+  settings. Setting `barkBlockDownloadAllowPrivateAddresses` opts both Bark RPC
+  and block downloads into private or special-use addresses; it does not relax
+  origin, redirect, or proxy restrictions. Downloads are also size-limited
   to the largest block the chain admits for any era (`LedgerState.MaxBlockSize`:
   the live header and body limits, or the Byron genesis block size when larger;
   a 128 KiB default when neither is known). Downloaded bytes are then verified locally
@@ -5232,7 +5293,7 @@ ORDER BY proposed_epoch ASC, added_slot ASC,
 validation resolves votes, parents, and potential committee members against:
 
 ```sql
-SELECT gp.*
+SELECT gp.*, gpd.dropped_epoch, gpd.dropped_slot, gpo.tx_index
 FROM governance_proposal gp
 LEFT JOIN governance_proposal_order gpo ON gpo.proposal_id = gp.id
 LEFT JOIN governance_proposal_drop gpd ON gpd.proposal_id = gp.id
@@ -5330,7 +5391,7 @@ happened, keyed by `proposal_id`:
 -- step order: a boundary reprocessed after a commit crash reruns this query
 -- against expiries the first pass already wrote, and an unbounded predicate
 -- would refund them in the epoch that expired them.
-SELECT gp.*
+SELECT gp.*, gpd.dropped_epoch, gpd.dropped_slot, gpo.tx_index
 FROM governance_proposal gp
 LEFT JOIN governance_proposal_order gpo ON gpo.proposal_id = gp.id
 LEFT JOIN governance_proposal_drop gpd ON gpd.proposal_id = gp.id
@@ -5343,12 +5404,29 @@ ORDER BY gp.proposed_epoch ASC, gp.added_slot ASC,
 
 -- GetDroppedGovernanceProposalsAt(epoch, slot): epoch-boundary replay lookup,
 -- mirroring GetEnactedGovernanceProposalsAt/GetExpiredGovernanceProposalsAt.
-SELECT gp.*
+SELECT gp.*, gpd.dropped_epoch, gpd.dropped_slot, gpo.tx_index
 FROM governance_proposal gp
 LEFT JOIN governance_proposal_order gpo ON gpo.proposal_id = gp.id
 LEFT JOIN governance_proposal_drop gpd ON gpd.proposal_id = gp.id
 WHERE gpd.dropped_epoch = $1
   AND gpd.dropped_slot = $2
+  AND gp.deleted_slot IS NULL
+ORDER BY gp.proposed_epoch ASC, gp.added_slot ASC,
+  CASE WHEN gpo.tx_index IS NULL THEN 0 ELSE 1 END ASC, gpo.tx_index ASC,
+  gp.tx_hash ASC, gp.action_index ASC;
+```
+
+### `GetGovernanceProposalsRefundedAt`
+
+Returns the proposals whose deposit was returned when an epoch began: enacted at the epoch (with a ratified epoch) or dropped at it, excluding soft-deleted rows. Unlike the boundary replay lookups it reads by epoch alone, for the Koios parity check, which has no boundary slot to name; each row carries its own `enacted_slot` or `dropped_slot`.
+
+```sql
+SELECT gp.*, gpd.dropped_epoch, gpd.dropped_slot, gpo.tx_index
+FROM governance_proposal gp
+LEFT JOIN governance_proposal_order gpo ON gpo.proposal_id = gp.id
+LEFT JOIN governance_proposal_drop gpd ON gpd.proposal_id = gp.id
+WHERE ((gp.ratified_epoch IS NOT NULL AND gp.enacted_epoch = $1)
+       OR gpd.dropped_epoch = $1)
   AND gp.deleted_slot IS NULL
 ORDER BY gp.proposed_epoch ASC, gp.added_slot ASC,
   CASE WHEN gpo.tx_index IS NULL THEN 0 ELSE 1 END ASC, gpo.tx_index ASC,

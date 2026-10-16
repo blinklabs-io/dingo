@@ -152,6 +152,13 @@ func TestHardForkDijkstraCarriesFieldsSkippedByEmptyCheck(t *testing.T) {
 				require.Equal(t, uint32(1234), p.MaxEndorserBlockTxsSize)
 			},
 		},
+		{
+			name:    "perasMinCandidateBlockAge",
+			genesis: `{"perasMinCandidateBlockAge":101}`,
+			check: func(t *testing.T, p *dijkstra.DijkstraProtocolParameters) {
+				require.Equal(t, uint32(101), p.PerasMinCandidateBlockAge)
+			},
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -161,6 +168,38 @@ func TestHardForkDijkstraCarriesFieldsSkippedByEmptyCheck(t *testing.T) {
 			requireConwayRefScriptDefaults(t, pparams)
 		})
 	}
+}
+
+func TestHardForkDijkstraAppliesAndClonesCurrentGenesisFields(t *testing.T) {
+	t.Parallel()
+	const genesis = `{
+		"perasMinCandidateBlockAge":101,
+		"perasHealingFactor":0.25,
+		"perasCertBoost":102,
+		"perasTargetCommitteeSize":103,
+		"perasBootstrapRound":104,
+		"perasQuorumThresholdSafetyMargin":0.5,
+		"refInputsCostPerMultiAssetPolicy":105,
+		"refInputsCostPerDatumByte":106
+	}`
+	pparams := hardForkDijkstraFromGenesisJSON(t, genesis)
+	clonedParams, err := eras.CloneGovernanceProtocolParameters(pparams)
+	require.NoError(t, err)
+	cloned, ok := clonedParams.(*dijkstra.DijkstraProtocolParameters)
+	require.True(t, ok)
+
+	require.Equal(t, uint32(101), cloned.PerasMinCandidateBlockAge)
+	require.Zero(t, cloned.PerasHealingFactor.Cmp(big.NewRat(1, 4)))
+	require.Equal(t, uint16(102), cloned.PerasCertBoost)
+	require.Equal(t, uint16(103), cloned.PerasTargetCommitteeSize)
+	require.NotNil(t, cloned.PerasBootstrapRound)
+	require.Equal(t, uint32(104), *cloned.PerasBootstrapRound)
+	require.Zero(
+		t,
+		cloned.PerasQuorumThresholdSafetyMargin.Cmp(big.NewRat(1, 2)),
+	)
+	require.Equal(t, uint64(105), cloned.RefInputsCostPerMultiAssetPolicy)
+	require.Equal(t, uint64(106), cloned.RefInputsCostPerDatumByte)
 }
 
 func TestHardForkDijkstraKeepsConwayGovernanceParamsGenesisOmits(t *testing.T) {

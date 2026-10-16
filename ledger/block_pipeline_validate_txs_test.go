@@ -45,9 +45,11 @@ func TestDecodeReadChainBatchValidatesBlockWithTransactions(t *testing.T) {
 
 	ls := newValidatedPipelineTestLedger(t, vb)
 	require.NoError(t, ls.blockPipeline.Stop())
-	ls.blockPipeline = pipeline.NewBlockPipeline(
+	ls.blockPipeline = newTestReplayPipeline(ls,
 		pipeline.WithDecodeWorkers(1),
-		pipeline.WithTrustedDecodeOnly(),
+		pipeline.WithValidateWorkers(1),
+		pipeline.WithEta0(vb.EpochNonceHex),
+		pipeline.WithSlotsPerKesPeriod(vb.SlotsPerKesPeriod),
 	)
 	require.NoError(t, ls.blockPipeline.Start(t.Context()))
 

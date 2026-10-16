@@ -56,10 +56,13 @@ profiles as part of `./...`, and their verbose output reports the exact corpus
 and scenario counts. The [conformance tests](../internal/test/conformance/README.md)
 document what each profile proves and excludes.
 
-The Linux tag workflow generates a Conway CBOR decoding conformance report
-from the upstream corpus before uploading it as a dated JSON release asset.
-The report is uploaded only when Dingo accepts and rejects the corpus samples
-as expected and matches the reference encodings.
+The Linux tag workflow generates four conformance reports and uploads them as
+dated JSON release assets: Conway CBOR decoding, ledger rules, UPLC
+conformance and UPLC turbo performance. Each input corpus is pinned by commit,
+and the turbo archive by SHA-256. A report that records failures is still
+uploaded; the release step requires all four reports to exist. The turbo report
+measures an evenly spaced sample of `TURBO_MAX_PROGRAMS` programs (10,000 by
+default) and records the sample size in its setup.
 
 ## Local development workflows
 

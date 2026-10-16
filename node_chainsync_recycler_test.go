@@ -108,7 +108,7 @@ func TestRecyclerComponentsLeavesChainSelectorNilWhenUnset(t *testing.T) {
 	assert.True(t, ok)
 }
 
-func TestChainsyncObservePeerTipIsSynchronousDuringGenesisSelection(
+func TestChainsyncObservePeerTipStagesUntilAdmission(
 	t *testing.T,
 ) {
 	t.Parallel()
@@ -124,15 +124,21 @@ func TestChainsyncObservePeerTipIsSynchronousDuringGenesisSelection(
 	point := ocommon.NewPoint(42, []byte("genesis-frontier"))
 	tip := ochainsync.Tip{Point: point, BlockNumber: 7}
 
-	disposition := n.chainsyncObservePeerTip(
-		chainselection.PeerTipUpdateEvent{
-			ConnectionId: connId,
-			Tip:          tip,
-			ObservedTip:  tip,
-		},
-	)
-	require.Equal(t, chainselection.PeerTipUpdateAccepted, disposition)
+	update := chainselection.PeerTipUpdateEvent{
+		ConnectionId: connId,
+		AdmissionID:  1,
+		Tip:          tip,
+		ObservedTip:  tip,
+	}
+	require.Equal(t, chainselection.PeerTipUpdateAccepted, n.chainsyncObservePeerTip(update))
 	peerTip := selector.GetPeerTip(connId)
+	require.Nil(t, peerTip)
+	admissionCtx, cancelAdmission := context.WithTimeout(t.Context(), time.Second)
+	defer cancelAdmission()
+	require.NoError(t, selector.AwaitEagernessLimit(admissionCtx, connId, tip.BlockNumber, nil))
+
+	n.chainsyncResolvePeerTip(update, true)
+	peerTip = selector.GetPeerTip(connId)
 	require.NotNil(t, peerTip)
 	require.Equal(t, point, peerTip.ObservedTip.Point)
 
@@ -147,6 +153,34 @@ func TestChainsyncObservePeerTipIsSynchronousDuringGenesisSelection(
 	peerTip = selector.GetPeerTip(connId)
 	require.NotNil(t, peerTip)
 	require.Equal(t, origin, peerTip.ObservedTip.Point)
+}
+
+func TestChainsyncObservePeerTipRejectsAtAdmissionCapacity(t *testing.T) {
+	t.Parallel()
+
+	selector := chainselection.NewChainSelector(
+		chainselection.ChainSelectorConfig{MaxTrackedPeers: 1},
+	)
+	n := &Node{chainSelector: selector}
+	update := func(
+		connNum uint,
+		admissionID uint64,
+	) chainselection.PeerTipUpdateEvent {
+		point := ocommon.NewPoint(42, []byte("capacity-frontier"))
+		tip := ochainsync.Tip{Point: point, BlockNumber: 7}
+		return chainselection.PeerTipUpdateEvent{
+			ConnectionId: newNodeTestConnId(connNum),
+			AdmissionID:  admissionID,
+			Tip:          tip,
+			ObservedTip:  tip,
+		}
+	}
+
+	first := update(1, 1)
+	second := update(2, 2)
+	require.Equal(t, chainselection.PeerTipUpdateAccepted, n.chainsyncObservePeerTip(first))
+	assert.Equal(t, chainselection.PeerTipUpdateRejected, n.chainsyncObservePeerTip(second))
+	assert.Nil(t, selector.GetPeerTip(second.ConnectionId))
 }
 
 func TestRecyclerComponentsSkipsWhenLifecycleOpHoldsLock(t *testing.T) {
