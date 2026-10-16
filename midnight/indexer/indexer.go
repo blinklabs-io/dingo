@@ -45,12 +45,11 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
-const midnightCheckpointPhase = "midnight"
-const midnightRegistrationCheckpointPhase = "midnight-registration-rebuild"
-
 const (
-	midnightRegistrationFingerprintKey = "midnight_registration_policy_fingerprint"
-	midnightRegistrationPendingKey     = "midnight_registration_rebuild_pending"
+	midnightCheckpointPhase             = "midnight"
+	midnightRegistrationCheckpointPhase = "midnight-registration-rebuild"
+	midnightRegistrationFingerprintKey  = "midnight_registration_policy_fingerprint"
+	midnightRegistrationPendingKey      = "midnight_registration_rebuild_pending"
 )
 
 // candidateRollbackDepth is the Cardano security parameter k: the maximum
@@ -554,7 +553,7 @@ func (idx *Indexer) Start() error {
 func (idx *Indexer) registrationFingerprint() string {
 	data := []byte("v1\x00" + idx.config.AuthTokenPolicyID + "\x00" + idx.config.AuthTokenAssetName + "\x00" + idx.config.MappingValidatorAddress)
 	sum := sha256.Sum256(data)
-	return fmt.Sprintf("%x", sum[:])
+	return hex.EncodeToString(sum[:])
 }
 
 func (idx *Indexer) rebuildRegistrationStateIfNeeded() error {
@@ -867,7 +866,9 @@ func (idx *Indexer) preflightRegistrationHistory() (*models.Block, *models.Block
 			}
 			wantNumber := previous.Number + 1
 			isEBB := decoded.Type() == ouroborosledger.BlockTypeByronEbb
-			if stored.Slot <= previous.Slot || (decoded.BlockNumber() != wantNumber && !(isEBB && decoded.BlockNumber() == previous.Number)) || !bytes.Equal(decoded.PrevHash().Bytes(), previous.Hash) {
+			validNumber := decoded.BlockNumber() == wantNumber ||
+				(isEBB && decoded.BlockNumber() == previous.Number)
+			if stored.Slot <= previous.Slot || !validNumber || !bytes.Equal(decoded.PrevHash().Bytes(), previous.Hash) {
 				return fmt.Errorf("retained history is discontinuous at slot=%d number=%d", stored.Slot, decoded.BlockNumber())
 			}
 		}
