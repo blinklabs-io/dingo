@@ -285,9 +285,37 @@ func TestRedactArgsEdgeCases(t *testing.T) {
 			"https://<redacted>@host/path",
 		},
 		{
-			"secret flag followed by secret flag",
+			"flag shaped secret value",
 			[]string{"--api-key", "--bearer", "real-secret", "serve"},
-			"--api-key --bearer <redacted> serve",
+			"--api-key <redacted> real-secret serve",
+		},
+		{
+			"url query credential",
+			[]string{
+				"--tracing-endpoint=https://collector.example/v1/traces" +
+					"?api_key=query-secret&service=dingo#fragment",
+			},
+			"--tracing-endpoint=https://collector.example/v1/traces" +
+				"?api_key=<redacted>&service=dingo#fragment",
+		},
+		{
+			"encoded url query credential name",
+			[]string{
+				"https://collector.example/v1/traces" +
+					"?api%5Fkey=query-secret&service=dingo",
+			},
+			"https://collector.example/v1/traces" +
+				"?api%5Fkey=<redacted>&service=dingo",
+		},
+		{
+			"plus encoded url query credential name",
+			[]string{"https://collector.example?api+key=query-secret&monkey=banana"},
+			"https://collector.example?api+key=<redacted>&monkey=banana",
+		},
+		{
+			"credential file path query untouched",
+			[]string{"https://collector.example?token_file_path=/run/token&service=dingo"},
+			"https://collector.example?token_file_path=/run/token&service=dingo",
 		},
 		{
 			"url query with at sign untouched",
@@ -341,6 +369,7 @@ func TestEntrypointRedactsSecretArguments(t *testing.T) {
 		secretB = "bearer-secret-bbb"
 		secretC = "url-pass-ccc"
 		secretD = "header-secret-ddd"
+		secretE = "query-secret-eee"
 	)
 	for _, debug := range []string{"", "1"} {
 		t.Run("debug="+debug, func(t *testing.T) {
@@ -359,6 +388,9 @@ func TestEntrypointRedactsSecretArguments(t *testing.T) {
 				"--api-secret=" + secretB,
 				"--mithril-aggregator-url=https://user:" + secretC + "@agg.example/api",
 				"--header", "Authorization: Bearer " + secretD,
+				"--api-key", "--bearer",
+				"--tracing-endpoint=https://collector.example/v1/traces?api_key=" +
+					secretE + "&service=dingo",
 				"--token-registry-enabled",
 				"--network", "devnet",
 			}
@@ -373,12 +405,17 @@ func TestEntrypointRedactsSecretArguments(t *testing.T) {
 			require.NotContains(t, logs, secretB)
 			require.NotContains(t, logs, secretC)
 			require.NotContains(t, logs, secretD)
+			require.NotContains(t, logs, secretE)
+			require.NotContains(t, logs, "--bearer")
 			require.Contains(
 				t,
 				logs,
 				"serve --koios-parity-api-key <redacted> --api-secret=<redacted> "+
 					"--mithril-aggregator-url=https://<redacted>@agg.example/api "+
 					"--header Authorization: Bearer <redacted> "+
+					"--api-key <redacted> "+
+					"--tracing-endpoint=https://collector.example/v1/traces"+
+					"?api_key=<redacted>&service=dingo "+
 					"--token-registry-enabled --network devnet",
 			)
 		})
