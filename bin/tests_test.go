@@ -229,6 +229,200 @@ func TestEntrypointSignalHandlingSurvivesBootstrapToServeHandoff(t *testing.T) {
 	require.Equal(t, "SIGTERM\n", readFile(t, harness.serveSignalFile))
 }
 
+// redact_args is exercised directly, without starting the entrypoint, so edge
+// cases do not each need a fake dingo process.
+func TestRedactArgsEdgeCases(t *testing.T) {
+	t.Parallel()
+	script := readFile(t, "entrypoint.sh")
+	start := strings.Index(script, "# Secret-bearing flags")
+	require.GreaterOrEqual(t, start, 0)
+	// The redaction helpers end at the next section banner.
+	length := strings.Index(script[start:], "\n# ---")
+	require.Greater(t, length, 0)
+	helpers := script[start : start+length]
+
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"no args", nil, ""},
+		{"secret flag last, no value", []string{"--api-key"}, "--api-key"},
+		{"empty value", []string{"--api-key="}, "--api-key=<redacted>"},
+		{
+			"empty next value",
+			[]string{"--api-key", "", "serve"},
+			"--api-key <redacted> serve",
+		},
+		{
+			"equals inside value",
+			[]string{"--api-secret=a=b=c"},
+			"--api-secret=<redacted>",
+		},
+		{
+			"uppercase flag",
+			[]string{"--API-TOKEN", "abc"},
+			"--API-TOKEN <redacted>",
+		},
+		{
+			"single dash flag",
+			[]string{"-token", "abc"},
+			"-token <redacted>",
+		},
+		{
+			"non-secret flag untouched",
+			[]string{"--token-registry-interval", "5", "--network", "preview"},
+			"--token-registry-interval 5 --network preview",
+		},
+		{
+			"file path flag untouched",
+			[]string{"--shelley-kes-key", "/keys/kes.skey"},
+			"--shelley-kes-key /keys/kes.skey",
+		},
+		{
+			"url userinfo",
+			[]string{"https://user:pw@host/path"},
+			"https://<redacted>@host/path",
+		},
+		{
+			"flag shaped secret value",
+			[]string{"--api-key", "--bearer", "real-secret", "serve"},
+			"--api-key --bearer <redacted> serve",
+		},
+		{
+			"url query credential",
+			[]string{
+				"--tracing-endpoint=https://collector.example/v1/traces" +
+					"?api_key=query-secret&service=dingo#fragment",
+			},
+			"--tracing-endpoint=https://collector.example/v1/traces" +
+				"?api_key=<redacted>&service=dingo#fragment",
+		},
+		{
+			"encoded url query credential name",
+			[]string{
+				"https://collector.example/v1/traces" +
+					"?api%5Fkey=query-secret&service=dingo",
+			},
+			"https://collector.example/v1/traces" +
+				"?api%5Fkey=<redacted>&service=dingo",
+		},
+		{
+			"plus encoded url query credential name",
+			[]string{"https://collector.example?api+key=query-secret&monkey=banana"},
+			"https://collector.example?api+key=<redacted>&monkey=banana",
+		},
+		{
+			"credential file path query untouched",
+			[]string{"https://collector.example?token_file_path=/run/token&service=dingo"},
+			"https://collector.example?token_file_path=/run/token&service=dingo",
+		},
+		{
+			"url query with at sign untouched",
+			[]string{"https://host?email=user@example.com"},
+			"https://host?email=user@example.com",
+		},
+		{
+			"url fragment with at sign untouched",
+			[]string{"https://host#user@example.com"},
+			"https://host#user@example.com",
+		},
+		{
+			"url userinfo before query redacted",
+			[]string{"https://u:pw@host?x=y@z"},
+			"https://<redacted>@host?x=y@z",
+		},
+		{
+			"url without userinfo untouched",
+			[]string{"https://host/path@x"},
+			"https://host/path@x",
+		},
+		{
+			"bearer header equals form",
+			[]string{"--header=Authorization: Bearer xyz"},
+			"--header=Authorization: Bearer <redacted>",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			cmd := exec.Command( //nolint:gosec
+				"bash", "-c",
+				helpers+"\nredact_args \"$@\"", "bash",
+			)
+			cmd.Args = append(cmd.Args, test.args...)
+			out, err := cmd.CombinedOutput()
+			require.NoError(t, err, string(out))
+			require.Equal(t, test.want, strings.TrimSuffix(string(out), "\n"))
+		})
+	}
+}
+
+// Secret-bearing arguments must not reach the entrypoint's output: not in the
+// "Starting dingo" log line, and not in xtrace output when DINGO_DEBUG is set.
+// The arguments cover the "--flag value" and "--flag=value" forms, URL
+// credentials, an Authorization header, and a boolean flag whose neighbor must
+// stay unredacted.
+func TestEntrypointRedactsSecretArguments(t *testing.T) {
+	const (
+		secretA = "bearer-secret-aaa"
+		secretB = "bearer-secret-bbb"
+		secretC = "url-pass-ccc"
+		secretD = "header-secret-ddd"
+		secretE = "query-secret-eee"
+		secretF = "pending-secret-fff"
+	)
+	for _, debug := range []string{"", "1"} {
+		t.Run("debug="+debug, func(t *testing.T) {
+			harness := newEntrypointHarness(t, false)
+			harness.env = append(
+				harness.env,
+				"DINGO_TEST_SERVE_EXIT_CODE=0",
+				"RESTORE_SNAPSHOT=",
+			)
+			if debug != "" {
+				harness.env = append(harness.env, "DINGO_DEBUG=1")
+			}
+			harness.args = []string{
+				"serve",
+				"--koios-parity-api-key", secretA,
+				"--api-secret=" + secretB,
+				"--mithril-aggregator-url=https://user:" + secretC + "@agg.example/api",
+				"--header", "Authorization: Bearer " + secretD,
+				"--api-key", "--bearer", secretF,
+				"--tracing-endpoint=https://collector.example/v1/traces?api_key=" +
+					secretE + "&service=dingo",
+				"--token-registry-enabled",
+				"--network", "devnet",
+			}
+			_, process, output := harness.start(t)
+
+			harness.requireServeReady(t, process, output)
+			require.NoError(t, process.cmd.Process.Signal(syscall.SIGTERM))
+			_ = waitForEntrypoint(t, process.cmd, process, output)
+
+			logs := output.String()
+			require.NotContains(t, logs, secretA)
+			require.NotContains(t, logs, secretB)
+			require.NotContains(t, logs, secretC)
+			require.NotContains(t, logs, secretD)
+			require.NotContains(t, logs, secretE)
+			require.NotContains(t, logs, secretF)
+			require.Contains(
+				t,
+				logs,
+				"serve --koios-parity-api-key <redacted> --api-secret=<redacted> "+
+					"--mithril-aggregator-url=https://<redacted>@agg.example/api "+
+					"--header Authorization: Bearer <redacted> "+
+					"--api-key --bearer <redacted> "+
+					"--tracing-endpoint=https://collector.example/v1/traces"+
+					"?api_key=<redacted>&service=dingo "+
+					"--token-registry-enabled --network devnet",
+			)
+		})
+	}
+}
+
 // A child that spawns and then wedges must fail the readiness wait, and the
 // failure must say it started, so the stage is not misread as a spawn stall.
 func TestEntrypointReadinessWaitFailsForChildThatNeverBecomesReady(
@@ -259,6 +453,7 @@ func TestEntrypointReadinessWaitFailsForChildThatNeverBecomesReady(
 
 type entrypointHarness struct {
 	env                  []string
+	args                 []string
 	bootstrapStartedFile string
 	bootstrapReadyFile   string
 	bootstrapSignalFile  string
@@ -349,10 +544,16 @@ func TestWaitForEntrypointChildReady(t *testing.T) {
 			startedFile := filepath.Join(dir, "child.started")
 			readyFile := filepath.Join(dir, "child.ready")
 			if test.started {
-				require.NoError(t, os.WriteFile(startedFile, []byte("started\n"), 0o600))
+				require.NoError(
+					t,
+					os.WriteFile(startedFile, []byte("started\n"), 0o600),
+				)
 			}
 			if test.ready {
-				require.NoError(t, os.WriteFile(readyFile, []byte("ready\n"), 0o600))
+				require.NoError(
+					t,
+					os.WriteFile(readyFile, []byte("ready\n"), 0o600),
+				)
 			}
 			process := &entrypointProcess{done: make(chan struct{})}
 			if test.exited {
@@ -403,17 +604,33 @@ func waitForEntrypointChildReady(
 				return nil
 			}
 			if !fileExists(startedFile) {
-				return fmt.Errorf("%s child did not start: entrypoint exited: %v", name, process.err)
+				return fmt.Errorf(
+					"%s child did not start: entrypoint exited: %v",
+					name,
+					process.err,
+				)
 			}
-			return fmt.Errorf("%s child started but exited before becoming ready: %v", name, process.err)
+			return fmt.Errorf(
+				"%s child started but exited before becoming ready: %v",
+				name,
+				process.err,
+			)
 		case <-deadline.C:
 			if fileExists(readyFile) {
 				return nil
 			}
 			if !running && !fileExists(startedFile) {
-				return fmt.Errorf("%s child did not start within %s", name, startBudget)
+				return fmt.Errorf(
+					"%s child did not start within %s",
+					name,
+					startBudget,
+				)
 			}
-			return fmt.Errorf("%s child started but did not become ready within %s", name, readyBudget)
+			return fmt.Errorf(
+				"%s child started but did not become ready within %s",
+				name,
+				readyBudget,
+			)
 		case <-poll.C:
 			if fileExists(readyFile) {
 				return nil
@@ -539,7 +756,9 @@ func (h *entrypointHarness) start(
 	entrypointPath, err := filepath.Abs("entrypoint.sh")
 	require.NoError(t, err)
 
-	cmd := exec.Command("bash", entrypointPath) //nolint:gosec
+	cmd := exec.Command( //nolint:gosec
+		"bash", append([]string{entrypointPath}, h.args...)...,
+	)
 	cmd.Env = h.env
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	output := &bytes.Buffer{}
