@@ -30,7 +30,6 @@ import (
 )
 
 type peerForkPathPrefix struct {
-	tip      ocommon.Point
 	ancestor models.Block
 	headers  []gledger.BlockHeader
 }
@@ -70,6 +69,13 @@ func (ls *LedgerState) peerChainSelectionEpochNonce(
 			header.SlotNumber(),
 		)
 	}
+	// The applied tip can advance while peerHeaderForkPath reconstructs the
+	// ancestry. If the new tip is the candidate's parent, verify this as a
+	// local extension instead of treating the older intersection as a
+	// multi-epoch fork whose intermediate nonce cannot be reconstructed.
+	if peerHeaderPathHasParentPoint(forkHeaders, ls.chain.Tip().Point) {
+		return nil, models.Epoch{}, false, nil
+	}
 	if _, err := ls.headerVerificationEpoch(context.Background(), header.SlotNumber(), false); err != nil {
 		return nil, models.Epoch{}, false, err
 	}
@@ -105,7 +111,8 @@ func (ls *LedgerState) peerChainSelectionEpochNonce(
 		return cloneNonce(targetEpoch.Nonce), targetEpoch, true, nil
 	}
 	if targetEpoch.EpochId != sourceEpoch.EpochId+1 {
-		if tip := ls.chain.Tip().Point; tip.Slot == ancestor.Slot && bytes.Equal(tip.Hash, ancestor.Hash) {
+		if tip := ls.chain.Tip().Point; tip.Slot == ancestor.Slot &&
+			bytes.Equal(tip.Hash, ancestor.Hash) {
 			return nil, models.Epoch{}, false, nil
 		}
 		return nil, models.Epoch{}, false, fmt.Errorf(
@@ -267,6 +274,18 @@ func (ls *LedgerState) peerChainSelectionEpochNonce(
 	return epochNonce, targetEpoch, true, nil
 }
 
+func peerHeaderPathHasParentPoint(
+	headers []gledger.BlockHeader,
+	point ocommon.Point,
+) bool {
+	if len(headers) < 2 || len(point.Hash) == 0 {
+		return false
+	}
+	parent := headers[len(headers)-2]
+	return parent.SlotNumber() == point.Slot &&
+		bytes.Equal(parent.Hash().Bytes(), point.Hash)
+}
+
 func (ls *LedgerState) peerForkNoncePrefix(
 	connId ouroboros.ConnectionId,
 	sourceEpoch models.Epoch,
@@ -371,21 +390,34 @@ func (ls *LedgerState) peerHeaderForkPath(
 	if ls.chain == nil || ls.config.PeerHeaderLookupFunc == nil {
 		return ocommon.Point{}, nil, false, nil
 	}
-	tip := ls.chain.Tip().Point
 	key := connIdKey(connId)
 	ls.forkHeaderNonceCacheMutex.Lock()
 	cached, cachedOK := ls.forkHeaderPathCache[key]
 	ls.forkHeaderNonceCacheMutex.Unlock()
-	if cachedOK && cached.tip.Slot == tip.Slot && bytes.Equal(cached.tip.Hash, tip.Hash) &&
-		len(cached.headers) > 0 && len(cached.headers) < ls.peerHeaderHistoryLimit() &&
-		bytes.Equal(cached.headers[len(cached.headers)-1].Hash().Bytes(), header.PrevHash().Bytes()) {
-		parent := headerOnlyBlock{header: cached.headers[len(cached.headers)-1], peerRelative: true}
+	cachedAncestor := ocommon.NewPoint(
+		cached.ancestor.Slot,
+		cached.ancestor.Hash,
+	)
+	if cachedOK && ls.chain.HoldsPoint(context.Background(), cachedAncestor) &&
+		len(cached.headers) > 0 &&
+		len(cached.headers) < ls.peerHeaderHistoryLimit() &&
+		bytes.Equal(
+			cached.headers[len(cached.headers)-1].Hash().Bytes(),
+			header.PrevHash().Bytes(),
+		) {
+		parent := headerOnlyBlock{
+			header:       cached.headers[len(cached.headers)-1],
+			peerRelative: true,
+		}
 		if err := validateBlockOrder(headerOnlyBlock{header: header, peerRelative: true}, envelopeParentFromBlock(parent), byronEpochSlots(ls.config.CardanoNodeConfig)); err != nil {
 			return ocommon.Point{}, nil, false, err
 		}
 		path := append(slices.Clone(cached.headers), header)
-		ls.storePeerForkPathPrefix(key, tip, cached.ancestor, path)
-		return ocommon.NewPoint(cached.ancestor.Slot, cached.ancestor.Hash), path, true, nil
+		ls.storePeerForkPathPrefix(key, cached.ancestor, path)
+		return ocommon.NewPoint(
+			cached.ancestor.Slot,
+			cached.ancestor.Hash,
+		), path, true, nil
 	}
 	pathReversed := []gledger.BlockHeader{header}
 	prevHash := append([]byte(nil), header.PrevHash().Bytes()...)
@@ -405,7 +437,7 @@ func (ls *LedgerState) peerHeaderForkPath(
 				); err != nil {
 					return ocommon.Point{}, nil, false, err
 				}
-				ls.storePeerForkPathPrefix(key, tip, block, pathReversed)
+				ls.storePeerForkPathPrefix(key, block, pathReversed)
 				return point, pathReversed, true, nil
 			}
 		} else if !errors.Is(err, models.ErrBlockNotFound) {
@@ -442,13 +474,20 @@ func (ls *LedgerState) peerHeaderForkPath(
 	}
 }
 
-func (ls *LedgerState) storePeerForkPathPrefix(key string, tip ocommon.Point, ancestor models.Block, headers []gledger.BlockHeader) {
+func (ls *LedgerState) storePeerForkPathPrefix(
+	key string,
+	ancestor models.Block,
+	headers []gledger.BlockHeader,
+) {
 	ls.forkHeaderNonceCacheMutex.Lock()
 	defer ls.forkHeaderNonceCacheMutex.Unlock()
 	if ls.forkHeaderPathCache == nil {
 		ls.forkHeaderPathCache = make(map[string]peerForkPathPrefix)
 	}
-	ls.forkHeaderPathCache[key] = peerForkPathPrefix{tip: tip, ancestor: ancestor, headers: headers}
+	ls.forkHeaderPathCache[key] = peerForkPathPrefix{
+		ancestor: ancestor,
+		headers:  headers,
+	}
 }
 
 func (ls *LedgerState) validatePeerHeaderPath(

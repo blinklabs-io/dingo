@@ -5881,22 +5881,27 @@ it. Dingo implements this as a **corroboration gate**
   checks for every folded header. Hash links, slots, block numbers, and era
   order are validated across the reconstructed path before it can affect
   selection. The verifier receives the ChainSync connection identity so
-  ancestry from one peer cannot be used for another peer's header. A per-connection
-  path cache reuses a resolved ancestor only while the applied tip is unchanged
-  and the next header directly extends the cached path; disconnects discard it.
+  ancestry from one peer cannot be used for another peer's header. A per-
+  connection path cache reuses a resolved ancestor while that intersection
+  remains on the applied chain and the next header directly extends the cached
+  path, even as the applied tip advances; peer rollbacks and disconnects clear
+  it.
   Verification is skipped only for a slot an imported Mithril snapshot
   already covers, the same exemption the ledger's own header-queue path
   applies; a result showing local state has not caught up to
   the header's slot (`IsHeaderVerificationDeferred`) still leaves the header
   eligible — both preserve legitimate catch-up behavior. Missing or unsafe
-  fork ancestry excludes the header from observation and schedules
-  re-intersection without recycling the peer. Headers past the forecast
+  fork ancestry excludes the header from observation without recycling the
+  peer or scheduling re-intersection; the retained header is not automatically
+  re-delivered. Headers past the forecast
   horizon are likewise excluded from observation until admission can forecast
   their slots. Bounded-history exhaustion defers verification so later retries
   can resolve the ancestry as the applied tip advances. A multi-epoch fork that
-  intersects at the applied tip uses the normal local-chain verifier; other
-  multi-epoch forks remain withheld because their intermediate epoch nonce
-  cannot be reconstructed from the retained candidate path.
+  intersects at the applied tip uses the normal local-chain verifier. If the
+  applied tip advances to the candidate header's parent during lookup, the
+  header also uses the local-chain verifier; other multi-epoch forks remain
+  withheld because their intermediate epoch nonce cannot be reconstructed
+  from the retained candidate path.
   A header whose
   point (slot and hash) is on the chain (`Chain.HoldsPoint`) at or below the
   ledger tip returns success without re-verification: it was fully verified
