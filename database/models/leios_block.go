@@ -100,8 +100,18 @@ func hasDijkstraLeiosShape(raw []byte) bool {
 // components.
 func decodeLeiosExtendedConwayBlock(raw []byte) (*conway.ConwayBlock, error) {
 	var components []cbor.RawMessage
-	if _, err := cbor.Decode(raw, &components); err != nil {
+	consumed, err := cbor.Decode(raw, &components)
+	if err != nil {
 		return nil, fmt.Errorf("decode Conway block components: %w", err)
+	}
+	// block.SetCbor(raw) below stores the original input, so bytes past the
+	// first CBOR item would be persisted and re-served as part of the block.
+	if consumed != len(raw) {
+		return nil, fmt.Errorf(
+			"trailing data after Conway block: %d of %d bytes consumed",
+			consumed,
+			len(raw),
+		)
 	}
 	if len(components) != conwayBlockComponentCount {
 		return nil, fmt.Errorf(
