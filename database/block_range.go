@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"slices"
 	"strings"
 
@@ -118,5 +119,46 @@ func ForEachBlockInRangeDB(
 	txn := db.Transaction(ctx, false)
 	return txn.Do(func(txn *Txn) error {
 		return ForEachBlockInRange(txn, startSlot, endSlot, fn)
+	})
+}
+
+// ForEachCanonicalBlockByIndexRangeDB iterates the primary-chain block index
+// over [startIndex, endIndex), skipping sparse imported index IDs. Unlike the
+// blob-key iterator, this excludes abandoned fork blobs.
+func ForEachCanonicalBlockByIndexRangeDB(
+	ctx context.Context,
+	db *Database,
+	startIndex, endIndex uint64,
+	fn func(block models.Block) error,
+) error {
+	if fn == nil {
+		return errors.New("ForEachCanonicalBlockByIndexRangeDB: callback fn must not be nil")
+	}
+	if startIndex >= endIndex {
+		return nil
+	}
+	txn := db.Transaction(ctx, false)
+	return txn.Do(func(txn *Txn) error {
+		index := startIndex
+		for index < endIndex {
+			block, err := db.BlockAtOrAfterIndex(index, txn)
+			if errors.Is(err, models.ErrBlockNotFound) {
+				return nil
+			}
+			if err != nil {
+				return fmt.Errorf("resolve canonical block index >= %d: %w", index, err)
+			}
+			if block.ID >= endIndex {
+				return nil
+			}
+			if err := fn(block); err != nil {
+				return fmt.Errorf("processing canonical block index=%d: %w", block.ID, err)
+			}
+			if block.ID == math.MaxUint64 {
+				return nil
+			}
+			index = block.ID + 1
+		}
+		return nil
 	})
 }

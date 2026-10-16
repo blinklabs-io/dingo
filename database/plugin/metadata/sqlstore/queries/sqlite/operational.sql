@@ -1335,7 +1335,7 @@ DELETE FROM transaction_metadata_label WHERE slot > ?;
 -- name: CountTransactionsByPaymentCred :one
 SELECT COUNT(DISTINCT transaction_id)
 FROM address_transaction
-WHERE payment_key = ?;
+WHERE payment_key = ? AND payment_script = ?;
 
 -- name: CountTransactionsByMetadataLabel :one
 SELECT COUNT(*) FROM transaction_metadata_label WHERE label = ?;

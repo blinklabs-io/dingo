@@ -285,6 +285,45 @@ VALUES (?, 0, 400)`,
 	}
 }
 
+func TestAddressTransactionCredentialKindBackfillCapturesTransactionIDs(t *testing.T) {
+	db, runTo := baselineBackfillDB(t)
+	registry, err := migrations.SQLiteRegistry()
+	require.NoError(t, err)
+	runTo(registry[:45])
+	ctx := context.Background()
+	for i := 1; i <= 2; i++ {
+		result, err := db.ExecContext(ctx, `
+INSERT INTO "transaction" (hash, block_hash, slot, block_index, type, valid)
+VALUES (?, ?, ?, ?, 0, 1)`, []byte{byte(i)}, []byte{0xaa}, i, i-1)
+		require.NoError(t, err)
+		transactionID, err := result.LastInsertId()
+		require.NoError(t, err)
+		_, err = db.ExecContext(ctx, `
+INSERT INTO address_transaction (payment_key, transaction_id, slot, tx_index)
+VALUES (?, ?, ?, ?)`, []byte{byte(i)}, transactionID, i, i-1)
+		require.NoError(t, err)
+		if i == 1 {
+			_, err = db.ExecContext(ctx, `
+INSERT INTO address_transaction (payment_key, transaction_id, slot, tx_index)
+VALUES (?, ?, ?, ?)`, []byte{0x11}, transactionID, i, i-1)
+			require.NoError(t, err)
+		}
+	}
+	runTo(registry)
+	rows, err := db.QueryContext(ctx, `
+SELECT transaction_id FROM address_transaction_rebuild_source ORDER BY transaction_id`)
+	require.NoError(t, err)
+	defer rows.Close()
+	var got []int64
+	for rows.Next() {
+		var id int64
+		require.NoError(t, rows.Scan(&id))
+		got = append(got, id)
+	}
+	require.NoError(t, rows.Err())
+	require.Equal(t, []int64{1, 2}, got)
+}
+
 func alonzoPParamsUnitBackfillDB(
 	t *testing.T,
 ) (*sql.DB, func([]migrations.Migration)) {
@@ -296,7 +335,7 @@ func alonzoPParamsUnitBackfillDB(
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
 	registry, err := migrations.SQLiteRegistry()
 	require.NoError(t, err)
-	require.Len(t, registry, 44)
+	require.Len(t, registry, 46)
 
 	runTo := func(versions []migrations.Migration) {
 		runner := migrations.Runner{
@@ -424,7 +463,7 @@ func depositHeldBackfillDB(
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
 	registry, err := migrations.SQLiteRegistry()
 	require.NoError(t, err)
-	require.Len(t, registry, 44)
+	require.Len(t, registry, 46)
 
 	runTo := func(versions []migrations.Migration) {
 		runner := migrations.Runner{

@@ -747,6 +747,7 @@ func TestPruneAccountCoverageBoundsCheckpointRows(t *testing.T) {
 		0,
 		time.Time{},
 		false,
+		false,
 	))
 }
 

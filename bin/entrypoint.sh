@@ -28,6 +28,7 @@
 #   CARDANO_DATABASE_PATH - Database storage location (default: /data/db)
 #   DINGO_SOCKET_PATH     - Unix socket path for NtC (default: /ipc/dingo.socket)
 #   DINGO_DEBUG           - Set to any value to enable debug logging and set -x
+#                           (tracing stops before the dingo command line is built)
 #   DINGO_LOG_FILE        - Optional file receiving dingo stdout/stderr
 #   RESTORE_SNAPSHOT      - Set to any value to bootstrap from Mithril snapshot on first run
 
@@ -64,6 +65,149 @@ export CARDANO_SOCKET_PATH="${DINGO_SOCKET_PATH}"
 log()  { echo "[entrypoint] $*"; }
 warn() { echo "[entrypoint] WARNING: $*" >&2; }
 die()  { echo "[entrypoint] ERROR: $*" >&2; exit 1; }
+
+# Secret-bearing flags and query names are matched by their final word, so
+# --koios-parity-api-key and api_key are redacted but
+# --token-registry-interval and file-path names are not.
+SECRET_NAME_PATTERN='^.*(tokens?|secrets?|passwords?|passwd|passphrase|pwd|credentials?|bearer|sas|signatures?|api([-_.+]|[[:space:]])?key|access([-_.+]|[[:space:]])?key(id)?|private([-_.+]|[[:space:]])?key|shared([-_.+]|[[:space:]])?key|signing([-_.+]|[[:space:]])?key)$'
+URL_USERINFO_PATTERN='^([A-Za-z][A-Za-z0-9+.-]*://)[^/?#@[:space:]]+@(.*)$'
+AUTH_VALUE_PATTERN='^(.*(authorization|bearer)[:= ]+)(.*)$'
+
+# decode_query_name decodes the escapes that can hide separators in a query
+# parameter name. Malformed names fail closed in is_secret_name.
+decode_query_name() {
+  local encoded="$1" decoded="" byte hex i=0
+  while (( i < ${#encoded} )); do
+    byte="${encoded:i:1}"
+    if [[ "${byte}" == "+" ]]; then
+      decoded+=" "
+      i=$((i + 1))
+    elif [[ "${byte}" == "%" ]]; then
+      if (( i + 2 >= ${#encoded} )); then
+        return 1
+      fi
+      hex="${encoded:i+1:2}"
+      if [[ ! "${hex}" =~ ^[[:xdigit:]]{2}$ ]] || [[ "${hex}" == "00" ]]; then
+        return 1
+      fi
+      printf -v byte '%b' "\\x${hex}"
+      decoded+="${byte}"
+      i=$((i + 3))
+    else
+      decoded+="${byte}"
+      i=$((i + 1))
+    fi
+  done
+  printf '%s' "${decoded}"
+}
+
+is_secret_name() {
+  local decoded
+  if ! decoded="$(decode_query_name "$1")"; then
+    return 0
+  fi
+  [[ "${decoded}" =~ ${SECRET_NAME_PATTERN} ]]
+}
+
+is_secret_flag() {
+  if [[ "$1" != -* ]]; then
+    return 1
+  fi
+  local name="${1#-}"
+  name="${name#-}"
+  is_secret_name "${name}"
+}
+
+# redact_url_query masks credential parameters while retaining endpoint and
+# non-secret query values that are useful in startup diagnostics.
+redact_url_query() {
+  local value="$1" head tail query fragment="" rendered pair separator name
+  if [[ "${value}" != *\?* ]]; then
+    printf '%s' "${value}"
+    return
+  fi
+  head="${value%%\?*}"
+  tail="${value#*\?}"
+  if [[ "${tail}" == *#* ]]; then
+    query="${tail%%#*}"
+    fragment="#${tail#*#}"
+  else
+    query="${tail}"
+  fi
+  rendered="${head}?"
+  while true; do
+    if [[ "${query}" =~ ^([^\&\;]*)([\&\;])(.*)$ ]]; then
+      pair="${BASH_REMATCH[1]}"
+      separator="${BASH_REMATCH[2]}"
+      query="${BASH_REMATCH[3]}"
+    else
+      pair="${query}"
+      separator=""
+      query=""
+    fi
+    if [[ "${pair}" == *=* ]]; then
+      name="${pair%%=*}"
+      if is_secret_name "${name}"; then
+        pair="${name}=<redacted>"
+      fi
+    fi
+    rendered+="${pair}${separator}"
+    if [[ -z "${separator}" ]]; then
+      break
+    fi
+  done
+  printf '%s' "${rendered}${fragment}"
+}
+
+# redact_value masks credentials embedded in a free-form value: URL userinfo
+# (scheme://user:pass@host), query parameters, and
+# "Authorization:"/"Bearer" header values.
+redact_value() {
+  local value="$1"
+  if [[ "${value}" =~ ${URL_USERINFO_PATTERN} ]]; then
+    value="${BASH_REMATCH[1]}<redacted>@${BASH_REMATCH[2]}"
+  fi
+  value="$(redact_url_query "${value}")"
+  if [[ "${value}" =~ ${AUTH_VALUE_PATTERN} ]]; then
+    value="${BASH_REMATCH[1]}<redacted>"
+  fi
+  printf '%s' "${value}"
+}
+
+# redact_args prints its arguments space-separated with the values of
+# secret-bearing flags replaced by "<redacted>". Both "--flag value" and
+# "--flag=value" forms are handled, and credentials embedded in any other
+# argument are masked.
+redact_args() {
+  local out=() arg name redact_next="false"
+  shopt -s nocasematch
+  for arg in "$@"; do
+    if [[ "${redact_next}" == "true" ]]; then
+      # A secret flag followed by another secret flag has no value of its own;
+      # keep the pending redaction for the next flag's value.
+      if [[ "${arg}" != *=* ]] && is_secret_flag "${arg}"; then
+        out+=("${arg}")
+      else
+        out+=("<redacted>")
+        redact_next="false"
+      fi
+    elif [[ "${arg}" == -*=* ]]; then
+      name="${arg%%=*}"
+      if is_secret_flag "${name}"; then
+        out+=("${name}=<redacted>")
+      else
+        out+=("${name}=$(redact_value "${arg#*=}")")
+      fi
+    elif is_secret_flag "${arg}"; then
+      out+=("${arg}")
+      redact_next="true"
+    else
+      out+=("$(redact_value "${arg}")")
+    fi
+  done
+  shopt -u nocasematch
+  echo "${out[*]}"
+}
 
 # --------------------------------------------------------------------------- #
 # Managed child and signal handling
@@ -311,6 +455,11 @@ trap 'forward_signal SIGINT 130' SIGINT
 # Run Mithril bootstrap if applicable
 bootstrap_if_needed
 
+# Command-line arguments may carry secrets, and xtrace would print them while
+# they are expanded below and at launch. Stop tracing here; the bootstrap and
+# setup steps above have already been traced.
+{ set +x; } 2>/dev/null
+
 # Build the dingo command arguments
 DINGO_ARGS=()
 
@@ -326,7 +475,7 @@ else
   DINGO_ARGS+=("$@")
 fi
 
-log "Starting dingo ${DINGO_ARGS[*]}"
+log "Starting dingo $(redact_args "${DINGO_ARGS[@]}")"
 
 # Persist structured output for test harnesses when requested, while keeping
 # stdout as the default for normal deployments.

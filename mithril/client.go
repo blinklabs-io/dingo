@@ -1210,7 +1210,7 @@ func (c *Client) doGet(
 		return nil, redactLocationError(fmt.Errorf(
 			"unexpected status %d: %s",
 			resp.StatusCode,
-			string(bodyBytes),
+			EscapeText(string(bodyBytes)),
 		), reqURL)
 	}
 

@@ -125,6 +125,20 @@ func newLiveLifecycleTestNodeWithStorageMode(
 	storageMode StorageMode,
 ) (*Node, []ocommon.Point) {
 	t.Helper()
+	return newLiveLifecycleTestNodeWithStorageModeAtBlock(
+		t, numBlocks, cardanoNodeCfgOverride, workerPoolCfg, storageMode, 1,
+	)
+}
+
+func newLiveLifecycleTestNodeWithStorageModeAtBlock(
+	t *testing.T,
+	numBlocks int,
+	cardanoNodeCfgOverride *cardano.CardanoNodeConfig,
+	workerPoolCfg ledger.DatabaseWorkerPoolConfig,
+	storageMode StorageMode,
+	startBlockNumber uint64,
+) (*Node, []ocommon.Point) {
+	t.Helper()
 
 	tmpDir := t.TempDir()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -163,10 +177,12 @@ func newLiveLifecycleTestNodeWithStorageMode(
 		cm.SetLedger(nodeTestSecurityParamLedger{securityParam: 432}),
 	)
 
-	points := loadLiveLifecycleTestBlocks(t, db, cm.PrimaryChain(), numBlocks)
+	points := loadLiveLifecycleTestBlocksAtBlock(
+		t, db, cm.PrimaryChain(), numBlocks, startBlockNumber,
+	)
 	require.NoError(t, db.SetTip(ochainsync.Tip{
 		Point:       points[len(points)-1],
-		BlockNumber: uint64(len(points)),
+		BlockNumber: startBlockNumber + uint64(len(points)-1),
 	}, nil))
 
 	cardanoNodeCfg := cardanoNodeCfgOverride
@@ -312,7 +328,20 @@ func loadLiveLifecycleTestBlocks(
 	numBlocks int,
 ) []ocommon.Point {
 	t.Helper()
-	blocks, err := testfixtures.GenerateBabbageChain(numBlocks)
+	return loadLiveLifecycleTestBlocksAtBlock(t, db, c, numBlocks, 1)
+}
+
+func loadLiveLifecycleTestBlocksAtBlock(
+	t *testing.T,
+	db *database.Database,
+	c *chain.Chain,
+	numBlocks int,
+	startBlockNumber uint64,
+) []ocommon.Point {
+	t.Helper()
+	blocks, err := testfixtures.GenerateBabbageChainAt(
+		startBlockNumber, 2, numBlocks,
+	)
 	require.NoError(t, err)
 
 	var points []ocommon.Point

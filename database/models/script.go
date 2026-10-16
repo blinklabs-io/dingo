@@ -24,3 +24,14 @@ type Script struct {
 	CreatedSlot uint64
 	Type        uint8
 }
+
+// ScriptRedeemerRef locates one redeemer that executed a script: the
+// transaction, the redeemer pointer (tag and index) within it, and the
+// transaction's chain position.
+type ScriptRedeemerRef struct {
+	TxHash  []byte
+	Slot    uint64
+	TxIndex uint32
+	Index   uint32
+	Tag     uint8
+}

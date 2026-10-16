@@ -2949,6 +2949,121 @@ func TestPipelineStagesMatch(t *testing.T) {
 	}
 }
 
+func TestCBORConformanceReportRunsOnlyForLinuxRelease(t *testing.T) {
+	root := repoRoot(t)
+	const datasetRevision = "6cd8c928665bbafe90e02066ebb4620e38f051de"
+
+	prJobs := pipelineJobs(t, root, prPipeline)
+	for jobName, rawJob := range prJobs {
+		job, ok := rawJob.(map[string]any)
+		if !ok {
+			continue
+		}
+		steps, _ := job["steps"].([]any)
+		for _, rawStep := range steps {
+			step, ok := rawStep.(map[string]any)
+			if !ok {
+				continue
+			}
+			run, _ := step["run"].(string)
+			if strings.Contains(run, "cborconformance") ||
+				strings.Contains(run, "generate-conformance-reports") ||
+				step["name"] == "Checkout CBOR conformance corpus" {
+				t.Errorf("PR job %s runs report generation or checks out its corpus", jobName)
+			}
+		}
+	}
+
+	jobs := pipelineJobs(t, root, publishPipeline)
+	needsJob := func(job map[string]any, name string) bool {
+		needs, _ := job["needs"].([]any)
+		for _, need := range needs {
+			if need == name {
+				return true
+			}
+		}
+		return false
+	}
+	build, ok := jobs["build-linux"].(map[string]any)
+	if !ok {
+		t.Fatal("publish workflow has no Linux build job")
+	}
+	steps, ok := build["steps"].([]any)
+	if !ok {
+		t.Fatal("publish workflow Linux build job has no steps")
+	}
+	if build["runs-on"] != "ubuntu-latest" {
+		t.Error("publish report generation must run on Linux")
+	}
+	if !needsJob(build, "go-test-linux") {
+		t.Error("publish Linux report job does not wait for Linux tests")
+	}
+	if !needsJob(build, "create-draft-release") {
+		t.Error("publish Linux report job does not wait for all release tests")
+	}
+	jobEnv, _ := build["env"].(map[string]any)
+	if jobEnv["CBOR_DATASET_REVISION"] != datasetRevision {
+		t.Errorf("Linux release job CBOR dataset revision = %v, want %q", jobEnv["CBOR_DATASET_REVISION"], datasetRevision)
+	}
+	corpusCheckout, reportGeneration, releaseUpload := 0, 0, 0
+	for _, rawStep := range steps {
+		step, ok := rawStep.(map[string]any)
+		if !ok {
+			continue
+		}
+		with, _ := step["with"].(map[string]any)
+		env, _ := step["env"].(map[string]any)
+		switch step["name"] {
+		case "Checkout CBOR conformance corpus":
+			corpusCheckout++
+			if step["if"] != "github.ref_type == 'tag'" ||
+				step["uses"] != "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1" ||
+				with["repository"] != "r2rationality/cardano-cbor-dataset" ||
+				with["ref"] != "${{ env.CBOR_DATASET_REVISION }}" {
+				t.Error("Linux release checks out the wrong CBOR corpus")
+			}
+		case "Checkout UPLC conformance corpus":
+			if step["if"] != "github.ref_type == 'tag'" ||
+				with["repository"] != "pragma-org/amaru" ||
+				with["ref"] != "ceda0c57a10d95b30a9338454e209582d62318e8" {
+				t.Error("Linux release checks out the wrong UPLC corpus")
+			}
+		case "Checkout ledger-rules fixtures":
+			if step["if"] != "github.ref_type == 'tag'" ||
+				with["repository"] != "pragma-org/node-diversity-conformance" ||
+				with["ref"] != "fc4713f2e8f10925becc4a17a1567a559cf27918" {
+				t.Error("Linux release does not use the pinned ledger-rules fixtures")
+			}
+		case "Generate conformance reports":
+			reportGeneration++
+			if step["if"] != "github.ref_type == 'tag'" ||
+				step["run"] != ".github/scripts/generate-conformance-reports.sh" ||
+				env["CBOR_DATASET_DIR"] != ".conformance/cardano-cbor-dataset" ||
+				env["TURBO_URL"] != "https://pub-2239d82d9a074482b2eb2c886191cb4e.r2.dev/turbo.tar.xz" ||
+				env["TURBO_SHA256"] != "fffe2e959fb8bdb47ee4834008dcceb89fcde53afb659a454beca26cf95507cc" {
+				t.Error("Linux release does not generate reports from the pinned corpora")
+			}
+		case "Upload release assets":
+			releaseUpload++
+			if env["REQUIRE_CONFORMANCE_REPORT"] != "true" {
+				t.Error("Linux release upload does not require every conformance report")
+			}
+		case "Download CBOR conformance report":
+			t.Error("Linux release downloads a report generated during tests")
+		}
+	}
+	if corpusCheckout != 1 || reportGeneration != 1 || releaseUpload != 1 {
+		t.Errorf("Linux release has corpus checkout=%d report generation=%d report upload=%d; want one of each", corpusCheckout, reportGeneration, releaseUpload)
+	}
+
+	reportScript := readRepoFile(t, root, ".github/scripts/generate-conformance-reports.sh")
+	if !strings.Contains(reportScript, "go run ./internal/cborconformance/cmd") ||
+		!strings.Contains(reportScript, `-corpus-revision "$dataset_revision"`) ||
+		!strings.Contains(reportScript, `for report in "${DIST_DIR}"/dingo-*.json`) {
+		t.Error("release report script does not generate and compress the revision-bound CBOR report")
+	}
+}
+
 func TestPullRequestChangeGateRunsDocsParity(t *testing.T) {
 	root := repoRoot(t)
 	jobs := pipelineJobs(t, root, prPipeline)
@@ -3728,23 +3843,27 @@ func jobSteps(t *testing.T, workflow, name string, job any) []map[string]any {
 	return steps
 }
 
-var (
-	fullSHAActionRe = regexp.MustCompile(`@[0-9a-f]{40}$`)
-	buildTagsRe     = regexp.MustCompile(`(?m)^BUILD_TAGS \?= (\S+)$`)
-)
-
-// TestGovulncheckRunsThroughPinnedAction checks that CI reaches govulncheck
-// through a commit-pinned action instead of fetching and executing an
-// unpinned module with `go run ...@latest`.
-func TestGovulncheckRunsThroughPinnedAction(t *testing.T) {
+// TestGovulncheckRunsThroughPinnedModule checks that CI and local validation
+// use the same checksum-verified scanner module and never execute a floating
+// tool release.
+func TestGovulncheckRunsThroughPinnedModule(t *testing.T) {
 	t.Parallel()
 	root := repoRoot(t)
-
-	tags := buildTagsRe.FindStringSubmatch(readRepoFile(t, root, "Makefile"))
-	if tags == nil {
-		t.Fatal("Makefile does not set BUILD_TAGS")
+	makefile := readRepoFile(t, root, "Makefile")
+	for _, want := range []string{
+		"GOVULNCHECK_VERSION=v1.8.0",
+		"GOVULNCHECK_SUM=h1:clG4qBU6zH5VKjti8n5j8BBuYzoSha392xXMkXS351U=",
+		"GOVULNCHECK_MODULE=golang.org/x/vuln",
+		"$(call VERIFY_GO_MODULE,$(GOVULNCHECK_MODULE),$(GOVULNCHECK_VERSION),$(GOVULNCHECK_SUM))",
+		"GOTOOLCHAIN=auto $(GOVULNCHECK) $(GO_TAG_FLAGS) ./...",
+	} {
+		if !strings.Contains(makefile, want) {
+			t.Errorf("Makefile does not preserve pinned govulncheck input %q", want)
+		}
 	}
-	wantGoflags := "-tags=" + tags[1]
+	if strings.Contains(makefile, "golang.org/x/vuln/cmd/govulncheck@latest") {
+		t.Error("Makefile executes a floating govulncheck release")
+	}
 
 	for _, workflow := range []string{prPipeline, publishPipeline} {
 		job, ok := pipelineJobs(t, root, workflow)["govulncheck"]
@@ -3753,59 +3872,12 @@ func TestGovulncheckRunsThroughPinnedAction(t *testing.T) {
 		}
 		found := false
 		for _, step := range jobSteps(t, workflow, "govulncheck", job) {
-			if run, _ := step["run"].(string); strings.Contains(run, "@latest") ||
-				strings.Contains(run, "make govulncheck") {
-				t.Errorf(
-					"%s: govulncheck step runs %q instead of the pinned action",
-					workflow,
-					run,
-				)
-			}
-			uses, _ := step["uses"].(string)
-			if !strings.HasPrefix(uses, "golang/govulncheck-action@") {
-				continue
-			}
-			found = true
-			if !fullSHAActionRe.MatchString(uses) {
-				t.Errorf("%s: %s is not pinned to a full commit SHA", workflow, uses)
-			}
-			// The action has no build-tags input, so GOFLAGS is the only
-			// route for the tags `make govulncheck` scans with; without it
-			// CI silently skips every tag-gated package.
-			env, _ := step["env"].(map[string]any)
-			if got := env["GOFLAGS"]; got != wantGoflags {
-				t.Errorf(
-					"%s: govulncheck GOFLAGS is %v, want %q to match make govulncheck",
-					workflow,
-					got,
-					wantGoflags,
-				)
-			}
-			if got := env["GOTOOLCHAIN"]; got != "auto" {
-				t.Errorf(
-					"%s: govulncheck GOTOOLCHAIN is %v, want auto",
-					workflow,
-					got,
-				)
-			}
-			with, _ := step["with"].(map[string]any)
-			for input, want := range map[string]string{
-				"go-package": "./...",
-				"work-dir":   ".",
-			} {
-				if got, set := with[input]; set && got != want {
-					t.Errorf(
-						"%s: govulncheck %s is %v, make govulncheck scans %q",
-						workflow,
-						input,
-						got,
-						want,
-					)
-				}
+			if run, _ := step["run"].(string); run == "make govulncheck" {
+				found = true
 			}
 		}
 		if !found {
-			t.Errorf("%s: govulncheck job does not use golang/govulncheck-action", workflow)
+			t.Errorf("%s: govulncheck job does not run the pinned Makefile target", workflow)
 		}
 	}
 }
@@ -3958,6 +4030,7 @@ func TestLintGatesNilawayAndModernize(t *testing.T) {
 		"nilaway":   "go.uber.org/nilaway/cmd/nilaway@",
 		"modernize": "golang.org/x/tools/go/analysis/passes/modernize/cmd/modernize@",
 	}
+
 	for _, workflow := range lintWorkflows {
 		job, ok := pipelineJobs(t, root, workflow)["lint"]
 		if !ok {
@@ -3972,6 +4045,7 @@ func TestLintGatesNilawayAndModernize(t *testing.T) {
 		for tool, pkg := range installs {
 			if !strings.Contains(all, "make "+tool) {
 				t.Errorf("%s lint job never runs `make %s`", workflow, tool)
+				continue
 			}
 			_, version, ok := strings.Cut(all, pkg)
 			if !ok {
@@ -3979,15 +4053,8 @@ func TestLintGatesNilawayAndModernize(t *testing.T) {
 				continue
 			}
 			version, _, _ = strings.Cut(version, "\n")
-			// Scanners float like golangci-lint, so a new release's findings
-			// are fixed when it lands rather than parked behind a stale pin.
 			if version != "latest" {
-				t.Errorf(
-					"%s installs %s at %q, want latest",
-					workflow,
-					tool,
-					version,
-				)
+				t.Errorf("%s installs %s at %q, want latest", workflow, tool, version)
 			}
 		}
 	}
