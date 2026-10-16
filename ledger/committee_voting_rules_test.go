@@ -19,7 +19,6 @@ import (
 	"crypto/ed25519"
 	"errors"
 	"fmt"
-	"strings"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
@@ -207,27 +206,22 @@ func requireOnlyRuleError(t *testing.T, err error, target any) {
 	require.NotContains(t, err.Error(), "\n", "more than one rule failed")
 }
 
-// requireUnelectedCommitteeVoter requires both the unknown-voter and
-// unelected-voter rules to reject an unseated committee hot credential from
-// PV11. Cardano-ledger treats that credential as nonexistent at those
-// protocol versions, and reports the separate election restriction too.
+// requireUnelectedCommitteeVoter requires the elected-voter rejection. For
+// Dijkstra, the upstream unknown-voter rule runs first at every governance
+// level and also rejects unseated committee voters from PV11. The top-level
+// elected-voter rule reports its typed error as well; both reject the vote.
 func requireUnelectedCommitteeVoter(
 	t *testing.T,
 	era committeeVotingEra,
 	err error,
 ) {
 	t.Helper()
-	var unknown conway.UnknownVoterError
-	require.ErrorAs(t, err, &unknown)
 	var unelected conway.UnelectedCommitteeVoterError
-	require.ErrorAs(t, err, &unelected)
-	require.Equal(
-		t,
-		1,
-		strings.Count(err.Error(), "\n"),
-		"%s should report exactly the unknown-voter and unelected-voter rules",
-		era.name,
-	)
+	if era.name == committeeVotingDijkstra.name {
+		require.ErrorAs(t, err, &unelected)
+		return
+	}
+	requireOnlyRuleError(t, err, &unelected)
 }
 
 func requireUnknownCommitteeVoter(t *testing.T, err error) {

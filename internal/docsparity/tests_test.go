@@ -3022,11 +3022,25 @@ func TestCBORConformanceReportRunsOnlyForLinuxRelease(t *testing.T) {
 				with["ref"] != "${{ env.CBOR_DATASET_REVISION }}" {
 				t.Error("Linux release checks out the wrong CBOR corpus")
 			}
+		case "Checkout UPLC conformance corpus":
+			if step["if"] != "github.ref_type == 'tag'" ||
+				with["repository"] != "pragma-org/amaru" ||
+				with["ref"] != "ceda0c57a10d95b30a9338454e209582d62318e8" {
+				t.Error("Linux release checks out the wrong UPLC corpus")
+			}
+		case "Checkout ledger-rules fixtures":
+			if step["if"] != "github.ref_type == 'tag'" ||
+				with["repository"] != "pragma-org/node-diversity-conformance" ||
+				with["ref"] != "fc4713f2e8f10925becc4a17a1567a559cf27918" {
+				t.Error("Linux release checks out the wrong ledger-rules fixtures")
+			}
 		case "Generate conformance reports":
 			reportGeneration++
 			if step["if"] != "github.ref_type == 'tag'" ||
 				step["run"] != ".github/scripts/generate-conformance-reports.sh" ||
-				env["CBOR_DATASET_DIR"] != ".conformance/cardano-cbor-dataset" {
+				env["CBOR_DATASET_DIR"] != ".conformance/cardano-cbor-dataset" ||
+				env["TURBO_URL"] != "https://pub-2239d82d9a074482b2eb2c886191cb4e.r2.dev/turbo.tar.xz" ||
+				env["TURBO_SHA256"] != "fffe2e959fb8bdb47ee4834008dcceb89fcde53afb659a454beca26cf95507cc" {
 				t.Error("Linux release does not generate reports from the pinned corpora")
 			}
 		case "Upload release assets":
