@@ -6381,7 +6381,6 @@ func TestCloseStopsDecodePipelineBeforeWaitingForBlockProcessing(t *testing.T) {
 		blockPipeline: pipeline.NewBlockPipeline(
 			pipeline.WithTrustedDecodeOnly(),
 			pipeline.WithDecodeWorkers(1),
-			pipeline.WithTrustedDecodeOnly(),
 		),
 	}
 	require.NoError(t, ls.blockPipeline.Start(t.Context()))

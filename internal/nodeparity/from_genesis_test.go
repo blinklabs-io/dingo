@@ -868,12 +868,10 @@ func (s *genesisFakeServer) findIntersect(
 	case s.sessionStarted <- struct{}{}:
 	default:
 	}
-	if len(points) > 0 {
-		for i, p := range s.chain.Points {
-			if p.Slot == points[0].Slot {
-				s.cursor = i + 1
-				return points[0], s.chain.Tips[i], nil
-			}
+	for i, p := range s.chain.Points {
+		if p.Slot == points[0].Slot {
+			s.cursor = i + 1
+			return points[0], s.chain.Tips[i], nil
 		}
 	}
 	s.cursor = 0

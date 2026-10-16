@@ -17232,13 +17232,16 @@ chain-rollback generation — so neither is touched by leaving apply
 where it is. Wiring apply into the pipeline would put both back in play.
 `drainBlockPipelineBeforeRollback` bounds `WaitForDrain` at
 `BlockPipelineRollbackDrainTimeout` (5s) and, on timeout, logs and proceeds
-with the rollback anyway. That is safe today precisely because a nil
-`ApplyFunc` means the barrier only covers decode and re-sequencing, while
-the real apply stays behind the reader goroutine's in-order
-`readChainResult` handshake, which the rollback path holds via
-`blockPipelineGatherMutex`. Header-crypto batch work is also joined by that
-reader before it can publish a result or exit. It does not mutate state and
-is not covered by the decoder's `WaitForDrain` barrier.
+with the rollback anyway. A nil `ApplyFunc` means this barrier covers only
+decode and re-sequencing. Real apply stays behind the reader goroutine's
+in-order `readChainResult` handshake. `blockPipelineGatherMutex` excludes
+new gather-and-submit work during chain truncation; it does not wait for a
+batch already in database apply. A rollback can therefore overlap that apply
+window, and `processChainIteratorRollback` uses its uncached stale-tip check
+to detect and repair a transient re-advance onto an abandoned block.
+Header-crypto batch work is joined before the reader can publish a result
+or exit. It does not mutate state and is not covered by the decoder's
+`WaitForDrain` barrier.
 With real apply wired in, the drain barrier would also cover database work,
 and expiring it would let a rollback run
 while blocks were still being applied to the

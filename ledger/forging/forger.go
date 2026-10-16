@@ -4457,7 +4457,7 @@ func buildLeiosEB(
 		size := uint32(len(tx.Cbor)) // #nosec G115
 		refs = append(refs, lcommon.LeiosTransactionReference{
 			TransactionHash: lcommon.Blake2b256Hash(tx.Cbor),
-			TransactionSize: uint32(size),
+			TransactionSize: size,
 		})
 		bodies = append(bodies, tx.Cbor)
 	}
