@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
-# Generate the ledger-rules, UPLC conformance and UPLC turbo reports for a
-# release tag, and compress them alongside the CBOR report.
+# Generate the CBOR, ledger-rules, UPLC conformance and UPLC turbo reports for
+# a release tag.
 #
 # A report is published even when it records failures: the generators exit
 # non-zero for those, so success is the report file existing rather than the
@@ -15,6 +15,8 @@
 #   DIST_DIR              optional, defaults to dist
 #   CONFORMANCE_DIR       optional, defaults to .conformance; holds the
 #                         amaru and node-diversity-conformance checkouts
+#   CBOR_DATASET_DIR      required, the checked out cardano-cbor-dataset
+#   CBOR_DATASET_REVISION required, the pinned dataset commit
 #   TURBO_URL             required, the turbo corpus archive
 #   TURBO_SHA256          required, digest of that archive
 #   TURBO_SAMPLES         optional, timed samples per program, defaults to 10
@@ -23,6 +25,8 @@
 set -euo pipefail
 
 : "${RELEASE_TAG:?RELEASE_TAG must be set}"
+: "${CBOR_DATASET_DIR:?CBOR_DATASET_DIR must be set}"
+: "${CBOR_DATASET_REVISION:?CBOR_DATASET_REVISION must be set}"
 : "${TURBO_URL:?TURBO_URL must be set}"
 : "${TURBO_SHA256:?TURBO_SHA256 must be set}"
 
@@ -55,6 +59,18 @@ run_generator() {
 
 mkdir -p "$DIST_DIR"
 
+dataset_revision="$(git -C "$CBOR_DATASET_DIR" rev-parse HEAD)"
+if [ "$dataset_revision" != "$CBOR_DATASET_REVISION" ]; then
+  echo "CBOR dataset checkout does not match the pinned revision" >&2
+  exit 1
+fi
+
+run_generator "${prefix}-cbor-conformance.json" \
+  go run ./internal/cborconformance/cmd \
+  -dataset "${CBOR_DATASET_DIR}/dataset/conway" \
+  -corpus-revision "$dataset_revision" \
+  -output "${prefix}-cbor-conformance.json"
+
 run_generator "${prefix}-ledger-rules.json" \
   go run ./internal/ledgerrulesconformance/cmd \
   -fixtures "${CONFORMANCE_DIR}/node-diversity-conformance/scenarios/ledger-rules/fixtures" \
@@ -82,7 +98,7 @@ run_generator "${prefix}-uplc-turbo.json" \
   -output "${prefix}-uplc-turbo.json"
 
 shopt -s nullglob
-for report in "${DIST_DIR}"/dingo-*-conformance.json "${DIST_DIR}"/dingo-*-ledger-rules.json "${DIST_DIR}"/dingo-*-uplc-turbo.json; do
+for report in "${DIST_DIR}"/dingo-*.json; do
   gzip -n -9 -f "$report"
 done
 shopt -u nullglob

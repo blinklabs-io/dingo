@@ -504,6 +504,8 @@ jobs:
       && (github.ref_type != 'tag' || needs.create-draft-release.result == 'success')
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    env:
+      CBOR_DATASET_REVISION: '6cd8c928665bbafe90e02066ebb4620e38f051de'
     permissions:
       attestations: write
       contents: write
@@ -536,20 +538,10 @@ jobs:
         if: github.ref_type == 'tag'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
         with:
-          repository: etorreborre/cardano-cbor-dataset
-          ref: 94260f96bc419bf66be0b5d1dd121695e889662e
+          repository: r2rationality/cardano-cbor-dataset
+          ref: ${{ env.CBOR_DATASET_REVISION }}
           path: .conformance/cardano-cbor-dataset
           persist-credentials: false
-      - name: Generate CBOR conformance report
-        if: github.ref_type == 'tag'
-        env:
-          RELEASE_TAG: ${{ github.ref_name }}
-        run: |
-          report_date="$(date -u +%Y%m%d)"
-          report_name="dingo-${RELEASE_TAG#v}-${report_date}-cbor-conformance.json"
-          go run ./internal/cborconformance/cmd \
-            -dataset .conformance/cardano-cbor-dataset/dataset/conway-123-100 \
-            -output "dist/${report_name}"
       - name: Checkout UPLC conformance corpus
         if: github.ref_type == 'tag'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
@@ -573,6 +565,7 @@ jobs:
         timeout-minutes: 30
         env:
           RELEASE_TAG: ${{ github.ref_name }}
+          CBOR_DATASET_DIR: .conformance/cardano-cbor-dataset
           TURBO_URL: https://pub-2239d82d9a074482b2eb2c886191cb4e.r2.dev/turbo.tar.xz
           TURBO_SHA256: fffe2e959fb8bdb47ee4834008dcceb89fcde53afb659a454beca26cf95507cc
         run: .github/scripts/generate-conformance-reports.sh
