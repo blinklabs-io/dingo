@@ -3864,11 +3864,12 @@ INSERT INTO "transaction" (
 		))
 		require.NoError(t, exec(`
 INSERT INTO address_transaction (
-    id, payment_key, staking_key, credential_tag, transaction_id, slot, tx_index
+    id, payment_key, payment_script, staking_key, credential_tag,
+    transaction_id, slot, tx_index
 ) VALUES
-    (1, ?, ?, 0, 1, 10, 0),
-    (2, ?, ?, 0, 2, 11, 1),
-    (3, ?, ?, 1, 3, 12, 0)`,
+    (1, ?, FALSE, ?, 0, 1, 10, 0),
+    (2, ?, FALSE, ?, 0, 2, 11, 1),
+    (3, ?, FALSE, ?, 1, 3, 12, 0)`,
 			[]byte("pay-a"), []byte("stake-a"),
 			[]byte("pay-a"), []byte("stake-a"),
 			[]byte("pay-b"), []byte("stake-a"),

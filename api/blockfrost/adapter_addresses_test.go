@@ -76,6 +76,7 @@ func seedAddressOutput(
 			TxId:          txHash,
 			OutputIdx:     0,
 			PaymentKey:    addr.PaymentKeyHash().Bytes(),
+			PaymentScript: models.PaymentScriptFromAddress(addr),
 			StakingKey:    stakingKeyOf(addr),
 			CredentialTag: 0,
 			AddedSlot:     slot,
@@ -114,9 +115,11 @@ func linkAddressTransaction(
 	t.Helper()
 	_, err := raw.Exec(`
 INSERT INTO address_transaction (
-    payment_key, staking_key, credential_tag, transaction_id, slot, tx_index
-) VALUES (?, ?, 0, ?, ?, 0)`,
-		addr.PaymentKeyHash().Bytes(), stakingKeyOf(addr), transactionID, slot,
+    payment_key, payment_script, staking_key, credential_tag,
+    transaction_id, slot, tx_index
+) VALUES (?, ?, ?, 0, ?, ?, 0)`,
+		addr.PaymentKeyHash().Bytes(), models.PaymentScriptFromAddress(addr),
+		stakingKeyOf(addr), transactionID, slot,
 	)
 	require.NoError(t, err)
 }
@@ -365,11 +368,6 @@ func TestNodeAdapterAddressTotalSeparatesKeyAndScriptCredentials(
 		2_000_000, nil, nil)
 	scriptTx := seedAddressOutput(t, raw, db, scriptAddr, fill32(0x32), 11,
 		9_000_000, nil, nil)
-	_, err = raw.Exec(
-		`UPDATE utxo SET payment_script = 1 WHERE tx_id = ?`,
-		fill32(0x32),
-	)
-	require.NoError(t, err)
 	linkAddressTransaction(t, raw, keyAddr, keyTx.ID, 10)
 	linkAddressTransaction(t, raw, scriptAddr, scriptTx.ID, 11)
 

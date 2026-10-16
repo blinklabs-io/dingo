@@ -265,9 +265,10 @@ func (s *Store) markTransactionUtxoReferences(
 }
 
 type addressIndexKey struct {
-	payment string
-	tag     uint8
-	staking string
+	payment       string
+	paymentScript bool
+	tag           uint8
+	staking       string
 }
 
 const (
@@ -282,7 +283,7 @@ var cachedAddressInputQuerySizes = [...]int{1, 2, 4, 8, 16, 32}
 func addressTransactionInputQuery(size int) string {
 	placeholders := strings.TrimSuffix(strings.Repeat("?,", size), ",")
 	return `
-SELECT tx_id, output_idx, payment_key, credential_tag, staking_key
+SELECT tx_id, output_idx, payment_key, payment_script, credential_tag, staking_key
 FROM utxo WHERE tx_id IN (` + placeholders + `)`
 }
 
@@ -306,18 +307,19 @@ func (s *Store) indexTransactionAddresses(
 		}
 	}
 	addresses := make(map[addressIndexKey]struct{})
-	add := func(payment []byte, tag uint8, staking []byte) {
+	add := func(payment []byte, paymentScript bool, tag uint8, staking []byte) {
 		if len(payment) == 0 && len(staking) == 0 {
 			return
 		}
 		addresses[addressIndexKey{
-			payment: string(payment),
-			tag:     tag,
-			staking: string(staking),
+			payment:       string(payment),
+			paymentScript: paymentScript,
+			tag:           tag,
+			staking:       string(staking),
 		}] = struct{}{}
 	}
 	for _, output := range produced {
-		add(output.PaymentKey, output.CredentialTag, output.StakingKey)
+		add(output.PaymentKey, output.PaymentScript, output.CredentialTag, output.StakingKey)
 	}
 	allInputs := make(
 		[]lcommon.TransactionInput,
@@ -369,13 +371,14 @@ func (s *Store) indexTransactionAddresses(
 			}()
 			for inputRows.Next() {
 				var (
-					txID    []byte
-					output  uint32
-					payment []byte
-					staking []byte
-					tag     uint8
+					txID          []byte
+					output        uint32
+					payment       []byte
+					paymentScript bool
+					staking       []byte
+					tag           uint8
 				)
-				if err := inputRows.Scan(&txID, &output, &payment, &tag, &staking); err != nil {
+				if err := inputRows.Scan(&txID, &output, &payment, &paymentScript, &tag, &staking); err != nil {
 					return fmt.Errorf("scan input address for transaction %d: %w", transactionID, err)
 				}
 				outputs, ok := wanted[string(txID)]
@@ -385,7 +388,7 @@ func (s *Store) indexTransactionAddresses(
 				if _, ok := outputs[output]; !ok {
 					continue
 				}
-				add(payment, tag, staking)
+				add(payment, paymentScript, tag, staking)
 			}
 			if err := inputRows.Err(); err != nil {
 				return fmt.Errorf("iterate input addresses for transaction %d: %w", transactionID, err)
@@ -399,6 +402,7 @@ func (s *Store) indexTransactionAddresses(
 		rows.add(
 			addressTransactionShape,
 			[]byte(address.payment),
+			address.paymentScript,
 			[]byte(address.staking),
 			address.tag,
 			transactionID,

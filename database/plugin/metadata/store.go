@@ -3311,6 +3311,17 @@ type MetadataStore interface {
 	) ([]models.MidnightCommitteeCandidateRegistration, error)
 }
 
+// AddressTransactionIndexRebuilder upgrades the API-mode address index when
+// persisted rows predate payment-credential kind tracking. The callback must
+// reconstruct one transaction's complete address associations from retained
+// ledger data; an error leaves the index unavailable for retry on next start.
+type AddressTransactionIndexRebuilder interface {
+	RebuildAddressTransactionIndex(
+		context.Context,
+		func(context.Context, models.Transaction) ([]models.AddressTransaction, error),
+	) error
+}
+
 // BulkLoadOptimizer is an optional interface that metadata stores can
 // implement to provide optimized settings for bulk loading operations.
 // The load command checks for this interface and uses it when available.

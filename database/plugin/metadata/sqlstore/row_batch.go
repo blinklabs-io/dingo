@@ -69,7 +69,7 @@ var (
 	addressTransactionShape = rowShape{
 		table: "address_transaction",
 		columns: []string{
-			"payment_key", "staking_key", "credential_tag",
+			"payment_key", "payment_script", "staking_key", "credential_tag",
 			"transaction_id", "slot", "tx_index",
 		},
 	}
