@@ -26,7 +26,6 @@ import (
 	"strings"
 
 	"github.com/blinklabs-io/dingo/chain"
-	"github.com/blinklabs-io/dingo/consensus/leaderthreshold"
 	"github.com/blinklabs-io/dingo/consensus/praos"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
@@ -114,12 +113,6 @@ var (
 	// errHeaderVerificationDeferred instead.
 	errBlockPipelineEta0Unavailable = errors.New(
 		"block-processing pipeline: epoch nonce unavailable",
-	)
-	// errBlockPipelineAdmissionVerified is returned by the pipeline's nonce
-	// provider for a slot whose block passed full header verification at
-	// admission, so the validate stage skips the repeat VRF/KES work.
-	errBlockPipelineAdmissionVerified = errors.New(
-		"block-processing pipeline: header verified at admission",
 	)
 	// errHeaderStateLookupFailed marks a failure to read the local state a
 	// stateful header check needs. It says nothing about the header, so it
@@ -392,10 +385,14 @@ func verifyBlockHeaderHex(
 	//   parameters which are handled elsewhere
 	// - Stake pool validation requires pool registration lookups
 	//   which are handled elsewhere
+	// - Block-wide limits need protocol parameters, which this stateless
+	//   check is not given, and gouroboros fails closed when limits are
+	//   required without them; the ledger apply path checks them
 	config := lcommon.VerifyConfig{
 		SkipBodyHashValidation:    true,
 		SkipTransactionValidation: true,
 		SkipStakePoolValidation:   true,
+		SkipBlockLimitsValidation: true,
 	}
 
 	header, err := normalizeHeaderVrfFieldsFromBodyCbor(block.Header())
@@ -775,6 +772,7 @@ func (ls *LedgerState) verifyBlockHeaderStateWithCache(
 	); err != nil {
 		return err
 	}
+	//nolint:contextcheck // the overlay fallback forecasts parameters without a request context
 	if handled, err := ls.verifyGenesisDelegateHeader(
 		block,
 		allowStateDefer,
@@ -1639,11 +1637,10 @@ func (ls *LedgerState) verifyBlockLeaderEligibilityFromSnapshot(
 	}
 
 	// Use the genesis Rat directly to avoid a float64 precision roundtrip.
-	// A zero or negative coefficient computes a zero threshold, under which
-	// no VRF output is ever eligible.
+	// Invalid coefficients cannot produce a leader-eligibility decision.
 	activeSlotCoeffRat := ls.activeSlotCoeffRat()
 	if activeSlotCoeffRat == nil || activeSlotCoeffRat.Sign() <= 0 {
-		// The coefficient is a threshold input, so without it eligibility
+		// Without the coefficient eligibility
 		// cannot be evaluated at all. Unlike a missing snapshot this is a
 		// genesis/configuration fault that the apply cursor never
 		// resolves, so it is rejected outright rather than deferred.
@@ -1669,7 +1666,7 @@ func (ls *LedgerState) verifyBlockLeaderEligibilityFromSnapshot(
 	mode, modeErr := ls.ConsensusModeForEpoch(epochId)
 	if modeErr != nil {
 		// The mode selects both the leader-value derivation and the
-		// threshold, so without it eligibility cannot be evaluated. The era
+		// eligibility predicate, so without it eligibility cannot be evaluated. The era
 		// shape it is resolved from comes from the local node configuration,
 		// so an unresolvable mode is not the peer's fault: defer instead of
 		// recycling the connection that served the header.
@@ -1699,8 +1696,8 @@ func (ls *LedgerState) verifyBlockLeaderEligibilityFromSnapshot(
 		)
 	}
 
-	// Compute the Praos leadership threshold and compare.
-	threshold, err := leaderthreshold.Threshold(
+	// Prepare the finite E34 predicate for this stake distribution.
+	eligibility, err := consensus.NewLeaderEligibility(
 		poolStake,
 		totalStake,
 		activeSlotCoeffRat,
@@ -1709,33 +1706,21 @@ func (ls *LedgerState) verifyBlockLeaderEligibilityFromSnapshot(
 	if err != nil {
 		return fmt.Errorf(
 			"block header verification rejected at slot %d: "+
-				"compute leadership threshold: %w",
+				"prepare leader eligibility: %w",
 			block.SlotNumber(),
 			err,
 		)
 	}
-	belowThreshold, err := consensus.IsVRFOutputBelowThresholdWithMode(
-		vrfResult.Output,
-		threshold,
-		mode,
-	)
+	eligible, err := eligibility.CheckVRFOutput(vrfResult.Output)
 	if err != nil {
 		return fmt.Errorf(
 			"block header verification rejected at slot %d: "+
-				"compare VRF output against threshold: %w",
+				"check VRF leader eligibility: %w",
 			block.SlotNumber(),
 			err,
 		)
 	}
-	// Record how close the decision was, for every decision rather than only
-	// the failures. See leaderThresholdMargin for why the distribution is the
-	// thing worth having.
-	margin := leaderThresholdMargin(
-		leaderValueForMode(vrfResult.Output, mode),
-		threshold,
-	)
-	ls.metrics.observeLeaderThresholdMargin(margin)
-	if !belowThreshold {
+	if !eligible {
 		// The leadership stake includes reward-account balances:
 		// refreshRewardLiveStakeAggregate stores total_stake =
 		// utxo_stake + reward_stake (reward_stake from account.reward) and
@@ -1752,7 +1737,7 @@ func (ls *LedgerState) verifyBlockLeaderEligibilityFromSnapshot(
 		// LedgerStateConfig.SkipLeaderStakeThresholdCheck.
 		if ls.config.SkipLeaderStakeThresholdCheck {
 			ls.config.Logger.Warn(
-				"leader eligibility below stake-derived threshold; trusting block (prototype trust bypass)",
+				"producer pool does not satisfy leader eligibility; trusting block (prototype trust bypass)",
 				"slot",
 				block.SlotNumber(),
 				"pool",
@@ -1776,15 +1761,10 @@ func (ls *LedgerState) verifyBlockLeaderEligibilityFromSnapshot(
 		// above trusts the block, so counting before it would report
 		// rejections that never happened.
 		ls.metrics.incLeaderThresholdRejections()
-		// margin is carried in the message because it is the number that
-		// says whether this was a genuinely ineligible producer or a stake
-		// discrepancy: a rejection sitting a fraction of a percent under
-		// zero means the local stake distribution, not the block, is what
-		// disagreed with the network.
 		return fmt.Errorf(
 			"block header verification rejected at slot %d: "+
-				"producer pool %x VRF leader value exceeds stake-derived threshold "+
-				"(pool stake: %d, total stake: %d, epoch: %d, snapshot_epoch: %d, snapshot_type: %s, threshold_margin: %.9f)",
+				"producer pool %x does not satisfy leader eligibility "+
+				"(pool stake: %d, total stake: %d, epoch: %d, snapshot_epoch: %d, snapshot_type: %s)",
 			block.SlotNumber(),
 			poolKeyHash[:],
 			poolStake,
@@ -1792,7 +1772,6 @@ func (ls *LedgerState) verifyBlockLeaderEligibilityFromSnapshot(
 			epochId,
 			snapshotEpoch,
 			snapshotType,
-			margin,
 		)
 	}
 
@@ -2782,51 +2761,6 @@ func (ls *LedgerState) epochNonceHex(epochId uint64, nonce []byte) string {
 		hex:   nonceHex,
 	}
 	return nonceHex
-}
-
-// blockPipelineEta0Provider implements gouroboros' pipeline.Eta0Provider for
-// the block-processing pipeline's validate stage. It
-// reads only the already-published epoch cache. Unlike the admission path it
-// must neither forecast nor rebuild the hard-fork summary: validate workers
-// run concurrently over blocks already committed to ls.chain, and a missing
-// cached nonce means this later validation is deferred under the same gate as
-// the serial path. Avoiding headerVerificationEpoch here also keeps the hot
-// path O(logical cache scan) instead of rebuilding the full era summary for
-// every block.
-//
-// Byron-era slots have no Praos epoch nonce. Callers skip VRF/KES validation
-// for decoded Byron blocks, exactly as the serial path's verifyBlockHeaderHex
-// does. A missing nonce for any decoded post-Byron block is handled by the
-// same validation-state gate as admission rather than treated as a
-// cryptographic rejection.
-//
-// An epoch without a nonce is wrapped in errBlockPipelineEta0Unavailable.
-// A slot outside the published cache is wrapped in
-// errHeaderVerificationDeferred, so the error drain and enforcement path can
-// distinguish missing state from a cryptographic rejection.
-func (ls *LedgerState) blockPipelineEta0Provider(slot uint64) (string, error) {
-	if ls.admissionVerifiedSlot(slot) {
-		return "", errBlockPipelineAdmissionVerified
-	}
-	epoch, err := ls.epochForSlot(slot)
-	if err != nil {
-		return "", fmt.Errorf(
-			"%w: block-processing pipeline nonce lookup for slot %d: %w",
-			errHeaderVerificationDeferred,
-			slot,
-			err,
-		)
-	}
-	if len(epoch.Nonce) == 0 {
-		return "", fmt.Errorf(
-			"%w: %w: epoch %d has no nonce for slot %d",
-			errBlockPipelineEta0Unavailable,
-			errEpochNonceUnavailable,
-			epoch.EpochId,
-			slot,
-		)
-	}
-	return ls.epochNonceHex(epoch.EpochId, epoch.Nonce), nil
 }
 
 // epochForSlot searches the currently published epoch-cache snapshot for the

@@ -33,31 +33,43 @@ const (
 	chainSelectedNoneMaxRetryInterval     = time.Second
 )
 
-// chainsyncObservePeerTip synchronously feeds a peer tip update into chain
-// selection (and peergov) when Genesis selection is active. This keeps the
-// density frontier ordered before a later AwaitReply and ensures the
-// ChainsyncApplyEligible check immediately following a roll-forward sees the
-// header currently being admitted. It returns true when it handled the
-// observation synchronously, so the ouroboros layer skips the async
-// PeerTipUpdateEvent publish to avoid a double update.
-//
-// Outside Genesis selection the async path is used unchanged (returns false),
-// so normal high-throughput sync keeps its parallelism.
+// chainsyncObservePeerTip stages a header frontier for the Genesis apply gate.
+// The staged value is not selectable until ledger admission promotes it.
 func (n *Node) chainsyncObservePeerTip(
 	e chainselection.PeerTipUpdateEvent,
 ) chainselection.PeerTipUpdateDisposition {
 	if n.chainSelector == nil {
 		return chainselection.PeerTipUpdateUnhandled
 	}
-	genesisActive, _ := n.chainSelector.GenesisSelectionState()
-	if !genesisActive {
-		return chainselection.PeerTipUpdateUnhandled
+	if e.AdmissionID == 0 {
+		active, _ := n.chainSelector.GenesisSelectionState()
+		if !active {
+			return chainselection.PeerTipUpdateUnhandled
+		}
+		return n.chainSelector.ObservePeerTipUpdate(e)
 	}
-	disposition := n.chainSelector.ObservePeerTipUpdate(e)
+	disposition := n.chainSelector.PreparePeerTipAdmissionDisposition(e)
 	if disposition == chainselection.PeerTipUpdateAccepted {
 		n.touchPeerByConnId(e.ConnectionId)
 	}
 	return disposition
+}
+
+// chainsyncResolvePeerTip removes rejected candidates immediately and promotes
+// admitted candidates before the event-bus notification is dispatched.
+func (n *Node) chainsyncResolvePeerTip(
+	e chainselection.PeerTipUpdateEvent,
+	admitted bool,
+) {
+	if n.chainSelector == nil {
+		return
+	}
+	if admitted {
+		n.chainSelector.CommitPeerTipAdmission(e)
+		n.touchPeerByConnId(e.ConnectionId)
+		return
+	}
+	n.chainSelector.RejectPeerTipAdmission(e)
 }
 
 // chainsyncObservePeerRollback synchronously applies a peer rollback into chain

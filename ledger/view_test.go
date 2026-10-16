@@ -2667,7 +2667,7 @@ func TestLedgerViewGovernanceActionContentDrivesRules(t *testing.T) {
 	t.Run("hard fork succession", func(t *testing.T) {
 		pparams := &conway.ConwayProtocolParameters{
 			ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
-				Major: 9,
+				Major: 10,
 			},
 		}
 		lv, db := governanceTestView(t, pparams)
@@ -3661,7 +3661,6 @@ func TestWithTxValidationSessionKeepsUnavailableUtxoCborRetryable(
 	t.Parallel()
 	db := newStorageFaultTestDB(t, errInjectingMetadataStore{})
 	input := shelley.MustNewShelleyTransactionInput(strings.Repeat("a9", 32), 0)
-
 	require.NoError(t, db.CreateUtxo(t.Context(), nil, &models.Utxo{
 		TxId:      input.Id().Bytes(),
 		OutputIdx: input.Index(),

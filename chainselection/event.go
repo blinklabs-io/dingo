@@ -78,6 +78,12 @@ type PeerTipUpdateEvent struct {
 	ObservedTip ochainsync.Tip
 	VRFOutput   []byte // VRF output from observed block header for tie-breaking
 	PraosView   PraosTiebreakerView
+	// AdmissionID identifies one delivered header. A candidate may contribute
+	// to Genesis corroboration, but cannot be a selectable peer until admitted.
+	AdmissionID uint64
+	Admitted    bool
+	// Rejected removes the candidate after definite ledger rejection.
+	Rejected bool
 	// ObservedPrevHash is the hash of the parent the delivered header names.
 	// It lets the selector require that far frontiers claimed by one
 	// connection form a connected header chain; empty means unknown.

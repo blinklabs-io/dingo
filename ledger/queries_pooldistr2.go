@@ -77,11 +77,43 @@ func (ls *LedgerState) queryShelleyPoolDistr2(ctx context.Context, q *olocalstat
 			VrfHash:        pool.VrfKeyHash,
 		}
 	}
-	// Client.GetPoolDistr2 decodes the wire reply directly into a
-	// PoolDistr2Result (client.go's runQuery does a plain cbor.Decode with no
-	// extra wrapping), so the two fields must be the top-level array here.
-	// Returning the struct itself would let its own StructAsArray encoding
-	// nest inside this slice's, producing a spurious extra array layer that
-	// no real NtC client can decode.
-	return []any{result.Pools, result.TotalActiveStake}, nil
+	// Client.GetPoolDistr2 decodes the wire reply into a
+	// StakeDistribution2Result, a one-field struct around the distribution,
+	// so the reply is a one-element slice holding the distribution's own two
+	// fields. Returning the PoolDistr2Result struct itself would let its own
+	// StructAsArray encoding nest inside this slice's, producing a spurious
+	// extra array layer that no real NtC client can decode.
+	return []any{[]any{result.Pools, result.TotalActiveStake}}, nil
+}
+
+// queryShelleyStakeDistribution2 answers GetStakeDistribution2, which replaces
+// GetStakeDistribution from node-to-client protocol version 21. It reports the
+// same pool distribution as GetPoolDistr2 with no pool filter, so both read
+// through PoolStakeDistribution and cannot disagree about the snapshot or the
+// VRF keys.
+//
+// Client.GetStakeDistribution2 decodes the reply into a StakeDistribution2Result,
+// a one-field struct around the distribution, so the result is a one-element
+// slice holding the distribution's own two fields.
+func (ls *LedgerState) queryShelleyStakeDistribution2(
+	ctx context.Context,
+	at QueryPoint,
+	txn *database.Txn,
+) (any, error) {
+	dist, err := ls.PoolStakeDistribution(ctx, nil, at, txn)
+	if err != nil {
+		return nil, err
+	}
+	pools := make(
+		map[ledger.PoolId]olocalstatequery.IndividualPoolStake,
+		len(dist.Pools),
+	)
+	for _, pool := range dist.Pools {
+		pools[ledger.PoolId(pool.PoolKeyHash)] = olocalstatequery.IndividualPoolStake{
+			StakeFraction:  pool.StakeFraction,
+			TotalPoolStake: pool.Stake,
+			VrfHash:        pool.VrfKeyHash,
+		}
+	}
+	return []any{[]any{pools, dist.TotalActiveStake}}, nil
 }

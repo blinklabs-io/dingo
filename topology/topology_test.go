@@ -24,6 +24,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/topology"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -591,7 +592,7 @@ func TestNewTopologyConfigFromReader_RejectsWarmValencyAboveAccessPointCount(
 	require.Contains(t, err.Error(), "localRoots[0].warmValency must be <= len(localRoots[0].accessPoints)")
 }
 
-func TestNewPeerSnapshotConfigFromReader_ParsesButValidateRejectsMissingRelayPort(
+func TestNewPeerSnapshotConfigFromReader_AcceptsMissingRelayPortAsMultiHost(
 	t *testing.T,
 ) {
 	jsonData := `{
@@ -609,13 +610,10 @@ func TestNewPeerSnapshotConfigFromReader_ParsesButValidateRejectsMissingRelayPor
 
 	cfg, err := topology.NewPeerSnapshotConfigFromReader(strings.NewReader(jsonData))
 	require.NoError(t, err)
-	// SRV relay mode (no port) is not supported; Validate must reject it even
-	// though plain JSON decoding succeeds. Use a valid point hash so the
-	// error actually comes from the relay port check, not from point
-	// validation.
-	err = cfg.Validate(1)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "SRV relay mode is not supported")
+	require.NoError(t, cfg.Validate(1))
+	accessPoints := cfg.RelayAccessPoints()
+	require.Len(t, accessPoints, 1)
+	assert.Zero(t, accessPoints[0].Port)
 }
 
 // TestPeerSnapshotConfigValidate verifies that snapshot identity, format,
@@ -728,11 +726,18 @@ func TestPeerSnapshotConfigValidate(t *testing.T) {
 			wantErr: "address must not be empty",
 		},
 		{
-			name: "unsupported SRV relay",
+			name: "valid DNS SRV relay",
 			mutate: func(s *topology.PeerSnapshotConfig) {
 				s.BigLedgerPools[0].Relays[0].Port = 0
 			},
-			wantErr: "SRV relay mode is not supported",
+		},
+		{
+			name: "IP relay missing port",
+			mutate: func(s *topology.PeerSnapshotConfig) {
+				s.BigLedgerPools[0].Relays[0].Address = "192.0.2.1"
+				s.BigLedgerPools[0].Relays[0].Port = 0
+			},
+			wantErr: "port must be specified for IP relay",
 		},
 		{
 			name: "port above TCP range",

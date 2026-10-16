@@ -223,6 +223,16 @@ var Manifest = []Index{
 		Notes:   "Policy lookup", Critical: true,
 	},
 	{
+		Name: "idx_pool_opcert_sequence_slot", Table: "pool_opcert_sequence",
+		Columns: []string{"slot"},
+		Notes:   "Operational-certificate rollback range", Critical: true,
+	},
+	{
+		Name: "idx_pool_opcert_sequence_pool_sequence", Table: "pool_opcert_sequence",
+		Columns: []string{"pool_key_hash", "sequence"},
+		Notes:   "Latest operational-certificate counter lookup", Critical: true,
+	},
+	{
 		Name:    "idx_datum_added_slot",
 		Table:   "datum",
 		Columns: []string{"added_slot"},

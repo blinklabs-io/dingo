@@ -78,7 +78,7 @@ func TestCriticalManifestNotEmpty(t *testing.T) {
 	// idx_utxo_transaction_id joined the critical subset: the rollback's
 	// DELETE FROM "transaction" cascades through it, and a rollback can
 	// run as soon as the database is marked ready.
-	const wantCritical = 25
+	const wantCritical = 27
 	if len(critical) != wantCritical {
 		t.Errorf(
 			"CriticalManifest: got %d entries, want %d — update this constant if the classification changed intentionally",

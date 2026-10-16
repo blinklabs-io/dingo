@@ -23,6 +23,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/ledger/governance"
 )
 
 // RewardParitySource is the read-only view of Dingo's committed reward state
@@ -136,6 +137,18 @@ type RewardParitySource interface {
 		ctx context.Context,
 		epoch uint64,
 	) ([]*models.RewardAccountOutput, error)
+	// GetProposalDepositRefunds returns the governance proposal deposits that
+	// were credited to a reward account when epoch refundEpoch began: those of
+	// proposals enacted or dropped at that boundary whose return account was
+	// registered. A deposit returned to the treasury because the account was
+	// not registered is absent, as it is from Koios's proposal_refund rows.
+	// Koios reporting epoch K pairs with refundEpoch K+1: Koios files a
+	// credit made at the K to K+1 boundary under earned_epoch K. See
+	// ProposalDepositRefunds.Pending for when the result is still incomplete.
+	GetProposalDepositRefunds(
+		ctx context.Context,
+		refundEpoch uint64,
+	) (ProposalDepositRefunds, error)
 	// GetEarliestAvailableEpoch returns the earliest Koios reporting epoch
 	// this node could plausibly have genuine, locally computed
 	// reward-calculation state for, derived from its own Mithril bootstrap
@@ -280,6 +293,85 @@ func (s *DatabaseSource) GetEarliestAvailableEpoch(
 		return 0, false, nil
 	}
 	return boundaryEpoch.EpochId + 1, true, nil
+}
+
+// ProposalDepositRefunds is what RewardParitySource.GetProposalDepositRefunds
+// read for one refund epoch.
+type ProposalDepositRefunds struct {
+	Refunds []governance.ProposalDepositRefund
+	// Pending reports that the tip has not reached the start of the refund
+	// epoch, so the boundary that journals these refunds has not been applied
+	// and Refunds is not yet final. It is independent of
+	// DingoPoolEpochData.RewardsPending: refunds for Koios earned epoch K are
+	// journaled when K+1 begins, a full epoch before the member and leader
+	// rewards of the same earned epoch are applied. A missing refund-epoch row
+	// reads as pending; an unknown tip leaves it false, so the comparison
+	// stays strict rather than downgrading a divergence on incomplete
+	// metadata.
+	Pending bool
+}
+
+// GetProposalDepositRefunds implements RewardParitySource from the proposal
+// and reward-credit journal tables the epoch boundary wrote.
+func (s *DatabaseSource) GetProposalDepositRefunds(
+	ctx context.Context,
+	refundEpoch uint64,
+) (ProposalDepositRefunds, error) {
+	var out ProposalDepositRefunds
+	// See GetLatestEpoch's comment on why ctx is only checked up front.
+	if err := ctx.Err(); err != nil {
+		return out, err
+	}
+	txn := s.db.Transaction(ctx, false)
+	defer txn.Release()
+	meta := s.db.Metadata()
+	tip, err := s.db.GetTip(txn)
+	if err != nil {
+		return out, fmt.Errorf("tip lookup: %w", err)
+	}
+	// As in GetPoolEpochDataMap, a genuine tip always carries a block hash.
+	if len(tip.Point.Hash) > 0 && tip.Point.Slot > 0 {
+		epoch, err := meta.GetEpoch(refundEpoch, txn.Metadata())
+		if err != nil {
+			return out, fmt.Errorf("epoch lookup %d: %w", refundEpoch, err)
+		}
+		out.Pending = epoch == nil || tip.Point.Slot < epoch.StartSlot
+	}
+	proposals, err := meta.GetGovernanceProposalsRefundedAt(
+		refundEpoch,
+		txn.Metadata(),
+	)
+	if err != nil {
+		return out, fmt.Errorf(
+			"governance proposals refunded at epoch %d: %w",
+			refundEpoch,
+			err,
+		)
+	}
+	var credits []*models.AccountRewardDelta
+	for _, slot := range governance.ProposalDepositRefundSlots(
+		proposals,
+		refundEpoch,
+	) {
+		slotCredits, err := meta.GetPostSnapshotRewardCreditEvents(
+			slot,
+			txn.Metadata(),
+		)
+		if err != nil {
+			return out, fmt.Errorf(
+				"reward credits at slot %d: %w",
+				slot,
+				err,
+			)
+		}
+		credits = append(credits, slotCredits...)
+	}
+	out.Refunds, err = governance.MatchProposalDepositRefunds(
+		proposals,
+		refundEpoch,
+		credits,
+	)
+	return out, err
 }
 
 // GetEpochData returns epoch-level aggregates for the given epoch, or nil,
