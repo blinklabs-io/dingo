@@ -340,9 +340,13 @@ func newPprofDebugServer(cfg *config.Config) *http.Server {
 // block producer that cannot forge holds readiness.
 func nodeHealthChecks(d *dingo.Node) []health.Check {
 	return []health.Check{
-		{Liveness: true, Fn: d.EventLoopResponsive},
-		{Fn: d.DatabaseReady},
-		{Fn: d.BlockProducerReady},
+		{
+			Liveness: true,
+			Reason:   "event_loop_unresponsive",
+			Fn:       d.EventLoopResponsive,
+		},
+		{Reason: "database_unavailable", Fn: d.DatabaseReady},
+		{Reason: "block_producer_unavailable", Fn: d.BlockProducerReady},
 	}
 }
 
@@ -371,6 +375,7 @@ func nodeHealthChecks(d *dingo.Node) []health.Check {
 func NewHealthServer(
 	cfg *config.Config,
 	tipGap health.TipGapFunc,
+	logger *slog.Logger,
 	checks ...health.Check,
 ) *http.Server {
 	if cfg.HealthPort == 0 {
@@ -387,7 +392,7 @@ func NewHealthServer(
 			cfg.BindAddr,
 			strconv.FormatUint(uint64(cfg.HealthPort), 10),
 		),
-		Handler:           health.NewMux(tipGap, readyTipGapSlots, checks...),
+		Handler:           health.NewMux(logger, tipGap, readyTipGapSlots, checks...),
 		ReadHeaderTimeout: 10 * time.Second,
 		WriteTimeout:      10 * time.Second,
 		IdleTimeout:       60 * time.Second,
@@ -606,7 +611,7 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger) error {
 	// or load balancer can probe the node without being handed the metrics
 	// or pprof surface. Started for every storage mode.
 	healthServer := NewHealthServer(
-		cfg, d.TipGapSlots, nodeHealthChecks(d)...,
+		cfg, d.TipGapSlots, logger, nodeHealthChecks(d)...,
 	)
 	if healthServer != nil {
 		logger.Info(
