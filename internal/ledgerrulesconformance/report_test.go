@@ -40,6 +40,16 @@ func TestOutsideForecastMatchesExpectedMessage(t *testing.T) {
 	}
 }
 
+func TestVotersDoNotExistMatchesUnelectedCommitteeVoter(t *testing.T) {
+	t.Parallel()
+	if !predicateMatches(
+		errors.New("conway utxo validation rule 60: committee voter is not elected"),
+		expectedDoc{Predicate: "VotersDoNotExist"},
+	) {
+		t.Fatal("VotersDoNotExist did not match an unelected committee voter")
+	}
+}
+
 func TestResolveReferencedObjectAppliesSiblingOverrides(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
