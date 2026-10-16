@@ -154,6 +154,11 @@ h.transition_slot, h.tx_hash, h.cert_index,
    AND same.id < h.id),
 (SELECT COUNT(*) FROM governance_vote_history same
  WHERE same.vote_id = h.vote_id AND same.transition_slot = h.transition_slot),
+CASE WHEN EXISTS (
+    SELECT 1 FROM governance_vote_history earlier
+    WHERE earlier.vote_id = h.vote_id
+      AND earlier.transition_slot < h.transition_slot
+) THEN 0 ELSE 1 END,
 CASE WHEN v.deleted_slot IS NULL AND NOT EXISTS (
     SELECT 1 FROM governance_vote_history later
     WHERE later.vote_id = h.vote_id
@@ -173,6 +178,7 @@ CASE WHEN v.deleted_slot IS NULL AND NOT EXISTS (
 		var anchorURL sql.NullString
 		var certIndex sql.NullInt64
 		var counted int64
+		var earliest int64
 		if err := rows.Scan(
 			&row.Vote.ID, &row.Vote.ProposalID, &row.Vote.VoterType,
 			&row.Vote.VoterCredentialTag, &row.Vote.VoterCredential,
@@ -181,7 +187,7 @@ CASE WHEN v.deleted_slot IS NULL AND NOT EXISTS (
 			&row.Vote.DeletedSlot, &row.ProposalTxHash,
 			&row.ProposalActionIndex, &row.ProposalActionType, &row.CastSlot,
 			&row.CastTxHash, &certIndex, &row.CastSlotRank,
-			&row.CastSlotCount, &counted,
+			&row.CastSlotCount, &earliest, &counted,
 		); err != nil {
 			return nil, 0, err
 		}
@@ -195,6 +201,7 @@ CASE WHEN v.deleted_slot IS NULL AND NOT EXISTS (
 			row.CastCertIndex = uint32(certIndex.Int64)
 		}
 		row.Counted = counted != 0
+		row.CastSlotEarliest = earliest != 0
 		ret = append(ret, row)
 	}
 	if err := rows.Err(); err != nil {

@@ -663,8 +663,11 @@ type blockCast struct {
 // proposal fall into runs of one value, and only a run's first cast was
 // recorded. The first run goes unrecorded when it repeats the value from
 // before the block, so the vote's entries at the slot are the first casts of
-// its last CastSlotCount runs, in order. The value the entry recorded must
-// match the cast it lands on.
+// its last CastSlotCount runs, in order. The one exception is the entry
+// migration v22 seeded for a vote that predates it: the vote's earliest
+// entry, holding only the value current at the upgrade, so the block's
+// earlier runs have no entry and it lands on the last run. The value the
+// entry recorded must match the cast it lands on.
 func legacyCastTransaction(
 	row models.GovernanceVoteRow,
 	block *slotBlock,
@@ -717,7 +720,8 @@ func legacyCastTransaction(
 	}
 	count := row.CastSlotCount
 	if count < 1 || row.CastSlotRank < 0 || row.CastSlotRank >= count ||
-		count > len(runs) || count < len(runs)-1 {
+		count > len(runs) ||
+		(count < len(runs)-1 && !row.CastSlotEarliest) {
 		return castTransaction{}, notRetained
 	}
 	cast := runs[len(runs)-count+row.CastSlotRank]

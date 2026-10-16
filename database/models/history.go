@@ -128,6 +128,10 @@ type GovernanceVoteRow struct {
 	// recorded position is matched to the block's casts by them.
 	CastSlotRank  int
 	CastSlotCount int
+	// CastSlotEarliest reports that no history entry of the vote precedes
+	// CastSlot. Migration v22 seeded each vote that existed before it with
+	// one such entry, carrying only its value current at the upgrade.
+	CastSlotEarliest bool
 	// Counted reports whether the cast counts toward the tally: it is the
 	// voter's latest cast on the proposal and was not invalidated by its
 	// DRep deregistering.

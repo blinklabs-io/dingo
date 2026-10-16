@@ -219,7 +219,10 @@ value or anchor, so the casts fall into runs of one value, of which only each
 run's first cast was recorded, and the first run goes unrecorded when it
 repeats the value from before the block: the vote's entries at a slot are the
 first casts of its last runs, in recording order, and each must carry the
-value its cast did. A revote that repeated the value before v46 is not
+value its cast did. The exception is the entry migration v22 seeded for a vote
+that predated it, which held only the vote's value at the upgrade: as the
+vote's earliest entry it may stand for fewer runs than its block holds, and
+lands on the last one, so that block's earlier casts are not listed. A revote that repeated the value before v46 is not
 listed. When the block is not held, or no valid
 transaction in it carries the vote, the endpoint answers `404` "not retained
 by this node" instead of omitting the vote or inventing a transaction. Within

@@ -1180,3 +1180,53 @@ func TestNodeAdapterVotesMatchRepeatedUnpositionedValues(t *testing.T) {
 	assert.Equal(t, hexOf(fill32(0xa1)), rows[0].TxHash,
 		"the first no, alone on its page")
 }
+
+// Migration v22 seeded one history entry per vote that predated it, holding
+// the vote's value current at the upgrade rather than each change in its last
+// block. That seed lands on the block's last run; the earlier casts it never
+// recorded are not listed.
+func TestNodeAdapterVotesMatchV22SeededHistory(t *testing.T) {
+	t.Parallel()
+	fx := newEpochFixture(t)
+	ctx := context.Background()
+	proposal := fx.addProposal(t, 0x01, 0, lcommon.GovActionTypeInfo, []byte{0x81, 0x06}, 10)
+	drep := voter(lcommon.VoterTypeDRepKeyHash, 0xd1)
+	action := govID(t, 0x01, 0)
+	serveBlocks(fx, map[uint64]*slotBlock{
+		100: {number: 40, txs: []lcommon.Transaction{
+			newTx(0xa1, true, procedures(drep, action, uint8(models.VoteNo))),
+			newTx(0xa2, true, procedures(drep, action, uint8(models.VoteYes))),
+			newTx(0xa3, true, procedures(drep, action, uint8(models.VoteNo))),
+		}},
+	})
+	// The vote as a pre-v22 node left it, then the row v22's backfill
+	// inserts from it.
+	result, err := fx.raw.Exec(`
+INSERT INTO governance_vote (
+    proposal_id, voter_type, voter_credential_tag, voter_credential, vote,
+    added_slot, vote_updated_slot
+) VALUES (?, ?, 0, ?, ?, 100, 100)`,
+		proposal.ID, models.VoterTypeDRep, bytes32of(28, 0xd1), models.VoteNo,
+	)
+	require.NoError(t, err)
+	voteID, err := result.LastInsertId()
+	require.NoError(t, err)
+	_, err = fx.raw.Exec(`
+INSERT INTO governance_vote_history (
+    vote_id, transition_slot, vote, anchor_url, anchor_hash
+)
+SELECT id, COALESCE(vote_updated_slot, added_slot), vote, anchor_url,
+    anchor_hash
+FROM governance_vote WHERE id = ?`, voteID)
+	require.NoError(t, err)
+
+	rows, total, err := fx.adapter.GovernanceProposalVotes(
+		ctx, GovActionRef{TxHash: fill32(0x01), Index: 0}, asc,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, 1, total)
+	require.Len(t, rows, 1)
+	assert.Equal(t, hexOf(fill32(0xa3)), rows[0].TxHash)
+	assert.Equal(t, "no", rows[0].Vote)
+	assert.True(t, rows[0].Counted)
+}
