@@ -2245,6 +2245,7 @@ func leiosForgedEBOffer(entry *leiosForgedEBEntry) protocol.Message {
 		return oleiosnotify.NewMsgBlockTxsOffer(*entry.txOffer)
 	case entry.announcement != nil:
 		return oleiosnotify.NewMsgBlockAnnouncement(
+			uint(gdijkstra.EraIdDijkstra),
 			cbor.RawMessage(entry.announcement),
 		)
 	case entry.vote != nil:
@@ -2285,6 +2286,16 @@ func (o *Ouroboros) acceptLeiosAnnouncementInternal(
 	// no half-updated state behind and simply drops the announcement.
 	header, err := decodeLeiosAnnouncementHeader(raw)
 	if err != nil {
+		if cbor.ValidateExact(raw) == nil {
+			o.config.Logger.Debug(
+				"dropping unsupported opaque leios announcement",
+				"component", "network",
+				"protocol", "leios-notify",
+				"connection_id", source,
+				"bytes", len(raw),
+			)
+			return nil
+		}
 		return fmt.Errorf("decode ranking-block header: %w", err)
 	}
 	ebHash, ebSize, ok := header.LeiosAnnouncement()

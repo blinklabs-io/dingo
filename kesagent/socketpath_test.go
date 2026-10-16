@@ -59,11 +59,17 @@ func TestNewClientCleansAbsoluteSocketPath(t *testing.T) {
 	require.Equal(t, want, client.cfg.SocketPath)
 }
 
-func TestNewClientKeepsAbstractSocketAddress(t *testing.T) {
+func TestNewClientResolvesAtSocketPathByPlatform(t *testing.T) {
 	t.Parallel()
 
-	const want = "@kes-agent"
-	client, err := NewClient(Config{SocketPath: want, Mode: ModeServeKey})
+	const configured = "@kes-agent"
+	client, err := NewClient(Config{SocketPath: configured, Mode: ModeServeKey})
+	require.NoError(t, err)
+	if runtime.GOOS == "linux" {
+		require.Equal(t, configured, client.cfg.SocketPath)
+		return
+	}
+	want, err := filepath.Abs(configured)
 	require.NoError(t, err)
 	require.Equal(t, want, client.cfg.SocketPath)
 }
@@ -119,13 +125,14 @@ func TestSocketPathLimitIsPlatformCorrect(t *testing.T) {
 	t.Parallel()
 
 	named := socketPathLimit("/run/kes-agent.sock")
-	abstract := socketPathLimit("@kes-agent")
-	require.Equal(t, named+1, abstract, "abstract addresses carry no NUL")
+	atPrefix := socketPathLimit("@kes-agent")
 
 	if runtime.GOOS == "darwin" {
 		require.Equal(t, sunPathLenDarwin-1, named)
+		require.Equal(t, named, atPrefix, "@ is an ordinary filename character")
 	} else {
 		require.Equal(t, sunPathLenOther-1, named)
+		require.Equal(t, named+1, atPrefix, "Linux abstract addresses carry no NUL")
 	}
 }
 

@@ -522,7 +522,7 @@ func (r *dribbleBlockTxsRequester) BlockTxsRequest(
 	requested := leiosBitmapTxIndices(bitmaps)
 	slices.Sort(requested)
 	if len(requested) == 0 {
-		return leiosfetch.NewMsgBlockTxsFull(
+		return leiosfetch.NewMsgBlockTxs(
 			point,
 			map[uint16]uint64{},
 			nil,
@@ -534,7 +534,7 @@ func (r *dribbleBlockTxsRequester) BlockTxsRequest(
 	if err != nil {
 		return nil, err
 	}
-	return leiosfetch.NewMsgBlockTxsFull(
+	return leiosfetch.NewMsgBlockTxs(
 		point,
 		served,
 		[]cbor.RawMessage{cbor.RawMessage(enc)},

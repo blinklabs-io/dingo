@@ -54,6 +54,17 @@ func plutusDataField(d string, n int) string {
 	return "[(force (builtin headList)) " + fields + "]"
 }
 
+// plutusListField renders UPLC that selects field n of the Data list that the
+// Data-typed term d evaluates to. V4 encodes single-constructor types such as
+// ScriptContext and ProposalProcedure as lists of their fields.
+func plutusListField(d string, n int) string {
+	fields := "[(builtin unListData) " + d + "]"
+	for range n {
+		fields = "[(force (builtin tailList)) " + fields + "]"
+	}
+	return "[(force (builtin headList)) " + fields + "]"
+}
+
 // changedParametersGuardrailsScript compiles a guardrails script that
 // succeeds only when the ChangedParameters of the proposal it guards equal
 // expected, the Plutus Data text of a map. It reads them from ScriptInfo
@@ -65,9 +76,15 @@ func changedParametersGuardrailsScript(
 	expected string,
 ) lcommon.Script {
 	t.Helper()
-	scriptInfo := plutusDataField("ctx", 2)
+	// ScriptInfo and the governance action are sum types and stay
+	// constructors in V4; ScriptContext and ProposalProcedure become lists.
+	productField := plutusDataField
+	if version == lang.LanguageVersionV4 {
+		productField = plutusListField
+	}
+	scriptInfo := productField("ctx", 2)
 	procedure := plutusDataField(scriptInfo, 1)
-	action := plutusDataField(procedure, 2)
+	action := productField(procedure, 2)
 	changed := plutusDataField(action, 1)
 	program, err := syn.Parse(fmt.Sprintf(
 		`(program 1.1.0 (lam ctx (force [(force (builtin ifThenElse))

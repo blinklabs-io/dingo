@@ -391,7 +391,8 @@ func (ls *LedgerState) handleEventChainsync(evt event.Event) {
 			"rollback", e.Rollback,
 			"slot", e.Point.Slot,
 		)
-		ls.discardBufferedPeerHeaders(e.ConnectionId)
+		ls.discardBufferedPeerHeaders(e.ConnectionId, &pending)
+		queuePeerTipAdmission(&pending, e, false)
 		ls.removePeerHeaderHistory(connIdKey(e.ConnectionId))
 		return
 	}
@@ -402,7 +403,7 @@ func (ls *LedgerState) handleEventChainsync(evt event.Event) {
 				// loop. Trigger a chainsync re-sync so the peer
 				// can negotiate a fresh intersection rather than
 				// continuing to send the same rollback point.
-				ls.resetChainsyncResyncState()
+				ls.resetChainsyncResyncState(&pending)
 				ls.setChainsyncState(SyncingChainsyncState)
 				// Queued rather than published here: this runs with
 				// ls.chainsyncMutex held, and this event's subscriber
@@ -652,15 +653,6 @@ func (ls *LedgerState) markAdmissionVerified(
 		pointKey:   headerValidationPointKey(point),
 		generation: generation,
 	}
-}
-
-// admissionVerifiedSlot reports whether a block at slot has an admission
-// record. It does not consume it.
-func (ls *LedgerState) admissionVerifiedSlot(slot uint64) bool {
-	ls.admissionVerifiedMu.Lock()
-	record, ok := ls.admissionVerified[slot]
-	ls.admissionVerifiedMu.Unlock()
-	return ok && ls.headerCryptoVerificationGenerationCurrent(record.generation)
 }
 
 // consumeAdmissionVerified removes any record for point's slot and reports
@@ -1508,9 +1500,9 @@ func (ls *LedgerState) handleConnectionClosedEvent(evt event.Event) {
 		ls.shadowBlockfetchConnId = ouroboros.ConnectionId{}
 		ls.shadowBlockfetchRequestDone = nil
 	}
-	ls.bufferedHeaderMutex.Lock()
-	delete(ls.bufferedHeaderEvents, connIdKey(e.ConnectionId))
-	ls.bufferedHeaderMutex.Unlock()
+	for _, bufferedEvent := range ls.takeBufferedPeerHeaders(e.ConnectionId) {
+		queuePeerTipAdmission(&pending, bufferedEvent, false)
+	}
 	ls.removePeerHeaderHistory(connIdKey(e.ConnectionId))
 	ls.resetHeaderMismatches(connIdKey(e.ConnectionId))
 	// Cancel in-flight blockfetch if the dead connection owns it.
@@ -2171,13 +2163,15 @@ func chainSwitchNewObservedTip(
 	return e.NewTip
 }
 
-func (ls *LedgerState) bufferHeaderEvent(e ChainsyncEvent) {
+func (ls *LedgerState) bufferHeaderEvent(
+	e ChainsyncEvent,
+	pending *pendingPublishes,
+) {
 	// Reached from the chainsync dispatch goroutine, which holds only
 	// chainsyncMutex: claimHeaderPipelineOwnership released
 	// chainsyncBlockfetchMutex on return, so this write is otherwise
 	// unprotected against nextBufferedHeaderConnId's iteration.
 	ls.bufferedHeaderMutex.Lock()
-	defer ls.bufferedHeaderMutex.Unlock()
 	if ls.bufferedHeaderEvents == nil {
 		ls.bufferedHeaderEvents = make(
 			map[string][]ChainsyncEvent,
@@ -2189,16 +2183,24 @@ func (ls *LedgerState) bufferHeaderEvent(e ChainsyncEvent) {
 		last := events[len(events)-1]
 		if last.Point.Slot == e.Point.Slot &&
 			bytes.Equal(last.Point.Hash, e.Point.Hash) {
+			ls.bufferedHeaderMutex.Unlock()
+			queuePeerTipAdmission(pending, e, false)
 			return
 		}
 	}
 	const maxBufferedHeadersPerConn = 128
 	if len(events) >= maxBufferedHeadersPerConn {
+		evicted := events[0]
 		events = append(events[1:], e)
+		ls.bufferedHeaderEvents[key] = events
+		ls.bufferedHeaderMutex.Unlock()
+		queuePeerTipAdmission(pending, evicted, false)
+		return
 	} else {
 		events = append(events, e)
 	}
 	ls.bufferedHeaderEvents[key] = events
+	ls.bufferedHeaderMutex.Unlock()
 }
 
 // clearQueuedHeaders discards the header queue. Chain.ClearHeaders enqueues a
@@ -2535,59 +2537,7 @@ func (ls *LedgerState) headerAlreadyOnPrimaryChain(
 	e ChainsyncEvent,
 	localTip ochainsync.Tip,
 ) bool {
-	if ls.db == nil || len(e.Point.Hash) == 0 {
-		return false
-	}
-	if e.Point.Slot > localTip.Point.Slot {
-		return false
-	}
-	block, err := ls.blockByHash(ls.lifecycleContext(), e.Point.Hash)
-	if errors.Is(err, models.ErrBlockNotFound) {
-		// Blocks written before the hash index was introduced still have an
-		// exact point key and metadata. Probe that local path without allowing
-		// Bark to fall through to its archive on an unknown fork hash.
-		blockID, localErr := database.BlockIDByPointLocal(ls.db, e.Point)
-		if errors.Is(localErr, models.ErrBlockNotFound) {
-			return false
-		}
-		if localErr != nil {
-			ls.config.Logger.Debug(
-				"could not check legacy historical header by local point",
-				"component", "ledger",
-				"slot", e.Point.Slot,
-				"hash", hex.EncodeToString(e.Point.Hash),
-				"error", localErr,
-			)
-			return false
-		}
-		contains, localErr := ls.primaryChainContainsBlockID(blockID, e.Point)
-		if localErr != nil {
-			ls.config.Logger.Debug(
-				"could not check legacy historical header against primary chain",
-				"component",
-				"ledger",
-				"slot",
-				e.Point.Slot,
-				"hash",
-				hex.EncodeToString(e.Point.Hash),
-				"error",
-				localErr,
-			)
-			return false
-		}
-		return contains
-	}
-	if err != nil {
-		ls.config.Logger.Debug(
-			"could not prefilter historical header by hash index",
-			"component", "ledger",
-			"slot", e.Point.Slot,
-			"hash", hex.EncodeToString(e.Point.Hash),
-			"error", err,
-		)
-		return false
-	}
-	contains, err := ls.primaryChainContainsBlock(block, e.Point)
+	contains, err := ls.historicalPointOnPrimaryChain(e.Point, localTip)
 	if err != nil {
 		ls.config.Logger.Debug(
 			"could not check historical header against primary chain",
@@ -2596,9 +2546,40 @@ func (ls *LedgerState) headerAlreadyOnPrimaryChain(
 			"hash", hex.EncodeToString(e.Point.Hash),
 			"error", err,
 		)
-		return false
 	}
 	return contains
+}
+
+// historicalPointOnPrimaryChain performs the bounded local membership check
+// shared by historical-header filtering and rollback diagnosis. It never
+// treats append-only blob presence as primary-chain membership and never
+// falls through to a configured archive for a legacy point lookup.
+func (ls *LedgerState) historicalPointOnPrimaryChain(
+	point ocommon.Point,
+	localTip ochainsync.Tip,
+) (bool, error) {
+	if ls.db == nil || len(point.Hash) == 0 ||
+		point.Slot > localTip.Point.Slot {
+		return false, nil
+	}
+	block, err := ls.blockByHash(ls.lifecycleContext(), point.Hash)
+	if errors.Is(err, models.ErrBlockNotFound) {
+		// Blocks written before the hash index was introduced still have an
+		// exact point key and metadata. Probe that local path without allowing
+		// Bark to fall through to its archive on an unknown fork hash.
+		blockID, localErr := database.BlockIDByPointLocal(ls.db, point)
+		if errors.Is(localErr, models.ErrBlockNotFound) {
+			return false, nil
+		}
+		if localErr != nil {
+			return false, localErr
+		}
+		return ls.primaryChainContainsBlockID(blockID, point)
+	}
+	if err != nil {
+		return false, err
+	}
+	return ls.primaryChainContainsBlock(block, point)
 }
 
 func (ls *LedgerState) findPeerForkPath(
@@ -2875,9 +2856,9 @@ func (ls *LedgerState) requestChainsyncResync(
 ) bool {
 	ls.resetHeaderMismatches(connIdKey(connId))
 	ls.clearRollbackHistory()
-	ls.bufferedHeaderMutex.Lock()
-	delete(ls.bufferedHeaderEvents, connIdKey(connId))
-	ls.bufferedHeaderMutex.Unlock()
+	for _, bufferedEvent := range ls.takeBufferedPeerHeaders(connId) {
+		queuePeerTipAdmission(pending, bufferedEvent, false)
+	}
 	if ls.coalesceChainsyncResync(connId, reason) {
 		return false
 	}
@@ -3044,7 +3025,10 @@ func (ls *LedgerState) claimHeaderPipelineOwnership(
 	return owner, true, false
 }
 
-func (ls *LedgerState) shouldBufferHeaderEvent(e ChainsyncEvent) bool {
+func (ls *LedgerState) shouldBufferHeaderEvent(
+	e ChainsyncEvent,
+	pending *pendingPublishes,
+) bool {
 	ownerConnId, shouldBuffer, acceptedDifferentConnection := ls.claimHeaderPipelineOwnership(
 		e,
 	)
@@ -3060,7 +3044,7 @@ func (ls *LedgerState) shouldBufferHeaderEvent(e ChainsyncEvent) bool {
 	if !shouldBuffer {
 		return false
 	}
-	ls.bufferHeaderEvent(e)
+	ls.bufferHeaderEvent(e, pending)
 	ls.config.Logger.Debug(
 		"buffering header from non-owner connection",
 		"component", "ledger",
@@ -3180,8 +3164,11 @@ func (ls *LedgerState) replayBufferedHeaderEvents(
 	)
 	delete(ls.bufferedHeaderEvents, key)
 	ls.bufferedHeaderMutex.Unlock()
-	for _, evt := range events {
+	for i, evt := range events {
 		if err := ls.handleEventChainsyncBlockHeaderWithPending(evt, pending); err != nil {
+			for _, remaining := range events[i+1:] {
+				queuePeerTipAdmission(pending, remaining, false)
+			}
 			return err
 		}
 	}
@@ -3202,15 +3189,28 @@ func (ls *LedgerState) replayBufferedHeaderEvents(
 // goroutine under a different mutex is a concurrent iteration and write.
 func (ls *LedgerState) discardBufferedPeerHeaders(
 	connId ouroboros.ConnectionId,
+	pending *pendingPublishes,
 ) {
 	ls.chainsyncBlockfetchMutex.Lock()
-	defer ls.chainsyncBlockfetchMutex.Unlock()
-	ls.bufferedHeaderMutex.Lock()
-	delete(ls.bufferedHeaderEvents, connIdKey(connId))
-	ls.bufferedHeaderMutex.Unlock()
+	buffered := ls.takeBufferedPeerHeaders(connId)
 	if sameConnectionId(ls.headerPipelineConnId, connId) {
 		ls.clearQueuedHeaders()
 	}
+	ls.chainsyncBlockfetchMutex.Unlock()
+	for _, e := range buffered {
+		queuePeerTipAdmission(pending, e, false)
+	}
+}
+
+func (ls *LedgerState) takeBufferedPeerHeaders(
+	connId ouroboros.ConnectionId,
+) []ChainsyncEvent {
+	ls.bufferedHeaderMutex.Lock()
+	defer ls.bufferedHeaderMutex.Unlock()
+	key := connIdKey(connId)
+	buffered := append([]ChainsyncEvent(nil), ls.bufferedHeaderEvents[key]...)
+	delete(ls.bufferedHeaderEvents, key)
+	return buffered
 }
 
 // handleMithrilBoundaryRollback rejects a rollback at or below the local
@@ -3279,7 +3279,7 @@ func (ls *LedgerState) handleMithrilBoundaryRollback(
 		reason,
 		e.ConnectionId,
 	)
-	ls.resetChainsyncResyncState()
+	ls.resetChainsyncResyncState(pending)
 	ls.setChainsyncState(SyncingChainsyncState)
 	pending.add(
 		ls.config.EventBus,
@@ -3408,7 +3408,7 @@ func (ls *LedgerState) handleEventChainsyncRollback(
 				"local_tip_slot", ls.chain.Tip().Point.Slot,
 			)
 		} else if !sameConnectionId(*activeConnId, e.ConnectionId) {
-			ls.discardBufferedPeerHeaders(e.ConnectionId)
+			ls.discardBufferedPeerHeaders(e.ConnectionId, pending)
 			// Event is from non-active connection, skip
 			// Rate-limit this message to once per dropEventLogInterval
 			now := time.Now()
@@ -3549,7 +3549,7 @@ func (ls *LedgerState) handleEventChainsyncRollback(
 			"connection_id",
 			e.ConnectionId.String(),
 		)
-		ls.resetChainsyncResyncState()
+		ls.resetChainsyncResyncState(pending)
 		ls.setChainsyncState(SyncingChainsyncState)
 		pending.add(
 			ls.config.EventBus,
@@ -3602,7 +3602,7 @@ func (ls *LedgerState) handleEventChainsyncRollback(
 				event.ChainsyncResyncReasonRollbackNotFound,
 				e.ConnectionId,
 			)
-			ls.resetChainsyncResyncState()
+			ls.resetChainsyncResyncState(pending)
 			ls.setChainsyncState(SyncingChainsyncState)
 			pending.add(
 				ls.config.EventBus,
@@ -3640,7 +3640,7 @@ func (ls *LedgerState) handleEventChainsyncRollback(
 				)
 			}
 			if reconciled {
-				ls.resetChainsyncResyncState()
+				ls.resetChainsyncResyncState(pending)
 				ls.setChainsyncState(SyncingChainsyncState)
 				return nil
 			}
@@ -3745,7 +3745,7 @@ func (ls *LedgerState) handleEventChainsyncRollback(
 				event.ChainsyncResyncReasonRollbackBelowUtxoPruneFloor,
 				e.ConnectionId,
 			)
-			ls.resetChainsyncResyncState()
+			ls.resetChainsyncResyncState(pending)
 			ls.setChainsyncState(SyncingChainsyncState)
 			pending.add(
 				ls.config.EventBus,
@@ -3851,7 +3851,9 @@ func (ls *LedgerState) clearRollbackHistoryForPoint(point ocommon.Point) {
 // blockfetchRequestRangeCleanup (while holding chainsyncBlockfetchMutex).
 // Callers must hold chainsyncMutex before invoking this method to avoid races
 // with other chainsync operations.
-func (ls *LedgerState) resetChainsyncResyncState() {
+func (ls *LedgerState) resetChainsyncResyncState(
+	pending *pendingPublishes,
+) {
 	ls.clearRollbackHistory()
 	ls.clearHeaderMismatches()
 	ls.setSelectedBlockfetchConnId(ouroboros.ConnectionId{})
@@ -3861,12 +3863,19 @@ func (ls *LedgerState) resetChainsyncResyncState() {
 	// lock (rather than called before it, as this used to) to close that
 	// gap. bufferedHeaderEvents has its own lock; see bufferedHeaderMutex.
 	ls.bufferedHeaderMutex.Lock()
+	var buffered []ChainsyncEvent
+	for _, events := range ls.bufferedHeaderEvents {
+		buffered = append(buffered, events...)
+	}
 	ls.bufferedHeaderEvents = nil
 	ls.bufferedHeaderMutex.Unlock()
 	ls.clearQueuedHeaders()
 	ls.blockfetchRequestRangeCleanup()
 	ls.activeBlockfetchConnId = ouroboros.ConnectionId{}
 	ls.chainsyncBlockfetchMutex.Unlock()
+	for _, e := range buffered {
+		queuePeerTipAdmission(pending, e, false)
+	}
 }
 
 func pointMatches(a, b ocommon.Point) bool {
@@ -4324,7 +4333,7 @@ func (ls *LedgerState) RecoverAfterLocalRollback(
 			}
 		}
 	}
-	ls.resetChainsyncResyncState()
+	ls.resetChainsyncResyncState(&pending)
 
 	preferredConnIds := make([]ouroboros.ConnectionId, 0, len(connIds)+1)
 	seenConnIds := make(map[string]struct{}, len(connIds)+1)
@@ -4444,10 +4453,47 @@ func (ls *LedgerState) RecoverAfterLocalRollback(
 	return LocalRollbackRecoveryResult{}
 }
 
+func (ls *LedgerState) completeChainsyncHeaderAdmission(
+	e ChainsyncEvent,
+	pending *pendingPublishes,
+	admitted bool,
+) {
+	queuePeerTipAdmission(pending, e, admitted)
+	if !admitted || e.PeerTipUpdate == nil || ls.config.EventBus == nil {
+		return
+	}
+	update := *e.PeerTipUpdate
+	update.Admitted = true
+	pending.add(
+		ls.config.EventBus,
+		chainselection.PeerTipUpdateEventType,
+		event.NewEvent(chainselection.PeerTipUpdateEventType, update),
+	)
+}
+
+func queuePeerTipAdmission(
+	pending *pendingPublishes,
+	e ChainsyncEvent,
+	admitted bool,
+) {
+	if e.PeerTipAdmission == nil {
+		return
+	}
+	pending.addAfterUnlock(func() {
+		e.PeerTipAdmission(admitted)
+	})
+}
+
 func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 	e ChainsyncEvent,
 	pending *pendingPublishes,
 ) error {
+	admissionResolved := false
+	defer func() {
+		if !admissionResolved {
+			ls.completeChainsyncHeaderAdmission(e, pending, false)
+		}
+	}()
 	// Admitting, discarding or fork-replaying a header enqueues the
 	// matching chain.header event on the chain-level sequencer under
 	// c.mutex; register the drain so it is published once chainsyncMutex is
@@ -4559,7 +4605,8 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 		ls.metrics.forks.Add(1)
 	}
 	ls.recordPeerHeaderHistory(e)
-	if ls.shouldBufferHeaderEvent(e) {
+	if ls.shouldBufferHeaderEvent(e, pending) {
+		admissionResolved = true
 		return nil
 	}
 	// Allow us to build up a few blockfetch batches worth of headers,
@@ -4592,6 +4639,8 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 					"slot", e.Point.Slot,
 					"connection_id", e.ConnectionId.String(),
 				)
+				ls.completeChainsyncHeaderAdmission(e, pending, true)
+				admissionResolved = true
 				return nil
 			}
 			localTip := ls.chain.Tip()
@@ -4633,6 +4682,8 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 					"local_tip_slot", localTip.Point.Slot,
 					"connection_id", e.ConnectionId.String(),
 				)
+				ls.completeChainsyncHeaderAdmission(e, pending, true)
+				admissionResolved = true
 				return nil
 			}
 			// Header doesn't fit current chain tip. Clear stale queued
@@ -4679,6 +4730,10 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 					e,
 					headerTrusted,
 				)
+				if pointMatches(ls.chain.HeaderTip().Point, e.Point) {
+					ls.completeChainsyncHeaderAdmission(e, pending, true)
+					admissionResolved = true
+				}
 				return nil
 			}
 			// Fallback: after several consecutive mismatches where
@@ -4723,6 +4778,8 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 		e,
 		headerTrusted,
 	)
+	ls.completeChainsyncHeaderAdmission(e, pending, true)
+	admissionResolved = true
 	// Wait for additional block headers before fetching block bodies if we're
 	// far enough out from upstream tip
 	// Use security window as slot threshold if available
@@ -5671,7 +5728,7 @@ func (ls *LedgerState) tryResolveFork(
 				)
 			}
 			if reconciled {
-				ls.resetChainsyncResyncState()
+				ls.resetChainsyncResyncState(pending)
 				ls.setChainsyncState(SyncingChainsyncState)
 				return true, nil
 			}

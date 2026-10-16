@@ -158,3 +158,49 @@ func TestBuildDeferredIndexesContextWithProgressReportsOnlyMissingIndexes(
 	require.NoError(t, err)
 	require.True(t, exists, "the after callback follows the CREATE INDEX")
 }
+
+func TestBuildDeferredIndexesContextCommitsEachSQLiteIndex(t *testing.T) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+	require.NoError(t, store.DropDeferredIndexes())
+	missingBefore, err := store.MissingDeferredIndexes()
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, len(missingBefore), 2)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	var firstBuilt string
+	err = store.BuildDeferredIndexesContextWithProgress(
+		ctx,
+		nil,
+		func(name string, _ time.Duration) {
+			if firstBuilt != "" {
+				return
+			}
+			firstBuilt = name
+			cancel()
+		},
+	)
+	require.ErrorIs(t, err, context.Canceled)
+	require.Equal(t, missingBefore[0], firstBuilt)
+
+	pending, err := store.HasDeferredIndexesPending()
+	require.NoError(t, err)
+	require.True(t, pending)
+	missingAfter, err := store.MissingDeferredIndexes()
+	require.NoError(t, err)
+	require.NotContains(
+		t,
+		missingAfter,
+		firstBuilt,
+		"the completed index remains committed after cancellation",
+	)
+	require.NotEmpty(t, missingAfter, "cancellation leaves unfinished indexes to resume")
+
+	require.NoError(t, store.BuildDeferredIndexesContext(t.Context()))
+	pending, err = store.HasDeferredIndexesPending()
+	require.NoError(t, err)
+	require.False(t, pending)
+	missing, err := store.MissingDeferredIndexes()
+	require.NoError(t, err)
+	require.Empty(t, missing)
+}

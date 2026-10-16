@@ -5352,73 +5352,28 @@ corroborated and becomes that connection's own reference, like a known peer's
 previous frontier: its next update is accepted within `securityParam` of its
 claim even when the corroborating frontier sits up to `securityParam` below
 it, and the entry is cleared once the connection is accepted.
-A lone far peer is also accepted, on its own connected header chain. The
-selector requires more than `securityParam` consecutive delivered headers from
-the connection (`farTipClaim.run`), each naming the previous header's hash as
-its parent (`PeerTipUpdateEvent.ObservedPrevHash`, filled from the header by the
-ChainSync roll-forward handler), exactly one block and a later slot above it,
-with a block number no higher than the local block number plus `securityParam`
-plus the slot distance from the local tip (a chain holds at most one block per
-slot). A Byron epoch boundary block is the one header that adds no block: it
-carries its parent's block number, a later slot, and the epoch's first ordinary
-block may share its slot. The selector sees only the header type the peer sent
-(`PeerTipUpdateEvent.ObservedBoundary`), not an era, so it accepts a boundary
-block only after an ordinary header, at its parent's block number and a later
-slot, and counts it neither as progress nor as a break; two in a row, or one
-with any other block number, break the chain. A boundary-typed header therefore
-never adds height and cannot be repeated to stall a run or to dodge revocation.
-A repeated header neither advances nor resets the run; a regression, a skipped
-block, a different parent, a non-increasing slot or a delivery with no parent
-hash restarts it. Two connections delivering frontiers more than
-`securityParam` apart do not corroborate each other.
+A delivered frontier beyond the catch-up allowance is not rejected outright.
+`checkPeerTipPlausibleLocked` holds bounded far-tip evidence per connection. A
+far frontier is supported by another distinct connection within
+`securityParam`, or by more than `securityParam` consecutive connected headers.
+The connected-header check uses the delivered parent hash, block number, slot,
+and Byron boundary marker; a lone accepted frontier must continue that chain
+or the peer is removed. A lone frontier is not independent evidence for a new
+peer, and the check counts connections rather than operators.
 
-The accepted connection keeps its `farTipClaims` entry marked `lone`. A marked
-frontier is excluded from the reference frontier used to admit a new peer; if
-no independently admitted frontier remains, the local tip is the reference.
-The lone peer therefore cannot indirectly admit an unrelated peer, which would
-otherwise retain ordinary standing after the lone frontier was revoked. While
-its frontier stays beyond the catch-up allowance, every delivery must continue
-the frontier it last delivered by the same rules, or the peer is removed from
-the selector (`loneFrontierBrokenLocked`, then `RemovePeer`) and has to build a
-new run from nothing. After a RollBackward to a point inside the retained `k+1`
-delivered-header history, where the block number is known, the next header must
-continue that point's block number by one. A rollback
-to any other point leaves the block number unknown (zero), and an unknown
-height continues nothing: the next delivery, whatever it names and whether
-or not it is within the catch-up allowance, removes the peer, so a peer-chosen
-rollback point cannot carry an accepted frontier or a run to another height.
-The `lone` mark is cleared without removal only when the last delivered height
-is known and both it and the new delivery are within the allowance. The
-boundary-block allowance is not restored by a
-rollback: a rollback to a boundary block followed by a block sharing its slot
-also removes the peer. Removal also happens when the connection closes, which is
-what a header-verification failure at ledger apply ends in: the ledger recycles
-the connection and `ConnectionClosedEvent` calls `RemovePeer`. The selector
-holds this state in memory only, so no persisted state depends on a lone
-frontier.
-
-This is not verification. A header this far ahead of local ledger state has
-passed no signature check: epoch resolution defers before the opcert or KES
-signature, VRF proof or leader-eligibility checks run, and a peer signing with
-its own keys would pass the signature checks that need no ledger state. A lone
-peer can therefore fabricate a connected chain of more than `securityParam`
-headers with a claimed height up to the slot-distance bound and become a
-selectable peer ahead of honest ones. What bounds it: the claimed height is
-capped by the slot distance rather than arbitrary; every later delivery must
-continue the chain or the peer is removed; the ledger verifies every applied
-header, completing deferred verification at apply time, and recycles a
-connection whose header fails; and nothing is persisted from the selector. The
-cost to honest sync is time spent following that peer until the ledger reaches
-the first header that fails. The lone run accepts only a subset of what the
-peer's own previous frontier already allows once it is tracked (each header at
-most `securityParam` above the last): it adds the connected-chain requirement
-to a bound the selector applies to every known peer, and removes the peer when
-that requirement stops holding. The check counts connections, not operators, so
-corroboration is not a Sybil defence; acceptance only admits the frontier to
-chain selection. A rejection log line is still emitted for every header of an
-unaccepted far connection, and for a new peer whose reference sits above the
-local tip, which this path does not touch, so the line volume is not removed.
-
+Chainsync observations carry an admission ID and remain staged until the
+ledger admits the matching header. Far-tip claims and corroboration gathered
+while admission is pending stay in a bounded provisional view. Only commit
+after ledger admission may move the peer frontier into `peerTips`, evaluate
+selection, or emit a chain switch. Rejection, rollback, peer removal, and
+resynchronization discard affected provisional evidence and rebuild it from
+committed state, so an unadmitted header cannot corroborate a later selection.
+The synchronous observation hook reports accepted, pending, or rejected staging.
+Pending far-tip claims remain withheld from ledger ingress; rejected candidates
+terminate the protocol. The stale-tip and eagerness admission gates consult the
+staged frontier, including a new peer awaiting its first ledger admission.
+The ledger still verifies every applied header, completing deferred
+verification at apply time.
 Genesis exit may consult the advertised slot only through the separately
 documented delivered-frontier gate below. A RollBackward restores the
 delivered frontier from a bounded `k+1` header history; if the point is no longer retained, the
@@ -5836,17 +5791,42 @@ it. Dingo implements this as a **corroboration gate**
   ledger genuinely stalls. Observation happening before the apply gate is what
   avoids a deadlock (a peer must be observed to become corroborated). While the
   gate is active the observation is made **synchronously** with the gate
-  (`OuroborosConfig.ChainsyncObservePeerTip`, wired to update chain selection in
-  the roll-forward handler, skipping the async `PeerTipUpdateEvent`), so the
-  apply decision reflects the header currently being admitted rather than a tip
-  update that has not been processed yet — an async observation could otherwise
-  let a header slip through in the window before it revoked corroboration. The
+  (`OuroborosConfig.ChainsyncObservePeerTip`, wired to stage chain-selection
+  state in the roll-forward handler), so the apply decision reflects the header
+  currently being admitted rather than a tip update that has not been processed
+  yet — an async observation could otherwise let a header slip through in the
+  window before it revoked corroboration. A staged candidate cannot become a
+  selectable peer frontier until the ledger accepts a header at its point, but
+  it does count as corroboration evidence before admission: the gate checks the
+  applicant's own staged frontier and counts every other connection's staged
+  frontier, so connections from distinct hosts that stage the same points
+  open the apply gate for each other even when no peer has been admitted yet.
+  Staged peers share the selector's tracked-peer limit, with at most 256
+  pending header observations per peer. A staged candidate resolves with its
+  point rather than with the connection that delivered it, because a header
+  delivered by several connections is published to the ledger once. Admitting
+  the point promotes every staged candidate at that point, including the
+  copies whose publish was suppressed as duplicates and the copies of
+  apply-denied peers, each advancing its peer's frontier to that header only;
+  earlier withheld observations do not enter the committed frontier. Rejecting
+  the point removes the candidate at that point and everything staged after it
+  on every connection, since later headers depend on the rejected prefix, and
+  reevaluates selection before the rejection callback returns. Apply-denied
+  headers that are neither admitted nor rejected stay corroboration evidence
+  without steering selection. Ledger admission advances the tracked ChainSync
+  cursor and publishes the accepted peer-tip event. A delivery suppressed as a
+  duplicate, from a non-driver peer, or withheld by the apply gate counts as
+  client activity without moving the cursor, so the stall checker does not
+  recycle a peer that is following the chain. This staged
+  admission path applies when Genesis corroboration is disabled too, so a
+  rejected or discarded header cannot advance the selector frontier. The
   roll-**backward** path does the same via `OuroborosConfig.ChainsyncObserveRollback`
   (wired to apply the rollback into chain selection, skipping the async
   `PeerRollbackEvent`): a rollback trims the peer's observed frontier and can
   change its corroboration status, so the rollback apply decision must reflect
   the post-rollback state rather than pre-trim corroboration. With the gate
-  disabled both paths use the async path unchanged.
+  disabled, rollback keeps its existing async observation path; roll-forward
+  still stages and resolves tips around ledger admission.
 - The gate **denies application but does not disconnect** the fast source. Genesis
   wants the fast source kept connected so it can serve blocks as soon as
   corroboration arrives; demoting or dropping it would defeat the accelerator.
@@ -5957,9 +5937,13 @@ candidate, but does not independently corroborate that suffix.
 
 #### Genesis Limit on Patience
 
-The stall watchdog (`chainsync.CheckStalledClients`) only detects a silent
-peer: any header refreshes `LastActivity`, so a peer that advertises a far
-better tip and drips one valid header per 110 seconds never stalls, keeps a
+The stall watchdog (`chainsync.CheckStalledClients`) tracks forward delivery
+progress. An admitted header or a distinct forward header suppressed by
+cross-peer deduplication or an ingress gate refreshes `LastActivity`; replaying
+the same or an older suppressed point does not. A bounded per-client delivery
+watermark records that progress independently of the admitted cursor and
+rewinds with peer and local rollbacks. A peer that advertises a far better tip
+and drips one new valid header per 110 seconds still never stalls, keeps a
 ChainSync client slot, and keeps its misleading candidate in consideration.
 The Limit on Patience (LoP) bounds the delivery *rate* instead. Each tracked,
 non-observability client carries a leaky token bucket
@@ -6055,10 +6039,11 @@ signal instead. While a peer is paused it is never treated as stale and
 is not removed by stale-peer cleanup: a paused peer sends no tips, and aging it
 out would release the cap with no new evidence. The header's sender
 always counts as a candidate, even when stale, and a header from an untracked
-peer is admitted, so a lone peer is never held back. In Genesis mode the
-roll-forward and roll-backward handlers observe tips synchronously, so a new
-peer is tracked before its first header reaches the wait; an untracked sender
-is one chain selection declined. The limit does not hold
+peer is rejected while the cap is active. Roll-forward handlers synchronously
+stage tips before the wait, so a new peer has a provisional frontier before its
+first header reaches the gate. A lone staged peer is its own intersection and
+is not held back. Roll-backward handlers update the committed frontier
+synchronously in Genesis mode. The limit does not hold
 back a rollback. Two candidates that both run more than `k` past their fork
 point each pause at the limit, and neither is dropped for being silent: see
 the standoff rule below. A held header's wait happens inside the roll-forward
@@ -6379,7 +6364,7 @@ The `chainsync.State` tracks multiple concurrent chainsync clients:
 
 #### Header-Sync Strategy
 
-A configurable strategy (`chainsync.HeaderSyncStrategy`, `chainsync/strategy.go`) decides which eligible peer is permitted to drive ledger ingress when several peers offer valid next headers. The Ouroboros roll-forward handler first records the delivered cursor, tip, activity, and header count in the per-peer registry, then synchronously observes the tip in Genesis selection mode, so the corroboration apply gate and the Limit on Eagerness wait both see it. This ordering lets an immediate `ChainSwitchEvent` distinguish the delivering client from a reused zero-tip connection ID. After the resulting apply-eligibility decision, admitted headers enter cross-peer deduplication and fork detection, then `State.ShouldPublishHeader` applies the strategy before a `ChainsyncEvent` is published into the ledger:
+A configurable strategy (`chainsync.HeaderSyncStrategy`, `chainsync/strategy.go`) decides which eligible peer is permitted to drive ledger ingress when several peers offer valid next headers. The Ouroboros roll-forward handler synchronously stages the tip so the corroboration apply gate and the Limit on Eagerness wait both see it. After the resulting apply-eligibility decision, headers enter cross-peer deduplication and fork detection, then `State.ShouldPublishHeader` applies the strategy before ledger admission. Successful admission advances the delivered cursor, tip, activity, and header count before promoting the staged tip into chain selection. This ordering lets an immediate `ChainSwitchEvent` distinguish the delivering client from a reused zero-tip connection ID:
 
 - **primary** (default) — a single active peer drives ingress; new headers from any eligible peer publish, and the active peer replays a header first observed from another peer so it stays the contiguous driver. `ChainSelector` exclusively chooses replacements after a peer delivers a selectable tip; registry insertion never selects a peer, while eligibility demotion and connection removal may clear an invalid active peer but never promote a connected zero-tip fallback independently. A fallback's first valid new header can still enter the ledger queue and chain selection, whose switch event then makes that peer active. This keeps the ledger and blockfetch source aligned with the selector's liveness, eligibility, and Genesis-corroboration gates.
 - **parallel** — every eligible peer may supply headers concurrently. The first peer to report a header drives it; duplicates from other peers are deduplicated before ledger ingress (no replay), while its identity remains in the bounded cache.
@@ -6410,7 +6395,7 @@ Four rules shape the deferred-header path beyond the marker itself.
 
 - **Bounded set.** The deferred set holds at most `defaultMaxDeferredHeaderMarkers` entries. The rollback-horizon eviction is keyed to the applied tip, so it cannot bound the set while the header chain runs far ahead of a stalled tip; `boundDeferredHeaderValidation` runs after each admission and, once over the cap, evicts the lowest-slot entries and their `dh` blob markers. Concurrent bounds serialize their snapshot, durable floor write, and marker deletion so an older floor cannot overwrite a newer one. Startup restore applies the same cap before returning, persisting the raised floor before deleting excess markers. A non-Mithril block below the floor gets full header verification at apply with or without a marker, so eviction never skips a check. The floor is reloaded at startup.
 - **Size limits at header time.** `verifyHeaderSizeLimits` rejects a Shelley-and-later header declaring a body larger than `maxBlockBodySize` or whose encoding exceeds `maxBlockHeaderSize`, using the applied ledger's parameters. A header from an epoch later than the ledger tip's defers instead of failing, because the parameters may change at the boundary.
-- **Admission-verified replay.** With `BlockPipelineValidateEnabled`, a block whose admission verification completed is recorded in a bounded in-memory set keyed by slot and hash. The pipeline's nonce provider tells the validate stage to skip that slot, and block-pipeline replay accepts the block without the VRF/KES and operational-certificate re-check when the recorded hash matches exactly. A block with no record, a record for another hash at its slot, or a deferred admission is verified in full. The set is not persisted, so blocks admitted before a restart are verified in full.
+- **Admission-verified replay.** With `BlockPipelineValidateEnabled`, a block whose admission verification completed is recorded in a bounded in-memory set keyed by slot and hash. `decodeReadChainBatch` skips that slot's header check, and block-pipeline replay accepts the block without the VRF/KES and operational-certificate re-check when the recorded hash matches exactly. A block with no record, a record for another hash at its slot, or a deferred admission is verified in full. The set is not persisted, so blocks admitted before a restart are verified in full.
 - **Peer attribution.** The deferred marker records the connection that supplied the block (not persisted). When apply-time validation rejects the block with a verdict on the block itself, rather than a gap in local state, recovery publishes a `ChainsyncResyncEvent` with reason `deferred header validation failure` for that connection only. The chainsync handler treats it like the other peer-fault reasons: it clears that connection's observed header history, denies the peer in peer governance for the divergent-peer cooldown, and closes the connection.
 
 Header state verification resolves the producing pool's electing stake snapshot row once per header (`resolveElectingSnapshot`) for both the VRF-key cutoff and the leader stake.
@@ -6747,7 +6732,18 @@ un-crossable rollbacks; once the same point recurs past a threshold within a
 window it surfaces the stuck-divergence condition as a throttled operator
 error plus the `dingo_chainsync_unrecoverable_rollback_total` metric, since a
 node in this state cannot self-recover and needs operator intervention
-(e.g. re-bootstrapping from a Mithril snapshot). When the per-connection loop
+(e.g. re-bootstrapping from a Mithril snapshot). Local-tip progress discards
+the point's accumulated failures for every rollback reason, so a canonical
+node continuing to advance does not emit a false divergence diagnosis for a
+peer's fork. Without progress, protocol-constrained failures (exceeding K, the
+Mithril boundary, or the UTxO prune floor) escalate at the recurrence
+threshold. Peer-fork failures use the bounded local primary-chain membership
+check also used for historical headers: an absent point can advance the
+diagnosis immediately, while an on-chain point waits for the full tracking
+window. Unavailable chain state or a lookup error cannot produce a diagnosis.
+The membership result is cached for the unchanged local tip, avoiding repeated
+storage reads on the rollback-failure path.
+When the per-connection loop
 detector itself breaks a loop by skipping a rollback it can no longer cross,
 it feeds that same point-keyed tracker so the escalation and metric fire on
 the skip path too, rather than silently suppressing the rollback.
@@ -7488,6 +7484,11 @@ on both the submit endpoint and the evaluation endpoints, where
 an open per-era set of gouroboros types with no shared marker, so the
 complement cannot be enumerated: an unrecognized error stays a rejection.
 
+Each rebuild first evicts (`RemoveTxsByHash`) the transactions of blocks added
+since the previous rebuild, on every node, so a block produced elsewhere is not
+reported as invalid transactions dropped by revalidation. A rollback forgets
+the transactions of the blocks it removes before they are evicted.
+
 Ordinary mutations are serialized by a dedicated mutation gate, but chain-update
 revalidation does not hold that gate while it validates the whole pool. Both
 backends briefly snapshot their live state, build a private candidate while
@@ -7553,10 +7554,10 @@ make a long rebuild repeatedly lose its pinned ledger generation.
 ## DMQ Message Pool
 
 `dmq.MessageMempool` is the message mempool of CIP-0137's Decentralized
-Message Queue (primary use case: Mithril signature diffusion). It is a
-standalone package, not yet wired into `node.go`, the plugin host, or any
-network protocol client/server, and there is no DMQ feature flag or peer
-manager integration yet.
+Message Queue (primary use case: Mithril signature diffusion).
+`dmq.Stack` composes it with the local node-to-client protocols (see "DMQ
+Local Protocols" below) and `node.go` runs that stack when `dmq.enabled` is
+set.
 
 The wire types are not redefined here. `Message`, `MessagePayload`, and
 `OperationalCertificate` from CIP-0137's CDDL, along with their CBOR
@@ -7595,7 +7596,7 @@ sequence number, not a slice index, so TTL compaction never invalidates it)
 over the arrival-ordered log, mirroring CIP-0137's per-peer outstanding
 message-ids queue for the node-to-node message-submission mini-protocol
 (protocol 18) without implementing that protocol's blocking/non-blocking
-request state machine itself, which is not implemented yet. A peer new to
+request state machine itself, which a node-to-node transport must provide. A peer new to
 the pool sees the full retained backlog before anything arriving after it
 connects; `RemovePeer` releases a disconnected peer's cursor.
 
@@ -7611,6 +7612,67 @@ lock, matching the mempool package's event-publication rule. Their payloads
 are `AddMessageEvent` and `RemoveMessageEvent`, each carrying a 32-byte
 `MessageID` field. `EventBus` is optional (nil-safe) so the package is usable
 standalone ahead of node composition.
+
+### DMQ Local Protocols
+
+`dmq.Stack` is one DMQ topic instance running in the Cardano node's process: its
+own `MessageMempool`, its own `connmanager.ConnectionManager`, its own event
+bus, and one Unix socket (`dmq.socketPath`, distinct from the Cardano
+`socketPath`). The Cardano connection manager, event bus and handlers never see
+a DMQ connection. Connections negotiate the DMQ node-to-client handshake
+(`WithDMQ`) under the topic's network magic, which `dmq.networkMagic` overrides
+and otherwise comes from the topic and Cardano network (`dmq.TopicNetworkMagic`).
+Only the `mithril` topic is accepted. YAML, environment and CLI overrides retain
+their presence separately, so an explicit zero network magic is valid even on
+a custom network. `StackConfig.Now` supplies one clock for admission, notification
+feeding and message-pool expiry checks.
+Each connection carries local message submission (mini-protocol 14) and local
+message notification (mini-protocol 15).
+
+Submission validates in this order and replies with the CIP-0137 reject reason
+of the first check that fails: already expired (`expired`), the current KES
+period (`other` when it cannot be resolved, `invalid` for a message claiming a
+later period or an operational certificate whose KES window has ended), expiry
+beyond `dmq.messageTtl` (`invalid`), `MessageAuthenticator.VerifyMessage`
+(`invalid`), then `MessageMempool.Add` (`expired`, `invalid` for a mismatched
+ID, `alreadyReceived` for a duplicate, `other` when the pool is full). The
+gouroboros server's own TTL and authentication checks are disabled because
+`Stack` performs them, so that every refusal is counted by reason and an
+expired message is reported as expired rather than invalid.
+
+Notification gives each connection a `NextForPeer` cursor keyed by connection
+ID. A feeder goroutine per connection moves messages into the gouroboros
+notification server's queue (`Server.AddMessage`) and keeps a refused message
+pending, so a consumer with a full queue delays messages and loses only those
+that expire before delivery. Feeders wake on `MessageMempool.AddedSignal`, taken
+before each drain so an admission between the drain and the wait is not missed.
+A full queue and a finished server have no signal, so a feeder also wakes on a
+timer that starts at 100ms and doubles to 2s until it next delivers a message;
+a connection that never requests notifications keeps a full queue for its
+whole life. The
+server's authentication and TTL checks are disabled here because pooled
+messages were validated on admission. The connection manager publishes its
+closed event only for node-to-node connections, so the stack learns of a local
+disconnect through `ConnClosedFunc`, which stops the feeder and releases the
+cursor. A consumer that sends `MsgClientDone` keeps its connection open for
+submission; its feeder sees the notification server's terminal state on its
+next wake, exits and releases the cursor. The inbound-connection subscription that starts feeders uses the bus's
+blocking backpressure policy: a detached subscriber would leave every later
+connection without a feeder.
+
+Metrics are registered against the retained registry (not the rebuildable one,
+which a live restore unregisters) and are all prefixed `dingo_dmq_`:
+`messages_received_total`, `messages_expired_total`, `messages_sent_total`
+(messages queued for a notification consumer),
+`validation_failures_total{reason}`, `mempool_messages`, `mempool_bytes`, and
+`connections`. Every `reason` series exists from startup, so a `rate()` alert
+sees a reason before its first rejection.
+
+Not yet provided: the node-to-node message submission transport, its listener,
+topology, peer limits and ledger peer discovery, which the DMQ stack needs
+before it can exchange messages with other nodes. `n2n_port`, `listen_address`,
+`topology_file`, `min_peers` and `max_peers` are therefore not configuration
+keys yet.
 
 ### DMQ Message Authentication
 
@@ -7633,11 +7695,26 @@ callback required) and gates on a stake-weighted `StakeAuthority` interface
 rather than a boolean registered-pool set, so this codebase no longer needs
 its own copy.
 
-Nothing in the codebase constructs a `MessageAuthenticator` yet: driving one
-from an inbound message and then feeding an authenticated message to
-`MessageMempool.Add` needs protocol wiring that does not exist yet: nothing
-runs the node-to-node mini-protocol or composes the DMQ subsystem into
-`node.go`.
+`node_dmq.go` constructs the `MessageAuthenticator` for `dmq.Stack`, with a
+`StakeAuthority` that reads the pool's stake from the snapshot Praos leader
+election uses (`praos.StakeSnapshotEpoch` of the current epoch), so a message is
+accepted only from a pool that may currently forge blocks. The DMQ stack is not
+stopped by a live restore or truncate, so the `StakeAuthority` holds its own
+ledger reference under a lock: quiesce clears it before storage closes, and
+reinitialization sets the rebuilt ledger state. Clearing waits for a lookup in
+flight, so it is one of the quiesce stops bounded by the shutdown timeout: a
+lookup that does not finish escalates to a supervised restart rather than
+letting storage close beneath it. Submissions in between are rejected as
+`other`, because the current KES period cannot be resolved.
+
+Before authentication, admission resolves the current KES period from the
+wall-clock slot derived from confirmed era history. Unavailable ledger state or
+a wall clock beyond the confirmed forecast horizon fails closed (`other`). A
+message claiming a later period, or whose operational certificate's
+`maxKESEvolutions` window no longer covers the current period, is `invalid`:
+`VerifyMessage` checks the window only against the period the message claims,
+so without this an expired certificate's key could still sign accepted
+messages.
 
 `VerifyMessage` runs CIP-0137's full authentication chain against one
 message, in order: message-ID integrity, pool-ID derivation plus
@@ -7653,16 +7730,15 @@ identity before paying for an ed25519 verify and a KES verify. Expiry is a
 separate concern, handled by gouroboros' `TTLValidator` before
 `VerifyMessage` is called.
 
-Pool authorization is injected through `protocol/common.StakeAuthority`
-(`PoolActiveStake(poolKeyHash [28]byte) (uint64, error)`) at construction --
-`NewMessageAuthenticator` returns `ErrAuthenticatorMisconfigured` without
-one. Nothing adapts `ledger.LedgerView.GetPoolStake` to it yet; an adapter
-following the pattern `node_leios.go`'s stake adapters use for Leios
-committee formation would keep this codebase's ledger/database access out of
-gouroboros' dependency graph. The opcert issue-number cache has no automatic
-eviction; `RemoveKESOpCertCacheEntry` lets a caller drop a pool's baseline
-when it is no longer registered or active, mirroring
-`MessageMempool.RemovePeer`.
+The node's lock-protected `dmqStakeAuthority` supplies all three authoritative
+lookups required by `MessageAuthenticator`: active pool stake, current chain
+slot, and the latest on-chain opcert issue number. The callbacks resolve the
+replaceable ledger state while holding the authority's read lock, so a live
+restore or truncate cannot leave the long-lived DMQ stack reading a closed
+ledger. `NewMessageAuthenticator` rejects construction if any required lookup
+is missing. The authenticator's opcert issue-number cache has no automatic
+eviction; `RemoveKESOpCertCacheEntry` lets a caller drop a pool's baseline when
+it is no longer registered or active, mirroring `MessageMempool.RemovePeer`.
 
 ## Block Production
 
@@ -8512,6 +8588,19 @@ agent and local paths.
 Every value read off the agent socket is treated as untrusted input, since the
 socket is attacker-reachable whenever its filesystem path is:
 
+- Before dialing a filesystem socket, the client requires an actual socket in
+  a directory that is not group- or other-writable, and refuses other-write
+  access on the socket itself. After the dial it verifies that the socket and
+  its parent directory still identify the inspected filesystem objects,
+  authenticates the process UID from kernel peer credentials, and pins that
+  UID across reconnects. The protected directory prevents an untrusted local
+  user from choosing the first process whose UID becomes pinned. On Linux, an
+  `@`-prefixed address is an abstract socket with no filesystem metadata, so
+  its kernel-authenticated peer UID must match the node's effective UID. On
+  macOS, `@` is an ordinary filename character and the filesystem checks
+  apply. Protocol and mode checks still apply after transport authentication;
+  a later valid block signature is data integrity evidence, not the peer
+  identity check.
 - The initial handshake (`Client` dial + `Hello` read) is bounded by
   `HelloTimeout` (default 5s) in both size (`MaxHelloFrameLen`) and time.
 - The two halves of a frame are bounded separately. Waiting for a length
@@ -8563,7 +8652,9 @@ one absolute path before the first connection, then reuses that path for every
 reconnect; changing the process working directory cannot redirect later
 connections to another local agent. Absolute filesystem paths are cleaned,
 and Linux abstract socket addresses use Go's `@name` form and are kept as
-configured. Literal NUL-prefixed addresses are rejected as nonportable. The
+configured; because they lack an owner and mode, they are accepted only from
+the node's own effective UID. Literal NUL-prefixed addresses are rejected as
+nonportable. The
 client rejects an over-long resolved path at block-producer startup with an
 error that states the length and the limit.
 
@@ -8597,6 +8688,12 @@ Deferred Leios announcements retain the source connection's done channel.
 Insertion rejects a closed source and releases closed entries under the
 deferral mutex; a delayed close event removes only closed lifetimes, preserving
 announcements from a replacement connection with the same address pair.
+
+LeiosNotify's announcement payload is CBOR `any`, so a well-formed item is not
+necessarily a Dijkstra ranking-block header. Dingo drops an unsupported item
+without applying the invalid-announcement penalty; malformed CBOR remains
+subject to the bounded per-connection penalty. This keeps an opaque announcement
+from closing the shared bearer and canceling ChainSync.
 
 After header validation, at most two distinct ranking-block announcements are
 retained for each slot/issuer election within the announcement retention window.
@@ -9481,7 +9578,16 @@ complete file nor a resumed partial can cross source roots. Each response is
 bounded by the configured initial-era chunk layout: primary-index slots come
 from the initial epoch size, the primary index fixes the exact secondary-index
 length, and the block file is bounded by the number of possible block entries
-times the block-fetch protocol's encoded-block limit. Loading stops after the
+times the block-fetch protocol's encoded-block limit. One import-wide budget
+also counts bytes across retries and workers. Its transfer bound follows the
+requested `tip.json` chunk range, the bounded prefetch window, the retry count,
+and those format limits; its active cache bound covers the worker window plus
+the retained ready chunk. Writes check free space on the cache filesystem and
+leave one maximum block-fetch message available. Staging is removed after all
+workers stop on success or error. The HTTP transport ignores proxy settings,
+checks every initial and redirected URL, and checks all DNS answers again when
+dialing. Private and special-use destinations fail closed; loopback HTTP uses a
+separate local policy that accepts only loopback resolutions. Loading stops after the
 chunk that reaches the `tip.json`
 slot, whose hash must then match the loaded block, or at the first chunk the
 root does not publish; a chunk whose `.chunk` exists without its indexes is an
@@ -16190,12 +16296,15 @@ before. When `LedgerStateConfig.BlockPipelineEnabled` is set (config
 `github.com/blinklabs-io/gouroboros/pipeline.BlockPipeline` with decode
 workers set by `blockPipelineWorkerCount()` (`ledger/state.go`) — the host's
 `GOMAXPROCS`, floored at `blockPipelineMinWorkers` (2, the prior fixed count)
-and capped at `blockPipelineMaxWorkers` (8) — and validation disabled
-(`ValidateWorkers: 0`) unless `BlockPipelineValidateEnabled` is also set, in
-which case validate workers use the same CPU-scaled count. Each gathered batch
+and capped at `blockPipelineMaxWorkers` (8). The pipeline runs in
+gouroboros' trusted decode-only mode, which gives the persisted blocks the
+ledger reads back from the chain no validation or ledger-apply stage, while
+the pipeline still re-sequences decoded results into submission order; with
+`BlockPipelineValidateEnabled` the header cryptography is checked by
+`decodeReadChainBatch` itself (see Phase 3 below). Each gathered batch
 of raw blocks (`decodeReadChainBatch`) is submitted to the pipeline from a
 separate goroutine while the caller drains `Results()` in submission order —
-the pipeline's apply stage guarantees this ordering regardless of which
+the pipeline's re-sequencing guarantees this ordering regardless of which
 worker decodes first. Draining concurrently is required: `Submit` waits once
 `MaxPendingBlocks` sequences are outstanding, and once the `Results()`
 buffer is full the apply stage completes no further sequences until results
@@ -16371,36 +16480,40 @@ outright (checked with `Config.isMusashiNetwork()`, the same predicate used
 by the other Musashi-only checks), so this can only be reached by an
 embedder that builds a `LedgerStateConfig` directly and skips validation.
 
-**Phase 3: parallel header-crypto validation.**
+**Phase 3: replay header-crypto validation.**
 `LedgerStateConfig.BlockPipelineValidateEnabled` (config
 `blockPipelineValidateEnabled` / `DINGO_BLOCK_PIPELINE_VALIDATE_ENABLED` /
 `--block-pipeline-validate-enabled`; default off) requires
-`BlockPipelineEnabled` and adds two checks to replay:
+`BlockPipelineEnabled` and adds a check to replay: after the pipeline has
+decoded a block, `decodeReadChainBatch` calls
+`verifyBlockHeaderStatelessCryptoWithCache`, which verifies the VRF proof and
+KES signature, the OpCert cold-key signature and the `MaxKESEvolutions`
+expiry. OpCert counter monotonicity remains a stateful read-before-write
+check in `ledgerProcessBlock`.
 
-- gouroboros validate workers verify the block-local VRF proof, KES signature,
-  and OpCert cold-key signature with `ledger.VerifyBlock`;
-- after an item passes that stage, `decodeReadChainBatch` calls
-  `verifyOpCertHeaderCrypto`, which repeats the cold-key signature check as
-  defense in depth and adds the `MaxKESEvolutions` expiry check the generic
-  stage cannot perform. OpCert counter monotonicity remains a stateful
-  read-before-write check in `ledgerProcessBlock`.
+The check runs in Dingo's loop and not in the pipeline because gouroboros'
+validate stage treats any failure, including a nonce that is not yet known,
+as fatal to ordered processing: it rejects the item and stops the pipeline,
+which every attempt of `ledgerProcessBlocks` shares. Dingo instead defers a
+missing nonce to the authoritative apply-time check and reports a genuinely
+invalid header as a `headerValidationError` without stopping the pipeline. The
+cost is that the checks of one batch run one block at a time. The pipeline's
+decode stage has already checked the body hash. `verifyBlockHeaderHex` passes
+`VerifyConfig` flags that skip its body-hash, transaction, stake-pool and
+block-limit checks, because it is given no protocol parameters or ledger state
+and gouroboros fails closed when block limits are required without them; those
+rules, including the Conway per-block reference-script total, run in
+`ledgerProcessBlock`. Left on, the block-limit step rejects every Conway block.
 
-The generic stage receives no protocol parameters or ledger state, so
-`blockPipelineVerifyConfig` skips its body-hash, transaction, stake-pool, and
-block-limit checks. The pipeline's decode stage has already checked the body
-hash; the other rules, including the Conway per-block reference-script total,
-run in `ledgerProcessBlock`. Left on, the block-limit
-step rejects every Conway block that carries a transaction.
-
-`NewLedgerState` fails startup when this stage is enabled without a nonzero
-Shelley `slotsPerKESPeriod`; otherwise the generic stage would reject every
-Praos block with a captured zero value.
+`NewLedgerState` fails startup when this check is enabled without a nonzero
+Shelley `slotsPerKESPeriod`; otherwise it would reject every Praos block with a
+captured zero value.
 
 This replay check is defense in depth, not a substitute for admission-time
 validation. `handleEventChainsyncBlockHeaderWithPending` and
 `handleEventBlockfetchBlock` retain the serial header gate. This ordering is
 required because blockfetch persistence advances `ls.chain` before the
-ledger reader reaches the validate stage, and `ls.chain` is consumed by the
+ledger reader reaches the replay header check, and `ls.chain` is consumed by the
 downstream blockfetch server and UTxO RPC sync/watch readers. A block that has
 not passed admission crypto must therefore never enter that chain.
 
@@ -16522,22 +16635,22 @@ header pipeline owner. The node sets it from the
 `DINGO_BLOCKFETCH_LOW_WATERMARK_ENABLED` environment variable, or the
 `--blockfetch-low-watermark-enabled` flag.
 
-`blockPipelineEta0Provider` reads the immutable epoch-cache snapshot directly;
-it does not forecast, mutate the cache, or rebuild `HardForkSummary` per
-block. `decodeReadChainBatch` enforces pipeline results only when the serial
-path has enough state to make the same decision: validation is enabled, the
-slot is above the Mithril trust boundary, and the published epoch cache has a
-nonce for the slot. Byron, trusted historical replay, Mithril-covered blocks,
-and missing/deferred nonce states ignore the generic stage's validation
-outcome and continue through their existing trust/deferred-validation paths.
-This keeps pipeline mode acceptance-equivalent to serial mode instead of
-turning an unavailable nonce into a rejected chain.
+`decodeReadChainBatch` enforces the header check only when the serial path
+has enough state to make the same decision: validation is enabled, the slot is
+above the Mithril trust boundary, and the published epoch cache has a nonce for
+the slot. Byron, trusted historical replay, Mithril-covered blocks, admission-
+verified blocks, and missing/deferred nonce states skip the check and continue
+through their existing trust/deferred-validation paths. This keeps pipeline
+mode acceptance-equivalent to serial mode instead of turning an unavailable
+nonce into a rejected chain.
 
 The pipeline's bounded `errorsChan` is continuously drained by
-`drainBlockPipelineErrors` for the lifetime of `LedgerState`; otherwise the
-workers would deadlock after enough deferred nonce-state errors. The drain
-classifies `errBlockPipelineEta0Unavailable`, `errHeaderVerificationDeferred`,
-and a stage worker's own `context.Canceled`/`context.DeadlineExceeded` at
+`drainBlockPipelineErrors` for the lifetime of `LedgerState`. Workers report
+errors without blocking and drop one when the channel is full, so the drain
+keeps failing blocks, such as undecodable ones, counted and logged; the
+counters are best effort and not an exact tally.
+The drain classifies `errBlockPipelineEta0Unavailable`,
+`errHeaderVerificationDeferred`, and a stage worker's own `context.Canceled`/`context.DeadlineExceeded` at
 debug level, each under its own counter, and reports other stage errors at
 error level. When one stage worker falls behind its siblings, `Submit` waits
 until the apply stage has room below `MaxPendingBlocks` rather than
@@ -16590,8 +16703,8 @@ failure handling — reproduced live, with the identical log signature
 `"failed to queue header from fork extension"` /
 `"header queue at maximum capacity"`), under `BlockPipelineValidateEnabled`,
 under decode-only phase 1, and under the pre-pipeline baseline alike during
-the same investigation; the validate stage's extra CPU cost (two dedicated
-VRF/KES workers) makes the underlying throughput mismatch easier to hit in
+the same investigation; the former validate stage's extra CPU cost (two
+dedicated VRF/KES workers) made the underlying throughput mismatch easier to hit in
 practice, but is not what causes it. The outage is bounded, not permanent:
 `internal/chainsyncrecycler`'s local-tip-plateau watchdog
 (`shouldRecycleLocalTipPlateau`, threshold `max(2*StallTimeout, 4m)`,
@@ -16757,7 +16870,7 @@ chainsync per-connection event handling (`handleEventChainsyncRollback`,
 `tryResolveFork` in `ledger/chainsync.go`) — never from `ledgerProcessBlocks`
 itself. Chain-selection can decide to abandon a fork while the reader
 goroutine has already gathered and submitted a batch of blocks — from that
-very fork — to the pipeline's decode/validate workers and is blocked
+very fork — to the pipeline's decode workers and is blocked
 draining `Results()` for it. `drainBlockPipelineBeforeRollback`
 (`ledger/state.go`) closes part of that window: called near the top of
 `rollbackChainAndStateDeferred`, before `ls.chain.Rollback`, it waits (via
@@ -16956,7 +17069,7 @@ unguarded window between gathering raw blocks and submitting them.
 
 What this still does *not* close: `drainBlockPipelineBeforeRollback` (even
 combined with `blockPipelineGatherMutex`) only waits for `ls.blockPipeline`'s
-own decode/validate stages plus the reader's own not-yet-submitted gather,
+own decode stage plus the reader's own not-yet-submitted gather,
 not for `ledgerProcessBlocksFromSource`'s subsequent DB-apply of a batch
 already drained from the pipeline before the wait started — that step runs
 entirely outside `blockPipeline` by decision, not by omission (see "Why
@@ -17009,29 +17122,34 @@ nothing.
 
 Five facts about the two sides make the wiring unsafe rather than merely
 awkward. The first three are properties of
-`gouroboros/pipeline.ApplyStage` at the pinned version and are pinned by
-contract tests in `ledger/block_pipeline_apply_contract_test.go`, so a
-gouroboros bump that changes any of them fails CI instead of silently
-invalidating this decision.
+`gouroboros/pipeline` at the pinned version and are pinned by the contract
+tests in `ledger/block_pipeline_apply_contract_test.go`, so a gouroboros bump
+that changes any of them fails CI instead of silently invalidating this
+decision. They changed in gouroboros v0.213: the earlier apply stage ignored a
+failed item and carried on, which was itself a reason not to wire a ledger to
+it, and the stage now stops. The decision therefore rests on facts 4 and 5 and
+on the first three below, as they now stand.
 
-1. **`ApplyFunc` does not stop on failure.** `ApplyStage.maybeApply` records
-   a failing item's error on the item and pushes it onto the errors channel,
-   then applies every following block regardless. There is no option to halt
-   the sequence. A ledger must stop: block N+1's validation and delta apply
-   read state that block N was supposed to have written.
-   (`TestPipelineApplyFuncErrorDoesNotStopLaterBlocks`.)
-2. **A skipped item still consumes its sequence slot.** An item that failed
-   decode or validation is not applied, but `nextSequence` advances and the
-   *next* block is applied normally. `decodeReadChainBatchWithError` does the
-   opposite on purpose: any decode or enforced-validation failure discards
-   the whole batch, so a partially-decoded batch is never handed downstream.
-   Wiring apply would replace batch-discard with apply-the-rest, a
-   chain-continuity violation.
-   (`TestPipelineApplyFuncSkipsUndecodableBlockButAppliesTheNext`.)
-3. **The failure never reaches the submitter synchronously.** An
-   `ApplyFunc` error reaches `BlockItem.ApplyError()` and
-   `BlockPipeline.Errors()`, which `drainBlockPipelineErrors` reads for
-   logging and counters only. Dingo's retry contract requires
+1. **A normal pipeline can only run with ledger apply wired in.** A pipeline
+   that applies blocks requires an era resolver, nonce and KES settings, a
+   verification-config provider, a chain-context validator and an `ApplyFunc`,
+   and refuses to start without them. The mode dingo uses cannot carry an
+   `ApplyFunc`: trusted decode-only rejects one at start.
+   Using the pipeline for decode therefore means leaving apply out.
+   (`TestPipelineModesRejectAnApplyFunc`.)
+2. **A rejected item stops ordered processing.** A decode or validation
+   failure, or an `ApplyFunc` error, ends the pipeline's ordered stage and
+   every later `Submit` fails, with the results committed before it preserved.
+   This is the stop a ledger needs, and it reverses the earlier behavior, but
+   it also makes one bad block fatal to the pipeline shared by every attempt
+   of `ledgerProcessBlocks`, which is why header cryptography is checked in
+   `decodeReadChainBatch` and not in the pipeline (see Phase 3). Trusted
+   decode-only mode is the exception: a decode error stays on the item.
+   (`TestPipelineRejectedDecodeIsNotFatalInTrustedMode`.)
+3. **The failure reaches the submitter only as a failed `Submit`.** A rejection
+   surfaces as an error from a later `Submit`, as `BlockItem.ApplyError()` and
+   on `BlockPipeline.Errors()`, not as a value dingo's retry contract can
+   return synchronously. Dingo's retry contract requires
    `errRestartLedgerPipeline` and `errStaleChainIterator` to return
    synchronously up to `ledgerProcessBlocks`, which then waits for the
    attempt's reader goroutine to fully exit before starting the next attempt
@@ -17062,8 +17180,8 @@ with the rollback anyway. That is safe today precisely because a nil
 `ApplyFunc` means the barrier only covers decode and re-sequencing, while
 the real apply stays behind the reader goroutine's in-order
 `readChainResult` handshake, which the rollback path holds via
-`blockPipelineGatherMutex`. `WaitForDrain` does cover `ApplyFunc`
-(`TestPipelineWaitForDrainCoversApplyFunc`), so with real apply wired in,
+`blockPipelineGatherMutex`. `WaitForDrain` covers `ApplyFunc` upstream, so
+with real apply wired in,
 that same timeout would be a bounded wait on database work — and expiring
 it would let a rollback run while blocks were still being applied to the
 ledger, which is the "mutation survives a rollback" class.
@@ -17084,7 +17202,8 @@ restart-tolerant — a consensus-critical rewrite of transaction boundaries,
 epoch rollover and retry semantics. Neither is warranted by throughput,
 since the parallelizable work is already parallel. If a contract test in
 `ledger/block_pipeline_apply_contract_test.go` starts failing after a
-gouroboros bump, revisit this decision rather than the test.
+gouroboros bump, revisit this decision rather than the test; this is what
+happened at v0.213, and facts 1 to 3 above are the result of that review.
 
 ### Ledger-Tip/Chain-Iterator Rollback Synchronization
 

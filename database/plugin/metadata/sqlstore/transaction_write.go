@@ -299,7 +299,11 @@ func utxoIdentityKey(txID []byte, outputIdx uint32) string {
 	return string(txID) + ":" + strconv.FormatUint(uint64(outputIdx), 10)
 }
 
-const utxoBatchSize = 8
+const (
+	// 32 UTxOs use 480 bind parameters, below SQLite's conservative limit.
+	utxoInsertBatchSize = 32
+	utxoSpendBatchSize  = 8
+)
 
 func (s *Store) insertUtxoModelsChecked(
 	ctx context.Context,
@@ -322,8 +326,8 @@ func (s *Store) insertUtxoModelsChecked(
 		return inserted, nil
 	}
 
-	for start := 0; start < len(utxos); start += utxoBatchSize {
-		end := min(start+utxoBatchSize, len(utxos))
+	for start := 0; start < len(utxos); start += utxoInsertBatchSize {
+		end := min(start+utxoInsertBatchSize, len(utxos))
 		batch := utxos[start:end]
 		query := insertUtxoBatchQuery(len(batch))
 		args := make([]any, 0, len(batch)*15)
@@ -1019,8 +1023,8 @@ func (s *Store) setTransactionWithAccumulator(
 					Idx:  input.Index(),
 				})
 			}
-			for start := 0; start < len(uniqueConsumed); start += utxoBatchSize {
-				end := min(start+utxoBatchSize, len(uniqueConsumed))
+			for start := 0; start < len(uniqueConsumed); start += utxoSpendBatchSize {
+				end := min(start+utxoSpendBatchSize, len(uniqueConsumed))
 				batch := uniqueConsumed[start:end]
 				updated := make(map[string]struct{}, len(batch))
 				if s.dialect.Name() == "sqlite" && len(batch) > 1 {
