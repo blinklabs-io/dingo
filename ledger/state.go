@@ -15130,7 +15130,8 @@ func (l *evaluationLimiter) acquire(ctx context.Context) (func(), error) {
 	source, _ := ctx.Value(evaluationSourceContextKey{}).(string)
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if l.total >= l.maxTotal || l.perSource[source] >= l.maxPerSource {
+	if l.total >= l.maxTotal ||
+		(source != "" && l.perSource[source] >= l.maxPerSource) {
 		return nil, ErrEvaluationBusy
 	}
 	l.total++

@@ -14042,6 +14042,27 @@ func TestEvaluationAdmissionPreservesCapacityAcrossSources(t *testing.T) {
 	releaseB()
 }
 
+func TestEvaluationAdmissionUnidentifiedCallsUseGlobalCapacity(t *testing.T) {
+	t.Parallel()
+
+	limiter := newEvaluationLimiter(4)
+	releases := make([]func(), 0, 4)
+	for range 4 {
+		release, err := limiter.acquire(t.Context())
+		require.NoError(t, err)
+		releases = append(releases, release)
+	}
+	defer func() {
+		for _, release := range releases {
+			release()
+		}
+	}()
+
+	_, err := limiter.acquire(t.Context())
+	require.ErrorIs(t, err, ErrEvaluationBusy)
+	require.Equal(t, 4, limiter.total)
+}
+
 func TestEvaluationCapacityReservesConsensusProcessor(t *testing.T) {
 	t.Parallel()
 
