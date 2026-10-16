@@ -121,13 +121,20 @@ func TestValueLogGCMetricsReportReclaimedBytes(t *testing.T) {
 	go store.blobGc(ticks, stop)
 	const maxGCCycles = 32
 	var completedCycles float64
+	gcDeadline := time.Now().Add(time.Minute)
+	waitForNoRewrite := func(after float64) {
+		remaining := time.Until(gcDeadline)
+		if remaining <= 0 {
+			t.Fatal("Badger GC did not finish within one minute")
+		}
+		require.Eventually(t, func() bool {
+			return testutil.ToFloat64(store.gcMetrics.noRewrite) > after
+		}, remaining, 10*time.Millisecond)
+	}
 	for cycle := 0; cycle < maxGCCycles &&
 		testutil.ToFloat64(store.gcMetrics.successes) == 0; cycle++ {
 		ticks <- time.Time{}
-		require.Eventually(t, func() bool {
-			return testutil.ToFloat64(store.gcMetrics.noRewrite) >
-				completedCycles
-		}, time.Minute, 10*time.Millisecond)
+		waitForNoRewrite(completedCycles)
 		completedCycles = testutil.ToFloat64(store.gcMetrics.noRewrite)
 	}
 	require.Positive(t, testutil.ToFloat64(store.gcMetrics.successes))
@@ -139,9 +146,7 @@ func TestValueLogGCMetricsReportReclaimedBytes(t *testing.T) {
 	)
 	completedCycles = testutil.ToFloat64(store.gcMetrics.noRewrite)
 	ticks <- time.Time{}
-	require.Eventually(t, func() bool {
-		return testutil.ToFloat64(store.gcMetrics.noRewrite) > completedCycles
-	}, time.Minute, 10*time.Millisecond)
+	waitForNoRewrite(completedCycles)
 	stopOnce.Do(func() { close(stop) })
 	store.gcWg.Wait()
 	require.Zero(t, testutil.ToFloat64(store.gcMetrics.consecutive))
