@@ -52,25 +52,85 @@ func (b *lockedBuffer) String() string {
 // blockCarryingTx builds a Conway block whose only transaction is txBytes.
 func blockCarryingTx(t *testing.T, txBytes []byte) models.Block {
 	t.Helper()
-	var parts []cbor.RawMessage
-	_, err := cbor.Decode(txBytes, &parts)
+	return blockCarryingTxs(t, 100, txBytes)
+}
+
+func blockCarryingTxs(
+	t *testing.T,
+	slot uint64,
+	transactions ...[]byte,
+) models.Block {
+	t.Helper()
+	bodies := make([]cbor.RawMessage, 0, len(transactions))
+	witnesses := make([]cbor.RawMessage, 0, len(transactions))
+	for _, txBytes := range transactions {
+		var parts []cbor.RawMessage
+		_, err := cbor.Decode(txBytes, &parts)
+		require.NoError(t, err)
+		require.GreaterOrEqual(t, len(parts), 2)
+		bodies = append(bodies, parts[0])
+		witnesses = append(witnesses, parts[1])
+	}
+	body, err := cbor.Encode(bodies)
 	require.NoError(t, err)
-	require.GreaterOrEqual(t, len(parts), 2)
-	body, err := cbor.Encode([]cbor.RawMessage{parts[0]})
-	require.NoError(t, err)
-	witnesses, err := cbor.Encode([]cbor.RawMessage{parts[1]})
+	witnessBytes, err := cbor.Encode(witnesses)
 	require.NoError(t, err)
 	raw := testutil.BuildBlockBytesFromComponents(
 		t,
 		gledger.BlockTypeConway,
-		100,
+		slot,
 		1,
 		body,
-		witnesses,
+		witnessBytes,
 		[]byte{0xa0},
 		[]byte{0x80},
 	)
-	return models.Block{Type: gledger.BlockTypeConway, Cbor: raw, Slot: 100}
+	return models.Block{Type: gledger.BlockTypeConway, Cbor: raw, Slot: slot}
+}
+
+func TestChainUpdateRestoresRolledBackTransactionsInLedgerOrder(t *testing.T) {
+	t.Parallel()
+	validator := newMockValidator()
+	m, err := NewMempool(MempoolConfig{
+		Logger:          slog.Default(),
+		EventBus:        event.NewEventBus(nil, nil),
+		PromRegistry:    prometheus.NewRegistry(),
+		Validator:       validator,
+		MempoolCapacity: 1024 * 1024,
+	})
+	require.NoError(t, err)
+	require.NoError(t, m.Start(context.Background()))
+	t.Cleanup(func() {
+		require.NoError(t, m.Stop(context.Background()))
+		m.eventBus.Close()
+	})
+	first, firstHash, err := buildBenchmarkTransaction(
+		benchmarkSeedHash(30, 1), 0, 1, 1,
+	)
+	require.NoError(t, err)
+	second, secondHash, err := buildBenchmarkTransaction(
+		benchmarkSeedHash(30, 2), 0, 2, 1,
+	)
+	require.NoError(t, err)
+	third, thirdHash, err := buildBenchmarkTransaction(
+		benchmarkSeedHash(30, 3), 0, 3, 1,
+	)
+	require.NoError(t, err)
+
+	m.noteChainUpdate(chainUpdate(chain.ChainRollbackEvent{
+		RolledBackBlocks: []models.Block{
+			blockCarryingTxs(t, 101, third),
+			blockCarryingTxs(t, 100, first, second),
+		},
+	}))
+	wantOrder := []string{firstHash, secondHash, thirdHash}
+	require.Equal(t, wantOrder, m.pendingRolledBackOrder)
+	require.NoError(t, m.rebuildAfterChainUpdate(context.Background()))
+	transactions := m.Transactions()
+	require.Len(t, transactions, len(wantOrder))
+	for i, hash := range wantOrder {
+		require.Equal(t, hash, transactions[i].Hash)
+	}
 }
 
 func newConfirmedBlockMempool(
@@ -151,6 +211,78 @@ func TestChainUpdateKeepsTransactionOfARolledBackBlock(t *testing.T) {
 	}))
 	require.NoError(t, m.rebuildAfterChainUpdate(context.Background()))
 
+	_, ok := m.GetTransaction(hash)
+	require.True(t, ok)
+	require.Len(t, m.Transactions(), 1)
+}
+
+func TestChainUpdateRestoresTransactionRolledBackAfterEviction(t *testing.T) {
+	t.Parallel()
+	m, v, _, txBytes, hash := newConfirmedBlockMempool(t)
+	block := blockCarryingTx(t, txBytes)
+
+	v.mu.Lock()
+	v.failHashes[hash] = true
+	v.mu.Unlock()
+	m.noteChainUpdate(chainUpdate(chain.ChainBlockEvent{Block: block}))
+	require.NoError(t, m.rebuildAfterChainUpdate(context.Background()))
+	_, ok := m.GetTransaction(hash)
+	require.False(t, ok)
+
+	v.mu.Lock()
+	delete(v.failHashes, hash)
+	v.mu.Unlock()
+	m.noteChainUpdate(chainUpdate(chain.ChainRollbackEvent{
+		RolledBackBlocks: []models.Block{block},
+	}))
+	require.NoError(t, m.rebuildAfterChainUpdate(context.Background()))
+
+	_, ok = m.GetTransaction(hash)
+	require.True(t, ok)
+}
+
+func TestChainUpdateRejectsInvalidTransactionFromRolledBackBlock(t *testing.T) {
+	t.Parallel()
+	m, v, _, txBytes, hash := newConfirmedBlockMempool(t)
+	block := blockCarryingTx(t, txBytes)
+
+	v.mu.Lock()
+	v.failHashes[hash] = true
+	v.mu.Unlock()
+	m.noteChainUpdate(chainUpdate(chain.ChainBlockEvent{Block: block}))
+	require.NoError(t, m.rebuildAfterChainUpdate(context.Background()))
+	m.noteChainUpdate(chainUpdate(chain.ChainRollbackEvent{
+		RolledBackBlocks: []models.Block{block},
+	}))
+	require.NoError(t, m.rebuildAfterChainUpdate(context.Background()))
+
+	_, ok := m.GetTransaction(hash)
+	require.False(t, ok)
+}
+
+func TestChainUpdateRetriesUnsettledRolledBackTransaction(t *testing.T) {
+	t.Parallel()
+	m, v, _, txBytes, hash := newConfirmedBlockMempool(t)
+	block := blockCarryingTx(t, txBytes)
+
+	m.RemoveTransaction(hash)
+	v.mu.Lock()
+	v.errorsByHash[hash] = ErrPendingStateMoved
+	v.mu.Unlock()
+	m.noteChainUpdate(chainUpdate(chain.ChainRollbackEvent{
+		RolledBackBlocks: []models.Block{block},
+	}))
+	require.ErrorIs(
+		t,
+		m.rebuildAfterChainUpdate(context.Background()),
+		ErrPendingStateMoved,
+	)
+	require.Equal(t, []string{hash}, m.pendingRolledBackOrder)
+
+	v.mu.Lock()
+	delete(v.errorsByHash, hash)
+	v.mu.Unlock()
+	require.NoError(t, m.rebuildAfterChainUpdate(context.Background()))
 	_, ok := m.GetTransaction(hash)
 	require.True(t, ok)
 }
