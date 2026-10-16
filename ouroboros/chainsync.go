@@ -1499,55 +1499,43 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 			Point:       point,
 			BlockNumber: v.BlockNumber(),
 		}
+		var peerTipUpdate *chainselection.PeerTipUpdateEvent
 		if ingressEligible {
-			// Update the tracked tip before synchronous chain selection. Genesis
-			// corroboration can select this peer from the callback, and the
-			// resulting switch must see a delivered tip.
-			if o.chainsyncState != nil {
-				o.chainsyncState.UpdateClientTipWithoutDedup(
-					ctx.ConnectionId,
-					point,
-					tip,
-				)
-			}
-			peerTipUpdate := chainselection.PeerTipUpdateEvent{
+			update := chainselection.PeerTipUpdateEvent{
 				ConnectionId: ctx.ConnectionId,
 				Tip:          tip,
 				ObservedTip:  observedTip,
 				VRFOutput:    vrfOutput,
 				PraosView:    praosView,
+				AdmissionID:  o.chainsyncAdmissionSequence.Add(1),
 				// The parent hash is what lets the selector tell a connected
 				// header chain from a sequence of advancing numbers.
 				ObservedPrevHash: v.PrevHash().Bytes(),
 				ObservedBoundary: blockType == gledger.BlockTypeByronEbb,
 			}
-			// If the hook handles it synchronously (Genesis selection mode,
-			// so the apply and eagerness gates below reflect this header), skip
-			// the async publish to avoid a double update; otherwise publish for
-			// the async chain-selection and peergov subscribers.
 			disposition := chainselection.PeerTipUpdateUnhandled
 			if o.config.ChainsyncObservePeerTip != nil {
-				disposition = o.config.ChainsyncObservePeerTip(peerTipUpdate)
+				disposition = o.config.ChainsyncObservePeerTip(update)
 			}
 			switch disposition {
 			case chainselection.PeerTipUpdateUnhandled:
+				if o.config.ChainsyncResolvePeerTip != nil {
+					ingressEligible = false
+					break
+				}
+				peerTipUpdate = &update
 				o.eventBus.Publish(
 					chainselection.PeerTipUpdateEventType,
-					event.NewEvent(
-						chainselection.PeerTipUpdateEventType,
-						peerTipUpdate,
-					),
+					event.NewEvent(chainselection.PeerTipUpdateEventType, update),
 				)
 			case chainselection.PeerTipUpdatePending:
 				ingressEligible = false
 			case chainselection.PeerTipUpdateAccepted:
+				peerTipUpdate = &update
 			case chainselection.PeerTipUpdateRejected:
 				return errChainsyncCandidateRejected
 			default:
-				return fmt.Errorf(
-					"invalid peer tip disposition: %d",
-					disposition,
-				)
+				return fmt.Errorf("invalid peer tip disposition: %d", disposition)
 			}
 		}
 		// Apply-eligibility, evaluated after observation so it reflects this
@@ -1609,6 +1597,9 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 			o.updateChainsyncMetrics(ctx.ConnectionId, tip)
 			return nil
 		}
+		if o.chainsyncState != nil {
+			o.chainsyncState.RecordClientDelivery(ctx.ConnectionId, point)
+		}
 		// Header-sync strategy gate: cross-peer deduplication (isNew) has run
 		// above; the configured strategy now decides whether this eligible
 		// peer is permitted to drive ledger ingress. Primary lets any eligible
@@ -1622,6 +1613,8 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 				point,
 				isNew,
 			) {
+			// The staged candidate for this point is not resolved here: it
+			// follows the connection whose copy reaches the ledger.
 			dropReason := "duplicate"
 			if isNew {
 				dropReason = "not ingress driver"
@@ -1672,6 +1665,40 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 			}
 		}
 		chainsyncEvent.SyncTargetTrusted = true
+		chainsyncEvent.PeerTipUpdate = peerTipUpdate
+		if peerTipUpdate != nil {
+			update := *peerTipUpdate
+			resolvePeerTip := func(admitted bool) {
+				if o.config.ChainsyncResolvePeerTip != nil {
+					o.config.ChainsyncResolvePeerTip(update, admitted)
+					return
+				}
+				if !admitted && o.eventBus != nil {
+					update.Rejected = true
+					o.eventBus.Publish(
+						chainselection.PeerTipUpdateEventType,
+						event.NewEvent(
+							chainselection.PeerTipUpdateEventType,
+							update,
+						),
+					)
+				}
+			}
+			chainsyncEvent.PeerTipAdmission = func(admitted bool) {
+				if admitted {
+					if o.chainsyncState != nil {
+						o.chainsyncState.AdmitClientTip(
+							ctx.ConnectionId,
+							point,
+							tip,
+						)
+					}
+					resolvePeerTip(true)
+					return
+				}
+				resolvePeerTip(false)
+			}
+		}
 		if err := o.eventBus.PublishBlocking(
 			ledger.ChainsyncEventType,
 			event.NewEvent(
@@ -1679,13 +1706,10 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 				chainsyncEvent,
 			),
 		); err != nil {
-			return fmt.Errorf("chainsync: publish roll-forward event: %w", err)
-		}
-		if point.Slot == tip.Point.Slot &&
-			bytes.Equal(point.Hash, tip.Point.Hash) {
-			if o.chainsyncState != nil {
-				o.chainsyncState.MarkClientSynced(ctx.ConnectionId)
+			if chainsyncEvent.PeerTipAdmission != nil {
+				chainsyncEvent.PeerTipAdmission(false)
 			}
+			return fmt.Errorf("chainsync: publish roll-forward event: %w", err)
 		}
 		// Update ChainSync performance metrics for peer scoring
 		o.updateChainsyncMetrics(ctx.ConnectionId, tip)

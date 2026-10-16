@@ -409,6 +409,10 @@ func TestValidateTxDijkstraSubTransactionCommitteeVoterEligibility(
 			t.Parallel()
 			pparams := committeeVotingDijkstra.pparams(tc.protocolVersion)
 			lv, db := committeeTestView(t, pparams)
+			require.NoError(
+				t,
+				db.SetEpoch(0, 0, nil, nil, nil, nil, 0, 1, 100, nil),
+			)
 			seatedCold := committeeTestCredential(0x61)
 			voterCold := seatedCold
 			if !tc.elected {
@@ -419,6 +423,11 @@ func TestValidateTxDijkstraSubTransactionCommitteeVoterEligibility(
 			seedCommitteeCredentialAuthorization(t, db, voterCold, voterHot, 1, 1)
 			actionID := storeCommitteeVotingTarget(
 				t, db, 0x64, lcommon.GovActionTypeInfo,
+			)
+			// Validation derives the action's expiry from its proposed epoch.
+			require.NoError(
+				t,
+				db.SetEpoch(0, 0, nil, nil, nil, nil, 0, 1, 100, nil),
 			)
 
 			// Each Dijkstra UTxO level needs its own spend and witnesses for

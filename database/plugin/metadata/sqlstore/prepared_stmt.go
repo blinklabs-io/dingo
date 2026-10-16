@@ -38,6 +38,7 @@ var hotStatements = func() []string {
 		rewardLiveStakeUtxoStakeQuery,
 		insertUtxoQuery,
 		insertUtxoQueryIgnoreConflict,
+		repairConflictedUtxoQuery,
 		importAssetQuery,
 		getAssetIDQuery,
 		getLiveUtxoByRefQuery,
@@ -75,9 +76,11 @@ var hotStatements = func() []string {
 		utxoStakeConsumedDeltaQuery(256),
 		utxoStakeConsumedDeltaQuery(400),
 	}
-	for rowCount := 2; rowCount <= utxoBatchSize; rowCount++ {
+	for rowCount := 2; rowCount <= utxoInsertBatchSize; rowCount++ {
+		queries = append(queries, insertUtxoBatchQuery(rowCount))
+	}
+	for rowCount := 2; rowCount <= utxoSpendBatchSize; rowCount++ {
 		queries = append(queries,
-			insertUtxoBatchQuery(rowCount),
 			consumeUtxosBatchQuery(rowCount, false),
 			consumeUtxosBatchQuery(rowCount, true),
 		)

@@ -15,7 +15,6 @@
 package ledger
 
 import (
-	"context"
 	"fmt"
 	"runtime"
 	"testing"
@@ -70,8 +69,7 @@ func TestBlockPipelineWorkerCount(t *testing.T) {
 }
 
 // buildValidatedPipelineThroughputBlocks generates n genuinely VRF/KES-valid
-// Conway blocks sharing one epoch nonce (so a single pipeline instance's
-// ValidateStage can check all of them), for measuring pipeline decode+validate
+// Conway blocks sharing one epoch nonce, for measuring pipeline decode
 // throughput without any network or database involved. Generation itself
 // (real VRF/KES/cold-key material per block) is excluded from the caller's
 // timed section.
@@ -105,13 +103,9 @@ func buildValidatedPipelineThroughputBlocks(
 	return blocks, epochNonceHex, slotsPerKesPeriod
 }
 
-// runPipelineThroughput submits every block in blocks through a freshly
-// constructed pipeline.BlockPipeline configured exactly as NewLedgerState
-// wires production (productionValidateVerifyConfig, decode plus VRF/KES
-// validate), with the given worker count for both stages, and returns
-// blocks-processed-per-second. It fails the test if any block fails to
-// decode or validate -- every generated block is genuinely valid, so an
-// error here means the harness (not the worker count) is broken.
+// runPipelineThroughput measures persisted decode plus the separate bounded
+// header-crypto workers used by NewLedgerState, with the requested worker count
+// for both. Every generated block must pass real VRF/KES validation.
 func runPipelineThroughput(
 	t *testing.T,
 	blocks []models.Block,
@@ -120,31 +114,41 @@ func runPipelineThroughput(
 	workers int,
 ) float64 {
 	t.Helper()
-	pl := pipeline.NewBlockPipeline(
+	ls := &LedgerState{config: LedgerStateConfig{Logger: testLogger()}}
+	pl := newTestReplayPipeline(ls,
 		pipeline.WithDecodeWorkers(workers),
 		pipeline.WithValidateWorkers(workers),
 		pipeline.WithEta0(epochNonceHex),
 		pipeline.WithSlotsPerKesPeriod(slotsPerKesPeriod),
-		pipeline.WithVerifyConfig(productionValidateVerifyConfig),
 	)
 	require.NoError(t, pl.Start(t.Context()))
 	defer func() { require.NoError(t, pl.Stop()) }()
 
 	start := time.Now()
-	for _, blk := range blocks {
-		tip := ocommon.Tip{
-			Point:       ocommon.NewPoint(blk.Slot, blk.Hash),
-			BlockNumber: blk.Number,
+	submitted := make(chan error, 1)
+	go func() {
+		for _, blk := range blocks {
+			tip := ocommon.Tip{
+				Point:       ocommon.NewPoint(blk.Slot, blk.Hash),
+				BlockNumber: blk.Number,
+			}
+			if err := pl.Submit(t.Context(), blk.Type, blk.Cbor, tip); err != nil {
+				submitted <- err
+				return
+			}
 		}
-		require.NoError(
-			t,
-			pl.Submit(context.Background(), blk.Type, blk.Cbor, tip),
-		)
+		submitted <- nil
+	}()
+	items := make([]*pipeline.BlockItem, 0, len(blocks))
+	for range blocks {
+		item := <-pl.Results()
+		require.NoError(t, item.DecodeError())
+		items = append(items, item)
 	}
-	results := pl.Results()
-	for i := range blocks {
-		item := <-results
-		require.NoError(t, item.DecodeError(), "block %d", i)
+	require.NoError(t, <-submitted)
+	require.NoError(t, ls.validateReadChainBatch(t.Context(), items))
+	for i, item := range items {
+		require.True(t, item.IsValid(), "block %d", i)
 		require.NoError(t, item.ValidationError(), "block %d", i)
 	}
 	elapsed := time.Since(start)
@@ -152,10 +156,10 @@ func runPipelineThroughput(
 }
 
 // TestBlockPipelineWorkerCountThroughput asserts the correctness property the
-// CPU-scaled worker count puts at risk -- that decode and VRF/KES validation
+// CPU-scaled worker count puts at risk -- that decoding and header validation
 // still produce a clean result for every block once more than two workers
-// share the stages -- and reports decode+validate throughput at the prior
-// fixed count and at this host's scaled count alongside it. Blocks are
+// share each stage -- and reports decode-plus-validation throughput at the
+// prior fixed count and this host's scaled count. Blocks are
 // genuinely valid and everything runs in-process, so neither the correctness
 // check nor the reported numbers depend on peer availability, block density,
 // or disk state.
@@ -198,7 +202,7 @@ func TestBlockPipelineWorkerCountThroughput(t *testing.T) {
 	newAvg := newTotal / repetitions
 
 	t.Logf(
-		"pipeline throughput on GOMAXPROCS(0)=%d: workers=%d avg=%.0f blocks/sec, workers=%d avg=%.0f blocks/sec, ratio=%.2fx",
+		"pipeline decode+validation throughput on GOMAXPROCS(0)=%d: workers=%d avg=%.0f blocks/sec, workers=%d avg=%.0f blocks/sec, ratio=%.2fx",
 		runtime.GOMAXPROCS(0),
 		oldWorkers,
 		oldAvg,

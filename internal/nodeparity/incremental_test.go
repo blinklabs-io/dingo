@@ -46,17 +46,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// fakeStakeEntry mirrors dingo's own unexported stakeDistributionEntry
-// (ledger/queries_stakedistribution.go): a real cardano-node's
-// GetStakeDistribution wire reply, and dingo's own, both decode into this
-// exact shape client-side, so a fake server must produce it too for a real
-// gouroboros client to accept the reply as it would either real peer's.
-type fakeStakeEntry struct {
-	cbor.StructAsArray
-	StakeFraction *cbor.Rat
-	VrfHash       ledger.Blake2b256
-}
-
 // fakeLSQState is one node's synthetic LocalStateQuery answers: mutable and
 // mutex-protected so a test can change what a node reports between blocks
 // (e.g. to simulate an epoch transition, or to flip a clean match into a
@@ -65,7 +54,7 @@ type fakeStakeEntry struct {
 type fakeLSQState struct {
 	mu                sync.Mutex
 	protocolParams    *conway.ConwayProtocolParameters
-	stakeDistribution map[ledger.PoolId]fakeStakeEntry
+	stakeDistribution map[ledger.PoolId]localstatequery.IndividualPoolStake
 	epoch             int
 	// tip is what this node's ChainSync half reports to GetCurrentTip (a
 	// one-shot MsgFindIntersect with an empty points list -- see
@@ -102,8 +91,10 @@ type fakeLSQState struct {
 
 func newFakeLSQState() *fakeLSQState {
 	return &fakeLSQState{
-		protocolParams:    newFakeProtocolParams(),
-		stakeDistribution: map[ledger.PoolId]fakeStakeEntry{},
+		protocolParams: newFakeProtocolParams(),
+		stakeDistribution: make(
+			map[ledger.PoolId]localstatequery.IndividualPoolStake,
+		),
 	}
 }
 
@@ -184,28 +175,47 @@ func newFakeProtocolParams() *conway.ConwayProtocolParameters {
 	}
 }
 
-// findIntersect answers ChainSync's GetCurrentTip (the empty-points
-// MsgFindIntersect it sends) with s.tip, regardless of what points are
-// requested. This is the only ChainSync behavior the dingo-only fake server
-// needs: RunIncremental never runs a Sync loop against dingo, only Check's
-// one-shot tip read.
+// findIntersect answers the empty-points GetCurrentTip probe with no
+// intersection and s.tip. RunIncremental only reads this server's tip;
+// it never runs a Sync loop against the dingo-only server.
 func (s *fakeLSQState) findIntersect(
-	_ chainsync.CallbackContext, _ []pcommon.Point,
+	_ chainsync.CallbackContext, points []pcommon.Point,
 ) (pcommon.Point, chainsync.Tip, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return csmock.OriginPoint(), s.tip, nil
+	return intersectOrNotFound(points, s.tip)
+}
+
+// intersectOrNotFound answers a FindIntersect the way a real node does: an
+// IntersectFound only for a point the client offered, and otherwise
+// IntersectNotFound carrying the node's tip, which is what ChainSync's
+// GetCurrentTip (an empty point list) reads. The client rejects an
+// IntersectFound for a point it did not offer.
+func intersectOrNotFound(
+	points []pcommon.Point,
+	tip chainsync.Tip,
+) (pcommon.Point, chainsync.Tip, error) {
+	origin := csmock.OriginPoint()
+	for _, p := range points {
+		if p.Slot == origin.Slot && bytes.Equal(p.Hash, origin.Hash) {
+			return origin, tip, nil
+		}
+	}
+	return pcommon.Point{}, tip, chainsync.ErrIntersectNotFound
 }
 
 func (s *fakeLSQState) snapshot() (
 	*conway.ConwayProtocolParameters,
-	map[ledger.PoolId]fakeStakeEntry,
+	map[ledger.PoolId]localstatequery.IndividualPoolStake,
 	int,
 ) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	pp := *s.protocolParams
-	dist := make(map[ledger.PoolId]fakeStakeEntry, len(s.stakeDistribution))
+	dist := make(
+		map[ledger.PoolId]localstatequery.IndividualPoolStake,
+		len(s.stakeDistribution),
+	)
 	maps.Copy(dist, s.stakeDistribution)
 	return &pp, dist, s.epoch
 }
@@ -227,7 +237,7 @@ func (s *fakeLSQState) setMinFeeA(minFeeA uint) {
 // divergence between dingo and cardano-node directly (see
 // TestRunIncremental_PerBlockCheckIgnoresStakeDistributionDivergence).
 func (s *fakeLSQState) setStakeDistribution(
-	dist map[ledger.PoolId]fakeStakeEntry,
+	dist map[ledger.PoolId]localstatequery.IndividualPoolStake,
 ) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -261,14 +271,11 @@ func (s *fakeLSQState) stallQueryUntil(done <-chan struct{}) {
 }
 
 // config builds the localstatequery.Config a real gouroboros server uses to
-// answer exactly the four query types incremental mode's per-block and full
-// checks need (GetCurrentProtocolParams, GetStakeDistribution,
+// answer the query types incremental mode's per-block and full checks need
+// (GetCurrentProtocolParams, GetStakeDistribution/GetStakeDistribution2,
 // GetUTxOByTxIn, GetEpochNo) plus GetChainPoint (Check's own point
-// resolution) -- every wire shape below matches dingo's real server-side
-// handlers (ledger/queries_currentprotocolparams.go,
-// ledger/queries_stakedistribution.go, ledger/queries.go's
-// queryShelleyUtxoByTxIn/queryShelleyEpochNo) exactly, so a real gouroboros
-// client decodes these replies the same way it would a real node's.
+// resolution). Stake replies use the SDK's version-specific result types,
+// so the real client decodes the same wire shape as a node.
 // Acquire succeeds regardless of target by default -- these tests mostly
 // care about per-block content, not point-based historical rejection --
 // except for exactly the slot named by a prior rejectAcquireAtSlot call, if
@@ -339,7 +346,26 @@ func (s *fakeLSQState) config() localstatequery.Config {
 					case *localstatequery.ShelleyCurrentProtocolParamsQuery:
 						return []any{pp}, nil
 					case *localstatequery.ShelleyStakeDistributionQuery:
-						return []any{dist}, nil
+						legacy := localstatequery.StakeDistributionResult{
+							Results: make(map[ledger.PoolId]struct {
+								cbor.StructAsArray
+								StakeFraction *cbor.Rat
+								VrfHash       ledger.Blake2b256
+							}, len(dist)),
+						}
+						for poolID, entry := range dist {
+							legacyEntry := legacy.Results[poolID]
+							legacyEntry.StakeFraction = entry.StakeFraction
+							legacyEntry.VrfHash = entry.VrfHash
+							legacy.Results[poolID] = legacyEntry
+						}
+						return legacy, nil
+					case *localstatequery.ShelleyStakeDistribution2Query:
+						return localstatequery.StakeDistribution2Result{
+							Distribution: localstatequery.PoolDistribution{
+								Pools: dist,
+							},
+						}, nil
 					case *localstatequery.ShelleyUtxoByTxinQuery:
 						return []any{
 							map[localstatequery.UtxoId]ledger.TransactionOutput{},
@@ -479,8 +505,8 @@ func (s *fakeCardanoServer) findIntersect(
 	// it -- see baselineTipIndex's own doc comment for why.
 	if len(points) == 0 {
 		s.cursor = s.baselineTipIndex + 1
-		return s.chain.Points[s.baselineTipIndex],
-			s.chain.Tips[s.baselineTipIndex], nil
+		return pcommon.Point{}, s.chain.Tips[s.baselineTipIndex],
+			chainsync.ErrIntersectNotFound
 	}
 	// Otherwise intersect at whatever point the client asked for (its
 	// cursor), not always origin: incrementalSession always Syncs from its
@@ -493,7 +519,7 @@ func (s *fakeCardanoServer) findIntersect(
 		}
 	}
 	s.cursor = 0
-	return csmock.OriginPoint(), s.chain.Tip(), nil
+	return intersectOrNotFound(points, s.chain.Tip())
 }
 
 func (s *fakeCardanoServer) requestNext(ctx chainsync.CallbackContext) error {
@@ -935,12 +961,16 @@ func TestRunIncremental_PerBlockCheckIgnoresStakeDistributionDivergence(
 	}
 
 	poolID := ledger.PoolId{0x01}
-	dingoState.setStakeDistribution(map[ledger.PoolId]fakeStakeEntry{
-		poolID: {StakeFraction: &cbor.Rat{Rat: big.NewRat(1, 2)}},
-	})
-	cardanoState.setStakeDistribution(map[ledger.PoolId]fakeStakeEntry{
-		poolID: {StakeFraction: &cbor.Rat{Rat: big.NewRat(1, 3)}},
-	})
+	dingoState.setStakeDistribution(
+		map[ledger.PoolId]localstatequery.IndividualPoolStake{
+			poolID: {StakeFraction: &cbor.Rat{Rat: big.NewRat(1, 2)}},
+		},
+	)
+	cardanoState.setStakeDistribution(
+		map[ledger.PoolId]localstatequery.IndividualPoolStake{
+			poolID: {StakeFraction: &cbor.Rat{Rat: big.NewRat(1, 3)}},
+		},
+	)
 	cardanoServer.allowStep(t)
 
 	select {

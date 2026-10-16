@@ -119,6 +119,7 @@ func (p poolCertPosition) before(other poolCertPosition) bool {
 func poolPositionPredicate(
 	table string,
 	at poolCertPosition,
+	blockIndex string,
 ) (string, []any) {
 	args := []any{
 		at.slot,
@@ -128,12 +129,16 @@ func poolPositionPredicate(
 	return `(
       ` + table + `.added_slot < ?
       OR (` + table + `.added_slot = ?
-          AND COALESCE(t.block_index, 0) < ?)
+          AND ` + blockIndex + ` < ?)
       OR (` + table + `.added_slot = ?
-          AND COALESCE(t.block_index, 0) = ?
+          AND ` + blockIndex + ` = ?
           AND COALESCE(c.cert_index, 0) < ?)
   )`, args
 }
+
+const poolRegistrationBlockIndex = `COALESCE((
+    SELECT tx.block_index FROM "transaction" tx WHERE tx.id = c.transaction_id
+), 0)`
 
 // poolRegistrationDepositHeld returns the deposit the pool registration being
 // written at `at` retains, given the `charged` amount the block era's
@@ -231,7 +236,9 @@ func latestPoolRegistrationBefore(
 	poolID int64,
 	at poolCertPosition,
 ) (poolRegistrationDepositRow, bool, error) {
-	predicate, args := poolPositionPredicate("pr", at)
+	predicate, args := poolPositionPredicate(
+		"pr", at, poolRegistrationBlockIndex,
+	)
 	var (
 		row       poolRegistrationDepositRow
 		held      sql.NullString
@@ -242,13 +249,12 @@ func latestPoolRegistrationBefore(
 	)
 	err := db.QueryRowContext(ctx, `
 SELECT pr.deposit_held, pr.deposit_amount, pr.added_slot,
-       COALESCE(t.block_index, 0), COALESCE(c.cert_index, 0)
+       `+poolRegistrationBlockIndex+`, COALESCE(c.cert_index, 0)
 FROM pool_registration pr
 LEFT JOIN certs c ON c.id = pr.certificate_id
-LEFT JOIN "transaction" t ON t.id = c.transaction_id
 WHERE pr.pool_id = ?
   AND `+predicate+`
-ORDER BY pr.added_slot DESC, COALESCE(t.block_index, 0) DESC,
+ORDER BY pr.added_slot DESC, `+poolRegistrationBlockIndex+` DESC,
          COALESCE(c.cert_index, 0) DESC, pr.registration_index DESC
 LIMIT 1`,
 		append([]any{poolID}, args...)...,
@@ -294,7 +300,9 @@ func latestPoolRetirementBefore(
 	poolID int64,
 	at poolCertPosition,
 ) (poolRetirementPositionRow, bool, error) {
-	predicate, args := poolPositionPredicate("rt", at)
+	predicate, args := poolPositionPredicate(
+		"rt", at, "COALESCE(t.block_index, 0)",
+	)
 	var (
 		row       poolRetirementPositionRow
 		epoch     int64
@@ -991,6 +999,147 @@ func (s *Store) UpdatePoolOpCertSequence(
 			return err
 		},
 	)
+}
+
+func (s *Store) UpdatePoolOpCertSequenceBatched(
+	poolKeyHash lcommon.PoolKeyHash,
+	sequence uint64,
+	slot uint64,
+	accumulator types.MetadataBatchAccumulator,
+	txn types.Txn,
+) error {
+	batched, ok := accumulator.(*transactionBatchAccumulator)
+	if !ok {
+		return fmt.Errorf(
+			"sqlstore UpdatePoolOpCertSequenceBatched: wrong accumulator type %T",
+			accumulator,
+		)
+	}
+	sequenceValue, err := checkedInt64(sequence)
+	if err != nil {
+		return err
+	}
+	slotValue, err := checkedInt64(slot)
+	if err != nil {
+		return err
+	}
+	if transaction, ok := txn.(*sqlTxn); ok {
+		if err := transaction.bindBatch(batched); err != nil {
+			return err
+		}
+	}
+	key := poolOpCertSequenceKey{poolKeyHash: poolKeyHash, slot: slot}
+	if queued, exists := batched.opCertSequences[key]; exists {
+		if queued.sequence != sequence {
+			return fmt.Errorf(
+				"opcert counter conflict for pool %x at slot %d: queued %d, candidate %d",
+				poolKeyHash.Bytes(), slot, queued.sequence, sequence,
+			)
+		}
+		return nil
+	}
+	if batched.opCertSequences == nil {
+		batched.opCertSequences = make(
+			map[poolOpCertSequenceKey]queuedPoolOpCertSequence,
+		)
+	}
+	batched.opCertSequences[key] = queuedPoolOpCertSequence{
+		key:           key,
+		sequence:      sequence,
+		slotValue:     slotValue,
+		sequenceValue: sequenceValue,
+	}
+	batched.opCertOrder = append(batched.opCertOrder, key)
+	return nil
+}
+
+func (s *Store) flushPoolOpCertSequences(
+	ctx context.Context,
+	db queryer,
+	batched *transactionBatchAccumulator,
+) error {
+	if len(batched.opCertOrder) == 0 {
+		return nil
+	}
+	perStatement := max(1, s.dialect.ParameterLimit()/3)
+	placeholder := "(?, ?, ?)"
+	for start := 0; start < len(batched.opCertOrder); start += perStatement {
+		end := min(start+perStatement, len(batched.opCertOrder))
+		args := make([]any, 0, (end-start)*3)
+		for _, key := range batched.opCertOrder[start:end] {
+			queued := batched.opCertSequences[key]
+			args = append(
+				args,
+				queued.key.poolKeyHash.Bytes(),
+				queued.slotValue,
+				queued.sequenceValue,
+			)
+		}
+		query := `INSERT INTO pool_opcert_sequence
+(pool_key_hash, slot, sequence) VALUES ` + strings.TrimSuffix(
+			strings.Repeat(placeholder+", ", end-start),
+			", ",
+		) + `
+ON CONFLICT (pool_key_hash, slot) DO NOTHING`
+		result, err := db.ExecContext(ctx, query, args...)
+		if err != nil {
+			return fmt.Errorf("insert batched opcert counters: %w", err)
+		}
+		inserted, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if inserted != int64(end-start) || s.dialect.Name() == "mysql" {
+			for _, key := range batched.opCertOrder[start:end] {
+				queued := batched.opCertSequences[key]
+				var storedSequence int64
+				if err := db.QueryRowContext(
+					ctx,
+					poolOpCertSequenceBySlotSQL,
+					queued.key.poolKeyHash.Bytes(),
+					queued.slotValue,
+				).Scan(&storedSequence); err != nil {
+					return err
+				}
+				if storedSequence != queued.sequenceValue {
+					return fmt.Errorf(
+						"opcert counter conflict for pool %x at slot %d: existing %d, candidate %d",
+						queued.key.poolKeyHash.Bytes(),
+						queued.key.slot,
+						storedSequence,
+						queued.sequence,
+					)
+				}
+			}
+		}
+	}
+
+	latest := make(map[lcommon.PoolKeyHash]int64)
+	for _, key := range batched.opCertOrder {
+		queued := batched.opCertSequences[key]
+		if sequence, ok := latest[key.poolKeyHash]; !ok || queued.sequenceValue > sequence {
+			latest[key.poolKeyHash] = queued.sequenceValue
+		}
+	}
+	updated := make(map[lcommon.PoolKeyHash]struct{}, len(latest))
+	for _, key := range batched.opCertOrder {
+		if _, ok := updated[key.poolKeyHash]; ok {
+			continue
+		}
+		sequence := latest[key.poolKeyHash]
+		if _, err := s.execCached(
+			ctx,
+			db,
+			poolUpdateLatestOpCertSequenceSQL,
+			sequence,
+			key.poolKeyHash.Bytes(),
+			sequence,
+		); err != nil {
+			return err
+		}
+		updated[key.poolKeyHash] = struct{}{}
+	}
+	return nil
 }
 
 const poolOpCertSequenceBySlotSQL = `

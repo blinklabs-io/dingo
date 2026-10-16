@@ -176,7 +176,12 @@ func archiveDownloadHTTPClient(
 	dial netguard.DialContextFunc,
 	lookup netguard.LookupIPAddrFunc,
 ) *http.Client {
-	secured := *client
+	secured := barkDestinationHTTPClient(
+		client,
+		allowPrivate,
+		dial,
+		lookup,
+	)
 	previousRedirectPolicy := client.CheckRedirect
 	secured.CheckRedirect = func(req *http.Request, via []*http.Request) error {
 		if len(via) >= 10 {
@@ -192,6 +197,64 @@ func archiveDownloadHTTPClient(
 		}
 		return nil
 	}
+	return secured
+}
+
+func barkServiceHTTPClient(
+	client *http.Client,
+	baseURL string,
+	allowPrivate bool,
+	dial netguard.DialContextFunc,
+	lookup netguard.LookupIPAddrFunc,
+) (*http.Client, error) {
+	allowedOrigin, _, err := normalizeArchiveOrigin(baseURL)
+	if err != nil {
+		return nil, fmt.Errorf("invalid bark base URL: %w", err)
+	}
+	secured := barkDestinationHTTPClient(
+		client,
+		allowPrivate,
+		dial,
+		lookup,
+	)
+	previousRedirectPolicy := client.CheckRedirect
+	secured.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 10 {
+			return errors.New("bark: too many service redirects")
+		}
+		if previousRedirectPolicy != nil {
+			if err := previousRedirectPolicy(req, via); err != nil {
+				return err
+			}
+		}
+		if req.URL.User != nil {
+			return errors.New(
+				"bark: unsafe Bark service redirect: URL must not contain embedded credentials",
+			)
+		}
+		origin, _, err := normalizeArchiveOrigin(req.URL.String())
+		if err != nil {
+			return fmt.Errorf("bark: unsafe Bark service redirect: %w", err)
+		}
+		if origin != allowedOrigin {
+			return fmt.Errorf(
+				"bark: unsafe Bark service redirect: origin %q is not configured origin %q",
+				origin,
+				allowedOrigin,
+			)
+		}
+		return nil
+	}
+	return secured, nil
+}
+
+func barkDestinationHTTPClient(
+	client *http.Client,
+	allowPrivate bool,
+	dial netguard.DialContextFunc,
+	lookup netguard.LookupIPAddrFunc,
+) *http.Client {
+	secured := *client
 
 	baseTransport := client.Transport
 	if baseTransport == nil {
@@ -231,10 +294,11 @@ type BlobStoreBarkConfig struct {
 	BaseUrl                   string
 	HTTPClient                *http.Client
 	BlockDownloadAllowedHosts []string
-	// BlockDownloadAllowPrivateAddresses permits block downloads from
-	// private, loopback, and other special-use addresses, such as an
-	// S3-compatible store on a private network. Origin, HTTPS, redirect, and
-	// proxy restrictions still apply. Defaults to false.
+	// BlockDownloadAllowPrivateAddresses permits the Bark service and block
+	// downloads to use private, loopback, and other special-use addresses,
+	// such as an archive and S3-compatible store on a private network. Origin,
+	// HTTPS download, redirect, and proxy restrictions still apply. Defaults
+	// to false.
 	BlockDownloadAllowPrivateAddresses bool
 	// MaxBlockSize reports the largest block, in bytes, an archive download may
 	// carry. It is read on every download, so a limit that follows the live
@@ -268,12 +332,22 @@ func NewBarkBlobStore(
 	if err != nil {
 		return nil, err
 	}
-	archiveServiceHTTPClient := config.HTTPClient
-	if archiveServiceHTTPClient == nil {
-		archiveServiceHTTPClient = &http.Client{Timeout: 30 * time.Second}
+	baseHTTPClient := config.HTTPClient
+	if baseHTTPClient == nil {
+		baseHTTPClient = &http.Client{Timeout: 30 * time.Second}
+	}
+	archiveServiceHTTPClient, err := barkServiceHTTPClient(
+		baseHTTPClient,
+		config.BaseUrl,
+		config.BlockDownloadAllowPrivateAddresses,
+		config.dialContext,
+		config.lookupIPAddr,
+	)
+	if err != nil {
+		return nil, err
 	}
 	downloadHTTPClient := archiveDownloadHTTPClient(
-		archiveServiceHTTPClient,
+		baseHTTPClient,
 		allowedOrigins,
 		config.BlockDownloadAllowPrivateAddresses,
 		config.dialContext,
@@ -284,6 +358,7 @@ func NewBarkBlobStore(
 		archiveClient: archiveconnect.NewArchiveServiceClient(
 			archiveServiceHTTPClient,
 			config.BaseUrl,
+			connect.WithReadMaxBytes(DefaultMaxResponseBody),
 		),
 		httpClient:           downloadHTTPClient,
 		blockDownloadOrigins: allowedOrigins,

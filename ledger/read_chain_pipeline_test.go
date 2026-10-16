@@ -20,7 +20,9 @@ import (
 	"io"
 	"log/slog"
 	"runtime"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database/models"
@@ -101,6 +103,7 @@ func TestDecodeReadChainBatchSerialAndPipelineAgree(t *testing.T) {
 
 	pipelineLS := &LedgerState{config: LedgerStateConfig{Logger: testLogger()}}
 	pipelineLS.blockPipeline = pipeline.NewBlockPipeline(
+		pipeline.WithTrustedDecodeOnly(),
 		pipeline.WithDecodeWorkers(2),
 	)
 	require.NoError(t, pipelineLS.blockPipeline.Start(ctx))
@@ -149,6 +152,7 @@ func TestDecodeReadChainBatchPropagatesDecodeErrorBothModes(t *testing.T) {
 
 	pipelineLS := &LedgerState{config: LedgerStateConfig{Logger: testLogger()}}
 	pipelineLS.blockPipeline = pipeline.NewBlockPipeline(
+		pipeline.WithTrustedDecodeOnly(),
 		pipeline.WithDecodeWorkers(2),
 	)
 	require.NoError(t, pipelineLS.blockPipeline.Start(ctx))
@@ -249,6 +253,7 @@ func TestLedgerReadChainIteratorPipelineMatchesSerial(t *testing.T) {
 
 	pipelineLS := &LedgerState{config: LedgerStateConfig{Logger: testLogger()}}
 	pipelineLS.blockPipeline = pipeline.NewBlockPipeline(
+		pipeline.WithTrustedDecodeOnly(),
 		pipeline.WithDecodeWorkers(2),
 	)
 	require.NoError(t, pipelineLS.blockPipeline.Start(t.Context()))
@@ -324,6 +329,7 @@ func TestLedgerReadChainIteratorRollbackTrimMatchesBothModes(t *testing.T) {
 
 	pipelineLS := &LedgerState{config: LedgerStateConfig{Logger: testLogger()}}
 	pipelineLS.blockPipeline = pipeline.NewBlockPipeline(
+		pipeline.WithTrustedDecodeOnly(),
 		pipeline.WithDecodeWorkers(2),
 	)
 	require.NoError(t, pipelineLS.blockPipeline.Start(t.Context()))
@@ -361,6 +367,7 @@ func TestBlockPipelineLifecycleNoGoroutineLeak(t *testing.T) {
 	for i := range iterations {
 		ls := &LedgerState{config: LedgerStateConfig{Logger: testLogger()}}
 		ls.blockPipeline = pipeline.NewBlockPipeline(
+			pipeline.WithTrustedDecodeOnly(),
 			pipeline.WithDecodeWorkers(2),
 		)
 		ctx := t.Context()
@@ -474,6 +481,7 @@ func TestLedgerProcessBlocksRetryDoesNotMixBlocksAcrossAttempts(t *testing.T) {
 	for iter := range iterations {
 		ls := &LedgerState{config: LedgerStateConfig{Logger: testLogger()}}
 		ls.blockPipeline = pipeline.NewBlockPipeline(
+			pipeline.WithTrustedDecodeOnly(),
 			pipeline.WithDecodeWorkers(2),
 		)
 		require.NoError(t, ls.blockPipeline.Start(t.Context()))
@@ -601,16 +609,9 @@ func TestLedgerProcessBlocksRetryDoesNotMixBlocksAcrossAttempts(t *testing.T) {
 	}
 }
 
-// TestBlockPipelineLifecycleNoGoroutineLeakWithValidation extends
-// TestBlockPipelineLifecycleNoGoroutineLeak (decode-only) to the
-// decode+validate pipeline configuration added in commit c6142feb: the
-// validate-stage worker pool has its own Start/Stop lifecycle
-// (ValidateStageWorkerPool), separate from the decode worker pool, and had
-// zero goroutine-leak coverage before this test. Uses genuinely VRF/KES-
-// valid blocks (buildValidatedTestModelsBlock) so the validate stage
-// actually runs real crypto and its worker goroutines actually do work
-// across the whole Start/Submit/Stop cycle, rather than the pipeline
-// silently skipping validation.
+// TestBlockPipelineLifecycleNoGoroutineLeakWithValidation covers both the
+// persisted decoder lifecycle and the bounded crypto workers joined by each
+// batch. Real VRF/KES-valid blocks ensure crypto actually runs.
 // Not t.Parallel: runtime.NumGoroutine is a process-wide measurement that
 // concurrent tests perturb.
 func TestBlockPipelineLifecycleNoGoroutineLeakWithValidation(t *testing.T) {
@@ -637,12 +638,11 @@ func TestBlockPipelineLifecycleNoGoroutineLeakWithValidation(t *testing.T) {
 				BlockPipelineValidateEnabled: true,
 			},
 		}
-		ls.blockPipeline = pipeline.NewBlockPipeline(
+		ls.blockPipeline = newTestReplayPipeline(ls,
 			pipeline.WithDecodeWorkers(2),
 			pipeline.WithValidateWorkers(2),
 			pipeline.WithEta0(vb.EpochNonceHex),
 			pipeline.WithSlotsPerKesPeriod(vb.SlotsPerKesPeriod),
-			pipeline.WithVerifyConfig(productionValidateVerifyConfig),
 		)
 		ctx := t.Context()
 		require.NoError(t, ls.blockPipeline.Start(ctx))
@@ -741,12 +741,11 @@ func TestLedgerReadChainIteratorRollbackTrimMatchesValidateEnabled(
 			BlockPipelineValidateEnabled: true,
 		},
 	}
-	validateLS.blockPipeline = pipeline.NewBlockPipeline(
+	validateLS.blockPipeline = newTestReplayPipeline(validateLS,
 		pipeline.WithDecodeWorkers(2),
 		pipeline.WithValidateWorkers(2),
 		pipeline.WithEta0(vb1.EpochNonceHex),
 		pipeline.WithSlotsPerKesPeriod(vb1.SlotsPerKesPeriod),
-		pipeline.WithVerifyConfig(productionValidateVerifyConfig),
 	)
 	require.NoError(t, validateLS.blockPipeline.Start(t.Context()))
 	defer func() {
@@ -788,34 +787,17 @@ func TestDrainBlockPipelineBeforeRollbackNilPipelineNoOp(t *testing.T) {
 	)
 }
 
-// TestDrainBlockPipelineBeforeRollbackWaitsForPendingWork is a regression
-// test for the rollback-coordination helper: it must
-// actually wait for ls.blockPipeline's in-flight decode/validate work to
-// finish, not merely check PendingCount() once and return. Uses the
-// validate stage with real VRF/KES crypto and a single worker per stage so
-// a batch of blocks takes measurable time to drain, then asserts:
-//  1. immediately after submitting the whole batch, genuine backlog exists
-//     (PendingCount() > 0) -- this is the precondition that makes the
-//     second assertion meaningful rather than vacuously true;
-//  2. immediately after drainBlockPipelineBeforeRollback returns,
-//     PendingCount() is 0.
-//
-// If drainBlockPipelineBeforeRollback were reverted to a no-op (or its
-// WaitForDrain call removed), the second assertion would fail: essentially
-// no wall-clock time passes between the two PendingCount() checks other
-// than the call itself, so a backlog confirmed present immediately before
-// the call would still be present immediately after it, absent an actual
-// wait. Verified directly: temporarily reverting
-// drainBlockPipelineBeforeRollback to `if ls.blockPipeline == nil { return
-// } ` (dropping the WaitForDrain call) makes this test fail.
+// TestDrainBlockPipelineBeforeRollbackWaitsForPendingWork gates result
+// consumption so decoder backlog is deterministic, independent of CPU speed.
+// Crypto workers are drained by the reader, not this decode-only barrier.
 func TestDrainBlockPipelineBeforeRollbackWaitsForPendingWork(t *testing.T) {
 	t.Parallel()
 
-	const numBlocks = 25
+	const numBlocks = 4
 
 	var seed0 [32]byte
 	seed0[0] = 1
-	firstBlock, vb := buildValidatedTestModelsBlock(t, seed0, 200, 100, 1)
+	firstBlock, _ := buildValidatedTestModelsBlock(t, seed0, 200, 100, 1)
 
 	blocks := make([]models.Block, 0, numBlocks)
 	blocks = append(blocks, firstBlock)
@@ -832,23 +814,29 @@ func TestDrainBlockPipelineBeforeRollbackWaitsForPendingWork(t *testing.T) {
 		blocks = append(blocks, block)
 	}
 
-	ls := &LedgerState{
-		config: LedgerStateConfig{
-			Logger:                       testLogger(),
-			BlockPipelineValidateEnabled: true,
-		},
-	}
+	ls := &LedgerState{config: LedgerStateConfig{Logger: testLogger()}}
 	ls.blockPipeline = pipeline.NewBlockPipeline(
+		pipeline.WithTrustedDecodeOnly(),
 		pipeline.WithDecodeWorkers(1),
-		pipeline.WithValidateWorkers(1),
-		pipeline.WithEta0(vb.EpochNonceHex),
-		pipeline.WithSlotsPerKesPeriod(vb.SlotsPerKesPeriod),
-		pipeline.WithVerifyConfig(productionValidateVerifyConfig),
+		pipeline.WithPrefetchBufferSize(1),
 	)
 	ctx := t.Context()
 	require.NoError(t, ls.blockPipeline.Start(ctx))
+	releaseResults := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseResults) }) }
+	resultsDone := make(chan struct{})
+	go func() {
+		defer close(resultsDone)
+		<-releaseResults
+		for range numBlocks {
+			<-ls.blockPipeline.Results()
+		}
+	}()
 	defer func() {
+		release()
 		require.NoError(t, ls.blockPipeline.Stop())
+		<-resultsDone
 	}()
 
 	for _, raw := range blocks {
@@ -862,11 +850,9 @@ func TestDrainBlockPipelineBeforeRollbackWaitsForPendingWork(t *testing.T) {
 		)
 	}
 
-	// Precondition: real backlog exists right after submission. If this
-	// ever starts flaking (e.g. validation becomes fast enough that a
-	// single worker drains 25 items before this check runs), increase
-	// numBlocks rather than delete the assertion -- it's what makes the
-	// post-drain assertion below meaningful.
+	// One result fits and the next blocks forwarding. The decoder can hold
+	// a third in flight, which PendingCount excludes; the fourth forces a
+	// queued item until the consumer is released.
 	require.Positive(
 		t,
 		ls.blockPipeline.PendingCount(),
@@ -874,7 +860,22 @@ func TestDrainBlockPipelineBeforeRollbackWaitsForPendingWork(t *testing.T) {
 			"the assertion below would be vacuous",
 	)
 
-	ls.drainBlockPipelineBeforeRollback(t.Context(), "test")
+	drained := make(chan struct{})
+	go func() {
+		defer close(drained)
+		ls.drainBlockPipelineBeforeRollback(t.Context(), "test")
+	}()
+	require.Never(t, func() bool {
+		select {
+		case <-drained:
+			return true
+		default:
+			return false
+		}
+	}, 100*time.Millisecond, time.Millisecond,
+		"rollback drain returned while decoder work was blocked")
+	release()
+	testutil.RequireReceive(t, drained, testutil.AsyncWait, "decoder drain")
 
 	assert.Equal(
 		t,
@@ -916,6 +917,7 @@ func TestProcessChainIteratorRollbackMatchesWithAndWithoutBlockPipeline(
 		fixture := newChainsyncRollbackFixture(t)
 		if attachPipeline {
 			fixture.ls.blockPipeline = pipeline.NewBlockPipeline(
+				pipeline.WithTrustedDecodeOnly(),
 				pipeline.WithDecodeWorkers(2),
 			)
 			require.NoError(t, fixture.ls.blockPipeline.Start(t.Context()))
