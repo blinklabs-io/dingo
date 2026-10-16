@@ -56,6 +56,17 @@ write_error_report() {
   echo "::warning::${scenario} report could not be generated: ${message}" >&2
 }
 
+# log_excerpt FILE
+# Prints a log on one line, keeping the start, where a panic message is, and
+# the end of a long one.
+log_excerpt() {
+  if [ "$(wc -l <"$1")" -gt 8 ]; then
+    { head -n 3 "$1"; echo ...; tail -n 5 "$1"; } | tr '\n' ' '
+  else
+    tr '\n' ' ' <"$1"
+  fi
+}
+
 # run_generator REPORT SCENARIO COMMAND...
 # Runs a generator that writes REPORT. A non-zero exit with the report written
 # is a report of failures and is kept. Without a report, an error report is
@@ -70,10 +81,10 @@ run_generator() {
   cat "$log" >&2
   if [ ! -s "$report" ]; then
     write_error_report "$report" "$scenario" \
-      "generator exited ${status} without writing a report: $(tail -n 5 "$log" | tr '\n' ' ')"
+      "generator exited ${status} without writing a report: $(log_excerpt "$log")"
   elif ! jq -e -s 'length == 1 and (.[0] | type == "object")' "$report" >/dev/null 2>&1; then
     write_error_report "$report" "$scenario" \
-      "generator exited ${status} with an invalid report: $(tail -n 5 "$log" | tr '\n' ' ')"
+      "generator exited ${status} with an invalid report: $(log_excerpt "$log")"
   elif [ "$status" -ne 0 ]; then
     echo "generator reported failures (exit ${status}); keeping ${report}" >&2
   fi
@@ -84,7 +95,7 @@ run_generator() {
 # Downloads, verifies and unpacks the turbo corpus into DIR/corpus.
 prepare_turbo_corpus() {
   local dir="$1"
-  curl --fail --show-error --location --retry 3 -o "${dir}/turbo.tar.xz" "$TURBO_URL" &&
+  curl --fail --silent --show-error --location --retry 3 -o "${dir}/turbo.tar.xz" "$TURBO_URL" &&
     echo "${TURBO_SHA256}  ${dir}/turbo.tar.xz" | sha256sum --check --strict &&
     mkdir "${dir}/corpus" &&
     tar -xf "${dir}/turbo.tar.xz" -C "${dir}/corpus"
@@ -92,8 +103,11 @@ prepare_turbo_corpus() {
 
 mkdir -p "$DIST_DIR"
 
-if dataset_revision="$(git -C "$CBOR_DATASET_DIR" rev-parse HEAD)" &&
-  [ "$dataset_revision" = "$CBOR_DATASET_REVISION" ]; then
+dataset_log="$(mktemp)"
+if ! dataset_revision="$(git -C "$CBOR_DATASET_DIR" rev-parse HEAD 2>"$dataset_log")"; then
+  write_error_report "${prefix}-cbor-conformance.json" cbor-decoding \
+    "cannot read the CBOR dataset revision: $(log_excerpt "$dataset_log")"
+elif [ "$dataset_revision" = "$CBOR_DATASET_REVISION" ]; then
   run_generator "${prefix}-cbor-conformance.json" cbor-decoding \
     go run ./internal/cborconformance/cmd \
     -dataset "${CBOR_DATASET_DIR}/dataset/conway" \
@@ -116,7 +130,7 @@ run_generator "${prefix}-uplc-conformance.json" uplc-conformance \
 
 turbo_dir="$(mktemp -d)"
 trap 'rm -rf "$turbo_dir"' EXIT
-if prepare_turbo_corpus "$turbo_dir"; then
+if prepare_turbo_corpus "$turbo_dir" 2>"${turbo_dir}/prepare.log"; then
   run_generator "${prefix}-uplc-turbo.json" uplc-turbo \
     go run ./internal/uplcconformance/turbocmd \
     -corpus "${turbo_dir}/corpus" \
@@ -127,7 +141,7 @@ if prepare_turbo_corpus "$turbo_dir"; then
     -output "${prefix}-uplc-turbo.json"
 else
   write_error_report "${prefix}-uplc-turbo.json" uplc-turbo \
-    "turbo corpus could not be downloaded, verified or unpacked"
+    "turbo corpus could not be downloaded, verified or unpacked: $(log_excerpt "${turbo_dir}/prepare.log")"
 fi
 
 shopt -s nullglob
