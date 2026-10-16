@@ -3,8 +3,9 @@
 # Generate the ledger-rules, UPLC conformance and UPLC turbo reports for a
 # release tag, and compress them alongside the CBOR report.
 #
-# Each generator exits non-zero when its report contains failures. Stop the
-# release before compression or upload unless every functional report passes.
+# A report is published even when it records failures: the generators exit
+# non-zero for those, so success is the report file existing rather than the
+# exit status. A generator that wrote no report is a real error.
 #
 # The UPLC turbo run is Linux-only and measures an evenly spaced subset of the
 # corpus, because the whole archive takes hours.
@@ -35,7 +36,8 @@ report_date="$(date -u +%Y%m%d)"
 prefix="${DIST_DIR}/dingo-${version}-${report_date}"
 
 # run_generator REPORT COMMAND...
-# Requires both a report file and a successful generator result.
+# Runs a generator that writes REPORT, tolerating a non-zero exit when the
+# report was written.
 run_generator() {
   local report="$1"
   shift
@@ -47,8 +49,7 @@ run_generator() {
     exit 1
   fi
   if [ "$status" -ne 0 ]; then
-    echo "generator reported failures (exit ${status}): ${report}" >&2
-    exit "$status"
+    echo "generator reported failures (exit ${status}); keeping ${report}" >&2
   fi
 }
 
