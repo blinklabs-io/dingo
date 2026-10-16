@@ -101,6 +101,60 @@ func TestGenerateTurboReportMeasuresFlatPrograms(t *testing.T) {
 	}
 }
 
+func TestGenerateTurboReportSkipsUndecodablePrograms(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS != "linux" {
+		t.Skip("UPLC turbo reports are Linux-only")
+	}
+	root := t.TempDir()
+	named, err := syn.Parse(referenceAddInteger)
+	if err != nil {
+		t.Fatalf("parse source program: %v", err)
+	}
+	program, err := syn.NameToDeBruijn(named)
+	if err != nil {
+		t.Fatalf("convert source program: %v", err)
+	}
+	encoded, err := syn.Encode(program)
+	if err != nil {
+		t.Fatalf("encode Flat program: %v", err)
+	}
+	if err := writeTurboTestProgram(
+		filepath.Join(root, "good-v1.flat"),
+		encoded,
+	); err != nil {
+		t.Fatalf("write Flat program: %v", err)
+	}
+	if err := writeTurboTestProgram(
+		filepath.Join(root, "bad-v1.flat"),
+		[]byte{0xff, 0xff, 0xff},
+	); err != nil {
+		t.Fatalf("write invalid Flat program: %v", err)
+	}
+	generatedAt := time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)
+
+	report, err := GenerateTurboReport(root, "", "", "", 1, 0, generatedAt)
+	if err != nil {
+		t.Fatalf("generate turbo report: %v", err)
+	}
+	if len(report.Benchmarks) != 1 || report.Benchmarks[0].Bench != "good-v1.flat" {
+		t.Fatalf("benchmarks = %+v", report.Benchmarks)
+	}
+	if len(report.Skipped) != 1 || report.Skipped[0].Bench != "bad-v1.flat" ||
+		report.Skipped[0].Reason == "" {
+		t.Fatalf("skipped = %+v", report.Skipped)
+	}
+
+	if err := os.Remove(filepath.Join(root, "good-v1.flat")); err != nil {
+		t.Fatalf("remove valid program: %v", err)
+	}
+	if _, err := GenerateTurboReport(
+		root, "", "", "", 1, 0, generatedAt,
+	); err == nil {
+		t.Fatal("report with no measurable program must be an error")
+	}
+}
+
 func TestTurboRepresentativeIndexGroupsNearDuplicatePrograms(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()

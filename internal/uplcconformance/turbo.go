@@ -59,6 +59,14 @@ type TurboReport struct {
 	Benchmarks      []TurboBenchmark  `json:"benchmarks"`
 	Representatives []TurboBenchmark  `json:"representatives"`
 	WorstCases      []TurboBenchmark  `json:"worst_cases"`
+	Skipped         []TurboSkipped    `json:"skipped,omitempty"`
+}
+
+// TurboSkipped names a program that could not be measured, with the decode or
+// evaluation error that excluded it.
+type TurboSkipped struct {
+	Bench  string `json:"bench"`
+	Reason string `json:"reason"`
 }
 
 type TurboSetup struct {
@@ -260,7 +268,14 @@ func GenerateTurboReport(
 		}
 		measurements, err := measureTurboCase(tc, programBytes, samples)
 		if err != nil {
-			return TurboReport{}, fmt.Errorf("benchmark %s: %w", tc.name, err)
+			// The corpus can hold programs a conforming decoder rejects. They
+			// have no timing to report, so list them rather than losing the
+			// whole run to one.
+			report.Skipped = append(
+				report.Skipped,
+				TurboSkipped{Bench: tc.name, Reason: err.Error()},
+			)
+			continue
 		}
 		benchmark, err := makeTurboBenchmark(
 			tc,
@@ -289,6 +304,13 @@ func GenerateTurboReport(
 				err,
 			)
 		}
+	}
+	if len(report.Benchmarks) == 0 {
+		return TurboReport{}, fmt.Errorf(
+			"no turbo program could be measured; first skipped: %s: %s",
+			report.Skipped[0].Bench,
+			report.Skipped[0].Reason,
+		)
 	}
 	report.Summary = summarizeTurbo(report.Benchmarks, samples)
 	report.Representatives = representativeIndex.benchmarks()

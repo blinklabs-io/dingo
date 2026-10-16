@@ -3,9 +3,11 @@
 # Generate the CBOR, ledger-rules, UPLC conformance and UPLC turbo reports for
 # a release tag.
 #
-# A report is published even when it records failures: the generators exit
-# non-zero for those, so success is the report file existing rather than the
-# exit status. A generator that wrote no report is a real error.
+# Reporting never stops a release. A generator exits non-zero when it records
+# failures, and that is fine: the report file is what counts. When a generator
+# crashes or its inputs cannot be prepared, an error report naming the scenario
+# and the cause is written in its place so every report kind is still
+# published.
 #
 # The UPLC turbo run is Linux-only and measures an evenly spaced subset of the
 # corpus, because the whole archive takes hours.
@@ -39,63 +41,91 @@ version="${RELEASE_TAG#v}"
 report_date="$(date -u +%Y%m%d)"
 prefix="${DIST_DIR}/dingo-${version}-${report_date}"
 
-# run_generator REPORT COMMAND...
-# Runs a generator that writes REPORT, tolerating a non-zero exit when the
-# report was written.
+# write_error_report REPORT SCENARIO MESSAGE
+# Writes a report that carries no results, only the reason there are none.
+write_error_report() {
+  local report="$1" scenario="$2" message="$3"
+  jq -n \
+    --arg scenario "$scenario" \
+    --arg generated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --arg version "$version" \
+    --arg error "$message" \
+    '{schema_version: "1", scenario: $scenario, generated_at: $generated_at,
+      implementation: {name: "dingo", version: $version}, error: $error}' \
+    >"$report"
+  echo "::warning::${scenario} report could not be generated: ${message}" >&2
+}
+
+# run_generator REPORT SCENARIO COMMAND...
+# Runs a generator that writes REPORT. A non-zero exit with the report written
+# is a report of failures and is kept. Without a report, an error report is
+# written instead.
 run_generator() {
-  local report="$1"
-  shift
+  local report="$1" scenario="$2"
+  shift 2
   rm -f "$report"
-  local status=0
-  "$@" || status=$?
+  local log status=0
+  log="$(mktemp)"
+  "$@" 2>"$log" || status=$?
+  cat "$log" >&2
   if [ ! -s "$report" ]; then
-    echo "generator exited ${status} without writing ${report}" >&2
-    exit 1
-  fi
-  if [ "$status" -ne 0 ]; then
+    write_error_report "$report" "$scenario" \
+      "generator exited ${status} without writing a report: $(tail -n 5 "$log" | tr '\n' ' ')"
+  elif [ "$status" -ne 0 ]; then
     echo "generator reported failures (exit ${status}); keeping ${report}" >&2
   fi
+  rm -f "$log"
+}
+
+# prepare_turbo_corpus DIR
+# Downloads, verifies and unpacks the turbo corpus into DIR/corpus.
+prepare_turbo_corpus() {
+  local dir="$1"
+  curl --fail --show-error --location --retry 3 -o "${dir}/turbo.tar.xz" "$TURBO_URL" &&
+    echo "${TURBO_SHA256}  ${dir}/turbo.tar.xz" | sha256sum --check --strict &&
+    mkdir "${dir}/corpus" &&
+    tar -xf "${dir}/turbo.tar.xz" -C "${dir}/corpus"
 }
 
 mkdir -p "$DIST_DIR"
 
-dataset_revision="$(git -C "$CBOR_DATASET_DIR" rev-parse HEAD)"
-if [ "$dataset_revision" != "$CBOR_DATASET_REVISION" ]; then
-  echo "CBOR dataset checkout does not match the pinned revision" >&2
-  exit 1
+if dataset_revision="$(git -C "$CBOR_DATASET_DIR" rev-parse HEAD)" &&
+  [ "$dataset_revision" = "$CBOR_DATASET_REVISION" ]; then
+  run_generator "${prefix}-cbor-conformance.json" cbor-decoding \
+    go run ./internal/cborconformance/cmd \
+    -dataset "${CBOR_DATASET_DIR}/dataset/conway" \
+    -corpus-revision "$dataset_revision" \
+    -output "${prefix}-cbor-conformance.json"
+else
+  write_error_report "${prefix}-cbor-conformance.json" cbor-decoding \
+    "CBOR dataset checkout does not match the pinned revision ${CBOR_DATASET_REVISION}"
 fi
 
-run_generator "${prefix}-cbor-conformance.json" \
-  go run ./internal/cborconformance/cmd \
-  -dataset "${CBOR_DATASET_DIR}/dataset/conway" \
-  -corpus-revision "$dataset_revision" \
-  -output "${prefix}-cbor-conformance.json"
-
-run_generator "${prefix}-ledger-rules.json" \
+run_generator "${prefix}-ledger-rules.json" ledger-rules \
   go run ./internal/ledgerrulesconformance/cmd \
   -fixtures "${CONFORMANCE_DIR}/node-diversity-conformance/scenarios/ledger-rules/fixtures" \
   -output "${prefix}-ledger-rules.json"
 
-run_generator "${prefix}-uplc-conformance.json" \
+run_generator "${prefix}-uplc-conformance.json" uplc-conformance \
   go run ./internal/uplcconformance/cmd \
   -corpus "${CONFORMANCE_DIR}/amaru/crates/amaru-uplc/tests" \
   -output "${prefix}-uplc-conformance.json"
 
 turbo_dir="$(mktemp -d)"
 trap 'rm -rf "$turbo_dir"' EXIT
-curl --fail --show-error --location --retry 3 -o "${turbo_dir}/turbo.tar.xz" "$TURBO_URL"
-echo "${TURBO_SHA256}  ${turbo_dir}/turbo.tar.xz" | sha256sum --check --strict
-mkdir "${turbo_dir}/corpus"
-tar -xf "${turbo_dir}/turbo.tar.xz" -C "${turbo_dir}/corpus"
-
-run_generator "${prefix}-uplc-turbo.json" \
-  go run ./internal/uplcconformance/turbocmd \
-  -corpus "${turbo_dir}/corpus" \
-  -corpus-digest "$TURBO_SHA256" \
-  -version "$version" \
-  -samples "$TURBO_SAMPLES" \
-  -max-programs "$TURBO_MAX_PROGRAMS" \
-  -output "${prefix}-uplc-turbo.json"
+if prepare_turbo_corpus "$turbo_dir"; then
+  run_generator "${prefix}-uplc-turbo.json" uplc-turbo \
+    go run ./internal/uplcconformance/turbocmd \
+    -corpus "${turbo_dir}/corpus" \
+    -corpus-digest "$TURBO_SHA256" \
+    -version "$version" \
+    -samples "$TURBO_SAMPLES" \
+    -max-programs "$TURBO_MAX_PROGRAMS" \
+    -output "${prefix}-uplc-turbo.json"
+else
+  write_error_report "${prefix}-uplc-turbo.json" uplc-turbo \
+    "turbo corpus could not be downloaded, verified or unpacked"
+fi
 
 shopt -s nullglob
 for report in "${DIST_DIR}"/dingo-*.json; do
