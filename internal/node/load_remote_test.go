@@ -659,6 +659,35 @@ func TestCopyBlocksRemoteStopsOnCancellation(t *testing.T) {
 	}
 }
 
+func TestExpectedRemotePrefetchCleanupError(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "canceled", err: context.Canceled, want: true},
+		{
+			name: "unpublished chunk and cancellation",
+			err:  errors.Join(errRemoteChunkNotPublished, context.Canceled),
+			want: true,
+		},
+		{
+			name: "network failure and cancellation",
+			err:  errors.Join(errors.New("connection reset"), context.Canceled),
+		},
+		{
+			name: "unpublished chunk and network failure",
+			err:  errors.Join(errRemoteChunkNotPublished, errors.New("HTTP 500")),
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tc.want, isExpectedRemotePrefetchCleanupError(tc.err))
+		})
+	}
+}
+
 func TestCopyBlocksRemoteRequiresChunkZero(t *testing.T) {
 	t.Parallel()
 	root := newRemoteRoot(t, 1)
