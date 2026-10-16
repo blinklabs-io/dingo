@@ -626,6 +626,6 @@ func forceCloseUtxorpc(server *http.Server, shutdownErr <-chan error) error {
 			"force-close after graceful shutdown failed: %w", err,
 		)
 	}
-	<-shutdownErr //nolint:errcheck // Shutdown error is moot after Close
+	<-shutdownErr
 	return nil
 }
