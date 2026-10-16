@@ -917,7 +917,10 @@ prevent startup.
 boundary whose RATIFY decision or mark snapshot has not been written yet. `GetPostSnapshotRewardCredits(slot)` returns
 each stake credential's total of the `account_reward_delta` credits at `slot`
 with `post_snapshot` set, which the deferred mark snapshot subtracts from the
-live stake read to recover the SNAP point. The boundary
+live stake read to recover the SNAP point. `GetPostSnapshotRewardCreditEvents(slot)`
+returns the same credits one row each with their `tx_hash` source hash, which
+the Koios parity check pairs with proposals to find the deposit refunds a
+boundary credited. The boundary
 transaction writes it; the transaction that writes the decision's ratified and
 expired marks -- the background ratification job's, or the next boundary's --
 deletes it. A rollback below `boundary_slot` deletes it in the rollback
@@ -5290,7 +5293,7 @@ ORDER BY proposed_epoch ASC, added_slot ASC,
 validation resolves votes, parents, and potential committee members against:
 
 ```sql
-SELECT gp.*
+SELECT gp.*, gpd.dropped_epoch, gpd.dropped_slot, gpo.tx_index
 FROM governance_proposal gp
 LEFT JOIN governance_proposal_order gpo ON gpo.proposal_id = gp.id
 LEFT JOIN governance_proposal_drop gpd ON gpd.proposal_id = gp.id
@@ -5388,7 +5391,7 @@ happened, keyed by `proposal_id`:
 -- step order: a boundary reprocessed after a commit crash reruns this query
 -- against expiries the first pass already wrote, and an unbounded predicate
 -- would refund them in the epoch that expired them.
-SELECT gp.*
+SELECT gp.*, gpd.dropped_epoch, gpd.dropped_slot, gpo.tx_index
 FROM governance_proposal gp
 LEFT JOIN governance_proposal_order gpo ON gpo.proposal_id = gp.id
 LEFT JOIN governance_proposal_drop gpd ON gpd.proposal_id = gp.id
@@ -5401,12 +5404,29 @@ ORDER BY gp.proposed_epoch ASC, gp.added_slot ASC,
 
 -- GetDroppedGovernanceProposalsAt(epoch, slot): epoch-boundary replay lookup,
 -- mirroring GetEnactedGovernanceProposalsAt/GetExpiredGovernanceProposalsAt.
-SELECT gp.*
+SELECT gp.*, gpd.dropped_epoch, gpd.dropped_slot, gpo.tx_index
 FROM governance_proposal gp
 LEFT JOIN governance_proposal_order gpo ON gpo.proposal_id = gp.id
 LEFT JOIN governance_proposal_drop gpd ON gpd.proposal_id = gp.id
 WHERE gpd.dropped_epoch = $1
   AND gpd.dropped_slot = $2
+  AND gp.deleted_slot IS NULL
+ORDER BY gp.proposed_epoch ASC, gp.added_slot ASC,
+  CASE WHEN gpo.tx_index IS NULL THEN 0 ELSE 1 END ASC, gpo.tx_index ASC,
+  gp.tx_hash ASC, gp.action_index ASC;
+```
+
+### `GetGovernanceProposalsRefundedAt`
+
+Returns the proposals whose deposit was returned when an epoch began: enacted at the epoch (with a ratified epoch) or dropped at it, excluding soft-deleted rows. Unlike the boundary replay lookups it reads by epoch alone, for the Koios parity check, which has no boundary slot to name; each row carries its own `enacted_slot` or `dropped_slot`.
+
+```sql
+SELECT gp.*, gpd.dropped_epoch, gpd.dropped_slot, gpo.tx_index
+FROM governance_proposal gp
+LEFT JOIN governance_proposal_order gpo ON gpo.proposal_id = gp.id
+LEFT JOIN governance_proposal_drop gpd ON gpd.proposal_id = gp.id
+WHERE ((gp.ratified_epoch IS NOT NULL AND gp.enacted_epoch = $1)
+       OR gpd.dropped_epoch = $1)
   AND gp.deleted_slot IS NULL
 ORDER BY gp.proposed_epoch ASC, gp.added_slot ASC,
   CASE WHEN gpo.tx_index IS NULL THEN 0 ELSE 1 END ASC, gpo.tx_index ASC,
