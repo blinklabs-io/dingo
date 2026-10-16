@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
-# Upload every binary archive and the optional CBOR conformance report to the
-# draft release.
+# Upload every binary archive and the optional conformance reports (CBOR,
+# ledger rules, UPLC conformance and UPLC turbo) to the draft release.
 #
 # Split out of the per-target build-binaries matrix so one job can upload the
 # several archives it now builds. The matrix version uploaded exactly one file
@@ -17,7 +17,8 @@
 #   REPOSITORY_OWNER      required, github.repository_owner
 #   APPLICATION_NAME      optional, defaults to dingo; also the repository name
 #   DIST_DIR                      optional, defaults to dist
-#   REQUIRE_CONFORMANCE_REPORT    optional, requires one dated report when true
+#   REQUIRE_CONFORMANCE_REPORT    optional, requires exactly one report of each
+#                                 kind when true; a report is .json or .json.gz
 
 set -euo pipefail
 
@@ -30,20 +31,27 @@ DIST_DIR="${DIST_DIR:-dist}"
 
 shopt -s nullglob
 archives=("${DIST_DIR}"/*.tar.gz)
-reports=("${DIST_DIR}/${APPLICATION_NAME}"-*-cbor-conformance.json.gz)
+report_kinds=(cbor-conformance ledger-rules uplc-conformance uplc-turbo)
+reports=()
+for kind in "${report_kinds[@]}"; do
+  kind_reports=("${DIST_DIR}/${APPLICATION_NAME}"-*-"${kind}".json "${DIST_DIR}/${APPLICATION_NAME}"-*-"${kind}".json.gz)
+  if [ "${#kind_reports[@]}" -gt 1 ]; then
+    echo "expected at most one ${APPLICATION_NAME} ${kind} report in ${DIST_DIR}" >&2
+    exit 1
+  fi
+  if [ "${REQUIRE_CONFORMANCE_REPORT:-false}" = "true" ] && [ "${#kind_reports[@]}" -ne 1 ]; then
+    echo "expected one ${APPLICATION_NAME} ${kind} report in ${DIST_DIR}" >&2
+    exit 1
+  fi
+  # Bash 3.2 treats an empty array expansion as unset under nounset.
+  if [ "${#kind_reports[@]}" -gt 0 ]; then
+    reports+=("${kind_reports[@]}")
+  fi
+done
 shopt -u nullglob
 
 if [ "${#archives[@]}" -eq 0 ]; then
   echo "no archives found in ${DIST_DIR}; build-targets.sh runs with RELEASE_TAG set on a tag" >&2
-  exit 1
-fi
-
-if [ "${#reports[@]}" -gt 1 ]; then
-  echo "expected at most one ${APPLICATION_NAME} CBOR conformance report in ${DIST_DIR}" >&2
-  exit 1
-fi
-if [ "${REQUIRE_CONFORMANCE_REPORT:-false}" = "true" ] && [ "${#reports[@]}" -ne 1 ]; then
-  echo "expected one ${APPLICATION_NAME} CBOR conformance report in ${DIST_DIR}" >&2
   exit 1
 fi
 
@@ -54,6 +62,7 @@ upload_asset() {
   name="$(basename "$asset")"
   content_type="application/octet-stream"
   case "$name" in
+    *.json) content_type="application/json" ;;
     *.json.gz) content_type="application/gzip" ;;
   esac
   echo "uploading ${name}"

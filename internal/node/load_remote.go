@@ -635,8 +635,14 @@ func copyBlocksRemote(
 	defer func() {
 		cancelFetch()
 		for _, done := range pending {
-			//nolint:errcheck // The caller has already chosen its return path.
-			<-done
+			if err := <-done; err != nil &&
+				!errors.Is(err, context.Canceled) &&
+				!errors.Is(err, errRemoteChunkNotPublished) {
+				logger.Warn(
+					"remote ImmutableDB prefetch failed during shutdown",
+					"error", err,
+				)
+			}
 		}
 	}()
 	next := first
