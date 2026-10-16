@@ -131,6 +131,13 @@ func TestGenerateTurboReportSkipsUndecodablePrograms(t *testing.T) {
 	); err != nil {
 		t.Fatalf("write invalid Flat program: %v", err)
 	}
+	if err := os.WriteFile(
+		filepath.Join(root, "unwrapped-v1.flat"),
+		[]byte{0xff},
+		0o600,
+	); err != nil {
+		t.Fatalf("write invalid CBOR wrapper: %v", err)
+	}
 	generatedAt := time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)
 
 	report, err := GenerateTurboReport(root, "", "", "", 1, 0, generatedAt)
@@ -140,8 +147,10 @@ func TestGenerateTurboReportSkipsUndecodablePrograms(t *testing.T) {
 	if len(report.Benchmarks) != 1 || report.Benchmarks[0].Bench != "good-v1.flat" {
 		t.Fatalf("benchmarks = %+v", report.Benchmarks)
 	}
-	if len(report.Skipped) != 1 || report.Skipped[0].Bench != "bad-v1.flat" ||
-		report.Skipped[0].Reason == "" {
+	if len(report.Skipped) != 2 ||
+		report.Skipped[0].Bench != "bad-v1.flat" ||
+		report.Skipped[1].Bench != "unwrapped-v1.flat" ||
+		report.Skipped[0].Reason == "" || report.Skipped[1].Reason == "" {
 		t.Fatalf("skipped = %+v", report.Skipped)
 	}
 

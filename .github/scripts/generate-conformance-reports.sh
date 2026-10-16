@@ -71,6 +71,9 @@ run_generator() {
   if [ ! -s "$report" ]; then
     write_error_report "$report" "$scenario" \
       "generator exited ${status} without writing a report: $(tail -n 5 "$log" | tr '\n' ' ')"
+  elif ! jq -e -s 'length == 1 and (.[0] | type == "object")' "$report" >/dev/null 2>&1; then
+    write_error_report "$report" "$scenario" \
+      "generator exited ${status} with an invalid report: $(tail -n 5 "$log" | tr '\n' ' ')"
   elif [ "$status" -ne 0 ]; then
     echo "generator reported failures (exit ${status}); keeping ${report}" >&2
   fi

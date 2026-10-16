@@ -259,18 +259,14 @@ func GenerateTurboReport(
 	}
 	for _, tc := range cases {
 		programBytes, err := readTurboProgram(tc.path)
-		if err != nil {
-			return TurboReport{}, fmt.Errorf(
-				"read CBOR-wrapped Flat program %q: %w",
-				tc.path,
-				err,
-			)
+		var measurements []turboSample
+		if err == nil {
+			measurements, err = measureTurboCase(tc, programBytes, samples)
 		}
-		measurements, err := measureTurboCase(tc, programBytes, samples)
 		if err != nil {
-			// The corpus can hold programs a conforming decoder rejects. They
-			// have no timing to report, so list them rather than losing the
-			// whole run to one.
+			// The corpus can hold programs that are unreadable or that a
+			// conforming decoder rejects. They have no timing to report, so
+			// list them rather than losing the whole run to one.
 			report.Skipped = append(
 				report.Skipped,
 				TurboSkipped{Bench: tc.name, Reason: err.Error()},
