@@ -1143,7 +1143,7 @@ func (d *DingoDB) GetProposalDepositRefunds(
 	refundEpoch uint64,
 ) (ProposalDepositRefunds, error) {
 	var out ProposalDepositRefunds
-	tx, err := d.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	tx, err := d.db.BeginTx(ctx, proposalRefundReadTxOptions(d.dialect))
 	if err != nil {
 		return out, fmt.Errorf("begin proposal refund read: %w", err)
 	}
@@ -1181,6 +1181,14 @@ func (d *DingoDB) GetProposalDepositRefunds(
 		credits,
 	)
 	return out, err
+}
+
+func proposalRefundReadTxOptions(dialect string) *sql.TxOptions {
+	options := &sql.TxOptions{ReadOnly: true}
+	if dialect == "postgres" || dialect == "mysql" {
+		options.Isolation = sql.LevelRepeatableRead
+	}
+	return options
 }
 
 // refundsPending computes ProposalDepositRefunds.Pending with the tip and
