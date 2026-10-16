@@ -39,7 +39,13 @@ func checkOpenFileOwner(f *os.File) error {
 			"key file %q has no owner: %w", f.Name(), ErrInsecureFileOwner,
 		)
 	}
-	token := windows.GetCurrentProcessToken()
+	var token windows.Token
+	if err := windows.OpenProcessToken(
+		windows.CurrentProcess(), windows.TOKEN_QUERY, &token,
+	); err != nil {
+		return fmt.Errorf("open current process token for key file %q: %w", f.Name(), err)
+	}
+	defer token.Close()
 	user, err := token.GetTokenUser()
 	if err != nil {
 		return fmt.Errorf("get current user for key file %q: %w", f.Name(), err)
