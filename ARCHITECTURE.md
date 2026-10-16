@@ -9685,6 +9685,11 @@ every block and
 or reordered chunk fails the load. The replay is a trusted replay that skips
 body-hash checks, so it does not detect a root serving a self-consistent
 alternative history or altered block bodies. Load only from a root you trust.
+Block batches enter the blob store before the asynchronous ledger worker
+applies their metadata. If that worker rejects a batch, fails, or is cancelled,
+the loader waits for it to stop and rewinds the blob chain to the worker's last
+applied ledger tip before returning the error. This also removes batches the
+bounded channel admitted after the rejected batch.
 The blob-only copy that follows a Mithril ledger-state import
 (`LoadBlobsWithDB`) reads only the local ImmutableDB whose digests the Mithril
 certificate covers and never takes a remote root. To bootstrap without trusting

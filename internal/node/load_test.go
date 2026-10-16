@@ -1065,6 +1065,59 @@ func TestLoadWithDBConfiguresRawChainSecurityParamBeforeHooks(t *testing.T) {
 	}
 }
 
+// Not t.Parallel: this test swaps processTrustedBlockBatchesForLoad.
+func TestLoadWithDBRewindsBlocksRejectedDuringReplay(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	db := newTestDB(t)
+	rejected := errors.New("reject trusted replay batch")
+	noBatch := errors.New("trusted replay ended without a batch")
+
+	var copiedTip ochainsync.Tip
+	var appliedTip ochainsync.Tip
+	oldProcess := processTrustedBlockBatchesForLoad
+	processTrustedBlockBatchesForLoad = func(
+		ls *ledger.LedgerState,
+		ctx context.Context,
+		batches <-chan []gledger.Block,
+	) error {
+		select {
+		case _, ok := <-batches:
+			if !ok {
+				return noBatch
+			}
+			copiedTip = ls.PrimaryChainTip()
+			appliedTip = ls.Tip()
+			return rejected
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	t.Cleanup(func() {
+		processTrustedBlockBatchesForLoad = oldProcess
+	})
+
+	immutableDir := filepath.Join(
+		"..",
+		"..",
+		"database",
+		"immutable",
+		"testdata",
+	)
+	err := LoadWithDB(
+		t.Context(),
+		&config.Config{Network: "preview"},
+		logger,
+		immutableDir,
+		db,
+	)
+	require.ErrorIs(t, err, rejected)
+	require.NotEqual(t, appliedTip.Point, copiedTip.Point)
+
+	cm, err := chain.NewManager(t.Context(), db, nil)
+	require.NoError(t, err)
+	require.Equal(t, appliedTip, cm.PrimaryChain().Tip())
+}
+
 // TestLoadWithDBPropagatesFullPotRewards verifies that the CIP-0163 full-pot
 // feature gate flows from the loaded config into the load-mode ledger config,
 // so `dingo load` computes the same reward state as an enabled serve node
