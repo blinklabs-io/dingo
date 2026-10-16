@@ -5253,8 +5253,8 @@ func (ls *LedgerState) rollbackWithBlocksAndIntent(
 // batch to ls.currentTip immediately afterward, momentarily re-advancing
 // the ledger tip onto a fork chain-selection has already discarded.
 //
-// What this does NOT do: it only waits for the persisted decoder's
-// PendingCount to empty, not the subsequent bounded header-crypto batch or
+// What this does NOT do: it waits for accepted persisted-decode work to
+// finish ordered processing, not the subsequent bounded header-crypto batch or
 // ledgerProcessBlocksFromSource's DB apply. Those remain behind the reader's
 // in-order result handshake and all crypto workers join before reader exit.
 // Real ledger apply remains deliberately outside pipeline.ApplyFunc; see this

@@ -16943,9 +16943,11 @@ very fork — to the pipeline's decode workers and is blocked
 draining `Results()` for it. `drainBlockPipelineBeforeRollback`
 (`ledger/state.go`) closes part of that window: called near the top of
 `rollbackChainAndStateDeferred`, before `ls.chain.Rollback`, it waits (via
-`pipeline.BlockPipeline.WaitForDrain`/`PendingCount`, bounded by
+`pipeline.BlockPipeline.WaitForDrain`, bounded by
 `BlockPipelineRollbackDrainTimeout`, default 5s) for `ls.blockPipeline`'s
-decode/validate backlog to empty before the physical rollback proceeds. A
+accepted persisted-decode work to finish ordered processing before the
+physical rollback proceeds. `PendingCount` is diagnostic: it excludes work
+executing in decode workers and is not a completion barrier. A
 timeout logs a warning and proceeds anyway rather than blocking a rollback
 indefinitely; a nil `blockPipeline` (pipeline disabled, or
 `ManualBlockProcessing`) makes the call a no-op, matching every other
@@ -17111,7 +17113,7 @@ blocks' existence at all, not merely of their content.
 
 `blockPipelineGatherMutex` (`ledger/state.go`) closes a narrower, earlier
 gap in the same window: `drainBlockPipelineBeforeRollback` only accounts
-for work already *submitted* to `blockPipeline` (`PendingCount`) — raw
+for work already *submitted* to `blockPipeline` at the drain boundary — raw
 blocks `ledgerReadChainIterator` has already pulled off the chain iterator
 into its local batch, but has not yet handed to `decodeReadChainBatch`
 (`Submit`), hold nothing in the pipeline's queues, so `WaitForDrain` can

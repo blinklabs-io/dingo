@@ -793,7 +793,7 @@ func TestDrainBlockPipelineBeforeRollbackNilPipelineNoOp(t *testing.T) {
 func TestDrainBlockPipelineBeforeRollbackWaitsForPendingWork(t *testing.T) {
 	t.Parallel()
 
-	const numBlocks = 3
+	const numBlocks = 4
 
 	var seed0 [32]byte
 	seed0[0] = 1
@@ -850,8 +850,9 @@ func TestDrainBlockPipelineBeforeRollbackWaitsForPendingWork(t *testing.T) {
 		)
 	}
 
-	// One result fits, the next blocks forwarding, and the third remains
-	// pending until the consumer is released.
+	// One result fits and the next blocks forwarding. The decoder can hold
+	// a third in flight, which PendingCount excludes; the fourth forces a
+	// queued item until the consumer is released.
 	require.Positive(
 		t,
 		ls.blockPipeline.PendingCount(),
