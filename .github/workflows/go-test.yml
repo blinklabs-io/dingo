@@ -47,7 +47,7 @@ permissions:
   contents: read
 
 env:
-  CBOR_DATASET_REVISION: '99f9f968e90ce52eb7b47623c72a7b9b066649de'
+  CBOR_DATASET_REVISION: '6cd8c928665bbafe90e02066ebb4620e38f051de'
 
 concurrency:
   # A new push to the branch cancels the run for the commit it replaced, so a

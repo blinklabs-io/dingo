@@ -4,6 +4,7 @@ package cborconformance
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -24,6 +25,10 @@ const (
 	protocolVersion  = "11.0"
 	maxCorpusSamples = 100_000
 	maxSampleBytes   = int64(16 << 20)
+
+	// Update this inventory together with the dataset revision in both conformance workflows.
+	primaryConwayCorpusRevision  = "6cd8c928665bbafe90e02066ebb4620e38f051de"
+	primaryConwayCorpusInventory = "9a7ce28ed79198ed30e09a9d13032728d00e0b70e501891965aa126c4ab7a93f"
 
 	decodeFailed        = "decoding failed"
 	decodeSucceeded     = "decoding succeeded but the sample must be rejected"
@@ -105,6 +110,16 @@ func GenerateReport(datasetDir, corpusRevision string) (Report, error) {
 	if err := validateCorpusRevision(corpusRevision); err != nil {
 		return Report{}, err
 	}
+	if corpusRevision != primaryConwayCorpusRevision {
+		return Report{}, fmt.Errorf("no Conway corpus inventory is recorded for revision %s", corpusRevision)
+	}
+	return generateReport(datasetDir, corpusRevision, primaryConwayCorpusInventory)
+}
+
+func generateReport(datasetDir, corpusRevision, expectedInventory string) (Report, error) {
+	if err := validateCorpusRevision(corpusRevision); err != nil {
+		return Report{}, err
+	}
 	root, err := filepath.Abs(datasetDir)
 	if err != nil {
 		return Report{}, fmt.Errorf("resolve dataset directory: %w", err)
@@ -120,6 +135,20 @@ func GenerateReport(datasetDir, corpusRevision string) (Report, error) {
 	}
 	if !info.IsDir() {
 		return Report{}, fmt.Errorf("dataset path is not a directory: %s", root)
+	}
+	if expectedInventory != "" {
+		actualInventory, err := corpusInventorySHA256(corpusRoot.FS())
+		if err != nil {
+			return Report{}, fmt.Errorf("hash Conway corpus inventory: %w", err)
+		}
+		if actualInventory != expectedInventory {
+			return Report{}, fmt.Errorf(
+				"conway corpus inventory mismatch for revision %s: got %s, want %s",
+				corpusRevision,
+				actualInventory,
+				expectedInventory,
+			)
+		}
 	}
 
 	entries, err := fs.ReadDir(corpusRoot.FS(), ".")
@@ -149,7 +178,6 @@ func GenerateReport(datasetDir, corpusRevision string) (Report, error) {
 
 	var files []sample
 	metadataPresent := false
-	presentRules := make(map[string]struct{}, len(knownRules))
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			if entry.Name() == "corpus.json" {
@@ -174,7 +202,6 @@ func GenerateReport(datasetDir, corpusRevision string) (Report, error) {
 				entry.Name(),
 			)
 		}
-		presentRules[entry.Name()] = struct{}{}
 		report.Rules[entry.Name()] = Outcome{}
 		ruleFiles, err := listRuleSamples(corpusRoot, entry.Name())
 		if err != nil {
@@ -192,11 +219,6 @@ func GenerateReport(datasetDir, corpusRevision string) (Report, error) {
 				"dataset exceeds %d CBOR samples",
 				maxCorpusSamples,
 			)
-		}
-	}
-	for _, rule := range knownRules {
-		if _, ok := presentRules[rule]; !ok {
-			return Report{}, fmt.Errorf("dataset is missing Conway rule directory: %s", rule)
 		}
 	}
 	waivedSamples, err := loadSampleWaivers(corpusRoot, metadataPresent, files)
@@ -267,7 +289,8 @@ func GenerateReport(datasetDir, corpusRevision string) (Report, error) {
 			continue
 		}
 
-		if isByteExactRule(file.rule) && !bytes.Equal(reencoded, input) {
+		byteExact := isByteExactRule(file.rule)
+		if byteExact && !bytes.Equal(reencoded, input) {
 			report.addFailure(
 				file,
 				byteExactMismatch,
@@ -275,6 +298,18 @@ func GenerateReport(datasetDir, corpusRevision string) (Report, error) {
 			)
 			report.Rules[file.rule] = outcome
 			continue
+		}
+		if !byteExact {
+			reencoded, err = NormalizeCBOR(reencoded)
+			if err != nil {
+				report.addFailure(
+					file,
+					decodeFailed,
+					"normalize re-encoding failed: "+err.Error(),
+				)
+				report.Rules[file.rule] = outcome
+				continue
+			}
 		}
 		if file.expectPath == "" {
 			report.addFailure(
@@ -295,21 +330,15 @@ func GenerateReport(datasetDir, corpusRevision string) (Report, error) {
 			report.Rules[file.rule] = outcome
 			continue
 		}
-		reencoded, err = NormalizeCBOR(reencoded)
-		if err != nil {
-			report.addFailure(
-				file,
-				decodeFailed,
-				"normalize re-encoding failed: "+err.Error(),
-			)
-			report.Rules[file.rule] = outcome
-			continue
-		}
 		if !bytes.Equal(reencoded, reference) {
+			reason := "normalized reserialization differs from the expected output"
+			if byteExact {
+				reason = "byte-exact reserialization differs from the expected output"
+			}
 			report.addFailure(
 				file,
 				referenceMismatch,
-				"normalized reserialization differs from the expected output",
+				reason,
 			)
 		} else {
 			outcome.GeneratedDecodedReencodedActual++
@@ -322,6 +351,54 @@ func GenerateReport(datasetDir, corpusRevision string) (Report, error) {
 	}
 	report.Successful = len(report.Failures) == 0
 	return report, nil
+}
+
+func corpusInventorySHA256(corpus fs.FS) (string, error) {
+	var files []string
+	if err := fs.WalkDir(corpus, ".", func(name string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if name == "." || entry.IsDir() {
+			return nil
+		}
+		if entry.Type()&fs.ModeSymlink != 0 {
+			return fmt.Errorf("corpus contains a symbolic link: %s", name)
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return fmt.Errorf("stat corpus file %s: %w", name, err)
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("corpus entry is not a regular file: %s", name)
+		}
+		files = append(files, name)
+		return nil
+	}); err != nil {
+		return "", fmt.Errorf("walk corpus files: %w", err)
+	}
+	sort.Strings(files)
+
+	digest := sha256.New()
+	for _, name := range files {
+		file, err := corpus.Open(name)
+		if err != nil {
+			return "", fmt.Errorf("open corpus file %s: %w", name, err)
+		}
+		fileDigest := sha256.New()
+		if _, err := io.Copy(fileDigest, file); err != nil {
+			_ = file.Close()
+			return "", fmt.Errorf("read corpus file %s: %w", name, err)
+		}
+		if err := file.Close(); err != nil {
+			return "", fmt.Errorf("close corpus file %s: %w", name, err)
+		}
+		_, _ = io.WriteString(digest, name)
+		_, _ = digest.Write([]byte{0})
+		_, _ = digest.Write(fileDigest.Sum(nil))
+		_, _ = digest.Write([]byte{'\n'})
+	}
+	return hex.EncodeToString(digest.Sum(nil)), nil
 }
 
 func loadSampleWaivers(

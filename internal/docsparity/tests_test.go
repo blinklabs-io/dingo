@@ -2951,7 +2951,7 @@ func TestPipelineStagesMatch(t *testing.T) {
 
 func TestCBORConformanceReportRunsOnLinuxAndFeedsRelease(t *testing.T) {
 	root := repoRoot(t)
-	const datasetRevision = "99f9f968e90ce52eb7b47623c72a7b9b066649de"
+	const datasetRevision = "6cd8c928665bbafe90e02066ebb4620e38f051de"
 
 	for _, workflow := range []string{prPipeline, publishPipeline} {
 		var config struct {

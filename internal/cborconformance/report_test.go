@@ -68,7 +68,7 @@ func TestGenerateReport(t *testing.T) {
 	write(filepath.Join(zapZeroDir, "invalid.cbor"), []byte{0xf6})
 	write(filepath.Join(zapOneDir, "mutation.cbor"), []byte{0x80})
 
-	report, err := GenerateReport(corpus, testCorpusRevision)
+	report, err := generateReport(corpus, testCorpusRevision, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,19 +96,66 @@ func TestGenerateReport(t *testing.T) {
 	}
 }
 
-func TestGenerateReportRequiresEveryRuleDirectory(t *testing.T) {
+func TestGenerateReportComparesByteExactRulesWithoutNormalization(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
-	corpus := filepath.Join(root, "conway")
-	makeCompleteCorpus(t, corpus)
-	missingRule := ruleNames()[0]
-	if err := os.RemoveAll(filepath.Join(corpus, missingRule)); err != nil {
+	corpus := filepath.Join(t.TempDir(), "conway")
+	validDir := filepath.Join(corpus, "native_script", "valid")
+	if err := os.MkdirAll(validDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	valid, err := hex.DecodeString(
+		"8200581c00000000000000000000000000000000000000000000000000000000",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, suffix := range []string{"input", "expected"} {
+		if err := os.WriteFile(
+			filepath.Join(validDir, "valid."+suffix+".cbor"),
+			valid,
+			0o644,
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
 
-	_, err := GenerateReport(corpus, testCorpusRevision)
-	if err == nil || !strings.Contains(err.Error(), "missing Conway rule directory: "+missingRule) {
-		t.Fatalf("GenerateReport error = %v, want missing rule directory %q", err, missingRule)
+	report, err := generateReport(corpus, testCorpusRevision, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !report.Successful {
+		t.Fatalf("report has failures: %+v", report.Failures)
+	}
+	if report.Totals.GeneratedDecodedReencodedActual != 1 {
+		t.Fatalf("exact re-encoding count = %d, want 1", report.Totals.GeneratedDecodedReencodedActual)
+	}
+}
+
+func TestGenerateReportRejectsIncompleteCorpusInventory(t *testing.T) {
+	t.Parallel()
+	for _, mutation := range []string{"missing sample", "altered sample"} {
+		t.Run(mutation, func(t *testing.T) {
+			t.Parallel()
+			corpus := filepath.Join(t.TempDir(), "conway")
+			makeCompleteCorpus(t, corpus)
+			expectedInventory, err := corpusInventorySHA256(os.DirFS(corpus))
+			if err != nil {
+				t.Fatal(err)
+			}
+			samplePath := filepath.Join(corpus, "credential", "invalid-zap-1", "complete.input.cbor")
+			if mutation == "missing sample" {
+				err = os.Remove(samplePath)
+			} else {
+				err = os.WriteFile(samplePath, []byte{0x01}, 0o644)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = generateReport(corpus, testCorpusRevision, expectedInventory)
+			if err == nil || !strings.Contains(err.Error(), "inventory mismatch") {
+				t.Fatalf("generateReport error = %v, want inventory mismatch", err)
+			}
+		})
 	}
 }
 
@@ -125,7 +172,7 @@ func TestGenerateReportAppliesExplicitSampleWaivers(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	report, err := GenerateReport(corpus, testCorpusRevision)
+	report, err := generateReport(corpus, testCorpusRevision, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -181,7 +228,7 @@ func TestGenerateReportRejectsInvalidSampleWaivers(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(corpus, "corpus.json"), []byte(test.metadata), 0o644); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := GenerateReport(corpus, testCorpusRevision); err == nil || !strings.Contains(err.Error(), test.wantErr) {
+			if _, err := generateReport(corpus, testCorpusRevision, ""); err == nil || !strings.Contains(err.Error(), test.wantErr) {
 				t.Fatalf("GenerateReport error = %v, want %q", err, test.wantErr)
 			}
 		})
@@ -247,7 +294,7 @@ func TestGenerateReportPrimaryDatasetLayout(t *testing.T) {
 	write(filepath.Join(zapZeroDir, "00001-invalid.input.cbor"), []byte{0xf6})
 	write(filepath.Join(zapOneDir, "00001-mutation.input.cbor"), []byte{0x80})
 
-	report, err := GenerateReport(corpus, testCorpusRevision)
+	report, err := generateReport(corpus, testCorpusRevision, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -293,7 +340,7 @@ func TestGenerateReportRejectsOrphanExpectedOutput(t *testing.T) {
 		}
 	}
 
-	_, err = GenerateReport(corpus, testCorpusRevision)
+	_, err = generateReport(corpus, testCorpusRevision, "")
 	if err == nil || !strings.Contains(err.Error(), "orphan.expected.cbor") {
 		t.Fatalf(
 			"GenerateReport error = %v, want orphan expected output error",
@@ -329,7 +376,7 @@ func TestGenerateReportAcceptsManualSamplesAndEmitsScenarioSchema(t *testing.T) 
 		t.Fatal(err)
 	}
 
-	report, err := GenerateReport(corpus, testCorpusRevision)
+	report, err := generateReport(corpus, testCorpusRevision, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -382,7 +429,7 @@ func TestGenerateReportRejectsUnknownConwayRule(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := GenerateReport(corpus, testCorpusRevision)
+	_, err := generateReport(corpus, testCorpusRevision, "")
 	if err == nil || !strings.Contains(err.Error(), "unknown Conway rule directory") {
 		t.Fatalf("GenerateReport error = %v, want unknown rule directory", err)
 	}
@@ -403,7 +450,7 @@ func TestGenerateReportRejectsEmptyConwayRule(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := GenerateReport(corpus, testCorpusRevision)
+	_, err := generateReport(corpus, testCorpusRevision, "")
 	if err == nil || !strings.Contains(err.Error(), "contains no CBOR samples") {
 		t.Fatalf("GenerateReport error = %v, want empty rule directory", err)
 	}
@@ -439,7 +486,7 @@ func TestGenerateReportRejectsSampleSymlink(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	report, err := GenerateReport(corpus, testCorpusRevision)
+	report, err := generateReport(corpus, testCorpusRevision, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -475,7 +522,7 @@ func TestGenerateReportRejectsOversizedSample(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	report, err := GenerateReport(corpus, testCorpusRevision)
+	report, err := generateReport(corpus, testCorpusRevision, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -494,6 +541,14 @@ func TestGenerateReportRejectsInvalidCorpusRevision(t *testing.T) {
 	_, err := GenerateReport(t.TempDir(), "main")
 	if err == nil || !strings.Contains(err.Error(), "full commit SHA") {
 		t.Fatalf("GenerateReport error = %v, want full commit SHA error", err)
+	}
+}
+
+func TestGenerateReportRequiresRecordedCorpusInventory(t *testing.T) {
+	t.Parallel()
+	_, err := GenerateReport(t.TempDir(), testCorpusRevision)
+	if err == nil || !strings.Contains(err.Error(), "no Conway corpus inventory is recorded") {
+		t.Fatalf("GenerateReport error = %v, want missing corpus inventory error", err)
 	}
 }
 
@@ -516,7 +571,7 @@ func TestGenerateReportClassifiesAcceptedMutation(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	report, err := GenerateReport(corpus, testCorpusRevision)
+	report, err := generateReport(corpus, testCorpusRevision, "")
 	if err != nil {
 		t.Fatal(err)
 	}

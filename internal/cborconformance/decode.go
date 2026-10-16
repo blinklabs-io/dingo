@@ -1051,7 +1051,57 @@ func reencodeWithdrawals(raw []byte) ([]byte, error) {
 	if err := common.ValidateWithdrawalAddresses(withdrawals); err != nil {
 		return nil, err
 	}
-	return common.EncodeRewardAccountMap(withdrawals)
+	return encodeRewardAccountMap(withdrawals)
+}
+
+// encodeRewardAccountMap preserves Cardano's ledger ordering for reward accounts.
+func encodeRewardAccountMap(withdrawals map[*common.Address]uint64) ([]byte, error) {
+	encoded := appendCBORMapHeader(nil, uint64(len(withdrawals)))
+	for _, address := range common.SortRewardAccountAddresses(withdrawals) {
+		encodedAddress, err := cbor.Encode(address)
+		if err != nil {
+			return nil, fmt.Errorf("encode withdrawal reward account: %w", err)
+		}
+		encodedAmount, err := cbor.Encode(withdrawals[address])
+		if err != nil {
+			return nil, fmt.Errorf("encode withdrawal amount: %w", err)
+		}
+		encoded = append(encoded, encodedAddress...)
+		encoded = append(encoded, encodedAmount...)
+	}
+	return encoded, nil
+}
+
+func appendCBORMapHeader(dst []byte, length uint64) []byte {
+	const mapMajorType = byte(5 << 5)
+	switch {
+	case length < 24:
+		return append(dst, mapMajorType|byte(length))
+	case length <= 0xff:
+		return append(dst, mapMajorType|24, byte(length))
+	case length <= 0xffff:
+		return append(
+			dst,
+			mapMajorType|25,
+			byte((length>>8)&0xff),
+			byte(length&0xff),
+		)
+	case length <= 0xffffffff:
+		return append(
+			dst,
+			mapMajorType|26,
+			byte((length>>24)&0xff),
+			byte((length>>16)&0xff),
+			byte((length>>8)&0xff),
+			byte(length&0xff),
+		)
+	default:
+		dst = append(dst, mapMajorType|27)
+		for shift := 56; shift >= 0; shift -= 8 {
+			dst = append(dst, byte((length>>shift)&0xff))
+		}
+		return dst
+	}
 }
 
 func validateConwayAuxiliaryDataScripts(raw []byte) error {

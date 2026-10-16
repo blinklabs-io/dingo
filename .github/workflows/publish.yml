@@ -61,7 +61,7 @@ concurrency:
 env:
   APPLICATION_NAME: 'dingo'
   RELEASE_TAG: ${{ github.ref_name }}
-  CBOR_DATASET_REVISION: '99f9f968e90ce52eb7b47623c72a7b9b066649de'
+  CBOR_DATASET_REVISION: '6cd8c928665bbafe90e02066ebb4620e38f051de'
 
 jobs:
   # Stage 1. See go-test.yml's lint job for why these are steps of one job
