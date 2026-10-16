@@ -306,10 +306,15 @@ func writeBadgerGCBlocks(
 ) (int, time.Duration) {
 	tb.Helper()
 	const batchSize = 64
+	maxBatchPayloadBytes := store.DB().MaxBatchSize() / 2
+	require.Positive(tb, maxBatchPayloadBytes)
+	batchEnds := badgerGCBlockBatchEnds(
+		blocks, batchSize, maxBatchPayloadBytes,
+	)
 	start := time.Now()
 	for range repeats {
-		for lo := 0; lo < len(blocks); lo += batchSize {
-			hi := min(lo+batchSize, len(blocks))
+		lo := 0
+		for _, hi := range batchEnds {
 			txn := store.NewTransaction(true)
 			for i := lo; i < hi; i++ {
 				block := blocks[i]
@@ -324,9 +329,34 @@ func writeBadgerGCBlocks(
 			}
 			require.NoError(tb, txn.Commit())
 			require.NoError(tb, store.Sync())
+			lo = hi
 		}
 	}
 	return len(blocks) * repeats, time.Since(start)
+}
+
+func badgerGCBlockBatchEnds(
+	blocks []badgerGCBlock,
+	maxBlocks int,
+	maxPayloadBytes int64,
+) []int {
+	var ends []int
+	start := 0
+	var payloadBytes int64
+	for i, block := range blocks {
+		blockBytes := int64(len(block.cbor))
+		if i > start && (i-start >= maxBlocks ||
+			blockBytes > maxPayloadBytes-payloadBytes) {
+			ends = append(ends, i)
+			start = i
+			payloadBytes = 0
+		}
+		payloadBytes += blockBytes
+	}
+	if start < len(blocks) {
+		ends = append(ends, len(blocks))
+	}
+	return ends
 }
 
 func readBadgerGCBlocks(
@@ -958,6 +988,26 @@ func TestShouldTriggerAdaptiveGC(t *testing.T) {
 		badgerGCFileSizes{sstTables: 2, vlog: vlogFileSize + 1},
 		vlogFileSize,
 	))
+}
+
+func TestBadgerGCBlockBatchEndsBoundsCountAndPayload(t *testing.T) {
+	blocks := make([]badgerGCBlock, 6)
+	for i, size := range []int{4, 4, 7, 1, 9, 2} {
+		blocks[i].cbor = make([]byte, size)
+	}
+
+	ends := badgerGCBlockBatchEnds(blocks, 3, 8)
+	require.Equal(t, []int{2, 4, 5, 6}, ends)
+	lo := 0
+	for _, hi := range ends {
+		payloadBytes := int64(0)
+		for _, block := range blocks[lo:hi] {
+			payloadBytes += int64(len(block.cbor))
+		}
+		require.LessOrEqual(t, hi-lo, 3)
+		require.True(t, payloadBytes <= 8 || hi-lo == 1)
+		lo = hi
+	}
 }
 
 func TestReadProcIO(t *testing.T) {
