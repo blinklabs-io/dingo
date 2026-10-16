@@ -16,6 +16,7 @@ package sqlstore
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"slices"
@@ -374,7 +375,7 @@ func (s *Store) indexTransactionAddresses(
 					txID          []byte
 					output        uint32
 					payment       []byte
-					paymentScript bool
+					paymentScript sql.NullBool
 					staking       []byte
 					tag           uint8
 				)
@@ -388,7 +389,9 @@ func (s *Store) indexTransactionAddresses(
 				if _, ok := outputs[output]; !ok {
 					continue
 				}
-				add(payment, paymentScript, tag, staking)
+				// A NULL payment_script reads as a key credential, as every
+				// other utxo read does.
+				add(payment, paymentScript.Bool, tag, staking)
 			}
 			if err := inputRows.Err(); err != nil {
 				return fmt.Errorf("iterate input addresses for transaction %d: %w", transactionID, err)

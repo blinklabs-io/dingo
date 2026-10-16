@@ -1084,7 +1084,7 @@ func TestRowBatchFlushTranslatesForProviders(t *testing.T) {
 		rows.add(redeemerShape, []byte{seed, 0x01}, int64(seed), 1, 2, int64(i), 0)
 		rows.add(
 			addressTransactionShape,
-			[]byte{seed, 0x09}, []byte{seed, 0x0a}, 1,
+			[]byte{seed, 0x09}, false, []byte{seed, 0x0a}, 1,
 			int64(seed), 300, int64(i),
 		)
 		rows.add(metadataLabelShape, int64(7), i+1, 300, []byte{seed, 0x02}, nil)
