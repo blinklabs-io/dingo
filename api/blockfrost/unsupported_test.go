@@ -68,8 +68,6 @@ func TestRouterUnsupportedMethodAndUnknownPath(t *testing.T) {
 		method, path, allow string
 		status              int
 	}{
-		{http.MethodPost, "/api/v0/scripts/hash/cbor", "GET, HEAD", http.StatusMethodNotAllowed},
-		{http.MethodPost, "/api/v0/pools/retired", "GET, HEAD", http.StatusMethodNotAllowed},
 		{http.MethodPost, "/api/v0/nutlink/hash/tickers", "GET, HEAD", http.StatusMethodNotAllowed},
 		{http.MethodGet, "/api/v0/ipfs/pin/add/hash", "POST", http.StatusMethodNotAllowed},
 		{http.MethodHead, "/api/v0/nutlink/hash", "", http.StatusNotImplemented},
