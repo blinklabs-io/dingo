@@ -52,6 +52,7 @@ func requireReadChainBatchShapeOutcome(
 		ls.blockPipeline = pipeline.NewBlockPipeline(
 			pipeline.WithTrustedDecodeOnly(),
 			pipeline.WithDecodeWorkers(2),
+			pipeline.WithTrustedDecodeOnly(),
 		)
 		require.NoError(t, ls.blockPipeline.Start(ctx))
 		defer func() {
