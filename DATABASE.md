@@ -1083,7 +1083,8 @@ removes its staging files after all fetch workers stop.
 The loader can persist blob batches ahead of the ledger worker. Any replay
 failure rewinds that blob suffix to the last applied metadata tip before the
 command returns, so a rejected batch cannot become the next run's canonical
-starting point.
+starting point. If the storage backend refuses that rewind, the command returns
+both errors and the database requires recovery before another load.
 
 ## SQL Conventions
 

@@ -40,6 +40,7 @@ import (
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/snapshot"
 	"github.com/blinklabs-io/dingo/plugin"
@@ -1071,9 +1072,13 @@ func TestLoadWithDBRewindsBlocksRejectedDuringReplay(t *testing.T) {
 	db := newTestDB(t)
 	rejected := errors.New("reject trusted replay batch")
 	noBatch := errors.New("trusted replay ended without a batch")
+	firstBatchReceived := make(chan struct{})
+	rejectReplay := make(chan struct{})
 
-	var copiedTip ochainsync.Tip
+	var firstCopiedTip ochainsync.Tip
+	var rejectedCopiedTip ochainsync.Tip
 	var appliedTip ochainsync.Tip
+	var replayState *ledger.LedgerState
 	oldProcess := processTrustedBlockBatchesForLoad
 	processTrustedBlockBatchesForLoad = func(
 		ls *ledger.LedgerState,
@@ -1085,9 +1090,17 @@ func TestLoadWithDBRewindsBlocksRejectedDuringReplay(t *testing.T) {
 			if !ok {
 				return noBatch
 			}
-			copiedTip = ls.PrimaryChainTip()
-			appliedTip = ls.Tip()
-			return rejected
+			replayState = ls
+			firstCopiedTip = ls.PrimaryChainTip()
+			close(firstBatchReceived)
+			select {
+			case <-rejectReplay:
+				rejectedCopiedTip = ls.PrimaryChainTip()
+				appliedTip = ls.Tip()
+				return rejected
+			case <-ctx.Done():
+				return ctx.Err()
+			}
 		case <-ctx.Done():
 			return ctx.Err()
 		}
@@ -1103,15 +1116,39 @@ func TestLoadWithDBRewindsBlocksRejectedDuringReplay(t *testing.T) {
 		"immutable",
 		"testdata",
 	)
-	err := LoadWithDB(
-		t.Context(),
-		&config.Config{Network: "preview"},
-		logger,
-		immutableDir,
-		db,
+	loadErr := make(chan error, 1)
+	go func() {
+		loadErr <- LoadWithDB(
+			t.Context(),
+			&config.Config{Network: "preview"},
+			logger,
+			immutableDir,
+			db,
+		)
+	}()
+	testutil.RequireReceive(
+		t, firstBatchReceived, 5*time.Second, "first replay batch",
+	)
+	testutil.WaitForCondition(
+		t,
+		func() bool {
+			return replayState.PrimaryChainTip().BlockNumber >
+				firstCopiedTip.BlockNumber
+		},
+		5*time.Second,
+		"the copier must persist a later batch before replay rejects the first",
+	)
+	close(rejectReplay)
+	err := testutil.RequireReceive(
+		t, loadErr, 5*time.Second, "load failure after replay rejection",
 	)
 	require.ErrorIs(t, err, rejected)
-	require.NotEqual(t, appliedTip.Point, copiedTip.Point)
+	require.Greater(
+		t,
+		rejectedCopiedTip.BlockNumber,
+		firstCopiedTip.BlockNumber,
+	)
+	require.NotEqual(t, appliedTip.Point, rejectedCopiedTip.Point)
 
 	cm, err := chain.NewManager(t.Context(), db, nil)
 	require.NoError(t, err)
