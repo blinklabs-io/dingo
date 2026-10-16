@@ -294,6 +294,59 @@ func TestNodeAdapterAddressUTXOsLargeResultSetPagination(t *testing.T) {
 	})
 }
 
+func TestNodeAdapterAddressUTXOsDescendingPageStopsAtRequestedWindow(t *testing.T) {
+	t.Parallel()
+
+	adapter, raw, db := newDBBackedAdapter(t)
+
+	payment := bytes.Repeat([]byte{0x97}, lcommon.AddressHashSize)
+	addr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyNone,
+		lcommon.AddressNetworkTestnet,
+		payment,
+		nil,
+	)
+	require.NoError(t, err)
+
+	const total = database.DefaultPublicUtxoResultLimit + 2
+	for i := range total {
+		txHash := make([]byte, 32)
+		binary.BigEndian.PutUint32(txHash[28:], uint32(i)+1)
+		amount := (uint64(i) + 1) * 1_000_000
+		insertAdapterTransaction(t, raw, &models.Transaction{
+			Hash:       txHash,
+			Slot:       uint64(i) + 1,
+			BlockIndex: 0,
+			Outputs: []models.Utxo{{
+				TxId:       txHash,
+				OutputIdx:  0,
+				PaymentKey: payment,
+				AddedSlot:  uint64(i) + 1,
+				Amount:     types.Uint64(amount),
+			}},
+		})
+		if i == 0 || i == total-3 {
+			// A first-page descending read must not inspect the oldest row or
+			// the third-newest row, beyond the requested result window.
+			require.NoError(t, db.BlobTxn(true).Do(func(txn *database.Txn) error {
+				return db.Blob().SetUtxo(txn.Blob(), txHash, 0, []byte{0xff})
+			}))
+			continue
+		}
+		storePointerOutputCbor(t, db, txHash, 0, addr, amount)
+	}
+
+	items, resultTotal, err := adapter.AddressUTXOs(
+		t.Context(),
+		addr.String(),
+		PaginationParams{Count: 1, Page: 1, Order: PaginationOrderDesc},
+	)
+	require.NoError(t, err)
+	require.Len(t, items, 1)
+	assert.Equal(t, -1, resultTotal)
+	assert.Equal(t, "1002000000", items[0].Amount[0].Quantity)
+}
+
 func TestNodeAdapterAddressUTXOsStopsAfterRequestedWindow(t *testing.T) {
 	t.Parallel()
 
