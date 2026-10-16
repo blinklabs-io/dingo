@@ -46,6 +46,16 @@ func utxoWholeQuery() *olocalstatequery.BlockQuery {
 	}
 }
 
+func utxoWholeCborQuery() *olocalstatequery.BlockQuery {
+	return &olocalstatequery.BlockQuery{
+		Query: &olocalstatequery.ShelleyQuery{
+			Query: &olocalstatequery.ShelleyCborQuery{
+				Query: &olocalstatequery.ShelleyUtxoWholeQuery{},
+			},
+		},
+	}
+}
+
 func requireUtxoWholeMap(
 	t *testing.T,
 	result any,
@@ -238,11 +248,40 @@ func TestQueryShelleyUtxoWhole_BoundsRetainedAndEncodedBytes(t *testing.T) {
 	require.ErrorIs(t, err, errUtxoWholeLimitExceeded)
 
 	encoded := defaultUtxoWholeLimits()
-	encoded.maxResponseBytes = 1
+	encoded.maxResponseBytes = 3
 	_, err = ls.queryShelleyUtxoWholeWithLimits(
 		t.Context(), QueryPoint{}, nil, encoded,
 	)
 	require.ErrorIs(t, err, errUtxoWholeLimitExceeded)
+}
+
+func TestQueryShelleyUtxoWholeViaGetCBOR(t *testing.T) {
+	t.Parallel()
+	db := newTestDB(t)
+	addr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyNone,
+		lcommon.AddressNetworkTestnet,
+		bytes.Repeat([]byte{0xAC}, lcommon.AddressHashSize),
+		nil,
+	)
+	require.NoError(t, err)
+	seedBabbageUtxo(t, db, 0xC1, 0, addr, 1_000_000)
+	ls := newPoolDistr2Ledger(t, db)
+
+	direct, err := ls.Query(t.Context(), utxoWholeQuery(), QueryPoint{})
+	require.NoError(t, err)
+	bounded, ok := direct.(*utxoWholeResult)
+	require.True(t, ok)
+
+	wrapped, err := ls.Query(t.Context(), utxoWholeCborQuery(), QueryPoint{})
+	require.NoError(t, err)
+	values, ok := wrapped.([]any)
+	require.True(t, ok)
+	require.Len(t, values, 1)
+	tag, ok := values[0].(cbor.Tag)
+	require.True(t, ok)
+	require.EqualValues(t, cbor.CborTagCbor, tag.Number)
+	require.Equal(t, bounded.encoded, tag.Content)
 }
 
 func TestQueryShelleyUtxoWhole_HasServerDeadline(t *testing.T) {

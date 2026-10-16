@@ -639,13 +639,9 @@ func (s *queryServiceServer) SearchUtxos(
 	if err != nil {
 		return nil, err
 	}
-	utxos := page.Utxos
 
 	pageCap := int(effectiveMax)
-	hasMore := page.Next != nil
-	if hasMore {
-		utxos = utxos[:min(len(utxos), pageCap)]
-	}
+	utxos, cursor := trimSearchUtxoPage(page, pageCap)
 	items := make([]*query.AnyUtxoData, 0, len(utxos))
 	for i := range utxos {
 		aud, err := searchUtxoModelToAnyData(&utxos[i])
@@ -655,15 +651,7 @@ func (s *queryServiceServer) SearchUtxos(
 		items = append(items, aud)
 	}
 	resp.Items = items
-	if hasMore {
-		cursor := page.Next
-		if len(utxos) > 0 {
-			last := utxos[len(utxos)-1]
-			cursor = &models.UtxoOrderingCursor{
-				Slot: last.TxSlot, BlockIndex: last.TxBlockIndex,
-				OutputIdx: last.OutputIdx, TxId: last.TxId,
-			}
-		}
+	if cursor != nil {
 		resp.NextToken = fmt.Sprintf(
 			"%d:%d:%d:%x",
 			cursor.Slot,
@@ -675,6 +663,21 @@ func (s *queryServiceServer) SearchUtxos(
 
 	resp.LedgerTip = s.searchUtxosLedgerTip()
 	return connect.NewResponse(resp), nil
+}
+
+func trimSearchUtxoPage(
+	page models.UtxoAddressPage,
+	pageCap int,
+) ([]models.UtxoWithOrdering, *models.UtxoOrderingCursor) {
+	if len(page.Utxos) <= pageCap {
+		return page.Utxos, page.Next
+	}
+	utxos := page.Utxos[:pageCap]
+	last := utxos[len(utxos)-1]
+	return utxos, &models.UtxoOrderingCursor{
+		Slot: last.TxSlot, BlockIndex: last.TxBlockIndex,
+		OutputIdx: last.OutputIdx, TxId: last.TxId,
+	}
 }
 
 // ReadData

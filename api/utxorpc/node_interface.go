@@ -59,16 +59,17 @@ type UtxorpcLedgerState interface {
 		epoch uint64,
 		era eras.EraDesc,
 	) (lcommon.ProtocolParameters, error)
-	// PoolStakeDistribution reports the active stake distribution across
-	// block-producing pools. A nil filter asks for every pool; see the method
-	// on ledger.LedgerState for why an empty non-nil filter differs. at is
-	// the zero value and txn is nil here -- this RPC handler always answers
-	// live, never pinned.
-	PoolStakeDistribution(
+	// PoolStakeDistributionBounded reports the active stake distribution
+	// across at most maxPools block-producing pools. A nil filter asks for
+	// every pool; see the method on ledger.LedgerState for why an empty non-nil
+	// filter differs. at is the zero value and txn is nil here -- this RPC
+	// handler always answers live, never pinned.
+	PoolStakeDistributionBounded(
 		ctx context.Context,
 		poolFilter []lcommon.PoolKeyHash,
 		at ledger.QueryPoint,
 		txn *database.Txn,
+		maxPools int,
 	) (*ledger.PoolStakeDistribution, error)
 	// SecurityParam is the configured security parameter k, the deepest
 	// rollback a chain follower can be asked to undo.

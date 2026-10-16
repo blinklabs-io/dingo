@@ -1451,6 +1451,15 @@ type StakeSnapshotStore interface {
 		types.Txn,
 	) ([]*models.PoolStakeSnapshot, error)
 
+	// GetPoolStakeSnapshotsByEpochBounded retrieves at most maxRows pool
+	// stake snapshots for an epoch.
+	GetPoolStakeSnapshotsByEpochBounded(
+		uint64, // epoch
+		string, // snapshotType
+		int, // maxRows
+		types.Txn,
+	) ([]*models.PoolStakeSnapshot, error)
+
 	// GetPoolStakeSnapshotsForPools retrieves the snapshot rows for just the
 	// pools named, for a caller wanting a bounded subset rather than a whole
 	// epoch. A pool the snapshot has no row for is absent from the result.

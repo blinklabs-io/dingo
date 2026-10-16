@@ -381,6 +381,51 @@ func TestSearchUtxos_PassesStorageWorkAndByteBounds(t *testing.T) {
 	require.ErrorIs(t, stub.gotContextErr, context.Canceled)
 }
 
+func TestTrimSearchUtxoPagePreservesContinuation(t *testing.T) {
+	t.Parallel()
+
+	first := models.UtxoWithOrdering{
+		Utxo:   models.Utxo{TxId: []byte{0x01}, OutputIdx: 1},
+		TxSlot: 10,
+	}
+	second := models.UtxoWithOrdering{
+		Utxo:   models.Utxo{TxId: []byte{0x02}, OutputIdx: 2},
+		TxSlot: 20,
+	}
+	scanCursor := &models.UtxoOrderingCursor{
+		Slot: 30, OutputIdx: 3, TxId: []byte{0x03},
+	}
+
+	t.Run("extra result", func(t *testing.T) {
+		t.Parallel()
+		items, cursor := trimSearchUtxoPage(models.UtxoAddressPage{
+			Utxos: []models.UtxoWithOrdering{first, second},
+		}, 1)
+		require.Equal(t, []models.UtxoWithOrdering{first}, items)
+		require.Equal(t, first.TxSlot, cursor.Slot)
+		require.Equal(t, first.TxId, cursor.TxId)
+	})
+
+	t.Run("candidate scan", func(t *testing.T) {
+		t.Parallel()
+		items, cursor := trimSearchUtxoPage(models.UtxoAddressPage{
+			Utxos: []models.UtxoWithOrdering{first},
+			Next:  scanCursor,
+		}, 2)
+		require.Equal(t, []models.UtxoWithOrdering{first}, items)
+		require.Equal(t, scanCursor, cursor)
+	})
+
+	t.Run("exhausted", func(t *testing.T) {
+		t.Parallel()
+		items, cursor := trimSearchUtxoPage(models.UtxoAddressPage{
+			Utxos: []models.UtxoWithOrdering{first},
+		}, 2)
+		require.Equal(t, []models.UtxoWithOrdering{first}, items)
+		require.Nil(t, cursor)
+	})
+}
+
 func TestSearchUtxos_PageByteBudget(t *testing.T) {
 	t.Parallel()
 	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{numBlocks: 20})

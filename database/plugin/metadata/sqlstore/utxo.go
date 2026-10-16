@@ -2692,12 +2692,34 @@ func (s *Store) IterateLiveUtxos(
 	txn types.Txn,
 	fn func(*models.Utxo) error,
 ) error {
-	if fn == nil {
-		return errors.New("iterate live UTxOs: callback is nil")
-	}
 	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return err
+	}
+	return iterateLiveUtxos(ctx, db, fn)
+}
+
+// IterateLiveUtxosContext binds the scan to ctx while preserving txn's
+// snapshot.
+func (s *Store) IterateLiveUtxosContext(
+	ctx context.Context,
+	txn types.Txn,
+	fn func(*models.Utxo) error,
+) error {
+	db, _, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return err
+	}
+	return iterateLiveUtxos(ctx, db, fn)
+}
+
+func iterateLiveUtxos(
+	ctx context.Context,
+	db queryer,
+	fn func(*models.Utxo) error,
+) error {
+	if fn == nil {
+		return errors.New("iterate live UTxOs: callback is nil")
 	}
 	rows, err := db.QueryContext(
 		ctx,
@@ -2734,12 +2756,36 @@ func (s *Store) IterateUtxosAsOf(
 	txn types.Txn,
 	fn func(*models.Utxo) error,
 ) error {
-	if fn == nil {
-		return errors.New("iterate UTxOs as of slot: callback is nil")
-	}
 	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return err
+	}
+	return s.iterateUtxosAsOf(ctx, db, atSlot, fn)
+}
+
+// IterateUtxosAsOfContext binds the scan to ctx while preserving txn's
+// snapshot.
+func (s *Store) IterateUtxosAsOfContext(
+	ctx context.Context,
+	atSlot uint64,
+	txn types.Txn,
+	fn func(*models.Utxo) error,
+) error {
+	db, _, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return err
+	}
+	return s.iterateUtxosAsOf(ctx, db, atSlot, fn)
+}
+
+func (s *Store) iterateUtxosAsOf(
+	ctx context.Context,
+	db queryer,
+	atSlot uint64,
+	fn func(*models.Utxo) error,
+) error {
+	if fn == nil {
+		return errors.New("iterate UTxOs as of slot: callback is nil")
 	}
 	sqlSlot, err := checkedInt64(atSlot)
 	if err != nil {

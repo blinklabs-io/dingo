@@ -144,18 +144,22 @@ func (s *betaQueryServiceServer) readStakePoolDistribution(
 	ctx, cancel := context.WithTimeout(ctx, s.utxorpc.config.ServerTimeout)
 	defer cancel()
 
-	dist, err := s.utxorpc.config.LedgerState.PoolStakeDistribution(
+	dist, err := s.utxorpc.config.LedgerState.PoolStakeDistributionBounded(
 		ctx,
 		poolFilter,
 		ledger.QueryPoint{},
 		nil,
+		maxStakePoolsForResponse(s.utxorpc.config.MaxResponseBytes),
 	)
 	if err != nil {
-		if errors.Is(err, context.Canceled) {
-			return nil, connect.NewError(connect.CodeCanceled, err)
+		if errors.Is(err, context.Canceled) ||
+			errors.Is(err, context.DeadlineExceeded) {
+			return nil, readStateContextError(err)
 		}
-		if errors.Is(err, context.DeadlineExceeded) {
-			return nil, connect.NewError(connect.CodeDeadlineExceeded, err)
+		if errors.Is(err, ledger.ErrPoolStakeDistributionLimitExceeded) {
+			return nil, (&byteBudget{
+				limit: s.utxorpc.config.MaxResponseBytes,
+			}).exceeded()
 		}
 		return nil, connect.NewError(
 			connect.CodeInternal,
@@ -228,7 +232,32 @@ func (s *betaQueryServiceServer) readStakePoolDistribution(
 			limit: s.utxorpc.config.MaxResponseBytes,
 		}).exceeded()
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, readStateContextError(err)
+	}
 	return connect.NewResponse(resp), nil
+}
+
+func readStateContextError(err error) *connect.Error {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return connect.NewError(connect.CodeDeadlineExceeded, err)
+	}
+	return connect.NewError(connect.CodeCanceled, err)
+}
+
+// A pool share always carries a 28-byte pool hash and a 32-byte VRF hash.
+// Their protobuf tags and lengths make 64 bytes a conservative lower bound.
+const minimumStakePoolShareWireBytes = 64
+
+func maxStakePoolsForResponse(maxBytes int64) int {
+	maxPools := maxBytes / minimumStakePoolShareWireBytes
+	if maxPools < 1 {
+		return 1
+	}
+	if maxPools > math.MaxInt {
+		return math.MaxInt
+	}
+	return int(maxPools)
 }
 
 // poolKeyHashFilter converts the request's pool filter into the form

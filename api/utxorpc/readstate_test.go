@@ -51,12 +51,14 @@ type readStateLedgerStub struct {
 	// blockErr drives the height-lookup fallback.
 	blockErr error
 
-	dist    *ledger.PoolStakeDistribution
-	distErr error
+	dist      *ledger.PoolStakeDistribution
+	distErr   error
+	afterRead func()
 	// gotFilter records what the handler passed down, including whether it was
 	// nil, which is what separates "every pool" from "no pools".
 	gotFilter    []lcommon.PoolKeyHash
 	gotFilterNil bool
+	gotMaxPools  int
 	calls        int
 	// tipCalls proves the handler does not sample the live tip when building
 	// the reply; the point must come from the distribution read instead.
@@ -70,11 +72,12 @@ type blockingReadStateLedgerStub struct {
 	dist    *ledger.PoolStakeDistribution
 }
 
-func (s *blockingReadStateLedgerStub) PoolStakeDistribution(
+func (s *blockingReadStateLedgerStub) PoolStakeDistributionBounded(
 	ctx context.Context,
 	_ []lcommon.PoolKeyHash,
 	_ ledger.QueryPoint,
 	_ *database.Txn,
+	_ int,
 ) (*ledger.PoolStakeDistribution, error) {
 	close(s.started)
 	select {
@@ -97,17 +100,22 @@ func (s *readStateLedgerStub) GetBlock(ocommon.Point) (models.Block, error) {
 	return s.block, nil
 }
 
-func (s *readStateLedgerStub) PoolStakeDistribution(
+func (s *readStateLedgerStub) PoolStakeDistributionBounded(
 	ctx context.Context,
 	poolFilter []lcommon.PoolKeyHash,
 	_ ledger.QueryPoint,
 	_ *database.Txn,
+	maxPools int,
 ) (*ledger.PoolStakeDistribution, error) {
 	s.calls++
 	s.gotFilter = poolFilter
 	s.gotFilterNil = poolFilter == nil
+	s.gotMaxPools = maxPools
 	if s.distErr != nil {
 		return nil, s.distErr
+	}
+	if s.afterRead != nil {
+		s.afterRead()
 	}
 	return s.dist, nil
 }
@@ -563,6 +571,50 @@ func TestReadState_LedgerErrorIsInternal(t *testing.T) {
 	)
 	require.Error(t, err)
 	assert.Equal(t, connect.CodeInternal, connect.CodeOf(err))
+}
+
+func TestReadStateBoundsLedgerMaterialization(t *testing.T) {
+	t.Parallel()
+
+	stub := &readStateLedgerStub{dist: &ledger.PoolStakeDistribution{}}
+	u := NewUtxorpc(UtxorpcConfig{
+		Logger:           slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		LedgerState:      stub,
+		MaxResponseBytes: 128,
+	})
+	srv := &betaQueryServiceServer{utxorpc: u}
+
+	_, err := srv.ReadState(t.Context(), stakePoolDistributionRequest())
+	require.NoError(t, err)
+	require.Equal(t, 2, stub.gotMaxPools)
+}
+
+func TestReadStateRejectsCanceledEmptyDistribution(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	stub := &readStateLedgerStub{
+		dist:      &ledger.PoolStakeDistribution{},
+		afterRead: cancel,
+	}
+	srv := newReadStateServer(t, stub)
+
+	_, err := srv.ReadState(ctx, stakePoolDistributionRequest())
+	require.Error(t, err)
+	require.Equal(t, connect.CodeCanceled, connect.CodeOf(err))
+}
+
+func TestReadStateMapsLedgerPoolLimitToResourceExhausted(t *testing.T) {
+	t.Parallel()
+
+	stub := &readStateLedgerStub{
+		distErr: ledger.ErrPoolStakeDistributionLimitExceeded,
+	}
+	srv := newReadStateServer(t, stub)
+
+	_, err := srv.ReadState(t.Context(), stakePoolDistributionRequest())
+	require.Error(t, err)
+	require.Equal(t, connect.CodeResourceExhausted, connect.CodeOf(err))
 }
 
 // TestReadState_TipHeightSurvivesAnUnreadableBlock covers the tip's block row
