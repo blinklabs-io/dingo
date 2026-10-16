@@ -1112,11 +1112,11 @@ type APIPluginsConfig struct {
 //
 // bindAddr, debugBindAddr, and corsAllowedOrigins deliberately
 // stay at the Config root rather than moving under this section: bindAddr is
-// not API-specific (the relay/NtN listener uses it too),
+// not API-specific (the relay/NtN listener uses it too) and remains the
+// fallback for an explicitly empty Blockfrost or MCP provider host,
 // debugBindAddr controls the separate pprof listener, and corsAllowedOrigins
 // already applies uniformly to all four API providers, so
-// duplicating any of them here would only add a second source of truth for no
-// behavioral gain.
+// duplicating the shared settings here would add another source of truth.
 type APIConfig struct {
 	TLS apiconfig.TLSPolicy `yaml:"tls"`
 }
@@ -1144,7 +1144,10 @@ func defaultPluginsConfig() PluginsConfig {
 		API: APIPluginsConfig{
 			Blockfrost: hostplugin.Selection{
 				Provider: "builtin",
-				Config:   map[string]any{"port": 3000},
+				Config: map[string]any{
+					"port": 3000,
+					"host": "127.0.0.1",
+				},
 			},
 			Kupo: hostplugin.Selection{
 				Provider: "builtin",

@@ -10286,8 +10286,11 @@ provider `mode: disabled` keeps that listener plaintext. Shared TLS values
 follow the normal CLI > environment > YAML > default precedence before this
 scope merge. Certificate files are loaded when the listener starts.
 
-Blockfrost, Kupo, Mesh, and UTxO RPC routes require no credentials, including
-health and reflection routes. MCP supports an optional shared token through Bearer
+Blockfrost read routes require no credentials. Its submission and evaluation
+routes require the provider's `authToken`; the listener cannot expose an
+authenticated mutation route on a non-loopback address without server TLS.
+Kupo, Mesh, and UTxO RPC routes require no credentials, including health and
+reflection routes. MCP supports an optional shared token through Bearer
 authentication or `X-API-Key`. Its `/healthz` route bypasses authentication and
 rate limiting; `/health` does not. Origin validation precedes both routes and
 preflight handling.
@@ -10295,9 +10298,9 @@ preflight handling.
 The legacy root `tlsCertFilePath`/`tlsKeyFilePath` fields remain a UTxO
 RPC-only TLS compatibility input among these providers; Midnight also
 uses the pair directly. They are not promoted to Blockfrost, Kupo, Mesh, or MCP.
-Blockfrost, Kupo, Mesh, and UTxO RPC use the root `bindAddr`, whose default is
-`0.0.0.0`. MCP overrides it with `plugins.api.mcp.config.host`, defaulting to
-`127.0.0.1`; an explicitly empty MCP host falls back to `bindAddr`.
+Kupo, Mesh, and UTxO RPC use the root `bindAddr`, whose default is `0.0.0.0`.
+Blockfrost and MCP override it with their provider `host`, defaulting to
+`127.0.0.1`; an explicitly empty provider host falls back to `bindAddr`.
 `metricsBindAddr` and `debugBindAddr` separately configure Prometheus and pprof;
 both default to loopback. `metricsAuthToken` protects both the ordinary and
 Mithril-sync Prometheus listeners when configured. The listener remains plain
@@ -10480,8 +10483,20 @@ truncated bodies retain the existing HTTP 400 response. The HTTP listener also
 sets a 60-second read timeout as a backstop, independently of its header,
 write, and idle timeouts.
 
-Optional TLS is configured through `plugins.api.blockfrost.config.tls`;
-requests do not require credentials. See "API security" above.
+The listener defaults to `127.0.0.1`. Set
+`plugins.api.blockfrost.config.host` to expose it on another interface.
+Transaction submission and evaluation require the configured
+`plugins.api.blockfrost.config.authToken`, accepted through the standard
+`project_id` header, `X-Blockfrost-Project-Id`, or Bearer authentication. A
+non-loopback listener with mutation authentication enabled also requires
+server TLS through `plugins.api.blockfrost.config.tls` so the credential is
+not sent in cleartext. Read routes remain public.
+
+Mutation admission runs after authentication and before body decoding. The
+shared `maxConcurrentMutations` limit bounds process-wide submission and
+evaluation work, while `maxConcurrentMutationsPerClient` prevents one remote
+address from consuming the whole budget. Their defaults are 4 and 1,
+respectively; excess work receives HTTP 429 without reading its body.
 
 A Blockfrost-compatible REST API that provides read access to chain data,
 transaction evaluation, and transaction submission. Transaction evaluation is
