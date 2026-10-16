@@ -629,6 +629,9 @@ var ledgerPredicateErrorPatterns = map[string][]string{
 		"vote cast by unknown voter",
 		"committee voter is not elected",
 	},
+	"UnelectedCommitteeVoters": {
+		"committee voter is not elected",
+	},
 	"VotingOnExpiredGovAction": {
 		"voting on expired governance action",
 		"vote cast on expired governance action",
