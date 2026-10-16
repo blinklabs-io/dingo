@@ -37,10 +37,27 @@ func InstallLocalTestKeys(dir string) error {
 	})
 }
 
+// InstallLocalTestKeysInRoot copies the local DevNet credentials into dir,
+// resolving every operation beneath root.
+func InstallLocalTestKeysInRoot(root *os.Root, dir string) error {
+	return installLocalTestKeysInRoot(root, dir, []string{
+		"vrf.skey", "kes.skey", "opcert.cert",
+		"faucet.skey", "faucet.vkey", "faucet.addr",
+	})
+}
+
 // InstallLocalTestFaucet copies only the bundled faucet credentials into dir
 // with owner-only permissions, preserving existing producer credentials.
 func InstallLocalTestFaucet(dir string) error {
 	return installLocalTestKeys(dir, []string{
+		"faucet.skey", "faucet.vkey", "faucet.addr",
+	})
+}
+
+// InstallLocalTestFaucetInRoot copies the bundled faucet credentials into dir,
+// resolving every operation beneath root.
+func InstallLocalTestFaucetInRoot(root *os.Root, dir string) error {
+	return installLocalTestKeysInRoot(root, dir, []string{
 		"faucet.skey", "faucet.vkey", "faucet.addr",
 	})
 }
@@ -61,6 +78,43 @@ func installLocalTestKeys(dir string, names []string) error {
 		return err
 	}
 	defer root.Close() //nolint:errcheck // read/write errors are reported below
+	return installLocalTestKeysIntoRoot(root, names)
+}
+
+func installLocalTestKeysInRoot(
+	root *os.Root,
+	dir string,
+	names []string,
+) error {
+	if err := root.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("creating local DevNet key directory: %w", err)
+	}
+	dirInfo, err := root.Lstat(dir)
+	if err != nil {
+		return fmt.Errorf("checking local DevNet key directory: %w", err)
+	}
+	if dirInfo.Mode()&os.ModeSymlink != 0 || !dirInfo.IsDir() {
+		return fmt.Errorf("local DevNet key path %q is not a directory", dir)
+	}
+	keyRoot, err := root.OpenRoot(dir)
+	if err != nil {
+		return fmt.Errorf("opening local DevNet key directory: %w", err)
+	}
+	defer keyRoot.Close() //nolint:errcheck // read/write errors are reported below
+	opened, err := keyRoot.Stat(".")
+	if err != nil {
+		return fmt.Errorf("checking opened local DevNet key directory: %w", err)
+	}
+	if !opened.IsDir() || !os.SameFile(dirInfo, opened) {
+		return fmt.Errorf(
+			"local DevNet key directory %q changed while it was opened",
+			dir,
+		)
+	}
+	return installLocalTestKeysIntoRoot(keyRoot, names)
+}
+
+func installLocalTestKeysIntoRoot(root *os.Root, names []string) error {
 	dirFile, err := root.Open(".")
 	if err != nil {
 		return fmt.Errorf("opening local DevNet key directory: %w", err)

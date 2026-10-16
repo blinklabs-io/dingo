@@ -1,0 +1,98 @@
+// Copyright 2026 Blink Labs Software
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//go:build unix
+
+package main
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/require"
+)
+
+func TestPrepareDevnetStateRejectsSymlinkedConfig(t *testing.T) {
+	t.Parallel()
+
+	runDir := t.TempDir()
+	start := time.Date(2026, time.October, 16, 12, 0, 0, 0, time.UTC)
+	require.NoError(t, prepareDevnetStateAtPath(runDir, true, false, start))
+
+	target := filepath.Join(t.TempDir(), "target")
+	require.NoError(t, os.WriteFile(target, []byte("unchanged"), 0o600))
+	configPath := filepath.Join(runDir, "dingo.yaml")
+	require.NoError(t, os.Remove(configPath))
+	require.NoError(t, os.Symlink(target, configPath))
+
+	err := prepareDevnetStateAtPath(runDir, true, false, start)
+	require.ErrorContains(t, err, "dingo.yaml")
+	data, readErr := os.ReadFile(target)
+	require.NoError(t, readErr)
+	require.Equal(t, "unchanged", string(data))
+}
+
+func TestPrepareDevnetStateResetUsesPinnedRoot(t *testing.T) {
+	t.Parallel()
+
+	parent := t.TempDir()
+	runDir := filepath.Join(parent, "state")
+	start := time.Date(2026, time.October, 16, 12, 0, 0, 0, time.UTC)
+	require.NoError(t, prepareDevnetStateAtPath(runDir, true, false, start))
+	root, err := openDevnetStateRoot(runDir)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, root.Close()) })
+
+	pinnedDir := filepath.Join(parent, "pinned")
+	require.NoError(t, os.Rename(runDir, pinnedDir))
+	victimDir := filepath.Join(parent, "victim")
+	require.NoError(t, os.MkdirAll(filepath.Join(victimDir, "data"), 0o700))
+	victim := filepath.Join(victimDir, "data", "keep")
+	require.NoError(t, os.WriteFile(victim, []byte("unchanged"), 0o600))
+	require.NoError(t, os.Symlink(victimDir, runDir))
+
+	require.NoError(t, prepareDevnetState(root, runDir, true, true, start))
+	data, err := os.ReadFile(victim)
+	require.NoError(t, err)
+	require.Equal(t, "unchanged", string(data))
+	require.FileExists(t, filepath.Join(pinnedDir, "dingo.yaml"))
+	require.DirExists(t, filepath.Join(pinnedDir, "data"))
+}
+
+func TestWriteLocalDevnetConfigReplacesSymlink(t *testing.T) {
+	t.Parallel()
+
+	runDir := t.TempDir()
+	root, err := openDevnetStateRoot(runDir)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, root.Close()) })
+	target := filepath.Join(t.TempDir(), "target")
+	require.NoError(t, os.WriteFile(target, []byte("unchanged"), 0o600))
+	require.NoError(t, os.Symlink(target, filepath.Join(runDir, "dingo.yaml")))
+
+	require.NoError(t, writeLocalDevnetConfig(
+		root,
+		"dingo.yaml",
+		filepath.Join(runDir, "cardano"),
+		filepath.Join(runDir, "data"),
+	))
+	data, err := os.ReadFile(target)
+	require.NoError(t, err)
+	require.Equal(t, "unchanged", string(data))
+	info, err := os.Lstat(filepath.Join(runDir, "dingo.yaml"))
+	require.NoError(t, err)
+	require.True(t, info.Mode().IsRegular())
+}

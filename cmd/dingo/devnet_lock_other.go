@@ -20,21 +20,26 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 )
 
-func acquireDevnetStateLock(runDir string) (func() error, error) {
-	path := filepath.Join(runDir, devnetStateLock)
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+func acquireDevnetStateLock(
+	root *os.Root,
+	runDir string,
+) (func() error, error) {
+	file, err := root.OpenFile(
+		devnetStateLock,
+		os.O_WRONLY|os.O_CREATE|os.O_EXCL,
+		0o600,
+	)
 	if errors.Is(err, os.ErrExist) {
 		return nil, fmt.Errorf("%w: %q", errDevnetStateInUse, runDir)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("creating devnet state lock %q: %w", path, err)
+		return nil, fmt.Errorf("creating devnet state lock in %q: %w", runDir, err)
 	}
 	if err := file.Close(); err != nil {
-		_ = os.Remove(path)
-		return nil, fmt.Errorf("closing devnet state lock %q: %w", path, err)
+		_ = root.Remove(devnetStateLock)
+		return nil, fmt.Errorf("closing devnet state lock in %q: %w", runDir, err)
 	}
-	return func() error { return os.Remove(path) }, nil
+	return func() error { return root.Remove(devnetStateLock) }, nil
 }
