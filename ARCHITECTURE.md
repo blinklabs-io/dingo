@@ -542,11 +542,13 @@ sequenceDiagram
 
     Note over Peer,DB: Stage 1 — Header Discovery (ChainSync)
     Peer->>OB: RollForward(header, tip)
+    OB->>OB: strictly verify header crypto against current ledger generation
+    Note over OB: If verification is deferred, retain only bounded raw ancestry; do not update peer selection or ledger state
     OB->>LS: await bounded header capacity
     LS->>ChM: wait for header queue drain
     OB->>EB: publish ChainsyncEvent(header)
     EB->>LS: handleEventChainsyncBlockHeader()
-    LS->>LS: verify header crypto (VRF/KES/OpCert)
+    LS->>LS: recheck header crypto against current ledger generation
     LS->>ChM: enqueue header in chain.headers[]
 
     Note over Peer,DB: Stage 2 — Full Block Retrieval (BlockFetch)
@@ -576,6 +578,10 @@ sequenceDiagram
     DB-->>LS: durable commit succeeds
     LS->>EB: publish TransactionEvent per tx (AfterCommit)
     ChM->>EB: publish ChainUpdateEvent
+    EB->>OB: retry deferred peers after ledger tip advances
+    OB->>Peer: re-intersect at last accepted cursor
+    Peer->>OB: replay parent-linked headers in order
+    OB->>OB: strictly verify and promote each replayed header
     LS->>EB: publish BlockEvent
 
     Note over Peer,DB: Rollback Path

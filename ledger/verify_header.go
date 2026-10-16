@@ -190,6 +190,7 @@ func (b headerOnlyBlock) BlockBodyHash() lcommon.Blake2b256 {
 	return b.header.BlockBodyHash()
 }
 
+//nolint:unused // Retained as a test helper for stateless header-only checks.
 func (ls *LedgerState) verifyBlockHeaderOnlyCrypto(
 	header ledger.BlockHeader,
 ) error {
@@ -502,6 +503,7 @@ func (ls *LedgerState) verifyBlockHeaderStateWithEpochAdvance(
 	)
 }
 
+//nolint:unused // Retained as a test helper for stateless block verification.
 func (ls *LedgerState) verifyBlockHeaderStatelessCrypto(
 	block ledger.Block,
 	allowEpochCacheAdvance bool,

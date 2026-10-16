@@ -6343,8 +6343,9 @@ func TestChainsyncHeaderVerificationMissingEpochDefersToBlockfetch(
 		100*time.Millisecond,
 		"missing epoch should defer header verification, not recycle peer",
 	)
-	assert.True(t, testChain.FirstHeaderMatchesPoint(point))
+	assert.False(t, testChain.FirstHeaderMatchesPoint(point))
 	assert.False(t, testChain.FirstVerifiedHeaderMatchesPoint(point))
+	assert.Zero(t, testChain.HeaderCount())
 	assert.Zero(t, ls.syncUpstreamTipSlot.Load())
 }
 
@@ -6418,20 +6419,19 @@ func TestChainsyncHeaderVerificationEmptyEpochNonceDefersToBlockfetch(
 	})
 	require.NoError(t, err)
 
-	gotStart := testutil.RequireReceive(
+	testutil.RequireNoReceive(
 		t,
 		requested,
-		testutil.AsyncWait,
-		"empty nonce should start blockfetch for deferred verification",
+		100*time.Millisecond,
+		"a deferred header must not start blockfetch",
 	)
-	assert.Equal(t, point, gotStart)
 	testutil.RequireNoReceive(
 		t,
 		recycled,
 		100*time.Millisecond,
 		"empty nonce should defer header verification, not recycle peer",
 	)
-	assert.True(t, testChain.FirstHeaderMatchesPoint(point))
+	assert.False(t, testChain.FirstHeaderMatchesPoint(point))
 	assert.False(t, testChain.FirstVerifiedHeaderMatchesPoint(point))
 	assert.Zero(t, ls.syncUpstreamTipSlot.Load())
 }
@@ -19041,16 +19041,17 @@ func TestChainsyncHeaderAdmissionAnnouncesOnlyWhenCryptoVerified(
 	)
 	point := ocommon.NewPoint(header.slot, header.hash.Bytes())
 
-	// The fixture has no cached epoch nonce, so the policy defers verification
-	// and the handler takes the AddBlockHeader branch -- the real end-to-end
-	// unverified admission.
-	t.Run("unverified admission is queued, not announced", func(t *testing.T) {
+	// The Mithril-covered fixture bypasses per-header verification because its
+	// certificate authenticated the history. That trusted path may queue the
+	// header, but it does not mark the queued header cryptographically verified.
+	t.Run("Mithril-covered admission is queued, not announced", func(t *testing.T) {
 		fixture := newHeaderStreamLedger(t)
+		fixture.ls.mithrilLedgerSlot = header.slot
 		verifyNow, trusted := fixture.ls.chainsyncHeaderCryptoPolicy(
 			header.slot,
 		)
-		require.False(t, verifyNow, "fixture must exercise the unverified path")
-		require.False(t, trusted)
+		require.False(t, verifyNow, "fixture must exercise the trusted path")
+		require.True(t, trusted)
 
 		require.NoError(
 			t,
