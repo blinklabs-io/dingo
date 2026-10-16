@@ -121,10 +121,20 @@ func TestValueLogGCMetricsReportReclaimedBytes(t *testing.T) {
 	// Badger samples a value-log file at random, so a cycle can end in
 	// ErrNoRewrite without any rewrite. Tick until one cycle rewrites.
 	for cycle := 1.0; testutil.ToFloat64(store.gcMetrics.successes) == 0; cycle++ {
-		require.Less(t, cycle, 20.0, "no GC cycle rewrote a value-log file")
+		require.LessOrEqual(t, cycle, 20.0, "no GC cycle rewrote a value-log file")
+		attemptsBefore := testutil.ToFloat64(store.gcMetrics.attempts)
+		noRewriteBefore := testutil.ToFloat64(store.gcMetrics.noRewrite)
+		errorsBefore := testutil.ToFloat64(store.gcMetrics.errors)
 		ticks <- time.Time{}
 		require.Eventually(t, func() bool {
-			return testutil.ToFloat64(store.gcMetrics.noRewrite) >= cycle
+			attempts := testutil.ToFloat64(store.gcMetrics.attempts)
+			successes := testutil.ToFloat64(store.gcMetrics.successes)
+			noRewrite := testutil.ToFloat64(store.gcMetrics.noRewrite)
+			errors := testutil.ToFloat64(store.gcMetrics.errors)
+			cycleComplete := attempts > attemptsBefore &&
+				attempts == successes+noRewrite+errors
+			return cycleComplete &&
+				(successes > 0 || noRewrite > noRewriteBefore || errors > errorsBefore)
 		}, time.Minute, 10*time.Millisecond)
 	}
 	require.Positive(t, testutil.ToFloat64(store.gcMetrics.consecutive))
