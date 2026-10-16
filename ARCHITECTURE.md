@@ -1803,6 +1803,13 @@ journal and replayed in bounded batches before the candidate is published. A
 busy pass that cannot catch up leaves the live pool unchanged and is retried
 after a later chain update; it is not a failed admission or a partial swap.
 
+The chain-update worker coalesces confirmed-transaction removals and
+rolled-back transaction restores before rebuilding. Rollback events list blocks
+newest first, so each event is traversed oldest first; if more rollback events
+arrive before the rebuild, their older transactions are placed ahead of the
+already queued restores. Revalidation therefore sees transactions in ledger
+order.
+
 Mempool admission, revalidation, block-candidate selection and forged-block
 validation each validate a transaction against the UTxO overlay and a state
 overlay (`utxoref.StateOverlay`) holding the earlier pending or selected
@@ -3035,8 +3042,11 @@ fallback:
   and every resolved address is rejected if it is private or special-use before
   dialing, unless `barkBlockDownloadAllowPrivateAddresses` is set for an
   archive store on a private network; that default-off opt-in lifts only the
-  address check. The client ignores ambient proxy settings, and response bodies are
-  capped before buffering at the largest block the chain admits for any era
+  address check. The Bark RPC client applies the same resolved-address policy,
+  keeps redirects on the configured RPC origin, ignores ambient proxy settings,
+  and caps each decoded Connect response at 1 MiB. Block download response
+  bodies are capped before buffering at the largest block the chain admits for
+  any era
   (`LedgerState.MaxBlockSize`: the live header and body limits, or the Byron
   genesis block size when larger; a 128 KiB default when neither is known).
   This wrapper can be used with or without local History Expiry. It is
@@ -7282,11 +7292,10 @@ Because that replacement is what makes the snapshot useful, `configValidate`
 validates the complete snapshot before startup. Dingo accepts the cardano-node
 version 23 format with a 32-byte hexadecimal block point, a nonzero
 `NetworkMagic` matching the node, exactly one nonempty pool mode
-(`bigLedgerPools` or `allLedgerPools`), and host/IP relay entries carrying TCP
-ports in the range 1–65535. Legacy version 1/2 snapshots use a different
-`slotNo` point shape and are rejected. Portless SRV relay entries are also
-rejected because Dingo's snapshot-to-peer adapter does not implement the SRV
-lookup and prefixing required for that relay mode.
+(`bigLedgerPools` or `allLedgerPools`), DNS relay entries with a TCP port in
+the range 1–65535 or port zero for MultiHostName SRV resolution, and IP relay
+entries with a TCP port in the range 1–65535. Legacy version 1/2 snapshots use
+a different `slotNo` point shape and are rejected.
 
 These checks run as one contract because individually resolvable relays are not
 proof that the snapshot is usable. A foreign snapshot, for example, costs the
@@ -7317,11 +7326,12 @@ the `peergov.LedgerPeerProvider` interface consumed by the peer governor.
 `ledger.PoolRelayProvider` attaches each relay's delegated pool stake (one
 batched `Database.GetStakeByPools` per cache refill; a lookup failure leaves
 stake at zero rather than failing discovery) and flags MultiHostName relays
-(hostname, no port). Discovery draws pools without replacement weighted by
-their stake (`weightedSample` in `peergov/weighted_selection.go`, zero stake
-carrying a floor weight so such pools stay discoverable), chooses one relay
-from each drawn pool per round, and walks the resulting relay order until the
-ledger-peer deficit is filled. A MultiHostName relay is
+(hostname, no port); the snapshot adapter flags the same relay shape. Discovery
+draws pools without replacement weighted by their stake
+(`weightedSample` in `peergov/weighted_selection.go`, zero stake carrying a
+floor weight so such pools stay discoverable), chooses one relay from each drawn
+pool per round, and walks the resulting relay order until the ledger-peer
+deficit is filled. A MultiHostName relay is
 carried as `host:0`; resolution looks up its SRV record for target and port,
 falls back to A/AAAA on the default port, and never leaves port 0 as the
 dial target. MultiHost reconnects preserve SRV-selected ports and absolute
