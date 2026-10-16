@@ -15,6 +15,7 @@
 package badger
 
 import (
+	"sync"
 	"testing"
 	"time"
 
@@ -111,24 +112,33 @@ func TestValueLogGCMetricsReportReclaimedBytes(t *testing.T) {
 
 	ticks := make(chan time.Time, 1)
 	stop := make(chan struct{})
+	var stopOnce sync.Once
+	// Registered after the store's Close cleanup so it runs first: Close waits
+	// for this goroutine, and an assertion failure would otherwise hang it.
+	t.Cleanup(func() { stopOnce.Do(func() { close(stop) }) })
 	store.gcWg.Add(1)
 	go store.blobGc(ticks, stop)
-	ticks <- time.Time{}
-	require.Eventually(t, func() bool {
-		return testutil.ToFloat64(store.gcMetrics.noRewrite) > 0
-	}, time.Minute, 10*time.Millisecond)
-	require.Positive(t, testutil.ToFloat64(store.gcMetrics.successes))
+	// Badger samples a value-log file at random, so a cycle can end in
+	// ErrNoRewrite without any rewrite. Tick until one cycle rewrites.
+	for cycle := 1.0; testutil.ToFloat64(store.gcMetrics.successes) == 0; cycle++ {
+		require.Less(t, cycle, 20.0, "no GC cycle rewrote a value-log file")
+		ticks <- time.Time{}
+		require.Eventually(t, func() bool {
+			return testutil.ToFloat64(store.gcMetrics.noRewrite) >= cycle
+		}, time.Minute, 10*time.Millisecond)
+	}
 	require.Positive(t, testutil.ToFloat64(store.gcMetrics.consecutive))
 	require.Equal(
 		t,
 		wantReclaimed,
 		testutil.ToFloat64(store.gcMetrics.reclaimedBytes),
 	)
+	cycles := testutil.ToFloat64(store.gcMetrics.noRewrite)
 	ticks <- time.Time{}
 	require.Eventually(t, func() bool {
-		return testutil.ToFloat64(store.gcMetrics.noRewrite) > 1
+		return testutil.ToFloat64(store.gcMetrics.noRewrite) > cycles
 	}, time.Minute, 10*time.Millisecond)
-	close(stop)
+	stopOnce.Do(func() { close(stop) })
 	store.gcWg.Wait()
 	require.Zero(t, testutil.ToFloat64(store.gcMetrics.consecutive))
 	require.Zero(t, testutil.ToFloat64(store.gcMetrics.reclaimedBytes))
