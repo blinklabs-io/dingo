@@ -137,6 +137,8 @@ github.com/blinklabs-io/plutigo v0.9.4 h1:F79jOl9DNSXX+SizDe6w22NkEDsOcGi2ZwCnvB
 github.com/blinklabs-io/plutigo v0.9.4/go.mod h1:/Srbjyh7GPIoUXNzdFOhYtGqPAuzm44ZiA0Vm1/re8M=
 github.com/blinklabs-io/plutigo v0.9.6 h1:3xttJsyFEr4U/qykjr1GdcuEBrSYq5DrbKpBndprT0w=
 github.com/blinklabs-io/plutigo v0.9.6/go.mod h1:/Srbjyh7GPIoUXNzdFOhYtGqPAuzm44ZiA0Vm1/re8M=
+github.com/blinklabs-io/plutigo v0.9.7 h1:98z8NhVKFp7SCPOavPk/W/PHyUchdgGbdvZuFyFDEuo=
+github.com/blinklabs-io/plutigo v0.9.7/go.mod h1:/Srbjyh7GPIoUXNzdFOhYtGqPAuzm44ZiA0Vm1/re8M=
 github.com/blockfrost/blockfrost-go v0.5.0 h1:I+qEQw5Re9UHolKZGJE0FtuQL3a7L0WqEYkEO4GisIw=
 github.com/blockfrost/blockfrost-go v0.5.0/go.mod h1:XdD+mryM/Rd/MqW1MfSQ0+Xfu2YnOGuwqMpLQa0jHvM=
 github.com/btcsuite/btcd/btcec/v2 v2.5.0 h1:KioMXOWa76b86sTZZOmbzv/ldaQCmB8KFAyn5PbB8E8=
