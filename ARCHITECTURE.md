@@ -5886,20 +5886,43 @@ it. Dingo implements this as a **corroboration gate**
   from peer-reported headers that had not passed any check. The roll-forward
   handler now verifies a header's VRF/KES cryptography and, once local ledger
   state has caught up, its leader eligibility
-  (`LedgerState.ValidateChainSelectionHeaderCrypto`, gated by
+  (`LedgerState.ValidatePeerChainSelectionHeaderCrypto`, gated by
   `ShouldVerifyChainSelectionHeaderCrypto`) *before* it is observed, for every
   ingress-eligible peer — not only the currently apply-eligible one, since a
   competing candidate's headers never reach the ledger's own chainsync
   header-queue verification (that only runs for headers actually applied).
+  For a competing fork, verification follows the retained headers for that
+  peer back to a primary-chain intersection and folds their nonce
+  contributions through the source epoch's stability cutoff. A per-connection
+  nonce-prefix cache resumes folding at the first newly added header, keyed by
+  the last folded hash, source epoch, cutoff, and source nonce. This supplies
+  the fork's frozen candidate nonce at the next epoch boundary while retaining
+  the same pool-key, leader-eligibility, size, KES, and operational-certificate
+  checks for every folded header. Hash links, slots, block numbers, and era
+  order are validated across the reconstructed path before it can affect
+  selection. The verifier receives the ChainSync connection identity so
+  ancestry from one peer cannot be used for another peer's header. A per-
+  connection path cache reuses a resolved ancestor while that intersection
+  remains on the applied chain and the next header directly extends the cached
+  path, even as the applied tip advances; peer rollbacks and disconnects clear
+  it.
   Verification is skipped only for a slot an imported Mithril snapshot
   already covers, the same exemption the ledger's own header-queue path
   applies; a result showing local state has not caught up to
   the header's slot (`IsHeaderVerificationDeferred`) still leaves the header
-  eligible — both preserve legitimate catch-up behavior. The exception is a
-  header past the forecast horizon (`ledger.ErrHeaderBeyondForecastHorizon`),
-  which ChainSync admission holds back until the ledger can forecast its slot,
-  so it never counts for selection, Genesis density, or corroboration before
-  it can be validated. A header whose
+  eligible — both preserve legitimate catch-up behavior. Missing or unsafe
+  fork ancestry excludes the header from observation without recycling the
+  peer or scheduling re-intersection; the retained header is not automatically
+  re-delivered. Headers past the forecast
+  horizon are likewise excluded from observation until admission can forecast
+  their slots. Bounded-history exhaustion defers verification so later retries
+  can resolve the ancestry as the applied tip advances. A multi-epoch fork that
+  intersects at the applied tip uses the normal local-chain verifier. If the
+  applied tip advances to the candidate header's parent during lookup, the
+  header also uses the local-chain verifier; other multi-epoch forks remain
+  withheld because their intermediate epoch nonce cannot be reconstructed
+  from the retained candidate path.
+  A header whose
   point (slot and hash) is on the chain (`Chain.HoldsPoint`) at or below the
   ledger tip returns success without re-verification: it was fully verified
   when applied, and re-judging it against pool snapshots the 3-epoch
@@ -5910,7 +5933,7 @@ it. Dingo implements this as a **corroboration gate**
   `current-3` (`errPoolSnapshotPruned`, non-API storage modes only) is
   deferred rather than rejected, because the node no longer holds the state
   to evaluate it; a pool absent from a populated snapshot still rejects.
-  Only a definite failure excludes the header from observation and publishes
+  A definite failure also excludes the header from observation and publishes
   `ledger.ConnectionRecycleRequestedEventType`
   (`"header_verification_failure"`, translated to a connmanager recycle by
   node composition, the same as the ledger's own header-queue failures).
@@ -5999,7 +6022,9 @@ tokens per second. It follows the reference ChainSync client:
   `ouroboros.chainsyncClientRollForwardAt` charges the peer only up to the
   header's network arrival (`PatienceMessageArrived`) and resumes after the
   callback (`PatienceHeaderAccepted`), so decoding, future-header admission
-  waits, verification and ledger backpressure are not charged. A new bucket starts paused
+  waits, verification and ledger backpressure are not charged. A withheld or
+  rejected ingress-eligible header resumes leakage through
+  `PatienceMessageProcessed` without earning a token. A new bucket starts paused
   until the peer's first accepted header or rollback, because tracked clients
   are registered inside their first callback. Headers from a peer that is
   not ingress-eligible are not verified, so they pause the bucket rather than
