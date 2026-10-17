@@ -484,10 +484,10 @@ func splitRefScriptSizeError(err error) (
 	if err == nil {
 		return common.RefScriptSizePerTxTooLargeError{}, nil, false
 	}
+	asSizeError := errors.AsType[common.RefScriptSizePerTxTooLargeError]
 	joined, ok := err.(interface{ Unwrap() []error })
 	if !ok {
-		var sizeError common.RefScriptSizePerTxTooLargeError
-		if errors.As(err, &sizeError) {
+		if sizeError, ok := asSizeError(err); ok {
 			return sizeError, nil, true
 		}
 		return common.RefScriptSizePerTxTooLargeError{}, nil, false
@@ -498,7 +498,9 @@ func splitRefScriptSizeError(err error) (
 		found     bool
 	)
 	for _, child := range joined.Unwrap() {
-		if !found && errors.As(child, &sizeError) {
+		matchedSizeError, ok := asSizeError(child)
+		if !found && ok {
+			sizeError = matchedSizeError
 			found = true
 			continue
 		}
