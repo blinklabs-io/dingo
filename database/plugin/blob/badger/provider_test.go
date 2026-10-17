@@ -175,6 +175,53 @@ func TestProviderStorageModeRunModeDefaults(t *testing.T) {
 	}
 }
 
+func TestProviderValueThresholdDefaults(t *testing.T) {
+	tests := []struct {
+		name        string
+		storageMode string
+		runMode     string
+		want        uint64
+	}{
+		{
+			name:        "core sync",
+			storageMode: "core",
+			runMode:     "sync",
+			want:        DefaultCoreSyncValueThreshold,
+		},
+		{
+			name:        "api sync",
+			storageMode: "api",
+			runMode:     "sync",
+			want:        DefaultValueThreshold,
+		},
+		{
+			name:        "core load",
+			storageMode: "core",
+			runMode:     "load",
+			want:        DefaultValueThreshold,
+		},
+		{
+			name:        "core serve",
+			storageMode: "core",
+			runMode:     "serve",
+			want:        DefaultValueThreshold,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := resolveBadgerProvider(
+				t,
+				testutil.BadgerBlobConfig(),
+				blob.ProviderDependencies{
+					StorageMode: tt.storageMode,
+					RunMode:     tt.runMode,
+				},
+			)
+			require.Equal(t, int64(tt.want), store.valueThreshold)
+		})
+	}
+}
+
 // TestProviderExplicitConfigOverridesDefaults verifies that explicit provider
 // config values win over the storage-mode/run-mode-derived defaults. API mode
 // with the load run mode would otherwise force large caches and compression
@@ -188,6 +235,7 @@ func TestProviderExplicitConfigOverridesDefaults(t *testing.T) {
 		"compression":      false,
 		"gc":               true,
 		"compressionLevel": 7,
+		"valueThreshold":   uint64(2048),
 	}, blob.ProviderDependencies{
 		StorageMode: "api",
 		RunMode:     "load",
@@ -197,6 +245,7 @@ func TestProviderExplicitConfigOverridesDefaults(t *testing.T) {
 	require.False(t, store.compressionEnabled)
 	require.False(t, store.gcEnabled)
 	require.Equal(t, 7, store.compressionLevel)
+	require.Equal(t, int64(2048), store.valueThreshold)
 }
 
 func TestProviderStopDeadlineDuringValueLogGC(t *testing.T) {

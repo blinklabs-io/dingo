@@ -2605,6 +2605,14 @@ a different analysis.
 
 All blob plugins expose the same logical keys. Badger stores these binary keys directly. GCS and S3 hex-encode the logical key bytes into object names; S3 may prepend the configured object prefix. After an isolated cloud restore, both cloud providers insert `.dingo-namespaces/<id>/` between that configured prefix and the encoded logical key. The selected ID is stored in `.dingo-blob-namespace` beside the local metadata store, so the data-directory activation also selects the matching blob generation. A missing marker preserves the original object-key layout for existing databases; legacy S3/GCS iteration excludes nested namespace objects so backup and reset continue to see only legacy keys. A later successful restore reclaims the superseded namespaced generation. The first restore from the marker-free layout retains its legacy objects because deleting their prefix would also delete the nested active namespace. Durable cleanup state is retried before a later live restore creates its own record, and an incomplete recovery directory without a record is removed consistently during retry and startup cleanup.
 
+### Core sync value placement
+
+Core Mithril sync uses a 1 KiB Badger value threshold by default. Larger block
+CBOR values go to the value log instead of being rewritten through LSM
+compactions during import. Other storage modes and run modes retain the 1 MiB
+default. The blob provider's `valueThreshold` setting overrides either
+default.
+
 ### Badger Close and the Directory Lock
 
 Badger holds an exclusive `flock` on its `blob` directory and releases it only
