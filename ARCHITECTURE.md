@@ -542,11 +542,13 @@ sequenceDiagram
 
     Note over Peer,DB: Stage 1 — Header Discovery (ChainSync)
     Peer->>OB: RollForward(header, tip)
+    OB->>OB: strictly verify header crypto against current ledger generation
+    Note over OB: If verification is deferred, retain only bounded raw ancestry; do not update peer selection or ledger state
     OB->>LS: await bounded header capacity
     LS->>ChM: wait for header queue drain
     OB->>EB: publish ChainsyncEvent(header)
     EB->>LS: handleEventChainsyncBlockHeader()
-    LS->>LS: verify header crypto (VRF/KES/OpCert)
+    LS->>LS: recheck header crypto against current ledger generation
     LS->>ChM: enqueue header in chain.headers[]
 
     Note over Peer,DB: Stage 2 — Full Block Retrieval (BlockFetch)
@@ -576,6 +578,10 @@ sequenceDiagram
     DB-->>LS: durable commit succeeds
     LS->>EB: publish TransactionEvent per tx (AfterCommit)
     ChM->>EB: publish ChainUpdateEvent
+    EB->>OB: retry deferred peers after ledger tip advances
+    OB->>Peer: re-intersect at last accepted cursor
+    Peer->>OB: replay parent-linked headers in order
+    OB->>OB: strictly verify and promote each replayed header
     LS->>EB: publish BlockEvent
 
     Note over Peer,DB: Rollback Path
@@ -3827,7 +3833,10 @@ fields correctly, and carries the key itself through to the same columns;
 malformed key/proof lengths reject that pool state. The same
 prototype release also changes `MsgLeiosBlockAnnouncement` from a null
 placeholder to the full ranking-block header. The LeiosNotify client accepts
-that header. In prototype-2026w31, `ouroboros/` decodes the Dijkstra header,
+that header. Announcements wrap it as `[era_id, header]`; Dingo unwraps the
+Dijkstra-era envelope and rejects envelopes tagged with another era, while
+retaining support for bare Dijkstra headers used by local diffusion. In
+prototype-2026w31, `ouroboros/` decodes the Dijkstra header,
 requires a valid `leios_announcement`, rejects future or more-than-ten-minute-
 old announcements, and rejects a repeated endorser-block hash whose size
 differs from an earlier observation. A valid announcement is relayed only
@@ -4541,7 +4550,9 @@ dependency across two points in the pipeline:
   block. Rollback safety is inherited from the per-`(pool, slot)`
   `PoolOpCertSequence` store, which drops rows past the rollback slot and
   recomputes the latest counter, so the counter never advances for a block that
-  is later rolled back.
+  is later rolled back. The SQL store flips the counter's sign bit on write
+  and read, preserving the complete `uint64` domain and its ordering in signed
+  integer columns.
 - **Leios announcement classification** (`ValidateLeiosAnnouncementHeader`):
   a dangling ranking-block announcement first passes the same VRF, KES, opcert
   signature, and KES-expiry checks as other header-only input. Ledger then
@@ -5893,10 +5904,18 @@ it. Dingo implements this as a **corroboration gate**
   header-queue verification (that only runs for headers actually applied).
   Verification is skipped only for a slot an imported Mithril snapshot
   already covers, the same exemption the ledger's own header-queue path
-  applies; a result showing local state has not caught up to
-  the header's slot (`IsHeaderVerificationDeferred`) still leaves the header
-  eligible — both preserve legitimate catch-up behavior. The exception is a
-  header past the forecast horizon (`ledger.ErrHeaderBeyondForecastHorizon`),
+  applies. A result showing local state has not caught up to the header's slot
+  (`IsHeaderVerificationDeferred`) withholds the header from chain selection,
+  density, and corroboration without penalizing the peer. The ledger may keep
+  the header in bounded peer ancestry or queue it when it extends the current
+  header chain, but a competing deferred header cannot clear the queue or
+  trigger canonical rollback. A later header can reuse the retained ancestry
+  once producer authorization succeeds. Genesis-overlay parameters remain
+  authoritative for later slots within the applied epoch and era, so a tip
+  earlier within that epoch does not by itself defer the overlay decision;
+  headers requiring a different epoch or era's parameters remain deferred
+  until those parameters are applied. A header past the forecast horizon
+  (`ledger.ErrHeaderBeyondForecastHorizon`),
   which ChainSync admission holds back until the ledger can forecast its slot,
   so it never counts for selection, Genesis density, or corroboration before
   it can be validated. A header whose
@@ -5910,8 +5929,9 @@ it. Dingo implements this as a **corroboration gate**
   `current-3` (`errPoolSnapshotPruned`, non-API storage modes only) is
   deferred rather than rejected, because the node no longer holds the state
   to evaluate it; a pool absent from a populated snapshot still rejects.
-  Only a definite failure excludes the header from observation and publishes
-  `ledger.ConnectionRecycleRequestedEventType`
+  Deferred headers are withheld from selection but retained as peer ancestry;
+  definite verification failures are excluded from observation and instead
+  publish `ledger.ConnectionRecycleRequestedEventType`
   (`"header_verification_failure"`, translated to a connmanager recycle by
   node composition, the same as the ledger's own header-queue failures).
   The check is two derived closures on `Ouroboros`
@@ -8428,32 +8448,13 @@ forging path narrows either value. Those structs are dingo's own rather than
 gouroboros types precisely because they are what gets signed, so their field
 widths are fixed here instead of following a release.
 
-The counter alone carries a further bound that is dingo's own rather than
-the chain's: `eras.MaxPersistableOpCertCounter`, which is `math.MaxInt64`.
-`pool_opcert_sequence`.`sequence` and `pool`.`latest_op_cert_sequence` are
-signed engine integers that carry the monotonicity ordering as well as the
-value, so a counter above that bound has no representation the `MAX`,
-`<`, and index reads over those columns would order correctly.
-`ledgerProcessBlock` refuses a block carrying one before processing its
-transactions -- for validated and unvalidated blocks alike, because the
-counter is recorded for every applied block -- naming the bound, rather than
-letting the block fail inside `UpdatePoolOpCertSequence` once its
-transactions are already applied. The forge loop's pre-flight and the block
-builder refuse the same counter, so the node never forges a block it could
-not then apply. `ledgerstate.importOpCertCounters` refuses it too: the
-certified HeaderState counter map is decoded at the reference's full
-`uint64` width (`decodeOpCertCounters`), so a Mithril restore is the one
-write path into `pool_opcert_sequence` whose counters were never checked
-against a chain rule first. `Store.UpdatePoolOpCertSequence` holds the only
-insert into that table, and block application and the Mithril import are its
-only non-test callers, so those two plus the forging pre-flight and the block
-builder are every place the bound has to be named; the rollback recompute
-derives `pool`.`latest_op_cert_sequence` from rows already inside it, and
-`ImportPool` and the pool registration and retirement certificates write that
-column as zero. The bound is unreachable through block application from
-Babbage onward, where Praos rejects a counter more than one past the last
-seen; only the TPraos eras, which enforce monotonicity alone, admit an
-arbitrary first counter.
+The SQL store preserves that complete counter domain in signed engine integer
+columns by flipping bit 63 at its read and write boundary. This maps unsigned
+ordering directly onto signed ordering, so `MAX`, `<`, and the
+`(pool_key_hash, sequence)` index keep the ledger's order from zero through
+`math.MaxUint64`. Migration v47 shifts legacy nonnegative values into the same
+representation. Block application, forging, and Mithril HeaderState import
+therefore share the reference's full counter range.
 
 `LedgerState.LatestOpCertSequence` -- the `LedgerView` method both this
 gate and startup's `PoolCredentials.ValidateAgainstLedger` read through --
@@ -8851,6 +8852,12 @@ is a metadata writer even though its bulk payload belongs to the blob store.
 Ordering the two resumable phases keeps their SQLite write transactions from
 contending during bootstrap. A later import failure resumes against the already
 copied immutable data.
+
+The Core-mode copy omits produced-UTxO offset references, which are used by
+API-mode UTxO resolution. It does not mark the immutable offset range complete;
+an API-mode backfill after a later storage-mode change will therefore build
+those references instead of skipping them. API-mode bootstrap keeps writing
+the references during the copy and records the completed range.
 
 `dingo load` uses the bulk-load pragma and deferred-index path as well. Before
 it returns successfully, it rebuilds the critical deferred indexes needed for

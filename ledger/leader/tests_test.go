@@ -19,6 +19,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/gouroboros/consensus"
 	"github.com/blinklabs-io/ouroboros-mock/fixtures"
 	"github.com/stretchr/testify/require"
@@ -150,6 +151,11 @@ func e34NonOverlay(t *testing.T, c e34ScheduleCase, slots []uint64) []uint64 {
 }
 
 func TestLeaderEligibilityNodeSchedules(t *testing.T) {
+	testutil.SkipUnderRace(
+		t,
+		"each case is a single-goroutine pass over every slot of an epoch; "+
+			"go-test (Linux) replays the same cases un-instrumented",
+	)
 	for i, c := range e34ScheduleCases(t) {
 		t.Run(fmt.Sprintf("%02d_%s", i, c.Mode), func(t *testing.T) {
 			t.Parallel()
