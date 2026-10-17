@@ -1046,7 +1046,7 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		// Both are scaled into int64 quantities: seconds to a Duration and
 		// megabytes to bytes.
 		const maxMessageTTL = uint64(math.MaxInt64) / uint64(time.Second)
-		const maxMempoolSize = math.MaxInt64 >> 20
+		const maxMempoolSize = uint64(math.MaxInt64 >> 20)
 		switch {
 		case c.DMQ.MessageTTL == 0:
 			errs = append(errs, errors.New(
