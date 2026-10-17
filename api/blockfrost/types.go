@@ -62,6 +62,20 @@ type EpochResponse struct {
 	ActiveStake    *string `json:"active_stake"`
 }
 
+// EpochStakeResponse is one delegator's stake in an epoch's distribution.
+type EpochStakeResponse struct {
+	StakeAddress string `json:"stake_address"`
+	PoolID       string `json:"pool_id"`
+	Amount       string `json:"amount"`
+}
+
+// EpochPoolStakeResponse is one delegator's stake to a pool in an epoch's
+// distribution.
+type EpochPoolStakeResponse struct {
+	StakeAddress string `json:"stake_address"`
+	Amount       string `json:"amount"`
+}
+
 // ProtocolParamsResponse represents Blockfrost protocol
 // parameters.
 type ProtocolParamsResponse struct {
@@ -298,6 +312,39 @@ type DRepMetadataResponse struct {
 type PoolRetiringResponse struct {
 	PoolID string `json:"pool_id"`
 	Epoch  uint64 `json:"epoch"`
+}
+
+// PoolHistoryResponse is one epoch of a pool's history.
+type PoolHistoryResponse struct {
+	Epoch           uint64  `json:"epoch"`
+	Blocks          int     `json:"blocks"`
+	ActiveStake     string  `json:"active_stake"`
+	ActiveSize      float64 `json:"active_size"`
+	DelegatorsCount uint64  `json:"delegators_count"`
+	Rewards         string  `json:"rewards"`
+	Fees            string  `json:"fees"`
+}
+
+// PoolRelayResponse is one relay of a pool registration.
+type PoolRelayResponse struct {
+	IPv4   *string `json:"ipv4"`
+	IPv6   *string `json:"ipv6"`
+	DNS    *string `json:"dns"`
+	DNSSrv *string `json:"dns_srv"`
+	Port   int     `json:"port"`
+}
+
+// PoolDelegatorResponse is one delegator of a pool.
+type PoolDelegatorResponse struct {
+	Address   string `json:"address"`
+	LiveStake string `json:"live_stake"`
+}
+
+// PoolUpdateResponse is one registration or retirement certificate of a pool.
+type PoolUpdateResponse struct {
+	TxHash    string `json:"tx_hash"`
+	CertIndex int    `json:"cert_index"`
+	Action    string `json:"action"`
 }
 
 // PoolMetadataResponse represents Blockfrost pool metadata. The error
@@ -681,4 +728,27 @@ type AccountTransactionResponse struct {
 	TxIndex     int    `json:"tx_index"`
 	BlockHeight uint64 `json:"block_height"`
 	BlockTime   int    `json:"block_time"`
+}
+
+// AccountStakeHistoryResponse is the stake an account held in one epoch.
+type AccountStakeHistoryResponse struct {
+	ActiveEpoch uint64 `json:"active_epoch"`
+	Amount      string `json:"amount"`
+	PoolID      string `json:"pool_id"`
+}
+
+// AccountMIRResponse is one Move Instantaneous Rewards payment to an
+// account.
+type AccountMIRResponse struct {
+	TxHash string `json:"tx_hash"`
+	Amount string `json:"amount"`
+}
+
+// AccountAddressTotalResponse is the lifetime received and sent totals
+// across the addresses of an account.
+type AccountAddressTotalResponse struct {
+	StakeAddress string                  `json:"stake_address"`
+	ReceivedSum  []AddressAmountResponse `json:"received_sum"`
+	SentSum      []AddressAmountResponse `json:"sent_sum"`
+	TxCount      int                     `json:"tx_count"`
 }

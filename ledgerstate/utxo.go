@@ -495,6 +495,21 @@ func parseMempackTxOut(
 		return nil, fmt.Errorf("decoding MemPack address: %w", err)
 	}
 	result.RenderedAddress = []byte(address.String())
+	if len(decoded.ScriptRef) > 0 {
+		// The script hash covers the language tag, which only the decoded
+		// output pairs with the script bytes.
+		txOut, err := ledger.NewTransactionOutputFromCbor(outputCbor)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"decoding MemPack TxOut reference script: %w",
+				err,
+			)
+		}
+		if sr := txOut.ScriptRef(); sr != nil {
+			hash := sr.Hash()
+			result.ReferenceScriptHash = hash.Bytes()
+		}
+	}
 
 	return result, nil
 }
@@ -650,6 +665,8 @@ func parseCborTxOut(
 	}
 	if sr := txOut.ScriptRef(); sr != nil {
 		result.ScriptRef = sr.RawScriptBytes()
+		hash := sr.Hash()
+		result.ReferenceScriptHash = hash.Bytes()
 	}
 
 	if multiAsset := txOut.Assets(); multiAsset != nil {
@@ -918,19 +935,20 @@ func parseIndefiniteUTxOMapWithProgressLimit(
 // UTxOToModel converts a ParsedUTxO to a Dingo database Utxo model.
 func UTxOToModel(u *ParsedUTxO, slot uint64) models.Utxo {
 	utxo := models.Utxo{
-		TxId:          u.TxHash,
-		Address:       u.RenderedAddress,
-		OutputIdx:     u.OutputIndex,
-		Cbor:          u.Cbor,
-		PaymentKey:    u.PaymentKey,
-		StakingKey:    u.StakingKey,
-		CredentialTag: u.CredentialTag,
-		PaymentScript: u.PaymentScript,
-		Amount:        types.Uint64(u.Amount),
-		AddedSlot:     slot,
-		DatumHash:     u.DatumHash,
-		Datum:         u.Datum,
-		ScriptRef:     u.ScriptRef,
+		TxId:                u.TxHash,
+		Address:             u.RenderedAddress,
+		OutputIdx:           u.OutputIndex,
+		Cbor:                u.Cbor,
+		PaymentKey:          u.PaymentKey,
+		StakingKey:          u.StakingKey,
+		CredentialTag:       u.CredentialTag,
+		PaymentScript:       u.PaymentScript,
+		Amount:              types.Uint64(u.Amount),
+		AddedSlot:           slot,
+		DatumHash:           u.DatumHash,
+		Datum:               u.Datum,
+		ScriptRef:           u.ScriptRef,
+		ReferenceScriptHash: u.ReferenceScriptHash,
 	}
 	if u.Pointer != nil {
 		utxo.Pointer = &models.UtxoPointer{

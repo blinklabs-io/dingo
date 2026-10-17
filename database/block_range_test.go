@@ -15,6 +15,8 @@
 package database
 
 import (
+	"bytes"
+	"errors"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -67,4 +69,50 @@ func TestBlockRangeRejectsInvalidIteratorItems(t *testing.T) {
 			require.Equal(t, 1, visited)
 		})
 	}
+}
+
+func TestForEachCanonicalBlockByIndexRangeDBUsesPrimaryIndex(t *testing.T) {
+	t.Parallel()
+	db := newTestDB(t)
+	blocks := []models.Block{
+		testIndexedBlock(10, 1, 0x11),
+		testIndexedBlock(50, 5, 0x55),
+	}
+	for _, block := range blocks {
+		require.NoError(t, db.BlockCreate(block, nil))
+	}
+
+	// An ID-zero synthetic/abandoned blob is not part of the canonical index
+	// range and must not be reached through key iteration.
+	abandonedKey := types.BlockBlobKey(30, bytes.Repeat([]byte{0x33}, 32))
+	txn := db.BlobTxn(true)
+	require.NoError(t, txn.Do(func(txn *Txn) error {
+		if err := db.Blob().Set(txn.Blob(), abandonedKey, []byte{0x80}); err != nil {
+			return err
+		}
+		return db.Blob().Set(txn.Blob(), types.BlockBlobIndexKey(0), abandonedKey)
+	}))
+
+	var got []uint64
+	err := ForEachCanonicalBlockByIndexRangeDB(
+		t.Context(), db, 1, 6,
+		func(block models.Block) error {
+			got = append(got, block.ID)
+			return nil
+		},
+	)
+	require.NoError(t, err)
+	require.Equal(t, []uint64{1, 5}, got, "sparse index IDs must be skipped and non-indexed blobs ignored")
+
+	callbackErr := errors.New("stop canonical iteration")
+	visits := 0
+	err = ForEachCanonicalBlockByIndexRangeDB(
+		t.Context(), db, 1, 6,
+		func(models.Block) error {
+			visits++
+			return callbackErr
+		},
+	)
+	require.ErrorIs(t, err, callbackErr)
+	require.Equal(t, 1, visits)
 }

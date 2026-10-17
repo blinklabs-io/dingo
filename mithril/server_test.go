@@ -341,7 +341,9 @@ func (s *blockingListStore) Subdirs(
 	}
 }
 
-func TestServerSignatureRouteUsesPublicRequestAdmissionLimit(t *testing.T) {
+func TestServerSignatureAdmissionIsIndependentFromArtifactDownloads(
+	t *testing.T,
+) {
 	t.Parallel()
 
 	const requestLimit = publicRequestLimit
@@ -388,8 +390,8 @@ func TestServerSignatureRouteUsesPublicRequestAdmissionLimit(t *testing.T) {
 			http.MethodPost, "/register-signatures", strings.NewReader(`{}`),
 		),
 	)
-	assert.Equal(t, http.StatusServiceUnavailable, rec.status)
-	assert.Equal(t, "1", rec.Header().Get("Retry-After"))
+	assert.Equal(t, http.StatusConflict, rec.status)
+	assert.Empty(t, rec.Header().Get("Retry-After"))
 	assert.NotEmpty(t, rec.readDeadlines)
 
 	close(store.release)
@@ -440,7 +442,6 @@ func TestServerRejectsArtifactWorkBeyondAdmissionLimit(t *testing.T) {
 		{http.MethodGet, "/artifact/cardano-database", ""},
 		{http.MethodGet, "/certificate-pending", ""},
 		{http.MethodGet, "/artifact/mithril-stake-distributions", ""},
-		{http.MethodPost, "/register-signatures", `{}`},
 	} {
 		rec := httptest.NewRecorder()
 		handler.ServeHTTP(
@@ -456,6 +457,52 @@ func TestServerRejectsArtifactWorkBeyondAdmissionLimit(t *testing.T) {
 	close(store.release)
 	testutil.RequireReceive(
 		t, firstDone, testutil.AsyncWait, "admitted artifact request",
+	)
+}
+
+func TestServerBoundsSignatureAdmissionIndependently(t *testing.T) {
+	t.Parallel()
+
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	s := &snapshotServer{
+		cfg: ServerConfig{
+			Logger: slog.New(slog.DiscardHandler),
+		},
+		signatureRequests:    make(chan struct{}, 1),
+		requestReadTimeout:   time.Minute,
+		responseWriteTimeout: time.Minute,
+	}
+	handler := s.withSignatureRequest(
+		func(w http.ResponseWriter, _ *http.Request) {
+			entered <- struct{}{}
+			<-release
+			w.WriteHeader(http.StatusCreated)
+		},
+	)
+	firstDone := make(chan struct{})
+	go func() {
+		defer close(firstDone)
+		handler.ServeHTTP(
+			httptest.NewRecorder(),
+			httptest.NewRequest(http.MethodPost, "/register-signatures", nil),
+		)
+	}()
+	testutil.RequireReceive(
+		t, entered, testutil.AsyncWait, "admitted signature request",
+	)
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(
+		rec,
+		httptest.NewRequest(http.MethodPost, "/register-signatures", nil),
+	)
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	assert.Equal(t, "1", rec.Header().Get("Retry-After"))
+
+	close(release)
+	testutil.RequireReceive(
+		t, firstDone, testutil.AsyncWait, "released signature request",
 	)
 }
 

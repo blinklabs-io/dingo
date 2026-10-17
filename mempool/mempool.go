@@ -186,11 +186,12 @@ type MempoolConfig struct {
 }
 
 type Mempool struct {
-	// pendingConfirmed holds the hashes of transactions in blocks added since
-	// the last rebuild, under confirmedMu.
 	confirmedMu      sync.Mutex
 	pendingConfirmed map[string]struct{}
-	metrics          struct {
+	// Rolled-back bodies are held only until a successful chain rebuild.
+	pendingRolledBack      map[string]MempoolTransaction
+	pendingRolledBackOrder []string
+	metrics                struct {
 		txsProcessedNum prometheus.Counter
 		txsInMempool    prometheus.Gauge
 		mempoolBytes    prometheus.Gauge
@@ -1095,45 +1096,62 @@ func (m *Mempool) processChainEvents(
 	)
 }
 
-// noteChainUpdate records the transactions a newly added block confirms, and
-// forgets those of blocks a rollback removes. They are evicted when the pool
-// is next rebuilt, not here: a block can be rolled back before the rebuild, in
-// which case it confirms nothing and its transactions must stay pending.
+// noteChainUpdate records transactions confirmed by added blocks and retains
+// transactions from rolled-back blocks for revalidation after the next rebuild.
 func (m *Mempool) noteChainUpdate(evt event.Event) {
 	switch data := evt.Data.(type) {
 	case chain.ChainBlockEvent:
-		hashes := m.blockTxHashes(data.Block)
-		if len(hashes) == 0 {
+		transactions := m.blockTransactions(data.Block)
+		if len(transactions) == 0 {
 			return
 		}
 		m.confirmedMu.Lock()
 		defer m.confirmedMu.Unlock()
 		if m.pendingConfirmed == nil {
-			m.pendingConfirmed = make(map[string]struct{}, len(hashes))
+			m.pendingConfirmed = make(
+				map[string]struct{}, len(transactions),
+			)
 		}
-		for _, h := range hashes {
-			m.pendingConfirmed[h] = struct{}{}
+		for _, tx := range transactions {
+			hash := tx.Hash().String()
+			m.pendingConfirmed[hash] = struct{}{}
+			delete(m.pendingRolledBack, hash)
 		}
 	case chain.ChainRollbackEvent:
-		m.confirmedMu.Lock()
-		empty := len(m.pendingConfirmed) == 0
-		m.confirmedMu.Unlock()
-		if empty {
-			return
-		}
-		var hashes []string
-		for _, block := range data.RolledBackBlocks {
-			hashes = append(hashes, m.blockTxHashes(block)...)
+		var transactions []MempoolTransaction
+		for _, block := range slices.Backward(data.RolledBackBlocks) {
+			for _, tx := range m.blockTransactions(block) {
+				transactions = append(transactions, MempoolTransaction{
+					Hash: tx.Hash().String(),
+					Cbor: slices.Clone(tx.Cbor()),
+					Type: uint(tx.Type()),
+				})
+			}
 		}
 		m.confirmedMu.Lock()
 		defer m.confirmedMu.Unlock()
-		for _, h := range hashes {
-			delete(m.pendingConfirmed, h)
+		if m.pendingRolledBack == nil {
+			m.pendingRolledBack = make(
+				map[string]MempoolTransaction, len(transactions),
+			)
+		}
+		newOrder := make([]string, 0, len(transactions))
+		for _, tx := range transactions {
+			delete(m.pendingConfirmed, tx.Hash)
+			if _, ok := m.pendingRolledBack[tx.Hash]; !ok {
+				newOrder = append(newOrder, tx.Hash)
+			}
+			m.pendingRolledBack[tx.Hash] = tx
+		}
+		if len(newOrder) > 0 {
+			m.pendingRolledBackOrder = append(
+				newOrder, m.pendingRolledBackOrder...,
+			)
 		}
 	}
 }
 
-func (m *Mempool) blockTxHashes(b models.Block) []string {
+func (m *Mempool) blockTransactions(b models.Block) []gledger.Transaction {
 	if len(b.Cbor) == 0 {
 		return nil
 	}
@@ -1146,23 +1164,17 @@ func (m *Mempool) blockTxHashes(b models.Block) []string {
 		)
 		return nil
 	}
-	txs := block.Transactions()
-	hashes := make([]string, 0, len(txs))
-	for _, tx := range txs {
-		hashes = append(hashes, tx.Hash().String())
-	}
-	return hashes
+	return block.Transactions()
 }
 
-// rebuildAfterChainUpdate evicts the transactions confirmed since the last
-// rebuild, then rebuilds the pool. Only a node that forged a block removes its
-// transactions itself; on every other node the block has already consumed
-// their inputs, so leaving them to full-pool revalidation reports each one as
-// an invalid transaction that was dropped. Descendants stay: they are judged
-// against the ledger, which now holds the confirmed parent's outputs.
+// rebuildAfterChainUpdate evicts confirmed transactions, rebuilds the pool,
+// then revalidates transactions recovered from rolled-back blocks. Descendants
+// of confirmed transactions stay and are judged against the selected chain.
 func (m *Mempool) rebuildAfterChainUpdate(ctx context.Context) error {
 	m.confirmedMu.Lock()
 	pending := m.pendingConfirmed
+	rolledBack := m.pendingRolledBack
+	rolledBackOrder := m.pendingRolledBackOrder
 	m.pendingConfirmed = nil
 	m.confirmedMu.Unlock()
 	if len(pending) > 0 {
@@ -1172,7 +1184,55 @@ func (m *Mempool) rebuildAfterChainUpdate(ctx context.Context) error {
 		}
 		m.RemoveTxsByHash(hashes)
 	}
-	return m.rebuildOverlay(ctx)
+	if err := m.rebuildOverlay(ctx); err != nil {
+		return err
+	}
+	m.confirmedMu.Lock()
+	m.pendingRolledBack = nil
+	m.pendingRolledBackOrder = nil
+	m.confirmedMu.Unlock()
+	for i, hash := range rolledBackOrder {
+		tx, ok := rolledBack[hash]
+		if !ok {
+			continue
+		}
+		delete(rolledBack, hash)
+		if err := m.AddTransaction(ctx, tx.Type, tx.Cbor); err != nil {
+			if isRetryableRolledBackAdmissionError(err) {
+				rolledBack[hash] = tx
+				m.confirmedMu.Lock()
+				m.pendingRolledBack = rolledBack
+				m.pendingRolledBackOrder = slices.Clone(
+					rolledBackOrder[i:],
+				)
+				m.confirmedMu.Unlock()
+				return fmt.Errorf(
+					"restore rolled-back transaction %s: %w", hash, err,
+				)
+			}
+			m.logger.Debug(
+				"rolled-back transaction is invalid on the selected chain",
+				"component", "mempool",
+				"tx_hash", hash,
+				"error", err,
+			)
+			continue
+		}
+		m.logger.Debug(
+			"restored rolled-back transaction",
+			"component", "mempool",
+			"tx_hash", hash,
+		)
+	}
+	return nil
+}
+
+func isRetryableRolledBackAdmissionError(err error) bool {
+	return errors.Is(err, ErrPendingStateMoved) ||
+		errors.Is(err, ErrNilValidator) ||
+		errors.Is(err, ErrMempoolStopped) ||
+		errors.Is(err, context.Canceled) ||
+		errors.Is(err, context.DeadlineExceeded)
 }
 
 func runChainUpdateWorker(

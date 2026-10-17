@@ -373,10 +373,10 @@ const (
 )
 
 // parameterChangeDRepGroups classifies the fields touched by a concrete
-// Conway or Dijkstra parameter-change action. Dijkstra keys 34-37 and 40-48
-// are NetworkGroup parameters, while keys 38-39 are TechnicalGroup and
-// EconomicGroup parameters respectively. SecurityGroupFields supplies the
-// independent SPO threshold classification.
+// Conway or Dijkstra parameter-change action. Dijkstra keys 34-37, 40-54 are
+// NetworkGroup parameters, keys 39 and 55-56 are EconomicGroup, and key 38 is
+// TechnicalGroup. SecurityGroupFields supplies the independent SPO threshold
+// classification.
 func parameterChangeDRepGroups(
 	action lcommon.ParameterChangeGovAction,
 ) drepParameterGroups {
@@ -408,14 +408,23 @@ func parameterChangeDRepGroups(
 			a.ParamUpdate.MaxEndorserBlockReferencesSize != nil ||
 			a.ParamUpdate.MaxEndorserBlockTxsSize != nil ||
 			a.ParamUpdate.MaxEndorserBlockExUnits != nil ||
-			a.ParamUpdate.MaxRefScriptSizePerEndorserBlock != nil {
+			a.ParamUpdate.MaxRefScriptSizePerEndorserBlock != nil ||
+			a.ParamUpdate.PerasMinCandidateBlockAge != nil ||
+			a.ParamUpdate.PerasHealingFactor != nil ||
+			a.ParamUpdate.PerasCertBoost != nil ||
+			a.ParamUpdate.PerasTargetCommitteeSize != nil ||
+			a.ParamUpdate.PerasBootstrapRoundSet ||
+			a.ParamUpdate.PerasBootstrapRound != nil ||
+			a.ParamUpdate.PerasQuorumThresholdSafetyMargin != nil {
 			groups |= drepParameterGroupNetwork
 		}
 		if a.ParamUpdate.MaxPledgeLeverageSet ||
 			a.ParamUpdate.MaxPledgeLeverage != nil {
 			groups |= drepParameterGroupTechnical
 		}
-		if a.ParamUpdate.MinPoolMargin != nil {
+		if a.ParamUpdate.MinPoolMargin != nil ||
+			a.ParamUpdate.RefInputsCostPerMultiAssetPolicy != nil ||
+			a.ParamUpdate.RefInputsCostPerDatumByte != nil {
 			groups |= drepParameterGroupEconomic
 		}
 	default:

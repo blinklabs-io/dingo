@@ -59,10 +59,17 @@ var (
 			`"index"`, "tag",
 		},
 	}
+	redeemerScriptShape = rowShape{
+		table: "redeemer_script",
+		columns: []string{
+			"transaction_id", "tag", `"index"`, "script_hash", "slot",
+			"tx_index",
+		},
+	}
 	addressTransactionShape = rowShape{
 		table: "address_transaction",
 		columns: []string{
-			"payment_key", "staking_key", "credential_tag",
+			"payment_key", "payment_script", "staking_key", "credential_tag",
 			"transaction_id", "slot", "tx_index",
 		},
 	}
