@@ -49,6 +49,7 @@ func seedRebuildSource(t *testing.T, db *Database, ref byte, payment byte) {
 	require.NoError(t, txn.Do(func(txn *Txn) error {
 		return db.Metadata().CreateUtxo(txn.Metadata(), &models.Utxo{
 			TxId:       bytes.Repeat([]byte{ref}, 32),
+			Address:    []byte{'a', ref},
 			PaymentKey: bytes.Repeat([]byte{payment}, 28),
 			AddedSlot:  1,
 			Amount:     types.Uint64(1),
