@@ -91,7 +91,10 @@ func installLocalTestKeysInRoot(
 	names []string,
 ) error {
 	current := root
-	for _, part := range strings.Split(filepath.ToSlash(filepath.Clean(dir)), "/") {
+	for part := range strings.SplitSeq(
+		filepath.ToSlash(filepath.Clean(dir)),
+		"/",
+	) {
 		if part == "." {
 			continue
 		}
