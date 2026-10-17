@@ -19,6 +19,7 @@ import (
 	"context"
 	"database/sql"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -144,8 +145,10 @@ func runCommitteeRenewalTermStartBackfill(
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
 	registry, err := SQLiteRegistry()
 	require.NoError(t, err)
-	index := len(registry) - 1
-	require.Equal(t, committeeRenewalTermStartSchemaRelease, registry[index].Name)
+	index := slices.IndexFunc(registry, func(m Migration) bool {
+		return m.Name == committeeRenewalTermStartSchemaRelease
+	})
+	require.GreaterOrEqual(t, index, 0)
 	// One credential per batch, so the cursor is resumed between every
 	// credential and a renewal chain is never split.
 	registry[index].BatchSize = 1

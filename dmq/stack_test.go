@@ -394,11 +394,9 @@ func TestStackNotificationNonBlocking(t *testing.T) {
 	}, 10*time.Second, 10*time.Millisecond)
 	require.Equal(t, []string{"a", "b"}, other)
 	// Two messages queued for each of the three open connections.
-	require.Equal(
-		t,
-		6.0,
-		metricValue(t, reg, "dingo_dmq_messages_sent_total", ""),
-	)
+	require.Eventually(t, func() bool {
+		return metricValue(t, reg, "dingo_dmq_messages_sent_total", "") == 6
+	}, 10*time.Second, 10*time.Millisecond)
 	require.Eventually(t, func() bool {
 		return metricValue(t, reg, "dingo_dmq_connections", "") == 3
 	}, 10*time.Second, 10*time.Millisecond)

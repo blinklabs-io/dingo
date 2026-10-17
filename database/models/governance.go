@@ -105,6 +105,12 @@ type GovernanceVote struct {
 	// Slot when vote was last changed (for rollback safety).
 	VoteUpdatedSlot *uint64
 	DeletedSlot     *uint64
+	// CastTxHash and CastCertIndex locate the voting procedure that casts
+	// this value: the transaction and the procedure's position among the
+	// voter's own procedures in it. They are recorded in the vote history on
+	// write and are not read back into this struct.
+	CastTxHash    []byte
+	CastCertIndex uint32
 }
 
 // ResignCommitteeCold represents a resignation certificate for a

@@ -65,15 +65,17 @@ func deadForkHeaders(
 }
 
 func deadForkEvent(
+	generation uint64,
 	connId ouroboros.ConnectionId,
 	h mockHeader,
 	advertised ochainsync.Tip,
 ) ChainsyncEvent {
 	return ChainsyncEvent{
-		ConnectionId: connId,
-		BlockHeader:  h,
-		Point:        ocommon.NewPoint(h.slot, h.hash.Bytes()),
-		Tip:          advertised,
+		ConnectionId:                       connId,
+		HeaderCryptoVerificationGeneration: generation,
+		BlockHeader:                        h,
+		Point:                              ocommon.NewPoint(h.slot, h.hash.Bytes()),
+		Tip:                                advertised,
 	}
 }
 
@@ -146,16 +148,30 @@ func TestDeadForkSharedMismatchCounterDoesNotBlameHonestPeer(t *testing.T) {
 	}
 	for i := range headerMismatchResyncThreshold - 1 {
 		h := declinedMismatchHeader(fmt.Sprintf("fork-%d", i), fixture.currentTip)
-		require.NoError(t, fixture.ls.handleEventChainsyncBlockHeader(
-			deadForkEvent(forkConn, h, advertised)))
+		require.NoError(
+			t,
+			fixture.ls.handleEventChainsyncBlockHeader(deadForkEvent(
+				fixture.ls.loadConsensusSnapshot().generation,
+				forkConn,
+				h,
+				advertised,
+			)),
+		)
 	}
 	require.Equal(t, headerMismatchResyncThreshold-1,
 		fixture.ls.headerMismatchCounts[connIdKey(forkConn)],
 		"fork peer's mismatches must accumulate for the scenario to hold")
 
 	h := declinedMismatchHeader("honest-0", fixture.currentTip)
-	require.NoError(t, fixture.ls.handleEventChainsyncBlockHeader(
-		deadForkEvent(honestConn, h, advertised)))
+	require.NoError(
+		t,
+		fixture.ls.handleEventChainsyncBlockHeader(deadForkEvent(
+			fixture.ls.loadConsensusSnapshot().generation,
+			honestConn,
+			h,
+			advertised,
+		)),
+	)
 
 	for _, e := range rec.drain(t) {
 		require.Falsef(t, sameConnectionId(e.ConnectionId, honestConn),
@@ -181,7 +197,7 @@ func TestPersistentForkResyncsConnectionOwningMismatches(t *testing.T) {
 	for i := range headerMismatchResyncThreshold {
 		h := declinedMismatchHeader(fmt.Sprintf("own-%d", i), fixture.currentTip)
 		require.NoError(t, fixture.ls.handleEventChainsyncBlockHeader(
-			deadForkEvent(fixture.connId, h, advertised)))
+			deadForkEvent(fixture.ls.loadConsensusSnapshot().generation, fixture.connId, h, advertised)))
 	}
 
 	var persistent int
@@ -219,7 +235,7 @@ func TestPersistentForkResyncsInterleavedForkPeers(t *testing.T) {
 			h := declinedMismatchHeader(
 				fmt.Sprintf("%s-%d", name, i), fixture.currentTip)
 			require.NoError(t, fixture.ls.handleEventChainsyncBlockHeader(
-				deadForkEvent(connId, h, advertised)))
+				deadForkEvent(fixture.ls.loadConsensusSnapshot().generation, connId, h, advertised)))
 		}
 	}
 
@@ -258,6 +274,7 @@ func TestResolveErrorKeepsOtherConnectionMismatchCount(t *testing.T) {
 		slot:        fixture.currentTip.Point.Slot + 10,
 	}
 	err := fixture.ls.handleEventChainsyncBlockHeader(deadForkEvent(
+		fixture.ls.loadConsensusSnapshot().generation,
 		forkConn,
 		header,
 		ochainsync.Tip{
@@ -336,7 +353,7 @@ func TestHeaderMismatchCountsSafeAgainstBlockfetchResync(t *testing.T) {
 		h := declinedMismatchHeader(fmt.Sprintf("race-%d", i), fixture.currentTip)
 		fixture.ls.chainsyncMutex.Lock()
 		err := fixture.ls.handleEventChainsyncBlockHeader(
-			deadForkEvent(forkConn, h, advertised))
+			deadForkEvent(fixture.ls.loadConsensusSnapshot().generation, forkConn, h, advertised))
 		fixture.ls.chainsyncMutex.Unlock()
 		require.NoError(t, err)
 	}

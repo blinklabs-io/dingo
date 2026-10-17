@@ -19,6 +19,7 @@ import (
 	"context"
 	"database/sql"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -40,12 +41,10 @@ func TestCommitteeRenewalTermStartUpgradeRestoresHotKey(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "metadata.sqlite")
 	registry, err := migrations.SQLiteRegistry()
 	require.NoError(t, err)
-	index := len(registry) - 1
-	require.Equal(
-		t,
-		"committee-renewal-term-start-repair",
-		registry[index].Name,
-	)
+	index := slices.IndexFunc(registry, func(m migrations.Migration) bool {
+		return m.Name == "committee-renewal-term-start-repair"
+	})
+	require.GreaterOrEqual(t, index, 0)
 	locker := migrations.NewFileLocker(path + ".migrate.lock")
 	openStore := func(versions []migrations.Migration) (*Store, *sql.DB) {
 		t.Helper()

@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"context"
+	"math"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
@@ -28,19 +29,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestLedgerProcessBlockRejectsOpCertCounterAbovePersistableBound is the
-// apply-path half of the persistable-counter contract: a counter above
-// 2^63-1 must fail through ledgerProcessBlock, and the test must fail
-// without eras.ValidateOpCertPersistableCounter's guard at state.go. That
-// guard was unreachable at the gouroboros pin the guard was written against,
-// because every opCertFromHeader path decoded the counter as uint32; the module
-// is now at a release that widened the header counter, so a counter this wide
-// is representable and the guard is finally exercisable.
-//
-// The guard runs unconditionally, ahead of the era-scoped monotonicity/no-gap
-// rule, so shouldValidate is false here to isolate it: this proves the width
-// bound alone rejects the block, not the separate stateful check.
-func TestLedgerProcessBlockRejectsOpCertCounterAbovePersistableBound(
+// TestLedgerProcessBlockRecordsCounterAboveMaxInt64 covers the apply path at
+// the boundary that signed SQL storage previously rejected.
+func TestLedgerProcessBlockRecordsCounterAboveMaxInt64(
 	t *testing.T,
 ) {
 	t.Parallel()
@@ -74,7 +65,7 @@ func TestLedgerProcessBlockRejectsOpCertCounterAbovePersistableBound(
 				Slot:       10,
 				IssuerVkey: issuerVkey,
 				OpCert: babbage.BabbageOpCert{
-					SequenceNumber: eras.MaxPersistableOpCertCounter + 1,
+					SequenceNumber: uint64(math.MaxInt64) + 1,
 				},
 			},
 		},
@@ -102,16 +93,12 @@ func TestLedgerProcessBlockRejectsOpCertCounterAbovePersistableBound(
 			)
 			return err
 		})
-	require.Error(t, err)
-	require.ErrorContains(t, err, "pool_opcert_sequence")
-
-	var poolID [28]byte
-	copy(poolID[:], pkh.Bytes())
-	_, found, err := ls.LatestOpCertSequence(poolID)
 	require.NoError(t, err)
-	require.False(
-		t,
-		found,
-		"a counter above the persistable bound must not be recorded",
+
+	sequence, found, err := db.LatestPoolOpCertSequence(
+		context.Background(), pkh, nil,
 	)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, uint64(math.MaxInt64)+1, sequence)
 }

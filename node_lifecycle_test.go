@@ -19,6 +19,8 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/binary"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -125,6 +127,20 @@ func newLiveLifecycleTestNodeWithStorageMode(
 	storageMode StorageMode,
 ) (*Node, []ocommon.Point) {
 	t.Helper()
+	return newLiveLifecycleTestNodeWithStorageModeAtBlock(
+		t, numBlocks, cardanoNodeCfgOverride, workerPoolCfg, storageMode, 1,
+	)
+}
+
+func newLiveLifecycleTestNodeWithStorageModeAtBlock(
+	t *testing.T,
+	numBlocks int,
+	cardanoNodeCfgOverride *cardano.CardanoNodeConfig,
+	workerPoolCfg ledger.DatabaseWorkerPoolConfig,
+	storageMode StorageMode,
+	startBlockNumber uint64,
+) (*Node, []ocommon.Point) {
+	t.Helper()
 
 	tmpDir := t.TempDir()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -163,10 +179,12 @@ func newLiveLifecycleTestNodeWithStorageMode(
 		cm.SetLedger(nodeTestSecurityParamLedger{securityParam: 432}),
 	)
 
-	points := loadLiveLifecycleTestBlocks(t, db, cm.PrimaryChain(), numBlocks)
+	points := loadLiveLifecycleTestBlocksAtBlock(
+		t, db, cm.PrimaryChain(), numBlocks, startBlockNumber,
+	)
 	require.NoError(t, db.SetTip(ochainsync.Tip{
 		Point:       points[len(points)-1],
-		BlockNumber: uint64(len(points)),
+		BlockNumber: startBlockNumber + uint64(len(points)-1),
 	}, nil))
 
 	cardanoNodeCfg := cardanoNodeCfgOverride
@@ -312,7 +330,20 @@ func loadLiveLifecycleTestBlocks(
 	numBlocks int,
 ) []ocommon.Point {
 	t.Helper()
-	blocks, err := testfixtures.GenerateBabbageChain(numBlocks)
+	return loadLiveLifecycleTestBlocksAtBlock(t, db, c, numBlocks, 1)
+}
+
+func loadLiveLifecycleTestBlocksAtBlock(
+	t *testing.T,
+	db *database.Database,
+	c *chain.Chain,
+	numBlocks int,
+	startBlockNumber uint64,
+) []ocommon.Point {
+	t.Helper()
+	blocks, err := testfixtures.GenerateBabbageChainAt(
+		startBlockNumber, 2, numBlocks,
+	)
 	require.NoError(t, err)
 
 	var points []ocommon.Point
@@ -643,9 +674,15 @@ const genesisSelectionTestWindowSlots = 25
 func newGenesisSelectionTestNode(
 	t *testing.T,
 	numBlocks int,
-) (*Node, []ocommon.Point) {
+) (*Node, []ocommon.Point, genesisForkTestKeys) {
 	t.Helper()
-	n, points := newLiveLifecycleTestNode(t, numBlocks)
+	keys := newGenesisForkTestKeys(t)
+	n, points := newLiveLifecycleTestNodeWithGenesis(
+		t,
+		numBlocks,
+		genesisForkTestCardanoNodeConfig(t, keys),
+		disabledLiveLifecycleTestWorkerPoolCfg,
+	)
 	// Reuse the connection manager the harness ouroboros was built with, so
 	// the ledger's liveness gate and its blockfetch requests resolve the
 	// same instance -- exactly as they do after a live rebuild, where
@@ -664,7 +701,87 @@ func newGenesisSelectionTestNode(
 	active, window := n.chainSelector.GenesisSelectionState()
 	require.True(t, active, "test selector must start in Genesis mode")
 	require.Equal(t, uint64(genesisSelectionTestWindowSlots), window)
-	return n, points
+	return n, points, keys
+}
+
+type genesisForkTestKeys struct {
+	vrfPk       []byte
+	vrfSk       []byte
+	kesPk       []byte
+	kesSk       *kes.SecretKey
+	coldPubKey  ed25519.PublicKey
+	coldPrivKey ed25519.PrivateKey
+}
+
+func newGenesisForkTestKeys(t *testing.T) genesisForkTestKeys {
+	t.Helper()
+	var seed [32]byte
+	copy(seed[:], []byte("genesis-fork-chain-vrf-kes-seed"))
+	vrfPk, vrfSk, err := vrf.KeyGen(seed[:])
+	require.NoError(t, err)
+
+	kesSeed := seed
+	kesSeed[0] ^= 0xAA
+	kesSk, kesPk, err := kes.KeyGen(kes.CardanoKesDepth, kesSeed[:])
+	require.NoError(t, err)
+
+	coldSeed := seed
+	coldSeed[0] ^= 0xBB
+	coldPrivKey := ed25519.NewKeyFromSeed(coldSeed[:])
+	return genesisForkTestKeys{
+		vrfPk: vrfPk, vrfSk: vrfSk,
+		kesPk: kesPk, kesSk: kesSk,
+		coldPubKey:  coldPrivKey.Public().(ed25519.PublicKey),
+		coldPrivKey: coldPrivKey,
+	}
+}
+
+// genesisForkTestCardanoNodeConfig preserves Preview's ledger parameters but
+// gives the deterministic fork producer a matching genesis-overlay
+// delegation. A 0.1 active-slot coefficient places two valid overlay slots
+// inside the test's 25-slot density window, so the headers pass production
+// genesis-delegate verification rather than relying on an unregistered
+// synthetic stake pool.
+func genesisForkTestCardanoNodeConfig(
+	t *testing.T,
+	keys genesisForkTestKeys,
+) *cardano.CardanoNodeConfig {
+	t.Helper()
+	cfg := newNodeTestCardanoNodeCfg(t)
+	genesisBytes, err := cardano.EmbeddedConfigFS.ReadFile(
+		"preview/shelley-genesis.json",
+	)
+	require.NoError(t, err)
+
+	var genesis map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(genesisBytes, &genesis))
+	genesis["activeSlotsCoeff"] = json.RawMessage("0.1")
+	genesisKeyHash := lcommon.Blake2b224Hash(
+		[]byte("genesis-fork-test-genesis-key"),
+	)
+	genDelegs, err := json.Marshal(map[string]map[string]string{
+		hex.EncodeToString(genesisKeyHash.Bytes()): {
+			"delegate": hex.EncodeToString(
+				lcommon.Blake2b224Hash(keys.coldPubKey).Bytes(),
+			),
+			"vrf": hex.EncodeToString(
+				lcommon.Blake2b256Hash(keys.vrfPk).Bytes(),
+			),
+		},
+	})
+	require.NoError(t, err)
+	genesis["genDelegs"] = genDelegs
+
+	genesisBytes, err = json.Marshal(genesis)
+	require.NoError(t, err)
+	require.NoError(
+		t,
+		cfg.LoadShelleyGenesisFromReader(bytes.NewReader(genesisBytes)),
+	)
+	cfg.ShelleyGenesisHash = hex.EncodeToString(
+		lcommon.Blake2b256Hash(genesisBytes).Bytes(),
+	)
+	return cfg
 }
 
 // registerGenesisForkTestPeer registers a mock node-to-node connection with
@@ -715,6 +832,7 @@ func registerGenesisForkTestPeer(
 // the way a peer's actual fork would.
 func generateValidatedConwayForkChain(
 	t *testing.T,
+	keys genesisForkTestKeys,
 	epochNonce []byte,
 	startBlockNumber uint64,
 	prevHash lcommon.Blake2b256,
@@ -723,33 +841,18 @@ func generateValidatedConwayForkChain(
 ) []gledger.Block {
 	t.Helper()
 
-	var seed [32]byte
-	copy(seed[:], []byte("genesis-fork-chain-vrf-kes-seed"))
-	vrfPk, vrfSk, err := vrf.KeyGen(seed[:])
-	require.NoError(t, err)
-
-	kesSeed := seed
-	kesSeed[0] ^= 0xAA
-	kesSk, kesPk, err := kes.KeyGen(kes.CardanoKesDepth, kesSeed[:])
-	require.NoError(t, err)
-
-	coldSeed := seed
-	coldSeed[0] ^= 0xBB
-	coldPrivKey := ed25519.NewKeyFromSeed(coldSeed[:])
-	coldPubKey := coldPrivKey.Public().(ed25519.PublicKey)
-
 	const opCertSeqNum = uint64(0)
 	const opCertKesPeriod = uint64(0)
 	var opCertBody [48]byte
-	copy(opCertBody[:32], kesPk)
+	copy(opCertBody[:32], keys.kesPk)
 	binary.BigEndian.PutUint64(opCertBody[32:40], uint64(opCertSeqNum))
 	binary.BigEndian.PutUint64(opCertBody[40:48], uint64(opCertKesPeriod))
-	opCertSig := ed25519.Sign(coldPrivKey, opCertBody[:])
+	opCertSig := ed25519.Sign(keys.coldPrivKey, opCertBody[:])
 
 	bodyHash := testutil.ConwayEmptyBodyHash(t)
 
 	var issuerVkey lcommon.IssuerVkey
-	copy(issuerVkey[:], coldPubKey)
+	copy(issuerVkey[:], keys.coldPubKey)
 
 	blocks := make([]gledger.Block, 0, count)
 	currentPrev := prevHash
@@ -759,7 +862,7 @@ func generateValidatedConwayForkChain(
 
 		vrfInput, err := vrf.MkInputVrf(int64(slot), epochNonce) //nolint:gosec
 		require.NoError(t, err)
-		vrfProof, vrfOutput, err := vrf.Prove(vrfSk, vrfInput)
+		vrfProof, vrfOutput, err := vrf.Prove(keys.vrfSk, vrfInput)
 		require.NoError(t, err)
 
 		headerBody := babbage.BabbageBlockHeaderBody{
@@ -767,7 +870,7 @@ func generateValidatedConwayForkChain(
 			Slot:        slot,
 			PrevHash:    currentPrev,
 			IssuerVkey:  issuerVkey,
-			VrfKey:      vrfPk,
+			VrfKey:      keys.vrfPk,
 			VrfResult: lcommon.VrfResult{
 				Output: vrfOutput,
 				Proof:  vrfProof,
@@ -775,7 +878,7 @@ func generateValidatedConwayForkChain(
 			BlockBodySize: 0,
 			BlockBodyHash: bodyHash,
 			OpCert: babbage.BabbageOpCert{
-				HotVkey:        kesPk,
+				HotVkey:        keys.kesPk,
 				SequenceNumber: opCertSeqNum,
 				KesPeriod:      opCertKesPeriod,
 				Signature:      opCertSig,
@@ -788,7 +891,7 @@ func generateValidatedConwayForkChain(
 		// extractOriginalBodyCbor can retrieve it for KES verification.
 		headerBody.SetCbor(headerBodyCbor)
 
-		kesSig, err := kes.Sign(kesSk, uint64(opCertKesPeriod), headerBodyCbor)
+		kesSig, err := kes.Sign(keys.kesSk, uint64(opCertKesPeriod), headerBodyCbor)
 		require.NoError(t, err)
 
 		block := &conway.ConwayBlock{
@@ -836,6 +939,7 @@ func requireGenesisDeepForkWins(
 	n *Node,
 	points []ocommon.Point,
 	ancestorIdx int,
+	keys genesisForkTestKeys,
 ) {
 	t.Helper()
 	require.Greater(t, len(points), ancestorIdx+1)
@@ -868,13 +972,17 @@ func requireGenesisDeepForkWins(
 		epochNonce,
 		"ledger must have a cached nonce for the fork intersection's epoch",
 	)
+	const genesisOverlaySlotInterval = uint64(10)
+	startSlot := (ancestor.Slot/genesisOverlaySlotInterval + 1) *
+		genesisOverlaySlotInterval
 	forkBlocks := generateValidatedConwayForkChain(
 		t,
+		keys,
 		epochNonce,
 		uint64(ancestorIdx)+1,
 		lcommon.NewBlake2b256(ancestor.Hash),
-		ancestor.Slot+2,
-		2,
+		startSlot,
+		genesisOverlaySlotInterval,
 		2,
 	)
 	forkTipBlock := forkBlocks[len(forkBlocks)-1]
@@ -900,6 +1008,9 @@ func requireGenesisDeepForkWins(
 
 	connId := registerGenesisForkTestPeer(t, n)
 	for _, blk := range forkBlocks {
+		verificationGeneration, err := n.ledgerState.
+			ValidateChainSelectionHeaderCryptoWithGeneration(blk.Header())
+		require.NoError(t, err)
 		n.eventBus.Publish(
 			ledger.ChainsyncEventType,
 			event.NewEvent(ledger.ChainsyncEventType, ledger.ChainsyncEvent{
@@ -908,10 +1019,11 @@ func requireGenesisDeepForkWins(
 					blk.SlotNumber(),
 					blk.Hash().Bytes(),
 				),
-				BlockHeader: blk.Header(),
-				Tip:         forkTip,
-				BlockNumber: blk.BlockNumber(),
-				Type:        uint(blk.Type()),
+				BlockHeader:                        blk.Header(),
+				Tip:                                forkTip,
+				BlockNumber:                        blk.BlockNumber(),
+				Type:                               uint(blk.Type()),
+				HeaderCryptoVerificationGeneration: verificationGeneration,
 			}),
 		)
 	}
@@ -946,10 +1058,10 @@ func TestLiveTruncatePreservesGenesisForkSelection(t *testing.T) {
 	t.Parallel()
 
 	const numBlocks = 25
-	n, points := newGenesisSelectionTestNode(t, numBlocks)
+	n, points, keys := newGenesisSelectionTestNode(t, numBlocks)
 
 	// Before: Genesis density resolves a deep fork 4 blocks behind the tip.
-	requireGenesisDeepForkWins(t, n, points, numBlocks-5)
+	requireGenesisDeepForkWins(t, n, points, numBlocks-5, keys)
 
 	targetSlot := points[10].Slot
 	_, err := n.Truncate(context.Background(), dblifecycle.TruncateTarget{
@@ -961,7 +1073,7 @@ func TestLiveTruncatePreservesGenesisForkSelection(t *testing.T) {
 	// After: the rebuilt ledger must still consult the same selector. A
 	// different intersection is used because the truncate discarded the
 	// blocks the first half rolled back to.
-	requireGenesisDeepForkWins(t, n, points, 5)
+	requireGenesisDeepForkWins(t, n, points, 5, keys)
 }
 
 // TestLiveRestorePreservesGenesisForkSelection is
@@ -972,7 +1084,7 @@ func TestLiveRestorePreservesGenesisForkSelection(t *testing.T) {
 	t.Parallel()
 
 	const numBlocks = 25
-	n, points := newGenesisSelectionTestNode(t, numBlocks)
+	n, points, keys := newGenesisSelectionTestNode(t, numBlocks)
 
 	snapshotDir := filepath.Join(t.TempDir(), "snap-3273")
 	manifest, err := lifecycleSnapshot(t, n, snapshotDir)
@@ -980,7 +1092,7 @@ func TestLiveRestorePreservesGenesisForkSelection(t *testing.T) {
 	require.Equal(t, points[len(points)-1].Slot, manifest.TipSlot)
 
 	// Before: Genesis density resolves a deep fork 4 blocks behind the tip.
-	requireGenesisDeepForkWins(t, n, points, numBlocks-5)
+	requireGenesisDeepForkWins(t, n, points, numBlocks-5, keys)
 
 	_, err = n.Restore(context.Background(), snapshotDir)
 	require.NoError(t, err)
@@ -992,7 +1104,7 @@ func TestLiveRestorePreservesGenesisForkSelection(t *testing.T) {
 	)
 
 	// After: the rebuilt ledger must still consult the same selector.
-	requireGenesisDeepForkWins(t, n, points, numBlocks-10)
+	requireGenesisDeepForkWins(t, n, points, numBlocks-10, keys)
 }
 
 // TestLiveTruncateIsSerializedAgainstConcurrentCalls exercises

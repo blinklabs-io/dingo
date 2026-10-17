@@ -33,6 +33,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	okeepalive "github.com/blinklabs-io/gouroboros/protocol/keepalive"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -1997,6 +1998,41 @@ func TestChainSelectorStalePeerFiltering(t *testing.T) {
 	bestPeer := cs.SelectBestChain()
 	require.NotNil(t, bestPeer)
 	assert.Equal(t, connId2, *bestPeer)
+}
+
+func TestChainSelectorKeepsPeerSelectableDuringKeepAliveTimeout(t *testing.T) {
+	t.Parallel()
+
+	connId := newTestConnectionId(1)
+	connected := true
+	cs := NewChainSelector(ChainSelectorConfig{
+		ConnectionLive: func(ouroboros.ConnectionId) bool {
+			return connected
+		},
+	})
+	clk := &fakeClock{now: time.Unix(1_700_000_000, 0)}
+	installFakeClock(cs, clk)
+
+	localTip := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 100, Hash: []byte("local")},
+		BlockNumber: 100,
+	}
+	peerTip := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 101, Hash: []byte("peer")},
+		BlockNumber: 101,
+	}
+	cs.SetLocalTip(localTip)
+	require.True(t, cs.UpdatePeerTip(connId, peerTip, nil))
+	cs.EvaluateAndSwitch()
+	require.Equal(t, &connId, cs.GetBestPeer())
+
+	// A delayed pong can still arrive before the protocol drops the connection.
+	period := time.Duration(okeepalive.DefaultKeepAlivePeriod) * time.Second
+	clk.Advance(period + okeepalive.ServerTimeout - time.Second)
+	cs.EvaluateAndSwitch()
+
+	require.True(t, connected)
+	require.Equal(t, &connId, cs.GetBestPeer())
 }
 
 func TestChainSelectorStalePeerCleanupEmitsChainSwitchEvent(t *testing.T) {
