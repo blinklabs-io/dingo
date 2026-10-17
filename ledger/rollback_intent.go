@@ -332,7 +332,8 @@ func loadRollbackIntent(
 // than maxRollbackIntentBlocks entries, or more than
 // maxRollbackIntentPayloadBytes of block fields, is refused before the rest of
 // it is allocated; a whole-value json.Unmarshal would size the slice from
-// attacker-controlled input first. Violations wrap errInvalidRollbackIntent so
+// attacker-controlled input first. Unknown fields are refused for the same
+// reason. Violations wrap errInvalidRollbackIntent so
 // recovery discards the record like any other unreadable one.
 func decodeRollbackIntent(raw string) (durableRollbackIntent, error) {
 	var intent durableRollbackIntent
@@ -371,8 +372,9 @@ func decodeRollbackIntent(raw string) (durableRollbackIntent, error) {
 		case "blocks":
 			intent.Blocks, err = decodeRollbackBlocks(dec)
 		default:
-			var skipped json.RawMessage
-			err = dec.Decode(&skipped)
+			// The writer emits exactly these fields. Skipping an unknown one
+			// would still materialize it, up to the encoded size limit.
+			return fail(fmt.Errorf("unknown field %q", key))
 		}
 		if err != nil {
 			if errors.Is(err, errInvalidRollbackIntent) {

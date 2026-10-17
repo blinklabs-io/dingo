@@ -15,6 +15,7 @@
 package sqlstore
 
 import (
+	"database/sql"
 	"fmt"
 	"math"
 	"testing"
@@ -351,6 +352,29 @@ func testGetSyncStateBounded(t *testing.T, store *Store) {
 		"a value is sized in bytes, so two characters can exceed a limit of three",
 	)
 	require.Empty(t, got)
+
+	// The database itself must withhold an oversized value, so that a size
+	// check made after the read cannot satisfy this test.
+	var (
+		length int64
+		value  sql.NullString
+	)
+	require.NoError(t, store.readDB.QueryRow(
+		store.dialect.Rebind(boundedSyncStateQuery(store.dialect.Name())),
+		3, "multibyte",
+	).Scan(&length, &value))
+	require.Equal(t, int64(4), length)
+	require.False(
+		t,
+		value.Valid,
+		"the value column must be NULL when the value exceeds the limit",
+	)
+	require.NoError(t, store.readDB.QueryRow(
+		store.dialect.Rebind(boundedSyncStateQuery(store.dialect.Name())),
+		4, "multibyte",
+	).Scan(&length, &value))
+	require.True(t, value.Valid)
+	require.Equal(t, "éé", value.String)
 
 	got, err = store.GetSyncStateBounded("missing", 1, nil)
 	require.NoError(t, err)

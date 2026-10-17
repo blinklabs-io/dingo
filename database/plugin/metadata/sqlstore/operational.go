@@ -256,6 +256,15 @@ func syncStateByteLength(dialect string) string {
 	}
 }
 
+// boundedSyncStateQuery selects the value's size in bytes and the value itself
+// only when that size is at most the first parameter; otherwise the value
+// column is NULL.
+func boundedSyncStateQuery(dialect string) string {
+	size := syncStateByteLength(dialect)
+	return "SELECT " + size + ", CASE WHEN " + size + " <= ? THEN value END " +
+		"FROM sync_state WHERE sync_key = ?"
+}
+
 func (s *Store) GetSyncStateBounded(
 	key string,
 	maxBytes int,
@@ -268,15 +277,13 @@ func (s *Store) GetSyncStateBounded(
 	// One statement returns the size and, only when it fits, the value, so
 	// an oversized value never leaves the database and cannot grow between a
 	// size probe and the read.
-	size := syncStateByteLength(s.dialect.Name())
 	var (
 		length int64
 		value  sql.NullString
 	)
 	err = db.QueryRowContext(
 		ctx,
-		"SELECT "+size+", CASE WHEN "+size+" <= ? THEN value END "+
-			"FROM sync_state WHERE sync_key = ?",
+		boundedSyncStateQuery(s.dialect.Name()),
 		maxBytes,
 		key,
 	).Scan(&length, &value)

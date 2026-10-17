@@ -499,6 +499,11 @@ func TestDecodeRollbackIntentRefusesRecordsBeyondWriterLimits(t *testing.T) {
 			want: "unexpected data",
 		},
 		{
+			name: "unknown field",
+			raw:  `{"format_version":1,"slot":1,"hash":"01","extra":"x"}`,
+			want: "unknown field",
+		},
+		{
 			name: "blocks not an array",
 			raw:  rollbackIntentRecord(`{}`),
 			want: "blocks is not an array",

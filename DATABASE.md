@@ -915,7 +915,8 @@ which sizes the `sync_state` value in bytes inside the database and returns
 the cap is the base64 size of a full payload plus per-block and envelope
 overhead (about 91 MB). The `blocks` array is then read element by element, so
 a record with more than 4096 blocks or more than 64 MiB of block fields is
-refused without allocating the remainder. Any such record is treated as
+refused without allocating the remainder. A record with a field the writer
+never emits is refused for the same reason. Any such record is treated as
 unreadable and removed.
 
 **Pending ratification.** Key `dingo:governance:ratify-pending` in
