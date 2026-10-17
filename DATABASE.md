@@ -3080,6 +3080,12 @@ Dijkstra block is decoded and indexed with `BlockIndexer`, because validity is
 each transaction's own `is_valid` field and a valid transaction also produces
 its sub-transactions' outputs, keyed by the sub-transaction body hash.
 
+Core-mode immutable loading skips these produced-UTxO offset writes and leaves
+the immutable-offset completion marker unset. API-mode loading continues to
+write the references and records the completed tip. If a Core database is later
+used in API mode, backfill sees no completion marker and builds the references
+from the immutable blocks instead of assuming they were imported.
+
 `DTXP` transaction-part references are 69 bytes:
 
 ```text

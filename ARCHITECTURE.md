@@ -8853,6 +8853,12 @@ Ordering the two resumable phases keeps their SQLite write transactions from
 contending during bootstrap. A later import failure resumes against the already
 copied immutable data.
 
+The Core-mode copy omits produced-UTxO offset references, which are used by
+API-mode UTxO resolution. It does not mark the immutable offset range complete;
+an API-mode backfill after a later storage-mode change will therefore build
+those references instead of skipping them. API-mode bootstrap keeps writing
+the references during the copy and records the completed range.
+
 `dingo load` uses the bulk-load pragma and deferred-index path as well. Before
 it returns successfully, it rebuilds the critical deferred indexes needed for
 startup queries; the existing recovery path completes an interrupted index
