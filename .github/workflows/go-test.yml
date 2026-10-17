@@ -492,6 +492,7 @@ jobs:
     name: go-test (Linux, race)
     needs: [go-test-linux-quick]
     strategy:
+      fail-fast: false
       matrix:
         go-version: [1.26.x]
         shard: [database, ledger, rest]
