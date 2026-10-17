@@ -150,6 +150,24 @@ func BenchmarkChunkBlockDataAccess(b *testing.B) {
 	}
 }
 
+// TestBytesEntryRangeAtCapsCapacity proves an append to a returned range
+// cannot reach the neighbouring bytes of the chunk buffer.
+func TestBytesEntryRangeAtCapsCapacity(t *testing.T) {
+	t.Parallel()
+	data := []byte{1, 2, 3, 4, 5, 6}
+	entry := newBytesEntry(slices.Clone(data))
+
+	got, ok := entry.RangeAt(1, 2)
+	require.True(t, ok)
+	require.Equal(t, []byte{2, 3}, got)
+	require.Equal(t, len(got), cap(got))
+
+	_ = append(got, 0xff)
+	whole, ok := entry.RangeAt(0, int64(len(data)))
+	require.True(t, ok)
+	require.Equal(t, data, whole)
+}
+
 // TestChunkNamesSortNumericallyPastFiveDigits covers the ordering every lookup
 // here rests on.
 //

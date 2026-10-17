@@ -96,7 +96,10 @@ func (b *bytesEntry) RangeAt(offset, length int64) ([]byte, bool) {
 	if offset > size || length > size-offset {
 		return nil, false
 	}
-	return b.data[int(offset):int(offset+length)], true
+	end := int(offset + length)
+	// Cap the capacity at the range end so an append by the caller
+	// reallocates instead of overwriting the next block's bytes.
+	return b.data[int(offset):end:end], true
 }
 
 func (b *bytesEntry) Seek(offset int64, whence int) (int64, error) {
