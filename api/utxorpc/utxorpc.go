@@ -621,13 +621,17 @@ func (u *Utxorpc) gracefulShutdown(
 // deadline) elapsed or because the caller's ctx was cancelled early -- then
 // drains shutdownErr so the Shutdown goroutine started above never leaks.
 func forceCloseUtxorpc(server *http.Server, shutdownErr <-chan error) error {
-	if err := server.Close(); err != nil {
+	closeErr := server.Close()
+	shutdownResult := <-shutdownErr
+	if closeErr != nil {
 		return fmt.Errorf(
-			"force-close after graceful shutdown failed: %w", err,
+			"force-close after graceful shutdown failed: %w", closeErr,
 		)
 	}
-	if err := <-shutdownErr; err != nil {
-		return fmt.Errorf("graceful shutdown after forced close: %w", err)
+	if shutdownResult != nil {
+		return fmt.Errorf(
+			"graceful shutdown after force-close failed: %w", shutdownResult,
+		)
 	}
 	return nil
 }

@@ -50,7 +50,7 @@ func v1FeatureCases(t *testing.T) []v1FeatureCase {
 			apply: func(t *testing.T, tx *mockProducedValidityTx, ls *mockLedgerState) {
 				ref := newTestInput(0xe1, 0)
 				tx.referenceInputs = []lcommon.TransactionInput{ref}
-				ls.addUtxo(ref, newTestOutput(1_000_000))
+				ls.addUtxo(ref, newTestOutputWithAddress(1_000_000, newTestKeyAddress(t)))
 			},
 			wantV1Err: func(t *testing.T, err error) {
 				var target babbage.PlutusV1ReferenceInputsNotSupportedError
@@ -64,7 +64,7 @@ func v1FeatureCases(t *testing.T) []v1FeatureCase {
 				spent := newTestInput(0xe2, 0)
 				tx.inputs = append(tx.inputs, spent)
 				ls.addUtxo(spent, testAddressScriptOutput{
-					testOutput: newTestOutput(1_000_000),
+					testOutput: newTestOutputWithAddress(1_000_000, newTestKeyAddress(t)),
 					addr:       keyAddr,
 					scriptRef:  refScript,
 				})
@@ -79,7 +79,7 @@ func v1FeatureCases(t *testing.T) []v1FeatureCase {
 			name: "reference script on output",
 			apply: func(t *testing.T, tx *mockProducedValidityTx, _ *mockLedgerState) {
 				tx.outputs = append(tx.outputs, testAddressScriptOutput{
-					testOutput: newTestOutput(1_000_000),
+					testOutput: newTestOutputWithAddress(1_000_000, newTestKeyAddress(t)),
 					addr:       keyAddr,
 					scriptRef:  refScript,
 				})
@@ -129,7 +129,7 @@ func newV1FeatureTx(
 	tx, input := newContextMintTx(t, plutusScript, true, nil, nil, nil)
 	tx.txType = txType
 	ls := newMockLedgerState()
-	ls.addUtxo(input, newTestOutput(10_000_000))
+	ls.addUtxo(input, newTestOutputWithAddress(10_000_000, newTestKeyAddress(t)))
 	if feature != nil {
 		feature.apply(t, tx, ls)
 	}
@@ -177,7 +177,7 @@ func TestValidateTxBabbageRejectsPlutusV1Features(t *testing.T) {
 			t, lang.LanguageVersionV1, babbage.TxTypeBabbage, nil,
 		)
 		tx.outputs = []lcommon.TransactionOutput{testDatumHashOutput{
-			testOutput: newTestOutput(1_000_000),
+			testOutput: newTestOutputWithAddress(1_000_000, newTestKeyAddress(t)),
 			addr:       newTestKeyAddress(t),
 		}}
 		require.NoError(t, ValidateTxBabbage(tx, 0, ls, pp))

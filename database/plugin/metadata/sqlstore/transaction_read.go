@@ -253,8 +253,14 @@ func (s *Store) GetTransactionHashesAfterSlot(
 	return ret, nil
 }
 
+const countTransactionsByPaymentCredSQL = `
+SELECT COUNT(DISTINCT transaction_id)
+FROM address_transaction
+WHERE payment_key = ? AND payment_script = ?`
+
 func (s *Store) CountTransactionsByPaymentCred(
 	paymentKey []byte,
+	paymentScript bool,
 	txn types.Txn,
 ) (int, error) {
 	if len(paymentKey) == 0 {
@@ -264,12 +270,12 @@ func (s *Store) CountTransactionsByPaymentCred(
 	if err != nil {
 		return 0, err
 	}
-	q := s.operationalQueries(db)
-	count, err := q.CountTransactionsByPaymentCred(
+	var count int64
+	if err := db.QueryRowContext(
 		ctx,
-		paymentKey,
-	)
-	if err != nil {
+		s.dialect.Rebind(countTransactionsByPaymentCredSQL),
+		paymentKey, paymentScript,
+	).Scan(&count); err != nil {
 		return 0, fmt.Errorf("count txs by payment cred: %w", err)
 	}
 	return int(count), nil

@@ -394,6 +394,7 @@ func TestOptimizePlannerStatsMetrics(t *testing.T) {
 	seedStakeRefLookupUtxos(t, store, 300, 16)
 	for _, trigger := range []string{
 		PlannerStatsTriggerStartup, PlannerStatsTriggerEpoch,
+		PlannerStatsTriggerPeriodic,
 	} {
 		_, err := store.OptimizePlannerStatsContext(
 			context.Background(),
@@ -417,14 +418,18 @@ func TestOptimizePlannerStatsMetrics(t *testing.T) {
 		}
 	}
 	require.Equal(t, map[string]float64{
-		"result=changed,trigger=startup,":   1,
-		"result=unchanged,trigger=startup,": 0,
-		"result=skipped,trigger=startup,":   0,
-		"result=error,trigger=startup,":     0,
-		"result=changed,trigger=epoch,":     0,
-		"result=unchanged,trigger=epoch,":   1,
-		"result=skipped,trigger=epoch,":     0,
-		"result=error,trigger=epoch,":       0,
+		"result=changed,trigger=startup,":    1,
+		"result=unchanged,trigger=startup,":  0,
+		"result=skipped,trigger=startup,":    0,
+		"result=error,trigger=startup,":      0,
+		"result=changed,trigger=epoch,":      0,
+		"result=unchanged,trigger=epoch,":    1,
+		"result=skipped,trigger=epoch,":      0,
+		"result=error,trigger=epoch,":        0,
+		"result=changed,trigger=periodic,":   0,
+		"result=unchanged,trigger=periodic,": 1,
+		"result=skipped,trigger=periodic,":   0,
+		"result=error,trigger=periodic,":     0,
 	}, got)
 }
 
@@ -578,5 +583,5 @@ func TestPlannerStatsRunSeriesExistBeforeAnyRun(t *testing.T) {
 			series = len(family.GetMetric())
 		}
 	}
-	require.Equal(t, 8, series, "2 triggers x 4 results")
+	require.Equal(t, 12, series, "3 triggers x 4 results")
 }

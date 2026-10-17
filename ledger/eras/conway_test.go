@@ -338,7 +338,10 @@ func TestValidateTxConwayPV11ReferenceInputOverlapUsesExecutedLanguage(
 			script, _ := newConwayOverlapMintScript(t, tc.version)
 			tx := newConwayOverlapTx(input, script, nil)
 			ls := newMockLedgerState()
-			ls.addUtxo(input, newTestOutput(2_000_000))
+			ls.addUtxo(input, newTestOutputWithAddress(
+				2_000_000,
+				newTestKeyAddress(t),
+			))
 			require.NoError(t, ValidateTxConway(
 				tx,
 				0,
@@ -1424,16 +1427,16 @@ func TestInvalidPlutusTxInfoUsesBodyOutputs(t *testing.T) {
 		{
 			name: "different collateral return",
 			bodyOutputs: []lcommon.TransactionOutput{
-				newTestOutput(1_000_000),
-				newTestOutput(2_000_000),
+				newTestOutputWithAddress(1_000_000, newTestKeyAddress(t)),
+				newTestOutputWithAddress(2_000_000, newTestKeyAddress(t)),
 			},
-			produced:   []lcommon.Utxo{{Output: newTestOutput(3_000_000)}},
+			produced:   []lcommon.Utxo{{Output: newTestOutputWithAddress(3_000_000, newTestKeyAddress(t))}},
 			minOutputs: 2,
 		},
 		{
 			name: "no collateral return",
 			bodyOutputs: []lcommon.TransactionOutput{
-				newTestOutput(1_000_000),
+				newTestOutputWithAddress(1_000_000, newTestKeyAddress(t)),
 			},
 			minOutputs: 1,
 		},
@@ -1462,7 +1465,7 @@ func TestInvalidPlutusTxInfoUsesBodyOutputs(t *testing.T) {
 						nil,
 					)
 					ls := newMockLedgerState()
-					ls.addUtxo(input, newTestOutput(10_000_000))
+					ls.addUtxo(input, newTestOutputWithAddress(10_000_000, newTestKeyAddress(t)))
 					pp := &babbage.BabbageProtocolParameters{
 						ProtocolMajor: 7,
 						CostModels: map[uint][]int64{
@@ -1486,7 +1489,7 @@ func TestInvalidPlutusTxInfoUsesBodyOutputs(t *testing.T) {
 						nil,
 					)
 					ls := newMockLedgerState()
-					ls.addUtxo(input, newTestOutput(10_000_000))
+					ls.addUtxo(input, newTestOutputWithAddress(10_000_000, newTestKeyAddress(t)))
 					modelIndex := uint(0)
 					if tc.version == lang.LanguageVersionV2 {
 						modelIndex = 1
@@ -1523,12 +1526,12 @@ func TestInvalidPlutusTxInfoUsesBodyOutputs(t *testing.T) {
 						t,
 						txInfoOutputCountScript(t, tc.version, 1, false),
 						false,
-						[]lcommon.TransactionOutput{newTestOutput(1_000_000)},
+						[]lcommon.TransactionOutput{newTestOutputWithAddress(1_000_000, newTestKeyAddress(t))},
 						nil,
 						nil,
 					)
 					ls := newMockLedgerState()
-					ls.addUtxo(input, newTestOutput(10_000_000))
+					ls.addUtxo(input, newTestOutputWithAddress(10_000_000, newTestKeyAddress(t)))
 					pp := &babbage.BabbageProtocolParameters{
 						ProtocolMajor: 7,
 						CostModels: map[uint][]int64{
@@ -1550,12 +1553,12 @@ func TestInvalidPlutusTxInfoUsesBodyOutputs(t *testing.T) {
 					t,
 					txInfoOutputCountScript(t, tc.version, 1, false),
 					false,
-					[]lcommon.TransactionOutput{newTestOutput(1_000_000)},
+					[]lcommon.TransactionOutput{newTestOutputWithAddress(1_000_000, newTestKeyAddress(t))},
 					nil,
 					nil,
 				)
 				ls := newMockLedgerState()
-				ls.addUtxo(input, newTestOutput(10_000_000))
+				ls.addUtxo(input, newTestOutputWithAddress(10_000_000, newTestKeyAddress(t)))
 				modelIndex := uint(0)
 				if tc.version == lang.LanguageVersionV2 {
 					modelIndex = 1

@@ -97,10 +97,19 @@ func GenerateConwayChainWithPeriodicTransactions(
 // GenerateBabbageChain returns valid generated Babbage blocks for tests whose
 // ledger configuration intentionally stops at the Babbage era.
 func GenerateBabbageChain(count int) ([]ledger.Block, error) {
+	return GenerateBabbageChainAt(1, 2, count)
+}
+
+// GenerateBabbageChainAt returns valid generated Babbage blocks beginning at
+// the requested block number and slot.
+func GenerateBabbageChainAt(
+	startBlockNumber, startSlot uint64,
+	count int,
+) ([]ledger.Block, error) {
 	return mockfixtures.GenerateBabbageChain(
-		1,
+		startBlockNumber,
 		common.Blake2b256{},
-		2,
+		startSlot,
 		20,
 		count,
 	)

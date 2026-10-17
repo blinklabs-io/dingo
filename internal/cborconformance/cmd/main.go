@@ -12,15 +12,20 @@ import (
 
 func main() {
 	datasetDir := flag.String("dataset", "", "path to the Conway corpus directory")
+	corpusRevision := flag.String(
+		"corpus-revision",
+		"",
+		"full commit SHA of the CBOR corpus",
+	)
 	outputPath := flag.String("output", "", "path for the JSON report")
 	flag.Parse()
 
-	if *datasetDir == "" || *outputPath == "" {
+	if *datasetDir == "" || *corpusRevision == "" || *outputPath == "" {
 		flag.Usage()
 		os.Exit(2)
 	}
 
-	report, err := cborconformance.GenerateReport(*datasetDir)
+	report, err := cborconformance.GenerateReport(*datasetDir, *corpusRevision)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)

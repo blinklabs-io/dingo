@@ -87,6 +87,30 @@ func (s *Store) FindMidnightRegistrationsFrom(
 	)
 }
 
+func (s *Store) ResetMidnightRegistrationState(txn types.Txn) error {
+	return s.withWriteTransaction(txn, func(db queryer, ctx context.Context) error {
+		if _, err := db.ExecContext(ctx, "-- name: ClearMidnightDeregistrations :exec\nDELETE FROM midnight_deregistrations"); err != nil {
+			return fmt.Errorf("clear midnight deregistrations: %w", err)
+		}
+		if _, err := db.ExecContext(ctx, "-- name: ClearMidnightRegistrations :exec\nDELETE FROM midnight_registrations"); err != nil {
+			return fmt.Errorf("clear midnight registrations: %w", err)
+		}
+		return nil
+	})
+}
+
+func (s *Store) MidnightRegistrationStateExists(txn types.Txn) (bool, error) {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return false, err
+	}
+	var count int64
+	if err := db.QueryRowContext(ctx, "-- name: CountMidnightRegistrationState :one\nSELECT (SELECT COUNT(*) FROM midnight_registrations) + (SELECT COUNT(*) FROM midnight_deregistrations)").Scan(&count); err != nil {
+		return false, fmt.Errorf("count midnight registration state: %w", err)
+	}
+	return count > 0, nil
+}
+
 func (s *Store) FindMidnightDeregistrationsFrom(
 	startBlock uint64,
 	startTxIndex uint32,
