@@ -143,7 +143,8 @@ type DingoStateManager struct {
 	// pre-validation govState mirror (the real committee row removal is
 	// handled by governance.EnactProposal itself, decoding the same
 	// UpdateCommittee action from the persisted GovActionCbor).
-	committeeRemovals map[string]map[common.Blake2b224]struct{}
+	committeeRemovals         map[string]map[common.Blake2b224]struct{}
+	unelectedCommitteeMembers map[string]struct{}
 
 	// committeeQuorums tracks the new quorum of pending UpdateCommittee
 	// proposals, keyed by gov action id, consumed at enactment.
@@ -380,6 +381,10 @@ func (m *DingoStateManager) LoadInitialState(
 	m.currentEpoch = state.CurrentEpoch
 	m.appliedSlotMax = 0
 	m.committeeEpochStartSlot = 0
+	m.lastSlot = 0
+	m.blockIndex = 0
+	m.utxoIDs = make(map[string]struct{})
+	m.stakeDeposits = make(map[mockledger.RewardAccountKey]uint64)
 	m.committeeRemovals = make(map[string]map[common.Blake2b224]struct{})
 	m.committeeQuorums = make(map[string]*big.Rat)
 
@@ -416,16 +421,25 @@ func (m *DingoStateManager) LoadInitialState(
 	// and the value the corpus documents for these credentials.
 	initialDeposit := m.initialStakeDepositLocked()
 	for credential, balance := range resolveInitialStakeRegistrations(state) {
+		deposit := initialDeposit
+		if stateDeposit, ok := state.StakeCredentialDeposits[credential]; ok {
+			stateDeposit := types.Uint64(stateDeposit)
+			deposit = &stateDeposit
+		}
 		account := &models.Account{
 			StakingKey:    credential.Credential[:],
 			CredentialTag: conformanceCredentialTag(credential.AsCredential()),
 			Active:        true,
 			Reward:        types.Uint64(balance),
-			ImportDeposit: initialDeposit,
+			ImportDeposit: deposit,
+		}
+		if pool, delegated := state.PoolDelegationsByCredential[credential]; delegated {
+			account.Pool = append([]byte(nil), pool[:]...)
 		}
 		if drep, delegated := state.DRepDelegationsByCredential[credential]; delegated {
 			account.Drep = append([]byte(nil), drep.Credential...)
-			account.DrepType = uint64(drep.Type) //nolint:gosec // conformance DRep types are bounded ledger enums.
+			//nolint:gosec // conformance DRep types are bounded ledger enums.
+			account.DrepType = uint64(drep.Type)
 		}
 		if err := m.db.Metadata().ImportAccount(
 			account,
@@ -485,6 +499,9 @@ func (m *DingoStateManager) LoadInitialState(
 			CredentialTag: credentialTag,
 			Active:        true,
 		}
+		if expiry, ok := state.DRepExpiries[credential]; ok {
+			drep.ExpiryEpoch = expiry
+		}
 		registration := &models.RegistrationDrep{
 			DrepCredential: drep.Credential,
 			CredentialTag:  drep.CredentialTag,
@@ -515,6 +532,9 @@ func (m *DingoStateManager) LoadInitialState(
 			CredentialTag: credentialTag,
 			Active:        true,
 		}
+		if expiry, ok := state.DRepExpiries[credential]; ok {
+			drep.ExpiryEpoch = expiry
+		}
 		registration := &models.RegistrationDrep{
 			DrepCredential: drep.Credential,
 			CredentialTag:  credentialTag,
@@ -525,25 +545,45 @@ func (m *DingoStateManager) LoadInitialState(
 		}
 	}
 
-	if len(state.CommitteeMembers) > 0 {
-		members := make(
-			[]*models.CommitteeMember,
-			0,
-			len(state.CommitteeMembers),
-		)
+	if len(state.CommitteeMembers) > 0 ||
+		len(state.CommitteeMembersByCredential) > 0 {
+		membersByCredential := make(map[string]*models.CommitteeMember)
 		for coldKey, expiry := range state.CommitteeMembers {
-			members = append(members, &models.CommitteeMember{
-				ColdCredHash:     coldKey[:],
-				ExpiresEpoch:     expiry,
-				TermStartSlotSet: true,
-			})
+			key := string(append([]byte{0}, coldKey[:]...))
+			membersByCredential[key] = &models.CommitteeMember{
+				ColdCredentialTag: uint8(common.CredentialTypeAddrKeyHash),
+				ColdCredHash:      coldKey[:],
+				ExpiresEpoch:      expiry,
+				TermStartSlotSet:  true,
+			}
+		}
+		for coldCredential, expiry := range state.CommitteeMembersByCredential {
+			credentialTag, err := models.CredentialTagFromUint(
+				coldCredential.CredType,
+			)
+			if err != nil {
+				return fmt.Errorf("seed committee credential tag: %w", err)
+			}
+			key := string(
+				append([]byte{credentialTag}, coldCredential.Credential[:]...),
+			)
+			membersByCredential[key] = &models.CommitteeMember{
+				ColdCredentialTag: credentialTag,
+				ColdCredHash:      coldCredential.Credential[:],
+				ExpiresEpoch:      expiry,
+				TermStartSlotSet:  true,
+			}
+		}
+		members := make([]*models.CommitteeMember, 0, len(membersByCredential))
+		for _, member := range membersByCredential {
+			members = append(members, member)
 		}
 		if err := m.db.SetCommitteeMembers(context.Background(), members, txn); err != nil {
 			return fmt.Errorf("seed committee members: %w", err)
 		}
 	}
 
-	if err := m.seedAuthCommitteeHot(txn, state.HotKeyAuthorizations); err != nil {
+	if err := m.seedInitialCommitteeStatus(txn, state); err != nil {
 		return err
 	}
 
@@ -616,7 +656,9 @@ func stateManagerProtocolMajor(
 ) (uint64, error) {
 	versioned, ok := pp.(common.PoolRuleProtocolParameters)
 	if !ok {
-		return 0, errors.New("protocol parameters do not define a protocol version")
+		return 0, errors.New(
+			"protocol parameters do not define a protocol version",
+		)
 	}
 	return uint64(versioned.ProtocolMajorVersion()), nil
 }
@@ -671,36 +713,81 @@ func resolveInitialStakeRegistrations(
 	return regs
 }
 
-// seedAuthCommitteeHot persists pre-existing hot-key authorizations from a
-// vector's initial state through the real certificate-application path
-// (there is no direct metadata.GovernanceStore write for AuthCommitteeHot
-// outside of certificate processing), by building a synthetic, otherwise
-// inert transaction carrying one AuthCommitteeHotCertificate per
-// authorization and running it through SetTransactionMetadataOnly.
-func (m *DingoStateManager) seedAuthCommitteeHot(
+// seedInitialCommitteeStatus persists the initial state's hot-key
+// authorizations and resignations through the real certificate-application
+// path. The metadata store has no direct import path for either certificate.
+func (m *DingoStateManager) seedInitialCommitteeStatus(
 	txn *database.Txn,
-	auths map[common.Blake2b224]common.Blake2b224,
+	state *conformance.ParsedInitialState,
 ) error {
-	if len(auths) == 0 {
+	type committeeSeed struct {
+		cold     common.Credential
+		hot      *common.Credential
+		resigned bool
+	}
+	seeds := make(map[string]committeeSeed)
+	for cold, hot := range state.HotKeyAuthorizationsByCredential {
+		coldCredential := cold.AsCredential()
+		hotCredential := hot
+		key := committeeCredentialKey(coldCredential)
+		seeds[key] = committeeSeed{cold: coldCredential, hot: &hotCredential}
+	}
+	for cold, hot := range state.HotKeyAuthorizations {
+		coldCredential := common.Credential{
+			CredType:   common.CredentialTypeAddrKeyHash,
+			Credential: cold,
+		}
+		key := committeeCredentialKey(coldCredential)
+		if _, exists := seeds[key]; exists {
+			continue
+		}
+		hotCredential := common.Credential{
+			CredType:   common.CredentialTypeAddrKeyHash,
+			Credential: hot,
+		}
+		seeds[key] = committeeSeed{cold: coldCredential, hot: &hotCredential}
+	}
+	for cold, resigned := range state.CommitteeResignations {
+		if !resigned {
+			continue
+		}
+		coldCredential := cold.AsCredential()
+		key := committeeCredentialKey(coldCredential)
+		seed := seeds[key]
+		seed.cold = coldCredential
+		seed.hot = nil
+		seed.resigned = true
+		seeds[key] = seed
+	}
+	if len(seeds) == 0 {
 		return nil
 	}
-	certs := make([]common.Certificate, 0, len(auths))
-	for coldKey, hotKey := range auths {
-		certs = append(certs, &common.AuthCommitteeHotCertificate{
-			CertType: uint(common.CertificateTypeAuthCommitteeHot),
-			ColdCredential: common.Credential{
-				CredType:   common.CredentialTypeAddrKeyHash,
-				Credential: coldKey,
-			},
-			HotCredential: common.Credential{
-				CredType:   common.CredentialTypeAddrKeyHash,
-				Credential: hotKey,
-			},
-		})
+	keys := make([]string, 0, len(seeds))
+	for key := range seeds {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	certs := make([]common.Certificate, 0, len(seeds))
+	for _, key := range keys {
+		seed := seeds[key]
+		if seed.resigned {
+			certs = append(certs, &common.ResignCommitteeColdCertificate{
+				CertType:       uint(common.CertificateTypeResignCommitteeCold),
+				ColdCredential: seed.cold,
+			})
+			continue
+		}
+		if seed.hot != nil {
+			certs = append(certs, &common.AuthCommitteeHotCertificate{
+				CertType:       uint(common.CertificateTypeAuthCommitteeHot),
+				ColdCredential: seed.cold,
+				HotCredential:  *seed.hot,
+			})
+		}
 	}
 	tx, err := syntheticTransaction("seed-auth-committee-hot", certs)
 	if err != nil {
-		return fmt.Errorf("build synthetic auth-committee-hot tx: %w", err)
+		return fmt.Errorf("build synthetic committee-state tx: %w", err)
 	}
 	point := ocommon.Point{Slot: 0, Hash: syntheticBlockHash(0)}
 	protocolMajor, err := stateManagerProtocolMajor(m.protocolParams)
@@ -969,7 +1056,10 @@ func (m *DingoStateManager) ApplyTransaction(
 			m.db,
 			txn,
 		); err != nil {
-			return fmt.Errorf("reset DRep dormancy before certificates: %w", err)
+			return fmt.Errorf(
+				"reset DRep dormancy before certificates: %w",
+				err,
+			)
 		}
 		if err := m.spendUtxos(txn, level.Inputs(), slot); err != nil {
 			return fmt.Errorf(
@@ -981,8 +1071,10 @@ func (m *DingoStateManager) ApplyTransaction(
 		levelHash := level.Hash()
 		for outIdx, output := range level.Outputs() {
 			input := &dingoTransactionInput{
-				txId:  levelHash,
-				index: uint32(outIdx), //nolint:gosec // idx bounded by tx outputs
+				txId: levelHash,
+				index: uint32(
+					outIdx,
+				), //nolint:gosec // idx bounded by tx outputs
 			}
 			utxo := common.Utxo{Id: input, Output: output}
 			if err := m.createUtxo(txn, utxo, slot); err != nil {
@@ -1049,7 +1141,11 @@ func (m *DingoStateManager) ApplyTransaction(
 			m.protocolParams,
 			&proposalsValidated,
 		); err != nil {
-			return fmt.Errorf("process transaction body %d governance effects: %w", levelIndex, err)
+			return fmt.Errorf(
+				"process transaction body %d governance effects: %w",
+				levelIndex,
+				err,
+			)
 		}
 		if proposals := level.ProposalProcedures(); len(proposals) > 0 {
 			m.recordProposalsInGovState(level, govActionLifetime)
@@ -1746,7 +1842,8 @@ func (m *DingoStateManager) committeeActionRatified(
 
 	decision := governance.ShouldRatify(governance.RatifyInputs{
 		Tally: &governance.ProposalTally{
-			ActionType:     uint8(proposal.ActionType), //nolint:gosec // bounded by the small fixed set of GovActionType values
+			//nolint:gosec // bounded by the small fixed set of GovActionType values
+			ActionType:     uint8(proposal.ActionType),
 			DRepYesStake:   drepYes,
 			DRepTotalStake: drepTotal,
 			SPOYesStake:    spoYes,
@@ -2137,15 +2234,19 @@ func (m *DingoStateManager) persistEnactment(
 	if dijkstraPP, ok := m.protocolParams.(*dijkstra.DijkstraProtocolParameters); ok {
 		enactmentPP = dijkstraPP
 	}
-	result, err := governance.EnactProposal(context.Background(), &governance.EnactmentContext{
-		DB:                 m.db,
-		Txn:                txn,
-		Epoch:              m.currentEpoch,
-		Slot:               boundarySlot,
-		PrevEpochStartSlot: m.committeeEpochStartSlot,
-		PParams:            enactmentPP,
-		UpdateFn:           stateManagerPParamsUpdateFunc(m.protocolParams),
-	}, dbProposal)
+	result, err := governance.EnactProposal(
+		context.Background(),
+		&governance.EnactmentContext{
+			DB:                 m.db,
+			Txn:                txn,
+			Epoch:              m.currentEpoch,
+			Slot:               boundarySlot,
+			PrevEpochStartSlot: m.committeeEpochStartSlot,
+			PParams:            enactmentPP,
+			UpdateFn:           stateManagerPParamsUpdateFunc(m.protocolParams),
+		},
+		dbProposal,
+	)
 	if err != nil {
 		return fmt.Errorf("enact governance proposal: %w", err)
 	}

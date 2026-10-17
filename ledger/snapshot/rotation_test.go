@@ -130,9 +130,9 @@ func TestCleanupOldSnapshotsCoreModePrunesRewardAccountOutput(t *testing.T) {
 // TestCleanupOldSnapshotsAPIModeRetainsRewardAccountOutput is the
 // regression test: in API storage mode, reward_account_output must be
 // retained WITHOUT BOUND (so the Blockfrost account reward-history endpoint
-// can serve an account's full history), while reward_stake_input still
-// cannot be kept and continues to be pruned to the rotation/reward-replay
-// window exactly as in core mode. Also the / regression test:
+// can serve an account's full history), and so must reward_stake_input (so
+// the epoch stake and account stake-history endpoints can serve past the
+// rotation/reward-replay window). Also the / regression test:
 // pool_stake_snapshot must likewise be retained WITHOUT BOUND in API mode,
 // so a from-genesis historical Acquire pinned well outside the ordinary
 // 3-epoch window can still be validated
@@ -148,7 +148,6 @@ func TestCleanupOldSnapshotsAPIModeRetainsRewardAccountOutput(t *testing.T) {
 	meta := db.Metadata()
 
 	const currentEpoch = uint64(10)
-	const firstRetainedEpoch = currentEpoch - 3
 	poolKeyHash := bytes.Repeat([]byte{0x22}, 28)
 
 	seedRetentionRows(t, db, poolKeyHash, currentEpoch)
@@ -182,25 +181,18 @@ func TestCleanupOldSnapshotsAPIModeRetainsRewardAccountOutput(t *testing.T) {
 		)
 	}
 
-	// reward_stake_input is still pruned to the same window as core mode.
-	for epoch := range firstRetainedEpoch {
-		stakeInputs, err := meta.GetRewardStakeInputs(epoch, nil)
-		require.NoError(t, err, "get reward stake inputs %d", epoch)
-		require.Empty(
-			t,
-			stakeInputs,
-			"API mode must still prune reward_stake_input for epoch %d",
-			epoch,
-		)
-	}
-	for epoch := firstRetainedEpoch; epoch <= currentEpoch; epoch++ {
+	// reward_stake_input is retained without bound too, so the Blockfrost
+	// epoch stake and account history endpoints can answer for any epoch the
+	// node has run in this mode. Core mode and the koios-parity observer keep
+	// pruning it to the window (see the two sibling tests).
+	for epoch := uint64(0); epoch <= currentEpoch; epoch++ {
 		stakeInputs, err := meta.GetRewardStakeInputs(epoch, nil)
 		require.NoError(t, err, "get reward stake inputs %d", epoch)
 		require.Len(
 			t,
 			stakeInputs,
 			1,
-			"reward_stake_input for epoch %d is inside the retained window",
+			"API mode must retain reward_stake_input for epoch %d",
 			epoch,
 		)
 	}
