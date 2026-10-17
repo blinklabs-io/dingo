@@ -45,6 +45,21 @@ func TestPrepareDevnetStateRejectsSymlinkedConfig(t *testing.T) {
 	require.Equal(t, "unchanged", string(data))
 }
 
+func TestAcquireDevnetStateLockRejectsSymlink(t *testing.T) {
+	t.Parallel()
+
+	runDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(runDir, "real"), nil, 0o600))
+	require.NoError(t, os.Symlink("real", filepath.Join(runDir, devnetStateLock)))
+	root, err := os.OpenRoot(runDir)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, root.Close()) })
+
+	release, err := acquireDevnetStateLock(root, runDir)
+	require.Nil(t, release)
+	require.ErrorContains(t, err, "is a symlink")
+}
+
 func TestPrepareDevnetStateResetUsesPinnedRoot(t *testing.T) {
 	t.Parallel()
 
