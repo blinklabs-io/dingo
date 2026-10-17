@@ -31,6 +31,7 @@ import (
 	sqlitequery "github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/internal/query/sqlite"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/migrations"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -179,6 +180,7 @@ func legacyGetUtxosByRefsAsOfQuery(
 // idx_utxo_deleted_staking_amount past a handful of terms, and the tx_id-IN
 // form this test also exercises does not.
 func TestGetUtxosByRefsUsesTxIDIndex(t *testing.T) {
+	skipPlanTestUnderRace(t)
 	t.Parallel()
 	store := newMigratedSQLiteStore(t)
 	seedStakeRefLookupUtxos(t, store, 50_000, 256)
@@ -236,6 +238,7 @@ func TestGetUtxosByRefsUsesTxIDIndex(t *testing.T) {
 }
 
 func TestAddressTransactionInputQueryUsesTxIDIndex(t *testing.T) {
+	skipPlanTestUnderRace(t)
 	t.Parallel()
 	store := newMigratedSQLiteStore(t)
 	seedStakeRefLookupUtxos(t, store, 50_000, 256)
@@ -483,6 +486,7 @@ func legacyMarkUtxosDeletedAtSlotQuery(
 // batch into a scan of nearly every live UTxO. Selecting by tx_id and
 // filtering output indexes in Go keeps the lookup on tx_id_output_idx.
 func TestMarkUtxosDeletedAtSlotUsesTxIDIndex(t *testing.T) {
+	skipPlanTestUnderRace(t)
 	t.Parallel()
 	store := newMigratedSQLiteStore(t)
 	seedStakeRefLookupUtxos(t, store, 50_000, 256)
@@ -606,6 +610,7 @@ func TestMarkUtxosDeletedAtSlotUpdatesOnlyRequestedLiveRows(t *testing.T) {
 // whole-table pass moved from the first statement to the second. Statistics
 // hide it, so this test must not run ANALYZE.
 func TestMarkUtxosDeletedAtSlotUpdatePlansOnPrimaryKey(t *testing.T) {
+	skipPlanTestUnderRace(t)
 	t.Parallel()
 	store := newMigratedSQLiteStore(t)
 	seedStakeRefLookupUtxos(t, store, 50_000, 256)
@@ -1349,6 +1354,19 @@ func legacyUtxoStakeRefsQuery(
 	return query, args
 }
 
+// skipPlanTestUnderRace skips a test that asserts SQLite query plans over a
+// fixture of tens of thousands of rows inserted by one goroutine. The race
+// detector cannot inform such a test and slows it several times over;
+// go-test (Linux) and go-test (Linux, quick) run it un-instrumented. Correctness
+// tests that share the seeders keep running under race.
+func skipPlanTestUnderRace(t testing.TB) {
+	t.Helper()
+	testutil.SkipUnderRace(
+		t,
+		"large single-goroutine fixture that asserts SQLite query plans",
+	)
+}
+
 // seedStakeRefLookupUtxos inserts n live utxo rows with sequential, distinct
 // (tx_id, output_idx) pairs spread over stakeCredentials distinct stake
 // credentials, plus a handful of already-deleted rows so liveOnly has
@@ -1422,6 +1440,7 @@ func utxoIDAt(i int) models.UtxoId {
 // regardless of term count, because a plain IN list has no such competing
 // index to be lured by.
 func TestQueryUtxoStakeRefsUsesTxIDIndex(t *testing.T) {
+	skipPlanTestUnderRace(t)
 	t.Parallel()
 	store := newMigratedSQLiteStore(t)
 	seedStakeRefLookupUtxos(t, store, 50_000, 256)
