@@ -10080,10 +10080,12 @@ mounted, the list omits snapshots that carry no certificate yet, since a
 verifying client bootstraps from the newest listed one.
 
 All public artifact reads, including pending-certificate and stake-distribution
-reads, and public signature submissions share an admission bound of
+reads, share an admission bound of
 `2 * (immutableDownloadWorkers + 1)` (34) requests, enough for two v2
-bootstraps each running its 16 immutable downloads beside the ancillary one, and
-return `503 Service Unavailable` with `Retry-After: 1` when it is full. A
+bootstraps each running its 16 immutable downloads beside the ancillary one.
+Public signature submissions use a separate four-request bound, so progressing
+archive transfers cannot consume their capacity. Either bound returns `503
+Service Unavailable` with `Retry-After: 1` when it is full. A
 15-second request-body read deadline is armed before decoding a signature
 submission. Each response write refreshes a separate 15-second progress
 deadline, so an active large snapshot transfer has no absolute duration limit
@@ -10843,8 +10845,12 @@ parameter plus one blocks, the deepest rollback a follower can need.
 
 Transaction evaluation (`LedgerState.EvaluateTx`, shared by the Blockfrost and
 UTxO RPC front ends) admits at most `LedgerStateConfig.MaxConcurrentEvaluations`
-(default `GOMAXPROCS`) calls at once and returns `ErrEvaluationBusy` instead of
-queuing; Blockfrost reports it as `429` and UTxO RPC as `ResourceExhausted`.
+calls at once. The default is `max(GOMAXPROCS-1, 1)`, leaving one logical
+processor for consensus work when the process has more than one. A remote host
+may occupy at most half of the evaluation slots, rounded up; source ports are
+discarded, and clients behind one proxy share a budget. Admission returns
+`ErrEvaluationBusy` instead of queuing; Blockfrost reports it as `429` and UTxO
+RPC as `ResourceExhausted`.
 Each redeemer is evaluated against the part of `MaxTxExUnits` the earlier
 redeemers have not used, so a transaction's total work stays within the
 protocol limit. `safedecode.Transaction` rejects bytes after the single
