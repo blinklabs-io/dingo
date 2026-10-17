@@ -22,11 +22,17 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/migrations"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/stretchr/testify/require"
 	_ "modernc.org/sqlite"
 )
 
 func TestRewardLiveStakeRefreshesTransactionPlannerStats(t *testing.T) {
+	testutil.SkipUnderRace(
+		t,
+		"asserts SQLite planner statistics over a single-goroutine fixture; "+
+			"go-test (Linux) runs it un-instrumented",
+	)
 	t.Parallel()
 	db, err := OpenDB("sqlite", filepath.Join(t.TempDir(), "metadata.sqlite"), "sqlite", false)
 	require.NoError(t, err)

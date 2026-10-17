@@ -31,6 +31,7 @@ import (
 	sqlitequery "github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/internal/query/sqlite"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/migrations"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -1349,6 +1350,25 @@ func legacyUtxoStakeRefsQuery(
 	return query, args
 }
 
+// plannerFixtureRows is the row count from which a seeded fixture exists to
+// shape SQLite's query-planner statistics rather than to exercise code paths.
+const plannerFixtureRows = 5_000
+
+// skipPlannerFixtureUnderRace skips a test whose fixture is large enough to
+// assert on a query plan. Those tests insert tens of thousands of rows through
+// one goroutine and compare EXPLAIN output, which the race detector cannot
+// inform and slows several times over. go-test (Linux) and go-test (Linux,
+// quick) run them un-instrumented.
+func skipPlannerFixtureUnderRace(tb testing.TB, rows int) {
+	tb.Helper()
+	if rows >= plannerFixtureRows {
+		testutil.SkipUnderRace(
+			tb,
+			"large single-goroutine fixture that asserts SQLite query plans",
+		)
+	}
+}
+
 // seedStakeRefLookupUtxos inserts n live utxo rows with sequential, distinct
 // (tx_id, output_idx) pairs spread over stakeCredentials distinct stake
 // credentials, plus a handful of already-deleted rows so liveOnly has
@@ -1360,6 +1380,7 @@ func seedStakeRefLookupUtxos(
 	stakeCredentials int,
 ) {
 	tb.Helper()
+	skipPlannerFixtureUnderRace(tb, n)
 	tx, err := store.writeDB.Begin()
 	require.NoError(tb, err)
 	stmt, err := tx.Prepare(

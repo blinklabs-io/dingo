@@ -56,6 +56,7 @@ func skewedUtxoTxID(i int) []byte {
 // that makes SQLite statistics report deleted_slot as selective.
 func seedSkewedUtxos(tb testing.TB, store *Store, n int) {
 	tb.Helper()
+	skipPlannerFixtureUnderRace(tb, n)
 	tx, err := store.writeDB.Begin()
 	require.NoError(tb, err)
 	stmt, err := tx.Prepare(

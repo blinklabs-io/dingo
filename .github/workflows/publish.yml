@@ -332,14 +332,15 @@ jobs:
 
   # Stage 3. Optional service backends are deliberately unconfigured here, so
   # internal/test/conformance replays its vectors against SQLite only. Same
-  # command as go-test.yml's race job, so a pull request cannot pass a check
-  # the release then fails.
+  # command and shards as go-test.yml's race job, so a pull request cannot pass
+  # a check the release then fails.
   go-test-linux-race:
     name: go-test (Linux, race)
     needs: [go-test-linux-quick]
     strategy:
       matrix:
         go-version: [1.26.x]
+        shard: [database, ledger, rest]
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
@@ -355,13 +356,32 @@ jobs:
           path: |
             ~/go/pkg/mod
             ~/.cache/go-build
-          key: ${{ runner.os }}-go-race-${{ matrix.go-version }}-${{ hashFiles('**/go.sum') }}
+          key: ${{ runner.os }}-go-race-${{ matrix.go-version }}-${{ matrix.shard }}-${{ hashFiles('**/go.sum') }}
           restore-keys: |
-            ${{ runner.os }}-go-race-${{ matrix.go-version }}-
+            ${{ runner.os }}-go-race-${{ matrix.go-version }}-${{ matrix.shard }}-
       - name: go-build
         run: go build -tags dingo_extra_plugins ./cmd/dingo
       - name: go-test-race
-        run: go test -v -tags dingo_extra_plugins -ldflags="-s -w" -race -timeout 60m ./...
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: |
+          set -euo pipefail
+          database='/database($|/lifecycle|/plugin/blob|/plugin/metadata/sqlstore($|/))'
+          ledger='/ledger($|/)|/internal/test/conformance'
+          all="$(go list -tags dingo_extra_plugins ./...)"
+          case "$SHARD" in
+            database) selected="$(grep -E "$database" <<<"$all" || true)" ;;
+            ledger) selected="$(grep -E "$ledger" <<<"$all" || true)" ;;
+            rest) selected="$(grep -Ev "$database|$ledger" <<<"$all" || true)" ;;
+            *) echo "unknown shard: $SHARD" >&2; exit 1 ;;
+          esac
+          if [ -z "$selected" ]; then
+            echo "shard $SHARD selected no packages" >&2
+            exit 1
+          fi
+          mapfile -t pkgs <<<"$selected"
+          printf '%s\n' "${pkgs[@]}"
+          go test -v -tags dingo_extra_plugins -ldflags="-s -w" -race -timeout 60m "${pkgs[@]}"
 
   # Stage 3. macOS coverage on the merge and release path, not only on a pull
   # request: a merge conflict, a stale base, or a force-push can land a tree
