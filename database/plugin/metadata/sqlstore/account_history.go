@@ -425,6 +425,15 @@ WHERE ard.withdrawal = TRUE
   AND ard.staking_key = ?`, []any{credentialTag, stakingKey}
 }
 
+const stakeRegistrationsBySourceSQL = `
+SELECT sr.credential_tag, sr.staking_key
+FROM stake_registration sr
+LEFT JOIN certs c ON c.id = sr.certificate_id
+LEFT JOIN "transaction" t ON t.id = c.transaction_id
+WHERE sr.credential_tag = ? AND sr.staking_key = ?
+ORDER BY sr.added_slot DESC, COALESCE(t.block_index, 0) DESC,
+         COALESCE(c.cert_index, 0) DESC`
+
 func (s *Store) GetStakeRegistrationsByCredential(
 	credentialTag uint8,
 	stakingKey []byte,
@@ -435,14 +444,7 @@ func (s *Store) GetStakeRegistrationsByCredential(
 	if err != nil {
 		return ret, err
 	}
-	rows, err := db.QueryContext(ctx, `
-SELECT sr.credential_tag, sr.staking_key
-FROM stake_registration sr
-LEFT JOIN certs c ON c.id = sr.certificate_id
-LEFT JOIN "transaction" t ON t.id = c.transaction_id
-WHERE sr.credential_tag = ? AND sr.staking_key = ?
-ORDER BY sr.added_slot DESC, COALESCE(t.block_index, 0) DESC,
-         COALESCE(c.cert_index, 0) DESC`,
+	rows, err := db.QueryContext(ctx, stakeRegistrationsBySourceSQL,
 		credentialTag,
 		stakingKey,
 	)
@@ -888,6 +890,17 @@ GROUP BY credential_tag, staking_key`,
 	return rows.Err()
 }
 
+func accountCertificatePositionsSQL(table string, keys int) string {
+	return `
+SELECT source.credential_tag, source.staking_key, source.added_slot,
+       COALESCE(tx.block_index, 0), COALESCE(c.cert_index, 0)
+FROM ` + table + ` source
+JOIN certs c ON c.id = source.certificate_id
+LEFT JOIN "transaction" tx ON tx.id = c.transaction_id
+WHERE source.staking_key IN (` + bindPlaceholders(keys) + `)
+  AND source.added_slot <= ?`
+}
+
 func mergeAccountCertificatePositions(
 	ctx context.Context,
 	db queryer,
@@ -902,14 +915,9 @@ func mergeAccountCertificatePositions(
 		args = append(args, key)
 	}
 	args = append(args, slot)
-	rows, err := db.QueryContext(ctx, `
-SELECT source.credential_tag, source.staking_key, source.added_slot,
-       COALESCE(tx.block_index, 0), COALESCE(c.cert_index, 0)
-FROM `+table+` source
-JOIN certs c ON c.id = source.certificate_id
-LEFT JOIN "transaction" tx ON tx.id = c.transaction_id
-WHERE source.staking_key IN (`+bindPlaceholders(len(keys))+`)
-  AND source.added_slot <= ?`,
+	rows, err := db.QueryContext(
+		ctx,
+		accountCertificatePositionsSQL(table, len(keys)),
 		args...,
 	)
 	if err != nil {

@@ -31,6 +31,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
 	"github.com/blinklabs-io/plutigo/data"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -1648,13 +1649,6 @@ var errUtxoNotFound = errors.New("UTxO not found")
 
 // mockLedgerState implements lcommon.LedgerState for testing
 // UTxO-aware Byron validation rules.
-// GovPurposeRoots reports no purpose roots, which is the state of a chain
-// that has not enacted a governance action. The Conway ancestry rule requires
-// the capability whenever a transaction proposes a purpose-chain action.
-func (s *mockLedgerState) GovPurposeRoots() (*lcommon.GovPurposeRoots, error) {
-	return &lcommon.GovPurposeRoots{}, nil
-}
-
 type mockLedgerState struct {
 	utxos         map[string]lcommon.Utxo
 	networkId     uint
@@ -1700,12 +1694,21 @@ type mockLedgerState struct {
 	// a *mockLedgerState into eras.PlutusEvalContextCacheProvider. nil (the
 	// zero value) preserves every existing test's uncached behavior.
 	plutusEvalContextCache *PlutusEvalContextCache
+	governanceState        *mockledger.MockLedgerState
 }
 
 // PlutusEvalContextCache implements eras.PlutusEvalContextCacheProvider, the
 // same way *ledger.LedgerView does in production.
 func (m *mockLedgerState) PlutusEvalContextCache() *PlutusEvalContextCache {
 	return m.plutusEvalContextCache
+}
+
+// GovPurposeRoots delegates to the shared, explicitly configured fixture.
+func (m *mockLedgerState) GovPurposeRoots() (*lcommon.GovPurposeRoots, error) {
+	if m.governanceState == nil {
+		return nil, errors.New("governance purpose roots unavailable")
+	}
+	return m.governanceState.GovPurposeRoots()
 }
 
 // MIRDelegState implements eras.MIRDelegStateProvider for tests. The real

@@ -116,6 +116,31 @@ func (d *Database) UpdatePoolOpCertSequence(
 	})
 }
 
+// UpdatePoolOpCertSequenceBatched queues an observed op-cert sequence in acc.
+// FlushBatch writes every queued observation and advances each pool's
+// denormalized maximum inside txn.
+func (d *Database) UpdatePoolOpCertSequenceBatched(
+	ctx context.Context,
+	pkh lcommon.PoolKeyHash,
+	sequence uint64,
+	slot uint64,
+	acc BatchAccumulator,
+	txn *Txn,
+) error {
+	if txn == nil || txn.Metadata() == nil {
+		return types.ErrNilTxn
+	}
+	return d.withMetadataWriteTxn(ctx, txn, func(txn *Txn) error {
+		return d.metadata.UpdatePoolOpCertSequenceBatched(
+			pkh,
+			sequence,
+			slot,
+			acc,
+			txn.Metadata(),
+		)
+	})
+}
+
 // LatestPoolOpCertSequence returns the highest observed op-cert sequence for
 // a pool.
 func (d *Database) LatestPoolOpCertSequence(

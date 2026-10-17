@@ -736,6 +736,7 @@ func NewConfig(opts ...ConfigOptionFunc) Config {
 			KoiosParity:         internalconfig.DefaultKoiosParityConfig(),
 			Logging:             internalconfig.DefaultLoggingConfig(),
 			Midnight:            internalconfig.DefaultMidnightConfig(),
+			DMQ:                 internalconfig.DefaultDMQConfig(),
 			CORSAllowedOrigins:  []string{"*"},
 
 			// SQLite planner statistics stay current unless an operator
@@ -1874,10 +1875,10 @@ func WithBarkBlockDownloadHosts(hosts []string) ConfigOptionFunc {
 	}
 }
 
-// WithBarkBlockDownloadAllowPrivateAddresses permits Bark block downloads
-// from private, loopback, and other special-use addresses, such as an
-// S3-compatible store on a private network. Allowed origins, HTTPS,
-// redirect, and proxy restrictions still apply. Disabled by default.
+// WithBarkBlockDownloadAllowPrivateAddresses permits Bark RPC and block
+// downloads to private, loopback, and other special-use addresses, such as an
+// archive and S3-compatible store on a private network. Allowed origins, HTTPS
+// download, redirect, and proxy restrictions still apply. Disabled by default.
 func WithBarkBlockDownloadAllowPrivateAddresses(allow bool) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.BarkBlockDownloadAllowPrivateAddresses = allow
@@ -2078,6 +2079,20 @@ func WithMidnightConfig(cfg MidnightConfig) ConfigOptionFunc {
 	}
 }
 
+// DMQConfig configures the CIP-0137 Decentralized Message Queue stack.
+type DMQConfig = internalconfig.DMQConfig
+
+// WithDMQConfig configures the DMQ stack that runs alongside the Cardano
+// stack when enabled.
+func WithDMQConfig(cfg DMQConfig) ConfigOptionFunc {
+	return func(c *Config) {
+		if c.cfg == nil {
+			*c = NewConfig()
+		}
+		c.cfg.DMQ = cfg
+	}
+}
+
 // WithChainsyncMaxClients specifies the maximum number of concurrent chainsync
 // client connections. Zero selects an automatic limit: at least 3 and large
 // enough for every configured local-root access point.
@@ -2266,8 +2281,8 @@ func (c *Config) BarkBlockDownloadHosts() []string {
 	return c.cfg.BarkBlockDownloadHosts
 }
 
-// BarkBlockDownloadAllowPrivateAddresses reports whether Bark block downloads
-// may reach private, loopback, and other special-use addresses.
+// BarkBlockDownloadAllowPrivateAddresses reports whether Bark RPC and block
+// downloads may reach private, loopback, and other special-use addresses.
 func (c *Config) BarkBlockDownloadAllowPrivateAddresses() bool {
 	return c.cfg.BarkBlockDownloadAllowPrivateAddresses
 }
@@ -2626,6 +2641,11 @@ func (c *Config) Logging() internalconfig.LoggingConfig {
 // Midnight returns the Midnight indexer configuration.
 func (c *Config) Midnight() internalconfig.MidnightConfig {
 	return c.cfg.Midnight
+}
+
+// DMQ returns the DMQ stack configuration.
+func (c *Config) DMQ() internalconfig.DMQConfig {
+	return c.cfg.DMQ
 }
 
 // CORSAllowedOrigins returns the CORS allowed origins list.

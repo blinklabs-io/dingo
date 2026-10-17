@@ -1079,6 +1079,31 @@ func TestNew_PolicyIDLengthValidation(t *testing.T) {
 	assert.Contains(t, err.Error(), "auth_token_policy_id")
 }
 
+// TestNew_AuthTokenRequiresPolicyAndAssetName verifies that the auth token is
+// identified by policy ID and asset name together. An asset name alone would
+// match that name under any minting policy.
+func TestNew_AuthTokenRequiresPolicyAndAssetName(t *testing.T) {
+	t.Parallel()
+	store := setupTestStore(t)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
+
+	_, err := New(Config{
+		Metadata:           store,
+		Logger:             logger,
+		AuthTokenAssetName: testAuthAssetNameHex,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "must be set together")
+
+	_, err = New(Config{
+		Metadata:          store,
+		Logger:            logger,
+		AuthTokenPolicyID: testAuthPolicyID,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "must be set together")
+}
+
 // TestLoadTrackedUTxOs_RestoredOnStartup verifies that the indexer restores
 // the in-memory tracked UTxO sets from the database on startup so that a
 // spend arriving after restart is matched correctly.
@@ -1109,6 +1134,7 @@ func TestLoadTrackedUTxOs_RestoredOnStartup(t *testing.T) {
 		CNightPolicyID:          testPolicyID,
 		CNightAssetName:         testAssetNameHex,
 		MappingValidatorAddress: testMappingAddr,
+		AuthTokenPolicyID:       testAuthPolicyID,
 		AuthTokenAssetName:      testAuthAssetNameHex,
 	})
 	require.NoError(t, err)

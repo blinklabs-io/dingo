@@ -30,7 +30,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/blinklabs-io/dingo/consensus/leaderthreshold"
 	"github.com/blinklabs-io/dingo/consensus/praos"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
@@ -211,7 +210,7 @@ func TestComputeScheduleWipesTheSeedItTook(t *testing.T) {
 // calculation when the epoch provider can supply it, instead of the float64
 // value returned by ActiveSlotCoeff().
 func TestComputeSchedulePrefersExactGenesisActiveSlotCoeff(t *testing.T) {
-	exact := big.NewRat(1, 3)
+	exact := big.NewRat(1, 1)
 	election := newSigmaAuditElection(
 		&recordingStakeProvider{
 			poolStake:  sigmaAuditPoolStake,
@@ -219,7 +218,7 @@ func TestComputeSchedulePrefersExactGenesisActiveSlotCoeff(t *testing.T) {
 		},
 		&sigmaAuditEpochProvider{
 			exactCoeff: exact,
-			floatCoeff: 1.0 / 3.0,
+			floatCoeff: -1,
 		},
 		slog.New(slog.DiscardHandler),
 	)
@@ -229,17 +228,23 @@ func TestComputeSchedulePrefersExactGenesisActiveSlotCoeff(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.NotNil(t, schedule)
-	require.NotNil(t, schedule.Threshold)
+	require.Equal(t, []uint64{
+		sigmaAuditStartSlot, sigmaAuditStartSlot + 1, sigmaAuditStartSlot + 2,
+		sigmaAuditStartSlot + 3, sigmaAuditStartSlot + 4, sigmaAuditStartSlot + 5,
+	}, schedule.LeaderSlotsSnapshot())
+}
 
-	want, err := leaderthreshold.Threshold(
-		sigmaAuditPoolStake,
-		sigmaAuditTotalStake,
-		exact,
-		consensus.ConsensusModeCPraos,
+func TestComputeScheduleRejectsUnsupportedExactCoefficient(t *testing.T) {
+	exact := new(big.Rat).SetFrac(
+		big.NewInt(1), new(big.Int).Exp(big.NewInt(10), big.NewInt(20), nil),
 	)
-	require.NoError(t, err)
-	require.Equal(t, 0, schedule.Threshold.Cmp(want),
-		"threshold must come from the exact genesis rational, not float64")
+	election := newSigmaAuditElection(
+		&recordingStakeProvider{poolStake: 1, totalStake: 3},
+		&sigmaAuditEpochProvider{exactCoeff: exact, floatCoeff: 0.05},
+		slog.New(slog.DiscardHandler),
+	)
+	_, err := election.computeSchedule(context.Background(), sigmaAuditEpoch)
+	require.ErrorContains(t, err, "PositiveUnitInterval")
 }
 
 // TestComputeScheduleWithoutExactCoeffUsesFloatFallback keeps providers that
@@ -259,16 +264,6 @@ func TestComputeScheduleWithoutExactCoeffUsesFloatFallback(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.NotNil(t, schedule)
-	require.NotNil(t, schedule.Threshold)
-
-	want, err := leaderthreshold.Threshold(
-		sigmaAuditPoolStake,
-		sigmaAuditTotalStake,
-		new(big.Rat).SetFloat64(0.05),
-		consensus.ConsensusModeCPraos,
-	)
-	require.NoError(t, err)
-	require.Equal(t, 0, schedule.Threshold.Cmp(want))
 }
 
 // TestComputeScheduleLogsAuditableSigmaInputs pins the "leader schedule
@@ -312,11 +307,7 @@ func TestComputeScheduleLogsAuditableSigmaInputs(t *testing.T) {
 	require.Equal(t, hex.EncodeToString(coeffTestNonce), record["epoch_nonce"])
 	require.Equal(t, "1/20", record["active_slot_coeff"])
 	require.Equal(t, "cpraos", record["consensus_mode"])
-	require.Equal(
-		t,
-		schedule.Threshold.Text(16),
-		record["leader_threshold"],
-	)
+	require.NotContains(t, record, "leader_threshold")
 }
 
 // findLogRecord returns the first JSON log record whose "msg" matches.
@@ -1845,7 +1836,7 @@ func TestElectionCanceledWaiterAfterReplacement(t *testing.T) {
 
 // TestComputeScheduleDeclinesUnresolvableConsensusMode pins the caller half of
 // the fail-closed consensus-mode forecast. The mode selects both the VRF input
-// construction and the threshold, so a schedule computed from a substituted
+// construction and finite eligibility, so a schedule computed from a substituted
 // default is a leader-slot list cardano-node will reject. computeSchedule must
 // return the resolution error rather than produce one.
 func TestComputeScheduleDeclinesUnresolvableConsensusMode(t *testing.T) {

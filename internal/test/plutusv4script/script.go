@@ -128,6 +128,9 @@ func MaybeScript(
 }
 
 // TxInfoSubTxIx selects txInfoSubTxIx from the ScriptContext.
+// The V4 selectors follow plutus-ledger-api 1.70.0.0,
+// PlutusLedgerApi.V4.Contexts: ScriptContext and TxInfo use
+// makeIsDataSchemaAsList; ScriptInfo retains indexed constructors.
 func TxInfoSubTxIx(ctx Term) Term {
 	txInfo := Field(ListFields(ctx), 0)
 	return Field(ListFields(txInfo), 1)
