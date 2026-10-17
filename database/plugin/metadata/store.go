@@ -997,6 +997,25 @@ type UtxoStore interface {
 		fn func(*models.Utxo) error,
 	) error
 
+	// IterateLiveUtxosContext is IterateLiveUtxos with the scan bound to
+	// ctx, so cancellation stops it between rows while txn still supplies
+	// the snapshot.
+	IterateLiveUtxosContext(
+		ctx context.Context,
+		txn types.Txn,
+		fn func(*models.Utxo) error,
+	) error
+
+	// IterateUtxosAsOfContext is IterateUtxosAsOf with the scan bound to
+	// ctx, so cancellation stops it between rows while txn still supplies
+	// the snapshot.
+	IterateUtxosAsOfContext(
+		ctx context.Context,
+		atSlot uint64,
+		txn types.Txn,
+		fn func(*models.Utxo) error,
+	) error
+
 	// MarkUtxosDeletedAtSlot marks every live UTxO row matching one
 	// of refs as deleted at atSlot. Refs that don't match any live
 	// row are silently ignored. Rollback un-deletion is handled by

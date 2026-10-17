@@ -181,7 +181,7 @@ func (s *betaQueryServiceServer) readStakePoolDistribution(
 	var retainedBytes int64
 	for _, pool := range dist.Pools {
 		if err := ctx.Err(); err != nil {
-			return nil, connect.NewError(connect.CodeOf(err), err)
+			return nil, readStateContextError(err)
 		}
 		var fraction *big.Rat
 		if pool.StakeFraction != nil {

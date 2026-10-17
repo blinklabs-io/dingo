@@ -103,6 +103,14 @@ func (r *utxoWholeResult) MarshalCBOR() ([]byte, error) {
 	return r.encoded, nil
 }
 
+// bareResult returns the UTxO map without the one-element array that wraps
+// the direct reply. GetCBOR carries the bare result inside tag 24, as every
+// other GetCBOR-wrapped query does. The wrapper is a single definite-length
+// array head byte, so the map follows it directly.
+func (r *utxoWholeResult) bareResult() []byte {
+	return r.encoded[1:]
+}
+
 type encodedUtxoWholeEntry struct {
 	key   []byte
 	value []byte

@@ -281,7 +281,13 @@ func TestQueryShelleyUtxoWholeViaGetCBOR(t *testing.T) {
 	tag, ok := values[0].(cbor.Tag)
 	require.True(t, ok)
 	require.EqualValues(t, cbor.CborTagCbor, tag.Number)
-	require.Equal(t, bounded.encoded, tag.Content)
+	require.Equal(t, bounded.encoded[1:], tag.Content)
+	content, ok := tag.Content.([]byte)
+	require.True(t, ok)
+	var decoded map[olocalstatequery.UtxoId]cbor.RawMessage
+	_, err = cbor.Decode(content, &decoded)
+	require.NoError(t, err)
+	require.Len(t, decoded, 1)
 }
 
 func TestQueryShelleyUtxoWhole_HasServerDeadline(t *testing.T) {

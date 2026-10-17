@@ -1783,30 +1783,6 @@ func (d *Database) IterateLiveUtxos(
 	})
 }
 
-type contextUtxoIterator interface {
-	IterateLiveUtxosContext(
-		context.Context,
-		types.Txn,
-		func(*models.Utxo) error,
-	) error
-	IterateUtxosAsOfContext(
-		context.Context,
-		uint64,
-		types.Txn,
-		func(*models.Utxo) error,
-	) error
-}
-
-func (d *Database) contextUtxoIterator() (contextUtxoIterator, error) {
-	iterator, ok := d.utxoStore().(contextUtxoIterator)
-	if !ok {
-		return nil, errors.New(
-			"metadata store does not support context-aware UTxO iteration",
-		)
-	}
-	return iterator, nil
-}
-
 // IterateLiveUtxoRefs invokes fn once for each live UTxO row (DeletedSlot ==
 // 0), like IterateLiveUtxos, but does not resolve u.Cbor -- it is left as
 // the store's raw stored value (a CborOffset reference, not the referenced
@@ -1822,10 +1798,7 @@ func (d *Database) IterateLiveUtxoRefs(
 	txn *Txn,
 	fn func(*models.Utxo) error,
 ) error {
-	iterator, err := d.contextUtxoIterator()
-	if err != nil {
-		return err
-	}
+	iterator := d.utxoStore()
 	if txn != nil {
 		return iterator.IterateLiveUtxosContext(ctx, txn.Metadata(), fn)
 	}
@@ -1855,10 +1828,7 @@ func (d *Database) IterateUtxoRefsAsOf(
 	txn *Txn,
 	fn func(*models.Utxo) error,
 ) error {
-	iterator, err := d.contextUtxoIterator()
-	if err != nil {
-		return err
-	}
+	iterator := d.utxoStore()
 	if txn != nil {
 		return iterator.IterateUtxosAsOfContext(
 			ctx, atSlot, txn.Metadata(), fn,

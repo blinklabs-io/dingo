@@ -724,3 +724,24 @@ func TestStakeFractionToBetaRational_RejectsUnusable(t *testing.T) {
 	_, err = stakeFractionToBetaRational(big.NewRat(-1, 2))
 	require.Error(t, err, "a negative share is not a share")
 }
+
+func TestReadStateMapsCancellationDuringPoolEncoding(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	stub := &readStateLedgerStub{
+		dist: &ledger.PoolStakeDistribution{
+			Pools: []ledger.PoolStakeShare{{
+				PoolKeyHash:   testPoolKeyHash(0xAA),
+				StakeFraction: &cbor.Rat{Rat: big.NewRat(1, 2)},
+				VrfKeyHash:    testVrfKeyHash(0x01),
+			}},
+		},
+		afterRead: cancel,
+	}
+	srv := newReadStateServer(t, stub)
+
+	_, err := srv.ReadState(ctx, stakePoolDistributionRequest())
+	require.Error(t, err)
+	require.Equal(t, connect.CodeCanceled, connect.CodeOf(err))
+}

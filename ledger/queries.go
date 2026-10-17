@@ -1435,7 +1435,7 @@ func (ls *LedgerState) queryShelleyCbor(ctx context.Context, q *olocalstatequery
 	if bounded, ok := inner.(*utxoWholeResult); ok {
 		return []any{cbor.Tag{
 			Number:  cbor.CborTagCbor,
-			Content: bounded.encoded,
+			Content: bounded.bareResult(),
 		}}, nil
 	}
 	// Two different, shape-indistinguishable conventions collide at
