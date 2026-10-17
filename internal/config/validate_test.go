@@ -19,6 +19,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -2029,8 +2030,13 @@ func TestPipeline_DMQYAMLAndFlags(t *testing.T) {
 
 func TestValidateDMQBounds(t *testing.T) {
 	t.Parallel()
+	// The scaled limits below exceed a 32-bit uint, so those cases have no
+	// representable input there and are skipped.
+	maxTTL := uint64(math.MaxInt64 / int64(time.Second))
+	maxMempool := uint64(math.MaxInt64 >> 20)
 	tests := []struct {
 		name    string
+		wide    bool
 		mutate  func(*Config)
 		wantErr string
 	}{
@@ -2056,27 +2062,31 @@ func TestValidateDMQBounds(t *testing.T) {
 		},
 		{
 			name: "largest message ttl",
+			wide: true,
 			mutate: func(c *Config) {
-				c.DMQ.MessageTTL = uint(math.MaxInt64 / int64(time.Second))
+				c.DMQ.MessageTTL = uint(maxTTL)
 			},
 		},
 		{
 			name: "message ttl overflowing a duration",
+			wide: true,
 			mutate: func(c *Config) {
-				c.DMQ.MessageTTL = uint(math.MaxInt64/int64(time.Second)) + 1
+				c.DMQ.MessageTTL = uint(maxTTL + 1)
 			},
 			wantErr: "dmq.messageTtl must be at most",
 		},
 		{
 			name: "largest mempool size",
+			wide: true,
 			mutate: func(c *Config) {
-				c.DMQ.MaxMempoolSize = uint(math.MaxInt64 >> 20)
+				c.DMQ.MaxMempoolSize = uint(maxMempool)
 			},
 		},
 		{
 			name: "mempool size overflowing a byte count",
+			wide: true,
 			mutate: func(c *Config) {
-				c.DMQ.MaxMempoolSize = uint(math.MaxInt64>>20) + 1
+				c.DMQ.MaxMempoolSize = uint(maxMempool + 1)
 			},
 			wantErr: "dmq.maxMempoolSize must be at most",
 		},
@@ -2084,6 +2094,9 @@ func TestValidateDMQBounds(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
+			if tt.wide && strconv.IntSize < 64 {
+				t.Skip("uint is too narrow for this limit on this target")
+			}
 			cfg := validTestConfig()
 			cfg.SocketPath = "dingo.socket"
 			cfg.DMQ = DefaultDMQConfig()
