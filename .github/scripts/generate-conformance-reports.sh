@@ -9,8 +9,8 @@
 # and the cause is written in its place so every report kind is still
 # published.
 #
-# The UPLC turbo run is Linux-only and measures an evenly spaced subset of the
-# corpus, because the whole archive takes hours.
+# The UPLC turbo run is Linux-only and measures up to 10,000 evenly spaced
+# programs from the corpus.
 #
 # Inputs:
 #   RELEASE_TAG           required, for example v0.71.0
@@ -19,30 +19,34 @@
 #                         amaru and node-diversity-conformance checkouts
 #   CBOR_DATASET_DIR      required, the checked out cardano-cbor-dataset
 #   CBOR_DATASET_REVISION required, the pinned dataset commit
-#   TURBO_URL             required, the turbo corpus archive
-#   TURBO_SHA256          required, digest of that archive
+#   TURBO_DATASET_REVISION required, TurboCardano source commit
+#   TURBO_DATASET_DATE     required, date directory of the dataset archive
+#   TURBO_SHARD_0000_SHA256 required, digest of the first archive shard
+#   TURBO_SHARD_0001_SHA256 required, digest of the second archive shard
 #   TURBO_SAMPLES         optional, timed samples per program, defaults to 50
-#   TURBO_MAX_PROGRAMS    optional, programs measured, defaults to 500
+#   TURBO_MAX_PROGRAMS    optional, programs measured, defaults to 10000
 
 set -euo pipefail
 
 : "${RELEASE_TAG:?RELEASE_TAG must be set}"
 : "${CBOR_DATASET_DIR:?CBOR_DATASET_DIR must be set}"
 : "${CBOR_DATASET_REVISION:?CBOR_DATASET_REVISION must be set}"
-: "${TURBO_URL:?TURBO_URL must be set}"
-: "${TURBO_SHA256:?TURBO_SHA256 must be set}"
+: "${TURBO_DATASET_REVISION:?TURBO_DATASET_REVISION must be set}"
+: "${TURBO_DATASET_DATE:?TURBO_DATASET_DATE must be set}"
+: "${TURBO_SHARD_0000_SHA256:?TURBO_SHARD_0000_SHA256 must be set}"
+: "${TURBO_SHARD_0001_SHA256:?TURBO_SHARD_0001_SHA256 must be set}"
 
 DIST_DIR="${DIST_DIR:-dist}"
 CONFORMANCE_DIR="${CONFORMANCE_DIR:-.conformance}"
 TURBO_SAMPLES="${TURBO_SAMPLES:-50}"
-TURBO_MAX_PROGRAMS="${TURBO_MAX_PROGRAMS:-500}"
+TURBO_MAX_PROGRAMS="${TURBO_MAX_PROGRAMS:-10000}"
 
-# The report step has a 30-minute limit. Generator budgets total 23 minutes;
-# corpus preparation is capped at three minutes, leaving time for compression.
+# The report step has a 60-minute limit. Generator budgets total 43 minutes;
+# corpus preparation is capped at three minutes, leaving 14 minutes for gzip.
 CBOR_GENERATOR_TIMEOUT_SECONDS=120
 LEDGER_GENERATOR_TIMEOUT_SECONDS=120
 UPLC_GENERATOR_TIMEOUT_SECONDS=240
-TURBO_GENERATOR_TIMEOUT_SECONDS=900
+TURBO_GENERATOR_TIMEOUT_SECONDS=2100
 TURBO_CORPUS_TIMEOUT_SECONDS=180
 
 version="${RELEASE_TAG#v}"
@@ -161,15 +165,24 @@ run_generator() {
 prepare_turbo_corpus() {
   local dir="$1"
   timeout --signal=TERM --kill-after=5s "${TURBO_CORPUS_TIMEOUT_SECONDS}s" \
-    bash -s -- "$dir" "$TURBO_URL" "$TURBO_SHA256" <<'PREPARE_TURBO_CORPUS'
+    bash -s -- "$dir" "$TURBO_DATASET_REVISION" "$TURBO_DATASET_DATE" \
+      "$TURBO_SHARD_0000_SHA256" "$TURBO_SHARD_0001_SHA256" <<'PREPARE_TURBO_CORPUS'
 set -euo pipefail
 dir="$1"
-url="$2"
-sha256="$3"
-curl --fail --silent --show-error --location --retry 3 -o "${dir}/turbo.tar.xz" "$url"
-echo "${sha256}  ${dir}/turbo.tar.xz" | sha256sum --check --strict
-mkdir "${dir}/corpus"
-tar -xf "${dir}/turbo.tar.xz" -C "${dir}/corpus"
+revision="$2"
+dataset_date="$3"
+sha256_0000="$4"
+sha256_0001="$5"
+base_url="https://raw.githubusercontent.com/r2rationality/turbocardano/${revision}/experiment/plutus-benchmark/${dataset_date}"
+for shard in 0000 0001; do
+  curl --fail --silent --show-error --location --retry 3 \
+    -o "${dir}/dataset.tar.${shard}.xz" "${base_url}/dataset.tar.${shard}.xz"
+done
+echo "${sha256_0000}  ${dir}/dataset.tar.0000.xz" | sha256sum --check --strict
+echo "${sha256_0001}  ${dir}/dataset.tar.0001.xz" | sha256sum --check --strict
+mkdir -p "${dir}/corpus"
+cat "${dir}/dataset.tar.0000.xz" "${dir}/dataset.tar.0001.xz" \
+  | tar -xJf - -C "${dir}/corpus"
 PREPARE_TURBO_CORPUS
 }
 
@@ -206,7 +219,7 @@ trap 'rm -rf "$turbo_dir"' EXIT
 if prepare_turbo_corpus "$turbo_dir" 2>"${turbo_dir}/prepare.log"; then
   run_generator "${prefix}-uplc-turbo.json" uplc-turbo "$TURBO_GENERATOR_TIMEOUT_SECONDS" \
     go run ./internal/uplcconformance/turbocmd \
-    -corpus "${turbo_dir}/corpus" \
+    -corpus "${turbo_dir}/corpus/plutus-bench" \
     -samples "$TURBO_SAMPLES" \
     -max-programs "$TURBO_MAX_PROGRAMS" \
     -output "${prefix}-uplc-turbo.json"

@@ -332,14 +332,16 @@ jobs:
 
   # Stage 3. Optional service backends are deliberately unconfigured here, so
   # internal/test/conformance replays its vectors against SQLite only. Same
-  # command as go-test.yml's race job, so a pull request cannot pass a check
-  # the release then fails.
+  # command and shards as go-test.yml's race job, so a pull request cannot pass
+  # a check the release then fails.
   go-test-linux-race:
     name: go-test (Linux, race)
     needs: [go-test-linux-quick]
     strategy:
+      fail-fast: false
       matrix:
         go-version: [1.26.x]
+        shard: [database, ledger, rest]
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
@@ -355,13 +357,32 @@ jobs:
           path: |
             ~/go/pkg/mod
             ~/.cache/go-build
-          key: ${{ runner.os }}-go-race-${{ matrix.go-version }}-${{ hashFiles('**/go.sum') }}
+          key: ${{ runner.os }}-go-race-${{ matrix.go-version }}-${{ matrix.shard }}-${{ hashFiles('**/go.sum') }}
           restore-keys: |
-            ${{ runner.os }}-go-race-${{ matrix.go-version }}-
+            ${{ runner.os }}-go-race-${{ matrix.go-version }}-${{ matrix.shard }}-
       - name: go-build
         run: go build -tags dingo_extra_plugins ./cmd/dingo
       - name: go-test-race
-        run: go test -v -tags dingo_extra_plugins -ldflags="-s -w" -race -timeout 60m ./...
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: |
+          set -euo pipefail
+          database='/database($|/lifecycle|/plugin/blob|/plugin/metadata/sqlstore($|/))'
+          ledger='/ledger($|/)|/internal/test/conformance'
+          all="$(go list -tags dingo_extra_plugins ./...)"
+          case "$SHARD" in
+            database) selected="$(grep -E "$database" <<<"$all" || true)" ;;
+            ledger) selected="$(grep -E "$ledger" <<<"$all" || true)" ;;
+            rest) selected="$(grep -Ev "$database|$ledger" <<<"$all" || true)" ;;
+            *) echo "unknown shard: $SHARD" >&2; exit 1 ;;
+          esac
+          if [ -z "$selected" ]; then
+            echo "shard $SHARD selected no packages" >&2
+            exit 1
+          fi
+          mapfile -t pkgs <<<"$selected"
+          printf '%s\n' "${pkgs[@]}"
+          go test -v -tags dingo_extra_plugins -ldflags="-s -w" -race -timeout 60m "${pkgs[@]}"
 
   # Stage 3. macOS coverage on the merge and release path, not only on a pull
   # request: a merge conflict, a stale base, or a force-push can land a tree
@@ -510,11 +531,15 @@ jobs:
       && needs.go-test-linux.result == 'success'
       && (github.ref_type != 'tag' || needs.create-draft-release.result == 'success')
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     env:
       CBOR_DATASET_REVISION: '6cd8c928665bbafe90e02066ebb4620e38f051de'
       AMARU_UPLC_REVISION: '03acfc01807e5e2a8a5466541ad22c856f3de99c'
       NDC_LEDGER_REVISION: '4fed8790fb81164f9d7a53414acc5f78aaf65422'
+      TURBO_DATASET_REVISION: '862fa7127fe07c2537005955cf98e7b332151996'
+      TURBO_DATASET_DATE: '20260826'
+      TURBO_SHARD_0000_SHA256: 'c446743b869955bae355aea04fade0a0dc46f01ae08f04bcada44d8944e477ee'
+      TURBO_SHARD_0001_SHA256: '2bb62f11dee861296fbdf7de69599340cd6d4b93a7fad37a365b0dcd004fd83d'
     permissions:
       attestations: write
       contents: write
@@ -571,12 +596,10 @@ jobs:
           persist-credentials: false
       - name: Generate conformance reports
         if: github.ref_type == 'tag'
-        timeout-minutes: 30
+        timeout-minutes: 60
         env:
           RELEASE_TAG: ${{ github.ref_name }}
           CBOR_DATASET_DIR: .conformance/cardano-cbor-dataset
-          TURBO_URL: https://pub-2239d82d9a074482b2eb2c886191cb4e.r2.dev/turbo.tar.xz
-          TURBO_SHA256: fffe2e959fb8bdb47ee4834008dcceb89fcde53afb659a454beca26cf95507cc
         run: .github/scripts/generate-conformance-reports.sh
       - name: Upload release assets
         if: github.ref_type == 'tag'
