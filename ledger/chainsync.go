@@ -1190,6 +1190,10 @@ func (ls *LedgerState) verifyDeferredBlockHeaderState(
 	if err != nil {
 		return err
 	}
+	if !required && ls.config.VerifyReplayHeaders &&
+		!ls.slotCoveredByMithril(point.Slot) {
+		required = true
+	}
 	if !required {
 		return nil
 	}

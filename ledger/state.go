@@ -1006,6 +1006,12 @@ type LedgerStateConfig struct {
 	ManualBlockProcessing    bool
 	ForgeBlocks              bool
 	DatabaseWorkerPoolConfig DatabaseWorkerPoolConfig
+	// VerifyReplayHeaders makes ledger apply run the full VRF, KES,
+	// operational-certificate and leader-eligibility check on every block
+	// that no Mithril certificate covers, as if admission had deferred it.
+	// Replay feeds blocks that never passed admission, so apply is the only
+	// place their headers can be checked before they reach ledger state.
+	VerifyReplayHeaders bool
 	// BlockPipelineEnabled turns on parallel block decode in the chainsync
 	// replay loop (ledgerReadChainIterator): blocks read back from the
 	// primary chain are decoded by a small worker pool (gouroboros'
@@ -9344,6 +9350,12 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 				}
 				if recovered {
 					completeReadResult()
+					if ls.config.ManualBlockProcessing {
+						// Nothing re-reads the primary chain under manual
+						// processing, so a restart would drop the cause. The
+						// rejected block is already rewound off the chain.
+						return fmt.Errorf("process block batch: %w", err)
+					}
 					return errRestartLedgerPipeline
 				}
 				// A stale chain iterator delivers a fork block whose prev-hash
