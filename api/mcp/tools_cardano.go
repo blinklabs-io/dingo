@@ -668,11 +668,11 @@ func RegisterCardanoTools(
 			for i, v := range vals {
 				switch val := v.(type) {
 				case []byte:
-					rowStr[i] = FormatCell(hex.EncodeToString(val))
+					rowStr[i] = hex.EncodeToString(val)
 				case nil:
 					rowStr[i] = "null"
 				default:
-					rowStr[i] = FormatCell(fmt.Sprintf("%v", val))
+					rowStr[i] = fmt.Sprintf("%v", val)
 				}
 			}
 			utxoRows = append(utxoRows, rowStr)
@@ -835,11 +835,11 @@ func RegisterCardanoTools(
 		for _, v := range vals {
 			switch val := v.(type) {
 			case []byte:
-				rowStr = append(rowStr, FormatCell(hex.EncodeToString(val)))
+				rowStr = append(rowStr, hex.EncodeToString(val))
 			case nil:
 				rowStr = append(rowStr, "null")
 			default:
-				rowStr = append(rowStr, FormatCell(fmt.Sprintf("%v", val)))
+				rowStr = append(rowStr, fmt.Sprintf("%v", val))
 			}
 		}
 
@@ -1227,13 +1227,13 @@ func RegisterCardanoTools(
 			}
 
 			resRows = append(resRows, []string{
-				FormatCell(utxoRef),
-				FormatCell(payCred),
-				FormatCell(loveStr),
-				FormatCell(nameDisplay),
-				FormatCell(fprint),
-				FormatCell(amtStr),
-				FormatCell(dHashStr),
+				utxoRef,
+				payCred,
+				loveStr,
+				nameDisplay,
+				fprint,
+				amtStr,
+				dHashStr,
 			})
 		}
 
@@ -1642,7 +1642,7 @@ func RegisterCardanoTools(
 					return nil, nil, fmt.Errorf("read committee member: %w", err)
 				} else {
 					members = append(members, []string{
-						FormatCell(hex.EncodeToString(credHash)),
+						hex.EncodeToString(credHash),
 						strconv.FormatInt(expEpoch, 10),
 						strconv.FormatInt(termSlot, 10),
 					})
@@ -1862,14 +1862,14 @@ func RegisterCardanoTools(
 			poolRows = append(poolRows, []string{
 				strconv.FormatInt(epoch, 10),
 				blocksStr,
-				FormatCell(delStakeStr),
-				FormatCell(pledgeStr),
-				FormatCell(costStr),
-				FormatCell(marginStr),
-				FormatCell(perfStr),
-				FormatCell(totRewStr),
-				FormatCell(leadRewStr),
-				FormatCell(memRewStr),
+				delStakeStr,
+				pledgeStr,
+				costStr,
+				marginStr,
+				perfStr,
+				totRewStr,
+				leadRewStr,
+				memRewStr,
 			})
 		}
 

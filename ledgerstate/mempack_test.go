@@ -429,3 +429,51 @@ func TestParseTvarFileIfAvailable(t *testing.T) {
 		t.Logf("Sample Amount: %d lovelace", sampleEntry.Amount)
 	}
 }
+
+// A snapshot UTxO carrying a reference script yields the script's hash on its
+// model, as an output applied from a block does, so the reference-script index
+// covers outputs that predate the snapshot.
+func TestSnapshotUTxOCarriesReferenceScriptHash(t *testing.T) {
+	t.Parallel()
+
+	address := buildShelleyAddr(
+		7, 1, bytes.Repeat([]byte{0x11}, 28), nil,
+	)
+	nativeScript, err := cbor.Encode([]any{
+		uint64(0), bytes.Repeat([]byte{0x23}, 28),
+	})
+	require.NoError(t, err)
+	want := lcommon.Blake2b224Hash(append([]byte{0}, nativeScript...))
+
+	mempack := []byte{babbageTxOutCompactRefScript, byte(len(address))}
+	mempack = append(mempack, address...)
+	mempack = append(
+		mempack, 0, 1, 0, alonzoScriptNative, byte(len(nativeScript)),
+	)
+	mempack = append(mempack, nativeScript...)
+	txHash := bytes.Repeat([]byte{0x24}, 32)
+
+	fromMempack, err := parseMempackTxOut(txHash, 0, mempack)
+	require.NoError(t, err)
+	require.Equal(t, want.Bytes(), fromMempack.ReferenceScriptHash)
+	require.Equal(
+		t,
+		want.Bytes(),
+		UTxOToModel(fromMempack, 1).ReferenceScriptHash,
+	)
+
+	fromCbor, err := parseCborTxOut(txHash, 0, nil, fromMempack.Cbor)
+	require.NoError(t, err)
+	require.Equal(t, want.Bytes(), fromCbor.ReferenceScriptHash)
+
+	plain := []byte{babbageTxOutCompactRefScript, byte(len(address))}
+	plain = append(plain, address...)
+	plain = append(plain, 0, 1, 0, alonzoScriptPlutus, 0, 2, 0x41, 0x00)
+	withPlutus, err := parseMempackTxOut(txHash, 1, plain)
+	require.NoError(t, err)
+	require.Equal(
+		t,
+		lcommon.Blake2b224Hash([]byte{1, 0x41, 0x00}).Bytes(),
+		withPlutus.ReferenceScriptHash,
+	)
+}
