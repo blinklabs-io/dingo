@@ -340,7 +340,7 @@ func (s *submitServiceServer) EvalTx(
 	}
 	// Evaluate TX
 	fee, totalExUnits, redeemerExUnits, err := s.utxorpc.config.LedgerState.EvaluateTxContext(
-		ctx,
+		ledger.WithEvaluationSource(ctx, req.Peer().Addr),
 		tx,
 	)
 	if errors.Is(err, ledger.ErrEvaluationBusy) {

@@ -1233,8 +1233,54 @@ func compareEpochAccounts(
 		}}
 	}
 
+	// Koios files a credit made at the boundary into epoch+1 under earned
+	// epoch `epoch`, so the proposal deposits it lists as proposal_refund for
+	// this reporting epoch are the ones returned when epoch+1 began.
+	refunds, err := dingo.GetProposalDepositRefunds(ctx, epoch+1)
+	if err != nil {
+		return []CheckMismatch{{
+			Network:    network,
+			Epoch:      epoch,
+			Field:      "proposal_deposit_refund",
+			DingoValue: fmt.Sprintf("error: %v", err),
+			KoiosValue: "",
+			Category:   CategoryDBError,
+			CheckedAt:  now,
+		}}
+	}
+
 	var out []CheckMismatch
 	dingoRows, credentialErrs, poolErrs := creditedAccountRewards(dingoOutputs)
+	for _, refund := range refunds.Refunds {
+		addr, err := StakeAddressFromCredential(
+			refund.StakingKey,
+			refund.CredentialTag,
+		)
+		if err != nil {
+			logger.Warn(
+				"koiosparity: failed to decode proposal refund credential",
+				"refund_epoch",
+				epoch+1,
+				"error",
+				err,
+			)
+			out = append(out, CheckMismatch{
+				Network:    network,
+				Epoch:      epoch,
+				Field:      "account_reward_address_decode",
+				DingoValue: fmt.Sprintf("error: %v", err),
+				KoiosValue: "",
+				Category:   CategoryDBError,
+				CheckedAt:  now,
+			})
+			continue
+		}
+		dingoRows = append(dingoRows, DingoAccountReward{
+			StakeAddress: addr,
+			RewardType:   rewardTypeProposalRefund,
+			Amount:       strconv.FormatUint(refund.Amount, 10),
+		})
+	}
 	for _, decodeErr := range credentialErrs {
 		logger.Warn(
 			"koiosparity: failed to decode reward_account_output credential",
@@ -1287,6 +1333,7 @@ func compareEpochAccounts(
 			graceHours,
 			epochEndTime,
 			rewardsPending,
+			refunds.Pending,
 		)...,
 	)
 	out = append(
