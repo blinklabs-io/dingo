@@ -10088,8 +10088,8 @@ verifying client bootstraps from the newest listed one.
 
 All public artifact reads, including pending-certificate and stake-distribution
 reads, share an admission bound of
-`2 * (immutableDownloadWorkers + 1)` (34) requests, enough for two v2
-bootstraps each running its 16 immutable downloads beside the ancillary one.
+`2 * (immutableDownloadWorkers + 1)` (66) requests, enough for two v2
+bootstraps each running its 32 immutable downloads beside the ancillary one.
 Public signature submissions use a separate four-request bound, so progressing
 archive transfers cannot consume their capacity. Either bound returns `503
 Service Unavailable` with `Retry-After: 1` when it is full. A

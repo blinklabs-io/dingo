@@ -43,10 +43,8 @@ import (
 // archive downloads during a v2 bootstrap. Paired with a shared
 // keep-alive client (see downloadImmutables) so each worker holds a
 // warm pooled connection; the connection pool in
-// newPooledDownloadTransport is sized to this value. 16 is a safe
-// default across constrained pods; bandwidth/CPU-rich hosts can go
-// higher with diminishing returns past ~32.
-const immutableDownloadWorkers = 16
+// newPooledDownloadTransport is sized to this value.
+const immutableDownloadWorkers = 32
 
 // Compressed-size limits for one v2 object, used when no operator limit is
 // set. They are constants rather than values read from the artifact because
