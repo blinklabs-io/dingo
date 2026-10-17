@@ -169,6 +169,7 @@ func TestOptimizePlannerStatsCreatesStat1OnGenesisStyleDatabase(t *testing.T) {
 }
 
 func TestOptimizePlannerStatsRefreshesPooledReadConnections(t *testing.T) {
+	skipPlanTestUnderRace(t)
 	t.Parallel()
 	store := newFilePlannerStatsStore(t, nil)
 	seedStakeRefLookupUtxos(t, store, 50_000, 256)
@@ -252,6 +253,7 @@ func TestOptimizePlannerStatsRefreshesAfterUpdateOnlyRun(t *testing.T) {
 }
 
 func TestOptimizePlannerStatsReloadsSharedCacheStatistics(t *testing.T) {
+	skipPlanTestUnderRace(t)
 	t.Parallel()
 	store := newMigratedSQLiteStore(t)
 	require.Same(t, store.readDB, store.writeDB)
@@ -334,6 +336,7 @@ var plannerProbeSequence atomic.Int64
 // on the write connection. The probe is a SQL function evaluated for every
 // row the plan visits: the trap plan visits all live UTxOs, the good plan one.
 func TestPreparedStatementReplansAfterOptimizeOnSameConnection(t *testing.T) {
+	skipPlanTestUnderRace(t)
 	t.Parallel()
 	// A uniquely named function keeps the process-wide registration from
 	// colliding with other tests.

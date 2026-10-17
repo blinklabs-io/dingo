@@ -1076,3 +1076,30 @@ func TestRestorePoolStateAtSlotScopesOpCertSequenceToAffectedPools(
 	require.Equal(t, uint64(3), untouchedPool.LatestOpCertSequence,
 		"a pool with no discarded op-cert rows must be left exactly as it was")
 }
+
+func TestRestorePoolLatestOpCertSequenceReservesFallbackParameter(
+	t *testing.T,
+) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+	d := store.dialect.(dialect)
+	d.parameterLimit = 3
+	store.dialect = d
+
+	poolKeyHashes := make([][]byte, 5)
+	for i := range poolKeyHashes {
+		hash := bytes.Repeat([]byte{byte(i + 1)}, 28)
+		seedPoolWithSingleRegistration(t, store, hash, 1000)
+		require.NoError(t, store.UpdatePoolOpCertSequence(
+			lcommon.PoolKeyHash(hash), uint64(i+1), 2000, nil,
+		))
+		poolKeyHashes[i] = hash
+	}
+	limitSQLiteVariableNumber(t, store.writeDB, d.ParameterLimit())
+
+	updated, err := store.restorePoolLatestOpCertSequence(
+		context.Background(), store.writeDB, poolKeyHashes,
+	)
+	require.NoError(t, err)
+	require.Equal(t, int64(len(poolKeyHashes)), updated)
+}

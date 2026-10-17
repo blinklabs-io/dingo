@@ -35,6 +35,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
+	datatypes "github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/config"
 	internalplugins "github.com/blinklabs-io/dingo/internal/plugins"
@@ -1191,26 +1192,37 @@ func LoadBlobsWithDB(
 	}
 
 	var utxoOffsetsStored int
-	blocksCopied, immutableTipSlot, err := copyBlocksRawWithCallback(
-		ctx, logger, imm, db, c,
-		func(rb chain.RawBlock, txn *database.Txn) error {
+	var callback func(chain.RawBlock, *database.Txn) error
+	if db.StorageMode() != datatypes.StorageModeCore {
+		callback = func(rb chain.RawBlock, txn *database.Txn) error {
 			stored, err := storeRawBlockUtxoOffsets(txn, rb)
 			if err != nil {
 				return err
 			}
 			utxoOffsetsStored += stored
 			return nil
-		},
+		}
+	}
+	blocksCopied, immutableTipSlot, err := copyBlocksRawWithCallback(
+		ctx, logger, imm, db, c,
+		callback,
 		opts.onProgress,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("loading blocks: %w", err)
 	}
-	logger.Info(
-		"finished storing immutable UTxO offsets during copy",
-		"blocks_copied", blocksCopied,
-		"utxo_offsets_stored", utxoOffsetsStored,
-	)
+	if callback == nil {
+		logger.Info(
+			"skipped immutable UTxO offset writes for Core storage mode",
+			"blocks_copied", blocksCopied,
+		)
+	} else {
+		logger.Info(
+			"finished storing immutable UTxO offsets during copy",
+			"blocks_copied", blocksCopied,
+			"utxo_offsets_stored", utxoOffsetsStored,
+		)
+	}
 
 	return &LoadBlobsResult{
 		BlocksCopied:     blocksCopied,
@@ -1494,9 +1506,42 @@ func CopyImmutableBlobsBounded(
 	maxSlot uint64,
 	onProgress func(LoadBlobsProgress),
 ) (int, uint64, error) {
+	return copyImmutableBlobsBounded(
+		ctx, logger, imm, c, maxSlot, onProgress, true,
+	)
+}
+
+// CopyImmutableBlobsBoundedWithoutUtxoOffsets copies immutable blocks without
+// materializing API UTxO offset references. Callers must leave the completion
+// marker unset so a later API backfill rebuilds those references.
+func CopyImmutableBlobsBoundedWithoutUtxoOffsets(
+	ctx context.Context,
+	logger *slog.Logger,
+	imm *immutable.ImmutableDb,
+	c *chain.Chain,
+	maxSlot uint64,
+	onProgress func(LoadBlobsProgress),
+) (int, uint64, error) {
+	return copyImmutableBlobsBounded(
+		ctx, logger, imm, c, maxSlot, onProgress, false,
+	)
+}
+
+func copyImmutableBlobsBounded(
+	ctx context.Context,
+	logger *slog.Logger,
+	imm *immutable.ImmutableDb,
+	c *chain.Chain,
+	maxSlot uint64,
+	onProgress func(LoadBlobsProgress),
+	storeUtxoOffsets bool,
+) (int, uint64, error) {
 	callback := func(rb chain.RawBlock, txn *database.Txn) error {
 		_, err := storeRawBlockUtxoOffsets(txn, rb)
 		return err
+	}
+	if !storeUtxoOffsets {
+		callback = nil
 	}
 
 	startPoint := c.Tip().Point
