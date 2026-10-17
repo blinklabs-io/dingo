@@ -16,10 +16,15 @@ package blockfrost
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
 	"errors"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/blinklabs-io/dingo/internal/apilistener"
@@ -27,7 +32,12 @@ import (
 )
 
 // Leave time to report a stalled body before the 30-second write deadline.
-const defaultRequestBodyTimeout = 15 * time.Second
+const (
+	defaultRequestBodyTimeout                   = 15 * time.Second
+	defaultListenHost                           = "127.0.0.1"
+	defaultMaxConcurrentMutations          uint = 4
+	defaultMaxConcurrentMutationsPerClient      = 1
+)
 
 // Blockfrost is the Blockfrost-compatible REST API server.
 type Blockfrost struct {
@@ -35,6 +45,8 @@ type Blockfrost struct {
 	logger             *slog.Logger
 	requestBodyTimeout time.Duration
 	node               BlockfrostNode
+	mutationAuth       mutationAuth
+	mutationAdmission  *mutationAdmission
 	// listener owns the start/stop protocol, including releasing the
 	// listening socket as part of what Stop waits for -- see
 	// internal/apilistener.
@@ -54,15 +66,146 @@ func New(
 	}
 	logger = logger.With("component", "blockfrost")
 	if cfg.ListenAddress == "" {
-		cfg.ListenAddress = ":3000"
+		cfg.ListenAddress = net.JoinHostPort(defaultListenHost, "3000")
+	}
+	if cfg.MaxConcurrentMutations == 0 {
+		cfg.MaxConcurrentMutations = defaultMaxConcurrentMutations
+	}
+	if cfg.MaxConcurrentMutationsPerClient == 0 {
+		cfg.MaxConcurrentMutationsPerClient = defaultMaxConcurrentMutationsPerClient
 	}
 	return &Blockfrost{
 		config:             cfg,
 		requestBodyTimeout: defaultRequestBodyTimeout,
 		logger:             logger,
 		node:               node,
-		listener:           apilistener.New("Blockfrost API", logger),
+		mutationAuth: newMutationAuth(
+			cfg.AuthToken,
+		),
+		mutationAdmission: newMutationAdmission(
+			cfg.MaxConcurrentMutations,
+			cfg.MaxConcurrentMutationsPerClient,
+		),
+		listener: apilistener.New("Blockfrost API", logger),
 	}
+}
+
+type mutationAuth struct {
+	enabled   bool
+	tokenHash [sha256.Size]byte
+}
+
+func newMutationAuth(token string) mutationAuth {
+	return mutationAuth{
+		enabled:   token != "",
+		tokenHash: sha256.Sum256([]byte(token)),
+	}
+}
+
+func (a mutationAuth) authorized(r *http.Request) bool {
+	if !a.enabled {
+		return false
+	}
+	provided := r.Header.Get("project_id")
+	if provided == "" {
+		provided = r.Header.Get("X-Blockfrost-Project-Id")
+	}
+	if provided == "" {
+		scheme, value, ok := strings.Cut(r.Header.Get("Authorization"), " ")
+		if ok && strings.EqualFold(scheme, "Bearer") {
+			provided = strings.TrimLeft(value, " ")
+		}
+	}
+	providedHash := sha256.Sum256([]byte(provided))
+	return subtle.ConstantTimeCompare(
+		providedHash[:],
+		a.tokenHash[:],
+	) == 1
+}
+
+type mutationAdmission struct {
+	mu           sync.Mutex
+	active       uint
+	activeClient map[string]uint
+	maxActive    uint
+	maxClient    uint
+}
+
+func newMutationAdmission(maxActive, maxClient uint) *mutationAdmission {
+	return &mutationAdmission{
+		activeClient: make(map[string]uint),
+		maxActive:    maxActive,
+		maxClient:    maxClient,
+	}
+}
+
+func (a *mutationAdmission) acquire(
+	ctx context.Context,
+	client string,
+) (func(), bool) {
+	select {
+	case <-ctx.Done():
+		return nil, false
+	default:
+	}
+
+	a.mu.Lock()
+	if a.active >= a.maxActive || a.activeClient[client] >= a.maxClient {
+		a.mu.Unlock()
+		return nil, false
+	}
+	a.active++
+	a.activeClient[client]++
+	a.mu.Unlock()
+
+	return func() {
+		a.mu.Lock()
+		a.active--
+		a.activeClient[client]--
+		if a.activeClient[client] == 0 {
+			delete(a.activeClient, client)
+		}
+		a.mu.Unlock()
+	}, true
+}
+
+func mutationClient(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err == nil {
+		return host
+	}
+	return r.RemoteAddr
+}
+
+func (b *Blockfrost) mutationHandler(next http.HandlerFunc) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !b.mutationAuth.authorized(r) {
+			w.Header().Set("WWW-Authenticate", "Bearer")
+			writeError(
+				w,
+				http.StatusUnauthorized,
+				"Unauthorized",
+				"missing or invalid authentication token",
+			)
+			return
+		}
+		release, ok := b.mutationAdmission.acquire(
+			r.Context(),
+			mutationClient(r),
+		)
+		if !ok {
+			w.Header().Set("Retry-After", "1")
+			writeError(
+				w,
+				http.StatusTooManyRequests,
+				"Too Many Requests",
+				"transaction mutation capacity reached, try again later",
+			)
+			return
+		}
+		defer release()
+		next(w, r)
+	})
 }
 
 // handler builds the HTTP handler for the Blockfrost API,
@@ -298,17 +441,17 @@ func (b *Blockfrost) handler() http.Handler {
 		"GET /api/v0/txs/{hash}",
 		b.handleTransaction,
 	)
-	mux.HandleFunc(
+	mux.Handle(
 		"POST /api/v0/tx/submit",
-		b.handleTransactionSubmit,
+		b.mutationHandler(b.handleTransactionSubmit),
 	)
-	mux.HandleFunc(
+	mux.Handle(
 		"POST /api/v0/utils/txs/evaluate",
-		b.handleTransactionEvaluate,
+		b.mutationHandler(b.handleTransactionEvaluate),
 	)
-	mux.HandleFunc(
+	mux.Handle(
 		"POST /api/v0/utils/txs/evaluate/utxos",
-		b.handleTransactionEvaluateUtxos,
+		b.mutationHandler(b.handleTransactionEvaluateUtxos),
 	)
 	mux.HandleFunc(
 		"GET /api/v0/txs/{hash}/cbor",
