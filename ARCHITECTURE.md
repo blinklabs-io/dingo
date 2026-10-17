@@ -8430,7 +8430,7 @@ The SQL store preserves that complete counter domain in signed engine integer
 columns by flipping bit 63 at its read and write boundary. This maps unsigned
 ordering directly onto signed ordering, so `MAX`, `<`, and the
 `(pool_key_hash, sequence)` index keep the ledger's order from zero through
-`math.MaxUint64`. Migration v45 shifts legacy nonnegative values into the same
+`math.MaxUint64`. Migration v47 shifts legacy nonnegative values into the same
 representation. Block application, forging, and Mithril HeaderState import
 therefore share the reference's full counter range.
 
