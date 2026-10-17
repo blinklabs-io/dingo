@@ -10535,12 +10535,50 @@ transactions endpoints. It uses an adapter pattern to translate between
 Dingo's internal state and Blockfrost response types and supports
 Blockfrost-style pagination headers. Pool and account list routes reject
 out-of-range count and page values before calling the adapter, using the
-shared strict pagination parser (count 1–100, page 1–21474836).
+shared strict pagination parser (count 1–100, page 1–21474836). The epoch
+next, previous and stakes lists, whose Blockfrost schema defines only count and
+page, drop `order` before parsing, so it is ignored like any other undefined
+query parameter.
 The root document is served only at the literal `/` path (`GET /{$}`).
 Documented operations without a handler return `501`; unknown paths fall
 through to a catch-all `404` handler instead of the root document.
 `GET /addresses/{address}/transactions` honors the inclusive `from`/`to` block
 range through the same parser as the account endpoint.
+
+The router also serves the epoch operations (`/epochs/{number}` with `next`,
+`previous`, `stakes`, `stakes/{pool_id}`, `blocks` and `blocks/{pool_id}`;
+`/epochs/latest` reports the epoch's output, fees and active stake), the pool
+history operations (`retired`, `history`, `relays`, `delegators`, `blocks`,
+`updates`, `votes`), the account history operations (`history`, `mirs`,
+`addresses/assets`, `addresses/total`) and the governance operations
+(committee and committee votes, DRep delegators, metadata, updates and votes,
+the proposal list, and every proposal's details, parameters, withdrawals, votes
+and metadata). A proposal is addressed either by transaction hash and
+certificate index or by CIP-129 governance action id. The router registers one
+pattern per segment count under `/governance/proposals/` and tells the forms
+apart by whether the second segment names a part (`parameters`,
+`withdrawals`, `votes`, `metadata`), so both forms share one identifier parser
+and one error path.
+
+Historical answers follow what the node retains. The endpoint answers `404`
+with "The requested history is not retained by this node"
+(`ErrHistoryNotRetained`) rather than an empty or partial answer that reads as
+complete when an epoch's stake distribution was pruned or is still being
+written, when an account has no retained stake-history row although its history
+predates the oldest retained snapshot (an account with some retained rows lists
+those), when the block that cast a governance vote is not held, and when a pool
+history epoch has no ready epoch summary or lies at or below a Mithril anchor
+without imported block counts, and when an epoch or pool block list reaches a
+Mithril anchor or a range whose non-checkpoint `block_nonce` rows were pruned
+(`database.BlockHistoryRetained`), and when a cold-credential committee vote
+list meets a vote whose hot key no retained authorization maps to a cold
+credential. A votes page releases its read transaction
+before decoding the blocks that cast its votes, since each block read takes a
+pooled read connection of its own. API storage mode
+retains `reward_stake_input`, non-checkpoint `block_nonce` rows and superseded
+`auth_committee_hot` rows without bound for these endpoints; see "Snapshot and
+Reward-State Retention" and "Committee Hot-Key Authorization Retention" in
+DATABASE.md for the storage cost.
 
 Go's `ServeMux` rejects two patterns that neither contains the other, so the
 routes whose literal segment overlaps a wildcard are served by one pattern that
@@ -11573,7 +11611,7 @@ second sync:
   - *Core-mode pruning.* `ledger/snapshot/rotation.go`'s
     `cleanupOldSnapshots` keeps `reward_stake_input`/`reward_account_output`
     for only a rolling 4-epoch window in core storage mode (API mode retains
-    `reward_account_output` without bound instead); `reward_pool_input`/
+    both without bound instead); `reward_pool_input`/
     `reward_pool_output` are not pruned by that path at all. `DatabaseSource`
     does not race this in any special, same-transaction way — it just reads
     whatever is currently committed. What actually satisfies "available
@@ -15133,9 +15171,10 @@ from the epoch-window prune and retained for the life of the database instead,
 so the Blockfrost account reward-history endpoint
 (`NodeAdapter.AccountRewardHistory`, `GET /accounts/{stake_address}/rewards`)
 can answer for any epoch rather than only the trailing four; `core` mode is
-unchanged. `RewardStakeInput` is pruned to the same four-epoch window in both
-modes regardless — it is not a Blockfrost-visible table and remains too large
-to retain unconditionally. The rollback path, `DeleteRewardStateAfterSlot`, is
+unchanged. `RewardStakeInput` is likewise retained without bound in `api` mode,
+for the Blockfrost epoch stake and account stake-history endpoints, and pruned
+to the four-epoch window in `core` mode (and by the Koios parity observer,
+which needs only `RewardAccountOutput`). The rollback path, `DeleteRewardStateAfterSlot`, is
 unaffected: it does not consult storage mode and always removes reward-state
 rows (including `RewardAccountOutput`) above the rollback slot in every mode.
 
@@ -16440,11 +16479,14 @@ those rows (`snapshot.Manager.SetDeferRewardStakeInputs`,
 commits, in bounded batches under `rewardPrecomputeWriteMu`
 (`queueDeferredRewardStakeInputs`). The boundary transaction records the
 snapshot epoch as pending (`dingo:stake-reward:stake-inputs-pending`) and the
-last batch clears it. Every reader of `reward_stake_input` calls
+last batch clears it. Every reward-path reader of `reward_stake_input` calls
 `ensureRewardStakeInputsReady` first: while this process is still writing the
 rows the round waits; a pending entry with no writer is completed from the
 historical reconstruction the retention path uses, checked against the
-snapshot's persisted pool inputs.
+snapshot's persisted pool inputs. The Blockfrost stake readers run read-only
+and cannot complete an entry, so they check
+`LedgerState.RewardStakeInputsIncomplete` and answer "not retained" for a
+pending snapshot instead of serving its partial rows.
 
 The application engine for a precompute without a cursor verifies the frozen
 input bundle and requires an exact pool output set, valid leader reward

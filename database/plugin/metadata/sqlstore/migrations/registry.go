@@ -77,6 +77,8 @@ const (
 	drepDelegatorStateSchemaRelease                     = "drep-delegator-state"
 	poolRegistrationIdentitySchemaRelease               = "pool-registration-identity"
 	utxoAddressIdentitySchemaRelease                    = "utxo-address-identity"
+	rewardStakeInputCredentialIndexSchemaRelease        = "reward-stake-input-credential-index"
+	governanceVoteCastSchemaRelease                     = "governance-vote-cast"
 	governanceProposalOrderSchemaRelease                = "governance-proposal-order"
 	accountDRepClearSchemaRelease                       = "account-drep-clear-history"
 	committeeHotAuthorizationPruneOrderSchemaRelease    = "committee-hot-authorization-prune-order"
@@ -239,6 +241,12 @@ var schemaVersions = []struct {
 	},
 	{Version: 45, Name: scriptIndexSchemaRelease, Dir: "v45"},
 	{Version: 46, Name: addressTransactionCredentialKindSchemaRelease, Dir: "v46"},
+	{
+		Version: 47,
+		Name:    rewardStakeInputCredentialIndexSchemaRelease,
+		Dir:     "v47",
+	},
+	{Version: 48, Name: governanceVoteCastSchemaRelease, Dir: "v48"},
 }
 
 // SQLiteRegistry returns the checked-in SQLite migration registry.

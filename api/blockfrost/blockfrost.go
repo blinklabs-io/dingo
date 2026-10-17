@@ -114,6 +114,22 @@ func (b *Blockfrost) handler() http.Handler {
 		"GET /api/v0/epochs/{number}/parameters",
 		b.handleEpochParams,
 	)
+	mux.HandleFunc("GET /api/v0/epochs/{number}", b.handleEpoch)
+	mux.HandleFunc("GET /api/v0/epochs/{number}/next", b.handleEpochNext)
+	mux.HandleFunc(
+		"GET /api/v0/epochs/{number}/previous",
+		b.handleEpochPrevious,
+	)
+	mux.HandleFunc("GET /api/v0/epochs/{number}/stakes", b.handleEpochStakes)
+	mux.HandleFunc(
+		"GET /api/v0/epochs/{number}/stakes/{pool_id}",
+		b.handleEpochPoolStakes,
+	)
+	mux.HandleFunc("GET /api/v0/epochs/{number}/blocks", b.handleEpochBlocks)
+	mux.HandleFunc(
+		"GET /api/v0/epochs/{number}/blocks/{pool_id}",
+		b.handleEpochPoolBlocks,
+	)
 	mux.HandleFunc(
 		"GET /api/v0/network",
 		b.handleNetwork,
@@ -178,6 +194,15 @@ func (b *Blockfrost) handler() http.Handler {
 		"GET /api/v0/pools/retiring",
 		b.handlePoolsRetiring,
 	)
+	mux.HandleFunc("GET /api/v0/pools/retired", b.handlePoolsRetired)
+	mux.HandleFunc("GET /api/v0/pools/{pool_id}/history", b.handlePoolHistory)
+	mux.HandleFunc("GET /api/v0/pools/{pool_id}/relays", b.handlePoolRelays)
+	mux.HandleFunc(
+		"GET /api/v0/pools/{pool_id}/delegators",
+		b.handlePoolDelegators,
+	)
+	mux.HandleFunc("GET /api/v0/pools/{pool_id}/blocks", b.handlePoolBlocks)
+	mux.HandleFunc("GET /api/v0/pools/{pool_id}/updates", b.handlePoolUpdates)
 	mux.HandleFunc(
 		"GET /api/v0/pools/{pool_id}/metadata",
 		b.handlePoolMetadata,
@@ -194,6 +219,45 @@ func (b *Blockfrost) handler() http.Handler {
 		"GET /api/v0/governance/dreps/{drep_id}",
 		b.handleDRep,
 	)
+	mux.HandleFunc(
+		"GET /api/v0/governance/dreps/{drep_id}/delegators",
+		b.handleDRepDelegators,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/governance/dreps/{drep_id}/metadata",
+		b.handleDRepMetadata,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/governance/dreps/{drep_id}/updates",
+		b.handleDRepUpdates,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/governance/dreps/{drep_id}/votes",
+		b.handleDRepVotes,
+	)
+	mux.HandleFunc("GET /api/v0/governance/committee", b.handleCommittee)
+	mux.HandleFunc(
+		"GET /api/v0/governance/committee/votes",
+		b.handleCommitteeVotes,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/governance/committee/{cc_id}/votes",
+		b.handleCommitteeMemberVotes,
+	)
+	mux.HandleFunc("GET /api/v0/governance/proposals", b.handleProposals)
+	mux.HandleFunc(
+		"GET /api/v0/governance/proposals/{first}",
+		b.handleProposalByID,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/governance/proposals/{first}/{second}",
+		b.handleProposalTwoSegments,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/governance/proposals/{first}/{second}/{third}",
+		b.handleProposalThreeSegments,
+	)
+	mux.HandleFunc("GET /api/v0/pools/{pool_id}/votes", b.handlePoolVotes)
 	mux.HandleFunc(
 		"GET /api/v0/addresses/{address}",
 		b.handleAddress,
@@ -301,6 +365,22 @@ func (b *Blockfrost) handler() http.Handler {
 	mux.HandleFunc(
 		"GET /api/v0/accounts/{stake_address}/addresses",
 		b.handleAccountAssociatedAddresses,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/accounts/{stake_address}/history",
+		b.handleAccountStakeHistory,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/accounts/{stake_address}/mirs",
+		b.handleAccountMIRs,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/accounts/{stake_address}/addresses/assets",
+		b.handleAccountAddressAssets,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/accounts/{stake_address}/addresses/total",
+		b.handleAccountAddressTotal,
 	)
 	mux.HandleFunc(
 		"GET /api/v0/accounts/{stake_address}/delegations",

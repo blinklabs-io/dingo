@@ -41,7 +41,7 @@ func TestPoolRegistrationIdentityMigrationKeepsSyntheticReplayIdempotent(
 
 	registry, err := migrations.SQLiteRegistry()
 	require.NoError(t, err)
-	require.Len(t, registry, 46)
+	require.Len(t, registry, 48)
 	run := func(versions []migrations.Migration) {
 		runner := migrations.Runner{
 			DB:       db,
