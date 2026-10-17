@@ -31,6 +31,7 @@ import (
 	sqlitequery "github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/internal/query/sqlite"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/migrations"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -179,6 +180,7 @@ func legacyGetUtxosByRefsAsOfQuery(
 // idx_utxo_deleted_staking_amount past a handful of terms, and the tx_id-IN
 // form this test also exercises does not.
 func TestGetUtxosByRefsUsesTxIDIndex(t *testing.T) {
+	skipPlanTestUnderRace(t)
 	t.Parallel()
 	store := newMigratedSQLiteStore(t)
 	seedStakeRefLookupUtxos(t, store, 50_000, 256)
@@ -236,6 +238,7 @@ func TestGetUtxosByRefsUsesTxIDIndex(t *testing.T) {
 }
 
 func TestAddressTransactionInputQueryUsesCompositeIndex(t *testing.T) {
+	skipPlanTestUnderRace(t)
 	t.Parallel()
 	store := newMigratedSQLiteStore(t)
 	seedStakeRefLookupUtxos(t, store, 50_000, 256)
@@ -488,6 +491,7 @@ func legacyMarkUtxosDeletedAtSlotQuery(
 // batch into a scan of nearly every live UTxO. Selecting by tx_id and
 // filtering output indexes in Go keeps the lookup on tx_id_output_idx.
 func TestMarkUtxosDeletedAtSlotUsesTxIDIndex(t *testing.T) {
+	skipPlanTestUnderRace(t)
 	t.Parallel()
 	store := newMigratedSQLiteStore(t)
 	seedStakeRefLookupUtxos(t, store, 50_000, 256)
@@ -611,6 +615,7 @@ func TestMarkUtxosDeletedAtSlotUpdatesOnlyRequestedLiveRows(t *testing.T) {
 // whole-table pass moved from the first statement to the second. Statistics
 // hide it, so this test must not run ANALYZE.
 func TestMarkUtxosDeletedAtSlotUpdatePlansOnPrimaryKey(t *testing.T) {
+	skipPlanTestUnderRace(t)
 	t.Parallel()
 	store := newMigratedSQLiteStore(t)
 	seedStakeRefLookupUtxos(t, store, 50_000, 256)
@@ -1354,6 +1359,19 @@ func legacyUtxoStakeRefsQuery(
 	return query, args
 }
 
+// skipPlanTestUnderRace skips a test that asserts SQLite query plans over a
+// fixture of tens of thousands of rows inserted by one goroutine. The race
+// detector cannot inform such a test and slows it several times over;
+// go-test (Linux) and go-test (Linux, quick) run it un-instrumented. Correctness
+// tests that share the seeders keep running under race.
+func skipPlanTestUnderRace(t testing.TB) {
+	t.Helper()
+	testutil.SkipUnderRace(
+		t,
+		"large single-goroutine fixture that asserts SQLite query plans",
+	)
+}
+
 // seedStakeRefLookupUtxos inserts n live utxo rows with sequential, distinct
 // (tx_id, output_idx) pairs spread over stakeCredentials distinct stake
 // credentials, plus a handful of already-deleted rows so liveOnly has
@@ -1427,6 +1445,7 @@ func utxoIDAt(i int) models.UtxoId {
 // regardless of term count, because a plain IN list has no such competing
 // index to be lured by.
 func TestQueryUtxoStakeRefsUsesTxIDIndex(t *testing.T) {
+	skipPlanTestUnderRace(t)
 	t.Parallel()
 	store := newMigratedSQLiteStore(t)
 	seedStakeRefLookupUtxos(t, store, 50_000, 256)
@@ -2104,6 +2123,76 @@ func TestImportUtxosDeferredRewardLiveStakeRefreshRebuildsCorrectly(
 		utxo.StakingKey,
 	).Scan(&utxoStake))
 	require.Equal(t, "5000000", utxoStake)
+}
+
+func TestImportUtxosDeferredSQLiteBatchesLiveRows(t *testing.T) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+
+	existing := *utxoForInsertCacheTest(90, 0, 5_000_000)
+	existing.AddedSlot = 100
+	require.NoError(t, store.ImportUtxos([]models.Utxo{existing}, nil))
+	markUtxoSpentDirect(t, store, existing.TxId, 0, importConflictHash32(0xaa), 150)
+
+	const outputCount = 33
+	utxos := make([]models.Utxo, outputCount)
+	utxos[0] = existing
+	for i := 1; i < len(utxos); i++ {
+		utxos[i] = *utxoForInsertCacheTest(byte(100+i), 0, 1_000_000)
+	}
+	utxos[1].Address = []byte("test-address")
+	utxos[1].Assets = []models.Asset{{
+		Name:        []byte("token"),
+		PolicyId:    bytes.Repeat([]byte{0xab}, 28),
+		Fingerprint: []byte("asset1"),
+		Amount:      types.Uint64(9),
+	}}
+
+	require.NoError(t, store.ImportUtxosDeferredRewardLiveStakeRefresh(utxos, nil))
+	for i := range utxos {
+		got, err := store.GetUtxo(utxos[i].TxId, utxos[i].OutputIdx, nil)
+		require.NoError(t, err)
+		require.NotNil(t, got)
+	}
+	deletedSlot, spentAtTxID := utxoDeletedAndSpender(t, store, existing.TxId, 0)
+	require.Zero(t, deletedSlot)
+	require.Nil(t, spentAtTxID)
+
+	var assetCount, addressCount int
+	require.NoError(t, store.writeDB.QueryRow(
+		"SELECT COUNT(*) FROM asset",
+	).Scan(&assetCount))
+	require.NoError(t, store.writeDB.QueryRow(
+		"SELECT COUNT(*) FROM utxo_address",
+	).Scan(&addressCount))
+	require.Equal(t, 1, assetCount)
+	require.Equal(t, 1, addressCount)
+}
+
+// TestImportUtxosDeferredSQLiteDoesNotMutateInput proves the batched path
+// leaves the caller's models and their assets as it received them.
+func TestImportUtxosDeferredSQLiteDoesNotMutateInput(t *testing.T) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+
+	utxos := []models.Utxo{
+		*utxoForInsertCacheTest(120, 0, 1_000_000),
+		*utxoForInsertCacheTest(121, 0, 1_000_000),
+	}
+	utxos[0].Address = []byte("test-address")
+	utxos[0].Assets = []models.Asset{{
+		Name:        []byte("token"),
+		PolicyId:    bytes.Repeat([]byte{0xab}, 28),
+		Fingerprint: []byte("asset1"),
+		Amount:      types.Uint64(9),
+	}}
+
+	require.NoError(t, store.ImportUtxosDeferredRewardLiveStakeRefresh(utxos, nil))
+	for i := range utxos {
+		require.Zero(t, utxos[i].ID)
+	}
+	require.Zero(t, utxos[0].Assets[0].ID)
+	require.Zero(t, utxos[0].Assets[0].UtxoID)
 }
 
 // TestImportUtxosBoundsTxScopedStatementRetentionInOneTransaction exercises
