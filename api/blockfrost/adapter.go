@@ -57,11 +57,15 @@ import (
 )
 
 var (
-	ErrInvalidAddress     = errors.New("invalid address")
-	ErrAddressNotFound    = errors.New("address not found")
-	ErrInvalidBlockID     = errors.New("invalid block id")
-	ErrBlockNotFound      = errors.New("block not found")
-	ErrEpochNotFound      = errors.New("epoch not found")
+	ErrInvalidAddress  = errors.New("invalid address")
+	ErrAddressNotFound = errors.New("address not found")
+	ErrInvalidBlockID  = errors.New("invalid block id")
+	ErrBlockNotFound   = errors.New("block not found")
+	ErrEpochNotFound   = errors.New("epoch not found")
+	// ErrHistoryNotRetained reports a historical query whose source rows
+	// this node no longer holds, as opposed to a query whose answer is
+	// genuinely empty.
+	ErrHistoryNotRetained = errors.New("history not retained")
 	ErrAssetNotFound      = errors.New("asset not found")
 	ErrDRepNotFound       = errors.New("drep not found")
 	ErrInvalidTransaction = errors.New("invalid transaction")
@@ -147,6 +151,10 @@ type NodeAdapter struct {
 	ledgerState *ledger.LedgerState
 	submitter   TransactionSubmitter
 	evaluator   transactionEvaluator
+	// slotBlocks overrides how a vote's block is loaded. Tests set it to
+	// serve transactions that carry voting procedures without building a
+	// body-hash-valid block; nil reads the block from the chain.
+	slotBlocks func(ctx context.Context, slot uint64) (*slotBlock, error)
 	// slotTime overrides the ledger's slot-to-time conversion. It is nil in
 	// production. The ledger converter needs the epoch cache a running node
 	// builds, which a store-backed test adapter has no way to populate.
@@ -627,70 +635,7 @@ func (a *NodeAdapter) CurrentEpoch() (
 			err,
 		)
 	}
-	startTime, err := a.ledgerState.SlotToTime(tipEpoch.StartSlot)
-	if err != nil {
-		return EpochInfo{}, fmt.Errorf(
-			"get epoch start time for slot %d: %w",
-			tipEpoch.StartSlot,
-			err,
-		)
-	}
-	endTime := epochEndTime(startTime, tipEpoch)
-	blockCount, firstBlockSlot, lastBlockSlot, err := a.ledgerState.CountBlocksInSlotRange(
-		tipEpoch.StartSlot,
-		tip.Point.Slot,
-	)
-	if err != nil {
-		return EpochInfo{}, fmt.Errorf(
-			"count epoch blocks for slots %d-%d: %w",
-			tipEpoch.StartSlot,
-			tip.Point.Slot,
-			err,
-		)
-	}
-	txCount, err := a.ledgerState.CountTransactionsInSlotRange(
-		tipEpoch.StartSlot,
-		tip.Point.Slot,
-	)
-	if err != nil {
-		return EpochInfo{}, fmt.Errorf(
-			"count epoch transactions for slots %d-%d: %w",
-			tipEpoch.StartSlot,
-			tip.Point.Slot,
-			err,
-		)
-	}
-	firstBlockTime := int64(0)
-	lastBlockTime := int64(0)
-	if blockCount > 0 {
-		firstTime, err := a.ledgerState.SlotToTime(firstBlockSlot)
-		if err != nil {
-			return EpochInfo{}, fmt.Errorf(
-				"get first epoch block time for slot %d: %w",
-				firstBlockSlot,
-				err,
-			)
-		}
-		lastTime, err := a.ledgerState.SlotToTime(lastBlockSlot)
-		if err != nil {
-			return EpochInfo{}, fmt.Errorf(
-				"get last epoch block time for slot %d: %w",
-				lastBlockSlot,
-				err,
-			)
-		}
-		firstBlockTime = firstTime.Unix()
-		lastBlockTime = lastTime.Unix()
-	}
-	return EpochInfo{
-		Epoch:          tipEpoch.EpochId,
-		StartTime:      startTime.Unix(),
-		EndTime:        endTime.Unix(),
-		FirstBlockTime: firstBlockTime,
-		LastBlockTime:  lastBlockTime,
-		BlockCount:     blockCount,
-		TxCount:        txCount,
-	}, nil
+	return a.epochInfoFor(context.Background(), tipEpoch, tip.Point.Slot)
 }
 
 // CurrentProtocolParams returns the current protocol

@@ -627,8 +627,13 @@ RETURNING id`
 
 const governanceVoteHistoryInsertQuery = `
 INSERT INTO governance_vote_history (
-    vote_id, transition_slot, vote, anchor_url, anchor_hash
-) VALUES (?, ?, ?, ?, ?)`
+    vote_id, transition_slot, vote, anchor_url, anchor_hash, tx_hash,
+    cert_index
+) VALUES (?, ?, ?, ?, ?, ?, ?)`
+
+const governanceVoteCastExistsQuery = `
+SELECT COUNT(*) FROM governance_vote_history
+WHERE vote_id = ? AND tx_hash = ? AND cert_index = ?`
 
 func (s *Store) SetGovernanceVote(
 	vote *models.GovernanceVote,
@@ -677,18 +682,40 @@ func (s *Store) SetGovernanceVote(
 			}
 			vote.ID = id
 
-			// Record a history entry whenever this call changes the
-			// effective vote (including the first cast, where no previous
-			// row exists), so a later rollback that lands between two
-			// replacements can restore the value that was actually current
-			// at the target slot instead of losing it.
-			unchanged := previousErr == nil &&
-				previousVote.Valid &&
-				previousVote.Byte == vote.Vote &&
-				previousAnchorURL.String == vote.AnchorURL &&
-				bytes.Equal(previousAnchorHash, vote.AnchorHash)
-			if unchanged {
-				return nil
+			// History keeps the value current at every slot, so a rollback
+			// landing between two replacements restores the right one. A
+			// located cast is recorded even when it repeats the value,
+			// because the API lists every cast; its position makes a replay
+			// of the same block a no-op. A write with no position records
+			// only a change of value.
+			var castTxHash []byte
+			var castCertIndex any
+			if len(vote.CastTxHash) > 0 {
+				var existing int
+				if err := s.queryRowCached(
+					ctx,
+					db,
+					governanceVoteCastExistsQuery,
+					id,
+					vote.CastTxHash,
+					vote.CastCertIndex,
+				).Scan(&existing); err != nil {
+					return err
+				}
+				if existing > 0 {
+					return nil
+				}
+				castTxHash = vote.CastTxHash
+				castCertIndex = vote.CastCertIndex
+			} else {
+				unchanged := previousErr == nil &&
+					previousVote.Valid &&
+					previousVote.Byte == vote.Vote &&
+					previousAnchorURL.String == vote.AnchorURL &&
+					bytes.Equal(previousAnchorHash, vote.AnchorHash)
+				if unchanged {
+					return nil
+				}
 			}
 			transitionSlot := vote.AddedSlot
 			if vote.VoteUpdatedSlot != nil {
@@ -703,6 +730,8 @@ func (s *Store) SetGovernanceVote(
 				vote.Vote,
 				vote.AnchorURL,
 				vote.AnchorHash,
+				castTxHash,
+				castCertIndex,
 			)
 			return err
 		},
