@@ -1464,7 +1464,11 @@ type DatabaseLifecycleConfig struct {
 	// payloads. It is required for cloud snapshot creation and restore.
 	// Local-only snapshots and restores may use the unkeyed checksum only
 	// when this is unset. Every node that restores another's snapshots must
-	// hold the same secret.
+	// hold the same secret. The file must be a regular, non-symlink file of at
+	// most 1 KiB. Ownership and access are checked using the platform's
+	// controls: Unix requires the current user and no group/other access;
+	// Windows permits the current user or BUILTIN Administrators as owner and
+	// applies its restricted DACL rules.
 	SnapshotTrustKeyFile string `yaml:"snapshotTrustKeyFile"           envconfig:"DINGO_DB_LIFECYCLE_SNAPSHOT_TRUST_KEY_FILE"`
 	// SnapshotMaxCommitPause bounds how long a snapshot (manual or
 	// automatic) may hold the commit barrier once acquired. A snapshot still
