@@ -28,59 +28,11 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 )
 
-// ErrUnsafeSnapshotDigest reports an aggregator-supplied digest that cannot be
-// used to name a directory inside the download directory.
-var ErrUnsafeSnapshotDigest = errors.New("unsafe snapshot digest")
-
-// validateSnapshotDigest refuses a digest that would not stay one element deep
-// inside the download directory.
-//
-// The digest is the aggregator's string and v1 has nothing to check it
-// against — no computed hash, the way v2 recomputes an artifact's — yet it
-// names two directories, `immutable-<digest>` and `ancillary-<digest>`, that
-// get extracted into and later removed with os.RemoveAll. Joining it raw does
-// not keep it inside: a leading separator makes the `immutable-` prefix its own
-// path element, and a following `..` then pops it, so `/../..` names the
-// download directory's grandparent.
-//
-// Refused rather than reduced. A digest is an identifier, and one that is not a
-// single path element is not a digest — reducing it would silently give two
-// different snapshots the same cache key, which is how a stale extraction gets
-// reused for the wrong artifact.
-//
-// validateSnapshotIdentity runs ahead of this and is stricter today: a digest
-// of 64 hex characters holds no separator. This stays as the narrower rule it
-// is stating, because the two answer different questions — that one asks
-// whether the digest has the shape a digest has, this one whether it can name a
-// directory. A format rule relaxed for a private aggregator, the way the
-// network name already is, would take the first answer with it and not this
-// one.
-func validateSnapshotDigest(digest string) error {
-	if digest == "" {
-		return fmt.Errorf("%w: snapshot has no digest", ErrUnsafeSnapshotDigest)
-	}
-	if digest == "." || digest == ".." ||
-		strings.ContainsRune(digest, '/') ||
-		strings.ContainsRune(digest, '\\') ||
-		strings.ContainsRune(digest, filepath.Separator) {
-		return fmt.Errorf(
-			"%w: %q is not a single path element",
-			ErrUnsafeSnapshotDigest, digest,
-		)
-	}
-	return nil
-}
-
 // Mithril artifact backends.
 const (
-	// BackendV1 restores from the legacy full-database snapshot
-	// archives (CardanoImmutableFilesFull, /artifact/snapshots).
-	// Upstream Mithril is phasing this artifact type out.
-	BackendV1 = "v1"
 	// BackendV2 restores from incremental Cardano database artifacts
 	// (CardanoDatabase, /artifact/cardano-database): per-immutable
 	// archives verified against the certified merkle root.
@@ -93,7 +45,7 @@ const (
 // validation whitelist (which cannot import this package) verifies
 // parity against it.
 func AcceptedBackends() []string {
-	return []string{BackendV1, BackendV2}
+	return []string{BackendV2}
 }
 
 // BootstrapConfig holds configuration for the Mithril bootstrap
@@ -102,10 +54,9 @@ type BootstrapConfig struct {
 	// Network is the Cardano network name (e.g., "mainnet",
 	// "preprod", "preview").
 	Network string
-	// Backend selects the Mithril artifact backend: BackendV1
-	// downloads the legacy full-database tarball, BackendV2 restores
+	// Backend selects the Mithril artifact backend. BackendV2 restores
 	// per-immutable archives verified against the certified merkle
-	// root. Empty selects BackendV2.
+	// root and is the only backend; empty selects it.
 	Backend string
 	// AggregatorURL overrides the default aggregator URL for the
 	// network. If empty, the default URL for the network is used.
@@ -174,8 +125,8 @@ type BootstrapConfig struct {
 	// resume against, including the artifact-keyed download cache.
 	OnArtifactSelected func(SelectedArtifact) error
 	// PinnedDigest, when set, selects that exact artifact from the aggregator
-	// instead of the latest one: the v2 backend resolves it as a Cardano
-	// database artifact hash and the v1 backend as a snapshot digest. A resumed
+	// instead of the latest one: it is resolved as a Cardano database
+	// artifact hash. A resumed
 	// Mithril sync sets it from the artifact pin the interrupted run recorded,
 	// so the resume imports the artifact its partial database rows and phase
 	// checkpoints belong to. Empty selects the latest artifact, the normal
@@ -204,8 +155,8 @@ type BootstrapConfig struct {
 
 // SelectedArtifact is the identity of the aggregator artifact a bootstrap run
 // resolved, reported to BootstrapConfig.OnArtifactSelected before any download
-// begins. Digest is the v2 Cardano database artifact hash or the v1 snapshot
-// digest, matching what BootstrapConfig.PinnedDigest accepts for that backend.
+// begins. Digest is the Cardano database artifact hash, matching what
+// BootstrapConfig.PinnedDigest accepts.
 type SelectedArtifact struct {
 	Backend         string
 	Network         string
@@ -245,8 +196,7 @@ type ContiguousChunk struct {
 type VerificationMode uint8
 
 const (
-	// VerificationModeStructural verifies certificate chain linkage and leaf
-	// binding to the requested snapshot digest.
+	// VerificationModeStructural verifies certificate chain linkage.
 	VerificationModeStructural VerificationMode = iota + 1
 	// VerificationModeSTM verifies the structural certificate chain and the
 	// aggregate multi-signature of each non-genesis certificate.
@@ -260,7 +210,6 @@ type CertificateChainVerificationResult struct {
 	LeafCertificate    *Certificate
 	GenesisCertificate *Certificate
 	SignedEntityKind   string
-	SnapshotDigest     string
 }
 
 func normalizeBackend(backend string) string {
@@ -289,7 +238,7 @@ type BootstrapResult struct {
 	// handle refers to the directory that was vetted, and keeps referring to it
 	// however the name is repointed.
 	//
-	// Both bootstrap paths set it. A result without it did not come from a
+	// The bootstrap always sets it. A result without it did not come from a
 	// vetted lookup, and loading refuses rather than falling back to the
 	// pathname — a silent fallback would reinstate exactly the open this
 	// replaces.
@@ -297,8 +246,7 @@ type BootstrapResult struct {
 	// ImmutableDigests is the certified SHA-256 of every file in ImmutableDir,
 	// keyed by the name beneath it ("00000.chunk"). Set by the v2 backend,
 	// which downloads each immutable trio against a digest list covered by the
-	// certificate's merkle root; nil for v1, which certifies one archive
-	// rather than the files inside it and so has nothing to re-check against.
+	// certificate's merkle root.
 	//
 	// It is carried beside ImmutableRoot because the two answer different
 	// questions and both have to be answered. The handle says the load reads
@@ -324,12 +272,9 @@ type BootstrapResult struct {
 	// AncillaryVerified reports that the ancillary tree's contents were checked
 	// against the signed ancillary manifest (a verified v2 bootstrap).
 	//
-	// The ledger-state import will not look past a verified tree that yields no
-	// state. Falling through would move the import from a tree covered by a
-	// signature to one that is not, and an attacker who can empty the first can
-	// then choose the second. Where nothing was verified there is no such
-	// downgrade, and the fallback stays available — v1 keeps its ledger state
-	// in the main archive, so looking there is how that layout works at all.
+	// The ledger-state import accepts a verified tree's state even when it is
+	// newer than the certified tip, and refuses a verified tree that yields no
+	// state at all.
 	AncillaryVerified bool
 	// AncillaryDigests is the signed ancillary manifest's digest map: every
 	// file the ancillary key vouched for, keyed by its slash-separated path
@@ -343,17 +288,12 @@ type BootstrapResult struct {
 	AncillaryDigests map[string]string
 	// ExtractRoot is an open handle on ExtractDir.
 	//
-	// The ledger-state import falls back to the main extraction directory when
-	// the ancillary archive carried no ledger state (v1 snapshots keep it in
-	// db/ledger). ExtractDir is derived inside the download directory like
-	// everything else here, so that fallback reads through a handle too rather
-	// than resolving a name nothing vetted.
+	// ExtractDir is derived inside the download directory like everything else
+	// here, so it is held through a handle rather than resolved by name.
 	ExtractRoot *os.Root
 	// AncillaryArchivePath is the path to the downloaded ancillary
 	// archive file. Empty if no ancillary data was downloaded.
 	AncillaryArchivePath string
-	// ArchivePath is the path to the downloaded archive file.
-	ArchivePath string
 	// TempDir is the auto-created temporary directory that holds
 	// all downloaded and extracted files. Set only when
 	// BootstrapConfig.DownloadDir was empty. Cleanup() removes it
@@ -361,11 +301,9 @@ type BootstrapResult struct {
 	TempDir string
 }
 
-// Bootstrap orchestrates the full Mithril bootstrap flow:
-//  1. Fetch the latest snapshot from the aggregator
-//  2. Download the snapshot archive
-//  3. Extract the archive to obtain the ImmutableDB files
-//  4. Return the path for loading with existing immutable DB logic
+// Bootstrap validates cfg, resolves the aggregator URL, and delegates to the
+// v2 backend, which restores the ImmutableDB trio files and the ancillary
+// ledger state from the aggregator's incremental database artifacts.
 //
 // The caller is responsible for invoking the immutable DB load using
 // the returned ImmutableDir path. If CleanupAfterLoad is true, the
@@ -424,624 +362,14 @@ func Bootstrap(
 		"backend", cfg.Backend,
 	)
 
-	// Dispatch to the selected artifact backend. The remainder of
-	// this function implements the legacy v1 (full snapshot
-	// archive) flow.
-	switch cfg.Backend {
-	case BackendV1:
-		// Continue with the legacy v1 flow below
-	case BackendV2:
-		return bootstrapV2(ctx, cfg, aggregatorURL)
-	default:
+	if cfg.Backend != BackendV2 {
 		return nil, fmt.Errorf(
-			"unsupported Mithril backend %q (expected %q or %q)",
+			"unsupported Mithril backend %q (expected %q)",
 			cfg.Backend,
-			BackendV1,
 			BackendV2,
 		)
 	}
-
-	// Step 1: Fetch the selected snapshot -- the pinned one for a resumed sync,
-	// otherwise the latest the aggregator publishes.
-	client := newMithrilClient(aggregatorURL, cfg.AllowInsecureHTTP)
-	var snapshot *SnapshotListItem
-	var err error
-	if cfg.PinnedDigest != "" {
-		snapshot, err = client.GetSnapshot(ctx, cfg.PinnedDigest)
-		if err != nil {
-			return nil, fmt.Errorf(
-				"fetching pinned snapshot %s: %w",
-				cfg.PinnedDigest,
-				err,
-			)
-		}
-		if snapshot != nil && snapshot.Digest != cfg.PinnedDigest {
-			return nil, fmt.Errorf(
-				"aggregator returned snapshot %s for pinned digest %s",
-				snapshot.Digest,
-				cfg.PinnedDigest,
-			)
-		}
-	} else {
-		snapshot, err = client.GetLatestSnapshot(ctx)
-		if err != nil {
-			return nil, fmt.Errorf(
-				"fetching latest snapshot: %w",
-				err,
-			)
-		}
-	}
-	if snapshot == nil {
-		return nil, errors.New("aggregator returned no snapshot")
-	}
-	if err := validateSnapshotIdentity(
-		cfg.Network, snapshot.Network, snapshot.Digest,
-	); err != nil {
-		return nil, fmt.Errorf("validating snapshot metadata: %w", err)
-	}
-	if cfg.Network != "" && snapshot.Network != "" &&
-		cfg.Network != snapshot.Network {
-		return nil, fmt.Errorf(
-			"mithril snapshot network mismatch: requested=%s snapshot=%s",
-			cfg.Network,
-			snapshot.Network,
-		)
-	}
-	// Before anything is derived from it. The digest names the extraction and
-	// ancillary directories, so a refusal that came after the first join would
-	// already have said where they are. v2 gets this from recomputing the
-	// artifact hash, which constrains it to hex; v1 has no such check.
-	if err := validateSnapshotDigest(snapshot.Digest); err != nil {
-		return nil, err
-	}
-
-	cfg.Logger.Info(
-		"found latest snapshot",
-		"component", "mithril",
-		"network", snapshot.Network,
-		"digest", snapshot.Digest,
-		"snapshot_hash", snapshot.Digest,
-		"epoch", snapshot.Beacon.Epoch,
-		"immutable_file_number", snapshot.Beacon.ImmutableFileNumber,
-		"size", snapshot.Size,
-	)
-	cfg.Logger = cfg.Logger.With(
-		"network", snapshot.Network,
-		"snapshot_hash", snapshot.Digest,
-		"snapshot_epoch", snapshot.Beacon.Epoch,
-		"snapshot_immutable_file_number", snapshot.Beacon.ImmutableFileNumber,
-	)
-	cfg.OnProgress = withProgressContext(
-		cfg.OnProgress, "snapshot_archive", snapshot.Digest,
-	)
-
-	if len(snapshot.Locations) == 0 {
-		return nil, fmt.Errorf(
-			"snapshot %s has no download locations",
-			snapshot.Digest,
-		)
-	}
-
-	// Step 1b: Verify certificate chain (optional)
-	if cfg.VerifyCertificateChain {
-		if snapshot.CertificateHash == "" {
-			return nil, fmt.Errorf(
-				"certificate chain verification requested "+
-					"but snapshot %s has no certificate hash",
-				snapshot.Digest,
-			)
-		}
-		cfg.Logger.Info(
-			"verifying certificate chain",
-			"component", "mithril",
-			"certificate_hash", snapshot.CertificateHash,
-		)
-		verificationResult, err := VerifyCertificateChainWithMode(
-			ctx,
-			client,
-			snapshot.CertificateHash,
-			snapshot.Digest,
-			VerificationModeSTM,
-		)
-		if err != nil {
-			return nil, fmt.Errorf(
-				"certificate chain verification failed: %w",
-				err,
-			)
-		}
-		if verificationResult == nil ||
-			verificationResult.GenesisCertificate == nil {
-			return nil, errors.New(
-				"verified certificate chain has no genesis certificate",
-			)
-		}
-		if err := VerifyGenesisCertificateSignature(
-			verificationResult.GenesisCertificate,
-			cfg.GenesisVerificationKey,
-		); err != nil {
-			return nil, fmt.Errorf(
-				"genesis certificate verification failed: %w",
-				err,
-			)
-		}
-		verificationMaterial, err := BuildVerificationMaterial(
-			ctx,
-			client,
-			verificationResult,
-		)
-		if err != nil {
-			return nil, fmt.Errorf(
-				"building verification material failed: %w",
-				err,
-			)
-		}
-		if err := ValidateVerificationMaterial(verificationMaterial); err != nil {
-			return nil, fmt.Errorf(
-				"verification material validation failed: %w",
-				err,
-			)
-		}
-		if verificationResult.SignedEntityKind !=
-			signedEntityTypeCardanoImmutableFilesFull {
-			return nil, fmt.Errorf(
-				"unexpected signed entity kind for snapshot bootstrap: %s",
-				verificationResult.SignedEntityKind,
-			)
-		}
-		if snapshot.Network != "" &&
-			(verificationResult.LeafCertificate.Metadata.Network == "" ||
-				verificationResult.LeafCertificate.Metadata.Network != snapshot.Network) {
-			return nil, fmt.Errorf(
-				"certificate network mismatch: certificate=%s snapshot=%s",
-				verificationResult.LeafCertificate.Metadata.Network,
-				snapshot.Network,
-			)
-		}
-		if beacon := verificationResult.LeafCertificate.SignedEntityType.
-			CardanoImmutableFilesFull(); beacon != nil {
-			if beacon.Epoch != snapshot.Beacon.Epoch ||
-				beacon.ImmutableFileNumber != snapshot.Beacon.ImmutableFileNumber {
-				return nil, fmt.Errorf(
-					"signed entity beacon mismatch: certificate=(epoch=%d, immutable=%d) snapshot=(epoch=%d, immutable=%d)",
-					beacon.Epoch,
-					beacon.ImmutableFileNumber,
-					snapshot.Beacon.Epoch,
-					snapshot.Beacon.ImmutableFileNumber,
-				)
-			}
-		}
-		cfg.Logger.Info(
-			"certificate chain verified",
-			"component", "mithril",
-		)
-		// The legacy v1 artifact has no signed ancillary manifest. It can
-		// authenticate its immutable tarball, but not the ledger state that
-		// would be imported with it, so it cannot satisfy the verified fast
-		// bootstrap trust boundary.
-		return nil, errors.New(
-			"verified Mithril v1 bootstrap is unsupported because it has no signed ancillary state; use the v2 backend",
-		)
-	}
-
-	// Report the selected artifact before the first download so the caller can
-	// pin it durably; an interruption anywhere below then has an identity to
-	// resume against.
-	if cfg.OnArtifactSelected != nil {
-		if err := cfg.OnArtifactSelected(SelectedArtifact{
-			Backend:         cfg.Backend,
-			Network:         snapshot.Network,
-			Digest:          snapshot.Digest,
-			Beacon:          snapshot.Beacon,
-			CertificateHash: snapshot.CertificateHash,
-		}); err != nil {
-			return nil, err
-		}
-	}
-
-	// Step 2: Set up download directory
-	downloadDir := cfg.DownloadDir
-	createdTempDir := false
-	if downloadDir == "" {
-		var err error
-		downloadDir, err = os.MkdirTemp("", "dingo-mithril-*")
-		if err != nil {
-			return nil, fmt.Errorf(
-				"creating temp directory: %w",
-				err,
-			)
-		}
-		createdTempDir = true
-	}
-	// Clean up temp dir on error to avoid leaking disk space
-	success := false
-	defer func() {
-		if !success && createdTempDir {
-			os.RemoveAll(downloadDir)
-		}
-	}()
-
-	// Step 3: Download snapshot archive (skip if already complete)
-	archiveFilename := filepath.Base(fmt.Sprintf(
-		"%s-%s.tar.zst",
-		snapshot.Network,
-		truncateDigest(snapshot.Digest),
-	))
-	archivePath := filepath.Join(downloadDir, archiveFilename)
-	snapshotCacheKey := snapshot.Digest
-
-	if err := (DownloadConfig{
-		MaxBytes: cfg.DownloadMaxBytes, ExpectedSize: snapshot.Size,
-	}).Validate(); err != nil {
-		return nil, err
-	}
-	if isFileComplete(archivePath, snapshot.Size) {
-		cfg.Logger.Info(
-			"snapshot archive already downloaded, skipping",
-			"component", "mithril",
-			"path", archivePath,
-		)
-	} else {
-		var dlErr error
-		for i, loc := range snapshot.Locations {
-			archivePath, dlErr = DownloadSnapshot(
-				ctx, DownloadConfig{
-					URL:                 loc,
-					DestDir:             downloadDir,
-					Filename:            archiveFilename,
-					ExpectedSize:        snapshot.Size,
-					MaxBytes:            cfg.DownloadMaxBytes,
-					Logger:              cfg.Logger,
-					OnProgress:          cfg.OnProgress,
-					IdleTimeout:         cfg.DownloadIdleTimeout,
-					MaxIdleRetries:      cfg.DownloadMaxIdleRetries,
-					MaxTransientRetries: cfg.DownloadMaxTransientRetries,
-					AllowInsecureHTTP:   cfg.AllowInsecureHTTP,
-				},
-			)
-			if dlErr == nil {
-				break
-			}
-			cfg.Logger.Warn(
-				"download location failed, trying next",
-				"component", "mithril",
-				"location", i+1,
-				"total", len(snapshot.Locations),
-				"error", dlErr,
-			)
-		}
-		if dlErr != nil {
-			return nil, fmt.Errorf(
-				"downloading snapshot (all %d locations failed): %w",
-				len(snapshot.Locations),
-				dlErr,
-			)
-		}
-	}
-
-	// Steps 4+5: Extract main archive and download ancillary in
-	// parallel. These write to separate directories (immutable/
-	// vs ancillary/) so they are independent.
-	extractDir := filepath.Join(
-		downloadDir,
-		filepath.Base("immutable-"+snapshotCacheKey),
-	)
-	var ancillaryTree *vettedDir
-	var ancillaryArchivePath string
-	// Closed only when the result that would own it is never returned; on
-	// success it is carried to the ledger-state import and released by Cleanup.
-	defer func() {
-		if !success {
-			ancillaryTree.Close()
-		}
-	}()
-
-	// Launch ancillary download concurrently (non-fatal if it fails).
-	// Always wait for the goroutine before returning, even on error,
-	// to prevent goroutine leaks and races with temp dir cleanup.
-	// Use a derived context so the goroutine is promptly cancelled
-	// if the main extraction fails. Defers execute in LIFO order:
-	// ancCancel (registered last) runs first, signalling the
-	// goroutine to stop, then ancWg.Wait blocks until it exits.
-	ancCtx, ancCancel := context.WithCancel(ctx)
-	var ancWg sync.WaitGroup
-	defer ancWg.Wait()
-	defer ancCancel()
-	if len(snapshot.AncillaryLocations) > 0 {
-		ancWg.Go(func() {
-			candidateDir := filepath.Join(
-				downloadDir,
-				filepath.Base("ancillary-"+snapshotCacheKey),
-			)
-			if cached := ledgerDir(candidateDir); cached != nil {
-				cfg.Logger.Info(
-					"ancillary data already "+
-						"extracted, skipping",
-					"component", "mithril",
-					"path", cached.Path(),
-				)
-				ancillaryTree = cached
-				// Only set archive path if the file still
-				// exists (it may have been cleaned up after
-				// a prior successful extraction).
-				candidateArchive := filepath.Join(
-					downloadDir,
-					filepath.Base(fmt.Sprintf(
-						"%s-%s-ancillary.tar.zst",
-						snapshot.Network,
-						truncateDigest(
-							snapshot.Digest,
-						),
-					)),
-				)
-				if _, err := os.Stat(candidateArchive); err == nil {
-					ancillaryArchivePath = candidateArchive
-				}
-				return
-			}
-			tree, archPath, ancErr := downloadAncillary(
-				ancCtx, cfg, snapshot, downloadDir,
-			)
-			// Recorded whether or not the tree turned out usable, so a
-			// downloaded archive still gets cleaned up.
-			if archPath != "" {
-				ancillaryArchivePath = archPath
-			}
-			if ancErr != nil {
-				cfg.Logger.Warn(
-					"failed to download ancillary "+
-						"data, continuing without "+
-						"ledger state",
-					"component", "mithril",
-					"error", ancErr,
-				)
-				return
-			}
-			// The handle the tree was vetted through, carried across
-			// rather than reopened from its name here.
-			ancillaryTree = tree
-		})
-	}
-
-	// Step 4: Extract main archive (skip if already extracted)
-	//
-	// One handle on the extraction directory, and both trees taken from it: the
-	// immutable DB below it, and — when the ancillary archive carries no ledger
-	// state — the ledger state below it too. Vetting the directory twice would
-	// be two resolutions of one name, so the ImmutableDB that was accepted and
-	// the ledger state that gets imported could come from different trees.
-	//
-	// Both handles are held from here until Cleanup, and closed on every error
-	// path below, since the result that would own them is never returned.
-	var extractTree *os.Root
-	var immutableTree *vettedDir
-	defer func() {
-		if !success {
-			immutableTree.Close()
-			if extractTree != nil {
-				_ = extractTree.Close()
-			}
-		}
-	}()
-
-	// Absent on a first run, which is not an error — it means no cached tree.
-	if extractTree, err = openVerifiedDir(extractDir); err == nil {
-		immutableTree = findImmutableDirIn(extractTree, extractDir)
-	}
-	if immutableTree != nil {
-		cfg.Logger.Info(
-			"snapshot already extracted, skipping",
-			"component", "mithril",
-			"immutable_dir", immutableTree.Path(),
-		)
-	} else {
-		// Reopened after extracting, not before: publication renames a staging
-		// directory onto extractDir, so a handle taken beforehand would refer
-		// to the directory that rename replaced.
-		if extractTree != nil {
-			_ = extractTree.Close()
-			extractTree = nil
-		}
-		// Replace: a previous run may have left a partial extraction
-		// here, which the lookup above did not accept.
-		_, err = ExtractArchive(
-			ctx,
-			archivePath,
-			extractDir,
-			cfg.Logger.With(
-				"phase", "snapshot_extraction",
-				"artifact", "snapshot_archive",
-			),
-			WithReplaceDestination(),
-		)
-		if err != nil {
-			return nil, fmt.Errorf(
-				"extracting snapshot archive: %w",
-				err,
-			)
-		}
-
-		if extractTree, err = openVerifiedDir(extractDir); err != nil {
-			return nil, fmt.Errorf(
-				"verifying extraction directory %s: %w", extractDir, err,
-			)
-		}
-		immutableTree = findImmutableDirIn(extractTree, extractDir)
-		if immutableTree == nil {
-			return nil, fmt.Errorf(
-				"immutable DB directory not found in "+
-					"extracted archive at %s",
-				extractDir,
-			)
-		}
-	}
-
-	// Wait for ancillary download to finish (also deferred above
-	// for the error-return path; calling Wait twice is safe).
-	ancWg.Wait()
-
-	cfg.Logger.Info(
-		"Mithril bootstrap ready for loading",
-		"component", "mithril",
-		"immutable_dir", immutableTree.Path(),
-		"ancillary_dir", ancillaryTree.Path(),
-	)
-
-	success = true
-	result := &BootstrapResult{
-		Snapshot:             snapshot,
-		ImmutableDir:         immutableTree.Path(),
-		ImmutableRoot:        immutableTree.Root(),
-		ExtractDir:           extractDir,
-		ExtractRoot:          extractTree,
-		AncillaryDir:         ancillaryTree.Path(),
-		AncillaryRoot:        ancillaryTree.Root(),
-		ArchivePath:          archivePath,
-		AncillaryArchivePath: ancillaryArchivePath,
-	}
-	if createdTempDir {
-		result.TempDir = downloadDir
-	}
-	return result, nil
-}
-
-// downloadAncillary downloads and extracts the ancillary archive
-// which contains the ledger state in UTxO-HD format. It returns the extracted
-// tree as the handle it was vetted through.
-//
-// v1 has no ancillary manifest, so nothing here is signature-bound the way the
-// v2 path is. The handle is still what is returned rather than the directory's
-// name: a function that vets a tree, drops the handle and hands back a name
-// invites the caller to reopen it and believe the check applies to what they
-// reopened — which is exactly how the v2 path went wrong once. The caller
-// closes the result.
-func downloadAncillary(
-	ctx context.Context,
-	cfg BootstrapConfig,
-	snapshot *SnapshotListItem,
-	downloadDir string,
-) (tree *vettedDir, archivePath string, err error) {
-	if len(snapshot.AncillaryLocations) == 0 {
-		return nil, "", errors.New(
-			"snapshot has no ancillary locations",
-		)
-	}
-
-	cfg.Logger.Info(
-		"downloading ancillary data (ledger state)",
-		"component", "mithril",
-		"size", snapshot.AncillarySize,
-		"phase", "ancillary_download",
-		"artifact", "ancillary_ledger_state",
-		"destination", downloadDir,
-	)
-
-	ancillaryFilename := filepath.Base(fmt.Sprintf(
-		"%s-%s-ancillary.tar.zst",
-		snapshot.Network,
-		truncateDigest(snapshot.Digest),
-	))
-
-	// Where the download lands whether or not it completes: DownloadSnapshot
-	// resumes, so a failed attempt deliberately leaves a partial file here.
-	// Reporting the path with every error below is what lets Cleanup remove it
-	// — otherwise a failed ancillary download leaves a file behind in an
-	// operator-supplied download directory, which no temp-dir removal sweeps.
-	//
-	// Asked of the downloader rather than assembled here. The filename carries
-	// the network name, which comes from the aggregator, and the downloader
-	// reduces it to its last element before writing. Joining it raw would name
-	// a different file for a network like "../../etc" — one outside the
-	// download directory, which Cleanup would then remove.
-	ancillaryDest := downloadDestinationPath(DownloadConfig{
-		DestDir:  downloadDir,
-		Filename: ancillaryFilename,
-	})
-
-	var ancillaryPath string
-	for i, loc := range snapshot.AncillaryLocations {
-		ancillaryPath, err = DownloadSnapshot(
-			ctx, DownloadConfig{
-				URL:          loc,
-				DestDir:      downloadDir,
-				Filename:     ancillaryFilename,
-				ExpectedSize: snapshot.AncillarySize,
-				MaxBytes:     cfg.DownloadMaxBytes,
-				Logger:       cfg.Logger,
-				OnProgress: withProgressContext(
-					cfg.OnProgress,
-					"ancillary_ledger_state",
-					snapshot.Digest,
-				),
-				IdleTimeout:         cfg.DownloadIdleTimeout,
-				MaxIdleRetries:      cfg.DownloadMaxIdleRetries,
-				MaxTransientRetries: cfg.DownloadMaxTransientRetries,
-				AllowInsecureHTTP:   cfg.AllowInsecureHTTP,
-			},
-		)
-		if err == nil {
-			break
-		}
-		cfg.Logger.Warn(
-			"ancillary download location failed, "+
-				"trying next",
-			"component", "mithril",
-			"location", i+1,
-			"total", len(snapshot.AncillaryLocations),
-			"error", err,
-		)
-	}
-	if err != nil {
-		return nil, ancillaryDest, fmt.Errorf(
-			"downloading ancillary archive "+
-				"(all %d locations failed): %w",
-			len(snapshot.AncillaryLocations),
-			err,
-		)
-	}
-
-	ancillaryDir := filepath.Join(
-		downloadDir,
-		filepath.Base("ancillary-"+snapshot.Digest),
-	)
-	// Replace: the ancillary directory is keyed by digest, so a stale
-	// copy from an interrupted run may already be present.
-	if _, extractErr := ExtractArchive(
-		ctx,
-		ancillaryPath,
-		ancillaryDir,
-		cfg.Logger.With(
-			"phase", "ancillary_extraction",
-			"artifact", "ancillary_ledger_state",
-		),
-		WithReplaceDestination(),
-		withArchiveLimits(ancillaryLimits()),
-	); extractErr != nil {
-		return nil, ancillaryPath, fmt.Errorf(
-			"extracting ancillary archive: %w",
-			extractErr,
-		)
-	}
-
-	extracted := ledgerDir(ancillaryDir)
-	if extracted == nil {
-		// Removed here or not at all: Cleanup takes AncillaryDir from the
-		// returned handle, and this path has no handle to return. The archive
-		// path goes back even so, since removing the extraction is not
-		// removing the archive it came from.
-		os.RemoveAll(ancillaryDir)
-		return nil, ancillaryPath, fmt.Errorf(
-			"extracted ancillary data at %s holds no ledger state",
-			ancillaryDir,
-		)
-	}
-
-	cfg.Logger.Info(
-		"ancillary data extracted",
-		"component", "mithril",
-		"path", extracted.Path(),
-	)
-
-	return extracted, ancillaryPath, nil
+	return bootstrapV2(ctx, cfg, aggregatorURL)
 }
 
 // Cleanup removes the temporary files created during bootstrap.
@@ -1056,7 +384,6 @@ func (r *BootstrapResult) Cleanup(logger *slog.Logger) {
 	// a directory with an open handle beneath it — can remove the tree.
 	r.CloseHandles()
 	paths := []string{
-		r.ArchivePath,
 		r.ExtractDir,
 		r.AncillaryArchivePath,
 		r.AncillaryDir,
@@ -1124,103 +451,19 @@ func (r *BootstrapResult) CloseHandles() {
 	}
 }
 
-// findImmutableDirIn is findImmutableDir with the extraction directory already
-// open, so that every read — the layout enumeration as much as the per-
-// candidate checks — resolves through the one handle that was vetted.
-//
-// root stays the caller's. When the extraction directory is itself the answer,
-// the returned vettedDir gets its own handle on it, derived from this one
-// through the open descriptor rather than by resolving the name a second time.
-// That is what lets a caller hold one vetted extraction handle and give both
-// the immutable lookup and the ledger-state fallback a share of it.
-//
-// Taking the handle as a parameter is also what lets a test place a directory
-// swap between the open and the reads, which is the window the enumeration and
-// the returned path were exposed to.
-func findImmutableDirIn(root *os.Root, extractDir string) *vettedDir {
-	if hasChunkFilesIn(root, ".") {
-		self, err := root.OpenRoot(".")
-		if err != nil {
-			return nil
-		}
-		return vetted(self, extractDir, ".")
-	}
-	chunkDir := func(rel string) *vettedDir {
-		if err := assertNoSymlinkComponents(root, rel); err != nil {
-			return nil
-		}
-		// The candidate is opened once, then read and handed on through that
-		// one handle. Resolving rel again for each step would be a fresh
-		// chance for it to be something other than what the previous step saw,
-		// and the answer would then be about whichever tree held the name last.
-		candidate, err := openVerifiedRoot(root, rel)
-		if err != nil {
-			return nil
-		}
-		if !hasChunkFilesIn(candidate, ".") {
-			_ = candidate.Close()
-			return nil
-		}
-		return vetted(candidate, extractDir, rel)
-	}
-
-	// Check common subdirectory layouts
-	candidates := []string{
-		"immutable",
-		filepath.Join("db", "immutable"),
-	}
-
-	// Check for a single top-level directory. ReadDir reports a symlink as
-	// its own type rather than the directory it points at, so one is never
-	// collected here.
-	//
-	// Read through the handle rather than by pathname: enumerating the pathname
-	// again would list the entries of a directory swapped in behind it, while
-	// the names taken from there are checked against the tree that was opened.
-	// A candidate passing that pair of reads is a path into the replacement.
-	entries, err := fs.ReadDir(root.FS(), ".")
-	if err != nil {
-		return nil
-	}
-	var dirs []string
-	for _, e := range entries {
-		if e.IsDir() {
-			dirs = append(dirs, e.Name())
-		}
-	}
-	if len(dirs) == 1 {
-		candidates = append(candidates,
-			dirs[0],
-			filepath.Join(dirs[0], "immutable"),
-			filepath.Join(dirs[0], "db", "immutable"),
-		)
-	}
-
-	for _, c := range candidates {
-		if dir := chunkDir(c); dir != nil {
-			return dir
-		}
-	}
-
-	return nil
-}
-
 // VerifyCertificateChain walks the Mithril certificate chain from
 // the given hash back to the genesis certificate. This verifies
-// the chain is unbroken and, if snapshotDigest is non-empty,
-// that the leaf certificate's protocol message binds to it. It
-// does not verify STM cryptographic signatures (Phase 2).
+// the chain is unbroken. It does not verify STM cryptographic signatures
+// (Phase 2).
 func VerifyCertificateChain(
 	ctx context.Context,
 	client *Client,
 	certificateHash string,
-	snapshotDigest string,
 ) error {
 	_, err := VerifyCertificateChainWithMode(
 		ctx,
 		client,
 		certificateHash,
-		snapshotDigest,
 		VerificationModeStructural,
 	)
 	return err
@@ -1232,14 +475,12 @@ func VerifyCertificateChainWithMode(
 	ctx context.Context,
 	client *Client,
 	certificateHash string,
-	snapshotDigest string,
 	mode VerificationMode,
 ) (*CertificateChainVerificationResult, error) {
 	return verifyCertificateChain(
 		ctx,
 		client,
 		certificateHash,
-		snapshotDigest,
 		mode,
 		newCertificateChainBudget(),
 	)
@@ -1249,7 +490,6 @@ func verifyCertificateChain(
 	ctx context.Context,
 	client *Client,
 	certificateHash string,
-	snapshotDigest string,
 	mode VerificationMode,
 	budget *certificateChainBudget,
 ) (*CertificateChainVerificationResult, error) {
@@ -1270,9 +510,7 @@ func verifyCertificateChain(
 	seen := make(map[string]bool)
 	isLeaf := true
 	var childCert *Certificate
-	result := &CertificateChainVerificationResult{
-		SnapshotDigest: snapshotDigest,
-	}
+	result := &CertificateChainVerificationResult{}
 
 	for {
 		if err := budget.chargeCertificate(); err != nil {
@@ -1419,26 +657,6 @@ func verifyCertificateChain(
 				}
 				result.SignedEntityKind = entityKind
 			}
-			if snapshotDigest != "" {
-				certDigest := cert.ProtocolMessage.
-					MessageParts["snapshot_digest"]
-				if certDigest == "" {
-					return nil, fmt.Errorf(
-						"leaf certificate %s is missing "+
-							"snapshot_digest",
-						currentHash,
-					)
-				}
-				if certDigest != snapshotDigest {
-					return nil, fmt.Errorf(
-						"certificate snapshot_digest "+
-							"mismatch: cert has %q, "+
-							"expected %q",
-						certDigest,
-						snapshotDigest,
-					)
-				}
-			}
 		}
 		isLeaf = false
 		childCert = cert
@@ -1513,19 +731,6 @@ func holdsChunkFile[E fs.DirEntry](entries []E) bool {
 	return false
 }
 
-// isFileComplete checks if a file exists and matches the expected
-// size. Returns false if expectedSize is 0 (unknown).
-func isFileComplete(path string, expectedSize int64) bool {
-	if expectedSize <= 0 {
-		return false
-	}
-	fi, err := os.Stat(path)
-	if err != nil {
-		return false
-	}
-	return fi.Size() == expectedSize
-}
-
 // ledgerDir returns dir when it holds ledger state files, and nil when it does
 // not or when the name no longer denotes the directory that was read.
 //
@@ -1581,7 +786,7 @@ func truncateDigest(digest string) string {
 }
 
 // snapshotDigestLength is the expected length of a Mithril snapshot digest:
-// a Blake2b-256 (v1) or SHA-256 (v2, see CardanoDatabaseSnapshot.ComputeHash)
+// a SHA-256 (see CardanoDatabaseSnapshot.ComputeHash)
 // hash, hex-encoded (32 bytes -> 64 hex characters).
 const snapshotDigestLength = 64
 

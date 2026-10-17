@@ -16,7 +16,6 @@ package mithril
 
 import (
 	"bytes"
-	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
@@ -709,12 +708,6 @@ type NetworkConfig struct {
 	AncillaryVerificationKeyURL string
 }
 
-// ErrNoSnapshotsAvailable indicates that the aggregator responded
-// successfully but currently has no snapshots to serve.
-var ErrNoSnapshotsAvailable = errors.New(
-	"no snapshots available from aggregator",
-)
-
 // Default network configuration for each supported Cardano network. The
 // verification key URLs follow the official Mithril network configurations.
 var defaultNetworkConfigs = map[string]NetworkConfig{
@@ -917,60 +910,6 @@ func requireSecureURL(
 	return nil
 }
 
-// ListSnapshots retrieves the list of available snapshots from the
-// aggregator. Corresponds to GET /artifact/snapshots.
-func (c *Client) ListSnapshots(
-	ctx context.Context,
-) ([]SnapshotListItem, error) {
-	reqURL := c.aggregatorURL + "/artifact/snapshots"
-	body, err := c.doGet(ctx, reqURL)
-	if err != nil {
-		return nil, fmt.Errorf(
-			"listing snapshots: %w",
-			err,
-		)
-	}
-	defer body.Close()
-
-	var snapshots []SnapshotListItem
-	if err := json.NewDecoder(body).Decode(&snapshots); err != nil {
-		return nil, fmt.Errorf(
-			"decoding snapshot list: %w",
-			err,
-		)
-	}
-	return snapshots, nil
-}
-
-// GetSnapshot retrieves the details of a specific snapshot by its
-// digest. Corresponds to GET /artifact/snapshot/{digest}.
-func (c *Client) GetSnapshot(
-	ctx context.Context,
-	digest string,
-) (*SnapshotListItem, error) {
-	reqURL := c.aggregatorURL + "/artifact/snapshot/" +
-		url.PathEscape(digest)
-	body, err := c.doGet(ctx, reqURL)
-	if err != nil {
-		return nil, fmt.Errorf(
-			"getting snapshot %s: %w",
-			digest,
-			err,
-		)
-	}
-	defer body.Close()
-
-	var snapshot SnapshotListItem
-	if err := json.NewDecoder(body).Decode(&snapshot); err != nil {
-		return nil, fmt.Errorf(
-			"decoding snapshot %s: %w",
-			digest,
-			err,
-		)
-	}
-	return &snapshot, nil
-}
-
 // ListMithrilStakeDistributions retrieves available Mithril stake
 // distributions from the aggregator.
 func (c *Client) ListMithrilStakeDistributions(
@@ -1134,31 +1073,6 @@ func (c *Client) getCertificateWithLimit(
 		)
 	}
 	return &cert, int64(len(data)), nil
-}
-
-// GetLatestSnapshot returns the most recent snapshot from the
-// aggregator, sorted by epoch (descending) with immutable file
-// number as tie-breaker.
-func (c *Client) GetLatestSnapshot(
-	ctx context.Context,
-) (*SnapshotListItem, error) {
-	snapshots, err := c.ListSnapshots(ctx)
-	if err != nil {
-		return nil, err
-	}
-	if len(snapshots) == 0 {
-		return nil, ErrNoSnapshotsAvailable
-	}
-	slices.SortFunc(snapshots, func(a, b SnapshotListItem) int {
-		if a.Beacon.Epoch != b.Beacon.Epoch {
-			return cmp.Compare(b.Beacon.Epoch, a.Beacon.Epoch)
-		}
-		return cmp.Compare(
-			b.Beacon.ImmutableFileNumber,
-			a.Beacon.ImmutableFileNumber,
-		)
-	})
-	return &snapshots[0], nil
 }
 
 // doGet performs an HTTP GET request and returns the response body.

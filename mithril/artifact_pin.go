@@ -45,9 +45,8 @@ import (
 const syncKeyPinnedArtifact = "mithril_pinned_artifact"
 
 // pinnedArtifact is the durable identity of the Mithril artifact an in-flight
-// sync run is importing. Digest is the v2 artifact hash or the v1 snapshot
-// digest; Backend distinguishes the two because the identifiers are not
-// interchangeable across the aggregator's artifact endpoints.
+// sync run is importing. Digest is the v2 artifact hash; Backend records the
+// backend that produced it.
 type pinnedArtifact struct {
 	Backend             string `json:"backend"`
 	Network             string `json:"network"`
@@ -122,7 +121,7 @@ func clearPinnedArtifact(db *database.Database) error {
 }
 
 // recordPinnedCertifiedTip stores the certified ImmutableDB tip slot on the
-// existing pin. It is a no-op when no pin is present, which is the v1/no-pin
+// existing pin. It is a no-op when no pin is present, which is the no-pin
 // path rather than an error.
 func recordPinnedCertifiedTip(db *database.Database, slot uint64) error {
 	pin, ok, err := getPinnedArtifact(db)
