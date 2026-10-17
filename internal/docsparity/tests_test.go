@@ -2952,6 +2952,8 @@ func TestPipelineStagesMatch(t *testing.T) {
 func TestCBORConformanceReportRunsOnlyForLinuxRelease(t *testing.T) {
 	root := repoRoot(t)
 	const datasetRevision = "6cd8c928665bbafe90e02066ebb4620e38f051de"
+	const amaruUPLCRevision = "03acfc01807e5e2a8a5466541ad22c856f3de99c"
+	const ndcLedgerRevision = "4fed8790fb81164f9d7a53414acc5f78aaf65422"
 
 	prJobs := pipelineJobs(t, root, prPipeline)
 	for jobName, rawJob := range prJobs {
@@ -3005,6 +3007,12 @@ func TestCBORConformanceReportRunsOnlyForLinuxRelease(t *testing.T) {
 	if jobEnv["CBOR_DATASET_REVISION"] != datasetRevision {
 		t.Errorf("Linux release job CBOR dataset revision = %v, want %q", jobEnv["CBOR_DATASET_REVISION"], datasetRevision)
 	}
+	if jobEnv["AMARU_UPLC_REVISION"] != amaruUPLCRevision {
+		t.Errorf("Linux release job Amaru UPLC revision = %v, want %q", jobEnv["AMARU_UPLC_REVISION"], amaruUPLCRevision)
+	}
+	if jobEnv["NDC_LEDGER_REVISION"] != ndcLedgerRevision {
+		t.Errorf("Linux release job NDC ledger revision = %v, want %q", jobEnv["NDC_LEDGER_REVISION"], ndcLedgerRevision)
+	}
 	corpusCheckout, reportGeneration, releaseUpload := 0, 0, 0
 	for _, rawStep := range steps {
 		step, ok := rawStep.(map[string]any)
@@ -3025,13 +3033,13 @@ func TestCBORConformanceReportRunsOnlyForLinuxRelease(t *testing.T) {
 		case "Checkout UPLC conformance corpus":
 			if step["if"] != "github.ref_type == 'tag'" ||
 				with["repository"] != "pragma-org/amaru" ||
-				with["ref"] != "ceda0c57a10d95b30a9338454e209582d62318e8" {
+				with["ref"] != "${{ env.AMARU_UPLC_REVISION }}" {
 				t.Error("Linux release checks out the wrong UPLC corpus")
 			}
 		case "Checkout ledger-rules fixtures":
 			if step["if"] != "github.ref_type == 'tag'" ||
 				with["repository"] != "pragma-org/node-diversity-conformance" ||
-				with["ref"] != "fc4713f2e8f10925becc4a17a1567a559cf27918" {
+				with["ref"] != "${{ env.NDC_LEDGER_REVISION }}" {
 				t.Error("Linux release does not use the pinned ledger-rules fixtures")
 			}
 		case "Generate conformance reports":
