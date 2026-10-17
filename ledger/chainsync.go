@@ -1241,8 +1241,7 @@ func (ls *LedgerState) deferredHeaderValidationRequired(
 
 // deferredHeaderMarkerValue encodes a persisted deferred marker. The value is
 // the bare marker for an unattributed block, and the marker followed by the
-// supplying peer's remote address otherwise. Startup rebuilds legacy
-// in-memory markers from the key scan when downgrading.
+// supplying peer's remote address otherwise.
 func deferredHeaderMarkerValue(source ouroboros.ConnectionId) string {
 	if source.RemoteAddr == nil {
 		return deferredHeaderValidationSyncStateValue
