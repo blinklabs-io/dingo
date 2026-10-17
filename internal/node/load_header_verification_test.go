@@ -148,6 +148,13 @@ func TestLoadWithDBRejectsInvalidPraosHeader(t *testing.T) {
 		t, dbTip.Point.Slot, tipSlot,
 		"the block with the invalid header must not reach ledger state",
 	)
+	// Blocks copied ahead of the rejected batch would otherwise sit above the
+	// ledger tip, where a later serve-mode replay applies them without the
+	// load-only header check.
+	require.Equal(
+		t, dbTip.Point, c.Tip().Point,
+		"the chain must be rewound exactly to the ledger tip",
+	)
 }
 
 func TestLoadWithDBAcceptsValidPraosHeaders(t *testing.T) {
