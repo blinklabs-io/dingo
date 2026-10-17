@@ -3833,7 +3833,10 @@ fields correctly, and carries the key itself through to the same columns;
 malformed key/proof lengths reject that pool state. The same
 prototype release also changes `MsgLeiosBlockAnnouncement` from a null
 placeholder to the full ranking-block header. The LeiosNotify client accepts
-that header. In prototype-2026w31, `ouroboros/` decodes the Dijkstra header,
+that header. Announcements wrap it as `[era_id, header]`; Dingo unwraps the
+Dijkstra-era envelope and rejects envelopes tagged with another era, while
+retaining support for bare Dijkstra headers used by local diffusion. In
+prototype-2026w31, `ouroboros/` decodes the Dijkstra header,
 requires a valid `leios_announcement`, rejects future or more-than-ten-minute-
 old announcements, and rejects a repeated endorser-block hash whose size
 differs from an earlier observation. A valid announcement is relayed only
