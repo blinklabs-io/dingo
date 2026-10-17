@@ -23,6 +23,7 @@ import (
 	"math"
 	"slices"
 	"time"
+	"unsafe"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
@@ -324,9 +325,10 @@ type leiosEndorserBlockData struct {
 	txCount    int
 	cacheKeys  []string
 	insertedAt time.Time
-	// relayOfferRequested is set for content received through LeiosNotify.
-	// The cached EB is re-offered only after its slot is verified, and its
-	// transactions only after their complete set has been validated.
+	// relayOfferRequested is set for content received through LeiosNotify or
+	// historical by-point fetch. The cached EB is re-offered only after its slot
+	// is verified, and its transactions only after their complete set has been
+	// validated.
 	relayOfferRequested      bool
 	relayManifestOffered     bool
 	relayTransactionsOffered bool
@@ -373,9 +375,12 @@ const (
 	// anything keyed on its slot is published.
 	leiosStorePeerOffered leiosStoreOrigin = iota
 	// leiosStoreAuthoritative is a store whose slot dingo established itself:
-	// a locally forged endorser block, or a by-point backfill whose point came
-	// from the ranking block the ledger is applying.
+	// a locally forged endorser block.
 	leiosStoreAuthoritative
+	// leiosStoreBackfill is a store fetched from a peer for a point established
+	// by the ranking block the ledger is applying. It is authoritative and is
+	// relayed after validation so downstream peers can fetch the same closure.
+	leiosStoreBackfill
 )
 
 // leiosBlockKey returns the leiosEndorserBlocks cache identity for one
@@ -618,8 +623,11 @@ func (o *Ouroboros) storeLeiosEndorserBlock(
 	// always leiosAnnouncementsMu before leiosMu.
 	o.leiosAnnouncementsMu.Lock()
 	verified := origin == leiosStoreAuthoritative ||
+		origin == leiosStoreBackfill ||
 		o.leiosAnnouncementBindsSlotLocked(point.Hash, point.Slot)
 	cacheKeys := []string{leiosBlockKey(point.Slot, point.Hash)}
+	relayOfferRequested := origin == leiosStorePeerOffered ||
+		origin == leiosStoreBackfill
 	data := &leiosEndorserBlockData{
 		point:                    point,
 		blockRaw:                 slices.Clone(blockRaw),
@@ -628,7 +636,7 @@ func (o *Ouroboros) storeLeiosEndorserBlock(
 		txCount:                  len(block.TransactionReferences),
 		cacheKeys:                cacheKeys,
 		insertedAt:               time.Now(),
-		relayOfferRequested:      origin == leiosStorePeerOffered,
+		relayOfferRequested:      relayOfferRequested,
 		slotVerified:             verified,
 		semanticValidationStatus: leiosEBValidationUnknown,
 	}
@@ -1653,21 +1661,25 @@ func (data *leiosEndorserBlockData) hasManifest() bool {
 	return data != nil && len(data.blockRaw) > 0
 }
 
-// approxBytes estimates the memory retained by one cache entry: the manifest
-// plus every transaction body currently held, complete (txsRaw) or partial
-// (partialTxs). It undercounts slice/map overhead, which is acceptable for a
-// budget meant to bound the dominant cost -- the transaction and manifest
-// payloads themselves -- rather than account for every byte.
+const rawMessageHeaderBytes = int(unsafe.Sizeof(cbor.RawMessage{}))
+
+// approxBytes estimates the memory retained by one cache entry. It charges
+// backing-array capacity for the manifest, transaction bodies, and the outer
+// transaction slices so sparse partial fetches consume their actual cache
+// budget even when most entries are nil. It does not include the fixed entry
+// struct or small bookkeeping strings.
 func (data *leiosEndorserBlockData) approxBytes() int {
 	if data == nil {
 		return 0
 	}
-	total := len(data.blockRaw)
-	for _, raw := range data.txsRaw {
-		total += len(raw)
-	}
-	for _, raw := range data.partialTxs {
-		total += len(raw)
+	return cap(data.blockRaw) + rawMessagesRetainedBytes(data.txsRaw) +
+		rawMessagesRetainedBytes(data.partialTxs)
+}
+
+func rawMessagesRetainedBytes(messages []cbor.RawMessage) int {
+	total := cap(messages) * rawMessageHeaderBytes
+	for _, raw := range messages {
+		total += cap(raw)
 	}
 	return total
 }

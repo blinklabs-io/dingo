@@ -539,7 +539,7 @@ func TestCacheableConsumeUtxosForDialect(t *testing.T) {
 		t.Run(dialect, func(t *testing.T) {
 			t.Parallel()
 			require.True(t, cacheableForDialect(dialect, consumeUtxoSQL))
-			for rowCount := 2; rowCount <= utxoBatchSize; rowCount++ {
+			for rowCount := 2; rowCount <= utxoSpendBatchSize; rowCount++ {
 				for _, returnStake := range []bool{false, true} {
 					require.Equal(t, dialect == "sqlite",
 						cacheableForDialect(dialect,

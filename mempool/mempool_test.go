@@ -49,14 +49,16 @@ import (
 
 // mockValidator is a test validator that can be configured to pass or fail
 type mockValidator struct {
-	failHashes map[string]bool
-	mu         sync.Mutex
-	failAll    bool
+	failHashes   map[string]bool
+	errorsByHash map[string]error
+	mu           sync.Mutex
+	failAll      bool
 }
 
 func newMockValidator() *mockValidator {
 	return &mockValidator{
-		failHashes: make(map[string]bool),
+		failHashes:   make(map[string]bool),
+		errorsByHash: make(map[string]error),
 	}
 }
 
@@ -221,6 +223,9 @@ func (v *mockValidator) ValidateTx(tx gledger.Transaction) error {
 	}
 	if v.failHashes[tx.Hash().String()] {
 		return fmt.Errorf("validation failed for %s", tx.Hash())
+	}
+	if err := v.errorsByHash[tx.Hash().String()]; err != nil {
+		return err
 	}
 	return nil
 }

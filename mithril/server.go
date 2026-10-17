@@ -43,10 +43,14 @@ var (
 	)
 )
 
-// publicRequestLimit bounds concurrent public requests. One v2 bootstrap
-// holds immutableDownloadWorkers archive downloads and the ancillary download
-// at once, so the bound admits two of them without shedding a request.
+// publicRequestLimit bounds concurrent artifact reads. One v2 bootstrap holds
+// immutableDownloadWorkers archive downloads and the ancillary download at
+// once, so the bound admits two of them without shedding a request.
 const publicRequestLimit = 2 * (immutableDownloadWorkers + 1)
+
+// signatureRequestLimit bounds signature verification independently from
+// artifact reads so downloads cannot starve certificate production.
+const signatureRequestLimit = 4
 
 const (
 	certificatesPrefix           = "certificates"
@@ -185,6 +189,7 @@ type snapshotServer struct {
 	publicBaseURL        *url.URL
 	publicBaseURLErr     error
 	publicRequests       chan struct{}
+	signatureRequests    chan struct{}
 	requestReadTimeout   time.Duration
 	responseWriteTimeout time.Duration
 }
@@ -214,6 +219,7 @@ func newServerHandler(
 		publicBaseURL:        publicBaseURL,
 		publicBaseURLErr:     publicBaseURLErr,
 		publicRequests:       make(chan struct{}, requestLimit),
+		signatureRequests:    make(chan struct{}, signatureRequestLimit),
 		requestReadTimeout:   publicRequestReadTimeout,
 		responseWriteTimeout: responseWriteTimeout,
 	}
@@ -235,12 +241,29 @@ func newServerHandler(
 		s.withPublicRequest(s.handleCertificate),
 	)
 	if cfg.Aggregator != nil {
-		cfg.Aggregator.registerRoutes(mux, s.withPublicRequest)
+		cfg.Aggregator.registerRoutes(
+			mux,
+			s.withPublicRequest,
+			s.withSignatureRequest,
+		)
 	}
 	return mux
 }
 
 func (s *snapshotServer) withPublicRequest(
+	next http.HandlerFunc,
+) http.HandlerFunc {
+	return s.withRequestAdmission(s.publicRequests, next)
+}
+
+func (s *snapshotServer) withSignatureRequest(
+	next http.HandlerFunc,
+) http.HandlerFunc {
+	return s.withRequestAdmission(s.signatureRequests, next)
+}
+
+func (s *snapshotServer) withRequestAdmission(
+	slots chan struct{},
 	next http.HandlerFunc,
 ) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -257,8 +280,8 @@ func (s *snapshotServer) withPublicRequest(
 		}
 
 		select {
-		case s.publicRequests <- struct{}{}:
-			defer func() { <-s.publicRequests }()
+		case slots <- struct{}{}:
+			defer func() { <-slots }()
 		default:
 			w.Header().Set("Retry-After", "1")
 			http.Error(w, "server busy", http.StatusServiceUnavailable)

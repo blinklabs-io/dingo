@@ -15,12 +15,17 @@
 package ledger
 
 import (
+	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/chain"
+	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -120,15 +125,11 @@ func TestUnrecoverableRollbackTrackerSurvivesResyncReset(t *testing.T) {
 func TestReportUnrecoverableRollbackSurfacesOperatorSignal(t *testing.T) {
 	t.Parallel()
 
-	ls := &LedgerState{
-		config: LedgerStateConfig{
-			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
-		},
-	}
-	ls.metrics.init(prometheus.NewRegistry())
+	fixture := newChainsyncRollbackFixture(t)
+	ls := fixture.ls
 	point := ocommon.NewPoint(
-		116385054,
-		[]byte{0x46, 0xc5, 0xd0, 0x72, 0x6c, 0xcf, 0xc5, 0xde},
+		fixture.ancestorTip.Point.Slot,
+		testHashBytes("missing-canonical-rollback-point"),
 	)
 
 	// Below threshold: no metric increment.
@@ -177,4 +178,275 @@ func TestReportUnrecoverableRollbackSurfacesOperatorSignal(t *testing.T) {
 	count, stuck := ls.noteUnrecoverableRollback(point)
 	require.Equal(t, 1, count)
 	require.False(t, stuck)
+}
+
+func TestReportUnrecoverableRollbackClearsEvidenceAfterLocalProgress(t *testing.T) {
+	t.Parallel()
+	for _, reason := range []string{
+		event.ChainsyncResyncReasonRollbackNotFound,
+		event.ChainsyncResyncReasonRollbackLoop,
+		event.ChainsyncResyncReasonRollbackExceedsK,
+		event.ChainsyncResyncReasonRollbackExceedsMithril,
+		event.ChainsyncResyncReasonRollbackBelowUtxoPruneFloor,
+	} {
+		t.Run(reason, func(t *testing.T) {
+			t.Parallel()
+			fixture := newChainsyncRollbackFixture(t)
+			key := unrecoverableRollbackKey(fixture.ancestorTip.Point)
+			fixture.ls.unrecoverableRollbacks = map[string]unrecoverableRollbackRecord{
+				key: {
+					count:    unrecoverableRollbackThreshold - 1,
+					lastSeen: time.Now(),
+					localTip: fixture.currentTip.Point,
+				},
+			}
+			nextBlock := chain.RawBlock{
+				Slot:        fixture.currentTip.Point.Slot + 1,
+				Hash:        testHashBytes("next-canonical-block"),
+				BlockNumber: fixture.currentTip.BlockNumber + 1,
+				Type:        1,
+				PrevHash:    fixture.currentTip.Point.Hash,
+				Cbor:        []byte{0x80},
+			}
+			require.NoError(t, fixture.ls.chain.AddRawBlocks(
+				t.Context(),
+				[]chain.RawBlock{nextBlock},
+			))
+
+			fixture.ls.reportUnrecoverableRollbackIfStuck(
+				fixture.ancestorTip.Point,
+				reason,
+				fixture.connId,
+			)
+			require.Zero(
+				t,
+				promtestutil.ToFloat64(fixture.ls.metrics.unrecoverableRollbacks),
+			)
+			_, tracked := fixture.ls.unrecoverableRollbacks[key]
+			require.False(t, tracked)
+		})
+	}
+}
+
+func TestProtocolConstrainedRollbackProgressDoesNotAccumulate(t *testing.T) {
+	t.Parallel()
+	for _, reason := range []string{
+		event.ChainsyncResyncReasonRollbackExceedsK,
+		event.ChainsyncResyncReasonRollbackExceedsMithril,
+		event.ChainsyncResyncReasonRollbackBelowUtxoPruneFloor,
+	} {
+		t.Run(reason, func(t *testing.T) {
+			t.Parallel()
+			fixture := newChainsyncRollbackFixture(t)
+			key := unrecoverableRollbackKey(fixture.ancestorTip.Point)
+			for attempt := range unrecoverableRollbackThreshold + 2 {
+				if attempt > 0 {
+					localTip := fixture.ls.chain.HeaderTip()
+					nextBlock := chain.RawBlock{
+						Slot:        localTip.Point.Slot + 1,
+						Hash:        testHashBytes(fmt.Sprintf("progress-%s-%d", reason, attempt)),
+						BlockNumber: localTip.BlockNumber + 1,
+						Type:        1,
+						PrevHash:    localTip.Point.Hash,
+						Cbor:        []byte{0x80},
+					}
+					require.NoError(t, fixture.ls.chain.AddRawBlocks(
+						t.Context(),
+						[]chain.RawBlock{nextBlock},
+					))
+				}
+
+				fixture.ls.reportUnrecoverableRollbackIfStuck(
+					fixture.ancestorTip.Point,
+					reason,
+					fixture.connId,
+				)
+				require.Zero(
+					t,
+					promtestutil.ToFloat64(
+						fixture.ls.metrics.unrecoverableRollbacks,
+					),
+					"canonical progress between failures must reset escalation evidence",
+				)
+				if record, tracked := fixture.ls.unrecoverableRollbacks[key]; tracked {
+					require.Equal(t, 1, record.count)
+				}
+			}
+		})
+	}
+}
+
+func TestReportUnrecoverableRollbackClearsProgressBeforeFuturePointReturn(t *testing.T) {
+	t.Parallel()
+	fixture := newChainsyncRollbackFixture(t)
+	point := ocommon.NewPoint(
+		fixture.currentTip.Point.Slot+5,
+		testHashBytes("future-rollback-point"),
+	)
+	key := unrecoverableRollbackKey(point)
+	fixture.ls.unrecoverableRollbacks = map[string]unrecoverableRollbackRecord{
+		key: {
+			count:     unrecoverableRollbackThreshold - 1,
+			firstSeen: time.Now(),
+			lastSeen:  time.Now(),
+			localTip:  fixture.currentTip.Point,
+		},
+	}
+	nextBlock := chain.RawBlock{
+		Slot:        fixture.currentTip.Point.Slot + 1,
+		Hash:        testHashBytes("next-canonical-block"),
+		BlockNumber: fixture.currentTip.BlockNumber + 1,
+		Type:        1,
+		PrevHash:    fixture.currentTip.Point.Hash,
+		Cbor:        []byte{0x80},
+	}
+	require.NoError(t, fixture.ls.chain.AddRawBlocks(
+		t.Context(),
+		[]chain.RawBlock{nextBlock},
+	))
+
+	fixture.ls.reportUnrecoverableRollbackIfStuck(
+		point,
+		event.ChainsyncResyncReasonRollbackBelowUtxoPruneFloor,
+		fixture.connId,
+	)
+	_, tracked := fixture.ls.unrecoverableRollbacks[key]
+	require.False(t, tracked)
+}
+
+func TestReportUnrecoverableRollbackWaitsForStalledPrimaryChain(t *testing.T) {
+	t.Parallel()
+	fixture := newChainsyncRollbackFixture(t)
+	key := unrecoverableRollbackKey(fixture.ancestorTip.Point)
+	fixture.ls.unrecoverableRollbacks = map[string]unrecoverableRollbackRecord{
+		key: {
+			count:     unrecoverableRollbackThreshold - 1,
+			firstSeen: time.Now(),
+			lastSeen:  time.Now(),
+			localTip:  fixture.currentTip.Point,
+		},
+	}
+	lookups := 0
+	fixture.ls.lookupBlockByHash = func(hash []byte) (models.Block, error) {
+		lookups++
+		return database.BlockByHash(t.Context(), fixture.ls.db, hash)
+	}
+	onPrimary, err := fixture.ls.historicalPointOnPrimaryChain(
+		fixture.ancestorTip.Point,
+		fixture.ls.chain.HeaderTip(),
+	)
+	require.NoError(t, err)
+	require.True(t, onPrimary)
+	lookups = 0
+
+	for range unrecoverableRollbackThreshold + 2 {
+		fixture.ls.reportUnrecoverableRollbackIfStuck(
+			fixture.ancestorTip.Point,
+			event.ChainsyncResyncReasonRollbackLoop,
+			fixture.connId,
+		)
+	}
+	require.Zero(t, promtestutil.ToFloat64(fixture.ls.metrics.unrecoverableRollbacks))
+	require.Equal(t, 1, lookups, "primary-chain membership is cached for this tip")
+	require.True(t, fixture.ls.unrecoverableRollbacks[key].primaryChainChecked)
+	require.True(t, fixture.ls.unrecoverableRollbacks[key].onPrimaryChain)
+
+	fixture.ls.unrecoverableRollbacks[key] = unrecoverableRollbackRecord{
+		count:               unrecoverableRollbackThreshold - 1,
+		firstSeen:           time.Now().Add(-unrecoverableRollbackWindow),
+		lastSeen:            time.Now(),
+		localTip:            fixture.currentTip.Point,
+		primaryChainChecked: true,
+		onPrimaryChain:      true,
+	}
+	fixture.ls.reportUnrecoverableRollbackIfStuck(
+		fixture.ancestorTip.Point,
+		event.ChainsyncResyncReasonRollbackLoop,
+		fixture.connId,
+	)
+	require.Equal(t, float64(1), promtestutil.ToFloat64(fixture.ls.metrics.unrecoverableRollbacks))
+}
+
+func TestReportUnrecoverableRollbackRequiresAuthoritativeChain(t *testing.T) {
+	t.Parallel()
+
+	ls := &LedgerState{}
+	ls.metrics.init(prometheus.NewRegistry())
+	point := ocommon.NewPoint(110374142, []byte("unverified-point"))
+
+	for range unrecoverableRollbackThreshold + 1 {
+		ls.reportUnrecoverableRollbackIfStuck(
+			point,
+			event.ChainsyncResyncReasonRollbackNotFound,
+			freshUnrecoverableConnId(3001),
+		)
+	}
+	require.Zero(
+		t,
+		promtestutil.ToFloat64(ls.metrics.unrecoverableRollbacks),
+	)
+	require.Empty(t, ls.unrecoverableRollbacks)
+}
+
+func TestReportUnrecoverableRollbackDoesNotGuessOnLookupError(t *testing.T) {
+	t.Parallel()
+
+	fixture := newChainsyncRollbackFixture(t)
+	fixture.ls.lookupBlockByHash = func([]byte) (models.Block, error) {
+		return models.Block{}, errors.New("lookup failed")
+	}
+	point := ocommon.NewPoint(
+		fixture.ancestorTip.Point.Slot,
+		testHashBytes("unreadable-rollback-point"),
+	)
+
+	for range unrecoverableRollbackThreshold + 1 {
+		fixture.ls.reportUnrecoverableRollbackIfStuck(
+			point,
+			event.ChainsyncResyncReasonRollbackNotFound,
+			fixture.connId,
+		)
+	}
+	require.Zero(
+		t,
+		promtestutil.ToFloat64(fixture.ls.metrics.unrecoverableRollbacks),
+	)
+}
+
+func TestReportProtocolConstrainedRollbackEscalatesImmediately(t *testing.T) {
+	t.Parallel()
+	for _, reason := range []string{
+		event.ChainsyncResyncReasonRollbackExceedsK,
+		event.ChainsyncResyncReasonRollbackExceedsMithril,
+		event.ChainsyncResyncReasonRollbackBelowUtxoPruneFloor,
+	} {
+		t.Run(reason, func(t *testing.T) {
+			t.Parallel()
+			fixture := newChainsyncRollbackFixture(t)
+			for range unrecoverableRollbackThreshold {
+				fixture.ls.reportUnrecoverableRollbackIfStuck(fixture.ancestorTip.Point, reason, fixture.connId)
+			}
+			require.Equal(t, float64(1), promtestutil.ToFloat64(fixture.ls.metrics.unrecoverableRollbacks))
+		})
+	}
+}
+
+func TestReportProtocolConstrainedRollbackAtOrigin(t *testing.T) {
+	t.Parallel()
+	for _, reason := range []string{
+		event.ChainsyncResyncReasonRollbackExceedsK,
+		event.ChainsyncResyncReasonRollbackExceedsMithril,
+		event.ChainsyncResyncReasonRollbackBelowUtxoPruneFloor,
+	} {
+		t.Run(reason, func(t *testing.T) {
+			t.Parallel()
+			fixture := newChainsyncRollbackFixture(t)
+			for range unrecoverableRollbackThreshold {
+				fixture.ls.reportUnrecoverableRollbackIfStuck(
+					ocommon.Point{}, reason, fixture.connId,
+				)
+			}
+			require.Equal(t, float64(1), promtestutil.ToFloat64(fixture.ls.metrics.unrecoverableRollbacks))
+		})
+	}
 }

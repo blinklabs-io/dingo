@@ -203,6 +203,9 @@ type ParsedUTxO struct {
 	DatumHash []byte // optional
 	Datum     []byte // optional inline datum CBOR
 	ScriptRef []byte // optional reference script CBOR
+	// ReferenceScriptHash is the hash of the reference script, when the
+	// output carries one.
+	ReferenceScriptHash []byte
 }
 
 // ParsedAsset represents a native asset within a UTxO.
@@ -670,6 +673,45 @@ func ImportLedgerState(
 		}
 		if err := cfg.Database.DeleteRewardStateAfterSlot(slot, txn); err != nil {
 			return fmt.Errorf("deleting post-anchor reward state: %w", err)
+		}
+		if err := cfg.Database.RestorePoolStateAtSlot(ctx, slot, txn); err != nil {
+			return fmt.Errorf("restoring post-anchor pool state: %w", err)
+		}
+		if err := cfg.Database.RestoreAccountStateAtSlot(ctx, slot, txn); err != nil {
+			return fmt.Errorf("restoring post-anchor account state: %w", err)
+		}
+		if err := cfg.Database.DeletePParamsAfterSlot(
+			ctx, slot, txn,
+		); err != nil {
+			return fmt.Errorf("deleting post-anchor protocol parameters: %w", err)
+		}
+		if err := cfg.Database.DeletePParamUpdatesAfterSlot(
+			ctx, slot, txn,
+		); err != nil {
+			return fmt.Errorf("deleting post-anchor protocol parameter updates: %w", err)
+		}
+		if err := cfg.Database.RestoreDrepStateAtSlot(ctx, slot, txn); err != nil {
+			return fmt.Errorf("restoring post-anchor DRep state: %w", err)
+		}
+		if err := cfg.Database.DeleteGovernanceVotesAfterSlot(
+			ctx, slot, txn,
+		); err != nil {
+			return fmt.Errorf("deleting post-anchor governance votes: %w", err)
+		}
+		if err := cfg.Database.DeleteGovernanceProposalsAfterSlot(
+			ctx, slot, txn,
+		); err != nil {
+			return fmt.Errorf("deleting post-anchor governance proposals: %w", err)
+		}
+		if err := cfg.Database.DeleteCommitteeMembersAfterSlot(
+			ctx, slot, txn,
+		); err != nil {
+			return fmt.Errorf("deleting post-anchor committee state: %w", err)
+		}
+		if err := cfg.Database.DeleteConstitutionsAfterSlot(
+			ctx, slot, txn,
+		); err != nil {
+			return fmt.Errorf("deleting post-anchor constitutions: %w", err)
 		}
 		if err := cfg.Database.DeleteBlockNoncesAfterPoint(
 			ocommon.Point{Slot: slot, Hash: cfg.State.Tip.BlockHash},

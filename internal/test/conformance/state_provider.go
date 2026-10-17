@@ -27,7 +27,9 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/governance"
+	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/ouroboros-mock/conformance"
 	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
 )
@@ -71,12 +73,25 @@ func isBadConnErr(err error) bool {
 // harness-injected synthetic validation input, not application state
 // Dingo itself commits).
 type DingoStateProvider struct {
-	manager *DingoStateManager
+	manager          *DingoStateManager
+	forecastMaxSlot  uint64
+	forecastLimitSet bool
 }
 
 // NewDingoStateProvider creates a new DingoStateProvider.
 func NewDingoStateProvider(manager *DingoStateManager) *DingoStateProvider {
 	return &DingoStateProvider{manager: manager}
+}
+
+// SetForecastHorizon limits slot-to-time conversion to the stability window
+// carried by a ledger conformance fixture.
+func (p *DingoStateProvider) SetForecastHorizon(currentSlot, stabilityWindow uint64) {
+	maxSlot := ^uint64(0)
+	if stabilityWindow <= maxSlot-currentSlot {
+		maxSlot = currentSlot + stabilityWindow
+	}
+	p.forecastMaxSlot = maxSlot
+	p.forecastLimitSet = true
 }
 
 // ========== common.LedgerState ==========
@@ -281,6 +296,13 @@ func (p *DingoStateProvider) StakeCredentialDeposit(
 
 // SlotToTime converts a slot number to a time
 func (p *DingoStateProvider) SlotToTime(slot uint64) (time.Time, error) {
+	if p.forecastLimitSet && slot > p.forecastMaxSlot {
+		return time.Time{}, fmt.Errorf(
+			"slot %d is outside forecast ending at %d",
+			slot,
+			p.forecastMaxSlot,
+		)
+	}
 	// For conformance testing, use a simple epoch-based calculation
 	// assuming slot 0 = Unix epoch and 1 second per slot
 	//nolint:gosec // G115: slot values in tests won't overflow int64
@@ -812,6 +834,10 @@ func (p *DingoStateProvider) CommitteeMembers() ([]common.CommitteeMember, error
 			tag:  dbMember.ColdCredentialTag,
 			hash: string(dbMember.ColdCredHash),
 		}
+		committeeKey := string([]byte{key.tag}) + key.hash
+		if _, unelected := p.manager.unelectedCommitteeMembers[committeeKey]; unelected {
+			continue
+		}
 		if tagsByHash[key.hash] == nil {
 			tagsByHash[key.hash] = make(map[uint8]struct{}, 1)
 		}
@@ -1075,6 +1101,10 @@ func (p *DingoStateProvider) committeeHotAuthorizations(
 func (p *DingoStateProvider) CommitteeCredentialIsElected(
 	coldCredential common.Credential,
 ) (bool, error) {
+	key := committeeCredentialKey(coldCredential)
+	if _, unelected := p.manager.unelectedCommitteeMembers[key]; unelected {
+		return false, nil
+	}
 	coldTag, err := models.CredentialTagFromUint(coldCredential.CredType)
 	if err != nil {
 		return false, fmt.Errorf("invalid committee cold credential: %w", err)
@@ -1348,11 +1378,82 @@ func (p *DingoStateProvider) GovActionById(
 	if err != nil {
 		return nil, fmt.Errorf("lookup governance action: %w", err)
 	}
+	var action common.GovAction
+	if len(proposal.GovActionCbor) > 0 {
+		var decoded conway.ConwayGovAction
+		if _, err := cbor.DecodeExact(proposal.GovActionCbor, &decoded); err != nil {
+			return nil, fmt.Errorf("decode governance action contents: %w", err)
+		}
+		action = decoded.Action
+	}
 	return &common.GovActionState{
 		ActionId:   id,
 		ActionType: common.GovActionType(proposal.ActionType),
-		ExpirySlot: proposal.ExpiresEpoch * conformanceSlotsPerEpoch,
+		ExpirySlot: govActionExpirySlot(proposal.ExpiresEpoch),
+		Action:     action,
 	}, nil
+}
+
+// GovPurposeRoots returns each enacted purpose root from the persisted ledger
+// state. A non-nil result with nil fields records that the purpose has no root.
+func (p *DingoStateProvider) GovPurposeRoots() (*common.GovPurposeRoots, error) {
+	root := func(actionTypes ...common.GovActionType) (*common.GovActionId, error) {
+		types := make([]uint8, len(actionTypes))
+		for i, actionType := range actionTypes {
+			if uint64(actionType) > uint64(^uint8(0)) {
+				return nil, fmt.Errorf("governance action type %d exceeds storage range", actionType)
+			}
+			types[i] = uint8(actionType)
+		}
+		proposal, err := p.manager.db.GetLastEnactedGovernanceProposal(
+			context.Background(), types, nil,
+		)
+		if err != nil {
+			return nil, err
+		}
+		if proposal == nil {
+			return nil, nil
+		}
+		id, err := common.NewGovActionId(proposal.TxHash, proposal.ActionIndex)
+		if err != nil {
+			return nil, fmt.Errorf("decode governance purpose root: %w", err)
+		}
+		return &id, nil
+	}
+
+	parameterChange, err := root(common.GovActionTypeParameterChange)
+	if err != nil {
+		return nil, fmt.Errorf("lookup parameter-change purpose root: %w", err)
+	}
+	hardFork, err := root(common.GovActionTypeHardForkInitiation)
+	if err != nil {
+		return nil, fmt.Errorf("lookup hard-fork purpose root: %w", err)
+	}
+	committee, err := root(
+		common.GovActionTypeNoConfidence,
+		common.GovActionTypeUpdateCommittee,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("lookup committee purpose root: %w", err)
+	}
+	constitution, err := root(common.GovActionTypeNewConstitution)
+	if err != nil {
+		return nil, fmt.Errorf("lookup constitution purpose root: %w", err)
+	}
+	return &common.GovPurposeRoots{
+		PParamUpdate: parameterChange,
+		HardFork:     hardFork,
+		Committee:    committee,
+		Constitution: constitution,
+	}, nil
+}
+
+func govActionExpirySlot(expiresEpoch uint64) uint64 {
+	maxUint64 := ^uint64(0)
+	if expiresEpoch >= maxUint64/conformanceSlotsPerEpoch {
+		return maxUint64
+	}
+	return (expiresEpoch+1)*conformanceSlotsPerEpoch - 1
 }
 
 // GovActionExists checks if a governance action exists

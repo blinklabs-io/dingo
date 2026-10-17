@@ -15,7 +15,7 @@ type Querier interface {
 	ClaimOffchainMetadataFetch(ctx context.Context, arg ClaimOffchainMetadataFetchParams) (int64, error)
 	CountPParamsByEra(ctx context.Context, eraID sql.NullInt64) (int64, error)
 	CountTransactionsByMetadataLabel(ctx context.Context, label sql.NullString) (int64, error)
-	CountTransactionsByPaymentCred(ctx context.Context, paymentKey []byte) (int64, error)
+	CountTransactionsByPaymentCred(ctx context.Context, arg CountTransactionsByPaymentCredParams) (int64, error)
 	CountTransactionsInSlotRange(ctx context.Context, arg CountTransactionsInSlotRangeParams) (int64, error)
 	CreateAccount(ctx context.Context, arg CreateAccountParams) (int64, error)
 	CreateAsset(ctx context.Context, arg CreateAssetParams) (int64, error)

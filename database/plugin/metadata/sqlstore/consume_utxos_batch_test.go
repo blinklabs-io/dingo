@@ -185,7 +185,7 @@ func TestConsumeUtxosBatchQueryPlansOnTxIDOutputIdx(t *testing.T) {
 	for _, stage := range stages {
 		stage.setup()
 		for _, returnStake := range []bool{false, true} {
-			for n := 2; n <= utxoBatchSize; n++ {
+			for n := 2; n <= utxoSpendBatchSize; n++ {
 				name := fmt.Sprintf(
 					"%s/stake=%v/inputs=%d", stage.name, returnStake, n,
 				)

@@ -97,6 +97,7 @@ type Ouroboros struct {
 	// lastOriginOnlyIntersectWarn throttles warnOriginOnlyIntersectRescued.
 	// Unix nanoseconds; 0 means "never warned".
 	lastOriginOnlyIntersectWarn atomic.Int64
+	chainsyncAdmissionSequence  atomic.Uint64
 	// servedActivityLast throttles recordServedActivity per connection
 	// (servedActivityKey -> *atomic.Int64 nanoseconds since
 	// servedActivityClockBase of the last report).
@@ -316,6 +317,12 @@ type Ouroboros struct {
 	// leiosFetchClaimPublished is an instance-local test seam used to hold a
 	// claimed manifest before dispatch and expose admission ordering deterministically.
 	leiosFetchClaimPublished func()
+	// Exact-point peer provenance used by historical backfill. Entries share
+	// the endorser-block cache's retention horizon and are owner-bound so a
+	// replacement connection cannot inherit an earlier connection's offer.
+	leiosBackfillSourcesMu sync.Mutex
+	leiosBackfillSources   map[string]*leiosBackfillPointSources
+	leiosBackfillSourceSeq uint64
 
 	// Locally-forged EB broadcast log (cursors are owned by the log).
 	leiosEBLog *leiosForgedEBLog
@@ -461,6 +468,18 @@ type OuroborosConfig struct {
 	// is observed but cannot steer the ledger. When nil, every ingress-
 	// eligible peer is apply-eligible (no behavior change).
 	ChainsyncApplyEligible func(ouroboros.ConnectionId) bool
+	// ChainsyncObservePeerTip stages a candidate update before the
+	// ChainsyncApplyEligible gate. Accepted updates must not also publish a
+	// candidate event. Pending far-tip claims are withheld from ingress;
+	// rejected candidates terminate the protocol. Unhandled updates use the
+	// async event path when no resolver is configured.
+	// Candidates may inform Genesis corroboration and eagerness but must not
+	// affect selection until the ledger admits the accompanying header.
+	ChainsyncObservePeerTip func(chainselection.PeerTipUpdateEvent) chainselection.PeerTipUpdateDisposition
+	// ChainsyncResolvePeerTip synchronously resolves a staged candidate after
+	// definite header admission or rejection. Deferred buffered headers are not
+	// resolved until replay.
+	ChainsyncResolvePeerTip func(chainselection.PeerTipUpdateEvent, bool)
 	// ChainsyncAwaitEagerness blocks until a header numbered blockNumber from
 	// connId is within the Limit on Eagerness, and returns an error if ctx is
 	// cancelled first. The roll-forward callback blocks on it after the header's
@@ -474,19 +493,6 @@ type OuroborosConfig struct {
 		blockNumber uint64,
 		appliedTip func() ochainsync.Tip,
 	) error
-	// ChainsyncObservePeerTip observes a peer tip update and reports its
-	// disposition. A synchronously handled update MUST NOT also publish the async
-	// PeerTipUpdateEvent (avoids a double update). This
-	// lets the node update chain-selection state synchronously before the
-	// ChainsyncApplyEligible gate and the ChainsyncAwaitEagerness wait run, so
-	// both reflect the header currently being admitted (closing the race where
-	// an async tip update that revokes corroboration, or that first registers
-	// the peer with the Limit on Eagerness, is not yet processed). Returning
-	// PeerTipUpdateUnhandled falls back to the async PeerTipUpdateEvent path.
-	// Pending far-tip claims advance the protocol cursor but remain withheld
-	// from ledger ingress. Rejected candidates terminate the protocol. A nil
-	// hook uses the async path.
-	ChainsyncObservePeerTip func(chainselection.PeerTipUpdateEvent) chainselection.PeerTipUpdateDisposition
 	// ChainsyncObserveAwaitReply records the peer's explicit protocol-idle
 	// frontier. It runs after gouroboros fences preceding pipelined updates.
 	ChainsyncObserveAwaitReply func(ouroboros.ConnectionId, ocommon.Point)
@@ -728,7 +734,8 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 		headerDecodeCache: newDecodeCacheWithByteLimit[gledger.BlockHeader](
 			headerDecodeCacheMaxBytes,
 		),
-		leiosEndorserBlocks: make(map[string]*leiosEndorserBlockData),
+		leiosEndorserBlocks:  make(map[string]*leiosEndorserBlockData),
+		leiosBackfillSources: make(map[string]*leiosBackfillPointSources),
 		leiosSelectedHeaders: make(
 			map[string]map[string]map[string]selectedLeiosHeader,
 		),

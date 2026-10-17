@@ -4815,6 +4815,30 @@ func TestBuildLeiosEBBodiesAlignWithRefs(t *testing.T) {
 	}
 }
 
+// TestBuildLeiosEBKeepsATransactionLargerThan16Bits verifies the manifest
+// reference size is a 32-bit field: a transaction past 65535 bytes is
+// referenced with its true size, not dropped as unrepresentable.
+func TestBuildLeiosEBKeepsATransactionLargerThan16Bits(t *testing.T) {
+	const size = 70_000
+	tx := MempoolTransaction{
+		Hash: strings.Repeat("11", 32),
+		Cbor: make([]byte, size),
+	}
+	require.True(t, validLeiosTransactionReference(tx))
+
+	ebCbor, _, bodies, err := buildLeiosEB(
+		[]MempoolTransaction{tx},
+		leiosEBCaps{},
+	)
+	require.NoError(t, err)
+	require.Len(t, bodies, 1)
+
+	eb, err := lcommon.NewLeiosEndorserBlockFromCbor(ebCbor)
+	require.NoError(t, err)
+	require.Len(t, eb.TransactionReferences, 1)
+	require.Equal(t, uint32(size), eb.TransactionReferences[0].TransactionSize)
+}
+
 // TestBuildLeiosEBNoValidRefs verifies buildLeiosEB returns errNoValidTxRefs
 // when no transaction yields a valid reference.
 func TestBuildLeiosEBNoValidRefs(t *testing.T) {

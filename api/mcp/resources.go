@@ -173,14 +173,7 @@ ORDER BY m.name, p.cid`)
 		if err := rows.Scan(&table, &column, &columnType); err != nil {
 			return "", err
 		}
-		if len(data) == 0 || data[len(data)-1][0] != table {
-			data = append(data, []string{table, descriptions[table], ""})
-		}
-		row := data[len(data)-1]
-		if row[2] != "" {
-			row[2] += ", "
-		}
-		row[2] += column + " " + columnType
+		data = append(data, []string{table, descriptions[table], column, columnType})
 	}
 	if err := rows.Err(); err != nil {
 		return "", err
@@ -188,7 +181,7 @@ ORDER BY m.name, p.cid`)
 	return heading + "Columns and declared types are read from the connected SQLite database. " +
 		"Read dingo://schema/table/<table> for DDL, keys and constraints.\n\n" +
 		FormatMarkdownTable(
-			[]string{"Table", "Description", "Columns (declared types)"},
+			[]string{"Table", "Description", "Column", "Declared type"},
 			data,
 		), nil
 }
@@ -249,7 +242,7 @@ During Ouroboros network protocol handshakes:
 Dingo exports Prometheus metrics with the ` + "`dingo_`" + ` prefix:
 - ` + "`dingo_forge_blocks_forged_total`" + `: Total blocks successfully minted.
 - ` + "`dingo_forge_slots_elected_total`" + `: Slots won in leader election.
-- ` + "`dingo_ledger_leader_threshold_margin`" + `: Margin between VRF output and leader threshold.
+- ` + "`dingo_ledger_leader_threshold_rejections_total`" + `: Headers rejected by finite E34 leader eligibility.
 `
 
 const docsFAQContent = `# Dingo Frequently Asked Questions (FAQ)
@@ -587,7 +580,7 @@ func registerResources(
 								} else {
 									row := make([]string, len(cols))
 									for i, v := range vals {
-										row[i] = FormatCell(v)
+										row[i] = cellText(v)
 									}
 									tableData = append(tableData, row)
 								}

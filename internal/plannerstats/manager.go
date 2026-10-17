@@ -16,7 +16,10 @@
 // runs. A fresh SQLite metadata database has no sqlite_stat1, so the planner
 // picks indexes by shape alone and can scan most of a large table for a query
 // that should seek; this package runs the backend's incremental statistics
-// maintenance before block processing starts and after each epoch rollover.
+// maintenance before block processing starts, after each epoch rollover, and
+// on a fixed interval in between, because block application can grow tables
+// well past the cardinality the last run recorded long before the next
+// rollover.
 package plannerstats
 
 import (
@@ -24,11 +27,19 @@ import (
 	"errors"
 	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
 )
+
+// DefaultRefreshInterval is how often the worker re-runs the incremental
+// maintenance between epoch rollovers. A run that finds no table grown
+// roughly 25-fold since its statistics were recorded changes nothing, so a
+// short interval costs little; one that does find growth is what keeps the
+// planner from treating a table filled since startup as nearly empty.
+const DefaultRefreshInterval = time.Minute
 
 // shelleyProtocolMajor is the first protocol major version with an epoch
 // nonce; Byron used 0 and 1.
@@ -48,6 +59,10 @@ type Manager struct {
 	// follow-up is remembered, because a run reads current state and so
 	// covers every transition that arrived before it started.
 	pending chan struct{}
+
+	// newTick returns the periodic trigger channel and its stop function.
+	// Tests replace it to fire the trigger without waiting on a clock.
+	newTick func() (<-chan time.Time, func())
 
 	mu             sync.Mutex
 	cancel         context.CancelFunc
@@ -69,6 +84,10 @@ func NewManager(
 		eventBus: eventBus,
 		logger:   logger,
 		pending:  make(chan struct{}, 1),
+		newTick: func() (<-chan time.Time, func()) {
+			ticker := time.NewTicker(DefaultRefreshInterval)
+			return ticker.C, ticker.Stop
+		},
 	}
 }
 
@@ -112,7 +131,11 @@ func (m *Manager) Start(ctx context.Context) error {
 		return nil
 	}
 	m.cancel = cancel
-	m.wg.Go(func() { m.worker(childCtx) })
+	tick, stopTick := m.newTick()
+	m.wg.Go(func() {
+		defer stopTick()
+		m.worker(childCtx, tick)
+	})
 	return nil
 }
 
@@ -165,11 +188,13 @@ func (m *Manager) handleEpochTransition(evt event.Event) {
 	}
 }
 
-func (m *Manager) worker(ctx context.Context) {
+func (m *Manager) worker(ctx context.Context, tick <-chan time.Time) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case <-tick:
+			_, _ = m.run(ctx, types.PlannerStatsTriggerPeriodic)
 		case <-m.pending:
 			_, _ = m.run(ctx, types.PlannerStatsTriggerEpoch)
 		}

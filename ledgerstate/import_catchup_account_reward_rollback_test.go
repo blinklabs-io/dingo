@@ -290,6 +290,88 @@ func TestImportLedgerStateCatchUpRollsBackPostAnchorAccountRewardCredit(
 	)
 }
 
+func TestImportLedgerStateCatchUpClearsRewardJournalForDeletedAccount(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	t.Cleanup(func() { dbtest.CloseDatabase(db) })
+
+	const anchorSlot = uint64(100_000)
+	const laterSlot = uint64(101_000)
+	snapshotKey := bytes.Repeat([]byte{0xa1}, 28)
+	laterKey := bytes.Repeat([]byte{0xa2}, 28)
+	certData := accountCertStateData(t, snapshotKey, 1_000, 0)
+	newImportConfig := func() ImportConfig {
+		nonce := make([]byte, 32)
+		return ImportConfig{
+			Database: db,
+			Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+			State: &RawLedgerState{
+				CertStateData:       certData,
+				Epoch:               anchorSlot / 1_000,
+				EraIndex:            EraConway,
+				EraBounds:           make([]EraBound, EraConway+1),
+				EpochNonce:          nonce,
+				EvolvingNonce:       nonce,
+				CandidateNonce:      nonce,
+				LastEpochBlockNonce: nonce,
+				Tip: &SnapshotTip{
+					Slot:      anchorSlot,
+					BlockHash: make([]byte, 32),
+				},
+			},
+			EpochLength: func(uint) (uint, uint, error) {
+				return 1, importTestEpochLength, nil
+			},
+		}
+	}
+
+	require.NoError(t, ImportLedgerState(
+		context.Background(), newImportConfig(),
+	))
+	require.NoError(t, db.CreateAccount(context.Background(), nil, &models.Account{
+		StakingKey:    laterKey,
+		CredentialTag: accountCredTagKey,
+		AddedSlot:     laterSlot,
+		CreatedSlot:   laterSlot,
+		Active:        true,
+	}))
+	const creditAmount = uint64(5_000_000)
+	creditSourceHash := []byte{0xa3}
+	require.NoError(t, db.AddAccountRewardByCredential(
+		context.Background(), accountCredTagKey, laterKey,
+		creditAmount, laterSlot, creditSourceHash, nil,
+	))
+
+	require.NoError(t, ImportLedgerState(
+		context.Background(), newImportConfig(),
+	))
+	_, err = db.GetAccountByCredential(
+		context.Background(), accountCredTagKey, laterKey, true, nil,
+	)
+	require.ErrorIs(t, err, models.ErrAccountNotFound)
+
+	require.NoError(t, db.CreateAccount(context.Background(), nil, &models.Account{
+		StakingKey:    laterKey,
+		CredentialTag: accountCredTagKey,
+		AddedSlot:     laterSlot,
+		CreatedSlot:   laterSlot,
+		Active:        true,
+	}))
+	require.NoError(t, db.AddAccountRewardByCredential(
+		context.Background(), accountCredTagKey, laterKey,
+		creditAmount, laterSlot, creditSourceHash, nil,
+	))
+	account, err := db.GetAccountByCredential(
+		context.Background(), accountCredTagKey, laterKey, false, nil,
+	)
+	require.NoError(t, err)
+	require.Equal(t, creditAmount, uint64(account.Reward))
+}
+
 // TestImportLedgerStateReconcileCatchUpRollsBackPostAnchorAccountRewardCredit
 // is the same case with the second import run as Reconcile: true, so a
 // genuine catch-up sync (not only the ordinary resumed-sync shape) is also
