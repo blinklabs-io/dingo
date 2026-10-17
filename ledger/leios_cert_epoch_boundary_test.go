@@ -26,9 +26,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/chain"
-	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
@@ -37,7 +35,6 @@ import (
 	gconway "github.com/blinklabs-io/gouroboros/ledger/conway"
 	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
-	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 )
@@ -186,7 +183,13 @@ func TestLedgerProcessBlocksRetriesLocalLeiosCertificateFailurePastEpochBoundary
 	})
 }
 
-func TestLedgerProcessBlocksAppliesCertifiedClosureBeforeEpochSnapshot(t *testing.T) {
+// An endorser block is never certified across an epoch boundary: a ranking
+// block in epoch 1 certifying an endorser block announced in epoch 0 is
+// rejected before the certificate is checked, its closure is not applied, and
+// the block leaves the primary chain.
+func TestLedgerProcessBlocksRejectsCertificateAcrossEpochBoundary(
+	t *testing.T,
+) {
 	t.Parallel()
 	runLeiosCertEpochBoundaryCase(t, false, nil, true)
 }
@@ -346,18 +349,6 @@ func runLeiosCertEpochBoundaryCase(
 		rewardPParams = epochBoundaryBenchPParams()
 	}
 	seedEmptyRewardBasisForRollover(t, db, epoch0, rewardPParams)
-	var closureVisibleAtSnap bool
-	if crossingClosure {
-		ls.SetEpochBoundarySnapshotStakeHook(func(txn *database.Txn, _ event.EpochTransitionEvent) error {
-			tx, err := db.GetTransactionByHash(t.Context(), closureTx.Hash().Bytes(), txn)
-			if err != nil {
-				return err
-			}
-			closureVisibleAtSnap = tx != nil
-			return nil
-		})
-	}
-
 	results := make(chan readChainResult, 1)
 	results <- readChainResult{blocks: blocks}
 	close(results)
@@ -365,6 +356,35 @@ func runLeiosCertEpochBoundaryCase(
 		context.Background(),
 		results,
 	)
+	if crossingClosure {
+		require.ErrorIs(t, processErr, errRestartLedgerPipeline)
+		require.NotEqual(
+			t,
+			certifier.Hash().Bytes(),
+			cm.PrimaryChain().Tip().Point.Hash,
+			"the rejected certifying block must leave the primary chain",
+		)
+		require.Less(t, ls.currentTip.Point.Slot, certifier.SlotNumber())
+		storedTx, err := db.GetTransactionByHash(
+			t.Context(),
+			closureTx.Hash().Bytes(),
+			nil,
+		)
+		require.NoError(t, err)
+		require.Nil(
+			t,
+			storedTx,
+			"a rejected certificate must not apply its closure",
+		)
+		validatedMu.Lock()
+		defer validatedMu.Unlock()
+		require.Empty(
+			t,
+			validatedEpochs,
+			"the timing verdict precedes the certificate check",
+		)
+		return
+	}
 	if certificateErr != nil &&
 		!errors.Is(certificateErr, ErrLeiosInvalidCertificate) {
 		require.Equal(
@@ -417,27 +437,6 @@ func runLeiosCertEpochBoundaryCase(
 	validatedMu.Lock()
 	defer validatedMu.Unlock()
 	expectedEpochs := []uint64{1, 1}
-	if crossingClosure {
-		require.True(t, closureVisibleAtSnap, "the certified closure must be applied to the unticked ledger before SNAP")
-		fees, err := db.Metadata().SumTransactionFeesInSlotRange(0, epochLength-1, nil)
-		require.NoError(t, err)
-		require.Equal(t, closureTx.Fee().Uint64(), fees)
-		fees, err = db.Metadata().SumTransactionFeesInSlotRange(epochLength, 2*epochLength-1, nil)
-		require.NoError(t, err)
-		require.Zero(t, fees)
-		storedTx, err := db.GetTransactionByHash(t.Context(), closureTx.Hash().Bytes(), nil)
-		require.NoError(t, err)
-		require.Equal(t, certifier.SlotNumber(), storedTx.Slot, "rollback ownership remains with the certifying ranking block")
-		_, _, err = db.TruncateAfterSlot(t.Context(), ocommon.Point{Slot: announcer.SlotNumber(), Hash: announcer.Hash().Bytes()}, 0, nil)
-		require.NoError(t, err)
-		storedTx, err = db.GetTransactionByHash(t.Context(), closureTx.Hash().Bytes(), nil)
-		require.NoError(t, err)
-		require.Nil(t, storedTx, "rolling back the certifier removes its pre-tick closure")
-		fees, err = db.Metadata().SumTransactionFeesInSlotRange(0, epochLength-1, nil)
-		require.NoError(t, err)
-		require.Zero(t, fees, "rollback removes the closure's fee context")
-		expectedEpochs = []uint64{0, 0, 0, 0}
-	}
 	require.Equal(
 		t,
 		expectedEpochs,
