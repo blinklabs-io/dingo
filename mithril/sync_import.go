@@ -277,6 +277,11 @@ func selectLedgerStateSnapshot(
 		})
 	}
 	if len(searchTrees) == 0 {
+		if !result.CertificateVerified {
+			return nil, "", nil, false, errors.New(
+				"bootstrap produced no ancillary ledger state to import",
+			)
+		}
 		return nil, "", nil, false, errors.New(
 			"bootstrap result carries no verified directory handle to " +
 				"import ledger state from",

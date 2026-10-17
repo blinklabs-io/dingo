@@ -274,6 +274,29 @@ func TestImportLedgerStateRefusesUnvettedResult(t *testing.T) {
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 		nil,
 		&BootstrapResult{
+			AncillaryDir:        t.TempDir(),
+			ExtractDir:          t.TempDir(),
+			CertificateVerified: true,
+		},
+		false,
+		^uint64(0),
+		nil,
+	)
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "no verified directory handle")
+}
+
+// TestImportLedgerStateUnverifiedRunReportsNoAncillaryState pins that a run
+// that never asked for verification is not told a verified handle is missing.
+func TestImportLedgerStateUnverifiedRunReportsNoAncillaryState(t *testing.T) {
+	t.Parallel()
+
+	_, _, _, err := importLedgerState(
+		t.Context(),
+		nil,
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+		nil,
+		&BootstrapResult{
 			AncillaryDir: t.TempDir(),
 			ExtractDir:   t.TempDir(),
 		},
@@ -282,7 +305,8 @@ func TestImportLedgerStateRefusesUnvettedResult(t *testing.T) {
 		nil,
 	)
 	require.Error(t, err)
-	assert.ErrorContains(t, err, "no verified directory handle")
+	assert.ErrorContains(t, err, "produced no ancillary ledger state")
+	assert.NotContains(t, err.Error(), "verified")
 }
 
 // TestImportLedgerStateRefusesSymlinkedState covers the ancillary tree's file

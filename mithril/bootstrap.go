@@ -276,6 +276,10 @@ type BootstrapResult struct {
 	// newer than the certified tip, and refuses a verified tree that yields no
 	// state at all.
 	AncillaryVerified bool
+	// CertificateVerified reports that the bootstrap was asked to verify the
+	// certificate chain, so a missing ancillary tree is a verification failure
+	// rather than an unverified run that simply produced none.
+	CertificateVerified bool
 	// AncillaryDigests is the signed ancillary manifest's digest map: every
 	// file the ancillary key vouched for, keyed by its slash-separated path
 	// under AncillaryDir. Set only when AncillaryVerified is true.

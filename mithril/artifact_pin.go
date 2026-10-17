@@ -141,6 +141,14 @@ func recordPinnedCertifiedTip(db *database.Database, slot uint64) error {
 // across either would re-import a different snapshot's live set over the
 // partially imported one.
 func (p pinnedArtifact) validateForRun(backend, network string) error {
+	if p.Backend == "v1" {
+		return fmt.Errorf(
+			"interrupted Mithril sync pinned artifact %s on the v1 backend, "+
+				"which is no longer supported; remove the database "+
+				"directory and bootstrap again",
+			p.Digest,
+		)
+	}
 	if p.Backend != "" && p.Backend != normalizeBackend(backend) {
 		return fmt.Errorf(
 			"interrupted Mithril sync pinned artifact %s on the %s backend, "+

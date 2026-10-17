@@ -552,8 +552,9 @@ func bootstrapV2(
 				CardanoNodeVersion: artifact.CardanoNodeVersion,
 			},
 		},
-		ImmutableDir:  immutableTree.Path(),
-		ImmutableRoot: immutableTree.Root(),
+		ImmutableDir:        immutableTree.Path(),
+		ImmutableRoot:       immutableTree.Root(),
+		CertificateVerified: cfg.VerifyCertificateChain,
 		// The digest list the certificate's merkle root covers, carried on so
 		// the load can re-check each file from the descriptor it reads through
 		// rather than trusting a check that ran before the file was closed.

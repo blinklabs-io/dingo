@@ -387,3 +387,14 @@ func TestSyncRefusesResumeWhenCertifiedTipMoved(t *testing.T) {
 	assert.ErrorContains(t, err, "certified ImmutableDB tip")
 	assert.ErrorContains(t, err, "no longer matches the pinned artifact")
 }
+
+func TestValidateForRunRejectsV1Pin(t *testing.T) {
+	t.Parallel()
+
+	err := pinnedArtifact{Backend: "v1", Digest: "old-digest"}.
+		validateForRun("v2", "preview")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "v1 backend, which is no longer supported")
+	assert.Contains(t, err.Error(), "remove the database directory")
+	assert.NotContains(t, err.Error(), "re-run with the original backend")
+}
