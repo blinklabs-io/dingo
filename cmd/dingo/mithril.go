@@ -662,7 +662,7 @@ func runMithrilSyncWithRepair(
 			Blob:     cfg.Plugins.Storage.Blob,
 			Metadata: cfg.Plugins.Storage.Metadata,
 		},
-		RunMode:           string(config.RunModeLoad),
+		RunMode:           string(config.RunModeSync),
 		BackfillBatchSize: cfg.BackfillBatchSize,
 		DatabaseWorkers:   cfg.DatabaseWorkers,
 		Tracing:           cfg.Tracing,
