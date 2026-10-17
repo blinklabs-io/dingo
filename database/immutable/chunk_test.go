@@ -113,6 +113,43 @@ func BenchmarkChunkBlockRead(b *testing.B) {
 	}
 }
 
+func BenchmarkChunkBlockDataAccess(b *testing.B) {
+	spans, chunkPath := benchmarkChunkSpans(b)
+	data, err := os.ReadFile(chunkPath)
+	if err != nil {
+		b.Fatal(err)
+	}
+	entry := newBytesEntry(data)
+	for _, method := range []string{"read-at", "range-at"} {
+		b.Run(method, func(b *testing.B) {
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := range b.N {
+				span := spans[i%len(spans)]
+				if method == "read-at" {
+					blockData := make([]byte, span.size)
+					n, err := entry.ReadAt(blockData, span.offset)
+					if err != nil {
+						b.Fatal(err)
+					}
+					if n != len(blockData) {
+						b.Fatalf("read %d bytes, want %d", n, len(blockData))
+					}
+					benchmarkReadSink ^= blockData[0]
+					continue
+				}
+				blockData, ok := entry.RangeAt(
+					span.offset, int64(span.size),
+				)
+				if !ok {
+					b.Fatalf("range [%d:%d] outside chunk", span.offset, span.offset+int64(span.size))
+				}
+				benchmarkReadSink ^= blockData[0]
+			}
+		})
+	}
+}
+
 // TestChunkNamesSortNumericallyPastFiveDigits covers the ordering every lookup
 // here rests on.
 //
@@ -217,6 +254,7 @@ func TestChunkNextReadsDistinctCBORAtNonzeroOffset(t *testing.T) {
 		copy(secondaryData[base+16:base+48], bytes.Repeat([]byte{byte(i + 1)}, 32))
 		binary.BigEndian.PutUint64(secondaryData[base+48:], uint64(100+i))
 	}
+	originalChunkData := bytes.Clone(chunkData)
 
 	tests := []struct {
 		name   string
@@ -249,6 +287,11 @@ func TestChunkNextReadsDistinctCBORAtNonzeroOffset(t *testing.T) {
 				require.Equal(t, uint64(100+i), block.Slot)
 				require.Equal(t, bytes.Repeat([]byte{byte(i + 1)}, 32), block.Hash)
 				require.Equal(t, want, block.Cbor)
+				if test.name == "bytesEntry" {
+					block.Cbor[0] ^= 0x01
+					require.Equal(t, originalChunkData, chunkData)
+					block.Cbor[0] ^= 0x01
+				}
 			}
 			block, err := chunk.Next()
 			require.NoError(t, err)

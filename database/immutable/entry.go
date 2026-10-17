@@ -74,17 +74,29 @@ func (f fileEntry) Size() (int64, error) {
 // the file rather than by its actual size — see readVerifiedEntry, which
 // establishes the one before allocating for the other.
 type bytesEntry struct {
+	data   []byte
 	reader *bytes.Reader
 }
 
 func newBytesEntry(data []byte) *bytesEntry {
-	return &bytesEntry{reader: bytes.NewReader(data)}
+	return &bytesEntry{data: data, reader: bytes.NewReader(data)}
 }
 
 func (b *bytesEntry) Read(p []byte) (int, error) { return b.reader.Read(p) }
 
 func (b *bytesEntry) ReadAt(p []byte, off int64) (int, error) {
 	return b.reader.ReadAt(p, off)
+}
+
+func (b *bytesEntry) RangeAt(offset, length int64) ([]byte, bool) {
+	if offset < 0 || length < 0 {
+		return nil, false
+	}
+	size := int64(len(b.data))
+	if offset > size || length > size-offset {
+		return nil, false
+	}
+	return b.data[int(offset):int(offset+length)], true
 }
 
 func (b *bytesEntry) Seek(offset int64, whence int) (int64, error) {
