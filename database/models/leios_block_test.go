@@ -137,3 +137,23 @@ func TestDecodeConwayBlockRejectsMalformedLeiosHeaderExtension(t *testing.T) {
 		})
 	}
 }
+
+// The extended-header fallback stores the original input as the block's CBOR.
+// cbor.Decode accepts a valid prefix and reports how many bytes it consumed, so
+// without an explicit length check, bytes after the block would be persisted
+// and re-served as part of it while strict decoders reject the same bytes.
+func TestDecodeConwayBlockRejectsTrailingDataAfterLeiosExtendedBlock(
+	t *testing.T,
+) {
+	extendedRaw := testutil.ExtendConwayHeaderWithLeios(
+		t,
+		buildStandardConwayBlock(t),
+	)
+	// A single trailing byte is the smallest input that still decodes as a
+	// valid block prefix; the fallback must reject it.
+	raw := append(bytes.Clone(extendedRaw), 0x00)
+
+	_, err := DecodeConwayBlock(raw)
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "trailing data")
+}

@@ -86,11 +86,16 @@ func (q *Queries) CountTransactionsByMetadataLabel(ctx context.Context, label sq
 const countTransactionsByPaymentCred = `-- name: CountTransactionsByPaymentCred :one
 SELECT COUNT(DISTINCT transaction_id)
 FROM address_transaction
-WHERE payment_key = ?
+WHERE payment_key = ? AND payment_script = ?
 `
 
-func (q *Queries) CountTransactionsByPaymentCred(ctx context.Context, paymentKey []byte) (int64, error) {
-	row := q.db.QueryRowContext(ctx, countTransactionsByPaymentCred, paymentKey)
+type CountTransactionsByPaymentCredParams struct {
+	PaymentKey    []byte
+	PaymentScript sql.NullBool
+}
+
+func (q *Queries) CountTransactionsByPaymentCred(ctx context.Context, arg CountTransactionsByPaymentCredParams) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countTransactionsByPaymentCred, arg.PaymentKey, arg.PaymentScript)
 	var count int64
 	err := row.Scan(&count)
 	return count, err

@@ -81,8 +81,10 @@ const (
 	accountDRepClearSchemaRelease                       = "account-drep-clear-history"
 	committeeHotAuthorizationPruneOrderSchemaRelease    = "committee-hot-authorization-prune-order"
 	poolRelayTypeSchemaRelease                          = "pool-relay-type"
+	scriptIndexSchemaRelease                            = "script-redeemer-reference-index"
 	midnightRollbackJournalSchemaRelease                = "midnight-rollback-journal"
 	committeeRenewalTermStartSchemaRelease              = "committee-renewal-term-start-repair"
+	addressTransactionCredentialKindSchemaRelease       = "address-transaction-credential-kind"
 	opCertCounterEncodingSchemaRelease                  = "opcert-counter-unsigned-order"
 )
 
@@ -236,7 +238,9 @@ var schemaVersions = []struct {
 		Name:    committeeRenewalTermStartSchemaRelease,
 		Dir:     "v44",
 	},
-	{Version: 45, Name: opCertCounterEncodingSchemaRelease, Dir: "v45"},
+	{Version: 45, Name: scriptIndexSchemaRelease, Dir: "v45"},
+	{Version: 46, Name: addressTransactionCredentialKindSchemaRelease, Dir: "v46"},
+	{Version: 47, Name: opCertCounterEncodingSchemaRelease, Dir: "v47"},
 }
 
 // SQLiteRegistry returns the checked-in SQLite migration registry.
@@ -332,6 +336,10 @@ func registryForDialect(dialect string) ([]Migration, error) {
 		if version.Name == committeeTermStartPresenceSchemaRelease {
 			migration.BackfillRevision = "1"
 			migration.Backfill = committeeTermStartBackfill
+		}
+		if version.Name == addressTransactionCredentialKindSchemaRelease {
+			migration.BackfillRevision = "1"
+			migration.Backfill = addressTransactionCredentialKindBackfill
 		}
 		if version.Name == poolDepositHeldSchemaRelease {
 			migration.BackfillRevision = "1"
@@ -1610,6 +1618,60 @@ func rewardStakeVersionRestampBackfill(
 		Cursor: formatRestampCursor(restampCursorRewardPhase, lastID),
 		Rows:   rowCount,
 		Done:   done,
+	}, nil
+}
+
+func addressTransactionCredentialKindBackfill(
+	ctx context.Context,
+	batch Batch,
+) (BatchResult, error) {
+	lastID := int64(0)
+	if batch.Cursor != "" {
+		parsed, err := strconv.ParseInt(batch.Cursor, 10, 64)
+		if err != nil {
+			return BatchResult{}, fmt.Errorf(
+				"parse address transaction rebuild cursor: %w",
+				err,
+			)
+		}
+		lastID = parsed
+	}
+	rows, err := batch.Tx.QueryContext(ctx, batch.Rebind(`
+SELECT DISTINCT transaction_id
+FROM address_transaction
+WHERE transaction_id > ?
+  AND transaction_id IS NOT NULL
+ORDER BY transaction_id
+LIMIT ?`), lastID, batch.Limit)
+	if err != nil {
+		return BatchResult{}, fmt.Errorf("read address transaction rebuild source: %w", err)
+	}
+	defer rows.Close()
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return BatchResult{}, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return BatchResult{}, err
+	}
+	if len(ids) == 0 {
+		return BatchResult{Cursor: batch.Cursor, Done: true}, nil
+	}
+	for _, id := range ids {
+		if _, err := batch.Tx.ExecContext(ctx, batch.Rebind(
+			"INSERT INTO address_transaction_rebuild_source (transaction_id) VALUES (?)",
+		), id); err != nil {
+			return BatchResult{}, fmt.Errorf("save address transaction rebuild source: %w", err)
+		}
+	}
+	return BatchResult{
+		Cursor: strconv.FormatInt(ids[len(ids)-1], 10),
+		Rows:   int64(len(ids)),
+		Done:   len(ids) < batch.Limit,
 	}, nil
 }
 

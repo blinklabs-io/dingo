@@ -16,6 +16,7 @@ package koiosparity
 
 import (
 	"context"
+	"database/sql"
 	"encoding/hex"
 	"fmt"
 	"math/big"
@@ -192,6 +193,25 @@ func openTestDingoDB(t *testing.T) (*DingoDB, *testDB) {
 	dir := t.TempDir()
 	gdb := openTestSQLDB(t, dir, true)
 	return &DingoDB{db: gdb.db, dialect: "sqlite"}, gdb
+}
+
+func TestProposalRefundReadTxOptions(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		dialect   string
+		isolation sql.IsolationLevel
+	}{
+		{dialect: "sqlite", isolation: sql.LevelDefault},
+		{dialect: "postgres", isolation: sql.LevelRepeatableRead},
+		{dialect: "mysql", isolation: sql.LevelRepeatableRead},
+	} {
+		t.Run(tc.dialect, func(t *testing.T) {
+			t.Parallel()
+			options := proposalRefundReadTxOptions(tc.dialect)
+			require.Equal(t, tc.isolation, options.Isolation)
+			assert.True(t, options.ReadOnly)
+		})
+	}
 }
 
 func testPoolKeyHash(t *testing.T, b byte) []byte {

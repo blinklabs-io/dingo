@@ -202,6 +202,9 @@ type ParsedUTxO struct {
 	DatumHash []byte // optional
 	Datum     []byte // optional inline datum CBOR
 	ScriptRef []byte // optional reference script CBOR
+	// ReferenceScriptHash is the hash of the reference script, when the
+	// output carries one.
+	ReferenceScriptHash []byte
 }
 
 // ParsedAsset represents a native asset within a UTxO.

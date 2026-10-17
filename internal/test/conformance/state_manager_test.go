@@ -117,6 +117,9 @@ func TestLoadInitialStateLegacyDRepUsesRecordedCredential(t *testing.T) {
 		DRepDeposits: map[mockledger.RewardAccountKey]uint64{
 			script: recordedDeposit,
 		},
+		DRepExpiries: map[mockledger.RewardAccountKey]uint64{
+			script: 123,
+		},
 	}, pp))
 
 	drep, err := m.db.GetDrepByCredential(
@@ -128,6 +131,7 @@ func TestLoadInitialStateLegacyDRepUsesRecordedCredential(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.NotNil(t, drep)
+	require.Equal(t, uint64(123), drep.ExpiryEpoch)
 	deposit, err := m.db.GetDrepLastRegistrationDeposit(
 		context.Background(),
 		1,
@@ -788,15 +792,18 @@ func TestProcessEpochAgainstRealBackend(t *testing.T) {
 	txn := m.db.Transaction(context.Background(), true)
 	defer txn.Release()
 
-	_, err = governance.ProcessEpoch(context.Background(), &governance.EpochInput{
-		DB:           m.db,
-		Txn:          txn,
-		PrevEpoch:    0,
-		NewEpoch:     1,
-		BoundarySlot: boundarySlot,
-		PParams:      pp,
-		UpdateFn:     eras.ConwayEraDesc.PParamsUpdateFunc,
-	})
+	_, err = governance.ProcessEpoch(
+		context.Background(),
+		&governance.EpochInput{
+			DB:           m.db,
+			Txn:          txn,
+			PrevEpoch:    0,
+			NewEpoch:     1,
+			BoundarySlot: boundarySlot,
+			PParams:      pp,
+			UpdateFn:     eras.ConwayEraDesc.PParamsUpdateFunc,
+		},
+	)
 	require.NoError(
 		t,
 		err,
@@ -1016,8 +1023,11 @@ func TestCommitteeActionRatifiedUpdateCommitteeUsesAbsentCommitteeThreshold(
 	defer txn.Release()
 	ratified, err := m.committeeActionRatified(txn, proposal, 5)
 	require.NoError(t, err)
-	require.True(t, ratified,
-		"an absent committee must select CommitteeNoConfidence, not CommitteeNormal")
+	require.True(
+		t,
+		ratified,
+		"an absent committee must select CommitteeNoConfidence, not CommitteeNormal",
+	)
 }
 
 // TestProcessEpochBoundaryRatifiesUpdateCommitteeWithoutCommitteeVote closes
@@ -1807,21 +1817,28 @@ func (o *observedLedgerState) CostModels() map[common.PlutusLanguage]common.Cost
 // entryPointCorpusDecodeEra is the era decodeVectorTransaction decodes as.
 const entryPointCorpusDecodeEra = conway.EraNameConway
 
-func TestConformanceApplyTransactionResetsDormancyBeforeCertificates(t *testing.T) {
+func TestConformanceApplyTransactionResetsDormancyBeforeCertificates(
+	t *testing.T,
+) {
 	t.Parallel()
 	m, err := NewDingoStateManager()
 	require.NoError(t, err)
 	defer func() { require.NoError(t, m.Close()) }()
 
 	pparams := &conway.ConwayProtocolParameters{
-		ProtocolVersion:         common.ProtocolParametersProtocolVersion{Major: 9},
+		ProtocolVersion: common.ProtocolParametersProtocolVersion{
+			Major: 9,
+		},
 		GovActionValidityPeriod: 20,
 		DRepInactivityPeriod:    20,
 	}
 	m.protocolParams = pparams
 	m.currentEpoch = 100
 	drepCredential := testHash28(0xd7)
-	require.NoError(t, m.db.SetImportedDormantDRepEpochs(context.Background(), 3, nil))
+	require.NoError(
+		t,
+		m.db.SetImportedDormantDRepEpochs(context.Background(), 3, nil),
+	)
 
 	rewardHash := testHash28(0xd8)
 	rewardAddress, err := common.NewAddressFromBytes(
@@ -1837,7 +1854,10 @@ func TestConformanceApplyTransactionResetsDormancyBeforeCertificates(t *testing.
 			Type:   uint(common.GovActionTypeInfo),
 			Action: &common.InfoGovAction{Type: uint(common.GovActionTypeInfo)},
 		},
-		PPAnchor: common.GovAnchor{Url: "https://example.com/new", DataHash: anchorHash},
+		PPAnchor: common.GovAnchor{
+			Url:      "https://example.com/new",
+			DataHash: anchorHash,
+		},
 	}
 	transaction := mockledger.NewTransactionBuilder()
 	transaction.WithId(testHash32(0xda))
@@ -1854,7 +1874,13 @@ func TestConformanceApplyTransactionResetsDormancyBeforeCertificates(t *testing.
 	transaction.WithProposalProcedures(proposal)
 
 	require.NoError(t, m.ApplyTransaction(transaction, 100))
-	drep, err := m.db.GetDrepByCredential(context.Background(), 0, drepCredential[:], true, nil)
+	drep, err := m.db.GetDrepByCredential(
+		context.Background(),
+		0,
+		drepCredential[:],
+		true,
+		nil,
+	)
 	require.NoError(t, err)
 	require.NotNil(t, drep)
 	require.Equal(t, uint64(100), drep.LastActivityEpoch)
