@@ -1782,20 +1782,11 @@ func (pc *PoolCredentials) validateAgainstLedger(
 // blocks a slot the chain would have adopted. The rule itself lives in
 // ledger/eras.ValidateOpCertCounter, the single source both call sites
 // share, so it cannot drift between them.
-//
-// The persistable-counter bound is applied alongside it. A candidate above it
-// is a counter the chain accepts and this node cannot record, so declining the
-// leader slot is the same disposition block application takes for an inbound
-// block carrying one -- and it is taken before the slot is spent rather than
-// after the block is built.
 func validateOpCertSequence(
 	stored uint64,
 	found bool,
 	candidate uint64,
 	enforceNoGap bool,
 ) error {
-	if err := eras.ValidateOpCertPersistableCounter(candidate); err != nil {
-		return err
-	}
 	return eras.ValidateOpCertCounter(stored, found, candidate, enforceNoGap)
 }
