@@ -2952,6 +2952,12 @@ func TestPipelineStagesMatch(t *testing.T) {
 func TestCBORConformanceReportRunsOnlyForLinuxRelease(t *testing.T) {
 	root := repoRoot(t)
 	const datasetRevision = "6cd8c928665bbafe90e02066ebb4620e38f051de"
+	const amaruUPLCRevision = "03acfc01807e5e2a8a5466541ad22c856f3de99c"
+	const ndcLedgerRevision = "4fed8790fb81164f9d7a53414acc5f78aaf65422"
+	const turboDatasetRevision = "862fa7127fe07c2537005955cf98e7b332151996"
+	const turboDatasetDate = "20260826"
+	const turboShard0000SHA256 = "c446743b869955bae355aea04fade0a0dc46f01ae08f04bcada44d8944e477ee"
+	const turboShard0001SHA256 = "2bb62f11dee861296fbdf7de69599340cd6d4b93a7fad37a365b0dcd004fd83d"
 
 	prJobs := pipelineJobs(t, root, prPipeline)
 	for jobName, rawJob := range prJobs {
@@ -3005,6 +3011,18 @@ func TestCBORConformanceReportRunsOnlyForLinuxRelease(t *testing.T) {
 	if jobEnv["CBOR_DATASET_REVISION"] != datasetRevision {
 		t.Errorf("Linux release job CBOR dataset revision = %v, want %q", jobEnv["CBOR_DATASET_REVISION"], datasetRevision)
 	}
+	if jobEnv["AMARU_UPLC_REVISION"] != amaruUPLCRevision {
+		t.Errorf("Linux release job Amaru UPLC revision = %v, want %q", jobEnv["AMARU_UPLC_REVISION"], amaruUPLCRevision)
+	}
+	if jobEnv["NDC_LEDGER_REVISION"] != ndcLedgerRevision {
+		t.Errorf("Linux release job NDC ledger revision = %v, want %q", jobEnv["NDC_LEDGER_REVISION"], ndcLedgerRevision)
+	}
+	if jobEnv["TURBO_DATASET_REVISION"] != turboDatasetRevision ||
+		jobEnv["TURBO_DATASET_DATE"] != turboDatasetDate ||
+		jobEnv["TURBO_SHARD_0000_SHA256"] != turboShard0000SHA256 ||
+		jobEnv["TURBO_SHARD_0001_SHA256"] != turboShard0001SHA256 {
+		t.Error("Linux release job does not pin the TurboCardano dataset and both archive shards")
+	}
 	corpusCheckout, reportGeneration, releaseUpload := 0, 0, 0
 	for _, rawStep := range steps {
 		step, ok := rawStep.(map[string]any)
@@ -3025,22 +3043,20 @@ func TestCBORConformanceReportRunsOnlyForLinuxRelease(t *testing.T) {
 		case "Checkout UPLC conformance corpus":
 			if step["if"] != "github.ref_type == 'tag'" ||
 				with["repository"] != "pragma-org/amaru" ||
-				with["ref"] != "ceda0c57a10d95b30a9338454e209582d62318e8" {
+				with["ref"] != "${{ env.AMARU_UPLC_REVISION }}" {
 				t.Error("Linux release checks out the wrong UPLC corpus")
 			}
 		case "Checkout ledger-rules fixtures":
 			if step["if"] != "github.ref_type == 'tag'" ||
 				with["repository"] != "pragma-org/node-diversity-conformance" ||
-				with["ref"] != "fc4713f2e8f10925becc4a17a1567a559cf27918" {
+				with["ref"] != "${{ env.NDC_LEDGER_REVISION }}" {
 				t.Error("Linux release does not use the pinned ledger-rules fixtures")
 			}
 		case "Generate conformance reports":
 			reportGeneration++
 			if step["if"] != "github.ref_type == 'tag'" ||
 				step["run"] != ".github/scripts/generate-conformance-reports.sh" ||
-				env["CBOR_DATASET_DIR"] != ".conformance/cardano-cbor-dataset" ||
-				env["TURBO_URL"] != "https://pub-2239d82d9a074482b2eb2c886191cb4e.r2.dev/turbo.tar.xz" ||
-				env["TURBO_SHA256"] != "fffe2e959fb8bdb47ee4834008dcceb89fcde53afb659a454beca26cf95507cc" {
+				env["CBOR_DATASET_DIR"] != ".conformance/cardano-cbor-dataset" {
 				t.Error("Linux release does not generate reports from the pinned corpora")
 			}
 		case "Upload release assets":
@@ -3059,6 +3075,8 @@ func TestCBORConformanceReportRunsOnlyForLinuxRelease(t *testing.T) {
 	reportScript := readRepoFile(t, root, ".github/scripts/generate-conformance-reports.sh")
 	if !strings.Contains(reportScript, "go run ./internal/cborconformance/cmd") ||
 		!strings.Contains(reportScript, `-corpus-revision "$dataset_revision"`) ||
+		!strings.Contains(reportScript, `raw.githubusercontent.com/r2rationality/turbocardano/${revision}`) ||
+		!strings.Contains(reportScript, `cat "${dir}/dataset.tar.0000.xz" "${dir}/dataset.tar.0001.xz"`) ||
 		!strings.Contains(reportScript, `for report in "${DIST_DIR}"/dingo-*.json`) {
 		t.Error("release report script does not generate and compress the revision-bound CBOR report")
 	}

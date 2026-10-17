@@ -1657,6 +1657,7 @@ type MetadataStore interface {
 	StakeSnapshotStore
 	TransactionStore
 	UtxoStore
+	HistoryStore
 
 	// Bulk import methods (ledger state restore from snapshot)
 
@@ -1780,6 +1781,14 @@ type MetadataStore interface {
 	// matching deregistration row. Used to restore the in-memory tracked-UTxO
 	// set on startup.
 	FindUnspentMidnightRegistrations() ([]models.MidnightRegistration, error)
+
+	// ResetMidnightRegistrationState clears registration and deregistration
+	// history. The caller supplies a transaction so the clear can be committed
+	// atomically with a pending rebuild marker.
+	ResetMidnightRegistrationState(types.Txn) error
+	// MidnightRegistrationStateExists reports whether either registration table
+	// contains rows.
+	MidnightRegistrationStateExists(types.Txn) (bool, error)
 
 	// DeleteMidnightAssetCreatesByBlock removes all cNIGHT create rows for
 	// the given block number and returns them so the caller can update the
@@ -3146,9 +3155,9 @@ type MetadataStore interface {
 
 	// DeleteRewardStakeInputBeforeEpoch deletes only reward_stake_input rows
 	// older than the retained snapshot window, leaving reward_account_output
-	// intact. This is the API storage-mode pruning path, used so the
-	// Blockfrost account reward-history endpoint can serve an account's full
-	// reward history. See rewardstate.DeleteStakeInputBeforeEpoch.
+	// intact. This is the Koios-parity pruning path, used so the observer
+	// can read reward_account_output behind the tip. API storage mode prunes
+	// neither table. See rewardstate.DeleteStakeInputBeforeEpoch.
 	DeleteRewardStakeInputBeforeEpoch(uint64, types.Txn) error
 
 	// Network state methods

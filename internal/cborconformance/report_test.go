@@ -168,6 +168,37 @@ func TestGenerateReportNormalizesByteExactReference(t *testing.T) {
 	}
 }
 
+func TestGenerateReportNormalizesRawByteExactReference(t *testing.T) {
+	t.Parallel()
+	corpus := filepath.Join(t.TempDir(), "conway")
+	validDir := filepath.Join(corpus, "native_script", "valid")
+	if err := os.MkdirAll(validDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	input := append([]byte{0x9f, 0x00, 0x58, 0x1c}, make([]byte, 28)...)
+	input = append(input, 0xff)
+	for _, suffix := range []string{"input", "expected"} {
+		if err := os.WriteFile(
+			filepath.Join(validDir, "valid."+suffix+".cbor"),
+			input,
+			0o644,
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	report, err := generateReport(corpus, testCorpusRevision, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !report.Successful {
+		t.Fatalf("report has failures: %+v", report.Failures)
+	}
+	if report.Totals.GeneratedDecodedReencodedActual != 1 {
+		t.Fatalf("normalized raw reference count = %d, want 1", report.Totals.GeneratedDecodedReencodedActual)
+	}
+}
+
 func TestGenerateReportRejectsIncompleteCorpusInventory(t *testing.T) {
 	t.Parallel()
 	for _, mutation := range []string{"missing sample", "altered sample"} {

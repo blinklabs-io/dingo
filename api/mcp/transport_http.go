@@ -132,7 +132,7 @@ func (s *Server) handler() http.Handler {
 	})
 
 	// Wrap mux with security middleware (auth, rate limiting, and CORS)
-	return SecurityMiddleware(
+	return newSecurityMiddleware(
 		s.config.AuthToken,
 		s.config.RateLimit,
 		s.config.Burst,
@@ -196,7 +196,10 @@ func (s *Server) Stop(ctx context.Context) error {
 			// A timed-out Start still owns publication; wait for it before closing
 			// the database, and prevent any later Start with the stopped gate.
 			go func() {
-				if cleanupErr := s.listener.Stop(context.WithoutCancel(ctx), func(_ context.Context, server *http.Server) error { return server.Close() }); cleanupErr != nil {
+				if cleanupErr := s.listener.Stop(
+					context.WithoutCancel(ctx),
+					closeHTTPServer,
+				); cleanupErr != nil {
 					s.logger.Error(
 						"MCP deferred shutdown failed",
 						"error",
@@ -218,8 +221,21 @@ func (s *Server) Stop(ctx context.Context) error {
 }
 
 func stopHTTPServer(ctx context.Context, server *http.Server) error {
-	if err := server.Shutdown(ctx); err != nil {
-		return errors.Join(err, server.Close())
+	defer closeSecurityHandler(server)
+	err := server.Shutdown(ctx)
+	if err != nil {
+		err = errors.Join(err, server.Close())
 	}
-	return nil
+	return err
+}
+
+func closeHTTPServer(_ context.Context, server *http.Server) error {
+	defer closeSecurityHandler(server)
+	return server.Close()
+}
+
+func closeSecurityHandler(server *http.Server) {
+	if handler, ok := server.Handler.(*managedSecurityHandler); ok {
+		handler.Close()
+	}
 }

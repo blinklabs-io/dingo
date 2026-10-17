@@ -23,10 +23,12 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/blinklabs-io/dingo/internal/test/conformance"
@@ -40,7 +42,10 @@ import (
 	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
 )
 
-const schemaVersion = "1"
+const (
+	schemaVersion                     = "1"
+	maxConcurrentLedgerFixtureWorkers = 4
+)
 
 type Report struct {
 	SchemaVersion string        `json:"schema_version"`
@@ -262,40 +267,87 @@ func GenerateReport(
 		Scenarios:     make([]CaseOutcome, 0, len(files)),
 	}
 	failures := make([]Failure, 0)
-	for _, path := range files {
-		manager, err := conformance.NewDingoStateManager()
-		if err != nil {
-			return Report{}, failures, fmt.Errorf(
-				"create Dingo ledger state manager: %w",
-				err,
-			)
+	type indexedResult struct {
+		index   int
+		outcome CaseOutcome
+		failure *Failure
+		err     error
+	}
+	workerCount := min(
+		maxConcurrentLedgerFixtureWorkers,
+		runtime.GOMAXPROCS(0),
+		len(files),
+	)
+	jobs := make(chan int, len(files))
+	results := make(chan indexedResult, len(files))
+	for index := range files {
+		jobs <- index
+	}
+	close(jobs)
+
+	var workers sync.WaitGroup
+	workers.Add(workerCount)
+	for range workerCount {
+		go func() {
+			defer workers.Done()
+			for index := range jobs {
+				path := files[index]
+				outcome, failure, err := evaluateFixture(root, path)
+				results <- indexedResult{
+					index:   index,
+					outcome: outcome,
+					failure: failure,
+					err:     err,
+				}
+			}
+		}()
+	}
+	workers.Wait()
+	close(results)
+
+	orderedResults := make([]indexedResult, len(files))
+	for result := range results {
+		orderedResults[result.index] = result
+	}
+	for _, result := range orderedResults {
+		if result.err != nil {
+			return Report{}, failures, result.err
 		}
-		outcome, failure, err := runFixture(root, path, manager)
-		closeErr := manager.Close()
-		if err != nil {
-			return Report{}, failures, fmt.Errorf(
-				"run fixture %s: %w",
-				path,
-				err,
-			)
-		}
-		if closeErr != nil {
-			return Report{}, failures, fmt.Errorf(
-				"close ledger state manager after %s: %w",
-				path,
-				closeErr,
-			)
-		}
-		report.Scenarios = append(report.Scenarios, outcome)
+		report.Scenarios = append(report.Scenarios, result.outcome)
 		report.Totals.Total++
-		if failure == nil {
+		if result.failure == nil {
 			report.Totals.Passed++
 		} else {
 			report.Totals.Failed++
-			failures = append(failures, *failure)
+			failures = append(failures, *result.failure)
 		}
 	}
 	return report, failures, nil
+}
+
+func evaluateFixture(
+	root, path string,
+) (CaseOutcome, *Failure, error) {
+	manager, err := conformance.NewDingoStateManager()
+	if err != nil {
+		return CaseOutcome{}, nil, fmt.Errorf(
+			"create Dingo ledger state manager: %w",
+			err,
+		)
+	}
+	outcome, failure, err := runFixture(root, path, manager)
+	closeErr := manager.Close()
+	if err != nil {
+		return CaseOutcome{}, nil, fmt.Errorf("run fixture %s: %w", path, err)
+	}
+	if closeErr != nil {
+		return CaseOutcome{}, nil, fmt.Errorf(
+			"close ledger state manager after %s: %w",
+			path,
+			closeErr,
+		)
+	}
+	return outcome, failure, nil
 }
 
 // WriteReport writes the ledger-rules report as indented JSON.
@@ -413,6 +465,12 @@ func runFixture(
 		provider,
 		pp,
 	)
+	validationErr = applyReferenceScriptSizeOverride(
+		tx,
+		provider,
+		protocolParameters.MaxReferenceScriptsSize,
+		validationErr,
+	)
 	if expected.Predicate == "" {
 		if validationErr == nil {
 			return CaseOutcome{ID: id, Result: "pass"}, nil, nil
@@ -426,6 +484,81 @@ func runFixture(
 		return CaseOutcome{ID: id, Result: "pass"}, nil, nil
 	}
 	return mismatch(id, expected, "rejected: "+validationErr.Error())
+}
+
+// Conformance fixtures can override Conway's fixed limit to exercise small
+// boundary values; this override applies only to report evaluation.
+func applyReferenceScriptSizeOverride(
+	tx common.Transaction,
+	ls common.LedgerState,
+	maxSize *uint64,
+	validationErr error,
+) error {
+	if maxSize == nil || *maxSize == conway.MaxRefScriptSizePerTx || !tx.IsValid() {
+		return validationErr
+	}
+
+	sizeError, siblings, found := splitRefScriptSizeError(validationErr)
+	var totalSize uint64
+	switch {
+	case found:
+		totalSize = sizeError.TxSize
+	case validationErr != nil:
+		return validationErr
+	default:
+		var err error
+		totalSize, err = eras.ReferencedScriptSize(tx, ls)
+		if err != nil {
+			return fmt.Errorf("calculating reference script size: %w", err)
+		}
+	}
+	if totalSize > *maxSize {
+		return errors.Join(append(
+			siblings,
+			common.RefScriptSizePerTxTooLargeError{
+				TxSize:  totalSize,
+				MaxSize: *maxSize,
+			},
+		)...)
+	}
+	return errors.Join(siblings...)
+}
+
+// splitRefScriptSizeError separates the reference-script size verdict from the
+// sibling errors ValidateTxConway joins together, so the override can replace
+// the size verdict alone and still reject a transaction that failed another
+// rule.
+func splitRefScriptSizeError(err error) (
+	common.RefScriptSizePerTxTooLargeError,
+	[]error,
+	bool,
+) {
+	if err == nil {
+		return common.RefScriptSizePerTxTooLargeError{}, nil, false
+	}
+	asSizeError := errors.AsType[common.RefScriptSizePerTxTooLargeError]
+	joined, ok := err.(interface{ Unwrap() []error })
+	if !ok {
+		if sizeError, ok := asSizeError(err); ok {
+			return sizeError, nil, true
+		}
+		return common.RefScriptSizePerTxTooLargeError{}, nil, false
+	}
+	var (
+		sizeError common.RefScriptSizePerTxTooLargeError
+		siblings  []error
+		found     bool
+	)
+	for _, child := range joined.Unwrap() {
+		matchedSizeError, ok := asSizeError(child)
+		if !found && ok {
+			sizeError = matchedSizeError
+			found = true
+			continue
+		}
+		siblings = append(siblings, child)
+	}
+	return sizeError, siblings, found
 }
 
 func transactionFailsToDecode(transactionCBOR []byte) bool {
