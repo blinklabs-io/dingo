@@ -87,6 +87,7 @@ const (
 	midnightRollbackJournalSchemaRelease                = "midnight-rollback-journal"
 	committeeRenewalTermStartSchemaRelease              = "committee-renewal-term-start-repair"
 	addressTransactionCredentialKindSchemaRelease       = "address-transaction-credential-kind"
+	opCertCounterEncodingSchemaRelease                  = "opcert-counter-unsigned-order"
 )
 
 const mithrilRewardRepairPendingKey = "mithril_reward_repair_pending"
@@ -247,6 +248,7 @@ var schemaVersions = []struct {
 		Dir:     "v47",
 	},
 	{Version: 48, Name: governanceVoteCastSchemaRelease, Dir: "v48"},
+	{Version: 49, Name: opCertCounterEncodingSchemaRelease, Dir: "v49"},
 }
 
 // SQLiteRegistry returns the checked-in SQLite migration registry.

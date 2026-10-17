@@ -16,6 +16,7 @@ package sqlstore
 
 import (
 	"bytes"
+	"math"
 	"testing"
 
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -53,7 +54,11 @@ func seedPoolOpCertSequence(
 	)
 	require.NoError(tb, err)
 	for i := range n {
-		_, err := stmt.Exec(poolKeyHash, int64(i)*20, int64(i))
+		_, err := stmt.Exec(
+			poolKeyHash,
+			int64(i)*20,
+			encodeOpCertSequence(uint64(i)),
+		)
 		require.NoError(tb, err)
 	}
 	require.NoError(tb, stmt.Close())
@@ -107,6 +112,51 @@ func TestLatestPoolOpCertSequenceMatchesLegacyQuery(t *testing.T) {
 		)
 		require.NoError(t, err)
 		require.Equal(t, legacyCount > 0, gotFound)
-		require.Equal(t, uint64(legacySeq), gotSeq)
+		if legacyCount > 0 {
+			require.Equal(t, decodeOpCertSequence(legacySeq), gotSeq)
+		}
+	}
+}
+
+func TestPoolOpCertSequencePreservesUint64Order(t *testing.T) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+	poolKeyHash := lcommon.PoolKeyHash{0x51}
+	_, err := store.writeDB.Exec(
+		"INSERT INTO pool (pool_key_hash, latest_op_cert_sequence) VALUES (?, ?)",
+		poolKeyHash.Bytes(),
+		encodeOpCertSequence(0),
+	)
+	require.NoError(t, err)
+
+	sequences := []uint64{
+		0,
+		math.MaxInt64,
+		uint64(math.MaxInt64) + 1,
+		math.MaxUint64,
+	}
+	for i, sequence := range sequences {
+		require.NoError(t, store.UpdatePoolOpCertSequence(
+			poolKeyHash,
+			sequence,
+			uint64(i+1),
+			nil,
+		))
+	}
+
+	latest, found, err := store.LatestPoolOpCertSequence(poolKeyHash, nil)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, uint64(math.MaxUint64), latest)
+
+	all, err := store.LatestPoolOpCertSequences(nil)
+	require.NoError(t, err)
+	require.Equal(t, uint64(math.MaxUint64), all[string(poolKeyHash.Bytes())])
+
+	rows, err := store.GetPoolBlockIssuersInSlotRange(1, 4, nil)
+	require.NoError(t, err)
+	require.Len(t, rows, len(sequences))
+	for i := range rows {
+		require.Equal(t, sequences[i], rows[i].Sequence)
 	}
 }
