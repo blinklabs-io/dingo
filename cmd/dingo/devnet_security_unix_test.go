@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/internal/devnetkeys"
 	"github.com/stretchr/testify/require"
 )
 
@@ -39,7 +40,7 @@ func TestPrepareDevnetStateRejectsSymlinkedConfig(t *testing.T) {
 	require.NoError(t, os.Symlink(target, configPath))
 
 	err := prepareDevnetStateAtPath(runDir, true, false, start)
-	require.ErrorContains(t, err, "dingo.yaml")
+	require.ErrorContains(t, err, "is not a regular file")
 	data, readErr := os.ReadFile(target)
 	require.NoError(t, readErr)
 	require.Equal(t, "unchanged", string(data))
@@ -110,4 +111,39 @@ func TestWriteLocalDevnetConfigReplacesSymlink(t *testing.T) {
 	info, err := os.Lstat(filepath.Join(runDir, "dingo.yaml"))
 	require.NoError(t, err)
 	require.True(t, info.Mode().IsRegular())
+}
+
+func TestDevnetRunDirectoryResolvesSymlinkedDataDir(t *testing.T) {
+	t.Parallel()
+
+	realDir := t.TempDir()
+	link := filepath.Join(t.TempDir(), "link")
+	require.NoError(t, os.Symlink(realDir, link))
+	want, err := filepath.EvalSymlinks(realDir)
+	require.NoError(t, err)
+
+	got, err := devnetRunDirectory(link)
+	require.NoError(t, err)
+	require.Equal(t, want, got)
+	root, err := openDevnetStateRoot(got)
+	require.NoError(t, err)
+	require.NoError(t, root.Close())
+}
+
+func TestInstallLocalTestFaucetInRootRejectsSymlinkedIntermediate(t *testing.T) {
+	t.Parallel()
+
+	runDir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(runDir, "other", "keys"), 0o700))
+	require.NoError(t, os.Symlink("other", filepath.Join(runDir, "cardano")))
+	root, err := openDevnetStateRoot(runDir)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, root.Close()) })
+
+	err = devnetkeys.InstallLocalTestFaucetInRoot(
+		root,
+		filepath.Join("cardano", "keys"),
+	)
+	require.ErrorContains(t, err, "is not a directory")
+	require.NoFileExists(t, filepath.Join(runDir, "other", "keys", "faucet.skey"))
 }

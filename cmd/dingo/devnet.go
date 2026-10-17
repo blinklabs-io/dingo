@@ -213,6 +213,11 @@ func devnetRunDirectory(dataDir string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("resolving devnet data directory: %w", err)
 	}
+	// A symlinked --data-dir is resolved once here; the resolved directory is
+	// then opened and pinned, and any symlink swapped in later is rejected.
+	if resolved, err := filepath.EvalSymlinks(runDir); err == nil {
+		runDir = resolved
+	}
 	return runDir, nil
 }
 

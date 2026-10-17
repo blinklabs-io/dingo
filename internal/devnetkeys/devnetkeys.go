@@ -19,8 +19,12 @@ package devnetkeys
 import (
 	"crypto/rand"
 	"embed"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
+	"path/filepath"
+	"strings"
 )
 
 //go:embed keys/vrf.skey keys/kes.skey keys/opcert.cert
@@ -86,32 +90,57 @@ func installLocalTestKeysInRoot(
 	dir string,
 	names []string,
 ) error {
-	if err := root.MkdirAll(dir, 0o700); err != nil {
-		return fmt.Errorf("creating local DevNet key directory: %w", err)
+	current := root
+	for _, part := range strings.Split(filepath.ToSlash(filepath.Clean(dir)), "/") {
+		if part == "." {
+			continue
+		}
+		next, err := openLocalTestKeyChild(current, part)
+		if current != root {
+			_ = current.Close()
+		}
+		if err != nil {
+			return err
+		}
+		current = next
 	}
-	dirInfo, err := root.Lstat(dir)
+	if current != root {
+		defer current.Close() //nolint:errcheck // read/write errors are reported below
+	}
+	return installLocalTestKeysIntoRoot(current, names)
+}
+
+// openLocalTestKeyChild opens one directory component beneath parent without
+// following a symlink, creating it when absent, so a symlinked intermediate
+// directory cannot redirect the key files to another directory in the root.
+func openLocalTestKeyChild(parent *os.Root, name string) (*os.Root, error) {
+	if err := parent.Mkdir(name, 0o700); err != nil && !errors.Is(err, fs.ErrExist) {
+		return nil, fmt.Errorf("creating local DevNet key directory: %w", err)
+	}
+	info, err := parent.Lstat(name)
 	if err != nil {
-		return fmt.Errorf("checking local DevNet key directory: %w", err)
+		return nil, fmt.Errorf("checking local DevNet key directory: %w", err)
 	}
-	if dirInfo.Mode()&os.ModeSymlink != 0 || !dirInfo.IsDir() {
-		return fmt.Errorf("local DevNet key path %q is not a directory", dir)
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return nil, fmt.Errorf("local DevNet key path %q is not a directory", name)
 	}
-	keyRoot, err := root.OpenRoot(dir)
+	child, err := parent.OpenRoot(name)
 	if err != nil {
-		return fmt.Errorf("opening local DevNet key directory: %w", err)
+		return nil, fmt.Errorf("opening local DevNet key directory: %w", err)
 	}
-	defer keyRoot.Close() //nolint:errcheck // read/write errors are reported below
-	opened, err := keyRoot.Stat(".")
+	opened, err := child.Stat(".")
 	if err != nil {
-		return fmt.Errorf("checking opened local DevNet key directory: %w", err)
+		_ = child.Close()
+		return nil, fmt.Errorf("checking opened local DevNet key directory: %w", err)
 	}
-	if !opened.IsDir() || !os.SameFile(dirInfo, opened) {
-		return fmt.Errorf(
+	if !opened.IsDir() || !os.SameFile(info, opened) {
+		_ = child.Close()
+		return nil, fmt.Errorf(
 			"local DevNet key directory %q changed while it was opened",
-			dir,
+			name,
 		)
 	}
-	return installLocalTestKeysIntoRoot(keyRoot, names)
+	return child, nil
 }
 
 func installLocalTestKeysIntoRoot(root *os.Root, names []string) error {
