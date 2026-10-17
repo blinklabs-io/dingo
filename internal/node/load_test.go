@@ -781,13 +781,16 @@ func TestStoreRawBlockUtxoOffsetsPropagatesExtractError(t *testing.T) {
 func TestLoadBlobsWithDBSkipsUtxoOffsetsInCoreMode(t *testing.T) {
 	t.Parallel()
 
-	immutableDir := filepath.Join(
-		"..",
-		"..",
-		"database",
-		"immutable",
-		"testdata",
-	)
+	immutableDir := os.Getenv("DINGO_TEST_IMMUTABLE_DIR")
+	if immutableDir == "" {
+		immutableDir = filepath.Join(
+			"..",
+			"..",
+			"database",
+			"immutable",
+			"testdata",
+		)
+	}
 	imm, err := immutable.New(immutableDir)
 	require.NoError(t, err)
 	iter, err := imm.BlocksFromPoint(ocommon.Point{})
