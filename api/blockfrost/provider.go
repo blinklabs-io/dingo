@@ -72,6 +72,7 @@ func RegisterProvider(host *plugin.Host) error {
 			if listenHost == "" {
 				listenHost = deps.Host
 			}
+			listenHost = normalizeListenHost(listenHost)
 			if cfg.MaxConcurrentMutations == 0 {
 				return nil, nil, errors.New(
 					"blockfrost: maxConcurrentMutations must be positive",
@@ -100,6 +101,15 @@ func RegisterProvider(host *plugin.Host) error {
 			return server, server, nil
 		},
 	)
+}
+
+// normalizeListenHost strips one enclosing bracket pair so net.JoinHostPort,
+// which adds its own brackets to IPv6 literals, does not double them.
+func normalizeListenHost(host string) string {
+	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
+		return host[1 : len(host)-1]
+	}
+	return host
 }
 
 func validateListenSecurity(

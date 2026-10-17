@@ -10523,13 +10523,15 @@ Transaction submission and evaluation require the configured
 `project_id` header, `X-Blockfrost-Project-Id`, or Bearer authentication. A
 non-loopback listener with mutation authentication enabled also requires
 server TLS through `plugins.api.blockfrost.config.tls` so the credential is
-not sent in cleartext. Read routes remain public.
+not sent in cleartext; `Start` enforces this for every server, including one
+built directly with `New`. When several credential headers are present, the
+request is accepted if any one of them matches. Read routes remain public.
 
 Mutation admission runs after authentication and before body decoding. The
 shared `maxConcurrentMutations` limit bounds process-wide submission and
-evaluation work, while `maxConcurrentMutationsPerClient` prevents one remote
-address from consuming the whole budget. Their defaults are 4 and 1,
-respectively; excess work receives HTTP 429 without reading its body.
+evaluation work, while `maxConcurrentMutationsPerClient` caps one remote
+address (it may equal the shared limit, in which case one address can use the
+whole budget). Their defaults are 4 and 1, respectively; excess work receives HTTP 429 without reading its body.
 
 A Blockfrost-compatible REST API that provides read access to chain data,
 transaction evaluation, and transaction submission. Transaction evaluation is

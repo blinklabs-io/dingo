@@ -1469,7 +1469,7 @@ func newTestBlockfrost(
 ) *Blockfrost {
 	return New(
 		BlockfrostConfig{
-			ListenAddress: ":0",
+			ListenAddress: "127.0.0.1:0",
 			AuthToken:     testMutationAuthToken,
 		},
 		node,

@@ -19,6 +19,7 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -106,21 +107,25 @@ func (a mutationAuth) authorized(r *http.Request) bool {
 	if !a.enabled {
 		return false
 	}
-	provided := r.Header.Get("project_id")
-	if provided == "" {
-		provided = r.Header.Get("X-Blockfrost-Project-Id")
+	candidates := []string{
+		r.Header.Get("project_id"),
+		r.Header.Get("X-Blockfrost-Project-Id"),
 	}
-	if provided == "" {
-		scheme, value, ok := strings.Cut(r.Header.Get("Authorization"), " ")
-		if ok && strings.EqualFold(scheme, "Bearer") {
-			provided = strings.TrimLeft(value, " ")
-		}
+	scheme, value, ok := strings.Cut(r.Header.Get("Authorization"), " ")
+	if ok && strings.EqualFold(scheme, "Bearer") {
+		candidates = append(candidates, strings.TrimLeft(value, " "))
 	}
-	providedHash := sha256.Sum256([]byte(provided))
-	return subtle.ConstantTimeCompare(
-		providedHash[:],
-		a.tokenHash[:],
-	) == 1
+	// Every credential is compared so a stale value in one header cannot mask
+	// a valid one in another, and the work does not depend on which matched.
+	matched := 0
+	for _, provided := range candidates {
+		providedHash := sha256.Sum256([]byte(provided))
+		matched |= subtle.ConstantTimeCompare(
+			providedHash[:],
+			a.tokenHash[:],
+		)
+	}
+	return matched == 1
 }
 
 type mutationAdmission struct {
@@ -585,6 +590,18 @@ func (b *Blockfrost) Start(
 		return err
 	}
 	defer b.listener.EndStart(startDone)
+
+	host, _, err := net.SplitHostPort(b.config.ListenAddress)
+	if err != nil {
+		return fmt.Errorf("blockfrost: invalid listen address: %w", err)
+	}
+	if err := validateListenSecurity(
+		host,
+		b.config.AuthToken,
+		b.config.TLS,
+	); err != nil {
+		return fmt.Errorf("blockfrost: %w", err)
+	}
 
 	server, bindDone, err := b.listener.Publish(func() *http.Server {
 		return &http.Server{
