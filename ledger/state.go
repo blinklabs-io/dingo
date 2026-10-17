@@ -14244,16 +14244,20 @@ func (ls *LedgerState) UtxosByAddress(
 	return ret, nil
 }
 
-// UtxosByAddressWithOrdering returns UTxOs matching q with ordering metadata.
-// See models.UtxoWithOrderingQuery (nil SearchUtxos predicate: MatchAllAddresses).
-func (ls *LedgerState) UtxosByAddressWithOrdering(
+// UtxosByAddressBoundedPage returns an ordered, resumable UTxO page while
+// bounding candidate work and retained CBOR.
+func (ls *LedgerState) UtxosByAddressBoundedPage(
+	ctx context.Context,
 	q *models.UtxoWithOrderingQuery,
-) ([]models.UtxoWithOrdering, error) {
-	utxos, err := ls.db.UtxosByAddressWithOrdering(context.Background(), q, nil)
-	if err != nil {
-		return nil, err
-	}
-	return utxos, nil
+	maxCandidates int,
+	maxBytes int64,
+) (models.UtxoAddressPage, error) {
+	return ls.db.UtxosByAddressBoundedPage(
+		ctx,
+		q,
+		maxCandidates,
+		maxBytes,
+	)
 }
 
 // UtxosByAddressAtSlot returns all UTxOs belonging to the

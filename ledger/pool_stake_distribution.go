@@ -18,7 +18,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"math"
 	"math/big"
 	"slices"
 
@@ -40,6 +42,12 @@ import (
 // reference rather than by import to avoid coupling this query path to
 // snapshot rotation internals.
 const stakeSnapshotRetentionEpochs = 3
+
+// ErrPoolStakeDistributionLimitExceeded reports that a bounded distribution
+// contains more pools than its caller can retain.
+var ErrPoolStakeDistributionLimitExceeded = errors.New(
+	"pool stake distribution limit exceeded",
+)
 
 // checkAsOfEpochRecency rejects a historical epoch already outside the pool
 // mark-snapshot retention window, or ahead of the live epoch.
@@ -256,9 +264,39 @@ type PoolStakeDistribution struct {
 // a pinned call's point-validation and this read share one consistent
 // snapshot -- nil opens and releases one internally, for a caller (a
 // direct, unpinned RPC handler) with no such transaction of its own.
-func (ls *LedgerState) PoolStakeDistribution(ctx context.Context, poolFilter []lcommon.PoolKeyHash,
+func (ls *LedgerState) PoolStakeDistribution(
+	ctx context.Context,
+	poolFilter []lcommon.PoolKeyHash,
 	at QueryPoint,
 	txn *database.Txn,
+) (*PoolStakeDistribution, error) {
+	return ls.poolStakeDistribution(ctx, poolFilter, at, txn, 0)
+}
+
+// PoolStakeDistributionBounded reads a distribution only when it contains at
+// most maxPools entries.
+func (ls *LedgerState) PoolStakeDistributionBounded(
+	ctx context.Context,
+	poolFilter []lcommon.PoolKeyHash,
+	at QueryPoint,
+	txn *database.Txn,
+	maxPools int,
+) (*PoolStakeDistribution, error) {
+	if maxPools <= 0 {
+		return nil, fmt.Errorf(
+			"%w: max pools must be positive",
+			ErrPoolStakeDistributionLimitExceeded,
+		)
+	}
+	return ls.poolStakeDistribution(ctx, poolFilter, at, txn, maxPools)
+}
+
+func (ls *LedgerState) poolStakeDistribution(
+	ctx context.Context,
+	poolFilter []lcommon.PoolKeyHash,
+	at QueryPoint,
+	txn *database.Txn,
+	maxPools int,
 ) (*PoolStakeDistribution, error) {
 	// The per-pool stakes, their total, and the epoch naming the snapshot they
 	// come from all have to come from one view: read separately, an epoch
@@ -320,7 +358,19 @@ func (ls *LedgerState) PoolStakeDistribution(ctx context.Context, poolFilter []l
 	// rather than one query per pool.
 	var stakeByPool map[string]uint64
 	if poolFilter == nil {
-		stakeByPool, err = ls.markStakeByPool(snapshotEpoch, true, metaTxn)
+		if maxPools > 0 && maxPools < math.MaxInt {
+			stakeByPool, err = ls.markStakeByPoolBounded(
+				snapshotEpoch,
+				maxPools+1,
+				metaTxn,
+			)
+		} else {
+			stakeByPool, err = ls.markStakeByPool(
+				snapshotEpoch,
+				true,
+				metaTxn,
+			)
+		}
 	} else {
 		poolIds := make([]ledger.PoolId, 0, len(poolFilter))
 		for _, pkh := range poolFilter {
@@ -334,6 +384,13 @@ func (ls *LedgerState) PoolStakeDistribution(ctx context.Context, poolFilter []l
 	}
 	if err != nil {
 		return nil, err
+	}
+	if maxPools > 0 && len(stakeByPool) > maxPools {
+		return nil, fmt.Errorf(
+			"%w: pool count exceeds %d",
+			ErrPoolStakeDistributionLimitExceeded,
+			maxPools,
+		)
 	}
 
 	// Via the shared helper rather than the store directly: it clamps a zero

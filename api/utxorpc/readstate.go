@@ -27,6 +27,7 @@ import (
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	betacardano "github.com/utxorpc/go-codegen/utxorpc/v1beta/cardano"
 	betaquery "github.com/utxorpc/go-codegen/utxorpc/v1beta/query"
+	"google.golang.org/protobuf/proto"
 )
 
 // betaQueryServiceServer serves the v1beta-only QueryService methods. Every
@@ -135,14 +136,31 @@ func (s *betaQueryServiceServer) readStakePoolDistribution(
 		"pool_filter", len(poolFilter),
 		"field_mask_paths", fieldMaskPaths,
 	)
+	release, err := s.utxorpc.acquireBulk(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	ctx, cancel := context.WithTimeout(ctx, s.utxorpc.config.ServerTimeout)
+	defer cancel()
 
-	dist, err := s.utxorpc.config.LedgerState.PoolStakeDistribution(
+	dist, err := s.utxorpc.config.LedgerState.PoolStakeDistributionBounded(
 		ctx,
 		poolFilter,
 		ledger.QueryPoint{},
 		nil,
+		maxStakePoolsForResponse(s.utxorpc.config.MaxResponseBytes),
 	)
 	if err != nil {
+		if errors.Is(err, context.Canceled) ||
+			errors.Is(err, context.DeadlineExceeded) {
+			return nil, readStateContextError(err)
+		}
+		if errors.Is(err, ledger.ErrPoolStakeDistributionLimitExceeded) {
+			return nil, (&byteBudget{
+				limit: s.utxorpc.config.MaxResponseBytes,
+			}).exceeded()
+		}
 		return nil, connect.NewError(
 			connect.CodeInternal,
 			fmt.Errorf("read stake pool distribution: %w", err),
@@ -159,8 +177,12 @@ func (s *betaQueryServiceServer) readStakePoolDistribution(
 		)
 	}
 
-	pools := make([]*betacardano.PoolStakeShare, 0, len(dist.Pools))
+	pools := make([]*betacardano.PoolStakeShare, 0)
+	var retainedBytes int64
 	for _, pool := range dist.Pools {
+		if err := ctx.Err(); err != nil {
+			return nil, connect.NewError(connect.CodeOf(err), err)
+		}
 		var fraction *big.Rat
 		if pool.StakeFraction != nil {
 			fraction = pool.StakeFraction.Rat
@@ -176,15 +198,22 @@ func (s *betaQueryServiceServer) readStakePoolDistribution(
 				),
 			)
 		}
-		pools = append(pools, &betacardano.PoolStakeShare{
+		item := &betacardano.PoolStakeShare{
 			PoolKeyhash:   pool.PoolKeyHash.Bytes(),
 			StakeFraction: stakeFraction,
 			VrfKeyhash:    pool.VrfKeyHash.Bytes(),
-		})
+		}
+		retainedBytes += int64(proto.Size(item))
+		if retainedBytes > s.utxorpc.config.MaxResponseBytes {
+			return nil, (&byteBudget{
+				limit: s.utxorpc.config.MaxResponseBytes,
+			}).exceeded()
+		}
+		pools = append(pools, item)
 	}
 
 	tip := s.utxorpc.betaChainPoint(dist.Tip)
-	return connect.NewResponse(&betaquery.ReadStateResponse{
+	resp := &betaquery.ReadStateResponse{
 		Result: &betaquery.AnyChainStateData{
 			Result: &betaquery.AnyChainStateData_Cardano{
 				Cardano: &betacardano.StateData{
@@ -197,7 +226,38 @@ func (s *betaQueryServiceServer) readStakePoolDistribution(
 			},
 		},
 		LedgerTip: tip,
-	}), nil
+	}
+	if int64(proto.Size(resp)) > s.utxorpc.config.MaxResponseBytes {
+		return nil, (&byteBudget{
+			limit: s.utxorpc.config.MaxResponseBytes,
+		}).exceeded()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, readStateContextError(err)
+	}
+	return connect.NewResponse(resp), nil
+}
+
+func readStateContextError(err error) *connect.Error {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return connect.NewError(connect.CodeDeadlineExceeded, err)
+	}
+	return connect.NewError(connect.CodeCanceled, err)
+}
+
+// A pool share always carries a 28-byte pool hash and a 32-byte VRF hash.
+// Their protobuf tags and lengths make 64 bytes a conservative lower bound.
+const minimumStakePoolShareWireBytes = 64
+
+func maxStakePoolsForResponse(maxBytes int64) int {
+	maxPools := maxBytes / minimumStakePoolShareWireBytes
+	if maxPools < 1 {
+		return 1
+	}
+	if maxPools > math.MaxInt {
+		return math.MaxInt
+	}
+	return int(maxPools)
 }
 
 // poolKeyHashFilter converts the request's pool filter into the form

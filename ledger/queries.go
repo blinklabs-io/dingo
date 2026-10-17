@@ -1432,6 +1432,12 @@ func (ls *LedgerState) queryShelleyCbor(ctx context.Context, q *olocalstatequery
 	if err != nil {
 		return nil, err
 	}
+	if bounded, ok := inner.(*utxoWholeResult); ok {
+		return []any{cbor.Tag{
+			Number:  cbor.CborTagCbor,
+			Content: bounded.encoded,
+		}}, nil
+	}
 	// Two different, shape-indistinguishable conventions collide at
 	// exactly one element. Most handlers return []any{value} where value
 	// IS the complete result the client decodes directly (e.g.
@@ -1760,11 +1766,34 @@ func (ls *LedgerState) markStakeByPool(
 	if err != nil {
 		return nil, err
 	}
+	return stakeByPoolSnapshots(snapshots), nil
+}
+
+func (ls *LedgerState) markStakeByPoolBounded(
+	epoch uint64,
+	maxRows int,
+	txn types.Txn,
+) (map[string]uint64, error) {
+	snapshots, err := ls.db.Metadata().GetPoolStakeSnapshotsByEpochBounded(
+		epoch,
+		snapshotTypeMark,
+		maxRows,
+		txn,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return stakeByPoolSnapshots(snapshots), nil
+}
+
+func stakeByPoolSnapshots(
+	snapshots []*models.PoolStakeSnapshot,
+) map[string]uint64 {
 	byPool := make(map[string]uint64, len(snapshots))
 	for _, snapshot := range snapshots {
 		byPool[string(snapshot.PoolKeyHash)] = uint64(snapshot.TotalStake)
 	}
-	return byPool, nil
+	return byPool
 }
 
 // markStakeForPools reads the mark snapshot for just the pools named, keyed by

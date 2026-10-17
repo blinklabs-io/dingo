@@ -159,6 +159,35 @@ func (s *Store) GetPoolStakeSnapshotsByEpoch(
 	return ret, nil
 }
 
+func (s *Store) GetPoolStakeSnapshotsByEpochBounded(
+	epoch uint64,
+	snapshotType string,
+	maxRows int,
+	txn types.Txn,
+) ([]*models.PoolStakeSnapshot, error) {
+	if maxRows <= 0 {
+		return nil, errors.New("pool stake snapshot row limit must be positive")
+	}
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, err
+	}
+	sqlEpoch, err := checkedInt64(epoch)
+	if err != nil {
+		return nil, err
+	}
+	query := "SELECT " + poolStakeSnapshotColumns +
+		" FROM pool_stake_snapshot" +
+		" WHERE epoch = ? AND snapshot_type = ?" +
+		" ORDER BY id LIMIT ?"
+	return s.scanPoolStakeSnapshots(
+		ctx,
+		db,
+		query,
+		[]any{sqlEpoch, snapshotType, maxRows},
+	)
+}
+
 // poolStakeSnapshotColumns is the projection poolStakeSnapshotFromSQLite
 // expects, in the order it scans them.
 const poolStakeSnapshotColumns = `id, epoch, snapshot_type, pool_key_hash,
@@ -253,7 +282,7 @@ func (s *Store) scanPoolStakeSnapshots(
 		args...,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("get pool stake snapshots for pools: %w", err)
+		return nil, fmt.Errorf("scan pool stake snapshots: %w", err)
 	}
 	defer rows.Close()
 	ret := []*models.PoolStakeSnapshot{}
