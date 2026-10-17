@@ -9010,8 +9010,8 @@ mismatching file is removed before the pool moves on. The digest list archive
 admits one top-level JSON file of at most 64 MiB. The v1 and v2 ancillary
 archives admit the signed manifest, the `ledger/` tree and the next immutable
 trio. The immutable pool charges each in-flight download at its size limit
-against a 16 GiB budget. Raising the limit lowers concurrency; an override
-above 16 GiB allows only one download, with capacity equal to that override.
+against a 32 GiB budget. Raising the limit lowers concurrency; an override
+above 32 GiB allows only one download, with capacity equal to that override.
 
 Both backends produce the same `BootstrapResult` (immutable directory,
 ancillary ledger-state directory, synthesized snapshot metadata), so
