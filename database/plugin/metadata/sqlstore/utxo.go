@@ -600,6 +600,9 @@ func (s *Store) importUtxos(
 	return s.withWriteTransaction(
 		txn,
 		func(db queryer, ctx context.Context) error {
+			if !refreshRewardLiveStake && s.dialect.Name() == "sqlite" {
+				return s.importUtxosDeferredSQLite(ctx, db, utxos)
+			}
 			q := s.operationalQueries(db)
 			refs := make(map[string]models.StakeCredentialRef)
 			slots := make(map[string]uint64)
@@ -713,6 +716,39 @@ func (s *Store) importUtxos(
 			return nil
 		},
 	)
+}
+
+func (s *Store) importUtxosDeferredSQLite(
+	ctx context.Context,
+	db queryer,
+	utxos []models.Utxo,
+) error {
+	if len(utxos) == 0 {
+		return nil
+	}
+	utxoPtrs := make([]*models.Utxo, len(utxos))
+	for i := range utxos {
+		utxoPtrs[i] = &utxos[i]
+	}
+	var deferredRows rowBatch
+	inserted, err := s.insertUtxoModelsChecked(
+		ctx, db, utxoPtrs, true, &deferredRows,
+	)
+	if err != nil {
+		return fmt.Errorf("inserting imported UTxO batch: %w", err)
+	}
+	for i := range utxos {
+		if inserted[i] {
+			continue
+		}
+		if err := hydrateImportedUtxo(ctx, db, &utxos[i]); err != nil {
+			return fmt.Errorf("hydrating imported UTxO: %w", err)
+		}
+	}
+	if err := deferredRows.flush(ctx, db, s.dialect.ParameterLimit()); err != nil {
+		return fmt.Errorf("flushing imported UTxO relations: %w", err)
+	}
+	return nil
 }
 
 func hydrateImportedUtxo(
