@@ -1190,6 +1190,9 @@ func (ls *LedgerState) verifyDeferredBlockHeaderState(
 	if err != nil {
 		return err
 	}
+	// A replay-forced check has no marker to clear. Skipping the clear keeps
+	// bulk load from committing one blob delete transaction per block.
+	markerRequired := required
 	if !required && ls.config.VerifyReplayHeaders &&
 		!ls.slotCoveredByMithril(point.Slot) {
 		required = true
@@ -1216,6 +1219,9 @@ func (ls *LedgerState) verifyDeferredBlockHeaderState(
 			),
 			Source: source,
 		}
+	}
+	if !markerRequired {
+		return nil
 	}
 	if err := ls.clearPersistentDeferredHeaderValidation(point, txn); err != nil {
 		return err
