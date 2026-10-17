@@ -1190,8 +1190,9 @@ func (ls *LedgerState) verifyDeferredBlockHeaderState(
 	if err != nil {
 		return err
 	}
-	// A replay-forced check has no marker to clear. Skipping the clear keeps
-	// bulk load from committing one blob delete transaction per block.
+	// A check that only VerifyReplayHeaders forces has no marker to clear,
+	// so it skips the per-block blob delete. Blocks below the eviction floor
+	// are already required above and still take the clear.
 	markerRequired := required
 	if !required && ls.config.VerifyReplayHeaders &&
 		!ls.slotCoveredByMithril(point.Slot) {
