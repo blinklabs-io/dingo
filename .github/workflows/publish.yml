@@ -357,9 +357,9 @@ jobs:
           path: |
             ~/go/pkg/mod
             ~/.cache/go-build
-          key: ${{ runner.os }}-go-race-${{ matrix.go-version }}-${{ matrix.shard }}-${{ hashFiles('**/go.sum') }}
+          key: ${{ runner.os }}-go-race-${{ matrix.go-version }}-${{ hashFiles('**/go.sum') }}
           restore-keys: |
-            ${{ runner.os }}-go-race-${{ matrix.go-version }}-${{ matrix.shard }}-
+            ${{ runner.os }}-go-race-${{ matrix.go-version }}-
       - name: go-build
         run: go build -tags dingo_extra_plugins ./cmd/dingo
       - name: go-test-race
