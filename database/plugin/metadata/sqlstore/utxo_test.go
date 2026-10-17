@@ -2120,6 +2120,76 @@ func TestImportUtxosDeferredRewardLiveStakeRefreshRebuildsCorrectly(
 	require.Equal(t, "5000000", utxoStake)
 }
 
+func TestImportUtxosDeferredSQLiteBatchesLiveRows(t *testing.T) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+
+	existing := *utxoForInsertCacheTest(90, 0, 5_000_000)
+	existing.AddedSlot = 100
+	require.NoError(t, store.ImportUtxos([]models.Utxo{existing}, nil))
+	markUtxoSpentDirect(t, store, existing.TxId, 0, importConflictHash32(0xaa), 150)
+
+	const outputCount = 33
+	utxos := make([]models.Utxo, outputCount)
+	utxos[0] = existing
+	for i := 1; i < len(utxos); i++ {
+		utxos[i] = *utxoForInsertCacheTest(byte(100+i), 0, 1_000_000)
+	}
+	utxos[1].Address = []byte("test-address")
+	utxos[1].Assets = []models.Asset{{
+		Name:        []byte("token"),
+		PolicyId:    bytes.Repeat([]byte{0xab}, 28),
+		Fingerprint: []byte("asset1"),
+		Amount:      types.Uint64(9),
+	}}
+
+	require.NoError(t, store.ImportUtxosDeferredRewardLiveStakeRefresh(utxos, nil))
+	for i := range utxos {
+		got, err := store.GetUtxo(utxos[i].TxId, utxos[i].OutputIdx, nil)
+		require.NoError(t, err)
+		require.NotNil(t, got)
+	}
+	deletedSlot, spentAtTxID := utxoDeletedAndSpender(t, store, existing.TxId, 0)
+	require.Zero(t, deletedSlot)
+	require.Nil(t, spentAtTxID)
+
+	var assetCount, addressCount int
+	require.NoError(t, store.writeDB.QueryRow(
+		"SELECT COUNT(*) FROM asset",
+	).Scan(&assetCount))
+	require.NoError(t, store.writeDB.QueryRow(
+		"SELECT COUNT(*) FROM utxo_address",
+	).Scan(&addressCount))
+	require.Equal(t, 1, assetCount)
+	require.Equal(t, 1, addressCount)
+}
+
+// TestImportUtxosDeferredSQLiteDoesNotMutateInput proves the batched path
+// leaves the caller's models and their assets as it received them.
+func TestImportUtxosDeferredSQLiteDoesNotMutateInput(t *testing.T) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+
+	utxos := []models.Utxo{
+		*utxoForInsertCacheTest(120, 0, 1_000_000),
+		*utxoForInsertCacheTest(121, 0, 1_000_000),
+	}
+	utxos[0].Address = []byte("test-address")
+	utxos[0].Assets = []models.Asset{{
+		Name:        []byte("token"),
+		PolicyId:    bytes.Repeat([]byte{0xab}, 28),
+		Fingerprint: []byte("asset1"),
+		Amount:      types.Uint64(9),
+	}}
+
+	require.NoError(t, store.ImportUtxosDeferredRewardLiveStakeRefresh(utxos, nil))
+	for i := range utxos {
+		require.Zero(t, utxos[i].ID)
+	}
+	require.Zero(t, utxos[0].Assets[0].ID)
+	require.Zero(t, utxos[0].Assets[0].UtxoID)
+}
+
 // TestImportUtxosBoundsTxScopedStatementRetentionInOneTransaction exercises
 // the production shape: one import batch keeps a write transaction open while
 // it inserts many outputs. Reusing one Tx-scoped derivative keeps database/sql
