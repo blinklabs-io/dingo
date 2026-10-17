@@ -39,7 +39,7 @@ const (
 	turboBestSamples   = 30
 )
 
-var turboVersionSuffix = regexp.MustCompile(`(?i)-v([123])\.flat$`)
+var turboVersionSuffix = regexp.MustCompile(`(?i)-v([123])(-p([0-9]+))?\.flat$`)
 
 type TurboReport struct {
 	SchemaVersion  string            `json:"schema_version"`
@@ -252,7 +252,7 @@ func discoverTurboCases(root string) ([]turboCase, error) {
 				return nil
 			}
 			match := turboVersionSuffix.FindStringSubmatch(filepath.Base(path))
-			if len(match) != 2 {
+			if len(match) != 4 {
 				return fmt.Errorf(
 					"flat program name has no Plutus version suffix: %s",
 					path,
@@ -271,6 +271,13 @@ func discoverTurboCases(root string) ([]turboCase, error) {
 			if err != nil || epoch < 0 {
 				return fmt.Errorf("turbo program has an invalid epoch directory: %s", path)
 			}
+			protocolMajor := protocolMajorForEpoch(epoch)
+			if match[3] != "" {
+				protocolMajor, err = strconv.Atoi(match[3])
+				if err != nil || protocolMajor < 1 {
+					return fmt.Errorf("turbo program has an invalid protocol version suffix: %s", path)
+				}
+			}
 			version := lang.LanguageVersionV1
 			switch versionNumber {
 			case "2":
@@ -285,7 +292,7 @@ func discoverTurboCases(root string) ([]turboCase, error) {
 				),
 				version:       version,
 				group:         "V" + versionNumber,
-				protocolMajor: protocolMajorForEpoch(epoch),
+				protocolMajor: protocolMajor,
 			})
 			return nil
 		},

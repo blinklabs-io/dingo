@@ -231,6 +231,37 @@ func TestTurboProtocolMajorByEpoch(t *testing.T) {
 	}
 }
 
+func TestDiscoverTurboCasesUsesProtocolMajorFromFilename(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	for _, name := range []string{
+		"510/script-v1.flat",
+		"510/script-v2-p6.flat",
+	} {
+		path := filepath.Join(root, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatalf("create program directory: %v", err)
+		}
+		if err := os.WriteFile(path, nil, 0o600); err != nil {
+			t.Fatalf("write program placeholder: %v", err)
+		}
+	}
+
+	cases, err := discoverTurboCases(root)
+	if err != nil {
+		t.Fatalf("discover turbo cases: %v", err)
+	}
+	if len(cases) != 2 {
+		t.Fatalf("discovered %d cases, want 2", len(cases))
+	}
+	if cases[0].protocolMajor != 9 {
+		t.Errorf("legacy filename protocol major = %d, want 9", cases[0].protocolMajor)
+	}
+	if cases[1].protocolMajor != 6 {
+		t.Errorf("explicit filename protocol major = %d, want 6", cases[1].protocolMajor)
+	}
+}
+
 func TestMakeTurboBenchmarkUsesBestThirtySamples(t *testing.T) {
 	t.Parallel()
 	budget := cek.ExBudget{Cpu: 100, Mem: 20}
