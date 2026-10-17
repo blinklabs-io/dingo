@@ -109,20 +109,9 @@ func (c *chunk) Next() (*Block, error) {
 				blockSize,
 			)
 		}
-		blockData := make([]byte, int(blockSize))
-		// ReadAt avoids a separate seek syscall for every block. It also leaves
-		// the reader position untouched, which is important because the same
-		// chunk file is independently used by the index reader.
-		n, err := c.file.ReadAt(blockData, currOffset)
+		blockData, err := c.readBlockData(currOffset, blockSize)
 		if err != nil {
 			return nil, err
-		}
-		if int64(n) < blockSize {
-			return nil, fmt.Errorf(
-				"did not read expected amount of block data: expected %d, got %d",
-				blockSize,
-				n,
-			)
 		}
 		blkType, blkBytes, err := c.unwrapBlock(blockData)
 		if err != nil {
@@ -193,19 +182,9 @@ func (c *chunk) Next() (*Block, error) {
 				blockSize,
 			)
 		}
-		blockData := make([]byte, int(blockSize))
-		// See the final-entry path above: one positional read replaces the
-		// seek/read pair without changing the bytes handed to the decoder.
-		n, err := c.file.ReadAt(blockData, currOffset)
+		blockData, err := c.readBlockData(currOffset, blockSize)
 		if err != nil {
 			return nil, err
-		}
-		if int64(n) < blockSize {
-			return nil, fmt.Errorf(
-				"did not read expected amount of block data: expected %d, got %d",
-				blockSize,
-				n,
-			)
 		}
 		blkType, blkBytes, err := c.unwrapBlock(blockData)
 		if err != nil {
@@ -226,6 +205,39 @@ func (c *chunk) Next() (*Block, error) {
 		c.nextEntry = nextEntry
 		return ret, nil
 	}
+}
+
+type rangeEntryReader interface {
+	RangeAt(offset, length int64) ([]byte, bool)
+}
+
+func (c *chunk) readBlockData(offset, size int64) ([]byte, error) {
+	if reader, ok := c.file.(rangeEntryReader); ok {
+		data, valid := reader.RangeAt(offset, size)
+		if !valid {
+			return nil, fmt.Errorf(
+				"%w: block range [%d:%d] exceeds chunk size %d",
+				ErrInvalidChunkOffset,
+				offset,
+				offset+size,
+				c.fileSize,
+			)
+		}
+		return data, nil
+	}
+	blockData := make([]byte, int(size))
+	n, err := c.file.ReadAt(blockData, offset)
+	if err != nil {
+		return nil, err
+	}
+	if int64(n) < size {
+		return nil, fmt.Errorf(
+			"did not read expected amount of block data: expected %d, got %d",
+			size,
+			n,
+		)
+	}
+	return blockData, nil
 }
 
 func (c *chunk) unwrapBlock(data []byte) (uint, []byte, error) {

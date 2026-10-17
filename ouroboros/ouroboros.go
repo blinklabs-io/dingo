@@ -247,6 +247,8 @@ type Ouroboros struct {
 	futureHeaderResyncCtx    context.Context
 	futureHeaderResyncCancel context.CancelFunc
 	futureHeaderResyncClosed bool
+	deferredHeaderRecoveryMu sync.Mutex
+	deferredHeaderRecovery   map[ouroboros.ConnectionId]ochainsync.Tip
 	// Per-peer rate limiter for TxSubmission server
 	txSubmissionRateLimiter *txSubmissionRateLimiter
 	// Cached Leios EB material fetched from peers. This lets NtC
@@ -726,6 +728,9 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 		futureHeaderResyncs: make(
 			map[ouroboros.ConnectionId]*scheduledChainsyncResync,
 		),
+		deferredHeaderRecovery: make(
+			map[ouroboros.ConnectionId]ochainsync.Tip,
+		),
 		futureHeaderResyncCtx:    futureHeaderResyncCtx,
 		futureHeaderResyncCancel: futureHeaderResyncCancel,
 		blockDecodeCache: newDecodeCacheWithByteLimit[gledger.Block](
@@ -793,6 +798,7 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 		o.initDecodeCacheMetrics()
 	}
 	o.subscribeLeiosAnnouncementRetries()
+	o.subscribeDeferredHeaderRecovery()
 	o.restoreLeiosVerifiedEbSlot()
 	return o
 }
@@ -1177,6 +1183,7 @@ func (o *Ouroboros) HandleConnClosedEvent(evt event.Event) {
 	}
 	connId := e.ConnectionId
 	o.cancelFutureHeaderResync(connId)
+	o.clearDeferredHeaderRecovery(connId)
 	o.forgetServedActivity(connId)
 
 	// Counts keep-alive pong timeouts.

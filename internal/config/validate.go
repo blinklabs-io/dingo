@@ -1026,6 +1026,14 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 			storageModeAPI, c.StorageMode, storageModeAPI,
 		))
 	}
+	if (c.Midnight.AuthTokenPolicyID == "") !=
+		(c.Midnight.AuthTokenAssetName == "") {
+		errs = append(errs, errors.New(
+			"midnight.authTokenPolicyId and midnight.authTokenAssetName "+
+				"must be set together: an asset name alone matches that "+
+				"name under any minting policy",
+		))
+	}
 	if c.Midnight.ReflectionEnabled && !c.Midnight.ServerEnabled {
 		errs = append(errs, errors.New(
 			"midnight.reflectionEnabled requires midnight.serverEnabled",

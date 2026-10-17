@@ -15,6 +15,7 @@
 package sqlstore
 
 import (
+	"context"
 	"testing"
 
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -70,7 +71,7 @@ func TestBatchedPoolOpCertSequenceRejectsQueuedConflict(t *testing.T) {
 	store := newMigratedSQLiteStore(t)
 	pool := lcommon.PoolKeyHash{3}
 	acc := store.NewBatchAccumulator()
-	txn := store.Transaction(t.Context())
+	txn := store.Transaction(context.Background())
 	t.Cleanup(func() { require.NoError(t, txn.Rollback()) })
 
 	require.NoError(t, store.UpdatePoolOpCertSequenceBatched(pool, 6, 10, acc, txn))

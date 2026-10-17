@@ -96,7 +96,7 @@ func TestGenerateReport(t *testing.T) {
 	}
 }
 
-func TestGenerateReportComparesByteExactRulesWithoutNormalization(t *testing.T) {
+func TestGenerateReportAcceptsByteExactRules(t *testing.T) {
 	t.Parallel()
 	corpus := filepath.Join(t.TempDir(), "conway")
 	validDir := filepath.Join(corpus, "native_script", "valid")
@@ -128,6 +128,74 @@ func TestGenerateReportComparesByteExactRulesWithoutNormalization(t *testing.T) 
 	}
 	if report.Totals.GeneratedDecodedReencodedActual != 1 {
 		t.Fatalf("exact re-encoding count = %d, want 1", report.Totals.GeneratedDecodedReencodedActual)
+	}
+}
+
+func TestGenerateReportNormalizesByteExactReference(t *testing.T) {
+	t.Parallel()
+	corpus := filepath.Join(t.TempDir(), "conway")
+	validDir := filepath.Join(corpus, "native_script", "valid")
+	if err := os.MkdirAll(validDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	input := append([]byte{0x9f, 0x00, 0x58, 0x1c}, make([]byte, 28)...)
+	input = append(input, 0xff)
+	expected := append([]byte{0x82, 0x00, 0x58, 0x1c}, make([]byte, 28)...)
+	if err := os.WriteFile(
+		filepath.Join(validDir, "valid.input.cbor"),
+		input,
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(validDir, "valid.expected.cbor"),
+		expected,
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	report, err := generateReport(corpus, testCorpusRevision, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !report.Successful {
+		t.Fatalf("report has failures: %+v", report.Failures)
+	}
+	if report.Totals.GeneratedDecodedReencodedActual != 1 {
+		t.Fatalf("normalized reference count = %d, want 1", report.Totals.GeneratedDecodedReencodedActual)
+	}
+}
+
+func TestGenerateReportNormalizesRawByteExactReference(t *testing.T) {
+	t.Parallel()
+	corpus := filepath.Join(t.TempDir(), "conway")
+	validDir := filepath.Join(corpus, "native_script", "valid")
+	if err := os.MkdirAll(validDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	input := append([]byte{0x9f, 0x00, 0x58, 0x1c}, make([]byte, 28)...)
+	input = append(input, 0xff)
+	for _, suffix := range []string{"input", "expected"} {
+		if err := os.WriteFile(
+			filepath.Join(validDir, "valid."+suffix+".cbor"),
+			input,
+			0o644,
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	report, err := generateReport(corpus, testCorpusRevision, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !report.Successful {
+		t.Fatalf("report has failures: %+v", report.Failures)
+	}
+	if report.Totals.GeneratedDecodedReencodedActual != 1 {
+		t.Fatalf("normalized raw reference count = %d, want 1", report.Totals.GeneratedDecodedReencodedActual)
 	}
 }
 

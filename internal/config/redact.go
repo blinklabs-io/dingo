@@ -21,6 +21,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"unicode"
 )
 
 // redactedPlaceholder replaces a secret-bearing value in a rendered log.
@@ -46,6 +47,9 @@ const (
 	// components removed, keeping scheme, host, port, path, and
 	// non-credential parameters so the value stays diagnosable.
 	logURI
+	// logURLOrPath redacts HTTP(S) URL credentials while preserving an
+	// ordinary filesystem path byte for byte.
+	logURLOrPath
 	// logProviderConfig recursively renders a plugin provider's
 	// free-form configuration map, classifying each key by name.
 	logProviderConfig
@@ -84,6 +88,10 @@ var logURIConfigFields = []string{
 	"TokenRegistry.ManifestURL",
 	"TokenRegistry.SourceURL",
 	"TracingEndpoint",
+}
+
+var logURLOrPathConfigFields = []string{
+	"ImmutableDbPath",
 }
 
 // logProviderConfigFields are Config field paths holding a plugin
@@ -174,7 +182,6 @@ var logPlainConfigFields = []string{
 	"HealthReadyGapSlots",
 	"HistoryExpiry.Enabled",
 	"HistoryExpiry.Frequency",
-	"ImmutableDbPath",
 	"InactivityTimeout",
 	"InboundCooldown",
 	"InboundDuplexOnlyForHot",
@@ -335,6 +342,7 @@ var configLogClasses = sync.OnceValue(func() map[string]logClass {
 		logPlain:          logPlainConfigFields,
 		logSecret:         logSecretConfigFields,
 		logURI:            logURIConfigFields,
+		logURLOrPath:      logURLOrPathConfigFields,
 		logProviderConfig: logProviderConfigFields,
 	} {
 		for _, path := range paths {
@@ -495,6 +503,8 @@ func classedValue(v reflect.Value, class logClass) slog.Value {
 		return providerConfigValue(v)
 	case logURI:
 		return mappedValue(v, redactURICredentials, redactedValue)
+	case logURLOrPath:
+		return mappedValue(v, redactURLCredentialsOrPath, redactedValue)
 	case logPlain:
 		return mappedValue(
 			v,
@@ -540,7 +550,7 @@ func mappedValue(
 	transform func(string) string,
 	fallback func(reflect.Value) slog.Value,
 ) slog.Value {
-	switch v.Kind() { //nolint:exhaustive // reflect.Kind default is intended
+	switch v.Kind() {
 	case reflect.String:
 		return slog.StringValue(transform(v.String()))
 	case reflect.Slice, reflect.Array:
@@ -566,6 +576,14 @@ func mappedValue(
 			))
 		}
 		return slog.GroupValue(attrs...)
+	case reflect.Invalid, reflect.Bool,
+		reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64,
+		reflect.Uintptr, reflect.Float32, reflect.Float64,
+		reflect.Complex64, reflect.Complex128,
+		reflect.Chan, reflect.Func, reflect.Interface, reflect.Pointer,
+		reflect.Struct, reflect.UnsafePointer:
+		return fallback(v)
 	default:
 		return fallback(v)
 	}
@@ -687,6 +705,35 @@ func redactURICredentials(s string) string {
 	return redactURIUserinfo(redactCredentialParams(s))
 }
 
+func redactURLCredentialsOrPath(s string) string {
+	leading := len(s) - len(strings.TrimLeftFunc(s, unicode.IsSpace))
+	value := s[leading:]
+	if !strings.HasPrefix(strings.ToLower(value), "http://") &&
+		!strings.HasPrefix(strings.ToLower(value), "https://") {
+		return s
+	}
+	return s[:leading] + redactURLUserinfo(redactCredentialParams(value))
+}
+
+// redactURLUserinfo removes the entire userinfo component. Unlike generic
+// database DSNs, an ImmutableDB URL's username can itself be a credential.
+func redactURLUserinfo(s string) string {
+	start := strings.Index(s, "://")
+	if start < 0 {
+		return s
+	}
+	start += len("://")
+	end := len(s)
+	if i := strings.IndexAny(s[start:], "/?#"); i >= 0 {
+		end = start + i
+	}
+	at := strings.LastIndex(s[start:end], "@")
+	if at < 0 {
+		return s
+	}
+	return s[:start] + redactedPlaceholder + s[start+at:]
+}
+
 // redactCredentialParams redacts the value of every credential-named
 // "name=value" parameter in s. The decision is made per parameter name
 // through isCredentialKeyName, not by matching credential shapes against
@@ -708,9 +755,14 @@ func redactCredentialParams(s string) string {
 		s = redactParams(s, keywordDSNSyntax)
 	}
 	if start, end, ok := uriQuerySpan(s); ok {
-		return s[:start] +
-			redactParams(s[start:end], uriQuerySyntax) +
-			s[end:]
+		s = s[:start] + redactParams(s[start:end], uriQuerySyntax) + s[end:]
+		if mark := strings.IndexByte(s, '#'); mark >= 0 {
+			s = s[:mark+1] + redactParams(s[mark+1:], uriQuerySyntax)
+		}
+		return s
+	}
+	if mark := strings.IndexByte(s, '#'); mark >= 0 {
+		return s[:mark+1] + redactParams(s[mark+1:], uriQuerySyntax)
 	}
 	return redactParams(s, keywordDSNSyntax)
 }

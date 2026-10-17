@@ -20,6 +20,7 @@ import (
 	"encoding/hex"
 	"io"
 	"log/slog"
+	"math"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -29,7 +30,6 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
-	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/governance"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -648,31 +648,18 @@ func TestImportTipPersistsSnapshotNetworkState(t *testing.T) {
 	require.Equal(t, reserves, uint64(state.Reserves))
 }
 
-// TestPersistableOpCertBoundMatchesStore ties eras.MaxPersistableOpCertCounter
-// to the check that enforces it. The constant names the limit
-// sqlstore.checkedInt64 imposes on pool_opcert_sequence.sequence and
-// pool.latest_op_cert_sequence before a caller reaches it. The former
-// ledger/eras test also checked the constant against the math.MaxInt64
-// literal, but could not detect drift in the store's accepted range. This
-// test drives the value through the real store write in both directions, so a
-// change to the constant or to that range fails it.
-//
-// It is not next to checkedInt64 because checkedInt64 is unexported and the
-// reviewed import direction in internal/architecture/tests_test.go
-// forbids anything under database/ from importing ledger/, test files
-// included. ledgerstate owns the write path the bound was found missing from
-// (importOpCertCounters) and already imports ledger/eras, so it is the
-// package that can see both sides.
-func TestPersistableOpCertBoundMatchesStore(t *testing.T) {
+func TestOpCertStorePreservesFullCounterDomain(t *testing.T) {
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
 
 	poolKeyHash := testPoolKeyHash(bytes.Repeat([]byte{0x7a}, 28))
 
-	// The store records the highest counter the bound admits.
 	require.NoError(t, db.Metadata().UpdatePoolOpCertSequence(
-		poolKeyHash, eras.MaxPersistableOpCertCounter, 100, nil,
+		poolKeyHash, uint64(math.MaxInt64)+1, 100, nil,
+	))
+	require.NoError(t, db.Metadata().UpdatePoolOpCertSequence(
+		poolKeyHash, math.MaxUint64, 101, nil,
 	))
 	sequence, found, err := db.LatestPoolOpCertSequence(
 		context.Background(),
@@ -681,13 +668,7 @@ func TestPersistableOpCertBoundMatchesStore(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.True(t, found)
-	require.Equal(t, eras.MaxPersistableOpCertCounter, sequence)
-
-	// The store refuses the next one, which is what makes the bound the
-	// bound rather than an arbitrary constant.
-	require.Error(t, db.Metadata().UpdatePoolOpCertSequence(
-		poolKeyHash, eras.MaxPersistableOpCertCounter+1, 101, nil,
-	))
+	require.Equal(t, uint64(math.MaxUint64), sequence)
 }
 
 // encodeTestNonce builds a CBOR Nonce value: [0] for NeutralNonce or

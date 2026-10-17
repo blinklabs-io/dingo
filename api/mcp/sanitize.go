@@ -100,6 +100,10 @@ func WrapUntrustedChainData(data string) string {
 // FormatCell formats a single database column value for LLM consumption, summarizing large
 // binary blobs or hex strings so they do not exhaust the client's context window.
 func FormatCell(val any) string {
+	return formatMarkdownCell(cellText(val), maxCellLength)
+}
+
+func cellText(val any) string {
 	if val == nil {
 		return "NULL"
 	}
@@ -117,24 +121,26 @@ func FormatCell(val any) string {
 		return "0x" + hex.EncodeToString(v)
 
 	case string:
-		clean := SanitizeExternalString(v)
-		// Clean markdown pipes so table layout is not corrupted
-		clean = strings.ReplaceAll(clean, "|", "\\|")
-		clean = strings.NewReplacer("\n", " ", "\r", " ").Replace(clean)
-		if len(clean) > maxCellLength {
-			return truncateUTF8(clean, maxCellLength) + "..."
-		}
-		return clean
+		return v
 
 	default:
-		s := fmt.Sprintf("%v", v)
-		s = strings.ReplaceAll(s, "|", "\\|")
-		s = strings.NewReplacer("\n", " ", "\r", " ").Replace(s)
-		if len(s) > maxCellLength {
-			return truncateUTF8(s, maxCellLength) + "..."
-		}
-		return s
+		return fmt.Sprintf("%v", v)
 	}
+}
+
+func formatMarkdownCell(value string, maxLength int) string {
+	clean := SanitizeExternalString(value)
+	clean = strings.NewReplacer(
+		"&", "&amp;",
+		"<", "&lt;",
+		">", "&gt;",
+	).Replace(clean)
+	clean = strings.ReplaceAll(clean, "|", "\\|")
+	clean = strings.NewReplacer("\n", " ", "\r", " ").Replace(clean)
+	if maxLength > 0 && len(clean) > maxLength {
+		return truncateUTF8(clean, maxLength) + "..."
+	}
+	return clean
 }
 
 // FormatMarkdownTable converts columns and row records into a clean GitHub Markdown table.
@@ -144,6 +150,7 @@ func FormatMarkdownTable(columns []string, rows [][]string) string {
 	}
 
 	var sb strings.Builder
+	sb.WriteString("<untrusted_chain_data>\n\n")
 
 	// Header row
 	sb.WriteString("| ")
@@ -172,10 +179,11 @@ func FormatMarkdownTable(columns []string, rows [][]string) string {
 			if i > 0 {
 				sb.WriteString(" | ")
 			}
-			sb.WriteString(cell)
+			sb.WriteString(FormatCell(cell))
 		}
 		sb.WriteString(" |\n")
 	}
+	sb.WriteString("\n</untrusted_chain_data>\n")
 
 	return sb.String()
 }
