@@ -15,7 +15,7 @@
 package ledgerstate
 
 import (
-	"cmp"
+	"bytes"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -323,6 +323,17 @@ func parsePStateConwayWithRetirements(
 // params for the CertState import path. Handles both definite
 // and indefinite-length maps.
 func parseCertPoolParamsMap(data []byte) ([]ParsedPool, error) {
+	return parseCertPoolParamsMapWith(data, parsePoolParamsOrDistr)
+}
+
+func parseCertPoolRegistrationMap(data []byte) ([]ParsedPool, error) {
+	return parseCertPoolParamsMapWith(data, parsePoolRegistration)
+}
+
+func parseCertPoolParamsMapWith(
+	data []byte,
+	parse func([]byte, []byte) (*ParsedPool, error),
+) ([]ParsedPool, error) {
 	entries, err := decodeMapEntries(data)
 	if err != nil {
 		return nil, fmt.Errorf(
@@ -341,7 +352,7 @@ func parseCertPoolParamsMap(data []byte) ([]ParsedPool, error) {
 			continue
 		}
 
-		pool, err := parsePoolParamsOrDistr(
+		pool, err := parse(
 			poolKeyHash, entry.ValueRaw,
 		)
 		if err != nil {
@@ -681,8 +692,7 @@ func parsePStateWithRetirements(
 
 func parsePStateMaps(ps [][]byte) ([]ParsedPool, map[uint64][][]byte, error) {
 	type mapEntry struct {
-		idx  int
-		size int
+		idx int
 	}
 	var maps []mapEntry
 	for i, elem := range ps {
@@ -691,30 +701,58 @@ func parsePStateMaps(ps [][]byte) ([]ParsedPool, map[uint64][][]byte, error) {
 		}
 		major := elem[0] >> 5
 		if major == 5 || elem[0] == 0xbf {
-			maps = append(maps, mapEntry{idx: i, size: len(elem)})
+			maps = append(maps, mapEntry{idx: i})
 		}
 	}
 	if len(maps) == 0 {
 		return nil, nil, nil
 	}
 
-	slices.SortFunc(
-		maps,
-		func(a, b mapEntry) int {
-			return cmp.Compare(b.size, a.size)
-		},
-	)
-
+	type parsedMap struct {
+		idx     int
+		pools   []ParsedPool
+		warning error
+	}
+	parsed := make([]parsedMap, 0, len(maps))
 	var bestPools []ParsedPool
 	var bestWarning error
 	bestIdx := -1
+	bestIsPoolParams := false
 	for _, m := range maps {
 		pools, warning := parseCertPoolParamsMap(ps[m.idx])
-		if bestIdx < 0 || len(pools) > len(bestPools) {
+		parsed = append(parsed, parsedMap{m.idx, pools, warning})
+		// poolParams precedes futurePoolParams in every supported layout.
+		// Recognize malformed registrations by shape too: otherwise a staged
+		// map with more decodable entries can replace the current map.
+		isPoolParams := len(pools) > 0 || hasPoolParamsEntries(ps[m.idx])
+		if bestIdx < 0 || (isPoolParams && !bestIsPoolParams) {
 			bestPools = pools
 			bestWarning = warning
 			bestIdx = m.idx
+			bestIsPoolParams = isPoolParams
 		}
+	}
+	// Four-field PStates are [psVRFKeyHashes, psStakePools,
+	// psFutureStakePoolParams, psRetiring] or the older [poolParams,
+	// futurePoolParams, retiring, deposits]. The first pool-keyed map is
+	// current only at index 0, or at index 1 when its values omit the
+	// operator as psStakePools does; futurePoolParams values carry it. A
+	// pool-keyed map anywhere else is staged, and the current map is empty.
+	if len(ps) == 4 && bestIsPoolParams && bestIdx > 0 &&
+		(bestIdx > 1 || poolMapCarriesOperator(ps[bestIdx])) {
+		bestPools, bestWarning, bestIdx = nil, nil, bestIdx-1
+	}
+	// An empty poolParams map has no entries to recognize by shape, so a
+	// lone staged map would otherwise be read as the current one. A
+	// registered pool always has a deposit, so a pool-keyed map that follows
+	// an empty map and has none is futurePoolParams. The four-field layout is
+	// excluded: UTxO-HD snapshots put the current pools at index 1 behind an
+	// empty map and keep each deposit inside the pool record, so there the
+	// two cases cannot be told apart.
+	if len(ps) != 4 && bestIsPoolParams && bestIdx > 0 &&
+		isEmptyCborMap(ps[bestIdx-1]) &&
+		!poolsHaveDeposits(bestPools, ps, bestIdx) {
+		bestPools, bestWarning, bestIdx = nil, nil, bestIdx-1
 	}
 	var mapErrs []error
 	if bestWarning != nil {
@@ -724,6 +762,23 @@ func parsePStateMaps(ps [][]byte) ([]ParsedPool, map[uint64][][]byte, error) {
 		if err := mergePoolDeposits(bestPools, ps, bestIdx); err != nil {
 			mapErrs = append(mapErrs, err)
 		}
+	}
+	for _, p := range parsed {
+		if p.idx <= bestIdx {
+			continue
+		}
+		// The adjacent future map can contain only malformed entries;
+		// zero successfully decoded pools must not erase its warning.
+		if len(p.pools) == 0 &&
+			(p.idx != bestIdx+1 || p.warning == nil) &&
+			!hasPoolParamsEntries(ps[p.idx]) {
+			continue
+		}
+		future, warning := parseCertPoolRegistrationMap(ps[p.idx])
+		if err := mergeFuturePoolParams(bestPools, future, warning); err != nil {
+			mapErrs = append(mapErrs, err)
+		}
+		break
 	}
 	retirementIndices := make([]int, 0, len(ps))
 	if len(ps) == 4 && bestIdx == 0 {
@@ -750,6 +805,120 @@ func parsePStateMaps(ps [][]byte) ([]ParsedPool, map[uint64][][]byte, error) {
 		mapErrs = append(mapErrs, err)
 	}
 	return bestPools, retirements, errors.Join(mapErrs...)
+}
+
+// poolMapCarriesOperator reports whether every value in a pool-keyed map
+// starts with the operator key hash, as futurePoolParams values do.
+func poolMapCarriesOperator(data []byte) bool {
+	entries, err := decodeMapEntries(data)
+	if err != nil || len(entries) == 0 {
+		return false
+	}
+	for _, entry := range entries {
+		var key []byte
+		if _, err := cbor.Decode(entry.KeyRaw, &key); err != nil {
+			return false
+		}
+		fields, err := decodeRawArray(entry.ValueRaw)
+		if err != nil || len(fields) == 0 {
+			return false
+		}
+		var operator []byte
+		if _, err := cbor.Decode(fields[0], &operator); err != nil ||
+			!bytes.Equal(operator, key) {
+			return false
+		}
+	}
+	return true
+}
+
+func isEmptyCborMap(data []byte) bool {
+	entries, err := decodeMapEntries(data)
+	return err == nil && len(entries) == 0
+}
+
+// poolsHaveDeposits reports whether any PState map other than the one at
+// poolParamsIdx holds a deposit for one of pools.
+func poolsHaveDeposits(
+	pools []ParsedPool,
+	ps [][]byte,
+	poolParamsIdx int,
+) bool {
+	for i, elem := range ps {
+		if i == poolParamsIdx {
+			continue
+		}
+		deposits, _ := parsePoolUint64Map(elem)
+		if !looksLikeDeposits(deposits) {
+			continue
+		}
+		for j := range pools {
+			if _, ok := deposits[hex.EncodeToString(
+				pools[j].PoolKeyHash,
+			)]; ok {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func hasPoolParamsEntries(data []byte) bool {
+	entries, err := decodeMapEntries(data)
+	if err != nil {
+		return false
+	}
+	for _, entry := range entries {
+		var key []byte
+		if _, err := cbor.Decode(entry.KeyRaw, &key); err != nil || len(key) != poolKeyHashLen {
+			continue
+		}
+		if _, err := decodeRawArray(entry.ValueRaw); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// mergeFuturePoolParams attaches the PState futurePoolParams entries -- the
+// re-registrations staged during the snapshot's epoch and not yet promoted --
+// to the pools they re-register. Only the map that decodes as pool parameters
+// but is not poolParams can be futurePoolParams: the other PState maps carry
+// scalars or VRF keys. The pool's deposit is carried forward because a
+// re-registration of a registered pool pays none.
+//
+// An entry that cannot be decoded or has no registered pool is an error: it
+// is a re-registration the node would otherwise never apply.
+func mergeFuturePoolParams(
+	pools []ParsedPool,
+	future []ParsedPool,
+	warning error,
+) error {
+	if pools == nil {
+		return errors.New("future pool params without current pool params")
+	}
+	byHash := make(map[string]int, len(pools))
+	for i := range pools {
+		byHash[string(pools[i].PoolKeyHash)] = i
+	}
+	var errs []error
+	if warning != nil {
+		errs = append(errs, fmt.Errorf("future pool params: %w", warning))
+	}
+	for i := range future {
+		idx, ok := byHash[string(future[i].PoolKeyHash)]
+		if !ok {
+			errs = append(errs, fmt.Errorf(
+				"future pool params for unregistered pool %x",
+				future[i].PoolKeyHash,
+			))
+			continue
+		}
+		f := future[i]
+		f.Deposit = pools[idx].Deposit
+		pools[idx].FutureParams = &f
+	}
+	return errors.Join(errs...)
 }
 
 func mergePoolDeposits(
@@ -1173,12 +1342,17 @@ func parsePoolParamsWithoutOperator(
 		)
 	}
 
-	if rewardAccount, rewardAccountTag, ok := parseRewardAccount(
+	rewardAccount, rewardAccountTag, ok := parseRewardAccount(
 		params[4+leiosOffset],
-	); ok {
-		pool.RewardAccount = rewardAccount
-		pool.RewardAccountCredentialTag = rewardAccountTag
+	)
+	if !ok {
+		return nil, true, fmt.Errorf(
+			"decoding reward account for pool %x",
+			poolKeyHash,
+		)
 	}
+	pool.RewardAccount = rewardAccount
+	pool.RewardAccountCredentialTag = rewardAccountTag
 
 	owners, err := parsePoolOwners(params[5+leiosOffset])
 	if err != nil {
@@ -1341,7 +1515,7 @@ func parsePoolParamsOrDistr(
 	poolKeyHash []byte,
 	data []byte,
 ) (*ParsedPool, error) {
-	pool, err := parsePoolParams(poolKeyHash, data)
+	pool, err := parsePoolRegistration(poolKeyHash, data)
 	if err == nil {
 		return pool, nil
 	}
@@ -1353,15 +1527,6 @@ func parsePoolParamsOrDistr(
 	if !errors.Is(err, ErrNotPoolParams) {
 		return nil, err
 	}
-	// The snapshot layout carries the full parameters; try it before
-	// degrading to the VRF-only reading, which discards them.
-	if fields, arrErr := decodeRawArray(data); arrErr == nil {
-		if pool, snapErr := parseSnapshotPoolParams(
-			poolKeyHash, fields,
-		); snapErr == nil {
-			return pool, nil
-		}
-	}
 	pool, distrErr := parsePoolDistrEntry(poolKeyHash, data)
 	if distrErr == nil {
 		return pool, nil
@@ -1371,6 +1536,25 @@ func parsePoolParamsOrDistr(
 		err,
 		distrErr,
 	)
+}
+
+func parsePoolRegistration(
+	poolKeyHash []byte,
+	data []byte,
+) (*ParsedPool, error) {
+	pool, err := parsePoolParams(poolKeyHash, data)
+	if err == nil || !errors.Is(err, ErrNotPoolParams) {
+		return pool, err
+	}
+	fields, fieldsErr := decodeRawArray(data)
+	if fieldsErr != nil {
+		return nil, err
+	}
+	pool, snapshotErr := parseSnapshotPoolParams(poolKeyHash, fields)
+	if snapshotErr == nil {
+		return pool, nil
+	}
+	return nil, err
 }
 
 // snapshotPoolParamsFields is the field count of the UTxO-HD snapshot pool

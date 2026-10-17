@@ -338,3 +338,50 @@ func TestMithrilMetricsUsesDedicatedLoopbackBind(t *testing.T) {
 		})
 	}
 }
+
+func TestMithrilMetricsRequiresConfiguredToken(t *testing.T) {
+	t.Parallel()
+
+	const token = "mithril-metrics-secret"
+	server, err := startMithrilMetricsServer(
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+		&config.Config{
+			MetricsBindAddr:  "127.0.0.1",
+			MetricsAuthToken: token,
+			MetricsPort:      0,
+		},
+		http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusNoContent)
+		}),
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		require.NoError(t, server.Shutdown(ctx))
+	})
+
+	client := http.Client{Timeout: 2 * time.Second}
+	request, err := http.NewRequest(
+		http.MethodGet,
+		"http://"+server.addr+"/metrics",
+		nil,
+	)
+	require.NoError(t, err)
+	response, err := client.Do(request)
+	require.NoError(t, err)
+	require.NoError(t, response.Body.Close())
+	require.Equal(t, http.StatusUnauthorized, response.StatusCode)
+
+	request, err = http.NewRequest(
+		http.MethodGet,
+		"http://"+server.addr+"/metrics",
+		nil,
+	)
+	require.NoError(t, err)
+	request.Header.Set("Authorization", "bearer  "+token)
+	response, err = client.Do(request)
+	require.NoError(t, err)
+	require.NoError(t, response.Body.Close())
+	require.Equal(t, http.StatusNoContent, response.StatusCode)
+}

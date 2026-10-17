@@ -59,10 +59,17 @@ var (
 			`"index"`, "tag",
 		},
 	}
+	redeemerScriptShape = rowShape{
+		table: "redeemer_script",
+		columns: []string{
+			"transaction_id", "tag", `"index"`, "script_hash", "slot",
+			"tx_index",
+		},
+	}
 	addressTransactionShape = rowShape{
 		table: "address_transaction",
 		columns: []string{
-			"payment_key", "staking_key", "credential_tag",
+			"payment_key", "payment_script", "staking_key", "credential_tag",
 			"transaction_id", "slot", "tx_index",
 		},
 	}
@@ -87,6 +94,11 @@ var (
 		table:   "asset",
 		columns: []string{"name", "policy_id", "fingerprint", "utxo_id", "amount"},
 		suffix:  "ON CONFLICT (name, policy_id, utxo_id) DO NOTHING",
+	}
+	assetUtxoAddressShape = rowShape{
+		table:   "utxo_address",
+		columns: []string{"utxo_id", "address"},
+		suffix:  "ON CONFLICT (utxo_id) DO UPDATE SET address = excluded.address",
 	}
 	assetMintBurnShape = rowShape{
 		table: "asset_mint_burn",

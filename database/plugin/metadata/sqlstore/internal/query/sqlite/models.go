@@ -28,11 +28,16 @@ type Account struct {
 type AddressTransaction struct {
 	ID            int64
 	PaymentKey    []byte
+	PaymentScript sql.NullBool
 	StakingKey    []byte
 	CredentialTag int64
 	TransactionID sql.NullInt64
 	Slot          sql.NullInt64
 	TxIndex       sql.NullInt64
+}
+
+type AddressTransactionRebuildSource struct {
+	TransactionID int64
 }
 
 type Asset struct {
@@ -566,4 +571,9 @@ type Utxo struct {
 	Amount                  sql.NullString
 	OutputIdx               sql.NullInt64
 	PaymentScript           sql.NullBool
+}
+
+type UtxoAddress struct {
+	UtxoID  int64
+	Address []byte
 }

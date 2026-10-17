@@ -18,7 +18,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/hex"
-	"errors"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/chain"
@@ -35,10 +34,36 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// productionValidateVerifyConfig is the generic header-crypto portion of
-// NewLedgerState's pipeline wiring. Dingo adds OpCert KES-period expiry after
-// the generic VRF/KES/OpCert-signature stage succeeds.
-var productionValidateVerifyConfig = blockPipelineVerifyConfig()
+// newTestReplayPipeline configures the real persisted decoder and separate
+// bounded header-crypto workers used by decodeReadChainBatch.
+func newTestReplayPipeline(
+	ls *LedgerState,
+	opts ...pipeline.PipelineOption,
+) *pipeline.BlockPipeline {
+	cfg := pipeline.DefaultPipelineConfig()
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+	ls.blockPipelineValidation = nil
+	ls.blockPipelineValidationWindow = 0
+	ls.blockPipelineValidationMetrics = pipeline.NewPipelineMetrics(0)
+	if cfg.ValidateWorkers > 0 {
+		ls.blockPipelineValidation = pipeline.NewValidateStage(
+			pipeline.ValidateStageConfig{
+				BlockLocal:        true,
+				Eta0Provider:      cfg.Eta0Provider,
+				SlotsPerKesPeriod: cfg.SlotsPerKesPeriod,
+			},
+		)
+		ls.blockPipelineValidationWorkers = cfg.ValidateWorkers
+		if cfg.MaxPendingBlocks > 0 {
+			ls.blockPipelineValidationWindow = cfg.MaxPendingBlocks + 1
+		}
+	}
+	cfg.ValidateWorkers = 0
+	cfg.TrustedDecodeOnly = true
+	return pipeline.NewBlockPipeline(pipeline.WithConfig(cfg))
+}
 
 func TestNewLedgerStateRejectsPipelineValidationWithoutKesConfig(
 	t *testing.T,
@@ -149,12 +174,11 @@ func newValidatedPipelineTestLedger(
 	}
 	ls.slotsPerKESPeriod.Store(ls.loadSlotsPerKESPeriod())
 	ls.publishSnapshotsLocked()
-	ls.blockPipeline = pipeline.NewBlockPipeline(
+	ls.blockPipeline = newTestReplayPipeline(ls,
 		pipeline.WithDecodeWorkers(1),
 		pipeline.WithValidateWorkers(1),
 		pipeline.WithEta0(vb.EpochNonceHex),
 		pipeline.WithSlotsPerKesPeriod(vb.SlotsPerKesPeriod),
-		pipeline.WithVerifyConfig(productionValidateVerifyConfig),
 	)
 	require.NoError(t, ls.blockPipeline.Start(t.Context()))
 	t.Cleanup(func() {
@@ -163,6 +187,22 @@ func newValidatedPipelineTestLedger(
 		}
 	})
 	return ls
+}
+
+// useWrongEpochNonce publishes an epoch nonce other than the one the block
+// was proven against, so header VRF verification genuinely fails (rather than
+// tampering CBOR bytes, which risks failing decode instead of validation and
+// testing the wrong thing).
+func useWrongEpochNonce(
+	t *testing.T,
+	ls *LedgerState,
+	vb testutil.ValidatedConwayBlock,
+) {
+	t.Helper()
+	wrong, err := hex.DecodeString(wrongNonceHexFor(t, vb.EpochNonceHex))
+	require.NoError(t, err)
+	ls.epochCache[0].Nonce = wrong
+	ls.publishSnapshotsLocked()
 }
 
 // loadRealByronMainBlock returns a genuine Byron main block from the shared
@@ -216,12 +256,11 @@ func TestDecodeReadChainBatchAcceptsRealByronWithValidation(t *testing.T) {
 	}
 	ls.slotsPerKESPeriod.Store(ls.loadSlotsPerKESPeriod())
 	ls.publishSnapshotsLocked()
-	ls.blockPipeline = pipeline.NewBlockPipeline(
+	ls.blockPipeline = newTestReplayPipeline(ls,
 		pipeline.WithDecodeWorkers(1),
 		pipeline.WithValidateWorkers(1),
 		pipeline.WithEta0Provider(ls.blockPipelineEta0Provider),
 		pipeline.WithSlotsPerKesPeriod(ls.SlotsPerKESPeriod()),
-		pipeline.WithVerifyConfig(productionValidateVerifyConfig),
 	)
 	require.NoError(t, ls.blockPipeline.Start(t.Context()))
 	t.Cleanup(func() { require.NoError(t, ls.blockPipeline.Stop()) })
@@ -369,12 +408,11 @@ func TestDecodeReadChainBatchSkipsValidationWithoutCachedNonce(
 	}
 	ls.publishSnapshotsLocked()
 	require.NoError(t, ls.blockPipeline.Stop())
-	ls.blockPipeline = pipeline.NewBlockPipeline(
+	ls.blockPipeline = newTestReplayPipeline(ls,
 		pipeline.WithDecodeWorkers(1),
 		pipeline.WithValidateWorkers(1),
 		pipeline.WithEta0Provider(ls.blockPipelineEta0Provider),
 		pipeline.WithSlotsPerKesPeriod(vb.SlotsPerKesPeriod),
-		pipeline.WithVerifyConfig(productionValidateVerifyConfig),
 	)
 	require.NoError(t, ls.blockPipeline.Start(t.Context()))
 
@@ -428,15 +466,15 @@ func TestDecodeReadChainBatchMirrorsSerialValidationGates(t *testing.T) {
 			)
 			ls := newValidatedPipelineTestLedger(t, vb)
 			tt.mutate(ls, block)
+			useWrongEpochNonce(t, ls, vb)
 			ls.publishSnapshotsLocked()
 
 			require.NoError(t, ls.blockPipeline.Stop())
-			ls.blockPipeline = pipeline.NewBlockPipeline(
+			ls.blockPipeline = newTestReplayPipeline(ls,
 				pipeline.WithDecodeWorkers(1),
 				pipeline.WithValidateWorkers(1),
 				pipeline.WithEta0(wrongNonceHexFor(t, vb.EpochNonceHex)),
 				pipeline.WithSlotsPerKesPeriod(vb.SlotsPerKesPeriod),
-				pipeline.WithVerifyConfig(productionValidateVerifyConfig),
 			)
 			require.NoError(t, ls.blockPipeline.Start(t.Context()))
 
@@ -525,16 +563,12 @@ func TestDecodeReadChainBatchRejectsFailedValidationWhenEnabled(t *testing.T) {
 
 	ls := newValidatedPipelineTestLedger(t, vb)
 	require.NoError(t, ls.blockPipeline.Stop())
-	// Configure the pipeline with a *different* epoch nonce than the one the
-	// block was actually proven against, so VRF verification genuinely
-	// fails (rather than tampering CBOR bytes, which risks failing decode
-	// instead of validation and testing the wrong thing).
-	ls.blockPipeline = pipeline.NewBlockPipeline(
+	useWrongEpochNonce(t, ls, vb)
+	ls.blockPipeline = newTestReplayPipeline(ls,
 		pipeline.WithDecodeWorkers(2),
 		pipeline.WithValidateWorkers(2),
 		pipeline.WithEta0(wrongNonceHexFor(t, vb.EpochNonceHex)),
 		pipeline.WithSlotsPerKesPeriod(vb.SlotsPerKesPeriod),
-		pipeline.WithVerifyConfig(productionValidateVerifyConfig),
 	)
 	require.NoError(t, ls.blockPipeline.Start(t.Context()))
 
@@ -586,12 +620,11 @@ func TestDecodeReadChainBatchDrainsRemainingResultsAfterEarlyFailure(
 
 	ls := newValidatedPipelineTestLedger(t, vb2)
 	require.NoError(t, ls.blockPipeline.Stop())
-	ls.blockPipeline = pipeline.NewBlockPipeline(
+	ls.blockPipeline = newTestReplayPipeline(ls,
 		pipeline.WithDecodeWorkers(2),
 		pipeline.WithValidateWorkers(2),
 		pipeline.WithEta0(vb2.EpochNonceHex),
 		pipeline.WithSlotsPerKesPeriod(vb2.SlotsPerKesPeriod),
-		pipeline.WithVerifyConfig(productionValidateVerifyConfig),
 	)
 	require.NoError(t, ls.blockPipeline.Start(t.Context()))
 
@@ -645,12 +678,11 @@ func TestDecodeReadChainBatchIgnoresValidationOutcomeWhenDisabled(
 	// Wire a nonce that will fail validation -- if decodeReadChainBatch
 	// incorrectly consulted the validation outcome anyway, this would flip
 	// the assertion below from ok=true to ok=false.
-	ls.blockPipeline = pipeline.NewBlockPipeline(
+	ls.blockPipeline = newTestReplayPipeline(ls,
 		pipeline.WithDecodeWorkers(2),
 		pipeline.WithValidateWorkers(2),
 		pipeline.WithEta0(wrongNonceHexFor(t, vb.EpochNonceHex)),
 		pipeline.WithSlotsPerKesPeriod(vb.SlotsPerKesPeriod),
-		pipeline.WithVerifyConfig(productionValidateVerifyConfig),
 	)
 	require.NoError(t, ls.blockPipeline.Start(t.Context()))
 	defer func() {
@@ -715,23 +747,9 @@ func TestLedgerReadChainIteratorPipelineValidateMatchesSerial(t *testing.T) {
 	serialLS := &LedgerState{config: LedgerStateConfig{Logger: testLogger()}}
 	serialBlocks := run(t, serialLS)
 
-	pipelineLS := &LedgerState{
-		config: LedgerStateConfig{
-			Logger:                       testLogger(),
-			BlockPipelineValidateEnabled: true,
-		},
-	}
-	pipelineLS.blockPipeline = pipeline.NewBlockPipeline(
-		pipeline.WithDecodeWorkers(2),
-		pipeline.WithValidateWorkers(2),
-		pipeline.WithEta0(vb1.EpochNonceHex),
-		pipeline.WithSlotsPerKesPeriod(vb1.SlotsPerKesPeriod),
-		pipeline.WithVerifyConfig(productionValidateVerifyConfig),
-	)
-	require.NoError(t, pipelineLS.blockPipeline.Start(t.Context()))
-	defer func() {
-		require.NoError(t, pipelineLS.blockPipeline.Stop())
-	}()
+	// The ledger carries the epoch nonce and Shelley genesis, so the header
+	// check is enforced rather than skipped.
+	pipelineLS := newValidatedPipelineTestLedger(t, vb1)
 	pipelineBlocks := run(t, pipelineLS)
 
 	require.Len(t, serialBlocks, len(pipelineBlocks))
@@ -751,88 +769,6 @@ func TestLedgerReadChainIteratorPipelineValidateMatchesSerial(t *testing.T) {
 			i,
 		)
 	}
-}
-
-func TestBlockPipelineEta0Provider_ReturnsNonceHex(t *testing.T) {
-	t.Parallel()
-
-	ls := &LedgerState{
-		epochCache: []models.Epoch{
-			{
-				EpochId:       0,
-				StartSlot:     0,
-				LengthInSlots: 432000,
-				Nonce:         []byte{0x01, 0x02, 0x03},
-			},
-		},
-		config: LedgerStateConfig{
-			CardanoNodeConfig: newTestShelleyGenesisCfg(t),
-			Logger:            testLogger(),
-		},
-	}
-	ls.publishSnapshotsLocked()
-
-	nonceHex, err := ls.blockPipelineEta0Provider(1000)
-	require.NoError(t, err)
-	assert.Equal(t, "010203", nonceHex)
-}
-
-// TestBlockPipelineEta0Provider_EmptyCache is a regression test for
-// blockPipelineEta0Provider previously wrapping *every* lookup error in
-// errBlockPipelineEta0Unavailable. An empty epoch cache means the published
-// state does not cover the slot at all, so it must be classified as deferred
-// rather than as the distinct "covered epoch has no nonce" case.
-func TestBlockPipelineEta0Provider_EmptyCache(t *testing.T) {
-	t.Parallel()
-
-	ls := &LedgerState{
-		config: LedgerStateConfig{
-			CardanoNodeConfig: newTestShelleyGenesisCfg(t),
-			Logger:            testLogger(),
-		},
-	}
-	ls.publishSnapshotsLocked()
-
-	_, err := ls.blockPipelineEta0Provider(1000)
-	require.Error(t, err)
-	assert.True(t, errors.Is(err, errHeaderVerificationDeferred))
-	assert.False(
-		t,
-		errors.Is(err, errBlockPipelineEta0Unavailable),
-		"a slot outside the cache must not be classified as a covered epoch without a nonce",
-	)
-}
-
-// TestBlockPipelineEta0Provider_NoNonceForEpoch covers an epoch present in the
-// cache without a published Praos nonce. This is permanent for Byron and can
-// be transient later; the provider must fail rather than inventing a nonce,
-// while preserving the sentinel that lets enforcement defer to admission.
-func TestBlockPipelineEta0Provider_NoNonceForEpoch(t *testing.T) {
-	t.Parallel()
-
-	ls := &LedgerState{
-		epochCache: []models.Epoch{
-			{
-				EpochId:       0,
-				StartSlot:     0,
-				LengthInSlots: 432000,
-				Nonce:         nil,
-			},
-		},
-		config: LedgerStateConfig{
-			CardanoNodeConfig: newTestShelleyGenesisCfg(t),
-			Logger:            testLogger(),
-		},
-	}
-	ls.publishSnapshotsLocked()
-
-	_, err := ls.blockPipelineEta0Provider(1000)
-	require.Error(t, err)
-	assert.True(
-		t,
-		errors.Is(err, errBlockPipelineEta0Unavailable),
-		"a covered epoch without a nonce must retain the eta0-unavailable sentinel",
-	)
 }
 
 // newAdmissionSkipTestLedger returns a pipeline-validating ledger whose epoch
@@ -856,12 +792,11 @@ func newAdmissionSkipTestLedger(
 		ls.publishSnapshotsLocked()
 	}
 	require.NoError(t, ls.blockPipeline.Stop())
-	ls.blockPipeline = pipeline.NewBlockPipeline(
+	ls.blockPipeline = newTestReplayPipeline(ls,
 		pipeline.WithDecodeWorkers(1),
 		pipeline.WithValidateWorkers(1),
 		pipeline.WithEta0Provider(ls.blockPipelineEta0Provider),
 		pipeline.WithSlotsPerKesPeriod(vb.SlotsPerKesPeriod),
-		pipeline.WithVerifyConfig(productionValidateVerifyConfig),
 	)
 	require.NoError(t, ls.blockPipeline.Start(t.Context()))
 	return ls
@@ -884,7 +819,7 @@ func TestDecodeReadChainBatchSkipsCryptoForAdmissionVerifiedBlock(
 	t.Run("admission verified is skipped", func(t *testing.T) {
 		t.Parallel()
 		ls := newAdmissionSkipTestLedger(t, vb, false)
-		ls.markAdmissionVerified(point)
+		ls.markAdmissionVerified(point, ls.loadConsensusSnapshot().generation)
 
 		decoded, ok := ls.decodeReadChainBatch(
 			t.Context(), []models.Block{block},
@@ -908,11 +843,28 @@ func TestDecodeReadChainBatchSkipsCryptoForAdmissionVerifiedBlock(
 			"block without an admission record must be verified",
 		)
 	})
+	t.Run("stale admission verdict is verified", func(t *testing.T) {
+		t.Parallel()
+		ls := newAdmissionSkipTestLedger(t, vb, false)
+		ls.markAdmissionVerified(
+			point,
+			ls.loadConsensusSnapshot().generation,
+		)
+		ls.publishSnapshotsLocked()
+
+		_, ok := ls.decodeReadChainBatch(t.Context(), []models.Block{block})
+		assert.False(
+			t,
+			ok,
+			"a verdict from an older ledger generation must not skip verification",
+		)
+	})
 	t.Run("same slot different hash is verified", func(t *testing.T) {
 		t.Parallel()
 		ls := newAdmissionSkipTestLedger(t, vb, false)
 		ls.markAdmissionVerified(
 			ocommon.NewPoint(block.Slot, bytes.Repeat([]byte{0xAB}, 32)),
+			ls.loadConsensusSnapshot().generation,
 		)
 
 		_, ok := ls.decodeReadChainBatch(t.Context(), []models.Block{block})
@@ -929,6 +881,7 @@ func TestDecodeReadChainBatchSkipsCryptoForAdmissionVerifiedBlock(
 			ls := newAdmissionSkipTestLedger(t, vb, true)
 			ls.markAdmissionVerified(
 				ocommon.NewPoint(block.Slot, bytes.Repeat([]byte{0xAB}, 32)),
+				ls.loadConsensusSnapshot().generation,
 			)
 
 			decoded, ok := ls.decodeReadChainBatch(
@@ -950,7 +903,10 @@ func TestAdmissionVerifiedSetIsBounded(t *testing.T) {
 	ls := &LedgerState{maxAdmissionVerified: limit}
 	ls.publishSnapshotsLocked()
 	for slot := uint64(10); slot < 10+limit+3; slot++ {
-		ls.markAdmissionVerified(ocommon.NewPoint(slot, []byte{byte(slot)}))
+		ls.markAdmissionVerified(
+			ocommon.NewPoint(slot, []byte{byte(slot)}),
+			ls.loadConsensusSnapshot().generation,
+		)
 	}
 	ls.admissionVerifiedMu.Lock()
 	assert.Len(t, ls.admissionVerified, limit)
@@ -959,35 +915,6 @@ func TestAdmissionVerifiedSetIsBounded(t *testing.T) {
 	ls.currentTip.Point.Slot = 100
 	ls.publishSnapshotsLocked()
 	late := ocommon.NewPoint(200, []byte{0xCC})
-	ls.markAdmissionVerified(late)
+	ls.markAdmissionVerified(late, ls.loadConsensusSnapshot().generation)
 	assert.True(t, ls.consumeAdmissionVerified(late))
-}
-
-// TestBlockPipelineEta0ProviderSkipsAdmissionVerifiedSlot pins that the
-// validate stage is told to skip a slot whose block was verified at admission,
-// so the VRF/KES work is not repeated, and only that slot.
-func TestBlockPipelineEta0ProviderSkipsAdmissionVerifiedSlot(t *testing.T) {
-	t.Parallel()
-
-	ls := &LedgerState{
-		epochCache: []models.Epoch{{
-			EpochId:       0,
-			StartSlot:     0,
-			LengthInSlots: 432000,
-			Nonce:         []byte{0x01, 0x02, 0x03},
-		}},
-		config: LedgerStateConfig{
-			CardanoNodeConfig: newTestShelleyGenesisCfg(t),
-			Logger:            testLogger(),
-		},
-	}
-	ls.publishSnapshotsLocked()
-	ls.markAdmissionVerified(ocommon.NewPoint(1000, []byte{0x01}))
-
-	_, err := ls.blockPipelineEta0Provider(1000)
-	require.ErrorIs(t, err, errBlockPipelineAdmissionVerified)
-
-	nonceHex, err := ls.blockPipelineEta0Provider(1001)
-	require.NoError(t, err)
-	assert.Equal(t, "010203", nonceHex)
 }

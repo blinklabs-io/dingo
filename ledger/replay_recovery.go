@@ -275,9 +275,7 @@ func (ls *LedgerState) tryRecoverFromTxValidationError(
 						ferr,
 					)
 				}
-				if onChain && (floor.Slot < rewindPoint.Slot ||
-					(floor.Slot == rewindPoint.Slot &&
-						!bytes.Equal(floor.Hash, rewindPoint.Hash))) {
+				if onChain && replayHoldUsesDurableFloor(rewindPoint, floor) {
 					rewindPoint = floor
 				}
 			}
@@ -399,6 +397,15 @@ func (ls *LedgerState) tryRecoverFromTxValidationError(
 		ls.armContinuationAudit(ls.lifecycleContext(), rewindPoint, "replay recovery rewind")
 	}
 	return true, nil
+}
+
+func replayHoldUsesDurableFloor(rewindPoint, floor ocommon.Point) bool {
+	if rewindPoint.Slot == 0 && len(rewindPoint.Hash) == 0 {
+		return false
+	}
+	return floor.Slot < rewindPoint.Slot ||
+		(floor.Slot == rewindPoint.Slot &&
+			!bytes.Equal(floor.Hash, rewindPoint.Hash))
 }
 
 // checkReplayRecoveryRollbackFloor preserves the refuse-before-chain-moves
@@ -576,6 +583,9 @@ func isDeterministicTxValidationError(err error) bool {
 	if isRewardWithdrawalMismatch(err) {
 		return true
 	}
+	if isConwayGovPredFailureError(err) {
+		return true
+	}
 	if _, ok := errors.AsType[eras.TxTooLargeByronError](err); ok {
 		return true
 	}
@@ -586,6 +596,46 @@ func isDeterministicTxValidationError(err error) bool {
 		return true
 	}
 	_, ok := errors.AsType[eras.UnknownAddressAttributesByronError](err)
+	return ok
+}
+
+// isConwayGovPredFailureError identifies final governance predicate verdicts
+// whose validation rules do not resolve transaction inputs. State access and
+// availability errors are deliberately excluded.
+func isConwayGovPredFailureError(err error) bool {
+	if errorIsType[conway.CommitteeExpiryEpochUnavailableError](err) ||
+		errorIsType[conway.ConstitutionLookupError](err) ||
+		errorIsType[conway.MalformedConstitutionError](err) ||
+		errorIsType[conway.CommitteeMemberLookupError](err) ||
+		errorIsType[conway.CommitteeStateUnavailableError](err) {
+		return false
+	}
+	return errorIsType[conway.ProtocolParameterUpdateEmptyError](err) ||
+		errorIsType[conway.ProtocolParameterUpdateFieldZeroError](err) ||
+		errorIsType[conway.ConwayProtocolParameterUpdateError](err) ||
+		errorIsType[conway.CommitteeMemberAlreadyExpiredError](err) ||
+		errorIsType[conway.EmptyTreasuryWithdrawalsError](err) ||
+		errorIsType[conway.ZeroTreasuryWithdrawalAmountError](err) ||
+		errorIsType[conway.BootstrapDisallowedGovActionError](err) ||
+		errorIsType[conway.WrongNetworkProposalAddressError](err) ||
+		errorIsType[conway.MalformedGovActionError](err) ||
+		errorIsType[conway.ConflictingCommitteeUpdateError](err) ||
+		errorIsType[conway.InvalidGuardrailsScriptHashError](err) ||
+		errorIsType[conway.BadHardForkProtocolVersionError](err) ||
+		errorIsType[conway.ProposalDepositIncorrectError](err) ||
+		errorIsType[conway.ProposalReturnAccountDoesNotExistError](err) ||
+		errorIsType[conway.TreasuryWithdrawalReturnAccountsDoNotExistError](err) ||
+		errorIsType[conway.UnknownGovActionIdError](err) ||
+		errorIsType[conway.UnknownVoterError](err) ||
+		errorIsType[conway.VotingOnExpiredGovActionError](err) ||
+		errorIsType[conway.BootstrapVotingRestrictionError](err) ||
+		errorIsType[conway.StakePoolVotingRestrictionError](err) ||
+		errorIsType[conway.CCVotingRestrictionError](err) ||
+		errorIsType[conway.UnelectedCommitteeVoterError](err)
+}
+
+func errorIsType[T error](err error) bool {
+	_, ok := errors.AsType[T](err)
 	return ok
 }
 
@@ -1946,8 +1996,10 @@ func (ls *LedgerState) rejectRecoveryAtMithrilBoundary(
 		)
 		return fmt.Errorf("%s: %w", errContext, errHaltLedgerPipeline)
 	}
+	var pending pendingPublishes
+	defer pending.flush()
 	ls.chainsyncMutex.Lock()
-	ls.resetChainsyncResyncState()
+	ls.resetChainsyncResyncState(&pending)
 	ls.setChainsyncState(SyncingChainsyncState)
 	ls.chainsyncMutex.Unlock()
 	if ls.config.EventBus != nil {

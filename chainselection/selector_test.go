@@ -33,6 +33,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	okeepalive "github.com/blinklabs-io/gouroboros/protocol/keepalive"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -117,6 +118,442 @@ func TestHandlePeerRollbackRegistersPeerAfterConnectionRecycle(t *testing.T) {
 			"without waiting for the next RollForward",
 	)
 	assert.Equal(t, connId, *best)
+}
+
+func TestHandlePeerRollbackClearsPendingTipAdmissions(t *testing.T) {
+	t.Parallel()
+
+	connId := newTestConnectionId(21)
+	cs := NewChainSelector(ChainSelectorConfig{
+		SecurityParam:             2160,
+		DisableEventSubscriptions: true,
+	})
+	localTip := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 100, Hash: []byte("local-tip")},
+		BlockNumber: 100,
+	}
+	cs.SetLocalTip(localTip)
+	require.True(t, cs.UpdatePeerTip(connId, localTip, nil))
+
+	for id := uint64(1); id <= 2; id++ {
+		update := PeerTipUpdateEvent{
+			ConnectionId: connId,
+			AdmissionID:  id,
+			Tip: ochainsync.Tip{
+				Point:       ocommon.Point{Slot: 100 + id, Hash: []byte("peer-tip")},
+				BlockNumber: 100 + id,
+			},
+			ObservedTip: ochainsync.Tip{
+				Point:       ocommon.Point{Slot: 100 + id, Hash: []byte("observed")},
+				BlockNumber: 100 + id,
+			},
+		}
+		require.True(t, cs.PreparePeerTipAdmission(update))
+	}
+	require.Len(t, cs.pendingPeerTips[connId], 2)
+	require.NotNil(t, cs.pendingPeerTipFrontiers[connId])
+
+	rollbackTip := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 101, Hash: []byte("rollback-tip")},
+		BlockNumber: 101,
+	}
+	cs.HandlePeerRollbackEvent(newRollbackEvent(
+		connId,
+		localTip.Point,
+		rollbackTip,
+	))
+
+	assert.NotContains(t, cs.pendingPeerTips, connId)
+	assert.NotContains(t, cs.pendingPeerTipFrontiers, connId)
+	assert.Equal(t, rollbackTip, cs.GetPeerTip(connId).Tip)
+}
+
+func TestCommitPeerTipAdmissionPromotesMatchingPeerCandidates(t *testing.T) {
+	t.Parallel()
+
+	firstConn := newTestConnectionId(23)
+	secondConn := newTestConnectionId(24)
+	localTip := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 100, Hash: []byte("local-tip")},
+		BlockNumber: 100,
+	}
+	acceptedPoint := ocommon.Point{Slot: 101, Hash: []byte("accepted-header")}
+	advertisedTip := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 200, Hash: []byte("remote-tip")},
+		BlockNumber: 200,
+	}
+	cs := NewChainSelector(ChainSelectorConfig{
+		SecurityParam:             2160,
+		DisableEventSubscriptions: true,
+	})
+	cs.SetLocalTip(localTip)
+
+	first := PeerTipUpdateEvent{
+		ConnectionId: firstConn,
+		AdmissionID:  1,
+		Tip:          advertisedTip,
+		ObservedTip:  ochainsync.Tip{Point: acceptedPoint, BlockNumber: 101},
+	}
+	second := first
+	second.ConnectionId = secondConn
+	second.AdmissionID = 1
+	require.True(t, cs.PreparePeerTipAdmission(first))
+	require.True(t, cs.PreparePeerTipAdmission(second),
+		"the duplicate peer candidate remains staged until the point is admitted")
+	assert.Nil(t, cs.GetPeerTip(secondConn))
+
+	require.True(t, cs.CommitPeerTipAdmission(first))
+	for _, connId := range []ouroboros.ConnectionId{firstConn, secondConn} {
+		peerTip := cs.GetPeerTip(connId)
+		require.NotNil(t, peerTip)
+		assert.Equal(t, acceptedPoint, peerTip.SelectionTip().Point,
+			"an admitted shared point should advance every peer that delivered it")
+	}
+	assert.NotContains(t, cs.pendingPeerTips, secondConn)
+	assert.NotContains(t, cs.pendingPeerTipFrontiers, secondConn)
+}
+
+func TestRejectPeerTipAdmissionPrunesMatchingPeerCandidates(t *testing.T) {
+	t.Parallel()
+
+	firstConn := newTestConnectionId(27)
+	secondConn := newTestConnectionId(28)
+	thirdConn := newTestConnectionId(29)
+	localTip := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 100, Hash: []byte("local-tip")},
+		BlockNumber: 100,
+	}
+	advertisedTip := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 200, Hash: []byte("remote-tip")},
+		BlockNumber: 200,
+	}
+	staged := func(
+		connId ouroboros.ConnectionId,
+		id uint64,
+		slot uint64,
+		hash string,
+	) PeerTipUpdateEvent {
+		return PeerTipUpdateEvent{
+			ConnectionId: connId,
+			AdmissionID:  id,
+			Tip:          advertisedTip,
+			ObservedTip: ochainsync.Tip{
+				Point:       ocommon.Point{Slot: slot, Hash: []byte(hash)},
+				BlockNumber: slot,
+			},
+		}
+	}
+	newSelector := func() *ChainSelector {
+		cs := NewChainSelector(ChainSelectorConfig{
+			SecurityParam:             2160,
+			DisableEventSubscriptions: true,
+		})
+		cs.SetLocalTip(localTip)
+		return cs
+	}
+
+	t.Run("duplicate copy does not outlive the rejected point", func(t *testing.T) {
+		t.Parallel()
+		cs := newSelector()
+		first := staged(firstConn, 1, 101, "bad-header")
+		duplicate := staged(secondConn, 1, 101, "bad-header")
+		unrelated := staged(thirdConn, 1, 102, "other-header")
+		for _, update := range []PeerTipUpdateEvent{first, duplicate, unrelated} {
+			require.True(t, cs.PreparePeerTipAdmission(update))
+		}
+
+		cs.RejectPeerTipAdmission(first)
+
+		assert.NotContains(t, cs.pendingPeerTips, firstConn)
+		assert.NotContains(t, cs.pendingPeerTips, secondConn,
+			"a duplicate whose publish was suppressed has no resolution of its own")
+		assert.NotContains(t, cs.pendingPeerTipFrontiers, secondConn)
+		assert.Contains(t, cs.pendingPeerTips, thirdConn,
+			"a candidate at a different point is unaffected")
+	})
+
+	t.Run("later headers of the duplicate peer go with it", func(t *testing.T) {
+		t.Parallel()
+		cs := newSelector()
+		first := staged(firstConn, 1, 101, "bad-header")
+		before := staged(secondConn, 1, 100, "ok-header")
+		duplicate := staged(secondConn, 2, 101, "bad-header")
+		after := staged(secondConn, 3, 102, "child-header")
+		for _, update := range []PeerTipUpdateEvent{first, before, duplicate, after} {
+			require.True(t, cs.PreparePeerTipAdmission(update))
+		}
+
+		cs.RejectPeerTipAdmission(first)
+
+		require.Len(t, cs.pendingPeerTips[secondConn], 1)
+		assert.Equal(t, uint64(1), cs.pendingPeerTips[secondConn][0].update.AdmissionID,
+			"only the prefix before the rejected point survives")
+	})
+
+	t.Run("an admitted point keeps its copies", func(t *testing.T) {
+		t.Parallel()
+		cs := newSelector()
+		first := staged(firstConn, 1, 101, "good-header")
+		duplicate := staged(secondConn, 1, 101, "good-header")
+		require.True(t, cs.PreparePeerTipAdmission(first))
+		require.True(t, cs.PreparePeerTipAdmission(duplicate))
+		require.True(t, cs.CommitPeerTipAdmission(first))
+
+		retry := staged(thirdConn, 1, 101, "good-header")
+		require.True(t, cs.PreparePeerTipAdmission(retry))
+		cs.RejectPeerTipAdmission(retry)
+
+		for _, connId := range []ouroboros.ConnectionId{firstConn, secondConn} {
+			peerTip := cs.GetPeerTip(connId)
+			require.NotNil(t, peerTip)
+			assert.Equal(t, first.ObservedTip.Point, peerTip.SelectionTip().Point)
+		}
+	})
+}
+
+func TestPreparePeerTipAdmissionPromotesPreviouslyAdmittedPoint(t *testing.T) {
+	t.Parallel()
+
+	firstConn := newTestConnectionId(25)
+	secondConn := newTestConnectionId(26)
+	localTip := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 100, Hash: []byte("local-tip")},
+		BlockNumber: 100,
+	}
+	acceptedPoint := ocommon.Point{Slot: 101, Hash: []byte("accepted-header")}
+	update := PeerTipUpdateEvent{
+		ConnectionId: firstConn,
+		AdmissionID:  1,
+		Tip: ochainsync.Tip{
+			Point:       ocommon.Point{Slot: 200, Hash: []byte("remote-tip")},
+			BlockNumber: 200,
+		},
+		ObservedTip: ochainsync.Tip{Point: acceptedPoint, BlockNumber: 101},
+	}
+	cs := NewChainSelector(ChainSelectorConfig{
+		SecurityParam:             2160,
+		DisableEventSubscriptions: true,
+	})
+	cs.SetLocalTip(localTip)
+	require.True(t, cs.PreparePeerTipAdmission(update))
+	require.True(t, cs.CommitPeerTipAdmission(update))
+
+	update.ConnectionId = secondConn
+	update.AdmissionID = 1
+	require.True(t, cs.PreparePeerTipAdmission(update))
+	peerTip := cs.GetPeerTip(secondConn)
+	require.NotNil(t, peerTip,
+		"a late duplicate should be admitted from the already committed chain history")
+	assert.Equal(t, acceptedPoint, peerTip.SelectionTip().Point)
+	assert.NotContains(t, cs.pendingPeerTips, secondConn)
+}
+
+func TestFarTipAdmissionClaimsStayProvisionalUntilCommit(t *testing.T) {
+	t.Parallel()
+
+	selector := NewChainSelector(ChainSelectorConfig{
+		SecurityParam:             2,
+		DisableEventSubscriptions: true,
+	})
+	localTip := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 100, Hash: []byte("local")},
+		BlockNumber: 10,
+	}
+	selector.SetLocalTip(localTip)
+	referenceConn := newTestConnectionId(33)
+	farConn := newTestConnectionId(34)
+	require.True(t, selector.UpdatePeerTip(referenceConn, localTip, nil))
+
+	updates := []PeerTipUpdateEvent{
+		{
+			ConnectionId:     farConn,
+			AdmissionID:      1,
+			Tip:              ochainsync.Tip{Point: ocommon.Point{Slot: 105, Hash: []byte("h15")}, BlockNumber: 15},
+			ObservedTip:      ochainsync.Tip{Point: ocommon.Point{Slot: 105, Hash: []byte("h15")}, BlockNumber: 15},
+			ObservedPrevHash: []byte("h14"),
+		},
+		{
+			ConnectionId:     farConn,
+			AdmissionID:      2,
+			Tip:              ochainsync.Tip{Point: ocommon.Point{Slot: 106, Hash: []byte("h16")}, BlockNumber: 16},
+			ObservedTip:      ochainsync.Tip{Point: ocommon.Point{Slot: 106, Hash: []byte("h16")}, BlockNumber: 16},
+			ObservedPrevHash: []byte("h15"),
+		},
+		{
+			ConnectionId:     farConn,
+			AdmissionID:      3,
+			Tip:              ochainsync.Tip{Point: ocommon.Point{Slot: 107, Hash: []byte("h17")}, BlockNumber: 17},
+			ObservedTip:      ochainsync.Tip{Point: ocommon.Point{Slot: 107, Hash: []byte("h17")}, BlockNumber: 17},
+			ObservedPrevHash: []byte("h16"),
+		},
+	}
+	for _, update := range updates {
+		require.True(t, selector.PreparePeerTipAdmission(update))
+	}
+	assert.Nil(t, selector.GetPeerTip(farConn),
+		"linked far-tip evidence must not enter the selectable peer table before admission")
+	assert.Equal(t, referenceConn, *selector.GetBestPeer())
+	require.True(t, selector.pendingFarTipClaims[farConn].lone,
+		"the bounded provisional chain may establish evidence while staged")
+	assert.False(t, selector.pendingPeerTips[farConn][0].plausible)
+	assert.False(t, selector.pendingPeerTips[farConn][1].plausible)
+	assert.True(t, selector.pendingPeerTips[farConn][2].plausible)
+
+	for i, update := range updates {
+		require.True(t, selector.CommitPeerTipAdmission(update))
+		if i < len(updates)-1 {
+			assert.Nil(t, selector.GetPeerTip(farConn),
+				"an admitted prefix shorter than K+1 remains evidence only")
+		}
+	}
+	require.NotNil(t, selector.GetPeerTip(farConn))
+	assert.Equal(t, updates[2].ObservedTip.Point,
+		selector.GetPeerTip(farConn).SelectionTip().Point)
+}
+
+func TestRejectedFarTipCannotCorroborateAnotherPendingPeer(t *testing.T) {
+	t.Parallel()
+
+	selector := NewChainSelector(ChainSelectorConfig{
+		SecurityParam:             2,
+		DisableEventSubscriptions: true,
+	})
+	localTip := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 100, Hash: []byte("local")},
+		BlockNumber: 10,
+	}
+	selector.SetLocalTip(localTip)
+	referenceConn := newTestConnectionId(35)
+	rejectedConn := newTestConnectionId(36)
+	otherConn := newTestConnectionId(37)
+	require.True(t, selector.UpdatePeerTip(referenceConn, localTip, nil))
+	rejected := PeerTipUpdateEvent{
+		ConnectionId:     rejectedConn,
+		AdmissionID:      1,
+		Tip:              ochainsync.Tip{Point: ocommon.Point{Slot: 105, Hash: []byte("rejected")}, BlockNumber: 15},
+		ObservedTip:      ochainsync.Tip{Point: ocommon.Point{Slot: 105, Hash: []byte("rejected")}, BlockNumber: 15},
+		ObservedPrevHash: []byte("prior"),
+	}
+	require.True(t, selector.PreparePeerTipAdmission(rejected))
+	require.Contains(t, selector.pendingFarTipClaims, rejectedConn)
+	assert.NotContains(t, selector.farTipClaims, rejectedConn,
+		"unadmitted evidence must remain outside the committed claims")
+	selector.RejectPeerTipAdmission(rejected)
+	assert.NotContains(t, selector.pendingFarTipClaims, rejectedConn)
+
+	other := PeerTipUpdateEvent{
+		ConnectionId:     otherConn,
+		AdmissionID:      2,
+		Tip:              ochainsync.Tip{Point: ocommon.Point{Slot: 106, Hash: []byte("other")}, BlockNumber: 16},
+		ObservedTip:      ochainsync.Tip{Point: ocommon.Point{Slot: 106, Hash: []byte("other")}, BlockNumber: 16},
+		ObservedPrevHash: []byte("other-prior"),
+	}
+	require.True(t, selector.PreparePeerTipAdmission(other))
+	require.Len(t, selector.pendingPeerTips[otherConn], 1)
+	assert.False(t, selector.pendingPeerTips[otherConn][0].plausible,
+		"the rejected header must not serve as corroboration for this peer")
+	assert.False(t, selector.pendingFarTipClaims[otherConn].corroborated)
+}
+
+func TestPreparePeerTipAdmissionDoesNotReplayUnchangedFarClaim(t *testing.T) {
+	t.Parallel()
+
+	rejections := 0
+	selector := NewChainSelector(ChainSelectorConfig{
+		SecurityParam:             2,
+		DisableEventSubscriptions: true,
+		OnPeerTipRejected: func(PeerTipRejection) {
+			rejections++
+		},
+	})
+	localTip := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 100, Hash: []byte("local")},
+		BlockNumber: 10,
+	}
+	selector.SetLocalTip(localTip)
+	reference := newTestConnectionId(38)
+	require.True(t, selector.UpdatePeerTip(reference, localTip, nil))
+	far := PeerTipUpdateEvent{
+		ConnectionId: newTestConnectionId(39),
+		AdmissionID:  1,
+		Tip: ochainsync.Tip{
+			Point:       ocommon.Point{Slot: 105, Hash: []byte("far")},
+			BlockNumber: 15,
+		},
+		ObservedTip: ochainsync.Tip{
+			Point:       ocommon.Point{Slot: 105, Hash: []byte("far")},
+			BlockNumber: 15,
+		},
+		ObservedPrevHash: []byte("unknown"),
+	}
+	require.True(t, selector.PreparePeerTipAdmission(far))
+	require.Contains(t, selector.pendingFarTipClaims, far.ConnectionId)
+
+	rejections = 0
+	normal := PeerTipUpdateEvent{
+		ConnectionId: newTestConnectionId(40),
+		AdmissionID:  1,
+		Tip: ochainsync.Tip{
+			Point:       ocommon.Point{Slot: 101, Hash: []byte("normal")},
+			BlockNumber: 11,
+		},
+		ObservedTip: ochainsync.Tip{
+			Point:       ocommon.Point{Slot: 101, Hash: []byte("normal")},
+			BlockNumber: 11,
+		},
+		ObservedPrevHash: []byte("normal-parent"),
+	}
+	require.True(t, selector.PreparePeerTipAdmission(normal))
+	assert.Zero(t, rejections,
+		"an unrelated admission must not replay unchanged far-tip evidence")
+
+}
+
+func TestHandlePeerRollbackDoesNotPromoteAdvertisedTipBeforeHeaderAdmission(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	connId := newTestConnectionId(22)
+	localTip := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 100, Hash: []byte("local-tip")},
+		BlockNumber: 100,
+	}
+	advertisedTip := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 10000, Hash: []byte("far-tip")},
+		BlockNumber: 10000,
+	}
+	cs := NewChainSelector(ChainSelectorConfig{
+		SecurityParam:             2160,
+		DisableEventSubscriptions: true,
+	})
+	cs.SetLocalTip(localTip)
+	cs.HandlePeerRollbackEvent(newRollbackEvent(
+		connId,
+		localTip.Point,
+		advertisedTip,
+	))
+
+	peerTip := cs.GetPeerTip(connId)
+	require.NotNil(t, peerTip)
+	assert.Equal(t, localTip.Point, peerTip.SelectionTip().Point)
+	assert.Zero(t, peerTip.SelectionTip().BlockNumber)
+
+	firstHeader := PeerTipUpdateEvent{
+		ConnectionId: connId,
+		AdmissionID:  1,
+		Tip:          advertisedTip,
+		ObservedTip: ochainsync.Tip{
+			Point:       ocommon.Point{Slot: 101, Hash: []byte("first-header")},
+			BlockNumber: 101,
+		},
+	}
+	require.True(t, cs.PreparePeerTipAdmission(firstHeader))
+	assert.Equal(t, localTip.Point, cs.GetPeerTip(connId).SelectionTip().Point,
+		"an unadmitted header must not move the selected frontier")
+	assert.True(t, cs.CommitPeerTipAdmission(firstHeader))
+	assert.Equal(t, firstHeader.ObservedTip, cs.GetPeerTip(connId).SelectionTip(),
+		"admission should advance selection only to the delivered header")
 }
 
 // A rollback can race the ConnectionClosedEvent that removed the peer. The
@@ -1561,6 +1998,41 @@ func TestChainSelectorStalePeerFiltering(t *testing.T) {
 	bestPeer := cs.SelectBestChain()
 	require.NotNil(t, bestPeer)
 	assert.Equal(t, connId2, *bestPeer)
+}
+
+func TestChainSelectorKeepsPeerSelectableDuringKeepAliveTimeout(t *testing.T) {
+	t.Parallel()
+
+	connId := newTestConnectionId(1)
+	connected := true
+	cs := NewChainSelector(ChainSelectorConfig{
+		ConnectionLive: func(ouroboros.ConnectionId) bool {
+			return connected
+		},
+	})
+	clk := &fakeClock{now: time.Unix(1_700_000_000, 0)}
+	installFakeClock(cs, clk)
+
+	localTip := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 100, Hash: []byte("local")},
+		BlockNumber: 100,
+	}
+	peerTip := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 101, Hash: []byte("peer")},
+		BlockNumber: 101,
+	}
+	cs.SetLocalTip(localTip)
+	require.True(t, cs.UpdatePeerTip(connId, peerTip, nil))
+	cs.EvaluateAndSwitch()
+	require.Equal(t, &connId, cs.GetBestPeer())
+
+	// A delayed pong can still arrive before the protocol drops the connection.
+	period := time.Duration(okeepalive.DefaultKeepAlivePeriod) * time.Second
+	clk.Advance(period + okeepalive.ServerTimeout - time.Second)
+	cs.EvaluateAndSwitch()
+
+	require.True(t, connected)
+	require.Equal(t, &connId, cs.GetBestPeer())
 }
 
 func TestChainSelectorStalePeerCleanupEmitsChainSwitchEvent(t *testing.T) {
@@ -5572,6 +6044,78 @@ func TestLoneFarFrontierAcceptsConnectedChain(t *testing.T) {
 	}
 }
 
+func TestFarTipDispositionRejectsJumpAfterPendingClaim(t *testing.T) {
+	t.Parallel()
+
+	c := loneFarChain{localBlock: 1_000, k: 2}
+	cs := NewChainSelector(ChainSelectorConfig{SecurityParam: c.k})
+	cs.SetLocalTip(c.tip(c.localBlock))
+	lagging := newTestConnectionId(1)
+	require.True(t, cs.UpdatePeerTip(
+		lagging,
+		c.tip(c.localBlock-500),
+		nil,
+	))
+	conn := newTestConnectionId(2)
+	first := c.first()
+	pending := c.tip(first)
+	require.Equal(t, PeerTipUpdatePending, cs.ObservePeerTipUpdate(
+		PeerTipUpdateEvent{
+			ConnectionId:     conn,
+			Tip:              c.tip(100_000),
+			ObservedTip:      pending,
+			ObservedPrevHash: c.prevHash(first),
+		},
+	))
+
+	// Move the trusted reference just beyond the local tip. The next unrelated
+	// jump is rejected before far-claim accumulation, so the older pending
+	// entry must not classify this different observation as pending.
+	require.True(t, cs.UpdatePeerTip(
+		lagging,
+		c.tip(c.localBlock+1),
+		nil,
+	))
+	jump := c.tip(first + 1_000)
+	assert.Equal(t, PeerTipUpdateRejected, cs.ObservePeerTipUpdate(
+		PeerTipUpdateEvent{
+			ConnectionId:     conn,
+			Tip:              c.tip(100_000),
+			ObservedTip:      jump,
+			ObservedPrevHash: []byte("unrelated"),
+		},
+	))
+}
+
+func TestFarTipDispositionRejectsCorroboratedImpossibleHeight(t *testing.T) {
+	t.Parallel()
+
+	c := loneFarChain{localBlock: 1_000, k: 2}
+	cs := c.newSelector(t)
+	impossible := ochainsync.Tip{
+		Point: ocommon.Point{
+			Slot: c.tip(c.localBlock).Point.Slot + 1,
+			Hash: []byte("impossible-height"),
+		},
+		BlockNumber: c.localBlock + 100,
+	}
+	for _, conn := range []ouroboros.ConnectionId{
+		newTestConnectionId(2),
+		newTestConnectionId(3),
+	} {
+		require.Equal(t, PeerTipUpdateRejected, cs.ObservePeerTipUpdate(
+			PeerTipUpdateEvent{
+				ConnectionId:     conn,
+				Tip:              c.tip(100_000),
+				ObservedTip:      impossible,
+				ObservedPrevHash: []byte("parent"),
+			},
+		))
+		assert.Nil(t, cs.GetPeerTip(conn))
+		assert.NotContains(t, cs.farTipClaims, conn)
+	}
+}
+
 // A frontier admitted from one peer's connected run is not independent
 // evidence for an unrelated peer. Losing that first peer must not leave the
 // unrelated peer with an ordinary frontier it can advance by K at a time.
@@ -5999,16 +6543,17 @@ func TestLoneFarFrontierThroughEpochBoundaryBlocks(t *testing.T) {
 		require.True(t, claim.lone)
 		other := newTestConnectionId(3)
 		far := c.tip(claim.block + 1)
-		require.False(t, cs.corroborateFarTipClaimLocked(
-			other, far, deliveredLink{prevHash: []byte("x")},
-		))
+		corroborated, _ := cs.corroborateFarTipClaimTrackedLocked(
+			other, far, deliveredLink{prevHash: []byte("x")}, cs.farTipClaims,
+		)
+		require.False(t, corroborated)
 		assert.True(t, cs.farTipClaims[conn].lone)
 		assert.False(t, cs.farTipClaims[conn].corroborated)
 
 		// Re-entering with the lone connection's own next header keeps the mark.
-		cs.corroborateFarTipClaimLocked(conn, far, deliveredLink{
+		cs.corroborateFarTipClaimTrackedLocked(conn, far, deliveredLink{
 			prevHash: claim.hash,
-		})
+		}, cs.farTipClaims)
 		assert.True(t, cs.farTipClaims[conn].lone,
 			"a lone claim that re-enters must stay lone")
 	})
@@ -6407,4 +6952,165 @@ func TestHandlePeerRollbackReportsAdvertisedTipRejection(t *testing.T) {
 		[]PeerTipRejection{PeerTipRejectedAdvertisedTip},
 		reasons,
 	)
+}
+
+// A peer registered from a rollback is exempt from the delivered-frontier
+// filters, but its advertised tip bounds what it can deliver: one advertising
+// a tip more than k blocks behind the local tip can never extend the local
+// chain and must stay unselectable, including as the RemovePeer fallback.
+func TestRollbackRegisteredPeerFarBehindLocalTipIsNotSelectable(t *testing.T) {
+	t.Parallel()
+	const k = 10
+	const localBlock = 1000
+	for _, tc := range []struct {
+		name       string
+		advertised uint64
+		selectable bool
+	}{
+		{"far behind", localBlock - k - 1, false},
+		{"exactly k behind", localBlock - k, true},
+		{"at local tip", localBlock, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			eventBus := event.NewEventBus(nil, nil)
+			t.Cleanup(eventBus.Stop)
+			cs := NewChainSelector(ChainSelectorConfig{
+				EventBus:      eventBus,
+				SecurityParam: k,
+			})
+			_, evtCh := eventBus.Subscribe(ChainSwitchEventType)
+			cs.SetLocalTip(ochainsync.Tip{
+				Point: ocommon.Point{
+					Slot: localBlock,
+					Hash: []byte("local"),
+				},
+				BlockNumber: localBlock,
+			})
+			honest := newTestConnectionId(1)
+			deadFork := newTestConnectionId(2)
+			require.True(t, cs.UpdatePeerTip(honest, ochainsync.Tip{
+				Point: ocommon.Point{
+					Slot: localBlock,
+					Hash: []byte("local"),
+				},
+				BlockNumber: localBlock,
+			}, nil))
+			cs.EvaluateAndSwitch()
+			require.NotNil(t, cs.GetBestPeer())
+			require.Equal(t, honest, *cs.GetBestPeer())
+
+			cs.HandlePeerRollbackEvent(newRollbackEvent(
+				deadFork,
+				ocommon.Point{Slot: 400, Hash: []byte("intersect")},
+				ochainsync.Tip{
+					Point: ocommon.Point{
+						Slot: 5000,
+						Hash: []byte("dead-fork"),
+					},
+					BlockNumber: tc.advertised,
+				},
+			))
+			require.Equal(t, 2, cs.PeerCount())
+
+			cs.RemovePeer(honest)
+
+			best := cs.GetBestPeer()
+			if !tc.selectable {
+				assert.Nil(t, best, "dead-fork peer must not be selected")
+				for {
+					select {
+					case evt := <-evtCh:
+						sw, ok := evt.Data.(ChainSwitchEvent)
+						if ok {
+							assert.NotEqual(
+								t, deadFork, sw.NewConnectionId,
+								"ChainSwitchEvent names dead-fork peer",
+							)
+						}
+						continue
+					default:
+					}
+					break
+				}
+				return
+			}
+			require.NotNil(t, best)
+			assert.Equal(t, deadFork, *best)
+		})
+	}
+}
+
+// The evaluation path applies the same advertised-tip bound: a sole
+// rollback-registered peer advertising a tip more than k blocks behind is
+// never selected, and one already selected is dropped once the local tip
+// passes its advertised tip by more than k.
+func TestRollbackRegisteredPeerBehindLocalTipEvaluation(t *testing.T) {
+	t.Parallel()
+	const k = 10
+	const localBlock = 1000
+	newSelector := func(t *testing.T) (*ChainSelector, <-chan event.Event) {
+		eventBus := event.NewEventBus(nil, nil)
+		t.Cleanup(eventBus.Stop)
+		cs := NewChainSelector(ChainSelectorConfig{
+			EventBus:      eventBus,
+			SecurityParam: k,
+		})
+		_, noneCh := eventBus.Subscribe(ChainSelectedNoneEventType)
+		cs.SetLocalTip(ochainsync.Tip{
+			Point:       ocommon.Point{Slot: localBlock, Hash: []byte("local")},
+			BlockNumber: localBlock,
+		})
+		return cs, noneCh
+	}
+	rollback := func(
+		connId ouroboros.ConnectionId,
+		advertised uint64,
+	) event.Event {
+		return newRollbackEvent(
+			connId,
+			ocommon.Point{Slot: 400, Hash: []byte("intersect")},
+			ochainsync.Tip{
+				Point:       ocommon.Point{Slot: 5000, Hash: []byte("fork")},
+				BlockNumber: advertised,
+			},
+		)
+	}
+
+	t.Run("far behind is never selected", func(t *testing.T) {
+		t.Parallel()
+		cs, _ := newSelector(t)
+		deadFork := newTestConnectionId(1)
+		cs.HandlePeerRollbackEvent(rollback(deadFork, localBlock-k-1))
+		require.Equal(t, 1, cs.PeerCount())
+		assert.Nil(t, cs.GetBestPeer())
+		assert.Nil(t, cs.SelectBestChain())
+		assert.False(t, cs.EvaluateAndSwitch())
+		assert.Nil(t, cs.GetBestPeer())
+	})
+
+	t.Run("dropped when local tip passes advertised", func(t *testing.T) {
+		t.Parallel()
+		cs, noneCh := newSelector(t)
+		peer := newTestConnectionId(1)
+		cs.HandlePeerRollbackEvent(rollback(peer, localBlock-k))
+		require.NotNil(t, cs.GetBestPeer())
+		require.Equal(t, peer, *cs.GetBestPeer())
+
+		cs.SetLocalTip(ochainsync.Tip{
+			Point: ocommon.Point{
+				Slot: localBlock + 1,
+				Hash: []byte("local+1"),
+			},
+			BlockNumber: localBlock + 1,
+		})
+		cs.EvaluateAndSwitch()
+		assert.Nil(t, cs.GetBestPeer())
+		evt := testutil.RequireReceive(
+			t, noneCh, 2*time.Second, "ChainSelectedNoneEvent",
+		)
+		none, ok := evt.Data.(ChainSelectedNoneEvent)
+		require.True(t, ok)
+		assert.Equal(t, peer, none.PreviousConnectionId)
+	})
 }

@@ -754,17 +754,19 @@ func fetchEpoch(
 	// Validate all rejection conditions before any DB writes so an incomplete
 	// or pre-staking epoch response never partially modifies the cache.
 
-	// Epochs 0 and 1 predate a valid "go" stake snapshot and can never have a
-	// comparable active_stake — not a heuristic, but exact Shelley ledger
-	// mechanics (formal-ledger-specifications, Ledger.Conway.Specification.Rewards):
-	// a stake snapshot taken as "mark" at the boundary into epoch N+1 becomes
-	// "set" at the boundary into epoch N+2, then "go" (the one used for reward /
-	// active-stake calculation) at the boundary into epoch N+3. So the go
-	// snapshot used for epoch E's active_stake was captured at the boundary
-	// into epoch E-2, which only exists once E >= 2 (both preview and preprod
-	// start their own epoch numbering at 0, so this is network-independent).
+	// The first epochs of a network predate a valid "go" stake snapshot and
+	// can never have a comparable active_stake — not a heuristic, but exact
+	// Shelley ledger mechanics (formal-ledger-specifications,
+	// Ledger.Conway.Specification.Rewards): a stake snapshot taken as "mark"
+	// at the boundary into epoch N+1 becomes "set" at the boundary into epoch
+	// N+2, then "go" (the one used for reward / active-stake calculation) at
+	// the boundary into epoch N+3. So the go snapshot used for epoch E's
+	// active_stake was captured at the boundary into epoch E-2, which only
+	// exists two epochs after the network's first Shelley-based epoch: E >= 2
+	// on preview, which starts in Alonzo at epoch 0, and E >= 6 on preprod,
+	// which enters Shelley at epoch 4 (see preStakingThroughEpochByNetwork).
 	// Koios returns active_stake=null here permanently — commit a PreStaking
-	// marker so GetUncachedEpochs stops proposing these two epochs on every
+	// marker so GetUncachedEpochs stops proposing these epochs on every
 	// future fetch run.
 	//
 	// A null active_stake on any OTHER epoch is not this condition — it means
@@ -773,7 +775,7 @@ func fetchEpoch(
 	// Treating that as permanent pre-staking would silently and permanently
 	// stop comparing a real epoch, so it is rejected as a retryable error
 	// instead of being cached.
-	if info.ActiveStake == nil && epoch <= preStakingThroughEpoch {
+	if info.ActiveStake == nil && epoch <= preStakingThroughEpoch(network) {
 		if err := cache.CommitEpochData(KoiosEpochInfo{
 			Network:        network,
 			Epoch:          epoch,
@@ -804,7 +806,7 @@ func fetchEpoch(
 		return 0, fmt.Errorf(
 			"epoch %d: koios returned null active_stake unexpectedly (only epochs <= %d predate a valid stake snapshot)",
 			epoch,
-			preStakingThroughEpoch,
+			preStakingThroughEpoch(network),
 		)
 	}
 	activeStake := *info.ActiveStake

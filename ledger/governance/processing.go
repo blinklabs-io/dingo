@@ -16,10 +16,12 @@ package governance
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
@@ -305,6 +307,13 @@ func processDRepActivityCertificates(
 // The govActionLifetime parameter determines how many epochs a proposal remains
 // active before expiring. txIndex is the transaction's position in its block;
 // Conway RATIFY orders equal-priority actions by it within a slot.
+//
+// pp is the protocol parameters in force for the transaction. A ParameterChange
+// that the era's proposal rule refuses (zero-valued fields, out-of-domain
+// widths) is rejected here, before anything is stored, so replay and backfill
+// reach the same decision as mempool admission and live block validation.
+// validated is shared only by levels of one enclosing transaction; the era
+// rule checks all its levels in one call.
 func ProcessProposals(
 	ctx context.Context,
 	tx lcommon.Transaction,
@@ -312,10 +321,17 @@ func ProcessProposals(
 	txIndex uint32,
 	currentEpoch uint64,
 	govActionLifetime uint64,
+	pp lcommon.ProtocolParameters,
 	db *database.Database,
 	txn *database.Txn,
+	validated *bool,
 ) error {
 	if err := validateCostModelLanguageIDs(tx); err != nil {
+		return err
+	}
+	if err := validateProposalDomains(
+		tx, point, currentEpoch, pp, validated,
+	); err != nil {
 		return err
 	}
 	if err := ResetDormantDRepExpiryBeforeCertificates(
@@ -336,6 +352,30 @@ func ProcessProposals(
 	)
 }
 
+// validateProposalDomains applies the era's proposal rule once per enclosing
+// transaction, recording that it ran in validated.
+func validateProposalDomains(
+	tx lcommon.Transaction,
+	point ocommon.Point,
+	currentEpoch uint64,
+	pp lcommon.ProtocolParameters,
+	validated *bool,
+) error {
+	if validated != nil && *validated {
+		return nil
+	}
+	didValidate, err := validateParameterChanges(
+		tx, point.Slot, currentEpoch, pp,
+	)
+	if err != nil {
+		return fmt.Errorf("proposal well-formedness: %w", err)
+	}
+	if validated != nil && didValidate {
+		*validated = true
+	}
+	return nil
+}
+
 // ProcessHistoricalProposals is ProcessProposals for replay of blocks at or
 // below a Mithril snapshot anchor. The snapshot already holds every proposal
 // still live at the anchor, so a replayed proposal with no row was enacted,
@@ -343,6 +383,10 @@ func ProcessProposals(
 // snapshot's balances. Such a proposal is stored for history as expired and
 // dropped at its own slot, so no later boundary expires, refunds or ratifies
 // it again.
+//
+// pp and validated have the meaning they have for ProcessProposals: a
+// ParameterChange the era's proposal rule refuses is rejected before anything
+// is stored.
 func ProcessHistoricalProposals(
 	ctx context.Context,
 	tx lcommon.Transaction,
@@ -350,9 +394,19 @@ func ProcessHistoricalProposals(
 	txIndex uint32,
 	currentEpoch uint64,
 	govActionLifetime uint64,
+	pp lcommon.ProtocolParameters,
 	db *database.Database,
 	txn *database.Txn,
+	validated *bool,
 ) error {
+	if err := validateCostModelLanguageIDs(tx); err != nil {
+		return err
+	}
+	if err := validateProposalDomains(
+		tx, point, currentEpoch, pp, validated,
+	); err != nil {
+		return err
+	}
 	return persistGovernanceProposals(
 		ctx,
 		tx,
@@ -364,6 +418,60 @@ func ProcessHistoricalProposals(
 		db,
 		txn,
 	)
+}
+
+// enclosingTransaction is implemented by a transaction level (a Dijkstra
+// sub-transaction body or the enclosing body) that carries the transaction it
+// belongs to.
+type enclosingTransaction interface {
+	EnclosingTransaction() lcommon.Transaction
+}
+
+// epochOnlyLedgerState answers the one ledger query the proposal rule makes
+// outside the transaction itself: which epoch a slot falls in.
+type epochOnlyLedgerState struct {
+	lcommon.LedgerState
+	epoch uint64
+}
+
+func (s epochOnlyLedgerState) EpochForSlot(uint64) (uint64, error) {
+	return s.epoch, nil
+}
+
+// validateParameterChanges runs the era's transaction-level proposal rule over
+// the whole enclosing transaction when the level being processed carries a
+// ParameterChange. Dijkstra validates every sub-transaction body together, so
+// a single level cannot be judged on its own.
+func validateParameterChanges(
+	tx lcommon.Transaction,
+	slot uint64,
+	currentEpoch uint64,
+	pp lcommon.ProtocolParameters,
+) (bool, error) {
+	hasParameterChange := false
+	for _, proposal := range tx.ProposalProcedures() {
+		switch proposal.GovAction().(type) {
+		case *conway.ConwayParameterChangeGovAction,
+			*gdijkstra.DijkstraParameterChangeGovAction:
+			hasParameterChange = true
+		}
+	}
+	if !hasParameterChange || !tx.IsValid() {
+		return false, nil
+	}
+	if pp == nil {
+		return false, errors.New("protocol parameters unavailable")
+	}
+	if level, ok := tx.(enclosingTransaction); ok {
+		tx = level.EnclosingTransaction()
+	}
+	err := gdijkstra.UtxoValidateProposalProcedures(
+		tx,
+		slot,
+		epochOnlyLedgerState{epoch: currentEpoch},
+		pp,
+	)
+	return err == nil, err
 }
 
 // TransactionRequiresConwayParameters reports whether applying tx's governance
@@ -410,6 +518,8 @@ func ProcessTransactionEffects(
 	protocolMajor uint64,
 	db *database.Database,
 	txn *database.Txn,
+	pp lcommon.ProtocolParameters,
+	validated *bool,
 ) error {
 	if err := validateCostModelLanguageIDs(tx); err != nil {
 		return err
@@ -436,8 +546,8 @@ func ProcessTransactionEffects(
 		}
 	}
 	if len(tx.ProposalProcedures()) > 0 {
-		if err := persistGovernanceProposals(
-			ctx, tx, point, txIndex, currentEpoch, govActionLifetime, false, db, txn,
+		if err := ProcessProposals(
+			ctx, tx, point, txIndex, currentEpoch, govActionLifetime, pp, db, txn, validated,
 		); err != nil {
 			return fmt.Errorf("process governance proposals: %w", err)
 		}
@@ -465,10 +575,12 @@ func ProcessHistoricalTransactionEffects(
 	govActionLifetime uint64,
 	db *database.Database,
 	txn *database.Txn,
+	pp lcommon.ProtocolParameters,
+	validated *bool,
 ) error {
 	if len(tx.ProposalProcedures()) > 0 {
 		if err := ProcessHistoricalProposals(
-			ctx, tx, point, txIndex, currentEpoch, govActionLifetime, db, txn,
+			ctx, tx, point, txIndex, currentEpoch, govActionLifetime, pp, db, txn, validated,
 		); err != nil {
 			return fmt.Errorf("process governance proposals: %w", err)
 		}
@@ -873,6 +985,7 @@ func processVotes(
 			}
 		}
 
+		procedureIndexes := voterProcedureIndexes(actionVotes)
 		for actionId, procedure := range actionVotes {
 			if actionId == nil {
 				continue
@@ -946,6 +1059,8 @@ func processVotes(
 				Vote:               procedure.Vote,
 				AddedSlot:          point.Slot,
 				VoteUpdatedSlot:    &updatedSlot,
+				CastTxHash:         txHash,
+				CastCertIndex:      procedureIndexes[*actionId],
 			}
 
 			if procedure.Anchor != nil {
@@ -964,6 +1079,33 @@ func processVotes(
 	}
 
 	return nil
+}
+
+// voterProcedureIndexes numbers one voter's procedures in a transaction from
+// 0 in the ledger map's order of governance action id: transaction id, then
+// action index. This is db-sync's voting_procedure.index, which Blockfrost
+// serves as a vote's cert_index, so other voters in the transaction do not
+// shift it.
+func voterProcedureIndexes(
+	votes map[*lcommon.GovActionId]lcommon.VotingProcedure,
+) map[lcommon.GovActionId]uint32 {
+	actions := make([]lcommon.GovActionId, 0, len(votes))
+	for id := range votes {
+		if id != nil {
+			actions = append(actions, *id)
+		}
+	}
+	slices.SortFunc(actions, func(x, y lcommon.GovActionId) int {
+		if c := bytes.Compare(x.TransactionId[:], y.TransactionId[:]); c != 0 {
+			return c
+		}
+		return cmp.Compare(x.GovActionIdx, y.GovActionIdx)
+	})
+	ret := make(map[lcommon.GovActionId]uint32, len(actions))
+	for index, id := range actions {
+		ret[id] = uint32(index) //nolint:gosec // bounded by the map size
+	}
+	return ret
 }
 
 type proposalRepairCache struct {

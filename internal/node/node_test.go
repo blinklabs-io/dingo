@@ -25,6 +25,7 @@ import (
 	"maps"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"reflect"
 	"regexp"
@@ -168,7 +169,7 @@ func startHealthListener(
 	listener, port := reservedTCPListener(t, "127.0.0.1")
 	cfg.HealthPort = port
 
-	srv := NewHealthServer(cfg, tipGap)
+	srv := NewHealthServer(cfg, tipGap, nil)
 	if srv == nil {
 		t.Fatal("expected an enabled health listener")
 	}
@@ -425,7 +426,7 @@ func TestNewHealthServerDisabledOnZeroPort(t *testing.T) {
 	t.Parallel()
 
 	cfg := &config.Config{BindAddr: "127.0.0.1", HealthPort: 0}
-	if srv := NewHealthServer(cfg, nil); srv != nil {
+	if srv := NewHealthServer(cfg, nil, nil); srv != nil {
 		t.Fatalf("healthPort 0 must disable the listener, got %+v", srv)
 	}
 }
@@ -438,7 +439,7 @@ func TestHealthServerBindsPublicBindAddr(t *testing.T) {
 	t.Parallel()
 
 	cfg := &config.Config{BindAddr: "0.0.0.0", HealthPort: 12799}
-	srv := NewHealthServer(cfg, nil)
+	srv := NewHealthServer(cfg, nil, nil)
 	if srv == nil {
 		t.Fatal("expected an enabled health listener")
 	}
@@ -469,7 +470,7 @@ func TestHealthServerBracketsIPv6BindAddr(t *testing.T) {
 				BindAddr:   test.bindAddr,
 				HealthPort: 12799,
 			}
-			srv := NewHealthServer(cfg, nil)
+			srv := NewHealthServer(cfg, nil, nil)
 			if srv == nil {
 				t.Fatal("expected an enabled health listener")
 			}
@@ -506,7 +507,11 @@ func TestHealthListenerBindsIPv6Loopback(t *testing.T) {
 	}
 
 	cfg := &config.Config{HealthPort: uint(port), BindAddr: "::1"}
-	srv := NewHealthServer(cfg, func() (uint64, bool) { return 4, true })
+	srv := NewHealthServer(
+		cfg,
+		func() (uint64, bool) { return 4, true },
+		nil,
+	)
 	if srv == nil {
 		t.Fatal("expected an enabled health listener")
 	}
@@ -678,6 +683,48 @@ func TestMetricsServerDisabledByZeroPort(t *testing.T) {
 	})
 	if srv != nil {
 		t.Fatalf("metricsPort 0 must start no listener, got %q", srv.Addr)
+	}
+}
+
+func TestMetricsServerAuthenticatesRemoteListener(t *testing.T) {
+	t.Parallel()
+
+	const token = "metrics-secret"
+	srv := newMetricsServer(&config.Config{
+		MetricsBindAddr:  "192.0.2.10",
+		MetricsAuthToken: token,
+		MetricsPort:      12798,
+	})
+	if srv.Addr != "192.0.2.10:12798" {
+		t.Fatalf("metrics address = %q", srv.Addr)
+	}
+
+	for _, tc := range []struct {
+		name   string
+		header string
+		want   int
+	}{
+		{name: "missing token", want: http.StatusUnauthorized},
+		{name: "wrong token", header: "Bearer wrong", want: http.StatusUnauthorized},
+		{name: "authenticated", header: "Bearer " + token, want: http.StatusOK},
+		{name: "lowercase scheme", header: "bearer " + token, want: http.StatusOK},
+		{name: "multiple spaces", header: "Bearer   " + token, want: http.StatusOK},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+			if tc.header != "" {
+				req.Header.Set("Authorization", tc.header)
+			}
+			resp := httptest.NewRecorder()
+			srv.Handler.ServeHTTP(resp, req)
+			if resp.Code != tc.want {
+				t.Fatalf("status = %d, want %d", resp.Code, tc.want)
+			}
+			if strings.Contains(resp.Body.String(), token) {
+				t.Fatal("response disclosed the metrics token")
+			}
+		})
 	}
 }
 

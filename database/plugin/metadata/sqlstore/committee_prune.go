@@ -18,6 +18,8 @@ import (
 	"context"
 	"fmt"
 	"time"
+
+	"github.com/blinklabs-io/dingo/database/types"
 )
 
 // auth_committee_hot records one row per AuthCommitteeHot certificate and
@@ -152,10 +154,7 @@ WHERE cold_credential_tag = ?
 ORDER BY added_slot DESC, certificate_id DESC
 LIMIT ? OFFSET 1`
 
-func committeeHotAuthorizationDeleteIDsQuery(count int) string {
-	return "DELETE FROM auth_committee_hot WHERE id IN (" +
-		bindPlaceholders(count) + ")"
-}
+const committeeHotAuthorizationDeleteIDQuery = "DELETE FROM auth_committee_hot WHERE id = ?"
 
 type committeeAuthIdentity struct {
 	tag        uint8
@@ -259,6 +258,12 @@ func (s *Store) pruneCommitteeHotAuthorizations(
 	coldCredential []byte,
 	tipSlot uint64,
 ) (int64, error) {
+	// API storage mode keeps every authorization: the Blockfrost committee
+	// vote endpoints map a cold credential to all the hot credentials it has
+	// authorized, superseded ones included.
+	if s.storageMode == types.StorageModeAPI {
+		return 0, nil
+	}
 	s.committeeAuthImmutableSlotMu.RLock()
 	defer s.committeeAuthImmutableSlotMu.RUnlock()
 	horizon, ok := s.committeeAuthHorizonLocked(tipSlot)
@@ -307,24 +312,42 @@ func (s *Store) pruneCommitteeHotAuthorizations(
 	if len(ids) == 0 {
 		return 0, nil
 	}
-	// Binding the bounded ID set turns the indexed candidates into one DELETE
-	// statement without returning to the stale-statistics-sensitive subquery.
-	deleteArgs := make([]any, len(ids))
-	for i, id := range ids {
-		deleteArgs[i] = id
+	if s.dialect.Name() != "sqlite" {
+		args := make([]any, len(ids))
+		for i, id := range ids {
+			args[i] = id
+		}
+		result, err := s.execCached(ctx, db,
+			`DELETE FROM auth_committee_hot WHERE id IN (`+bindPlaceholders(len(ids))+`)`,
+			args...,
+		)
+		if err != nil {
+			return 0, fmt.Errorf("prune superseded committee hot authorizations: %w", err)
+		}
+		pruned, err := result.RowsAffected()
+		if err != nil {
+			return 0, fmt.Errorf("prune superseded committee hot authorizations: row count: %w", err)
+		}
+		return pruned, nil
 	}
-	result, err := s.execCached(
-		ctx,
-		db,
-		committeeHotAuthorizationDeleteIDsQuery(len(ids)),
-		deleteArgs...,
-	)
-	if err != nil {
-		return 0, fmt.Errorf("prune superseded committee hot authorizations: %w", err)
-	}
-	pruned, err := result.RowsAffected()
-	if err != nil {
-		return 0, fmt.Errorf("prune superseded committee hot authorizations: row count: %w", err)
+	var pruned int64
+	for _, id := range ids {
+		result, err := s.execCached(
+			ctx, db, committeeHotAuthorizationDeleteIDQuery, id,
+		)
+		if err != nil {
+			return 0, fmt.Errorf(
+				"prune superseded committee hot authorizations (id %d): %w", id, err,
+			)
+		}
+		rowsAffected, err := result.RowsAffected()
+		if err != nil {
+			return 0, fmt.Errorf(
+				"prune superseded committee hot authorizations: row count: %w",
+				err,
+			)
+		}
+		pruned += rowsAffected
 	}
 	return pruned, nil
 }
@@ -337,6 +360,9 @@ func (s *Store) pruneCommitteeHotAuthorizations(
 func (s *Store) pruneCommitteeHotAuthorizationsMaintenance(
 	ctx context.Context,
 ) error {
+	if s.storageMode == types.StorageModeAPI {
+		return nil
+	}
 	tipTxn := s.ReadTransaction(ctx)
 	tip, err := s.GetTip(tipTxn) //nolint:contextcheck // tipTxn carries ctx
 	_ = tipTxn.Rollback()

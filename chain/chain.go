@@ -52,13 +52,15 @@ type Chain struct {
 	eventBus      *event.EventBus
 	manager       *ChainManager
 	waitingChan   chan struct{}
+	headerChange  chan struct{}
 	headers       []queuedHeader
 	blocks        []ocommon.Point
 	iterators     []*ChainIterator
 	currentTip    ochainsync.Tip
 	tipBlockIndex uint64
 	// mutationGeneration counts mutations of the in-memory block state:
-	// currentTip, tipBlockIndex, and the ephemeral block buffer.
+	// currentTip, tipBlockIndex, the ephemeral block buffer, and its common
+	// block anchor.
 	// headerMutationGeneration independently counts queued-header mutations.
 	// Keeping the counters separate lets atOriginAfterMutation distinguish a
 	// fresh chain that has only queued headers while still preventing either
@@ -151,11 +153,58 @@ type Chain struct {
 }
 
 type queuedHeader struct {
-	header         ledger.BlockHeader
-	point          ocommon.Point
-	prevHash       []byte
-	blockNumber    uint64
-	cryptoVerified bool
+	header                       ledger.BlockHeader
+	point                        ocommon.Point
+	prevHash                     []byte
+	blockNumber                  uint64
+	cryptoVerified               bool
+	cryptoVerificationGeneration uint64
+}
+
+// WaitForHeaderCountBelow blocks until fewer than limit headers remain queued
+// or ctx is canceled. Header consumers signal the waiter directly, avoiding a
+// polling interval between blockfetch progress and ChainSync resuming.
+func (c *Chain) WaitForHeaderCountBelow(
+	ctx context.Context,
+	limit int,
+) error {
+	return c.WaitForHeaderCountBelowOrSignal(ctx, limit, nil)
+}
+
+// WaitForHeaderCountBelowOrSignal also resumes when an external capacity
+// constraint changes, allowing callers to re-evaluate their admission predicate.
+func (c *Chain) WaitForHeaderCountBelowOrSignal(ctx context.Context, limit int, signal <-chan struct{}) error {
+	if c == nil {
+		return errors.New("chain is nil")
+	}
+	for {
+		c.mutex.Lock()
+		if len(c.headers) < limit {
+			c.mutex.Unlock()
+			return nil
+		}
+		if c.headerChange == nil {
+			c.headerChange = make(chan struct{})
+		}
+		changed := c.headerChange
+		c.mutex.Unlock()
+
+		select {
+		case <-signal:
+			return nil
+		case <-changed:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+
+func (c *Chain) setHeadersLocked(headers []queuedHeader) {
+	c.headers = headers
+	if c.headerChange != nil {
+		close(c.headerChange)
+		c.headerChange = nil
+	}
 }
 
 func (c *Chain) Tip() ochainsync.Tip {
@@ -459,20 +508,29 @@ func (c *Chain) AddBlockHeader(
 	ctx context.Context,
 	header ledger.BlockHeader,
 ) error {
-	return c.addBlockHeader(ctx, header, false)
+	return c.addBlockHeader(ctx, header, false, 0)
 }
 
 func (c *Chain) AddVerifiedBlockHeader(
 	ctx context.Context,
 	header ledger.BlockHeader,
 ) error {
-	return c.addBlockHeader(ctx, header, true)
+	return c.addBlockHeader(ctx, header, true, 0)
+}
+
+func (c *Chain) AddBlockHeaderWithCryptoVerificationGeneration(
+	ctx context.Context,
+	header ledger.BlockHeader,
+	generation uint64,
+) error {
+	return c.addBlockHeader(ctx, header, generation != 0, generation)
 }
 
 func (c *Chain) addBlockHeader(
 	ctx context.Context,
 	header ledger.BlockHeader,
 	cryptoVerified bool,
+	cryptoVerificationGeneration uint64,
 ) error {
 	if c == nil {
 		return errors.New("chain is nil")
@@ -485,9 +543,10 @@ func (c *Chain) addBlockHeader(
 			Slot: header.SlotNumber(),
 			Hash: headerHash.Bytes(),
 		},
-		prevHash:       headerPrevHash.Bytes(),
-		blockNumber:    header.BlockNumber(),
-		cryptoVerified: cryptoVerified,
+		prevHash:                     headerPrevHash.Bytes(),
+		blockNumber:                  header.BlockNumber(),
+		cryptoVerified:               cryptoVerified,
+		cryptoVerificationGeneration: cryptoVerificationGeneration,
 	}
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
@@ -1115,10 +1174,10 @@ func (c *Chain) addBlockLocked(
 	// Remove matching header entry, if any
 	var discardedHeaders []lcommon.Blake2b256
 	if matchPendingHeader && len(c.headers) > 0 {
-		c.headers = slices.Delete(c.headers, 0, 1)
+		c.setHeadersLocked(slices.Delete(c.headers, 0, 1))
 	} else if !matchPendingHeader {
 		discardedHeaders = c.queuedHeaderHashes()
-		c.headers = c.headers[:0]
+		c.setHeadersLocked(c.headers[:0])
 	}
 	// Update tip
 	c.currentTip = ochainsync.Tip{
@@ -1217,19 +1276,14 @@ func (c *Chain) AddBlocks(
 		err := func() error {
 			c.batchCommitMutex.RLock()
 			defer c.batchCommitMutex.RUnlock()
-			txn := c.manager.db.BlobTxn(true)
+			txn, txnErr := c.manager.db.BlockBatchTxnContext(ctx)
+			if txnErr != nil {
+				return txnErr
+			}
 			var (
-				savedTip                ochainsync.Tip
-				savedTipBlockIndex      uint64
-				savedGeneration         uint64
-				savedHeaderGeneration   uint64
-				savedHeaders            []queuedHeader
-				savedBlocks             []ocommon.Point
-				batchApplied            bool
-				appliedTip              ochainsync.Tip
-				appliedTipBlockIndex    uint64
-				appliedGeneration       uint64
-				appliedHeaderGeneration uint64
+				saved        chainBatchSnapshot
+				applied      chainBatchPosition
+				batchApplied bool
 			)
 			err := txn.Do(func(txn *database.Txn) error {
 				c.mutex.Lock()
@@ -1239,14 +1293,7 @@ func (c *Chain) AddBlocks(
 				if err := c.reconcile(ctx); err != nil {
 					return fmt.Errorf("reconcile chain: %w", err)
 				}
-				savedTip = c.currentTip
-				savedTipBlockIndex = c.tipBlockIndex
-				savedGeneration = c.mutationGeneration
-				savedHeaderGeneration = c.headerMutationGeneration
-				savedHeaders = slices.Clone(c.headers)
-				if !c.persistent {
-					savedBlocks = slices.Clone(c.blocks)
-				}
+				saved = c.batchSnapshotLocked()
 				for _, tmpBlock := range blocks[batchOffset : batchOffset+batchSize] {
 					var evt event.Event
 					err := ctx.Err()
@@ -1260,14 +1307,8 @@ func (c *Chain) AddBlocks(
 						)
 					}
 					if err != nil {
-						c.currentTip = savedTip
-						c.tipBlockIndex = savedTipBlockIndex
-						c.mutationGeneration = savedGeneration
-						c.headerMutationGeneration = savedHeaderGeneration
-						c.headers = savedHeaders
-						if !c.persistent {
-							c.blocks = savedBlocks
-						}
+						c.restoreBatchBlocksLocked(saved)
+						c.restoreBatchHeadersLocked(saved)
 						return err
 					}
 					if evt.Type != "" {
@@ -1275,48 +1316,12 @@ func (c *Chain) AddBlocks(
 					}
 				}
 				batchApplied = true
-				appliedTip = c.currentTip
-				appliedTipBlockIndex = c.tipBlockIndex
-				appliedGeneration = c.mutationGeneration
-				appliedHeaderGeneration = c.headerMutationGeneration
+				applied = c.batchPositionLocked()
 				return ctx.Err()
 			})
 			if err != nil && batchApplied {
-				c.mutex.Lock()
-				c.manager.mutex.Lock()
-				if c.batchRestoreIsSafeLocked(
-					appliedTip,
-					appliedTipBlockIndex,
-					appliedGeneration,
-				) {
-					c.currentTip = savedTip
-					c.tipBlockIndex = savedTipBlockIndex
-					c.mutationGeneration = savedGeneration
-					if c.headerMutationGeneration == appliedHeaderGeneration {
-						c.headerMutationGeneration = savedHeaderGeneration
-						c.headers = savedHeaders
-					}
-					if !c.persistent {
-						c.blocks = savedBlocks
-					}
-				} else {
-					slog.Default().Error(
-						"skipped in-memory restore after block batch commit failure: chain moved under the batch",
-						"component", "chain",
-						"chain_id", c.id,
-						"applied_tip_block_index", appliedTipBlockIndex,
-						"tip_block_index", c.tipBlockIndex,
-						"applied_generation", appliedGeneration,
-						"mutation_generation", c.mutationGeneration,
-						"applied_tip_slot", appliedTip.Point.Slot,
-						"applied_tip_hash", hex.EncodeToString(appliedTip.Point.Hash),
-						"tip_slot", c.currentTip.Point.Slot,
-						"tip_hash", hex.EncodeToString(c.currentTip.Point.Hash),
-						"error", err,
-					)
-				}
-				c.manager.mutex.Unlock()
-				c.mutex.Unlock()
+				c.restoreFailedBatch(saved, applied, err,
+					"skipped in-memory restore after block batch commit failure: chain moved under the batch")
 			}
 			return err
 		}()
@@ -1421,7 +1426,7 @@ func (c *Chain) addRawBlockLocked(
 		c.blocks = append(c.blocks, tmpPoint)
 	}
 	if len(c.headers) > 0 {
-		c.headers = slices.Delete(c.headers, 0, 1)
+		c.setHeadersLocked(slices.Delete(c.headers, 0, 1))
 	}
 	c.currentTip = ochainsync.Tip{
 		Point:       tmpPoint,
@@ -1548,7 +1553,10 @@ func (c *Chain) addRawBlocks(
 			}
 			c.batchCommitMutex.RLock()
 			defer c.batchCommitMutex.RUnlock()
-			txn := c.manager.db.BlobTxn(true)
+			txn, txnErr := c.manager.db.BlockBatchTxnContext(ctx)
+			if txnErr != nil {
+				return txnErr
+			}
 			// addRawBlockLocked mutates c.currentTip, c.tipBlockIndex,
 			// c.headers, and c.blocks before the txn commits. If a
 			// later block in the batch fails the closure restores the
@@ -1558,17 +1566,9 @@ func (c *Chain) addRawBlocks(
 			// leaving the in-memory chain advanced. Capture the
 			// snapshot here so we can also restore on Commit failure.
 			var (
-				savedTip                ochainsync.Tip
-				savedTipBlockIndex      uint64
-				savedGeneration         uint64
-				savedHeaderGeneration   uint64
-				savedHeaders            []queuedHeader
-				savedBlocks             []ocommon.Point
-				batchApplied            bool
-				appliedTip              ochainsync.Tip
-				appliedTipBlockIndex    uint64
-				appliedGeneration       uint64
-				appliedHeaderGeneration uint64
+				saved        chainBatchSnapshot
+				applied      chainBatchPosition
+				batchApplied bool
 			)
 			err := txn.Do(func(txn *database.Txn) error {
 				batch := blocks[batchOffset : batchOffset+batchSize]
@@ -1579,14 +1579,7 @@ func (c *Chain) addRawBlocks(
 				if err := c.reconcile(ctx); err != nil {
 					return fmt.Errorf("reconcile: %w", err)
 				}
-				savedTip = c.currentTip
-				savedTipBlockIndex = c.tipBlockIndex
-				savedGeneration = c.mutationGeneration
-				savedHeaderGeneration = c.headerMutationGeneration
-				savedHeaders = slices.Clone(c.headers)
-				if !c.persistent {
-					savedBlocks = slices.Clone(c.blocks)
-				}
+				saved = c.batchSnapshotLocked()
 				for _, rb := range batch {
 					var evt event.Event
 					err := ctx.Err()
@@ -1598,14 +1591,8 @@ func (c *Chain) addRawBlocks(
 						)
 					}
 					if err != nil {
-						c.currentTip = savedTip
-						c.tipBlockIndex = savedTipBlockIndex
-						c.mutationGeneration = savedGeneration
-						c.headerMutationGeneration = savedHeaderGeneration
-						c.headers = savedHeaders
-						if !c.persistent {
-							c.blocks = savedBlocks
-						}
+						c.restoreBatchBlocksLocked(saved)
+						c.restoreBatchHeadersLocked(saved)
 						return err
 					}
 					if evt.Type != "" {
@@ -1617,68 +1604,13 @@ func (c *Chain) addRawBlocks(
 				// Record what this batch leaves behind so the Commit-failure
 				// path below can tell its own state from someone else's.
 				batchApplied = true
-				appliedTip = c.currentTip
-				appliedTipBlockIndex = c.tipBlockIndex
-				appliedGeneration = c.mutationGeneration
-				appliedHeaderGeneration = c.headerMutationGeneration
+				applied = c.batchPositionLocked()
 				return ctx.Err()
 			})
 			if err != nil {
-				// Cover the Commit-failure path: closure returned nil
-				// but txn.Do's later Commit failed, so memory still
-				// reflects the post-batch tip while the DB rolled
-				// back. Re-acquire the locks and restore -- but only
-				// while the chain still shows exactly what this batch
-				// left behind.
-				//
-				// The batch-commit barrier remains held while this recovery runs, so
-				// another chain mutation cannot move the chain between the failed
-				// commit and the snapshot check. A closure-internal error already
-				// restored under the chain locks, so there is nothing left to do for
-				// it here either.
 				if batchApplied {
-					c.mutex.Lock()
-					c.manager.mutex.Lock()
-					if c.batchRestoreIsSafeLocked(
-						appliedTip,
-						appliedTipBlockIndex,
-						appliedGeneration,
-					) {
-						c.currentTip = savedTip
-						c.tipBlockIndex = savedTipBlockIndex
-						c.mutationGeneration = savedGeneration
-						if c.headerMutationGeneration == appliedHeaderGeneration {
-							c.headerMutationGeneration = savedHeaderGeneration
-							c.headers = savedHeaders
-						}
-						if !c.persistent {
-							c.blocks = savedBlocks
-						}
-					} else {
-						// Skipping the restore is the correct choice -- writing
-						// the snapshot over whatever moved the chain is the
-						// divergence this guard exists to prevent -- but it
-						// leaves the in-memory chain holding a batch the commit
-						// discarded. Record it, so the missing block or inflated
-						// fork depth it later surfaces as is attributable to this
-						// commit failure instead of appearing without a cause.
-						slog.Default().Error(
-							"skipped in-memory restore after batch commit failure: chain moved under the batch",
-							"component", "chain",
-							"chain_id", c.id,
-							"applied_tip_block_index", appliedTipBlockIndex,
-							"tip_block_index", c.tipBlockIndex,
-							"applied_generation", appliedGeneration,
-							"mutation_generation", c.mutationGeneration,
-							"applied_tip_slot", appliedTip.Point.Slot,
-							"applied_tip_hash", hex.EncodeToString(appliedTip.Point.Hash),
-							"tip_slot", c.currentTip.Point.Slot,
-							"tip_hash", hex.EncodeToString(c.currentTip.Point.Hash),
-							"error", err,
-						)
-					}
-					c.manager.mutex.Unlock()
-					c.mutex.Unlock()
+					c.restoreFailedBatch(saved, applied, err,
+						"skipped in-memory restore after batch commit failure: chain moved under the batch")
 				}
 				return fmt.Errorf("add raw block batch: %w", err)
 			}
@@ -2146,7 +2078,7 @@ func (c *Chain) rollbackWithMutationBarrierHeld(
 			// to void it.
 			discarded := c.queuedHeaderHashes()[idx+1:]
 			dropped := len(discarded)
-			c.headers = slices.Delete(c.headers, idx+1, len(c.headers))
+			c.setHeadersLocked(slices.Delete(c.headers, idx+1, len(c.headers)))
 			if dropped > 0 {
 				c.headerMutationGeneration++
 				c.queueDeferredEventLocked(headerInvalidationEvent(
@@ -2192,7 +2124,7 @@ func (c *Chain) rollbackWithMutationBarrierHeld(
 			// after it and leave the matched header itself queued.
 			discarded := c.queuedHeaderHashes()[idx+1:]
 			dropped := len(discarded)
-			c.headers = slices.Delete(c.headers, idx+1, len(c.headers))
+			c.setHeadersLocked(slices.Delete(c.headers, idx+1, len(c.headers)))
 			// Those headers never become blocks, so any announcement
 			// they carried is void. This path returns no chain.update
 			// event at all -- no block was removed -- so without this
@@ -2308,7 +2240,7 @@ func (c *Chain) rollbackWithMutationBarrierHeld(
 	}
 	// Clear out any headers
 	discardedHeaders := c.queuedHeaderHashes()
-	c.headers = slices.Delete(c.headers, 0, len(c.headers))
+	c.setHeadersLocked(slices.Delete(c.headers, 0, len(c.headers)))
 	// Update tip
 	c.currentTip = ochainsync.Tip{
 		Point:       point,
@@ -2447,7 +2379,7 @@ func (c *Chain) ClearHeaders() {
 	defer c.mutex.Unlock()
 	discarded := c.queuedHeaderHashes()
 	hadHeaders := len(discarded) > 0
-	c.headers = c.headers[:0]
+	c.setHeadersLocked(c.headers[:0])
 	// Discarded headers never become blocks, so any announcement they
 	// carried is void, and no rollback is published for them because no
 	// block was ever added. Everything at or below the block tip survives;
@@ -2728,6 +2660,24 @@ func (c *Chain) QueuedVerifiedHeaderMatchesPoint(point ocommon.Point) bool {
 		}
 	}
 	return false
+}
+
+func (c *Chain) QueuedHeaderCryptoVerificationGeneration(
+	point ocommon.Point,
+) uint64 {
+	if c == nil {
+		return 0
+	}
+	c.mutex.RLock()
+	defer c.mutex.RUnlock()
+	for i := range c.headers {
+		header := &c.headers[i]
+		if header.point.Slot == point.Slot &&
+			bytes.Equal(header.point.Hash, point.Hash) {
+			return header.cryptoVerificationGeneration
+		}
+	}
+	return 0
 }
 
 func (c *Chain) firstHeaderMatchesPoint(
@@ -3305,6 +3255,7 @@ func (c *Chain) reconcile(ctx context.Context) error {
 			// Adjust our chain-local blocks and offset point from primary chain
 			c.blocks = slices.Delete(c.blocks, 0, i+1)
 			c.lastCommonBlockIndex = tmpBlock.ID
+			c.mutationGeneration++
 			return nil
 		}
 		if blockIndex == 0 {
@@ -3336,6 +3287,7 @@ func (c *Chain) reconcile(ctx context.Context) error {
 		return err
 	}
 	lastPrevHash := decodedKnownBlock.PrevHash().Bytes()
+	var lastCommonBlockIndex uint64
 	iterationCount := 0
 	for {
 		if iterationCount >= securityParam {
@@ -3358,7 +3310,7 @@ func (c *Chain) reconcile(ctx context.Context) error {
 		if err == nil &&
 			tmpBlock.Slot == primaryBlock.Slot &&
 			bytes.Equal(tmpBlock.Hash, primaryBlock.Hash) {
-			c.lastCommonBlockIndex = tmpBlock.ID
+			lastCommonBlockIndex = tmpBlock.ID
 			break
 		}
 		// Decode block and extract prev-hash
@@ -3372,13 +3324,16 @@ func (c *Chain) reconcile(ctx context.Context) error {
 			Slot: tmpBlock.Slot,
 		}
 		newBlocks = append(newBlocks, tmpPoint)
-		c.lastCommonBlockIndex--
 	}
 	// Prepend accumulated blocks in a single operation (O(K) instead of O(K²))
 	if len(newBlocks) > 0 {
 		// Reverse newBlocks since they were collected in reverse order
 		slices.Reverse(newBlocks)
 		c.blocks = slices.Concat(newBlocks, c.blocks)
+	}
+	if lastCommonBlockIndex != c.lastCommonBlockIndex || len(newBlocks) > 0 {
+		c.lastCommonBlockIndex = lastCommonBlockIndex
+		c.mutationGeneration++
 	}
 	return nil
 }

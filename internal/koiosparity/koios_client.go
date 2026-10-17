@@ -1330,34 +1330,9 @@ func (k *KoiosClient) GetEpochInfo(
 	ctx context.Context,
 	epoch uint64,
 ) (*KoiosEpochInfoResp, error) {
-	path := fmt.Sprintf("/epoch_info?_epoch_no=%d", epoch)
-	resp, err := k.get(ctx, path, -1, -1)
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf(
-			"koios /epoch_info: status %d body: %s",
-			resp.StatusCode,
-			resp.Body,
-		)
-	}
-	var items []KoiosEpochInfoResp
-	if err := json.Unmarshal(resp.Body, &items); err != nil {
-		return nil, fmt.Errorf("koios /epoch_info decode: %w", err)
-	}
-	if len(items) == 0 {
-		return nil, fmt.Errorf("koios /epoch_info: no data for epoch %d", epoch)
-	}
-	if len(items) != 1 || items[0].EpochNo != epoch {
-		return nil, fmt.Errorf(
-			"koios /epoch_info: requested epoch %d, got %d row(s) beginning with epoch %d",
-			epoch,
-			len(items),
-			items[0].EpochNo,
-		)
-	}
-	return &items[0], nil
+	return getEpochRow(ctx, k, "/epoch_info", epoch,
+		func(row KoiosEpochInfoResp) uint64 { return row.EpochNo },
+	)
 }
 
 // GetTotals fetches network-wide tokenomic totals (treasury, reserves,
@@ -1366,34 +1341,9 @@ func (k *KoiosClient) GetTotals(
 	ctx context.Context,
 	epoch uint64,
 ) (*KoiosTotalsResp, error) {
-	path := fmt.Sprintf("/totals?_epoch_no=%d", epoch)
-	resp, err := k.get(ctx, path, -1, -1)
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf(
-			"koios /totals: status %d body: %s",
-			resp.StatusCode,
-			resp.Body,
-		)
-	}
-	var items []KoiosTotalsResp
-	if err := json.Unmarshal(resp.Body, &items); err != nil {
-		return nil, fmt.Errorf("koios /totals decode: %w", err)
-	}
-	if len(items) == 0 {
-		return nil, fmt.Errorf("koios /totals: no data for epoch %d", epoch)
-	}
-	if len(items) != 1 || items[0].EpochNo != epoch {
-		return nil, fmt.Errorf(
-			"koios /totals: requested epoch %d, got %d row(s) beginning with epoch %d",
-			epoch,
-			len(items),
-			items[0].EpochNo,
-		)
-	}
-	return &items[0], nil
+	return getEpochRow(ctx, k, "/totals", epoch,
+		func(row KoiosTotalsResp) uint64 { return row.EpochNo },
+	)
 }
 
 // GetEpochParams fetches the protocol parameters in force for a specific
@@ -1405,34 +1355,38 @@ func (k *KoiosClient) GetEpochParams(
 	ctx context.Context,
 	epoch uint64,
 ) (*KoiosEpochParamsResp, error) {
-	path := fmt.Sprintf("/epoch_params?_epoch_no=%d", epoch)
-	resp, err := k.get(ctx, path, -1, -1)
+	return getEpochRow(ctx, k, "/epoch_params", epoch,
+		func(row KoiosEpochParamsResp) uint64 { return row.EpochNo },
+	)
+}
+
+func getEpochRow[T any](
+	ctx context.Context,
+	client *KoiosClient,
+	endpoint string,
+	epoch uint64,
+	epochNumber func(T) uint64,
+) (*T, error) {
+	path := fmt.Sprintf("%s?_epoch_no=%d", endpoint, epoch)
+	resp, err := client.get(ctx, path, -1, -1)
 	if err != nil {
 		return nil, err
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf(
-			"koios /epoch_params: status %d body: %s",
-			resp.StatusCode,
-			resp.Body,
-		)
+		return nil, fmt.Errorf("koios %s: status %d body: %s",
+			endpoint, resp.StatusCode, resp.Body)
 	}
-	var items []KoiosEpochParamsResp
+	var items []T
 	if err := json.Unmarshal(resp.Body, &items); err != nil {
-		return nil, fmt.Errorf("koios /epoch_params decode: %w", err)
+		return nil, fmt.Errorf("koios %s decode: %w", endpoint, err)
 	}
 	if len(items) == 0 {
-		return nil, fmt.Errorf(
-			"koios /epoch_params: no data for epoch %d",
-			epoch,
-		)
+		return nil, fmt.Errorf("koios %s: no data for epoch %d", endpoint, epoch)
 	}
-	if len(items) != 1 || items[0].EpochNo != epoch {
+	if len(items) != 1 || epochNumber(items[0]) != epoch {
 		return nil, fmt.Errorf(
-			"koios /epoch_params: requested epoch %d, got %d row(s) beginning with epoch %d",
-			epoch,
-			len(items),
-			items[0].EpochNo,
+			"koios %s: requested epoch %d, got %d row(s) beginning with epoch %d",
+			endpoint, epoch, len(items), epochNumber(items[0]),
 		)
 	}
 	return &items[0], nil

@@ -292,29 +292,47 @@ func CheckEpoch(
 	)
 }
 
-// preStakingThroughEpoch is the last Koios reporting epoch that predates a
-// valid "go" stake snapshot (see koiosStakeEpoch's doc comment for the
-// mark/set/go derivation). fetchEpoch commits a PreStaking marker instead of
-// erroring/retrying forever for epoch <= preStakingThroughEpoch;
+// defaultPreStakingThroughEpoch is the last Koios reporting epoch that
+// predates a valid "go" stake snapshot on a network with no entry in
+// preStakingThroughEpochByNetwork (see koiosStakeEpoch's doc comment for the
+// mark/set/go derivation).
+const defaultPreStakingThroughEpoch = 1
+
+// preStakingThroughEpochByNetwork holds networks that do not start in a
+// staking era at epoch 0. Preprod runs Byron for epochs 0-3 and enters
+// Shelley at epoch 4, so the mark/set/go derivation first yields a valid
+// snapshot at epoch 6 and Koios reports a null active_stake for epochs 0-5.
+var preStakingThroughEpochByNetwork = map[string]uint64{
+	"preprod": 5,
+}
+
+// preStakingThroughEpoch returns the last Koios reporting epoch of network
+// that predates a valid "go" stake snapshot. fetchEpoch commits a PreStaking
+// marker instead of erroring/retrying forever for epoch <= this value;
 // checkEpoch/koiosStakeEpoch/the account-fetch path
-// (FetchEpochAccountsWithAddrs) all key off this same constant so the
-// pre-staking exclusion stays consistent across every phase — a null
-// active_stake on any epoch above this value is a real, retryable error
-// instead.
-const preStakingThroughEpoch = 1
+// (FetchEpochAccountsWithAddrs) all key off it so the pre-staking exclusion
+// stays consistent across every phase — a null active_stake on any epoch
+// above it is a real, retryable error instead.
+func preStakingThroughEpoch(network string) uint64 {
+	if e, ok := preStakingThroughEpochByNetwork[network]; ok {
+		return e
+	}
+	return defaultPreStakingThroughEpoch
+}
 
 // IsPreStakingEpoch reports whether Koios legitimately has no active_stake
-// for epoch, because no valid "go" stake snapshot exists for it yet. Koios
-// returns active_stake=null there permanently, so a caller must treat that
-// null as "not comparable" rather than as a fault; above this boundary the
-// same null means Koios has not finished processing a just-closed epoch, or
-// something is genuinely wrong upstream, and is a real error.
+// for epoch on network, because no valid "go" stake snapshot exists for it
+// yet. Koios returns active_stake=null there permanently, so a caller must
+// treat that null as "not comparable" rather than as a fault; above this
+// boundary the same null means Koios has not finished processing a
+// just-closed epoch, or something is genuinely wrong upstream, and is a real
+// error.
 //
-// Exported so internal/nodeparity draws the boundary from the same constant
+// Exported so internal/nodeparity draws the boundary from the same source
 // the fetch and check phases already use, rather than hardcoding an epoch
 // number that would silently diverge if the derivation ever changed.
-func IsPreStakingEpoch(epoch uint64) bool {
-	return epoch <= preStakingThroughEpoch
+func IsPreStakingEpoch(network string, epoch uint64) bool {
+	return epoch <= preStakingThroughEpoch(network)
 }
 
 // koiosStakeEpoch returns the Dingo epoch whose reward_pool_input/
@@ -339,15 +357,18 @@ func IsPreStakingEpoch(epoch uint64) bool {
 // BlocksProduced field needs instead. Margin/FixedCost share this stake-epoch
 // offset rather than that one.
 //
-// ok is false for koiosEpoch <= preStakingThroughEpoch (0 and 1), neither of
+// ok is false for koiosEpoch <= preStakingThroughEpoch(network), none of
 // which has a valid stake epoch (checkEpoch never reaches this for those
 // epochs in practice — it's already filtered out by the PreStaking marker
-// fetch commits for epochs 0-1 — but the guard both avoids a uint64
-// underflow for epoch 0 and keeps epoch 1 from being treated as having a
-// real stakeEpoch of 0, which previously let the account-fetch path
-// wastefully run Koios requests for a pre-staking epoch).
-func koiosStakeEpoch(koiosEpoch uint64) (epoch uint64, ok bool) {
-	if koiosEpoch <= preStakingThroughEpoch {
+// fetch commits for them — but the guard both avoids a uint64 underflow for
+// epoch 0 and keeps the first epochs from being treated as having a real
+// stakeEpoch, which previously let the account-fetch path wastefully run
+// Koios requests for a pre-staking epoch).
+func koiosStakeEpoch(
+	network string,
+	koiosEpoch uint64,
+) (epoch uint64, ok bool) {
+	if koiosEpoch <= preStakingThroughEpoch(network) {
 		return 0, false
 	}
 	return koiosEpoch - 1, true
@@ -560,9 +581,9 @@ func checkEpoch(
 
 	// Resolve the distinct Dingo epoch numbers this Koios epoch's fields
 	// actually live under — see koiosStakeEpoch/koiosParamEpoch. stakeEpoch is
-	// always valid here: PreStaking (checked above) already excludes Koios
-	// epochs 0-1, so epoch >= 2 and stakeEpoch = epoch-1 >= 1.
-	stakeEpoch, hasStakeEpoch := koiosStakeEpoch(epoch)
+	// always valid here: PreStaking (checked above) already excludes every
+	// Koios epoch up to the network's boundary, so stakeEpoch = epoch-1 >= 1.
+	stakeEpoch, hasStakeEpoch := koiosStakeEpoch(network, epoch)
 	paramEpoch := koiosParamEpoch(epoch)
 
 	// 1. Compare epoch-level aggregates. total_active_stake needs the mark
@@ -1212,8 +1233,54 @@ func compareEpochAccounts(
 		}}
 	}
 
+	// Koios files a credit made at the boundary into epoch+1 under earned
+	// epoch `epoch`, so the proposal deposits it lists as proposal_refund for
+	// this reporting epoch are the ones returned when epoch+1 began.
+	refunds, err := dingo.GetProposalDepositRefunds(ctx, epoch+1)
+	if err != nil {
+		return []CheckMismatch{{
+			Network:    network,
+			Epoch:      epoch,
+			Field:      "proposal_deposit_refund",
+			DingoValue: fmt.Sprintf("error: %v", err),
+			KoiosValue: "",
+			Category:   CategoryDBError,
+			CheckedAt:  now,
+		}}
+	}
+
 	var out []CheckMismatch
 	dingoRows, credentialErrs, poolErrs := creditedAccountRewards(dingoOutputs)
+	for _, refund := range refunds.Refunds {
+		addr, err := StakeAddressFromCredential(
+			refund.StakingKey,
+			refund.CredentialTag,
+		)
+		if err != nil {
+			logger.Warn(
+				"koiosparity: failed to decode proposal refund credential",
+				"refund_epoch",
+				epoch+1,
+				"error",
+				err,
+			)
+			out = append(out, CheckMismatch{
+				Network:    network,
+				Epoch:      epoch,
+				Field:      "account_reward_address_decode",
+				DingoValue: fmt.Sprintf("error: %v", err),
+				KoiosValue: "",
+				Category:   CategoryDBError,
+				CheckedAt:  now,
+			})
+			continue
+		}
+		dingoRows = append(dingoRows, DingoAccountReward{
+			StakeAddress: addr,
+			RewardType:   rewardTypeProposalRefund,
+			Amount:       strconv.FormatUint(refund.Amount, 10),
+		})
+	}
 	for _, decodeErr := range credentialErrs {
 		logger.Warn(
 			"koiosparity: failed to decode reward_account_output credential",
@@ -1266,6 +1333,7 @@ func compareEpochAccounts(
 			graceHours,
 			epochEndTime,
 			rewardsPending,
+			refunds.Pending,
 		)...,
 	)
 	out = append(

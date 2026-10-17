@@ -78,6 +78,12 @@ type PeerTipUpdateEvent struct {
 	ObservedTip ochainsync.Tip
 	VRFOutput   []byte // VRF output from observed block header for tie-breaking
 	PraosView   PraosTiebreakerView
+	// AdmissionID identifies one delivered header. A candidate may contribute
+	// to Genesis corroboration, but cannot be a selectable peer until admitted.
+	AdmissionID uint64
+	Admitted    bool
+	// Rejected removes the candidate after definite ledger rejection.
+	Rejected bool
 	// ObservedPrevHash is the hash of the parent the delivered header names.
 	// It lets the selector require that far frontiers claimed by one
 	// connection form a connected header chain; empty means unknown.
@@ -86,6 +92,22 @@ type PeerTipUpdateEvent struct {
 	// boundary block, whose block number equals its parent's.
 	ObservedBoundary bool
 }
+
+// PeerTipUpdateDisposition describes synchronous handling of a delivered peer
+// tip at the ChainSync admission boundary.
+type PeerTipUpdateDisposition uint8
+
+const (
+	// PeerTipUpdateUnhandled leaves the update on the asynchronous event path.
+	PeerTipUpdateUnhandled PeerTipUpdateDisposition = iota
+	// PeerTipUpdateAccepted records the update as a selectable candidate.
+	PeerTipUpdateAccepted
+	// PeerTipUpdatePending retains a connected far-tip claim without making it
+	// selectable until enough consecutive headers establish plausibility.
+	PeerTipUpdatePending
+	// PeerTipUpdateRejected refuses an update that cannot become a candidate.
+	PeerTipUpdateRejected
+)
 
 // PeerActivityEvent is published when a peer has recent protocol activity
 // (for example, a keepalive response) without a tip change. This refreshes

@@ -168,6 +168,35 @@ func (d *LedgerDelta) applyWithoutRecordingDonations(
 	return d.applyWithDonationRecording(ctx, ls, txn, false, nil)
 }
 
+func (d *LedgerDelta) applyWithoutRecordingDonationsWithAccumulator(
+	ctx context.Context,
+	ls *LedgerState,
+	txn *database.Txn,
+	acc database.BatchAccumulator,
+) error {
+	return d.applyWithDonationRecording(ctx, ls, txn, false, acc)
+}
+
+type validatedReplayAccumulatorContextKey struct{}
+
+func withValidatedReplayAccumulator(
+	ctx context.Context,
+	acc database.BatchAccumulator,
+) context.Context {
+	return context.WithValue(
+		ctx,
+		validatedReplayAccumulatorContextKey{},
+		acc,
+	)
+}
+
+func validatedReplayAccumulatorFrom(
+	ctx context.Context,
+) database.BatchAccumulator {
+	acc, _ := ctx.Value(validatedReplayAccumulatorContextKey{}).(database.BatchAccumulator)
+	return acc
+}
+
 func (d *LedgerDelta) applyWithAccumulator(
 	ctx context.Context,
 	ls *LedgerState,
@@ -195,6 +224,7 @@ func (d *LedgerDelta) applyWithDonationRecording(
 	appliedTxs := make([]bool, len(d.Transactions))
 	storageIndexOffset := d.expandedIndexOffset
 	for i, tr := range d.Transactions {
+		var proposalsValidated bool
 		if !fitsUint32(tr.Index) {
 			return fmt.Errorf("transaction index out of range: %d", tr.Index)
 		}
@@ -336,6 +366,7 @@ func (d *LedgerDelta) applyWithDonationRecording(
 					level,
 					uint32(storageIndex), //nolint:gosec
 					txn,
+					&proposalsValidated,
 				); err != nil {
 					return fmt.Errorf("process transaction body %d governance: %w", levelIndex, err)
 				}
@@ -392,30 +423,32 @@ func (d *LedgerDelta) applyWithDonationRecording(
 	// callbacks in registration order, and this callback walks transactions in
 	// index order before handing each event to the ledger.tx ordered lane. See
 	// publishTransactionEvent.
-	applyEvents := make([]TransactionEvent, 0, len(d.Transactions))
-	for i, tr := range d.Transactions {
-		if !appliedTxs[i] {
-			continue
+	if d.stageApplyEvents != nil || ls.config.EventBus != nil {
+		applyEvents := make([]TransactionEvent, 0, len(d.Transactions))
+		for i, tr := range d.Transactions {
+			if !appliedTxs[i] {
+				continue
+			}
+			applyEvents = append(applyEvents, TransactionEvent{
+				Transaction: tr.Tx,
+				Point:       d.Point,
+				BlockNumber: d.BlockNumber,
+				TxIndex:     uint32(tr.Index), //nolint:gosec
+				Rollback:    false,
+			})
 		}
-		applyEvents = append(applyEvents, TransactionEvent{
-			Transaction: tr.Tx,
-			Point:       d.Point,
-			BlockNumber: d.BlockNumber,
-			TxIndex:     uint32(tr.Index), //nolint:gosec
-			Rollback:    false,
-		})
-	}
-	if len(applyEvents) > 0 && d.stageApplyEvents != nil {
-		d.stageApplyEvents(applyEvents)
-	} else if len(applyEvents) > 0 {
-		txn.AfterCommit(func() {
-			if ls.beforeTransactionApplyPublish != nil {
-				ls.beforeTransactionApplyPublish()
-			}
-			for _, evt := range applyEvents {
-				ls.publishTransactionEvent(ctx, evt)
-			}
-		})
+		if len(applyEvents) > 0 && d.stageApplyEvents != nil {
+			d.stageApplyEvents(applyEvents)
+		} else if len(applyEvents) > 0 {
+			txn.AfterCommit(func() {
+				if ls.beforeTransactionApplyPublish != nil {
+					ls.beforeTransactionApplyPublish()
+				}
+				for _, evt := range applyEvents {
+					ls.publishTransactionEvent(ctx, evt)
+				}
+			})
+		}
 	}
 
 	return nil
@@ -522,6 +555,7 @@ func (d *LedgerDelta) processGovernance(
 	tx lcommon.Transaction,
 	txIndex uint32,
 	txn *database.Txn,
+	validated *bool,
 ) error {
 	proposals := tx.ProposalProcedures()
 	votes := tx.VotingProcedures()
@@ -533,13 +567,35 @@ func (d *LedgerDelta) processGovernance(
 		return nil
 	}
 
-	// Determine current epoch and Conway protocol parameters.
-	// These are needed for proposals, votes, and DRep activity certificates;
-	// deregistration cleanup does not depend on them.
-	ls.RLock()
-	currentEpoch := ls.currentEpoch.EpochId
-	pparams := ls.currentPParams
-	ls.RUnlock()
+	// Determine the block epoch and Conway protocol parameters.
+	// These are needed for both proposals (govActionLifetime) and
+	// votes (dRepInactivityPeriod for activity tracking).
+	contextSlot := d.Point.Slot
+	if d.closureContextSlot != nil {
+		contextSlot = *d.closureContextSlot
+	}
+	snapshot := ls.loadConsensusSnapshot()
+	if snapshot == nil {
+		return errors.New("governance consensus snapshot not yet published")
+	}
+	blockEpoch, err := epochForSlotInCache(
+		snapshot.epochCache,
+		contextSlot,
+	)
+	if err != nil {
+		return fmt.Errorf(
+			"resolve governance block epoch at slot %d: %w",
+			contextSlot,
+			err,
+		)
+	}
+	pparams := protocolParametersForBlockEra(
+		d.BlockEraId,
+		snapshot.currentEra,
+		ls.eraList(),
+		snapshot.currentPParams,
+		snapshot.prevEraPParams,
+	)
 
 	if requiresConwayParameters {
 		conwayPParams := conwayProtocolParameters(pparams)
@@ -557,10 +613,12 @@ func (d *LedgerDelta) processGovernance(
 				tx,
 				d.Point,
 				txIndex,
-				currentEpoch,
+				blockEpoch.EpochId,
 				conwayPParams.GovActionValidityPeriod,
+				pparams,
 				ls.db,
 				txn,
+				validated,
 			); err != nil {
 				return fmt.Errorf("process governance proposals: %w", err)
 			}
@@ -572,7 +630,7 @@ func (d *LedgerDelta) processGovernance(
 				ctx,
 				tx,
 				d.Point,
-				currentEpoch,
+				blockEpoch.EpochId,
 				conwayPParams.DRepInactivityPeriod,
 				ls.db,
 				txn,
@@ -586,7 +644,7 @@ func (d *LedgerDelta) processGovernance(
 				ctx,
 				tx,
 				d.Point,
-				currentEpoch,
+				blockEpoch.EpochId,
 				conwayPParams.DRepInactivityPeriod,
 				uint64(conwayPParams.ProtocolVersion.Major),
 				ls.db,
@@ -601,7 +659,7 @@ func (d *LedgerDelta) processGovernance(
 			ctx,
 			tx,
 			d.Point,
-			currentEpoch,
+			blockEpoch.EpochId,
 			ls.db,
 			txn,
 		); err != nil {

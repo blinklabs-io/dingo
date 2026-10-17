@@ -175,7 +175,9 @@ func TestProcessProposalsRejectsExpiredCommitteeAdditions(t *testing.T) {
 				0,
 				100,
 				20,
+				testConwayProtocolParameters(),
 				db,
+				nil,
 				nil,
 			)
 			stored, getErr := db.GetGovernanceProposal(context.Background(),
@@ -205,22 +207,24 @@ func TestProcessProposalsRejectsExpiredCommitteeAdditions(t *testing.T) {
 func TestGovernanceEffectsRejectOverwideCostModelLanguageIDs(t *testing.T) {
 	t.Parallel()
 
+	// These paths isolate cost-model key width from the enclosing transaction rule.
+	validated := true
 	type applyFunc func(*database.Database, lcommon.Transaction) error
 	paths := map[string]applyFunc{
 		"persistence core": func(db *database.Database, tx lcommon.Transaction) error {
 			return persistGovernanceProposals(t.Context(), tx, ocommon.Point{Slot: 100}, 0, 1, 20, false, db, nil)
 		},
 		"live proposals": func(db *database.Database, tx lcommon.Transaction) error {
-			return ProcessProposals(t.Context(), tx, ocommon.Point{Slot: 100}, 0, 1, 20, db, nil)
+			return ProcessProposals(t.Context(), tx, ocommon.Point{Slot: 100}, 0, 1, 20, nil, db, nil, &validated)
 		},
 		"historical proposals": func(db *database.Database, tx lcommon.Transaction) error {
-			return ProcessHistoricalProposals(t.Context(), tx, ocommon.Point{Slot: 100}, 0, 1, 20, db, nil)
+			return ProcessHistoricalProposals(t.Context(), tx, ocommon.Point{Slot: 100}, 0, 1, 20, nil, db, nil, &validated)
 		},
 		"live transaction effects": func(db *database.Database, tx lcommon.Transaction) error {
-			return ProcessTransactionEffects(t.Context(), tx, ocommon.Point{Slot: 100}, 0, 1, 20, 20, 9, db, nil)
+			return ProcessTransactionEffects(t.Context(), tx, ocommon.Point{Slot: 100}, 0, 1, 20, 20, 9, db, nil, nil, &validated)
 		},
 		"historical transaction effects": func(db *database.Database, tx lcommon.Transaction) error {
-			return ProcessHistoricalTransactionEffects(t.Context(), tx, ocommon.Point{Slot: 100}, 0, 1, 20, db, nil)
+			return ProcessHistoricalTransactionEffects(t.Context(), tx, ocommon.Point{Slot: 100}, 0, 1, 20, db, nil, nil, &validated)
 		},
 	}
 	rewardAccount, err := lcommon.NewAddressFromParts(
@@ -491,7 +495,7 @@ func TestPV9DRepRegistrationUsesProposalDormancyReset(t *testing.T) {
 		if err := ProcessDRepActivityCertificates(context.Background(), tx, point, 100, 20, 9, db, txn); err != nil {
 			return err
 		}
-		return ProcessProposals(context.Background(), tx, point, 0, 100, 20, db, txn)
+		return ProcessProposals(context.Background(), tx, point, 0, 100, 20, nil, db, txn, nil)
 	}))
 
 	drep, err := db.GetDrepByCredential(context.Background(), 0, drepCredential, true, nil)
@@ -1373,4 +1377,122 @@ func TestProcessHistoricalVotesSettlesRebuiltProposal(t *testing.T) {
 			assert.Equal(t, proposalEpoch, *rebuilt.DroppedEpoch)
 		})
 	}
+}
+
+// Every cast is recorded with its transaction and per-voter index, including a
+// revote that only repeats the value; replaying a block records nothing new,
+// and a rollback drops the casts past its slot.
+func TestProcessVotesRecordsEveryCast(t *testing.T) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: t.TempDir(),
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	require.NoError(t, err)
+	defer dbtest.CloseDatabase(db)
+
+	proposalTxHash := testHash32("cast-proposal")
+	// The earlier action's id sorts before the target's, so it takes index 0
+	// in the transaction that votes on both.
+	earlierTxHash := make([]byte, 32)
+	for _, txHash := range [][]byte{proposalTxHash, earlierTxHash} {
+		require.NoError(t, db.SetGovernanceProposal(context.Background(),
+			&models.GovernanceProposal{
+				TxHash:        txHash,
+				ActionType:    uint8(lcommon.GovActionTypeInfo),
+				ProposedEpoch: 100,
+				ExpiresEpoch:  120,
+				Deposit:       1,
+				ReturnAddress: append(
+					[]byte{0xE1}, testHash28("cast-reward")...,
+				),
+				AddedSlot: 1000,
+			},
+			nil,
+		))
+	}
+	proposal, err := db.GetGovernanceProposal(context.Background(),
+		proposalTxHash, 0, nil,
+	)
+	require.NoError(t, err)
+
+	var voterHash [28]byte
+	copy(voterHash[:], testHash28("cast-cc-voter"))
+	voter := &lcommon.Voter{
+		Type: lcommon.VoterTypeConstitutionalCommitteeHotKeyHash,
+		Hash: voterHash,
+	}
+	target := &lcommon.GovActionId{TransactionId: [32]byte(proposalTxHash)}
+	earlier := &lcommon.GovActionId{TransactionId: [32]byte(earlierTxHash)}
+	voteTx := func(name string, vote uint8, withEarlier bool) lcommon.Transaction {
+		votes := map[*lcommon.GovActionId]lcommon.VotingProcedure{
+			target: {Vote: vote},
+		}
+		if withEarlier {
+			votes[earlier] = lcommon.VotingProcedure{Vote: vote}
+		}
+		tx := mockledger.NewTransactionBuilder().
+			WithVotingProcedures(lcommon.VotingProcedures{voter: votes})
+		tx.WithId(testHash32(name))
+		return tx
+	}
+	process := func(tx lcommon.Transaction, slot uint64) {
+		t.Helper()
+		txn := db.Transaction(context.Background(), true)
+		defer txn.Release()
+		require.NoError(t, txn.Do(func(txn *database.Txn) error {
+			return ProcessVotes(
+				context.Background(),
+				tx,
+				ocommon.Point{Slot: slot, Hash: testHash32("cast-block")},
+				100,
+				20,
+				db,
+				txn,
+			)
+		}))
+	}
+	no := voteTx("cast-no", models.VoteNo, true)
+	yes := voteTx("cast-yes", models.VoteYes, false)
+	again := voteTx("cast-yes-again", models.VoteYes, false)
+	process(no, 2000)
+	process(yes, 3000)
+	process(again, 3000)
+	process(yes, 3000)
+
+	type cast struct {
+		txHash  []byte
+		index   uint32
+		vote    uint8
+		slot    uint64
+		counted bool
+	}
+	casts := func() []cast {
+		t.Helper()
+		rows, total, err := db.Metadata().GetGovernanceVotesPage(
+			models.GovernanceVoteFilter{ProposalID: &proposal.ID},
+			10, 0, "asc", nil,
+		)
+		require.NoError(t, err)
+		require.Len(t, rows, total)
+		ret := make([]cast, 0, len(rows))
+		for _, row := range rows {
+			ret = append(ret, cast{
+				row.CastTxHash, row.CastCertIndex, row.Vote.Vote,
+				row.CastSlot, row.Counted,
+			})
+		}
+		return ret
+	}
+	require.Equal(t, []cast{
+		{testHash32("cast-no"), 1, models.VoteNo, 2000, false},
+		{testHash32("cast-yes"), 0, models.VoteYes, 3000, false},
+		{testHash32("cast-yes-again"), 0, models.VoteYes, 3000, true},
+	}, casts())
+
+	require.NoError(t, db.Metadata().DeleteGovernanceVotesAfterSlot(2500, nil))
+	require.Equal(t, []cast{
+		{testHash32("cast-no"), 1, models.VoteNo, 2000, true},
+	}, casts())
 }

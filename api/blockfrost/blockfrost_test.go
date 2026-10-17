@@ -24,6 +24,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -33,7 +34,6 @@ import (
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
-	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	bfgo "github.com/blockfrost/blockfrost-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -939,6 +939,8 @@ func TestMetadataEndpointsDeterministicAcrossRepeatsAndKeyOrders(t *testing.T) {
 
 // mockNode implements BlockfrostNode for testing.
 type mockNode struct {
+	historyMock
+	queryMock
 	chainTip                      ChainTipInfo
 	block                         BlockInfo
 	blockByID                     BlockInfo
@@ -1113,10 +1115,24 @@ func (m *mockNode) Genesis() (
 	return m.genesis, m.genesisErr
 }
 
-func (m *mockNode) PoolsExtended() (
-	[]PoolExtendedInfo, error,
+func (m *mockNode) PoolsExtended(
+	_ context.Context,
+	params PaginationParams,
+) (
+	[]PoolExtendedInfo, int, error,
 ) {
-	return m.pools, m.poolsErr
+	pools := slices.Clone(m.pools)
+	slices.SortFunc(pools, func(a, b PoolExtendedInfo) int {
+		return strings.Compare(a.Hex, b.Hex)
+	})
+	if params.Order == PaginationOrderDesc {
+		slices.Reverse(pools)
+	}
+	offset, ok := paginationOffset(params)
+	if !ok || offset >= len(pools) {
+		return []PoolExtendedInfo{}, len(pools), m.poolsErr
+	}
+	return pools[offset:min(offset+params.Count, len(pools))], len(pools), m.poolsErr
 }
 
 func (m *mockNode) PoolsList(ctx context.Context,
@@ -1127,6 +1143,7 @@ func (m *mockNode) PoolsList(ctx context.Context,
 }
 
 func (m *mockNode) PoolsRetiring(
+	_ context.Context,
 	_ PaginationParams,
 ) ([]PoolRetiringInfo, int, error) {
 	return m.poolsRetiring, m.poolsRetiringTotal, m.poolsRetiringErr
@@ -1152,6 +1169,7 @@ func (m *mockNode) Asset(
 }
 
 func (m *mockNode) AssetAddresses(
+	_ context.Context,
 	policyID string,
 	assetName []byte,
 	params PaginationParams,
@@ -1170,6 +1188,7 @@ func (m *mockNode) DRep(
 }
 
 func (m *mockNode) DReps(
+	_ context.Context,
 	params DRepListParams,
 ) ([]DRepListItemInfo, int, error) {
 	m.drepListParams = params
@@ -1985,48 +2004,6 @@ func TestHandleAssetAddressesNoHolders(t *testing.T) {
 	assert.Equal(t, "The requested asset could not be found.", resp.Message)
 }
 
-func TestAssetHoldersFromUtxosPreservesPointerAddress(t *testing.T) {
-	t.Parallel()
-
-	paymentHash := bytes.Repeat([]byte{0xab}, lcommon.AddressHashSize)
-	policyID := bytes.Repeat([]byte{0xcd}, lcommon.AddressHashSize)
-	assetName := []byte("TOKEN")
-	addrBytes := []byte{
-		(lcommon.AddressTypeKeyPointer << 4) |
-			lcommon.AddressNetworkTestnet,
-	}
-	addrBytes = append(addrBytes, paymentHash...)
-	addrBytes = append(addrBytes, 0x01, 0x00, 0x00)
-	addr, err := lcommon.NewAddressFromBytes(addrBytes)
-	require.NoError(t, err)
-
-	output := shelley.ShelleyTransactionOutput{
-		OutputAddress: addr,
-		OutputAmount:  1_000_000,
-	}
-	outputCbor, err := cbor.Encode(&output)
-	require.NoError(t, err)
-	holders, err := assetHoldersFromUtxos(
-		policyID,
-		assetName,
-		[]models.Utxo{{
-			TxId:      bytes.Repeat([]byte{0x01}, 32),
-			OutputIdx: 0,
-			Cbor:      outputCbor,
-			Assets: []models.Asset{{
-				PolicyId: policyID,
-				Name:     assetName,
-				Amount:   types.Uint64(7),
-			}},
-		}},
-		PaginationParams{Count: 100, Page: 1, Order: "asc"},
-	)
-	require.NoError(t, err)
-	require.Len(t, holders, 1)
-	assert.Equal(t, addr.String(), holders[0].Address)
-	assert.Equal(t, "7", holders[0].Quantity)
-}
-
 func TestHandlePoolsRetiring(t *testing.T) {
 	t.Parallel()
 
@@ -2452,7 +2429,7 @@ INSERT INTO drep (
 		require.NoError(t, err)
 	}
 
-	items, total, err := adapter.DReps(DRepListParams{
+	items, total, err := adapter.DReps(context.Background(), DRepListParams{
 		Pagination: PaginationParams{
 			Count: 100,
 			Page:  1,
@@ -4362,8 +4339,8 @@ func TestNodeAdapterAddressPaymentCredTransactionFallback(t *testing.T) {
 	// with a zero lovelace balance.
 	_, err = store.Exec(`
 INSERT INTO address_transaction (
-    payment_key, staking_key, transaction_id, slot
-) VALUES (?, ?, ?, ?)`,
+    payment_key, payment_script, staking_key, transaction_id, slot
+) VALUES (?, FALSE, ?, ?, ?)`,
 		paymentKey,
 		bytes.Repeat([]byte{0x33}, lcommon.AddressHashSize),
 		1,

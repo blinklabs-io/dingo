@@ -48,55 +48,6 @@ func TestOptions(t *testing.T) {
 	assert.Same(t, registry, store.promRegistry)
 }
 
-func TestProviderDefaults(t *testing.T) {
-	tests := []struct {
-		name        string
-		runMode     string
-		storageMode string
-		expected    bool
-	}{
-		{
-			name:        "serve core",
-			runMode:     "serve",
-			storageMode: "core",
-			expected:    true,
-		},
-		{
-			name:        "leios core",
-			runMode:     "leios",
-			storageMode: "core",
-			expected:    true,
-		},
-		{
-			name:        "load core",
-			runMode:     "load",
-			storageMode: "core",
-			expected:    false,
-		},
-		{
-			name:        "serve api",
-			runMode:     "serve",
-			storageMode: "api",
-			expected:    false,
-		},
-		{
-			name:        "empty run mode",
-			runMode:     "",
-			storageMode: "core",
-			expected:    false,
-		},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			assert.Equal(
-				t,
-				test.expected,
-				useCompactBlockMetadata(test.runMode, test.storageMode),
-			)
-		})
-	}
-}
-
 func TestStartWithoutRegistryLeavesMetricsDisabled(t *testing.T) {
 	store, err := New(
 		WithDataDir(t.TempDir()),

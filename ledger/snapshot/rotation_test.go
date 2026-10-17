@@ -130,9 +130,9 @@ func TestCleanupOldSnapshotsCoreModePrunesRewardAccountOutput(t *testing.T) {
 // TestCleanupOldSnapshotsAPIModeRetainsRewardAccountOutput is the
 // regression test: in API storage mode, reward_account_output must be
 // retained WITHOUT BOUND (so the Blockfrost account reward-history endpoint
-// can serve an account's full history), while reward_stake_input still
-// cannot be kept and continues to be pruned to the rotation/reward-replay
-// window exactly as in core mode. Also the / regression test:
+// can serve an account's full history), and so must reward_stake_input (so
+// the epoch stake and account stake-history endpoints can serve past the
+// rotation/reward-replay window). Also the / regression test:
 // pool_stake_snapshot must likewise be retained WITHOUT BOUND in API mode,
 // so a from-genesis historical Acquire pinned well outside the ordinary
 // 3-epoch window can still be validated
@@ -148,7 +148,6 @@ func TestCleanupOldSnapshotsAPIModeRetainsRewardAccountOutput(t *testing.T) {
 	meta := db.Metadata()
 
 	const currentEpoch = uint64(10)
-	const firstRetainedEpoch = currentEpoch - 3
 	poolKeyHash := bytes.Repeat([]byte{0x22}, 28)
 
 	seedRetentionRows(t, db, poolKeyHash, currentEpoch)
@@ -182,25 +181,18 @@ func TestCleanupOldSnapshotsAPIModeRetainsRewardAccountOutput(t *testing.T) {
 		)
 	}
 
-	// reward_stake_input is still pruned to the same window as core mode.
-	for epoch := range firstRetainedEpoch {
-		stakeInputs, err := meta.GetRewardStakeInputs(epoch, nil)
-		require.NoError(t, err, "get reward stake inputs %d", epoch)
-		require.Empty(
-			t,
-			stakeInputs,
-			"API mode must still prune reward_stake_input for epoch %d",
-			epoch,
-		)
-	}
-	for epoch := firstRetainedEpoch; epoch <= currentEpoch; epoch++ {
+	// reward_stake_input is retained without bound too, so the Blockfrost
+	// epoch stake and account history endpoints can answer for any epoch the
+	// node has run in this mode. Core mode and the koios-parity observer keep
+	// pruning it to the window (see the two sibling tests).
+	for epoch := uint64(0); epoch <= currentEpoch; epoch++ {
 		stakeInputs, err := meta.GetRewardStakeInputs(epoch, nil)
 		require.NoError(t, err, "get reward stake inputs %d", epoch)
 		require.Len(
 			t,
 			stakeInputs,
 			1,
-			"reward_stake_input for epoch %d is inside the retained window",
+			"API mode must retain reward_stake_input for epoch %d",
 			epoch,
 		)
 	}
@@ -734,6 +726,120 @@ func TestRotateSnapshotsPreservesCapturedLeiosKeyAcrossPoolRotation(
 	require.Equal(t, oldProof, stored.LeiosKeyPossessionProof)
 	require.NotNil(t, stored.LeiosKeyRegistrationEpoch)
 	require.Equal(t, uint64(7), *stored.LeiosKeyRegistrationEpoch)
+}
+
+func TestLeiosKeySnapshotUsesEraSpecificPoolRegistrationWindow(
+	t *testing.T,
+) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name            string
+		protocolVersion uint
+		wantPublic      byte
+		wantProof       byte
+		wantEpoch       uint64
+	}{
+		{
+			name:            "Conway",
+			protocolVersion: lcommon.ProtocolVersionDijkstra - 1,
+			wantPublic:      0x51,
+			wantProof:       0x61,
+			wantEpoch:       7,
+		},
+		{
+			name:            "Dijkstra",
+			protocolVersion: lcommon.ProtocolVersionDijkstra,
+			wantPublic:      0x52,
+			wantProof:       0x62,
+			wantEpoch:       8,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			db := setupTestDB(t)
+			seedEpochs(t, db, []models.Epoch{{
+				EpochId:       6,
+				StartSlot:     0,
+				LengthInSlots: 100,
+			}, {
+				EpochId:       7,
+				StartSlot:     100,
+				LengthInSlots: 100,
+			}, {
+				EpochId:       8,
+				StartSlot:     200,
+				LengthInSlots: 100,
+			}})
+
+			poolHash := bytes.Repeat([]byte{0x41}, 28)
+			importPool := func(slot uint64, publicByte, proofByte byte) {
+				t.Helper()
+				public := bytes.Repeat([]byte{publicByte}, 96)
+				proof := bytes.Repeat([]byte{proofByte}, 48)
+				pool := &models.Pool{
+					PoolKeyHash:             append([]byte(nil), poolHash...),
+					VrfKeyHash:              bytes.Repeat([]byte{0x71}, 32),
+					LeiosKeyPublic:          public,
+					LeiosKeyPossessionProof: proof,
+				}
+				registration := &models.PoolRegistration{
+					PoolKeyHash:             append([]byte(nil), poolHash...),
+					VrfKeyHash:              bytes.Repeat([]byte{0x71}, 32),
+					AddedSlot:               slot,
+					LeiosKeyPublic:          public,
+					LeiosKeyPossessionProof: proof,
+				}
+				require.NoError(
+					t,
+					db.ImportPool(context.Background(), nil, pool, registration),
+				)
+			}
+			importPool(50, 0x51, 0x61)
+			importPool(150, 0x52, 0x62)
+
+			var poolKey lcommon.PoolKeyHash
+			copy(poolKey[:], poolHash)
+			distribution := &StakeDistribution{
+				Slot:           199,
+				PoolStakes:     map[lcommon.PoolKeyHash]uint64{poolKey: 100},
+				DelegatorCount: map[lcommon.PoolKeyHash]uint64{poolKey: 1},
+				TotalStake:     100,
+				TotalPools:     1,
+			}
+			mgr := NewManager(db, event.NewEventBus(nil, nil), nil)
+			saved, err := mgr.saveSnapshot(
+				context.Background(),
+				8,
+				models.PoolStakeSnapshotTypeMark,
+				distribution,
+				event.EpochTransitionEvent{
+					PreviousEpoch:   7,
+					NewEpoch:        8,
+					BoundarySlot:    200,
+					SnapshotSlot:    199,
+					ProtocolVersion: tc.protocolVersion,
+				},
+				false,
+				false,
+				false,
+			)
+			require.NoError(t, err)
+			require.True(t, saved)
+
+			stored, err := db.Metadata().GetPoolStakeSnapshot(
+				8,
+				models.PoolStakeSnapshotTypeMark,
+				poolHash,
+				nil,
+			)
+			require.NoError(t, err)
+			require.NotNil(t, stored)
+			require.Equal(t, bytes.Repeat([]byte{tc.wantPublic}, 96), stored.LeiosKeyPublic)
+			require.Equal(t, bytes.Repeat([]byte{tc.wantProof}, 48), stored.LeiosKeyPossessionProof)
+			require.NotNil(t, stored.LeiosKeyRegistrationEpoch)
+			require.Equal(t, tc.wantEpoch, *stored.LeiosKeyRegistrationEpoch)
+		})
+	}
 }
 
 func TestRotateSnapshotsPreservesLeiosKeyWhenImportedAgeIsUnknown(

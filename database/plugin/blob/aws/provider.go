@@ -18,6 +18,7 @@ package aws
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
@@ -42,11 +43,15 @@ func RegisterProvider(host *plugin.Host) error {
 		},
 		func() Config { return Config{} },
 		func(_ context.Context, cfg Config, deps blob.ProviderDependencies) (*BlobStoreS3, plugin.Instance, error) {
+			prefix, err := objectPrefix(cfg.Prefix, deps.DataDir)
+			if err != nil {
+				return nil, nil, err
+			}
 			store, err := NewWithOptions(
 				WithEndpoint(cfg.Endpoint),
 				WithBucket(cfg.Bucket),
 				WithRegion(cfg.Region),
-				WithPrefix(cfg.Prefix),
+				WithPrefix(prefix),
 				WithTimeout(cfg.Timeout),
 				WithLogger(deps.Logger),
 				WithPromRegistry(deps.PromRegistry),
@@ -65,4 +70,15 @@ func RegisterProvider(host *plugin.Host) error {
 			}, nil
 		},
 	)
+}
+
+func objectPrefix(configured string, dataDir string) (string, error) {
+	namespace, err := blob.ReadNamespace(dataDir)
+	if err != nil {
+		return "", err
+	}
+	if namespace != "" && configured != "" && !strings.HasSuffix(configured, "/") {
+		configured += "/"
+	}
+	return blob.NamespacePrefix(configured, namespace), nil
 }

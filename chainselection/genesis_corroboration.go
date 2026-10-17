@@ -137,6 +137,16 @@ func (cs *ChainSelector) corroboratingPeersLocked(
 	candidate ouroboros.ConnectionId,
 	candidateTip *PeerChainTip,
 ) int {
+	return cs.corroboratingPeersIncludingCandidatesLocked(
+		candidate,
+		candidateTip,
+	)
+}
+
+func (cs *ChainSelector) corroboratingPeersIncludingCandidatesLocked(
+	candidate ouroboros.ConnectionId,
+	candidateTip *PeerChainTip,
+) int {
 	if candidateTip == nil {
 		return 0
 	}
@@ -145,14 +155,47 @@ func (cs *ChainSelector) corroboratingPeersLocked(
 		return 0
 	}
 	witnesses := make(map[string]struct{})
-	for connId, peerTip := range cs.peerTips {
+	seen := make(map[ouroboros.ConnectionId]struct{}, len(cs.peerTips))
+	for connId, committedTip := range cs.peerTips {
+		seen[connId] = struct{}{}
 		if connId == candidate {
 			continue
+		}
+		peerTip := cs.latestPeerTipCandidateLocked(connId)
+		if peerTip == nil {
+			peerTip = committedTip
 		}
 		if !cs.peerCanCorroborateLocked(connId, peerTip) {
 			continue
 		}
-		if !candidateTip.confirmsRecentChain(peerTip) ||
+		if !candidateTip.confirmsRecentChainWithin(
+			peerTip,
+			cs.genesisWindowSlotsLocked(),
+		) ||
+			!cs.witnessSupportsSuffixLocked(candidateTip, peerTip) {
+			continue
+		}
+		identity, ok := cs.corroboratorIdentity(connId)
+		if !ok || identity == candidateIdentity {
+			continue
+		}
+		witnesses[identity] = struct{}{}
+	}
+	for connId := range cs.pendingPeerTips {
+		if connId == candidate {
+			continue
+		}
+		if _, exists := seen[connId]; exists {
+			continue
+		}
+		peerTip := cs.latestPeerTipCandidateLocked(connId)
+		if !cs.peerCanCorroborateLocked(connId, peerTip) {
+			continue
+		}
+		if !candidateTip.confirmsRecentChainWithin(
+			peerTip,
+			cs.genesisWindowSlotsLocked(),
+		) ||
 			!cs.witnessSupportsSuffixLocked(candidateTip, peerTip) {
 			continue
 		}
@@ -211,20 +254,39 @@ func (cs *ChainSelector) isPeerCorroboratedLocked(
 //
 // An unknown peer (no tips observed yet) is treated as uncorroborated and denied
 // while the gate is active — fail closed until corroboration forms. Outside
-// Genesis corroboration it always returns true (no behavior change).
+// Genesis corroboration it returns true unless the peer's advertised tip is more
+// than a Genesis window older than the wall clock, which is denied in Genesis
+// mode regardless of corroboration (see advertisedTipStaleLocked).
 func (cs *ChainSelector) ShouldApplyIngress(
 	connId ouroboros.ConnectionId,
 ) bool {
 	cs.mutex.RLock()
 	defer cs.mutex.RUnlock()
+	peerTip := cs.latestPeerTipCandidateLocked(connId)
+	if peerTip == nil {
+		peerTip = cs.peerTips[connId]
+	}
+	// A peer whose advertised tip is older than the wall clock by more than a
+	// Genesis window serves an abandoned chain. Its headers must not enter the
+	// ledger's shared header queue, where they would outlive its selection and
+	// make honest peers' headers look like a persistent fork.
+	if _, active := cs.staleTipRuleWallSlotLocked(); active {
+		// Tip observation is ordered before this gate. If admission rejected
+		// that observation, there is no tip against which to apply the stale
+		// bound, so accepting the header would bypass the rule.
+		if peerTip == nil || cs.advertisedTipStaleLocked(peerTip) {
+			return false
+		}
+	}
 	if !cs.genesisCorroborationActiveLocked() {
 		return true
 	}
-	peerTip := cs.peerTips[connId]
+
 	if peerTip == nil {
 		return false
 	}
-	return cs.isPeerCorroboratedLocked(connId, peerTip)
+	return cs.corroboratingPeersIncludingCandidatesLocked(connId, peerTip) >=
+		cs.config.MinCorroboratingPeers
 }
 
 // rawDensityLeaderLocked returns the connection with the highest observed

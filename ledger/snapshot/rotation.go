@@ -36,6 +36,18 @@ var errRewardInputEpochUnavailable = errors.New(
 	"reward input epoch metadata unavailable",
 )
 
+func poolRegistrationSnapshotWindow(
+	evt event.EpochTransitionEvent,
+	previousEpochStartSlot uint64,
+) (uint64, uint64) {
+	if evt.ProtocolVersion >= lcommon.ProtocolVersionDijkstra {
+		// Dijkstra promotes pool parameters before SNAP, so the new epoch's
+		// boundary window represents the registration state being captured.
+		return evt.BoundarySlot, evt.NewEpoch
+	}
+	return previousEpochStartSlot, evt.PreviousEpoch
+}
+
 // errFallbackSupersededByAuthoritative is returned internally by
 // saveSnapshotInTxn (never to an outside caller — saveSnapshot translates it
 // into saved=false, nil) when a fallback, non-authoritative write's
@@ -404,10 +416,14 @@ func (m *Manager) snapshotLeiosKeys(
 	for poolKey := range distribution.PoolStakes {
 		poolKeys = append(poolKeys, poolKey)
 	}
+	registrationStartSlot, registrationEpoch := poolRegistrationSnapshotWindow(
+		evt,
+		endedEpoch.StartSlot,
+	)
 	registrations, err := meta.GetPoolRegistrationsEffectiveForEpoch(
 		poolKeys,
-		endedEpoch.StartSlot,
-		evt.PreviousEpoch,
+		registrationStartSlot,
+		registrationEpoch,
 		distribution.Slot,
 		metaTxn,
 	)
@@ -877,15 +893,14 @@ func (m *Manager) rewardInputs(
 			evt.PreviousEpoch,
 		)
 	}
-	// SNAP snapshots the pool params active DURING the ended epoch:
-	// re-registrations submitted within it are future params promoted only
-	// after SNAP (in POOLREAP), so the latest cert at the snapshot slot
-	// would be one epoch early for any pool that changed its params
-	// mid-epoch.
+	registrationStartSlot, registrationEpoch := poolRegistrationSnapshotWindow(
+		evt,
+		endedEpoch.StartSlot,
+	)
 	registrations, err := meta.GetPoolRegistrationsEffectiveForEpoch(
 		poolKeys,
-		endedEpoch.StartSlot,
-		evt.PreviousEpoch,
+		registrationStartSlot,
+		registrationEpoch,
 		distribution.Slot,
 		metaTxn,
 	)
@@ -1238,12 +1253,14 @@ const poolSnapshotRetentionMaxDepth uint64 = 24
 // be replayed after a rollback across the boundary where those rewards were
 // applied.
 //
-// reward_stake_input is pruned to that 4-epoch window in every storage mode:
-// it scales with delegator count (~1.3M rows/epoch on mainnet) and is not
-// needed once the epoch it snapshots has finished replaying. reward_account_output
-// is pruned to the same window in CORE storage mode (types.StorageModeCore),
-// matching dingo's original pruning behavior exactly, but retained WITHOUT BOUND
-// in API storage mode (types.StorageModeAPI) so the Blockfrost account
+// reward_stake_input scales with delegator count (~1.3M rows/epoch on mainnet)
+// and is not needed once the epoch it snapshots has finished replaying, so
+// outside API storage mode it is pruned to that 4-epoch window. In API storage
+// mode (types.StorageModeAPI) it is retained WITHOUT BOUND so the Blockfrost
+// epoch stake and account stake-history endpoints can answer for any epoch the
+// node has run in that mode. reward_account_output is pruned to the same
+// window in CORE storage mode (types.StorageModeCore), matching dingo's original pruning behavior exactly, but likewise retained
+// WITHOUT BOUND in API storage mode so the Blockfrost account
 // reward-history endpoint (GET /accounts/{stake_address}/rewards)
 // can serve an account's full reward history instead of only the trailing few
 // epochs — the same "silently look empty past the window" failure mode that
@@ -1255,7 +1272,7 @@ const poolSnapshotRetentionMaxDepth uint64 = 24
 // progression during a from-genesis or catch-up sync, so the fixed 4-epoch
 // window otherwise prunes an epoch's rows before the observer ever reads them.
 // See rewardstate.DeleteStateBeforeEpoch (core, prunes both tables) and
-// rewardstate.DeleteStakeInputBeforeEpoch (API/koios-parity, prunes only
+// rewardstate.DeleteStakeInputBeforeEpoch (koios-parity, prunes only
 // reward_stake_input) for the implementation and full rationale.
 //
 // epoch_summary is deliberately NOT pruned. It is a single small row per epoch
@@ -1369,22 +1386,28 @@ func (m *Manager) cleanupOldSnapshots(
 	meta := m.db.Metadata()
 	metaTxn := txn.Metadata()
 
-	if m.db.StorageMode() == types.StorageModeAPI ||
-		m.RewardAccountOutputRetentionUnbounded() {
-		// API storage mode, or the in-process Koios parity observer enabled:
-		// retain reward_account_output without bound (see doc comment above)
-		// and prune only reward_stake_input.
+	switch {
+	case m.db.StorageMode() == types.StorageModeAPI:
+		// API storage mode retains both reward tables without bound: the
+		// Blockfrost epoch stake and account history endpoints read
+		// reward_stake_input for epochs far behind the tip. This costs about
+		// 1.3M rows per epoch on mainnet.
+	case m.RewardAccountOutputRetentionUnbounded():
+		// The in-process Koios parity observer needs reward_account_output
+		// only (see doc comment above).
 		if err := meta.DeleteRewardStakeInputBeforeEpoch(
 			deleteBeforeEpoch,
 			metaTxn,
 		); err != nil {
 			return fmt.Errorf("cleanup reward state: %w", err)
 		}
-	} else if err := meta.DeleteRewardStateBeforeEpoch(
-		deleteBeforeEpoch,
-		metaTxn,
-	); err != nil {
-		return fmt.Errorf("cleanup reward state: %w", err)
+	default:
+		if err := meta.DeleteRewardStateBeforeEpoch(
+			deleteBeforeEpoch,
+			metaTxn,
+		); err != nil {
+			return fmt.Errorf("cleanup reward state: %w", err)
+		}
 	}
 
 	m.logger.Debug(

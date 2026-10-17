@@ -377,6 +377,11 @@ type acquiredEbRecord struct {
 	seenAt time.Time
 }
 
+type validatedAnnouncementRecord struct {
+	ebHash lcommon.Blake2b256
+	seenAt time.Time
+}
+
 // maxPendingPrototypeCandidatesPerVoter bounds alternate signatures retained
 // while an announcing ranking block is unknown. More than one candidate is
 // required because signatures cannot be verified until the announcement maps
@@ -504,18 +509,19 @@ type VoteManager struct {
 	// undone by an in-flight computation landing afterwards -- the rollback
 	// case derived from a pre-rollback stake snapshot, the stop case from the
 	// stopped lifecycle's providers.
-	committeeGeneration uint64
-	votesById           map[lcommon.LeiosVoteId]*storedVote
-	voteLog             []*storedVote // ascending seq order
-	voteRecords         map[lcommon.LeiosVoteId]voteRecord
-	nextSeq             uint64
-	cursors             map[string]uint64 // connection key -> next seq to serve
-	wakeCh              chan struct{}     // closed and replaced on every insert
-	tallies             map[tallyKey]*ebTally
-	announcements       map[lcommon.Blake2b256]announcementRecord
-	acquiredEbs         map[lcommon.Blake2b256]acquiredEbRecord
-	votedAnnouncements  map[lcommon.Blake2b256]struct{}
-	pendingVotes        map[lcommon.Blake2b256]map[uint64][]pendingPrototypeVote
+	committeeGeneration    uint64
+	votesById              map[lcommon.LeiosVoteId]*storedVote
+	voteLog                []*storedVote // ascending seq order
+	voteRecords            map[lcommon.LeiosVoteId]voteRecord
+	nextSeq                uint64
+	cursors                map[string]uint64 // connection key -> next seq to serve
+	wakeCh                 chan struct{}     // closed and replaced on every insert
+	tallies                map[tallyKey]*ebTally
+	announcements          map[lcommon.Blake2b256]announcementRecord
+	acquiredEbs            map[lcommon.Blake2b256]acquiredEbRecord
+	validatedAnnouncements map[lcommon.Blake2b256]validatedAnnouncementRecord
+	votedAnnouncements     map[lcommon.Blake2b256]struct{}
+	pendingVotes           map[lcommon.Blake2b256]map[uint64][]pendingPrototypeVote
 	// pendingVoteCount is the sum of all pending candidate slices;
 	// pendingVoteCountByConn partitions that same total by origin connection.
 	// Every admission and removal must update both counters together.
@@ -620,7 +626,10 @@ func NewVoteManager(cfg VoteManagerConfig) (*VoteManager, error) {
 		tallies:             make(map[tallyKey]*ebTally),
 		announcements:       make(map[lcommon.Blake2b256]announcementRecord),
 		acquiredEbs:         make(map[lcommon.Blake2b256]acquiredEbRecord),
-		votedAnnouncements:  make(map[lcommon.Blake2b256]struct{}),
+		validatedAnnouncements: make(
+			map[lcommon.Blake2b256]validatedAnnouncementRecord,
+		),
+		votedAnnouncements: make(map[lcommon.Blake2b256]struct{}),
 		pendingVotes: make(
 			map[lcommon.Blake2b256]map[uint64][]pendingPrototypeVote,
 		),
@@ -1092,7 +1101,8 @@ func (m *VoteManager) readyAnnouncementsForEpochLocked(
 		if record.epoch != currentEpoch {
 			continue
 		}
-		if _, acquired := m.acquiredEbs[record.ebHash]; !acquired {
+		validated, ok := m.validatedAnnouncements[rbHash]
+		if !ok || validated.ebHash != record.ebHash {
 			continue
 		}
 		if _, voted := m.votedAnnouncements[rbHash]; voted {
@@ -2147,8 +2157,14 @@ func (m *VoteManager) prunePrototypeStateLocked(now time.Time) {
 	for rbHash, record := range m.announcements {
 		if record.seenAt.Before(cutoff) {
 			delete(m.announcements, rbHash)
+			delete(m.validatedAnnouncements, rbHash)
 			delete(m.votedAnnouncements, rbHash)
 			m.removePendingAnnouncementLocked(rbHash)
+		}
+	}
+	for rbHash, record := range m.validatedAnnouncements {
+		if record.seenAt.Before(cutoff) {
+			delete(m.validatedAnnouncements, rbHash)
 		}
 	}
 	for ebHash, record := range m.acquiredEbs {
@@ -2219,7 +2235,8 @@ func (m *VoteManager) insertVote(
 			return false
 		}
 		if originConn == "" {
-			if _, acquired := m.acquiredEbs[current.ebHash]; !acquired {
+			validated, ok := m.validatedAnnouncements[announcingRbHash]
+			if !ok || validated.ebHash != current.ebHash {
 				m.mu.Unlock()
 				return false
 			}
@@ -2593,16 +2610,18 @@ func (m *VoteManager) VotesByIds(
 	return ret
 }
 
-// HandleEndorserBlock records acquisition. The current prototype votes only
-// after a selected ranking block announces the acquired EB.
-func (m *VoteManager) HandleEndorserBlock(
+// HandleValidatedEndorserBlock records an endorser block that passed semantic
+// validation for the named ranking-block announcement. Local votes are scoped
+// to that exact announcement.
+func (m *VoteManager) HandleValidatedEndorserBlock(
 	slot uint64,
+	rbHash lcommon.Blake2b256,
 	ebHash lcommon.Blake2b256,
 ) {
 	epoch, err := m.epochProvider.EpochForSlot(slot)
 	if err != nil {
 		m.logger.Debug(
-			"cannot resolve acquired endorser block epoch",
+			"cannot resolve validated endorser block epoch",
 			"error",
 			err,
 		)
@@ -2614,21 +2633,14 @@ func (m *VoteManager) HandleEndorserBlock(
 	m.acquiredEbs[ebHash] = acquiredEbRecord{
 		slot: slot, epoch: epoch, seenAt: now,
 	}
-	var ready []struct {
-		rbHash lcommon.Blake2b256
-		record announcementRecord
+	m.validatedAnnouncements[rbHash] = validatedAnnouncementRecord{
+		ebHash: ebHash, seenAt: now,
 	}
-	for rbHash, record := range m.announcements {
-		if record.ebHash == ebHash {
-			ready = append(ready, struct {
-				rbHash lcommon.Blake2b256
-				record announcementRecord
-			}{rbHash: rbHash, record: record})
-		}
-	}
+	record, ready := m.announcements[rbHash]
+	ready = ready && record.ebHash == ebHash
 	m.mu.Unlock()
-	for _, item := range ready {
-		m.emitPrototypeVote(item.rbHash, item.record)
+	if ready {
+		m.emitPrototypeVote(rbHash, record)
 	}
 }
 
@@ -3013,6 +3025,7 @@ func (m *VoteManager) handleChainHeaderInvalidation(
 	named := make(map[lcommon.Blake2b256]struct{}, len(evt.RbHashes))
 	for _, rbHash := range evt.RbHashes {
 		named[rbHash] = struct{}{}
+		delete(m.validatedAnnouncements, rbHash)
 	}
 	invalidated := make(map[lcommon.Blake2b256]struct{})
 	for rbHash, record := range m.announcements {
@@ -3021,6 +3034,7 @@ func (m *VoteManager) handleChainHeaderInvalidation(
 			continue
 		}
 		delete(m.announcements, rbHash)
+		delete(m.validatedAnnouncements, rbHash)
 		delete(m.votedAnnouncements, rbHash)
 		m.removePendingAnnouncementLocked(rbHash)
 		invalidated[rbHash] = struct{}{}
@@ -3073,6 +3087,9 @@ func (m *VoteManager) dropAnnouncementDerivedStateLocked(
 		if _, ok := invalidated[key.announcingRbHash]; ok {
 			delete(m.tallies, key)
 		}
+	}
+	for rbHash := range invalidated {
+		delete(m.validatedAnnouncements, rbHash)
 	}
 	if len(droppedIds) > 0 {
 		m.filterVotesLocked(func(sv *storedVote) bool {
@@ -3207,10 +3224,11 @@ func (m *VoteManager) observeAnnouncement(
 		record.headerSeq = existing.headerSeq
 	}
 	m.announcements[rbHash] = record
-	_, acquired := m.acquiredEbs[ebHash]
+	validated, ok := m.validatedAnnouncements[rbHash]
+	ready := ok && validated.ebHash == ebHash
 	pendingMap := m.removePendingAnnouncementLocked(rbHash)
 	m.mu.Unlock()
-	if acquired {
+	if ready {
 		m.emitPrototypeVote(rbHash, record)
 	}
 	for _, candidates := range pendingMap {
@@ -3269,6 +3287,7 @@ func (m *VoteManager) handleEpochTransition(
 	for rbHash, record := range m.announcements {
 		if record.epoch < keepFrom {
 			delete(m.announcements, rbHash)
+			delete(m.validatedAnnouncements, rbHash)
 			delete(m.votedAnnouncements, rbHash)
 			m.removePendingAnnouncementLocked(rbHash)
 		}
@@ -3385,6 +3404,7 @@ func (m *VoteManager) handleRollback(evt chain.ChainRollbackEvent) {
 			continue
 		}
 		delete(m.announcements, rbHash)
+		delete(m.validatedAnnouncements, rbHash)
 		delete(m.votedAnnouncements, rbHash)
 		m.removePendingAnnouncementLocked(rbHash)
 	}

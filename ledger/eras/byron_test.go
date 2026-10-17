@@ -31,6 +31,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
 	"github.com/blinklabs-io/plutigo/data"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -1391,19 +1392,6 @@ func (t *testByronTx) Cbor() []byte {
 	return t.cbor
 }
 
-func TestValidateTxByron_ValidTransaction(t *testing.T) {
-	tx := &testByronTx{
-		inputs: []lcommon.TransactionInput{
-			newTestInput(0x01, 0),
-		},
-		outputs: []lcommon.TransactionOutput{
-			newTestOutput(1_000_000),
-		},
-	}
-	err := ValidateTxByron(tx, 0, nil, nil)
-	assert.NoError(t, err)
-}
-
 func TestValidateTxByron_MainnetZeroValueOutput(t *testing.T) {
 	// This transaction is from the canonical mainnet block at slot 4,427,376.
 	// Byron consensus permits its first output to contain zero lovelace.
@@ -1706,12 +1694,21 @@ type mockLedgerState struct {
 	// a *mockLedgerState into eras.PlutusEvalContextCacheProvider. nil (the
 	// zero value) preserves every existing test's uncached behavior.
 	plutusEvalContextCache *PlutusEvalContextCache
+	governanceState        *mockledger.MockLedgerState
 }
 
 // PlutusEvalContextCache implements eras.PlutusEvalContextCacheProvider, the
 // same way *ledger.LedgerView does in production.
 func (m *mockLedgerState) PlutusEvalContextCache() *PlutusEvalContextCache {
 	return m.plutusEvalContextCache
+}
+
+// GovPurposeRoots delegates to the shared, explicitly configured fixture.
+func (m *mockLedgerState) GovPurposeRoots() (*lcommon.GovPurposeRoots, error) {
+	if m.governanceState == nil {
+		return nil, errors.New("governance purpose roots unavailable")
+	}
+	return m.governanceState.GovPurposeRoots()
 }
 
 // MIRDelegState implements eras.MIRDelegStateProvider for tests. The real

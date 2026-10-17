@@ -32,6 +32,20 @@ type Asset struct {
 	Amount      types.Uint64
 }
 
+type AssetHolderQuery struct {
+	PolicyID   []byte
+	AssetName  []byte
+	Descending bool
+	Limit      int
+	Offset     int
+}
+
+// AssetHolder is one metadata-aggregated live holder.
+type AssetHolder struct {
+	Address  []byte
+	Quantity uint64
+}
+
 // AssetMintBurn records a single asset mint or burn event: one row per
 // (transaction, asset) pair for every transaction that mints or burns the
 // asset. Quantity is a signed decimal string (positive for a mint, negative
@@ -49,6 +63,12 @@ type AssetMintBurn struct {
 	Slot        uint64
 	Quantity    string
 	TxIndex     uint32
+}
+
+// MintedAsset identifies an asset with a recorded mint or burn event.
+type MintedAsset struct {
+	PolicyId []byte
+	Name     []byte
 }
 
 // ConvertMintToAssetMintBurnModels converts a transaction's mint field into a

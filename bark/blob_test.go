@@ -17,8 +17,10 @@ package bark
 import (
 	"bytes"
 	"context"
+	"crypto/x509"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -26,6 +28,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"connectrpc.com/connect"
@@ -118,6 +121,14 @@ func startFakeArchive(
 	t *testing.T,
 	blocks map[string][]byte,
 ) (string, *fakeArchive, *http.Client) {
+	return startFakeArchiveWithOptions(t, blocks)
+}
+
+func startFakeArchiveWithOptions(
+	t *testing.T,
+	blocks map[string][]byte,
+	opts ...connect.HandlerOption,
+) (string, *fakeArchive, *http.Client) {
 	t.Helper()
 	mux := http.NewServeMux()
 	a := &fakeArchive{
@@ -157,7 +168,7 @@ func startFakeArchive(
 		},
 	)
 
-	archivePath, archiveHandler := archiveconnect.NewArchiveServiceHandler(a)
+	archivePath, archiveHandler := archiveconnect.NewArchiveServiceHandler(a, opts...)
 	mux.Handle(archivePath, archiveHandler)
 
 	srv := httptest.NewUnstartedServer(mux)
@@ -194,8 +205,9 @@ func newBarkBlobStoreForTest(
 	require.NoError(t, err)
 	localHost := base.Hostname()
 	store, err := NewBarkBlobStore(BlobStoreBarkConfig{
-		BaseUrl:    baseURL,
-		HTTPClient: httpClient,
+		BaseUrl:                            baseURL,
+		HTTPClient:                         httpClient,
+		BlockDownloadAllowPrivateAddresses: true,
 		lookupIPAddr: func(context.Context, string) ([]net.IPAddr, error) {
 			return []net.IPAddr{{IP: net.ParseIP("93.184.216.34")}}, nil
 		},
@@ -346,6 +358,7 @@ func TestArchiveHTTPClientValidatesRedirectOrigin(t *testing.T) {
 	client := archiveDownloadHTTPClient(
 		&http.Client{Transport: &http.Transport{}},
 		allowedOrigins,
+		false,
 		func(context.Context, string, string) (net.Conn, error) {
 			return nil, errors.New("not used")
 		},
@@ -395,6 +408,7 @@ func TestArchiveHTTPClientValidatesRedirectAfterCallerPolicy(t *testing.T) {
 			},
 		},
 		allowedOrigins,
+		false,
 		func(context.Context, string, string) (net.Conn, error) {
 			return nil, errors.New("not used")
 		},
@@ -428,7 +442,13 @@ func TestArchiveHTTPClientReplacesCustomTransport(t *testing.T) {
 	)
 	require.NoError(t, err)
 	original := &http.Client{Transport: customRoundTripper{}}
-	client := archiveDownloadHTTPClient(original, allowedOrigins, nil, nil)
+	client := archiveDownloadHTTPClient(
+		original,
+		allowedOrigins,
+		false,
+		nil,
+		nil,
+	)
 
 	transport, ok := client.Transport.(*http.Transport)
 	require.True(t, ok)
@@ -449,6 +469,7 @@ func TestArchiveHTTPClientRejectsPrivateResolvedAddress(t *testing.T) {
 	client := archiveDownloadHTTPClient(
 		&http.Client{Transport: &http.Transport{}},
 		allowedOrigins,
+		false,
 		func(context.Context, string, string) (net.Conn, error) {
 			dialed = true
 			return nil, errors.New("unexpected dial")
@@ -481,6 +502,7 @@ func TestArchiveHTTPClientDisablesProxy(t *testing.T) {
 			Transport: &http.Transport{Proxy: http.ProxyFromEnvironment},
 		},
 		allowedOrigins,
+		false,
 		func(context.Context, string, string) (net.Conn, error) {
 			return nil, errors.New("not used")
 		},
@@ -489,6 +511,44 @@ func TestArchiveHTTPClientDisablesProxy(t *testing.T) {
 		},
 	)
 	assert.Nil(t, client.Transport.(*http.Transport).Proxy)
+}
+
+func TestBarkServiceHTTPClientEnforcesTransportPolicy(t *testing.T) {
+	t.Parallel()
+
+	client, err := barkServiceHTTPClient(
+		&http.Client{
+			Transport: &http.Transport{Proxy: http.ProxyFromEnvironment},
+		},
+		"https://bark.example.com/api",
+		false,
+		func(context.Context, string, string) (net.Conn, error) {
+			return nil, errors.New("not used")
+		},
+		func(context.Context, string) ([]net.IPAddr, error) {
+			return []net.IPAddr{{IP: net.ParseIP("93.184.216.34")}}, nil
+		},
+	)
+	require.NoError(t, err)
+	assert.Nil(t, client.Transport.(*http.Transport).Proxy)
+
+	sameOrigin, err := http.NewRequest(
+		http.MethodPost,
+		"https://bark.example.com/other",
+		nil,
+	)
+	require.NoError(t, err)
+	require.NoError(t, client.CheckRedirect(sameOrigin, nil))
+
+	otherOrigin, err := http.NewRequest(
+		http.MethodPost,
+		"https://other.example.com/api",
+		nil,
+	)
+	require.NoError(t, err)
+	err = client.CheckRedirect(otherOrigin, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unsafe Bark service redirect")
 }
 
 func TestArchiveDownloadHTTPClientDiscardsCallerDialer(t *testing.T) {
@@ -512,6 +572,7 @@ func TestArchiveDownloadHTTPClientDiscardsCallerDialer(t *testing.T) {
 			},
 		}},
 		allowedOrigins,
+		false,
 		nil,
 		func(context.Context, string) ([]net.IPAddr, error) {
 			return []net.IPAddr{{IP: net.ParseIP("93.184.216.34")}}, nil
@@ -529,15 +590,99 @@ func TestArchiveDownloadHTTPClientDiscardsCallerDialer(t *testing.T) {
 	assert.False(t, callerDialed)
 }
 
-func TestArchiveServiceClientAllowsConfiguredLocalEndpoint(t *testing.T) {
+func TestArchiveHTTPClientAllowPrivateKeepsOtherChecks(t *testing.T) {
+	t.Parallel()
+
+	allowedOrigins, err := archiveDownloadOrigins(
+		"https://archive.example.com",
+		nil,
+	)
+	require.NoError(t, err)
+	var dialedAddress string
+	client := archiveDownloadHTTPClient(
+		&http.Client{
+			Transport: &http.Transport{Proxy: http.ProxyFromEnvironment},
+		},
+		allowedOrigins,
+		true,
+		func(_ context.Context, _ string, address string) (net.Conn, error) {
+			dialedAddress = address
+			return nil, errors.New("dial reached")
+		},
+		func(context.Context, string) ([]net.IPAddr, error) {
+			return []net.IPAddr{{IP: net.ParseIP("10.0.0.5")}}, nil
+		},
+	)
+	transport := client.Transport.(*http.Transport)
+	assert.Nil(t, transport.Proxy)
+
+	_, err = transport.DialContext(
+		context.Background(),
+		"tcp",
+		"archive.example.com:443",
+	)
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, netguard.ErrBlockedDestination)
+	assert.Equal(t, "archive.example.com:443", dialedAddress)
+
+	for _, target := range []string{
+		"https://other.example.com/block",
+		"http://archive.example.com/block",
+	} {
+		redirect, err := http.NewRequest(http.MethodGet, target, nil)
+		require.NoError(t, err)
+		err = client.CheckRedirect(redirect, nil)
+		require.Error(t, err, target)
+		assert.Contains(t, err.Error(), "unsafe archive redirect", target)
+	}
+}
+
+// TestGetBlock_PrivateArchiveDownloadRequiresOptIn serves the archive and its
+// download origin from loopback, the shape of a private S3-compatible store.
+func TestGetBlock_PrivateArchiveDownloadRequiresOptIn(t *testing.T) {
+	t.Parallel()
+
+	block := archiveBlockFixtures(t, 2)[1]
+	hash := block.Hash()
+	for _, allowPrivate := range []bool{false, true} {
+		t.Run(fmt.Sprintf("allowPrivate=%t", allowPrivate), func(t *testing.T) {
+			t.Parallel()
+
+			db := newTestDB(t)
+			blocks, configure := serveArchiveBlock(t, block)
+			baseURL, fakeArch, httpClient := startFakeArchive(t, blocks)
+			configure(fakeArch)
+			store, err := NewBarkBlobStore(BlobStoreBarkConfig{
+				BaseUrl:                            baseURL,
+				HTTPClient:                         httpClient,
+				BlockDownloadAllowPrivateAddresses: allowPrivate,
+			}, db.Blob())
+			require.NoError(t, err)
+			rTxn := store.NewTransaction(false)
+			t.Cleanup(func() { _ = rTxn.Rollback() })
+
+			cbor, _, err := store.GetBlock(rTxn, block.SlotNumber(), hash[:])
+			if !allowPrivate {
+				require.Error(t, err)
+				assert.ErrorIs(t, err, netguard.ErrBlockedDestination)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, block.Cbor(), cbor)
+		})
+	}
+}
+
+func TestArchiveServiceClientAllowsConfiguredLocalEndpointWithOptIn(t *testing.T) {
 	t.Parallel()
 
 	db := newTestDB(t)
 	baseURL, archiveServer, httpClient := startFakeArchive(t, nil)
 	archiveServer.serveNotFound = true
 	store, err := NewBarkBlobStore(BlobStoreBarkConfig{
-		BaseUrl:    baseURL,
-		HTTPClient: httpClient,
+		BaseUrl:                            baseURL,
+		HTTPClient:                         httpClient,
+		BlockDownloadAllowPrivateAddresses: true,
 	}, db.Blob())
 	require.NoError(t, err)
 	slot := uint64(1)
@@ -554,6 +699,110 @@ func TestArchiveServiceClientAllowsConfiguredLocalEndpoint(t *testing.T) {
 	)
 	require.NoError(t, err)
 	assert.Equal(t, 1, archiveServer.fetchCalls)
+}
+
+func TestArchiveServiceClientRejectsPrivateDestinationByDefault(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	baseURL, archiveServer, httpClient := startFakeArchive(t, nil)
+	archiveServer.serveNotFound = true
+	store, err := NewBarkBlobStore(BlobStoreBarkConfig{
+		BaseUrl:    baseURL,
+		HTTPClient: httpClient,
+	}, db.Blob())
+	require.NoError(t, err)
+	slot := uint64(1)
+	hash := strings.Repeat("00", 32)
+
+	_, err = store.archiveClient.FetchBlock(
+		t.Context(),
+		connect.NewRequest(&archive.FetchBlockRequest{
+			Blocks: []*archive.BlockRef{{Slot: &slot, Hash: &hash}},
+		}),
+	)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, netguard.ErrBlockedDestination)
+	assert.Equal(t, 0, archiveServer.fetchCalls)
+}
+
+func TestArchiveServiceClientRejectsCrossOriginRedirect(t *testing.T) {
+	t.Parallel()
+
+	var targetCalled atomic.Bool
+	target := httptest.NewTLSServer(http.HandlerFunc(
+		func(w http.ResponseWriter, _ *http.Request) {
+			targetCalled.Store(true)
+			w.WriteHeader(http.StatusNoContent)
+		},
+	))
+	t.Cleanup(target.Close)
+
+	redirector := httptest.NewTLSServer(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(
+				w,
+				r,
+				target.URL+r.URL.Path,
+				http.StatusTemporaryRedirect,
+			)
+		},
+	))
+	t.Cleanup(redirector.Close)
+
+	rootCAs := x509.NewCertPool()
+	rootCAs.AddCert(redirector.Certificate())
+	rootCAs.AddCert(target.Certificate())
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.TLSClientConfig = redirector.Client().Transport.(*http.Transport).
+		TLSClientConfig.Clone()
+	transport.TLSClientConfig.RootCAs = rootCAs
+
+	db := newTestDB(t)
+	store, err := NewBarkBlobStore(BlobStoreBarkConfig{
+		BaseUrl:                            redirector.URL,
+		HTTPClient:                         &http.Client{Transport: transport},
+		BlockDownloadAllowPrivateAddresses: true,
+	}, db.Blob())
+	require.NoError(t, err)
+
+	_, err = store.archiveClient.FetchBlock(
+		t.Context(),
+		connect.NewRequest(&archive.FetchBlockRequest{}),
+	)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unsafe Bark service redirect")
+	assert.False(t, targetCalled.Load())
+}
+
+func TestArchiveServiceClientBoundsDecodedResponse(t *testing.T) {
+	t.Parallel()
+
+	const hash = "00"
+	baseURL, archiveServer, httpClient := startFakeArchiveWithOptions(
+		t,
+		map[string][]byte{hash: nil},
+		connect.WithCompressMinBytes(1),
+	)
+	archiveServer.downloadURL = "https://archive.example/" +
+		strings.Repeat("a", DefaultMaxResponseBody)
+	db := newTestDB(t)
+	store, err := NewBarkBlobStore(BlobStoreBarkConfig{
+		BaseUrl:                            baseURL,
+		HTTPClient:                         httpClient,
+		BlockDownloadAllowPrivateAddresses: true,
+	}, db.Blob())
+	require.NoError(t, err)
+
+	_, err = store.archiveClient.FetchBlock(
+		t.Context(),
+		connect.NewRequest(&archive.FetchBlockRequest{
+			Blocks: []*archive.BlockRef{{Hash: new(hash)}},
+		}),
+	)
+	require.Error(t, err)
+	assert.Equal(t, connect.CodeResourceExhausted, connect.CodeOf(err))
+	assert.Contains(t, err.Error(), "larger than configured max")
 }
 
 // TestGetBlock_RejectsNonHTTPS verifies that a non-HTTPS download URL returned

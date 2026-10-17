@@ -22,6 +22,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
+	"github.com/blinklabs-io/dingo/database/types"
 )
 
 // FinalizeBackfillPlannerStats refreshes statistics once per completed backfill.
@@ -31,6 +32,31 @@ func FinalizeBackfillPlannerStats(
 	ctx context.Context,
 	db *database.Database,
 	logger *slog.Logger,
+) error {
+	return finalizeBackfillPlannerStats(ctx, db, logger, false)
+}
+
+// FinalizeMithrilBackfillPlannerStats permits sampled planner statistics for
+// a fresh bootstrap. Resumed databases retain the full statistics refresh.
+func FinalizeMithrilBackfillPlannerStats(
+	ctx context.Context,
+	db *database.Database,
+	logger *slog.Logger,
+	freshDatabaseBootstrap bool,
+) error {
+	return finalizeBackfillPlannerStats(
+		ctx,
+		db,
+		logger,
+		freshDatabaseBootstrap,
+	)
+}
+
+func finalizeBackfillPlannerStats(
+	ctx context.Context,
+	db *database.Database,
+	logger *slog.Logger,
+	allowIncremental bool,
 ) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -65,19 +91,16 @@ func FinalizeBackfillPlannerStats(
 		cp.LastSlot,
 	)
 	started := time.Now()
-	if contextual, ok := updater.(metadata.ContextPlannerStatsUpdater); ok {
-		err = contextual.UpdatePlannerStatsContext(ctx)
-	} else {
-		err = updater.UpdatePlannerStats()
-	}
-	if err != nil {
+	if err := updatePlannerStatsAfterBackfill(
+		ctx, updater, allowIncremental,
+	); err != nil {
 		return fmt.Errorf("refresh planner statistics after backfill: %w", err)
 	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	// The marker follows successful ANALYZE. A crash before this write safely
-	// repeats analysis instead of allowing stale statistics through readiness.
+	// Record only completed maintenance; a crash before this write reruns it
+	// instead of declaring readiness with stale planner statistics.
 	if err := db.SetSyncState(metadata.PlannerStatsBackfillSyncKey, version, nil); err != nil {
 		return err
 	}
@@ -89,4 +112,27 @@ func FinalizeBackfillPlannerStats(
 		time.Since(started),
 	)
 	return nil
+}
+
+func updatePlannerStatsAfterBackfill(
+	ctx context.Context,
+	updater metadata.PlannerStatsUpdater,
+	allowIncremental bool,
+) error {
+	if incremental, ok := updater.(metadata.IncrementalPlannerStatsUpdater); allowIncremental && ok {
+		result, err := incremental.OptimizePlannerStatsContext(
+			ctx,
+			types.PlannerStatsTriggerStartup,
+		)
+		if err != nil {
+			return err
+		}
+		if result.Supported && !result.Skipped {
+			return nil
+		}
+	}
+	if contextual, ok := updater.(metadata.ContextPlannerStatsUpdater); ok {
+		return contextual.UpdatePlannerStatsContext(ctx)
+	}
+	return updater.UpdatePlannerStats()
 }

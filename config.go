@@ -151,6 +151,8 @@ type OffchainMetadataConfig struct {
 type TokenRegistryConfig struct {
 	HTTPClient            *http.Client
 	SourceURL             string
+	ManifestURL           string
+	TrustedManifestKey    string
 	UserAgent             string
 	Headers               map[string]string
 	Interval              time.Duration
@@ -164,6 +166,7 @@ type TokenRegistryConfig struct {
 	Enabled               bool
 	StoreLogos            bool
 	AllowPrivateAddresses bool
+	AllowRollback         bool
 }
 
 // MidnightConfig controls the Midnight indexer and optional gRPC listener.
@@ -237,6 +240,7 @@ type Config struct {
 	outboundSourcePort, barkPort                                                        uint
 	barkBaseUrl                                                                         string
 	barkBlockDownloadHosts                                                              []string
+	barkBlockDownloadAllowPrivateAddresses                                              bool
 	barkHost                                                                            string
 	barkClientCAFilePath                                                                string
 	barkArchiveMaxConcurrentFetches                                                     int
@@ -291,6 +295,7 @@ type Config struct {
 	fullPotRewardsEnabled, unsafeFullPotRewardsOnStandardNetworks                       bool
 	delegatorInactivityEnabled                                                          bool
 	delegatorInactivity                                                                 uint64
+	leiosPersistenceRetentionSlots                                                      uint64
 	leiosVoteSigningKeyFile                                                             string
 	midnight                                                                            MidnightConfig
 	chainsyncMaxClients                                                                 int
@@ -732,6 +737,7 @@ func NewConfig(opts ...ConfigOptionFunc) Config {
 			KoiosParity:         internalconfig.DefaultKoiosParityConfig(),
 			Logging:             internalconfig.DefaultLoggingConfig(),
 			Midnight:            internalconfig.DefaultMidnightConfig(),
+			DMQ:                 internalconfig.DefaultDMQConfig(),
 			CORSAllowedOrigins:  []string{"*"},
 
 			// SQLite planner statistics stay current unless an operator
@@ -813,6 +819,7 @@ func (c *Config) syncCompatFields() {
 	c.tlsCertFilePath, c.tlsKeyFilePath = c.cfg.TlsCertFilePath, c.cfg.TlsKeyFilePath
 	c.apiConfig = c.cfg.API
 	c.barkBaseUrl, c.barkPort, c.barkBlockDownloadHosts = c.cfg.BarkBaseUrl, c.cfg.BarkPort, c.cfg.BarkBlockDownloadHosts
+	c.barkBlockDownloadAllowPrivateAddresses = c.cfg.BarkBlockDownloadAllowPrivateAddresses
 	c.barkHost = c.cfg.BarkHost
 	c.barkClientCAFilePath = c.cfg.BarkClientCAFilePath
 	c.barkArchiveMaxConcurrentFetches = c.cfg.BarkArchiveMaxConcurrentFetches
@@ -871,6 +878,8 @@ func (c *Config) syncCompatFields() {
 	c.tokenRegistry = TokenRegistryConfig{
 		HTTPClient:            c.tokenRegistry.HTTPClient,
 		SourceURL:             c.cfg.TokenRegistry.SourceURL,
+		ManifestURL:           c.cfg.TokenRegistry.ManifestURL,
+		TrustedManifestKey:    c.cfg.TokenRegistry.TrustedManifestKey,
 		UserAgent:             c.cfg.TokenRegistry.UserAgent,
 		Headers:               c.cfg.TokenRegistry.HeaderSecrets,
 		Interval:              c.cfg.TokenRegistry.Interval,
@@ -884,6 +893,7 @@ func (c *Config) syncCompatFields() {
 		Enabled:               c.cfg.TokenRegistry.Enabled,
 		StoreLogos:            c.cfg.TokenRegistry.StoreLogos,
 		AllowPrivateAddresses: c.cfg.TokenRegistry.AllowPrivateAddresses,
+		AllowRollback:         c.cfg.TokenRegistry.AllowRollback,
 	}
 	c.midnight = MidnightConfig{
 		Enabled:                     c.cfg.Midnight.Enabled,
@@ -940,6 +950,7 @@ func (c *Config) syncCompatFields() {
 	c.minPoolMargin, c.pledgeLeverageEnabled, c.pledgeLeverage = c.cfg.MinPoolMargin, c.cfg.PledgeLeverageEnabled, c.cfg.PledgeLeverage
 	c.fullPotRewardsEnabled, c.unsafeFullPotRewardsOnStandardNetworks = c.cfg.FullPotRewardsEnabled, c.cfg.UnsafeFullPotRewardsOnStandardNetworks
 	c.delegatorInactivityEnabled, c.delegatorInactivity = c.cfg.DelegatorInactivityEnabled, c.cfg.DelegatorInactivity
+	c.leiosPersistenceRetentionSlots = c.cfg.LeiosPersistenceRetentionSlots
 	c.leiosVoteSigningKeyFile = c.cfg.LeiosVoteSigningKeyFile
 	c.cacheBlockLRUEntries, c.cacheHotUtxoEntries, c.cacheHotTxEntries, c.cacheHotTxMaxBytes = c.cfg.Cache.BlockLRUEntries, c.cfg.Cache.HotUtxoEntries, c.cfg.Cache.HotTxEntries, c.cfg.Cache.HotTxMaxBytes
 	c.pluginSelections = map[hostplugin.Capability]hostplugin.Selection{
@@ -1659,6 +1670,15 @@ func WithLeiosVoteSigningKeyFile(path string) ConfigOptionFunc {
 	}
 }
 
+// WithLeiosPersistenceRetentionSlots sets the number of slots of persisted
+// Leios endorser-block history retained for historical serving. Zero keeps all
+// persisted history.
+func WithLeiosPersistenceRetentionSlots(slots uint64) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.LeiosPersistenceRetentionSlots = slots
+	}
+}
+
 // WithLeiosPipelineTiming overrides the provisional Leios pipeline stage
 // timing windows. CIP-0164 has not finalized these parameters, so they are
 // kept off-chain and overridable here rather than as protocol parameters.
@@ -1788,9 +1808,10 @@ func WithBlockPipelineEnabled(enabled bool) ConfigOptionFunc {
 	}
 }
 
-// WithBlockPipelineValidateEnabled adds a parallel VRF/KES and OpCert
-// validate stage to the block-decode pipeline (phase 3 of the pipeline). Off by
-// default; requires WithBlockPipelineEnabled. See
+// WithBlockPipelineValidateEnabled checks VRF/KES and OpCert header
+// cryptography serially for blocks read back during replay, ahead of the
+// decode pipeline's results. Off by default; requires
+// WithBlockPipelineEnabled. See
 // LedgerStateConfig.BlockPipelineValidateEnabled.
 func WithBlockPipelineValidateEnabled(enabled bool) ConfigOptionFunc {
 	return func(c *Config) {
@@ -1852,6 +1873,16 @@ func WithBarkBaseUrl(baseUrl string) ConfigOptionFunc {
 func WithBarkBlockDownloadHosts(hosts []string) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.BarkBlockDownloadHosts = slices.Clone(hosts)
+	}
+}
+
+// WithBarkBlockDownloadAllowPrivateAddresses permits Bark RPC and block
+// downloads to private, loopback, and other special-use addresses, such as an
+// archive and S3-compatible store on a private network. Allowed origins, HTTPS
+// download, redirect, and proxy restrictions still apply. Disabled by default.
+func WithBarkBlockDownloadAllowPrivateAddresses(allow bool) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.BarkBlockDownloadAllowPrivateAddresses = allow
 	}
 }
 
@@ -2002,6 +2033,8 @@ func WithTokenRegistryConfig(cfg TokenRegistryConfig) ConfigOptionFunc {
 		c.cfg.TokenRegistry = internalconfig.TokenRegistryConfig{
 			Enabled:               cfg.Enabled,
 			SourceURL:             cfg.SourceURL,
+			ManifestURL:           cfg.ManifestURL,
+			TrustedManifestKey:    cfg.TrustedManifestKey,
 			Interval:              cfg.Interval,
 			RequestTimeout:        cfg.RequestTimeout,
 			UserAgent:             cfg.UserAgent,
@@ -2014,6 +2047,7 @@ func WithTokenRegistryConfig(cfg TokenRegistryConfig) ConfigOptionFunc {
 			MaxBatchBytes:         cfg.MaxBatchBytes,
 			StoreLogos:            cfg.StoreLogos,
 			AllowPrivateAddresses: cfg.AllowPrivateAddresses,
+			AllowRollback:         cfg.AllowRollback,
 		}
 	}
 }
@@ -2046,8 +2080,23 @@ func WithMidnightConfig(cfg MidnightConfig) ConfigOptionFunc {
 	}
 }
 
-// WithChainsyncMaxClients specifies the maximum number of
-// concurrent chainsync client connections. Default is 3.
+// DMQConfig configures the CIP-0137 Decentralized Message Queue stack.
+type DMQConfig = internalconfig.DMQConfig
+
+// WithDMQConfig configures the DMQ stack that runs alongside the Cardano
+// stack when enabled.
+func WithDMQConfig(cfg DMQConfig) ConfigOptionFunc {
+	return func(c *Config) {
+		if c.cfg == nil {
+			*c = NewConfig()
+		}
+		c.cfg.DMQ = cfg
+	}
+}
+
+// WithChainsyncMaxClients specifies the maximum number of concurrent chainsync
+// client connections. Zero selects an automatic limit: at least 3 and large
+// enough for every configured local-root access point.
 func WithChainsyncMaxClients(
 	maxClients int,
 ) ConfigOptionFunc {
@@ -2231,6 +2280,12 @@ func (c *Config) BarkBaseUrl() string {
 // BarkBlockDownloadHosts returns the allowed Bark block-download origins.
 func (c *Config) BarkBlockDownloadHosts() []string {
 	return c.cfg.BarkBlockDownloadHosts
+}
+
+// BarkBlockDownloadAllowPrivateAddresses reports whether Bark RPC and block
+// downloads may reach private, loopback, and other special-use addresses.
+func (c *Config) BarkBlockDownloadAllowPrivateAddresses() bool {
+	return c.cfg.BarkBlockDownloadAllowPrivateAddresses
 }
 
 // BarkOperatorCertificateFingerprints returns the SHA-256 client certificate
@@ -2589,6 +2644,11 @@ func (c *Config) Midnight() internalconfig.MidnightConfig {
 	return c.cfg.Midnight
 }
 
+// DMQ returns the DMQ stack configuration.
+func (c *Config) DMQ() internalconfig.DMQConfig {
+	return c.cfg.DMQ
+}
+
 // CORSAllowedOrigins returns the CORS allowed origins list.
 func (c *Config) CORSAllowedOrigins() []string {
 	return c.cfg.CORSAllowedOrigins
@@ -2690,8 +2750,8 @@ func (c *Config) BlockPipelineEnabled() bool {
 	return c.cfg.BlockPipelineEnabled
 }
 
-// BlockPipelineValidateEnabled returns whether the parallel VRF/KES and
-// OpCert validate stage of the block-decode pipeline is enabled.
+// BlockPipelineValidateEnabled returns whether VRF/KES and OpCert header
+// cryptography is checked during block-pipeline replay.
 func (c *Config) BlockPipelineValidateEnabled() bool {
 	return c.cfg.BlockPipelineValidateEnabled
 }
@@ -2717,6 +2777,12 @@ func (c *Config) BlockfetchLowWatermarkEnabled() bool {
 // LeiosVoteSigningKeyFile returns the path to the Leios vote signing key.
 func (c *Config) LeiosVoteSigningKeyFile() string {
 	return c.cfg.LeiosVoteSigningKeyFile
+}
+
+// LeiosPersistenceRetentionSlots returns the configured Leios historical-
+// serving retention window. Zero means keep all history.
+func (c *Config) LeiosPersistenceRetentionSlots() uint64 {
+	return c.cfg.LeiosPersistenceRetentionSlots
 }
 
 // PeerSharing returns the peer sharing configuration.

@@ -44,7 +44,7 @@ func rewardUpgradeStartFixture(
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
 	registry, err := migrations.SQLiteRegistry()
 	require.NoError(t, err)
-	require.GreaterOrEqual(t, len(registry), 41)
+	require.GreaterOrEqual(t, len(registry), 43)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	runner := migrations.Runner{
 		DB: db, Dialect: "sqlite", Registry: registry[:34],
@@ -120,7 +120,9 @@ func TestRewardStakeUpgradeStartCertifiesBeforeMigrations(t *testing.T) {
 		db.QueryRowContext(t.Context(), `SELECT MAX(version) FROM schema_migrations`).
 			Scan(&version),
 	)
-	require.Equal(t, 41, version)
+	registry, err := migrations.SQLiteRegistry()
+	require.NoError(t, err)
+	require.Equal(t, len(registry), version)
 	for _, table := range []string{"pool_stake_snapshot", "reward_snapshot"} {
 		require.NoError(
 			t,

@@ -57,11 +57,15 @@ import (
 )
 
 var (
-	ErrInvalidAddress     = errors.New("invalid address")
-	ErrAddressNotFound    = errors.New("address not found")
-	ErrInvalidBlockID     = errors.New("invalid block id")
-	ErrBlockNotFound      = errors.New("block not found")
-	ErrEpochNotFound      = errors.New("epoch not found")
+	ErrInvalidAddress  = errors.New("invalid address")
+	ErrAddressNotFound = errors.New("address not found")
+	ErrInvalidBlockID  = errors.New("invalid block id")
+	ErrBlockNotFound   = errors.New("block not found")
+	ErrEpochNotFound   = errors.New("epoch not found")
+	// ErrHistoryNotRetained reports a historical query whose source rows
+	// this node no longer holds, as opposed to a query whose answer is
+	// genuinely empty.
+	ErrHistoryNotRetained = errors.New("history not retained")
 	ErrAssetNotFound      = errors.New("asset not found")
 	ErrDRepNotFound       = errors.New("drep not found")
 	ErrInvalidTransaction = errors.New("invalid transaction")
@@ -147,6 +151,18 @@ type NodeAdapter struct {
 	ledgerState *ledger.LedgerState
 	submitter   TransactionSubmitter
 	evaluator   transactionEvaluator
+	// slotBlocks overrides how a vote's block is loaded. Tests set it to
+	// serve transactions that carry voting procedures without building a
+	// body-hash-valid block; nil reads the block from the chain.
+	slotBlocks func(ctx context.Context, slot uint64) (*slotBlock, error)
+	// slotTime overrides the ledger's slot-to-time conversion. It is nil in
+	// production. The ledger converter needs the epoch cache a running node
+	// builds, which a store-backed test adapter has no way to populate.
+	slotTime func(slot uint64) (time.Time, error)
+	// mempool serves the mempool read endpoints. It is nil when the
+	// submitter does not expose the pool, which those endpoints report as
+	// ErrMempoolUnavailable.
+	mempool mempoolReader
 }
 
 // NewNodeAdapter creates a NodeAdapter that queries the
@@ -160,10 +176,12 @@ func NewNodeAdapter(
 			"new node adapter: ledger state must not be nil",
 		)
 	}
+	reader, _ := submitter.(mempoolReader)
 	return &NodeAdapter{
 		ledgerState: ls,
 		submitter:   submitter,
 		evaluator:   ls,
+		mempool:     reader,
 	}, nil
 }
 
@@ -296,41 +314,53 @@ func (a *NodeAdapter) LatestBlock() (
 func (a *NodeAdapter) BlockByHashOrNumber(
 	id string,
 ) (BlockInfo, error) {
-	var block models.Block
+	block, err := a.resolveBlock(context.Background(), id)
+	if err != nil {
+		return BlockInfo{}, err
+	}
+	return a.blockInfoFromBlock(block)
+}
+
+// resolveBlock loads the block named by a 64-character hex hash or a decimal
+// height. Errors wrap ErrInvalidBlockID for a malformed identifier and
+// ErrBlockNotFound for one that names no stored block.
+func (a *NodeAdapter) resolveBlock(
+	ctx context.Context,
+	id string,
+) (models.Block, error) {
 	if len(id) == 64 {
 		hash, err := hex.DecodeString(id)
 		if err != nil {
-			return BlockInfo{}, fmt.Errorf(
+			return models.Block{}, fmt.Errorf(
 				"decode block hash %q: %w",
 				id,
 				ErrInvalidBlockID,
 			)
 		}
-		var getErr error
-		block, getErr = a.ledgerState.BlockByHash(context.Background(), hash)
-		if getErr != nil {
-			if errors.Is(getErr, models.ErrBlockNotFound) {
-				return BlockInfo{}, fmt.Errorf(
+		block, err := a.ledgerState.BlockByHash(ctx, hash)
+		if err != nil {
+			if errors.Is(err, models.ErrBlockNotFound) {
+				return models.Block{}, fmt.Errorf(
 					"block %s: %w",
 					id,
 					ErrBlockNotFound,
 				)
 			}
-			return BlockInfo{}, getErr
+			return models.Block{}, err
 		}
-		return a.blockInfoFromBlock(block)
+		return block, nil
 	}
 
 	height, err := strconv.ParseUint(id, 10, 64)
 	if err != nil {
-		return BlockInfo{}, fmt.Errorf(
+		return models.Block{}, fmt.Errorf(
 			"parse block height %q: %w",
 			id,
 			ErrInvalidBlockID,
 		)
 	}
 	if height > math.MaxUint64-database.BlockInitialIndex {
-		return BlockInfo{}, fmt.Errorf(
+		return models.Block{}, fmt.Errorf(
 			"block height %q overflows internal index: %w",
 			id,
 			ErrInvalidBlockID,
@@ -339,21 +369,21 @@ func (a *NodeAdapter) BlockByHashOrNumber(
 	// Blockfrost accepts Cardano block height here. Dingo's blob block index
 	// is 1-based while Cardano block heights are 0-based, so translate height
 	// to the internal index before lookup.
-	block, err = a.ledgerState.Database().BlockByIndex(
+	block, err := a.ledgerState.Database().BlockByIndex(
 		height+database.BlockInitialIndex,
 		nil,
 	)
 	if err != nil {
 		if errors.Is(err, models.ErrBlockNotFound) {
-			return BlockInfo{}, fmt.Errorf(
+			return models.Block{}, fmt.Errorf(
 				"block %s: %w",
 				id,
 				ErrBlockNotFound,
 			)
 		}
-		return BlockInfo{}, err
+		return models.Block{}, err
 	}
-	return a.blockInfoFromBlock(block)
+	return block, nil
 }
 
 func (a *NodeAdapter) blockInfoFromBlock(
@@ -605,70 +635,7 @@ func (a *NodeAdapter) CurrentEpoch() (
 			err,
 		)
 	}
-	startTime, err := a.ledgerState.SlotToTime(tipEpoch.StartSlot)
-	if err != nil {
-		return EpochInfo{}, fmt.Errorf(
-			"get epoch start time for slot %d: %w",
-			tipEpoch.StartSlot,
-			err,
-		)
-	}
-	endTime := epochEndTime(startTime, tipEpoch)
-	blockCount, firstBlockSlot, lastBlockSlot, err := a.ledgerState.CountBlocksInSlotRange(
-		tipEpoch.StartSlot,
-		tip.Point.Slot,
-	)
-	if err != nil {
-		return EpochInfo{}, fmt.Errorf(
-			"count epoch blocks for slots %d-%d: %w",
-			tipEpoch.StartSlot,
-			tip.Point.Slot,
-			err,
-		)
-	}
-	txCount, err := a.ledgerState.CountTransactionsInSlotRange(
-		tipEpoch.StartSlot,
-		tip.Point.Slot,
-	)
-	if err != nil {
-		return EpochInfo{}, fmt.Errorf(
-			"count epoch transactions for slots %d-%d: %w",
-			tipEpoch.StartSlot,
-			tip.Point.Slot,
-			err,
-		)
-	}
-	firstBlockTime := int64(0)
-	lastBlockTime := int64(0)
-	if blockCount > 0 {
-		firstTime, err := a.ledgerState.SlotToTime(firstBlockSlot)
-		if err != nil {
-			return EpochInfo{}, fmt.Errorf(
-				"get first epoch block time for slot %d: %w",
-				firstBlockSlot,
-				err,
-			)
-		}
-		lastTime, err := a.ledgerState.SlotToTime(lastBlockSlot)
-		if err != nil {
-			return EpochInfo{}, fmt.Errorf(
-				"get last epoch block time for slot %d: %w",
-				lastBlockSlot,
-				err,
-			)
-		}
-		firstBlockTime = firstTime.Unix()
-		lastBlockTime = lastTime.Unix()
-	}
-	return EpochInfo{
-		Epoch:          tipEpoch.EpochId,
-		StartTime:      startTime.Unix(),
-		EndTime:        endTime.Unix(),
-		FirstBlockTime: firstBlockTime,
-		LastBlockTime:  lastBlockTime,
-		BlockCount:     blockCount,
-		TxCount:        txCount,
-	}, nil
+	return a.epochInfoFor(context.Background(), tipEpoch, tip.Point.Slot)
 }
 
 // CurrentProtocolParams returns the current protocol
@@ -1067,6 +1034,7 @@ func (a *NodeAdapter) Asset(
 	if len(initialMintTxHash) > 0 {
 		info.InitialMintTxHash = hex.EncodeToString(initialMintTxHash)
 		if err := a.populateAssetOnchainMetadata(
+			context.Background(),
 			&info,
 			initialMintTxHash,
 			policyID,
@@ -1092,13 +1060,14 @@ func (a *NodeAdapter) Asset(
 // info. A mint transaction without (matching) metadata is not an error; the
 // fields are simply left unset.
 func (a *NodeAdapter) populateAssetOnchainMetadata(
+	ctx context.Context,
 	info *AssetInfo,
 	initialMintTxHash []byte,
 	policyID string,
 	assetName []byte,
 ) error {
 	metadataCbor, err := a.ledgerState.Database().
-		GetTransactionMetadataByHash(context.Background(), initialMintTxHash, nil)
+		GetTransactionMetadataByHash(ctx, initialMintTxHash, nil)
 	if err != nil {
 		return fmt.Errorf(
 			"get initial mint tx %x metadata for asset %s%x: %w",
@@ -1132,6 +1101,7 @@ func (a *NodeAdapter) populateAssetOnchainMetadata(
 
 // AssetAddresses returns paginated addresses currently holding the given asset.
 func (a *NodeAdapter) AssetAddresses(
+	ctx context.Context,
 	policyID string,
 	assetName []byte,
 	params PaginationParams,
@@ -1144,31 +1114,29 @@ func (a *NodeAdapter) AssetAddresses(
 			err,
 		)
 	}
-	utxos, err := a.ledgerState.Database().
-		UtxosByAssets(context.Background(), policyIDBytes, assetName, nil)
+	db := a.ledgerState.Database()
+	txn := db.Transaction(ctx, false)
+	defer txn.Release()
+	offset, ok := paginationOffset(params)
+	if !ok {
+		return nil, 0, ErrInvalidPaginationParameters
+	}
+	rows, total, err := db.AssetHolders(ctx, models.AssetHolderQuery{
+		PolicyID:   policyIDBytes,
+		AssetName:  assetName,
+		Descending: params.Order == PaginationOrderDesc,
+		Limit:      params.Count,
+		Offset:     offset,
+	}, txn)
 	if err != nil {
 		return nil, 0, fmt.Errorf(
-			"get asset UTxOs for %s%x: %w",
+			"get asset holders for %s%x: %w",
 			policyID,
 			assetName,
 			err,
 		)
 	}
-	holders, err := assetHoldersFromUtxos(
-		policyIDBytes,
-		assetName,
-		utxos,
-		params,
-	)
-	if err != nil {
-		return nil, 0, fmt.Errorf(
-			"build asset holders for %s%x: %w",
-			policyID,
-			assetName,
-			err,
-		)
-	}
-	if len(holders) == 0 {
+	if total == 0 {
 		return nil, 0, fmt.Errorf(
 			"asset %s%x: %w",
 			policyID,
@@ -1176,73 +1144,14 @@ func (a *NodeAdapter) AssetAddresses(
 			ErrAssetNotFound,
 		)
 	}
-	total := len(holders)
-	return paginateSlice(holders, params), total, nil
-}
-
-type assetHolderQuantity struct {
-	address  string
-	quantity uint64
-}
-
-func assetHoldersFromUtxos(
-	policyID []byte,
-	assetName []byte,
-	utxos []models.Utxo,
-	params PaginationParams,
-) ([]AssetHolderInfo, error) {
-	quantities := make(map[string]uint64)
-	for _, utxo := range utxos {
-		var quantity uint64
-		for _, asset := range utxo.Assets {
-			if bytes.Equal(asset.PolicyId, policyID) &&
-				bytes.Equal(asset.Name, assetName) {
-				quantity += uint64(asset.Amount)
-			}
+	holders := make([]AssetHolderInfo, len(rows))
+	for i := range rows {
+		holders[i] = AssetHolderInfo{
+			Address:  string(rows[i].Address),
+			Quantity: strconv.FormatUint(rows[i].Quantity, 10),
 		}
-		if quantity == 0 {
-			continue
-		}
-		output, err := gledger.NewTransactionOutputFromCbor(utxo.Cbor)
-		if err != nil {
-			return nil, fmt.Errorf(
-				"decode UTxO %x#%d: %w",
-				utxo.TxId,
-				utxo.OutputIdx,
-				err,
-			)
-		}
-		quantities[output.Address().String()] += quantity
 	}
-
-	rows := make([]assetHolderQuantity, 0, len(quantities))
-	for address, quantity := range quantities {
-		rows = append(rows, assetHolderQuantity{
-			address:  address,
-			quantity: quantity,
-		})
-	}
-	slices.SortFunc(rows, func(a, b assetHolderQuantity) int {
-		if params.Order == "desc" {
-			if n := cmp.Compare(b.quantity, a.quantity); n != 0 {
-				return n
-			}
-			return cmp.Compare(b.address, a.address)
-		}
-		if n := cmp.Compare(a.quantity, b.quantity); n != 0 {
-			return n
-		}
-		return cmp.Compare(a.address, b.address)
-	})
-
-	holders := make([]AssetHolderInfo, 0, len(rows))
-	for _, row := range rows {
-		holders = append(holders, AssetHolderInfo{
-			Address:  row.address,
-			Quantity: strconv.FormatUint(row.quantity, 10),
-		})
-	}
-	return holders, nil
+	return holders, total, nil
 }
 
 // drepRatificationWait bounds how long a DRep request waits for the latest
@@ -1250,10 +1159,8 @@ func assetHoldersFromUtxos(
 // deposits count toward DRep power.
 const drepRatificationWait = 2 * time.Minute
 
-func (a *NodeAdapter) waitEpochBoundaryJob() error {
-	ctx, cancel := context.WithTimeout(
-		context.Background(), drepRatificationWait,
-	)
+func (a *NodeAdapter) waitEpochBoundaryJob(parent context.Context) error {
+	ctx, cancel := context.WithTimeout(parent, drepRatificationWait)
 	defer cancel()
 	if err := a.ledgerState.WaitEpochBoundaryJob(ctx); err != nil {
 		return fmt.Errorf("wait for governance ratification: %w", err)
@@ -1266,7 +1173,7 @@ func (a *NodeAdapter) waitEpochBoundaryJob() error {
 func (a *NodeAdapter) DRep(
 	credential DRepCredential,
 ) (DRepInfo, error) {
-	if err := a.waitEpochBoundaryJob(); err != nil {
+	if err := a.waitEpochBoundaryJob(context.Background()); err != nil {
 		return DRepInfo{}, err
 	}
 	if credential.Predefined != nil {
@@ -1530,51 +1437,68 @@ func cip129DRepHeader(hasScript bool) byte {
 // at the position of their first delegation, matching hosted
 // Blockfrost.
 func (a *NodeAdapter) DReps(
+	ctx context.Context,
 	params DRepListParams,
 ) ([]DRepListItemInfo, int, error) {
-	if err := a.waitEpochBoundaryJob(); err != nil {
+	if err := a.waitEpochBoundaryJob(ctx); err != nil {
 		return nil, 0, err
 	}
 	db := a.ledgerState.Database()
 	// Read every query from one snapshot so a block committed
 	// mid-request cannot mix two chain states in the response.
-	txn := db.Transaction(context.Background(), false)
+	txn := db.Transaction(ctx, false)
 	defer txn.Release()
 	meta := db.Metadata()
-
-	dreps, err := meta.GetDreps(txn.Metadata())
+	currentEpoch := a.ledgerState.CurrentEpoch()
+	inactivity, inactivityKnown := a.drepInactivityPeriod()
+	desc := params.Pagination.Order == PaginationOrderDesc
+	offset, ok := paginationOffset(params.Pagination)
+	if !ok {
+		return []DRepListItemInfo{}, 0, nil
+	}
+	var powerAdjustments []models.DrepPowerAdjustment
+	if params.OrderByAmount {
+		refPower, noConfidencePower, err := governance.
+			ActiveProposalDepositDRepPower(ctx, db, txn, currentEpoch, 0)
+		if err != nil {
+			return nil, 0, fmt.Errorf(
+				"get active proposal deposit voting power: %w", err,
+			)
+		}
+		powerAdjustments = make([]models.DrepPowerAdjustment, 0, len(refPower)+1)
+		for key, amount := range refPower {
+			if len(key) == 0 || amount == 0 {
+				continue
+			}
+			powerAdjustments = append(powerAdjustments, models.DrepPowerAdjustment{
+				CredentialTag: key[0],
+				Credential:    []byte(key[1:]),
+				Amount:        amount,
+			})
+		}
+		if noConfidencePower > 0 {
+			predefined := uint64(models.DrepTypeAlwaysNoConfidence)
+			powerAdjustments = append(powerAdjustments, models.DrepPowerAdjustment{
+				Predefined: &predefined,
+				Amount:     noConfidencePower,
+			})
+		}
+	}
+	dreps, total, err := meta.GetDrepsPage(models.DrepListPageQuery{
+		CurrentEpoch:     currentEpoch,
+		InactivityPeriod: inactivity,
+		InactivityKnown:  inactivityKnown,
+		Retired:          params.Retired,
+		Expired:          params.Expired,
+		Descending:       desc,
+		OrderByAmount:    params.OrderByAmount,
+		PowerAdjustments: powerAdjustments,
+		Limit:            params.Pagination.Count,
+		Offset:           offset,
+	}, txn.Metadata())
 	if err != nil {
 		return nil, 0, fmt.Errorf("get dreps: %w", err)
 	}
-
-	// Slot-to-epoch resolution reads the epoch table once instead of
-	// querying per DRep. The metadata stores order by epoch_id, which is
-	// monotonic with start_slot, but sorting locally makes the binary
-	// search below independent of store ordering. The sort is stable so
-	// epochs sharing a start slot keep their query order, matching the
-	// previous linear scan's choice of the last such row.
-	epochs, err := meta.GetEpochs(txn.Metadata())
-	if err != nil {
-		return nil, 0, fmt.Errorf("get epochs: %w", err)
-	}
-	sort.SliceStable(epochs, func(i, j int) bool {
-		return epochs[i].StartSlot < epochs[j].StartSlot
-	})
-	epochForSlot := func(slot uint64) uint64 {
-		// Index of the first epoch starting after slot; the epoch
-		// containing slot is the one before it. Slots before the first
-		// recorded epoch resolve to 0, as they did before.
-		next := sort.Search(len(epochs), func(i int) bool {
-			return epochs[i].StartSlot > slot
-		})
-		if next == 0 {
-			return 0
-		}
-		return epochs[next-1].EpochId
-	}
-
-	currentEpoch := a.ledgerState.CurrentEpoch()
-	inactivity, inactivityKnown := a.drepInactivityPeriod()
 
 	type entry struct {
 		predefined *uint64
@@ -1592,18 +1516,22 @@ func (a *NodeAdapter) DReps(
 	entries := make([]entry, 0, len(dreps)+2)
 	for i := range dreps {
 		drep := dreps[i]
-		// The most recent registration certificate is the
-		// active_epoch source; drep.added_slot is overwritten by
-		// update and deregistration certificates.
-		regSlot := drep.LastRegistrationSlot
-		if regSlot == 0 {
-			regSlot = drep.AddedSlot
+		if drep.Predefined != nil {
+			entries = append(entries, entry{
+				predefined: drep.Predefined,
+				firstSeen:  drep.FirstSeenSlot,
+				amount:     drep.Amount,
+			})
+			continue
 		}
+		// The most recent registration certificate is the active_epoch
+		// source; storage has already resolved its epoch for this page.
+		registrationEpoch := drep.RegistrationEpoch
 		retired, expired, lastActive := drepStatus(
 			drep.Active,
 			drep.LastActivityEpoch,
 			drep.ExpiryEpoch,
-			epochForSlot(regSlot),
+			registrationEpoch,
 			currentEpoch,
 			inactivity,
 			inactivityKnown,
@@ -1618,51 +1546,9 @@ func (a *NodeAdapter) DReps(
 			retired:    retired,
 			expired:    expired,
 			lastActive: &lastActive,
+			amount:     drep.Amount,
 		})
 	}
-	// The special DReps appear at the position of their first
-	// delegation. They never register, retire, or expire.
-	specialSlots, err := meta.GetPredefinedDrepFirstSeenSlots(
-		txn.Metadata(),
-	)
-	if err != nil {
-		return nil, 0, fmt.Errorf(
-			"get predefined drep first seen slots: %w", err,
-		)
-	}
-	for _, drepType := range []uint64{
-		models.DrepTypeAlwaysAbstain,
-		models.DrepTypeAlwaysNoConfidence,
-	} {
-		slot, ok := specialSlots[drepType]
-		if !ok {
-			continue
-		}
-		dt := drepType
-		entries = append(entries, entry{
-			predefined: &dt,
-			firstSeen:  slot,
-		})
-	}
-	sort.SliceStable(entries, func(i, j int) bool {
-		if entries[i].firstSeen != entries[j].firstSeen {
-			return entries[i].firstSeen < entries[j].firstSeen
-		}
-		return entries[i].id < entries[j].id
-	})
-
-	filtered := entries[:0]
-	for _, item := range entries {
-		if params.Retired != nil && item.retired != *params.Retired {
-			continue
-		}
-		if params.Expired != nil && item.expired != *params.Expired {
-			continue
-		}
-		filtered = append(filtered, item)
-	}
-	entries = filtered
-	total := len(entries)
 
 	fillAmounts := func(items []entry) error {
 		refs := make([]models.StakeCredentialRef, 0, len(items))
@@ -1714,7 +1600,7 @@ func (a *NodeAdapter) DReps(
 		// deposit power, so typePowers' AlwaysAbstain entry is untouched.
 		depositRefPower, depositNoConfidencePower, depositErr := governance.
 			ActiveProposalDepositDRepPower(
-				context.Background(),
+				ctx,
 				db,
 				txn,
 				currentEpoch,
@@ -1746,32 +1632,7 @@ func (a *NodeAdapter) DReps(
 		return nil
 	}
 
-	desc := params.Pagination.Order == PaginationOrderDesc
-	if params.OrderByAmount {
-		// Amount ordering needs every candidate's voting power
-		// before pagination.
-		if err := fillAmounts(entries); err != nil {
-			return nil, 0, err
-		}
-		sort.SliceStable(entries, func(i, j int) bool {
-			if entries[i].amount != entries[j].amount {
-				if desc {
-					return entries[i].amount > entries[j].amount
-				}
-				return entries[i].amount < entries[j].amount
-			}
-			return entries[i].firstSeen < entries[j].firstSeen
-		})
-	} else if desc {
-		slices.Reverse(entries)
-	}
-
-	start := (params.Pagination.Page - 1) * params.Pagination.Count
-	if start >= len(entries) {
-		return []DRepListItemInfo{}, total, nil
-	}
-	end := min(start+params.Pagination.Count, len(entries))
-	page := entries[start:end]
+	page := entries
 
 	if !params.OrderByAmount {
 		if err := fillAmounts(page); err != nil {
@@ -2040,31 +1901,29 @@ func parsePoolID(id string) ([]byte, error) {
 // retirement epoch and then announcement position, matching hosted
 // Blockfrost.
 func (a *NodeAdapter) PoolsRetiring(
+	ctx context.Context,
 	params PaginationParams,
 ) ([]PoolRetiringInfo, int, error) {
 	db := a.ledgerState.Database()
-	txn := db.Transaction(context.Background(), false)
+	txn := db.Transaction(ctx, false)
 	defer txn.Release()
 
-	rows, err := db.Metadata().GetRetiringPools(
-		a.ledgerState.CurrentEpoch(), txn.Metadata(),
+	offset, ok := paginationOffset(params)
+	if !ok {
+		return []PoolRetiringInfo{}, 0, nil
+	}
+	rows, total, err := db.Metadata().GetRetiringPoolsPage(
+		a.ledgerState.CurrentEpoch(),
+		params.Count,
+		offset,
+		params.Order == PaginationOrderDesc,
+		txn.Metadata(),
 	)
 	if err != nil {
 		return nil, 0, fmt.Errorf("get retiring pools: %w", err)
 	}
-	if params.Order == PaginationOrderDesc {
-		slices.Reverse(rows)
-	}
-	total := len(rows)
-
-	start := (params.Page - 1) * params.Count
-	if start >= len(rows) {
-		return []PoolRetiringInfo{}, total, nil
-	}
-	end := min(start+params.Count, len(rows))
-
-	ret := make([]PoolRetiringInfo, 0, end-start)
-	for _, row := range rows[start:end] {
+	ret := make([]PoolRetiringInfo, 0, len(rows))
+	for _, row := range rows {
 		poolKeyHash, err := lcommon.NewBlake2b224Checked(row.PoolKeyHash)
 		if err != nil {
 			return nil, 0, fmt.Errorf("retiring pool key hash: %w", err)
@@ -2183,30 +2042,41 @@ func (a *NodeAdapter) PoolMetadata(
 // PoolsExtended returns the current active pools with the fields required
 // by the Blockfrost OpenAPI 0.1.90 pool_list_extended schema (active/live
 // stake, blocks_minted, live_saturation, margin/pledge/cost, and the
-// nullable off-chain metadata object). Pagination and ordering are applied
-// by the caller (handlePoolsExtended); this returns every active pool.
-func (a *NodeAdapter) PoolsExtended() (
-	[]PoolExtendedInfo, error,
+// nullable off-chain metadata object).
+func (a *NodeAdapter) PoolsExtended(
+	ctx context.Context,
+	params PaginationParams,
+) (
+	[]PoolExtendedInfo, int, error,
 ) {
 	db := a.ledgerState.Database()
-	txn := db.Transaction(context.Background(), false)
+	txn := db.Transaction(ctx, false)
 	defer txn.Release()
 
-	poolKeyHashes, err := db.Metadata().GetActivePoolKeyHashes(txn.Metadata())
+	offset, ok := paginationOffset(params)
+	if !ok {
+		return []PoolExtendedInfo{}, 0, nil
+	}
+	poolKeyHashes, total, err := db.Metadata().GetActivePoolKeyHashesPage(
+		params.Count,
+		offset,
+		params.Order == PaginationOrderDesc,
+		txn.Metadata(),
+	)
 	if err != nil {
-		return nil, fmt.Errorf(
-			"get active pool key hashes: %w",
+		return nil, 0, fmt.Errorf(
+			"get active pool key hash page: %w",
 			err,
 		)
 	}
 	if len(poolKeyHashes) == 0 {
-		return []PoolExtendedInfo{}, nil
+		return []PoolExtendedInfo{}, total, nil
 	}
 	poolHashes := make([]lcommon.PoolKeyHash, 0, len(poolKeyHashes))
 	for _, poolKeyHash := range poolKeyHashes {
 		poolHash, err := lcommon.NewBlake2b224Checked(poolKeyHash)
 		if err != nil {
-			return nil, fmt.Errorf("active pool key hash: %w", err)
+			return nil, 0, fmt.Errorf("active pool key hash: %w", err)
 		}
 		poolHashes = append(poolHashes, lcommon.PoolKeyHash(poolHash))
 	}
@@ -2216,7 +2086,7 @@ func (a *NodeAdapter) PoolsExtended() (
 		txn.Metadata(),
 	)
 	if err != nil {
-		return nil, fmt.Errorf(
+		return nil, 0, fmt.Errorf(
 			"get live stake by pools: %w",
 			err,
 		)
@@ -2228,13 +2098,14 @@ func (a *NodeAdapter) PoolsExtended() (
 	if currentEpoch >= 2 {
 		activeStakeEpoch = currentEpoch - 2
 	}
-	snapshots, err := db.Metadata().GetPoolStakeSnapshotsByEpoch(
+	snapshots, err := db.Metadata().GetPoolStakeSnapshotsForPools(
 		activeStakeEpoch,
 		"mark",
+		poolKeyHashes,
 		txn.Metadata(),
 	)
 	if err != nil {
-		return nil, fmt.Errorf(
+		return nil, 0, fmt.Errorf(
 			"get pool stake snapshots for epoch %d: %w",
 			activeStakeEpoch,
 			err,
@@ -2253,13 +2124,13 @@ func (a *NodeAdapter) PoolsExtended() (
 	// PoolDetail (adapter_pool_detail.go).
 	protocolParams, err := a.CurrentProtocolParams()
 	if err != nil {
-		return nil, fmt.Errorf("get protocol parameters: %w", err)
+		return nil, 0, fmt.Errorf("get protocol parameters: %w", err)
 	}
 	totalActiveStake, err := db.Metadata().GetTotalActiveStake(
 		activeStakeEpoch, "mark", txn.Metadata(),
 	)
 	if err != nil {
-		return nil, fmt.Errorf("get total active stake: %w", err)
+		return nil, 0, fmt.Errorf("get total active stake: %w", err)
 	}
 	// live_saturation's denominator is the per-pool saturation threshold
 	// totalCirculation/nOpt, not total active stake. See
@@ -2267,12 +2138,12 @@ func (a *NodeAdapter) PoolsExtended() (
 	// Resolved once for the whole page rather than per pool.
 	totalCirculation, err := a.totalCirculation(txn.Metadata())
 	if err != nil {
-		return nil, fmt.Errorf("get total circulation: %w", err)
+		return nil, 0, fmt.Errorf("get total circulation: %w", err)
 	}
 
-	pools, err := db.GetPools(context.Background(), poolHashes, txn)
+	pools, err := db.GetPools(ctx, poolHashes, txn)
 	if err != nil {
-		return nil, fmt.Errorf("get pools: %w", err)
+		return nil, 0, fmt.Errorf("get pools: %w", err)
 	}
 	poolsByHash := make(map[string]*models.Pool, len(pools))
 	for i := range pools {
@@ -2280,7 +2151,7 @@ func (a *NodeAdapter) PoolsExtended() (
 		poolsByHash[string(pool.PoolKeyHash)] = pool
 	}
 
-	// blocks_minted (lifetime): one query across every active pool,
+	// blocks_minted (lifetime): one query across the requested page,
 	// keyed by pool, exactly like CountPoolBlocksInSlotRange is already
 	// used for pool detail (adapter_pool_detail.go) -- not a per-pool
 	// query. On a Mithril-bootstrapped node it is a lower bound: it adds the
@@ -2290,10 +2161,10 @@ func (a *NodeAdapter) PoolsExtended() (
 		db.Metadata(), txn.Metadata(), poolHashes, noSlotUpperBound,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("count lifetime blocks for pools: %w", err)
+		return nil, 0, fmt.Errorf("count lifetime blocks for pools: %w", err)
 	}
 
-	// Off-chain metadata: one batched query across every active pool's
+	// Off-chain metadata: one batched query across the requested pools'
 	// registered metadata URL (GetOffchainMetadataBatch), instead of one
 	// GetOffchainMetadata call per pool.
 	metadataURLs := make([]string, 0, len(pools))
@@ -2309,7 +2180,7 @@ func (a *NodeAdapter) PoolsExtended() (
 		models.OffchainMetadataSourcePool, metadataURLs, txn.Metadata(),
 	)
 	if err != nil {
-		return nil, fmt.Errorf("get off-chain metadata for pools: %w", err)
+		return nil, 0, fmt.Errorf("get off-chain metadata for pools: %w", err)
 	}
 	metadataDocsByKey := make(
 		map[string]*models.OffchainMetadata, len(metadataDocs),
@@ -2325,7 +2196,7 @@ func (a *NodeAdapter) PoolsExtended() (
 	for _, poolKeyHash := range poolKeyHashes {
 		pool, ok := poolsByHash[string(poolKeyHash)]
 		if !ok {
-			return nil, fmt.Errorf(
+			return nil, 0, fmt.Errorf(
 				"get pool %x: %w",
 				poolKeyHash,
 				models.ErrPoolNotFound,
@@ -2333,7 +2204,7 @@ func (a *NodeAdapter) PoolsExtended() (
 		}
 		poolKeyHash, err := lcommon.NewBlake2b224Checked(pool.PoolKeyHash)
 		if err != nil {
-			return nil, fmt.Errorf("pool key hash: %w", err)
+			return nil, 0, fmt.Errorf("pool key hash: %w", err)
 		}
 		poolID := lcommon.PoolId(poolKeyHash)
 		poolHex := hex.EncodeToString(pool.PoolKeyHash)
@@ -2385,7 +2256,7 @@ func (a *NodeAdapter) PoolsExtended() (
 		})
 	}
 
-	return ret, nil
+	return ret, total, nil
 }
 
 // Account returns stake-account information for the
@@ -3023,6 +2894,13 @@ func protocolParamsInfoFromNative(
 		fillBasePParamsInfo(&info, pp.MinFeeA, pp.MinFeeB, pp.MaxBlockBodySize, pp.MaxTxSize, pp.MaxBlockHeaderSize, pp.KeyDeposit, pp.PoolDeposit, pp.MaxEpoch, pp.NOpt, pp.A0, pp.Rho, pp.Tau, pp.ProtocolVersion.Major, pp.ProtocolVersion.Minor)
 		fillAlonzoPParamsInfo(&info, pp.MinPoolCost, pp.AdaPerUtxoByte, pp.ExecutionCosts, pp.MaxTxExUnits, pp.MaxBlockExUnits, pp.MaxValueSize, pp.CollateralPercentage, pp.MaxCollateralInputs, pp.CostModels)
 		fillConwayPParamsInfo(&info, pp)
+	case *dijkstra.DijkstraProtocolParameters:
+		// Blockfrost's epoch parameters carry no Dijkstra-only field, so the
+		// embedded Conway parameters (with every cost model) are the view.
+		return protocolParamsInfoFromNative(
+			&pp.ConwayProtocolParameters,
+			epoch,
+		)
 	default:
 		return ProtocolParamsInfo{}, fmt.Errorf(
 			"unsupported protocol parameters type: %T",
@@ -3266,6 +3144,7 @@ func parseAddressOrPaymentCred(
 // exactAddressBalance aggregates balances after the database layer has
 // compared each candidate's complete decoded output address.
 func (a *NodeAdapter) exactAddressBalance(
+	ctx context.Context,
 	addr lcommon.Address,
 	txn *database.Txn,
 ) (models.AddressBalance, error) {
@@ -3277,7 +3156,7 @@ func (a *NodeAdapter) exactAddressBalance(
 
 	candidates, err := a.ledgerState.Database().
 		UtxosByAddressWithOrdering(
-			context.Background(),
+			ctx,
 			&models.UtxoWithOrderingQuery{
 				AddressPatterns: []models.UtxoAddressPattern{pattern},
 			},
@@ -3337,12 +3216,19 @@ func (a *NodeAdapter) exactAddressBalance(
 func (a *NodeAdapter) Address(
 	address string,
 ) (AddressInfo, error) {
+	return a.addressSummary(context.Background(), address)
+}
+
+// parseQueryAddress parses an address or bare payment credential for an
+// address query and rejects one encoded for another network. ErrInvalidAddress
+// drives the HTTP 400 mapping (errors.Is in the handler); the parse error is
+// kept alongside it so logs retain the reason.
+func (a *NodeAdapter) parseQueryAddress(
+	address string,
+) (lcommon.Address, bool, error) {
 	addr, isPaymentCred, err := parseAddressOrPaymentCred(address)
 	if err != nil {
-		// ErrInvalidAddress drives the HTTP 400 mapping
-		// (errors.Is in the handler); the parse error is kept
-		// alongside it so logs retain the reason.
-		return AddressInfo{}, fmt.Errorf(
+		return lcommon.Address{}, false, fmt.Errorf(
 			"parse address %q: %w: %w",
 			address,
 			ErrInvalidAddress,
@@ -3354,17 +3240,28 @@ func (a *NodeAdapter) Address(
 	// this check a foreign-network address would return this network's
 	// balances. Bare payment credentials carry no network id.
 	if !isPaymentCred && addr.NetworkId() != uint(a.networkID()) {
-		return AddressInfo{}, fmt.Errorf(
+		return lcommon.Address{}, false, fmt.Errorf(
 			"address %q network mismatch: %w",
 			address,
 			ErrInvalidAddress,
 		)
 	}
+	return addr, isPaymentCred, nil
+}
+
+func (a *NodeAdapter) addressSummary(
+	ctx context.Context,
+	address string,
+) (AddressInfo, error) {
+	addr, isPaymentCred, err := a.parseQueryAddress(address)
+	if err != nil {
+		return AddressInfo{}, err
+	}
 
 	// Read every query from one snapshot so a block committed
 	// mid-request cannot mix two chain states in the response.
 	db := a.ledgerState.Database()
-	txn := db.Transaction(context.Background(), false)
+	txn := db.Transaction(ctx, false)
 	defer txn.Release()
 
 	// Full addresses use exact matching so UTxOs at other address
@@ -3380,7 +3277,7 @@ func (a *NodeAdapter) Address(
 				txn.Metadata(),
 			)
 	} else {
-		balance, err = a.exactAddressBalance(addr, txn)
+		balance, err = a.exactAddressBalance(ctx, addr, txn)
 	}
 	if err != nil {
 		return AddressInfo{}, fmt.Errorf(
@@ -3399,13 +3296,14 @@ func (a *NodeAdapter) Address(
 			// address carrying the payment credential.
 			var txCount int
 			txCount, err = db.CountTransactionsByPaymentCred(
-				context.Background(),
+				ctx,
 				addr.PaymentKeyHash().Bytes(),
+				models.PaymentScriptFromAddress(addr),
 				txn,
 			)
 			hasTransactions = txCount > 0
 		} else {
-			hasTransactions, err = db.HasTransactionsByAddress(context.Background(), addr, txn)
+			hasTransactions, err = db.HasTransactionsByAddress(ctx, addr, txn)
 		}
 		if err != nil {
 			return AddressInfo{}, fmt.Errorf(
@@ -3472,6 +3370,20 @@ func (a *NodeAdapter) AddressUTXOs(ctx context.Context,
 	address string,
 	params PaginationParams,
 ) ([]AddressUTXOInfo, int, error) {
+	return a.addressUTXOs(ctx, address, params, nil)
+}
+
+// assetFilter restricts a UTxO listing to outputs holding one asset.
+type assetFilter struct {
+	policyID  []byte
+	assetName []byte
+}
+
+func (a *NodeAdapter) addressUTXOs(ctx context.Context,
+	address string,
+	params PaginationParams,
+	filter *assetFilter,
+) ([]AddressUTXOInfo, int, error) {
 	addr, err := lcommon.NewAddress(address)
 	if err != nil {
 		return nil, 0, fmt.Errorf(
@@ -3479,6 +3391,15 @@ func (a *NodeAdapter) AddressUTXOs(ctx context.Context,
 			address,
 			ErrInvalidAddress,
 			err,
+		)
+	}
+	// The match is on the exact address, so a foreign-network address would
+	// list nothing rather than being rejected as Blockfrost does.
+	if addr.NetworkId() != uint(a.networkID()) {
+		return nil, 0, fmt.Errorf(
+			"address %q network mismatch: %w",
+			address,
+			ErrInvalidAddress,
 		)
 	}
 
@@ -3499,14 +3420,16 @@ func (a *NodeAdapter) AddressUTXOs(ctx context.Context,
 	// references (no assets, no full rows) for that pass, and materialize
 	// full UTxO data via UtxosByRefs for just the requested page, instead
 	// of loading the address's entire UTxO history in full.
+	query := &models.UtxoWithOrderingQuery{
+		AddressPatterns: []models.UtxoAddressPattern{pattern},
+	}
+	if filter != nil {
+		query.FilterByAsset = true
+		query.AssetPolicyID = filter.policyID
+		query.AssetName = filter.assetName
+	}
 	refs, err := a.ledgerState.Database().
-		MatchingUtxoRefsByAddressWithOrdering(
-			ctx,
-			&models.UtxoWithOrderingQuery{
-				AddressPatterns: []models.UtxoAddressPattern{pattern},
-			},
-			txn,
-		)
+		MatchingUtxoRefsByAddressWithOrdering(ctx, query, txn)
 	if err != nil {
 		return nil, 0, fmt.Errorf(
 			"get address UTxOs for %q: %w",
@@ -3764,6 +3687,19 @@ func (a *NodeAdapter) AddressTransactions(
 		)
 	}
 
+	ret, err := a.transactionPositionInfos(ctx, txs)
+	if err != nil {
+		return nil, 0, err
+	}
+	return ret, total, nil
+}
+
+// transactionPositionInfos resolves the block height and block time of each
+// transaction. Heights are looked up once per distinct block.
+func (a *NodeAdapter) transactionPositionInfos(
+	ctx context.Context,
+	txs []models.Transaction,
+) ([]AddressTransactionInfo, error) {
 	blockNumbers := make(map[string]uint64, len(txs))
 	ret := make([]AddressTransactionInfo, 0, len(txs))
 	for _, tx := range txs {
@@ -3772,7 +3708,7 @@ func (a *NodeAdapter) AddressTransactions(
 		if !ok {
 			block, err := a.ledgerState.BlockByHash(ctx, tx.BlockHash)
 			if err != nil {
-				return nil, 0, fmt.Errorf(
+				return nil, fmt.Errorf(
 					"get block for transaction %x: %w",
 					tx.Hash,
 					err,
@@ -3784,7 +3720,7 @@ func (a *NodeAdapter) AddressTransactions(
 
 		blockTime, err := a.transactionBlockTime(tx)
 		if err != nil {
-			return nil, 0, fmt.Errorf(
+			return nil, fmt.Errorf(
 				"get block time for transaction %x: %w",
 				tx.Hash,
 				err,
@@ -3797,7 +3733,7 @@ func (a *NodeAdapter) AddressTransactions(
 			BlockTime:   blockTime,
 		})
 	}
-	return ret, total, nil
+	return ret, nil
 }
 
 // MetadataTransactions returns paginated transaction metadata values for the
@@ -5141,6 +5077,9 @@ func (a *NodeAdapter) transactionRedeemerMetadata(
 		mint = *decodedTx.AssetMint()
 	}
 
+	// A spend redeemer indexes the inputs in ledger set order, which a body
+	// need not list them in.
+	spendInputs := gscript.SortInputs(decodedTx.Inputs())
 	for _, redeemer := range tx.Redeemers {
 		key := lcommon.RedeemerKey{
 			Tag:   lcommon.RedeemerTag(redeemer.Tag),
@@ -5149,7 +5088,7 @@ func (a *NodeAdapter) transactionRedeemerMetadata(
 		purpose, err := gscript.BuildScriptPurpose(
 			key,
 			resolvedInputs,
-			decodedTx.Inputs(),
+			spendInputs,
 			mint,
 			decodedTx.Certificates(),
 			decodedTx.Withdrawals(),
@@ -5609,10 +5548,17 @@ func (a *NodeAdapter) protocolParamsForSlot(
 	return pparams, nil
 }
 
+func (a *NodeAdapter) slotToTime(slot uint64) (time.Time, error) {
+	if a.slotTime != nil {
+		return a.slotTime(slot)
+	}
+	return a.ledgerState.SlotToTime(slot)
+}
+
 func (a *NodeAdapter) transactionBlockTime(
 	tx models.Transaction,
 ) (int64, error) {
-	blockTime, err := a.ledgerState.SlotToTime(tx.Slot)
+	blockTime, err := a.slotToTime(tx.Slot)
 	if err != nil {
 		return 0, fmt.Errorf(
 			"convert slot %d to block time for transaction %x: %w",

@@ -30,16 +30,17 @@ func TestRollbackWaitsForDestructiveTransitionBarrier(t *testing.T) {
 	finish := fixture.ls.db.BeginDestructiveTransition()
 	var releaseOnce sync.Once
 	release := func() { releaseOnce.Do(finish) }
-	defer release()
+	var wg sync.WaitGroup
+	joinBeforeFixtureClose(t, &wg, release)
 
 	rollbackDone := make(chan error, 1)
-	go func() {
+	wg.Go(func() {
 		rollbackDone <- fixture.ls.rollbackChainAndStateDeferred(
 			t.Context(),
 			fixture.ancestorTip.Point,
 			nil,
 		)
-	}()
+	})
 
 	// Both bounds here are deliberately generous rather than tuned. What this
 	// test asserts is ordering -- parked before release, complete after -- and
@@ -74,6 +75,36 @@ func TestRollbackWaitsForDestructiveTransitionBarrier(t *testing.T) {
 	))
 }
 
+// joinBeforeFixtureClose registers a cleanup that runs release and then
+// waits for wg, without a bound. Cleanups run last-registered first, so
+// calling this after newChainsyncRollbackFixture makes it run before the
+// fixture closes the ledger: a test that fails mid-wait must not leave a
+// rollback or reconciliation running into LedgerState.Close.
+func joinBeforeFixtureClose(t *testing.T, wg *sync.WaitGroup, release func()) {
+	t.Helper()
+	t.Cleanup(func() {
+		release()
+		joined := make(chan struct{})
+		go func() {
+			wg.Wait()
+			close(joined)
+		}()
+		select {
+		case <-joined:
+		case <-time.After(testutil.AsyncWait):
+			// Returning here would let the fixture close the ledger under a
+			// running worker, the failure this cleanup exists to prevent. Name
+			// the stuck stacks now and keep waiting: a worker that never
+			// returns is left to the package -timeout, whose dump repeats them.
+			t.Errorf(
+				"rollback or reconciliation still running at cleanup:\n%s",
+				testutil.AllGoroutineStacks(),
+			)
+			<-joined
+		}
+	})
+}
+
 func TestReconciliationTakesPruneLockBeforeDestructiveBarrier(t *testing.T) {
 	// Not t.Parallel: both reconciliation tests inspect process-wide goroutine
 	// dumps for identical frames and could satisfy each other's waits.
@@ -86,13 +117,13 @@ func TestReconciliationTakesPruneLockBeforeDestructiveBarrier(t *testing.T) {
 	releasePrune := func() {
 		releasePruneOnce.Do(fixture.ls.consumedUtxoPruneMutex.Unlock)
 	}
-	defer releasePrune()
+	var wg sync.WaitGroup
+	joinBeforeFixtureClose(t, &wg, releasePrune)
 
 	reconcileDone := make(chan error, 1)
-	go func() {
+	wg.Go(func() {
 		reconcileDone <- fixture.ls.reconcilePrimaryChainTipWithLedgerTip(t.Context())
-	}()
-	const wait = 10 * time.Second
+	})
 	testutil.WaitForCondition(
 		t,
 		func() bool {
@@ -101,28 +132,32 @@ func TestReconciliationTakesPruneLockBeforeDestructiveBarrier(t *testing.T) {
 				"(*LedgerState).withConsumedUtxoPruneBoundary",
 			)
 		},
-		wait,
+		testutil.AsyncWait,
 		"reconciliation waiting for the prune lock",
 	)
 
-	barrierEntered := make(chan struct{})
-	go func() {
-		finish := fixture.ls.db.BeginDestructiveTransition()
-		finish()
-		close(barrierEntered)
-	}()
-	testutil.RequireReceive(
+	barrierEntered := make(chan error, 1)
+	wg.Go(func() {
+		finish, err := fixture.ls.db.BeginDestructiveTransitionContext(
+			t.Context(),
+		)
+		if err == nil {
+			finish()
+		}
+		barrierEntered <- err
+	})
+	require.NoError(t, testutil.RequireReceive(
 		t,
 		barrierEntered,
-		wait,
+		testutil.AsyncWait,
 		"reconciliation must not hold the destructive barrier while waiting for the prune lock",
-	)
+	))
 
 	releasePrune()
 	require.NoError(t, testutil.RequireReceive(
 		t,
 		reconcileDone,
-		wait,
+		testutil.AsyncWait,
 		"reconciliation after the prune lock is released",
 	))
 }
@@ -131,17 +166,20 @@ func TestReconciliationWaitsForDestructiveTransitionBarrier(t *testing.T) {
 	// Not t.Parallel: both reconciliation tests inspect process-wide goroutine
 	// dumps for identical frames and could satisfy each other's waits.
 	fixture := newChainsyncRollbackFixture(t)
-	require.NoError(t, fixture.ls.chain.Rollback(t.Context(), fixture.ancestorTip.Point))
+	require.NoError(
+		t,
+		fixture.ls.chain.Rollback(t.Context(), fixture.ancestorTip.Point),
+	)
 	finish := fixture.ls.db.BeginDestructiveTransition()
 	var releaseOnce sync.Once
 	release := func() { releaseOnce.Do(finish) }
-	defer release()
+	var wg sync.WaitGroup
+	joinBeforeFixtureClose(t, &wg, release)
 
 	reconcileDone := make(chan error, 1)
-	go func() {
+	wg.Go(func() {
 		reconcileDone <- fixture.ls.reconcilePrimaryChainTipWithLedgerTip(t.Context())
-	}()
-	const wait = 10 * time.Second
+	})
 	testutil.WaitForCondition(
 		t,
 		func() bool {
@@ -150,7 +188,7 @@ func TestReconciliationWaitsForDestructiveTransitionBarrier(t *testing.T) {
 				"(*LedgerState).withDestructiveDatabaseTransition",
 			)
 		},
-		wait,
+		testutil.AsyncWait,
 		"reconciliation waiting for the destructive transition barrier",
 	)
 	testutil.RequireNoReceive(
@@ -165,7 +203,7 @@ func TestReconciliationWaitsForDestructiveTransitionBarrier(t *testing.T) {
 	require.NoError(t, testutil.RequireReceive(
 		t,
 		reconcileDone,
-		wait,
+		testutil.AsyncWait,
 		"reconciliation after the destructive transition finishes",
 	))
 	require.Equal(t, fixture.ancestorTip, fixture.ls.chain.Tip())

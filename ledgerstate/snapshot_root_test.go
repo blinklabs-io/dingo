@@ -715,37 +715,6 @@ func TestOpenSnapshotAtOrBeforeRefusesADemotedNewestSlot(t *testing.T) {
 	}
 }
 
-// TestOpenSnapshotAtOrBeforeStillSkipsAStatelessNewestSlot is the control that
-// keeps the refusals above about planted content.
-//
-// A slot directory that never had a state is ordinary — an extraction
-// interrupted before writing one — and must still fall through to the next slot
-// down. Only that case is skippable; the entry being present but the wrong kind
-// of thing is not.
-func TestOpenSnapshotAtOrBeforeStillSkipsAStatelessNewestSlot(t *testing.T) {
-	t.Parallel()
-
-	dir := writeUTxOHDSnapshot(t, "100", "older", "older-tables")
-	if err := os.MkdirAll(
-		filepath.Join(dir, "ledger", "200"), 0o750,
-	); err != nil {
-		t.Fatalf("unexpected error: %s", err)
-	}
-
-	files, err := OpenSnapshotAtOrBefore(openTree(t, dir), ^uint64(0))
-	if err != nil {
-		t.Fatalf("unexpected error: %s", err)
-	}
-	defer files.Close()
-	got, err := io.ReadAll(files.State)
-	if err != nil {
-		t.Fatalf("unexpected error: %s", err)
-	}
-	if string(got) != "older" {
-		t.Fatalf("expected the older slot's state, got %q", string(got))
-	}
-}
-
 // TestOpenSnapshotAtOrBeforePrefersTheNewestAcrossFormats covers a legacy state
 // file newer than every UTxO-HD slot directory.
 //

@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/safedecode"
 	"github.com/blinklabs-io/dingo/internal/tracing"
@@ -185,7 +186,12 @@ type MempoolConfig struct {
 }
 
 type Mempool struct {
-	metrics struct {
+	confirmedMu      sync.Mutex
+	pendingConfirmed map[string]struct{}
+	// Rolled-back bodies are held only until a successful chain rebuild.
+	pendingRolledBack      map[string]MempoolTransaction
+	pendingRolledBackOrder []string
+	metrics                struct {
 		txsProcessedNum prometheus.Counter
 		txsInMempool    prometheus.Gauge
 		mempoolBytes    prometheus.Gauge
@@ -1063,34 +1069,221 @@ func (m *Mempool) processChainEvents(
 	defer func() {
 		m.eventBus.Unsubscribe(chain.ChainUpdateEventType, chainUpdateSubId)
 	}()
-	lastValidationTime := time.Now()
-	var ok bool
-	for {
-		select {
-		case _, ok = <-chainUpdateChan:
-			if !ok {
+	runChainUpdateWorker(
+		ctx,
+		m.done,
+		chainUpdateChan,
+		30*time.Second,
+		m.noteChainUpdate,
+		func() error {
+			return m.rebuildAfterChainUpdate(ctx)
+		},
+		func(err error) {
+			if errors.Is(err, errValidationSnapshotChanged) {
+				m.logger.Debug(
+					"mempool overlay rebuild deferred after ledger update",
+					"component", "mempool",
+					"error", err,
+				)
 				return
 			}
-		case <-m.done:
-			return
-		case <-ctx.Done():
-			return
-		}
-		// Only purge once every 30 seconds when there are more blocks available
-		if time.Since(lastValidationTime) < 30*time.Second &&
-			len(chainUpdateChan) > 0 {
-			continue
-		}
-		// Rebuild overlay: re-validate each pending TX in order against
-		// a fresh overlay, removing TXs that no longer validate. Log
-		// and continue on error — the next chain update will try
-		// again rather than crashing the node.
-		if err := m.rebuildOverlay(ctx); err != nil {
 			m.logger.Error(
 				"mempool overlay rebuild failed",
 				"component", "mempool",
 				"error", err,
 			)
+		},
+	)
+}
+
+// noteChainUpdate records transactions confirmed by added blocks and retains
+// transactions from rolled-back blocks for revalidation after the next rebuild.
+func (m *Mempool) noteChainUpdate(evt event.Event) {
+	switch data := evt.Data.(type) {
+	case chain.ChainBlockEvent:
+		transactions := m.blockTransactions(data.Block)
+		if len(transactions) == 0 {
+			return
+		}
+		m.confirmedMu.Lock()
+		defer m.confirmedMu.Unlock()
+		if m.pendingConfirmed == nil {
+			m.pendingConfirmed = make(
+				map[string]struct{}, len(transactions),
+			)
+		}
+		for _, tx := range transactions {
+			hash := tx.Hash().String()
+			m.pendingConfirmed[hash] = struct{}{}
+			delete(m.pendingRolledBack, hash)
+		}
+	case chain.ChainRollbackEvent:
+		var transactions []MempoolTransaction
+		for _, block := range slices.Backward(data.RolledBackBlocks) {
+			for _, tx := range m.blockTransactions(block) {
+				transactions = append(transactions, MempoolTransaction{
+					Hash: tx.Hash().String(),
+					Cbor: slices.Clone(tx.Cbor()),
+					Type: uint(tx.Type()),
+				})
+			}
+		}
+		m.confirmedMu.Lock()
+		defer m.confirmedMu.Unlock()
+		if m.pendingRolledBack == nil {
+			m.pendingRolledBack = make(
+				map[string]MempoolTransaction, len(transactions),
+			)
+		}
+		newOrder := make([]string, 0, len(transactions))
+		for _, tx := range transactions {
+			delete(m.pendingConfirmed, tx.Hash)
+			if _, ok := m.pendingRolledBack[tx.Hash]; !ok {
+				newOrder = append(newOrder, tx.Hash)
+			}
+			m.pendingRolledBack[tx.Hash] = tx
+		}
+		if len(newOrder) > 0 {
+			m.pendingRolledBackOrder = append(
+				newOrder, m.pendingRolledBackOrder...,
+			)
+		}
+	}
+}
+
+func (m *Mempool) blockTransactions(b models.Block) []gledger.Transaction {
+	if len(b.Cbor) == 0 {
+		return nil
+	}
+	block, err := b.Decode()
+	if err != nil {
+		m.logger.Debug(
+			"could not decode block to evict confirmed transactions",
+			"component", "mempool",
+			"error", err,
+		)
+		return nil
+	}
+	return block.Transactions()
+}
+
+// rebuildAfterChainUpdate evicts confirmed transactions, rebuilds the pool,
+// then revalidates transactions recovered from rolled-back blocks. Descendants
+// of confirmed transactions stay and are judged against the selected chain.
+func (m *Mempool) rebuildAfterChainUpdate(ctx context.Context) error {
+	m.confirmedMu.Lock()
+	pending := m.pendingConfirmed
+	rolledBack := m.pendingRolledBack
+	rolledBackOrder := m.pendingRolledBackOrder
+	m.pendingConfirmed = nil
+	m.confirmedMu.Unlock()
+	if len(pending) > 0 {
+		hashes := make([]string, 0, len(pending))
+		for h := range pending {
+			hashes = append(hashes, h)
+		}
+		m.RemoveTxsByHash(hashes)
+	}
+	if err := m.rebuildOverlay(ctx); err != nil {
+		return err
+	}
+	m.confirmedMu.Lock()
+	m.pendingRolledBack = nil
+	m.pendingRolledBackOrder = nil
+	m.confirmedMu.Unlock()
+	for i, hash := range rolledBackOrder {
+		tx, ok := rolledBack[hash]
+		if !ok {
+			continue
+		}
+		delete(rolledBack, hash)
+		if err := m.AddTransaction(ctx, tx.Type, tx.Cbor); err != nil {
+			if isRetryableRolledBackAdmissionError(err) {
+				rolledBack[hash] = tx
+				m.confirmedMu.Lock()
+				m.pendingRolledBack = rolledBack
+				m.pendingRolledBackOrder = slices.Clone(
+					rolledBackOrder[i:],
+				)
+				m.confirmedMu.Unlock()
+				return fmt.Errorf(
+					"restore rolled-back transaction %s: %w", hash, err,
+				)
+			}
+			m.logger.Debug(
+				"rolled-back transaction is invalid on the selected chain",
+				"component", "mempool",
+				"tx_hash", hash,
+				"error", err,
+			)
+			continue
+		}
+		m.logger.Debug(
+			"restored rolled-back transaction",
+			"component", "mempool",
+			"tx_hash", hash,
+		)
+	}
+	return nil
+}
+
+func isRetryableRolledBackAdmissionError(err error) bool {
+	return errors.Is(err, ErrPendingStateMoved) ||
+		errors.Is(err, ErrNilValidator) ||
+		errors.Is(err, ErrMempoolStopped) ||
+		errors.Is(err, context.Canceled) ||
+		errors.Is(err, context.DeadlineExceeded)
+}
+
+func runChainUpdateWorker(
+	ctx context.Context,
+	done <-chan struct{},
+	chainUpdateChan <-chan event.Event,
+	revalidationInterval time.Duration,
+	onUpdate func(event.Event),
+	rebuild func() error,
+	onError func(error),
+) {
+	lastValidationTime := time.Now()
+	var retryTimer *time.Timer
+	var retryTimerChan <-chan time.Time
+	defer func() {
+		if retryTimer != nil {
+			retryTimer.Stop()
+		}
+	}()
+	for {
+		select {
+		case evt, ok := <-chainUpdateChan:
+			if !ok {
+				return
+			}
+			// Every update is seen here, including the ones the rebuild
+			// below skips, so no block's transactions are missed.
+			if onUpdate != nil {
+				onUpdate(evt)
+			}
+			if retryTimerChan != nil {
+				continue
+			}
+			// Preserve the queue-drain behavior on healthy rebuilds, while a
+			// failed rebuild is retried only after its cooldown expires.
+			if time.Since(lastValidationTime) < revalidationInterval &&
+				len(chainUpdateChan) > 0 {
+				continue
+			}
+		case <-retryTimerChan:
+			retryTimer = nil
+			retryTimerChan = nil
+		case <-done:
+			return
+		case <-ctx.Done():
+			return
+		}
+		if err := rebuild(); err != nil {
+			onError(err)
+			retryTimer = time.NewTimer(revalidationInterval)
+			retryTimerChan = retryTimer.C
 		}
 		lastValidationTime = time.Now()
 	}

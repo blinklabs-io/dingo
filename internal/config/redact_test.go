@@ -103,6 +103,7 @@ func TestConfigLogClassesAreUnambiguous(t *testing.T) {
 		logPlainConfigFields,
 		logSecretConfigFields,
 		logURIConfigFields,
+		logURLOrPathConfigFields,
 		logProviderConfigFields,
 	} {
 		for _, path := range paths {
@@ -120,6 +121,7 @@ func TestConfigLogClassesAreUnambiguous(t *testing.T) {
 // below. None of them may appear in a rendered log line.
 var sentinelSecrets = []string{
 	"SENTINEL-KOIOS-API-KEY",
+	"SENTINEL-METRICS-AUTH-TOKEN",
 	"SENTINEL-BARK-PASSWORD",
 	"SENTINEL-BARK-HOST-PASSWORD",
 	"SENTINEL-MITHRIL-KEY",
@@ -157,7 +159,8 @@ func sentinelSecretConfig() *Config {
 			Enabled: true,
 			APIKey:  "SENTINEL-KOIOS-API-KEY",
 		},
-		BarkBaseUrl: "https://bark:SENTINEL-BARK-PASSWORD@bark.example/api",
+		MetricsAuthToken: "SENTINEL-METRICS-AUTH-TOKEN",
+		BarkBaseUrl:      "https://bark:SENTINEL-BARK-PASSWORD@bark.example/api",
 		BarkBlockDownloadHosts: []string{
 			"https://blocks:SENTINEL-BARK-HOST-PASSWORD@blocks.example",
 			"https://plain.example",
@@ -500,9 +503,10 @@ func TestRedactURICredentials(t *testing.T) {
 			want: "https://api.example/v1?tokenFilePath=/etc/dingo/t",
 		},
 		{
-			name: "fragment is not scanned as a query parameter",
+			name: "credential fragment is redacted",
 			in:   "https://api.example/v1?page=2#apiKey=abc123",
-			want: "https://api.example/v1?page=2#apiKey=abc123",
+			want: "https://api.example/v1?page=2#apiKey=" +
+				redactedPlaceholder,
 		},
 		{
 			name: "no credentials is unchanged",
@@ -829,6 +833,7 @@ func TestConfigFieldClassesAgreeWithClassifier(t *testing.T) {
 	for _, path := range slices.Concat(
 		logPlainConfigFields,
 		logURIConfigFields,
+		logURLOrPathConfigFields,
 		logProviderConfigFields,
 	) {
 		leaf := path
@@ -872,6 +877,59 @@ func TestConfigFieldClassesAgreeWithClassifier(t *testing.T) {
 				path,
 				keyNameWords(leaf),
 			)
+		}
+	}
+}
+
+func TestImmutableDbPathRedactsRemoteCredentialsAndPreservesLocalPath(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	cfg := Config{ImmutableDbPath: "https://credential-name:password@example.test/db?" +
+		"apiKey=query-secret#access_token=fragment-secret"}
+	rendered := fmt.Sprint(cfg.LogValue())
+	for _, secret := range []string{
+		"credential-name", "password", "query-secret", "fragment-secret",
+	} {
+		if strings.Contains(rendered, secret) {
+			t.Errorf("ImmutableDbPath leaks %q: %s", secret, rendered)
+		}
+	}
+	if !strings.Contains(rendered, "example.test/db") {
+		t.Errorf("ImmutableDbPath dropped the remote host and path: %s", rendered)
+	}
+
+	cfg.ImmutableDbPath = "/var/lib/dingo/password=ordinary-path"
+	rendered = fmt.Sprint(cfg.LogValue())
+	if !strings.Contains(rendered, cfg.ImmutableDbPath) {
+		t.Errorf("ImmutableDbPath changed a local path: %s", rendered)
+	}
+
+	cfg.ImmutableDbPath = "https://credential-name:pass%zz@example.test/db"
+	rendered = fmt.Sprint(cfg.LogValue())
+	for _, secret := range []string{"credential-name", "pass%zz"} {
+		if strings.Contains(rendered, secret) {
+			t.Errorf("malformed ImmutableDbPath leaks %q: %s", secret, rendered)
+		}
+	}
+	if !strings.Contains(rendered, "example.test/db") {
+		t.Errorf("malformed ImmutableDbPath dropped the remote host and path: %s", rendered)
+	}
+
+	for _, path := range []string{
+		" https://credential-name:password@example.test/db",
+		"\u00a0https://credential-name:password@example.test/db",
+		"https:///db?apiKey=query-secret",
+	} {
+		cfg.ImmutableDbPath = path
+		rendered = fmt.Sprint(cfg.LogValue())
+		for _, secret := range []string{
+			"credential-name", "password", "query-secret",
+		} {
+			if strings.Contains(rendered, secret) {
+				t.Errorf("ImmutableDbPath %q leaks %q: %s", path, secret, rendered)
+			}
 		}
 	}
 }

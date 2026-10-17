@@ -61,9 +61,17 @@ func Field(list Term, index int) Term {
 	return Apply(builtin.HeadList, list)
 }
 
-// ConstrFields returns the field list of a Constr.
+// ConstrFields returns the field list of a Constr. Only sum types, such as
+// ScriptInfo and credentials, are still constructors in V4.
 func ConstrFields(term Term) Term {
 	return Apply(builtin.SndPair, Apply(builtin.UnConstrData, term))
+}
+
+// ListFields returns the fields of a single-constructor V4 type, which the
+// context encodes as a Data list: ScriptContext, TxInfo and the other
+// product types.
+func ListFields(term Term) Term {
+	return Apply(builtin.UnListData, term)
 }
 
 // BoolConstant is a boolean literal.
@@ -120,14 +128,17 @@ func MaybeScript(
 }
 
 // TxInfoSubTxIx selects txInfoSubTxIx from the ScriptContext.
+// The V4 selectors follow plutus-ledger-api 1.70.0.0,
+// PlutusLedgerApi.V4.Contexts: ScriptContext and TxInfo use
+// makeIsDataSchemaAsList; ScriptInfo retains indexed constructors.
 func TxInfoSubTxIx(ctx Term) Term {
-	txInfo := Field(ConstrFields(ctx), 0)
-	return Field(ConstrFields(txInfo), 1)
+	txInfo := Field(ListFields(ctx), 0)
+	return Field(ListFields(txInfo), 1)
 }
 
 // GuardingTopTxInfo selects the TopTxInfo of a GuardingScript purpose.
 func GuardingTopTxInfo(ctx Term) Term {
-	scriptInfo := Field(ConstrFields(ctx), 2)
+	scriptInfo := Field(ListFields(ctx), 2)
 	return Field(ConstrFields(scriptInfo), 1)
 }
 
@@ -153,10 +164,10 @@ func MapOrderScript(
 ) lcommon.PlutusV4Script {
 	t.Helper()
 	return ContextScript(t, func(ctx Term) Term {
-		txInfo := Field(ConstrFields(ctx), 0)
+		txInfo := Field(ListFields(ctx), 0)
 		entries := Apply(
 			builtin.UnMapData,
-			Field(ConstrFields(txInfo), fieldIndex),
+			Field(ListFields(txInfo), fieldIndex),
 		)
 		tagIs := func(entry Term, tag int64) Term {
 			credential := Apply(builtin.FstPair, entry)

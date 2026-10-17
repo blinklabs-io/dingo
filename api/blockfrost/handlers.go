@@ -23,7 +23,6 @@ import (
 	"log/slog"
 	"mime"
 	"net/http"
-	"slices"
 	"strconv"
 	"strings"
 
@@ -250,19 +249,7 @@ func (b *Blockfrost) handleLatestEpoch(
 		)
 		return
 	}
-	activeStake := "0"
-	writeJSON(w, http.StatusOK, EpochResponse{
-		Epoch:          info.Epoch,
-		StartTime:      info.StartTime,
-		EndTime:        info.EndTime,
-		FirstBlockTime: info.FirstBlockTime,
-		LastBlockTime:  info.LastBlockTime,
-		BlockCount:     info.BlockCount,
-		TxCount:        info.TxCount,
-		Output:         "0",
-		Fees:           "0",
-		ActiveStake:    &activeStake,
-	})
+	writeJSON(w, http.StatusOK, epochResponse(info))
 }
 
 // handleLatestEpochParams handles
@@ -564,7 +551,12 @@ func (b *Blockfrost) handleAssetAddresses(
 		)
 		return
 	}
-	holders, total, err := b.node.AssetAddresses(policyID, assetName, params)
+	holders, total, err := b.node.AssetAddresses(
+		r.Context(),
+		policyID,
+		assetName,
+		params,
+	)
 	if err != nil {
 		if errors.Is(err, ErrAssetNotFound) {
 			writeError(
@@ -616,7 +608,7 @@ func (b *Blockfrost) handlePoolsRetiring(
 		writeError(w, http.StatusBadRequest, "Bad Request", errMsg)
 		return
 	}
-	pools, total, err := b.node.PoolsRetiring(params)
+	pools, total, err := b.node.PoolsRetiring(r.Context(), params)
 	if err != nil {
 		b.logger.Error(
 			"failed to list retiring pools",
@@ -712,7 +704,7 @@ func (b *Blockfrost) handlePoolsExtended(
 		return
 	}
 
-	pools, err := b.node.PoolsExtended()
+	pools, totalItems, err := b.node.PoolsExtended(r.Context(), params)
 	if err != nil {
 		b.logger.Error(
 			"failed to get extended pools",
@@ -727,35 +719,10 @@ func (b *Blockfrost) handlePoolsExtended(
 		return
 	}
 
-	slices.SortFunc(
-		pools,
-		func(a, b PoolExtendedInfo) int {
-			switch {
-			case a.Hex < b.Hex:
-				return -1
-			case a.Hex > b.Hex:
-				return 1
-			default:
-				return 0
-			}
-		},
-	)
-	if params.Order == PaginationOrderDesc {
-		slices.Reverse(pools)
-	}
-
-	totalItems := len(pools)
 	SetPaginationHeaders(w, totalItems, params)
 
-	start := (params.Page - 1) * params.Count
-	if start >= totalItems {
-		writeJSON(w, http.StatusOK, []PoolExtendedResponse{})
-		return
-	}
-	end := min(start+params.Count, totalItems)
-
-	resp := make([]PoolExtendedResponse, 0, end-start)
-	for _, pool := range pools[start:end] {
+	resp := make([]PoolExtendedResponse, 0, len(pools))
+	for _, pool := range pools {
 		var metadata *PoolExtendedMetadataResponse
 		if pool.Metadata != nil {
 			metadata = &PoolExtendedMetadataResponse{
@@ -885,7 +852,7 @@ func (b *Blockfrost) handleDReps(
 		}
 	}
 
-	items, total, err := b.node.DReps(params)
+	items, total, err := b.node.DReps(r.Context(), params)
 	if err != nil {
 		b.logger.Error(
 			"failed to list dreps",

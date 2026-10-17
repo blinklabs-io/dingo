@@ -1756,10 +1756,12 @@ func (d *Database) CountTransactionsByAddressKeys(
 
 // CountTransactionsByPaymentCred returns the total number of transactions
 // involving a payment credential across every address that carries it,
-// regardless of staking part.
+// regardless of staking part. paymentScript selects a script credential
+// rather than a key credential sharing the hash.
 func (d *Database) CountTransactionsByPaymentCred(
 	ctx context.Context,
 	paymentKey []byte,
+	paymentScript bool,
 	txn *Txn,
 ) (int, error) {
 	if txn == nil {
@@ -1768,6 +1770,7 @@ func (d *Database) CountTransactionsByPaymentCred(
 	}
 	count, err := d.transactionStore().CountTransactionsByPaymentCred(
 		paymentKey,
+		paymentScript,
 		txn.Metadata(),
 	)
 	if err != nil {
@@ -2111,6 +2114,14 @@ func (d *Database) TransactionsDeleteRolledback(
 	); err != nil {
 		return fmt.Errorf(
 			"failed to delete transaction metadata labels after slot %d: %w",
+			slot,
+			err,
+		)
+	}
+
+	if err := d.restoreAssetUtxoAddressesAfterSlot(ctx, slot, txn); err != nil {
+		return fmt.Errorf(
+			"restore asset UTxO addresses before deleting transactions after slot %d: %w",
 			slot,
 			err,
 		)

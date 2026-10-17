@@ -19,6 +19,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"runtime"
 	"strings"
 )
 
@@ -243,6 +244,7 @@ var mysqlDeferredIndexPrefixColumns = map[string]map[string]bool{
 	"asset": {
 		"policy_id": true,
 	},
+	"pool_opcert_sequence": {"pool_key_hash": true},
 	"asset_mint_burn": {
 		"policy_id": true, "name": true, "fingerprint": true,
 	},
@@ -277,12 +279,24 @@ func SQLiteDialect() Dialect {
 		beginOptions: func(readOnly bool) *sql.TxOptions {
 			return &sql.TxOptions{ReadOnly: readOnly}
 		},
-		setBulk: execStatements(
-			"PRAGMA synchronous = OFF",
-			"PRAGMA cache_size = -200000",
-			"PRAGMA temp_store = MEMORY",
-			"PRAGMA wal_autocheckpoint = 10000",
-		),
+		setBulk: func(ctx context.Context, exec Execer) error {
+			if err := execStatements(
+				"PRAGMA synchronous = OFF",
+				"PRAGMA cache_size = -200000",
+				"PRAGMA temp_store = MEMORY",
+				"PRAGMA wal_autocheckpoint = 10000",
+			)(ctx, exec); err != nil {
+				return err
+			}
+			// Leave one P for the goroutine driving CREATE INDEX and cap
+			// SQLite's auxiliary sorter workers.
+			workers := min(4, max(0, runtime.GOMAXPROCS(0)-1))
+			_, err := exec.ExecContext(
+				ctx,
+				fmt.Sprintf("PRAGMA threads = %d", workers),
+			)
+			return err
+		},
 		// wal_autocheckpoint is restored to 10000, not SQLite's compiled-in
 		// default of 1000: the per-connection DSN pragmas
 		// (sqliteCommonPragmas in database/plugin/metadata/sqlite/
@@ -294,6 +308,7 @@ func SQLiteDialect() Dialect {
 			"PRAGMA synchronous = NORMAL",
 			"PRAGMA cache_size = -50000",
 			"PRAGMA temp_store = DEFAULT",
+			"PRAGMA threads = 0",
 			"PRAGMA wal_autocheckpoint = 10000",
 		),
 		analyze: execStatements("ANALYZE"),

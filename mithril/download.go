@@ -964,7 +964,7 @@ func downloadSnapshotOnce(
 					"restart download failed with "+
 						"status %d: %s",
 					resp2.StatusCode,
-					string(bodyBytes),
+					EscapeText(string(bodyBytes)),
 				), cfg.URL)
 			}
 			// Replace the original response body with the
@@ -1056,13 +1056,13 @@ func downloadSnapshotOnce(
 				"%w: download failed with status %d: %s",
 				errDownloadTransient,
 				resp.StatusCode,
-				string(bodyBytes),
+				EscapeText(string(bodyBytes)),
 			), cfg.URL)
 		}
 		return "", redactLocationError(fmt.Errorf(
 			"download failed with status %d: %s",
 			resp.StatusCode,
-			string(bodyBytes),
+			EscapeText(string(bodyBytes)),
 		), cfg.URL)
 	}
 	defer func() {
