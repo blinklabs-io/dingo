@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/connmanager"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	gouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -69,7 +70,7 @@ func requireLeiosFetchConversationDone(t *testing.T, mockErrCh <-chan error) {
 	select {
 	case err := <-mockErrCh:
 		require.NoError(t, err)
-	case <-time.After(2 * time.Second):
+	case <-time.After(testutil.AsyncWait):
 		t.Fatal("mock leios-fetch conversation did not finish")
 	}
 }

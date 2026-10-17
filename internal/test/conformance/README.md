@@ -152,9 +152,10 @@ already runs a `postgres:16` service with those exact env vars, so the
 Postgres variant runs automatically as part of the existing tagged
 `go test -tags dingo_extra_plugins ./...` step. Note that
 `.github/workflows/go-test.yml`'s `go-test-linux-race` job deliberately runs
-without those services, so under `-race` this suite covers the SQLite backend
-only; the Postgres and MySQL vectors are covered uninstrumented by
-`go-test-linux`.
+without those services, and it skips the corpus replays outright
+(`testutil.SkipUnderRace`): they are single-goroutine and cost most of the
+package's time under the detector. The SQLite, Postgres and MySQL vectors are
+all covered uninstrumented by `go-test-linux`, and SQLite by `go-test-linux-quick`.
 
 **Schema isolation.** `database/plugin/metadata/postgres`'s own tests
 connect to the same `dingo_test` database. Since `go test ./...` runs
