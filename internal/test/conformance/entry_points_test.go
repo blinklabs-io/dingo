@@ -21,6 +21,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/ouroboros-mock/conformance"
@@ -417,6 +418,11 @@ func TestDingoEraEntryPointsReportsMissingValidator(t *testing.T) {
 // shared harness's verdict, which is produced by upstream gouroboros rules
 // and stays green with ValidateTxConway stubbed out entirely.
 func TestConformanceVectorsExerciseDingoEraEntryPoints(t *testing.T) {
+	testutil.SkipUnderRace(
+		t,
+		"a single-goroutine corpus replay; go-test (Linux) and go-test "+
+			"(Linux, quick) run the same entry-point assertions un-instrumented",
+	)
 	run := entryPointCorpusEvidence(t)
 	require.NotEmpty(
 		t,

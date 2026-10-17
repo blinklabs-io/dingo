@@ -32,7 +32,6 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/consensus/praos"
-	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/utxoref"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
@@ -6431,10 +6430,8 @@ func TestPraosOpCertEncodesCounterBeyondUint32(t *testing.T) {
 	)
 }
 
-// TestBuildBlockDoesNotNarrowOpCertCounterAtUint32 exercises the assignment
-// rather than the struct: a counter one past math.MaxUint32 reaches the
-// encoder intact, so no bound of dingo's stands between the certificate and
-// the forged header.
+// TestBuildBlockPreservesFullOpCertCounter exercises the assignment rather
+// than the struct: a counter above math.MaxInt64 reaches the encoder intact.
 //
 // buildBlock re-decodes the block it encoded, so the assertion depends on
 // gouroboros decoding the field at full width: the module is pinned past
@@ -6442,8 +6439,8 @@ func TestPraosOpCertEncodesCounterBeyondUint32(t *testing.T) {
 // shelley.ShelleyBlockHeaderBody.OpCertSequenceNumber from uint32 to
 // uint64, so the re-decode now returns a block whose header carries the
 // full counter rather than reporting an upstream overflow.
-func TestBuildBlockDoesNotNarrowOpCertCounterAtUint32(t *testing.T) {
-	const counter = uint64(math.MaxUint32) + 1
+func TestBuildBlockPreservesFullOpCertCounter(t *testing.T) {
+	const counter = uint64(math.MaxInt64) + 1
 	creds := setupTestCredentials(t)
 	creds.opCert.IssueNumber = counter
 
@@ -6457,41 +6454,6 @@ func TestBuildBlockDoesNotNarrowOpCertCounterAtUint32(t *testing.T) {
 		counter,
 		uint64(header.Body.OpCertSequenceNumber),
 	)
-}
-
-// TestBuildBlockRejectsOpCertCounterAbovePersistableBound covers the other
-// end: a counter the reference accepts but this node cannot record is
-// refused before the leader slot is spent, naming the bound, rather than
-// being forged and then failing its own block apply.
-func TestBuildBlockRejectsOpCertCounterAbovePersistableBound(t *testing.T) {
-	creds := setupTestCredentials(t)
-	creds.opCert.IssueNumber = eras.MaxPersistableOpCertCounter + 1
-
-	builder := newTPraosTestBuilder(t, creds)
-	_, _, err := builder.BuildBlock(context.Background(), 1001, 0)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "pool_opcert_sequence")
-	assert.NotContains(t, err.Error(), "exceeds uint32 max")
-}
-
-// TestValidateOpCertSequenceRejectsCounterAbovePersistableBound pins the
-// forge loop's pre-flight against the same bound block application applies,
-// so the two cannot disagree about which counters are forgeable.
-func TestValidateOpCertSequenceRejectsCounterAbovePersistableBound(
-	t *testing.T,
-) {
-	require.NoError(
-		t,
-		validateOpCertSequence(5, true, uint64(math.MaxInt64), false),
-	)
-	err := validateOpCertSequence(
-		5,
-		true,
-		eras.MaxPersistableOpCertCounter+1,
-		false,
-	)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "pool_opcert_sequence")
 }
 
 func newTPraosTestBuilder(
