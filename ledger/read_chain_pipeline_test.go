@@ -877,6 +877,10 @@ func TestDrainBlockPipelineBeforeRollbackWaitsForPendingWork(t *testing.T) {
 	release()
 	testutil.RequireReceive(t, drained, testutil.AsyncWait, "decoder drain")
 
+	// WaitForDrain returns once ordered processing finishes; the last result
+	// can still sit in the results queue until the consumer takes it, and
+	// PendingCount counts it. Wait for the consumer before asserting.
+	testutil.RequireReceive(t, resultsDone, testutil.AsyncWait, "result consumer")
 	assert.Equal(
 		t,
 		0,

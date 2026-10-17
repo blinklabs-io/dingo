@@ -1184,16 +1184,6 @@ func (b *DefaultBlockBuilder) buildBlock(ctx context.Context,
 	if opCert == nil {
 		return nil, nil, errors.New("operational certificate not loaded")
 	}
-	// The header carries the counter and KES period at the width gouroboros
-	// decodes them, so neither is narrowed here. The counter is still bounded
-	// by what the metadata store can record: a block whose counter the node
-	// cannot persist would be forged and then fail its own apply, so it is
-	// refused before the leader slot is spent on VRF and KES work.
-	if err := eras.ValidateOpCertPersistableCounter(
-		opCert.IssueNumber,
-	); err != nil {
-		return nil, nil, err
-	}
 	// Get issuer vkey (cold vkey) from operational certificate.
 	// The IssuerVkey identifies the pool operator via their cold key.
 	issuerVKey := opCert.ColdVKey

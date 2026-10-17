@@ -131,7 +131,7 @@ func TestMySQLOpCertConflictWithClientFoundRows(t *testing.T) {
 		t.Context(),
 		"INSERT INTO pool (pool_key_hash, latest_op_cert_sequence) VALUES (?, ?)",
 		poolKeyHash.Bytes(),
-		0,
+		encodeOpCertSequence(0),
 	)
 	require.NoError(t, err)
 	require.NoError(t, store.UpdatePoolOpCertSequence(poolKeyHash, 2, 10, nil))
@@ -139,7 +139,7 @@ func TestMySQLOpCertConflictWithClientFoundRows(t *testing.T) {
 	err = store.UpdatePoolOpCertSequence(poolKeyHash, 3, 10, nil)
 	require.ErrorContains(t, err, "opcert counter conflict")
 
-	var latest, recorded uint64
+	var latest, recorded int64
 	require.NoError(t, store.writeDB.QueryRowContext(
 		t.Context(),
 		"SELECT latest_op_cert_sequence FROM pool WHERE pool_key_hash = ?",
@@ -151,7 +151,7 @@ func TestMySQLOpCertConflictWithClientFoundRows(t *testing.T) {
 		poolKeyHash.Bytes(),
 		10,
 	).Scan(&recorded))
-	require.Equal(t, uint64(2), latest)
+	require.Equal(t, uint64(2), decodeOpCertSequence(latest))
 	require.Equal(t, latest, recorded)
 }
 

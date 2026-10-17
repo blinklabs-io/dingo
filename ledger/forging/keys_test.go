@@ -1571,19 +1571,11 @@ func TestValidateOpCertSequence(t *testing.T) {
 			enforceNoGap: false,
 		},
 		{
-			// The era rule accepts an unchanged counter at
-			// math.MaxUint64 -- its gap comparison cannot wrap; that
-			// property is pinned on eras.ValidateOpCertCounter itself
-			// (TestValidateOpCertCounterMaxUint64DoesNotWrap). The forge
-			// loop still refuses it, because this node cannot record a
-			// counter above eras.MaxPersistableOpCertCounter and would
-			// forge a block it could not then apply.
-			name:         "maximum counter refused as unrecordable (boundary)",
+			name:         "maximum counter accepted unchanged (boundary)",
 			stored:       math.MaxUint64,
 			found:        true,
 			candidate:    math.MaxUint64,
 			enforceNoGap: true,
-			wantErr:      "pool_opcert_sequence",
 		},
 	}
 	for _, tt := range tests {
