@@ -15,19 +15,23 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"runtime/pprof"
 	"strings"
+	"syscall"
 
 	"github.com/blinklabs-io/dingo/internal/config"
 	internalplugins "github.com/blinklabs-io/dingo/internal/plugins"
 	"github.com/blinklabs-io/dingo/internal/settingsresolve"
 	"github.com/blinklabs-io/dingo/internal/version"
+	"github.com/blinklabs-io/dingo/mithril"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"go.uber.org/automaxprocs/maxprocs"
@@ -423,7 +427,6 @@ Database Workers:
 			}
 		},
 	}
-
 	// Global flags
 	rootCmd.PersistentFlags().
 		BoolVarP(&globalFlags.debug, "debug", "D", false, "enable debug logging")
@@ -523,8 +526,8 @@ Database Workers:
 
 	// Execute cobra command
 	exitCode := 0
-	if err := rootCmd.Execute(); err != nil {
-		slog.Error(err.Error())
+	if err := executeWithSignalContext(rootCmd); err != nil {
+		logExecuteError(slog.Default(), err)
 		exitCode = 1
 	}
 
@@ -550,4 +553,23 @@ Database Workers:
 	}
 
 	return exitCode
+}
+
+// logExecuteError logs a command's final error. Errors can embed
+// aggregator-controlled text, and slog's JSON handler passes C1 controls such
+// as U+009B through unescaped, so the message is escaped here.
+func logExecuteError(logger *slog.Logger, err error) {
+	logger.Error(mithril.EscapeText(err.Error()))
+}
+
+func executeWithSignalContext(cmd *cobra.Command) error {
+	parent := cmd.Context()
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, stop := signal.NotifyContext(
+		parent, syscall.SIGINT, syscall.SIGTERM,
+	)
+	defer stop()
+	return cmd.ExecuteContext(ctx)
 }

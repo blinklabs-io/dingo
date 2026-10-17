@@ -332,7 +332,7 @@ func TestLeiosTxsOfferRetriesAfterAdmissionReleases(t *testing.T) {
 			ProtocolId: leiosfetch.ProtocolId,
 			IsResponse: true,
 			Messages: []protocol.Message{
-				leiosfetch.NewMsgBlockTxsFull(point, bitmap, []cbor.RawMessage{tx}),
+				leiosfetch.NewMsgBlockTxs(point, bitmap, []cbor.RawMessage{tx}),
 			},
 		},
 	))
@@ -512,7 +512,7 @@ func TestLeiosTxsOfferHealthyPeerIsNotSuppressedByFailingPeer(t *testing.T) {
 			ProtocolId: leiosfetch.ProtocolId,
 			IsResponse: true,
 			Messages: []protocol.Message{
-				leiosfetch.NewMsgBlockTxsFull(
+				leiosfetch.NewMsgBlockTxs(
 					point, bitmap, nil,
 				),
 			},
@@ -528,7 +528,7 @@ func TestLeiosTxsOfferHealthyPeerIsNotSuppressedByFailingPeer(t *testing.T) {
 			ProtocolId: leiosfetch.ProtocolId,
 			IsResponse: true,
 			Messages: []protocol.Message{
-				leiosfetch.NewMsgBlockTxsFull(
+				leiosfetch.NewMsgBlockTxs(
 					point, bitmap, []cbor.RawMessage{tx},
 				),
 			},
@@ -605,11 +605,12 @@ func requireLeiosTxFetchClaim(
 }
 
 type leiosTxOfferTestRequester struct {
-	txs      []cbor.RawMessage
-	perRound time.Duration
-	limit    int
-	requests int
-	lastNeed int
+	txs            []cbor.RawMessage
+	perRound       time.Duration
+	immediateFirst bool
+	limit          int
+	requests       int
+	lastNeed       int
 }
 
 func (r *leiosTxOfferTestRequester) BlockRequest(
@@ -624,7 +625,7 @@ func (r *leiosTxOfferTestRequester) BlockTxsRequest(
 	point ocommon.Point,
 	bitmaps map[uint16]uint64,
 ) (protocol.Message, error) {
-	if r.perRound > 0 {
+	if r.perRound > 0 && !(r.immediateFirst && r.requests == 0) {
 		timer := time.NewTimer(r.perRound)
 		defer timer.Stop()
 		select {
@@ -646,7 +647,7 @@ func (r *leiosTxOfferTestRequester) BlockTxsRequest(
 		served[uint16(idx/64)] |= 1 << uint(63-(idx%64))
 		txs = append(txs, r.txs[idx])
 	}
-	return leiosfetch.NewMsgBlockTxsFull(point, served, txs), nil
+	return leiosfetch.NewMsgBlockTxs(point, served, txs), nil
 }
 
 func testLeiosTxOfferDeadlineFixture(
@@ -717,7 +718,8 @@ func TestLeiosTxsOfferDeadlineWithoutWaiterReleasesClaim(t *testing.T) {
 	o, point, txs := testLeiosTxOfferDeadlineFixture(t, 466)
 	o.leiosTxFetchAttemptTimeoutOverride = 40 * time.Millisecond
 	owner := &leiosTxOfferTestRequester{
-		txs: txs, perRound: 10 * time.Millisecond, limit: 1,
+		txs: txs, perRound: 10 * time.Millisecond, immediateFirst: true,
+		limit: 1,
 	}
 	guard := &leiosFetchGuard{}
 	guard.inflight.Store(1)
@@ -761,7 +763,7 @@ func TestLeiosTxsOfferHandsOffAcrossMultipleFailingPeers(t *testing.T) {
 				ProtocolId: leiosfetch.ProtocolId,
 				IsResponse: true,
 				Messages: []protocol.Message{
-					leiosfetch.NewMsgBlockTxsFull(point, bitmap, txs),
+					leiosfetch.NewMsgBlockTxs(point, bitmap, txs),
 				},
 			},
 		))
@@ -871,6 +873,38 @@ func TestLeiosTxsOfferCancellationBeforeWorkerLaunch(t *testing.T) {
 	}, 5*time.Second, "canceled owner launched or retained its fetch claim")
 }
 
+func TestLeiosTxFetchLaunchChecksConnectionBeforeDispatch(t *testing.T) {
+	t.Parallel()
+
+	o := newOuroboros(OuroborosConfig{})
+	t.Cleanup(func() { require.NoError(t, o.Close()) })
+	o.leiosTxFetchClaims = make(map[string]*leiosTxFetchClaim)
+	done := make(chan any)
+	guard := &leiosFetchGuard{}
+	guard.inflight.Store(1)
+	guard.mu.Lock()
+	point := ocommon.NewPoint(463, []byte{0x47, 0x48})
+	candidate := newLeiosTxFetchCandidate(
+		gouroboros.ConnectionId{}, "", guard, nil, point, done,
+	)
+	candidate.ctx = context.Background()
+	candidate.cancel = func() {}
+	candidate.attemptCtx = context.Background()
+	candidate.attemptDone = func() {}
+	close(done)
+	defer func() {
+		candidate.state.Store(leiosTxFetchCanceled)
+		guard.mu.Unlock()
+	}()
+	key := leiosBlockKey(point.Slot, point.Hash)
+	o.leiosTxFetchClaims[key] = &leiosTxFetchClaim{owner: candidate}
+
+	o.launchLeiosTxFetchOwner(key, candidate)
+
+	require.Zero(t, guard.inflight.Load())
+	require.NotContains(t, o.leiosTxFetchClaims, key)
+}
+
 func TestLeiosTxsOfferOwnerDisconnectHandsOffToWaiter(t *testing.T) {
 	t.Parallel()
 	tx, ref := testLeiosManifestTx(t, 0x48)
@@ -894,7 +928,7 @@ func TestLeiosTxsOfferOwnerDisconnectHandsOffToWaiter(t *testing.T) {
 			ProtocolId: leiosfetch.ProtocolId,
 			IsResponse: true,
 			Messages: []protocol.Message{
-				leiosfetch.NewMsgBlockTxsFull(
+				leiosfetch.NewMsgBlockTxs(
 					point, bitmap, []cbor.RawMessage{tx},
 				),
 			},
@@ -941,13 +975,19 @@ func TestLeiosTxsOfferOwnerDisconnectHandsOffToWaiter(t *testing.T) {
 	))
 	requireLeiosTxFetchClaim(t, o, point, owner.Id(), healthy.Id())
 	close(ownerDone)
+	testutil.WaitForCondition(t, func() bool {
+		o.leiosTxFetchClaimsMu.Lock()
+		defer o.leiosTxFetchClaimsMu.Unlock()
+		claim := o.leiosTxFetchClaims[leiosBlockKey(point.Slot, point.Hash)]
+		return claim != nil && claim.owner.connId == healthy.Id()
+	}, 5*time.Second, "owner disconnect did not promote the healthy waiter")
 	close(release)
 	require.NoError(t, <-result)
-	requireLeiosFetchConversationDone(t, healthyDone)
 	testutil.WaitForCondition(t, func() bool {
 		data, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
 		return ok && data.completeTxCache()
 	}, 5*time.Second, "owner disconnect did not hand off to the healthy waiter")
+	requireLeiosFetchConversationDone(t, healthyDone)
 }
 
 func TestLeiosTxsOfferQueuedOwnerDisconnectPromotesWaiterImmediately(t *testing.T) {
@@ -1074,8 +1114,8 @@ func TestLeiosTxsOfferOtherPathCompletionRelaysTransactionsOnce(t *testing.T) {
 	defer o.leiosEBLog.mu.Unlock()
 	txOffers := 0
 	for _, entry := range o.leiosEBLog.items {
-		if entry.txOffer != nil && entry.txOffer.Slot == point.Slot &&
-			bytes.Equal(entry.txOffer.Hash, point.Hash) {
+		if entry.entry.txOffer != nil && entry.entry.txOffer.Slot == point.Slot &&
+			bytes.Equal(entry.entry.txOffer.Hash, point.Hash) {
 			txOffers++
 		}
 	}
@@ -1137,8 +1177,8 @@ func TestLeiosTxsOfferCacheMissIntentSurvivesOwnerCancellation(t *testing.T) {
 	defer o.leiosEBLog.mu.Unlock()
 	txOffers := 0
 	for _, entry := range o.leiosEBLog.items {
-		if entry.txOffer != nil && entry.txOffer.Slot == point.Slot &&
-			bytes.Equal(entry.txOffer.Hash, point.Hash) {
+		if entry.entry.txOffer != nil && entry.entry.txOffer.Slot == point.Slot &&
+			bytes.Equal(entry.entry.txOffer.Hash, point.Hash) {
 			txOffers++
 		}
 	}
@@ -1280,8 +1320,8 @@ func TestLeiosRelayOfferIntentMergesWithPersistedCacheReload(t *testing.T) {
 	defer o.leiosEBLog.mu.Unlock()
 	txOffers := 0
 	for _, entry := range o.leiosEBLog.items {
-		if entry.txOffer != nil && entry.txOffer.Slot == point.Slot &&
-			bytes.Equal(entry.txOffer.Hash, point.Hash) {
+		if entry.entry.txOffer != nil && entry.entry.txOffer.Slot == point.Slot &&
+			bytes.Equal(entry.entry.txOffer.Hash, point.Hash) {
 			txOffers++
 		}
 	}

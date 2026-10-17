@@ -162,11 +162,11 @@ func mithrilListCommand() *cobra.Command {
 				}
 				fmt.Printf(
 					"%-16s  %-8d  %-8d  %12s  %s\n",
-					digest,
+					mithril.EscapeText(digest),
 					s.Beacon.Epoch,
 					s.Beacon.ImmutableFileNumber,
 					mithril.HumanBytes(s.Size),
-					created,
+					mithril.EscapeText(created),
 				)
 			}
 
@@ -205,11 +205,11 @@ func runMithrilListV2(ctx context.Context, client *mithril.Client) error {
 		}
 		fmt.Printf(
 			"%-16s  %-8d  %-8d  %12s  %s\n",
-			hash,
+			mithril.EscapeText(hash),
 			s.Beacon.Epoch,
 			s.Beacon.ImmutableFileNumber,
 			mithril.HumanBytes(s.TotalDbSizeUncompressed),
-			created,
+			mithril.EscapeText(created),
 		)
 	}
 	return nil
@@ -264,8 +264,8 @@ func mithrilShowCommand() *cobra.Command {
 				return fmt.Errorf("getting snapshot: %w", err)
 			}
 
-			fmt.Printf("Digest:                %s\n", snapshot.Digest)
-			fmt.Printf("Network:               %s\n", snapshot.Network)
+			fmt.Printf("Digest:                %s\n", mithril.EscapeText(snapshot.Digest))
+			fmt.Printf("Network:               %s\n", mithril.EscapeText(snapshot.Network))
 			fmt.Printf(
 				"Epoch:                 %d\n",
 				snapshot.Beacon.Epoch,
@@ -280,20 +280,20 @@ func mithrilShowCommand() *cobra.Command {
 			)
 			fmt.Printf(
 				"Certificate Hash:      %s\n",
-				snapshot.CertificateHash,
+				mithril.EscapeText(snapshot.CertificateHash),
 			)
 			fmt.Printf(
 				"Compression:           %s\n",
-				snapshot.CompressionAlgorithm,
+				mithril.EscapeText(snapshot.CompressionAlgorithm),
 			)
 			fmt.Printf(
 				"Cardano Node Version:  %s\n",
-				snapshot.CardanoNodeVersion,
+				mithril.EscapeText(snapshot.CardanoNodeVersion),
 			)
-			fmt.Printf("Created:               %s\n", snapshot.CreatedAt)
+			fmt.Printf("Created:               %s\n", mithril.EscapeText(snapshot.CreatedAt))
 			fmt.Println("Locations:")
 			for _, loc := range snapshot.Locations {
-				fmt.Printf("  - %s\n", loc)
+				fmt.Printf("  - %s\n", mithril.EscapeText(loc))
 			}
 
 			return nil
@@ -314,9 +314,9 @@ func runMithrilShowV2(
 		return fmt.Errorf("getting Cardano database snapshot: %w", err)
 	}
 
-	fmt.Printf("Hash:                  %s\n", snapshot.Hash)
-	fmt.Printf("Merkle Root:           %s\n", snapshot.MerkleRoot)
-	fmt.Printf("Network:               %s\n", snapshot.Network)
+	fmt.Printf("Hash:                  %s\n", mithril.EscapeText(snapshot.Hash))
+	fmt.Printf("Merkle Root:           %s\n", mithril.EscapeText(snapshot.MerkleRoot))
+	fmt.Printf("Network:               %s\n", mithril.EscapeText(snapshot.Network))
 	fmt.Printf(
 		"Epoch:                 %d\n",
 		snapshot.Beacon.Epoch,
@@ -331,13 +331,13 @@ func runMithrilShowV2(
 	)
 	fmt.Printf(
 		"Certificate Hash:      %s\n",
-		snapshot.CertificateHash,
+		mithril.EscapeText(snapshot.CertificateHash),
 	)
 	fmt.Printf(
 		"Cardano Node Version:  %s\n",
-		snapshot.CardanoNodeVersion,
+		mithril.EscapeText(snapshot.CardanoNodeVersion),
 	)
-	fmt.Printf("Created:               %s\n", snapshot.CreatedAt)
+	fmt.Printf("Created:               %s\n", mithril.EscapeText(snapshot.CreatedAt))
 	printLocations := func(label string, locs []mithril.CardanoDatabaseLocation) {
 		fmt.Printf("%s Locations:\n", label)
 		for _, loc := range locs {
@@ -345,7 +345,7 @@ func runMithrilShowV2(
 			if uri == "" {
 				uri = loc.URITemplate
 			}
-			fmt.Printf("  - [%s] %s\n", loc.Type, uri)
+			fmt.Printf("  - [%s] %s\n", mithril.EscapeText(loc.Type), mithril.EscapeText(uri))
 		}
 	}
 	printLocations("Digest", snapshot.Digests.Locations)
@@ -366,6 +366,8 @@ This is the fastest way to bootstrap a new node.`,
 	}
 	return cmd
 }
+
+var runMithrilSyncForCommand = runMithrilSync
 
 // mithrilSyncRunE is the shared RunE for both the "mithril sync"
 // subcommand and the "sync --mithril" convenience command.
@@ -403,7 +405,9 @@ func mithrilSyncRunE(
 			"error", healthErr,
 		)
 	}
-	return runMithrilSync(cmd.Context(), cfg, logger, network, healthProbe)
+	return runMithrilSyncForCommand(
+		cmd.Context(), cfg, logger, network, healthProbe,
+	)
 }
 
 // errMithrilInactivityIncompatible reports why Mithril bootstrap and the

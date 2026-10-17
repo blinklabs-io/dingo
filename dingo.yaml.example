@@ -181,13 +181,21 @@
 # CLI: --metrics-port
 # metricsPort: 12798
 
-# Address for the unauthenticated Prometheus listener. This is deliberately
-# independent of bindAddr and stays on loopback by default. Set a wildcard or
-# remote-reachable address only when scrapers need it and an external network
-# control protects the endpoint. The container image sets
-# DINGO_METRICS_BIND_ADDR=0.0.0.0, which takes precedence over this setting.
+# Address for the Prometheus listener. This is deliberately independent of
+# bindAddr and stays on loopback by default. Set a wildcard or remote-reachable
+# address only when scrapers need it; the environment variable takes precedence
+# over this setting.
 # CLI: --metrics-bind-addr  Env: DINGO_METRICS_BIND_ADDR
 # metricsBindAddr: "127.0.0.1"
+
+# Optional Bearer token required by the Prometheus listener. Prefer the
+# environment variable so the token does not live in a shared config file.
+# There is no CLI flag because arguments may be visible to other users.
+# Remote traffic remains plain HTTP. Require a TLS reverse proxy or an
+# authenticated encrypted tunnel to protect the token in transit; use network
+# isolation as an additional access control.
+# Env: DINGO_METRICS_AUTH_TOKEN
+# metricsAuthToken: ""
 
 # TCP port for the liveness/readiness probe listener. 0 disables it.
 # Binds bindAddr, like the relay listener: a kubelet or
@@ -307,6 +315,16 @@
 # CLI: --bark-url
 # barkBaseUrl: ""
 
+# Allow Bark RPC and block downloads from private, loopback, and other
+# special-use addresses, for example a Bark service and S3-compatible store
+# such as MinIO on a private network. Download origins must still be
+# barkBaseUrl or a barkBlockDownloadHosts entry, use HTTPS, and pass the same
+# checks on every redirect. Bark RPC redirects stay on the configured origin,
+# and ambient proxy settings stay ignored for both request paths.
+# Can be overridden with DINGO_BARK_BLOCK_DOWNLOAD_ALLOW_PRIVATE_ADDRESSES
+# CLI: --bark-block-download-allow-private-addresses
+# barkBlockDownloadAllowPrivateAddresses: false
+
 # TCP port bind for listening for Bark RPC calls. Enable this on archive nodes.
 # Can be overridden with DINGO_BARK_PORT
 # CLI: --bark-port
@@ -402,6 +420,17 @@
   # Can be overridden with DINGO_TOKEN_REGISTRY_SOURCE_URL
   # CLI: --token-registry-source-url
   # sourceUrl: ""
+  # Signed manifest URL. Required when enabled. The manifest authenticates
+  # the snapshot URL, exact compressed size, BLAKE2b-256 digest, and monotonic
+  # sequence. HTTPS is required for the manifest, snapshot, and every redirect.
+  # Can be overridden with DINGO_TOKEN_REGISTRY_MANIFEST_URL
+  # CLI: --token-registry-manifest-url
+  # manifestUrl: ""
+  # Hex-encoded Ed25519 public key trusted to sign manifests. Required when
+  # enabled. Key rotation is an explicit configuration change.
+  # Can be overridden with DINGO_TOKEN_REGISTRY_TRUSTED_MANIFEST_KEY
+  # CLI: --token-registry-trusted-manifest-key
+  # trustedManifestKey: ""
   # How often the registry is re-checked. Each check is a conditional
   # request, so an unchanged registry costs no download. Values below one
   # minute are raised to it: polling a source that serves a roughly 240MB
@@ -463,6 +492,12 @@
   # Can be overridden with DINGO_TOKEN_REGISTRY_ALLOW_PRIVATE_ADDRESSES
   # CLI: --token-registry-allow-private-addresses
   # allowPrivateAddresses: false
+  # Permit a valid signed manifest below the currently stored sequence.
+  # Accepting it lowers the stored sequence. Leave false except for an
+  # intentional publisher rollback.
+  # Can be overridden with DINGO_TOKEN_REGISTRY_ALLOW_ROLLBACK
+  # CLI: --token-registry-allow-rollback
+  # allowRollback: false
 
 # Optional in-process Koios reward-parity observer (dingo #3098). When
 # enabled, Dingo subscribes an observer to its own epoch.transition EventBus
@@ -651,12 +686,27 @@
 # Can be overridden with DINGO_LEIOS_VOTE_SIGNING_KEY_FILE.
 # leiosVoteSigningKeyFile: "/keys/leios-vote.skey"
 
+# Optional retention for persisted Leios endorser-block history used by
+# leios-fetch to serve historical blocks after the in-memory cache expires.
+# Zero or unset retains all history. Positive values must be at least the
+# network stability window, ceil(3k/f) slots. A positive value keeps records from the
+# highest persisted endorser-block slot back through this many slots; older
+# manifests and transaction bodies are pruned at startup and hourly. This does
+# not remove already-applied ledger state, but historical serving and a later
+# rollback/replay that needs pruned data then depend on a connected peer.
+# Hourly sweeps list manifests to find the highest persisted slot, then scan
+# the shared Leios prefix for deletion candidates. Object stores pay both
+# listing costs plus per-key delete requests.
+# Can be overridden with DINGO_LEIOS_PERSISTENCE_RETENTION_SLOTS.
+# leiosPersistenceRetentionSlots: 0
+
 # Path to ImmutableDB for batch import (used when runMode is "load")
 # Can also be provided as argument to 'dingo load' command
 # An https:// value, or http:// on loopback for local development, names a
 # remote ImmutableDB root serving NNNNN.chunk, NNNNN.primary, NNNNN.secondary
 # and tip.json; chunks download into <databasePath>/immutable-download and load
-# as they arrive in order. Non-loopback HTTP is rejected.
+# as they arrive in order. Non-loopback HTTP and private or special-use HTTPS
+# destinations are rejected, including after redirects and DNS resolution.
 #
 # Can be overridden with the DINGO_IMMUTABLE_DB_PATH environment variable
 # CLI: --immutable-db-path
@@ -840,6 +890,29 @@
   # limitOnPatienceCapacity: 0
   # limitOnPatienceRate: 0
 
+# DMQ (CIP-0137 Decentralized Message Queue) runs alongside the Cardano stack
+# in the same process, on its own Unix socket and network magic. It serves
+# local message submission and notification only.
+# CLI: --dmq-enabled, --dmq-topic, --dmq-network-magic, --dmq-socket-path,
+#   --dmq-message-ttl, --dmq-max-mempool-size
+# Env: DINGO_DMQ_ENABLED, DINGO_DMQ_TOPIC, DINGO_DMQ_NETWORK_MAGIC,
+#   DINGO_DMQ_SOCKET_PATH, DINGO_DMQ_MESSAGE_TTL, DINGO_DMQ_MAX_MEMPOOL_SIZE
+# dmq:
+  # Start the DMQ stack. Default: false.
+  # enabled: false
+  # DMQ topic. Only "mithril" is supported. Default: "mithril".
+  # topic: "mithril"
+  # DMQ network magic. Left unset, it is derived from the topic and network
+  # (mithril: mainnet 2912307721, preprod 2147483649, preview 2147483650).
+  # networkMagic: 0
+  # Unix socket for local submission and notification. Must differ from
+  # socketPath. Default: "dingo-dmq.socket".
+  # socketPath: "dingo-dmq.socket"
+  # Longest expiry, in seconds, a submitted message may claim. Default: 1800.
+  # messageTtl: 1800
+  # Message pool size limit in megabytes. Default: 128.
+  # maxMempoolSize: 128
+
 # Midnight indexer configuration
 # Indexing requires BOTH enabled: true AND API storage mode; either alone is
 # not enough. The gRPC server is a separate, explicit opt-in and also requires
@@ -869,8 +942,9 @@
   # cnightPolicyId: ""
   # cnightAssetName: ""
   # mappingValidatorAddress: ""
-  # Auth token policy ID (28-byte / 56 hex char). When set, only tokens minted
-  # under this exact policy are accepted as registration auth tokens.
+  # Auth token policy ID (28-byte / 56 hex char) and hex asset name. Set both
+  # or neither: only tokens with this asset name minted under this exact
+  # policy are accepted as registration auth tokens.
   # authTokenPolicyId: ""
   # authTokenAssetName: ""
   # committeeCandidateAddress: ""
@@ -908,9 +982,9 @@
 # Multi-client ChainSync (header synchronization) configuration
 # chainsync:
   # Maximum number of concurrent ChainSync client connections
-  # Default: 3
+  # Default: 0 (automatic: at least 3, and one per local-root access point)
   # CLI: --chainsync-max-clients  Env: DINGO_CHAINSYNC_MAX_CLIENTS
-  # maxClients: 3
+  # maxClients: 0
   # Duration with no activity after which a ChainSync client is
   # considered stalled and eligible for failover/recycling
   # Default: "2m"

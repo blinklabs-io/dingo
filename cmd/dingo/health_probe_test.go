@@ -47,7 +47,7 @@ func heldHealthProbe(t *testing.T, cfg *config.Config) *boundHealthProbe {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = ln.Close() })
-	server := node.NewHealthServer(cfg, nil)
+	server := node.NewHealthServer(cfg, nil, nil)
 	require.NotNil(t, server)
 	return &boundHealthProbe{server: server, listener: ln}
 }

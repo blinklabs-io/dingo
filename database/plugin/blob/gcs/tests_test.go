@@ -18,7 +18,7 @@ package gcs
 
 import (
 	"context"
-	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"os"
 	"path/filepath"
@@ -29,6 +29,7 @@ import (
 	"cloud.google.com/go/storage"
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/dingo/database/plugin/blob/internal/blobbackup"
+	"github.com/blinklabs-io/dingo/database/plugin/blob/internal/reversekey"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/blockverify"
 	"github.com/blinklabs-io/dingo/internal/test/storagetest"
@@ -485,115 +486,20 @@ func TestGcsTransactionStagesAndRollsBack(t *testing.T) {
 	}
 }
 
-func TestReverseKeyFile(t *testing.T) {
-	file, err := os.CreateTemp(t.TempDir(), "reverse-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	f := &reverseKeyFile{file: file}
-	for _, key := range []string{"a", "b", "c"} {
-		if err := writeReverseKey(file, key); err != nil {
-			t.Fatal(err)
-		}
-	}
-	for _, want := range []string{"c", "b", "a"} {
-		got, valid, err := f.nextReverse()
-		if err != nil || !valid || got != want {
-			t.Fatalf("reverse key = %q, %v, %v", got, valid, err)
-		}
-	}
-	if _, valid, err := f.nextReverse(); err != nil || valid {
-		t.Fatalf(
-			"reverse iterator should be exhausted: valid=%v err=%v",
-			valid,
-			err,
-		)
-	}
-	file.Close()
-}
-
-// Corrupt local spool framing must never yield a key to the cloud iterator.
-func TestReverseKeyFileRejectsMalformedRecords(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		data []byte
-	}{
-		{"short header", []byte{0, 0, 0}},
-		{"missing prefix", []byte{0, 0, 0, 4}},
-		{"truncated payload", []byte{0, 0, 0, 2, 'a', 0, 0, 0, 2}},
-		{"mismatched lengths", []byte{0, 0, 0, 2, 'a', 0, 0, 0, 1}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			file, err := os.CreateTemp(t.TempDir(), "reverse-")
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer file.Close()
-			if _, err := file.Write(tc.data); err != nil {
-				t.Fatal(err)
-			}
-			f := &reverseKeyFile{file: file}
-			key, valid, err := f.nextReverse()
-			if err == nil || valid || key != "" {
-				t.Fatalf(
-					"malformed spool yielded key %q, valid=%v, err=%v",
-					key,
-					valid,
-					err,
-				)
-			}
-		})
-	}
-}
-
-func TestReverseKeyFileEmptyAndBinaryKeys(t *testing.T) {
-	file, err := os.CreateTemp(t.TempDir(), "reverse-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer file.Close()
-	keys := []string{
-		"",
-		string(binary.BigEndian.AppendUint32(nil, 0xffffffff)),
-		"last",
-	}
-	for _, key := range keys {
-		if err := writeReverseKey(file, key); err != nil {
-			t.Fatal(err)
-		}
-	}
-	f := &reverseKeyFile{file: file}
-	for i := len(keys) - 1; i >= 0; i-- {
-		key, valid, err := f.nextReverse()
-		if err != nil || !valid || key != keys[i] {
-			t.Fatalf(
-				"reverse key = %q, valid=%v, err=%v; want %q",
-				key,
-				valid,
-				err,
-				keys[i],
-			)
-		}
-	}
-	if _, valid, err := f.nextReverse(); err != nil || valid {
-		t.Fatalf("exhausted iterator: valid=%v err=%v", valid, err)
-	}
-}
-
 func TestReverseIteratorPropagatesSpoolCorruption(t *testing.T) {
 	file, err := os.CreateTemp(t.TempDir(), "reverse-")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer file.Close()
-	if err := writeReverseKey(file, "a"); err != nil {
+	if err := reversekey.Write(file, "a"); err != nil {
 		t.Fatal(err)
 	}
 	// The trailer still declares one byte, but the prefix declares two.
 	if _, err := file.WriteAt([]byte{0, 0, 0, 2}, 0); err != nil {
 		t.Fatal(err)
 	}
-	it := &gcsReverseIterator{keys: &reverseKeyFile{file: file}}
+	it := &gcsReverseIterator{keys: reversekey.New(file)}
 	it.Rewind()
 	if it.Err() == nil || it.Valid() || it.Item() != nil {
 		t.Fatalf(
@@ -723,6 +629,39 @@ func TestRollbackIsNoopReportsFalse(t *testing.T) {
 	if txn.pending != nil {
 		t.Fatal("rollback should discard pending changes")
 	}
+}
+
+func TestObjectPrefixScopesKeysToDataDirNamespace(t *testing.T) {
+	t.Parallel()
+	dataDir := t.TempDir()
+	namespace := "0123456789abcdef0123456789abcdef"
+	require.NoError(t, blob.WriteNamespace(dataDir, namespace))
+	prefix, err := objectPrefix(dataDir)
+	require.NoError(t, err)
+	require.Equal(t, ".dingo-namespaces/"+namespace+"/", prefix)
+
+	store, err := NewWithOptions(WithPrefix(prefix))
+	require.NoError(t, err)
+	key := []byte("key")
+	objectKey := store.fullKey(string(key))
+	require.Equal(t, prefix+hex.EncodeToString(key), objectKey)
+	decoded, err := store.externalKey(objectKey)
+	require.NoError(t, err)
+	require.Equal(t, string(key), decoded)
+}
+
+func TestLegacyPrefixExcludesNamespacedObjects(t *testing.T) {
+	t.Parallel()
+	store, err := NewWithOptions()
+	require.NoError(t, err)
+	require.True(t, store.isNamespacedObject(
+		".dingo-namespaces/0123456789abcdef0123456789abcdef/00",
+	))
+	require.False(t, store.isNamespacedObject("00"))
+	store.prefix = "configured/"
+	require.False(t, store.isNamespacedObject(
+		".dingo-namespaces/0123456789abcdef0123456789abcdef/00",
+	))
 }
 
 func TestTombstoneBlockRetainsMetadata(t *testing.T) {

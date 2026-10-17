@@ -22,6 +22,24 @@ The Makefile also provides `make lint`, `make docs-parity`,
 `make config-parity`, and `make sql-check`. After changing SQL queries, run
 `make sql` to regenerate the checked-in code before `make sql-check`.
 
+## Pull-request CI selection
+
+Pull requests that change only root-level Markdown files or Markdown files
+under `docs/` run documentation parity checks, then skip lint, vulnerability
+scanning, the full Go test suite, binary builds, and Docker builds. All other
+paths run the full staged pipeline, including Go package documentation
+(`doc.go`), configuration, fixtures, dependencies, and CI scripts. Mixed
+documentation and code changes also run the full pipeline.
+
+The `changes` job runs the classifier from the workflow commit in a separate
+checkout and compares the PR checkout's merge base with its head using Git,
+including both sides of renames. An empty diff or a failed comparison runs
+full CI.
+Manual CI runs, main-branch publishing, and release tags always run full CI.
+The workflow still starts for documentation-only PRs so existing required job
+checks can report skipped instead of remaining pending. Commit-message checks
+continue to run.
+
 ## Conformance profiles
 
 Dingo reports compatibility in separate layers; a green ledger result is not
@@ -38,10 +56,21 @@ profiles as part of `./...`, and their verbose output reports the exact corpus
 and scenario counts. The [conformance tests](../internal/test/conformance/README.md)
 document what each profile proves and excludes.
 
-The Linux tag workflow generates a Conway CBOR decoding conformance report
-from the upstream corpus before uploading it as a dated JSON release asset.
-The report is uploaded only when Dingo accepts and rejects the corpus samples
-as expected and matches the reference encodings.
+The Linux tag workflow generates four conformance reports and uploads them as
+dated JSON release assets: Conway CBOR decoding, ledger rules, UPLC
+conformance and UPLC turbo performance. Each input corpus is pinned by commit,
+and the turbo archive by SHA-256. A report that records failures is still
+uploaded; the release step requires all four reports to exist. Report
+generation never stops a release: when a generator crashes or its inputs
+cannot be prepared, an `error` report naming the scenario and the cause is
+uploaded in its place. Generator and turbo corpus preparation deadlines leave
+time to write all four reports and compress them within the 30-minute report
+step.
+The turbo report measures an evenly spaced sample of
+`TURBO_MAX_PROGRAMS` programs (500 by default) using 50 samples per program
+and the mean of the best 30. A program that cannot be decoded or evaluated
+remains in the report with null measurements and an `error` reason; it counts
+as a failed benchmark.
 
 ## Local development workflows
 

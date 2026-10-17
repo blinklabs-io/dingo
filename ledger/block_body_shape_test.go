@@ -50,6 +50,7 @@ func requireReadChainBatchShapeOutcome(
 	ls := &LedgerState{config: LedgerStateConfig{Logger: testLogger()}}
 	if pipelined {
 		ls.blockPipeline = pipeline.NewBlockPipeline(
+			pipeline.WithTrustedDecodeOnly(),
 			pipeline.WithDecodeWorkers(2),
 		)
 		require.NoError(t, ls.blockPipeline.Start(ctx))

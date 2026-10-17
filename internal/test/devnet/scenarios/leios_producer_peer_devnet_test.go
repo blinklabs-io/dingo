@@ -19,6 +19,7 @@ package scenarios
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"sync"
@@ -171,11 +172,16 @@ func TestLeiosEndorserBlockProducerToPeer(t *testing.T) {
 		offeringProducer, point.Hash, point.Slot)
 
 	txOfferCtx, cancelTxOffer := context.WithTimeout(ctx, 2*time.Minute)
-	err = awaitLeiosTransactionOffer(
+	referenceCurrent := func() bool {
+		return leiosReferenceOnCanonicalChain(group.Snapshots(), relay.Name, certifyingHeader)
+	}
+	transactionOffers := leiosTransactionOfferMatcher{}
+	err = transactionOffers.await(
 		txOfferCtx,
 		transactions.TransactionOffers,
 		transactions.Errors,
 		point,
+		referenceCurrent,
 	)
 	cancelTxOffer()
 	require.NoError(t, err,
@@ -198,6 +204,7 @@ func TestLeiosEndorserBlockProducerToPeer(t *testing.T) {
 		relayNtcAddr,
 		cfg.NetworkMagic,
 		bodies,
+		referenceCurrent,
 	)
 	cancelApply()
 	require.NoError(t, err,
@@ -365,7 +372,7 @@ func awaitLeiosCanonicalTriple(
 	}
 }
 
-func awaitLeiosTransactionOutputsApplied(
+func awaitLeiosTransactionOutputsAppliedLegacy(
 	ctx context.Context,
 	addr string,
 	magic uint32,
@@ -412,6 +419,223 @@ func awaitLeiosTransactionOffer(
 			}
 		case <-ctx.Done():
 			return ctx.Err()
+		}
+	}
+}
+
+type leiosOfferKey struct {
+	slot uint64
+	hash string
+}
+
+type leiosProducerOfferMatcher struct {
+	manifests    map[leiosOfferKey]pcommon.Point
+	transactions map[leiosOfferKey]struct{}
+}
+
+func (m *leiosProducerOfferMatcher) await(
+	ctx context.Context,
+	manifestOffers <-chan pcommon.Point,
+	transactionOffers <-chan pcommon.Point,
+) (pcommon.Point, error) {
+	if m.manifests == nil {
+		m.manifests = make(map[leiosOfferKey]pcommon.Point)
+	}
+	if m.transactions == nil {
+		m.transactions = make(map[leiosOfferKey]struct{})
+	}
+	for {
+		select {
+		case point, ok := <-manifestOffers:
+			if !ok {
+				return pcommon.Point{}, errors.New(
+					"producer LeiosNotify manifest offer stream closed",
+				)
+			}
+			key := leiosOfferKey{slot: point.Slot, hash: string(point.Hash)}
+			if _, ok := m.transactions[key]; ok {
+				delete(m.transactions, key)
+				point.Hash = append([]byte(nil), point.Hash...)
+				return point, nil
+			}
+			point.Hash = append([]byte(nil), point.Hash...)
+			m.manifests[key] = point
+		case point, ok := <-transactionOffers:
+			if !ok {
+				return pcommon.Point{}, errors.New(
+					"producer LeiosNotify transaction offer stream closed",
+				)
+			}
+			key := leiosOfferKey{slot: point.Slot, hash: string(point.Hash)}
+			if manifest, ok := m.manifests[key]; ok {
+				delete(m.manifests, key)
+				return manifest, nil
+			}
+			m.transactions[key] = struct{}{}
+		case <-ctx.Done():
+			return pcommon.Point{}, ctx.Err()
+		}
+	}
+}
+
+func leiosScenarioError(ctx context.Context, err error) error {
+	if err == nil {
+		return nil
+	}
+	if cause := context.Cause(ctx); cause != nil {
+		return cause
+	}
+	return err
+}
+
+var errLeiosReferenceRolledBack = errors.New(
+	"Leios referencing block rolled back",
+)
+
+func leiosReferencingHeader(
+	snapshots []devnet.ChainSnapshot,
+	node string,
+	point pcommon.Point,
+) (devnet.ObservedHeader, bool) {
+	// The ranking header carries the announced EB content hash and size, but
+	// not the slot from its LeiosNotify point. The slot lower bound rejects an
+	// older occurrence of repeated content. The subsequent exact-point
+	// transaction offer binds the selected occurrence; an eligible later
+	// header with the same hash names the same validated EB content.
+	for _, snapshot := range snapshots {
+		if snapshot.Node != node {
+			continue
+		}
+		for _, header := range snapshot.Headers {
+			if header.Slot >= point.Slot && bytes.Equal(
+				header.LeiosAnnouncementHash,
+				point.Hash,
+			) {
+				return header, true
+			}
+		}
+		return devnet.ObservedHeader{}, false
+	}
+	return devnet.ObservedHeader{}, false
+}
+
+func leiosReferenceOnCanonicalChain(
+	snapshots []devnet.ChainSnapshot,
+	node string,
+	reference devnet.ObservedHeader,
+) bool {
+	for _, snapshot := range snapshots {
+		if snapshot.Node != node {
+			continue
+		}
+		hash, ok := snapshot.HashAt(reference.Slot)
+		return ok && bytes.Equal(hash, reference.Hash)
+	}
+	return false
+}
+
+func awaitLeiosTransactionOutputsApplied(
+	ctx context.Context,
+	addr string,
+	magic uint32,
+	bodies [][]byte,
+	referenceCurrent func() bool,
+) error {
+	return awaitLeiosApplication(
+		ctx,
+		func(ctx context.Context) (bool, error) {
+			return devnet.LeiosTransactionOutputsApplied(
+				ctx,
+				addr,
+				magic,
+				bodies,
+			)
+		},
+		referenceCurrent,
+	)
+}
+
+func awaitLeiosApplication(
+	ctx context.Context,
+	appliedNow func(context.Context) (bool, error),
+	referenceCurrent func() bool,
+) error {
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if !referenceCurrent() {
+			return errLeiosReferenceRolledBack
+		}
+		applied, err := appliedNow(ctx)
+		if err != nil {
+			return err
+		}
+		if !referenceCurrent() {
+			return errLeiosReferenceRolledBack
+		}
+		if applied {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
+type leiosTransactionOfferMatcher struct {
+	offers map[leiosOfferKey]struct{}
+}
+
+func (m *leiosTransactionOfferMatcher) await(
+	ctx context.Context,
+	offers <-chan pcommon.Point,
+	errorStream <-chan error,
+	want pcommon.Point,
+	referenceCurrent func() bool,
+) error {
+	if m.offers == nil {
+		m.offers = make(map[leiosOfferKey]struct{})
+	}
+	wantKey := leiosOfferKey{slot: want.Slot, hash: string(want.Hash)}
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if !referenceCurrent() {
+			return errLeiosReferenceRolledBack
+		}
+		if _, ok := m.offers[wantKey]; ok {
+			if !referenceCurrent() {
+				return errLeiosReferenceRolledBack
+			}
+			delete(m.offers, wantKey)
+			return nil
+		}
+		select {
+		case point, ok := <-offers:
+			if !ok {
+				return errors.New("relay LeiosNotify transaction offer stream closed")
+			}
+			key := leiosOfferKey{slot: point.Slot, hash: string(point.Hash)}
+			m.offers[key] = struct{}{}
+			if key == wantKey {
+				if !referenceCurrent() {
+					return errLeiosReferenceRolledBack
+				}
+				delete(m.offers, wantKey)
+				return nil
+			}
+		case err, ok := <-errorStream:
+			if !ok {
+				return errors.New("relay LeiosNotify error stream closed")
+			}
+			if err != nil {
+				return err
+			}
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
 		}
 	}
 }

@@ -841,16 +841,17 @@ func (s *genesisFakeServer) allowStep(t *testing.T) {
 	}
 }
 
-// findIntersect always succeeds at whatever point the client asks for (its
-// own cursor), matching a fresh from-genesis session's actual FindIntersect
-// call ([]pcommon.Point{startPoint}, resolveStartPoint's Origin by
-// default), or at Origin if the requested point isn't on this fake's chain
-// at all.
+// findIntersect resumes at an offered chain point or origin. Empty tip
+// probes have no possible intersection and do not start a sync session.
 func (s *genesisFakeServer) findIntersect(
 	_ chainsync.CallbackContext, points []pcommon.Point,
 ) (pcommon.Point, chainsync.Tip, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if len(points) == 0 {
+		return pcommon.Point{}, s.chain.Tip(),
+			chainsync.ErrIntersectNotFound
+	}
 	// FindIntersect starts a session, and a real server opens every session
 	// with a RollBackward (NeedsInitialRollback), not just the first one.
 	// Clearing the flag here is what makes a reconnect after a failed
@@ -867,16 +868,14 @@ func (s *genesisFakeServer) findIntersect(
 	case s.sessionStarted <- struct{}{}:
 	default:
 	}
-	if len(points) > 0 {
-		for i, p := range s.chain.Points {
-			if p.Slot == points[0].Slot {
-				s.cursor = i + 1
-				return points[0], s.chain.Tips[i], nil
-			}
+	for i, p := range s.chain.Points {
+		if p.Slot == points[0].Slot {
+			s.cursor = i + 1
+			return points[0], s.chain.Tips[i], nil
 		}
 	}
 	s.cursor = 0
-	return csmock.OriginPoint(), s.chain.Tip(), nil
+	return intersectOrNotFound(points, s.chain.Tip())
 }
 
 // requestNext mirrors fakeCardanoServer.requestNext's three-branch shape
@@ -978,8 +977,10 @@ func (s *genesisFakeServer) lsqConfig() localstatequery.Config {
 					case *localstatequery.ShelleyCurrentProtocolParamsQuery:
 						return []any{pp}, nil
 					case *localstatequery.ShelleyPoolDistr2Query:
-						return localstatequery.PoolDistr2Result{
-							Pools: map[ledger.PoolId]localstatequery.PoolDistr2IndividualStake{},
+						return localstatequery.StakeDistribution2Result{
+							Distribution: localstatequery.PoolDistr2Result{
+								Pools: map[ledger.PoolId]localstatequery.PoolDistr2IndividualStake{},
+							},
 						}, nil
 					case *localstatequery.ShelleyUtxoWholeQuery:
 						s.mu.Lock()

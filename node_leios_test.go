@@ -282,11 +282,15 @@ func testLeiosPParamRat() cbor.Rat {
 func TestLeiosCommitteeParamsFromPParamsRejectsMissingValues(t *testing.T) {
 	t.Parallel()
 
-	_, _, err := leiosCommitteeParamsFromPParams(&gdijkstra.DijkstraProtocolParameters{})
+	_, _, err := leiosCommitteeParamsFromPParams(
+		&gdijkstra.DijkstraProtocolParameters{},
+	)
 	require.ErrorContains(t, err, "committee size")
-	_, _, err = leiosCommitteeParamsFromPParams(&gdijkstra.DijkstraProtocolParameters{
-		LeiosCommitteeSize: 900,
-	})
+	_, _, err = leiosCommitteeParamsFromPParams(
+		&gdijkstra.DijkstraProtocolParameters{
+			LeiosCommitteeSize: 900,
+		},
+	)
 	require.ErrorContains(t, err, "quorum stake threshold is missing")
 }
 
@@ -508,7 +512,7 @@ func TestEnableLeiosVotingRetriesFailedImmediateReplay(t *testing.T) {
 	defer eventBus.Unsubscribe(leios.VoteEmittedEventType, subID)
 	ebHash := lcommon.NewBlake2b256([]byte("startup-replay-eb"))
 	rbHash := lcommon.NewBlake2b256([]byte("startup-replay-rb"))
-	voteManager.HandleEndorserBlock(501, ebHash)
+	voteManager.HandleValidatedEndorserBlock(501, rbHash, ebHash)
 	voteManager.ObserveAnnouncement(501, rbHash, ebHash)
 
 	n := &Node{
@@ -619,4 +623,33 @@ func TestInitLeiosVoteManagerUnsubscribesAcrossLiveLifecycleCycles(
 	}, 250*time.Millisecond, 10*time.Millisecond,
 		"exactly one vote must be enqueued for the single published event, "+
 			"not once per accumulated live-lifecycle cycle")
+}
+
+func TestLeiosPersistenceRetentionRequiresStabilityWindow(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name      string
+		retention uint64
+		coeff     *big.Rat
+		valid     bool
+	}{
+		{"disabled", 0, nil, true},
+		{"below rollback window", 129599, big.NewRat(1, 20), false},
+		{"at rollback window", 129600, big.NewRat(1, 20), true},
+		{"above rollback window", 129601, big.NewRat(1, 20), true},
+		{"unknown coefficient", 1, nil, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateLeiosPersistenceRetention(
+				tc.retention,
+				2160,
+				tc.coeff,
+			)
+			if tc.valid {
+				require.NoError(t, err)
+			} else {
+				require.Error(t, err)
+			}
+		})
+	}
 }

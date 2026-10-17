@@ -21,6 +21,7 @@ type AddressTransaction struct {
 	// PaymentKey backs bare payment-credential lookups and provides the final
 	// deterministic tie-break in the stake-position index.
 	PaymentKey    []byte
+	PaymentScript bool
 	StakingKey    []byte
 	CredentialTag uint8
 	TransactionID uint

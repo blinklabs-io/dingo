@@ -102,8 +102,8 @@ func TestNPMReleaseUsesTrustedPublishing(t *testing.T) {
 	if !strings.Contains(workflowText, "id-token: write") {
 		t.Error("publish workflow does not grant the npm job OIDC token access")
 	}
-	if !strings.Contains(workflowText, "node-version: '24.x'") {
-		t.Error("npm release does not use a Node.js version supported by trusted publishing")
+	if !strings.Contains(workflowText, "node-version: '24.21.0'") {
+		t.Error("npm release does not use the pinned Node.js version")
 	}
 	job := workflow.Jobs["npm-release"]
 	installedTrustedCLI := false

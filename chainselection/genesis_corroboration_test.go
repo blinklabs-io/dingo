@@ -73,8 +73,8 @@ func feedFrontier(
 // feedPoints records a sequence of points into a bare PeerChainTip with hash
 // tracking enabled.
 func feedPoints(pt *PeerChainTip, window uint64, points ...ocommon.Point) {
-	for _, p := range points {
-		pt.recordObservedPoint(p, window, true)
+	for i, p := range points {
+		pt.recordObservedPoint(p, uint64(i+1), window, window, true)
 	}
 }
 
@@ -94,8 +94,7 @@ func feedPointsWithTipHistory(
 	}
 }
 
-// recordObservedPoint keeps the slot frontier and the point (slot+hash)
-// frontier in lockstep, storing the current hash at each slot.
+// recordObservedPoint stores the current hash for each retained point.
 func TestRecordObservedPointTracksHashFrontier(t *testing.T) {
 	pt := &PeerChainTip{}
 	window := uint64(100)
@@ -119,12 +118,37 @@ func TestRecordObservedPointTracksHashFrontier(t *testing.T) {
 	// Re-reporting the same slot with a new hash updates the frontier in place.
 	pt.recordObservedPoint(
 		ocommon.Point{Slot: 30, Hash: []byte("h30b")},
+		3,
+		window,
 		window,
 		true,
 	)
 	require.Equal(t, []uint64{10, 20, 30}, pt.observedSlots)
 	require.Len(t, pt.observedPoints, 3)
 	assert.Equal(t, []byte("h30b"), pt.observedPoints[2].Hash)
+}
+
+func TestRecordObservedPointRestartsAfterHeightGap(t *testing.T) {
+	pt := &PeerChainTip{}
+	window := uint64(100)
+	pt.recordObservedPoint(
+		ocommon.Point{Slot: 10, Hash: []byte("h10")},
+		10,
+		window,
+		window,
+		true,
+	)
+	pt.recordObservedPoint(
+		ocommon.Point{Slot: 30, Hash: []byte("h30")},
+		12,
+		window,
+		window,
+		true,
+	)
+
+	require.Len(t, pt.observedPoints, 1)
+	assert.Equal(t, uint64(12), pt.observedPointBaseBlock)
+	assert.Equal(t, uint64(30), pt.observedPoints[0].Slot)
 }
 
 // With hash tracking disabled (corroboration inactive) only the slot frontier
@@ -136,7 +160,7 @@ func TestRecordObservedPointSkipsHashesWhenInactive(t *testing.T) {
 		{Slot: 10, Hash: []byte("h10")},
 		{Slot: 20, Hash: []byte("h20")},
 	} {
-		pt.recordObservedPoint(p, window, false)
+		pt.recordObservedPoint(p, p.Slot/10, window, window, false)
 	}
 	assert.Equal(t, []uint64{10, 20}, pt.observedSlots)
 	assert.Empty(t, pt.observedPoints)
@@ -145,20 +169,23 @@ func TestRecordObservedPointSkipsHashesWhenInactive(t *testing.T) {
 	// clears it.
 	pt.recordObservedPoint(
 		ocommon.Point{Slot: 30, Hash: []byte("h30")},
+		3,
+		window,
 		window,
 		true,
 	)
 	assert.Len(t, pt.observedPoints, 1)
 	pt.recordObservedPoint(
 		ocommon.Point{Slot: 40, Hash: []byte("h40")},
+		4,
+		window,
 		window,
 		false,
 	)
 	assert.Empty(t, pt.observedPoints)
 }
 
-// ApplyRollback trims the slot and point frontiers together so they stay
-// aligned after a rollback.
+// ApplyRollback trims both frontiers to the rollback slot.
 func TestApplyRollbackTrimsPointFrontier(t *testing.T) {
 	pt := &PeerChainTip{}
 	window := uint64(100)
@@ -184,12 +211,32 @@ func TestApplyRollbackTrimsPointFrontier(t *testing.T) {
 	// A subsequent point extends both frontiers consistently.
 	pt.recordObservedPoint(
 		ocommon.Point{Slot: 40, Hash: []byte("h40")},
+		3,
+		window,
 		window,
 		true,
 	)
 	require.Equal(t, []uint64{10, 20, 40}, pt.observedSlots)
 	require.Len(t, pt.observedPoints, 3)
 	assert.Equal(t, []byte("h40"), pt.observedPoints[2].Hash)
+}
+
+func TestApplyRollbackClearsPointFrontierForUnknownFork(t *testing.T) {
+	pt := &PeerChainTip{}
+	window := uint64(100)
+	feedPoints(pt, window,
+		ocommon.Point{Slot: 10, Hash: []byte("h10")},
+		ocommon.Point{Slot: 20, Hash: []byte("h20")},
+	)
+
+	pt.ApplyRollback(
+		ocommon.Point{Slot: 20, Hash: []byte("other-h20")},
+		genesisTip(30, "advertised", 3),
+	)
+
+	assert.Empty(t, pt.observedPoints)
+	assert.Empty(t, pt.observedSlots)
+	assert.Zero(t, pt.observedPointBaseBlock)
 }
 
 func TestApplyRollbackDoesNotPromoteAdvertisedTipToObserved(t *testing.T) {
@@ -269,9 +316,9 @@ func TestConfirmsRecentChainHashSensitive(t *testing.T) {
 		ocommon.Point{Slot: 20, Hash: []byte("x20")},
 	)
 
-	assert.True(t, honestA.confirmsRecentChain(honestB))
-	assert.False(t, honestA.confirmsRecentChain(divergent))
-	assert.False(t, divergent.confirmsRecentChain(honestB))
+	assert.True(t, honestA.confirmsRecentChainWithin(honestB, 0))
+	assert.False(t, honestA.confirmsRecentChainWithin(divergent, 0))
+	assert.False(t, divergent.confirmsRecentChainWithin(honestB, 0))
 }
 
 // Regression for the "shared ancestor then diverge" bypass: a fast source that
@@ -295,7 +342,7 @@ func TestConfirmsRecentChainRejectsSharedAncestorThenDiverge(t *testing.T) {
 		ocommon.Point{Slot: 111, Hash: []byte("h111")},
 	)
 
-	assert.False(t, fast.confirmsRecentChain(honest),
+	assert.False(t, fast.confirmsRecentChainWithin(honest, 0),
 		"a witness that diverges after the shared ancestor must not confirm")
 }
 
@@ -313,7 +360,7 @@ func TestConfirmsRecentChainRequiresOverlap(t *testing.T) {
 		ocommon.Point{Slot: 100, Hash: []byte("h100")},
 		ocommon.Point{Slot: 105, Hash: []byte("h105")},
 	)
-	assert.False(t, ahead.confirmsRecentChain(behind))
+	assert.False(t, ahead.confirmsRecentChainWithin(behind, 0))
 }
 
 func TestGenesisCorroborationRejectsOldMatchWithAheadWitness(t *testing.T) {
@@ -452,6 +499,255 @@ func TestGenesisShouldApplyIngressGatesUncorroborated(t *testing.T) {
 	cs.RemovePeer(witness)
 	assert.False(t, cs.ShouldApplyIngress(fast),
 		"apply must be denied again once corroboration is revoked")
+}
+
+func TestPeerTipAdmissionCandidatesStayOutOfSelectionUntilAdmitted(t *testing.T) {
+	t.Parallel()
+
+	cs := NewChainSelector(ChainSelectorConfig{
+		GenesisMode:           true,
+		SecurityParam:         20,
+		MinCorroboratingPeers: 1,
+	})
+	applicant := corrConn(11)
+	witness := corrConn(12)
+	anchor := corrConn(13)
+	feedFrontier(cs, witness,
+		genesisTip(100, "h100", 100),
+		genesisTip(105, "h105", 105),
+		genesisTip(110, "h110", 110),
+	)
+	feedFrontier(cs, anchor,
+		genesisTip(100, "h100", 100),
+		genesisTip(105, "h105", 105),
+		genesisTip(110, "h110", 110),
+	)
+	bestBefore := cs.GetBestPeer()
+	require.NotNil(t, bestBefore)
+
+	updates := []PeerTipUpdateEvent{
+		{
+			ConnectionId: applicant,
+			AdmissionID:  1,
+			Tip:          genesisTip(100, "h100", 100),
+			ObservedTip:  genesisTip(100, "h100", 100),
+		},
+		{
+			ConnectionId: applicant,
+			AdmissionID:  2,
+			Tip:          genesisTip(105, "h105", 105),
+			ObservedTip:  genesisTip(105, "h105", 105),
+		},
+		{
+			ConnectionId: applicant,
+			AdmissionID:  3,
+			Tip:          genesisTip(110, "h110", 110),
+			ObservedTip:  genesisTip(110, "h110", 110),
+		},
+	}
+	var candidateFrontier *PeerChainTip
+	for _, update := range updates {
+		require.True(t, cs.PreparePeerTipAdmission(update))
+		if candidateFrontier == nil {
+			candidateFrontier = cs.pendingPeerTipFrontiers[applicant]
+		} else {
+			assert.Same(t, candidateFrontier,
+				cs.pendingPeerTipFrontiers[applicant],
+				"queued admissions should share one bounded frontier snapshot")
+		}
+	}
+	assert.True(t, cs.ShouldApplyIngress(applicant),
+		"Genesis corroboration should see the candidate frontier")
+	assert.NotContains(t, cs.GetAllPeerTips(), applicant,
+		"an unadmitted candidate must not be visible to chain selection")
+	assert.Equal(t, *bestBefore, *cs.GetBestPeer(),
+		"the candidate must not change the selected peer before admission")
+
+	rejected := updates[0]
+	rejected.Rejected = true
+	cs.HandlePeerTipUpdateEvent(event.NewEvent(
+		PeerTipUpdateEventType,
+		rejected,
+	))
+	assert.False(t, cs.ShouldApplyIngress(applicant),
+		"rejecting the candidate must remove it from corroboration")
+	assert.NotContains(t, cs.GetAllPeerTips(), applicant)
+	assert.Nil(t, cs.pendingPeerTipFrontiers[applicant])
+}
+
+// A disconnected peer's staged candidates are corroboration evidence only while
+// the connection lives; removing the peer must drop them with its tracked tip.
+func TestRemovePeerDropsStagedPeerTipAdmissions(t *testing.T) {
+	t.Parallel()
+
+	cs := NewChainSelector(ChainSelectorConfig{
+		GenesisMode:           true,
+		SecurityParam:         20,
+		MinCorroboratingPeers: 1,
+	})
+	applicant := corrConn(41)
+	departed := corrConn(42)
+	for _, connId := range []ouroboros.ConnectionId{applicant, departed} {
+		for i, tip := range []ochainsync.Tip{
+			genesisTip(100, "h100", 100),
+			genesisTip(105, "h105", 105),
+		} {
+			require.True(t, cs.PreparePeerTipAdmission(PeerTipUpdateEvent{
+				ConnectionId: connId,
+				AdmissionID:  uint64(i + 1),
+				Tip:          tip,
+				ObservedTip:  tip,
+			}))
+		}
+	}
+	require.True(t, cs.ShouldApplyIngress(applicant),
+		"the other staged frontier should corroborate the applicant")
+
+	cs.RemovePeer(departed)
+	assert.NotContains(t, cs.pendingPeerTips, departed)
+	assert.NotContains(t, cs.pendingPeerTipFrontiers, departed)
+	assert.False(t, cs.ShouldApplyIngress(applicant),
+		"a removed peer's staged candidates must not remain as evidence")
+}
+
+func TestPeerTipAdmissionCommitPromotesCandidate(t *testing.T) {
+	t.Parallel()
+
+	cs := NewChainSelector(ChainSelectorConfig{
+		GenesisMode:           true,
+		SecurityParam:         20,
+		MinCorroboratingPeers: 1,
+	})
+	applicant := corrConn(21)
+	witness := corrConn(22)
+	feedFrontier(cs, witness,
+		genesisTip(100, "h100", 100),
+		genesisTip(105, "h105", 105),
+	)
+	update := PeerTipUpdateEvent{
+		ConnectionId: applicant,
+		AdmissionID:  1,
+		Tip:          genesisTip(105, "h105", 105),
+		ObservedTip:  genesisTip(105, "h105", 105),
+	}
+	require.True(t, cs.PreparePeerTipAdmission(update))
+	assert.NotContains(t, cs.GetAllPeerTips(), applicant)
+
+	update.Admitted = true
+	require.True(t, cs.CommitPeerTipAdmission(update))
+	assert.Contains(t, cs.GetAllPeerTips(), applicant)
+	assert.True(t, cs.ShouldApplyIngress(applicant))
+}
+
+func TestPeerTipAdmissionCommitsQueuedFrontiersInOrder(t *testing.T) {
+	t.Parallel()
+
+	cs := NewChainSelector(ChainSelectorConfig{
+		GenesisMode:           true,
+		SecurityParam:         20,
+		MinCorroboratingPeers: 1,
+	})
+	applicant := corrConn(31)
+	witness := corrConn(32)
+	feedFrontier(cs, witness,
+		genesisTip(100, "h100", 100),
+		genesisTip(105, "h105", 105),
+		genesisTip(110, "h110", 110),
+	)
+	updates := []PeerTipUpdateEvent{
+		{
+			ConnectionId: applicant,
+			AdmissionID:  1,
+			Tip:          genesisTip(100, "h100", 100),
+			ObservedTip:  genesisTip(100, "h100", 100),
+		},
+		{
+			ConnectionId: applicant,
+			AdmissionID:  2,
+			Tip:          genesisTip(105, "h105", 105),
+			ObservedTip:  genesisTip(105, "h105", 105),
+		},
+		{
+			ConnectionId: applicant,
+			AdmissionID:  3,
+			Tip:          genesisTip(110, "h110", 110),
+			ObservedTip:  genesisTip(110, "h110", 110),
+		},
+	}
+	for _, update := range updates {
+		require.True(t, cs.PreparePeerTipAdmission(update))
+	}
+	for i, update := range updates {
+		require.True(t, cs.CommitPeerTipAdmission(update))
+		peerTip := cs.GetPeerTip(applicant)
+		require.NotNil(t, peerTip)
+		assert.Equal(t, update.ObservedTip.Point.Slot,
+			peerTip.ObservedTip.Point.Slot)
+		assert.Len(t, peerTip.observedTipHistory, i+1)
+	}
+	assert.Nil(t, cs.pendingPeerTipFrontiers[applicant])
+}
+
+func TestPeerTipAdmissionDoesNotPromoteEarlierWithheldCandidate(t *testing.T) {
+	t.Parallel()
+
+	cs := NewChainSelector(ChainSelectorConfig{
+		GenesisMode:           true,
+		SecurityParam:         20,
+		MinCorroboratingPeers: 1,
+	})
+	applicant := corrConn(41)
+	withheld := PeerTipUpdateEvent{
+		ConnectionId: applicant,
+		AdmissionID:  1,
+		Tip:          genesisTip(100, "h100", 100),
+		ObservedTip:  genesisTip(100, "h100", 100),
+	}
+	admitted := PeerTipUpdateEvent{
+		ConnectionId: applicant,
+		AdmissionID:  2,
+		Tip:          genesisTip(105, "h105", 105),
+		ObservedTip:  genesisTip(105, "h105", 105),
+	}
+	require.True(t, cs.PreparePeerTipAdmission(withheld))
+	require.True(t, cs.PreparePeerTipAdmission(admitted))
+
+	require.True(t, cs.CommitPeerTipAdmission(admitted))
+	peerTip := cs.GetPeerTip(applicant)
+	require.NotNil(t, peerTip)
+	require.Len(t, peerTip.observedTipHistory, 1,
+		"only the admitted header may enter the committed peer frontier")
+	assert.Equal(t, admitted.ObservedTip.Point,
+		peerTip.observedTipHistory[0].Point)
+}
+
+func TestPeerTipAdmissionCandidatesRespectTrackedPeerLimit(t *testing.T) {
+	t.Parallel()
+
+	cs := NewChainSelector(ChainSelectorConfig{
+		MaxTrackedPeers: 1,
+	})
+	first := corrConn(51)
+	second := corrConn(52)
+	update := func(
+		conn ouroboros.ConnectionId,
+		admissionID uint64,
+	) PeerTipUpdateEvent {
+		tip := genesisTip(100, "h100", 100)
+		return PeerTipUpdateEvent{
+			ConnectionId: conn,
+			AdmissionID:  admissionID,
+			Tip:          tip,
+			ObservedTip:  tip,
+		}
+	}
+
+	require.True(t, cs.PreparePeerTipAdmission(update(first, 1)))
+	assert.False(t, cs.PreparePeerTipAdmission(update(second, 2)),
+		"pending candidates must share the selector's tracked-peer bound")
+	assert.Len(t, cs.pendingPeerTips, 1)
+	assert.Contains(t, cs.pendingPeerTips, first)
+	assert.NotContains(t, cs.pendingPeerTips, second)
 }
 
 // Outside Genesis corroboration (Praos, or Genesis with the gate disabled) every
@@ -963,8 +1259,8 @@ func TestGenesisCorroborationDedupsBySybilHost(t *testing.T) {
 	for _, conn := range []ouroboros.ConnectionId{fast, sybilA, sybilB} {
 		feedFrontier(cs, conn,
 			genesisTip(100, "h100", 100),
-			genesisTip(105, "h105", 105),
-			genesisTip(110, "h110", 110),
+			genesisTip(105, "h105", 101),
+			genesisTip(110, "h110", 102),
 		)
 	}
 
@@ -980,7 +1276,7 @@ func TestGenesisCorroborationDedupsBySybilHost(t *testing.T) {
 	independent := corrConnAddr("10.0.0.42", 3001)
 	feedFrontier(cs, independent,
 		genesisTip(100, "h100", 100),
-		genesisTip(105, "h105", 105),
+		genesisTip(105, "h105", 101),
 	)
 	cs.EvaluateAndSwitch()
 	require.NotNil(t, cs.GetBestPeer(),

@@ -196,6 +196,20 @@ func (s *Store) GetDroppedGovernanceProposalsAt(
 	)
 }
 
+func (s *Store) GetGovernanceProposalsRefundedAt(
+	epoch uint64,
+	txn types.Txn,
+) ([]*models.GovernanceProposal, error) {
+	return s.queryGovernanceProposals(
+		txn,
+		"((ratified_epoch IS NOT NULL AND enacted_epoch = ?) "+
+			"OR dropped_epoch = ?) AND deleted_slot IS NULL",
+		governanceProposalOrderSQL,
+		epoch,
+		epoch,
+	)
+}
+
 func (s *Store) GetRatifiedGovernanceProposals(
 	txn types.Txn,
 ) ([]*models.GovernanceProposal, error) {
@@ -590,6 +604,37 @@ WHERE v.proposal_id = ? AND v.added_slot <= ?
 	return ret, rows.Err()
 }
 
+const governanceVotePreviousQuery = `
+SELECT vote, anchor_url, anchor_hash
+FROM governance_vote
+WHERE proposal_id = ? AND voter_type = ? AND voter_credential_tag = ?
+    AND voter_credential = ?`
+
+const governanceVoteUpsertQuery = `
+INSERT INTO governance_vote (
+    proposal_id, voter_type, voter_credential_tag, voter_credential, vote,
+    anchor_url, anchor_hash, added_slot, vote_updated_slot, deleted_slot
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT (
+    proposal_id, voter_type, voter_credential_tag, voter_credential
+) DO UPDATE SET
+    vote = excluded.vote,
+    anchor_url = excluded.anchor_url,
+    anchor_hash = excluded.anchor_hash,
+    vote_updated_slot = excluded.vote_updated_slot,
+    deleted_slot = excluded.deleted_slot
+RETURNING id`
+
+const governanceVoteHistoryInsertQuery = `
+INSERT INTO governance_vote_history (
+    vote_id, transition_slot, vote, anchor_url, anchor_hash, tx_hash,
+    cert_index
+) VALUES (?, ?, ?, ?, ?, ?, ?)`
+
+const governanceVoteCastExistsQuery = `
+SELECT COUNT(*) FROM governance_vote_history
+WHERE vote_id = ? AND tx_hash = ? AND cert_index = ?`
+
 func (s *Store) SetGovernanceVote(
 	vote *models.GovernanceVote,
 	txn types.Txn,
@@ -603,11 +648,10 @@ func (s *Store) SetGovernanceVote(
 			var previousVote sql.NullByte
 			var previousAnchorURL sql.NullString
 			var previousAnchorHash []byte
-			previousErr := db.QueryRowContext(ctx, `
-SELECT vote, anchor_url, anchor_hash
-FROM governance_vote
-WHERE proposal_id = ? AND voter_type = ? AND voter_credential_tag = ?
-    AND voter_credential = ?`,
+			previousErr := s.queryRowCached(
+				ctx,
+				db,
+				governanceVotePreviousQuery,
 				vote.ProposalID,
 				vote.VoterType,
 				vote.VoterCredentialTag,
@@ -618,20 +662,10 @@ WHERE proposal_id = ? AND voter_type = ? AND voter_credential_tag = ?
 			}
 
 			var id uint
-			err := db.QueryRowContext(ctx, `
-INSERT INTO governance_vote (
-    proposal_id, voter_type, voter_credential_tag, voter_credential, vote,
-    anchor_url, anchor_hash, added_slot, vote_updated_slot, deleted_slot
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT (
-    proposal_id, voter_type, voter_credential_tag, voter_credential
-) DO UPDATE SET
-    vote = excluded.vote,
-    anchor_url = excluded.anchor_url,
-    anchor_hash = excluded.anchor_hash,
-    vote_updated_slot = excluded.vote_updated_slot,
-    deleted_slot = excluded.deleted_slot
-RETURNING id`,
+			err := s.queryRowCached(
+				ctx,
+				db,
+				governanceVoteUpsertQuery,
 				vote.ProposalID,
 				vote.VoterType,
 				vote.VoterCredentialTag,
@@ -648,32 +682,56 @@ RETURNING id`,
 			}
 			vote.ID = id
 
-			// Record a history entry whenever this call changes the
-			// effective vote (including the first cast, where no previous
-			// row exists), so a later rollback that lands between two
-			// replacements can restore the value that was actually current
-			// at the target slot instead of losing it.
-			unchanged := previousErr == nil &&
-				previousVote.Valid &&
-				previousVote.Byte == vote.Vote &&
-				previousAnchorURL.String == vote.AnchorURL &&
-				bytes.Equal(previousAnchorHash, vote.AnchorHash)
-			if unchanged {
-				return nil
+			// History keeps the value current at every slot, so a rollback
+			// landing between two replacements restores the right one. A
+			// located cast is recorded even when it repeats the value,
+			// because the API lists every cast; its position makes a replay
+			// of the same block a no-op. A write with no position records
+			// only a change of value.
+			var castTxHash []byte
+			var castCertIndex any
+			if len(vote.CastTxHash) > 0 {
+				var existing int
+				if err := s.queryRowCached(
+					ctx,
+					db,
+					governanceVoteCastExistsQuery,
+					id,
+					vote.CastTxHash,
+					vote.CastCertIndex,
+				).Scan(&existing); err != nil {
+					return err
+				}
+				if existing > 0 {
+					return nil
+				}
+				castTxHash = vote.CastTxHash
+				castCertIndex = vote.CastCertIndex
+			} else {
+				unchanged := previousErr == nil &&
+					previousVote.Valid &&
+					previousVote.Byte == vote.Vote &&
+					previousAnchorURL.String == vote.AnchorURL &&
+					bytes.Equal(previousAnchorHash, vote.AnchorHash)
+				if unchanged {
+					return nil
+				}
 			}
 			transitionSlot := vote.AddedSlot
 			if vote.VoteUpdatedSlot != nil {
 				transitionSlot = *vote.VoteUpdatedSlot
 			}
-			_, err = db.ExecContext(ctx, `
-INSERT INTO governance_vote_history (
-    vote_id, transition_slot, vote, anchor_url, anchor_hash
-) VALUES (?, ?, ?, ?, ?)`,
+			_, err = s.execCached(
+				ctx,
+				db,
+				governanceVoteHistoryInsertQuery,
 				id,
 				transitionSlot,
 				vote.Vote,
 				vote.AnchorURL,
 				vote.AnchorHash,
+				castTxHash,
+				castCertIndex,
 			)
 			return err
 		},

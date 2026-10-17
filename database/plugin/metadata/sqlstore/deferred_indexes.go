@@ -27,14 +27,17 @@ import (
 )
 
 var (
-	_ metadata.DeferredIndexManager               = (*Store)(nil)
-	_ metadata.MissingCriticalDeferredIndexLister = (*Store)(nil)
-	_ metadata.MissingDeferredIndexLister         = (*Store)(nil)
-	_ metadata.ContextDeferredIndexBuilder        = (*Store)(nil)
-	_ metadata.DeferredIndexProgressBuilder       = (*Store)(nil)
+	_ metadata.DeferredIndexManager                      = (*Store)(nil)
+	_ metadata.ContextDeferredIndexDropper               = (*Store)(nil)
+	_ metadata.MissingCriticalDeferredIndexLister        = (*Store)(nil)
+	_ metadata.ContextMissingCriticalDeferredIndexLister = (*Store)(nil)
+	_ metadata.MissingDeferredIndexLister                = (*Store)(nil)
+	_ metadata.ContextDeferredIndexBuilder               = (*Store)(nil)
+	_ metadata.ContextCriticalDeferredIndexBuilder       = (*Store)(nil)
+	_ metadata.DeferredIndexProgressBuilder              = (*Store)(nil)
 )
 
-// withDeferredIndexWrite runs fn in one write transaction, with every
+// withDeferredIndexWriteContext runs fn in one write transaction, with every
 // deferred.Retained index guaranteed resident before fn sees the database.
 //
 // Every entry point in this file returns with the store able to serve writes,
@@ -44,15 +47,6 @@ var (
 // recorded complete, so restoring it here is its only way back. Enforcing that
 // once, on the path every drop and rebuild takes, is what keeps a rebuild path
 // from being added without it.
-func (s *Store) withDeferredIndexWrite(
-	fn func(db queryer, ctx context.Context) error,
-) error {
-	return s.withDeferredIndexWriteContext(context.Background(), fn)
-}
-
-// withDeferredIndexWriteContext is withDeferredIndexWrite bound to a
-// caller-owned context, so a cancelled caller interrupts the DDL rather than
-// waiting out a multi-million-row index build.
 func (s *Store) withDeferredIndexWriteContext(
 	ctx context.Context,
 	fn func(db queryer, ctx context.Context) error,
@@ -75,7 +69,13 @@ func (s *Store) withDeferredIndexWriteContext(
 // DropDeferredIndexes records the durable recovery marker and drops the
 // manifest in one SQLite transaction.
 func (s *Store) DropDeferredIndexes() error {
-	return s.withDeferredIndexWrite(
+	return s.DropDeferredIndexesContext(context.Background())
+}
+
+// DropDeferredIndexesContext is DropDeferredIndexes bound to ctx.
+func (s *Store) DropDeferredIndexesContext(ctx context.Context) error {
+	return s.withDeferredIndexWriteContext(
+		ctx,
 		func(db queryer, ctx context.Context) error {
 			if _, err := db.ExecContext(
 				ctx,
@@ -141,11 +141,15 @@ func isMySQLForeignKeyIndexError(err error) bool {
 // rollback traffic begins. The recovery marker stays set until the full
 // manifest is restored.
 func (s *Store) BuildCriticalDeferredIndexes() error {
-	return s.buildDeferredIndexes(
-		context.Background(),
-		deferred.CriticalManifest(),
-		false,
-	)
+	return s.BuildCriticalDeferredIndexesContext(context.Background())
+}
+
+// BuildCriticalDeferredIndexesContext is BuildCriticalDeferredIndexes bound
+// to ctx for cancellable startup repair.
+func (s *Store) BuildCriticalDeferredIndexesContext(
+	ctx context.Context,
+) error {
+	return s.buildDeferredIndexes(ctx, deferred.CriticalManifest(), false)
 }
 
 // BuildDeferredIndexes restores the full manifest and clears the durable
@@ -195,6 +199,43 @@ func (s *Store) buildDeferredIndexesWithProgress(
 	before func(string),
 	after func(string, time.Duration),
 ) error {
+	if s.dialect.Name() == "sqlite" {
+		// SQLite runs wal_autocheckpoint at commit, so one transaction around
+		// all CREATE INDEX statements would defer it until the rebuild ends.
+		var missing []deferred.Index
+		err := s.withDeferredIndexWriteContext(
+			buildCtx,
+			func(db queryer, ctx context.Context) error {
+				var err error
+				missing, err = s.missingDeferredIndexes(ctx, db, indexes)
+				if err != nil {
+					return err
+				}
+				if len(missing) == 0 && clearPending {
+					if _, err := db.ExecContext(
+						ctx,
+						"DELETE FROM sync_state WHERE sync_key = ?",
+						deferred.SyncStateKey,
+					); err != nil {
+						return fmt.Errorf(
+							"clear deferred indexes marker: %w",
+							err,
+						)
+					}
+				}
+				return nil
+			},
+		)
+		if err != nil {
+			return err
+		}
+		if len(missing) > 0 {
+			return s.buildSQLiteDeferredIndexesWithProgress(
+				buildCtx, missing, indexes, clearPending, before, after,
+			)
+		}
+		return nil
+	}
 	return s.withDeferredIndexWriteContext(
 		buildCtx,
 		func(db queryer, ctx context.Context) error {
@@ -248,6 +289,125 @@ func (s *Store) buildDeferredIndexesWithProgress(
 			return nil
 		},
 	)
+}
+
+func (s *Store) buildSQLiteDeferredIndexesWithProgress(
+	ctx context.Context,
+	indexesToBuild []deferred.Index,
+	requestedIndexes []deferred.Index,
+	clearPending bool,
+	before func(string),
+	after func(string, time.Duration),
+) error {
+	for {
+		for _, index := range indexesToBuild {
+			var started time.Time
+			built := false
+			err := s.withDeferredIndexWriteContext(
+				ctx,
+				func(db queryer, txCtx context.Context) error {
+					exists, err := s.deferredIndexExists(
+						txCtx, db, index,
+					)
+					if err != nil {
+						return fmt.Errorf(
+							"check deferred index %s: %w",
+							index.Name,
+							err,
+						)
+					}
+					if exists {
+						return nil
+					}
+					if before != nil {
+						before(index.Name)
+					}
+					statement := s.dialect.CreateIndexSQL(
+						index.Name,
+						index.Table,
+						index.Columns,
+					)
+					started = time.Now()
+					if _, err := db.ExecContext(
+						txCtx,
+						statement,
+					); err != nil {
+						return fmt.Errorf(
+							"build deferred index %s: %w",
+							index.Name,
+							err,
+						)
+					}
+					built = true
+					return nil
+				},
+			)
+			if err != nil {
+				return err
+			}
+			if built && after != nil {
+				after(index.Name, time.Since(started))
+			}
+		}
+
+		complete := true
+		missing := make([]deferred.Index, 0)
+		err := s.withDeferredIndexWriteContext(
+			ctx,
+			func(db queryer, txCtx context.Context) error {
+				var err error
+				missing, err = s.missingDeferredIndexes(
+					txCtx, db, requestedIndexes,
+				)
+				if err != nil {
+					return err
+				}
+				complete = len(missing) == 0
+				if complete && clearPending {
+					if _, err := db.ExecContext(
+						txCtx,
+						"DELETE FROM sync_state WHERE sync_key = ?",
+						deferred.SyncStateKey,
+					); err != nil {
+						return fmt.Errorf(
+							"clear deferred indexes marker: %w",
+							err,
+						)
+					}
+				}
+				return nil
+			},
+		)
+		if err != nil {
+			return err
+		}
+		if complete {
+			return nil
+		}
+		indexesToBuild = missing
+	}
+}
+
+func (s *Store) missingDeferredIndexes(
+	ctx context.Context,
+	db queryer,
+	indexes []deferred.Index,
+) ([]deferred.Index, error) {
+	var missing []deferred.Index
+	for _, index := range indexes {
+		exists, err := s.deferredIndexExists(ctx, db, index)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"check deferred index %s: %w",
+				index.Name,
+				err,
+			)
+		}
+		if !exists {
+			missing = append(missing, index)
+		}
+	}
+	return missing, nil
 }
 
 // ensureRetainedIndexes creates any deferred.Retained index missing from the
@@ -321,10 +481,17 @@ WHERE type = 'index' AND name = ? LIMIT 1`
 // DDL. Callers use it to name the indexes a rebuild is about to build before
 // the rebuild starts.
 func (s *Store) MissingCriticalDeferredIndexes() ([]string, error) {
+	return s.MissingCriticalDeferredIndexesContext(context.Background())
+}
+
+// MissingCriticalDeferredIndexesContext reports absent critical entries using
+// the caller's cancellation context and no DDL.
+func (s *Store) MissingCriticalDeferredIndexesContext(
+	ctx context.Context,
+) ([]string, error) {
 	if err := s.ensureReady(); err != nil {
 		return nil, err
 	}
-	ctx := context.Background()
 	db := s.instrumentedQueryer(s.readDB)
 	var missing []string
 	for _, index := range deferred.CriticalManifest() {

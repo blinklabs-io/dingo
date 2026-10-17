@@ -99,7 +99,8 @@ import (
 func TestCloseStopsForgingScheduler(t *testing.T) {
 	t.Parallel()
 
-	ls := &LedgerState{
+	var ls *LedgerState
+	ls = &LedgerState{
 		config: LedgerStateConfig{
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
@@ -6144,7 +6145,7 @@ func TestLeiosValidationSessionRollsBackStagedCertificateWrites(t *testing.T) {
 			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		},
 	}
-	ls.publishSnapshotsLocked()
+	publishGovernanceTestEpoch(ls, 0, eras.ConwayEraDesc)
 
 	err = ls.withTxValidationSession(context.Background(), nil, nil, true, false, func(
 		_ func(lcommon.Transaction, map[utxoref.Key]struct{}, map[utxoref.Key]lcommon.Utxo, *utxoref.StateOverlay) error,
@@ -6378,6 +6379,7 @@ func TestCloseStopsDecodePipelineBeforeWaitingForBlockProcessing(t *testing.T) {
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 		blockPipeline: pipeline.NewBlockPipeline(
+			pipeline.WithTrustedDecodeOnly(),
 			pipeline.WithDecodeWorkers(1),
 		),
 	}
@@ -13998,18 +14000,82 @@ func TestVerifyPointQueryable_UtxoFloorOnly_Rejected(t *testing.T) {
 func TestEvaluateTxRefusesWhenEvaluationSlotsAreInUse(t *testing.T) {
 	t.Parallel()
 
-	ls := &LedgerState{evalSlots: make(chan struct{}, 2)}
-	ls.evalSlots <- struct{}{}
-	ls.evalSlots <- struct{}{}
+	limiter := newEvaluationLimiter(2)
+	releaseA, err := limiter.acquire(WithEvaluationSource(t.Context(), "a:1"))
+	require.NoError(t, err)
+	defer releaseA()
+	releaseB, err := limiter.acquire(WithEvaluationSource(t.Context(), "b:1"))
+	require.NoError(t, err)
+	defer releaseB()
+	ls := &LedgerState{evalAdmission: limiter}
 
 	// The refusal happens before the transaction is looked at.
-	var err error
 	require.NotPanics(t, func() {
 		_, _, _, err = ls.EvaluateTx(nil)
 	}, "admission must be checked before any evaluation work starts")
 
 	require.ErrorIs(t, err, ErrEvaluationBusy)
-	require.Len(t, ls.evalSlots, 2, "a refused call must not take a slot")
+	require.Equal(t, 2, limiter.total, "a refused call must not take a slot")
+}
+
+func TestEvaluationAdmissionPreservesCapacityAcrossSources(t *testing.T) {
+	t.Parallel()
+
+	limiter := newEvaluationLimiter(4)
+	ctxA := WithEvaluationSource(t.Context(), "192.0.2.1:1000")
+	releaseA1, err := limiter.acquire(ctxA)
+	require.NoError(t, err)
+	defer releaseA1()
+	releaseA2, err := limiter.acquire(
+		WithEvaluationSource(t.Context(), "192.0.2.1:2000"),
+	)
+	require.NoError(t, err)
+	defer releaseA2()
+
+	_, err = limiter.acquire(ctxA)
+	require.ErrorIs(t, err, ErrEvaluationBusy)
+
+	releaseB, err := limiter.acquire(
+		WithEvaluationSource(t.Context(), "192.0.2.2:1000"),
+	)
+	require.NoError(t, err)
+	releaseB()
+}
+
+func TestEvaluationAdmissionUnidentifiedCallsUseGlobalCapacity(t *testing.T) {
+	t.Parallel()
+
+	limiter := newEvaluationLimiter(4)
+	releases := make([]func(), 0, 4)
+	for range 4 {
+		release, err := limiter.acquire(t.Context())
+		require.NoError(t, err)
+		releases = append(releases, release)
+	}
+	defer func() {
+		for _, release := range releases {
+			release()
+		}
+	}()
+
+	_, err := limiter.acquire(t.Context())
+	require.ErrorIs(t, err, ErrEvaluationBusy)
+	require.Equal(t, 4, limiter.total)
+}
+
+func TestEvaluationCapacityReservesConsensusProcessor(t *testing.T) {
+	t.Parallel()
+
+	require.Equal(
+		t,
+		max(runtime.GOMAXPROCS(0)-1, 1),
+		evaluationCapacity(LedgerStateConfig{}),
+	)
+	require.Equal(
+		t,
+		7,
+		evaluationCapacity(LedgerStateConfig{MaxConcurrentEvaluations: 7}),
+	)
 }
 
 func TestNewLedgerStateRejectsNegativeEvaluationCapacity(t *testing.T) {
@@ -14219,4 +14285,190 @@ func TestAtTipRecoveryForwardProgressRestoresEpochBoundaryCrossing(
 		t, deep, got,
 		"a failure after forward progress should get its own crossing",
 	)
+}
+
+type leiosApplyBatchTestBlock struct {
+	lcommon.Block
+	header lcommon.BlockHeader
+}
+
+func (b leiosApplyBatchTestBlock) Header() lcommon.BlockHeader {
+	return b.header
+}
+
+func (b leiosApplyBatchTestBlock) SlotNumber() uint64 {
+	return b.header.SlotNumber()
+}
+
+func (b leiosApplyBatchTestBlock) Hash() lcommon.Blake2b256 {
+	return b.header.Hash()
+}
+
+func (b leiosApplyBatchTestBlock) PrevHash() lcommon.Blake2b256 {
+	return b.header.PrevHash()
+}
+
+func TestLeiosAnnouncementBatchEndWaitsOnlyForSelectedBlock(t *testing.T) {
+	plain := func(slot uint64) lcommon.Block {
+		return leiosApplyBatchTestBlock{header: mockHeader{slot: slot}}
+	}
+	announcing := func(slot uint64) lcommon.Block {
+		return leiosApplyBatchTestBlock{header: announcingHeader(
+			slot,
+			fmt.Sprintf("header-%d", slot),
+			lcommon.Blake2b256{},
+			slot,
+			lcommon.NewBlake2b256([]byte("endorser")),
+		)}
+	}
+
+	blocks := []lcommon.Block{
+		plain(1),
+		plain(2),
+		announcing(3),
+		announcing(4),
+		plain(5),
+	}
+	live := func(uint64) bool { return true }
+	require.Equal(t, 2, leiosAnnouncementBatchEnd(blocks, 0, len(blocks), live))
+	require.Equal(t, 4, leiosAnnouncementBatchEnd(blocks, 3, len(blocks), live))
+	require.Equal(t, len(blocks), leiosAnnouncementBatchEnd(blocks, 4, len(blocks), live))
+
+	// A chunk can begin in historical replay and cross the stability cutoff.
+	// The first live announcing block must begin the next one-block chunk.
+	crossing := []lcommon.Block{plain(8), plain(9), announcing(10), plain(11)}
+	require.Equal(t, 2, leiosAnnouncementBatchEnd(
+		crossing,
+		0,
+		len(crossing),
+		func(slot uint64) bool { return slot >= 10 },
+	))
+	require.Equal(t, 3, leiosAnnouncementBatchEnd(
+		crossing,
+		2,
+		len(crossing),
+		func(slot uint64) bool { return slot >= 10 },
+	))
+}
+
+func TestLeiosTransitionBlockReconcilesLiveRegionAfterWait(t *testing.T) {
+	ebHash := lcommon.NewBlake2b256([]byte("transition-endorser"))
+	header := announcingHeader(
+		100,
+		"transition-header",
+		lcommon.NewBlake2b256([]byte("parent")),
+		10,
+		ebHash,
+	)
+	block := leiosApplyBatchTestBlock{header: header}
+	validated := 0
+	epoch := models.Epoch{StartSlot: 0, SlotLength: 1, LengthInSlots: 1_000}
+	ls := &LedgerState{
+		chainsyncState: SyncingChainsyncState,
+		currentEpoch:   epoch,
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			ValidateLeiosAnnouncement: func(
+				_ context.Context,
+				got lcommon.BlockHeader,
+			) error {
+				require.Equal(t, header, got)
+				validated++
+				return nil
+			},
+		},
+	}
+	snapshot, err := ls.prepareBlockApplySnapshot(
+		t.Context(),
+		[]lcommon.Block{block},
+		epoch,
+		false,
+	)
+	require.NoError(t, err)
+	require.Equal(t, SyncingChainsyncState, snapshot.chainsyncState)
+	require.Equal(t, 1, validated)
+}
+
+func TestLeiosApplySnapshotIsReadAfterAnnouncementWait(t *testing.T) {
+	header := announcingHeader(
+		100,
+		"waiting-header",
+		lcommon.NewBlake2b256([]byte("old-parent")),
+		10,
+		lcommon.NewBlake2b256([]byte("endorser")),
+	)
+	block := leiosApplyBatchTestBlock{header: header}
+	newTip := ochainsync.Tip{
+		Point:       ocommon.NewPoint(99, []byte("reloaded-parent")),
+		BlockNumber: 9,
+	}
+	var ls *LedgerState
+	ls = &LedgerState{
+		currentTip: ochainsync.Tip{
+			Point:       ocommon.NewPoint(98, []byte("old-parent")),
+			BlockNumber: 8,
+		},
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			ValidateLeiosAnnouncement: func(
+				_ context.Context,
+				_ lcommon.BlockHeader,
+			) error {
+				// Model rollback recovery publishing replacement state while the
+				// bounded announcement validation is in progress.
+				ls.Lock()
+				ls.currentTip = newTip
+				ls.Unlock()
+				return nil
+			},
+		},
+	}
+	snapshot, err := ls.prepareBlockApplySnapshot(
+		t.Context(),
+		[]lcommon.Block{block},
+		models.Epoch{StartSlot: 0, SlotLength: 1, LengthInSlots: 1_000},
+		true,
+	)
+	require.NoError(t, err)
+	require.Equal(t, newTip, snapshot.tip,
+		"the canonical apply snapshot must observe state published during the wait")
+}
+
+// Non-checkpoint block nonces older than the nonce window are read only by
+// the API's epoch and pool block lists, so API storage mode retains them
+// while core mode prunes them.
+func TestCleanupBlockNoncesRetainsHistoryInAPIMode(t *testing.T) {
+	t.Parallel()
+	for _, mode := range []string{types.StorageModeCore, types.StorageModeAPI} {
+		t.Run(mode, func(t *testing.T) {
+			t.Parallel()
+			db := newTestDBForCleanup(t, mode)
+			for _, nonce := range []struct {
+				slot       uint64
+				checkpoint bool
+			}{{10, true}, {20, false}, {2000, false}} {
+				require.NoError(t, db.SetBlockNonce(
+					testHashBytes(fmt.Sprintf("nonce-%d", nonce.slot)),
+					nonce.slot, nil, nonce.checkpoint, nil,
+				))
+			}
+			ls := &LedgerState{db: db, config: LedgerStateConfig{
+				Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			}}
+			ls.cleanupBlockNoncesBefore(t.Context(), 1000)
+			rows, err := db.GetBlockNoncesInSlotRange(0, 3000, nil)
+			require.NoError(t, err)
+			var slots []uint64
+			for _, row := range rows {
+				slots = append(slots, row.Slot)
+			}
+			if mode == types.StorageModeAPI {
+				require.Equal(t, []uint64{10, 20, 2000}, slots,
+					"API mode keeps the old block")
+			} else {
+				require.Equal(t, []uint64{10, 2000}, slots,
+					"core mode prunes the old block but not its checkpoint")
+			}
+		})
+	}
 }

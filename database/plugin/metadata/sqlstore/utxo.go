@@ -70,6 +70,9 @@ func (s *Store) CreateUtxo(txn types.Txn, utxo *models.Utxo) error {
 				return err
 			}
 			utxo.ID = uint(id)
+			if err := persistUtxoAddress(ctx, db, id, utxo); err != nil {
+				return err
+			}
 			// A pointer address carries its stake reference as a
 			// position rather than a credential, so it lives in
 			// utxo_pointer rather than in a utxo column. Writing the
@@ -77,6 +80,11 @@ func (s *Store) CreateUtxo(txn types.Txn, utxo *models.Utxo) error {
 			// omission insertUtxoModel avoids on the block-apply path.
 			if err := persistUtxoPointer(
 				ctx, db, id, utxo.Pointer,
+			); err != nil {
+				return err
+			}
+			if err := s.persistUtxoReferenceScript(
+				ctx, db, utxo.ID, utxo.ReferenceScriptHash,
 			); err != nil {
 				return err
 			}
@@ -287,6 +295,50 @@ SELECT COUNT(*) FROM utxo WHERE tx_id = ? AND output_idx = ?`,
 			return s.refreshRewardLiveStakeRefs(ctx, db, refs, slot)
 		},
 	)
+}
+
+func (s *Store) GetSpentAssetUtxosMissingAddressAfterSlot(
+	slot uint64,
+	afterID uint,
+	limit int,
+	txn types.Txn,
+) ([]models.Utxo, error) {
+	if limit <= 0 {
+		return nil, errors.New("missing UTxO address limit must be positive")
+	}
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, err
+	}
+	slotValue, err := checkedInt64(slot)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := db.QueryContext(ctx, s.dialect.Rebind(
+		`SELECT `+qualifiedSQLiteUtxoColumns+` FROM utxo
+WHERE utxo.deleted_slot > ?
+  AND utxo.id > ?
+  AND EXISTS (SELECT 1 FROM asset WHERE asset.utxo_id = utxo.id)
+  AND NOT EXISTS (SELECT 1 FROM utxo_address WHERE utxo_address.utxo_id = utxo.id)
+ORDER BY utxo.id LIMIT ?`,
+	), slotValue, afterID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ret := make([]models.Utxo, 0, limit)
+	for rows.Next() {
+		row, err := scanSQLiteUtxo(rows)
+		if err != nil {
+			return nil, err
+		}
+		utxo, err := utxoFromSQLite(row)
+		if err != nil {
+			return nil, err
+		}
+		ret = append(ret, *utxo)
+	}
+	return ret, rows.Err()
 }
 
 func (s *Store) SetUtxosNotDeletedAfterSlot(
@@ -608,6 +660,15 @@ func (s *Store) importUtxos(
 				// already imported keeps the same position.
 				if err := persistUtxoPointer(
 					ctx, db, id, item.Pointer,
+				); err != nil {
+					return err
+				}
+				if err := persistUtxoAddress(ctx, db, id, &item); err != nil {
+					return err
+				}
+				// #nosec G115 -- row ids are positive
+				if err := s.persistUtxoReferenceScript(
+					ctx, db, uint(id), item.ReferenceScriptHash,
 				); err != nil {
 					return err
 				}
@@ -1943,7 +2004,9 @@ func (s *Store) utxosByAddressPatterns(
 // GetUtxosByAddressWithOrdering and CountUtxosByAddressWithOrdering. The
 // returned args follow the placeholders in from, then predicate. The
 // predicate excludes any keyset (query.After) bound, which only
-// GetUtxosByAddressWithOrdering applies.
+// GetUtxosByAddressWithOrdering applies. A CreatedFrom/CreatedTo range
+// compares the producing transaction position, so from then also joins that
+// transaction.
 func utxoOrderingClauses(
 	query *models.UtxoWithOrderingQuery,
 	disqualifyLivenessIndex bool,
@@ -1999,8 +2062,42 @@ func utxoOrderingClauses(
 			args = append(args, assetArgs...)
 		}
 	}
+	if utxoOrderingRanged(query) {
+		from += utxoProducerJoin
+	}
+	if from := query.CreatedFrom; from != nil {
+		predicate += " AND (" + utxoOrderingSlotExpr + " > ? OR (" +
+			utxoOrderingSlotExpr + " = ? AND " +
+			utxoOrderingBlockIndexExpr + " >= ?))"
+		args = append(args, from.Slot, from.Slot, from.TxIndex)
+	}
+	if to := query.CreatedTo; to != nil {
+		predicate += " AND (" + utxoOrderingSlotExpr + " < ? OR (" +
+			utxoOrderingSlotExpr + " = ? AND " +
+			utxoOrderingBlockIndexExpr + " <= ?))"
+		args = append(args, to.Slot, to.Slot, to.TxIndex)
+	}
 	return from, predicate, args, nil
 }
+
+// utxoOrderingRanged reports whether the query bounds the producing
+// transaction position, which needs utxoProducerJoin in its FROM clause.
+func utxoOrderingRanged(query *models.UtxoWithOrderingQuery) bool {
+	return query.CreatedFrom != nil || query.CreatedTo != nil
+}
+
+// utxoProducerJoin joins the transaction that produced a UTxO. A collateral
+// return has no transaction_id; it belongs to the transaction named by
+// collateral_return_for_tx_id, whose position it takes.
+const utxoProducerJoin = `
+LEFT JOIN "transaction"
+    ON COALESCE(utxo.transaction_id, utxo.collateral_return_for_tx_id)
+       = "transaction".id`
+
+const (
+	utxoOrderingSlotExpr       = `COALESCE("transaction".slot, utxo.added_slot)`
+	utxoOrderingBlockIndexExpr = `COALESCE("transaction".block_index, 0)`
+)
 
 func countUtxosOrderingStatement(
 	query *models.UtxoWithOrderingQuery,
@@ -2060,8 +2157,11 @@ func (s *Store) GetUtxosByAddressWithOrdering(
 	if err != nil {
 		return nil, fmt.Errorf("GetUtxosByAddressWithOrdering: %w", err)
 	}
-	slotExpr := `COALESCE("transaction".slot, utxo.added_slot)`
-	blockIndexExpr := `COALESCE("transaction".block_index, 0)`
+	if !utxoOrderingRanged(query) {
+		from += utxoProducerJoin
+	}
+	slotExpr := utxoOrderingSlotExpr
+	blockIndexExpr := utxoOrderingBlockIndexExpr
 	if query.After != nil {
 		predicate += `
  AND (
@@ -2094,7 +2194,6 @@ func (s *Store) GetUtxosByAddressWithOrdering(
 SELECT ` + qualifiedSQLiteUtxoColumns + `,
        ` + slotExpr + `, ` + blockIndexExpr + `
 FROM ` + from + `
-LEFT JOIN "transaction" ON utxo.transaction_id = "transaction".id
 WHERE ` + predicate + `
 ORDER BY ` + slotExpr + ` ` + orderDir + `, ` + blockIndexExpr + ` ` + orderDir + `,
          utxo.output_idx ` + orderDir + `, utxo.tx_id ` + orderDir
@@ -2538,6 +2637,104 @@ func (s *Store) GetUtxosByAssets(
 		return nil, err
 	}
 	return ret, nil
+}
+
+func persistUtxoAddress(
+	ctx context.Context,
+	db queryer,
+	utxoID int64,
+	utxo *models.Utxo,
+) error {
+	address, err := assetUtxoAddress(utxo)
+	if err != nil {
+		return err
+	}
+	if len(address) == 0 {
+		return nil
+	}
+	_, err = db.ExecContext(ctx,
+		"INSERT INTO utxo_address (utxo_id, address) VALUES (?, ?) "+
+			"ON CONFLICT (utxo_id) DO UPDATE SET address = excluded.address",
+		utxoID,
+		address,
+	)
+	if err != nil {
+		return fmt.Errorf("persist UTxO address: %w", err)
+	}
+	return nil
+}
+
+func assetUtxoAddress(utxo *models.Utxo) ([]byte, error) {
+	if len(utxo.Assets) == 0 {
+		return nil, nil
+	}
+	address := utxo.Address
+	if len(address) == 0 && len(utxo.Cbor) > 0 {
+		output, err := utxo.Decode()
+		if err != nil {
+			return nil, fmt.Errorf("decode UTxO address: %w", err)
+		}
+		address = []byte(output.Address().String())
+	}
+	if len(address) == 0 {
+		return nil, errors.New("persist asset UTxO address: address is unavailable")
+	}
+	return address, nil
+}
+
+func (s *Store) GetLiveAssetUtxosMissingAddress(
+	afterID uint,
+	limit int,
+	txn types.Txn,
+) ([]models.Utxo, error) {
+	if limit <= 0 {
+		return nil, errors.New("missing UTxO address limit must be positive")
+	}
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := db.QueryContext(ctx, s.dialect.Rebind(
+		`SELECT `+qualifiedSQLiteUtxoColumns+` FROM utxo
+WHERE utxo.deleted_slot = 0
+	AND utxo.id > ?
+  AND EXISTS (SELECT 1 FROM asset WHERE asset.utxo_id = utxo.id)
+  AND NOT EXISTS (SELECT 1 FROM utxo_address WHERE utxo_address.utxo_id = utxo.id)
+ORDER BY utxo.id LIMIT ?`,
+	), afterID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ret := make([]models.Utxo, 0, limit)
+	for rows.Next() {
+		row, err := scanSQLiteUtxo(rows)
+		if err != nil {
+			return nil, err
+		}
+		utxo, err := utxoFromSQLite(row)
+		if err != nil {
+			return nil, err
+		}
+		ret = append(ret, *utxo)
+	}
+	return ret, rows.Err()
+}
+
+func (s *Store) SetUtxoAddress(
+	utxoID uint,
+	address []byte,
+	txn types.Txn,
+) error {
+	if len(address) == 0 {
+		return errors.New("UTxO address must not be empty")
+	}
+	return s.withWriteTransaction(txn, func(db queryer, ctx context.Context) error {
+		_, err := db.ExecContext(ctx, `
+INSERT INTO utxo_address (utxo_id, address) VALUES (?, ?)
+ON CONFLICT (utxo_id) DO UPDATE SET address = excluded.address`, utxoID, address)
+		return err
+	})
 }
 
 func (s *Store) IterateLiveUtxos(

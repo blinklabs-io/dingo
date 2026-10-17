@@ -15,6 +15,7 @@
 package config
 
 import (
+	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -687,6 +688,47 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 			c.TokenRegistry.MaxEntryBytes,
 		))
 	}
+	if c.TokenRegistry.Enabled &&
+		strings.TrimSpace(c.TokenRegistry.ManifestURL) == "" {
+		errs = append(errs, errors.New(
+			"tokenRegistry.manifestUrl is required when token registry sync is enabled",
+		))
+	}
+	if raw := strings.TrimSpace(c.TokenRegistry.ManifestURL); raw != "" {
+		parsed, err := url.Parse(raw)
+		if err != nil || parsed.Scheme != "https" || parsed.Host == "" ||
+			parsed.User != nil {
+			errs = append(errs, errors.New(
+				"tokenRegistry.manifestUrl must be an absolute HTTPS URL",
+			))
+		}
+	}
+	if raw := strings.TrimSpace(c.TokenRegistry.SourceURL); raw != "" {
+		parsed, err := url.Parse(raw)
+		if err != nil || parsed.Scheme != "https" || parsed.Host == "" ||
+			parsed.User != nil {
+			errs = append(errs, errors.New(
+				"tokenRegistry.sourceUrl must be an absolute HTTPS URL",
+			))
+		}
+	}
+	trustedManifestKey := strings.TrimSpace(
+		c.TokenRegistry.TrustedManifestKey,
+	)
+	if c.TokenRegistry.Enabled && trustedManifestKey == "" {
+		errs = append(errs, errors.New(
+			"tokenRegistry.trustedManifestKey is required when token registry sync is enabled",
+		))
+	}
+	if trustedManifestKey != "" {
+		decoded, err := hex.DecodeString(trustedManifestKey)
+		if err != nil || len(decoded) != ed25519.PublicKeySize {
+			errs = append(errs, fmt.Errorf(
+				"tokenRegistry.trustedManifestKey must be a %d-byte Ed25519 public key encoded as hexadecimal",
+				ed25519.PublicKeySize,
+			))
+		}
+	}
 
 	// Block production needs all three credential paths
 	if c.BlockProducer {
@@ -974,10 +1016,60 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 			storageModeAPI, c.StorageMode, storageModeAPI,
 		))
 	}
+	if (c.Midnight.AuthTokenPolicyID == "") !=
+		(c.Midnight.AuthTokenAssetName == "") {
+		errs = append(errs, errors.New(
+			"midnight.authTokenPolicyId and midnight.authTokenAssetName "+
+				"must be set together: an asset name alone matches that "+
+				"name under any minting policy",
+		))
+	}
 	if c.Midnight.ReflectionEnabled && !c.Midnight.ServerEnabled {
 		errs = append(errs, errors.New(
 			"midnight.reflectionEnabled requires midnight.serverEnabled",
 		))
+	}
+	if c.DMQ.Enabled {
+		if c.DMQ.Topic == "" {
+			errs = append(errs, errors.New("dmq.topic must be set"))
+		} else if c.DMQ.Topic != "mithril" {
+			errs = append(errs, errors.New("dmq.topic must be mithril"))
+		}
+		switch {
+		case c.DMQ.SocketPath == "":
+			errs = append(errs, errors.New("dmq.socketPath must be set"))
+		case sameSocketPath(c.DMQ.SocketPath, c.SocketPath):
+			errs = append(errs, errors.New(
+				"dmq.socketPath must differ from socketPath",
+			))
+		}
+		// Both are scaled into int64 quantities: seconds to a Duration and
+		// megabytes to bytes.
+		const maxMessageTTL = uint64(math.MaxInt64) / uint64(time.Second)
+		const maxMempoolSize = math.MaxInt64 >> 20
+		switch {
+		case c.DMQ.MessageTTL == 0:
+			errs = append(errs, errors.New(
+				"dmq.messageTtl must be positive",
+			))
+		case uint64(c.DMQ.MessageTTL) > maxMessageTTL:
+			errs = append(errs, fmt.Errorf(
+				"dmq.messageTtl must be at most %d seconds",
+				maxMessageTTL,
+			))
+		}
+		// The pool reads a zero capacity as unbounded.
+		switch {
+		case c.DMQ.MaxMempoolSize == 0:
+			errs = append(errs, errors.New(
+				"dmq.maxMempoolSize must be positive",
+			))
+		case uint64(c.DMQ.MaxMempoolSize) > maxMempoolSize:
+			errs = append(errs, fmt.Errorf(
+				"dmq.maxMempoolSize must be at most %d megabytes",
+				maxMempoolSize,
+			))
+		}
 	}
 	if c.DatabaseLifecycle.SnapshotEnabled &&
 		c.DatabaseLifecycle.SnapshotDir == "" {
@@ -1034,14 +1126,12 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		}
 		u, err := url.Parse(dest)
 		if err != nil || u.Scheme == "" || u.Host == "" {
-			errs = append(errs, fmt.Errorf(
-				"invalid databaseLifecycle.snapshotCloudDestination %q: must be a URI like s3://bucket/prefix or gcs://bucket/prefix",
-				dest,
+			errs = append(errs, errors.New(
+				"invalid databaseLifecycle.snapshotCloudDestination: must be a URI like s3://bucket/prefix or gcs://bucket/prefix",
 			))
 		} else if !snapshotCloudSchemeSupported(u.Scheme) {
 			errs = append(errs, fmt.Errorf(
-				"invalid databaseLifecycle.snapshotCloudDestination %q: cloud scheme %q is unavailable in this build (s3/gcs require -tags dingo_extra_plugins)",
-				dest,
+				"invalid databaseLifecycle.snapshotCloudDestination: cloud scheme %q is unavailable in this build (s3/gcs require -tags dingo_extra_plugins)",
 				u.Scheme,
 			))
 		}
@@ -1236,4 +1326,18 @@ func validatePathNoTraversal(setting, path string) error {
 		}
 	}
 	return nil
+}
+
+// sameSocketPath reports whether two Unix socket paths name the same file,
+// comparing them resolved against the working directory.
+func sameSocketPath(a, b string) bool {
+	if a == "" || b == "" {
+		return false
+	}
+	absA, errA := filepath.Abs(a)
+	absB, errB := filepath.Abs(b)
+	if errA != nil || errB != nil {
+		return filepath.Clean(a) == filepath.Clean(b)
+	}
+	return absA == absB
 }

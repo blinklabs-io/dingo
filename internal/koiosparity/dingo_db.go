@@ -26,6 +26,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/ledger/governance"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	_ "github.com/go-sql-driver/mysql"
 	_ "github.com/jackc/pgx/v5/stdlib"
@@ -1131,6 +1132,194 @@ func (d *DingoDB) GetRewardAccountOutputs(
 		return nil, fmt.Errorf("reward_account_output epoch %d: %w", epoch, err)
 	}
 	return out, nil
+}
+
+// GetProposalDepositRefunds implements RewardParitySource with the same reads
+// DatabaseSource makes, against the metadata schema directly. They run in one
+// read-only transaction so a rollback between them cannot remove the credits
+// of proposals an earlier read already returned.
+func (d *DingoDB) GetProposalDepositRefunds(
+	ctx context.Context,
+	refundEpoch uint64,
+) (ProposalDepositRefunds, error) {
+	var out ProposalDepositRefunds
+	tx, err := d.db.BeginTx(ctx, proposalRefundReadTxOptions(d.dialect))
+	if err != nil {
+		return out, fmt.Errorf("begin proposal refund read: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	out.Pending, err = d.refundsPending(ctx, tx, refundEpoch)
+	if err != nil {
+		return out, err
+	}
+	proposals, err := d.proposalsRefundedAt(ctx, tx, refundEpoch)
+	if err != nil {
+		return out, fmt.Errorf(
+			"governance proposals refunded at epoch %d: %w",
+			refundEpoch,
+			err,
+		)
+	}
+	var credits []*models.AccountRewardDelta
+	for _, slot := range governance.ProposalDepositRefundSlots(
+		proposals,
+		refundEpoch,
+	) {
+		slotCredits, err := d.postSnapshotCreditEvents(ctx, tx, slot)
+		if err != nil {
+			return out, fmt.Errorf(
+				"reward credits at slot %d: %w",
+				slot,
+				err,
+			)
+		}
+		credits = append(credits, slotCredits...)
+	}
+	out.Refunds, err = governance.MatchProposalDepositRefunds(
+		proposals,
+		refundEpoch,
+		credits,
+	)
+	return out, err
+}
+
+func proposalRefundReadTxOptions(dialect string) *sql.TxOptions {
+	options := &sql.TxOptions{ReadOnly: true}
+	if dialect == "postgres" || dialect == "mysql" {
+		options.Isolation = sql.LevelRepeatableRead
+	}
+	return options
+}
+
+// refundsPending computes ProposalDepositRefunds.Pending with the tip and
+// epoch reads GetPoolEpochDataMap uses for DingoPoolEpochData.RewardsPending.
+func (d *DingoDB) refundsPending(
+	ctx context.Context,
+	tx *sql.Tx,
+	refundEpoch uint64,
+) (bool, error) {
+	var tipSlot sql.NullInt64
+	var tipHash []byte
+	err := tx.QueryRowContext(
+		ctx, `SELECT slot, hash FROM tip ORDER BY id DESC LIMIT 1`,
+	).Scan(&tipSlot, &tipHash)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return false, nil
+	case err != nil:
+		return false, fmt.Errorf("tip lookup: %w", err)
+	case !tipSlot.Valid || tipSlot.Int64 <= 0 || len(tipHash) == 0:
+		return false, nil
+	}
+	var startSlot sql.NullInt64
+	err = tx.QueryRowContext(
+		ctx,
+		rebind(`SELECT start_slot FROM epoch WHERE epoch_id = ?`, d.dialect),
+		refundEpoch,
+	).Scan(&startSlot)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return true, nil
+	case err != nil:
+		return false, fmt.Errorf("epoch lookup %d: %w", refundEpoch, err)
+	case !startSlot.Valid || startSlot.Int64 < 0:
+		return false, fmt.Errorf(
+			"epoch lookup %d: invalid start slot", refundEpoch,
+		)
+	}
+	return uint64(tipSlot.Int64) < uint64(startSlot.Int64), nil
+}
+
+// proposalsRefundedAt mirrors
+// MetadataStore.GetGovernanceProposalsRefundedAt, reading only the columns
+// the refund pairing needs: the action type and CBOR decide whether a
+// treasury withdrawal pays its own return account. dropped_epoch/dropped_slot
+// live in the governance_proposal_drop companion table.
+func (d *DingoDB) proposalsRefundedAt(
+	ctx context.Context,
+	tx *sql.Tx,
+	epoch uint64,
+) ([]*models.GovernanceProposal, error) {
+	rows, err := tx.QueryContext(
+		ctx,
+		rebind(`SELECT governance_proposal.tx_hash, governance_proposal.action_index,
+       governance_proposal.action_type, governance_proposal.gov_action_cbor,
+       governance_proposal.deposit, governance_proposal.return_address,
+       governance_proposal.enacted_epoch, governance_proposal.enacted_slot,
+       governance_proposal_drop.dropped_epoch,
+       governance_proposal_drop.dropped_slot
+FROM governance_proposal
+LEFT JOIN governance_proposal_drop
+  ON governance_proposal_drop.proposal_id = governance_proposal.id
+WHERE ((governance_proposal.ratified_epoch IS NOT NULL
+        AND governance_proposal.enacted_epoch = ?)
+       OR governance_proposal_drop.dropped_epoch = ?)
+  AND governance_proposal.deleted_slot IS NULL
+ORDER BY governance_proposal.id`, d.dialect),
+		epoch,
+		epoch,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*models.GovernanceProposal
+	for rows.Next() {
+		p := &models.GovernanceProposal{}
+		var deposit types.Uint64
+		if err := rows.Scan(
+			&p.TxHash,
+			&p.ActionIndex,
+			&p.ActionType,
+			&p.GovActionCbor,
+			&deposit,
+			&p.ReturnAddress,
+			&p.EnactedEpoch,
+			&p.EnactedSlot,
+			&p.DroppedEpoch,
+			&p.DroppedSlot,
+		); err != nil {
+			return nil, err
+		}
+		p.Deposit = uint64(deposit)
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+// postSnapshotCreditEvents mirrors
+// MetadataStore.GetPostSnapshotRewardCreditEvents.
+func (d *DingoDB) postSnapshotCreditEvents(
+	ctx context.Context,
+	tx *sql.Tx,
+	slot uint64,
+) ([]*models.AccountRewardDelta, error) {
+	rows, err := tx.QueryContext(
+		ctx,
+		rebind(`SELECT credential_tag, staking_key, tx_hash, amount
+FROM account_reward_delta
+WHERE added_slot = ? AND post_snapshot = TRUE AND withdrawal = FALSE
+ORDER BY credential_tag, staking_key, id`, d.dialect),
+		slot,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*models.AccountRewardDelta
+	for rows.Next() {
+		c := &models.AccountRewardDelta{AddedSlot: slot, PostSnapshot: true}
+		if err := rows.Scan(
+			&c.CredentialTag,
+			&c.StakingKey,
+			&c.TxHash,
+			&c.Amount,
+		); err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
 }
 
 // StakeAddressFromCredential converts a reward-account credential — as

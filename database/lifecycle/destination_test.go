@@ -156,6 +156,13 @@ func (d *fakeCloudDestination) ListSnapshots(
 	return lifecycle.ListSnapshots(d.dir, opts...)
 }
 
+func (d *fakeCloudDestination) ListSnapshotCatalog(
+	ctx context.Context,
+	_ lifecycle.SnapshotCatalogScanBudget,
+) ([]lifecycle.SnapshotEntry, error) {
+	return lifecycle.ListSnapshotsContext(ctx, d.dir)
+}
+
 // FetchManifest/Delete similarly delegate straight to real local-file
 // operations, since d.dir already resolves to this specific snapshot's
 // own directory when parsed from a per-snapshot URI (base + snapshot ID).
@@ -538,6 +545,7 @@ func TestSnapshotToCloudInvalidDestinationStillErrorsButKeepsLocal(
 		"sqlite",
 		"unsupported-scheme://bucket/prefix",
 		"", "",
+		lifecycle.WithManifestKey(testTrustKey),
 	)
 	require.Error(t, err)
 	// Local snapshot must still be valid even though the operation as a

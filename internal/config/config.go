@@ -300,7 +300,8 @@ func midnightYAMLFieldSet(field string) bool {
 // subsystem.
 type ChainsyncConfig struct {
 	// MaxClients is the maximum number of concurrent chainsync client
-	// connections. Default: 3.
+	// connections. Zero selects an automatic limit: at least 3 and large enough
+	// for every configured local-root access point.
 	MaxClients int `yaml:"maxClients"   envconfig:"DINGO_CHAINSYNC_MAX_CLIENTS"`
 	// StallTimeout is the duration after which a client with no
 	// activity is considered stalled. Default: "2m".
@@ -473,6 +474,12 @@ type TokenRegistryConfig struct {
 	// operators running a mirror. Empty selects by network: the Cardano
 	// Foundation registry for mainnet, the IOG testnet registry otherwise.
 	SourceURL string `yaml:"sourceUrl"             envconfig:"DINGO_TOKEN_REGISTRY_SOURCE_URL"`
+	// ManifestURL identifies the signed manifest that authenticates each
+	// snapshot. It is required when the sync is enabled.
+	ManifestURL string `yaml:"manifestUrl"           envconfig:"DINGO_TOKEN_REGISTRY_MANIFEST_URL"`
+	// TrustedManifestKey is the hex-encoded Ed25519 public key used to verify
+	// signed manifests. It is required when the sync is enabled.
+	TrustedManifestKey string `yaml:"trustedManifestKey"    envconfig:"DINGO_TOKEN_REGISTRY_TRUSTED_MANIFEST_KEY"`
 	// Interval controls how often the registry is re-checked. Each check
 	// is a conditional request, so an unchanged registry costs no download.
 	// Values below one minute are raised to it.
@@ -507,6 +514,9 @@ type TokenRegistryConfig struct {
 	// AllowPrivateAddresses permits syncing from private, loopback, and
 	// link-local addresses. Leave false for the default SSRF guard.
 	AllowPrivateAddresses bool `yaml:"allowPrivateAddresses" envconfig:"DINGO_TOKEN_REGISTRY_ALLOW_PRIVATE_ADDRESSES"`
+	// AllowRollback permits a correctly signed manifest sequence below the
+	// currently stored sequence. Accepting it lowers the stored sequence.
+	AllowRollback bool `yaml:"allowRollback"          envconfig:"DINGO_TOKEN_REGISTRY_ALLOW_ROLLBACK"`
 }
 
 // DefaultChainsyncConfig returns the default chainsync configuration.
@@ -514,7 +524,6 @@ type TokenRegistryConfig struct {
 // fallback in internal/node/node.go.
 func DefaultChainsyncConfig() ChainsyncConfig {
 	return ChainsyncConfig{
-		MaxClients:   3,
 		StallTimeout: "2m",
 		Strategy:     "primary",
 	}
@@ -626,6 +635,52 @@ func DefaultMidnightConfig() MidnightConfig {
 	}
 }
 
+// DMQConfig holds configuration for the CIP-0137 Decentralized Message Queue
+// running alongside the Cardano stack in the same process.
+type DMQConfig struct {
+	// Enabled starts the DMQ stack. Default false.
+	Enabled bool `yaml:"enabled"      envconfig:"DINGO_DMQ_ENABLED"`
+	// Topic names the DMQ instance. It selects the default NetworkMagic for
+	// the configured Cardano network; only "mithril" is supported.
+	Topic string `yaml:"topic"        envconfig:"DINGO_DMQ_TOPIC"`
+	// NetworkMagic overrides the topic's default DMQ network magic. Required
+	// when the Cardano network has no default for the topic.
+	NetworkMagic    uint32 `yaml:"networkMagic" envconfig:"DINGO_DMQ_NETWORK_MAGIC"`
+	networkMagicSet bool
+	// SocketPath is the Unix socket serving local message submission and
+	// notification. It must differ from the Cardano SocketPath.
+	SocketPath string `yaml:"socketPath"   envconfig:"DINGO_DMQ_SOCKET_PATH"`
+	// MessageTTL is the longest expiry, in seconds, a submitted message may
+	// claim.
+	MessageTTL uint `yaml:"messageTtl"   envconfig:"DINGO_DMQ_MESSAGE_TTL"`
+	// MaxMempoolSize bounds the message pool, in megabytes.
+	MaxMempoolSize uint `yaml:"maxMempoolSize" envconfig:"DINGO_DMQ_MAX_MEMPOOL_SIZE"`
+}
+
+// NetworkMagicExplicit reports whether a source supplied the DMQ network magic.
+func (c DMQConfig) NetworkMagicExplicit() bool { return c.networkMagicSet }
+
+// UnmarshalYAML records whether the network magic was explicitly supplied.
+func (c *DMQConfig) UnmarshalYAML(node *yaml.Node) error {
+	type plain DMQConfig
+	*c = DefaultDMQConfig()
+	if err := node.Decode((*plain)(c)); err != nil {
+		return err
+	}
+	c.networkMagicSet = mappingValue(node, "networkMagic") != nil
+	return nil
+}
+
+// DefaultDMQConfig returns the default DMQ settings.
+func DefaultDMQConfig() DMQConfig {
+	return DMQConfig{
+		Topic:          "mithril",
+		SocketPath:     "dingo-dmq.socket",
+		MessageTTL:     1800,
+		MaxMempoolSize: 128,
+	}
+}
+
 type Config struct {
 	Plugins PluginsConfig `yaml:"plugins"`
 	// API holds shared TLS policy defaults for every selected
@@ -647,7 +702,12 @@ type Config struct {
 	RelayPort              uint      `yaml:"relayPort"                           envconfig:"port"`
 	BarkBaseUrl            string    `yaml:"barkBaseUrl"                         envconfig:"DINGO_BARK_BASE_URL"`
 	BarkBlockDownloadHosts []string  `yaml:"barkBlockDownloadHosts"              envconfig:"DINGO_BARK_BLOCK_DOWNLOAD_HOSTS"`
-	BarkPort               uint      `yaml:"barkPort"                            envconfig:"DINGO_BARK_PORT"`
+	// BarkBlockDownloadAllowPrivateAddresses permits the Bark service and block
+	// downloads to use private, loopback, and other special-use addresses.
+	// Origin, HTTPS download, redirect, and proxy checks still apply. Default:
+	// false.
+	BarkBlockDownloadAllowPrivateAddresses bool `yaml:"barkBlockDownloadAllowPrivateAddresses" envconfig:"DINGO_BARK_BLOCK_DOWNLOAD_ALLOW_PRIVATE_ADDRESSES"`
+	BarkPort                               uint `yaml:"barkPort"                            envconfig:"DINGO_BARK_PORT"`
 	// LocalStateQueryViewMaxLifetime is the longest a LocalStateQuery session
 	// may hold one acquired ledger snapshot before the node closes it.
 	// Default: "5m".
@@ -692,7 +752,11 @@ type Config struct {
 	// BindAddr; operators must set this field explicitly to expose
 	// metrics on a wildcard or remote-scrape address.
 	MetricsBindAddr string `yaml:"metricsBindAddr" envconfig:"DINGO_METRICS_BIND_ADDR"`
-	MetricsPort     uint   `yaml:"metricsPort"    split_words:"true"`
+	// MetricsAuthToken enables Bearer authentication on the Prometheus
+	// listener. It has no CLI flag because process arguments are public to
+	// other users on many systems.
+	MetricsAuthToken string `yaml:"metricsAuthToken" envconfig:"DINGO_METRICS_AUTH_TOKEN"`
+	MetricsPort      uint   `yaml:"metricsPort"    split_words:"true"`
 	// DebugBindAddr is the interface used by the unauthenticated pprof
 	// listener. It defaults to loopback independently of BindAddr and
 	// PrivateBindAddr; operators must set this field explicitly to expose
@@ -772,8 +836,8 @@ type Config struct {
 	// defaults off until throughput and stability are proven (phase 1 of the
 	// pipeline rollout). See ARCHITECTURE.md ("Block Processing Pipeline").
 	BlockPipelineEnabled bool `yaml:"blockPipelineEnabled"                envconfig:"DINGO_BLOCK_PIPELINE_ENABLED"`
-	// BlockPipelineValidateEnabled adds parallel VRF/KES and OpCert checks to
-	// block-pipeline replay (phase 3 of the pipeline rollout). It requires
+	// BlockPipelineValidateEnabled checks VRF/KES and OpCert header
+	// cryptography serially during block-pipeline replay. It requires
 	// BlockPipelineEnabled. Admission-time header validation remains the
 	// authoritative gate because ls.chain is visible to downstream readers
 	// before replay reaches this stage. See ARCHITECTURE.md ("Block Processing
@@ -854,6 +918,8 @@ type Config struct {
 
 	// Midnight indexer and gRPC API configuration.
 	Midnight MidnightConfig `yaml:"midnight"`
+	// DMQ configures the CIP-0137 Decentralized Message Queue stack.
+	DMQ DMQConfig `yaml:"dmq"`
 
 	// KES (Key Evolving Signature) configuration for block production
 	// SlotsPerKESPeriod is the number of slots in a KES period.
@@ -962,6 +1028,12 @@ type Config struct {
 	// inactivity).
 	DelegatorInactivityEnabled bool   `yaml:"delegatorInactivityEnabled"             envconfig:"DINGO_DELEGATOR_INACTIVITY_ENABLED"`
 	DelegatorInactivity        uint64 `yaml:"delegatorInactivity"                    envconfig:"DINGO_DELEGATOR_INACTIVITY"`
+
+	// Leios persistence retention (experimental, leios runMode only).
+	// LeiosPersistenceRetentionSlots bounds how far behind the highest
+	// persisted Leios endorser block historical-serving records are kept.
+	// Zero retains all history; positive values must cover the stability window.
+	LeiosPersistenceRetentionSlots uint64 `yaml:"leiosPersistenceRetentionSlots" envconfig:"DINGO_LEIOS_PERSISTENCE_RETENTION_SLOTS"`
 
 	// Leios voting configuration (experimental, leios runMode only).
 	// LeiosVoteSigningKeyFile is the path to a Cardano text-envelope
@@ -1480,6 +1552,7 @@ func newDefaultConfig() *Config {
 		Logging: DefaultLoggingConfig(),
 		// Midnight defaults
 		Midnight: DefaultMidnightConfig(),
+		DMQ:      DefaultDMQConfig(),
 		// KES configuration defaults (mainnet values)
 		SlotsPerKESPeriod: 129600, // 1.5 days at 1 second per slot
 		MaxKESEvolutions:  62,     // 2^6 - 2 for KES depth 6
@@ -1726,6 +1799,9 @@ func LoadConfig(configFile string) (*Config, error) {
 	err := envconfig.Process("cardano", cfg)
 	if err != nil {
 		return nil, fmt.Errorf("error processing environment: %+w", err)
+	}
+	if _, present := os.LookupEnv("DINGO_DMQ_NETWORK_MAGIC"); present {
+		cfg.DMQ.networkMagicSet = true
 	}
 	if err := applyTokenRegistryHeaderSecretsEnvironment(cfg); err != nil {
 		return nil, err
