@@ -3448,6 +3448,9 @@ func (a *NodeAdapter) addressUTXOs(ctx context.Context,
 			Descending:      params.Order == PaginationOrderDesc,
 		}
 		if filter != nil {
+			// The asset predicate has no index, so scan to the candidate
+			// budget to keep the exact total the listing reported before.
+			query.Limit = max(matchLimit, database.ExactAddressCandidateScanLimit+1)
 			query.FilterByAsset = true
 			query.AssetPolicyID = filter.policyID
 			query.AssetName = filter.assetName

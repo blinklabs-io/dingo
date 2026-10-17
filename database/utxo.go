@@ -20,7 +20,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"math"
 	"time"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -881,40 +880,6 @@ func (d *Database) UtxosByAddressAsOf(
 	maxResults int,
 	txn *Txn,
 ) ([]models.Utxo, error) {
-	if ctx == nil {
-		return nil, errors.New("utxos by address as of context is nil")
-	}
-	return d.utxosByAddressAsOf(
-		ctx, addrs, atSlot, maxResults, math.MaxInt, txn,
-	)
-}
-
-// UtxosByAddressAsOfContextBounded applies cancellation, result-count, and
-// cumulative output-CBOR byte limits while loading historical UTxOs.
-func (d *Database) UtxosByAddressAsOfContextBounded(
-	ctx context.Context,
-	addrs []ledger.Address,
-	atSlot uint64,
-	maxResults int,
-	maxCborBytes int,
-	txn *Txn,
-) ([]models.Utxo, error) {
-	if ctx == nil {
-		return nil, errors.New("utxos by address as of context is nil")
-	}
-	return d.utxosByAddressAsOf(
-		ctx, addrs, atSlot, maxResults, maxCborBytes, txn,
-	)
-}
-
-func (d *Database) utxosByAddressAsOf(
-	ctx context.Context,
-	addrs []ledger.Address,
-	atSlot uint64,
-	maxResults int,
-	maxCborBytes int,
-	txn *Txn,
-) ([]models.Utxo, error) {
 	if len(addrs) == 0 {
 		return nil, nil
 	}
@@ -939,21 +904,10 @@ func (d *Database) utxosByAddressAsOf(
 	if err != nil {
 		return nil, err
 	}
-	cborBytes := 0
 	for i := range utxos {
-		if err := ctx.Err(); err != nil {
+		if err := loadCbor(&utxos[i], txn); err != nil {
 			return nil, err
 		}
-		utxo := utxos[i]
-		if err := loadCbor(&utxo, txn); err != nil {
-			return nil, err
-		}
-		if cborBytes > maxCborBytes ||
-			len(utxo.Cbor) > maxCborBytes-cborBytes {
-			return nil, models.ErrUtxoQueryBudgetExceeded
-		}
-		cborBytes += len(utxo.Cbor)
-		utxos[i] = utxo
 	}
 	return filterUtxosByAddressPatterns(utxos, patterns)
 }

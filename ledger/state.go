@@ -14265,47 +14265,6 @@ func (ls *LedgerState) UtxosByAddressAtSlot(
 	return ls.db.UtxosByAddressAtSlot(context.Background(), addr, slot, nil)
 }
 
-// UtxosByAddressAtSlotBounded returns historical UTxOs under a request-aware
-// transaction and rejects coarse result sets above maxResults. Complete
-// address identity is absent from metadata for pointer and Byron addresses,
-// so exact matching still requires bounded output-CBOR decoding.
-func (ls *LedgerState) UtxosByAddressAtSlotBounded(
-	ctx context.Context,
-	addr lcommon.Address,
-	slot uint64,
-	maxResults int,
-	maxCborBytes int,
-) ([]models.Utxo, error) {
-	txn := database.NewTxnContext(ctx, ls.db, false)
-	defer txn.Release()
-	if ls.db.StorageMode() != types.StorageModeAPI {
-		pruneFloor, err := ls.readConsumedUtxoPruneFloor(txn)
-		if err != nil {
-			return nil, err
-		}
-		if pruneFloor > 0 && slot < pruneFloor {
-			return nil, fmt.Errorf(
-				"%w: requested slot %d is below consumed UTxO prune floor %d",
-				ErrHistoricalStateUnavailable,
-				slot,
-				pruneFloor,
-			)
-		}
-	}
-	utxos, err := ls.db.UtxosByAddressAsOfContextBounded(
-		ctx,
-		[]lcommon.Address{addr},
-		slot,
-		maxResults,
-		maxCborBytes,
-		txn,
-	)
-	if err != nil {
-		return nil, err
-	}
-	return utxos, nil
-}
-
 // UtxoBalanceByAddressAtSlot aggregates a historical address balance without
 // materializing its UTxO set.
 func (ls *LedgerState) UtxoBalanceByAddressAtSlot(
