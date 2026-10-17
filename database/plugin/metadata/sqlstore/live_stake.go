@@ -1607,6 +1607,61 @@ ORDER BY credential_tag, staking_key, id`, slotValue)
 	return ret, nil
 }
 
+func (s *Store) GetPostSnapshotRewardCreditEvents(
+	slot uint64,
+	txn types.Txn,
+) ([]*models.AccountRewardDelta, error) {
+	slotValue, err := checkedInt64(slot)
+	if err != nil {
+		return nil, err
+	}
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"GetPostSnapshotRewardCreditEvents: resolve db: %w", err,
+		)
+	}
+	rows, err := db.QueryContext(ctx, `
+SELECT credential_tag, staking_key, tx_hash, amount
+FROM account_reward_delta
+WHERE added_slot = ? AND post_snapshot = TRUE AND withdrawal = FALSE
+ORDER BY credential_tag, staking_key, id`, slotValue)
+	if err != nil {
+		return nil, fmt.Errorf("GetPostSnapshotRewardCreditEvents: %w", err)
+	}
+	defer rows.Close()
+	var ret []*models.AccountRewardDelta
+	for rows.Next() {
+		var tag uint8
+		var key, txHash []byte
+		var raw sql.NullString
+		if err := rows.Scan(&tag, &key, &txHash, &raw); err != nil {
+			return nil, fmt.Errorf(
+				"GetPostSnapshotRewardCreditEvents: %w", err,
+			)
+		}
+		if !raw.Valid || raw.String == "" {
+			continue
+		}
+		amount, err := parseUint64("post-snapshot reward credit", raw.String)
+		if err != nil {
+			return nil, err
+		}
+		ret = append(ret, &models.AccountRewardDelta{
+			CredentialTag: tag,
+			StakingKey:    key,
+			TxHash:        txHash,
+			Amount:        types.Uint64(amount),
+			AddedSlot:     slot,
+			PostSnapshot:  true,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("GetPostSnapshotRewardCreditEvents: %w", err)
+	}
+	return ret, nil
+}
+
 func (s *Store) GetLiveStakeInputsForPools(
 	poolKeyHashes [][]byte,
 	expiryEpoch uint64,

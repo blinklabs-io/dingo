@@ -16,6 +16,7 @@ package mcp
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -23,6 +24,22 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestBoundedSQLiteRowLimitsRetainedText(t *testing.T) {
+	t.Parallel()
+
+	large := strings.Repeat("x", 500*1024)
+	row := boundedSQLiteRow([]any{large, "small"})
+	if len(row[0]) != maxCellLength+3 {
+		t.Fatalf(
+			"SQLite row retained %d cell bytes before table formatting, want %d",
+			len(row[0]),
+			maxCellLength+3,
+		)
+	}
+	require.Equal(t, strings.Repeat("x", maxCellLength)+"...", row[0])
+	require.Equal(t, "small", row[1])
+}
 
 func TestValidateReadOnlyQuery(t *testing.T) {
 	t.Parallel()

@@ -1874,6 +1874,7 @@ func newAPIPluginRuntimeNode(t *testing.T) *Node {
 			ListenNetwork: "tcp",
 			ListenAddress: "127.0.0.1:0",
 		}),
+		WithUtxorpcPort(0),
 		WithMidnightConfig(MidnightConfig{Port: 0}),
 		WithShutdownTimeout(5*time.Second),
 	))

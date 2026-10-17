@@ -23,6 +23,19 @@ import (
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
+const trustedReplayUtxoCacheLimit = 65_536
+
+func trimTrustedReplayUtxos(
+	utxos map[utxoref.Key]lcommon.Utxo,
+) {
+	for key := range utxos {
+		if len(utxos) <= trustedReplayUtxoCacheLimit {
+			return
+		}
+		delete(utxos, key)
+	}
+}
+
 // prefetchBlockUtxos resolves every spend, collateral and reference input of
 // txs that no transaction in the block produces, with a single UtxosByRefs
 // query. Rows that fail to decode are left out so the point lookup in

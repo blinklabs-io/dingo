@@ -756,6 +756,48 @@ func TestRepeatedInvalidLeiosAnnouncementsArePenalizedPerConnection(t *testing.T
 	)
 }
 
+func TestLeiosNotifyOpaqueAnnouncementsDoNotAffectPeerPenalty(t *testing.T) {
+	t.Parallel()
+
+	cm := connmanager.NewConnectionManager(connmanager.ConnectionManagerConfig{})
+	conn, err := gouroboros.New()
+	require.NoError(t, err)
+	require.True(t, cm.AddConnection(conn, false, "127.0.0.1:1234"))
+	defer func() { conn.ErrorChan() <- errors.New("test connection closed") }()
+
+	o := newOuroboros(OuroborosConfig{
+		ConnManager: cm,
+		EnableLeios: true,
+		LeiosAnnouncementLedger: &fakeLeiosAnnouncementLedger{
+			currentSlot: 10,
+		},
+	})
+	message := oleiosnotify.NewMsgBlockAnnouncement(
+		uint(gdijkstra.EraIdDijkstra),
+		cbor.RawMessage{0x01},
+	)
+	for range leiosInvalidAnnouncementLimit {
+		require.NoError(t, o.leiosnotifyClientNotification(
+			oleiosnotify.CallbackContext{ConnectionId: conn.Id()},
+			message,
+		))
+	}
+	malformed := oleiosnotify.NewMsgBlockAnnouncement(
+		uint(gdijkstra.EraIdDijkstra),
+		cbor.RawMessage{0xff},
+	)
+	for range leiosInvalidAnnouncementLimit - 1 {
+		require.NoError(t, o.leiosnotifyClientNotification(
+			oleiosnotify.CallbackContext{ConnectionId: conn.Id()},
+			malformed,
+		))
+	}
+	require.ErrorContains(t, o.leiosnotifyClientNotification(
+		oleiosnotify.CallbackContext{ConnectionId: conn.Id()},
+		malformed,
+	), "repeated invalid announcements")
+}
+
 func TestLeiosAnnouncementValidationCapacityDoesNotCountAsPeerMisbehavior(
 	t *testing.T,
 ) {

@@ -391,7 +391,8 @@ func (ls *LedgerState) handleEventChainsync(evt event.Event) {
 			"rollback", e.Rollback,
 			"slot", e.Point.Slot,
 		)
-		ls.discardBufferedPeerHeaders(e.ConnectionId)
+		ls.discardBufferedPeerHeaders(e.ConnectionId, &pending)
+		queuePeerTipAdmission(&pending, e, false)
 		ls.removePeerHeaderHistory(connIdKey(e.ConnectionId))
 		return
 	}
@@ -402,7 +403,7 @@ func (ls *LedgerState) handleEventChainsync(evt event.Event) {
 				// loop. Trigger a chainsync re-sync so the peer
 				// can negotiate a fresh intersection rather than
 				// continuing to send the same rollback point.
-				ls.resetChainsyncResyncState()
+				ls.resetChainsyncResyncState(&pending)
 				ls.setChainsyncState(SyncingChainsyncState)
 				// Queued rather than published here: this runs with
 				// ls.chainsyncMutex held, and this event's subscriber
@@ -1499,9 +1500,9 @@ func (ls *LedgerState) handleConnectionClosedEvent(evt event.Event) {
 		ls.shadowBlockfetchConnId = ouroboros.ConnectionId{}
 		ls.shadowBlockfetchRequestDone = nil
 	}
-	ls.bufferedHeaderMutex.Lock()
-	delete(ls.bufferedHeaderEvents, connIdKey(e.ConnectionId))
-	ls.bufferedHeaderMutex.Unlock()
+	for _, bufferedEvent := range ls.takeBufferedPeerHeaders(e.ConnectionId) {
+		queuePeerTipAdmission(&pending, bufferedEvent, false)
+	}
 	ls.removePeerHeaderHistory(connIdKey(e.ConnectionId))
 	ls.resetHeaderMismatches(connIdKey(e.ConnectionId))
 	// Cancel in-flight blockfetch if the dead connection owns it.
@@ -2162,13 +2163,15 @@ func chainSwitchNewObservedTip(
 	return e.NewTip
 }
 
-func (ls *LedgerState) bufferHeaderEvent(e ChainsyncEvent) {
+func (ls *LedgerState) bufferHeaderEvent(
+	e ChainsyncEvent,
+	pending *pendingPublishes,
+) {
 	// Reached from the chainsync dispatch goroutine, which holds only
 	// chainsyncMutex: claimHeaderPipelineOwnership released
 	// chainsyncBlockfetchMutex on return, so this write is otherwise
 	// unprotected against nextBufferedHeaderConnId's iteration.
 	ls.bufferedHeaderMutex.Lock()
-	defer ls.bufferedHeaderMutex.Unlock()
 	if ls.bufferedHeaderEvents == nil {
 		ls.bufferedHeaderEvents = make(
 			map[string][]ChainsyncEvent,
@@ -2180,16 +2183,24 @@ func (ls *LedgerState) bufferHeaderEvent(e ChainsyncEvent) {
 		last := events[len(events)-1]
 		if last.Point.Slot == e.Point.Slot &&
 			bytes.Equal(last.Point.Hash, e.Point.Hash) {
+			ls.bufferedHeaderMutex.Unlock()
+			queuePeerTipAdmission(pending, e, false)
 			return
 		}
 	}
 	const maxBufferedHeadersPerConn = 128
 	if len(events) >= maxBufferedHeadersPerConn {
+		evicted := events[0]
 		events = append(events[1:], e)
+		ls.bufferedHeaderEvents[key] = events
+		ls.bufferedHeaderMutex.Unlock()
+		queuePeerTipAdmission(pending, evicted, false)
+		return
 	} else {
 		events = append(events, e)
 	}
 	ls.bufferedHeaderEvents[key] = events
+	ls.bufferedHeaderMutex.Unlock()
 }
 
 // clearQueuedHeaders discards the header queue. Chain.ClearHeaders enqueues a
@@ -2845,9 +2856,9 @@ func (ls *LedgerState) requestChainsyncResync(
 ) bool {
 	ls.resetHeaderMismatches(connIdKey(connId))
 	ls.clearRollbackHistory()
-	ls.bufferedHeaderMutex.Lock()
-	delete(ls.bufferedHeaderEvents, connIdKey(connId))
-	ls.bufferedHeaderMutex.Unlock()
+	for _, bufferedEvent := range ls.takeBufferedPeerHeaders(connId) {
+		queuePeerTipAdmission(pending, bufferedEvent, false)
+	}
 	if ls.coalesceChainsyncResync(connId, reason) {
 		return false
 	}
@@ -3014,7 +3025,10 @@ func (ls *LedgerState) claimHeaderPipelineOwnership(
 	return owner, true, false
 }
 
-func (ls *LedgerState) shouldBufferHeaderEvent(e ChainsyncEvent) bool {
+func (ls *LedgerState) shouldBufferHeaderEvent(
+	e ChainsyncEvent,
+	pending *pendingPublishes,
+) bool {
 	ownerConnId, shouldBuffer, acceptedDifferentConnection := ls.claimHeaderPipelineOwnership(
 		e,
 	)
@@ -3030,7 +3044,7 @@ func (ls *LedgerState) shouldBufferHeaderEvent(e ChainsyncEvent) bool {
 	if !shouldBuffer {
 		return false
 	}
-	ls.bufferHeaderEvent(e)
+	ls.bufferHeaderEvent(e, pending)
 	ls.config.Logger.Debug(
 		"buffering header from non-owner connection",
 		"component", "ledger",
@@ -3150,8 +3164,11 @@ func (ls *LedgerState) replayBufferedHeaderEvents(
 	)
 	delete(ls.bufferedHeaderEvents, key)
 	ls.bufferedHeaderMutex.Unlock()
-	for _, evt := range events {
+	for i, evt := range events {
 		if err := ls.handleEventChainsyncBlockHeaderWithPending(evt, pending); err != nil {
+			for _, remaining := range events[i+1:] {
+				queuePeerTipAdmission(pending, remaining, false)
+			}
 			return err
 		}
 	}
@@ -3172,15 +3189,28 @@ func (ls *LedgerState) replayBufferedHeaderEvents(
 // goroutine under a different mutex is a concurrent iteration and write.
 func (ls *LedgerState) discardBufferedPeerHeaders(
 	connId ouroboros.ConnectionId,
+	pending *pendingPublishes,
 ) {
 	ls.chainsyncBlockfetchMutex.Lock()
-	defer ls.chainsyncBlockfetchMutex.Unlock()
-	ls.bufferedHeaderMutex.Lock()
-	delete(ls.bufferedHeaderEvents, connIdKey(connId))
-	ls.bufferedHeaderMutex.Unlock()
+	buffered := ls.takeBufferedPeerHeaders(connId)
 	if sameConnectionId(ls.headerPipelineConnId, connId) {
 		ls.clearQueuedHeaders()
 	}
+	ls.chainsyncBlockfetchMutex.Unlock()
+	for _, e := range buffered {
+		queuePeerTipAdmission(pending, e, false)
+	}
+}
+
+func (ls *LedgerState) takeBufferedPeerHeaders(
+	connId ouroboros.ConnectionId,
+) []ChainsyncEvent {
+	ls.bufferedHeaderMutex.Lock()
+	defer ls.bufferedHeaderMutex.Unlock()
+	key := connIdKey(connId)
+	buffered := append([]ChainsyncEvent(nil), ls.bufferedHeaderEvents[key]...)
+	delete(ls.bufferedHeaderEvents, key)
+	return buffered
 }
 
 // handleMithrilBoundaryRollback rejects a rollback at or below the local
@@ -3249,7 +3279,7 @@ func (ls *LedgerState) handleMithrilBoundaryRollback(
 		reason,
 		e.ConnectionId,
 	)
-	ls.resetChainsyncResyncState()
+	ls.resetChainsyncResyncState(pending)
 	ls.setChainsyncState(SyncingChainsyncState)
 	pending.add(
 		ls.config.EventBus,
@@ -3378,7 +3408,7 @@ func (ls *LedgerState) handleEventChainsyncRollback(
 				"local_tip_slot", ls.chain.Tip().Point.Slot,
 			)
 		} else if !sameConnectionId(*activeConnId, e.ConnectionId) {
-			ls.discardBufferedPeerHeaders(e.ConnectionId)
+			ls.discardBufferedPeerHeaders(e.ConnectionId, pending)
 			// Event is from non-active connection, skip
 			// Rate-limit this message to once per dropEventLogInterval
 			now := time.Now()
@@ -3519,7 +3549,7 @@ func (ls *LedgerState) handleEventChainsyncRollback(
 			"connection_id",
 			e.ConnectionId.String(),
 		)
-		ls.resetChainsyncResyncState()
+		ls.resetChainsyncResyncState(pending)
 		ls.setChainsyncState(SyncingChainsyncState)
 		pending.add(
 			ls.config.EventBus,
@@ -3572,7 +3602,7 @@ func (ls *LedgerState) handleEventChainsyncRollback(
 				event.ChainsyncResyncReasonRollbackNotFound,
 				e.ConnectionId,
 			)
-			ls.resetChainsyncResyncState()
+			ls.resetChainsyncResyncState(pending)
 			ls.setChainsyncState(SyncingChainsyncState)
 			pending.add(
 				ls.config.EventBus,
@@ -3610,7 +3640,7 @@ func (ls *LedgerState) handleEventChainsyncRollback(
 				)
 			}
 			if reconciled {
-				ls.resetChainsyncResyncState()
+				ls.resetChainsyncResyncState(pending)
 				ls.setChainsyncState(SyncingChainsyncState)
 				return nil
 			}
@@ -3715,7 +3745,7 @@ func (ls *LedgerState) handleEventChainsyncRollback(
 				event.ChainsyncResyncReasonRollbackBelowUtxoPruneFloor,
 				e.ConnectionId,
 			)
-			ls.resetChainsyncResyncState()
+			ls.resetChainsyncResyncState(pending)
 			ls.setChainsyncState(SyncingChainsyncState)
 			pending.add(
 				ls.config.EventBus,
@@ -3821,7 +3851,9 @@ func (ls *LedgerState) clearRollbackHistoryForPoint(point ocommon.Point) {
 // blockfetchRequestRangeCleanup (while holding chainsyncBlockfetchMutex).
 // Callers must hold chainsyncMutex before invoking this method to avoid races
 // with other chainsync operations.
-func (ls *LedgerState) resetChainsyncResyncState() {
+func (ls *LedgerState) resetChainsyncResyncState(
+	pending *pendingPublishes,
+) {
 	ls.clearRollbackHistory()
 	ls.clearHeaderMismatches()
 	ls.setSelectedBlockfetchConnId(ouroboros.ConnectionId{})
@@ -3831,12 +3863,19 @@ func (ls *LedgerState) resetChainsyncResyncState() {
 	// lock (rather than called before it, as this used to) to close that
 	// gap. bufferedHeaderEvents has its own lock; see bufferedHeaderMutex.
 	ls.bufferedHeaderMutex.Lock()
+	var buffered []ChainsyncEvent
+	for _, events := range ls.bufferedHeaderEvents {
+		buffered = append(buffered, events...)
+	}
 	ls.bufferedHeaderEvents = nil
 	ls.bufferedHeaderMutex.Unlock()
 	ls.clearQueuedHeaders()
 	ls.blockfetchRequestRangeCleanup()
 	ls.activeBlockfetchConnId = ouroboros.ConnectionId{}
 	ls.chainsyncBlockfetchMutex.Unlock()
+	for _, e := range buffered {
+		queuePeerTipAdmission(pending, e, false)
+	}
 }
 
 func pointMatches(a, b ocommon.Point) bool {
@@ -4294,7 +4333,7 @@ func (ls *LedgerState) RecoverAfterLocalRollback(
 			}
 		}
 	}
-	ls.resetChainsyncResyncState()
+	ls.resetChainsyncResyncState(&pending)
 
 	preferredConnIds := make([]ouroboros.ConnectionId, 0, len(connIds)+1)
 	seenConnIds := make(map[string]struct{}, len(connIds)+1)
@@ -4414,32 +4453,63 @@ func (ls *LedgerState) RecoverAfterLocalRollback(
 	return LocalRollbackRecoveryResult{}
 }
 
+func (ls *LedgerState) completeChainsyncHeaderAdmission(
+	e ChainsyncEvent,
+	pending *pendingPublishes,
+	admitted bool,
+) {
+	queuePeerTipAdmission(pending, e, admitted)
+	if !admitted || e.PeerTipUpdate == nil || ls.config.EventBus == nil {
+		return
+	}
+	update := *e.PeerTipUpdate
+	update.Admitted = true
+	pending.add(
+		ls.config.EventBus,
+		chainselection.PeerTipUpdateEventType,
+		event.NewEvent(chainselection.PeerTipUpdateEventType, update),
+	)
+}
+
+func queuePeerTipAdmission(
+	pending *pendingPublishes,
+	e ChainsyncEvent,
+	admitted bool,
+) {
+	if e.PeerTipAdmission == nil {
+		return
+	}
+	pending.addAfterUnlock(func() {
+		e.PeerTipAdmission(admitted)
+	})
+}
+
 func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 	e ChainsyncEvent,
 	pending *pendingPublishes,
 ) error {
+	admissionResolved := false
+	defer func() {
+		if !admissionResolved {
+			ls.completeChainsyncHeaderAdmission(e, pending, false)
+		}
+	}()
 	// Admitting, discarding or fork-replaying a header enqueues the
 	// matching chain.header event on the chain-level sequencer under
 	// c.mutex; register the drain so it is published once chainsyncMutex is
 	// released. Idempotent per chain. See
 	// chain.Chain.PublishPendingChainUpdates.
 	pending.drainChain(ls.chain)
-	ls.clearFreshCursorRequestedLocked(e.ConnectionId)
-	// Detect connection switch so pipeline ownership is handed off
-	// even when the first post-switch event is a header rather than
-	// a rollback. Without this, headers from a newly-selected active
-	// connection are buffered indefinitely because the pipeline owner
-	// still points to the old (dead) connection.
-	ls.detectConnectionSwitch(pending)
-
 	// Verify header crypto before accepting it into the header queue.
 	// Skip only headers covered by a Mithril snapshot: those slots were
 	// verified by the certificate chain during import, and the restored
 	// database intentionally does not keep every historical epoch nonce.
 	// A missing epoch nonce for any other slot (e.g. Byron->Shelley, where
-	// it may not be fully computed yet) defers verification rather than
-	// skipping it outright.
+	// it may not be fully computed yet) defers producer authorization. The
+	// header may still be queued for block-fetch, whose body path retries
+	// verification before applying it.
 	headerCryptoVerificationGeneration := e.HeaderCryptoVerificationGeneration
+	producerAuthorizationGeneration := e.HeaderCryptoVerificationGeneration
 	headerCryptoVerified := e.BlockHeader != nil &&
 		pointMatches(e.Point, ocommon.NewPoint(
 			e.BlockHeader.SlotNumber(),
@@ -4454,11 +4524,11 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 	if headerValidationRequired && !headerCryptoVerified {
 		var err error
 		headerCryptoVerificationGeneration, err = ls.
-			verifyBlockHeaderOnlyCryptoWithGeneration(e.BlockHeader)
+			ValidateChainSelectionHeaderCryptoWithGeneration(e.BlockHeader)
 		if err != nil {
 			if IsHeaderVerificationDeferred(err) {
 				ls.config.Logger.Debug(
-					"deferring chainsync header crypto verification until blockfetch",
+					"withholding chainsync header until producer authorization can be verified",
 					"component",
 					"ledger",
 					"slot",
@@ -4495,7 +4565,16 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 				)
 			}
 		}
+		producerAuthorizationGeneration = headerCryptoVerificationGeneration
 	}
+	// The strict verification above may defer while the local applied tip is
+	// behind this header. Do not mutate ledger-owned cursor, fork history, or
+	// queue state in that case; the ingress owner will re-intersect after a
+	// later applied-chain update.
+	ls.clearFreshCursorRequestedLocked(e.ConnectionId)
+	// Detect connection switch only after strict producer authorization has
+	// succeeded, so a deferred candidate cannot mutate pipeline ownership.
+	ls.detectConnectionSwitch(pending)
 
 	// A header past the forecast horizon cannot be validated until the
 	// applied ledger advances, so it must not join the queue blockfetch
@@ -4529,7 +4608,8 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 		ls.metrics.forks.Add(1)
 	}
 	ls.recordPeerHeaderHistory(e)
-	if ls.shouldBufferHeaderEvent(e) {
+	if ls.shouldBufferHeaderEvent(e, pending) {
+		admissionResolved = true
 		return nil
 	}
 	// Allow us to build up a few blockfetch batches worth of headers,
@@ -4550,6 +4630,9 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 		e.BlockHeader,
 		headerCryptoVerificationGeneration,
 	)
+	producerAuthorized := headerTrusted || (producerAuthorizationGeneration != 0 &&
+		headerCryptoVerified &&
+		producerAuthorizationGeneration == headerCryptoVerificationGeneration)
 	if headerCryptoVerified {
 		headerTrusted = true
 	}
@@ -4562,6 +4645,8 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 					"slot", e.Point.Slot,
 					"connection_id", e.ConnectionId.String(),
 				)
+				ls.completeChainsyncHeaderAdmission(e, pending, true)
+				admissionResolved = true
 				return nil
 			}
 			localTip := ls.chain.Tip()
@@ -4601,6 +4686,17 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 					"component", "ledger",
 					"slot", e.Point.Slot,
 					"local_tip_slot", localTip.Point.Slot,
+					"connection_id", e.ConnectionId.String(),
+				)
+				ls.completeChainsyncHeaderAdmission(e, pending, true)
+				admissionResolved = true
+				return nil
+			}
+			if !producerAuthorized {
+				ls.config.Logger.Debug(
+					"retaining deferred fork header without canonical rollback",
+					"component", "ledger",
+					"slot", e.Point.Slot,
 					"connection_id", e.ConnectionId.String(),
 				)
 				return nil
@@ -4649,6 +4745,10 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 					e,
 					headerTrusted,
 				)
+				if pointMatches(ls.chain.HeaderTip().Point, e.Point) {
+					ls.completeChainsyncHeaderAdmission(e, pending, true)
+					admissionResolved = true
+				}
 				return nil
 			}
 			// Fallback: after several consecutive mismatches where
@@ -4693,6 +4793,8 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 		e,
 		headerTrusted,
 	)
+	ls.completeChainsyncHeaderAdmission(e, pending, true)
+	admissionResolved = true
 	// Wait for additional block headers before fetching block bodies if we're
 	// far enough out from upstream tip
 	// Use security window as slot threshold if available
@@ -5242,9 +5344,9 @@ func localForkAnchor(intersectionSlot, tipSlot uint64) (uint64, bool) {
 }
 
 // chainsyncHeaderCryptoPolicy distinguishes headers trusted by Mithril
-// coverage from headers whose crypto check must wait for an epoch nonce.
-// Both skip verification at chainsync time, but only the former may advance
-// shared sync state.
+// coverage from headers whose producer authorization can be checked now.
+// Headers with unavailable epoch state may enter the block-fetch queue, but
+// cannot advance the admitted frontier or cause a competing-fork rollback.
 //
 // Header VRF/KES/OpCert crypto is the check that makes sync trustless in the
 // first place, so unlike per-tx ledger validation
@@ -5252,10 +5354,11 @@ func localForkAnchor(intersectionSlot, tipSlot uint64) (uint64, bool) {
 // re-deriving the UTxO set for blocks the network already delivered, this is
 // not gated on ValidateHistorical/validationEnabled: a coarse
 // historical-sync toggle must not disable this entire group of checks.
-// The only narrower, deliberate exemption is a slot a Mithril
-// certificate already covers -- those slots were authenticated by the
-// certificate chain during import, and the restored database intentionally
-// does not retain every historical epoch nonce needed to re-verify them.
+// Mithril-covered slots are trusted because their certificate chain was
+// verified during import; the restored database intentionally does not
+// retain every historical epoch nonce needed to re-verify them. Other
+// missing nonces defer authorization to block-fetch, which verifies the body
+// before applying it.
 func (ls *LedgerState) chainsyncHeaderCryptoPolicy(
 	slot uint64,
 ) (verifyNow bool, trustedWithoutVerification bool) {
@@ -5263,6 +5366,9 @@ func (ls *LedgerState) chainsyncHeaderCryptoPolicy(
 	if mithrilLedgerSlot != 0 && slot <= mithrilLedgerSlot {
 		return false, true
 	}
+	// Queue admission can safely defer producer authorization to block-fetch,
+	// which verifies the body before application. Chain selection has a
+	// separate strict gate and must not treat a deferred header as eligible.
 	if !ls.hasCachedEpochNonceForSlot(slot) {
 		return false, false
 	}
@@ -5321,14 +5427,6 @@ func (ls *LedgerState) headerCryptoVerificationGenerationCurrent(
 		consensus != nil && tip != nil &&
 		consensus.generation == generation &&
 		tip.generation == generation
-}
-
-func (ls *LedgerState) verifyBlockHeaderOnlyCryptoWithGeneration(
-	header gledger.BlockHeader,
-) (uint64, error) {
-	return ls.withStableHeaderVerificationContext(func() error {
-		return ls.verifyBlockHeaderOnlyCrypto(header)
-	})
 }
 
 func (ls *LedgerState) addChainsyncHeader(
@@ -5641,7 +5739,7 @@ func (ls *LedgerState) tryResolveFork(
 				)
 			}
 			if reconciled {
-				ls.resetChainsyncResyncState()
+				ls.resetChainsyncResyncState(pending)
 				ls.setChainsyncState(SyncingChainsyncState)
 				return true, nil
 			}
@@ -9343,11 +9441,15 @@ func (ls *LedgerState) captureEpochBoundarySnapshot(ctx context.Context,
 	return nil
 }
 
+// cleanupBlockNoncesBefore prunes non-checkpoint block nonces older than
+// startSlot. Nonce computation needs only the recent window and the
+// checkpoints, but the Blockfrost epoch and pool block lists read every
+// block's row, so API storage mode keeps them all.
 func (ls *LedgerState) cleanupBlockNoncesBefore(
 	ctx context.Context,
 	startSlot uint64,
 ) {
-	if startSlot == 0 {
+	if startSlot == 0 || ls.db.StorageMode() == types.StorageModeAPI {
 		return
 	}
 	ls.config.Logger.Debug(

@@ -2101,15 +2101,16 @@ func (o *Ouroboros) fetchLeiosEbTxsBatchedUntilWithValidator(
 		}
 		served := leiosBitmapTxIndices(respTxs.Bitmaps)
 		if len(served) != len(respTxs.TxsRaw) {
-			// Response omitted bitmaps: assume the relay served a prefix of the
-			// requested indices in ascending order.
-			served = leiosBitmapTxIndices(needed)
+			// The SDK wire contract requires one transaction per served bit;
+			// do not infer positions from an obsolete bitmap-free response.
+			return leiosCollectTxs(result), fmt.Errorf(
+				"leios-fetch response bitmap selects %d transactions, got %d",
+				len(served),
+				len(respTxs.TxsRaw),
+			)
 		}
 		progress := 0
 		for k, raw := range respTxs.TxsRaw {
-			if k >= len(served) {
-				break
-			}
 			idx := served[k]
 			if idx >= 0 && idx < txCount && result[idx] == nil {
 				if validate != nil {
@@ -2286,6 +2287,16 @@ func (o *Ouroboros) acceptLeiosAnnouncementInternal(
 	// no half-updated state behind and simply drops the announcement.
 	header, err := decodeLeiosAnnouncementHeader(raw)
 	if err != nil {
+		if cbor.ValidateExact(raw) == nil {
+			o.config.Logger.Debug(
+				"dropping unsupported opaque leios announcement",
+				"component", "network",
+				"protocol", "leios-notify",
+				"connection_id", source,
+				"bytes", len(raw),
+			)
+			return nil
+		}
 		return fmt.Errorf("decode ranking-block header: %w", err)
 	}
 	ebHash, ebSize, ok := header.LeiosAnnouncement()

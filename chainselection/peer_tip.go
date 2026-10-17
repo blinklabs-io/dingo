@@ -16,6 +16,7 @@ package chainselection
 
 import (
 	"bytes"
+	"slices"
 	"sort"
 	"time"
 
@@ -64,6 +65,10 @@ type PeerChainTip struct {
 	observedPointBaseBlock uint64
 	observedTipHistory     []ochainsync.Tip
 	idling                 bool
+	// admittedTipHistory retains only points a ledger admission explicitly
+	// accepted. It is separate from observedTipHistory because legacy rollback
+	// and recovery observations are not proof of ledger admission.
+	admittedTipHistory []ocommon.Point
 	// nowFn is the owning ChainSelector's clock, so LastUpdated and IsStale
 	// share one time source with the selector. Nil for a PeerChainTip built
 	// by NewPeerChainTip, which then uses time.Now.
@@ -189,6 +194,7 @@ func (p *PeerChainTip) ApplyRollback(
 	if p == nil {
 		return
 	}
+	p.trimAdmittedTipHistory(point)
 	previousObservedTip := p.ObservedTip
 	p.Tip = tip
 	p.ObservedTip = ochainsync.Tip{Point: clonePoint(point)}
@@ -258,6 +264,47 @@ func (p *PeerChainTip) ApplyRollback(
 		p.observedPoints = nil
 		p.observedPointBaseBlock = 0
 	}
+}
+
+func (p *PeerChainTip) recordAdmittedTipPoint(
+	point ocommon.Point,
+	maxEntries int,
+) {
+	if p == nil {
+		return
+	}
+	for len(p.admittedTipHistory) > 0 &&
+		p.admittedTipHistory[len(p.admittedTipHistory)-1].Slot >= point.Slot {
+		p.admittedTipHistory = p.admittedTipHistory[:len(p.admittedTipHistory)-1]
+	}
+	p.admittedTipHistory = append(
+		p.admittedTipHistory,
+		clonePoint(point),
+	)
+	if maxEntries <= 0 {
+		maxEntries = 1
+	}
+	if len(p.admittedTipHistory) > maxEntries {
+		p.admittedTipHistory = p.admittedTipHistory[len(p.admittedTipHistory)-maxEntries:]
+	}
+}
+
+func (p *PeerChainTip) trimAdmittedTipHistory(point ocommon.Point) {
+	if p == nil {
+		return
+	}
+	if point.Slot == 0 && len(point.Hash) == 0 {
+		p.admittedTipHistory = nil
+		return
+	}
+	for i := range slices.Backward(p.admittedTipHistory) {
+		admitted := p.admittedTipHistory[i]
+		if admitted.Slot == point.Slot && bytes.Equal(admitted.Hash, point.Hash) {
+			p.admittedTipHistory = p.admittedTipHistory[:i+1]
+			return
+		}
+	}
+	p.admittedTipHistory = nil
 }
 
 // recordObservedTipHistory retains enough delivered tips to restore the exact

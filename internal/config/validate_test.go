@@ -1219,6 +1219,27 @@ func TestValidateMidnightServerPolicy(t *testing.T) {
 			},
 		},
 		{
+			name: "auth token asset name requires policy id",
+			configure: func(c *Config) {
+				c.Midnight.AuthTokenAssetName = "61757468"
+			},
+			wantErr: "midnight.authTokenPolicyId and midnight.authTokenAssetName must be set together",
+		},
+		{
+			name: "auth token policy id requires asset name",
+			configure: func(c *Config) {
+				c.Midnight.AuthTokenPolicyID = strings.Repeat("cc", 28)
+			},
+			wantErr: "midnight.authTokenPolicyId and midnight.authTokenAssetName must be set together",
+		},
+		{
+			name: "auth token policy id and asset name together",
+			configure: func(c *Config) {
+				c.Midnight.AuthTokenPolicyID = strings.Repeat("cc", 28)
+				c.Midnight.AuthTokenAssetName = "61757468"
+			},
+		},
+		{
 			name: "reflection requires server",
 			configure: func(c *Config) {
 				c.StorageMode = storageModeAPI

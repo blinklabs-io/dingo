@@ -70,6 +70,11 @@ func (n *Node) midnightIndexerConfig() midnightindexer.Config {
 				},
 			)
 		},
+		CanonicalBlockIterator: func(startIndex, endIndex uint64, fn func(models.Block) error) error {
+			return database.ForEachCanonicalBlockByIndexRangeDB(
+				n.ctx, n.db, startIndex, endIndex, fn,
+			)
+		},
 		// Read the applied ledger tip straight from metadata rather than
 		// from n.ledgerState.Tip(): LedgerState only loads its in-memory
 		// tip inside Start, which runs after this indexer has already
@@ -83,6 +88,20 @@ func (n *Node) midnightIndexerConfig() midnightindexer.Config {
 				return 0, err
 			}
 			return tip.Point.Slot, nil
+		},
+		LedgerTipBlock: func() (*models.Block, error) {
+			tip, err := n.db.GetTip(nil)
+			if err != nil {
+				return nil, err
+			}
+			if len(tip.Point.Hash) == 0 {
+				return nil, nil
+			}
+			block, err := database.BlockByPoint(n.ctx, n.db, tip.Point)
+			if err != nil {
+				return nil, err
+			}
+			return &block, nil
 		},
 		FatalErrorFunc: func(err error) {
 			n.config.logger.Error(

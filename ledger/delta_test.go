@@ -250,6 +250,19 @@ type ledgerDeltaBatchStoreRecorder struct {
 	events []string
 }
 
+// Embedding the store interface hides the optional rebuild method that API
+// mode startup requires, so forward it to the wrapped store.
+func (s *ledgerDeltaBatchStoreRecorder) RebuildAddressTransactionIndex(
+	ctx context.Context,
+	rebuild func(context.Context, models.Transaction) ([]models.AddressTransaction, error),
+) error {
+	rebuilder, ok := s.MetadataStore.(metadata.AddressTransactionIndexRebuilder)
+	if !ok {
+		return errors.New("wrapped store cannot rebuild the address index")
+	}
+	return rebuilder.RebuildAddressTransactionIndex(ctx, rebuild)
+}
+
 func (s *ledgerDeltaBatchStoreRecorder) SetTransactionBatched(
 	tx lcommon.Transaction,
 	point ocommon.Point,

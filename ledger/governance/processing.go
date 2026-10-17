@@ -16,10 +16,12 @@ package governance
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
@@ -983,6 +985,7 @@ func processVotes(
 			}
 		}
 
+		procedureIndexes := voterProcedureIndexes(actionVotes)
 		for actionId, procedure := range actionVotes {
 			if actionId == nil {
 				continue
@@ -1056,6 +1059,8 @@ func processVotes(
 				Vote:               procedure.Vote,
 				AddedSlot:          point.Slot,
 				VoteUpdatedSlot:    &updatedSlot,
+				CastTxHash:         txHash,
+				CastCertIndex:      procedureIndexes[*actionId],
 			}
 
 			if procedure.Anchor != nil {
@@ -1074,6 +1079,33 @@ func processVotes(
 	}
 
 	return nil
+}
+
+// voterProcedureIndexes numbers one voter's procedures in a transaction from
+// 0 in the ledger map's order of governance action id: transaction id, then
+// action index. This is db-sync's voting_procedure.index, which Blockfrost
+// serves as a vote's cert_index, so other voters in the transaction do not
+// shift it.
+func voterProcedureIndexes(
+	votes map[*lcommon.GovActionId]lcommon.VotingProcedure,
+) map[lcommon.GovActionId]uint32 {
+	actions := make([]lcommon.GovActionId, 0, len(votes))
+	for id := range votes {
+		if id != nil {
+			actions = append(actions, *id)
+		}
+	}
+	slices.SortFunc(actions, func(x, y lcommon.GovActionId) int {
+		if c := bytes.Compare(x.TransactionId[:], y.TransactionId[:]); c != 0 {
+			return c
+		}
+		return cmp.Compare(x.GovActionIdx, y.GovActionIdx)
+	})
+	ret := make(map[lcommon.GovActionId]uint32, len(actions))
+	for index, id := range actions {
+		ret[id] = uint32(index) //nolint:gosec // bounded by the map size
+	}
+	return ret
 }
 
 type proposalRepairCache struct {

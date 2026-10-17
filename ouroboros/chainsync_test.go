@@ -473,10 +473,11 @@ func TestChainsyncPendingFarTipRunRemainsConnectedUntilAccepted(t *testing.T) {
 		ChainsyncObservePeerTip: func(
 			e chainselection.PeerTipUpdateEvent,
 		) chainselection.PeerTipUpdateDisposition {
-			disposition := selector.ObservePeerTipUpdate(e)
+			disposition := selector.PreparePeerTipAdmissionDisposition(e)
 			dispositions = append(dispositions, disposition)
 			return disposition
 		},
+		ChainsyncResolvePeerTip: selector.ResolvePeerTipAdmission,
 	})
 	o.chainsyncState = state
 	tip := ochainsync.Tip{
@@ -502,7 +503,8 @@ func TestChainsyncPendingFarTipRunRemainsConnectedUntilAccepted(t *testing.T) {
 		))
 		tracked := state.GetTrackedClient(connId)
 		require.NotNil(t, tracked)
-		assert.Equal(t, uint64(1_000)+i, tracked.Cursor.Slot)
+		assert.Zero(t, tracked.Cursor.Slot,
+			"a staged header must not advance the admitted cursor")
 		if i < securityParam {
 			assert.Equal(t,
 				chainselection.PeerTipUpdatePending,
@@ -518,10 +520,14 @@ func TestChainsyncPendingFarTipRunRemainsConnectedUntilAccepted(t *testing.T) {
 		chainselection.PeerTipUpdateAccepted,
 		dispositions[securityParam],
 	)
-	testutil.RequireReceive(
+	admitted := testutil.RequireReceive(
 		t, ledgerCh, time.Second,
 		"connected far-tip run must proceed after K+1 headers",
 	)
+	admission := admitted.Data.(ledger.ChainsyncEvent)
+	require.NotNil(t, admission.PeerTipAdmission)
+	admission.PeerTipAdmission(true)
+	assert.Equal(t, uint64(1_000)+securityParam, state.GetTrackedClient(connId).Cursor.Slot)
 }
 
 func TestChainsyncHeaderBackpressurePrecedesAdmissionAndCrypto(t *testing.T) {
@@ -831,6 +837,64 @@ func TestChainsyncAwaitReplyPublishesDeliveredFrontier(t *testing.T) {
 	assert.Equal(t, connId, data.ConnectionId)
 }
 
+func TestChainsyncRejectedStagedCandidateDoesNotReachLedger(t *testing.T) {
+	t.Parallel()
+
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Close)
+	_, ledgerCh := bus.Subscribe(ledger.ChainsyncEventType)
+	_, observedCh := bus.Subscribe(chainselection.PeerTipUpdateEventType)
+	state := dchainsync.NewState(bus, nil)
+	connId := newTestConnId("127.0.0.1:6000", "10.0.0.1:3001")
+	require.True(t, state.AddClientConnId(connId))
+
+	o := newOuroboros(OuroborosConfig{
+		EventBus: bus,
+		ChainsyncIngressEligible: func(ouroboros.ConnectionId) bool {
+			return true
+		},
+		ChainsyncApplyEligible: func(ouroboros.ConnectionId) bool {
+			return true
+		},
+		ChainsyncObservePeerTip: func(
+			chainselection.PeerTipUpdateEvent,
+		) chainselection.PeerTipUpdateDisposition {
+			return chainselection.PeerTipUpdateRejected
+		},
+		ChainsyncResolvePeerTip: func(
+			chainselection.PeerTipUpdateEvent,
+			bool,
+		) {
+		},
+	})
+	o.chainsyncState = state
+	header := newTestBlockHeader(100, 1, 0xaa)
+	tip := ochainsync.Tip{
+		Point:       ocommon.NewPoint(100, header.Hash().Bytes()),
+		BlockNumber: 1,
+	}
+
+	require.ErrorIs(t, o.chainsyncClientRollForwardAt(
+		ochainsync.CallbackContext{ConnectionId: connId},
+		0,
+		header,
+		tip,
+		time.Now(),
+	), errChainsyncCandidateRejected)
+	testutil.RequireNoReceive(
+		t,
+		ledgerCh,
+		50*time.Millisecond,
+		"a rejected staged candidate must not reach the ledger",
+	)
+	testutil.RequireNoReceive(
+		t,
+		observedCh,
+		50*time.Millisecond,
+		"a rejected staged candidate must not enter the legacy async path",
+	)
+}
+
 func TestChainsyncFarFutureDropHasNoStateOrConnectionPenalty(t *testing.T) {
 	t.Parallel()
 
@@ -958,6 +1022,15 @@ func TestChainsyncFarFutureDropHasNoStateOrConnectionPenalty(t *testing.T) {
 		ochainsync.Tip{},
 		time.Now(),
 	))
+	acceptedEvent := testutil.RequireReceive(
+		t,
+		ledgerCh,
+		time.Second,
+		"restarted stream header admission",
+	)
+	acceptedHeader := acceptedEvent.Data.(ledger.ChainsyncEvent)
+	require.NotNil(t, acceptedHeader.PeerTipAdmission)
+	acceptedHeader.PeerTipAdmission(true)
 	droppedClient = state.GetTrackedClient(droppedConn)
 	require.NotNil(t, droppedClient)
 	require.Equal(t, uint64(103), droppedClient.Cursor.Slot)
@@ -1286,18 +1359,15 @@ func TestChainsyncClientRollForwardExcludesHeaderFailingCryptoVerification(
 	}
 }
 
-// TestChainsyncClientRollForwardObservesHeaderWithDeferredCryptoVerification
-// proves that a header this node cannot yet confirm (ValidateChainSelection-
-// HeaderCrypto returns a deferred error, e.g. because local ledger state has
-// not caught up to it) is still observed for chain selection. This preserves
-// legitimate fast-sync/Genesis-bootstrap behavior, where an honest peer
-// racing ahead of local ledger application must not be excluded.
+// TestChainsyncClientRollForwardWithholdsHeaderWithDeferredCryptoVerification
+// proves that a header this node cannot yet confirm stays out of trusted
+// history until a later strict verification succeeds.
 //
 // The verifier here is the real ledger.LedgerState.ValidateChainSelection-
 // HeaderCrypto (not a fake), driven into its deferred path by a bare ledger
 // with no cached epoch/nonce data -- proving the actual ledger method, not
 // just the branching around it.
-func TestChainsyncClientRollForwardObservesHeaderWithDeferredCryptoVerification(
+func TestChainsyncClientRollForwardWithholdsHeaderWithDeferredCryptoVerification(
 	t *testing.T,
 ) {
 	t.Parallel()
@@ -1308,6 +1378,7 @@ func TestChainsyncClientRollForwardObservesHeaderWithDeferredCryptoVerification(
 	_, tipCh := bus.Subscribe(chainselection.PeerTipUpdateEventType)
 	_, recycleCh := bus.Subscribe(ledger.ConnectionRecycleRequestedEventType)
 	_, ledgerCh := bus.Subscribe(ledger.ChainsyncEventType)
+	_, resyncCh := bus.Subscribe(event.ChainsyncResyncEventType)
 	state := dchainsync.NewState(bus, nil)
 	conn := newTestConnId("127.0.0.1:6011", "1.1.1.3:3001")
 	require.True(t, state.AddClientConnId(conn))
@@ -1315,7 +1386,9 @@ func TestChainsyncClientRollForwardObservesHeaderWithDeferredCryptoVerification(
 	ls := newTestLedgerState(t)
 
 	o := newOuroboros(OuroborosConfig{
-		EventBus: bus,
+		EventBus:       bus,
+		LedgerState:    ls,
+		ChainsyncState: state,
 		ChainsyncIngressEligible: func(ouroboros.ConnectionId) bool {
 			return true
 		},
@@ -1323,8 +1396,6 @@ func TestChainsyncClientRollForwardObservesHeaderWithDeferredCryptoVerification(
 			return true
 		},
 	})
-	o.chainsyncState = state
-	o.eventBus = bus
 	// Force the readiness gate on and use the real verifier: a bare
 	// LedgerState with no cached epoch/nonce data for this slot deterministically
 	// returns a deferred error, matching what ShouldVerifyChainSelectionHeaderCrypto
@@ -1332,8 +1403,6 @@ func TestChainsyncClientRollForwardObservesHeaderWithDeferredCryptoVerification(
 	// the real verifier's own error classification, without the readiness gate,
 	// must still get fast-sync-safe (deferred, not excluded) behavior.
 	o.chainSelectionShouldVerifyHeaderCrypto = func(uint64) bool { return true }
-	o.chainSelectionVerifyHeaderCrypto = ls.ValidateChainSelectionHeaderCryptoWithGeneration
-
 	var hash gledger.Blake2b256
 	hash[0] = 0xdd
 	header := nonByronTestHeader{&testBlockHeader{
@@ -1341,6 +1410,15 @@ func TestChainsyncClientRollForwardObservesHeaderWithDeferredCryptoVerification(
 		blockNumber: 1,
 		slotNumber:  200,
 	}}
+	deferredErr := ls.ValidateChainSelectionHeaderCrypto(header)
+	require.True(t, ledger.IsHeaderVerificationDeferred(deferredErr))
+	var verificationReady atomic.Bool
+	o.chainSelectionVerifyHeaderCrypto = func(gledger.BlockHeader) (uint64, error) {
+		if !verificationReady.Load() {
+			return 0, deferredErr
+		}
+		return 42, nil
+	}
 	tip := ochainsync.Tip{
 		Point:       ocommon.NewPoint(200, header.Hash().Bytes()),
 		BlockNumber: 1,
@@ -1353,18 +1431,12 @@ func TestChainsyncClientRollForwardObservesHeaderWithDeferredCryptoVerification(
 		tip,
 	))
 
-	select {
-	case evt := <-tipCh:
-		_, ok := evt.Data.(chainselection.PeerTipUpdateEvent)
-		require.True(
-			t,
-			ok,
-			"a deferred verification result must still leave the header "+
-				"eligible for chain-selection observation",
-		)
-	case <-time.After(time.Second):
-		t.Fatal("expected PeerTipUpdateEvent despite deferred verification")
-	}
+	testutil.RequireNoReceive(
+		t,
+		tipCh,
+		200*time.Millisecond,
+		"a deferred verification result must not enter chain selection",
+	)
 	select {
 	case <-recycleCh:
 		t.Fatal(
@@ -1372,10 +1444,93 @@ func TestChainsyncClientRollForwardObservesHeaderWithDeferredCryptoVerification(
 		)
 	case <-time.After(200 * time.Millisecond):
 	}
-	evt := testutil.RequireReceive(t, ledgerCh, time.Second, "ledger event")
-	data, ok := evt.Data.(ledger.ChainsyncEvent)
+	testutil.RequireNoReceive(
+		t,
+		ledgerCh,
+		200*time.Millisecond,
+		"a deferred header must not enter the ledger queue",
+	)
+	_, _, retained := state.LookupObservedHeader(conn, header.Hash().Bytes())
+	require.False(t, retained, "deferred header must not enter trusted history")
+	require.Contains(t, o.deferredHeaderRecovery, conn)
+
+	baseline := ls.Tip().Point
+	advancedPoint := ocommon.NewPoint(baseline.Slot+1, []byte("applied-block"))
+	bus.Publish(
+		chain.ChainUpdateEventType,
+		event.NewEvent(chain.ChainUpdateEventType, chain.ChainBlockEvent{
+			Point: advancedPoint,
+		}),
+	)
+	resync := testutil.RequireReceive(
+		t,
+		resyncCh,
+		testutil.AsyncWait,
+		"an applied chain update should re-intersect deferred peers",
+	)
+	resyncData, ok := resync.Data.(event.ChainsyncResyncEvent)
 	require.True(t, ok)
-	require.Zero(t, data.HeaderCryptoVerificationGeneration)
+	require.Equal(t, conn, resyncData.ConnectionId)
+	require.Equal(t, event.ChainsyncResyncReasonHeaderValidationRecovery, resyncData.Reason)
+
+	// The peer's re-intersection sends its linked suffix through the ordinary
+	// callback parent-first. Once strict verification passes, both selector and
+	// ledger admission resume on that fresh connection.
+	verificationReady.Store(true)
+	replayConn := newTestConnId("127.0.0.1:6012", "1.1.1.4:3001")
+	require.True(t, state.AddClientConnId(replayConn))
+	childHash := hash
+	childHash[0]++
+	childHeader := nonByronTestHeader{&testBlockHeader{
+		hash:        childHash,
+		prevHash:    header.Hash(),
+		blockNumber: 2,
+		slotNumber:  201,
+	}}
+	for _, replay := range []struct {
+		header gledger.BlockHeader
+		tip    ochainsync.Tip
+	}{
+		{header: header, tip: tip},
+		{
+			header: childHeader,
+			tip: ochainsync.Tip{
+				Point:       ocommon.NewPoint(201, childHeader.Hash().Bytes()),
+				BlockNumber: 2,
+			},
+		},
+	} {
+		require.NoError(t, o.chainsyncClientRollForward(
+			ochainsync.CallbackContext{ConnectionId: replayConn},
+			0,
+			replay.header,
+			replay.tip,
+		))
+	}
+	for _, replay := range []struct {
+		header gledger.BlockHeader
+	}{
+		{header: header},
+		{header: childHeader},
+	} {
+		observed := testutil.RequireReceive(
+			t,
+			tipCh,
+			testutil.AsyncWait,
+			"verified parent-first replay should re-enter selector admission",
+		)
+		require.IsType(t, chainselection.PeerTipUpdateEvent{}, observed.Data)
+		ledgerEvent := testutil.RequireReceive(
+			t,
+			ledgerCh,
+			testutil.AsyncWait,
+			"verified parent-first replay should re-enter ledger admission",
+		)
+		ledgerData, ok := ledgerEvent.Data.(ledger.ChainsyncEvent)
+		require.True(t, ok)
+		require.Equal(t, replay.header.Hash().Bytes(), ledgerData.Point.Hash)
+		require.EqualValues(t, 42, ledgerData.HeaderCryptoVerificationGeneration)
+	}
 }
 
 // TestChainsyncClientRollForwardCompetingPeersOnlyVerifiedHeaderCounted
@@ -4547,11 +4702,10 @@ func TestChainsyncClientRollForward_WithheldHeaderNotPermanentlyDeduped(
 	}
 }
 
-// With the synchronous observe hook wired (as the node does when Genesis
-// corroboration is active), a header's apply decision reflects that header:
-// the tip is folded into chain selection before the apply gate runs, so a
-// header that establishes corroboration is applied in the same roll-forward
-// rather than withheld until an asynchronous tip update is processed.
+// With the synchronous observe hook wired, the Genesis apply gate can inspect
+// a candidate from this header without making it selectable before ledger
+// admission. A header that establishes corroboration is therefore submitted
+// in the same roll-forward, while rejected candidates remain invisible.
 // The roll-backward apply gate must reflect the rollback currently being
 // admitted: a rollback trims the peer's observed frontier (via ApplyRollback),
 // which can change its corroboration status, so the observation must be applied
@@ -4668,21 +4822,29 @@ func TestChainsyncClientRollForwardSyncObservationOrdersApplyGate(
 		ChainsyncIngressEligible: func(ouroboros.ConnectionId) bool {
 			return true
 		},
-		// Synchronous observation, exactly like node.chainsyncObservePeerTip.
+		// Stage the candidate synchronously, as the node does before the
+		// Genesis apply gate.
 		ChainsyncObservePeerTip: func(
 			e chainselection.PeerTipUpdateEvent,
 		) chainselection.PeerTipUpdateDisposition {
+			return cs.PreparePeerTipAdmissionDisposition(e)
+		},
+		ChainsyncResolvePeerTip: func(
+			e chainselection.PeerTipUpdateEvent,
+			admitted bool,
+		) {
+			if !admitted {
+				cs.RejectPeerTipAdmission(e)
+				return
+			}
 			previousBest := cs.GetBestPeer()
-			disposition := cs.ObservePeerTipUpdate(e)
+			cs.CommitPeerTipAdmission(e)
 			best := cs.GetBestPeer()
 			if previousBest == nil && best != nil {
-				// This is the same synchronous callback ordering as the node's
-				// ChainSwitchEvent handler: the newly selected client must already
-				// show a delivered tip, or TrySetClientConnId rejects the one-shot
-				// switch with no retry.
+				// Admission updates the tracked cursor before committing the
+				// candidate, so the selected client is ready for the handoff.
 				switchAccepted = state.TrySetClientConnId(*best)
 			}
-			return disposition
 		},
 		ChainsyncApplyEligible: cs.ShouldApplyIngress,
 	})
@@ -4724,6 +4886,8 @@ func TestChainsyncClientRollForwardSyncObservationOrdersApplyGate(
 		data, ok := evt.Data.(ledger.ChainsyncEvent)
 		require.True(t, ok)
 		require.Equal(t, connA, data.ConnectionId)
+		require.NotNil(t, data.PeerTipAdmission)
+		data.PeerTipAdmission(true)
 	case <-time.After(time.Second):
 		t.Fatal(
 			"corroborating header must be applied in the same roll-forward",
@@ -4738,6 +4902,65 @@ func TestChainsyncClientRollForwardSyncObservationOrdersApplyGate(
 	require.NotNil(t, trackedA)
 	require.Equal(t, uint64(1), trackedA.HeadersRecv,
 		"pre-selection tracking must not double-count the delivered header")
+}
+
+func TestChainsyncRejectedHeaderRemovesStagedPeerTip(t *testing.T) {
+	t.Parallel()
+
+	bus := event.NewEventBus(nil, nil)
+	defer bus.Close()
+	_, ledgerCh := bus.Subscribe(ledger.ChainsyncEventType)
+	conn := newTestConnId("127.0.0.1:6000", "10.0.0.1:3001")
+	selector := chainselection.NewChainSelector(chainselection.ChainSelectorConfig{
+		GenesisMode:           true,
+		SecurityParam:         20,
+		MinCorroboratingPeers: 1,
+	})
+	witnessConn := newTestConnId("127.0.0.1:6000", "10.0.0.2:3001")
+	header := newTestBlockHeader(100, 1, 0xaa)
+	tip := ochainsync.Tip{
+		Point:       ocommon.NewPoint(100, header.Hash().Bytes()),
+		BlockNumber: 1,
+	}
+	selector.UpdatePeerTip(witnessConn, tip, nil)
+	o := newOuroboros(OuroborosConfig{
+		EventBus: bus,
+		ChainsyncIngressEligible: func(ouroboros.ConnectionId) bool {
+			return true
+		},
+		ChainsyncObservePeerTip: func(update chainselection.PeerTipUpdateEvent) chainselection.PeerTipUpdateDisposition {
+			selector.PreparePeerTipAdmission(update)
+			return chainselection.PeerTipUpdateAccepted
+		},
+		ChainsyncResolvePeerTip: selector.ResolvePeerTipAdmission,
+	})
+	o.eventBus = bus
+
+	require.NoError(t, o.chainsyncClientRollForward(
+		ochainsync.CallbackContext{ConnectionId: conn},
+		0,
+		header,
+		tip,
+	))
+	evt := testutil.RequireReceive(
+		t,
+		ledgerCh,
+		time.Second,
+		"header sent for ledger admission",
+	)
+	chainsyncEvent, ok := evt.Data.(ledger.ChainsyncEvent)
+	require.True(t, ok)
+	require.NotNil(t, chainsyncEvent.PeerTipUpdate)
+	require.NotContains(t, selector.GetAllPeerTips(), conn,
+		"staged header must not be selector-visible before ledger admission")
+	require.True(t, selector.ShouldApplyIngress(conn),
+		"the staged candidate should be usable for Genesis corroboration")
+	require.NotNil(t, chainsyncEvent.PeerTipAdmission)
+	chainsyncEvent.PeerTipAdmission(false)
+	require.NotContains(t, selector.GetAllPeerTips(), conn,
+		"rejected header must leave no selector-visible peer tip")
+	require.False(t, selector.ShouldApplyIngress(conn),
+		"rejection must synchronously remove the candidate from corroboration")
 }
 
 func TestChainsyncClientRollForwardReplaysDuplicateFromSelectedPeerSeenElsewhere(
@@ -4800,6 +5023,187 @@ func TestChainsyncClientRollForwardReplaysDuplicateFromSelectedPeerSeenElsewhere
 			"expected selected peer to replay duplicate header first seen elsewhere",
 		)
 	}
+}
+
+// A suppressed header at a new point is forward protocol activity, while
+// replaying that point must not keep an otherwise stalled client eligible.
+// Neither delivery moves the admitted cursor.
+func TestChainsyncClientRollForwardSuppressedHeaderAdvancesActivityOnce(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		name          string
+		applyEligible bool
+	}{
+		{name: "duplicate", applyEligible: true},
+		{name: "withheld", applyEligible: false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			bus := event.NewEventBus(nil, nil)
+			defer bus.Close()
+			_, ch := bus.Subscribe(ledger.ChainsyncEventType)
+			now := time.Unix(1, 0)
+			state := dchainsync.NewStateWithConfig(
+				bus,
+				nil,
+				dchainsync.Config{
+					MaxClients:   3,
+					StallTimeout: time.Minute,
+					Now:          func() time.Time { return now },
+				},
+			)
+			connA := newTestConnId("127.0.0.1:6000", "1.1.1.1:3001")
+			connB := newTestConnId("127.0.0.1:6000", "2.2.2.2:3001")
+			require.True(t, state.AddClientConnId(connA))
+			require.True(t, state.AddClientConnId(connB))
+			selectTrackedChainsyncClient(t, state, connA)
+			o := newOuroboros(OuroborosConfig{
+				EventBus: bus,
+				ChainsyncIngressEligible: func(ouroboros.ConnectionId) bool {
+					return true
+				},
+				ChainsyncApplyEligible: func(
+					connId ouroboros.ConnectionId,
+				) bool {
+					return connId == connA || tt.applyEligible
+				},
+			})
+			o.chainsyncState = state
+			o.eventBus = bus
+
+			header := newTestBlockHeader(100, 1, 0xaa)
+			tip := ochainsync.Tip{
+				Point:       ocommon.NewPoint(100, header.Hash().Bytes()),
+				BlockNumber: 1,
+			}
+			require.NoError(t, o.chainsyncClientRollForward(
+				ochainsync.CallbackContext{ConnectionId: connA},
+				0,
+				header,
+				tip,
+			))
+			testutil.RequireReceive(
+				t, ch, time.Second, "active peer header published",
+			)
+
+			before := state.GetTrackedClient(connB)
+			require.NotNil(t, before)
+			now = now.Add(time.Second)
+			require.NoError(t, o.chainsyncClientRollForward(
+				ochainsync.CallbackContext{ConnectionId: connB},
+				0,
+				header,
+				tip,
+			))
+			after := state.GetTrackedClient(connB)
+			require.NotNil(t, after)
+			require.Equal(t, before.HeadersRecv+1, after.HeadersRecv,
+				"suppressed delivery must count as client activity")
+			require.Equal(t, now, after.LastActivity)
+			require.Equal(t, before.Cursor, after.Cursor,
+				"suppressed delivery must not move the cursor")
+
+			now = now.Add(2 * time.Minute)
+			require.NoError(t, o.chainsyncClientRollForward(
+				ochainsync.CallbackContext{ConnectionId: connB},
+				0,
+				header,
+				tip,
+			))
+			replayed := state.GetTrackedClient(connB)
+			require.NotNil(t, replayed)
+			require.Equal(t, after.LastActivity, replayed.LastActivity,
+				"replayed suppressed header must not refresh activity")
+			require.Contains(t, state.CheckStalledClients(), connB)
+		})
+	}
+}
+
+func TestChainsyncClientRollForwardRecordsDeliveryBeforeLedgerBackpressure(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	bus := event.NewEventBus(nil, nil)
+	defer bus.Close()
+	_, ledgerCh := bus.SubscribeWithBuffer(ledger.ChainsyncEventType, 1)
+	bus.Publish(
+		ledger.ChainsyncEventType,
+		event.NewEvent(ledger.ChainsyncEventType, "occupy buffer"),
+	)
+	now := time.Unix(2, 0)
+	state := dchainsync.NewStateWithConfig(
+		bus,
+		nil,
+		dchainsync.Config{
+			MaxClients:   1,
+			StallTimeout: time.Minute,
+			Now:          func() time.Time { return now },
+		},
+	)
+	conn := newTestConnId("127.0.0.1:6000", "1.1.1.1:3001")
+	require.True(t, state.AddClientConnId(conn))
+	o := newOuroboros(OuroborosConfig{
+		EventBus: bus,
+		ChainsyncIngressEligible: func(ouroboros.ConnectionId) bool {
+			return true
+		},
+		ChainsyncObservePeerTip: func(chainselection.PeerTipUpdateEvent) chainselection.PeerTipUpdateDisposition {
+			return chainselection.PeerTipUpdateAccepted
+		},
+	})
+	o.chainsyncState = state
+	o.eventBus = bus
+
+	header := newTestBlockHeader(100, 1, 0xaa)
+	point := ocommon.NewPoint(100, header.Hash().Bytes())
+	tip := ochainsync.Tip{Point: point, BlockNumber: 1}
+	done := make(chan error, 1)
+	go func() {
+		done <- o.chainsyncClientRollForward(
+			ochainsync.CallbackContext{ConnectionId: conn},
+			0,
+			header,
+			tip,
+		)
+	}()
+
+	require.Eventually(t, func() bool {
+		client := state.GetTrackedClient(conn)
+		return client != nil && client.HeadersRecv == 1 &&
+			client.LastActivity.Equal(now)
+	}, time.Second, time.Millisecond)
+	blocked := state.GetTrackedClient(conn)
+	require.NotNil(t, blocked)
+	assert.Equal(t, ocommon.Point{}, blocked.Cursor)
+	select {
+	case err := <-done:
+		require.Failf(t, "roll forward returned before ledger capacity", "%v", err)
+	default:
+	}
+
+	<-ledgerCh
+	var chainsyncEvent ledger.ChainsyncEvent
+	select {
+	case evt := <-ledgerCh:
+		var ok bool
+		chainsyncEvent, ok = evt.Data.(ledger.ChainsyncEvent)
+		require.True(t, ok)
+	case <-time.After(time.Second):
+		t.Fatal("ledger event was not published after capacity became available")
+	}
+	require.NoError(t, <-done)
+	require.NotNil(t, chainsyncEvent.PeerTipAdmission)
+	chainsyncEvent.PeerTipAdmission(true)
+	admitted := state.GetTrackedClient(conn)
+	require.NotNil(t, admitted)
+	assert.Equal(t, point, admitted.Cursor)
+	assert.Equal(t, uint64(1), admitted.HeadersRecv)
+	assert.Equal(t, now, admitted.LastActivity)
 }
 
 func TestChainsyncClientRollForwardReplaysDuplicateFromEquivalentSelectedPeerSeenElsewhere(
