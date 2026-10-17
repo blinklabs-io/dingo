@@ -60,6 +60,7 @@ func seedOrderingAssets(t *testing.T, store *Store) {
 // primary key. Starting from utxo probes asset once per live UTxO, a cost
 // that does not depend on how many UTxOs hold the policy.
 func TestUtxoOrderingAssetOnlyFilterDrivesFromAsset(t *testing.T) {
+	skipPlanTestUnderRace(t)
 	t.Parallel()
 	store := newMigratedSQLiteStore(t)
 	seedStakeRefLookupUtxos(t, store, 20_000, 256)

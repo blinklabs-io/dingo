@@ -8079,7 +8079,7 @@ INSERT INTO pool_stake_snapshot (epoch, snapshot_type, pool_key_hash,
 VALUES (?, 'mark', ?, ?, ?, ?, ?)`)
 	blockStmt := prepare(`
 INSERT INTO pool_opcert_sequence (pool_key_hash, slot, sequence)
-VALUES (?, ?, 0)`)
+VALUES (?, ?, ?)`)
 
 	shape := f.shape
 	pools := make([]epochBoundaryBenchPool, shape.pools)
@@ -8282,7 +8282,7 @@ VALUES (?, ?, ?, ?, ?, ?, 1)`,
 				float64(pools[p].stake) / float64(totalStake),
 		)
 		for range share {
-			_, err := blockStmt.Exec(pools[p].key, slot)
+			_, err := blockStmt.Exec(pools[p].key, slot, int64(math.MinInt64))
 			require.NoError(tb, err)
 			slot += 20
 		}

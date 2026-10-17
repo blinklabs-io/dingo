@@ -23,10 +23,12 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/blinklabs-io/dingo/internal/test/conformance"
@@ -40,7 +42,10 @@ import (
 	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
 )
 
-const schemaVersion = "1"
+const (
+	schemaVersion                     = "1"
+	maxConcurrentLedgerFixtureWorkers = 4
+)
 
 type Report struct {
 	SchemaVersion string        `json:"schema_version"`
@@ -262,40 +267,87 @@ func GenerateReport(
 		Scenarios:     make([]CaseOutcome, 0, len(files)),
 	}
 	failures := make([]Failure, 0)
-	for _, path := range files {
-		manager, err := conformance.NewDingoStateManager()
-		if err != nil {
-			return Report{}, failures, fmt.Errorf(
-				"create Dingo ledger state manager: %w",
-				err,
-			)
+	type indexedResult struct {
+		index   int
+		outcome CaseOutcome
+		failure *Failure
+		err     error
+	}
+	workerCount := min(
+		maxConcurrentLedgerFixtureWorkers,
+		runtime.GOMAXPROCS(0),
+		len(files),
+	)
+	jobs := make(chan int, len(files))
+	results := make(chan indexedResult, len(files))
+	for index := range files {
+		jobs <- index
+	}
+	close(jobs)
+
+	var workers sync.WaitGroup
+	workers.Add(workerCount)
+	for range workerCount {
+		go func() {
+			defer workers.Done()
+			for index := range jobs {
+				path := files[index]
+				outcome, failure, err := evaluateFixture(root, path)
+				results <- indexedResult{
+					index:   index,
+					outcome: outcome,
+					failure: failure,
+					err:     err,
+				}
+			}
+		}()
+	}
+	workers.Wait()
+	close(results)
+
+	orderedResults := make([]indexedResult, len(files))
+	for result := range results {
+		orderedResults[result.index] = result
+	}
+	for _, result := range orderedResults {
+		if result.err != nil {
+			return Report{}, failures, result.err
 		}
-		outcome, failure, err := runFixture(root, path, manager)
-		closeErr := manager.Close()
-		if err != nil {
-			return Report{}, failures, fmt.Errorf(
-				"run fixture %s: %w",
-				path,
-				err,
-			)
-		}
-		if closeErr != nil {
-			return Report{}, failures, fmt.Errorf(
-				"close ledger state manager after %s: %w",
-				path,
-				closeErr,
-			)
-		}
-		report.Scenarios = append(report.Scenarios, outcome)
+		report.Scenarios = append(report.Scenarios, result.outcome)
 		report.Totals.Total++
-		if failure == nil {
+		if result.failure == nil {
 			report.Totals.Passed++
 		} else {
 			report.Totals.Failed++
-			failures = append(failures, *failure)
+			failures = append(failures, *result.failure)
 		}
 	}
 	return report, failures, nil
+}
+
+func evaluateFixture(
+	root, path string,
+) (CaseOutcome, *Failure, error) {
+	manager, err := conformance.NewDingoStateManager()
+	if err != nil {
+		return CaseOutcome{}, nil, fmt.Errorf(
+			"create Dingo ledger state manager: %w",
+			err,
+		)
+	}
+	outcome, failure, err := runFixture(root, path, manager)
+	closeErr := manager.Close()
+	if err != nil {
+		return CaseOutcome{}, nil, fmt.Errorf("run fixture %s: %w", path, err)
+	}
+	if closeErr != nil {
+		return CaseOutcome{}, nil, fmt.Errorf(
+			"close ledger state manager after %s: %w",
+			path,
+			closeErr,
+		)
+	}
+	return outcome, failure, nil
 }
 
 // WriteReport writes the ledger-rules report as indented JSON.

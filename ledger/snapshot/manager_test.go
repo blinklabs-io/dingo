@@ -602,12 +602,13 @@ INSERT INTO pool_registration_owner (
 		},
 		{PoolKeyHash: poolHash, Slot: 432000, Sequence: 2},
 	} {
-		_, err = raw.Exec(`
-INSERT INTO pool_opcert_sequence (pool_key_hash, slot, sequence)
-VALUES (?, ?, ?)`,
-			row.PoolKeyHash, row.Slot, row.Sequence,
-		)
-		require.NoError(t, err)
+		require.NoError(t, db.UpdatePoolOpCertSequence(
+			context.Background(),
+			lcommon.PoolKeyHash(row.PoolKeyHash),
+			row.Sequence,
+			row.Slot,
+			nil,
+		))
 	}
 
 	eventBus := event.NewEventBus(nil, nil)

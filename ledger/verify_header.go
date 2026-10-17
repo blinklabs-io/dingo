@@ -203,6 +203,7 @@ func (b headerOnlyBlock) BlockBodyHash() lcommon.Blake2b256 {
 	return b.header.BlockBodyHash()
 }
 
+//nolint:unused // Retained as a test helper for stateless header-only checks.
 func (ls *LedgerState) verifyBlockHeaderOnlyCrypto(
 	header ledger.BlockHeader,
 ) error {
@@ -248,7 +249,8 @@ func (ls *LedgerState) ValidateBlockHeaderCrypto(
 // returns false for is never re-verified. ValidateChainSelectionHeaderCrypto
 // already handles a not-yet-available epoch by returning a deferred error
 // (see IsHeaderVerificationDeferred) rather than failing, so it's always
-// safe to attempt verification here and let the verifier decide.
+// safe to attempt verification here and let the verifier decide. A deferred
+// result must remain outside chain selection until a later header verifies.
 func (ls *LedgerState) ShouldVerifyChainSelectionHeaderCrypto(
 	slot uint64,
 ) bool {
@@ -269,8 +271,8 @@ func (ls *LedgerState) ShouldVerifyChainSelectionHeaderCrypto(
 // up to the header's slot: that is the normal condition for a peer
 // legitimately racing ahead of local ledger application during fast sync or
 // Genesis bootstrap. Use IsHeaderVerificationDeferred to distinguish that
-// case (the header must still be treated as eligible) from a header this
-// node can already prove is invalid.
+// case (the peer is not at fault, but the header is not selection-eligible)
+// from a header this node can already prove is invalid.
 func (ls *LedgerState) ValidateChainSelectionHeaderCrypto(
 	header ledger.BlockHeader,
 ) error {
@@ -617,10 +619,8 @@ func (ls *LedgerState) verifyBlockHeaderStateWithEpochAdvance(
 	if block.Era().Id == byron.EraIdByron {
 		return nil
 	}
-	epoch, epochCache, err := ls.headerVerificationEpochWithCache(
-		ctx,
-		block.SlotNumber(),
-		allowEpochCacheAdvance,
+	epoch, epochCache, err := ls.headerVerificationEpochForBlockWithCache(
+		ctx, block, allowEpochCacheAdvance,
 	)
 	if err != nil {
 		return err
@@ -631,6 +631,7 @@ func (ls *LedgerState) verifyBlockHeaderStateWithEpochAdvance(
 	)
 }
 
+//nolint:unused // Retained as a test helper for stateless block verification.
 func (ls *LedgerState) verifyBlockHeaderStatelessCrypto(
 	block ledger.Block,
 	allowEpochCacheAdvance bool,
@@ -657,10 +658,8 @@ func (ls *LedgerState) verifyBlockHeaderStatelessCryptoWithCache(
 	}
 
 	blockSlot := block.SlotNumber()
-	epoch, epochCache, err := ls.headerVerificationEpochWithCache(
-		ctx,
-		blockSlot,
-		allowEpochCacheAdvance,
+	epoch, epochCache, err := ls.headerVerificationEpochForBlockWithCache(
+		ctx, block, allowEpochCacheAdvance,
 	)
 	if err != nil {
 		return models.Epoch{}, nil, err
@@ -879,6 +878,96 @@ func (ls *LedgerState) headerVerificationEpochWithCache(
 	)
 }
 
+func (ls *LedgerState) headerVerificationEpochForBlockWithCache(
+	ctx context.Context,
+	block ledger.Block,
+	allowEpochCacheAdvance bool,
+) (models.Epoch, []models.Epoch, error) {
+	epoch, cache, err := ls.headerVerificationEpochWithCache(
+		ctx, block.SlotNumber(), allowEpochCacheAdvance,
+	)
+	if err == nil || allowEpochCacheAdvance ||
+		!errors.Is(err, errHeaderVerificationDeferred) ||
+		errors.Is(err, ErrHeaderBeyondForecastHorizon) {
+		return epoch, cache, err
+	}
+	forecast, forecastCache, ok, forecastErr := ls.forecastNextEpochForAppliedTipChild(
+		ctx, block,
+	)
+	if forecastErr != nil || !ok {
+		return epoch, cache, err
+	}
+	return forecast, forecastCache, nil
+}
+
+// forecastNextEpochForAppliedTipChild returns an immutable one-epoch forecast
+// only for a direct child of the applied tip. That restriction makes the
+// applied ledger state authoritative for the candidate's parent while avoiding
+// shared epoch-cache mutation during chain-selection verification.
+func (ls *LedgerState) forecastNextEpochForAppliedTipChild(
+	ctx context.Context,
+	block ledger.Block,
+) (models.Epoch, []models.Epoch, bool, error) {
+	consensus, tip := ls.loadConsensusAndTipSnapshots()
+	if consensus == nil || tip == nil ||
+		consensus.generation != tip.generation ||
+		tip.currentTip.BlockNumber == ^uint64(0) ||
+		block.BlockNumber() != tip.currentTip.BlockNumber+1 ||
+		!bytes.Equal(block.PrevHash().Bytes(), tip.currentTip.Point.Hash) ||
+		block.SlotNumber() <= tip.currentTip.Point.Slot ||
+		len(consensus.epochCache) == 0 {
+		return models.Epoch{}, nil, false, nil
+	}
+	cache := consensus.epochCache
+	last := cache[len(cache)-1]
+	tipEpoch, err := epochForSlotInCache(cache, tip.currentTip.Point.Slot)
+	if err != nil {
+		return models.Epoch{}, nil, false, err
+	}
+	if tipEpoch.EpochId != last.EpochId ||
+		last.EraId != consensus.currentEra.Id {
+		return models.Epoch{}, nil, false, nil
+	}
+	if err := ls.validateEpochCacheForecast(
+		last, consensus.currentEra.Id, consensus.transitionInfo,
+	); err != nil {
+		return models.Epoch{}, nil, false, err
+	}
+	if last.LengthInSlots == 0 {
+		return models.Epoch{}, nil, false, nil
+	}
+	start := last.StartSlot + uint64(last.LengthInSlots)
+	if block.SlotNumber() < start ||
+		block.SlotNumber() >= start+uint64(last.LengthInSlots) {
+		return models.Epoch{}, nil, false, nil
+	}
+	nonce, evolving, candidate, lab, err := ls.computeEpochNonceForSlot(
+		ctx, start, last,
+	)
+	if err != nil {
+		return models.Epoch{}, nil, false, err
+	}
+	next := models.Epoch{
+		EpochId:             last.EpochId + 1,
+		StartSlot:           start,
+		LengthInSlots:       last.LengthInSlots,
+		SlotLength:          last.SlotLength,
+		EraId:               last.EraId,
+		Nonce:               nonce,
+		EvolvingNonce:       evolving,
+		CandidateNonce:      candidate,
+		LastEpochBlockNonce: lab,
+	}
+	forecastCache := make([]models.Epoch, len(cache)+1)
+	copy(forecastCache, cache)
+	forecastCache[len(cache)] = next
+	epoch, err := epochForSlotInCache(forecastCache, block.SlotNumber())
+	if err != nil {
+		return models.Epoch{}, nil, false, err
+	}
+	return epoch, forecastCache, true, nil
+}
+
 //nolint:unused // retained as a test helper
 func (ls *LedgerState) verifyBlockHeaderState(
 	block ledger.Block,
@@ -904,9 +993,10 @@ func (ls *LedgerState) verifyBlockHeaderStateWithCache(
 		return err
 	}
 	//nolint:contextcheck // the overlay fallback forecasts parameters without a request context
-	if handled, err := ls.verifyGenesisDelegateHeader(
+	if handled, err := ls.verifyGenesisDelegateHeaderWithEpochCache(
 		block,
 		allowStateDefer,
+		epochCache,
 	); handled || err != nil {
 		return err
 	}
@@ -1016,9 +1106,22 @@ func (ls *LedgerState) verifyHeaderSizeLimits(
 	return err
 }
 
+//nolint:unused // retained as a test helper
 func (ls *LedgerState) verifyGenesisDelegateHeader(
 	block ledger.Block,
 	allowStateDefer bool,
+) (bool, error) {
+	return ls.verifyGenesisDelegateHeaderWithEpochCache(
+		block,
+		allowStateDefer,
+		ls.loadConsensusSnapshot().epochCache,
+	)
+}
+
+func (ls *LedgerState) verifyGenesisDelegateHeaderWithEpochCache(
+	block ledger.Block,
+	allowStateDefer bool,
+	epochCache []models.Epoch,
 ) (bool, error) {
 	if block.Era().Id == byron.EraIdByron {
 		return false, nil
@@ -1037,16 +1140,18 @@ func (ls *LedgerState) verifyGenesisDelegateHeader(
 	// target epoch's parameters. This must precede
 	// genesisOverlayDelegationForBlock because stale parameters can otherwise
 	// classify a future slot as having no overlay.
-	if allowStateDefer && ls.ledgerTipBehindSlot(block.SlotNumber()) {
+	if allowStateDefer && ls.ledgerTipBehindSlot(block.SlotNumber()) &&
+		!ls.hasAuthoritativeGenesisOverlayState(block, epochCache) {
 		return true, fmt.Errorf(
 			"%w: genesis overlay state for slot %d is not yet authoritative",
 			errHeaderVerificationDeferred,
 			block.SlotNumber(),
 		)
 	}
-	genesisDeleg, status, err := ls.genesisOverlayDelegationForBlock(
+	genesisDeleg, status, err := ls.genesisOverlayDelegationForBlockWithEpochCache(
 		block,
 		shelleyGenesis,
+		epochCache,
 	)
 	if err != nil {
 		return true, err
@@ -1104,14 +1209,71 @@ func (ls *LedgerState) verifyGenesisDelegateHeader(
 	return true, nil
 }
 
+func (ls *LedgerState) hasAuthoritativeGenesisOverlayState(
+	block ledger.Block,
+	epochCache []models.Epoch,
+) bool {
+	consensus := ls.loadConsensusSnapshot()
+	tip := ls.loadTipSnapshot()
+	if consensus == nil || tip == nil ||
+		consensus.generation != tip.generation {
+		return false
+	}
+	blockEpoch, err := epochForSlotInCache(epochCache, block.SlotNumber())
+	if err != nil {
+		return false
+	}
+	tipEpoch, err := epochForSlotInCache(
+		consensus.epochCache,
+		tip.currentTip.Point.Slot,
+	)
+	if err != nil {
+		return false
+	}
+	paramsEra := blockEpoch.EraId
+	if uint(block.Era().Id) < paramsEra {
+		paramsEra = uint(block.Era().Id)
+	}
+	sameEpoch := blockEpoch.EpochId == tipEpoch.EpochId
+	nextSameEraEpoch := blockEpoch.EpochId == tipEpoch.EpochId+1 &&
+		blockEpoch.EraId == tipEpoch.EraId &&
+		uint(block.Era().Id) == tipEpoch.EraId &&
+		ls.isDirectChildOfAppliedTip(block)
+	return (sameEpoch || nextSameEraEpoch) &&
+		blockEpoch.EpochId >= consensus.currentEpoch.EpochId &&
+		paramsEra == consensus.currentEpoch.EraId &&
+		ls.genesisOverlayProtocolParamsForBlock(block) != nil
+}
+
+func (ls *LedgerState) isDirectChildOfAppliedTip(block ledger.Block) bool {
+	tip := ls.loadTipSnapshot()
+	return tip != nil && tip.currentTip.BlockNumber != ^uint64(0) &&
+		block.BlockNumber() == tip.currentTip.BlockNumber+1 &&
+		bytes.Equal(block.PrevHash().Bytes(), tip.currentTip.Point.Hash)
+}
+
 // genesisOverlayDelegationForBlock resolves the overlay parameters using the
 // era that encoded the block. At a hard-fork boundary, the boundary block can
 // be encoded in the predecessor era while its header announces the successor.
 // In that case the epoch cache already describes the successor era, but the
 // block's leader was selected under the predecessor-era parameters.
+//
+//nolint:unused // retained as a test helper
 func (ls *LedgerState) genesisOverlayDelegationForBlock(
 	block ledger.Block,
 	shelleyGenesis *shelley.ShelleyGenesis,
+) (genesisDelegation, genesisOverlaySlotStatus, error) {
+	return ls.genesisOverlayDelegationForBlockWithEpochCache(
+		block,
+		shelleyGenesis,
+		ls.loadConsensusSnapshot().epochCache,
+	)
+}
+
+func (ls *LedgerState) genesisOverlayDelegationForBlockWithEpochCache(
+	block ledger.Block,
+	shelleyGenesis *shelley.ShelleyGenesis,
+	epochCache []models.Epoch,
 ) (genesisDelegation, genesisOverlaySlotStatus, error) {
 	pparams := ls.genesisOverlayProtocolParamsForBlock(block)
 	if pparams == nil {
@@ -1132,17 +1294,33 @@ func (ls *LedgerState) genesisOverlayDelegationForBlock(
 			block.SlotNumber(),
 		)
 	}
-	return ls.genesisOverlayDelegationForSlotWithParams(
+	return ls.genesisOverlayDelegationForSlotWithParamsAndEpochCache(
 		block.SlotNumber(),
 		shelleyGenesis,
 		pparams,
+		epochCache,
 	)
 }
 
+//nolint:unused // retained as a test helper
 func (ls *LedgerState) genesisOverlayDelegationForSlotWithParams(
 	slot uint64,
 	shelleyGenesis *shelley.ShelleyGenesis,
 	pparams lcommon.ProtocolParameters,
+) (genesisDelegation, genesisOverlaySlotStatus, error) {
+	return ls.genesisOverlayDelegationForSlotWithParamsAndEpochCache(
+		slot,
+		shelleyGenesis,
+		pparams,
+		ls.loadConsensusSnapshot().epochCache,
+	)
+}
+
+func (ls *LedgerState) genesisOverlayDelegationForSlotWithParamsAndEpochCache(
+	slot uint64,
+	shelleyGenesis *shelley.ShelleyGenesis,
+	pparams lcommon.ProtocolParameters,
+	epochCache []models.Epoch,
 ) (genesisDelegation, genesisOverlaySlotStatus, error) {
 	genesisDelegs, err := parseShelleyGenesisDelegations(shelleyGenesis)
 	if err != nil {
@@ -1157,7 +1335,7 @@ func (ls *LedgerState) genesisOverlayDelegationForSlotWithParams(
 		return genesisDelegation{}, genesisOverlayNone, nil
 	}
 
-	epoch, err := ls.epochForSlot(slot)
+	epoch, err := epochForSlotInCache(epochCache, slot)
 	if err != nil {
 		return genesisDelegation{}, genesisOverlayNone, fmt.Errorf(
 			"block header verification rejected at slot %d: "+

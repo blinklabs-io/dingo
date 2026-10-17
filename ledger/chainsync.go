@@ -4506,22 +4506,16 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 	// released. Idempotent per chain. See
 	// chain.Chain.PublishPendingChainUpdates.
 	pending.drainChain(ls.chain)
-	ls.clearFreshCursorRequestedLocked(e.ConnectionId)
-	// Detect connection switch so pipeline ownership is handed off
-	// even when the first post-switch event is a header rather than
-	// a rollback. Without this, headers from a newly-selected active
-	// connection are buffered indefinitely because the pipeline owner
-	// still points to the old (dead) connection.
-	ls.detectConnectionSwitch(pending)
-
 	// Verify header crypto before accepting it into the header queue.
 	// Skip only headers covered by a Mithril snapshot: those slots were
 	// verified by the certificate chain during import, and the restored
 	// database intentionally does not keep every historical epoch nonce.
 	// A missing epoch nonce for any other slot (e.g. Byron->Shelley, where
-	// it may not be fully computed yet) defers verification rather than
-	// skipping it outright.
+	// it may not be fully computed yet) defers producer authorization. The
+	// header may still be queued for block-fetch, whose body path retries
+	// verification before applying it.
 	headerCryptoVerificationGeneration := e.HeaderCryptoVerificationGeneration
+	producerAuthorizationGeneration := e.HeaderCryptoVerificationGeneration
 	headerCryptoVerified := e.BlockHeader != nil &&
 		pointMatches(e.Point, ocommon.NewPoint(
 			e.BlockHeader.SlotNumber(),
@@ -4536,11 +4530,11 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 	if headerValidationRequired && !headerCryptoVerified {
 		var err error
 		headerCryptoVerificationGeneration, err = ls.
-			verifyBlockHeaderOnlyCryptoWithGeneration(e.BlockHeader)
+			ValidateChainSelectionHeaderCryptoWithGeneration(e.BlockHeader)
 		if err != nil {
 			if IsHeaderVerificationDeferred(err) {
 				ls.config.Logger.Debug(
-					"deferring chainsync header crypto verification until blockfetch",
+					"withholding chainsync header until producer authorization can be verified",
 					"component",
 					"ledger",
 					"slot",
@@ -4577,7 +4571,16 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 				)
 			}
 		}
+		producerAuthorizationGeneration = headerCryptoVerificationGeneration
 	}
+	// The strict verification above may defer while the local applied tip is
+	// behind this header. Do not mutate ledger-owned cursor, fork history, or
+	// queue state in that case; the ingress owner will re-intersect after a
+	// later applied-chain update.
+	ls.clearFreshCursorRequestedLocked(e.ConnectionId)
+	// Detect connection switch only after strict producer authorization has
+	// succeeded, so a deferred candidate cannot mutate pipeline ownership.
+	ls.detectConnectionSwitch(pending)
 
 	// A header past the forecast horizon cannot be validated until the
 	// applied ledger advances, so it must not join the queue blockfetch
@@ -4633,6 +4636,9 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 		e.BlockHeader,
 		headerCryptoVerificationGeneration,
 	)
+	producerAuthorized := headerTrusted || (producerAuthorizationGeneration != 0 &&
+		headerCryptoVerified &&
+		producerAuthorizationGeneration == headerCryptoVerificationGeneration)
 	if headerCryptoVerified {
 		headerTrusted = true
 	}
@@ -4690,6 +4696,15 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 				)
 				ls.completeChainsyncHeaderAdmission(e, pending, true)
 				admissionResolved = true
+				return nil
+			}
+			if !producerAuthorized {
+				ls.config.Logger.Debug(
+					"retaining deferred fork header without canonical rollback",
+					"component", "ledger",
+					"slot", e.Point.Slot,
+					"connection_id", e.ConnectionId.String(),
+				)
 				return nil
 			}
 			// Header doesn't fit current chain tip. Clear stale queued
@@ -5335,9 +5350,9 @@ func localForkAnchor(intersectionSlot, tipSlot uint64) (uint64, bool) {
 }
 
 // chainsyncHeaderCryptoPolicy distinguishes headers trusted by Mithril
-// coverage from headers whose crypto check must wait for an epoch nonce.
-// Both skip verification at chainsync time, but only the former may advance
-// shared sync state.
+// coverage from headers whose producer authorization can be checked now.
+// Headers with unavailable epoch state may enter the block-fetch queue, but
+// cannot advance the admitted frontier or cause a competing-fork rollback.
 //
 // Header VRF/KES/OpCert crypto is the check that makes sync trustless in the
 // first place, so unlike per-tx ledger validation
@@ -5345,10 +5360,11 @@ func localForkAnchor(intersectionSlot, tipSlot uint64) (uint64, bool) {
 // re-deriving the UTxO set for blocks the network already delivered, this is
 // not gated on ValidateHistorical/validationEnabled: a coarse
 // historical-sync toggle must not disable this entire group of checks.
-// The only narrower, deliberate exemption is a slot a Mithril
-// certificate already covers -- those slots were authenticated by the
-// certificate chain during import, and the restored database intentionally
-// does not retain every historical epoch nonce needed to re-verify them.
+// Mithril-covered slots are trusted because their certificate chain was
+// verified during import; the restored database intentionally does not
+// retain every historical epoch nonce needed to re-verify them. Other
+// missing nonces defer authorization to block-fetch, which verifies the body
+// before applying it.
 func (ls *LedgerState) chainsyncHeaderCryptoPolicy(
 	slot uint64,
 ) (verifyNow bool, trustedWithoutVerification bool) {
@@ -5356,6 +5372,9 @@ func (ls *LedgerState) chainsyncHeaderCryptoPolicy(
 	if mithrilLedgerSlot != 0 && slot <= mithrilLedgerSlot {
 		return false, true
 	}
+	// Queue admission can safely defer producer authorization to block-fetch,
+	// which verifies the body before application. Chain selection has a
+	// separate strict gate and must not treat a deferred header as eligible.
 	if !ls.hasCachedEpochNonceForSlot(slot) {
 		return false, false
 	}
@@ -5414,14 +5433,6 @@ func (ls *LedgerState) headerCryptoVerificationGenerationCurrent(
 		consensus != nil && tip != nil &&
 		consensus.generation == generation &&
 		tip.generation == generation
-}
-
-func (ls *LedgerState) verifyBlockHeaderOnlyCryptoWithGeneration(
-	header gledger.BlockHeader,
-) (uint64, error) {
-	return ls.withStableHeaderVerificationContext(func() error {
-		return ls.verifyBlockHeaderOnlyCrypto(header)
-	})
 }
 
 func (ls *LedgerState) addChainsyncHeader(
