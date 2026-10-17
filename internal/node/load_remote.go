@@ -830,6 +830,13 @@ func fetchRemoteChunkWithClient(
 	); err != nil {
 		return err
 	}
+	immDB, err := immutable.New(dir)
+	if err != nil {
+		return fmt.Errorf("opening remote chunk %s: %w", name, err)
+	}
+	if err := immDB.ValidateChunkBlockSpans(name); err != nil {
+		return fmt.Errorf("remote chunk %s block offsets: %w", name, err)
+	}
 	return nil
 }
 
