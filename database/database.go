@@ -452,6 +452,20 @@ func (d *Database) init(ctx context.Context) error {
 	if err := d.CheckNodeSettings(ctx); err != nil {
 		return err
 	}
+	if d.config.StorageMode == types.StorageModeAPI {
+		rebuilder, ok := d.metadata.(metadata.AddressTransactionIndexRebuilder)
+		if !ok {
+			return errors.New(
+				"API metadata store cannot rebuild typed address transaction history",
+			)
+		}
+		if err := rebuilder.RebuildAddressTransactionIndex(
+			ctx,
+			d.rebuildAddressTransaction,
+		); err != nil {
+			return fmt.Errorf("rebuild typed address transaction history: %w", err)
+		}
+	}
 	if err := d.backfillUtxoAddresses(ctx); err != nil {
 		return fmt.Errorf("backfill UTxO addresses: %w", err)
 	}

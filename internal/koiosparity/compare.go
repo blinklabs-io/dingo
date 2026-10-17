@@ -125,6 +125,15 @@ const (
 	// false and any remaining divergence reports as a genuine
 	// value_mismatch again.
 	CategoryCostModelSynthetic = "cost_model_synthetic"
+	// CategoryRewardTypeUnmodeled marks a Koios /account_reward_history row
+	// whose type is neither compared (member, leader, proposal_refund) nor
+	// deliberately out of scope: a type Koios added that this comparer has
+	// no model for. No Dingo read happened and no Dingo value was compared,
+	// so it is not a Dingo/Koios disagreement, but the account's rewards were
+	// only partly validated. It is therefore ERROR rather than informational:
+	// an unrecognized reward mechanism must never let an account check pass,
+	// and a strict node stops on it (it is not reference_lag).
+	CategoryRewardTypeUnmodeled = "reward_type_unmodeled"
 )
 
 // AllCategories is every mismatch category above, in one place.
@@ -153,6 +162,7 @@ var AllCategories = []string{
 	CategoryAcctNewlyRegistered,
 	CategoryAcctDeregistered,
 	CategoryCostModelSynthetic,
+	CategoryRewardTypeUnmodeled,
 }
 
 // Epoch check status values.
@@ -1090,6 +1100,29 @@ func ComparePoolEpoch(
 	return out
 }
 
+// rewardTypeLeader is the operator's reward row; rewardTypeMember is declared
+// beside DingoDB.
+//
+// rewardTypeProposalRefund is the Koios /account_reward_history type for a
+// governance proposal deposit returned to its return account. It is also the
+// reward_type the Dingo-side refund rows are reported under, so one spelling
+// keys both sides.
+const (
+	rewardTypeLeader         = "leader"
+	rewardTypeProposalRefund = "proposal_refund"
+)
+
+// rewardTypeSumsRepeatedRows reports whether several rows with the same
+// (stake_address, reward_type, pool) are distinct events that add up rather
+// than a repeated row. A governance deposit refund is one event per proposal,
+// and two proposals sharing a deposit amount and a return account in one
+// epoch are two identical-looking rows on both sides (Preview publishes them
+// that way). Member and leader rewards are one row per pool per account, so
+// a repeat there is a data-integrity problem.
+func rewardTypeSumsRepeatedRows(rewardType string) bool {
+	return rewardType == rewardTypeProposalRefund
+}
+
 // koiosAccountRewardTypesOutOfScope lists Koios /account_reward_history
 // "type" enum values that Dingo's reward_account_output does not currently
 // produce (MIR/refund distribution mechanisms — treasury/reserves MIR
@@ -1203,6 +1236,12 @@ type accountRewardPoolAmount struct {
 // the same guard. It is a required parameter rather than
 // a variadic option so a caller cannot silently omit it and get the strict
 // answer for an epoch that has not been computed.
+//
+// refundsPending is the same guard for proposal_refund rows alone, taken from
+// ProposalDepositRefunds.Pending. Refunds for this earned epoch are journaled
+// when the next epoch begins, a full epoch before rewardsPending clears, so
+// holding them to rewardsPending would report a missing or wrong refund as
+// lag for that whole epoch.
 func CompareAccountEpoch(
 	network string,
 	epoch uint64,
@@ -1212,6 +1251,7 @@ func CompareAccountEpoch(
 	graceHours int,
 	epochEndTime time.Time,
 	rewardsPending bool,
+	refundsPending bool,
 ) []CheckMismatch {
 	koiosByKey, koiosMismatches := aggregateKoiosAccountRewards(
 		network,
@@ -1263,6 +1303,10 @@ func CompareAccountEpoch(
 	for _, k := range allKeys {
 		kr, koiosOK := koiosByKey[k]
 		dr, dingoOK := dingoByKey[k]
+		pending := rewardsPending
+		if k.rtype == rewardTypeProposalRefund {
+			pending = refundsPending
+		}
 		switch {
 		case koiosOK && !dingoOK:
 			// The chain-position form of the same question the grace window
@@ -1277,7 +1321,7 @@ func CompareAccountEpoch(
 				// case: a zero row is not a value the other side can publish
 				// later, so waiting cannot change the answer.
 				cat = CategoryAcctZeroRewardRow
-			case rewardsPending:
+			case pending:
 				cat = CategoryReferenceLag
 			case graceHours > 0 && !epochEndTime.IsZero() &&
 				now.Sub(epochEndTime) < time.Duration(graceHours)*time.Hour:
@@ -1309,7 +1353,7 @@ func CompareAccountEpoch(
 			case isZeroRewardAmount(dr.Amount):
 				// Symmetric with the koiosOK && !dingoOK case above.
 				cat = CategoryAcctZeroRewardRow
-			case rewardsPending:
+			case pending:
 				// Also symmetric: before the boundary a reward computed
 				// for a credential that deregisters in the meantime is
 				// still marked spendable, so Dingo holds a row Koios will
@@ -1343,7 +1387,7 @@ func CompareAccountEpoch(
 			// presence check is not would report the same epoch as both a
 			// lag and a mismatch.
 			cat := CategoryValueMismatch
-			if rewardsPending {
+			if pending {
 				cat = CategoryReferenceLag
 			}
 			switch {
@@ -1618,11 +1662,14 @@ func formatAccountRewardPools(
 // (stake_address, reward_type, pool) row still is one, and is reported as
 // CategoryAcctDuplicate without contributing to the total.
 //
-// A reward type that is neither in scope nor deliberately out of scope, and a
-// pool identifier that does not decode, are reported as CategoryDBError
-// instead of being folded: either would otherwise surface as an acct_only_* or
-// a value_mismatch, both of which read as a Dingo defect rather than as
-// reference data this code cannot interpret.
+// A reward type that is neither modeled nor deliberately out of scope is
+// reported as CategoryRewardTypeUnmodeled, and a pool identifier that does not
+// decode as CategoryDBError, instead of being folded: either would otherwise
+// surface as an acct_only_* or a value_mismatch, both of which read as a Dingo
+// defect rather than as reference data this code cannot interpret.
+//
+// Repeated proposal_refund rows are summed rather than reported as
+// duplicates; see rewardTypeSumsRepeatedRows.
 func aggregateKoiosAccountRewards(
 	network string,
 	epoch uint64,
@@ -1637,14 +1684,16 @@ func aggregateKoiosAccountRewards(
 		if koiosAccountRewardTypesOutOfScope[row.RewardType] {
 			continue
 		}
-		if row.RewardType != "member" && row.RewardType != "leader" {
+		switch row.RewardType {
+		case rewardTypeMember, rewardTypeLeader, rewardTypeProposalRefund:
+		default:
 			out = append(out, side.mismatch(
 				network,
 				epoch,
 				row.StakeAddress,
 				"account_reward_type",
 				row.RewardType,
-				CategoryDBError,
+				CategoryRewardTypeUnmodeled,
 				now,
 			))
 			continue
@@ -1665,7 +1714,7 @@ func aggregateKoiosAccountRewards(
 		key := accountRewardKey{row.StakeAddress, row.RewardType}
 		source := accountRewardSourceKey{key, poolID}
 		seen[source]++
-		if seen[source] > 1 {
+		if seen[source] > 1 && !rewardTypeSumsRepeatedRows(row.RewardType) {
 			out = append(out, side.mismatch(
 				network,
 				epoch,
@@ -1731,7 +1780,7 @@ func aggregateDingoAccountRewards(
 		key := accountRewardKey{row.StakeAddress, row.RewardType}
 		source := accountRewardSourceKey{key, poolID}
 		seen[source]++
-		if seen[source] > 1 {
+		if seen[source] > 1 && !rewardTypeSumsRepeatedRows(row.RewardType) {
 			out = append(out, side.mismatch(
 				network,
 				epoch,
@@ -1874,7 +1923,8 @@ func severityOf(category string) mismatchSeverity {
 	case CategoryDBError,
 		CategoryDBMissing,
 		CategoryReferenceLag,
-		CategoryAcctCoverageIncomplete:
+		CategoryAcctCoverageIncomplete,
+		CategoryRewardTypeUnmodeled:
 		return severityError
 	case CategoryAcctZeroReward,
 		CategoryAcctZeroRewardRow,
@@ -1931,9 +1981,10 @@ func CountSignificant(mismatches []CheckMismatch) int {
 // entry and every significant entry is reference_lag. That is the one
 // non-pass result a strict-mode observer does not treat as fatal: Koios's
 // data for the epoch is not yet complete, which is not evidence that Dingo
-// is wrong. dingo_db_missing, dingo_db_error and acct_coverage_incomplete
-// share reference_lag's ERROR severity but are not covered here, so a row
-// Dingo never wrote past the grace window still stops a strict node.
+// is wrong. dingo_db_missing, dingo_db_error, acct_coverage_incomplete and
+// reward_type_unmodeled share reference_lag's ERROR severity but are not
+// covered here, so a row Dingo never wrote past the grace window, or a reward
+// type nothing validated, still stops a strict node.
 func referenceLagOnly(mismatches []CheckMismatch) bool {
 	lag := false
 	for _, m := range mismatches {
@@ -1974,7 +2025,9 @@ func isZeroRewardAmount(amount string) bool {
 //     reference_lag (Koios data may be incomplete for a recent epoch), or
 //     acct_coverage_incomplete (the Koios account-reward fetch for this
 //     epoch never completed across every chunk, so there is no complete
-//     reference set to compare against yet).
+//     reference set to compare against yet), or reward_type_unmodeled (a
+//     Koios reward type with no model here, so the account was not fully
+//     validated).
 //   - PASS: no mismatches.
 func DetermineStatus(mismatches []CheckMismatch) string {
 	hasError := false

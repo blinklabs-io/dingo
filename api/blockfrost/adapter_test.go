@@ -1400,8 +1400,9 @@ func TestAddressTransactionsApplyResolvedBoundsToCountAndPage(t *testing.T) {
 		storePointerOutputCbor(t, db, block.txHash, 0, addr, 1_000_000)
 		_, err := raw.Exec(`
 INSERT INTO address_transaction (
-    payment_key, staking_key, credential_tag, transaction_id, slot, tx_index
-) VALUES (?, NULL, 0, ?, ?, 0)`, payment, tx.ID, block.slot)
+    payment_key, payment_script, staking_key, credential_tag,
+    transaction_id, slot, tx_index
+) VALUES (?, FALSE, NULL, 0, ?, ?, 0)`, payment, tx.ID, block.slot)
 		require.NoError(t, err)
 		if i == len(blocks)-1 {
 			require.NoError(t, db.SetTip(

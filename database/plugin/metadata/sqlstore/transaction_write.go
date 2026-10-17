@@ -1740,6 +1740,11 @@ func (s *Store) persistUtxoRelations(
 	if err := persistUtxoPointer(ctx, db, int64(id), utxo.Pointer); err != nil {
 		return err
 	}
+	if err := s.persistUtxoReferenceScript(
+		ctx, db, id, utxo.ReferenceScriptHash,
+	); err != nil {
+		return err
+	}
 	for i := range utxo.Assets {
 		asset := &utxo.Assets[i]
 		asset.UtxoID = id
@@ -1787,6 +1792,11 @@ func (s *Store) persistUtxoRelationsWithDeferredAssets(
 		}
 	}
 	if err := persistUtxoPointer(ctx, db, int64(id), utxo.Pointer); err != nil {
+		return err
+	}
+	if err := s.persistUtxoReferenceScript(
+		ctx, db, id, utxo.ReferenceScriptHash,
+	); err != nil {
 		return err
 	}
 	for i := range utxo.Assets {

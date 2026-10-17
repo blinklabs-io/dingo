@@ -30,7 +30,6 @@ import (
 	"connectrpc.com/connect"
 	"connectrpc.com/grpchealth"
 	"connectrpc.com/grpcreflect"
-	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/internal/apiconfig"
 	"github.com/blinklabs-io/dingo/internal/apilistener"
 	"github.com/blinklabs-io/dingo/internal/httpcors"
@@ -49,7 +48,7 @@ import (
 // unbounded request arrays.
 const (
 	DefaultMaxBlockRefs    = 100
-	DefaultMaxUtxoKeys     = database.DefaultPublicUtxoResultLimit
+	DefaultMaxUtxoKeys     = 1000
 	DefaultMaxHistoryItems = 10000
 	// DefaultHistoryPageItems is the DumpHistory page size when the request
 	// omits max_items; it stays well below DefaultMaxHistoryItems so an
@@ -622,13 +621,17 @@ func (u *Utxorpc) gracefulShutdown(
 // deadline) elapsed or because the caller's ctx was cancelled early -- then
 // drains shutdownErr so the Shutdown goroutine started above never leaks.
 func forceCloseUtxorpc(server *http.Server, shutdownErr <-chan error) error {
-	if err := server.Close(); err != nil {
+	closeErr := server.Close()
+	shutdownResult := <-shutdownErr
+	if closeErr != nil {
 		return fmt.Errorf(
-			"force-close after graceful shutdown failed: %w", err,
+			"force-close after graceful shutdown failed: %w", closeErr,
 		)
 	}
-	if err := <-shutdownErr; err != nil {
-		return fmt.Errorf("graceful shutdown after forced close: %w", err)
+	if shutdownResult != nil {
+		return fmt.Errorf(
+			"graceful shutdown after force-close failed: %w", shutdownResult,
+		)
 	}
 	return nil
 }

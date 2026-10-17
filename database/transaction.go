@@ -1756,10 +1756,12 @@ func (d *Database) CountTransactionsByAddressKeys(
 
 // CountTransactionsByPaymentCred returns the total number of transactions
 // involving a payment credential across every address that carries it,
-// regardless of staking part.
+// regardless of staking part. paymentScript selects a script credential
+// rather than a key credential sharing the hash.
 func (d *Database) CountTransactionsByPaymentCred(
 	ctx context.Context,
 	paymentKey []byte,
+	paymentScript bool,
 	txn *Txn,
 ) (int, error) {
 	if txn == nil {
@@ -1768,6 +1770,7 @@ func (d *Database) CountTransactionsByPaymentCred(
 	}
 	count, err := d.transactionStore().CountTransactionsByPaymentCred(
 		paymentKey,
+		paymentScript,
 		txn.Metadata(),
 	)
 	if err != nil {

@@ -472,9 +472,11 @@ INSERT INTO utxo (
 	require.NoError(t, err)
 	_, err = raw.Exec(`
 INSERT INTO address_transaction (
-    payment_key, staking_key, credential_tag, transaction_id, slot, tx_index
-) VALUES (?, ?, ?, ?, ?, 0)`,
+    payment_key, payment_script, staking_key, credential_tag,
+    transaction_id, slot, tx_index
+) VALUES (?, ?, ?, ?, ?, ?, 0)`,
 		row.PaymentKey,
+		row.PaymentScript,
 		row.StakingKey,
 		row.CredentialTag,
 		txID,

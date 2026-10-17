@@ -249,19 +249,7 @@ func (b *Blockfrost) handleLatestEpoch(
 		)
 		return
 	}
-	activeStake := "0"
-	writeJSON(w, http.StatusOK, EpochResponse{
-		Epoch:          info.Epoch,
-		StartTime:      info.StartTime,
-		EndTime:        info.EndTime,
-		FirstBlockTime: info.FirstBlockTime,
-		LastBlockTime:  info.LastBlockTime,
-		BlockCount:     info.BlockCount,
-		TxCount:        info.TxCount,
-		Output:         "0",
-		Fees:           "0",
-		ActiveStake:    &activeStake,
-	})
+	writeJSON(w, http.StatusOK, epochResponse(info))
 }
 
 // handleLatestEpochParams handles
