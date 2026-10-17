@@ -15,8 +15,11 @@
 package main
 
 import (
+	"fmt"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -57,17 +60,8 @@ func TestTxPayloadSizeHandlesCBORHeaderBoundaries(t *testing.T) {
 }
 
 func TestValidateConfigRejectsUnrepresentableTransactionSize(t *testing.T) {
-	config := benchConfig{
-		prePopulatedEbs: 1,
-		txsPerEb:        1,
-		txSizeBytes:     259,
-		fetchClients:    1,
-		ebsPerClient:    1,
-		fetchServers:    1,
-		chainSelReads:   1,
-		gcTicks:         0,
-		runs:            1,
-	}
+	config := validTestConfig()
+	config.txSizeBytes = 259
 	if err := validateConfig(config); err == nil || !strings.Contains(err.Error(), "cannot be encoded") {
 		t.Fatalf("validateConfig(%d-byte transaction) error = %v, want CBOR size error", config.txSizeBytes, err)
 	}
@@ -109,5 +103,64 @@ func TestGenManifestReferencesSerializedTransactions(t *testing.T) {
 		} else if bytesRead != len(tx) || len(items) != 1 {
 			t.Errorf("transaction %d decoded %d bytes and %d items; want %d bytes and one item", i, bytesRead, len(items), len(tx))
 		}
+	}
+}
+
+func validTestConfig() benchConfig {
+	return benchConfig{
+		volatileEbs:     1,
+		txsPerEb:        1,
+		txSizeBytes:     350,
+		requestBytes:    500_000,
+		jobBytes:        65_536,
+		upstreamPeers:   1,
+		downstreamPeers: 1,
+		samples:         1,
+		gcEvery:         1,
+		burstSize:       1,
+		burstInterval:   time.Second,
+	}
+}
+
+func TestRequestsCoverEveryOffsetOnceInSeedOrder(t *testing.T) {
+	config := validTestConfig()
+	config.txsPerEb = 2857
+	// 187 txs per job and 7 jobs per request give 1309 txs per request.
+	want := []txRange{{0, 1309}, {1309, 2618}, {2618, 2857}}
+	for seed := range 8 {
+		got := requests(seed, 7, config)
+		if len(got) != len(want) {
+			t.Fatalf("seed %d: %d requests, want %d", seed, len(got), len(want))
+		}
+		sorted := slices.Clone(got)
+		slices.SortFunc(sorted, func(a, b txRange) int { return a.start - b.start })
+		if !slices.Equal(sorted, want) {
+			t.Fatalf("seed %d: requests %v do not cover the offsets as %v", seed, got, want)
+		}
+	}
+	orders := map[string]bool{}
+	for seed := range 16 {
+		orders[fmt.Sprint(requests(seed, 7, config))] = true
+	}
+	if len(orders) < 2 {
+		t.Fatal("every seed produced the same request order")
+	}
+}
+
+func TestValidateConfigRejectsNonPositiveCounts(t *testing.T) {
+	for name, mutate := range map[string]func(*benchConfig){
+		"samples":    func(c *benchConfig) { c.samples = 0 },
+		"downstream": func(c *benchConfig) { c.downstreamPeers = 0 },
+		"gc":         func(c *benchConfig) { c.gcEvery = 0 },
+		"interval":   func(c *benchConfig) { c.burstInterval = 0 },
+	} {
+		config := validTestConfig()
+		mutate(&config)
+		if err := validateConfig(config); err == nil {
+			t.Errorf("%s: validateConfig accepted %+v", name, config)
+		}
+	}
+	if err := validateConfig(validTestConfig()); err != nil {
+		t.Fatalf("validateConfig(valid) = %v", err)
 	}
 }

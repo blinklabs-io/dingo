@@ -12,20 +12,39 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Command leios-db-bench runs the Dingo workload corresponding to the
-// ouroboros-consensus leios-db-bench entrypoint.
+// Command leios-db-bench measures the latency of Dingo's LeiosDB storage
+// steps, mirroring the ouroboros-consensus LeiosDB-bench latency benchmark.
+//
+// Every measured endorser block (EB) goes through:
+//
+//   - Fetch: its Tx chunks arrive from the upstream peers and the complete EB is
+//     committed with one SetLeiosEB call, as the EB persistence writer does.
+//   - Vote read: once fetched, one transaction-closure read.
+//   - Serve: once fetched, every downstream peer reads the manifest, then the
+//     transactions request by request, each request reloading the stored
+//     transaction list as the historical serving path does.
+//   - Apply read: once served, one transaction-closure read.
+//
+// The measured EBs go one at a time. Optional background bursts of EBs are
+// fetched, voted on and served concurrently and push the measured latencies
+// where they overlap. Pruning keeps the stored EB window at -volatile-ebs.
 package main
 
 import (
+	"cmp"
 	"context"
 	"encoding/binary"
 	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
+	"math"
 	"os"
 	"path/filepath"
+	"runtime"
+	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/blinklabs-io/dingo/config/cardano"
@@ -39,27 +58,80 @@ import (
 const maxLeiosTxSizeBytes = 1<<16 - 1
 
 type benchConfig struct {
-	prePopulatedEbs int
+	volatileEbs     int
 	txsPerEb        int
 	txSizeBytes     int
-	fetchClients    int
-	ebsPerClient    int
-	fetchServers    int
-	chainSelReads   int
-	gcTicks         int
-	runs            int
+	requestBytes    int
+	jobBytes        int
+	upstreamPeers   int
+	downstreamPeers int
+	samples         int
+	gcEvery         int
+	burst           bool
+	burstSize       int
+	burstInterval   time.Duration
 }
 
-type benchPoint struct {
-	slot uint64
-	hash []byte
+type metric int
+
+const (
+	metricFetch metric = iota
+	metricFetchChunks
+	metricFetchCommit
+	metricServe
+	metricServeBody
+	metricServeTxs
+	metricVoteRead
+	metricApplyRead
+	metricCount
+)
+
+var metricLabels = [metricCount]string{
+	"Fetch", "  Chunks", "  Commit", "Serve", "  Body", "  Txs request",
+	"Vote read", "Apply read",
 }
 
-type benchEnv struct {
-	db        *database.Database
-	points    []benchPoint
-	nextEbIdx int
-	config    benchConfig
+// benchEb is one EB generated ahead of its fetch. Its slot is assigned when it
+// is fetched, in fetch order.
+type benchEb struct {
+	idx      int
+	hash     []byte
+	manifest []byte
+	txs      []cbor.RawMessage
+	measured bool
+}
+
+type txRange struct{ start, end int }
+
+type recorder struct {
+	mu      sync.Mutex
+	samples [metricCount][]time.Duration
+	missing int
+	err     error
+}
+
+func (r *recorder) record(m metric, d time.Duration) {
+	r.mu.Lock()
+	r.samples[m] = append(r.samples[m], d)
+	r.mu.Unlock()
+}
+
+func (r *recorder) fail(err error) {
+	r.mu.Lock()
+	r.err = errors.Join(r.err, err)
+	r.mu.Unlock()
+}
+
+func (r *recorder) miss() {
+	r.mu.Lock()
+	r.missing++
+	r.mu.Unlock()
+}
+
+func (r *recorder) failed() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.err != nil
 }
 
 func main() {
@@ -74,7 +146,6 @@ func run() (runErr error) {
 	if err := validateConfig(config); err != nil {
 		return err
 	}
-	printBenchInfo(config)
 
 	tmpDir, err := os.MkdirTemp("", "dingo-leios-db-bench-")
 	if err != nil {
@@ -86,10 +157,11 @@ func run() (runErr error) {
 				fmt.Errorf("remove benchmark directory: %w", err))
 		}
 	}()
+	printBenchInfo(config, tmpDir)
 
 	dbDir := filepath.Join(tmpDir, "db")
 	logger := slog.New(slog.DiscardHandler)
-	runtime, err := plugins.OpenDatabase(
+	rt, err := plugins.OpenDatabase(
 		context.Background(),
 		&database.Config{
 			DataDir:        dbDir,
@@ -116,60 +188,62 @@ func run() (runErr error) {
 		return fmt.Errorf("open Dingo database: %w", err)
 	}
 	defer func() {
-		if err := runtime.Close(context.Background()); err != nil {
+		if err := rt.Close(context.Background()); err != nil {
 			runErr = errors.Join(runErr,
 				fmt.Errorf("close Dingo database: %w", err))
 		}
 	}()
-	if err := runtime.RecoveryError(); err != nil {
+	if err := rt.RecoveryError(); err != nil {
 		return fmt.Errorf("open Dingo database recovery state: %w", err)
 	}
 
-	env := &benchEnv{
-		db:     runtime.Database,
-		points: make([]benchPoint, 0, config.prePopulatedEbs),
-		config: config,
-	}
-	if err := setupBenchEnv(env); err != nil {
+	if err := populate(rt.Database, config); err != nil {
 		return err
 	}
-	return runBench(env)
+	return runBench(rt.Database, config)
 }
 
 func parseConfig() benchConfig {
 	config := benchConfig{}
-	flag.IntVar(&config.prePopulatedEbs, "pre-populated-ebs", 500,
-		"number of complete EBs inserted before timing")
-	flag.IntVar(&config.txsPerEb, "txs-per-eb", 200,
+	flag.IntVar(&config.volatileEbs, "volatile-ebs", 1000,
+		"EBs stored before timing and kept stored by pruning")
+	flag.IntVar(&config.txsPerEb, "txs-per-eb", 2857,
 		"number of transactions in each EB")
-	flag.IntVar(&config.txSizeBytes, "tx-size-bytes", 16_384,
+	flag.IntVar(&config.txSizeBytes, "tx-size-bytes", 350,
 		"serialized transaction item size in bytes")
-	flag.IntVar(&config.fetchClients, "fetch-clients", 3,
-		"number of concurrent EB writers")
-	flag.IntVar(&config.ebsPerClient, "ebs-per-client", 20,
-		"new EBs written by each fetch client per iteration")
-	flag.IntVar(&config.fetchServers, "fetch-servers", 3,
-		"number of concurrent fetch readers")
-	flag.IntVar(&config.chainSelReads, "chain-sel-reads", 50,
-		"closure reads per iteration")
-	flag.IntVar(&config.gcTicks, "gc-ticks", 3,
-		"GC ticker calls per iteration")
-	flag.IntVar(&config.runs, "runs", 5,
-		"timed workload repetitions after the warmup")
+	flag.IntVar(&config.requestBytes, "request-bytes", 500_000,
+		"upper bound on the transaction bytes of one request")
+	flag.IntVar(&config.jobBytes, "job-bytes", 65_536,
+		"transaction bytes per job, the unit a request is made of")
+	flag.IntVar(&config.upstreamPeers, "upstream-peers", 20,
+		"peers the transaction chunks of every EB are fetched from")
+	flag.IntVar(&config.downstreamPeers, "downstream-peers", 100,
+		"peers each reading every EB once it is complete")
+	flag.IntVar(&config.samples, "samples", 100,
+		"measured EBs, processed one at a time")
+	flag.IntVar(&config.gcEvery, "gc-every", 10,
+		"prune beyond the volatile window every this many fetched EBs")
+	flag.BoolVar(&config.burst, "burst", false,
+		"fetch and serve bursts of background EBs while measuring")
+	flag.IntVar(&config.burstSize, "burst-size", 10,
+		"background EBs started at once per burst")
+	flag.DurationVar(&config.burstInterval, "burst-interval", 5*time.Second,
+		"time between background bursts")
 	flag.Parse()
 	return config
 }
 
 func validateConfig(config benchConfig) error {
-	if config.prePopulatedEbs < 1 || config.txsPerEb < 1 ||
+	if config.volatileEbs < 1 || config.txsPerEb < 1 ||
 		config.txSizeBytes < 32 || config.txSizeBytes > maxLeiosTxSizeBytes ||
-		config.fetchClients < 1 ||
-		config.ebsPerClient < 1 || config.fetchServers < 1 ||
-		config.chainSelReads < 1 || config.gcTicks < 0 || config.runs < 1 {
+		config.requestBytes < 1 || config.jobBytes < 1 ||
+		config.upstreamPeers < 1 || config.downstreamPeers < 1 ||
+		config.samples < 1 || config.gcEvery < 1 ||
+		config.burstSize < 1 || config.burstInterval <= 0 {
 		return errors.New(
-			"invalid benchmark configuration: counts must be positive, " +
-				"GC ticks may be zero, and transaction sizes must be " +
-				"between 32 and 65535 bytes",
+			"invalid benchmark configuration: counts and durations must be " +
+				"positive and transaction sizes must be between 32 and " +
+				"65535 bytes",
 		)
 	}
 	if _, err := txPayloadSize(config.txSizeBytes); err != nil {
@@ -178,197 +252,430 @@ func validateConfig(config benchConfig) error {
 	return nil
 }
 
-func printBenchInfo(config benchConfig) {
-	fmt.Println("Dingo LeiosDB concurrent benchmark")
+func printBenchInfo(config benchConfig, dir string) {
+	background := "None (-burst to turn on)"
+	if config.burst {
+		background = fmt.Sprintf(
+			"%d EBs every %s (%s)",
+			config.burstSize,
+			config.burstInterval,
+			showBytes(config.burstSize*config.txsPerEb*config.txSizeBytes),
+		)
+	}
+	fmt.Println("Dingo LeiosDB latency benchmark")
 	fmt.Println()
-	fmt.Println("Database setup:")
-	fmt.Printf("  EBs pre-populated : %d\n", config.prePopulatedEbs)
-	fmt.Printf("  TXs per EB        : %d\n", config.txsPerEb)
-	fmt.Printf("  Total TXs         : %d\n", config.prePopulatedEbs*config.txsPerEb)
-	fmt.Printf("  TX bytes per item : %d\n", config.txSizeBytes)
-	fmt.Println("  Blob backend      : Badger (core defaults)")
+	fmt.Printf("  Database          : %d volatile EBs (Badger blob store, core defaults)\n", config.volatileEbs)
+	fmt.Printf("  EB                : %d Txs of %s (closure %s)\n",
+		config.txsPerEb, showBytes(config.txSizeBytes),
+		showBytes(config.txsPerEb*config.txSizeBytes))
+	fmt.Printf("  Requests          : %s of %d KiB jobs\n",
+		showBytes(config.requestBytes), config.jobBytes/1024)
+	fmt.Printf("  Schedule          : %d EBs, one at a time\n", config.samples)
+	fmt.Printf("  Fetch             : from %d upstream peers\n", config.upstreamPeers)
+	fmt.Printf("  Serve             : to %d downstream peers\n", config.downstreamPeers)
+	fmt.Printf("  Background load   : %s\n", background)
+	fmt.Printf("  Runtime           : GOMAXPROCS=%d\n", runtime.GOMAXPROCS(0))
 	fmt.Println()
-	fmt.Println("Concurrent workload per iteration:")
-	fmt.Printf("  Fetch clients   (×%d): %d SetLeiosEB calls each\n",
-		config.fetchClients, config.ebsPerClient)
-	fmt.Printf("  Fetch servers   (×%d): 30 manifest reads + 10 transaction batches each\n",
-		config.fetchServers)
-	fmt.Printf("  Chain-sel reader(×1): %d transaction-closure reads\n",
-		config.chainSelReads)
-	fmt.Printf("  GC ticker       (×1): %d no-op calls\n", config.gcTicks)
-	fmt.Println()
-	fmt.Printf("Runs: 1 warmup + %d timed\n", config.runs)
+	fmt.Printf("Database in %s (TMPDIR to change)\n", dir)
 	fmt.Println()
 	fmt.Println("Comparison notes:")
-	fmt.Println("  Haskell uses SQLite; Dingo stores Leios EB data in its Badger blob store.")
-	fmt.Println("  Dingo's SQLite metadata store is not touched by these Leios operations.")
-	fmt.Println("  Dingo reads the stored transaction list before selecting batch offsets.")
-	fmt.Println("  Dingo manifest refs bind each CBOR body's Blake2b-256 hash and serialized size.")
-	fmt.Println("  The reference fixture uses synthetic hashes and 200-byte manifest sizes.")
-	fmt.Println("  GC ticks match the reference's current no-op call; Badger's periodic GC remains enabled.")
+	fmt.Println("  Haskell writes each Tx chunk to SQLite as it arrives; Dingo assembles the")
+	fmt.Println("  chunks in memory and commits the EB once with SetLeiosEB.")
+	fmt.Println("  Every Dingo Txs request reloads the stored transaction list, then slices it.")
+	fmt.Println("  Dingo serves from memory when the EB is cached; this measures the database path.")
 	fmt.Println()
 }
 
-func setupBenchEnv(env *benchEnv) error {
-	config := env.config
-	fmt.Printf("Inserting EBs: ")
-	for i := range config.prePopulatedEbs {
-		point, err := insertOneEb(env.db, i, config)
+func populate(db *database.Database, config benchConfig) error {
+	fmt.Print("Inserting EBs: ")
+	step := max(config.volatileEbs/10, 1)
+	for i := range config.volatileEbs {
+		eb, err := genBenchEb(i, config, false)
 		if err != nil {
+			return fmt.Errorf("generate EB %d: %w", i, err)
+		}
+		slot, err := nonNegativeUint64(i)
+		if err != nil {
+			return err
+		}
+		if err := db.SetLeiosEB(slot, eb.hash, eb.manifest, eb.txs); err != nil {
 			return fmt.Errorf("prepopulate EB %d: %w", i, err)
 		}
-		env.points = append(env.points, point)
-		step := max(config.prePopulatedEbs/10, 1)
-		if (i+1)%step == 0 || i+1 == config.prePopulatedEbs {
+		if (i+1)%step == 0 {
 			fmt.Printf("%d ", i+1)
 		}
 	}
-	env.nextEbIdx = config.prePopulatedEbs
 	fmt.Println("done")
 	return nil
 }
 
-func runBench(env *benchEnv) error {
-	config := env.config
-	if err := benchConcurrentAll(env); err != nil {
-		return fmt.Errorf("warmup workload: %w", err)
-	}
-	times := make([]time.Duration, config.runs)
-	for i := range config.runs {
-		started := time.Now()
-		if err := benchConcurrentAll(env); err != nil {
-			return fmt.Errorf("timed workload %d: %w", i+1, err)
-		}
-		times[i] = time.Since(started)
-		fmt.Printf("  run %d/%d: %s\n", i+1, config.runs, showTime(times[i]))
-	}
-	var total time.Duration
-	minimum := times[0]
-	maximum := times[0]
-	for _, elapsed := range times {
-		total += elapsed
-		minimum = min(minimum, elapsed)
-		maximum = max(maximum, elapsed)
-	}
-	average := total / time.Duration(len(times))
-	fmt.Printf("  => min=%s  avg=%s  max=%s\n",
-		showTime(minimum), showTime(average), showTime(maximum))
-	return nil
+type peerItem struct {
+	eb        *benchEb
+	slot      uint64
+	completed time.Time
+	onDone    func()
 }
 
-func benchConcurrentAll(env *benchEnv) error {
-	config := env.config
-	startIdx := env.nextEbIdx
-	env.nextEbIdx += config.fetchClients * config.ebsPerClient
+type chunkJob struct {
+	eb       *benchEb
+	assembly []cbor.RawMessage
+	rng      txRange
+	done     chan<- struct{}
+}
 
-	workerCount := config.fetchClients + config.fetchServers + 2
-	errCh := make(chan error, workerCount)
-	var wg sync.WaitGroup
-	start := func(work func() error) {
-		wg.Go(func() {
-			errCh <- work()
-		})
-	}
-
-	start(func() error { return chainSelReader(env) })
-	start(func() error { return gcTicker(config.gcTicks) })
-	for client := range config.fetchClients {
-		first := startIdx + client*config.ebsPerClient
-		start(func() error {
-			return fetchClient(env, first, config.ebsPerClient)
-		})
-	}
-	for server := range config.fetchServers {
-		start(func() error { return fetchServer(env, server) })
-	}
-	wg.Wait()
-	close(errCh)
-	for err := range errCh {
+func runBench(db *database.Database, config benchConfig) error {
+	rec := &recorder{}
+	fmt.Print("Generating EBs: ")
+	signal := make([]*benchEb, config.samples)
+	for i := range signal {
+		eb, err := genBenchEb(signalIdx+i, config, true)
 		if err != nil {
-			return err
+			return fmt.Errorf("generate EB %d: %w", signalIdx+i, err)
 		}
+		signal[i] = eb
 	}
-	return nil
-}
+	fmt.Println("done")
 
-func fetchClient(env *benchEnv, firstEb, count int) error {
-	for i := range count {
-		idx := firstEb + i
-		if _, err := insertOneEb(env.db, idx, env.config); err != nil {
-			return fmt.Errorf("write EB %d: %w", idx, err)
-		}
-	}
-	return nil
-}
-
-func chainSelReader(env *benchEnv) error {
-	for i := range env.config.chainSelReads {
-		point := env.points[i%len(env.points)]
-		if _, err := env.db.GetLeiosEBTxs(point.hash, point.slot); err != nil {
-			return fmt.Errorf("read transaction closure at slot %d: %w", point.slot, err)
-		}
-	}
-	return nil
-}
-
-func gcTicker(ticks int) error {
-	for i := 1; i <= ticks; i++ {
-		leiosGarbageCollect(uint64(i * 10))
-	}
-	return nil
-}
-
-// Dingo has no explicit Leios garbage-collection call. The reference
-// benchmark's current backend implementation is also a no-op; Badger's own
-// periodic value-log collection stays enabled through the production provider.
-func leiosGarbageCollect(_ uint64) {}
-
-func fetchServer(env *benchEnv, server int) error {
-	points := env.points
-	for i := range 30 {
-		point := points[(server*30+i)%len(points)]
-		if _, err := env.db.GetLeiosEBManifest(point.hash, point.slot); err != nil {
-			return fmt.Errorf("read EB body at slot %d: %w", point.slot, err)
-		}
-	}
-	for i := range 10 {
-		point := points[(server*10+i)%len(points)]
-		txs, err := env.db.GetLeiosEBTxs(point.hash, point.slot)
-		if err != nil {
-			return fmt.Errorf("read transaction batch at slot %d: %w", point.slot, err)
-		}
-		for offset := 0; offset < env.config.txsPerEb; offset += 10 {
-			if offset >= len(txs) {
-				return fmt.Errorf("transaction batch at slot %d has %d entries, need offset %d",
-					point.slot, len(txs), offset)
+	upstream := make([]chan chunkJob, config.upstreamPeers)
+	var upstreamWg sync.WaitGroup
+	for i := range upstream {
+		upstream[i] = make(chan chunkJob, 1<<12)
+		upstreamWg.Go(func() {
+			for job := range upstream[i] {
+				// A delivered chunk lands in the EB's in-memory assembly.
+				copy(job.assembly[job.rng.start:job.rng.end],
+					job.eb.txs[job.rng.start:job.rng.end])
+				job.done <- struct{}{}
 			}
-			_ = txs[offset]
-		}
+		})
 	}
+	voteQ := make(chan peerItem, 1<<12)
+	var voterWg sync.WaitGroup
+	voterWg.Go(func() {
+		for item := range voteQ {
+			closureRead(db, item.eb, item.slot, metricVoteRead, config, rec)
+			item.onDone()
+		}
+	})
+	peerQs := make([]chan peerItem, config.downstreamPeers)
+	var peersWg sync.WaitGroup
+	for seed := range peerQs {
+		peerQs[seed] = make(chan peerItem, 1<<12)
+		peersWg.Go(func() {
+			for item := range peerQs[seed] {
+				servePeer(db, seed+1, item, config, rec)
+				item.onDone()
+			}
+		})
+	}
+
+	var slotCounter atomic.Uint64
+	slotCounter.Store(uint64(config.volatileEbs)) //nolint:gosec // validated positive
+	var pruneMu sync.Mutex
+	fetchEb := func(eb *benchEb, onDone func()) uint64 {
+		slot := slotCounter.Add(1) - 1
+		if slot%uint64(config.gcEvery) == 0 && slot+1 > uint64(config.volatileEbs) { //nolint:gosec // validated positive
+			pruneMu.Lock()
+			_, err := db.PruneLeiosEBBeforeSlot(
+				context.Background(),
+				slot+1-uint64(config.volatileEbs), //nolint:gosec // validated positive
+			)
+			pruneMu.Unlock()
+			if err != nil {
+				rec.fail(fmt.Errorf("prune before slot %d: %w", slot+1, err))
+			}
+		}
+		started := time.Now()
+		assembly := make([]cbor.RawMessage, len(eb.txs))
+		ranges := requests(0, eb.idx, config)
+		dones := make(chan struct{}, len(ranges))
+		for k, rng := range ranges {
+			upstream[(int(slot)+k)%config.upstreamPeers] <- chunkJob{ //nolint:gosec // slot fits int
+				eb: eb, assembly: assembly, rng: rng, done: dones,
+			}
+		}
+		for range ranges {
+			<-dones
+		}
+		chunksDone := time.Now()
+		if err := db.SetLeiosEB(slot, eb.hash, eb.manifest, assembly); err != nil {
+			rec.fail(fmt.Errorf("write EB %d: %w", eb.idx, err))
+		}
+		completed := time.Now()
+		if eb.measured {
+			rec.record(metricFetch, completed.Sub(started))
+			rec.record(metricFetchChunks, chunksDone.Sub(started))
+			rec.record(metricFetchCommit, completed.Sub(chunksDone))
+		}
+		item := peerItem{eb: eb, slot: slot, completed: completed, onDone: onDone}
+		voteQ <- item
+		for _, q := range peerQs {
+			q <- item
+		}
+		return slot
+	}
+
+	var fetched atomic.Int64
+	var stopped atomic.Bool
+	t0 := time.Now()
+	progressDone := make(chan struct{})
+	progressStopped := make(chan struct{})
+	go func() {
+		defer close(progressStopped)
+		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
+		for {
+			state := ""
+			if stopped.Load() {
+				state = ", draining"
+			}
+			fmt.Printf("\rRunning: %s, %d/%d EBs done%s   ",
+				showTime(time.Since(t0)), fetched.Load(), config.samples, state)
+			select {
+			case <-progressDone:
+				return
+			case <-ticker.C:
+			}
+		}
+	}()
+
+	var burstWg sync.WaitGroup
+	if config.burst {
+		burstWg.Go(func() { burstLoad(config, func(eb *benchEb) { fetchEb(eb, func() {}) }, &stopped, t0, rec) })
+	}
+	for _, eb := range signal {
+		if rec.failed() {
+			break
+		}
+		var readers sync.WaitGroup
+		readers.Add(1 + config.downstreamPeers)
+		slot := fetchEb(eb, readers.Done)
+		readers.Wait()
+		closureRead(db, eb, slot, metricApplyRead, config, rec)
+		fetched.Add(1)
+	}
+	stopped.Store(true)
+	burstWg.Wait()
+	for _, q := range upstream {
+		close(q)
+	}
+	upstreamWg.Wait()
+	close(voteQ)
+	voterWg.Wait()
+	for _, q := range peerQs {
+		close(q)
+	}
+	peersWg.Wait()
+	close(progressDone)
+	<-progressStopped
+	fmt.Println()
+	if rec.err != nil {
+		return rec.err
+	}
+	report(rec)
 	return nil
 }
 
-func insertOneEb(
-	db *database.Database,
-	ebIdx int,
+// signalIdx and burstIdx keep the generated EB hashes of measured and
+// background EBs apart from each other and from the preloaded ones.
+const (
+	signalIdx = 1_000_000
+	burstIdx  = 2_000_000
+)
+
+// burstLoad starts a burst of EBs every burst interval from t0, whether or not
+// earlier ones are done, until stopped; then it waits for those in flight.
+func burstLoad(
 	config benchConfig,
-) (benchPoint, error) {
-	point, err := genPoint(ebIdx)
-	if err != nil {
-		return benchPoint{}, err
+	fetchEb func(*benchEb),
+	stopped *atomic.Bool,
+	t0 time.Time,
+	rec *recorder,
+) {
+	var inFlight sync.WaitGroup
+	defer inFlight.Wait()
+	for b := 0; ; b++ {
+		ebs := make([]*benchEb, config.burstSize)
+		for i := range ebs {
+			eb, err := genBenchEb(burstIdx+b*config.burstSize+i, config, false)
+			if err != nil {
+				rec.fail(fmt.Errorf("generate background EB: %w", err))
+				return
+			}
+			ebs[i] = eb
+		}
+		time.Sleep(time.Until(t0.Add(time.Duration(b) * config.burstInterval)))
+		if stopped.Load() || rec.failed() {
+			return
+		}
+		for _, eb := range ebs {
+			inFlight.Go(func() { fetchEb(eb) })
+		}
 	}
+}
+
+// closureRead resolves a completed EB's transaction closure, as the voter and
+// block application do.
+func closureRead(
+	db *database.Database,
+	eb *benchEb,
+	slot uint64,
+	m metric,
+	config benchConfig,
+	rec *recorder,
+) {
+	started := time.Now()
+	txs, err := db.GetLeiosEBTxs(eb.hash, slot)
+	elapsed := time.Since(started)
+	switch {
+	case err != nil:
+		rec.fail(fmt.Errorf("read closure of EB %d: %w", eb.idx, err))
+	case len(txs) != config.txsPerEb:
+		rec.miss()
+	case eb.measured:
+		rec.record(m, elapsed)
+	}
+}
+
+// servePeer is a downstream peer reading a completed EB in full, one request at
+// a time: the manifest, then the transaction requests in the order of its seed.
+func servePeer(
+	db *database.Database,
+	seed int,
+	item peerItem,
+	config benchConfig,
+	rec *recorder,
+) {
+	eb := item.eb
+	started := time.Now()
+	manifest, err := db.GetLeiosEBManifest(eb.hash, item.slot)
+	elapsed := time.Since(started)
+	switch {
+	case err != nil:
+		rec.fail(fmt.Errorf("read manifest of EB %d: %w", eb.idx, err))
+		return
+	case len(manifest) == 0:
+		rec.miss()
+	case eb.measured:
+		rec.record(metricServeBody, elapsed)
+	}
+	for _, rng := range requests(seed, eb.idx, config) {
+		started := time.Now()
+		txs, err := db.GetLeiosEBTxs(eb.hash, item.slot)
+		var served []cbor.RawMessage
+		if err == nil && len(txs) >= rng.end {
+			served = txs[rng.start:rng.end]
+		}
+		elapsed := time.Since(started)
+		switch {
+		case err != nil:
+			rec.fail(fmt.Errorf("read transactions of EB %d: %w", eb.idx, err))
+			return
+		case len(served) != rng.end-rng.start:
+			rec.miss()
+		case eb.measured:
+			rec.record(metricServeTxs, elapsed)
+		}
+	}
+	if eb.measured {
+		rec.record(metricServe, time.Since(item.completed))
+	}
+}
+
+// requests splits an EB's transaction offsets into requests of contiguous
+// offsets, whole jobs at a time and at most the request size, in the order of
+// the given seed.
+func requests(seed, ebIdx int, config benchConfig) []txRange {
+	txsPerJob := max(1, config.jobBytes/config.txSizeBytes)
+	txsPerRequest := txsPerJob *
+		max(1, config.requestBytes/(txsPerJob*config.txSizeBytes))
+	count := (config.txsPerEb + txsPerRequest - 1) / txsPerRequest
+	ranges := make([]txRange, count)
+	for i := range ranges {
+		ranges[i] = txRange{
+			start: i * txsPerRequest,
+			end:   min(config.txsPerEb, (i+1)*txsPerRequest),
+		}
+	}
+	slices.SortFunc(ranges, func(a, b txRange) int {
+		return cmp.Compare(
+			mix(seed, ebIdx, a.start/txsPerRequest),
+			mix(seed, ebIdx, b.start/txsPerRequest),
+		)
+	})
+	return ranges
+}
+
+// mix is a deterministic shuffle key.
+func mix(seed, ebIdx, j int) int64 {
+	h := (int64(j)*0x9E3779B1 + int64(ebIdx)*0x85EBCA77 + int64(seed)*0xC2B2AE3D) * 0x27D4EB2F
+	return h ^ (h >> 29)
+}
+
+func genBenchEb(ebIdx int, config benchConfig, measured bool) (*benchEb, error) {
 	txs, err := genTxs(ebIdx, config)
 	if err != nil {
-		return benchPoint{}, err
+		return nil, err
 	}
 	manifest, err := genManifest(txs)
 	if err != nil {
-		return benchPoint{}, err
+		return nil, err
 	}
-	if err := db.SetLeiosEB(point.slot, point.hash, manifest, txs); err != nil {
-		return benchPoint{}, err
+	return &benchEb{
+		idx:      ebIdx,
+		hash:     genHash(fmt.Sprintf("ebHash:%d", ebIdx)),
+		manifest: manifest,
+		txs:      txs,
+		measured: measured,
+	}, nil
+}
+
+func report(rec *recorder) {
+	fmt.Println()
+	fmt.Printf("%-18s%11s%11s%11s%11s\n", "Latency", "p50", "p99", "Max", "Count")
+	for m := range metricCount {
+		ts := slices.Clone(rec.samples[m])
+		slices.Sort(ts)
+		fmt.Printf("%-18s%11s%11s%11s%11d\n",
+			metricLabels[m],
+			percentile(ts, 0.5), percentile(ts, 0.99), percentile(ts, 1),
+			len(ts))
 	}
-	return point, nil
+	if rec.missing > 0 {
+		fmt.Printf("WARNING: %d reads found their EB incomplete or missing (pruned too early?)\n",
+			rec.missing)
+	}
+}
+
+func percentile(sorted []time.Duration, q float64) string {
+	n := len(sorted)
+	if n == 0 {
+		return "-"
+	}
+	idx := min(n-1, max(0, int(math.Ceil(q*float64(n)))-1))
+	return showTime(sorted[idx])
+}
+
+func showTime(elapsed time.Duration) string {
+	switch {
+	case elapsed < time.Millisecond:
+		return fmt.Sprintf("%d μs", elapsed.Round(time.Microsecond).Microseconds())
+	case elapsed < time.Second:
+		return fmt.Sprintf("%d ms", elapsed.Round(time.Millisecond).Milliseconds())
+	default:
+		return fmt.Sprintf("%.2f s", elapsed.Seconds())
+	}
+}
+
+func showBytes(n int) string {
+	switch {
+	case n >= 1_000_000:
+		return fmt.Sprintf("%.4g MB", float64(n)/1e6)
+	case n >= 1_000:
+		return fmt.Sprintf("%.4g KB", float64(n)/1e3)
+	default:
+		return fmt.Sprintf("%d B", n)
+	}
 }
 
 func genTxs(ebIdx int, config benchConfig) ([]cbor.RawMessage, error) {
@@ -453,17 +760,6 @@ func cborHeadSize(value uint64) int {
 	}
 }
 
-func genPoint(ebIdx int) (benchPoint, error) {
-	slot, err := nonNegativeUint64(ebIdx)
-	if err != nil {
-		return benchPoint{}, err
-	}
-	return benchPoint{
-		slot: slot,
-		hash: genHash(fmt.Sprintf("ebHash:%d", ebIdx)),
-	}, nil
-}
-
 func nonNegativeUint64(value int) (uint64, error) {
 	if value < 0 {
 		return 0, fmt.Errorf("cannot encode negative integer %d as CBOR", value)
@@ -505,18 +801,5 @@ func appendCborHead(dst []byte, major byte, value uint64) []byte {
 		dst = append(dst, prefix|27, 0, 0, 0, 0, 0, 0, 0, 0)
 		binary.BigEndian.PutUint64(dst[len(dst)-8:], value)
 		return dst
-	}
-}
-
-func showTime(elapsed time.Duration) string {
-	switch {
-	case elapsed < time.Microsecond:
-		return fmt.Sprintf("%d ns", elapsed.Nanoseconds())
-	case elapsed < time.Millisecond:
-		return fmt.Sprintf("%d μs", elapsed.Round(time.Microsecond).Microseconds())
-	case elapsed < time.Second:
-		return fmt.Sprintf("%d ms", elapsed.Round(time.Millisecond).Milliseconds())
-	default:
-		return fmt.Sprintf("%.3f s", elapsed.Seconds())
 	}
 }

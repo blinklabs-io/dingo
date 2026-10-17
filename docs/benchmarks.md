@@ -2,7 +2,7 @@
 
 Run benchmark commands from the repository root. The Makefile targets include
 the default `dingo_extra_plugins` build tag. Go test benchmark targets report
-memory allocations; `make bench-leios-db` prints workload timings only.
+memory allocations; `make bench-leios-db` prints latency percentiles only.
 
 ## Benchmarks
 
@@ -22,27 +22,35 @@ benchmark, package, or subsystem, use `go test` directly:
 go test -run='^$' -bench='^BenchmarkName$' -benchmem -count=5 ./ledger
 ```
 
-`make bench-leios-db` runs the concurrent LeiosDB workload corresponding to the
-[upstream LeiosDB benchmark entrypoint](https://github.com/IntersectMBO/ouroboros-consensus/blob/7ee63a2240320189545c43519efc6542ea35745c/ouroboros-consensus/bench/leios-db-bench/Main.hs).
-Its defaults match the reference workload: 500 preloaded EBs with 200
-transactions each, three concurrent writers and readers, 50 closure reads,
-one warmup, and five timed iterations. The command accepts flags for adjusting
-the workload counts and transaction size and prints the minimum, average, and
-maximum iteration time.
+`make bench-leios-db` measures the latency of Dingo's LeiosDB storage steps,
+mirroring the
+[upstream LeiosDB latency benchmark](https://github.com/IntersectMBO/ouroboros-consensus/pull/2422).
+It tracks 100 measured EBs, one at a time, over a database of 1000 EBs of 2857
+transactions of 350 bytes each. Each EB is fetched from 20 upstream peers,
+read once for voting, read by 100 downstream peers, and read once more for
+block application. The command prints the p50, p99, maximum, and count for each
+step. `-burst` adds background bursts of 10 EBs every 5 seconds that are
+fetched, voted on, and served alongside the measured EBs, and `-h` lists the
+flags that change the workload. Set `GOMAXPROCS` and `TMPDIR` to compare
+against the reference's `-N` setting and storage device.
 
-Dingo transaction fixtures retain the reference's 16 KiB body size. Dingo
-manifest references contain the Blake2b-256 hash and serialized size of each
-CBOR transaction, as required by Dingo's Leios fetch validation. The reference
-fixture instead uses synthetic hashes and records 200 bytes per manifest
-reference, so those manifest fields differ between the two workloads.
+Dingo persists Leios EBs in its Badger blob store, whereas the reference uses
+SQLite, so the steps map as follows:
 
-The logical workload is aligned, while the storage implementations differ:
-Dingo persists Leios EBs in its Badger blob store, whereas the reference
-entrypoint uses SQLite. Dingo writes the manifest and complete CBOR transaction
-list in one Badger blob transaction, and its transaction-read API loads the
-stored list before selecting the requested offsets. The reference benchmark's
-current GC call is a no-op; Dingo uses the matching no-op tick while Badger's
-periodic value-log collection remains active.
+- Fetch: the reference writes each transaction chunk as it arrives. Dingo
+  assembles the chunks in memory (`Chunks`) and commits the EB once with
+  `SetLeiosEB` (`Commit`).
+- Serve: each downstream peer reads the manifest (`Body`), then issues the
+  transaction requests (`Txs request`). Dingo's transaction read loads the
+  stored list before selecting the requested offsets. Dingo normally serves
+  cached EBs from memory, so this measures the database reload path.
+- Vote and apply reads load the transaction list.
+- Pruning with `PruneLeiosEBBeforeSlot` every 10 fetched EBs keeps the stored
+  window at 1000 EBs.
+
+Dingo manifest references contain the Blake2b-256 hash and serialized size of
+each CBOR transaction, as required by Dingo's Leios fetch validation, so the
+transaction fixtures differ from the reference's synthetic ones.
 
 `make bench-ci` runs the curated benchmark set ten times and a separate
 lock-contention sweep across several `GOMAXPROCS` values. It is intended for
