@@ -46,7 +46,8 @@ SQLite, so the steps map as follows:
   cached EBs from memory, so this measures the database reload path.
 - Vote and apply reads load the transaction list.
 - Pruning with `PruneLeiosEBBeforeSlot` every 10 fetched EBs keeps the stored
-  window at 1000 EBs.
+  window near 1000 EBs, up to 9 more between prunes. The prune cutoff never
+  passes an EB whose readers are still running.
 
 Dingo manifest references contain the Blake2b-256 hash and serialized size of
 each CBOR transaction, as required by Dingo's Leios fetch validation, so the

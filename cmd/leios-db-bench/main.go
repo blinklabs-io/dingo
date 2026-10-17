@@ -222,7 +222,7 @@ func parseConfig() benchConfig {
 	flag.IntVar(&config.samples, "samples", 100,
 		"measured EBs, processed one at a time")
 	flag.IntVar(&config.gcEvery, "gc-every", 10,
-		"prune beyond the volatile window every this many fetched EBs")
+		"prune beyond the volatile window every this many fetched EBs; the stored window can exceed -volatile-ebs by up to this many minus one")
 	flag.BoolVar(&config.burst, "burst", false,
 		"fetch and serve bursts of background EBs while measuring")
 	flag.IntVar(&config.burstSize, "burst-size", 10,
@@ -249,7 +249,75 @@ func validateConfig(config benchConfig) error {
 	if _, err := txPayloadSize(config.txSizeBytes); err != nil {
 		return fmt.Errorf("invalid benchmark configuration: %w", err)
 	}
+	if minRequest := minRequestBytes(config); config.requestBytes < minRequest {
+		return fmt.Errorf(
+			"invalid benchmark configuration: -request-bytes %d is below one job (%d bytes)",
+			config.requestBytes, minRequest,
+		)
+	}
 	return nil
+}
+
+// minRequestBytes is the size of one whole job, the smallest request.
+func minRequestBytes(config benchConfig) int {
+	return config.txSizeBytes * max(1, config.jobBytes/config.txSizeBytes)
+}
+
+// fetchRanges splits an EB's transactions into one contiguous chunk per
+// upstream peer, fewer when the EB has fewer transactions than peers.
+func fetchRanges(config benchConfig) []txRange {
+	count := min(config.upstreamPeers, config.txsPerEb)
+	ranges := make([]txRange, count)
+	for i := range ranges {
+		ranges[i] = txRange{
+			start: i * config.txsPerEb / count,
+			end:   (i + 1) * config.txsPerEb / count,
+		}
+	}
+	return ranges
+}
+
+// pruneGuard assigns fetch slots and computes prune cutoffs that never pass a
+// slot whose readers are still running.
+type pruneGuard struct {
+	mu       sync.Mutex
+	next     uint64
+	inFlight map[uint64]struct{}
+	window   uint64
+	every    uint64
+}
+
+func newPruneGuard(window, every int) *pruneGuard {
+	return &pruneGuard{
+		next:     uint64(window), //nolint:gosec // validated positive
+		inFlight: map[uint64]struct{}{},
+		window:   uint64(window), //nolint:gosec // validated positive
+		every:    uint64(every),  //nolint:gosec // validated positive
+	}
+}
+
+// begin assigns the next slot and marks it in flight. When this slot is due a
+// prune it returns the cutoff, held back to the oldest in-flight slot.
+func (g *pruneGuard) begin() (slot, cutoff uint64, prune bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	slot = g.next
+	g.next++
+	g.inFlight[slot] = struct{}{}
+	if slot%g.every != 0 || slot+1 <= g.window {
+		return slot, 0, false
+	}
+	cutoff = slot + 1 - g.window
+	for s := range g.inFlight {
+		cutoff = min(cutoff, s)
+	}
+	return slot, cutoff, true
+}
+
+func (g *pruneGuard) end(slot uint64) {
+	g.mu.Lock()
+	delete(g.inFlight, slot)
+	g.mu.Unlock()
 }
 
 func printBenchInfo(config benchConfig, dir string) {
@@ -369,25 +437,28 @@ func runBench(db *database.Database, config benchConfig) error {
 		})
 	}
 
-	var slotCounter atomic.Uint64
-	slotCounter.Store(uint64(config.volatileEbs)) //nolint:gosec // validated positive
-	var pruneMu sync.Mutex
+	guard := newPruneGuard(config.volatileEbs, config.gcEvery)
 	fetchEb := func(eb *benchEb, onDone func()) uint64 {
-		slot := slotCounter.Add(1) - 1
-		if slot%uint64(config.gcEvery) == 0 && slot+1 > uint64(config.volatileEbs) { //nolint:gosec // validated positive
-			pruneMu.Lock()
-			_, err := db.PruneLeiosEBBeforeSlot(
-				context.Background(),
-				slot+1-uint64(config.volatileEbs), //nolint:gosec // validated positive
-			)
-			pruneMu.Unlock()
-			if err != nil {
-				rec.fail(fmt.Errorf("prune before slot %d: %w", slot+1, err))
+		slot, cutoff, prune := guard.begin()
+		var readers atomic.Int64
+		readers.Store(int64(1 + config.downstreamPeers))
+		release := onDone
+		onDone = func() {
+			if readers.Add(-1) == 0 {
+				guard.end(slot)
+			}
+			release()
+		}
+		if prune {
+			if _, err := db.PruneLeiosEBBeforeSlot(
+				context.Background(), cutoff,
+			); err != nil {
+				rec.fail(fmt.Errorf("prune before slot %d: %w", cutoff, err))
 			}
 		}
 		started := time.Now()
 		assembly := make([]cbor.RawMessage, len(eb.txs))
-		ranges := requests(0, eb.idx, config)
+		ranges := fetchRanges(config)
 		dones := make(chan struct{}, len(ranges))
 		for k, rng := range ranges {
 			upstream[(int(slot)+k)%config.upstreamPeers] <- chunkJob{ //nolint:gosec // slot fits int
@@ -417,6 +488,7 @@ func runBench(db *database.Database, config benchConfig) error {
 
 	var fetched atomic.Int64
 	var stopped atomic.Bool
+	stop := make(chan struct{})
 	t0 := time.Now()
 	progressDone := make(chan struct{})
 	progressStopped := make(chan struct{})
@@ -441,7 +513,7 @@ func runBench(db *database.Database, config benchConfig) error {
 
 	var burstWg sync.WaitGroup
 	if config.burst {
-		burstWg.Go(func() { burstLoad(config, func(eb *benchEb) { fetchEb(eb, func() {}) }, &stopped, t0, rec) })
+		burstWg.Go(func() { burstLoad(config, func(eb *benchEb) { fetchEb(eb, func() {}) }, stop, t0, rec) })
 	}
 	for _, eb := range signal {
 		if rec.failed() {
@@ -455,6 +527,7 @@ func runBench(db *database.Database, config benchConfig) error {
 		fetched.Add(1)
 	}
 	stopped.Store(true)
+	close(stop)
 	burstWg.Wait()
 	for _, q := range upstream {
 		close(q)
@@ -488,7 +561,7 @@ const (
 func burstLoad(
 	config benchConfig,
 	fetchEb func(*benchEb),
-	stopped *atomic.Bool,
+	stop <-chan struct{},
 	t0 time.Time,
 	rec *recorder,
 ) {
@@ -504,8 +577,14 @@ func burstLoad(
 			}
 			ebs[i] = eb
 		}
-		time.Sleep(time.Until(t0.Add(time.Duration(b) * config.burstInterval)))
-		if stopped.Load() || rec.failed() {
+		timer := time.NewTimer(time.Until(t0.Add(time.Duration(b) * config.burstInterval)))
+		select {
+		case <-stop:
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+		if rec.failed() {
 			return
 		}
 		for _, eb := range ebs {

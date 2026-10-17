@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -162,5 +163,92 @@ func TestValidateConfigRejectsNonPositiveCounts(t *testing.T) {
 	}
 	if err := validateConfig(validTestConfig()); err != nil {
 		t.Fatalf("validateConfig(valid) = %v", err)
+	}
+}
+
+func TestValidateConfigRejectsRequestBelowOneJob(t *testing.T) {
+	config := validTestConfig()
+	// One job is 187 transactions of 350 bytes.
+	config.requestBytes = 187*350 - 1
+	if err := validateConfig(config); err == nil {
+		t.Fatalf("validateConfig accepted %+v", config)
+	}
+	config.requestBytes = 187 * 350
+	if err := validateConfig(config); err != nil {
+		t.Fatalf("validateConfig(one job) = %v", err)
+	}
+}
+
+func TestFetchRangesSpreadOverUpstreamPeers(t *testing.T) {
+	config := validTestConfig()
+	config.txsPerEb = 2857
+	config.upstreamPeers = 20
+	got := fetchRanges(config)
+	if len(got) != 20 {
+		t.Fatalf("%d fetch chunks, want 20", len(got))
+	}
+	next := 0
+	for _, rng := range got {
+		if rng.start != next || rng.end <= rng.start {
+			t.Fatalf("chunk %v does not continue at %d", rng, next)
+		}
+		next = rng.end
+	}
+	if next != config.txsPerEb {
+		t.Fatalf("chunks end at %d, want %d", next, config.txsPerEb)
+	}
+	config.txsPerEb = 3
+	if got := fetchRanges(config); len(got) != 3 {
+		t.Fatalf("%d chunks for 3 txs, want 3", len(got))
+	}
+}
+
+func TestPruneGuardHoldsBackToInFlightSlots(t *testing.T) {
+	g := newPruneGuard(10, 5)
+	first, _, _ := g.begin() // slot 10, still in flight
+	var cutoff uint64
+	var prune bool
+	for range 20 {
+		_, cutoff, prune = g.begin()
+	}
+	if !prune || cutoff != first {
+		t.Fatalf("cutoff = %d (prune %v), want held back to in-flight slot %d", cutoff, prune, first)
+	}
+	g.end(first)
+	for {
+		slot, c, p := g.begin()
+		if p {
+			if c <= first {
+				t.Fatalf("cutoff %d did not advance past released slot %d", c, first)
+			}
+			break
+		}
+		g.end(slot)
+	}
+}
+
+func TestBurstLoadStopsWhileWaitingForNextBurst(t *testing.T) {
+	config := validTestConfig()
+	config.burstInterval = time.Hour
+	stop := make(chan struct{})
+	var started atomic.Int64
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		burstLoad(config, func(*benchEb) { started.Add(1) }, stop, time.Now(), &recorder{})
+	}()
+	deadline := time.After(5 * time.Second)
+	for started.Load() == 0 {
+		select {
+		case <-deadline:
+			t.Fatal("first burst never started")
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+	close(stop)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("burstLoad kept sleeping after stop")
 	}
 }
