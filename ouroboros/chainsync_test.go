@@ -1359,18 +1359,15 @@ func TestChainsyncClientRollForwardExcludesHeaderFailingCryptoVerification(
 	}
 }
 
-// TestChainsyncClientRollForwardObservesHeaderWithDeferredCryptoVerification
-// proves that a header this node cannot yet confirm (ValidateChainSelection-
-// HeaderCrypto returns a deferred error, e.g. because local ledger state has
-// not caught up to it) is still observed for chain selection. This preserves
-// legitimate fast-sync/Genesis-bootstrap behavior, where an honest peer
-// racing ahead of local ledger application must not be excluded.
+// TestChainsyncClientRollForwardWithholdsHeaderWithDeferredCryptoVerification
+// proves that a header this node cannot yet confirm stays out of trusted
+// history until a later strict verification succeeds.
 //
 // The verifier here is the real ledger.LedgerState.ValidateChainSelection-
 // HeaderCrypto (not a fake), driven into its deferred path by a bare ledger
 // with no cached epoch/nonce data -- proving the actual ledger method, not
 // just the branching around it.
-func TestChainsyncClientRollForwardObservesHeaderWithDeferredCryptoVerification(
+func TestChainsyncClientRollForwardWithholdsHeaderWithDeferredCryptoVerification(
 	t *testing.T,
 ) {
 	t.Parallel()
@@ -1381,6 +1378,7 @@ func TestChainsyncClientRollForwardObservesHeaderWithDeferredCryptoVerification(
 	_, tipCh := bus.Subscribe(chainselection.PeerTipUpdateEventType)
 	_, recycleCh := bus.Subscribe(ledger.ConnectionRecycleRequestedEventType)
 	_, ledgerCh := bus.Subscribe(ledger.ChainsyncEventType)
+	_, resyncCh := bus.Subscribe(event.ChainsyncResyncEventType)
 	state := dchainsync.NewState(bus, nil)
 	conn := newTestConnId("127.0.0.1:6011", "1.1.1.3:3001")
 	require.True(t, state.AddClientConnId(conn))
@@ -1388,7 +1386,9 @@ func TestChainsyncClientRollForwardObservesHeaderWithDeferredCryptoVerification(
 	ls := newTestLedgerState(t)
 
 	o := newOuroboros(OuroborosConfig{
-		EventBus: bus,
+		EventBus:       bus,
+		LedgerState:    ls,
+		ChainsyncState: state,
 		ChainsyncIngressEligible: func(ouroboros.ConnectionId) bool {
 			return true
 		},
@@ -1396,8 +1396,6 @@ func TestChainsyncClientRollForwardObservesHeaderWithDeferredCryptoVerification(
 			return true
 		},
 	})
-	o.chainsyncState = state
-	o.eventBus = bus
 	// Force the readiness gate on and use the real verifier: a bare
 	// LedgerState with no cached epoch/nonce data for this slot deterministically
 	// returns a deferred error, matching what ShouldVerifyChainSelectionHeaderCrypto
@@ -1405,8 +1403,6 @@ func TestChainsyncClientRollForwardObservesHeaderWithDeferredCryptoVerification(
 	// the real verifier's own error classification, without the readiness gate,
 	// must still get fast-sync-safe (deferred, not excluded) behavior.
 	o.chainSelectionShouldVerifyHeaderCrypto = func(uint64) bool { return true }
-	o.chainSelectionVerifyHeaderCrypto = ls.ValidateChainSelectionHeaderCryptoWithGeneration
-
 	var hash gledger.Blake2b256
 	hash[0] = 0xdd
 	header := nonByronTestHeader{&testBlockHeader{
@@ -1414,6 +1410,15 @@ func TestChainsyncClientRollForwardObservesHeaderWithDeferredCryptoVerification(
 		blockNumber: 1,
 		slotNumber:  200,
 	}}
+	deferredErr := ls.ValidateChainSelectionHeaderCrypto(header)
+	require.True(t, ledger.IsHeaderVerificationDeferred(deferredErr))
+	var verificationReady atomic.Bool
+	o.chainSelectionVerifyHeaderCrypto = func(gledger.BlockHeader) (uint64, error) {
+		if !verificationReady.Load() {
+			return 0, deferredErr
+		}
+		return 42, nil
+	}
 	tip := ochainsync.Tip{
 		Point:       ocommon.NewPoint(200, header.Hash().Bytes()),
 		BlockNumber: 1,
@@ -1426,18 +1431,12 @@ func TestChainsyncClientRollForwardObservesHeaderWithDeferredCryptoVerification(
 		tip,
 	))
 
-	select {
-	case evt := <-tipCh:
-		_, ok := evt.Data.(chainselection.PeerTipUpdateEvent)
-		require.True(
-			t,
-			ok,
-			"a deferred verification result must still leave the header "+
-				"eligible for chain-selection observation",
-		)
-	case <-time.After(time.Second):
-		t.Fatal("expected PeerTipUpdateEvent despite deferred verification")
-	}
+	testutil.RequireNoReceive(
+		t,
+		tipCh,
+		200*time.Millisecond,
+		"a deferred verification result must not enter chain selection",
+	)
 	select {
 	case <-recycleCh:
 		t.Fatal(
@@ -1445,10 +1444,93 @@ func TestChainsyncClientRollForwardObservesHeaderWithDeferredCryptoVerification(
 		)
 	case <-time.After(200 * time.Millisecond):
 	}
-	evt := testutil.RequireReceive(t, ledgerCh, time.Second, "ledger event")
-	data, ok := evt.Data.(ledger.ChainsyncEvent)
+	testutil.RequireNoReceive(
+		t,
+		ledgerCh,
+		200*time.Millisecond,
+		"a deferred header must not enter the ledger queue",
+	)
+	_, _, retained := state.LookupObservedHeader(conn, header.Hash().Bytes())
+	require.False(t, retained, "deferred header must not enter trusted history")
+	require.Contains(t, o.deferredHeaderRecovery, conn)
+
+	baseline := ls.Tip().Point
+	advancedPoint := ocommon.NewPoint(baseline.Slot+1, []byte("applied-block"))
+	bus.Publish(
+		chain.ChainUpdateEventType,
+		event.NewEvent(chain.ChainUpdateEventType, chain.ChainBlockEvent{
+			Point: advancedPoint,
+		}),
+	)
+	resync := testutil.RequireReceive(
+		t,
+		resyncCh,
+		testutil.AsyncWait,
+		"an applied chain update should re-intersect deferred peers",
+	)
+	resyncData, ok := resync.Data.(event.ChainsyncResyncEvent)
 	require.True(t, ok)
-	require.Zero(t, data.HeaderCryptoVerificationGeneration)
+	require.Equal(t, conn, resyncData.ConnectionId)
+	require.Equal(t, event.ChainsyncResyncReasonHeaderValidationRecovery, resyncData.Reason)
+
+	// The peer's re-intersection sends its linked suffix through the ordinary
+	// callback parent-first. Once strict verification passes, both selector and
+	// ledger admission resume on that fresh connection.
+	verificationReady.Store(true)
+	replayConn := newTestConnId("127.0.0.1:6012", "1.1.1.4:3001")
+	require.True(t, state.AddClientConnId(replayConn))
+	childHash := hash
+	childHash[0]++
+	childHeader := nonByronTestHeader{&testBlockHeader{
+		hash:        childHash,
+		prevHash:    header.Hash(),
+		blockNumber: 2,
+		slotNumber:  201,
+	}}
+	for _, replay := range []struct {
+		header gledger.BlockHeader
+		tip    ochainsync.Tip
+	}{
+		{header: header, tip: tip},
+		{
+			header: childHeader,
+			tip: ochainsync.Tip{
+				Point:       ocommon.NewPoint(201, childHeader.Hash().Bytes()),
+				BlockNumber: 2,
+			},
+		},
+	} {
+		require.NoError(t, o.chainsyncClientRollForward(
+			ochainsync.CallbackContext{ConnectionId: replayConn},
+			0,
+			replay.header,
+			replay.tip,
+		))
+	}
+	for _, replay := range []struct {
+		header gledger.BlockHeader
+	}{
+		{header: header},
+		{header: childHeader},
+	} {
+		observed := testutil.RequireReceive(
+			t,
+			tipCh,
+			testutil.AsyncWait,
+			"verified parent-first replay should re-enter selector admission",
+		)
+		require.IsType(t, chainselection.PeerTipUpdateEvent{}, observed.Data)
+		ledgerEvent := testutil.RequireReceive(
+			t,
+			ledgerCh,
+			testutil.AsyncWait,
+			"verified parent-first replay should re-enter ledger admission",
+		)
+		ledgerData, ok := ledgerEvent.Data.(ledger.ChainsyncEvent)
+		require.True(t, ok)
+		require.Equal(t, replay.header.Hash().Bytes(), ledgerData.Point.Hash)
+		require.EqualValues(t, 42, ledgerData.HeaderCryptoVerificationGeneration)
+	}
 }
 
 // TestChainsyncClientRollForwardCompetingPeersOnlyVerifiedHeaderCounted

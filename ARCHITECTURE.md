@@ -542,11 +542,13 @@ sequenceDiagram
 
     Note over Peer,DB: Stage 1 — Header Discovery (ChainSync)
     Peer->>OB: RollForward(header, tip)
+    OB->>OB: strictly verify header crypto against current ledger generation
+    Note over OB: If verification is deferred, retain only bounded raw ancestry; do not update peer selection or ledger state
     OB->>LS: await bounded header capacity
     LS->>ChM: wait for header queue drain
     OB->>EB: publish ChainsyncEvent(header)
     EB->>LS: handleEventChainsyncBlockHeader()
-    LS->>LS: verify header crypto (VRF/KES/OpCert)
+    LS->>LS: recheck header crypto against current ledger generation
     LS->>ChM: enqueue header in chain.headers[]
 
     Note over Peer,DB: Stage 2 — Full Block Retrieval (BlockFetch)
@@ -576,6 +578,10 @@ sequenceDiagram
     DB-->>LS: durable commit succeeds
     LS->>EB: publish TransactionEvent per tx (AfterCommit)
     ChM->>EB: publish ChainUpdateEvent
+    EB->>OB: retry deferred peers after ledger tip advances
+    OB->>Peer: re-intersect at last accepted cursor
+    Peer->>OB: replay parent-linked headers in order
+    OB->>OB: strictly verify and promote each replayed header
     LS->>EB: publish BlockEvent
 
     Note over Peer,DB: Rollback Path
@@ -5893,10 +5899,18 @@ it. Dingo implements this as a **corroboration gate**
   header-queue verification (that only runs for headers actually applied).
   Verification is skipped only for a slot an imported Mithril snapshot
   already covers, the same exemption the ledger's own header-queue path
-  applies; a result showing local state has not caught up to
-  the header's slot (`IsHeaderVerificationDeferred`) still leaves the header
-  eligible — both preserve legitimate catch-up behavior. The exception is a
-  header past the forecast horizon (`ledger.ErrHeaderBeyondForecastHorizon`),
+  applies. A result showing local state has not caught up to the header's slot
+  (`IsHeaderVerificationDeferred`) withholds the header from chain selection,
+  density, and corroboration without penalizing the peer. The ledger may keep
+  the header in bounded peer ancestry or queue it when it extends the current
+  header chain, but a competing deferred header cannot clear the queue or
+  trigger canonical rollback. A later header can reuse the retained ancestry
+  once producer authorization succeeds. Genesis-overlay parameters remain
+  authoritative for later slots within the applied epoch and era, so a tip
+  earlier within that epoch does not by itself defer the overlay decision;
+  headers requiring a different epoch or era's parameters remain deferred
+  until those parameters are applied. A header past the forecast horizon
+  (`ledger.ErrHeaderBeyondForecastHorizon`),
   which ChainSync admission holds back until the ledger can forecast its slot,
   so it never counts for selection, Genesis density, or corroboration before
   it can be validated. A header whose
@@ -5910,8 +5924,9 @@ it. Dingo implements this as a **corroboration gate**
   `current-3` (`errPoolSnapshotPruned`, non-API storage modes only) is
   deferred rather than rejected, because the node no longer holds the state
   to evaluate it; a pool absent from a populated snapshot still rejects.
-  Only a definite failure excludes the header from observation and publishes
-  `ledger.ConnectionRecycleRequestedEventType`
+  Deferred headers are withheld from selection but retained as peer ancestry;
+  definite verification failures are excluded from observation and instead
+  publish `ledger.ConnectionRecycleRequestedEventType`
   (`"header_verification_failure"`, translated to a connmanager recycle by
   node composition, the same as the ledger's own header-queue failures).
   The check is two derived closures on `Ouroboros`
