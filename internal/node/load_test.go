@@ -778,6 +778,77 @@ func TestStoreRawBlockUtxoOffsetsPropagatesExtractError(t *testing.T) {
 	)
 }
 
+func TestLoadBlobsWithDBSkipsUtxoOffsetsInCoreMode(t *testing.T) {
+	t.Parallel()
+
+	immutableDir := filepath.Join(
+		"..",
+		"..",
+		"database",
+		"immutable",
+		"testdata",
+	)
+	imm, err := immutable.New(immutableDir)
+	require.NoError(t, err)
+	iter, err := imm.BlocksFromPoint(ocommon.Point{})
+	require.NoError(t, err)
+	defer iter.Close()
+
+	var txHash []byte
+	var outputIdx uint32
+	for range 10_000 {
+		block, err := iter.Next()
+		require.NoError(t, err)
+		if block == nil {
+			break
+		}
+		if block.IsEbb {
+			continue
+		}
+		decoded, err := gledger.NewBlockFromCbor(
+			block.Type,
+			block.Cbor,
+			lcommon.VerifyConfig{SkipBodyHashValidation: true},
+		)
+		require.NoError(t, err)
+		for _, tx := range decoded.Transactions() {
+			produced := tx.Produced()
+			if len(produced) == 0 {
+				continue
+			}
+			txHash = bytes.Clone(tx.Hash().Bytes())
+			outputIdx = produced[0].Id.Index()
+			break
+		}
+		if len(txHash) > 0 {
+			break
+		}
+	}
+	require.NotEmpty(t, txHash, "fixture has no produced UTxO")
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir:     "",
+		Logger:      logger,
+		StorageMode: types.StorageModeCore,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		dbtest.CloseDatabase(db) //nolint:errcheck
+	})
+
+	result, err := LoadBlobsWithDB(
+		context.Background(), &config.Config{}, logger, immutableDir, db,
+	)
+	require.NoError(t, err)
+	assert.Positive(t, result.BlocksCopied)
+
+	blobTxn := db.BlobTxn(false)
+	defer blobTxn.Rollback() //nolint:errcheck
+	_, err = db.Blob().GetUtxo(blobTxn.Blob(), txHash, outputIdx)
+	require.ErrorIs(t, err, types.ErrBlobKeyNotFound)
+}
+
 func TestStoreRawBlockUtxoOffsetsSkipsByronEbb(t *testing.T) {
 	t.Parallel()
 
