@@ -413,6 +413,12 @@ func runFixture(
 		provider,
 		pp,
 	)
+	validationErr = applyReferenceScriptSizeOverride(
+		tx,
+		provider,
+		protocolParameters.MaxReferenceScriptsSize,
+		validationErr,
+	)
 	if expected.Predicate == "" {
 		if validationErr == nil {
 			return CaseOutcome{ID: id, Result: "pass"}, nil, nil
@@ -426,6 +432,41 @@ func runFixture(
 		return CaseOutcome{ID: id, Result: "pass"}, nil, nil
 	}
 	return mismatch(id, expected, "rejected: "+validationErr.Error())
+}
+
+// Conformance fixtures can override Conway's fixed limit to exercise small
+// boundary values; this override applies only to report evaluation.
+func applyReferenceScriptSizeOverride(
+	tx common.Transaction,
+	ls common.LedgerState,
+	maxSize *uint64,
+	validationErr error,
+) error {
+	if maxSize == nil || *maxSize == conway.MaxRefScriptSizePerTx || !tx.IsValid() {
+		return validationErr
+	}
+
+	var currentSizeError common.RefScriptSizePerTxTooLargeError
+	var totalSize uint64
+	switch {
+	case errors.As(validationErr, &currentSizeError):
+		totalSize = currentSizeError.TxSize
+	case validationErr != nil:
+		return validationErr
+	default:
+		var err error
+		totalSize, err = eras.ReferencedScriptSize(tx, ls)
+		if err != nil {
+			return fmt.Errorf("calculating reference script size: %w", err)
+		}
+	}
+	if totalSize > *maxSize {
+		return common.RefScriptSizePerTxTooLargeError{
+			TxSize:  totalSize,
+			MaxSize: *maxSize,
+		}
+	}
+	return nil
 }
 
 func transactionFailsToDecode(transactionCBOR []byte) bool {
