@@ -517,10 +517,12 @@ jobs:
             ~/.cache/go-build
           # Race-instrumented objects are a separate build-cache population
           # from the plain ones, so this job keys its own entry rather than
-          # thrashing go-test (Linux)'s.
-          key: ${{ runner.os }}-go-race-${{ matrix.go-version }}-${{ matrix.shard }}-${{ hashFiles('**/go.sum') }}
+          # thrashing go-test (Linux)'s. The shards share that one entry: most
+          # of it is dependencies compiled with -race, which every shard
+          # needs, and the repository's cache quota cannot hold one copy each.
+          key: ${{ runner.os }}-go-race-${{ matrix.go-version }}-${{ hashFiles('**/go.sum') }}
           restore-keys: |
-            ${{ runner.os }}-go-race-${{ matrix.go-version }}-${{ matrix.shard }}-
+            ${{ runner.os }}-go-race-${{ matrix.go-version }}-
       - name: go-build
         run: go build -tags dingo_extra_plugins ./cmd/dingo
       - name: go-test-race
