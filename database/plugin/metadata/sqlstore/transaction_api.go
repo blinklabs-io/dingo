@@ -284,7 +284,7 @@ const addressTransactionInputQueryParamsPerRef = 2
 // Separate lookups keep SQLite on tx_id_output_idx for every input.
 func addressTransactionInputQuery(size int) string {
 	var query strings.Builder
-	for i := 0; i < size; i++ {
+	for i := range size {
 		if i > 0 {
 			query.WriteString(" UNION ALL ")
 		}

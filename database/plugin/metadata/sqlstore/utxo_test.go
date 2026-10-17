@@ -244,7 +244,7 @@ func TestAddressTransactionInputQueryUsesCompositeIndex(t *testing.T) {
 		[]any,
 		maxCachedAddressInputQuerySize*addressTransactionInputQueryParamsPerRef,
 	)
-	for i := 0; i < maxCachedAddressInputQuerySize; i++ {
+	for i := range maxCachedAddressInputQuerySize {
 		ref := utxoIDAt(i * 7)
 		args[i*addressTransactionInputQueryParamsPerRef] = ref.Hash
 		args[i*addressTransactionInputQueryParamsPerRef+1] = ref.Idx
