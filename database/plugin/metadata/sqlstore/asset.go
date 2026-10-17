@@ -54,7 +54,7 @@ WHERE a.policy_id = ? AND a.name = ? AND u.deleted_slot = 0
   AND ua.utxo_id IS NULL
 LIMIT 1`), args...).Scan(&missing)
 	if err == nil {
-		return nil, 0, errors.New("live asset UTxO address is unavailable")
+		return nil, 0, errors.New("live UTxO address is unavailable")
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
 		return nil, 0, fmt.Errorf("check asset holder addresses: %w", err)

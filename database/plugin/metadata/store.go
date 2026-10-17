@@ -880,6 +880,15 @@ type UtxoStore interface {
 		models.UtxoAddressMatchMode,
 		types.Txn,
 	) (models.AddressBalance, error)
+	// GetUtxoBalanceByAddressAtSlot aggregates an exact address balance from
+	// retained UTxOs that existed at the requested slot. It returns
+	// models.ErrTooManyUtxoResults when more than maxResults UTxOs match.
+	GetUtxoBalanceByAddressAtSlot(
+		[]byte,
+		uint64,
+		int,
+		types.Txn,
+	) (models.AddressBalance, error)
 
 	// GetUtxosByAddressWithOrdering runs q against live UTxOs with ordering
 	// metadata. Snapshot-imported UTxOs without a producing transaction use
@@ -904,10 +913,10 @@ type UtxoStore interface {
 	) ([]models.UtxoWithHistory, error)
 
 	// CountUtxosByAddressWithOrdering returns the number of live UTxOs
-	// matching q's coarse SQL predicate, without materializing rows. It
-	// errors if q's address patterns require CBOR-based exact-address
-	// filtering (see models.RequiresExactAddressFilter), since the coarse
-	// predicate alone would over-count. See models.UtxoWithOrderingQuery.
+	// matching q's SQL predicate, without materializing rows. It errors if
+	// q's address patterns require CBOR-based exact-address filtering (see
+	// models.RequiresExactAddressFilter), since that coarse predicate alone
+	// would over-count. IndexedExactAddress is counted exactly in SQL.
 	CountUtxosByAddressWithOrdering(
 		*models.UtxoWithOrderingQuery,
 		types.Txn,
@@ -931,7 +940,7 @@ type UtxoStore interface {
 		models.AssetHolderQuery,
 		types.Txn,
 	) ([]models.AssetHolder, int, error)
-	GetLiveAssetUtxosMissingAddress(
+	GetUtxosMissingAddress(
 		uint,
 		int,
 		types.Txn,
@@ -956,7 +965,7 @@ type UtxoStore interface {
 
 	// SetUtxosNotDeletedAfterSlot marks all UTxOs created after the given slot as not deleted.
 	SetUtxosNotDeletedAfterSlot(uint64, types.Txn) error
-	GetSpentAssetUtxosMissingAddressAfterSlot(
+	GetSpentUtxosMissingAddressAfterSlot(
 		uint64,
 		uint,
 		int,

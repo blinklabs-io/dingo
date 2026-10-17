@@ -245,17 +245,24 @@ Migration `v48` (`governance-vote-cast`) adds the nullable `tx_hash` and
 `cert_index` columns to `governance_vote_history`; it backfills nothing, so
 entries written before it leave both `NULL`.
 
-Blockfrost asset-holder pages aggregate live quantities in metadata storage.
-`utxo_address` keeps each asset-bearing UTxO's canonical rendered address as
-bytes so every backend groups exact pointer and bootstrap identities and
-orders equal quantities with the same bytewise address order as the API.
-Migration v42 adds
-the table; API-mode startup backfills only live asset-bearing UTxOs in
-cancellable batches before APIs become available, records completion in
-sync_state, and logs progress. Startup fails if an output CBOR cannot be
+Blockfrost asset-holder pages aggregate live quantities in metadata storage,
+and historical Mesh balances aggregate address balances without materializing
+the matching UTxOs. Blockfrost address-list pages use the exact address index
+for SQL ordering, offset, and total count after API-mode startup backfill,
+avoiding CBOR scans of earlier outputs on deep pages. If that index is not
+available, address listing retains the bounded CBOR candidate scan. Historical
+balance queries scan at most
+`ExactAddressCandidateScanLimit + 1` matching rows and return
+`ErrTooManyUtxoResults` when the address exceeds that bound. `utxo_address`
+keeps each UTxO's canonical rendered address as bytes so exact pointer and
+bootstrap identities are available to both queries. Migration v42 adds the
+table; API-mode startup backfills all retained
+UTxOs in cancellable batches before APIs become available, records completion
+in sync_state, and logs progress. Startup fails if an output CBOR cannot be
 resolved. A failed backfill leaves completion unset, so the next startup
 resumes from rows still missing an address. Core-mode nodes skip the backfill.
-New UTxO writes persist the address in the same metadata transaction.
+API-mode UTxO writes persist the address in the same metadata transaction;
+core-mode writes omit this API-only relation.
 SQLite uses an exact unsigned 64-bit aggregate that returns a fixed-width
 decimal key; PostgreSQL and MySQL use decimal aggregation with an explicit
 overflow check. Holder count and LIMIT/OFFSET page reads share the request's
@@ -3915,6 +3922,12 @@ by the API adapter, which compares each candidate output's decoded
 address bytes, because the pointer payload is not represented in the
 `utxo` table.
 
+Historical Mesh balance uses the exact rendered address stored in
+`utxo_address`, together with `added_slot <= requested_slot` and
+`deleted_slot = 0 OR deleted_slot > requested_slot`, and aggregates ADA and
+assets in metadata storage. This avoids materializing a potentially large
+historical UTxO set in the API process.
+
 ### `GetUtxosByAddress`, `GetUtxosByAddressAsOf`, `GetUtxosByAddressAtSlot`, and `GetControlledAmountByCredential`
 
 `GetUtxosByAddress` accepts multiple address patterns and OR-joins their coarse
@@ -4073,11 +4086,12 @@ like CIP-68 (`onchain_metadata_extra`) datum-based metadata, is returned as
 `null` to match the Blockfrost response shape.
 
 The Blockfrost-compatible `GET /api/v0/assets/{asset}/addresses` endpoint
-uses `GetUtxosByAssets` for live candidate UTxOs, decodes each UTxO CBOR value
-to recover the exact original address, then aggregates matching asset
-quantities by that address. Decoding CBOR is required because some valid
-addresses, such as pointer addresses, cannot be reconstructed from the
-metadata credential-hash columns alone.
+groups live asset quantities by canonical address in metadata storage. The
+`utxo_address` index stores each UTxO's rendered address, including pointer
+payloads and bootstrap identities that cannot be reconstructed from credential
+columns alone. API-mode startup backfills missing address rows before exposing
+the API; core-mode nodes do not maintain this API-only index. See the
+historical Mesh balance notes above for its separate bounded row scan.
 
 The asset listing endpoints read the mint/burn history rather than live holdings.
 `ListMintedAssets` lists distinct assets with
@@ -5718,7 +5732,7 @@ floor. `TruncateAfterSlot` restores spent UTxOs with an update. The
 `database/lifecycle.Truncate` refuses a target below the floor before
 `TruncateAfterSlot` begins, because already-deleted rows cannot be restored.
 Before a rollback marks retained spent UTxOs live again, it fills any missing
-`utxo_address` identity for asset-bearing rows from their retained output CBOR.
+`utxo_address` identity from their retained output CBOR.
 The address restoration and unspend update share the rollback transaction.
 
 # At-tip recovery repair

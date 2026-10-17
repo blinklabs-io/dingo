@@ -29,8 +29,9 @@ none of them. Failures unwind providers in reverse order. Normal shutdown
 orders APIs, mempool, ledger/database, then storage.
 Database receives provider-owned stores through `database.Stores`.
 Before API providers start, API-mode database startup runs the one-time,
-cancellable backfill for rendered addresses of live asset UTxOs; a sync_state
-marker skips the scan after it completes.
+cancellable backfill for rendered addresses of all retained UTxOs; a sync_state
+marker skips the scan after it completes. The exact-address index supports
+historical balance aggregation without materializing each matching output.
 Storage lifecycle contexts cross the provider boundary. In particular, Badger
 stops scheduling value-log GC before close and prevents a successful rewrite
 from chaining another pass. Because Badger cannot cancel a rewrite already in
@@ -10682,6 +10683,16 @@ as one ANDed address pattern; exact keyset queries scan through nonmatching
 coarse candidates before forming a limited page, preserving continuation-token
 correctness. Blockfrost address-transaction reads apply the same CBOR-backed
 exact check over credential-index candidates and paginate the exact matches.
+Public exact-address UTxO reads carry request cancellation into their
+coordinated transaction. API-mode Blockfrost address pages use the completed
+canonical-address index for exact SQL ordering, offset, and total count; when
+that index is unavailable, the CBOR candidate fallback remains bounded by
+candidate count and decoded bytes. Asset-holder pages group live asset
+quantities by canonical address in metadata storage and hydrate no output
+CBOR. Historical Mesh balance aggregates from the same exact address index and
+slot membership in metadata storage. API-mode startup
+backfills missing address rows for all retained UTxOs in cancellable batches;
+core-mode nodes skip both the backfill and address writes.
 
 `/pools/extended` resolves the whole page with two batched queries rather than
 one query per pool: `database.CountPoolBlocksLifetime` returns every active pool's
