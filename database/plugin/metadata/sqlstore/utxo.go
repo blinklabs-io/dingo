@@ -726,10 +726,16 @@ func (s *Store) importUtxosDeferredSQLite(
 	if len(utxos) == 0 {
 		return nil
 	}
+	// The insert helpers write IDs onto the models and their assets, so work
+	// on copies to leave the caller's slice untouched.
+	owned := make([]models.Utxo, len(utxos))
 	utxoPtrs := make([]*models.Utxo, len(utxos))
 	for i := range utxos {
-		utxoPtrs[i] = &utxos[i]
+		owned[i] = utxos[i]
+		owned[i].Assets = slices.Clone(utxos[i].Assets)
+		utxoPtrs[i] = &owned[i]
 	}
+	utxos = owned
 	var deferredRows rowBatch
 	inserted, err := s.insertUtxoModelsChecked(
 		ctx, db, utxoPtrs, true, &deferredRows,

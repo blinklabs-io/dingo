@@ -2145,6 +2145,32 @@ func TestImportUtxosDeferredSQLiteBatchesLiveRows(t *testing.T) {
 	require.Equal(t, 1, addressCount)
 }
 
+// TestImportUtxosDeferredSQLiteDoesNotMutateInput proves the batched path
+// leaves the caller's models and their assets as it received them.
+func TestImportUtxosDeferredSQLiteDoesNotMutateInput(t *testing.T) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+
+	utxos := []models.Utxo{
+		*utxoForInsertCacheTest(120, 0, 1_000_000),
+		*utxoForInsertCacheTest(121, 0, 1_000_000),
+	}
+	utxos[0].Address = []byte("test-address")
+	utxos[0].Assets = []models.Asset{{
+		Name:        []byte("token"),
+		PolicyId:    bytes.Repeat([]byte{0xab}, 28),
+		Fingerprint: []byte("asset1"),
+		Amount:      types.Uint64(9),
+	}}
+
+	require.NoError(t, store.ImportUtxosDeferredRewardLiveStakeRefresh(utxos, nil))
+	for i := range utxos {
+		require.Zero(t, utxos[i].ID)
+	}
+	require.Zero(t, utxos[0].Assets[0].ID)
+	require.Zero(t, utxos[0].Assets[0].UtxoID)
+}
+
 // TestImportUtxosBoundsTxScopedStatementRetentionInOneTransaction exercises
 // the production shape: one import batch keeps a write transaction open while
 // it inserts many outputs. Reusing one Tx-scoped derivative keeps database/sql
