@@ -94,8 +94,11 @@ func RegisterProvider(host *hostplugin.Host) error {
 			if cfg.ValueThreshold != nil {
 				valueThreshold = *cfg.ValueThreshold
 			}
-			gcEnabled := deps.RunMode != "load"
-			if cfg.GC != nil && deps.RunMode != "load" {
+			// Bulk import runs (load, and the Mithril sync that feeds the
+			// same bulk path) keep value-log GC off regardless of config.
+			bulkImport := deps.RunMode == "load" || deps.RunMode == "sync"
+			gcEnabled := !bulkImport
+			if cfg.GC != nil && !bulkImport {
 				gcEnabled = *cfg.GC
 			}
 			if cfg.GCInterval != 0 && cfg.GCInterval < time.Second {

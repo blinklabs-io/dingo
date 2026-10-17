@@ -135,6 +135,16 @@ func TestProviderStorageModeRunModeDefaults(t *testing.T) {
 			wantCompactBlock: false,
 		},
 		{
+			name:             "core sync disables gc",
+			storageMode:      "core",
+			runMode:          "sync",
+			wantBlockCache:   DefaultCoreBlockCacheSize,
+			wantIndexCache:   DefaultCoreIndexCacheSize,
+			wantCompression:  DefaultCoreCompressionEnabled,
+			wantGC:           false,
+			wantCompactBlock: false,
+		},
+		{
 			name:             "core leios keeps compact metadata",
 			storageMode:      "core",
 			runMode:          "leios",
@@ -246,6 +256,19 @@ func TestProviderExplicitConfigOverridesDefaults(t *testing.T) {
 	require.False(t, store.gcEnabled)
 	require.Equal(t, 7, store.compressionLevel)
 	require.Equal(t, int64(2048), store.valueThreshold)
+}
+
+// TestProviderExplicitZeroValueThresholdOverridesSyncDefault proves an
+// explicit 0 is honoured rather than read as unset and replaced by the Core
+// sync default.
+func TestProviderExplicitZeroValueThresholdOverridesSyncDefault(t *testing.T) {
+	store := resolveBadgerProvider(t, map[string]any{
+		"valueThreshold": uint64(0),
+	}, blob.ProviderDependencies{
+		StorageMode: "core",
+		RunMode:     "sync",
+	})
+	require.Zero(t, store.valueThreshold)
 }
 
 func TestProviderStopDeadlineDuringValueLogGC(t *testing.T) {
