@@ -180,6 +180,7 @@ func legacyGetUtxosByRefsAsOfQuery(
 // idx_utxo_deleted_staking_amount past a handful of terms, and the tx_id-IN
 // form this test also exercises does not.
 func TestGetUtxosByRefsUsesTxIDIndex(t *testing.T) {
+	skipPlanTestUnderRace(t)
 	t.Parallel()
 	store := newMigratedSQLiteStore(t)
 	seedStakeRefLookupUtxos(t, store, 50_000, 256)
@@ -237,6 +238,7 @@ func TestGetUtxosByRefsUsesTxIDIndex(t *testing.T) {
 }
 
 func TestAddressTransactionInputQueryUsesTxIDIndex(t *testing.T) {
+	skipPlanTestUnderRace(t)
 	t.Parallel()
 	store := newMigratedSQLiteStore(t)
 	seedStakeRefLookupUtxos(t, store, 50_000, 256)
@@ -484,6 +486,7 @@ func legacyMarkUtxosDeletedAtSlotQuery(
 // batch into a scan of nearly every live UTxO. Selecting by tx_id and
 // filtering output indexes in Go keeps the lookup on tx_id_output_idx.
 func TestMarkUtxosDeletedAtSlotUsesTxIDIndex(t *testing.T) {
+	skipPlanTestUnderRace(t)
 	t.Parallel()
 	store := newMigratedSQLiteStore(t)
 	seedStakeRefLookupUtxos(t, store, 50_000, 256)
@@ -607,6 +610,7 @@ func TestMarkUtxosDeletedAtSlotUpdatesOnlyRequestedLiveRows(t *testing.T) {
 // whole-table pass moved from the first statement to the second. Statistics
 // hide it, so this test must not run ANALYZE.
 func TestMarkUtxosDeletedAtSlotUpdatePlansOnPrimaryKey(t *testing.T) {
+	skipPlanTestUnderRace(t)
 	t.Parallel()
 	store := newMigratedSQLiteStore(t)
 	seedStakeRefLookupUtxos(t, store, 50_000, 256)
@@ -1350,23 +1354,17 @@ func legacyUtxoStakeRefsQuery(
 	return query, args
 }
 
-// plannerFixtureRows is the row count from which a seeded fixture exists to
-// shape SQLite's query-planner statistics rather than to exercise code paths.
-const plannerFixtureRows = 5_000
-
-// skipPlannerFixtureUnderRace skips a test whose fixture is large enough to
-// assert on a query plan. Those tests insert tens of thousands of rows through
-// one goroutine and compare EXPLAIN output, which the race detector cannot
-// inform and slows several times over. go-test (Linux) and go-test (Linux,
-// quick) run them un-instrumented.
-func skipPlannerFixtureUnderRace(tb testing.TB, rows int) {
-	tb.Helper()
-	if rows >= plannerFixtureRows {
-		testutil.SkipUnderRace(
-			tb,
-			"large single-goroutine fixture that asserts SQLite query plans",
-		)
-	}
+// skipPlanTestUnderRace skips a test that asserts SQLite query plans over a
+// fixture of tens of thousands of rows inserted by one goroutine. The race
+// detector cannot inform such a test and slows it several times over;
+// go-test (Linux) and go-test (Linux, quick) run it un-instrumented. Correctness
+// tests that share the seeders keep running under race.
+func skipPlanTestUnderRace(t testing.TB) {
+	t.Helper()
+	testutil.SkipUnderRace(
+		t,
+		"large single-goroutine fixture that asserts SQLite query plans",
+	)
 }
 
 // seedStakeRefLookupUtxos inserts n live utxo rows with sequential, distinct
@@ -1380,7 +1378,6 @@ func seedStakeRefLookupUtxos(
 	stakeCredentials int,
 ) {
 	tb.Helper()
-	skipPlannerFixtureUnderRace(tb, n)
 	tx, err := store.writeDB.Begin()
 	require.NoError(tb, err)
 	stmt, err := tx.Prepare(
@@ -1443,6 +1440,7 @@ func utxoIDAt(i int) models.UtxoId {
 // regardless of term count, because a plain IN list has no such competing
 // index to be lured by.
 func TestQueryUtxoStakeRefsUsesTxIDIndex(t *testing.T) {
+	skipPlanTestUnderRace(t)
 	t.Parallel()
 	store := newMigratedSQLiteStore(t)
 	seedStakeRefLookupUtxos(t, store, 50_000, 256)
