@@ -31,6 +31,8 @@ const (
 	PlannerStatsTriggerStartup = types.PlannerStatsTriggerStartup
 	// PlannerStatsTriggerEpoch labels a run made after an epoch rollover.
 	PlannerStatsTriggerEpoch = types.PlannerStatsTriggerEpoch
+	// PlannerStatsTriggerPeriodic labels a run made on the refresh interval.
+	PlannerStatsTriggerPeriodic = types.PlannerStatsTriggerPeriodic
 
 	// readConnMaxLifetime bounds how long a pooled read connection keeps the
 	// statistics it loaded when a refresh could not reach it, for example a
@@ -59,7 +61,7 @@ func newPlannerStatsMetrics(
 			prometheus.CounterOpts{
 				Name: sqlMetricNamePrefix + "planner_stats_runs_total",
 				Help: "Incremental planner-statistics runs by trigger " +
-					"(startup, epoch) and result (changed, unchanged, " +
+					"(startup, epoch, periodic) and result (changed, unchanged, " +
 					"skipped, error).",
 			}, []string{"trigger", "result"},
 		)),
@@ -84,6 +86,7 @@ func newPlannerStatsMetrics(
 	// has not happened yet reads zero instead of no data.
 	for _, trigger := range []string{
 		PlannerStatsTriggerStartup, PlannerStatsTriggerEpoch,
+		PlannerStatsTriggerPeriodic,
 	} {
 		for _, result := range []string{
 			"changed", "unchanged", "skipped", "error",

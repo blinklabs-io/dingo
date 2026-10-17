@@ -2949,101 +2949,29 @@ func TestPipelineStagesMatch(t *testing.T) {
 	}
 }
 
-func TestCBORConformanceReportRunsOnLinuxAndFeedsRelease(t *testing.T) {
+func TestCBORConformanceReportRunsOnlyForLinuxRelease(t *testing.T) {
 	root := repoRoot(t)
 	const datasetRevision = "6cd8c928665bbafe90e02066ebb4620e38f051de"
+	const amaruUPLCRevision = "03acfc01807e5e2a8a5466541ad22c856f3de99c"
+	const ndcLedgerRevision = "4fed8790fb81164f9d7a53414acc5f78aaf65422"
 
-	for _, workflow := range []string{prPipeline, publishPipeline} {
-		var config struct {
-			Env map[string]string `yaml:"env"`
-		}
-		if err := yaml.Unmarshal([]byte(readRepoFile(t, root, workflow)), &config); err != nil {
-			t.Fatalf("parse %s: %v", workflow, err)
-		}
-		if config.Env["CBOR_DATASET_REVISION"] != datasetRevision {
-			t.Errorf(
-				"%s CBOR dataset revision = %q, want %q",
-				workflow,
-				config.Env["CBOR_DATASET_REVISION"],
-				datasetRevision,
-			)
-		}
-
-		jobs := pipelineJobs(t, root, workflow)
-		quick, ok := jobs["go-test-linux-quick"].(map[string]any)
+	prJobs := pipelineJobs(t, root, prPipeline)
+	for jobName, rawJob := range prJobs {
+		job, ok := rawJob.(map[string]any)
 		if !ok {
-			t.Fatalf("%s go-test-linux-quick job is missing", workflow)
+			continue
 		}
-		if quick["runs-on"] != "ubuntu-latest" {
-			t.Errorf("%s CBOR conformance job must run on Linux", workflow)
-		}
-		steps, ok := quick["steps"].([]any)
-		if !ok {
-			t.Fatalf("%s go-test-linux-quick job has no steps", workflow)
-		}
-
-		corpusCheckout, reportGeneration, reportUpload := 0, 0, 0
+		steps, _ := job["steps"].([]any)
 		for _, rawStep := range steps {
 			step, ok := rawStep.(map[string]any)
 			if !ok {
 				continue
 			}
-			with, _ := step["with"].(map[string]any)
-			switch step["name"] {
-			case "Checkout CBOR conformance corpus":
-				corpusCheckout++
-				if step["uses"] != "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1" ||
-					with["repository"] != "r2rationality/cardano-cbor-dataset" ||
-					with["ref"] != "${{ env.CBOR_DATASET_REVISION }}" {
-					t.Errorf("%s checks out the wrong CBOR corpus", workflow)
-				}
-			case "Generate CBOR conformance report":
-				reportGeneration++
-				run, _ := step["run"].(string)
-				if !strings.Contains(run, "go run ./internal/cborconformance/cmd") ||
-					!strings.Contains(run, `-corpus-revision "$dataset_revision"`) ||
-					!strings.Contains(run, "gzip -n") {
-					t.Errorf("%s does not generate a compressed, revision-bound report", workflow)
-				}
-			case "Upload CBOR conformance report":
-				reportUpload++
-				uses, _ := step["uses"].(string)
-				if !strings.HasPrefix(uses, "actions/upload-artifact@") ||
-					with["name"] != "dingo-cbor-conformance-report" ||
-					with["if-no-files-found"] != "error" {
-					t.Errorf("%s does not retain the generated report artifact", workflow)
-				}
-			}
-		}
-		if corpusCheckout != 1 || reportGeneration != 1 || reportUpload != 1 {
-			t.Errorf(
-				"%s Linux quick gate has corpus checkout=%d report generation=%d report upload=%d; want one of each",
-				workflow,
-				corpusCheckout,
-				reportGeneration,
-				reportUpload,
-			)
-		}
-		for jobName, rawJob := range jobs {
-			job, ok := rawJob.(map[string]any)
-			if !ok {
-				continue
-			}
-			jobSteps, _ := job["steps"].([]any)
-			for _, rawStep := range jobSteps {
-				step, ok := rawStep.(map[string]any)
-				if !ok {
-					continue
-				}
-				run, _ := step["run"].(string)
-				if strings.Contains(run, "go run ./internal/cborconformance/cmd") &&
-					jobName != "go-test-linux-quick" {
-					t.Errorf(
-						"%s generates the CBOR report outside the Linux quick job: %s",
-						workflow,
-						jobName,
-					)
-				}
+			run, _ := step["run"].(string)
+			if strings.Contains(run, "cborconformance") ||
+				strings.Contains(run, "generate-conformance-reports") ||
+				step["name"] == "Checkout CBOR conformance corpus" {
+				t.Errorf("PR job %s runs report generation or checks out its corpus", jobName)
 			}
 		}
 	}
@@ -3058,17 +2986,6 @@ func TestCBORConformanceReportRunsOnLinuxAndFeedsRelease(t *testing.T) {
 		}
 		return false
 	}
-	_, ok := jobs["go-test-linux-quick"].(map[string]any)
-	if !ok {
-		t.Fatal("publish workflow has no Linux quick test job")
-	}
-	linuxTest, ok := jobs["go-test-linux"].(map[string]any)
-	if !ok {
-		t.Fatal("publish workflow has no Linux service test job")
-	}
-	if !needsJob(linuxTest, "go-test-linux-quick") {
-		t.Error("publish Linux service test job does not wait for the report artifact")
-	}
 	build, ok := jobs["build-linux"].(map[string]any)
 	if !ok {
 		t.Fatal("publish workflow has no Linux build job")
@@ -3078,31 +2995,80 @@ func TestCBORConformanceReportRunsOnLinuxAndFeedsRelease(t *testing.T) {
 		t.Fatal("publish workflow Linux build job has no steps")
 	}
 	if build["runs-on"] != "ubuntu-latest" {
-		t.Error("publish release artifact download must run on Linux")
+		t.Error("publish report generation must run on Linux")
 	}
 	if !needsJob(build, "go-test-linux") {
-		t.Error("publish Linux build does not wait for the report-producing test job")
+		t.Error("publish Linux report job does not wait for Linux tests")
 	}
-	reportDownload := 0
+	if !needsJob(build, "create-draft-release") {
+		t.Error("publish Linux report job does not wait for all release tests")
+	}
+	jobEnv, _ := build["env"].(map[string]any)
+	if jobEnv["CBOR_DATASET_REVISION"] != datasetRevision {
+		t.Errorf("Linux release job CBOR dataset revision = %v, want %q", jobEnv["CBOR_DATASET_REVISION"], datasetRevision)
+	}
+	if jobEnv["AMARU_UPLC_REVISION"] != amaruUPLCRevision {
+		t.Errorf("Linux release job Amaru UPLC revision = %v, want %q", jobEnv["AMARU_UPLC_REVISION"], amaruUPLCRevision)
+	}
+	if jobEnv["NDC_LEDGER_REVISION"] != ndcLedgerRevision {
+		t.Errorf("Linux release job NDC ledger revision = %v, want %q", jobEnv["NDC_LEDGER_REVISION"], ndcLedgerRevision)
+	}
+	corpusCheckout, reportGeneration, releaseUpload := 0, 0, 0
 	for _, rawStep := range steps {
 		step, ok := rawStep.(map[string]any)
-		if !ok || step["name"] != "Download CBOR conformance report" {
+		if !ok {
 			continue
 		}
-		reportDownload++
 		with, _ := step["with"].(map[string]any)
-		if step["uses"] != "actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333" ||
-			step["if"] != "github.ref_type == 'tag'" ||
-			with["name"] != "dingo-cbor-conformance-report" ||
-			with["path"] != "dist" {
-			t.Error("Linux release build does not download the verified report artifact")
-		}
-		if run, _ := step["run"].(string); strings.Contains(run, "go run ./internal/cborconformance/cmd") {
-			t.Error("Linux release build generates the conformance report a second time")
+		env, _ := step["env"].(map[string]any)
+		switch step["name"] {
+		case "Checkout CBOR conformance corpus":
+			corpusCheckout++
+			if step["if"] != "github.ref_type == 'tag'" ||
+				step["uses"] != "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1" ||
+				with["repository"] != "r2rationality/cardano-cbor-dataset" ||
+				with["ref"] != "${{ env.CBOR_DATASET_REVISION }}" {
+				t.Error("Linux release checks out the wrong CBOR corpus")
+			}
+		case "Checkout UPLC conformance corpus":
+			if step["if"] != "github.ref_type == 'tag'" ||
+				with["repository"] != "pragma-org/amaru" ||
+				with["ref"] != "${{ env.AMARU_UPLC_REVISION }}" {
+				t.Error("Linux release checks out the wrong UPLC corpus")
+			}
+		case "Checkout ledger-rules fixtures":
+			if step["if"] != "github.ref_type == 'tag'" ||
+				with["repository"] != "pragma-org/node-diversity-conformance" ||
+				with["ref"] != "${{ env.NDC_LEDGER_REVISION }}" {
+				t.Error("Linux release does not use the pinned ledger-rules fixtures")
+			}
+		case "Generate conformance reports":
+			reportGeneration++
+			if step["if"] != "github.ref_type == 'tag'" ||
+				step["run"] != ".github/scripts/generate-conformance-reports.sh" ||
+				env["CBOR_DATASET_DIR"] != ".conformance/cardano-cbor-dataset" ||
+				env["TURBO_URL"] != "https://pub-2239d82d9a074482b2eb2c886191cb4e.r2.dev/turbo.tar.xz" ||
+				env["TURBO_SHA256"] != "fffe2e959fb8bdb47ee4834008dcceb89fcde53afb659a454beca26cf95507cc" {
+				t.Error("Linux release does not generate reports from the pinned corpora")
+			}
+		case "Upload release assets":
+			releaseUpload++
+			if env["REQUIRE_CONFORMANCE_REPORT"] != "true" {
+				t.Error("Linux release upload does not require every conformance report")
+			}
+		case "Download CBOR conformance report":
+			t.Error("Linux release downloads a report generated during tests")
 		}
 	}
-	if reportDownload != 1 {
-		t.Errorf("publish Linux build has %d report downloads, want one", reportDownload)
+	if corpusCheckout != 1 || reportGeneration != 1 || releaseUpload != 1 {
+		t.Errorf("Linux release has corpus checkout=%d report generation=%d report upload=%d; want one of each", corpusCheckout, reportGeneration, releaseUpload)
+	}
+
+	reportScript := readRepoFile(t, root, ".github/scripts/generate-conformance-reports.sh")
+	if !strings.Contains(reportScript, "go run ./internal/cborconformance/cmd") ||
+		!strings.Contains(reportScript, `-corpus-revision "$dataset_revision"`) ||
+		!strings.Contains(reportScript, `for report in "${DIST_DIR}"/dingo-*.json`) {
+		t.Error("release report script does not generate and compress the revision-bound CBOR report")
 	}
 }
 

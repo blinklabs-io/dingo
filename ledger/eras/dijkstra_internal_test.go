@@ -32,6 +32,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/mary"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"github.com/blinklabs-io/plutigo/cek"
+	"github.com/blinklabs-io/plutigo/data"
 	"github.com/blinklabs-io/plutigo/lang"
 	"github.com/blinklabs-io/plutigo/syn"
 	"github.com/stretchr/testify/require"
@@ -187,6 +188,7 @@ func newDijkstraGuardingValidityOutcomeTx(
 			WsRedeemers: gdijkstra.DijkstraRedeemers{
 				Redeemers: map[lcommon.RedeemerKey]lcommon.RedeemerValue{
 					{Tag: lcommon.RedeemerTagGuarding, Index: 0}: {
+						Data:    lcommon.Datum{Data: data.NewConstr(0)},
 						ExUnits: exUnits,
 					},
 				},
@@ -489,10 +491,10 @@ func (r *validityOutcomeRedeemers) Value(
 ) lcommon.RedeemerValue {
 	for _, entry := range r.entries {
 		if entry.key.Index == uint32(idx) && entry.key.Tag == tag {
-			return entry.val
+			return withRedeemerData(entry.val)
 		}
 	}
-	return lcommon.RedeemerValue{}
+	return withRedeemerData(lcommon.RedeemerValue{})
 }
 
 func (m *mockConwayFeeTxV3) CurrentTreasuryValue() *big.Int {
