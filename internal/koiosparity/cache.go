@@ -194,10 +194,11 @@ type KoiosAccountRewards struct {
 	Epoch        uint64
 	StakeAddress string
 	// RewardType is Koios's /account_reward_history "type" enum value
-	// verbatim: "member", "leader", "treasury", "reserves", or "refund".
-	// CompareAccountEpoch currently treats treasury/reserves/refund as out
-	// of scope (see its doc comment) — stored here regardless, per this
-	// cache's "store the full documented schema" convention.
+	// verbatim: "member", "leader", "proposal_refund", "treasury",
+	// "reserves", or "refund". CompareAccountEpoch compares the first three
+	// and treats treasury/reserves/refund as out of scope (see its doc
+	// comment) — stored here regardless, per this cache's "store the full
+	// documented schema" convention.
 	RewardType string
 	Earned     string // lovelace decimal string (Koios "amount")
 	// SpendableEpoch is Koios's spendable_epoch — stored for reference only;

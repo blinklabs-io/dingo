@@ -240,7 +240,7 @@ services:
       start_period: 10s
 
   txpump-dingo:
-    image: ${TXPUMP_IMAGE:-ghcr.io/blinklabs-io/cardano-txpump:main}
+    image: ${TXPUMP_IMAGE:-ghcr.io/blinklabs-io/cardano-txpump:main@sha256:c3dadf8c6a6a1604487e32c2ee0503801369a989f0eaf82c73f0e7c5f7c5f9f3}
     pull_policy: always
     profiles: ["dingo"]
     init: true
@@ -345,7 +345,7 @@ services:
       start_period: 10s
 
   cardano-producer:
-    image: ghcr.io/blinklabs-io/cardano-node:11.0.1
+    image: ghcr.io/blinklabs-io/cardano-node:11.0.1@sha256:d5ede07a890e9b6a0a5182cdba9dbaf73756336762235e0934a11690beedae02
     profiles: ["conformance"]
     depends_on:
       configurator:
@@ -399,7 +399,7 @@ services:
       start_period: 10s
 
   txpump:
-    image: ${TXPUMP_IMAGE:-ghcr.io/blinklabs-io/cardano-txpump:main}
+    image: ${TXPUMP_IMAGE:-ghcr.io/blinklabs-io/cardano-txpump:main@sha256:c3dadf8c6a6a1604487e32c2ee0503801369a989f0eaf82c73f0e7c5f7c5f9f3}
     pull_policy: always
     profiles: ["conformance"]
     init: true
@@ -445,7 +445,7 @@ services:
         ipv4_address: ${DEVNET_NET_BASE:-172.20.0}.20
 
   cardano-relay:
-    image: ghcr.io/blinklabs-io/cardano-node:11.0.1
+    image: ghcr.io/blinklabs-io/cardano-node:11.0.1@sha256:d5ede07a890e9b6a0a5182cdba9dbaf73756336762235e0934a11690beedae02
     profiles: ["conformance"]
     depends_on:
       configurator:
@@ -512,7 +512,7 @@ services:
       retries: 3
 
   koios-parity-prometheus:
-    image: prom/prometheus:v3.0.1
+    image: prom/prometheus:v3.0.1@sha256:565ee86501224ebbb98fc10b332fa54440b100469924003359edf49cbce374bd
     profiles: ["koios-parity"]
     restart: unless-stopped
     depends_on:
@@ -525,7 +525,7 @@ services:
       - "127.0.0.1:${DEVNET_KOIOS_PARITY_PROMETHEUS_PORT:-13900}:9090"
 
   koios-parity-grafana:
-    image: grafana/grafana:11.3.1
+    image: grafana/grafana:11.3.1@sha256:fa801ab6e1ae035135309580891e09f7eb94d1abdbd2106bdc288030b028158c
     profiles: ["koios-parity"]
     restart: unless-stopped
     depends_on:

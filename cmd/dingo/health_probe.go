@@ -65,7 +65,7 @@ type boundHealthProbe struct {
 // what keeps the container alive; readiness is what keeps it out of a load
 // balancer.
 func bindHealthProbe(cfg *config.Config) (*boundHealthProbe, error) {
-	server := node.NewHealthServer(cfg, nil)
+	server := node.NewHealthServer(cfg, nil, nil)
 	if server == nil {
 		return nil, nil
 	}

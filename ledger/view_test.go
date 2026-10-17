@@ -2667,7 +2667,7 @@ func TestLedgerViewGovernanceActionContentDrivesRules(t *testing.T) {
 	t.Run("hard fork succession", func(t *testing.T) {
 		pparams := &conway.ConwayProtocolParameters{
 			ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
-				Major: 9,
+				Major: 10,
 			},
 		}
 		lv, db := governanceTestView(t, pparams)

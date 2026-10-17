@@ -65,6 +65,29 @@ const (
 // file for a chunk number, which ends the contiguous published history.
 var errRemoteChunkNotPublished = errors.New("remote chunk not published")
 
+func isExpectedRemotePrefetchCleanupError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		causes := joined.Unwrap()
+		if len(causes) == 0 {
+			return false
+		}
+		for _, cause := range causes {
+			if !isExpectedRemotePrefetchCleanupError(cause) {
+				return false
+			}
+		}
+		return true
+	}
+	if wrapped, ok := err.(interface{ Unwrap() error }); ok {
+		return isExpectedRemotePrefetchCleanupError(wrapped.Unwrap())
+	}
+	return errors.Is(err, context.Canceled) ||
+		errors.Is(err, errRemoteChunkNotPublished)
+}
+
 var errRemoteImmutableFileTooLarge = errors.New(
 	"remote ImmutableDB file exceeds its format limit",
 )
@@ -635,7 +658,10 @@ func copyBlocksRemote(
 	defer func() {
 		cancelFetch()
 		for _, done := range pending {
-			<-done
+			if err := <-done; err != nil &&
+				!isExpectedRemotePrefetchCleanupError(err) {
+				logger.Warn("remote prefetch cleanup failed", "error", err)
+			}
 		}
 	}()
 	next := first

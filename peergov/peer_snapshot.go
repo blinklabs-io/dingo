@@ -71,8 +71,9 @@ func poolRelayFromSnapshotAccessPoint(
 	ip := net.ParseIP(accessPoint.Address)
 	if ip == nil {
 		return PoolRelay{
-			Hostname: accessPoint.Address,
-			Port:     accessPoint.Port,
+			Hostname:    accessPoint.Address,
+			Port:        accessPoint.Port,
+			IsMultiHost: accessPoint.Port == 0,
 		}, true
 	}
 	if ipv4 := ip.To4(); ipv4 != nil {

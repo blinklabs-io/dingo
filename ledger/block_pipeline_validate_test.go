@@ -34,6 +34,37 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// newTestReplayPipeline configures the real persisted decoder and separate
+// bounded header-crypto workers used by decodeReadChainBatch.
+func newTestReplayPipeline(
+	ls *LedgerState,
+	opts ...pipeline.PipelineOption,
+) *pipeline.BlockPipeline {
+	cfg := pipeline.DefaultPipelineConfig()
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+	ls.blockPipelineValidation = nil
+	ls.blockPipelineValidationWindow = 0
+	ls.blockPipelineValidationMetrics = pipeline.NewPipelineMetrics(0)
+	if cfg.ValidateWorkers > 0 {
+		ls.blockPipelineValidation = pipeline.NewValidateStage(
+			pipeline.ValidateStageConfig{
+				BlockLocal:        true,
+				Eta0Provider:      cfg.Eta0Provider,
+				SlotsPerKesPeriod: cfg.SlotsPerKesPeriod,
+			},
+		)
+		ls.blockPipelineValidationWorkers = cfg.ValidateWorkers
+		if cfg.MaxPendingBlocks > 0 {
+			ls.blockPipelineValidationWindow = cfg.MaxPendingBlocks + 1
+		}
+	}
+	cfg.ValidateWorkers = 0
+	cfg.TrustedDecodeOnly = true
+	return pipeline.NewBlockPipeline(pipeline.WithConfig(cfg))
+}
+
 func TestNewLedgerStateRejectsPipelineValidationWithoutKesConfig(
 	t *testing.T,
 ) {
@@ -143,9 +174,11 @@ func newValidatedPipelineTestLedger(
 	}
 	ls.slotsPerKESPeriod.Store(ls.loadSlotsPerKESPeriod())
 	ls.publishSnapshotsLocked()
-	ls.blockPipeline = pipeline.NewBlockPipeline(
+	ls.blockPipeline = newTestReplayPipeline(ls,
 		pipeline.WithDecodeWorkers(1),
-		pipeline.WithTrustedDecodeOnly(),
+		pipeline.WithValidateWorkers(1),
+		pipeline.WithEta0(vb.EpochNonceHex),
+		pipeline.WithSlotsPerKesPeriod(vb.SlotsPerKesPeriod),
 	)
 	require.NoError(t, ls.blockPipeline.Start(t.Context()))
 	t.Cleanup(func() {
@@ -223,9 +256,11 @@ func TestDecodeReadChainBatchAcceptsRealByronWithValidation(t *testing.T) {
 	}
 	ls.slotsPerKESPeriod.Store(ls.loadSlotsPerKESPeriod())
 	ls.publishSnapshotsLocked()
-	ls.blockPipeline = pipeline.NewBlockPipeline(
+	ls.blockPipeline = newTestReplayPipeline(ls,
 		pipeline.WithDecodeWorkers(1),
-		pipeline.WithTrustedDecodeOnly(),
+		pipeline.WithValidateWorkers(1),
+		pipeline.WithEta0Provider(ls.blockPipelineEta0Provider),
+		pipeline.WithSlotsPerKesPeriod(ls.SlotsPerKESPeriod()),
 	)
 	require.NoError(t, ls.blockPipeline.Start(t.Context()))
 	t.Cleanup(func() { require.NoError(t, ls.blockPipeline.Stop()) })
@@ -373,9 +408,11 @@ func TestDecodeReadChainBatchSkipsValidationWithoutCachedNonce(
 	}
 	ls.publishSnapshotsLocked()
 	require.NoError(t, ls.blockPipeline.Stop())
-	ls.blockPipeline = pipeline.NewBlockPipeline(
+	ls.blockPipeline = newTestReplayPipeline(ls,
 		pipeline.WithDecodeWorkers(1),
-		pipeline.WithTrustedDecodeOnly(),
+		pipeline.WithValidateWorkers(1),
+		pipeline.WithEta0Provider(ls.blockPipelineEta0Provider),
+		pipeline.WithSlotsPerKesPeriod(vb.SlotsPerKesPeriod),
 	)
 	require.NoError(t, ls.blockPipeline.Start(t.Context()))
 
@@ -433,9 +470,11 @@ func TestDecodeReadChainBatchMirrorsSerialValidationGates(t *testing.T) {
 			ls.publishSnapshotsLocked()
 
 			require.NoError(t, ls.blockPipeline.Stop())
-			ls.blockPipeline = pipeline.NewBlockPipeline(
+			ls.blockPipeline = newTestReplayPipeline(ls,
 				pipeline.WithDecodeWorkers(1),
-				pipeline.WithTrustedDecodeOnly(),
+				pipeline.WithValidateWorkers(1),
+				pipeline.WithEta0(wrongNonceHexFor(t, vb.EpochNonceHex)),
+				pipeline.WithSlotsPerKesPeriod(vb.SlotsPerKesPeriod),
 			)
 			require.NoError(t, ls.blockPipeline.Start(t.Context()))
 
@@ -525,9 +564,11 @@ func TestDecodeReadChainBatchRejectsFailedValidationWhenEnabled(t *testing.T) {
 	ls := newValidatedPipelineTestLedger(t, vb)
 	require.NoError(t, ls.blockPipeline.Stop())
 	useWrongEpochNonce(t, ls, vb)
-	ls.blockPipeline = pipeline.NewBlockPipeline(
+	ls.blockPipeline = newTestReplayPipeline(ls,
 		pipeline.WithDecodeWorkers(2),
-		pipeline.WithTrustedDecodeOnly(),
+		pipeline.WithValidateWorkers(2),
+		pipeline.WithEta0(wrongNonceHexFor(t, vb.EpochNonceHex)),
+		pipeline.WithSlotsPerKesPeriod(vb.SlotsPerKesPeriod),
 	)
 	require.NoError(t, ls.blockPipeline.Start(t.Context()))
 
@@ -579,9 +620,11 @@ func TestDecodeReadChainBatchDrainsRemainingResultsAfterEarlyFailure(
 
 	ls := newValidatedPipelineTestLedger(t, vb2)
 	require.NoError(t, ls.blockPipeline.Stop())
-	ls.blockPipeline = pipeline.NewBlockPipeline(
+	ls.blockPipeline = newTestReplayPipeline(ls,
 		pipeline.WithDecodeWorkers(2),
-		pipeline.WithTrustedDecodeOnly(),
+		pipeline.WithValidateWorkers(2),
+		pipeline.WithEta0(vb2.EpochNonceHex),
+		pipeline.WithSlotsPerKesPeriod(vb2.SlotsPerKesPeriod),
 	)
 	require.NoError(t, ls.blockPipeline.Start(t.Context()))
 
@@ -624,7 +667,7 @@ func TestDecodeReadChainBatchIgnoresValidationOutcomeWhenDisabled(
 
 	var seed [32]byte
 	seed[0] = 4
-	block, _ := buildValidatedTestModelsBlock(t, seed, 7, 100, 1)
+	block, vb := buildValidatedTestModelsBlock(t, seed, 7, 100, 1)
 
 	ls := &LedgerState{
 		config: LedgerStateConfig{
@@ -635,9 +678,11 @@ func TestDecodeReadChainBatchIgnoresValidationOutcomeWhenDisabled(
 	// Wire a nonce that will fail validation -- if decodeReadChainBatch
 	// incorrectly consulted the validation outcome anyway, this would flip
 	// the assertion below from ok=true to ok=false.
-	ls.blockPipeline = pipeline.NewBlockPipeline(
+	ls.blockPipeline = newTestReplayPipeline(ls,
 		pipeline.WithDecodeWorkers(2),
-		pipeline.WithTrustedDecodeOnly(),
+		pipeline.WithValidateWorkers(2),
+		pipeline.WithEta0(wrongNonceHexFor(t, vb.EpochNonceHex)),
+		pipeline.WithSlotsPerKesPeriod(vb.SlotsPerKesPeriod),
 	)
 	require.NoError(t, ls.blockPipeline.Start(t.Context()))
 	defer func() {
@@ -747,9 +792,11 @@ func newAdmissionSkipTestLedger(
 		ls.publishSnapshotsLocked()
 	}
 	require.NoError(t, ls.blockPipeline.Stop())
-	ls.blockPipeline = pipeline.NewBlockPipeline(
+	ls.blockPipeline = newTestReplayPipeline(ls,
 		pipeline.WithDecodeWorkers(1),
-		pipeline.WithTrustedDecodeOnly(),
+		pipeline.WithValidateWorkers(1),
+		pipeline.WithEta0Provider(ls.blockPipelineEta0Provider),
+		pipeline.WithSlotsPerKesPeriod(vb.SlotsPerKesPeriod),
 	)
 	require.NoError(t, ls.blockPipeline.Start(t.Context()))
 	return ls

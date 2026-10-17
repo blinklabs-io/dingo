@@ -470,7 +470,7 @@ var flagSpecs = []flagSpec{
 	boolFlag(
 		"BarkBlockDownloadAllowPrivateAddresses",
 		"bark-block-download-allow-private-addresses",
-		"allow Bark block downloads from private, loopback, and special-use addresses",
+		"allow Bark RPC and block downloads from private, loopback, and special-use addresses",
 	),
 	uintFlag("BarkPort", "bark-port", "Bark RPC port"),
 	stringFlag(

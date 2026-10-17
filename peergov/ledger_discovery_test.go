@@ -370,6 +370,7 @@ func TestLoadPeerSnapshotConvertsRelayShapes(t *testing.T) {
 			{
 				Relays: []topology.TopologyConfigP2PAccessPoint{
 					{Address: "relay.example.com", Port: 3002},
+					{Address: "srv.example.com"},
 					{Address: "44.0.1.1", Port: 3003},
 					{Address: "2001:db8::1", Port: 3004},
 				},
@@ -379,15 +380,20 @@ func TestLoadPeerSnapshotConvertsRelayShapes(t *testing.T) {
 
 	relays := PoolRelaysFromPeerSnapshot(snapshot)
 
-	require.Len(t, relays, 3)
+	require.Len(t, relays, 4)
 	assert.Equal(t, "relay.example.com", relays[0].Hostname)
 	assert.Equal(t, uint(3002), relays[0].Port)
-	require.NotNil(t, relays[1].IPv4)
-	assert.Equal(t, "44.0.1.1", relays[1].IPv4.String())
-	assert.Equal(t, uint(3003), relays[1].Port)
-	require.NotNil(t, relays[2].IPv6)
-	assert.Equal(t, "2001:db8::1", relays[2].IPv6.String())
-	assert.Equal(t, uint(3004), relays[2].Port)
+	assert.False(t, relays[0].IsMultiHost)
+	assert.Equal(t, "srv.example.com", relays[1].Hostname)
+	assert.Zero(t, relays[1].Port)
+	assert.True(t, relays[1].IsMultiHost)
+	assert.Equal(t, []string{"srv.example.com:0"}, relays[1].Addresses())
+	require.NotNil(t, relays[2].IPv4)
+	assert.Equal(t, "44.0.1.1", relays[2].IPv4.String())
+	assert.Equal(t, uint(3003), relays[2].Port)
+	require.NotNil(t, relays[3].IPv6)
+	assert.Equal(t, "2001:db8::1", relays[3].IPv6.String())
+	assert.Equal(t, uint(3004), relays[3].Port)
 }
 
 func TestDiscoverLedgerPeers_BoundedByTarget(t *testing.T) {

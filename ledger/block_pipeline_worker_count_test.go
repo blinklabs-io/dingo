@@ -15,7 +15,6 @@
 package ledger
 
 import (
-	"context"
 	"fmt"
 	"runtime"
 	"testing"
@@ -104,11 +103,9 @@ func buildValidatedPipelineThroughputBlocks(
 	return blocks, epochNonceHex, slotsPerKesPeriod
 }
 
-// runPipelineThroughput submits every block through a freshly constructed
-// pipeline.BlockPipeline with decode and header validation enabled, and
-// returns blocks-processed-per-second. It fails if any block fails to decode
-// or validate; every generated block is genuinely valid, so an error means
-// the harness (not the worker count) is broken.
+// runPipelineThroughput measures persisted decode plus the separate bounded
+// header-crypto workers used by NewLedgerState, with the requested worker count
+// for both. Every generated block must pass real VRF/KES validation.
 func runPipelineThroughput(
 	t *testing.T,
 	blocks []models.Block,
@@ -117,15 +114,10 @@ func runPipelineThroughput(
 	workers int,
 ) float64 {
 	t.Helper()
-	pl := pipeline.NewBlockPipeline(
+	ls := &LedgerState{config: LedgerStateConfig{Logger: testLogger()}}
+	pl := newTestReplayPipeline(ls,
 		pipeline.WithDecodeWorkers(workers),
 		pipeline.WithValidateWorkers(workers),
-		pipeline.WithHeaderOnly(),
-		pipeline.WithBlockTypeResolver(
-			func(context.Context, []byte) (uint, error) {
-				return gledger.BlockTypeConway, nil
-			},
-		),
 		pipeline.WithEta0(epochNonceHex),
 		pipeline.WithSlotsPerKesPeriod(slotsPerKesPeriod),
 	)
@@ -133,20 +125,30 @@ func runPipelineThroughput(
 	defer func() { require.NoError(t, pl.Stop()) }()
 
 	start := time.Now()
-	for _, blk := range blocks {
-		tip := ocommon.Tip{
-			Point:       ocommon.NewPoint(blk.Slot, blk.Hash),
-			BlockNumber: blk.Number,
+	submitted := make(chan error, 1)
+	go func() {
+		for _, blk := range blocks {
+			tip := ocommon.Tip{
+				Point:       ocommon.NewPoint(blk.Slot, blk.Hash),
+				BlockNumber: blk.Number,
+			}
+			if err := pl.Submit(t.Context(), blk.Type, blk.Cbor, tip); err != nil {
+				submitted <- err
+				return
+			}
 		}
-		require.NoError(
-			t,
-			pl.Submit(context.Background(), blk.Type, blk.Cbor, tip),
-		)
+		submitted <- nil
+	}()
+	items := make([]*pipeline.BlockItem, 0, len(blocks))
+	for range blocks {
+		item := <-pl.Results()
+		require.NoError(t, item.DecodeError())
+		items = append(items, item)
 	}
-	results := pl.Results()
-	for i := range blocks {
-		item := <-results
-		require.NoError(t, item.DecodeError(), "block %d", i)
+	require.NoError(t, <-submitted)
+	require.NoError(t, ls.validateReadChainBatch(t.Context(), items))
+	for i, item := range items {
+		require.True(t, item.IsValid(), "block %d", i)
 		require.NoError(t, item.ValidationError(), "block %d", i)
 	}
 	elapsed := time.Since(start)

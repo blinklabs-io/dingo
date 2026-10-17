@@ -91,7 +91,7 @@ txpump does not verify on-chain confirmation or recover outputs lost to a
 rollback, so expiry alone does not prove an output is spendable. It exists
 to keep the mempool exercised while the consensus tests run, so block bodies
 are non-empty and tx-submission / mempool paths are continuously hit. Compose
-pulls `ghcr.io/blinklabs-io/cardano-txpump:main` by default; set
+pulls the digest-pinned `ghcr.io/blinklabs-io/cardano-txpump:main` image by default; set
 `TXPUMP_IMAGE` to select another image tag. Its source and container build
 live in the [`cardano-txpump`](https://github.com/blinklabs-io/cardano-txpump)
 repository.
@@ -168,7 +168,7 @@ someone quietly speeds them up.
   image.
 - Local build of Dingo via the repo root `Dockerfile` — Compose builds it
   automatically on `up` / `run-tests.sh`.
-- Pull of `ghcr.io/blinklabs-io/cardano-txpump:main` for the transaction
+- Pull of the digest-pinned `ghcr.io/blinklabs-io/cardano-txpump:main` image for the transaction
   generator; set `TXPUMP_IMAGE` to select a different tag.
 
 ## Building Dingo
@@ -801,7 +801,7 @@ harness and the compose port mappings always agree.
 | `compose-project.sh`         | Derives a stable, worktree-specific Compose project name, a collision-checked bridge subnet and host port block, and a rendered topology directory; wraps `docker compose up` with a retry on subnet collision |
 | `start.sh` / `stop.sh`       | Convenience wrappers around `docker compose up -d` / `down -v`; accept `--conformance` |
 | `run-tests.sh`               | Full native-Linux bring-up → test → tear-down runner; accepts `--conformance`, `--keep-up`, and forwards other flags to `go test` |
-| `TXPUMP_IMAGE` (default `ghcr.io/blinklabs-io/cardano-txpump:main`) | Transaction generator container image |
+| `TXPUMP_IMAGE` (default is digest-pinned `ghcr.io/blinklabs-io/cardano-txpump:main`) | Transaction generator container image |
 | `harness.go`                 | Go test harness: Ouroboros NtN client, tip queries, consensus checks, the `WaitForChainStart` genesis gate, and per-scenario failure capture (build tag `devnet`) |
 | `config.go`                  | `testnet*.yaml` loader, derived timings, and spec validation (`linux`) |
 | `chainstate.go`              | Observed-chain state machine: applies RollForward/RollBackward, tracks tip and retained headers, and exposes cross-node agreement helpers and bounded-context conditions (`linux`) |

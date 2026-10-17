@@ -1421,6 +1421,14 @@ func TestProcessEpochRatifiesAndEnactsDijkstraOnlyParameterChanges(
 	maxTx := uint32(1_000)
 	stride := uint32(128)
 	multiplier := &cbor.Rat{Rat: new(big.Rat).SetFrac64(7, 4)}
+	perasMinCandidateAge := uint32(90)
+	perasHealingFactor := testRatPtr(1, 2)
+	perasCertBoost := uint16(15)
+	perasCommitteeSize := uint16(100)
+	perasBootstrapRound := uint32(42)
+	perasSafetyMargin := testRatPtr(1, 10)
+	refInputPolicyCost := uint64(2)
+	refInputDatumCost := uint64(3)
 	tests := []struct {
 		name   string
 		update gdijkstra.DijkstraProtocolParameterUpdate
@@ -1460,6 +1468,38 @@ func TestProcessEpochRatifiesAndEnactsDijkstraOnlyParameterChanges(
 			},
 			assert: func(t *testing.T, p *gdijkstra.DijkstraProtocolParameters) {
 				require.Zero(t, p.RefScriptCostMultiplier.Cmp(multiplier.Rat))
+			},
+		},
+		{
+			name: "keys-49-through-56-current-parameters",
+			update: gdijkstra.DijkstraProtocolParameterUpdate{
+				PerasMinCandidateBlockAge:        &perasMinCandidateAge,
+				PerasHealingFactor:               perasHealingFactor,
+				PerasCertBoost:                   &perasCertBoost,
+				PerasTargetCommitteeSize:         &perasCommitteeSize,
+				PerasBootstrapRound:              &perasBootstrapRound,
+				PerasBootstrapRoundSet:           true,
+				PerasQuorumThresholdSafetyMargin: perasSafetyMargin,
+				RefInputsCostPerMultiAssetPolicy: &refInputPolicyCost,
+				RefInputsCostPerDatumByte:        &refInputDatumCost,
+			},
+			assert: func(t *testing.T, p *gdijkstra.DijkstraProtocolParameters) {
+				require.Equal(t, perasMinCandidateAge, p.PerasMinCandidateBlockAge)
+				require.Zero(t, p.PerasHealingFactor.Cmp(perasHealingFactor.Rat))
+				require.Equal(t, perasCertBoost, p.PerasCertBoost)
+				require.Equal(t, perasCommitteeSize, p.PerasTargetCommitteeSize)
+				require.NotNil(t, p.PerasBootstrapRound)
+				require.Equal(t, perasBootstrapRound, *p.PerasBootstrapRound)
+				require.Zero(
+					t,
+					p.PerasQuorumThresholdSafetyMargin.Cmp(perasSafetyMargin.Rat),
+				)
+				require.Equal(
+					t,
+					refInputPolicyCost,
+					p.RefInputsCostPerMultiAssetPolicy,
+				)
+				require.Equal(t, refInputDatumCost, p.RefInputsCostPerDatumByte)
 			},
 		},
 	}
@@ -1512,8 +1552,9 @@ func TestProcessEpochRatifiesAndEnactsDijkstraOnlyParameterChanges(
 						PpSecurityGroup: newRat(1, 1),
 					},
 					DRepVotingThresholds: conway.DRepVotingThresholds{
-						PpNetworkGroup: newRat(1, 1),
-						PpGovGroup:     newRat(1, 1),
+						PpNetworkGroup:  newRat(1, 1),
+						PpEconomicGroup: newRat(1, 1),
+						PpGovGroup:      newRat(1, 1),
 					},
 				},
 				MaxRefScriptSizePerBlock: 1_000,
@@ -3095,4 +3136,25 @@ func TestDecideRatificationOnReadOnlySnapshotMatchesBoundary(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.NotNil(t, child.ExpiredEpoch)
+}
+
+// The quorum is shared configuration; a caller mutating the returned value
+// must not change what later ratification reads.
+// Not t.Parallel: without the copy the default-quorum case writes the
+// package-level defaultCCQuorum.
+func TestEffectiveCommitteeQuorumReturnsCopy(t *testing.T) {
+	t.Cleanup(func() { defaultCCQuorum.SetFrac64(2, 3) })
+	genesis := &conway.ConwayGenesis{}
+	genesis.Committee.Threshold = &cbor.Rat{Rat: big.NewRat(3, 5)}
+	quorum, err := EffectiveCommitteeQuorum(context.Background(), nil, nil, genesis)
+	require.NoError(t, err)
+	quorum.SetInt64(1)
+	assert.Zero(t, genesis.Committee.Threshold.Cmp(big.NewRat(3, 5)))
+
+	quorum, err = EffectiveCommitteeQuorum(context.Background(), nil, nil, nil)
+	require.NoError(t, err)
+	quorum.SetInt64(0)
+	quorum, err = EffectiveCommitteeQuorum(context.Background(), nil, nil, nil)
+	require.NoError(t, err)
+	assert.Zero(t, quorum.Cmp(big.NewRat(2, 3)))
 }

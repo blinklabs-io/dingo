@@ -56,12 +56,12 @@ api/mcp/
 
 ### 2.3 Security & Guardrails (`security.go`, `sanitize.go`)
 - **Bearer Authentication**: Optional shared secret token configured via `DINGO_PLUGINS_API_MCP_CONFIG_AUTH_TOKEN` or YAML `plugins.api.mcp.config.authToken`.
-- **Rate Limiting**: Thread-safe token bucket rate limiter (default: 60 requests/sec with burst capacity of 15) keyed per client IP address.
+- **Rate Limiting**: Thread-safe token bucket rate limiter (default: 60 requests/sec with burst capacity of 15) keyed per client IP address. Pre-authentication state is capped at 4096 identities and one timer removes entries after 30 idle minutes.
 - **Strict Read-Only SQL Validator**:
   - Identifies the main statement after CTE definitions, accounting for comments, quoted data and nested expressions; permits SELECT/VALUES reads and EXPLAIN without executing DDL or DML.
   - Enforces single-statement execution (blocks `;` statement chaining).
   - Whitelists only safe PRAGMA queries (`table_info`, `index_list`, `index_info`, `foreign_key_list`).
-- **External Text Handling**: Bounds text, removes control and invisible formatting, JSON-quotes it, and escapes Markdown syntax before formatting registry and CIP-25 data. Results explicitly mark external metadata as untrusted; clients must not follow instructions contained in it.
+- **External Text Handling**: Bounds text, removes control and invisible formatting, JSON-quotes it, and escapes Markdown syntax before formatting registry and CIP-25 data. Markdown tables sanitize and HTML-escape each cell at the table boundary, then wrap the table in an explicit untrusted-data envelope. Clients must not follow instructions contained in it.
 - **Network Bind Protection**: The default listener is loopback. Provider construction rejects a non-loopback bind unless both an auth token and server TLS are configured.
 
 ---
@@ -227,8 +227,8 @@ handling. Only same-origin on loopback or explicitly allowed origins pass; the s
 wildcard is ignored for MCP. Native clients without Origin remain supported.
 `DINGO_MCP_AUTH_TOKEN` is a compatibility alias below the canonical plugin
 environment setting in precedence. HTTP has no absolute write deadline because
-SSE responses span client sessions. Rate-limit entries are reclaimed during
-requests, so replacing a server retains no cleanup goroutine.
+SSE responses span client sessions. The limiter's idle-expiry timer reclaims
+entries even when no requests arrive and is stopped when its server shuts down.
 
 ### Upstream references
 

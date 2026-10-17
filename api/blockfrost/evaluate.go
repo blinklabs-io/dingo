@@ -23,6 +23,8 @@ import (
 	"mime"
 	"net/http"
 	"strings"
+
+	"github.com/blinklabs-io/dingo/ledger"
 )
 
 const (
@@ -147,7 +149,11 @@ func (b *Blockfrost) handleTransactionEvaluate(
 	if !ok {
 		return
 	}
-	b.evaluateTransaction(r.Context(), w, payload)
+	b.evaluateTransaction(
+		ledger.WithEvaluationSource(r.Context(), r.RemoteAddr),
+		w,
+		payload,
+	)
 }
 
 // handleTransactionEvaluateUtxos handles
@@ -190,7 +196,11 @@ func (b *Blockfrost) handleTransactionEvaluateUtxos(
 		)
 		return
 	}
-	b.evaluateTransaction(r.Context(), w, []byte(req.Cbor))
+	b.evaluateTransaction(
+		ledger.WithEvaluationSource(r.Context(), r.RemoteAddr),
+		w,
+		[]byte(req.Cbor),
+	)
 }
 
 // evaluateTransaction decodes a transaction payload, evaluates it, and writes
