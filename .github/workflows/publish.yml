@@ -515,6 +515,10 @@ jobs:
       CBOR_DATASET_REVISION: '6cd8c928665bbafe90e02066ebb4620e38f051de'
       AMARU_UPLC_REVISION: '03acfc01807e5e2a8a5466541ad22c856f3de99c'
       NDC_LEDGER_REVISION: '4fed8790fb81164f9d7a53414acc5f78aaf65422'
+      TURBO_DATASET_REVISION: '862fa7127fe07c2537005955cf98e7b332151996'
+      TURBO_DATASET_DATE: '20260826'
+      TURBO_SHARD_0000_SHA256: 'c446743b869955bae355aea04fade0a0dc46f01ae08f04bcada44d8944e477ee'
+      TURBO_SHARD_0001_SHA256: '2bb62f11dee861296fbdf7de69599340cd6d4b93a7fad37a365b0dcd004fd83d'
     permissions:
       attestations: write
       contents: write
@@ -575,8 +579,6 @@ jobs:
         env:
           RELEASE_TAG: ${{ github.ref_name }}
           CBOR_DATASET_DIR: .conformance/cardano-cbor-dataset
-          TURBO_URL: https://pub-2239d82d9a074482b2eb2c886191cb4e.r2.dev/turbo.tar.xz
-          TURBO_SHA256: fffe2e959fb8bdb47ee4834008dcceb89fcde53afb659a454beca26cf95507cc
         run: .github/scripts/generate-conformance-reports.sh
       - name: Upload release assets
         if: github.ref_type == 'tag'

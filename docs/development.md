@@ -59,8 +59,8 @@ document what each profile proves and excludes.
 The Linux tag workflow generates four conformance reports and uploads them as
 dated JSON release assets: Conway CBOR decoding, ledger rules, UPLC
 conformance and UPLC turbo performance. Each input corpus is pinned by commit,
-and the turbo archive by SHA-256. A report that records failures is still
-uploaded; the release step requires all four reports to exist. Report
+and the TurboCardano archive shards by SHA-256. A report that records failures
+is still uploaded; the release step requires all four reports to exist. Report
 generation never stops a release: when a generator crashes or its inputs
 cannot be prepared, an `error` report naming the scenario and the cause is
 uploaded in its place. Generator and turbo corpus preparation deadlines leave
