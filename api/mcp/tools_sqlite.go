@@ -163,11 +163,7 @@ func RegisterSQLiteTools(
 				}, nil, nil
 			}
 
-			rowFormatted := make([]string, len(cols))
-			for i, val := range rowValues {
-				rowFormatted[i] = FormatCell(val)
-			}
-			resultRows = append(resultRows, rowFormatted)
+			resultRows = append(resultRows, boundedSQLiteRow(rowValues))
 			count++
 			if count >= effectiveLimit {
 				break
@@ -261,11 +257,7 @@ func RegisterSQLiteTools(
 
 		for rows.Next() {
 			if err := rows.Scan(valuePtrs...); err == nil {
-				rowFormatted := make([]string, len(cols))
-				for i, val := range rowValues {
-					rowFormatted[i] = FormatCell(val)
-				}
-				planRows = append(planRows, rowFormatted)
+				planRows = append(planRows, boundedSQLiteRow(rowValues))
 			}
 		}
 
@@ -379,11 +371,7 @@ func RegisterSQLiteTools(
 			if err := rows.Scan(valuePtrs...); err != nil {
 				return nil, nil, err
 			} else {
-				rowFormatted := make([]string, len(cols))
-				for i, val := range rowValues {
-					rowFormatted[i] = FormatCell(val)
-				}
-				colRows = append(colRows, rowFormatted)
+				colRows = append(colRows, boundedSQLiteRow(rowValues))
 			}
 		}
 
@@ -422,11 +410,7 @@ func RegisterSQLiteTools(
 				if err := idxRows.Scan(idxPtr...); err != nil {
 					return nil, nil, err
 				} else {
-					rowFormatted := make([]string, len(idxCols))
-					for i, val := range idxVal {
-						rowFormatted[i] = FormatCell(val)
-					}
-					idxData = append(idxData, rowFormatted)
+					idxData = append(idxData, boundedSQLiteRow(idxVal))
 				}
 			}
 			if err := idxRows.Err(); err != nil {
@@ -454,6 +438,21 @@ func RegisterSQLiteTools(
 			},
 		}, nil, nil
 	})
+}
+
+func boundedSQLiteRow(values []any) []string {
+	row := make([]string, len(values))
+	for i, value := range values {
+		text := cellText(value)
+		if len(text) > maxCellLength {
+			// Detach the prefix so the retained row cannot keep the full
+			// database value's backing storage alive.
+			prefix := strings.Clone(truncateUTF8(text, maxCellLength))
+			text = prefix + "..."
+		}
+		row[i] = text
+	}
+	return row
 }
 
 // boundedSQLiteConn applies limits before SQLite materializes arbitrary values.
