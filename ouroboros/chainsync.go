@@ -1603,6 +1603,8 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 				VRFOutput:    vrfOutput,
 				PraosView:    praosView,
 				AdmissionID:  o.chainsyncAdmissionSequence.Add(1),
+				HeaderCryptoVerificationGeneration: chainsyncEvent.
+					HeaderCryptoVerificationGeneration,
 				// The parent hash is what lets the selector tell a connected
 				// header chain from a sequence of advancing numbers.
 				ObservedPrevHash: v.PrevHash().Bytes(),
@@ -1674,11 +1676,13 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 			o.chainsyncState.RecordObservedHeader(
 				chainsync.ObservedHeader{
 					ConnectionId: ctx.ConnectionId,
-					Point:        point,
-					Type:         blockType,
-					BlockHeader:  v,
-					ArrivalTime:  arrivalTime,
-					Tip:          tip,
+					HeaderCryptoVerificationGeneration: chainsyncEvent.
+						HeaderCryptoVerificationGeneration,
+					Point:       point,
+					Type:        blockType,
+					BlockHeader: v,
+					ArrivalTime: arrivalTime,
+					Tip:         tip,
 				},
 			)
 		}
@@ -1761,9 +1765,17 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 		}
 		chainsyncEvent.SyncTargetTrusted = true
 		chainsyncEvent.PeerTipUpdate = peerTipUpdate
+		if o.chainsyncState != nil {
+			chainsyncEvent.InvalidatePeerHeaderHistory = func() {
+				o.chainsyncState.ClearObservedHeaderHistoryFrom(
+					ctx.ConnectionId,
+					point,
+				)
+			}
+		}
 		if peerTipUpdate != nil {
-			update := *peerTipUpdate
 			resolvePeerTip := func(admitted bool) {
+				update := *peerTipUpdate
 				if o.config.ChainsyncResolvePeerTip != nil {
 					o.config.ChainsyncResolvePeerTip(update, admitted)
 					return
@@ -1781,7 +1793,6 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 			}
 			chainsyncEvent.PeerTipAdmission = func(admitted bool) {
 				if admitted {
-					o.clearDeferredHeaderRecovery(ctx.ConnectionId)
 					if o.chainsyncState != nil {
 						o.chainsyncState.AdmitClientTip(
 							ctx.ConnectionId,
@@ -1803,6 +1814,9 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 				chainsyncEvent,
 			),
 		); err != nil {
+			if chainsyncEvent.InvalidatePeerHeaderHistory != nil {
+				chainsyncEvent.InvalidatePeerHeaderHistory()
+			}
 			if chainsyncEvent.PeerTipAdmission != nil {
 				chainsyncEvent.PeerTipAdmission(false)
 			}

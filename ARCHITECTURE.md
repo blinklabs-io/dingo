@@ -5861,11 +5861,15 @@ it. Dingo implements this as a **corroboration gate**
   already covers, the same exemption the ledger's own header-queue path
   applies. A result showing local state has not caught up to the header's slot
   (`IsHeaderVerificationDeferred`) withholds the header from chain selection,
-  density, and corroboration without penalizing the peer. The ledger may keep
-  the header in bounded peer ancestry or queue it when it extends the current
-  header chain, but a competing deferred header cannot clear the queue or
-  trigger canonical rollback. A later header can reuse the retained ancestry
-  once producer authorization succeeds. Genesis-overlay parameters remain
+  density, corroboration, and the observed ancestry used by fork resolution or
+  rollback replay without penalizing the peer. ChainSync records that the peer
+  needs recovery and re-intersects it after the applied ledger advances. The
+  peer then delivers its linked suffix parent-first, and each header must pass
+  verification before entering observed ancestry or the ledger queue.
+  The verification snapshot generation travels with the staged selector
+  candidate and ledger event; a rollback or concurrent publication that makes
+  it stale removes the candidate from corroboration and triggers recovery.
+  Genesis-overlay parameters remain
   authoritative for later slots within the applied epoch and era, so a tip
   earlier within that epoch does not by itself defer the overlay decision;
   headers requiring a different epoch or era's parameters remain deferred
@@ -5884,7 +5888,7 @@ it. Dingo implements this as a **corroboration gate**
   `current-3` (`errPoolSnapshotPruned`, non-API storage modes only) is
   deferred rather than rejected, because the node no longer holds the state
   to evaluate it; a pool absent from a populated snapshot still rejects.
-  Deferred headers are withheld from selection but retained as peer ancestry;
+  Deferred headers are withheld from selection and trusted peer ancestry;
   definite verification failures are excluded from observation and instead
   publish `ledger.ConnectionRecycleRequestedEventType`
   (`"header_verification_failure"`, translated to a connmanager recycle by

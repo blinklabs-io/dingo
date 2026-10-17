@@ -65,7 +65,7 @@ func (n *Node) chainsyncResolvePeerTip(
 		return
 	}
 	if admitted {
-		n.chainSelector.CommitPeerTipAdmission(e)
+		n.chainSelector.CommitPeerTipAdmissionPinned(e)
 		n.touchPeerByConnId(e.ConnectionId)
 		return
 	}
