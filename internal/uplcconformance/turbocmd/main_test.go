@@ -55,10 +55,9 @@ func TestGenerateReportWritesPartialReportOnProgramFailure(t *testing.T) {
 		Scenario   string `json:"scenario"`
 		Benchmarks []struct {
 			BudgetCPU *int64   `json:"budget_cpu"`
-			FlatUS    *float64 `json:"flat_us"`
+			BudgetMem *int64   `json:"budget_mem"`
 			MemBytes  *float64 `json:"mem_bytes"`
 			CPUUS     *float64 `json:"cpu_us"`
-			Error     string   `json:"error"`
 		} `json:"benchmarks"`
 	}
 	if err := json.Unmarshal(reportJSON, &report); err != nil {
@@ -68,9 +67,8 @@ func TestGenerateReportWritesPartialReportOnProgramFailure(t *testing.T) {
 		t.Fatalf("partial report = %+v", report)
 	}
 	benchmark := report.Benchmarks[0]
-	if benchmark.BudgetCPU != nil || benchmark.FlatUS != nil || benchmark.MemBytes != nil ||
-		benchmark.CPUUS != nil || benchmark.Error == "" ||
-		strings.Contains(benchmark.Error, root) {
+	if benchmark.BudgetCPU != nil || benchmark.BudgetMem != nil || benchmark.MemBytes != nil ||
+		benchmark.CPUUS != nil || strings.Contains(string(reportJSON), root) {
 		t.Fatalf("failed benchmark has measurements: %+v", benchmark)
 	}
 }

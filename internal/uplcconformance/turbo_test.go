@@ -97,7 +97,7 @@ func TestGenerateTurboReportMeasuresFlatPrograms(t *testing.T) {
 	reportFields := assertTurboJSONFields(
 		t,
 		reportJSON,
-		"schema_version",
+		"version",
 		"scenario",
 		"generated_at",
 		"implementation",
@@ -108,7 +108,7 @@ func TestGenerateTurboReportMeasuresFlatPrograms(t *testing.T) {
 	if err := json.Unmarshal(reportFields["implementation"], &implementation); err != nil {
 		t.Fatalf("decode implementation: %v", err)
 	}
-	assertTurboJSONFields(t, implementation, "name", "language")
+	assertTurboJSONFields(t, implementation, "name")
 	var machine json.RawMessage
 	if err := json.Unmarshal(reportFields["machine"], &machine); err != nil {
 		t.Fatalf("decode machine: %v", err)
@@ -130,11 +130,9 @@ func TestGenerateTurboReportMeasuresFlatPrograms(t *testing.T) {
 		"budget_cpu",
 		"budget_mem",
 		"cpu_us",
-		"flat_us",
 		"mem_bytes",
-		"size_bytes",
 	)
-	for _, field := range []string{"cpu_us", "flat_us", "mem_bytes"} {
+	for _, field := range []string{"cpu_us", "mem_bytes"} {
 		var value float64
 		if err := json.Unmarshal(benchmarkFields[field], &value); err != nil {
 			t.Fatalf("decode benchmark %s: %v", field, err)
@@ -352,15 +350,14 @@ func TestGenerateTurboReportKeepsFailedBenchmarks(t *testing.T) {
 	}
 	for i, benchmark := range decoded.Benchmarks {
 		if string(benchmark["cpu_us"]) != "null" ||
-			string(benchmark["flat_us"]) != "null" ||
 			string(benchmark["mem_bytes"]) != "null" ||
 			string(benchmark["budget_cpu"]) != "null" {
 			t.Fatalf("failed benchmark JSON = %s", reportJSON)
 		}
-		var failureReason string
-		if err := json.Unmarshal(benchmark["error"], &failureReason); err != nil ||
-			failureReason == "" || strings.Contains(failureReason, root) {
-			t.Fatalf("failed benchmark %d error = %q, err = %v", i, failureReason, err)
+		for _, field := range []string{"flat_us", "size_bytes", "error"} {
+			if _, ok := benchmark[field]; ok {
+				t.Fatalf("failed benchmark %d contains unsupported field %q: %s", i, field, reportJSON)
+			}
 		}
 	}
 }

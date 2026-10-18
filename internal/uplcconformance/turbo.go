@@ -42,7 +42,7 @@ const (
 var turboVersionSuffix = regexp.MustCompile(`(?i)-v([123])(-p([0-9]+))?\.flat$`)
 
 type TurboReport struct {
-	SchemaVersion  string            `json:"schema_version"`
+	SchemaVersion  string            `json:"version"`
 	Scenario       string            `json:"scenario"`
 	GeneratedAt    string            `json:"generated_at"`
 	Implementation map[string]string `json:"implementation"`
@@ -63,10 +63,10 @@ type TurboBenchmark struct {
 	BudgetCPU       *int64   `json:"budget_cpu"`
 	BudgetMem       *int64   `json:"budget_mem"`
 	CPUUS           *float64 `json:"cpu_us"`
-	FlatUS          *float64 `json:"flat_us"`
 	MemBytes        *float64 `json:"mem_bytes"`
-	SizeBytes       int      `json:"size_bytes"`
-	Error           string   `json:"error,omitempty"`
+	FlatUS          *float64 `json:"-"`
+	SizeBytes       int      `json:"-"`
+	Error           string   `json:"-"`
 }
 
 type turboSample struct {
@@ -143,8 +143,7 @@ func GenerateTurboReport(
 		Scenario:      "uplc-turbo",
 		GeneratedAt:   generatedAt.UTC().Format(time.RFC3339),
 		Implementation: map[string]string{
-			"name":     "dingo",
-			"language": "Go",
+			"name": "dingo",
 		},
 		Machine: TurboMachine{
 			OS:           runtime.GOOS,

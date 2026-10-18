@@ -74,13 +74,14 @@ var (
 )
 
 type Report struct {
-	SchemaVersion   string       `json:"schema_version"`
-	Scenario        string       `json:"scenario"`
-	GeneratedAt     string       `json:"generated_at"`
-	ProtocolVersion string       `json:"protocol_version"`
-	CostModels      []CostModel  `json:"cost_models"`
-	Totals          Totals       `json:"totals"`
-	Scenarios       []CaseResult `json:"scenarios"`
+	SchemaVersion   string            `json:"version"`
+	Scenario        string            `json:"scenario"`
+	GeneratedAt     string            `json:"generated_at"`
+	Implementation  map[string]string `json:"implementation"`
+	ProtocolVersion string            `json:"-"`
+	CostModels      []CostModel       `json:"-"`
+	Totals          Totals            `json:"-"`
+	Scenarios       []CaseResult      `json:"scenarios"`
 }
 
 type CostModel struct {
@@ -106,9 +107,15 @@ type DimensionTotal struct {
 }
 
 type Outcome struct {
-	Expected any   `json:"expected"`
-	Actual   any   `json:"actual"`
-	Passed   *bool `json:"passed"`
+	Expected any
+	Actual   any
+	Passed   *bool
+}
+
+// MarshalJSON exposes the observed value; expectations and pass bookkeeping
+// are internal to Dingo's report generation.
+func (o Outcome) MarshalJSON() ([]byte, error) {
+	return json.Marshal(o.Actual)
 }
 
 type CaseResult struct {
@@ -117,10 +124,10 @@ type CaseResult struct {
 	Group           string  `json:"group"`
 	PlutusVersion   string  `json:"plutus_version"`
 	ProtocolVersion uint    `json:"protocol_version"`
-	CostModelID     string  `json:"cost_model_id"`
+	CostModelID     string  `json:"-"`
 	Evaluation      Outcome `json:"evaluation"`
 	Budget          Outcome `json:"budget"`
-	Passed          bool    `json:"passed"`
+	Passed          bool    `json:"-"`
 	Error           string  `json:"error,omitempty"`
 }
 
@@ -211,6 +218,7 @@ func GenerateReport(root string, generatedAt time.Time) (Report, error) {
 		SchemaVersion:   schemaVersion,
 		Scenario:        "uplc-conformance",
 		GeneratedAt:     generatedAt.UTC().Format(time.RFC3339),
+		Implementation:  map[string]string{"name": "dingo"},
 		ProtocolVersion: "mixed",
 		Scenarios:       make([]CaseResult, 0, len(cases)),
 	}
@@ -605,12 +613,13 @@ func runCase(
 			return CaseResult{}, fmt.Errorf("parse budget expectation %q", expectedBudget)
 		}
 		wantCPU, wantMem := budgetMatch[1], budgetMatch[2]
-		actual := map[string]string{"cpu": "", "mem": ""}
+		actual := map[string]int64{"cpu": 0, "mem": 0}
 		budgetPassed := false
 		if stage == noFailure {
-			actual["cpu"] = strconv.FormatInt(consumed.Cpu, 10)
-			actual["mem"] = strconv.FormatInt(consumed.Mem, 10)
-			budgetPassed = actual["cpu"] == wantCPU && actual["mem"] == wantMem
+			actual["cpu"] = consumed.Cpu
+			actual["mem"] = consumed.Mem
+			budgetPassed = strconv.FormatInt(actual["cpu"], 10) == wantCPU &&
+				strconv.FormatInt(actual["mem"], 10) == wantMem
 		}
 		caseResult.Budget = Outcome{
 			Expected: map[string]string{"cpu": wantCPU, "mem": wantMem},

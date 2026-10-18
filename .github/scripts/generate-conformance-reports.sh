@@ -61,8 +61,8 @@ write_error_report() {
     --arg scenario "$scenario" \
     --arg generated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     --arg error "$message" \
-    '{schema_version: "1", scenario: $scenario, generated_at: $generated_at,
-      implementation: {name: "dingo", language: "Go"}, error: $error}' \
+    '{version: "1", scenario: $scenario, generated_at: $generated_at,
+      implementation: {name: "dingo"}, error: $error}' \
     >"$report"
   echo "::warning::${scenario} report could not be generated: ${message}" >&2
 }
@@ -90,9 +90,10 @@ valid_report() {
   local report="$1" scenario="$2"
   jq -e -s --arg scenario "$scenario" '
     def common:
-      .schema_version == "1" and
+      .version == "1" and
       .scenario == $scenario and
       (.generated_at | type == "string" and length > 0);
+    def nullable_number: type == "number" or . == null;
     length == 1 and
     (.[0] as $report |
       ($report | common) and
@@ -112,17 +113,38 @@ valid_report() {
           (.failures | type == "array")
         elif $scenario == "ledger-rules" then
           (.corpus | type == "string" and length > 0) and
+          (.implementation.name | type == "string" and length > 0) and
           (.totals | type == "object") and
-          (.scenarios | type == "array")
+          (.scenarios | type == "array") and
+          all(.scenarios[]; (.id | type == "string") and (.result | type == "string"))
         elif $scenario == "uplc-conformance" then
-          (.protocol_version | type == "string" and length > 0) and
-          (.cost_models | type == "array") and
-          (.totals | type == "object") and
-          (.scenarios | type == "array")
+          (.implementation.name | type == "string" and length > 0) and
+          (.scenarios | type == "array") and
+          all(.scenarios[];
+            (.id | type == "string") and
+            (.title | type == "string") and
+            (.group | type == "string") and
+            (.plutus_version | type == "string" or type == "number" or . == null) and
+            (.protocol_version | type == "string" or type == "number" or . == null) and
+            (.evaluation | type == "string") and
+            ((.budget == null) or
+              ((.budget | type == "object") and
+                (.budget.cpu | type == "number") and
+                (.budget.mem | type == "number")))
+          )
         elif $scenario == "uplc-turbo" then
           (.implementation.name | type == "string" and length > 0) and
           (.machine | type == "object") and
-          (.benchmarks | type == "array")
+          (.benchmarks | type == "array") and
+          all(.benchmarks[];
+            (.bench | type == "string") and
+            (.plutus_version | type == "string") and
+            (.protocol_version | type == "string") and
+            (.budget_cpu | nullable_number) and
+            (.budget_mem | nullable_number) and
+            (.cpu_us | nullable_number) and
+            (.mem_bytes | nullable_number)
+          )
         else false end)
       end)
   ' "$report" >/dev/null 2>&1

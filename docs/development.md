@@ -69,8 +69,8 @@ step. The Linux release job has a 90-minute limit for setup and asset
 publishing. The turbo report measures an evenly spaced sample of up to
 `TURBO_MAX_PROGRAMS` programs (10,000 by default) using 50 samples per program
 and the mean of the best 30. A program that cannot be decoded or evaluated
-remains in the report with null measurements and an `error` reason; it counts
-as a failed benchmark.
+remains in the report with null measurements and counts as a failed benchmark;
+the generation log records the error reason.
 
 ## Local development workflows
 

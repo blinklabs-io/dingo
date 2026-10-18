@@ -48,12 +48,13 @@ const (
 )
 
 type Report struct {
-	SchemaVersion string        `json:"schema_version"`
-	Scenario      string        `json:"scenario"`
-	GeneratedAt   string        `json:"generated_at"`
-	Corpus        string        `json:"corpus"`
-	Totals        Totals        `json:"totals"`
-	Scenarios     []CaseOutcome `json:"scenarios"`
+	SchemaVersion  string            `json:"version"`
+	Scenario       string            `json:"scenario"`
+	GeneratedAt    string            `json:"generated_at"`
+	Implementation map[string]string `json:"implementation"`
+	Corpus         string            `json:"corpus"`
+	Totals         Totals            `json:"totals"`
+	Scenarios      []CaseOutcome     `json:"scenarios"`
 }
 
 type Totals struct {
@@ -260,11 +261,12 @@ func GenerateReport(
 	sort.Strings(files)
 
 	report := Report{
-		SchemaVersion: schemaVersion,
-		Scenario:      "ledger-rules",
-		GeneratedAt:   generatedAt.UTC().Format(time.RFC3339),
-		Corpus:        "pragma-org/node-diversity-conformance/ledger-rules-v2",
-		Scenarios:     make([]CaseOutcome, 0, len(files)),
+		SchemaVersion:  schemaVersion,
+		Scenario:       "ledger-rules",
+		GeneratedAt:    generatedAt.UTC().Format(time.RFC3339),
+		Implementation: map[string]string{"name": "dingo"},
+		Corpus:         "pragma-org/node-diversity-conformance/ledger-rules-v2",
+		Scenarios:      make([]CaseOutcome, 0, len(files)),
 	}
 	failures := make([]Failure, 0)
 	type indexedResult struct {
@@ -407,7 +409,7 @@ func runFixture(
 			)
 		}
 		if transactionFailsToDecode(transactionCBOR) {
-			return CaseOutcome{ID: id, Result: "pass"}, nil, nil
+			return CaseOutcome{ID: id, Result: "DecodingFailure"}, nil, nil
 		}
 		return mismatch(id, expected, "transaction decoded successfully")
 	}
@@ -481,7 +483,7 @@ func runFixture(
 		return mismatch(id, expected, "transaction accepted")
 	}
 	if predicateMatches(validationErr, expected) {
-		return CaseOutcome{ID: id, Result: "pass"}, nil, nil
+		return CaseOutcome{ID: id, Result: expected.Predicate}, nil, nil
 	}
 	return mismatch(id, expected, "rejected: "+validationErr.Error())
 }
@@ -571,6 +573,13 @@ func mismatch(
 	expected expectedDoc,
 	observed string,
 ) (CaseOutcome, *Failure, error) {
+	result, ok := observedLedgerResult(observed)
+	if !ok {
+		return CaseOutcome{}, nil, fmt.Errorf(
+			"ledger result cannot be represented in the conformance report: %s",
+			observed,
+		)
+	}
 	expectedText := "Pass"
 	if expected.DecodingFailure {
 		expectedText = "decoding_failure"
@@ -580,11 +589,55 @@ func mismatch(
 			expectedText += ":" + expected.Description
 		}
 	}
-	return CaseOutcome{ID: id, Result: "fail"}, &Failure{
+	return CaseOutcome{ID: id, Result: result}, &Failure{
 		ID:       id,
 		Expected: expectedText,
 		Observed: observed,
 	}, nil
+}
+
+// observedLedgerResult emits the ledger outcome that NDC compares with its
+// fixture expectation.
+func observedLedgerResult(observed string) (string, bool) {
+	switch {
+	case observed == "transaction accepted" || observed == "transaction decoded successfully":
+		return "pass", true
+	case strings.HasPrefix(observed, "transaction decoding failure:"):
+		return "DecodingFailure", true
+	case strings.HasPrefix(observed, "rejected: "):
+		return ledgerPredicateFromError(strings.TrimPrefix(observed, "rejected: "))
+	default:
+		return "", false
+	}
+}
+
+func ledgerPredicateFromError(errText string) (string, bool) {
+	text := strings.ToLower(errText)
+	predicates := make([]string, 0, len(ledgerPredicateErrorPatterns))
+	for predicate := range ledgerPredicateErrorPatterns {
+		predicates = append(predicates, predicate)
+	}
+	sort.Strings(predicates)
+
+	var result string
+	bestPatternLength := 0
+	for _, predicate := range predicates {
+		reportResult := predicate
+		if separator := strings.IndexByte(reportResult, ':'); separator >= 0 {
+			reportResult = reportResult[:separator]
+		}
+		if reportResult == "UnelectedCommitteeVoters" {
+			reportResult = "VotersDoNotExist"
+		}
+		for _, pattern := range ledgerPredicateErrorPatterns[predicate] {
+			pattern = strings.ToLower(pattern)
+			if len(pattern) > bestPatternLength && strings.Contains(text, pattern) {
+				result = reportResult
+				bestPatternLength = len(pattern)
+			}
+		}
+	}
+	return result, result != ""
 }
 
 func parseExpected(raw json.RawMessage) (expectedDoc, error) {
