@@ -155,7 +155,9 @@ var utxoStoreMethods = []string{
 	"GetLiveAssetUtxosMissingAddress",
 	"SetUtxoAddress",
 	"IterateLiveUtxos",
+	"IterateLiveUtxosContext",
 	"IterateUtxosAsOf",
+	"IterateUtxosAsOfContext",
 }
 
 // transactionStoreMethods is the chain-transaction domain: sqlstore's
