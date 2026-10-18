@@ -2693,7 +2693,9 @@ ConnectRPC, for byte-for-byte compatibility with the Acropolis tonic service)
 on its own `midnight.host:midnight.port` listener. It registers the
 `MidnightState` service and a `grpc_health_v1` health service reporting
 `SERVING`; gRPC reflection is registered only when
-`midnight.reflectionEnabled` is also true. The server flag is independent of
+`midnight.reflectionEnabled` is also true. The health service supports the
+bounded unary `Check` and `List` methods; `Watch` returns `Unimplemented` so
+anonymous clients cannot retain streams. The server flag is independent of
 `midnight.enabled`, which controls the indexer: an operator may index without
 serving or serve already-persisted rows without running the scanner. The
 `MidnightState` service is backed by two
@@ -10900,7 +10902,9 @@ references. Empty lists retain the current-tip fallback.
 
 `WaitForTx` rejects more than `MaxTxRefs` (default 1000) references
 before subscribing or reading the ledger, and one `ServerTimeout` deadline
-covers the durable lookups as well as the wait. `FollowTip`, `WatchTx`,
+covers the durable lookups as well as the wait. The health service supports
+only unary `Check`; `Health/Watch` returns `Unimplemented` instead of creating
+a stream outside this listener's admission limits. `FollowTip`, `WatchTx`,
 `WatchMempool`, and `WaitForTx` take a slot from a shared limiter
 (`MaxStreams` process-wide, `MaxStreamsPerClient` per remote host) and answer
 `ResourceExhausted` when
@@ -13488,8 +13492,11 @@ services. It exposes archive access over Connect/gRPC and supplies the remote
 archive adapter used by nodes that want historical fallback.
 
 The server side (`bark.Bark`) registers the archive service, health endpoint,
-and gRPC reflection. Archive fetches ask the active blob plugin for a signed
-block URL and return it with block type, height, and previous-hash metadata. In
+and gRPC reflection. The health endpoint supports only unary `Check`;
+`Health/Watch` returns `Unimplemented` instead of retaining an anonymous
+stream outside Bark's request budgets. Archive fetches ask the active blob
+plugin for a signed block URL and return it with block type, height, and
+previous-hash metadata. In
 practice this makes `s3` and `gcs` the archive-node blob backends because they
 can sign object-storage URLs.
 

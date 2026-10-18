@@ -34,6 +34,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/internal/rpchealth"
 	"github.com/blinklabs-io/dingo/midnight"
 	"github.com/prometheus/client_golang/prometheus"
 	"google.golang.org/grpc"
@@ -241,7 +242,10 @@ func (s *Server) Start(ctx context.Context) error {
 	// Health service reporting SERVING for the overall server ("") and the
 	// MidnightState service by name.
 	healthSrv := health.NewServer()
-	healthpb.RegisterHealthServer(grpcServer, healthSrv)
+	healthpb.RegisterHealthServer(
+		grpcServer,
+		rpchealth.UnaryServer(healthSrv),
+	)
 	healthSrv.SetServingStatus("", healthpb.HealthCheckResponse_SERVING)
 	healthSrv.SetServingStatus(
 		midnight.MidnightState_ServiceDesc.ServiceName,
