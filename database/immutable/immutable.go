@@ -62,7 +62,7 @@ type ImmutableDb struct {
 	maxChunk string
 }
 
-const maxSinglePassVerifiedEntrySize = 4 << 20
+const maxSinglePassVerifiedEntrySize = 16 << 20
 
 var ErrPointBeyondLastChunk = errors.New(
 	"immutable DB: point is beyond the last chunk",
