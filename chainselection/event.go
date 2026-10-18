@@ -81,7 +81,11 @@ type PeerTipUpdateEvent struct {
 	// AdmissionID identifies one delivered header. A candidate may contribute
 	// to Genesis corroboration, but cannot be a selectable peer until admitted.
 	AdmissionID uint64
-	Admitted    bool
+	// HeaderCryptoVerificationGeneration identifies the ledger snapshot that
+	// authorized this header. The selector must ignore a staged candidate once
+	// that snapshot is no longer current.
+	HeaderCryptoVerificationGeneration uint64
+	Admitted                           bool
 	// Rejected removes the candidate after definite ledger rejection.
 	Rejected bool
 	// ObservedPrevHash is the hash of the parent the delivered header names.

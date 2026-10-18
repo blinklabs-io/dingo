@@ -260,6 +260,11 @@ func (cs *ChainSelector) isPeerCorroboratedLocked(
 func (cs *ChainSelector) ShouldApplyIngress(
 	connId ouroboros.ConnectionId,
 ) bool {
+	releaseGeneration, generationCurrent := cs.pinCurrentHeaderCryptoGeneration()
+	if !generationCurrent {
+		return false
+	}
+	defer releaseGeneration()
 	cs.mutex.RLock()
 	defer cs.mutex.RUnlock()
 	peerTip := cs.latestPeerTipCandidateLocked(connId)

@@ -2050,7 +2050,7 @@ func (n *Node) buildChainSelectorConfig(
 	genesisMode bool,
 	genesisWindowSlots uint64,
 ) chainselection.ChainSelectorConfig {
-	return chainselection.ChainSelectorConfig{
+	config := chainselection.ChainSelectorConfig{
 		Logger:                n.config.logger,
 		EventBus:              n.eventBus,
 		SecurityParam:         securityParam,
@@ -2088,6 +2088,31 @@ func (n *Node) buildChainSelectorConfig(
 			return slot, err == nil
 		},
 	}
+	// The running node publishes its started ledger before constructing the
+	// selector. Callers that build a standalone selector config without a
+	// ledger retain the generation-free behavior used by non-ledger events.
+	if n.wallClockLedger.Load() != nil {
+		config.HeaderCryptoVerificationGenerationCurrent = func(generation uint64) bool {
+			ls := n.wallClockLedger.Load()
+			return ls != nil &&
+				ls.HeaderCryptoVerificationGenerationCurrent(generation)
+		}
+		config.CurrentHeaderCryptoVerificationGeneration = func() uint64 {
+			ls := n.wallClockLedger.Load()
+			if ls == nil {
+				return 0
+			}
+			return ls.CurrentHeaderCryptoVerificationGeneration()
+		}
+		config.PinHeaderCryptoVerificationGeneration = func(generation uint64) (func(), bool) {
+			ls := n.wallClockLedger.Load()
+			if ls == nil {
+				return nil, false
+			}
+			return ls.PinHeaderCryptoVerificationGeneration(generation)
+		}
+	}
+	return config
 }
 
 // setLedgerState replaces n.ledgerState and withdraws the copy published to

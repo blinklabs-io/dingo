@@ -29,6 +29,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
@@ -147,6 +148,7 @@ const (
 	// Number of received blockfetch blocks to buffer before committing them.
 	// Keep this small so downstream iterators still see fresh blocks promptly.
 	blockfetchCommitBatchSize = 8
+	maxBufferedHeadersPerConn = 128
 
 	deferredHeaderValidationSyncStatePrefix = "deferred_header_validation:"
 	deferredHeaderValidationSyncStateValue  = "true"
@@ -2307,13 +2309,16 @@ func (ls *LedgerState) bufferHeaderEvent(
 			return
 		}
 	}
-	const maxBufferedHeadersPerConn = 128
 	if len(events) >= maxBufferedHeadersPerConn {
-		evicted := events[0]
-		events = append(events[1:], e)
-		ls.bufferedHeaderEvents[key] = events
+		rejected := append(events, e)
+		delete(ls.bufferedHeaderEvents, key)
+		ls.rejectBufferedHeaderEvents(rejected, pending)
 		ls.bufferedHeaderMutex.Unlock()
-		queuePeerTipAdmission(pending, evicted, false)
+		ls.requestChainsyncResync(
+			e.ConnectionId,
+			"buffered header limit exceeded",
+			pending,
+		)
 		return
 	} else {
 		events = append(events, e)
@@ -2371,7 +2376,11 @@ func (ls *LedgerState) recordPeerHeaderHistory(e ChainsyncEvent) {
 		ls.peerHeaderHistory[key] = history
 	}
 	hashKey := hex.EncodeToString(e.Point.Hash)
-	if _, ok := history.byHash[hashKey]; ok {
+	if existing, ok := history.byHash[hashKey]; ok {
+		if e.HeaderCryptoVerificationGeneration != 0 {
+			existing.event.HeaderCryptoVerificationGeneration = e.HeaderCryptoVerificationGeneration
+			history.byHash[hashKey] = existing
+		}
 		return
 	}
 	headerCbor := append([]byte(nil), e.BlockHeader.Cbor()...)
@@ -2408,8 +2417,9 @@ func (ls *LedgerState) recordPeerHeaderHistory(e ChainsyncEvent) {
 			Slot: e.Point.Slot,
 			Hash: append([]byte(nil), e.Point.Hash...),
 		},
-		BlockNumber: e.BlockNumber,
-		Type:        e.Type,
+		HeaderCryptoVerificationGeneration: e.HeaderCryptoVerificationGeneration,
+		BlockNumber:                        e.BlockNumber,
+		Type:                               e.Type,
 	}
 	if len(headerCbor) == 0 {
 		// Synthetic headers used by some in-package callers do not expose CBOR.
@@ -2499,6 +2509,40 @@ func (ls *LedgerState) removePeerHeaderHistory(historyKey string) {
 	}
 	ls.peerHeaderHistoryBytes -= history.retainedBytes
 	delete(ls.peerHeaderHistory, historyKey)
+}
+
+func (ls *LedgerState) removePeerHeaderHistoryFrom(
+	historyKey string,
+	point ocommon.Point,
+) {
+	history := ls.peerHeaderHistory[historyKey]
+	if history == nil {
+		return
+	}
+	pointKey := hex.EncodeToString(point.Hash)
+	removeFrom := -1
+	for i, key := range history.order {
+		if key == pointKey {
+			removeFrom = i
+			break
+		}
+	}
+	if removeFrom < 0 {
+		return
+	}
+	for _, key := range history.order[removeFrom:] {
+		record, ok := history.byHash[key]
+		if !ok {
+			continue
+		}
+		history.retainedBytes -= record.bytes
+		ls.peerHeaderHistoryBytes -= record.bytes
+		delete(history.byHash, key)
+	}
+	history.order = history.order[:removeFrom]
+	if len(history.order) == 0 {
+		delete(ls.peerHeaderHistory, historyKey)
+	}
 }
 
 func (ls *LedgerState) makePeerHeaderHistoryRoom(
@@ -2774,6 +2818,11 @@ func (ls *LedgerState) findPeerForkPath(
 			// replaying an incomplete candidate path.
 			return nil, nil, nil
 		}
+		if !ls.headerCryptoVerificationGenerationCurrent(
+			recordEvent.HeaderCryptoVerificationGeneration,
+		) {
+			return nil, nil, nil
+		}
 		if _, seen := visited[hashKey]; seen {
 			return nil, nil, nil
 		}
@@ -2975,9 +3024,7 @@ func (ls *LedgerState) requestChainsyncResync(
 ) bool {
 	ls.resetHeaderMismatches(connIdKey(connId))
 	ls.clearRollbackHistory()
-	for _, bufferedEvent := range ls.takeBufferedPeerHeaders(connId) {
-		queuePeerTipAdmission(pending, bufferedEvent, false)
-	}
+	ls.rejectBufferedHeaderEvents(ls.takeBufferedPeerHeaders(connId), pending)
 	if ls.coalesceChainsyncResync(connId, reason) {
 		return false
 	}
@@ -3284,10 +3331,9 @@ func (ls *LedgerState) replayBufferedHeaderEvents(
 	delete(ls.bufferedHeaderEvents, key)
 	ls.bufferedHeaderMutex.Unlock()
 	for i, evt := range events {
+		evt.peerHeaderHistoryReplay = true
 		if err := ls.handleEventChainsyncBlockHeaderWithPending(evt, pending); err != nil {
-			for _, remaining := range events[i+1:] {
-				queuePeerTipAdmission(pending, remaining, false)
-			}
+			ls.rejectBufferedHeaderEvents(events[i+1:], pending)
 			return err
 		}
 	}
@@ -3316,9 +3362,7 @@ func (ls *LedgerState) discardBufferedPeerHeaders(
 		ls.clearQueuedHeaders()
 	}
 	ls.chainsyncBlockfetchMutex.Unlock()
-	for _, e := range buffered {
-		queuePeerTipAdmission(pending, e, false)
-	}
+	ls.rejectBufferedHeaderEvents(buffered, pending)
 }
 
 func (ls *LedgerState) takeBufferedPeerHeaders(
@@ -3330,6 +3374,17 @@ func (ls *LedgerState) takeBufferedPeerHeaders(
 	buffered := append([]ChainsyncEvent(nil), ls.bufferedHeaderEvents[key]...)
 	delete(ls.bufferedHeaderEvents, key)
 	return buffered
+}
+
+func (ls *LedgerState) rejectBufferedHeaderEvents(
+	buffered []ChainsyncEvent,
+	pending *pendingPublishes,
+) {
+	for _, e := range buffered {
+		ls.removePeerHeaderHistoryFrom(connIdKey(e.ConnectionId), e.Point)
+		queuePeerHeaderHistoryInvalidation(pending, e)
+		queuePeerTipAdmission(pending, e, false)
+	}
 }
 
 // handleMithrilBoundaryRollback rejects a rollback at or below the local
@@ -3992,9 +4047,7 @@ func (ls *LedgerState) resetChainsyncResyncState(
 	ls.blockfetchRequestRangeCleanup()
 	ls.activeBlockfetchConnId = ouroboros.ConnectionId{}
 	ls.chainsyncBlockfetchMutex.Unlock()
-	for _, e := range buffered {
-		queuePeerTipAdmission(pending, e, false)
-	}
+	ls.rejectBufferedHeaderEvents(buffered, pending)
 }
 
 func pointMatches(a, b ocommon.Point) bool {
@@ -4391,7 +4444,22 @@ func (ls *LedgerState) recoverPeerHeaderHistoryFromPointLocked(
 			if evt.Point.Slot <= cutoffSlot {
 				continue
 			}
-			if err := ls.chain.AddBlockHeader(ctx, evt.BlockHeader); err != nil {
+			release, current := ls.PinHeaderCryptoVerificationGeneration(
+				evt.HeaderCryptoVerificationGeneration,
+			)
+			if !current {
+				ls.chainsyncBlockfetchMutex.Lock()
+				ls.clearQueuedHeaders()
+				ls.chainsyncBlockfetchMutex.Unlock()
+				return 0, nil
+			}
+			err := ls.chain.AddBlockHeaderWithCryptoVerificationGeneration(
+				ctx,
+				evt.BlockHeader,
+				evt.HeaderCryptoVerificationGeneration,
+			)
+			release()
+			if err != nil {
 				// clearQueuedHeaders (and the headerPipelineConnId write
 				// below) mutate a field every other mutator guards with
 				// chainsyncBlockfetchMutex -- take it here too, scoped
@@ -4590,6 +4658,34 @@ func (ls *LedgerState) completeChainsyncHeaderAdmission(
 	)
 }
 
+func (ls *LedgerState) invalidateChainsyncHeaderAdmission(
+	e ChainsyncEvent,
+) pendingPublishes {
+	var pending pendingPublishes
+	pending.drainChain(ls.chain)
+	ls.chainsyncMutex.Lock()
+	ls.removePeerHeaderHistoryFrom(connIdKey(e.ConnectionId), e.Point)
+	ls.bufferedHeaderMutex.Lock()
+	for _, events := range ls.bufferedHeaderEvents {
+		for _, buffered := range events {
+			ls.removePeerHeaderHistoryFrom(
+				connIdKey(buffered.ConnectionId),
+				buffered.Point,
+			)
+		}
+	}
+	ls.bufferedHeaderMutex.Unlock()
+	ls.resetChainsyncResyncState(&pending)
+	ls.requestChainsyncResync(
+		e.ConnectionId,
+		"header authorization changed before selector admission",
+		&pending,
+	)
+	queuePeerHeaderHistoryInvalidation(&pending, e)
+	ls.chainsyncMutex.Unlock()
+	return pending
+}
+
 func queuePeerTipAdmission(
 	pending *pendingPublishes,
 	e ChainsyncEvent,
@@ -4603,6 +4699,16 @@ func queuePeerTipAdmission(
 	})
 }
 
+func queuePeerHeaderHistoryInvalidation(
+	pending *pendingPublishes,
+	e ChainsyncEvent,
+) {
+	if e.InvalidatePeerHeaderHistory == nil {
+		return
+	}
+	pending.addAfterUnlock(e.InvalidatePeerHeaderHistory)
+}
+
 func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 	e ChainsyncEvent,
 	pending *pendingPublishes,
@@ -4610,6 +4716,13 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 	admissionResolved := false
 	defer func() {
 		if !admissionResolved {
+			if e.peerHeaderHistoryReplay {
+				ls.removePeerHeaderHistoryFrom(
+					connIdKey(e.ConnectionId),
+					e.Point,
+				)
+			}
+			queuePeerHeaderHistoryInvalidation(pending, e)
 			ls.completeChainsyncHeaderAdmission(e, pending, false)
 		}
 	}()
@@ -4640,6 +4753,16 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 	headerValidationRequired, headerTrusted := ls.chainsyncHeaderCryptoPolicy(
 		e.Point.Slot,
 	)
+	if headerCryptoVerificationGeneration != 0 &&
+		!headerCryptoVerified && !headerTrusted && !headerValidationRequired {
+		ls.config.Logger.Debug(
+			"withholding chainsync header after its producer authorization became stale",
+			"component", "ledger",
+			"slot", e.Point.Slot,
+			"hash", hex.EncodeToString(e.Point.Hash),
+		)
+		return nil
+	}
 	if headerValidationRequired && !headerCryptoVerified {
 		var err error
 		headerCryptoVerificationGeneration, err = ls.
@@ -4657,6 +4780,7 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 					"error",
 					err,
 				)
+				return nil
 			} else {
 				if ls.config.EventBus != nil {
 					ls.config.Logger.Warn(
@@ -4684,7 +4808,35 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 				)
 			}
 		}
+		headerCryptoVerified = true
+		e.HeaderCryptoVerificationGeneration = headerCryptoVerificationGeneration
+		if e.PeerTipUpdate != nil {
+			e.PeerTipUpdate.HeaderCryptoVerificationGeneration = headerCryptoVerificationGeneration
+		}
 		producerAuthorizationGeneration = headerCryptoVerificationGeneration
+	}
+	var releaseVerificationGeneration func()
+	verificationGenerationReleased := false
+	if headerCryptoVerificationGeneration != 0 {
+		var generationCurrent bool
+		releaseVerificationGeneration, generationCurrent = ls.
+			PinHeaderCryptoVerificationGeneration(
+				headerCryptoVerificationGeneration,
+			)
+		if !generationCurrent {
+			ls.config.Logger.Debug(
+				"withholding chainsync header after producer authorization changed before admission",
+				"component", "ledger",
+				"slot", e.Point.Slot,
+				"hash", hex.EncodeToString(e.Point.Hash),
+			)
+			return nil
+		}
+		defer func() {
+			if releaseVerificationGeneration != nil {
+				releaseVerificationGeneration()
+			}
+		}()
 	}
 	// The strict verification above may defer while the local applied tip is
 	// behind this header. Do not mutate ledger-owned cursor, fork history, or
@@ -4716,16 +4868,6 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 		)
 		return nil
 	}
-	if ls.setChainsyncState(SyncingChainsyncState) == RollbackChainsyncState {
-		ls.config.Logger.Info(
-			fmt.Sprintf(
-				"ledger: switched to fork at %d.%s",
-				e.Point.Slot,
-				hex.EncodeToString(e.Point.Hash),
-			),
-		)
-		ls.metrics.forks.Add(1)
-	}
 	ls.recordPeerHeaderHistory(e)
 	if ls.shouldBufferHeaderEvent(e, pending) {
 		admissionResolved = true
@@ -4745,10 +4887,74 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 		"header_count", headerCount,
 		"connection_id", e.ConnectionId.String(),
 	)
-	headerCryptoVerified, err := ls.addChainsyncHeader(
-		e.BlockHeader,
-		headerCryptoVerificationGeneration,
-	)
+	var err error
+	if headerCryptoVerified {
+		err = ls.chain.AddBlockHeaderWithCryptoVerificationGeneration(
+			ls.lifecycleContext(),
+			e.BlockHeader,
+			headerCryptoVerificationGeneration,
+		)
+	} else {
+		err = ls.chain.AddBlockHeader(ls.lifecycleContext(), e.BlockHeader)
+	}
+	completeAdmitted := func() {
+		if releaseVerificationGeneration != nil {
+			if verificationGenerationReleased {
+				release, current := ls.
+					PinHeaderCryptoVerificationGeneration(
+						headerCryptoVerificationGeneration,
+					)
+				if current {
+					ls.recordAdmittedHeaderFrontier(e, headerTrusted)
+					release()
+				}
+			} else {
+				ls.recordAdmittedHeaderFrontier(e, headerTrusted)
+			}
+			// The queue mutation is complete. Release before later ledger reads so
+			// a snapshot publisher holding the ledger write lock cannot form a
+			// lock cycle with this generation pin. The deferred selector callback
+			// reacquires the same generation and rejects admission if publication
+			// occurred in the gap.
+			releaseVerificationGeneration()
+			releaseVerificationGeneration = nil
+			if e.PeerTipAdmission != nil {
+				admit := e.PeerTipAdmission
+				e.PeerTipAdmission = func(admitted bool) {
+					if !admitted {
+						admit(false)
+						return
+					}
+					release, current := ls.
+						PinHeaderCryptoVerificationGeneration(
+							headerCryptoVerificationGeneration,
+						)
+					if !current {
+						cleanup := ls.invalidateChainsyncHeaderAdmission(e)
+						admit(false)
+						cleanup.flush()
+						return
+					}
+					defer release()
+					admit(true)
+				}
+			}
+		} else {
+			ls.recordAdmittedHeaderFrontier(e, headerTrusted)
+		}
+		if ls.setChainsyncState(SyncingChainsyncState) == RollbackChainsyncState {
+			ls.config.Logger.Info(
+				fmt.Sprintf(
+					"ledger: switched to fork at %d.%s",
+					e.Point.Slot,
+					hex.EncodeToString(e.Point.Hash),
+				),
+			)
+			ls.metrics.forks.Add(1)
+		}
+		ls.completeChainsyncHeaderAdmission(e, pending, true)
+		admissionResolved = true
+	}
 	producerAuthorized := headerTrusted || (producerAuthorizationGeneration != 0 &&
 		headerCryptoVerified &&
 		producerAuthorizationGeneration == headerCryptoVerificationGeneration)
@@ -4764,8 +4970,7 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 					"slot", e.Point.Slot,
 					"connection_id", e.ConnectionId.String(),
 				)
-				ls.completeChainsyncHeaderAdmission(e, pending, true)
-				admissionResolved = true
+				completeAdmitted()
 				return nil
 			}
 			localTip := ls.chain.Tip()
@@ -4807,8 +5012,7 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 					"local_tip_slot", localTip.Point.Slot,
 					"connection_id", e.ConnectionId.String(),
 				)
-				ls.completeChainsyncHeaderAdmission(e, pending, true)
-				admissionResolved = true
+				completeAdmitted()
 				return nil
 			}
 			if !producerAuthorized {
@@ -4846,9 +5050,31 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 			// from — the common ancestor. If that block exists on our
 			// chain and the peer's chain is ahead, we roll back to
 			// the common ancestor so chainsync can continue.
-			resolved, resolveErr := ls.tryResolveFork(
-				e, notFitErr, pending, headerCryptoVerificationGeneration,
-			)
+			forkRelease := releaseVerificationGeneration
+			if forkRelease != nil {
+				forkRelease = func() {
+					releaseVerificationGeneration()
+					verificationGenerationReleased = true
+				}
+			}
+			var resolved bool
+			var resolveErr error
+			if forkRelease == nil {
+				resolved, resolveErr = ls.tryResolveFork(
+					e,
+					notFitErr,
+					pending,
+					headerCryptoVerificationGeneration,
+				)
+			} else {
+				resolved, resolveErr = ls.tryResolveForkPinned(
+					e,
+					notFitErr,
+					pending,
+					headerCryptoVerificationGeneration,
+					forkRelease,
+				)
+			}
 			if resolveErr != nil {
 				ls.undoHeaderMismatch(mismatchKey)
 				return fmt.Errorf(
@@ -4860,13 +5086,8 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 				if headerValidationRequired {
 					headerTrusted = ls.queuedHeaderCryptoVerdictCurrent(e.Point)
 				}
-				ls.recordAdmittedHeaderFrontier(
-					e,
-					headerTrusted,
-				)
 				if pointMatches(ls.chain.HeaderTip().Point, e.Point) {
-					ls.completeChainsyncHeaderAdmission(e, pending, true)
-					admissionResolved = true
+					completeAdmitted()
 				}
 				return nil
 			}
@@ -4908,12 +5129,7 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 	}
 	// A successful header resets only the connection that delivered it.
 	ls.resetHeaderMismatches(connIdKey(e.ConnectionId))
-	ls.recordAdmittedHeaderFrontier(
-		e,
-		headerTrusted,
-	)
-	ls.completeChainsyncHeaderAdmission(e, pending, true)
-	admissionResolved = true
+	completeAdmitted()
 	// Wait for additional block headers before fetching block bodies if we're
 	// far enough out from upstream tip
 	// Use security window as slot threshold if available
@@ -5535,11 +5751,9 @@ func (ls *LedgerState) hasCachedEpochNonceForSlot(slot uint64) bool {
 func (ls *LedgerState) headerCryptoVerificationGenerationCurrent(
 	generation uint64,
 ) bool {
-	if generation == 0 {
+	if generation == 0 || ls.txValidationTransitions.Load() != 0 {
 		return false
 	}
-	ls.txValidationCommitMutex.RLock()
-	defer ls.txValidationCommitMutex.RUnlock()
 	consensus := ls.loadConsensusSnapshot()
 	tip := ls.loadTipSnapshot()
 	return ls.txValidationTransitions.Load() == 0 &&
@@ -5548,12 +5762,73 @@ func (ls *LedgerState) headerCryptoVerificationGenerationCurrent(
 		tip.generation == generation
 }
 
+// HeaderCryptoVerificationGenerationCurrent reports whether a producer
+// authorization verdict still matches the live ledger snapshots.
+func (ls *LedgerState) HeaderCryptoVerificationGenerationCurrent(
+	generation uint64,
+) bool {
+	return ls.headerCryptoVerificationGenerationCurrent(generation)
+}
+
+// CurrentHeaderCryptoVerificationGeneration returns the current generation,
+// or zero while the consensus and tip snapshots are not jointly stable.
+func (ls *LedgerState) CurrentHeaderCryptoVerificationGeneration() uint64 {
+	if ls.txValidationTransitions.Load() != 0 {
+		return 0
+	}
+	consensus := ls.loadConsensusSnapshot()
+	tip := ls.loadTipSnapshot()
+	if consensus == nil || tip == nil || consensus.generation != tip.generation ||
+		ls.txValidationTransitions.Load() != 0 {
+		return 0
+	}
+	return consensus.generation
+}
+
+// PinHeaderCryptoVerificationGeneration keeps a current producer-
+// authorization generation stable until the returned release function runs.
+func (ls *LedgerState) PinHeaderCryptoVerificationGeneration(
+	generation uint64,
+) (func(), bool) {
+	if generation == 0 {
+		return nil, false
+	}
+	ls.txValidationCommitMutex.RLock()
+	consensus := ls.loadConsensusSnapshot()
+	tip := ls.loadTipSnapshot()
+	current := ls.txValidationTransitions.Load() == 0 &&
+		consensus != nil && tip != nil &&
+		consensus.generation == generation &&
+		tip.generation == generation
+	if !current {
+		ls.txValidationCommitMutex.RUnlock()
+		return nil, false
+	}
+	var once sync.Once
+	return func() {
+		once.Do(ls.txValidationCommitMutex.RUnlock)
+	}, true
+}
+
 func (ls *LedgerState) addChainsyncHeader(
 	header gledger.BlockHeader,
 	verificationGeneration uint64,
 ) (bool, error) {
+	verified, release, err := ls.addChainsyncHeaderPinned(
+		header,
+		verificationGeneration,
+	)
+	if release != nil {
+		release()
+	}
+	return verified, err
+}
+
+func (ls *LedgerState) addChainsyncHeaderPinned(
+	header gledger.BlockHeader,
+	verificationGeneration uint64,
+) (bool, func(), error) {
 	ls.txValidationCommitMutex.RLock()
-	defer ls.txValidationCommitMutex.RUnlock()
 	consensus := ls.loadConsensusSnapshot()
 	tip := ls.loadTipSnapshot()
 	verified := verificationGeneration != 0 &&
@@ -5562,13 +5837,18 @@ func (ls *LedgerState) addChainsyncHeader(
 		consensus.generation == verificationGeneration &&
 		tip.generation == verificationGeneration
 	if !verified {
-		return false, ls.chain.AddBlockHeader(ls.lifecycleContext(), header)
+		ls.txValidationCommitMutex.RUnlock()
+		return false, nil, ls.chain.AddBlockHeader(ls.lifecycleContext(), header)
 	}
-	return true, ls.chain.AddBlockHeaderWithCryptoVerificationGeneration(
+	err := ls.chain.AddBlockHeaderWithCryptoVerificationGeneration(
 		ls.lifecycleContext(),
 		header,
 		verificationGeneration,
 	)
+	if err != nil {
+		return true, ls.txValidationCommitMutex.RUnlock, err
+	}
+	return true, ls.txValidationCommitMutex.RUnlock, nil
 }
 
 func (ls *LedgerState) queuedHeaderCryptoVerdictCurrent(
@@ -5578,30 +5858,45 @@ func (ls *LedgerState) queuedHeaderCryptoVerdictCurrent(
 	return ls.headerCryptoVerificationGenerationCurrent(generation)
 }
 
-// addForkPathHeader re-queues one header of a resolved fork path, carrying the
-// incoming header's crypto verdict but no other's.
-//
-// Only the header this ChainsyncEvent delivered was put through
-// chainsyncHeaderCryptoPolicy and verifyBlockHeaderOnlyCrypto by the admission
-// path above. The rest of forkPath is replayed out of recorded peer header
-// history, which does not retain a per-header verdict, so those are admitted
-// unverified exactly as they were before -- they are below the incoming header
-// and are announced, if at all, once blockfetch validates their blocks.
-//
-// This matters because Chain.addBlockHeader arms a Leios announcement only for
-// a crypto-verified header. Re-queueing the incoming header unverified here
-// would silently drop the announcement on the fork-resolution path, which is
-// precisely the near-tip reorg case where the vote window is still open.
+// addForkPathHeader re-queues one header of a resolved fork path with its
+// retained producer-authorization generation.
 func (ls *LedgerState) addForkPathHeader(
 	forkEvent ChainsyncEvent,
 	incomingPoint ocommon.Point,
 	incomingCryptoVerificationGeneration uint64,
 ) error {
-	if incomingCryptoVerificationGeneration != 0 &&
-		pointMatches(forkEvent.Point, incomingPoint) {
+	return ls.addForkPathHeaderPinned(
+		forkEvent,
+		incomingPoint,
+		incomingCryptoVerificationGeneration,
+		false,
+	)
+}
+
+func (ls *LedgerState) addForkPathHeaderPinned(
+	forkEvent ChainsyncEvent,
+	incomingPoint ocommon.Point,
+	incomingCryptoVerificationGeneration uint64,
+	incomingGenerationPinned bool,
+) error {
+	verificationGeneration := forkEvent.HeaderCryptoVerificationGeneration
+	if pointMatches(forkEvent.Point, incomingPoint) {
+		verificationGeneration = incomingCryptoVerificationGeneration
+	}
+	if incomingGenerationPinned && verificationGeneration != 0 {
+		if verificationGeneration != incomingCryptoVerificationGeneration {
+			return errors.New("fork path header authorization generation changed")
+		}
+		return ls.chain.AddBlockHeaderWithCryptoVerificationGeneration(
+			ls.lifecycleContext(),
+			forkEvent.BlockHeader,
+			verificationGeneration,
+		)
+	}
+	if verificationGeneration != 0 {
 		_, err := ls.addChainsyncHeader(
 			forkEvent.BlockHeader,
-			incomingCryptoVerificationGeneration,
+			verificationGeneration,
 		)
 		return err
 	}
@@ -5629,6 +5924,23 @@ func (ls *LedgerState) tryResolveFork(
 	pending *pendingPublishes,
 	incomingCryptoVerificationGeneration uint64,
 ) (bool, error) {
+	return ls.tryResolveForkPinned(
+		e,
+		notFitErr,
+		pending,
+		incomingCryptoVerificationGeneration,
+		nil,
+	)
+}
+
+func (ls *LedgerState) tryResolveForkPinned(
+	e ChainsyncEvent,
+	notFitErr chain.BlockNotFitChainTipError,
+	pending *pendingPublishes,
+	incomingCryptoVerificationGeneration uint64,
+	releaseIncomingGeneration func(),
+) (bool, error) {
+	incomingGenerationPinned := releaseIncomingGeneration != nil
 	localTip := ls.chain.Tip()
 	praosComparison := ls.compareIncomingHeaderToLocalTip(
 		e,
@@ -5756,8 +6068,11 @@ func (ls *LedgerState) tryResolveFork(
 			"connection_id", e.ConnectionId.String(),
 		)
 		for _, forkEvent := range forkPath {
-			if err := ls.addForkPathHeader(
-				forkEvent, e.Point, incomingCryptoVerificationGeneration,
+			if err := ls.addForkPathHeaderPinned(
+				forkEvent,
+				e.Point,
+				incomingCryptoVerificationGeneration,
+				incomingGenerationPinned,
 			); err != nil {
 				ls.config.Logger.Warn(
 					"failed to queue header from fork extension",
@@ -5783,6 +6098,13 @@ func (ls *LedgerState) tryResolveFork(
 		ls.clearRollbackHistory()
 		if ls.config.BlockfetchRequestRangeFunc != nil &&
 			ls.chain.HeaderCount() > 0 {
+			// The queued headers retain their verification generation. Release
+			// its admission pin before draining an old request: its blockfetch
+			// callback may need the generation lock before it can deliver the
+			// terminal event that ends the drain.
+			if releaseIncomingGeneration != nil {
+				releaseIncomingGeneration()
+			}
 			ls.chainsyncBlockfetchMutex.Lock()
 			if err := ls.restartQueuedBlockfetchAfterForkLocked(e.ConnectionId, pending); err != nil {
 				ls.recoverBlockfetchRestartFailureLocked(
@@ -5794,6 +6116,14 @@ func (ls *LedgerState) tryResolveFork(
 			ls.chainsyncBlockfetchMutex.Unlock()
 		}
 		return true, nil
+	}
+	reverifyAfterRollback := incomingGenerationPinned
+	if reverifyAfterRollback {
+		// Rollback publishes a new producer-authorization generation and needs
+		// the generation write lock, so release the old generation before the
+		// destructive transition. The fork suffix is replayed after a fresh
+		// intersection and verified against the resulting ledger state.
+		releaseIncomingGeneration()
 	}
 
 	ls.config.Logger.Info(
@@ -5914,6 +6244,14 @@ func (ls *LedgerState) tryResolveFork(
 	// Mark state as rollback so the next block header event logs
 	// "switched to fork" and increments the fork metric.
 	ls.setChainsyncState(RollbackChainsyncState)
+	if reverifyAfterRollback {
+		ls.requestChainsyncResync(
+			e.ConnectionId,
+			event.ChainsyncResyncReasonPersistentFork,
+			pending,
+		)
+		return true, nil
+	}
 
 	// Rollback succeeded — re-add the known peer fork segment from the
 	// common ancestor forward. Re-adding only the latest mismatching header
@@ -6077,19 +6415,29 @@ func (ls *LedgerState) handleEventBlockfetchBlockDeferredInternal(
 			queuedVerificationGeneration = ls.chain.QueuedHeaderCryptoVerificationGeneration(e.Point)
 		}
 		headerVerifyStart := time.Now()
-		verificationGeneration, verifyErr := ls.withStableHeaderVerificationContext(func() error {
-			if !ls.headerCryptoVerificationGenerationCurrent(
-				queuedVerificationGeneration,
-			) {
-				return ls.verifyBlockHeaderCryptoBeforeApply(e.Block)
-			}
-			return ls.verifyBlockHeaderStateWithEpochAdvance(
-				ls.lifecycleContext(),
-				e.Block,
-				true,
-				true,
+		verificationGeneration, verifyErr := ls.
+			withStableBlockfetchHeaderVerification(
+				blockfetchMutexHeld,
+				func() error {
+					if !ls.headerCryptoVerificationGenerationCurrent(
+						queuedVerificationGeneration,
+					) {
+						return ls.verifyBlockHeaderCryptoBeforeApply(e.Block)
+					}
+					return ls.verifyBlockHeaderStateWithEpochAdvance(
+						ls.lifecycleContext(),
+						e.Block,
+						true,
+						true,
+					)
+				},
 			)
-		})
+		if blockfetchMutexHeld {
+			if !ls.blockfetchEventCurrent(e) ||
+				!ls.blockfetchBatchStillCurrent() {
+				return nil
+			}
+		}
 		ls.metrics.observeBlockStage(
 			blockStageHeaderVerify,
 			time.Since(headerVerifyStart),
@@ -6204,6 +6552,30 @@ func (ls *LedgerState) withBlockfetchMutexReleased(
 	ls.chainsyncBlockfetchMutex.Unlock()
 	defer ls.chainsyncBlockfetchMutex.Lock()
 	return fn()
+}
+
+// withStableBlockfetchHeaderVerification keeps the blockfetch mutex out of
+// the generation-lock order. ChainSync admission pins a generation before it
+// takes the blockfetch mutex, so verification must release the mutex before
+// the stable-context check takes the generation read lock.
+func (ls *LedgerState) withStableBlockfetchHeaderVerification(
+	blockfetchMutexHeld bool,
+	verify func() error,
+) (uint64, error) {
+	if !blockfetchMutexHeld {
+		return ls.withStableHeaderVerificationContext(verify)
+	}
+	var (
+		generation uint64
+		verifyErr  error
+	)
+	if err := ls.withBlockfetchMutexReleased(func() error {
+		generation, verifyErr = ls.withStableHeaderVerificationContext(verify)
+		return nil
+	}); err != nil {
+		return 0, err
+	}
+	return generation, verifyErr
 }
 
 func (ls *LedgerState) nextBlockfetchConnId() (ouroboros.ConnectionId, bool) {

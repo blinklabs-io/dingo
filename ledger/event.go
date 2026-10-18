@@ -109,9 +109,15 @@ type ChainsyncEvent struct {
 	// to the ingress owner. It is not called while the header is buffered for a
 	// connection switch; the callback travels with that buffered event.
 	PeerTipAdmission func(admitted bool)
-	BlockNumber      uint64
-	Type             uint // Block or header type ID
-	Rollback         bool // Set to true for a Rollback event
+	// InvalidatePeerHeaderHistory removes this point and its dependent suffix
+	// from the ingress owner's observed-header ancestry.
+	InvalidatePeerHeaderHistory func()
+	// peerHeaderHistoryReplay identifies a buffered event whose history was
+	// recorded before it was detached from the replay queue.
+	peerHeaderHistoryReplay bool
+	BlockNumber             uint64
+	Type                    uint // Block or header type ID
+	Rollback                bool // Set to true for a Rollback event
 }
 
 // ChainsyncAwaitReplyEvent is emitted when a chainsync peer explicitly reports

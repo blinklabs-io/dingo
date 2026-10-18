@@ -19,10 +19,12 @@ import (
 	"math"
 	"net"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -573,6 +575,272 @@ func TestPeerTipAdmissionCandidatesStayOutOfSelectionUntilAdmitted(t *testing.T)
 		"rejecting the candidate must remove it from corroboration")
 	assert.NotContains(t, cs.GetAllPeerTips(), applicant)
 	assert.Nil(t, cs.pendingPeerTipFrontiers[applicant])
+}
+
+func TestStaleHeaderVerificationGenerationCannotCorroborate(t *testing.T) {
+	t.Parallel()
+
+	var current atomic.Uint64
+	current.Store(1)
+	cs := NewChainSelector(ChainSelectorConfig{
+		GenesisMode:           true,
+		SecurityParam:         20,
+		MinCorroboratingPeers: 1,
+		HeaderCryptoVerificationGenerationCurrent: func(generation uint64) bool {
+			return generation == current.Load()
+		},
+	})
+	applicant := corrConn(31)
+	witness := corrConn(32)
+	for _, connId := range []ouroboros.ConnectionId{applicant, witness} {
+		require.True(t, cs.PreparePeerTipAdmission(PeerTipUpdateEvent{
+			ConnectionId:                       connId,
+			AdmissionID:                        1,
+			Tip:                                genesisTip(100, "h100", 100),
+			ObservedTip:                        genesisTip(100, "h100", 100),
+			HeaderCryptoVerificationGeneration: 1,
+		}))
+	}
+	require.True(t, cs.ShouldApplyIngress(applicant))
+
+	current.Store(2)
+	assert.False(t, cs.ShouldApplyIngress(applicant),
+		"a candidate authorized by an obsolete snapshot must not corroborate")
+	assert.False(t, cs.ShouldApplyIngress(witness))
+	require.True(t, cs.PreparePeerTipAdmission(PeerTipUpdateEvent{
+		ConnectionId:                       applicant,
+		AdmissionID:                        2,
+		Tip:                                genesisTip(101, "h101", 101),
+		ObservedTip:                        genesisTip(101, "h101", 101),
+		HeaderCryptoVerificationGeneration: 2,
+	}))
+	assert.False(t, cs.ShouldApplyIngress(applicant),
+		"a stale witness must not authorize a current candidate")
+}
+
+func TestStaleHeaderVerificationGenerationCannotCommit(t *testing.T) {
+	t.Parallel()
+
+	cs := NewChainSelector(ChainSelectorConfig{
+		HeaderCryptoVerificationGenerationCurrent: func(uint64) bool {
+			return true
+		},
+		PinHeaderCryptoVerificationGeneration: func(uint64) (func(), bool) {
+			return nil, false
+		},
+	})
+	connId := corrConn(33)
+	update := PeerTipUpdateEvent{
+		ConnectionId:                       connId,
+		AdmissionID:                        1,
+		Tip:                                genesisTip(100, "h100", 100),
+		ObservedTip:                        genesisTip(100, "h100", 100),
+		HeaderCryptoVerificationGeneration: 1,
+	}
+	require.True(t, cs.PreparePeerTipAdmission(update))
+	require.False(t, cs.CommitPeerTipAdmission(update))
+	require.NotContains(t, cs.GetAllPeerTips(), connId)
+}
+
+func TestPinnedPeerTipAdmissionDoesNotRepinDuringEvaluation(t *testing.T) {
+	t.Parallel()
+
+	var pinCalls atomic.Int64
+	cs := NewChainSelector(ChainSelectorConfig{
+		HeaderCryptoVerificationGenerationCurrent: func(uint64) bool {
+			return true
+		},
+		PinHeaderCryptoVerificationGeneration: func(uint64) (func(), bool) {
+			pinCalls.Add(1)
+			return nil, false
+		},
+	})
+	connId := corrConn(36)
+	update := PeerTipUpdateEvent{
+		ConnectionId:                       connId,
+		AdmissionID:                        1,
+		Tip:                                genesisTip(100, "h100", 100),
+		ObservedTip:                        genesisTip(100, "h100", 100),
+		HeaderCryptoVerificationGeneration: 1,
+	}
+	require.True(t, cs.PreparePeerTipAdmission(update))
+	require.True(t, cs.CommitPeerTipAdmissionPinned(update))
+	assert.Zero(t, pinCalls.Load(),
+		"a ledger-pinned admission must not acquire the generation lock again")
+	assert.Contains(t, cs.GetAllPeerTips(), connId)
+}
+
+func TestImmediatePeerTipAdmissionAcquiresGenerationPin(t *testing.T) {
+	t.Parallel()
+
+	var allowPin atomic.Bool
+	allowPin.Store(true)
+	var pinCalls atomic.Int64
+	cs := NewChainSelector(ChainSelectorConfig{
+		HeaderCryptoVerificationGenerationCurrent: func(uint64) bool {
+			return true
+		},
+		PinHeaderCryptoVerificationGeneration: func(uint64) (func(), bool) {
+			pinCalls.Add(1)
+			return func() {}, allowPin.Load()
+		},
+	})
+	admittedConn := corrConn(37)
+	point := genesisTip(100, "h100", 100)
+	admitted := PeerTipUpdateEvent{
+		ConnectionId:                       admittedConn,
+		AdmissionID:                        1,
+		Tip:                                point,
+		ObservedTip:                        point,
+		HeaderCryptoVerificationGeneration: 1,
+	}
+	require.True(t, cs.PreparePeerTipAdmission(admitted))
+	require.True(t, cs.CommitPeerTipAdmissionPinned(admitted))
+
+	allowPin.Store(false)
+	candidateConn := corrConn(38)
+	candidate := admitted
+	candidate.ConnectionId = candidateConn
+	require.True(t, cs.PreparePeerTipAdmission(candidate))
+	assert.EqualValues(t, 1, pinCalls.Load())
+	assert.NotContains(t, cs.GetAllPeerTips(), candidateConn,
+		"an immediately matched candidate must not bypass a failed generation pin")
+}
+
+func TestMatchingPeerTipAdmissionsShareGenerationPin(t *testing.T) {
+	t.Parallel()
+
+	var generation atomic.Uint64
+	generation.Store(1)
+	var gate sync.RWMutex
+	matchingConn := corrConn(40)
+	var blockMatching atomic.Bool
+	matchingEntered := make(chan struct{})
+	releaseMatching := make(chan struct{})
+	cs := NewChainSelector(ChainSelectorConfig{
+		HeaderCryptoVerificationGenerationCurrent: func(value uint64) bool {
+			return value == generation.Load()
+		},
+		PinHeaderCryptoVerificationGeneration: func(value uint64) (func(), bool) {
+			gate.RLock()
+			if value != generation.Load() {
+				gate.RUnlock()
+				return nil, false
+			}
+			return gate.RUnlock, true
+		},
+		ConnectionLive: func(connId ouroboros.ConnectionId) bool {
+			if connId == matchingConn && blockMatching.Load() {
+				close(matchingEntered)
+				<-releaseMatching
+			}
+			return true
+		},
+	})
+	admittedConn := corrConn(39)
+	point := genesisTip(100, "h100", 100)
+	makeUpdate := func(connId ouroboros.ConnectionId) PeerTipUpdateEvent {
+		return PeerTipUpdateEvent{
+			ConnectionId:                       connId,
+			AdmissionID:                        1,
+			Tip:                                point,
+			ObservedTip:                        point,
+			HeaderCryptoVerificationGeneration: 1,
+		}
+	}
+	admitted := makeUpdate(admittedConn)
+	matching := makeUpdate(matchingConn)
+	require.True(t, cs.PreparePeerTipAdmission(admitted))
+	require.True(t, cs.PreparePeerTipAdmission(matching))
+
+	blockMatching.Store(true)
+	committed := make(chan bool, 1)
+	go func() { committed <- cs.CommitPeerTipAdmission(admitted) }()
+	testutil.RequireReceive(t, matchingEntered, time.Second,
+		"matching admission should begin while the original pin is held")
+	published := make(chan struct{})
+	go func() {
+		gate.Lock()
+		generation.Store(2)
+		gate.Unlock()
+		close(published)
+	}()
+	testutil.RequireNoReceive(t, published, 100*time.Millisecond,
+		"snapshot publication must wait for all matching admissions")
+	close(releaseMatching)
+	require.True(t, testutil.RequireReceive(t, committed, time.Second,
+		"the original admission should complete"))
+	testutil.RequireReceive(t, published, time.Second,
+		"publication should resume after matching admissions finish")
+	assert.Contains(t, cs.GetAllPeerTips(), admittedConn)
+	assert.Contains(t, cs.GetAllPeerTips(), matchingConn)
+}
+
+func TestCorroborationPinsVerificationGeneration(t *testing.T) {
+	t.Parallel()
+
+	var (
+		generation atomic.Uint64
+		gate       sync.RWMutex
+		blockOnce  sync.Once
+	)
+	generation.Store(1)
+	entered := make(chan struct{})
+	releaseDecision := make(chan struct{})
+	cs := NewChainSelector(ChainSelectorConfig{
+		GenesisMode:           true,
+		SecurityParam:         20,
+		MinCorroboratingPeers: 1,
+		HeaderCryptoVerificationGenerationCurrent: func(value uint64) bool {
+			return value == generation.Load()
+		},
+		CurrentHeaderCryptoVerificationGeneration: generation.Load,
+		PinHeaderCryptoVerificationGeneration: func(value uint64) (func(), bool) {
+			gate.RLock()
+			if value != generation.Load() {
+				gate.RUnlock()
+				return nil, false
+			}
+			return gate.RUnlock, true
+		},
+		PeerIdentity: func(connId ouroboros.ConnectionId) string {
+			blockOnce.Do(func() {
+				close(entered)
+				<-releaseDecision
+			})
+			return connId.RemoteAddr.String()
+		},
+	})
+	applicant := corrConn(34)
+	witness := corrConn(35)
+	for _, connId := range []ouroboros.ConnectionId{applicant, witness} {
+		require.True(t, cs.PreparePeerTipAdmission(PeerTipUpdateEvent{
+			ConnectionId:                       connId,
+			AdmissionID:                        1,
+			Tip:                                genesisTip(100, "h100", 100),
+			ObservedTip:                        genesisTip(100, "h100", 100),
+			HeaderCryptoVerificationGeneration: 1,
+		}))
+	}
+
+	decision := make(chan bool, 1)
+	go func() { decision <- cs.ShouldApplyIngress(applicant) }()
+	testutil.RequireReceive(t, entered, time.Second,
+		"corroboration should reach the decision hook")
+	published := make(chan struct{})
+	go func() {
+		gate.Lock()
+		generation.Store(2)
+		gate.Unlock()
+		close(published)
+	}()
+	testutil.RequireNoReceive(t, published, 100*time.Millisecond,
+		"publication must wait until corroboration releases its generation pin")
+	close(releaseDecision)
+	require.True(t, testutil.RequireReceive(t, decision, time.Second,
+		"corroboration should complete"))
+	testutil.RequireReceive(t, published, time.Second,
+		"publication should resume after the selector decision")
 }
 
 // A disconnected peer's staged candidates are corroboration evidence only while
@@ -1436,4 +1704,24 @@ func TestGenesisModeExitEmitsEvent(t *testing.T) {
 	assert.Equal(t, uint64(75), exits[0].LocalSlot)
 	assert.Equal(t, uint64(100), exits[0].BestKnownSlot)
 	assert.Equal(t, uint64(30), exits[0].GenesisWindowSlots)
+}
+
+func TestShouldApplyIngressWaitsOutTransientZeroGeneration(t *testing.T) {
+	t.Parallel()
+
+	var generation atomic.Uint64
+	cs := NewChainSelector(ChainSelectorConfig{
+		SecurityParam: 20,
+		CurrentHeaderCryptoVerificationGeneration: generation.Load,
+		PinHeaderCryptoVerificationGeneration: func(value uint64) (func(), bool) {
+			return func() {}, value == generation.Load()
+		},
+	})
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		generation.Store(1)
+	}()
+
+	assert.True(t, cs.ShouldApplyIngress(corrConn(40)),
+		"a generation that is zero only during a transition must not reject the header")
 }

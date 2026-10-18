@@ -74,6 +74,12 @@ import (
 // shrink it instead of waiting on a real multi-minute timer.
 var cleanupConsumedUtxosInterval = 5 * time.Minute
 
+// snapshotGenerationCounter gives every publication in this process a unique
+// generation. A live Restore or Truncate replaces LedgerState while consumers
+// can retain generation-tagged work from the outgoing instance, so a
+// replacement must never reuse one of its tokens.
+var snapshotGenerationCounter atomic.Uint64
+
 // gatherCoalesceRetryInterval and gatherCoalesceMaxAttempts bound how long
 // ledgerReadChainIterator's batch-gather loop will wait, after a non-blocking
 // iter.Next(false) reports chain.ErrIteratorChainTip, for more blocks to
@@ -1313,8 +1319,9 @@ type LedgerState struct {
 	persistedBlockSizeMu     sync.Mutex
 	persistedBlockSize       uint64
 	persistedBlockSizeLoaded bool
-	// snapshotGeneration is incremented while writers are serialized by Lock.
-	// It lets readers that need both snapshots reject adjacent publications.
+	// snapshotGeneration is assigned while writers are serialized by Lock.
+	// It lets readers that need both snapshots reject adjacent publications and
+	// generation-tagged work reject snapshots from another LedgerState instance.
 	snapshotGeneration uint64
 	// txValidationCommitMutex serializes snapshot publication against the
 	// final generation check and mutation performed by a validation session.
@@ -2243,8 +2250,11 @@ func cloneEpochs(values []models.Epoch) []models.Epoch {
 func (ls *LedgerState) publishSnapshotsLocked() {
 	ls.txValidationCommitMutex.Lock()
 	defer ls.txValidationCommitMutex.Unlock()
-	ls.snapshotGeneration++
-	generation := ls.snapshotGeneration
+	generation := snapshotGenerationCounter.Add(1)
+	if generation == 0 {
+		panic("ledger snapshot generations exhausted")
+	}
+	ls.snapshotGeneration = generation
 	// Prevent a later append to the writer-owned slice from reusing storage
 	// visible to an already-published snapshot. Element updates still require
 	// replacing the cache and its slice-backed Epoch fields.
