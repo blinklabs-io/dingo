@@ -286,6 +286,10 @@ func openDevnetStateRoot(runDir string) (*os.Root, error) {
 			runDir,
 		)
 	}
+	if err := devnetkeys.RestrictLocalTestDirectory(root); err != nil {
+		_ = root.Close()
+		return nil, fmt.Errorf("restricting devnet data directory: %w", err)
+	}
 	return root, nil
 }
 

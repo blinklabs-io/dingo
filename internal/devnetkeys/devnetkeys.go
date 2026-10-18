@@ -66,6 +66,22 @@ func InstallLocalTestFaucetInRoot(root *os.Root, dir string) error {
 	})
 }
 
+// RestrictLocalTestDirectory limits an opened DevNet directory to its owner.
+func RestrictLocalTestDirectory(root *os.Root) error {
+	dirFile, err := root.Open(".")
+	if err != nil {
+		return fmt.Errorf("opening local DevNet directory: %w", err)
+	}
+	if err := restrictLocalTestKeyPath(dirFile, 0o700); err != nil {
+		_ = dirFile.Close()
+		return fmt.Errorf("restricting local DevNet directory: %w", err)
+	}
+	if err := dirFile.Close(); err != nil {
+		return fmt.Errorf("closing local DevNet directory: %w", err)
+	}
+	return nil
+}
+
 func installLocalTestKeys(dir string, names []string) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("creating local DevNet key directory: %w", err)
@@ -147,16 +163,8 @@ func openLocalTestKeyChild(parent *os.Root, name string) (*os.Root, error) {
 }
 
 func installLocalTestKeysIntoRoot(root *os.Root, names []string) error {
-	dirFile, err := root.Open(".")
-	if err != nil {
-		return fmt.Errorf("opening local DevNet key directory: %w", err)
-	}
-	if err := restrictLocalTestKeyPath(dirFile, 0o700); err != nil {
-		_ = dirFile.Close()
-		return fmt.Errorf("restricting local DevNet key directory: %w", err)
-	}
-	if err := dirFile.Close(); err != nil {
-		return fmt.Errorf("closing local DevNet key directory: %w", err)
+	if err := RestrictLocalTestDirectory(root); err != nil {
+		return err
 	}
 	for _, name := range names {
 		data, err := localKeys.ReadFile("keys/" + name)

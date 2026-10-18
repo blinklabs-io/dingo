@@ -130,6 +130,21 @@ func TestDevnetRunDirectoryResolvesSymlinkedDataDir(t *testing.T) {
 	require.NoError(t, root.Close())
 }
 
+func TestOpenDevnetStateRootRestrictsExistingDirectory(t *testing.T) {
+	t.Parallel()
+
+	runDir := t.TempDir()
+	require.NoError(t, os.Chmod(runDir, 0o777))
+
+	root, err := openDevnetStateRoot(runDir)
+	require.NoError(t, err)
+	require.NoError(t, root.Close())
+
+	info, err := os.Stat(runDir)
+	require.NoError(t, err)
+	require.Equal(t, os.FileMode(0o700), info.Mode().Perm())
+}
+
 func TestInstallLocalTestFaucetInRootRejectsSymlinkedIntermediate(t *testing.T) {
 	t.Parallel()
 
