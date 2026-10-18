@@ -17,6 +17,7 @@ package leader
 import (
 	"testing"
 
+	nodeconsensus "github.com/blinklabs-io/dingo/consensus"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -76,6 +77,7 @@ func TestSyncStateScheduleStoreRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, loaded)
 	assert.Equal(t, ScheduleFormatVersion, loaded.FormatVersion)
+	assert.Equal(t, nodeconsensus.PraosIdentity, loaded.ConsensusIdentity)
 	assert.Equal(t, schedule.Epoch, loaded.Epoch)
 	assert.Equal(t, schedule.PoolId, loaded.PoolId)
 	assert.Equal(t, schedule.PoolStake, loaded.PoolStake)
@@ -112,6 +114,7 @@ func TestSyncStateScheduleStoreLoadsZeroFormatVersionFromOldRecord(
 	require.NotNil(t, loaded)
 	assert.Equal(t, 0, loaded.FormatVersion,
 		"missing format_version must decode to 0 so validation rejects it")
+	assert.Equal(t, nodeconsensus.PraosIdentity, loaded.ConsensusIdentity)
 }
 
 // TestSyncStateScheduleStoreSortsUnsortedRecord verifies that a persisted

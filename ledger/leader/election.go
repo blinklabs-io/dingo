@@ -25,6 +25,7 @@ import (
 	"sync"
 	"time"
 
+	nodeconsensus "github.com/blinklabs-io/dingo/consensus"
 	"github.com/blinklabs-io/dingo/consensus/praos"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/gouroboros/consensus"
@@ -241,16 +242,17 @@ type Election struct {
 	logger        *slog.Logger
 	scheduleStore ScheduleStore
 
-	mu             sync.RWMutex
-	schedules      map[uint64]*Schedule // epoch -> schedule
-	running        bool
-	cancel         context.CancelFunc
-	lifecycleCtx   context.Context
-	lifecycleDone  chan struct{} // closes after the generation has drained
-	computeCh      chan uint64   // requests background schedule computation
-	subscriptionId event.EventSubscriberId
-	nonceReadySub  event.EventSubscriberId
-	metrics        *electionMetrics
+	mu                sync.RWMutex
+	schedules         map[uint64]*Schedule // epoch -> schedule
+	running           bool
+	cancel            context.CancelFunc
+	lifecycleCtx      context.Context
+	lifecycleDone     chan struct{} // closes after the generation has drained
+	computeCh         chan uint64   // requests background schedule computation
+	subscriptionId    event.EventSubscriberId
+	nonceReadySub     event.EventSubscriberId
+	metrics           *electionMetrics
+	consensusIdentity string
 
 	// wg owns only the three worker loops. The cancellation coordinator joins
 	// them before closing lifecycleDone; it must never join itself. Start
@@ -272,13 +274,25 @@ func NewElection(
 		logger = slog.Default()
 	}
 	return &Election{
-		poolId:        poolId,
-		vrfSeed:       vrfSeed,
-		stakeProvider: stakeProvider,
-		epochProvider: epochProvider,
-		eventBus:      eventBus,
-		logger:        logger,
+		poolId:            poolId,
+		vrfSeed:           vrfSeed,
+		stakeProvider:     stakeProvider,
+		epochProvider:     epochProvider,
+		eventBus:          eventBus,
+		logger:            logger,
+		consensusIdentity: nodeconsensus.PraosIdentity,
 	}
+}
+
+// SetConsensusIdentity binds computed and persisted schedules to the selected
+// consensus provider. It must be called before Start.
+func (e *Election) SetConsensusIdentity(identity string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if identity == "" {
+		identity = nodeconsensus.PraosIdentity
+	}
+	e.consensusIdentity = identity
 }
 
 // SetScheduleStore configures an optional persistent schedule store.
@@ -737,6 +751,16 @@ func (e *Election) validatePersistedSchedule(
 			ScheduleFormatVersion,
 		), nil
 	}
+	e.mu.RLock()
+	consensusIdentity := e.consensusIdentity
+	e.mu.RUnlock()
+	if schedule.ConsensusIdentity != consensusIdentity {
+		return false, fmt.Sprintf(
+			"consensus identity mismatch: got %q want %q",
+			schedule.ConsensusIdentity,
+			consensusIdentity,
+		), nil
+	}
 
 	expectedNonce := e.epochProvider.EpochNonce(ctx, epoch)
 	if len(expectedNonce) == 0 {
@@ -950,6 +974,9 @@ func (e *Election) computeSchedule(
 	if err != nil {
 		return nil, fmt.Errorf("calculate schedule: %w", err)
 	}
+	e.mu.RLock()
+	schedule.ConsensusIdentity = e.consensusIdentity
+	e.mu.RUnlock()
 
 	// One O(1)-per-epoch record carrying every input to the leader check, so a
 	// schedule that disagrees with `cardano-cli query leadership-schedule` can

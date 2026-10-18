@@ -664,6 +664,11 @@ func (n *Node) reinitializeCoreStorage(ctx context.Context) error {
 		)
 		dbNeedsRecovery = true
 	}
+	if !dbNeedsRecovery {
+		if err := n.enforceConsensusDatabaseIdentity(); err != nil {
+			return fmt.Errorf("consensus database compatibility: %w", err)
+		}
+	}
 
 	cm, err := chain.NewManager(ctx, n.db, n.eventBus, n.config.promRegistry)
 	if err != nil {
@@ -717,6 +722,9 @@ func (n *Node) reinitializeCoreStorage(ctx context.Context) error {
 	if dbNeedsRecovery {
 		if err := n.ledgerState.RecoverCommitTimestampConflict(ctx); err != nil {
 			return fmt.Errorf("failed to recover database: %w", err)
+		}
+		if err := n.enforceConsensusDatabaseIdentity(); err != nil {
+			return fmt.Errorf("consensus database compatibility: %w", err)
 		}
 		if err := n.enforceRecoveredNodeSettings(ctx); err != nil {
 			return err

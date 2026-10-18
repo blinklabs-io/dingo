@@ -32,6 +32,7 @@ import (
 	"github.com/blinklabs-io/dingo/internal/settingsresolve"
 	"github.com/blinklabs-io/dingo/internal/version"
 	"github.com/blinklabs-io/dingo/mithril"
+	"github.com/blinklabs-io/dingo/plugin"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"go.uber.org/automaxprocs/maxprocs"
@@ -490,6 +491,18 @@ Database Workers:
 
 		if err := cfg.Validate(effectiveRunMode(cmd, cfg)); err != nil {
 			return fmt.Errorf("invalid configuration: %w", err)
+		}
+
+		host, err := internalplugins.NewHost()
+		if err != nil {
+			return fmt.Errorf("create plugin host: %w", err)
+		}
+		if err := host.ValidateSelection(
+			plugin.CapabilityConsensus,
+			cfg.Plugins.Consensus.Provider,
+			cfg.Plugins.Consensus.Config,
+		); err != nil {
+			return fmt.Errorf("invalid consensus plugin selection: %w", err)
 		}
 
 		// Topology derives from the network and topology settings, so it

@@ -26,6 +26,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	nodeconsensus "github.com/blinklabs-io/dingo/consensus"
 	"github.com/blinklabs-io/dingo/event"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
@@ -149,6 +150,7 @@ const (
 
 // ChainSelectorConfig holds configuration for the ChainSelector.
 type ChainSelectorConfig struct {
+	Consensus          nodeconsensus.Provider
 	Logger             *slog.Logger
 	EventBus           *event.EventBus
 	EvaluationInterval time.Duration
@@ -474,6 +476,9 @@ func (cs *ChainSelector) refreshGenesisSelectionSnapshotLocked() {
 
 // NewChainSelector creates a new ChainSelector with the given configuration.
 func NewChainSelector(cfg ChainSelectorConfig) *ChainSelector {
+	if cfg.Consensus == nil {
+		cfg.Consensus = nodeconsensus.NewPraosProvider()
+	}
 	if cfg.Logger == nil {
 		cfg.Logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
 	}
@@ -3118,7 +3123,7 @@ func (cs *ChainSelector) comparePeerTipsPraos(
 ) ChainComparisonResult {
 	tipA := peerTipA.SelectionTip()
 	tipB := peerTipB.SelectionTip()
-	comparison := ComparePraosTips(
+	comparison := cs.config.Consensus.CompareTips(
 		tipA,
 		tipB,
 		peerTipA.PraosView,
@@ -3659,7 +3664,7 @@ func (cs *ChainSelector) evaluateBestPeerLocked() (
 			if !ok {
 				return false, nil, nil, corroborationEvent
 			}
-			if ComparePraosTips(
+			if cs.config.Consensus.CompareTips(
 				newPeerTip.SelectionTip(),
 				previousPeerTip.SelectionTip(),
 				newPeerTip.PraosView,

@@ -1087,9 +1087,10 @@ type Config struct {
 // PluginsConfig is the canonical configuration tree for compiled-in plugin
 // capabilities.
 type PluginsConfig struct {
-	Storage StoragePluginsConfig `yaml:"storage"`
-	Mempool hostplugin.Selection `yaml:"mempool"`
-	API     APIPluginsConfig     `yaml:"api"`
+	Storage   StoragePluginsConfig `yaml:"storage"`
+	Consensus hostplugin.Selection `yaml:"consensus"`
+	Mempool   hostplugin.Selection `yaml:"mempool"`
+	API       APIPluginsConfig     `yaml:"api"`
 }
 
 type StoragePluginsConfig struct {
@@ -1134,6 +1135,10 @@ func defaultPluginsConfig() PluginsConfig {
 				Provider: "sqlite",
 				Config:   map[string]any{},
 			},
+		},
+		Consensus: hostplugin.Selection{
+			Provider: "praos",
+			Config:   map[string]any{},
 		},
 		Mempool: hostplugin.Selection{
 			Provider: DefaultMempoolImplementation,
@@ -1709,6 +1714,7 @@ func cloneConfig(cfg *Config) *Config {
 	clone.Plugins.Storage.Metadata = clonePluginSelection(
 		cfg.Plugins.Storage.Metadata,
 	)
+	clone.Plugins.Consensus = clonePluginSelection(cfg.Plugins.Consensus)
 	clone.Plugins.Mempool = clonePluginSelection(cfg.Plugins.Mempool)
 	clone.Plugins.API.Blockfrost = clonePluginSelection(
 		cfg.Plugins.API.Blockfrost,
@@ -1832,6 +1838,7 @@ func LoadConfig(configFile string) (*Config, error) {
 	}{
 		{hostplugin.CapabilityStorageBlob, &cfg.Plugins.Storage.Blob},
 		{hostplugin.CapabilityStorageMetadata, &cfg.Plugins.Storage.Metadata},
+		{hostplugin.CapabilityConsensus, &cfg.Plugins.Consensus},
 		{hostplugin.CapabilityMempool, &cfg.Plugins.Mempool},
 		{hostplugin.CapabilityAPIBlockfrost, &cfg.Plugins.API.Blockfrost},
 		{hostplugin.CapabilityAPIKupo, &cfg.Plugins.API.Kupo},

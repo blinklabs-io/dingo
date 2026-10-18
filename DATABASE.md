@@ -67,6 +67,14 @@ itself distinguish which of the two classes above produced it.
 
 ## Storage provider ownership
 
+The `consensus_provider_identity` sync-state key binds a database to the
+versioned consensus semantics that created it. Databases without the key are
+existing Praos databases and are treated as `praos/v1`; opening one with Praos
+writes the marker. Startup rejects a different selected identity before ledger
+processing. Leader schedule records separately carry the same identity and a
+format version, so cached production schedules are reused only by the provider
+that computed them.
+
 Blob and metadata stores are constructed by the application plugin host and
 injected with `database.New(config, database.Stores{Blob: ..., Metadata: ...})`.
 The database drains only database-owned workers; the host closes providers

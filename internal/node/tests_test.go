@@ -30,6 +30,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/deferred"
 	"github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/plugin"
 	"github.com/stretchr/testify/require"
 )
 
@@ -689,7 +690,10 @@ func TestBuildDingoConfigWiresForgeEBSelectionReserve(t *testing.T) {
 	)
 
 	if got := built.ForgeEBSelectionReserve(); got != 750*time.Millisecond {
-		t.Fatalf("expected forgeEbSelectionReserve 750ms to flow through, got %s", got)
+		t.Fatalf(
+			"expected forgeEbSelectionReserve 750ms to flow through, got %s",
+			got,
+		)
 	}
 }
 
@@ -747,6 +751,29 @@ func TestBuildDingoConfigCarriesTokenRegistry(t *testing.T) {
 	require.Equal(t, int64(89), got.MaxBatchBytes)
 	require.True(t, got.StoreLogos)
 	require.True(t, got.AllowPrivateAddresses)
+}
+
+func TestBuildDingoConfigCarriesConsensusProvider(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.Config{
+		Plugins: config.PluginsConfig{
+			Consensus: plugin.Selection{Provider: "custom-consensus"},
+		},
+	}
+	built := buildDingoConfig(
+		cfg,
+		nil,
+		nil,
+		nil,
+		false,
+		dingo.StorageModeCore,
+		time.Minute,
+		time.Minute,
+		0,
+	)
+
+	require.Equal(t, "custom-consensus", built.ConsensusPlugin())
 }
 
 // TestBuildDingoConfigTokenRegistryDefaultsOff pins the deliberate default

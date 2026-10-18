@@ -58,6 +58,12 @@ var flagSpecs = []flagSpec{
 	),
 	stringFlag("Plugins.Mempool.Provider", "mempool", "", "mempool provider"),
 	stringFlag(
+		"Plugins.Consensus.Provider",
+		"consensus",
+		"",
+		"consensus provider",
+	),
+	stringFlag(
 		"DatabasePath",
 		"data-dir",
 		"",

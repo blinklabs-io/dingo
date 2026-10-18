@@ -4064,7 +4064,7 @@ func (ls *LedgerState) compareIncomingHeaderToLocalTip(
 	}
 
 	incomingView, _ := praos.GetPraosTiebreakerView(e.BlockHeader)
-	result := praos.ComparePraosTips(
+	result := ls.compareConsensusTips(
 		observedTip,
 		localTip,
 		incomingView,
@@ -4100,7 +4100,7 @@ func (ls *LedgerState) earlierHeaderCanBeatLocalTip(
 		return false
 	}
 	incomingView, _ := praos.GetPraosTiebreakerView(e.BlockHeader)
-	return praos.ComparePraosTips(
+	return ls.compareConsensusTips(
 		observedTip,
 		localTip,
 		incomingView,
