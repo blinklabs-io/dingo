@@ -32,7 +32,7 @@ func checkOpenFileOwner(f *os.File) error {
 	if err != nil {
 		return fmt.Errorf("get key file %q owner: %w", f.Name(), err)
 	}
-	defer freeSecurityDescriptor(sd)
+	// GetSecurityInfo returns a Go-heap copy and releases its native buffer.
 	owner, _, err := sd.Owner()
 	if err != nil || owner == nil {
 		return fmt.Errorf(
