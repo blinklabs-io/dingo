@@ -187,8 +187,10 @@ func verifiedAncillaryLimits(
 	}
 	manifestDigest := sha256.Sum256(manifestData)
 	digests[ancillaryManifestFilename] = hex.EncodeToString(manifestDigest[:])
+	// The extractor counts entries before cleaning their names, so one "./"
+	// root entry is admitted on top of the manifest's own names.
 	return archiveLimits{
-		maxEntries:     len(allowed),
+		maxEntries:     len(allowed) + 1,
 		maxMemberBytes: maxExtractFileSize,
 		maxTotalBytes:  ancillaryExpandedMaxBytes,
 		allow: func(name string) bool {

@@ -354,7 +354,7 @@ func bootstrapV2(
 		Transport:     downloadTransport,
 		CheckRedirect: locationPolicy.checkRedirect,
 	}
-	client.httpClient = cfg.httpClient
+	client.httpClient = aggregatorHTTPClient(cfg.httpClient)
 	downloadCtx, cancelDownloads := context.WithTimeout(
 		ctx, artifactDownloadTotalTimeout,
 	)
