@@ -26,7 +26,9 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/chain"
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
@@ -349,6 +351,28 @@ func runLeiosCertEpochBoundaryCase(
 		rewardPParams = epochBoundaryBenchPParams()
 	}
 	seedEmptyRewardBasisForRollover(t, db, epoch0, rewardPParams)
+	var (
+		boundarySnapshots int
+		closureAtBoundary bool
+	)
+	if crossingClosure {
+		ls.SetEpochBoundarySnapshotStakeHook(func(
+			txn *database.Txn,
+			_ event.EpochTransitionEvent,
+		) error {
+			boundarySnapshots++
+			tx, err := db.GetTransactionByHash(
+				t.Context(),
+				closureTx.Hash().Bytes(),
+				txn,
+			)
+			if err != nil {
+				return err
+			}
+			closureAtBoundary = tx != nil
+			return nil
+		})
+	}
 	results := make(chan readChainResult, 1)
 	results <- readChainResult{blocks: blocks}
 	close(results)
@@ -377,11 +401,37 @@ func runLeiosCertEpochBoundaryCase(
 			"a rejected certificate must not apply its closure",
 		)
 		validatedMu.Lock()
-		defer validatedMu.Unlock()
 		require.Empty(
 			t,
 			validatedEpochs,
 			"the timing verdict precedes the certificate check",
+		)
+		validatedMu.Unlock()
+		recovery := leiosBoundaryTestBlock(
+			t,
+			certifier.BlockNumber(),
+			certifier.SlotNumber()+1,
+			announcer.Hash(),
+			false,
+			nil,
+		)
+		require.NoError(t, cm.PrimaryChain().AddBlock(
+			t.Context(),
+			recovery,
+			nil,
+		))
+		recoveryResults := make(chan readChainResult, 1)
+		recoveryResults <- readChainResult{blocks: []gledger.Block{recovery}}
+		close(recoveryResults)
+		require.NoError(t, ls.ledgerProcessBlocksFromSource(
+			t.Context(),
+			recoveryResults,
+		))
+		require.Positive(t, boundarySnapshots)
+		require.False(
+			t,
+			closureAtBoundary,
+			"a rejected closure entered the epoch boundary snapshot",
 		)
 		return
 	}

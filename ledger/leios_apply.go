@@ -64,10 +64,9 @@ var errCertifiedEndorserBlockUnavailable = errors.New(
 )
 
 // errLeiosCertificateWithoutAnnouncement is the verdict on a certifying ranking
-// block whose parent announced no endorser block, or announced it in an earlier
-// epoch (an endorser block is never certified across an epoch boundary): there
-// is nothing for the certificate to certify, so the block is invalid, as in the
-// reference Forker.applyBlock (LeiosCertificateWithoutAnnouncement). It is not
+// block whose parent announced no endorser block. There is nothing for the
+// certificate to certify, so the block is invalid, as in the reference
+// Forker.applyBlock (LeiosCertificateWithoutAnnouncement). It is not
 // errCertifiedEndorserBlockUnavailable, which is retried while a closure that
 // exists is fetched; no closure exists here, so retrying would only hold the
 // pipeline on the block until the stuck-pipeline halt.
@@ -1170,19 +1169,16 @@ func (ls *LedgerState) validateDijkstraLeiosCertificate(
 			EndorserBlockValidationValid:
 		}
 	}
-	if err := ls.CheckLeiosCertificationTiming(
+	epochInfo, err := ls.checkLeiosCertificationTiming(
 		ebSlot,
 		block.SlotNumber(),
-	); err != nil {
-		if errors.Is(err, errLeiosCertificateWithoutAnnouncement) ||
+	)
+	if err != nil {
+		if errors.Is(err, errLeiosCertificateAcrossEpochBoundary) ||
 			errors.Is(err, errLeiosCertificateTooYoung) {
 			return ls.rejectLeiosCertifyingBlock(block, err)
 		}
 		return fmt.Errorf("check Leios certification timing: %w", err)
-	}
-	epochInfo, err := ls.epochForSlot(ebSlot)
-	if err != nil {
-		return fmt.Errorf("resolve certified endorser-block epoch: %w", err)
 	}
 	if err := ls.config.ValidateLeiosCertificate(
 		epochInfo.EpochId,

@@ -17,8 +17,10 @@ package ledger
 import (
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 )
 
@@ -27,6 +29,10 @@ import (
 // since the block that announced the endorser block.
 var errLeiosCertificateTooYoung = errors.New(
 	"certifying ranking block is too soon after the announcement",
+)
+
+var errLeiosCertificateAcrossEpochBoundary = errors.New(
+	"certifying ranking block crosses the announcement epoch boundary",
 )
 
 // leiosCertificationGapSlots returns the number of slots that must pass
@@ -39,6 +45,9 @@ func leiosCertificationGapSlots(
 	pparams *dijkstra.DijkstraProtocolParameters,
 	slotLengthMs uint64,
 ) (uint64, error) {
+	if pparams == nil {
+		return 0, errors.New("dijkstra protocol parameters are unavailable")
+	}
 	totalMs := 3*uint64(pparams.LeiosAnnouncementPeriodLength) +
 		uint64(pparams.LeiosVotePeriodLength) +
 		uint64(pparams.LeiosDiffusionPeriodLength)
@@ -48,69 +57,179 @@ func leiosCertificationGapSlots(
 	if slotLengthMs == 0 {
 		return 0, errors.New("slot length is unknown")
 	}
-	return (totalMs + slotLengthMs - 1) / slotLengthMs, nil
+	gap := totalMs / slotLengthMs
+	if totalMs%slotLengthMs != 0 {
+		gap++
+	}
+	return gap, nil
 }
 
-// leiosEpochForSlot resolves a slot against the published epoch cache and, for
-// a slot past it (the certifying block may open an epoch the cache does not yet
-// hold), against the era history.
-func (ls *LedgerState) leiosEpochForSlot(slot uint64) (models.Epoch, error) {
-	if epoch, err := ls.epochForSlot(slot); err == nil {
-		return epoch, nil
+func leiosEpochFromInfo(infoEpoch uint64, startSlot uint64, eraID uint,
+	slotLength time.Duration, lengthInSlots uint64,
+) models.Epoch {
+	// The hard-fork summary validates both values against the protocol bounds.
+	// #nosec G115
+	return models.Epoch{
+		EpochId:       infoEpoch,
+		StartSlot:     startSlot,
+		EraId:         eraID,
+		SlotLength:    uint(slotLength / time.Millisecond),
+		LengthInSlots: uint(lengthInSlots),
 	}
-	return ls.SlotToEpoch(slot)
+}
+
+func (ls *LedgerState) leiosEpochsForSlots(
+	snapshot *consensusSnapshot,
+	tip *tipSnapshot,
+	announcingSlot uint64,
+	certifyingSlot uint64,
+) (models.Epoch, models.Epoch, error) {
+	announcingEpoch, announcingErr := epochForSlotInCache(
+		snapshot.epochCache,
+		announcingSlot,
+	)
+	certifyingEpoch, certifyingErr := epochForSlotInCache(
+		snapshot.epochCache,
+		certifyingSlot,
+	)
+	if announcingErr == nil && certifyingErr == nil {
+		return announcingEpoch, certifyingEpoch, nil
+	}
+	if tip == nil {
+		return models.Epoch{}, models.Epoch{}, errors.New(
+			"ledger tip not yet published",
+		)
+	}
+	summary, err := ls.buildHardForkSummary(
+		snapshot,
+		tip,
+		0,
+	)
+	if err != nil {
+		return models.Epoch{}, models.Epoch{}, err
+	}
+	resolve := func(slot uint64) (models.Epoch, error) {
+		info, err := summary.SlotToEpoch(slot)
+		if err != nil {
+			return models.Epoch{}, err
+		}
+		return leiosEpochFromInfo(
+			info.Epoch,
+			info.StartSlot,
+			info.EraID,
+			info.SlotLength,
+			info.LengthInSlots,
+		), nil
+	}
+	announcingEpoch, err = resolve(announcingSlot)
+	if err != nil {
+		return models.Epoch{}, models.Epoch{}, fmt.Errorf(
+			"resolve announcing block epoch: %w",
+			err,
+		)
+	}
+	certifyingEpoch, err = resolve(certifyingSlot)
+	if err != nil {
+		return models.Epoch{}, models.Epoch{}, fmt.Errorf(
+			"resolve certifying block epoch: %w",
+			err,
+		)
+	}
+	return announcingEpoch, certifyingEpoch, nil
+}
+
+func (ls *LedgerState) leiosPParamsForEpoch(
+	snapshot *consensusSnapshot,
+	epoch models.Epoch,
+) (*dijkstra.DijkstraProtocolParameters, error) {
+	pparams := snapshot.currentPParams
+	if epoch.EpochId != snapshot.currentEpoch.EpochId {
+		if ls.db == nil {
+			return nil, errors.New(
+				"historical protocol parameters are unavailable",
+			)
+		}
+		era := eras.GetEraById(epoch.EraId)
+		if era == nil {
+			return nil, fmt.Errorf("unknown era %d", epoch.EraId)
+		}
+		var err error
+		pparams, err = ls.loadPersistedProtocolParameters(
+			epoch.EpochId,
+			*era,
+			nil,
+		)
+		if err != nil {
+			return nil, err
+		}
+	}
+	dijkstraPParams, ok := pparams.(*dijkstra.DijkstraProtocolParameters)
+	if !ok || dijkstraPParams == nil {
+		return nil, fmt.Errorf(
+			"dijkstra protocol parameters are unavailable for epoch %d (got %T)",
+			epoch.EpochId,
+			pparams,
+		)
+	}
+	return dijkstraPParams, nil
 }
 
 // CheckLeiosCertificationTiming reports whether a ranking block at slot may
 // certify the endorser block announced by the ranking block at announcingSlot.
-// It returns nil when it may, errLeiosCertificateWithoutAnnouncement when the
-// announcement was made in an earlier epoch (an endorser block is never
-// certified across an epoch boundary, so there is nothing to certify), and
-// errLeiosCertificateTooYoung when the certification gap has not elapsed. Any
-// other error means the node could not decide, which says nothing about the
-// block.
-//
-// The periods are read from the current protocol parameters. They cannot change
-// between the announcing and the certifying block, because those share an
-// epoch and parameters change only at an epoch boundary.
+// It returns nil when it may, errLeiosCertificateAcrossEpochBoundary when the
+// announcement was made in another epoch, and errLeiosCertificateTooYoung
+// when the certification gap has not elapsed. Any other error means the node
+// could not decide, which says nothing about the block.
 func (ls *LedgerState) CheckLeiosCertificationTiming(
 	announcingSlot uint64,
 	slot uint64,
 ) error {
-	announcingEpoch, err := ls.leiosEpochForSlot(announcingSlot)
-	if err != nil {
-		return fmt.Errorf("resolve announcing block epoch: %w", err)
+	_, err := ls.checkLeiosCertificationTiming(announcingSlot, slot)
+	return err
+}
+
+func (ls *LedgerState) checkLeiosCertificationTiming(
+	announcingSlot uint64,
+	slot uint64,
+) (models.Epoch, error) {
+	snapshot, tip := ls.loadConsensusAndTipSnapshots()
+	if snapshot == nil {
+		return models.Epoch{}, errors.New("ledger state not yet published")
 	}
-	certifyingEpoch, err := ls.leiosEpochForSlot(slot)
+	announcingEpoch, certifyingEpoch, err := ls.leiosEpochsForSlots(
+		snapshot,
+		tip,
+		announcingSlot,
+		slot,
+	)
 	if err != nil {
-		return fmt.Errorf("resolve certifying block epoch: %w", err)
+		return models.Epoch{}, err
 	}
 	if announcingEpoch.EpochId != certifyingEpoch.EpochId {
-		return errLeiosCertificateWithoutAnnouncement
+		return models.Epoch{}, errLeiosCertificateAcrossEpochBoundary
 	}
-	snapshot := ls.loadConsensusSnapshot()
-	if snapshot == nil {
-		return errors.New("protocol parameters not yet published")
-	}
-	pparams, ok := snapshot.currentPParams.(*dijkstra.DijkstraProtocolParameters)
-	if !ok {
-		return nil
+	pparams, err := ls.leiosPParamsForEpoch(snapshot, announcingEpoch)
+	if err != nil {
+		return models.Epoch{}, fmt.Errorf(
+			"resolve certification protocol parameters: %w",
+			err,
+		)
 	}
 	gap, err := leiosCertificationGapSlots(
 		pparams,
 		uint64(announcingEpoch.SlotLength),
 	)
 	if err != nil {
-		return fmt.Errorf("derive certification gap: %w", err)
+		return models.Epoch{}, fmt.Errorf("derive certification gap: %w", err)
 	}
-	if slot < announcingSlot+gap {
-		return fmt.Errorf(
-			"%w: announced at slot %d, certified at slot %d, earliest slot %d",
+	if slot < announcingSlot || slot-announcingSlot < gap {
+		return models.Epoch{}, fmt.Errorf(
+			"%w: announced at slot %d, certified at slot %d, required gap %d slots",
 			errLeiosCertificateTooYoung,
 			announcingSlot,
 			slot,
-			announcingSlot+gap,
+			gap,
 		)
 	}
-	return nil
+	return announcingEpoch, nil
 }

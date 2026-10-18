@@ -4588,6 +4588,11 @@ func TestCheckAndForgeProductionAppliesLeiosCertificationTiming(
 			require.Positive(t, timing.calls)
 			require.Equal(t, uint64(9), timing.announcingSlot)
 			require.Equal(t, uint64(10), timing.slot)
+			require.Equal(
+				t,
+				1,
+				builder.calls+builder.leiosCalls+builder.contextCalls,
+			)
 			if test.wantCert {
 				require.Same(t, cert, builder.leiosData.Certificate)
 			} else {
