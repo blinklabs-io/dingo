@@ -9305,9 +9305,8 @@ a boundary that has already been crossed.
 
 That is a statement about who can attempt the write, not about whether it would
 be read, and the two are worth keeping apart: the layers above do not rely on
-it. A file read once and parsed from the buffer is not reachable by an in-place
-write at all, whoever makes it, because there is no second read for it to land
-in front of.
+it. An immutable entry up to 16 MiB is read once into a buffer; later in-place
+writes cannot change the bytes its parsers walk.
 
 That is the shape of the gap on both sides. `checkImmutableTrio` hashes each
 downloaded trio as its archive lands and closes it; the tip read, the catch-up
@@ -9321,7 +9320,7 @@ reader keeps:
 
 | tree | what travels | where it is re-checked |
 |---|---|---|
-| immutable (v2) | `BootstrapResult.ImmutableDigests`, the certified digest list the certificate's merkle root covers | `immutable.NewFromRootVerified` streams each chunk, primary and secondary file past a hash to establish its certified size, reads that many bytes, confirms the digest over the buffer, and the chunk and index parsers walk that buffer |
+| immutable (v2) | `BootstrapResult.ImmutableDigests`, the certified digest list the certificate's merkle root covers | `immutable.NewFromRootVerified` reads entries up to 16 MiB once, hashes the buffer, and gives that buffer to the chunk and index parsers; larger entries use a streaming verification pass, then are read and hashed into a buffer sized to the certified length |
 | immutable (v1) | nothing — v1 certifies one archive rather than the files inside it | not re-checkable; these reads are bound to the directory alone |
 | ancillary state (v2, verified) | `BootstrapResult.AncillaryDigests`, the signed manifest's map | the state is read once into a buffer; `verifySignedState` hashes that buffer and `ParseSnapshotBytes` parses the same one |
 | ancillary table (v2, verified) | the manifest's entry for it, carried down as `ImportConfig.State.UTxOTableDigest` | the table is gigabytes and is mapped rather than read, so the digest is checked against the mapped bytes the decoder then walks |
@@ -9333,53 +9332,49 @@ the point of use. For the same reason an ancillary tree flagged `AncillaryVerifi
 without a digest map is refused outright — the flag would otherwise rest on a
 check nothing downstream can repeat.
 
-Note what none of these rows do: hash a descriptor and hand the parser that same
-descriptor. It looks equivalent and is not, because the parser then reads the
-file a second time. Rewinding does not detach a descriptor from its inode, so a
-writer who can modify the file in place changes what the second pass reads
-without changing anything the first pass could have seen — the check and the
-parse become two readings of one mutable thing, and only the first is the one
-compared against the digest. Where the payload fits in memory the fix is to read
-once and give both the buffer; where it does not, it is to map once and hash the
-mapping. Either way there is no second read to catch out.
+Note what none of these rows do: hash a descriptor and hand the parser that
+same descriptor. Rewinding does not detach it from its inode, so a writer can
+change the bytes the parser reads after the hash. Immutable entries up to 16 MiB
+use one bounded read for both hash and parse. Larger entries retain the streaming
+size and digest check before reading the certified length into a buffer; that
+buffer is hashed before parsing. The ancillary state uses one buffer, and the
+UTxO-HD table is verified and parsed through the same mapping.
 
 For the ImmutableDB that means the reader takes bytes rather than a file:
 `entryReader` (`database/immutable/entry.go`) is what the chunk and index
 parsers read through, and a verified open supplies a `bytesEntry` over the
-buffer it hashed while an ordinary local open supplies a `fileEntry` over the
-descriptor, exactly as before. Only the verified path buffers, so a node reading
-its own ImmutableDB still streams chunks from disk and holds none of one in
-memory.
+buffer it hashed. Entries up to 16 MiB use one read for verification and
+parsing. Larger entries keep the streaming verification pass before buffering;
+an ordinary local open still supplies a `fileEntry` over the descriptor, so a
+node reading its own ImmutableDB streams chunks from disk.
 
-The cost is one entry in memory at a time, bounded by the largest certified
-file, which is a chunk. The file is still read twice, as verifying it always
-meant: what the buffer removes is the parser's read, not one of those.
+The single-pass path holds at most 16 MiB for one entry. The larger-entry
+fallback keeps the certified-size allocation bound used by the previous
+verified reader.
 
-The first pass is why the second is safe to allocate for. How large a file is,
-is whoever wrote it's choice; how large the *certified* file is, is not, because
-SHA-256 preimage resistance stands between the two. So the streaming pass holds
-nothing and returns a size only for an entry whose digest already matched, and
-the buffered pass reads that many bytes. Reading straight into memory instead
-would size an allocation from an untrusted file, and a planted entry large
-enough would be materialised in full before its digest could be found wrong —
-turning a refusal into an out-of-memory kill. A refusal that cannot be reached
-is not a refusal.
+For entries above 16 MiB, the first pass is why the next allocation is safe.
+How large a file is, is whoever wrote it's choice; how large the *certified*
+file is, is not, because SHA-256 preimage resistance stands between the two.
+The streaming pass holds nothing and returns a size only for an entry whose
+digest already matched, then the buffered pass reads that many bytes. Reading
+straight into memory instead would size an allocation from an untrusted file,
+and a planted entry large enough would be materialised in full before its
+digest could be found wrong — turning a refusal into an out-of-memory kill. A
+refusal that cannot be reached is not a refusal.
 
-The second pass hashes again, and not out of caution: the parser reads the
-buffer, so the buffer is the thing that has to be compared. That is also what
-makes a write landing between the two passes a refusal rather than a hole — it
-changes the bytes, so it changes the digest. An entry that grew is read only to
-its certified length and the remainder is never looked at; one that shrank fails
-to fill the buffer, which is a mismatch like any other.
+The larger-entry pass hashes the buffer again because the parser reads that
+buffer, so it is the bytes that have to be compared. A write landing between
+the streaming and buffered passes therefore changes the digest and is refused.
+An entry that grew is read only to its certified length and the remainder is
+never looked at; one that shrank fails to fill the buffer, which is a mismatch
+like any other.
 
-Re-hashing is the cost the alternative was not worth. Binding by retained
-descriptor would mean holding one for every file in the snapshot from
-verification until load, which for a mainnet ImmutableDB is tens of thousands;
-binding by file identity (`os.SameFile`, size, mtime) is defeatable by an
-attacker who creates the replacement, since inode numbers are reused and
-timestamps are settable. Hashing what is read costs a pass over data the reader
-is about to read anyway, so it is bounded by SHA-256 throughput rather than by
-I/O.
+Binding by retained descriptor would mean holding one for every file in the
+snapshot from verification until load, which for a mainnet ImmutableDB is tens
+of thousands; binding by file identity (`os.SameFile`, size, mtime) is
+defeatable by an attacker who creates the replacement, since inode numbers are
+reused and timestamps are settable. The buffered entry binds the parser to the
+bytes verified during its open without retaining those descriptors.
 
 A digest map that is present but empty is refused rather than treated as
 absent. Absence is v1, which certifies an archive and not the files in it;
