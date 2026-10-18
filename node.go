@@ -965,11 +965,12 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	// (a) the synchronous backfill runs while no new blocks can arrive, and
 	// (b) the EventBus subscription exists before any BlockActionApply events
 	// can be emitted, eliminating the startup gap. The
-	// epoch cache is loaded first because Midnight backfill writes epoch-keyed
-	// Ariadne/candidate rows. Both the explicit opt-in and API storage mode
-	// are required: the indexer depends on the api-mode indexes to function,
-	// and storage mode alone is no longer sufficient to start it (an api-mode
-	// deployment may not want Midnight indexing at all).
+	// epoch cache and applied tip are loaded first because Midnight backfill
+	// writes epoch-keyed Ariadne/candidate rows and resolves block timestamps
+	// through the tip-anchored era horizon. Both the explicit opt-in and API
+	// storage mode are required: the indexer depends on the api-mode indexes to
+	// function, and storage mode alone is no longer sufficient to start it (an
+	// api-mode deployment may not want Midnight indexing at all).
 	if midnightIndexerActive(n.config.storageMode, n.config.midnight) {
 		if err := n.ledgerState.PrepareEpochCacheForStartup(ctx); err != nil {
 			return fmt.Errorf(
