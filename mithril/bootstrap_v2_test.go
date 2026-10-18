@@ -387,6 +387,10 @@ func newV2Fixture(t *testing.T, opts v2FixtureOptions) *v2Fixture {
 	t.Cleanup(fixture.server.Close)
 	baseURL := fixture.server.URL
 
+	// The fallback ledger state ships in the signed ancillary archive: an
+	// immutable archive admits only its own certified trio.
+	var fallbackState []byte
+
 	// Immutable trios and their digest entries
 	for num := uint64(0); num <= opts.immutableFileNumber; num++ {
 		files := map[string][]byte{}
@@ -405,11 +409,11 @@ func newV2Fixture(t *testing.T, opts v2FixtureOptions) *v2Fixture {
 					if stateSlot == 999 {
 						stateHash = files["immutable/00000.secondary"][16:48]
 					}
-					files["ledger/100/state"] = minimalLedgerState(
+					fallbackState = minimalLedgerState(
 						t, stateSlot, stateHash,
 					)
 					if opts.fallbackLedgerStateUTxOMap != nil {
-						files["ledger/100/state"] = minimalLedgerStateWithUTxOMap(
+						fallbackState = minimalLedgerStateWithUTxOMap(
 							t, stateSlot, stateHash,
 							opts.fallbackLedgerStateUTxOMap,
 						)
@@ -490,6 +494,9 @@ func newV2Fixture(t *testing.T, opts v2FixtureOptions) *v2Fixture {
 	fixture.ancillaryVKey = mithrilJSONHexKey(t, ancillaryPub)
 	nextTrio := opts.immutableFileNumber + 1
 	ancillaryLedgerState := []byte("ledger state data")
+	if fallbackState != nil {
+		ancillaryLedgerState = fallbackState
+	}
 	if len(opts.ancillaryLedgerState) > 0 {
 		ancillaryLedgerState = opts.ancillaryLedgerState
 	}
@@ -577,7 +584,7 @@ func newV2Fixture(t *testing.T, opts v2FixtureOptions) *v2Fixture {
 		Ancillary: CardanoDatabaseAncillary{
 			SizeUncompressed: int64(len(fixture.ancillaryArchive)),
 			Locations: func() []CardanoDatabaseLocation {
-				if opts.missingAncillary {
+				if opts.missingAncillary && fallbackState == nil {
 					return nil
 				}
 				return []CardanoDatabaseLocation{
@@ -963,7 +970,7 @@ func TestBootstrapV2NoCertVerification(t *testing.T) {
 	require.NotEmpty(t, result.AncillaryDir)
 }
 
-func TestSyncV2NoCertVerificationUsesExtractDirLedgerState(t *testing.T) {
+func TestSyncV2NoCertVerificationUsesAncillaryLedgerState(t *testing.T) {
 	t.Parallel()
 
 	fixture := newV2Fixture(t, v2FixtureOptions{
@@ -1963,7 +1970,7 @@ func TestBootstrapV2RedownloadsAfterCorruptAncillaryArchive(t *testing.T) {
 
 	_, err := Bootstrap(context.Background(), cfg)
 	require.Error(t, err)
-	require.ErrorContains(t, err, "extracting ancillary archive")
+	require.ErrorContains(t, err, "reading ancillary archive")
 
 	fixture.ancillaryServed.Store(nil)
 	result, err := Bootstrap(context.Background(), cfg)
