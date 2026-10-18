@@ -136,8 +136,12 @@ func assembleDSN(cfg Config) (string, error) {
 		ReadTimeout:  cfg.ReadTimeout,
 		WriteTimeout: cfg.WriteTimeout,
 	}
-	if cfg.SSLMode != "" {
-		driverConfig.TLSConfig = cfg.SSLMode
+	tlsMode := cfg.SSLMode
+	if tlsMode == "" && !isLocalDatabaseHost(cfg.Host) {
+		tlsMode = "true"
+	}
+	if tlsMode != "" {
+		driverConfig.TLSConfig = tlsMode
 	}
 	// max_execution_time and innodb_lock_wait_timeout are session
 	// variables, not connection parameters -- the driver issues them as a
@@ -164,6 +168,15 @@ func assembleDSN(cfg Config) (string, error) {
 		}
 	}
 	return driverConfig.FormatDSN(), nil
+}
+
+func isLocalDatabaseHost(host string) bool {
+	host = strings.TrimSuffix(strings.TrimSpace(host), ".")
+	if host == "" || strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // millisecondsRoundUp converts d to whole milliseconds, rounding a
