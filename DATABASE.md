@@ -1151,9 +1151,17 @@ in flight, each file written as `<name>.part` and renamed when complete;
 `ready/` once a later chunk holding a block is copied, so the cache keeps the
 chunk holding the chain tip, which the next run resumes from. Source keys keep
 completed files from one root out of another root's replay. Aggregate transfer
-and cache bounds follow the requested chunk range and format limits. Each write
-also preserves free space on the cache filesystem; an unsuccessful import
-removes its staging files after all fetch workers stop.
+and cache bounds follow the requested chunk range and format limits. Before a
+chunk enters `ready/`, every index-derived block span is checked against the
+maximum network block size. Each downloaded block body is verified against its
+header commitment before `Chain.AddBlocks` persists it. Each write also
+preserves free space on the cache filesystem; an unsuccessful import removes
+its staging files after all fetch workers stop.
+The loader can persist blob batches ahead of the ledger worker. Any replay
+failure rewinds that blob suffix to the last applied metadata tip before the
+command returns, so a rejected batch cannot become the next run's canonical
+starting point. If the storage backend refuses that rewind, the command returns
+both errors and the database requires recovery before another load.
 
 ## SQL Conventions
 
@@ -3145,7 +3153,9 @@ trusts its own on-disk storage and is not changed.
 Musashi/Leios prototype's extended 12-field header body (see
 `models.DecodeConwayBlock`) is accepted the same way the rest of the
 storage stack already accepts it, instead of this check alone rejecting it
-as undecodable.
+as undecodable. `models.DecodeBlockCbor` converts panics from every era-specific
+decoder to `safedecode.ErrDecodePanic`, so malformed remote objects fail as
+undecodable instead of terminating the process.
 
 `blockverify.Hash`, like bark's `GetBlock` (`bark/blob.go`), does not
 independently re-derive the type recorded in `bp..._metadata` from the
