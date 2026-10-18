@@ -274,13 +274,15 @@ func (i *ImmutableDb) readVerifiedEntry(
 	}
 	if info, err := f.Stat(); err == nil &&
 		info.Size() >= 0 && info.Size() <= maxSinglePassVerifiedEntrySize {
-		data, err := io.ReadAll(io.LimitReader(
-			f, maxSinglePassVerifiedEntrySize+1,
-		))
-		if err != nil {
+		// Read one beyond the stat size to detect a concurrent append.
+		data := make([]byte, int(info.Size())+1)
+		n, err := io.ReadFull(f, data)
+		if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
 			return nil, fmt.Errorf("reading %s: %w", i.entryPath(name), err)
 		}
-		if int64(len(data)) <= maxSinglePassVerifiedEntrySize {
+		if int64(n) == info.Size() &&
+			(err == io.ErrUnexpectedEOF || info.Size() == 0 && err == io.EOF) {
+			data = data[:n]
 			sum := sha256.Sum256(data)
 			if got := hex.EncodeToString(sum[:]); got != expected {
 				return nil, fmt.Errorf(
