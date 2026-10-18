@@ -110,7 +110,7 @@ func TestInboundHostDenialDoesNotRefuseArrival(t *testing.T) {
 	pg.mu.Unlock()
 	first := inboundArrival(t, "44.0.0.1:51000")
 	pg.handleInboundConnectionEvent(first)
-	require.Equal(t, 1, len(pg.GetPeers()))
+	require.Equal(t, 2, len(pg.GetPeers()))
 
 	pg.DenyPeer("44.0.0.1:3001", time.Minute)
 
@@ -125,14 +125,12 @@ func TestInboundHostDenialDoesNotRefuseArrival(t *testing.T) {
 		deniedInboundCount(pg),
 		"a host denied on one source port must still be admitted on another",
 	)
-	assert.Equal(t, 1, len(pg.GetPeers()), "the host keeps one record")
-	assert.Equal(
-		t,
-		"local-root-0",
-		pg.GetPeers()[0].InboundTopologyMatch,
-		"the denied topology peer's new-port arrival remains admitted",
-	)
+	assert.Equal(t, 7, len(pg.GetPeers()), "each transport identity is retained")
 	peers := pg.GetPeers()
+	for _, peer := range peers {
+		assert.Empty(t, peer.InboundTopologyMatch,
+			"same-host arrivals must not inherit topology privileges")
+	}
 	require.NotNil(t, peers[0].Connection)
 	assert.True(
 		t,
