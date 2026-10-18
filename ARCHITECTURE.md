@@ -264,8 +264,10 @@ version-matched HTTPS archive, verifies it against the six-target checksum
 manifest embedded by the NPM release job, and streams its `dingo` member into
 a size-bounded temporary file before atomically installing the executable.
 Downloads have a size bound and retry only transient transport and server
-failures. Archive paths are never extracted as filesystem paths. The
-JavaScript command inherits standard I/O
+failures. The downloader accepts only the GitHub release and asset hosts,
+checks the destination of every redirect, and refuses DNS results in private
+or special-use address ranges. Archive paths are never extracted as filesystem
+paths. The JavaScript command inherits standard I/O
 and forwards arguments and termination signals to the native process; it
 preserves the process exit result. The package contains only this installer,
 command wrapper and package documentation. For stable release tags, the
@@ -8987,8 +8989,17 @@ probe and is never written. Size-limit errors are terminal for the downloader.
 An oversized existing file or a file that overflows while streaming is removed;
 ordinary header rejection can retain an existing in-budget partial file for a
 different mirror, while a malformed-range restart truncates the prefix before
-checking the replacement response. This is not an aggregate budget
-across archives, mirrors, retries, or a bootstrap's extracted files.
+checking the replacement response.
+
+The v2 bootstrap admits at most four unique locations per artifact component.
+Aggregator locations must retain the configured aggregator origin; cloud
+locations and every redirect must use that origin or the official Mithril
+Google Cloud Storage origin. A single budget covers response bytes and HTTP
+requests across the digest list, immutable archives, ancillary archive,
+mirrors, redirects, and retries. Its byte limit is the sum of the fixed
+per-object limits for the selected archive range, and its request limit is four
+requests per selected object. The artifact range is capped at 100000 immutable
+archives, and all artifact transfers share a 24-hour deadline.
 
 Without an `ExpectedSize`, which v2 artifacts cannot supply, a resume request
 for a file already at the server's size is answered 416 and the cached file

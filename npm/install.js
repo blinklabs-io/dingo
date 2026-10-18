@@ -13,9 +13,11 @@
 'use strict';
 
 const crypto = require('node:crypto');
+const dns = require('node:dns');
 const fs = require('node:fs');
 const fsp = require('node:fs/promises');
 const https = require('node:https');
+const net = require('node:net');
 const os = require('node:os');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
@@ -25,6 +27,67 @@ const { pipeline } = require('node:stream/promises');
 const MAX_ARCHIVE_BYTES = 256 * 1024 * 1024;
 const MAX_BINARY_BYTES = 512 * 1024 * 1024;
 const RETRY_DELAYS_MS = [100, 500];
+const RELEASE_HOSTS = new Set([
+  'github.com',
+  'github-releases.githubusercontent.com',
+  'objects.githubusercontent.com',
+  'release-assets.githubusercontent.com',
+]);
+
+const blockedAddresses = new net.BlockList();
+for (const [network, prefix] of [
+  ['0.0.0.0', 8], ['10.0.0.0', 8], ['100.64.0.0', 10], ['127.0.0.0', 8],
+  ['169.254.0.0', 16], ['172.16.0.0', 12], ['192.0.0.0', 24], ['192.0.2.0', 24],
+  ['192.88.99.0', 24], ['192.168.0.0', 16], ['198.18.0.0', 15],
+  ['198.51.100.0', 24], ['203.0.113.0', 24], ['224.0.0.0', 4], ['240.0.0.0', 4],
+]) blockedAddresses.addSubnet(network, prefix, 'ipv4');
+for (const [network, prefix] of [
+  ['::', 128], ['::1', 128], ['::ffff:0:0', 96], ['64:ff9b::', 96],
+  ['64:ff9b:1::', 48],
+  ['100::', 64], ['2001:2::', 48], ['2001:db8::', 32], ['2001:10::', 28],
+  ['fc00::', 7], ['fe80::', 10], ['ff00::', 8],
+]) blockedAddresses.addSubnet(network, prefix, 'ipv6');
+
+function validateReleaseURL(parsed) {
+  if (parsed.protocol !== 'https:') {
+    throw new Error('Dingo release downloads require HTTPS');
+  }
+  if (parsed.username || parsed.password || (parsed.port && parsed.port !== '443')) {
+    throw new Error('Dingo release download URL is not allowed');
+  }
+  if (!RELEASE_HOSTS.has(parsed.hostname.toLowerCase())) {
+    throw new Error('Dingo release download host is not allowed');
+  }
+}
+
+function publicLookup(hostname, options, callback) {
+  const lookupOptions = typeof options === 'object' ? options : {};
+  dns.lookup(hostname, {
+    family: lookupOptions.family,
+    hints: lookupOptions.hints,
+    all: true,
+    verbatim: true,
+  }, (error, addresses) => {
+    if (error) {
+      callback(error);
+      return;
+    }
+    if (addresses.length === 0 || addresses.some(({ address, family }) =>
+      blockedAddresses.check(address, family === 6 ? 'ipv6' : 'ipv4'))) {
+      callback(new Error('Dingo release host resolved to a disallowed address'));
+      return;
+    }
+    if (lookupOptions.all) {
+      callback(null, addresses);
+      return;
+    }
+    callback(null, addresses[0].address, addresses[0].family);
+  });
+}
+
+function secureGet(url, callback) {
+  return https.get(url, { lookup: publicLookup }, callback);
+}
 
 function releaseTarget(version, platform = process.platform, arch = process.arch) {
   const targets = {
@@ -64,9 +127,12 @@ function byteLimit(maxBytes, description) {
 
 function downloadOnce(url, destination, get, redirects, maxBytes) {
   return new Promise((resolve, reject) => {
-    const parsed = new URL(url);
-    if (parsed.protocol !== 'https:') {
-      reject(new Error('Dingo release downloads require HTTPS'));
+    let parsed;
+    try {
+      parsed = new URL(url);
+      validateReleaseURL(parsed);
+    } catch (error) {
+      reject(error);
       return;
     }
     const request = get(parsed, (response) => {
@@ -109,7 +175,7 @@ function downloadOnce(url, destination, get, redirects, maxBytes) {
   });
 }
 
-async function download(url, destination, get = https.get, options = {}) {
+async function download(url, destination, get = secureGet, options = {}) {
   const delays = options.retryDelays ?? RETRY_DELAYS_MS;
   const wait = options.wait ?? ((milliseconds) => new Promise((resolve) => {
     setTimeout(resolve, milliseconds);

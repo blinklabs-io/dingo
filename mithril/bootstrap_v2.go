@@ -222,6 +222,21 @@ func bootstrapV2(
 			artifact.Network,
 		)
 	}
+	if artifact.Beacon.ImmutableFileNumber >= maxCardanoDatabaseArchives {
+		return nil, fmt.Errorf(
+			"cardano database snapshot has too many immutable archives: %d",
+			artifact.Beacon.ImmutableFileNumber+1,
+		)
+	}
+	locationPolicy, err := newArtifactLocationPolicy(
+		aggregatorURL, cfg.AllowInsecureHTTP,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if err := locationPolicy.apply(artifact); err != nil {
+		return nil, err
+	}
 	// A certificate authenticates the immutable database content, while the
 	// ledger state and the final in-progress immutable trio are authenticated
 	// by the separately signed ancillary manifest. Do not start downloading
@@ -294,6 +309,46 @@ func bootstrapV2(
 			return nil, err
 		}
 	}
+
+	totalArchives := artifact.Beacon.ImmutableFileNumber + 1
+	downloadArchives := totalArchives - min(cfg.StartImmutable, totalArchives)
+	immutableBytes, ok := multiplyWithinInt64(
+		cfg.objectMaxBytes(immutableArchiveMaxBytes), downloadArchives,
+	)
+	if !ok {
+		return nil, errArtifactDownloadBudget
+	}
+	artifactObjects := downloadArchives + 1
+	var ancillaryBytes int64
+	if len(artifact.Ancillary.Locations) > 0 {
+		artifactObjects++
+		ancillaryBytes = cfg.objectMaxBytes(ancillaryMaxBytes)
+	}
+	cfg.downloadBudget, err = newArtifactDownloadBudget(
+		artifactObjects,
+		immutableBytes,
+		cfg.objectMaxBytes(digestListMaxBytes),
+		ancillaryBytes,
+	)
+	if err != nil {
+		return nil, err
+	}
+	downloadTransport := newPooledDownloadTransport(
+		immutableDownloadWorkers,
+		cfg.AllowInsecureHTTP,
+	)
+	downloadTransport.downloadBudget = cfg.downloadBudget
+	defer downloadTransport.CloseIdleConnections()
+	cfg.httpClient = &http.Client{
+		Transport:     downloadTransport,
+		CheckRedirect: locationPolicy.checkRedirect,
+	}
+	client.httpClient = cfg.httpClient
+	downloadCtx, cancelDownloads := context.WithTimeout(
+		ctx, artifactDownloadTotalTimeout,
+	)
+	defer cancelDownloads()
+	ctx = downloadCtx
 
 	// Step 2: Set up download directory
 	downloadDir := cfg.DownloadDir
@@ -844,6 +899,7 @@ func downloadDigestsArchive(
 			MaxIdleRetries:      cfg.DownloadMaxIdleRetries,
 			MaxTransientRetries: cfg.DownloadMaxTransientRetries,
 			AllowInsecureHTTP:   cfg.AllowInsecureHTTP,
+			HTTPClient:          cfg.httpClient,
 		},
 	)
 	if err != nil {
@@ -1000,20 +1056,6 @@ func downloadImmutables(
 	// progress is reported by onArchiveDone instead.
 	quietLogger := slog.New(slog.DiscardHandler)
 
-	// One shared keep-alive client for the whole pool so workers reuse
-	// pooled connections instead of paying a TCP+TLS handshake per
-	// archive. Sized to the worker count; idle connections are closed
-	// when the pool finishes. Carried on the (by-value) cfg so each
-	// fetchImmutableArchive call reuses it without a signature change.
-	dlTransport := newPooledDownloadTransport(
-		immutableDownloadWorkers,
-		cfg.AllowInsecureHTTP,
-	)
-	defer dlTransport.CloseIdleConnections()
-	cfg.httpClient = &http.Client{
-		Timeout:   0,
-		Transport: dlTransport,
-	}
 	cfg.immutableDigests = digests
 	// Each in-flight download is charged at its size limit, since the real
 	// size is not known until it has arrived.
@@ -1626,6 +1668,7 @@ func downloadAncillaryV2(
 				MaxIdleRetries:      cfg.DownloadMaxIdleRetries,
 				MaxTransientRetries: cfg.DownloadMaxTransientRetries,
 				AllowInsecureHTTP:   cfg.AllowInsecureHTTP,
+				HTTPClient:          cfg.httpClient,
 			},
 		)
 		if err == nil {
