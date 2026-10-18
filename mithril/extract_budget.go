@@ -43,10 +43,16 @@ type bootstrapExtractionBudget struct {
 func newBootstrapExtractionBudget(
 	downloadDir string,
 ) (*bootstrapExtractionBudget, error) {
-	filesystemPath := filepath.Dir(filepath.Clean(downloadDir))
+	filesystemPath := filepath.Clean(downloadDir)
 	for {
-		_, err := os.Stat(filesystemPath)
+		info, err := os.Stat(filesystemPath)
 		if err == nil {
+			if !info.IsDir() {
+				return nil, fmt.Errorf(
+					"checking Mithril extraction path: %s is not a directory",
+					filesystemPath,
+				)
+			}
 			break
 		}
 		if !errors.Is(err, os.ErrNotExist) {
