@@ -62,6 +62,41 @@ func seedUnregisteredPoolStake(
 	return pkh
 }
 
+func TestPoolStakeDistributionBoundedRejectsBeforeFullSnapshotLoad(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	const snapshotEpoch = 0
+	seedPoolDistr2Fixture(
+		t,
+		db,
+		repeatedBytes(28, 0x11),
+		repeatedBytes(32, 0xAA),
+		3_000_000,
+		snapshotEpoch,
+	)
+	seedPoolDistr2Fixture(
+		t,
+		db,
+		repeatedBytes(28, 0x22),
+		repeatedBytes(32, 0xBB),
+		1_000_000,
+		snapshotEpoch,
+	)
+	ls := newPoolDistr2Ledger(t, db)
+
+	_, err := ls.PoolStakeDistributionBounded(
+		t.Context(),
+		nil,
+		QueryPoint{},
+		nil,
+		1,
+	)
+	require.ErrorIs(t, err, ErrPoolStakeDistributionLimitExceeded)
+}
+
 // TestPoolStakeDistribution_OrdersPoolsByKeyHash covers the ordering contract
 // the exported distribution adds over queryShelleyPoolDistr2's own result.
 //
