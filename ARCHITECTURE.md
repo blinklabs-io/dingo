@@ -11783,7 +11783,11 @@ second sync:
     attempt the way the simpler `FetchEpochWithClient` primitive does — a
     bounded retry loop hammering both full Koios scans on every attempt would
     burn meaningfully more of the daily rate-limit/quota budget than the
-    per-epoch fetch itself does.
+    per-epoch fetch itself does. Successful `/pool_history` responses are also
+    retained across those attempts, including confirmed empty responses, so a
+    transient failure retries only the unfinished pools instead of restarting
+    a several-hundred-pool epoch from zero. Every retry is logged with the
+    epoch, failed attempt, next attempt, and error.
   - **Decoupled aggregate/account queues.** Two independent
     background goroutines, each with their own pending set and wake channel,
     drain `Observer.pending`/`wake` (`run`, always started) and
