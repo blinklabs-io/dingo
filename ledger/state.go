@@ -11307,9 +11307,12 @@ func (ls *LedgerState) loadEpochs(ctx context.Context, txn *database.Txn) error 
 	return ls.setEpochCache(ctx, txn, epochs)
 }
 
-// PrepareEpochCacheForStartup loads epoch metadata before LedgerState.Start().
-// It is startup-only: callers use this when another component needs
-// SlotToEpoch before the ledger processing loop is running.
+// PrepareEpochCacheForStartup loads epoch metadata and the applied tip before
+// LedgerState.Start(). It is startup-only: callers use this when another
+// component needs slot conversion before the ledger processing loop is
+// running. The tip is part of that preparation because it anchors the current
+// era's forecast horizon; an epoch cache published against the origin tip can
+// reject historical slots near the persisted tip as past the era horizon.
 func (ls *LedgerState) PrepareEpochCacheForStartup(ctx context.Context) error {
 	if ls.ctx != nil {
 		return errors.New(
@@ -11319,7 +11322,18 @@ func (ls *LedgerState) PrepareEpochCacheForStartup(ctx context.Context) error {
 	txn := ls.db.Transaction(ctx, true)
 	defer txn.Release()
 	return txn.Do(func(txn *database.Txn) error {
-		return ls.loadEpochs(ctx, txn)
+		if err := ls.loadEpochs(ctx, txn); err != nil {
+			return err
+		}
+		tip, err := ls.db.GetTip(txn)
+		if err != nil {
+			return fmt.Errorf("load applied tip for startup era history: %w", err)
+		}
+		ls.Lock()
+		ls.currentTip = tip
+		ls.publishSnapshotsLocked()
+		ls.Unlock()
+		return nil
 	})
 }
 

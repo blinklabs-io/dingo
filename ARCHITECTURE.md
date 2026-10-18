@@ -1659,7 +1659,8 @@ When `Node.Run()` is called, components are initialized in this order:
     recoverable timestamp conflict
  7. History Expiry worker (if configured), after recovery has settled the
     ledger tip and blob contents
- 8. Ledger startup epoch-cache preparation, then Midnight indexer creation +
+ 8. Ledger startup era-history preparation (epoch cache plus applied tip),
+    then Midnight indexer creation +
     backfill + EventBus subscription (if `midnight.enabled` AND API storage
     mode; both are required).
     Indexes cNIGHT creates/spends, mapping-validator registrations/deregistrations,
@@ -1667,9 +1668,10 @@ When `Node.Run()` is called, components are initialized in this order:
     parameters, and committee-candidate UTxO snapshots (taken at epoch boundaries via
     block-event epoch advancement, with EpochTransitionEvent as a secondary path).
     Runs synchronously before LedgerState starts so no
-    BlockActionApply events are missed. The epoch cache is prepared first,
-    inside a startup-only transaction, so backfill can resolve
-    Ariadne/candidate epoch keys without falling back to epoch 0. Before
+    BlockActionApply events are missed. The epoch cache and applied tip are
+    prepared first, inside a startup-only transaction, so backfill can resolve
+    Ariadne/candidate epoch keys and block timestamps against the persisted
+    tip's current-era horizon without falling back to epoch 0. Before
     ordinary backfill, startup checks whether the auth-token policy fingerprint
     requires a registration-state rebuild and verifies complete
     retained primary-chain history from block number zero through the applied
