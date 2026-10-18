@@ -154,12 +154,14 @@ provider's resolved file location, exposed through the optional
 `sqlstore.Store.SQLitePath()` capability. A metadata provider `dataDir` override
 therefore also controls MCP's read target. Other backends and in-memory SQLite
 return no file location. MCP owns the extra connection pool and closes it when
-the API stops; it never borrows or closes the provider's pools. SQL row limits
-are enforced during iteration, including PRAGMA results. Arbitrary queries and
-EXPLAIN use a dedicated borrowed connection with `query_only` and SQLite limits:
-1 MiB per value/encoded row, 64 KiB SQL, and 128 columns. Settings are restored
-before returning injected connections to their pool. The SQL byte limit is also
-checked before tokenization. Schema inspection binds table names through SQLite
+the API stops; it never borrows or closes the provider's pools. At most four
+SQL-tool calls execute concurrently; excess calls fail immediately. SQL row
+limits are enforced during iteration, including PRAGMA results. Arbitrary
+queries and EXPLAIN use a dedicated borrowed connection with `query_only` and
+SQLite limits: 64 KiB per value or encoded row, 64 KiB SQL, and 32 result
+columns. `sqlite_query` also rejects a response after 1 MiB of decoded cell data.
+Settings are restored before returning injected connections to their pool. The
+SQL byte limit is also checked before tokenization. Schema inspection binds table names through SQLite
 table-valued PRAGMAs, including reserved identifiers such as `transaction`. Query offsets are capped
 at 10,000. UTxO and asset queries use `deleted_slot = 0`; native-asset supply is
 summed from decimal quantities with arbitrary precision. Asset pages order by

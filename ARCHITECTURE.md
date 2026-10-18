@@ -10265,7 +10265,11 @@ The canonical plugin auth-token environment setting overrides the compatibility
 same-origin on loopback or explicitly listed in `corsAllowedOrigins`; the root wildcard
 does not grant access to MCP. Rejected origins receive HTTP 403 before any
 transport or preflight handling. Native clients can omit Origin. Streaming
-responses have no absolute write timeout. The pre-authentication rate limiter
+responses have no absolute write timeout. Streamable HTTP and legacy SSE share
+a 128-session admission budget with an eight-session limit per client address.
+New sessions fail immediately when either limit is full. Both transports close
+sessions after five idle minutes or one hour of total lifetime, and listener
+shutdown closes every admitted session. The pre-authentication rate limiter
 keeps at most 4096 client identities in least-recently-used order. A single
 expiry timer removes identities after 30 idle minutes without waiting for more
 traffic. It runs before authentication, so
@@ -10294,9 +10298,11 @@ request at once; the ledger call stops at its next cancellation check, including
 during CEK execution. The admission slot is held until the ledger call returns,
 so further evaluations receive a busy error and
 canceled requests cannot accumulate workers.
-Arbitrary SQLite queries borrow one connection, enable `query_only`, and apply
-SQLite size limits before execution. The original settings are restored before
-the connection returns to an injected pool.
+SQLite tools share four fail-fast execution slots. Arbitrary queries borrow one
+connection, enable `query_only`, and apply 64 KiB value, 64 KiB SQL, and
+32-column limits before execution. Query results are also capped at 1 MiB of
+decoded cell data. The original settings are restored before the connection
+returns to an injected pool.
 Markdown tables wrap their sanitized cells in explicit untrusted-chain-data
 delimiters. Chain-controlled text is HTML-escaped before rendering so it cannot
 terminate that envelope.
