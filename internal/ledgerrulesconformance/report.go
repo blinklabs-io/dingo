@@ -203,10 +203,12 @@ type protocolParametersDoc struct {
 	MaxExecutionUnitsPerTransaction exUnitsDoc `json:"max_execution_units_per_transaction"`
 	MaxExecutionUnitsPerBlock       exUnitsDoc `json:"max_execution_units_per_block"`
 	MaxValueSize                    uint       `json:"max_value_size"`
-	MaxReferenceScriptsSize         *uint64    `json:"max_reference_scripts_size"`
-	CollateralPercentage            uint       `json:"collateral_percentage"`
-	MaxCollateralInputs             uint       `json:"max_collateral_inputs"`
-	StakePoolVotingThresholds       struct {
+	// Conway fixes the per-transaction reference-script limit, so Dingo parses
+	// but does not apply this value.
+	MaxReferenceScriptsSize   *uint64 `json:"max_reference_scripts_size"`
+	CollateralPercentage      uint    `json:"collateral_percentage"`
+	MaxCollateralInputs       uint    `json:"max_collateral_inputs"`
+	StakePoolVotingThresholds struct {
 		MotionNoConfidence      ratioDoc `json:"motion_no_confidence"`
 		CommitteeNormal         ratioDoc `json:"committee_normal"`
 		CommitteeNoConfidence   ratioDoc `json:"committee_no_confidence"`
@@ -467,12 +469,6 @@ func runFixture(
 		provider,
 		pp,
 	)
-	validationErr = applyReferenceScriptSizeOverride(
-		tx,
-		provider,
-		protocolParameters.MaxReferenceScriptsSize,
-		validationErr,
-	)
 	if expected.Predicate == "" {
 		if validationErr == nil {
 			return CaseOutcome{ID: id, Result: "pass"}, nil, nil
@@ -486,81 +482,6 @@ func runFixture(
 		return CaseOutcome{ID: id, Result: expected.Predicate}, nil, nil
 	}
 	return mismatch(id, expected, "rejected: "+validationErr.Error())
-}
-
-// Conformance fixtures can override Conway's fixed limit to exercise small
-// boundary values; this override applies only to report evaluation.
-func applyReferenceScriptSizeOverride(
-	tx common.Transaction,
-	ls common.LedgerState,
-	maxSize *uint64,
-	validationErr error,
-) error {
-	if maxSize == nil || *maxSize == conway.MaxRefScriptSizePerTx || !tx.IsValid() {
-		return validationErr
-	}
-
-	sizeError, siblings, found := splitRefScriptSizeError(validationErr)
-	var totalSize uint64
-	switch {
-	case found:
-		totalSize = sizeError.TxSize
-	case validationErr != nil:
-		return validationErr
-	default:
-		var err error
-		totalSize, err = eras.ReferencedScriptSize(tx, ls)
-		if err != nil {
-			return fmt.Errorf("calculating reference script size: %w", err)
-		}
-	}
-	if totalSize > *maxSize {
-		return errors.Join(append(
-			siblings,
-			common.RefScriptSizePerTxTooLargeError{
-				TxSize:  totalSize,
-				MaxSize: *maxSize,
-			},
-		)...)
-	}
-	return errors.Join(siblings...)
-}
-
-// splitRefScriptSizeError separates the reference-script size verdict from the
-// sibling errors ValidateTxConway joins together, so the override can replace
-// the size verdict alone and still reject a transaction that failed another
-// rule.
-func splitRefScriptSizeError(err error) (
-	common.RefScriptSizePerTxTooLargeError,
-	[]error,
-	bool,
-) {
-	if err == nil {
-		return common.RefScriptSizePerTxTooLargeError{}, nil, false
-	}
-	asSizeError := errors.AsType[common.RefScriptSizePerTxTooLargeError]
-	joined, ok := err.(interface{ Unwrap() []error })
-	if !ok {
-		if sizeError, ok := asSizeError(err); ok {
-			return sizeError, nil, true
-		}
-		return common.RefScriptSizePerTxTooLargeError{}, nil, false
-	}
-	var (
-		sizeError common.RefScriptSizePerTxTooLargeError
-		siblings  []error
-		found     bool
-	)
-	for _, child := range joined.Unwrap() {
-		matchedSizeError, ok := asSizeError(child)
-		if !found && ok {
-			sizeError = matchedSizeError
-			found = true
-			continue
-		}
-		siblings = append(siblings, child)
-	}
-	return sizeError, siblings, found
 }
 
 func transactionFailsToDecode(transactionCBOR []byte) bool {
@@ -628,9 +549,6 @@ func ledgerPredicateFromError(errText string) (string, bool) {
 		reportResult := predicate
 		if separator := strings.IndexByte(reportResult, ':'); separator >= 0 {
 			reportResult = reportResult[:separator]
-		}
-		if reportResult == "UnelectedCommitteeVoters" {
-			reportResult = "VotersDoNotExist"
 		}
 		for _, pattern := range ledgerPredicateErrorPatterns[predicate] {
 			pattern = strings.ToLower(pattern)
@@ -816,7 +734,6 @@ var ledgerPredicateErrorPatterns = map[string][]string{
 	"ValueNotConservedUTxO": {"value not conserved"},
 	"VotersDoNotExist": {
 		"vote cast by unknown voter",
-		"committee voter is not elected",
 	},
 	"UnelectedCommitteeVoters": {
 		"committee voter is not elected",
