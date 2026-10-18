@@ -25,6 +25,7 @@ import (
 	"reflect"
 	"runtime"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/ledger/hardfork"
@@ -38,6 +39,7 @@ import (
 	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/blinklabs-io/gouroboros/ledger/mary"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
+	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
 	"github.com/blinklabs-io/plutigo/data"
 	"github.com/blinklabs-io/plutigo/lang"
 	"github.com/blinklabs-io/plutigo/syn"
@@ -460,6 +462,25 @@ func TestEraUtxoValidationRuleCompositions(t *testing.T) {
 			for _, rule := range era.built {
 				byIndex[rule.index] = rule.validationFunc
 			}
+			for index, descriptor := range era.descriptors {
+				if descriptor.Id != lcommon.UtxoValidationRuleSignatures {
+					continue
+				}
+				require.Contains(
+					t,
+					byIndex,
+					index,
+					"signature rule must still run",
+				)
+				require.True(
+					t,
+					strings.Contains(
+						utxoValidationRuleName(byIndex[index]),
+						"reusePreverifiedSignatures",
+					),
+					"signature rule must use the preverification-aware wrapper",
+				)
+			}
 
 			for index, id := range replacedIndexes {
 				replacement := era.replaced[id]
@@ -489,12 +510,15 @@ func TestEraUtxoValidationRuleCompositions(t *testing.T) {
 					index,
 					"upstream rule %s must still run", id,
 				)
-				require.Equal(
-					t,
-					utxoValidationRuleName(era.upstream[index]),
-					utxoValidationRuleName(byIndex[index]),
-					"upstream rule %s must run the upstream implementation", id,
-				)
+				if id != lcommon.UtxoValidationRuleSignatures {
+					require.Equal(
+						t,
+						utxoValidationRuleName(era.upstream[index]),
+						utxoValidationRuleName(byIndex[index]),
+						"upstream rule %s must run the upstream implementation",
+						id,
+					)
+				}
 			}
 		})
 	}
@@ -619,6 +643,78 @@ type mockTransaction struct {
 	lcommon.Transaction
 	cbor   []byte
 	txType int
+}
+
+type preverifiedMockLedgerState struct {
+	*mockLedgerState
+	signatures *lcommon.PreverifiedSignatures
+}
+
+func (s *preverifiedMockLedgerState) PreverifiedSignatures() *lcommon.PreverifiedSignatures {
+	return s.signatures
+}
+
+func TestReusePreverifiedSignaturesScopesAndUnwrapsRule(t *testing.T) {
+	t.Parallel()
+
+	tx := &conway.ConwayTransaction{}
+	bodyCbor, err := cbor.Encode(&tx.Body)
+	require.NoError(t, err)
+	tx.Body.SetCbor(bodyCbor)
+	sentinel := errors.New("signature rule failed")
+
+	t.Run("matching result uses transaction-scoped state", func(t *testing.T) {
+		t.Parallel()
+		state := &preverifiedMockLedgerState{
+			mockLedgerState: &mockLedgerState{},
+			signatures:      lcommon.PreverifySignatures(tx),
+		}
+		rule := reusePreverifiedSignatures(func(
+			_ lcommon.Transaction,
+			_ uint64,
+			ls lcommon.LedgerState,
+			_ lcommon.ProtocolParameters,
+		) error {
+			require.NotSame(t, state, ls)
+			require.Same(t, state, lcommon.UnwrapLedgerState(ls))
+			return nil
+		})
+		require.NoError(t, rule(tx, 10, state, nil))
+	})
+
+	t.Run("rule error retains its original identity", func(t *testing.T) {
+		t.Parallel()
+		state := &preverifiedMockLedgerState{
+			mockLedgerState: &mockLedgerState{},
+			signatures:      lcommon.PreverifySignatures(tx),
+		}
+		rule := reusePreverifiedSignatures(func(
+			lcommon.Transaction,
+			uint64,
+			lcommon.LedgerState,
+			lcommon.ProtocolParameters,
+		) error {
+			return sentinel
+		})
+		require.ErrorIs(t, rule(tx, 10, state, nil), sentinel)
+	})
+
+	t.Run("nil result keeps the ordinary rule path", func(t *testing.T) {
+		t.Parallel()
+		state := &preverifiedMockLedgerState{
+			mockLedgerState: &mockLedgerState{},
+		}
+		rule := reusePreverifiedSignatures(func(
+			_ lcommon.Transaction,
+			_ uint64,
+			ls lcommon.LedgerState,
+			_ lcommon.ProtocolParameters,
+		) error {
+			require.Same(t, state, ls)
+			return sentinel
+		})
+		require.ErrorIs(t, rule(tx, 10, state, nil), sentinel)
+	})
 }
 
 func (m *mockTransaction) Cbor() []byte {
@@ -892,14 +988,31 @@ func (m *mockRedeemers) Indexes(
 	return nil
 }
 
+// Value and Iter return the configured redeemers. One without data gets an
+// empty constructor, because the evaluator rejects a nil PlutusData argument.
 func (m *mockRedeemers) Value(
-	_ uint,
-	_ lcommon.RedeemerTag,
+	index uint,
+	tag lcommon.RedeemerTag,
 ) lcommon.RedeemerValue {
+	value := lcommon.RedeemerValue{}
 	if m.valueOverride != nil {
-		return *m.valueOverride
+		value = *m.valueOverride
+	} else {
+		for _, entry := range m.entries {
+			if uint(entry.key.Index) == index && entry.key.Tag == tag {
+				value = entry.val
+				break
+			}
+		}
 	}
-	return lcommon.RedeemerValue{}
+	return withRedeemerData(value)
+}
+
+func withRedeemerData(value lcommon.RedeemerValue) lcommon.RedeemerValue {
+	if value.Data.Data == nil {
+		value.Data = lcommon.Datum{Data: data.NewConstr(0)}
+	}
+	return value
 }
 
 func (m *mockRedeemers) Iter() iter.Seq2[lcommon.RedeemerKey, lcommon.RedeemerValue] {
@@ -907,7 +1020,7 @@ func (m *mockRedeemers) Iter() iter.Seq2[lcommon.RedeemerKey, lcommon.RedeemerVa
 		yield func(lcommon.RedeemerKey, lcommon.RedeemerValue) bool,
 	) {
 		for _, e := range m.entries {
-			if !yield(e.key, e.val) {
+			if !yield(e.key, withRedeemerData(e.val)) {
 				return
 			}
 		}
@@ -3479,6 +3592,9 @@ func TestValidateTxConwayRejectsExpiredCommitteeAdditions(t *testing.T) {
 				TxIsValid: true,
 			}
 			baseState := newMockLedgerState()
+			baseState.governanceState = mockledger.NewLedgerStateBuilder().
+				WithGovPurposeRootsValue(&lcommon.GovPurposeRoots{}).
+				Build()
 			baseState.skipPhase2Validation = true
 			baseState.addUtxo(input, output)
 			state := &mockCommitteeEpochState{

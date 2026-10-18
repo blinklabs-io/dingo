@@ -898,7 +898,7 @@ INSERT INTO pool (
     margin, pool_key_hash, vrf_key_hash, reward_account,
     latest_op_cert_sequence, reward_account_credential_tag, pledge, cost,
     leios_key_public, leios_key_possession_proof
-) VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (pool_key_hash) DO UPDATE SET
     margin = excluded.margin,
     vrf_key_hash = excluded.vrf_key_hash,
@@ -913,6 +913,7 @@ RETURNING id`,
 		cert.Operator[:],
 		cert.VrfKeyHash[:],
 		rewardAccount,
+		encodeOpCertSequence(0),
 		rewardTag,
 		decimalUint64(types.Uint64(cert.Pledge)),
 		decimalUint64(types.Uint64(cert.Cost)),
@@ -1031,11 +1032,12 @@ func applyPoolRetirementCertificate(
 INSERT INTO pool (
     pool_key_hash, latest_op_cert_sequence, pledge, cost,
     reward_account_credential_tag
-) VALUES (?, 0, '0', '0', 0)
+) VALUES (?, ?, '0', '0', 0)
 ON CONFLICT (pool_key_hash) DO UPDATE SET
     pool_key_hash = excluded.pool_key_hash
 RETURNING id`,
 		cert.PoolKeyHash[:],
+		encodeOpCertSequence(0),
 	)
 	if err != nil {
 		return 0, err

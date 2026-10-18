@@ -22,6 +22,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -34,6 +35,7 @@ import (
 // it must keep.
 func dijkstraQueryPParams(stride uint32) *dijkstra.DijkstraProtocolParameters {
 	ratPtr := func(n, d int64) *cbor.Rat { return &cbor.Rat{Rat: big.NewRat(n, d)} }
+	bootstrapRound := uint32(22)
 	return &dijkstra.DijkstraProtocolParameters{
 		ConwayProtocolParameters: *conwayPParamsWithCostModels(
 			map[uint][]int64{
@@ -42,18 +44,38 @@ func dijkstraQueryPParams(stride uint32) *dijkstra.DijkstraProtocolParameters {
 				3: {4, 4, 4},
 			},
 		),
-		MaxRefScriptSizePerBlock: 1048576,
-		MaxRefScriptSizePerTx:    204800,
-		RefScriptCostStride:      stride,
-		RefScriptCostMultiplier:  ratPtr(6, 5),
-		MaxPledgeLeverage:        ratPtr(10, 1),
-		MinPoolMargin:            ratPtr(1, 100),
+		MaxRefScriptSizePerBlock:       1048576,
+		MaxRefScriptSizePerTx:          204800,
+		RefScriptCostStride:            stride,
+		RefScriptCostMultiplier:        ratPtr(6, 5),
+		MaxPledgeLeverage:              ratPtr(10, 1),
+		MinPoolMargin:                  ratPtr(1, 100),
+		LeiosAnnouncementPeriodLength:  10,
+		LeiosVotePeriodLength:          11,
+		LeiosDiffusionPeriodLength:     12,
+		LeiosCommitteeSize:             13,
+		LeiosQuorumStakeThreshold:      ratPtr(3, 4),
+		MaxEndorserBlockReferencesSize: 14,
+		MaxEndorserBlockTxsSize:        15,
+		MaxEndorserBlockExUnits: lcommon.ExUnits{
+			Memory: 16,
+			Steps:  17,
+		},
+		MaxRefScriptSizePerEndorserBlock: 18,
+		PerasMinCandidateBlockAge:        19,
+		PerasHealingFactor:               ratPtr(1, 4),
+		PerasCertBoost:                   20,
+		PerasTargetCommitteeSize:         21,
+		PerasBootstrapRound:              &bootstrapRound,
+		PerasQuorumThresholdSafetyMargin: ratPtr(1, 2),
+		RefInputsCostPerMultiAssetPolicy: 23,
+		RefInputsCostPerDatumByte:        24,
 	}
 }
 
 // requireDijkstraQueryReply checks the reply as a client decodes it from the
 // wire: the Dijkstra type, without the synthetic PlutusV2 entry, with every
-// Dijkstra-only field intact.
+// Dijkstra-only wire field intact.
 func requireDijkstraQueryReply(
 	t *testing.T,
 	result any,
@@ -83,6 +105,34 @@ func requireDijkstraQueryReply(
 	assert.Zero(t, decoded.MaxPledgeLeverage.Cmp(big.NewRat(10, 1)))
 	require.NotNil(t, decoded.MinPoolMargin)
 	assert.Zero(t, decoded.MinPoolMargin.Cmp(big.NewRat(1, 100)))
+	assert.Equal(t, uint32(10), decoded.LeiosAnnouncementPeriodLength)
+	assert.Equal(t, uint32(11), decoded.LeiosVotePeriodLength)
+	assert.Equal(t, uint32(12), decoded.LeiosDiffusionPeriodLength)
+	assert.Equal(t, uint16(13), decoded.LeiosCommitteeSize)
+	require.NotNil(t, decoded.LeiosQuorumStakeThreshold)
+	assert.Zero(t, decoded.LeiosQuorumStakeThreshold.Cmp(big.NewRat(3, 4)))
+	assert.Equal(t, uint32(14), decoded.MaxEndorserBlockReferencesSize)
+	assert.Equal(t, uint32(15), decoded.MaxEndorserBlockTxsSize)
+	assert.Equal(
+		t,
+		lcommon.ExUnits{Memory: 16, Steps: 17},
+		decoded.MaxEndorserBlockExUnits,
+	)
+	assert.Equal(t, uint32(18), decoded.MaxRefScriptSizePerEndorserBlock)
+	assert.Equal(t, uint32(19), decoded.PerasMinCandidateBlockAge)
+	require.NotNil(t, decoded.PerasHealingFactor)
+	assert.Zero(t, decoded.PerasHealingFactor.Cmp(big.NewRat(1, 4)))
+	assert.Equal(t, uint16(20), decoded.PerasCertBoost)
+	assert.Equal(t, uint16(21), decoded.PerasTargetCommitteeSize)
+	require.NotNil(t, decoded.PerasBootstrapRound)
+	assert.Equal(t, uint32(22), *decoded.PerasBootstrapRound)
+	require.NotNil(t, decoded.PerasQuorumThresholdSafetyMargin)
+	assert.Zero(
+		t,
+		decoded.PerasQuorumThresholdSafetyMargin.Cmp(big.NewRat(1, 2)),
+	)
+	assert.Equal(t, uint64(23), decoded.RefInputsCostPerMultiAssetPolicy)
+	assert.Equal(t, uint64(24), decoded.RefInputsCostPerDatumByte)
 }
 
 func TestQueryShelleyCurrentProtocolParams_DijkstraLive(t *testing.T) {

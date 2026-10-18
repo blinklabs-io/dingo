@@ -35,7 +35,7 @@ type Config struct {
 	IndexCacheSize   *uint64 `yaml:"indexCacheSize"`
 	ValueLogFileSize uint64  `yaml:"valueLogFileSize"`
 	MemTableSize     uint64  `yaml:"memTableSize"`
-	ValueThreshold   uint64  `yaml:"valueThreshold"`
+	ValueThreshold   *uint64 `yaml:"valueThreshold"`
 	GC               *bool   `yaml:"gc"`
 	// GCInterval is how often value-log GC runs, such as "5m". Zero uses
 	// DefaultGCInterval.
@@ -51,7 +51,6 @@ func defaultConfig() Config {
 	return Config{
 		ValueLogFileSize: DefaultValueLogFileSize,
 		MemTableSize:     DefaultMemTableSize,
-		ValueThreshold:   DefaultValueThreshold,
 		CompressionLevel: DefaultCompressionLevel,
 	}
 }
@@ -88,8 +87,18 @@ func RegisterProvider(host *hostplugin.Host) error {
 			if cfg.Compression != nil {
 				compression = *cfg.Compression
 			}
-			gcEnabled := deps.RunMode != "load"
-			if cfg.GC != nil && deps.RunMode != "load" {
+			valueThreshold := uint64(DefaultValueThreshold)
+			if deps.StorageMode == "core" && deps.RunMode == "sync" {
+				valueThreshold = DefaultCoreSyncValueThreshold
+			}
+			if cfg.ValueThreshold != nil {
+				valueThreshold = *cfg.ValueThreshold
+			}
+			// Bulk import runs (load, and the Mithril sync that feeds the
+			// same bulk path) keep value-log GC off regardless of config.
+			bulkImport := deps.RunMode == "load" || deps.RunMode == "sync"
+			gcEnabled := !bulkImport
+			if cfg.GC != nil && !bulkImport {
 				gcEnabled = *cfg.GC
 			}
 			if cfg.GCInterval != 0 && cfg.GCInterval < time.Second {
@@ -115,7 +124,7 @@ func RegisterProvider(host *hostplugin.Host) error {
 				),
 				// #nosec G115 -- values are capped to the destination maximum.
 				WithValueThreshold(
-					int64(min(cfg.ValueThreshold, uint64(math.MaxInt64))),
+					int64(min(valueThreshold, uint64(math.MaxInt64))),
 				),
 				WithCompactBlockMetadata(
 					useCompactBlockMetadata(deps.RunMode, deps.StorageMode),

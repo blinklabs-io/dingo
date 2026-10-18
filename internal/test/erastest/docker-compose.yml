@@ -102,7 +102,7 @@ services:
       start_period: 10s
 
   cardano-producer:
-    image: ghcr.io/blinklabs-io/cardano-node:11.0.1
+    image: ghcr.io/blinklabs-io/cardano-node:11.0.1@sha256:d5ede07a890e9b6a0a5182cdba9dbaf73756336762235e0934a11690beedae02
     container_name: eras-cardano-producer
     depends_on:
       configurator:
@@ -148,7 +148,7 @@ services:
       start_period: 10s
 
   cardano-relay:
-    image: ghcr.io/blinklabs-io/cardano-node:11.0.1
+    image: ghcr.io/blinklabs-io/cardano-node:11.0.1@sha256:d5ede07a890e9b6a0a5182cdba9dbaf73756336762235e0934a11690beedae02
     container_name: eras-cardano-relay
     depends_on:
       configurator:

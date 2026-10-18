@@ -21,6 +21,9 @@ const (
 	PlannerStatsTriggerStartup = "startup"
 	// PlannerStatsTriggerEpoch labels a run made after an epoch rollover.
 	PlannerStatsTriggerEpoch = "epoch"
+	// PlannerStatsTriggerPeriodic labels a run made on the refresh interval
+	// between epoch rollovers.
+	PlannerStatsTriggerPeriodic = "periodic"
 )
 
 // PlannerStatsResult reports one incremental planner-statistics run.

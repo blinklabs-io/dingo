@@ -20,6 +20,8 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/internal/safedecode"
+	"github.com/blinklabs-io/gouroboros/cbor"
+	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
@@ -115,6 +117,32 @@ func TestDecodeLeiosAnnouncementHeaderNonPanickingOutcomesUnchanged(
 		header, err := decodeLeiosAnnouncementHeader(raw)
 		require.NoError(t, err)
 		require.NotNil(t, header)
+	})
+
+	t.Run("hard-fork wrapped header decodes", func(t *testing.T) {
+		t.Parallel()
+		raw := readHexFixture(t, musashiType8HeaderFixture)
+		wrapped, err := cbor.Encode([]any{
+			uint8(gledger.EraIdDijkstra), cbor.RawMessage(raw),
+		})
+		require.NoError(t, err)
+
+		header, err := decodeLeiosAnnouncementHeader(wrapped)
+		require.NoError(t, err)
+		require.NotNil(t, header)
+	})
+
+	t.Run("hard-fork wrapped non-Dijkstra header is rejected", func(t *testing.T) {
+		t.Parallel()
+		raw := readHexFixture(t, musashiType8HeaderFixture)
+		wrapped, err := cbor.Encode([]any{
+			uint8(gledger.EraIdConway), cbor.RawMessage(raw),
+		})
+		require.NoError(t, err)
+
+		header, err := decodeLeiosAnnouncementHeader(wrapped)
+		require.ErrorContains(t, err, "unexpected era")
+		require.Nil(t, header)
 	})
 
 	t.Run("malformed header reports an ordinary error", func(t *testing.T) {

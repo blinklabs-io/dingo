@@ -49,8 +49,9 @@ package health
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
+	"log/slog"
 	"net/http"
+	"sync"
 )
 
 // Paths served by the health listener.
@@ -74,8 +75,10 @@ type Check struct {
 	// Liveness marks a check whose failure fails /healthz as well as
 	// /readyz. Every other check gates /readyz alone.
 	Liveness bool
+	// Reason is the stable public reason code returned when Fn fails.
+	Reason string
 	// Fn returns nil when the condition holds, and otherwise an error whose
-	// message is reported as the reason.
+	// full message is retained for server diagnostics.
 	Fn func() error
 }
 
@@ -94,13 +97,25 @@ type Status struct {
 	// Ready is true when the node is following the chain within the
 	// configured tip-gap tolerance.
 	Ready bool `json:"ready"`
-	// Reason explains a false Ready. Empty when the node is ready.
+	// Reason explains a false Live or Ready. Empty when both are true.
 	Reason string `json:"reason,omitempty"`
 	// TipGapSlots is the observed gap. Nil until the first slot tick.
 	TipGapSlots *uint64 `json:"tipGapSlots,omitempty"`
 	// Status is "ok" or "unhealthy" for the probe that produced it, so a
 	// probe body can be read without knowing which path was requested.
 	Status string `json:"status"`
+}
+
+const (
+	reasonTipGapUnavailable = "tip_gap_unavailable"
+	reasonNodeStarting      = "node_starting"
+	reasonTipGapExceeded    = "tip_gap_exceeded"
+	reasonCheckFailed       = "health_check_failed"
+)
+
+type evaluation struct {
+	status     Status
+	diagnostic error
 }
 
 // Evaluate classifies the node against a tip-gap tolerance and the extra
@@ -113,6 +128,14 @@ func Evaluate(
 	readyTipGapSlots uint64,
 	checks ...Check,
 ) Status {
+	return evaluate(tipGap, readyTipGapSlots, checks...).status
+}
+
+func evaluate(
+	tipGap TipGapFunc,
+	readyTipGapSlots uint64,
+	checks ...Check,
+) evaluation {
 	status := Status{Live: true}
 	for _, check := range checks {
 		if !check.Liveness {
@@ -120,54 +143,103 @@ func Evaluate(
 		}
 		if err := check.evaluate(); err != nil {
 			status.Live = false
-			status.Reason = err.Error()
-			return status
+			status.Reason = check.Reason
+			if status.Reason == "" {
+				status.Reason = reasonCheckFailed
+			}
+			return evaluation{status: status, diagnostic: err}
 		}
 	}
 	if tipGap == nil {
-		status.Reason = "tip gap unavailable"
-		return status
+		status.Reason = reasonTipGapUnavailable
+		return evaluation{status: status}
 	}
 	gap, ok := tipGap()
 	if !ok {
-		status.Reason = "no chain tip yet: node is starting or bootstrapping"
-		return status
+		status.Reason = reasonNodeStarting
+		return evaluation{status: status}
 	}
 	status.TipGapSlots = &gap
 	if gap > readyTipGapSlots {
-		status.Reason = fmt.Sprintf(
-			"tip gap %d slots exceeds tolerance of %d slots",
-			gap,
-			readyTipGapSlots,
-		)
-		return status
+		status.Reason = reasonTipGapExceeded
+		return evaluation{status: status}
 	}
 	for _, check := range checks {
 		if check.Liveness {
 			continue
 		}
 		if err := check.evaluate(); err != nil {
-			status.Reason = err.Error()
-			return status
+			status.Reason = check.Reason
+			if status.Reason == "" {
+				status.Reason = reasonCheckFailed
+			}
+			return evaluation{status: status, diagnostic: err}
 		}
 	}
 	status.Ready = true
-	return status
+	return evaluation{status: status}
+}
+
+type diagnosticReporter struct {
+	logger *slog.Logger
+	mu     sync.Mutex
+	recent map[string]struct{}
+	order  []string
+}
+
+const maxRememberedDiagnostics = 128
+
+func (r *diagnosticReporter) report(result evaluation) {
+	if r == nil || r.logger == nil {
+		return
+	}
+	key := ""
+	if result.diagnostic != nil {
+		key = result.status.Reason + "\x00" + result.diagnostic.Error()
+	}
+	r.mu.Lock()
+	if r.recent == nil {
+		r.recent = make(map[string]struct{})
+	}
+	if _, exists := r.recent[key]; exists {
+		r.mu.Unlock()
+		return
+	}
+	if len(r.order) == maxRememberedDiagnostics {
+		delete(r.recent, r.order[0])
+		copy(r.order, r.order[1:])
+		r.order = r.order[:len(r.order)-1]
+	}
+	r.recent[key] = struct{}{}
+	r.order = append(r.order, key)
+	r.mu.Unlock()
+	if result.diagnostic != nil {
+		r.logger.Warn(
+			"health check failed",
+			"reason", result.status.Reason,
+			"error", result.diagnostic,
+		)
+	}
 }
 
 // NewMux builds the health listener's routes. readyTipGapSlots is the
 // number of slots the chain tip may trail the wall clock while still
 // counting as ready.
 func NewMux(
+	logger *slog.Logger,
 	tipGap TipGapFunc,
 	readyTipGapSlots uint64,
 	checks ...Check,
 ) *http.ServeMux {
 	mux := http.NewServeMux()
-	live := probeHandler(tipGap, readyTipGapSlots, false, checks)
+	reporter := &diagnosticReporter{logger: logger}
+	live := probeHandler(reporter, tipGap, readyTipGapSlots, false, checks)
 	mux.Handle(PathHealth, live)
 	mux.Handle(PathLive, live)
-	mux.Handle(PathReady, probeHandler(tipGap, readyTipGapSlots, true, checks))
+	mux.Handle(
+		PathReady,
+		probeHandler(reporter, tipGap, readyTipGapSlots, true, checks),
+	)
 	return mux
 }
 
@@ -175,6 +247,7 @@ func NewMux(
 // (503 when the node is not following the chain) over liveness semantics
 // (200 whenever the handler runs at all).
 func probeHandler(
+	reporter *diagnosticReporter,
 	tipGap TipGapFunc,
 	readyTipGapSlots uint64,
 	requireReady bool,
@@ -191,7 +264,9 @@ func probeHandler(
 				)
 				return
 			}
-			status := Evaluate(tipGap, readyTipGapSlots, checks...)
+			result := evaluate(tipGap, readyTipGapSlots, checks...)
+			reporter.report(result)
+			status := result.status
 			code := http.StatusOK
 			status.Status = "ok"
 			if !status.Live || (requireReady && !status.Ready) {

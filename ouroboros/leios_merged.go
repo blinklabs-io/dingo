@@ -23,6 +23,7 @@ import (
 	"math"
 	"slices"
 	"time"
+	"unsafe"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
@@ -1660,21 +1661,25 @@ func (data *leiosEndorserBlockData) hasManifest() bool {
 	return data != nil && len(data.blockRaw) > 0
 }
 
-// approxBytes estimates the memory retained by one cache entry: the manifest
-// plus every transaction body currently held, complete (txsRaw) or partial
-// (partialTxs). It undercounts slice/map overhead, which is acceptable for a
-// budget meant to bound the dominant cost -- the transaction and manifest
-// payloads themselves -- rather than account for every byte.
+const rawMessageHeaderBytes = int(unsafe.Sizeof(cbor.RawMessage{}))
+
+// approxBytes estimates the memory retained by one cache entry. It charges
+// backing-array capacity for the manifest, transaction bodies, and the outer
+// transaction slices so sparse partial fetches consume their actual cache
+// budget even when most entries are nil. It does not include the fixed entry
+// struct or small bookkeeping strings.
 func (data *leiosEndorserBlockData) approxBytes() int {
 	if data == nil {
 		return 0
 	}
-	total := len(data.blockRaw)
-	for _, raw := range data.txsRaw {
-		total += len(raw)
-	}
-	for _, raw := range data.partialTxs {
-		total += len(raw)
+	return cap(data.blockRaw) + rawMessagesRetainedBytes(data.txsRaw) +
+		rawMessagesRetainedBytes(data.partialTxs)
+}
+
+func rawMessagesRetainedBytes(messages []cbor.RawMessage) int {
+	total := cap(messages) * rawMessageHeaderBytes
+	for _, raw := range messages {
+		total += cap(raw)
 	}
 	return total
 }

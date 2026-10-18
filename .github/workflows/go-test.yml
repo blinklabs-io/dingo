@@ -11,7 +11,7 @@ name: ci
 #     -> go-test (Linux, quick)           1 runner,  ~8 min
 #       -> devnet (block pipeline)        1 runner, PR pipeline only
 #       -> go-test (Linux)                    services, no race
-#          go-test (Linux, race)              race, no services
+#          go-test (Linux, race)              race, no services, 3 shards
 #          go-test (macOS)               3 runners, 5-35 min
 #         -> build-<os>, docker          gated on the SAME OS's tests
 #
@@ -184,25 +184,30 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
         with:
+          # This job runs a checksum-pinned third-party scanner in
+          # the workspace. Do not leave GITHUB_TOKEN in the local git config.
           persist-credentials: false
-      # The action is pinned; the scanner it installs and the vulnerability
-      # database it reads are not, so a new advisory fails the job instead of
-      # waiting behind a stale scanner. The toolchain floats for the same
-      # reason. govulncheck exits non-zero only for vulnerabilities this module
-      # actually calls, so unreachable findings it also prints do not fail the
-      # job. GOFLAGS carries the build tags `make govulncheck` passes, which
-      # the action has no input for. setup-go forces GOTOOLCHAIN=local, so the
-      # step overrides it to honor go.mod's patched toolchain floor when the
-      # setup-go release manifest lags a Go security release.
-      - name: govulncheck
-        uses: golang/govulncheck-action@032d45514ae346b1db93c04b0c90b841c370344f # v1.1.0 https://github.com/golang/govulncheck-action/releases/tag/v1.1.0
-        env:
-          GOFLAGS: -tags=dingo_extra_plugins
-          GOTOOLCHAIN: auto
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
         with:
-          go-version-input: 1.26.x
-          check-latest: true
-          repo-checkout: false
+          go-version: 1.26.x
+          cache: false
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: ${{ runner.os }}-go-1.26.x-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-1.26.x-
+      - name: govulncheck
+        # govulncheck exits non-zero only for vulnerabilities this module
+        # actually calls, so the unreachable findings it also prints (currently
+        # GO-2026-5932, an unmaintained golang.org/x/crypto package with no
+        # fixed version) do not fail the job.
+        # The scanner binary is pinned while its vulnerability database remains
+        # live. Run through the Makefile so this CI check and `make
+        # govulncheck` cannot drift apart.
+        run: make govulncheck
 
   # The accelerated all-Dingo DevNet with the block pipeline and its parallel
   # validate stage on, the only end-to-end run of that stage. Both flags
@@ -259,7 +264,7 @@ jobs:
         run: go build -tags dingo_extra_plugins ./cmd/dingo
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0 https://github.com/actions/setup-node/releases/tag/v7.1.0
         with:
-          node-version: '22.x'
+          node-version: '22.18.0'
       - name: npm-test
         run: npm test
       - name: go-build-minimal
@@ -298,7 +303,7 @@ jobs:
     timeout-minutes: 120
     services:
       minio:
-        image: blinklabs/minio:main
+        image: ghcr.io/blinklabs-io/minio:main@sha256:4682bc04bc46ae19aca740dfcdb7341399669fd7fe23f74271e9d09d36a88ada
         options: >-
           --health-cmd "curl localhost:9000"
           --health-interval 10s
@@ -321,8 +326,6 @@ jobs:
       MYSQL_PASSWORD: mysql
       MYSQL_DATABASE: dingo_test
       MYSQL_ROOT_PASSWORD: mysql
-      AWS_ACCESS_KEY_ID: minioadmin
-      AWS_SECRET_ACCESS_KEY: minioadmin
       AWS_ENDPOINT: "http://127.0.0.1:9000/"
       AWS_REGION: us-east-1
       DINGO_TEST_S3_BUCKET: dingo-test
@@ -336,7 +339,7 @@ jobs:
             --env POSTGRES_DB=dingo_test \
             --health-cmd pg_isready --health-interval 10s \
             --health-timeout 5s --health-retries 5 \
-            postgres:16 postgres -c fsync=off -c synchronous_commit=off -c full_page_writes=off
+            postgres:16@sha256:ca0bd484cb98bf4b24eb1010e73fb3fcbd6714d240fbc1a10eea5b7dbecb641d postgres -c fsync=off -c synchronous_commit=off -c full_page_writes=off
           docker run --detach --name "$DINGO_CI_MYSQL_CONTAINER" \
             --publish 3306:3306 \
             --env MYSQL_ROOT_PASSWORD=mysql --env MYSQL_USER=mysql \
@@ -344,7 +347,7 @@ jobs:
             --health-cmd 'mysqladmin ping -h 127.0.0.1 -u root -p"$MYSQL_ROOT_PASSWORD"' \
             --health-interval 10s --health-timeout 5s --health-start-period 10s \
             --health-retries 4 \
-            mysql:8 --innodb-file-per-table=OFF --innodb-flush-log-at-trx-commit=0 \
+            mysql:8@sha256:6ea90827b1100f8f2ae306a539f86d2c264a26ed435a2a9f75551dd5c3aeb242 --innodb-file-per-table=OFF --innodb-flush-log-at-trx-commit=0 \
             --sync-binlog=0 --skip-log-bin
           for container in "$DINGO_CI_PG_CONTAINER" "$DINGO_CI_MYSQL_CONTAINER"; do
             for attempt in {1..60}; do
@@ -367,12 +370,23 @@ jobs:
               esac
             done
           done
-      - name: setup-s3-bucket
+      - name: install-aws-cli
         run: |
-            curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
-            unzip -q awscliv2.zip
-            sudo ./aws/install --update
-            aws --endpoint-url "$AWS_ENDPOINT" s3api create-bucket --bucket "$DINGO_TEST_S3_BUCKET"
+          set -euo pipefail
+          curl --fail --location --silent --show-error \
+            --output awscliv2.zip \
+            https://awscli.amazonaws.com/awscli-exe-linux-x86_64-2.37.3.zip
+          echo "78903b609938e6c06a02bd2c157af3af4fe184868e5507d6ed588cb68a7a2764  awscliv2.zip" \
+            | sha256sum --check --strict -
+          unzip -q awscliv2.zip
+          sudo ./aws/install --update
+          aws --version | grep -F 'aws-cli/2.37.3 '
+          {
+            echo 'AWS_ACCESS_KEY_ID=minioadmin'
+            echo 'AWS_SECRET_ACCESS_KEY=minioadmin'
+          } >> "$GITHUB_ENV"
+      - name: setup-s3-bucket
+        run: aws --endpoint-url "$AWS_ENDPOINT" s3api create-bucket --bucket "$DINGO_TEST_S3_BUCKET"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
         with:
           persist-credentials: false
@@ -459,11 +473,12 @@ jobs:
   # race-detector failure in ./ledger surfaced with the tag already pushed, and
   # the whole publication was skipped.
   #
-  # Deliberately a sibling of go-test (Linux) rather than another step of it.
-  # Race instrumentation roughly doubles the suite, so folding the two together
-  # would put the Linux stage at ~57 minutes on one runner and make every merge
-  # wait for it. Two runners for 35 minutes is the balance point: the stage
-  # still costs less than half the old flat fan-out.
+  # Deliberately a sibling of go-test (Linux) rather than another step of it,
+  # and sharded by package across three runners. Race instrumentation is CPU
+  # bound and the packages share nothing, so one runner took ~60 minutes while
+  # the longest shard takes about a quarter of that. The database and ledger
+  # shards name their packages; rest is every other package, so a new package
+  # is tested without editing this list.
   #
   # It also runs without the service containers on purpose. The Postgres and
   # MySQL variants in internal/test/conformance gate on POSTGRES_PASSWORD /
@@ -477,8 +492,10 @@ jobs:
     name: go-test (Linux, race)
     needs: [go-test-linux-quick]
     strategy:
+      fail-fast: false
       matrix:
         go-version: [1.26.x]
+        shard: [database, ledger, rest]
     runs-on: ubuntu-latest
     # Only a backstop against a wedged runner, replacing GitHub's 360-minute
     # default. The per-package -timeout below is what actually diagnoses a
@@ -501,23 +518,41 @@ jobs:
           # Race-instrumented objects are a separate build-cache population
           # from the plain ones, so this job keys its own entry rather than
           # thrashing go-test (Linux)'s.
-          key: ${{ runner.os }}-go-race-${{ matrix.go-version }}-${{ hashFiles('**/go.sum') }}
+          key: ${{ runner.os }}-go-race-${{ matrix.go-version }}-${{ matrix.shard }}-${{ hashFiles('**/go.sum') }}
           restore-keys: |
-            ${{ runner.os }}-go-race-${{ matrix.go-version }}-
+            ${{ runner.os }}-go-race-${{ matrix.go-version }}-${{ matrix.shard }}-
       - name: go-build
         run: go build -tags dingo_extra_plugins ./cmd/dingo
       - name: go-test-race
-        # Same command as publish.yml's release gate, so a pull request cannot
-        # pass a check the release then fails.
+        # Same command and shards as publish.yml's release gate, so a pull
+        # request cannot pass a check the release then fails.
         #
-        # 60m for the reason go-test (Linux) carries it. ./ledger reached the
-        # original 20m limit in run 33315370942 and runs 255-437s here now;
-        # internal/test/conformance replays SQLite only in this job but does
-        # it under the race detector, which put it at 684-1134s across the
-        # same ten runs. 30m sat 1.6x above the slower of the two, which is
-        # not enough clearance for a ceiling whose panic is the only thing
-        # that names a stuck test. timeout-minutes: 90 remains the backstop.
-        run: go test -v -tags dingo_extra_plugins -ldflags="-s -w" -race -timeout 60m ./...
+        # Tests that only run single-goroutine computation or assert SQLite
+        # query plans call testutil.SkipUnderRace; go-test (Linux) and
+        # go-test (Linux, quick) still run them un-instrumented.
+        #
+        # -timeout stays at 60m so a hang is still named by the per-package
+        # panic before the job backstop above fires.
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: |
+          set -euo pipefail
+          database='/database($|/lifecycle|/plugin/blob|/plugin/metadata/sqlstore($|/))'
+          ledger='/ledger($|/)|/internal/test/conformance'
+          all="$(go list -tags dingo_extra_plugins ./...)"
+          case "$SHARD" in
+            database) selected="$(grep -E "$database" <<<"$all" || true)" ;;
+            ledger) selected="$(grep -E "$ledger" <<<"$all" || true)" ;;
+            rest) selected="$(grep -Ev "$database|$ledger" <<<"$all" || true)" ;;
+            *) echo "unknown shard: $SHARD" >&2; exit 1 ;;
+          esac
+          if [ -z "$selected" ]; then
+            echo "shard $SHARD selected no packages" >&2
+            exit 1
+          fi
+          mapfile -t pkgs <<<"$selected"
+          printf '%s\n' "${pkgs[@]}"
+          go test -v -tags dingo_extra_plugins -ldflags="-s -w" -race -timeout 60m "${pkgs[@]}"
 
   # Stage 3. macos-latest runs the full ./... suite here.
   go-test-macos:

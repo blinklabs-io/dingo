@@ -33,7 +33,6 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
-	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
@@ -203,6 +202,9 @@ type ParsedUTxO struct {
 	DatumHash []byte // optional
 	Datum     []byte // optional inline datum CBOR
 	ScriptRef []byte // optional reference script CBOR
+	// ReferenceScriptHash is the hash of the reference script, when the
+	// output carries one.
+	ReferenceScriptHash []byte
 }
 
 // ParsedAsset represents a native asset within a UTxO.
@@ -3339,29 +3341,13 @@ func sumBlocksMade(blocks map[string]uint64) uint64 {
 }
 
 // validateOpCertCounters checks that every certified counter is keyed by a
-// pool key hash and can be recorded.
+// pool key hash.
 func validateOpCertCounters(counters map[string]uint64) error {
-	for poolKey, sequence := range counters {
+	for poolKey := range counters {
 		if len(poolKey) != len(lcommon.PoolKeyHash{}) {
 			return fmt.Errorf(
 				"certified opcert pool key has length %d, expected 28",
 				len(poolKey),
-			)
-		}
-		// decodeOpCertCounters decodes the certified counter map at the
-		// reference's full uint64 width, independently of the header types
-		// the gouroboros pin declares, so this is the one write path into
-		// pool_opcert_sequence whose counters were never narrowed or checked
-		// against a chain rule first. Refuse an unrecordable counter here,
-		// naming the bound the way block application and forging name it,
-		// rather than letting it reach checkedInt64 and abort the import
-		// with a message that reports only that an unsigned SQL value
-		// exceeds int64.
-		if err := eras.ValidateOpCertPersistableCounter(sequence); err != nil {
-			return fmt.Errorf(
-				"storing certified opcert counter for pool %x: %w",
-				[]byte(poolKey),
-				err,
 			)
 		}
 	}

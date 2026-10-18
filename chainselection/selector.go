@@ -30,6 +30,7 @@ import (
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	okeepalive "github.com/blinklabs-io/gouroboros/protocol/keepalive"
 )
 
 // safeAddUint64 returns a + b, clamped to math.MaxUint64 on overflow.
@@ -42,7 +43,10 @@ func safeAddUint64(a, b uint64) uint64 {
 
 const (
 	defaultEvaluationInterval = 10 * time.Second
-	defaultStaleTipThreshold  = 60 * time.Second
+	// A connected peer may need one probe period plus the full server timeout
+	// to report activity.
+	defaultStaleTipThreshold = time.Duration(okeepalive.DefaultKeepAlivePeriod)*time.Second +
+		okeepalive.ServerTimeout
 
 	// DefaultMaxTrackedPeers is the maximum number of peers tracked by
 	// the ChainSelector. When a new peer is added and the limit is reached,
