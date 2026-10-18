@@ -66,7 +66,8 @@ genesisBootstrap:
   # 0 auto-derives the density window from Shelley genesis params (3k/f).
   windowSlots: 0
   # Independent peers that must report the same recent blocks before a fast
-  # source may drive Genesis selection. 0 disables corroboration (density-only).
+  # source may drive Genesis selection. The default is 1. Setting 0 explicitly
+  # disables corroboration (density-only).
   # Set this to the number of independent snapshot/ledger peers you expect to
   # corroborate the fast source.
   corroborationPeers: 2
@@ -184,10 +185,11 @@ fast source, and per-peer density/corroboration for metrics or debugging.
 
 ## Tuning `corroborationPeers`
 
-- **0** — corroboration off. The densest source wins on density alone (prior
-  behavior). Use only when every configured peer is already trusted.
-- **1** — a single independent peer must confirm the fast source. Minimal
-  protection; a lone honest snapshot peer is enough to keep going.
+- **0** — corroboration off. The densest source wins on density alone. Set this
+  explicitly only when every configured peer is already trusted for fork
+  choice.
+- **1 (default)** — a single independent peer must confirm the fast source.
+  Minimal protection; a lone honest snapshot peer is enough to keep going.
 - **2+** — require a quorum of distinct-host peers. More robust against a small
   set of colluding/divergent sources, but the node stalls until that many
   reachable peers agree, so size it to how many independent snapshot peers you

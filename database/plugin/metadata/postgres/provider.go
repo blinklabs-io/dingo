@@ -60,7 +60,7 @@ func defaultConfig() Config {
 		Port:     5432,
 		User:     "postgres",
 		Database: "postgres",
-		SSLMode:  "require",
+		SSLMode:  "verify-full",
 		TimeZone: "UTC",
 		// StatementTimeout/LockTimeout default to zero (server default,
 		// i.e. unbounded) rather than an opinionated value: an aggressive

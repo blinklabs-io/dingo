@@ -159,6 +159,14 @@ func (a *NodeAdapter) Matches(
 	if err := a.applyPointBounds(storageQuery, query, txn); err != nil {
 		return nil, err
 	}
+	// Keep an ascending stream bounded to the ledger view advertised by Tip.
+	// Later pages use fresh read snapshots so they do not retain one SQLite
+	// snapshot for the lifetime of the HTTP response.
+	if storageQuery.CreatedBefore == nil ||
+		*storageQuery.CreatedBefore > dbTip.Point.Slot {
+		createdBefore := dbTip.Point.Slot
+		storageQuery.CreatedBefore = &createdBefore
+	}
 	releaseOnError = false
 	return &nodeMatchIterator{
 		ctx:     ctx,
@@ -186,7 +194,22 @@ func (i *nodeMatchIterator) Next() (Match, bool, error) {
 		}
 		if i.pageIndex >= len(i.page) {
 			if i.exhausted {
+				i.releaseSnapshot()
 				return Match{}, false, nil
+			}
+			if i.storage.After != nil {
+				i.releaseSnapshot()
+				txn, _, err := database.NewReadSnapshotContext(
+					i.ctx,
+					i.adapter.ledgerState.Database(),
+				)
+				if err != nil {
+					return Match{}, false, fmt.Errorf(
+						"open Kupo query page snapshot: %w",
+						err,
+					)
+				}
+				i.txn = txn
 			}
 			i.storage.Limit = matchPageSize
 			page, err := i.adapter.ledgerState.Database().UtxosWithHistory(
@@ -338,7 +361,15 @@ func (i *nodeMatchIterator) Close() {
 		return
 	}
 	i.closed = true
+	i.releaseSnapshot()
+}
+
+func (i *nodeMatchIterator) releaseSnapshot() {
+	if i.txn == nil {
+		return
+	}
 	i.txn.Release()
+	i.txn = nil
 }
 
 func applyPatternFilters(

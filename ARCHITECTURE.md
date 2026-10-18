@@ -2695,7 +2695,9 @@ ConnectRPC, for byte-for-byte compatibility with the Acropolis tonic service)
 on its own `midnight.host:midnight.port` listener. It registers the
 `MidnightState` service and a `grpc_health_v1` health service reporting
 `SERVING`; gRPC reflection is registered only when
-`midnight.reflectionEnabled` is also true. The server flag is independent of
+`midnight.reflectionEnabled` is also true. The health service supports the
+bounded unary `Check` and `List` methods; `Watch` returns `Unimplemented` so
+anonymous clients cannot retain streams. The server flag is independent of
 `midnight.enabled`, which controls the indexer: an operator may index without
 serving or serve already-persisted rows without running the scanner. The
 `MidnightState` service is backed by two
@@ -2728,6 +2730,10 @@ Midnight events; `GetUtxoEvents` fails with `codes.FailedPrecondition` if
 `utxo_capacity`/`tx_capacity` are clamped server-side (`effectivePageSize`)
 to a bounded default/max instead of being forwarded to the store, since the
 store's own pagination contract treats a non-positive limit as unbounded.
+All `MidnightState` calls share a 16-request admission limit and a two-minute
+server deadline; excess calls fail with `ResourceExhausted`. The RPC context is
+also attached to every metadata read transaction, so client cancellation and
+the server deadline stop database work. Health checks bypass this admission.
 
 `Config.Database` (set to `midnightserver.NewDatabase(n.db)` — `adapter.go`'s
 `databaseAdapter`, which bridges the package-level
@@ -5890,11 +5896,12 @@ it. Dingo implements this as a **corroboration gate**
   A best-peer → none transition publishes `chainselection.selected_none` for
   observability of the stall; peer governance may also subscribe to the
   corroboration-failure event to react.
-- `corroborationPeers = 0` disables the gate (density-only Genesis selection,
-  the historical default), preserving prior behavior for nodes that do not opt
-  into the Genesis trust model. The per-peer hash frontier is tracked in every
-  Genesis mode (the trusted-frontier rule above needs it) and dropped in Praos,
-  so normal Praos operation carries no extra state.
+- `corroborationPeers` defaults to 1, so a fresh node needs one independent
+  witness before a fast source can drive Genesis selection. Setting it to 0
+  explicitly disables the gate and trusts every configured source for fork
+  choice (density-only Genesis selection). The per-peer hash frontier is
+  tracked in every Genesis mode (the trusted-frontier rule above needs it) and
+  dropped in Praos, so normal Praos operation carries no extra state.
 - **Header-crypto verification gates observation, independent of
   corroboration.** Density and the corroboration hash frontier are both
   populated from `recordObservedPoint`, driven by `PeerTipUpdateEvent`
@@ -9727,9 +9734,14 @@ Trust: remote chunk files carry no signature or digest, so authenticated
 transport establishes the remote root as the source. `dingo load` decodes
 every block and
 `Chain.AddBlocks` links each header to its predecessor, so a corrupt, truncated
-or reordered chunk fails the load. The replay is a trusted replay that skips
-body-hash checks, so it does not detect a root serving a self-consistent
-alternative history or altered block bodies. Load only from a root you trust.
+or reordered chunk fails the load. Remote imports also verify each block body
+against its header commitment before persistence. A root can still serve a
+self-consistent alternative history, so load only from a root you trust.
+Block batches enter the blob store before the asynchronous ledger worker
+applies their metadata. If that worker rejects a batch or fails, or the copy or replay is cancelled,
+the loader waits for it to stop and rewinds the blob chain to the worker's last
+applied ledger tip before returning the error. This also removes batches the
+bounded channel admitted after the rejected batch.
 The blob-only copy that follows a Mithril ledger-state import
 (`LoadBlobsWithDB`) reads only the local ImmutableDB whose digests the Mithril
 certificate covers and never takes a remote root. To bootstrap without trusting
@@ -10284,7 +10296,11 @@ The canonical plugin auth-token environment setting overrides the compatibility
 same-origin on loopback or explicitly listed in `corsAllowedOrigins`; the root wildcard
 does not grant access to MCP. Rejected origins receive HTTP 403 before any
 transport or preflight handling. Native clients can omit Origin. Streaming
-responses have no absolute write timeout. The pre-authentication rate limiter
+responses have no absolute write timeout. Streamable HTTP and legacy SSE share
+a 128-session admission budget with an eight-session limit per client address.
+New sessions fail immediately when either limit is full. Both transports close
+sessions after five idle minutes or one hour of total lifetime, and listener
+shutdown closes every admitted session. The pre-authentication rate limiter
 keeps at most 4096 client identities in least-recently-used order. A single
 expiry timer removes identities after 30 idle minutes without waiting for more
 traffic. It runs before authentication, so
@@ -10313,9 +10329,11 @@ request at once; the ledger call stops at its next cancellation check, including
 during CEK execution. The admission slot is held until the ledger call returns,
 so further evaluations receive a busy error and
 canceled requests cannot accumulate workers.
-Arbitrary SQLite queries borrow one connection, enable `query_only`, and apply
-SQLite size limits before execution. The original settings are restored before
-the connection returns to an injected pool.
+SQLite tools share four fail-fast execution slots. Arbitrary queries borrow one
+connection, enable `query_only`, and apply 64 KiB value, 64 KiB SQL, and
+32-column limits before execution. Query results are also capped at 1 MiB of
+decoded cell data. The original settings are restored before the connection
+returns to an injected pool.
 Markdown tables wrap their sanitized cells in explicit untrusted-chain-data
 delimiters. Chain-controlled text is HTML-escaped before rendering so it cannot
 terminate that envelope.
@@ -10507,12 +10525,11 @@ reserves a metadata read connection before briefly taking the commit barriers,
 keeping an exhausted-pool wait outside them. Admission remains held for the
 snapshot's lifetime and is capped at one below the provider's read-pool size,
 so client-paced `/matches` streams cannot consume the connection destructive
-rollback needs for operational reads. The server sets no overall write
-timeout, because a fixed deadline would truncate a large stream; instead a
-30-second write deadline is re-armed before every response write. A client that
-stops reading, or reads so slowly that a single write takes longer than the
-deadline, fails its stream and releases its snapshot; a stream whose every
-write completes within the deadline is never cut off, however long it runs.
+rollback needs for operational reads. Kupo admits at most two match streams
+globally and one per remote address, and each stream has a five-minute
+lifetime. Excess streams receive HTTP 429. A 30-second write deadline is also
+re-armed before every response write, so a client that stops reading releases
+its snapshot before the stream lifetime expires.
 
 Match results stream in 512-row pages through an ordering cursor, hydrate
 spending details only for the current page, check request cancellation between
@@ -10551,6 +10568,12 @@ shared `maxConcurrentMutations` limit bounds process-wide submission and
 evaluation work, while `maxConcurrentMutationsPerClient` caps one remote
 address (it may equal the shared limit, in which case one address can use the
 whole budget). Their defaults are 4 and 1, respectively; excess work receives HTTP 429 without reading its body.
+
+The DRep detail route separately admits four requests globally and one per
+remote address. Its two-minute deadline and client cancellation flow through
+the epoch-boundary wait and the single read transaction used for the detail,
+voting-power, proposal-deposit, and registration lookups. Excess requests
+receive HTTP 429.
 
 A Blockfrost-compatible REST API that provides read access to chain data,
 transaction evaluation, and transaction submission. Transaction evaluation is
@@ -10870,6 +10893,9 @@ interceptor and retain their unbounded write lifetime.
 
 A gRPC server implementing the UTxO RPC specification with query, submit, sync, and watch services. The same listener exposes both the `utxorpc.v1alpha` and `utxorpc.v1beta` service namespaces. Every method other than v1beta's additional `QueryService.ReadState` is wire-compatible across the two, so the beta routes rewrite the service path onto the alpha handlers; `ReadState` is served by `betaQueryServiceServer` (`api/utxorpc/readstate.go`) instead. It answers the one Cardano state query v1beta defines, `GetStakePoolDistribution`, from `ledger.LedgerState.PoolStakeDistribution` — the same read that backs the node-to-client `GetPoolDistr2` query. The `ledger_tip` it reports is the tip that read took inside its own transaction, carried back on the result, rather than one sampled while building the reply: the two can straddle an epoch boundary, and a later tip would name an epoch whose stake snapshot is not the one the reply carries. Its `height` comes from that same carried tip's block number rather than from a separate lookup of the tip's stored block, as it does for every tip this listener reports (`ReadTip` already did; `ReadParams`, `ReadUtxos`, `SearchUtxos`, `ReadData`, `ReadTx`, and `ReadState` were brought in line): the height is already known at the point the slot and hash are, and `height` is a plain proto3 `uint64` with no encoding for "unknown", so a zero — whether from a failed lookup or from never populating the field — asserts that the tip is the origin block rather than admitting the height could not be read. Chain points that name something other than a tip, such as the `block_ref` on a returned transaction, still come from that block's own stored model. `LedgerState` is an optional dependency that `Utxorpc.Start` admits as an untyped nil, so the handler checks it per request and reports `Unavailable` rather than panicking. The `pool_keyhashes` filter is capped by `MaxPoolFilter` (default 1000), like the `ReadUtxos` and `ReadData` key lists, since it sizes the snapshot and registration reads it drives; asking for every pool is an empty filter and one bulk read. An empty `pool_keyhashes` means every pool, per the proto; a filter entry that is not 28 bytes is rejected as `InvalidArgument` rather than padded or truncated into a different pool. Because the protobuf `RationalNumber` is an int32 over a uint32, a stake fraction whose exact ratio does not fit — the normal case on a real network, where the denominator is total active stake in lovelace — is rescaled onto a fixed denominator of 1e9 rather than failing. `newServeMux` is the single wiring site for the routing table, and one service-name list (`servedServiceNames`) feeds the `grpc_health_v1` checker and both reflection wire versions, so `grpc.reflection.v1` and `grpc.reflection.v1alpha` clients discover the same services — v1alpha is an older reflection protocol, not an older API surface. Unary handlers whose cost scales with the result (`ReadUtxos`, `SearchUtxos`, `ReadData`, `FetchBlock`, `DumpHistory`, `ReadMempool`) share a non-blocking concurrency budget (`MaxConcurrentBulkRequests`, default 32): a request that finds every slot held is refused with `ResourceExhausted` rather than queued behind retained responses. A request takes its slot only after its parameters validate, so a rejected request never contends with valid ones, and keeps it until Connect has finished writing the response or `BulkResponseWriteTimeout` has cut the write off (`holdBulkSlotsUntilWritten` wraps the query, submit and sync routes), because a response is serialized and written after the handler returns and a slow reader would otherwise pin it with its slot already free. All but `DumpHistory`, which has its own `MaxHistoryBytes` cap described below, have a response byte budget (`MaxResponseBytes`, default 16 MiB of native CBOR, the first item always kept). `SearchUtxos` has a cursor, so a page that reaches the byte budget ends early and returns the resumption token; `ReadUtxos`, `ReadData` and `FetchBlock` have none, so the request is refused with `ResourceExhausted`. `ReadMempool` has no cursor in the pinned spec, so it returns a prefix of the mempool snapshot in the mempool's own order, capped at `MaxMempoolItems` (default 1000) transactions and the byte budget, and the response does not say whether it was truncated. `Mempool.TransactionsBounded` walks and copies only that prefix, transaction headers and CBOR alike, so the read costs in proportion to the result and not the pool. Request logs carry fixed-size metadata (counts and presence flags) and are written after request validation, never the caller's keys, predicates, tokens or field masks. TLS is configured through `plugins.api.utxorpc.config.tls`; the legacy process-level `tlsCertFilePath`/`tlsKeyFilePath` fields remain a supported, UTxO RPC-only default for that TLS policy.
 
+`ReadTx` rejects hashes that are not exactly 32 bytes before database access and
+uses a constant-size not-found error.
+
 `WaitForTx` rejects references that are not exactly 32 bytes before logging,
 allocating pending state, subscribing, or looking up transactions. Empty
 reference lists remain a no-op. Duplicate references are deduplicated in
@@ -10897,7 +10923,9 @@ references. Empty lists retain the current-tip fallback.
 
 `WaitForTx` rejects more than `MaxTxRefs` (default 1000) references
 before subscribing or reading the ledger, and one `ServerTimeout` deadline
-covers the durable lookups as well as the wait. `FollowTip`, `WatchTx`,
+covers the durable lookups as well as the wait. The health service supports
+only unary `Check`; `Health/Watch` returns `Unimplemented` instead of creating
+a stream outside this listener's admission limits. `FollowTip`, `WatchTx`,
 `WatchMempool`, and `WaitForTx` take a slot from a shared limiter
 (`MaxStreams` process-wide, `MaxStreamsPerClient` per remote host) and answer
 `ResourceExhausted` when
@@ -13485,8 +13513,11 @@ services. It exposes archive access over Connect/gRPC and supplies the remote
 archive adapter used by nodes that want historical fallback.
 
 The server side (`bark.Bark`) registers the archive service, health endpoint,
-and gRPC reflection. Archive fetches ask the active blob plugin for a signed
-block URL and return it with block type, height, and previous-hash metadata. In
+and gRPC reflection. The health endpoint supports only unary `Check`;
+`Health/Watch` returns `Unimplemented` instead of retaining an anonymous
+stream outside Bark's request budgets. Archive fetches ask the active blob
+plugin for a signed block URL and return it with block type, height, and
+previous-hash metadata. In
 practice this makes `s3` and `gcs` the archive-node blob backends because they
 can sign object-storage URLs.
 
@@ -13549,7 +13580,10 @@ local blocks expire; `internal/historyexpiry.Pruner` owns that lifecycle when
 Because the archive controls both the download URL and the response body, the
 client re-establishes block identity locally rather than trusting the response.
 Downloaded bytes are decoded with body validation enabled, and the block's
-computed hash and slot must match the point that was requested.
+computed hash and slot must match the point that was requested. All storage
+block decoding passes through `models.DecodeBlockCbor`, which converts any
+panic raised by an era-specific decoder to `safedecode.ErrDecodePanic` on the
+ordinary decode-error path.
 
 The default gouroboros decoder validates each Byron main block body-proof
 component against its payload, including `ssc_proof`. This binds archived SSC
@@ -13770,7 +13804,11 @@ restoring into a throwaway directory under `SnapshotDir` (never the system
 temp directory, since the restore is as large as the snapshot) and deleting
 it afterward, rather
 than duplicating the manifest-checksum/consistency validation `Restore`
-already does.
+already does. It authenticates and inspects the manifest before constructing
+any provider and admits only Badger plus SQLite. PostgreSQL/MySQL metadata and
+S3/GCS blobs need separately configured disposable resources to make a full
+restore side effect free; Bark has no such configuration, so verification
+rejects those providers before a migration, reset, or object write can occur.
 
 Every async operation's goroutine (CreateSnapshot/Restore/Truncate/
 VerifySnapshot) runs its work through `runProtected`, which recovers any

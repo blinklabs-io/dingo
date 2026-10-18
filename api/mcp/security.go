@@ -142,7 +142,11 @@ func (cl *clientLimiter) scheduleExpiryLocked(now time.Time) {
 		return
 	}
 	for cl.order.Len() > 0 {
-		oldest, ok := cl.order.Front().Value.(*clientLimiterEntry)
+		front := cl.order.Front()
+		if front == nil {
+			return
+		}
+		oldest, ok := front.Value.(*clientLimiterEntry)
 		if !ok || oldest == nil {
 			cl.removeOldestLocked()
 			continue
@@ -222,12 +226,7 @@ func newSecurityMiddleware(
 
 		// Rate limiting check
 		if limiter != nil {
-			clientIP, _, err := net.SplitHostPort(r.RemoteAddr)
-			if err != nil {
-				clientIP = r.RemoteAddr
-			}
-
-			if !limiter.getLimiter(clientIP).Allow() {
+			if !limiter.getLimiter(requestClientKey(r)).Allow() {
 				w.Header().Set("Content-Type", "application/json")
 				w.Header().Set("Retry-After", "1")
 				w.WriteHeader(http.StatusTooManyRequests)

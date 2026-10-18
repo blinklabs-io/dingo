@@ -15,6 +15,7 @@
 package kupo
 
 import (
+	"context"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -34,7 +35,20 @@ func (s *Server) handleMatches(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	matches, err := s.node.Matches(r.Context(), query)
+	release, ok := s.matchAdmission.acquire(r.Context(), matchClient(r))
+	if !ok {
+		w.Header().Set("Retry-After", "1")
+		writeError(
+			w,
+			http.StatusTooManyRequests,
+			errors.New("match stream capacity reached, try again later"),
+		)
+		return
+	}
+	defer release()
+	ctx, cancel := context.WithTimeout(r.Context(), s.matchStreamTimeout)
+	defer cancel()
+	matches, err := s.node.Matches(ctx, query)
 	if err != nil {
 		s.writeNodeError(w, err)
 		return
@@ -89,7 +103,7 @@ func (s *Server) handleMatches(w http.ResponseWriter, r *http.Request) {
 		}
 		first, ok, err = matches.Next()
 		if err != nil {
-			if r.Context().Err() == nil {
+			if ctx.Err() == nil {
 				s.logger.Error("stream Kupo matches", "error", err)
 			}
 			return

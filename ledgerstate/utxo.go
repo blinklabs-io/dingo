@@ -226,7 +226,7 @@ func unwrapCborBytes(
 
 // utxoBatchSize controls how many UTxOs are collected per batch
 // during streaming decode.
-const utxoBatchSize = 10000
+const utxoBatchSize = 50000
 
 // UTxOCallback is called for each batch of parsed UTxOs during
 // streaming decode.

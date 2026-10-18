@@ -230,7 +230,7 @@ test-devnet: ## Run the default all-Dingo DevNet integration tests
 # without making the phony target force every binary to rebuild.
 $(BINARIES): | mod-tidy
 
-$(BINARIES): $(GO_FILES) go.mod go.sum
+$(BINARIES): $(GO_FILES) go.mod go.sum $(wildcard $(ROOT_DIR)/cmd/*/default.pgo)
 	CGO_ENABLED=$(CGO_ENABLED) \
 	go build \
 		$(GO_TAG_FLAGS) \

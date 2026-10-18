@@ -154,12 +154,14 @@ provider's resolved file location, exposed through the optional
 `sqlstore.Store.SQLitePath()` capability. A metadata provider `dataDir` override
 therefore also controls MCP's read target. Other backends and in-memory SQLite
 return no file location. MCP owns the extra connection pool and closes it when
-the API stops; it never borrows or closes the provider's pools. SQL row limits
-are enforced during iteration, including PRAGMA results. Arbitrary queries and
-EXPLAIN use a dedicated borrowed connection with `query_only` and SQLite limits:
-1 MiB per value/encoded row, 64 KiB SQL, and 128 columns. Settings are restored
-before returning injected connections to their pool. The SQL byte limit is also
-checked before tokenization. Schema inspection binds table names through SQLite
+the API stops; it never borrows or closes the provider's pools. At most four
+SQL-tool calls execute concurrently; excess calls fail immediately. SQL row
+limits are enforced during iteration, including PRAGMA results. Arbitrary
+queries and EXPLAIN use a dedicated borrowed connection with `query_only` and
+SQLite limits: 64 KiB per value or encoded row, 64 KiB SQL, and 32 result
+columns. `sqlite_query` also rejects a response after 1 MiB of decoded cell data.
+Settings are restored before returning injected connections to their pool. The
+SQL byte limit is also checked before tokenization. Schema inspection binds table names through SQLite
 table-valued PRAGMAs, including reserved identifiers such as `transaction`. Query offsets are capped
 at 10,000. UTxO and asset queries use `deleted_slot = 0`; native-asset supply is
 summed from decimal quantities with arbitrary precision. Asset pages order by
@@ -210,6 +212,9 @@ without a width bound. Epoch stakes, pool history and delegators, and account
 stake history read the reward snapshot tables; the snapshot labelled E is the
 distribution active in epoch E+1. Account MIRs, asset balances and address
 totals read `move_instantaneous_rewards_reward`, `asset` and `utxo`.
+The single-DRep detail read uses one context-bound read transaction after its
+epoch-boundary wait, so cancellation covers every metadata query and all fields
+come from one database view.
 The vote endpoints list every cast, not only each voter's current vote: one
 row per `governance_vote_history` entry, so a revote keeps its earlier casts.
 A cast counts toward the tally (`counted`) only when it is the voter's latest
@@ -386,6 +391,13 @@ rounds up to 1ms rather than truncating to zero (indistinguishable from
 unset). MySQL additionally accepts `readTimeout`/`writeTimeout`, the
 driver's own transport-level I/O deadlines per socket read/write -- not a
 statement-level bound, and also zero/disabled by default.
+
+PostgreSQL defaults `sslMode` to `verify-full`, requiring encryption and
+verification of the server certificate and hostname. MySQL leaves local
+loopback connections unchanged, but a provider-generated connection to any
+other host defaults to `tls=true`, which requires encryption and verifies the
+server certificate and hostname. Operators can set `sslMode` explicitly when
+the server needs different behavior; an explicit `dsn` remains authoritative.
 
 The providers open their direct database/sql drivers and return the shared
 `database/plugin/metadata/sqlstore.Store`. Schema ownership is explicit:
@@ -882,7 +894,7 @@ survive cleanup rather than be replaced by an older value read by the import.
 
   Postgres connection parameters are derived from the configured DSN with `pgconn.ParseConfig` (accepts either URI or keyword=value style); any DSN query parameter that isn't one of the handful of real libpq connection keywords (e.g. an operator-set `timezone`, or the `options=-c...` fragment `database/plugin/metadata/sqlstore/dialect_integration_test.go`'s search-path-isolated tests rely on) is folded into `PGOPTIONS` instead of forwarded as a raw `PG<NAME>` variable, since real `pg_dump`/`pg_restore` (linked against actual libpq, unlike pgx's own lenient Go DSN parser) reject an unrecognized top-level connection keyword outright — each folded value is backslash-escaped (`escapePGOption`) so an embedded space or backslash survives the server's own whitespace-splitting parse of that startup parameter instead of being read as a token separator or a broken escape sequence. `PGSSLMODE` is recovered from `pgconn.Config`'s already-resolved `*tls.Config` (`postgresSSLMode`) by inspecting the specific field combination each mode leaves behind — `ServerName` set only for `verify-full`, a custom `VerifyPeerCertificate` only for `verify-ca`, neither for a bare `require` — rather than collapsing every non-nil `TLSConfig` to `require`, which would silently downgrade an operator's `verify-ca`/`verify-full` configuration to "encrypted but unverified." A custom root CA or client certificate configured for `verify-ca`/`verify-full` can't be forwarded, though: `pgconn` parses `sslrootcert`/`sslcert`/`sslkey` into in-memory certificate material and discards the original file paths, and `pg_dump`/`pg_restore` need real files — rather than silently falling back to weaker verification in that case, `connEnv` fails loudly instead (this also means a legitimate `sslrootcert=system` configuration is rejected too, since a system-trust pool and a custom-file pool are indistinguishable once resolved — an accepted false-positive in favor of never misclassifying a custom CA as safe to skip).
 
-  MySQL connection parameters come from `mysqldriver.ParseDSN`. The DSN's `tls` setting is mapped to CLI flags (`mysqlSSLArgs`) for the client tools actually shipped in the Docker image — Debian's `default-mysql-client`, confirmed live to be MariaDB's client (`mariadb-client`), not real MySQL: MariaDB's `mysql`/`mysqldump` reject MySQL 5.7+'s `--ssl-mode` flag outright ("unknown variable"), so this speaks MariaDB's older `--ssl`/`--skip-ssl`/`--ssl-verify-server-cert` flags instead. That older flag set can only express whether TLS is attempted and whether the server certificate is verified, not a hard "TLS required, unverified" mode, so `skip-verify` and `preferred` necessarily collapse to the same `--ssl` — an accepted fidelity gap forced by the shipped client. `true` (verify CA and hostname, the driver's strictest mode) still maps to its own distinct `--ssl --ssl-verify-server-cert`, since silently weakening that specific case would be a real regression from what the app's own connection pool requires. A custom registered TLS config name (`mysql.RegisterTLSConfig`, referencing an arbitrary `*tls.Config` the driver resolves internally) can't be mapped to fixed flags at all and is rejected rather than guessed.
+  MySQL connection parameters come from `mysqldriver.ParseDSN`. The DSN's `tls` setting is mapped to CLI flags (`mysqlSSLArgs`) for the client tools actually shipped in the Docker image — Debian's `default-mysql-client`, confirmed live to be MariaDB's client (`mariadb-client`), not real MySQL: MariaDB's `mysql`/`mysqldump` reject MySQL 5.7+'s `--ssl-mode` flag outright ("unknown variable"), so this speaks MariaDB's older `--ssl`/`--skip-ssl`/`--ssl-verify-server-cert` flags instead. That older flag set cannot require unverified TLS, so `skip-verify` is rejected for snapshot and restore rather than weakened to an opportunistic connection. `preferred` remains opportunistic in both clients. `true` (verify CA and hostname, the driver's strictest mode) maps to `--ssl --ssl-verify-server-cert`. A custom registered TLS config name (`mysql.RegisterTLSConfig`, referencing an arbitrary `*tls.Config` the driver resolves internally) cannot be mapped to fixed flags and is rejected rather than guessed.
 
 A plugin that implements neither interface simply cannot be snapshotted/restored — `lifecycle.Snapshot`/`Restore` return a clear error (e.g. `blob plugin "s3" does not support snapshotting`) rather than silently no-op'ing, and the failure happens before any file is written, since both interfaces are type-asserted up front.
 
@@ -1065,7 +1077,7 @@ incomplete.
 
 The truncate deletion range ends at the newest block in the indexed blob chain, not at the metadata ledger tip. During live synchronization, BlockFetch can have persisted a speculative blob tail that the ledger has not applied yet. If the requested target equals the metadata tip, that tail must still be deleted; treating the operation as a no-op would leave non-contiguous block indexes visible after the live node rebuild and prevent ChainSync from making forward progress.
 
-`lifecycle.Restore` accepts either a local directory or a cloud destination URI for `snapshotDir` — a cloud URI first fetches the manifest, then downloads only its two declared payloads into a temporary local directory (`downloadCloudFiles`), before proceeding with restore. A local snapshot's payloads are copied the same way before verification, so a file replaced after its digest check is never read. Both the downloads and the copies are created beside the restore target, on the volume sized for the restored data, never in the system temp directory, and are removed when the restore returns. Restore and snapshot verification remove matching sibling work directories older than seven days before starting; newer directories may belong to another active operation. Restoring from the cloud requires the full per-snapshot URI (`<cloudDest>/<snapshotID>`, the same one `SnapshotToCloud` uploaded to), not the bare base destination, which is a catalog of potentially many snapshots. This is also how a snapshot captured on one node can be restored onto another, since the two never need to share a filesystem.
+`lifecycle.Restore` accepts either a local directory or a cloud destination URI for `snapshotDir` — a cloud URI first fetches the manifest, then downloads only its two declared payloads into a temporary local directory (`downloadCloudFiles`), before proceeding with restore. A local snapshot's payloads are copied the same way before verification, so a file replaced after its digest check is never read. Both the downloads and the copies are created beside the restore target, on the volume sized for the restored data, never in the system temp directory, and are removed when the restore returns. Restore and snapshot verification remove matching sibling work directories older than seven days before starting; newer directories may belong to another active operation. Bark snapshot verification authenticates and inspects the manifest before resolving storage providers and supports only Badger plus SQLite, whose complete restore fits inside the temporary local target. It rejects PostgreSQL/MySQL metadata and S3/GCS blobs before starting a provider because they need separately configured disposable resources; reusing the live provider configuration would mutate the active database or leave a new object namespace behind. Restoring from the cloud requires the full per-snapshot URI (`<cloudDest>/<snapshotID>`, the same one `SnapshotToCloud` uploaded to), not the bare base destination, which is a catalog of potentially many snapshots. This is also how a snapshot captured on one node can be restored onto another, since the two never need to share a filesystem.
 
 Local restore copies the two manifest-declared payloads into a private temporary
 directory, bounded by their declared sizes, and verifies and consumes those
@@ -1151,9 +1163,17 @@ in flight, each file written as `<name>.part` and renamed when complete;
 `ready/` once a later chunk holding a block is copied, so the cache keeps the
 chunk holding the chain tip, which the next run resumes from. Source keys keep
 completed files from one root out of another root's replay. Aggregate transfer
-and cache bounds follow the requested chunk range and format limits. Each write
-also preserves free space on the cache filesystem; an unsuccessful import
-removes its staging files after all fetch workers stop.
+and cache bounds follow the requested chunk range and format limits. Before a
+chunk enters `ready/`, every index-derived block span is checked against the
+maximum network block size. Each downloaded block body is verified against its
+header commitment before `Chain.AddBlocks` persists it. Each write also
+preserves free space on the cache filesystem; an unsuccessful import removes
+its staging files after all fetch workers stop.
+The loader can persist blob batches ahead of the ledger worker. Any replay
+failure rewinds that blob suffix to the last applied metadata tip before the
+command returns, so a rejected batch cannot become the next run's canonical
+starting point. If the storage backend refuses that rewind, the command returns
+both errors and the database requires recovery before another load.
 
 ## SQL Conventions
 
@@ -3145,7 +3165,9 @@ trusts its own on-disk storage and is not changed.
 Musashi/Leios prototype's extended 12-field header body (see
 `models.DecodeConwayBlock`) is accepted the same way the rest of the
 storage stack already accepts it, instead of this check alone rejecting it
-as undecodable.
+as undecodable. `models.DecodeBlockCbor` converts panics from every era-specific
+decoder to `safedecode.ErrDecodePanic`, so malformed remote objects fail as
+undecodable instead of terminating the process.
 
 `blockverify.Hash`, like bark's `GetBlock` (`bark/blob.go`), does not
 independently re-derive the type recorded in `bp..._metadata` from the
