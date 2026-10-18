@@ -195,8 +195,21 @@ func (p *artifactLocationPolicy) admit(rawURL, locationType string) bool {
 
 func (p *artifactLocationPolicy) checkRedirect(
 	req *http.Request,
-	_ []*http.Request,
+	via []*http.Request,
 ) error {
+	// The aggregator already vouches for the artifacts it serves, so a
+	// redirect it issues itself (for example to the bucket behind a
+	// RedirectBaseURL) may lead to any origin that passes the scheme and
+	// destination checks. Redirects from any other origin stay limited to
+	// the approved storage origins.
+	if len(via) > 0 && requireSecureURL(
+		req.URL.String(), "Mithril artifact location", p.allowInsecure,
+	) == nil {
+		if origin, err := normalizedOrigin(via[len(via)-1].URL.String()); err == nil &&
+			origin == p.aggregatorOrigin {
+			return nil
+		}
+	}
 	if !p.admit(req.URL.String(), locationTypeCloudStorage) {
 		return errors.New("mithril artifact redirect origin is not allowed")
 	}
