@@ -31,14 +31,16 @@ import (
 // The snapshot is the complete, trusted ledger state at its tip, so every live
 // row missing from it has been spent/deregistered/retired by that tip.
 type reconcileKeys struct {
-	utxos            map[utxoReconcileKey]struct{}
-	accounts         map[string]struct{}
-	pools            map[string]struct{}
-	dreps            map[string]struct{}
-	utxosComplete    bool
-	accountsComplete bool
-	poolsComplete    bool
-	drepsComplete    bool
+	utxos                       map[utxoReconcileKey]struct{}
+	accounts                    map[string]struct{}
+	pools                       map[string]struct{}
+	dreps                       map[string]struct{}
+	governanceProposals         map[string]struct{}
+	utxosComplete               bool
+	accountsComplete            bool
+	poolsComplete               bool
+	drepsComplete               bool
+	governanceProposalsComplete bool
 }
 
 type utxoReconcileKey struct {
@@ -48,10 +50,11 @@ type utxoReconcileKey struct {
 
 func newReconcileKeys() *reconcileKeys {
 	return &reconcileKeys{
-		utxos:    make(map[utxoReconcileKey]struct{}),
-		accounts: make(map[string]struct{}),
-		pools:    make(map[string]struct{}),
-		dreps:    make(map[string]struct{}),
+		utxos:               make(map[utxoReconcileKey]struct{}),
+		accounts:            make(map[string]struct{}),
+		pools:               make(map[string]struct{}),
+		dreps:               make(map[string]struct{}),
+		governanceProposals: make(map[string]struct{}),
 	}
 }
 
@@ -89,6 +92,10 @@ func (k *reconcileKeys) addDrep(tag uint8, credential []byte) {
 	k.dreps[models.NewStakeCredentialRef(tag, credential).MapKey()] = struct{}{}
 }
 
+func (k *reconcileKeys) addGovernanceProposal(txHash []byte, actionIndex uint32) {
+	k.governanceProposals[govActionIdKey(txHash, actionIndex)] = struct{}{}
+}
+
 func (k *reconcileKeys) markUtxosComplete() {
 	k.utxosComplete = true
 }
@@ -99,10 +106,15 @@ func (k *reconcileKeys) markCertStateComplete() {
 	k.drepsComplete = true
 }
 
+func (k *reconcileKeys) markGovernanceProposalsComplete() {
+	k.governanceProposalsComplete = true
+}
+
 // reconcileStaleLedgerState marks every live row absent from the imported
 // snapshot's live key set inactive: live UTxOs get DeletedSlot=tipSlot, accounts
-// and DReps go Active=false, and pools get a retirement at tipEpoch. It never
-// deletes a row. On an empty database (a fresh bootstrap) it is a no-op.
+// and DReps go Active=false, pools get a retirement at tipEpoch, and stale
+// governance proposals get DeletedSlot=tipSlot. It never deletes a row. On an
+// empty database (a fresh bootstrap) it is a no-op.
 //
 // Each entity is reconciled only after its import path marks key recording
 // complete. A completed empty key set is authoritative and deactivates any
@@ -126,10 +138,11 @@ func reconcileStaleLedgerState(
 
 	// Phase 1: collect the live rows that are absent from the snapshot.
 	var (
-		staleUtxos []types.UtxoKey
-		staleAccts []models.StakeCredentialRef
-		staleDreps []models.StakeCredentialRef
-		stalePools [][]byte
+		staleUtxos     []types.UtxoKey
+		staleAccts     []models.StakeCredentialRef
+		staleDreps     []models.StakeCredentialRef
+		stalePools     [][]byte
+		staleProposals []*models.GovernanceProposal
 	)
 
 	skipIncomplete := func(entity string) {
@@ -233,6 +246,25 @@ func reconcileStaleLedgerState(
 			}
 		}
 	}
+
+	if !keys.governanceProposalsComplete {
+		skipIncomplete("governance proposal")
+	} else {
+		proposals, err := db.GetGovernanceProposalSet(ctx, rtxn)
+		if err != nil {
+			rtxn.Release()
+			return fmt.Errorf("listing governance proposal set: %w", err)
+		}
+		for _, proposal := range proposals {
+			if err := ctx.Err(); err != nil {
+				rtxn.Release()
+				return fmt.Errorf("scanning governance proposal set: %w", err)
+			}
+			if _, ok := keys.governanceProposals[govActionIdKey(proposal.TxHash, proposal.ActionIndex)]; !ok {
+				staleProposals = append(staleProposals, proposal)
+			}
+		}
+	}
 	rtxn.Release()
 
 	// Phase 2: apply all the inactive-markings atomically.
@@ -294,6 +326,27 @@ func reconcileStaleLedgerState(
 	); err != nil {
 		return fmt.Errorf("retiring %d stale pools: %w", len(stalePools), err)
 	}
+	for _, proposal := range staleProposals {
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf(
+				"reconcile cancelled before applying stale markers: %w",
+				err,
+			)
+		}
+		deletedSlot := tipSlot
+		proposal.DeletedSlot = &deletedSlot
+		if err := store.SetGovernanceProposal(
+			proposal,
+			wtxn.Metadata(),
+		); err != nil {
+			return fmt.Errorf(
+				"retiring stale governance proposal %x#%d: %w",
+				proposal.TxHash,
+				proposal.ActionIndex,
+				err,
+			)
+		}
+	}
 	if err := ctx.Err(); err != nil {
 		return fmt.Errorf(
 			"reconcile cancelled before applying stale markers: %w",
@@ -313,6 +366,7 @@ func reconcileStaleLedgerState(
 		"accounts_deactivated", len(staleAccts),
 		"dreps_deactivated", len(staleDreps),
 		"pools_retired", len(stalePools),
+		"governance_proposals_retired", len(staleProposals),
 	)
 	return nil
 }
