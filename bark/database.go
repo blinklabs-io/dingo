@@ -1192,11 +1192,29 @@ func verifySnapshotIntegrity(
 		return fmt.Errorf("build storage plugin host: %w", err)
 	}
 	defer host.Stop(context.WithoutCancel(ctx)) //nolint:errcheck
-	if _, err := lifecycle.Restore(
+	if _, err := lifecycle.RestoreValidated(
 		ctx, host, registry, snapshotDir, filepath.Join(tempDir, "data"),
-		storageConfig, manifestOpts...,
+		validateSnapshotVerificationPlugins, storageConfig, manifestOpts...,
 	); err != nil {
 		return fmt.Errorf("verify snapshot: %w", err)
+	}
+	return nil
+}
+
+func validateSnapshotVerificationPlugins(manifest lifecycle.Manifest) error {
+	if manifest.MetadataPlugin != "sqlite" {
+		return fmt.Errorf(
+			"snapshot verification requires an isolated metadata target; "+
+				"plugin %q is not supported",
+			manifest.MetadataPlugin,
+		)
+	}
+	if manifest.BlobPlugin != "badger" {
+		return fmt.Errorf(
+			"snapshot verification requires an isolated blob target; "+
+				"plugin %q is not supported",
+			manifest.BlobPlugin,
+		)
 	}
 	return nil
 }

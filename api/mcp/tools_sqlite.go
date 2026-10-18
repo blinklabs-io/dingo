@@ -28,6 +28,13 @@ import (
 	sqlite3 "modernc.org/sqlite/lib"
 )
 
+const (
+	maxConcurrentSQLiteQueries = 4
+	maxSQLiteValueBytes        = 64 << 10
+	maxSQLiteResultColumns     = 32
+	maxSQLiteDecodedBytes      = 1 << 20
+)
+
 // SQLiteQueryParams defines the input schema for sqlite_query.
 type SQLiteQueryParams struct {
 	Query  string `json:"query"            jsonschema:"The SQL SELECT query to execute against Dingo's SQLite database"`
@@ -58,6 +65,16 @@ func RegisterSQLiteTools(
 	if maxRows <= 0 {
 		maxRows = 100
 	}
+	querySlots := make(chan struct{}, maxConcurrentSQLiteQueries)
+	acquireQuery := func() bool {
+		select {
+		case querySlots <- struct{}{}:
+			return true
+		default:
+			return false
+		}
+	}
+	releaseQuery := func() { <-querySlots }
 
 	// Tool: sqlite_query
 	mcp.AddTool(server, &mcp.Tool{
@@ -85,6 +102,10 @@ func RegisterSQLiteTools(
 				},
 			}, nil, nil
 		}
+		if !acquireQuery() {
+			return nil, nil, errors.New("too many concurrent SQLite queries")
+		}
+		defer releaseQuery()
 
 		effectiveLimit := input.Limit
 		if effectiveLimit <= 0 {
@@ -143,6 +164,7 @@ func RegisterSQLiteTools(
 		}
 
 		count := 0
+		decodedBytes := 0
 		for rows.Next() {
 			if offset > 0 {
 				offset--
@@ -163,6 +185,14 @@ func RegisterSQLiteTools(
 				}, nil, nil
 			}
 
+			rowBytes, err := sqliteDecodedBytes(
+				rowValues,
+				maxSQLiteDecodedBytes-decodedBytes,
+			)
+			if err != nil {
+				return nil, nil, err
+			}
+			decodedBytes += rowBytes
 			resultRows = append(resultRows, boundedSQLiteRow(rowValues))
 			count++
 			if count >= effectiveLimit {
@@ -224,6 +254,10 @@ func RegisterSQLiteTools(
 				},
 			}, nil, nil
 		}
+		if !acquireQuery() {
+			return nil, nil, errors.New("too many concurrent SQLite queries")
+		}
+		defer releaseQuery()
 
 		// #nosec G202 //nolint:gosec // cleanQ is validated by ValidateReadOnlyQuery
 		explainQuery := "EXPLAIN QUERY PLAN " + cleanQ
@@ -299,6 +333,10 @@ func RegisterSQLiteTools(
 				},
 			}, nil, nil
 		}
+		if !acquireQuery() {
+			return nil, nil, errors.New("too many concurrent SQLite queries")
+		}
+		defer releaseQuery()
 
 		tableName := strings.TrimSpace(input.TableName)
 		// Table name must be alphanumeric or underscore
@@ -455,6 +493,30 @@ func boundedSQLiteRow(values []any) []string {
 	return row
 }
 
+func sqliteDecodedBytes(values []any, remaining int) (int, error) {
+	total := 0
+	for _, value := range values {
+		var size int
+		switch value := value.(type) {
+		case nil:
+		case string:
+			size = len(value)
+		case []byte:
+			size = len(value)
+		default:
+			size = len(fmt.Sprint(value))
+		}
+		if remaining < total || size > remaining-total {
+			return 0, fmt.Errorf(
+				"SQLite query results exceed %d decoded bytes",
+				maxSQLiteDecodedBytes,
+			)
+		}
+		total += size
+	}
+	return total, nil
+}
+
 // boundedSQLiteConn applies limits before SQLite materializes arbitrary values.
 // Settings are restored before an injected pool's connection can be reused.
 func boundedSQLiteConn(
@@ -471,9 +533,9 @@ func boundedSQLiteConn(
 		return nil, nil, err
 	}
 	limits := []struct{ id, value, previous int }{
-		{sqlite3.SQLITE_LIMIT_LENGTH, 1 << 20, 0},
+		{sqlite3.SQLITE_LIMIT_LENGTH, maxSQLiteValueBytes, 0},
 		{sqlite3.SQLITE_LIMIT_SQL_LENGTH, maxSQLiteQueryLength, 0},
-		{sqlite3.SQLITE_LIMIT_COLUMN, 128, 0},
+		{sqlite3.SQLITE_LIMIT_COLUMN, maxSQLiteResultColumns, 0},
 	}
 	applied := 0
 	release := func() { //nolint:contextcheck // Cleanup must restore connection state after qCtx cancellation.

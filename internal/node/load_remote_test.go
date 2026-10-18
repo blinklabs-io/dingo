@@ -39,6 +39,7 @@ import (
 	"github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/netguard"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
+	"github.com/blinklabs-io/gouroboros/protocol/blockfetch"
 	"github.com/stretchr/testify/require"
 )
 
@@ -471,6 +472,7 @@ func localBlockCount(t *testing.T, dir string) int {
 		dir,
 		cm.PrimaryChain(),
 		batches,
+		false,
 	)
 	close(batches)
 	require.NoError(t, err)
@@ -674,6 +676,32 @@ func TestFetchRemoteChunkValidatesIndexesBeforeChunkBody(t *testing.T) {
 	)
 	require.ErrorContains(t, err, "unsupported primary index version")
 	require.False(t, root.requested("00000.chunk"))
+}
+
+func TestFetchRemoteChunkRejectsOversizedBlockSpan(t *testing.T) {
+	t.Parallel()
+	root := newRemoteRoot(t, 1)
+	chunkPath := filepath.Join(root.dir, "00000.chunk")
+	chunkInfo, err := os.Stat(chunkPath)
+	require.NoError(t, err)
+	require.NoError(t, os.Truncate(
+		chunkPath,
+		chunkInfo.Size()+int64(blockfetch.StreamingMaxPendingMessageBytes)+1,
+	))
+	limits, err := remoteImmutableLimitsForSlots(4_320, true)
+	require.NoError(t, err)
+	limits, err = limits.withChunkCount(1)
+	require.NoError(t, err)
+	rootURL := strings.TrimRight(root.serve(t), "/")
+	dir := t.TempDir()
+	client, budget := newRemoteImmutableTestClientAndBudget(
+		t, rootURL, dir, limits,
+	)
+	err = fetchRemoteChunkWithClient(
+		context.Background(), client, budget, rootURL, dir, 0, limits,
+	)
+	require.ErrorIs(t, err, immutable.ErrInvalidChunkOffset)
+	require.ErrorContains(t, err, "exceeds maximum")
 }
 
 func TestCopyBlocksRemoteRejectsACorruptChunk(t *testing.T) {

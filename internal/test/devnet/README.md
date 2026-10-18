@@ -51,6 +51,12 @@ three producers so block diffusion is exercised in addition to direct
 producer-to-producer sync. Network spec: `testnet-dingo.yaml` (3 pools,
 `poolPledge: 0` — required for the CIP-50 scenario below).
 
+The controlled DevNet containers explicitly set
+`DINGO_GENESIS_BOOTSTRAP_CORROBORATION_PEERS=0`: they start with no shared
+chain history, and the scenarios verify deterministic propagation rather than
+bootstrap quorum behavior. Genesis corroboration itself is covered by the
+chain-selection tests.
+
 ## Topology — conformance mode (`--conformance`)
 
 | Service            | Role                                 | Container IP  | NtN host port | NtC (LocalStateQuery) host port |

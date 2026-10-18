@@ -1171,42 +1171,51 @@ func (a *NodeAdapter) waitEpochBoundaryJob(parent context.Context) error {
 // DRep returns governance DRep information for the requested
 // credential.
 func (a *NodeAdapter) DRep(
+	ctx context.Context,
 	credential DRepCredential,
 ) (DRepInfo, error) {
-	if err := a.waitEpochBoundaryJob(context.Background()); err != nil {
+	if err := a.waitEpochBoundaryJob(ctx); err != nil {
 		return DRepInfo{}, err
 	}
+	db := a.ledgerState.Database()
+	txn := db.TransactionContext(ctx, false)
+	defer txn.Release()
+	if txn.Metadata() == nil {
+		return DRepInfo{}, dbtypes.ErrNilTxn
+	}
 	if credential.Predefined != nil {
-		return a.predefinedDRep(credential)
+		return a.predefinedDRep(ctx, credential, txn)
 	}
 	if credential.CredentialTagKnown {
 		var credentialTag uint8
 		if credential.HasScript {
 			credentialTag = 1
 		}
-		return a.drepByCredentialTag(credential, credentialTag)
+		return a.drepByCredentialTag(ctx, credential, credentialTag, txn)
 	}
 
-	info, err := a.drepByCredentialTag(credential, 0)
+	info, err := a.drepByCredentialTag(ctx, credential, 0, txn)
 	if err == nil {
 		return info, nil
 	}
 	if !errors.Is(err, ErrDRepNotFound) {
 		return DRepInfo{}, err
 	}
-	return a.drepByCredentialTag(credential, 1)
+	return a.drepByCredentialTag(ctx, credential, 1, txn)
 }
 
 // predefinedDRep returns the special always-abstain /
 // always-no-confidence DRep summary. These carry no credential, never
 // register, retire, or expire, and have no activity epochs.
 func (a *NodeAdapter) predefinedDRep(
+	ctx context.Context,
 	credential DRepCredential,
+	txn *database.Txn,
 ) (DRepInfo, error) {
 	drepType := *credential.Predefined
 	db := a.ledgerState.Database()
 	powers, err := db.Metadata().
-		GetDRepVotingPowerByType([]uint64{drepType}, 0, nil)
+		GetDRepVotingPowerByType([]uint64{drepType}, 0, txn.Metadata())
 	if err != nil {
 		return DRepInfo{}, fmt.Errorf(
 			"get predefined drep voting power: %w",
@@ -1219,9 +1228,9 @@ func (a *NodeAdapter) predefinedDRep(
 	// AlwaysNoConfidence.
 	if drepType == models.DrepTypeAlwaysNoConfidence {
 		_, depositPower, err := governance.ActiveProposalDepositDRepPower(
-			context.Background(),
+			ctx,
 			db,
-			nil,
+			txn,
 			a.ledgerState.CurrentEpoch(),
 			0,
 		)
@@ -1291,16 +1300,18 @@ func drepStatus(
 }
 
 func (a *NodeAdapter) drepByCredentialTag(
+	ctx context.Context,
 	credential DRepCredential,
 	credentialTag uint8,
+	txn *database.Txn,
 ) (DRepInfo, error) {
 	db := a.ledgerState.Database()
 	drep, err := db.GetDrepByCredential(
-		context.Background(),
+		ctx,
 		credentialTag,
 		credential.Hash,
 		true,
-		nil,
+		txn,
 	)
 	if err != nil {
 		if errors.Is(err, models.ErrDrepNotFound) {
@@ -1320,11 +1331,11 @@ func (a *NodeAdapter) drepByCredentialTag(
 	// expiryEpoch 0: this point-in-time API query is not gated by the
 	// CIP-0163 epoch-boundary tally (see ledger/governance for that path).
 	power, err := db.GetDRepVotingPower(
-		context.Background(),
+		ctx,
 		credentialTag,
 		credential.Hash,
 		0,
-		nil,
+		txn,
 	)
 	if err != nil {
 		return DRepInfo{}, fmt.Errorf(
@@ -1338,9 +1349,9 @@ func (a *NodeAdapter) drepByCredentialTag(
 	// account delegating to this DRep, matching the deposit-inclusive tally
 	// ledger/governance.LoadDRepVotingState uses for ratification (CIP-1694).
 	drepDepositPower, _, err := governance.ActiveProposalDepositDRepPower(
-		context.Background(),
+		ctx,
 		db,
-		nil,
+		txn,
 		currentEpoch,
 		0,
 	)
@@ -1361,7 +1372,7 @@ func (a *NodeAdapter) drepByCredentialTag(
 	// deregistration certificates. Rows without certificate history
 	// (core mode or pre-backfill databases) fall back to added_slot.
 	regSlot, err := db.Metadata().GetDrepLastRegistrationSlot(
-		credentialTag, credential.Hash, nil,
+		credentialTag, credential.Hash, txn.Metadata(),
 	)
 	if err != nil {
 		return DRepInfo{}, fmt.Errorf(

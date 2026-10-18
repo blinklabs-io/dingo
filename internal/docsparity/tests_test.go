@@ -1937,6 +1937,32 @@ func TestMakefileDocumentedTargetsArePhony(t *testing.T) {
 	}
 }
 
+// TestMakefileBuildTracksPgoProfile checks the binary build rule lists the PGO
+// profile as a prerequisite, so regenerating cmd/dingo/default.pgo triggers a
+// rebuild instead of leaving a stale binary.
+func TestMakefileBuildTracksPgoProfile(t *testing.T) {
+	root := repoRoot(t)
+	rules, _, _ := parseMakefile(t, root)
+
+	rule, ok := rules[binariesTarget]
+	if !ok {
+		t.Fatalf("Makefile has no %q rule", binariesTarget)
+	}
+
+	for _, prereq := range rule.prereqs {
+		if strings.Contains(prereq, "default.pgo") {
+			return
+		}
+	}
+	t.Errorf(
+		"Makefile:%d: %q build rule does not list the PGO profile as a "+
+			"prerequisite, so a refreshed cmd/dingo/default.pgo never "+
+			"rebuilds the binary",
+		rule.line,
+		binariesTarget,
+	)
+}
+
 // TestDocumentedDefaultMakeMatchesMakefile checks every description of what a
 // bare `make` does names exactly the targets the default rule depends on. It
 // is the rule that catches documentation claiming the default target runs the

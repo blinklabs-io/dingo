@@ -78,6 +78,14 @@ func loadDecodeWorkerCount() int {
 // be verified without replaying a full ImmutableDB fixture.
 var newLedgerStateForLoad = ledger.NewLedgerState
 
+var processTrustedBlockBatchesForLoad = func(
+	ls *ledger.LedgerState,
+	ctx context.Context,
+	batches <-chan []gledger.Block,
+) error {
+	return ls.ProcessTrustedBlockBatches(ctx, batches)
+}
+
 type loadSecurityParam int
 
 func (k loadSecurityParam) SecurityParam() int {
@@ -779,6 +787,38 @@ func LoadWithDB(
 			)
 		}
 	}
+	var remoteLimits remoteImmutableLimits
+	if remoteImmutable {
+		var (
+			regularSlots  uint64
+			canContainEBB bool
+		)
+		if byronGenesis := nodeCfg.ByronGenesis(); byronGenesis != nil {
+			if byronGenesis.ProtocolConsts.K <= 0 ||
+				uint64(byronGenesis.ProtocolConsts.K) > math.MaxUint64/10 {
+				return errors.New(
+					"remote ImmutableDB requires a valid Byron security parameter",
+				)
+			}
+			regularSlots = uint64(
+				byronGenesis.ProtocolConsts.K,
+			) * 10 //nolint:gosec
+			canContainEBB = true
+		} else if shelleyGenesis := nodeCfg.ShelleyGenesis(); shelleyGenesis != nil &&
+			shelleyGenesis.EpochLength > 0 {
+			regularSlots = uint64(shelleyGenesis.EpochLength) //nolint:gosec
+		} else {
+			return errors.New(
+				"remote ImmutableDB requires an initial era epoch length",
+			)
+		}
+		remoteLimits, err = remoteImmutableLimitsForSlots(
+			regularSlots, canContainEBB,
+		)
+		if err != nil {
+			return err
+		}
+	}
 	logger.Debug(
 		"cardano network config",
 		"component", "node",
@@ -928,7 +968,8 @@ func LoadWithDB(
 	replayBatches := make(chan []gledger.Block, 1)
 	replayErrCh := make(chan error, 1)
 	go func() {
-		err := ls.ProcessTrustedBlockBatches(
+		err := processTrustedBlockBatchesForLoad(
+			ls,
 			replayCtx,
 			replayBatches,
 		)
@@ -946,43 +987,14 @@ func LoadWithDB(
 		immutableTipSlot uint64
 	)
 	if remoteImmutable {
-		var (
-			regularSlots  uint64
-			canContainEBB bool
-		)
-		if byronGenesis := nodeCfg.ByronGenesis(); byronGenesis != nil {
-			if byronGenesis.ProtocolConsts.K <= 0 ||
-				uint64(byronGenesis.ProtocolConsts.K) > math.MaxUint64/10 {
-				return errors.New(
-					"remote ImmutableDB requires a valid Byron security parameter",
-				)
-			}
-			regularSlots = uint64(
-				byronGenesis.ProtocolConsts.K,
-			) * 10 //nolint:gosec
-			canContainEBB = true
-		} else if shelleyGenesis := nodeCfg.ShelleyGenesis(); shelleyGenesis != nil &&
-			shelleyGenesis.EpochLength > 0 {
-			regularSlots = uint64(shelleyGenesis.EpochLength) //nolint:gosec
-		} else {
-			return errors.New(
-				"remote ImmutableDB requires an initial era epoch length",
-			)
-		}
-		limits, limitErr := remoteImmutableLimitsForSlots(
-			regularSlots, canContainEBB,
-		)
-		if limitErr != nil {
-			return limitErr
-		}
 		blocksCopied, immutableTipSlot, err = copyBlocksRemote(
 			replayCtx, logger, immutableDir,
 			filepath.Join(cfg.DatabasePath, remoteImmutableCacheDir),
-			limits, c, replayBatches,
+			remoteLimits, c, replayBatches,
 		)
 	} else {
 		blocksCopied, immutableTipSlot, err = copyBlocksDirect(
-			replayCtx, logger, immutableDir, c, replayBatches,
+			replayCtx, logger, immutableDir, c, replayBatches, false,
 		)
 	}
 	close(replayBatches)
@@ -996,12 +1008,27 @@ func LoadWithDB(
 		// actual failure instead of only its downstream symptom.
 		replayErr := <-replayErrCh
 		if replayErr != nil && !errors.Is(replayErr, context.Canceled) {
-			return errors.Join(fmt.Errorf("loading blocks: %w", err), replayErr)
+			return loadReplayFailure(
+				ctx,
+				c,
+				ls,
+				errors.Join(fmt.Errorf("loading blocks: %w", err), replayErr),
+			)
 		}
-		return fmt.Errorf("loading blocks: %w", err)
+		return loadReplayFailure(
+			ctx,
+			c,
+			ls,
+			fmt.Errorf("loading blocks: %w", err),
+		)
 	}
-	if err := <-replayErrCh; err != nil && !errors.Is(err, context.Canceled) {
-		return fmt.Errorf("processing trusted block batches: %w", err)
+	if err := <-replayErrCh; err != nil {
+		return loadReplayFailure(
+			ctx,
+			c,
+			ls,
+			fmt.Errorf("processing trusted block batches: %w", err),
+		)
 	}
 	logger.Info(
 		"finished processing blocks from immutable DB",
@@ -1021,6 +1048,30 @@ func LoadWithDB(
 		)
 	}
 	return nil
+}
+
+func loadReplayFailure(
+	ctx context.Context,
+	c *chain.Chain,
+	ls *ledger.LedgerState,
+	cause error,
+) error {
+	appliedTip := ls.Tip()
+	chainTip := c.Tip()
+	if chainTip.Point.Slot == appliedTip.Point.Slot &&
+		bytes.Equal(chainTip.Point.Hash, appliedTip.Point.Hash) {
+		return cause
+	}
+	if err := c.RollbackUnbounded(
+		context.WithoutCancel(ctx),
+		appliedTip.Point,
+	); err != nil {
+		return errors.Join(
+			cause,
+			fmt.Errorf("rewinding unapplied immutable blocks: %w", err),
+		)
+	}
+	return cause
 }
 
 // LoadBlobsResult contains the result of a blob-only ImmutableDB load.
@@ -1187,6 +1238,7 @@ func copyBlocksDirect(
 	immutableDir string,
 	c *chain.Chain,
 	replayBatches chan<- []gledger.Block,
+	validateBodyHash bool,
 ) (int, uint64, error) {
 	immDB, err := immutable.New(immutableDir)
 	if err != nil {
@@ -1224,7 +1276,7 @@ func copyBlocksDirect(
 	lastProgressLog := time.Time{}
 	var lastProgressSlot uint64
 	verifyCfg := lcommon.VerifyConfig{
-		SkipBodyHashValidation: true,
+		SkipBodyHashValidation: !validateBodyHash,
 	}
 	for {
 		rawBatch := make([]immutable.Block, 0, loadBlockBatchSize)

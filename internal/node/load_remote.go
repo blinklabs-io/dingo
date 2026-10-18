@@ -708,7 +708,7 @@ func copyBlocksRemote(
 			return blocksCopied, tip.Slot, err
 		}
 		copied, _, err := copyBlocksDirect(
-			ctx, logger, readyDir, c, replayBatches,
+			ctx, logger, readyDir, c, replayBatches, true,
 		)
 		blocksCopied += copied
 		if err != nil {
@@ -829,6 +829,13 @@ func fetchRemoteChunkWithClient(
 		ctx, client, budget, rootURL, dir, name+".chunk", limits.chunk, 0,
 	); err != nil {
 		return err
+	}
+	immDB, err := immutable.New(dir)
+	if err != nil {
+		return fmt.Errorf("opening remote chunk %s: %w", name, err)
+	}
+	if err := immDB.ValidateChunkBlockSpans(name); err != nil {
+		return fmt.Errorf("remote chunk %s block offsets: %w", name, err)
 	}
 	return nil
 }

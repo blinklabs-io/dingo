@@ -62,6 +62,7 @@ func checkOpenFilePermissions(f *os.File) error {
 			err,
 		)
 	}
+	// GetSecurityInfo returns a Go-heap copy and releases its native buffer.
 	return checkOpenSecurityDescriptor(f.Name(), sd)
 }
 
