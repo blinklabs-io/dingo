@@ -3928,7 +3928,16 @@ committed: like the reference `ChainSel.isUnacquiredCertRB`, a CertRB whose
 closure has not arrived waits rather than being skipped or marked invalid. The
 ledger pipeline retries after a short bounded delay. A parent that resolves
 but announced nothing is different: no closure can arrive, so the CertRB is
-rejected as invalid instead. Uncertified current
+rejected as invalid instead. So is a CertRB whose parent announced its endorser
+block in an earlier epoch, since an endorser block is never certified across an
+epoch boundary, and one forged before three announcement periods plus the voting
+and diffusion periods (the `leiosAnnouncementPeriodLength`,
+`leiosVotePeriodLength` and `leiosDiffusionPeriodLength` protocol parameters, in
+milliseconds) have elapsed since the announcing block, rounded up to whole slots
+(14 slots on the default parameters). A block at exactly that slot may certify.
+`LedgerState.CheckLeiosCertificationTiming` is the single decision; ledger
+admission applies it before the certificate is verified, and the forger applies
+it to each eligible certificate before selecting one. Uncertified current
 announcements remain best-effort prefetches. This prevents historical catch-up
 from silently omitting
 pool registrations, delegations, UTxOs, or other certified transaction effects

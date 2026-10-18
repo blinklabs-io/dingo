@@ -267,6 +267,7 @@ type BlockForger struct {
 	leiosAnnouncementValidator func(context.Context, ledger.BlockHeader) error
 	leiosCerts                 LeiosCertificateProvider
 	leiosParent                LeiosParentAnnouncementProvider
+	leiosCertTiming            LeiosCertificationTimingChecker
 
 	// Prometheus metrics
 	metrics *forgingMetrics
@@ -509,6 +510,15 @@ type LeiosParentAnnouncementProvider interface {
 	)
 }
 
+// LeiosCertificationTimingChecker decides whether a ranking block at slot may
+// certify the endorser block announced by the ranking block at announcingSlot:
+// not across an epoch boundary, and not before the announcement, voting and
+// diffusion periods have elapsed. A non-nil error means it may not, or that the
+// answer could not be determined; either way the forger must not certify.
+type LeiosCertificationTimingChecker interface {
+	CheckLeiosCertificationTiming(announcingSlot, slot uint64) error
+}
+
 // EndorserBlockBroadcaster stores a locally-forged endorser block and
 // notifies connected peers via the LeiosNotify protocol. txBodies are the
 // referenced transactions' raw CBOR, in manifest order, so the endorser block
@@ -671,6 +681,10 @@ type ForgerConfig struct {
 	// LeiosParentAnnouncementProvider supplies the EB hash announced by the
 	// parent RB so CertRB selection cannot certify an unrelated EB.
 	LeiosParentAnnouncementProvider LeiosParentAnnouncementProvider
+	// LeiosCertificationTimingChecker applies the ledger's certification
+	// timing rules to CertRB selection. Required with
+	// LeiosCertificateProvider.
+	LeiosCertificationTimingChecker LeiosCertificationTimingChecker
 
 	// ForgeSyncToleranceSlots controls how far the local chain can lag the
 	// upstream tip before forging is skipped. Zero uses the default.
@@ -819,6 +833,7 @@ func NewBlockForger(cfg ForgerConfig) (*BlockForger, error) {
 		leiosAnnouncementValidator: cfg.LeiosAnnouncementValidator,
 		leiosCerts:                 cfg.LeiosCertificateProvider,
 		leiosParent:                cfg.LeiosParentAnnouncementProvider,
+		leiosCertTiming:            cfg.LeiosCertificationTimingChecker,
 		blockValidator:             cfg.BlockValidator,
 		fenceStore:                 cfg.ForgeFence,
 		opCertLedgerView:           cfg.OpCertLedgerView,
@@ -920,6 +935,12 @@ func NewBlockForger(cfg ForgerConfig) (*BlockForger, error) {
 		cfg.LeiosParentAnnouncementProvider == nil {
 		return nil, errors.New(
 			"leios certificate provider requires LeiosParentAnnouncementProvider",
+		)
+	}
+	if cfg.LeiosCertificateProvider != nil &&
+		cfg.LeiosCertificationTimingChecker == nil {
+		return nil, errors.New(
+			"leios certificate provider requires LeiosCertificationTimingChecker",
 		)
 	}
 	if cfg.OpCertLedgerView != nil && cfg.EraParams == nil {
@@ -2260,6 +2281,21 @@ func (f *BlockForger) leiosBlockDataForSlot(
 		if eb.EndorserBlockHash != parentHash ||
 			eb.Certificate.EndorserBlockHash != parentHash ||
 			eb.AnnouncingRbHash != parentRbHash {
+			continue
+		}
+		if err := f.leiosCertTiming.CheckLeiosCertificationTiming(
+			eb.SlotNo,
+			slot,
+		); err != nil {
+			f.logger.Debug(
+				"leios endorser block certificate skipped: not certifiable at this slot",
+				"slot",
+				slot,
+				"eb_slot",
+				eb.SlotNo,
+				"error",
+				err,
+			)
 			continue
 		}
 		hash := eb.EndorserBlockHash
