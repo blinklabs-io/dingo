@@ -2346,6 +2346,12 @@ paths, where the point is to report before the goroutine unwinds.
   observes `LedgerState`'s shutdown context, so a chainsync subscriber already
   waiting for a reused connection can return before the terminal EventBus close
   waits for in-flight handlers.
+- Blockfetch header admission releases `chainsyncBlockfetchMutex` while it
+  performs epoch lookups and stateful header verification. It then reacquires
+  the mutex and accepts the result only if the event still belongs to the
+  active batch. Admission has the same 30-second bound as a busy blockfetch
+  batch. A deadline records deferred header validation, so the block is fully
+  rechecked during ledger apply rather than accepted without stateful checks.
 - `RequestRange`'s terminal outcome (success, `NoBlocks`, or any
   transport/protocol failure) always arrives asynchronously through its
   `RangeDoneFunc`, published as a `BlockfetchEvent` with `BatchDone` set and
@@ -4312,8 +4318,8 @@ finite, a header past it fails with
 epoch/nonce cache.
 
 A known transition (`TransitionKnown`) is set by one of three
-`ls.evaluateXXX` methods, run in this order at every block-apply tip update,
-startup, and (a rollback-surviving subset of them) rollback:
+`ls.evaluateXXX` methods, considered in this order at every block-apply tip
+update, startup, and (a rollback-surviving subset of them) rollback:
 `evaluateTriggerAtEpoch` (the `TestXHardForkAtEpoch` config override, for the
 era's `TriggerAtEpoch` kind), `evaluateProtocolVersionBump` (the era's
 `TriggerAtVersion` kind: every historical Cardano hard fork before Conway's
@@ -4351,6 +4357,12 @@ rollback or restart recomputes it without stored state; an epoch shorter
 than `2 * stabilityWindow` counts from its own first slot. The forecast never
 changes `ls.currentEra` or what `processEpochRollover` actually enacts, both
 of which re-read the real quorum state independently at the boundary.
+Runtime evaluation snapshots the era, epoch, tip, parameters, and rollback
+generation under the ledger mutex, then performs the chain lookup and
+parameter forecast asynchronously. It publishes `TransitionKnown` only when
+the epoch and generation still match. Startup performs the same evaluation
+synchronously before event processing begins. This keeps iterator and
+database waits outside the ledger mutex while retaining rollback safety.
 Without this evaluator,
 `transitionInfo` stays `TransitionUnknown` for the entire epoch preceding
 any version-triggered hard fork, so the ordinary tip-anchored safe zone (see

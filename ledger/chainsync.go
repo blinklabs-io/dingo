@@ -6077,23 +6077,64 @@ func (ls *LedgerState) handleEventBlockfetchBlockDeferredInternal(
 			queuedVerificationGeneration = ls.chain.QueuedHeaderCryptoVerificationGeneration(e.Point)
 		}
 		headerVerifyStart := time.Now()
-		verificationGeneration, verifyErr := ls.withStableHeaderVerificationContext(func() error {
-			if !ls.headerCryptoVerificationGenerationCurrent(
-				queuedVerificationGeneration,
-			) {
-				return ls.verifyBlockHeaderCryptoBeforeApply(e.Block)
+		verificationBatch := ls.chainsyncBlockfetchReadyChan
+		verifyCtx, cancelVerify := context.WithTimeout(
+			ls.lifecycleContext(),
+			blockfetchBusyTimeout,
+		)
+		var verificationGeneration uint64
+		var verifyErr error
+		verify := func() error {
+			verificationGeneration, verifyErr = ls.withStableHeaderVerificationContext(func() error {
+				if !ls.headerCryptoVerificationGenerationCurrent(
+					queuedVerificationGeneration,
+				) {
+					return ls.verifyBlockHeaderCryptoWithEpochAdvance(
+						verifyCtx,
+						e.Block,
+						true,
+						true,
+					)
+				}
+				return ls.verifyBlockHeaderStateWithEpochAdvance(
+					verifyCtx,
+					e.Block,
+					true,
+					true,
+				)
+			})
+			return nil
+		}
+		if blockfetchMutexHeld {
+			if err := ls.withBlockfetchMutexReleased(verify); err != nil {
+				cancelVerify()
+				return err
 			}
-			return ls.verifyBlockHeaderStateWithEpochAdvance(
-				ls.lifecycleContext(),
-				e.Block,
-				true,
-				true,
-			)
-		})
+		} else if err := verify(); err != nil {
+			cancelVerify()
+			return err
+		}
+		cancelVerify()
+		if blockfetchMutexHeld &&
+			(ls.chainsyncBlockfetchReadyChan != verificationBatch ||
+				!ls.blockfetchEventCurrent(e)) {
+			return nil
+		}
 		ls.metrics.observeBlockStage(
 			blockStageHeaderVerify,
 			time.Since(headerVerifyStart),
 		)
+		if errors.Is(verifyErr, context.Canceled) &&
+			ls.lifecycleContext().Err() != nil {
+			return nil //nolint:nilerr // Ledger shutdown cancels in-flight admission.
+		}
+		if errors.Is(verifyErr, context.DeadlineExceeded) {
+			verifyErr = fmt.Errorf(
+				"%w: header verification exceeded %s",
+				errHeaderVerificationDeferred,
+				blockfetchBusyTimeout,
+			)
+		}
 		if verifyErr == nil && ls.config.BlockPipelineValidateEnabled {
 			ls.markAdmissionVerified(e.Point, verificationGeneration)
 		}
