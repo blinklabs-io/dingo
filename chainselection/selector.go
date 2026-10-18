@@ -358,8 +358,24 @@ type eagernessAnchor struct {
 }
 
 type peerTipAdmissionCandidate struct {
-	update    PeerTipUpdateEvent
-	plausible bool
+	update      PeerTipUpdateEvent
+	plausible   bool
+	farTipClaim *farTipClaim
+}
+
+func cloneCandidateFarTipClaim(
+	update PeerTipUpdateEvent,
+	plausible bool,
+	claim farTipClaim,
+	ok bool,
+) *farTipClaim {
+	if !plausible || !ok || !claim.lone ||
+		claim.slot != update.ObservedTip.Point.Slot ||
+		!bytes.Equal(claim.hash, update.ObservedTip.Point.Hash) {
+		return nil
+	}
+	claim.hash = bytes.Clone(claim.hash)
+	return &claim
 }
 
 // clonePeerTipAdmissionFrontier copies only state used while a header waits
@@ -1060,6 +1076,9 @@ func (cs *ChainSelector) PreparePeerTipAdmissionDisposition(
 		pending = append(pending, peerTipAdmissionCandidate{
 			update:    update,
 			plausible: plausible,
+			farTipClaim: cloneCandidateFarTipClaim(
+				update, plausible, claim, hasClaim,
+			),
 		})
 		truncated := false
 		pendingLimit := cs.pendingPeerTipAdmissionLimitLocked()
@@ -1218,6 +1237,12 @@ func (cs *ChainSelector) rebuildPendingAdmissionStateLocked() {
 		evidence := hasClaim && claim.slot == update.ObservedTip.Point.Slot &&
 			bytes.Equal(claim.hash, update.ObservedTip.Point.Hash)
 		candidate.plausible = plausible
+		candidate.farTipClaim = cloneCandidateFarTipClaim(
+			update,
+			plausible,
+			claim,
+			hasClaim,
+		)
 		if !plausible && !evidence {
 			continue
 		}
@@ -1464,12 +1489,11 @@ func (cs *ChainSelector) commitPeerTipAdmission(
 			)
 			if candidate.plausible {
 				plausible = true
-				if claim, ok := cs.pendingFarTipClaims[update.ConnectionId]; ok &&
-					claim.slot == candidate.update.ObservedTip.Point.Slot &&
-					bytes.Equal(claim.hash, candidate.update.ObservedTip.Point.Hash) {
+				if candidate.farTipClaim != nil {
 					if cs.farTipClaims == nil {
 						cs.farTipClaims = make(map[ouroboros.ConnectionId]farTipClaim)
 					}
+					claim := *candidate.farTipClaim
 					claim.hash = bytes.Clone(claim.hash)
 					cs.farTipClaims[update.ConnectionId] = claim
 				}
