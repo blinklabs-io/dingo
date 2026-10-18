@@ -162,14 +162,12 @@ func GenerateTurboReport(
 			}
 			failure := turboBenchmarkError(tc, fmt.Errorf("read CBOR-wrapped Flat program: %w", err))
 			benchmarkErrors = append(benchmarkErrors, failure)
-			report.Benchmarks = append(report.Benchmarks, failedTurboBenchmark(tc, 0, failure))
 			continue
 		}
 		measurements, err := measureTurboCase(tc, programBytes, samples)
 		if err != nil {
 			failure := turboBenchmarkError(tc, err)
 			benchmarkErrors = append(benchmarkErrors, failure)
-			report.Benchmarks = append(report.Benchmarks, failedTurboBenchmark(tc, len(programBytes), failure))
 			continue
 		}
 		benchmark, err := makeTurboBenchmark(
@@ -180,7 +178,6 @@ func GenerateTurboReport(
 		if err != nil {
 			failure := turboBenchmarkError(tc, err)
 			benchmarkErrors = append(benchmarkErrors, failure)
-			report.Benchmarks = append(report.Benchmarks, failedTurboBenchmark(tc, len(programBytes), failure))
 			continue
 		}
 		report.Benchmarks = append(report.Benchmarks, benchmark)
@@ -209,16 +206,6 @@ func readTurboProgram(path string) ([]byte, error) {
 	return program, nil
 }
 
-func failedTurboBenchmark(tc turboCase, size int, err error) TurboBenchmark {
-	return TurboBenchmark{
-		Bench:           tc.name,
-		PlutusVersion:   tc.group,
-		ProtocolVersion: fmt.Sprintf("%d.0", tc.protocolMajor),
-		SizeBytes:       size,
-		Error:           err.Error(),
-	}
-}
-
 func turboBenchmarkError(tc turboCase, err error) error {
 	if pathErr, ok := errors.AsType[*os.PathError](err); ok {
 		err = pathErr.Err
@@ -241,6 +228,7 @@ func protocolMajorForEpoch(epoch int) int {
 
 func discoverTurboCases(root string) ([]turboCase, error) {
 	var cases []turboCase
+	benchmarkPaths := map[string]string{}
 	err := filepath.WalkDir(
 		root,
 		func(path string, entry os.DirEntry, walkErr error) error {
@@ -277,6 +265,16 @@ func discoverTurboCases(root string) ([]turboCase, error) {
 					return fmt.Errorf("turbo program has an invalid protocol version suffix: %s", path)
 				}
 			}
+			name := filepath.Base(path)
+			if previous, ok := benchmarkPaths[name]; ok {
+				return fmt.Errorf(
+					"duplicate benchmark ID %q in %q and %q",
+					name,
+					previous,
+					relativePath,
+				)
+			}
+			benchmarkPaths[name] = relativePath
 			version := lang.LanguageVersionV1
 			switch versionNumber {
 			case "2":
@@ -285,10 +283,8 @@ func discoverTurboCases(root string) ([]turboCase, error) {
 				version = lang.LanguageVersionV3
 			}
 			cases = append(cases, turboCase{
-				path: path,
-				name: filepath.ToSlash(
-					strings.TrimPrefix(path, root+string(filepath.Separator)),
-				),
+				path:          path,
+				name:          name,
 				version:       version,
 				group:         "V" + versionNumber,
 				protocolMajor: protocolMajor,

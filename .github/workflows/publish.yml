@@ -534,12 +534,9 @@ jobs:
     timeout-minutes: 90
     env:
       CBOR_DATASET_REVISION: '6cd8c928665bbafe90e02066ebb4620e38f051de'
-      AMARU_UPLC_REVISION: '03acfc01807e5e2a8a5466541ad22c856f3de99c'
-      NDC_LEDGER_REVISION: '4fed8790fb81164f9d7a53414acc5f78aaf65422'
-      TURBO_DATASET_REVISION: '862fa7127fe07c2537005955cf98e7b332151996'
-      TURBO_DATASET_DATE: '20260826'
-      TURBO_SHARD_0000_SHA256: 'c446743b869955bae355aea04fade0a0dc46f01ae08f04bcada44d8944e477ee'
-      TURBO_SHARD_0001_SHA256: '2bb62f11dee861296fbdf7de69599340cd6d4b93a7fad37a365b0dcd004fd83d'
+      NDC_LEDGER_REVISION: '8974561cb6b48807e2a578028d4f5d85430007a6'
+      UPLC_CORPUS_SHA256: '8bd4ad4f9f4c8c6b8ffa1f06ed1db0b43043afbba77ef6a14bcfb5a52345ed3f'
+      TURBO_CORPUS_SHA256: '821af55e3323c826b5598c964d634b46dd468014834d0e97ebdc5edb0a158576'
     permissions:
       attestations: write
       contents: write
@@ -575,15 +572,6 @@ jobs:
           repository: r2rationality/cardano-cbor-dataset
           ref: ${{ env.CBOR_DATASET_REVISION }}
           path: .conformance/cardano-cbor-dataset
-          persist-credentials: false
-      - name: Checkout UPLC conformance corpus
-        if: github.ref_type == 'tag'
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
-        with:
-          repository: pragma-org/amaru
-          ref: ${{ env.AMARU_UPLC_REVISION }}
-          path: .conformance/amaru
-          sparse-checkout: crates/amaru-uplc/tests
           persist-credentials: false
       - name: Checkout ledger-rules fixtures
         if: github.ref_type == 'tag'
