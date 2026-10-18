@@ -78,7 +78,8 @@ if (process.argv[2] === 'wait') {
   const hook = path.join(dir, 'https-fixture.cjs');
   await fs.writeFile(hook, `const https = require('node:https');
 const fs = require('node:fs'); const { EventEmitter } = require('node:events');
-https.get = (url, callback) => {
+https.get = (url, options, callback) => {
+  if (typeof options === 'function') callback = options;
   const version = ${JSON.stringify(version)};
   const expected = 'https://github.com/blinklabs-io/dingo/releases/download/v' + version +
     '/dingo-v' + version + '-' + process.platform + '-' +

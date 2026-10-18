@@ -264,8 +264,10 @@ version-matched HTTPS archive, verifies it against the six-target checksum
 manifest embedded by the NPM release job, and streams its `dingo` member into
 a size-bounded temporary file before atomically installing the executable.
 Downloads have a size bound and retry only transient transport and server
-failures. Archive paths are never extracted as filesystem paths. The
-JavaScript command inherits standard I/O
+failures. The downloader accepts only the GitHub release and asset hosts,
+checks the destination of every redirect, and refuses DNS results in private
+or special-use address ranges. Archive paths are never extracted as filesystem
+paths. The JavaScript command inherits standard I/O
 and forwards arguments and termination signals to the native process; it
 preserves the process exit result. The package contains only this installer,
 command wrapper and package documentation. For stable release tags, the
@@ -8997,8 +8999,17 @@ probe and is never written. Size-limit errors are terminal for the downloader.
 An oversized existing file or a file that overflows while streaming is removed;
 ordinary header rejection can retain an existing in-budget partial file for a
 different mirror, while a malformed-range restart truncates the prefix before
-checking the replacement response. This is not an aggregate budget
-across archives, mirrors, retries, or a bootstrap's extracted files.
+checking the replacement response.
+
+The v2 bootstrap admits at most four unique locations per artifact component.
+Aggregator locations must retain the configured aggregator origin; cloud
+locations and every redirect must use that origin or the official Mithril
+Google Cloud Storage origin. A single budget covers response bytes and HTTP
+requests across the digest list, immutable archives, ancillary archive,
+mirrors, redirects, and retries. Its byte limit is the sum of the fixed
+per-object limits for the selected archive range, and its request limit is four
+requests per selected object. The artifact range is capped at 100000 immutable
+archives, and all artifact transfers share a 24-hour deadline.
 
 Without an `ExpectedSize`, which v2 artifacts cannot supply, a resume request
 for a file already at the server's size is answered 416 and the cached file
@@ -9015,17 +9026,26 @@ cap (directories and empty files count), per-member and aggregate expanded-byte
 caps, and an expansion bound of 256 times the compressed bytes read plus a
 64 MiB floor. Each archive type except the v1 full snapshot admits only the
 members its consumer reads, and a refused member is never created. An
-immutable archive admits its own certified trio (plus a `ledger/` tree, where
-v1-layout archives keep the ledger state). Its expanded-byte limits allow
-8 GiB per member and 1 TiB in total so ledger tables retain the same limits
-as full snapshots; each trio file is
-SHA-256-checked against the certified digest list as it is written, so a
-mismatching file is removed before the pool moves on. The digest list archive
-admits one top-level JSON file of at most 64 MiB. The v1 and v2 ancillary
-archives admit the signed manifest, the `ledger/` tree and the next immutable
-trio. The immutable pool charges each in-flight download at its size limit
-against a 32 GiB budget. Raising the limit lowers concurrency; an override
-above 32 GiB allows only one download, with capacity equal to that override.
+immutable archive admits only its own certified trio and SHA-256-checks each
+file against the certified digest list as it is written. Ledger entries are
+accepted only from the ancillary archive. The
+digest list archive admits one top-level JSON file of at most 64 MiB.
+
+A verified v2 ancillary archive is read twice through one open descriptor. The
+first pass decompresses without writing, finds the manifest, validates its
+Ed25519 signature, and rejects unsupported paths or malformed digests. The
+second pass admits only the manifest, its signed files, and their parent
+directories; it checks every digest while writing. The ordinary post-extraction
+verification still binds the resulting directory handle to the importer.
+
+All v2 extractions share a one-million-entry and 1 TiB expanded-byte ceiling,
+further reduced to the filesystem's available space minus the larger of 1 GiB
+or ten percent. Free space is checked after each 64 MiB of aggregate output so
+concurrent downloads and other writers cannot silently consume the reserve.
+The immutable pool separately charges each compressed in-flight download at
+its size limit against a 32 GiB budget. Raising the limit lowers concurrency;
+an override above 32 GiB allows only one download, with capacity equal to that
+override.
 
 Both backends produce the same `BootstrapResult` (immutable directory,
 ancillary ledger-state directory, synthesized snapshot metadata), so
