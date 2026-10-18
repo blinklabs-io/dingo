@@ -159,6 +159,9 @@ type BootstrapConfig struct {
 	// downloadBudget bounds all artifact transfer requests and bytes in one v2
 	// bootstrap. It is initialized after the certified artifact is selected.
 	downloadBudget *artifactDownloadBudget
+	// extractionBudget bounds expanded bytes and entries across all archives in
+	// one v2 bootstrap and preserves free space on their destination filesystem.
+	extractionBudget *bootstrapExtractionBudget
 	// immutableDigests is the verified digest list, set by downloadImmutables
 	// so each archive's members are checked as they are extracted. When nil,
 	// an immutable archive is extracted without a member allowlist.

@@ -9016,17 +9016,26 @@ cap (directories and empty files count), per-member and aggregate expanded-byte
 caps, and an expansion bound of 256 times the compressed bytes read plus a
 64 MiB floor. Each archive type except the v1 full snapshot admits only the
 members its consumer reads, and a refused member is never created. An
-immutable archive admits its own certified trio (plus a `ledger/` tree, where
-v1-layout archives keep the ledger state). Its expanded-byte limits allow
-8 GiB per member and 1 TiB in total so ledger tables retain the same limits
-as full snapshots; each trio file is
-SHA-256-checked against the certified digest list as it is written, so a
-mismatching file is removed before the pool moves on. The digest list archive
-admits one top-level JSON file of at most 64 MiB. The v1 and v2 ancillary
-archives admit the signed manifest, the `ledger/` tree and the next immutable
-trio. The immutable pool charges each in-flight download at its size limit
-against a 32 GiB budget. Raising the limit lowers concurrency; an override
-above 32 GiB allows only one download, with capacity equal to that override.
+immutable archive admits only its own certified trio and SHA-256-checks each
+file against the certified digest list as it is written. Ledger entries are
+accepted only from the ancillary archive. The
+digest list archive admits one top-level JSON file of at most 64 MiB.
+
+A verified v2 ancillary archive is read twice through one open descriptor. The
+first pass decompresses without writing, finds the manifest, validates its
+Ed25519 signature, and rejects unsupported paths or malformed digests. The
+second pass admits only the manifest, its signed files, and their parent
+directories; it checks every digest while writing. The ordinary post-extraction
+verification still binds the resulting directory handle to the importer.
+
+All v2 extractions share a one-million-entry and 1 TiB expanded-byte ceiling,
+further reduced to the filesystem's available space minus the larger of 1 GiB
+or ten percent. Free space is checked after each 64 MiB of aggregate output so
+concurrent downloads and other writers cannot silently consume the reserve.
+The immutable pool separately charges each compressed in-flight download at
+its size limit against a 32 GiB budget. Raising the limit lowers concurrency;
+an override above 32 GiB allows only one download, with capacity equal to that
+override.
 
 Both backends produce the same `BootstrapResult` (immutable directory,
 ancillary ledger-state directory, synthesized snapshot metadata), so

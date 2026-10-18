@@ -455,10 +455,16 @@ func TestImmutableDownloadBudgetAbovePoolLimit(t *testing.T) {
 	budget.Release(weight)
 }
 
-func TestImmutableArchiveLimitsAdmitLedgerStateSizes(t *testing.T) {
+func TestImmutableArchiveLimitsAdmitOnlyCertifiedTrio(t *testing.T) {
 	t.Parallel()
-	limits := immutableArchiveLimits(0, nil)
-	require.True(t, limits.allow("ledger/100/state"))
+	limits := immutableArchiveLimits(0, map[string]string{
+		"00000.chunk":     strings.Repeat("0", 64),
+		"00000.primary":   strings.Repeat("1", 64),
+		"00000.secondary": strings.Repeat("2", 64),
+	})
+	require.True(t, limits.allow("immutable"))
+	require.True(t, limits.allow("immutable/00000.chunk"))
+	require.False(t, limits.allow("ledger/100/state"))
 	require.GreaterOrEqual(t, limits.maxMemberBytes, int64(maxExtractFileSize))
 	require.GreaterOrEqual(t, limits.maxTotalBytes, int64(maxTotalExtractSize))
 }
