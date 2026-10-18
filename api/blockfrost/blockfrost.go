@@ -38,6 +38,8 @@ const (
 	defaultListenHost                           = "127.0.0.1"
 	defaultMaxConcurrentMutations          uint = 4
 	defaultMaxConcurrentMutationsPerClient      = 1
+	defaultMaxConcurrentDRepDetails        uint = 4
+	defaultMaxDRepDetailsPerClient              = 1
 )
 
 // Blockfrost is the Blockfrost-compatible REST API server.
@@ -47,7 +49,8 @@ type Blockfrost struct {
 	requestBodyTimeout time.Duration
 	node               BlockfrostNode
 	mutationAuth       mutationAuth
-	mutationAdmission  *mutationAdmission
+	mutationAdmission  *requestAdmission
+	drepAdmission      *requestAdmission
 	// listener owns the start/stop protocol, including releasing the
 	// listening socket as part of what Stop waits for -- see
 	// internal/apilistener.
@@ -83,9 +86,13 @@ func New(
 		mutationAuth: newMutationAuth(
 			cfg.AuthToken,
 		),
-		mutationAdmission: newMutationAdmission(
+		mutationAdmission: newRequestAdmission(
 			cfg.MaxConcurrentMutations,
 			cfg.MaxConcurrentMutationsPerClient,
+		),
+		drepAdmission: newRequestAdmission(
+			defaultMaxConcurrentDRepDetails,
+			defaultMaxDRepDetailsPerClient,
 		),
 		listener: apilistener.New("Blockfrost API", logger),
 	}
@@ -128,7 +135,7 @@ func (a mutationAuth) authorized(r *http.Request) bool {
 	return matched == 1
 }
 
-type mutationAdmission struct {
+type requestAdmission struct {
 	mu           sync.Mutex
 	active       uint
 	activeClient map[string]uint
@@ -136,15 +143,15 @@ type mutationAdmission struct {
 	maxClient    uint
 }
 
-func newMutationAdmission(maxActive, maxClient uint) *mutationAdmission {
-	return &mutationAdmission{
+func newRequestAdmission(maxActive, maxClient uint) *requestAdmission {
+	return &requestAdmission{
 		activeClient: make(map[string]uint),
 		maxActive:    maxActive,
 		maxClient:    maxClient,
 	}
 }
 
-func (a *mutationAdmission) acquire(
+func (a *requestAdmission) acquire(
 	ctx context.Context,
 	client string,
 ) (func(), bool) {
@@ -174,7 +181,7 @@ func (a *mutationAdmission) acquire(
 	}, true
 }
 
-func mutationClient(r *http.Request) string {
+func requestClient(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err == nil {
 		return host
@@ -196,7 +203,7 @@ func (b *Blockfrost) mutationHandler(next http.HandlerFunc) http.Handler {
 		}
 		release, ok := b.mutationAdmission.acquire(
 			r.Context(),
-			mutationClient(r),
+			requestClient(r),
 		)
 		if !ok {
 			w.Header().Set("Retry-After", "1")

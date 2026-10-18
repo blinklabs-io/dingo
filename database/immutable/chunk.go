@@ -20,17 +20,20 @@ import (
 	"math"
 
 	"github.com/blinklabs-io/gouroboros/cbor"
+	"github.com/blinklabs-io/gouroboros/protocol/blockfetch"
 )
 
 const (
 	chunkFileExtension = ".chunk"
+	maxBlockSize       = int64(blockfetch.StreamingMaxPendingMessageBytes)
 )
 
 // ErrInvalidChunkOffset reports a secondary-index block offset that cannot be
 // trusted to seek or slice the chunk file it names: it overflows int64,
-// lands beyond the file's size, or does not strictly follow the offset
-// before it. Callers can match it with errors.Is to distinguish a corrupt or
-// tampered index from an ordinary I/O failure.
+// lands beyond the file's size, does not strictly follow the offset before it,
+// or describes a block larger than the network permits. Callers can match it
+// with errors.Is to distinguish a corrupt or tampered index from an ordinary
+// I/O failure.
 var ErrInvalidChunkOffset = errors.New("invalid chunk offset")
 
 type chunk struct {
@@ -80,131 +83,99 @@ func (c *chunk) Next() (*Block, error) {
 	if c.currentEntry == nil {
 		return nil, nil
 	}
-	if c.nextEntry == nil {
-		if c.currentEntry.BlockOffset > math.MaxInt64 {
-			return nil, fmt.Errorf(
-				"%w: current block offset %d overflows int64",
-				ErrInvalidChunkOffset,
-				c.currentEntry.BlockOffset,
-			)
-		}
-		// This triggers even though we check it above
-		// #nosec G115
-		currOffset := int64(c.currentEntry.BlockOffset)
-		if currOffset > c.fileSize {
-			return nil, fmt.Errorf(
-				"%w: current block offset %d is beyond chunk size %d",
-				ErrInvalidChunkOffset,
-				currOffset,
-				c.fileSize,
-			)
-		}
-
-		// We've reached the last entry in the chunk, so we calculate
-		// block size based on the size of the file
-		blockSize := c.fileSize - currOffset
-		if blockSize > int64(math.MaxInt) {
-			return nil, fmt.Errorf(
-				"block size %d exceeds platform allocation limit",
-				blockSize,
-			)
-		}
-		blockData, err := c.readBlockData(currOffset, blockSize)
-		if err != nil {
-			return nil, err
-		}
-		blkType, blkBytes, err := c.unwrapBlock(blockData)
-		if err != nil {
-			return nil, err
-		}
-		ret := &Block{
-			Type:  blkType,
-			Slot:  c.currentEntry.BlockOrEbb,
-			Hash:  c.currentEntry.HeaderHash[:],
-			IsEbb: c.currentEntry.IsEbb,
-			Cbor:  blkBytes,
-		}
+	last := c.nextEntry == nil
+	endOffset := uint64(c.fileSize) // #nosec G115 -- file sizes cannot be negative
+	if !last {
+		endOffset = c.nextEntry.BlockOffset
+	}
+	currOffset, blockSize, err := validBlockSpan(
+		c.currentEntry.BlockOffset,
+		endOffset,
+		c.fileSize,
+	)
+	if err != nil {
+		return nil, err
+	}
+	blockData, err := c.readBlockData(currOffset, blockSize)
+	if err != nil {
+		return nil, err
+	}
+	blkType, blkBytes, err := c.unwrapBlock(blockData)
+	if err != nil {
+		return nil, err
+	}
+	ret := &Block{
+		Type:  blkType,
+		Slot:  c.currentEntry.BlockOrEbb,
+		Hash:  c.currentEntry.HeaderHash[:],
+		IsEbb: c.currentEntry.IsEbb,
+		Cbor:  blkBytes,
+	}
+	if last {
 		c.currentEntry = nil
 		c.nextEntry = nil
-		return ret, nil
 	} else {
-		// Calculate block size based on the offsets for the current and next entries
-		if c.currentEntry.BlockOffset > math.MaxInt64 {
-			return nil, fmt.Errorf(
-				"%w: current block offset %d overflows int64",
-				ErrInvalidChunkOffset,
-				c.currentEntry.BlockOffset,
-			)
-		}
-		// This triggers even though we check it above
-		// #nosec G115
-		currOffset := int64(c.currentEntry.BlockOffset)
-
-		if c.nextEntry.BlockOffset > math.MaxInt64 {
-			return nil, fmt.Errorf(
-				"%w: next block offset %d overflows int64",
-				ErrInvalidChunkOffset,
-				c.nextEntry.BlockOffset,
-			)
-		}
-		// This triggers even though we check it above
-		// #nosec G115
-		nextOffset := int64(c.nextEntry.BlockOffset)
-		if currOffset > c.fileSize {
-			return nil, fmt.Errorf(
-				"%w: current block offset %d is beyond chunk size %d",
-				ErrInvalidChunkOffset,
-				currOffset,
-				c.fileSize,
-			)
-		}
-		if nextOffset > c.fileSize {
-			return nil, fmt.Errorf(
-				"%w: next block offset %d is beyond chunk size %d",
-				ErrInvalidChunkOffset,
-				nextOffset,
-				c.fileSize,
-			)
-		}
-		if nextOffset <= currOffset {
-			return nil, fmt.Errorf(
-				"%w: next block offset %d does not follow current block offset %d",
-				ErrInvalidChunkOffset,
-				nextOffset,
-				currOffset,
-			)
-		}
-
-		blockSize := nextOffset - currOffset
-		if blockSize > int64(math.MaxInt) {
-			return nil, fmt.Errorf(
-				"block size %d exceeds platform allocation limit",
-				blockSize,
-			)
-		}
-		blockData, err := c.readBlockData(currOffset, blockSize)
-		if err != nil {
-			return nil, err
-		}
-		blkType, blkBytes, err := c.unwrapBlock(blockData)
-		if err != nil {
-			return nil, err
-		}
-		ret := &Block{
-			Type:  blkType,
-			Slot:  c.currentEntry.BlockOrEbb,
-			Hash:  c.currentEntry.HeaderHash[:],
-			IsEbb: c.currentEntry.IsEbb,
-			Cbor:  blkBytes,
-		}
 		c.currentEntry = c.nextEntry
 		nextEntry, err := c.secondary.Next()
 		if err != nil {
 			return nil, err
 		}
 		c.nextEntry = nextEntry
-		return ret, nil
 	}
+	return ret, nil
+}
+
+func validBlockSpan(start, end uint64, fileSize int64) (int64, int64, error) {
+	if start > math.MaxInt64 {
+		return 0, 0, fmt.Errorf(
+			"%w: current block offset %d overflows int64",
+			ErrInvalidChunkOffset,
+			start,
+		)
+	}
+	if end > math.MaxInt64 {
+		return 0, 0, fmt.Errorf(
+			"%w: next block offset %d overflows int64",
+			ErrInvalidChunkOffset,
+			end,
+		)
+	}
+	current := int64(start) // #nosec G115 -- guarded above
+	next := int64(end)      // #nosec G115 -- guarded above
+	if current > fileSize {
+		return 0, 0, fmt.Errorf(
+			"%w: current block offset %d is beyond chunk size %d",
+			ErrInvalidChunkOffset,
+			current,
+			fileSize,
+		)
+	}
+	if next > fileSize {
+		return 0, 0, fmt.Errorf(
+			"%w: next block offset %d is beyond chunk size %d",
+			ErrInvalidChunkOffset,
+			next,
+			fileSize,
+		)
+	}
+	if next <= current {
+		return 0, 0, fmt.Errorf(
+			"%w: next block offset %d does not follow current block offset %d",
+			ErrInvalidChunkOffset,
+			next,
+			current,
+		)
+	}
+	blockSize := next - current
+	if blockSize > maxBlockSize {
+		return 0, 0, fmt.Errorf(
+			"%w: block span %d exceeds maximum %d",
+			ErrInvalidChunkOffset,
+			blockSize,
+			maxBlockSize,
+		)
+	}
+	return current, blockSize, nil
 }
 
 type rangeEntryReader interface {

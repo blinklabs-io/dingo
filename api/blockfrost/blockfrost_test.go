@@ -1183,6 +1183,7 @@ func (m *mockNode) AssetAddresses(
 }
 
 func (m *mockNode) DRep(
+	_ context.Context,
 	credential DRepCredential,
 ) (DRepInfo, error) {
 	m.drepCredential = credential

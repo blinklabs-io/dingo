@@ -19,6 +19,7 @@ import "net/http"
 type managedSecurityHandler struct {
 	handler http.Handler
 	limiter *clientLimiter
+	onClose func()
 }
 
 func (h *managedSecurityHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -26,6 +27,9 @@ func (h *managedSecurityHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 }
 
 func (h *managedSecurityHandler) Close() {
+	if h.onClose != nil {
+		h.onClose()
+	}
 	if h.limiter != nil {
 		h.limiter.close()
 	}
