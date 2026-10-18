@@ -17,6 +17,7 @@ package uplcconformance
 import (
 	"bytes"
 	"encoding/json"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -26,6 +27,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/plutigo/cek"
+	"github.com/blinklabs-io/plutigo/lang"
 	"github.com/blinklabs-io/plutigo/syn"
 	"github.com/fxamacker/cbor/v2"
 )
@@ -372,4 +374,45 @@ func writeTurboTestProgram(path string, program []byte) error {
 		return err
 	}
 	return os.WriteFile(path, encoded, 0o600)
+}
+
+func TestTurboEvalContextUsesVariantACosts(t *testing.T) {
+	t.Parallel()
+	named, err := syn.Parse(`(program 1.0.0 (con integer 1))`)
+	if err != nil {
+		t.Fatalf("parse program: %v", err)
+	}
+	program, err := syn.NameToDeBruijn(named)
+	if err != nil {
+		t.Fatalf("convert program: %v", err)
+	}
+	for _, tc := range []struct {
+		name     string
+		version  lang.LanguageVersion
+		protocol uint
+		wantCPU  int64
+	}{
+		{"V1 before Chang", lang.LanguageVersionV1, 8, 23100},
+		{"V2 before Chang", lang.LanguageVersionV2, 8, 23100},
+		{"V1 at Chang", lang.LanguageVersionV1, 9, 16100},
+		{"V2 at Chang", lang.LanguageVersionV2, 9, 16100},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			evalCtx, err := turboEvalContext(tc.version, tc.protocol)
+			if err != nil {
+				t.Fatalf("eval context: %v", err)
+			}
+			machine := cek.NewMachine[syn.DeBruijn](tc.version, 200, evalCtx)
+			initial := cek.ExBudget{Cpu: math.MaxInt64, Mem: math.MaxInt64}
+			machine.ExBudget = initial
+			if _, err := machine.Run(program.Term); err != nil {
+				t.Fatalf("run program: %v", err)
+			}
+			got := initial.Sub(&machine.ExBudget)
+			if got.Cpu != tc.wantCPU || got.Mem != 200 {
+				t.Fatalf("budget = %+v, want cpu %d mem 200", got, tc.wantCPU)
+			}
+		})
+	}
 }
