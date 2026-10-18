@@ -1705,3 +1705,23 @@ func TestGenesisModeExitEmitsEvent(t *testing.T) {
 	assert.Equal(t, uint64(100), exits[0].BestKnownSlot)
 	assert.Equal(t, uint64(30), exits[0].GenesisWindowSlots)
 }
+
+func TestShouldApplyIngressWaitsOutTransientZeroGeneration(t *testing.T) {
+	t.Parallel()
+
+	var generation atomic.Uint64
+	cs := NewChainSelector(ChainSelectorConfig{
+		SecurityParam: 20,
+		CurrentHeaderCryptoVerificationGeneration: generation.Load,
+		PinHeaderCryptoVerificationGeneration: func(value uint64) (func(), bool) {
+			return func() {}, value == generation.Load()
+		},
+	})
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		generation.Store(1)
+	}()
+
+	assert.True(t, cs.ShouldApplyIngress(corrConn(40)),
+		"a generation that is zero only during a transition must not reject the header")
+}

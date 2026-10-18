@@ -1269,8 +1269,9 @@ func (s *State) ClearObservedHeaderHistory(
 }
 
 // ClearObservedHeaderHistoryFrom removes a rejected header and every header
-// observed after it while retaining the independently verified prefix. If the
-// rejected point is no longer retained, the whole history is discarded.
+// observed after it while retaining the independently verified prefix. When
+// the rejected hash is not retained, removal starts at the first retained
+// header at or beyond the point's slot; if none exists, the history is kept.
 func (s *State) ClearObservedHeaderHistoryFrom(
 	connId ouroboros.ConnectionId,
 	point ocommon.Point,

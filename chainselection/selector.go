@@ -1696,6 +1696,15 @@ func (cs *ChainSelector) pinPeerTipAdmissionGeneration(
 	return release, true
 }
 
+// A zero or just-superseded generation is transient: the ledger reports it
+// while a validation transition is in flight. Treating it as final would
+// withhold the header from a peer that never re-sends it, so the pin waits a
+// bounded time for a stable generation before giving up.
+const (
+	headerCryptoGenerationStableWait   = 2 * time.Second
+	headerCryptoGenerationPollInterval = 2 * time.Millisecond
+)
+
 // pinCurrentHeaderCryptoGeneration orders a selector decision before the next
 // ledger publication. Callers acquire this pin before cs.mutex, matching the
 // ledger admission callback's generation-pin then selector-lock order.
@@ -1704,15 +1713,22 @@ func (cs *ChainSelector) pinCurrentHeaderCryptoGeneration() (func(), bool) {
 		cs.config.PinHeaderCryptoVerificationGeneration == nil {
 		return func() {}, true
 	}
-	generation := cs.config.CurrentHeaderCryptoVerificationGeneration()
-	if generation == 0 {
-		return func() {}, false
+	deadline := time.Now().Add(headerCryptoGenerationStableWait)
+	for {
+		generation := cs.config.CurrentHeaderCryptoVerificationGeneration()
+		if generation != 0 {
+			release, current := cs.config.PinHeaderCryptoVerificationGeneration(
+				generation,
+			)
+			if current && release != nil {
+				return release, true
+			}
+		}
+		if !time.Now().Before(deadline) {
+			return func() {}, false
+		}
+		time.Sleep(headerCryptoGenerationPollInterval)
 	}
-	release, current := cs.config.PinHeaderCryptoVerificationGeneration(generation)
-	if !current || release == nil {
-		return func() {}, false
-	}
-	return release, true
 }
 
 // ResolvePeerTipAdmission promotes an accepted header or removes a rejected
