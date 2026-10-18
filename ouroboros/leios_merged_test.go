@@ -341,7 +341,9 @@ func TestLeiosFetchServerMissingDataUsesUnavailableErrors(t *testing.T) {
 	require.ErrorIs(t, err, oleiosfetch.ErrBlockTxsNotFound)
 }
 
-func TestLeiosFetchServerBlockTxsServesAvailableBodiesWhileIncomplete(t *testing.T) {
+func TestLeiosFetchServerBlockTxsAnswersNotFoundWhenBodyMissing(
+	t *testing.T,
+) {
 	t.Parallel()
 
 	tx0, ref0 := testLeiosManifestTx(t, 0)
@@ -369,29 +371,29 @@ func TestLeiosFetchServerBlockTxsServesAvailableBodiesWhileIncomplete(t *testing
 		nil,
 	)
 
+	// The reply carries no bitmap, so a request that includes a missing
+	// transaction cannot be answered partially.
+	for _, bitmap := range []map[uint16]uint64{
+		{0: 1 << 63},
+		{0: (1 << 63) | (1 << 62)},
+	} {
+		msg, err := o.leiosfetchServerBlockTxsRequest(
+			oleiosfetch.CallbackContext{},
+			point,
+			bitmap,
+		)
+		require.Nil(t, msg)
+		require.ErrorIs(t, err, oleiosfetch.ErrBlockTxsNotFound)
+	}
+
 	msg, err := o.leiosfetchServerBlockTxsRequest(
 		oleiosfetch.CallbackContext{},
 		point,
-		map[uint16]uint64{0: 1 << 63},
+		map[uint16]uint64{0: 1 << 62},
 	)
 	require.NoError(t, err)
 	response, ok := msg.(*oleiosfetch.MsgBlockTxs)
 	require.True(t, ok)
-	require.Equal(t, point, response.Point)
-	require.NotNil(t, response.Bitmaps)
-	require.Empty(t, response.Bitmaps)
-	require.Empty(t, response.TxsRaw)
-
-	msg, err = o.leiosfetchServerBlockTxsRequest(
-		oleiosfetch.CallbackContext{},
-		point,
-		map[uint16]uint64{0: (1 << 63) | (1 << 62)},
-	)
-	require.NoError(t, err)
-	response, ok = msg.(*oleiosfetch.MsgBlockTxs)
-	require.True(t, ok)
-	require.Equal(t, point, response.Point)
-	require.Equal(t, map[uint16]uint64{0: 1 << 62}, response.Bitmaps)
 	require.Equal(t, []cbor.RawMessage{tx1}, response.TxsRaw)
 
 	require.NoError(
@@ -411,12 +413,6 @@ func TestLeiosFetchServerBlockTxsServesAvailableBodiesWhileIncomplete(t *testing
 	require.NoError(t, err)
 	response, ok = msg.(*oleiosfetch.MsgBlockTxs)
 	require.True(t, ok)
-	require.Equal(t, point, response.Point)
-	require.Equal(
-		t,
-		map[uint16]uint64{0: (1 << 63) | (1 << 62)},
-		response.Bitmaps,
-	)
 	require.Equal(t, []cbor.RawMessage{tx0, tx1}, response.TxsRaw)
 }
 
@@ -1326,8 +1322,14 @@ func testDijkstraCertRBRaw(
 
 func testDijkstraTx(t *testing.T, seed byte) cbor.RawMessage {
 	t.Helper()
-	// A complete standalone Dijkstra transaction: [body, witness_set, is_valid, aux].
-	tx, err := dijkstraTestTx(int(seed))
+	return testDijkstraTxIndex(t, int(seed))
+}
+
+func testDijkstraTxIndex(t *testing.T, index int) cbor.RawMessage {
+	t.Helper()
+	// A complete Dijkstra block_transaction:
+	// [body, witness_set, aux, is_valid].
+	tx, err := dijkstraTestTx(index)
 	require.NoError(t, err)
 	return tx
 }
@@ -1356,19 +1358,14 @@ func dijkstraTestTx(index int) (cbor.RawMessage, error) {
 		return nil, err
 	}
 	encoded, err := cbor.Encode([]cbor.RawMessage{
-		body, witnesses, valid, auxiliaryData,
+		body, witnesses, auxiliaryData, valid,
 	})
 	return cbor.RawMessage(encoded), err
 }
 
 func testDijkstraBlockTx(t *testing.T, seed byte) cbor.RawMessage {
 	t.Helper()
-	var tx []cbor.RawMessage
-	_, err := cbor.Decode(testDijkstraTx(t, seed), &tx)
-	require.NoError(t, err)
-	require.Len(t, tx, 4)
-	tx[2], tx[3] = tx[3], tx[2]
-	return mustCbor(t, tx)
+	return testDijkstraTx(t, seed)
 }
 
 func testLeiosManifestTx(
@@ -1376,17 +1373,23 @@ func testLeiosManifestTx(
 	seed byte,
 ) (cbor.RawMessage, lcommon.LeiosTransactionReference) {
 	t.Helper()
-	txCbor := testDijkstraTx(t, seed)
+	return testLeiosManifestTxIndex(t, int(seed))
+}
+
+func testLeiosManifestTxIndex(
+	t *testing.T,
+	index int,
+) (cbor.RawMessage, lcommon.LeiosTransactionReference) {
+	t.Helper()
+	txCbor := testDijkstraTxIndex(t, index)
 	var txElems []cbor.RawMessage
 	bytesRead, err := cbor.Decode(txCbor, &txElems)
 	require.NoError(t, err)
 	require.Equal(t, len(txCbor), bytesRead)
 	require.NotEmpty(t, txElems)
-	wrapped, err := cbor.Encode([]byte(txCbor))
-	require.NoError(t, err)
 	// Test fixture is small, so the length fits in uint32.
 	txSize := uint32(len(txCbor)) //nolint:gosec // G115
-	return cbor.RawMessage(wrapped), lcommon.LeiosTransactionReference{
+	return txCbor, lcommon.LeiosTransactionReference{
 		TransactionHash: lcommon.Blake2b256Hash(txCbor),
 		TransactionSize: txSize,
 	}
@@ -1593,7 +1596,7 @@ func (r manifestTxRequester) BlockTxsRequest(
 			txs = append(txs, r.txs[index])
 		}
 	}
-	return oleiosfetch.NewMsgBlockTxs(point, bitmaps, txs), nil
+	return oleiosfetch.NewMsgBlockTxs(txs), nil
 }
 
 type recordingManifestTxRequester struct {
@@ -1614,7 +1617,7 @@ func (r *recordingManifestTxRequester) BlockTxsRequest(
 			txs = append(txs, r.txs[index])
 		}
 	}
-	return oleiosfetch.NewMsgBlockTxs(point, bitmaps, txs), nil
+	return oleiosfetch.NewMsgBlockTxs(txs), nil
 }
 
 func TestFetchLeiosEbTxsBatchedRefetchesMismatchedRetainedPartial(
@@ -1921,49 +1924,73 @@ func TestSpliceEndorserTxsIntoDijkstraBlockFillsCertRB(t *testing.T) {
 	require.Len(t, decoded.Transactions(), 2)
 }
 
-func TestSpliceEndorserMempoolTxReordersValidityAndAuxiliaryData(
-	t *testing.T,
-) {
+func TestSpliceEndorserTxsKeepsIsValidFlag(t *testing.T) {
 	t.Parallel()
 
 	body := mustCbor(t, []any{uint64(1)})
 	witnesses := mustCbor(t, map[uint]any{})
-	isValid := mustCbor(t, true)
 	auxiliaryData := mustCbor(t, map[uint]any{0: []byte{0x01}})
-	mempoolTx := mustCbor(t, []cbor.RawMessage{
-		body, witnesses, isValid, auxiliaryData,
-	})
 	certRB := testDijkstraCertRBRaw(
 		t,
 		100,
 		make([]byte, lcommon.Blake2b256Size),
 	)
 
-	merged, err := spliceEndorserTxsIntoDijkstraBlock(
-		certRB,
-		[]cbor.RawMessage{mempoolTx},
+	for _, isValid := range []bool{true, false} {
+		blockTx := mustCbor(t, []cbor.RawMessage{
+			body, witnesses, auxiliaryData, mustCbor(t, isValid),
+		})
+		merged, err := spliceEndorserTxsIntoDijkstraBlock(
+			certRB,
+			[]cbor.RawMessage{blockTx},
+		)
+		require.NoError(t, err)
+
+		var top []cbor.RawMessage
+		_, err = cbor.Decode(merged, &top)
+		require.NoError(t, err)
+		var blockBody []cbor.RawMessage
+		_, err = cbor.Decode(top[1], &blockBody)
+		require.NoError(t, err)
+		var transactions []cbor.RawMessage
+		_, err = cbor.Decode(blockBody[0], &transactions)
+		require.NoError(t, err)
+		require.Equal(t, []cbor.RawMessage{blockTx}, transactions)
+	}
+}
+
+func TestSpliceEndorserTxsRejectsNonBlockTransactionForms(t *testing.T) {
+	t.Parallel()
+
+	body := mustCbor(t, []any{uint64(1)})
+	witnesses := mustCbor(t, map[uint]any{})
+	auxiliaryData := mustCbor(t, map[uint]any{0: []byte{0x01}})
+	certRB := testDijkstraCertRBRaw(
+		t,
+		100,
+		make([]byte, lcommon.Blake2b256Size),
 	)
-	require.NoError(t, err)
-
-	var top []cbor.RawMessage
-	_, err = cbor.Decode(merged, &top)
-	require.NoError(t, err)
-	var blockBody []cbor.RawMessage
-	_, err = cbor.Decode(top[1], &blockBody)
-	require.NoError(t, err)
-	var transactions []cbor.RawMessage
-	_, err = cbor.Decode(blockBody[0], &transactions)
-	require.NoError(t, err)
-	require.Len(t, transactions, 1)
-
-	var blockTx []cbor.RawMessage
-	_, err = cbor.Decode(transactions[0], &blockTx)
-	require.NoError(t, err)
-	require.Len(t, blockTx, 4)
-	require.Equal(t, []byte(body), []byte(blockTx[0]))
-	require.Equal(t, []byte(witnesses), []byte(blockTx[1]))
-	require.Equal(t, []byte(auxiliaryData), []byte(blockTx[2]))
-	require.Equal(t, []byte(isValid), []byte(blockTx[3]))
+	blockTx := mustCbor(t, []cbor.RawMessage{
+		body, witnesses, auxiliaryData, mustCbor(t, true),
+	})
+	for name, tx := range map[string]cbor.RawMessage{
+		"mempool order": mustCbor(t, []cbor.RawMessage{
+			body, witnesses, mustCbor(t, true), auxiliaryData,
+		}),
+		"without is_valid": mustCbor(t, []cbor.RawMessage{
+			body, witnesses, auxiliaryData,
+		}),
+		"byte string wrapper": mustCbor(t, []byte(blockTx)),
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			_, err := spliceEndorserTxsIntoDijkstraBlock(
+				certRB,
+				[]cbor.RawMessage{tx},
+			)
+			require.Error(t, err)
+		})
+	}
 }
 
 func TestSpliceEndorserTxsRejectsBlockWithExistingTxs(t *testing.T) {
@@ -1979,53 +2006,6 @@ func TestSpliceEndorserTxsRejectsBlockWithExistingTxs(t *testing.T) {
 		block, []cbor.RawMessage{testDijkstraTx(t, 1)},
 	)
 	require.Error(t, err)
-}
-
-func TestDijkstraBlockTransactionCborConvertsStandaloneForm(t *testing.T) {
-	t.Parallel()
-
-	standalone := testDijkstraTx(t, 10)
-	var components []cbor.RawMessage
-	_, err := cbor.Decode(standalone, &components)
-	require.NoError(t, err)
-	blockWithValidity, err := cbor.Encode([]cbor.RawMessage{
-		components[0], components[1], components[3], components[2],
-	})
-	require.NoError(t, err)
-	standaloneWithoutValidity, err := cbor.Encode([]cbor.RawMessage{
-		components[0], components[1], components[3],
-	})
-	require.NoError(t, err)
-
-	for _, tc := range []struct {
-		name string
-		raw  cbor.RawMessage
-	}{
-		{name: "standalone validity before auxiliary data", raw: standalone},
-		{name: "without explicit validity", raw: standaloneWithoutValidity},
-		{name: "block validity after auxiliary data", raw: blockWithValidity},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			got, err := dijkstraBlockTransactionCbor(tc.raw)
-			require.NoError(t, err)
-			var blockComponents []cbor.RawMessage
-			_, err = cbor.Decode(got, &blockComponents)
-			require.NoError(t, err)
-			require.Len(t, blockComponents, 4)
-			require.Equal(t, []byte(components[0]), []byte(blockComponents[0]))
-			require.Equal(t, []byte(components[1]), []byte(blockComponents[1]))
-			require.Equal(t, []byte(components[3]), []byte(blockComponents[2]))
-			require.Equal(t, []byte{0xf5}, []byte(blockComponents[3]))
-		})
-	}
-
-	invalid, err := cbor.Encode([]cbor.RawMessage{
-		components[0], components[1], {0xf4}, components[3],
-	})
-	require.NoError(t, err)
-	_, err = dijkstraBlockTransactionCbor(invalid)
-	require.ErrorContains(t, err, "marked invalid")
 }
 
 func TestSpliceEndorserTxsRejectsWrongShape(t *testing.T) {
@@ -3518,4 +3498,120 @@ func TestMaxVerifiedEndorserBlockSlotTracksOnlyCorroboratedSlots(t *testing.T) {
 		leiosStoreAuthoritative,
 	))
 	require.Equal(t, uint64(42), o.MaxVerifiedEndorserBlockSlot())
+}
+
+func TestLeiosEndorserBlockTxCborAcceptsOnlyBlockTransaction(t *testing.T) {
+	t.Parallel()
+
+	blockTx := testDijkstraTx(t, 3)
+	got, err := leiosEndorserBlockTxCbor(blockTx)
+	require.NoError(t, err)
+	require.Equal(t, []byte(blockTx), got)
+
+	var parts []cbor.RawMessage
+	_, err = cbor.Decode(blockTx, &parts)
+	require.NoError(t, err)
+	for name, raw := range map[string]cbor.RawMessage{
+		"byte string wrapper": mustCbor(t, []byte(blockTx)),
+		"tag 24 wrapper": mustCbor(t, cbor.Tag{
+			Number: 24, Content: []byte(blockTx),
+		}),
+		"without is_valid": mustCbor(t, parts[:3]),
+		"mempool order": mustCbor(t, []cbor.RawMessage{
+			parts[0], parts[1], parts[3], parts[2],
+		}),
+		"trailing bytes": append(
+			append(cbor.RawMessage{}, blockTx...), 0x00,
+		),
+		"validity not a boolean": mustCbor(t, []cbor.RawMessage{
+			parts[0], parts[1], parts[2], parts[2],
+		}),
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			_, err := leiosEndorserBlockTxCbor(raw)
+			require.Error(t, err)
+		})
+	}
+}
+
+// Transaction lists persisted before leios-fetch dropped its byte-string
+// wrapping fail manifest revalidation on reload and are discarded, leaving the
+// manifest so the transactions are fetched again.
+func TestLeiosReloadDiscardsLegacyWrappedPersistedTxs(t *testing.T) {
+	t.Parallel()
+
+	tx, ref := testLeiosManifestTx(t, 5)
+	manifestRaw, err := lcommon.LeiosEndorserBlock{
+		TransactionReferences: []lcommon.LeiosTransactionReference{ref},
+	}.MarshalCBOR()
+	require.NoError(t, err)
+	point := ocommon.NewPoint(77, lcommon.Blake2b256Hash(manifestRaw).Bytes())
+	o := newTestOuroborosWithLeiosDB(t)
+	db := o.leiosDatabase()
+	require.NoError(t, db.SetLeiosEB(
+		point.Slot,
+		point.Hash,
+		manifestRaw,
+		[]cbor.RawMessage{mustCbor(t, []byte(tx))},
+	))
+
+	data, ok := o.loadLeiosEBFromDB(point.Slot, point.Hash)
+	require.True(t, ok)
+	require.False(t, data.completeTxCache())
+	require.Empty(t, data.txsRaw)
+
+	// Control: the same transaction in the current form reloads complete.
+	o2 := newTestOuroborosWithLeiosDB(t)
+	require.NoError(t, o2.leiosDatabase().SetLeiosEB(
+		point.Slot,
+		point.Hash,
+		manifestRaw,
+		[]cbor.RawMessage{tx},
+	))
+	data, ok = o2.loadLeiosEBFromDB(point.Slot, point.Hash)
+	require.True(t, ok)
+	require.True(t, data.completeTxCache())
+	require.Equal(t, []cbor.RawMessage{tx}, data.txsRaw)
+}
+
+// The reply carries only the transactions, each wrapped in tag 24 on the
+// wire; the cached value stays the bare block_transaction.
+func TestLeiosFetchServerBlockTxsWireFormat(t *testing.T) {
+	t.Parallel()
+
+	tx0, ref0 := testLeiosManifestTx(t, 0)
+	tx1, ref1 := testLeiosManifestTx(t, 1)
+	blockRaw, err := cbor.Encode(&lcommon.LeiosEndorserBlock{
+		TransactionReferences: []lcommon.LeiosTransactionReference{ref0, ref1},
+	})
+	require.NoError(t, err)
+	point := ocommon.NewPoint(10, lcommon.Blake2b256Hash(blockRaw).Bytes())
+	o := newOuroboros(OuroborosConfig{EnableLeios: true})
+	require.NoError(t, o.storeLeiosEndorserBlock(
+		point, blockRaw, []cbor.RawMessage{tx0, tx1}, leiosStoreAuthoritative,
+	))
+
+	msg, err := o.leiosfetchServerBlockTxsRequest(
+		oleiosfetch.CallbackContext{},
+		point,
+		map[uint16]uint64{0: (1 << 63) | (1 << 62)},
+	)
+	require.NoError(t, err)
+	wire, err := cbor.Encode(msg)
+	require.NoError(t, err)
+
+	var envelope []cbor.RawMessage
+	_, err = cbor.Decode(wire, &envelope)
+	require.NoError(t, err)
+	require.Len(t, envelope, 2)
+	require.Equal(t, mustCbor(t, oleiosfetch.MessageTypeBlockTxs), envelope[0])
+	var wrapped []cbor.Tag
+	_, err = cbor.Decode(envelope[1], &wrapped)
+	require.NoError(t, err)
+	require.Len(t, wrapped, 2)
+	for i, want := range []cbor.RawMessage{tx0, tx1} {
+		require.EqualValues(t, 24, wrapped[i].Number)
+		require.Equal(t, []byte(want), wrapped[i].Content)
+	}
 }
