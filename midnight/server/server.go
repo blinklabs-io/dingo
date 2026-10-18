@@ -62,18 +62,21 @@ type SlotTimer interface {
 // dependent on a narrow interface (rather than *database.Database directly)
 // matches the composition boundary documented in ARCHITECTURE.md: domain
 // packages depend on constructor-injected narrow interfaces, and only the
-// composition layer (here, adapter.go's NewDatabase) wires the concrete
-// type. All methods implicitly use a nil transaction (auto-transaction per
-// call), mirroring api/mesh's MeshDatabase.
+// composition layer (here, adapter.go's NewDatabase) wires the concrete type.
+// Read methods receive the RPC context so cancellation and the server deadline
+// reach the metadata transaction.
 type MidnightDatabase interface {
 	GetLatestMidnightGovernanceDatum(
+		ctx context.Context,
 		datumType string,
 		blockNumber uint64,
 	) (*models.MidnightGovernanceDatum, error)
 	GetMidnightAriadneParamsAtOrBeforeEpoch(
+		ctx context.Context,
 		epoch uint64,
 	) (*models.MidnightAriadneParams, error)
 	GetMidnightEpochCandidatesByEpoch(
+		ctx context.Context,
 		epoch uint64,
 	) (*models.MidnightEpochCandidates, error)
 	// GetMidnightCommitteeCandidateRegistrationsByTxHashes returns the
@@ -82,14 +85,16 @@ type MidnightDatabase interface {
 	// join against the (tx_hash, output_index, datum) membership decoded
 	// from a MidnightEpochCandidates snapshot.
 	GetMidnightCommitteeCandidateRegistrationsByTxHashes(
+		ctx context.Context,
 		txHashes [][]byte,
 	) ([]models.MidnightCommitteeCandidateRegistration, error)
 	GetPoolStakeSnapshotsByEpoch(
+		ctx context.Context,
 		epoch uint64,
 		snapshotType string,
 	) ([]*models.PoolStakeSnapshot, error)
-	GetEpoch(epochId uint64) (*models.Epoch, error)
-	GetEpochBySlot(slot uint64) (*models.Epoch, error)
+	GetEpoch(ctx context.Context, epochId uint64) (*models.Epoch, error)
+	GetEpochBySlot(ctx context.Context, slot uint64) (*models.Epoch, error)
 	BlockByHash(ctx context.Context, hash []byte) (models.Block, error)
 	// BlockByNumber returns the block at the given 0-based consensus block
 	// number, translating to the blob store's internal 1-based index.
@@ -143,11 +148,12 @@ type Config struct {
 
 // Server runs the MidnightState gRPC service over its own listener.
 type Server struct {
-	mu         sync.Mutex // protects grpcServer and health
-	config     Config
-	grpcServer *grpc.Server
-	health     *health.Server
-	metrics    *serverMetrics
+	mu           sync.Mutex // protects grpcServer and health
+	config       Config
+	grpcServer   *grpc.Server
+	health       *health.Server
+	metrics      *serverMetrics
+	rpcAdmission chan struct{}
 }
 
 // New validates cfg and returns a Server. It does not bind or serve; call
@@ -172,8 +178,9 @@ func New(cfg Config) (*Server, error) {
 		)
 	}
 	return &Server{
-		config:  cfg,
-		metrics: newServerMetrics(cfg.PromRegistry),
+		config:       cfg,
+		metrics:      newServerMetrics(cfg.PromRegistry),
+		rpcAdmission: make(chan struct{}, maxConcurrentMidnightRPCs),
 	}, nil
 }
 
@@ -186,7 +193,10 @@ func (s *Server) Start(ctx context.Context) error {
 	useTLS := s.config.TLSCertFilePath != "" && s.config.TLSKeyFilePath != ""
 
 	opts := []grpc.ServerOption{
-		grpc.UnaryInterceptor(s.metrics.unaryInterceptor),
+		grpc.ChainUnaryInterceptor(
+			s.admissionInterceptor,
+			s.metrics.unaryInterceptor,
+		),
 	}
 	serverType := "non-TLS"
 	if useTLS {

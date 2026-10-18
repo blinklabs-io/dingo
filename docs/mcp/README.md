@@ -57,6 +57,11 @@ Ask your AI assistant:
 - **Server-Sent Events (SSE)** (`GET /sse`): Streaming event transport for CLI and IDE agents.
 - **Health Endpoint** (`GET /healthz`): Listener health probe returning `{"service":"dingo-mcp","status":"ok"}`; it does not probe database connectivity.
 
+Both session transports share a 128-session cap and an eight-session cap per
+client address. A session closes after five idle minutes, after one hour total,
+or when the server stops. New sessions receive HTTP 429 while either cap is
+full.
+
 ### 21 Registered Tools
 Dingo registers 21 typed, read-only tools:
 - **SQLite Tools (3)**: `sqlite_query` (safe SELECT execution), `sqlite_explain` (query plan analysis), `sqlite_table_schema` (DDL schema inspection).

@@ -388,7 +388,7 @@ type BlockfrostNode interface {
 
 	// DRep returns governance DRep information for a parsed
 	// DRep credential.
-	DRep(DRepCredential) (DRepInfo, error)
+	DRep(context.Context, DRepCredential) (DRepInfo, error)
 
 	// DReps returns the paginated DRep list along with the total
 	// number of matching results before pagination.

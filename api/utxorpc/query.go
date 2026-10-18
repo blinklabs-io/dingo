@@ -770,10 +770,10 @@ func (s *queryServiceServer) ReadTx(
 ) (*connect.Response[query.ReadTxResponse], error) {
 	hash := req.Msg.GetHash()
 
-	if len(hash) == 0 {
+	if len(hash) != 32 {
 		return nil, connect.NewError(
 			connect.CodeInvalidArgument,
-			errors.New("hash is required"),
+			errors.New("transaction hash must be 32 bytes"),
 		)
 	}
 	s.utxorpc.config.Logger.Info(
@@ -789,7 +789,7 @@ func (s *queryServiceServer) ReadTx(
 	if txRecord == nil {
 		return nil, connect.NewError(
 			connect.CodeNotFound,
-			fmt.Errorf("transaction not found: %x", hash),
+			errors.New("transaction not found"),
 		)
 	}
 
