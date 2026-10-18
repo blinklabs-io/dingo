@@ -293,11 +293,14 @@ same binary command. Supplying `--data-dir` keeps the generated configuration
 and database for the next run; `--reset` rebuilds those managed paths with
 fresh genesis start times. The CLI holds an exclusive state-directory lock
 until the child exits and rewrites the path-bearing node configuration when
-reusing copied state. The state directory is opened with `os.Root` and pinned
-by file identity: a symlinked `--data-dir` is resolved once at startup, and any
-symlink later introduced in the state path is rejected rather than followed.
-Each `cardano/keys/` directory component is opened the same way, so a symlinked
-intermediate directory cannot redirect key writes outside the state directory.
+reusing copied state. State preparation and reset open the directory with
+`os.Root` and pin it by file identity: a symlinked `--data-dir` is resolved once
+at startup, and a symlink introduced while those operations run is rejected
+rather than followed. Each `cardano/keys/` directory component is opened the
+same way, so a symlinked intermediate directory cannot redirect key writes
+outside the state directory. The child node later opens its configuration,
+database, and keys from the generated absolute paths; the preparation handle
+does not pin those child-process opens.
 
 Dingo's architecture is built on several key principles:
 
