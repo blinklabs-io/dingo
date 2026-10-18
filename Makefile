@@ -189,7 +189,7 @@ bench-storage-scale: ## Run the scale-parameterised storage benchmarks (DINGO_BE
 	DINGO_BENCH_SCALE=$${DINGO_BENCH_SCALE:-1m} DINGO_BENCH_BLOCKS=$${DINGO_BENCH_BLOCKS:-100k} go test $(GO_TAG_FLAGS) -run=^$$ -bench='^BenchmarkStorageScale(Utxo|BlobBlocks)' -benchtime=100x -benchmem -timeout=0 ./internal/integration
 	DINGO_BENCH_SCALE=$${DINGO_BENCH_SCALE:-1m} DINGO_BENCH_BLOCKS=$${DINGO_BENCH_BLOCKS:-100k} go test $(GO_TAG_FLAGS) -run=^$$ -bench='^BenchmarkStorageScaleSnapshotPause' -benchtime=1x -benchmem -timeout=0 ./internal/integration
 
-bench-leios-db: ## Run the LeiosDB workload benchmark against the default storage providers
+bench-leios-db: ## Run the LeiosDB latency benchmark against the default storage providers
 	go run $(GO_TAG_FLAGS) ./cmd/leios-db-bench
 
 bench-ci: mod-tidy ## Run mod-tidy, then the curated CI benchmark suite (count=10) plus a GOMAXPROCS lock-contention sweep
