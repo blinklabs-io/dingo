@@ -2089,22 +2089,12 @@ func (o *Ouroboros) fetchLeiosEbTxsBatchedUntilWithValidator(
 				"unexpected leios-fetch BlockTxs response type %T", resp,
 			)
 		}
-		if err := validateLeiosTxBitmap(txCount, respTxs.Bitmaps); err != nil {
-			// A relay-declared bitmap referencing an index beyond this
-			// endorser block's txCount is rejected before it is expanded: a
-			// small txCount must not license decoding a disproportionately
-			// large index list.
-			return leiosCollectTxs(result), fmt.Errorf(
-				"leios-fetch response bitmap: %w",
-				err,
-			)
-		}
-		served := leiosBitmapTxIndices(respTxs.Bitmaps)
+		served := leiosBitmapTxIndices(needed)
 		if len(served) != len(respTxs.TxsRaw) {
-			// The SDK wire contract requires one transaction per served bit;
-			// do not infer positions from an obsolete bitmap-free response.
+			// The w42 wire response no longer echoes the request, so each
+			// transaction corresponds to one requested bit in request order.
 			return leiosCollectTxs(result), fmt.Errorf(
-				"leios-fetch response bitmap selects %d transactions, got %d",
+				"leios-fetch requested %d transactions, got %d",
 				len(served),
 				len(respTxs.TxsRaw),
 			)

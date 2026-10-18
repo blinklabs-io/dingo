@@ -22,7 +22,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"math"
 	"net"
 	"slices"
 	"sync"
@@ -2730,15 +2729,14 @@ func TestLeiosFetchGuardCooldownResetsOnSuccess(t *testing.T) {
 
 // The helpers in this file reproduce, byte for byte, how the Haskell Leios
 // reference node encodes an endorser-block manifest and a MsgLeiosBlockTxs
-// response. They follow ouroboros-consensus commit 1820edf5e (leios-prototype
-// branch):
+// response. They follow the rc-2026w42 wire format:
 //
 //   - LeiosDemoTypes: encodeLeiosEb, hashLeiosEb, hashLeiosTx, encodeLeiosTx,
 //     encodeLeiosPoint (HASH = Blake2b_256)
-//   - LeiosDemoOnlyTestFetch: encodeLeiosFetch (MsgLeiosBlockTxs),
-//     encodeBitmaps, decodeBitmaps
-//   - LeiosDemoLogic: msgLeiosBlockTxsRequest, which echoes the request point
-//     and bitmaps and rejects zero bitmaps and non-ascending offsets
+//   - LeiosDemoOnlyTestFetch: encodeLeiosFetch (MsgLeiosBlockTxs) and
+//     decodeBitmaps
+//   - LeiosDemoLogic: msgLeiosBlockTxsRequest, which returns every requested
+//     transaction and rejects zero bitmaps and non-ascending offsets
 //
 // They are written independently of gouroboros' encoders so that the test
 // pins interoperability with the reference node rather than Dingo's agreement
@@ -2788,29 +2786,17 @@ func haskellEncodeLeiosEb(txs []cbor.RawMessage) []byte {
 	return out
 }
 
-// haskellEncodeBlockTxs mirrors encodeLeiosFetch for
-// MsgLeiosBlockTxs p bitmaps txs as served by msgLeiosBlockTxsRequest:
-// listLen 4, word 3, encodeLeiosPoint (listLen 2, slot, hash bytes),
-// encodeBitmaps (an indefinite-length map of word16 offset -> word64 bitmap,
-// in request order), then listLen n of encodeLeiosTx (cbor-in-cbor: the
-// stored tx bytes wrapped in a byte string). Transactions are emitted in
-// bitmap order, where the most significant bit of each 64-bit bitmap is the
-// first transaction of that window.
+// haskellEncodeBlockTxs mirrors encodeLeiosFetch for MsgLeiosBlockTxs txs as
+// served by msgLeiosBlockTxsRequest: listLen 2, word 4, then listLen n of
+// encodeLeiosTx (tag 24 around the stored transaction bytes). Transactions
+// are emitted in bitmap order, where the most significant bit of each 64-bit
+// bitmap is the first transaction of that window.
 func haskellEncodeBlockTxs(
-	point ocommon.Point,
 	bitmaps [][2]uint64,
 	txs []cbor.RawMessage,
 ) ([]byte, error) {
-	out := []byte{0x84}
-	out = append(out, haskellCborUint(0, leiosfetch.MessageTypeBlockTxs)...)
-	out = append(out, 0x82)
-	out = append(out, haskellCborUint(0, point.Slot)...)
-	out = append(out, haskellCborBytes(point.Hash)...)
-	out = append(out, 0xbf)
 	var served []cbor.RawMessage
 	for _, bm := range bitmaps {
-		out = append(out, haskellCborUint(0, bm[0])...)
-		out = append(out, haskellCborUint(0, bm[1])...)
 		for i := range 64 {
 			if bm[1]&(uint64(1)<<(63-i)) == 0 {
 				continue
@@ -2825,9 +2811,11 @@ func haskellEncodeBlockTxs(
 			served = append(served, txs[idx])
 		}
 	}
-	out = append(out, 0xff)
+	out := []byte{0x82}
+	out = append(out, haskellCborUint(0, leiosfetch.MessageTypeBlockTxs)...)
 	out = append(out, haskellCborUint(4, uint64(len(served)))...)
 	for _, tx := range served {
+		out = append(out, 0xd8, cbor.CborTagCbor)
 		out = append(out, haskellCborBytes(tx)...)
 	}
 	return out, nil
@@ -2903,7 +2891,7 @@ func (p *haskellBlockTxsPeer) BlockTxsRequest(
 	if err != nil {
 		return nil, fmt.Errorf("reference node rejects request: %w", err)
 	}
-	raw, err := haskellEncodeBlockTxs(point, windows, p.txs)
+	raw, err := haskellEncodeBlockTxs(windows, p.txs)
 	if err != nil {
 		return nil, err
 	}
@@ -2965,22 +2953,20 @@ func (r malformedBlockTxsRequester) BlockTxsRequest(
 	return r.response, nil
 }
 
-func TestFetchLeiosEbTxsBatchedRejectsBitmapCardinalityMismatch(t *testing.T) {
+func TestFetchLeiosEbTxsBatchedRejectsTransactionCountMismatch(t *testing.T) {
 	t.Parallel()
 
 	point := ocommon.NewPoint(100, []byte{0x01})
-	for _, bitmaps := range []map[uint16]uint64{
-		nil,
-		{0: uint64(3) << 62},
+	for _, responseTxs := range [][]cbor.RawMessage{
+		{testDijkstraTx(t, 0)},
+		{testDijkstraTx(t, 0), testDijkstraTx(t, 1), testDijkstraTx(t, 2)},
 	} {
 		requester := malformedBlockTxsRequester{
-			response: leiosfetch.NewMsgBlockTxs(
-				point, bitmaps, []cbor.RawMessage{testDijkstraTx(t, 0)},
-			),
+			response: leiosfetch.NewMsgBlockTxs(responseTxs),
 		}
 		o := &Ouroboros{}
 		txs, err := o.fetchLeiosEbTxsBatched(requester, point, 2, nil)
-		require.ErrorContains(t, err, "leios-fetch response bitmap selects")
+		require.ErrorContains(t, err, "leios-fetch requested 2 transactions")
 		require.Empty(t, txs)
 	}
 }
@@ -3007,22 +2993,18 @@ func (r *diffusingBlockTxsRequester) BlockTxsRequest(
 	requested := leiosBitmapTxIndices(bitmaps)
 	slices.Sort(requested)
 	r.requested = append(r.requested, requested...)
-	served := map[uint16]uint64{}
 	txs := make([]cbor.RawMessage, 0, len(requested))
 	for _, idx := range requested {
 		if idx >= r.available {
 			continue
 		}
-		served[uint16(idx/64)] |= 1 << uint(
-			63-(idx%64),
-		) // MSB-first, see leiosWindowNeededMask
 		enc, err := dijkstraTestTx(idx)
 		if err != nil {
 			return nil, err
 		}
 		txs = append(txs, enc)
 	}
-	return leiosfetch.NewMsgBlockTxs(point, served, txs), nil
+	return leiosfetch.NewMsgBlockTxs(txs), nil
 }
 
 // A fetch that runs out of diffused transactions must retain what it already
@@ -3032,8 +3014,8 @@ func (r *diffusingBlockTxsRequester) BlockTxsRequest(
 func TestFetchLeiosEbTxsRetainsPartialTailOnIncompleteFetch(t *testing.T) {
 	t.Parallel()
 
-	const txCount = 100
-	const diffused = 40
+	const txCount = 600
+	const diffused = 512
 	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 7, txCount)
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 	require.NoError(
@@ -3071,8 +3053,8 @@ func TestFetchLeiosEbTxsRetainsPartialTailOnIncompleteFetch(t *testing.T) {
 func TestFetchLeiosEbTxsCompletesPartialTailOnReoffer(t *testing.T) {
 	t.Parallel()
 
-	const txCount = 100
-	const diffused = 40
+	const txCount = 600
+	const diffused = 512
 	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 11, txCount)
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 	require.NoError(
@@ -3137,8 +3119,8 @@ func TestFetchLeiosEbTxsCompletesPartialTailOnReoffer(t *testing.T) {
 func TestStoreLeiosEndorserBlockManifestKeepsPartialTail(t *testing.T) {
 	t.Parallel()
 
-	const txCount = 100
-	const diffused = 40
+	const txCount = 600
+	const diffused = 512
 	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 13, txCount)
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 	require.NoError(
@@ -3297,8 +3279,8 @@ func TestRetainLeiosPartialTxsIgnoresUnknownBlock(t *testing.T) {
 func TestStoreLeiosEndorserBlockPartialDoesNotRefreshCacheTTL(t *testing.T) {
 	t.Parallel()
 
-	const txCount = 100
-	const diffused = 40
+	const txCount = 600
+	const diffused = 512
 	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 19, txCount)
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 	require.NoError(
@@ -3618,9 +3600,7 @@ func TestLeiosServeWaiterNotRegisteredForClosedConnection(t *testing.T) {
 	require.Contains(t, got.err.Error(), "cancelled")
 }
 
-// cappingBlockTxsRequester simulates a relay that serves at most maxPerResp
-// transactions per BlockTxsRequest — a prefix of the requested ascending
-// indices, mirroring the prototype relay's per-message size cap. Each returned
+// cappingBlockTxsRequester can return an invalid short response. Each returned
 // transaction's CBOR encodes its absolute index so callers can verify ordering.
 type cappingBlockTxsRequester struct {
 	maxPerResp   int // <= 0 means no cap (serve all requested)
@@ -3642,22 +3622,18 @@ func (r *cappingBlockTxsRequester) BlockTxsRequest(
 	} else if r.maxPerResp > 0 && n > r.maxPerResp {
 		n = r.maxPerResp
 	}
-	served := map[uint16]uint64{}
 	txs := make([]cbor.RawMessage, 0, n)
 	for k, idx := range requested {
 		if k >= n {
 			break
 		}
-		served[uint16(idx/64)] |= 1 << uint(
-			63-(idx%64),
-		) // MSB-first, see leiosWindowNeededMask
 		enc, err := dijkstraTestTx(idx)
 		if err != nil {
 			return nil, err
 		}
 		txs = append(txs, enc)
 	}
-	return leiosfetch.NewMsgBlockTxs(point, served, txs), nil
+	return leiosfetch.NewMsgBlockTxs(txs), nil
 }
 
 func requireTxsInIndexOrder(t *testing.T, txs []cbor.RawMessage, want int) {
@@ -3685,15 +3661,14 @@ func requireTxsInIndexOrder(t *testing.T, txs []cbor.RawMessage, want int) {
 	}
 }
 
-func TestFetchLeiosEbTxsBatchedReRequestsUntilComplete(t *testing.T) {
+func TestFetchLeiosEbTxsBatchedRequestsUntilComplete(t *testing.T) {
 	t.Parallel()
 
 	o := &Ouroboros{}
 	point := ocommon.Point{Slot: 100, Hash: []byte{0x01, 0x02}}
-	// 639 txs across 10 windows; relay caps each response at 50, so most
-	// windows need multiple rounds. Response echoes served bitmaps.
+	// 639 txs cross the eight-window request cap, so fetching takes two rounds.
 	txs, err := o.fetchLeiosEbTxsBatched(
-		&cappingBlockTxsRequester{maxPerResp: 50},
+		&cappingBlockTxsRequester{},
 		point,
 		639,
 		nil,
@@ -3854,36 +3829,29 @@ func TestLeiosNeededBitmap(t *testing.T) {
 	require.Len(t, leiosNeededBitmap(result, 600, 100), 9)
 }
 
-// buildBitmapResponseTxs serves every index named by bitmaps: it decodes them
-// in ascending order, sets the matching bit of the served response bitmap for
-// each (MSB-first, see leiosWindowNeededMask), and encodes the absolute index
-// in each transaction's fee (see requireTxsInIndexOrder). It is the
-// single source of truth for "serve everything requested, in full", shared by
-// every fake relay below that needs that baseline behavior.
+// buildBitmapResponseTxs serves every index named by bitmaps in ascending
+// order and encodes the absolute index in each transaction's fee. It is the
+// shared implementation for fake relays that serve a complete request.
 func buildBitmapResponseTxs(
 	bitmaps map[uint16]uint64,
-) (map[uint16]uint64, []cbor.RawMessage, error) {
+) ([]cbor.RawMessage, error) {
 	requested := leiosBitmapTxIndices(bitmaps)
 	slices.Sort(requested)
-	served := map[uint16]uint64{}
 	txs := make([]cbor.RawMessage, 0, len(requested))
 	for _, idx := range requested {
-		served[uint16(idx/64)] |= 1 << uint(
-			63-(idx%64),
-		) // MSB-first, see leiosWindowNeededMask
 		enc, err := dijkstraTestTx(idx)
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 		txs = append(txs, enc)
 	}
-	return served, txs, nil
+	return txs, nil
 }
 
 // servingBlockTxsRequester serves every requested transaction in a single
-// response (no per-message cap), echoing the served bitmap. It records the
-// largest number of windows asked for in one request so a test can assert the
-// fetch batches windows rather than requesting them one at a time.
+// response. It records the largest number of windows asked for in one request
+// so a test can assert the fetch batches windows rather than requesting them
+// one at a time.
 type servingBlockTxsRequester struct {
 	calls          int
 	maxWindowsSeen int
@@ -3898,107 +3866,70 @@ func (r *servingBlockTxsRequester) BlockTxsRequest(
 	if len(bitmaps) > r.maxWindowsSeen {
 		r.maxWindowsSeen = len(bitmaps)
 	}
-	served, txs, err := buildBitmapResponseTxs(bitmaps)
+	txs, err := buildBitmapResponseTxs(bitmaps)
 	if err != nil {
 		return nil, err
 	}
-	return leiosfetch.NewMsgBlockTxs(point, served, txs), nil
+	return leiosfetch.NewMsgBlockTxs(txs), nil
 }
 
-// oversizedBitmapRequester serves a legitimate-looking response for a small
-// endorser block but echoes a response bitmap that also references a window
-// far beyond txCount, simulating a relay (malicious or buggy) that declares a
-// tiny transaction count yet returns a disproportionately large bitmap
-type oversizedBitmapRequester struct {
-	// extraWindow, when non-zero, is set to extraMask in the response bitmap
-	// in addition to the legitimately served windows. extraMask has no effect
-	// when extraWindow is zero.
-	extraWindow uint16
-	extraMask   uint64
+// wrongCountBlockTxsRequester serves one more or one fewer transaction than
+// requested to exercise the in-process boundary used by tests and adapters.
+type wrongCountBlockTxsRequester struct {
+	delta int
 }
 
-func (r *oversizedBitmapRequester) BlockTxsRequest(
+func (r *wrongCountBlockTxsRequester) BlockTxsRequest(
 	_ context.Context,
-	point ocommon.Point,
+	_ ocommon.Point,
 	bitmaps map[uint16]uint64,
 ) (protocol.Message, error) {
-	served, txs, err := buildBitmapResponseTxs(bitmaps)
+	txs, err := buildBitmapResponseTxs(bitmaps)
 	if err != nil {
 		return nil, err
 	}
-	if r.extraWindow != 0 {
-		served[r.extraWindow] = r.extraMask
+	if r.delta < 0 {
+		txs = txs[:len(txs)-1]
+	} else if r.delta > 0 {
+		extra, err := dijkstraTestTx(len(txs))
+		if err != nil {
+			return nil, err
+		}
+		txs = append(txs, extra)
 	}
-	return leiosfetch.NewMsgBlockTxs(point, served, txs), nil
+	return leiosfetch.NewMsgBlockTxs(txs), nil
 }
 
-// TestFetchLeiosEbTxsBatchedRejectsOversizedResponseBitmap simulates a relay
-// for a 1-transaction endorser block that echoes a legitimate response for
-// that one transaction but also sets an unrelated, far-out-of-range bitmap
-// window (1000, all 64 bits). A response bitmap that claims transactions the
-// block cannot possibly have must be rejected outright (with an error
-// mentioning "leios-fetch response bitmap"), not silently expanded into a
-// huge index list.
-func TestFetchLeiosEbTxsBatchedRejectsOversizedResponseBitmap(t *testing.T) {
+func TestFetchLeiosEbTxsBatchedRejectsExtraResponseTransaction(t *testing.T) {
 	t.Parallel()
 
 	o := &Ouroboros{}
 	point := ocommon.Point{Slot: 1, Hash: []byte{0x09}}
-	// txCount 1 fits entirely in window 0; the relay also sets every bit of
-	// window 1000, referencing indices far beyond the single requested
-	// transaction.
-	requester := &oversizedBitmapRequester{
-		extraWindow: 1000,
-		extraMask:   math.MaxUint64,
-	}
+	requester := &wrongCountBlockTxsRequester{delta: 1}
 	txs, err := o.fetchLeiosEbTxsBatched(requester, point, 1, nil)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "leios-fetch response bitmap")
+	require.ErrorContains(t, err, "requested 1 transactions, got 2")
 	require.Empty(t, txs)
 }
 
-// TestFetchLeiosEbTxsBatchedRejectsResponseBitmapPastBoundary simulates a
-// relay for a 64-transaction endorser block (which fills window 0 exactly,
-// indices 0..63) that also sets a single bit of window 1 — offset 0 of that
-// window, i.e. index 64, the very first index past the last one this block
-// can have. Even this smallest possible one-past-the-end violation must be
-// rejected, proving the bound check is exact rather than merely "roughly
-// close enough".
-func TestFetchLeiosEbTxsBatchedRejectsResponseBitmapPastBoundary(t *testing.T) {
+func TestFetchLeiosEbTxsBatchedRejectsMissingResponseTransaction(t *testing.T) {
 	t.Parallel()
 
 	o := &Ouroboros{}
 	point := ocommon.Point{Slot: 1, Hash: []byte{0x09}}
-	// txCount 64 exactly fills window 0 (indices 0..63); window 1 has no valid
-	// indices at all, so setting just its offset-0 bit (bit 63, MSB-first —
-	// see leiosWindowNeededMask — i.e. index 64) must be rejected as one past
-	// the exact boundary.
-	requester := &oversizedBitmapRequester{
-		extraWindow: 1,
-		extraMask:   1 << 63,
-	}
+	requester := &wrongCountBlockTxsRequester{delta: -1}
 	txs, err := o.fetchLeiosEbTxsBatched(requester, point, 64, nil)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "leios-fetch response bitmap")
+	require.ErrorContains(t, err, "requested 64 transactions, got 63")
 	require.Empty(t, txs)
 }
 
-// TestFetchLeiosEbTxsBatchedAcceptsExactBoundaryResponseBitmap simulates a
-// relay for a 64-transaction endorser block that echoes a response bitmap
-// covering exactly window 0 (indices 0..63) and nothing more — the largest
-// bitmap that is still entirely valid for this block. This must be accepted
-// and the fetch must complete normally, proving the new bound check does not
-// reject legitimate, exactly-sized replies.
-func TestFetchLeiosEbTxsBatchedAcceptsExactBoundaryResponseBitmap(
+func TestFetchLeiosEbTxsBatchedAcceptsExactResponseCount(
 	t *testing.T,
 ) {
 	t.Parallel()
 
 	o := &Ouroboros{}
 	point := ocommon.Point{Slot: 1, Hash: []byte{0x09}}
-	// txCount 64 exactly fills window 0; a response bitmap covering only
-	// window 0 (the exact boundary, no extra window) must be accepted.
-	requester := &oversizedBitmapRequester{}
+	requester := &servingBlockTxsRequester{}
 	txs, err := o.fetchLeiosEbTxsBatched(requester, point, 64, nil)
 	require.NoError(t, err)
 	requireTxsInIndexOrder(t, txs, 64)

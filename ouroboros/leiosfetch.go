@@ -167,17 +167,14 @@ func (o *Ouroboros) leiosfetchServerBlockTxsRequest(
 		return nil, err
 	}
 	if !data.completeTxCache() {
-		available := make([]cbor.RawMessage, data.txCount)
-		data.seedLeiosPartialTxsLocked(available, nil)
-		servedBitmap, txs := leiosAvailableTxsFromBitmap(
-			available,
-			txBitmap,
+		return nil, fmt.Errorf(
+			"%w: incomplete cache for %d.%x",
+			oleiosfetch.ErrBlockTxsNotFound,
+			point.Slot,
+			point.Hash,
 		)
-		return oleiosfetch.NewMsgBlockTxs(point, servedBitmap, txs), nil
 	}
 	return oleiosfetch.NewMsgBlockTxs(
-		point,
-		txBitmap,
 		leiosTxsFromBitmap(data.txsRaw, txBitmap),
 	), nil
 }

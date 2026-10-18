@@ -341,7 +341,7 @@ func TestLeiosFetchServerMissingDataUsesUnavailableErrors(t *testing.T) {
 	require.ErrorIs(t, err, oleiosfetch.ErrBlockTxsNotFound)
 }
 
-func TestLeiosFetchServerBlockTxsServesAvailableBodiesWhileIncomplete(t *testing.T) {
+func TestLeiosFetchServerBlockTxsRequiresCompleteBodies(t *testing.T) {
 	t.Parallel()
 
 	tx0, ref0 := testLeiosManifestTx(t, 0)
@@ -374,25 +374,16 @@ func TestLeiosFetchServerBlockTxsServesAvailableBodiesWhileIncomplete(t *testing
 		point,
 		map[uint16]uint64{0: 1 << 63},
 	)
-	require.NoError(t, err)
-	response, ok := msg.(*oleiosfetch.MsgBlockTxs)
-	require.True(t, ok)
-	require.Equal(t, point, response.Point)
-	require.NotNil(t, response.Bitmaps)
-	require.Empty(t, response.Bitmaps)
-	require.Empty(t, response.TxsRaw)
+	require.Nil(t, msg)
+	require.ErrorIs(t, err, oleiosfetch.ErrBlockTxsNotFound)
 
 	msg, err = o.leiosfetchServerBlockTxsRequest(
 		oleiosfetch.CallbackContext{},
 		point,
 		map[uint16]uint64{0: (1 << 63) | (1 << 62)},
 	)
-	require.NoError(t, err)
-	response, ok = msg.(*oleiosfetch.MsgBlockTxs)
-	require.True(t, ok)
-	require.Equal(t, point, response.Point)
-	require.Equal(t, map[uint16]uint64{0: 1 << 62}, response.Bitmaps)
-	require.Equal(t, []cbor.RawMessage{tx1}, response.TxsRaw)
+	require.Nil(t, msg)
+	require.ErrorIs(t, err, oleiosfetch.ErrBlockTxsNotFound)
 
 	require.NoError(
 		t,
@@ -409,14 +400,8 @@ func TestLeiosFetchServerBlockTxsServesAvailableBodiesWhileIncomplete(t *testing
 		map[uint16]uint64{0: (1 << 63) | (1 << 62)},
 	)
 	require.NoError(t, err)
-	response, ok = msg.(*oleiosfetch.MsgBlockTxs)
+	response, ok := msg.(*oleiosfetch.MsgBlockTxs)
 	require.True(t, ok)
-	require.Equal(t, point, response.Point)
-	require.Equal(
-		t,
-		map[uint16]uint64{0: (1 << 63) | (1 << 62)},
-		response.Bitmaps,
-	)
 	require.Equal(t, []cbor.RawMessage{tx0, tx1}, response.TxsRaw)
 }
 
@@ -1593,7 +1578,7 @@ func (r manifestTxRequester) BlockTxsRequest(
 			txs = append(txs, r.txs[index])
 		}
 	}
-	return oleiosfetch.NewMsgBlockTxs(point, bitmaps, txs), nil
+	return oleiosfetch.NewMsgBlockTxs(txs), nil
 }
 
 type recordingManifestTxRequester struct {
@@ -1614,7 +1599,7 @@ func (r *recordingManifestTxRequester) BlockTxsRequest(
 			txs = append(txs, r.txs[index])
 		}
 	}
-	return oleiosfetch.NewMsgBlockTxs(point, bitmaps, txs), nil
+	return oleiosfetch.NewMsgBlockTxs(txs), nil
 }
 
 func TestFetchLeiosEbTxsBatchedRefetchesMismatchedRetainedPartial(

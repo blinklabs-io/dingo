@@ -2164,28 +2164,6 @@ func leiosTxsFromBitmap(
 	return ret
 }
 
-func leiosAvailableTxsFromBitmap(
-	txs []cbor.RawMessage,
-	requested map[uint16]uint64,
-) (map[uint16]uint64, []cbor.RawMessage) {
-	available := make(map[uint16]uint64)
-	for idx, tx := range txs {
-		if tx == nil {
-			continue
-		}
-		bucket := idx / 64
-		if bucket > math.MaxUint16 {
-			break
-		}
-		mask := uint64(1) << uint(63-(idx%64))
-		if requested[uint16(bucket)]&mask == 0 { // #nosec G115 -- checked above
-			continue
-		}
-		available[uint16(bucket)] |= mask // #nosec G115 -- checked above
-	}
-	return available, leiosTxsFromBitmap(txs, available)
-}
-
 func validateLeiosTxBitmap(count int, bitmaps map[uint16]uint64) error {
 	for bucket, mask := range bitmaps {
 		if mask == 0 {

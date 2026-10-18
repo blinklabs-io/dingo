@@ -332,7 +332,7 @@ func TestLeiosTxsOfferRetriesAfterAdmissionReleases(t *testing.T) {
 			ProtocolId: leiosfetch.ProtocolId,
 			IsResponse: true,
 			Messages: []protocol.Message{
-				leiosfetch.NewMsgBlockTxs(point, bitmap, []cbor.RawMessage{tx}),
+				leiosfetch.NewMsgBlockTxs([]cbor.RawMessage{tx}),
 			},
 		},
 	))
@@ -512,9 +512,7 @@ func TestLeiosTxsOfferHealthyPeerIsNotSuppressedByFailingPeer(t *testing.T) {
 			ProtocolId: leiosfetch.ProtocolId,
 			IsResponse: true,
 			Messages: []protocol.Message{
-				leiosfetch.NewMsgBlockTxs(
-					point, bitmap, nil,
-				),
+				leiosfetch.NewMsgBlockTxs(nil),
 			},
 		},
 	))
@@ -528,9 +526,7 @@ func TestLeiosTxsOfferHealthyPeerIsNotSuppressedByFailingPeer(t *testing.T) {
 			ProtocolId: leiosfetch.ProtocolId,
 			IsResponse: true,
 			Messages: []protocol.Message{
-				leiosfetch.NewMsgBlockTxs(
-					point, bitmap, []cbor.RawMessage{tx},
-				),
+				leiosfetch.NewMsgBlockTxs([]cbor.RawMessage{tx}),
 			},
 		},
 	))
@@ -647,7 +643,7 @@ func (r *leiosTxOfferTestRequester) BlockTxsRequest(
 		served[uint16(idx/64)] |= 1 << uint(63-(idx%64))
 		txs = append(txs, r.txs[idx])
 	}
-	return leiosfetch.NewMsgBlockTxs(point, served, txs), nil
+	return leiosfetch.NewMsgBlockTxs(txs), nil
 }
 
 func testLeiosTxOfferDeadlineFixture(
@@ -763,7 +759,7 @@ func TestLeiosTxsOfferHandsOffAcrossMultipleFailingPeers(t *testing.T) {
 				ProtocolId: leiosfetch.ProtocolId,
 				IsResponse: true,
 				Messages: []protocol.Message{
-					leiosfetch.NewMsgBlockTxs(point, bitmap, txs),
+					leiosfetch.NewMsgBlockTxs(txs),
 				},
 			},
 		))
@@ -928,9 +924,7 @@ func TestLeiosTxsOfferOwnerDisconnectHandsOffToWaiter(t *testing.T) {
 			ProtocolId: leiosfetch.ProtocolId,
 			IsResponse: true,
 			Messages: []protocol.Message{
-				leiosfetch.NewMsgBlockTxs(
-					point, bitmap, []cbor.RawMessage{tx},
-				),
+				leiosfetch.NewMsgBlockTxs([]cbor.RawMessage{tx}),
 			},
 		},
 	))
