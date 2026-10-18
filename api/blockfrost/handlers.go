@@ -772,8 +772,35 @@ func (b *Blockfrost) handleDRep(
 		return
 	}
 
-	drep, err := b.node.DRep(credential)
+	release, ok := b.drepAdmission.acquire(r.Context(), requestClient(r))
+	if !ok {
+		w.Header().Set("Retry-After", "1")
+		writeError(
+			w,
+			http.StatusTooManyRequests,
+			"Too Many Requests",
+			"DRep detail capacity reached, try again later",
+		)
+		return
+	}
+	defer release()
+	ctx, cancel := context.WithTimeout(r.Context(), drepRatificationWait)
+	defer cancel()
+	drep, err := b.node.DRep(ctx, credential)
 	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			return
+		}
+		if errors.Is(err, context.DeadlineExceeded) {
+			w.Header().Set("Retry-After", "1")
+			writeError(
+				w,
+				http.StatusServiceUnavailable,
+				"Service Unavailable",
+				"DRep detail deadline exceeded, try again later",
+			)
+			return
+		}
 		if errors.Is(err, ErrDRepNotFound) {
 			writeError(
 				w,

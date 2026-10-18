@@ -212,6 +212,9 @@ without a width bound. Epoch stakes, pool history and delegators, and account
 stake history read the reward snapshot tables; the snapshot labelled E is the
 distribution active in epoch E+1. Account MIRs, asset balances and address
 totals read `move_instantaneous_rewards_reward`, `asset` and `utxo`.
+The single-DRep detail read uses one context-bound read transaction after its
+epoch-boundary wait, so cancellation covers every metadata query and all fields
+come from one database view.
 The vote endpoints list every cast, not only each voter's current vote: one
 row per `governance_vote_history` entry, so a revote keeps its earlier casts.
 A cast counts toward the tally (`counted`) only when it is the voter's latest

@@ -2726,6 +2726,10 @@ Midnight events; `GetUtxoEvents` fails with `codes.FailedPrecondition` if
 `utxo_capacity`/`tx_capacity` are clamped server-side (`effectivePageSize`)
 to a bounded default/max instead of being forwarded to the store, since the
 store's own pagination contract treats a non-positive limit as unbounded.
+All `MidnightState` calls share a 16-request admission limit and a two-minute
+server deadline; excess calls fail with `ResourceExhausted`. The RPC context is
+also attached to every metadata read transaction, so client cancellation and
+the server deadline stop database work. Health checks bypass this admission.
 
 `Config.Database` (set to `midnightserver.NewDatabase(n.db)` — `adapter.go`'s
 `databaseAdapter`, which bridges the package-level
@@ -10494,12 +10498,11 @@ reserves a metadata read connection before briefly taking the commit barriers,
 keeping an exhausted-pool wait outside them. Admission remains held for the
 snapshot's lifetime and is capped at one below the provider's read-pool size,
 so client-paced `/matches` streams cannot consume the connection destructive
-rollback needs for operational reads. The server sets no overall write
-timeout, because a fixed deadline would truncate a large stream; instead a
-30-second write deadline is re-armed before every response write. A client that
-stops reading, or reads so slowly that a single write takes longer than the
-deadline, fails its stream and releases its snapshot; a stream whose every
-write completes within the deadline is never cut off, however long it runs.
+rollback needs for operational reads. Kupo admits at most two match streams
+globally and one per remote address, and each stream has a five-minute
+lifetime. Excess streams receive HTTP 429. A 30-second write deadline is also
+re-armed before every response write, so a client that stops reading releases
+its snapshot before the stream lifetime expires.
 
 Match results stream in 512-row pages through an ordering cursor, hydrate
 spending details only for the current page, check request cancellation between
@@ -10538,6 +10541,12 @@ shared `maxConcurrentMutations` limit bounds process-wide submission and
 evaluation work, while `maxConcurrentMutationsPerClient` caps one remote
 address (it may equal the shared limit, in which case one address can use the
 whole budget). Their defaults are 4 and 1, respectively; excess work receives HTTP 429 without reading its body.
+
+The DRep detail route separately admits four requests globally and one per
+remote address. Its two-minute deadline and client cancellation flow through
+the epoch-boundary wait and the single read transaction used for the detail,
+voting-power, proposal-deposit, and registration lookups. Excess requests
+receive HTTP 429.
 
 A Blockfrost-compatible REST API that provides read access to chain data,
 transaction evaluation, and transaction submission. Transaction evaluation is
