@@ -33,14 +33,15 @@ import (
 
 // Common errors returned by KeyStore operations.
 var (
-	ErrKeysNotLoaded    = errors.New("keys not loaded")
-	ErrVRFKeyNotLoaded  = errors.New("VRF key not loaded")
-	ErrKESKeyNotLoaded  = errors.New("KES key not loaded")
-	ErrOpCertNotLoaded  = errors.New("operational certificate not loaded")
-	ErrAlreadyRunning   = errors.New("keystore already running")
-	ErrNotRunning       = errors.New("keystore not running")
-	ErrInsecureFileMode = errors.New("insecure file mode")
-	ErrNotRegularFile   = errors.New("key path is not a regular file")
+	ErrKeysNotLoaded     = errors.New("keys not loaded")
+	ErrVRFKeyNotLoaded   = errors.New("VRF key not loaded")
+	ErrKESKeyNotLoaded   = errors.New("KES key not loaded")
+	ErrOpCertNotLoaded   = errors.New("operational certificate not loaded")
+	ErrAlreadyRunning    = errors.New("keystore already running")
+	ErrNotRunning        = errors.New("keystore not running")
+	ErrInsecureFileMode  = errors.New("insecure file mode")
+	ErrInsecureFileOwner = errors.New("insecure file owner")
+	ErrNotRegularFile    = errors.New("key path is not a regular file")
 )
 
 // OpCert represents an operational certificate that binds a KES key to a pool.
