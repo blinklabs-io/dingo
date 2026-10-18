@@ -6679,10 +6679,14 @@ func TestPinnedForkRollbackResyncsWithoutGenerationLockDeadlock(t *testing.T) {
 		"the generation writer should resume after fork handling")
 	assert.False(t, testutil.RequireReceive(t, admission, time.Second,
 		"a header must not be selector-admitted across a rollback generation"))
+	// The rollback publishes its own "local ledger rollback" resync first.
 	resync := testutil.RequireReceive(t, resyncCh, time.Second,
+		"the peer should re-intersect after the rollback")
+	assert.Equal(t, event.ChainsyncResyncReasonLocalLedgerRollback, resync.Reason)
+	resync = testutil.RequireReceive(t, resyncCh, time.Second,
 		"the peer should re-intersect before replaying the winning fork")
 	assert.Equal(t, event.ChainsyncResyncReasonPersistentFork, resync.Reason)
-	assert.Equal(t, fixture.currentTip, ls.chain.Tip())
+	assert.Equal(t, fixture.ancestorTip, ls.chain.Tip())
 	assert.Zero(t, ls.chain.HeaderCount())
 }
 
@@ -9158,9 +9162,18 @@ func TestTryResolveForkGenesisRequestsRevalidationForDenserShorterCandidate(
 	)
 
 	require.NoError(t, err)
-	assert.Equal(t, localTip, fixture.ls.chain.Tip())
+	assert.Equal(t, fixture.ancestorTip, fixture.ls.chain.Tip())
+	assert.NotEqual(t, localTip, fixture.ls.chain.Tip())
 	assert.Zero(t, fixture.ls.chain.HeaderCount())
+	// The rollback publishes its own "local ledger rollback" resync first.
 	resync := testutil.RequireReceive(
+		t,
+		resyncCh,
+		time.Second,
+		"the rollback should request a resync",
+	)
+	assert.Equal(t, event.ChainsyncResyncReasonLocalLedgerRollback, resync.Reason)
+	resync = testutil.RequireReceive(
 		t,
 		resyncCh,
 		time.Second,
@@ -11582,7 +11595,7 @@ func subscribeChainsyncResync(
 ) chan event.ChainsyncResyncEvent {
 	t.Helper()
 
-	resyncCh := make(chan event.ChainsyncResyncEvent, 1)
+	resyncCh := make(chan event.ChainsyncResyncEvent, 4)
 	subId := bus.SubscribeFunc(
 		event.ChainsyncResyncEventType,
 		func(evt event.Event) {
