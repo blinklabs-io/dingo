@@ -4431,6 +4431,10 @@ the verdict is computed, not *whether* it is enforced; the marker
 what forces that apply-time recheck, so its retention is load-bearing (see the
 retention-floor, eviction-horizon, and marker-restore invariants below and in
 `DATABASE.md`).
+The persisted marker also carries the supplying peer's remote address. Startup
+restores that address for the chainsync deny cooldown, but cannot reconstruct
+the original connection lifetime or its local address; only live in-memory
+attribution can target that exact connection's history and closure.
 
 The concrete acceptance case the defer *does* exist for is a genesis-delegate
 **reassignment** that the apply cursor has not reached yet. A
@@ -6455,7 +6459,7 @@ Four rules shape the deferred-header path beyond the marker itself.
 - **Bounded set.** The deferred set holds at most `defaultMaxDeferredHeaderMarkers` entries. The rollback-horizon eviction is keyed to the applied tip, so it cannot bound the set while the header chain runs far ahead of a stalled tip; `boundDeferredHeaderValidation` runs after each admission and, once over the cap, evicts the lowest-slot entries and their `dh` blob markers. Concurrent bounds serialize their snapshot, durable floor write, and marker deletion so an older floor cannot overwrite a newer one. Startup restore applies the same cap before returning, persisting the raised floor before deleting excess markers. A non-Mithril block below the floor gets full header verification at apply with or without a marker, so eviction never skips a check. The floor is reloaded at startup.
 - **Size limits at header time.** `verifyHeaderSizeLimits` rejects a Shelley-and-later header declaring a body larger than `maxBlockBodySize` or whose encoding exceeds `maxBlockHeaderSize`, using the applied ledger's parameters. A header from an epoch later than the ledger tip's defers instead of failing, because the parameters may change at the boundary.
 - **Admission-verified replay.** With `BlockPipelineValidateEnabled`, a block whose admission verification completed is recorded in a bounded in-memory set keyed by slot and hash. `decodeReadChainBatch` skips that slot's header check, and block-pipeline replay accepts the block without the VRF/KES and operational-certificate re-check when the recorded hash matches exactly. A block with no record, a record for another hash at its slot, or a deferred admission is verified in full. The set is not persisted, so blocks admitted before a restart are verified in full.
-- **Peer attribution.** The deferred marker records the connection that supplied the block (not persisted). When apply-time validation rejects the block with a verdict on the block itself, rather than a gap in local state, recovery publishes a `ChainsyncResyncEvent` with reason `deferred header validation failure` for that connection only. The chainsync handler treats it like the other peer-fault reasons: it clears that connection's observed header history, denies the peer in peer governance for the divergent-peer cooldown, and closes the connection.
+- **Peer attribution.** The deferred marker records the connection that supplied the block; persistence retains only its remote address. When apply-time validation rejects the block with a verdict on the block itself, rather than a gap in local state, recovery publishes a `ChainsyncResyncEvent` with reason `deferred header validation failure`. Live in-memory attribution lets the chainsync handler clear and close that exact connection as well as deny its remote address for the divergent-peer cooldown. After restart, the restored remote address still supports the cooldown, but does not identify the original connection lifetime for targeted history cleanup or closure.
 
 Header state verification resolves the producing pool's electing stake snapshot row once per header (`resolveElectingSnapshot`) for both the VRF-key cutoff and the leader stake.
 
@@ -9005,8 +9009,8 @@ mismatching file is removed before the pool moves on. The digest list archive
 admits one top-level JSON file of at most 64 MiB. The ancillary
 archive admits the signed manifest, the `ledger/` tree and the next immutable
 trio. The immutable pool charges each in-flight download at its size limit
-against a 16 GiB budget. Raising the limit lowers concurrency; an override
-above 16 GiB allows only one download, with capacity equal to that override.
+against a 32 GiB budget. Raising the limit lowers concurrency; an override
+above 32 GiB allows only one download, with capacity equal to that override.
 
 `Bootstrap()` returns a `BootstrapResult` (immutable directory,
 ancillary ledger-state directory, synthesized snapshot metadata).
@@ -9292,9 +9296,8 @@ a boundary that has already been crossed.
 
 That is a statement about who can attempt the write, not about whether it would
 be read, and the two are worth keeping apart: the layers above do not rely on
-it. A file read once and parsed from the buffer is not reachable by an in-place
-write at all, whoever makes it, because there is no second read for it to land
-in front of.
+it. An immutable entry up to 16 MiB is read once into a buffer; later in-place
+writes cannot change the bytes its parsers walk.
 
 That is the shape of the gap on both sides. `checkImmutableTrio` hashes each
 downloaded trio as its archive lands and closes it; the tip read, the catch-up
@@ -9308,7 +9311,7 @@ reader keeps:
 
 | tree | what travels | where it is re-checked |
 |---|---|---|
-| immutable (v2) | `BootstrapResult.ImmutableDigests`, the certified digest list the certificate's merkle root covers | `immutable.NewFromRootVerified` streams each chunk, primary and secondary file past a hash to establish its certified size, reads that many bytes, confirms the digest over the buffer, and the chunk and index parsers walk that buffer |
+| immutable (v2) | `BootstrapResult.ImmutableDigests`, the certified digest list the certificate's merkle root covers | `immutable.NewFromRootVerified` reads entries up to 16 MiB once, hashes the buffer, and gives that buffer to the chunk and index parsers; larger entries use a streaming verification pass, then are read and hashed into a buffer sized to the certified length |
 | ancillary state (v2, verified) | `BootstrapResult.AncillaryDigests`, the signed manifest's map | the state is read once into a buffer; `verifySignedState` hashes that buffer and `ParseSnapshotBytes` parses the same one |
 | ancillary table (v2, verified) | the manifest's entry for it, carried down as `ImportConfig.State.UTxOTableDigest` | the table is gigabytes and is mapped rather than read, so the digest is checked against the mapped bytes the decoder then walks |
 
@@ -9319,53 +9322,49 @@ the point of use. For the same reason an ancillary tree flagged `AncillaryVerifi
 without a digest map is refused outright — the flag would otherwise rest on a
 check nothing downstream can repeat.
 
-Note what none of these rows do: hash a descriptor and hand the parser that same
-descriptor. It looks equivalent and is not, because the parser then reads the
-file a second time. Rewinding does not detach a descriptor from its inode, so a
-writer who can modify the file in place changes what the second pass reads
-without changing anything the first pass could have seen — the check and the
-parse become two readings of one mutable thing, and only the first is the one
-compared against the digest. Where the payload fits in memory the fix is to read
-once and give both the buffer; where it does not, it is to map once and hash the
-mapping. Either way there is no second read to catch out.
+Note what none of these rows do: hash a descriptor and hand the parser that
+same descriptor. Rewinding does not detach it from its inode, so a writer can
+change the bytes the parser reads after the hash. Immutable entries up to 16 MiB
+use one bounded read for both hash and parse. Larger entries retain the streaming
+size and digest check before reading the certified length into a buffer; that
+buffer is hashed before parsing. The ancillary state uses one buffer, and the
+UTxO-HD table is verified and parsed through the same mapping.
 
 For the ImmutableDB that means the reader takes bytes rather than a file:
 `entryReader` (`database/immutable/entry.go`) is what the chunk and index
 parsers read through, and a verified open supplies a `bytesEntry` over the
-buffer it hashed while an ordinary local open supplies a `fileEntry` over the
-descriptor, exactly as before. Only the verified path buffers, so a node reading
-its own ImmutableDB still streams chunks from disk and holds none of one in
-memory.
+buffer it hashed. Entries up to 16 MiB use one read for verification and
+parsing. Larger entries keep the streaming verification pass before buffering;
+an ordinary local open still supplies a `fileEntry` over the descriptor, so a
+node reading its own ImmutableDB streams chunks from disk.
 
-The cost is one entry in memory at a time, bounded by the largest certified
-file, which is a chunk. The file is still read twice, as verifying it always
-meant: what the buffer removes is the parser's read, not one of those.
+The single-pass path holds at most 16 MiB for one entry. The larger-entry
+fallback keeps the certified-size allocation bound used by the previous
+verified reader.
 
-The first pass is why the second is safe to allocate for. How large a file is,
-is whoever wrote it's choice; how large the *certified* file is, is not, because
-SHA-256 preimage resistance stands between the two. So the streaming pass holds
-nothing and returns a size only for an entry whose digest already matched, and
-the buffered pass reads that many bytes. Reading straight into memory instead
-would size an allocation from an untrusted file, and a planted entry large
-enough would be materialised in full before its digest could be found wrong —
-turning a refusal into an out-of-memory kill. A refusal that cannot be reached
-is not a refusal.
+For entries above 16 MiB, the first pass is why the next allocation is safe.
+How large a file is, is whoever wrote it's choice; how large the *certified*
+file is, is not, because SHA-256 preimage resistance stands between the two.
+The streaming pass holds nothing and returns a size only for an entry whose
+digest already matched, then the buffered pass reads that many bytes. Reading
+straight into memory instead would size an allocation from an untrusted file,
+and a planted entry large enough would be materialised in full before its
+digest could be found wrong — turning a refusal into an out-of-memory kill. A
+refusal that cannot be reached is not a refusal.
 
-The second pass hashes again, and not out of caution: the parser reads the
-buffer, so the buffer is the thing that has to be compared. That is also what
-makes a write landing between the two passes a refusal rather than a hole — it
-changes the bytes, so it changes the digest. An entry that grew is read only to
-its certified length and the remainder is never looked at; one that shrank fails
-to fill the buffer, which is a mismatch like any other.
+The larger-entry pass hashes the buffer again because the parser reads that
+buffer, so it is the bytes that have to be compared. A write landing between
+the streaming and buffered passes therefore changes the digest and is refused.
+An entry that grew is read only to its certified length and the remainder is
+never looked at; one that shrank fails to fill the buffer, which is a mismatch
+like any other.
 
-Re-hashing is the cost the alternative was not worth. Binding by retained
-descriptor would mean holding one for every file in the snapshot from
-verification until load, which for a mainnet ImmutableDB is tens of thousands;
-binding by file identity (`os.SameFile`, size, mtime) is defeatable by an
-attacker who creates the replacement, since inode numbers are reused and
-timestamps are settable. Hashing what is read costs a pass over data the reader
-is about to read anyway, so it is bounded by SHA-256 throughput rather than by
-I/O.
+Binding by retained descriptor would mean holding one for every file in the
+snapshot from verification until load, which for a mainnet ImmutableDB is tens
+of thousands; binding by file identity (`os.SameFile`, size, mtime) is
+defeatable by an attacker who creates the replacement, since inode numbers are
+reused and timestamps are settable. The buffered entry binds the parser to the
+bytes verified during its open without retaining those descriptors.
 
 A result carrying no digest map, or an empty one, is refused rather than read
 unverified. Reading without digests would make "verify nothing" reachable by
@@ -10067,8 +10066,8 @@ verifying client bootstraps from the newest listed one.
 
 All public artifact reads, including pending-certificate and stake-distribution
 reads, share an admission bound of
-`2 * (immutableDownloadWorkers + 1)` (34) requests, enough for two v2
-bootstraps each running its 16 immutable downloads beside the ancillary one.
+`2 * (immutableDownloadWorkers + 1)` (66) requests, enough for two v2
+bootstraps each running its 32 immutable downloads beside the ancillary one.
 Public signature submissions use a separate four-request bound, so progressing
 archive transfers cannot consume their capacity. Either bound returns `503
 Service Unavailable` with `Retry-After: 1` when it is full. A
@@ -10298,8 +10297,11 @@ provider `mode: disabled` keeps that listener plaintext. Shared TLS values
 follow the normal CLI > environment > YAML > default precedence before this
 scope merge. Certificate files are loaded when the listener starts.
 
-Blockfrost, Kupo, Mesh, and UTxO RPC routes require no credentials, including
-health and reflection routes. MCP supports an optional shared token through Bearer
+Blockfrost read routes require no credentials. Its submission and evaluation
+routes require the provider's `authToken`; the listener cannot expose an
+authenticated mutation route on a non-loopback address without server TLS.
+Kupo, Mesh, and UTxO RPC routes require no credentials, including health and
+reflection routes. MCP supports an optional shared token through Bearer
 authentication or `X-API-Key`. Its `/healthz` route bypasses authentication and
 rate limiting; `/health` does not. Origin validation precedes both routes and
 preflight handling.
@@ -10307,9 +10309,9 @@ preflight handling.
 The legacy root `tlsCertFilePath`/`tlsKeyFilePath` fields remain a UTxO
 RPC-only TLS compatibility input among these providers; Midnight also
 uses the pair directly. They are not promoted to Blockfrost, Kupo, Mesh, or MCP.
-Blockfrost, Kupo, Mesh, and UTxO RPC use the root `bindAddr`, whose default is
-`0.0.0.0`. MCP overrides it with `plugins.api.mcp.config.host`, defaulting to
-`127.0.0.1`; an explicitly empty MCP host falls back to `bindAddr`.
+Kupo, Mesh, and UTxO RPC use the root `bindAddr`, whose default is `0.0.0.0`.
+Blockfrost and MCP override it with their provider `host`, defaulting to
+`127.0.0.1`; an explicitly empty provider host falls back to `bindAddr`.
 `metricsBindAddr` and `debugBindAddr` separately configure Prometheus and pprof;
 both default to loopback. `metricsAuthToken` protects both the ordinary and
 Mithril-sync Prometheus listeners when configured. The listener remains plain
@@ -10492,8 +10494,22 @@ truncated bodies retain the existing HTTP 400 response. The HTTP listener also
 sets a 60-second read timeout as a backstop, independently of its header,
 write, and idle timeouts.
 
-Optional TLS is configured through `plugins.api.blockfrost.config.tls`;
-requests do not require credentials. See "API security" above.
+The listener defaults to `127.0.0.1`. Set
+`plugins.api.blockfrost.config.host` to expose it on another interface.
+Transaction submission and evaluation require the configured
+`plugins.api.blockfrost.config.authToken`, accepted through the standard
+`project_id` header, `X-Blockfrost-Project-Id`, or Bearer authentication. A
+non-loopback listener with mutation authentication enabled also requires
+server TLS through `plugins.api.blockfrost.config.tls` so the credential is
+not sent in cleartext; `Start` enforces this for every server, including one
+built directly with `New`. When several credential headers are present, the
+request is accepted if any one of them matches. Read routes remain public.
+
+Mutation admission runs after authentication and before body decoding. The
+shared `maxConcurrentMutations` limit bounds process-wide submission and
+evaluation work, while `maxConcurrentMutationsPerClient` caps one remote
+address (it may equal the shared limit, in which case one address can use the
+whole budget). Their defaults are 4 and 1, respectively; excess work receives HTTP 429 without reading its body.
 
 A Blockfrost-compatible REST API that provides read access to chain data,
 transaction evaluation, and transaction submission. Transaction evaluation is

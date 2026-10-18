@@ -20,6 +20,7 @@ import (
 	"testing"
 
 	internalconfig "github.com/blinklabs-io/dingo/internal/config"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -32,6 +33,7 @@ func TestBarkLifecycleServiceCarriesTrustKey(t *testing.T) {
 		t,
 		os.WriteFile(keyFile, []byte("0123456789abcdef0123456789abcdef"), 0o600),
 	)
+	testutil.RestrictFileToCurrentUser(t, keyFile)
 	n := &Node{
 		config: Config{
 			databaseLifecycle: internalconfig.DatabaseLifecycleConfig{

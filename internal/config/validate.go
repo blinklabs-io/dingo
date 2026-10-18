@@ -393,6 +393,16 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 	blockfrostPort := APIPluginPort(c.Plugins.API.Blockfrost)
 	kupoPort := APIPluginPort(c.Plugins.API.Kupo)
 	meshPort := APIPluginPort(c.Plugins.API.Mesh)
+	blockfrostHost := c.BindAddr
+	if c.Plugins.API.Blockfrost.Provider == "builtin" {
+		blockfrostHost = "127.0.0.1"
+		if host, ok := c.Plugins.API.Blockfrost.Config["host"].(string); ok {
+			blockfrostHost = host
+			if host == "" {
+				blockfrostHost = c.BindAddr
+			}
+		}
+	}
 	mcpHost := "127.0.0.1"
 	if host, ok := c.Plugins.API.Mcp.Config["host"].(string); ok {
 		mcpHost = host
@@ -439,7 +449,7 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		},
 		{
 			"plugins.api.blockfrost.config.port",
-			c.BindAddr,
+			blockfrostHost,
 			blockfrostPort,
 			apiListeners,
 			false,

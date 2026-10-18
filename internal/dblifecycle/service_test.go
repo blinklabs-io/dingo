@@ -29,6 +29,7 @@ import (
 	"github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/dblifecycle"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/plugin"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -106,6 +107,7 @@ func TestServiceSignsAndVerifiesSnapshotsWithTrustKey(t *testing.T) {
 	writeKey := func(secret string) string {
 		path := filepath.Join(t.TempDir(), "trust.key")
 		require.NoError(t, os.WriteFile(path, []byte(secret), 0o600))
+		testutil.RestrictFileToCurrentUser(t, path)
 		return path
 	}
 	srcDir := filepath.Join(t.TempDir(), "src")

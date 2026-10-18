@@ -85,6 +85,7 @@ func testSnapshotTrustKeyFile(t *testing.T) string {
 	path := filepath.Join(t.TempDir(), "snapshot-trust.key")
 	keyFile := append(append([]byte(nil), testSnapshotTrustKey...), '\n')
 	require.NoError(t, os.WriteFile(path, keyFile, 0o600))
+	testutil.RestrictFileToCurrentUser(t, path)
 	return path
 }
 

@@ -32,12 +32,38 @@ func TestDeferredHeaderMarkerRoundTrip(t *testing.T) {
 	has, err := db.HasDeferredHeaderMarker("10:aa")
 	require.NoError(t, err)
 	require.False(t, has)
+	value, found, err := db.GetDeferredHeaderMarkerValue("10:aa")
+	require.NoError(t, err)
+	require.False(t, found)
+	require.Nil(t, value)
 
 	require.NoError(t, db.SetDeferredHeaderMarker("10:aa"))
 	require.NoError(t, db.SetDeferredHeaderMarker("20:bb"))
 	has, err = db.HasDeferredHeaderMarker("10:aa")
 	require.NoError(t, err)
 	require.True(t, has)
+	value, found, err = db.GetDeferredHeaderMarkerValue("10:aa")
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, []byte{1}, value)
+
+	require.NoError(t, db.SetDeferredHeaderMarkerWithValue(
+		"20:bb", []byte("true@127.0.0.1:3001"),
+	))
+	value, found, err = db.GetDeferredHeaderMarkerValue("20:bb")
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, []byte("true@127.0.0.1:3001"), value)
+	markers, err := db.ListDeferredHeaderMarkerValues()
+	require.NoError(t, err)
+	markerValues := make(map[string][]byte, len(markers))
+	for _, marker := range markers {
+		markerValues[marker.Key] = marker.Value
+	}
+	require.Equal(t, map[string][]byte{
+		"10:aa": []byte{1},
+		"20:bb": []byte("true@127.0.0.1:3001"),
+	}, markerValues)
 
 	keys, err := db.ListDeferredHeaderMarkers()
 	require.NoError(t, err)

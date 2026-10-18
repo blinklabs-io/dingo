@@ -59,6 +59,7 @@ func postEvaluate(
 	b := newTestBlockfrost(node)
 	req := httptest.NewRequest(http.MethodPost, target, strings.NewReader(body))
 	req.Header.Set("Content-Type", contentType)
+	req.Header.Set("project_id", testMutationAuthToken)
 	w := httptest.NewRecorder()
 	b.handler().ServeHTTP(w, req)
 	return w

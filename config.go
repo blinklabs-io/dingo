@@ -1852,9 +1852,9 @@ func WithBlockfetchLowWatermarkEnabled(enabled bool) ConfigOptionFunc {
 }
 
 // WithBlockfrostPort specifies the port for the
-// Blockfrost-compatible REST API server. The server binds
-// to the node's bindAddr on this port. 0 disables the
-// server (default).
+// Blockfrost-compatible REST API server. The built-in
+// provider binds to loopback unless its plugin host is
+// configured explicitly. 0 disables the server.
 func WithBlockfrostPort(port uint) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.Plugins.API.Blockfrost.Config["port"] = port
