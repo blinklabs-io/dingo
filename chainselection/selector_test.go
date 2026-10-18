@@ -6044,6 +6044,48 @@ func TestLoneFarFrontierAcceptsConnectedChain(t *testing.T) {
 	}
 }
 
+func TestStagedLoneFarFrontierIsCommittedAfterKConnectedHeaders(t *testing.T) {
+	t.Parallel()
+
+	for _, securityParam := range []uint64{2, 432} {
+		t.Run(fmt.Sprintf("k=%d", securityParam), func(t *testing.T) {
+			c := loneFarChain{localBlock: 175516, k: securityParam}
+			cs := c.newSelector(t)
+			conn := newTestConnectionId(2)
+			first := c.first()
+			var last PeerTipUpdateEvent
+
+			for i := uint64(0); i <= securityParam; i++ {
+				block := first + i
+				last = PeerTipUpdateEvent{
+					ConnectionId:     conn,
+					AdmissionID:      i + 1,
+					Tip:              c.tip(4687076),
+					ObservedTip:      c.tip(block),
+					ObservedPrevHash: c.prevHash(block),
+				}
+				disposition := cs.PreparePeerTipAdmissionDisposition(last)
+				if i < securityParam {
+					require.Equal(t, PeerTipUpdatePending, disposition)
+				} else {
+					require.Equal(t, PeerTipUpdateAccepted, disposition)
+				}
+			}
+
+			claim, ok := cs.pendingFarTipClaims[conn]
+			require.True(t, ok)
+			assert.Equal(t, securityParam+1, claim.run)
+			assert.True(t, claim.lone)
+
+			require.True(t, cs.CommitPeerTipAdmission(last))
+			peerTip := cs.GetPeerTip(conn)
+			require.NotNil(t, peerTip,
+				"ledger admission must promote the connected far frontier")
+			assert.Equal(t, last.ObservedTip.Point, peerTip.SelectionTip().Point)
+		})
+	}
+}
+
 func TestFarTipDispositionRejectsJumpAfterPendingClaim(t *testing.T) {
 	t.Parallel()
 

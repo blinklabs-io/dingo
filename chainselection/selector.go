@@ -358,8 +358,24 @@ type eagernessAnchor struct {
 }
 
 type peerTipAdmissionCandidate struct {
-	update    PeerTipUpdateEvent
-	plausible bool
+	update      PeerTipUpdateEvent
+	plausible   bool
+	farTipClaim *farTipClaim
+}
+
+func cloneCandidateFarTipClaim(
+	update PeerTipUpdateEvent,
+	plausible bool,
+	claim farTipClaim,
+	ok bool,
+) *farTipClaim {
+	if !plausible || !ok || !claim.lone ||
+		claim.slot != update.ObservedTip.Point.Slot ||
+		!bytes.Equal(claim.hash, update.ObservedTip.Point.Hash) {
+		return nil
+	}
+	claim.hash = bytes.Clone(claim.hash)
+	return &claim
 }
 
 // clonePeerTipAdmissionFrontier copies only state used while a header waits
@@ -1060,10 +1076,14 @@ func (cs *ChainSelector) PreparePeerTipAdmissionDisposition(
 		pending = append(pending, peerTipAdmissionCandidate{
 			update:    update,
 			plausible: plausible,
+			farTipClaim: cloneCandidateFarTipClaim(
+				update, plausible, claim, hasClaim,
+			),
 		})
 		truncated := false
-		if len(pending) > maxPendingPeerTipAdmissions {
-			pending = pending[len(pending)-maxPendingPeerTipAdmissions:]
+		pendingLimit := cs.pendingPeerTipAdmissionLimitLocked()
+		if len(pending) > pendingLimit {
+			pending = pending[len(pending)-pendingLimit:]
 			truncated = true
 		}
 		cs.pendingPeerTips[update.ConnectionId] = pending
@@ -1076,6 +1096,12 @@ func (cs *ChainSelector) PreparePeerTipAdmissionDisposition(
 			cs.rebuildPeerTipAdmissionFrontierLocked(update.ConnectionId)
 		case plausible:
 			cs.appendPeerTipAdmissionFrontierLocked(update)
+		}
+		for _, candidate := range cs.pendingPeerTips[update.ConnectionId] {
+			if candidate.update.AdmissionID == update.AdmissionID {
+				plausible = candidate.plausible
+				break
+			}
 		}
 		commitImmediately = cs.admittedPeerTipPointLocked(update)
 		accepted = true
@@ -1211,6 +1237,12 @@ func (cs *ChainSelector) rebuildPendingAdmissionStateLocked() {
 		evidence := hasClaim && claim.slot == update.ObservedTip.Point.Slot &&
 			bytes.Equal(claim.hash, update.ObservedTip.Point.Hash)
 		candidate.plausible = plausible
+		candidate.farTipClaim = cloneCandidateFarTipClaim(
+			update,
+			plausible,
+			claim,
+			hasClaim,
+		)
 		if !plausible && !evidence {
 			continue
 		}
@@ -1364,7 +1396,7 @@ func (cs *ChainSelector) CommitPeerTipAdmission(
 		point := update.ObservedTip.Point
 		if peerTip != nil && peerTip.ObservedTip.Point.Slot == point.Slot &&
 			bytes.Equal(peerTip.ObservedTip.Point.Hash, point.Hash) {
-			peerTip.recordAdmittedTipPoint(point, maxPendingPeerTipAdmissions)
+			peerTip.recordAdmittedTipPoint(point, maxAdmittedPeerTipPoints)
 		}
 		cs.mutex.Unlock()
 		cs.commitMatchingPeerTipAdmissions(update)
@@ -1455,6 +1487,17 @@ func (cs *ChainSelector) commitPeerTipAdmission(
 				cs.farTipClaims,
 				false,
 			)
+			if candidate.plausible {
+				plausible = true
+				if candidate.farTipClaim != nil {
+					if cs.farTipClaims == nil {
+						cs.farTipClaims = make(map[ouroboros.ConnectionId]farTipClaim)
+					}
+					claim := *candidate.farTipClaim
+					claim.hash = bytes.Clone(claim.hash)
+					cs.farTipClaims[update.ConnectionId] = claim
+				}
+			}
 			cs.committedPeerTips[update.ConnectionId] = update.AdmissionID
 			if i == len(pending)-1 {
 				delete(cs.pendingPeerTips, update.ConnectionId)
@@ -1488,7 +1531,7 @@ func (cs *ChainSelector) commitPeerTipAdmission(
 			cs.applyPeerTipAdmissionUpdateLocked(peerTip, candidate.update)
 			peerTip.recordAdmittedTipPoint(
 				candidate.update.ObservedTip.Point,
-				maxPendingPeerTipAdmissions,
+				maxAdmittedPeerTipPoints,
 			)
 			cs.peerTips[update.ConnectionId] = peerTip
 			modeChanged := cs.advanceSelectionModeLocked()
@@ -1543,7 +1586,7 @@ func (cs *ChainSelector) commitPeerTipAdmission(
 			point := update.ObservedTip.Point
 			if peerTip != nil && peerTip.ObservedTip.Point.Slot == point.Slot &&
 				bytes.Equal(peerTip.ObservedTip.Point.Hash, point.Hash) {
-				peerTip.recordAdmittedTipPoint(point, maxPendingPeerTipAdmissions)
+				peerTip.recordAdmittedTipPoint(point, maxAdmittedPeerTipPoints)
 			}
 			cs.mutex.Unlock()
 		}
@@ -1568,7 +1611,23 @@ func (cs *ChainSelector) ResolvePeerTipAdmission(
 	cs.RejectPeerTipAdmission(update)
 }
 
-const maxPendingPeerTipAdmissions = 256
+const (
+	minPendingPeerTipAdmissions = 256
+	maxAdmittedPeerTipPoints    = 256
+)
+
+// pendingPeerTipAdmissionLimitLocked retains enough staged headers to prove a
+// connected K+1-header far frontier while keeping a fixed minimum window.
+func (cs *ChainSelector) pendingPeerTipAdmissionLimitLocked() int {
+	if cs.securityParam < uint64(minPendingPeerTipAdmissions-1) {
+		return minPendingPeerTipAdmissions
+	}
+	maxInt := int(^uint(0) >> 1)
+	if cs.securityParam >= uint64(maxInt) {
+		return maxInt
+	}
+	return int(cs.securityParam + 1) //nolint:gosec // The bound above keeps the value within int range.
+}
 
 // admissionPeerCountLocked counts committed peers and pending-only peers once
 // each, keeping staged frontiers within the same resource bound as selection.
@@ -2418,6 +2477,15 @@ func (cs *ChainSelector) SetSecurityParam(k uint64) {
 		cs.mutex.Lock()
 		defer cs.mutex.Unlock()
 		cs.securityParam = k
+		pendingLimit := cs.pendingPeerTipAdmissionLimitLocked()
+		for connId, pending := range cs.pendingPeerTips {
+			if len(pending) > pendingLimit {
+				cs.pendingPeerTips[connId] = append(
+					[]peerTipAdmissionCandidate(nil),
+					pending[len(pending)-pendingLimit:]...,
+				)
+			}
+		}
 		cs.rebuildPendingAdmissionStateLocked()
 		shouldEvaluate = cs.advanceSelectionModeLocked()
 		// advanceSelectionModeLocked already refreshes the snapshot when it
