@@ -126,10 +126,13 @@ func BenchmarkRebuildPendingPeerTipAdmissions(b *testing.B) {
 
 func BenchmarkRebuildPendingPeerTipAdmissionsMaxBacklog(b *testing.B) {
 	cs, _ := admissionCostFixture(2161)
+	cs.mutex.RLock()
+	maxAdmissions := cs.pendingPeerTipAdmissionLimitLocked()
+	cs.mutex.RUnlock()
 	for peer := range admissionCostPeerCount - 1 {
 		connID := newTestConnectionId(100 + peer)
 		baseBlock := uint64(10_000 + peer)
-		for admissionID := uint64(2); admissionID <= maxPendingPeerTipAdmissions; admissionID++ {
+		for admissionID := uint64(1); admissionID <= uint64(maxAdmissions); admissionID++ {
 			block := baseBlock + admissionID
 			update := PeerTipUpdateEvent{
 				ConnectionId: connID,

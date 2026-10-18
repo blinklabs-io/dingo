@@ -5856,9 +5856,12 @@ it. Dingo implements this as a **corroboration gate**
   applicant's own staged frontier and counts every other connection's staged
   frontier, so connections from distinct hosts that stage the same points
   open the apply gate for each other even when no peer has been admitted yet.
-  Staged peers share the selector's tracked-peer limit, with at most 256
-  pending header observations per peer. A staged candidate resolves with its
-  point rather than with the connection that delivered it, because a header
+  Staged peers share the selector's tracked-peer limit, with at most
+  `max(256, K+1)` pending header observations per peer. This preserves enough
+  connected headers to prove a lone far frontier. A far-frontier claim becomes
+  committed only when the exact staged header is admitted by the ledger. A
+  staged candidate resolves with its point rather than with the connection
+  that delivered it, because a header
   delivered by several connections is published to the ledger once. Admitting
   the point promotes every staged candidate at that point, including the
   copies whose publish was suppressed as duplicates and the copies of
