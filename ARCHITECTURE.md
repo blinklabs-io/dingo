@@ -13776,7 +13776,11 @@ restoring into a throwaway directory under `SnapshotDir` (never the system
 temp directory, since the restore is as large as the snapshot) and deleting
 it afterward, rather
 than duplicating the manifest-checksum/consistency validation `Restore`
-already does.
+already does. It authenticates and inspects the manifest before constructing
+any provider and admits only Badger plus SQLite. PostgreSQL/MySQL metadata and
+S3/GCS blobs need separately configured disposable resources to make a full
+restore side effect free; Bark has no such configuration, so verification
+rejects those providers before a migration, reset, or object write can occur.
 
 Every async operation's goroutine (CreateSnapshot/Restore/Truncate/
 VerifySnapshot) runs its work through `runProtected`, which recovers any
