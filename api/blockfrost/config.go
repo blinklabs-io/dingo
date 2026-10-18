@@ -20,8 +20,16 @@ import "github.com/blinklabs-io/dingo/internal/apiconfig"
 // API server.
 type BlockfrostConfig struct {
 	// ListenAddress is the address to listen on.
-	// Defaults to ":3000".
+	// Defaults to "127.0.0.1:3000".
 	ListenAddress string
+	// AuthToken authorizes transaction submission and evaluation.
+	AuthToken string
+	// MaxConcurrentMutations bounds transaction submission and evaluation
+	// work across the server.
+	MaxConcurrentMutations uint
+	// MaxConcurrentMutationsPerClient bounds transaction submission and
+	// evaluation work from one remote address.
+	MaxConcurrentMutationsPerClient uint
 	// CORSAllowedOrigins configures Access-Control-Allow-Origin.
 	// Empty disables CORS.
 	CORSAllowedOrigins []string
