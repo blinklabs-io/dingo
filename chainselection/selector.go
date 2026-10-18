@@ -1602,7 +1602,7 @@ func (cs *ChainSelector) pendingPeerTipAdmissionLimitLocked() int {
 	if cs.securityParam >= uint64(maxInt) {
 		return maxInt
 	}
-	return int(cs.securityParam + 1)
+	return int(cs.securityParam + 1) //nolint:gosec // The bound above keeps the value within int range.
 }
 
 // admissionPeerCountLocked counts committed peers and pending-only peers once
