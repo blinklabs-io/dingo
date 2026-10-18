@@ -5998,19 +5998,13 @@ func (ls *LedgerState) tryResolveForkPinned(
 		}
 		return true, nil
 	}
-	if incomingGenerationPinned {
-		// A rollback publishes a new producer-authorization generation. The
-		// header that selected this fork was verified against the generation
-		// before that rollback, so it cannot authorize both the destructive
-		// transition and admission afterward. Re-intersection lets the peer
-		// replay the winning fork against the resulting ledger state without
-		// carrying a stale verdict across the rollback.
-		ls.requestChainsyncResync(
-			e.ConnectionId,
-			event.ChainsyncResyncReasonPersistentFork,
-			pending,
-		)
-		return true, nil
+	reverifyAfterRollback := incomingGenerationPinned
+	if reverifyAfterRollback {
+		// Rollback publishes a new producer-authorization generation and needs
+		// the generation write lock, so release the old generation before the
+		// destructive transition. The fork suffix is replayed after a fresh
+		// intersection and verified against the resulting ledger state.
+		releaseIncomingGeneration()
 	}
 
 	ls.config.Logger.Info(
@@ -6131,6 +6125,14 @@ func (ls *LedgerState) tryResolveForkPinned(
 	// Mark state as rollback so the next block header event logs
 	// "switched to fork" and increments the fork metric.
 	ls.setChainsyncState(RollbackChainsyncState)
+	if reverifyAfterRollback {
+		ls.requestChainsyncResync(
+			e.ConnectionId,
+			event.ChainsyncResyncReasonPersistentFork,
+			pending,
+		)
+		return true, nil
+	}
 
 	// Rollback succeeded — re-add the known peer fork segment from the
 	// common ancestor forward. Re-adding only the latest mismatching header

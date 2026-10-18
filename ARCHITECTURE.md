@@ -5913,7 +5913,10 @@ it. Dingo implements this as a **corroboration gate**
   verification before entering observed ancestry or the ledger queue.
   The verification snapshot generation travels with the staged selector
   candidate and ledger event; a rollback or concurrent publication that makes
-  it stale removes the candidate from corroboration and triggers recovery.
+  it stale removes the candidate from corroboration and triggers recovery. A
+  verified winning fork releases its old generation pin before rolling back,
+  then re-intersects so the fork suffix is verified against the generation the
+  rollback publishes.
   Genesis-overlay parameters remain
   authoritative for later slots within the applied epoch and era, so a tip
   earlier within that epoch does not by itself defer the overlay decision;
