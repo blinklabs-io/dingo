@@ -568,6 +568,10 @@ func transactionFailsToDecode(transactionCBOR []byte) bool {
 	return err != nil
 }
 
+// unmappedLedgerResult is reported for observations that map to no NDC
+// predicate, so the scenario fails without discarding the rest of the report.
+const unmappedLedgerResult = "Unknown"
+
 func mismatch(
 	id string,
 	expected expectedDoc,
@@ -575,10 +579,9 @@ func mismatch(
 ) (CaseOutcome, *Failure, error) {
 	result, ok := observedLedgerResult(observed)
 	if !ok {
-		return CaseOutcome{}, nil, fmt.Errorf(
-			"ledger result cannot be represented in the conformance report: %s",
-			observed,
-		)
+		// An unrecognised rejection must not abort the whole report; emit a
+		// result that no NDC expectation can equal and keep the Failure.
+		result = unmappedLedgerResult
 	}
 	expectedText := "Pass"
 	if expected.DecodingFailure {
