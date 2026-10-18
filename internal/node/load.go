@@ -994,7 +994,7 @@ func LoadWithDB(
 		)
 	} else {
 		blocksCopied, immutableTipSlot, err = copyBlocksDirect(
-			replayCtx, logger, immutableDir, c, replayBatches,
+			replayCtx, logger, immutableDir, c, replayBatches, false,
 		)
 	}
 	close(replayBatches)
@@ -1238,6 +1238,7 @@ func copyBlocksDirect(
 	immutableDir string,
 	c *chain.Chain,
 	replayBatches chan<- []gledger.Block,
+	validateBodyHash bool,
 ) (int, uint64, error) {
 	immDB, err := immutable.New(immutableDir)
 	if err != nil {
@@ -1275,7 +1276,7 @@ func copyBlocksDirect(
 	lastProgressLog := time.Time{}
 	var lastProgressSlot uint64
 	verifyCfg := lcommon.VerifyConfig{
-		SkipBodyHashValidation: true,
+		SkipBodyHashValidation: !validateBodyHash,
 	}
 	for {
 		rawBatch := make([]immutable.Block, 0, loadBlockBatchSize)

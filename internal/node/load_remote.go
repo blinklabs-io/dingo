@@ -708,7 +708,7 @@ func copyBlocksRemote(
 			return blocksCopied, tip.Slot, err
 		}
 		copied, _, err := copyBlocksDirect(
-			ctx, logger, readyDir, c, replayBatches,
+			ctx, logger, readyDir, c, replayBatches, true,
 		)
 		blocksCopied += copied
 		if err != nil {
