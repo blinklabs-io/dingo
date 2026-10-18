@@ -1502,8 +1502,7 @@ func (cs *ChainSelector) commitMatchingPeerTipAdmissions(
 		}
 	}()
 	for _, candidate := range candidates {
-		candidate.HeaderCryptoVerificationGeneration =
-			admitted.HeaderCryptoVerificationGeneration
+		candidate.HeaderCryptoVerificationGeneration = admitted.HeaderCryptoVerificationGeneration
 		cs.commitPeerTipAdmission(candidate, true, &admitted, generationPinned)
 	}
 }
@@ -1547,8 +1546,7 @@ func (cs *ChainSelector) commitPeerTipAdmission(
 			if candidate.update.AdmissionID != update.AdmissionID {
 				continue
 			}
-			candidate.update.HeaderCryptoVerificationGeneration =
-				update.HeaderCryptoVerificationGeneration
+			candidate.update.HeaderCryptoVerificationGeneration = update.HeaderCryptoVerificationGeneration
 			link := deliveredLink{
 				prevHash: candidate.update.ObservedPrevHash,
 				boundary: candidate.update.ObservedBoundary,
@@ -1632,7 +1630,6 @@ func (cs *ChainSelector) commitPeerTipAdmission(
 		shouldEvaluate = false
 	}
 	releaseGeneration()
-	releaseGeneration = func() {}
 	if evictedConn != nil && cs.config.EventBus != nil {
 		cs.publishSelection(
 			PeerEvictedEventType,

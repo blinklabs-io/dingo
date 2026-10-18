@@ -2259,8 +2259,7 @@ func (ls *LedgerState) recordPeerHeaderHistory(e ChainsyncEvent) {
 	hashKey := hex.EncodeToString(e.Point.Hash)
 	if existing, ok := history.byHash[hashKey]; ok {
 		if e.HeaderCryptoVerificationGeneration != 0 {
-			existing.event.HeaderCryptoVerificationGeneration =
-				e.HeaderCryptoVerificationGeneration
+			existing.event.HeaderCryptoVerificationGeneration = e.HeaderCryptoVerificationGeneration
 			history.byHash[hashKey] = existing
 		}
 		return
@@ -4693,8 +4692,7 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 		headerCryptoVerified = true
 		e.HeaderCryptoVerificationGeneration = headerCryptoVerificationGeneration
 		if e.PeerTipUpdate != nil {
-			e.PeerTipUpdate.HeaderCryptoVerificationGeneration =
-				headerCryptoVerificationGeneration
+			e.PeerTipUpdate.HeaderCryptoVerificationGeneration = headerCryptoVerificationGeneration
 		}
 		producerAuthorizationGeneration = headerCryptoVerificationGeneration
 	}
@@ -4940,13 +4938,24 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 					verificationGenerationReleased = true
 				}
 			}
-			resolved, resolveErr := ls.tryResolveForkPinned(
-				e,
-				notFitErr,
-				pending,
-				headerCryptoVerificationGeneration,
-				forkRelease,
-			)
+			var resolved bool
+			var resolveErr error
+			if forkRelease == nil {
+				resolved, resolveErr = ls.tryResolveFork(
+					e,
+					notFitErr,
+					pending,
+					headerCryptoVerificationGeneration,
+				)
+			} else {
+				resolved, resolveErr = ls.tryResolveForkPinned(
+					e,
+					notFitErr,
+					pending,
+					headerCryptoVerificationGeneration,
+					forkRelease,
+				)
+			}
 			if resolveErr != nil {
 				ls.undoHeaderMismatch(mismatchKey)
 				return fmt.Errorf(

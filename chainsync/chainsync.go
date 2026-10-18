@@ -1203,8 +1203,7 @@ func (s *State) RecordObservedHeader(h ObservedHeader) {
 	hashKey := hex.EncodeToString(h.Point.Hash)
 	if existing, exists := chainHistory.byHash[hashKey]; exists {
 		if h.HeaderCryptoVerificationGeneration != 0 {
-			existing.header.HeaderCryptoVerificationGeneration =
-				h.HeaderCryptoVerificationGeneration
+			existing.header.HeaderCryptoVerificationGeneration = h.HeaderCryptoVerificationGeneration
 			chainHistory.byHash[hashKey] = existing
 		}
 		return
