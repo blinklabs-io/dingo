@@ -220,17 +220,14 @@ func bootstrapV2(
 			artifact.Network,
 		)
 	}
-	// A certificate authenticates the immutable database content, while the
-	// ledger state and the final in-progress immutable trio are authenticated
-	// by the separately signed ancillary manifest. Do not start downloading
-	// immutable data when the second half of that trust boundary cannot be
-	// checked.
+	// The v2 flow imports ledger state only from the ancillary artifact. Refuse
+	// an incomplete artifact before downloading its immutable files.
+	if len(artifact.Ancillary.Locations) == 0 {
+		return nil, errors.New(
+			"mithril bootstrap requires ancillary locations",
+		)
+	}
 	if cfg.VerifyCertificateChain {
-		if len(artifact.Ancillary.Locations) == 0 {
-			return nil, errors.New(
-				"verified Mithril bootstrap requires ancillary locations",
-			)
-		}
 		if cfg.AncillaryVerificationKey == "" {
 			return nil, errors.New(
 				"verified Mithril bootstrap requires an ancillary verification key",
@@ -506,23 +503,14 @@ func bootstrapV2(
 	// for the error-return path; calling Wait twice is safe).
 	ancWg.Wait()
 	if ancillaryErr != nil {
-		if cfg.VerifyCertificateChain {
-			return nil, fmt.Errorf(
-				"verified Mithril ancillary data unavailable: %w",
-				ancillaryErr,
-			)
-		}
-		cfg.Logger.Warn(
-			"failed to download ancillary data; continuing without ledger state",
-			"component",
-			"mithril",
-			"error",
+		return nil, fmt.Errorf(
+			"mithril ancillary data unavailable: %w",
 			ancillaryErr,
 		)
 	}
-	if cfg.VerifyCertificateChain && ancillaryTree == nil {
+	if ancillaryTree == nil {
 		return nil, errors.New(
-			"verified Mithril bootstrap produced no ancillary data",
+			"mithril bootstrap produced no ancillary data",
 		)
 	}
 

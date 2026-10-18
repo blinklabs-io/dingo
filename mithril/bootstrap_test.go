@@ -615,36 +615,10 @@ func chunkDirUnder(base, rel string) *vettedDir {
 	return chunkDirIn(baseRoot, base, rel)
 }
 
-// TestBootstrapSurvivesAnUnavailableAncillaryArchive covers the non-verified
-// fallback: ancillary locations are advertised, every one of them fails, and
-// the bootstrap has to complete without a ledger state rather than fail.
-//
-// Both backends make this failure explicitly non-fatal unless certificate
-// verification is on, so the result they build carries no ancillary tree — and
-// every use of that tree between the failure and the return has to tolerate its
-// absence. `vettedDir`'s methods are nil-safe for exactly this reason: Path
-// returns "", Root returns nil, Close does nothing. A nil `*vettedDir` is the
-// representation of "there is no ancillary tree", not an error state, so the
-// bootstrap reports it by carrying the nil rather than by branching around it.
-//
-// The failure is staged as an unusable archive rather than absent locations.
-// Absent locations skip the download entirely, which does not exercise the
-// branch that has to decide whether an ancillary error is fatal.
-func TestBootstrapSurvivesAnUnavailableAncillaryArchive(t *testing.T) {
+// TestBootstrapRejectsAnUnavailableAncillaryArchive verifies that a v2
+// bootstrap cannot succeed without the only supported ledger-state source.
+func TestBootstrapRejectsAnUnavailableAncillaryArchive(t *testing.T) {
 	t.Parallel()
-
-	assertNoAncillary := func(t *testing.T, result *BootstrapResult) {
-		t.Helper()
-		assert.Nil(t, result.AncillaryRoot,
-			"a failed ancillary download must leave no handle")
-		assert.Empty(t, result.AncillaryDir,
-			"nor a directory name for one")
-		assert.False(t, result.AncillaryVerified)
-		// The half that has to survive: the immutable tree is what the load
-		// reads, and it is unaffected by the ancillary failure.
-		require.NotNil(t, result.ImmutableRoot)
-		assert.True(t, hasChunkFiles(result.ImmutableDir))
-	}
 
 	t.Run("v2", func(t *testing.T) {
 		fixture := newV2Fixture(t, v2FixtureOptions{immutableFileNumber: 1})
@@ -657,9 +631,7 @@ func TestBootstrapSurvivesAnUnavailableAncillaryArchive(t *testing.T) {
 		cfg.AncillaryVerificationKey = ""
 
 		result, err := Bootstrap(context.Background(), cfg)
-		require.NoError(t, err,
-			"a failed ancillary download is non-fatal without verification")
-		t.Cleanup(result.CloseHandles)
-		assertNoAncillary(t, result)
+		require.ErrorContains(t, err, "mithril ancillary data unavailable")
+		assert.Nil(t, result)
 	})
 }

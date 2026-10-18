@@ -262,12 +262,12 @@ type BootstrapResult struct {
 	ExtractDir string
 	// AncillaryDir is the root directory where the ancillary
 	// archive was extracted. Contains ledger/<slot>/{meta,state,
-	// tables/tvar}. Empty if no ancillary data was downloaded.
+	// tables/tvar}. Set on every successful bootstrap.
 	AncillaryDir string
 	// AncillaryRoot is an open handle on AncillaryDir, on the same terms as
 	// ImmutableRoot: the ledger-state import discovers and reads through it, so
 	// the tree the signed manifest was checked against is the tree that gets
-	// loaded. Nil when no ancillary data was obtained.
+	// loaded. Set on every successful bootstrap.
 	AncillaryRoot *os.Root
 	// AncillaryVerified reports that the ancillary tree's contents were checked
 	// against the signed ancillary manifest (a verified v2 bootstrap).
