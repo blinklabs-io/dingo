@@ -1311,6 +1311,14 @@ func (ls *LedgerState) verifyDeferredBlockHeaderState(
 	if err != nil {
 		return err
 	}
+	// A check that only VerifyReplayHeaders forces has no marker to clear,
+	// so it skips the per-block blob delete. Blocks below the eviction floor
+	// are already required above and still take the clear.
+	markerRequired := required
+	if !required && ls.config.VerifyReplayHeaders &&
+		!ls.slotCoveredByMithril(point.Slot) {
+		required = true
+	}
 	if !required {
 		return nil
 	}
@@ -1333,6 +1341,9 @@ func (ls *LedgerState) verifyDeferredBlockHeaderState(
 			),
 			Source: source,
 		}
+	}
+	if !markerRequired {
+		return nil
 	}
 	if err := ls.clearPersistentDeferredHeaderValidation(point, txn); err != nil {
 		return err

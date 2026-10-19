@@ -1012,6 +1012,12 @@ type LedgerStateConfig struct {
 	ManualBlockProcessing    bool
 	ForgeBlocks              bool
 	DatabaseWorkerPoolConfig DatabaseWorkerPoolConfig
+	// VerifyReplayHeaders makes ledger apply run the full VRF, KES,
+	// operational-certificate and leader-eligibility check on every block
+	// that no Mithril certificate covers, as if admission had deferred it.
+	// Replay feeds blocks that never passed admission, so apply is the only
+	// place their headers can be checked before they reach ledger state.
+	VerifyReplayHeaders bool
 	// BlockPipelineEnabled turns on parallel block decode in the chainsync
 	// replay loop (ledgerReadChainIterator): blocks read back from the
 	// primary chain are decoded by a small worker pool (gouroboros'
@@ -8142,7 +8148,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 					return fmt.Errorf("%s: %w", label, recoverErr)
 				}
 				if recovered {
-					return errRestartLedgerPipeline
+					return ls.restartAfterRecovery(rejected)
 				}
 				return fmt.Errorf("%s: %w", label, rejected)
 			}
@@ -8171,7 +8177,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 								return fmt.Errorf("recover rejected Leios certifying block: %w", recoverErr)
 							}
 							if recovered {
-								return errRestartLedgerPipeline
+								return ls.restartAfterRecovery(err)
 							}
 							return err
 						}
@@ -8657,7 +8663,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 						)
 					}
 					if recovered {
-						return errRestartLedgerPipeline
+						return ls.restartAfterRecovery(result.err)
 					}
 					return fmt.Errorf(
 						"read-chain decode or validation: %w",
@@ -8782,7 +8788,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 					)
 				}
 				if recovered {
-					return errRestartLedgerPipeline
+					return ls.restartAfterRecovery(err)
 				}
 				return fmt.Errorf(
 					"prepare block apply snapshot: %w",
@@ -9335,7 +9341,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 				}
 				if recovered {
 					completeReadResult()
-					return errRestartLedgerPipeline
+					return ls.restartAfterRecovery(err)
 				}
 				// A deferred header check that rejects an already-persisted
 				// block is deterministic: restarting the pipeline re-reads
@@ -9354,7 +9360,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 				}
 				if recovered {
 					completeReadResult()
-					return errRestartLedgerPipeline
+					return ls.restartAfterRecovery(err)
 				}
 				// A stale chain iterator delivers a fork block whose prev-hash
 				// doesn't match our current tip. This happens when a concurrent

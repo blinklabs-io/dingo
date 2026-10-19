@@ -878,6 +878,9 @@ func LoadWithDB(
 			// serve node.
 			FullPotRewardsEnabled: cfg.FullPotRewardsEnabled,
 			TrustedReplay:         true,
+			// Imported blocks never passed admission, so apply must verify
+			// each Praos header before the block reaches ledger state.
+			VerifyReplayHeaders: true,
 			// Immutable load replays blocks already accepted into the trusted
 			// database. Structural Leios certificate checks still run;
 			// cryptographic verification belongs to live admission, where the
