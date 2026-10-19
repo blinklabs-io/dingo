@@ -12787,11 +12787,18 @@ rollback re-baselines it and marks that epoch's UTxO verdict "not run" rather
 than reporting a comparison that would trivially match.
 
 Every session opens with a rollback to the origin, which Dingo refuses to
-acquire; the origin is epoch 0, so the tool does not ask. A chain that starts
-in Byron (preprod, epochs 0-3) has points Dingo cannot answer for -- no
-protocol parameters or stake there, and Koios holds none either -- so the tool
-skips blocks until Dingo first answers, logs where validation starts, and
-treats any later refusal as a real failure that ends the session.
+acquire; the origin is epoch 0, so the tool does not ask. Each block's epoch
+is resolved locally from Dingo's era history (`HardForkEraHistoryQuery`, read
+on a connection acquired at the volatile tip and cached, refetched only when a
+slot falls outside it), so no block's point is acquired just to learn its
+epoch. When the history is unavailable or does not cover a slot, the tool
+falls back to acquiring the point and asking `GetEpochNo`, logging the
+fallback once. Byron blocks (preprod, epochs 0-3) are never checked -- there
+are no protocol parameters or stake there, and Koios holds none either -- so
+they are skipped by era, still feed the UTxO reconstruction, and validation
+starts, with a log line, at the first Shelley-era epoch. In the fallback path
+the tool also skips blocks Dingo refuses as too old until it first answers,
+and treats any later refusal as a real failure that ends the session.
 
 `--koios-cache-path` makes those lookups cache-first against a `koios-parity` `cache.db`, which
 may be the one a dingo instance's own embedded observer is writing, provided
@@ -12809,6 +12816,7 @@ internal/nodeparity/       # shared library, untagged and importable
   watch.go                  # Watcher, WatchBlocks: persistent per-node ChainSync subscription with reconnect (full mode)
   incremental.go            # IncrementalCursor, RunIncremental: sequential per-block UTxO-delta orchestration (incremental mode)
   from_genesis.go           # RunFromGenesis: reconnecting from-genesis ChainSync walk, per-epoch checks (Koios mode)
+  epoch_oracle.go           # epochOracle: slot-to-epoch resolution from Dingo's cached era history
   koios_check.go            # CheckProtocolParams/CheckStakeDistribution/UTxOChanges: the Koios-backed comparisons
 
 cmd/node-parity/           # thin Cobra CLI wrapper: 'check', 'watch' and 'from-genesis' are the subcommands

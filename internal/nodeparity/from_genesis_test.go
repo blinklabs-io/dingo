@@ -974,6 +974,48 @@ type genesisFakeServer struct {
 	// true for fail with ErrAcquireFailurePointTooOld, as Dingo does for a
 	// point it cannot answer for.
 	refuseAcquireFn func(pcommon.Point) bool
+
+	// eraHistory, when non-nil, is the answer to HardForkEraHistoryQuery.
+	// Left nil, that query fails like any other unexpected one, so
+	// RunFromGenesis resolves every epoch through its per-point fallback.
+	eraHistory []eraSpan
+
+	// acquiredSlots records the slot of every specific-point Acquire
+	// attempt, refused or not; volatileTipAcquires and epochNoQueries count
+	// tip Acquires and ShelleyEpochNoQuery calls.
+	acquiredSlots       []uint64
+	volatileTipAcquires int
+	epochNoQueries      int
+}
+
+// queryCounts snapshots this fake's Acquire and GetEpochNo bookkeeping.
+func (s *genesisFakeServer) queryCounts() (
+	acquiredSlots []uint64, volatileTipAcquires, epochNoQueries int,
+) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]uint64(nil), s.acquiredSlots...),
+		s.volatileTipAcquires, s.epochNoQueries
+}
+
+// eraHistoryAnswer encodes spans the way Dingo answers
+// HardForkEraHistoryQuery.
+func eraHistoryAnswer(spans []eraSpan) any {
+	ret := make(cbor.IndefLengthList, 0, len(spans))
+	for _, sp := range spans {
+		var end any
+		if !sp.unbounded {
+			endEpoch := sp.startEpoch +
+				(sp.endSlot-sp.startSlot)/sp.epochSize
+			end = []any{big.NewInt(0), sp.endSlot, endEpoch}
+		}
+		ret = append(ret, []any{
+			[]any{big.NewInt(0), sp.startSlot, sp.startEpoch},
+			end,
+			[]any{sp.epochSize, uint(1000), []any{0, 0, []any{0}}, 0},
+		})
+	}
+	return ret
 }
 
 // failEpochNoOnce arranges for the next ShelleyEpochNoQuery Acquired at slot
@@ -1188,7 +1230,15 @@ func (s *genesisFakeServer) lsqConfig() localstatequery.Config {
 				target localstatequery.AcquireTarget,
 				_ bool,
 			) error {
+				if _, ok := target.(localstatequery.AcquireVolatileTip); ok {
+					s.mu.Lock()
+					s.volatileTipAcquires++
+					s.mu.Unlock()
+				}
 				if sp, ok := target.(localstatequery.AcquireSpecificPoint); ok {
+					s.mu.Lock()
+					s.acquiredSlots = append(s.acquiredSlots, sp.Point.Slot)
+					s.mu.Unlock()
 					if s.refuseOriginAcquire &&
 						sp.Point.Slot == 0 && len(sp.Point.Hash) == 0 {
 						return localstatequery.ErrAcquireFailurePointTooOld
@@ -1217,6 +1267,16 @@ func (s *genesisFakeServer) lsqConfig() localstatequery.Config {
 					switch inner.Query.(type) {
 					case *localstatequery.HardForkCurrentEraQuery:
 						return int(ledger.EraIdConway), nil
+					case *localstatequery.HardForkEraHistoryQuery:
+						s.mu.Lock()
+						spans := s.eraHistory
+						s.mu.Unlock()
+						if spans == nil {
+							return nil, errors.New(
+								"era history not configured",
+							)
+						}
+						return eraHistoryAnswer(spans), nil
 					default:
 						return nil, fmt.Errorf("unexpected hardfork query %T", inner.Query)
 					}
@@ -1245,6 +1305,9 @@ func (s *genesisFakeServer) lsqConfig() localstatequery.Config {
 							Results: map[localstatequery.UtxoId]ledger.BabbageTransactionOutput{},
 						}, nil
 					case *localstatequery.ShelleyEpochNoQuery:
+						s.mu.Lock()
+						s.epochNoQueries++
+						s.mu.Unlock()
 						if s.takeEpochNoFailure() {
 							return nil, errors.New(
 								"simulated epoch-number query failure",

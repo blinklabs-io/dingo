@@ -34,6 +34,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/internal/koiosparity"
 	ouroboros "github.com/blinklabs-io/gouroboros"
+	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/protocol"
 	"github.com/blinklabs-io/gouroboros/protocol/chainsync"
@@ -66,7 +67,9 @@ var errAcquireWithoutLocalStateQuery = errors.New(
 
 // currentEpochNo Acquires point and asks Dingo directly which epoch it
 // falls in (queryShelleyEpochNo, an unbounded query with no retention
-// floor), rather than computing it client-side from the raw slot number.
+// floor). RunFromGenesis uses it only as a fallback when Dingo's era history
+// (epochOracle) does not cover a point: one dial and Acquire per block is
+// what Dingo times out on under sync load.
 //
 // Dividing block.SlotNumber() by a per-network epoch-length constant is
 // wrong on preprod, and not fixable by simply using the right constant:
@@ -623,15 +626,38 @@ func RunFromGenesis(
 	// Blocks are skipped until Dingo answers, which starts validation at the
 	// first epoch it can. A refusal after that is a real failure and ends the
 	// session as before.
+	//
+	// The latch belongs to the per-point fallback only. While Dingo's era
+	// history covers a point, no point is acquired to resolve its epoch, so
+	// there is nothing to refuse.
 	var (
-		acquirable    bool
-		skippedBlocks int
-		lastRefusal   error
+		acquirable     bool
+		skippedBlocks  int
+		lastRefusal    error
+		loggedFallback bool
+		// skippedByron counts Byron blocks consumed without epoch checks.
+		skippedByron int
 	)
-	// epochAt resolves point's epoch from Dingo. skip is true when Dingo
-	// refused point as too old before ever answering: the caller consumes the
-	// block without checking it.
+	oracle := newEpochOracle(func(ctx context.Context) ([]eraSpan, error) {
+		return fetchEraSpans(ctx, dingoAddr, magic)
+	})
+	// epochAt resolves point's epoch from Dingo's era history, or from Dingo
+	// directly for a point the history does not cover. skip is true when
+	// Dingo refused point as too old before ever answering: the caller
+	// consumes the block without checking it.
 	epochAt := func(point pcommon.Point) (epoch uint64, skip bool, err error) {
+		epoch, oracleErr := oracle.epoch(ctx, point.Slot)
+		if oracleErr == nil {
+			return epoch, false, nil
+		}
+		if !loggedFallback {
+			loggedFallback = true
+			logf(
+				"nodeparity: Dingo's era history does not resolve slot %d, "+
+					"resolving epochs by querying Dingo per point: %v",
+				point.Slot, oracleErr,
+			)
+		}
 		epoch, err = currentEpochNo(ctx, dingoAddr, magic, point)
 		if err == nil {
 			if !acquirable {
@@ -866,6 +892,19 @@ func RunFromGenesis(
 							}
 						}
 
+						// Byron has no protocol parameters or stake
+						// distribution in Dingo or Koios, so its epochs are
+						// never compared. Deciding by the block's own era,
+						// not by Dingo refusing the point, keeps a Byron
+						// point from ever being acquired here, and leaving
+						// lastEpoch unset lets the first Shelley-era epoch
+						// be checked.
+						if block.Era().Id == byron.EraIdByron {
+							skippedByron++
+							progressed = true
+							return nil
+						}
+
 						epoch, skip, err := epochAt(point)
 						if err != nil {
 							// callbackErr, not fmt.Errorf: GetEpochNo's own
@@ -887,6 +926,17 @@ func RunFromGenesis(
 						}
 						haveLastEpoch = true
 						lastEpoch = epoch
+						if skippedByron > 0 {
+							logf(
+								"nodeparity: validation starts at slot "+
+									"%d (epoch %d): the %d earlier Byron "+
+									"block(s) have no protocol parameters "+
+									"or stake distribution, so they are not "+
+									"compared against Koios",
+								point.Slot, epoch, skippedByron,
+							)
+							skippedByron = 0
+						}
 
 						// About to Acquire and compare at this exact point --
 						// flush any hashes still buffered below the threshold
