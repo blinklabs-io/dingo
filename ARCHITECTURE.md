@@ -5956,8 +5956,16 @@ it. Dingo implements this as a **corroboration gate**
   until those parameters are applied. A header past the forecast horizon
   (`ledger.ErrHeaderBeyondForecastHorizon`),
   which ChainSync admission holds back until the ledger can forecast its slot,
-  so it never counts for selection, Genesis density, or corroboration before
-  it can be validated. A header whose
+  never counts for selection, Genesis density, eagerness, or ledger admission
+  before it can be validated. While the per-peer callback waits, its connected
+  point may exist in a separate corroboration-only view. That point can confirm
+  an independently verified staged candidate only when the slot and hash match
+  exactly. The selector then re-intersects the verified candidate's connection
+  so its withheld header is delivered again through the ordinary verification
+  and admission path, allowing ledger progress to move the forecast horizon.
+  The temporary witness is removed when the wait ends and is never promoted.
+  This avoids an empty-queue bootstrap deadlock without making an unverified
+  header selectable or applicable. A header whose
   point (slot and hash) is on the chain (`Chain.HoldsPoint`) at or below the
   ledger tip returns success without re-verification: it was fully verified
   when applied, and re-judging it against pool snapshots the 3-epoch

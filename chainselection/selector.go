@@ -249,12 +249,16 @@ type ChainSelector struct {
 	// One rolling snapshot per peer; candidate events retain only the bounded
 	// admission updates needed to promote or rebuild that snapshot.
 	pendingPeerTipFrontiers map[ouroboros.ConnectionId]*PeerChainTip
-	committedPeerTips       map[ouroboros.ConnectionId]uint64
-	eligible                map[ouroboros.ConnectionId]bool
-	priority                map[ouroboros.ConnectionId]int
-	evaluationTrigger       chan struct{}
-	bestPeerConn            *ouroboros.ConnectionId
-	localTip                ochainsync.Tip
+	// One unverified, connected header per peer may temporarily corroborate
+	// verified candidates while that peer waits for the forecast horizon. It
+	// is excluded from every selection and admission path.
+	forecastHorizonWitnesses map[ouroboros.ConnectionId]forecastHorizonWitness
+	committedPeerTips        map[ouroboros.ConnectionId]uint64
+	eligible                 map[ouroboros.ConnectionId]bool
+	priority                 map[ouroboros.ConnectionId]int
+	evaluationTrigger        chan struct{}
+	bestPeerConn             *ouroboros.ConnectionId
+	localTip                 ochainsync.Tip
 	// farTipClaims records, per connection, the most recent delivered
 	// frontier that exceeded the catch-up plausibility ceiling. Entries are
 	// provisional: they never enter peerTips and so never influence chain
@@ -374,6 +378,11 @@ type peerTipAdmissionCandidate struct {
 	update      PeerTipUpdateEvent
 	plausible   bool
 	farTipClaim *farTipClaim
+}
+
+type forecastHorizonWitness struct {
+	admissionID uint64
+	peerTip     *PeerChainTip
 }
 
 func cloneCandidateFarTipClaim(
@@ -517,22 +526,23 @@ func NewChainSelector(cfg ChainSelectorConfig) *ChainSelector {
 		cfg.MinCorroboratingPeers = 1
 	}
 	cs := &ChainSelector{
-		config:                  cfg,
-		securityParam:           cfg.SecurityParam,
-		maxTrackedPeers:         maxPeers,
-		mode:                    SelectionModePraos,
-		peerTips:                make(map[ouroboros.ConnectionId]*PeerChainTip),
-		pendingPeerTips:         make(map[ouroboros.ConnectionId][]peerTipAdmissionCandidate),
-		pendingPeerTipFrontiers: make(map[ouroboros.ConnectionId]*PeerChainTip),
-		farTipClaims:            make(map[ouroboros.ConnectionId]farTipClaim),
-		pendingFarTipClaims:     make(map[ouroboros.ConnectionId]farTipClaim),
-		committedPeerTips:       make(map[ouroboros.ConnectionId]uint64),
-		eligible:                make(map[ouroboros.ConnectionId]bool),
-		priority:                make(map[ouroboros.ConnectionId]int),
-		evaluationTrigger:       make(chan struct{}, 1),
-		nowFn:                   time.Now,
-		switchBackCooldown:      cfg.SwitchBackCooldown,
-		recentlyLeft:            make(map[ouroboros.ConnectionId]time.Time),
+		config:                   cfg,
+		securityParam:            cfg.SecurityParam,
+		maxTrackedPeers:          maxPeers,
+		mode:                     SelectionModePraos,
+		peerTips:                 make(map[ouroboros.ConnectionId]*PeerChainTip),
+		pendingPeerTips:          make(map[ouroboros.ConnectionId][]peerTipAdmissionCandidate),
+		pendingPeerTipFrontiers:  make(map[ouroboros.ConnectionId]*PeerChainTip),
+		forecastHorizonWitnesses: make(map[ouroboros.ConnectionId]forecastHorizonWitness),
+		farTipClaims:             make(map[ouroboros.ConnectionId]farTipClaim),
+		pendingFarTipClaims:      make(map[ouroboros.ConnectionId]farTipClaim),
+		committedPeerTips:        make(map[ouroboros.ConnectionId]uint64),
+		eligible:                 make(map[ouroboros.ConnectionId]bool),
+		priority:                 make(map[ouroboros.ConnectionId]int),
+		evaluationTrigger:        make(chan struct{}, 1),
+		nowFn:                    time.Now,
+		switchBackCooldown:       cfg.SwitchBackCooldown,
+		recentlyLeft:             make(map[ouroboros.ConnectionId]time.Time),
 	}
 	if cfg.GenesisMode {
 		cs.mode = SelectionModeGenesis
@@ -1138,6 +1148,69 @@ func (cs *ChainSelector) PreparePeerTipAdmissionDisposition(
 		return PeerTipUpdateRejected
 	}
 	return disposition
+}
+
+// PrepareForecastHorizonWitness records one connected header solely as a
+// Genesis corroboration witness while its ChainSync callback waits for the
+// ledger forecast horizon. The header has not passed consensus verification,
+// so it is kept outside every selection and admission path. The returned
+// connections have verified staged headers that the witness now corroborates
+// and should be re-intersected so those headers are delivered again.
+func (cs *ChainSelector) PrepareForecastHorizonWitness(
+	update PeerTipUpdateEvent,
+) []ouroboros.ConnectionId {
+	if update.AdmissionID == 0 ||
+		(cs.config.ConnectionLive != nil &&
+			!cs.config.ConnectionLive(update.ConnectionId)) {
+		return nil
+	}
+	cs.mutex.Lock()
+	defer cs.mutex.Unlock()
+	if !cs.genesisCorroborationActiveLocked() {
+		return nil
+	}
+	base := cs.latestPeerTipCandidateLocked(update.ConnectionId)
+	if base == nil {
+		base = cs.peerTips[update.ConnectionId]
+	}
+	if base == nil || update.ObservedTip.Point.Slot <= base.ObservedTip.Point.Slot ||
+		len(update.ObservedPrevHash) == 0 ||
+		!bytes.Equal(update.ObservedPrevHash, base.ObservedTip.Point.Hash) {
+		return nil
+	}
+	witnessTip := cs.clonePeerTipAdmissionFrontier(base)
+	cs.applyPeerTipAdmissionUpdateLocked(witnessTip, update)
+	cs.forecastHorizonWitnesses[update.ConnectionId] = forecastHorizonWitness{
+		admissionID: update.AdmissionID,
+		peerTip:     witnessTip,
+	}
+	var recoveries []ouroboros.ConnectionId
+	for connId := range cs.pendingPeerTips {
+		if connId == update.ConnectionId {
+			continue
+		}
+		candidate := cs.latestPeerTipCandidateLocked(connId)
+		if candidate != nil && cs.isPeerCorroboratedLocked(connId, candidate) {
+			recoveries = append(recoveries, connId)
+		}
+	}
+	slices.SortFunc(recoveries, func(a, b ouroboros.ConnectionId) int {
+		return cmp.Compare(a.String(), b.String())
+	})
+	return recoveries
+}
+
+// RemoveForecastHorizonWitness removes the temporary witness created for the
+// matching admission wait. A later wait on the same connection is unaffected.
+func (cs *ChainSelector) RemoveForecastHorizonWitness(
+	update PeerTipUpdateEvent,
+) {
+	cs.mutex.Lock()
+	defer cs.mutex.Unlock()
+	witness, ok := cs.forecastHorizonWitnesses[update.ConnectionId]
+	if ok && witness.admissionID == update.AdmissionID {
+		delete(cs.forecastHorizonWitnesses, update.ConnectionId)
+	}
 }
 
 func (cs *ChainSelector) admittedPeerTipPointLocked(
@@ -2518,6 +2591,7 @@ func (cs *ChainSelector) deletePeerLocked(connId ouroboros.ConnectionId) {
 	delete(cs.peerTips, connId)
 	delete(cs.pendingPeerTips, connId)
 	delete(cs.pendingPeerTipFrontiers, connId)
+	delete(cs.forecastHorizonWitnesses, connId)
 	delete(cs.committedPeerTips, connId)
 	delete(cs.eligible, connId)
 	delete(cs.priority, connId)
