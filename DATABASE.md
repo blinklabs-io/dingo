@@ -3050,6 +3050,17 @@ process's lifetime, with no later call able to repair it, and the next
 releases while the barrier's writer preference blocked every read-write `Txn`
 constructed behind it.
 
+Coordinated read snapshots (`NewReadSnapshotContext`) do not take that
+barrier's exclusive side. A read-write `Txn` holding the shared side also holds
+a narrower commit-phase barrier's shared side for the duration of `Commit`
+alone -- the commit timestamp update and both store commits -- and snapshot
+construction takes the commit phase exclusively while it opens the metadata
+and then the blob view. Uncommitted writes are invisible to both views, so the
+pair still shares one commit boundary, while construction waits only for a
+commit in progress rather than for every open read-write `Txn` to finish.
+`lifecycle.Snapshot` keeps `PauseCommits`, because its metadata backup needs
+the write connection an open read-write `Txn` holds.
+
 `Txn.OnFinish` exposes that same terminal transition to callers. It registers a
 callback that runs exactly once when the transaction reaches its terminal state
 on any path -- a successful commit, a failed commit, an explicit `Rollback`, a

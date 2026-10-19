@@ -568,6 +568,10 @@ func TestQueryViewLeavesAReadConnectionForOtherReaders(t *testing.T) {
 		t, err, context.DeadlineExceeded,
 		"the last read connection must stay free",
 	)
+	require.ErrorContains(
+		t, err, "admit read snapshot",
+		"a timed-out open must name the stage it was waiting in",
+	)
 
 	// The context only bounds the wait to acquire: a view outlives it.
 	for _, view := range views {
@@ -581,6 +585,44 @@ func TestQueryViewLeavesAReadConnectionForOtherReaders(t *testing.T) {
 	defer txn.Release()
 	_, err = db.GetTip(txn)
 	require.NoError(t, err, "a reader outside the views must still get a connection")
+}
+
+// TestAcquireQueryViewDoesNotWaitForOpenWriteTxn proves a view opens while a
+// read-write transaction is open and uncommitted. Snapshot construction used
+// to wait for every open read-write Txn to finish, so a long block-apply chunk
+// or epoch-boundary write held a LocalStateQuery Acquire past its deadline.
+func TestAcquireQueryViewDoesNotWaitForOpenWriteTxn(t *testing.T) {
+	t.Parallel()
+
+	ls, db := newDiskTestLedger(t)
+	committedTip := ochainsync.Tip{
+		Point: ocommon.NewPoint(1_000, repeatedBytes(32, 0x0B)),
+	}
+	require.NoError(t, db.SetTip(committedTip, nil))
+
+	writer := db.Transaction(t.Context(), true)
+	t.Cleanup(writer.Release)
+	require.NoError(t, db.SetTip(ochainsync.Tip{
+		Point: ocommon.NewPoint(2_000, repeatedBytes(32, 0x0C)),
+	}, writer))
+
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	view, err := ls.AcquireQueryView(ctx, QueryPoint{})
+	require.NoError(t, err, "an open write transaction must not hold off Acquire")
+	t.Cleanup(view.Close)
+
+	require.NoError(t, writer.Commit())
+	result, err := view.Query(
+		t.Context(), &olocalstatequery.ChainPointQuery{}, 0,
+	)
+	require.NoError(t, err)
+	point, ok := result.(ocommon.Point)
+	require.True(t, ok, "expected ocommon.Point, got %T", result)
+	require.Equal(
+		t, committedTip.Point.Slot, point.Slot,
+		"the view must not see the write that was uncommitted at Acquire",
+	)
 }
 
 func seedPendingRatification(

@@ -3823,7 +3823,7 @@ anything the result lacks is read in the write transaction as with the flag off.
 The goroutine runs at most one block ahead (block 1 overlaps block 0) and the
 apply worker never waits for it to acquire its read-pool connection: until the
 read transaction is open every block reads its own inputs, because snapshot
-opens parked on the chunk's commit barrier can hold the pool. It is cancelled
+opens parked on the chunk's commit can hold the pool. It is cancelled
 and joined, and its read transaction released, on every exit from the chunk
 callback. Dijkstra chunks do not use it, because endorser-block application
 consumes inputs that no ranking-block transaction names.
@@ -5173,8 +5173,15 @@ A snapshot pins a database read transaction (holding back WAL checkpoints and
 one read connection), so both its number and its lifetime are bounded. It
 counts against the database's read-snapshot admission cap, which always leaves
 one metadata read connection free for the rest of the node; once the cap is
-reached an `Acquire` waits up to five seconds for a snapshot to close and then
-fails. It is closed on `Release`,
+reached an `Acquire` waits up to four seconds for a snapshot to close and then
+fails. The wait stays below the gouroboros client's default five-second
+`Acquire` timeout, whose timer starts before the request arrives, so a client
+receives the `AcquireFailure` instead of timing out in `Acquiring` and closing
+the connection. Opening the snapshot waits for a commit in progress, not for
+every open read-write transaction to finish, so a long block-apply chunk or
+epoch-boundary write does not hold an `Acquire` past that bound. A timed-out
+open names the stage it was waiting in: admission, a read connection, or the
+commit barriers. It is closed on `Release`,
 on re-`Acquire` (before the replacement opens, so a connection never needs a
 second admission slot; a failed `Acquire` returns the protocol to idle with no
 session), on the connection closing, and on

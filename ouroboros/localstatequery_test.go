@@ -1511,3 +1511,26 @@ func TestLocalstatequeryReopen_CloseDuringReopenLeavesNoView(t *testing.T) {
 	require.False(t, hasSession, "nor a session for the dead connection")
 	require.False(t, hasAcquisition, "nor its in-flight acquisition")
 }
+
+// TestLocalStateQueryAcquireWaitBelowClientTimeout pins the server's Acquire
+// wait below the gouroboros client's default Acquire timeout. With the two
+// equal, a client always timed out in Acquiring before the AcquireFailure
+// reached it, and closed the connection.
+func TestLocalStateQueryAcquireWaitBelowClientTimeout(t *testing.T) {
+	t.Parallel()
+
+	clientTimeout := olocalstatequery.NewConfig().AcquireTimeout
+	require.Positive(t, clientTimeout)
+	require.Less(
+		t,
+		localStateQueryAcquireWait,
+		clientTimeout,
+		"an AcquireFailure must reach a default client before it gives up",
+	)
+	require.GreaterOrEqual(
+		t,
+		clientTimeout-localStateQueryAcquireWait,
+		time.Second,
+		"the margin must cover the request's transit and the reply's",
+	)
+}

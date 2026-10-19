@@ -162,12 +162,18 @@ func (ls *LedgerState) openQueryViewSnapshot(
 	txn, _, err := database.NewReadSnapshotContext(viewCtx, ls.db)
 	if !stopWatch() {
 		// ctx ended while the snapshot was opening and cancelled viewCtx,
-		// which also ends a transaction that did open.
+		// which also ends a transaction that did open. err names the stage
+		// the open was waiting in (admission, read connection, commit
+		// barrier), which ctx's error alone does not.
 		if err == nil {
 			txn.Release()
+			cancelView()
+			return nil, nil, fmt.Errorf("open ledger snapshot: %w", ctx.Err())
 		}
 		cancelView()
-		return nil, nil, fmt.Errorf("open ledger snapshot: %w", ctx.Err())
+		return nil, nil, fmt.Errorf(
+			"open ledger snapshot: %w: %w", ctx.Err(), err,
+		)
 	}
 	if err != nil {
 		cancelView()

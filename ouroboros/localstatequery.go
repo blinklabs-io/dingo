@@ -128,11 +128,13 @@ var errLocalStateQueryConnectionClosed = errors.New(
 	"local-state-query: connection closed during acquire",
 )
 
-// localStateQueryAcquireWait bounds how long an Acquire waits for a ledger
-// snapshot when every snapshot the database admits is already held. It
-// matches the Acquire timeout gouroboros clients use by default, past which
-// the client has given up on the reply anyway.
-const localStateQueryAcquireWait = 5 * time.Second
+// localStateQueryAcquireWait bounds how long an Acquire waits to open its
+// ledger snapshot. It sits below the 5s Acquire timeout gouroboros clients use
+// by default: the client's timer starts before the request reaches this node,
+// so a wait equal to it always loses the race, and the client tears the
+// connection down in Acquiring instead of receiving the AcquireFailure this
+// node answers with.
+const localStateQueryAcquireWait = 4 * time.Second
 
 // defaultLocalStateQueryViewMaxLifetime bounds how long a connection may hold
 // one acquired ledger snapshot when OuroborosConfig does not say otherwise.
