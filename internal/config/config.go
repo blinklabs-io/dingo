@@ -661,6 +661,24 @@ type DMQConfig struct {
 	MessageTTL uint `yaml:"messageTtl"   envconfig:"DINGO_DMQ_MESSAGE_TTL"`
 	// MaxMempoolSize bounds the message pool, in megabytes.
 	MaxMempoolSize uint `yaml:"maxMempoolSize" envconfig:"DINGO_DMQ_MAX_MEMPOOL_SIZE"`
+	// N2NPort is the TCP port peers connect to. It is independent of the
+	// Cardano relay port. Zero, the default, serves local clients only.
+	N2NPort uint `yaml:"n2nPort"      envconfig:"DINGO_DMQ_N2N_PORT"`
+	// ListenAddress is the IPv4 address the peer listener binds. Empty
+	// disables the IPv4 listener.
+	ListenAddress string `yaml:"listenAddress" envconfig:"DINGO_DMQ_LISTEN_ADDRESS"`
+	// ListenIPv6Address is the IPv6 address the peer listener binds. Empty
+	// disables the IPv6 listener.
+	ListenIPv6Address string `yaml:"listenIpv6Address" envconfig:"DINGO_DMQ_LISTEN_IPV6_ADDRESS"`
+	// TopologyFile is a dmq-node topology file naming the DMQ peers to dial.
+	// It is separate from the Cardano topology.
+	TopologyFile string `yaml:"topologyFile" envconfig:"DINGO_DMQ_TOPOLOGY_FILE"`
+	// MinPeers is the number of DMQ peers to keep connections to. It must
+	// not exceed MaxPeers.
+	MinPeers uint `yaml:"minPeers"     envconfig:"DINGO_DMQ_MIN_PEERS"`
+	// MaxPeers is the most DMQ peers to hold connections to. Zero allows
+	// none, which needs MinPeers of zero too.
+	MaxPeers uint `yaml:"maxPeers"     envconfig:"DINGO_DMQ_MAX_PEERS"`
 }
 
 // NetworkMagicExplicit reports whether a source supplied the DMQ network magic.
@@ -680,10 +698,14 @@ func (c *DMQConfig) UnmarshalYAML(node *yaml.Node) error {
 // DefaultDMQConfig returns the default DMQ settings.
 func DefaultDMQConfig() DMQConfig {
 	return DMQConfig{
-		Topic:          "mithril",
-		SocketPath:     "dingo-dmq.socket",
-		MessageTTL:     1800,
-		MaxMempoolSize: 128,
+		Topic:             "mithril",
+		SocketPath:        "dingo-dmq.socket",
+		MessageTTL:        1800,
+		MaxMempoolSize:    128,
+		ListenAddress:     "0.0.0.0",
+		ListenIPv6Address: "::",
+		MinPeers:          3,
+		MaxPeers:          10,
 	}
 }
 

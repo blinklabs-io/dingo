@@ -901,11 +901,18 @@
 
 # DMQ (CIP-0137 Decentralized Message Queue) runs alongside the Cardano stack
 # in the same process, on its own Unix socket and network magic. It serves
-# local message submission and notification only.
+# local message submission and notification. The peer settings (n2nPort,
+# listenAddress, listenIpv6Address, topologyFile, minPeers, maxPeers) are
+# validated but not yet used: no peer listener or dialer exists yet.
 # CLI: --dmq-enabled, --dmq-topic, --dmq-network-magic, --dmq-socket-path,
-#   --dmq-message-ttl, --dmq-max-mempool-size
+#   --dmq-message-ttl, --dmq-max-mempool-size, --dmq-n2n-port,
+#   --dmq-listen-address, --dmq-listen-ipv6-address, --dmq-topology-file,
+#   --dmq-min-peers, --dmq-max-peers
 # Env: DINGO_DMQ_ENABLED, DINGO_DMQ_TOPIC, DINGO_DMQ_NETWORK_MAGIC,
-#   DINGO_DMQ_SOCKET_PATH, DINGO_DMQ_MESSAGE_TTL, DINGO_DMQ_MAX_MEMPOOL_SIZE
+#   DINGO_DMQ_SOCKET_PATH, DINGO_DMQ_MESSAGE_TTL, DINGO_DMQ_MAX_MEMPOOL_SIZE,
+#   DINGO_DMQ_N2N_PORT, DINGO_DMQ_LISTEN_ADDRESS,
+#   DINGO_DMQ_LISTEN_IPV6_ADDRESS, DINGO_DMQ_TOPOLOGY_FILE,
+#   DINGO_DMQ_MIN_PEERS, DINGO_DMQ_MAX_PEERS
 # dmq:
   # Start the DMQ stack. Default: false.
   # enabled: false
@@ -921,6 +928,20 @@
   # messageTtl: 1800
   # Message pool size limit in megabytes. Default: 128.
   # maxMempoolSize: 128
+  # TCP port DMQ peers connect to, separate from the Cardano relay port.
+  # 0 serves local clients only. Default: 0.
+  # n2nPort: 4001
+  # Peer listener addresses. Empty disables that address family.
+  # Defaults: "0.0.0.0" and "::".
+  # listenAddress: "0.0.0.0"
+  # listenIpv6Address: "::"
+  # dmq-node topology file naming the DMQ peers to dial. Separate from the
+  # Cardano topology. It must exist when set. Default: unset.
+  # topologyFile: "/etc/dingo/dmq-topology.json"
+  # DMQ peers to keep connected, and the most to hold. minPeers must not
+  # exceed maxPeers; 0 and 0 allows no peers. Defaults: 3 and 10.
+  # minPeers: 3
+  # maxPeers: 10
 
 # Midnight indexer configuration
 # Indexing requires BOTH enabled: true AND API storage mode; either alone is
