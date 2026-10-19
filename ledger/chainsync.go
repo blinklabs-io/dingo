@@ -5292,6 +5292,14 @@ var ErrChainsyncHeaderDisconnected = errors.New(
 	"chainsync header does not connect to the local chain",
 )
 
+// ErrChainsyncHeaderNeedsResync is returned when a forecast-held header
+// connects to the local chain but no queued or in-flight blockfetch can
+// publish state that advances the forecast horizon. Re-intersection makes the
+// peer replay from the local chain; this is not a peer fault.
+var ErrChainsyncHeaderNeedsResync = errors.New(
+	"chainsync header forecast has no local block work to advance it",
+)
+
 // AwaitChainsyncHeaderAdmission enforces the Ouroboros ChainSync future-header
 // rule against the timestamp recorded at network ingress. It must run from the
 // per-peer ChainSync callback before the header updates observed-tip, dedup, or
@@ -5307,11 +5315,12 @@ var ErrChainsyncHeaderDisconnected = errors.New(
 // client does for OutsideForecastRange; until then it must not influence chain
 // selection or reach blockfetch. Such a header whose predecessor does not
 // connect to the local chain is not held: it returns an error wrapping
-// ErrChainsyncHeaderDisconnected, because no publication can release it.
-// Other conversion failures fail closed. A zero
-// timestamp is retained for compatibility with synthetic/internal events that
-// never crossed the network ingress path. As with other Go APIs that accept a
-// context, ctx must not be nil.
+// ErrChainsyncHeaderDisconnected. A connected header also returns
+// ErrChainsyncHeaderNeedsResync when no queued or in-flight blockfetch can
+// publish state to advance the forecast. Other conversion failures fail
+// closed. A zero timestamp is retained for compatibility with
+// synthetic/internal events that never crossed the network ingress path. As
+// with other Go APIs that accept a context, ctx must not be nil.
 func (ls *LedgerState) AwaitChainsyncHeaderAdmission(
 	ctx context.Context,
 	e ChainsyncEvent,
@@ -5376,11 +5385,12 @@ func (ls *LedgerState) AwaitChainsyncHeaderAdmission(
 }
 
 // flushQueuedHeadersForHorizonWait starts blockfetch for headers already
-// queued while admission holds the next header past the forecast horizon.
+// queued while admission holds the next header past the forecast horizon, and
+// reports whether a queued or in-flight fetch can publish a newer snapshot.
 // Far from the peer tip the header handler waits for a full batch before
 // fetching, but the held header is the one that would complete it, and only
 // applying the queued blocks moves the horizon that releases it. It is a no-op
-// when a fetch is already running or nothing is queued.
+// when no fetch is running and nothing is queued.
 //
 // The fetch origin is the header pipeline owner, which delivered the queued
 // headers, rather than waitingConnId: peer selection treats the origin as a
@@ -5390,28 +5400,31 @@ func (ls *LedgerState) AwaitChainsyncHeaderAdmission(
 // already have been processed and must not be undone here.
 func (ls *LedgerState) flushQueuedHeadersForHorizonWait(
 	waitingConnId ouroboros.ConnectionId,
-) {
-	if ls.chain == nil || ls.chain.HeaderCount() == 0 {
-		return
-	}
+) bool {
 	var pending pendingPublishes
 	defer pending.flush()
-	pending.drainChain(ls.chain)
 	ls.chainsyncMutex.Lock()
 	defer ls.chainsyncMutex.Unlock()
 	ls.chainsyncBlockfetchMutex.Lock()
 	defer ls.chainsyncBlockfetchMutex.Unlock()
 	if ls.chainsyncBlockfetchReadyChan != nil ||
-		ls.blockfetchContinuationPending ||
-		ls.chain.HeaderCount() == 0 {
-		return
+		ls.activeBlockfetchRequestDone != nil ||
+		ls.blockfetchContinuationPending {
+		return true
+	}
+	if ls.chain == nil {
+		return false
+	}
+	pending.drainChain(ls.chain)
+	if ls.chain.HeaderCount() == 0 {
+		return false
 	}
 	connId := ls.headerPipelineConnId
 	if connIdKey(connId) == "" {
 		connId = waitingConnId
 	}
 	if !ls.isConnectionLive(connId) {
-		return
+		return false
 	}
 	ls.setSelectedBlockfetchConnId(connId)
 	initialConnId := ls.selectInitialBlockfetchConn(connId)
@@ -5422,6 +5435,9 @@ func (ls *LedgerState) flushQueuedHeadersForHorizonWait(
 		"header_count", ls.chain.HeaderCount(),
 	)
 	ls.startQueuedBlockfetchWithFallbackLocked(initialConnId, connId, &pending)
+	return ls.chainsyncBlockfetchReadyChan != nil ||
+		ls.activeBlockfetchRequestDone != nil ||
+		ls.blockfetchContinuationPending
 }
 
 // awaitForecastHorizon blocks until the published ledger state can forecast
@@ -5448,7 +5464,20 @@ func (ls *LedgerState) awaitForecastHorizon(
 			)
 			logged = true
 		}
-		ls.flushQueuedHeadersForHorizonWait(e.ConnectionId)
+		if !ls.flushQueuedHeadersForHorizonWait(e.ConnectionId) {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if !ls.headerBeyondForecastHorizon(ctx, e) {
+				return nil
+			}
+			select {
+			case <-published:
+				continue
+			default:
+			}
+			return ErrChainsyncHeaderNeedsResync
+		}
 		select {
 		case <-published:
 		case <-ctx.Done():

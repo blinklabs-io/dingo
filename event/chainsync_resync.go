@@ -64,6 +64,11 @@ const (
 	// restarts from fresh intersect points. It is not a peer-fault signal and
 	// does not impose a peer cooldown.
 	ChainsyncResyncReasonDisconnectedHeaderAdmission = "disconnected header admission"
+	// ChainsyncResyncReasonForecastHorizonNoWork re-intersects a connected
+	// ChainSync peer when no local queued or in-flight blockfetch can advance
+	// the forecast horizon. It is not a peer-fault signal and does not impose
+	// a peer cooldown.
+	ChainsyncResyncReasonForecastHorizonNoWork = "forecast horizon has no local block work"
 	// ChainsyncResyncReasonBehindLocalTip re-intersects an ingress-eligible
 	// ChainSync connection whose delivered header trails the local tip by more
 	// than the security parameter while the peer's advertised tip does not,

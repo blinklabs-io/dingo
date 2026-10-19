@@ -16925,9 +16925,13 @@ it retries on the origin, then on the active best peer, and when those fail the 
 and a re-sync requested, since the wait cannot end while nothing fetches the
 queued blocks. The discarded headers' invalidation is published after the ledger
 locks are released, so their Leios announcements and derived votes are removed
-without waiting for another chain event. As in the reference, the forecast is
-measured from where the peer's chain leaves the local chain: a fork that left
-before the ledger tip gets that
+without waiting for another chain event. If no fetch is active and no queued
+headers can be fetched, admission rechecks the forecast and pending snapshot
+publication, then returns `ErrChainsyncHeaderNeedsResync`. Ouroboros
+re-intersects that peer from the local chain with a non-penalizing reason,
+instead of leaving its callback waiting for work that cannot start. As in the
+reference, the forecast is measured from where the peer's chain leaves the
+local chain: a fork that left before the ledger tip gets that
 point's shorter horizon (`chainsyncForkAnchor`, `forecastSummaryFrom`). The
 intersection is resolved from the peer's recorded headers; a header extending
 the local header chain resolves on the first step, and an intersection that
