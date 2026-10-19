@@ -856,10 +856,15 @@ func (cs *ChainSelector) updatePeerTipObservedLinked(
 	link deliveredLink,
 ) bool {
 	return cs.updatePeerTipObservedLinkedDisposition(
-		connId, tip, observedTip, vrfOutput, praosView, link,
+		connId, tip, observedTip, vrfOutput, praosView, link, false,
 	) == PeerTipUpdateAccepted
 }
 
+// updatePeerTipObservedLinkedDisposition records a peer tip and re-evaluates
+// selection. generationPinned reports that the caller already holds the
+// ledger's header-crypto generation pin; the evaluation must then reuse it,
+// because a second read-lock of the ledger's generation RWMutex blocks behind
+// any queued publisher, which in turn waits for the caller's pin.
 func (cs *ChainSelector) updatePeerTipObservedLinkedDisposition(
 	connId ouroboros.ConnectionId,
 	tip ochainsync.Tip,
@@ -867,6 +872,7 @@ func (cs *ChainSelector) updatePeerTipObservedLinkedDisposition(
 	vrfOutput []byte,
 	praosView PraosTiebreakerView,
 	link deliveredLink,
+	generationPinned bool,
 ) PeerTipUpdateDisposition {
 	if cs.config.ConnectionLive != nil &&
 		!cs.config.ConnectionLive(connId) {
@@ -1017,14 +1023,14 @@ func (cs *ChainSelector) updatePeerTipObservedLinkedDisposition(
 	}
 
 	if revoke {
-		cs.RemovePeer(connId)
+		cs.removePeer(connId, generationPinned)
 	}
 	if disposition != PeerTipUpdateAccepted {
 		return disposition
 	}
 
 	if shouldEvaluate {
-		cs.EvaluateAndSwitch()
+		cs.evaluateAndSwitch(generationPinned)
 	}
 
 	return PeerTipUpdateAccepted
@@ -1551,11 +1557,12 @@ func (cs *ChainSelector) commitPeerTipAdmissionResolved(
 			cs.RejectPeerTipAdmission(update)
 			return false
 		}
-		generationPinned = true
+		// A zero generation takes no pin, so evaluation must still take its own.
+		generationPinned = update.HeaderCryptoVerificationGeneration != 0
 	}
 	defer releaseGeneration()
 	if update.AdmissionID == 0 {
-		accepted := cs.updatePeerTipObservedLinked(
+		accepted := cs.updatePeerTipObservedLinkedDisposition(
 			update.ConnectionId,
 			update.Tip,
 			update.ObservedTip,
@@ -1565,7 +1572,8 @@ func (cs *ChainSelector) commitPeerTipAdmissionResolved(
 				prevHash: update.ObservedPrevHash,
 				boundary: update.ObservedBoundary,
 			},
-		)
+			generationPinned,
+		) == PeerTipUpdateAccepted
 		if !accepted {
 			return false
 		}
@@ -1747,7 +1755,10 @@ func (cs *ChainSelector) commitPeerTipAdmission(
 		}
 	}()
 	if accepted && shouldEvaluate {
-		cs.evaluateAndSwitch(true)
+		// pinPeerTipAdmissionGeneration takes no pin for a zero generation.
+		cs.evaluateAndSwitch(
+			generationPinned || update.HeaderCryptoVerificationGeneration != 0,
+		)
 		shouldEvaluate = false
 	}
 	releaseGeneration()
@@ -1764,7 +1775,7 @@ func (cs *ChainSelector) commitPeerTipAdmission(
 		if requireStaged {
 			return false
 		}
-		accepted = cs.updatePeerTipObservedLinked(
+		accepted = cs.updatePeerTipObservedLinkedDisposition(
 			update.ConnectionId,
 			update.Tip,
 			update.ObservedTip,
@@ -1774,7 +1785,8 @@ func (cs *ChainSelector) commitPeerTipAdmission(
 				prevHash: update.ObservedPrevHash,
 				boundary: update.ObservedBoundary,
 			},
-		)
+			generationPinned,
+		) == PeerTipUpdateAccepted
 		if accepted {
 			cs.mutex.Lock()
 			if update.AdmissionID > cs.committedPeerTips[update.ConnectionId] {
@@ -1791,7 +1803,7 @@ func (cs *ChainSelector) commitPeerTipAdmission(
 		return accepted
 	}
 	if shouldEvaluate {
-		cs.EvaluateAndSwitch()
+		cs.evaluateAndSwitch(generationPinned)
 	}
 	return true
 }
@@ -2616,6 +2628,13 @@ func (cs *ChainSelector) deletePeerLocked(connId ouroboros.ConnectionId) {
 
 // RemovePeer removes a peer from tracking.
 func (cs *ChainSelector) RemovePeer(connId ouroboros.ConnectionId) {
+	cs.removePeer(connId, false)
+}
+
+func (cs *ChainSelector) removePeer(
+	connId ouroboros.ConnectionId,
+	generationPinned bool,
+) {
 	var switchEvent *event.Event
 	var reevaluate bool
 
@@ -2687,7 +2706,7 @@ func (cs *ChainSelector) RemovePeer(connId ouroboros.ConnectionId) {
 	cs.publishPendingGenesisExitEvent()
 	cs.publishPendingSelectedNoneEvent()
 	if reevaluate {
-		cs.EvaluateAndSwitch()
+		cs.evaluateAndSwitch(generationPinned)
 	}
 }
 
@@ -4162,6 +4181,7 @@ func (cs *ChainSelector) ObservePeerTipUpdate(
 			prevHash: e.ObservedPrevHash,
 			boundary: e.ObservedBoundary,
 		},
+		false,
 	)
 }
 

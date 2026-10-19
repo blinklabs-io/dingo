@@ -15055,6 +15055,16 @@ retry a non-current session; forged-block self-validation is one. Starting a
 transition also waits for any commit callback already holding the mutex, so a
 writer cannot make database state durable midway through that callback.
 
+A header-crypto generation pin (`PinHeaderCryptoVerificationGeneration`) is a
+read lock on the same mutex, and no path may take it while already holding
+one: Go's `RWMutex` admits no new reader once a writer waits, so a second pin
+blocks behind a queued transition that is itself waiting for the first. The
+ChainSync admission callback runs under the ledger's pin, so
+`ChainSelector.CommitPeerTipAdmissionPinned`, and a selector commit that took
+its own admission pin, pass that pin to every peer-tip update, peer removal,
+and chain-selection evaluation they trigger instead of re-pinning the current
+generation.
+
 ## Configuration
 
 Configuration priority (highest to lowest):
