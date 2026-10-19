@@ -680,6 +680,22 @@ observes it and before the ledger apply gate runs. This bookkeeping does not
 count a rollback as a delivered header or record it in the header deduplication
 cache. A callback for a removed client does not recreate its tracked state.
 
+The ledger defers the rollback that opens a ChainSync session when the
+connection has not yet delivered a header and the point is a queued header or a
+primary-chain block behind the header tip (`deferOpeningChainsyncRollback`).
+That point is only the session's intersection: a reconnecting peer intersects
+at the tip as of its FindIntersect, and the tip often advances before the reply
+is handled. The peer's first header settles it
+(`resolveOpeningChainsyncRollback`). The rollback is applied as before only
+when that header builds on the point and is not already on the local chain,
+meaning the peer's chain leaves ours there. A header the local chain holds is a
+replay, and a header that does not build on the point (the ingress apply gate
+can withhold a session's headers until the peer is selected) is left to the
+ordinary header path and its fork resolution; either way the rollback only
+moved the peer's cursor and is dropped. A rollback from a session that has
+delivered a header is applied immediately. The deferred state is per
+connection, held under `chainsyncMutex`, and cleared on `ledger.conn_closed`.
+
 `ledger.tx` is published with `PublishOrdered`, not `PublishAsync`, so a
 subscriber deriving state from it sees a block's transactions in index order
 and sees a rollback's undo events (`Rollback: true`) before any transaction

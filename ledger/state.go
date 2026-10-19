@@ -2086,6 +2086,14 @@ type LedgerState struct {
 
 	lastActiveConnId *ouroboros.ConnectionId // tracks active connection for switch detection
 
+	// chainsyncOpeningRollbacks holds a session's opening rollback while
+	// deferOpeningChainsyncRollback waits for the peer's first header, and
+	// chainsyncHeaderSessions marks the connections that have delivered one.
+	// Both are keyed by connIdKey, guarded by chainsyncMutex, and cleared
+	// when the connection closes.
+	chainsyncOpeningRollbacks map[string]ChainsyncEvent
+	chainsyncHeaderSessions   map[string]struct{}
+
 	// Header mismatch tracking for fork detection and re-sync
 	// headerMismatchMu guards headerMismatchCounts. The header handler
 	// counts under chainsyncMutex, but blockfetch paths reset a count through

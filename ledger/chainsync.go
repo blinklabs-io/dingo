@@ -401,6 +401,7 @@ func (ls *LedgerState) handleEventChainsync(evt event.Event) {
 		ls.discardBufferedPeerHeaders(e.ConnectionId, &pending)
 		queuePeerTipAdmission(&pending, e, false)
 		ls.removePeerHeaderHistory(connIdKey(e.ConnectionId))
+		ls.forgetChainsyncSession(connIdKey(e.ConnectionId))
 		return
 	}
 	// Also drops an event published before the hold was taken.
@@ -409,43 +410,12 @@ func (ls *LedgerState) handleEventChainsync(evt event.Event) {
 		return
 	}
 	if e.Rollback {
-		if err := ls.handleEventChainsyncRollback(e, &pending); err != nil {
-			if errors.Is(err, ErrRollbackLoopDetected) {
-				// The rollback was skipped to break a pathological
-				// loop. Trigger a chainsync re-sync so the peer
-				// can negotiate a fresh intersection rather than
-				// continuing to send the same rollback point.
-				ls.resetChainsyncResyncState(&pending)
-				ls.setChainsyncState(SyncingChainsyncState)
-				// Queued rather than published here: this runs with
-				// ls.chainsyncMutex held, and this event's subscriber
-				// takes that same mutex via RecoverAfterLocalRollback.
-				pending.add(
-					ls.config.EventBus,
-					event.ChainsyncResyncEventType,
-					event.NewEvent(
-						event.ChainsyncResyncEventType,
-						event.ChainsyncResyncEvent{
-							ConnectionId: e.ConnectionId,
-							Reason:       event.ChainsyncResyncReasonRollbackLoop,
-						},
-					),
-				)
-				return
-			}
-			ls.config.Logger.Error(
-				"failed to handle rollback",
-				"component", "ledger",
-				"error", err,
-				"slot", e.Point.Slot,
-				"hash", hex.EncodeToString(e.Point.Hash),
-			)
-			if ls.config.FatalErrorFunc != nil {
-				ls.config.FatalErrorFunc(err)
-			}
+		if ls.deferOpeningChainsyncRollback(e) {
 			return
 		}
+		ls.processChainsyncRollback(e, &pending)
 	} else if e.BlockHeader != nil {
+		ls.resolveOpeningChainsyncRollback(e, &pending)
 		if err := ls.handleEventChainsyncBlockHeaderWithPending(e, &pending); err != nil {
 			// Header queue full is expected during bulk sync when
 			// pipelined headers arrive faster than blockfetch can
@@ -1656,6 +1626,7 @@ func (ls *LedgerState) handleConnectionClosedEvent(evt event.Event) {
 	}
 	ls.removePeerHeaderHistory(connIdKey(e.ConnectionId))
 	ls.resetHeaderMismatches(connIdKey(e.ConnectionId))
+	ls.forgetChainsyncSession(connIdKey(e.ConnectionId))
 	// Cancel in-flight blockfetch if the dead connection owns it.
 	// Without this, chainsyncBlockfetchReadyChan stays non-nil and
 	// new headers from reconnected peers are queued behind a batch
