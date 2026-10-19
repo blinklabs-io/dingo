@@ -40,14 +40,19 @@ func TestOutsideForecastMatchesExpectedMessage(t *testing.T) {
 	}
 }
 
-func TestUnelectedCommitteeVoterIsNotUnknownVoter(t *testing.T) {
+func TestUnelectedCommitteeVoterIsReportedAsVotersDoNotExist(t *testing.T) {
 	t.Parallel()
 	err := errors.New("conway utxo validation rule 60: committee voter is not elected")
-	if predicateMatches(err, expectedDoc{Predicate: "VotersDoNotExist"}) {
-		t.Fatal("an unelected committee voter matched VotersDoNotExist")
+	for _, predicate := range []string{"VotersDoNotExist", "UnelectedCommitteeVoters"} {
+		if !predicateMatches(err, expectedDoc{Predicate: predicate}) {
+			t.Fatalf("an unelected committee voter did not match %s", predicate)
+		}
 	}
-	if !predicateMatches(err, expectedDoc{Predicate: "UnelectedCommitteeVoters"}) {
-		t.Fatal("an unelected committee voter did not match UnelectedCommitteeVoters")
+	if predicateMatches(
+		errors.New("vote cast by unknown voter"),
+		expectedDoc{Predicate: "UnelectedCommitteeVoters"},
+	) {
+		t.Fatal("an unknown voter matched UnelectedCommitteeVoters")
 	}
 }
 
@@ -106,7 +111,7 @@ func TestObservedLedgerResult(t *testing.T) {
 		{
 			"unelected committee voter",
 			"rejected: conway utxo validation rule 60: committee voter is not elected",
-			"UnelectedCommitteeVoters",
+			"VotersDoNotExist",
 			true,
 		},
 		{"unmapped rejection", "rejected: something novel", "", false},

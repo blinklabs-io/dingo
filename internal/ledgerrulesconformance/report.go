@@ -550,6 +550,9 @@ func ledgerPredicateFromError(errText string) (string, bool) {
 		if separator := strings.IndexByte(reportResult, ':'); separator >= 0 {
 			reportResult = reportResult[:separator]
 		}
+		if listed, ok := ndcPredicateAliases[reportResult]; ok {
+			reportResult = listed
+		}
 		for _, pattern := range ledgerPredicateErrorPatterns[predicate] {
 			pattern = strings.ToLower(pattern)
 			if len(pattern) > bestPatternLength && strings.Contains(text, pattern) {
@@ -594,12 +597,29 @@ func predicateMatches(err error, expected expectedDoc) bool {
 	if !ok {
 		patterns = []string{predicate}
 	}
+	for alias, listed := range ndcPredicateAliases {
+		if listed == predicate {
+			patterns = append(slices.Clone(patterns), ledgerPredicateErrorPatterns[alias]...)
+		}
+	}
 	for _, pattern := range patterns {
 		if strings.Contains(text, strings.ToLower(pattern)) {
 			return true
 		}
 	}
 	return false
+}
+
+// ndcPredicateAliases names the listed predicate that reports a Dingo rule
+// which the scenario's closed predicate list lacks. The scenario asks each
+// implementation to map its own failures onto that list. Only the report is
+// affected: the validator still raises the distinct rule.
+//
+// UnelectedCommitteeVoters, raised for a committee hot credential whose cold
+// credential holds no seat, is reported as VotersDoNotExist, the listed
+// predicate for a vote cast by a voter that cannot vote.
+var ndcPredicateAliases = map[string]string{
+	"UnelectedCommitteeVoters": "VotersDoNotExist",
 }
 
 var ledgerPredicateErrorPatterns = map[string][]string{
