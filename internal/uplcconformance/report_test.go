@@ -15,6 +15,7 @@
 package uplcconformance
 
 import (
+	"encoding/json"
 	"errors"
 	"math"
 	"os"
@@ -24,6 +25,8 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/plutigo/cek"
+	"github.com/blinklabs-io/plutigo/lang"
+	"github.com/blinklabs-io/plutigo/syn"
 )
 
 const (
@@ -186,7 +189,7 @@ func TestGenerateReportDerivesScenarioIdentity(t *testing.T) {
 			Title:           "baseline",
 			Group:           "baseline",
 			PlutusVersion:   "V3",
-			ProtocolVersion: 11,
+			ProtocolVersion: "11.0",
 			CostModelID:     "v3-pv11-default",
 		},
 		{
@@ -194,7 +197,7 @@ func TestGenerateReportDerivesScenarioIdentity(t *testing.T) {
 			Title:           "baseline regression",
 			Group:           "textual/baseline",
 			PlutusVersion:   "V2",
-			ProtocolVersion: 11,
+			ProtocolVersion: "11.0",
 			CostModelID:     "v2-pv11-default",
 		},
 		{
@@ -202,7 +205,7 @@ func TestGenerateReportDerivesScenarioIdentity(t *testing.T) {
 			Title:           "addinteger 01",
 			Group:           "builtin/semantics/addInteger",
 			PlutusVersion:   "V3",
-			ProtocolVersion: 11,
+			ProtocolVersion: "11.0",
 			CostModelID:     "v3-pv11-default",
 		},
 		{
@@ -210,7 +213,7 @@ func TestGenerateReportDerivesScenarioIdentity(t *testing.T) {
 			Title:           "builtin semantics addinteger v2 pv11 regression",
 			Group:           "textual/builtin/semantics/addInteger",
 			PlutusVersion:   "V2",
-			ProtocolVersion: 11,
+			ProtocolVersion: "11.0",
 			CostModelID:     "v2-pv11-default",
 		},
 	}
@@ -236,6 +239,151 @@ func TestGenerateReportDerivesScenarioIdentity(t *testing.T) {
 	if len(report.CostModels) != 2 || !ids["v3-pv11-default"] ||
 		!ids["v2-pv11-default"] {
 		t.Fatalf("cost models = %+v", report.CostModels)
+	}
+}
+
+func TestGenerateReportReadsNDCFlatCorpus(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	writeFile(
+		t,
+		filepath.Join(root, "cost-models", "protocol-version-10", "v1.json"),
+		"[1,2,3]",
+	)
+	writeFile(
+		t,
+		filepath.Join(root, "cost-models", "protocol-version-11", "v1.json"),
+		"[1,2,3]",
+	)
+
+	for _, protocol := range []string{"10", "11"} {
+		badVectorDir := filepath.Join(
+			root,
+			"protocol-version-"+protocol,
+			"v1",
+			"term",
+			"parse",
+			"bad-flat",
+		)
+		writeFile(t, filepath.Join(badVectorDir, "bad-flat.uplc"), "(program 1.0.0 (error))")
+		writeFile(t, filepath.Join(badVectorDir, "bad-flat.flat"), "not-hex")
+		writeFile(t, filepath.Join(badVectorDir, "bad-flat.uplc.expected"), "parse/decode error")
+		writeFile(t, filepath.Join(badVectorDir, "bad-flat.budget"), "parse/decode error")
+	}
+	textualVectorDir := filepath.Join(
+		root,
+		"protocol-version-10",
+		"v1",
+		"term",
+		"textual",
+		"simple",
+	)
+	writeFile(
+		t,
+		filepath.Join(textualVectorDir, "simple.uplc"),
+		"(program 1.0.0 (con integer",
+	)
+	writeFile(
+		t,
+		filepath.Join(textualVectorDir, "simple.uplc.expected"),
+		"parse/decode error",
+	)
+
+	report, err := GenerateReport(root, testTime)
+	if err != nil {
+		t.Fatalf("generate report from NDC corpus: %v", err)
+	}
+	if len(report.Scenarios) != 3 {
+		t.Fatalf("scenario count = %d, want 3", len(report.Scenarios))
+	}
+	for i, protocol := range []string{"10.0", "11.0"} {
+		scenario := report.Scenarios[i]
+		if scenario.ID != "term_parse_bad_flat_v1" ||
+			scenario.Title != "bad flat" || scenario.Group != "term/parse" ||
+			scenario.PlutusVersion != "V1" || scenario.ProtocolVersion != protocol ||
+			scenario.Evaluation.Actual != "parse/decode error" || !scenario.Passed {
+			t.Fatalf("NDC Flat scenario = %+v", scenario)
+		}
+	}
+	textualScenario := scenarioByID(t, report, "term_textual_simple_v1")
+	if textualScenario.Evaluation.Actual != "parse/decode error" ||
+		!textualScenario.Passed {
+		t.Fatalf("NDC textual scenario = %+v", textualScenario)
+	}
+}
+
+func TestGenerateReportUsesNDCObservationFormat(t *testing.T) {
+	t.Parallel()
+	root := newCorpus(t)
+	writeVector(
+		t,
+		root,
+		mainCorpusDir,
+		"term/parse",
+		"bad-syntax",
+		"(program 1.0.0 (con integer",
+		"parse error",
+		"",
+	)
+	report := generate(t, root)
+	encoded, err := json.Marshal(report)
+	if err != nil {
+		t.Fatalf("marshal report: %v", err)
+	}
+	var wire struct {
+		Scenarios []struct {
+			ID              string          `json:"id"`
+			ProtocolVersion json.RawMessage `json:"protocol_version"`
+			Evaluation      string          `json:"evaluation"`
+		} `json:"scenarios"`
+	}
+	if err := json.Unmarshal(encoded, &wire); err != nil {
+		t.Fatalf("decode report: %v", err)
+	}
+	observed := map[string]struct {
+		ProtocolVersion json.RawMessage
+		Evaluation      string
+	}{}
+	for _, scenario := range wire.Scenarios {
+		observed[scenario.ID] = struct {
+			ProtocolVersion json.RawMessage
+			Evaluation      string
+		}{scenario.ProtocolVersion, scenario.Evaluation}
+	}
+	if got := observed["baseline_baseline"]; string(got.ProtocolVersion) != `"11.0"` ||
+		got.Evaluation != referenceResult {
+		t.Fatalf("successful observation = %+v", got)
+	}
+	if got := observed["term_parse_bad_syntax"]; string(got.ProtocolVersion) != `"11.0"` ||
+		got.Evaluation != "parse/decode error" {
+		t.Fatalf("parse error observation = %+v", got)
+	}
+}
+
+func TestObservedProgramUsesNDCVariableNames(t *testing.T) {
+	t.Parallel()
+	term := &syn.Lambda[syn.DeBruijn]{
+		ParameterName: 0,
+		Body: &syn.Lambda[syn.DeBruijn]{
+			ParameterName: 0,
+			Body:          &syn.Var[syn.DeBruijn]{Name: 2},
+		},
+	}
+
+	got, err := observedProgram(lang.LanguageVersionV1, term)
+	if err != nil {
+		t.Fatalf("format NDC program: %v", err)
+	}
+	if want := "(program 1.0.0 (lam i-0\n  (lam i-1\n    i-0\n  )\n))"; got != want {
+		t.Fatalf("NDC program = %q, want %q", got, want)
+	}
+}
+
+func TestFormatNDCPrettyTermKeepsStringContents(t *testing.T) {
+	t.Parallel()
+	got := formatNDCPrettyTerm(`(lam i_0 (con string "i_0 \o177"))`)
+	if want := `(lam i-0 (con string "i_0 \DEL"))`; got != want {
+		t.Fatalf("formatted NDC term = %q, want %q", got, want)
 	}
 }
 
@@ -289,7 +437,7 @@ func TestGenerateReportSeparatesEvaluationAndBudget(t *testing.T) {
 	}
 }
 
-func TestGenerateReportPreservesUint32ProtocolVersion(t *testing.T) {
+func TestGenerateReportFormatsUint32ProtocolVersion(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 	writeManifest(t, root, baselineManifest+`regression_case!(
@@ -314,8 +462,8 @@ func TestGenerateReportPreservesUint32ProtocolVersion(t *testing.T) {
 	const maxUint32 = uint64(1<<32 - 1)
 	report := generate(t, root)
 	scenario := scenarioByID(t, report, "max_protocol_version_regression")
-	if got := uint64(scenario.ProtocolVersion); got != maxUint32 {
-		t.Fatalf("scenario protocol version = %d, want %d", got, maxUint32)
+	if got, want := scenario.ProtocolVersion, "4294967295.0"; got != want {
+		t.Fatalf("scenario protocol version = %q, want %q", got, want)
 	}
 
 	for _, model := range report.CostModels {
@@ -492,9 +640,9 @@ regression_case!(
 	report := generate(t, root)
 	before := scenarioByID(t, report, "program_version_v2_pv10_regression")
 	from := scenarioByID(t, report, "program_version_v2_pv11_regression")
-	if before.ProtocolVersion != 10 || from.ProtocolVersion != 11 {
+	if before.ProtocolVersion != "10.0" || from.ProtocolVersion != "11.0" {
 		t.Fatalf(
-			"protocol versions = %d, %d",
+			"protocol versions = %q, %q",
 			before.ProtocolVersion,
 			from.ProtocolVersion,
 		)

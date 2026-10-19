@@ -17,6 +17,7 @@ package uplcconformance
 import (
 	"bytes"
 	"encoding/json"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -26,6 +27,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/plutigo/cek"
+	"github.com/blinklabs-io/plutigo/lang"
 	"github.com/blinklabs-io/plutigo/syn"
 	"github.com/fxamacker/cbor/v2"
 )
@@ -76,6 +78,9 @@ func TestGenerateTurboReportMeasuresFlatPrograms(t *testing.T) {
 		report.Benchmarks[0].SizeBytes != len(encoded) {
 		t.Fatalf("benchmarks = %+v", report.Benchmarks)
 	}
+	if report.Benchmarks[0].Bench != "addInteger-v1.flat" {
+		t.Fatalf("benchmark ID = %q, want bare corpus filename", report.Benchmarks[0].Bench)
+	}
 	if report.Benchmarks[0].ProtocolVersion != "8.0" {
 		t.Fatalf("protocol version = %q, want 8.0 for epoch 484", report.Benchmarks[0].ProtocolVersion)
 	}
@@ -97,7 +102,7 @@ func TestGenerateTurboReportMeasuresFlatPrograms(t *testing.T) {
 	reportFields := assertTurboJSONFields(
 		t,
 		reportJSON,
-		"schema_version",
+		"version",
 		"scenario",
 		"generated_at",
 		"implementation",
@@ -108,7 +113,7 @@ func TestGenerateTurboReportMeasuresFlatPrograms(t *testing.T) {
 	if err := json.Unmarshal(reportFields["implementation"], &implementation); err != nil {
 		t.Fatalf("decode implementation: %v", err)
 	}
-	assertTurboJSONFields(t, implementation, "name", "language")
+	assertTurboJSONFields(t, implementation, "name")
 	var machine json.RawMessage
 	if err := json.Unmarshal(reportFields["machine"], &machine); err != nil {
 		t.Fatalf("decode machine: %v", err)
@@ -130,11 +135,9 @@ func TestGenerateTurboReportMeasuresFlatPrograms(t *testing.T) {
 		"budget_cpu",
 		"budget_mem",
 		"cpu_us",
-		"flat_us",
 		"mem_bytes",
-		"size_bytes",
 	)
-	for _, field := range []string{"cpu_us", "flat_us", "mem_bytes"} {
+	for _, field := range []string{"cpu_us", "mem_bytes"} {
 		var value float64
 		if err := json.Unmarshal(benchmarkFields[field], &value); err != nil {
 			t.Fatalf("decode benchmark %s: %v", field, err)
@@ -288,7 +291,7 @@ func TestMakeTurboBenchmarkUsesBestThirtySamples(t *testing.T) {
 	}
 }
 
-func TestGenerateTurboReportKeepsFailedBenchmarks(t *testing.T) {
+func TestGenerateTurboReportOmitsFailedBenchmarks(t *testing.T) {
 	t.Parallel()
 	if runtime.GOOS != "linux" {
 		t.Skip("UPLC turbo reports are Linux-only")
@@ -319,19 +322,13 @@ func TestGenerateTurboReportKeepsFailedBenchmarks(t *testing.T) {
 	if err == nil {
 		t.Fatal("generate turbo report succeeded for an invalid Flat program")
 	}
-	if len(report.Benchmarks) != 2 {
-		t.Fatalf("benchmarks = %d, want both failed benchmarks in report", len(report.Benchmarks))
+	if len(report.Benchmarks) != 0 {
+		t.Fatalf("benchmarks = %d, want failed benchmarks omitted", len(report.Benchmarks))
 	}
-	for i, benchmark := range report.Benchmarks {
-		if benchmark.BudgetCPU != nil || benchmark.BudgetMem != nil ||
-			benchmark.FlatUS != nil || benchmark.MemBytes != nil || benchmark.CPUUS != nil ||
-			benchmark.Error == "" || strings.Contains(benchmark.Error, root) {
-			t.Fatalf("failed benchmark %d contains measurements: %+v", i, benchmark)
-		}
-	}
-	if !strings.Contains(report.Benchmarks[0].Error, "decode Flat program") ||
-		!strings.Contains(report.Benchmarks[1].Error, "decode CBOR byte string") {
-		t.Fatalf("benchmark errors = %q / %q", report.Benchmarks[0].Error, report.Benchmarks[1].Error)
+	if !strings.Contains(err.Error(), "decode Flat program") ||
+		!strings.Contains(err.Error(), "decode CBOR byte string") ||
+		strings.Contains(err.Error(), root) {
+		t.Fatalf("generation error does not preserve safe diagnostics: %v", err)
 	}
 	reportPath := filepath.Join(t.TempDir(), "report.json")
 	if writeErr := WriteTurboReport(reportPath, report); writeErr != nil {
@@ -347,21 +344,27 @@ func TestGenerateTurboReportKeepsFailedBenchmarks(t *testing.T) {
 	if unmarshalErr := json.Unmarshal(reportJSON, &decoded); unmarshalErr != nil {
 		t.Fatalf("decode partial turbo report: %v", unmarshalErr)
 	}
-	if len(decoded.Benchmarks) != 2 {
+	if len(decoded.Benchmarks) != 0 {
 		t.Fatalf("failed benchmark JSON = %s", reportJSON)
 	}
-	for i, benchmark := range decoded.Benchmarks {
-		if string(benchmark["cpu_us"]) != "null" ||
-			string(benchmark["flat_us"]) != "null" ||
-			string(benchmark["mem_bytes"]) != "null" ||
-			string(benchmark["budget_cpu"]) != "null" {
-			t.Fatalf("failed benchmark JSON = %s", reportJSON)
+}
+
+func TestDiscoverTurboCasesRejectsDuplicateBenchmarkIDs(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	for _, epoch := range []string{"484", "485"} {
+		path := filepath.Join(root, epoch, "duplicate-v1.flat")
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatalf("create epoch directory: %v", err)
 		}
-		var failureReason string
-		if err := json.Unmarshal(benchmark["error"], &failureReason); err != nil ||
-			failureReason == "" || strings.Contains(failureReason, root) {
-			t.Fatalf("failed benchmark %d error = %q, err = %v", i, failureReason, err)
+		if err := os.WriteFile(path, []byte{0x80}, 0o600); err != nil {
+			t.Fatalf("write benchmark: %v", err)
 		}
+	}
+
+	if _, err := discoverTurboCases(root); err == nil ||
+		!strings.Contains(err.Error(), "duplicate benchmark ID") {
+		t.Fatalf("duplicate benchmark IDs error = %v", err)
 	}
 }
 
@@ -371,4 +374,45 @@ func writeTurboTestProgram(path string, program []byte) error {
 		return err
 	}
 	return os.WriteFile(path, encoded, 0o600)
+}
+
+func TestTurboEvalContextUsesVariantACosts(t *testing.T) {
+	t.Parallel()
+	named, err := syn.Parse(`(program 1.0.0 (con integer 1))`)
+	if err != nil {
+		t.Fatalf("parse program: %v", err)
+	}
+	program, err := syn.NameToDeBruijn(named)
+	if err != nil {
+		t.Fatalf("convert program: %v", err)
+	}
+	for _, tc := range []struct {
+		name     string
+		version  lang.LanguageVersion
+		protocol uint
+		wantCPU  int64
+	}{
+		{"V1 before Chang", lang.LanguageVersionV1, 8, 23100},
+		{"V2 before Chang", lang.LanguageVersionV2, 8, 23100},
+		{"V1 at Chang", lang.LanguageVersionV1, 9, 16100},
+		{"V2 at Chang", lang.LanguageVersionV2, 9, 16100},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			evalCtx, err := turboEvalContext(tc.version, tc.protocol)
+			if err != nil {
+				t.Fatalf("eval context: %v", err)
+			}
+			machine := cek.NewMachine[syn.DeBruijn](tc.version, 200, evalCtx)
+			initial := cek.ExBudget{Cpu: math.MaxInt64, Mem: math.MaxInt64}
+			machine.ExBudget = initial
+			if _, err := machine.Run(program.Term); err != nil {
+				t.Fatalf("run program: %v", err)
+			}
+			got := initial.Sub(&machine.ExBudget)
+			if got.Cpu != tc.wantCPU || got.Mem != 200 {
+				t.Fatalf("budget = %+v, want cpu %d mem 200", got, tc.wantCPU)
+			}
+		})
+	}
 }
