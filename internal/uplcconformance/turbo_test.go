@@ -86,6 +86,17 @@ func TestGenerateTurboReportMeasuresFlatPrograms(t *testing.T) {
 		report.Benchmarks[0].BudgetMem == nil {
 		t.Fatalf("consumed budget is missing: %+v", report.Benchmarks[0])
 	}
+	// Pin the pre-Chang (protocol 8) variant A costs for this program. The
+	// report's published budgets must match the cardano-node reference, and a
+	// change to plutigo's default cost model must not silently shift them.
+	if *report.Benchmarks[0].BudgetCPU != 321577 ||
+		*report.Benchmarks[0].BudgetMem != 602 {
+		t.Fatalf(
+			"consumed budget = cpu %d mem %d, want cpu 321577 mem 602",
+			*report.Benchmarks[0].BudgetCPU,
+			*report.Benchmarks[0].BudgetMem,
+		)
+	}
 	reportPath := filepath.Join(t.TempDir(), "report.json")
 	if err := WriteTurboReport(reportPath, report); err != nil {
 		t.Fatalf("write turbo report: %v", err)
