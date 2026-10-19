@@ -440,6 +440,9 @@ func effectiveChainsyncBlockTimeout(timeout time.Duration) time.Duration {
 	return timeout
 }
 
+// includeClient is true for node-to-node connections, which run a chainsync
+// client as well as the server; node-to-client connections run only the
+// server and get its local-client behaviour (see chainsyncServerConnOpts).
 func (o *Ouroboros) chainsyncConnectionConfigOption(
 	ctx context.Context,
 	includeClient bool,
@@ -449,7 +452,7 @@ func (o *Ouroboros) chainsyncConnectionConfigOption(
 			chainsyncFindIntersectBudgetRate,
 			chainsyncFindIntersectBudgetBurst,
 		)
-		opts := o.chainsyncServerConnOpts(ctx, limiter)
+		opts := o.chainsyncServerConnOpts(ctx, limiter, !includeClient)
 		if includeClient {
 			opts = slices.Concat(o.chainsyncClientConnOpts(), opts)
 		}
@@ -459,10 +462,17 @@ func (o *Ouroboros) chainsyncConnectionConfigOption(
 	}
 }
 
+// waitForLedger is set for node-to-client connections: see
+// chainsyncServerRequestNext.
 func (o *Ouroboros) chainsyncServerConnOpts(
 	ctx context.Context,
 	limiter *chainsyncFindIntersectRateLimiter,
+	waitForLedger bool,
 ) []ochainsync.ChainSyncOptionFunc {
+	requestNext := o.chainsyncServerRequestNextPeer
+	if waitForLedger {
+		requestNext = o.chainsyncServerRequestNextLocal
+	}
 	return []ochainsync.ChainSyncOptionFunc{
 		ochainsync.WithFindIntersectFunc(
 			o.instrumentChainsyncFindIntersect(
@@ -480,7 +490,7 @@ func (o *Ouroboros) chainsyncServerConnOpts(
 			),
 		),
 		ochainsync.WithRequestNextFunc(
-			o.instrumentChainsyncRequestNext(o.chainsyncServerRequestNext),
+			o.instrumentChainsyncRequestNext(requestNext),
 		),
 		// Increase intersect timeout from the 10s default. Downstream
 		// peers may send FindIntersect with many points during initial
@@ -975,8 +985,42 @@ func (o *Ouroboros) refreshTip(next *chain.ChainIteratorResult) ochainsync.Tip {
 	return tip
 }
 
+// chainsyncServerAheadOfLedger reports whether next rolls forward to a block
+// the ledger has not applied yet. The chain iterator runs ahead of the ledger
+// during sync, by seconds and more across an epoch boundary.
+func (o *Ouroboros) chainsyncServerAheadOfLedger(
+	next *chain.ChainIteratorResult,
+) bool {
+	return next != nil && !next.Rollback &&
+		next.Point.Slot > o.ledgerState.Tip().Point.Slot
+}
+
+func (o *Ouroboros) chainsyncServerRequestNextPeer(
+	ctx ochainsync.CallbackContext,
+) error {
+	return o.chainsyncServerRequestNext(ctx, false)
+}
+
+func (o *Ouroboros) chainsyncServerRequestNextLocal(
+	ctx ochainsync.CallbackContext,
+) error {
+	return o.chainsyncServerRequestNext(ctx, true)
+}
+
+// chainsyncServerRequestNext serves the next chain event to a downstream
+// client.
+//
+// With waitForLedger set (node-to-client connections) a roll-forward is held
+// until the ledger has applied the block. A local client follows chainsync to
+// read ledger state at the points it receives, and cardano-node serves its
+// local clients only blocks on its selected chain, which it adopts after
+// validating them against the ledger, so every point it delivers can be
+// acquired by LocalStateQuery. Serving a block the ledger has not reached yet
+// makes Acquire of that point fail with AcquireFailurePointNotOnChain.
+// Peers (node-to-node) are still served ahead of the ledger.
 func (o *Ouroboros) chainsyncServerRequestNext(
 	ctx ochainsync.CallbackContext,
+	waitForLedger bool,
 ) error {
 	o.recordServedActivity(ctx.ConnectionId)
 	// Create/retrieve chainsync state for connection
@@ -1026,6 +1070,14 @@ func (o *Ouroboros) chainsyncServerRequestNext(
 			return fmt.Errorf("chainsync server: next chain event: %w", err)
 		}
 	}
+	// A roll-forward the ledger has not reached is held behind AwaitReply
+	// rather than waited for here: the client's CanAwait timeout is 10s and
+	// the ledger can lag longer than that.
+	var pending *chain.ChainIteratorResult
+	if waitForLedger && o.chainsyncServerAheadOfLedger(next) {
+		pending = next
+		next = nil
+	}
 	if next != nil {
 		tip = o.refreshTip(next)
 		if next.Rollback {
@@ -1072,59 +1124,95 @@ func (o *Ouroboros) chainsyncServerRequestNext(
 		ctx,
 		connWithDone{conn: rawConn, done: connDone, closeErr: closeErr},
 		clientState,
+		pending,
+		waitForLedger,
 	)
 	return nil
 }
 
 // chainsyncServerAwaitNext is the post-AwaitReply waiter. It runs as its own
 // goroutine once the server has parked the peer in MustReply, and either serves
-// the block the iterator eventually yields or drops the transport.
+// the block the iterator eventually yields or drops the transport. pending is
+// a result already taken from the iterator and held for the ledger; when it is
+// nil the waiter reads the iterator. With waitForLedger set a roll-forward is
+// served only once the ledger has applied it (see chainsyncServerRequestNext).
 func (o *Ouroboros) chainsyncServerAwaitNext(
 	ctx ochainsync.CallbackContext,
 	conn managedConnection,
 	clientState *chainsync.ChainsyncClientState,
+	pending *chain.ChainIteratorResult,
+	waitForLedger bool,
 ) {
-	// Wait for next block in a separate goroutine so we can
-	// also monitor the connection for errors. This avoids
-	// leaking the monitor goroutine when Next returns first.
-	done := make(chan struct{})
-	var next *chain.ChainIteratorResult
+	next := pending
 	var nextErr error
-	go func() {
-		defer close(done)
-		next, nextErr = clientState.ChainIter.Next(true)
-	}()
-	select {
-	case <-done:
-		// Iterator returned
-	case <-conn.Done():
-		// Abandoning the wait here leaves the peer parked in MustReply
-		// with the server holding agency, so the transport has to be
-		// dropped: nothing else unparks it. See closeChainsyncServerConn.
-		// The connection manager has already consumed the connection's
-		// error, so the close is idempotent.
-		clientState.ChainIter.Cancel()
-		closeReason := error(errChainsyncAwaitConnectionClosed)
-		if closeErr, ok := conn.(interface{ CloseError() error }); ok {
-			if actualErr := closeErr.CloseError(); actualErr != nil {
-				closeReason = fmt.Errorf(
-					"%w: %w",
-					errChainsyncAwaitConnectionClosed,
-					actualErr,
-				)
-			}
+	if next == nil {
+		// Wait for next block in a separate goroutine so we can
+		// also monitor the connection for errors. This avoids
+		// leaking the monitor goroutine when Next returns first.
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			next, nextErr = clientState.ChainIter.Next(true)
+		}()
+		select {
+		case <-done:
+			// Iterator returned
+		case <-conn.Done():
+			clientState.ChainIter.Cancel()
+			o.closeAbandonedChainsyncServerConn(ctx, conn)
+			return
 		}
-		o.closeChainsyncServerConn(
-			conn,
-			ctx.ConnectionId.String(),
-			fmt.Errorf(
-				"connection torn down while peer awaited a reply: %w",
-				closeReason,
-			),
-		)
-		return
+	}
+	if nextErr == nil && waitForLedger &&
+		o.chainsyncServerAheadOfLedger(next) {
+		waitCtx, cancel := context.WithCancel(context.Background())
+		stop := make(chan struct{})
+		go func() {
+			select {
+			case <-conn.Done():
+				cancel()
+			case <-stop:
+			}
+		}()
+		err := o.ledgerState.AwaitAppliedSlot(waitCtx, next.Point.Slot)
+		close(stop)
+		cancel()
+		if err != nil {
+			o.closeAbandonedChainsyncServerConn(ctx, conn)
+			return
+		}
 	}
 	o.chainsyncServerServeAwaited(ctx, conn, next, nextErr)
+}
+
+// closeAbandonedChainsyncServerConn drops the transport when the connection is
+// torn down while the waiter holds the peer in MustReply. Abandoning the wait
+// leaves the peer parked with the server holding agency, so the transport has
+// to be dropped: nothing else unparks it. See closeChainsyncServerConn. The
+// connection manager has already consumed the connection's error, so the
+// close is idempotent.
+func (o *Ouroboros) closeAbandonedChainsyncServerConn(
+	ctx ochainsync.CallbackContext,
+	conn managedConnection,
+) {
+	closeReason := error(errChainsyncAwaitConnectionClosed)
+	if closeErr, ok := conn.(interface{ CloseError() error }); ok {
+		if actualErr := closeErr.CloseError(); actualErr != nil {
+			closeReason = fmt.Errorf(
+				"%w: %w",
+				errChainsyncAwaitConnectionClosed,
+				actualErr,
+			)
+		}
+	}
+	o.closeChainsyncServerConn(
+		conn,
+		ctx.ConnectionId.String(),
+		fmt.Errorf(
+			"connection torn down while peer awaited a reply: %w",
+			closeReason,
+		),
+	)
 }
 
 // errChainsyncAwaitConnectionClosed is the reason logged when the connection

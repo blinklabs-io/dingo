@@ -13536,6 +13536,27 @@ func (ls *LedgerState) Tip() ochainsync.Tip {
 	return cloneTip(ls.loadTipSnapshot().currentTip)
 }
 
+// AwaitAppliedSlot blocks until the applied ledger tip has reached slot, or
+// ctx ends, in which case it returns ctx's error. The applied tip is
+// published only after the block's transaction commits, so once this returns
+// a fresh read snapshot sees a tip at or beyond slot.
+func (ls *LedgerState) AwaitAppliedSlot(
+	ctx context.Context,
+	slot uint64,
+) error {
+	for {
+		published := ls.snapshotPublishedChan()
+		if ls.loadTipSnapshot().currentTip.Point.Slot >= slot {
+			return nil
+		}
+		select {
+		case <-published:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+
 // ImmutablePoint returns the primary-chain point k blocks behind the applied
 // ledger tip.
 // found is false while the retained chain is too short to have a non-origin

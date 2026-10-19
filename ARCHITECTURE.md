@@ -5389,6 +5389,14 @@ retention-floor pruning committed afterwards does not reach the session. Only a
 snapshot closed by the lifetime bound above reproduces this connection-teardown
 behavior.
 
+"Ahead of the tip" means ahead of the applied ledger tip, and the chain
+iterator runs ahead of it during sync. So the node-to-client ChainSync server
+(`chainsyncServerRequestNext` with `waitForLedger`) holds a roll-forward
+behind `MsgAwaitReply` until `LedgerState.AwaitAppliedSlot` sees the ledger
+reach the block, as cardano-node serves local clients only blocks it has
+already validated. A local client can therefore Acquire every point ChainSync
+delivers to it. Node-to-node peers are still served ahead of the ledger.
+
 A specific acquired point is also pinned against pruning
 (`ledger/acquired_point_pins.go`). Acquire calls `LedgerState.PinAcquiredPoint`
 *before* `AcquireQueryView` verifies the point, and the consumed-UTxO cleanup
