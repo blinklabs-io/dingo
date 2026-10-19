@@ -6526,6 +6526,15 @@ Four rules shape the deferred-header path beyond the marker itself.
 
 Header state verification resolves the producing pool's electing stake snapshot row once per header (`resolveElectingSnapshot`) for both the VRF-key cutoff and the leader stake.
 
+#### Leios-fetch Transaction Response Ownership
+
+Leios-fetch transaction responses copy their selected raw transaction bytes
+into a response-owned buffer through `internal/txresponse`. Each transaction
+view has its capacity capped at its own length, so appending cannot overwrite
+another transaction. The response retains only its selected bytes, independently
+of the cached closure. The storage benchmark uses the same response-copy routine
+for its cached-read model.
+
 #### Leios CertRB Serving (NtC)
 
 CertRB serving waiters are owned by the concrete chainsync server instance as well as the connection ID; the owner-aware close callback cannot release a replacement lifetime that reused the ID.
