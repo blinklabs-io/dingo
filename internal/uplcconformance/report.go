@@ -714,6 +714,7 @@ func runCase(
 		testCase.language,
 		testCase.protocol,
 		evalCtx,
+		testCase.ndc,
 	)
 	var evalActual, evaluationObservation string
 	switch stage {
@@ -823,11 +824,15 @@ func compareBudgetExhaustion(stage failureStage, err error) bool {
 // and protocol version. A program rejected by the syntax parser fails at the
 // parse stage; one rejected by protocol-version validation, de Bruijn
 // conversion or the machine fails at the evaluation stage.
+// evaluate parses and runs a textual program. The scenario's expected results
+// treat the execution-time version gate as a decode error, which gateIsDecode
+// selects; the earlier corpus layout treats it as an evaluation failure.
 func evaluate(
 	text string,
 	language lang.LanguageVersion,
 	protocol uint,
 	evalCtx *cek.EvalContext,
+	gateIsDecode bool,
 ) (syn.Term[syn.DeBruijn], lang.LanguageVersion, cek.ExBudget, failureStage, error) {
 	if _, err := syn.Parse(text); err != nil {
 		return nil, lang.LanguageVersion{}, cek.ExBudget{}, parseFailure, err
@@ -841,7 +846,11 @@ func evaluate(
 		return nil, lang.LanguageVersion{}, cek.ExBudget{}, evaluationFailure, err
 	}
 	if err := syn.ValidateTermVersionForExecution(program.Version, programContext); err != nil {
-		return nil, program.Version, cek.ExBudget{}, evaluationFailure, err
+		stage := evaluationFailure
+		if gateIsDecode {
+			stage = parseFailure
+		}
+		return nil, program.Version, cek.ExBudget{}, stage, err
 	}
 	deBruijn, err := syn.NameToDeBruijn(program)
 	if err != nil {

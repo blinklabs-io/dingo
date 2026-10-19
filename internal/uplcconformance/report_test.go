@@ -260,6 +260,13 @@ func TestGenerateReportReadsNDCCorpusFromTextualPrograms(t *testing.T) {
 	)
 	writeFile(t, filepath.Join(earlyDir, "simple.uplc"), "(program 1.0.0 (con integer")
 	writeFile(t, filepath.Join(earlyDir, "simple.uplc.expected"), "parse/decode error")
+	// UPLC 1.1.0 is not available to Plutus V1 before protocol 11. The
+	// execution-time version gate is a decode error, not an evaluation failure.
+	gatedDir := filepath.Join(
+		root, "protocol-version-10", "v1", "program", "version", "one-one-zero",
+	)
+	writeFile(t, filepath.Join(gatedDir, "one-one-zero.uplc"), "(program 1.1.0 (con integer 1))")
+	writeFile(t, filepath.Join(gatedDir, "one-one-zero.uplc.expected"), "parse/decode error")
 
 	// The text is a parse error, while the Flat file beside it decodes to a
 	// valid constr with tag 2^64-5. The expected result follows the text, so
@@ -289,8 +296,12 @@ func TestGenerateReportReadsNDCCorpusFromTextualPrograms(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generate report from NDC corpus: %v", err)
 	}
-	if len(report.Scenarios) != 2 {
-		t.Fatalf("scenario count = %d, want 2", len(report.Scenarios))
+	if len(report.Scenarios) != 3 {
+		t.Fatalf("scenario count = %d, want 3", len(report.Scenarios))
+	}
+	gated := scenarioByID(t, report, "program_version_one_one_zero_v1")
+	if gated.Evaluation.Actual != "parse/decode error" || !gated.Passed {
+		t.Fatalf("version-gated scenario = %+v", gated)
 	}
 	scenario := scenarioByID(t, report, "term_constr_negative_tag_v3")
 	if scenario.ID != "term_constr_negative_tag_v3" ||
