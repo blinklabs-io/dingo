@@ -21,6 +21,7 @@ import (
 	"io"
 	"log/slog"
 	"math"
+	"net"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -275,9 +276,18 @@ type ChainSelector struct {
 	// Guarded by mutex.
 	farTipClaims        map[ouroboros.ConnectionId]farTipClaim
 	pendingFarTipClaims map[ouroboros.ConnectionId]farTipClaim
-	mutex               sync.RWMutex
-	ctx                 context.Context
-	cancel              context.CancelFunc
+	// rejectedAdvertisedClaims holds the advertised tips of connections the
+	// bootstrap advertised bound refused, oldest first, so a later connection
+	// from another remote host advertising a tip within securityParam is
+	// corroborated by it. Entries outlive their connection on purpose: a
+	// refused connection is closed before the next honest peer arrives, so a
+	// live-only witness set would let one lagging reference refuse every
+	// honest peer in turn. Bounded to maxTrackedPeers entries. Guarded by
+	// mutex.
+	rejectedAdvertisedClaims []rejectedAdvertisedClaim
+	mutex                    sync.RWMutex
+	ctx                      context.Context
+	cancel                   context.CancelFunc
 
 	// Anti-flap incumbent pin state (guarded by mutex).
 	//
@@ -2135,6 +2145,22 @@ func (cs *ChainSelector) checkPeerTipPlausibleWithClaimsTrackedLocked(
 				}
 			}
 		}
+		// The advertised references are only the peers that delivered a
+		// header first, and nothing has verified their advertisements
+		// either. A reference lagging far behind the network would otherwise
+		// refuse every honest peer, and refused peers never become
+		// references, so bootstrap would wedge on it. A claim another remote
+		// host independently agrees with is therefore not a lone far claim.
+		if advertisedReject && !observedReject &&
+			cs.localTip.BlockNumber == 0 {
+			if cs.advertisedClaimCorroboratedLocked(
+				connId, tip, claims, includePending,
+			) {
+				advertisedReject = false
+			} else {
+				cs.recordRejectedAdvertisedClaimLocked(connId, tip)
+			}
+		}
 		// Case 3: len(peerTips)==0 && peer not known → bootstrap
 		if observedReject ||
 			(advertisedReject && cs.localTip.BlockNumber == 0) {
@@ -2175,6 +2201,110 @@ func (cs *ChainSelector) checkPeerTipPlausibleWithClaimsTrackedLocked(
 		}
 	}
 	return true, claimsChanged
+}
+
+// rejectedAdvertisedClaim is an advertised tip the bootstrap advertised bound
+// refused, keyed by the remote host that advertised it.
+type rejectedAdvertisedClaim struct {
+	host  string
+	block uint64
+}
+
+// connectionRemoteHost returns the remote host of connId without its port, so
+// reconnections from one host count as one witness.
+func connectionRemoteHost(connId ouroboros.ConnectionId) string {
+	if connId.RemoteAddr == nil {
+		return connId.String()
+	}
+	addr := connId.RemoteAddr.String()
+	if host, _, err := net.SplitHostPort(addr); err == nil {
+		return host
+	}
+	return addr
+}
+
+// advertisedClaimCorroboratedLocked reports whether an advertised tip that
+// exceeded the bootstrap advertised bound is supported by a connection from
+// another remote host advertising a tip within securityParam of it: a tracked
+// peer (including one registered from a rollback that has delivered no header
+// yet), or a recently refused claim. A lone far frontier is not a witness, and
+// a claim no chain could have reached by its slot is never corroborated. Like
+// corroborateFarTipClaimLocked this counts hosts, not operators, so it is no
+// Sybil defence; it only stops one connection from moving the bound alone.
+// Must be called with cs.mutex held.
+func (cs *ChainSelector) advertisedClaimCorroboratedLocked(
+	connId ouroboros.ConnectionId,
+	tip ochainsync.Tip,
+	claims map[ouroboros.ConnectionId]farTipClaim,
+	includePending bool,
+) bool {
+	if !cs.blockWithinSlotDistanceLocked(tip) {
+		return false
+	}
+	host := connectionRemoteHost(connId)
+	agrees := func(otherHost string, block uint64) bool {
+		if otherHost == host {
+			return false
+		}
+		lo, hi := min(tip.BlockNumber, block), max(tip.BlockNumber, block)
+		return safeAddUint64(lo, cs.securityParam) >= hi
+	}
+	witness := func(other ouroboros.ConnectionId, pt *PeerChainTip) bool {
+		if pt == nil || other == connId {
+			return false
+		}
+		if claim, ok := claims[other]; ok && claim.lone {
+			return false
+		}
+		return agrees(connectionRemoteHost(other), pt.Tip.BlockNumber)
+	}
+	for other, pt := range cs.peerTips {
+		if witness(other, pt) {
+			return true
+		}
+	}
+	if includePending {
+		for other := range cs.pendingPeerTips {
+			if witness(other, cs.latestPeerTipCandidateLocked(other)) {
+				return true
+			}
+		}
+	}
+	for _, refused := range cs.rejectedAdvertisedClaims {
+		if agrees(refused.host, refused.block) {
+			return true
+		}
+	}
+	return false
+}
+
+// recordRejectedAdvertisedClaimLocked remembers connId's refused advertised
+// tip as a witness for later connections, replacing that host's previous
+// entry and evicting the oldest entry when full. Must be called with cs.mutex
+// held.
+func (cs *ChainSelector) recordRejectedAdvertisedClaimLocked(
+	connId ouroboros.ConnectionId,
+	tip ochainsync.Tip,
+) {
+	if cs.maxTrackedPeers <= 0 {
+		return
+	}
+	host := connectionRemoteHost(connId)
+	cs.rejectedAdvertisedClaims = slices.DeleteFunc(
+		cs.rejectedAdvertisedClaims,
+		func(c rejectedAdvertisedClaim) bool { return c.host == host },
+	)
+	if len(cs.rejectedAdvertisedClaims) >= cs.maxTrackedPeers {
+		cs.rejectedAdvertisedClaims = slices.Delete(
+			cs.rejectedAdvertisedClaims,
+			0,
+			len(cs.rejectedAdvertisedClaims)-cs.maxTrackedPeers+1,
+		)
+	}
+	cs.rejectedAdvertisedClaims = append(
+		cs.rejectedAdvertisedClaims,
+		rejectedAdvertisedClaim{host: host, block: tip.BlockNumber},
+	)
 }
 
 // corroborateFarTipClaimLocked records connId's delivered frontier, which

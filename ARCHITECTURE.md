@@ -5615,7 +5615,13 @@ carries the highest point the previous and new peers' candidate fragments
 share. It is not intersected with the local chain and can lie above the local
 tip; it is nil when the fragments share no retained point. Before the
 node has applied any local block, new peers' advertisements remain bounded
-against the first bootstrap peer; after a local tip exists, the delivered
+against the highest advertisement of the peers that delivered a header, unless
+a connection from another remote host advertises a tip within `securityParam`
+of the claim. Refused advertisements are kept as witnesses
+(`ChainSelector.rejectedAdvertisedClaims`, bounded to `maxTrackedPeers` and
+outliving their connection), so a lagging first peer cannot refuse every
+honest peer in turn, while a lone far claim, or one host reconnecting to vouch
+for itself, is still refused. After a local tip exists, the delivered
 frontier is the authority. This lets a node resume when the honest advertised
 tip is arbitrarily far ahead: the next delivered header is still checked
 incrementally against the previous delivered frontier (with the local-tip
