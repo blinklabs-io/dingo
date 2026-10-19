@@ -6,7 +6,7 @@ toolchain go1.26.9
 
 require (
 	cloud.google.com/go/storage v1.68.0
-	connectrpc.com/connect v1.21.0
+	connectrpc.com/connect v1.21.1
 	connectrpc.com/grpchealth v1.5.0
 	connectrpc.com/grpcreflect v1.3.1
 	github.com/Microsoft/go-winio v0.6.2
