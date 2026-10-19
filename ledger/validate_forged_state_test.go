@@ -539,3 +539,81 @@ func TestValidateForgedBlockDoesNotTrustARuleFailureFromAStaleSession(
 
 	require.NotErrorIs(t, err, rule)
 }
+
+// The forger admits a parent that is still unapplied, so the ledger can
+// trail the block's parent with nothing in flight. Judging the block there
+// would use state without the unapplied ancestors' spent inputs and
+// certificates, so validation waits for the ledger to reach the parent and
+// takes its verdict only then.
+func TestValidateForgedBlockWaitsForUnappliedAncestors(t *testing.T) {
+	t.Parallel()
+	rule := errors.New("unknown voter")
+	ls, calls, waits := newForgedStateTestLedger(
+		t,
+		forgedStateTestHash(0x01),
+		rule,
+	)
+	chainBlocks := newForgedStateTestChain(t, ls)
+	a, b, p := chainBlocks[0], chainBlocks[1], chainBlocks[2]
+	setForgedStateTestTipBlock(ls, a)
+	block := newForgedStateTestBlock(p.Hash())
+
+	result := validateForgedTxsAsync(t.Context(), t, ls, block, waits)
+	require.Zero(t, calls.Load(), "no verdict before the parent is applied")
+
+	setForgedStateTestTipBlock(ls, b)
+	select {
+	case <-waits:
+	case err := <-result:
+		t.Fatalf("validation returned with the parent still unapplied: %v", err)
+	case <-time.After(forgedStateTestTimeout):
+		t.Fatal("validation neither waited nor returned")
+	}
+	require.Zero(t, calls.Load(), "no verdict before the parent is applied")
+
+	setForgedStateTestTipBlock(ls, p)
+	err := testutil.RequireReceive(
+		t,
+		result,
+		forgedStateTestTimeout,
+		"forged validation result",
+	)
+	require.ErrorIs(t, err, rule, "the verdict is taken at the parent")
+	require.Equal(t, int32(1), calls.Load())
+}
+
+// A slot that ends while an ancestor is still unapplied drops the block
+// unjudged instead of validating it against the applied state.
+func TestValidateForgedBlockDropsUnappliedAncestorsAtSlotEnd(t *testing.T) {
+	t.Parallel()
+	ls, calls, waits := newForgedStateTestLedger(
+		t,
+		forgedStateTestHash(0x01),
+		nil,
+	)
+	setForgedStateTestSlotEnd(ls, time.Now().Add(-time.Hour))
+	chainBlocks := newForgedStateTestChain(t, ls)
+	setForgedStateTestTipBlock(ls, chainBlocks[0])
+	block := newForgedStateTestBlock(chainBlocks[2].Hash())
+
+	err := ls.validateForgedTxs(t.Context(), block)
+
+	require.ErrorIs(t, err, forging.ErrForgedBlockStateChanged)
+	require.Zero(t, calls.Load())
+	require.Empty(t, waits)
+}
+
+// When the parent is the applied tip nothing is unapplied: validation
+// judges the block in its first session without waiting.
+func TestValidateForgedBlockDoesNotWaitWhenParentIsApplied(t *testing.T) {
+	t.Parallel()
+	parent := forgedStateTestHash(0x01)
+	ls, calls, waits := newForgedStateTestLedger(t, parent, nil)
+
+	require.NoError(
+		t,
+		ls.validateForgedTxs(t.Context(), newForgedStateTestBlock(parent)),
+	)
+	require.Equal(t, int32(1), calls.Load())
+	require.Empty(t, waits)
+}
