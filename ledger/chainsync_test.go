@@ -2692,12 +2692,12 @@ func TestDiscardedBodyDoesNotCountAsRangeProgress(t *testing.T) {
 	f.ls.chainsyncMutex.Unlock()
 	rollbackPending.flush()
 	require.NoError(t, rollbackErr)
-	f.deliverForkABody(t)
-
-	f.ls.chainsyncBlockfetchMutex.Lock()
-	err := f.ls.flushPendingBlockfetchBlocksDeferred(nil)
-	f.ls.chainsyncBlockfetchMutex.Unlock()
-	require.NoError(t, err)
+	f.ls.handleEventBlockfetch(f.forkABlockEvent())
+	require.Empty(
+		t,
+		f.ls.pendingBlockfetchEvents,
+		"a body from a superseded batch must be rejected after verification",
+	)
 
 	assert.True(
 		t,
@@ -3391,8 +3391,10 @@ func TestRecoverPeerHeaderHistoryIncompleteLookupReintersects(t *testing.T) {
 	}
 	fixture.ls.recordPeerHeaderHistory(ChainsyncEvent{
 		ConnectionId: fixture.connId,
-		Point:        ocommon.NewPoint(header.slot, headerHash),
-		BlockHeader:  header,
+		HeaderCryptoVerificationGeneration: fixture.ls.
+			loadConsensusSnapshot().generation,
+		Point:       ocommon.NewPoint(header.slot, headerHash),
+		BlockHeader: header,
 	})
 	fixture.ls.config.PeerHeaderLookupFunc = func(
 		_ ouroboros.ConnectionId,
@@ -3893,6 +3895,8 @@ func buildOverflowForkPath(
 		}
 		fixture.ls.recordPeerHeaderHistory(ChainsyncEvent{
 			ConnectionId: connId,
+			HeaderCryptoVerificationGeneration: fixture.ls.
+				loadConsensusSnapshot().generation,
 			Point: ocommon.NewPoint(
 				h.SlotNumber(),
 				h.Hash().Bytes(),
@@ -4115,6 +4119,38 @@ func TestPeerHeaderHistoryRehydratesWireHeader(t *testing.T) {
 	assert.Equal(t, header.PrevHash(), rehydrated.BlockHeader.PrevHash())
 	assert.Equal(t, header.BlockNumber(), rehydrated.BlockHeader.BlockNumber())
 	assert.Equal(t, header.SlotNumber(), rehydrated.BlockHeader.SlotNumber())
+}
+
+func TestPeerHeaderHistoryRefreshesAuthorizationGeneration(t *testing.T) {
+	t.Parallel()
+
+	fixture := newChainsyncRollbackFixture(t)
+	header := mockHeader{
+		hash:        lcommon.NewBlake2b256([]byte("generation-refresh")),
+		prevHash:    lcommon.NewBlake2b256(fixture.currentTip.Point.Hash),
+		blockNumber: fixture.currentTip.BlockNumber + 1,
+		slot:        fixture.currentTip.Point.Slot + 1,
+	}
+	evt := ChainsyncEvent{
+		ConnectionId: fixture.connId,
+		HeaderCryptoVerificationGeneration: fixture.ls.
+			loadConsensusSnapshot().generation,
+		Point:       ocommon.NewPoint(header.slot, header.hash.Bytes()),
+		BlockHeader: header,
+	}
+	fixture.ls.recordPeerHeaderHistory(evt)
+	oldGeneration := evt.HeaderCryptoVerificationGeneration
+	fixture.ls.publishSnapshotsLocked()
+	evt.HeaderCryptoVerificationGeneration = fixture.ls.
+		loadConsensusSnapshot().generation
+	require.NotEqual(t, oldGeneration,
+		evt.HeaderCryptoVerificationGeneration)
+	fixture.ls.recordPeerHeaderHistory(evt)
+
+	record := fixture.ls.peerHeaderHistory[connIdKey(fixture.connId)].
+		byHash[hex.EncodeToString(evt.Point.Hash)]
+	require.Equal(t, evt.HeaderCryptoVerificationGeneration,
+		record.event.HeaderCryptoVerificationGeneration)
 }
 
 // TestTryResolveForkExtensionRestartsBlockfetchAfterQueueOverflow pins the
@@ -6234,15 +6270,594 @@ func TestChainsyncHeaderVerificationRejectsStaleIngressVerdict(t *testing.T) {
 	require.ErrorContains(t, err, "block header crypto verification failed")
 
 	event.HeaderCryptoVerificationGeneration = ls.loadConsensusSnapshot().generation
+	admissionResolved := false
+	admitted := true
+	event.PeerTipAdmission = func(value bool) {
+		admissionResolved = true
+		admitted = value
+	}
 	finishTransition := ls.beginTxValidationTransition()
 	err = ls.handleEventChainsyncBlockHeader(event)
 	finishTransition()
 	require.NoError(t, err)
+	require.True(t, admissionResolved)
+	require.False(t, admitted, "deferred authorization must reject selector admission")
+	require.Empty(
+		t,
+		ls.peerHeaderHistory[connIdKey(event.ConnectionId)],
+		"deferred authorization must not enter trusted peer history",
+	)
 	require.False(
 		t,
 		ls.chain.FirstVerifiedHeaderMatchesPoint(event.Point),
-		"a durable state transition without a publication must queue the header unverified",
+		"a durable state transition must not retain a stale verification verdict",
 	)
+	require.Zero(t, ls.chain.HeaderCount(), "deferred header must stay out of the queue")
+
+	// A rollback can remove the epoch nonce at the same time it invalidates
+	// the ingress verdict. The missing nonce must not turn that stale verdict
+	// into permission to queue the header for later body validation.
+	event.HeaderCryptoVerificationGeneration = ls.loadConsensusSnapshot().generation
+	ls.Lock()
+	ls.epochCache[0].Nonce = nil
+	ls.publishSnapshotsLocked()
+	ls.Unlock()
+	admissionResolved = false
+	admitted = true
+	err = ls.handleEventChainsyncBlockHeader(event)
+	require.NoError(t, err)
+	require.True(t, admissionResolved)
+	require.False(t, admitted)
+	require.Empty(t, ls.peerHeaderHistory[connIdKey(event.ConnectionId)])
+	require.Zero(t, ls.chain.HeaderCount())
+}
+
+func TestBufferedHeaderReplayRemovesHistoryWhenAdmissionBecomesStale(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	fixture := newChainsyncRollbackFixture(t)
+	ls := fixture.ls
+	parentHash := lcommon.NewBlake2b256([]byte("detached-replay-parent"))
+	parent := mockHeader{
+		hash:        parentHash,
+		prevHash:    lcommon.NewBlake2b256(fixture.currentTip.Point.Hash),
+		blockNumber: fixture.currentTip.BlockNumber + 1,
+		slot:        fixture.currentTip.Point.Slot + 10,
+	}
+	parentPoint := ocommon.NewPoint(parent.slot, parent.hash.Bytes())
+	ls.mithrilLedgerSlot = parent.slot + 10
+	ls.publishSnapshotsLocked()
+	generation := ls.loadConsensusSnapshot().generation
+	parentEvent := ChainsyncEvent{
+		ConnectionId:                       fixture.connId,
+		BlockHeader:                        parent,
+		HeaderCryptoVerificationGeneration: generation,
+		Point:                              parentPoint,
+		Tip: ochainsync.Tip{
+			Point:       parentPoint,
+			BlockNumber: parent.blockNumber,
+		},
+	}
+	ls.recordPeerHeaderHistory(parentEvent)
+	ls.bufferedHeaderEvents = map[string][]ChainsyncEvent{
+		connIdKey(fixture.connId): {parentEvent},
+	}
+
+	finishTransition := ls.beginTxValidationTransition()
+	var pending pendingPublishes
+	replayErr := ls.replayBufferedHeaderEvents(fixture.connId, &pending)
+	finishTransition()
+	pending.flush()
+	require.NoError(t, replayErr)
+	require.Empty(t, ls.bufferedHeaderEvents)
+	require.Empty(t, ls.peerHeaderHistory[connIdKey(fixture.connId)])
+	require.Zero(t, ls.chain.HeaderCount())
+
+	childHash := lcommon.NewBlake2b256([]byte("detached-replay-child"))
+	child := mockHeader{
+		hash:        childHash,
+		prevHash:    parentHash,
+		blockNumber: parent.blockNumber + 1,
+		slot:        parent.slot + 10,
+	}
+	childPoint := ocommon.NewPoint(child.slot, child.hash.Bytes())
+	childAdmitted := true
+	require.NoError(t, ls.handleEventChainsyncBlockHeader(ChainsyncEvent{
+		ConnectionId:                       fixture.connId,
+		BlockHeader:                        child,
+		HeaderCryptoVerificationGeneration: generation,
+		Point:                              childPoint,
+		Tip: ochainsync.Tip{
+			Point:       childPoint,
+			BlockNumber: child.blockNumber,
+		},
+		PeerTipAdmission: func(admitted bool) {
+			childAdmitted = admitted
+		},
+	}))
+	require.False(t, childAdmitted)
+	require.Zero(t, ls.chain.HeaderCount())
+}
+
+func TestChainsyncHeaderRevalidationUpdatesPeerTipGeneration(t *testing.T) {
+	t.Parallel()
+
+	fixture := newChainsyncRollbackFixture(t)
+	ls := fixture.ls
+	ls.Lock()
+	ls.epochCache = []models.Epoch{{
+		EpochId:       0,
+		StartSlot:     0,
+		LengthInSlots: 2_000,
+		Nonce:         make([]byte, 32),
+	}}
+	ls.publishSnapshotsLocked()
+	ls.Unlock()
+	oldGeneration := ls.loadConsensusSnapshot().generation
+	ls.Lock()
+	ls.publishSnapshotsLocked()
+	ls.Unlock()
+	currentGeneration := ls.loadConsensusSnapshot().generation
+	require.NotEqual(t, oldGeneration, currentGeneration)
+
+	header := mockHeader{
+		hash: lcommon.NewBlake2b256(fixture.currentTip.Point.Hash),
+		prevHash: lcommon.NewBlake2b256(
+			fixture.ancestorTip.Point.Hash,
+		),
+		blockNumber: fixture.currentTip.BlockNumber,
+		slot:        fixture.currentTip.Point.Slot,
+	}
+	peerTip := &chainselection.PeerTipUpdateEvent{
+		ConnectionId:                       fixture.connId,
+		AdmissionID:                        1,
+		HeaderCryptoVerificationGeneration: oldGeneration,
+	}
+	admission := make(chan bool, 1)
+	admittedGeneration := make(chan uint64, 1)
+	require.NoError(t, ls.handleEventChainsyncBlockHeader(ChainsyncEvent{
+		ConnectionId:                       fixture.connId,
+		HeaderCryptoVerificationGeneration: oldGeneration,
+		BlockHeader:                        header,
+		Point:                              fixture.currentTip.Point,
+		Tip:                                fixture.currentTip,
+		PeerTipUpdate:                      peerTip,
+		PeerTipAdmission: func(admitted bool) {
+			admission <- admitted
+			admittedGeneration <- peerTip.HeaderCryptoVerificationGeneration
+		},
+	}))
+	assert.True(t, testutil.RequireReceive(t, admission, time.Second,
+		"the revalidated primary header should resolve admission"))
+	assert.Equal(t, currentGeneration, testutil.RequireReceive(
+		t,
+		admittedGeneration,
+		time.Second,
+		"selector admission should receive the revalidated generation",
+	))
+	assert.Equal(t, currentGeneration,
+		peerTip.HeaderCryptoVerificationGeneration)
+}
+
+func TestHeaderCryptoVerificationGenerationPinBlocksPublication(t *testing.T) {
+	t.Parallel()
+
+	ls := &LedgerState{}
+	ls.publishSnapshotsLocked()
+	generation := ls.loadConsensusSnapshot().generation
+	release, current := ls.PinHeaderCryptoVerificationGeneration(generation)
+	require.True(t, current)
+	require.NotNil(t, release)
+
+	published := make(chan struct{})
+	go func() {
+		ls.Lock()
+		ls.publishSnapshotsLocked()
+		ls.Unlock()
+		close(published)
+	}()
+	testutil.RequireNoReceive(t, published, 100*time.Millisecond,
+		"snapshot publication must wait for the generation pin")
+	release()
+	testutil.RequireReceive(t, published, time.Second,
+		"snapshot publication should resume after the generation pin releases")
+	require.False(t, ls.HeaderCryptoVerificationGenerationCurrent(generation))
+}
+
+func TestBlockfetchHeaderVerificationAvoidsGenerationLockInversion(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	ls := &LedgerState{}
+	ls.publishSnapshotsLocked()
+	generation := ls.loadConsensusSnapshot().generation
+
+	verifyStarted := make(chan struct{})
+	continueVerify := make(chan struct{})
+	type verificationResult struct {
+		generation uint64
+		err        error
+	}
+	verified := make(chan verificationResult, 1)
+	go func() {
+		ls.chainsyncBlockfetchMutex.Lock()
+		verifiedGeneration, err := ls.withStableBlockfetchHeaderVerification(
+			true,
+			func() error {
+				close(verifyStarted)
+				<-continueVerify
+				return nil
+			},
+		)
+		ls.chainsyncBlockfetchMutex.Unlock()
+		verified <- verificationResult{
+			generation: verifiedGeneration,
+			err:        err,
+		}
+	}()
+	testutil.RequireReceive(
+		t,
+		verifyStarted,
+		testutil.AsyncWait,
+		"blockfetch verification did not start",
+	)
+
+	pinCurrent := make(chan bool, 1)
+	chainHasBlockfetchLock := make(chan struct{})
+	releaseChain := make(chan struct{})
+	chainDone := make(chan struct{})
+	go func() {
+		defer close(chainDone)
+		release, current := ls.PinHeaderCryptoVerificationGeneration(generation)
+		pinCurrent <- current
+		if !current {
+			return
+		}
+		defer release()
+		ls.chainsyncBlockfetchMutex.Lock()
+		close(chainHasBlockfetchLock)
+		<-releaseChain
+		ls.chainsyncBlockfetchMutex.Unlock()
+	}()
+	require.True(t, testutil.RequireReceive(
+		t,
+		pinCurrent,
+		testutil.AsyncWait,
+		"ChainSync did not pin its verification generation",
+	))
+	testutil.RequireReceive(
+		t,
+		chainHasBlockfetchLock,
+		testutil.AsyncWait,
+		"blockfetch verification retained the blockfetch mutex",
+	)
+
+	transitionReady := make(chan func(), 1)
+	go func() {
+		transitionReady <- ls.beginTxValidationTransition()
+	}()
+	testutil.RequireNoReceive(
+		t,
+		transitionReady,
+		100*time.Millisecond,
+		"ledger transition crossed a pinned ChainSync admission",
+	)
+	close(continueVerify)
+	testutil.RequireNoReceive(
+		t,
+		verified,
+		100*time.Millisecond,
+		"blockfetch verification crossed a queued ledger transition",
+	)
+	close(releaseChain)
+
+	finishTransition := testutil.RequireReceive(
+		t,
+		transitionReady,
+		testutil.AsyncWait,
+		"ledger transition did not resume after ChainSync released its pin",
+	)
+	result := testutil.RequireReceive(
+		t,
+		verified,
+		testutil.AsyncWait,
+		"blockfetch verification deadlocked with ChainSync admission",
+	)
+	require.ErrorIs(t, result.err, errHeaderVerificationDeferred)
+	require.Zero(t, result.generation)
+	finishTransition()
+	testutil.RequireReceive(
+		t,
+		chainDone,
+		testutil.AsyncWait,
+		"ChainSync admission did not release its locks",
+	)
+}
+
+func TestNotFitHeaderRetainsVerificationGenerationPin(t *testing.T) {
+	t.Parallel()
+
+	fixture := newChainsyncRollbackFixture(t)
+	ls := fixture.ls
+	generation := ls.loadConsensusSnapshot().generation
+	header := mockHeader{
+		hash: lcommon.NewBlake2b256(
+			testHashBytes("not-fit-generation-pin"),
+		),
+		prevHash:    lcommon.NewBlake2b256(fixture.ancestorTip.Point.Hash),
+		blockNumber: fixture.currentTip.BlockNumber,
+		slot:        fixture.currentTip.Point.Slot,
+	}
+
+	verified, release, err := ls.addChainsyncHeaderPinned(header, generation)
+	require.True(t, verified)
+	require.NotNil(t, release)
+	var notFitErr chain.BlockNotFitChainTipError
+	require.ErrorAs(t, err, &notFitErr)
+
+	published := make(chan struct{})
+	go func() {
+		ls.Lock()
+		ls.publishSnapshotsLocked()
+		ls.Unlock()
+		close(published)
+	}()
+	testutil.RequireNoReceive(t, published, 100*time.Millisecond,
+		"fork resolution must retain the generation pin after a not-fit result")
+	release()
+	testutil.RequireReceive(t, published, time.Second,
+		"snapshot publication should resume after fork handling releases the pin")
+}
+
+func TestPinnedForkRollbackResyncsWithoutGenerationLockDeadlock(t *testing.T) {
+	t.Parallel()
+
+	fixture := newChainsyncRollbackFixture(t)
+	ls := fixture.ls
+	bus := newTestEventBus(t, nil)
+	t.Cleanup(bus.Stop)
+	ls.config.EventBus = bus
+	resyncCh := subscribeChainsyncResync(t, bus)
+
+	decisionEntered := make(chan struct{})
+	releaseDecision := make(chan struct{})
+	var blockOnce sync.Once
+	ls.config.GenesisSelectionStateFunc = func() (bool, uint64) {
+		blockOnce.Do(func() {
+			close(decisionEntered)
+			<-releaseDecision
+		})
+		return false, 0
+	}
+	header := mockHeader{
+		hash: lcommon.NewBlake2b256(
+			testHashBytes("pinned-rollback-resync"),
+		),
+		prevHash:    lcommon.NewBlake2b256(fixture.ancestorTip.Point.Hash),
+		blockNumber: fixture.ancestorTip.BlockNumber + 1,
+		slot:        fixture.currentTip.Point.Slot + 10,
+	}
+	admission := make(chan bool, 1)
+	handled := make(chan error, 1)
+	go func() {
+		handled <- ls.handleEventChainsyncBlockHeader(ChainsyncEvent{
+			ConnectionId: fixture.connId,
+			HeaderCryptoVerificationGeneration: ls.
+				loadConsensusSnapshot().generation,
+			BlockHeader: header,
+			Point: ocommon.NewPoint(
+				header.SlotNumber(),
+				header.Hash().Bytes(),
+			),
+			Tip: ochainsync.Tip{
+				Point: ocommon.NewPoint(
+					header.SlotNumber()+10,
+					testHashBytes("pinned-rollback-peer-tip"),
+				),
+				BlockNumber: header.BlockNumber() + 1,
+			},
+			PeerTipAdmission: func(admitted bool) { admission <- admitted },
+		})
+	}()
+	testutil.RequireReceive(t, decisionEntered, time.Second,
+		"fork decision should run with the verification generation pinned")
+	writerDone := make(chan struct{})
+	go func() {
+		ls.Lock()
+		ls.publishSnapshotsLocked()
+		ls.Unlock()
+		close(writerDone)
+	}()
+	testutil.RequireNoReceive(t, writerDone, 100*time.Millisecond,
+		"a generation writer should wait for the fork decision")
+	close(releaseDecision)
+	require.NoError(t, testutil.RequireReceive(t, handled, time.Second,
+		"pinned fork handling must not deadlock on rollback"))
+	testutil.RequireReceive(t, writerDone, time.Second,
+		"the generation writer should resume after fork handling")
+	assert.False(t, testutil.RequireReceive(t, admission, time.Second,
+		"a header must not be selector-admitted across a rollback generation"))
+	// The rollback publishes its own "local ledger rollback" resync first.
+	resync := testutil.RequireReceive(t, resyncCh, time.Second,
+		"the peer should re-intersect after the rollback")
+	assert.Equal(t, event.ChainsyncResyncReasonLocalLedgerRollback, resync.Reason)
+	resync = testutil.RequireReceive(t, resyncCh, time.Second,
+		"the peer should re-intersect before replaying the winning fork")
+	assert.Equal(t, event.ChainsyncResyncReasonPersistentFork, resync.Reason)
+	assert.Equal(t, fixture.ancestorTip, ls.chain.Tip())
+	assert.Zero(t, ls.chain.HeaderCount())
+}
+
+func TestPinnedForkExtensionAvoidsLedgerGenerationLockCycle(t *testing.T) {
+	t.Parallel()
+
+	fixture := newChainsyncRollbackFixture(t)
+	ls := fixture.ls
+	requestDone := make(chan struct{})
+	oldBatchReady := make(chan struct{})
+	ls.activeBlockfetchConnId = fixture.connId
+	ls.selectedBlockfetchConnId = fixture.connId
+	ls.chainsyncBlockfetchReadyChan = oldBatchReady
+	ls.blockfetchRequestsInFlight = map[string][]chan struct{}{
+		connIdKey(fixture.connId): {requestDone},
+	}
+	ls.config.BlockfetchRequestRangeFunc = func(
+		ouroboros.ConnectionId,
+		ocommon.Point,
+		ocommon.Point,
+	) (uint64, error) {
+		return 0, nil
+	}
+	t.Cleanup(func() {
+		ls.chainsyncBlockfetchMutex.Lock()
+		ls.completeBlockfetchRequestLocked(fixture.connId)
+		ls.blockfetchRequestRangeCleanup()
+		ls.activeBlockfetchConnId = ouroboros.ConnectionId{}
+		ls.chainsyncBlockfetchMutex.Unlock()
+	})
+
+	verificationStarted := make(chan struct{})
+	continueVerification := make(chan struct{})
+	var continueOnce sync.Once
+	verificationDone := make(chan error, 1)
+	go func() {
+		ls.chainsyncBlockfetchMutex.Lock()
+		_, err := ls.withStableBlockfetchHeaderVerification(true, func() error {
+			close(verificationStarted)
+			<-continueVerification
+			return nil
+		})
+		ls.completeBlockfetchRequestLocked(fixture.connId)
+		ls.chainsyncBlockfetchMutex.Unlock()
+		verificationDone <- err
+	}()
+	t.Cleanup(func() {
+		continueOnce.Do(func() { close(continueVerification) })
+	})
+	testutil.RequireReceive(t, verificationStarted, time.Second,
+		"blockfetch verification should reach its final generation check")
+	upstreamTipBefore := ls.syncUpstreamTipSlot.Load()
+	upstreamStateBefore := ls.syncUpstreamState.Load()
+
+	queued := mockHeader{
+		hash: lcommon.NewBlake2b256(
+			testHashBytes("queued-extension-competitor"),
+		),
+		prevHash:    lcommon.NewBlake2b256(fixture.currentTip.Point.Hash),
+		blockNumber: fixture.currentTip.BlockNumber + 1,
+		slot:        fixture.currentTip.Point.Slot + 5,
+	}
+	require.NoError(t, ls.chain.AddBlockHeader(context.Background(), queued))
+
+	decisionEntered := make(chan struct{})
+	releaseDecision := make(chan struct{})
+	var blockOnce sync.Once
+	ls.config.GenesisSelectionStateFunc = func() (bool, uint64) {
+		blockOnce.Do(func() {
+			close(decisionEntered)
+			<-releaseDecision
+		})
+		return false, 0
+	}
+	header := mockHeader{
+		hash: lcommon.NewBlake2b256(
+			testHashBytes("pinned-current-tip-extension"),
+		),
+		prevHash:    lcommon.NewBlake2b256(fixture.currentTip.Point.Hash),
+		blockNumber: fixture.currentTip.BlockNumber + 1,
+		slot:        fixture.currentTip.Point.Slot + 10,
+	}
+	admission := make(chan bool, 1)
+	handled := make(chan error, 1)
+	go func() {
+		handled <- ls.handleEventChainsyncBlockHeader(ChainsyncEvent{
+			ConnectionId: fixture.connId,
+			HeaderCryptoVerificationGeneration: ls.
+				loadConsensusSnapshot().generation,
+			BlockHeader: header,
+			Point: ocommon.NewPoint(
+				header.SlotNumber(),
+				header.Hash().Bytes(),
+			),
+			Tip: ochainsync.Tip{
+				Point: ocommon.NewPoint(
+					header.SlotNumber()+10,
+					testHashBytes("pinned-extension-peer-tip"),
+				),
+				BlockNumber: header.BlockNumber() + 1,
+			},
+			PeerTipAdmission: func(admitted bool) { admission <- admitted },
+		})
+	}()
+	testutil.RequireReceive(t, decisionEntered, time.Second,
+		"fork extension should run with the verification generation pinned")
+	writerDone := make(chan struct{})
+	go func() {
+		ls.Lock()
+		ls.publishSnapshotsLocked()
+		ls.Unlock()
+		close(writerDone)
+	}()
+	testutil.RequireNoReceive(t, writerDone, 100*time.Millisecond,
+		"a generation writer should wait for the fork extension")
+	close(releaseDecision)
+	testutil.RequireReceive(t, oldBatchReady, time.Second,
+		"fork extension should begin draining the prior blockfetch request")
+	continueOnce.Do(func() { close(continueVerification) })
+	testutil.RequireReceive(t, writerDone, time.Second,
+		"fork restart must release the generation pin before request drain")
+	require.ErrorIs(t, testutil.RequireReceive(
+		t,
+		verificationDone,
+		time.Second,
+		"blockfetch verification deadlocked behind the generation writer",
+	), errHeaderVerificationDeferred)
+	require.NoError(t, testutil.RequireReceive(t, handled, time.Second,
+		"fork extension did not resume after the prior request completed"))
+	assert.False(t, testutil.RequireReceive(t, admission, time.Second,
+		"snapshot publication before the deferred callback must reject selector admission"))
+	assert.Zero(t, ls.chain.HeaderCount(),
+		"the stale queued header must be removed with selector admission")
+	assert.Equal(t, upstreamTipBefore, ls.syncUpstreamTipSlot.Load(),
+		"stale fork authorization must not advance the upstream frontier")
+	assert.Equal(t, upstreamStateBefore, ls.syncUpstreamState.Load(),
+		"stale fork authorization must not publish an upstream target")
+	history := ls.peerHeaderHistory[connIdKey(fixture.connId)]
+	if history != nil {
+		assert.NotContains(t, history.byHash,
+			hex.EncodeToString(header.Hash().Bytes()))
+	}
+
+	child := mockHeader{
+		hash: lcommon.NewBlake2b256(
+			testHashBytes("child-of-invalidated-extension"),
+		),
+		prevHash:    header.Hash(),
+		blockNumber: header.BlockNumber() + 1,
+		slot:        header.SlotNumber() + 1,
+	}
+	childAdmission := make(chan bool, 1)
+	require.NoError(t, ls.handleEventChainsyncBlockHeader(ChainsyncEvent{
+		ConnectionId: fixture.connId,
+		HeaderCryptoVerificationGeneration: ls.
+			loadConsensusSnapshot().generation,
+		BlockHeader: child,
+		Point: ocommon.NewPoint(
+			child.SlotNumber(),
+			child.Hash().Bytes(),
+		),
+		Tip: ochainsync.Tip{
+			Point:       ocommon.NewPoint(child.SlotNumber(), child.Hash().Bytes()),
+			BlockNumber: child.BlockNumber(),
+		},
+		PeerTipAdmission: func(admitted bool) { childAdmission <- admitted },
+	}))
+	assert.False(t, testutil.RequireReceive(t, childAdmission, time.Second,
+		"a child must not build on invalidated ledger ancestry"))
+	assert.Zero(t, ls.chain.HeaderCount())
 }
 
 func TestChainsyncHeaderVerificationRejectsMismatchedIngressVerdict(
@@ -8474,10 +9089,16 @@ func TestTryResolveForkGenesisRejectsLongerSparseCandidate(t *testing.T) {
 	assert.Zero(t, fixture.ls.chain.HeaderCount())
 }
 
-func TestTryResolveForkGenesisAcceptsDenserShorterCandidate(t *testing.T) {
+func TestTryResolveForkGenesisRequestsRevalidationForDenserShorterCandidate(
+	t *testing.T,
+) {
 	t.Parallel()
 
 	fixture := newChainsyncRollbackFixture(t)
+	bus := newTestEventBus(t, nil)
+	t.Cleanup(bus.Stop)
+	fixture.ls.config.EventBus = bus
+	resyncCh := subscribeChainsyncResync(t, bus)
 	require.NoError(
 		t,
 		fixture.ls.config.ChainManager.SetLedger(
@@ -8514,6 +9135,7 @@ func TestTryResolveForkGenesisAcceptsDenserShorterCandidate(t *testing.T) {
 			},
 		}),
 	)
+	localTip := fixture.ls.chain.Tip()
 
 	forkHash1 := testHashBytes("genesis-dense-fork-1")
 	forkHash2 := testHashBytes("genesis-dense-fork-2")
@@ -8531,8 +9153,10 @@ func TestTryResolveForkGenesisAcceptsDenserShorterCandidate(t *testing.T) {
 	}
 	fixture.ls.recordPeerHeaderHistory(ChainsyncEvent{
 		ConnectionId: fixture.connId,
-		Point:        ocommon.NewPoint(header1.slot, forkHash1),
-		BlockHeader:  header1,
+		HeaderCryptoVerificationGeneration: fixture.ls.
+			loadConsensusSnapshot().generation,
+		Point:       ocommon.NewPoint(header1.slot, forkHash1),
+		BlockHeader: header1,
 	})
 	err := fixture.ls.handleEventChainsyncBlockHeader(
 		ChainsyncEvent{
@@ -8550,7 +9174,23 @@ func TestTryResolveForkGenesisAcceptsDenserShorterCandidate(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, fixture.ancestorTip, fixture.ls.chain.Tip())
-	assert.Equal(t, 2, fixture.ls.chain.HeaderCount())
+	assert.NotEqual(t, localTip, fixture.ls.chain.Tip())
+	assert.Zero(t, fixture.ls.chain.HeaderCount())
+	// The rollback publishes its own "local ledger rollback" resync first.
+	resync := testutil.RequireReceive(
+		t,
+		resyncCh,
+		time.Second,
+		"the rollback should request a resync",
+	)
+	assert.Equal(t, event.ChainsyncResyncReasonLocalLedgerRollback, resync.Reason)
+	resync = testutil.RequireReceive(
+		t,
+		resyncCh,
+		time.Second,
+		"the denser Genesis candidate should be replayed after reintersection",
+	)
+	assert.Equal(t, event.ChainsyncResyncReasonPersistentFork, resync.Reason)
 }
 
 func TestTryResolveForkUsesPraosAfterGenesisExit(t *testing.T) {
@@ -9039,13 +9679,17 @@ func TestTryResolveForkQueuesKnownPeerForkSegment(t *testing.T) {
 
 	fixture.ls.recordPeerHeaderHistory(ChainsyncEvent{
 		ConnectionId: fixture.connId,
-		Point:        ocommon.NewPoint(header1.SlotNumber(), forkHash1),
-		BlockHeader:  header1,
+		HeaderCryptoVerificationGeneration: fixture.ls.
+			loadConsensusSnapshot().generation,
+		Point:       ocommon.NewPoint(header1.SlotNumber(), forkHash1),
+		BlockHeader: header1,
 	})
 	fixture.ls.recordPeerHeaderHistory(ChainsyncEvent{
 		ConnectionId: fixture.connId,
-		Point:        ocommon.NewPoint(header2.SlotNumber(), forkHash2),
-		BlockHeader:  header2,
+		HeaderCryptoVerificationGeneration: fixture.ls.
+			loadConsensusSnapshot().generation,
+		Point:       ocommon.NewPoint(header2.SlotNumber(), forkHash2),
+		BlockHeader: header2,
 	})
 
 	err := fixture.ls.chain.AddBlockHeader(context.Background(), header3)
@@ -9106,21 +9750,24 @@ func TestTryResolveForkUsesObservedPeerHistoryFallback(t *testing.T) {
 		blockNumber: fixture.ancestorTip.BlockNumber + 3,
 		slot:        fixture.currentTip.Point.Slot + 3,
 	}
+	generation := fixture.ls.loadConsensusSnapshot().generation
 
 	observedHeaders := map[string]peerHeaderRecord{
 		hex.EncodeToString(forkHash1): {
 			event: ChainsyncEvent{
-				ConnectionId: fixture.connId,
-				Point:        ocommon.NewPoint(header1.SlotNumber(), forkHash1),
-				BlockHeader:  header1,
+				ConnectionId:                       fixture.connId,
+				HeaderCryptoVerificationGeneration: generation,
+				Point:                              ocommon.NewPoint(header1.SlotNumber(), forkHash1),
+				BlockHeader:                        header1,
 			},
 			prevHash: append([]byte(nil), fixture.ancestorTip.Point.Hash...),
 		},
 		hex.EncodeToString(forkHash2): {
 			event: ChainsyncEvent{
-				ConnectionId: fixture.connId,
-				Point:        ocommon.NewPoint(header2.SlotNumber(), forkHash2),
-				BlockHeader:  header2,
+				ConnectionId:                       fixture.connId,
+				HeaderCryptoVerificationGeneration: generation,
+				Point:                              ocommon.NewPoint(header2.SlotNumber(), forkHash2),
+				BlockHeader:                        header2,
 			},
 			prevHash: append([]byte(nil), forkHash1...),
 		},
@@ -9360,6 +10007,8 @@ func TestRecoverAfterLocalRollbackReplaysPeerHeaderHistory(
 	}
 	fixture.ls.recordPeerHeaderHistory(ChainsyncEvent{
 		ConnectionId: fixture.connId,
+		HeaderCryptoVerificationGeneration: fixture.ls.
+			loadConsensusSnapshot().generation,
 		Point: ocommon.NewPoint(
 			header1.slot,
 			header1.hash.Bytes(),
@@ -9375,6 +10024,8 @@ func TestRecoverAfterLocalRollbackReplaysPeerHeaderHistory(
 	})
 	fixture.ls.recordPeerHeaderHistory(ChainsyncEvent{
 		ConnectionId: fixture.connId,
+		HeaderCryptoVerificationGeneration: fixture.ls.
+			loadConsensusSnapshot().generation,
 		Point: ocommon.NewPoint(
 			header2.slot,
 			header2.hash.Bytes(),
@@ -9418,6 +10069,56 @@ func TestRecoverAfterLocalRollbackReplaysPeerHeaderHistory(
 	)
 	assert.Equal(t, 1, requestCount)
 	fixture.ls.blockfetchRequestRangeCleanup()
+}
+
+func TestRecoverAfterLocalRollbackRejectsStaleHeaderHistory(t *testing.T) {
+	t.Parallel()
+
+	fixture := newChainsyncRollbackFixture(t)
+	require.NoError(t, fixture.ls.chain.Rollback(
+		context.Background(),
+		fixture.ancestorTip.Point,
+	))
+	require.NoError(t, fixture.ls.db.SetTip(fixture.ancestorTip, nil))
+	fixture.ls.currentTip = fixture.ancestorTip
+	fixture.ls.currentTipBlockNonce = append(
+		[]byte(nil),
+		fixture.ancestorNonce...,
+	)
+
+	staleGeneration := fixture.ls.loadConsensusSnapshot().generation
+	header := mockHeader{
+		hash: lcommon.NewBlake2b256(
+			testHashBytes("stale-rollback-history"),
+		),
+		prevHash:    lcommon.NewBlake2b256(fixture.ancestorTip.Point.Hash),
+		blockNumber: fixture.ancestorTip.BlockNumber + 1,
+		slot:        fixture.ancestorTip.Point.Slot + 1,
+	}
+	fixture.ls.recordPeerHeaderHistory(ChainsyncEvent{
+		ConnectionId:                       fixture.connId,
+		HeaderCryptoVerificationGeneration: staleGeneration,
+		Point: ocommon.NewPoint(
+			header.SlotNumber(),
+			header.Hash().Bytes(),
+		),
+		BlockHeader: header,
+	})
+	fixture.ls.publishSnapshotsLocked()
+	require.False(t, fixture.ls.headerCryptoVerificationGenerationCurrent(
+		staleGeneration,
+	))
+
+	result := fixture.ls.RecoverAfterLocalRollback(
+		context.Background(),
+		[]ouroboros.ConnectionId{fixture.connId},
+		fixture.ancestorTip.Point,
+	)
+
+	require.False(t, result.Recovered)
+	require.Zero(t, fixture.ls.chain.HeaderCount())
+	require.Equal(t, ouroboros.ConnectionId{},
+		fixture.ls.selectedBlockfetchConnId)
 }
 
 // TestRecoverAfterLocalRollbackRetargetsSelectedBlockfetchConn asserts the
@@ -9477,6 +10178,8 @@ func TestRecoverAfterLocalRollbackRetargetsSelectedBlockfetchConn(
 	}
 	fixture.ls.recordPeerHeaderHistory(ChainsyncEvent{
 		ConnectionId: fixture.connId,
+		HeaderCryptoVerificationGeneration: fixture.ls.
+			loadConsensusSnapshot().generation,
 		Point: ocommon.NewPoint(
 			header.SlotNumber(),
 			header.Hash().Bytes(),
@@ -9568,6 +10271,8 @@ func TestRecoverAfterLocalRollbackClearsSelectionWhenEveryConnectionFails(
 	}
 	fixture.ls.recordPeerHeaderHistory(ChainsyncEvent{
 		ConnectionId: fixture.connId,
+		HeaderCryptoVerificationGeneration: fixture.ls.
+			loadConsensusSnapshot().generation,
 		Point: ocommon.NewPoint(
 			header.SlotNumber(),
 			header.Hash().Bytes(),
@@ -9633,6 +10338,8 @@ func TestRecoverAfterLocalRollbackReportsBlockfetchFailure(
 	}
 	fixture.ls.recordPeerHeaderHistory(ChainsyncEvent{
 		ConnectionId: fixture.connId,
+		HeaderCryptoVerificationGeneration: fixture.ls.
+			loadConsensusSnapshot().generation,
 		Point: ocommon.NewPoint(
 			header.SlotNumber(),
 			header.Hash().Bytes(),
@@ -10899,7 +11606,7 @@ func subscribeChainsyncResync(
 ) chan event.ChainsyncResyncEvent {
 	t.Helper()
 
-	resyncCh := make(chan event.ChainsyncResyncEvent, 1)
+	resyncCh := make(chan event.ChainsyncResyncEvent, 4)
 	subId := bus.SubscribeFunc(
 		event.ChainsyncResyncEventType,
 		func(evt event.Event) {
@@ -13817,6 +14524,47 @@ func TestHandleEventChainsyncBlockHeaderBuffersIncompatibleNonOwnerConnection(
 	)
 }
 
+func TestBufferHeaderOverflowRejectsDependentHistory(t *testing.T) {
+	t.Parallel()
+
+	connID := testRecycleConnId()
+	ls := &LedgerState{
+		chain: &chain.Chain{},
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+	var pending pendingPublishes
+	rejected := 0
+	previousHash := lcommon.NewBlake2b256(nil)
+	for i := range maxBufferedHeadersPerConn + 1 {
+		hash := lcommon.NewBlake2b256(fmt.Appendf(nil, "buffered-%d", i))
+		header := mockHeader{
+			hash:        hash,
+			prevHash:    previousHash,
+			blockNumber: uint64(i + 1),
+			slot:        uint64(i + 1),
+		}
+		evt := ChainsyncEvent{
+			ConnectionId: connID,
+			BlockHeader:  header,
+			Point:        ocommon.NewPoint(header.slot, hash.Bytes()),
+			PeerTipAdmission: func(admitted bool) {
+				require.False(t, admitted)
+				rejected++
+			},
+		}
+		ls.recordPeerHeaderHistory(evt)
+		ls.bufferHeaderEvent(evt, &pending)
+		previousHash = hash
+	}
+	pending.flush()
+
+	require.Equal(t, maxBufferedHeadersPerConn+1, rejected)
+	require.Empty(t, ls.bufferedHeaderEvents)
+	require.Empty(t, ls.peerHeaderHistory[connIdKey(connID)])
+}
+
 func TestHandleEventChainsyncBlockHeader_ProcessesEligibleNonActivePeer(
 	t *testing.T,
 ) {
@@ -14308,22 +15056,23 @@ func TestHandleEventChainsyncRollbackClearsBufferedHeadersForNonActivePeer(
 		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3002},
 	}
 	bufferedHash := lcommon.NewBlake2b256([]byte("buffered-header"))
+	bufferedEvent := ChainsyncEvent{
+		ConnectionId: bufferedConn,
+		BlockHeader: mockHeader{
+			hash:        bufferedHash,
+			prevHash:    lcommon.NewBlake2b256(nil),
+			blockNumber: 1,
+			slot:        1,
+		},
+		Point: ocommon.NewPoint(1, bufferedHash.Bytes()),
+		Tip: ochainsync.Tip{
+			Point:       ocommon.NewPoint(10, []byte("tip")),
+			BlockNumber: 10,
+		},
+	}
 	ls := &LedgerState{
 		bufferedHeaderEvents: map[string][]ChainsyncEvent{
-			connIdKey(bufferedConn): {{
-				ConnectionId: bufferedConn,
-				BlockHeader: mockHeader{
-					hash:        bufferedHash,
-					prevHash:    lcommon.NewBlake2b256(nil),
-					blockNumber: 1,
-					slot:        1,
-				},
-				Point: ocommon.NewPoint(1, bufferedHash.Bytes()),
-				Tip: ochainsync.Tip{
-					Point:       ocommon.NewPoint(10, []byte("tip")),
-					BlockNumber: 10,
-				},
-			}},
+			connIdKey(bufferedConn): {bufferedEvent},
 		},
 		config: LedgerStateConfig{
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -14332,6 +15081,8 @@ func TestHandleEventChainsyncRollbackClearsBufferedHeadersForNonActivePeer(
 			},
 		},
 	}
+	ls.recordPeerHeaderHistory(bufferedEvent)
+	require.NotEmpty(t, ls.peerHeaderHistory[connIdKey(bufferedConn)])
 
 	err := ls.handleEventChainsyncRollback(ChainsyncEvent{
 		ConnectionId: bufferedConn,
@@ -14339,6 +15090,7 @@ func TestHandleEventChainsyncRollbackClearsBufferedHeadersForNonActivePeer(
 	}, nil)
 	require.NoError(t, err)
 	assert.Empty(t, ls.bufferedHeaderEvents[connIdKey(bufferedConn)])
+	assert.Empty(t, ls.peerHeaderHistory[connIdKey(bufferedConn)])
 }
 
 func TestHandleEventChainsyncBlockHeaderStartsBlockfetchForSmallBlockGap(

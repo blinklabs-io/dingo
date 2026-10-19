@@ -1161,13 +1161,23 @@ func leiosTestEnableCertifiedBlock(
 	ls.config.ValidateLeiosCertificate = func(uint64, []byte, []byte, []byte) error {
 		return nil
 	}
-	ls.consensus.Store(&consensusSnapshot{
-		epochCache: []models.Epoch{{
-			EpochId:       5,
-			StartSlot:     0,
-			LengthInSlots: 200,
-		}},
-	})
+	ls.consensus.Store(leiosTestCertificationSnapshot())
+}
+
+func leiosTestCertificationSnapshot() *consensusSnapshot {
+	epoch := models.Epoch{
+		EpochId:       5,
+		StartSlot:     0,
+		SlotLength:    1000,
+		LengthInSlots: 200,
+		EraId:         eras.DijkstraEraDesc.Id,
+	}
+	return &consensusSnapshot{
+		currentEpoch:   epoch,
+		currentEra:     eras.DijkstraEraDesc,
+		currentPParams: &dijkstra.DijkstraProtocolParameters{},
+		epochCache:     []models.Epoch{epoch},
+	}
 }
 
 func TestEnsureReferencedEndorserBlocksRequiresCertifiedMusashiClosure(

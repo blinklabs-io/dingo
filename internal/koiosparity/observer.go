@@ -1089,6 +1089,7 @@ func (o *Observer) fetchPoolsIfNeeded(ctx context.Context, epoch uint64) error {
 	var poolIDs []string
 	var firstActiveEpochs map[string]uint64
 	var poolsResolved bool
+	poolState := newPoolHistoryFetchState()
 	var lastErr error
 	for attempt := 0; attempt < o.cfg.FetchRetryAttempts; attempt++ {
 		if !poolsResolved {
@@ -1111,7 +1112,7 @@ func (o *Observer) fetchPoolsIfNeeded(ctx context.Context, epoch uint64) error {
 			}
 			poolsResolved = true
 		}
-		_, err := FetchEpochWithPools(
+		_, err := fetchEpochWithPoolState(
 			ctx,
 			o.koios,
 			o.cache,
@@ -1120,6 +1121,7 @@ func (o *Observer) fetchPoolsIfNeeded(ctx context.Context, epoch uint64) error {
 			poolIDs,
 			firstActiveEpochs,
 			o.cfg.Logger,
+			poolState,
 		)
 		if err == nil {
 			return nil
@@ -1131,6 +1133,15 @@ func (o *Observer) fetchPoolsIfNeeded(ctx context.Context, epoch uint64) error {
 		if attempt == o.cfg.FetchRetryAttempts-1 {
 			break
 		}
+		o.cfg.Logger.Warn(
+			"koiosparity: retrying epoch reference fetch",
+			"network", o.cfg.Network,
+			"epoch", epoch,
+			"failed_attempt", attempt+1,
+			"next_attempt", attempt+2,
+			"max_attempts", o.cfg.FetchRetryAttempts,
+			"error", err,
+		)
 		select {
 		case <-ctx.Done():
 			return ctx.Err()

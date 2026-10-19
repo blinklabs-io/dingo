@@ -200,7 +200,7 @@ func TestBlockfrostMutationAdmissionHonorsCancelledContext(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	release, ok := newMutationAdmission(1, 1).acquire(ctx, "client")
+	release, ok := newRequestAdmission(1, 1).acquire(ctx, "client")
 	assert.False(t, ok)
 	assert.Nil(t, release)
 }

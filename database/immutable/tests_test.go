@@ -300,6 +300,33 @@ func TestImmutableIndexRejectsDescendingBlockOffsets(t *testing.T) {
 	)
 }
 
+func TestImmutableIndexRejectsOversizedBlockSpan(t *testing.T) {
+	fixture := writeImmutableIndexFixture(
+		t, 1, []uint32{0, secondaryIndexEntrySize}, []uint64{0},
+	)
+	chunkPath := filepath.Join(fixture.dir, "00000"+chunkFileExtension)
+	if err := os.Truncate(chunkPath, maxBlockSize+1); err != nil {
+		t.Fatalf("extend chunk: %s", err)
+	}
+	imm, err := New(fixture.dir)
+	if err != nil {
+		t.Fatalf("open immutable DB: %s", err)
+	}
+	if err := imm.ValidateChunkBlockSpans("00000"); !errors.Is(
+		err,
+		ErrInvalidChunkOffset,
+	) {
+		t.Fatalf(
+			"ValidateChunkBlockSpans error = %v, want errors.Is match for %v",
+			err,
+			ErrInvalidChunkOffset,
+		)
+	}
+	requireGetBlockErrorIs(
+		t, fixture, ErrInvalidChunkOffset, "exceeds maximum",
+	)
+}
+
 func TestImmutableIndexRejectsBlockOffsetOverflow(t *testing.T) {
 	tests := []struct {
 		name         string

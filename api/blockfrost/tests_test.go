@@ -824,7 +824,7 @@ func TestPredefinedDRepAmountIncludesActiveProposalDeposit(t *testing.T) {
 	)
 
 	drepType := models.DrepTypeAlwaysNoConfidence
-	info, err := adapter.DRep(DRepCredential{
+	info, err := adapter.DRep(context.Background(), DRepCredential{
 		ID:         "drep_always_no_confidence",
 		Predefined: &drepType,
 	})

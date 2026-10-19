@@ -544,6 +544,12 @@ var flagSpecs = []flagSpec{
 		"Koios Bearer token for rate-limited access",
 	),
 	stringFlag(
+		"KoiosParity.APIKeyFile",
+		"koios-parity-api-key-file",
+		"",
+		"file holding the Koios Bearer token (alternative to --koios-parity-api-key)",
+	),
+	stringFlag(
 		"KoiosParity.BaseURL",
 		"koios-parity-base-url",
 		"",
@@ -748,7 +754,7 @@ var flagSpecs = []flagSpec{
 	intFlag(
 		"GenesisBootstrap.CorroborationPeers",
 		"genesis-bootstrap-corroboration-peers",
-		"independent peers that must corroborate a fast source before it drives Genesis selection (0 disables)",
+		"independent peers that must corroborate a fast source before it drives Genesis selection (default 1; 0 explicitly disables)",
 	),
 	boolFlag(
 		"GenesisBootstrap.LimitOnPatienceEnabled",
@@ -1193,6 +1199,9 @@ func ApplyFlags(cmd *cobra.Command, cfg *Config) error {
 		if isGatedField(spec.field) {
 			cfg.recordProvenance(spec.field, SourceFlag)
 		}
+	}
+	if err := applySecretFileFlags(flags, cfg); err != nil {
+		return err
 	}
 	if cfg.Network != previousNetwork {
 		clearMidnightNetworkDefaults(cfg, previousNetwork)

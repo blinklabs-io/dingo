@@ -86,6 +86,12 @@ func (s *service) checkBlockBackends() error {
 // driver-specific SQL text, file paths, or CBOR diagnostics that should
 // never leave the process.
 func (s *service) internalError(op string, err error) error {
+	if errors.Is(err, context.Canceled) {
+		return status.Error(codes.Canceled, "request canceled")
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return status.Error(codes.DeadlineExceeded, "request deadline exceeded")
+	}
 	if s.logger != nil {
 		s.logger.Error("midnight grpc: internal error", "op", op, "error", err)
 	}
@@ -102,6 +108,7 @@ func (s *service) GetTechnicalCommitteeDatum(
 		return nil, err
 	}
 	datum, err := s.db.GetLatestMidnightGovernanceDatum(
+		ctx,
 		models.MidnightGovernanceDatumTypeTechnicalCommittee,
 		req.GetBlockNumber(),
 	)
@@ -130,6 +137,7 @@ func (s *service) GetCouncilDatum(
 		return nil, err
 	}
 	datum, err := s.db.GetLatestMidnightGovernanceDatum(
+		ctx,
 		models.MidnightGovernanceDatumTypeCouncil,
 		req.GetBlockNumber(),
 	)
@@ -157,7 +165,10 @@ func (s *service) GetAriadneParameters(
 	if err := s.checkDatabase(); err != nil {
 		return nil, err
 	}
-	params, err := s.db.GetMidnightAriadneParamsAtOrBeforeEpoch(req.GetEpoch())
+	params, err := s.db.GetMidnightAriadneParamsAtOrBeforeEpoch(
+		ctx,
+		req.GetEpoch(),
+	)
 	if err != nil {
 		return nil, s.internalError("get ariadne parameters", err)
 	}
@@ -181,7 +192,7 @@ func (s *service) GetEpochNonce(
 	if err := s.checkDatabase(); err != nil {
 		return nil, err
 	}
-	epoch, err := s.db.GetEpoch(req.GetEpoch())
+	epoch, err := s.db.GetEpoch(ctx, req.GetEpoch())
 	if err != nil {
 		return nil, s.internalError("get epoch", err)
 	}
@@ -202,7 +213,7 @@ func (s *service) GetEpochCandidates(
 		return nil, err
 	}
 	epoch := req.GetEpoch()
-	snapshot, err := s.db.GetMidnightEpochCandidatesByEpoch(epoch)
+	snapshot, err := s.db.GetMidnightEpochCandidatesByEpoch(ctx, epoch)
 	if err != nil {
 		return nil, s.internalError("get epoch candidates", err)
 	}
@@ -218,7 +229,7 @@ func (s *service) GetEpochCandidates(
 	if err != nil {
 		return nil, s.internalError("decode candidate snapshot", err)
 	}
-	registrations, err := s.candidateRegistrationsFor(entries)
+	registrations, err := s.candidateRegistrationsFor(ctx, entries)
 	if err != nil {
 		return nil, s.internalError(
 			"get committee candidate registrations",
@@ -262,6 +273,7 @@ func (s *service) GetEpochCandidates(
 	}
 
 	stakeSnapshots, err := s.db.GetPoolStakeSnapshotsByEpoch(
+		ctx,
 		epoch,
 		models.PoolStakeSnapshotTypeMark,
 	)
@@ -301,6 +313,7 @@ type candidateRegistrationKey struct {
 // output_index) for O(1) lookup per candidate. A single query regardless of
 // candidate count avoids one round trip per candidate.
 func (s *service) candidateRegistrationsFor(
+	ctx context.Context,
 	entries []midnightindexer.CandidateEntry,
 ) (map[candidateRegistrationKey]models.MidnightCommitteeCandidateRegistration, error) {
 	if len(entries) == 0 {
@@ -317,6 +330,7 @@ func (s *service) candidateRegistrationsFor(
 		txHashes = append(txHashes, entry.TxHash)
 	}
 	rows, err := s.db.GetMidnightCommitteeCandidateRegistrationsByTxHashes(
+		ctx,
 		txHashes,
 	)
 	if err != nil {
@@ -354,7 +368,7 @@ func (s *service) GetBlockByHash(
 	if err != nil {
 		return nil, s.internalError("decode block", err)
 	}
-	epoch, err := s.epochForSlot(blk.Slot)
+	epoch, err := s.epochForSlot(ctx, blk.Slot)
 	if err != nil {
 		return nil, s.internalError("resolve epoch", err)
 	}
@@ -398,7 +412,7 @@ func (s *service) GetLatestBlock(
 	if len(blocks) == 0 {
 		return nil, status.Error(codes.NotFound, "no blocks in chain yet")
 	}
-	pb, err := s.buildBlock(blocks[0])
+	pb, err := s.buildBlock(ctx, blocks[0])
 	if err != nil {
 		return nil, s.internalError("build block", err)
 	}
@@ -437,7 +451,7 @@ func (s *service) GetStableBlock(
 		tip.Number-blk.Number < uint64(req.GetStabilityOffset()) {
 		return &midnight.StableBlockResponse{}, nil
 	}
-	pb, err := s.buildBlock(blk)
+	pb, err := s.buildBlock(ctx, blk)
 	if err != nil {
 		return nil, s.internalError("build block", err)
 	}
@@ -477,7 +491,7 @@ func (s *service) GetLatestStableBlock(
 		}
 		return nil, s.internalError("get block by number", err)
 	}
-	pb, err := s.buildBlock(blk)
+	pb, err := s.buildBlock(ctx, blk)
 	if err != nil {
 		return nil, s.internalError("build block", err)
 	}
@@ -518,8 +532,11 @@ func (s *service) resolveTipBlock(ctx context.Context, asOfMillis uint64) (model
 
 // buildBlock converts a stored block into the shared MidnightState Block
 // message, resolving its epoch number and wall-clock timestamp.
-func (s *service) buildBlock(blk models.Block) (*midnight.Block, error) {
-	epoch, err := s.epochForSlot(blk.Slot)
+func (s *service) buildBlock(
+	ctx context.Context,
+	blk models.Block,
+) (*midnight.Block, error) {
+	epoch, err := s.epochForSlot(ctx, blk.Slot)
 	if err != nil {
 		return nil, err
 	}
@@ -554,8 +571,11 @@ func (s *service) buildBlock(blk models.Block) (*midnight.Block, error) {
 
 // epochForSlot resolves the epoch containing slot from the stored epoch
 // cache.
-func (s *service) epochForSlot(slot uint64) (*models.Epoch, error) {
-	epoch, err := s.db.GetEpochBySlot(slot)
+func (s *service) epochForSlot(
+	ctx context.Context,
+	slot uint64,
+) (*models.Epoch, error) {
+	epoch, err := s.db.GetEpochBySlot(ctx, slot)
 	if err != nil {
 		return nil, fmt.Errorf("resolve epoch for slot %d: %w", slot, err)
 	}

@@ -1944,7 +1944,7 @@ func TestBootstrapV2RedownloadsAfterCorruptAncillaryArchive(t *testing.T) {
 
 	_, err := Bootstrap(context.Background(), cfg)
 	require.Error(t, err)
-	require.ErrorContains(t, err, "extracting ancillary archive")
+	require.ErrorContains(t, err, "reading ancillary archive")
 
 	fixture.ancillaryServed.Store(nil)
 	result, err := Bootstrap(context.Background(), cfg)

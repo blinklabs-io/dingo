@@ -86,21 +86,29 @@ func NewServer(
 // handler constructs the HTTP mux and middleware stack.
 func (s *Server) handler() http.Handler {
 	mux := http.NewServeMux()
+	sessionAdmission := newSessionAdmission()
 
 	// Streamable HTTP transport handler (used by modern MCP clients and inspector)
-	streamableHandler := mcp.NewStreamableHTTPHandler(
-		func(_ *http.Request) *mcp.Server {
-			return s.mcpServer
-		},
-		&mcp.StreamableHTTPOptions{
-			Logger: s.logger,
-		},
-	)
+	streamableHandler := &admittedStreamableHandler{
+		next: mcp.NewStreamableHTTPHandler(
+			func(_ *http.Request) *mcp.Server {
+				return s.mcpServer
+			},
+			&mcp.StreamableHTTPOptions{
+				Logger:         s.logger,
+				SessionTimeout: mcpSessionIdleTimeout,
+			},
+		),
+		admission: sessionAdmission,
+	}
 
 	// SSE transport handler (legacy and inspector fallback)
-	sseHandler := mcp.NewSSEHandler(func(_ *http.Request) *mcp.Server {
-		return s.mcpServer
-	}, nil)
+	sseHandler := &admittedSSEHandler{
+		next: mcp.NewSSEHandler(func(_ *http.Request) *mcp.Server {
+			return s.mcpServer
+		}, nil),
+		admission: sessionAdmission,
+	}
 
 	// Mount endpoints
 	mux.Handle("/mcp", streamableHandler)
@@ -132,13 +140,15 @@ func (s *Server) handler() http.Handler {
 	})
 
 	// Wrap mux with security middleware (auth, rate limiting, and CORS)
-	return newSecurityMiddleware(
+	handler := newSecurityMiddleware(
 		s.config.AuthToken,
 		s.config.RateLimit,
 		s.config.Burst,
 		s.allowedOrigin,
 		mux,
 	)
+	handler.onClose = sessionAdmission.Close
+	return handler
 }
 
 // Start binds the socket and starts serving in a background goroutine.
@@ -221,7 +231,7 @@ func (s *Server) Stop(ctx context.Context) error {
 }
 
 func stopHTTPServer(ctx context.Context, server *http.Server) error {
-	defer closeSecurityHandler(server)
+	closeSecurityHandler(server)
 	err := server.Shutdown(ctx)
 	if err != nil {
 		err = errors.Join(err, server.Close())
@@ -230,7 +240,7 @@ func stopHTTPServer(ctx context.Context, server *http.Server) error {
 }
 
 func closeHTTPServer(_ context.Context, server *http.Server) error {
-	defer closeSecurityHandler(server)
+	closeSecurityHandler(server)
 	return server.Close()
 }
 
