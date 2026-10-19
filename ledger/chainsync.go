@@ -1328,6 +1328,10 @@ func (ls *LedgerState) verifyDeferredBlockHeaderState(
 	if err := ls.verifyBlockHeaderCryptoWithEpochAdvance(
 		ctx, block, true, false,
 	); err != nil {
+		if errors.Is(err, context.Canceled) ||
+			errors.Is(err, context.DeadlineExceeded) {
+			return err
+		}
 		// Typed so the pipeline can rewind past this block instead of
 		// restarting onto it forever: the block is already persisted, so
 		// this failure is deterministic rather than transient. The block is
