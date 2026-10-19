@@ -32,7 +32,9 @@ const importedUtxoRows = 20000
 // a never-spent UTxO set and are now stale: every spent_at_tx_id was NULL at
 // ANALYZE, so idx_utxo_spent_at_tx_id is recorded as a single value covering
 // the whole table, and the spends added afterwards do not grow the table
-// enough for the incremental refresh to revisit it.
+// enough for the incremental refresh to revisit it. The fixture writes that
+// statistic itself rather than relying on ANALYZE to produce it, so the test
+// keeps exercising the worst case if the index stops analyzing that way.
 func newImportStatsStore(t *testing.T, spenders int) (*Store, [][]byte) {
 	t.Helper()
 	store := newFilePlannerStatsStore(t, prometheus.NewRegistry())
@@ -51,6 +53,10 @@ INSERT INTO utxo
 SELECT randomblob(32), 0, i %% 2, randomblob(28), 1, 0, '1' FROM n`,
 		importedUtxoRows))
 	exec("ANALYZE")
+	exec(
+		`UPDATE sqlite_stat1 SET stat = ? WHERE idx = 'idx_utxo_spent_at_tx_id'`,
+		fmt.Sprintf("%d %d", importedUtxoRows, importedUtxoRows),
+	)
 
 	hashes := make([][]byte, 0, spenders)
 	for i := range spenders {
