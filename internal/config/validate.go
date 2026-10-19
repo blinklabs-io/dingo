@@ -389,6 +389,11 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		(effectiveMode == RunModeDev || c.RunMode.IsDevMode() ||
 			c.StorageMode == storageModeAPI)
 	midnightServer := apiListeners && c.Midnight.ServerEnabled
+	dmqN2N := serving && c.DMQ.Enabled
+	dmqN2NHost := c.DMQ.ListenAddress
+	if dmqN2NHost == "" {
+		dmqN2NHost = c.DMQ.ListenIPv6Address
+	}
 	utxorpcPort := APIPluginPort(c.Plugins.API.Utxorpc)
 	blockfrostPort := APIPluginPort(c.Plugins.API.Blockfrost)
 	kupoPort := APIPluginPort(c.Plugins.API.Kupo)
@@ -475,6 +480,7 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 			midnightServer,
 			midnightServer,
 		},
+		{"dmq.n2nPort", dmqN2NHost, c.DMQ.N2NPort, dmqN2N, false},
 	}
 	// Two active listeners contending for a port only fails at bind
 	// time; catch it here. Zero ports are disabled or OS-assigned, so
@@ -1053,6 +1059,7 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 				"dmq.socketPath must differ from socketPath",
 			))
 		}
+		errs = append(errs, validateDMQPeers(c.DMQ)...)
 		// Both are scaled into int64 quantities: seconds to a Duration and
 		// megabytes to bytes.
 		const maxMessageTTL = uint64(math.MaxInt64) / uint64(time.Second)
@@ -1350,4 +1357,46 @@ func sameSocketPath(a, b string) bool {
 		return filepath.Clean(a) == filepath.Clean(b)
 	}
 	return absA == absB
+}
+
+// validateDMQPeers checks the DMQ peer listener and peer-count settings. The
+// listener fields are only meaningful when N2NPort is set, so they are left
+// unchecked for a local-only stack.
+func validateDMQPeers(c DMQConfig) []error {
+	var errs []error
+	if c.MaxPeers == 0 {
+		errs = append(errs, errors.New("dmq.maxPeers must be positive"))
+	} else if c.MinPeers > c.MaxPeers {
+		errs = append(errs, errors.New(
+			"dmq.minPeers must not exceed dmq.maxPeers",
+		))
+	}
+	if c.N2NPort == 0 {
+		return errs
+	}
+	if c.ListenAddress == "" && c.ListenIPv6Address == "" {
+		errs = append(errs, errors.New(
+			"dmq.listenAddress or dmq.listenIpv6Address must be set "+
+				"when dmq.n2nPort is set",
+		))
+	}
+	if c.ListenAddress != "" {
+		if addr, err := netip.ParseAddr(c.ListenAddress); err != nil ||
+			!addr.Is4() {
+			errs = append(errs, fmt.Errorf(
+				"dmq.listenAddress %q must be an IPv4 address",
+				c.ListenAddress,
+			))
+		}
+	}
+	if c.ListenIPv6Address != "" {
+		if addr, err := netip.ParseAddr(c.ListenIPv6Address); err != nil ||
+			!addr.Is6() || addr.Is4In6() {
+			errs = append(errs, fmt.Errorf(
+				"dmq.listenIpv6Address %q must be an IPv6 address",
+				c.ListenIPv6Address,
+			))
+		}
+	}
+	return errs
 }
