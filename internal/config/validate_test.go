@@ -2008,6 +2008,17 @@ func TestValidateDMQ(t *testing.T) {
 			wantErr: "is assigned to both port (relay/NtN) and dmq.n2nPort",
 		},
 		{
+			name: "ipv6 listener overlaps another listener on the same port",
+			mutate: func(c *Config) {
+				c.DMQ.Enabled = true
+				c.BindAddr = "::1"
+				c.DMQ.ListenAddress = "127.0.0.1"
+				c.DMQ.ListenIPv6Address = "::1"
+				c.DMQ.N2NPort = c.RelayPort
+			},
+			wantErr: "is assigned to both port (relay/NtN) and dmq.n2nPort",
+		},
+		{
 			name: "n2n port zero skips listener checks",
 			mutate: func(c *Config) {
 				c.DMQ.Enabled = true
@@ -2087,6 +2098,19 @@ func TestValidateDMQ(t *testing.T) {
 			assert.Contains(t, err.Error(), tt.wantErr)
 		})
 	}
+}
+
+func TestValidateDMQN2NPortRangeReportedOnce(t *testing.T) {
+	t.Parallel()
+	cfg := validTestConfig()
+	cfg.SocketPath = "dingo.socket"
+	cfg.DMQ = DefaultDMQConfig()
+	cfg.DMQ.Enabled = true
+	cfg.DMQ.N2NPort = 70000
+	err := cfg.validate(cfg.RunMode, minUnprivilegedPort)
+	require.Error(t, err)
+	assert.Equal(t, 1, strings.Count(err.Error(), "invalid dmq.n2nPort"))
+	assert.NotContains(t, err.Error(), "assigned to both dmq.n2nPort")
 }
 
 func TestPipeline_DMQYAMLAndFlags(t *testing.T) {

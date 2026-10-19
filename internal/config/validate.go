@@ -390,9 +390,19 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 			c.StorageMode == storageModeAPI)
 	midnightServer := apiListeners && c.Midnight.ServerEnabled
 	dmqN2N := serving && c.DMQ.Enabled
-	dmqN2NHost := c.DMQ.ListenAddress
-	if dmqN2NHost == "" {
-		dmqN2NHost = c.DMQ.ListenIPv6Address
+	// The peer listener binds one port on each configured address family,
+	// so each address contends with the other listeners. With neither set a
+	// single wildcard row still range-checks the port.
+	var dmqN2NHosts []string
+	for _, host := range []string{
+		c.DMQ.ListenAddress, c.DMQ.ListenIPv6Address,
+	} {
+		if host != "" {
+			dmqN2NHosts = append(dmqN2NHosts, host)
+		}
+	}
+	if len(dmqN2NHosts) == 0 {
+		dmqN2NHosts = []string{""}
 	}
 	utxorpcPort := APIPluginPort(c.Plugins.API.Utxorpc)
 	blockfrostPort := APIPluginPort(c.Plugins.API.Blockfrost)
@@ -419,13 +429,21 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 	// at runtime: bindAddr for public listeners, privateBindAddr for the
 	// private listener, debugBindAddr for pprof, metricsBindAddr for
 	// Prometheus, midnight.host for Midnight, and BarkHost for bark.
-	ports := []struct {
+	type portSpec struct {
 		setting  string
 		host     string
 		port     uint
 		active   bool
 		required bool
-	}{
+	}
+	dmqPorts := make([]portSpec, 0, len(dmqN2NHosts))
+	for _, host := range dmqN2NHosts {
+		dmqPorts = append(
+			dmqPorts,
+			portSpec{"dmq.n2nPort", host, c.DMQ.N2NPort, dmqN2N, false},
+		)
+	}
+	ports := slices.Concat([]portSpec{
 		{"port (relay/NtN)", c.BindAddr, c.RelayPort, serving, serving},
 		{"privatePort", c.PrivateBindAddr, c.PrivatePort, serving, serving},
 		{
@@ -480,8 +498,7 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 			midnightServer,
 			midnightServer,
 		},
-		{"dmq.n2nPort", dmqN2NHost, c.DMQ.N2NPort, dmqN2N, false},
-	}
+	}, dmqPorts)
 	// Two active listeners contending for a port only fails at bind
 	// time; catch it here. Zero ports are disabled or OS-assigned, so
 	// they don't clash, and a port is only a conflict when the bind
@@ -492,18 +509,25 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		host    string
 	}
 	seenPorts := make(map[uint][]boundListener, len(ports))
+	validated := make(map[string]bool, len(ports))
 	for _, p := range ports {
 		if !p.active {
 			continue
 		}
-		if err := validatePort(p.setting, p.port, p.required, minBindable); err != nil {
-			errs = append(errs, err)
+		// A setting listed once per bind address is range-checked once.
+		if !validated[p.setting] {
+			validated[p.setting] = true
+			if err := validatePort(p.setting, p.port, p.required, minBindable); err != nil {
+				errs = append(errs, err)
+			}
 		}
 		if p.port == 0 {
 			continue
 		}
 		for _, other := range seenPorts[p.port] {
-			if !bindAddrsOverlap(other.host, p.host) {
+			// One setting's own addresses (0.0.0.0 and ::) are one listener.
+			if other.setting == p.setting ||
+				!bindAddrsOverlap(other.host, p.host) {
 				continue
 			}
 			errs = append(errs, fmt.Errorf(
