@@ -12784,7 +12784,11 @@ Koios. The UTxO side is a running reconstruction seeded from Dingo at the
 start point and advanced by Koios's own `/tx_info` answers for every
 transaction on the chain, so it stays independent of Dingo after its seed; a
 rollback re-baselines it and marks that epoch's UTxO verdict "not run" rather
-than reporting a comparison that would trivially match.
+than reporting a comparison that would trivially match. The rollback that opens
+a resumed session lands on the block already processed, so it changes nothing
+and keeps the comparison. A "not run" verdict names its cause: a failed
+`/tx_info` fetch, a rollback and its slot, or a baseline captured at that
+boundary.
 
 Every session opens with a rollback to the origin, which Dingo refuses to
 acquire; the origin is epoch 0, so the tool does not ask. Each block's epoch

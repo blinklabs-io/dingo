@@ -16,6 +16,7 @@ package nodeparity
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -748,7 +749,7 @@ func TestResolveStartPoint(t *testing.T) {
 
 // TestUTxOVerdict pins the fix for a Koios outage during tx_info
 // reconstruction being reported as a false "utxo set match" instead of
-// "not run": utxoTaintedThisEpoch was closure state inside RunFromGenesis's
+// "not run": the taint flag was closure state inside RunFromGenesis's
 // 500+ line function literal, with nothing asserting on it directly.
 // utxoVerdict is that decision, lifted out so it is directly testable:
 // reverting its tainted case in place (returning utxoVerdictCompare
@@ -757,28 +758,29 @@ func TestUTxOVerdict(t *testing.T) {
 	someRefs := UTxOSet{"deadbeef#0": "addr|100|||"}
 
 	t.Run("tainted always wins, even with refs available", func(t *testing.T) {
-		mode, err := utxoVerdict(true, someRefs)
+		mode, err := utxoVerdict(taintCauseTxInfo, someRefs)
 		assert.Equal(t, utxoVerdictTainted, mode)
 		assert.ErrorIs(t, err, errUTxOTainted)
+		assert.ErrorContains(t, err, taintCauseTxInfo)
 	})
 
 	t.Run("refs available and not tainted: compare", func(t *testing.T) {
-		mode, err := utxoVerdict(false, someRefs)
+		mode, err := utxoVerdict("", someRefs)
 		assert.Equal(t, utxoVerdictCompare, mode)
 		assert.NoError(t, err)
 	})
 
 	t.Run("no refs, not tainted: no baseline", func(t *testing.T) {
-		mode, err := utxoVerdict(false, nil)
+		mode, err := utxoVerdict("", nil)
 		assert.Equal(t, utxoVerdictNoBaseline, mode)
 		assert.NoError(t, err)
 	})
 }
 
 // TestApplyTxInfoResults pins flushPendingTxInfos's actual failure
-// decision -- the one that sets utxoTaintedThisEpoch -- not just
+// decision -- the one that sets utxoTaintCause -- not just
 // utxoVerdict, which only reads that flag: TestUTxOVerdict alone doesn't
-// prove a tx_info fetch failure is what makes utxoTaintedThisEpoch true in
+// prove a tx_info fetch failure is what makes utxoTaintCause non-empty in
 // the first place. Reverting applyTxInfoResults to always return false (as
 // if every chunk always succeeded) would make the "one chunk fails" subtest
 // below fail.
@@ -1366,7 +1368,7 @@ func (s *genesisFakeServer) serve(t *testing.T, listener net.Listener, magic uin
 
 // TestRunFromGenesis_UTxOTaintLifecycle drives RunFromGenesis through a
 // genuine RollBackward and three epoch boundaries, proving
-// utxoTaintedThisEpoch's real lifecycle inside RunFromGenesis's own
+// utxoTaintCause's real lifecycle inside RunFromGenesis's own
 // closures -- not just utxoVerdict/applyTxInfoResults in isolation (see
 // this file's own doc comment).
 //
@@ -1376,16 +1378,19 @@ func (s *genesisFakeServer) serve(t *testing.T, listener net.Listener, magic uin
 // epoch that rollback already established and never itself starts a new
 // epoch boundary -- it only captures the genesis UTxO baseline. Block 1 is
 // this test's first real reported epoch (clean). The deliberate rollback
-// then fires once block 1 has been delivered (rollbackAfterCursor),
-// re-baselining utxoRefs from Dingo's own (fake) current answer -- which
+// to block 0 then fires once block 1 has been delivered
+// (rollbackAfterCursor), re-baselining utxoRefs from Dingo's own (fake) current answer -- which
 // the fix must taint, or block 2's report would trivially compare the
 // re-baselined set against itself and falsely read "clean". Block 3's
 // report must NOT still be tainted, proving the post-report reset ran too,
 // not just that the rollback's own assignment did.
 //
-// Reverting the rollback callback's utxoTaintedThisEpoch = true assignment
-// in from_genesis.go, or its post-report utxoTaintedThisEpoch = false
-// reset, in place leaves TestUTxOVerdict and TestApplyTxInfoResults green:
+// The rollback targets block 0, not block 1: a rollback to the block last
+// processed invalidates nothing and must not re-baseline (see
+// TestRunFromGenesis_ResumeKeepsUTxOComparison).
+//
+// Reverting the rollback callback's taint call in from_genesis.go, or its
+// post-report utxoTaintCause = "" reset, in place leaves TestUTxOVerdict and TestApplyTxInfoResults green:
 // neither drives RunFromGenesis's real callbacks at all.
 func TestRunFromGenesis_UTxOTaintLifecycle(t *testing.T) {
 	const magic = 42
@@ -1393,7 +1398,7 @@ func TestRunFromGenesis_UTxOTaintLifecycle(t *testing.T) {
 
 	server := newGenesisFakeServer(t, blockCount)
 	server.rollbackAfterCursor = 1
-	rollbackTo := server.chain.Points[1]
+	rollbackTo := server.chain.Points[0]
 	server.rollbackTo = &rollbackTo
 	server.epochBySlot = map[uint64]int{
 		server.chain.Points[0].Slot: 1,
@@ -1465,6 +1470,9 @@ func TestRunFromGenesis_UTxOTaintLifecycle(t *testing.T) {
 	assert.True(t, report2.UTxOAttempted)
 	require.Error(t, report2.UTxOErr)
 	assert.ErrorIs(t, report2.UTxOErr, errUTxOTainted)
+	assert.ErrorContains(
+		t, report2.UTxOErr, taintCauseRollback(rollbackTo.Slot),
+	)
 
 	server.allowStep(t)
 
@@ -1485,11 +1493,11 @@ func TestRunFromGenesis_UTxOTaintLifecycle(t *testing.T) {
 
 // TestRunFromGenesis_TxInfoChunkFailureTaintsEpoch drives RunFromGenesis
 // through a genuine Koios tx_info fetch failure -- no rollback at all --
-// proving flushPendingTxInfos's own "if failed { utxoTaintedThisEpoch =
-// true ... }" branch (from_genesis.go) actually taints the epoch it
-// belongs to. TestRunFromGenesis_UTxOTaintLifecycle above only exercises
-// the rollback callback's separate utxoTaintedThisEpoch = true assignment;
-// its own chain (newGenesisFakeServer's empty-body blocks) never gives
+// proving flushPendingTxInfos's own "if failed { taint(...) }" branch
+// (from_genesis.go) actually taints the epoch it belongs to, and that the
+// verdict names the tx_info failure as the cause.
+// TestRunFromGenesis_UTxOTaintLifecycle above only exercises the rollback
+// callback's separate taint call; its own chain (newGenesisFakeServer's empty-body blocks) never gives
 // flushPendingTxInfos a single transaction hash to fetch, so that taint
 // source's own wiring goes completely unexercised there. Reverting this
 // assignment to a discarded no-op (`_ = true`) in place leaves
@@ -1567,6 +1575,11 @@ func TestRunFromGenesis_TxInfoChunkFailureTaintsEpoch(t *testing.T) {
 	assert.True(t, report.UTxOAttempted)
 	require.Error(t, report.UTxOErr)
 	assert.ErrorIs(t, report.UTxOErr, errUTxOTainted)
+	assert.Equal(
+		t,
+		taintCauseTxInfo+": "+errUTxOTainted.Error(),
+		report.UTxOErr.Error(),
+	)
 
 	cancel()
 	select {
@@ -1669,6 +1682,7 @@ func TestRunFromGenesis_UTxOBaselineRetryRecovers(t *testing.T) {
 	assert.True(t, report1.UTxOAttempted)
 	require.Error(t, report1.UTxOErr)
 	assert.ErrorIs(t, report1.UTxOErr, errUTxOTainted)
+	assert.ErrorContains(t, report1.UTxOErr, taintCauseBaseline)
 
 	// Block 2: utxoRefs is now non-nil and untainted -- a real comparison
 	// (call #3) must run and come back clean, proving checking actually
@@ -1683,6 +1697,169 @@ func TestRunFromGenesis_UTxOBaselineRetryRecovers(t *testing.T) {
 	report3 := recv()
 	assert.True(t, report3.UTxOAttempted)
 	assert.NoError(t, report3.UTxOErr)
+
+	cancel()
+	select {
+	case err := <-done:
+		assert.True(t, err == nil || errors.Is(err, context.Canceled))
+	case <-time.After(10 * time.Second):
+		t.Fatal("RunFromGenesis did not exit after ctx cancellation")
+	}
+}
+
+// TestRunFromGenesis_ResumeKeepsUTxOComparison drives a chainsync session
+// that dies mid-epoch and resumes. The resumed session opens with a
+// RollBackward to the block last processed, which invalidates nothing: the
+// reconstruction is still exact there. That epoch must still get a real
+// UTxO comparison, with no extra GetUTxOWhole, and every block's transaction
+// must reach /tx_info exactly once.
+//
+// Four blocks with one transaction each, in epochs 1, 2, 2, 3. Block 2's
+// epoch lookup fails after its transaction was buffered, ending the session
+// with lastPoint at block 2. Treating the reconnect's rollback as a real one
+// re-baselines from Dingo, drops block 2's buffered hash, and reports epoch
+// 3 as not run.
+func TestRunFromGenesis_ResumeKeepsUTxOComparison(t *testing.T) {
+	t.Parallel()
+	const magic = 42
+	const blockCount = 4
+
+	server := newGenesisFakeServerWithTransactions(t, blockCount)
+	server.epochBySlot = map[uint64]int{
+		server.chain.Points[0].Slot: 1,
+		server.chain.Points[1].Slot: 2,
+		server.chain.Points[2].Slot: 2,
+		server.chain.Points[3].Slot: 3,
+	}
+	server.failEpochNoOnce(server.chain.Points[2].Slot)
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = listener.Close() })
+	server.serve(t, listener, magic)
+
+	// /tx_info answers every requested hash with a transaction that neither
+	// spends nor creates anything, so the reconstruction stays equal to the
+	// fake's empty UTxO set, and records how often each hash was asked for.
+	// Everything else 404s, as in the sibling tests.
+	var (
+		txInfoMu       sync.Mutex
+		txInfoRequests = map[string]int{}
+	)
+	koiosSrv := httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			if !strings.HasSuffix(r.URL.Path, "/tx_info") {
+				http.NotFound(w, r)
+				return
+			}
+			var body struct {
+				TxHashes []string `json:"_tx_hashes"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			items := make([]koiosparity.KoiosTxInfoItem, 0, len(body.TxHashes))
+			txInfoMu.Lock()
+			for _, h := range body.TxHashes {
+				txInfoRequests[h]++
+				items = append(items, koiosparity.KoiosTxInfoItem{TxHash: h})
+			}
+			txInfoMu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(items)
+		},
+	))
+	t.Cleanup(koiosSrv.Close)
+	koios, err := NewKoiosClient("preview", "", koiosSrv.URL, true, true)
+	require.NoError(t, err)
+
+	logs := newLogCollector()
+	results := make(chan EpochResult, 8)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- RunFromGenesis(
+			ctx, listener.Addr().String(), "preview", magic, koios, nil,
+			func(r EpochResult) { results <- r },
+			logs.logf, nil,
+		)
+	}()
+
+	recv := func() EpochResult {
+		t.Helper()
+		select {
+		case r := <-results:
+			return r
+		case <-time.After(20 * time.Second):
+			t.Fatal("timed out waiting for an epoch result")
+			return EpochResult{}
+		}
+	}
+
+	// Block 0: baseline (GetUTxOWhole #1). Block 1: epoch 2 boundary, a real
+	// comparison (#2).
+	server.allowStep(t)
+	server.allowStep(t)
+	report2 := recv()
+	require.Equal(t, uint64(2), report2.Epoch)
+	require.True(t, report2.UTxOAttempted)
+	require.NoError(t, report2.UTxOErr)
+
+	// Block 2: its transaction is buffered, then its epoch lookup fails.
+	server.allowStep(t)
+	require.True(
+		t,
+		logs.waitFor("chainsync session ended, resuming from slot", 20*time.Second),
+		"the failed session never reached the reconnect loop; logs: %v",
+		logs.all(),
+	)
+	server.waitForSessions(t, 2)
+
+	// Block 3: epoch 3 boundary, a real comparison (#3) covering block 2's
+	// transaction, which must have survived the reconnect.
+	server.allowStep(t)
+	report3 := recv()
+	assert.Equal(t, uint64(3), report3.Epoch)
+	assert.True(t, report3.UTxOAttempted)
+	assert.NoError(
+		t, report3.UTxOErr,
+		"the reconnect's rollback to the block last processed voided "+
+			"this epoch's UTxO comparison",
+	)
+	assert.Empty(t, report3.UTxOMissing)
+	assert.Empty(t, report3.UTxOExtra)
+	assert.Empty(t, report3.UTxODiffers)
+
+	server.mu.Lock()
+	utxoWholeCalls := server.utxoWholeCalls
+	server.mu.Unlock()
+	// A re-baseline skips the tainted epoch's comparison, so the count
+	// alone would not show it; the re-baseline's own log line does.
+	assert.Equal(
+		t, 3, utxoWholeCalls,
+		"want one baseline and two comparisons, no re-baseline",
+	)
+	for _, line := range logs.all() {
+		assert.NotContains(t, line, "re-baselined")
+	}
+
+	txInfoMu.Lock()
+	gotRequests := make(map[string]int, len(txInfoRequests))
+	for h, n := range txInfoRequests {
+		gotRequests[h] = n
+	}
+	txInfoMu.Unlock()
+	wantRequests := map[string]int{}
+	// Block 0's transaction is inside the baseline, so it is never fetched.
+	for _, block := range server.chain.Blocks[1:] {
+		for _, tx := range block.Transactions() {
+			wantRequests[tx.Hash().String()] = 1
+		}
+	}
+	assert.Equal(t, wantRequests, gotRequests)
 
 	cancel()
 	select {

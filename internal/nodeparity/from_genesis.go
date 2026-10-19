@@ -25,6 +25,7 @@ package nodeparity
 // loop's own doc comment further down.
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -405,14 +406,24 @@ func captureGenesisBaseline(
 	return set, nil
 }
 
-// errUTxOTainted is returned by utxoVerdict for utxoVerdictTainted -- see
-// that constant's doc comment.
+// errUTxOTainted is wrapped by utxoVerdict for utxoVerdictTainted, prefixed
+// with the cause that re-baselined the reconstruction -- see that constant's
+// doc comment.
 var errUTxOTainted = errors.New(
-	"tx_info fetch failed during this epoch; " +
-		"UTxO reconstruction was re-baselined from " +
-		"Dingo directly, so this epoch's comparison " +
-		"would be against Dingo itself and was skipped",
+	"UTxO reconstruction was re-baselined from Dingo this epoch, " +
+		"so comparing it against Dingo was skipped",
 )
+
+// Causes recorded in RunFromGenesis's utxoTaintCause. A rollback's cause
+// names its slot instead (taintCauseRollback).
+const (
+	taintCauseTxInfo   = "tx_info fetch failed"
+	taintCauseBaseline = "UTxO baseline captured at this epoch boundary"
+)
+
+func taintCauseRollback(slot uint64) string {
+	return fmt.Sprintf("rolled back to slot %d", slot)
+}
 
 // utxoVerdictMode is utxoVerdict's per-epoch decision of which UTxO-check
 // outcome applies this epoch.
@@ -428,10 +439,10 @@ const (
 	// tainting the recovery epoch itself) or utxoVerdictCompare (once a
 	// trustworthy baseline is held again) on a later epoch.
 	utxoVerdictNoBaseline utxoVerdictMode = iota
-	// utxoVerdictTainted: a tx_info failure this epoch forced a re-baseline
-	// from Dingo's own answer (see flushPendingTxInfos) -- comparing now
-	// would silently pass by construction, not confirm anything against
-	// Koios.
+	// utxoVerdictTainted: a tx_info failure, a rollback or a baseline retry
+	// this epoch replaced the reconstruction with Dingo's own answer --
+	// comparing now would silently pass by construction, not confirm
+	// anything against Koios.
 	utxoVerdictTainted
 	// utxoVerdictCompare: run the real Dingo-vs-reconstruction comparison.
 	utxoVerdictCompare
@@ -441,7 +452,7 @@ const (
 // I/O -- extracted from RunFromGenesis's roll-forward callback specifically
 // so the regression it fixes is directly assertable: a Koios outage during
 // tx_info reconstruction being reported as a false "utxo set match" instead
-// of "not run", because utxoTaintedThisEpoch was closure state inside a
+// of "not run", because the taint flag was closure state inside a
 // 500+ line function literal that no test exercised. Reverting the taint
 // check this function replaces would make TestUTxOVerdict's tainted case
 // fail.
@@ -454,13 +465,16 @@ const (
 // log the baseline failure's cause does so once, from utxoBaselineErr
 // directly, at the point that error was captured -- not from this
 // per-epoch decision.
+//
+// taintCause is empty when nothing re-baselined the reconstruction this
+// epoch; otherwise it names what did, and prefixes the returned error.
 func utxoVerdict(
-	tainted bool,
+	taintCause string,
 	utxoRefs UTxOSet,
 ) (mode utxoVerdictMode, err error) {
 	switch {
-	case tainted:
-		return utxoVerdictTainted, errUTxOTainted
+	case taintCause != "":
+		return utxoVerdictTainted, fmt.Errorf("%s: %w", taintCause, errUTxOTainted)
 	case utxoRefs != nil:
 		return utxoVerdictCompare, nil
 	default:
@@ -491,11 +505,11 @@ func nextSessionRetryDelay(
 // applyTxInfoResults applies each successful chunk's tx_info changes to
 // utxoRefs and reports whether any chunk failed -- pulled out of
 // flushPendingTxInfos, which threads that result straight into
-// utxoTaintedThisEpoch, so a test can drive the actual failure decision
+// utxoTaintCause, so a test can drive the actual failure decision
 // directly with synthetic chunks/results/errs instead of needing a real
 // Koios server: the fix for a Koios outage being reported as a false "utxo
 // set match" was pinned only at utxoVerdict, the function that reads
-// utxoTaintedThisEpoch, never at anything that decides what sets it. Does
+// utxoTaintCause, never at anything that decides what sets it. Does
 // no network I/O itself -- chunks/results/errs are already-fetched,
 // matching the same already-fetched-input shape evaluatePoolStake uses for
 // the identical reason.
@@ -518,6 +532,11 @@ func applyTxInfoResults(
 		UTxOChanges(utxoRefs, results[i])
 	}
 	return anyFailed
+}
+
+// pointsEqual reports whether a and b name the same block.
+func pointsEqual(a, b pcommon.Point) bool {
+	return a.Slot == b.Slot && bytes.Equal(a.Hash, b.Hash)
 }
 
 // resolveStartPoint converts resumeFrom into the chain point RunFromGenesis
@@ -600,7 +619,7 @@ func RunFromGenesis(
 		// (re)established -- see sessionRetryDelay's doc comment for why
 		// this gates resetting the reconnect backoff.
 		progressed bool
-		// utxoTaintedThisEpoch is set whenever a tx_info failure forced a
+		// utxoTaintCause is set whenever a tx_info failure forced a
 		// mid-epoch re-baseline (see flushPendingTxInfos), a rollback forced
 		// one (see the roll-backward callback below), or a previously failed
 		// baseline capture is successfully retried at this epoch's own
@@ -615,8 +634,17 @@ func RunFromGenesis(
 		// "utxo set match" instead of "not run": the re-baseline is the
 		// right recovery for later epochs, but this epoch's own verdict must
 		// say the comparison did not happen.
-		utxoTaintedThisEpoch bool
+		//
+		// It holds the first cause seen this epoch, so the verdict can say
+		// which one it was; empty means untainted.
+		utxoTaintCause string
 	)
+	// taint records cause unless an earlier one this epoch already did.
+	taint := func(cause string) {
+		if utxoTaintCause == "" {
+			utxoTaintCause = cause
+		}
+	}
 
 	// acquirable becomes true once Dingo has answered for a point. Until
 	// then a refusal as too old is expected, not an error: Dingo cannot answer
@@ -754,7 +782,7 @@ func RunFromGenesis(
 		pendingTxHashes = pendingTxHashes[:0]
 
 		if failed {
-			utxoTaintedThisEpoch = true
+			taint(taintCauseTxInfo)
 			refs, err := captureGenesisBaseline(ctx, dingoAddr, magic, point)
 			if err != nil {
 				utxoRefs = nil
@@ -997,7 +1025,7 @@ func RunFromGenesis(
 								// tx_info-chunk-failure and rollback
 								// re-baselines elsewhere in this function --
 								// taint this recovery epoch too.
-								utxoTaintedThisEpoch = true
+								taint(taintCauseBaseline)
 								logf(
 									"nodeparity: UTxO baseline retry "+
 										"succeeded, comparison resumes next "+
@@ -1007,7 +1035,7 @@ func RunFromGenesis(
 							}
 						}
 						switch mode, verdictErr := utxoVerdict(
-							utxoTaintedThisEpoch, utxoRefs,
+							utxoTaintCause, utxoRefs,
 						); mode {
 						case utxoVerdictTainted:
 							result.UTxOAttempted = true
@@ -1038,7 +1066,7 @@ func RunFromGenesis(
 							result.UTxOAttempted = false
 						}
 						result.UTxOElapsed = time.Since(utxoStart)
-						utxoTaintedThisEpoch = false
+						utxoTaintCause = ""
 
 						result.TxInfoFlushCount = txInfoFlushCount
 						result.TxInfoFlushElapsed = txInfoFlushElapsed
@@ -1051,6 +1079,16 @@ func RunFromGenesis(
 				),
 				chainsync.WithRollBackwardFunc(
 					func(_ chainsync.CallbackContext, point pcommon.Point, _ chainsync.Tip) error {
+						// A rollback to lastPoint itself invalidates nothing.
+						// Every reconnect opens with exactly this rollback,
+						// since the session resumes from lastPoint, the block
+						// last fully processed: the roll-forward callback
+						// buffers a block's transactions immediately after
+						// recording its point, and can fail only later, so
+						// utxoRefs plus pendingTxHashes are exact through it.
+						// ChainSync resumes after the intersection, so that
+						// block is not delivered again.
+						rollbackInvalidates := !pointsEqual(point, lastPoint)
 						// Recorded before any of this rollback's own work runs
 						// -- see lastPoint's doc comment above.
 						lastPoint = point
@@ -1075,9 +1113,11 @@ func RunFromGenesis(
 						// now-abandoned fork -- discard them rather than
 						// applying them on top of the re-baselined (or
 						// disabled) reconstruction below.
-						pendingTxHashes = pendingTxHashes[:0]
+						if rollbackInvalidates {
+							pendingTxHashes = pendingTxHashes[:0]
+						}
 
-						if utxoRefs != nil {
+						if rollbackInvalidates && utxoRefs != nil {
 							// A rollback-triggered re-baseline replaces utxoRefs
 							// with Dingo's own current answer, same as the
 							// tx_info-chunk-failure re-baseline in
@@ -1086,7 +1126,7 @@ func RunFromGenesis(
 							// construction, not confirm anything against Koios.
 							// Taint this epoch the same way so the verdict
 							// reports "not run" instead of a false match.
-							utxoTaintedThisEpoch = true
+							taint(taintCauseRollback(point.Slot))
 							refs, err := captureGenesisBaseline(ctx, dingoAddr, magic, point)
 							if err != nil {
 								utxoRefs = nil
