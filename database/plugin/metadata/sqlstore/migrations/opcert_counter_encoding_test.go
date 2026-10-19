@@ -36,7 +36,7 @@ func TestOpCertCounterEncodingMigrationPreservesLegacyValues(t *testing.T) {
 
 	registry, err := migrations.SQLiteRegistry()
 	require.NoError(t, err)
-	require.Len(t, registry, 49)
+	require.Len(t, registry, 50)
 	run := func(selected []migrations.Migration) {
 		runner := migrations.Runner{
 			DB:       db,
@@ -48,7 +48,7 @@ func TestOpCertCounterEncodingMigrationPreservesLegacyValues(t *testing.T) {
 		}
 		require.NoError(t, runner.Run(ctx))
 	}
-	run(registry[:len(registry)-1])
+	run(registry[:48])
 
 	poolKeyHash := []byte("legacy-opcert-pool-key-hash")
 	_, err = db.ExecContext(ctx, `

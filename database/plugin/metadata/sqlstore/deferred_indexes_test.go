@@ -204,3 +204,54 @@ func TestBuildDeferredIndexesContextCommitsEachSQLiteIndex(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, missing)
 }
+
+// A bulk-load cycle drops the spender indexes and the rebuild recreates them.
+// The rebuild must restore the partial definition the schema migration
+// installed, not a full-table index over the mostly-NULL columns.
+func TestDeferredRebuildKeepsUtxoSpenderIndexesPartial(t *testing.T) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+	require.NoError(t, store.DropDeferredIndexes())
+	require.NoError(t, store.BuildDeferredIndexes())
+
+	for _, column := range []string{
+		"spent_at_tx_id",
+		"collateral_by_tx_id",
+		"referenced_by_tx_id",
+	} {
+		var definition string
+		require.NoError(t, store.readDB.QueryRow(
+			"SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?",
+			"idx_utxo_"+column,
+		).Scan(&definition))
+		require.Contains(t, definition, "WHERE "+column+" IS NOT NULL",
+			"rebuilt idx_utxo_%s must stay partial: %s", column, definition)
+	}
+}
+
+// MySQL has no partial indexes and needs a full index on each foreign-key
+// column, so a deferred index predicate applies only to SQLite and Postgres.
+func TestDeferredIndexSQLPartialPredicateByDialect(t *testing.T) {
+	t.Parallel()
+	index := deferred.Index{
+		Name:    "idx_utxo_spent_at_tx_id",
+		Table:   "utxo",
+		Columns: []string{"spent_at_tx_id"},
+		Where:   "spent_at_tx_id IS NOT NULL",
+	}
+	require.Equal(
+		t,
+		`CREATE INDEX IF NOT EXISTS "idx_utxo_spent_at_tx_id" ON "utxo" ("spent_at_tx_id") WHERE spent_at_tx_id IS NOT NULL`,
+		deferredIndexCreateSQL(SQLiteDialect(), index),
+	)
+	require.Equal(
+		t,
+		`CREATE INDEX IF NOT EXISTS "idx_utxo_spent_at_tx_id" ON "utxo" ("spent_at_tx_id") WHERE spent_at_tx_id IS NOT NULL`,
+		deferredIndexCreateSQL(PostgresDialect(), index),
+	)
+	require.Equal(
+		t,
+		"CREATE INDEX `idx_utxo_spent_at_tx_id` ON `utxo` (`spent_at_tx_id`(255))",
+		deferredIndexCreateSQL(MySQLDialect(), index),
+	)
+}
