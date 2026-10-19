@@ -161,7 +161,7 @@ func (cs *ChainSelector) corroboratingPeersIncludingCandidatesLocked(
 		if connId == candidate {
 			continue
 		}
-		peerTip := cs.latestPeerTipCandidateLocked(connId)
+		peerTip := cs.latestCorroborationWitnessLocked(connId)
 		if peerTip == nil {
 			peerTip = committedTip
 		}
@@ -188,7 +188,7 @@ func (cs *ChainSelector) corroboratingPeersIncludingCandidatesLocked(
 		if _, exists := seen[connId]; exists {
 			continue
 		}
-		peerTip := cs.latestPeerTipCandidateLocked(connId)
+		peerTip := cs.latestCorroborationWitnessLocked(connId)
 		if !cs.peerCanCorroborateLocked(connId, peerTip) {
 			continue
 		}
@@ -206,6 +206,15 @@ func (cs *ChainSelector) corroboratingPeersIncludingCandidatesLocked(
 		witnesses[identity] = struct{}{}
 	}
 	return len(witnesses)
+}
+
+func (cs *ChainSelector) latestCorroborationWitnessLocked(
+	connId ouroboros.ConnectionId,
+) *PeerChainTip {
+	if witness, ok := cs.forecastHorizonWitnesses[connId]; ok {
+		return witness.peerTip
+	}
+	return cs.latestPeerTipCandidateLocked(connId)
 }
 
 // frontierTrustedLocked reports whether a peer's delivered frontier may be used

@@ -5432,6 +5432,7 @@ func (ls *LedgerState) awaitForecastHorizon(
 	e ChainsyncEvent,
 ) error {
 	logged := false
+	witnessPublished := false
 	for {
 		published := ls.snapshotPublishedChan()
 		if !ls.headerBeyondForecastHorizon(ctx, e) {
@@ -5439,6 +5440,10 @@ func (ls *LedgerState) awaitForecastHorizon(
 		}
 		if ls.chainsyncHeaderDisconnected(ctx, e) {
 			return ErrChainsyncHeaderDisconnected
+		}
+		if !witnessPublished && e.ForecastHorizonWait != nil {
+			e.ForecastHorizonWait()
+			witnessPublished = true
 		}
 		if !logged && ls.config.Logger != nil {
 			ls.config.Logger.Debug(
