@@ -271,6 +271,88 @@ func runProtocolParamsAndStake(
 	return ppMismatches, ppErr, stakeMismatches, stakeErr
 }
 
+// utxoComparisonRetries/utxoComparisonRetryDelay bound how many times
+// compareUTxOWithRetry redials and repeats the whole {Acquire, GetUTxOWhole}
+// sequence after the connection dies, with the same budget as
+// runProtocolParamsAndStake.
+const (
+	utxoComparisonRetries    = acquireRetries
+	utxoComparisonRetryDelay = acquireRetryDelay
+)
+
+type utxoComparison struct {
+	refCount int
+	missing  []string
+	extra    []string
+	differs  []string
+}
+
+// compareUTxOWithRetry compares Dingo's whole UTxO set at point against want.
+// A connection that dies during Acquire or GetUTxOWhole
+// (isRetryableDingoConnErr) is retried on a fresh connection, as
+// runProtocolParamsAndStake does; any other error is returned at once. Each
+// attempt only reads want, so a retry cannot apply the reconstruction twice
+// or change what a later epoch compares against.
+func compareUTxOWithRetry(
+	ctx context.Context,
+	dingoAddr string,
+	magic uint32,
+	point pcommon.Point,
+	want UTxOSet,
+) (utxoComparison, error) {
+	var lastErr error
+	for attempt := range utxoComparisonRetries {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return utxoComparison{}, ctx.Err()
+			case <-time.After(utxoComparisonRetryDelay):
+			}
+		}
+		cmp, err := compareUTxOOnce(ctx, dingoAddr, magic, point, want)
+		if err == nil || !isRetryableDingoConnErr(err) {
+			return cmp, err
+		}
+		lastErr = err
+	}
+	return utxoComparison{}, lastErr
+}
+
+func compareUTxOOnce(
+	ctx context.Context,
+	dingoAddr string,
+	magic uint32,
+	point pcommon.Point,
+	want UTxOSet,
+) (utxoComparison, error) {
+	conn, lsq, err := acquireWithRetry(ctx, dingoAddr, magic, point)
+	if err != nil {
+		return utxoComparison{}, err
+	}
+	if conn == nil || lsq == nil || lsq.Client == nil {
+		if conn != nil {
+			conn.Close() //nolint:errcheck
+		}
+		return utxoComparison{}, errAcquireWithoutLocalStateQuery
+	}
+	defer func() {
+		_ = lsq.Client.Release() //nolint:errcheck
+		conn.Close()             //nolint:errcheck
+	}()
+	utxos, err := lsq.Client.GetUTxOWhole()
+	if err != nil {
+		return utxoComparison{}, fmt.Errorf("dingo GetUTxOWhole: %w", err)
+	}
+	got := make(UTxOSet, len(utxos.Results))
+	for id, out := range utxos.Results {
+		key := fmt.Sprintf("%s#%d", id.Hash.String(), id.Idx)
+		got[key] = canonicalUTxOEntry(out)
+	}
+	cmp := utxoComparison{refCount: len(got)}
+	cmp.missing, cmp.extra, cmp.differs = UTxODiff(want, got)
+	return cmp, nil
+}
+
 // EpochResult reports one epoch's check outcomes. A nil error paired with a
 // nil/empty mismatch value means that check ran cleanly; a non-nil error
 // means it could not run at all (most commonly an Acquire failure once the
@@ -1046,25 +1128,16 @@ func RunFromGenesis(
 							result.UTxOErr = verdictErr
 						case utxoVerdictCompare:
 							result.UTxOAttempted = true
-							if utxoConn, lsqUtxo, err := acquireWithRetry(ctx, dingoAddr, magic, point); err != nil {
+							cmp, err := compareUTxOWithRetry(
+								ctx, dingoAddr, magic, point, utxoRefs,
+							)
+							if err != nil {
 								result.UTxOErr = err
-							} else if utxoConn == nil || lsqUtxo == nil || lsqUtxo.Client == nil {
-								result.UTxOErr = errAcquireWithoutLocalStateQuery
 							} else {
-								utxos, err := lsqUtxo.Client.GetUTxOWhole()
-								if err != nil {
-									result.UTxOErr = fmt.Errorf("dingo GetUTxOWhole: %w", err)
-								} else {
-									dingoSet := make(UTxOSet, len(utxos.Results))
-									for id, out := range utxos.Results {
-										key := fmt.Sprintf("%s#%d", id.Hash.String(), id.Idx)
-										dingoSet[key] = canonicalUTxOEntry(out)
-									}
-									result.UTxORefCount = len(dingoSet)
-									result.UTxOMissing, result.UTxOExtra, result.UTxODiffers = UTxODiff(utxoRefs, dingoSet)
-								}
-								_ = lsqUtxo.Client.Release() //nolint:errcheck
-								utxoConn.Close()             //nolint:errcheck
+								result.UTxORefCount = cmp.refCount
+								result.UTxOMissing = cmp.missing
+								result.UTxOExtra = cmp.extra
+								result.UTxODiffers = cmp.differs
 							}
 						case utxoVerdictNoBaseline:
 							result.UTxOAttempted = false

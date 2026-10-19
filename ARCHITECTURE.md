@@ -12784,7 +12784,11 @@ Koios. The UTxO side is a running reconstruction seeded from Dingo at the
 start point and advanced by Koios's own `/tx_info` answers for every
 transaction on the chain, so it stays independent of Dingo after its seed; a
 rollback re-baselines it and marks that epoch's UTxO verdict "not run" rather
-than reporting a comparison that would trivially match. A session that ends
+than reporting a comparison that would trivially match. Each epoch's
+comparisons run on their own LocalStateQuery connections; one that dies
+during Acquire or a query is redialed and the check repeated, a bounded number
+of times, and the UTxO comparison only reads the reconstruction, so a retry
+cannot apply it twice. A session that ends
 for any reason, including Dingo closing the connection, is resumed from the
 last block processed after a backoff; only interruption ends the run. The
 rollback that opens a resumed session lands on the block already processed, so it changes nothing

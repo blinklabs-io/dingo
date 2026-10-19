@@ -949,6 +949,18 @@ type genesisFakeServer struct {
 	// never fails, leaving every other test's behavior unchanged.
 	failUtxoWholeCount int
 	utxoWholeCalls     int
+	// failUtxoWholeSkip lets that many GetUTxOWhole calls succeed before
+	// the failUtxoWholeCount failures begin, so a failure can land on a
+	// comparison rather than the genesis capture.
+	failUtxoWholeSkip int
+
+	// failAcquiresAfterStake arms, at the next ShelleyPoolDistr2Query, that
+	// many failures of the specific-point Acquires that follow it: the UTxO
+	// comparison's Acquire, which runs right after the stake check. The
+	// Acquire callback returns a generic error, which tears the connection
+	// down as Dingo's did when its snapshot open hit its deadline.
+	failAcquiresAfterStake int
+	acquireFailuresArmed   int
 
 	// failEpochNoAtSlot, when non-nil, makes ShelleyEpochNoQuery fail once
 	// for each slot in it whose count is still above zero, decrementing as
@@ -1292,6 +1304,14 @@ func (s *genesisFakeServer) lsqConfig() localstatequery.Config {
 						return localstatequery.ErrAcquireFailurePointTooOld
 					}
 					s.mu.Lock()
+					if s.acquireFailuresArmed > 0 {
+						s.acquireFailuresArmed--
+						s.mu.Unlock()
+						return errors.New(
+							"simulated open ledger snapshot: " +
+								"context deadline exceeded",
+						)
+					}
 					s.lastAcquiredSlot = sp.Point.Slot
 					s.mu.Unlock()
 				}
@@ -1330,6 +1350,10 @@ func (s *genesisFakeServer) lsqConfig() localstatequery.Config {
 					case *localstatequery.ShelleyCurrentProtocolParamsQuery:
 						return []any{pp}, nil
 					case *localstatequery.ShelleyPoolDistr2Query:
+						s.mu.Lock()
+						s.acquireFailuresArmed = s.failAcquiresAfterStake
+						s.failAcquiresAfterStake = 0
+						s.mu.Unlock()
 						return localstatequery.StakeDistribution2Result{
 							Distribution: localstatequery.PoolDistr2Result{
 								Pools: map[ledger.PoolId]localstatequery.PoolDistr2IndividualStake{},
@@ -1338,7 +1362,8 @@ func (s *genesisFakeServer) lsqConfig() localstatequery.Config {
 					case *localstatequery.ShelleyUtxoWholeQuery:
 						s.mu.Lock()
 						s.utxoWholeCalls++
-						fail := s.utxoWholeCalls <= s.failUtxoWholeCount
+						fail := s.utxoWholeCalls > s.failUtxoWholeSkip &&
+							s.utxoWholeCalls <= s.failUtxoWholeSkip+s.failUtxoWholeCount
 						s.mu.Unlock()
 						if fail {
 							return nil, errors.New(
@@ -1747,6 +1772,112 @@ func TestRunFromGenesis_UTxOBaselineRetryRecovers(t *testing.T) {
 	report3 := recv()
 	assert.True(t, report3.UTxOAttempted)
 	assert.NoError(t, report3.UTxOErr)
+
+	cancel()
+	select {
+	case err := <-done:
+		assert.True(t, err == nil || errors.Is(err, context.Canceled))
+	case <-time.After(10 * time.Second):
+		t.Fatal("RunFromGenesis did not exit after ctx cancellation")
+	}
+}
+
+// TestRunFromGenesis_UTxOComparisonRetriesConnectionFailure proves the UTxO
+// comparison survives its Dingo connection dying, as the protocol-parameter
+// and stake checks already do. Live, Dingo's Acquire missed its deadline at
+// an epoch boundary, the client gave up in Acquiring, and the epoch was
+// reported as "utxo check did not run" with "acquire: protocol is shutting
+// down".
+//
+// Epochs 1-4 on blocks 0-3. Block 0 captures the baseline (GetUTxOWhole call
+// 1). At block 1 the comparison's GetUTxOWhole (call 2) kills its
+// connection; the retry (call 3) must report a clean comparison. At block 2
+// the comparison's Acquire kills its connection, as in the live failure; the
+// retry must again report clean. Block 3 checks that neither retry tainted
+// or re-baselined the reconstruction: one more clean comparison, and exactly
+// one GetUTxOWhole per comparison plus the retried one.
+func TestRunFromGenesis_UTxOComparisonRetriesConnectionFailure(t *testing.T) {
+	t.Parallel()
+	const magic = 42
+	const blockCount = 5
+
+	server := newGenesisFakeServer(t, blockCount)
+	server.failUtxoWholeSkip = 1
+	server.failUtxoWholeCount = 1
+	server.epochBySlot = map[uint64]int{
+		server.chain.Points[0].Slot: 1,
+		server.chain.Points[1].Slot: 2,
+		server.chain.Points[2].Slot: 3,
+		server.chain.Points[3].Slot: 4,
+	}
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = listener.Close() })
+	server.serve(t, listener, magic)
+
+	koiosSrv := httptest.NewServer(http.NotFoundHandler())
+	t.Cleanup(koiosSrv.Close)
+	koios, err := NewKoiosClient("preview", "", koiosSrv.URL, true, true)
+	require.NoError(t, err)
+
+	results := make(chan EpochResult, 8)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- RunFromGenesis(
+			ctx, listener.Addr().String(), "preview", magic, koios, nil,
+			func(r EpochResult) { results <- r },
+			nil, nil,
+		)
+	}()
+
+	recv := func() EpochResult {
+		t.Helper()
+		select {
+		case r := <-results:
+			return r
+		case <-time.After(10 * time.Second):
+			t.Fatal("timed out waiting for an epoch result")
+			return EpochResult{}
+		}
+	}
+	utxoWholeCalls := func() int {
+		server.mu.Lock()
+		defer server.mu.Unlock()
+		return server.utxoWholeCalls
+	}
+
+	server.allowStep(t)
+
+	server.allowStep(t)
+	report1 := recv()
+	assert.Equal(t, uint64(2), report1.Epoch)
+	assert.True(t, report1.UTxOAttempted)
+	assert.NoError(t, report1.UTxOErr, "a dropped GetUTxOWhole must be retried")
+	assert.Equal(t, 3, utxoWholeCalls())
+
+	server.mu.Lock()
+	server.failAcquiresAfterStake = 1
+	server.mu.Unlock()
+	server.allowStep(t)
+	report2 := recv()
+	assert.Equal(t, uint64(3), report2.Epoch)
+	assert.True(t, report2.UTxOAttempted)
+	assert.NoError(t, report2.UTxOErr, "a dropped Acquire must be retried")
+	assert.Equal(t, 4, utxoWholeCalls())
+	server.mu.Lock()
+	assert.Zero(t, server.acquireFailuresArmed, "the armed Acquire failure must have fired")
+	server.mu.Unlock()
+
+	server.allowStep(t)
+	report3 := recv()
+	assert.Equal(t, uint64(4), report3.Epoch)
+	assert.True(t, report3.UTxOAttempted)
+	assert.NoError(t, report3.UTxOErr)
+	assert.Equal(t, 5, utxoWholeCalls())
 
 	cancel()
 	select {
