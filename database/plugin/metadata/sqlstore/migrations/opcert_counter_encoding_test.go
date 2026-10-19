@@ -87,7 +87,10 @@ WHERE pool_key_hash = ? ORDER BY sequence`, poolKeyHash)
 	require.NoError(t, rows.Err())
 	require.NoError(t, rows.Close())
 
-	for _, statement := range registry[len(registry)-1].SQL["sqlite"].Expand {
+	opcertMigration := registry[48]
+	require.Equal(t, 49, opcertMigration.Version)
+	require.NotEmpty(t, opcertMigration.SQL["sqlite"].Expand)
+	for _, statement := range opcertMigration.SQL["sqlite"].Expand {
 		_, err = db.ExecContext(ctx, statement)
 		require.NoError(t, err)
 	}
