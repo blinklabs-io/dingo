@@ -20,6 +20,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -229,4 +230,42 @@ func TestExtractArchiveVerifiesMemberDigest(t *testing.T) {
 	_, statErr := os.Stat(filepath.Join(dest, "m"))
 	require.ErrorIs(t, statErr, os.ErrNotExist,
 		"a member that fails its digest must not stay on disk")
+}
+
+func TestVerifiedAncillaryLimitsAdmitRootEntry(t *testing.T) {
+	t.Parallel()
+	state := []byte("state")
+	digest := sha256.Sum256(state)
+	manifest := &ancillaryManifest{
+		Data: map[string]string{
+			"ledger/100/state": hex.EncodeToString(digest[:]),
+		},
+	}
+	manifestData := []byte("{}")
+	entries := []limitsTestEntry{
+		{name: "./", typeflag: tar.TypeDir},
+		{name: "ledger/", typeflag: tar.TypeDir},
+		{name: "ledger/100/", typeflag: tar.TypeDir},
+		{name: "ledger/100/state", content: state},
+		{name: ancillaryManifestFilename, content: manifestData},
+	}
+
+	dest, err := extractWithLimits(
+		t, entries, verifiedAncillaryLimits(manifest, manifestData, nil),
+	)
+
+	require.NoError(t, err)
+	_, err = os.Stat(filepath.Join(dest, "ledger", "100", "state"))
+	require.NoError(t, err)
+}
+
+func TestAggregatorHTTPClientKeepsRequestTimeout(t *testing.T) {
+	t.Parallel()
+	base := &http.Client{Transport: http.DefaultTransport}
+
+	client := aggregatorHTTPClient(base)
+
+	require.Equal(t, aggregatorRequestTimeout, client.Timeout)
+	require.Same(t, base.Transport, client.Transport)
+	require.Zero(t, base.Timeout, "the download client stays unbounded")
 }

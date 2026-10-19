@@ -22,8 +22,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestDefaultAssembledDSNRequiresSSL(t *testing.T) {
+func TestDefaultAssembledDSNVerifiesServer(t *testing.T) {
 	dsn := assembleDSN(defaultConfig())
 
-	require.Contains(t, dsn, "sslmode=require")
+	require.Contains(t, dsn, "sslmode=verify-full")
 }

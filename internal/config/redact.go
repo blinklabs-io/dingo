@@ -371,6 +371,8 @@ var providerConfigPlainKeys = []string{
 	// mempool
 	"capacity", "evictionwatermark", "rejectionwatermark",
 	"revalidationdeltacap",
+	// api/blockfrost admission limits
+	"maxconcurrentmutations", "maxconcurrentmutationsperclient",
 	// api/{blockfrost,kupo,mesh,utxorpc} TLS policy keys
 	"mode", "certfilepath", "keyfilepath",
 }

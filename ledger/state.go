@@ -16,7 +16,6 @@ package ledger
 
 import (
 	"bytes"
-	"cmp"
 	"context"
 	"encoding/binary"
 	"encoding/hex"
@@ -28,6 +27,7 @@ import (
 	"math"
 	"math/big"
 	"math/bits"
+	"net"
 	"runtime"
 	"runtime/debug"
 	"slices"
@@ -73,6 +73,12 @@ import (
 // runs. A var, like the Close* drain timeouts below, so lifecycle tests can
 // shrink it instead of waiting on a real multi-minute timer.
 var cleanupConsumedUtxosInterval = 5 * time.Minute
+
+// snapshotGenerationCounter gives every publication in this process a unique
+// generation. A live Restore or Truncate replaces LedgerState while consumers
+// can retain generation-tagged work from the outgoing instance, so a
+// replacement must never reuse one of its tokens.
+var snapshotGenerationCounter atomic.Uint64
 
 // gatherCoalesceRetryInterval and gatherCoalesceMaxAttempts bound how long
 // ledgerReadChainIterator's batch-gather loop will wait, after a non-blocking
@@ -843,7 +849,8 @@ type GenesisSelectionStateFunc func() (active bool, window uint64)
 
 type LedgerStateConfig struct {
 	// MaxConcurrentEvaluations bounds transaction evaluations running at
-	// once across every API front end (0 = GOMAXPROCS).
+	// once across every API front end. Zero leaves one logical processor for
+	// consensus work when possible.
 	MaxConcurrentEvaluations int
 	PromRegistry             prometheus.Registerer
 	Logger                   *slog.Logger
@@ -1005,6 +1012,12 @@ type LedgerStateConfig struct {
 	ManualBlockProcessing    bool
 	ForgeBlocks              bool
 	DatabaseWorkerPoolConfig DatabaseWorkerPoolConfig
+	// VerifyReplayHeaders makes ledger apply run the full VRF, KES,
+	// operational-certificate and leader-eligibility check on every block
+	// that no Mithril certificate covers, as if admission had deferred it.
+	// Replay feeds blocks that never passed admission, so apply is the only
+	// place their headers can be checked before they reach ledger state.
+	VerifyReplayHeaders bool
 	// BlockPipelineEnabled turns on parallel block decode in the chainsync
 	// replay loop (ledgerReadChainIterator): blocks read back from the
 	// primary chain are decoded by a small worker pool (gouroboros'
@@ -1278,11 +1291,12 @@ type tipSnapshot struct {
 }
 
 type LedgerState struct {
-	// evalSlots bounds concurrent EvaluateTx calls; nil means unbounded.
-	evalSlots chan struct{}
-	metrics   stateMetrics
-	consensus atomic.Pointer[consensusSnapshot]
-	tip       atomic.Pointer[tipSnapshot]
+	// evalAdmission bounds concurrent EvaluateTx calls globally and per remote
+	// source. Nil means unbounded.
+	evalAdmission *evaluationLimiter
+	metrics       stateMetrics
+	consensus     atomic.Pointer[consensusSnapshot]
+	tip           atomic.Pointer[tipSnapshot]
 	// snapshotPublished is closed and replaced after every snapshot
 	// publication, so a reader waiting for the ledger to advance can block
 	// until the published state changes instead of polling it.
@@ -1311,8 +1325,9 @@ type LedgerState struct {
 	persistedBlockSizeMu     sync.Mutex
 	persistedBlockSize       uint64
 	persistedBlockSizeLoaded bool
-	// snapshotGeneration is incremented while writers are serialized by Lock.
-	// It lets readers that need both snapshots reject adjacent publications.
+	// snapshotGeneration is assigned while writers are serialized by Lock.
+	// It lets readers that need both snapshots reject adjacent publications and
+	// generation-tagged work reject snapshots from another LedgerState instance.
 	snapshotGeneration uint64
 	// txValidationCommitMutex serializes snapshot publication against the
 	// final generation check and mutation performed by a validation session.
@@ -2140,10 +2155,7 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 		validationEnabled:  cfg.ValidateHistorical,
 		plutusEvalCtxCache: eras.NewPlutusEvalContextCache(),
 		byronPBFT:          byronPBFT,
-		evalSlots: make(
-			chan struct{},
-			cmp.Or(cfg.MaxConcurrentEvaluations, runtime.GOMAXPROCS(0)),
-		),
+		evalAdmission:      newEvaluationLimiter(evaluationCapacity(cfg)),
 	}
 	ls.publishCtx, ls.publishCancel = context.WithCancel(context.Background())
 	ls.timeConverter = ls.newTimeConverter()
@@ -2244,8 +2256,11 @@ func cloneEpochs(values []models.Epoch) []models.Epoch {
 func (ls *LedgerState) publishSnapshotsLocked() {
 	ls.txValidationCommitMutex.Lock()
 	defer ls.txValidationCommitMutex.Unlock()
-	ls.snapshotGeneration++
-	generation := ls.snapshotGeneration
+	generation := snapshotGenerationCounter.Add(1)
+	if generation == 0 {
+		panic("ledger snapshot generations exhausted")
+	}
+	ls.snapshotGeneration = generation
 	// Prevent a later append to the writer-owned slice from reusing storage
 	// visible to an already-published snapshot. Element updates still require
 	// replacing the cache and its slice-backed Epoch fields.
@@ -8133,7 +8148,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 					return fmt.Errorf("%s: %w", label, recoverErr)
 				}
 				if recovered {
-					return errRestartLedgerPipeline
+					return ls.restartAfterRecovery(rejected)
 				}
 				return fmt.Errorf("%s: %w", label, rejected)
 			}
@@ -8162,7 +8177,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 								return fmt.Errorf("recover rejected Leios certifying block: %w", recoverErr)
 							}
 							if recovered {
-								return errRestartLedgerPipeline
+								return ls.restartAfterRecovery(err)
 							}
 							return err
 						}
@@ -8648,7 +8663,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 						)
 					}
 					if recovered {
-						return errRestartLedgerPipeline
+						return ls.restartAfterRecovery(result.err)
 					}
 					return fmt.Errorf(
 						"read-chain decode or validation: %w",
@@ -8773,7 +8788,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 					)
 				}
 				if recovered {
-					return errRestartLedgerPipeline
+					return ls.restartAfterRecovery(err)
 				}
 				return fmt.Errorf(
 					"prepare block apply snapshot: %w",
@@ -9326,7 +9341,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 				}
 				if recovered {
 					completeReadResult()
-					return errRestartLedgerPipeline
+					return ls.restartAfterRecovery(err)
 				}
 				// A deferred header check that rejects an already-persisted
 				// block is deterministic: restarting the pipeline re-reads
@@ -9345,7 +9360,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 				}
 				if recovered {
 					completeReadResult()
-					return errRestartLedgerPipeline
+					return ls.restartAfterRecovery(err)
 				}
 				// A stale chain iterator delivers a fork block whose prev-hash
 				// doesn't match our current tip. This happens when a concurrent
@@ -9623,6 +9638,15 @@ func (ls *LedgerState) ledgerProcessBlock(
 		); err != nil {
 			return nil, err
 		}
+	} else if !ls.config.TrustedReplay && !ls.slotCoveredByMithril(point.Slot) {
+		// The aggregate maxBlockExUnits bound is a block-level ledger rule
+		// that per-transaction validation never repeats, so a peer-sourced
+		// block must meet it even when ValidateHistorical=false skips the
+		// rest of validation. Mithril-certified and TrustedReplay blocks are
+		// trusted input and keep skipping it.
+		if err := validateBlockExUnits(block, pparams); err != nil {
+			return nil, err
+		}
 	}
 	// Validate the operational certificate counter before processing the
 	// block's transactions, so a stale or gapped opcert is rejected by this
@@ -9640,21 +9664,6 @@ func (ls *LedgerState) ledgerProcessBlock(
 		}
 		opCertIssueNumber = opCert.IssueNumber
 		opCertPoolKeyHash = lcommon.PoolKeyHash(block.IssuerVkey().Hash())
-		// The counter is recorded for every applied block, validated or not,
-		// so the bound on what the metadata store can record is checked here
-		// rather than beside the era rule below: an unvalidated replay would
-		// otherwise reach UpdatePoolOpCertSequence with a counter it cannot
-		// write and fail after the block's transactions had been processed,
-		// with the width limit named nowhere.
-		if err := eras.ValidateOpCertPersistableCounter(
-			opCertIssueNumber,
-		); err != nil {
-			return nil, fmt.Errorf(
-				"pool %x: %w",
-				opCertPoolKeyHash.Bytes(),
-				err,
-			)
-		}
 		// Counter monotonicity is the stateful half of inbound opcert
 		// validation: read the pool's last-seen counter before processing this
 		// block, inside the same validation transaction. A backward counter
@@ -11313,9 +11322,12 @@ func (ls *LedgerState) loadEpochs(ctx context.Context, txn *database.Txn) error 
 	return ls.setEpochCache(ctx, txn, epochs)
 }
 
-// PrepareEpochCacheForStartup loads epoch metadata before LedgerState.Start().
-// It is startup-only: callers use this when another component needs
-// SlotToEpoch before the ledger processing loop is running.
+// PrepareEpochCacheForStartup loads epoch metadata and the applied tip before
+// LedgerState.Start(). It is startup-only: callers use this when another
+// component needs slot conversion before the ledger processing loop is
+// running. The tip is part of that preparation because it anchors the current
+// era's forecast horizon; an epoch cache published against the origin tip can
+// reject historical slots near the persisted tip as past the era horizon.
 func (ls *LedgerState) PrepareEpochCacheForStartup(ctx context.Context) error {
 	if ls.ctx != nil {
 		return errors.New(
@@ -11325,7 +11337,18 @@ func (ls *LedgerState) PrepareEpochCacheForStartup(ctx context.Context) error {
 	txn := ls.db.Transaction(ctx, true)
 	defer txn.Release()
 	return txn.Do(func(txn *database.Txn) error {
-		return ls.loadEpochs(ctx, txn)
+		if err := ls.loadEpochs(ctx, txn); err != nil {
+			return err
+		}
+		tip, err := ls.db.GetTip(txn)
+		if err != nil {
+			return fmt.Errorf("load applied tip for startup era history: %w", err)
+		}
+		ls.Lock()
+		ls.currentTip = tip
+		ls.publishSnapshotsLocked()
+		ls.Unlock()
+		return nil
 	})
 }
 
@@ -14245,16 +14268,20 @@ func (ls *LedgerState) UtxosByAddress(
 	return ret, nil
 }
 
-// UtxosByAddressWithOrdering returns UTxOs matching q with ordering metadata.
-// See models.UtxoWithOrderingQuery (nil SearchUtxos predicate: MatchAllAddresses).
-func (ls *LedgerState) UtxosByAddressWithOrdering(
+// UtxosByAddressBoundedPage returns an ordered, resumable UTxO page while
+// bounding candidate work and retained CBOR.
+func (ls *LedgerState) UtxosByAddressBoundedPage(
+	ctx context.Context,
 	q *models.UtxoWithOrderingQuery,
-) ([]models.UtxoWithOrdering, error) {
-	utxos, err := ls.db.UtxosByAddressWithOrdering(context.Background(), q, nil)
-	if err != nil {
-		return nil, err
-	}
-	return utxos, nil
+	maxCandidates int,
+	maxBytes int64,
+) (models.UtxoAddressPage, error) {
+	return ls.db.UtxosByAddressBoundedPage(
+		ctx,
+		q,
+		maxCandidates,
+		maxBytes,
+	)
 }
 
 // UtxosByAddressAtSlot returns all UTxOs belonging to the
@@ -15092,6 +15119,64 @@ func (ls *LedgerState) ValidateTxWithOverlay(
 // outright rather than queued.
 var ErrEvaluationBusy = errors.New("transaction evaluation capacity exhausted")
 
+type evaluationSourceContextKey struct{}
+
+// WithEvaluationSource identifies the remote host that initiated an API
+// transaction evaluation. Ports are discarded so reconnecting cannot create a
+// new admission identity.
+func WithEvaluationSource(ctx context.Context, peerAddr string) context.Context {
+	if host, _, err := net.SplitHostPort(peerAddr); err == nil {
+		peerAddr = host
+	}
+	return context.WithValue(ctx, evaluationSourceContextKey{}, peerAddr)
+}
+
+type evaluationLimiter struct {
+	mu           sync.Mutex
+	total        int
+	perSource    map[string]int
+	maxTotal     int
+	maxPerSource int
+}
+
+func evaluationCapacity(cfg LedgerStateConfig) int {
+	if cfg.MaxConcurrentEvaluations > 0 {
+		return cfg.MaxConcurrentEvaluations
+	}
+	return max(runtime.GOMAXPROCS(0)-1, 1)
+}
+
+func newEvaluationLimiter(maxTotal int) *evaluationLimiter {
+	return &evaluationLimiter{
+		perSource:    make(map[string]int),
+		maxTotal:     maxTotal,
+		maxPerSource: maxTotal/2 + maxTotal%2,
+	}
+}
+
+func (l *evaluationLimiter) acquire(ctx context.Context) (func(), error) {
+	source, _ := ctx.Value(evaluationSourceContextKey{}).(string)
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.total >= l.maxTotal ||
+		(source != "" && l.perSource[source] >= l.maxPerSource) {
+		return nil, ErrEvaluationBusy
+	}
+	l.total++
+	l.perSource[source]++
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			l.mu.Lock()
+			defer l.mu.Unlock()
+			l.total--
+			if l.perSource[source]--; l.perSource[source] == 0 {
+				delete(l.perSource, source)
+			}
+		})
+	}, nil
+}
+
 // EvaluateTx evaluates the scripts in the provided transaction and returns the calculated
 // fee, per-redeemer ExUnits, and total ExUnits.
 //
@@ -15111,13 +15196,12 @@ func (ls *LedgerState) EvaluateTxContext(
 	if err := ctx.Err(); err != nil {
 		return 0, lcommon.ExUnits{}, nil, err
 	}
-	if ls.evalSlots != nil {
-		select {
-		case ls.evalSlots <- struct{}{}:
-			defer func() { <-ls.evalSlots }()
-		default:
-			return 0, lcommon.ExUnits{}, nil, ErrEvaluationBusy
+	if ls.evalAdmission != nil {
+		release, err := ls.evalAdmission.acquire(ctx)
+		if err != nil {
+			return 0, lcommon.ExUnits{}, nil, err
 		}
+		defer release()
 	}
 	// Snapshot mutable state from the lock-free consensus snapshot
 	consensusState := ls.loadConsensusSnapshot()

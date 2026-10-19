@@ -19,6 +19,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/ouroboros-mock/conformance"
 	"github.com/stretchr/testify/require"
 )
@@ -41,6 +42,12 @@ const expectedBlueprintVectorCount = 2575
 // tests_cc29688c_test.go for why the replay is memoized per backend and what the
 // previous separate statistics pass cost.
 func TestRulesConformanceVectors(t *testing.T) {
+	testutil.SkipUnderRace(
+		t,
+		"a single-goroutine replay of the corpus through the SQLite state "+
+			"manager; go-test (Linux) and go-test (Linux, quick) replay it "+
+			"un-instrumented",
+	)
 	results := sqliteCorpusResults(t)
 	reportCorpus(t, "sqlite", results)
 	require.Equal(t, expectedBlueprintVectorCount, len(results))

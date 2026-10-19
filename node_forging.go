@@ -1068,6 +1068,7 @@ func (n *Node) initBlockForger(
 		},
 		LeiosCertificateProvider:        leiosCerts,
 		LeiosParentAnnouncementProvider: leiosParent,
+		LeiosCertificationTimingChecker: n.ledgerState,
 		OpCertLedgerView: blockProducerLedgerView{
 			ls: n.ledgerState,
 		},

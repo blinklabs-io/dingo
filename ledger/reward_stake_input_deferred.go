@@ -312,6 +312,31 @@ func (ls *LedgerState) writeDeferredRewardStakeInputs(
 	}
 }
 
+// RewardStakeInputsIncomplete reports whether any snapshot labelled in
+// [from, through) still has incomplete reward_stake_input rows: its deferred write
+// has not committed the last chunk and no reward round has rebuilt it yet.
+// A read-only reader cannot complete them, so it must not present the
+// snapshot's rows as the whole distribution.
+func (ls *LedgerState) RewardStakeInputsIncomplete(
+	txn *database.Txn,
+	from uint64,
+	through uint64,
+) (bool, error) {
+	pending, err := loadRewardStakeInputsPending(
+		ls.db.Metadata(),
+		txn.Metadata(),
+	)
+	if err != nil {
+		return false, err
+	}
+	for _, entry := range pending.Entries {
+		if entry.Epoch >= from && entry.Epoch < through {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 // ensureRewardStakeInputsReady makes a snapshot's reward_stake_input rows
 // complete before a reader uses them. While this process is still writing
 // them it returns errRewardStakeInputsNotReady. A pending entry with no writer

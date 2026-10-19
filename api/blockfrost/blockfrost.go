@@ -16,10 +16,16 @@ package blockfrost
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/blinklabs-io/dingo/internal/apilistener"
@@ -27,7 +33,14 @@ import (
 )
 
 // Leave time to report a stalled body before the 30-second write deadline.
-const defaultRequestBodyTimeout = 15 * time.Second
+const (
+	defaultRequestBodyTimeout                   = 15 * time.Second
+	defaultListenHost                           = "127.0.0.1"
+	defaultMaxConcurrentMutations          uint = 4
+	defaultMaxConcurrentMutationsPerClient      = 1
+	defaultMaxConcurrentDRepDetails        uint = 4
+	defaultMaxDRepDetailsPerClient              = 1
+)
 
 // Blockfrost is the Blockfrost-compatible REST API server.
 type Blockfrost struct {
@@ -35,6 +48,9 @@ type Blockfrost struct {
 	logger             *slog.Logger
 	requestBodyTimeout time.Duration
 	node               BlockfrostNode
+	mutationAuth       mutationAuth
+	mutationAdmission  *requestAdmission
+	drepAdmission      *requestAdmission
 	// listener owns the start/stop protocol, including releasing the
 	// listening socket as part of what Stop waits for -- see
 	// internal/apilistener.
@@ -54,15 +70,154 @@ func New(
 	}
 	logger = logger.With("component", "blockfrost")
 	if cfg.ListenAddress == "" {
-		cfg.ListenAddress = ":3000"
+		cfg.ListenAddress = net.JoinHostPort(defaultListenHost, "3000")
+	}
+	if cfg.MaxConcurrentMutations == 0 {
+		cfg.MaxConcurrentMutations = defaultMaxConcurrentMutations
+	}
+	if cfg.MaxConcurrentMutationsPerClient == 0 {
+		cfg.MaxConcurrentMutationsPerClient = defaultMaxConcurrentMutationsPerClient
 	}
 	return &Blockfrost{
 		config:             cfg,
 		requestBodyTimeout: defaultRequestBodyTimeout,
 		logger:             logger,
 		node:               node,
-		listener:           apilistener.New("Blockfrost API", logger),
+		mutationAuth: newMutationAuth(
+			cfg.AuthToken,
+		),
+		mutationAdmission: newRequestAdmission(
+			cfg.MaxConcurrentMutations,
+			cfg.MaxConcurrentMutationsPerClient,
+		),
+		drepAdmission: newRequestAdmission(
+			defaultMaxConcurrentDRepDetails,
+			defaultMaxDRepDetailsPerClient,
+		),
+		listener: apilistener.New("Blockfrost API", logger),
 	}
+}
+
+type mutationAuth struct {
+	enabled   bool
+	tokenHash [sha256.Size]byte
+}
+
+func newMutationAuth(token string) mutationAuth {
+	return mutationAuth{
+		enabled:   token != "",
+		tokenHash: sha256.Sum256([]byte(token)),
+	}
+}
+
+func (a mutationAuth) authorized(r *http.Request) bool {
+	if !a.enabled {
+		return false
+	}
+	candidates := []string{
+		r.Header.Get("project_id"),
+		r.Header.Get("X-Blockfrost-Project-Id"),
+	}
+	scheme, value, ok := strings.Cut(r.Header.Get("Authorization"), " ")
+	if ok && strings.EqualFold(scheme, "Bearer") {
+		candidates = append(candidates, strings.TrimLeft(value, " "))
+	}
+	// Every credential is compared so a stale value in one header cannot mask
+	// a valid one in another, and the work does not depend on which matched.
+	matched := 0
+	for _, provided := range candidates {
+		providedHash := sha256.Sum256([]byte(provided))
+		matched |= subtle.ConstantTimeCompare(
+			providedHash[:],
+			a.tokenHash[:],
+		)
+	}
+	return matched == 1
+}
+
+type requestAdmission struct {
+	mu           sync.Mutex
+	active       uint
+	activeClient map[string]uint
+	maxActive    uint
+	maxClient    uint
+}
+
+func newRequestAdmission(maxActive, maxClient uint) *requestAdmission {
+	return &requestAdmission{
+		activeClient: make(map[string]uint),
+		maxActive:    maxActive,
+		maxClient:    maxClient,
+	}
+}
+
+func (a *requestAdmission) acquire(
+	ctx context.Context,
+	client string,
+) (func(), bool) {
+	select {
+	case <-ctx.Done():
+		return nil, false
+	default:
+	}
+
+	a.mu.Lock()
+	if a.active >= a.maxActive || a.activeClient[client] >= a.maxClient {
+		a.mu.Unlock()
+		return nil, false
+	}
+	a.active++
+	a.activeClient[client]++
+	a.mu.Unlock()
+
+	return func() {
+		a.mu.Lock()
+		a.active--
+		a.activeClient[client]--
+		if a.activeClient[client] == 0 {
+			delete(a.activeClient, client)
+		}
+		a.mu.Unlock()
+	}, true
+}
+
+func requestClient(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err == nil {
+		return host
+	}
+	return r.RemoteAddr
+}
+
+func (b *Blockfrost) mutationHandler(next http.HandlerFunc) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !b.mutationAuth.authorized(r) {
+			w.Header().Set("WWW-Authenticate", "Bearer")
+			writeError(
+				w,
+				http.StatusUnauthorized,
+				"Unauthorized",
+				"missing or invalid authentication token",
+			)
+			return
+		}
+		release, ok := b.mutationAdmission.acquire(
+			r.Context(),
+			requestClient(r),
+		)
+		if !ok {
+			w.Header().Set("Retry-After", "1")
+			writeError(
+				w,
+				http.StatusTooManyRequests,
+				"Too Many Requests",
+				"transaction mutation capacity reached, try again later",
+			)
+			return
+		}
+		defer release()
+		next(w, r)
+	})
 }
 
 // handler builds the HTTP handler for the Blockfrost API,
@@ -83,8 +238,24 @@ func (b *Blockfrost) handler() http.Handler {
 		b.handleLatestBlockTxs,
 	)
 	mux.HandleFunc(
+		"GET /api/v0/blocks/latest/txs/cbor",
+		b.handleLatestBlockTransactionsCBOR,
+	)
+	mux.HandleFunc(
 		"GET /api/v0/blocks/{hash_or_number}",
 		b.handleBlock,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/blocks/{hash_or_number}/{section}",
+		b.handleBlockSection,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/blocks/{hash_or_number}/txs/cbor",
+		b.handleBlockTransactionsCBOR,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/blocks/epoch/{epoch_number}/slot/{slot_number}",
+		b.handleBlockByEpochSlot,
 	)
 	mux.HandleFunc(
 		"GET /api/v0/epochs/latest",
@@ -97,6 +268,22 @@ func (b *Blockfrost) handler() http.Handler {
 	mux.HandleFunc(
 		"GET /api/v0/epochs/{number}/parameters",
 		b.handleEpochParams,
+	)
+	mux.HandleFunc("GET /api/v0/epochs/{number}", b.handleEpoch)
+	mux.HandleFunc("GET /api/v0/epochs/{number}/next", b.handleEpochNext)
+	mux.HandleFunc(
+		"GET /api/v0/epochs/{number}/previous",
+		b.handleEpochPrevious,
+	)
+	mux.HandleFunc("GET /api/v0/epochs/{number}/stakes", b.handleEpochStakes)
+	mux.HandleFunc(
+		"GET /api/v0/epochs/{number}/stakes/{pool_id}",
+		b.handleEpochPoolStakes,
+	)
+	mux.HandleFunc("GET /api/v0/epochs/{number}/blocks", b.handleEpochBlocks)
+	mux.HandleFunc(
+		"GET /api/v0/epochs/{number}/blocks/{pool_id}",
+		b.handleEpochPoolBlocks,
 	)
 	mux.HandleFunc(
 		"GET /api/v0/network",
@@ -115,8 +302,40 @@ func (b *Blockfrost) handler() http.Handler {
 		b.handleAsset,
 	)
 	mux.HandleFunc(
-		"GET /api/v0/assets/{asset}/addresses",
-		b.handleAssetAddresses,
+		"GET /api/v0/assets",
+		b.handleAssets,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/assets/{asset}/{section}",
+		b.handleAssetSection,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/scripts",
+		b.handleScripts,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/scripts/{script_hash}",
+		b.handleScript,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/scripts/{script_hash}/{section}",
+		b.handleScriptSection,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/scripts/datum/{datum_hash}/cbor",
+		b.handleDatumCBOR,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/mempool",
+		b.handleMempool,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/mempool/{hash}",
+		b.handleMempoolTransaction,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/mempool/addresses/{address}",
+		b.handleMempoolAddress,
 	)
 	mux.HandleFunc(
 		"GET /api/v0/pools",
@@ -130,6 +349,15 @@ func (b *Blockfrost) handler() http.Handler {
 		"GET /api/v0/pools/retiring",
 		b.handlePoolsRetiring,
 	)
+	mux.HandleFunc("GET /api/v0/pools/retired", b.handlePoolsRetired)
+	mux.HandleFunc("GET /api/v0/pools/{pool_id}/history", b.handlePoolHistory)
+	mux.HandleFunc("GET /api/v0/pools/{pool_id}/relays", b.handlePoolRelays)
+	mux.HandleFunc(
+		"GET /api/v0/pools/{pool_id}/delegators",
+		b.handlePoolDelegators,
+	)
+	mux.HandleFunc("GET /api/v0/pools/{pool_id}/blocks", b.handlePoolBlocks)
+	mux.HandleFunc("GET /api/v0/pools/{pool_id}/updates", b.handlePoolUpdates)
 	mux.HandleFunc(
 		"GET /api/v0/pools/{pool_id}/metadata",
 		b.handlePoolMetadata,
@@ -147,6 +375,45 @@ func (b *Blockfrost) handler() http.Handler {
 		b.handleDRep,
 	)
 	mux.HandleFunc(
+		"GET /api/v0/governance/dreps/{drep_id}/delegators",
+		b.handleDRepDelegators,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/governance/dreps/{drep_id}/metadata",
+		b.handleDRepMetadata,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/governance/dreps/{drep_id}/updates",
+		b.handleDRepUpdates,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/governance/dreps/{drep_id}/votes",
+		b.handleDRepVotes,
+	)
+	mux.HandleFunc("GET /api/v0/governance/committee", b.handleCommittee)
+	mux.HandleFunc(
+		"GET /api/v0/governance/committee/votes",
+		b.handleCommitteeVotes,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/governance/committee/{cc_id}/votes",
+		b.handleCommitteeMemberVotes,
+	)
+	mux.HandleFunc("GET /api/v0/governance/proposals", b.handleProposals)
+	mux.HandleFunc(
+		"GET /api/v0/governance/proposals/{first}",
+		b.handleProposalByID,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/governance/proposals/{first}/{second}",
+		b.handleProposalTwoSegments,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/governance/proposals/{first}/{second}/{third}",
+		b.handleProposalThreeSegments,
+	)
+	mux.HandleFunc("GET /api/v0/pools/{pool_id}/votes", b.handlePoolVotes)
+	mux.HandleFunc(
 		"GET /api/v0/addresses/{address}",
 		b.handleAddress,
 	)
@@ -157,6 +424,22 @@ func (b *Blockfrost) handler() http.Handler {
 	mux.HandleFunc(
 		"GET /api/v0/addresses/{address}/transactions",
 		b.handleAddressTransactions,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/addresses/{address}/txs",
+		b.handleAddressTransactionHashes,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/addresses/{address}/extended",
+		b.handleAddressExtended,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/addresses/{address}/total",
+		b.handleAddressTotal,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/addresses/{address}/utxos/{asset}",
+		b.handleAddressAssetUTXOs,
 	)
 	mux.HandleFunc(
 		"GET /api/v0/metadata/txs/labels/{label}",
@@ -170,17 +453,17 @@ func (b *Blockfrost) handler() http.Handler {
 		"GET /api/v0/txs/{hash}",
 		b.handleTransaction,
 	)
-	mux.HandleFunc(
+	mux.Handle(
 		"POST /api/v0/tx/submit",
-		b.handleTransactionSubmit,
+		b.mutationHandler(b.handleTransactionSubmit),
 	)
-	mux.HandleFunc(
+	mux.Handle(
 		"POST /api/v0/utils/txs/evaluate",
-		b.handleTransactionEvaluate,
+		b.mutationHandler(b.handleTransactionEvaluate),
 	)
-	mux.HandleFunc(
+	mux.Handle(
 		"POST /api/v0/utils/txs/evaluate/utxos",
-		b.handleTransactionEvaluateUtxos,
+		b.mutationHandler(b.handleTransactionEvaluateUtxos),
 	)
 	mux.HandleFunc(
 		"GET /api/v0/txs/{hash}/cbor",
@@ -237,6 +520,22 @@ func (b *Blockfrost) handler() http.Handler {
 	mux.HandleFunc(
 		"GET /api/v0/accounts/{stake_address}/addresses",
 		b.handleAccountAssociatedAddresses,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/accounts/{stake_address}/history",
+		b.handleAccountStakeHistory,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/accounts/{stake_address}/mirs",
+		b.handleAccountMIRs,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/accounts/{stake_address}/addresses/assets",
+		b.handleAccountAddressAssets,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/accounts/{stake_address}/addresses/total",
+		b.handleAccountAddressTotal,
 	)
 	mux.HandleFunc(
 		"GET /api/v0/accounts/{stake_address}/delegations",
@@ -298,6 +597,18 @@ func (b *Blockfrost) Start(
 		return err
 	}
 	defer b.listener.EndStart(startDone)
+
+	host, _, err := net.SplitHostPort(b.config.ListenAddress)
+	if err != nil {
+		return fmt.Errorf("blockfrost: invalid listen address: %w", err)
+	}
+	if err := validateListenSecurity(
+		host,
+		b.config.AuthToken,
+		b.config.TLS,
+	); err != nil {
+		return fmt.Errorf("blockfrost: %w", err)
+	}
 
 	server, bindDone, err := b.listener.Publish(func() *http.Server {
 		return &http.Server{

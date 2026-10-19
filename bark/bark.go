@@ -37,6 +37,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/lifecycle"
 	"github.com/blinklabs-io/dingo/internal/dblifecycle"
 	"github.com/blinklabs-io/dingo/internal/httpcors"
+	"github.com/blinklabs-io/dingo/internal/rpchealth"
 	"github.com/blinklabs-io/dingo/internal/tlsutil"
 )
 
@@ -463,7 +464,9 @@ func (b *Bark) Start(ctx context.Context) error {
 
 	mux.Handle(
 		grpchealth.NewHandler(
-			grpchealth.NewStaticChecker(serviceNames...),
+			rpchealth.UnaryChecker(
+				grpchealth.NewStaticChecker(serviceNames...),
+			),
 			commonHandlerOptions,
 		),
 	)

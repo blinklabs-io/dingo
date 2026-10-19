@@ -1937,6 +1937,32 @@ func TestMakefileDocumentedTargetsArePhony(t *testing.T) {
 	}
 }
 
+// TestMakefileBuildTracksPgoProfile checks the binary build rule lists the PGO
+// profile as a prerequisite, so regenerating cmd/dingo/default.pgo triggers a
+// rebuild instead of leaving a stale binary.
+func TestMakefileBuildTracksPgoProfile(t *testing.T) {
+	root := repoRoot(t)
+	rules, _, _ := parseMakefile(t, root)
+
+	rule, ok := rules[binariesTarget]
+	if !ok {
+		t.Fatalf("Makefile has no %q rule", binariesTarget)
+	}
+
+	for _, prereq := range rule.prereqs {
+		if strings.Contains(prereq, "default.pgo") {
+			return
+		}
+	}
+	t.Errorf(
+		"Makefile:%d: %q build rule does not list the PGO profile as a "+
+			"prerequisite, so a refreshed cmd/dingo/default.pgo never "+
+			"rebuilds the binary",
+		rule.line,
+		binariesTarget,
+	)
+}
+
 // TestDocumentedDefaultMakeMatchesMakefile checks every description of what a
 // bare `make` does names exactly the targets the default rule depends on. It
 // is the rule that catches documentation claiming the default target runs the
@@ -2949,9 +2975,12 @@ func TestPipelineStagesMatch(t *testing.T) {
 	}
 }
 
-func TestCBORConformanceReportRunsOnlyForLinuxRelease(t *testing.T) {
+func TestConformanceReportsRunOnlyForLinuxRelease(t *testing.T) {
 	root := repoRoot(t)
 	const datasetRevision = "6cd8c928665bbafe90e02066ebb4620e38f051de"
+	const ndcLedgerRevision = "8974561cb6b48807e2a578028d4f5d85430007a6"
+	const uplcCorpusSHA256 = "8bd4ad4f9f4c8c6b8ffa1f06ed1db0b43043afbba77ef6a14bcfb5a52345ed3f"
+	const turboCorpusSHA256 = "821af55e3323c826b5598c964d634b46dd468014834d0e97ebdc5edb0a158576"
 
 	prJobs := pipelineJobs(t, root, prPipeline)
 	for jobName, rawJob := range prJobs {
@@ -3005,6 +3034,24 @@ func TestCBORConformanceReportRunsOnlyForLinuxRelease(t *testing.T) {
 	if jobEnv["CBOR_DATASET_REVISION"] != datasetRevision {
 		t.Errorf("Linux release job CBOR dataset revision = %v, want %q", jobEnv["CBOR_DATASET_REVISION"], datasetRevision)
 	}
+	if jobEnv["NDC_LEDGER_REVISION"] != ndcLedgerRevision {
+		t.Errorf("Linux release job NDC ledger revision = %v, want %q", jobEnv["NDC_LEDGER_REVISION"], ndcLedgerRevision)
+	}
+	if jobEnv["UPLC_CORPUS_SHA256"] != uplcCorpusSHA256 ||
+		jobEnv["TURBO_CORPUS_SHA256"] != turboCorpusSHA256 {
+		t.Error("Linux release job does not pin both NDC report archives")
+	}
+	for _, obsolete := range []string{
+		"AMARU_UPLC_REVISION",
+		"TURBO_DATASET_REVISION",
+		"TURBO_DATASET_DATE",
+		"TURBO_SHARD_0000_SHA256",
+		"TURBO_SHARD_0001_SHA256",
+	} {
+		if _, ok := jobEnv[obsolete]; ok {
+			t.Errorf("Linux release job still pins obsolete input %q", obsolete)
+		}
+	}
 	corpusCheckout, reportGeneration, releaseUpload := 0, 0, 0
 	for _, rawStep := range steps {
 		step, ok := rawStep.(map[string]any)
@@ -3023,24 +3070,18 @@ func TestCBORConformanceReportRunsOnlyForLinuxRelease(t *testing.T) {
 				t.Error("Linux release checks out the wrong CBOR corpus")
 			}
 		case "Checkout UPLC conformance corpus":
-			if step["if"] != "github.ref_type == 'tag'" ||
-				with["repository"] != "pragma-org/amaru" ||
-				with["ref"] != "ceda0c57a10d95b30a9338454e209582d62318e8" {
-				t.Error("Linux release checks out the wrong UPLC corpus")
-			}
+			t.Error("Linux release still checks out the superseded Amaru UPLC corpus")
 		case "Checkout ledger-rules fixtures":
 			if step["if"] != "github.ref_type == 'tag'" ||
 				with["repository"] != "pragma-org/node-diversity-conformance" ||
-				with["ref"] != "fc4713f2e8f10925becc4a17a1567a559cf27918" {
-				t.Error("Linux release checks out the wrong ledger-rules fixtures")
+				with["ref"] != "${{ env.NDC_LEDGER_REVISION }}" {
+				t.Error("Linux release does not use the pinned ledger-rules fixtures")
 			}
 		case "Generate conformance reports":
 			reportGeneration++
 			if step["if"] != "github.ref_type == 'tag'" ||
 				step["run"] != ".github/scripts/generate-conformance-reports.sh" ||
-				env["CBOR_DATASET_DIR"] != ".conformance/cardano-cbor-dataset" ||
-				env["TURBO_URL"] != "https://pub-2239d82d9a074482b2eb2c886191cb4e.r2.dev/turbo.tar.xz" ||
-				env["TURBO_SHA256"] != "fffe2e959fb8bdb47ee4834008dcceb89fcde53afb659a454beca26cf95507cc" {
+				env["CBOR_DATASET_DIR"] != ".conformance/cardano-cbor-dataset" {
 				t.Error("Linux release does not generate reports from the pinned corpora")
 			}
 		case "Upload release assets":
@@ -3059,8 +3100,13 @@ func TestCBORConformanceReportRunsOnlyForLinuxRelease(t *testing.T) {
 	reportScript := readRepoFile(t, root, ".github/scripts/generate-conformance-reports.sh")
 	if !strings.Contains(reportScript, "go run ./internal/cborconformance/cmd") ||
 		!strings.Contains(reportScript, `-corpus-revision "$dataset_revision"`) ||
+		!strings.Contains(reportScript, "UPLC_CORPUS_SHA256") ||
+		!strings.Contains(reportScript, "TURBO_CORPUS_SHA256") ||
+		!strings.Contains(reportScript, "uplc-conformance.tar.zst") ||
+		!strings.Contains(reportScript, "turbo.tar.zst") ||
+		!strings.Contains(reportScript, `zstd -dc "${dir}/${archive}" | tar -xf - -C "${dir}/corpus"`) ||
 		!strings.Contains(reportScript, `for report in "${DIST_DIR}"/dingo-*.json`) {
-		t.Error("release report script does not generate and compress the revision-bound CBOR report")
+		t.Error("release report script does not generate and compress the pinned NDC reports")
 	}
 }
 

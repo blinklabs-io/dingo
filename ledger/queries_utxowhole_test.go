@@ -20,6 +20,7 @@ import (
 	"errors"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
@@ -43,6 +44,39 @@ func utxoWholeQuery() *olocalstatequery.BlockQuery {
 			Query: &olocalstatequery.ShelleyUtxoWholeQuery{},
 		},
 	}
+}
+
+func utxoWholeCborQuery() *olocalstatequery.BlockQuery {
+	return &olocalstatequery.BlockQuery{
+		Query: &olocalstatequery.ShelleyQuery{
+			Query: &olocalstatequery.ShelleyCborQuery{
+				Query: &olocalstatequery.ShelleyUtxoWholeQuery{},
+			},
+		},
+	}
+}
+
+func requireUtxoWholeMap(
+	t *testing.T,
+	result any,
+) map[olocalstatequery.UtxoId]ledger.TransactionOutput {
+	t.Helper()
+	bounded, ok := result.(*utxoWholeResult)
+	require.True(t, ok, "expected a bounded whole UTxO result, got %T", result)
+	var wire []map[olocalstatequery.UtxoId]cbor.RawMessage
+	_, err := cbor.Decode(bounded.encoded, &wire)
+	require.NoError(t, err)
+	require.Len(t, wire, 1)
+	ret := make(
+		map[olocalstatequery.UtxoId]ledger.TransactionOutput,
+		len(wire[0]),
+	)
+	for id, raw := range wire[0] {
+		output, err := ledger.NewTransactionOutputFromCbor(raw)
+		require.NoError(t, err)
+		ret[id] = output
+	}
+	return ret
 }
 
 // seedBabbageUtxo inserts a Utxo metadata row plus a raw-CBOR blob entry for
@@ -109,12 +143,7 @@ func TestQueryShelleyUtxoWhole_ReturnsLiveUtxos(t *testing.T) {
 
 	result, err := ls.Query(t.Context(), utxoWholeQuery(), QueryPoint{})
 	require.NoError(t, err)
-	arr, ok := result.([]any)
-	require.True(t, ok, "expected the []any result wrapper")
-	require.Len(t, arr, 1)
-
-	utxos, ok := arr[0].(map[olocalstatequery.UtxoId]ledger.TransactionOutput)
-	require.True(t, ok, "expected a UtxoId map, got %T", arr[0])
+	utxos := requireUtxoWholeMap(t, result)
 	require.Len(t, utxos, 2)
 
 	outA, ok := utxos[olocalstatequery.UtxoId{
@@ -144,13 +173,134 @@ func TestQueryShelleyUtxoWhole_EmptyLedger(t *testing.T) {
 
 	result, err := ls.queryShelleyUtxoWhole(t.Context(), QueryPoint{}, nil)
 	require.NoError(t, err)
-	arr, ok := result.([]any)
-	require.True(t, ok)
-	require.Len(t, arr, 1)
-
-	utxos, ok := arr[0].(map[olocalstatequery.UtxoId]ledger.TransactionOutput)
-	require.True(t, ok)
+	utxos := requireUtxoWholeMap(t, result)
 	require.Empty(t, utxos)
+}
+
+func TestQueryShelleyUtxoWhole_CachesCheckedEncoding(t *testing.T) {
+	t.Parallel()
+	db := newTestDB(t)
+	addr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyNone,
+		lcommon.AddressNetworkTestnet,
+		bytes.Repeat([]byte{0xAC}, lcommon.AddressHashSize),
+		nil,
+	)
+	require.NoError(t, err)
+	seedBabbageUtxo(t, db, 0xC2, 1, addr, 2_000_000)
+	seedBabbageUtxo(t, db, 0xC1, 0, addr, 1_000_000)
+	ls := newPoolDistr2Ledger(t, db)
+	result, err := ls.queryShelleyUtxoWhole(t.Context(), QueryPoint{}, nil)
+	require.NoError(t, err)
+	bounded, ok := result.(*utxoWholeResult)
+	require.True(t, ok)
+
+	encodedByProtocol, err := cbor.Encode(&result)
+	require.NoError(t, err)
+	require.Equal(t, bounded.encoded, encodedByProtocol)
+
+	utxos := requireUtxoWholeMap(t, result)
+	canonical, err := cbor.Encode(&[]any{utxos})
+	require.NoError(t, err)
+	require.Equal(t, canonical, bounded.encoded)
+}
+
+func TestQueryShelleyUtxoWhole_BoundsAggregateWork(t *testing.T) {
+	t.Parallel()
+	db := newTestDB(t)
+	addr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyNone,
+		lcommon.AddressNetworkTestnet,
+		bytes.Repeat([]byte{0xAA}, lcommon.AddressHashSize),
+		nil,
+	)
+	require.NoError(t, err)
+	seedBabbageUtxo(t, db, 0xA1, 0, addr, 1_000_000)
+	seedBabbageUtxo(t, db, 0xA2, 0, addr, 2_000_000)
+	ls := newPoolDistr2Ledger(t, db)
+	limits := defaultUtxoWholeLimits()
+	limits.maxItems = 1
+
+	_, err = ls.queryShelleyUtxoWholeWithLimits(
+		t.Context(), QueryPoint{}, nil, limits,
+	)
+	require.ErrorIs(t, err, errUtxoWholeLimitExceeded)
+}
+
+func TestQueryShelleyUtxoWhole_BoundsRetainedAndEncodedBytes(t *testing.T) {
+	t.Parallel()
+	db := newTestDB(t)
+	addr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyNone,
+		lcommon.AddressNetworkTestnet,
+		bytes.Repeat([]byte{0xAB}, lcommon.AddressHashSize),
+		nil,
+	)
+	require.NoError(t, err)
+	seedBabbageUtxo(t, db, 0xB1, 0, addr, 1_000_000)
+	ls := newPoolDistr2Ledger(t, db)
+
+	retained := defaultUtxoWholeLimits()
+	retained.maxRetainedBytes = 1
+	_, err = ls.queryShelleyUtxoWholeWithLimits(
+		t.Context(), QueryPoint{}, nil, retained,
+	)
+	require.ErrorIs(t, err, errUtxoWholeLimitExceeded)
+
+	encoded := defaultUtxoWholeLimits()
+	encoded.maxResponseBytes = 3
+	_, err = ls.queryShelleyUtxoWholeWithLimits(
+		t.Context(), QueryPoint{}, nil, encoded,
+	)
+	require.ErrorIs(t, err, errUtxoWholeLimitExceeded)
+}
+
+func TestQueryShelleyUtxoWholeViaGetCBOR(t *testing.T) {
+	t.Parallel()
+	db := newTestDB(t)
+	addr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyNone,
+		lcommon.AddressNetworkTestnet,
+		bytes.Repeat([]byte{0xAC}, lcommon.AddressHashSize),
+		nil,
+	)
+	require.NoError(t, err)
+	seedBabbageUtxo(t, db, 0xC1, 0, addr, 1_000_000)
+	ls := newPoolDistr2Ledger(t, db)
+
+	direct, err := ls.Query(t.Context(), utxoWholeQuery(), QueryPoint{})
+	require.NoError(t, err)
+	bounded, ok := direct.(*utxoWholeResult)
+	require.True(t, ok)
+
+	wrapped, err := ls.Query(t.Context(), utxoWholeCborQuery(), QueryPoint{})
+	require.NoError(t, err)
+	values, ok := wrapped.([]any)
+	require.True(t, ok)
+	require.Len(t, values, 1)
+	tag, ok := values[0].(cbor.Tag)
+	require.True(t, ok)
+	require.EqualValues(t, cbor.CborTagCbor, tag.Number)
+	require.Equal(t, bounded.encoded[1:], tag.Content)
+	content, ok := tag.Content.([]byte)
+	require.True(t, ok)
+	var decoded map[olocalstatequery.UtxoId]cbor.RawMessage
+	_, err = cbor.Decode(content, &decoded)
+	require.NoError(t, err)
+	require.Len(t, decoded, 1)
+}
+
+func TestQueryShelleyUtxoWhole_HasServerDeadline(t *testing.T) {
+	t.Parallel()
+	db := newTestDB(t)
+	ls := newPoolDistr2Ledger(t, db)
+	limits := defaultUtxoWholeLimits()
+	limits.timeout = time.Nanosecond
+
+	_, err := ls.queryShelleyUtxoWholeWithLimits(
+		t.Context(), QueryPoint{}, nil, limits,
+	)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
 }
 
 func TestQueryShelleyUtxoWholeRejectsWrongLengthTransactionID(t *testing.T) {
@@ -475,10 +625,7 @@ func TestQueryShelleyUtxoWhole_PinnedPointExcludesUtxoCreatedAfterIt(
 		nil,
 	)
 	require.NoError(t, err)
-	arr, ok := result.([]any)
-	require.True(t, ok)
-	utxos, ok := arr[0].(map[olocalstatequery.UtxoId]ledger.TransactionOutput)
-	require.True(t, ok)
+	utxos := requireUtxoWholeMap(t, result)
 
 	_, hasOld := utxos[olocalstatequery.UtxoId{
 		Hash: ledger.NewBlake2b256(txIdOld), Idx: 0,
@@ -532,8 +679,7 @@ func TestQueryShelleyUtxoWhole_PinnedPointIncludesUtxoSpentAfterIt(
 		nil,
 	)
 	require.NoError(t, err)
-	pinnedArr, _ := pinned.([]any)
-	pinnedUtxos, _ := pinnedArr[0].(map[olocalstatequery.UtxoId]ledger.TransactionOutput)
+	pinnedUtxos := requireUtxoWholeMap(t, pinned)
 	_, stillLiveAtPin := pinnedUtxos[olocalstatequery.UtxoId{
 		Hash: ledger.NewBlake2b256(txId), Idx: 0,
 	}]
@@ -545,8 +691,7 @@ func TestQueryShelleyUtxoWhole_PinnedPointIncludesUtxoSpentAfterIt(
 
 	live, err := ls.queryShelleyUtxoWhole(t.Context(), QueryPoint{}, nil)
 	require.NoError(t, err)
-	liveArr, _ := live.([]any)
-	liveUtxos, _ := liveArr[0].(map[olocalstatequery.UtxoId]ledger.TransactionOutput)
+	liveUtxos := requireUtxoWholeMap(t, live)
 	_, stillLiveNow := liveUtxos[olocalstatequery.UtxoId{
 		Hash: ledger.NewBlake2b256(txId), Idx: 0,
 	}]

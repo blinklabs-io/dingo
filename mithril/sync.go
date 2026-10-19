@@ -30,6 +30,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/immutable"
 	"github.com/blinklabs-io/dingo/database/models"
+	datatypes "github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/node"
 	internalplugins "github.com/blinklabs-io/dingo/internal/plugins"
 	"github.com/blinklabs-io/dingo/ledgerstate"
@@ -732,6 +733,7 @@ func Sync(
 		)
 	}
 	db := runtime.Database
+	skipImmutableUtxoOffsets := db.StorageMode() == datatypes.StorageModeCore
 	defer runtime.Close(context.Background()) //nolint:contextcheck
 	if recoveryErr := runtime.RecoveryError(); recoveryErr != nil {
 		// Tolerate a recoverable commit-timestamp mismatch from a previously
@@ -957,7 +959,11 @@ func Sync(
 				return merr
 			}
 		}
-		if _, _, cerr := node.CopyImmutableBlobsBounded(
+		copyImmutable := node.CopyImmutableBlobsBounded
+		if skipImmutableUtxoOffsets {
+			copyImmutable = node.CopyImmutableBlobsBoundedWithoutUtxoOffsets
+		}
+		if _, _, cerr := copyImmutable(
 			ctx, logger, pipeImm, copyChain, maxSlot, nil,
 		); cerr != nil {
 			return fmt.Errorf(
@@ -1377,8 +1383,7 @@ func Sync(
 			"immutable_dir", bootstrapResult.ImmutableDir,
 		)
 		var loadErr error
-		loadResult, loadErr = node.LoadBlobsWithDB(
-			ctx, nil, logger, bootstrapResult.ImmutableDir, db,
+		loadOptions := []node.LoadBlobsOption{
 			node.WithImmutableDB(certifiedImmutable),
 			node.WithLoadBlobsProgress(func(p node.LoadBlobsProgress) {
 				cfg.emit(SyncProgress{
@@ -1391,6 +1396,10 @@ func Sync(
 					BytesPerSecond: p.BlocksPerSecond,
 				})
 			}),
+		}
+		loadResult, loadErr = node.LoadBlobsWithDB(
+			ctx, nil, logger, bootstrapResult.ImmutableDir, db,
+			loadOptions...,
 		)
 		if loadErr != nil {
 			return fmt.Errorf("loading ImmutableDB: %w", loadErr)
@@ -1461,7 +1470,7 @@ func Sync(
 	// pipeline already copied the entire immutable DB). Record it explicitly
 	// for the full immutable tip so a later API backfill or resume does not
 	// redo offset work the copy already performed. Idempotent.
-	if loadResult != nil {
+	if loadResult != nil && !skipImmutableUtxoOffsets {
 		if err := node.MarkImmutableUtxoOffsetsComplete(
 			db, loadResult.ImmutableTipSlot,
 		); err != nil {

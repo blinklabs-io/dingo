@@ -63,7 +63,7 @@ type WaivedSample struct {
 }
 
 type Report struct {
-	SchemaVersion   string             `json:"schema_version"`
+	SchemaVersion   string             `json:"version"`
 	Scenario        string             `json:"scenario"`
 	GeneratedAt     time.Time          `json:"generated_at"`
 	Corpus          string             `json:"corpus"`
@@ -324,6 +324,16 @@ func generateReport(datasetDir, corpusRevision, expectedInventory string) (Repor
 				file,
 				referenceUnreadable,
 				"cannot read expected output: "+err.Error(),
+			)
+			report.Rules[file.rule] = outcome
+			continue
+		}
+		reference, err = NormalizeCBOR(reference)
+		if err != nil {
+			report.addFailure(
+				file,
+				referenceUnreadable,
+				"cannot normalize expected output: "+err.Error(),
 			)
 			report.Rules[file.rule] = outcome
 			continue

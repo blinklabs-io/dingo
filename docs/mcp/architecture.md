@@ -56,12 +56,13 @@ api/mcp/
 
 ### 2.3 Security & Guardrails (`security.go`, `sanitize.go`)
 - **Bearer Authentication**: Optional shared secret token configured via `DINGO_PLUGINS_API_MCP_CONFIG_AUTH_TOKEN` or YAML `plugins.api.mcp.config.authToken`.
-- **Rate Limiting**: Thread-safe token bucket rate limiter (default: 60 requests/sec with burst capacity of 15) keyed per client IP address.
+- **Rate Limiting**: Thread-safe token bucket rate limiter (default: 60 requests/sec with burst capacity of 15) keyed per client IP address. Pre-authentication state is capped at 4096 identities and one timer removes entries after 30 idle minutes.
+- **Session Admission**: Streamable HTTP and legacy SSE share a 128-session cap, with at most eight sessions per client address. New sessions fail with HTTP 429 when either cap is full. Sessions close after five idle minutes, after one hour of total lifetime, or during server shutdown.
 - **Strict Read-Only SQL Validator**:
   - Identifies the main statement after CTE definitions, accounting for comments, quoted data and nested expressions; permits SELECT/VALUES reads and EXPLAIN without executing DDL or DML.
   - Enforces single-statement execution (blocks `;` statement chaining).
   - Whitelists only safe PRAGMA queries (`table_info`, `index_list`, `index_info`, `foreign_key_list`).
-- **External Text Handling**: Bounds text, removes control and invisible formatting, JSON-quotes it, and escapes Markdown syntax before formatting registry and CIP-25 data. Results explicitly mark external metadata as untrusted; clients must not follow instructions contained in it.
+- **External Text Handling**: Bounds text, removes control and invisible formatting, JSON-quotes it, and escapes Markdown syntax before formatting registry and CIP-25 data. Markdown tables sanitize and HTML-escape each cell at the table boundary, then wrap the table in an explicit untrusted-data envelope. Clients must not follow instructions contained in it.
 - **Network Bind Protection**: The default listener is loopback. Provider construction rejects a non-loopback bind unless both an auth token and server TLS are configured.
 
 ---
@@ -77,6 +78,11 @@ The server exposes 21 specialized tools categorized into SQLite introspection (3
 | `sqlite_query` | Execute read-only SQL queries with pagination and Markdown formatting | `query` (string), `limit` (int, default 50, capped by configured maxRows and 200), `offset` (int) |
 | `sqlite_explain` | Analyze query execution plans via `EXPLAIN QUERY PLAN` | `query` (string) |
 | `sqlite_table_schema` | Inspect table DDL, column types, nullability, and indices | `table_name` (string) |
+
+The three SQL tools share four execution slots and fail immediately when all
+slots are occupied. SQLite rejects values over 64 KiB and result sets over 32
+columns before Go materializes them; `sqlite_query` stops after 1 MiB of decoded
+cell data.
 
 ### 3.2 Cardano Domain Tools (`tools_cardano.go`, `tools_cardano_extended.go`)
 
@@ -227,8 +233,10 @@ handling. Only same-origin on loopback or explicitly allowed origins pass; the s
 wildcard is ignored for MCP. Native clients without Origin remain supported.
 `DINGO_MCP_AUTH_TOKEN` is a compatibility alias below the canonical plugin
 environment setting in precedence. HTTP has no absolute write deadline because
-SSE responses span client sessions. Rate-limit entries are reclaimed during
-requests, so replacing a server retains no cleanup goroutine.
+SSE responses span client sessions. The session admission layer supplies the
+finite idle and lifetime bounds for both transports. The limiter's idle-expiry
+timer reclaims entries even when no requests arrive and is stopped when its
+server shuts down.
 
 ### Upstream references
 

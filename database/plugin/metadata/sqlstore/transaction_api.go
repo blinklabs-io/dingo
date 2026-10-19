@@ -16,6 +16,7 @@ package sqlstore
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"slices"
@@ -149,6 +150,18 @@ func (s *Store) applyTransactionAPIDetails(
 	); err != nil {
 		return err
 	}
+	if err := s.storeRedeemerScripts(
+		ctx,
+		db,
+		rows,
+		transactionID,
+		transaction,
+		slot,
+		index,
+		transactionIsNew,
+	); err != nil {
+		return err
+	}
 	if err := storeTransactionIndexedScripts(
 		ctx,
 		db,
@@ -253,9 +266,10 @@ func (s *Store) markTransactionUtxoReferences(
 }
 
 type addressIndexKey struct {
-	payment string
-	tag     uint8
-	staking string
+	payment       string
+	paymentScript bool
+	tag           uint8
+	staking       string
 }
 
 const (
@@ -265,13 +279,20 @@ const (
 
 var cachedAddressInputQuerySizes = [...]int{1, 2, 4, 8, 16, 32}
 
-// A wide OR of (tx_id, output_idx) pairs can make SQLite abandon
-// tx_id_output_idx. Query by tx_id and filter other outputs in Go.
+const addressTransactionInputQueryParamsPerRef = 2
+
+// Separate lookups keep SQLite on tx_id_output_idx for every input.
 func addressTransactionInputQuery(size int) string {
-	placeholders := strings.TrimSuffix(strings.Repeat("?,", size), ",")
-	return `
-SELECT tx_id, output_idx, payment_key, credential_tag, staking_key
-FROM utxo WHERE tx_id IN (` + placeholders + `)`
+	var query strings.Builder
+	for i := range size {
+		if i > 0 {
+			query.WriteString(" UNION ALL ")
+		}
+		query.WriteString(`
+SELECT payment_key, payment_script, credential_tag, staking_key
+FROM utxo WHERE tx_id = ? AND output_idx = ?`)
+	}
+	return query.String()
 }
 
 func (s *Store) indexTransactionAddresses(
@@ -294,18 +315,19 @@ func (s *Store) indexTransactionAddresses(
 		}
 	}
 	addresses := make(map[addressIndexKey]struct{})
-	add := func(payment []byte, tag uint8, staking []byte) {
+	add := func(payment []byte, paymentScript bool, tag uint8, staking []byte) {
 		if len(payment) == 0 && len(staking) == 0 {
 			return
 		}
 		addresses[addressIndexKey{
-			payment: string(payment),
-			tag:     tag,
-			staking: string(staking),
+			payment:       string(payment),
+			paymentScript: paymentScript,
+			tag:           tag,
+			staking:       string(staking),
 		}] = struct{}{}
 	}
 	for _, output := range produced {
-		add(output.PaymentKey, output.CredentialTag, output.StakingKey)
+		add(output.PaymentKey, output.PaymentScript, output.CredentialTag, output.StakingKey)
 	}
 	allInputs := make(
 		[]lcommon.TransactionInput,
@@ -324,22 +346,29 @@ func (s *Store) indexTransactionAddresses(
 			Idx:  input.Index(),
 		})
 	}
-	txIDs, wanted := distinctUtxoTxIDs(refs)
+	inputRefs := dedupeUtxoIDs(refs)
 	inputBatchSize := 1
-	for inputBatchSize*2 <= parameterLimit &&
-		inputBatchSize*2 <= maxCachedAddressInputQuerySize {
+	maxInputBatchSize := min(
+		maxCachedAddressInputQuerySize,
+		parameterLimit/addressTransactionInputQueryParamsPerRef,
+	)
+	for inputBatchSize*2 <= maxInputBatchSize {
 		inputBatchSize *= 2
 	}
-	for start := 0; start < len(txIDs); start += inputBatchSize {
-		end := min(start+inputBatchSize, len(txIDs))
-		batch := txIDs[start:end]
+	for start := 0; start < len(inputRefs); start += inputBatchSize {
+		end := min(start+inputBatchSize, len(inputRefs))
+		batch := inputRefs[start:end]
 		querySize := 1
 		for querySize < len(batch) {
 			querySize *= 2
 		}
-		args := make([]any, querySize)
-		for i, txID := range batch {
-			args[i] = txID
+		args := make(
+			[]any,
+			querySize*addressTransactionInputQueryParamsPerRef,
+		)
+		for i, ref := range batch {
+			args[i*addressTransactionInputQueryParamsPerRef] = ref.Hash
+			args[i*addressTransactionInputQueryParamsPerRef+1] = ref.Idx
 		}
 		inputRows, err := s.queryRowsCached(
 			ctx, db, addressTransactionInputQuery(querySize), args...,
@@ -357,23 +386,17 @@ func (s *Store) indexTransactionAddresses(
 			}()
 			for inputRows.Next() {
 				var (
-					txID    []byte
-					output  uint32
-					payment []byte
-					staking []byte
-					tag     uint8
+					payment       []byte
+					paymentScript sql.NullBool
+					staking       []byte
+					tag           uint8
 				)
-				if err := inputRows.Scan(&txID, &output, &payment, &tag, &staking); err != nil {
+				if err := inputRows.Scan(&payment, &paymentScript, &tag, &staking); err != nil {
 					return fmt.Errorf("scan input address for transaction %d: %w", transactionID, err)
 				}
-				outputs, ok := wanted[string(txID)]
-				if !ok {
-					continue
-				}
-				if _, ok := outputs[output]; !ok {
-					continue
-				}
-				add(payment, tag, staking)
+				// A NULL payment_script reads as a key credential, as every
+				// other utxo read does.
+				add(payment, paymentScript.Bool, tag, staking)
 			}
 			if err := inputRows.Err(); err != nil {
 				return fmt.Errorf("iterate input addresses for transaction %d: %w", transactionID, err)
@@ -387,6 +410,7 @@ func (s *Store) indexTransactionAddresses(
 		rows.add(
 			addressTransactionShape,
 			[]byte(address.payment),
+			address.paymentScript,
 			[]byte(address.staking),
 			address.tag,
 			transactionID,

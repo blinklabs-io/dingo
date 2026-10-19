@@ -17,6 +17,7 @@ package models
 import (
 	"errors"
 
+	"github.com/blinklabs-io/dingo/internal/safedecode"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/common"
 )
@@ -43,6 +44,36 @@ func (b Block) Decode(config ...common.VerifyConfig) (ledger.Block, error) {
 // DecodeBlockCbor applies Dingo's era-specific compatibility decoders before
 // falling back to the strict Gouroboros block decoder.
 func DecodeBlockCbor(
+	blockType uint,
+	blockCbor []byte,
+	config ...common.VerifyConfig,
+) (ledger.Block, error) {
+	return decodeBlockCborGuarded(
+		blockType,
+		blockCbor,
+		config,
+		decodeBlockCbor,
+	)
+}
+
+type blockDecoder func(
+	uint,
+	[]byte,
+	...common.VerifyConfig,
+) (ledger.Block, error)
+
+func decodeBlockCborGuarded(
+	blockType uint,
+	blockCbor []byte,
+	config []common.VerifyConfig,
+	decode blockDecoder,
+) (ledger.Block, error) {
+	return safedecode.Guard(func() (ledger.Block, error) {
+		return decode(blockType, blockCbor, config...)
+	})
+}
+
+func decodeBlockCbor(
 	blockType uint,
 	blockCbor []byte,
 	config ...common.VerifyConfig,

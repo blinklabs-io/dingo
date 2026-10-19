@@ -264,6 +264,7 @@ func testSnapshotTrustKeyFile(t *testing.T) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "snapshot-trust-key")
 	require.NoError(t, os.WriteFile(path, testSnapshotTrustKey, 0o600))
+	testutil.RestrictFileToCurrentUser(t, path)
 	return path
 }
 

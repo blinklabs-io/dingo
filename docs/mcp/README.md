@@ -57,6 +57,11 @@ Ask your AI assistant:
 - **Server-Sent Events (SSE)** (`GET /sse`): Streaming event transport for CLI and IDE agents.
 - **Health Endpoint** (`GET /healthz`): Listener health probe returning `{"service":"dingo-mcp","status":"ok"}`; it does not probe database connectivity.
 
+Both session transports share a 128-session cap and an eight-session cap per
+client address. A session closes after five idle minutes, after one hour total,
+or when the server stops. New sessions receive HTTP 429 while either cap is
+full.
+
 ### 21 Registered Tools
 Dingo registers 21 typed, read-only tools:
 - **SQLite Tools (3)**: `sqlite_query` (safe SELECT execution), `sqlite_explain` (query plan analysis), `sqlite_table_schema` (DDL schema inspection).
@@ -92,8 +97,8 @@ Pre-packaged diagnostic and forensic protocols exposed via `prompts/list` and `p
 - **Pure-Go SQLite Enforcement**: The `modernc.org/sqlite` connection uses `mode=ro` and `PRAGMA query_only = ON`.
 - **SQL Statement Validation**: A tokenizer identifies the main statement after any CTE definitions and rejects writes before execution. Read-only EXPLAIN and metadata PRAGMAs are supported.
 - **Immutable Ledger State**: Cardano domain tools read immutable in-memory ledger state or read-only database connections.
-- **Rate Limiting**: Per-IP token bucket (default 60 req/s, burst 15) prevents runaway agent loops from exhausting CPU or disk I/O.
-- **Output Sanitization**: External asset text is length-bounded, stripped of control characters and invisible formatting, JSON-quoted, and escaped for Markdown. Results mark this metadata as untrusted data; clients must not follow instructions contained in it.
+- **Rate Limiting**: Per-IP token bucket (default 60 req/s, burst 15) prevents runaway agent loops from exhausting CPU or disk I/O. Pre-authentication state is capped at 4096 identities and entries expire after 30 idle minutes independently of incoming traffic.
+- **Output Sanitization**: External asset text is length-bounded, stripped of control characters and invisible formatting, JSON-quoted, and escaped for Markdown. Markdown tables wrap sanitized cells in an explicit untrusted-data envelope. Clients must not follow instructions contained in it.
 
 ---
 

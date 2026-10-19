@@ -83,6 +83,11 @@ func (s *Store) CreateUtxo(txn types.Txn, utxo *models.Utxo) error {
 			); err != nil {
 				return err
 			}
+			if err := s.persistUtxoReferenceScript(
+				ctx, db, utxo.ID, utxo.ReferenceScriptHash,
+			); err != nil {
+				return err
+			}
 			for i := range utxo.Assets {
 				asset := &utxo.Assets[i]
 				asset.UtxoID = utxo.ID
@@ -595,6 +600,9 @@ func (s *Store) importUtxos(
 	return s.withWriteTransaction(
 		txn,
 		func(db queryer, ctx context.Context) error {
+			if !refreshRewardLiveStake && s.dialect.Name() == "sqlite" {
+				return s.importUtxosDeferredSQLite(ctx, db, utxos)
+			}
 			q := s.operationalQueries(db)
 			refs := make(map[string]models.StakeCredentialRef)
 			slots := make(map[string]uint64)
@@ -661,6 +669,12 @@ func (s *Store) importUtxos(
 				if err := persistUtxoAddress(ctx, db, id, &item); err != nil {
 					return err
 				}
+				// #nosec G115 -- row ids are positive
+				if err := s.persistUtxoReferenceScript(
+					ctx, db, uint(id), item.ReferenceScriptHash,
+				); err != nil {
+					return err
+				}
 				for j := range item.Assets {
 					asset := item.Assets[j]
 					if _, err := s.execCached(ctx, db, importAssetQuery,
@@ -702,6 +716,45 @@ func (s *Store) importUtxos(
 			return nil
 		},
 	)
+}
+
+func (s *Store) importUtxosDeferredSQLite(
+	ctx context.Context,
+	db queryer,
+	utxos []models.Utxo,
+) error {
+	if len(utxos) == 0 {
+		return nil
+	}
+	// The insert helpers write IDs onto the models and their assets, so work
+	// on copies to leave the caller's slice untouched.
+	owned := make([]models.Utxo, len(utxos))
+	utxoPtrs := make([]*models.Utxo, len(utxos))
+	for i := range utxos {
+		owned[i] = utxos[i]
+		owned[i].Assets = slices.Clone(utxos[i].Assets)
+		utxoPtrs[i] = &owned[i]
+	}
+	utxos = owned
+	var deferredRows rowBatch
+	inserted, err := s.insertUtxoModelsChecked(
+		ctx, db, utxoPtrs, true, &deferredRows,
+	)
+	if err != nil {
+		return fmt.Errorf("inserting imported UTxO batch: %w", err)
+	}
+	for i := range utxos {
+		if inserted[i] {
+			continue
+		}
+		if err := hydrateImportedUtxo(ctx, db, &utxos[i]); err != nil {
+			return fmt.Errorf("hydrating imported UTxO: %w", err)
+		}
+	}
+	if err := deferredRows.flush(ctx, db, s.dialect.ParameterLimit()); err != nil {
+		return fmt.Errorf("flushing imported UTxO relations: %w", err)
+	}
+	return nil
 }
 
 func hydrateImportedUtxo(
@@ -1993,7 +2046,9 @@ func (s *Store) utxosByAddressPatterns(
 // GetUtxosByAddressWithOrdering and CountUtxosByAddressWithOrdering. The
 // returned args follow the placeholders in from, then predicate. The
 // predicate excludes any keyset (query.After) bound, which only
-// GetUtxosByAddressWithOrdering applies.
+// GetUtxosByAddressWithOrdering applies. A CreatedFrom/CreatedTo range
+// compares the producing transaction position, so from then also joins that
+// transaction.
 func utxoOrderingClauses(
 	query *models.UtxoWithOrderingQuery,
 	disqualifyLivenessIndex bool,
@@ -2049,8 +2104,42 @@ func utxoOrderingClauses(
 			args = append(args, assetArgs...)
 		}
 	}
+	if utxoOrderingRanged(query) {
+		from += utxoProducerJoin
+	}
+	if from := query.CreatedFrom; from != nil {
+		predicate += " AND (" + utxoOrderingSlotExpr + " > ? OR (" +
+			utxoOrderingSlotExpr + " = ? AND " +
+			utxoOrderingBlockIndexExpr + " >= ?))"
+		args = append(args, from.Slot, from.Slot, from.TxIndex)
+	}
+	if to := query.CreatedTo; to != nil {
+		predicate += " AND (" + utxoOrderingSlotExpr + " < ? OR (" +
+			utxoOrderingSlotExpr + " = ? AND " +
+			utxoOrderingBlockIndexExpr + " <= ?))"
+		args = append(args, to.Slot, to.Slot, to.TxIndex)
+	}
 	return from, predicate, args, nil
 }
+
+// utxoOrderingRanged reports whether the query bounds the producing
+// transaction position, which needs utxoProducerJoin in its FROM clause.
+func utxoOrderingRanged(query *models.UtxoWithOrderingQuery) bool {
+	return query.CreatedFrom != nil || query.CreatedTo != nil
+}
+
+// utxoProducerJoin joins the transaction that produced a UTxO. A collateral
+// return has no transaction_id; it belongs to the transaction named by
+// collateral_return_for_tx_id, whose position it takes.
+const utxoProducerJoin = `
+LEFT JOIN "transaction"
+    ON COALESCE(utxo.transaction_id, utxo.collateral_return_for_tx_id)
+       = "transaction".id`
+
+const (
+	utxoOrderingSlotExpr       = `COALESCE("transaction".slot, utxo.added_slot)`
+	utxoOrderingBlockIndexExpr = `COALESCE("transaction".block_index, 0)`
+)
 
 func countUtxosOrderingStatement(
 	query *models.UtxoWithOrderingQuery,
@@ -2110,8 +2199,11 @@ func (s *Store) GetUtxosByAddressWithOrdering(
 	if err != nil {
 		return nil, fmt.Errorf("GetUtxosByAddressWithOrdering: %w", err)
 	}
-	slotExpr := `COALESCE("transaction".slot, utxo.added_slot)`
-	blockIndexExpr := `COALESCE("transaction".block_index, 0)`
+	if !utxoOrderingRanged(query) {
+		from += utxoProducerJoin
+	}
+	slotExpr := utxoOrderingSlotExpr
+	blockIndexExpr := utxoOrderingBlockIndexExpr
 	if query.After != nil {
 		predicate += `
  AND (
@@ -2144,7 +2236,6 @@ func (s *Store) GetUtxosByAddressWithOrdering(
 SELECT ` + qualifiedSQLiteUtxoColumns + `,
        ` + slotExpr + `, ` + blockIndexExpr + `
 FROM ` + from + `
-LEFT JOIN "transaction" ON utxo.transaction_id = "transaction".id
 WHERE ` + predicate + `
 ORDER BY ` + slotExpr + ` ` + orderDir + `, ` + blockIndexExpr + ` ` + orderDir + `,
          utxo.output_idx ` + orderDir + `, utxo.tx_id ` + orderDir
@@ -2692,12 +2783,34 @@ func (s *Store) IterateLiveUtxos(
 	txn types.Txn,
 	fn func(*models.Utxo) error,
 ) error {
-	if fn == nil {
-		return errors.New("iterate live UTxOs: callback is nil")
-	}
 	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return err
+	}
+	return iterateLiveUtxos(ctx, db, fn)
+}
+
+// IterateLiveUtxosContext binds the scan to ctx while preserving txn's
+// snapshot.
+func (s *Store) IterateLiveUtxosContext(
+	ctx context.Context,
+	txn types.Txn,
+	fn func(*models.Utxo) error,
+) error {
+	db, _, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return err
+	}
+	return iterateLiveUtxos(ctx, db, fn)
+}
+
+func iterateLiveUtxos(
+	ctx context.Context,
+	db queryer,
+	fn func(*models.Utxo) error,
+) error {
+	if fn == nil {
+		return errors.New("iterate live UTxOs: callback is nil")
 	}
 	rows, err := db.QueryContext(
 		ctx,
@@ -2734,12 +2847,36 @@ func (s *Store) IterateUtxosAsOf(
 	txn types.Txn,
 	fn func(*models.Utxo) error,
 ) error {
-	if fn == nil {
-		return errors.New("iterate UTxOs as of slot: callback is nil")
-	}
 	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return err
+	}
+	return s.iterateUtxosAsOf(ctx, db, atSlot, fn)
+}
+
+// IterateUtxosAsOfContext binds the scan to ctx while preserving txn's
+// snapshot.
+func (s *Store) IterateUtxosAsOfContext(
+	ctx context.Context,
+	atSlot uint64,
+	txn types.Txn,
+	fn func(*models.Utxo) error,
+) error {
+	db, _, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return err
+	}
+	return s.iterateUtxosAsOf(ctx, db, atSlot, fn)
+}
+
+func (s *Store) iterateUtxosAsOf(
+	ctx context.Context,
+	db queryer,
+	atSlot uint64,
+	fn func(*models.Utxo) error,
+) error {
+	if fn == nil {
+		return errors.New("iterate UTxOs as of slot: callback is nil")
 	}
 	sqlSlot, err := checkedInt64(atSlot)
 	if err != nil {

@@ -193,6 +193,28 @@ func TestLedgerStatePublishedEpochCacheRejectsInPlaceAppend(t *testing.T) {
 	require.Equal(t, uint64(7), oldConsensus.epochCache[0].EpochId)
 }
 
+func TestHeaderCryptoVerificationGenerationUniqueAcrossLedgerStates(t *testing.T) {
+	first := &LedgerState{}
+	first.publishSnapshotsLocked()
+	firstGeneration := first.CurrentHeaderCryptoVerificationGeneration()
+	require.NotZero(t, firstGeneration)
+
+	replacement := &LedgerState{}
+	replacement.publishSnapshotsLocked()
+	replacementGeneration := replacement.CurrentHeaderCryptoVerificationGeneration()
+	require.NotZero(t, replacementGeneration)
+	require.NotEqual(t, firstGeneration, replacementGeneration,
+		"replacement ledger reused a producer-authorization generation")
+	require.False(t,
+		replacement.HeaderCryptoVerificationGenerationCurrent(firstGeneration),
+	)
+	release, current := replacement.PinHeaderCryptoVerificationGeneration(
+		firstGeneration,
+	)
+	require.False(t, current)
+	require.Nil(t, release)
+}
+
 // TestSetEpochCachePublishesPartialStateOnError verifies that startup cache
 // mutations are published even when validation returns an error afterward.
 func TestSetEpochCachePublishesPartialStateOnError(t *testing.T) {
@@ -215,7 +237,7 @@ func TestSetEpochCachePublishesPartialStateOnError(t *testing.T) {
 	// The deferred publication must expose the mutation through the atomic
 	// reader path despite setEpochCache returning before normal completion.
 	snapshot := ls.consensus.Load()
-	require.Equal(t, previousGeneration+1, snapshot.generation)
+	require.Greater(t, snapshot.generation, previousGeneration)
 	require.Equal(t, invalidEpoch.EpochId, snapshot.currentEpoch.EpochId)
 	require.Equal(t, invalidEpoch.EraId, snapshot.currentEpoch.EraId)
 	require.Len(t, snapshot.epochCache, 1)
@@ -14000,18 +14022,82 @@ func TestVerifyPointQueryable_UtxoFloorOnly_Rejected(t *testing.T) {
 func TestEvaluateTxRefusesWhenEvaluationSlotsAreInUse(t *testing.T) {
 	t.Parallel()
 
-	ls := &LedgerState{evalSlots: make(chan struct{}, 2)}
-	ls.evalSlots <- struct{}{}
-	ls.evalSlots <- struct{}{}
+	limiter := newEvaluationLimiter(2)
+	releaseA, err := limiter.acquire(WithEvaluationSource(t.Context(), "a:1"))
+	require.NoError(t, err)
+	defer releaseA()
+	releaseB, err := limiter.acquire(WithEvaluationSource(t.Context(), "b:1"))
+	require.NoError(t, err)
+	defer releaseB()
+	ls := &LedgerState{evalAdmission: limiter}
 
 	// The refusal happens before the transaction is looked at.
-	var err error
 	require.NotPanics(t, func() {
 		_, _, _, err = ls.EvaluateTx(nil)
 	}, "admission must be checked before any evaluation work starts")
 
 	require.ErrorIs(t, err, ErrEvaluationBusy)
-	require.Len(t, ls.evalSlots, 2, "a refused call must not take a slot")
+	require.Equal(t, 2, limiter.total, "a refused call must not take a slot")
+}
+
+func TestEvaluationAdmissionPreservesCapacityAcrossSources(t *testing.T) {
+	t.Parallel()
+
+	limiter := newEvaluationLimiter(4)
+	ctxA := WithEvaluationSource(t.Context(), "192.0.2.1:1000")
+	releaseA1, err := limiter.acquire(ctxA)
+	require.NoError(t, err)
+	defer releaseA1()
+	releaseA2, err := limiter.acquire(
+		WithEvaluationSource(t.Context(), "192.0.2.1:2000"),
+	)
+	require.NoError(t, err)
+	defer releaseA2()
+
+	_, err = limiter.acquire(ctxA)
+	require.ErrorIs(t, err, ErrEvaluationBusy)
+
+	releaseB, err := limiter.acquire(
+		WithEvaluationSource(t.Context(), "192.0.2.2:1000"),
+	)
+	require.NoError(t, err)
+	releaseB()
+}
+
+func TestEvaluationAdmissionUnidentifiedCallsUseGlobalCapacity(t *testing.T) {
+	t.Parallel()
+
+	limiter := newEvaluationLimiter(4)
+	releases := make([]func(), 0, 4)
+	for range 4 {
+		release, err := limiter.acquire(t.Context())
+		require.NoError(t, err)
+		releases = append(releases, release)
+	}
+	defer func() {
+		for _, release := range releases {
+			release()
+		}
+	}()
+
+	_, err := limiter.acquire(t.Context())
+	require.ErrorIs(t, err, ErrEvaluationBusy)
+	require.Equal(t, 4, limiter.total)
+}
+
+func TestEvaluationCapacityReservesConsensusProcessor(t *testing.T) {
+	t.Parallel()
+
+	require.Equal(
+		t,
+		max(runtime.GOMAXPROCS(0)-1, 1),
+		evaluationCapacity(LedgerStateConfig{}),
+	)
+	require.Equal(
+		t,
+		7,
+		evaluationCapacity(LedgerStateConfig{MaxConcurrentEvaluations: 7}),
+	)
 }
 
 func TestNewLedgerStateRejectsNegativeEvaluationCapacity(t *testing.T) {
@@ -14368,4 +14454,43 @@ func TestLeiosApplySnapshotIsReadAfterAnnouncementWait(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, newTip, snapshot.tip,
 		"the canonical apply snapshot must observe state published during the wait")
+}
+
+// Non-checkpoint block nonces older than the nonce window are read only by
+// the API's epoch and pool block lists, so API storage mode retains them
+// while core mode prunes them.
+func TestCleanupBlockNoncesRetainsHistoryInAPIMode(t *testing.T) {
+	t.Parallel()
+	for _, mode := range []string{types.StorageModeCore, types.StorageModeAPI} {
+		t.Run(mode, func(t *testing.T) {
+			t.Parallel()
+			db := newTestDBForCleanup(t, mode)
+			for _, nonce := range []struct {
+				slot       uint64
+				checkpoint bool
+			}{{10, true}, {20, false}, {2000, false}} {
+				require.NoError(t, db.SetBlockNonce(
+					testHashBytes(fmt.Sprintf("nonce-%d", nonce.slot)),
+					nonce.slot, nil, nonce.checkpoint, nil,
+				))
+			}
+			ls := &LedgerState{db: db, config: LedgerStateConfig{
+				Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			}}
+			ls.cleanupBlockNoncesBefore(t.Context(), 1000)
+			rows, err := db.GetBlockNoncesInSlotRange(0, 3000, nil)
+			require.NoError(t, err)
+			var slots []uint64
+			for _, row := range rows {
+				slots = append(slots, row.Slot)
+			}
+			if mode == types.StorageModeAPI {
+				require.Equal(t, []uint64{10, 20, 2000}, slots,
+					"API mode keeps the old block")
+			} else {
+				require.Equal(t, []uint64{10, 2000}, slots,
+					"core mode prunes the old block but not its checkpoint")
+			}
+		})
+	}
 }

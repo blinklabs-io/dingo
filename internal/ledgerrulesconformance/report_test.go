@@ -40,13 +40,14 @@ func TestOutsideForecastMatchesExpectedMessage(t *testing.T) {
 	}
 }
 
-func TestVotersDoNotExistMatchesUnelectedCommitteeVoter(t *testing.T) {
+func TestUnelectedCommitteeVoterIsNotUnknownVoter(t *testing.T) {
 	t.Parallel()
-	if !predicateMatches(
-		errors.New("conway utxo validation rule 60: committee voter is not elected"),
-		expectedDoc{Predicate: "VotersDoNotExist"},
-	) {
-		t.Fatal("VotersDoNotExist did not match an unelected committee voter")
+	err := errors.New("conway utxo validation rule 60: committee voter is not elected")
+	if predicateMatches(err, expectedDoc{Predicate: "VotersDoNotExist"}) {
+		t.Fatal("an unelected committee voter matched VotersDoNotExist")
+	}
+	if !predicateMatches(err, expectedDoc{Predicate: "UnelectedCommitteeVoters"}) {
+		t.Fatal("an unelected committee voter did not match UnelectedCommitteeVoters")
 	}
 }
 
@@ -78,4 +79,90 @@ func mustJSON(t *testing.T, value any) string {
 		t.Fatalf("marshal JSON: %v", err)
 	}
 	return string(encoded)
+}
+
+func TestObservedLedgerResult(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name     string
+		observed string
+		want     string
+		ok       bool
+	}{
+		{"accepted", "transaction accepted", "pass", true},
+		{"decoded", "transaction decoded successfully", "pass", true},
+		{
+			"decoding failure",
+			"transaction decoding failure: bad cbor",
+			"DecodingFailure",
+			true,
+		},
+		{
+			"mapped predicate",
+			"rejected: output too small",
+			"BabbageOutputTooSmallUTxO",
+			true,
+		},
+		{
+			"unelected committee voter",
+			"rejected: conway utxo validation rule 60: committee voter is not elected",
+			"UnelectedCommitteeVoters",
+			true,
+		},
+		{"unmapped rejection", "rejected: something novel", "", false},
+		{"unknown observation", "weird", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, ok := observedLedgerResult(tc.observed)
+			if got != tc.want || ok != tc.ok {
+				t.Fatalf(
+					"observedLedgerResult(%q) = %q, %v; want %q, %v",
+					tc.observed, got, ok, tc.want, tc.ok,
+				)
+			}
+		})
+	}
+}
+
+func TestMismatchReportsUnmappedRejectionWithoutAborting(t *testing.T) {
+	t.Parallel()
+	outcome, failure, err := mismatch(
+		"00001",
+		expectedDoc{Predicate: "BadInputsUTxO"},
+		"rejected: something novel",
+	)
+	if err != nil {
+		t.Fatalf("mismatch returned error for unmapped rejection: %v", err)
+	}
+	if outcome.ID != "00001" || outcome.Result != unmappedLedgerResult {
+		t.Fatalf("unexpected outcome: %+v", outcome)
+	}
+	if failure == nil || failure.Observed != "rejected: something novel" ||
+		failure.Expected != "BadInputsUTxO" {
+		t.Fatalf("unexpected failure: %+v", failure)
+	}
+}
+
+func TestReportJSONFields(t *testing.T) {
+	t.Parallel()
+	data, err := json.Marshal(Report{
+		SchemaVersion:  schemaVersion,
+		Implementation: map[string]string{"name": "dingo"},
+		Scenarios:      []CaseOutcome{{ID: "00001", Result: "pass"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["version"] != schemaVersion {
+		t.Fatalf("version = %v", got["version"])
+	}
+	impl, _ := got["implementation"].(map[string]any)
+	if impl["name"] != "dingo" {
+		t.Fatalf("implementation = %v", got["implementation"])
+	}
 }

@@ -39,6 +39,17 @@ var errRestartLedgerPipeline = errors.New(
 	"restart ledger pipeline after local state recovery",
 )
 
+// restartAfterRecovery is what a processing pass returns once a recovery has
+// rewound a rejected block. The pipeline loop restarts on the sentinel alone,
+// but manual block processing has no loop: its caller receives this error
+// directly, so it must also carry the rejection that caused the rewind.
+func (ls *LedgerState) restartAfterRecovery(cause error) error {
+	if !ls.config.ManualBlockProcessing {
+		return errRestartLedgerPipeline
+	}
+	return fmt.Errorf("%w: %w", errRestartLedgerPipeline, cause)
+}
+
 var errHaltLedgerPipeline = errors.New(
 	"persistent tx validation failure after recovery attempts",
 )

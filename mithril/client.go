@@ -838,11 +838,24 @@ func NewClient(
 	}
 	if c.httpClient == nil {
 		c.httpClient = newMithrilHTTPClient(
-			30*time.Second,
+			aggregatorRequestTimeout,
 			c.allowInsecureHTTP,
 		)
 	}
 	return c
+}
+
+// aggregatorRequestTimeout bounds each aggregator API request. Artifact
+// downloads run on their own client with no per-request timeout.
+const aggregatorRequestTimeout = 30 * time.Second
+
+// aggregatorHTTPClient shares base's transport and redirect policy with the
+// aggregator client while keeping its per-request timeout, which base (built
+// for long artifact downloads) does not carry.
+func aggregatorHTTPClient(base *http.Client) *http.Client {
+	client := *base
+	client.Timeout = aggregatorRequestTimeout
+	return &client
 }
 
 // newMithrilClient constructs a Client, applying WithAllowInsecureHTTP

@@ -39,6 +39,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+const testMutationAuthToken = "test-blockfrost-auth-token"
+
 // TestCompatBlockResponse verifies that our BlockResponse
 // round-trips through blockfrost-go's Block type.
 func TestCompatBlockResponse(t *testing.T) {
@@ -939,6 +941,8 @@ func TestMetadataEndpointsDeterministicAcrossRepeatsAndKeyOrders(t *testing.T) {
 
 // mockNode implements BlockfrostNode for testing.
 type mockNode struct {
+	historyMock
+	queryMock
 	chainTip                      ChainTipInfo
 	block                         BlockInfo
 	blockByID                     BlockInfo
@@ -1179,6 +1183,7 @@ func (m *mockNode) AssetAddresses(
 }
 
 func (m *mockNode) DRep(
+	_ context.Context,
 	credential DRepCredential,
 ) (DRepInfo, error) {
 	m.drepCredential = credential
@@ -1465,7 +1470,8 @@ func newTestBlockfrost(
 ) *Blockfrost {
 	return New(
 		BlockfrostConfig{
-			ListenAddress: ":0",
+			ListenAddress: "127.0.0.1:0",
+			AuthToken:     testMutationAuthToken,
 		},
 		node,
 		slog.Default(),
@@ -4164,7 +4170,7 @@ func TestDefaultListenAddress(t *testing.T) {
 		&mockNode{},
 		slog.Default(),
 	)
-	assert.Equal(t, ":3000", b.config.ListenAddress)
+	assert.Equal(t, "127.0.0.1:3000", b.config.ListenAddress)
 }
 
 func TestParseAddressOrPaymentCred(t *testing.T) {
@@ -4337,8 +4343,8 @@ func TestNodeAdapterAddressPaymentCredTransactionFallback(t *testing.T) {
 	// with a zero lovelace balance.
 	_, err = store.Exec(`
 INSERT INTO address_transaction (
-    payment_key, staking_key, transaction_id, slot
-) VALUES (?, ?, ?, ?)`,
+    payment_key, payment_script, staking_key, transaction_id, slot
+) VALUES (?, FALSE, ?, ?, ?)`,
 		paymentKey,
 		bytes.Repeat([]byte{0x33}, lcommon.AddressHashSize),
 		1,

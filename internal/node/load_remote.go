@@ -65,6 +65,29 @@ const (
 // file for a chunk number, which ends the contiguous published history.
 var errRemoteChunkNotPublished = errors.New("remote chunk not published")
 
+func isExpectedRemotePrefetchCleanupError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		causes := joined.Unwrap()
+		if len(causes) == 0 {
+			return false
+		}
+		for _, cause := range causes {
+			if !isExpectedRemotePrefetchCleanupError(cause) {
+				return false
+			}
+		}
+		return true
+	}
+	if wrapped, ok := err.(interface{ Unwrap() error }); ok {
+		return isExpectedRemotePrefetchCleanupError(wrapped.Unwrap())
+	}
+	return errors.Is(err, context.Canceled) ||
+		errors.Is(err, errRemoteChunkNotPublished)
+}
+
 var errRemoteImmutableFileTooLarge = errors.New(
 	"remote ImmutableDB file exceeds its format limit",
 )
@@ -636,12 +659,8 @@ func copyBlocksRemote(
 		cancelFetch()
 		for _, done := range pending {
 			if err := <-done; err != nil &&
-				!errors.Is(err, context.Canceled) &&
-				!errors.Is(err, errRemoteChunkNotPublished) {
-				logger.Warn(
-					"remote ImmutableDB prefetch failed during shutdown",
-					"error", err,
-				)
+				!isExpectedRemotePrefetchCleanupError(err) {
+				logger.Warn("remote prefetch cleanup failed", "error", err)
 			}
 		}
 	}()
@@ -689,7 +708,7 @@ func copyBlocksRemote(
 			return blocksCopied, tip.Slot, err
 		}
 		copied, _, err := copyBlocksDirect(
-			ctx, logger, readyDir, c, replayBatches,
+			ctx, logger, readyDir, c, replayBatches, true,
 		)
 		blocksCopied += copied
 		if err != nil {
@@ -810,6 +829,13 @@ func fetchRemoteChunkWithClient(
 		ctx, client, budget, rootURL, dir, name+".chunk", limits.chunk, 0,
 	); err != nil {
 		return err
+	}
+	immDB, err := immutable.New(dir)
+	if err != nil {
+		return fmt.Errorf("opening remote chunk %s: %w", name, err)
+	}
+	if err := immDB.ValidateChunkBlockSpans(name); err != nil {
+		return fmt.Errorf("remote chunk %s block offsets: %w", name, err)
 	}
 	return nil
 }

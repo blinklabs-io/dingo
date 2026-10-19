@@ -328,10 +328,11 @@ type GenesisBootstrapConfig struct {
 	// the same recent blocks before a fast (shallow) block source may drive
 	// Genesis-mode chain selection. This is the Ouroboros Genesis trust control
 	// for biased fast-sync sources: an uncorroborated or divergent fast source
-	// is denied selection and stalls rather than steering the local chain. A
-	// zero value disables the selection gate (density-only Genesis selection);
-	// a peer's frontier still needs one independent witness before it can
-	// exclude other candidates as behind.
+	// is denied selection and stalls rather than steering the local chain.
+	// The default is one independent peer. An explicitly configured zero
+	// disables the selection gate (density-only Genesis selection); a peer's
+	// frontier still needs one independent witness before it can exclude other
+	// candidates as behind.
 	CorroborationPeers int `yaml:"corroborationPeers"          envconfig:"DINGO_GENESIS_BOOTSTRAP_CORROBORATION_PEERS"`
 	// LimitOnPatienceEnabled turns on the Genesis Limit on Patience: while
 	// Genesis selection is syncing, a ChainSync peer that delivers its
@@ -538,6 +539,7 @@ func DefaultChainsyncConfig() ChainsyncConfig {
 func DefaultGenesisBootstrapConfig() GenesisBootstrapConfig {
 	return GenesisBootstrapConfig{
 		Enabled:                true,
+		CorroborationPeers:     1,
 		LimitOnPatienceEnabled: true,
 	}
 }
@@ -1116,11 +1118,11 @@ type APIPluginsConfig struct {
 //
 // bindAddr, debugBindAddr, and corsAllowedOrigins deliberately
 // stay at the Config root rather than moving under this section: bindAddr is
-// not API-specific (the relay/NtN listener uses it too),
+// not API-specific (the relay/NtN listener uses it too) and remains the
+// fallback for an explicitly empty Blockfrost or MCP provider host,
 // debugBindAddr controls the separate pprof listener, and corsAllowedOrigins
 // already applies uniformly to all four API providers, so
-// duplicating any of them here would only add a second source of truth for no
-// behavioral gain.
+// duplicating the shared settings here would add another source of truth.
 type APIConfig struct {
 	TLS apiconfig.TLSPolicy `yaml:"tls"`
 }
@@ -1148,7 +1150,10 @@ func defaultPluginsConfig() PluginsConfig {
 		API: APIPluginsConfig{
 			Blockfrost: hostplugin.Selection{
 				Provider: "builtin",
-				Config:   map[string]any{"port": 3000},
+				Config: map[string]any{
+					"port": 3000,
+					"host": "127.0.0.1",
+				},
 			},
 			Kupo: hostplugin.Selection{
 				Provider: "builtin",
@@ -1468,7 +1473,11 @@ type DatabaseLifecycleConfig struct {
 	// payloads. It is required for cloud snapshot creation and restore.
 	// Local-only snapshots and restores may use the unkeyed checksum only
 	// when this is unset. Every node that restores another's snapshots must
-	// hold the same secret.
+	// hold the same secret. The file must be a regular, non-symlink file of at
+	// most 1 KiB. Ownership and access are checked using the platform's
+	// controls: Unix requires the current user and no group/other access;
+	// Windows permits the current user or BUILTIN Administrators as owner and
+	// applies its restricted DACL rules.
 	SnapshotTrustKeyFile string `yaml:"snapshotTrustKeyFile"           envconfig:"DINGO_DB_LIFECYCLE_SNAPSHOT_TRUST_KEY_FILE"`
 	// SnapshotMaxCommitPause bounds how long a snapshot (manual or
 	// automatic) may hold the commit barrier once acquired. A snapshot still

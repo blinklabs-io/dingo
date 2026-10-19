@@ -887,8 +887,9 @@
   # Genesis Sync Accelerator: an uncorroborated or divergent fast source is
   # denied selection and stalls rather than steering the local chain. Pair it
   # with a trustable localRoots peer plus a ledger peer snapshot in the topology
-  # file. 0 disables corroboration (density-only Genesis selection).
-  # corroborationPeers: 0
+  # file. The default is 1. Set 0 explicitly only when every configured source
+  # is trusted for fork choice (density-only Genesis selection).
+  # corroborationPeers: 1
   # Genesis Limit on Patience: while Genesis selection is active, disconnect a
   # ChainSync peer that delivers its advertised progress more slowly than
   # limitOnPatienceRate headers per second, beyond a limitOnPatienceCapacity
@@ -950,8 +951,9 @@
   # cnightPolicyId: ""
   # cnightAssetName: ""
   # mappingValidatorAddress: ""
-  # Auth token policy ID (28-byte / 56 hex char). When set, only tokens minted
-  # under this exact policy are accepted as registration auth tokens.
+  # Auth token policy ID (28-byte / 56 hex char) and hex asset name. Set both
+  # or neither: only tokens with this asset name minted under this exact
+  # policy are accepted as registration auth tokens.
   # authTokenPolicyId: ""
   # authTokenAssetName: ""
   # committeeCandidateAddress: ""
@@ -1269,7 +1271,13 @@
   # destination cannot substitute payloads. It is required when a cloud
   # destination is configured, and every node that restores another node's
   # snapshots must use the same secret. Local-only snapshots and restores
-  # may use the unkeyed checksum only when this setting is unset.
+  # may use the unkeyed checksum only when this setting is unset. The file
+  # must be a regular, non-symlink file no larger than 1 KiB. Unix requires
+  # ownership by the node user with no group or other access. Windows accepts
+  # the current user or BUILTIN Administrators (when the process belongs to
+  # that group) as owner. Its DACL allows the owner, Administrators, SYSTEM,
+  # Creator Owner, and Owner Rights, plus the restricted local Administrator
+  # ACE when Administrators owns the file.
   # Can be overridden with DINGO_DB_LIFECYCLE_SNAPSHOT_TRUST_KEY_FILE
   # CLI: --db-snapshot-trust-key-file
   # snapshotTrustKeyFile: ""

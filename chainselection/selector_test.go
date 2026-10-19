@@ -33,6 +33,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	okeepalive "github.com/blinklabs-io/gouroboros/protocol/keepalive"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -1997,6 +1998,41 @@ func TestChainSelectorStalePeerFiltering(t *testing.T) {
 	bestPeer := cs.SelectBestChain()
 	require.NotNil(t, bestPeer)
 	assert.Equal(t, connId2, *bestPeer)
+}
+
+func TestChainSelectorKeepsPeerSelectableDuringKeepAliveTimeout(t *testing.T) {
+	t.Parallel()
+
+	connId := newTestConnectionId(1)
+	connected := true
+	cs := NewChainSelector(ChainSelectorConfig{
+		ConnectionLive: func(ouroboros.ConnectionId) bool {
+			return connected
+		},
+	})
+	clk := &fakeClock{now: time.Unix(1_700_000_000, 0)}
+	installFakeClock(cs, clk)
+
+	localTip := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 100, Hash: []byte("local")},
+		BlockNumber: 100,
+	}
+	peerTip := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 101, Hash: []byte("peer")},
+		BlockNumber: 101,
+	}
+	cs.SetLocalTip(localTip)
+	require.True(t, cs.UpdatePeerTip(connId, peerTip, nil))
+	cs.EvaluateAndSwitch()
+	require.Equal(t, &connId, cs.GetBestPeer())
+
+	// A delayed pong can still arrive before the protocol drops the connection.
+	period := time.Duration(okeepalive.DefaultKeepAlivePeriod) * time.Second
+	clk.Advance(period + okeepalive.ServerTimeout - time.Second)
+	cs.EvaluateAndSwitch()
+
+	require.True(t, connected)
+	require.Equal(t, &connId, cs.GetBestPeer())
 }
 
 func TestChainSelectorStalePeerCleanupEmitsChainSwitchEvent(t *testing.T) {
@@ -6005,6 +6041,48 @@ func TestLoneFarFrontierAcceptsConnectedChain(t *testing.T) {
 			c.deliver(cs, conn, first+i, c.prevHash(first+i)),
 			"header %d after acceptance must stay accepted", i,
 		)
+	}
+}
+
+func TestStagedLoneFarFrontierIsCommittedAfterKConnectedHeaders(t *testing.T) {
+	t.Parallel()
+
+	for _, securityParam := range []uint64{2, 432} {
+		t.Run(fmt.Sprintf("k=%d", securityParam), func(t *testing.T) {
+			c := loneFarChain{localBlock: 175516, k: securityParam}
+			cs := c.newSelector(t)
+			conn := newTestConnectionId(2)
+			first := c.first()
+			var last PeerTipUpdateEvent
+
+			for i := uint64(0); i <= securityParam; i++ {
+				block := first + i
+				last = PeerTipUpdateEvent{
+					ConnectionId:     conn,
+					AdmissionID:      i + 1,
+					Tip:              c.tip(4687076),
+					ObservedTip:      c.tip(block),
+					ObservedPrevHash: c.prevHash(block),
+				}
+				disposition := cs.PreparePeerTipAdmissionDisposition(last)
+				if i < securityParam {
+					require.Equal(t, PeerTipUpdatePending, disposition)
+				} else {
+					require.Equal(t, PeerTipUpdateAccepted, disposition)
+				}
+			}
+
+			claim, ok := cs.pendingFarTipClaims[conn]
+			require.True(t, ok)
+			assert.Equal(t, securityParam+1, claim.run)
+			assert.True(t, claim.lone)
+
+			require.True(t, cs.CommitPeerTipAdmission(last))
+			peerTip := cs.GetPeerTip(conn)
+			require.NotNil(t, peerTip,
+				"ledger admission must promote the connected far frontier")
+			assert.Equal(t, last.ObservedTip.Point, peerTip.SelectionTip().Point)
+		})
 	}
 }
 

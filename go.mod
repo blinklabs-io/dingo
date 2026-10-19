@@ -8,7 +8,7 @@ require (
 	cloud.google.com/go/storage v1.68.0
 	connectrpc.com/connect v1.21.0
 	connectrpc.com/grpchealth v1.5.0
-	connectrpc.com/grpcreflect v1.3.0
+	connectrpc.com/grpcreflect v1.3.1
 	github.com/Microsoft/go-winio v0.6.2
 	github.com/XSAM/otelsql v0.44.0
 	github.com/aws/aws-sdk-go-v2 v1.47.2
@@ -19,9 +19,9 @@ require (
 	github.com/aws/smithy-go v1.28.4
 	github.com/blinklabs-io/bark v0.2.0
 	github.com/blinklabs-io/bursa v0.17.1
-	github.com/blinklabs-io/gouroboros v0.213.3
+	github.com/blinklabs-io/gouroboros v0.213.5
 	github.com/blinklabs-io/ouroboros-mock v0.21.1
-	github.com/blinklabs-io/plutigo v0.9.4
+	github.com/blinklabs-io/plutigo v0.9.9
 	github.com/blockfrost/blockfrost-go v0.5.0
 	github.com/btcsuite/btcd/btcutil v1.2.0
 	github.com/consensys/gnark-crypto v0.22.0

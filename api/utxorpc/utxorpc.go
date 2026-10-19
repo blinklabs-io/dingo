@@ -33,6 +33,7 @@ import (
 	"github.com/blinklabs-io/dingo/internal/apiconfig"
 	"github.com/blinklabs-io/dingo/internal/apilistener"
 	"github.com/blinklabs-io/dingo/internal/httpcors"
+	"github.com/blinklabs-io/dingo/internal/rpchealth"
 	"github.com/utxorpc/go-codegen/utxorpc/v1alpha/query/queryconnect"
 	"github.com/utxorpc/go-codegen/utxorpc/v1alpha/submit/submitconnect"
 	"github.com/utxorpc/go-codegen/utxorpc/v1alpha/sync/syncconnect"
@@ -444,7 +445,9 @@ func (u *Utxorpc) newServeMux() *http.ServeMux {
 	serviceNames := servedServiceNames()
 	mux.Handle(
 		grpchealth.NewHandler(
-			grpchealth.NewStaticChecker(serviceNames...),
+			rpchealth.UnaryChecker(
+				grpchealth.NewStaticChecker(serviceNames...),
+			),
 			compress1KB,
 		),
 	)

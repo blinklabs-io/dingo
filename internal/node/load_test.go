@@ -40,6 +40,7 @@ import (
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/snapshot"
 	"github.com/blinklabs-io/dingo/plugin"
@@ -778,6 +779,80 @@ func TestStoreRawBlockUtxoOffsetsPropagatesExtractError(t *testing.T) {
 	)
 }
 
+func TestLoadBlobsWithDBSkipsUtxoOffsetsInCoreMode(t *testing.T) {
+	t.Parallel()
+
+	immutableDir := os.Getenv("DINGO_TEST_IMMUTABLE_DIR")
+	if immutableDir == "" {
+		immutableDir = filepath.Join(
+			"..",
+			"..",
+			"database",
+			"immutable",
+			"testdata",
+		)
+	}
+	imm, err := immutable.New(immutableDir)
+	require.NoError(t, err)
+	iter, err := imm.BlocksFromPoint(ocommon.Point{})
+	require.NoError(t, err)
+	defer iter.Close()
+
+	var txHash []byte
+	var outputIdx uint32
+	for range 10_000 {
+		block, err := iter.Next()
+		require.NoError(t, err)
+		if block == nil {
+			break
+		}
+		if block.IsEbb {
+			continue
+		}
+		decoded, err := gledger.NewBlockFromCbor(
+			block.Type,
+			block.Cbor,
+			lcommon.VerifyConfig{SkipBodyHashValidation: true},
+		)
+		require.NoError(t, err)
+		for _, tx := range decoded.Transactions() {
+			produced := tx.Produced()
+			if len(produced) == 0 {
+				continue
+			}
+			txHash = bytes.Clone(tx.Hash().Bytes())
+			outputIdx = produced[0].Id.Index()
+			break
+		}
+		if len(txHash) > 0 {
+			break
+		}
+	}
+	require.NotEmpty(t, txHash, "fixture has no produced UTxO")
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir:     "",
+		Logger:      logger,
+		StorageMode: types.StorageModeCore,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		dbtest.CloseDatabase(db) //nolint:errcheck
+	})
+
+	result, err := LoadBlobsWithDB(
+		context.Background(), &config.Config{}, logger, immutableDir, db,
+	)
+	require.NoError(t, err)
+	assert.Positive(t, result.BlocksCopied)
+
+	blobTxn := db.BlobTxn(false)
+	defer blobTxn.Rollback() //nolint:errcheck
+	_, err = db.Blob().GetUtxo(blobTxn.Blob(), txHash, outputIdx)
+	require.ErrorIs(t, err, types.ErrBlobKeyNotFound)
+}
+
 func TestStoreRawBlockUtxoOffsetsSkipsByronEbb(t *testing.T) {
 	t.Parallel()
 
@@ -1063,6 +1138,95 @@ func TestLoadWithDBConfiguresRawChainSecurityParamBeforeHooks(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Not t.Parallel: this test swaps processTrustedBlockBatchesForLoad.
+func TestLoadWithDBRewindsBlocksRejectedDuringReplay(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	db := newTestDB(t)
+	rejected := errors.New("reject trusted replay batch")
+	noBatch := errors.New("trusted replay ended without a batch")
+	firstBatchReceived := make(chan struct{})
+	rejectReplay := make(chan struct{})
+
+	var firstCopiedTip ochainsync.Tip
+	var rejectedCopiedTip ochainsync.Tip
+	var appliedTip ochainsync.Tip
+	var replayState *ledger.LedgerState
+	oldProcess := processTrustedBlockBatchesForLoad
+	processTrustedBlockBatchesForLoad = func(
+		ls *ledger.LedgerState,
+		ctx context.Context,
+		batches <-chan []gledger.Block,
+	) error {
+		select {
+		case _, ok := <-batches:
+			if !ok {
+				return noBatch
+			}
+			replayState = ls
+			firstCopiedTip = ls.PrimaryChainTip()
+			close(firstBatchReceived)
+			select {
+			case <-rejectReplay:
+				rejectedCopiedTip = ls.PrimaryChainTip()
+				appliedTip = ls.Tip()
+				return rejected
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	t.Cleanup(func() {
+		processTrustedBlockBatchesForLoad = oldProcess
+	})
+
+	immutableDir := filepath.Join(
+		"..",
+		"..",
+		"database",
+		"immutable",
+		"testdata",
+	)
+	loadErr := make(chan error, 1)
+	go func() {
+		loadErr <- LoadWithDB(
+			t.Context(),
+			&config.Config{Network: "preview"},
+			logger,
+			immutableDir,
+			db,
+		)
+	}()
+	testutil.RequireReceive(
+		t, firstBatchReceived, 5*time.Second, "first replay batch",
+	)
+	testutil.WaitForCondition(
+		t,
+		func() bool {
+			return replayState.PrimaryChainTip().BlockNumber >
+				firstCopiedTip.BlockNumber
+		},
+		5*time.Second,
+		"the copier must persist a later batch before replay rejects the first",
+	)
+	close(rejectReplay)
+	err := testutil.RequireReceive(
+		t, loadErr, 5*time.Second, "load failure after replay rejection",
+	)
+	require.ErrorIs(t, err, rejected)
+	require.Greater(
+		t,
+		rejectedCopiedTip.BlockNumber,
+		firstCopiedTip.BlockNumber,
+	)
+	require.NotEqual(t, appliedTip.Point, rejectedCopiedTip.Point)
+
+	cm, err := chain.NewManager(t.Context(), db, nil)
+	require.NoError(t, err)
+	require.Equal(t, appliedTip, cm.PrimaryChain().Tip())
 }
 
 // TestLoadWithDBPropagatesFullPotRewards verifies that the CIP-0163 full-pot

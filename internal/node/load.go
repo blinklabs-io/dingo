@@ -35,6 +35,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
+	datatypes "github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/config"
 	internalplugins "github.com/blinklabs-io/dingo/internal/plugins"
@@ -76,6 +77,14 @@ func loadDecodeWorkerCount() int {
 // newLedgerStateForLoad is replaceable in tests so load-mode composition can
 // be verified without replaying a full ImmutableDB fixture.
 var newLedgerStateForLoad = ledger.NewLedgerState
+
+var processTrustedBlockBatchesForLoad = func(
+	ls *ledger.LedgerState,
+	ctx context.Context,
+	batches <-chan []gledger.Block,
+) error {
+	return ls.ProcessTrustedBlockBatches(ctx, batches)
+}
 
 type loadSecurityParam int
 
@@ -778,6 +787,38 @@ func LoadWithDB(
 			)
 		}
 	}
+	var remoteLimits remoteImmutableLimits
+	if remoteImmutable {
+		var (
+			regularSlots  uint64
+			canContainEBB bool
+		)
+		if byronGenesis := nodeCfg.ByronGenesis(); byronGenesis != nil {
+			if byronGenesis.ProtocolConsts.K <= 0 ||
+				uint64(byronGenesis.ProtocolConsts.K) > math.MaxUint64/10 {
+				return errors.New(
+					"remote ImmutableDB requires a valid Byron security parameter",
+				)
+			}
+			regularSlots = uint64(
+				byronGenesis.ProtocolConsts.K,
+			) * 10 //nolint:gosec
+			canContainEBB = true
+		} else if shelleyGenesis := nodeCfg.ShelleyGenesis(); shelleyGenesis != nil &&
+			shelleyGenesis.EpochLength > 0 {
+			regularSlots = uint64(shelleyGenesis.EpochLength) //nolint:gosec
+		} else {
+			return errors.New(
+				"remote ImmutableDB requires an initial era epoch length",
+			)
+		}
+		remoteLimits, err = remoteImmutableLimitsForSlots(
+			regularSlots, canContainEBB,
+		)
+		if err != nil {
+			return err
+		}
+	}
 	logger.Debug(
 		"cardano network config",
 		"component", "node",
@@ -837,6 +878,9 @@ func LoadWithDB(
 			// serve node.
 			FullPotRewardsEnabled: cfg.FullPotRewardsEnabled,
 			TrustedReplay:         true,
+			// Imported blocks never passed admission, so apply must verify
+			// each Praos header before the block reaches ledger state.
+			VerifyReplayHeaders: true,
 			// Immutable load replays blocks already accepted into the trusted
 			// database. Structural Leios certificate checks still run;
 			// cryptographic verification belongs to live admission, where the
@@ -927,7 +971,8 @@ func LoadWithDB(
 	replayBatches := make(chan []gledger.Block, 1)
 	replayErrCh := make(chan error, 1)
 	go func() {
-		err := ls.ProcessTrustedBlockBatches(
+		err := processTrustedBlockBatchesForLoad(
+			ls,
 			replayCtx,
 			replayBatches,
 		)
@@ -945,43 +990,14 @@ func LoadWithDB(
 		immutableTipSlot uint64
 	)
 	if remoteImmutable {
-		var (
-			regularSlots  uint64
-			canContainEBB bool
-		)
-		if byronGenesis := nodeCfg.ByronGenesis(); byronGenesis != nil {
-			if byronGenesis.ProtocolConsts.K <= 0 ||
-				uint64(byronGenesis.ProtocolConsts.K) > math.MaxUint64/10 {
-				return errors.New(
-					"remote ImmutableDB requires a valid Byron security parameter",
-				)
-			}
-			regularSlots = uint64(
-				byronGenesis.ProtocolConsts.K,
-			) * 10 //nolint:gosec
-			canContainEBB = true
-		} else if shelleyGenesis := nodeCfg.ShelleyGenesis(); shelleyGenesis != nil &&
-			shelleyGenesis.EpochLength > 0 {
-			regularSlots = uint64(shelleyGenesis.EpochLength) //nolint:gosec
-		} else {
-			return errors.New(
-				"remote ImmutableDB requires an initial era epoch length",
-			)
-		}
-		limits, limitErr := remoteImmutableLimitsForSlots(
-			regularSlots, canContainEBB,
-		)
-		if limitErr != nil {
-			return limitErr
-		}
 		blocksCopied, immutableTipSlot, err = copyBlocksRemote(
 			replayCtx, logger, immutableDir,
 			filepath.Join(cfg.DatabasePath, remoteImmutableCacheDir),
-			limits, c, replayBatches,
+			remoteLimits, c, replayBatches,
 		)
 	} else {
 		blocksCopied, immutableTipSlot, err = copyBlocksDirect(
-			replayCtx, logger, immutableDir, c, replayBatches,
+			replayCtx, logger, immutableDir, c, replayBatches, false,
 		)
 	}
 	close(replayBatches)
@@ -995,12 +1011,27 @@ func LoadWithDB(
 		// actual failure instead of only its downstream symptom.
 		replayErr := <-replayErrCh
 		if replayErr != nil && !errors.Is(replayErr, context.Canceled) {
-			return errors.Join(fmt.Errorf("loading blocks: %w", err), replayErr)
+			return loadReplayFailure(
+				ctx,
+				c,
+				ls,
+				errors.Join(fmt.Errorf("loading blocks: %w", err), replayErr),
+			)
 		}
-		return fmt.Errorf("loading blocks: %w", err)
+		return loadReplayFailure(
+			ctx,
+			c,
+			ls,
+			fmt.Errorf("loading blocks: %w", err),
+		)
 	}
-	if err := <-replayErrCh; err != nil && !errors.Is(err, context.Canceled) {
-		return fmt.Errorf("processing trusted block batches: %w", err)
+	if err := <-replayErrCh; err != nil {
+		return loadReplayFailure(
+			ctx,
+			c,
+			ls,
+			fmt.Errorf("processing trusted block batches: %w", err),
+		)
 	}
 	logger.Info(
 		"finished processing blocks from immutable DB",
@@ -1020,6 +1051,30 @@ func LoadWithDB(
 		)
 	}
 	return nil
+}
+
+func loadReplayFailure(
+	ctx context.Context,
+	c *chain.Chain,
+	ls *ledger.LedgerState,
+	cause error,
+) error {
+	appliedTip := ls.Tip()
+	chainTip := c.Tip()
+	if chainTip.Point.Slot == appliedTip.Point.Slot &&
+		bytes.Equal(chainTip.Point.Hash, appliedTip.Point.Hash) {
+		return cause
+	}
+	if err := c.RollbackUnbounded(
+		context.WithoutCancel(ctx),
+		appliedTip.Point,
+	); err != nil {
+		return errors.Join(
+			cause,
+			fmt.Errorf("rewinding unapplied immutable blocks: %w", err),
+		)
+	}
+	return cause
 }
 
 // LoadBlobsResult contains the result of a blob-only ImmutableDB load.
@@ -1140,26 +1195,37 @@ func LoadBlobsWithDB(
 	}
 
 	var utxoOffsetsStored int
-	blocksCopied, immutableTipSlot, err := copyBlocksRawWithCallback(
-		ctx, logger, imm, db, c,
-		func(rb chain.RawBlock, txn *database.Txn) error {
+	var callback func(chain.RawBlock, *database.Txn) error
+	if db.StorageMode() != datatypes.StorageModeCore {
+		callback = func(rb chain.RawBlock, txn *database.Txn) error {
 			stored, err := storeRawBlockUtxoOffsets(txn, rb)
 			if err != nil {
 				return err
 			}
 			utxoOffsetsStored += stored
 			return nil
-		},
+		}
+	}
+	blocksCopied, immutableTipSlot, err := copyBlocksRawWithCallback(
+		ctx, logger, imm, db, c,
+		callback,
 		opts.onProgress,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("loading blocks: %w", err)
 	}
-	logger.Info(
-		"finished storing immutable UTxO offsets during copy",
-		"blocks_copied", blocksCopied,
-		"utxo_offsets_stored", utxoOffsetsStored,
-	)
+	if callback == nil {
+		logger.Info(
+			"skipped immutable UTxO offset writes for Core storage mode",
+			"blocks_copied", blocksCopied,
+		)
+	} else {
+		logger.Info(
+			"finished storing immutable UTxO offsets during copy",
+			"blocks_copied", blocksCopied,
+			"utxo_offsets_stored", utxoOffsetsStored,
+		)
+	}
 
 	return &LoadBlobsResult{
 		BlocksCopied:     blocksCopied,
@@ -1175,6 +1241,7 @@ func copyBlocksDirect(
 	immutableDir string,
 	c *chain.Chain,
 	replayBatches chan<- []gledger.Block,
+	validateBodyHash bool,
 ) (int, uint64, error) {
 	immDB, err := immutable.New(immutableDir)
 	if err != nil {
@@ -1212,7 +1279,7 @@ func copyBlocksDirect(
 	lastProgressLog := time.Time{}
 	var lastProgressSlot uint64
 	verifyCfg := lcommon.VerifyConfig{
-		SkipBodyHashValidation: true,
+		SkipBodyHashValidation: !validateBodyHash,
 	}
 	for {
 		rawBatch := make([]immutable.Block, 0, loadBlockBatchSize)
@@ -1443,9 +1510,42 @@ func CopyImmutableBlobsBounded(
 	maxSlot uint64,
 	onProgress func(LoadBlobsProgress),
 ) (int, uint64, error) {
+	return copyImmutableBlobsBounded(
+		ctx, logger, imm, c, maxSlot, onProgress, true,
+	)
+}
+
+// CopyImmutableBlobsBoundedWithoutUtxoOffsets copies immutable blocks without
+// materializing API UTxO offset references. Callers must leave the completion
+// marker unset so a later API backfill rebuilds those references.
+func CopyImmutableBlobsBoundedWithoutUtxoOffsets(
+	ctx context.Context,
+	logger *slog.Logger,
+	imm *immutable.ImmutableDb,
+	c *chain.Chain,
+	maxSlot uint64,
+	onProgress func(LoadBlobsProgress),
+) (int, uint64, error) {
+	return copyImmutableBlobsBounded(
+		ctx, logger, imm, c, maxSlot, onProgress, false,
+	)
+}
+
+func copyImmutableBlobsBounded(
+	ctx context.Context,
+	logger *slog.Logger,
+	imm *immutable.ImmutableDb,
+	c *chain.Chain,
+	maxSlot uint64,
+	onProgress func(LoadBlobsProgress),
+	storeUtxoOffsets bool,
+) (int, uint64, error) {
 	callback := func(rb chain.RawBlock, txn *database.Txn) error {
 		_, err := storeRawBlockUtxoOffsets(txn, rb)
 		return err
+	}
+	if !storeUtxoOffsets {
+		callback = nil
 	}
 
 	startPoint := c.Tip().Point
