@@ -221,3 +221,42 @@ func TestRollbackSpentStakeRefsQueryWithoutSpenderIndex(t *testing.T) {
 	_, err = queryStakeRefs(ctx, store.writeDB, query, []byte("missing"))
 	require.NoError(t, err)
 }
+
+// The rollback sweep refreshes each affected credential's live stake with a
+// full scan of its UTxOs while the ledger write lock is held. The stake lookup
+// returns one row per spent UTxO, so the sweep must deduplicate before the
+// refresh: a credential with several UTxOs spent by rolled-back transactions
+// is scanned once.
+func TestDeleteTransactionsAfterSlotRefreshesEachCredentialOnce(t *testing.T) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+	keyA := make([]byte, 28)
+	keyA[0] = 0xAA
+	keyB := make([]byte, 28)
+	keyB[0] = 0xBB
+	spender := []byte(fmt.Sprintf("%032d", 1))
+	_, err := store.writeDB.Exec(
+		`INSERT INTO "transaction" (hash, slot, block_index) VALUES (?, 10, 0)`,
+		spender,
+	)
+	require.NoError(t, err)
+	for i, key := range [][]byte{keyA, keyA, keyB} {
+		_, err := store.writeDB.Exec(
+			`INSERT INTO utxo
+    (tx_id, output_idx, credential_tag, staking_key, spent_at_tx_id,
+     added_slot, deleted_slot, amount)
+VALUES (?, 0, 0, ?, ?, 1, 10, '1')`,
+			[]byte{byte(i)}, key, spender,
+		)
+		require.NoError(t, err)
+	}
+
+	before := store.sumCredentialUtxoStakeCalls.Load()
+	require.NoError(t, store.DeleteTransactionsAfterSlot(5, nil))
+	require.Equal(
+		t,
+		before+2,
+		store.sumCredentialUtxoStakeCalls.Load(),
+		"two distinct credentials must be refreshed once each",
+	)
+}
