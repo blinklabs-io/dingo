@@ -1920,8 +1920,16 @@ func TestValidateMinPoolMargin(t *testing.T) {
 	}
 }
 
+func TestDefaultDMQConfigIsLocalOnly(t *testing.T) {
+	t.Parallel()
+	assert.Zero(t, DefaultDMQConfig().N2NPort)
+}
+
 func TestValidateDMQ(t *testing.T) {
 	t.Parallel()
+	topologyDir := t.TempDir()
+	topologyFile := filepath.Join(topologyDir, "dmq-topology.json")
+	require.NoError(t, os.WriteFile(topologyFile, []byte("{}"), 0o600))
 	tests := []struct {
 		name    string
 		mutate  func(*Config)
@@ -1932,7 +1940,14 @@ func TestValidateDMQ(t *testing.T) {
 			mutate: func(c *Config) { c.DMQ.SocketPath = c.SocketPath },
 		},
 		{
-			name:   "enabled defaults",
+			name: "enabled defaults",
+			mutate: func(c *Config) {
+				c.DMQ.Enabled = true
+				c.DMQ.N2NPort = 0
+			},
+		},
+		{
+			name:   "enabled with a peer listener",
 			mutate: func(c *Config) { c.DMQ.Enabled = true },
 		},
 		{
@@ -1976,12 +1991,66 @@ func TestValidateDMQ(t *testing.T) {
 			wantErr: "dmq.maxMempoolSize must be positive",
 		},
 		{
-			name: "zero max peers",
+			name: "zero max peers with the default min peers",
 			mutate: func(c *Config) {
 				c.DMQ.Enabled = true
 				c.DMQ.MaxPeers = 0
 			},
-			wantErr: "dmq.maxPeers must be positive",
+			wantErr: "dmq.minPeers must not exceed dmq.maxPeers",
+		},
+		{
+			name: "no peers allowed",
+			mutate: func(c *Config) {
+				c.DMQ.Enabled = true
+				c.DMQ.MinPeers = 0
+				c.DMQ.MaxPeers = 0
+			},
+		},
+		{
+			name: "peer counts checked without a peer listener",
+			mutate: func(c *Config) {
+				c.DMQ.Enabled = true
+				c.DMQ.N2NPort = 0
+				c.DMQ.MinPeers = 11
+			},
+			wantErr: "dmq.minPeers must not exceed dmq.maxPeers",
+		},
+		{
+			name: "topology file",
+			mutate: func(c *Config) {
+				c.DMQ.Enabled = true
+				c.DMQ.TopologyFile = topologyFile
+			},
+		},
+		{
+			name: "missing topology file",
+			mutate: func(c *Config) {
+				c.DMQ.Enabled = true
+				c.DMQ.TopologyFile = filepath.Join(topologyDir, "absent.json")
+			},
+			wantErr: "invalid dmq.topologyFile",
+		},
+		{
+			name: "topology file is a directory",
+			mutate: func(c *Config) {
+				c.DMQ.Enabled = true
+				c.DMQ.TopologyFile = topologyDir
+			},
+			wantErr: "not a regular file",
+		},
+		{
+			name: "topology file with a parent directory component",
+			mutate: func(c *Config) {
+				c.DMQ.Enabled = true
+				c.DMQ.TopologyFile = topologyDir + "/../dmq-topology.json"
+			},
+			wantErr: "path must not contain",
+		},
+		{
+			name: "topology file ignored when disabled",
+			mutate: func(c *Config) {
+				c.DMQ.TopologyFile = filepath.Join(topologyDir, "absent.json")
+			},
 		},
 		{
 			name: "min peers above max peers",
@@ -2088,6 +2157,7 @@ func TestValidateDMQ(t *testing.T) {
 			cfg := validTestConfig()
 			cfg.SocketPath = "dingo.socket"
 			cfg.DMQ = DefaultDMQConfig()
+			cfg.DMQ.N2NPort = 4001
 			tt.mutate(cfg)
 			err := cfg.validate(cfg.RunMode, minUnprivilegedPort)
 			if tt.wantErr == "" {
@@ -2127,11 +2197,15 @@ func TestPipeline_DMQYAMLAndFlags(t *testing.T) {
 		t.Setenv(name, "")
 		require.NoError(t, os.Unsetenv(name))
 	}
+	topologyFile := filepath.ToSlash(
+		filepath.Join(t.TempDir(), "dmq-topology.json"),
+	)
+	require.NoError(t, os.WriteFile(topologyFile, []byte("{}"), 0o600))
 	cfg, err := loadConfigThroughPipeline(
 		t,
 		"dmq:\n  enabled: true\n  topic: mithril\n  messageTtl: 300\n"+
 			"  n2nPort: 4100\n  listenIpv6Address: \"::1\"\n"+
-			"  topologyFile: /etc/dmq-topology.json\n  minPeers: 2\n",
+			"  topologyFile: \""+topologyFile+"\"\n  minPeers: 2\n",
 		[]string{
 			"--dmq-socket-path=/run/dmq.sock",
 			"--dmq-network-magic=7",
@@ -2153,7 +2227,7 @@ func TestPipeline_DMQYAMLAndFlags(t *testing.T) {
 		N2NPort:           4100,
 		ListenAddress:     "127.0.0.1",
 		ListenIPv6Address: "::1",
-		TopologyFile:      "/etc/dmq-topology.json",
+		TopologyFile:      topologyFile,
 		MinPeers:          2,
 		MaxPeers:          6,
 	}, cfg.DMQ)

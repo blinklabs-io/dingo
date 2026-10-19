@@ -658,7 +658,7 @@ type DMQConfig struct {
 	// MaxMempoolSize bounds the message pool, in megabytes.
 	MaxMempoolSize uint `yaml:"maxMempoolSize" envconfig:"DINGO_DMQ_MAX_MEMPOOL_SIZE"`
 	// N2NPort is the TCP port peers connect to. It is independent of the
-	// Cardano relay port. Zero serves local clients only.
+	// Cardano relay port. Zero, the default, serves local clients only.
 	N2NPort uint `yaml:"n2nPort"      envconfig:"DINGO_DMQ_N2N_PORT"`
 	// ListenAddress is the IPv4 address the peer listener binds. Empty
 	// disables the IPv4 listener.
@@ -669,9 +669,11 @@ type DMQConfig struct {
 	// TopologyFile is a dmq-node topology file naming the DMQ peers to dial.
 	// It is separate from the Cardano topology.
 	TopologyFile string `yaml:"topologyFile" envconfig:"DINGO_DMQ_TOPOLOGY_FILE"`
-	// MinPeers is the number of DMQ peers to keep connections to.
+	// MinPeers is the number of DMQ peers to keep connections to. It must
+	// not exceed MaxPeers.
 	MinPeers uint `yaml:"minPeers"     envconfig:"DINGO_DMQ_MIN_PEERS"`
-	// MaxPeers is the most DMQ peers to hold connections to.
+	// MaxPeers is the most DMQ peers to hold connections to. Zero allows
+	// none, which needs MinPeers of zero too.
 	MaxPeers uint `yaml:"maxPeers"     envconfig:"DINGO_DMQ_MAX_PEERS"`
 }
 
@@ -696,7 +698,6 @@ func DefaultDMQConfig() DMQConfig {
 		SocketPath:        "dingo-dmq.socket",
 		MessageTTL:        1800,
 		MaxMempoolSize:    128,
-		N2NPort:           4001,
 		ListenAddress:     "0.0.0.0",
 		ListenIPv6Address: "::",
 		MinPeers:          3,

@@ -1383,17 +1383,41 @@ func sameSocketPath(a, b string) bool {
 	return absA == absB
 }
 
+// validateDMQTopologyFile checks that a configured DMQ topology file is a
+// regular file, so a typo fails at startup instead of when the peer dialer
+// first reads it.
+func validateDMQTopologyFile(path string) error {
+	if path == "" {
+		return nil
+	}
+	if err := validatePathNoTraversal("dmq.topologyFile", path); err != nil {
+		return err
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("invalid dmq.topologyFile %q: %w", path, err)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf(
+			"invalid dmq.topologyFile %q: not a regular file", path,
+		)
+	}
+	return nil
+}
+
 // validateDMQPeers checks the DMQ peer listener and peer-count settings. The
 // listener fields are only meaningful when N2NPort is set, so they are left
-// unchecked for a local-only stack.
+// unchecked for a local-only stack; the peer counts and topology file bound
+// outbound peers too, so they are always checked.
 func validateDMQPeers(c DMQConfig) []error {
 	var errs []error
-	if c.MaxPeers == 0 {
-		errs = append(errs, errors.New("dmq.maxPeers must be positive"))
-	} else if c.MinPeers > c.MaxPeers {
+	if c.MinPeers > c.MaxPeers {
 		errs = append(errs, errors.New(
 			"dmq.minPeers must not exceed dmq.maxPeers",
 		))
+	}
+	if err := validateDMQTopologyFile(c.TopologyFile); err != nil {
+		errs = append(errs, err)
 	}
 	if c.N2NPort == 0 {
 		return errs
