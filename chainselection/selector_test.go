@@ -6086,6 +6086,83 @@ func TestStagedLoneFarFrontierIsCommittedAfterKConnectedHeaders(t *testing.T) {
 	}
 }
 
+func TestStagedFarFrontierCatchUpWithReferenceAheadOfLocalTip(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name            string
+		referenceOffset uint64
+		accepted        bool
+	}{
+		{name: "below catch-up ceiling", referenceOffset: 3, accepted: true},
+		{name: "at catch-up ceiling", referenceOffset: 4, accepted: true},
+		{name: "above catch-up ceiling", referenceOffset: 5},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			c := loneFarChain{localBlock: 1_000, k: 2}
+			cs := NewChainSelector(ChainSelectorConfig{
+				SecurityParam:             c.k,
+				DisableEventSubscriptions: true,
+			})
+			cs.SetLocalTip(c.tip(c.localBlock))
+			referenceConn := newTestConnectionId(1)
+			require.True(t, cs.UpdatePeerTip(
+				referenceConn,
+				c.tip(c.localBlock+tc.referenceOffset),
+				nil,
+			))
+
+			conn := newTestConnectionId(2)
+			first := c.first()
+			updates := make([]PeerTipUpdateEvent, 0, c.k+1)
+			for i := uint64(0); i <= c.k; i++ {
+				block := first + i
+				update := PeerTipUpdateEvent{
+					ConnectionId:     conn,
+					AdmissionID:      i + 1,
+					Tip:              c.tip(4_687_076),
+					ObservedTip:      c.tip(block),
+					ObservedPrevHash: c.prevHash(block),
+				}
+				updates = append(updates, update)
+				disposition := cs.PreparePeerTipAdmissionDisposition(update)
+				if !tc.accepted {
+					require.Equal(t, PeerTipUpdateRejected, disposition)
+					continue
+				}
+				if i < c.k {
+					require.Equal(t, PeerTipUpdatePending, disposition)
+				} else {
+					require.Equal(t, PeerTipUpdateAccepted, disposition)
+				}
+			}
+
+			if !tc.accepted {
+				assert.NotContains(t, cs.pendingFarTipClaims, conn)
+				assert.Nil(t, cs.GetPeerTip(conn))
+				return
+			}
+
+			claim, ok := cs.pendingFarTipClaims[conn]
+			require.True(t, ok)
+			assert.True(t, claim.lone)
+			assert.Equal(t, c.k+1, claim.run)
+			for _, update := range updates {
+				require.True(t, cs.CommitPeerTipAdmission(update))
+			}
+			peerTip := cs.GetPeerTip(conn)
+			require.NotNil(t, peerTip)
+			assert.Equal(
+				t,
+				updates[len(updates)-1].ObservedTip.Point,
+				peerTip.SelectionTip().Point,
+			)
+		})
+	}
+}
+
 func TestFarTipDispositionRejectsJumpAfterPendingClaim(t *testing.T) {
 	t.Parallel()
 

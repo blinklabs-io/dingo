@@ -5451,6 +5451,10 @@ corroborated and becomes that connection's own reference, like a known peer's
 previous frontier: its next update is accepted within `securityParam` of its
 claim even when the corroborating frontier sits up to `securityParam` below
 it, and the entry is cleared once the connection is accepted.
+The stale-reference recovery also applies when the tracked reference is ahead
+of the local tip but still within the same `localTip + 2*securityParam`
+catch-up ceiling; a snapshot-backed local tip can lag its delivered peer
+references without making those references current enough to rule out catch-up.
 A delivered frontier beyond the catch-up allowance is not rejected outright.
 `checkPeerTipPlausibleLocked` holds bounded far-tip evidence per connection. A
 far frontier is supported by another distinct connection within
