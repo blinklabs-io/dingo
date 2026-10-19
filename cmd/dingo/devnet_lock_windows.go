@@ -28,7 +28,11 @@ func acquireDevnetStateLock(
 	root *os.Root,
 	runDir string,
 ) (func() error, error) {
-	file, err := root.OpenFile(devnetStateLock, os.O_CREATE|os.O_RDWR, 0o600)
+	file, err := root.OpenFile(
+		devnetStateLock,
+		os.O_CREATE|os.O_RDWR|windows.O_FILE_FLAG_OPEN_REPARSE_POINT,
+		0o600,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("opening devnet state lock in %q: %w", runDir, err)
 	}
