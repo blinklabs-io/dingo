@@ -4695,6 +4695,22 @@ func queuePeerTipAdmission(
 	})
 }
 
+// clearChainsyncHeaderAuthorization queues a header whose producer
+// authorization cannot be confirmed now, as pre-authorization ledger admission
+// did: block-fetch verifies its body before application, and an unauthorized
+// header that does not fit the queue still cannot clear it or roll back
+// canonical state. Withholding it instead deadlocks sync whenever only applying
+// queued blocks can make its authorization verifiable, as at the Byron->Shelley
+// boundary.
+func clearChainsyncHeaderAuthorization(e *ChainsyncEvent) {
+	e.HeaderCryptoVerificationGeneration = 0
+	if e.PeerTipUpdate != nil {
+		update := *e.PeerTipUpdate
+		update.HeaderCryptoVerificationGeneration = 0
+		e.PeerTipUpdate = &update
+	}
+}
+
 func queuePeerHeaderHistoryInvalidation(
 	pending *pendingPublishes,
 	e ChainsyncEvent,
@@ -4752,32 +4768,40 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 	if headerCryptoVerificationGeneration != 0 &&
 		!headerCryptoVerified && !headerTrusted && !headerValidationRequired {
 		ls.config.Logger.Debug(
-			"withholding chainsync header after its producer authorization became stale",
+			"queueing chainsync header without producer authorization after it became stale",
 			"component", "ledger",
 			"slot", e.Point.Slot,
 			"hash", hex.EncodeToString(e.Point.Hash),
 		)
-		return nil
+		headerCryptoVerificationGeneration = 0
+		producerAuthorizationGeneration = 0
+		clearChainsyncHeaderAuthorization(&e)
 	}
 	if headerValidationRequired && !headerCryptoVerified {
 		var err error
 		headerCryptoVerificationGeneration, err = ls.
 			ValidateChainSelectionHeaderCryptoWithGeneration(e.BlockHeader)
-		if err != nil {
-			if IsHeaderVerificationDeferred(err) {
-				ls.config.Logger.Debug(
-					"withholding chainsync header until producer authorization can be verified",
-					"component",
-					"ledger",
-					"slot",
-					e.Point.Slot,
-					"hash",
-					hex.EncodeToString(e.Point.Hash),
-					"error",
-					err,
-				)
-				return nil
-			} else {
+		switch {
+		case err == nil:
+			headerCryptoVerified = true
+			e.HeaderCryptoVerificationGeneration = headerCryptoVerificationGeneration
+			if e.PeerTipUpdate != nil {
+				e.PeerTipUpdate.HeaderCryptoVerificationGeneration = headerCryptoVerificationGeneration
+			}
+			producerAuthorizationGeneration = headerCryptoVerificationGeneration
+		case IsHeaderVerificationDeferred(err):
+			ls.config.Logger.Debug(
+				"queueing chainsync header until producer authorization can be verified",
+				"component", "ledger",
+				"slot", e.Point.Slot,
+				"hash", hex.EncodeToString(e.Point.Hash),
+				"error", err,
+			)
+			headerCryptoVerificationGeneration = 0
+			producerAuthorizationGeneration = 0
+			clearChainsyncHeaderAuthorization(&e)
+		default:
+			{
 				if ls.config.EventBus != nil {
 					ls.config.Logger.Warn(
 						"recycling connection after header verification failure",
@@ -4804,12 +4828,6 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 				)
 			}
 		}
-		headerCryptoVerified = true
-		e.HeaderCryptoVerificationGeneration = headerCryptoVerificationGeneration
-		if e.PeerTipUpdate != nil {
-			e.PeerTipUpdate.HeaderCryptoVerificationGeneration = headerCryptoVerificationGeneration
-		}
-		producerAuthorizationGeneration = headerCryptoVerificationGeneration
 	}
 	var releaseVerificationGeneration func()
 	verificationGenerationReleased := false
