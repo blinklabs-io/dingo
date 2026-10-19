@@ -1019,6 +1019,9 @@ type LedgerStateConfig struct {
 	// the public testnets keep it off). Like the CIP-50 pledge-leverage gate it
 	// is set from operator config in node.go, not derived from the network.
 	FullPotRewardsEnabled bool
+	// UtxoWholeQueryLimits bounds each LocalStateQuery GetUTxOWhole request.
+	// The zero value keeps the built-in defaults.
+	UtxoWholeQueryLimits UtxoWholeQueryLimits
 	// DelegatorInactivityEnabled turns on CIP-0163 reward-account inactivity
 	// expiry. Consensus-affecting; defaults false. Set from operator config in
 	// node.go (serve mode) and internal/node/load.go (load/replay mode), not

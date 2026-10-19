@@ -29,6 +29,27 @@
 # Env: DINGO_LOCAL_STATE_QUERY_VIEW_MAX_LIFETIME
 # localStateQueryViewMaxLifetime: "5m"
 
+# Bounds on one LocalStateQuery GetUTxOWhole request: the UTxO count, the
+# output CBOR held in memory while resolving, the encoded reply size, and the
+# run time. A request over any bound fails, and because LocalStateQuery has no
+# failure reply for a query, the client's connection is closed. Zero keeps the
+# default; a negative value removes the bound. Raising or removing these lets
+# one client make the node hold the whole UTxO set in memory (millions of
+# entries on a public network), so only do so for trusted clients.
+# Defaults: 50000 UTxOs, 33554432 bytes (32 MiB), 33554432 bytes (32 MiB), "30s"
+# CLI: --local-state-query-utxo-whole-max-items,
+#      --local-state-query-utxo-whole-max-retained-bytes,
+#      --local-state-query-utxo-whole-max-response-bytes,
+#      --local-state-query-utxo-whole-timeout
+# Env: DINGO_LOCAL_STATE_QUERY_UTXO_WHOLE_MAX_ITEMS,
+#      DINGO_LOCAL_STATE_QUERY_UTXO_WHOLE_MAX_RETAINED_BYTES,
+#      DINGO_LOCAL_STATE_QUERY_UTXO_WHOLE_MAX_RESPONSE_BYTES,
+#      DINGO_LOCAL_STATE_QUERY_UTXO_WHOLE_TIMEOUT
+# localStateQueryUtxoWholeMaxItems: 0
+# localStateQueryUtxoWholeMaxRetainedBytes: 0
+# localStateQueryUtxoWholeMaxResponseBytes: 0
+# localStateQueryUtxoWholeTimeout: "0s"
+
 # Global data directory for both blob and metadata storage plugins.
 # Can be overridden with CARDANO_DATABASE_PATH or --data-dir.
 # databasePath: ".dingo"

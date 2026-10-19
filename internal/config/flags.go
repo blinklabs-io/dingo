@@ -117,6 +117,26 @@ var flagSpecs = []flagSpec{
 		"",
 		"maximum lifetime of a local-state-query ledger snapshot",
 	),
+	intFlag(
+		"LocalStateQueryUtxoWholeMaxItems",
+		"local-state-query-utxo-whole-max-items",
+		"max UTxOs in one GetUTxOWhole reply (0 = default 50000, negative = unlimited)",
+	),
+	int64Flag(
+		"LocalStateQueryUtxoWholeMaxRetainedBytes",
+		"local-state-query-utxo-whole-max-retained-bytes",
+		"max output CBOR bytes one GetUTxOWhole request may hold (0 = default 32 MiB, negative = unlimited)",
+	),
+	int64Flag(
+		"LocalStateQueryUtxoWholeMaxResponseBytes",
+		"local-state-query-utxo-whole-max-response-bytes",
+		"max encoded GetUTxOWhole reply bytes (0 = default 32 MiB, negative = unlimited)",
+	),
+	durationFlag(
+		"LocalStateQueryUtxoWholeTimeout",
+		"local-state-query-utxo-whole-timeout",
+		"max duration of one GetUTxOWhole request (0 = default 30s, negative = unlimited)",
+	),
 	stringFlag(
 		"TlsCertFilePath",
 		"tls-cert-file-path",

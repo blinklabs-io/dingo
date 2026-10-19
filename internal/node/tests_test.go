@@ -30,6 +30,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/deferred"
 	"github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/plugin"
 	"github.com/stretchr/testify/require"
 )
@@ -603,6 +604,40 @@ func TestBuildDingoConfigWiresLocalStateQueryViewMaxLifetime(t *testing.T) {
 		7*time.Minute,
 		built.LocalStateQueryViewMaxLifetimeDuration(),
 	)
+}
+
+// TestBuildDingoConfigWiresLocalStateQueryUtxoWholeLimits follows the
+// operator's GetUTxOWhole limits from loaded config into dingo.Config,
+// including a negative (unbounded) value.
+func TestBuildDingoConfigWiresLocalStateQueryUtxoWholeLimits(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.Config{
+		LocalStateQueryUtxoWholeMaxItems:         -1,
+		LocalStateQueryUtxoWholeMaxRetainedBytes: 2,
+		LocalStateQueryUtxoWholeMaxResponseBytes: 3,
+		LocalStateQueryUtxoWholeTimeout:          4 * time.Minute,
+	}
+	logger := slog.New(slog.NewTextHandler(new(bytes.Buffer), nil))
+
+	built := buildDingoConfig(
+		cfg,
+		logger,
+		nil,
+		nil,
+		false,
+		dingo.StorageModeCore,
+		30*time.Second,
+		chainsync.DefaultStallTimeout,
+		chainsync.HeaderSyncStrategyPrimary,
+	)
+
+	require.Equal(t, ledger.UtxoWholeQueryLimits{
+		MaxItems:         -1,
+		MaxRetainedBytes: 2,
+		MaxResponseBytes: 3,
+		Timeout:          4 * time.Minute,
+	}, built.LocalStateQueryUtxoWholeLimits())
 }
 
 // TestBuildDingoConfigPreservesExplicitZeroForgeEBCaps carries the

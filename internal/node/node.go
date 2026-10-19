@@ -971,6 +971,12 @@ func buildDingoConfig(
 		dingo.WithLocalStateQueryViewMaxLifetime(
 			localStateQueryViewMaxLifetime,
 		),
+		dingo.WithLocalStateQueryUtxoWholeLimits(ledger.UtxoWholeQueryLimits{
+			MaxItems:         cfg.LocalStateQueryUtxoWholeMaxItems,
+			MaxRetainedBytes: cfg.LocalStateQueryUtxoWholeMaxRetainedBytes,
+			MaxResponseBytes: cfg.LocalStateQueryUtxoWholeMaxResponseBytes,
+			Timeout:          cfg.LocalStateQueryUtxoWholeTimeout,
+		}),
 		// Enable metrics with default prometheus registry
 		dingo.WithPrometheusRegistry(prometheus.DefaultRegisterer),
 		dingo.WithTracing(cfg.Tracing),

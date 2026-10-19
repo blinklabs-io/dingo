@@ -21,6 +21,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 	"sync"
 	"time"
@@ -75,6 +76,24 @@ var errUtxoWholeLimitExceeded = errors.New(
 	"whole UTxO query resource limit exceeded",
 )
 
+// UtxoWholeQueryLimits bounds one LocalStateQuery GetUTxOWhole request.
+// For every field, zero selects the built-in default (50,000 UTxOs, 32 MiB
+// of retained CBOR, a 32 MiB encoded response, 30 seconds) and a negative
+// value removes that bound. A request that exceeds a bound fails, and
+// because LocalStateQuery has no failure reply for a query, the client's
+// node-to-client connection is closed.
+type UtxoWholeQueryLimits struct {
+	// MaxItems is the most UTxOs one reply may contain.
+	MaxItems int
+	// MaxRetainedBytes is the most output CBOR one request may hold in
+	// memory while it resolves the UTxO set.
+	MaxRetainedBytes int64
+	// MaxResponseBytes is the largest encoded reply one request may build.
+	MaxResponseBytes int64
+	// Timeout bounds how long one request may run.
+	Timeout time.Duration
+}
+
 type utxoWholeLimits struct {
 	maxItems         int
 	maxRetainedBytes int64
@@ -82,12 +101,34 @@ type utxoWholeLimits struct {
 	timeout          time.Duration
 }
 
-func defaultUtxoWholeLimits() utxoWholeLimits {
+// resolve applies the zero-is-default, negative-is-unbounded convention. An
+// unbounded timeout is zero because queryShelleyUtxoWholeWithLimits skips the
+// deadline for a non-positive timeout.
+func (l UtxoWholeQueryLimits) resolve() utxoWholeLimits {
 	return utxoWholeLimits{
-		maxItems:         maxUtxoWholeItems,
-		maxRetainedBytes: maxUtxoWholeRetainedBytes,
-		maxResponseBytes: maxUtxoWholeResponseBytes,
-		timeout:          utxoWholeQueryTimeout,
+		maxItems: resolveUtxoWholeLimit(
+			l.MaxItems, maxUtxoWholeItems, math.MaxInt,
+		),
+		maxRetainedBytes: resolveUtxoWholeLimit(
+			l.MaxRetainedBytes, maxUtxoWholeRetainedBytes, math.MaxInt64,
+		),
+		maxResponseBytes: resolveUtxoWholeLimit(
+			l.MaxResponseBytes, maxUtxoWholeResponseBytes, math.MaxInt64,
+		),
+		timeout: resolveUtxoWholeLimit(l.Timeout, utxoWholeQueryTimeout, 0),
+	}
+}
+
+func resolveUtxoWholeLimit[T int | int64 | time.Duration](
+	configured, def, unbounded T,
+) T {
+	switch {
+	case configured == 0:
+		return def
+	case configured < 0:
+		return unbounded
+	default:
+		return configured
 	}
 }
 
@@ -214,9 +255,9 @@ func encodeUtxoWholeResult(
 // cardano-cli's own client-side guidance is that a whole-UTxO dump
 // ("query utxo --whole-utxo") is only practical against a small network.
 // Dingo enforces item, retained-CBOR, encoded-response, and execution-time
-// limits before returning a result. This keeps the query useful for devnet
-// comparison without allowing one request to retain mainnet-scale state. A
-// pinned at is slower still:
+// limits (LedgerStateConfig.UtxoWholeQueryLimits) before returning a result.
+// This keeps the query useful for devnet comparison without allowing one
+// request to retain mainnet-scale state. A pinned at is slower still:
 // IterateUtxosAsOf has no indexed shortcut for "added_slot <= X" against an X
 // near the live tip (it matches nearly every row ever created, live or already
 // spent), unlike IterateLiveUtxos' indexed deleted_slot = 0 filter -- accepted
@@ -242,7 +283,7 @@ func (ls *LedgerState) queryShelleyUtxoWhole(ctx context.Context, at QueryPoint,
 		ctx,
 		at,
 		txn,
-		defaultUtxoWholeLimits(),
+		ls.config.UtxoWholeQueryLimits.resolve(),
 	)
 }
 

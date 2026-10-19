@@ -632,6 +632,21 @@ func TestFatalDuringStartupOverridesCancellationError(t *testing.T) {
 	require.ErrorIs(t, n.resolveRunError(context.Canceled), want)
 }
 
+func TestLedgerStateConfigCarriesUtxoWholeQueryLimits(t *testing.T) {
+	t.Parallel()
+	limits := ledger.UtxoWholeQueryLimits{
+		MaxItems:         10,
+		MaxRetainedBytes: -1,
+		MaxResponseBytes: 7,
+		Timeout:          time.Minute,
+	}
+	n := &Node{config: NewConfig(WithLocalStateQueryUtxoWholeLimits(limits))}
+	require.Equal(t, limits, n.ledgerStateConfig().UtxoWholeQueryLimits)
+
+	n = &Node{config: NewConfig()}
+	require.Zero(t, n.ledgerStateConfig().UtxoWholeQueryLimits)
+}
+
 func TestLedgerFatalCallbackPreservesShutdownCause(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
