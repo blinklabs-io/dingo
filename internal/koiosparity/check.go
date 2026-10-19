@@ -1363,9 +1363,10 @@ func compareEpochAccounts(
 // compareMemberRewardsEpoch runs CompareMemberRewards for one epoch, but only
 // once the epoch's Koios account-reward fetch is complete. An absent or
 // incomplete coverage row yields no verdict at all: the member sum would be
-// formed from a partial reference, and compareEpochAccounts has already
-// reported the incompleteness (or the cache error) for the epoch. A failed
-// read of the cached rows is likewise reported there, so it is not repeated.
+// formed from a partial reference, and compareEpochAccounts reports the
+// incompleteness for the epoch. A failed read is reported here as well,
+// because these are separate reads from compareEpochAccounts' and one
+// succeeding does not imply the other did.
 func compareMemberRewardsEpoch(
 	cache *Cache,
 	network string,
@@ -1376,13 +1377,26 @@ func compareMemberRewardsEpoch(
 	graceHours int,
 	epochEndTime time.Time,
 ) []CheckMismatch {
+	readErr := func(err error) []CheckMismatch {
+		return []CheckMismatch{{
+			Network:    network,
+			Epoch:      epoch,
+			Field:      "member_rewards",
+			KoiosValue: fmt.Sprintf("error: %v", err),
+			Category:   CategoryDBError,
+			CheckedAt:  now,
+		}}
+	}
 	coverage, err := cache.GetAccountCoverage(network, epoch)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return readErr(err)
+	}
 	if err != nil || coverage == nil || !coverage.Complete {
 		return nil
 	}
 	rows, err := cache.GetAccountRewardsForEpoch(network, epoch)
 	if err != nil {
-		return nil
+		return readErr(err)
 	}
 	return CompareMemberRewards(
 		network,

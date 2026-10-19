@@ -11448,7 +11448,8 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
   Because the reference is the per-account rows, the comparison runs in the
   account phase and only once the epoch's account coverage is complete; the
   fast aggregate phase produces no `member_rewards` row and cannot strict-halt
-  on the cached value. Where `pool_history.member_rewards` disagrees with
+  on the cached value. With account checking off (the standalone CLI without
+  `--accounts`), member rewards are therefore not checked at all. Where `pool_history.member_rewards` disagrees with
   Koios's own per-account sum, the pool is recorded under the informational
   category `koios_pool_history_inconsistent`, carrying both Koios values. It
   never fails Dingo and is never used to excuse a Dingo difference.

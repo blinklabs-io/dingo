@@ -512,3 +512,23 @@ func memberRewardsFor(
 		epochEndTime,
 	)
 }
+
+// TestCompareMemberRewardsEpochReportsCacheReadError pins that a failed read
+// of the Koios cache yields an ERROR rather than no member_rewards verdict.
+// The account phase reads the same rows separately, so an error here cannot
+// be assumed to have been reported there.
+func TestCompareMemberRewardsEpochReportsCacheReadError(t *testing.T) {
+	t.Parallel()
+
+	cache, err := openTestCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	require.NoError(t, err)
+	require.NoError(t, cache.Close())
+
+	ms := compareMemberRewardsEpoch(
+		cache, "preprod", 302, nil, memberRewardsDingo("300"),
+		time.Now(), 0, time.Time{},
+	)
+	require.Len(t, ms, 1)
+	assert.Equal(t, CategoryDBError, ms[0].Category)
+	assert.Equal(t, StatusError, DetermineStatus(ms))
+}

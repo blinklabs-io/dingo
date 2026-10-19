@@ -167,7 +167,7 @@ type DingoPoolEpochData struct {
 	// MemberRewardPresent distinguishes "no reward_pool_output row yet at the
 	// stake epoch (K-1)" — reward calculation not finished for this
 	// pool/epoch — from "row exists with a genuinely empty/zero
-	// MemberRewardTotal". See ComparePoolEpoch: neither absence may be
+	// MemberRewardTotal". See CompareMemberRewards: neither absence may be
 	// silently treated as a comparison pass.
 	MemberRewardPresent bool
 	// MemberRewardTotal is reward_pool_output.member_reward_total (lovelace
