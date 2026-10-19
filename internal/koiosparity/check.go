@@ -1046,6 +1046,21 @@ func checkEpoch(
 			rewardsPending,
 			logger,
 		)
+		if dingoPoolErr == nil {
+			accountMismatches = append(
+				accountMismatches,
+				compareMemberRewardsEpoch(
+					cache,
+					network,
+					epoch,
+					koiosPools,
+					dingoPoolMap,
+					now,
+					graceHours,
+					epochEndTime,
+				)...,
+			)
+		}
 		// Tagged by provenance rather than derived from Category, which
 		// cannot tell the phases apart: both emit CategoryDBError.
 		for i := range accountMismatches {
@@ -1343,6 +1358,42 @@ func compareEpochAccounts(
 		)...,
 	)
 	return out
+}
+
+// compareMemberRewardsEpoch runs CompareMemberRewards for one epoch, but only
+// once the epoch's Koios account-reward fetch is complete. An absent or
+// incomplete coverage row yields no verdict at all: the member sum would be
+// formed from a partial reference, and compareEpochAccounts has already
+// reported the incompleteness (or the cache error) for the epoch. A failed
+// read of the cached rows is likewise reported there, so it is not repeated.
+func compareMemberRewardsEpoch(
+	cache *Cache,
+	network string,
+	epoch uint64,
+	koiosPools []KoiosPoolEpoch,
+	dingoPools map[string]*DingoPoolEpochData,
+	now time.Time,
+	graceHours int,
+	epochEndTime time.Time,
+) []CheckMismatch {
+	coverage, err := cache.GetAccountCoverage(network, epoch)
+	if err != nil || coverage == nil || !coverage.Complete {
+		return nil
+	}
+	rows, err := cache.GetAccountRewardsForEpoch(network, epoch)
+	if err != nil {
+		return nil
+	}
+	return CompareMemberRewards(
+		network,
+		epoch,
+		koiosPools,
+		rows,
+		dingoPools,
+		now,
+		graceHours,
+		epochEndTime,
+	)
 }
 
 // creditedAccountRewards converts Dingo's per-account reward calculation rows
