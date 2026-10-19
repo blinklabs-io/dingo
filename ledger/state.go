@@ -9638,6 +9638,15 @@ func (ls *LedgerState) ledgerProcessBlock(
 		); err != nil {
 			return nil, err
 		}
+	} else if !ls.config.TrustedReplay && !ls.slotCoveredByMithril(point.Slot) {
+		// The aggregate maxBlockExUnits bound is a block-level ledger rule
+		// that per-transaction validation never repeats, so a peer-sourced
+		// block must meet it even when ValidateHistorical=false skips the
+		// rest of validation. Mithril-certified and TrustedReplay blocks are
+		// trusted input and keep skipping it.
+		if err := validateBlockExUnits(block, pparams); err != nil {
+			return nil, err
+		}
 	}
 	// Validate the operational certificate counter before processing the
 	// block's transactions, so a stale or gapped opcert is rejected by this
