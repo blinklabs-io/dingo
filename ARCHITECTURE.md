@@ -4096,6 +4096,21 @@ During accepted block replay, Alonzo-and-newer validation runs the UTXO/Phase 1 
 
 `dingo load` replays blocks that never passed chainsync admission, so no header check has run on them. It sets `LedgerStateConfig.VerifyReplayHeaders`, which makes ledger apply treat every block outside Mithril-covered slots as a deferred header: `verifyDeferredBlockHeaderState` runs the full VRF, KES, operational-certificate and leader-eligibility check against the epoch nonce and stake snapshot for the block's own epoch, advancing the epoch cache across boundaries, before any mutation of the block. A failure fails closed: the batch transaction rolls back and load stops with the header error. The chain is also rewound to the ledger tip when that tip precedes the rejected block and the rollback stays above the Mithril boundary; otherwise the chain is left in place and the error still stops the load. Under manual block processing there is no pipeline loop to restart, so every recovery that rewinds a rejected block, including epoch-boundary, Leios and transaction-validation rejections, returns the rejection wrapped with `errRestartLedgerPipeline` rather than the bare sentinel. Byron blocks take the PBFT path instead of the Praos checks: their signature, genesis-delegate issuer, protocol magic and slot bound are verified, with no epoch nonce or stake lookup. Verification adds per-block cryptographic cost to bulk load.
 
+Replay chunks verify Praos header cryptography with at most eight workers,
+overlapping ordered application only for slots with a known epoch nonce.
+Input bindings and lazy header hashes are prepared before workers start inside
+the apply callback. Each batch-owned result is bound to
+the original header and body CBOR, directly read KES and operational-certificate
+fields, epoch nonce and KES parameters. Apply resolves the epoch again before
+waiting for and using a matching result; an absent or changed result takes the ordinary full
+verifier. Producer registration, stake and leader eligibility remain ordered
+apply-time checks. Receipts are consumed only while replay verification is enabled.
+Unknown epoch nonces and Byron PBFT headers stay on that
+ordered path. All workers drain before the apply callback returns, including
+after cancellation or failure, so none outlive commit or rollback. Cancellation
+does not classify a header as invalid. Verifier panics reach the existing
+apply-transaction recovery.
+
 Trusted immutable replay reduces repeated work without weakening that validation.
 It prefetches each committed chunk's referenced UTxOs and retains bounded
 cross-transaction caches, preverifies transaction signatures in parallel and
