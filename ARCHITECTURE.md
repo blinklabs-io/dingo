@@ -4074,7 +4074,12 @@ remain included because the block budget constrains declared execution, not the
 UTxO outcome. Negative values and checked-add overflow fail closed. The forging
 selector uses the same transaction-wide declared-budget helper, so it cannot
 construct a candidate that inbound envelope validation would reject on that
-block-wide budget.
+block-wide budget. A block that skips the envelope validator because
+`ValidateHistorical: false` places it below the stability cutoff still has the
+aggregate `MaxBlockExUnits` budget enforced in `ledgerProcessBlock`, since
+per-transaction validation never checks the block-wide sum. `TrustedReplay`
+input and blocks inside an imported Mithril snapshot's certified range are
+exempt.
 
 A header or block may not belong to an earlier era than the block it extends
 (`chain.ErrEraRegression`). The hard-fork combinator only moves a chain's
@@ -9985,7 +9990,8 @@ before any hard-fork translation, as the live rollover does.
 Historical block validation before the stable anchor is controlled
 independently. With `ValidateHistorical: true` (the default), ledger replay
 validates the complete from-origin replay. Setting it to `false` is an explicit
-operator choice to trust the selected peer/intersection for older blocks;
+operator choice to trust the selected peer/intersection for older blocks, apart
+from the aggregate `MaxBlockExUnits` budget, which is still enforced;
 certificate verification of a Mithril artifact is not a substitute for future
 network-block validation.
 
