@@ -988,6 +988,43 @@ type genesisFakeServer struct {
 	acquiredSlots       []uint64
 	volatileTipAcquires int
 	epochNoQueries      int
+
+	// ungated makes requestNext answer every RollForward at once instead of
+	// waiting for allowStep.
+	ungated bool
+	// conns holds every accepted connection by its client address, and
+	// chainSyncAddr the client address of the latest chainsync session.
+	conns         map[string]net.Conn
+	chainSyncAddr string
+	// closeChainSyncAtSlot, when set, makes the ShelleyEpochNoQuery for a
+	// point Acquired at this slot close the chainsync session's connection
+	// from the server side, once, before answering.
+	//
+	// The query runs inside the client's roll-forward callback. gouroboros'
+	// chainsync client sends RequestNext in batches of PipelineLimit and
+	// sends no more until it has handled every reply, so during the callback
+	// for the last reply of a batch it has nothing outstanding and is idle.
+	// gouroboros reads a peer close in that state as graceful: it closes
+	// ErrorChan without sending an error. A Dingo killed while node-parity
+	// is busy in a callback leaves exactly that. Closing at any other block
+	// leaves requests outstanding, and the close arrives as an error.
+	closeChainSyncAtSlot *uint64
+}
+
+// closeChainSyncIfArmed implements closeChainSyncAtSlot.
+func (s *genesisFakeServer) closeChainSyncIfArmed() {
+	s.mu.Lock()
+	if s.closeChainSyncAtSlot == nil ||
+		*s.closeChainSyncAtSlot != s.lastAcquiredSlot {
+		s.mu.Unlock()
+		return
+	}
+	s.closeChainSyncAtSlot = nil
+	conn := s.conns[s.chainSyncAddr]
+	s.mu.Unlock()
+	if conn != nil {
+		_ = conn.Close()
+	}
 }
 
 // queryCounts snapshots this fake's Acquire and GetEpochNo bookkeeping.
@@ -1124,13 +1161,16 @@ func (s *genesisFakeServer) allowStep(t *testing.T) {
 // findIntersect resumes at an offered chain point or origin. Empty tip
 // probes have no possible intersection and do not start a sync session.
 func (s *genesisFakeServer) findIntersect(
-	_ chainsync.CallbackContext, points []pcommon.Point,
+	ctx chainsync.CallbackContext, points []pcommon.Point,
 ) (pcommon.Point, chainsync.Tip, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if len(points) == 0 {
 		return pcommon.Point{}, s.chain.Tip(),
 			chainsync.ErrIntersectNotFound
+	}
+	if ctx.ConnectionId.RemoteAddr != nil {
+		s.chainSyncAddr = ctx.ConnectionId.RemoteAddr.String()
 	}
 	// FindIntersect starts a session, and a real server opens every session
 	// with a RollBackward (NeedsInitialRollback), not just the first one.
@@ -1189,13 +1229,16 @@ func (s *genesisFakeServer) requestNext(ctx chainsync.CallbackContext) error {
 	}
 	step := s.step
 	gone := s.sessionGone
+	ungated := s.ungated
 	s.mu.Unlock()
-	select {
-	case <-step:
-	case <-gone:
-		// A newer session has started; stop feeding this one rather than
-		// consuming a step meant for its successor.
-		return errors.New("chainsync session superseded")
+	if !ungated {
+		select {
+		case <-step:
+		case <-gone:
+			// A newer session has started; stop feeding this one rather
+			// than consuming a step meant for its successor.
+			return errors.New("chainsync session superseded")
+		}
 	}
 
 	s.mu.Lock()
@@ -1310,6 +1353,7 @@ func (s *genesisFakeServer) lsqConfig() localstatequery.Config {
 						s.mu.Lock()
 						s.epochNoQueries++
 						s.mu.Unlock()
+						s.closeChainSyncIfArmed()
 						if s.takeEpochNoFailure() {
 							return nil, errors.New(
 								"simulated epoch-number query failure",
@@ -1343,6 +1387,12 @@ func (s *genesisFakeServer) serve(t *testing.T, listener net.Listener, magic uin
 			if err != nil {
 				return
 			}
+			s.mu.Lock()
+			if s.conns == nil {
+				s.conns = make(map[string]net.Conn)
+			}
+			s.conns[conn.RemoteAddr().String()] = conn
+			s.mu.Unlock()
 			go func() {
 				oconn, err := ouroboros.New(
 					ouroboros.WithConnection(conn),
@@ -1860,6 +1910,107 @@ func TestRunFromGenesis_ResumeKeepsUTxOComparison(t *testing.T) {
 		}
 	}
 	assert.Equal(t, wantRequests, gotRequests)
+
+	cancel()
+	select {
+	case err := <-done:
+		assert.True(t, err == nil || errors.Is(err, context.Canceled))
+	case <-time.After(10 * time.Second):
+		t.Fatal("RunFromGenesis did not exit after ctx cancellation")
+	}
+}
+
+// TestRunFromGenesis_ReconnectsAfterDingoClosesConnection proves a chainsync
+// connection Dingo closes while ctx is live ends only the session, not the
+// run. See closeChainSyncAtSlot for how the fake reaches the close that
+// gouroboros reports by closing ErrorChan rather than sending an error;
+// RunFromGenesis read that as a clean stop and returned nil, so a Dingo
+// restart ended the whole run.
+func TestRunFromGenesis_ReconnectsAfterDingoClosesConnection(t *testing.T) {
+	t.Parallel()
+	const magic = 42
+	// Client.Sync sends one RequestNext, answered by the initial
+	// RollBackward; handling that sends the first batch, answered by blocks
+	// 0 to closeBlock. A later block starts epoch 3.
+	const closeBlock = chainsync.DefaultPipelineLimit - 1
+	const blockCount = closeBlock + 10
+
+	server := newGenesisFakeServer(t, blockCount)
+	server.ungated = true
+	server.epochBySlot = make(map[uint64]int, blockCount)
+	for i, p := range server.chain.Points {
+		switch {
+		case i == 0:
+			server.epochBySlot[p.Slot] = 1
+		case i < blockCount-5:
+			server.epochBySlot[p.Slot] = 2
+		default:
+			server.epochBySlot[p.Slot] = 3
+		}
+	}
+	closeAt := server.chain.Points[closeBlock].Slot
+	server.closeChainSyncAtSlot = &closeAt
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = listener.Close() })
+	server.serve(t, listener, magic)
+
+	koiosSrv := httptest.NewServer(http.NotFoundHandler())
+	t.Cleanup(koiosSrv.Close)
+	koios, err := NewKoiosClient("preview", "", koiosSrv.URL, true, true)
+	require.NoError(t, err)
+
+	logs := newLogCollector()
+	results := make(chan EpochResult, 8)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- RunFromGenesis(
+			ctx, listener.Addr().String(), "preview", magic, koios, nil,
+			func(r EpochResult) { results <- r },
+			logs.logf, nil,
+		)
+	}()
+
+	recv := func() EpochResult {
+		t.Helper()
+		select {
+		case r := <-results:
+			return r
+		case err := <-done:
+			t.Fatalf(
+				"RunFromGenesis returned %v before ctx was cancelled; logs: %v",
+				err, logs.all(),
+			)
+		case <-time.After(30 * time.Second):
+			t.Fatalf("timed out waiting for an epoch result; logs: %v", logs.all())
+		}
+		return EpochResult{}
+	}
+
+	// Block 1 starts epoch 2. closeBlock's epoch lookup then closes the
+	// connection, so epoch 3 can only be reached by a second session.
+	require.Equal(t, uint64(2), recv().Epoch)
+	require.Equal(t, uint64(3), recv().Epoch)
+
+	server.mu.Lock()
+	sessions := server.sessions
+	server.mu.Unlock()
+	assert.GreaterOrEqual(t, sessions, 2)
+	assert.True(
+		t,
+		logs.waitFor("chainsync session ended, resuming from slot", time.Second),
+		"logs: %v", logs.all(),
+	)
+
+	select {
+	case err := <-done:
+		t.Fatalf("RunFromGenesis returned %v before ctx was cancelled", err)
+	default:
+	}
 
 	cancel()
 	select {

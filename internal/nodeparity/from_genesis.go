@@ -168,6 +168,10 @@ func isRetryableDingoConnErr(err error) bool {
 		errors.Is(err, net.ErrClosed)
 }
 
+var errDingoClosedConnection = errors.New(
+	"chainsync connection closed without an error",
+)
+
 // callbackErr builds the error a chainsync roll-forward or roll-backward
 // callback returns, flattening any cause that satisfies
 // errors.Is(err, protocol.ErrProtocolShuttingDown) into a plain error
@@ -1236,6 +1240,7 @@ func RunFromGenesis(
 			}
 			continue
 		}
+		csDone := cs.Client.DoneChan()
 
 		var sessionErr error
 		select {
@@ -1246,10 +1251,25 @@ func RunFromGenesis(
 		case err, ok := <-csConn.ErrorChan():
 			stopOnCancel()
 			csConn.Close() //nolint:errcheck
+			// gouroboros closes ErrorChan without sending anything when the
+			// peer closes the connection while every protocol is idle,
+			// which includes chainsync with no RequestNext outstanding --
+			// the callback for the last reply of a pipelined batch. A closed
+			// channel is therefore not a clean stop: unless ctx ended it,
+			// Dingo went away and the session is retried.
 			if !ok {
-				return nil
+				err = errDingoClosedConnection
 			}
 			sessionErr = err
+		}
+		// The callbacks write this run's state without a lock, relying on
+		// the session being over before the next one starts. A peer close
+		// can end the session while a callback is still running, so wait
+		// for the protocol's receive loop, which runs them, to exit.
+		select {
+		case <-csDone:
+		case <-ctx.Done():
+			return ctx.Err()
 		}
 
 		ok, err := retryOrStop(

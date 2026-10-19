@@ -12784,8 +12784,10 @@ Koios. The UTxO side is a running reconstruction seeded from Dingo at the
 start point and advanced by Koios's own `/tx_info` answers for every
 transaction on the chain, so it stays independent of Dingo after its seed; a
 rollback re-baselines it and marks that epoch's UTxO verdict "not run" rather
-than reporting a comparison that would trivially match. The rollback that opens
-a resumed session lands on the block already processed, so it changes nothing
+than reporting a comparison that would trivially match. A session that ends
+for any reason, including Dingo closing the connection, is resumed from the
+last block processed after a backoff; only interruption ends the run. The
+rollback that opens a resumed session lands on the block already processed, so it changes nothing
 and keeps the comparison. A "not run" verdict names its cause: a failed
 `/tx_info` fetch, a rollback and its slot, or a baseline captured at that
 boundary.
