@@ -4518,7 +4518,12 @@ reads `TestDijkstraHardForkAtEpoch` only when that flag is true. The same
 trigger bounds `boundaryEraForBlock`'s two-era elevation: a boundary block's
 header protocol major is cardano-node's advertised `cardanoProtocolVersion`
 (11, or 12 with the flag), not its era, so it cannot carry the ledger into a
-successor whose configured epoch has not arrived. The classic update-proposal system has a voting
+successor whose configured epoch has not arrived. Leaving Byron, only a
+`TriggerAtEpoch` successor admits the elevation at all: Byron carries no
+protocol version for `ledgerBoundaryEra` to decide from, and a version
+trigger reads the entered era's own enacted parameters, which do not exist
+before its first epoch. Preprod's first Shelley blocks advertise major 3, yet
+epoch 4 runs Shelley at major 2 and Allegra begins at epoch 5. The classic update-proposal system has a voting
 deadline too: a proposal for the next epoch can be submitted or superseded
 only before `2 * stabilityWindow` before that epoch starts (the Shelley PPUP
 rule). `evaluateProtocolVersionBump` therefore reports the transition only

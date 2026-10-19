@@ -2523,6 +2523,13 @@ func (ls *LedgerState) eraTransitionPath(
 // era, so on a devnet scheduling Babbage at epoch 4 and Conway at 5 the first
 // Babbage block advertises major 11 and would otherwise pull the ledger into
 // Conway an epoch early. newEpochID is the epoch the boundary block opens.
+//
+// Leaving Byron, only a TriggerAtEpoch may elevate past the body era. A
+// version trigger is read from the era's own ledger state, and the era entered
+// at this boundary has none yet; Byron's protocol state cannot stand in for it
+// and authorizeBoundaryEra does not decide a Byron source. The first Shelley
+// blocks on preprod carry header major 3, which would otherwise open epoch 4
+// in Allegra while the chain enacts major 3 only at epoch 5.
 func (ls *LedgerState) boundaryEraForBlock(
 	currentEraID, blockEraID, headerMajor uint,
 	headerMajorKnown bool,
@@ -2542,9 +2549,12 @@ func (ls *LedgerState) boundaryEraForBlock(
 	if err != nil {
 		return targetEraID, false
 	}
-	if entry, ok := shape.EraForID(blockEraID); ok &&
-		entry.NextEraTrigger.Kind == hardfork.TriggerAtEpoch &&
-		newEpochID < entry.NextEraTrigger.Epoch {
+	entry, ok := shape.EraForID(blockEraID)
+	atEpoch := ok && entry.NextEraTrigger.Kind == hardfork.TriggerAtEpoch
+	if atEpoch && newEpochID < entry.NextEraTrigger.Epoch {
+		return targetEraID, false
+	}
+	if currentEraID == byron.EraIdByron && !atEpoch {
 		return targetEraID, false
 	}
 	path, ok := ls.eraTransitionPath(currentEraID, headerEraID, true)
