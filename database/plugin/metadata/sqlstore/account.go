@@ -185,7 +185,7 @@ func writeAccountImportBaseline(
 	if account.ImportDeposit != nil {
 		deposit = decimalUint64(*account.ImportDeposit)
 	}
-	if _, err := db.ExecContext(ctx, `
+	if _, err := db.ExecContext(ctx, `-- name: UpsertAccountImportBaseline :exec
 INSERT INTO account_import_baseline (
     credential_tag, staking_key, pool, drep, drep_type, active, added_slot,
     deposit_amount
@@ -232,7 +232,7 @@ func (s *Store) GetAccountImportRegistrationByCredential(
 		addedSlot int64
 		raw       sql.NullString
 	)
-	err = db.QueryRowContext(ctx, `
+	err = db.QueryRowContext(ctx, `-- name: GetAccountImportBaselineState :one
 SELECT active, added_slot, deposit_amount
 FROM account_import_baseline
 WHERE credential_tag = ? AND staking_key = ?`,
@@ -274,7 +274,7 @@ func readAccountImportBaseline(
 		drepType  sql.NullInt64
 		addedSlot int64
 	)
-	err := db.QueryRowContext(ctx, `
+	err := db.QueryRowContext(ctx, `-- name: GetAccountImportBaseline :one
 SELECT pool, drep, drep_type, active, added_slot
 FROM account_import_baseline
 WHERE credential_tag = ? AND staking_key = ?`,
@@ -317,7 +317,7 @@ func deleteAccountImportBaseline(
 	if err := requireAccountBaselineTransaction(db); err != nil {
 		return err
 	}
-	if _, err := db.ExecContext(ctx, `
+	if _, err := db.ExecContext(ctx, `-- name: DeleteAccountImportBaseline :exec
 DELETE FROM account_import_baseline
 WHERE credential_tag = ? AND staking_key = ?`,
 		credentialTag,

@@ -47,9 +47,9 @@ const qualifiedSQLiteUtxoColumns = "utxo.transaction_id, " +
 	"utxo.payment_script"
 
 const (
-	getLiveUtxoByRefQuery = "SELECT " + sqliteUtxoColumns +
+	getLiveUtxoByRefQuery = "-- name: GetLiveUtxoByRef :one\nSELECT " + sqliteUtxoColumns +
 		" FROM utxo WHERE tx_id = ? AND output_idx = ? AND deleted_slot = 0"
-	getUtxoIncludingSpentByRefQuery = "SELECT " + sqliteUtxoColumns +
+	getUtxoIncludingSpentByRefQuery = "-- name: GetUtxoIncludingSpentByRef :one\nSELECT " + sqliteUtxoColumns +
 		" FROM utxo WHERE tx_id = ? AND output_idx = ?"
 )
 
@@ -979,7 +979,8 @@ func producedStakeCredentialDelta(
 // to a full idx_utxo_staking_deleted_amount scan once the batch has more than
 // a handful of terms.
 func utxoStakeConsumedDeltaQuery(n int) string {
-	return "SELECT tx_id, output_idx, credential_tag, staking_key, amount " +
+	return "-- name: GetUtxoStakeConsumedDeltaBatch :many\n" +
+		"SELECT tx_id, output_idx, credential_tag, staking_key, amount " +
 		"FROM utxo WHERE tx_id IN (" +
 		strings.TrimSuffix(strings.Repeat("?,", n), ",") + ")"
 }
@@ -1172,7 +1173,8 @@ func distinctUtxoTxIDs(
 // already-deleted ones) down to the exact requested (tx_id, output_idx)
 // pairs in Go.
 func utxoStakeRefsByTxIDQuery(n int) string {
-	return "SELECT tx_id, output_idx, deleted_slot, credential_tag, " +
+	return "-- name: GetUtxoStakeRefsByTxIDs :many\n" +
+		"SELECT tx_id, output_idx, deleted_slot, credential_tag, " +
 		"staking_key FROM utxo WHERE tx_id IN (" +
 		strings.TrimSuffix(strings.Repeat("?,", n), ",") + ")"
 }
@@ -1380,7 +1382,12 @@ func utxoDeletionRowsByTxIDQuery(
 		args[i] = txID
 	}
 	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(txIDs)), ",")
-	query := "SELECT id, tx_id, output_idx, deleted_slot, credential_tag, " +
+	name := "GetUtxoRowsByTxIDs"
+	if lockRows {
+		name = "LockUtxoRowsByTxIDs"
+	}
+	query := "-- name: " + name + " :many\n" +
+		"SELECT id, tx_id, output_idx, deleted_slot, credential_tag, " +
 		"staking_key FROM utxo " +
 		"WHERE tx_id IN (" + placeholders + ")"
 	if lockRows {
@@ -2695,7 +2702,8 @@ func persistUtxoAddress(
 		return nil
 	}
 	_, err = db.ExecContext(ctx,
-		"INSERT INTO utxo_address (utxo_id, address) VALUES (?, ?) "+
+		"-- name: UpsertUtxoAddress :exec\n"+
+			"INSERT INTO utxo_address (utxo_id, address) VALUES (?, ?) "+
 			"ON CONFLICT (utxo_id) DO UPDATE SET address = excluded.address",
 		utxoID,
 		address,
@@ -3042,7 +3050,8 @@ func (s *Store) loadUtxoAssetsPointers(
 			args[i] = id
 		}
 		rows, err := db.QueryContext(ctx, s.dialect.Rebind(
-			"SELECT name, policy_id, fingerprint, id, utxo_id, amount FROM asset WHERE utxo_id IN ("+bindPlaceholders(
+			"-- name: GetAssetsByUtxoIDs :many\n"+
+				"SELECT name, policy_id, fingerprint, id, utxo_id, amount FROM asset WHERE utxo_id IN ("+bindPlaceholders(
 				end-start,
 			)+") ORDER BY id",
 		), args...)
