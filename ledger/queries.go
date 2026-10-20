@@ -1304,7 +1304,7 @@ func (ls *LedgerState) queryShelley(ctx context.Context, query *olocalstatequery
 // registration rows, which carry no per-point history.
 //
 // Not answered, so the call fails with "unsupported query type":
-// ShelleyPoolStateQuery, ShelleyPoolDistrQuery and
+// ShelleyPoolStateQuery and
 // ShelleyNonMyopicMemberRewardsQuery, which decode but have no handler here;
 // ShelleyRewardInfoPoolsQuery, ShelleyRewardProvenanceQuery,
 // ShelleyDebugEpochStateQuery and ShelleyDebugNewEpochStateQuery, which need
@@ -1362,6 +1362,8 @@ func (ls *LedgerState) queryShelleyLeaf(ctx context.Context, query any,
 		return ls.queryShelleyDebugChainDepState(ctx, at, txn)
 	case *olocalstatequery.ShelleyPoolDistr2Query:
 		return ls.queryShelleyPoolDistr2(ctx, q, at, txn)
+	case *olocalstatequery.ShelleyPoolDistrQuery:
+		return ls.queryShelleyPoolDistr(ctx, q, at, txn)
 	case *olocalstatequery.ShelleyStakeDistributionQuery:
 		return ls.queryShelleyStakeDistribution(ctx, at, txn)
 	case *olocalstatequery.ShelleyStakeDistribution2Query:
@@ -1382,7 +1384,6 @@ func (ls *LedgerState) queryShelleyLeaf(ctx context.Context, query any,
 		case *olocalstatequery.ShelleyRewardProvenanceQuery:
 		case *olocalstatequery.ShelleyRewardInfoPoolsQuery:
 		case *olocalstatequery.ShelleyPoolStateQuery:
-		case *olocalstatequery.ShelleyPoolDistrQuery:
 	*/
 	default:
 		return nil, fmt.Errorf("unsupported query type: %T", q)
@@ -1475,7 +1476,8 @@ func (ls *LedgerState) queryShelleyCbor(ctx context.Context, q *olocalstatequery
 	}
 	var content any = values
 	switch q.Query.(type) {
-	case *olocalstatequery.ShelleyPoolDistr2Query,
+	case *olocalstatequery.ShelleyPoolDistrQuery,
+		*olocalstatequery.ShelleyPoolDistr2Query,
 		*olocalstatequery.ShelleyStakeDistributionQuery,
 		*olocalstatequery.ShelleyStakeDistribution2Query:
 		// content stays the whole slice; see comment above.
