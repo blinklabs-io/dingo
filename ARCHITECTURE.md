@@ -10890,6 +10890,23 @@ request error instead of panicking inside the handler.
 TLS is configured through `plugins.api.mesh.config.tls`; see "API security"
 above.
 
+`/account/coins` runs under the request context and reads one
+`UtxosByAddressBoundedPage` page (500 UTxOs, 5000 scanned candidates, 1 MiB
+of retained output CBOR) for the exact address; native assets come from the
+retained CBOR. A standard request receives every coin of the address when
+that read exhausts it, and otherwise fails with `ErrInvalidRequest` naming
+the opt-in, because Mesh clients treat an omitted coin as absent. Paging is
+opt-in: request `metadata.paginate: true` returns the page, with
+`metadata.next_cursor` (an opaque `slot:block_index:output_idx:tx_id` token)
+when the address is not exhausted, and the client continues by sending it as
+request `metadata.cursor`, which implies paging. A paged response can carry
+no coins and still a cursor when the page examined only other addresses
+sharing the payment credential. A malformed cursor or non-boolean `paginate`
+is `ErrInvalidRequest`. At most 8 such reads run at once; a request that finds
+no free slot is refused at once with `ErrUnavailable` instead of queueing. A
+cancelled request stops the read between rows.
+`/account/balance` is unchanged.
+
 Implements the Mesh (formerly Rosetta) API specification for wallet integration and chain analysis. Provides endpoints for network status, account balances, block queries, transaction construction, and mempool access.
 
 Mesh `network/status` reports `synced` only when the optional ledger sync
