@@ -1057,9 +1057,10 @@ these series carries a connection or peer label.
   `validate` and `apply` are also recorded for a chunk that fails or applies
   no block. For a recorded chunk the four stages sum to no more than its batch
   latency; the remainder is the rest of the transaction body (block
-  processing outside `validate`, and the nonce and tip writes) plus the
-  post-commit tip update. `header_verify` and `epoch_rollover` run
-  outside that window.
+  processing outside `validate`, the nonce and tip writes, and the
+  validation and writes of a certified Leios endorser block's transactions,
+  which no stage observes) plus the post-commit tip update. `header_verify`
+  and `epoch_rollover` run outside that window.
 - `dingo_ledger_blockfetch_batch_in_flight`,
   `dingo_ledger_blockfetch_continuation_pending` and
   `dingo_ledger_blockfetch_connection_selected` mirror
