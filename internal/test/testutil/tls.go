@@ -23,10 +23,14 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"math/big"
+	mathrand "math/rand/v2"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -39,17 +43,81 @@ import (
 // UTxO RPC).
 const BindAttempts = 8
 
-// FreePort reserves a loopback port and releases it, returning the bound
+// FreePort draws a loopback port no other process is using and returns its
 // address ("host:port"). The port is not guaranteed to still be free when
 // the caller binds it -- retry up to BindAttempts times instead of treating
 // one bind failure as a test failure.
+//
+// The port comes from below the host's ephemeral range rather than from the
+// kernel's port-0 assignment. Every process on the host draws ports from the
+// ephemeral range for its outgoing connections and port-0 listeners, so a
+// port from there can be taken the moment it is released: a test that stops
+// a server and then rebinds or probes the same port would fail on another
+// package's traffic rather than on its own code.
 func FreePort(t *testing.T) string {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	addr := ln.Addr().String()
-	require.NoError(t, ln.Close())
-	return addr
+	high := min(freePortHigh, firstEphemeralPort())
+	require.Greater(
+		t, high, freePortLow,
+		"the host's ephemeral port range leaves no ports below it",
+	)
+	freePortMu.Lock()
+	defer freePortMu.Unlock()
+	for range freePortProbes {
+		//nolint:gosec // test port selection, not a secret
+		port := freePortLow + mathrand.IntN(high-freePortLow)
+		if _, issued := freePortIssued[port]; issued {
+			continue
+		}
+		addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
+		ln, err := net.Listen("tcp", addr)
+		if err != nil {
+			continue
+		}
+		require.NoError(t, ln.Close())
+		freePortIssued[port] = struct{}{}
+		return addr
+	}
+	t.Fatalf(
+		"no free loopback port in [%d, %d) after %d probes",
+		freePortLow, high, freePortProbes,
+	)
+	return ""
+}
+
+// FreePort draws from [freePortLow, freePortHigh): below the first ephemeral
+// port of every supported host (32768 on Linux by default, 49152 on macOS and
+// Windows), and above the registered ports a test host's services listen on.
+const (
+	freePortLow    = 20000
+	freePortHigh   = 32768
+	freePortProbes = 1000
+)
+
+// freePortIssued records every port FreePort has handed out in this process,
+// so two parallel tests cannot both be given a port neither has bound yet.
+var (
+	freePortMu     sync.Mutex
+	freePortIssued = make(map[int]struct{})
+)
+
+// firstEphemeralPort returns the lowest port Linux assigns to an unbound
+// socket, which an administrator can lower below the default. Elsewhere it
+// returns freePortHigh, which the defaults already sit above.
+func firstEphemeralPort() int {
+	raw, err := os.ReadFile("/proc/sys/net/ipv4/ip_local_port_range")
+	if err != nil {
+		return freePortHigh
+	}
+	fields := strings.Fields(string(raw))
+	if len(fields) == 0 {
+		return freePortHigh
+	}
+	first, err := strconv.Atoi(fields[0])
+	if err != nil {
+		return freePortHigh
+	}
+	return first
 }
 
 // InsecureHTTPClient returns an *http.Client that skips TLS certificate
