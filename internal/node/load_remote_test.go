@@ -20,6 +20,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -997,4 +998,66 @@ func TestLoadWithDBRemoteRootRequiresADatabasePath(t *testing.T) {
 		newTestDB(t),
 	)
 	require.ErrorContains(t, err, "requires databasePath")
+}
+
+func TestRedactRemoteImmutableURLDropsQueryAndFragment(t *testing.T) {
+	t.Parallel()
+	got := redactRemoteImmutableURL(
+		"https://archive-user:archive-secret@example.invalid/tip.json" +
+			"?token=query-secret&x=1#frag-secret",
+	)
+	require.Equal(t, "https://example.invalid/tip.json", got)
+	got = redactRemoteImmutableURL("https://example.invalid/tip.json?#frag")
+	require.Equal(t, "https://example.invalid/tip.json", got)
+}
+
+func TestRemoteImmutableRequestErrorRedactsQueryCredentials(t *testing.T) {
+	t.Parallel()
+	const rawURL = "https://example.invalid/00000.chunk?token=query-secret"
+	for name, cause := range map[string]error{
+		"url error": &url.Error{
+			Op: "Get", URL: rawURL, Err: errors.New("connection refused"),
+		},
+		"nested url in cause": &url.Error{
+			Op: "Get", URL: rawURL,
+			Err: fmt.Errorf(
+				"redirect to %q failed: connection refused",
+				"https://other.invalid/x?token=query-secret#frag-secret",
+			),
+		},
+		"bare cause": fmt.Errorf("dial %s: connection refused", rawURL),
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			err := remoteImmutableRequestError("fetching", rawURL, cause)
+			require.NotContains(t, err.Error(), "query-secret")
+			require.NotContains(t, err.Error(), "frag-secret")
+			require.ErrorContains(t, err, "connection refused")
+		})
+	}
+}
+
+func TestFetchRemoteFileOnceRedactsQueryCredentials(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			// A redirect target that cannot be parsed makes the client
+			// quote the Location value in its error.
+			w.Header().Set("Location", "http://[::1/x?token=query-secret")
+			w.WriteHeader(http.StatusFound)
+		},
+	))
+	t.Cleanup(server.Close)
+	partPath := filepath.Join(t.TempDir(), "00000.chunk.part")
+	client, budget := newRemoteImmutableTestClientAndBudget(
+		t, server.URL, filepath.Dir(partPath), remoteImmutableLimits{
+			imported: 17, cache: 17, concurrent: 1,
+		},
+	)
+	err := fetchRemoteFileOnceWithClient(
+		context.Background(), client, budget,
+		server.URL+"/00000.chunk?token=query-secret", partPath, 16,
+	)
+	require.Error(t, err)
+	require.NotContains(t, err.Error(), "query-secret")
 }

@@ -30,6 +30,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -420,17 +421,44 @@ func redactRemoteImmutableURL(value string) string {
 		return "remote ImmutableDB URL"
 	}
 	u.User = nil
+	u.RawQuery = ""
+	u.ForceQuery = false
+	u.Fragment = ""
+	u.RawFragment = ""
 	return u.String()
 }
+
+// remoteImmutableURLText matches URL-shaped text in an error message. The
+// final class excludes trailing punctuation so it stays in the message.
+var remoteImmutableURLText = regexp.MustCompile(
+	`(?i)https?://[^\s"']*[^\s"':,.;)]`,
+)
+
+// redactedRemoteImmutableError keeps the original error reachable through
+// Unwrap for errors.Is and errors.As while its message carries no URL
+// userinfo, query or fragment.
+type redactedRemoteImmutableError struct {
+	msg string
+	err error
+}
+
+func (e *redactedRemoteImmutableError) Error() string { return e.msg }
+
+func (e *redactedRemoteImmutableError) Unwrap() error { return e.err }
 
 func remoteImmutableRequestError(action, requestURL string, err error) error {
 	var urlErr *url.Error
 	if errors.As(err, &urlErr) && urlErr.Err != nil {
 		err = urlErr.Err
 	}
-	return fmt.Errorf(
-		"%s %s: %w", action, redactRemoteImmutableURL(requestURL), err,
+	msg := fmt.Sprintf(
+		"%s %s: %s", action, redactRemoteImmutableURL(requestURL), err,
 	)
+	// Transport causes can quote the request or a redirect target verbatim.
+	msg = remoteImmutableURLText.ReplaceAllStringFunc(
+		msg, redactRemoteImmutableURL,
+	)
+	return &redactedRemoteImmutableError{msg: msg, err: err}
 }
 
 func isLoopbackRemoteURL(u *url.URL) bool {
