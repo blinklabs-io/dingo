@@ -33,6 +33,10 @@ type Dialect interface {
 	ParameterLimit() int
 	BeginOptions(readOnly bool) *sql.TxOptions
 	SetBulkMode(context.Context, Execer) error
+	// SetCatchUpMode applies the crash-safe subset of bulk tuning to a
+	// database that keeps serving: memory only, never durability. A backend
+	// with no such subset issues nothing. RestoreNormalMode undoes it.
+	SetCatchUpMode(context.Context, Execer) error
 	RestoreNormalMode(context.Context, Execer) error
 	UpdatePlannerStats(context.Context, Execer) error
 	// OptimizePlannerStats runs the backend's incremental statistics
@@ -72,6 +76,7 @@ type dialect struct {
 	rebind         func(string) string
 	beginOptions   func(bool) *sql.TxOptions
 	setBulk        func(context.Context, Execer) error
+	setCatchUp     func(context.Context, Execer) error
 	restore        func(context.Context, Execer) error
 	analyze        func(context.Context, Execer) error
 	optimize       func(context.Context, Execer) error
@@ -101,6 +106,13 @@ func (d dialect) BeginOptions(readOnly bool) *sql.TxOptions {
 
 func (d dialect) SetBulkMode(ctx context.Context, exec Execer) error {
 	return d.setBulk(ctx, exec)
+}
+
+func (d dialect) SetCatchUpMode(ctx context.Context, exec Execer) error {
+	if d.setCatchUp == nil {
+		return nil
+	}
+	return d.setCatchUp(ctx, exec)
 }
 
 func (d dialect) RestoreNormalMode(ctx context.Context, exec Execer) error {
@@ -297,6 +309,15 @@ func SQLiteDialect() Dialect {
 			)
 			return err
 		},
+		// Only the page cache and temporary storage change: synchronous and
+		// the journal keep their normal settings, because the node keeps
+		// serving and committing while it catches up, and a power loss must
+		// not lose more than it would at any other time. mmap_size is
+		// already set on every connection by the DSN.
+		setCatchUp: execStatements(
+			"PRAGMA cache_size = -200000",
+			"PRAGMA temp_store = MEMORY",
+		),
 		// wal_autocheckpoint is restored to 10000, not SQLite's compiled-in
 		// default of 1000: the per-connection DSN pragmas
 		// (sqliteCommonPragmas in database/plugin/metadata/sqlite/

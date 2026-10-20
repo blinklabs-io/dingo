@@ -1938,3 +1938,80 @@ func TestCopyBlocksDirectRejectsAlteredBlockBody(t *testing.T) {
 	require.ErrorAs(t, err, &validationErr)
 	assert.Equal(t, lcommon.ValidationErrorTypeBodyHash, validationErr.Type)
 }
+
+// CopyImmutableBlocks follows the storage-mode rule of the bulk copy: Core
+// resolution never reads produced-UTxO offsets, so only API mode stores them.
+func TestCopyImmutableBlocksStoresUtxoOffsetsOnlyInAPIMode(t *testing.T) {
+	t.Parallel()
+
+	imm, err := immutable.New(filepath.Join(
+		"..", "..", "database", "immutable", "testdata",
+	))
+	require.NoError(t, err)
+	iter, err := imm.BlocksFromPoint(ocommon.Point{})
+	require.NoError(t, err)
+	defer iter.Close()
+
+	var blocks []immutable.Block
+	var txHash []byte
+	var outputIdx uint32
+	for range 10_000 {
+		block, err := iter.Next()
+		require.NoError(t, err)
+		if block == nil {
+			break
+		}
+		blocks = append(blocks, *block)
+		if block.IsEbb {
+			continue
+		}
+		decoded, err := gledger.NewBlockFromCbor(
+			block.Type,
+			block.Cbor,
+			lcommon.VerifyConfig{SkipBodyHashValidation: true},
+		)
+		require.NoError(t, err)
+		for _, tx := range decoded.Transactions() {
+			if produced := tx.Produced(); len(produced) > 0 {
+				txHash = bytes.Clone(tx.Hash().Bytes())
+				outputIdx = produced[0].Id.Index()
+				break
+			}
+		}
+		if len(txHash) > 0 {
+			break
+		}
+	}
+	require.NotEmpty(t, txHash, "fixture has no produced UTxO")
+
+	for _, mode := range []string{types.StorageModeCore, types.StorageModeAPI} {
+		t.Run(mode, func(t *testing.T) {
+			t.Parallel()
+			db, err := dbtest.NewDatabase(t, &database.Config{
+				Logger:      slog.New(slog.DiscardHandler),
+				StorageMode: mode,
+			})
+			require.NoError(t, err)
+			t.Cleanup(func() {
+				dbtest.CloseDatabase(db) //nolint:errcheck
+			})
+			cm, err := chain.NewManager(t.Context(), db, nil)
+			require.NoError(t, err)
+
+			copied, err := CopyImmutableBlocks(
+				t.Context(), cm.PrimaryChain(), blocks,
+			)
+			require.NoError(t, err)
+			require.Equal(t, len(blocks), copied)
+
+			blobTxn := db.BlobTxn(false)
+			defer blobTxn.Rollback() //nolint:errcheck
+			_, err = db.Blob().GetUtxo(blobTxn.Blob(), txHash, outputIdx)
+			if mode == types.StorageModeCore {
+				require.ErrorIs(t, err, types.ErrBlobKeyNotFound)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}

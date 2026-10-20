@@ -27,6 +27,7 @@ import (
 	"strings"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/deferred"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/labelcodec"
 	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -1469,11 +1470,13 @@ SELECT hash FROM "transaction" WHERE slot > ?`,
 				for i, hash := range hashes[start:end] {
 					args[i] = hash
 				}
-				stakeRows, err := db.QueryContext(ctx, `
-SELECT DISTINCT credential_tag, staking_key FROM utxo
-WHERE spent_at_tx_id IN (`+bindPlaceholders(len(args))+`)`,
-					args...,
+				stakeQuery, err := s.rollbackSpentStakeRefsQuery(
+					ctx, db, len(args),
 				)
+				if err != nil {
+					return err
+				}
+				stakeRows, err := db.QueryContext(ctx, stakeQuery, args...)
 				if err != nil {
 					return err
 				}
@@ -1545,7 +1548,11 @@ DELETE FROM asset_mint_burn WHERE slot > ?`,
 			); err != nil {
 				return err
 			}
-			return s.refreshRewardLiveStakeRefs(ctx, db, refs, slot)
+			// The stake lookup returns one row per spent UTxO; refresh each
+			// credential once.
+			return s.refreshRewardLiveStakeRefs(
+				ctx, db, mergeStakeCredentialRefs(refs), slot,
+			)
 		},
 	)
 }
@@ -2043,4 +2050,51 @@ func recordTransactionLedgerContext(ctx context.Context, db queryer, transaction
 	}
 	_, err = db.ExecContext(ctx, `INSERT INTO leios_transaction_context (transaction_id, slot) VALUES (?, ?) ON CONFLICT (transaction_id) DO UPDATE SET slot = excluded.slot`, transactionID, value)
 	return err
+}
+
+// rollbackSpentStakeRefsIndex is the spender index the rollback stake lookup
+// reads. It is a deferred index, so it can be absent while a bulk-load
+// rebuild is pending.
+var rollbackSpentStakeRefsIndex = deferred.Index{
+	Name:  "idx_utxo_spent_at_tx_id",
+	Table: "utxo",
+}
+
+// rollbackSpentStakeRefsQuery returns the statement that collects the stake
+// credentials of the UTxOs spent by n rolled-back transactions.
+//
+// On SQLite the statement names idx_utxo_spent_at_tx_id whenever that index
+// exists. Its statistics are unreliable: utxo statistics taken over an
+// imported, never-spent UTxO set record spent_at_tx_id as one value covering
+// every row, and the table never grows enough afterwards for the incremental
+// refresh to re-analyze it. With those statistics a single-hash lookup was
+// planned as a pass over every utxo row, holding the ledger write lock for
+// tens of seconds on a mainnet-sized table. Without the index any plan scans,
+// so the hint is dropped rather than failing the rollback.
+//
+// There is no DISTINCT: it lets SQLite satisfy the query by walking
+// idx_utxo_staking_deleted_amount in credential order, and the caller
+// deduplicates in Go across all chunks anyway.
+func (s *Store) rollbackSpentStakeRefsQuery(
+	ctx context.Context,
+	db queryer,
+	n int,
+) (string, error) {
+	from := "FROM utxo"
+	if s.dialect.Name() == "sqlite" {
+		exists, err := s.deferredIndexExists(
+			ctx, db, rollbackSpentStakeRefsIndex,
+		)
+		if err != nil {
+			return "", fmt.Errorf(
+				"check %s: %w", rollbackSpentStakeRefsIndex.Name, err,
+			)
+		}
+		if exists {
+			from += " INDEXED BY " + rollbackSpentStakeRefsIndex.Name
+		}
+	}
+	return "-- name: GetRollbackSpentStakeRefs\n" +
+		"SELECT credential_tag, staking_key " + from + "\n" +
+		"WHERE spent_at_tx_id IN (" + bindPlaceholders(n) + ")", nil
 }

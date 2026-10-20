@@ -99,6 +99,12 @@ const (
 	DefaultForgeStaleGapThresholdSlots = 1000
 	DefaultHealthPort                  = 12799
 	DefaultMithrilServerPort           = 8081
+	DefaultMithrilWindowChunks         = 64
+	DefaultMithrilBatchChunks          = 8
+	DefaultMithrilDownloadWorkers      = 16
+	DefaultMithrilMinGapChunks         = 4
+	DefaultMithrilCheckInterval        = 10 * time.Minute
+	DefaultMithrilRetryBackoff         = 30 * time.Minute
 	// DefaultHealthReadyGapSlots matches
 	// DefaultForgeStaleGapThresholdSlots: both answer "has this node
 	// stopped following the chain?", and a readiness probe that flapped
@@ -1327,8 +1333,30 @@ func ReapplyMidnightNetworkDefaults(cfg *Config, previousNetwork string) {
 
 // MithrilConfig holds configuration for Mithril snapshot bootstrapping.
 type MithrilConfig struct {
-	// Enabled controls whether Mithril integration is available.
+	// Enabled makes `dingo serve` sync from Mithril while it is behind the
+	// aggregator's certified immutable tip, falling back to Ouroboros on any
+	// failure. It requires core storage mode and defaults to false, which
+	// leaves serve with Ouroboros only. `dingo mithril sync` does not consult
+	// it.
 	Enabled bool `yaml:"enabled"                envconfig:"DINGO_MITHRIL_ENABLED"`
+	// WindowChunks bounds the immutable chunks held on disk at once while a
+	// node-managed sync downloads ahead of ledger replay. They wait
+	// undecoded, so it does not bound memory; BatchChunks does.
+	WindowChunks int `yaml:"windowChunks"           envconfig:"DINGO_MITHRIL_WINDOW_CHUNKS"`
+	// BatchChunks is the number of chunks applied per ledger batch. It must
+	// not exceed WindowChunks.
+	BatchChunks int `yaml:"batchChunks"            envconfig:"DINGO_MITHRIL_BATCH_CHUNKS"`
+	// DownloadWorkers is the number of concurrent chunk downloads.
+	DownloadWorkers int `yaml:"downloadWorkers"        envconfig:"DINGO_MITHRIL_DOWNLOAD_WORKERS"`
+	// MinGapChunks is the smallest number of certified chunks ahead of the
+	// applied tip that makes a node-managed sync worth starting.
+	MinGapChunks uint64 `yaml:"minGapChunks"           envconfig:"DINGO_MITHRIL_MIN_GAP_CHUNKS"`
+	// CheckInterval is how often a live node re-checks the aggregator for a
+	// gap worth syncing.
+	CheckInterval time.Duration `yaml:"checkInterval"          envconfig:"DINGO_MITHRIL_CHECK_INTERVAL"`
+	// RetryBackoff is how long node-managed sync waits after a Mithril
+	// failure before trying again; Ouroboros keeps syncing meanwhile.
+	RetryBackoff time.Duration `yaml:"retryBackoff"           envconfig:"DINGO_MITHRIL_RETRY_BACKOFF"`
 	// AggregatorURL overrides the default aggregator URL for the network.
 	// If empty, the URL is auto-detected from the configured network.
 	AggregatorURL string `yaml:"aggregatorUrl"          envconfig:"DINGO_MITHRIL_AGGREGATOR_URL"`
@@ -1593,7 +1621,13 @@ func newDefaultConfig() *Config {
 		MaxKESEvolutions:  62,     // 2^6 - 2 for KES depth 6
 		// Mithril defaults
 		Mithril: MithrilConfig{
-			Enabled:            true,
+			Enabled:            false,
+			WindowChunks:       DefaultMithrilWindowChunks,
+			BatchChunks:        DefaultMithrilBatchChunks,
+			DownloadWorkers:    DefaultMithrilDownloadWorkers,
+			MinGapChunks:       DefaultMithrilMinGapChunks,
+			CheckInterval:      DefaultMithrilCheckInterval,
+			RetryBackoff:       DefaultMithrilRetryBackoff,
 			Backend:            "v2",
 			CleanupAfterLoad:   true,
 			VerifyCertificates: true,

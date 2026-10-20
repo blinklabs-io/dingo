@@ -81,6 +81,12 @@ const (
 	// from fresh intersect points. It is not a peer-fault signal and does not
 	// impose a peer cooldown.
 	ChainsyncResyncReasonBehindLocalTip = "behind local tip"
+	// ChainsyncResyncReasonNetworkIngestReleased re-intersects every tracked
+	// ChainSync client from the current chain tip when a network ingest hold
+	// is released: while held, each client's cursor ran ahead of the chain
+	// with its headers dropped. It carries no ConnectionId, is not a
+	// peer-fault signal and does not impose a peer cooldown.
+	ChainsyncResyncReasonNetworkIngestReleased = "network ingest released"
 )
 
 // ChainsyncResyncEvent carries the connection ID that should

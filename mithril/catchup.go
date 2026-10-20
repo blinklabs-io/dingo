@@ -35,6 +35,13 @@ var errCatchUpLocalAhead = errors.New(
 	"local chain is ahead of the target Mithril artifact",
 )
 
+// ErrNotOnCertifiedChain reports a local chain whose tip is not on the chain
+// a Mithril certificate covers. Nothing certified can be applied on top of
+// it; the caller must leave the database alone and sync from peers instead.
+var ErrNotOnCertifiedChain = errors.New(
+	"local chain is not on the certified Mithril chain",
+)
+
 // ErrRewardStateRepairWaitingForSnapshot means the selected certified state
 // does not reach the database's existing stable Mithril ledger point.
 var ErrRewardStateRepairWaitingForSnapshot = errors.New(
@@ -195,8 +202,9 @@ func verifyCatchupIntersection(
 			"local chain diverges from the target Mithril v2 artifact at "+
 				"slot %d (local block %x; artifact has slot %d block %x); "+
 				"the existing database was left untouched because catch-up "+
-				"cannot safely reconcile divergent chains",
+				"cannot safely reconcile divergent chains: %w",
 			tip.Slot, tip.Hash, first.Slot, first.Hash,
+			ErrNotOnCertifiedChain,
 		)
 	}
 	logger.Info(
@@ -221,9 +229,24 @@ func verifyLocalAheadOfArtifactTip(
 	if artifactTip == nil {
 		return errors.New("catch-up: target immutable DB has no chain tip")
 	}
+	return verifyLocalDescendsFromArtifactTip(
+		ctx, db, localTip, *artifactTip, logger,
+	)
+}
+
+// verifyLocalDescendsFromArtifactTip classifies a local tip above the last
+// certified block: errCatchUpLocalAhead when that block is an ancestor of the
+// local tip, an error wrapping ErrNotOnCertifiedChain when it is not.
+func verifyLocalDescendsFromArtifactTip(
+	ctx context.Context,
+	db *database.Database,
+	localTip models.Block,
+	artifactTip ocommon.Point,
+	logger *slog.Logger,
+) error {
 	containsArtifactTip, err := localChainDescendsFromPoint(
 		ctx,
-		db, localTip, *artifactTip,
+		db, localTip, artifactTip,
 	)
 	if err != nil {
 		return fmt.Errorf("checking local chain ancestry: %w", err)
@@ -242,8 +265,9 @@ func verifyLocalAheadOfArtifactTip(
 			"slot %d (local tip slot %d block %x; artifact tip block %x "+
 			"is not an ancestor of the local tip); the existing database was "+
 			"left untouched because catch-up cannot safely reconcile divergent "+
-			"chains",
+			"chains: %w",
 		artifactTip.Slot, localTip.Slot, localTip.Hash, artifactTip.Hash,
+		ErrNotOnCertifiedChain,
 	)
 }
 

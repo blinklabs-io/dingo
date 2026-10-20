@@ -1641,6 +1641,51 @@ func copyImmutableBlobsBounded(
 	return blocksCopied, lastSlot, nil
 }
 
+// CopyImmutableBlocks appends blocks, in ascending order, to c and, outside
+// Core storage mode, stores each block's produced-UTxO offsets in the same
+// transaction, as the bulk ImmutableDB copy does. Core resolution never reads
+// those offsets, so a Core copy skips them; it does not record the immutable
+// offset completion marker in either mode. The blocks must come from a
+// verified immutable trio: only the header is decoded, and only for the
+// chain's continuity fields. It returns the number of blocks added.
+func CopyImmutableBlocks(
+	ctx context.Context,
+	c *chain.Chain,
+	blocks []immutable.Block,
+) (int, error) {
+	callback := func(rb chain.RawBlock, txn *database.Txn) error {
+		if db := txn.DB(); db != nil &&
+			db.StorageMode() == datatypes.StorageModeCore {
+			return nil
+		}
+		_, err := storeRawBlockUtxoOffsets(txn, rb)
+		return err
+	}
+	copied := 0
+	batch := make([]chain.RawBlock, 0, min(len(blocks), loadBlockBatchSize))
+	for i := range blocks {
+		rawBlock, err := rawBlockFromImmutableBlock(&blocks[i])
+		if err != nil {
+			return copied, fmt.Errorf(
+				"building raw block at slot %d: %w", blocks[i].Slot, err,
+			)
+		}
+		batch = append(batch, rawBlock)
+		if len(batch) < loadBlockBatchSize && i < len(blocks)-1 {
+			continue
+		}
+		if err := c.AddRawBlocksWithCallback(ctx, batch, callback); err != nil {
+			return copied, fmt.Errorf("failed to import block: %w", err)
+		}
+		copied += len(batch)
+		batch = batch[:0]
+		if err := ctx.Err(); err != nil {
+			return copied, err
+		}
+	}
+	return copied, nil
+}
+
 // copyBlocksRawWithCallback is a lightweight variant of copyBlocks that
 // decodes only block headers instead of full blocks. This is significantly
 // faster for bulk loading since it skips decoding transaction bodies and

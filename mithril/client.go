@@ -1134,17 +1134,33 @@ func (c *Client) doGet(
 		bodyBytes, _ := io.ReadAll(
 			io.LimitReader(resp.Body, 1024),
 		)
-		return nil, redactLocationError(fmt.Errorf(
-			"unexpected status %d: %s",
-			resp.StatusCode,
-			EscapeText(string(bodyBytes)),
-		), reqURL)
+		return nil, redactLocationError(&aggregatorStatusError{
+			code: resp.StatusCode,
+			body: EscapeText(string(bodyBytes)),
+		}, reqURL)
 	}
 
 	return &limitedReadCloser{
 		Reader: io.LimitReader(resp.Body, maxResponseBytes),
 		Closer: resp.Body,
 	}, nil
+}
+
+// aggregatorStatusError is an aggregator response other than 200 OK.
+type aggregatorStatusError struct {
+	code int
+	body string
+}
+
+func (e *aggregatorStatusError) Error() string {
+	return fmt.Sprintf("unexpected status %d: %s", e.code, e.body)
+}
+
+// isAggregatorNotFound reports whether err is the aggregator answering 404:
+// it no longer serves, or never served, what was asked for.
+func isAggregatorNotFound(err error) bool {
+	var statusErr *aggregatorStatusError
+	return errors.As(err, &statusErr) && statusErr.code == http.StatusNotFound
 }
 
 func decodePrimaryEncodedBytes(data string) ([]byte, bool) {

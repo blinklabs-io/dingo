@@ -1533,6 +1533,27 @@ func (d *Database) UtxosByAssets(
 // this marker would therefore leave the live UTxO set incomplete.
 const ConsumedUtxoPruneFloorSyncKey = "consumed_utxo_prune_floor"
 
+// CountUtxosConsumedUpTo counts, up to limit, the spent UTxO rows that
+// UtxosDeleteConsumed with the same slot would remove. It reads at most limit
+// rows, so a result equal to limit means at least that many.
+func (d *Database) CountUtxosConsumedUpTo(
+	ctx context.Context,
+	slot uint64,
+	limit int,
+) (int, error) {
+	txn := d.Transaction(ctx, false)
+	defer txn.Rollback() //nolint:errcheck
+	utxos, err := d.utxoStore().GetUtxosDeletedBeforeSlot(
+		slot,
+		limit,
+		txn.Metadata(),
+	)
+	if err != nil {
+		return 0, fmt.Errorf("count consumed UTxOs: %w", err)
+	}
+	return len(utxos), nil
+}
+
 func (d *Database) UtxosDeleteConsumed(
 	ctx context.Context,
 	slot uint64,
@@ -1617,6 +1638,47 @@ func (d *Database) UtxosDeleteConsumed(
 	}
 
 	return utxoCount, nil
+}
+
+// UtxosDeleteSpentInBatch removes the rows of outputs that one trusted batch
+// both created and spent, inside the transaction that applied it, so they are
+// never committed. Every id must name a row the same transaction has already
+// marked spent. slot is the last slot the transaction applied; the
+// consumed-UTxO prune floor is raised to it, as UtxosDeleteConsumed does,
+// because a rollback below it could not restore the removed rows.
+func (d *Database) UtxosDeleteSpentInBatch(
+	ids []models.UtxoId,
+	slot uint64,
+	txn *Txn,
+) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	if txn == nil {
+		return types.ErrNilTxn
+	}
+	pruneFloor, err := d.ConsumedUtxoPruneFloor(txn)
+	if err != nil {
+		return err
+	}
+	utxos := make([]models.Utxo, len(ids))
+	for i, id := range ids {
+		utxos[i] = models.Utxo{TxId: id.Hash, OutputIdx: id.Idx}
+	}
+	if blobErr := deleteUtxoBlobs(d, utxos, txn); blobErr != nil {
+		d.logger.Error(
+			"trusted batch UTxO blob delete left unreachable objects",
+			"error", blobErr,
+			"utxos", len(utxos),
+		)
+	}
+	if err := d.utxoStore().DeleteUtxos(ids, txn.Metadata()); err != nil {
+		return err
+	}
+	if slot > pruneFloor {
+		return d.writeConsumedUtxoPruneFloor(slot, txn)
+	}
+	return nil
 }
 
 func (d *Database) UtxosDeleteRolledback(
