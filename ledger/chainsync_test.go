@@ -6296,47 +6296,89 @@ func TestChainsyncHeaderVerificationRejectsStaleIngressVerdict(t *testing.T) {
 	err = ls.handleEventChainsyncBlockHeader(event)
 	require.ErrorContains(t, err, "block header crypto verification failed")
 
+	// A verification context that cannot be pinned (a durable state transition
+	// is in flight) defers producer authorization rather than failing it. The
+	// header still joins the block-fetch queue, whose body path verifies it
+	// before application: withholding it deadlocked sync whenever only
+	// applying queued blocks could make its authorization verifiable, as at
+	// the Byron->Shelley boundary. It carries no verification verdict, so it
+	// cannot advance the admitted frontier or roll back canonical state.
 	event.HeaderCryptoVerificationGeneration = ls.loadConsensusSnapshot().generation
+	// Like the ouroboros ingress owner, the admission callback commits the
+	// update it shares with the event, read when admission resolves.
+	peerTipUpdate := &chainselection.PeerTipUpdateEvent{
+		ConnectionId:                       event.ConnectionId,
+		AdmissionID:                        1,
+		HeaderCryptoVerificationGeneration: event.HeaderCryptoVerificationGeneration,
+	}
+	event.PeerTipUpdate = peerTipUpdate
 	admissionResolved := false
-	admitted := true
+	admitted := false
+	var admittedGeneration uint64
 	event.PeerTipAdmission = func(value bool) {
 		admissionResolved = true
 		admitted = value
+		admittedGeneration = peerTipUpdate.HeaderCryptoVerificationGeneration
 	}
 	finishTransition := ls.beginTxValidationTransition()
 	err = ls.handleEventChainsyncBlockHeader(event)
 	finishTransition()
 	require.NoError(t, err)
 	require.True(t, admissionResolved)
-	require.False(t, admitted, "deferred authorization must reject selector admission")
-	require.Empty(
+	require.True(t, admitted, "a queued header resolves its admission")
+	require.Zero(
 		t,
-		ls.peerHeaderHistory[connIdKey(event.ConnectionId)],
-		"deferred authorization must not enter trusted peer history",
+		admittedGeneration,
+		"the admission callback must not commit the stale generation without its pin",
 	)
+	history := ls.peerHeaderHistory[connIdKey(event.ConnectionId)]
+	require.NotNil(t, history)
+	for _, record := range history.byHash {
+		require.Zero(
+			t,
+			record.event.HeaderCryptoVerificationGeneration,
+			"deferred authorization must not enter peer history as verified",
+		)
+	}
 	require.False(
 		t,
 		ls.chain.FirstVerifiedHeaderMatchesPoint(event.Point),
 		"a durable state transition must not retain a stale verification verdict",
 	)
-	require.Zero(t, ls.chain.HeaderCount(), "deferred header must stay out of the queue")
+	require.Equal(t, 1, ls.chain.HeaderCount(), "deferred header joins the queue unverified")
 
 	// A rollback can remove the epoch nonce at the same time it invalidates
-	// the ingress verdict. The missing nonce must not turn that stale verdict
-	// into permission to queue the header for later body validation.
-	event.HeaderCryptoVerificationGeneration = ls.loadConsensusSnapshot().generation
+	// the ingress verdict. The stale verdict must not survive into the queue:
+	// the header is handled exactly like one whose nonce was never available.
+	child := mockHeader{
+		hash:        lcommon.Blake2b256{0x01},
+		prevHash:    header.Hash(),
+		slot:        1020,
+		blockNumber: 101,
+	}
+	childEvent := event
+	childEvent.BlockHeader = child
+	childEvent.Point = ocommon.NewPoint(child.SlotNumber(), child.Hash().Bytes())
+	childEvent.HeaderCryptoVerificationGeneration = ls.loadConsensusSnapshot().generation
+	peerTipUpdate = &chainselection.PeerTipUpdateEvent{
+		ConnectionId:                       childEvent.ConnectionId,
+		AdmissionID:                        2,
+		HeaderCryptoVerificationGeneration: childEvent.HeaderCryptoVerificationGeneration,
+	}
+	childEvent.PeerTipUpdate = peerTipUpdate
 	ls.Lock()
 	ls.epochCache[0].Nonce = nil
 	ls.publishSnapshotsLocked()
 	ls.Unlock()
 	admissionResolved = false
-	admitted = true
-	err = ls.handleEventChainsyncBlockHeader(event)
+	admitted = false
+	err = ls.handleEventChainsyncBlockHeader(childEvent)
 	require.NoError(t, err)
 	require.True(t, admissionResolved)
-	require.False(t, admitted)
-	require.Empty(t, ls.peerHeaderHistory[connIdKey(event.ConnectionId)])
-	require.Zero(t, ls.chain.HeaderCount())
+	require.True(t, admitted)
+	require.Zero(t, admittedGeneration)
+	require.False(t, ls.chain.FirstVerifiedHeaderMatchesPoint(childEvent.Point))
+	require.Equal(t, 2, ls.chain.HeaderCount())
 }
 
 func TestBufferedHeaderReplayRemovesHistoryWhenAdmissionBecomesStale(

@@ -561,12 +561,12 @@ sequenceDiagram
     Note over Peer,DB: Stage 1 — Header Discovery (ChainSync)
     Peer->>OB: RollForward(header, tip)
     OB->>OB: strictly verify header crypto against current ledger generation
-    Note over OB: If verification is deferred, retain only bounded raw ancestry; do not update peer selection or ledger state
+    Note over OB: If verification is deferred, forward only a header extending the local chain, unverified; withhold any other from peer selection and ledger state
     OB->>LS: await bounded header capacity
     LS->>ChM: wait for header queue drain
     OB->>EB: publish ChainsyncEvent(header)
     EB->>LS: handleEventChainsyncBlockHeader()
-    LS->>LS: recheck header crypto against current ledger generation
+    LS->>LS: recheck header crypto; queue a deferred header unverified, never as a rollback trigger
     LS->>ChM: enqueue header in chain.headers[]
 
     Note over Peer,DB: Stage 2 — Full Block Retrieval (BlockFetch)
@@ -6133,12 +6133,27 @@ it. Dingo implements this as a **corroboration gate**
   Verification is skipped only for a slot an imported Mithril snapshot
   already covers, the same exemption the ledger's own header-queue path
   applies. A result showing local state has not caught up to the header's slot
-  (`IsHeaderVerificationDeferred`) withholds the header from chain selection,
-  density, corroboration, and the observed ancestry used by fork resolution or
-  rollback replay without penalizing the peer. ChainSync records that the peer
-  needs recovery and re-intersects it after the applied ledger advances. The
-  peer then delivers its linked suffix parent-first, and each header must pass
-  verification before entering observed ancestry or the ledger queue.
+  (`IsHeaderVerificationDeferred`) never enters the observed ancestry used by
+  fork resolution or rollback replay, and never penalizes the peer. A deferred
+  header that extends the local chain — its parent is the block tip, the
+  header-queue tip, or the last header the same connection passed through this
+  gate — still updates the selector and reaches the ledger queue with no
+  verification generation; block-fetch verifies its body before application.
+  Withholding it deadlocks sync whenever only applying that block can make its
+  authorization verifiable: at the Byron->Shelley boundary the first Shelley
+  epoch's state does not exist until a Shelley block is applied. Any other
+  deferred header is withheld from selection, density, corroboration and the
+  ledger. ChainSync records that the peer needs recovery and re-intersects it
+  after the applied ledger advances, or at once (once per connection and
+  applied tip) when nothing is queued, since then no block can be applied to
+  trigger it. The peer then delivers its linked suffix parent-first. The ledger
+  queues a header whose authorization it cannot confirm (deferred, or a stale
+  ingress verdict) the same way, without a verification generation, so it can
+  neither advance the admitted frontier nor clear the queue or roll back
+  canonical state when it does not fit. It clears the generation on the
+  update the ingress owner's admission callback commits as well, so the
+  selector receives a generation-0 update rather than a stale verdict without
+  its pin.
   The verification snapshot generation travels with the staged selector
   candidate and ledger event; a rollback or concurrent publication that makes
   it stale removes the candidate from corroboration and triggers recovery. A
@@ -17663,9 +17678,13 @@ it retries on the origin, then on the active best peer, and when those fail the 
 and a re-sync requested, since the wait cannot end while nothing fetches the
 queued blocks. The discarded headers' invalidation is published after the ledger
 locks are released, so their Leios announcements and derived votes are removed
-without waiting for another chain event. If no fetch is active and no queued
-headers can be fetched, admission rechecks the forecast and pending snapshot
-publication, then returns `ErrChainsyncHeaderNeedsResync`. Ouroboros
+without waiting for another chain event. Stored blocks the ledger has not
+applied yet (`chainAheadOfAppliedTip`) also count as local work, so admission
+keeps waiting for the snapshot publication their application brings rather
+than closing a connection that work may need, such as one serving endorser
+block backfill. If no fetch is active, no queued headers can be fetched and
+nothing stored is left to apply, admission rechecks the forecast and pending
+snapshot publication, then returns `ErrChainsyncHeaderNeedsResync`. Ouroboros
 re-intersects that peer from the local chain with a non-penalizing reason,
 instead of leaving its callback waiting for work that cannot start. As in the
 reference, the forecast is measured from where the peer's chain leaves the
