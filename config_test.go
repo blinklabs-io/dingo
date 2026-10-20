@@ -29,6 +29,7 @@ import (
 	"github.com/blinklabs-io/dingo/internal/promutil"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/plugin"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
@@ -1260,4 +1261,46 @@ func TestNewConfigPlannerStatsRefreshDefaultsOnAndCanBeDisabled(t *testing.T) {
 	// A hand-built Config has no internal config and must not start the
 	// refresh.
 	assert.False(t, (&Config{}).PlannerStatsRefreshEnabled())
+}
+
+// TestGenesisSelectionModeHonorsConsensusMode pins the rule that the node
+// configuration's ConsensusMode decides whether Genesis chain selection runs,
+// as it does for the reference node: PraosMode never selects by Genesis
+// density or demands corroboration, whatever genesisBootstrap says.
+func TestGenesisSelectionModeHonorsConsensusMode(t *testing.T) {
+	t.Parallel()
+
+	praos := &cardano.CardanoNodeConfig{ConsensusMode: "PraosMode"}
+	genesis := &cardano.CardanoNodeConfig{ConsensusMode: "GenesisMode"}
+	tests := []struct {
+		name          string
+		bootstrap     bool
+		nodeConfig    *cardano.CardanoNodeConfig
+		intersectTip  bool
+		intersectPnts []ocommon.Point
+		want          bool
+	}{
+		{name: "genesis mode config", bootstrap: true, nodeConfig: genesis, want: true},
+		{name: "mode not named", bootstrap: true, nodeConfig: &cardano.CardanoNodeConfig{}, want: true},
+		{name: "no node config", bootstrap: true, want: true},
+		{name: "praos mode config", bootstrap: true, nodeConfig: praos, want: false},
+		{name: "bootstrap disabled", bootstrap: false, nodeConfig: genesis, want: false},
+		{name: "intersect tip", bootstrap: true, nodeConfig: genesis, intersectTip: true, want: false},
+		{
+			name: "intersect points", bootstrap: true, nodeConfig: genesis,
+			intersectPnts: []ocommon.Point{{Slot: 1}}, want: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := &Config{
+				genesisBootstrap:  tt.bootstrap,
+				cardanoNodeConfig: tt.nodeConfig,
+				intersectTip:      tt.intersectTip,
+				intersectPoints:   tt.intersectPnts,
+			}
+			assert.Equal(t, tt.want, cfg.genesisSelectionMode())
+		})
+	}
 }

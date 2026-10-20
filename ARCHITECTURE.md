@@ -5794,7 +5794,9 @@ stranding ChainSync when the bootstrap peer is still the only usable upstream.
 #### Ouroboros Genesis trust model
 
 Genesis mode (`genesisBootstrap`, active only for from-origin sync with no
-`intersectTip`/`intersectPoints`) selects the chain by observed header
+`intersectTip`/`intersectPoints`, and never when the Cardano node configuration
+names `ConsensusMode: PraosMode`, which makes the node follow its peers by Praos
+rules as the reference node does) selects the chain by observed header
 *density* within a window of `3k/f` slots rather than by longest-chain length,
 so a from-origin node can prefer the denser (honest) chain before it has the
 history to run the full Praos comparison. The window is derived from Shelley
