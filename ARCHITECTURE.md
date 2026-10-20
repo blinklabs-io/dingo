@@ -1051,15 +1051,17 @@ these series carries a connection or peer label.
   wait, begin, commit). `apply` takes one sample per delta-batch flush (which
   includes the replay-row flush) and, on a validating block, one sample per
   validated transaction, because that write happens as soon as the
-  transaction validates and leaves the chunk's batch flush nearly empty.
+  transaction validates and leaves the chunk's batch flush nearly empty. A
+  certified Leios endorser block's transactions take the same per-transaction
+  `validate` and `apply` samples; when its closure is applied at an epoch
+  boundary those samples fall inside `epoch_rollover`.
   `prepare` and `commit` are recorded only for a chunk
   that commits at least one block, the same chunks the batch latency records;
   `validate` and `apply` are also recorded for a chunk that fails or applies
   no block. For a recorded chunk the four stages sum to no more than its batch
   latency; the remainder is the rest of the transaction body (block
-  processing outside `validate`, the nonce and tip writes, and the
-  validation and writes of a certified Leios endorser block's transactions,
-  which no stage observes) plus the post-commit tip update. `header_verify`
+  processing outside `validate` and `apply`, and the nonce and tip writes)
+  plus the post-commit tip update. `header_verify`
   and `epoch_rollover` run outside that window.
 - `dingo_ledger_blockfetch_batch_in_flight`,
   `dingo_ledger_blockfetch_continuation_pending` and
