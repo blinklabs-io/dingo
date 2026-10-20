@@ -1378,9 +1378,9 @@ sequenceDiagram
     end
 
     Note over SC,EB: Slot Battle Detection
-    EB->>BF: ChainUpdateEvent(externalBlock at same slot)
-    BF->>BF: SlotTracker detects competing block
-    BF->>EB: publish SlotBattleEvent
+    LS->>LS: blockfetch delivers a peer block at a forged slot, counted and held pending
+    LS->>PC: once the tip is a security parameter of blocks past it, is the forged block on the chain?
+    LS->>EB: publish SlotBattleEvent(Won)
 ```
 
 ## Directory Structure
