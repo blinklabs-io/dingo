@@ -284,9 +284,10 @@ func (s *Stack) shutdownLocal(ctx context.Context) error {
 }
 
 // submissionConfig serves protocol 14. Validation happens in submit, not in
-// the gouroboros server, so that every refusal is counted and an expired
-// message gets the expired reason rather than a generic invalid one; the
-// server's own checks are therefore disabled.
+// the gouroboros server, so that an expired message gets the expired reason
+// rather than a generic invalid one; the server's own checks are therefore
+// disabled. The server still answers a resubmitted message ID from its replay
+// cache without calling submit, so its refusals are counted separately.
 func (s *Stack) submissionConfig() localmessagesubmission.Config {
 	return localmessagesubmission.NewConfig(
 		localmessagesubmission.WithAuthenticator(
@@ -301,6 +302,16 @@ func (s *Stack) submissionConfig() localmessagesubmission.Config {
 				msg *ocommon.DmqMessage,
 			) ocommon.RejectReason {
 				return s.submit(msg)
+			},
+		),
+		localmessagesubmission.WithSubmitRefusedFunc(
+			func(
+				_ localmessagesubmission.CallbackContext,
+				_ *ocommon.DmqMessage,
+				reason ocommon.RejectReason,
+			) {
+				s.failures.WithLabelValues(reasonLabel(reason)).Inc()
+				s.logger.Debug("dmq message refused", "reason", reason)
 			},
 		),
 	)
