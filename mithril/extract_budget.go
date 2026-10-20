@@ -30,10 +30,14 @@ const (
 )
 
 type bootstrapExtractionBudget struct {
-	mu               sync.Mutex
-	maxBytes         int64
-	maxEntries       int
-	bytes            int64
+	mu             sync.Mutex
+	maxBytes       int64
+	maxStreamBytes int64
+	maxEntries     int
+	bytes          int64
+	// streamBytes counts bytes consumed below tar.Reader separately, so skipped
+	// bodies and metadata use the stream budget without double-counting disk writes.
+	streamBytes      int64
 	entries          int
 	nextDiskCheck    int64
 	freeSpaceReserve uint64
@@ -76,11 +80,25 @@ func newBootstrapExtractionBudget(
 	maxBytes := int64(min(usable, uint64(maxTotalExtractSize))) // #nosec G115 -- capped at 1 TiB
 	return &bootstrapExtractionBudget{
 		maxBytes:         maxBytes,
+		maxStreamBytes:   archiveStreamLimit(maxBytes, maxBootstrapExtractEntries),
 		maxEntries:       maxBootstrapExtractEntries,
 		nextDiskCheck:    freeSpaceCheckInterval,
 		freeSpaceReserve: reserve,
 		filesystemPath:   filesystemPath,
 	}, nil
+}
+
+func (b *bootstrapExtractionBudget) reserveStreamBytes(size int64) error {
+	if b == nil || size == 0 {
+		return nil
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if size < 0 || b.streamBytes > b.maxStreamBytes-size {
+		return fmt.Errorf("%w: bootstrap tar stream limit reached", ErrExtractLimitExceeded)
+	}
+	b.streamBytes += size
+	return nil
 }
 
 func (b *bootstrapExtractionBudget) reserveEntry() error {

@@ -1030,13 +1030,13 @@ var flagSpecs = []flagSpec{
 		"Mithril.Backend",
 		"mithril-backend",
 		"",
-		"Mithril artifact backend: v1 (legacy snapshots) or v2 (incremental database)",
+		"Mithril artifact backend: v2 (incremental database; empty selects v2)",
 	),
 	stringFlag(
 		"Mithril.PinnedDigest",
 		"mithril-pinned-digest",
 		"",
-		"Mithril artifact identity for a fresh bootstrap: v1 snapshot digest or v2 Cardano database artifact hash",
+		"Mithril artifact identity for a fresh bootstrap: a Cardano database artifact hash",
 	),
 	stringFlag(
 		"Mithril.DownloadDir",

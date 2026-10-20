@@ -79,8 +79,8 @@ The server exposes 21 specialized tools categorized into SQLite introspection (3
 | `sqlite_explain` | Analyze query execution plans via `EXPLAIN QUERY PLAN` | `query` (string) |
 | `sqlite_table_schema` | Inspect table DDL, column types, nullability, and indices | `table_name` (string) |
 
-The three SQL tools share four execution slots and fail immediately when all
-slots are occupied. SQLite rejects values over 64 KiB and result sets over 32
+The three SQL tools and `get_asset_info` share four execution slots and fail
+immediately when all slots are occupied. SQLite rejects values over 64 KiB and result sets over 32
 columns before Go materializes them; `sqlite_query` stops after 1 MiB of decoded
 cell data.
 
