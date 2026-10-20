@@ -5446,7 +5446,8 @@ func (ls *LedgerState) flushQueuedHeadersForHorizonWait(
 
 // awaitForecastHorizon blocks until the published ledger state can forecast
 // e's slot, or ctx ends. The horizon only moves when a snapshot is published,
-// so it waits for publication rather than polling.
+// so it waits for publication, or for blockfetch capacity to change, rather
+// than polling.
 func (ls *LedgerState) awaitForecastHorizon(
 	ctx context.Context,
 	e ChainsyncEvent,
@@ -5455,6 +5456,15 @@ func (ls *LedgerState) awaitForecastHorizon(
 	witnessPublished := false
 	for {
 		published := ls.snapshotPublishedChan()
+		// Captured before the fetch state is read so a request that ends
+		// without publishing a snapshot, such as a zero-block batch, still
+		// wakes this loop.
+		ls.chainsyncBlockfetchMutex.Lock()
+		if ls.chainsyncCapacityChanged == nil {
+			ls.chainsyncCapacityChanged = make(chan struct{})
+		}
+		capacityChanged := ls.chainsyncCapacityChanged
+		ls.chainsyncBlockfetchMutex.Unlock()
 		if !ls.headerBeyondForecastHorizon(ctx, e) {
 			return nil
 		}
@@ -5489,6 +5499,7 @@ func (ls *LedgerState) awaitForecastHorizon(
 		}
 		select {
 		case <-published:
+		case <-capacityChanged:
 		case <-ctx.Done():
 			return ctx.Err()
 		}

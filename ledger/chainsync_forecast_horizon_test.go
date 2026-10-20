@@ -172,6 +172,100 @@ func TestAwaitChainsyncHeaderAdmissionPastForecastHorizonHonorsCancellation(
 	require.False(t, got.accepted)
 }
 
+// A blockfetch request that ends without publishing a snapshot must still wake
+// a held header, which then finds no local work and asks for a resync.
+func TestAwaitChainsyncHeaderAdmissionWakesOnBlockfetchCapacityChange(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	systemStart := time.Date(2026, time.August, 22, 12, 0, 0, 0, time.UTC)
+	arrival := systemStart.Add(100 * time.Second)
+	ls, _ := newFutureHeaderTestLedger(t, systemStart, arrival)
+	ls.chainsyncBlockfetchReadyChan = make(chan struct{})
+	ls.slotClock.provider = pastHorizonSlotTimeProvider{
+		SlotTimeProvider: ls.slotClock.provider,
+		rejectedSlot:     90,
+	}
+
+	results := awaitAdmissionAsync(
+		t.Context(),
+		ls,
+		futureHeaderEvent(90, arrival),
+	)
+	testutil.RequireNoReceive(
+		t,
+		results,
+		100*time.Millisecond,
+		"a header past the forecast horizon must wait while fetch work exists",
+	)
+
+	ls.chainsyncBlockfetchMutex.Lock()
+	ls.chainsyncBlockfetchReadyChan = nil
+	ls.signalChainsyncCapacityChangedLocked()
+	ls.chainsyncBlockfetchMutex.Unlock()
+	got := testutil.RequireReceive(
+		t,
+		results,
+		testutil.AsyncWait,
+		"admission did not wake when blockfetch capacity changed",
+	)
+	require.ErrorIs(t, got.err, ErrChainsyncHeaderNeedsResync)
+	require.False(t, got.accepted)
+}
+
+// With no local work left to advance the forecast, the header rechecks
+// cancellation and the horizon before asking for a resync.
+func TestAwaitChainsyncHeaderAdmissionRechecksBeforeResync(t *testing.T) {
+	t.Parallel()
+
+	systemStart := time.Date(2026, time.August, 22, 12, 0, 0, 0, time.UTC)
+	arrival := systemStart.Add(100 * time.Second)
+
+	t.Run("cancelled", func(t *testing.T) {
+		t.Parallel()
+		ls, _ := newFutureHeaderTestLedger(t, systemStart, arrival)
+		ls.slotClock.provider = pastHorizonSlotTimeProvider{
+			SlotTimeProvider: ls.slotClock.provider,
+			rejectedSlot:     90,
+		}
+		ctx, cancel := context.WithCancel(t.Context())
+		e := futureHeaderEvent(90, arrival)
+		e.ForecastHorizonWait = cancel
+		results := awaitAdmissionAsync(ctx, ls, e)
+		got := testutil.RequireReceive(
+			t,
+			results,
+			testutil.AsyncWait,
+			"admission did not return after cancellation",
+		)
+		require.ErrorIs(t, got.err, context.Canceled)
+		require.False(t, got.accepted)
+	})
+
+	t.Run("horizon moved", func(t *testing.T) {
+		t.Parallel()
+		ls, _ := newFutureHeaderTestLedger(t, systemStart, arrival)
+		covered := &atomic.Bool{}
+		ls.slotClock.provider = gatedHorizonSlotTimeProvider{
+			SlotTimeProvider: ls.slotClock.provider,
+			slot:             90,
+			covered:          covered,
+		}
+		e := futureHeaderEvent(90, arrival)
+		e.ForecastHorizonWait = func() { covered.Store(true) }
+		results := awaitAdmissionAsync(t.Context(), ls, e)
+		got := testutil.RequireReceive(
+			t,
+			results,
+			testutil.AsyncWait,
+			"admission did not resume once the slot was forecastable",
+		)
+		require.NoError(t, got.err)
+		require.True(t, got.accepted)
+	})
+}
+
 func TestSnapshotPublishedChanClosesOnPublish(t *testing.T) {
 	t.Parallel()
 
