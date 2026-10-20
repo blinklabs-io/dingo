@@ -1937,6 +1937,32 @@ func TestMakefileDocumentedTargetsArePhony(t *testing.T) {
 	}
 }
 
+// TestMakefileBuildTracksPgoProfile checks the binary build rule lists the PGO
+// profile as a prerequisite, so regenerating cmd/dingo/default.pgo triggers a
+// rebuild instead of leaving a stale binary.
+func TestMakefileBuildTracksPgoProfile(t *testing.T) {
+	root := repoRoot(t)
+	rules, _, _ := parseMakefile(t, root)
+
+	rule, ok := rules[binariesTarget]
+	if !ok {
+		t.Fatalf("Makefile has no %q rule", binariesTarget)
+	}
+
+	for _, prereq := range rule.prereqs {
+		if strings.Contains(prereq, "default.pgo") {
+			return
+		}
+	}
+	t.Errorf(
+		"Makefile:%d: %q build rule does not list the PGO profile as a "+
+			"prerequisite, so a refreshed cmd/dingo/default.pgo never "+
+			"rebuilds the binary",
+		rule.line,
+		binariesTarget,
+	)
+}
+
 // TestDocumentedDefaultMakeMatchesMakefile checks every description of what a
 // bare `make` does names exactly the targets the default rule depends on. It
 // is the rule that catches documentation claiming the default target runs the
@@ -2949,15 +2975,12 @@ func TestPipelineStagesMatch(t *testing.T) {
 	}
 }
 
-func TestCBORConformanceReportRunsOnlyForLinuxRelease(t *testing.T) {
+func TestConformanceReportsRunOnlyForLinuxRelease(t *testing.T) {
 	root := repoRoot(t)
 	const datasetRevision = "6cd8c928665bbafe90e02066ebb4620e38f051de"
-	const amaruUPLCRevision = "03acfc01807e5e2a8a5466541ad22c856f3de99c"
-	const ndcLedgerRevision = "4fed8790fb81164f9d7a53414acc5f78aaf65422"
-	const turboDatasetRevision = "862fa7127fe07c2537005955cf98e7b332151996"
-	const turboDatasetDate = "20260826"
-	const turboShard0000SHA256 = "c446743b869955bae355aea04fade0a0dc46f01ae08f04bcada44d8944e477ee"
-	const turboShard0001SHA256 = "2bb62f11dee861296fbdf7de69599340cd6d4b93a7fad37a365b0dcd004fd83d"
+	const ndcLedgerRevision = "8974561cb6b48807e2a578028d4f5d85430007a6"
+	const uplcCorpusSHA256 = "8bd4ad4f9f4c8c6b8ffa1f06ed1db0b43043afbba77ef6a14bcfb5a52345ed3f"
+	const turboCorpusSHA256 = "821af55e3323c826b5598c964d634b46dd468014834d0e97ebdc5edb0a158576"
 
 	prJobs := pipelineJobs(t, root, prPipeline)
 	for jobName, rawJob := range prJobs {
@@ -3011,17 +3034,23 @@ func TestCBORConformanceReportRunsOnlyForLinuxRelease(t *testing.T) {
 	if jobEnv["CBOR_DATASET_REVISION"] != datasetRevision {
 		t.Errorf("Linux release job CBOR dataset revision = %v, want %q", jobEnv["CBOR_DATASET_REVISION"], datasetRevision)
 	}
-	if jobEnv["AMARU_UPLC_REVISION"] != amaruUPLCRevision {
-		t.Errorf("Linux release job Amaru UPLC revision = %v, want %q", jobEnv["AMARU_UPLC_REVISION"], amaruUPLCRevision)
-	}
 	if jobEnv["NDC_LEDGER_REVISION"] != ndcLedgerRevision {
 		t.Errorf("Linux release job NDC ledger revision = %v, want %q", jobEnv["NDC_LEDGER_REVISION"], ndcLedgerRevision)
 	}
-	if jobEnv["TURBO_DATASET_REVISION"] != turboDatasetRevision ||
-		jobEnv["TURBO_DATASET_DATE"] != turboDatasetDate ||
-		jobEnv["TURBO_SHARD_0000_SHA256"] != turboShard0000SHA256 ||
-		jobEnv["TURBO_SHARD_0001_SHA256"] != turboShard0001SHA256 {
-		t.Error("Linux release job does not pin the TurboCardano dataset and both archive shards")
+	if jobEnv["UPLC_CORPUS_SHA256"] != uplcCorpusSHA256 ||
+		jobEnv["TURBO_CORPUS_SHA256"] != turboCorpusSHA256 {
+		t.Error("Linux release job does not pin both NDC report archives")
+	}
+	for _, obsolete := range []string{
+		"AMARU_UPLC_REVISION",
+		"TURBO_DATASET_REVISION",
+		"TURBO_DATASET_DATE",
+		"TURBO_SHARD_0000_SHA256",
+		"TURBO_SHARD_0001_SHA256",
+	} {
+		if _, ok := jobEnv[obsolete]; ok {
+			t.Errorf("Linux release job still pins obsolete input %q", obsolete)
+		}
 	}
 	corpusCheckout, reportGeneration, releaseUpload := 0, 0, 0
 	for _, rawStep := range steps {
@@ -3041,11 +3070,7 @@ func TestCBORConformanceReportRunsOnlyForLinuxRelease(t *testing.T) {
 				t.Error("Linux release checks out the wrong CBOR corpus")
 			}
 		case "Checkout UPLC conformance corpus":
-			if step["if"] != "github.ref_type == 'tag'" ||
-				with["repository"] != "pragma-org/amaru" ||
-				with["ref"] != "${{ env.AMARU_UPLC_REVISION }}" {
-				t.Error("Linux release checks out the wrong UPLC corpus")
-			}
+			t.Error("Linux release still checks out the superseded Amaru UPLC corpus")
 		case "Checkout ledger-rules fixtures":
 			if step["if"] != "github.ref_type == 'tag'" ||
 				with["repository"] != "pragma-org/node-diversity-conformance" ||
@@ -3075,10 +3100,13 @@ func TestCBORConformanceReportRunsOnlyForLinuxRelease(t *testing.T) {
 	reportScript := readRepoFile(t, root, ".github/scripts/generate-conformance-reports.sh")
 	if !strings.Contains(reportScript, "go run ./internal/cborconformance/cmd") ||
 		!strings.Contains(reportScript, `-corpus-revision "$dataset_revision"`) ||
-		!strings.Contains(reportScript, `raw.githubusercontent.com/r2rationality/turbocardano/${revision}`) ||
-		!strings.Contains(reportScript, `cat "${dir}/dataset.tar.0000.xz" "${dir}/dataset.tar.0001.xz"`) ||
+		!strings.Contains(reportScript, "UPLC_CORPUS_SHA256") ||
+		!strings.Contains(reportScript, "TURBO_CORPUS_SHA256") ||
+		!strings.Contains(reportScript, "uplc-conformance.tar.zst") ||
+		!strings.Contains(reportScript, "turbo.tar.zst") ||
+		!strings.Contains(reportScript, `zstd -dc "${dir}/${archive}" | tar -xf - -C "${dir}/corpus"`) ||
 		!strings.Contains(reportScript, `for report in "${DIST_DIR}"/dingo-*.json`) {
-		t.Error("release report script does not generate and compress the revision-bound CBOR report")
+		t.Error("release report script does not generate and compress the pinned NDC reports")
 	}
 }
 

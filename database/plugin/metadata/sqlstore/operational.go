@@ -24,6 +24,7 @@ import (
 	"strings"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	sqlitequery "github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/internal/query/sqlite"
 	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -239,6 +240,68 @@ func (s *Store) GetSyncState(key string, txn types.Txn) (string, error) {
 		return "", fmt.Errorf("get sync state: %w", err)
 	}
 	return value, nil
+}
+
+// syncStateByteLength returns the dialect's byte-length expression for the
+// value column. SQLite's length() counts characters for TEXT, so it is applied
+// to a BLOB cast; MySQL's LENGTH and PostgreSQL's octet_length count bytes.
+func syncStateByteLength(dialect string) string {
+	switch dialect {
+	case "postgres":
+		return "octet_length(value)"
+	case "mysql":
+		return "LENGTH(value)"
+	default:
+		return "length(CAST(value AS BLOB))"
+	}
+}
+
+// boundedSyncStateQuery selects the value's size in bytes and the value itself
+// only when that size is at most the first parameter; otherwise the value
+// column is NULL.
+func boundedSyncStateQuery(dialect string) string {
+	size := syncStateByteLength(dialect)
+	return "SELECT " + size + ", CASE WHEN " + size + " <= ? THEN value END " +
+		"FROM sync_state WHERE sync_key = ?"
+}
+
+func (s *Store) GetSyncStateBounded(
+	key string,
+	maxBytes int,
+	txn types.Txn,
+) (string, error) {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return "", fmt.Errorf("get sync state: %w", err)
+	}
+	// One statement returns the size and, only when it fits, the value, so
+	// an oversized value never leaves the database and cannot grow between a
+	// size probe and the read.
+	var (
+		length int64
+		value  sql.NullString
+	)
+	err = db.QueryRowContext(
+		ctx,
+		boundedSyncStateQuery(s.dialect.Name()),
+		maxBytes,
+		key,
+	).Scan(&length, &value)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("get sync state: %w", err)
+	}
+	if length > int64(maxBytes) {
+		return "", fmt.Errorf(
+			"get sync state: %w: %d bytes exceeds %d",
+			metadata.ErrSyncStateTooLarge,
+			length,
+			maxBytes,
+		)
+	}
+	return value.String, nil
 }
 
 func (s *Store) SetSyncState(

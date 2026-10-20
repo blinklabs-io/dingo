@@ -3899,7 +3899,7 @@ func TestTxValidationCommitExcludesLedgerPublication(t *testing.T) {
 	})
 	require.NoError(t, err)
 	after, _ := ls.loadStateSnapshots()
-	require.Equal(t, before.generation+1, after.generation)
+	require.Greater(t, after.generation, before.generation)
 }
 
 func TestTxValidationSessionCarriesContextThroughPendingState(t *testing.T) {

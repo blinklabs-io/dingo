@@ -196,6 +196,7 @@ var logPlainConfigFields = []string{
 	"KoiosParity.Accounts",
 	"KoiosParity.AllowInsecureHTTP",
 	"KoiosParity.AllowPrivateAddresses",
+	"KoiosParity.APIKeyFile",
 	"KoiosParity.CachePath",
 	"KoiosParity.Enabled",
 	"KoiosParity.GraceHours",
@@ -218,11 +219,17 @@ var logPlainConfigFields = []string{
 	"MetricsBindAddr",
 	"MetricsPort",
 	"DMQ.Enabled",
+	"DMQ.ListenAddress",
+	"DMQ.ListenIPv6Address",
 	"DMQ.MaxMempoolSize",
+	"DMQ.MaxPeers",
 	"DMQ.MessageTTL",
+	"DMQ.MinPeers",
+	"DMQ.N2NPort",
 	"DMQ.NetworkMagic",
 	"DMQ.SocketPath",
 	"DMQ.Topic",
+	"DMQ.TopologyFile",
 	"Midnight.AuthTokenAssetName",
 	"Midnight.AuthTokenPolicyID",
 	"Midnight.CNightAssetName",
@@ -370,6 +377,8 @@ var providerConfigPlainKeys = []string{
 	// mempool
 	"capacity", "evictionwatermark", "rejectionwatermark",
 	"revalidationdeltacap",
+	// api/blockfrost admission limits
+	"maxconcurrentmutations", "maxconcurrentmutationsperclient",
 	// api/{blockfrost,kupo,mesh,utxorpc} TLS policy keys
 	"mode", "certfilepath", "keyfilepath",
 }

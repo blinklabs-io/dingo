@@ -63,6 +63,16 @@ func CheckOpenFilePermissions(f *os.File) error {
 	return checkOpenFilePermissions(f)
 }
 
+// CheckOpenFileOwnerAndPermissions verifies that an already-opened secret file
+// is controlled by the current user and is not accessible by other users where
+// the platform exposes those properties.
+func CheckOpenFileOwnerAndPermissions(f *os.File) error {
+	if err := CheckOpenFilePermissions(f); err != nil {
+		return err
+	}
+	return checkOpenFileOwner(f)
+}
+
 // OpenRegularFile opens path and verifies from the returned handle that it is
 // a regular file. On Unix the open itself is nonblocking, so a FIFO cannot
 // stall key loading before its type is checked. Symlinks to regular files are
@@ -72,6 +82,20 @@ func OpenRegularFile(path string) (*os.File, error) {
 	if err != nil {
 		return nil, err
 	}
+	return validateRegularFile(f, path)
+}
+
+// OpenRegularFileNoFollow opens path without following a symlink in its final
+// component and verifies from the returned handle that it is a regular file.
+func OpenRegularFileNoFollow(path string) (*os.File, error) {
+	f, err := openFileNoFollow(path)
+	if err != nil {
+		return nil, err
+	}
+	return validateRegularFile(f, path)
+}
+
+func validateRegularFile(f *os.File, path string) (*os.File, error) {
 	info, err := f.Stat()
 	if err != nil {
 		_ = f.Close()

@@ -193,6 +193,28 @@ func TestLedgerStatePublishedEpochCacheRejectsInPlaceAppend(t *testing.T) {
 	require.Equal(t, uint64(7), oldConsensus.epochCache[0].EpochId)
 }
 
+func TestHeaderCryptoVerificationGenerationUniqueAcrossLedgerStates(t *testing.T) {
+	first := &LedgerState{}
+	first.publishSnapshotsLocked()
+	firstGeneration := first.CurrentHeaderCryptoVerificationGeneration()
+	require.NotZero(t, firstGeneration)
+
+	replacement := &LedgerState{}
+	replacement.publishSnapshotsLocked()
+	replacementGeneration := replacement.CurrentHeaderCryptoVerificationGeneration()
+	require.NotZero(t, replacementGeneration)
+	require.NotEqual(t, firstGeneration, replacementGeneration,
+		"replacement ledger reused a producer-authorization generation")
+	require.False(t,
+		replacement.HeaderCryptoVerificationGenerationCurrent(firstGeneration),
+	)
+	release, current := replacement.PinHeaderCryptoVerificationGeneration(
+		firstGeneration,
+	)
+	require.False(t, current)
+	require.Nil(t, release)
+}
+
 // TestSetEpochCachePublishesPartialStateOnError verifies that startup cache
 // mutations are published even when validation returns an error afterward.
 func TestSetEpochCachePublishesPartialStateOnError(t *testing.T) {
@@ -215,7 +237,7 @@ func TestSetEpochCachePublishesPartialStateOnError(t *testing.T) {
 	// The deferred publication must expose the mutation through the atomic
 	// reader path despite setEpochCache returning before normal completion.
 	snapshot := ls.consensus.Load()
-	require.Equal(t, previousGeneration+1, snapshot.generation)
+	require.Greater(t, snapshot.generation, previousGeneration)
 	require.Equal(t, invalidEpoch.EpochId, snapshot.currentEpoch.EpochId)
 	require.Equal(t, invalidEpoch.EraId, snapshot.currentEpoch.EraId)
 	require.Len(t, snapshot.epochCache, 1)

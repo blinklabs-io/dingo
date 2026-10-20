@@ -328,10 +328,11 @@ type GenesisBootstrapConfig struct {
 	// the same recent blocks before a fast (shallow) block source may drive
 	// Genesis-mode chain selection. This is the Ouroboros Genesis trust control
 	// for biased fast-sync sources: an uncorroborated or divergent fast source
-	// is denied selection and stalls rather than steering the local chain. A
-	// zero value disables the selection gate (density-only Genesis selection);
-	// a peer's frontier still needs one independent witness before it can
-	// exclude other candidates as behind.
+	// is denied selection and stalls rather than steering the local chain.
+	// The default is one independent peer. An explicitly configured zero
+	// disables the selection gate (density-only Genesis selection); a peer's
+	// frontier still needs one independent witness before it can exclude other
+	// candidates as behind.
 	CorroborationPeers int `yaml:"corroborationPeers"          envconfig:"DINGO_GENESIS_BOOTSTRAP_CORROBORATION_PEERS"`
 	// LimitOnPatienceEnabled turns on the Genesis Limit on Patience: while
 	// Genesis selection is syncing, a ChainSync peer that delivers its
@@ -378,6 +379,10 @@ type KoiosParityConfig struct {
 	// APIKey is the Koios Bearer token for higher-rate-limit access. Empty
 	// uses Koios's unauthenticated rate limit.
 	APIKey string `yaml:"apiKey"               envconfig:"DINGO_KOIOS_PARITY_API_KEY"`
+	// APIKeyFile names a file holding APIKey, so the token need not appear
+	// in a command line or environment. ResolveSecretFiles reads it into
+	// APIKey; setting both in one configuration source is an error.
+	APIKeyFile string `yaml:"apiKeyFile"           envconfig:"DINGO_KOIOS_PARITY_API_KEY_FILE"`
 	// BaseURL overrides the public koios.rest host for the network, for a
 	// self-hosted or mirrored Koios instance. Full v1 API root, e.g.
 	// "https://preview-koios.example.com/api/v1". Empty selects the public
@@ -534,6 +539,7 @@ func DefaultChainsyncConfig() ChainsyncConfig {
 func DefaultGenesisBootstrapConfig() GenesisBootstrapConfig {
 	return GenesisBootstrapConfig{
 		Enabled:                true,
+		CorroborationPeers:     1,
 		LimitOnPatienceEnabled: true,
 	}
 }
@@ -655,6 +661,24 @@ type DMQConfig struct {
 	MessageTTL uint `yaml:"messageTtl"   envconfig:"DINGO_DMQ_MESSAGE_TTL"`
 	// MaxMempoolSize bounds the message pool, in megabytes.
 	MaxMempoolSize uint `yaml:"maxMempoolSize" envconfig:"DINGO_DMQ_MAX_MEMPOOL_SIZE"`
+	// N2NPort is the TCP port peers connect to. It is independent of the
+	// Cardano relay port. Zero, the default, serves local clients only.
+	N2NPort uint `yaml:"n2nPort"      envconfig:"DINGO_DMQ_N2N_PORT"`
+	// ListenAddress is the IPv4 address the peer listener binds. Empty
+	// disables the IPv4 listener.
+	ListenAddress string `yaml:"listenAddress" envconfig:"DINGO_DMQ_LISTEN_ADDRESS"`
+	// ListenIPv6Address is the IPv6 address the peer listener binds. Empty
+	// disables the IPv6 listener.
+	ListenIPv6Address string `yaml:"listenIpv6Address" envconfig:"DINGO_DMQ_LISTEN_IPV6_ADDRESS"`
+	// TopologyFile is a dmq-node topology file naming the DMQ peers to dial.
+	// It is separate from the Cardano topology.
+	TopologyFile string `yaml:"topologyFile" envconfig:"DINGO_DMQ_TOPOLOGY_FILE"`
+	// MinPeers is the number of DMQ peers to keep connections to. It must
+	// not exceed MaxPeers.
+	MinPeers uint `yaml:"minPeers"     envconfig:"DINGO_DMQ_MIN_PEERS"`
+	// MaxPeers is the most DMQ peers to hold connections to. Zero allows
+	// none, which needs MinPeers of zero too.
+	MaxPeers uint `yaml:"maxPeers"     envconfig:"DINGO_DMQ_MAX_PEERS"`
 }
 
 // NetworkMagicExplicit reports whether a source supplied the DMQ network magic.
@@ -674,10 +698,14 @@ func (c *DMQConfig) UnmarshalYAML(node *yaml.Node) error {
 // DefaultDMQConfig returns the default DMQ settings.
 func DefaultDMQConfig() DMQConfig {
 	return DMQConfig{
-		Topic:          "mithril",
-		SocketPath:     "dingo-dmq.socket",
-		MessageTTL:     1800,
-		MaxMempoolSize: 128,
+		Topic:             "mithril",
+		SocketPath:        "dingo-dmq.socket",
+		MessageTTL:        1800,
+		MaxMempoolSize:    128,
+		ListenAddress:     "0.0.0.0",
+		ListenIPv6Address: "::",
+		MinPeers:          3,
+		MaxPeers:          10,
 	}
 }
 
@@ -1112,11 +1140,11 @@ type APIPluginsConfig struct {
 //
 // bindAddr, debugBindAddr, and corsAllowedOrigins deliberately
 // stay at the Config root rather than moving under this section: bindAddr is
-// not API-specific (the relay/NtN listener uses it too),
+// not API-specific (the relay/NtN listener uses it too) and remains the
+// fallback for an explicitly empty Blockfrost or MCP provider host,
 // debugBindAddr controls the separate pprof listener, and corsAllowedOrigins
 // already applies uniformly to all four API providers, so
-// duplicating any of them here would only add a second source of truth for no
-// behavioral gain.
+// duplicating the shared settings here would add another source of truth.
 type APIConfig struct {
 	TLS apiconfig.TLSPolicy `yaml:"tls"`
 }
@@ -1144,7 +1172,10 @@ func defaultPluginsConfig() PluginsConfig {
 		API: APIPluginsConfig{
 			Blockfrost: hostplugin.Selection{
 				Provider: "builtin",
-				Config:   map[string]any{"port": 3000},
+				Config: map[string]any{
+					"port": 3000,
+					"host": "127.0.0.1",
+				},
 			},
 			Kupo: hostplugin.Selection{
 				Provider: "builtin",
@@ -1464,7 +1495,11 @@ type DatabaseLifecycleConfig struct {
 	// payloads. It is required for cloud snapshot creation and restore.
 	// Local-only snapshots and restores may use the unkeyed checksum only
 	// when this is unset. Every node that restores another's snapshots must
-	// hold the same secret.
+	// hold the same secret. The file must be a regular, non-symlink file of at
+	// most 1 KiB. Ownership and access are checked using the platform's
+	// controls: Unix requires the current user and no group/other access;
+	// Windows permits the current user or BUILTIN Administrators as owner and
+	// applies its restricted DACL rules.
 	SnapshotTrustKeyFile string `yaml:"snapshotTrustKeyFile"           envconfig:"DINGO_DB_LIFECYCLE_SNAPSHOT_TRUST_KEY_FILE"`
 	// SnapshotMaxCommitPause bounds how long a snapshot (manual or
 	// automatic) may hold the commit barrier once acquired. A snapshot still
@@ -1756,6 +1791,9 @@ func LoadConfig(configFile string) (*Config, error) {
 			return nil, fmt.Errorf("error reading config file: %w", err)
 		}
 		midnightYAMLFields = collectMidnightYAMLFields(buf)
+		if err := checkSecretFileYAML(buf); err != nil {
+			return nil, fmt.Errorf("config file %s: %w", configFile, err)
+		}
 
 		var root map[string]yaml.Node
 		if err := yaml.Unmarshal(buf, &root); err != nil {
@@ -1808,6 +1846,9 @@ func LoadConfig(configFile string) (*Config, error) {
 	}
 	pluginEnviron := os.Environ()
 	applyMCPAuthCompatibilityEnvironment(cfg, pluginEnviron)
+	if err := applySecretFileEnvironment(cfg); err != nil {
+		return nil, err
+	}
 	if err := applyAPIPortCompatibilityEnvironment(
 		cfg,
 		pluginEnviron,

@@ -232,14 +232,15 @@ type ChainProvider interface {
 // before cross-peer deduplication may suppress it. It carries enough context
 // for fork resolution to reconstruct a peer's candidate fragment later.
 type ObservedHeader struct {
-	ConnectionId ouroboros.ConnectionId
-	BlockHeader  gledger.BlockHeader
-	ArrivalTime  time.Time
-	Point        ocommon.Point
-	Tip          ochainsync.Tip
-	BlockNumber  uint64
-	Type         uint
-	Rollback     bool
+	ConnectionId                       ouroboros.ConnectionId
+	BlockHeader                        gledger.BlockHeader
+	HeaderCryptoVerificationGeneration uint64
+	ArrivalTime                        time.Time
+	Point                              ocommon.Point
+	Tip                                ochainsync.Tip
+	BlockNumber                        uint64
+	Type                               uint
+	Rollback                           bool
 }
 
 // State manages chainsync client connections and header
@@ -1207,7 +1208,11 @@ func (s *State) RecordObservedHeader(h ObservedHeader) {
 	}
 
 	hashKey := hex.EncodeToString(h.Point.Hash)
-	if _, exists := chainHistory.byHash[hashKey]; exists {
+	if existing, exists := chainHistory.byHash[hashKey]; exists {
+		if h.HeaderCryptoVerificationGeneration != 0 {
+			existing.header.HeaderCryptoVerificationGeneration = h.HeaderCryptoVerificationGeneration
+			chainHistory.byHash[hashKey] = existing
+		}
 		return
 	}
 	h.Point.Hash = cloneBytes(h.Point.Hash)
@@ -1268,6 +1273,41 @@ func (s *State) ClearObservedHeaderHistory(
 	connId ouroboros.ConnectionId,
 ) {
 	s.clearObservedHeaderHistory(connId)
+}
+
+// ClearObservedHeaderHistoryFrom removes a rejected header and every header
+// observed after it while retaining the independently verified prefix. When
+// the rejected hash is not retained, removal starts at the first retained
+// header at or beyond the point's slot; if none exists, the history is kept.
+func (s *State) ClearObservedHeaderHistoryFrom(
+	connId ouroboros.ConnectionId,
+	point ocommon.Point,
+) {
+	s.observedHeadersMutex.Lock()
+	defer s.observedHeadersMutex.Unlock()
+
+	chainHistory := s.observedHeaders[connId]
+	if chainHistory == nil {
+		return
+	}
+	index := slices.Index(chainHistory.order, hex.EncodeToString(point.Hash))
+	if index < 0 {
+		index = slices.IndexFunc(chainHistory.order, func(hashKey string) bool {
+			record, ok := chainHistory.byHash[hashKey]
+			return ok && record.header.Point.Slot >= point.Slot
+		})
+		if index < 0 {
+			return
+		}
+	}
+	for _, hashKey := range chainHistory.order[index:] {
+		delete(chainHistory.byHash, hashKey)
+	}
+	if index == 0 {
+		delete(s.observedHeaders, connId)
+		return
+	}
+	chainHistory.order = append([]string(nil), chainHistory.order[:index]...)
 }
 
 func (s *State) updateTrackedClientTip(

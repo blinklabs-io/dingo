@@ -576,17 +576,19 @@ func (n *Node) newOuroborosConfig(
 		// connection, so the fetch is gated on the txs offer, not the block
 		// offer. Best-effort: a fetch failure never tears down the shared
 		// connection.
-		EnableLeiosTxFetch:           enableLeiosNetworking,
-		LeiosTxFetchTailBudget:       leiosTxFetchTailBudget,
-		ChainsyncIngressEligible:     n.isChainsyncIngressEligible,
-		ChainsyncHasBestPeer:         n.chainsyncHasBestPeer,
-		ChainsyncApplyEligible:       n.chainsyncApplyEligible,
-		ChainsyncAwaitEagerness:      n.chainsyncAwaitEagerness,
-		ChainsyncObservePeerTip:      n.chainsyncObservePeerTip,
-		ChainsyncResolvePeerTip:      n.chainsyncResolvePeerTip,
-		ChainsyncObserveAwaitReply:   n.chainsyncObserveAwaitReply,
-		ChainsyncSyncTarget:          n.chainsyncSyncTarget,
-		ChainsyncObservePeerRollback: n.chainsyncObservePeerRollback,
+		EnableLeiosTxFetch:              enableLeiosNetworking,
+		LeiosTxFetchTailBudget:          leiosTxFetchTailBudget,
+		ChainsyncIngressEligible:        n.isChainsyncIngressEligible,
+		ChainsyncHasBestPeer:            n.chainsyncHasBestPeer,
+		ChainsyncApplyEligible:          n.chainsyncApplyEligible,
+		ChainsyncAwaitEagerness:         n.chainsyncAwaitEagerness,
+		ChainsyncObservePeerTip:         n.chainsyncObservePeerTip,
+		ChainsyncPrepareForecastWitness: n.chainsyncPrepareForecastWitness,
+		ChainsyncRemoveForecastWitness:  n.chainsyncRemoveForecastWitness,
+		ChainsyncResolvePeerTip:         n.chainsyncResolvePeerTip,
+		ChainsyncObserveAwaitReply:      n.chainsyncObserveAwaitReply,
+		ChainsyncSyncTarget:             n.chainsyncSyncTarget,
+		ChainsyncObservePeerRollback:    n.chainsyncObservePeerRollback,
 		// On the Musashi prototype network every mini-protocol shares one muxer
 		// to a single relay; block/EB traffic can delay the relay's keep-alive
 		// pong past the tight 10s gouroboros default, making dingo drop the
@@ -965,11 +967,12 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	// (a) the synchronous backfill runs while no new blocks can arrive, and
 	// (b) the EventBus subscription exists before any BlockActionApply events
 	// can be emitted, eliminating the startup gap. The
-	// epoch cache is loaded first because Midnight backfill writes epoch-keyed
-	// Ariadne/candidate rows. Both the explicit opt-in and API storage mode
-	// are required: the indexer depends on the api-mode indexes to function,
-	// and storage mode alone is no longer sufficient to start it (an api-mode
-	// deployment may not want Midnight indexing at all).
+	// epoch cache and applied tip are loaded first because Midnight backfill
+	// writes epoch-keyed Ariadne/candidate rows and resolves block timestamps
+	// through the tip-anchored era horizon. Both the explicit opt-in and API
+	// storage mode are required: the indexer depends on the api-mode indexes to
+	// function, and storage mode alone is no longer sufficient to start it (an
+	// api-mode deployment may not want Midnight indexing at all).
 	if midnightIndexerActive(n.config.storageMode, n.config.midnight) {
 		if err := n.ledgerState.PrepareEpochCacheForStartup(ctx); err != nil {
 			return fmt.Errorf(
@@ -2050,7 +2053,7 @@ func (n *Node) buildChainSelectorConfig(
 	genesisMode bool,
 	genesisWindowSlots uint64,
 ) chainselection.ChainSelectorConfig {
-	return chainselection.ChainSelectorConfig{
+	config := chainselection.ChainSelectorConfig{
 		Logger:                n.config.logger,
 		EventBus:              n.eventBus,
 		SecurityParam:         securityParam,
@@ -2088,6 +2091,31 @@ func (n *Node) buildChainSelectorConfig(
 			return slot, err == nil
 		},
 	}
+	// The running node publishes its started ledger before constructing the
+	// selector. Callers that build a standalone selector config without a
+	// ledger retain the generation-free behavior used by non-ledger events.
+	if n.wallClockLedger.Load() != nil {
+		config.HeaderCryptoVerificationGenerationCurrent = func(generation uint64) bool {
+			ls := n.wallClockLedger.Load()
+			return ls != nil &&
+				ls.HeaderCryptoVerificationGenerationCurrent(generation)
+		}
+		config.CurrentHeaderCryptoVerificationGeneration = func() uint64 {
+			ls := n.wallClockLedger.Load()
+			if ls == nil {
+				return 0
+			}
+			return ls.CurrentHeaderCryptoVerificationGeneration()
+		}
+		config.PinHeaderCryptoVerificationGeneration = func(generation uint64) (func(), bool) {
+			ls := n.wallClockLedger.Load()
+			if ls == nil {
+				return nil, false
+			}
+			return ls.PinHeaderCryptoVerificationGeneration(generation)
+		}
+	}
+	return config
 }
 
 // setLedgerState replaces n.ledgerState and withdraws the copy published to

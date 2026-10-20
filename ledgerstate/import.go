@@ -4022,6 +4022,15 @@ func importGovState(
 	if govState == nil {
 		return nil
 	}
+	if cfg.reconcileKeys != nil {
+		for _, proposal := range govState.Proposals {
+			cfg.reconcileKeys.addGovernanceProposal(
+				proposal.TxHash,
+				proposal.ActionIndex,
+			)
+		}
+		cfg.reconcileKeys.markGovernanceProposalsComplete()
+	}
 	if warning != nil {
 		cfg.Logger.Warn(
 			"governance state parsed with warnings",

@@ -459,6 +459,31 @@ var flagSpecs = []flagSpec{
 		"dmq-max-mempool-size",
 		"DMQ message pool size limit, in megabytes",
 	),
+	uintFlag(
+		"DMQ.N2NPort",
+		"dmq-n2n-port",
+		"DMQ peer listener port (0 = local clients only)",
+	),
+	stringFlag(
+		"DMQ.ListenAddress",
+		"dmq-listen-address",
+		"",
+		"DMQ peer listener IPv4 address (empty = no IPv4 listener)",
+	),
+	stringFlag(
+		"DMQ.ListenIPv6Address",
+		"dmq-listen-ipv6-address",
+		"",
+		"DMQ peer listener IPv6 address (empty = no IPv6 listener)",
+	),
+	stringFlag(
+		"DMQ.TopologyFile",
+		"dmq-topology-file",
+		"",
+		"dmq-node topology file naming the DMQ peers to dial",
+	),
+	uintFlag("DMQ.MinPeers", "dmq-min-peers", "DMQ peers to keep connected"),
+	uintFlag("DMQ.MaxPeers", "dmq-max-peers", "most DMQ peers to connect to"),
 
 	// Bark
 	stringFlag("BarkBaseUrl", "bark-url", "", "Bark archive fallback base URL"),
@@ -542,6 +567,12 @@ var flagSpecs = []flagSpec{
 		"koios-parity-api-key",
 		"",
 		"Koios Bearer token for rate-limited access",
+	),
+	stringFlag(
+		"KoiosParity.APIKeyFile",
+		"koios-parity-api-key-file",
+		"",
+		"file holding the Koios Bearer token (alternative to --koios-parity-api-key)",
 	),
 	stringFlag(
 		"KoiosParity.BaseURL",
@@ -748,7 +779,7 @@ var flagSpecs = []flagSpec{
 	intFlag(
 		"GenesisBootstrap.CorroborationPeers",
 		"genesis-bootstrap-corroboration-peers",
-		"independent peers that must corroborate a fast source before it drives Genesis selection (0 disables)",
+		"independent peers that must corroborate a fast source before it drives Genesis selection (default 1; 0 explicitly disables)",
 	),
 	boolFlag(
 		"GenesisBootstrap.LimitOnPatienceEnabled",
@@ -1193,6 +1224,9 @@ func ApplyFlags(cmd *cobra.Command, cfg *Config) error {
 		if isGatedField(spec.field) {
 			cfg.recordProvenance(spec.field, SourceFlag)
 		}
+	}
+	if err := applySecretFileFlags(flags, cfg); err != nil {
+		return err
 	}
 	if cfg.Network != previousNetwork {
 		clearMidnightNetworkDefaults(cfg, previousNetwork)

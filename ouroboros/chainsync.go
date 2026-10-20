@@ -1616,6 +1616,8 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 				VRFOutput:    vrfOutput,
 				PraosView:    praosView,
 				AdmissionID:  o.chainsyncAdmissionSequence.Add(1),
+				HeaderCryptoVerificationGeneration: chainsyncEvent.
+					HeaderCryptoVerificationGeneration,
 				// The parent hash is what lets the selector tell a connected
 				// header chain from a sequence of advancing numbers.
 				ObservedPrevHash: v.PrevHash().Bytes(),
@@ -1687,11 +1689,13 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 			o.chainsyncState.RecordObservedHeader(
 				chainsync.ObservedHeader{
 					ConnectionId: ctx.ConnectionId,
-					Point:        point,
-					Type:         blockType,
-					BlockHeader:  v,
-					ArrivalTime:  arrivalTime,
-					Tip:          tip,
+					HeaderCryptoVerificationGeneration: chainsyncEvent.
+						HeaderCryptoVerificationGeneration,
+					Point:       point,
+					Type:        blockType,
+					BlockHeader: v,
+					ArrivalTime: arrivalTime,
+					Tip:         tip,
 				},
 			)
 		}
@@ -1778,9 +1782,17 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 		}
 		chainsyncEvent.SyncTargetTrusted = true
 		chainsyncEvent.PeerTipUpdate = peerTipUpdate
+		if o.chainsyncState != nil {
+			chainsyncEvent.InvalidatePeerHeaderHistory = func() {
+				o.chainsyncState.ClearObservedHeaderHistoryFrom(
+					ctx.ConnectionId,
+					point,
+				)
+			}
+		}
 		if peerTipUpdate != nil {
-			update := *peerTipUpdate
 			resolvePeerTip := func(admitted bool) {
+				update := *peerTipUpdate
 				if o.config.ChainsyncResolvePeerTip != nil {
 					o.config.ChainsyncResolvePeerTip(update, admitted)
 					return
@@ -1798,7 +1810,6 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 			}
 			chainsyncEvent.PeerTipAdmission = func(admitted bool) {
 				if admitted {
-					o.clearDeferredHeaderRecovery(ctx.ConnectionId)
 					if o.chainsyncState != nil {
 						o.chainsyncState.AdmitClientTip(
 							ctx.ConnectionId,
@@ -1820,6 +1831,9 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 				chainsyncEvent,
 			),
 		); err != nil {
+			if chainsyncEvent.InvalidatePeerHeaderHistory != nil {
+				chainsyncEvent.InvalidatePeerHeaderHistory()
+			}
 			if chainsyncEvent.PeerTipAdmission != nil {
 				chainsyncEvent.PeerTipAdmission(false)
 			}
@@ -1841,9 +1855,36 @@ func (o *Ouroboros) admitChainsyncHeader(
 	e ledger.ChainsyncEvent,
 ) (bool, error) {
 	blockSlot := e.Point.Slot
+	var forecastWitness *chainselection.PeerTipUpdateEvent
+	if o.config.ChainsyncPrepareForecastWitness != nil {
+		e.ForecastHorizonWait = func() {
+			praosView, _ := praos.GetPraosTiebreakerView(e.BlockHeader)
+			update := chainselection.PeerTipUpdateEvent{
+				ConnectionId:     e.ConnectionId,
+				Tip:              e.Tip,
+				ObservedTip:      ochainsync.Tip{Point: e.Point, BlockNumber: e.BlockHeader.BlockNumber()},
+				VRFOutput:        praos.GetVRFOutput(e.BlockHeader),
+				PraosView:        praosView,
+				AdmissionID:      o.chainsyncAdmissionSequence.Add(1),
+				ObservedPrevHash: e.BlockHeader.PrevHash().Bytes(),
+				ObservedBoundary: e.Type == gledger.BlockTypeByronEbb,
+			}
+			forecastWitness = &update
+			for _, connId := range o.config.ChainsyncPrepareForecastWitness(update) {
+				o.scheduleHeaderResync(
+					connId,
+					time.Now(),
+					event.ChainsyncResyncReasonForecastCorroborationRecovery,
+				)
+			}
+		}
+	}
 	admissionCtx, cancel := chainsyncAdmissionContext(ctx)
 	defer cancel()
 	accepted, err := o.chainsyncHeaderAdmission(admissionCtx, e)
+	if forecastWitness != nil && o.config.ChainsyncRemoveForecastWitness != nil {
+		o.config.ChainsyncRemoveForecastWitness(*forecastWitness)
+	}
 	if errors.Is(err, ledger.ErrChainsyncHeaderDisconnected) {
 		// Blocks the node already has cannot connect this header, so no wait
 		// can release it. Return rather than hold the protocol until its state

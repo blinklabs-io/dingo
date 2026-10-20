@@ -1798,11 +1798,12 @@ func (d *Database) IterateLiveUtxoRefs(
 	txn *Txn,
 	fn func(*models.Utxo) error,
 ) error {
+	iterator := d.utxoStore()
 	if txn != nil {
-		return d.utxoStore().IterateLiveUtxos(txn.Metadata(), fn)
+		return iterator.IterateLiveUtxosContext(ctx, txn.Metadata(), fn)
 	}
 	return d.Transaction(ctx, false).Do(func(t *Txn) error {
-		return d.utxoStore().IterateLiveUtxos(t.Metadata(), fn)
+		return iterator.IterateLiveUtxosContext(ctx, t.Metadata(), fn)
 	})
 }
 
@@ -1827,11 +1828,14 @@ func (d *Database) IterateUtxoRefsAsOf(
 	txn *Txn,
 	fn func(*models.Utxo) error,
 ) error {
+	iterator := d.utxoStore()
 	if txn != nil {
-		return d.utxoStore().IterateUtxosAsOf(atSlot, txn.Metadata(), fn)
+		return iterator.IterateUtxosAsOfContext(
+			ctx, atSlot, txn.Metadata(), fn,
+		)
 	}
 	return d.Transaction(ctx, false).Do(func(t *Txn) error {
-		return d.utxoStore().IterateUtxosAsOf(atSlot, t.Metadata(), fn)
+		return iterator.IterateUtxosAsOfContext(ctx, atSlot, t.Metadata(), fn)
 	})
 }
 

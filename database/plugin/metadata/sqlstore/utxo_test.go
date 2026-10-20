@@ -237,15 +237,20 @@ func TestGetUtxosByRefsUsesTxIDIndex(t *testing.T) {
 	}
 }
 
-func TestAddressTransactionInputQueryUsesTxIDIndex(t *testing.T) {
+func TestAddressTransactionInputQueryUsesCompositeIndex(t *testing.T) {
 	skipPlanTestUnderRace(t)
 	t.Parallel()
 	store := newMigratedSQLiteStore(t)
 	seedStakeRefLookupUtxos(t, store, 50_000, 256)
 
-	args := make([]any, maxCachedAddressInputQuerySize)
-	for i := range args {
-		args[i] = utxoIDAt(i * 7).Hash
+	args := make(
+		[]any,
+		maxCachedAddressInputQuerySize*addressTransactionInputQueryParamsPerRef,
+	)
+	for i := range maxCachedAddressInputQuerySize {
+		ref := utxoIDAt(i * 7)
+		args[i*addressTransactionInputQueryParamsPerRef] = ref.Hash
+		args[i*addressTransactionInputQueryParamsPerRef+1] = ref.Idx
 	}
 	plan := queryPlan(
 		t,

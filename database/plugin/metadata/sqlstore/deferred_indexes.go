@@ -255,11 +255,7 @@ func (s *Store) buildDeferredIndexesWithProgress(
 					before(index.Name)
 				}
 				started := time.Now()
-				statement := s.dialect.CreateIndexSQL(
-					index.Name,
-					index.Table,
-					index.Columns,
-				)
+				statement := deferredIndexCreateSQL(s.dialect, index)
 				if _, err := db.ExecContext(
 					ctx,
 					statement,
@@ -322,11 +318,7 @@ func (s *Store) buildSQLiteDeferredIndexesWithProgress(
 					if before != nil {
 						before(index.Name)
 					}
-					statement := s.dialect.CreateIndexSQL(
-						index.Name,
-						index.Table,
-						index.Columns,
-					)
+					statement := deferredIndexCreateSQL(s.dialect, index)
 					started = time.Now()
 					if _, err := db.ExecContext(
 						txCtx,
@@ -428,11 +420,7 @@ func (s *Store) ensureRetainedIndexes(
 		if exists {
 			continue
 		}
-		statement := s.dialect.CreateIndexSQL(
-			index.Name,
-			index.Table,
-			index.Columns,
-		)
+		statement := deferredIndexCreateSQL(s.dialect, index)
 		if _, err := db.ExecContext(
 			ctx,
 			statement,
@@ -563,4 +551,14 @@ func (s *Store) HasDeferredIndexesPending() (bool, error) {
 		return false, fmt.Errorf("read deferred indexes marker: %w", err)
 	}
 	return value != "", nil
+}
+
+// deferredIndexCreateSQL builds the CREATE INDEX for a manifest or retained
+// entry, keeping a partial entry partial on the engines that support it.
+func deferredIndexCreateSQL(d Dialect, index deferred.Index) string {
+	statement := d.CreateIndexSQL(index.Name, index.Table, index.Columns)
+	if index.Where == "" || d.Name() == "mysql" {
+		return statement
+	}
+	return statement + " WHERE " + index.Where
 }
