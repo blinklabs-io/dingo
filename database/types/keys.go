@@ -145,12 +145,12 @@ const (
 	// unavailable for historical re-serving once its in-memory entry expires.
 	LeiosEBManifestKeyPrefix = "em"
 	// LeiosEBTxsKeyPrefix is the key prefix for storing the raw endorser-block
-	// transaction bodies (the CBOR-in-CBOR wrapped tx list from leios-fetch
+	// transaction bodies (the block_transaction list from leios-fetch
 	// MsgBlockTxs). Key format: "et" + hash(32 bytes) + slot(8 bytes
 	// big-endian), for the same (slot, hash) reason as LeiosEBManifestKeyPrefix.
-	// The value is a CBOR-encoded []cbor.RawMessage (each element is a CBOR
-	// byte string wrapping a full transaction CBOR, matching the leios-fetch
-	// wire format). Only written when the transaction cache is complete (all
+	// The value is a CBOR-encoded []cbor.RawMessage (each element is a full
+	// block_transaction CBOR, without the tag-24 wrapper of the wire
+	// format). Only written when the transaction cache is complete (all
 	// txCount txs fetched), so a missing "et" key means the txs are not
 	// available.
 	LeiosEBTxsKeyPrefix = "et"

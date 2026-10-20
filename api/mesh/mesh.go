@@ -58,6 +58,22 @@ const (
 	// api/utxorpc's listener carries the same bound.
 	listenerReadTimeout = 60 * time.Second
 
+	// defaultAccountCoinsPageSize caps the UTxOs one /account/coins response
+	// carries; a larger account is read by following the cursor.
+	defaultAccountCoinsPageSize = 500
+	// defaultAccountCoinsMaxCandidates caps the output rows one page scans,
+	// which bounds the work for an address whose payment credential is shared
+	// by many other addresses.
+	defaultAccountCoinsMaxCandidates = 5000
+	// defaultAccountCoinsMaxBytes caps the output CBOR one page retains. Each
+	// output expands into one coin per native asset, so the encoded response
+	// is bounded by a small multiple of this.
+	defaultAccountCoinsMaxBytes = 1 << 20
+	// defaultMaxConcurrentBulkReads caps how many /account/coins reads run
+	// at once; further requests are refused rather than queued, because a
+	// queue of blocked handlers would hold the memory the budgets bound.
+	defaultMaxConcurrentBulkReads = 8
+
 	// mainnetMagic is the network magic for Cardano
 	// mainnet, used to determine the address network.
 	mainnetMagic = 764824073
@@ -86,6 +102,14 @@ type ServerConfig struct {
 	// enough for a test". NewServer substitutes
 	// defaultRequestBodyTimeout when it is not positive.
 	requestBodyTimeout time.Duration
+	// accountCoinsPageSize, accountCoinsMaxCandidates,
+	// accountCoinsMaxBytes and maxConcurrentBulkReads are unexported for the
+	// same reason; NewServer substitutes the defaults above when they are
+	// not positive.
+	accountCoinsPageSize      int
+	accountCoinsMaxCandidates int
+	accountCoinsMaxBytes      int64
+	maxConcurrentBulkReads    int
 }
 
 // Server is the Mesh-compatible REST API server.
@@ -99,6 +123,9 @@ type Server struct {
 	// listening socket as part of what Stop waits for -- see
 	// internal/apilistener.
 	listener *apilistener.Listener
+	// bulkSlots admits at most maxConcurrentBulkReads concurrent
+	// result-size-scaled reads.
+	bulkSlots chan struct{}
 }
 
 // NewServer creates a new Mesh API server instance.
@@ -155,6 +182,19 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		cfg.requestBodyTimeout = defaultRequestBodyTimeout
 	}
 
+	if cfg.accountCoinsPageSize <= 0 {
+		cfg.accountCoinsPageSize = defaultAccountCoinsPageSize
+	}
+	if cfg.accountCoinsMaxCandidates <= 0 {
+		cfg.accountCoinsMaxCandidates = defaultAccountCoinsMaxCandidates
+	}
+	if cfg.accountCoinsMaxBytes <= 0 {
+		cfg.accountCoinsMaxBytes = defaultAccountCoinsMaxBytes
+	}
+	if cfg.maxConcurrentBulkReads <= 0 {
+		cfg.maxConcurrentBulkReads = defaultMaxConcurrentBulkReads
+	}
+
 	var addrNetID uint8 = lcommon.AddressNetworkTestnet
 	if cfg.NetworkMagic == mainnetMagic {
 		addrNetID = lcommon.AddressNetworkMainnet
@@ -177,6 +217,7 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		genesisID:     genesisID,
 		addrNetworkID: addrNetID,
 		listener:      apilistener.New("Mesh API", logger),
+		bulkSlots:     make(chan struct{}, cfg.maxConcurrentBulkReads),
 	}, nil
 }
 

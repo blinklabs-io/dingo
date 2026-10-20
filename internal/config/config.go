@@ -99,6 +99,12 @@ const (
 	DefaultForgeStaleGapThresholdSlots = 1000
 	DefaultHealthPort                  = 12799
 	DefaultMithrilServerPort           = 8081
+	DefaultMithrilWindowChunks         = 64
+	DefaultMithrilBatchChunks          = 8
+	DefaultMithrilDownloadWorkers      = 16
+	DefaultMithrilMinGapChunks         = 4
+	DefaultMithrilCheckInterval        = 10 * time.Minute
+	DefaultMithrilRetryBackoff         = 30 * time.Minute
 	// DefaultHealthReadyGapSlots matches
 	// DefaultForgeStaleGapThresholdSlots: both answer "has this node
 	// stopped following the chain?", and a readiness probe that flapped
@@ -661,6 +667,24 @@ type DMQConfig struct {
 	MessageTTL uint `yaml:"messageTtl"   envconfig:"DINGO_DMQ_MESSAGE_TTL"`
 	// MaxMempoolSize bounds the message pool, in megabytes.
 	MaxMempoolSize uint `yaml:"maxMempoolSize" envconfig:"DINGO_DMQ_MAX_MEMPOOL_SIZE"`
+	// N2NPort is the TCP port peers connect to. It is independent of the
+	// Cardano relay port. Zero, the default, serves local clients only.
+	N2NPort uint `yaml:"n2nPort"      envconfig:"DINGO_DMQ_N2N_PORT"`
+	// ListenAddress is the IPv4 address the peer listener binds. Empty
+	// disables the IPv4 listener.
+	ListenAddress string `yaml:"listenAddress" envconfig:"DINGO_DMQ_LISTEN_ADDRESS"`
+	// ListenIPv6Address is the IPv6 address the peer listener binds. Empty
+	// disables the IPv6 listener.
+	ListenIPv6Address string `yaml:"listenIpv6Address" envconfig:"DINGO_DMQ_LISTEN_IPV6_ADDRESS"`
+	// TopologyFile is a dmq-node topology file naming the DMQ peers to dial.
+	// It is separate from the Cardano topology.
+	TopologyFile string `yaml:"topologyFile" envconfig:"DINGO_DMQ_TOPOLOGY_FILE"`
+	// MinPeers is the number of DMQ peers to keep connections to. It must
+	// not exceed MaxPeers.
+	MinPeers uint `yaml:"minPeers"     envconfig:"DINGO_DMQ_MIN_PEERS"`
+	// MaxPeers is the most DMQ peers to hold connections to. Zero allows
+	// none, which needs MinPeers of zero too.
+	MaxPeers uint `yaml:"maxPeers"     envconfig:"DINGO_DMQ_MAX_PEERS"`
 }
 
 // NetworkMagicExplicit reports whether a source supplied the DMQ network magic.
@@ -680,10 +704,14 @@ func (c *DMQConfig) UnmarshalYAML(node *yaml.Node) error {
 // DefaultDMQConfig returns the default DMQ settings.
 func DefaultDMQConfig() DMQConfig {
 	return DMQConfig{
-		Topic:          "mithril",
-		SocketPath:     "dingo-dmq.socket",
-		MessageTTL:     1800,
-		MaxMempoolSize: 128,
+		Topic:             "mithril",
+		SocketPath:        "dingo-dmq.socket",
+		MessageTTL:        1800,
+		MaxMempoolSize:    128,
+		ListenAddress:     "0.0.0.0",
+		ListenIPv6Address: "::",
+		MinPeers:          3,
+		MaxPeers:          10,
 	}
 }
 
@@ -1305,8 +1333,30 @@ func ReapplyMidnightNetworkDefaults(cfg *Config, previousNetwork string) {
 
 // MithrilConfig holds configuration for Mithril snapshot bootstrapping.
 type MithrilConfig struct {
-	// Enabled controls whether Mithril integration is available.
+	// Enabled makes `dingo serve` sync from Mithril while it is behind the
+	// aggregator's certified immutable tip, falling back to Ouroboros on any
+	// failure. It requires core storage mode and defaults to false, which
+	// leaves serve with Ouroboros only. `dingo mithril sync` does not consult
+	// it.
 	Enabled bool `yaml:"enabled"                envconfig:"DINGO_MITHRIL_ENABLED"`
+	// WindowChunks bounds the immutable chunks held on disk at once while a
+	// node-managed sync downloads ahead of ledger replay. They wait
+	// undecoded, so it does not bound memory; BatchChunks does.
+	WindowChunks int `yaml:"windowChunks"           envconfig:"DINGO_MITHRIL_WINDOW_CHUNKS"`
+	// BatchChunks is the number of chunks applied per ledger batch. It must
+	// not exceed WindowChunks.
+	BatchChunks int `yaml:"batchChunks"            envconfig:"DINGO_MITHRIL_BATCH_CHUNKS"`
+	// DownloadWorkers is the number of concurrent chunk downloads.
+	DownloadWorkers int `yaml:"downloadWorkers"        envconfig:"DINGO_MITHRIL_DOWNLOAD_WORKERS"`
+	// MinGapChunks is the smallest number of certified chunks ahead of the
+	// applied tip that makes a node-managed sync worth starting.
+	MinGapChunks uint64 `yaml:"minGapChunks"           envconfig:"DINGO_MITHRIL_MIN_GAP_CHUNKS"`
+	// CheckInterval is how often a live node re-checks the aggregator for a
+	// gap worth syncing.
+	CheckInterval time.Duration `yaml:"checkInterval"          envconfig:"DINGO_MITHRIL_CHECK_INTERVAL"`
+	// RetryBackoff is how long node-managed sync waits after a Mithril
+	// failure before trying again; Ouroboros keeps syncing meanwhile.
+	RetryBackoff time.Duration `yaml:"retryBackoff"           envconfig:"DINGO_MITHRIL_RETRY_BACKOFF"`
 	// AggregatorURL overrides the default aggregator URL for the network.
 	// If empty, the URL is auto-detected from the configured network.
 	AggregatorURL string `yaml:"aggregatorUrl"          envconfig:"DINGO_MITHRIL_AGGREGATOR_URL"`
@@ -1317,11 +1367,11 @@ type MithrilConfig struct {
 	// should not be enabled in production.
 	AllowInsecureHTTP bool `yaml:"allowInsecureHttp"      envconfig:"DINGO_MITHRIL_ALLOW_INSECURE_HTTP"`
 	// Backend selects the Mithril artifact backend: "v2" (default) uses
-	// incremental Cardano database artifacts; "v1" uses the legacy full
-	// snapshot archives, which upstream Mithril is phasing out.
+	// incremental Cardano database artifacts. "v1" is no longer supported and
+	// is rejected by validation.
 	Backend string `yaml:"backend"                envconfig:"DINGO_MITHRIL_BACKEND"`
 	// PinnedDigest selects an exact Mithril artifact for a fresh bootstrap: a
-	// v1 snapshot digest or v2 Cardano database artifact hash. It is rejected
+	// Cardano database artifact hash. It is rejected
 	// for catch-up runs and may not conflict with the durable artifact pin used
 	// to resume an interrupted import.
 	PinnedDigest string `yaml:"pinnedDigest"           envconfig:"DINGO_MITHRIL_PINNED_DIGEST"`
@@ -1571,7 +1621,13 @@ func newDefaultConfig() *Config {
 		MaxKESEvolutions:  62,     // 2^6 - 2 for KES depth 6
 		// Mithril defaults
 		Mithril: MithrilConfig{
-			Enabled:            true,
+			Enabled:            false,
+			WindowChunks:       DefaultMithrilWindowChunks,
+			BatchChunks:        DefaultMithrilBatchChunks,
+			DownloadWorkers:    DefaultMithrilDownloadWorkers,
+			MinGapChunks:       DefaultMithrilMinGapChunks,
+			CheckInterval:      DefaultMithrilCheckInterval,
+			RetryBackoff:       DefaultMithrilRetryBackoff,
 			Backend:            "v2",
 			CleanupAfterLoad:   true,
 			VerifyCertificates: true,

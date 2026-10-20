@@ -459,6 +459,31 @@ var flagSpecs = []flagSpec{
 		"dmq-max-mempool-size",
 		"DMQ message pool size limit, in megabytes",
 	),
+	uintFlag(
+		"DMQ.N2NPort",
+		"dmq-n2n-port",
+		"DMQ peer listener port (0 = local clients only)",
+	),
+	stringFlag(
+		"DMQ.ListenAddress",
+		"dmq-listen-address",
+		"",
+		"DMQ peer listener IPv4 address (empty = no IPv4 listener)",
+	),
+	stringFlag(
+		"DMQ.ListenIPv6Address",
+		"dmq-listen-ipv6-address",
+		"",
+		"DMQ peer listener IPv6 address (empty = no IPv6 listener)",
+	),
+	stringFlag(
+		"DMQ.TopologyFile",
+		"dmq-topology-file",
+		"",
+		"dmq-node topology file naming the DMQ peers to dial",
+	),
+	uintFlag("DMQ.MinPeers", "dmq-min-peers", "DMQ peers to keep connected"),
+	uintFlag("DMQ.MaxPeers", "dmq-max-peers", "most DMQ peers to connect to"),
 
 	// Bark
 	stringFlag("BarkBaseUrl", "bark-url", "", "Bark archive fallback base URL"),
@@ -987,7 +1012,37 @@ var flagSpecs = []flagSpec{
 	boolFlag(
 		"Mithril.Enabled",
 		"mithril-enabled",
-		"enable Mithril integration",
+		"sync from Mithril inside serve while behind the certified tip (core storage mode only)",
+	),
+	intFlag(
+		"Mithril.WindowChunks",
+		"mithril-window-chunks",
+		"maximum immutable chunks on disk during node-managed Mithril sync",
+	),
+	intFlag(
+		"Mithril.BatchChunks",
+		"mithril-batch-chunks",
+		"immutable chunks applied per ledger batch during node-managed Mithril sync",
+	),
+	intFlag(
+		"Mithril.DownloadWorkers",
+		"mithril-download-workers",
+		"concurrent chunk downloads during node-managed Mithril sync",
+	),
+	uint64Flag(
+		"Mithril.MinGapChunks",
+		"mithril-min-gap-chunks",
+		"minimum certified chunks ahead of the applied tip to start node-managed Mithril sync",
+	),
+	durationFlag(
+		"Mithril.CheckInterval",
+		"mithril-check-interval",
+		"how often a live node re-checks the Mithril aggregator for a gap",
+	),
+	durationFlag(
+		"Mithril.RetryBackoff",
+		"mithril-retry-backoff",
+		"wait after a Mithril failure before retrying node-managed sync",
 	),
 	stringFlag(
 		"Mithril.AggregatorURL",
@@ -999,13 +1054,13 @@ var flagSpecs = []flagSpec{
 		"Mithril.Backend",
 		"mithril-backend",
 		"",
-		"Mithril artifact backend: v1 (legacy snapshots) or v2 (incremental database)",
+		"Mithril artifact backend: v2 (incremental database; empty selects v2)",
 	),
 	stringFlag(
 		"Mithril.PinnedDigest",
 		"mithril-pinned-digest",
 		"",
-		"Mithril artifact identity for a fresh bootstrap: v1 snapshot digest or v2 Cardano database artifact hash",
+		"Mithril artifact identity for a fresh bootstrap: a Cardano database artifact hash",
 	),
 	stringFlag(
 		"Mithril.DownloadDir",

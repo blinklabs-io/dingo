@@ -346,3 +346,59 @@ func TestPeriodicTickDoesNotOverlapEpochRun(t *testing.T) {
 	)
 	require.Equal(t, int64(1), u.maxSeen.Load(), "runs must never overlap")
 }
+
+// TestDeferHoldsRunsUntilResumeThenRunsOnce defers every trigger while a
+// catch-up holds the manager and collapses them into one run on resume.
+func TestDeferHoldsRunsUntilResumeThenRunsOnce(t *testing.T) {
+	t.Parallel()
+	u := newFakeUpdater()
+	close(u.release)
+	tick := make(chan time.Time)
+	m := newTestManager(u, event.NewEventBus(nil, nil))
+	SetTickSource(m, tick)
+	require.NoError(t, m.Start(t.Context()))
+	defer func() { require.NoError(t, m.Stop()) }()
+
+	resume := m.Defer()
+	resumeNested := m.Defer()
+	for range 3 {
+		m.handleEpochTransition(epochEvent([]byte{1}))
+		tick <- time.Now()
+	}
+	// The worker has consumed every tick, so it has seen the triggers.
+	tick <- time.Now()
+	require.Zero(t, u.calls.Load(), "a deferred trigger ran")
+
+	resumeNested()
+	// A tick the worker has received may still be in flight; sending another
+	// would race the final resume and could run as a periodic refresh. The
+	// window instead lets the worker skip it while one deferral is held.
+	require.Never(t, func() bool { return u.calls.Load() > 0 },
+		200*time.Millisecond, 10*time.Millisecond,
+		"ran before the last resume")
+
+	resume()
+	resume() // idempotent
+	require.Equal(t, "epoch", receive(t, u.entered, "the deferred run"))
+	require.Never(t, func() bool { return u.calls.Load() > 1 },
+		200*time.Millisecond, 10*time.Millisecond,
+		"deferred triggers must collapse to one run")
+}
+
+// TestDeferWithoutTriggerQueuesNothing resumes a deferral nothing arrived
+// during, which must not cost a run.
+func TestDeferWithoutTriggerQueuesNothing(t *testing.T) {
+	t.Parallel()
+	u := newFakeUpdater()
+	close(u.release)
+	m := newTestManager(u, event.NewEventBus(nil, nil))
+	SetTickSource(m, make(chan time.Time))
+	require.NoError(t, m.Start(t.Context()))
+	defer func() { require.NoError(t, m.Stop()) }()
+
+	m.Defer()()
+	require.Never(t, func() bool { return u.calls.Load() != 0 },
+		200*time.Millisecond, 10*time.Millisecond)
+	var nilManager *Manager
+	nilManager.Defer()()
+}

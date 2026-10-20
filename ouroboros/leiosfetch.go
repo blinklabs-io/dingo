@@ -166,20 +166,28 @@ func (o *Ouroboros) leiosfetchServerBlockTxsRequest(
 	if err := validateLeiosTxBitmap(data.txCount, txBitmap); err != nil {
 		return nil, err
 	}
-	if !data.completeTxCache() {
+	var txs []cbor.RawMessage
+	if data.completeTxCache() {
+		txs = leiosTxsFromBitmap(data.txsRaw, txBitmap)
+	} else {
 		available := make([]cbor.RawMessage, data.txCount)
 		data.seedLeiosPartialTxsLocked(available, nil)
-		servedBitmap, txs := leiosAvailableTxsFromBitmap(
-			available,
-			txBitmap,
-		)
-		return oleiosfetch.NewMsgBlockTxs(point, servedBitmap, txs), nil
+		_, txs = leiosAvailableTxsFromBitmap(available, txBitmap)
 	}
-	return oleiosfetch.NewMsgBlockTxs(
-		point,
-		txBitmap,
-		leiosTxsFromBitmap(data.txsRaw, txBitmap),
-	), nil
+	// MsgBlockTxs carries no bitmap, so a reply must hold exactly the
+	// requested transactions; a partial reply would be misread positionally.
+	if want := len(leiosBitmapTxIndices(txBitmap)); len(txs) != want {
+		return nil, fmt.Errorf(
+			"leios endorser block transactions not available: %d.%x: "+
+				"%d of %d requested: %w",
+			point.Slot,
+			point.Hash,
+			len(txs),
+			want,
+			oleiosfetch.ErrBlockTxsNotFound,
+		)
+	}
+	return oleiosfetch.NewMsgBlockTxs(txs), nil
 }
 
 func (o *Ouroboros) leiosfetchServerVotesRequest(
