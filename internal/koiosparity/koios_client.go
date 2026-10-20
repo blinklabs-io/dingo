@@ -154,7 +154,7 @@ const (
 	koiosDialTimeout           = 10 * time.Second
 	koiosDialKeepAlive         = 30 * time.Second
 	koiosTLSHandshakeTimeout   = 10 * time.Second
-	koiosResponseHeaderTimeout = 60 * time.Second
+	koiosResponseHeaderTimeout = 15 * time.Second
 	koiosExpectContinueTimeout = 1 * time.Second
 
 	// koiosIdleConnTimeout bounds how long an idle keep-alive connection
@@ -194,7 +194,7 @@ const (
 	// of caller, so this tightening only shortens how long a stall is
 	// tolerated before that retry fires -- it does not lower the ceiling
 	// on how long a legitimately slow bulk operation may run in total.
-	koiosRequestTimeout = 90 * time.Second
+	koiosRequestTimeout = 20 * time.Second
 )
 
 // koiosBaseURLs maps network name to Koios v1 base URL.
