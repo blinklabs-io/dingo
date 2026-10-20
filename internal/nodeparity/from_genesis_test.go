@@ -36,6 +36,8 @@ import (
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/mary"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"github.com/blinklabs-io/gouroboros/protocol"
 	"github.com/blinklabs-io/gouroboros/protocol/chainsync"
@@ -998,6 +1000,10 @@ type genesisFakeServer struct {
 	// checks that follow it.
 	tooOldAfterFirstAcquire map[uint64]int
 
+	// utxoWhole, when non-nil, is the answer to ShelleyUtxoWholeQuery in
+	// place of the empty set.
+	utxoWhole map[localstatequery.UtxoId]ledger.BabbageTransactionOutput
+
 	// eraHistory, when non-nil, is the answer to HardForkEraHistoryQuery.
 	// Left nil, that query fails like any other unexpected one, so
 	// RunFromGenesis resolves every epoch through its per-point fallback.
@@ -1398,9 +1404,13 @@ func (s *genesisFakeServer) lsqConfig() localstatequery.Config {
 									"can't assign requested address",
 							)
 						}
-						return localstatequery.UTxOsResult{
-							Results: map[localstatequery.UtxoId]ledger.BabbageTransactionOutput{},
-						}, nil
+						s.mu.Lock()
+						whole := s.utxoWhole
+						s.mu.Unlock()
+						if whole == nil {
+							whole = map[localstatequery.UtxoId]ledger.BabbageTransactionOutput{}
+						}
+						return localstatequery.UTxOsResult{Results: whole}, nil
 					case *localstatequery.ShelleyEpochNoQuery:
 						s.mu.Lock()
 						s.epochNoQueries++
@@ -2283,4 +2293,56 @@ func TestRunFromGenesis_EpochChecksRetryTooOldRefusal(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("RunFromGenesis did not exit after ctx cancellation")
 	}
+}
+
+// TestDial_ReceivesUTxOWholeLargerThanIngressBudget covers a whole-UTxO-set
+// reply larger than the muxer's connection-wide ingress budget. Live, the
+// reply at preprod epoch 157 overran the 64MiB default and the muxer closed
+// the connection with ErrIngressOverflow. The budget is shrunk to a fraction
+// of one segment here, so the reply exceeds it many times over and any
+// segment queued behind another overruns it.
+func TestDial_ReceivesUTxOWholeLargerThanIngressBudget(t *testing.T) {
+	t.Parallel()
+	const magic = 42
+	const utxoCount = 3000
+	const ingressBudget = 1024
+
+	server := newGenesisFakeServer(t, 1)
+	addr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyNone,
+		lcommon.AddressNetworkTestnet,
+		make([]byte, lcommon.AddressHashSize),
+		nil,
+	)
+	require.NoError(t, err)
+	server.utxoWhole = make(
+		map[localstatequery.UtxoId]ledger.BabbageTransactionOutput, utxoCount,
+	)
+	for i := range utxoCount {
+		var hash ledger.Blake2b256
+		hash[0], hash[1] = byte(i>>8), byte(i)
+		server.utxoWhole[localstatequery.UtxoId{Hash: hash, Idx: i}] =
+			ledger.BabbageTransactionOutput{
+				OutputAddress: addr,
+				OutputAmount:  mary.MaryTransactionOutputValue{Amount: uint64(i) + 1},
+			}
+	}
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = listener.Close() })
+	server.serve(t, listener, magic)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	conn, lsq, err := acquireWithRetry(
+		ctx, listener.Addr().String(), magic, server.chain.Points[0], true,
+	)
+	require.NoError(t, err)
+	defer conn.Close() //nolint:errcheck
+	conn.Muxer().SetIngressBudget(ingressBudget)
+
+	utxos, err := lsq.Client.GetUTxOWhole()
+	require.NoError(t, err)
+	assert.Len(t, utxos.Results, utxoCount)
 }
