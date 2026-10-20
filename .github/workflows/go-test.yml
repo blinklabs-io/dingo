@@ -264,6 +264,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
         with:
           persist-credentials: false
+      - name: runner-probe-start
+        # Logs the runner's region, CPU, memory and fsync latency, so a slow
+        # or red run can be attributed to its host without a re-run.
+        run: python3 .github/scripts/runner-probe.py start
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
         with:
           go-version: 1.26.x
@@ -306,6 +310,9 @@ jobs:
         # friends and t.Skip when unset, so this replays vectors against SQLite
         # only. go-test (Linux) and go-test (Linux, race) below cover the rest.
         run: go test -tags dingo_extra_plugins -ldflags="-s -w" -timeout 30m ./...
+      - name: runner-probe-end
+        if: always()
+        run: python3 .github/scripts/runner-probe.py end
 
   # Stage 3. Linux with Postgres, MySQL and MinIO (fake s3) services.
   #
@@ -414,6 +421,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
         with:
           persist-credentials: false
+      - name: runner-probe-start
+        # Logs the runner's region, CPU, memory and fsync latency, so a slow
+        # or red run can be attributed to its host without a re-run.
+        run: python3 .github/scripts/runner-probe.py start
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
         with:
           go-version: ${{ matrix.go-version }}
@@ -486,6 +497,9 @@ jobs:
         # job's serialized 10m + 20m + 60m; internal/docsparity's
         # TestPackageTimeoutsStayUnderJobBackstops keeps that ordering.
         run: go test -v -tags dingo_extra_plugins -ldflags="-s -w" -timeout 60m ./...
+      - name: runner-probe-end
+        if: always()
+        run: python3 .github/scripts/runner-probe.py end
       - name: stop-test-databases
         if: always()
         run: |
@@ -538,6 +552,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
         with:
           persist-credentials: false
+      - name: runner-probe-start
+        # Logs the runner's region, CPU, memory and fsync latency, so a slow
+        # or red run can be attributed to its host without a re-run.
+        run: python3 .github/scripts/runner-probe.py start
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
         with:
           go-version: ${{ matrix.go-version }}
@@ -606,6 +624,9 @@ jobs:
           mapfile -t pkgs <<<"$selected"
           printf '%s\n' "${pkgs[@]}"
           go test -v -tags dingo_extra_plugins -ldflags="-s -w" -race -timeout 60m "${pkgs[@]}"
+      - name: runner-probe-end
+        if: always()
+        run: python3 .github/scripts/runner-probe.py end
 
   # Stage 3. macos-latest runs the full ./... suite here.
   go-test-macos:
@@ -627,6 +648,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
         with:
           persist-credentials: false
+      - name: runner-probe-start
+        # Logs the runner's region, CPU, memory and fsync latency, so a slow
+        # or red run can be attributed to its host without a re-run.
+        run: python3 .github/scripts/runner-probe.py start
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
         with:
           go-version: ${{ matrix.go-version }}
@@ -651,6 +676,9 @@ jobs:
         run: go build ./...
       - name: go-test
         run: go test -v -ldflags="-s -w" -timeout 30m ./...
+      - name: runner-probe-end
+        if: always()
+        run: python3 .github/scripts/runner-probe.py end
 
   # Stage 4. One build job per runner OS, each gated on that OS's own tests.
   #
