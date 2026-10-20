@@ -710,7 +710,7 @@ func ListCloudSnapshots(
 	}
 	validated := make([]SnapshotEntry, 0, len(entries))
 	for _, entry := range entries {
-		if err := entry.Manifest.Authenticate(opts...); err != nil {
+		if err := authenticateEntry(entry, opts); err != nil {
 			problems = append(problems, fmt.Errorf(
 				"authenticate cloud snapshot %q: %w", entry.ID, err,
 			))
@@ -790,7 +790,7 @@ func ReconcileCloudSnapshotCatalogContext(
 		return false, listErr
 	}
 	for _, entry := range entries {
-		if err := entry.Manifest.Authenticate(opts...); err != nil {
+		if err := authenticateEntry(entry, opts); err != nil {
 			return false, fmt.Errorf(
 				"%w: authenticate cloud snapshot %q: %w",
 				ErrSnapshotCatalogIncomplete, entry.ID, err,
@@ -835,6 +835,10 @@ func FetchCloudManifest(
 	if !ok {
 		return Manifest{}, false, nil
 	}
+	opts = append(
+		append([]ManifestOption(nil), opts...),
+		WithManifestID(cloudSnapshotIDFromURI(snapshotURI)),
+	)
 	m, err = fetcher.FetchManifestWithOptions(ctx, opts...)
 	if err == nil {
 		err = m.Authenticate(opts...)

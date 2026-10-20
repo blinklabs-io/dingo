@@ -710,7 +710,15 @@ func resolveManifest(
 		return Manifest{}, err
 	}
 	defer cleanup()
-	return ReadManifest(dir, opts...)
+	// The download directory is temporary; the signed ID must match the
+	// object prefix the snapshot was requested by.
+	return ReadManifest(
+		dir,
+		append(
+			append([]ManifestOption(nil), opts...),
+			WithManifestID(cloudSnapshotIDFromURI(snapshotDir)),
+		)...,
+	)
 }
 
 // fetchPayloads returns a local directory, created under workParent, holding

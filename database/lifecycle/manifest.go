@@ -29,7 +29,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -44,7 +46,10 @@ import (
 // tooling can reject a manifest it doesn't understand instead of silently
 // misreading it. Adding the Gates field did not bump this -- see Gates'
 // doc comment for why that is acceptable today.
-const ManifestFormatVersion = 1
+//
+// Version 2 added the signed snapshot ID. A version 1 manifest carries no ID,
+// so a keyed verification rejects it; see ErrManifestLegacyFormat.
+const ManifestFormatVersion = 2
 
 // ManifestFileName is the name of the manifest file inside a snapshot
 // directory.
@@ -66,6 +71,8 @@ type ManifestOption func(*manifestConfig)
 type manifestConfig struct {
 	maxBytes int64
 	key      []byte
+	// id is the snapshot ID a manifest must carry when verified under a key.
+	id string
 	// maxPause is consumed only by Snapshot and SnapshotToCloud.
 	maxPause time.Duration
 	// pauseNow, pauseContext, and pauseDeadline are per-call test seams
@@ -104,6 +111,55 @@ func snapshotCatalogReconcile(
 // authenticates them. An empty key is the same as passing no option.
 func WithManifestKey(key []byte) ManifestOption {
 	return func(cfg *manifestConfig) { cfg.key = key }
+}
+
+// WithManifestID sets the snapshot ID (local directory name or cloud object
+// prefix segment) that a keyed verification requires the manifest to carry.
+// ReadManifest defaults it to the base name of the directory it reads, so
+// this is needed only where the manifest is read from a location whose name
+// is not the snapshot ID, such as a temporary download directory or a cached
+// catalog row. An empty id is the same as passing no option.
+func WithManifestID(id string) ManifestOption {
+	return func(cfg *manifestConfig) {
+		if id != "" {
+			cfg.id = id
+		}
+	}
+}
+
+func manifestID(opts []ManifestOption) string {
+	cfg := manifestConfig{}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&cfg)
+		}
+	}
+	return cfg.id
+}
+
+// snapshotIDForDir returns the snapshot ID a snapshot directory is addressed
+// by: its base name, without resolving symlinks, so a link to another
+// snapshot is addressed by the link's name.
+func snapshotIDForDir(dir string) string {
+	if abs, err := filepath.Abs(dir); err == nil {
+		dir = abs
+	}
+	return filepath.Base(dir)
+}
+
+// cloudSnapshotIDFromURI returns the last path segment of a cloud snapshot
+// URI, which JoinCloudURI makes the snapshot ID. It returns "" when the URI
+// has no path segment.
+func cloudSnapshotIDFromURI(uri string) string {
+	u, err := url.Parse(uri)
+	if err != nil {
+		return ""
+	}
+	id := path.Base(strings.TrimRight(u.Path, "/"))
+	if id == "." || id == "/" {
+		return ""
+	}
+	return id
 }
 
 func manifestKey(opts []ManifestOption) []byte {
@@ -191,6 +247,23 @@ var ErrManifestUnauthenticated = errors.New(
 	"manifest is not authenticated by the configured trust key",
 )
 
+// ErrManifestLegacyFormat marks a manifest written before snapshot IDs were
+// signed (format version 1). It carries no ID the trust key authenticates, so
+// it cannot be bound to the directory or object prefix it was found under;
+// the snapshot must be re-created. It is returned only by keyed verification,
+// and always joined with ErrManifestUnauthenticated.
+var ErrManifestLegacyFormat = errors.New(
+	"snapshot predates signed snapshot IDs and must be re-created",
+)
+
+// ErrManifestIDMismatch marks an authenticated manifest whose signed snapshot
+// ID differs from the directory name or object prefix it was found under,
+// which is how a complete older snapshot copied under a newer ID presents.
+// It is always joined with ErrManifestUnauthenticated.
+var ErrManifestIDMismatch = errors.New(
+	"manifest snapshot ID does not match the requested snapshot ID",
+)
+
 // Trigger values recorded in Manifest.Trigger.
 const (
 	TriggerEpochBoundary = "epoch-boundary"
@@ -203,9 +276,16 @@ const (
 // data. It is written as JSON (not CBOR) since it is operator/tooling
 // facing metadata, not chain data.
 type Manifest struct {
-	FormatVersion int       `json:"formatVersion"`
-	CreatedAt     time.Time `json:"createdAt"`
-	Trigger       string    `json:"trigger"`
+	FormatVersion int `json:"formatVersion"`
+
+	// ID is the snapshot ID, the base name of the snapshot directory or cloud
+	// prefix the snapshot was written to. It is covered by Authentication, so
+	// a keyed verification can bind the manifest to the ID it is requested by.
+	// Empty in a format version 1 manifest.
+	ID string `json:"id,omitempty"`
+
+	CreatedAt time.Time `json:"createdAt"`
+	Trigger   string    `json:"trigger"`
 
 	// Name/Description are operator-supplied labels, set after the fact
 	// via LabelSnapshot (Snapshot itself has no caller-facing label
@@ -323,10 +403,20 @@ func (m Manifest) authentication(key []byte) (string, error) {
 // Authenticate verifies m against the trust key in opts. It returns nil when
 // no key is configured, since there is then nothing to verify against, and
 // ErrManifestUnauthenticated when m's tag is absent or does not match.
+// Under a key it also rejects a format version 1 manifest
+// (ErrManifestLegacyFormat) and, when WithManifestID names the requested
+// snapshot, a manifest whose signed ID differs (ErrManifestIDMismatch).
 func (m Manifest) Authenticate(opts ...ManifestOption) error {
 	key := manifestKey(opts)
 	if len(key) == 0 {
 		return nil
+	}
+	if m.FormatVersion < 2 {
+		return fmt.Errorf(
+			"%w: %w (format version %d)",
+			ErrManifestUnauthenticated, ErrManifestLegacyFormat,
+			m.FormatVersion,
+		)
 	}
 	want, err := m.authentication(key)
 	if err != nil {
@@ -335,7 +425,21 @@ func (m Manifest) Authenticate(opts ...ManifestOption) error {
 	if !hmac.Equal([]byte(want), []byte(m.Authentication)) {
 		return ErrManifestUnauthenticated
 	}
+	if id := manifestID(opts); id != "" && m.ID != id {
+		return fmt.Errorf(
+			"%w: %w: manifest signed for %q, requested %q",
+			ErrManifestUnauthenticated, ErrManifestIDMismatch, m.ID, id,
+		)
+	}
 	return nil
+}
+
+// authenticateEntry verifies a catalog or listing entry against the trust key,
+// requiring the manifest to carry the entry's own ID.
+func authenticateEntry(entry SnapshotEntry, opts []ManifestOption) error {
+	return entry.Manifest.Authenticate(
+		append(append([]ManifestOption(nil), opts...), WithManifestID(entry.ID))...,
+	)
 }
 
 // CheckPluginMatch returns an error if the manifest was produced by a
@@ -492,6 +596,7 @@ func writeManifest(
 		return err
 	}
 	m.FormatVersion = ManifestFormatVersion
+	m.ID = snapshotIDForDir(dir)
 	m.Authentication = ""
 	if key := manifestKey(opts); len(key) > 0 {
 		tag, err := m.authentication(key)
@@ -582,7 +687,9 @@ func ReadManifest(dir string, opts ...ManifestOption) (Manifest, error) {
 	if err != nil {
 		return Manifest{}, fmt.Errorf("read manifest %q: %w", path, err)
 	}
-	m, err := ParseManifest(data, opts...)
+	// Explicit options come last so a caller-supplied ID wins the default.
+	idOpts := append([]ManifestOption{WithManifestID(snapshotIDForDir(dir))}, opts...)
+	m, err := ParseManifest(data, idOpts...)
 	if err != nil {
 		return Manifest{}, fmt.Errorf("%s: %w", path, err)
 	}
