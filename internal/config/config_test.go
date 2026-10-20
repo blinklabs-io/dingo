@@ -339,6 +339,12 @@ func TestDefaultMempoolProviderIsFIFO(t *testing.T) {
 	}
 }
 
+func TestDefaultConsensusProviderIsPraos(t *testing.T) {
+	if got := defaultPluginsConfig().Consensus.Provider; got != "praos" {
+		t.Fatalf("default consensus provider = %q, want praos", got)
+	}
+}
+
 func TestLoad_DAGMempoolProvider(t *testing.T) {
 	resetGlobalConfig()
 	tmpFile := filepath.Join(t.TempDir(), "dag-mempool.yaml")

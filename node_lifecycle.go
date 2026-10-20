@@ -672,6 +672,11 @@ func (n *Node) reinitializeCoreStorage(ctx context.Context) error {
 		)
 		dbNeedsRecovery = true
 	}
+	if !dbNeedsRecovery {
+		if err := n.enforceConsensusDatabaseIdentity(); err != nil {
+			return fmt.Errorf("consensus database compatibility: %w", err)
+		}
+	}
 	// A Mithril run this operation aborted skipped its index rebuild, and a
 	// restored snapshot may have been taken during one: either way the
 	// critical indexes rollback reads can be missing behind the marker.
@@ -731,6 +736,9 @@ func (n *Node) reinitializeCoreStorage(ctx context.Context) error {
 	if dbNeedsRecovery {
 		if err := n.ledgerState.RecoverCommitTimestampConflict(ctx); err != nil {
 			return fmt.Errorf("failed to recover database: %w", err)
+		}
+		if err := n.enforceConsensusDatabaseIdentity(); err != nil {
+			return fmt.Errorf("consensus database compatibility: %w", err)
 		}
 		if err := n.enforceRecoveredNodeSettings(ctx); err != nil {
 			return err

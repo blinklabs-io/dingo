@@ -21,8 +21,14 @@ start order with that same context, even if the capability wait reached its
 deadline, so one timed-out capability does not discard the host's remaining
 provider ownership.
 
-Startup resolves storage, constructs database and ledger, resolves mempool,
-then resolves the enabled API capabilities. Each API provider (Blockfrost,
+Startup resolves the selected consensus provider before opening storage, then
+constructs the database and ledger, resolves mempool, and resolves the enabled
+API capabilities. Praos is the default `consensus` provider. The same
+instance chooses header authorization, production scheduling, peer and ledger
+chain comparison, and local sibling adoption for both relays and producers.
+The ledger supplies state to the provider and retains ownership of epochs,
+nonces, transactions, rollback, and stake snapshots; producer credentials stay
+with the block producer. Each API provider (Blockfrost,
 Kupo, Mesh, UTxO RPC) is resolved only in API storage mode and only when its
 configured port is nonzero, so core-mode nodes and disabled ports resolve
 none of them. Failures unwind providers in reverse order. Normal shutdown
@@ -31,6 +37,14 @@ Database receives provider-owned stores through `database.Stores`.
 Before API providers start, API-mode database startup runs the one-time,
 cancellable backfill for rendered addresses of live asset UTxOs; a sync_state
 marker skips the scan after it completes.
+The provider's versioned identity is the network and database consensus
+identity. Existing unmarked databases are treated as `praos/v1` and marked on
+their next successful open. A different identity cannot open that database.
+Persisted leader schedules carry the same identity in addition to their format
+version, nonce, pool stake, and total stake, so a schedule computed by another
+algorithm is never reused; a record that carries no identity is recomputed. Alternative providers must define a distinct
+identity and a network compatibility mechanism before registration.
+
 Storage lifecycle contexts cross the provider boundary. In particular, Badger
 stops scheduling value-log GC before close and prevents a successful rewrite
 from chaining another pass. Because Badger cannot cancel a rewrite already in
@@ -18351,6 +18365,16 @@ before the real one arrives on-chain. `GetCurrentProtocolParams`
 `ledger.withoutSyntheticV2CostModel` in `ledger/view.go`) must not report
 that fabricated value as if it were real data — a real cardano-node on the
 same chain genuinely reports no PlutusV2 entry until a real update lands.
+
+An Alonzo genesis `extraConfig.costModels` overlay is real data, not
+synthetic: `alonzo.AlonzoProtocolParameters.UpdateFromGenesis` applies it, so a
+PlutusV2 model injected that way is present before `HardForkBabbage` runs and
+nothing is fabricated. The ledger injects the overlay after every era
+translation, so `HardForkConway` and `HardForkDijkstra` re-apply it per
+language after their own genesis cost models (`applyAlonzoExtraConfigCostModels`
+in `ledger/eras/cost_models.go`); without `extraConfig` the models are
+untouched, and a model shorter than the language's reference count is
+rejected.
 
 Whether the current PlutusV2 cost model is still that fabricated default is
 tracked with the same shared-database-function pattern as the CIP-0163

@@ -35,6 +35,12 @@
 
 # Compiled-in plugin selection and provider configuration.
 # plugins:
+  # consensus:
+    # Praos is the default when this section is omitted.
+    # CLI: --consensus
+    # Env: DINGO_PLUGINS_CONSENSUS_PROVIDER
+    # provider: "praos"
+    # config: {}
   # storage:
     # blob:
       # provider: "badger"

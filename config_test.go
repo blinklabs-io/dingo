@@ -417,6 +417,13 @@ func TestNewConfigDefaultsBuiltInMempoolCapacity(t *testing.T) {
 	}
 }
 
+func TestNewConfigDefaultsToPraosConsensus(t *testing.T) {
+	t.Parallel()
+
+	cfg := NewConfig()
+	assert.Equal(t, "praos", cfg.ConsensusPlugin())
+}
+
 func TestNewConfigDoesNotDefaultCustomMempoolConfig(t *testing.T) {
 	t.Parallel()
 
@@ -1130,14 +1137,16 @@ func TestTokenRegistryConfigReachesRuntimeFromYAML(t *testing.T) {
 	cfg, err := NewConfigFromInternal(
 		&internalconfig.Config{
 			TokenRegistry: internalconfig.TokenRegistryConfig{
-				Enabled:               true,
-				SourceURL:             "https://mirror.example.test/reg.tar.gz",
-				ManifestURL:           "https://mirror.example.test/manifest.json",
-				TrustedManifestKey:    strings.Repeat("ab", 32),
-				Interval:              2 * time.Hour,
-				RequestTimeout:        9 * time.Minute,
-				UserAgent:             "custom-agent/9",
-				HeaderSecrets:         map[string]string{"Authorization": "Bearer x"},
+				Enabled:            true,
+				SourceURL:          "https://mirror.example.test/reg.tar.gz",
+				ManifestURL:        "https://mirror.example.test/manifest.json",
+				TrustedManifestKey: strings.Repeat("ab", 32),
+				Interval:           2 * time.Hour,
+				RequestTimeout:     9 * time.Minute,
+				UserAgent:          "custom-agent/9",
+				HeaderSecrets: map[string]string{
+					"Authorization": "Bearer x",
+				},
 				MaxBytes:              123,
 				MaxDecompressedBytes:  456,
 				MaxEntryBytes:         45,
@@ -1164,7 +1173,11 @@ func TestTokenRegistryConfigReachesRuntimeFromYAML(t *testing.T) {
 		"https://mirror.example.test/manifest.json",
 		cfg.tokenRegistry.ManifestURL,
 	)
-	require.Equal(t, strings.Repeat("ab", 32), cfg.tokenRegistry.TrustedManifestKey)
+	require.Equal(
+		t,
+		strings.Repeat("ab", 32),
+		cfg.tokenRegistry.TrustedManifestKey,
+	)
 	require.Equal(t, 2*time.Hour, cfg.tokenRegistry.Interval)
 	require.Equal(t, 9*time.Minute, cfg.tokenRegistry.RequestTimeout)
 	require.Equal(t, "custom-agent/9", cfg.tokenRegistry.UserAgent)
@@ -1230,7 +1243,11 @@ func TestWithTokenRegistryConfigPreservesHTTPClient(t *testing.T) {
 		"https://mirror.example.test/manifest.json",
 		cfg.TokenRegistry().ManifestURL,
 	)
-	require.Equal(t, strings.Repeat("cd", 32), cfg.TokenRegistry().TrustedManifestKey)
+	require.Equal(
+		t,
+		strings.Repeat("cd", 32),
+		cfg.TokenRegistry().TrustedManifestKey,
+	)
 	require.True(t, cfg.TokenRegistry().AllowRollback)
 }
 
