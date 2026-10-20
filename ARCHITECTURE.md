@@ -11637,7 +11637,9 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
 `dingo_db_missing` (epoch/pool row not yet computed by Dingo), `dingo_db_error`
 (DB query failed), `reference_lag` (absence may be transient — either the epoch
 closed within --grace-hours, or the chain tip has not yet reached the boundary
-that applies this stake epoch's rewards; see "Reward timing" below),
+that applies this stake epoch's rewards; see "Reward timing" below; or Koios
+has `/epoch_info` for the epoch but an empty `/pool_history`, recorded as one
+`pool_history` row instead of a `pool_only_dingo` per Dingo pool, at any age),
 `pool_departed` (informational: the pool left the pool set
 at K+1, so its epoch-K block count has no row to live on), `pool_zero_stake`
 (informational: the pool is still registered but its delegated stake reached
@@ -11886,6 +11888,16 @@ second sync:
     transient failure retries only the unfinished pools instead of restarting
     a several-hundred-pool epoch from zero. Every retry is logged with the
     epoch, failed attempt, next attempt, and error.
+  - **Unpublished pool history refetch.** A `koios_epoch_info` row makes
+    `GetUncachedEpochs` treat an epoch as cached even when Koios returned no
+    `/pool_history` rows for it. `fetchPoolsIfNeeded` therefore fetches such an
+    epoch again when `Cache.EpochAwaitingPoolHistory` finds a post-staking
+    epoch with no `koios_pool_epoch` rows and a stored `pool_history`
+    `reference_lag` mismatch. Each refetch costs one `/pool_history` request
+    per pool, so it is spaced per epoch by
+    `ObserverConfig.PoolHistoryRefetchDelay` (one hour by default). The spacing
+    is held in memory, so a restart allows one immediate refetch. A refetch
+    failure goes through `reportError` like any other fetch failure.
   - **Decoupled aggregate/account queues.** Two independent
     background goroutines, each with their own pending set and wake channel,
     drain `Observer.pending`/`wake` (`run`, always started) and
