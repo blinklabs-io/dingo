@@ -8925,6 +8925,10 @@ verification key signs the ledger-state and in-progress immutable payload.
 The latter is ancillary-key-signed data, not stake-certified data. Normal
 Ouroboros validation resumes at the imported point and covers the gap and all
 future network blocks.
+Archive extraction counts decompressed bytes beneath Go's tar reader against a
+bootstrap-wide budget; ancillary preflight has a per-archive stream limit. Both
+readers check cancellation on each read, so metadata and skipped member bodies
+count toward these limits.
 
 The post-download ImmutableDB copy completes before ledger-state import starts.
 The copy persists block and transaction metadata as well as block blobs, so it

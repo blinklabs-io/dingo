@@ -1319,11 +1319,16 @@ func extractArchiveFile(
 	defer zr.Close()
 
 	limits := extractCfg.limits
-	tr := tar.NewReader(&expansionReader{
-		reader: zr,
-		read:   &countingFile.read,
-		ratio:  limits.maxExpansion,
-		floor:  limits.expansionFloor,
+	tr := tar.NewReader(&archiveStreamReader{
+		ctx: ctx,
+		reader: &expansionReader{
+			reader: zr,
+			read:   &countingFile.read,
+			ratio:  limits.maxExpansion,
+			floor:  limits.expansionFloor,
+		},
+		budget:   limits.budget,
+		maxBytes: archiveStreamLimit(limits.maxTotalBytes, limits.maxEntries),
 	})
 
 	var entries, filesExtracted int
@@ -1361,6 +1366,12 @@ func extractArchiveFile(
 		// filepath.Clean converts them to backslashes on Windows.
 		name := path.Clean(header.Name)
 		if name == "." {
+			if header.Typeflag != tar.TypeDir || header.Size != 0 {
+				return "", fmt.Errorf(
+					"%w: root archive member %q must be an empty directory",
+					ErrExtractUnexpectedMember, header.Name,
+				)
+			}
 			continue
 		}
 		if !validRelPath(name) {
