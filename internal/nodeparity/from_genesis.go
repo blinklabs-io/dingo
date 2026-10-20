@@ -753,18 +753,20 @@ func RunFromGenesis(
 		}
 	}
 
-	// acquirable becomes true once Dingo has answered for a point. Until
-	// then a refusal as too old is expected, not an error: Dingo cannot answer
-	// for the chain's earliest points. A network that starts in Byron, such as
-	// preprod, has no protocol parameters or stake distribution there, and
-	// Koios holds none either, so nothing in those epochs can be compared.
-	// Blocks are skipped until Dingo answers, which starts validation at the
-	// first epoch it can. A refusal after that is a real failure and ends the
-	// session as before.
+	// acquirable becomes true once validation starts: when Dingo first
+	// answers for a point, or when the roll-forward callback first resolves a
+	// post-Byron block's epoch by either path. Until then a refusal as too old
+	// is expected, not an error: Dingo cannot answer for the chain's earliest
+	// points. A network that starts in Byron, such as preprod, has no protocol
+	// parameters or stake distribution there, and Koios holds none either, so
+	// nothing in those epochs can be compared. A refusal after that is a real
+	// failure and ends the session.
 	//
-	// The latch belongs to the per-point fallback only. While Dingo's era
-	// history covers a point, no point is acquired to resolve its epoch, so
-	// there is nothing to refuse.
+	// The roll-forward callback sets the latch even when the era history
+	// resolved the epoch, or a run the history covered would skip a later
+	// refusal past the cached history and consume the block unchecked. epochAt
+	// does not set it on the era-history path, because the roll-backward
+	// callback can pass it a Byron point.
 	var (
 		acquirable     bool
 		skippedBlocks  int
@@ -1056,6 +1058,7 @@ func RunFromGenesis(
 						if skip {
 							return nil
 						}
+						acquirable = true
 						if haveLastEpoch && epoch <= lastEpoch {
 							return nil
 						}

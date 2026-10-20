@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"math"
 	"math/big"
 	"net"
@@ -28,6 +29,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -522,6 +524,58 @@ func TestRunFromGenesis_RefusalAfterValidationStartsStillFails(t *testing.T) {
 	}
 }
 
+// TestRunFromGenesis_RefusalPastEraHistoryAfterValidationStartsFails covers
+// a run whose epochs the era history resolved until a slot past its bounded
+// end, where the refetch fails and the per-point fallback is refused as too
+// old. Validation had already started, so the refusal must end the session
+// rather than consume the block unchecked and shift its epoch's checks to a
+// later block.
+func TestRunFromGenesis_RefusalPastEraHistoryAfterValidationStartsFails(
+	t *testing.T,
+) {
+	t.Parallel()
+	const blockCount = 6
+	// Slots 100..200 step 20. The cached history covers slots 100-140 as
+	// epoch 2; 160 and 180 are epoch 3 and 200 epoch 4, answered per point.
+	server := newGenesisFakeServer(t, blockCount)
+	server.ungated = true
+	server.eraHistory = []eraSpan{
+		{startSlot: 0, startEpoch: 0, endSlot: 150, epochSize: 50},
+	}
+	server.eraHistoryAnswers = 1
+	refused := server.chain.Points[3].Slot
+	server.epochBySlot = map[uint64]int{
+		refused:                     3,
+		server.chain.Points[4].Slot: 3,
+		server.chain.Points[5].Slot: 4,
+	}
+	var refusals atomic.Int32
+	server.refuseAcquireFn = func(p pcommon.Point) bool {
+		return p.Slot == refused && refusals.Add(1) == 1
+	}
+	run := startGenesisRun(t, server)
+
+	// The first block's epoch is the baseline's, so 3 is the first reported.
+	assert.Equal(t, uint64(3), run.recv(t).Epoch)
+	assert.Equal(t, uint64(4), run.recv(t).Epoch)
+
+	assert.Greater(t, refusals.Load(), int32(1),
+		"the refused point must be acquired again after the session ends")
+	server.mu.Lock()
+	sessions := server.sessions
+	server.mu.Unlock()
+	assert.GreaterOrEqual(t, sessions, 2)
+	assert.True(
+		t,
+		run.logs.waitFor("chainsync session ended", time.Second),
+		"logs: %v", run.logs.all(),
+	)
+	for _, line := range run.logs.all() {
+		assert.NotContains(t, line, "validation starts at slot",
+			"the refusal was skipped as if validation had not started")
+	}
+}
+
 // TestIsRetryableDingoConnErr pins the exact classification
 // runProtocolParamsAndStake's retry decision depends on: a connection-death
 // shaped error (protocol.ErrProtocolShuttingDown, bare or wrapped, or a raw
@@ -1008,6 +1062,11 @@ type genesisFakeServer struct {
 	// Left nil, that query fails like any other unexpected one, so
 	// RunFromGenesis resolves every epoch through its per-point fallback.
 	eraHistory []eraSpan
+	// eraHistoryAnswers, when nonzero, answers only that many
+	// HardForkEraHistoryQuery calls; later ones fail, as when Dingo cannot
+	// serve a refetch.
+	eraHistoryAnswers  int
+	eraHistoryAnswered int
 
 	// acquiredSlots records the slot of every specific-point Acquire
 	// attempt, refused or not; volatileTipAcquires and epochNoQueries count
@@ -1368,6 +1427,11 @@ func (s *genesisFakeServer) lsqConfig() localstatequery.Config {
 					case *localstatequery.HardForkEraHistoryQuery:
 						s.mu.Lock()
 						spans := s.eraHistory
+						if s.eraHistoryAnswers > 0 &&
+							s.eraHistoryAnswered >= s.eraHistoryAnswers {
+							spans = nil
+						}
+						s.eraHistoryAnswered++
 						s.mu.Unlock()
 						if spans == nil {
 							return nil, errors.New(
@@ -2065,10 +2129,7 @@ func TestRunFromGenesis_ResumeKeepsUTxOComparison(t *testing.T) {
 	}
 
 	txInfoMu.Lock()
-	gotRequests := make(map[string]int, len(txInfoRequests))
-	for h, n := range txInfoRequests {
-		gotRequests[h] = n
-	}
+	gotRequests := maps.Clone(txInfoRequests)
 	txInfoMu.Unlock()
 	wantRequests := map[string]int{}
 	// Block 0's transaction is inside the baseline, so it is never fetched.

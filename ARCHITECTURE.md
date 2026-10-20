@@ -12814,8 +12814,9 @@ fallback once. Byron blocks (preprod, epochs 0-3) are never checked -- there
 are no protocol parameters or stake there, and Koios holds none either -- so
 they are skipped by era, still feed the UTxO reconstruction, and validation
 starts, with a log line, at the first Shelley-era epoch. In the fallback path
-the tool also skips blocks Dingo refuses as too old until it first answers,
-and treats any later refusal as a real failure that ends the session.
+the tool also skips blocks Dingo refuses as too old until validation starts:
+the first post-Byron block whose epoch resolves, by the era history or by
+Dingo. Any later refusal is a real failure that ends the session.
 
 `--koios-cache-path` makes those lookups cache-first against a `koios-parity` `cache.db`, which
 may be the one a dingo instance's own embedded observer is writing, provided
