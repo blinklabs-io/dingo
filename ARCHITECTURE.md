@@ -11188,6 +11188,22 @@ with the shared pagination rules. It pages transaction hashes in block-index
 order, reverses that order for descending requests, and reports pagination
 totals for the whole block. Empty or out-of-range pages return an empty array.
 
+The base and extended address summaries pass the request context to the
+adapter, so a client disconnect stops the scan and the handler writes nothing.
+A full address is aggregated by walking its coarse credential candidates in
+keyset batches of 1,000 and keeping those whose decoded address matches; the
+adapter walks the keyset itself because the database's exact-match page fill
+stops after 10,000 non-matching candidates per call, and an enterprise address
+shares its coarse match with every base address of its payment credential. A
+summary is rejected with HTTP 400 once it reads more than 50,000 candidate
+outputs or returns more than 5,000 distinct assets; a bare payment credential
+passes the same budget into `GetUtxoBalanceByAddress`, which stops its scan at
+the first output or distinct asset past it. The extended route likewise
+rejects more than 1,000 assets to enrich, since each costs three point reads
+and the route has no pagination. Both routes share one
+admission pool (4 active, 2 per client address) that answers 429 with
+`Retry-After` when full.
+
 Blockfrost submission and both evaluation endpoints bound request body reads
 by their existing byte limits and a 15-second read deadline. The deadline is
 cleared after a successful read, before transaction processing; stalled or

@@ -1199,6 +1199,7 @@ func (m *mockNode) DReps(
 }
 
 func (m *mockNode) Address(
+	_ context.Context,
 	_ string,
 ) (AddressInfo, error) {
 	return m.addressInfo, m.addressInfoErr
@@ -4273,13 +4274,13 @@ func TestNodeAdapterAddressRejectsInvalidInput(t *testing.T) {
 		)
 		require.NoError(t, err)
 
-		_, err = adapter.Address(mainnetAddr.String())
+		_, err = adapter.Address(context.Background(), mainnetAddr.String())
 		require.ErrorIs(t, err, ErrInvalidAddress)
 		assert.ErrorContains(t, err, "network mismatch")
 	})
 
 	t.Run("parse failure keeps diagnostics", func(t *testing.T) {
-		_, err := adapter.Address("addr1stonks")
+		_, err := adapter.Address(context.Background(), "addr1stonks")
 		require.ErrorIs(t, err, ErrInvalidAddress,
 			"the HTTP layer maps this sentinel to 400")
 		// Which diagnostic comes back depends on the first check in the
@@ -4316,7 +4317,7 @@ func TestNodeAdapterAddressRejectsInvalidInput(t *testing.T) {
 			nil,
 		)
 		require.NoError(t, err)
-		_, err = adapter.Address(testnetAddr.String())
+		_, err = adapter.Address(context.Background(), testnetAddr.String())
 		require.ErrorIs(t, err, ErrAddressNotFound)
 	})
 }
@@ -4335,7 +4336,7 @@ func TestNodeAdapterAddressPaymentCredTransactionFallback(t *testing.T) {
 	require.NoError(t, err)
 
 	// No UTxOs and no transaction history: the credential is unknown.
-	_, err = adapter.Address(credID)
+	_, err = adapter.Address(context.Background(), credID)
 	require.ErrorIs(t, err, ErrAddressNotFound)
 
 	// Spent history recorded against the payment credential (via a base
@@ -4352,7 +4353,7 @@ INSERT INTO address_transaction (
 	)
 	require.NoError(t, err)
 
-	info, err := adapter.Address(credID)
+	info, err := adapter.Address(context.Background(), credID)
 	require.NoError(t, err)
 	assert.Equal(t, credID, info.Address)
 	require.Len(t, info.Amount, 1)
@@ -4387,7 +4388,7 @@ func TestNodeAdapterKeyScriptStakeAddress(t *testing.T) {
 	insertAdapterUtxo(t, store, &utxo)
 	storePointerOutputCbor(t, db, utxo.TxId, 0, addr, 1_000_000)
 
-	info, err := adapter.Address(addr.String())
+	info, err := adapter.Address(context.Background(), addr.String())
 	require.NoError(t, err)
 	require.NotNil(t, info.StakeAddress)
 	assert.True(t, strings.HasPrefix(*info.StakeAddress, "stake_test17"))
@@ -4415,7 +4416,9 @@ func TestNodeAdapterKeyScriptStakeAddress(t *testing.T) {
 	insertAdapterUtxo(t, mainnetStore, &mainnetUtxo)
 	storePointerOutputCbor(t, mainnetDB, mainnetUtxo.TxId, 0, mainnetAddr, 1_000_000)
 
-	mainnetInfo, err := mainnetAdapter.Address(mainnetAddr.String())
+	mainnetInfo, err := mainnetAdapter.Address(
+		context.Background(), mainnetAddr.String(),
+	)
 	require.NoError(t, err)
 	require.NotNil(t, mainnetInfo.StakeAddress)
 	assert.True(t, strings.HasPrefix(*mainnetInfo.StakeAddress, "stake17"))
@@ -4444,7 +4447,7 @@ func TestNodeAdapterKeyScriptStakeAddress(t *testing.T) {
 	insertAdapterUtxo(t, store, &keyUtxo)
 	storePointerOutputCbor(t, db, keyUtxo.TxId, 0, keyAddr, 1_000_000)
 
-	keyInfo, err := adapter.Address(keyAddr.String())
+	keyInfo, err := adapter.Address(context.Background(), keyAddr.String())
 	require.NoError(t, err)
 	require.NotNil(t, keyInfo.StakeAddress)
 	assert.True(t, strings.HasPrefix(*keyInfo.StakeAddress, "stake_test1u"))
