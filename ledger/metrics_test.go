@@ -20,6 +20,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1033,6 +1034,42 @@ func TestBlockApplyStagesAttributeBatchTime(t *testing.T) {
 			)
 		})
 	}
+}
+
+// TestBlockApplyStageIncludesReplayRowFlush pins the replay-row flush inside
+// the batch's apply sample. On the row-batching path the delta batch only
+// accumulates rows and the flush is where they are written, so an apply
+// sample that stopped before it would read near zero.
+func TestBlockApplyStageIncludesReplayRowFlush(t *testing.T) {
+	t.Parallel()
+
+	blocks, _ := rowBatchingScenario(t)
+	// Injected latency inside the flush, so the apply stage has a known
+	// lower bound that does not depend on machine speed.
+	const flushDelay = 20 * time.Millisecond
+	var flushes atomic.Int64
+	run := runRowBatchingScenario(
+		t, blocks, types.StorageModeCore, true, len(blocks),
+		func(ls *LedgerState) {
+			ls.beforeReplayRowFlush = func() {
+				flushes.Add(1)
+				deadline := time.Now().Add(flushDelay)
+				for time.Now().Before(deadline) {
+					runtime.Gosched()
+				}
+			}
+		},
+	)
+	require.Equal(
+		t, int64(1), flushes.Load(),
+		"the scenario must flush replay rows once",
+	)
+	count, sum := blockStageSampleCount(t, &run.ls.metrics, blockStageApply)
+	require.Equal(t, uint64(1), count)
+	assert.GreaterOrEqual(
+		t, sum, flushDelay.Seconds(),
+		"the apply sample must include the replay-row flush",
+	)
 }
 
 // TestBlockApplyStagesObservedOnlyWithBatchLatency pins prepare and commit to

@@ -1898,6 +1898,10 @@ type LedgerState struct {
 	// they write through the batched metadata path, so a test can tell that
 	// path from the per-row one, which stores the same state.
 	afterBatchedTransactionWrite func()
+	// beforeReplayRowFlush is a test-only observation hook, nil in
+	// production. It runs immediately before a chunk's replay-row flush, so a
+	// test can place a known delay inside that flush's apply sample.
+	beforeReplayRowFlush func()
 	// externalIngest pauses the chain-iterator loop so ApplyTrustedBatch can
 	// be the only block-apply writer. See external_ingest.go.
 	externalIngest externalIngestState
@@ -9540,6 +9544,9 @@ func (ls *LedgerState) processBlocksFromSource(
 					deltaBatch.Release()
 					// The replay-row flush is part of the same sample: it is
 					// the metadata write for this delta batch's rows.
+					if ls.beforeReplayRowFlush != nil {
+						ls.beforeReplayRowFlush()
+					}
 					flushErr := ls.db.FlushBatch(trustedReplayRows, txn)
 					ls.metrics.observeBlockStage(
 						blockStageApply,
