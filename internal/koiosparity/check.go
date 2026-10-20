@@ -1033,7 +1033,9 @@ func checkEpoch(
 	var accountMismatches []CheckMismatch
 	if accountsEnabled && hasStakeEpoch {
 		rewardsPending := accountRewardsPending(dingoPoolMap)
-		accountMismatches = compareEpochAccounts(
+		var koiosAccountRows []KoiosAccountRewards
+		var referenceLoaded bool
+		accountMismatches, koiosAccountRows, referenceLoaded = compareEpochAccounts(
 			ctx,
 			cache,
 			dingo,
@@ -1046,14 +1048,33 @@ func checkEpoch(
 			rewardsPending,
 			logger,
 		)
-		if dingoPoolErr == nil {
+		// member_rewards takes its Koios side from the rows the per-account
+		// comparison used, never from a second cache read: a refresh between
+		// two reads could leave this one seeing incomplete coverage and
+		// forming no verdict while the account scope still read as PASS.
+		switch {
+		case !referenceLoaded:
+			// compareEpochAccounts has already reported why, as an ERROR.
+		case dingoPoolErr != nil:
+			// The aggregate scope reports this failure too, but the account
+			// scope keeps its own stored verdict, which must not read as a
+			// pass with member_rewards unexamined.
+			accountMismatches = append(accountMismatches, CheckMismatch{
+				Network:    network,
+				Epoch:      epoch,
+				Field:      "member_rewards",
+				DingoValue: fmt.Sprintf("error: %v", dingoPoolErr),
+				Category:   CategoryDBError,
+				CheckedAt:  now,
+			})
+		default:
 			accountMismatches = append(
 				accountMismatches,
-				compareMemberRewardsEpoch(
-					cache,
+				CompareMemberRewards(
 					network,
 					epoch,
 					koiosPools,
+					koiosAccountRows,
 					dingoPoolMap,
 					now,
 					graceHours,
@@ -1169,6 +1190,12 @@ func accountRewardsPending(dingoPoolMap map[string]*DingoPoolEpochData) bool {
 // CategoryAcctCoverageIncomplete's doc comment), then loads both sides and
 // delegates the actual comparison to CompareAccountEpoch.
 //
+// The coverage record and the Koios rows come from one GetAccountReference
+// read, and the rows are returned with referenceLoaded = true so the caller
+// compares member_rewards against the same reference. referenceLoaded is
+// false only when the returned mismatches already carry an ERROR explaining
+// why no complete reference was available.
+//
 // stakeEpoch is the Dingo epoch reward_account_output rows for Koios
 // reporting epoch `epoch` actually live under — the same koiosStakeEpoch
 // (K-1) offset reward_pool_output already uses, since both are written from
@@ -1186,8 +1213,20 @@ func compareEpochAccounts(
 	epochEndTime time.Time,
 	rewardsPending bool,
 	logger *slog.Logger,
-) []CheckMismatch {
-	coverage, covErr := cache.GetAccountCoverage(network, epoch)
+) (out []CheckMismatch, koiosRows []KoiosAccountRewards, referenceLoaded bool) {
+	coverage, koiosRows, covErr := cache.GetAccountReference(network, epoch)
+	var rowsErr *accountRowsReadError
+	if errors.As(covErr, &rowsErr) {
+		return []CheckMismatch{{
+			Network:    network,
+			Epoch:      epoch,
+			Field:      "koios_account_rewards",
+			DingoValue: "",
+			KoiosValue: fmt.Sprintf("error: %v", rowsErr.Err),
+			Category:   CategoryDBError,
+			CheckedAt:  now,
+		}}, nil, false
+	}
 	// sql.ErrNoRows ("no fetch has been attempted for this epoch yet") is a
 	// legitimate incomplete-coverage state; any other error is a genuine
 	// cache/DB failure and must not be mistaken for "nothing to compare".
@@ -1200,7 +1239,7 @@ func compareEpochAccounts(
 			KoiosValue: fmt.Sprintf("error: %v", covErr),
 			Category:   CategoryDBError,
 			CheckedAt:  now,
-		}}
+		}}, nil, false
 	}
 	if covErr != nil || coverage == nil || !coverage.Complete {
 		detail := "no account fetch has been attempted for this epoch"
@@ -1219,20 +1258,7 @@ func compareEpochAccounts(
 			KoiosValue: detail,
 			Category:   CategoryAcctCoverageIncomplete,
 			CheckedAt:  now,
-		}}
-	}
-
-	koiosRows, err := cache.GetAccountRewardsForEpoch(network, epoch)
-	if err != nil {
-		return []CheckMismatch{{
-			Network:    network,
-			Epoch:      epoch,
-			Field:      "koios_account_rewards",
-			DingoValue: "",
-			KoiosValue: fmt.Sprintf("error: %v", err),
-			Category:   CategoryDBError,
-			CheckedAt:  now,
-		}}
+		}}, nil, false
 	}
 
 	dingoOutputs, err := dingo.GetRewardAccountOutputs(ctx, stakeEpoch)
@@ -1245,7 +1271,7 @@ func compareEpochAccounts(
 			KoiosValue: "",
 			Category:   CategoryDBError,
 			CheckedAt:  now,
-		}}
+		}}, koiosRows, true
 	}
 
 	// Koios files a credit made at the boundary into epoch+1 under earned
@@ -1261,10 +1287,9 @@ func compareEpochAccounts(
 			KoiosValue: "",
 			Category:   CategoryDBError,
 			CheckedAt:  now,
-		}}
+		}}, koiosRows, true
 	}
 
-	var out []CheckMismatch
 	dingoRows, credentialErrs, poolErrs := creditedAccountRewards(dingoOutputs)
 	for _, refund := range refunds.Refunds {
 		addr, err := StakeAddressFromCredential(
@@ -1357,57 +1382,7 @@ func compareEpochAccounts(
 			ctx, cache, dingo, network, epoch, stakeEpoch, dingoOutputs, now,
 		)...,
 	)
-	return out
-}
-
-// compareMemberRewardsEpoch runs CompareMemberRewards for one epoch, but only
-// once the epoch's Koios account-reward fetch is complete. An absent or
-// incomplete coverage row yields no verdict at all: the member sum would be
-// formed from a partial reference, and compareEpochAccounts reports the
-// incompleteness for the epoch. A failed read is reported here as well,
-// because these are separate reads from compareEpochAccounts' and one
-// succeeding does not imply the other did.
-func compareMemberRewardsEpoch(
-	cache *Cache,
-	network string,
-	epoch uint64,
-	koiosPools []KoiosPoolEpoch,
-	dingoPools map[string]*DingoPoolEpochData,
-	now time.Time,
-	graceHours int,
-	epochEndTime time.Time,
-) []CheckMismatch {
-	readErr := func(err error) []CheckMismatch {
-		return []CheckMismatch{{
-			Network:    network,
-			Epoch:      epoch,
-			Field:      "member_rewards",
-			KoiosValue: fmt.Sprintf("error: %v", err),
-			Category:   CategoryDBError,
-			CheckedAt:  now,
-		}}
-	}
-	coverage, err := cache.GetAccountCoverage(network, epoch)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return readErr(err)
-	}
-	if err != nil || coverage == nil || !coverage.Complete {
-		return nil
-	}
-	rows, err := cache.GetAccountRewardsForEpoch(network, epoch)
-	if err != nil {
-		return readErr(err)
-	}
-	return CompareMemberRewards(
-		network,
-		epoch,
-		koiosPools,
-		rows,
-		dingoPools,
-		now,
-		graceHours,
-		epochEndTime,
-	)
+	return out, koiosRows, true
 }
 
 // creditedAccountRewards converts Dingo's per-account reward calculation rows

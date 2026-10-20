@@ -12030,7 +12030,13 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
   Because the reference is the per-account rows, the comparison runs in the
   account phase and only once the epoch's account coverage is complete; the
   fast aggregate phase produces no `member_rewards` row and cannot strict-halt
-  on the cached value. With account checking off (the standalone CLI without
+  on the cached value. It compares against the same rows the per-account
+  comparison read: `Cache.GetAccountReference` reads the coverage record and
+  the rows in one read transaction, once per epoch check, so an account fetch
+  committing or downgrading coverage mid-check cannot leave `member_rewards`
+  unexamined while the account scope passes. A failed read of Dingo's pool
+  data, which leaves `member_rewards` unexamined, is a `dingo_db_error` in the
+  account scope as well as the aggregate one. With account checking off (the standalone CLI without
   `--accounts`), member rewards are therefore not checked at all. Where `pool_history.member_rewards` disagrees with
   Koios's own per-account sum, the pool is recorded under the informational
   category `koios_pool_history_inconsistent`, carrying both Koios values. It
@@ -12942,9 +12948,10 @@ never the reverse.
   skips the per-account comparison for that epoch entirely — mirroring how a
   missing `koios_totals` row already gates `CompareEpochTotals`. This is the
   invariant the chunked fetch must never violate: no code path may ever
-  set `complete = true` after a partial fetch. `Cache.GetAccountCoverage`
-  propagates `sql.ErrNoRows` unwrapped for "no fetch attempted yet" — every
-  caller (`compareEpochAccounts`, `Observer.fetchAccountsIfNeeded`) treats
+  set `complete = true` after a partial fetch. `Cache.GetAccountCoverage` and
+  `Cache.GetAccountReference` propagate `sql.ErrNoRows` unwrapped for "no
+  fetch attempted yet" — every caller (`compareEpochAccounts`,
+  `Observer.fetchAccountsIfNeeded`) treats
   that specific error as incomplete coverage, but any other error from the
   query is a genuine cache/DB failure and is surfaced as `dingo_db_error`
   (or a propagated error, for the observer) rather than being conflated with

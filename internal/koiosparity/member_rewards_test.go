@@ -17,6 +17,7 @@ package koiosparity
 import (
 	"context"
 	"encoding/hex"
+	"errors"
 	"log/slog"
 	"math/big"
 	"path/filepath"
@@ -260,6 +261,9 @@ type memberRewardsScenario struct {
 	koiosRows    []KoiosAccountRewards
 	poolHistory  string
 	coverageDone bool
+	// source, when set, wraps the Dingo source the check reads, with the
+	// scenario's cache, so a test can act between the check's reads.
+	source func(*Cache, RewardParitySource) RewardParitySource
 }
 
 // runMemberRewardsScenario drives the real Check entry point with accounts
@@ -350,13 +354,24 @@ func runMemberRewardsScenario(
 		fetchedAt,
 	))
 
-	_, err = Check(context.Background(), CheckConfig{
-		Network:         network,
-		DingoDB:         DingoDBConfig{Plugin: "sqlite", DataDir: dingoDir},
-		CachePath:       cachePath,
-		AccountsEnabled: true,
-	}, slog.New(slog.DiscardHandler))
-	require.NoError(t, err)
+	if sc.source == nil {
+		_, err = Check(context.Background(), CheckConfig{
+			Network:         network,
+			DingoDB:         DingoDBConfig{Plugin: "sqlite", DataDir: dingoDir},
+			CachePath:       cachePath,
+			AccountsEnabled: true,
+		}, slog.New(slog.DiscardHandler))
+		require.NoError(t, err)
+	} else {
+		dingo, err := OpenDingoDB(DingoDBConfig{Plugin: "sqlite", DataDir: dingoDir})
+		require.NoError(t, err)
+		defer dingo.Close() //nolint:errcheck
+		_, err = CheckEpoch(
+			context.Background(), cache, sc.source(cache, dingo), network,
+			koiosEpoch, 0, true, slog.New(slog.DiscardHandler),
+		)
+		require.NoError(t, err)
+	}
 
 	mismatches, err := cache.GetMismatches(network, koiosEpoch, "")
 	require.NoError(t, err)
@@ -513,22 +528,165 @@ func memberRewardsFor(
 	)
 }
 
-// TestCompareMemberRewardsEpochReportsCacheReadError pins that a failed read
-// of the Koios cache yields an ERROR rather than no member_rewards verdict.
-// The account phase reads the same rows separately, so an error here cannot
-// be assumed to have been reported there.
-func TestCompareMemberRewardsEpochReportsCacheReadError(t *testing.T) {
+// TestCompareEpochAccountsReferenceReadErrorsWithholdRows pins that every
+// failed read of the Koios account reference is an ERROR and returns no rows,
+// so the caller never forms a member_rewards verdict from a reference that
+// was not read.
+func TestCompareEpochAccountsReferenceReadErrorsWithholdRows(t *testing.T) {
 	t.Parallel()
 
-	cache, err := openTestCache(filepath.Join(t.TempDir(), "cache.db"), nil)
-	require.NoError(t, err)
-	require.NoError(t, cache.Close())
+	run := func(t *testing.T, cache *Cache) ([]CheckMismatch, bool) {
+		t.Helper()
+		ms, rows, loaded := compareEpochAccounts(
+			context.Background(), cache, nil, "preprod", 302, 301,
+			time.Now(), 0, time.Time{}, false, slog.New(slog.DiscardHandler),
+		)
+		assert.Nil(t, rows)
+		return ms, loaded
+	}
 
-	ms := compareMemberRewardsEpoch(
-		cache, "preprod", 302, nil, memberRewardsDingo("300"),
-		time.Now(), 0, time.Time{},
-	)
-	require.Len(t, ms, 1)
-	assert.Equal(t, CategoryDBError, ms[0].Category)
-	assert.Equal(t, StatusError, DetermineStatus(ms))
+	t.Run("closed cache", func(t *testing.T) {
+		t.Parallel()
+		cache, err := openTestCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+		require.NoError(t, err)
+		require.NoError(t, cache.Close())
+		ms, loaded := run(t, cache)
+		assert.False(t, loaded)
+		require.Len(t, ms, 1)
+		assert.Equal(t, "koios_account_coverage", ms[0].Field)
+		assert.Equal(t, StatusError, DetermineStatus(ms))
+	})
+
+	t.Run("rows unreadable", func(t *testing.T) {
+		t.Parallel()
+		cache, err := openTestCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+		require.NoError(t, err)
+		defer cache.Close() //nolint:errcheck
+		require.NoError(t, cache.CommitAccountRewardsForEpoch(
+			"preprod", 302, nil, 1, true, time.Now(),
+		))
+		_, err = cache.db.Exec("DROP TABLE koios_account_rewards")
+		require.NoError(t, err)
+		ms, loaded := run(t, cache)
+		assert.False(t, loaded)
+		require.Len(t, ms, 1)
+		assert.Equal(t, "koios_account_rewards", ms[0].Field)
+		assert.Equal(t, CategoryDBError, ms[0].Category)
+	})
+}
+
+// downgradingSource reports memberTotal as every pool's spendable member
+// total and, when downgrade is set, marks the epoch's account coverage
+// incomplete once the per-account comparison has read the Koios reference,
+// standing in for an account fetch that refreshes the cache while a check
+// runs.
+type downgradingSource struct {
+	RewardParitySource
+	cache       *Cache
+	memberTotal string
+	downgrade   bool
+}
+
+func (s downgradingSource) GetPoolEpochDataMap(
+	ctx context.Context,
+	stakeEpoch, paramEpoch uint64,
+) (map[string]*DingoPoolEpochData, error) {
+	m, err := s.RewardParitySource.GetPoolEpochDataMap(ctx, stakeEpoch, paramEpoch)
+	for _, p := range m {
+		if p.SpendableMemberRewardPresent {
+			p.SpendableMemberRewardTotal = s.memberTotal
+		}
+	}
+	return m, err
+}
+
+func (s downgradingSource) GetProposalDepositRefunds(
+	ctx context.Context,
+	epoch uint64,
+) (ProposalDepositRefunds, error) {
+	if s.downgrade {
+		if err := s.cache.MarkAccountCoverageIncomplete("preview", 10); err != nil {
+			return ProposalDepositRefunds{}, err
+		}
+	}
+	return s.RewardParitySource.GetProposalDepositRefunds(ctx, epoch)
+}
+
+// TestCheckMemberRewardsUsesTheAccountPhaseReference pins that member_rewards
+// is compared against the reference the per-account comparison read, so a
+// cache refresh between the two cannot leave member_rewards unexamined while
+// the account scope reads as PASS. The per-account rows agree on both sides;
+// only the pool's member total differs.
+func TestCheckMemberRewardsUsesTheAccountPhaseReference(t *testing.T) {
+	t.Parallel()
+
+	d1, k1 := memberAccount(t, 0x61, 100, true)
+	d2, k2 := memberAccount(t, 0x62, 200, true)
+	for _, tc := range []struct {
+		name      string
+		downgrade bool
+	}{
+		{name: "steady cache"},
+		{name: "coverage downgraded mid-check", downgrade: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ms := runMemberRewardsScenario(t, memberRewardsScenario{
+				dingoRows:    []models.RewardAccountOutput{d1, d2},
+				koiosRows:    []KoiosAccountRewards{k1, k2},
+				poolHistory:  "300",
+				coverageDone: true,
+				source: func(c *Cache, src RewardParitySource) RewardParitySource {
+					return downgradingSource{
+						RewardParitySource: src,
+						cache:              c,
+						memberTotal:        "250",
+						downgrade:          tc.downgrade,
+					}
+				},
+			})
+			acct := accountScope(ms)
+			assert.NotEqual(t, StatusPass, DetermineStatus(acct))
+			got := memberRewardsOf(acct, "member_rewards")
+			require.Len(t, got, 1, "%+v", acct)
+			assert.Equal(t, CategoryValueMismatch, got[0].Category)
+			assert.Equal(t, "250", got[0].DingoValue)
+			assert.Equal(t, "300", got[0].KoiosValue)
+		})
+	}
+}
+
+type failingPoolMapSource struct {
+	RewardParitySource
+}
+
+func (failingPoolMapSource) GetPoolEpochDataMap(
+	context.Context,
+	uint64,
+	uint64,
+) (map[string]*DingoPoolEpochData, error) {
+	return nil, errors.New("pool map read failed")
+}
+
+// TestCheckMemberRewardsPoolReadFailureIsAccountError pins that a failed read
+// of Dingo's pool data, which leaves member_rewards unexamined, keeps the
+// account scope's own stored verdict from reading as PASS.
+func TestCheckMemberRewardsPoolReadFailureIsAccountError(t *testing.T) {
+	t.Parallel()
+
+	d1, k1 := memberAccount(t, 0x61, 100, true)
+	ms := runMemberRewardsScenario(t, memberRewardsScenario{
+		dingoRows:    []models.RewardAccountOutput{d1},
+		koiosRows:    []KoiosAccountRewards{k1},
+		poolHistory:  "100",
+		coverageDone: true,
+		source: func(_ *Cache, src RewardParitySource) RewardParitySource {
+			return failingPoolMapSource{src}
+		},
+	})
+	acct := accountScope(ms)
+	assert.Equal(t, StatusError, DetermineStatus(acct))
+	got := memberRewardsOf(acct, "member_rewards")
+	require.Len(t, got, 1, "%+v", acct)
+	assert.Equal(t, CategoryDBError, got[0].Category)
 }
