@@ -93,6 +93,8 @@ type UtxosByAssetParams struct {
 	Offset    int    `json:"offset,omitempty"     jsonschema:"Pagination offset (default 0)"`
 }
 
+var errAssetInfoIncomplete = errors.New("asset info row cap exceeded")
+
 // AssetInfoParams defines the input schema for get_asset_info.
 type AssetInfoParams struct {
 	PolicyID  string `json:"policy_id"            jsonschema:"Hex-encoded 28-byte (56 hex characters) minting policy ID"`
@@ -132,6 +134,22 @@ func RegisterCardanoTools(
 	mp mempool.Service,
 	network string,
 	queryTimeout time.Duration,
+	addressLookups ...utxoAddressLookup,
+) {
+	registerCardanoTools(
+		server, db, ls, mp, network, queryTimeout,
+		newReadLimits(), addressLookups...,
+	)
+}
+
+func registerCardanoTools(
+	server *mcp.Server,
+	db *sql.DB,
+	ls *ledger.LedgerState,
+	mp mempool.Service,
+	network string,
+	queryTimeout time.Duration,
+	limits *readLimits,
 	addressLookups ...utxoAddressLookup,
 ) {
 	if queryTimeout <= 0 {
@@ -1331,6 +1349,11 @@ func RegisterCardanoTools(
 		}
 		subject := policyHex + hexName
 
+		if !limits.acquire() {
+			return nil, nil, errors.New("too many concurrent expensive queries")
+		}
+		defer limits.release()
+
 		qCtx, cancel := context.WithTimeout(ctx, queryTimeout)
 		defer cancel()
 
@@ -1355,17 +1378,18 @@ func RegisterCardanoTools(
 			circQuery = `SELECT a.amount, u.id
 						 FROM asset a
 						 JOIN utxo u ON a.utxo_id = u.id
-						 WHERE a.policy_id = ? AND a.name = ? AND u.deleted_slot = 0`
+						 WHERE a.policy_id = ? AND a.name = ? AND u.deleted_slot = 0 LIMIT ?`
 			circArgs = []any{
 				policyBytes,
 				rawName,
+				limits.maxAssetRows + 1,
 			}
 		} else {
 			circQuery = `SELECT a.amount, u.id
 						 FROM asset a
 						 JOIN utxo u ON a.utxo_id = u.id
-						 WHERE a.policy_id = ? AND u.deleted_slot = 0`
-			circArgs = []any{policyBytes}
+						 WHERE a.policy_id = ? AND u.deleted_slot = 0 LIMIT ?`
+			circArgs = []any{policyBytes, limits.maxAssetRows + 1}
 		}
 		if err := func() error {
 			rows, err := db.QueryContext(qCtx, circQuery, circArgs...)
@@ -1374,7 +1398,14 @@ func RegisterCardanoTools(
 			}
 			defer rows.Close()
 			holders := make(map[int64]struct{})
+			scanned := 0
 			for rows.Next() {
+				// The query reads one row past the cap so an over-cap
+				// policy is detected rather than silently truncated.
+				scanned++
+				if scanned > limits.maxAssetRows {
+					return errAssetInfoIncomplete
+				}
 				var amount string
 				var id int64
 				if err := rows.Scan(&amount, &id); err != nil {
@@ -1390,6 +1421,21 @@ func RegisterCardanoTools(
 			holderCount = len(holders)
 			return rows.Err()
 		}(); err != nil {
+			if errors.Is(err, errAssetInfoIncomplete) {
+				return &mcp.CallToolResult{
+					IsError: true,
+					Content: []mcp.Content{
+						&mcp.TextContent{
+							Text: fmt.Sprintf(
+								"Error: result incomplete: more than %d live asset rows match; "+
+									"supply and holder count were not computed. "+
+									"Specify asset_name to narrow the query.",
+								limits.maxAssetRows,
+							),
+						},
+					},
+				}, nil, nil
+			}
 			return nil, nil, fmt.Errorf("read circulating supply: %w", err)
 		}
 

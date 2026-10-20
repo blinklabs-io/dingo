@@ -29,10 +29,9 @@ import (
 )
 
 const (
-	maxConcurrentSQLiteQueries = 4
-	maxSQLiteValueBytes        = 64 << 10
-	maxSQLiteResultColumns     = 32
-	maxSQLiteDecodedBytes      = 1 << 20
+	maxSQLiteValueBytes    = 64 << 10
+	maxSQLiteResultColumns = 32
+	maxSQLiteDecodedBytes  = 1 << 20
 )
 
 // SQLiteQueryParams defines the input schema for sqlite_query.
@@ -59,22 +58,24 @@ func RegisterSQLiteTools(
 	queryTimeout time.Duration,
 	maxRows int,
 ) {
+	registerSQLiteTools(server, db, queryTimeout, maxRows, newReadLimits())
+}
+
+func registerSQLiteTools(
+	server *mcp.Server,
+	db *sql.DB,
+	queryTimeout time.Duration,
+	maxRows int,
+	limits *readLimits,
+) {
 	if queryTimeout <= 0 {
 		queryTimeout = defaultQueryTimeout
 	}
 	if maxRows <= 0 {
 		maxRows = 100
 	}
-	querySlots := make(chan struct{}, maxConcurrentSQLiteQueries)
-	acquireQuery := func() bool {
-		select {
-		case querySlots <- struct{}{}:
-			return true
-		default:
-			return false
-		}
-	}
-	releaseQuery := func() { <-querySlots }
+	acquireQuery := limits.acquire
+	releaseQuery := limits.release
 
 	// Tool: sqlite_query
 	mcp.AddTool(server, &mcp.Tool{
