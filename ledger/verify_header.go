@@ -454,6 +454,7 @@ func verifyBlockHeaderHex(
 // an attacker from forging headers that bypass verification by
 // targeting the epoch boundary window.
 
+//nolint:unused // Retained as a test helper for full pre-apply verification.
 func (ls *LedgerState) verifyBlockHeaderCryptoBeforeApply(
 	block ledger.Block,
 ) error {
@@ -461,6 +462,32 @@ func (ls *LedgerState) verifyBlockHeaderCryptoBeforeApply(
 }
 
 func (ls *LedgerState) verifyBlockHeaderCryptoWithEpochAdvance(
+	ctx context.Context,
+	block ledger.Block,
+	allowEpochCacheAdvance bool,
+	allowStateDefer bool,
+) error {
+	if ls.config.Consensus == nil {
+		return ls.ValidatePraosHeader(
+			ctx,
+			block,
+			allowEpochCacheAdvance,
+			allowStateDefer,
+		)
+	}
+	return ls.config.Consensus.ValidateHeader(
+		ctx,
+		ls,
+		block,
+		allowEpochCacheAdvance,
+		allowStateDefer,
+	)
+}
+
+// ValidatePraosHeader runs Dingo's Praos header checks against ledger-owned
+// state. Consensus providers call this entry point rather than duplicating
+// nonce, epoch, stake, or rollback state.
+func (ls *LedgerState) ValidatePraosHeader(
 	ctx context.Context,
 	block ledger.Block,
 	allowEpochCacheAdvance bool,

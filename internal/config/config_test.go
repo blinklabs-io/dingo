@@ -75,7 +75,12 @@ func resetGlobalConfig() {
 		ForgeEBMaxBytes:                  forgeEBCapDefault(DefaultForgeEBMaxBytes),
 		ForgeEBSelectionReserve:          DefaultForgeEBSelectionReserve,
 		Mithril: MithrilConfig{
-			Enabled:            true,
+			WindowChunks:       DefaultMithrilWindowChunks,
+			BatchChunks:        DefaultMithrilBatchChunks,
+			DownloadWorkers:    DefaultMithrilDownloadWorkers,
+			MinGapChunks:       DefaultMithrilMinGapChunks,
+			CheckInterval:      DefaultMithrilCheckInterval,
+			RetryBackoff:       DefaultMithrilRetryBackoff,
 			CleanupAfterLoad:   true,
 			VerifyCertificates: true,
 		},
@@ -298,6 +303,12 @@ mithril:
 		ForgeEBSelectionReserve:          750 * time.Millisecond,
 		Mithril: MithrilConfig{
 			Enabled:                false,
+			WindowChunks:           DefaultMithrilWindowChunks,
+			BatchChunks:            DefaultMithrilBatchChunks,
+			DownloadWorkers:        DefaultMithrilDownloadWorkers,
+			MinGapChunks:           DefaultMithrilMinGapChunks,
+			CheckInterval:          DefaultMithrilCheckInterval,
+			RetryBackoff:           DefaultMithrilRetryBackoff,
 			AggregatorURL:          "https://mithril.example.net",
 			DownloadDir:            "/tmp/mithril",
 			DownloadIdleTimeout:    "5m",
@@ -325,6 +336,12 @@ mithril:
 func TestDefaultMempoolProviderIsFIFO(t *testing.T) {
 	if got := defaultPluginsConfig().Mempool.Provider; got != "fifo" {
 		t.Fatalf("default mempool provider = %q, want fifo", got)
+	}
+}
+
+func TestDefaultConsensusProviderIsPraos(t *testing.T) {
+	if got := defaultPluginsConfig().Consensus.Provider; got != "praos" {
+		t.Fatalf("default consensus provider = %q, want praos", got)
 	}
 }
 
@@ -416,7 +433,12 @@ func TestLoad_WithoutConfigFile_UsesDefaults(t *testing.T) {
 		ForgeEBMaxBytes:                  forgeEBCapDefault(DefaultForgeEBMaxBytes),
 		ForgeEBSelectionReserve:          DefaultForgeEBSelectionReserve,
 		Mithril: MithrilConfig{
-			Enabled:            true,
+			WindowChunks:       DefaultMithrilWindowChunks,
+			BatchChunks:        DefaultMithrilBatchChunks,
+			DownloadWorkers:    DefaultMithrilDownloadWorkers,
+			MinGapChunks:       DefaultMithrilMinGapChunks,
+			CheckInterval:      DefaultMithrilCheckInterval,
+			RetryBackoff:       DefaultMithrilRetryBackoff,
 			CleanupAfterLoad:   true,
 			VerifyCertificates: true,
 		},

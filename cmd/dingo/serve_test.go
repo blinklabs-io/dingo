@@ -470,3 +470,79 @@ func TestResumeBackfillFinalizesStatsBeforeClearingSync(t *testing.T) {
 	)
 	require.NotEmpty(t, status)
 }
+
+// With mithril.enabled the node syncs an empty database itself, so serve
+// accepts one; an interrupted manual sync still has to be finished first.
+func TestServeAcceptsInNodeModeFreshDB(t *testing.T) {
+	t.Parallel()
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	cfg := &config.Config{
+		RunMode:      config.RunModeServe,
+		StorageMode:  "core",
+		Network:      "preview",
+		DatabasePath: t.TempDir(),
+		Plugins:      testStoragePlugins(),
+	}
+	cfg.Mithril.Enabled = true
+	require.NoError(t, checkSyncState(cfg, logger),
+		"an empty database must pass with node-managed Mithril")
+
+	runtime, err := openConfiguredDatabase(context.Background(), cfg, logger, 1)
+	require.NoError(t, err)
+	require.NoError(t, runtime.Database.SetSyncState(
+		"sync_status", syncStatusInProgress, nil,
+	))
+	require.NoError(t, runtime.Close(context.Background()))
+	require.ErrorContains(t, checkSyncState(cfg, logger),
+		"incomplete sync detected")
+}
+
+// The node's own interrupted snapshot restore is the node's to resume in
+// snapshot mode. In any other mode, or with the delegator-inactivity gate
+// that keeps the node off snapshots, it is refused like a manual sync.
+func TestServeAcceptsInterruptedSnapshotRestore(t *testing.T) {
+	t.Parallel()
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	cfg := &config.Config{
+		RunMode:      config.RunModeServe,
+		StorageMode:  "core",
+		Network:      "preview",
+		DatabasePath: t.TempDir(),
+		Plugins:      testStoragePlugins(),
+	}
+	cfg.Mithril.Enabled = true
+	cfg.HistoryExpiry.Enabled = true
+
+	runtime, err := openConfiguredDatabase(context.Background(), cfg, logger, 1)
+	require.NoError(t, err)
+	require.NoError(t, runtime.Database.SetSyncState(
+		"sync_status", syncStatusInProgress, nil,
+	))
+	require.NoError(t, runtime.Close(context.Background()))
+	require.ErrorContains(t, checkSyncState(cfg, logger),
+		"incomplete sync detected", "a manual sync's interruption passed")
+
+	runtime, err = openConfiguredDatabase(context.Background(), cfg, logger, 1)
+	require.NoError(t, err)
+	require.NoError(t, runtime.Database.SetSyncState(
+		"mithril_snapshot_restore_active", "1", nil,
+	))
+	require.NoError(t, runtime.Close(context.Background()))
+	require.NoError(t, checkSyncState(cfg, logger))
+
+	// Refused elsewhere, but pointed at the in-node resume: no sync
+	// command can finish the node's restore.
+	cfg.DelegatorInactivityEnabled = true
+	err = checkSyncState(cfg, logger)
+	require.ErrorContains(t, err, "node's own interrupted Mithril snapshot")
+	require.NotContains(t, err.Error(), "dingo sync")
+	cfg.DelegatorInactivityEnabled = false
+
+	cfg.HistoryExpiry.Enabled = false
+	err = checkSyncState(cfg, logger)
+	require.ErrorContains(t, err, "node's own interrupted Mithril snapshot",
+		"stream mode resumed a snapshot restore")
+	require.NotContains(t, err.Error(), "dingo sync")
+}

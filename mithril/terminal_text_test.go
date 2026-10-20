@@ -58,7 +58,7 @@ func TestStatusErrorEscapesAggregatorBody(t *testing.T) {
 	defer server.Close()
 
 	client := NewClient(server.URL, WithAllowInsecureHTTP())
-	_, err := client.ListSnapshots(context.Background())
+	_, err := client.ListCardanoDatabaseSnapshots(context.Background())
 	require.Error(t, err)
 	assert.NotContains(t, err.Error(), "\x1b")
 	assert.NotContains(t, err.Error(), "\x07")

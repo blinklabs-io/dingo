@@ -35,7 +35,7 @@ WORKDIR /antithesis/customer
 RUN make CGO_ENABLED=1 build
 
 FROM ghcr.io/blinklabs-io/cardano-cli:11.2.3.1-1@sha256:bc943590a8f0685a34a63697df18527b5e35d06dc0ce5fb931d7bc78ed5c4866 AS cardano-cli
-FROM ghcr.io/blinklabs-io/cardano-configs:20260915-1@sha256:d13289f8c094b8ec9e0f0c64888254c94183239400f9564fb933e323ee2fa5f7 AS cardano-configs
+FROM ghcr.io/blinklabs-io/cardano-configs:20261020-1@sha256:4f86193c93ac0cdac60db9bf6b0e1d850e52e2896b6615fa5aa5838d72809cfa AS cardano-configs
 FROM ghcr.io/blinklabs-io/nview:0.15.2@sha256:2c00f8542bc17073e4f8f75c403ba01226fb0949de4bb8db8f5170b29f85676d AS nview
 FROM ghcr.io/blinklabs-io/txtop:0.16.0@sha256:7386a04aefdeef17e84f1f80790374c8da74142fadb6b558f093496bb1a427b1 AS txtop
 

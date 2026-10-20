@@ -45,9 +45,8 @@ import (
 const syncKeyPinnedArtifact = "mithril_pinned_artifact"
 
 // pinnedArtifact is the durable identity of the Mithril artifact an in-flight
-// sync run is importing. Digest is the v2 artifact hash or the v1 snapshot
-// digest; Backend distinguishes the two because the identifiers are not
-// interchangeable across the aggregator's artifact endpoints.
+// sync run is importing. Digest is the v2 artifact hash; Backend records the
+// backend that produced it.
 type pinnedArtifact struct {
 	Backend             string `json:"backend"`
 	Network             string `json:"network"`
@@ -65,6 +64,16 @@ type pinnedArtifact struct {
 
 // setPinnedArtifact records pin as the artifact this sync run is importing.
 func setPinnedArtifact(db *database.Database, pin pinnedArtifact) error {
+	return setPinnedArtifactTxn(db, pin, nil)
+}
+
+// setPinnedArtifactTxn is setPinnedArtifact inside txn, or on its own when
+// txn is nil.
+func setPinnedArtifactTxn(
+	db *database.Database,
+	pin pinnedArtifact,
+	txn *database.Txn,
+) error {
 	if pin.Digest == "" {
 		return errors.New(
 			"pinning mithril artifact: artifact has no digest",
@@ -75,7 +84,7 @@ func setPinnedArtifact(db *database.Database, pin pinnedArtifact) error {
 		return fmt.Errorf("encoding mithril artifact pin: %w", err)
 	}
 	if err := db.SetSyncState(
-		syncKeyPinnedArtifact, string(encoded), nil,
+		syncKeyPinnedArtifact, string(encoded), txn,
 	); err != nil {
 		return fmt.Errorf("pinning mithril artifact: %w", err)
 	}
@@ -122,7 +131,7 @@ func clearPinnedArtifact(db *database.Database) error {
 }
 
 // recordPinnedCertifiedTip stores the certified ImmutableDB tip slot on the
-// existing pin. It is a no-op when no pin is present, which is the v1/no-pin
+// existing pin. It is a no-op when no pin is present, which is the no-pin
 // path rather than an error.
 func recordPinnedCertifiedTip(db *database.Database, slot uint64) error {
 	pin, ok, err := getPinnedArtifact(db)
@@ -142,6 +151,14 @@ func recordPinnedCertifiedTip(db *database.Database, slot uint64) error {
 // across either would re-import a different snapshot's live set over the
 // partially imported one.
 func (p pinnedArtifact) validateForRun(backend, network string) error {
+	if p.Backend == "v1" {
+		return fmt.Errorf(
+			"interrupted Mithril sync pinned artifact %s on the v1 backend, "+
+				"which is no longer supported; remove the database "+
+				"directory and bootstrap again",
+			p.Digest,
+		)
+	}
 	if p.Backend != "" && p.Backend != normalizeBackend(backend) {
 		return fmt.Errorf(
 			"interrupted Mithril sync pinned artifact %s on the %s backend, "+

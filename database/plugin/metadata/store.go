@@ -875,13 +875,17 @@ type UtxoStore interface {
 
 	// GetUtxoBalanceByAddress returns the live-UTxO lovelace balance,
 	// per-asset balances (ordered by policy id then name), and live UTxO
-	// count for the given address, aggregated in SQL. Payment-credential
-	// mode aggregates across address forms. Exact mode returns
+	// count for the given address. Payment-credential mode aggregates
+	// across address forms. Exact mode returns
 	// models.ErrExactAddressRequiresCbor; exact summaries use the coordinated
-	// Database query path instead.
+	// Database query path instead. The read stops with
+	// models.ErrAddressBalanceLimit as soon as it visits more outputs or
+	// accumulates more distinct assets than limits allow, and stops when the
+	// transaction's context ends.
 	GetUtxoBalanceByAddress(
 		lcommon.Address,
 		models.UtxoAddressMatchMode,
+		models.AddressBalanceLimits,
 		types.Txn,
 	) (models.AddressBalance, error)
 
@@ -3405,6 +3409,16 @@ type AddressTransactionIndexRebuilder interface {
 // The load command checks for this interface and uses it when available.
 type BulkLoadOptimizer interface {
 	SetBulkLoadPragmas() error
+	RestoreNormalPragmas() error
+}
+
+// CatchUpPragmaTuner is an optional interface for metadata stores that can
+// speed up a long write burst on a database that keeps serving, such as a
+// node-managed Mithril stream catch-up. SetCatchUpPragmas changes only
+// settings that cannot lose a committed write on a crash or power loss;
+// RestoreNormalPragmas restores the normal settings.
+type CatchUpPragmaTuner interface {
+	SetCatchUpPragmas() error
 	RestoreNormalPragmas() error
 }
 

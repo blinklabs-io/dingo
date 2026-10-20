@@ -896,6 +896,39 @@ type fakeLedgerState struct {
 		addr lcommon.Address,
 		slot uint64,
 	) ([]models.Utxo, error)
+	// boundedPage overrides UtxosByAddressBoundedPage. When nil the fake
+	// returns every UTxO from utxos in one exhausted page.
+	boundedPage func(
+		ctx context.Context,
+		q *models.UtxoWithOrderingQuery,
+		maxCandidates int,
+		maxBytes int64,
+	) (models.UtxoAddressPage, error)
+}
+
+func (f *fakeLedgerState) UtxosByAddressBoundedPage(
+	ctx context.Context,
+	q *models.UtxoWithOrderingQuery,
+	maxCandidates int,
+	maxBytes int64,
+) (models.UtxoAddressPage, error) {
+	if f.boundedPage != nil {
+		return f.boundedPage(ctx, q, maxCandidates, maxBytes)
+	}
+	if f.utxos == nil {
+		return models.UtxoAddressPage{}, nil
+	}
+	utxos, err := f.utxos(nil)
+	if err != nil {
+		return models.UtxoAddressPage{}, err
+	}
+	page := models.UtxoAddressPage{Scanned: len(utxos)}
+	for i := range utxos {
+		page.Utxos = append(
+			page.Utxos, models.UtxoWithOrdering{Utxo: utxos[i]},
+		)
+	}
+	return page, nil
 }
 
 func (f *fakeLedgerState) GetCurrentPParams() lcommon.ProtocolParameters {

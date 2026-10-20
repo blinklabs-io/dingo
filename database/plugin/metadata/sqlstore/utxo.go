@@ -471,6 +471,7 @@ func (s *Store) ImportUtxosDeferredRewardLiveStakeRefresh(
 func (s *Store) GetUtxoBalanceByAddress(
 	address lcommon.Address,
 	mode models.UtxoAddressMatchMode,
+	limits models.AddressBalanceLimits,
 	txn types.Txn,
 ) (models.AddressBalance, error) {
 	var ret models.AddressBalance
@@ -495,16 +496,31 @@ func (s *Store) GetUtxoBalanceByAddress(
 		return ret, nil
 	}
 	addressPredicate := "(" + strings.Join(predicates, " OR ") + ")"
-	rows, err := db.QueryContext(ctx, s.dialect.Rebind(`
+	// One row past the limit is enough to know it was exceeded.
+	amountQuery := `
 SELECT amount
 FROM utxo
-WHERE deleted_slot = 0 AND `+addressPredicate), args...)
+WHERE deleted_slot = 0 AND ` + addressPredicate
+	amountArgs := args
+	if limits.MaxUtxos > 0 {
+		amountQuery += `
+LIMIT ?`
+		amountArgs = append(slices.Clip(args), limits.MaxUtxos+1)
+	}
+	rows, err := db.QueryContext(ctx, s.dialect.Rebind(amountQuery), amountArgs...)
 	if err != nil {
 		return ret, fmt.Errorf("sum utxo balance by address: %w", err)
 	}
 	defer rows.Close()
 	for rows.Next() {
 		ret.UtxoCount++
+		if limits.MaxUtxos > 0 && ret.UtxoCount > int64(limits.MaxUtxos) {
+			return models.AddressBalance{}, fmt.Errorf(
+				"more than %d live UTxOs: %w",
+				limits.MaxUtxos,
+				models.ErrAddressBalanceLimit,
+			)
+		}
 		var raw sql.NullString
 		if err := rows.Scan(&raw); err != nil {
 			rows.Close()
@@ -575,6 +591,16 @@ ORDER BY asset.policy_id, asset.name`),
 		}
 		idx, ok := assetIndexes[key]
 		if !ok {
+			// Rows arrive in (policy id, name) order, so the distinct
+			// count only grows and the read can stop at the first asset
+			// past the limit.
+			if limits.MaxAssets > 0 && len(ret.Assets) >= limits.MaxAssets {
+				return models.AddressBalance{}, fmt.Errorf(
+					"more than %d distinct assets: %w",
+					limits.MaxAssets,
+					models.ErrAddressBalanceLimit,
+				)
+			}
 			asset.Amount = amount
 			assetIndexes[key] = len(ret.Assets)
 			ret.Assets = append(ret.Assets, asset)

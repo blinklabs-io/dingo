@@ -6,7 +6,15 @@ configuration is decoded before construction, and the host owns `Start`/`Stop`.
 
 Storage contracts remain in `database/plugin/blob` and
 `database/plugin/metadata`; the generic `plugin` package does not import either
-domain. The same platform also hosts mempool and API providers.
+domain. The same platform also hosts consensus, mempool, and API providers.
+
+Consensus providers implement `consensus.Provider`. One resolved instance must
+make header authorization, leader scheduling, and chain comparison decisions
+for the whole node. Keep ledger state and producer credentials in their owning
+components: use `consensus.HeaderVerifier` for ledger-owned Praos checks and
+the scheduler factory supplied by composition. A provider must return stable,
+versioned network, database, and schedule identities. Register it explicitly in
+`internal/plugins/register.go`; do not register from `init`.
 
 ## Provider shape
 
@@ -67,6 +75,9 @@ map so an untagged binary returns the actionable build-tag error.
 
 ```yaml
 plugins:
+  consensus:
+    provider: praos
+    config: {}
   storage:
     blob:
       provider: example
@@ -74,7 +85,7 @@ plugins:
         bucket: blocks
 ```
 
-The selector flag is `--blob example`. Generic environment paths flatten the
+Selector flags include `--consensus praos` and `--blob example`. Generic environment paths flatten the
 capability and config field names, for example:
 
 ```text

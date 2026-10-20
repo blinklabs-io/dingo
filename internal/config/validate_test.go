@@ -51,10 +51,7 @@ func validTestConfig() *Config {
 		Chainsync:            DefaultChainsyncConfig(),
 		HistoryExpiry:        DefaultHistoryExpiryConfig(),
 		Midnight:             DefaultMidnightConfig(),
-		Mithril: MithrilConfig{
-			Enabled: true,
-			Backend: "v2",
-		},
+		Mithril:              newDefaultConfig().Mithril,
 	}
 	cfg.Plugins.Mempool.Config["capacity"] = int64(DefaultMempoolCapacityPraos)
 	return cfg
@@ -876,7 +873,7 @@ func TestValidate(t *testing.T) {
 		{
 			name:    "invalid mithril backend",
 			modify:  func(c *Config) { c.Mithril.Backend = "v3" },
-			wantErr: "invalid mithril.backend",
+			wantErr: `must be empty or "v2"`,
 		},
 		{
 			name:   "empty mithril backend",
