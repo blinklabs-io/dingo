@@ -5973,28 +5973,38 @@ it. Dingo implements this as a **corroboration gate**
   competing candidate's headers never reach the ledger's own chainsync
   header-queue verification (that only runs for headers actually applied).
   For a competing fork, verification follows the retained headers for that
-  peer back to a primary-chain intersection and folds their nonce
-  contributions through the source epoch's stability cutoff. A per-connection
-  nonce-prefix cache resumes folding at the first newly added header, keyed by
-  the last folded hash, source epoch, cutoff, and source nonce. This supplies
-  the fork's frozen candidate nonce at the next epoch boundary while retaining
-  the same pool-key, leader-eligibility, size, KES, and operational-certificate
-  checks for every folded header. Hash links, slots, block numbers, and era
-  order are validated across the reconstructed path before it can affect
-  selection. The verifier receives the ChainSync connection identity so
-  ancestry from one peer cannot be used for another peer's header. A per-
-  connection path cache reuses a resolved ancestor while that intersection
-  remains on the applied chain and the next header directly extends the cached
-  path, even as the applied tip advances; peer rollbacks and disconnects clear
-  it.
+  peer back to a primary-chain intersection and rolls the evolving and
+  candidate nonces separately through every crossed epoch. Each epoch's eta
+  combines its candidate nonce with the carried last-epoch-block nonce and,
+  in TPraos eras, the protocol-parameter extraEntropy. The evolving nonce
+  folds every header through the epoch end; the candidate nonce follows it only
+  before that epoch's stability cutoff, then stays frozen while the evolving
+  nonce continues. Each next epoch nonce is assembled from that epoch's
+  candidate nonce and the carried last-epoch-block nonce. A per-connection,
+  per-epoch nonce-prefix cache resumes folding at the first newly added header,
+  keyed by the last folded hash, source epoch and nonce, cutoff, and both
+  initial nonce states; entries for epochs outside the currently retained
+  candidate path are discarded. This retains the same pool-key, leader-eligibility,
+  size, KES, and operational-certificate checks for every folded header. Hash
+  links, slots, block numbers, and era order are validated across the
+  reconstructed path before it can affect selection. The verifier receives the
+  ChainSync connection identity so ancestry from one peer cannot be used for
+  another peer's header. A per-connection path cache reuses a resolved ancestor
+  while that intersection remains on the applied chain and the next header
+  directly extends the cached path, even as the applied tip advances; peer
+  rollbacks and disconnects clear it.
   Verification is skipped only for a slot an imported Mithril snapshot
   already covers, the same exemption the ledger's own header-queue path
   applies. A result showing local state has not caught up to the header's slot
   (`IsHeaderVerificationDeferred`) withholds the header from chain selection,
   density, corroboration, and the observed ancestry used by fork resolution or
   rollback replay without penalizing the peer. ChainSync records that the peer
-  needs recovery and re-intersects it after the applied ledger advances. The
-  peer then delivers its linked suffix parent-first, and each header must pass
+  needs recovery and re-intersects it after the applied ledger advances. If the
+  ledger advances during ancestry verification, recording the deferred marker
+  detects that tip change and schedules recovery immediately. Closing the
+  connection clears its marker, and a failed retry does not restore the marker
+  after the connection has left the manager. The peer then delivers its linked
+  suffix parent-first, and each header must pass
   verification before entering observed ancestry or the ledger queue.
   The verification snapshot generation travels with the staged selector
   candidate and ledger event; a rollback or concurrent publication that makes
@@ -6029,12 +6039,11 @@ it. Dingo implements this as a **corroboration gate**
   and re-intersects; a point that became applied during lookup is trusted as
   part of the primary chain. A direct child of the applied tip can use the
   local verifier's immutable next-epoch forecast when the shared epoch cache
-  has not yet reached its slot. A multi-epoch candidate uses
-  the normal local-chain verifier only when its immediate parent is the
-  applied tip, including when that tip advances during ancestry lookup; other
-  multi-epoch forks remain
-  withheld because their intermediate epoch nonce cannot be reconstructed
-  from the retained candidate path. A header whose
+  has not yet reached its slot. Multi-epoch peer forks derive each
+  intermediate epoch nonce from the retained, verified candidate path. When
+  the applied tip advances during ancestry lookup and becomes the candidate's
+  parent, verification switches to the local-chain verifier against the newly
+  published ledger state. A header whose
   point (slot and hash) is on the chain (`Chain.HoldsPoint`) at or below the
   ledger tip returns success without re-verification: it was fully verified
   when applied, and re-judging it against pool snapshots the 3-epoch

@@ -36,11 +36,14 @@ type peerForkPathPrefix struct {
 }
 
 type peerForkNoncePrefix struct {
-	sourceEpoch uint64
-	cutoff      uint64
-	sourceNonce []byte
-	lastHash    []byte
-	candidate   []byte
+	sourceEpoch           uint64
+	cutoff                uint64
+	sourceNonce           []byte
+	initialEvolvingNonce  []byte
+	initialCandidateNonce []byte
+	lastHash              []byte
+	evolving              []byte
+	candidate             []byte
 }
 
 // peerChainSelectionEpochNonce returns a candidate-chain nonce when the
@@ -81,8 +84,7 @@ func (ls *LedgerState) peerChainSelectionEpochNonce(
 	localTip := appliedTip.currentTip.Point
 	// The applied tip can advance while peerHeaderForkPath reconstructs the
 	// ancestry. If the new tip is the candidate's parent, verify this as a
-	// local extension instead of treating the older intersection as a
-	// multi-epoch fork whose intermediate nonce cannot be reconstructed.
+	// local extension against the newly published ledger state.
 	if peerHeaderPathHasParentPoint(
 		forkHeaders,
 		localTip,
@@ -135,19 +137,6 @@ func (ls *LedgerState) peerChainSelectionEpochNonce(
 	if targetEpoch.EpochId == sourceEpoch.EpochId {
 		return cloneNonce(targetEpoch.Nonce), targetEpoch, true, nil
 	}
-	if targetEpoch.EpochId != sourceEpoch.EpochId+1 {
-		if peerHeaderPathHasParentPoint(forkHeaders, localTip) ||
-			(len(forkHeaders) == 1 && localTip.Slot == ancestor.Slot &&
-				bytes.Equal(localTip.Hash, ancestor.Hash)) {
-			return nil, models.Epoch{}, false, nil
-		}
-		return nil, models.Epoch{}, false, fmt.Errorf(
-			"%w: candidate fork spans epoch %d to %d",
-			ErrHeaderVerificationWithheld,
-			sourceEpoch.EpochId,
-			targetEpoch.EpochId,
-		)
-	}
 	if sourceEpoch.EraId == uint(byron.EraIdByron) {
 		if err := ls.verifyByronTransitionAncestry(
 			forkHeaders,
@@ -159,6 +148,62 @@ func (ls *LedgerState) peerChainSelectionEpochNonce(
 		return cloneNonce(targetEpoch.Nonce), targetEpoch, true, nil
 	}
 
+	return ls.peerChainSelectionEpochNonceAcrossEpochs(
+		connId,
+		ancestor,
+		forkHeaders,
+		sourceEpoch,
+		targetEpoch,
+		snapshot,
+	)
+}
+
+func (ls *LedgerState) peerChainSelectionEpochNonceAcrossEpochs(
+	connId ouroboros.ConnectionId,
+	ancestor ocommon.Point,
+	forkHeaders []gledger.BlockHeader,
+	sourceEpoch models.Epoch,
+	targetEpoch models.Epoch,
+	snapshot *consensusSnapshot,
+) ([]byte, models.Epoch, bool, error) {
+	retainedEpochs := map[uint64]struct{}{sourceEpoch.EpochId: {}}
+	for _, header := range forkHeaders {
+		if epoch, err := epochForSlotInCache(
+			snapshot.epochCache,
+			header.SlotNumber(),
+		); err == nil {
+			retainedEpochs[epoch.EpochId] = struct{}{}
+		}
+	}
+	ls.retainPeerForkNoncePrefixes(connId, retainedEpochs)
+	ancestorBlock, err := ls.blockByHash(context.Background(), ancestor.Hash)
+	if err != nil {
+		return nil, models.Epoch{}, false, fmt.Errorf(
+			"%w: lookup candidate intersection block: %w",
+			errHeaderVerificationDeferred,
+			err,
+		)
+	}
+	currentEpoch := sourceEpoch
+	epochNonce := cloneNonce(sourceEpoch.Nonce)
+	labNonce := cloneNonce(sourceEpoch.LastEpochBlockNonce)
+	initialEvolvingNonce, err := ls.db.GetBlockNonce(ancestor, nil)
+	if err != nil {
+		return nil, models.Epoch{}, false, fmt.Errorf(
+			"%w: %w: read candidate intersection nonce: %w",
+			errHeaderVerificationDeferred,
+			errHeaderStateLookupFailed,
+			err,
+		)
+	}
+	if len(initialEvolvingNonce) != lcommon.Blake2b256Size {
+		return nil, models.Epoch{}, false, fmt.Errorf(
+			"%w: candidate intersection at slot %d has no 32-byte nonce",
+			errHeaderVerificationDeferred,
+			ancestor.Slot,
+		)
+	}
+	initialCandidateNonce := cloneNonce(initialEvolvingNonce)
 	cutoff, ready := ls.nextEpochNonceReadyCutoffSlot(sourceEpoch)
 	if !ready {
 		return nil, models.Epoch{}, false, fmt.Errorf(
@@ -167,137 +212,274 @@ func (ls *LedgerState) peerChainSelectionEpochNonce(
 			sourceEpoch.EpochId,
 		)
 	}
-	var evolving []byte
-	var candidate []byte
-	startIndex := 0
-	if ancestor.Slot < cutoff {
-		evolving, err = ls.db.GetBlockNonce(ancestor, nil)
+	if ancestor.Slot >= cutoff {
+		nextEpoch, ok := epochByIDInCache(
+			snapshot.epochCache,
+			sourceEpoch.EpochId+1,
+		)
+		if !ok || len(nextEpoch.CandidateNonce) != lcommon.Blake2b256Size {
+			return nil, models.Epoch{}, false, fmt.Errorf(
+				"%w: frozen candidate nonce for epoch %d is unavailable",
+				errHeaderVerificationDeferred,
+				sourceEpoch.EpochId,
+			)
+		}
+		initialCandidateNonce = cloneNonce(nextEpoch.CandidateNonce)
+	}
+	evolvingNonce := cloneNonce(initialEvolvingNonce)
+	candidateNonce := cloneNonce(initialCandidateNonce)
+
+	for epochID := sourceEpoch.EpochId; epochID < targetEpoch.EpochId; epochID++ {
+		if epochID != sourceEpoch.EpochId {
+			var ok bool
+			currentEpoch, ok = epochByIDInCache(snapshot.epochCache, epochID)
+			if !ok {
+				return nil, models.Epoch{}, false, fmt.Errorf(
+					"%w: candidate epoch %d is unavailable",
+					errHeaderVerificationDeferred,
+					epochID,
+				)
+			}
+			initialEvolvingNonce = cloneNonce(evolvingNonce)
+			initialCandidateNonce = cloneNonce(candidateNonce)
+			currentEpoch.Nonce = cloneNonce(epochNonce)
+		}
+		cutoff, ready := ls.nextEpochNonceReadyCutoffSlot(currentEpoch)
+		if !ready {
+			return nil, models.Epoch{}, false, fmt.Errorf(
+				"%w: candidate nonce cutoff is unavailable for epoch %d",
+				errHeaderVerificationDeferred,
+				currentEpoch.EpochId,
+			)
+		}
+		evolving := cloneNonce(initialEvolvingNonce)
+		candidate := cloneNonce(initialCandidateNonce)
+		startIndex := 0
+		if cachedEvolving, cachedCandidate, next, ok := ls.peerForkNoncePrefix(
+			connId,
+			currentEpoch,
+			cutoff,
+			initialEvolvingNonce,
+			initialCandidateNonce,
+			forkHeaders,
+		); ok {
+			evolving = cachedEvolving
+			candidate = cachedCandidate
+			startIndex = next
+		}
+		var lastFolded gledger.BlockHeader
+		epochEnd := currentEpoch.StartSlot + uint64(currentEpoch.LengthInSlots)
+		for index, forkHeader := range forkHeaders {
+			if index < startIndex {
+				continue
+			}
+			if forkHeader.SlotNumber() >= epochEnd {
+				break
+			}
+			if forkHeader.SlotNumber() < currentEpoch.StartSlot {
+				continue
+			}
+			block := headerOnlyBlock{header: forkHeader, peerRelative: true}
+			if err := ls.verifyBlockHeaderStatelessCryptoWithEpochNonce(
+				block,
+				currentEpoch,
+				epochNonce,
+			); err != nil {
+				return nil, models.Epoch{}, false, err
+			}
+			if err := chainSelectionHeaderStateError(
+				ls.verifyBlockHeaderStateWithCache(
+					context.Background(),
+					block,
+					currentEpoch.EpochId,
+					snapshot.epochCache,
+					true,
+				),
+			); err != nil {
+				return nil, models.Epoch{}, false, err
+			}
+			var foldErr error
+			evolving, foldErr = ls.foldHeaderEtaV(evolving, forkHeader)
+			if foldErr != nil {
+				return nil, models.Epoch{}, false, fmt.Errorf(
+					"%w: fold candidate header at slot %d: %w",
+					errHeaderVerificationDeferred,
+					forkHeader.SlotNumber(),
+					foldErr,
+				)
+			}
+			if forkHeader.SlotNumber() < cutoff {
+				candidate = cloneNonce(evolving)
+			}
+			lastFolded = forkHeader
+		}
+		if lastFolded != nil {
+			ls.storePeerForkNoncePrefix(
+				connId,
+				currentEpoch,
+				cutoff,
+				initialEvolvingNonce,
+				initialCandidateNonce,
+				lastFolded,
+				evolving,
+				candidate,
+			)
+		}
+		if len(evolving) != lcommon.Blake2b256Size ||
+			len(candidate) != lcommon.Blake2b256Size {
+			return nil, models.Epoch{}, false, fmt.Errorf(
+				"%w: candidate epoch %d rolling nonce state is incomplete",
+				errHeaderVerificationDeferred,
+				currentEpoch.EpochId,
+			)
+		}
+		var nextEpoch models.Epoch
+		var ok bool
+		nextEpoch, ok = epochByIDInCache(snapshot.epochCache, epochID+1)
+		if !ok {
+			return nil, models.Epoch{}, false, fmt.Errorf(
+				"%w: candidate epoch %d is unavailable",
+				errHeaderVerificationDeferred,
+				epochID+1,
+			)
+		}
+		extraEntropy, err := ls.extraEntropyForCandidateEpoch(
+			nextEpoch,
+			snapshot,
+		)
 		if err != nil {
 			return nil, models.Epoch{}, false, fmt.Errorf(
-				"%w: %w: read candidate intersection nonce: %w",
+				"%w: %w: resolve candidate epoch extra entropy: %w",
 				errHeaderVerificationDeferred,
 				errHeaderStateLookupFailed,
 				err,
 			)
 		}
-		if len(evolving) != lcommon.Blake2b256Size {
-			return nil, models.Epoch{}, false, fmt.Errorf(
-				"%w: candidate intersection at slot %d has no 32-byte nonce",
-				errHeaderVerificationDeferred,
-				ancestor.Slot,
-			)
-		}
-		candidate = cloneNonce(evolving)
-		if cached, next, ok := ls.peerForkNoncePrefix(
-			connId,
-			sourceEpoch,
-			cutoff,
-			forkHeaders,
-		); ok {
-			candidate = cached
-			evolving = cloneNonce(cached)
-			startIndex = next
-		}
-	} else {
-		candidate = cloneNonce(targetEpoch.CandidateNonce)
-	}
-	var lastFolded gledger.BlockHeader
-	for index, forkHeader := range forkHeaders {
-		if index < startIndex {
-			continue
-		}
-		if forkHeader.SlotNumber() >= cutoff {
-			break
-		}
-		if forkHeader.SlotNumber() < sourceEpoch.StartSlot {
-			return nil, models.Epoch{}, false, fmt.Errorf(
-				"%w: candidate header at slot %d precedes intersection epoch %d",
-				errHeaderVerificationDeferred,
-				forkHeader.SlotNumber(),
-				sourceEpoch.EpochId,
-			)
-		}
-		block := headerOnlyBlock{header: forkHeader, peerRelative: true}
-		if err := ls.verifyBlockHeaderStatelessCryptoWithEpochNonce(
-			block,
-			sourceEpoch,
-			sourceEpoch.Nonce,
-		); err != nil {
-			return nil, models.Epoch{}, false, err
-		}
-		if err := chainSelectionHeaderStateError(
-			ls.verifyBlockHeaderStateWithCache(
-				context.Background(),
-				block,
-				sourceEpoch.EpochId,
-				snapshot.epochCache,
-				true,
-			),
-		); err != nil {
-			return nil, models.Epoch{}, false, err
-		}
-		evolving, err = ls.foldHeaderEtaV(evolving, forkHeader)
+		epochNonce, err = assembleEpochNonce(candidate, labNonce, extraEntropy)
 		if err != nil {
 			return nil, models.Epoch{}, false, fmt.Errorf(
-				"%w: fold candidate header at slot %d: %w",
+				"%w: assemble candidate epoch nonce: %w",
 				errHeaderVerificationDeferred,
-				forkHeader.SlotNumber(),
 				err,
 			)
 		}
-		candidate = cloneNonce(evolving)
-		lastFolded = forkHeader
-	}
-	if lastFolded != nil {
-		ls.storePeerForkNoncePrefix(
-			connId,
-			sourceEpoch,
-			cutoff,
-			lastFolded,
-			candidate,
+		if nextEpoch.EpochId == targetEpoch.EpochId {
+			return epochNonce, targetEpoch, true, nil
+		}
+		evolvingNonce = evolving
+		candidateNonce = candidate
+		labNonce, err = ls.peerForkEpochLabNonce(
+			currentEpoch,
+			ancestorBlock,
+			forkHeaders,
+			labNonce,
 		)
+		if err != nil {
+			return nil, models.Epoch{}, false, err
+		}
 	}
-	if len(candidate) != lcommon.Blake2b256Size {
-		return nil, models.Epoch{}, false, fmt.Errorf(
-			"%w: candidate epoch %d has no frozen nonce",
-			errHeaderVerificationDeferred,
-			sourceEpoch.EpochId,
-		)
-	}
-
-	var extraEntropy []byte
-	if targetEpoch.EpochId > snapshot.currentEpoch.EpochId {
-		extraEntropy, err = ls.forecastExtraEntropyForEpoch(
-			targetEpoch.EpochId,
-			targetEpoch.EraId,
-		)
-	} else {
-		extraEntropy, err = ls.recordedExtraEntropyForEpoch(
-			targetEpoch.EpochId,
-			targetEpoch.EraId,
-		)
-	}
-	if err != nil {
-		return nil, models.Epoch{}, false, fmt.Errorf(
-			"%w: %w: resolve candidate epoch extra entropy: %w",
-			errHeaderVerificationDeferred,
-			errHeaderStateLookupFailed,
-			err,
-		)
-	}
-	epochNonce, err := assembleEpochNonce(
-		candidate,
-		sourceEpoch.LastEpochBlockNonce,
-		extraEntropy,
+	return nil, models.Epoch{}, false, fmt.Errorf(
+		"%w: candidate epoch path did not reach epoch %d",
+		errHeaderVerificationDeferred,
+		targetEpoch.EpochId,
 	)
-	if err != nil {
-		return nil, models.Epoch{}, false, fmt.Errorf(
-			"%w: assemble candidate epoch nonce: %w",
+}
+
+func (ls *LedgerState) retainPeerForkNoncePrefixes(
+	connId ouroboros.ConnectionId,
+	retainedEpochs map[uint64]struct{},
+) {
+	key := connIdKey(connId)
+	ls.forkHeaderNonceCacheMutex.Lock()
+	defer ls.forkHeaderNonceCacheMutex.Unlock()
+	entries := ls.forkHeaderNonceCache[key]
+	for epochID := range entries {
+		if _, retained := retainedEpochs[epochID]; !retained {
+			delete(entries, epochID)
+		}
+	}
+	if len(entries) == 0 {
+		delete(ls.forkHeaderNonceCache, key)
+	}
+}
+
+func epochByIDInCache(
+	cache []models.Epoch,
+	epochID uint64,
+) (models.Epoch, bool) {
+	for _, epoch := range cache {
+		if epoch.EpochId == epochID && epoch.LengthInSlots > 0 {
+			return epoch, true
+		}
+	}
+	return models.Epoch{}, false
+}
+
+func (ls *LedgerState) extraEntropyForCandidateEpoch(
+	epoch models.Epoch,
+	snapshot *consensusSnapshot,
+) ([]byte, error) {
+	if epoch.EpochId > snapshot.currentEpoch.EpochId {
+		// The forecast sees the update that will enact at the requested
+		// boundary. It cannot include updates from intervening, not-yet-enacted
+		// epochs, so only the immediately following epoch is safe to forecast.
+		if eraHasExtraEntropy(epoch.EraId) &&
+			epoch.EpochId-snapshot.currentEpoch.EpochId > 1 {
+			return nil, fmt.Errorf(
+				"%w: extra entropy for epoch %d is beyond the one-epoch forecast horizon",
+				errHeaderVerificationDeferred,
+				epoch.EpochId,
+			)
+		}
+		return ls.forecastExtraEntropyForEpoch(epoch.EpochId, epoch.EraId)
+	}
+	return ls.recordedExtraEntropyForEpoch(epoch.EpochId, epoch.EraId)
+}
+
+func (ls *LedgerState) peerForkEpochLabNonce(
+	epoch models.Epoch,
+	ancestor models.Block,
+	headers []gledger.BlockHeader,
+	carried []byte,
+) ([]byte, error) {
+	var lastParent []byte
+	var hasLast bool
+	if ancestor.Slot >= epoch.StartSlot &&
+		ancestor.Slot < epoch.StartSlot+uint64(epoch.LengthInSlots) {
+		parent, err := blockPrevHash(ancestor)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"%w: read candidate epoch %d intersection parent: %w",
+				errHeaderVerificationDeferred,
+				epoch.EpochId,
+				err,
+			)
+		}
+		lastParent, hasLast = parent, true
+	}
+	for _, header := range headers {
+		if header.SlotNumber() >= epoch.StartSlot &&
+			header.SlotNumber() < epoch.StartSlot+uint64(epoch.LengthInSlots) {
+			lastParent = header.PrevHash().Bytes()
+			hasLast = true
+		}
+	}
+	if !hasLast || len(lastParent) == 0 {
+		return cloneNonce(carried), nil
+	}
+	genesisHash, err := GenesisBlockHash(ls.config.CardanoNodeConfig)
+	if err == nil && bytes.Equal(lastParent, genesisHash[:]) {
+		return cloneNonce(carried), nil
+	}
+	if len(lastParent) != lcommon.Blake2b256Size {
+		return nil, fmt.Errorf(
+			"%w: candidate epoch %d last block parent has length %d",
 			errHeaderVerificationDeferred,
-			err,
+			epoch.EpochId,
+			len(lastParent),
 		)
 	}
-	return epochNonce, targetEpoch, true, nil
+	return cloneNonce(lastParent), nil
 }
 
 func peerHeaderPathHasParentPoint(
@@ -316,47 +498,64 @@ func (ls *LedgerState) peerForkNoncePrefix(
 	connId ouroboros.ConnectionId,
 	sourceEpoch models.Epoch,
 	cutoff uint64,
+	initialEvolvingNonce []byte,
+	initialCandidateNonce []byte,
 	headers []gledger.BlockHeader,
-) ([]byte, int, bool) {
+) ([]byte, []byte, int, bool) {
 	key := connIdKey(connId)
 	ls.forkHeaderNonceCacheMutex.Lock()
-	entry, ok := ls.forkHeaderNonceCache[key]
+	entry, ok := ls.forkHeaderNonceCache[key][sourceEpoch.EpochId]
 	ls.forkHeaderNonceCacheMutex.Unlock()
 	if !ok || entry.sourceEpoch != sourceEpoch.EpochId ||
 		entry.cutoff != cutoff ||
-		!bytes.Equal(entry.sourceNonce, sourceEpoch.Nonce) {
-		return nil, 0, false
+		!bytes.Equal(entry.sourceNonce, sourceEpoch.Nonce) ||
+		!bytes.Equal(entry.initialEvolvingNonce, initialEvolvingNonce) ||
+		!bytes.Equal(entry.initialCandidateNonce, initialCandidateNonce) {
+		return nil, nil, 0, false
 	}
+	epochEnd := sourceEpoch.StartSlot + uint64(sourceEpoch.LengthInSlots)
 	for index, header := range headers {
-		if header.SlotNumber() >= cutoff {
+		if header.SlotNumber() >= epochEnd {
 			break
 		}
 		if bytes.Equal(header.Hash().Bytes(), entry.lastHash) {
-			return cloneNonce(entry.candidate), index + 1, true
+			return cloneNonce(entry.evolving), cloneNonce(entry.candidate),
+				index + 1, true
 		}
 	}
-	return nil, 0, false
+	return nil, nil, 0, false
 }
 
 func (ls *LedgerState) storePeerForkNoncePrefix(
 	connId ouroboros.ConnectionId,
 	sourceEpoch models.Epoch,
 	cutoff uint64,
+	initialEvolvingNonce []byte,
+	initialCandidateNonce []byte,
 	header gledger.BlockHeader,
+	evolving []byte,
 	candidate []byte,
 ) {
 	key := connIdKey(connId)
 	ls.forkHeaderNonceCacheMutex.Lock()
 	defer ls.forkHeaderNonceCacheMutex.Unlock()
 	if ls.forkHeaderNonceCache == nil {
-		ls.forkHeaderNonceCache = make(map[string]peerForkNoncePrefix)
+		ls.forkHeaderNonceCache = make(
+			map[string]map[uint64]peerForkNoncePrefix,
+		)
 	}
-	ls.forkHeaderNonceCache[key] = peerForkNoncePrefix{
-		sourceEpoch: sourceEpoch.EpochId,
-		cutoff:      cutoff,
-		sourceNonce: cloneNonce(sourceEpoch.Nonce),
-		lastHash:    append([]byte(nil), header.Hash().Bytes()...),
-		candidate:   cloneNonce(candidate),
+	if ls.forkHeaderNonceCache[key] == nil {
+		ls.forkHeaderNonceCache[key] = make(map[uint64]peerForkNoncePrefix)
+	}
+	ls.forkHeaderNonceCache[key][sourceEpoch.EpochId] = peerForkNoncePrefix{
+		sourceEpoch:           sourceEpoch.EpochId,
+		cutoff:                cutoff,
+		sourceNonce:           cloneNonce(sourceEpoch.Nonce),
+		initialEvolvingNonce:  cloneNonce(initialEvolvingNonce),
+		initialCandidateNonce: cloneNonce(initialCandidateNonce),
+		lastHash:              append([]byte(nil), header.Hash().Bytes()...),
+		evolving:              cloneNonce(evolving),
+		candidate:             cloneNonce(candidate),
 	}
 }
 

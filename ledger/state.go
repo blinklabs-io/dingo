@@ -2051,7 +2051,7 @@ type LedgerState struct {
 	peerHeaderHistoryBytes    int
 	peerHeaderHistorySequence uint64
 	forkHeaderNonceCacheMutex sync.Mutex
-	forkHeaderNonceCache      map[string]peerForkNoncePrefix
+	forkHeaderNonceCache      map[string]map[uint64]peerForkNoncePrefix
 	forkHeaderPathCache       map[string]peerForkPathPrefix
 	// Test hook for fork ancestor lookups.
 	lookupBlockByHash func([]byte) (models.Block, error)

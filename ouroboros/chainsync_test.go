@@ -1519,7 +1519,10 @@ func TestChainsyncClientRollForwardWithholdsHeaderWithDeferredCryptoVerification
 		connId ouroboros.ConnectionId,
 		header gledger.BlockHeader,
 	) (uint64, error) {
-		return ls.ValidatePeerChainSelectionHeaderCryptoWithGeneration(connId, header)
+		return ls.ValidatePeerChainSelectionHeaderCryptoWithGeneration(
+			connId,
+			header,
+		)
 	}
 
 	var hash gledger.Blake2b256
@@ -1593,7 +1596,11 @@ func TestChainsyncClientRollForwardWithholdsHeaderWithDeferredCryptoVerification
 	resyncData, ok := resync.Data.(event.ChainsyncResyncEvent)
 	require.True(t, ok)
 	require.Equal(t, conn, resyncData.ConnectionId)
-	require.Equal(t, event.ChainsyncResyncReasonHeaderValidationRecovery, resyncData.Reason)
+	require.Equal(
+		t,
+		event.ChainsyncResyncReasonHeaderValidationRecovery,
+		resyncData.Reason,
+	)
 
 	// The peer's re-intersection sends its linked suffix through the ordinary
 	// callback parent-first. Once strict verification passes, both selector and
@@ -1651,8 +1658,125 @@ func TestChainsyncClientRollForwardWithholdsHeaderWithDeferredCryptoVerification
 		ledgerData, ok := ledgerEvent.Data.(ledger.ChainsyncEvent)
 		require.True(t, ok)
 		require.Equal(t, replay.header.Hash().Bytes(), ledgerData.Point.Hash)
-		require.EqualValues(t, 42, ledgerData.HeaderCryptoVerificationGeneration)
+		require.EqualValues(
+			t,
+			42,
+			ledgerData.HeaderCryptoVerificationGeneration,
+		)
 	}
+}
+
+func TestDeferredHeaderRecoveryResyncsWhenAppliedTipAdvancesDuringVerification(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	bus := event.NewEventBus(nil, nil)
+	defer bus.Close()
+	_, resyncCh := bus.Subscribe(event.ChainsyncResyncEventType)
+	ls := newTestLedgerState(t)
+	state := dchainsync.NewState(bus, nil)
+	conn := newTestConnId("127.0.0.1:6013", "1.1.1.5:3001")
+	require.True(t, state.AddClientConnId(conn))
+	o := newOuroboros(OuroborosConfig{
+		EventBus:       bus,
+		LedgerState:    ls,
+		ChainsyncState: state,
+		ChainsyncIngressEligible: func(ouroboros.ConnectionId) bool {
+			return true
+		},
+	})
+	o.chainSelectionShouldVerifyHeaderCrypto = func(uint64) bool { return true }
+	deferredErr := ls.ValidateChainSelectionHeaderCrypto(
+		nonByronTestHeader{&testBlockHeader{slotNumber: 200}},
+	)
+	require.True(t, ledger.IsHeaderVerificationDeferred(deferredErr))
+	advancedTip := ochainsync.Tip{
+		Point:       ocommon.NewPoint(1, []byte("applied-during-verification")),
+		BlockNumber: 1,
+	}
+	var advanced atomic.Bool
+	o.chainSelectionVerifyHeaderCrypto = func(
+		ouroboros.ConnectionId,
+		gledger.BlockHeader,
+	) (uint64, error) {
+		if advanced.CompareAndSwap(false, true) {
+			// Model a ledger apply during ancestry verification, before this
+			// connection can register for the matching ChainUpdate event.
+			ls.SetTipForTesting(advancedTip)
+		}
+		return 0, deferredErr
+	}
+	o.chainsyncScheduleAt = func(_ time.Time, fn func()) func() {
+		fn()
+		return func() {}
+	}
+
+	header := nonByronTestHeader{&testBlockHeader{
+		hash:       gledger.Blake2b256{0xee},
+		slotNumber: 200,
+	}}
+	require.NoError(t, o.chainsyncClientRollForward(
+		ochainsync.CallbackContext{ConnectionId: conn},
+		0,
+		header,
+		ochainsync.Tip{
+			Point:       ocommon.NewPoint(200, header.Hash().Bytes()),
+			BlockNumber: 1,
+		},
+	))
+
+	resync := testutil.RequireReceive(
+		t,
+		resyncCh,
+		testutil.AsyncWait,
+		"tip advancement during verification must trigger recovery without another block",
+	)
+	resyncData, ok := resync.Data.(event.ChainsyncResyncEvent)
+	require.True(t, ok)
+	require.Equal(t, conn, resyncData.ConnectionId)
+	require.Equal(
+		t,
+		event.ChainsyncResyncReasonHeaderValidationRecovery,
+		resyncData.Reason,
+	)
+	require.NotContains(t, o.deferredHeaderRecovery, conn)
+}
+
+func TestDeferredHeaderRecoveryDoesNotRestoreClosedConnection(t *testing.T) {
+	t.Parallel()
+
+	bus := event.NewEventBus(nil, nil)
+	defer bus.Close()
+	manager := connmanager.NewConnectionManager(
+		connmanager.ConnectionManagerConfig{},
+	)
+	rawConn, err := ouroboros.New()
+	require.NoError(t, err)
+	conn := rawConn.Id()
+	require.True(t, manager.AddConnection(rawConn, false, "127.0.0.1:6014"))
+
+	o := newOuroboros(OuroborosConfig{
+		EventBus:    bus,
+		ConnManager: manager,
+	})
+	o.deferredHeaderRecovery = make(map[ouroboros.ConnectionId]ochainsync.Tip)
+	baseline := ochainsync.Tip{Point: ocommon.NewPoint(10, []byte("baseline"))}
+	o.deferredHeaderRecovery[conn] = baseline
+	o.chainsyncScheduleAt = func(_ time.Time, _ func()) func() {
+		// Reproduce close handling after retry removes the deferred marker but
+		// before a failed resync restores it.
+		require.True(t, manager.RemoveConnection(conn, rawConn))
+		o.clearDeferredHeaderRecovery(conn)
+		return func() {}
+	}
+
+	o.retryDeferredHeadersAfterLedgerAdvance(event.NewEvent(
+		chain.ChainUpdateEventType,
+		chain.ChainBlockEvent{Point: ocommon.NewPoint(11, []byte("advanced"))},
+	))
+
+	require.NotContains(t, o.deferredHeaderRecovery, conn)
 }
 
 func TestChainsyncClientRollForwardWithholdsUnauthenticatedCandidate(

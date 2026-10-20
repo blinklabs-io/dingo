@@ -7042,6 +7042,32 @@ func TestValidateChainSelectionHeaderCryptoAcceptsVerifiedHeader(
 	)
 }
 
+func TestPeerForkExtraEntropyDefersBeyondForecastHorizon(t *testing.T) {
+	t.Parallel()
+
+	ls := &LedgerState{}
+	snapshot := &consensusSnapshot{
+		currentEpoch: models.Epoch{EpochId: 6},
+	}
+	_, err := ls.extraEntropyForCandidateEpoch(
+		models.Epoch{
+			EpochId: 8,
+			EraId:   eras.ShelleyEraDesc.Id,
+		},
+		snapshot,
+	)
+	require.ErrorIs(t, err, errHeaderVerificationDeferred)
+	extraEntropy, err := ls.extraEntropyForCandidateEpoch(
+		models.Epoch{
+			EpochId: 8,
+			EraId:   eras.BabbageEraDesc.Id,
+		},
+		snapshot,
+	)
+	require.NoError(t, err)
+	require.Empty(t, extraEntropy)
+}
+
 func TestValidatePeerChainSelectionHeaderCryptoUsesForkNonce(
 	t *testing.T,
 ) {
@@ -7310,12 +7336,29 @@ func TestValidatePeerChainSelectionHeaderCryptoUsesForkNonce(
 		&lateAnchorBlockNumber,
 		tamperNone,
 	)
+	lateAnchorEvolvingNonce, err := ls.foldHeaderEtaV(
+		sourceNonce,
+		lateAnchor.block.Header(),
+	)
+	require.NoError(t, err)
+	require.NoError(t, db.SetBlockNonce(
+		lateAnchor.block.Hash().Bytes(),
+		lateAnchor.block.SlotNumber(),
+		lateAnchorEvolvingNonce,
+		false,
+		nil,
+	))
+	ls.epochCache[1].EvolvingNonce = cloneNonce(lateAnchorEvolvingNonce)
+	ls.publishSnapshotsLocked()
 	require.NoError(
 		t,
 		ls.chain.AddLocalBlock(context.Background(), lateAnchor.block),
 	)
 	ls.SetTipForTesting(ochainsync.Tip{
-		Point:       ocommon.NewPoint(lateAnchor.block.SlotNumber(), lateAnchor.block.Hash().Bytes()),
+		Point: ocommon.NewPoint(
+			lateAnchor.block.SlotNumber(),
+			lateAnchor.block.Hash().Bytes(),
+		),
 		BlockNumber: lateAnchor.block.BlockNumber(),
 	})
 	frozenEpochNonce, err := assembleEpochNonce(
@@ -7379,7 +7422,13 @@ func TestValidatePeerChainSelectionHeaderCryptoUsesForkNonce(
 	)
 	seedBlockPoolRegistration(t, db, withheldDescendant.block)
 	withheldDescendantPool := withheldDescendant.block.IssuerVkey().Hash()
-	seedPoolStakeSnapshot(t, db, 5, withheldDescendantPool[:], 1_000_000_000_000_000)
+	seedPoolStakeSnapshot(
+		t,
+		db,
+		5,
+		withheldDescendantPool[:],
+		1_000_000_000_000_000,
+	)
 	ls.removePeerHeaderHistory(connIdKey(ouroboros.ConnectionId{}))
 	ls.config.PeerHeaderLookupFunc = func(
 		_ ouroboros.ConnectionId,
@@ -7547,6 +7596,14 @@ func TestValidatePeerChainSelectionHeaderCryptoUsesForkNonce(
 		EraId:         eras.BabbageEraDesc.Id,
 		Nonce:         bytes.Repeat([]byte{0xc7}, lcommon.Blake2b256Size),
 	})
+	ls.epochCache = append(ls.epochCache, models.Epoch{
+		EpochId:       8,
+		StartSlot:     3 * targetEpochStart,
+		SlotLength:    1_000,
+		LengthInSlots: uint(targetEpochStart),
+		EraId:         eras.BabbageEraDesc.Id,
+		Nonce:         bytes.Repeat([]byte{0xc8}, lcommon.Blake2b256Size),
+	})
 	ls.publishSnapshotsLocked()
 	twoBoundaryTarget := createTestBlockWithNonceAtSlotsAndBlockNumber(
 		t,
@@ -7563,31 +7620,60 @@ func TestValidatePeerChainSelectionHeaderCryptoUsesForkNonce(
 		twoBoundaryTarget.block.Header(),
 	)
 	require.Error(t, twoBoundaryErr)
-	require.True(t, IsHeaderVerificationWithheld(twoBoundaryErr))
-	// A fork can intersect at the applied tip yet still span multiple
-	// epochs. Its candidate is not a local extension when an intermediate
-	// peer header separates it from the intersection.
+	require.False(t, IsHeaderVerificationWithheld(twoBoundaryErr))
+	require.False(t, IsHeaderVerificationDeferred(twoBoundaryErr))
+	require.ErrorContains(t, twoBoundaryErr, "VRF")
+	// A valid applied-tip extension can cross multiple epoch boundaries while
+	// queued headers provide the candidate nonce inputs for each epoch.
 	multiEpochForkMiddleNumber := lateAnchor.block.BlockNumber() + 1
 	multiEpochForkMiddle := createTestBlockWithNonceAtSlotsAndBlockNumber(
 		t,
 		[32]byte{95},
-		localNonce,
+		frozenEpochNonce,
 		targetEpochStart+200,
 		targetEpochStart+300,
 		lateAnchor.block.Hash().Bytes(),
 		&multiEpochForkMiddleNumber,
 		tamperNone,
 	)
+	middleCandidateNonce, err := ls.foldHeaderEtaV(
+		lateAnchorEvolvingNonce,
+		multiEpochForkMiddle.block.Header(),
+	)
+	require.NoError(t, err)
+	epoch7ExtraEntropy, err := ls.forecastExtraEntropyForEpoch(
+		7,
+		ls.epochCache[2].EraId,
+	)
+	require.NoError(t, err)
+	multiEpochTargetNonce, err := assembleEpochNonce(
+		middleCandidateNonce,
+		lateAnchor.block.Header().PrevHash().Bytes(),
+		epoch7ExtraEntropy,
+	)
+	require.NoError(t, err)
 	multiEpochForkTargetNumber := multiEpochForkMiddleNumber + 1
 	multiEpochForkTarget := createTestBlockWithNonceAtSlotsAndBlockNumber(
 		t,
 		[32]byte{96},
-		ls.epochCache[2].Nonce,
+		multiEpochTargetNonce,
 		2*targetEpochStart,
 		2*targetEpochStart+100,
 		multiEpochForkMiddle.block.Hash().Bytes(),
 		&multiEpochForkTargetNumber,
 		tamperNone,
+	)
+	seedBlockPoolRegistration(t, db, multiEpochForkMiddle.block)
+	middlePool := multiEpochForkMiddle.block.IssuerVkey().Hash()
+	seedPoolStakeSnapshot(t, db, 5, middlePool[:], 1_000_000_000_000_000)
+	seedBlockPoolRegistration(t, db, multiEpochForkTarget.block)
+	multiEpochTargetPool := multiEpochForkTarget.block.IssuerVkey().Hash()
+	seedPoolStakeSnapshot(
+		t,
+		db,
+		6,
+		multiEpochTargetPool[:],
+		1_000_000_000_000_000,
 	)
 	ls.removePeerHeaderHistory(connIdKey(ouroboros.ConnectionId{}))
 	ls.config.PeerHeaderLookupFunc = func(
@@ -7607,13 +7693,149 @@ func TestValidatePeerChainSelectionHeaderCryptoUsesForkNonce(
 				CurrentHeaderCryptoVerificationGeneration(),
 		}, lateAnchor.block.Hash().Bytes(), true
 	}
+	derivedMultiEpochNonce, _, isMultiEpochFork, deriveMultiEpochErr :=
+		ls.peerChainSelectionEpochNonce(
+			ouroboros.ConnectionId{},
+			multiEpochForkTarget.block.Header(),
+			ls.loadConsensusSnapshot(),
+		)
+	require.NoError(t, deriveMultiEpochErr)
+	require.True(t, isMultiEpochFork)
+	require.Equal(t, multiEpochTargetNonce, derivedMultiEpochNonce)
 	multiEpochForkErr := ls.ValidatePeerChainSelectionHeaderCrypto(
 		ouroboros.ConnectionId{},
 		multiEpochForkTarget.block.Header(),
 	)
-	require.Error(t, multiEpochForkErr)
-	require.True(t, IsHeaderVerificationWithheld(multiEpochForkErr))
+	require.NoError(t, multiEpochForkErr)
+	require.False(t, IsHeaderVerificationWithheld(multiEpochForkErr))
 	require.False(t, IsHeaderVerificationDeferred(multiEpochForkErr))
+	// The evolving nonce keeps folding after the candidate freezes. That
+	// evolving value becomes the next epoch's starting state and contributes
+	// again when a later pre-cutoff header updates the candidate.
+	postCutoffNumber := multiEpochForkMiddleNumber + 1
+	postCutoffHeader := createTestBlockWithNonceAtSlotsAndBlockNumber(
+		t,
+		[32]byte{95},
+		frozenEpochNonce,
+		2*targetEpochStart-10,
+		2*targetEpochStart-9,
+		multiEpochForkMiddle.block.Hash().Bytes(),
+		&postCutoffNumber,
+		tamperNone,
+	)
+	epoch6EvolvingNonce, err := ls.foldHeaderEtaV(
+		middleCandidateNonce,
+		postCutoffHeader.block.Header(),
+	)
+	require.NoError(t, err)
+	epoch8CutoffNonce, err := assembleEpochNonce(
+		middleCandidateNonce,
+		lateAnchor.block.Header().PrevHash().Bytes(),
+		epoch7ExtraEntropy,
+	)
+	require.NoError(t, err)
+	epoch7CarryNumber := postCutoffNumber + 1
+	epoch7Carry := createTestBlockWithNonceAtSlotsAndBlockNumber(
+		t,
+		[32]byte{96},
+		epoch8CutoffNonce,
+		2*targetEpochStart+100,
+		2*targetEpochStart+101,
+		postCutoffHeader.block.Hash().Bytes(),
+		&epoch7CarryNumber,
+		tamperNone,
+	)
+	epoch7CandidateNonce, err := ls.foldHeaderEtaV(
+		epoch6EvolvingNonce,
+		epoch7Carry.block.Header(),
+	)
+	require.NoError(t, err)
+	epoch8ExtraEntropy, err := ls.forecastExtraEntropyForEpoch(
+		8,
+		ls.epochCache[3].EraId,
+	)
+	require.NoError(t, err)
+	epoch8Nonce, err := assembleEpochNonce(
+		epoch7CandidateNonce,
+		multiEpochForkMiddle.block.Hash().Bytes(),
+		epoch8ExtraEntropy,
+	)
+	require.NoError(t, err)
+	epoch8TargetNumber := epoch7CarryNumber + 1
+	epoch8Target := createTestBlockWithNonceAtSlotsAndBlockNumber(
+		t,
+		[32]byte{96},
+		epoch8Nonce,
+		3*targetEpochStart,
+		3*targetEpochStart+100,
+		epoch7Carry.block.Hash().Bytes(),
+		&epoch8TargetNumber,
+		tamperNone,
+	)
+	for _, peerHeader := range []*testBlockResult{
+		postCutoffHeader,
+		epoch7Carry,
+		epoch8Target,
+	} {
+		seedBlockPoolRegistration(t, db, peerHeader.block)
+		pool := peerHeader.block.IssuerVkey().Hash()
+		snapshotEpoch := uint64(7)
+		if peerHeader == postCutoffHeader {
+			snapshotEpoch = 5
+		} else if peerHeader == epoch7Carry {
+			snapshotEpoch = 6
+		}
+		seedPoolStakeSnapshot(
+			t,
+			db,
+			snapshotEpoch,
+			pool[:],
+			1_000_000_000_000_000,
+		)
+	}
+	peerPath := []*testBlockResult{
+		multiEpochForkMiddle,
+		postCutoffHeader,
+		epoch7Carry,
+		epoch8Target,
+	}
+	peerHeadersByHash := make(map[string]*testBlockResult, len(peerPath))
+	for _, peerHeader := range peerPath {
+		peerHeadersByHash[string(peerHeader.block.Hash().Bytes())] = peerHeader
+	}
+	ls.removePeerHeaderHistory(connIdKey(ouroboros.ConnectionId{}))
+	ls.removePeerForkNoncePrefix(connIdKey(ouroboros.ConnectionId{}))
+	ls.config.PeerHeaderLookupFunc = func(
+		_ ouroboros.ConnectionId,
+		hash []byte,
+	) (ChainsyncEvent, []byte, bool) {
+		peerHeader, ok := peerHeadersByHash[string(hash)]
+		if !ok {
+			return ChainsyncEvent{}, nil, false
+		}
+		return ChainsyncEvent{
+			Point: ocommon.NewPoint(
+				peerHeader.block.SlotNumber(),
+				peerHeader.block.Hash().Bytes(),
+			),
+			BlockHeader: peerHeader.block.Header(),
+			HeaderCryptoVerificationGeneration: ls.
+				CurrentHeaderCryptoVerificationGeneration(),
+		}, peerHeader.block.Header().PrevHash().Bytes(), true
+	}
+	derivedEpoch8Nonce, _, isEpoch8Fork, deriveEpoch8Err :=
+		ls.peerChainSelectionEpochNonce(
+			ouroboros.ConnectionId{},
+			epoch8Target.block.Header(),
+			ls.loadConsensusSnapshot(),
+		)
+	require.NoError(t, deriveEpoch8Err)
+	require.True(t, isEpoch8Fork)
+	require.Equal(t, epoch8Nonce, derivedEpoch8Nonce)
+	require.NoError(t, ls.ValidatePeerChainSelectionHeaderCrypto(
+		ouroboros.ConnectionId{},
+		epoch8Target.block.Header(),
+	))
 	// A multi-epoch direct extension uses the normal local-chain verifier.
 	ls.removePeerForkNoncePrefix(connIdKey(ouroboros.ConnectionId{}))
 	ls.config.PeerHeaderLookupFunc = peerLookup(lateAnchor)
@@ -7696,7 +7918,8 @@ func TestValidatePeerChainSelectionHeaderCryptoUsesForkNonce(
 		racedTarget.block.Header(),
 	)
 	require.Error(t, racedErr)
-	require.True(t, IsHeaderVerificationWithheld(racedErr))
+	require.ErrorContains(t, racedErr, "VRF")
+	require.False(t, IsHeaderVerificationWithheld(racedErr))
 	require.False(t, IsHeaderVerificationDeferred(racedErr))
 	require.NoError(t, db.SetBlockNonce(
 		queuedAncestor.block.Hash().Bytes(),
@@ -7706,7 +7929,10 @@ func TestValidatePeerChainSelectionHeaderCryptoUsesForkNonce(
 		nil,
 	))
 	ls.SetTipForTesting(ochainsync.Tip{
-		Point:       ocommon.NewPoint(queuedAncestor.block.SlotNumber(), queuedAncestor.block.Hash().Bytes()),
+		Point: ocommon.NewPoint(
+			queuedAncestor.block.SlotNumber(),
+			queuedAncestor.block.Hash().Bytes(),
+		),
 		BlockNumber: queuedAncestor.block.BlockNumber(),
 	})
 	committedTipErr := ls.ValidatePeerChainSelectionHeaderCrypto(
