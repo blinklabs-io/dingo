@@ -41,6 +41,7 @@ import (
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/chainselection"
 	"github.com/blinklabs-io/dingo/config/cardano"
+	nodeconsensus "github.com/blinklabs-io/dingo/consensus"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
@@ -867,6 +868,7 @@ type PeerHeaderLookupFunc func(
 type GenesisSelectionStateFunc func() (active bool, window uint64)
 
 type LedgerStateConfig struct {
+	Consensus nodeconsensus.Provider
 	// MaxConcurrentEvaluations bounds transaction evaluations running at
 	// once across every API front end. Zero leaves one logical processor for
 	// consensus work when possible.
@@ -2187,6 +2189,9 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 		// Create logger to throw away logs
 		// We do this so we don't have to add guards around every log operation
 		cfg.Logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
+	}
+	if cfg.Consensus == nil {
+		cfg.Consensus = nodeconsensus.NewPraosProvider()
 	}
 	if cfg.StartInDijkstra && !cfg.EnableDijkstra {
 		return nil, errors.New("StartInDijkstra requires EnableDijkstra")

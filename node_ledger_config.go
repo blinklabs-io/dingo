@@ -71,6 +71,7 @@ func (n *Node) chainsyncSyncTarget(
 func (n *Node) ledgerStateConfig() ledger.LedgerStateConfig {
 	healthGeneration := n.health.currentGeneration()
 	return ledger.LedgerStateConfig{
+		Consensus:          n.selectedConsensusProvider(),
 		ChainManager:       n.chainManager,
 		Database:           n.db,
 		EventBus:           n.eventBus,

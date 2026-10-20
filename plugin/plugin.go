@@ -38,6 +38,7 @@ type Capability string
 const (
 	CapabilityStorageBlob     Capability = "storage.blob"
 	CapabilityStorageMetadata Capability = "storage.metadata"
+	CapabilityConsensus       Capability = "consensus"
 	CapabilityMempool         Capability = "mempool"
 	CapabilityAPIBlockfrost   Capability = "api.blockfrost"
 	CapabilityAPIKupo         Capability = "api.kupo"
@@ -53,6 +54,7 @@ const (
 var allCapabilities = []Capability{
 	CapabilityStorageBlob,
 	CapabilityStorageMetadata,
+	CapabilityConsensus,
 	CapabilityMempool,
 	CapabilityAPIBlockfrost,
 	CapabilityAPIKupo,
