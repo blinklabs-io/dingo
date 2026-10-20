@@ -875,13 +875,17 @@ type UtxoStore interface {
 
 	// GetUtxoBalanceByAddress returns the live-UTxO lovelace balance,
 	// per-asset balances (ordered by policy id then name), and live UTxO
-	// count for the given address, aggregated in SQL. Payment-credential
-	// mode aggregates across address forms. Exact mode returns
+	// count for the given address. Payment-credential mode aggregates
+	// across address forms. Exact mode returns
 	// models.ErrExactAddressRequiresCbor; exact summaries use the coordinated
-	// Database query path instead.
+	// Database query path instead. The read stops with
+	// models.ErrAddressBalanceLimit as soon as it visits more outputs or
+	// accumulates more distinct assets than limits allow, and stops when the
+	// transaction's context ends.
 	GetUtxoBalanceByAddress(
 		lcommon.Address,
 		models.UtxoAddressMatchMode,
+		models.AddressBalanceLimits,
 		types.Txn,
 	) (models.AddressBalance, error)
 

@@ -3340,21 +3340,21 @@ func (a *NodeAdapter) addressSummary(
 		utxoCount int
 	)
 	if isPaymentCred {
+		limits := a.summaryLimits.withDefaults()
 		balance, err = db.Metadata().
 			GetUtxoBalanceByAddress(
 				addr,
 				models.UtxoAddressMatchPaymentCred,
+				models.AddressBalanceLimits{
+					MaxUtxos:  limits.maxUtxos,
+					MaxAssets: limits.maxAssets,
+				},
 				txn.Metadata(),
 			)
-		utxoCount = int(balance.UtxoCount)
-		if maxAssets := a.summaryLimits.withDefaults().maxAssets; err == nil &&
-			len(balance.Assets) > maxAssets {
-			err = fmt.Errorf(
-				"more than %d distinct assets: %w",
-				maxAssets,
-				ErrAddressSummaryTooLarge,
-			)
+		if errors.Is(err, models.ErrAddressBalanceLimit) {
+			err = fmt.Errorf("%w: %w", ErrAddressSummaryTooLarge, err)
 		}
+		utxoCount = int(balance.UtxoCount)
 	} else {
 		sums, utxoCount, err = a.exactAddressBalance(ctx, addr, txn)
 	}
@@ -3400,8 +3400,8 @@ func (a *NodeAdapter) addressSummary(
 		}
 	}
 
-	// Payment credential balances are aggregated in SQL (see
-	// GetUtxoBalanceByAddress); assets arrive ordered by (policy id, name),
+	// Payment credential balances come from GetUtxoBalanceByAddress, whose
+	// assets arrive ordered by (policy id, name),
 	// which matches the hex-string unit ordering Blockfrost emits and
 	// unitSums reproduces for exact addresses.
 	var amounts []AddressAmountInfo

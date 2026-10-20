@@ -717,3 +717,24 @@ func TestNodeAdapterAddressPaymentCredAssetBudget(t *testing.T) {
 		{Unit: policyHex + hex.EncodeToString([]byte("c")), Quantity: "3"},
 	}, info.Amount)
 }
+
+// A bare payment credential's read is held to the output budget too.
+func TestNodeAdapterAddressPaymentCredUtxoBudget(t *testing.T) {
+	t.Parallel()
+	adapter, raw, db := newDBBackedAdapter(t)
+	addr, payment, _ := testKeyAddress(t, 0xe4, 0)
+	seedSummaryOutputs(t, adapter, raw, db, addr, 3, nil)
+	credID, err := bech32EncodeData("addr_vkh", payment)
+	require.NoError(t, err)
+
+	adapter.summaryLimits = addressSummaryLimits{maxUtxos: 2}
+	_, err = adapter.Address(context.Background(), credID)
+	require.ErrorIs(t, err, ErrAddressSummaryTooLarge)
+	_, err = adapter.AddressExtended(context.Background(), credID)
+	require.ErrorIs(t, err, ErrAddressSummaryTooLarge)
+
+	adapter.summaryLimits = addressSummaryLimits{maxUtxos: 3}
+	info, err := adapter.Address(context.Background(), credID)
+	require.NoError(t, err)
+	require.Equal(t, "6000000", info.Amount[0].Quantity)
+}
