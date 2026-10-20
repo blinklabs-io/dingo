@@ -17470,11 +17470,19 @@ write amplification was that the second condition alone used to flush
 immediately, even with only one or two blocks gathered: during bulk replay a
 momentary `ErrIteratorChainTip` commonly means the goroutine appending blocks
 to `ls.chain` is a beat behind this reader, not that the chain stopped
-growing. `ledgerReadChainIterator` now gives that case a short bounded chance
-to catch up — up to `gatherCoalesceMaxAttempts` retries (default 10) spaced
-`gatherCoalesceRetryInterval` apart (default 2ms) — but only while `rawBatch`
-already holds at least one real block, the node has not reached tip since boot
-(`ls.reachedTip`), and the last gathered slot is not near the upstream tip.
+growing: blockfetch exposes received blocks to the chain in groups of
+`blockfetchCommitBatchSize` (8), so the reader meets one gap per group, and a
+pass that flushed at each gap committed one group per SQLite transaction. Each
+transaction rewrites the hot pages of every index it touches into the WAL, so
+the number of transactions, not the data, set the write volume.
+`ledgerReadChainIterator` now gives that case a bounded chance to catch up —
+up to `gatherCoalesceMaxAttempts` retries (default 500) spaced
+`gatherCoalesceRetryInterval` apart (default 10ms), a budget for the whole
+gather pass rather than for each gap, so about five seconds per pass, with
+any single gap capped at `gatherCoalesceMaxGapAttempts` retries (default 200,
+about two seconds) so blocks the chain is not following up are applied
+promptly — but only while `rawBatch` already holds at least one real block,
+the node has not reached tip since boot (`ls.reachedTip`), and the last gathered slot is not near the upstream tip.
 Once at or near the live upstream tip, the wait is skipped entirely: a
 solitary new block still commits immediately, matching the pre-existing
 latency behavior.
@@ -17483,7 +17491,7 @@ latency behavior.
 `UpstreamTipSlot` returns 0 whenever no live upstream connection is selected,
 and the near-tip test folds an unknown upstream into "not near".
 Without the `reachedTip` term, a caught-up node that merely lost its upstream
-would resume paying this wait per gap, gather lock held, including for its own
+would resume paying this wait on every pass, gather lock held, including for its own
 forged blocks. `reachedTip` latches the first time the node reaches the
 stability window and never clears, so the two terms together confine the wait
 to initial catch-up.
@@ -17497,12 +17505,14 @@ comment) — releasing it here would let a rollback's write lock be granted,
 see an empty `blockPipeline` via `drainBlockPipelineBeforeRollback`, and
 proceed before this pass's already-gathered blocks are submitted, reopening
 the exact race `blockPipelineGatherMutex` exists to close. The bound on that
-wait is per gap rather than per gather pass — the attempt counter is reset
-each time a block is appended — so a rollback blocked on the write lock sleeps
-up to `batchSize*gatherCoalesceMaxAttempts*gatherCoalesceRetryInterval` (about
-1s at the defaults) in the worst case, and about
-`batchSize*gatherCoalesceRetryInterval` (100ms) when each gap resolves on its
-first retry.
+wait is per gather pass — the attempt counter accumulates across every gap the
+pass meets — so a rollback blocked on the write lock sleeps up to
+`gatherCoalesceMaxAttempts*gatherCoalesceRetryInterval` (about 5s at the
+defaults) in the worst case. A per-gap budget would either flush each
+blockfetch group on its own or, raised far enough to bridge the groups, let
+one pass wait `batchSize` times as long.
+`TestLedgerReadChainIteratorBoundsCoalesceWaitPerPass` pins the per-pass
+accounting.
 
 Those figures cover the sleeping only, not the whole hold. Every retry returns
 to the top of the inner loop and re-probes with `iter.Next(false)`, and that
@@ -17512,14 +17522,14 @@ is the lock the block-append path holds to advance the tip —
 `addBlockInternal` across one `addBlockLocked`, `addRawBlocks` across a whole
 `blockImportBatchSize` batch inside its transaction — so the contending writer
 is the very goroutine this wait exists to wait for. The full worst case adds up
-to `batchSize*gatherCoalesceMaxAttempts` such acquisitions, each bounded by the
+to `gatherCoalesceMaxAttempts` such acquisitions per pass, each bounded by the
 longest append critical section rather than by any coalescing setting.
 
 That probe cannot be hoisted out of the span the way the near-tip terms below
 were. It is not a term the span incidentally evaluates: re-probing the iterator
 is the operation the retry performs, and the gather lock cannot be released
 around it without reopening the rollback race this wait is written to avoid.
-`TestLedgerReadChainIteratorBoundsChainProbesPerCoalesceGap` pins the
+`TestLedgerReadChainIteratorBoundsChainProbesPerCoalescePass` pins the
 multiplier instead: a gap that never resolves costs exactly
 `gatherCoalesceMaxAttempts+1` probes, and every one of them runs with the
 gather read lock held.
