@@ -275,6 +275,10 @@ func NewTokenRegistrySync(
 				return err
 			}
 		}
+		// net/http derives Referer from the previous request before invoking
+		// CheckRedirect. Registry URLs may contain credentials in their query,
+		// so no redirect may forward that URL as a header.
+		req.Header.Del("Referer")
 		return validateTokenRegistryHTTPSURL(
 			req.URL.String(),
 			cfg.AllowPrivateAddresses,

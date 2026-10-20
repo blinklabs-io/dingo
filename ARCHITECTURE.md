@@ -3003,7 +3003,9 @@ archive URL by network, which the signed manifest must name exactly.
 is redacted from `Config.LogValue`, and requires HTTPS except for a loopback
 source. The sync removes the headers from a
 redirect that changes scheme or host so a redirect cannot forward the
-credential, including after a custom redirect callback. Header names reserved
+credential, including after a custom redirect callback. It also removes the
+automatically generated `Referer` from every redirect so a credential in a
+registry URL query is never copied into a request header. Header names reserved
 for transport or sync bookkeeping (`Host`, `Content-Length`, `User-Agent`,
 `Accept`, `If-None-Match`) are rejected. Configuration snapshots copy the
 credential map. `DINGO_TOKEN_REGISTRY_HEADER_SECRETS` is parsed by
