@@ -114,7 +114,7 @@ func (s *Server) handleAccountCoins(
 		return
 	}
 
-	after, meshErr := parseCoinsCursor(req.Metadata)
+	after, paged, meshErr := parseCoinsPaging(req.Metadata)
 	if meshErr != nil {
 		writeError(w, meshErr)
 		return
@@ -158,6 +158,14 @@ func (s *Server) handleAccountCoins(
 			"error", err,
 		)
 		writeError(w, ErrInternal)
+		return
+	}
+
+	if page.Next != nil && !paged {
+		// Standard Mesh clients treat an omitted coin as absent, so an
+		// address one bounded read cannot exhaust is refused rather than
+		// answered with part of its coins.
+		writeError(w, wrapErr(ErrInvalidRequest, errAccountCoinsTooLarge))
 		return
 	}
 
@@ -214,14 +222,42 @@ func formatCoinsCursor(c *models.UtxoOrderingCursor) string {
 	)
 }
 
-// parseCoinsCursor reads the optional "cursor" request metadata.
-func parseCoinsCursor(
+// errAccountCoinsTooLarge is the limit error a complete /account/coins
+// response returns when the address does not fit one bounded read.
+var errAccountCoinsTooLarge = errors.New(
+	"account coins exceed the complete response limit; " +
+		"set metadata.paginate to true and follow metadata.next_cursor",
+)
+
+// parseCoinsPaging reads the optional paging request metadata. A request
+// opts into paging with "paginate": true or by sending "cursor", the
+// "next_cursor" of a previous paged response.
+func parseCoinsPaging(
 	metadata map[string]any,
-) (*models.UtxoOrderingCursor, *Error) {
+) (*models.UtxoOrderingCursor, bool, *Error) {
+	paged := false
+	if raw, ok := metadata["paginate"]; ok && raw != nil {
+		v, ok := raw.(bool)
+		if !ok {
+			return nil, false, wrapErr(
+				ErrInvalidRequest, errors.New("paginate must be a boolean"),
+			)
+		}
+		paged = v
+	}
 	raw, ok := metadata["cursor"]
 	if !ok || raw == nil {
-		return nil, nil
+		return nil, paged, nil
 	}
+	after, meshErr := parseCoinsCursor(raw)
+	if meshErr != nil {
+		return nil, false, meshErr
+	}
+	return after, true, nil
+}
+
+// parseCoinsCursor decodes a "cursor" token.
+func parseCoinsCursor(raw any) (*models.UtxoOrderingCursor, *Error) {
 	token, ok := raw.(string)
 	if !ok {
 		return nil, wrapErr(

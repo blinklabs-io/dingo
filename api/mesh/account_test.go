@@ -741,8 +741,9 @@ func TestAccountCoinsPagesWithinBudgets(t *testing.T) {
 	pages := 0
 	for {
 		req := coinsRequest(addr)
+		req.Metadata = map[string]any{"paginate": true}
 		if cursor != nil {
-			req.Metadata = map[string]any{"cursor": cursor}
+			req.Metadata["cursor"] = cursor
 		}
 		resp := decodeResponse[AccountCoinsResponse](
 			t, postJSON(t, h, "/account/coins", req),
@@ -779,6 +780,78 @@ func TestAccountCoinsPagesWithinBudgets(t *testing.T) {
 	}
 	require.Nil(t, calls[0].after)
 	require.NotNil(t, calls[1].after)
+}
+
+// TestAccountCoinsStandardRequestIsCompleteOrRefused pins the response a
+// client that does not opt into paging receives: every coin of the address
+// when one bounded read exhausts it, otherwise a limit error naming the
+// opt-in, and never a partial coin list.
+func TestAccountCoinsStandardRequestIsCompleteOrRefused(t *testing.T) {
+	t.Parallel()
+
+	key := testKeyHash(0x34)
+	addr := testAddress(t, lcommon.AddressTypeKeyNone, key, nil)
+	utxosOf := func(n int) []models.Utxo {
+		var utxos []models.Utxo
+		for i := range n {
+			utxos = append(
+				utxos,
+				testUtxo(testHash(0x41), uint32(i), 1_000_000, key, nil),
+			)
+		}
+		return utxos
+	}
+	serve := func(t *testing.T, n int) *httptest.ResponseRecorder {
+		t.Helper()
+		deps := newTestDeps()
+		var calls []pageCall
+		deps.ledger.boundedPage = cursorPager(t, utxosOf(n), &calls)
+		h := newTestHandler(t, deps, func(c *ServerConfig) {
+			c.accountCoinsPageSize = 3
+		})
+		return postJSON(t, h, "/account/coins", coinsRequest(addr))
+	}
+
+	t.Run("fits one read", func(t *testing.T) {
+		t.Parallel()
+		resp := decodeResponse[AccountCoinsResponse](t, serve(t, 3))
+		require.Len(t, resp.Coins, 3)
+		require.NotContains(t, resp.Metadata, "next_cursor")
+	})
+	t.Run("exceeds one read", func(t *testing.T) {
+		t.Parallel()
+		got := requireMeshError(
+			t, serve(t, 4), ErrInvalidRequest, http.StatusBadRequest,
+		)
+		require.Contains(t, got.Details["error"], "metadata.paginate")
+	})
+}
+
+func TestAccountCoinsRejectsNonBooleanPaginate(t *testing.T) {
+	t.Parallel()
+
+	deps := newTestDeps()
+	addr := testAddress(
+		t, lcommon.AddressTypeKeyNone, testKeyHash(0x35), nil,
+	)
+	called := false
+	deps.ledger.boundedPage = func(
+		context.Context,
+		*models.UtxoWithOrderingQuery,
+		int,
+		int64,
+	) (models.UtxoAddressPage, error) {
+		called = true
+		return models.UtxoAddressPage{}, nil
+	}
+	h := newTestHandler(t, deps)
+	req := coinsRequest(addr)
+	req.Metadata = map[string]any{"paginate": "yes"}
+
+	rec := postJSON(t, h, "/account/coins", req)
+
+	requireMeshError(t, rec, ErrInvalidRequest, http.StatusBadRequest)
+	require.False(t, called)
 }
 
 func TestAccountCoinsRejectsMalformedCursor(t *testing.T) {

@@ -125,8 +125,9 @@ func TestAccountCoinsPagesRealDatabase(t *testing.T) {
 	pages := 0
 	for {
 		req := coinsRequest(target)
+		req.Metadata = map[string]any{"paginate": true}
 		if cursor != nil {
-			req.Metadata = map[string]any{"cursor": cursor}
+			req.Metadata["cursor"] = cursor
 		}
 		resp := decodeResponse[AccountCoinsResponse](
 			t, postJSON(t, h, "/account/coins", req),
@@ -163,6 +164,10 @@ func TestAccountCoinsPagesRealDatabase(t *testing.T) {
 		t, emptyContinuations,
 		"a page that only examined other addresses must still continue",
 	)
+
+	// A standard request never receives part of this address's coins.
+	rec := postJSON(t, h, "/account/coins", coinsRequest(target))
+	requireMeshError(t, rec, ErrInvalidRequest, http.StatusBadRequest)
 }
 
 // TestAccountCoinsCancelledReadFreesSlot holds the only bulk slot with a
