@@ -9801,8 +9801,9 @@ Trust: remote chunk files carry no signature or digest, so authenticated
 transport establishes the remote root as the source. `dingo load` decodes
 every block and
 `Chain.AddBlocks` links each header to its predecessor, so a corrupt, truncated
-or reordered chunk fails the load. Remote imports also verify each block body
-against its header commitment before persistence. A root can still serve a
+or reordered chunk fails the load. Remote and local imports also verify each
+block body against its header's body hash before persistence, so a body
+substituted under a genuine header fails the load. A root can still serve a
 self-consistent alternative history, so load only from a root you trust.
 Block batches enter the blob store before the asynchronous ledger worker
 applies their metadata. If that worker rejects a batch or fails, or the copy or replay is cancelled,
