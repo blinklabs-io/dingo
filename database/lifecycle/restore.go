@@ -696,6 +696,12 @@ func resolveManifest(
 	if err := requireManifestKey(opts); err != nil {
 		return Manifest{}, err
 	}
+	// The download directory is temporary; the signed ID must match the
+	// object prefix the snapshot was requested by.
+	opts, err = withCloudManifestID(snapshotDir, opts)
+	if err != nil {
+		return Manifest{}, err
+	}
 	// One byte over the limit lets ReadManifest, not the transfer, report an
 	// oversized manifest as ErrManifestTooLarge.
 	downloadLimit := limit
@@ -710,15 +716,7 @@ func resolveManifest(
 		return Manifest{}, err
 	}
 	defer cleanup()
-	// The download directory is temporary; the signed ID must match the
-	// object prefix the snapshot was requested by.
-	return ReadManifest(
-		dir,
-		append(
-			append([]ManifestOption(nil), opts...),
-			WithManifestID(cloudSnapshotIDFromURI(snapshotDir)),
-		)...,
-	)
+	return ReadManifest(dir, opts...)
 }
 
 // fetchPayloads returns a local directory, created under workParent, holding

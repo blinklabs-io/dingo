@@ -835,10 +835,10 @@ func FetchCloudManifest(
 	if !ok {
 		return Manifest{}, false, nil
 	}
-	opts = append(
-		append([]ManifestOption(nil), opts...),
-		WithManifestID(cloudSnapshotIDFromURI(snapshotURI)),
-	)
+	opts, err = withCloudManifestID(snapshotURI, opts)
+	if err != nil {
+		return Manifest{}, true, err
+	}
 	m, err = fetcher.FetchManifestWithOptions(ctx, opts...)
 	if err == nil {
 		err = m.Authenticate(opts...)

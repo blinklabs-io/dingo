@@ -29,7 +29,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -147,19 +146,45 @@ func snapshotIDForDir(dir string) string {
 	return filepath.Base(dir)
 }
 
-// cloudSnapshotIDFromURI returns the last path segment of a cloud snapshot
-// URI, which JoinCloudURI makes the snapshot ID. It returns "" when the URI
-// has no path segment.
+// cloudSnapshotIDFromURI returns the snapshot ID a cloud snapshot URI
+// addresses: the last segment of the canonical path ParseCloudDestination
+// hands the destination factory, which JoinCloudURI makes the snapshot ID.
+// Deriving it from the raw path instead would let "prefix/newer/." read the
+// objects under prefix/newer while naming no ID. It returns "" when the URI
+// is invalid or names no path segment.
 func cloudSnapshotIDFromURI(uri string) string {
-	u, err := url.Parse(uri)
+	u, err := parseCloudDestinationURL(uri)
 	if err != nil {
 		return ""
 	}
-	id := path.Base(strings.TrimRight(u.Path, "/"))
+	id := path.Base(u.Path)
 	if id == "." || id == "/" {
 		return ""
 	}
 	return id
+}
+
+// withCloudManifestID returns opts plus the snapshot ID uri addresses as the
+// ID a keyed verification requires. Under a key it refuses a URI naming no
+// snapshot ID: snapshots are always written one segment below a destination,
+// and accepting any signed manifest at the bucket root would let a writer to
+// the bucket substitute one there.
+func withCloudManifestID(
+	uri string,
+	opts []ManifestOption,
+) ([]ManifestOption, error) {
+	id := cloudSnapshotIDFromURI(uri)
+	if id == "" && len(manifestKey(opts)) > 0 {
+		return nil, fmt.Errorf(
+			"%w: %w: cloud URI %q names no snapshot ID",
+			ErrManifestUnauthenticated, ErrManifestIDMismatch,
+			CloudDestinationDisplay(uri),
+		)
+	}
+	return append(
+		append([]ManifestOption(nil), opts...),
+		WithManifestID(id),
+	), nil
 }
 
 func manifestKey(opts []ManifestOption) []byte {
@@ -438,7 +463,10 @@ func (m Manifest) Authenticate(opts ...ManifestOption) error {
 // requiring the manifest to carry the entry's own ID.
 func authenticateEntry(entry SnapshotEntry, opts []ManifestOption) error {
 	return entry.Manifest.Authenticate(
-		append(append([]ManifestOption(nil), opts...), WithManifestID(entry.ID))...,
+		append(
+			append([]ManifestOption(nil), opts...),
+			WithManifestID(entry.ID),
+		)...,
 	)
 }
 
@@ -688,7 +716,10 @@ func ReadManifest(dir string, opts ...ManifestOption) (Manifest, error) {
 		return Manifest{}, fmt.Errorf("read manifest %q: %w", path, err)
 	}
 	// Explicit options come last so a caller-supplied ID wins the default.
-	idOpts := append([]ManifestOption{WithManifestID(snapshotIDForDir(dir))}, opts...)
+	idOpts := append(
+		[]ManifestOption{WithManifestID(snapshotIDForDir(dir))},
+		opts...,
+	)
 	m, err := ParseManifest(data, idOpts...)
 	if err != nil {
 		return Manifest{}, fmt.Errorf("%s: %w", path, err)
