@@ -1548,6 +1548,11 @@ type LedgerState struct {
 	blockfetchInFlightTimeoutGeneration uint64
 	blockfetchInFlightTimeoutCount      uint8
 	selectedBlockfetchConnId            ouroboros.ConnectionId // latest selected chainsync connection for the next batch
+	// chainsyncCapacityWaitHook is a test seam, nil in production. It runs
+	// each time AwaitChainsyncHeaderCapacity has found the queue at its pause
+	// threshold and is about to wait, the point after which a test may drain
+	// headers and observe the hysteresis rather than the first check.
+	chainsyncCapacityWaitHook func()
 	// blockfetchContinuationPending prevents a chainsync handler from starting
 	// a competing batch in the short interval after the blockfetch subscriber
 	// schedules its next request on a worker. The worker must run outside the
