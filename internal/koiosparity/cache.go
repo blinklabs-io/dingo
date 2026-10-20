@@ -1812,6 +1812,32 @@ func (c *Cache) GetEpochsNeedingRetry(network string, accounts bool) ([]uint64, 
 	return epochs, rows.Err()
 }
 
+// EpochAwaitingPoolHistory reports whether the cache holds a post-staking
+// epoch with no pool rows whose last check recorded the pool_history
+// reference_lag mismatch. GetUncachedEpochs treats such an epoch as complete
+// because its epoch_info row exists, so the caller must refetch it explicitly
+// for Koios's later pool_history to be compared.
+func (c *Cache) EpochAwaitingPoolHistory(
+	network string,
+	epoch uint64,
+) (bool, error) {
+	var n int
+	err := c.db.QueryRow(
+		`SELECT COUNT(*) FROM koios_epoch_info i
+		 WHERE i.network = ? AND i.epoch = ? AND i.pre_staking = 0
+		   AND NOT EXISTS (SELECT 1 FROM koios_pool_epoch p
+		                   WHERE p.network = i.network AND p.epoch = i.epoch)
+		   AND EXISTS (SELECT 1 FROM check_mismatches m
+		               WHERE m.network = i.network AND m.epoch = i.epoch
+		                 AND m.field = ? AND m.category = ?)`,
+		network, epoch, poolHistoryMismatchField, CategoryReferenceLag,
+	).Scan(&n)
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
 // GetUncachedEpochs returns epoch numbers in [from, through] (inclusive) that
 // are NOT yet complete in the cache for the given network. This is used by Fetch
 // to fill holes left by prior failed or interrupted runs rather than naively

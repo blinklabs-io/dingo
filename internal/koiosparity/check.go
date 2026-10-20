@@ -292,6 +292,10 @@ func CheckEpoch(
 	)
 }
 
+// poolHistoryMismatchField is the mismatch field recorded when Koios has
+// epoch_info for an epoch but no pool_history yet.
+const poolHistoryMismatchField = "pool_history"
+
 // defaultPreStakingThroughEpoch is the last Koios reporting epoch that
 // predates a valid "go" stake snapshot on a network with no entry in
 // preStakingThroughEpochByNetwork (see koiosStakeEpoch's doc comment for the
@@ -993,7 +997,7 @@ func checkEpoch(
 				allMismatches = append(allMismatches, CheckMismatch{
 					Network:    network,
 					Epoch:      epoch,
-					Field:      "pool_history",
+					Field:      poolHistoryMismatchField,
 					DingoValue: "present",
 					KoiosValue: "",
 					Category:   CategoryReferenceLag,
