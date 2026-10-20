@@ -6144,11 +6144,20 @@ it. Dingo implements this as a **corroboration gate**
   ChainSync connection identity so ancestry from one peer cannot be used for
   another peer's header. A per-connection path cache reuses a resolved ancestor
   while that intersection remains on the applied chain, the next header
-  directly extends the cached path, and the ledger has published no snapshot
-  since the path was resolved. Any publication, including a tip-only one for
-  an applied block, invalidates the cached path, because every unapplied
-  ancestor's crypto verdict is tied to that snapshot generation; peer
-  rollbacks and disconnects also clear it.
+  directly extends the cached path, and the ledger's consensus context has not
+  changed since the path was resolved. Each published `consensusSnapshot`
+  carries a `contextGeneration`: the generation of the earliest publication
+  with the same header-verification inputs (epoch cache with its nonces,
+  current epoch apart from its evolving nonce, era, protocol parameters,
+  hard-fork transition). Stake snapshots and registered VRF keys are keyed by
+  epoch and change only with the epoch cache. A publication that only moves the
+  applied tip keeps the context, so an unapplied ancestor's crypto verdict, and
+  the cached path built from such verdicts, stays usable while catch-up applies
+  blocks. A verdict stamped before the context began is stale. This matches
+  the reference ChainSync client, which validates each candidate header once
+  against the candidate's own header state and only trims the candidate when
+  the local selection advances. Peer rollbacks and disconnects also clear the
+  cache.
   Verification is skipped only for a slot an imported Mithril snapshot
   already covers, the same exemption the ledger's own header-queue path
   applies. A result showing local state has not caught up to the header's slot
@@ -6191,7 +6200,8 @@ it. Dingo implements this as a **corroboration gate**
   lookups but does not re-deliver it. Bounded-history exhaustion defers
   verification instead, so the peer is re-intersected after the applied tip
   advances and the header can be checked again. Retained ancestry with a
-  missing or stale crypto-verification generation also defers the candidate
+  missing crypto-verification generation, or one stamped before the current
+  consensus context began, also defers the candidate
   and re-intersects; a point that became applied during lookup is trusted as
   part of the primary chain. A direct child of the applied tip can use the
   local verifier's immutable next-epoch forecast when the shared epoch cache

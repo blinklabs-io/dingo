@@ -29,6 +29,7 @@ import (
 	"math/big"
 	"math/bits"
 	"net"
+	"reflect"
 	"runtime"
 	"runtime/debug"
 	"slices"
@@ -1292,13 +1293,20 @@ type slotBattleRecorderHolder struct {
 // snapshot containers and their owned slices are immutable. Protocol parameter
 // values are shared with writer state and must be treated as read-only.
 type consensusSnapshot struct {
-	generation     uint64
-	currentEpoch   models.Epoch
-	currentEra     eras.EraDesc
-	currentPParams lcommon.ProtocolParameters
-	prevEraPParams lcommon.ProtocolParameters
-	epochCache     []models.Epoch
-	transitionInfo hardfork.TransitionInfo
+	generation uint64
+	// contextGeneration is the generation of the earliest publication whose
+	// header-verification inputs (epoch cache with its nonces, current epoch,
+	// era, protocol parameters, hard-fork transition) equal this one's. A
+	// header verdict stamped with a generation at or after it was made against
+	// the same consensus context, so a publication that only moves the applied
+	// tip does not invalidate it.
+	contextGeneration uint64
+	currentEpoch      models.Epoch
+	currentEra        eras.EraDesc
+	currentPParams    lcommon.ProtocolParameters
+	prevEraPParams    lcommon.ProtocolParameters
+	epochCache        []models.Epoch
+	transitionInfo    hardfork.TransitionInfo
 	// syntheticV2CostModelInEffect mirrors LedgerState.syntheticV2CostModel;
 	// see that field's doc comment.
 	syntheticV2CostModelInEffect bool
@@ -2328,7 +2336,7 @@ func (ls *LedgerState) publishSnapshotsLocked() {
 	// visible to an already-published snapshot. Element updates still require
 	// replacing the cache and its slice-backed Epoch fields.
 	ls.epochCache = slices.Clip(ls.epochCache)
-	ls.consensus.Store(&consensusSnapshot{
+	next := &consensusSnapshot{
 		generation:     generation,
 		currentEpoch:   cloneEpoch(ls.currentEpoch),
 		currentEra:     ls.currentEra,
@@ -2341,13 +2349,57 @@ func (ls *LedgerState) publishSnapshotsLocked() {
 		epochCache:                   ls.epochCache,
 		transitionInfo:               ls.transitionInfo,
 		syntheticV2CostModelInEffect: ls.syntheticV2CostModel,
-	})
+	}
+	next.contextGeneration = generation
+	if prev := ls.consensus.Load(); prev != nil &&
+		sameHeaderVerificationContext(prev, next) {
+		next.contextGeneration = prev.contextGeneration
+	}
+	ls.consensus.Store(next)
 	ls.tip.Store(&tipSnapshot{
 		generation:           generation,
 		currentTip:           cloneTip(ls.currentTip),
 		currentTipBlockNonce: cloneSnapshotBytes(ls.currentTipBlockNonce),
 	})
 	ls.notifySnapshotPublished()
+}
+
+// sameHeaderVerificationContext reports whether two consensus snapshots give
+// header verification the same inputs. The current epoch's evolving nonce is
+// excluded: it advances with every applied block, and verification reads only
+// the epoch nonces, frozen candidate nonces and labs held in the epoch cache.
+// Stake snapshots and registered VRF keys are keyed by epoch, so they can only
+// change together with the epoch cache.
+func sameHeaderVerificationContext(a, b *consensusSnapshot) bool {
+	if a.currentEra.Id != b.currentEra.Id ||
+		a.transitionInfo != b.transitionInfo ||
+		a.syntheticV2CostModelInEffect != b.syntheticV2CostModelInEffect ||
+		!sameProtocolParameters(a.currentPParams, b.currentPParams) ||
+		!sameProtocolParameters(a.prevEraPParams, b.prevEraPParams) {
+		return false
+	}
+	aEpoch, bEpoch := a.currentEpoch, b.currentEpoch
+	aEpoch.EvolvingNonce, bEpoch.EvolvingNonce = nil, nil
+	if !reflect.DeepEqual(aEpoch, bEpoch) {
+		return false
+	}
+	if len(a.epochCache) == len(b.epochCache) &&
+		(len(a.epochCache) == 0 || &a.epochCache[0] == &b.epochCache[0]) {
+		return true
+	}
+	return reflect.DeepEqual(a.epochCache, b.epochCache)
+}
+
+// sameProtocolParameters compares parameter sets by identity. Writers install
+// a new value when parameters change; a replacement with equal content is
+// treated as a change, which only costs a re-verification.
+func sameProtocolParameters(a, b lcommon.ProtocolParameters) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	av, bv := reflect.ValueOf(a), reflect.ValueOf(b)
+	return av.Type() == bv.Type() && av.Kind() == reflect.Pointer &&
+		av.Pointer() == bv.Pointer()
 }
 
 // snapshotPublishedChan returns a channel closed by the next snapshot

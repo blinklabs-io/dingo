@@ -624,7 +624,16 @@ func (ls *LedgerState) peerHeaderForkPath(
 		return ocommon.Point{}, nil, false, nil
 	}
 	key := connIdKey(connId)
-	verificationGeneration := ls.CurrentHeaderCryptoVerificationGeneration()
+	// Ancestor verdicts and the cached path stay usable while the consensus
+	// context is unchanged. Applying a block moves only the tip, and queued
+	// ancestors do not need re-verification for that, as in the reference
+	// ChainSync client, which only trims the candidate when the selection
+	// advances.
+	verificationGeneration, contextGeneration := ls.currentHeaderVerificationContext()
+	contextChanged := func() bool {
+		current, since := ls.currentHeaderVerificationContext()
+		return current == 0 || since != contextGeneration
+	}
 	ls.forkHeaderNonceCacheMutex.Lock()
 	cached, cachedOK := ls.forkHeaderPathCache[key]
 	ls.forkHeaderNonceCacheMutex.Unlock()
@@ -632,8 +641,11 @@ func (ls *LedgerState) peerHeaderForkPath(
 		cached.ancestor.Slot,
 		cached.ancestor.Hash,
 	)
-	if cachedOK && verificationGeneration != 0 &&
-		cached.generation == verificationGeneration &&
+	if cachedOK && headerVerdictInContext(
+		cached.generation,
+		contextGeneration,
+		verificationGeneration,
+	) &&
 		ls.chain.HoldsPoint(context.Background(), cachedAncestor) &&
 		len(cached.headers) > 0 &&
 		len(cached.headers) < ls.peerHeaderHistoryLimit() &&
@@ -648,9 +660,30 @@ func (ls *LedgerState) peerHeaderForkPath(
 		if err := validateBlockOrder(headerOnlyBlock{header: header, peerRelative: true}, envelopeParentFromBlock(parent), byronEpochSlots(ls.config.CardanoNodeConfig)); err != nil {
 			return ocommon.Point{}, nil, false, err
 		}
+		// The cached path was stored while its last header was still being
+		// verified, so that header's own verdict is checked before a child
+		// extends the path.
+		parentPoint := ocommon.NewPoint(
+			parent.SlotNumber(),
+			parent.Hash().Bytes(),
+		)
+		event, _, ok := ls.config.PeerHeaderLookupFunc(
+			connId,
+			parentPoint.Hash,
+		)
+		if (!ok || !headerVerdictInContext(
+			event.HeaderCryptoVerificationGeneration,
+			contextGeneration,
+			verificationGeneration,
+		)) && !ls.chain.HoldsPoint(context.Background(), parentPoint) {
+			return ocommon.Point{}, nil, false, fmt.Errorf(
+				"%w: candidate parent at slot %d has no current crypto verdict",
+				errHeaderVerificationDeferred,
+				parentPoint.Slot,
+			)
+		}
 		path := append(slices.Clone(cached.headers), header)
-		if ls.CurrentHeaderCryptoVerificationGeneration() !=
-			verificationGeneration {
+		if contextChanged() {
 			return ocommon.Point{}, nil, false, errHeaderVerificationDeferred
 		}
 		ls.storePeerForkPathPrefix(
@@ -676,8 +709,7 @@ func (ls *LedgerState) peerHeaderForkPath(
 			point := ocommon.NewPoint(block.Slot, block.Hash)
 			if ls.chain.HoldsPoint(context.Background(), point) {
 				slices.Reverse(pathReversed)
-				if ls.CurrentHeaderCryptoVerificationGeneration() !=
-					verificationGeneration {
+				if contextChanged() {
 					return ocommon.Point{}, nil, false,
 						errHeaderVerificationDeferred
 				}
@@ -724,9 +756,11 @@ func (ls *LedgerState) peerHeaderForkPath(
 			) {
 			return ocommon.Point{}, nil, false, nil
 		}
-		if (verificationGeneration == 0 ||
-			event.HeaderCryptoVerificationGeneration !=
-				verificationGeneration) &&
+		if !headerVerdictInContext(
+			event.HeaderCryptoVerificationGeneration,
+			contextGeneration,
+			verificationGeneration,
+		) &&
 			!ls.chain.HoldsPoint(context.Background(), event.Point) {
 			return ocommon.Point{}, nil, false, fmt.Errorf(
 				"%w: candidate ancestor at slot %d has no current crypto verdict",

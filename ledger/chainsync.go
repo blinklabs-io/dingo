@@ -5842,6 +5842,30 @@ func (ls *LedgerState) CurrentHeaderCryptoVerificationGeneration() uint64 {
 	return consensus.generation
 }
 
+// currentHeaderVerificationContext returns the current generation and the
+// generation at which its consensus context began, or zeros while the
+// consensus and tip snapshots are not jointly stable.
+func (ls *LedgerState) currentHeaderVerificationContext() (uint64, uint64) {
+	if ls.txValidationTransitions.Load() != 0 {
+		return 0, 0
+	}
+	consensus := ls.loadConsensusSnapshot()
+	tip := ls.loadTipSnapshot()
+	if consensus == nil || tip == nil || consensus.generation != tip.generation ||
+		ls.txValidationTransitions.Load() != 0 {
+		return 0, 0
+	}
+	return consensus.generation, consensus.contextGeneration
+}
+
+// headerVerdictInContext reports whether a verdict stamped with generation
+// was made within the consensus context that began at contextGeneration and
+// is current at generation current.
+func headerVerdictInContext(stamp, contextGeneration, current uint64) bool {
+	return stamp != 0 && contextGeneration != 0 &&
+		stamp >= contextGeneration && stamp <= current
+}
+
 // PinHeaderCryptoVerificationGeneration keeps a current producer-
 // authorization generation stable until the returned release function runs.
 func (ls *LedgerState) PinHeaderCryptoVerificationGeneration(

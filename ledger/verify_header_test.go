@@ -7336,10 +7336,26 @@ func TestValidatePeerChainSelectionHeaderCryptoUsesForkNonce(
 		&cachedNextNumber,
 		tamperNone,
 	)
+	// The extension looks up only its parent's own verdict; the rest of the
+	// path comes from the cache.
 	lookupCalls := 0
-	ls.config.PeerHeaderLookupFunc = func(ouroboros.ConnectionId, []byte) (ChainsyncEvent, []byte, bool) {
+	ls.config.PeerHeaderLookupFunc = func(
+		_ ouroboros.ConnectionId,
+		hash []byte,
+	) (ChainsyncEvent, []byte, bool) {
 		lookupCalls++
-		return ChainsyncEvent{}, nil, false
+		if !bytes.Equal(hash, target.block.Hash().Bytes()) {
+			return ChainsyncEvent{}, nil, false
+		}
+		return ChainsyncEvent{
+			Point: ocommon.NewPoint(
+				target.block.SlotNumber(),
+				target.block.Hash().Bytes(),
+			),
+			BlockHeader: target.block.Header(),
+			HeaderCryptoVerificationGeneration: ls.
+				CurrentHeaderCryptoVerificationGeneration(),
+		}, forkHeader.block.Hash().Bytes(), true
 	}
 	cachedAncestor, cachedHeaders, cachedFound, cachedErr := ls.peerHeaderForkPath(
 		ouroboros.ConnectionId{},
@@ -7349,8 +7365,9 @@ func TestValidatePeerChainSelectionHeaderCryptoUsesForkNonce(
 	require.True(t, cachedFound)
 	require.Equal(t, anchorPoint, cachedAncestor)
 	require.Len(t, cachedHeaders, 3)
-	require.Zero(
+	require.Equal(
 		t,
+		1,
 		lookupCalls,
 		"a direct extension must reuse its resolved ancestry",
 	)
@@ -8023,13 +8040,26 @@ func TestValidatePeerChainSelectionHeaderCryptoUsesForkNonce(
 		&cachedAfterTipAdvanceNumber,
 		tamperNone,
 	)
+	// Only the cached tip header's own verdict is looked up, here as if it
+	// had verified.
 	lookupCalls = 0
 	ls.config.PeerHeaderLookupFunc = func(
-		ouroboros.ConnectionId,
-		[]byte,
+		_ ouroboros.ConnectionId,
+		hash []byte,
 	) (ChainsyncEvent, []byte, bool) {
 		lookupCalls++
-		return ChainsyncEvent{}, nil, false
+		if !bytes.Equal(hash, racedTarget.block.Hash().Bytes()) {
+			return ChainsyncEvent{}, nil, false
+		}
+		return ChainsyncEvent{
+			Point: ocommon.NewPoint(
+				racedTarget.block.SlotNumber(),
+				racedTarget.block.Hash().Bytes(),
+			),
+			BlockHeader: racedTarget.block.Header(),
+			HeaderCryptoVerificationGeneration: ls.
+				CurrentHeaderCryptoVerificationGeneration(),
+		}, queuedAncestor.block.Hash().Bytes(), true
 	}
 	advancedAncestor, advancedPath, advancedFound, advancedErr :=
 		ls.peerHeaderForkPath(
@@ -8040,8 +8070,9 @@ func TestValidatePeerChainSelectionHeaderCryptoUsesForkNonce(
 	require.True(t, advancedFound)
 	require.Equal(t, queuedAncestor.block.Hash().Bytes(), advancedAncestor.Hash)
 	require.Len(t, advancedPath, 2)
-	require.Zero(
+	require.Equal(
 		t,
+		1,
 		lookupCalls,
 		"a path resolved after the tip advanced must serve its direct extension",
 	)
