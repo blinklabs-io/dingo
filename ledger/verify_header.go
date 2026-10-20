@@ -1692,6 +1692,11 @@ func (ls *LedgerState) genesisOverlayProtocolParamsForBlock(
 		paramsEraID == snapshot.currentEpoch.EraId {
 		return snapshot.currentPParams
 	}
+	if paramsEpoch > snapshot.currentEpoch.EpochId {
+		return ls.genesisOverlayProtocolParamsForFutureEpoch(
+			snapshot, slot, paramsEpoch, paramsEraID,
+		)
+	}
 	if ls.db != nil {
 		era, ok := ls.eraById(paramsEraID)
 		if ok && era != nil && era.DecodePParamsFunc != nil {
@@ -1703,6 +1708,55 @@ func (ls *LedgerState) genesisOverlayProtocolParamsForBlock(
 				return pparams
 			}
 		}
+	}
+	return ls.ProtocolParamsForSlot(slot)
+}
+
+// genesisOverlayProtocolParamsForFutureEpoch resolves overlay parameters for
+// an epoch the ledger has not rolled into yet. The published epoch cache can
+// describe that epoch before its rollover persists its parameters, and the
+// persisted lookup returns the newest row at or before the epoch, which is an
+// older epoch's parameters without the update the rollover will enact. Reading
+// it misclassified Preview's first epoch-2 slots under epoch 0's d=1. Use a row
+// persisted for exactly this epoch when one exists, otherwise forecast.
+func (ls *LedgerState) genesisOverlayProtocolParamsForFutureEpoch(
+	snapshot *consensusSnapshot,
+	slot uint64,
+	paramsEpoch uint64,
+	paramsEraID uint,
+) lcommon.ProtocolParameters {
+	if ls.db != nil {
+		era, ok := ls.eraById(paramsEraID)
+		if ok && era != nil && era.DecodePParamsFunc != nil {
+			rows, err := ls.db.Metadata().GetPParams(paramsEpoch, paramsEraID, nil)
+			if err == nil && len(rows) > 0 && rows[0].Epoch == paramsEpoch {
+				if pparams, pparamsErr := ls.loadPersistedProtocolParameters(
+					paramsEpoch,
+					*era,
+					nil,
+				); pparamsErr == nil && pparams != nil {
+					return pparams
+				}
+			}
+		}
+	}
+	// A boundary block encoded in the current era is led under that era's
+	// parameters with the pending in-era update applied, before any hard-fork
+	// translation, which ProtocolParamsForSlot would also apply.
+	if paramsEpoch == snapshot.currentEpoch.EpochId+1 &&
+		paramsEraID == snapshot.currentEra.Id {
+		updated, err := ls.forecastPendingPParamUpdate(
+			snapshot.currentEra,
+			paramsEpoch,
+			snapshot.currentPParams,
+		)
+		if err != nil {
+			return nil
+		}
+		if updated != nil {
+			return updated
+		}
+		return snapshot.currentPParams
 	}
 	return ls.ProtocolParamsForSlot(slot)
 }

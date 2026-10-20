@@ -7477,3 +7477,95 @@ func TestDeferredHeaderMarkerLegacySyncStateStillHonoured(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, value, "legacy marker must be removed after apply")
 }
+
+// TestGenesisOverlayForecastsNextEpochInEraUpdate reproduces the preview
+// from-genesis stall at slot 172780. The epoch 1->2 boundary enacts a
+// decentralization decrease (d=1 to d=0) voted by the genesis delegates in
+// epoch 1. The first epoch-2 header is verified before the rollover persists a
+// pparams row for epoch 2, so the only row for the era is epoch 0's d=1. The
+// overlay decision must forecast the pending update instead of reading that
+// older row, which classifies every epoch-2 slot as a non-active overlay slot.
+func TestGenesisOverlayForecastsNextEpochInEraUpdate(t *testing.T) {
+	t.Parallel()
+
+	genesisCfg := newGenesisDelegateShelleyGenesisCfgWithActiveSlots(
+		t,
+		strings.Repeat("00", lcommon.Blake2b224Size),
+		strings.Repeat("00", lcommon.Blake2b256Size),
+		"0.05",
+	)
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	t.Cleanup(func() { dbtest.CloseDatabase(db) }) //nolint:errcheck
+
+	epochZero := models.Epoch{
+		EpochId:       0,
+		StartSlot:     0,
+		LengthInSlots: 86_400,
+		SlotLength:    1,
+		EraId:         eras.AlonzoEraDesc.Id,
+	}
+	epochOne := models.Epoch{
+		EpochId:       1,
+		StartSlot:     86_400,
+		LengthInSlots: 86_400,
+		SlotLength:    1,
+		EraId:         eras.AlonzoEraDesc.Id,
+	}
+	epochTwo := models.Epoch{
+		EpochId:       2,
+		StartSlot:     172_800,
+		LengthInSlots: 86_400,
+		SlotLength:    1,
+		EraId:         eras.AlonzoEraDesc.Id,
+	}
+	initialPParams := &alonzo.AlonzoProtocolParameters{
+		MaxBlockBodySize:   65_536,
+		MaxTxSize:          16_384,
+		MaxBlockHeaderSize: 1_100,
+		Decentralization:   &cbor.Rat{Rat: big.NewRat(1, 1)},
+	}
+	initialCbor, err := cbor.Encode(initialPParams)
+	require.NoError(t, err)
+	require.NoError(t, db.SetPParams(
+		initialCbor, 0, 0, eras.AlonzoEraDesc.Id, nil,
+	))
+	// {12: 0/1}: the decentralization update every preview genesis delegate
+	// submitted at slot 86600.
+	update, err := hex.DecodeString("a10cd81e820001")
+	require.NoError(t, err)
+	require.NoError(t, db.SetPParamUpdate(
+		bytes.Repeat([]byte{0x11}, lcommon.Blake2b224Size),
+		update, 86_600, 1, nil,
+	))
+
+	ls := &LedgerState{
+		db:             db,
+		currentEpoch:   epochOne,
+		currentEra:     eras.AlonzoEraDesc,
+		currentPParams: initialPParams,
+		// The published cache already holds epoch 2 before its rollover,
+		// as it does during a live sync.
+		epochCache: []models.Epoch{epochZero, epochOne, epochTwo},
+		config: LedgerStateConfig{
+			CardanoNodeConfig: genesisCfg,
+			Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+	}
+	ls.publishSnapshotsLocked()
+
+	block := &mockBoundaryAlonzoBlock{
+		Block: &mockBabbageBlock{slot: 172_836},
+		slot:  172_836,
+	}
+	pparams := ls.genesisOverlayProtocolParamsForBlock(block)
+	require.NotNil(t, pparams)
+	require.Equal(t, big.NewRat(0, 1), decentralizationParamRat(pparams))
+	_, status, err := ls.genesisOverlayDelegationForBlockWithEpochCache(
+		block,
+		genesisCfg.ShelleyGenesis(),
+		ls.epochCache,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, genesisOverlayNone, status)
+}
