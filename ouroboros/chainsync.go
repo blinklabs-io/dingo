@@ -475,7 +475,9 @@ func (o *Ouroboros) chainsyncClientAwaitReply(
 		return nil
 	}
 	o.chainsyncState.MarkClientSynced(ctx.ConnectionId)
-	if client.ObservabilityOnly ||
+	// While held the cursor is not the point the peer awaits at, so it must
+	// not reach chain selection or the ledger.
+	if client.ObservabilityOnly || o.networkIngestHeld() ||
 		!o.shouldPublishChainsyncToLedger(ctx.ConnectionId) {
 		return nil
 	}
@@ -1245,6 +1247,9 @@ func (o *Ouroboros) chainsyncClientRollBackward(
 		attribute.String("block.hash", hex.EncodeToString(point.Hash)),
 	)
 	defer func() { tracing.End(span, err) }()
+	if o.recordHeldChainsyncTip(ctx.ConnectionId, tip) {
+		return ochainsync.ErrStopSyncProcess
+	}
 	if !o.reconcileChainsyncIngressAdmission(
 		ctx.ConnectionId,
 		o.shouldPublishChainsyncToLedger(ctx.ConnectionId),
@@ -1378,6 +1383,9 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 ) (err error) {
 	switch v := blockData.(type) {
 	case gledger.BlockHeader:
+		if o.recordHeldChainsyncTip(ctx.ConnectionId, tip) {
+			return ochainsync.ErrStopSyncProcess
+		}
 		blockSlot := v.SlotNumber()
 		blockHash := v.Hash().Bytes()
 		_, span := tracing.Start(
@@ -1442,6 +1450,10 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 				return fmt.Errorf("chainsync: await header capacity: %w", err)
 			}
 		}
+		// Each wait below can span the start of a hold; re-check after it.
+		if o.recordHeldChainsyncTip(ctx.ConnectionId, tip) {
+			return ochainsync.ErrStopSyncProcess
+		}
 		o.config.Logger.Debug(
 			"chainsync: header received",
 			"component", "ouroboros",
@@ -1505,6 +1517,9 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 			if err != nil || !admitted {
 				return err
 			}
+			if o.recordHeldChainsyncTip(ctx.ConnectionId, tip) {
+				return ochainsync.ErrStopSyncProcess
+			}
 		}
 		// Verify header crypto (VRF/KES and, once local state has caught up,
 		// leader eligibility) before this header is allowed to influence
@@ -1549,6 +1564,9 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 				admitted, err := o.admitChainsyncHeader(ctx, chainsyncEvent)
 				if err != nil || !admitted {
 					return err
+				}
+				if o.recordHeldChainsyncTip(ctx.ConnectionId, tip) {
+					return ochainsync.ErrStopSyncProcess
 				}
 				if o.ledgerState != nil {
 					verificationTipBaseline = o.ledgerState.Tip()
@@ -1701,6 +1719,9 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 			cancelAdmission()
 			if err != nil {
 				return fmt.Errorf("wait for eagerness limit: %w", err)
+			}
+			if o.recordHeldChainsyncTip(ctx.ConnectionId, tip) {
+				return ochainsync.ErrStopSyncProcess
 			}
 		}
 		patienceGrant = selectionEligible && ingressEligible
@@ -1878,6 +1899,39 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 		return fmt.Errorf("unexpected block data type: %T", v)
 	}
 	return nil
+}
+
+// networkIngestHeld reports whether the ledger holds network ingest.
+func (o *Ouroboros) networkIngestHeld() bool {
+	return o.ledgerState != nil && o.ledgerState.NetworkIngestHeld()
+}
+
+// recordHeldChainsyncTip reports whether connId's chainsync messages are
+// dropped: network ingest is held, or the connection existed during a hold
+// and has not closed yet. A dropped message skips every admission wait,
+// verification, chain selection and the ledger publish -- each of which would
+// otherwise wait on, or act on, a ledger that is not following the peer --
+// and only the tip the peer reported is kept, for PeerTipSlot and peer
+// scoring. The caller returns ochainsync.ErrStopSyncProcess, which stops the
+// client requesting further headers; the tip is then refreshed by
+// heldTipRefresher.
+func (o *Ouroboros) recordHeldChainsyncTip(
+	connId ouroboros.ConnectionId,
+	tip ochainsync.Tip,
+) bool {
+	held := o.networkIngestHeld()
+	if !held && (o.chainsyncState == nil ||
+		!o.chainsyncState.ConnectionIngestHeld(connId)) {
+		return false
+	}
+	if o.chainsyncState != nil {
+		o.chainsyncState.RecordHeldClientTip(connId, tip)
+	}
+	o.updateChainsyncMetrics(connId, tip)
+	if held {
+		o.ensureHeldTipRefresher()
+	}
+	return true
 }
 
 // admitChainsyncHeader runs the future-header admission for one delivered
@@ -2235,6 +2289,19 @@ func (o *Ouroboros) SubscribeChainsyncResync(ctx context.Context) {
 				return
 			default:
 			}
+			released := e.Reason == event.ChainsyncResyncReasonNetworkIngestReleased
+			// The release re-intersects every client, so a resync requested
+			// while held -- by a timer armed before the hold, say -- would
+			// only close a peer the hold means to keep.
+			if !released && o.networkIngestHeld() {
+				o.config.Logger.Debug(
+					"ignoring chainsync resync while network ingest is held",
+					"component", "ouroboros",
+					"connection_id", e.ConnectionId.String(),
+					"reason", e.Reason,
+				)
+				return
+			}
 			var connIds []ouroboros.ConnectionId
 			if e.ConnectionId != (ouroboros.ConnectionId{}) {
 				connIds = append(connIds, e.ConnectionId)
@@ -2242,6 +2309,11 @@ func (o *Ouroboros) SubscribeChainsyncResync(ctx context.Context) {
 				connIds = o.chainsyncState.RewindTrackedClientsTo(e.Point)
 				if e.Reason == event.ChainsyncResyncReasonLocalLedgerRollback &&
 					len(connIds) == 0 {
+					connIds = o.chainsyncState.GetClientConnIds()
+				}
+				if released {
+					// Observers too: their cursor and chain-selection view
+					// froze with the hold, and one may be promoted later.
 					connIds = o.chainsyncState.GetClientConnIds()
 				}
 			}
@@ -2455,6 +2527,10 @@ func (o *Ouroboros) chainsyncClientRollForwardRaw(
 	blockData []byte,
 	tip ochainsync.Tip,
 ) error {
+	// A held header is dropped, so it is not worth decoding.
+	if o.recordHeldChainsyncTip(ctx.ConnectionId, tip) {
+		return ochainsync.ErrStopSyncProcess
+	}
 	// Record arrival at the raw network callback boundary. Header decoding can
 	// block behind another peer's in-flight decode of the same bytes, so a
 	// timestamp taken by the decoded handler would already include local work.

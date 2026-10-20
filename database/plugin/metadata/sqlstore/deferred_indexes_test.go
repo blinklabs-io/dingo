@@ -205,6 +205,119 @@ func TestBuildDeferredIndexesContextCommitsEachSQLiteIndex(t *testing.T) {
 	require.Empty(t, missing)
 }
 
+// TestDropLazyDeferredIndexesKeepsCriticalIndexes drops only the lazy
+// manifest entries, behind the same recovery marker a full drop records, and
+// BuildDeferredIndexes ends that cycle.
+func TestDropLazyDeferredIndexesKeepsCriticalIndexes(t *testing.T) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+	require.NoError(t, store.DropLazyDeferredIndexesContext(t.Context()))
+
+	pending, err := store.HasDeferredIndexesPending()
+	require.NoError(t, err)
+	require.True(t, pending, "a lazy drop must record the recovery marker")
+	critical, err := store.MissingCriticalDeferredIndexes()
+	require.NoError(t, err)
+	require.Empty(t, critical, "a lazy drop removed a critical index")
+	var lazy []string
+	for _, index := range deferred.LazyManifest() {
+		lazy = append(lazy, index.Name)
+	}
+	require.NotEmpty(t, lazy)
+	missing, err := store.MissingDeferredIndexes()
+	require.NoError(t, err)
+	require.ElementsMatch(t, lazy, missing)
+
+	require.NoError(t, store.BuildDeferredIndexesContext(t.Context()))
+	pending, err = store.HasDeferredIndexesPending()
+	require.NoError(t, err)
+	require.False(t, pending)
+	missing, err = store.MissingDeferredIndexes()
+	require.NoError(t, err)
+	require.Empty(t, missing)
+}
+
+// TestCatchUpIndexDropAndRebuild drops the lazy and catch-up droppable
+// entries behind the recovery marker. The catch-up rebuild restores the
+// droppable ones and keeps the marker, which only the full rebuild clears.
+func TestCatchUpIndexDropAndRebuild(t *testing.T) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+	var lazy, droppable []string
+	for _, index := range deferred.LazyManifest() {
+		lazy = append(lazy, index.Name)
+	}
+	for _, index := range deferred.CatchUpDroppableManifest() {
+		droppable = append(droppable, index.Name)
+	}
+	require.NotEmpty(t, droppable)
+	require.NoError(t, store.DropCatchUpIndexesContext(t.Context()))
+
+	pending, err := store.HasDeferredIndexesPending()
+	require.NoError(t, err)
+	require.True(t, pending, "a catch-up drop must record the recovery marker")
+	missing, err := store.MissingDeferredIndexes()
+	require.NoError(t, err)
+	require.ElementsMatch(t, append(append([]string(nil), lazy...),
+		droppable...), missing)
+	critical, err := store.MissingCriticalDeferredIndexes()
+	require.NoError(t, err)
+	require.ElementsMatch(t, droppable, critical)
+
+	require.NoError(t, store.BuildCatchUpIndexesContext(t.Context()))
+	missing, err = store.MissingDeferredIndexes()
+	require.NoError(t, err)
+	require.ElementsMatch(t, lazy, missing,
+		"the catch-up rebuild must restore exactly the droppable entries")
+	pending, err = store.HasDeferredIndexesPending()
+	require.NoError(t, err)
+	require.True(t, pending, "the lazy entries are still missing")
+
+	require.NoError(t, store.BuildDeferredIndexesContext(t.Context()))
+	pending, err = store.HasDeferredIndexesPending()
+	require.NoError(t, err)
+	require.False(t, pending)
+}
+
+// TestSetCatchUpPragmasLeavesDurabilityAlone checks the catch-up tuning
+// changes only memory settings on the write connection and that
+// RestoreNormalPragmas puts them back.
+func TestSetCatchUpPragmasLeavesDurabilityAlone(t *testing.T) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+	store.writeDB.SetMaxOpenConns(1)
+	pragma := func(name string) int64 {
+		t.Helper()
+		var value int64
+		require.NoError(t, store.writeDB.QueryRowContext(
+			t.Context(), "PRAGMA "+name,
+		).Scan(&value))
+		return value
+	}
+	synchronous := pragma("synchronous")
+	journal := func() string {
+		t.Helper()
+		var mode string
+		require.NoError(t, store.writeDB.QueryRowContext(
+			t.Context(), "PRAGMA journal_mode",
+		).Scan(&mode))
+		return mode
+	}
+	journalMode := journal()
+
+	require.NoError(t, store.SetCatchUpPragmas())
+	require.Equal(t, int64(-200000), pragma("cache_size"))
+	require.Equal(t, int64(2), pragma("temp_store"), "temp_store = MEMORY")
+	require.Equal(t, synchronous, pragma("synchronous"),
+		"catch-up tuning must not relax durability")
+	require.Equal(t, journalMode, journal())
+	require.False(t, store.bulkMode, "catch-up tuning is not bulk mode")
+
+	require.NoError(t, store.RestoreNormalPragmas())
+	require.Equal(t, int64(-50000), pragma("cache_size"))
+	require.Equal(t, int64(0), pragma("temp_store"), "temp_store = DEFAULT")
+}
+
 // A bulk-load cycle drops the spender indexes and the rebuild recreates them.
 // The rebuild must restore the partial definition the schema migration
 // installed, not a full-table index over the mostly-NULL columns.

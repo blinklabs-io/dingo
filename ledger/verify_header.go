@@ -604,6 +604,32 @@ func (ls *LedgerState) verifyBlockHeaderCryptoWithEpochAdvance(
 	allowEpochCacheAdvance bool,
 	allowStateDefer bool,
 ) error {
+	if ls.config.Consensus == nil {
+		return ls.ValidatePraosHeader(
+			ctx,
+			block,
+			allowEpochCacheAdvance,
+			allowStateDefer,
+		)
+	}
+	return ls.config.Consensus.ValidateHeader(
+		ctx,
+		ls,
+		block,
+		allowEpochCacheAdvance,
+		allowStateDefer,
+	)
+}
+
+// ValidatePraosHeader runs Dingo's Praos header checks against ledger-owned
+// state. Consensus providers call this entry point rather than duplicating
+// nonce, epoch, stake, or rollback state.
+func (ls *LedgerState) ValidatePraosHeader(
+	ctx context.Context,
+	block ledger.Block,
+	allowEpochCacheAdvance bool,
+	allowStateDefer bool,
+) error {
 	epoch, epochCache, err := ls.verifyBlockHeaderStatelessCryptoWithCache(ctx,
 		block,
 		allowEpochCacheAdvance,

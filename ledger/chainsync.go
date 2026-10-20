@@ -403,6 +403,11 @@ func (ls *LedgerState) handleEventChainsync(evt event.Event) {
 		ls.removePeerHeaderHistory(connIdKey(e.ConnectionId))
 		return
 	}
+	// Also drops an event published before the hold was taken.
+	if ls.connectionIngestHeld(e.ConnectionId) {
+		queuePeerTipAdmission(&pending, e, false)
+		return
+	}
 	if e.Rollback {
 		if err := ls.handleEventChainsyncRollback(e, &pending); err != nil {
 			if errors.Is(err, ErrRollbackLoopDetected) {
@@ -1376,6 +1381,10 @@ func (ls *LedgerState) handleEventBlockfetch(evt event.Event) {
 		ls.logUnexpectedChainsyncEventData("BlockfetchEvent", evt)
 		return
 	}
+	// The hold discarded the batch these events belong to.
+	if ls.NetworkIngestHeld() {
+		return
+	}
 	if e.BatchDone {
 		if err := ls.handleEventBlockfetchBatchDone(e, &pending); err != nil {
 			ls.config.Logger.Error(
@@ -1484,6 +1493,12 @@ func (ls *LedgerState) handleChainSwitchEvent(evt event.Event) {
 	var requestFreshCursor bool
 	ls.chainsyncMutex.Lock()
 	defer ls.chainsyncMutex.Unlock()
+	// A switch would hand the header pipeline to the new peer. While held
+	// there is no pipeline, and the release closes every peer. Checked under
+	// chainsyncMutex, which the hold's discard takes after setting the flag.
+	if ls.NetworkIngestHeld() {
+		return
+	}
 	ls.chainsyncBlockfetchMutex.Lock()
 	if ls.config.GetActiveConnectionFunc != nil {
 		if !ls.isConnectionLive(effectiveConnId) {
@@ -4135,11 +4150,12 @@ func (ls *LedgerState) compareIncomingHeaderToLocalTip(
 	observedTip := observedHeaderTip(e)
 
 	incomingView, _ := praos.GetPraosTiebreakerView(e.BlockHeader)
-	return praos.ComparePraosTips(
+	localView := ls.localTipPraosView(ls.lifecycleContext(), localTip)
+	return ls.compareConsensusTips(
 		observedTip,
 		localTip,
 		incomingView,
-		ls.localTipPraosView(ls.lifecycleContext(), localTip),
+		localView,
 	)
 }
 
@@ -4148,14 +4164,8 @@ func (ls *LedgerState) earlierHeaderCanBeatLocalTip(
 	localTip ochainsync.Tip,
 ) bool {
 	observedTip := observedHeaderTip(e)
-	if observedTip.BlockNumber > localTip.BlockNumber {
-		return true
-	}
-	if observedTip.BlockNumber < localTip.BlockNumber {
-		return false
-	}
 	incomingView, _ := praos.GetPraosTiebreakerView(e.BlockHeader)
-	return praos.ComparePraosTips(
+	return ls.compareConsensusTips(
 		observedTip,
 		localTip,
 		incomingView,

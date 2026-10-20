@@ -51,10 +51,7 @@ func validTestConfig() *Config {
 		Chainsync:            DefaultChainsyncConfig(),
 		HistoryExpiry:        DefaultHistoryExpiryConfig(),
 		Midnight:             DefaultMidnightConfig(),
-		Mithril: MithrilConfig{
-			Enabled: true,
-			Backend: "v2",
-		},
+		Mithril:              newDefaultConfig().Mithril,
 	}
 	cfg.Plugins.Mempool.Config["capacity"] = int64(DefaultMempoolCapacityPraos)
 	return cfg

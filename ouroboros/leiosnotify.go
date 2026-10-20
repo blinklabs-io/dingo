@@ -680,18 +680,14 @@ func (o *Ouroboros) BroadcastEndorserBlock(
 	txBodies [][]byte,
 ) error {
 	point := ocommon.Point{Slot: slot, Hash: hash}
-	// Match the on-the-wire form fetched EB transactions are stored in: each
-	// transaction is a CBOR byte string wrapping its CBOR (LeiosTx =
-	// encodeBytes(txCbor)), so served forged-EB bodies decode identically.
+	// Forged bodies are already block_transactions, the form fetched EB
+	// transactions are cached in once leios-fetch has removed its tag-24
+	// wrapper.
 	var txsRaw []cbor.RawMessage
 	if len(txBodies) > 0 {
 		txsRaw = make([]cbor.RawMessage, 0, len(txBodies))
-		for i, body := range txBodies {
-			wrapped, err := cbor.Encode(body)
-			if err != nil {
-				return fmt.Errorf("encode forged EB tx %d: %w", i, err)
-			}
-			txsRaw = append(txsRaw, cbor.RawMessage(wrapped))
+		for _, body := range txBodies {
+			txsRaw = append(txsRaw, cbor.RawMessage(slices.Clone(body)))
 		}
 	}
 	// Locally forged: dingo chose this slot itself, so the binding is
@@ -2089,24 +2085,14 @@ func (o *Ouroboros) fetchLeiosEbTxsBatchedUntilWithValidator(
 				"unexpected leios-fetch BlockTxs response type %T", resp,
 			)
 		}
-		if err := validateLeiosTxBitmap(txCount, respTxs.Bitmaps); err != nil {
-			// A relay-declared bitmap referencing an index beyond this
-			// endorser block's txCount is rejected before it is expanded: a
-			// small txCount must not license decoding a disproportionately
-			// large index list.
-			return leiosCollectTxs(result), fmt.Errorf(
-				"leios-fetch response bitmap: %w",
-				err,
-			)
-		}
-		served := leiosBitmapTxIndices(respTxs.Bitmaps)
+		// The reply carries no bitmap: its transactions answer the requested
+		// bitmap in ascending index order.
+		served := leiosBitmapTxIndices(needed)
 		if len(served) != len(respTxs.TxsRaw) {
-			// The SDK wire contract requires one transaction per served bit;
-			// do not infer positions from an obsolete bitmap-free response.
 			return leiosCollectTxs(result), fmt.Errorf(
-				"leios-fetch response bitmap selects %d transactions, got %d",
-				len(served),
+				"leios-fetch response has %d transactions, requested %d",
 				len(respTxs.TxsRaw),
+				len(served),
 			)
 		}
 		progress := 0
