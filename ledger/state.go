@@ -9529,19 +9529,26 @@ func (ls *LedgerState) processBlocksFromSource(
 					// Apply delta batch
 					applyStart := time.Now()
 					err := deltaBatch.apply(ctx, ls, txn)
-					ls.metrics.observeBlockStage(
-						blockStageApply,
-						time.Since(applyStart),
-					)
 					if err != nil {
+						ls.metrics.observeBlockStage(
+							blockStageApply,
+							time.Since(applyStart),
+						)
 						deltaBatch.Release()
 						return err
 					}
 					deltaBatch.Release()
-					if err := ls.db.FlushBatch(trustedReplayRows, txn); err != nil {
+					// The replay-row flush is part of the same sample: it is
+					// the metadata write for this delta batch's rows.
+					flushErr := ls.db.FlushBatch(trustedReplayRows, txn)
+					ls.metrics.observeBlockStage(
+						blockStageApply,
+						time.Since(applyStart),
+					)
+					if flushErr != nil {
 						return fmt.Errorf(
 							"flush trusted replay metadata batch: %w",
-							err,
+							flushErr,
 						)
 					}
 					// Update tip in database only if blocks were processed
@@ -10337,6 +10344,10 @@ func (ls *LedgerState) ledgerProcessBlock(
 
 		// Apply delta immediately if we may need the data to validate the next TX
 		if shouldValidate {
+			// The write is a separate apply sample per transaction: a
+			// validating block leaves its chunk's delta batch empty, so
+			// the batch flush alone would hide this time.
+			applyStart := time.Now()
 			validatedReplayRows := validatedReplayAccumulatorFrom(ctx)
 			var applyErr error
 			if validatedReplayRows != nil {
@@ -10355,6 +10366,10 @@ func (ls *LedgerState) ledgerProcessBlock(
 			} else {
 				applyErr = delta.applyWithoutRecordingDonations(ctx, ls, txn)
 			}
+			ls.metrics.observeBlockStage(
+				blockStageApply,
+				time.Since(applyStart),
+			)
 			if applyErr != nil {
 				delta.Release()
 				if errors.Is(applyErr, models.ErrRewardWithdrawalExceedsBalance) {
