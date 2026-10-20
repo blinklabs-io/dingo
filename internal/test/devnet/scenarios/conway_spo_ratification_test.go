@@ -652,6 +652,17 @@ func (q *governanceLSQ) fundedWallet(
 	keys []*governanceSigningKey,
 	minimum uint64,
 ) (*governanceSigningKey, governanceUTxO, error) {
+	// The ledger answers for applied blocks only. A transaction still in the
+	// node's mempool (a txpump submission that was accepted before txpump was
+	// stopped, or one this test submitted earlier) has already claimed its
+	// inputs, and a transaction spending one is rejected. Read the mempool
+	// before the ledger: a pending transaction forged between the two reads
+	// is then gone from the mempool snapshot but already applied in the
+	// ledger snapshot, so its inputs are never offered as unspent.
+	pending, err := q.pendingInputs()
+	if err != nil {
+		return nil, governanceUTxO{}, err
+	}
 	if err := q.Refresh(); err != nil {
 		return nil, governanceUTxO{}, err
 	}
@@ -669,14 +680,6 @@ func (q *governanceLSQ) fundedWallet(
 		keyByAddress[string(addrBytes)] = key
 	}
 	result, err := q.client.GetUTxOByAddress(addresses)
-	if err != nil {
-		return nil, governanceUTxO{}, err
-	}
-	// The ledger answers for applied blocks only. A transaction still in the
-	// node's mempool (a txpump submission that was accepted before txpump was
-	// stopped, or one this test submitted earlier) has already claimed its
-	// inputs, and a transaction spending one is rejected.
-	pending, err := q.pendingInputs()
 	if err != nil {
 		return nil, governanceUTxO{}, err
 	}
