@@ -784,6 +784,19 @@ func ReconcileCloudSnapshotCatalogContext(
 		ctx, baseDir,
 	)
 	unlockSnapshotCatalog()
+	if errors.Is(generationErr, ErrSnapshotCatalogCorrupt) {
+		repairErr := EnsureSnapshotCatalogContext(ctx, baseDir, opts...)
+		if repairErr != nil && !errors.Is(repairErr, ErrSnapshotCatalogIncomplete) {
+			return false, repairErr
+		}
+		if err := lockSnapshotCatalog(ctx); err != nil {
+			return false, err
+		}
+		startGeneration, generationErr = readSnapshotCatalogGenerationLocked(
+			ctx, baseDir,
+		)
+		unlockSnapshotCatalog()
+	}
 	if generationErr != nil {
 		return false, generationErr
 	}

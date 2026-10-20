@@ -1004,6 +1004,46 @@ func TestCloudCatalogRecoversAfterStartupConstructorFailure(t *testing.T) {
 	require.Equal(t, cloudDest+"/mirrored", entries[0].Location)
 }
 
+func TestCloudReconciliationRepairsCorruptCatalogGeneration(t *testing.T) {
+	t.Parallel()
+	base := t.TempDir()
+	require.NoError(t, EnsureSnapshotCatalog(base, WithManifestKey(catalogTestTrustKey)))
+	db, err := openSnapshotCatalog(t.Context(), snapshotCatalogPath(base), false)
+	require.NoError(t, err)
+	_, err = db.ExecContext(t.Context(), `
+UPDATE catalog_meta SET generation = 'invalid' WHERE singleton = 1`)
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+
+	manifestDir := filepath.Join(t.TempDir(), "from-cloud")
+	require.NoError(t, os.Mkdir(manifestDir, 0o755))
+	require.NoError(t, WriteManifest(manifestDir, Manifest{
+		CreatedAt: time.Unix(10, 0).UTC(), Trigger: TriggerManual,
+	}, WithManifestKey(catalogTestTrustKey)))
+	manifest, err := ReadManifest(manifestDir, WithManifestKey(catalogTestTrustKey))
+	require.NoError(t, err)
+	registry := NewDestinationRegistry()
+	registry.Register("repaircorruptcatalog", func(*url.URL) (CloudDestination, error) {
+		return &catalogScriptedLister{entries: []SnapshotEntry{{
+			ID: "from-cloud", Manifest: manifest,
+		}}}, nil
+	})
+	const cloudDest = "repaircorruptcatalog://bucket/snapshots"
+
+	current, err := ReconcileCloudSnapshotCatalogContext(
+		t.Context(), base, registry, cloudDest,
+		WithManifestKey(catalogTestTrustKey),
+	)
+	require.NoError(t, err)
+	require.True(t, current)
+	entries, _, err := ListAvailableSnapshotPageContext(
+		t.Context(), base, cloudDest, 10, nil,
+	)
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	require.Equal(t, "from-cloud", entries[0].Entry.ID)
+}
+
 func TestCloudReconciliationDoesNotBlockIncrementalMirror(t *testing.T) {
 	base := t.TempDir()
 	require.NoError(t, EnsureSnapshotCatalog(base, WithManifestKey(catalogTestTrustKey)))

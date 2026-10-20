@@ -196,13 +196,19 @@ func (h *databaseServiceHandler) reconcileCloudSnapshotCatalog(
 ) error {
 	b := h.bark
 	destination := b.config.SnapshotCloudDestination
+	retryFailure := func(err error) error {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
+		h.catalogRetry.failed(destination, time.Now())
+		return err
+	}
 	if destination == "" {
 		_, err := lifecycle.ReconcileCloudSnapshotCatalogContext(
 			ctx, b.config.SnapshotDir, b.config.DestinationRegistry, "",
 		)
 		if err != nil {
-			h.catalogRetry.failed(destination, time.Now())
-			return err
+			return retryFailure(err)
 		}
 		h.catalogCloudDestination = ""
 		h.catalogRetry.succeeded()
@@ -210,8 +216,7 @@ func (h *databaseServiceHandler) reconcileCloudSnapshotCatalog(
 	}
 	manifestOpts, err := h.cloudManifestOptions()
 	if err != nil {
-		h.catalogRetry.failed(destination, time.Now())
-		return err
+		return retryFailure(err)
 	}
 	current, err := lifecycle.ReconcileCloudSnapshotCatalogContext(
 		ctx, b.config.SnapshotDir, b.config.DestinationRegistry,
@@ -221,8 +226,7 @@ func (h *databaseServiceHandler) reconcileCloudSnapshotCatalog(
 		err = lifecycle.ErrSnapshotCatalogIncomplete
 	}
 	if err != nil {
-		h.catalogRetry.failed(destination, time.Now())
-		return err
+		return retryFailure(err)
 	}
 	h.catalogCloudDestination = destination
 	h.catalogRetry.succeeded()
