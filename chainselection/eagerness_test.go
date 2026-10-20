@@ -125,6 +125,34 @@ func TestLimitOnEagernessSingleCandidateDoesNotWedge(t *testing.T) {
 	assert.Equal(t, uint64(40), tip.BlockNumber)
 }
 
+func TestLimitOnEagernessIgnoresStalePendingCandidate(t *testing.T) {
+	t.Parallel()
+
+	var current atomic.Uint64
+	current.Store(1)
+	cs := NewChainSelector(ChainSelectorConfig{
+		GenesisMode:   true,
+		SecurityParam: loeTestK,
+		HeaderCryptoVerificationGenerationCurrent: func(generation uint64) bool {
+			return generation == current.Load()
+		},
+	})
+	cs.SetLocalTip(loeTip("local", 10))
+	connId := newTestConnectionId(81)
+	update := PeerTipUpdateEvent{
+		ConnectionId:                       connId,
+		AdmissionID:                        1,
+		Tip:                                loeTip("candidate", 20),
+		ObservedTip:                        loeTip("candidate", 20),
+		HeaderCryptoVerificationGeneration: 1,
+	}
+	require.True(t, cs.PreparePeerTipAdmission(update))
+	require.Equal(t, uint64(20+loeTestK), cs.EagernessLimit().BlockNumber)
+
+	current.Store(2)
+	require.Equal(t, uint64(10+loeTestK), cs.EagernessLimit().BlockNumber)
+}
+
 func TestLimitOnEagernessWithoutCommonPointFallsBackToLocalTip(t *testing.T) {
 	t.Parallel()
 	// A runs far past the fork, so its retained fragment no longer holds the
@@ -517,9 +545,9 @@ func TestAwaitEagernessLimitPauseDoesNotAgePeersStale(t *testing.T) {
 		tip := loeTip(prefix, 17)
 		require.True(t, cs.PreparePeerTipAdmission(PeerTipUpdateEvent{
 			ConnectionId: connId,
-			AdmissionID: uint64(i + 1),
-			Tip: tip,
-			ObservedTip: tip,
+			AdmissionID:  uint64(i + 1),
+			Tip:          tip,
+			ObservedTip:  tip,
 		}))
 	}
 

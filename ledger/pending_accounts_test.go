@@ -17,10 +17,12 @@ package ledger
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
@@ -477,5 +479,167 @@ func TestValidateTxWithOverlayFollowsPublicationAtSameTip(t *testing.T) {
 		t,
 		f.ls.ValidateTxWithOverlay(f.withdrawalTx(0x02, 250), nil, nil, pending),
 		"the fold must follow the published state, not the tip",
+	)
+}
+
+// pendingDRepVoteFixture is a ledger holding one registered DRep whose rule
+// runs the production Conway rule set and keeps only its unknown-voter
+// verdict: the bare mock transactions fail every rule that needs inputs,
+// witnesses or a concrete transaction type, none of which bear on voters.
+func pendingDRepVoteFixture(
+	t *testing.T,
+) (*pendingAccountsFixture, lcommon.Credential) {
+	t.Helper()
+	pparams := &conway.ConwayProtocolParameters{
+		KeyDeposit:  pendingKeyDeposit,
+		DRepDeposit: 500_000_000,
+	}
+	pparams.ProtocolVersion.Major = lcommon.ProtocolVersionPlomin
+	f := newPendingAccountsFixtureWithRule(
+		t,
+		0,
+		func(
+			tx lcommon.Transaction,
+			slot uint64,
+			state lcommon.LedgerState,
+			pparams lcommon.ProtocolParameters,
+		) error {
+			unknown, ok := errors.AsType[conway.UnknownVoterError](
+				eras.ValidateTxConway(tx, slot, state, pparams),
+			)
+			if ok {
+				return unknown
+			}
+			return nil
+		},
+		pparams,
+	)
+	// The Conway rules read the network id from the node config.
+	f.ls.config.CardanoNodeConfig = &cardano.CardanoNodeConfig{}
+	drep := lcommon.Credential{
+		CredType:   lcommon.CredentialTypeAddrKeyHash,
+		Credential: lcommon.CredentialHash{0xd5},
+	}
+	seedImportedDrep(t, f.ls.db, drep, 500_000_000, 1, true)
+	return f, drep
+}
+
+func (f *pendingAccountsFixture) drepDeregistrationTx(
+	seed byte,
+	drep lcommon.Credential,
+) lcommon.Transaction {
+	return f.certificateTx(seed, &lcommon.DeregistrationDrepCertificate{
+		CertType:       uint(lcommon.CertificateTypeDeregistrationDrep),
+		DrepCredential: drep,
+		Amount:         500_000_000,
+	})
+}
+
+func (f *pendingAccountsFixture) drepVoteTx(
+	seed byte,
+	drep lcommon.Credential,
+) lcommon.Transaction {
+	tx := mockledger.NewTransactionBuilder().WithType(int(f.ls.currentEra.Id))
+	tx.WithId(bytes.Repeat([]byte{seed}, 32))
+	return tx.WithVotingProcedures(lcommon.VotingProcedures{
+		{
+			Type: lcommon.VoterTypeDRepKeyHash,
+			Hash: [28]byte(drep.Credential),
+		}: {},
+	})
+}
+
+func requireUnknownVoter(t *testing.T, err error, msg string) {
+	t.Helper()
+	var unknown conway.UnknownVoterError
+	require.ErrorAs(t, err, &unknown, msg)
+}
+
+// A DRep deregistered by an earlier pending transaction cannot vote in a later
+// one: mempool admission must judge the vote against the state the
+// deregistration leaves, not the stored registration.
+func TestValidateTxWithOverlayRejectsVoteOfPendingDRepDeregistration(
+	t *testing.T,
+) {
+	t.Parallel()
+	f, drep := pendingDRepVoteFixture(t)
+	deregister := f.drepDeregistrationTx(0x01, drep)
+	vote := f.drepVoteTx(0x02, drep)
+
+	require.NoError(
+		t,
+		f.ls.ValidateTxWithOverlay(vote, nil, nil, nil),
+		"control: the stored registration makes the DRep a known voter",
+	)
+	requireUnknownVoter(
+		t,
+		f.ls.ValidateTxWithOverlay(vote, nil, nil, f.overlayAfter(deregister)),
+		"a vote after a pending DRep deregistration must be rejected",
+	)
+}
+
+// Block selection validates every candidate through one session; a vote
+// selected after a DRep deregistration must be skipped.
+func TestTxValidationSessionRejectsVoteAfterDRepDeregistration(t *testing.T) {
+	t.Parallel()
+	f, drep := pendingDRepVoteFixture(t)
+	deregister := f.drepDeregistrationTx(0x01, drep)
+	vote := f.drepVoteTx(0x02, drep)
+
+	err := f.ls.WithTxValidationSession(context.Background(), func(
+		validate func(
+			gledger.Transaction,
+			map[utxoref.Key]struct{},
+			map[utxoref.Key]lcommon.Utxo,
+			*utxoref.StateOverlay,
+		) error,
+		_ func() bool,
+		_ func(func() error) (bool, error),
+	) error {
+		overlay := utxoref.NewStateOverlay()
+		require.NoError(
+			t,
+			validate(vote, nil, nil, overlay),
+			"control: no deregistration selected yet",
+		)
+		overlay.Apply(deregister)
+		requireUnknownVoter(
+			t,
+			validate(vote, nil, nil, overlay),
+			"a vote selected after a DRep deregistration must be rejected",
+		)
+		return nil
+	})
+	require.NoError(t, err)
+}
+
+// Forged-block self-validation applies transactions in block order, so a
+// block that deregisters a DRep and then carries its vote must fail, while
+// the reverse order leaves the vote valid.
+func TestValidateForgedTxsRejectsVoteAfterEarlierDRepDeregistration(
+	t *testing.T,
+) {
+	t.Parallel()
+	f, drep := pendingDRepVoteFixture(t)
+	deregister := f.drepDeregistrationTx(0x01, drep)
+	vote := f.drepVoteTx(0x02, drep)
+
+	block := pendingAccountsBlock{
+		stubValidateBlock: &stubValidateBlock{slot: 10},
+		txs:               []lcommon.Transaction{deregister, vote},
+	}
+	err := f.ls.validateForgedTxs(context.Background(), block)
+	requireUnknownVoter(
+		t,
+		err,
+		"a vote after the same block's DRep deregistration must fail",
+	)
+	require.Contains(t, err.Error(), "tx "+vote.Hash().String())
+
+	block.txs = []lcommon.Transaction{vote, deregister}
+	require.NoError(
+		t,
+		f.ls.validateForgedTxs(context.Background(), block),
+		"a vote before the deregistration is cast by a registered DRep",
 	)
 }

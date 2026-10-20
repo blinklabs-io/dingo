@@ -501,7 +501,6 @@ func TestLeiosTxsOfferHealthyPeerIsNotSuppressedByFailingPeer(t *testing.T) {
 		460,
 		lcommon.Blake2b256Hash(manifestRaw).Bytes(),
 	)
-	bitmap := map[uint16]uint64{0: 1 << 63}
 	first, firstDone := newLeiosFetchConversation(t, append(
 		leiosFetchHandshake(),
 		ouroboros_mock.ConversationEntryInput{
@@ -747,7 +746,6 @@ func TestLeiosTxsOfferHandsOffAcrossMultipleFailingPeers(t *testing.T) {
 		461,
 		lcommon.Blake2b256Hash(manifestRaw).Bytes(),
 	)
-	bitmap := map[uint16]uint64{0: 1 << 63}
 	newPeer := func(txs []cbor.RawMessage) (*gouroboros.Connection, <-chan error) {
 		return newLeiosFetchConversation(t, append(
 			leiosFetchHandshake(),
@@ -912,7 +910,6 @@ func TestLeiosTxsOfferOwnerDisconnectHandsOffToWaiter(t *testing.T) {
 		464,
 		lcommon.Blake2b256Hash(manifestRaw).Bytes(),
 	)
-	bitmap := map[uint16]uint64{0: 1 << 63}
 	owner, _ := newLeiosFetchConversation(t, leiosFetchHandshake())
 	healthy, healthyDone := newLeiosFetchConversation(t, append(
 		leiosFetchHandshake(),

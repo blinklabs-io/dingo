@@ -1089,6 +1089,7 @@ func TestEqualSlotAlternativeCarriesNoLeiosData(t *testing.T) {
 		ChainContext:                    newAltTestChainContext(10),
 		SiblingAdopter:                  adopter,
 		LeiosCertificateProvider:        leiosCerts,
+		LeiosCertificationTimingChecker: forgerTestCertTiming{},
 		LeiosParentAnnouncementProvider: parent,
 		PromRegistry:                    prometheus.NewRegistry(),
 	})
@@ -2841,6 +2842,7 @@ func TestForgeReResolvesLeiosDataWhenParentChanges(t *testing.T) {
 			slotEnd:           time.Now().Add(time.Hour),
 		},
 		LeiosCertificateProvider:        certs,
+		LeiosCertificationTimingChecker: forgerTestCertTiming{},
 		LeiosParentAnnouncementProvider: parent,
 		PromRegistry:                    prometheus.NewRegistry(),
 	})
@@ -2913,6 +2915,7 @@ func TestForgeDropsStaleAnnouncementWhenParentChanges(t *testing.T) {
 			txs: leiosAnnouncementTxs(t),
 		},
 		LeiosCertificateProvider:        certs,
+		LeiosCertificationTimingChecker: forgerTestCertTiming{},
 		LeiosParentAnnouncementProvider: parent,
 		PromRegistry:                    prometheus.NewRegistry(),
 	})
@@ -2978,6 +2981,7 @@ func TestForgeKeepsLeiosDataWhenParentIsUnchanged(t *testing.T) {
 			slotEnd:           time.Now().Add(time.Hour),
 		},
 		LeiosCertificateProvider:        certs,
+		LeiosCertificationTimingChecker: forgerTestCertTiming{},
 		LeiosParentAnnouncementProvider: parent,
 		PromRegistry:                    prometheus.NewRegistry(),
 	})
@@ -3073,6 +3077,7 @@ func TestForgeReResolvesLeiosDataForEmptyFallback(t *testing.T) {
 			slotEnd: time.Now(),
 		},
 		LeiosCertificateProvider:        certs,
+		LeiosCertificationTimingChecker: forgerTestCertTiming{},
 		LeiosParentAnnouncementProvider: parent,
 		PromRegistry:                    prometheus.NewRegistry(),
 	})
@@ -3130,6 +3135,7 @@ func TestForgeKeepsAnnouncementWhenParentIsUnchanged(t *testing.T) {
 			txs: leiosAnnouncementTxs(t),
 		},
 		LeiosCertificateProvider:        &forgerTestLeiosCerts{},
+		LeiosCertificationTimingChecker: forgerTestCertTiming{},
 		LeiosParentAnnouncementProvider: parent,
 		PromRegistry:                    prometheus.NewRegistry(),
 	})
@@ -3213,6 +3219,7 @@ func TestForgeReResolvesLeiosDataWhenParentChangesBeforeTheFirstBuild(
 			slotEnd:           time.Now().Add(time.Hour),
 		},
 		LeiosCertificateProvider:        certs,
+		LeiosCertificationTimingChecker: forgerTestCertTiming{},
 		LeiosParentAnnouncementProvider: parent,
 		LeiosProduceChecker:             leiosChecker,
 		LeiosEBBroadcaster:              &forgerTestLeiosCaster{},
@@ -3314,6 +3321,7 @@ func TestForgeMarksTheReResolvedEndorserBlockSlot(t *testing.T) {
 			slotEnd:           time.Now().Add(time.Hour),
 		},
 		LeiosCertificateProvider:        certs,
+		LeiosCertificationTimingChecker: forgerTestCertTiming{},
 		LeiosParentAnnouncementProvider: parent,
 		PromRegistry:                    prometheus.NewRegistry(),
 	})

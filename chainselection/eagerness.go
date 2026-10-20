@@ -46,7 +46,11 @@ func (cs *ChainSelector) peerTipsIncludingCandidatesLocked() iter.Seq2[ouroboros
 				return
 			}
 		}
-		for connId, peerTip := range cs.pendingPeerTipFrontiers {
+		for connId := range cs.pendingPeerTipFrontiers {
+			peerTip := cs.latestPeerTipCandidateLocked(connId)
+			if peerTip == nil {
+				continue
+			}
 			if _, exists := cs.peerTips[connId]; !exists && !yield(connId, peerTip) {
 				return
 			}
@@ -86,6 +90,11 @@ type EagernessLimit struct {
 
 // EagernessLimit returns the current Limit on Eagerness.
 func (cs *ChainSelector) EagernessLimit() EagernessLimit {
+	releaseGeneration, generationCurrent := cs.pinCurrentHeaderCryptoGeneration()
+	if !generationCurrent {
+		return EagernessLimit{Active: true}
+	}
+	defer releaseGeneration()
 	cs.mutex.RLock()
 	defer cs.mutex.RUnlock()
 	return cs.computeEagernessLimitLocked(nil, cs.localTip)
@@ -251,6 +260,11 @@ func (f CandidateFragment) containsPoint(point ocommon.Point) bool {
 // fragment not past the limit, or the local tip when the fragment holds none.
 // It returns false when no peer is selected.
 func (cs *ChainSelector) SelectedTip() (ochainsync.Tip, bool) {
+	releaseGeneration, generationCurrent := cs.pinCurrentHeaderCryptoGeneration()
+	if !generationCurrent {
+		return ochainsync.Tip{}, false
+	}
+	defer releaseGeneration()
 	cs.mutex.RLock()
 	defer cs.mutex.RUnlock()
 	if cs.bestPeerConn == nil {
@@ -422,6 +436,11 @@ func (cs *ChainSelector) eagernessAdmissionStatus(
 	if appliedTip != nil {
 		applied = appliedTip()
 	}
+	releaseGeneration, generationCurrent := cs.pinCurrentHeaderCryptoGeneration()
+	if !generationCurrent {
+		return false, true
+	}
+	defer releaseGeneration()
 	cs.mutex.RLock()
 	defer cs.mutex.RUnlock()
 	if appliedTip == nil {

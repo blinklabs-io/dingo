@@ -64,7 +64,7 @@ var errCertifiedEndorserBlockUnavailable = errors.New(
 )
 
 // errLeiosCertificateWithoutAnnouncement is the verdict on a certifying ranking
-// block whose parent announced no endorser block: there is nothing for the
+// block whose parent announced no endorser block. There is nothing for the
 // certificate to certify, so the block is invalid, as in the reference
 // Forker.applyBlock (LeiosCertificateWithoutAnnouncement). It is not
 // errCertifiedEndorserBlockUnavailable, which is retried while a closure that
@@ -1169,9 +1169,16 @@ func (ls *LedgerState) validateDijkstraLeiosCertificate(
 			EndorserBlockValidationValid:
 		}
 	}
-	epochInfo, err := ls.epochForSlot(ebSlot)
+	epochInfo, err := ls.checkLeiosCertificationTiming(
+		ebSlot,
+		block.SlotNumber(),
+	)
 	if err != nil {
-		return fmt.Errorf("resolve certified endorser-block epoch: %w", err)
+		if errors.Is(err, errLeiosCertificateAcrossEpochBoundary) ||
+			errors.Is(err, errLeiosCertificateTooYoung) {
+			return ls.rejectLeiosCertifyingBlock(block, err)
+		}
+		return fmt.Errorf("check Leios certification timing: %w", err)
 	}
 	if err := ls.config.ValidateLeiosCertificate(
 		epochInfo.EpochId,

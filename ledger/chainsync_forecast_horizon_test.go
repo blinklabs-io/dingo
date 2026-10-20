@@ -96,10 +96,13 @@ func TestAwaitChainsyncHeaderAdmissionHoldsHeaderPastForecastHorizon(
 		covered:          covered,
 	}
 
+	var witnessCalls atomic.Int32
+	e := futureHeaderEvent(90, arrival)
+	e.ForecastHorizonWait = func() { witnessCalls.Add(1) }
 	results := awaitAdmissionAsync(
 		t.Context(),
 		ls,
-		futureHeaderEvent(90, arrival),
+		e,
 	)
 	testutil.RequireNoReceive(
 		t,
@@ -126,6 +129,7 @@ func TestAwaitChainsyncHeaderAdmissionHoldsHeaderPastForecastHorizon(
 	)
 	require.NoError(t, got.err)
 	require.True(t, got.accepted)
+	require.EqualValues(t, 1, witnessCalls.Load())
 	require.Empty(
 		t,
 		*waits,

@@ -153,12 +153,15 @@ type BootstrapConfig struct {
 	// resets, HTTP 429, HTTP 5xx) per download. Zero uses the downloader
 	// default. Negative disables transient retries.
 	DownloadMaxTransientRetries int
-	// httpClient, when set, is the shared keep-alive client the v2
-	// immutable-download pool reuses across all archive fetches so
-	// connections are pooled instead of re-handshaked per file. It is set
-	// internally by downloadImmutables on a by-value copy of the config;
-	// callers do not populate it.
+	// httpClient is the shared keep-alive client the v2 bootstrap reuses across
+	// artifact fetches. Callers do not populate it.
 	httpClient *http.Client
+	// downloadBudget bounds all artifact transfer requests and bytes in one v2
+	// bootstrap. It is initialized after the certified artifact is selected.
+	downloadBudget *artifactDownloadBudget
+	// extractionBudget bounds expanded bytes and entries across all archives in
+	// one v2 bootstrap and preserves free space on their destination filesystem.
+	extractionBudget *bootstrapExtractionBudget
 	// immutableDigests is the verified digest list, set by downloadImmutables
 	// so each archive's members are checked as they are extracted. When nil,
 	// an immutable archive is extracted without a member allowlist.

@@ -554,7 +554,7 @@ func TestFetchEndorserBlockByPointReportsNoPeerAfterDisconnect(t *testing.T) {
 func TestFetchEndorserBlockByPointPrefersExactOfferSource(t *testing.T) {
 	t.Parallel()
 
-	tx, manifestRaw, point, bitmap := leiosCertifiedRecoveryFixture(
+	tx, manifestRaw, point, _ := leiosCertifiedRecoveryFixture(
 		t,
 		0x55,
 		376041,
@@ -1086,7 +1086,7 @@ func TestFetchEndorserBlockByPointRotatesPastPeerThatNeverAnswers(
 ) {
 	t.Parallel()
 
-	tx, manifestRaw, point, bitmap := leiosCertifiedRecoveryFixture(
+	tx, manifestRaw, point, _ := leiosCertifiedRecoveryFixture(
 		t,
 		0x58,
 		376044,

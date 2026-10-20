@@ -1387,6 +1387,9 @@ func extractArchiveFile(
 
 		switch header.Typeflag {
 		case tar.TypeDir:
+			if err := limits.budget.reserveEntry(); err != nil {
+				return "", err
+			}
 			if err := mkdirExtracted(workDir, target); err != nil {
 				return "", fmt.Errorf(
 					"creating directory %s: %w",
@@ -1396,6 +1399,9 @@ func extractArchiveFile(
 			}
 		case tar.TypeReg,
 			'\x00': // '\x00' is the legacy regular-file flag (tar.TypeRegA)
+			if err := limits.budget.reserveEntry(); err != nil {
+				return "", err
+			}
 			// Enforce per-file size limit (header.Size is
 			// attacker-controlled, so we check it as a fast
 			// reject but also enforce actual bytes below).
@@ -1434,6 +1440,12 @@ func extractArchiveFile(
 			if verifyDigest {
 				hasher = sha256.New()
 				dst = io.MultiWriter(outFile, hasher)
+			}
+			if limits.budget != nil {
+				dst = &extractionBudgetWriter{
+					writer: dst,
+					budget: limits.budget,
+				}
 			}
 			written, err := io.Copy(
 				dst,

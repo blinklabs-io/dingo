@@ -1895,13 +1895,20 @@ func TestObservedHeader_RoundTrip(t *testing.T) {
 	}
 
 	s.RecordObservedHeader(chainsync.ObservedHeader{
-		ConnectionId: conn,
-		BlockHeader:  hdr,
-		Point:        point,
-		Tip:          tip,
-		ArrivalTime:  arrivalTime,
-		BlockNumber:  5,
-		Type:         1,
+		ConnectionId:                       conn,
+		BlockHeader:                        hdr,
+		HeaderCryptoVerificationGeneration: 1,
+		Point:                              point,
+		Tip:                                tip,
+		ArrivalTime:                        arrivalTime,
+		BlockNumber:                        5,
+		Type:                               1,
+	})
+	s.RecordObservedHeader(chainsync.ObservedHeader{
+		ConnectionId:                       conn,
+		BlockHeader:                        hdr,
+		HeaderCryptoVerificationGeneration: 2,
+		Point:                              point,
 	})
 
 	got, gotPrev, ok := s.LookupObservedHeader(conn, hash)
@@ -1911,11 +1918,54 @@ func TestObservedHeader_RoundTrip(t *testing.T) {
 	require.Equal(t, arrivalTime, got.ArrivalTime)
 	require.Equal(t, uint64(5), got.BlockNumber)
 	require.Equal(t, uint(1), got.Type)
+	require.Equal(t, uint64(2), got.HeaderCryptoVerificationGeneration)
 	require.Equal(t, hdr.PrevHash().Bytes(), gotPrev)
 
 	// LookupObservedHeader must not be visible from a different connection.
 	_, _, ok = s.LookupObservedHeader(newTestConnId(99), hash)
 	require.False(t, ok)
+}
+
+func TestClearObservedHeaderHistoryFromRetainsVerifiedPrefix(t *testing.T) {
+	t.Parallel()
+
+	s := newTestState(t, newTestEventBus(t), chainsync.DefaultConfig())
+	conn := newTestConnId(44)
+	require.True(t, s.AddClientConnId(conn))
+
+	var hashes [][]byte
+	var prev []byte
+	for i := 1; i <= 3; i++ {
+		hash := lcommon.NewBlake2b256(
+			[]byte(fmt.Sprintf("observed-history-%d", i)),
+		).Bytes()
+		s.RecordObservedHeader(chainsync.ObservedHeader{
+			ConnectionId: conn,
+			BlockHeader: testBlockHeader{
+				hash:        lcommon.NewBlake2b256(hash),
+				prevHash:    lcommon.NewBlake2b256(prev),
+				blockNumber: uint64(i),
+				slot:        uint64(i),
+			},
+			Point:       ocommon.NewPoint(uint64(i), hash),
+			BlockNumber: uint64(i),
+		})
+		hashes = append(hashes, hash)
+		prev = hash
+	}
+
+	s.ClearObservedHeaderHistoryFrom(conn, ocommon.NewPoint(2, hashes[1]))
+	_, _, firstRetained := s.LookupObservedHeader(conn, hashes[0])
+	_, _, rejectedRetained := s.LookupObservedHeader(conn, hashes[1])
+	_, _, descendantRetained := s.LookupObservedHeader(conn, hashes[2])
+	require.True(t, firstRetained)
+	require.False(t, rejectedRetained)
+	require.False(t, descendantRetained)
+
+	s.ClearObservedHeaderHistoryFrom(conn, ocommon.NewPoint(3, hashes[2]))
+	_, _, firstRetained = s.LookupObservedHeader(conn, hashes[0])
+	require.True(t, firstRetained,
+		"repeated suffix invalidation must retain the verified prefix")
 }
 
 func TestObservedHeaderLimitFollowsSelectionState(t *testing.T) {
