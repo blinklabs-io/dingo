@@ -17,7 +17,12 @@ package mcp
 import (
 	"context"
 	"errors"
+	"io/fs"
+	"log/slog"
+	"math"
 	"os"
+	"sync/atomic"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -36,17 +41,21 @@ const (
 	// truncated since it grew past the limit, and an open reader is one
 	// thing that prevents both.
 	maxSQLiteWALBytes = 128 << 20
+	// walStatErrorLogInterval rate-limits the warning for a WAL probe that
+	// keeps failing, since the probe runs on every MCP request.
+	walStatErrorLogInterval = time.Minute
 )
 
 var (
 	errReadsBusy = errors.New("too many concurrent SQLite queries")
 	// errWALPressure is returned while the metadata WAL exceeds
-	// maxSQLiteWALBytes. Refusing new reads lets the in-flight ones finish
-	// within their query timeout, which gives the periodic TRUNCATE
-	// checkpoint the reader-free interval it needs.
+	// maxSQLiteWALBytes or its size cannot be read. Refusing new reads lets
+	// the in-flight ones finish within their query timeout, which gives the
+	// periodic TRUNCATE checkpoint the reader-free interval it needs.
 	errWALPressure = errors.New(
-		"SQLite metadata WAL is above its size limit; " +
-			"inspection queries are paused until it is checkpointed",
+		"SQLite metadata WAL is above its size limit or cannot be " +
+			"inspected; inspection queries are paused until it is " +
+			"checkpointed",
 	)
 )
 
@@ -71,15 +80,35 @@ func newReadLimits() *readLimits {
 }
 
 // walFileBytes returns a WAL size probe for the SQLite database at path. A
-// missing or unreadable WAL file reads as zero.
-func walFileBytes(path string) func() int64 {
+// missing WAL file reads as zero. Any other stat error reads as
+// math.MaxInt64, so a probe that cannot see the file fails closed instead of
+// admitting reads against a WAL of unknown size. Such errors are logged at
+// most once per walStatErrorLogInterval when logger is non-nil.
+func walFileBytes(path string, logger *slog.Logger) func() int64 {
 	walPath := path + "-wal"
+	var lastLogged atomic.Int64
 	return func() int64 {
 		info, err := os.Stat(walPath)
-		if err != nil {
+		if err == nil {
+			return info.Size()
+		}
+		if errors.Is(err, fs.ErrNotExist) {
 			return 0
 		}
-		return info.Size()
+		if logger != nil {
+			now := time.Now().UnixNano()
+			last := lastLogged.Load()
+			if (last == 0 ||
+				now-last >= int64(walStatErrorLogInterval)) &&
+				lastLogged.CompareAndSwap(last, now) {
+				logger.Warn(
+					"MCP cannot stat the metadata SQLite WAL; refusing reads",
+					"path", walPath,
+					"error", err,
+				)
+			}
+		}
+		return math.MaxInt64
 	}
 }
 

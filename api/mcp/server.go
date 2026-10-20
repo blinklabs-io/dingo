@@ -151,7 +151,11 @@ func NewMCPServer(
 	// Register tools, resources & prompts
 	limits := newReadLimits()
 	if sqlitePath != "" {
-		limits.walBytes = walFileBytes(sqlitePath)
+		walLogger := deps.Logger
+		if walLogger == nil {
+			walLogger = slog.Default()
+		}
+		limits.walBytes = walFileBytes(sqlitePath, walLogger)
 		server.AddReceivingMiddleware(limits.walPressureMiddleware())
 	}
 	registerSQLiteTools(server, db, cfg.QueryTimeout, cfg.MaxRows, limits)

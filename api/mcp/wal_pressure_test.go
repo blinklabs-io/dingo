@@ -15,9 +15,12 @@
 package mcp
 
 import (
+	"bytes"
 	"context"
 	"os"
+	"log/slog"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -104,7 +107,7 @@ func TestWALFileBytes(t *testing.T) {
 	t.Parallel()
 
 	path := filepath.Join(t.TempDir(), "metadata.sqlite")
-	probe := walFileBytes(path)
+	probe := walFileBytes(path, nil)
 	assert.Zero(t, probe(), "missing WAL reads as zero")
 
 	require.NoError(t, os.WriteFile(path+"-wal", make([]byte, 4096), 0o600))
@@ -194,4 +197,23 @@ func TestNewMCPServerRefusesDatabaseReadsUnderWALPressure(t *testing.T) {
 		URI: "dingo://node/status",
 	})
 	require.NoError(t, err)
+}
+
+func TestWALFileBytesFailsClosedOnStatError(t *testing.T) {
+	t.Parallel()
+
+	// A regular file where the database directory should be makes stat of
+	// the -wal path fail with an error other than "does not exist".
+	parent := filepath.Join(t.TempDir(), "not-a-dir")
+	require.NoError(t, os.WriteFile(parent, nil, 0o600))
+	var logs bytes.Buffer
+	probe := walFileBytes(
+		filepath.Join(parent, "metadata.sqlite"),
+		slog.New(slog.NewTextHandler(&logs, nil)),
+	)
+	for range 3 {
+		assert.Greater(t, probe(), int64(maxSQLiteWALBytes))
+	}
+	assert.Equal(t, 1, strings.Count(logs.String(), "cannot stat"),
+		"a persistent stat error is logged once per interval")
 }

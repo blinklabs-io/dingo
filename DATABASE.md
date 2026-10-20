@@ -211,7 +211,9 @@ neither reset nor truncated since it grew past the limit, and an open reader
 prevents both. The in-flight reads finish within the query timeout, which gives
 the periodic TRUNCATE checkpoint a reader-free interval from MCP; requests are
 admitted again once the file is back under the limit. The probe is a `stat` of
-the `-wal` file next to `SQLitePath()`; callers that inject their own SQLite
+the `-wal` file next to `SQLitePath()`: a missing file reads as empty, and
+any other stat error counts as pressure and is logged at most once a minute.
+Callers that inject their own SQLite
 pool without a metadata store get no WAL check. SQL row
 limits are enforced during iteration, including PRAGMA results. Arbitrary
 queries and EXPLAIN use a dedicated borrowed connection with `query_only` and
