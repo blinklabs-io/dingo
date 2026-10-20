@@ -428,37 +428,111 @@ func redactRemoteImmutableURL(value string) string {
 	return u.String()
 }
 
-// remoteImmutableURLText matches URL-shaped text in an error message. The
-// final class excludes trailing punctuation so it stays in the message.
-var remoteImmutableURLText = regexp.MustCompile(
-	`(?i)https?://[^\s"']*[^\s"':,.;)]`,
+// remoteImmutableCredentialToken matches whitespace and double-quote
+// delimited words. Transport causes quote URLs that net/http could not parse
+// (relative, scheme-relative, non-http, or containing apostrophes), so a word
+// is treated as URL text by the characters that carry credentials rather than
+// by its scheme.
+var remoteImmutableCredentialToken = regexp.MustCompile(`[^\s"]+`)
+
+const (
+	remoteImmutableRedactedURL    = "remote ImmutableDB URL"
+	remoteImmutableRedactedSecret = "[redacted]"
+	remoteImmutableMinSecretLen   = 3
 )
+
+// remoteImmutableRequestSecrets returns the credential values carried by the
+// request URL, so a cause that echoes them outside URL syntax is still
+// scrubbed.
+func remoteImmutableRequestSecrets(requestURL string) []string {
+	u, err := url.Parse(requestURL)
+	if err != nil {
+		return nil
+	}
+	var secrets []string
+	add := func(v string) {
+		if len(v) >= remoteImmutableMinSecretLen {
+			secrets = append(secrets, v)
+		}
+	}
+	if u.User != nil {
+		add(u.User.Username())
+		if pw, ok := u.User.Password(); ok {
+			add(pw)
+		}
+	}
+	add(u.RawQuery)
+	add(u.Fragment)
+	add(u.RawFragment)
+	for _, values := range u.Query() {
+		for _, v := range values {
+			add(v)
+		}
+	}
+	return secrets
+}
+
+func scrubRemoteImmutableText(text string, secrets []string) string {
+	for _, secret := range secrets {
+		text = strings.ReplaceAll(text, secret, remoteImmutableRedactedSecret)
+	}
+	return remoteImmutableCredentialToken.ReplaceAllStringFunc(
+		text,
+		func(word string) string {
+			if !strings.ContainsAny(word, "?#@") {
+				return word
+			}
+			trimmed := strings.TrimRight(word, ":,.;)'")
+			return remoteImmutableRedactedURL + word[len(trimmed):]
+		},
+	)
+}
 
 // redactedRemoteImmutableError keeps the original error reachable through
 // Unwrap for errors.Is and errors.As while its message carries no URL
 // userinfo, query or fragment.
 type redactedRemoteImmutableError struct {
-	msg string
-	err error
+	msg     string
+	err     error
+	secrets []string
 }
 
 func (e *redactedRemoteImmutableError) Error() string { return e.msg }
 
 func (e *redactedRemoteImmutableError) Unwrap() error { return e.err }
 
+// As stops errors.As from handing out the original *url.Error, whose URL and
+// message can carry credentials. Other targets traverse the original chain.
+func (e *redactedRemoteImmutableError) As(target any) bool {
+	urlErrTarget, ok := target.(**url.Error)
+	if !ok {
+		return false
+	}
+	var urlErr *url.Error
+	if !errors.As(e.err, &urlErr) {
+		return false
+	}
+	redacted := *urlErr
+	redacted.URL = redactRemoteImmutableURL(urlErr.URL)
+	redacted.Err = errors.New(
+		scrubRemoteImmutableText(fmt.Sprint(urlErr.Err), e.secrets),
+	)
+	*urlErrTarget = &redacted
+	return true
+}
+
 func remoteImmutableRequestError(action, requestURL string, err error) error {
+	secrets := remoteImmutableRequestSecrets(requestURL)
 	var urlErr *url.Error
 	if errors.As(err, &urlErr) && urlErr.Err != nil {
+		secrets = append(secrets, remoteImmutableRequestSecrets(urlErr.URL)...)
 		err = urlErr.Err
 	}
 	msg := fmt.Sprintf(
-		"%s %s: %s", action, redactRemoteImmutableURL(requestURL), err,
+		"%s %s: %s", action, redactRemoteImmutableURL(requestURL),
+		scrubRemoteImmutableText(err.Error(), secrets),
 	)
-	// Transport causes can quote the request or a redirect target verbatim.
-	msg = remoteImmutableURLText.ReplaceAllStringFunc(
-		msg, redactRemoteImmutableURL,
-	)
-	return &redactedRemoteImmutableError{msg: msg, err: err}
+	return &redactedRemoteImmutableError{msg: msg, err: err, secrets: secrets}
 }
 
 func isLoopbackRemoteURL(u *url.URL) bool {
