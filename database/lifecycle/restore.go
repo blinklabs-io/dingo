@@ -184,7 +184,12 @@ func restoreRecoveryMarkerDirs(
 	dirs := make([]string, 0, 1+len(cfg.RecoveryMarkerDirs)+len(additional))
 	seen := make(map[string]struct{}, cap(dirs))
 	candidates := append([]string{cfg.ActiveDataDir}, cfg.RecoveryMarkerDirs...)
-	candidates = append(candidates, additional...)
+	// The caller's target directory (the restore staging sibling on startup
+	// recovery) is not a trusted marker location. It only stands in when no
+	// active data directory is configured.
+	if cfg.ActiveDataDir == "" {
+		candidates = append(candidates, additional...)
+	}
 	for _, dir := range candidates {
 		if dir == "" {
 			continue
@@ -1533,8 +1538,6 @@ func RecoverInterruptedRestore(
 	storageConfig RestoreStorageConfig,
 	accept bool,
 ) error {
-	_, statErr := os.Stat(recoveryDir)
-	recoveryDirExists := statErr == nil
 	rollback, manifest, err := readRestoreRecovery(recoveryDir)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -1544,23 +1547,28 @@ func RecoverInterruptedRestore(
 					removeErr,
 				)
 			}
-			if recoveryDirExists {
-				if markerErr := removeRestoreRecoveryMarkers(
-					restoreRecoveryMarkerDirs(storageConfig, targetDataDir), "",
-				); markerErr != nil {
-					return fmt.Errorf(
-						"remove incomplete restore recovery marker: %w",
-						markerErr,
-					)
-				}
+			// A marker left without a record, or without its recovery
+			// directory, belongs to no restore and would block the next
+			// marker write.
+			if markerErr := removeRestoreRecoveryMarkers(
+				restoreRecoveryMarkerDirs(storageConfig, targetDataDir), "",
+			); markerErr != nil {
+				return fmt.Errorf(
+					"remove incomplete restore recovery marker: %w",
+					markerErr,
+				)
 			}
 			return nil
 		}
 		return err
 	}
 	rollback.markerDirs = restoreRecoveryMarkerDirs(storageConfig, targetDataDir)
-	if err := rollback.authenticate(); err != nil {
-		return err
+	// Only an external-store reset needs the marker binding; accepting a
+	// completed restore just disposes of the record.
+	if !accept {
+		if err := rollback.authenticate(); err != nil {
+			return err
+		}
 	}
 	if accept {
 		err = rollback.removeOriginalBlobNamespace(
