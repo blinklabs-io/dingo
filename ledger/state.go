@@ -1012,6 +1012,12 @@ type LedgerStateConfig struct {
 	ManualBlockProcessing    bool
 	ForgeBlocks              bool
 	DatabaseWorkerPoolConfig DatabaseWorkerPoolConfig
+	// VerifyReplayHeaders makes ledger apply run the full VRF, KES,
+	// operational-certificate and leader-eligibility check on every block
+	// that no Mithril certificate covers, as if admission had deferred it.
+	// Replay feeds blocks that never passed admission, so apply is the only
+	// place their headers can be checked before they reach ledger state.
+	VerifyReplayHeaders bool
 	// BlockPipelineEnabled turns on parallel block decode in the chainsync
 	// replay loop (ledgerReadChainIterator): blocks read back from the
 	// primary chain are decoded by a small worker pool (gouroboros'
@@ -8142,7 +8148,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 					return fmt.Errorf("%s: %w", label, recoverErr)
 				}
 				if recovered {
-					return errRestartLedgerPipeline
+					return ls.restartAfterRecovery(rejected)
 				}
 				return fmt.Errorf("%s: %w", label, rejected)
 			}
@@ -8171,7 +8177,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 								return fmt.Errorf("recover rejected Leios certifying block: %w", recoverErr)
 							}
 							if recovered {
-								return errRestartLedgerPipeline
+								return ls.restartAfterRecovery(err)
 							}
 							return err
 						}
@@ -8657,7 +8663,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 						)
 					}
 					if recovered {
-						return errRestartLedgerPipeline
+						return ls.restartAfterRecovery(result.err)
 					}
 					return fmt.Errorf(
 						"read-chain decode or validation: %w",
@@ -8782,7 +8788,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 					)
 				}
 				if recovered {
-					return errRestartLedgerPipeline
+					return ls.restartAfterRecovery(err)
 				}
 				return fmt.Errorf(
 					"prepare block apply snapshot: %w",
@@ -8903,6 +8909,14 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 				nextBatch[i:end],
 				snapshotEpoch,
 			)
+			verifiedReplayHeaders, replayHeaderJobs, verifyErr := ls.prepareReplayHeaders(
+				ctx,
+				blocksBeforeEpochEnd(nextBatch[i:end], snapshotEpoch),
+			)
+			if verifyErr != nil {
+				completeReadResult()
+				return verifyErr
+			}
 			finishValidationTransition := ls.beginTxValidationTransition()
 			var transactionOpCertCounters *trustedReplayOpCertCounterCache
 			var transactionReplayUtxos map[utxoref.Key]lcommon.Utxo
@@ -8935,6 +8949,11 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 				snapshotTip,
 				candidateTip,
 				func(txn *database.Txn) error { //nolint:contextcheck
+					replayWorkers := startReplayHeaderJobs(
+						ctx, nextBatch[i:end], verifiedReplayHeaders,
+						replayHeaderJobs, verifyReplayHeader,
+					)
+					defer replayWorkers.stop()
 					deltaBatch = NewLedgerDeltaBatch()
 					if trustedReplayOpCertCounters != nil {
 						transactionOpCertCounters = &trustedReplayOpCertCounterCache{
@@ -9162,6 +9181,9 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 							aheadUtxos = aheadPrefetch.take(offset)
 						}
 						blockCtx := withAheadUtxos(ctx, aheadUtxos)
+						blockCtx = withReplayHeaderVerification(
+							blockCtx, verifiedReplayHeaders, offset,
+						)
 						blockCtx = withPreverifiedSignatures(
 							blockCtx,
 							preverifiedSignatures,
@@ -9313,7 +9335,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 							return fmt.Errorf("failed to set tip: %w", err)
 						}
 					}
-					return nil
+					return replayWorkers.wait()
 				},
 			)
 			if err != nil {
@@ -9335,7 +9357,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 				}
 				if recovered {
 					completeReadResult()
-					return errRestartLedgerPipeline
+					return ls.restartAfterRecovery(err)
 				}
 				// A deferred header check that rejects an already-persisted
 				// block is deterministic: restarting the pipeline re-reads
@@ -9354,7 +9376,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 				}
 				if recovered {
 					completeReadResult()
-					return errRestartLedgerPipeline
+					return ls.restartAfterRecovery(err)
 				}
 				// A stale chain iterator delivers a fork block whose prev-hash
 				// doesn't match our current tip. This happens when a concurrent
@@ -9630,6 +9652,15 @@ func (ls *LedgerState) ledgerProcessBlock(
 		if err := ls.validateBlockHeaderProtocolVersion(
 			block.Header(), pparams,
 		); err != nil {
+			return nil, err
+		}
+	} else if !ls.config.TrustedReplay && !ls.slotCoveredByMithril(point.Slot) {
+		// The aggregate maxBlockExUnits bound is a block-level ledger rule
+		// that per-transaction validation never repeats, so a peer-sourced
+		// block must meet it even when ValidateHistorical=false skips the
+		// rest of validation. Mithril-certified and TrustedReplay blocks are
+		// trusted input and keep skipping it.
+		if err := validateBlockExUnits(block, pparams); err != nil {
 			return nil, err
 		}
 	}

@@ -542,12 +542,36 @@ func (ls *LedgerState) verifyBlockHeaderStatelessCryptoWithCache(
 		)
 	}
 
-	if err := verifyBlockHeaderHex(
-		block,
-		ls.epochNonceHex(epoch.EpochId, epoch.Nonce),
-		slotsPerKesPeriod,
+	nonce := ls.epochNonceHex(epoch.EpochId, epoch.Nonce)
+	maxEvolutions := ls.maxKESEvolutions()
+	if ls.config.VerifyReplayHeaders {
+		if result, ok := replayHeaderVerificationFrom(
+			ctx, block, epoch.EpochId, nonce, slotsPerKesPeriod, maxEvolutions,
+		); ok {
+			if result.panicked {
+				panic(result.panicValue)
+			}
+			if result.err != nil {
+				return models.Epoch{}, nil, result.err
+			}
+			return epoch, epochCache, nil
+		}
+	}
+	if err := verifyHeaderCryptoParameters(
+		block, nonce, slotsPerKesPeriod, maxEvolutions,
 	); err != nil {
 		return models.Epoch{}, nil, err
+	}
+	return epoch, epochCache, nil
+}
+
+func verifyHeaderCryptoParameters(
+	block ledger.Block,
+	nonce string,
+	slotsPerKesPeriod, maxEvolutions uint64,
+) error {
+	if err := verifyBlockHeaderHex(block, nonce, slotsPerKesPeriod); err != nil {
+		return err
 	}
 
 	// Validate the operational certificate's cold-key signature and KES
@@ -555,18 +579,17 @@ func (ls *LedgerState) verifyBlockHeaderStatelessCryptoWithCache(
 	// the counter-monotonicity check lives in the block-apply transaction.
 	if err := verifyOpCertHeaderCrypto(
 		block.Header(),
-		blockSlot,
+		block.SlotNumber(),
 		slotsPerKesPeriod,
-		ls.maxKESEvolutions(),
+		maxEvolutions,
 	); err != nil {
-		return models.Epoch{}, nil, fmt.Errorf(
+		return fmt.Errorf(
 			"block header verification failed at slot %d: %w",
-			blockSlot,
+			block.SlotNumber(),
 			err,
 		)
 	}
-
-	return epoch, epochCache, nil
+	return nil
 }
 
 // validateHeaderEraOrder rejects a non-nil header whose era precedes the era

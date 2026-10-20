@@ -131,4 +131,4 @@ documentation: keep them accurate and in `// Name ...` form.
 
 ## Config
 
-Priority: CLI provider selector > generic plugin env > YAML > provider defaults. Key env vars include `CARDANO_NETWORK`, `CARDANO_DATABASE_PATH`, and `DINGO_PLUGINS_<CAPABILITY>_{PROVIDER,CONFIG_*}`.
+Priority: CLI provider selector > generic plugin env > YAML > provider defaults. Key env vars include `CARDANO_NETWORK`, `CARDANO_DATABASE_PATH`, and `DINGO_PLUGINS_<CAPABILITY>_{PROVIDER,CONFIG_*}`; `CONFIG_<FIELD>_FILE` reads a field from a file.
