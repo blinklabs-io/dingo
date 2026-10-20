@@ -93,12 +93,18 @@ func NewMCPServer(
 	}
 	var db *sql.DB
 	var openedDB *sql.DB
+	var sqlitePath string
+	if deps.Database != nil {
+		if provider, ok := deps.Database.Metadata().(interface{ SQLitePath() string }); ok {
+			sqlitePath = provider.SQLitePath()
+		}
+	}
 
 	if deps.SQLDB != nil {
 		db = deps.SQLDB
 	} else if deps.Database != nil {
-		if provider, ok := deps.Database.Metadata().(interface{ SQLitePath() string }); ok && provider.SQLitePath() != "" {
-			readDB, err := OpenReadOnlySQLite(ctx, provider.SQLitePath())
+		if sqlitePath != "" {
+			readDB, err := OpenReadOnlySQLite(ctx, sqlitePath)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -144,6 +150,9 @@ func NewMCPServer(
 
 	// Register tools, resources & prompts
 	limits := newReadLimits()
+	if sqlitePath != "" {
+		limits.walBytes = walFileBytes(sqlitePath)
+	}
 	registerSQLiteTools(server, db, cfg.QueryTimeout, cfg.MaxRows, limits)
 	registerCardanoTools(
 		server,
