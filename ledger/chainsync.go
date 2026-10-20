@@ -6456,6 +6456,10 @@ func (ls *LedgerState) handleEventBlockfetchBlockDeferredInternal(
 			queuedVerificationGeneration = ls.chain.QueuedHeaderCryptoVerificationGeneration(e.Point)
 		}
 		headerVerifyStart := time.Now()
+		verifyCtx, cancelVerify := context.WithTimeout(
+			ls.lifecycleContext(),
+			blockfetchBusyTimeout,
+		)
 		verificationGeneration, verifyErr := ls.
 			withStableBlockfetchHeaderVerification(
 				blockfetchMutexHeld,
@@ -6463,16 +6467,22 @@ func (ls *LedgerState) handleEventBlockfetchBlockDeferredInternal(
 					if !ls.headerCryptoVerificationGenerationCurrent(
 						queuedVerificationGeneration,
 					) {
-						return ls.verifyBlockHeaderCryptoBeforeApply(e.Block)
+						return ls.verifyBlockHeaderCryptoWithEpochAdvance(
+							verifyCtx,
+							e.Block,
+							true,
+							true,
+						)
 					}
 					return ls.verifyBlockHeaderStateWithEpochAdvance(
-						ls.lifecycleContext(),
+						verifyCtx,
 						e.Block,
 						true,
 						true,
 					)
 				},
 			)
+		cancelVerify()
 		if blockfetchMutexHeld {
 			if !ls.blockfetchEventCurrent(e) ||
 				!ls.blockfetchBatchStillCurrent() {
@@ -6483,6 +6493,17 @@ func (ls *LedgerState) handleEventBlockfetchBlockDeferredInternal(
 			blockStageHeaderVerify,
 			time.Since(headerVerifyStart),
 		)
+		if errors.Is(verifyErr, context.Canceled) &&
+			ls.lifecycleContext().Err() != nil {
+			return nil //nolint:nilerr // Ledger shutdown cancels in-flight admission.
+		}
+		if errors.Is(verifyErr, context.DeadlineExceeded) {
+			verifyErr = fmt.Errorf(
+				"%w: header verification exceeded %s",
+				errHeaderVerificationDeferred,
+				blockfetchBusyTimeout,
+			)
+		}
 		if verifyErr == nil && ls.config.BlockPipelineValidateEnabled {
 			ls.markAdmissionVerified(e.Point, verificationGeneration)
 		}

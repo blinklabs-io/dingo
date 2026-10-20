@@ -1371,13 +1371,15 @@ type LedgerState struct {
 	// LocalStateQuery caller asking "what are the current protocol
 	// parameters" should see only what the chain has actually committed to,
 	// matching what a real cardano-node reports during the same window.
-	syntheticV2CostModel      bool
-	transitionInfo            hardfork.TransitionInfo // upcoming era boundary state (mirrors Haskell HFC TransitionInfo)
-	hfiEvalDoneEpoch          uint64                  // currentEpoch.EpochId for which the HFI tally has been kicked off (held under ls.RWMutex)
-	hfiEvalGeneration         atomic.Uint64           // bumped on rollback to invalidate any in-flight HFI tally
-	hfiStabilityEvalInFlight  atomic.Bool             // guard against overlapping async HFI tallies
-	rewardInputGeneration     atomic.Uint64           // bracketed around rollback to invalidate in-flight reward calculations
-	rewardInputRollbackActive atomic.Int64            // non-zero while rollback can mutate reward calculation inputs
+	syntheticV2CostModel        bool
+	transitionInfo              hardfork.TransitionInfo // upcoming era boundary state (mirrors Haskell HFC TransitionInfo)
+	hfiEvalDoneEpoch            uint64                  // currentEpoch.EpochId for which the HFI tally has been kicked off (held under ls.RWMutex)
+	hfiEvalGeneration           atomic.Uint64           // bumped on rollback to invalidate any in-flight HFI tally
+	hfiStabilityEvalInFlight    atomic.Bool             // guard against overlapping async HFI tallies
+	protocolVersionEvalInFlight atomic.Bool             // guard against overlapping async classic protocol-version evaluations
+	protocolVersionEvalRerun    atomic.Bool             // a queue request arrived while an evaluation was running
+	rewardInputGeneration       atomic.Uint64           // bracketed around rollback to invalidate in-flight reward calculations
+	rewardInputRollbackActive   atomic.Int64            // non-zero while rollback can mutate reward calculation inputs
 	// utxoByRefReads counts UTxO rows read from the database for
 	// LedgerView.UtxoById across every view of this LedgerState: each
 	// database.UtxoByRef point read, plus each row returned by a block's
@@ -1917,6 +1919,12 @@ type LedgerState struct {
 	// replayWG tracks in-flight replayBufferedHeadersAsync goroutines so
 	// Close can drain them before the database is closed.
 	replayWG sync.WaitGroup
+	// protocolVersionEvalMu serializes protocolVersionEvalWG.Add with Close's
+	// protocolVersionEvalWG.Wait so no evaluation starts once Close has begun
+	// draining; Close waits for the evaluations before storage is closed.
+	protocolVersionEvalMu     sync.Mutex
+	protocolVersionEvalClosed bool
+	protocolVersionEvalWG     sync.WaitGroup
 	// rewardPrecomputeMu serializes rewardPrecomputeWG.Add with Close's
 	// rewardPrecomputeWG.Wait and protects the latest-event coalescing state so
 	// Close cannot return while precompute is still issuing database reads/writes.
@@ -3591,6 +3599,13 @@ func (ls *LedgerState) Close() (retErr error) {
 		"elapsed", time.Since(replayStart).Round(time.Millisecond),
 	)
 
+	// closed was set above, so no new classic protocol-version evaluation can
+	// register; the in-flight ones read the chain and database.
+	ls.protocolVersionEvalMu.Lock()
+	ls.protocolVersionEvalClosed = true
+	ls.protocolVersionEvalMu.Unlock()
+	ls.protocolVersionEvalWG.Wait()
+
 	ls.config.Logger.Info("waiting for in-flight reward precompute handlers")
 	rewardStart := time.Now()
 	// closed was set before the subscriptions were removed. Taking the mutex
@@ -5159,7 +5174,7 @@ func (ls *LedgerState) rollbackWithBlocksAndIntent(
 	// of committing stale data.
 	ls.hfiEvalDoneEpoch = 0
 	ls.hfiEvalGeneration.Add(1)
-	ls.evaluateProtocolVersionBump(ctx)
+	ls.queueProtocolVersionBumpEvaluation(ctx)
 	ls.evaluateHardForkInitiationStability(ctx)
 	// Always update nonce - clear it on genesis rollback, set
 	// it otherwise
@@ -8394,7 +8409,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 			// advanced ls.currentEra to a new era whose own successor may
 			// carry its own AtEpoch override or already-met quorum.
 			ls.evaluateTriggerAtEpoch()
-			ls.evaluateProtocolVersionBump(ctx)
+			ls.queueProtocolVersionBumpEvaluation(ctx)
 			ls.publishSnapshotsLocked()
 			ls.Unlock()
 			finishValidationTransition()
@@ -9451,7 +9466,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 				// TransitionImpossible.
 				ls.evaluateTriggerAtEpoch()
 				ls.evaluateTransitionImpossible()
-				ls.evaluateProtocolVersionBump(ctx)
+				ls.queueProtocolVersionBumpEvaluation(ctx)
 				ls.evaluateHardForkInitiationStability(ctx)
 				// Capture tip for logging while holding the lock
 				tipForLog = ls.currentTip
@@ -10742,53 +10757,163 @@ func (ls *LedgerState) evaluateTriggerAtEpoch() {
 //     evaluateTriggerAtEpoch's own idempotency guard and avoiding a redundant
 //     DB read on every subsequent block once the boundary is confirmed.
 //
-// Call under ls.Lock() (runtime paths) or without a lock during
-// single-threaded startup.
+// Startup calls this synchronously before event processing begins. Runtime
+// paths call queueProtocolVersionBumpEvaluation while holding ls.Lock(), so
+// chain and database reads do not stall the ledger writer.
 func (ls *LedgerState) evaluateProtocolVersionBump(ctx context.Context) {
+	snapshot, ok := ls.protocolVersionBumpSnapshot()
+	if !ok || !ls.protocolVersionBumpDetected(ctx, snapshot) {
+		return
+	}
+	ls.transitionInfo = hardfork.NewTransitionKnown(snapshot.targetEpoch)
+}
+
+type protocolVersionBumpSnapshot struct {
+	era           eras.EraDesc
+	epoch         uint64
+	targetEpoch   uint64
+	pparams       lcommon.ProtocolParameters
+	tip           ochainsync.Tip
+	countFromSlot uint64
+	securityParam uint64
+	generation    uint64
+}
+
+// protocolVersionBumpSnapshot captures the cheap, writer-owned inputs used by
+// classic protocol-version evaluation. Call it under ls.Lock() at runtime or
+// without a lock during single-threaded startup.
+func (ls *LedgerState) protocolVersionBumpSnapshot() (
+	protocolVersionBumpSnapshot,
+	bool,
+) {
 	shape := ls.eraShape()
 	if len(shape.Eras) == 0 {
-		return
+		return protocolVersionBumpSnapshot{}, false
 	}
 	entry, ok := shape.EraForID(ls.currentEra.Id)
 	if !ok {
-		return
+		return protocolVersionBumpSnapshot{}, false
 	}
 	if entry.NextEraTrigger.Kind != hardfork.TriggerAtVersion {
-		return
+		return protocolVersionBumpSnapshot{}, false
 	}
 	targetEpoch := ls.currentEpoch.EpochId + 1
 	if ls.transitionInfo.State == hardfork.TransitionKnown &&
 		ls.transitionInfo.KnownEpoch == targetEpoch {
-		return
+		return protocolVersionBumpSnapshot{}, false
 	}
 	if ls.currentPParams == nil {
-		return
+		return protocolVersionBumpSnapshot{}, false
 	}
-	// Checked before the forecast so the database is not read for most of
-	// the epoch, while the tip is still before the deadline.
 	countFromSlot, ok := ls.pparamVotingCountStartSlot()
 	if !ok || ls.currentTip.Point.Slot < countFromSlot {
-		return
+		return protocolVersionBumpSnapshot{}, false
+	}
+	securityParam, ok := ls.securityParamForEra(ls.currentEra.Id)
+	if !ok {
+		return protocolVersionBumpSnapshot{}, false
+	}
+	tip := ls.currentTip
+	tip.Point.Hash = append([]byte(nil), tip.Point.Hash...)
+	return protocolVersionBumpSnapshot{
+		era:           ls.currentEra,
+		epoch:         ls.currentEpoch.EpochId,
+		targetEpoch:   targetEpoch,
+		pparams:       ls.currentPParams,
+		tip:           tip,
+		countFromSlot: countFromSlot,
+		securityParam: securityParam,
+		generation:    ls.hfiEvalGeneration.Load(),
+	}, true
+}
+
+func (ls *LedgerState) protocolVersionBumpDetected(
+	ctx context.Context,
+	snapshot protocolVersionBumpSnapshot,
+) bool {
+	count, err := ls.countBlocksFromSlot(
+		ctx,
+		snapshot.tip,
+		snapshot.countFromSlot,
+	)
+	if err != nil || count < snapshot.securityParam {
+		return false
 	}
 	forecasted, err := ls.forecastPendingPParamUpdate(
-		ls.currentEra, targetEpoch, ls.currentPParams,
+		snapshot.era,
+		snapshot.targetEpoch,
+		snapshot.pparams,
 	)
 	if err != nil || forecasted == nil {
-		return
+		return false
 	}
-	oldVer, oldErr := GetProtocolVersion(ls.currentPParams)
+	oldVer, oldErr := GetProtocolVersion(snapshot.pparams)
 	newVer, newErr := GetProtocolVersion(forecasted)
 	if oldErr != nil || newErr != nil {
+		return false
+	}
+	return ls.isHardForkTransition(oldVer, newVer)
+}
+
+// queueProtocolVersionBumpEvaluation snapshots inputs under the caller's
+// write lock, performs chain and database reads after the lock is released,
+// and publishes a result only if no rollback or epoch change invalidated it.
+// A request that arrives while an evaluation is running is not dropped: the
+// running evaluation re-queues one when it finishes, so a tip that moved
+// during a negative evaluation is still evaluated. The caller's context is
+// not used for the reads: the evaluation outlives it and runs on the ledger
+// lifecycle context instead.
+func (ls *LedgerState) queueProtocolVersionBumpEvaluation(
+	_ context.Context,
+) {
+	snapshot, ok := ls.protocolVersionBumpSnapshot()
+	if !ok {
 		return
 	}
-	if !ls.isHardForkTransition(oldVer, newVer) {
+	if !ls.protocolVersionEvalInFlight.CompareAndSwap(false, true) {
+		ls.protocolVersionEvalRerun.Store(true)
 		return
 	}
-	k, ok := ls.securityParamForEra(ls.currentEra.Id)
-	if !ok || ls.blocksAppliedFromSlot(ctx, countFromSlot) < k {
+	ls.protocolVersionEvalMu.Lock()
+	if ls.protocolVersionEvalClosed {
+		ls.protocolVersionEvalMu.Unlock()
+		ls.protocolVersionEvalInFlight.Store(false)
 		return
 	}
-	ls.transitionInfo = hardfork.NewTransitionKnown(targetEpoch)
+	ls.protocolVersionEvalWG.Add(1)
+	ls.protocolVersionEvalMu.Unlock()
+	go ls.runProtocolVersionBumpEvaluation( //nolint:contextcheck // the evaluation outlives the caller; Close drains it
+		ls.lifecycleContext(),
+		snapshot,
+	)
+}
+
+// runProtocolVersionBumpEvaluation reads with the ledger lifecycle context
+// rather than a caller's short-lived one: Close drains this goroutine before
+// storage is closed, and the database forecast takes no context to cancel.
+func (ls *LedgerState) runProtocolVersionBumpEvaluation(
+	ctx context.Context,
+	snapshot protocolVersionBumpSnapshot,
+) {
+	defer ls.protocolVersionEvalWG.Done()
+	detected := ls.protocolVersionBumpDetected(ctx, snapshot)
+	ls.Lock()
+	defer ls.Unlock()
+	// Cleared under the write lock that every queue request also holds, so a
+	// request either sees the evaluation in flight and sets the rerun flag
+	// before this point, or starts its own evaluation after it.
+	ls.protocolVersionEvalInFlight.Store(false)
+	if detected &&
+		ls.hfiEvalGeneration.Load() == snapshot.generation &&
+		ls.currentEra.Id == snapshot.era.Id &&
+		ls.currentEpoch.EpochId == snapshot.epoch &&
+		ls.transitionInfo.State != hardfork.TransitionKnown {
+		ls.transitionInfo = hardfork.NewTransitionKnown(snapshot.targetEpoch)
+		ls.publishSnapshotsLocked()
+	}
+	if ls.protocolVersionEvalRerun.Swap(false) {
+		ls.queueProtocolVersionBumpEvaluation(ctx)
+	}
 }
 
 // pparamVotingCountStartSlot returns the first slot whose blocks count toward
@@ -10839,6 +10964,8 @@ func (ls *LedgerState) votingCountStartSlot(
 // from a non-persistent chain's cache, counts nothing: the tip's block number
 // would then include blocks before slot and could report a transition early.
 // Both fallbacks can only delay a reported transition, never advance it.
+//
+//nolint:unused // Retained as a test helper for the current ledger tip.
 func (ls *LedgerState) blocksAppliedFromSlot(ctx context.Context, slot uint64) uint64 {
 	count, err := ls.countBlocksFromSlot(ctx, ls.currentTip, slot)
 	if err != nil {
