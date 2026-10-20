@@ -69,3 +69,22 @@ func TestFreePortNeverRepeatsInAProcess(t *testing.T) {
 		seen[addr] = struct{}{}
 	}
 }
+
+// TestFreePortSkipsAPortServedOnTheWildcardAddress guards against handing out
+// a port another process serves on every interface. macOS lets a loopback
+// bind succeed alongside that wildcard listener, so a probe of the loopback
+// address alone reports the port free, and a test that later dials it to
+// prove its own server stopped reaches the other process instead.
+func TestFreePortSkipsAPortServedOnTheWildcardAddress(t *testing.T) {
+	t.Parallel()
+	ln, err := net.Listen("tcp", ":0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ln.Close() })
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	addr, err := pickFreePort(port, port+1)
+	require.Error(
+		t, err,
+		"a port served on the wildcard address was handed out as %s", addr,
+	)
+}

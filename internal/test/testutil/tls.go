@@ -22,6 +22,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"fmt"
 	"math/big"
 	mathrand "math/rand/v2"
 	"net"
@@ -61,28 +62,47 @@ func FreePort(t *testing.T) string {
 		t, high, freePortLow,
 		"the host's ephemeral port range leaves no ports below it",
 	)
+	addr, err := pickFreePort(freePortLow, high)
+	require.NoError(t, err)
+	return addr
+}
+
+// pickFreePort returns a loopback address on a port in [low, high) that no
+// listener holds and FreePort has not handed out before in this process.
+func pickFreePort(low, high int) (string, error) {
 	freePortMu.Lock()
 	defer freePortMu.Unlock()
 	// A random start spreads concurrent test binaries across the range; the
 	// scan from there finds a free port whenever one is left.
-	size := high - freePortLow
+	size := high - low
 	start := mathrand.IntN(size) //nolint:gosec // not a secret
 	for i := range size {
-		port := freePortLow + (start+i)%size
+		port := low + (start+i)%size
 		if _, issued := freePortIssued[port]; issued {
 			continue
 		}
-		addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
-		ln, err := net.Listen("tcp", addr)
-		if err != nil {
+		if !portUnheld(port) {
 			continue
 		}
-		require.NoError(t, ln.Close())
 		freePortIssued[port] = struct{}{}
-		return addr
+		return net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), nil
 	}
-	t.Fatalf("no free loopback port in [%d, %d)", freePortLow, high)
-	return ""
+	return "", fmt.Errorf("no free loopback port in [%d, %d)", low, high)
+}
+
+// portUnheld reports whether both the loopback and the wildcard address can
+// bind port. The wildcard bind is the one that finds another process serving
+// the port on every interface: macOS lets a loopback bind succeed alongside
+// such a listener, and a dial of the loopback address then reaches it.
+func portUnheld(port int) bool {
+	for _, host := range []string{"127.0.0.1", ""} {
+		ln, err := net.Listen("tcp", net.JoinHostPort(host, strconv.Itoa(port)))
+		if err != nil {
+			return false
+		}
+		_ = ln.Close()
+	}
+	return true
 }
 
 // FreePort draws from [freePortLow, freePortHigh): below the first ephemeral
