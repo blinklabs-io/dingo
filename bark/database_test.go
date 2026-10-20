@@ -17,6 +17,7 @@ package bark
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"encoding/base64"
 	"encoding/hex"
@@ -266,6 +267,34 @@ func testSnapshotTrustKeyFile(t *testing.T) string {
 	require.NoError(t, os.WriteFile(path, testSnapshotTrustKey, 0o600))
 	testutil.RestrictFileToCurrentUser(t, path)
 	return path
+}
+
+// writeBarkCloudSnapshot writes a complete, authenticated snapshot (both
+// payload files plus their digests in the manifest) so MirrorToCloud accepts
+// it as a valid cloud upload.
+func writeBarkCloudSnapshot(t *testing.T, dir string) {
+	t.Helper()
+	blob := []byte("blob")
+	metadata := []byte("metadata")
+	require.NoError(t, os.WriteFile(
+		filepath.Join(dir, lifecycle.BlobBackupFileName), blob, 0o600,
+	))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(dir, lifecycle.MetadataBackupFileName), metadata, 0o600,
+	))
+	require.NoError(t, lifecycle.WriteManifest(dir, lifecycle.Manifest{
+		CreatedAt:      time.Unix(10, 0).UTC(),
+		Trigger:        lifecycle.TriggerManual,
+		BlobBytes:      int64(len(blob)),
+		MetadataBytes:  int64(len(metadata)),
+		BlobSHA256:     sha256Hex(blob),
+		MetadataSHA256: sha256Hex(metadata),
+	}, lifecycle.WithManifestKey(testSnapshotTrustKey)))
+}
+
+func sha256Hex(data []byte) string {
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
 }
 
 // fakeCloudBackingDir reads a fake scheme's backing directory under mu and
@@ -875,9 +904,7 @@ func TestListAvailableSnapshotsRetriesIncompleteStartupListing(t *testing.T) {
 
 	dir := filepath.Join(snapshotDir, "after-recovery")
 	require.NoError(t, os.Mkdir(dir, 0o755))
-	require.NoError(t, lifecycle.WriteManifest(dir, lifecycle.Manifest{
-		CreatedAt: time.Unix(10, 0).UTC(), Trigger: lifecycle.TriggerManual,
-	}, lifecycle.WithManifestKey(testSnapshotTrustKey)))
+	writeBarkCloudSnapshot(t, dir)
 	require.NoError(t, lifecycle.MirrorToCloud(
 		t.Context(), registry, dir, cloudDest,
 		lifecycle.WithManifestKey(testSnapshotTrustKey),
@@ -921,9 +948,7 @@ func TestListAvailableSnapshotsRetriesStartupConstructorFailure(t *testing.T) {
 
 	dir := filepath.Join(snapshotDir, "after-constructor-recovery")
 	require.NoError(t, os.Mkdir(dir, 0o755))
-	require.NoError(t, lifecycle.WriteManifest(dir, lifecycle.Manifest{
-		CreatedAt: time.Unix(10, 0).UTC(), Trigger: lifecycle.TriggerManual,
-	}, lifecycle.WithManifestKey(testSnapshotTrustKey)))
+	writeBarkCloudSnapshot(t, dir)
 	require.NoError(t, lifecycle.MirrorToCloud(
 		t.Context(), registry, dir, cloudDest,
 		lifecycle.WithManifestKey(testSnapshotTrustKey),

@@ -16,6 +16,8 @@ package lifecycle
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/url"
@@ -31,6 +33,31 @@ import (
 )
 
 var catalogTestTrustKey = []byte("catalog-test-trust-root-012345")
+
+// writeCatalogTestSnapshot writes a complete, authenticated snapshot (both
+// payload files plus their digests in the manifest) so MirrorToCloud accepts
+// it as a valid cloud upload.
+func writeCatalogTestSnapshot(t *testing.T, dir string) {
+	t.Helper()
+	blob := []byte("blob")
+	metadata := []byte("metadata")
+	require.NoError(t, os.WriteFile(
+		filepath.Join(dir, BlobBackupFileName), blob, 0o600,
+	))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(dir, MetadataBackupFileName), metadata, 0o600,
+	))
+	blobSum := sha256.Sum256(blob)
+	metadataSum := sha256.Sum256(metadata)
+	require.NoError(t, WriteManifest(dir, Manifest{
+		CreatedAt:      time.Unix(10, 0).UTC(),
+		Trigger:        TriggerManual,
+		BlobBytes:      int64(len(blob)),
+		MetadataBytes:  int64(len(metadata)),
+		BlobSHA256:     hex.EncodeToString(blobSum[:]),
+		MetadataSHA256: hex.EncodeToString(metadataSum[:]),
+	}, WithManifestKey(catalogTestTrustKey)))
+}
 
 type catalogRepairDestination struct {
 	dir string
@@ -622,9 +649,7 @@ func TestCloudCatalogMutationFailureRepairsFromDurableSource(t *testing.T) {
 	base := t.TempDir()
 	snapshotDir := filepath.Join(base, "snapshot-one")
 	require.NoError(t, os.Mkdir(snapshotDir, 0o755))
-	require.NoError(t, WriteManifest(snapshotDir, Manifest{
-		CreatedAt: time.Unix(10, 0).UTC(), Trigger: TriggerManual,
-	}, WithManifestKey(catalogTestTrustKey)))
+	writeCatalogTestSnapshot(t, snapshotDir)
 	require.NoError(t, EnsureSnapshotCatalog(base, WithManifestKey(catalogTestTrustKey)))
 
 	cloudRoot := t.TempDir()
@@ -674,9 +699,7 @@ func TestMirrorMarkerWaitsForCatalogRepair(t *testing.T) {
 	base := t.TempDir()
 	snapshotDir := filepath.Join(base, "snapshot-one")
 	require.NoError(t, os.Mkdir(snapshotDir, 0o755))
-	require.NoError(t, WriteManifest(snapshotDir, Manifest{
-		CreatedAt: time.Unix(10, 0).UTC(), Trigger: TriggerManual,
-	}, WithManifestKey(catalogTestTrustKey)))
+	writeCatalogTestSnapshot(t, snapshotDir)
 	require.NoError(t, EnsureSnapshotCatalog(base, WithManifestKey(catalogTestTrustKey)))
 	require.NoError(t, os.WriteFile(
 		snapshotCatalogPath(base), []byte("not a sqlite database"), 0o600,
@@ -987,9 +1010,7 @@ func TestCloudCatalogRecoversAfterStartupConstructorFailure(t *testing.T) {
 
 	snapshotDir := filepath.Join(base, "mirrored")
 	require.NoError(t, os.Mkdir(snapshotDir, 0o755))
-	require.NoError(t, WriteManifest(snapshotDir, Manifest{
-		CreatedAt: time.Unix(10, 0).UTC(), Trigger: TriggerManual,
-	}, WithManifestKey(catalogTestTrustKey)))
+	writeCatalogTestSnapshot(t, snapshotDir)
 	require.NoError(t, MirrorToCloud(
 		t.Context(), registry, snapshotDir, cloudDest,
 		WithManifestKey(catalogTestTrustKey),

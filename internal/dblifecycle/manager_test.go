@@ -17,6 +17,8 @@ package dblifecycle_test
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"io"
 	"log/slog"
@@ -91,11 +93,29 @@ func testSnapshotTrustKeyFile(t *testing.T) string {
 
 func writeManagerTestManifest(t *testing.T, dir string) {
 	t.Helper()
+	blob := []byte("blob")
+	metadata := []byte("metadata")
+	require.NoError(t, os.WriteFile(
+		filepath.Join(dir, lifecycle.BlobBackupFileName), blob, 0o600,
+	))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(dir, lifecycle.MetadataBackupFileName), metadata, 0o600,
+	))
 	require.NoError(t, lifecycle.WriteManifest(
 		dir,
-		lifecycle.Manifest{},
+		lifecycle.Manifest{
+			BlobBytes:      int64(len(blob)),
+			MetadataBytes:  int64(len(metadata)),
+			BlobSHA256:     sha256Hex(blob),
+			MetadataSHA256: sha256Hex(metadata),
+		},
 		lifecycle.WithManifestKey(testSnapshotTrustKey),
 	))
+}
+
+func sha256Hex(data []byte) string {
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
 }
 
 func newManagerTestDB(t *testing.T) *database.Database {
