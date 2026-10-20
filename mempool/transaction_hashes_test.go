@@ -16,6 +16,7 @@ package mempool
 
 import (
 	"fmt"
+	"slices"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -105,6 +106,58 @@ func TestMempool_TransactionHashes_DoesNotCopyCbor(t *testing.T) {
 			})
 			require.LessOrEqual(t, allocs, float64(2),
 				"hash listing must not allocate per transaction")
+		})
+	}
+}
+
+// TestMempool_TransactionHashes_AgreesWithSnapshot corrupts the DAG index in
+// each way the snapshot paths diagnose, and asserts that for every bound the
+// hash listing names exactly the transactions TransactionsBounded returns, so
+// the two DAG walks cannot drift apart on when they fall back.
+func TestMempool_TransactionHashes_AgreesWithSnapshot(t *testing.T) {
+	t.Parallel()
+	const txCount = 6
+	type corruption struct {
+		name    string
+		corrupt func(m *Mempool, order []string)
+	}
+	cases := []corruption{
+		{name: "consistent", corrupt: func(*Mempool, []string) {}},
+		{name: "order lost", corrupt: func(m *Mempool, _ []string) {
+			m.dag.order = nil
+		}},
+	}
+	for i := range txCount {
+		cases = append(cases, corruption{
+			name: fmt.Sprintf("ordered hash %d unresolvable", i),
+			corrupt: func(m *Mempool, order []string) {
+				delete(m.txByHash, order[i])
+			},
+		})
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			m := newBoundedTestMempool(t, true)
+			txs := addMockTransactions(t, m, txCount)
+			m.Lock()
+			for _, tx := range slices.Backward(txs) {
+				m.dag.add(appliedTx{hash: tx.Hash})
+			}
+			order := slices.Clone(m.dag.order)
+			tc.corrupt(m, order)
+			m.Unlock()
+
+			for bound := range txCount + 2 {
+				snapshot, snapshotTotal := m.TransactionsBounded(bound, 0)
+				want := make([]string, len(snapshot))
+				for i := range snapshot {
+					want[i] = snapshot[i].Hash
+				}
+				got, total := m.TransactionHashes(bound)
+				require.Equal(t, want, got, "bound %d", bound)
+				require.Equal(t, snapshotTotal, total, "bound %d", bound)
+			}
 		})
 	}
 }
