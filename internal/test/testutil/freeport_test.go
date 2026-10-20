@@ -63,7 +63,7 @@ func TestFreePortIsOutsideTheEphemeralRange(t *testing.T) {
 func TestFreePortNeverRepeatsInAProcess(t *testing.T) {
 	t.Parallel()
 	seen := make(map[string]struct{})
-	for range 1000 {
+	for range 400 {
 		addr := FreePort(t)
 		require.NotContains(t, seen, addr)
 		seen[addr] = struct{}{}

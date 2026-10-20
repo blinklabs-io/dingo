@@ -63,9 +63,12 @@ func FreePort(t *testing.T) string {
 	)
 	freePortMu.Lock()
 	defer freePortMu.Unlock()
-	for range freePortProbes {
-		//nolint:gosec // test port selection, not a secret
-		port := freePortLow + mathrand.IntN(high-freePortLow)
+	// A random start spreads concurrent test binaries across the range; the
+	// scan from there finds a free port whenever one is left.
+	size := high - freePortLow
+	start := mathrand.IntN(size) //nolint:gosec // not a secret
+	for i := range size {
+		port := freePortLow + (start+i)%size
 		if _, issued := freePortIssued[port]; issued {
 			continue
 		}
@@ -78,10 +81,7 @@ func FreePort(t *testing.T) string {
 		freePortIssued[port] = struct{}{}
 		return addr
 	}
-	t.Fatalf(
-		"no free loopback port in [%d, %d) after %d probes",
-		freePortLow, high, freePortProbes,
-	)
+	t.Fatalf("no free loopback port in [%d, %d)", freePortLow, high)
 	return ""
 }
 
@@ -89,9 +89,8 @@ func FreePort(t *testing.T) string {
 // port of every supported host (32768 on Linux by default, 49152 on macOS and
 // Windows), and above the registered ports a test host's services listen on.
 const (
-	freePortLow    = 20000
-	freePortHigh   = 32768
-	freePortProbes = 1000
+	freePortLow  = 20000
+	freePortHigh = 32768
 )
 
 // freePortIssued records every port FreePort has handed out in this process,
