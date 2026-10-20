@@ -262,6 +262,14 @@ func (s *syncServiceServer) FollowTip(
 
 	defer chainIter.Cancel()
 
+	peerAddr := req.Peer().Addr
+	var releaseReplay func()
+	defer func() {
+		if releaseReplay != nil {
+			releaseReplay()
+		}
+	}()
+
 	for {
 		// Check for available block
 		next, err := chainIter.Next(true)
@@ -280,6 +288,26 @@ func (s *syncServiceServer) FollowTip(
 			return err
 		}
 		if next != nil {
+			// A block behind the tip is replayed history and is charged
+			// against the replay limits; a block at the tip is live
+			// following and is not. A stream that catches up gives its
+			// replay slot back.
+			if !next.Rollback &&
+				next.Block.Number <
+					s.utxorpc.config.LedgerState.Tip().BlockNumber {
+				if releaseReplay == nil {
+					releaseReplay, err = s.utxorpc.replays.acquireSlot()
+					if err != nil {
+						return err
+					}
+				}
+				if err := s.utxorpc.replays.charge(ctx, peerAddr); err != nil {
+					return err
+				}
+			} else if releaseReplay != nil {
+				releaseReplay()
+				releaseReplay = nil
+			}
 			resp, err := s.followTipResponse(next)
 			if err != nil {
 				return err
