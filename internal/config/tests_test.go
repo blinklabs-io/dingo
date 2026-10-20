@@ -758,12 +758,8 @@ mithril:
 	assert.Equal(t, "cli-digest", cfg.Mithril.PinnedDigest)
 }
 
-// TestMusashiNetworkIdentityConflict pins the rule that decides whether a
-// configuration may enable the Musashi prototype's consensus/ledger trust
-// bypasses. The prototype network is identified by name ("musashi") or by
-// magic (164); a configuration that mixes one of those with a *different*
-// predefined network is a conflict and must be rejected, because otherwise a
-// node an operator believes is on preview/preprod runs with validation off.
+// TestMusashiNetworkIdentityConflict pins rejection of a network name and
+// magic that identify different predefined networks.
 func TestMusashiNetworkIdentityConflict(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -785,7 +781,7 @@ func TestMusashiNetworkIdentityConflict(t *testing.T) {
 			networkMagic: 164,
 		},
 
-		// Unambiguous non-prototype identities: allowed (bypasses stay off).
+		// Unambiguous non-prototype identities are allowed.
 		{name: "preview by name", network: "preview"},
 		{
 			name:         "preview by name and magic",
@@ -843,8 +839,8 @@ func TestMusashiNetworkIdentityConflict(t *testing.T) {
 		},
 
 		// Conflicts: the prototype name wearing a standard network's magic.
-		// This is the sharper direction — the handshake uses the magic, so
-		// the node actually joins preview while trusting prototype rules.
+		// The handshake uses the magic, so the node would join the standard
+		// network while loading Musashi's built-in configuration.
 		{
 			name:         "prototype name with preview magic",
 			network:      "musashi",
@@ -876,90 +872,6 @@ func TestMusashiNetworkIdentityConflict(t *testing.T) {
 			}
 			require.True(t, ok, "expected a conflict")
 			assert.Equal(t, tt.wantConflict, got)
-		})
-	}
-}
-
-// TestMusashiPrototypeNetwork pins which identities count as the prototype
-// network at all. Preview and preprod must never qualify.
-//
-// Note the asymmetry between the two kinds of half-match, which is the whole
-// point of the rule: a half-match is a misconfiguration only when the *other*
-// half names a different predefined network. A custom name on magic 164, or
-// the "musashi" name on an unregistered magic, is a private prototype
-// deployment rather than a mistake, so it still counts as the prototype
-// network — magic 164 *is* Musashi, whatever an operator calls it locally.
-func TestMusashiPrototypeNetwork(t *testing.T) {
-	tests := []struct {
-		name         string
-		network      string
-		networkMagic uint32
-		want         bool
-	}{
-		{name: "name only", network: "musashi", want: true},
-		{
-			name:         "name and magic",
-			network:      "musashi",
-			networkMagic: 164,
-			want:         true,
-		},
-		{name: "magic only", networkMagic: 164, want: true},
-		{name: "preview", network: "preview", networkMagic: 2},
-		{name: "preprod", network: "preprod", networkMagic: 1},
-		{name: "mainnet", network: "mainnet", networkMagic: 764824073},
-		{name: "devnet", network: "devnet", networkMagic: 42},
-		{name: "unset"},
-		// Half-matches against a *custom* identity are private prototype
-		// deployments (e.g. a Musashi mirror), not misconfigurations, so they
-		// remain the prototype network.
-		{
-			name:         "custom name with prototype magic",
-			network:      "musashi-mirror",
-			networkMagic: 164,
-			want:         true,
-		},
-		{
-			name:         "prototype name with unregistered magic",
-			network:      "musashi",
-			networkMagic: 9999,
-			want:         true,
-		},
-		// Consequence of the devnet exclusion: because neither pairing is a
-		// conflict, both still resolve to the prototype network and would run
-		// with the bypasses. That is acceptable precisely because devnet is a
-		// local test network.
-		{
-			name:         "devnet name with prototype magic",
-			network:      "devnet",
-			networkMagic: 164,
-			want:         true,
-		},
-		{
-			name:         "prototype name with devnet magic",
-			network:      "musashi",
-			networkMagic: 42,
-			want:         true,
-		},
-		// A conflicting identity is not the prototype network: the bypasses
-		// must stay off even if startup validation was never run.
-		{
-			name:         "preview with prototype magic",
-			network:      "preview",
-			networkMagic: 164,
-		},
-		{
-			name:         "prototype name with preview magic",
-			network:      "musashi",
-			networkMagic: 2,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(
-				t,
-				tt.want,
-				MusashiPrototypeNetwork(tt.network, tt.networkMagic),
-			)
 		})
 	}
 }

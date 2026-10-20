@@ -174,9 +174,6 @@ func (n *Node) ledgerStateConfig() ledger.LedgerStateConfig {
 			signers []byte,
 			aggregatedSignature []byte,
 		) error {
-			if n.config.prototypeTrustBypassesEnabled() {
-				return nil
-			}
 			if n.leiosVoteManager == nil {
 				return errors.New("leios vote manager is unavailable")
 			}
@@ -198,18 +195,6 @@ func (n *Node) ledgerStateConfig() ledger.LedgerStateConfig {
 			}
 			return err
 		},
-		// The leadership stake includes reward-account balances; see
-		// LedgerStateConfig.SkipLeaderStakeThresholdCheck. The check
-		// rejected the dominant pool's eligible blocks on Musashi's
-		// concentrated topology and wedged the chain, so it is downgraded
-		// to a warning there and enforced on real networks. TPraos
-		// bootstrap pool-threshold checks are waived separately inside
-		// header validation after genesis overlay slots are handled.
-		SkipLeaderStakeThresholdCheck: n.config.prototypeTrustBypassesEnabled(),
-		// On Musashi, certified endorser txs and Dijkstra ranking-block txs are
-		// trusted by the prototype; skip dingo's per-tx validation to match it
-		// and keep block application at the production rate.
-		SkipDijkstraTxValidation: n.config.prototypeTrustBypassesEnabled(),
 		// CIP-23 minimum pool margin (minimum variable fee). Operator-set,
 		// off by default (0), effective only in Dijkstra and later.
 		MinPoolMargin: n.config.minPoolMargin,

@@ -3697,7 +3697,7 @@ func TestVerifyBlockHeaderCrypto_SkipLeaderStakeThresholdCheckWarnsAndAccepts(
 	err := ls.verifyBlockHeaderCryptoWithEpochAdvance(t.Context(), tb.block, true, false)
 	require.NoError(t, err)
 	logs := logBuf.String()
-	assert.Contains(t, logs, "prototype trust bypass")
+	assert.Contains(t, logs, "explicit override")
 }
 
 func TestVerifyBlockHeaderCrypto_EmptyMarkSnapshotDiagnostic(t *testing.T) {
@@ -3781,7 +3781,7 @@ func TestVerifyBlockLeaderEligibility_MithrilImportedHistoricalMarkChecks(
 // unlike a certified imported row, this capture is neither the target
 // boundary nor the Mithril anchor, so a hard threshold *comparison* against it
 // is unsafe. That makes eligibility unevaluable, not automatically satisfied:
-// only the explicitly selected prototype profile (SkipLeaderStakeThresholdCheck)
+// only an explicit override (SkipLeaderStakeThresholdCheck)
 // may trust the block anyway (see the Prototype sibling below); a standard
 // profile must reject, deferring while the ledger apply cursor is still
 // catching up.
@@ -3896,7 +3896,7 @@ func TestVerifyBlockLeaderEligibility_ReconstructedHistoricalMarkPrototypeAccept
 	)
 
 	err := ls.verifyBlockLeaderEligibility(tb.block, 5)
-	assert.NoError(t, err, "prototype profile keeps its documented bypass")
+	assert.NoError(t, err, "explicit override keeps its documented bypass")
 	assert.Contains(t, logBuf.String(), "skipping leader eligibility check")
 }
 
@@ -4186,7 +4186,7 @@ func TestVerifyBlockLeaderEligibility_MissingActiveSlotsCoeffPrototypeAccepts(
 	ls := newCoeffGuardLedger(t, tb, nil, true)
 
 	err := ls.verifyBlockLeaderEligibility(tb.block, 5)
-	assert.NoError(t, err, "prototype profile keeps its documented bypass")
+	assert.NoError(t, err, "explicit override keeps its documented bypass")
 }
 
 // TestVerifyBlockLeaderEligibility_ZeroActiveSlotsCoeffPrototypeAccepts is the
@@ -4200,7 +4200,7 @@ func TestVerifyBlockLeaderEligibility_ZeroActiveSlotsCoeffPrototypeAccepts(
 	ls := newCoeffGuardLedger(t, tb, newZeroCoeffGenesisCfg(t), true)
 
 	err := ls.verifyBlockLeaderEligibility(tb.block, 5)
-	assert.NoError(t, err, "prototype profile keeps its documented bypass")
+	assert.NoError(t, err, "explicit override keeps its documented bypass")
 }
 
 // seedZeroTotalActiveStakeSummary marks the epoch's mark aggregate ready at
@@ -4258,7 +4258,7 @@ func TestVerifyBlockLeaderEligibility_ZeroTotalActiveStakePrototypeAccepts(
 	seedZeroTotalActiveStakeSummary(t, db, 4)
 
 	err := ls.verifyBlockLeaderEligibility(tb.block, 5)
-	assert.NoError(t, err, "prototype profile keeps its documented bypass")
+	assert.NoError(t, err, "explicit override keeps its documented bypass")
 }
 
 // TestVerifyBlockHeaderCryptoBeforeApplyDefersZeroTotalActiveStake verifies

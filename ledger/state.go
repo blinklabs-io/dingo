@@ -947,35 +947,19 @@ type LedgerStateConfig struct {
 	// 17-20 mark totals equal cardano-node's active stake for epochs 18-21
 	// exactly.
 	//
-	// The check stays enforced on real networks. On the concentrated
-	// prototype-2026w29 musashi topology it rejected the dominant pool's
-	// legitimately-eligible blocks and wedged the chain, so it is skipped
-	// there. All other header checks (KES, VRF proof,
-	// registered-VRF-key binding, opcert) still apply regardless.
 	// Separately, TPraos bootstrap epochs with decentralization still active
 	// validate genesis overlay assignment in verify_header.go, then skip only
 	// the local pool stake-threshold check while d remains active.
-	// Set from the network in node.go (true on musashi, false otherwise) via
-	// Config.prototypeTrustBypassesEnabled, which requires an unambiguous
-	// Musashi identity so this can never be reached from a
-	// preview/preprod/mainnet configuration.
 	// The same flag also gates every other path where the stake-derived
 	// threshold cannot be evaluated at all (zero total active stake, a
 	// missing/nonpositive active-slot coefficient, a post-Mithril mark
-	// snapshot reconstructed after its target boundary): standard profiles
-	// reject rather than trust an unevaluated producer, and this flag is the
-	// only way to bypass that.
+	// snapshot reconstructed after its target boundary). Network profiles never
+	// enable this flag; it exists for explicit test and embedder configuration.
 	SkipLeaderStakeThresholdCheck bool
 	// SkipDijkstraTxValidation, when true, skips the Dijkstra per-transaction
-	// validation rule set entirely. On Musashi, ranking-block transactions are
-	// trusted because the prototype does not validate them. Running dingo's
-	// rule set only to discard any disagreement is
-	// wasted work that prevents the node from reaching tip under load. Set true
-	// on Musashi in node.go via Config.prototypeTrustBypassesEnabled, which
-	// requires an unambiguous Musashi identity so this can never be reached
-	// from a preview/preprod/mainnet configuration. Applies to Dijkstra-era
-	// transactions only — see LedgerState.skipDijkstraTxValidation. Interim
-	// until the Leios certificate / endorser-availability surface is complete.
+	// validation rule set entirely. It applies to Dijkstra-era transactions
+	// only. Network profiles never enable this flag; it exists for explicit test
+	// and embedder configuration.
 	SkipDijkstraTxValidation bool
 	// MinPoolMargin is the CIP-23 minimum pool margin (minimum variable fee) in
 	// basis points, [0, 10000] (150 = 1.5%); 0 disables it. It is a consensus-
@@ -9549,9 +9533,7 @@ func (ls *LedgerState) strictConsumedInputsEnabled(
 // *skipped* for a transaction being validated under era eraId — true means
 // ValidateTxFunc is not called for it.
 //
-// This is the ledger half of the Musashi prototype's accepted non-validating
-// behaviour (see LedgerStateConfig.SkipDijkstraTxValidation), and its scope is
-// deliberately narrow: the bypass applies to Dijkstra-era transactions only.
+// The bypass applies to Dijkstra-era transactions only.
 // Transactions validated under any earlier era — Conway and before — still run
 // their full rule set even when the prototype flag is set, because the
 // prototype's trust argument (endorser transactions are stored but never
@@ -9561,8 +9543,7 @@ func (ls *LedgerState) strictConsumedInputsEnabled(
 // checks all still apply, and only the stake-derived leader threshold is
 // downgraded, by the separate SkipLeaderStakeThresholdCheck flag.
 //
-// The same prototype flag also scopes trustDijkstraTxValidationError. Standard
-// Dijkstra/Leios profiles run the rules and reject any disagreement.
+// The same flag also scopes trustDijkstraTxValidationError.
 func (ls *LedgerState) skipDijkstraTxValidation(eraId uint) bool {
 	return eraId == dijkstra.EraIdDijkstra &&
 		ls.config.SkipDijkstraTxValidation
@@ -9571,9 +9552,8 @@ func (ls *LedgerState) skipDijkstraTxValidation(eraId uint) bool {
 // trustDijkstraTxValidationError reports whether a per-transaction validation
 // failure under era eraId is logged and trusted instead of rejecting the block.
 //
-// Trust is limited to the explicit Musashi prototype bypass. Standard
-// Dijkstra/Leios profiles have complete endorser-block fetch/apply support and
-// must reject invalid ranking-block transactions just like every other era.
+// Network profiles leave the flag disabled and reject invalid ranking-block
+// transactions like every other era.
 func (ls *LedgerState) trustDijkstraTxValidationError(eraId uint) bool {
 	return eraId == dijkstra.EraIdDijkstra &&
 		ls.config.SkipDijkstraTxValidation
@@ -9852,7 +9832,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 	}
 	// Check the ranking block after any applicable endorser transactions,
 	// using their resulting state but before its own transaction mutations.
-	// The explicitly non-validating Musashi prototype keeps its trust policy.
+	// Explicit test or embedder configurations may skip Dijkstra validation.
 	if shouldValidate && !ls.skipDijkstraTxValidation(currentEra.Id) {
 		referenceParams := referenceScriptParams(
 			block, currentEra, ls.eraList(), pparams, prevEraPParams,
@@ -9995,9 +9975,8 @@ func (ls *LedgerState) ledgerProcessBlock(
 						faultErr,
 					)
 				}
-				// The Musashi prototype trusts remaining Dijkstra validation
-				// disagreements because its certificate-driven closure is still
-				// evolving. Standard profiles leave the error intact and reject
+				// An explicit override may trust remaining Dijkstra validation
+				// disagreements. Network profiles leave the error intact and reject
 				// the block below.
 				if err != nil &&
 					ls.trustDijkstraTxValidationError(validationEra.Id) {
