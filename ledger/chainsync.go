@@ -4702,12 +4702,15 @@ func queuePeerTipAdmission(
 // canonical state. Withholding it instead deadlocks sync whenever only applying
 // queued blocks can make its authorization verifiable, as at the Byron->Shelley
 // boundary.
+//
+// The update is cleared in place, never replaced by a copy: the ingress
+// owner's PeerTipAdmission callback commits the update it shares with this
+// event, and a copy would leave it committing the stale generation as if the
+// ledger still held that generation's pin.
 func clearChainsyncHeaderAuthorization(e *ChainsyncEvent) {
 	e.HeaderCryptoVerificationGeneration = 0
 	if e.PeerTipUpdate != nil {
-		update := *e.PeerTipUpdate
-		update.HeaderCryptoVerificationGeneration = 0
-		e.PeerTipUpdate = &update
+		e.PeerTipUpdate.HeaderCryptoVerificationGeneration = 0
 	}
 }
 

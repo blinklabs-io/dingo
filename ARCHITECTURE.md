@@ -5994,7 +5994,10 @@ it. Dingo implements this as a **corroboration gate**
   queues a header whose authorization it cannot confirm (deferred, or a stale
   ingress verdict) the same way, without a verification generation, so it can
   neither advance the admitted frontier nor clear the queue or roll back
-  canonical state when it does not fit.
+  canonical state when it does not fit. It clears the generation on the
+  update the ingress owner's admission callback commits as well, so the
+  selector receives a generation-0 update rather than a stale verdict without
+  its pin.
   The verification snapshot generation travels with the staged selector
   candidate and ledger event; a rollback or concurrent publication that makes
   it stale removes the candidate from corroboration and triggers recovery. A

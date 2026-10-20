@@ -6304,11 +6304,21 @@ func TestChainsyncHeaderVerificationRejectsStaleIngressVerdict(t *testing.T) {
 	// the Byron->Shelley boundary. It carries no verification verdict, so it
 	// cannot advance the admitted frontier or roll back canonical state.
 	event.HeaderCryptoVerificationGeneration = ls.loadConsensusSnapshot().generation
+	// Like the ouroboros ingress owner, the admission callback commits the
+	// update it shares with the event, read when admission resolves.
+	peerTipUpdate := &chainselection.PeerTipUpdateEvent{
+		ConnectionId:                       event.ConnectionId,
+		AdmissionID:                        1,
+		HeaderCryptoVerificationGeneration: event.HeaderCryptoVerificationGeneration,
+	}
+	event.PeerTipUpdate = peerTipUpdate
 	admissionResolved := false
 	admitted := false
+	var admittedGeneration uint64
 	event.PeerTipAdmission = func(value bool) {
 		admissionResolved = true
 		admitted = value
+		admittedGeneration = peerTipUpdate.HeaderCryptoVerificationGeneration
 	}
 	finishTransition := ls.beginTxValidationTransition()
 	err = ls.handleEventChainsyncBlockHeader(event)
@@ -6316,6 +6326,11 @@ func TestChainsyncHeaderVerificationRejectsStaleIngressVerdict(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, admissionResolved)
 	require.True(t, admitted, "a queued header resolves its admission")
+	require.Zero(
+		t,
+		admittedGeneration,
+		"the admission callback must not commit the stale generation without its pin",
+	)
 	history := ls.peerHeaderHistory[connIdKey(event.ConnectionId)]
 	require.NotNil(t, history)
 	for _, record := range history.byHash {
@@ -6345,6 +6360,12 @@ func TestChainsyncHeaderVerificationRejectsStaleIngressVerdict(t *testing.T) {
 	childEvent.BlockHeader = child
 	childEvent.Point = ocommon.NewPoint(child.SlotNumber(), child.Hash().Bytes())
 	childEvent.HeaderCryptoVerificationGeneration = ls.loadConsensusSnapshot().generation
+	peerTipUpdate = &chainselection.PeerTipUpdateEvent{
+		ConnectionId:                       childEvent.ConnectionId,
+		AdmissionID:                        2,
+		HeaderCryptoVerificationGeneration: childEvent.HeaderCryptoVerificationGeneration,
+	}
+	childEvent.PeerTipUpdate = peerTipUpdate
 	ls.Lock()
 	ls.epochCache[0].Nonce = nil
 	ls.publishSnapshotsLocked()
@@ -6355,6 +6376,7 @@ func TestChainsyncHeaderVerificationRejectsStaleIngressVerdict(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, admissionResolved)
 	require.True(t, admitted)
+	require.Zero(t, admittedGeneration)
 	require.False(t, ls.chain.FirstVerifiedHeaderMatchesPoint(childEvent.Point))
 	require.Equal(t, 2, ls.chain.HeaderCount())
 }
