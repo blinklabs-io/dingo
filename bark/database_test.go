@@ -990,6 +990,35 @@ func TestListAvailableSnapshotsRetriesStartupConstructorFailure(t *testing.T) {
 	require.Equal(t, constructorCallsBeforeListing+1, attempts.Load())
 }
 
+func TestReconcileCloudSnapshotCatalogCancellationDoesNotBackoff(t *testing.T) {
+	for _, destination := range []string{"", "cancelcatalog://bucket/snapshots"} {
+		t.Run(destination, func(t *testing.T) {
+			h := newTestDatabaseServiceHandlerWithTrustKey(t, nil, t.TempDir())
+			h.bark.config.SnapshotCloudDestination = destination
+			if destination != "" {
+				registry := lifecycle.NewDestinationRegistry()
+				registry.Register("cancelcatalog", func(*url.URL) (lifecycle.CloudDestination, error) {
+					return &countingSnapshotListerDestination{}, nil
+				})
+				h.bark.config.DestinationRegistry = registry
+			}
+			before := catalogReconciliationRetry{
+				destination: "previous",
+				nextAttempt: time.Now().Add(time.Minute),
+				delay:       time.Minute,
+			}
+			h.catalogRetry = before
+			ctx, cancel := context.WithCancel(t.Context())
+			cancel()
+
+			err := h.reconcileCloudSnapshotCatalog(ctx)
+
+			require.ErrorIs(t, err, context.Canceled)
+			require.Equal(t, before, h.catalogRetry)
+		})
+	}
+}
+
 // ── Restore/VerifySnapshot/DeleteSnapshot cloud-fallback ──────────────────
 //
 // None of these three RPCs previously had a direct in-process test at
