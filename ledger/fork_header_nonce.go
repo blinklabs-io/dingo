@@ -196,13 +196,6 @@ func (ls *LedgerState) peerChainSelectionEpochNonceAcrossEpochs(
 			err,
 		)
 	}
-	if len(initialEvolvingNonce) != lcommon.Blake2b256Size {
-		return nil, models.Epoch{}, false, fmt.Errorf(
-			"%w: candidate intersection at slot %d has no 32-byte nonce",
-			errHeaderVerificationDeferred,
-			ancestor.Slot,
-		)
-	}
 	initialCandidateNonce := cloneNonce(initialEvolvingNonce)
 	cutoff, ready := ls.nextEpochNonceReadyCutoffSlot(sourceEpoch)
 	if !ready {
@@ -225,6 +218,21 @@ func (ls *LedgerState) peerChainSelectionEpochNonceAcrossEpochs(
 			)
 		}
 		initialCandidateNonce = cloneNonce(nextEpoch.CandidateNonce)
+		// The evolving nonce after the cutoff cannot change the next
+		// epoch's nonce, which uses the frozen candidate. Blocks
+		// without a stored nonce (e.g. Mithril-imported) are only
+		// usable when the target is that next epoch.
+		if len(initialEvolvingNonce) != lcommon.Blake2b256Size &&
+			targetEpoch.EpochId == sourceEpoch.EpochId+1 {
+			initialEvolvingNonce = cloneNonce(initialCandidateNonce)
+		}
+	}
+	if len(initialEvolvingNonce) != lcommon.Blake2b256Size {
+		return nil, models.Epoch{}, false, fmt.Errorf(
+			"%w: candidate intersection at slot %d has no 32-byte nonce",
+			errHeaderVerificationDeferred,
+			ancestor.Slot,
+		)
 	}
 	evolvingNonce := cloneNonce(initialEvolvingNonce)
 	candidateNonce := cloneNonce(initialCandidateNonce)
