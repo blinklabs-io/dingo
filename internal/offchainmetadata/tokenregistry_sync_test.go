@@ -660,6 +660,23 @@ func TestTokenRegistrySnapshotRequiresManifestSizeAndDigest(t *testing.T) {
 	require.ErrorContains(t, err, "digest does not match")
 }
 
+func TestTokenRegistrySnapshotChecksDigestBeforeParsingArchive(t *testing.T) {
+	t.Parallel()
+	body := []byte("not a gzip archive")
+	server := newRegistryServer(t, body)
+	sync := newTestSync(t, newFakeTokenRegistryStore(), server.URL, nil)
+	digest := blake2b.Sum256([]byte("different archive"))
+	_, err := sync.stageAuthenticatedSnapshot(
+		t.Context(),
+		bytes.NewReader(body),
+		tokenRegistryManifest{
+			ArchiveBytes:  int64(len(body)),
+			ArchiveDigest: hex.EncodeToString(digest[:]),
+		},
+	)
+	require.ErrorContains(t, err, "digest does not match manifest")
+}
+
 func TestTokenRegistrySnapshotDigestCoversResponseThroughEOF(t *testing.T) {
 	t.Parallel()
 	body := tarballOf(t, map[string]string{
