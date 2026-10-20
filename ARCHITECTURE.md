@@ -10885,6 +10885,17 @@ request error instead of panicking inside the handler.
 TLS is configured through `plugins.api.mesh.config.tls`; see "API security"
 above.
 
+`/account/coins` is paged and runs under the request context. Each call reads
+one `UtxosByAddressBoundedPage` page (500 UTxOs, 5000 scanned candidates, 1 MiB
+of retained output CBOR) for the exact address; native assets come from the
+retained CBOR. When the page does not exhaust the address, the response
+`metadata.next_cursor` carries an opaque `slot:block_index:output_idx:tx_id`
+token, and the client continues by sending it as request `metadata.cursor`.
+A malformed cursor is `ErrInvalidRequest`. At most 8 such reads run at once;
+a request that finds no free slot is refused at once with `ErrUnavailable`
+instead of queueing. A cancelled request stops the read between rows.
+`/account/balance` is unchanged.
+
 Implements the Mesh (formerly Rosetta) API specification for wallet integration and chain analysis. Provides endpoints for network status, account balances, block queries, transaction construction, and mempool access.
 
 Mesh `network/status` reports `synced` only when the optional ledger sync

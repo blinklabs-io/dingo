@@ -263,6 +263,9 @@ type AccountCoinsRequest struct {
 	AccountIdentifier *AccountIdentifier `json:"account_identifier"`
 	IncludeMempool    bool               `json:"include_mempool"`
 	Currencies        []*Currency        `json:"currencies,omitempty"`
+	// Metadata may carry "cursor", the opaque "next_cursor" of a previous
+	// response, to continue after the last UTxO that response covered.
+	Metadata map[string]any `json:"metadata,omitempty"`
 }
 
 // MempoolTransactionRequest identifies a mempool tx.
