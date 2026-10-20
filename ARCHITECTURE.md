@@ -6143,9 +6143,12 @@ it. Dingo implements this as a **corroboration gate**
   reconstructed path before it can affect selection. The verifier receives the
   ChainSync connection identity so ancestry from one peer cannot be used for
   another peer's header. A per-connection path cache reuses a resolved ancestor
-  while that intersection remains on the applied chain and the next header
-  directly extends the cached path, even as the applied tip advances; peer
-  rollbacks and disconnects clear it.
+  while that intersection remains on the applied chain, the next header
+  directly extends the cached path, and the ledger has published no snapshot
+  since the path was resolved. Any publication, including a tip-only one for
+  an applied block, invalidates the cached path, because every unapplied
+  ancestor's crypto verdict is tied to that snapshot generation; peer
+  rollbacks and disconnects also clear it.
   Verification is skipped only for a slot an imported Mithril snapshot
   already covers, the same exemption the ledger's own header-queue path
   applies. A result showing local state has not caught up to the header's slot

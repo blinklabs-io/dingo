@@ -8043,7 +8043,7 @@ func TestValidatePeerChainSelectionHeaderCryptoUsesForkNonce(
 	require.Zero(
 		t,
 		lookupCalls,
-		"tip advance must not invalidate peer path cache",
+		"a path resolved after the tip advanced must serve its direct extension",
 	)
 
 	pastHorizonFork := createTestBlockWithNonceAtSlotsAndBlockNumber(
