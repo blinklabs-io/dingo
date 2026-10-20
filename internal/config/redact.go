@@ -18,6 +18,7 @@ import (
 	"log/slog"
 	"net/url"
 	"reflect"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -250,6 +251,12 @@ var logPlainConfigFields = []string{
 	"MinHotPeers",
 	"MinPoolMargin",
 	"Mithril.AllowInsecureHTTP",
+	"Mithril.BatchChunks",
+	"Mithril.CheckInterval",
+	"Mithril.DownloadWorkers",
+	"Mithril.MinGapChunks",
+	"Mithril.RetryBackoff",
+	"Mithril.WindowChunks",
 	"Mithril.Backend",
 	"Mithril.CleanupAfterLoad",
 	"Mithril.DownloadDir",
@@ -995,6 +1002,7 @@ func redactURIUserinfo(s string) string {
 // credentialWords name a credential themselves: one of them anywhere in a
 // key name means the value is a credential.
 var credentialWords = []string{
+	"authorization", "authorisation",
 	"credential", "credentials",
 	"pass", "passphrase", "passwd", "password", "passwords", "pwd",
 	// Azure shared access signature, spelled "sas" in its key names.
@@ -1069,6 +1077,10 @@ func isCredentialKeyName(name string) bool {
 	case containsWord(words, locationWords):
 		return false
 	case containsWord(words, credentialWords):
+		return true
+	case containsWord(words, []string{"access"}) &&
+		containsWord(words, []string{"id", "ids"}):
+		// An access id names the account a request signs as.
 		return true
 	default:
 		return containsWord(words, keyWords) &&
@@ -1211,3 +1223,15 @@ func isDigitByte(b byte) bool { return b >= '0' && b <= '9' }
 func isLowerByte(b byte) bool { return b >= 'a' && b <= 'z' }
 
 func isUpperByte(b byte) bool { return b >= 'A' && b <= 'Z' }
+
+var urlInTextPattern = regexp.MustCompile(`https?://[^\s"'<>]+`)
+
+// RedactCredentialsInText removes credentials from every http(s) URL in
+// free text such as an error message: the whole userinfo component and the
+// value of each credential-named query or fragment parameter. Text outside
+// URLs is returned unchanged.
+func RedactCredentialsInText(s string) string {
+	return urlInTextPattern.ReplaceAllStringFunc(s, func(u string) string {
+		return redactURLUserinfo(redactCredentialParams(u))
+	})
+}

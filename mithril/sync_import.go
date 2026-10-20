@@ -530,15 +530,7 @@ func importPreparedLedgerState(
 	// disabled by leaving the import key empty.
 	importKey := ""
 	if !reconcile && result.Snapshot != nil && result.Snapshot.Digest != "" {
-		digest := result.Snapshot.Digest
-		if len(digest) > 16 {
-			digest = digest[:16]
-		}
-		importKey = fmt.Sprintf(
-			"%s:%d",
-			digest,
-			state.Tip.Slot,
-		)
+		importKey = ledgerImportKey(result.Snapshot.Digest, state.Tip.Slot)
 	}
 
 	// Import the ledger state
@@ -595,6 +587,15 @@ func importPreparedLedgerState(
 		return 0, nil, false, fmt.Errorf("importing ledger state: %w", err)
 	}
 	return state.Tip.Slot, state.Tip.BlockHash, beyondCertifiedTip, nil
+}
+
+// ledgerImportKey is the ledger-state import checkpoint key for an
+// artifact's state at slot: "{digest prefix}:{slot}".
+func ledgerImportKey(digest string, slot uint64) string {
+	if len(digest) > 16 {
+		digest = digest[:16]
+	}
+	return fmt.Sprintf("%s:%d", digest, slot)
 }
 
 // errAncillaryDigestMismatch reports a file selected for import whose bytes are

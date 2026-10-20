@@ -1044,8 +1044,34 @@
 # Use 'dingo mithril sync' or 'dingo sync --mithril' to bootstrap from a snapshot
 # CLI: --mithril-enabled, --mithril-verify-certs
 # mithril:
-  # Enable Mithril integration (default: true)
-  # enabled: true
+  # Make `dingo serve` sync from Mithril while it is behind the aggregator's
+  # certified immutable tip, falling back to Ouroboros on any failure.
+  # Requires core storage mode. With historyExpiry.enabled false the node
+  # replays certified blocks; with it true it restores a snapshot and
+  # backfills. `dingo mithril sync` works regardless of this setting.
+  # Default: false
+  # enabled: false
+  # Immutable chunks held on disk at once during node-managed sync (default: 64).
+  # They wait undecoded; decoded blocks in memory are bounded by batchChunks.
+  # CLI: --mithril-window-chunks  Env: DINGO_MITHRIL_WINDOW_CHUNKS
+  # windowChunks: 64
+  # Chunks applied per ledger batch; at least 1 and at most windowChunks
+  # (default: 8)
+  # CLI: --mithril-batch-chunks  Env: DINGO_MITHRIL_BATCH_CHUNKS
+  # batchChunks: 8
+  # Concurrent chunk downloads (default: 16)
+  # CLI: --mithril-download-workers  Env: DINGO_MITHRIL_DOWNLOAD_WORKERS
+  # downloadWorkers: 16
+  # Smallest certified gap, in chunks, that starts a node-managed sync
+  # (default: 4)
+  # CLI: --mithril-min-gap-chunks  Env: DINGO_MITHRIL_MIN_GAP_CHUNKS
+  # minGapChunks: 4
+  # How often a live node re-checks the aggregator (default: 10m)
+  # CLI: --mithril-check-interval  Env: DINGO_MITHRIL_CHECK_INTERVAL
+  # checkInterval: 10m
+  # Wait after a Mithril failure before retrying (default: 30m)
+  # CLI: --mithril-retry-backoff  Env: DINGO_MITHRIL_RETRY_BACKOFF
+  # retryBackoff: 30m
   # Override aggregator URL (auto-detected from network if empty)
   # Supported networks: mainnet, preprod, preview
   # aggregatorUrl: ""
