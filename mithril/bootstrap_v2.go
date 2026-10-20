@@ -16,7 +16,6 @@ package mithril
 
 import (
 	"context"
-	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -61,6 +60,9 @@ const (
 	// The ancillary archive holds the ledger state, which is the largest v2
 	// object.
 	ancillaryMaxBytes int64 = 64 << 30
+	// Ancillary data holds the signed ledger state and in-progress trio.
+	ancillaryExpandedMaxBytes int64 = 64 << 30
+	maxAncillaryEntries             = 32 << 10
 
 	// immutableInflightBytes bounds the compressed bytes the immutable pool
 	// may have in flight, counting each download at its size limit. At the
@@ -81,10 +83,9 @@ func immutableDownloadBudget(cfg BootstrapConfig) (*semaphore.Weighted, int64) {
 	return semaphore.NewWeighted(max(immutableInflightBytes, weight)), weight
 }
 
-// immutableArchiveLimits admits an immutable archive's own certified trio, and
-// hashes each file as it is written. The ledger tree is also admitted because
-// v1-layout archives keep the ledger state there and the extraction directory
-// is searched for it when no ancillary archive is usable.
+// immutableArchiveLimits admits only an immutable archive's certified trio and
+// hashes each file as it is written. Ledger state comes from the separately
+// signed ancillary archive.
 func immutableArchiveLimits(
 	num uint64,
 	digests map[string]string,
@@ -105,8 +106,7 @@ func immutableArchiveLimits(
 			if _, ok := own[name]; ok {
 				return true
 			}
-			return name == "immutable" || name == "ledger" ||
-				strings.HasPrefix(name, "ledger/")
+			return name == "immutable"
 		},
 	}
 }
@@ -128,12 +128,23 @@ func digestListLimits() archiveLimits {
 // in-progress immutable trio.
 func ancillaryLimits() archiveLimits {
 	return archiveLimits{
+		maxEntries:     maxAncillaryEntries,
+		maxMemberBytes: maxExtractFileSize,
+		maxTotalBytes:  ancillaryExpandedMaxBytes,
 		allow: func(name string) bool {
 			return name == ancillaryManifestFilename ||
 				name == "ledger" || strings.HasPrefix(name, "ledger/") ||
 				name == "immutable" || ancillaryMemberPattern.MatchString(name)
 		},
 	}
+}
+
+func withBootstrapExtractionBudget(
+	limits archiveLimits,
+	budget *bootstrapExtractionBudget,
+) archiveLimits {
+	limits.budget = budget
+	return limits
 }
 
 // objectMaxBytes is the compressed-size limit for a v2 object whose built-in
@@ -222,6 +233,21 @@ func bootstrapV2(
 			artifact.Network,
 		)
 	}
+	if artifact.Beacon.ImmutableFileNumber >= maxCardanoDatabaseArchives {
+		return nil, fmt.Errorf(
+			"cardano database snapshot has too many immutable archives: %d",
+			artifact.Beacon.ImmutableFileNumber+1,
+		)
+	}
+	locationPolicy, err := newArtifactLocationPolicy(
+		aggregatorURL, cfg.AllowInsecureHTTP,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if err := locationPolicy.apply(artifact); err != nil {
+		return nil, err
+	}
 	// A certificate authenticates the immutable database content, while the
 	// ledger state and the final in-progress immutable trio are authenticated
 	// by the separately signed ancillary manifest. Do not start downloading
@@ -295,6 +321,46 @@ func bootstrapV2(
 		}
 	}
 
+	totalArchives := artifact.Beacon.ImmutableFileNumber + 1
+	downloadArchives := totalArchives - min(cfg.StartImmutable, totalArchives)
+	immutableBytes, ok := multiplyWithinInt64(
+		cfg.objectMaxBytes(immutableArchiveMaxBytes), downloadArchives,
+	)
+	if !ok {
+		return nil, errArtifactDownloadBudget
+	}
+	artifactObjects := downloadArchives + 1
+	var ancillaryBytes int64
+	if len(artifact.Ancillary.Locations) > 0 {
+		artifactObjects++
+		ancillaryBytes = cfg.objectMaxBytes(ancillaryMaxBytes)
+	}
+	cfg.downloadBudget, err = newArtifactDownloadBudget(
+		artifactObjects,
+		immutableBytes,
+		cfg.objectMaxBytes(digestListMaxBytes),
+		ancillaryBytes,
+	)
+	if err != nil {
+		return nil, err
+	}
+	downloadTransport := newPooledDownloadTransport(
+		immutableDownloadWorkers,
+		cfg.AllowInsecureHTTP,
+	)
+	downloadTransport.downloadBudget = cfg.downloadBudget
+	defer downloadTransport.CloseIdleConnections()
+	cfg.httpClient = &http.Client{
+		Transport:     downloadTransport,
+		CheckRedirect: locationPolicy.checkRedirect,
+	}
+	client.httpClient = aggregatorHTTPClient(cfg.httpClient)
+	downloadCtx, cancelDownloads := context.WithTimeout(
+		ctx, artifactDownloadTotalTimeout,
+	)
+	defer cancelDownloads()
+	ctx = downloadCtx
+
 	// Step 2: Set up download directory
 	downloadDir := cfg.DownloadDir
 	createdTempDir := false
@@ -316,6 +382,10 @@ func bootstrapV2(
 			os.RemoveAll(downloadDir)
 		}
 	}()
+	cfg.extractionBudget, err = newBootstrapExtractionBudget(downloadDir)
+	if err != nil {
+		return nil, err
+	}
 
 	// Unlike v1, the ancillary download and the immutable archive
 	// pool report progress concurrently. Downstream OnProgress
@@ -844,6 +914,7 @@ func downloadDigestsArchive(
 			MaxIdleRetries:      cfg.DownloadMaxIdleRetries,
 			MaxTransientRetries: cfg.DownloadMaxTransientRetries,
 			AllowInsecureHTTP:   cfg.AllowInsecureHTTP,
+			HTTPClient:          cfg.httpClient,
 		},
 	)
 	if err != nil {
@@ -872,7 +943,9 @@ func downloadDigestsArchive(
 			"artifact", "immutable_digest_list",
 		),
 		WithReplaceDestination(),
-		withArchiveLimits(digestListLimits()),
+		withArchiveLimits(withBootstrapExtractionBudget(
+			digestListLimits(), cfg.extractionBudget,
+		)),
 	); err != nil {
 		return nil, fmt.Errorf("extracting digests archive: %w", err)
 	}
@@ -1000,20 +1073,6 @@ func downloadImmutables(
 	// progress is reported by onArchiveDone instead.
 	quietLogger := slog.New(slog.DiscardHandler)
 
-	// One shared keep-alive client for the whole pool so workers reuse
-	// pooled connections instead of paying a TCP+TLS handshake per
-	// archive. Sized to the worker count; idle connections are closed
-	// when the pool finishes. Carried on the (by-value) cfg so each
-	// fetchImmutableArchive call reuses it without a signature change.
-	dlTransport := newPooledDownloadTransport(
-		immutableDownloadWorkers,
-		cfg.AllowInsecureHTTP,
-	)
-	defer dlTransport.CloseIdleConnections()
-	cfg.httpClient = &http.Client{
-		Timeout:   0,
-		Transport: dlTransport,
-	}
 	cfg.immutableDigests = digests
 	// Each in-flight download is charged at its size limit, since the real
 	// size is not known until it has arrived.
@@ -1398,7 +1457,10 @@ func fetchImmutableArchive(
 		extractOpts = append(
 			extractOpts,
 			withArchiveLimits(
-				immutableArchiveLimits(num, cfg.immutableDigests),
+				withBootstrapExtractionBudget(
+					immutableArchiveLimits(num, cfg.immutableDigests),
+					cfg.extractionBudget,
+				),
 			),
 		)
 	}
@@ -1626,6 +1688,7 @@ func downloadAncillaryV2(
 				MaxIdleRetries:      cfg.DownloadMaxIdleRetries,
 				MaxTransientRetries: cfg.DownloadMaxTransientRetries,
 				AllowInsecureHTTP:   cfg.AllowInsecureHTTP,
+				HTTPClient:          cfg.httpClient,
 			},
 		)
 		if err == nil {
@@ -1661,10 +1724,40 @@ func downloadAncillaryV2(
 		downloadDir,
 		filepath.Base("ancillary-"+artifact.Hash),
 	)
+	archiveFile, err := os.Open(ancillaryPath)
+	if err != nil {
+		return nil, nil, ancillaryPath, fmt.Errorf(
+			"opening ancillary archive: %w", err,
+		)
+	}
+	defer archiveFile.Close()
+	limits := withBootstrapExtractionBudget(
+		ancillaryLimits(), cfg.extractionBudget,
+	)
+	if cfg.VerifyCertificateChain {
+		manifest, manifestData, preflightErr := readVerifiedAncillaryManifest(
+			ctx, archiveFile, cfg.AncillaryVerificationKey,
+		)
+		if preflightErr != nil {
+			return nil, nil, ancillaryPath, fmt.Errorf(
+				"verifying ancillary manifest before extraction: %w",
+				preflightErr,
+			)
+		}
+		limits = verifiedAncillaryLimits(
+			manifest, manifestData, cfg.extractionBudget,
+		)
+	}
+	if _, err := archiveFile.Seek(0, io.SeekStart); err != nil {
+		return nil, nil, ancillaryPath, fmt.Errorf(
+			"rewinding ancillary archive: %w", err,
+		)
+	}
 	// Replace: the resume path above may have removed an unverified
 	// extraction, but an interrupted run can still leave one behind.
-	if _, extractErr := ExtractArchive(
+	if _, extractErr := extractArchiveFile(
 		ctx,
+		archiveFile,
 		ancillaryPath,
 		ancillaryDir,
 		cfg.Logger.With(
@@ -1672,7 +1765,7 @@ func downloadAncillaryV2(
 			"artifact", "ancillary_ledger_state",
 		),
 		WithReplaceDestination(),
-		withArchiveLimits(ancillaryLimits()),
+		withArchiveLimits(limits),
 	); extractErr != nil {
 		return nil, nil, ancillaryPath, fmt.Errorf(
 			"extracting ancillary archive: %w",
@@ -1803,58 +1896,14 @@ func verifyAncillaryManifest(
 	if err != nil {
 		return nil, fmt.Errorf("reading ancillary manifest: %w", err)
 	}
-	var manifest ancillaryManifest
-	if err := json.Unmarshal(data, &manifest); err != nil {
-		return nil, fmt.Errorf("parsing ancillary manifest: %w", err)
-	}
-	if len(manifest.Data) == 0 {
-		return nil, errors.New("ancillary manifest lists no files")
-	}
-	if manifest.Signature == "" {
-		return nil, errors.New("ancillary manifest has no signature")
-	}
-
-	key, err := ParseVerificationKey(ancillaryVerificationKey)
+	manifest, err := parseAndVerifyAncillaryManifest(
+		data, ancillaryVerificationKey,
+	)
 	if err != nil {
-		return nil, fmt.Errorf(
-			"parsing ancillary verification key: %w",
-			err,
-		)
-	}
-	if len(key.RawKeyBytes) != ed25519.PublicKeySize {
-		return nil, fmt.Errorf(
-			"ancillary verification key has unexpected size %d",
-			len(key.RawKeyBytes),
-		)
-	}
-	signature, err := decodeHexString(manifest.Signature)
-	if err != nil {
-		return nil, fmt.Errorf(
-			"decoding ancillary manifest signature: %w",
-			err,
-		)
-	}
-	if len(signature) != ed25519.SignatureSize {
-		return nil, fmt.Errorf(
-			"ancillary manifest signature has unexpected size %d",
-			len(signature),
-		)
-	}
-	if !ed25519.Verify(
-		ed25519.PublicKey(key.RawKeyBytes),
-		manifest.computeHash(),
-		signature,
-	) {
-		return nil, errors.New("ancillary manifest signature is invalid")
+		return nil, err
 	}
 
 	for _, relPath := range slices.Sorted(maps.Keys(manifest.Data)) {
-		if !filepath.IsLocal(relPath) {
-			return nil, fmt.Errorf(
-				"ancillary manifest contains non-local path %q",
-				relPath,
-			)
-		}
 		sum, err := sha256FileIn(root, relPath)
 		if err != nil {
 			return nil, fmt.Errorf(

@@ -165,6 +165,19 @@ type ChainSelectorConfig struct {
 	// Other peers' tips play no part in the decision. Optional; the rule is
 	// inactive while nil or while it reports false.
 	WallClockSlot func() (uint64, bool)
+	// HeaderCryptoVerificationGenerationCurrent reports whether a nonzero
+	// producer-authorization generation still matches the live ledger state.
+	// It is optional for callers that do not stage cryptographically verified
+	// headers.
+	HeaderCryptoVerificationGenerationCurrent func(uint64) bool
+	// CurrentHeaderCryptoVerificationGeneration returns the current nonzero
+	// ledger snapshot generation, or zero while publication is in flight.
+	CurrentHeaderCryptoVerificationGeneration func() uint64
+	// PinHeaderCryptoVerificationGeneration keeps a current generation stable
+	// until the returned release function is called. Selector promotion uses
+	// it to order a committed tip before any ledger snapshot publication that
+	// invalidates its producer-authorization verdict.
+	PinHeaderCryptoVerificationGeneration func(uint64) (func(), bool)
 	// MinCorroboratingPeers is the number of distinct other eligible peers
 	// that must report the same recent blocks as a candidate before that
 	// candidate can drive chain selection in Genesis mode. It implements the
@@ -238,12 +251,16 @@ type ChainSelector struct {
 	// One rolling snapshot per peer; candidate events retain only the bounded
 	// admission updates needed to promote or rebuild that snapshot.
 	pendingPeerTipFrontiers map[ouroboros.ConnectionId]*PeerChainTip
-	committedPeerTips       map[ouroboros.ConnectionId]uint64
-	eligible                map[ouroboros.ConnectionId]bool
-	priority                map[ouroboros.ConnectionId]int
-	evaluationTrigger       chan struct{}
-	bestPeerConn            *ouroboros.ConnectionId
-	localTip                ochainsync.Tip
+	// One unverified, connected header per peer may temporarily corroborate
+	// verified candidates while that peer waits for the forecast horizon. It
+	// is excluded from every selection and admission path.
+	forecastHorizonWitnesses map[ouroboros.ConnectionId]forecastHorizonWitness
+	committedPeerTips        map[ouroboros.ConnectionId]uint64
+	eligible                 map[ouroboros.ConnectionId]bool
+	priority                 map[ouroboros.ConnectionId]int
+	evaluationTrigger        chan struct{}
+	bestPeerConn             *ouroboros.ConnectionId
+	localTip                 ochainsync.Tip
 	// farTipClaims records, per connection, the most recent delivered
 	// frontier that exceeded the catch-up plausibility ceiling. Entries are
 	// provisional: they never enter peerTips and so never influence chain
@@ -363,6 +380,11 @@ type peerTipAdmissionCandidate struct {
 	update      PeerTipUpdateEvent
 	plausible   bool
 	farTipClaim *farTipClaim
+}
+
+type forecastHorizonWitness struct {
+	admissionID uint64
+	peerTip     *PeerChainTip
 }
 
 func cloneCandidateFarTipClaim(
@@ -509,22 +531,23 @@ func NewChainSelector(cfg ChainSelectorConfig) *ChainSelector {
 		cfg.MinCorroboratingPeers = 1
 	}
 	cs := &ChainSelector{
-		config:                  cfg,
-		securityParam:           cfg.SecurityParam,
-		maxTrackedPeers:         maxPeers,
-		mode:                    SelectionModePraos,
-		peerTips:                make(map[ouroboros.ConnectionId]*PeerChainTip),
-		pendingPeerTips:         make(map[ouroboros.ConnectionId][]peerTipAdmissionCandidate),
-		pendingPeerTipFrontiers: make(map[ouroboros.ConnectionId]*PeerChainTip),
-		farTipClaims:            make(map[ouroboros.ConnectionId]farTipClaim),
-		pendingFarTipClaims:     make(map[ouroboros.ConnectionId]farTipClaim),
-		committedPeerTips:       make(map[ouroboros.ConnectionId]uint64),
-		eligible:                make(map[ouroboros.ConnectionId]bool),
-		priority:                make(map[ouroboros.ConnectionId]int),
-		evaluationTrigger:       make(chan struct{}, 1),
-		nowFn:                   time.Now,
-		switchBackCooldown:      cfg.SwitchBackCooldown,
-		recentlyLeft:            make(map[ouroboros.ConnectionId]time.Time),
+		config:                   cfg,
+		securityParam:            cfg.SecurityParam,
+		maxTrackedPeers:          maxPeers,
+		mode:                     SelectionModePraos,
+		peerTips:                 make(map[ouroboros.ConnectionId]*PeerChainTip),
+		pendingPeerTips:          make(map[ouroboros.ConnectionId][]peerTipAdmissionCandidate),
+		pendingPeerTipFrontiers:  make(map[ouroboros.ConnectionId]*PeerChainTip),
+		forecastHorizonWitnesses: make(map[ouroboros.ConnectionId]forecastHorizonWitness),
+		farTipClaims:             make(map[ouroboros.ConnectionId]farTipClaim),
+		pendingFarTipClaims:      make(map[ouroboros.ConnectionId]farTipClaim),
+		committedPeerTips:        make(map[ouroboros.ConnectionId]uint64),
+		eligible:                 make(map[ouroboros.ConnectionId]bool),
+		priority:                 make(map[ouroboros.ConnectionId]int),
+		evaluationTrigger:        make(chan struct{}, 1),
+		nowFn:                    time.Now,
+		switchBackCooldown:       cfg.SwitchBackCooldown,
+		recentlyLeft:             make(map[ouroboros.ConnectionId]time.Time),
 	}
 	if cfg.GenesisMode {
 		cs.mode = SelectionModeGenesis
@@ -1024,6 +1047,9 @@ func (cs *ChainSelector) PreparePeerTipAdmissionDisposition(
 	if update.AdmissionID == 0 {
 		return PeerTipUpdateRejected
 	}
+	if !cs.peerTipAdmissionGenerationCurrent(update) {
+		return PeerTipUpdateRejected
+	}
 	if cs.config.ConnectionLive != nil &&
 		!cs.config.ConnectionLive(update.ConnectionId) {
 		return PeerTipUpdateRejected
@@ -1034,6 +1060,12 @@ func (cs *ChainSelector) PreparePeerTipAdmissionDisposition(
 	func() {
 		cs.mutex.Lock()
 		defer cs.mutex.Unlock()
+		if cs.truncateStalePendingPeerTipsLocked() {
+			cs.rebuildPendingAdmissionStateLocked()
+		}
+		if !cs.peerTipAdmissionGenerationCurrent(update) {
+			return
+		}
 		if update.AdmissionID <= cs.committedPeerTips[update.ConnectionId] {
 			accepted = true
 			return
@@ -1115,12 +1147,75 @@ func (cs *ChainSelector) PreparePeerTipAdmissionDisposition(
 		}
 	}()
 	if accepted && commitImmediately {
-		cs.commitPeerTipAdmission(update, true, &update)
+		cs.commitPeerTipAdmission(update, true, &update, false)
 	}
 	if !accepted {
 		return PeerTipUpdateRejected
 	}
 	return disposition
+}
+
+// PrepareForecastHorizonWitness records one connected header solely as a
+// Genesis corroboration witness while its ChainSync callback waits for the
+// ledger forecast horizon. The header has not passed consensus verification,
+// so it is kept outside every selection and admission path. The returned
+// connections have verified staged headers that the witness now corroborates
+// and should be re-intersected so those headers are delivered again.
+func (cs *ChainSelector) PrepareForecastHorizonWitness(
+	update PeerTipUpdateEvent,
+) []ouroboros.ConnectionId {
+	if update.AdmissionID == 0 ||
+		(cs.config.ConnectionLive != nil &&
+			!cs.config.ConnectionLive(update.ConnectionId)) {
+		return nil
+	}
+	cs.mutex.Lock()
+	defer cs.mutex.Unlock()
+	if !cs.genesisCorroborationActiveLocked() {
+		return nil
+	}
+	base := cs.latestPeerTipCandidateLocked(update.ConnectionId)
+	if base == nil {
+		base = cs.peerTips[update.ConnectionId]
+	}
+	if base == nil || update.ObservedTip.Point.Slot <= base.ObservedTip.Point.Slot ||
+		len(update.ObservedPrevHash) == 0 ||
+		!bytes.Equal(update.ObservedPrevHash, base.ObservedTip.Point.Hash) {
+		return nil
+	}
+	witnessTip := cs.clonePeerTipAdmissionFrontier(base)
+	cs.applyPeerTipAdmissionUpdateLocked(witnessTip, update)
+	cs.forecastHorizonWitnesses[update.ConnectionId] = forecastHorizonWitness{
+		admissionID: update.AdmissionID,
+		peerTip:     witnessTip,
+	}
+	var recoveries []ouroboros.ConnectionId
+	for connId := range cs.pendingPeerTips {
+		if connId == update.ConnectionId {
+			continue
+		}
+		candidate := cs.latestPeerTipCandidateLocked(connId)
+		if candidate != nil && cs.isPeerCorroboratedLocked(connId, candidate) {
+			recoveries = append(recoveries, connId)
+		}
+	}
+	slices.SortFunc(recoveries, func(a, b ouroboros.ConnectionId) int {
+		return cmp.Compare(a.String(), b.String())
+	})
+	return recoveries
+}
+
+// RemoveForecastHorizonWitness removes the temporary witness created for the
+// matching admission wait. A later wait on the same connection is unaffected.
+func (cs *ChainSelector) RemoveForecastHorizonWitness(
+	update PeerTipUpdateEvent,
+) {
+	cs.mutex.Lock()
+	defer cs.mutex.Unlock()
+	witness, ok := cs.forecastHorizonWitnesses[update.ConnectionId]
+	if ok && witness.admissionID == update.AdmissionID {
+		delete(cs.forecastHorizonWitnesses, update.ConnectionId)
+	}
 }
 
 func (cs *ChainSelector) admittedPeerTipPointLocked(
@@ -1141,7 +1236,57 @@ func (cs *ChainSelector) admittedPeerTipPointLocked(
 func (cs *ChainSelector) latestPeerTipCandidateLocked(
 	connId ouroboros.ConnectionId,
 ) *PeerChainTip {
+	for _, candidate := range cs.pendingPeerTips[connId] {
+		if !cs.peerTipAdmissionGenerationCurrent(candidate.update) {
+			return nil
+		}
+	}
 	return cs.pendingPeerTipFrontiers[connId]
+}
+
+func (cs *ChainSelector) peerTipAdmissionGenerationCurrent(
+	update PeerTipUpdateEvent,
+) bool {
+	generation := update.HeaderCryptoVerificationGeneration
+	if generation == 0 {
+		return true
+	}
+	if cs.config.HeaderCryptoVerificationGenerationCurrent != nil {
+		return cs.config.HeaderCryptoVerificationGenerationCurrent(generation)
+	}
+	if cs.config.PinHeaderCryptoVerificationGeneration != nil {
+		release, current := cs.config.PinHeaderCryptoVerificationGeneration(generation)
+		if release != nil {
+			release()
+		}
+		return current
+	}
+	return true
+}
+
+// truncateStalePendingPeerTipsLocked drops the first candidate authorized by
+// an obsolete ledger snapshot and every later candidate on that connection,
+// because the later suffix depends on the rejected prefix.
+func (cs *ChainSelector) truncateStalePendingPeerTipsLocked() bool {
+	changed := false
+	for connId, pending := range cs.pendingPeerTips {
+		for i, candidate := range pending {
+			if cs.peerTipAdmissionGenerationCurrent(candidate.update) {
+				continue
+			}
+			if i == 0 {
+				delete(cs.pendingPeerTips, connId)
+			} else {
+				cs.pendingPeerTips[connId] = append(
+					[]peerTipAdmissionCandidate(nil),
+					pending[:i]...,
+				)
+			}
+			changed = true
+			break
+		}
+	}
+	return changed
 }
 
 func (cs *ChainSelector) rebuildPeerTipAdmissionFrontierLocked(
@@ -1190,6 +1335,7 @@ func (cs *ChainSelector) appendPeerTipAdmissionFrontierLocked(
 }
 
 func (cs *ChainSelector) rebuildPendingAdmissionStateLocked() {
+	cs.truncateStalePendingPeerTipsLocked()
 	type staged struct {
 		connId  ouroboros.ConnectionId
 		connKey string
@@ -1381,6 +1527,33 @@ func (cs *ChainSelector) truncatePendingPeerTipsLocked(
 func (cs *ChainSelector) CommitPeerTipAdmission(
 	update PeerTipUpdateEvent,
 ) bool {
+	return cs.commitPeerTipAdmissionResolved(update, false)
+}
+
+// CommitPeerTipAdmissionPinned promotes a candidate while the ledger keeps
+// the producer-authorization generation pinned across this call.
+func (cs *ChainSelector) CommitPeerTipAdmissionPinned(
+	update PeerTipUpdateEvent,
+) bool {
+	return cs.commitPeerTipAdmissionResolved(update, true)
+}
+
+func (cs *ChainSelector) commitPeerTipAdmissionResolved(
+	update PeerTipUpdateEvent,
+	generationPinned bool,
+) bool {
+	releaseGeneration := func() {}
+	if update.AdmissionID != 0 && !generationPinned {
+		var generationCurrent bool
+		releaseGeneration, generationCurrent = cs.
+			pinPeerTipAdmissionGeneration(update)
+		if !generationCurrent {
+			cs.RejectPeerTipAdmission(update)
+			return false
+		}
+		generationPinned = true
+	}
+	defer releaseGeneration()
 	if update.AdmissionID == 0 {
 		accepted := cs.updatePeerTipObservedLinked(
 			update.ConnectionId,
@@ -1404,23 +1577,24 @@ func (cs *ChainSelector) CommitPeerTipAdmission(
 			peerTip.recordAdmittedTipPoint(point, maxAdmittedPeerTipPoints)
 		}
 		cs.mutex.Unlock()
-		cs.commitMatchingPeerTipAdmissions(update)
+		cs.commitMatchingPeerTipAdmissions(update, generationPinned)
 		return true
 	}
-	if !cs.commitPeerTipAdmission(update, false, nil) {
+	if !cs.commitPeerTipAdmission(update, false, nil, generationPinned) {
 		return false
 	}
 	cs.mutex.RLock()
 	pointStillAdmitted := cs.admittedPeerTipPointLocked(update)
 	cs.mutex.RUnlock()
 	if pointStillAdmitted {
-		cs.commitMatchingPeerTipAdmissions(update)
+		cs.commitMatchingPeerTipAdmissions(update, generationPinned)
 	}
 	return true
 }
 
 func (cs *ChainSelector) commitMatchingPeerTipAdmissions(
 	admitted PeerTipUpdateEvent,
+	generationPinned bool,
 ) {
 	var candidates []PeerTipUpdateEvent
 	func() {
@@ -1438,7 +1612,8 @@ func (cs *ChainSelector) commitMatchingPeerTipAdmissions(
 		}
 	}()
 	for _, candidate := range candidates {
-		cs.commitPeerTipAdmission(candidate, true, &admitted)
+		candidate.HeaderCryptoVerificationGeneration = admitted.HeaderCryptoVerificationGeneration
+		cs.commitPeerTipAdmission(candidate, true, &admitted, generationPinned)
 	}
 }
 
@@ -1446,9 +1621,21 @@ func (cs *ChainSelector) commitPeerTipAdmission(
 	update PeerTipUpdateEvent,
 	requireStaged bool,
 	witness *PeerTipUpdateEvent,
+	generationPinned bool,
 ) bool {
+	releaseGeneration := func() {}
+	if !generationPinned {
+		var generationCurrent bool
+		releaseGeneration, generationCurrent = cs.
+			pinPeerTipAdmissionGeneration(update)
+		if !generationCurrent {
+			cs.RejectPeerTipAdmission(update)
+			return false
+		}
+	}
 	if cs.config.ConnectionLive != nil &&
 		!cs.config.ConnectionLive(update.ConnectionId) {
+		releaseGeneration()
 		return false
 	}
 	var shouldEvaluate bool
@@ -1469,6 +1656,7 @@ func (cs *ChainSelector) commitPeerTipAdmission(
 			if candidate.update.AdmissionID != update.AdmissionID {
 				continue
 			}
+			candidate.update.HeaderCryptoVerificationGeneration = update.HeaderCryptoVerificationGeneration
 			link := deliveredLink{
 				prevHash: candidate.update.ObservedPrevHash,
 				boundary: candidate.update.ObservedBoundary,
@@ -1558,6 +1746,11 @@ func (cs *ChainSelector) commitPeerTipAdmission(
 			return
 		}
 	}()
+	if accepted && shouldEvaluate {
+		cs.evaluateAndSwitch(true)
+		shouldEvaluate = false
+	}
+	releaseGeneration()
 	if evictedConn != nil && cs.config.EventBus != nil {
 		cs.publishSelection(
 			PeerEvictedEventType,
@@ -1601,6 +1794,62 @@ func (cs *ChainSelector) commitPeerTipAdmission(
 		cs.EvaluateAndSwitch()
 	}
 	return true
+}
+
+func (cs *ChainSelector) pinPeerTipAdmissionGeneration(
+	update PeerTipUpdateEvent,
+) (func(), bool) {
+	generation := update.HeaderCryptoVerificationGeneration
+	if generation == 0 {
+		return func() {}, true
+	}
+	if cs.config.PinHeaderCryptoVerificationGeneration == nil {
+		// A point-in-time freshness hook cannot make promotion atomic with
+		// ledger publication. Preserve legacy callers with no generation hooks,
+		// but fail closed when a caller supplied freshness without a pin.
+		return func() {},
+			cs.config.HeaderCryptoVerificationGenerationCurrent == nil
+	}
+	release, current := cs.config.PinHeaderCryptoVerificationGeneration(generation)
+	if !current || release == nil {
+		return func() {}, false
+	}
+	return release, true
+}
+
+// A zero or just-superseded generation is transient: the ledger reports it
+// while a validation transition is in flight. Treating it as final would
+// withhold the header from a peer that never re-sends it, so the pin waits a
+// bounded time for a stable generation before giving up.
+const (
+	headerCryptoGenerationStableWait   = 2 * time.Second
+	headerCryptoGenerationPollInterval = 2 * time.Millisecond
+)
+
+// pinCurrentHeaderCryptoGeneration orders a selector decision before the next
+// ledger publication. Callers acquire this pin before cs.mutex, matching the
+// ledger admission callback's generation-pin then selector-lock order.
+func (cs *ChainSelector) pinCurrentHeaderCryptoGeneration() (func(), bool) {
+	if cs.config.CurrentHeaderCryptoVerificationGeneration == nil ||
+		cs.config.PinHeaderCryptoVerificationGeneration == nil {
+		return func() {}, true
+	}
+	deadline := time.Now().Add(headerCryptoGenerationStableWait)
+	for {
+		generation := cs.config.CurrentHeaderCryptoVerificationGeneration()
+		if generation != 0 {
+			release, current := cs.config.PinHeaderCryptoVerificationGeneration(
+				generation,
+			)
+			if current && release != nil {
+				return release, true
+			}
+		}
+		if !time.Now().Before(deadline) {
+			return func() {}, false
+		}
+		time.Sleep(headerCryptoGenerationPollInterval)
+	}
 }
 
 // ResolvePeerTipAdmission promotes an accepted header or removes a rejected
@@ -1813,10 +2062,9 @@ func (cs *ChainSelector) checkPeerTipPlausibleWithClaimsTrackedLocked(
 		// go stale while the network advances. A peer whose
 		// delta from the stale reference exceeds K looks
 		// implausible, but the network legitimately moved on.
-		// Accept the tip if it is within 2*K of the local tip
-		// AND the reference itself is stale (reference <=
-		// local tip, meaning the node hasn't updated peer
-		// records since the stall began).
+		// Keep the peer-relative K bound while the reference is within
+		// K of the local tip. A farther reference can be stale during
+		// snapshot catch-up, but only within the local 2*K ceiling.
 		// A corroborated far claim is this connection's own reference, as a
 		// known peer's previous frontier is in Case 1. The frontier that
 		// corroborated it may sit up to K below it, so the Case 2 ceiling
@@ -1830,12 +2078,20 @@ func (cs *ChainSelector) checkPeerTipPlausibleWithClaimsTrackedLocked(
 				}
 			}
 		}
+		catchUpCeiling := safeAddUint64(
+			cs.localTip.BlockNumber,
+			safeAddUint64(cs.securityParam, cs.securityParam),
+		)
+		catchUpFloor := safeAddUint64(
+			cs.localTip.BlockNumber,
+			cs.securityParam,
+		)
+		referenceStale := referenceBlock <= cs.localTip.BlockNumber
+		referenceAheadWithinCatchUpWindow := referenceBlock > catchUpFloor &&
+			referenceBlock <= catchUpCeiling
 		if observedReject && cs.localTip.BlockNumber > 0 &&
-			referenceBlock <= cs.localTip.BlockNumber {
-			maxPlausibleBlock = safeAddUint64(
-				cs.localTip.BlockNumber,
-				safeAddUint64(cs.securityParam, cs.securityParam),
-			)
+			(referenceStale || referenceAheadWithinCatchUpWindow) {
+			maxPlausibleBlock = catchUpCeiling
 			observedReject = observedBlock > maxPlausibleBlock
 			// The 2*K catch-up ceiling still assumes the honest network tip
 			// is at most a bounded stall away from the local tip. That
@@ -1846,13 +2102,14 @@ func (cs *ChainSelector) checkPeerTipPlausibleWithClaimsTrackedLocked(
 			// unreachable. A rejected frontier is never recorded, so it can
 			// never itself become a fresher reference -- a one-way ratchet.
 			//
-			// Every reference the selector holds is stale here (that is
-			// what put us in this branch), and nothing about this frontier
-			// can be verified yet: its epoch is beyond the ledger's forecast
-			// horizon, so header verification is deferred before any
-			// signature is checked. Require corroboration instead: another,
-			// distinct connection has delivered a frontier within K of it,
-			// or this connection has delivered a connected header chain
+			// References within this local catch-up ceiling can be stale
+			// while a snapshot-backed local tip lags behind the network.
+			// Nothing about this frontier can be verified yet: its epoch is
+			// beyond the ledger's forecast horizon, so header verification
+			// is deferred before any signature is checked. Require
+			// corroboration instead: another, distinct connection has
+			// delivered a frontier within K of it, or this connection has
+			// delivered a connected header chain
 			// (see corroborateFarTipClaimLocked). A single claim, honest or
 			// fabricated, cannot break the ratchet by itself.
 			if observedReject {
@@ -2347,6 +2604,7 @@ func (cs *ChainSelector) deletePeerLocked(connId ouroboros.ConnectionId) {
 	delete(cs.peerTips, connId)
 	delete(cs.pendingPeerTips, connId)
 	delete(cs.pendingPeerTipFrontiers, connId)
+	delete(cs.forecastHorizonWitnesses, connId)
 	delete(cs.committedPeerTips, connId)
 	delete(cs.eligible, connId)
 	delete(cs.priority, connId)
@@ -2683,6 +2941,11 @@ func (cs *ChainSelector) PeerCount() int {
 // SelectBestChain evaluates all peer tips and returns the connection ID of
 // the peer with the best chain.
 func (cs *ChainSelector) SelectBestChain() *ouroboros.ConnectionId {
+	releaseGeneration, generationCurrent := cs.pinCurrentHeaderCryptoGeneration()
+	if !generationCurrent {
+		return cs.GetBestPeer()
+	}
+	defer releaseGeneration()
 	cs.mutex.Lock()
 	best := cs.selectBestChainLocked()
 	cs.mutex.Unlock()
@@ -3809,6 +4072,10 @@ func (cs *ChainSelector) evaluateBestPeerLocked() (
 // EvaluateAndSwitch evaluates all peer tips and switches to the best chain if
 // it differs from the current best. Returns true if a switch occurred.
 func (cs *ChainSelector) EvaluateAndSwitch() bool {
+	return cs.evaluateAndSwitch(false)
+}
+
+func (cs *ChainSelector) evaluateAndSwitch(generationPinned bool) bool {
 	var switchEvent *event.Event
 	var selectionEvent *event.Event
 	var corroborationEvent *event.Event
@@ -3816,6 +4083,16 @@ func (cs *ChainSelector) EvaluateAndSwitch() bool {
 	switchOccurred := false
 
 	func() {
+		releaseGeneration := func() {}
+		if !generationPinned {
+			var generationCurrent bool
+			releaseGeneration, generationCurrent = cs.
+				pinCurrentHeaderCryptoGeneration()
+			if !generationCurrent {
+				return
+			}
+		}
+		defer releaseGeneration()
 		cs.mutex.Lock()
 		defer cs.mutex.Unlock()
 		switchOccurred, switchEvent, selectionEvent, corroborationEvent = cs.evaluateBestPeerLocked()

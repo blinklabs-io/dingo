@@ -32,7 +32,21 @@ const (
 
 type restrictedHTTPTransport struct {
 	*http.Transport
-	allowPrivate bool
+	allowPrivate   bool
+	downloadBudget *artifactDownloadBudget
+}
+
+func (t *restrictedHTTPTransport) RoundTrip(
+	req *http.Request,
+) (*http.Response, error) {
+	if err := t.downloadBudget.takeRequest(); err != nil {
+		return nil, err
+	}
+	resp, err := t.Transport.RoundTrip(req)
+	if resp != nil && resp.Body != nil {
+		resp.Body = t.downloadBudget.wrap(resp.Body)
+	}
+	return resp, err
 }
 
 func newMithrilHTTPClient(
@@ -82,7 +96,9 @@ func secureMithrilHTTPTransport(
 		if !restricted.allowPrivate {
 			return restricted, nil
 		}
-		return newRestrictedHTTPTransport(restricted.Transport, false), nil
+		secured := newRestrictedHTTPTransport(restricted.Transport, false)
+		secured.downloadBudget = restricted.downloadBudget
+		return secured, nil
 	}
 	transport, ok := base.(*http.Transport)
 	if !ok {

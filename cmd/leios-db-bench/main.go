@@ -42,6 +42,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"runtime/pprof"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -70,6 +71,9 @@ type benchConfig struct {
 	burst           bool
 	burstSize       int
 	burstInterval   time.Duration
+	cachedReads     bool
+	cpuProfile      string
+	heapProfile     string
 }
 
 type metric int
@@ -94,11 +98,12 @@ var metricLabels = [metricCount]string{
 // benchEb is one EB generated ahead of its fetch. Its slot is assigned when it
 // is fetched, in fetch order.
 type benchEb struct {
-	idx      int
-	hash     []byte
-	manifest []byte
-	txs      []cbor.RawMessage
-	measured bool
+	idx       int
+	hash      []byte
+	manifest  []byte
+	txs       []cbor.RawMessage
+	measured  bool
+	readCache *ebReadCache
 }
 
 type txRange struct{ start, end int }
@@ -197,8 +202,27 @@ func run() (runErr error) {
 		return fmt.Errorf("open Dingo database recovery state: %w", err)
 	}
 
+	if config.heapProfile != "" {
+		stopMemoryProfile := startMemoryProfile(config.heapProfile)
+		defer func() {
+			runErr = errors.Join(runErr, stopMemoryProfile())
+		}()
+	}
 	if err := populate(rt.Database, config); err != nil {
 		return err
+	}
+	if config.cpuProfile != "" {
+		file, err := os.Create(config.cpuProfile)
+		if err != nil {
+			return fmt.Errorf("create CPU profile: %w", err)
+		}
+		if err := pprof.StartCPUProfile(file); err != nil {
+			return errors.Join(err, file.Close())
+		}
+		defer func() {
+			pprof.StopCPUProfile()
+			runErr = errors.Join(runErr, file.Close())
+		}()
 	}
 	return runBench(rt.Database, config)
 }
@@ -221,14 +245,32 @@ func parseConfig() benchConfig {
 		"peers each reading every EB once it is complete")
 	flag.IntVar(&config.samples, "samples", 100,
 		"measured EBs, processed one at a time")
-	flag.IntVar(&config.gcEvery, "gc-every", 10,
-		"prune beyond the volatile window every this many fetched EBs; the stored window can exceed -volatile-ebs by up to this many minus one")
+	flag.IntVar(
+		&config.gcEvery,
+		"gc-every",
+		10,
+		"prune beyond the volatile window every this many fetched EBs; the stored window can exceed -volatile-ebs by up to this many minus one",
+	)
 	flag.BoolVar(&config.burst, "burst", false,
 		"fetch and serve bursts of background EBs while measuring")
 	flag.IntVar(&config.burstSize, "burst-size", 10,
 		"background EBs started at once per burst")
 	flag.DurationVar(&config.burstInterval, "burst-interval", 5*time.Second,
 		"time between background bursts")
+	flag.BoolVar(
+		&config.cachedReads,
+		"cached-reads",
+		false,
+		"share persisted manifest and closure reads per EB; clone returned transactions",
+	)
+	flag.StringVar(&config.cpuProfile, "cpuprofile", "",
+		"write a CPU profile of the measured workload, excluding prepopulation")
+	flag.StringVar(
+		&config.heapProfile,
+		"heapprofile",
+		"",
+		"write an unforced final heap profile and sample runtime memory; diagnostic runs only",
+	)
 	flag.Parse()
 	return config
 }
@@ -252,7 +294,8 @@ func validateConfig(config benchConfig) error {
 	if minRequest := minRequestBytes(config); config.requestBytes < minRequest {
 		return fmt.Errorf(
 			"invalid benchmark configuration: -request-bytes %d is below one job (%d bytes)",
-			config.requestBytes, minRequest,
+			config.requestBytes,
+			minRequest,
 		)
 	}
 	return nil
@@ -332,25 +375,50 @@ func printBenchInfo(config benchConfig, dir string) {
 	}
 	fmt.Println("Dingo LeiosDB latency benchmark")
 	fmt.Println()
-	fmt.Printf("  Database          : %d volatile EBs (Badger blob store, core defaults)\n", config.volatileEbs)
+	fmt.Printf(
+		"  Database          : %d volatile EBs (Badger blob store, core defaults)\n",
+		config.volatileEbs,
+	)
 	fmt.Printf("  EB                : %d Txs of %s (closure %s)\n",
 		config.txsPerEb, showBytes(config.txSizeBytes),
 		showBytes(config.txsPerEb*config.txSizeBytes))
 	fmt.Printf("  Requests          : %s of %d KiB jobs\n",
 		showBytes(config.requestBytes), config.jobBytes/1024)
 	fmt.Printf("  Schedule          : %d EBs, one at a time\n", config.samples)
-	fmt.Printf("  Fetch             : from %d upstream peers\n", config.upstreamPeers)
-	fmt.Printf("  Serve             : to %d downstream peers\n", config.downstreamPeers)
+	fmt.Printf(
+		"  Fetch             : from %d upstream peers\n",
+		config.upstreamPeers,
+	)
+	fmt.Printf(
+		"  Serve             : to %d downstream peers\n",
+		config.downstreamPeers,
+	)
 	fmt.Printf("  Background load   : %s\n", background)
 	fmt.Printf("  Runtime           : GOMAXPROCS=%d\n", runtime.GOMAXPROCS(0))
+	if config.cachedReads {
+		fmt.Println(
+			"  Reads             : per-EB read-through cache (first read loads storage)",
+		)
+	} else {
+		fmt.Println("  Reads             : database (application cache bypassed)")
+	}
 	fmt.Println()
 	fmt.Printf("Database in %s (TMPDIR to change)\n", dir)
 	fmt.Println()
 	fmt.Println("Comparison notes:")
-	fmt.Println("  Haskell writes each Tx chunk to SQLite as it arrives; Dingo assembles the")
+	fmt.Println(
+		"  Haskell writes each Tx chunk to SQLite as it arrives; Dingo assembles the",
+	)
 	fmt.Println("  chunks in memory and commits the EB once with SetLeiosEB.")
-	fmt.Println("  Every Dingo Txs request reloads the stored transaction list, then slices it.")
-	fmt.Println("  Dingo serves from memory when the EB is cached; this measures the database path.")
+	fmt.Println(
+		"  Default Txs requests reload the stored transaction list, then slice it.",
+	)
+	fmt.Println(
+		"  -cached-reads shares the first persisted read per EB; later reads reuse it.",
+	)
+	fmt.Println(
+		"  This models cached storage reads, not the protocol cache or wire encoding.",
+	)
 	fmt.Println()
 }
 
@@ -472,13 +540,21 @@ func runBench(db *database.Database, config benchConfig) error {
 		if err := db.SetLeiosEB(slot, eb.hash, eb.manifest, assembly); err != nil {
 			rec.fail(fmt.Errorf("write EB %d: %w", eb.idx, err))
 		}
+		if config.cachedReads {
+			eb.readCache = newEBReadCache(db, eb.hash, slot)
+		}
 		completed := time.Now()
 		if eb.measured {
 			rec.record(metricFetch, completed.Sub(started))
 			rec.record(metricFetchChunks, chunksDone.Sub(started))
 			rec.record(metricFetchCommit, completed.Sub(chunksDone))
 		}
-		item := peerItem{eb: eb, slot: slot, completed: completed, onDone: onDone}
+		item := peerItem{
+			eb:        eb,
+			slot:      slot,
+			completed: completed,
+			onDone:    onDone,
+		}
 		voteQ <- item
 		for _, q := range peerQs {
 			q <- item
@@ -513,7 +589,9 @@ func runBench(db *database.Database, config benchConfig) error {
 
 	var burstWg sync.WaitGroup
 	if config.burst {
-		burstWg.Go(func() { burstLoad(config, func(eb *benchEb) { fetchEb(eb, func() {}) }, stop, t0, rec) })
+		burstWg.Go(
+			func() { burstLoad(config, func(eb *benchEb) { fetchEb(eb, func() {}) }, stop, t0, rec) },
+		)
 	}
 	for _, eb := range signal {
 		if rec.failed() {
@@ -524,6 +602,9 @@ func runBench(db *database.Database, config benchConfig) error {
 		slot := fetchEb(eb, readers.Done)
 		readers.Wait()
 		closureRead(db, eb, slot, metricApplyRead, config, rec)
+		// All readers have finished, including apply; release this EB's
+		// retained closure before the next measured EB starts.
+		eb.readCache = nil
 		fetched.Add(1)
 	}
 	stopped.Store(true)
@@ -577,7 +658,9 @@ func burstLoad(
 			}
 			ebs[i] = eb
 		}
-		timer := time.NewTimer(time.Until(t0.Add(time.Duration(b) * config.burstInterval)))
+		timer := time.NewTimer(
+			time.Until(t0.Add(time.Duration(b) * config.burstInterval)),
+		)
 		select {
 		case <-stop:
 			timer.Stop()
@@ -604,7 +687,7 @@ func closureRead(
 	rec *recorder,
 ) {
 	started := time.Now()
-	txs, err := db.GetLeiosEBTxs(eb.hash, slot)
+	txs, err := readEBTxs(db, eb, slot, txRange{end: -1})
 	elapsed := time.Since(started)
 	switch {
 	case err != nil:
@@ -627,7 +710,13 @@ func servePeer(
 ) {
 	eb := item.eb
 	started := time.Now()
-	manifest, err := db.GetLeiosEBManifest(eb.hash, item.slot)
+	var manifest []byte
+	var err error
+	if eb.readCache != nil {
+		manifest, err = eb.readCache.manifest()
+	} else {
+		manifest, err = db.GetLeiosEBManifest(eb.hash, item.slot)
+	}
 	elapsed := time.Since(started)
 	switch {
 	case err != nil:
@@ -640,11 +729,7 @@ func servePeer(
 	}
 	for _, rng := range requests(seed, eb.idx, config) {
 		started := time.Now()
-		txs, err := db.GetLeiosEBTxs(eb.hash, item.slot)
-		var served []cbor.RawMessage
-		if err == nil && len(txs) >= rng.end {
-			served = txs[rng.start:rng.end]
-		}
+		served, err := readEBTxs(db, eb, item.slot, rng)
 		elapsed := time.Since(started)
 		switch {
 		case err != nil:
@@ -691,7 +776,11 @@ func mix(seed, ebIdx, j int) int64 {
 	return h ^ (h >> 29)
 }
 
-func genBenchEb(ebIdx int, config benchConfig, measured bool) (*benchEb, error) {
+func genBenchEb(
+	ebIdx int,
+	config benchConfig,
+	measured bool,
+) (*benchEb, error) {
 	txs, err := genTxs(ebIdx, config)
 	if err != nil {
 		return nil, err
@@ -711,7 +800,14 @@ func genBenchEb(ebIdx int, config benchConfig, measured bool) (*benchEb, error) 
 
 func report(rec *recorder) {
 	fmt.Println()
-	fmt.Printf("%-18s%11s%11s%11s%11s\n", "Latency", "p50", "p99", "Max", "Count")
+	fmt.Printf(
+		"%-18s%11s%11s%11s%11s\n",
+		"Latency",
+		"p50",
+		"p99",
+		"Max",
+		"Count",
+	)
 	for m := range metricCount {
 		ts := slices.Clone(rec.samples[m])
 		slices.Sort(ts)
@@ -721,8 +817,10 @@ func report(rec *recorder) {
 			len(ts))
 	}
 	if rec.missing > 0 {
-		fmt.Printf("WARNING: %d reads found their EB incomplete or missing (pruned too early?)\n",
-			rec.missing)
+		fmt.Printf(
+			"WARNING: %d reads found their EB incomplete or missing (pruned too early?)\n",
+			rec.missing,
+		)
 	}
 }
 
@@ -738,9 +836,15 @@ func percentile(sorted []time.Duration, q float64) string {
 func showTime(elapsed time.Duration) string {
 	switch {
 	case elapsed < time.Millisecond:
-		return fmt.Sprintf("%d μs", elapsed.Round(time.Microsecond).Microseconds())
+		return fmt.Sprintf(
+			"%d μs",
+			elapsed.Round(time.Microsecond).Microseconds(),
+		)
 	case elapsed < time.Second:
-		return fmt.Sprintf("%d ms", elapsed.Round(time.Millisecond).Milliseconds())
+		return fmt.Sprintf(
+			"%d ms",
+			elapsed.Round(time.Millisecond).Milliseconds(),
+		)
 	default:
 		return fmt.Sprintf("%.2f s", elapsed.Seconds())
 	}

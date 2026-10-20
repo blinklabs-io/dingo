@@ -477,7 +477,7 @@ func TestGenerateReportAcceptsManualSamplesAndEmitsScenarioSchema(t *testing.T) 
 	if err := json.Unmarshal(data, &fields); err != nil {
 		t.Fatal(err)
 	}
-	for _, field := range []string{"schema_version", "scenario", "generated_at", "corpus", "protocol_version", "totals", "rules"} {
+	for _, field := range []string{"version", "scenario", "generated_at", "corpus", "protocol_version", "totals", "rules"} {
 		if _, ok := fields[field]; !ok {
 			t.Errorf("serialized report has no required field %q", field)
 		}

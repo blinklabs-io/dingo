@@ -764,7 +764,9 @@ func (n *Node) reinitializeCoreStorage(ctx context.Context) error {
 // storage mode before n.ledgerState.Start, for the same race-avoidance
 // reason Run() creates it before starting the ledger: the synchronous
 // backfill must run while no new blocks can arrive, and the EventBus
-// subscription must exist before any BlockActionApply event can fire.
+// subscription must exist before any BlockActionApply event can fire. Startup
+// era history preparation publishes both the epoch cache and applied tip so
+// timestamp conversion uses the persisted tip's forecast horizon.
 func (n *Node) reinitializeMidnightIndexer() error {
 	if !midnightIndexerActive(n.config.storageMode, n.config.midnight) {
 		return nil

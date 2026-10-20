@@ -521,8 +521,8 @@ func (idx *Indexer) Subscribe() {
 }
 
 // Backfill replays all stored blocks from the last checkpoint through the
-// database. The configured SlotToEpoch resolver must already be usable before
-// this method is called.
+// database. The configured slot resolvers must already be usable before this
+// method is called.
 func (idx *Indexer) Backfill() error {
 	if idx.config.BlockIterator == nil {
 		return nil
@@ -531,8 +531,9 @@ func (idx *Indexer) Backfill() error {
 }
 
 // Start runs catch-up backfill and then subscribes to live events. Callers must
-// ensure SlotToEpoch is ready and that ledger block processing has not started
-// yet, so there is no overlap between backfill and live events.
+// ensure slot-to-epoch and slot-to-time conversion are ready and that ledger
+// block processing has not started yet, so there is no overlap between
+// backfill and live events.
 func (idx *Indexer) Start() error {
 	if err := idx.preflightRegistrationRebuildIfNeeded(); err != nil {
 		return err
