@@ -97,6 +97,7 @@ type Utxorpc struct {
 	// bulkSlots is a counting semaphore sized by MaxConcurrentBulkRequests.
 	bulkSlots chan struct{}
 	streams   *streamLimiter
+	replays   *replayLimiter
 }
 
 type UtxorpcConfig struct {
@@ -136,6 +137,25 @@ type UtxorpcConfig struct {
 	// MaxReplayBlocks caps how far behind the tip a WatchTx intersect may
 	// start, in blocks (0 = use default).
 	MaxReplayBlocks int
+	// MaxConcurrentReplays caps FollowTip streams that are serving blocks
+	// behind the tip at once, across all clients; a further replay is refused
+	// with ResourceExhausted (0 = use default).
+	MaxConcurrentReplays int
+	// MaxReplaysPerClient caps the FollowTip streams one client may have
+	// serving blocks behind the tip at once, so one client cannot hold every
+	// MaxConcurrentReplays slot (0 = use default).
+	MaxReplaysPerClient int
+	// ReplayBlocksPerSecond paces the historical blocks FollowTip serves to
+	// one client across all its streams; replay slows down, it does not stop
+	// (0 = use default).
+	ReplayBlocksPerSecond int
+	// MaxReplayBlocksPerClient caps the historical blocks FollowTip serves to
+	// one client per ReplayBudgetWindow; a replay that spends it ends with
+	// ResourceExhausted (0 = use default).
+	MaxReplayBlocksPerClient int64
+	// ReplayBudgetWindow is the period MaxReplayBlocksPerClient covers
+	// (0 = use default).
+	ReplayBudgetWindow time.Duration
 	// MaxPoolFilter caps ReadState's pool_keyhashes filter length.
 	MaxPoolFilter int
 	// MaxMempoolItems caps ReadMempool's result size (0 = use default).
@@ -207,6 +227,21 @@ func NewUtxorpc(cfg UtxorpcConfig) *Utxorpc {
 	if cfg.MaxReplayBlocks <= 0 {
 		cfg.MaxReplayBlocks = DefaultMaxReplayBlocks
 	}
+	if cfg.MaxConcurrentReplays <= 0 {
+		cfg.MaxConcurrentReplays = DefaultMaxConcurrentReplays
+	}
+	if cfg.MaxReplaysPerClient <= 0 {
+		cfg.MaxReplaysPerClient = DefaultMaxReplaysPerClient
+	}
+	if cfg.ReplayBlocksPerSecond <= 0 {
+		cfg.ReplayBlocksPerSecond = DefaultReplayBlocksPerSecond
+	}
+	if cfg.MaxReplayBlocksPerClient <= 0 {
+		cfg.MaxReplayBlocksPerClient = DefaultMaxReplayBlocksPerClient
+	}
+	if cfg.ReplayBudgetWindow <= 0 {
+		cfg.ReplayBudgetWindow = DefaultReplayBudgetWindow
+	}
 	if cfg.MaxPoolFilter <= 0 {
 		cfg.MaxPoolFilter = DefaultMaxPoolFilter
 	}
@@ -232,6 +267,13 @@ func NewUtxorpc(cfg UtxorpcConfig) *Utxorpc {
 		config:    cfg,
 		bulkSlots: make(chan struct{}, cfg.MaxConcurrentBulkRequests),
 		streams:   newStreamLimiter(cfg.MaxStreams, cfg.MaxStreamsPerClient),
+		replays: newReplayLimiter(
+			cfg.MaxConcurrentReplays,
+			cfg.MaxReplaysPerClient,
+			cfg.ReplayBlocksPerSecond,
+			cfg.MaxReplayBlocksPerClient,
+			cfg.ReplayBudgetWindow,
+		),
 		listener: apilistener.New(
 			"utxorpc gRPC", cfg.Logger,
 		),

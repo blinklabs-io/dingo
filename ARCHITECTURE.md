@@ -11605,6 +11605,28 @@ at `MaxHistoryBytes` of serialized blocks with a `next_token`. A single block
 larger than the byte cap is returned whole; at tip that response has no
 `next_token` because no further block exists.
 
+`FollowTip` separates historical replay from live following per block: a block
+numbered below the primary chain tip at the moment it is served is replayed
+history, and a block at the tip is live. The primary chain tip is used rather
+than the ledger tip because the iterator reads the primary chain, and the
+ledger tip lags it while blocks are still being applied. Replay is bounded by
+limits held in `replayLimiter` (`api/utxorpc/replay_limits.go`), distinct from
+the stream caps: `MaxConcurrentReplays` (default 4) streams may be replaying at
+once across all clients and `MaxReplaysPerClient` (default 1) per client, and a
+stream that cannot take a slot ends with `ResourceExhausted` rather than
+queuing; `ReplayBlocksPerSecond` (default 1000) paces the blocks served to one
+client across all its streams by making each wait for its token, so a replay
+slows down but is not refused; and `MaxReplayBlocksPerClient` (default
+20,000,000) blocks per `ReplayBudgetWindow` (default 24h) caps the history one
+client may pull, after which its replay ends with `ResourceExhausted` until the
+window renews. A client is the remote host, as for the stream caps, so the
+per-client slot cap is what stops one host holding every slot. A stream that
+reaches the tip returns its replay slot and never needs one again: blocks it
+later falls behind on, after a fork switch or while blocks arrive faster than
+it reads, are still charged against the rate and budget, but a full slot cap
+cannot disconnect it. Rollbacks are not charged. A full-chain replay therefore
+still completes within those rates and budget.
+
 `FollowTip` populates `Timestamp` on a `Reset` block reference and on every
 response's `Tip` from `LedgerState.SlotToTime`. `Timestamp` is a plain proto3
 `uint64` with the same "unknown" ambiguity `height` has (see the UTxO RPC
