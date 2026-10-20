@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -35,6 +36,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/deferred"
 	"github.com/blinklabs-io/dingo/internal/node"
+	dledger "github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/forging"
 	"github.com/blinklabs-io/dingo/ledgerstate"
@@ -44,6 +46,29 @@ const (
 	mithrilLedgerSlotSyncKey = "mithril_ledger_slot"
 	mithrilLedgerHashSyncKey = "mithril_ledger_hash"
 )
+
+func ancillaryGapBounds(
+	nodeCfg *cardano.CardanoNodeConfig,
+	certifiedTipSlot uint64,
+) (uint64, int, error) {
+	if nodeCfg == nil || nodeCfg.ShelleyGenesis() == nil {
+		return 0, 0, errors.New(
+			"bounding ancillary ledger state requires Shelley genesis",
+		)
+	}
+	genesis := nodeCfg.ShelleyGenesis()
+	window, err := dledger.ShelleyStabilityWindow(genesis)
+	if err != nil {
+		return 0, 0, fmt.Errorf("calculate ancillary gap window: %w", err)
+	}
+	if certifiedTipSlot > math.MaxUint64-window {
+		return 0, 0, errors.New("ancillary gap slot bound overflows uint64")
+	}
+	if genesis.SecurityParam > math.MaxInt/2 {
+		return 0, 0, errors.New("ancillary gap block bound overflows int")
+	}
+	return certifiedTipSlot + window, 2 * genesis.SecurityParam, nil
+}
 
 // epochLengthFromConfig returns an EpochLengthFunc that resolves
 // era parameters from the Cardano node config.
@@ -237,6 +262,7 @@ func selectLedgerStateSnapshot(
 	logger *slog.Logger,
 	result *BootstrapResult,
 	maxTrustedSlot uint64,
+	maxAncillarySlots ...uint64,
 ) (
 	snapshot *ledgerstate.SnapshotFiles,
 	stateDir string,
@@ -319,6 +345,14 @@ func selectLedgerStateSnapshot(
 				tree.root,
 			)
 			if newestErr == nil {
+				if len(maxAncillarySlots) > 0 &&
+					newestSlot > maxAncillarySlots[0] {
+					newest.Close()
+					return nil, "", nil, false, fmt.Errorf(
+						"ancillary ledger state slot %d exceeds artifact-relative limit %d",
+						newestSlot, maxAncillarySlots[0],
+					)
+				}
 				logger.Info(
 					"ancillary ledger state is newer than the certified "+
 						"tip; accepting it on the ancillary manifest's own "+
@@ -380,7 +414,13 @@ func importLedgerState(
 	beyondCertifiedTip bool,
 	err error,
 ) {
-	prepared, err := prepareLedgerStateImport(logger, result, maxTrustedSlot)
+	maxAncillarySlot, _, err := ancillaryGapBounds(nodeCfg, maxTrustedSlot)
+	if err != nil {
+		return 0, nil, false, err
+	}
+	prepared, err := prepareLedgerStateImport(
+		logger, result, maxTrustedSlot, maxAncillarySlot,
+	)
 	if err != nil {
 		return 0, nil, false, err
 	}
@@ -407,11 +447,13 @@ func prepareLedgerStateImport(
 	logger *slog.Logger,
 	result *BootstrapResult,
 	maxTrustedSlot uint64,
+	maxAncillarySlots ...uint64,
 ) (_ *preparedLedgerStateImport, err error) {
 	snapshot, stateDir, signedBy, beyondCertifiedTip, err := selectLedgerStateSnapshot(
 		logger,
 		result,
 		maxTrustedSlot,
+		maxAncillarySlots...,
 	)
 	if err != nil {
 		return nil, err
@@ -481,6 +523,21 @@ func prepareLedgerStateImport(
 		return nil, errors.New(
 			"parsed ledger state has no tip (Origin snapshot)",
 		)
+	}
+	if state.Tip.Slot > maxTrustedSlot {
+		if !beyondCertifiedTip {
+			return nil, fmt.Errorf(
+				"ancillary ledger state tip slot %d exceeds its selected slot boundary %d",
+				state.Tip.Slot, maxTrustedSlot,
+			)
+		}
+		if len(maxAncillarySlots) > 0 &&
+			state.Tip.Slot > maxAncillarySlots[0] {
+			return nil, fmt.Errorf(
+				"ancillary ledger state tip slot %d exceeds artifact-relative limit %d",
+				state.Tip.Slot, maxAncillarySlots[0],
+			)
+		}
 	}
 
 	nonceHex := "neutral"

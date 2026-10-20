@@ -41,6 +41,8 @@ import (
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
+const defaultMaxGapBlocks = 4320
+
 // fetchGapBlocks connects to network relay peers and fetches blocks
 // between start and end (inclusive). The start block is skipped since
 // it already exists in the blob store. This closes the gap between
@@ -54,6 +56,22 @@ func fetchGapBlocks(
 	start ocommon.Point,
 	end ocommon.Point,
 ) ([]models.Block, error) {
+	return fetchGapBlocksWithLimit(
+		ctx, logger, network, start, end, defaultMaxGapBlocks,
+	)
+}
+
+func fetchGapBlocksWithLimit(
+	ctx context.Context,
+	logger *slog.Logger,
+	network string,
+	start ocommon.Point,
+	end ocommon.Point,
+	maxBlocks int,
+) ([]models.Block, error) {
+	if maxBlocks <= 0 {
+		return nil, errors.New("volatile gap block limit must be positive")
+	}
 	// Resolve network info for magic and bootstrap peers
 	netInfo, ok := ouroboros.NetworkByName(network)
 	if !ok {
@@ -79,7 +97,18 @@ func fetchGapBlocks(
 		peerAddrs,
 		start,
 		end,
-		fetchGapBlocksFromPeer,
+		func(
+			ctx context.Context,
+			logger *slog.Logger,
+			networkMagic uint32,
+			peerAddr string,
+			start ocommon.Point,
+			end ocommon.Point,
+		) ([]models.Block, error) {
+			return fetchGapBlocksFromPeerWithLimit(
+				ctx, logger, networkMagic, peerAddr, start, end, maxBlocks,
+			)
+		},
 	)
 }
 
@@ -146,6 +175,29 @@ func fetchGapBlocksFromPeer(
 	start ocommon.Point,
 	end ocommon.Point,
 ) ([]models.Block, error) {
+	return fetchGapBlocksFromPeerWithLimit(
+		ctx,
+		logger,
+		networkMagic,
+		peerAddr,
+		start,
+		end,
+		defaultMaxGapBlocks,
+	)
+}
+
+func fetchGapBlocksFromPeerWithLimit(
+	ctx context.Context,
+	logger *slog.Logger,
+	networkMagic uint32,
+	peerAddr string,
+	start ocommon.Point,
+	end ocommon.Point,
+	maxBlocks int,
+) ([]models.Block, error) {
+	if maxBlocks <= 0 {
+		return nil, errors.New("volatile gap block limit must be positive")
+	}
 	logger.Info(
 		"connecting to relay for volatile blocks",
 		"component", "mithril",
@@ -175,6 +227,12 @@ func fetchGapBlocksFromPeer(
 			PrevHash: block.PrevHash().Bytes(),
 		}
 		mu.Lock()
+		if len(blocks) >= maxBlocks {
+			mu.Unlock()
+			return fmt.Errorf(
+				"volatile gap exceeds %d blocks", maxBlocks,
+			)
+		}
 		blocks = append(blocks, b)
 		mu.Unlock()
 		return nil

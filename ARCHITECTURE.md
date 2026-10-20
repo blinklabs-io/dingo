@@ -9728,18 +9728,14 @@ A verified ancillary tree holding only states newer than the certified
 ImmutableDB tip is the one case that is not treated as "yields no usable
 state": `selectLedgerStateSnapshot` (`mithril/sync_import.go`) retries such a
 tree with `ledgerstate.OpenNewestSnapshot`, which runs the same
-symlink/substitution-safe search with no slot ceiling, and accepts whatever it
-finds. That state is not a downgrade to an unsigned tree — the ancillary
-manifest signs it directly — so it is not the case the refusal above exists to
-prevent; it is the aggregator packaging the ancillary ledger state from the
-source node's volatile database, which can land past the certified boundary
-between the two being packaged. `mithril/sync.go`'s certified-tip guard accepts
-a slot past `certifiedTip` only when `selectLedgerStateSnapshot` reports it
-came from this path (`beyondCertifiedTip`); any other way of producing a slot
-past the certified tip still fails there. The raw blocks between the certified
-tip and that slightly-newer imported slot are not copied into the blob store by
-this path — they reach it the same way every block past the certified tip
-already does, through normal Ouroboros validation after the node starts.
+symlink/substitution-safe search. The selected slot and the parsed state's own
+tip must both remain within one Shelley stability window (3k/f) of the
+certified tip. That artifact-relative ceiling keeps the separately signed
+ancillary archive from selecting an unrelated future state. The relay gap
+fetch also stops after twice the Shelley security parameter in blocks, before
+retaining another block's CBOR, so its memory use is bounded. The ancillary
+manifest still authenticates the state bytes, while these two bounds establish
+their permitted relationship to the certified artifact.
 
 A symlinked UTxO table fails on the same rule rather than being reported
 absent: a caller cannot otherwise tell "this snapshot has no table" from "this
@@ -10122,7 +10118,9 @@ exactly as before: no coordinator starts and no aggregator is contacted.
   pruner's `StabilityWindow` also uses from Shelley on), downloads the
   ancillary archive and verifies its Ed25519 manifest, parses the ledger
   state, and fetches any blocks between the certified tip and a ledger state
-  beyond it from a relay. No file below the cutoff's is requested. Probing
+  beyond it from a relay. The same stability-window slot ceiling and
+  security-parameter block limit used by full sync apply here. No file below
+  the cutoff's is requested. Probing
   stops after `maxCutoffProbes` (16) files; the files below the lowest probe
   then come through a windowed feed from file 0, and that is logged. All of
   that is read-only; the restore's first write then records, in one

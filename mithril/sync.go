@@ -1125,6 +1125,12 @@ func Sync(
 			"certified ImmutableDB has no chain tip",
 		)
 	}
+	maxAncillarySlot, maxGapBlocks, err := ancillaryGapBounds(
+		nodeCfg, certifiedTip.Slot,
+	)
+	if err != nil {
+		return SyncResult{}, err
+	}
 
 	var preparedRepairImport *preparedLedgerStateImport
 	var preservedLocalTail map[string]struct{}
@@ -1185,7 +1191,7 @@ func Sync(
 		}
 		if cfg.RepairLegacyRewardState {
 			preparedRepairImport, err = prepareLedgerStateImport(
-				logger, bootstrapResult, certifiedTip.Slot,
+				logger, bootstrapResult, certifiedTip.Slot, maxAncillarySlot,
 			)
 			if err != nil {
 				return SyncResult{}, fmt.Errorf(
@@ -1705,10 +1711,11 @@ func Sync(
 			"immutable_tip_slot", immutableTip.Slot,
 			"ledger_state_slot", ledgerStateSlot,
 		)
-		gapBlocks, fetchErr := fetchGapBlocks(
+		gapBlocks, fetchErr := fetchGapBlocksWithLimit(
 			ctx, logger, network,
 			ocommon.NewPoint(immutableTip.Slot, immutableTip.Hash),
 			ocommon.NewPoint(ledgerStateSlot, ledgerStateHash),
+			maxGapBlocks,
 		)
 		if fetchErr != nil {
 			return SyncResult{}, fmt.Errorf(
