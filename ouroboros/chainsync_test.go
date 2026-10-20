@@ -6166,6 +6166,7 @@ func TestSubscribeChainsyncResyncClosesConnectionForFreshSyncReasons(
 		event.ChainsyncResyncReasonForkExtensionRestartFailed,
 		event.ChainsyncResyncReasonFutureHeaderAdmissionRecovery,
 		event.ChainsyncResyncReasonDisconnectedHeaderAdmission,
+		event.ChainsyncResyncReasonForecastHorizonNoWork,
 		event.ChainsyncResyncReasonBehindLocalTip,
 	}
 	for _, reason := range reasons {

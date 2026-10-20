@@ -1885,6 +1885,24 @@ func (o *Ouroboros) admitChainsyncHeader(
 	if forecastWitness != nil && o.config.ChainsyncRemoveForecastWitness != nil {
 		o.config.ChainsyncRemoveForecastWitness(*forecastWitness)
 	}
+	if errors.Is(err, ledger.ErrChainsyncHeaderNeedsResync) {
+		// No queued or in-flight blockfetch can publish state that advances
+		// the forecast, so replaying from the local chain is the only way to
+		// deliver this header after the node has made progress. This is not a
+		// peer fault.
+		o.config.Logger.Debug(
+			"chainsync: no local block work can advance the forecast horizon",
+			"component", "ouroboros",
+			"slot", blockSlot,
+			"connection_id", ctx.ConnectionId.String(),
+		)
+		o.scheduleHeaderResync(
+			ctx.ConnectionId,
+			time.Now(),
+			event.ChainsyncResyncReasonForecastHorizonNoWork,
+		)
+		return false, nil
+	}
 	if errors.Is(err, ledger.ErrChainsyncHeaderDisconnected) {
 		// Blocks the node already has cannot connect this header, so no wait
 		// can release it. Return rather than hold the protocol until its state

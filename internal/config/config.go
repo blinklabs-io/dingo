@@ -1339,11 +1339,11 @@ type MithrilConfig struct {
 	// should not be enabled in production.
 	AllowInsecureHTTP bool `yaml:"allowInsecureHttp"      envconfig:"DINGO_MITHRIL_ALLOW_INSECURE_HTTP"`
 	// Backend selects the Mithril artifact backend: "v2" (default) uses
-	// incremental Cardano database artifacts; "v1" uses the legacy full
-	// snapshot archives, which upstream Mithril is phasing out.
+	// incremental Cardano database artifacts. "v1" is no longer supported and
+	// is rejected by validation.
 	Backend string `yaml:"backend"                envconfig:"DINGO_MITHRIL_BACKEND"`
 	// PinnedDigest selects an exact Mithril artifact for a fresh bootstrap: a
-	// v1 snapshot digest or v2 Cardano database artifact hash. It is rejected
+	// Cardano database artifact hash. It is rejected
 	// for catch-up runs and may not conflict with the durable artifact pin used
 	// to resume an interrupted import.
 	PinnedDigest string `yaml:"pinnedDigest"           envconfig:"DINGO_MITHRIL_PINNED_DIGEST"`
