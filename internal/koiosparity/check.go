@@ -1215,8 +1215,7 @@ func compareEpochAccounts(
 	logger *slog.Logger,
 ) (out []CheckMismatch, koiosRows []KoiosAccountRewards, referenceLoaded bool) {
 	coverage, koiosRows, covErr := cache.GetAccountReference(network, epoch)
-	var rowsErr *accountRowsReadError
-	if errors.As(covErr, &rowsErr) {
+	if rowsErr, ok := errors.AsType[*accountRowsReadError](covErr); ok {
 		return []CheckMismatch{{
 			Network:    network,
 			Epoch:      epoch,
