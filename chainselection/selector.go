@@ -2057,10 +2057,9 @@ func (cs *ChainSelector) checkPeerTipPlausibleWithClaimsTrackedLocked(
 		// go stale while the network advances. A peer whose
 		// delta from the stale reference exceeds K looks
 		// implausible, but the network legitimately moved on.
-		// Accept the tip if it is within 2*K of the local tip
-		// AND the reference itself is stale (reference <=
-		// local tip, meaning the node hasn't updated peer
-		// records since the stall began).
+		// Keep the peer-relative K bound while the reference is within
+		// K of the local tip. A farther reference can be stale during
+		// snapshot catch-up, but only within the local 2*K ceiling.
 		// A corroborated far claim is this connection's own reference, as a
 		// known peer's previous frontier is in Case 1. The frontier that
 		// corroborated it may sit up to K below it, so the Case 2 ceiling
@@ -2074,12 +2073,20 @@ func (cs *ChainSelector) checkPeerTipPlausibleWithClaimsTrackedLocked(
 				}
 			}
 		}
+		catchUpCeiling := safeAddUint64(
+			cs.localTip.BlockNumber,
+			safeAddUint64(cs.securityParam, cs.securityParam),
+		)
+		catchUpFloor := safeAddUint64(
+			cs.localTip.BlockNumber,
+			cs.securityParam,
+		)
+		referenceStale := referenceBlock <= cs.localTip.BlockNumber
+		referenceAheadWithinCatchUpWindow := referenceBlock > catchUpFloor &&
+			referenceBlock <= catchUpCeiling
 		if observedReject && cs.localTip.BlockNumber > 0 &&
-			referenceBlock <= cs.localTip.BlockNumber {
-			maxPlausibleBlock = safeAddUint64(
-				cs.localTip.BlockNumber,
-				safeAddUint64(cs.securityParam, cs.securityParam),
-			)
+			(referenceStale || referenceAheadWithinCatchUpWindow) {
+			maxPlausibleBlock = catchUpCeiling
 			observedReject = observedBlock > maxPlausibleBlock
 			// The 2*K catch-up ceiling still assumes the honest network tip
 			// is at most a bounded stall away from the local tip. That
@@ -2090,13 +2097,14 @@ func (cs *ChainSelector) checkPeerTipPlausibleWithClaimsTrackedLocked(
 			// unreachable. A rejected frontier is never recorded, so it can
 			// never itself become a fresher reference -- a one-way ratchet.
 			//
-			// Every reference the selector holds is stale here (that is
-			// what put us in this branch), and nothing about this frontier
-			// can be verified yet: its epoch is beyond the ledger's forecast
-			// horizon, so header verification is deferred before any
-			// signature is checked. Require corroboration instead: another,
-			// distinct connection has delivered a frontier within K of it,
-			// or this connection has delivered a connected header chain
+			// References within this local catch-up ceiling can be stale
+			// while a snapshot-backed local tip lags behind the network.
+			// Nothing about this frontier can be verified yet: its epoch is
+			// beyond the ledger's forecast horizon, so header verification
+			// is deferred before any signature is checked. Require
+			// corroboration instead: another, distinct connection has
+			// delivered a frontier within K of it, or this connection has
+			// delivered a connected header chain
 			// (see corroborateFarTipClaimLocked). A single claim, honest or
 			// fabricated, cannot break the ratchet by itself.
 			if observedReject {
