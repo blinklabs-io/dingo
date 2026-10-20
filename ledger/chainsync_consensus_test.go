@@ -34,6 +34,11 @@ type fixedComparisonProvider struct {
 	result praos.ChainComparisonResult
 }
 
+type recordingComparisonProvider struct {
+	consensus.Provider
+	incoming []ochainsync.Tip
+}
+
 func (p fixedComparisonProvider) CompareTips(
 	ochainsync.Tip,
 	ochainsync.Tip,
@@ -41,6 +46,16 @@ func (p fixedComparisonProvider) CompareTips(
 	praos.PraosTiebreakerView,
 ) praos.ChainComparisonResult {
 	return p.result
+}
+
+func (p *recordingComparisonProvider) CompareTips(
+	incoming ochainsync.Tip,
+	_ ochainsync.Tip,
+	_ praos.PraosTiebreakerView,
+	_ praos.PraosTiebreakerView,
+) praos.ChainComparisonResult {
+	p.incoming = append(p.incoming, incoming)
+	return praos.ChainEqual
 }
 
 func newProviderComparisonLedger(
@@ -86,7 +101,7 @@ func TestEarlierHeaderCanBeatLocalTip_DefersHeightDecisionToProvider(
 		"a lower block number must not override the provider's preference")
 }
 
-func TestCompareIncomingHeaderToLocalTip_AdvertisedTipUsesProvider(
+func TestCompareIncomingHeaderToLocalTip_IgnoresAdvertisedTip(
 	t *testing.T,
 ) {
 	t.Parallel()
@@ -104,8 +119,16 @@ func TestCompareIncomingHeaderToLocalTip_AdvertisedTipUsesProvider(
 		BlockNumber: 12,
 	}
 
-	ls := newProviderComparisonLedger(praos.ChainEqual)
+	provider := &recordingComparisonProvider{
+		Provider: consensus.NewPraosProvider(),
+	}
+	ls := &LedgerState{
+		config: LedgerStateConfig{
+			Logger:    slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			Consensus: provider,
+		},
+	}
 	require.Equal(t, praos.ChainEqual,
-		ls.compareIncomingHeaderToLocalTip(event, localTip),
-		"an equal answer from the provider is not replaced by a block-number rule")
+		ls.compareIncomingHeaderToLocalTip(event, localTip))
+	require.Equal(t, []ochainsync.Tip{observedHeaderTip(event)}, provider.incoming)
 }
