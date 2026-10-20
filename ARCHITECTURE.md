@@ -10400,6 +10400,11 @@ connection, enable `query_only`, and apply 64 KiB value, 64 KiB SQL, and
 32-column limits before execution. Query results are also capped at 1 MiB of
 decoded cell data. The original settings are restored before the connection
 returns to an injected pool.
+`get_asset_info` takes one of the same slots and scans at most 50,000 live
+asset rows. A policy or asset with more matching rows returns an explicit
+incomplete error, never a partial supply or holder count. `NewMCPServer` shares
+one slot budget across both tool sets; the exported `RegisterSQLiteTools` and
+`RegisterCardanoTools` each create their own.
 Markdown tables wrap their sanitized cells in explicit untrusted-chain-data
 delimiters. Chain-controlled text is HTML-escaped before rendering so it cannot
 terminate that envelope.
