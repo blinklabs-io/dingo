@@ -1305,9 +1305,8 @@ func (ls *LedgerState) queryShelley(ctx context.Context, query *olocalstatequery
 //
 // Not answered, so the call fails with "unsupported query type":
 // ShelleyPoolStateQuery, ShelleyPoolDistrQuery and
-// ShelleyNonMyopicMemberRewardsQuery, whose request filters the pinned
-// gouroboros version cannot decode (the request is rejected before it reaches
-// this switch); ShelleyRewardInfoPoolsQuery, ShelleyRewardProvenanceQuery,
+// ShelleyNonMyopicMemberRewardsQuery, which decode but have no handler here;
+// ShelleyRewardInfoPoolsQuery, ShelleyRewardProvenanceQuery,
 // ShelleyDebugEpochStateQuery and ShelleyDebugNewEpochStateQuery, which need
 // reward-calculation and full epoch state that is not tracked.
 //
