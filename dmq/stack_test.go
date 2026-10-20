@@ -275,9 +275,12 @@ func TestStackSubmissionRejectReasons(t *testing.T) {
 	soon := soonExpiry()
 	tooFar := uint32(time.Now().Add(10 * time.Hour).Unix())
 	cases := []struct {
-		name  string
-		cfg   StackConfig
-		first *ocommon.DmqMessage // submitted and accepted beforehand
+		name string
+		cfg  StackConfig
+		// first is admitted to the pool directly: the gouroboros server
+		// answers a resubmitted message ID itself, before the callback that
+		// counts the refusal, so only a pool-level duplicate is counted here.
+		first *ocommon.DmqMessage
 		msg   ocommon.DmqMessage
 		want  ocommon.RejectReason
 		label string
@@ -343,7 +346,9 @@ func TestStackSubmissionRejectReasons(t *testing.T) {
 			s, reg := newTestStack(t, tc.cfg)
 			submit := submitter(t, s)
 			if tc.first != nil {
-				require.Nil(t, submit(*tc.first))
+				added, err := s.pool.Add(*tc.first)
+				require.NoError(t, err)
+				require.True(t, added)
 			}
 			reason := submit(tc.msg)
 			require.IsType(t, tc.want, reason)
