@@ -2459,3 +2459,33 @@ UPDATE utxo SET deleted_slot = 10, spent_at_tx_id = ?`, consumerHash)
 		})
 	}
 }
+
+// TestUtxosDeleteSpentInBatchFloor pins that removing a batch's spent rows
+// raises the consumed-UTxO prune floor to the batch's slot and never lowers
+// it, and that the delete refuses to run outside the caller's transaction.
+func TestUtxosDeleteSpentInBatchFloor(t *testing.T) {
+	t.Parallel()
+
+	db := openTestDB(t)
+	ids := []models.UtxoId{{Hash: bytes.Repeat([]byte{0x01}, 32), Idx: 0}}
+	require.ErrorIs(t,
+		db.UtxosDeleteSpentInBatch(ids, 10, nil), types.ErrNilTxn)
+	require.NoError(t, db.UtxosDeleteSpentInBatch(nil, 10, nil),
+		"an empty batch needs no transaction")
+
+	apply := func(slot uint64) {
+		txn := db.Transaction(context.Background(), true)
+		require.NoError(t, txn.Do(func(txn *Txn) error {
+			return db.UtxosDeleteSpentInBatch(ids, slot, txn)
+		}))
+	}
+	floor := func() uint64 {
+		value, err := db.ConsumedUtxoPruneFloor(nil)
+		require.NoError(t, err)
+		return value
+	}
+	apply(50)
+	require.Equal(t, uint64(50), floor())
+	apply(20)
+	require.Equal(t, uint64(50), floor(), "the floor must not move down")
+}

@@ -229,6 +229,8 @@ type Ouroboros struct {
 	// requested on any connection; see claimBehindTipRecycle.
 	behindTipRecycleMu sync.Mutex
 	behindTipRecycleAt time.Time
+	// heldTips refreshes held clients' tips. See chainsync_hold.go.
+	heldTips heldTipRefresher
 	// chainSelectionShouldVerifyHeaderCrypto and chainSelectionVerifyHeaderCrypto
 	// gate whether a peer-reported header may influence Genesis chain-selection
 	// density or corroboration before its VRF/KES cryptography (and, once local

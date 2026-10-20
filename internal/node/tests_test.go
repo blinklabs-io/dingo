@@ -792,3 +792,33 @@ func TestBuildDingoConfigWiresPlannerStatsRefresh(t *testing.T) {
 		require.Equal(t, enabled, built.PlannerStatsRefreshEnabled())
 	}
 }
+
+// TestRepairDeferredIndexesRestoresCatchUpIndexes covers serve's core-mode
+// startup after a process died inside a held Mithril catch-up: the catch-up
+// droppable and lazy entries are missing behind the marker, and the repair
+// that runs before the node starts rebuilds both and clears it.
+func TestRepairDeferredIndexesRestoresCatchUpIndexes(t *testing.T) {
+	db := newFileTestDB(t)
+	manager, ok := db.Metadata().(metadata.CatchUpIndexManager)
+	require.True(t, ok)
+	require.NoError(t, manager.DropCatchUpIndexesContext(t.Context()))
+	raw, err := dbtest.RawSQLiteMetadata(t, db)
+	require.NoError(t, err)
+	droppable := deferred.CatchUpDroppableManifest()
+	require.NotEmpty(t, droppable)
+	for _, index := range droppable {
+		require.False(t, dbtest.MetadataIndexExists(t, raw, index.Name))
+	}
+
+	require.NoError(t, RepairDeferredIndexes(
+		t.Context(),
+		db,
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+	))
+
+	for _, index := range deferred.Manifest {
+		require.True(t, dbtest.MetadataIndexExists(t, raw, index.Name),
+			index.Name)
+	}
+	requireNoPendingMarker(t, raw)
+}

@@ -116,7 +116,22 @@ func rowBatchingBlock(
 	txs ...rowBatchingTx,
 ) gledger.Block {
 	t.Helper()
+	return rowBatchingBlockWithInvalid(t, slot, number, prev, nil, txs...)
+}
+
+// rowBatchingBlockWithInvalid is rowBatchingBlock with the transactions at
+// the invalid indexes marked phase-2 invalid, so they consume their
+// collateral and produce only their collateral return.
+func rowBatchingBlockWithInvalid(
+	t *testing.T,
+	slot, number uint64,
+	prev lcommon.Blake2b256,
+	invalid []uint,
+	txs ...rowBatchingTx,
+) gledger.Block {
+	t.Helper()
 	block := &conway.ConwayBlock{
+		InvalidTransactions: invalid,
 		BlockHeader: &conway.ConwayBlockHeader{
 			BabbageBlockHeader: babbage.BabbageBlockHeader{
 				Body: babbage.BabbageBlockHeaderBody{

@@ -26,6 +26,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/node"
+	"github.com/blinklabs-io/dingo/internal/nodemithril"
 	internalplugins "github.com/blinklabs-io/dingo/internal/plugins"
 	"github.com/blinklabs-io/dingo/mithril"
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -86,13 +87,25 @@ func serveRun(
 		}
 	}
 
-	// Run node
-	if err := node.Run(cmd.Context(), cfg, logger); err != nil {
+	// Run node. The node runs Mithril catch-up itself under mithril.enabled;
+	// nodemithril supplies the mithril package it cannot import.
+	if err := node.Run(
+		cmd.Context(), cfg, logger,
+		dingo.WithMithrilCatchUp(nodemithril.New),
+	); err != nil {
 		return err
 	}
 	return nil
 }
 
+// checkSyncState refuses to serve a database a manual sync left incomplete.
+// An empty sync_status passes in every mode, an empty database included:
+// with mithril.enabled the node then syncs it from Mithril or Ouroboros
+// itself. So does the backfill status, which serve resumes, an interrupted
+// reward-state repair, which serve finishes, and, in Mithril snapshot mode,
+// the node's own interrupted snapshot restore, which the node resumes. Any
+// other value is an interrupted `dingo sync` or `dingo mithril sync`, which
+// only that command can finish, so it refuses whatever mithril.enabled says.
 func checkSyncState(
 	cfg *config.Config,
 	logger *slog.Logger,
@@ -148,6 +161,29 @@ func checkSyncState(
 	}
 	if val == syncStatusInProgress && pendingRepair && repairActive {
 		return nil
+	}
+	// The node resumes its own snapshot restore, but only in the mode that
+	// started it, and not with the delegator-inactivity gate it could never
+	// have started under. No sync command can finish it, so any other
+	// configuration is told how to let the node do so.
+	ownRestore, err := mithril.SnapshotRestoreInterrupted(db)
+	if err != nil {
+		return err
+	}
+	if ownRestore {
+		if mithril.SelectMode(
+			cfg.Mithril.Enabled, cfg.HistoryExpiry.Enabled,
+		) == mithril.ModeSnapshot && !cfg.DelegatorInactivityEnabled {
+			return nil
+		}
+		return errors.New(
+			"the database holds the node's own interrupted Mithril " +
+				"snapshot restore, which only the node finishes: start " +
+				"it with mithril.enabled and historyExpiry.enabled set " +
+				"and delegatorInactivityEnabled off to resume the " +
+				"restore, or remove the database directory to sync " +
+				"from scratch",
+		)
 	}
 	return fmt.Errorf(
 		"incomplete sync detected (sync_status=%q). "+

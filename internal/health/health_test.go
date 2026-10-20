@@ -327,3 +327,33 @@ func TestReadinessChecksWaitForTheTipGap(t *testing.T) {
 	assert.False(t, status.Ready)
 	assert.Equal(t, "tip_gap_exceeded", status.Reason)
 }
+
+// A startup check names the phase holding a starting node back, ahead of
+// the unknown tip gap; ordinary readiness checks still wait for the gap, and
+// a passing startup check leaves the starting answer as it was.
+func TestStartupChecksReportedBeforeTheTipGap(t *testing.T) {
+	t.Parallel()
+
+	starting := func() (uint64, bool) { return 0, false }
+	restoring := health.Check{
+		Startup: true,
+		Reason:  "mithril_snapshot_restore",
+		Fn:      func() error { return errors.New("restoring") },
+	}
+	ordinary := health.Check{
+		Reason: "database_unavailable",
+		Fn:     func() error { return errors.New("closed") },
+	}
+
+	status := health.Evaluate(starting, 1000, ordinary, restoring)
+	assert.True(t, status.Live)
+	assert.False(t, status.Ready)
+	assert.Equal(t, "mithril_snapshot_restore", status.Reason)
+
+	restoring.Fn = func() error { return nil }
+	status = health.Evaluate(starting, 1000, ordinary, restoring)
+	assert.Equal(t, "node_starting", status.Reason)
+
+	status = health.Evaluate(gap(5000), 1000, restoring, ordinary)
+	assert.Equal(t, "tip_gap_exceeded", status.Reason)
+}
