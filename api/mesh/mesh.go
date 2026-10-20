@@ -51,6 +51,16 @@ const (
 	// connection open.
 	defaultRequestBodyTimeout = 30 * time.Second
 
+	// defaultMaxMempoolListing caps the identifiers one /mempool response
+	// names. The Mesh response has no cursor, so a pool larger than this is
+	// listed as a prefix of the mempool's own order.
+	defaultMaxMempoolListing = 10000
+
+	// defaultMaxConcurrentMempoolListings caps /mempool requests in flight.
+	// A request over the cap is refused rather than queued, so unauthenticated
+	// callers cannot pile up pool walks behind one another.
+	defaultMaxConcurrentMempoolListings = 8
+
 	// listenerReadTimeout bounds the whole request read at the
 	// connection, covering the requests whose body no handler reads --
 	// such as an unknown route -- which the per-request deadline above
@@ -86,6 +96,11 @@ type ServerConfig struct {
 	// enough for a test". NewServer substitutes
 	// defaultRequestBodyTimeout when it is not positive.
 	requestBodyTimeout time.Duration
+	// maxMempoolListing and maxConcurrentMempoolListings are unexported for
+	// the same reason; NewServer substitutes the defaults above when they
+	// are not positive.
+	maxMempoolListing            int
+	maxConcurrentMempoolListings int
 }
 
 // Server is the Mesh-compatible REST API server.
@@ -99,6 +114,8 @@ type Server struct {
 	// listening socket as part of what Stop waits for -- see
 	// internal/apilistener.
 	listener *apilistener.Listener
+	// mempoolSlots holds one token per /mempool request in flight.
+	mempoolSlots chan struct{}
 }
 
 // NewServer creates a new Mesh API server instance.
@@ -155,6 +172,13 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		cfg.requestBodyTimeout = defaultRequestBodyTimeout
 	}
 
+	if cfg.maxMempoolListing <= 0 {
+		cfg.maxMempoolListing = defaultMaxMempoolListing
+	}
+	if cfg.maxConcurrentMempoolListings <= 0 {
+		cfg.maxConcurrentMempoolListings = defaultMaxConcurrentMempoolListings
+	}
+
 	var addrNetID uint8 = lcommon.AddressNetworkTestnet
 	if cfg.NetworkMagic == mainnetMagic {
 		addrNetID = lcommon.AddressNetworkMainnet
@@ -173,6 +197,7 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	return &Server{
 		config:        cfg,
 		logger:        logger,
+		mempoolSlots:  make(chan struct{}, cfg.maxConcurrentMempoolListings),
 		networkID:     networkID,
 		genesisID:     genesisID,
 		addrNetworkID: addrNetID,

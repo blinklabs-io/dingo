@@ -951,6 +951,13 @@ type fakeMempool struct {
 	txs       []mempool.MempoolTransaction
 	addErr    error
 	submitted []submittedTx
+	// listCalls records the maxItems of each TransactionHashes call.
+	listCalls []int
+	// listEntered and listRelease, when set before the server handles a
+	// request, park the next TransactionHashes call only until the test
+	// releases it; later calls run unparked.
+	listEntered chan struct{}
+	listRelease chan struct{}
 }
 
 func (f *fakeMempool) AddTransaction(
@@ -983,12 +990,27 @@ func (f *fakeMempool) GetTransaction(
 	return mempool.MempoolTransaction{}, false
 }
 
-func (f *fakeMempool) Transactions() []mempool.MempoolTransaction {
+func (f *fakeMempool) TransactionHashes(maxItems int) ([]string, int) {
+	f.mu.Lock()
+	listEntered, listRelease := f.listEntered, f.listRelease
+	f.listEntered, f.listRelease = nil, nil
+	f.listCalls = append(f.listCalls, maxItems)
+	f.mu.Unlock()
+	if listEntered != nil {
+		listEntered <- struct{}{}
+		<-listRelease
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return append(
-		[]mempool.MempoolTransaction(nil), f.txs...,
-	)
+	n := len(f.txs)
+	if maxItems > 0 && maxItems < n {
+		n = maxItems
+	}
+	hashes := make([]string, n)
+	for i := range hashes {
+		hashes[i] = f.txs[i].Hash
+	}
+	return hashes, len(f.txs)
 }
 
 func (f *fakeMempool) submissions() []submittedTx {

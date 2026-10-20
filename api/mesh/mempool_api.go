@@ -21,7 +21,9 @@ import (
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 )
 
-// handleMempool handles POST /mempool.
+// handleMempool handles POST /mempool. It lists at most maxMempoolListing
+// hashes and refuses a request that finds every listing slot held, after the
+// body has validated so a malformed request never takes a slot.
 func (s *Server) handleMempool(
 	w http.ResponseWriter,
 	r *http.Request,
@@ -34,13 +36,23 @@ func (s *Server) handleMempool(
 		return
 	}
 
-	txs := s.config.Mempool.Transactions()
-	txIDs := make(
-		[]*TransactionIdentifier, len(txs),
+	select {
+	case s.mempoolSlots <- struct{}{}:
+		defer func() { <-s.mempoolSlots }()
+	default:
+		writeError(w, ErrUnavailable)
+		return
+	}
+
+	hashes, _ := s.config.Mempool.TransactionHashes(
+		s.config.maxMempoolListing,
 	)
-	for i := range txs {
+	txIDs := make(
+		[]*TransactionIdentifier, len(hashes),
+	)
+	for i := range hashes {
 		txIDs[i] = &TransactionIdentifier{
-			Hash: txs[i].Hash,
+			Hash: hashes[i],
 		}
 	}
 

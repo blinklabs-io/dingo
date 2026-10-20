@@ -15,9 +15,15 @@
 package mesh
 
 import (
+	"bytes"
+	"encoding/json"
 	"net/http"
+	"net/http/httptest"
+	"sync"
 	"testing"
+	"time"
 
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/mempool"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -192,5 +198,100 @@ func TestMempoolTransactionUndecodable(t *testing.T) {
 
 	requireMeshError(
 		t, rec, ErrInternal, http.StatusInternalServerError,
+	)
+}
+
+// TestMempoolListingIsBounded asserts the handler asks the mempool for at
+// most the configured number of identifiers rather than the whole pool.
+func TestMempoolListingIsBounded(t *testing.T) {
+	t.Parallel()
+
+	deps := newTestDeps()
+	for i := range 5 {
+		deps.mempool.txs = append(
+			deps.mempool.txs,
+			mempool.MempoolTransaction{Hash: hexString(testHash(byte(i + 1)))},
+		)
+	}
+	h := newTestHandler(t, deps, func(c *ServerConfig) {
+		c.maxMempoolListing = 3
+	})
+
+	rec := postJSON(t, h, "/mempool", networkReq())
+
+	resp := decodeResponse[MempoolResponse](t, rec)
+	require.Len(t, resp.TransactionIdentifiers, 3)
+	require.Equal(
+		t, hexString(testHash(1)), resp.TransactionIdentifiers[0].Hash,
+	)
+	require.Equal(t, []int{3}, deps.mempool.listCalls)
+}
+
+// TestMempoolListingDefaultBound asserts a server built without an explicit
+// bound still passes one to the mempool.
+func TestMempoolListingDefaultBound(t *testing.T) {
+	t.Parallel()
+
+	deps := newTestDeps()
+	h := newTestHandler(t, deps)
+
+	rec := postJSON(t, h, "/mempool", networkReq())
+
+	decodeResponse[MempoolResponse](t, rec)
+	require.Equal(t, []int{defaultMaxMempoolListing}, deps.mempool.listCalls)
+}
+
+// TestMempoolConcurrencyBudget parks one listing inside the mempool and
+// asserts a second request is refused with the retriable Mesh error, then
+// that the slot is returned once the first request finishes.
+func TestMempoolConcurrencyBudget(t *testing.T) {
+	t.Parallel()
+
+	deps := newTestDeps()
+	listEntered := make(chan struct{})
+	deps.mempool.listEntered = listEntered
+	listRelease := make(chan struct{})
+	deps.mempool.listRelease = listRelease
+	h := newTestHandler(t, deps, func(c *ServerConfig) {
+		c.maxConcurrentMempoolListings = 1
+	})
+
+	var releaseOnce sync.Once
+	release := func() {
+		releaseOnce.Do(func() { close(listRelease) })
+	}
+	defer release()
+
+	body, err := json.Marshal(networkReq())
+	require.NoError(t, err)
+	first := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		req := httptest.NewRequest(
+			http.MethodPost, "/mempool", bytes.NewReader(body),
+		)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		first <- rec
+	}()
+	testutil.RequireReceive(
+		t, listEntered, 10*time.Second,
+		"first listing reaches the mempool",
+	)
+
+	rec := postJSON(t, h, "/mempool", networkReq())
+	got := requireMeshError(
+		t, rec, ErrUnavailable, http.StatusServiceUnavailable,
+	)
+	require.True(t, got.Retriable)
+
+	release()
+	firstRec := testutil.RequireReceive(
+		t, first, 10*time.Second, "first listing completes",
+	)
+	require.Equal(t, http.StatusOK, firstRec.Code)
+
+	// The slot is free again.
+	decodeResponse[MempoolResponse](
+		t, postJSON(t, h, "/mempool", networkReq()),
 	)
 }

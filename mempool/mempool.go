@@ -129,6 +129,7 @@ type Service interface {
 		maxItems int,
 		maxBytes int64,
 	) ([]MempoolTransaction, int)
+	TransactionHashes(maxItems int) ([]string, int)
 	RemoveTransaction(string)
 	RemoveTxsByHash([]string)
 	NewConsumer(ouroboros.ConnectionId) Consumer
@@ -2132,6 +2133,73 @@ func (m *Mempool) TransactionsBounded(
 		ret[i].Cbor = slices.Clone(ret[i].Cbor)
 	}
 	return ret, total
+}
+
+// TransactionHashes returns the hashes of at most maxItems transactions, in
+// the same order as Transactions, together with the total number of
+// transactions in the pool. A bound of zero or less is not applied.
+//
+// It reads only the identifiers, so it never clones transaction CBOR and its
+// cost follows the size of the result rather than the size of the pool.
+func (m *Mempool) TransactionHashes(maxItems int) ([]string, int) {
+	m.RLock()
+	total := len(m.transactions)
+	var ret []string
+	var dagErr error
+	if m.dag != nil {
+		ret, dagErr = m.dagHashesLocked(maxItems)
+	}
+	if m.dag == nil || dagErr != nil {
+		n := total
+		if maxItems > 0 && maxItems < n {
+			n = maxItems
+		}
+		ret = make([]string, n)
+		for i := range ret {
+			ret[i] = m.transactions[i].Hash
+		}
+	}
+	m.RUnlock()
+	if dagErr != nil {
+		m.logger.Error(
+			"falling back to admission order for mempool hash listing",
+			"component", "mempool",
+			"error", dagErr,
+		)
+	}
+	return ret, total
+}
+
+// dagHashesLocked is dagSnapshotLocked for identifiers only. It applies the
+// same consistency checks to the prefix it walks, so a listing never names a
+// hash the pool cannot resolve. The caller must hold the state lock.
+func (m *Mempool) dagHashesLocked(maxItems int) ([]string, error) {
+	order, err := m.dag.topologicalOrder()
+	if err != nil {
+		return nil, err
+	}
+	if len(order) != len(m.transactions) {
+		return nil, fmt.Errorf(
+			"DAG transaction index inconsistent: %d of %d transactions ordered",
+			len(order),
+			len(m.transactions),
+		)
+	}
+	n := len(order)
+	if maxItems > 0 && maxItems < n {
+		n = maxItems
+	}
+	ret := make([]string, n)
+	for i := range ret {
+		if m.txByHash[order[i]] == nil {
+			return nil, fmt.Errorf(
+				"DAG transaction index inconsistent: ordered transaction %s is not in the pool",
+				order[i],
+			)
+		}
+		ret[i] = order[i]
+	}
+	return ret, nil
 }
 
 // dagSnapshotLocked returns the bounded snapshot in the DAG's topological

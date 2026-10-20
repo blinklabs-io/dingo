@@ -69,5 +69,7 @@ type MeshSyncProgress interface {
 type MeshMempool interface {
 	AddTransaction(ctx context.Context, txType uint, txBytes []byte) error
 	GetTransaction(hash string) (mempool.MempoolTransaction, bool)
-	Transactions() []mempool.MempoolTransaction
+	// TransactionHashes lists at most maxItems transaction hashes without
+	// copying transaction bodies, plus the total pool size.
+	TransactionHashes(maxItems int) ([]string, int)
 }
