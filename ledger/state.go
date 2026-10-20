@@ -15095,10 +15095,7 @@ func (ls *LedgerState) ValidateLeiosEndorserBlockTransactions(
 					}
 					return ErrLeiosValidationParentUnavailable
 				}
-				tx, err := safedecode.Transaction(
-					ledger.TxTypeDijkstra,
-					txCbor,
-				)
+				tx, err := safedecode.DijkstraBlockTransaction(txCbor)
 				if err != nil {
 					return fmt.Errorf(
 						"%w: decode leios endorser transaction %d: %w",
