@@ -877,7 +877,9 @@
 
 # Genesis bootstrap configuration
 # Used only for from-origin sync. Default behavior keeps this enabled and
-# exits Genesis mode automatically near the best known peer tip.
+# exits Genesis mode automatically near the best known peer tip. A Cardano node
+# configuration with ConsensusMode set to PraosMode (for example Musashi) turns
+# Genesis mode off whatever this section says, as for the reference node.
 # genesisBootstrap:
   # Enable/disable Genesis bootstrap mode (default: true).
   # enabled: true
