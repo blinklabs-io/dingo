@@ -12816,7 +12816,11 @@ they are skipped by era, still feed the UTxO reconstruction, and validation
 starts, with a log line, at the first Shelley-era epoch. In the fallback path
 the tool also skips blocks Dingo refuses as too old until validation starts:
 the first post-Byron block whose epoch resolves, by the era history or by
-Dingo. Any later refusal is a real failure that ends the session.
+Dingo. Any later refusal is a real failure that ends the session. An epoch
+lookup runs inside the ChainSync callback, so it is bounded at five minutes
+and its connections close when the session ends: a lookup Dingo never answers
+ends the session and the run resumes, instead of holding the session open
+with no error to report.
 
 `--koios-cache-path` makes those lookups cache-first against a `koios-parity` `cache.db`, which
 may be the one a dingo instance's own embedded observer is writing, provided

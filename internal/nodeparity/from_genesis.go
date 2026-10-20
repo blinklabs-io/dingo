@@ -181,6 +181,18 @@ var errDingoClosedConnection = errors.New(
 	"chainsync connection closed without an error",
 )
 
+// epochLookupTimeout bounds one epoch lookup: the era-history fetch and the
+// per-point GetEpochNo fallback. Both run inside a chainsync callback on
+// connections Dial opens with no query timeout, so a query Dingo accepts and
+// never answers would hold the callback forever. Chainsync is idle with
+// nothing outstanding while a callback runs, so its connection reports no
+// error: the run would neither progress nor reconnect. Both answers are a few
+// bytes; the bound only has to cover Dingo's own Acquire wait across
+// acquireWithRetry's attempts. A variable so tests can shorten it.
+var epochLookupTimeout = 5 * time.Minute
+
+var errEpochLookupTimedOut = errors.New("no answer from Dingo to the epoch lookup")
+
 // callbackErr builds the error a chainsync roll-forward or roll-backward
 // callback returns, flattening any cause that satisfies
 // errors.Is(err, protocol.ErrProtocolShuttingDown) into a plain error
@@ -778,12 +790,34 @@ func RunFromGenesis(
 	oracle := newEpochOracle(func(ctx context.Context) ([]eraSpan, error) {
 		return fetchEraSpans(ctx, dingoAddr, magic)
 	})
+	// Read once: a callback can outlive the return on ctx cancellation.
+	lookupTimeout := epochLookupTimeout
 	// epochAt resolves point's epoch from Dingo's era history, or from Dingo
 	// directly for a point the history does not cover. skip is true when
 	// Dingo refused point as too old before ever answering: the caller
 	// consumes the block without checking it.
-	epochAt := func(point pcommon.Point) (epoch uint64, skip bool, err error) {
-		epoch, oracleErr := oracle.epoch(ctx, point.Slot)
+	//
+	// sessionCtx is cancelled when the chainsync session calling it ends,
+	// which closes the lookup's connections, so a callback blocked in one
+	// returns: the reconnect loop waits for that callback before starting the
+	// next session.
+	epochAt := func(
+		sessionCtx context.Context, point pcommon.Point,
+	) (epoch uint64, skip bool, err error) {
+		lookupCtx, cancelLookup := context.WithTimeout(
+			sessionCtx, lookupTimeout,
+		)
+		defer cancelLookup()
+		defer func() {
+			if err != nil && ctx.Err() == nil &&
+				errors.Is(lookupCtx.Err(), context.DeadlineExceeded) {
+				err = fmt.Errorf(
+					"%w within %s: %w",
+					errEpochLookupTimedOut, lookupTimeout, err,
+				)
+			}
+		}()
+		epoch, oracleErr := oracle.epoch(lookupCtx, point.Slot)
 		if oracleErr == nil {
 			return epoch, false, nil
 		}
@@ -795,7 +829,7 @@ func RunFromGenesis(
 				point.Slot, oracleErr,
 			)
 		}
-		epoch, err = currentEpochNo(ctx, dingoAddr, magic, point)
+		epoch, err = currentEpochNo(lookupCtx, dingoAddr, magic, point)
 		if err == nil {
 			if !acquirable {
 				acquirable = true
@@ -974,6 +1008,7 @@ func RunFromGenesis(
 			continue
 		}
 
+		sessionCtx, endSession := context.WithCancel(ctx)
 		csConn, connErr := ouroboros.New(
 			ouroboros.WithConnection(rawConn),
 			ouroboros.WithNetworkMagic(magic),
@@ -1042,7 +1077,7 @@ func RunFromGenesis(
 							return nil
 						}
 
-						epoch, skip, err := epochAt(point)
+						epoch, skip, err := epochAt(sessionCtx, point)
 						if err != nil {
 							// callbackErr, not fmt.Errorf: GetEpochNo's own
 							// connection dying returns an error wrapping
@@ -1265,7 +1300,7 @@ func RunFromGenesis(
 								skip bool
 								err  error
 							)
-							epoch, skip, err = epochAt(point)
+							epoch, skip, err = epochAt(sessionCtx, point)
 							if err != nil {
 								// callbackErr for the same reason as the
 								// roll-forward callback above.
@@ -1300,6 +1335,7 @@ func RunFromGenesis(
 			)),
 		)
 		if connErr != nil {
+			endSession()
 			rawConn.Close() //nolint:errcheck
 			ok, err := retryOrStop(
 				"nodeparity: ouroboros.New (chainsync) failed",
@@ -1318,11 +1354,13 @@ func RunFromGenesis(
 
 		cs := csConn.ChainSync()
 		if cs == nil || cs.Client == nil {
+			endSession()
 			stopOnCancel()
 			csConn.Close() //nolint:errcheck
 			return errors.New("ChainSync client unavailable")
 		}
 		if err := cs.Client.Sync([]pcommon.Point{lastPoint}); err != nil {
+			endSession()
 			stopOnCancel()
 			csConn.Close() //nolint:errcheck
 			ok, retryErr := retryOrStop(
@@ -1342,10 +1380,12 @@ func RunFromGenesis(
 		var sessionErr error
 		select {
 		case <-ctx.Done():
+			endSession()
 			stopOnCancel()
 			csConn.Close() //nolint:errcheck
 			return ctx.Err()
 		case err, ok := <-csConn.ErrorChan():
+			endSession()
 			stopOnCancel()
 			csConn.Close() //nolint:errcheck
 			// gouroboros closes ErrorChan without sending anything when the
@@ -1362,7 +1402,9 @@ func RunFromGenesis(
 		// The callbacks write this run's state without a lock, relying on
 		// the session being over before the next one starts. A peer close
 		// can end the session while a callback is still running, so wait
-		// for the protocol's receive loop, which runs them, to exit.
+		// for the protocol's receive loop, which runs them, to exit. That
+		// wait ends only once the callback returns; endSession above has
+		// already closed any epoch lookup it is blocked in.
 		select {
 		case <-csDone:
 		case <-ctx.Done():

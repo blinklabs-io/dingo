@@ -35,6 +35,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/internal/koiosparity"
 	"github.com/blinklabs-io/dingo/internal/test/fixtures"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
@@ -1095,6 +1096,25 @@ type genesisFakeServer struct {
 	// is busy in a callback leaves exactly that. Closing at any other block
 	// leaves requests outstanding, and the close arrives as an error.
 	closeChainSyncAtSlot *uint64
+	// hangEpochNoAtSlot, when set, makes the ShelleyEpochNoQuery for a point
+	// Acquired at this slot go unanswered, once, until hangRelease is
+	// closed. It runs after closeChainSyncAtSlot, so the two together close
+	// the session while its callback waits on the query.
+	hangEpochNoAtSlot *uint64
+	hangRelease       chan struct{}
+}
+
+// takeEpochNoHang implements hangEpochNoAtSlot, returning the channel to
+// wait on, or nil when this query is answered.
+func (s *genesisFakeServer) takeEpochNoHang() <-chan struct{} {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.hangEpochNoAtSlot == nil ||
+		*s.hangEpochNoAtSlot != s.lastAcquiredSlot {
+		return nil
+	}
+	s.hangEpochNoAtSlot = nil
+	return s.hangRelease
 }
 
 // closeChainSyncIfArmed implements closeChainSyncAtSlot.
@@ -1480,6 +1500,12 @@ func (s *genesisFakeServer) lsqConfig() localstatequery.Config {
 						s.epochNoQueries++
 						s.mu.Unlock()
 						s.closeChainSyncIfArmed()
+						if release := s.takeEpochNoHang(); release != nil {
+							<-release
+							return nil, errors.New(
+								"simulated unanswered epoch-number query",
+							)
+						}
 						if s.takeEpochNoFailure() {
 							return nil, errors.New(
 								"simulated epoch-number query failure",
@@ -2248,6 +2274,146 @@ func TestRunFromGenesis_ReconnectsAfterDingoClosesConnection(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("RunFromGenesis did not exit after ctx cancellation")
 	}
+}
+
+// newEpochLookupStallServer serves a chain whose epoch 3 starts after
+// closeBlock and whose epoch-number query at closeBlock goes unanswered, so
+// epoch 3 is reachable only if the run gives up on that query and reconnects.
+func newEpochLookupStallServer(
+	t *testing.T, magic uint32,
+) (server *genesisFakeServer, addr string, closeAt uint64) {
+	t.Helper()
+	const closeBlock = chainsync.DefaultPipelineLimit - 1
+	const blockCount = closeBlock + 10
+
+	server = newGenesisFakeServer(t, blockCount)
+	server.ungated = true
+	server.epochBySlot = make(map[uint64]int, blockCount)
+	for i, p := range server.chain.Points {
+		switch {
+		case i == 0:
+			server.epochBySlot[p.Slot] = 1
+		case i < blockCount-5:
+			server.epochBySlot[p.Slot] = 2
+		default:
+			server.epochBySlot[p.Slot] = 3
+		}
+	}
+	closeAt = server.chain.Points[closeBlock].Slot
+	server.hangEpochNoAtSlot = &closeAt
+	server.hangRelease = make(chan struct{})
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = listener.Close() })
+	server.serve(t, listener, magic)
+	t.Cleanup(func() { close(server.hangRelease) })
+	return server, listener.Addr().String(), closeAt
+}
+
+// runUntilEpoch3 runs RunFromGenesis against addr until it reports epochs 2
+// and 3, then cancels it and returns its log.
+func runUntilEpoch3(t *testing.T, addr string, magic uint32) []string {
+	t.Helper()
+	koiosSrv := httptest.NewServer(http.NotFoundHandler())
+	t.Cleanup(koiosSrv.Close)
+	koios, err := NewKoiosClient("preview", "", koiosSrv.URL, true, true)
+	require.NoError(t, err)
+
+	logs := newLogCollector()
+	results := make(chan EpochResult, 8)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- RunFromGenesis(
+			ctx, addr, "preview", magic, koios, nil,
+			func(r EpochResult) { results <- r },
+			logs.logf, nil,
+		)
+	}()
+
+	for _, want := range []uint64{2, 3} {
+		select {
+		case r := <-results:
+			require.Equal(t, want, r.Epoch)
+		case err := <-done:
+			t.Fatalf(
+				"RunFromGenesis returned %v before ctx was cancelled; logs: %v",
+				err, logs.all(),
+			)
+		case <-time.After(30 * time.Second):
+			t.Fatalf(
+				"timed out waiting for epoch %d; logs: %v", want, logs.all(),
+			)
+		}
+	}
+	cancel()
+	err = testutil.RequireReceive(
+		t, done, 10*time.Second, "RunFromGenesis exit after ctx cancellation",
+	)
+	assert.True(t, err == nil || errors.Is(err, context.Canceled))
+	return logs.all()
+}
+
+// TestRunFromGenesis_ReconnectsWhenSessionEndsDuringEpochLookup covers Dingo
+// closing the chainsync connection while the roll-forward callback waits on
+// an epoch-number query Dingo never answers. The reconnect loop waits for
+// that callback before starting the next session, and the query's
+// connection has no query timeout, so the run stayed up with no reconnect
+// and no further epoch. Ending the session must close the lookup's
+// connection.
+func TestRunFromGenesis_ReconnectsWhenSessionEndsDuringEpochLookup(t *testing.T) {
+	t.Parallel()
+	const magic = 42
+	server, addr, closeAt := newEpochLookupStallServer(t, magic)
+	server.closeChainSyncAtSlot = &closeAt
+
+	logs := runUntilEpoch3(t, addr, magic)
+
+	server.mu.Lock()
+	sessions := server.sessions
+	server.mu.Unlock()
+	assert.GreaterOrEqual(t, sessions, 2)
+	assert.True(
+		t,
+		slices.ContainsFunc(logs, func(line string) bool {
+			return strings.Contains(line, "chainsync session ended") &&
+				strings.Contains(line, errDingoClosedConnection.Error())
+		}),
+		"logs: %v", logs,
+	)
+}
+
+// TestRunFromGenesis_ReconnectsWhenEpochLookupStalls covers an epoch-number
+// query Dingo never answers while the chainsync connection stays open. The
+// session is idle with nothing outstanding, so the connection never reports
+// an error: without a bound on the lookup the run made no progress and never
+// reconnected.
+//
+// Not t.Parallel: it shortens the package-level epochLookupTimeout.
+func TestRunFromGenesis_ReconnectsWhenEpochLookupStalls(t *testing.T) {
+	prevTimeout := epochLookupTimeout
+	epochLookupTimeout = 2 * time.Second
+	t.Cleanup(func() { epochLookupTimeout = prevTimeout })
+
+	const magic = 42
+	server, addr, _ := newEpochLookupStallServer(t, magic)
+
+	logs := runUntilEpoch3(t, addr, magic)
+
+	server.mu.Lock()
+	sessions := server.sessions
+	server.mu.Unlock()
+	assert.GreaterOrEqual(t, sessions, 2)
+	assert.True(
+		t,
+		slices.ContainsFunc(logs, func(line string) bool {
+			return strings.Contains(line, "chainsync session ended") &&
+				strings.Contains(line, errEpochLookupTimedOut.Error())
+		}),
+		"logs: %v", logs,
+	)
 }
 
 // TestRunFromGenesis_EpochChecksRetryTooOldRefusal covers Dingo refusing an
