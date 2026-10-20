@@ -1050,12 +1050,11 @@
   # allowInsecureHttp: false
   # Mithril artifact backend: "v2" (default) restores from incremental
   # per-immutable-file archives verified against the certified merkle
-  # root; "v1" uses the legacy full snapshot tarballs (being phased
-  # out upstream)
+  # root. "v1" is no longer supported and is rejected.
   # CLI: --mithril-backend
   # backend: "v2"
-  # Optional exact artifact identity for a fresh bootstrap: a v1 snapshot
-  # digest or v2 Cardano database artifact hash. It is rejected for catch-up
+  # Optional exact artifact identity for a fresh bootstrap: a Cardano
+  # database artifact hash. It is rejected for catch-up
   # runs and cannot override an interrupted import's durable pin.
   # CLI: --mithril-pinned-digest  Env: DINGO_MITHRIL_PINNED_DIGEST
   # pinnedDigest: ""

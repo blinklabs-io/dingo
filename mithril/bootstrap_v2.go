@@ -83,9 +83,10 @@ func immutableDownloadBudget(cfg BootstrapConfig) (*semaphore.Weighted, int64) {
 	return semaphore.NewWeighted(max(immutableInflightBytes, weight)), weight
 }
 
-// immutableArchiveLimits admits only an immutable archive's certified trio and
-// hashes each file as it is written. Ledger state comes from the separately
-// signed ancillary archive.
+// immutableArchiveLimits admits only an immutable archive's own certified
+// trio under immutable/, and hashes each file as it is written. Any other
+// member, including a ledger/ tree, is refused: the ledger state is imported
+// from the ancillary archive only.
 func immutableArchiveLimits(
 	num uint64,
 	digests map[string]string,
@@ -166,9 +167,8 @@ var immutableFileExtensions = []string{"chunk", "primary", "secondary"}
 // bootstrapV2 restores a node database from Mithril CardanoDatabase
 // (v2) artifacts: per-immutable-file archives verified against the
 // certified merkle root, plus an ancillary archive carrying the
-// ledger state verified via the signed ancillary manifest. It
-// produces the same BootstrapResult shape as the v1 flow so that
-// downstream loading is backend-agnostic.
+// ledger state verified via the signed ancillary manifest. Its
+// result carries the verified immutable and ancillary handles.
 func bootstrapV2(
 	ctx context.Context,
 	cfg BootstrapConfig,
@@ -248,17 +248,19 @@ func bootstrapV2(
 	if err := locationPolicy.apply(artifact); err != nil {
 		return nil, err
 	}
+	// The v2 flow imports ledger state only from the ancillary artifact. Refuse
+	// an incomplete artifact before downloading its immutable files.
+	if len(artifact.Ancillary.Locations) == 0 {
+		return nil, errors.New(
+			"mithril bootstrap requires ancillary locations",
+		)
+	}
 	// A certificate authenticates the immutable database content, while the
 	// ledger state and the final in-progress immutable trio are authenticated
 	// by the separately signed ancillary manifest. Do not start downloading
 	// immutable data when the second half of that trust boundary cannot be
 	// checked.
 	if cfg.VerifyCertificateChain {
-		if len(artifact.Ancillary.Locations) == 0 {
-			return nil, errors.New(
-				"verified Mithril bootstrap requires ancillary locations",
-			)
-		}
 		if cfg.AncillaryVerificationKey == "" {
 			return nil, errors.New(
 				"verified Mithril bootstrap requires an ancillary verification key",
@@ -387,7 +389,7 @@ func bootstrapV2(
 		return nil, err
 	}
 
-	// Unlike v1, the ancillary download and the immutable archive
+	// The ancillary download and the immutable archive
 	// pool report progress concurrently. Downstream OnProgress
 	// callbacks are not required to be thread-safe, so serialize
 	// emissions here.
@@ -578,23 +580,14 @@ func bootstrapV2(
 	// for the error-return path; calling Wait twice is safe).
 	ancWg.Wait()
 	if ancillaryErr != nil {
-		if cfg.VerifyCertificateChain {
-			return nil, fmt.Errorf(
-				"verified Mithril ancillary data unavailable: %w",
-				ancillaryErr,
-			)
-		}
-		cfg.Logger.Warn(
-			"failed to download ancillary data; continuing without ledger state",
-			"component",
-			"mithril",
-			"error",
+		return nil, fmt.Errorf(
+			"mithril ancillary data unavailable: %w",
 			ancillaryErr,
 		)
 	}
-	if cfg.VerifyCertificateChain && ancillaryTree == nil {
+	if ancillaryTree == nil {
 		return nil, errors.New(
-			"verified Mithril bootstrap produced no ancillary data",
+			"mithril bootstrap produced no ancillary data",
 		)
 	}
 
@@ -622,8 +615,9 @@ func bootstrapV2(
 				CardanoNodeVersion: artifact.CardanoNodeVersion,
 			},
 		},
-		ImmutableDir:  immutableTree.Path(),
-		ImmutableRoot: immutableTree.Root(),
+		ImmutableDir:        immutableTree.Path(),
+		ImmutableRoot:       immutableTree.Root(),
+		CertificateVerified: cfg.VerifyCertificateChain,
 		// The digest list the certificate's merkle root covers, carried on so
 		// the load can re-check each file from the descriptor it reads through
 		// rather than trusting a check that ran before the file was closed.
@@ -676,7 +670,6 @@ func verifyArtifactCertificateV2(
 		ctx,
 		client,
 		artifact.CertificateHash,
-		"", // v2 leaf binding uses cardano_database_merkle_root below
 		VerificationModeSTM,
 	)
 	if err != nil {
@@ -1711,8 +1704,7 @@ func downloadAncillaryV2(
 		// there for Cleanup to remove.
 		//
 		// Asked of the downloader rather than assembled here, so the two
-		// cannot name different files — see downloadAncillary for what that
-		// costs when the aggregator picks the network name.
+		// cannot name different files.
 		dest := downloadDestinationPath(DownloadConfig{
 			DestDir:  downloadDir,
 			Filename: ancillaryFilename,

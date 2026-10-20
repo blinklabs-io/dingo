@@ -86,7 +86,7 @@ func withProgressContext(
 const (
 	// DefaultMaxDownloadBytes bounds each compressed archive, including any
 	// resumed prefix, when the caller sets no limit. v2 objects have tighter
-	// built-in limits; this one covers the v1 full-database snapshot.
+	// built-in limits.
 	DefaultMaxDownloadBytes int64 = 512 << 30
 
 	defaultDownloadIdleTimeout = 2 * time.Minute

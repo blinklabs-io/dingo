@@ -8989,8 +8989,10 @@ If the selected state predates the existing stable point, repair does not alter
 block or ledger contents, keeps the marker pending, and retries for a newer
 artifact.
 
-Two artifact backends are supported, selected by `mithril.backend`
-(`--mithril-backend`, `DINGO_MITHRIL_BACKEND`):
+One artifact backend is supported, selected by `mithril.backend`
+(`--mithril-backend`, `DINGO_MITHRIL_BACKEND`); the key accepts an empty value
+or `v2`. Setting it to `v1` fails configuration validation, and the `dingo
+mithril list`/`show` commands refuse it the same way:
 
 - `v2` (default): the incremental Cardano database backend
   (`CardanoDatabase` signed entity, `/artifact/cardano-database`). The
@@ -9005,24 +9007,16 @@ Two artifact backends are supported, selected by `mithril.backend`
   digest map (already-verified trios are skipped on resume), and the ancillary
   archive (ledger state) is verified via its Ed25519-signed
   `ancillary_manifest.json` using the per-network ancillary verification key.
-- `v1` (legacy): the full-database snapshot backend
-  (`CardanoImmutableFilesFull`, `/artifact/snapshots`), a single tarball
-  download bound to the certificate chain via the `snapshot_digest` protocol
-  message part. It has no signed ancillary-state boundary and is therefore
-  rejected when certificate verification is enabled. Upstream Mithril is
-  phasing this artifact type out. At the library level an empty
-  `BootstrapConfig.Backend`/`SyncConfig.Backend` selects v2; callers must
-  specify `v1` explicitly to use the legacy unverified workflow.
 
 Package layout:
 
-1. `client.go` / `client_v2.go` query the Mithril aggregator artifact and
-   certificate endpoints for the respective backends
+1. `client.go` / `client_v2.go` query the Mithril aggregator certificate and
+   Cardano database artifact endpoints
 2. `download.go` downloads and extracts archives, including resumable
-   downloads with idle-stall retry handling (shared by both backends)
-3. `bootstrap.go` verifies the certificate chain, dispatches on the
-   configured backend, and orchestrates the v1 snapshot workflow;
-   `bootstrap_v2.go` orchestrates the v2 digest/immutable/ancillary workflow
+   downloads with idle-stall retry handling
+3. `bootstrap.go` verifies the certificate chain and dispatches to
+   `bootstrap_v2.go`, which orchestrates the v2 digest/immutable/ancillary
+   workflow
 
 The certificate-chain walk (`bootstrap.go`) runs before any certificate is
 trusted, so it is bounded on every axis the aggregator controls. Each
@@ -9048,15 +9042,15 @@ also carry completed/total archive counts. Bootstrap logs add the phase,
 artifact, snapshot identity, and archive/destination paths so interleaved
 download and extraction output remains attributable to one operation.
 
-Compressed downloads have a per-object limit: 512 GiB for a v1 archive, and
-for v2 objects 1 GiB per immutable archive, 256 MiB for the digest list and
-64 GiB for the ancillary archive. Operators set `mithril.downloadMaxBytes`
-(`--mithril-download-max-bytes`, `DINGO_MITHRIL_DOWNLOAD_MAX_BYTES`); library
-callers can set `SyncConfig.DownloadMaxBytes`, `BootstrapConfig.DownloadMaxBytes`,
-or `DownloadConfig.MaxBytes`. Zero selects the built-in limit and negatives
-fail validation. A positive value replaces the limit of every v1 and v2
-object. `ExpectedSize`, when positive, remains
-an exact-size requirement and cannot exceed the configured maximum.
+Compressed downloads have a per-object limit: 1 GiB per immutable archive,
+256 MiB for the digest list and 64 GiB for the ancillary archive. Operators set
+`mithril.downloadMaxBytes` (`--mithril-download-max-bytes`,
+`DINGO_MITHRIL_DOWNLOAD_MAX_BYTES`); library callers can set
+`SyncConfig.DownloadMaxBytes`, `BootstrapConfig.DownloadMaxBytes`, or
+`DownloadConfig.MaxBytes`. Zero selects the built-in limit and negatives fail
+validation. A positive value replaces the limit of every object.
+`ExpectedSize`, when positive, remains an exact-size requirement and cannot
+exceed the configured maximum.
 Resumed prefixes count against the limit; responses without Content-Length
 are bounded while streaming. An extra byte is read only as an overflow
 probe and is never written. Size-limit errors are terminal for the downloader.
@@ -9088,11 +9082,13 @@ memory limit, configurable through `WithZstdLimits`.
 Extraction also bounds the archive's shape while it is read: an entry-count
 cap (directories and empty files count), per-member and aggregate expanded-byte
 caps, and an expansion bound of 256 times the compressed bytes read plus a
-64 MiB floor. Each archive type except the v1 full snapshot admits only the
+64 MiB floor. Each archive type admits only the
 members its consumer reads, and a refused member is never created. An
-immutable archive admits only its own certified trio and SHA-256-checks each
-file against the certified digest list as it is written. Ledger entries are
-accepted only from the ancillary archive. The
+immutable archive admits only its own certified trio under `immutable/`; any
+other member, including a `ledger/` tree, fails extraction with
+`ErrExtractUnexpectedMember` and nothing outside `immutable/` is written.
+Each trio file is SHA-256-checked against the certified digest list as it is
+written. Ledger entries are accepted only from the ancillary archive. The
 digest list archive admits one top-level JSON file of at most 64 MiB.
 
 A verified v2 ancillary archive is read twice through one open descriptor. The
@@ -9111,15 +9107,13 @@ its size limit against a 32 GiB budget. Raising the limit lowers concurrency;
 an override above 32 GiB allows only one download, with capacity equal to that
 override.
 
-Both backends produce the same `BootstrapResult` (immutable directory,
-ancillary ledger-state directory, synthesized snapshot metadata), so
-everything downstream of `Bootstrap()` is backend-agnostic.
+`Bootstrap()` returns a `BootstrapResult` (immutable directory,
+ancillary ledger-state directory, synthesized snapshot metadata).
 
-`snapshot.Network`/`Digest` (v1) and `artifact.Network`/`Hash` (v2) arrive
-from the aggregator before certificate/hash verification runs, so
-`bootstrap.go`'s `validateSnapshotIdentity` rejects them before either
-backend derives a filesystem path from them. The network must be either
-one of the default networks (`AcceptedNetworks()`, mirroring
+`artifact.Network`/`Hash` arrive from the aggregator before certificate/hash
+verification runs, so `bootstrap.go`'s `validateSnapshotIdentity` rejects them
+before the backend derives a filesystem path from them. The network must be
+either one of the default networks (`AcceptedNetworks()`, mirroring
 `AcceptedBackends()`) or an exact match for the operator's own configured
 `BootstrapConfig.Network` — trusted because it's already restricted to
 alphanumeric/hyphen/underscore by `internal/config`'s `ValidateNetworkName`
@@ -9207,7 +9201,7 @@ and one replaced via `WithReplaceDestination` both end that way.
 
 Destinations come in two shapes, selected by the caller:
 
-- **Exclusive** (v1 snapshot, ancillary, digests): extraction is staged in a
+- **Exclusive** (ancillary, digests): extraction is staged in a
   fresh `0700` directory alongside the destination and renamed into place only
   once complete, so a failed run publishes nothing and a pre-existing entry is
   discarded rather than merged with. A non-empty destination is refused unless
@@ -9279,11 +9273,11 @@ and a failed trio is removed through that handle. Removing
 to the file, so a symlink there would make a failed download unlink somebody
 else's files.
 
-The same rule governs the cache-reuse fast paths — `findImmutableDir` and the
-ancillary "already extracted, skipping" checks — which decide whether a
-previous run left a usable tree and, when they say yes, skip extraction
-entirely. A candidate reached through a symlink is refused and the snapshot
-reported absent. Extraction never creates a symlink, so one in an extracted
+The same rule governs the cache-reuse fast paths — the `chunkDirIn`
+lookup and the ancillary "already extracted, skipping" checks — which decide
+whether a previous run left a usable tree and, when they say yes, skip
+extraction entirely. A candidate reached through a symlink is refused and the
+snapshot reported absent. Extraction never creates a symlink, so one in an extracted
 tree is evidence of tampering rather than something this node produced;
 treating the tree as absent re-extracts it from the verified archive, which
 discards it. Accepting it would load the chain from a directory somebody else
@@ -9307,11 +9301,7 @@ the digest's to choose — `/../..` names the download directory's *parent*,
 `/../../..` its grandparent, and so on up — and whatever it names is then
 extracted into and, on `Cleanup`, removed with `os.RemoveAll`. v2 is closed by
 a check it already had, refusing an artifact whose hash is not the one it
-recomputes, and a computed hash is hex. v1 has nothing to recompute, so
-`validateSnapshotDigest` states the constraint directly and refuses anything
-that is not a single path element, before the first join. Refused rather than
-reduced: reducing it would give two different snapshots the same cache key, and
-a stale extraction would then be reused for the wrong artifact.
+recomputes, and a computed hash is hex.
 
 Reading through the handle is half of it. A name refers to whatever occupies it
 at the moment it is resolved, so a lookup that ends by handing back a pathname
@@ -9319,13 +9309,11 @@ discards everything the handle established: the consumer resolves that name
 afresh, and a tree swapped in behind it is read as though it were the one that
 was inspected. Each candidate is therefore opened once and then read *and*
 returned through that one handle — the immutable lookups
-(`findImmutableDir`, the v2 `<extract>/immutable` check) return a `vettedDir`,
+(the v2 `<extract>/immutable` check) return a `vettedDir`,
 which carries the open handle alongside the name. Comparing a fresh resolution
 of the name against another fresh resolution would not do — a candidate replaced
 after it was read appears on both sides, the two agree, and a tree that was never
-inspected is returned. `findImmutableDir` reads its layout enumeration through
-the handle for the same reason: names taken from a re-walked pathname would be
-checked against the tree that was opened while resolving into the replacement.
+inspected is returned.
 
 The handle then travels to the consumer rather than stopping at the package
 boundary. `BootstrapResult` carries three — `ImmutableRoot`, `AncillaryRoot`,
@@ -9338,9 +9326,9 @@ Every read of a bootstrapped tree goes through one of them:
 
 | tree | opened by | read by |
 |---|---|---|
-| immutable | `findImmutableDir` / `chunkDirUnder` | `immutable.NewFromRootVerified`, once, reused for the trust-boundary tip read, the catch-up divergence check, and the blob copy (`node.WithImmutableDB`) |
+| immutable | `chunkDirIn` | `immutable.NewFromRootVerified`, once, reused for the trust-boundary tip read, the catch-up divergence check, and the blob copy (`node.WithImmutableDB`) |
 | ancillary | `ledgerDir` | the signed-manifest verification and the ledger-state import (`ledgerstate.OpenSnapshotAtOrBefore`, falling back to `ledgerstate.OpenNewestSnapshot` when verified and nothing qualifies at or before the certified tip, `ParseSnapshotFile`, `ImportConfig.State.UTxOTableFile`) |
-| extraction | `openVerifiedDir` | the ledger-state import's fallback, for v1 snapshots that keep the state in `db/ledger` |
+| extraction | `openVerifiedDir` | held for cleanup; the immutable lookup derives its handle from it |
 
 The v2 pipelined copy reads through the same handle extraction is writing
 through, verified against the same digests and bounded to the contiguous prefix
@@ -9419,7 +9407,6 @@ reader keeps:
 | tree | what travels | where it is re-checked |
 |---|---|---|
 | immutable (v2) | `BootstrapResult.ImmutableDigests`, the certified digest list the certificate's merkle root covers | `immutable.NewFromRootVerified` reads entries up to 16 MiB once, hashes the buffer, and gives that buffer to the chunk and index parsers; larger entries use a streaming verification pass, then are read and hashed into a buffer sized to the certified length |
-| immutable (v1) | nothing — v1 certifies one archive rather than the files inside it | not re-checkable; these reads are bound to the directory alone |
 | ancillary state (v2, verified) | `BootstrapResult.AncillaryDigests`, the signed manifest's map | the state is read once into a buffer; `verifySignedState` hashes that buffer and `ParseSnapshotBytes` parses the same one |
 | ancillary table (v2, verified) | the manifest's entry for it, carried down as `ImportConfig.State.UTxOTableDigest` | the table is gigabytes and is mapped rather than read, so the digest is checked against the mapped bytes the decoder then walks |
 
@@ -9474,11 +9461,9 @@ defeatable by an attacker who creates the replacement, since inode numbers are
 reused and timestamps are settable. The buffered entry binds the parser to the
 bytes verified during its open without retaining those descriptors.
 
-A digest map that is present but empty is refused rather than treated as
-absent. Absence is v1, which certifies an archive and not the files in it;
-emptiness is a v2 result that lost its digests. Selecting the unverified read on
-emptiness would make "verify nothing" reachable by removing something, which is
-the direction a fail-open always comes from.
+A result carrying no digest map, or an empty one, is refused rather than read
+unverified. Reading without digests would make "verify nothing" reachable by
+removing something, which is the direction a fail-open always comes from.
 
 The pipelined copy is bounded as well as verified, because it reads a tree the
 download pool is still filling. Archives arrive out of order, so a chunk above
@@ -9556,21 +9541,16 @@ first and consulting the files only afterwards would let a legacy state at a
 newer slot be pre-empted by a directory at an older one.
 
 The same rule governs every choice between candidates, not just slot
-directories — which layout (`ledger/` before `db/ledger/`) and which tree (the
-ancillary one before the extraction directory) are picked the same way. Only a
-candidate that is genuinely absent moves on to the next; one that exists and is
-unusable fails the lookup. Otherwise making a candidate unopenable is a way of
-selecting the one after it.
+directories — which layout (`ledger/` before `db/ledger/`) is picked the same
+way. Only a candidate that is genuinely absent moves on to the next; one that
+exists and is unusable fails the lookup. Otherwise making a candidate
+unopenable is a way of selecting the one after it.
 
-Tree selection carries one rule more, because emptying a tree is destruction
-rather than planting and would otherwise slip past the above. Nothing is looked
-at after an ancillary tree whose contents the ancillary key signed
-(`AncillaryVerified`), when it yields no usable state at any slot: the
-extraction directory is not covered by that signature, so falling through would
-let whoever emptied the first tree choose the second. Where nothing was
-verified there is no downgrade to make and the fallback stays — v1 keeps its
-ledger state in the main archive, so looking there is how that layout works at
-all.
+The ledger state comes from the ancillary tree alone; there is no fallback to
+the extraction directory. An ancillary tree whose contents the ancillary key
+signed (`AncillaryVerified`) that yields no usable state at any slot fails the
+import, since emptying a signed tree is destruction rather than planting and
+nothing else vouches for a replacement.
 
 A verified ancillary tree holding only states newer than the certified
 ImmutableDB tip is the one case that is not treated as "yields no usable
@@ -9606,7 +9586,7 @@ has to be ours* above.
 
 A result carrying no handle is refused rather than opened by name — by
 `openBootstrappedImmutable` for the immutable side and by `importLedgerState`
-for the ancillary one. Both bootstrap paths set them, so an absent handle means
+for the ancillary one. The bootstrap always sets them, so an absent handle means
 the result did not come from a vetted lookup, and a fallback would be invisible:
 the load would succeed, having read a directory nothing checked. For the same
 reason `node.WithImmutableDB` treats a nil argument as an error rather than as a
@@ -9614,8 +9594,8 @@ pathname fallback.
 
 #### What a failed ancillary download leaves behind
 
-The ancillary downloaders (`downloadAncillary` for v1, `downloadAncillaryV2`
-for v2) return the archive path alongside every error, not only on success.
+The ancillary downloader (`downloadAncillaryV2`) returns the archive path
+alongside every error, not only on success.
 `Bootstrap` records it into `BootstrapResult.AncillaryArchivePath` whenever it
 is non-empty, and `Cleanup` removes the archive and the extracted tree as two
 separate paths.
@@ -9627,8 +9607,8 @@ leaves something:
 |---|---|---|
 | every download location failed | a partial file — `DownloadSnapshot` resumes, so it deliberately does not remove one, and it returns no path for it | none yet |
 | extraction failed | complete, reported | none published — exclusive extraction stages elsewhere and renames in only once complete |
-| extracted tree holds no ledger state (v1 and v2) | complete, reported | removed by the downloader |
-| ancillary manifest unverified (v2) | complete, reported | removed by the downloader |
+| extracted tree holds no ledger state | complete, reported | removed by the downloader |
+| ancillary manifest unverified | complete, reported | removed by the downloader |
 
 The bottom two rows are where both halves have to be done deliberately, and each
 half reads as though the other covered it.
@@ -9701,7 +9681,7 @@ spent/deregistered/retired and is marked inactive (UTxOs tombstoned via
 before the metadata tip is advanced to the snapshot tip — rows are never
 deleted. Complete API-mode databases with an immutable marker are rejected
 because incremental metadata replacement is not implemented; markerless API
-databases and the v1 backend use the bootstrap path. The marker is written
+databases use the bootstrap path. The marker is written
 after sync completion clears `sync_status`, so it survives across runs.
 
 ### Artifact pinning across interrupted imports
@@ -9717,7 +9697,7 @@ mid-flight against that artifact.
 
 A resuming run (`sync_status` non-empty) passes the pinned digest to
 `BootstrapConfig.PinnedDigest`, which resolves that exact artifact
-(`GetCardanoDatabaseSnapshot` for v2, `GetSnapshot` for v1) instead of the
+(`GetCardanoDatabaseSnapshot`) instead of the
 aggregator's latest. Without the pin, `Bootstrap` re-resolves the latest
 artifact on every run: if the aggregator advanced during the interruption, the
 resume imports a second snapshot's ledger state over the first's partially

@@ -712,11 +712,31 @@ func TestMithrilBackendYAML(t *testing.T) {
 	tmpFile := writeMithrilBackendTestConfig(t, `
 network: "preview"
 mithril:
+  backend: "v2"
+`)
+	cfg, err := LoadConfig(tmpFile)
+	require.NoError(t, err)
+	assert.Equal(t, "v2", cfg.Mithril.Backend)
+	require.NoError(t, cfg.Validate(RunModeServe))
+}
+
+func TestMithrilBackendV1Rejected(t *testing.T) {
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("DINGO_MITHRIL_BACKEND", "")
+	t.Setenv("CARDANO_DINGO_MITHRIL_BACKEND", "")
+	os.Unsetenv("DINGO_MITHRIL_BACKEND")
+	os.Unsetenv("CARDANO_DINGO_MITHRIL_BACKEND")
+	tmpFile := writeMithrilBackendTestConfig(t, `
+network: "preview"
+mithril:
   backend: "v1"
 `)
 	cfg, err := LoadConfig(tmpFile)
 	require.NoError(t, err)
-	assert.Equal(t, "v1", cfg.Mithril.Backend)
+	err = cfg.Validate(RunModeServe)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no longer supported")
 }
 
 func TestMithrilBackendEnvOverride(t *testing.T) {
@@ -735,6 +755,9 @@ mithril:
 		cfg.Mithril.Backend,
 		"env var should override YAML",
 	)
+	err = cfg.Validate(RunModeServe)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no longer supported")
 }
 
 func TestMithrilPinnedDigestYAMLEnvAndCLI(t *testing.T) {
