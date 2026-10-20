@@ -3993,8 +3993,8 @@ placeholder to the full ranking-block header. The LeiosNotify client accepts
 that header. Announcements wrap it as `[era_id, header]`; Dingo unwraps the
 Dijkstra-era envelope and rejects envelopes tagged with another era, while
 retaining support for bare Dijkstra headers used by local diffusion. Dingo
-keeps the original announcement bytes for duplicate detection and relay, and
-keeps the decoded bare Dijkstra header bytes for asynchronous semantic
+retains the original announcement bytes for relay while comparing the decoded
+bare Dijkstra header bytes for duplicates and asynchronous semantic
 validation. In
 prototype-2026w31, `ouroboros/` decodes the Dijkstra header,
 requires a valid `leios_announcement`, rejects future or more-than-ten-minute-
