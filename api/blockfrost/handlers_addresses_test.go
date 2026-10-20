@@ -337,7 +337,9 @@ func TestHandleAddressSummaryAdmissionCap(t *testing.T) {
 	}
 
 	// A different client is not affected by the first one's cap.
-	other := addressSummaryRequest(context.Background(), "/api/v0/addresses/addr1")
+	other := addressSummaryRequest(
+		context.Background(), "/api/v0/addresses/addr1",
+	)
 	other.RemoteAddr = "192.0.2.8:4000"
 	go b.handler().ServeHTTP(httptest.NewRecorder(), other)
 	testutil.RequireReceive(
@@ -366,6 +368,7 @@ func TestHandleAddressSummaryTooLarge(t *testing.T) {
 		node := &mockNode{addressInfoErr: ErrAddressSummaryTooLarge}
 		node.addressErr = ErrAddressSummaryTooLarge
 		w := serve(t, node, path)
-		require.Equal(t, http.StatusUnprocessableEntity, w.Code, path)
+		require.Equal(t, http.StatusBadRequest, w.Code, path)
+		require.Contains(t, w.Body.String(), "too many outputs or assets")
 	}
 }

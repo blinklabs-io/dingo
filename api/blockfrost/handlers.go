@@ -2015,11 +2015,13 @@ func writeNodeQueryError(
 		)
 		return
 	}
+	// Blockfrost documents 400 for requests past a service limit; 422 is
+	// outside the status set its clients expect from these routes.
 	if errors.Is(err, ErrAddressSummaryTooLarge) {
 		writeError(
 			w,
-			http.StatusUnprocessableEntity,
-			"Unprocessable Entity",
+			http.StatusBadRequest,
+			"Bad Request",
 			"The address holds too many outputs or assets to summarize.",
 		)
 		return

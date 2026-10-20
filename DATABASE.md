@@ -3941,10 +3941,13 @@ LIMIT 100;
 
 Aggregates live-UTxO balances for an address in SQL (used by the Blockfrost
 `/addresses/{address}` summary for a bare payment credential; a full address
-needs the exact-address CBOR comparison, so its summary instead folds keyset
-pages of `Database.UtxosByAddressWithOrdering` into big-integer sums and fails
-with `ErrAddressSummaryTooLarge` past 50,000 live outputs or 5,000 distinct
-assets). Lovelace and count:
+needs the exact-address CBOR comparison, so its summary instead reads keyset
+pages of coarse credential candidates through
+`Database.UtxosByAddressWithOrdering`, keeps outputs whose decoded address
+matches, folds them into big-integer sums, and fails with
+`ErrAddressSummaryTooLarge` past 50,000 candidates read or 5,000 distinct
+assets; the payment credential result is held to the same asset cap).
+Lovelace and count:
 
 ```sql
 SELECT COUNT(*) AS cnt, COALESCE(SUM(amount), 0) AS lovelace

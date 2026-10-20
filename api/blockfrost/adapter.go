@@ -3160,26 +3160,57 @@ func parseAddressOrPaymentCred(
 	return addr, false, nil
 }
 
-// exactAddressBalance aggregates balances after the database layer has
-// compared each candidate's complete decoded output address. Exact address
-// identity lives only in output CBOR, so the scan reads keyset batches and
-// folds each into big-integer sums rather than holding every row; the read
-// budget stops it before an address with an unbounded UTxO set can pin the
-// request.
+// exactAddressCandidates returns the coarse credential pattern that selects
+// every output which can carry addr, or false when addr has neither a payment
+// nor a stake credential to narrow by.
+func exactAddressCandidates(
+	addr lcommon.Address,
+) (models.UtxoAddressPattern, bool) {
+	var pattern models.UtxoAddressPattern
+	zero := lcommon.NewBlake2b224(nil)
+	if pk := addr.PaymentKeyHash(); pk != zero {
+		script := models.PaymentScriptFromAddress(addr)
+		pattern.PaymentPart = pk.Bytes()
+		pattern.PaymentScript = &script
+	}
+	if sk := addr.StakeKeyHash(); sk != zero {
+		pattern.DelegationPart = sk.Bytes()
+	}
+	ok := len(pattern.PaymentPart) > 0 || len(pattern.DelegationPart) > 0
+	return pattern, ok
+}
+
+// exactAddressBalance aggregates the live outputs whose complete address is
+// addr. Exact address identity lives only in output CBOR, so the scan reads
+// coarse credential candidates in keyset batches, keeps those whose decoded
+// address matches, and folds them into big-integer sums rather than holding
+// every row. The candidate keyset is walked here, not inside the database's
+// exact-match page fill, because that fill gives up after a fixed number of
+// non-matching candidates per call: an enterprise address shares its coarse
+// match with every base address of the same payment credential. The read
+// budget counts every candidate decoded, matching or not.
 func (a *NodeAdapter) exactAddressBalance(
 	ctx context.Context,
 	addr lcommon.Address,
 	txn *database.Txn,
 ) (*unitSums, int, error) {
-	pattern, err := models.ExactUtxoAddressPattern(addr)
+	exact, err := models.ExactUtxoAddressPattern(addr)
 	if err != nil {
 		return nil, 0, err
+	}
+	exactPatterns := []models.UtxoAddressPattern{exact}
+	coarse, ok := exactAddressCandidates(addr)
+	if !ok {
+		// Without a credential column to narrow by, only the database's
+		// exact-match scan can select the address.
+		coarse = exact
 	}
 	limits := a.summaryLimits.withDefaults()
 	sums := newUnitSums()
 	count := 0
+	candidates := 0
 	query := &models.UtxoWithOrderingQuery{
-		AddressPatterns: []models.UtxoAddressPattern{pattern},
+		AddressPatterns: []models.UtxoAddressPattern{coarse},
 		Limit:           limits.batch,
 	}
 	for {
@@ -3192,14 +3223,34 @@ func (a *NodeAdapter) exactAddressBalance(
 			return nil, 0, fmt.Errorf("get exact address UTxOs: %w", err)
 		}
 		for i := range batch {
-			count++
-			if count > limits.maxUtxos {
+			candidates++
+			if candidates > limits.maxUtxos {
 				return nil, 0, fmt.Errorf(
-					"more than %d UTxOs: %w",
+					"more than %d UTxOs read: %w",
 					limits.maxUtxos,
 					ErrAddressSummaryTooLarge,
 				)
 			}
+			output, err := batch[i].Decode()
+			if err != nil {
+				return nil, 0, fmt.Errorf(
+					"decode UTxO %x#%d for exact address match: %w",
+					batch[i].TxId,
+					batch[i].OutputIdx,
+					err,
+				)
+			}
+			match, err := models.MatchesUtxoAddressPatterns(
+				output.Address(),
+				exactPatterns,
+			)
+			if err != nil {
+				return nil, 0, err
+			}
+			if !match {
+				continue
+			}
+			count++
 			sums.add(batch[i].Utxo)
 		}
 		if len(sums.assets) > limits.maxAssets {
@@ -3225,8 +3276,8 @@ func (a *NodeAdapter) exactAddressBalance(
 // Address returns summary details for the requested address, with balances
 // aggregated across its live UTxOs. Addresses never seen on chain map to
 // ErrAddressNotFound; addresses with spent history resolve with a zero
-// lovelace balance. A full address whose live UTxO set or asset count
-// exceeds the read budget fails with ErrAddressSummaryTooLarge.
+// lovelace balance. A summary that would read more outputs or return more
+// distinct assets than its budget fails with ErrAddressSummaryTooLarge.
 func (a *NodeAdapter) Address(
 	ctx context.Context,
 	address string,
@@ -3296,6 +3347,14 @@ func (a *NodeAdapter) addressSummary(
 				txn.Metadata(),
 			)
 		utxoCount = int(balance.UtxoCount)
+		if maxAssets := a.summaryLimits.withDefaults().maxAssets; err == nil &&
+			len(balance.Assets) > maxAssets {
+			err = fmt.Errorf(
+				"more than %d distinct assets: %w",
+				maxAssets,
+				ErrAddressSummaryTooLarge,
+			)
+		}
 	} else {
 		sums, utxoCount, err = a.exactAddressBalance(ctx, addr, txn)
 	}

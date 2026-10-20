@@ -4416,7 +4416,9 @@ func TestNodeAdapterKeyScriptStakeAddress(t *testing.T) {
 	insertAdapterUtxo(t, mainnetStore, &mainnetUtxo)
 	storePointerOutputCbor(t, mainnetDB, mainnetUtxo.TxId, 0, mainnetAddr, 1_000_000)
 
-	mainnetInfo, err := mainnetAdapter.Address(context.Background(), mainnetAddr.String())
+	mainnetInfo, err := mainnetAdapter.Address(
+		context.Background(), mainnetAddr.String(),
+	)
 	require.NoError(t, err)
 	require.NotNil(t, mainnetInfo.StakeAddress)
 	assert.True(t, strings.HasPrefix(*mainnetInfo.StakeAddress, "stake17"))

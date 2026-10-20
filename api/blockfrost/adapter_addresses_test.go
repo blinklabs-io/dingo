@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/binary"
 	"encoding/hex"
 	"testing"
 	"time"
@@ -27,6 +28,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"github.com/btcsuite/btcd/btcutil/bech32"
 	"github.com/stretchr/testify/require"
 )
@@ -579,4 +581,139 @@ func TestNodeAdapterAddressExtendedCapsEnrichment(t *testing.T) {
 	got, err := adapter.AddressExtended(context.Background(), addr.String())
 	require.NoError(t, err)
 	require.Len(t, got.Amount, 4)
+}
+
+// seedSiblingOutputs stores count live outputs at sibling, each with its
+// output CBOR, at slots 1..count.
+func seedSiblingOutputs(
+	t *testing.T,
+	raw *sql.DB,
+	db *database.Database,
+	sibling lcommon.Address,
+	count int,
+) {
+	t.Helper()
+	siblingCbor, err := cbor.Encode(&shelley.ShelleyTransactionOutput{
+		OutputAddress: sibling,
+		OutputAmount:  1_000_000,
+	})
+	require.NoError(t, err)
+	tx, err := raw.Begin()
+	require.NoError(t, err)
+	stmt, err := tx.Prepare(`
+INSERT INTO utxo (tx_id, payment_key, staking_key, credential_tag,
+    added_slot, deleted_slot, amount, output_idx, payment_script)
+VALUES (?, ?, ?, 0, ?, 0, '1000000', 0, ?)`)
+	require.NoError(t, err)
+	ids := make([][]byte, count)
+	for i := range count {
+		id := make([]byte, 32)
+		binary.BigEndian.PutUint64(id, uint64(i)+1)
+		id[31] = 0xee
+		ids[i] = id
+		_, err = stmt.Exec(
+			id,
+			sibling.PaymentKeyHash().Bytes(),
+			stakingKeyOf(sibling),
+			uint64(i)+1,
+			models.PaymentScriptFromAddress(sibling),
+		)
+		require.NoError(t, err)
+	}
+	require.NoError(t, stmt.Close())
+	require.NoError(t, tx.Commit())
+	for start := 0; start < count; start += 1000 {
+		chunk := ids[start:min(start+1000, count)]
+		require.NoError(t, db.BlobTxn(true).Do(func(txn *database.Txn) error {
+			for _, id := range chunk {
+				if err := db.Blob().SetUtxo(
+					txn.Blob(), id, 0, siblingCbor,
+				); err != nil {
+					return err
+				}
+			}
+			return nil
+		}))
+	}
+}
+
+// An enterprise address shares its coarse credential match with every base
+// address of the same payment credential. Sibling outputs ahead of the
+// address's own outputs must not exhaust the database's per-call candidate
+// cap and fail the summary.
+func TestNodeAdapterAddressSkipsManySiblingForms(t *testing.T) {
+	t.Parallel()
+	adapter, raw, db := newDBBackedAdapter(t)
+	addr, _, _ := testKeyAddress(t, 0xd1, 0)
+	sibling, _, _ := testKeyAddress(t, 0xd1, 0xd3)
+	seedSiblingOutputs(t, raw, db, sibling, 10_050)
+	seedAddressOutput(
+		t, raw, db, addr, fill32(0xd7), 20_000, 2_000_000, nil, nil,
+	)
+	seedAddressOutput(
+		t, raw, db, addr, fill32(0xd8), 20_001, 3_000_000, nil, nil,
+	)
+
+	info, err := adapter.Address(context.Background(), addr.String())
+	require.NoError(t, err)
+	require.Equal(t, []AddressAmountInfo{
+		{Unit: "lovelace", Quantity: "5000000"},
+	}, info.Amount)
+}
+
+// The read budget counts every output the summary reads and decodes,
+// including sibling forms the exact comparison then discards.
+func TestNodeAdapterAddressBudgetCountsSiblingCandidates(t *testing.T) {
+	t.Parallel()
+	adapter, raw, db := newDBBackedAdapter(t)
+	addr, _, _ := testKeyAddress(t, 0xd4, 0)
+	sibling, _, _ := testKeyAddress(t, 0xd4, 0xd5)
+	seedSiblingOutputs(t, raw, db, sibling, 5)
+	seedAddressOutput(
+		t, raw, db, addr, fill32(0xd6), 100, 2_000_000, nil, nil,
+	)
+
+	adapter.summaryLimits = addressSummaryLimits{batch: 2, maxUtxos: 5}
+	_, err := adapter.Address(context.Background(), addr.String())
+	require.ErrorIs(t, err, ErrAddressSummaryTooLarge)
+
+	adapter.summaryLimits = addressSummaryLimits{batch: 2, maxUtxos: 6}
+	info, err := adapter.Address(context.Background(), addr.String())
+	require.NoError(t, err)
+	require.Equal(t, "2000000", info.Amount[0].Quantity)
+}
+
+// A bare payment credential aggregates in SQL, and its distinct asset count
+// is held to the same budget as a full address.
+func TestNodeAdapterAddressPaymentCredAssetBudget(t *testing.T) {
+	t.Parallel()
+	adapter, raw, db := newDBBackedAdapter(t)
+	addr, payment, _ := testKeyAddress(t, 0xe1, 0xe2)
+	policy := bytes.Repeat([]byte{0xe3}, lcommon.AddressHashSize)
+	seedAddressOutput(
+		t, raw, db, addr, fill32(0x61), 7, 2_000_000,
+		[]models.Asset{
+			{PolicyId: policy, Name: []byte("b"), Amount: 2},
+			{PolicyId: policy, Name: []byte("a"), Amount: 1},
+			{PolicyId: policy, Name: []byte("c"), Amount: 3},
+		},
+		nil,
+	)
+	credID, err := bech32EncodeData("addr_vkh", payment)
+	require.NoError(t, err)
+
+	adapter.summaryLimits = addressSummaryLimits{maxAssets: 2}
+	_, err = adapter.Address(context.Background(), credID)
+	require.ErrorIs(t, err, ErrAddressSummaryTooLarge)
+
+	adapter.summaryLimits = addressSummaryLimits{maxAssets: 3}
+	info, err := adapter.Address(context.Background(), credID)
+	require.NoError(t, err)
+	policyHex := hex.EncodeToString(policy)
+	require.Equal(t, []AddressAmountInfo{
+		{Unit: "lovelace", Quantity: "2000000"},
+		{Unit: policyHex + hex.EncodeToString([]byte("a")), Quantity: "1"},
+		{Unit: policyHex + hex.EncodeToString([]byte("b")), Quantity: "2"},
+		{Unit: policyHex + hex.EncodeToString([]byte("c")), Quantity: "3"},
+	}, info.Amount)
 }
