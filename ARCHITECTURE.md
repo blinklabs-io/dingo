@@ -7821,11 +7821,20 @@ which a live restore unregisters) and are all prefixed `dingo_dmq_`:
 `connections`. Every `reason` series exists from startup, so a `rate()` alert
 sees a reason before its first rejection.
 
+`dmq.topologyFile` names a dmq-node topology file, which uses cardano-node's
+P2P topology syntax and is separate from the Cardano topology. `dmq.LoadTopology`
+parses it into local and public root groups of peers; `bootstrapPeers`,
+`peerSnapshotFile` and `useLedgerAfterSlot` are ignored (the first two with a
+warning) because dmq-node does not support them, and a peer snapshot is never
+read from disk. `startDMQ` loads the file before opening any socket, so a bad
+file stops startup, and logs the peer count.
+
 Not yet provided: the node-to-node message submission transport, its listener,
-topology, peer limits and ledger peer discovery, which the DMQ stack needs
-before it can exchange messages with other nodes. `n2n_port`, `listen_address`,
-`topology_file`, `min_peers` and `max_peers` are therefore not configuration
-keys yet.
+the peer manager that dials the topology peers within `dmq.minPeers` and
+`dmq.maxPeers`, and ledger peer discovery, which the DMQ stack needs before it
+can exchange messages with other nodes. `dmq.n2nPort`, `dmq.listenAddress`,
+`dmq.listenIpv6Address`, `dmq.minPeers` and `dmq.maxPeers` are validated
+configuration keys that nothing reads yet.
 
 ### DMQ Message Authentication
 

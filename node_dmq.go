@@ -137,6 +137,20 @@ func (n *Node) startDMQ() error {
 	if !cfg.Enabled {
 		return nil
 	}
+	// Read the topology before opening any socket so that a bad file stops
+	// startup instead of surfacing when peers are first dialed.
+	if cfg.TopologyFile != "" {
+		topo, err := dmq.LoadTopology(cfg.TopologyFile, n.config.logger)
+		if err != nil {
+			return fmt.Errorf("loading dmq topology: %w", err)
+		}
+		n.config.logger.Info(
+			"loaded dmq topology",
+			"component", "dmq",
+			"file", cfg.TopologyFile,
+			"peers", len(topo.Peers()),
+		)
+	}
 	n.dmqStake.setLedgerState(n.ledgerState)
 	authenticator, err := ocommon.NewMessageAuthenticator(
 		ocommon.MessageAuthenticatorConfig{

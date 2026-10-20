@@ -19,6 +19,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -236,6 +237,27 @@ func TestNodeRunServesDMQSubmission(t *testing.T) {
 		},
 		reason,
 	)
+}
+
+// A topology file that does not parse stops startup before the DMQ socket
+// opens.
+func TestNodeRunRejectsBadDMQTopology(t *testing.T) {
+	t.Parallel()
+	n := newAPIPluginRuntimeNode(t)
+	dir := t.TempDir()
+	topologyFile := filepath.Join(dir, "dmq-topology.json")
+	require.NoError(t, os.WriteFile(topologyFile, []byte("{"), 0o600))
+	socket := filepath.Join(dir, "dmq.sock")
+	dmqCfg := internalconfig.DefaultDMQConfig()
+	dmqCfg.Enabled = true
+	dmqCfg.NetworkMagic = 42
+	dmqCfg.SocketPath = socket
+	dmqCfg.TopologyFile = topologyFile
+	n.config.cfg.DMQ = dmqCfg
+
+	err := n.Run(context.Background())
+	require.ErrorContains(t, err, "loading dmq topology")
+	require.NoFileExists(t, socket)
 }
 
 // submitDMQ submits an unsigned message over a DMQ local socket and returns
