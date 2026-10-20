@@ -338,8 +338,9 @@ func (o *Ouroboros) forgetAcceptedHeaderTip(connId ouroboros.ConnectionId) {
 
 // deferredHeaderExtendsLocalChain reports whether a header whose producer
 // authorization is deferred builds directly on the local chain: on the block
-// tip, the header-queue tip, or this connection's last header that passed
-// this gate. Such a header cannot be a competing fork, so it may reach the
+// tip, the header-queue tip, or this connection's accepted header tip, the
+// last header that itself extended the local chain and that chain selection
+// accepted. Such a header cannot be a competing fork, so it may reach the
 // block-fetch queue, where the body path verifies it before application.
 // Withholding it instead deadlocks whenever the deferral clears only by
 // applying the header's own block, as at the Byron->Shelley boundary, where
@@ -1440,6 +1441,15 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 ) (err error) {
 	switch v := blockData.(type) {
 	case gledger.BlockHeader:
+		// Every path that does not accept this header clears the
+		// connection's accepted tip, so a later deferred header cannot count
+		// as a linear extension of one that never reached the ledger queue.
+		tipAccepted := false
+		defer func() {
+			if !tipAccepted {
+				o.forgetAcceptedHeaderTip(ctx.ConnectionId)
+			}
+		}()
 		if o.recordHeldChainsyncTip(ctx.ConnectionId, tip) {
 			return ochainsync.ErrStopSyncProcess
 		}
@@ -1674,8 +1684,10 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 				}
 			}
 		}
+		extendsLocalChain := ingressEligible &&
+			o.deferredHeaderExtendsLocalChain(ctx.ConnectionId, v)
 		if deferredVerification {
-			if !o.deferredHeaderExtendsLocalChain(ctx.ConnectionId, v) {
+			if !extendsLocalChain {
 				// Do not advance peer cursors, history, dedup state, or publish
 				// to selector/ledger until this header passes strict
 				// verification. Observed history is trusted by fork-density and
@@ -1690,9 +1702,6 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 			// feeding the queue or apply eligibility stalls for as long as
 			// the ledger is behind the header's epoch.
 			selectionEligible = true
-		}
-		if ingressEligible {
-			o.recordAcceptedHeaderTip(ctx.ConnectionId, blockHash)
 		}
 		// Observe the tip for chain selection FIRST, so the apply-eligibility
 		// decision below reflects this header. Only ingress-eligible peers are
@@ -1742,6 +1751,10 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 			default:
 				return fmt.Errorf("invalid peer tip disposition: %d", disposition)
 			}
+		}
+		if ingressEligible && extendsLocalChain {
+			o.recordAcceptedHeaderTip(ctx.ConnectionId, blockHash)
+			tipAccepted = true
 		}
 		// Apply-eligibility, evaluated after observation so it reflects this
 		// header. A peer can be ingress-eligible yet not apply-eligible (an
@@ -1914,6 +1927,7 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 					resolvePeerTip(true)
 					return
 				}
+				o.forgetAcceptedHeaderTip(ctx.ConnectionId)
 				o.markDeferredHeaderRecovery(ctx.ConnectionId)
 				resolvePeerTip(false)
 			}

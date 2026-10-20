@@ -6136,20 +6136,26 @@ it. Dingo implements this as a **corroboration gate**
   (`IsHeaderVerificationDeferred`) never enters the observed ancestry used by
   fork resolution or rollback replay, and never penalizes the peer. A deferred
   header that extends the local chain — its parent is the block tip, the
-  header-queue tip, or the last header the same connection passed through this
-  gate — still updates the selector and reaches the ledger queue with no
-  verification generation; block-fetch verifies its body before application.
+  header-queue tip, or the same connection's accepted header tip — still
+  updates the selector and reaches the ledger queue with no verification
+  generation; block-fetch verifies its body before application.
+  The accepted header tip names only a header that itself extended the local
+  chain and that chain selection accepted; any other outcome for that
+  connection's header (withheld, past the forecast horizon, failed
+  verification, pending or rejected by the selector, refused by admission or
+  by the ledger) clears it, so no header can chain onto a fork through it.
   Withholding it deadlocks sync whenever only applying that block can make its
   authorization verifiable: at the Byron->Shelley boundary the first Shelley
   epoch's state does not exist until a Shelley block is applied. Any other
   deferred header is withheld from selection, density, corroboration and the
   ledger. ChainSync records that the peer needs recovery and re-intersects it
   after the applied ledger advances, or at once (once per connection and
-  applied tip) when nothing is queued, since then no block can be applied to
-  trigger it. The peer then delivers its linked suffix parent-first. The ledger
-  queues a header whose authorization it cannot confirm (deferred, or a stale
-  ingress verdict) the same way, without a verification generation, so it can
-  neither advance the admitted frontier nor clear the queue or roll back
+  applied tip) when no headers are queued (the header-queue tip is the block
+  tip), since then no queued header can bring the block whose application
+  would trigger it. The peer then delivers its linked suffix parent-first.
+  The ledger queues a header whose authorization it cannot confirm (deferred,
+  or a stale ingress verdict) the same way, without a verification generation,
+  so it can neither advance the admitted frontier nor clear the queue or roll back
   canonical state when it does not fit. It clears the generation on the
   update the ingress owner's admission callback commits as well, so the
   selector receives a generation-0 update rather than a stale verdict without
@@ -17679,8 +17685,10 @@ and a re-sync requested, since the wait cannot end while nothing fetches the
 queued blocks. The discarded headers' invalidation is published after the ledger
 locks are released, so their Leios announcements and derived votes are removed
 without waiting for another chain event. Stored blocks the ledger has not
-applied yet (`chainAheadOfAppliedTip`) also count as local work, so admission
-keeps waiting for the snapshot publication their application brings rather
+applied yet (`chainAheadOfAppliedTip`: a primary chain tip in a later slot
+than the applied tip, or in the same slot under another hash; a chain tip in an
+earlier slot is a rollback the ledger has yet to follow and does not count)
+also count as local work, so admission keeps waiting for the snapshot publication their application brings rather
 than closing a connection that work may need, such as one serving endorser
 block backfill. If no fetch is active, no queued headers can be fetched and
 nothing stored is left to apply, admission rechecks the forecast and pending
