@@ -838,3 +838,30 @@ func TestQueryViewUtxoWholeReleasesSnapshotAndAnswersAsOfAcquire(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 1, utxoMapLen(t, byTxIn))
 }
+
+// An open that times out waiting for an epoch boundary's job names that stage,
+// the way the snapshot-open stages do, and carries a sentinel a caller can
+// tell apart from a full admission cap.
+func TestAcquireQueryViewBoundaryJobWaitNamesStage(t *testing.T) {
+	t.Parallel()
+
+	ls, db := newDiskTestLedger(t)
+	require.NoError(t, db.SetTip(ochainsync.Tip{
+		Point: ocommon.NewPoint(1_000, repeatedBytes(32, 0x0B)),
+	}, nil))
+	release := ls.HoldEpochBoundaryJobForTesting(163)
+	require.True(t, ls.EpochBoundaryJobPending())
+
+	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	_, err := ls.AcquireQueryView(ctx, QueryPoint{})
+	cancel()
+	require.ErrorIs(t, err, ErrEpochBoundaryJobPending)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.ErrorContains(t, err, "wait for epoch 163 boundary job")
+
+	release()
+	require.False(t, ls.EpochBoundaryJobPending())
+	view, err := ls.AcquireQueryView(t.Context(), QueryPoint{})
+	require.NoError(t, err)
+	view.Close()
+}

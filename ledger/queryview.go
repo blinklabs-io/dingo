@@ -77,6 +77,8 @@ type QueryView struct {
 // the rest of the node however many views are held. When the cap is reached
 // AcquireQueryView waits for a view to close, and returns ctx's error if ctx
 // ends first. ctx bounds only opening the view, not the view's lifetime.
+// Opening also waits for the latest epoch boundary's deferred job, and an
+// error from a ctx that ends during that wait wraps ErrEpochBoundaryJobPending.
 func (ls *LedgerState) AcquireQueryView(
 	ctx context.Context,
 	at QueryPoint,
@@ -156,7 +158,7 @@ func (ls *LedgerState) waitPendingBoundaryJob(
 				return nil
 			}
 		case <-ctx.Done():
-			return fmt.Errorf("wait for epoch boundary job: %w", ctx.Err())
+			return epochBoundaryJobWaitError(ctx, pending.Epoch)
 		}
 	}
 }

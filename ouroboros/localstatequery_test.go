@@ -1534,3 +1534,93 @@ func TestLocalStateQueryAcquireWaitBelowClientTimeout(t *testing.T) {
 		"the margin must cover the request's transit and the reply's",
 	)
 }
+
+// A tip Acquire during an epoch boundary's job must not wait for it: the job
+// can outlast the Acquire budget, and a failed tip Acquire closes the
+// connection. The session's first Query opens the snapshot once the job
+// settles, at the tip current then, and later queries keep answering from it.
+func TestLocalstatequeryTipAcquireDuringBoundaryJobDefersSnapshot(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	o, db, _ := newSnapshotTestOuroboros(t, OuroborosConfig{})
+	release := o.ledgerState.HoldEpochBoundaryJobForTesting(163)
+	ctx := olocalstatequery.CallbackContext{
+		ConnectionId: ouroboros.ConnectionId{},
+	}
+
+	session := acquireSnapshotTestSession(t, o, ctx)
+	o.localstatequeryAcquireMutex.Lock()
+	require.Nil(t, session.view, "the snapshot must wait for the first Query")
+	o.localstatequeryAcquireMutex.Unlock()
+
+	settledTip := moveTestTip(t, db, 2)
+	type queryResult struct {
+		point any
+		err   error
+	}
+	done := make(chan queryResult, 1)
+	go func() {
+		point, err := queryChainPoint(t, o, ctx)
+		done <- queryResult{point: point, err: err}
+	}()
+	testutil.RequireNoReceive(
+		t, done, 100*time.Millisecond,
+		"the first Query must wait for the boundary job",
+	)
+	release()
+	got := testutil.RequireReceive(
+		t, done, testutil.AsyncWait, "the first Query did not finish",
+	)
+	require.NoError(t, got.err)
+	require.Equal(t, settledTip, got.point)
+
+	moveTestTip(t, db, 3)
+	point, err := queryChainPoint(t, o, ctx)
+	require.NoError(t, err)
+	require.Equal(t, settledTip, point, "the opened snapshot must stay fixed")
+}
+
+// A deferred session the client releases before querying holds no snapshot.
+func TestLocalstatequeryReleaseDeferredSession(t *testing.T) {
+	t.Parallel()
+
+	o, _, _ := newSnapshotTestOuroboros(t, OuroborosConfig{})
+	t.Cleanup(o.ledgerState.HoldEpochBoundaryJobForTesting(163))
+	ctx := olocalstatequery.CallbackContext{
+		ConnectionId: ouroboros.ConnectionId{},
+	}
+	acquireSnapshotTestSession(t, o, ctx)
+	require.NoError(t, o.localstatequeryServerRelease(ctx))
+	o.localstatequeryAcquireMutex.Lock()
+	_, held := o.localstatequerySessions[ctx.ConnectionId]
+	o.localstatequeryAcquireMutex.Unlock()
+	require.False(t, held)
+}
+
+// Over the wire, a default gouroboros client's tip Acquire during a boundary
+// job is acquired within its own 5s timeout and its connection stays usable.
+func TestLocalstatequeryProtocol_TipAcquireDuringBoundaryJob(t *testing.T) {
+	t.Parallel()
+
+	o, db, _ := newSnapshotTestOuroboros(t, OuroborosConfig{})
+	release := o.ledgerState.HoldEpochBoundaryJobForTesting(163)
+	client := newLocalStateQueryTestClient(t, o)
+
+	require.NoError(t, client.AcquireVolatileTip())
+	settledTip := moveTestTip(t, db, 2)
+	release()
+	point, err := client.GetChainPoint()
+	require.NoError(t, err)
+	require.Equal(t, settledTip.Slot, point.Slot)
+	require.NoError(t, client.Release())
+}
+
+func TestLocalStateQueryDeferredOpenWaitBelowClientTimeout(t *testing.T) {
+	t.Parallel()
+
+	clientTimeout := olocalstatequery.NewConfig().QueryTimeout
+	require.Positive(t, clientTimeout)
+	require.Less(t, localStateQueryDeferredOpenWait, clientTimeout)
+}

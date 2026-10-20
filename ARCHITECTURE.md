@@ -5146,7 +5146,15 @@ snapshot
 one commit boundary), and validates the point against it with
 `VerifyPointQueryable`. A boundary can commit before its job is published, so
 a snapshot that still contains the boundary's pending-ratification record is
-dropped and the open retried once the job settles. The
+dropped and the open retried once the job settles. A wait that outlasts the
+caller's deadline fails with `ledger.ErrEpochBoundaryJobPending`, naming the
+boundary's epoch. A volatile-tip Acquire does not wait for the job: the job
+can outlast the Acquire budget (seconds on preprod, tens of seconds beside a
+whole-UTxO query) and a failed tip Acquire has no failure reply, so while
+`LedgerState.EpochBoundaryJobPending` reports one, or the open fails with that
+error, the session is recorded without a view and its first `Query` opens it
+once the job settles (bounded by `localStateQueryDeferredOpenWait`, below the
+client's default query timeout), at the tip current then. The
 returned `ledger.QueryView` is held in `Ouroboros.localstatequerySessions`
 beside the acquired point and owner maps, and every `Query` on the connection
 is answered by `QueryView.Query`, which runs the ordinary query handlers
