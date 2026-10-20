@@ -67,6 +67,34 @@ func (d *Database) GetSyncState(
 	return val, nil
 }
 
+// GetSyncStateBounded retrieves a sync state value by key without reading a
+// value larger than maxBytes; see metadata.ErrSyncStateTooLarge.
+// Returns empty string if the key does not exist.
+func (d *Database) GetSyncStateBounded(
+	key string,
+	maxBytes int,
+	txn *Txn,
+) (string, error) {
+	var (
+		val string
+		err error
+	)
+	if txn == nil {
+		val, err = d.metadata.GetSyncStateBounded(key, maxBytes, nil)
+	} else {
+		val, err = d.metadata.GetSyncStateBounded(
+			key, maxBytes, txn.Metadata(),
+		)
+	}
+	if err != nil {
+		return "", fmt.Errorf(
+			"Database.GetSyncStateBounded(%q): %w",
+			key, err,
+		)
+	}
+	return val, nil
+}
+
 // SetSyncState stores or updates a sync state value.
 func (d *Database) SetSyncState(
 	key, value string,

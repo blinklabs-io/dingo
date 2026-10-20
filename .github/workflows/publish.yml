@@ -78,11 +78,19 @@ jobs:
         with:
           go-version: 1.26.x
           cache: false
+      # Module downloads do not depend on -race, so one entry per OS serves
+      # every job on it instead of a copy inside each build cache. The
+      # cache version includes the resolved home directory, so Linux and
+      # macOS cannot share one.
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
         with:
-          path: |
-            ~/go/pkg/mod
-            ~/.cache/go-build
+          path: ~/go/pkg/mod
+          key: ${{ runner.os }}-go-mod-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-mod-
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
+        with:
+          path: ~/.cache/go-build
           key: ${{ runner.os }}-go-1.26.x-${{ hashFiles('**/go.sum') }}
           restore-keys: |
             ${{ runner.os }}-go-1.26.x-
@@ -129,11 +137,19 @@ jobs:
         with:
           go-version: 1.26.x
           cache: false
+      # Module downloads do not depend on -race, so one entry per OS serves
+      # every job on it instead of a copy inside each build cache. The
+      # cache version includes the resolved home directory, so Linux and
+      # macOS cannot share one.
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
         with:
-          path: |
-            ~/go/pkg/mod
-            ~/.cache/go-build
+          path: ~/go/pkg/mod
+          key: ${{ runner.os }}-go-mod-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-mod-
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
+        with:
+          path: ~/.cache/go-build
           key: ${{ runner.os }}-go-1.26.x-${{ hashFiles('**/go.sum') }}
           restore-keys: |
             ${{ runner.os }}-go-1.26.x-
@@ -155,11 +171,19 @@ jobs:
         with:
           go-version: 1.26.x
           cache: false
+      # Module downloads do not depend on -race, so one entry per OS serves
+      # every job on it instead of a copy inside each build cache. The
+      # cache version includes the resolved home directory, so Linux and
+      # macOS cannot share one.
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
         with:
-          path: |
-            ~/go/pkg/mod
-            ~/.cache/go-build
+          path: ~/go/pkg/mod
+          key: ${{ runner.os }}-go-mod-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-mod-
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
+        with:
+          path: ~/.cache/go-build
           key: ${{ runner.os }}-go-1.26.x-${{ hashFiles('**/go.sum') }}
           restore-keys: |
             ${{ runner.os }}-go-1.26.x-
@@ -284,11 +308,19 @@ jobs:
         with:
           go-version: ${{ matrix.go-version }}
           cache: false
+      # Module downloads do not depend on -race, so one entry per OS serves
+      # every job on it instead of a copy inside each build cache. The
+      # cache version includes the resolved home directory, so Linux and
+      # macOS cannot share one.
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
         with:
-          path: |
-            ~/go/pkg/mod
-            ~/.cache/go-build
+          path: ~/go/pkg/mod
+          key: ${{ runner.os }}-go-mod-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-mod-
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
+        with:
+          path: ~/.cache/go-build
           key: ${{ runner.os }}-go-${{ matrix.go-version }}-${{ hashFiles('**/go.sum') }}
           restore-keys: |
             ${{ runner.os }}-go-${{ matrix.go-version }}-
@@ -352,14 +384,38 @@ jobs:
         with:
           go-version: ${{ matrix.go-version }}
           cache: false
+      # Module downloads do not depend on -race, so one entry per OS serves
+      # every job on it instead of a copy inside each build cache. The
+      # cache version includes the resolved home directory, so Linux and
+      # macOS cannot share one.
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
         with:
-          path: |
-            ~/go/pkg/mod
-            ~/.cache/go-build
-          key: ${{ runner.os }}-go-race-${{ matrix.go-version }}-${{ matrix.shard }}-${{ hashFiles('**/go.sum') }}
+          path: ~/go/pkg/mod
+          key: ${{ runner.os }}-go-mod-${{ hashFiles('**/go.sum') }}
           restore-keys: |
-            ${{ runner.os }}-go-race-${{ matrix.go-version }}-${{ matrix.shard }}-
+            ${{ runner.os }}-go-mod-
+      # The shards share one race build cache. Most of it is dependencies
+      # compiled with -race, which every shard needs, and the repository
+      # quota cannot hold one copy each. actions/cache keeps the first
+      # upload of a key and does not merge, so only the rest shard saves:
+      # it builds the most packages, and its entry holds about 87% of the
+      # objects the three shards build between them.
+      - name: restore race build cache
+        if: matrix.shard != 'rest'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
+        with:
+          path: ~/.cache/go-build
+          key: ${{ runner.os }}-go-race-${{ matrix.go-version }}-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-race-${{ matrix.go-version }}-
+      - name: save race build cache
+        if: matrix.shard == 'rest'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
+        with:
+          path: ~/.cache/go-build
+          key: ${{ runner.os }}-go-race-${{ matrix.go-version }}-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-race-${{ matrix.go-version }}-
       - name: go-build
         run: go build -tags dingo_extra_plugins ./cmd/dingo
       - name: go-test-race
@@ -405,11 +461,19 @@ jobs:
         with:
           go-version: ${{ matrix.go-version }}
           cache: false
+      # Module downloads do not depend on -race, so one entry per OS serves
+      # every job on it instead of a copy inside each build cache. The
+      # cache version includes the resolved home directory, so Linux and
+      # macOS cannot share one.
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
         with:
-          path: |
-            ~/go/pkg/mod
-            ~/Library/Caches/go-build
+          path: ~/go/pkg/mod
+          key: ${{ runner.os }}-go-mod-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-mod-
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
+        with:
+          path: ~/Library/Caches/go-build
           key: ${{ runner.os }}-go-${{ matrix.go-version }}-${{ hashFiles('**/go.sum') }}
           restore-keys: |
             ${{ runner.os }}-go-${{ matrix.go-version }}-
@@ -534,12 +598,9 @@ jobs:
     timeout-minutes: 90
     env:
       CBOR_DATASET_REVISION: '6cd8c928665bbafe90e02066ebb4620e38f051de'
-      AMARU_UPLC_REVISION: '03acfc01807e5e2a8a5466541ad22c856f3de99c'
-      NDC_LEDGER_REVISION: '4fed8790fb81164f9d7a53414acc5f78aaf65422'
-      TURBO_DATASET_REVISION: '862fa7127fe07c2537005955cf98e7b332151996'
-      TURBO_DATASET_DATE: '20260826'
-      TURBO_SHARD_0000_SHA256: 'c446743b869955bae355aea04fade0a0dc46f01ae08f04bcada44d8944e477ee'
-      TURBO_SHARD_0001_SHA256: '2bb62f11dee861296fbdf7de69599340cd6d4b93a7fad37a365b0dcd004fd83d'
+      NDC_LEDGER_REVISION: '8974561cb6b48807e2a578028d4f5d85430007a6'
+      UPLC_CORPUS_SHA256: '8bd4ad4f9f4c8c6b8ffa1f06ed1db0b43043afbba77ef6a14bcfb5a52345ed3f'
+      TURBO_CORPUS_SHA256: '821af55e3323c826b5598c964d634b46dd468014834d0e97ebdc5edb0a158576'
     permissions:
       attestations: write
       contents: write
@@ -554,11 +615,19 @@ jobs:
         with:
           go-version: 1.26.x
           cache: false
+      # Module downloads do not depend on -race, so one entry per OS serves
+      # every job on it instead of a copy inside each build cache. The
+      # cache version includes the resolved home directory, so Linux and
+      # macOS cannot share one.
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
         with:
-          path: |
-            ~/go/pkg/mod
-            ~/.cache/go-build
+          path: ~/go/pkg/mod
+          key: ${{ runner.os }}-go-mod-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-mod-
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
+        with:
+          path: ~/.cache/go-build
           key: ${{ runner.os }}-go-1.26.x-${{ hashFiles('**/go.sum') }}
           restore-keys: |
             ${{ runner.os }}-go-1.26.x-
@@ -575,15 +644,6 @@ jobs:
           repository: r2rationality/cardano-cbor-dataset
           ref: ${{ env.CBOR_DATASET_REVISION }}
           path: .conformance/cardano-cbor-dataset
-          persist-credentials: false
-      - name: Checkout UPLC conformance corpus
-        if: github.ref_type == 'tag'
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
-        with:
-          repository: pragma-org/amaru
-          ref: ${{ env.AMARU_UPLC_REVISION }}
-          path: .conformance/amaru
-          sparse-checkout: crates/amaru-uplc/tests
           persist-credentials: false
       - name: Checkout ledger-rules fixtures
         if: github.ref_type == 'tag'
@@ -638,11 +698,19 @@ jobs:
         with:
           go-version: 1.26.x
           cache: false
+      # Module downloads do not depend on -race, so one entry per OS serves
+      # every job on it instead of a copy inside each build cache. The
+      # cache version includes the resolved home directory, so Linux and
+      # macOS cannot share one.
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
         with:
-          path: |
-            ~/go/pkg/mod
-            ~/Library/Caches/go-build
+          path: ~/go/pkg/mod
+          key: ${{ runner.os }}-go-mod-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-mod-
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
+        with:
+          path: ~/Library/Caches/go-build
           key: ${{ runner.os }}-go-1.26.x-${{ hashFiles('**/go.sum') }}
           restore-keys: |
             ${{ runner.os }}-go-1.26.x-

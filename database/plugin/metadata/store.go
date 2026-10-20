@@ -34,6 +34,10 @@ import (
 // model-specific error when the public method contract requires one.
 var ErrNotFound = errors.New("metadata not found")
 
+// ErrSyncStateTooLarge reports a sync_state value above the caller's byte
+// limit. The value is not read.
+var ErrSyncStateTooLarge = errors.New("sync state value exceeds size limit")
+
 // The interfaces below are the compiled-in metadata provider contract
 // (database/plugin/PLUGIN_DEVELOPMENT.md). A provider maintained outside this
 // repository builds against a pinned module version, so adding a method or a
@@ -997,6 +1001,25 @@ type UtxoStore interface {
 		fn func(*models.Utxo) error,
 	) error
 
+	// IterateLiveUtxosContext is IterateLiveUtxos with the scan bound to
+	// ctx, so cancellation stops it between rows while txn still supplies
+	// the snapshot.
+	IterateLiveUtxosContext(
+		ctx context.Context,
+		txn types.Txn,
+		fn func(*models.Utxo) error,
+	) error
+
+	// IterateUtxosAsOfContext is IterateUtxosAsOf with the scan bound to
+	// ctx, so cancellation stops it between rows while txn still supplies
+	// the snapshot.
+	IterateUtxosAsOfContext(
+		ctx context.Context,
+		atSlot uint64,
+		txn types.Txn,
+		fn func(*models.Utxo) error,
+	) error
+
 	// MarkUtxosDeletedAtSlot marks every live UTxO row matching one
 	// of refs as deleted at atSlot. Refs that don't match any live
 	// row are silently ignored. Rollback un-deletion is handled by
@@ -1464,6 +1487,15 @@ type StakeSnapshotStore interface {
 	GetPoolStakeSnapshotsByEpoch(
 		uint64, // epoch
 		string, // snapshotType
+		types.Txn,
+	) ([]*models.PoolStakeSnapshot, error)
+
+	// GetPoolStakeSnapshotsByEpochBounded retrieves at most maxRows pool
+	// stake snapshots for an epoch.
+	GetPoolStakeSnapshotsByEpochBounded(
+		uint64, // epoch
+		string, // snapshotType
+		int, // maxRows
 		types.Txn,
 	) ([]*models.PoolStakeSnapshot, error)
 
@@ -3239,6 +3271,12 @@ type MetadataStore interface {
 	// GetSyncState retrieves a sync state value by key.
 	// Returns empty string if the key does not exist.
 	GetSyncState(string, types.Txn) (string, error)
+
+	// GetSyncStateBounded retrieves a sync state value by key only when its
+	// size is at most maxBytes; a larger value is not read and the call fails
+	// with ErrSyncStateTooLarge. Returns empty string if the key does not
+	// exist.
+	GetSyncStateBounded(string, int, types.Txn) (string, error)
 
 	// SetSyncState stores or updates a sync state value.
 	SetSyncState(string, string, types.Txn) error

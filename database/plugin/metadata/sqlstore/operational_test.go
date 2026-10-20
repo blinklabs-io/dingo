@@ -15,11 +15,13 @@
 package sqlstore
 
 import (
+	"database/sql"
 	"fmt"
 	"math"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -315,6 +317,68 @@ func TestListSyncStateKeysByPrefixSkipsNullKey(t *testing.T) {
 		[]string{prefix + "10:aa", prefix + "13:bb"},
 		got,
 	)
+}
+
+// GetSyncStateBounded must compare the stored size in bytes, not characters,
+// and must not return a value above the limit.
+func TestGetSyncStateBoundedLimitsByteSize(t *testing.T) {
+	t.Parallel()
+	testGetSyncStateBounded(t, newManagementTestStore(t))
+}
+
+func testGetSyncStateBounded(t *testing.T, store *Store) {
+	t.Helper()
+	require.NoError(t, store.SetSyncState("ascii", "abcd", nil))
+	// Two characters, four bytes.
+	require.NoError(t, store.SetSyncState("multibyte", "éé", nil))
+
+	got, err := store.GetSyncStateBounded("ascii", 4, nil)
+	require.NoError(t, err)
+	require.Equal(t, "abcd", got)
+
+	got, err = store.GetSyncStateBounded("ascii", 3, nil)
+	require.ErrorIs(t, err, metadata.ErrSyncStateTooLarge)
+	require.Empty(t, got)
+
+	got, err = store.GetSyncStateBounded("multibyte", 4, nil)
+	require.NoError(t, err)
+	require.Equal(t, "éé", got)
+
+	got, err = store.GetSyncStateBounded("multibyte", 3, nil)
+	require.ErrorIs(
+		t,
+		err,
+		metadata.ErrSyncStateTooLarge,
+		"a value is sized in bytes, so two characters can exceed a limit of three",
+	)
+	require.Empty(t, got)
+
+	// The database itself must withhold an oversized value, so that a size
+	// check made after the read cannot satisfy this test.
+	var (
+		length int64
+		value  sql.NullString
+	)
+	require.NoError(t, store.readDB.QueryRow(
+		store.dialect.Rebind(boundedSyncStateQuery(store.dialect.Name())),
+		3, "multibyte",
+	).Scan(&length, &value))
+	require.Equal(t, int64(4), length)
+	require.False(
+		t,
+		value.Valid,
+		"the value column must be NULL when the value exceeds the limit",
+	)
+	require.NoError(t, store.readDB.QueryRow(
+		store.dialect.Rebind(boundedSyncStateQuery(store.dialect.Name())),
+		4, "multibyte",
+	).Scan(&length, &value))
+	require.True(t, value.Valid)
+	require.Equal(t, "éé", value.String)
+
+	got, err = store.GetSyncStateBounded("missing", 1, nil)
+	require.NoError(t, err)
+	require.Empty(t, got)
 }
 
 // TestCheckedUint8 unit-tests the helper directly: zero, the maximum

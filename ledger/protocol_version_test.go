@@ -20,6 +20,7 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/config/cardano"
@@ -165,6 +166,32 @@ func TestEvaluateProtocolVersionBump_DetectsQuorumMetUpdate(t *testing.T) {
 	require.Equal(t, eras.BabbageEraDesc.Id, ls.currentEra.Id)
 	require.Equal(t, uint(8), pparams.ProtocolMajor,
 		"the peek must not mutate the live currentPParams pointer")
+}
+
+func TestQueueProtocolVersionBumpEvaluation_PublishesDetectedTransition(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	cfg := newBabbageQuorum1Cfg(t)
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	ls := newQuorumMetVersionBumpLedger(t, cfg, db)
+	testChain, tips := newVersionBumpChain(t, db, 30, 15, 2)
+	ls.chain = testChain
+	ls.currentTip = tips[1]
+	ls.publishSnapshotsLocked()
+
+	ls.Lock()
+	ls.queueProtocolVersionBumpEvaluation(t.Context())
+	ls.Unlock()
+
+	require.Eventually(t, func() bool {
+		ls.RLock()
+		defer ls.RUnlock()
+		return ls.transitionInfo.State == hardfork.TransitionKnown &&
+			ls.transitionInfo.KnownEpoch == 1
+	}, 5*time.Second, 10*time.Millisecond)
 }
 
 // TestEvaluateProtocolVersionBump_NoUpdateStaysUnknown is the negative half:

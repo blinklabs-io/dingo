@@ -478,6 +478,15 @@ type OuroborosConfig struct {
 	// Candidates may inform Genesis corroboration and eagerness but must not
 	// affect selection until the ledger admits the accompanying header.
 	ChainsyncObservePeerTip func(chainselection.PeerTipUpdateEvent) chainselection.PeerTipUpdateDisposition
+	// ChainsyncPrepareForecastWitness temporarily records a connected header
+	// that is waiting for the ledger forecast horizon. It may corroborate
+	// verified staged candidates but cannot enter selection or admission. The
+	// returned peers should be re-intersected to replay their now-corroborated
+	// headers.
+	ChainsyncPrepareForecastWitness func(chainselection.PeerTipUpdateEvent) []ouroboros.ConnectionId
+	// ChainsyncRemoveForecastWitness removes the temporary witness after the
+	// forecast wait ends.
+	ChainsyncRemoveForecastWitness func(chainselection.PeerTipUpdateEvent)
 	// ChainsyncResolvePeerTip synchronously resolves a staged candidate after
 	// definite header admission or rejection. Deferred buffered headers are not
 	// resolved until replay.

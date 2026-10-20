@@ -1726,10 +1726,10 @@ func TestBootstrapSurvivesAnUnavailableAncillaryArchive(t *testing.T) {
 	})
 
 	// Completing the bootstrap is only half of what the non-fatal branch
-	// promises. The other half is that the ledger state then comes from the
-	// main extraction, which is where v1-layout snapshots keep it — so this
-	// runs the whole of Sync rather than stopping at the result.
-	t.Run("v2 falls back to the extraction directory's ledger state",
+	// promises. The other half is that Sync then refuses to import a ledger
+	// state: an immutable archive admits only its own trio, so the extraction
+	// directory never holds one and nothing unsigned can stand in for it.
+	t.Run("v2 imports no ledger state when the ancillary archive is unusable",
 		func(t *testing.T) {
 			fixture := newV2Fixture(t, v2FixtureOptions{
 				validImmutable:      true,
@@ -1737,7 +1737,7 @@ func TestBootstrapSurvivesAnUnavailableAncillaryArchive(t *testing.T) {
 			})
 			fixture.ancillaryArchive = []byte("not an archive")
 
-			result, err := Sync(context.Background(), SyncConfig{
+			_, err := Sync(context.Background(), SyncConfig{
 				Network:       "preprod",
 				DataDir:       t.TempDir(),
 				StorageMode:   "core",
@@ -1749,9 +1749,6 @@ func TestBootstrapSurvivesAnUnavailableAncillaryArchive(t *testing.T) {
 				AllowInsecureHTTP: true,
 				VerifyCertChain:   false,
 			})
-			require.NoError(t, err)
-			assert.Equal(t, uint64(1000), result.LedgerSlot,
-				"the ledger state must come from the extraction directory "+
-					"when the ancillary archive is unusable")
+			require.ErrorContains(t, err, "no ledger state")
 		})
 }

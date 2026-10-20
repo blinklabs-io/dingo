@@ -74,6 +74,12 @@ import (
 // shrink it instead of waiting on a real multi-minute timer.
 var cleanupConsumedUtxosInterval = 5 * time.Minute
 
+// snapshotGenerationCounter gives every publication in this process a unique
+// generation. A live Restore or Truncate replaces LedgerState while consumers
+// can retain generation-tagged work from the outgoing instance, so a
+// replacement must never reuse one of its tokens.
+var snapshotGenerationCounter atomic.Uint64
+
 // gatherCoalesceRetryInterval and gatherCoalesceMaxAttempts bound how long
 // ledgerReadChainIterator's batch-gather loop will wait, after a non-blocking
 // iter.Next(false) reports chain.ErrIteratorChainTip, for more blocks to
@@ -1006,6 +1012,12 @@ type LedgerStateConfig struct {
 	ManualBlockProcessing    bool
 	ForgeBlocks              bool
 	DatabaseWorkerPoolConfig DatabaseWorkerPoolConfig
+	// VerifyReplayHeaders makes ledger apply run the full VRF, KES,
+	// operational-certificate and leader-eligibility check on every block
+	// that no Mithril certificate covers, as if admission had deferred it.
+	// Replay feeds blocks that never passed admission, so apply is the only
+	// place their headers can be checked before they reach ledger state.
+	VerifyReplayHeaders bool
 	// BlockPipelineEnabled turns on parallel block decode in the chainsync
 	// replay loop (ledgerReadChainIterator): blocks read back from the
 	// primary chain are decoded by a small worker pool (gouroboros'
@@ -1313,8 +1325,9 @@ type LedgerState struct {
 	persistedBlockSizeMu     sync.Mutex
 	persistedBlockSize       uint64
 	persistedBlockSizeLoaded bool
-	// snapshotGeneration is incremented while writers are serialized by Lock.
-	// It lets readers that need both snapshots reject adjacent publications.
+	// snapshotGeneration is assigned while writers are serialized by Lock.
+	// It lets readers that need both snapshots reject adjacent publications and
+	// generation-tagged work reject snapshots from another LedgerState instance.
 	snapshotGeneration uint64
 	// txValidationCommitMutex serializes snapshot publication against the
 	// final generation check and mutation performed by a validation session.
@@ -2244,8 +2257,11 @@ func cloneEpochs(values []models.Epoch) []models.Epoch {
 func (ls *LedgerState) publishSnapshotsLocked() {
 	ls.txValidationCommitMutex.Lock()
 	defer ls.txValidationCommitMutex.Unlock()
-	ls.snapshotGeneration++
-	generation := ls.snapshotGeneration
+	generation := snapshotGenerationCounter.Add(1)
+	if generation == 0 {
+		panic("ledger snapshot generations exhausted")
+	}
+	ls.snapshotGeneration = generation
 	// Prevent a later append to the writer-owned slice from reusing storage
 	// visible to an already-published snapshot. Element updates still require
 	// replacing the cache and its slice-backed Epoch fields.
@@ -8133,7 +8149,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 					return fmt.Errorf("%s: %w", label, recoverErr)
 				}
 				if recovered {
-					return errRestartLedgerPipeline
+					return ls.restartAfterRecovery(rejected)
 				}
 				return fmt.Errorf("%s: %w", label, rejected)
 			}
@@ -8162,7 +8178,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 								return fmt.Errorf("recover rejected Leios certifying block: %w", recoverErr)
 							}
 							if recovered {
-								return errRestartLedgerPipeline
+								return ls.restartAfterRecovery(err)
 							}
 							return err
 						}
@@ -8648,7 +8664,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 						)
 					}
 					if recovered {
-						return errRestartLedgerPipeline
+						return ls.restartAfterRecovery(result.err)
 					}
 					return fmt.Errorf(
 						"read-chain decode or validation: %w",
@@ -8773,7 +8789,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 					)
 				}
 				if recovered {
-					return errRestartLedgerPipeline
+					return ls.restartAfterRecovery(err)
 				}
 				return fmt.Errorf(
 					"prepare block apply snapshot: %w",
@@ -8894,6 +8910,14 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 				nextBatch[i:end],
 				snapshotEpoch,
 			)
+			verifiedReplayHeaders, replayHeaderJobs, verifyErr := ls.prepareReplayHeaders(
+				ctx,
+				blocksBeforeEpochEnd(nextBatch[i:end], snapshotEpoch),
+			)
+			if verifyErr != nil {
+				completeReadResult()
+				return verifyErr
+			}
 			finishValidationTransition := ls.beginTxValidationTransition()
 			var transactionOpCertCounters *trustedReplayOpCertCounterCache
 			var transactionReplayUtxos map[utxoref.Key]lcommon.Utxo
@@ -8926,6 +8950,11 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 				snapshotTip,
 				candidateTip,
 				func(txn *database.Txn) error { //nolint:contextcheck
+					replayWorkers := startReplayHeaderJobs(
+						ctx, nextBatch[i:end], verifiedReplayHeaders,
+						replayHeaderJobs, verifyReplayHeader,
+					)
+					defer replayWorkers.stop()
 					deltaBatch = NewLedgerDeltaBatch()
 					if trustedReplayOpCertCounters != nil {
 						transactionOpCertCounters = &trustedReplayOpCertCounterCache{
@@ -9153,6 +9182,9 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 							aheadUtxos = aheadPrefetch.take(offset)
 						}
 						blockCtx := withAheadUtxos(ctx, aheadUtxos)
+						blockCtx = withReplayHeaderVerification(
+							blockCtx, verifiedReplayHeaders, offset,
+						)
 						blockCtx = withPreverifiedSignatures(
 							blockCtx,
 							preverifiedSignatures,
@@ -9304,7 +9336,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 							return fmt.Errorf("failed to set tip: %w", err)
 						}
 					}
-					return nil
+					return replayWorkers.wait()
 				},
 			)
 			if err != nil {
@@ -9326,7 +9358,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 				}
 				if recovered {
 					completeReadResult()
-					return errRestartLedgerPipeline
+					return ls.restartAfterRecovery(err)
 				}
 				// A deferred header check that rejects an already-persisted
 				// block is deterministic: restarting the pipeline re-reads
@@ -9345,7 +9377,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 				}
 				if recovered {
 					completeReadResult()
-					return errRestartLedgerPipeline
+					return ls.restartAfterRecovery(err)
 				}
 				// A stale chain iterator delivers a fork block whose prev-hash
 				// doesn't match our current tip. This happens when a concurrent
@@ -9621,6 +9653,15 @@ func (ls *LedgerState) ledgerProcessBlock(
 		if err := ls.validateBlockHeaderProtocolVersion(
 			block.Header(), pparams,
 		); err != nil {
+			return nil, err
+		}
+	} else if !ls.config.TrustedReplay && !ls.slotCoveredByMithril(point.Slot) {
+		// The aggregate maxBlockExUnits bound is a block-level ledger rule
+		// that per-transaction validation never repeats, so a peer-sourced
+		// block must meet it even when ValidateHistorical=false skips the
+		// rest of validation. Mithril-certified and TrustedReplay blocks are
+		// trusted input and keep skipping it.
+		if err := validateBlockExUnits(block, pparams); err != nil {
 			return nil, err
 		}
 	}
@@ -11375,9 +11416,12 @@ func (ls *LedgerState) loadEpochs(ctx context.Context, txn *database.Txn) error 
 	return ls.setEpochCache(ctx, txn, epochs)
 }
 
-// PrepareEpochCacheForStartup loads epoch metadata before LedgerState.Start().
-// It is startup-only: callers use this when another component needs
-// SlotToEpoch before the ledger processing loop is running.
+// PrepareEpochCacheForStartup loads epoch metadata and the applied tip before
+// LedgerState.Start(). It is startup-only: callers use this when another
+// component needs slot conversion before the ledger processing loop is
+// running. The tip is part of that preparation because it anchors the current
+// era's forecast horizon; an epoch cache published against the origin tip can
+// reject historical slots near the persisted tip as past the era horizon.
 func (ls *LedgerState) PrepareEpochCacheForStartup(ctx context.Context) error {
 	if ls.ctx != nil {
 		return errors.New(
@@ -11387,7 +11431,18 @@ func (ls *LedgerState) PrepareEpochCacheForStartup(ctx context.Context) error {
 	txn := ls.db.Transaction(ctx, true)
 	defer txn.Release()
 	return txn.Do(func(txn *database.Txn) error {
-		return ls.loadEpochs(ctx, txn)
+		if err := ls.loadEpochs(ctx, txn); err != nil {
+			return err
+		}
+		tip, err := ls.db.GetTip(txn)
+		if err != nil {
+			return fmt.Errorf("load applied tip for startup era history: %w", err)
+		}
+		ls.Lock()
+		ls.currentTip = tip
+		ls.publishSnapshotsLocked()
+		ls.Unlock()
+		return nil
 	})
 }
 
@@ -14307,16 +14362,20 @@ func (ls *LedgerState) UtxosByAddress(
 	return ret, nil
 }
 
-// UtxosByAddressWithOrdering returns UTxOs matching q with ordering metadata.
-// See models.UtxoWithOrderingQuery (nil SearchUtxos predicate: MatchAllAddresses).
-func (ls *LedgerState) UtxosByAddressWithOrdering(
+// UtxosByAddressBoundedPage returns an ordered, resumable UTxO page while
+// bounding candidate work and retained CBOR.
+func (ls *LedgerState) UtxosByAddressBoundedPage(
+	ctx context.Context,
 	q *models.UtxoWithOrderingQuery,
-) ([]models.UtxoWithOrdering, error) {
-	utxos, err := ls.db.UtxosByAddressWithOrdering(context.Background(), q, nil)
-	if err != nil {
-		return nil, err
-	}
-	return utxos, nil
+	maxCandidates int,
+	maxBytes int64,
+) (models.UtxoAddressPage, error) {
+	return ls.db.UtxosByAddressBoundedPage(
+		ctx,
+		q,
+		maxCandidates,
+		maxBytes,
+	)
 }
 
 // UtxosByAddressAtSlot returns all UTxOs belonging to the

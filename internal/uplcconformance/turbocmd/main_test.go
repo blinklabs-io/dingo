@@ -25,7 +25,7 @@ import (
 	"github.com/fxamacker/cbor/v2"
 )
 
-func TestGenerateReportWritesPartialReportOnProgramFailure(t *testing.T) {
+func TestGenerateReportOmitsFailedProgramFromPartialReport(t *testing.T) {
 	t.Parallel()
 	if runtime.GOOS != "linux" {
 		t.Skip("UPLC turbo reports are Linux-only")
@@ -44,8 +44,12 @@ func TestGenerateReportWritesPartialReportOnProgramFailure(t *testing.T) {
 	}
 
 	reportPath := filepath.Join(t.TempDir(), "report.json")
-	if err := generateReport(root, reportPath, 1, 0); err == nil {
+	generateErr := generateReport(root, reportPath, 1, 0)
+	if generateErr == nil {
 		t.Fatal("generate report succeeded for an invalid Flat program")
+	}
+	if !strings.Contains(generateErr.Error(), "benchmark invalid-v1.flat") {
+		t.Fatalf("generation error = %v", generateErr)
 	}
 	reportJSON, err := os.ReadFile(reportPath)
 	if err != nil {
@@ -55,22 +59,18 @@ func TestGenerateReportWritesPartialReportOnProgramFailure(t *testing.T) {
 		Scenario   string `json:"scenario"`
 		Benchmarks []struct {
 			BudgetCPU *int64   `json:"budget_cpu"`
-			FlatUS    *float64 `json:"flat_us"`
+			BudgetMem *int64   `json:"budget_mem"`
 			MemBytes  *float64 `json:"mem_bytes"`
 			CPUUS     *float64 `json:"cpu_us"`
-			Error     string   `json:"error"`
 		} `json:"benchmarks"`
 	}
 	if err := json.Unmarshal(reportJSON, &report); err != nil {
 		t.Fatalf("decode partial report: %v", err)
 	}
-	if report.Scenario != "uplc-turbo" || len(report.Benchmarks) != 1 {
+	if report.Scenario != "uplc-turbo" || len(report.Benchmarks) != 0 {
 		t.Fatalf("partial report = %+v", report)
 	}
-	benchmark := report.Benchmarks[0]
-	if benchmark.BudgetCPU != nil || benchmark.FlatUS != nil || benchmark.MemBytes != nil ||
-		benchmark.CPUUS != nil || benchmark.Error == "" ||
-		strings.Contains(benchmark.Error, root) {
-		t.Fatalf("failed benchmark has measurements: %+v", benchmark)
+	if strings.Contains(string(reportJSON), root) {
+		t.Fatalf("partial report leaks corpus path: %s", reportJSON)
 	}
 }
