@@ -337,6 +337,25 @@ func TestNodeRunLoadsDMQTopology(t *testing.T) {
 			wantPeer: "peers=2",
 		},
 		{
+			// The topology the Mithril documentation publishes: a valency of
+			// 2 over one access point, and a null peerSnapshotFile.
+			name: "mithril documented topology",
+			content: `{
+				"bootstrapPeers": [],
+				"localRoots": [{
+					"accessPoints": [
+						{"address": "dmq.example.com", "port": 6161, "valency": 1}
+					],
+					"advertise": true,
+					"trustable": false,
+					"valency": 2
+				}],
+				"peerSnapshotFile": null,
+				"publicRoots": [{"accessPoints": [], "advertise": false}]
+			}`,
+			wantPeer: "peers=1",
+		},
+		{
 			name:     "no peers",
 			content:  `{}`,
 			wantPeer: "peers=0",

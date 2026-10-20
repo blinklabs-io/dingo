@@ -15,7 +15,6 @@
 package dmq
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -25,12 +24,13 @@ import (
 	"os"
 	"strconv"
 	"strings"
-
-	"github.com/blinklabs-io/dingo/topology"
 )
 
 // maxTopologyBytes bounds the topology file read into memory.
 const maxTopologyBytes = 10 << 20
+
+// maxPort is the highest valid TCP port.
+const maxPort = 65535
 
 // Peer is one DMQ peer's address.
 type Peer struct {
@@ -59,10 +59,12 @@ func (p Peer) key() string {
 // RootGroup is a set of peers that share valency and advertising settings.
 type RootGroup struct {
 	Peers []Peer
-	// Valency is how many of Peers to keep connections to.
+	// Valency is how many peers to keep connections to. It is a target, not
+	// a bound: it may exceed len(Peers), as in the topology the Mithril
+	// documentation publishes.
 	Valency uint
-	// WarmValency is how many of Peers to keep warm. A file that leaves it
-	// out gets Valency, so it is never below Valency.
+	// WarmValency is how many peers to keep warm. A file that leaves it out
+	// gets Valency, so it is never below Valency.
 	WarmValency uint
 	// Trustable is set from a local root only; a public root cannot be
 	// trusted.
@@ -78,26 +80,47 @@ type Topology struct {
 	PublicRoots []RootGroup
 }
 
-// ignoredTopologyFields are cardano-node topology keys that dmq-node does not
-// support. They are removed before the file is parsed, so their contents are
-// never validated or followed.
-var ignoredTopologyFields = []string{
-	"bootstrapPeers",
-	"peerSnapshotFile",
-	"useLedgerAfterSlot",
+// topologyFile is the part of a dmq-node topology file that is read. Fields
+// dmq-node does not support (bootstrapPeers, peerSnapshotFile,
+// useLedgerAfterSlot) are not declared, so they are never decoded or
+// validated and may hold anything.
+type topologyFile struct {
+	LocalRoots  []topologyRoot `json:"localRoots"`
+	PublicRoots []topologyRoot `json:"publicRoots"`
+}
+
+type topologyRoot struct {
+	AccessPoints []topologyAccessPoint `json:"accessPoints"`
+	Advertise    bool                  `json:"advertise"`
+	Trustable    bool                  `json:"trustable"`
+	Valency      *uint                 `json:"valency"`
+	HotValency   *uint                 `json:"hotValency"`
+	WarmValency  *uint                 `json:"warmValency"`
+}
+
+type topologyAccessPoint struct {
+	Address string `json:"address"`
+	Port    uint   `json:"port"`
 }
 
 // LoadTopology reads a dmq-node topology file. The format is cardano-node's
-// P2P topology, except that the fields in ignoredTopologyFields are not
-// supported: they are dropped before parsing, so even a malformed one does
-// not fail the load, and a peer snapshot is never read from disk. Configured
-// bootstrapPeers and peerSnapshotFile are reported with a warning.
+// P2P topology, except that bootstrapPeers, peerSnapshotFile and
+// useLedgerAfterSlot are not supported: they are never decoded, so even a
+// malformed one does not fail the load, and a peer snapshot is never read
+// from disk. A configured bootstrapPeers or peerSnapshotFile is reported with
+// a warning.
 //
-// Public roots read valency and warmValency only, as the Cardano topology
-// parser does; hotValency is understood for local roots alone. Peer hosts are
-// returned without surrounding whitespace or IPv6 brackets.
+// The shared Cardano topology reader is not used, because it refuses a
+// valency above the number of access points and the DMQ topology the Mithril
+// documentation publishes has a local root with valency 2 and one access
+// point. Here a valency is a target that may exceed the peers listed. The
+// other rules hold: an access point has a non-empty host and a port from 1 to
+// 65535, and a warmValency is not below the valency. Both local and public
+// roots accept hotValency as a spelling of valency, and valency wins when
+// both are present.
 //
-// A file that names no peers loads as an empty topology, because ledger peer
+// Peer hosts are returned without surrounding whitespace or IPv6 brackets. A
+// file that names no peers loads as an empty topology, because ledger peer
 // discovery can supply peers without one; the caller decides whether that is
 // worth a warning. A file that is not a JSON object, or that has two keys
 // differing only in case, is an error.
@@ -137,56 +160,93 @@ func LoadTopology(path string, logger *slog.Logger) (*Topology, error) {
 	if err := rejectCaseDuplicateKeys(fields); err != nil {
 		return nil, fmt.Errorf("dmq: parse topology file %q: %w", path, err)
 	}
-	// Go matches JSON keys to struct fields without regard to case, so the
-	// ignored keys are matched the same way.
-	for key, value := range fields {
-		for _, ignored := range ignoredTopologyFields {
-			if !strings.EqualFold(key, ignored) {
-				continue
-			}
-			warnIgnoredTopologyField(logger, path, ignored, value)
-			delete(fields, key)
-		}
-	}
-	stripped, err := json.Marshal(fields)
-	if err != nil {
-		return nil, fmt.Errorf("dmq: parse topology file %q: %w", path, err)
-	}
-	cfg, err := topology.NewTopologyConfigFromReader(
-		bytes.NewReader(stripped),
-	)
-	if err != nil {
+	warnIgnoredTopologyFields(logger, path, fields)
+	// Go matches keys to struct fields without regard to case.
+	var file topologyFile
+	if err := json.Unmarshal(data, &file); err != nil {
 		return nil, fmt.Errorf("dmq: parse topology file %q: %w", path, err)
 	}
 	t := &Topology{}
-	for _, root := range cfg.LocalRoots {
-		t.LocalRoots = append(t.LocalRoots, RootGroup{
-			Peers:       peersFromAccessPoints(root.AccessPoints),
-			Valency:     root.Valency,
-			WarmValency: root.WarmValency,
-			Trustable:   root.Trustable,
-			Advertise:   root.Advertise,
-		})
-	}
-	for _, root := range cfg.PublicRoots {
-		warm := root.WarmValency
-		if warm == 0 {
-			warm = root.Valency
+	for i, root := range file.LocalRoots {
+		group, err := newRootGroup(root, fmt.Sprintf("localRoots[%d]", i))
+		if err != nil {
+			return nil, fmt.Errorf(
+				"dmq: parse topology file %q: %w", path, err,
+			)
 		}
-		t.PublicRoots = append(t.PublicRoots, RootGroup{
-			Peers:       peersFromAccessPoints(root.AccessPoints),
-			Valency:     root.Valency,
-			WarmValency: warm,
-			Advertise:   root.Advertise,
-		})
+		group.Trustable = root.Trustable
+		t.LocalRoots = append(t.LocalRoots, group)
+	}
+	for i, root := range file.PublicRoots {
+		group, err := newRootGroup(root, fmt.Sprintf("publicRoots[%d]", i))
+		if err != nil {
+			return nil, fmt.Errorf(
+				"dmq: parse topology file %q: %w", path, err,
+			)
+		}
+		t.PublicRoots = append(t.PublicRoots, group)
 	}
 	return t, nil
 }
 
+// newRootGroup validates one root and converts it. field names the root in
+// errors, for example "localRoots[0]".
+func newRootGroup(root topologyRoot, field string) (RootGroup, error) {
+	peers := make([]Peer, 0, len(root.AccessPoints))
+	for i, ap := range root.AccessPoints {
+		host := cleanHost(ap.Address)
+		if host == "" {
+			return RootGroup{}, fmt.Errorf(
+				"%s.accessPoints[%d].address must not be empty", field, i,
+			)
+		}
+		if ap.Port == 0 || ap.Port > maxPort {
+			return RootGroup{}, fmt.Errorf(
+				"%s.accessPoints[%d].port must be in range 1-%d",
+				field, i, maxPort,
+			)
+		}
+		peers = append(peers, Peer{Host: host, Port: ap.Port})
+	}
+	var valency uint
+	switch {
+	case root.Valency != nil:
+		valency = *root.Valency
+	case root.HotValency != nil:
+		valency = *root.HotValency
+	}
+	warm := valency
+	if root.WarmValency != nil {
+		warm = *root.WarmValency
+		if warm < valency {
+			return RootGroup{}, fmt.Errorf(
+				"%s.warmValency must be >= %s.valency", field, field,
+			)
+		}
+	}
+	return RootGroup{
+		Peers:       peers,
+		Valency:     valency,
+		WarmValency: warm,
+		Advertise:   root.Advertise,
+	}, nil
+}
+
+// cleanHost trims whitespace and the brackets around an IPv6 literal, so a
+// dial and Peer.Address, which brackets an IPv6 host itself, both see the bare
+// host.
+func cleanHost(host string) string {
+	host = strings.TrimSpace(host)
+	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
+		host = strings.TrimSpace(host[1 : len(host)-1])
+	}
+	return host
+}
+
 // rejectCaseDuplicateKeys refuses an object that has two keys differing only
 // in case. Go matches keys to struct fields without regard to case, so the
-// topology parser would otherwise pick one of them by position and silently
-// drop the other.
+// decoder would otherwise pick one of them by position and silently drop the
+// other.
 func rejectCaseDuplicateKeys(fields map[string]json.RawMessage) error {
 	seen := make(map[string]string, len(fields))
 	for key := range fields {
@@ -202,53 +262,39 @@ func rejectCaseDuplicateKeys(fields map[string]json.RawMessage) error {
 	return nil
 }
 
-// warnIgnoredTopologyField logs an ignored field that carries a value worth
-// noticing: a non-empty bootstrapPeers or a peerSnapshotFile. A
+// warnIgnoredTopologyFields logs an unsupported field that carries a value
+// worth noticing: a non-empty bootstrapPeers or a peerSnapshotFile.
 // useLedgerAfterSlot is dropped silently.
-func warnIgnoredTopologyField(
+func warnIgnoredTopologyFields(
 	logger *slog.Logger,
-	path, field string,
-	value json.RawMessage,
+	path string,
+	fields map[string]json.RawMessage,
 ) {
-	switch field {
-	case "bootstrapPeers":
-		var peers []json.RawMessage
-		if err := json.Unmarshal(value, &peers); err != nil || len(peers) > 0 {
-			logger.Warn(
-				"ignoring bootstrapPeers in dmq topology: not supported",
-				"file", path,
-			)
+	for key, value := range fields {
+		switch strings.ToLower(key) {
+		case "bootstrappeers":
+			var peers []json.RawMessage
+			if err := json.Unmarshal(value, &peers); err != nil ||
+				len(peers) > 0 {
+				logger.Warn(
+					"ignoring bootstrapPeers in dmq topology: not supported",
+					"file", path,
+				)
+			}
+		case "peersnapshotfile":
+			var name string
+			if string(value) == "null" {
+				continue
+			}
+			if err := json.Unmarshal(value, &name); err != nil ||
+				name != "" {
+				logger.Warn(
+					"ignoring peerSnapshotFile in dmq topology: not supported",
+					"file", path,
+				)
+			}
 		}
-	case "peerSnapshotFile":
-		var name string
-		if err := json.Unmarshal(value, &name); err != nil || name != "" {
-			logger.Warn(
-				"ignoring peerSnapshotFile in dmq topology: not supported",
-				"file", path,
-			)
-		}
 	}
-}
-
-func peersFromAccessPoints(
-	points []topology.TopologyConfigP2PAccessPoint,
-) []Peer {
-	peers := make([]Peer, 0, len(points))
-	for _, ap := range points {
-		peers = append(peers, Peer{Host: cleanHost(ap.Address), Port: ap.Port})
-	}
-	return peers
-}
-
-// cleanHost trims whitespace and the brackets around an IPv6 literal, so a
-// dial and Peer.Address, which brackets an IPv6 host itself, both see the bare
-// host.
-func cleanHost(host string) string {
-	host = strings.TrimSpace(host)
-	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
-		host = strings.TrimSpace(host[1 : len(host)-1])
-	}
-	return host
 }
 
 // Peers returns every distinct peer, local roots first and each in file

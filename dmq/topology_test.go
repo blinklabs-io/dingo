@@ -78,6 +78,77 @@ func TestLoadTopologyGroups(t *testing.T) {
 	)
 }
 
+// The topology the Mithril documentation publishes for a DMQ node: one access
+// point under a local root with valency 2, an access point of its own valency
+// 1, a null peerSnapshotFile and a public root with no access points.
+const mithrilDocTopology = `{
+	"bootstrapPeers": [],
+	"localRoots": [{
+		"accessPoints": [
+			{"address": "dmq.example.com", "port": 6161, "valency": 1}
+		],
+		"advertise": true,
+		"trustable": false,
+		"valency": 2
+	}],
+	"peerSnapshotFile": null,
+	"publicRoots": [{
+		"accessPoints": [],
+		"advertise": false
+	}]
+}`
+
+func TestLoadTopologyMithrilDocumentedFile(t *testing.T) {
+	t.Parallel()
+	topo, err := LoadTopology(writeTopology(t, mithrilDocTopology), nil)
+	require.NoError(t, err)
+	assert.Equal(t, []RootGroup{{
+		Peers:       []Peer{{Host: "dmq.example.com", Port: 6161}},
+		Valency:     2,
+		WarmValency: 2,
+		Advertise:   true,
+	}}, topo.LocalRoots)
+	assert.Equal(t, []RootGroup{{Peers: []Peer{}}}, topo.PublicRoots)
+	assert.Equal(
+		t,
+		[]Peer{{Host: "dmq.example.com", Port: 6161}},
+		topo.Peers(),
+	)
+}
+
+// A valency is a target, not a bound on the access points, so a root may ask
+// for more peers than it lists, in either group and for either valency.
+func TestLoadTopologyValencyMayExceedAccessPoints(t *testing.T) {
+	t.Parallel()
+	topo, err := LoadTopology(writeTopology(t, `{
+		"localRoots": [{
+			"accessPoints": [{"address": "10.0.0.1", "port": 3141}],
+			"hotValency": 3,
+			"warmValency": 5
+		}],
+		"publicRoots": [{
+			"accessPoints": [{"address": "10.0.0.2", "port": 3141}],
+			"valency": 4
+		}]
+	}`), nil)
+	require.NoError(t, err)
+	assert.Equal(t, uint(3), topo.LocalRoots[0].Valency)
+	assert.Equal(t, uint(5), topo.LocalRoots[0].WarmValency)
+	assert.Equal(t, uint(4), topo.PublicRoots[0].Valency)
+	assert.Equal(t, uint(4), topo.PublicRoots[0].WarmValency)
+}
+
+func TestLoadTopologyValencyWinsOverHotValency(t *testing.T) {
+	t.Parallel()
+	topo, err := LoadTopology(writeTopology(t, `{"localRoots": [{
+		"accessPoints": [{"address": "10.0.0.1", "port": 3141}],
+		"valency": 1,
+		"hotValency": 2
+	}]}`), nil)
+	require.NoError(t, err)
+	assert.Equal(t, uint(1), topo.LocalRoots[0].Valency)
+}
+
 func TestLoadTopologyPublicRootWarmValency(t *testing.T) {
 	t.Parallel()
 	topo, err := LoadTopology(writeTopology(t, `{"publicRoots": [{
@@ -356,14 +427,36 @@ func TestLoadTopologyErrors(t *testing.T) {
 			wantErr: "publicRoots[0].accessPoints[0].address",
 		},
 		{
-			name: "valency above the access points",
+			name: "warm valency below the valency",
+			path: func(t *testing.T) string {
+				return writeTopology(t, `{"localRoots": [{
+					"accessPoints": [{"address": "10.0.0.1", "port": 3141}],
+					"valency": 2,
+					"warmValency": 1
+				}]}`)
+			},
+			wantErr: "localRoots[0].warmValency must be >= localRoots[0].valency",
+		},
+		{
+			name: "public root warm valency below the valency",
 			path: func(t *testing.T) string {
 				return writeTopology(t, `{"publicRoots": [{
 					"accessPoints": [{"address": "10.0.0.1", "port": 3141}],
-					"valency": 2
+					"valency": 1,
+					"warmValency": 0
 				}]}`)
 			},
-			wantErr: "publicRoots[0].valency",
+			wantErr: "publicRoots[0].warmValency must be >= publicRoots[0].valency",
+		},
+		{
+			name: "address of only brackets",
+			path: func(t *testing.T) string {
+				return writeTopology(t, `{"localRoots": [{
+					"accessPoints": [{"address": " [] ", "port": 3141}],
+					"valency": 1
+				}]}`)
+			},
+			wantErr: "localRoots[0].accessPoints[0].address must not be empty",
 		},
 	}
 	for _, tt := range tests {

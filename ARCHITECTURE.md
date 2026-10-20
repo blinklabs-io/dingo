@@ -7823,19 +7823,23 @@ sees a reason before its first rejection.
 
 `dmq.topologyFile` names a dmq-node topology file, which uses cardano-node's
 P2P topology syntax and is separate from the Cardano topology. `dmq.LoadTopology`
-parses it into local and public root groups of peers. `bootstrapPeers`,
-`peerSnapshotFile` and `useLedgerAfterSlot` are dropped before parsing, because
-dmq-node does not support them: even a malformed one does not fail the load, a
-configured `bootstrapPeers` or `peerSnapshotFile` is logged as ignored, and a
-peer snapshot is never read from disk. Public roots read `valency` and
-`warmValency` only, and a missing `warmValency` becomes `valency`; `hotValency`
-is understood for local roots alone. A file must be a JSON object and may not
-hold two keys that differ only in case. Peer hosts lose surrounding whitespace
-and IPv6 brackets, and `Topology.Peers` lists each distinct peer once, comparing
-hostnames without case or a trailing dot and IP literals by canonical form,
-without resolving names. A file naming no peers loads as an empty topology,
-since ledger peer discovery can supply peers without one, and logs a warning.
-Configuration validation rejects a
+parses it into local and public root groups of peers with its own decoder, not
+the shared Cardano reader: that reader refuses a valency above the number of
+access points, and the topology the Mithril documentation publishes has a local
+root with valency 2 and one access point. Here a valency is a target that may
+exceed the peers listed. An access point still needs a non-empty host and a
+port from 1 to 65535, and a `warmValency` may not be below the valency; a
+missing `warmValency` becomes the valency, and `hotValency` is accepted as a
+spelling of `valency` in both groups. `bootstrapPeers`, `peerSnapshotFile` and
+`useLedgerAfterSlot` are never decoded, because dmq-node does not support them:
+even a malformed one does not fail the load, a configured `bootstrapPeers` or
+`peerSnapshotFile` is logged as ignored, and a peer snapshot is never read from
+disk. A file must be a JSON object and may not hold two keys that differ only
+in case. Peer hosts lose surrounding whitespace and IPv6 brackets, and
+`Topology.Peers` lists each distinct peer once, comparing hostnames without case
+or a trailing dot and IP literals by canonical form, without resolving names. A
+file naming no peers loads as an empty topology, since ledger peer discovery can
+supply peers without one, and logs a warning. Configuration validation rejects a
 missing or non-regular file early; `startDMQ` then loads it, which is the
 authoritative read, before the DMQ stack opens its socket. A bad file stops
 startup through the node's normal failure path, after services that started
