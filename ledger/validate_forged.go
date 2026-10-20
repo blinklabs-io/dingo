@@ -302,12 +302,32 @@ func (ls *LedgerState) validateForgedTxsOnce(
 	txs []ledger.Transaction,
 	parentHash []byte,
 ) error {
+	// The tip relation takes the ledger read lock and the chain lock, so it
+	// is read before the session opens: the session holds a database
+	// transaction, and taking the ledger read lock under it can deadlock with
+	// a publisher that holds the write lock and needs a database connection.
+	// The session is then bound to that same tip, so the relation read here
+	// describes the state the session judges.
+	_, tipState := ls.loadStateSnapshots()
+	tip := tipState.currentTip.Point
+	if !bytes.Equal(tip.Hash, parentHash) {
+		//nolint:contextcheck // chain.TipRelation takes no context; it reads one locked chain snapshot
+		if err := ls.forgedTipBeforeParent(tip, parentHash); err != nil {
+			return err
+		}
+	}
+	// Non-nil even at origin, so the session always checks its tip.
+	sessionTip := append(make([]byte, 0, len(tip.Hash)), tip.Hash...)
 	// consumedUtxos: inputs spent within this block (prevents intra-block
 	// double-spend).
 	// createdUtxos: outputs produced within this block and not yet in the
 	// persistent UTxO set.
-	return ls.WithTxValidationSession(
+	err := ls.withTxValidationSession(
 		ctx,
+		sessionTip,
+		nil,
+		false,
+		false,
 		func(
 			validate func(
 				ledger.Transaction,
@@ -317,22 +337,10 @@ func (ls *LedgerState) validateForgedTxsOnce(
 			) error,
 			stillCurrent func() bool,
 			_ func(func() error) (bool, error),
+			_ txValidationApplyFunc,
 		) error {
-			// Read before stillCurrent, so a tip that moved after the
-			// session opened makes the session non-current rather than
-			// being judged here.
-			_, tip := ls.loadStateSnapshots()
 			if !stillCurrent() {
 				return errForgedValidationNotCurrent
-			}
-			if !bytes.Equal(tip.currentTip.Point.Hash, parentHash) {
-				//nolint:contextcheck // chain.TipRelation takes no context; it reads one locked chain snapshot
-				if err := ls.forgedTipBeforeParent(
-					tip.currentTip.Point,
-					parentHash,
-				); err != nil {
-					return err
-				}
 			}
 			consumedUtxos := make(map[utxoref.Key]struct{}, len(txs)*2)
 			createdUtxos := make(map[utxoref.Key]lcommon.Utxo, len(txs)*4)
@@ -383,6 +391,12 @@ func (ls *LedgerState) validateForgedTxsOnce(
 			return nil
 		},
 	)
+	// The ledger moved off the tip the relation was read for before the
+	// session opened; that relation says nothing about the new tip.
+	if errors.Is(err, ErrLeiosValidationParentSuperseded) {
+		return errForgedValidationNotCurrent
+	}
+	return err
 }
 
 // ValidateBlockReferenceScripts checks a locally built block's aggregate
