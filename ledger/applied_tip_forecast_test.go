@@ -34,6 +34,7 @@ type forecastChildBlock struct {
 	slot   uint64
 	number uint64
 	prev   lcommon.Blake2b256
+	era    lcommon.Era
 }
 
 func (b *forecastChildBlock) SlotNumber() uint64 { return b.slot }
@@ -41,6 +42,8 @@ func (b *forecastChildBlock) SlotNumber() uint64 { return b.slot }
 func (b *forecastChildBlock) BlockNumber() uint64 { return b.number }
 
 func (b *forecastChildBlock) PrevHash() lcommon.Blake2b256 { return b.prev }
+
+func (b *forecastChildBlock) Era() lcommon.Era { return b.era }
 
 func newAppliedTipForecastState(t *testing.T) (*LedgerState, lcommon.Blake2b256) {
 	t.Helper()
@@ -107,6 +110,74 @@ func TestForecastNextEpochForAppliedTipChild(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, epoch.EpochId, gotEpoch.EpochId)
 	require.Len(t, gotCache, 2)
+}
+
+func TestForecastNextEpochForAppliedTipChildAcrossHardFork(t *testing.T) {
+	t.Parallel()
+
+	ls, tipHash := newAppliedTipForecastState(t)
+	shape := ls.eraShape()
+	shape.Eras[0].NextEraTrigger = hardfork.NewTriggerAtEpoch(1)
+	dijkstraParams, err := eras.BuildEraParams(
+		ls.config.CardanoNodeConfig,
+		eras.DijkstraEraDesc,
+	)
+	require.NoError(t, err)
+	shape.Eras = append(shape.Eras, hardfork.ShapeEntry{
+		EraID:          eras.DijkstraEraDesc.Id,
+		EraName:        eras.DijkstraEraDesc.Name,
+		Params:         dijkstraParams,
+		NextEraTrigger: hardfork.NewTriggerNotDuringThisExecution(),
+	})
+	ls.cachedShape.Store(&shape)
+	ls.config.EnableDijkstra = true
+	ls.activeEras = eras.ActiveEras(true)
+	ls.transitionInfo = hardfork.NewTransitionUnknown()
+	ls.publishSnapshotsLocked()
+	gotShape := ls.eraShape()
+	entry, hasEntry := gotShape.EraForID(eras.ConwayEraDesc.Id)
+	require.True(t, hasEntry)
+	require.Equal(t, hardfork.TriggerAtEpoch, entry.NextEraTrigger.Kind)
+	_, hasDijkstra := ls.eraById(eras.DijkstraEraDesc.Id)
+	require.True(t, hasDijkstra)
+	gotEraID, isBoundary := ls.forecastBoundaryEra(
+		eras.ConwayEraDesc.Id, 1, ls.loadConsensusSnapshot().transitionInfo,
+	)
+	require.True(t, isBoundary)
+	require.Equal(t, eras.DijkstraEraDesc.Id, gotEraID)
+
+	child := &forecastChildBlock{
+		slot:   120,
+		number: 11,
+		prev:   tipHash,
+		era:    lcommon.Era{Id: uint8(eras.DijkstraEraDesc.Id)},
+	}
+	epoch, cache, ok, err := ls.forecastNextEpochForAppliedTipChild(
+		t.Context(), child,
+	)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, uint64(1), epoch.EpochId)
+	require.Equal(t, eras.DijkstraEraDesc.Id, epoch.EraId)
+	require.Equal(t, dijkstraParams.EpochSize, uint64(epoch.LengthInSlots))
+	require.Equal(t, dijkstraParams.SlotLength.Milliseconds(), int64(epoch.SlotLength))
+	require.Len(t, cache, 2)
+	require.Len(t, ls.loadConsensusSnapshot().epochCache, 1,
+		"the boundary forecast must not publish before transactional rollover")
+	gotEpoch, gotCache, err := ls.headerVerificationEpochForBlockWithCache(
+		t.Context(), child, true,
+	)
+	require.NoError(t, err)
+	require.Equal(t, epoch, gotEpoch)
+	require.Len(t, gotCache, 2)
+	require.Len(t, ls.loadConsensusSnapshot().epochCache, 1,
+		"forging header validation must keep the boundary forecast immutable")
+
+	child.era = lcommon.Era{Id: uint8(eras.ConwayEraDesc.Id)}
+	_, _, ok, err = ls.forecastNextEpochForAppliedTipChild(t.Context(), child)
+	require.NoError(t, err)
+	require.False(t, ok,
+		"a predecessor-era header cannot use the successor-era boundary forecast")
 }
 
 func TestForecastNextEpochForAppliedTipChildRejectsNonChildren(t *testing.T) {

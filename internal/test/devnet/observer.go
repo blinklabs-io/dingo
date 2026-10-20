@@ -184,6 +184,7 @@ func (o *ChainObservers) session(
 		observed := ObservedHeader{
 			Slot:        header.SlotNumber(),
 			BlockNumber: header.BlockNumber(),
+			Era:         header.Era().Name,
 			Hash:        hash.Bytes(),
 			PrevHash:    header.PrevHash().Bytes(),
 			BodySize:    header.BlockBodySize(),

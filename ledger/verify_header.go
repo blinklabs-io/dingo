@@ -805,9 +805,11 @@ func (ls *LedgerState) headerVerificationEpochForBlockWithCache(
 	epoch, cache, err := ls.headerVerificationEpochWithCache(
 		ctx, block.SlotNumber(), allowEpochCacheAdvance,
 	)
-	if err == nil || allowEpochCacheAdvance ||
+	if err == nil ||
 		!errors.Is(err, errHeaderVerificationDeferred) ||
-		errors.Is(err, ErrHeaderBeyondForecastHorizon) {
+		errors.Is(err, ErrHeaderBeyondForecastHorizon) ||
+		(allowEpochCacheAdvance &&
+			!errors.Is(err, errEpochCacheForecastBoundary)) {
 		return epoch, cache, err
 	}
 	forecast, forecastCache, ok, forecastErr := ls.forecastNextEpochForAppliedTipChild(
@@ -847,18 +849,63 @@ func (ls *LedgerState) forecastNextEpochForAppliedTipChild(
 		last.EraId != consensus.currentEra.Id {
 		return models.Epoch{}, nil, false, nil
 	}
-	if err := ls.validateEpochCacheForecast(
-		last, consensus.currentEra.Id, consensus.transitionInfo,
-	); err != nil {
-		return models.Epoch{}, nil, false, err
-	}
 	if last.LengthInSlots == 0 {
 		return models.Epoch{}, nil, false, nil
 	}
 	start := last.StartSlot + uint64(last.LengthInSlots)
-	if block.SlotNumber() < start ||
-		block.SlotNumber() >= start+uint64(last.LengthInSlots) {
+	targetEpochID := last.EpochId + 1
+	if start < last.StartSlot || block.SlotNumber() < start {
 		return models.Epoch{}, nil, false, nil
+	}
+	targetEraID, boundary := ls.forecastBoundaryEra(
+		last.EraId, targetEpochID, consensus.transitionInfo,
+	)
+	if boundary {
+		if uint(block.Era().Id) != targetEraID {
+			return models.Epoch{}, nil, false, nil
+		}
+	} else {
+		targetEraID = last.EraId
+	}
+	var (
+		slotLength  uint
+		epochLength uint
+	)
+	if boundary {
+		targetEra, ok := ls.eraById(targetEraID)
+		if !ok || targetEra == nil || targetEra.EpochLengthFunc == nil {
+			return models.Epoch{}, nil, false, fmt.Errorf(
+				"cannot forecast epoch %d: era %d parameters are unavailable",
+				targetEpochID,
+				targetEraID,
+			)
+		}
+		var err error
+		slotLength, epochLength, err = targetEra.EpochLengthFunc(
+			ls.config.CardanoNodeConfig,
+		)
+		if err != nil {
+			return models.Epoch{}, nil, false, fmt.Errorf(
+				"forecast epoch %d era %d parameters: %w",
+				targetEpochID,
+				targetEraID,
+				err,
+			)
+		}
+	} else {
+		slotLength = last.SlotLength
+		epochLength = last.LengthInSlots
+	}
+	if epochLength == 0 || slotLength == 0 ||
+		block.SlotNumber()-start >= uint64(epochLength) {
+		return models.Epoch{}, nil, false, nil
+	}
+	if !boundary {
+		if err := ls.validateEpochCacheForecast(
+			last, consensus.currentEra.Id, consensus.transitionInfo,
+		); err != nil {
+			return models.Epoch{}, nil, false, err
+		}
 	}
 	nonce, evolving, candidate, lab, err := ls.computeEpochNonceForSlot(
 		ctx, start, last,
@@ -867,11 +914,11 @@ func (ls *LedgerState) forecastNextEpochForAppliedTipChild(
 		return models.Epoch{}, nil, false, err
 	}
 	next := models.Epoch{
-		EpochId:             last.EpochId + 1,
+		EpochId:             targetEpochID,
 		StartSlot:           start,
-		LengthInSlots:       last.LengthInSlots,
-		SlotLength:          last.SlotLength,
-		EraId:               last.EraId,
+		LengthInSlots:       epochLength,
+		SlotLength:          slotLength,
+		EraId:               targetEraID,
 		Nonce:               nonce,
 		EvolvingNonce:       evolving,
 		CandidateNonce:      candidate,
@@ -885,6 +932,40 @@ func (ls *LedgerState) forecastNextEpochForAppliedTipChild(
 		return models.Epoch{}, nil, false, err
 	}
 	return epoch, forecastCache, true, nil
+}
+
+// forecastBoundaryEra returns the era that owns targetEpochID when the
+// boundary is already fixed by the configured epoch trigger or a published
+// hard-fork transition. It does not infer version-triggered transitions from
+// an unconfirmed protocol-parameter vote.
+func (ls *LedgerState) forecastBoundaryEra(
+	sourceEraID uint,
+	targetEpochID uint64,
+	transition hardfork.TransitionInfo,
+) (uint, bool) {
+	shape := ls.eraShape()
+	eraID := sourceEraID
+	for {
+		entry, ok := shape.EraForID(eraID)
+		if !ok {
+			return sourceEraID, false
+		}
+		boundary := entry.NextEraTrigger.Kind == hardfork.TriggerAtEpoch &&
+			entry.NextEraTrigger.Epoch <= targetEpochID
+		if eraID == sourceEraID &&
+			transition.State == hardfork.TransitionKnown &&
+			transition.KnownEpoch <= targetEpochID {
+			boundary = true
+		}
+		if !boundary {
+			return eraID, eraID != sourceEraID
+		}
+		nextEraID := eraID + 1
+		if _, ok := ls.eraById(nextEraID); !ok {
+			return sourceEraID, false
+		}
+		eraID = nextEraID
+	}
 }
 
 //nolint:unused // retained as a test helper
