@@ -286,6 +286,13 @@ func TestGetMempoolInfoSummaryIsBounded(t *testing.T) {
 				t, tc.wantLimit, strings.Count(text, "| `"),
 				"table rows must equal the display limit",
 			)
+			prev := -1
+			for i := range tc.wantLimit {
+				pos := strings.Index(text, fmt.Sprintf("| `%064x` |", i+1))
+				require.GreaterOrEqual(t, pos, 0, "row %d missing", i)
+				require.Greater(t, pos, prev, "row %d out of queue order", i)
+				prev = pos
+			}
 			assert.Contains(
 				t, text,
 				fmt.Sprintf("showing up to %d of %d", tc.wantLimit, poolSize),
