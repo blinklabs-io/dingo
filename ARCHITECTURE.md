@@ -18349,6 +18349,16 @@ before the real one arrives on-chain. `GetCurrentProtocolParams`
 that fabricated value as if it were real data — a real cardano-node on the
 same chain genuinely reports no PlutusV2 entry until a real update lands.
 
+An Alonzo genesis `extraConfig.costModels` overlay is real data, not
+synthetic: `alonzo.AlonzoProtocolParameters.UpdateFromGenesis` applies it, so a
+PlutusV2 model injected that way is present before `HardForkBabbage` runs and
+nothing is fabricated. The ledger injects the overlay after every era
+translation, so `HardForkConway` and `HardForkDijkstra` re-apply it per
+language after their own genesis cost models (`applyAlonzoExtraConfigCostModels`
+in `ledger/eras/cost_models.go`); without `extraConfig` the models are
+untouched, and a model shorter than the language's reference count is
+rejected.
+
 Whether the current PlutusV2 cost model is still that fabricated default is
 tracked with the same shared-database-function pattern as the CIP-0163
 section above, split into two sync_state markers
