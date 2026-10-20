@@ -16786,39 +16786,35 @@ type mockForgedBlockChecker struct {
 func TestCheckSlotBattle_DetectsConflict(t *testing.T) {
 	t.Parallel()
 
+	f := newSiblingFixture(t)
+	ls := f.ls
 	eventBus := newTestEventBus(t, nil)
 	defer eventBus.Stop()
+	ls.config.EventBus = eventBus
 
-	localHash := []byte{0x01, 0x02, 0x03, 0x04}
+	localHash := f.rival.Hash().Bytes()
 	remoteHash := []byte{0x0A, 0x0B, 0x0C, 0x0D}
 
 	checker := &mockForgedBlockChecker{
 		forgedSlots: map[uint64][]byte{
-			1000: localHash,
+			siblingSlot: localHash,
 		},
 	}
 
-	ls := &LedgerState{
-		config: LedgerStateConfig{
-			EventBus:           eventBus,
-			ForgedBlockChecker: checker,
-			Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		},
-	}
+	ls.config.ForgedBlockChecker = checker
 
 	// Subscribe to slot battle events
 	_, evtCh := eventBus.Subscribe(forging.SlotBattleEventType)
 
-	// Simulate an incoming block at slot 1000 with a different hash.
-	// Pass a non-nil error to indicate the remote block was rejected
-	// (local block stays on chain, so local won).
+	// An incoming block at the same slot with a different hash; the
+	// forged block is the one on the chain, so local won.
 	e := BlockfetchEvent{
 		Point: ocommon.Point{
-			Slot: 1000,
+			Slot: siblingSlot,
 			Hash: remoteHash,
 		},
 	}
-	ls.checkSlotBattle(e, errors.New("block rejected"))
+	ls.checkSlotBattle(e)
 
 	// Verify the event was emitted
 	evt := testutil.RequireReceive(
@@ -16829,47 +16825,43 @@ func TestCheckSlotBattle_DetectsConflict(t *testing.T) {
 	)
 	battle, ok := evt.Data.(forging.SlotBattleEvent)
 	require.True(t, ok, "event data should be SlotBattleEvent")
-	assert.Equal(t, uint64(1000), battle.Slot)
+	assert.Equal(t, siblingSlot, battle.Slot)
 	assert.Equal(t, localHash, battle.LocalBlockHash)
 	assert.Equal(t, remoteHash, battle.RemoteBlockHash)
 	assert.True(t, battle.Won,
-		"local should win when remote block is rejected")
+		"local should win when its block is on the chain")
 }
 
 func TestCheckSlotBattle_RemoteWinsWhenAccepted(t *testing.T) {
 	t.Parallel()
 
+	f := newSiblingFixture(t)
+	ls := f.ls
 	eventBus := newTestEventBus(t, nil)
 	defer eventBus.Stop()
+	ls.config.EventBus = eventBus
 
-	localHash := []byte{0x01, 0x02, 0x03, 0x04}
+	localHash := bytes.Repeat([]byte{0x01}, 32)
 	remoteHash := []byte{0x0A, 0x0B, 0x0C, 0x0D}
 
 	checker := &mockForgedBlockChecker{
 		forgedSlots: map[uint64][]byte{
-			1000: localHash,
+			siblingSlot: localHash,
 		},
 	}
 
-	ls := &LedgerState{
-		config: LedgerStateConfig{
-			EventBus:           eventBus,
-			ForgedBlockChecker: checker,
-			Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		},
-	}
+	ls.config.ForgedBlockChecker = checker
 
 	_, evtCh := eventBus.Subscribe(forging.SlotBattleEventType)
 
-	// Pass nil error to indicate the remote block was accepted
-	// (remote won, our block is replaced).
+	// The forged block is not on the chain, so the rival won.
 	e := BlockfetchEvent{
 		Point: ocommon.Point{
-			Slot: 1000,
+			Slot: siblingSlot,
 			Hash: remoteHash,
 		},
 	}
-	ls.checkSlotBattle(e, nil)
+	ls.checkSlotBattle(e)
 
 	evt := testutil.RequireReceive(
 		t,
@@ -16879,9 +16871,9 @@ func TestCheckSlotBattle_RemoteWinsWhenAccepted(t *testing.T) {
 	)
 	battle, ok := evt.Data.(forging.SlotBattleEvent)
 	require.True(t, ok)
-	assert.Equal(t, uint64(1000), battle.Slot)
+	assert.Equal(t, siblingSlot, battle.Slot)
 	assert.False(t, battle.Won,
-		"local should lose when remote block is accepted")
+		"local should lose when its block is not on the chain")
 }
 
 func TestCheckSlotBattle_NoConflictDifferentSlot(t *testing.T) {
@@ -16913,7 +16905,7 @@ func TestCheckSlotBattle_NoConflictDifferentSlot(t *testing.T) {
 			Hash: []byte{0x0A, 0x0B, 0x0C, 0x0D},
 		},
 	}
-	ls.checkSlotBattle(e, nil)
+	ls.checkSlotBattle(e)
 
 	// Verify no event was emitted
 	testutil.RequireNoReceive(
@@ -16955,7 +16947,7 @@ func TestCheckSlotBattle_SameHashIsNotBattle(t *testing.T) {
 			Hash: blockHash,
 		},
 	}
-	ls.checkSlotBattle(e, nil)
+	ls.checkSlotBattle(e)
 
 	testutil.RequireNoReceive(
 		t,
@@ -16987,7 +16979,7 @@ func TestCheckSlotBattle_NilCheckerSkips(t *testing.T) {
 			Hash: []byte{0x0A, 0x0B, 0x0C, 0x0D},
 		},
 	}
-	ls.checkSlotBattle(e, nil)
+	ls.checkSlotBattle(e)
 
 	testutil.RequireNoReceive(
 		t,
@@ -17024,7 +17016,7 @@ func TestCheckSlotBattle_NilEventBus(t *testing.T) {
 			Hash: remoteHash,
 		},
 	}
-	ls.checkSlotBattle(e, errors.New("rejected"))
+	ls.checkSlotBattle(e)
 }
 
 // TestCheckSlotBattle_UnderWriteLock is a regression test for the
@@ -17034,31 +17026,28 @@ func TestCheckSlotBattle_NilEventBus(t *testing.T) {
 func TestCheckSlotBattle_UnderWriteLock(t *testing.T) {
 	t.Parallel()
 
+	f := newSiblingFixture(t)
+	ls := f.ls
 	eventBus := newTestEventBus(t, nil)
 	defer eventBus.Stop()
+	ls.config.EventBus = eventBus
 
-	localHash := []byte{0x01, 0x02, 0x03, 0x04}
+	localHash := f.rival.Hash().Bytes()
 	remoteHash := []byte{0x0A, 0x0B, 0x0C, 0x0D}
 
 	checker := &mockForgedBlockChecker{
 		forgedSlots: map[uint64][]byte{
-			1000: localHash,
+			siblingSlot: localHash,
 		},
 	}
 
-	ls := &LedgerState{
-		config: LedgerStateConfig{
-			EventBus:           eventBus,
-			ForgedBlockChecker: checker,
-			Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		},
-	}
+	ls.config.ForgedBlockChecker = checker
 
 	_, evtCh := eventBus.Subscribe(forging.SlotBattleEventType)
 
 	e := BlockfetchEvent{
 		Point: ocommon.Point{
-			Slot: 1000,
+			Slot: siblingSlot,
 			Hash: remoteHash,
 		},
 	}
@@ -17069,7 +17058,7 @@ func TestCheckSlotBattle_UnderWriteLock(t *testing.T) {
 	go func() {
 		defer close(done)
 		ls.Lock()
-		ls.checkSlotBattle(e, errors.New("block rejected"))
+		ls.checkSlotBattle(e)
 		ls.Unlock()
 	}()
 
@@ -17088,7 +17077,7 @@ func TestCheckSlotBattle_UnderWriteLock(t *testing.T) {
 	)
 	battle, ok := evt.Data.(forging.SlotBattleEvent)
 	require.True(t, ok)
-	assert.Equal(t, uint64(1000), battle.Slot)
+	assert.Equal(t, siblingSlot, battle.Slot)
 	assert.True(t, battle.Won)
 }
 

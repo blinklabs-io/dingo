@@ -7676,7 +7676,7 @@ func (ls *LedgerState) flushPendingBlockfetchBlocksDeferred(
 			// fork transactions.
 			validationEnabled, _ := ls.validationStateSnapshot()
 			ls.auditContinuationBlock(pendingEvent, validationEnabled)
-			ls.checkSlotBattle(pendingEvent, nil)
+			ls.checkSlotBattle(pendingEvent)
 			// The block extended the chain, so the range it belongs to
 			// is fetchable after all and any failure record for it is
 			// stale. Noting it here rather than on arrival is what keeps
@@ -7746,7 +7746,7 @@ func (ls *LedgerState) flushPendingBlockfetchBlocksDeferred(
 				pubs,
 			)
 		}
-		ls.checkSlotBattle(pendingEvent, addBlockErr)
+		ls.checkSlotBattle(pendingEvent)
 	}
 	ls.chain.NotifyIterators()
 	return nil
@@ -10045,18 +10045,15 @@ func (ls *LedgerState) cleanupBlockNoncesBefore(
 // occupies a slot for which the local node has already forged a
 // block. If so, it emits a SlotBattleEvent and logs a warning.
 //
-// The addBlockErr parameter is the error (if any) returned by
-// chain.AddBlock for the incoming block. A nil error means the
-// remote block was accepted onto the chain (remote won); a
-// non-nil error means it was rejected (local won).
+// The winner is whichever block the chain holds at the slot, read after the
+// incoming block was offered to it. chain.AddBlock accepting a block only means
+// it was stored, not that it displaced the local block, so its result cannot
+// decide the winner.
 //
 // The caller must hold ls.Lock() (write lock). This method must not
 // acquire ls.RLock(), because sync.RWMutex is not reentrant and
 // attempting a read lock while holding the write lock deadlocks.
-func (ls *LedgerState) checkSlotBattle(
-	e BlockfetchEvent,
-	addBlockErr error,
-) {
+func (ls *LedgerState) checkSlotBattle(e BlockfetchEvent) {
 	checker := ls.loadForgedBlockChecker()
 	if checker == nil {
 		return
@@ -10075,9 +10072,18 @@ func (ls *LedgerState) checkSlotBattle(
 		return
 	}
 
-	// Determine winner: if the remote block was rejected (addBlockErr
-	// != nil), our local block remains on chain, so we won.
-	localWon := addBlockErr != nil
+	_, _, localWon, err := ls.chain.TipRelation(
+		ocommon.NewPoint(incomingSlot, localHash),
+	)
+	if err != nil {
+		ls.config.Logger.Warn(
+			"slot battle detected but winner could not be determined",
+			"component", "ledger",
+			"slot", incomingSlot,
+			"error", err,
+		)
+		return
+	}
 
 	ls.config.Logger.Warn(
 		"slot battle detected",
