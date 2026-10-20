@@ -15,6 +15,7 @@
 package ouroboros
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"encoding/hex"
@@ -414,6 +415,24 @@ func TestLeiosFetchServerBlockTxsAnswersNotFoundWhenBodyMissing(
 	response, ok = msg.(*oleiosfetch.MsgBlockTxs)
 	require.True(t, ok)
 	require.Equal(t, []cbor.RawMessage{tx0, tx1}, response.TxsRaw)
+	appended := append(response.TxsRaw[0], 0xff)
+	require.Len(t, appended, len(tx0)+1)
+	if !bytes.Equal(tx1, response.TxsRaw[1]) {
+		t.Fatal("append overwrote the next served transaction")
+	}
+	response.TxsRaw[0][0] ^= 0xff
+	msg, err = o.leiosfetchServerBlockTxsRequest(
+		oleiosfetch.CallbackContext{}, point,
+		map[uint16]uint64{0: (1 << 63) | (1 << 62)},
+	)
+	require.NoError(t, err)
+	response, ok = msg.(*oleiosfetch.MsgBlockTxs)
+	require.True(t, ok)
+	if len(response.TxsRaw) != 2 ||
+		!bytes.Equal(tx0, response.TxsRaw[0]) ||
+		!bytes.Equal(tx1, response.TxsRaw[1]) {
+		t.Fatal("mutating a served response changed the cached closure")
+	}
 }
 
 func TestLeiosFetchServerBlockTxsRejectsOutOfRangeBitmap(t *testing.T) {

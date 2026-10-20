@@ -19,6 +19,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -275,11 +276,37 @@ func (d *Database) GetLeiosEBTxs(
 			return nil, err
 		}
 	}
-	var txsRaw []cbor.RawMessage
-	if _, err := cbor.Decode(val, &txsRaw); err != nil {
+	txsRaw, err := decodeLeiosEBTxs(val)
+	if err != nil {
 		return nil, fmt.Errorf("GetLeiosEBTxs: decode: %w", err)
 	}
 	return txsRaw, nil
+}
+
+// The blob read owns val. Retaining views of it avoids another payload copy
+// per transaction while keeping separate database reads independent.
+func decodeLeiosEBTxs(val []byte) ([]cbor.RawMessage, error) {
+	var views []leiosTxView
+	if _, err := cbor.Decode(val, &views); err != nil {
+		return nil, err
+	}
+	if views == nil {
+		return nil, nil
+	}
+	txs := make([]cbor.RawMessage, len(views))
+	for i, view := range views {
+		txs[i] = cbor.RawMessage(view)
+	}
+	return txs, nil
+}
+
+type leiosTxView []byte
+
+func (view *leiosTxView) UnmarshalCBOR(data []byte) error {
+	// Decode reads the caller-owned blob directly without reusing its buffer.
+	// Cap each view so append cannot overwrite the following transaction.
+	*view = slices.Clip(data)
+	return nil
 }
 
 // SetLeiosEB persists an endorser block's manifest and, when txsRaw is non-nil,

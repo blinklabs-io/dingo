@@ -17,6 +17,8 @@ package plugin
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
@@ -25,6 +27,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
+	"github.com/stretchr/testify/require"
 )
 
 type testConfig struct {
@@ -350,6 +353,76 @@ func TestApplyEnvironmentRejectsEmptyPathComponent(t *testing.T) {
 			t.Fatalf("%s: error = %v", entry, err)
 		}
 	}
+}
+
+func TestApplyEnvironmentReadsFileBackedConfig(t *testing.T) {
+	dir := t.TempDir()
+	tokenPath := filepath.Join(dir, "token")
+	require.NoError(
+		t,
+		os.WriteFile(tokenPath, []byte("00123:true secret\n"), 0o600),
+	)
+	passwordPath := filepath.Join(dir, "password")
+	require.NoError(t, os.WriteFile(passwordPath, []byte("from-file"), 0o600))
+	selection := Selection{Config: map[string]any{"password": "from-yaml"}}
+	err := ApplyEnvironment(CapabilityAPIMcp, &selection, []string{
+		"DINGO_PLUGINS_API_MCP_CONFIG_AUTH_TOKEN_FILE=" + tokenPath,
+		"DINGO_PLUGINS_API_MCP_CONFIG_PASSWORD_FILE=" + passwordPath,
+	})
+	require.NoError(t, err)
+	// File contents are not parsed as YAML; trailing line endings are stripped.
+	require.Equal(t, "00123:true secret", selection.Config["authToken"])
+	require.Equal(t, "from-file", selection.Config["password"])
+	require.NotContains(t, selection.Config, "authTokenFile")
+}
+
+func TestApplyEnvironmentRejectsLiteralAndFileForSameField(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "password")
+	require.NoError(t, os.WriteFile(path, []byte("from-file"), 0o600))
+	literal := "DINGO_PLUGINS_STORAGE_METADATA_CONFIG_PASSWORD=literal"
+	file := "DINGO_PLUGINS_STORAGE_METADATA_CONFIG_PASSWORD_FILE=" + path
+	for _, environ := range [][]string{{literal, file}, {file, literal}} {
+		selection := Selection{}
+		err := ApplyEnvironment(
+			CapabilityStorageMetadata,
+			&selection,
+			environ,
+		)
+		require.ErrorContains(
+			t,
+			err,
+			"DINGO_PLUGINS_STORAGE_METADATA_CONFIG_PASSWORD",
+		)
+		require.ErrorContains(t, err, "_FILE")
+	}
+}
+
+func TestApplyEnvironmentEmptyFilePathMatchesEmptyLiteral(t *testing.T) {
+	apply := func(entry string) map[string]any {
+		selection := Selection{Config: map[string]any{"password": "yaml"}}
+		require.NoError(t, ApplyEnvironment(
+			CapabilityStorageMetadata,
+			&selection,
+			[]string{entry},
+		))
+		return selection.Config
+	}
+	literal := apply("DINGO_PLUGINS_STORAGE_METADATA_CONFIG_PASSWORD=")
+	file := apply("DINGO_PLUGINS_STORAGE_METADATA_CONFIG_PASSWORD_FILE=")
+	require.Equal(t, literal, file)
+}
+
+func TestApplyEnvironmentFileErrorNamesVariable(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "missing")
+	selection := Selection{}
+	err := ApplyEnvironment(CapabilityStorageMetadata, &selection, []string{
+		"DINGO_PLUGINS_STORAGE_METADATA_CONFIG_DSN_FILE=" + missing,
+	})
+	require.ErrorContains(
+		t,
+		err,
+		"DINGO_PLUGINS_STORAGE_METADATA_CONFIG_DSN_FILE",
+	)
 }
 
 func TestResolveRejectsTypedNilInstance(t *testing.T) {

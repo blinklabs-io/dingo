@@ -16,13 +16,11 @@
 #   RELEASE_TAG           required, for example v0.71.0
 #   DIST_DIR              optional, defaults to dist
 #   CONFORMANCE_DIR       optional, defaults to .conformance; holds the
-#                         amaru and node-diversity-conformance checkouts
+#                         node-diversity-conformance checkout
 #   CBOR_DATASET_DIR      required, the checked out cardano-cbor-dataset
 #   CBOR_DATASET_REVISION required, the pinned dataset commit
-#   TURBO_DATASET_REVISION required, TurboCardano source commit
-#   TURBO_DATASET_DATE     required, date directory of the dataset archive
-#   TURBO_SHARD_0000_SHA256 required, digest of the first archive shard
-#   TURBO_SHARD_0001_SHA256 required, digest of the second archive shard
+#   UPLC_CORPUS_SHA256     required, digest of the NDC UPLC corpus archive
+#   TURBO_CORPUS_SHA256    required, digest of the NDC Turbo corpus archive
 #   TURBO_SAMPLES         optional, timed samples per program, defaults to 50
 #   TURBO_MAX_PROGRAMS    optional, programs measured, defaults to 10000
 
@@ -31,10 +29,8 @@ set -euo pipefail
 : "${RELEASE_TAG:?RELEASE_TAG must be set}"
 : "${CBOR_DATASET_DIR:?CBOR_DATASET_DIR must be set}"
 : "${CBOR_DATASET_REVISION:?CBOR_DATASET_REVISION must be set}"
-: "${TURBO_DATASET_REVISION:?TURBO_DATASET_REVISION must be set}"
-: "${TURBO_DATASET_DATE:?TURBO_DATASET_DATE must be set}"
-: "${TURBO_SHARD_0000_SHA256:?TURBO_SHARD_0000_SHA256 must be set}"
-: "${TURBO_SHARD_0001_SHA256:?TURBO_SHARD_0001_SHA256 must be set}"
+: "${UPLC_CORPUS_SHA256:?UPLC_CORPUS_SHA256 must be set}"
+: "${TURBO_CORPUS_SHA256:?TURBO_CORPUS_SHA256 must be set}"
 
 DIST_DIR="${DIST_DIR:-dist}"
 CONFORMANCE_DIR="${CONFORMANCE_DIR:-.conformance}"
@@ -42,11 +38,12 @@ TURBO_SAMPLES="${TURBO_SAMPLES:-50}"
 TURBO_MAX_PROGRAMS="${TURBO_MAX_PROGRAMS:-10000}"
 
 # The report step has a 60-minute limit. Generator budgets total 43 minutes;
-# corpus preparation is capped at three minutes, leaving 14 minutes for gzip.
+# corpus preparation is capped at six minutes, leaving 11 minutes for gzip.
 CBOR_GENERATOR_TIMEOUT_SECONDS=120
 LEDGER_GENERATOR_TIMEOUT_SECONDS=120
 UPLC_GENERATOR_TIMEOUT_SECONDS=240
 TURBO_GENERATOR_TIMEOUT_SECONDS=2100
+UPLC_CORPUS_TIMEOUT_SECONDS=180
 TURBO_CORPUS_TIMEOUT_SECONDS=180
 
 version="${RELEASE_TAG#v}"
@@ -61,8 +58,8 @@ write_error_report() {
     --arg scenario "$scenario" \
     --arg generated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     --arg error "$message" \
-    '{schema_version: "1", scenario: $scenario, generated_at: $generated_at,
-      implementation: {name: "dingo", language: "Go"}, error: $error}' \
+    '{version: "1", scenario: $scenario, generated_at: $generated_at,
+      implementation: {name: "dingo"}, error: $error}' \
     >"$report"
   echo "::warning::${scenario} report could not be generated: ${message}" >&2
 }
@@ -90,9 +87,10 @@ valid_report() {
   local report="$1" scenario="$2"
   jq -e -s --arg scenario "$scenario" '
     def common:
-      .schema_version == "1" and
+      .version == "1" and
       .scenario == $scenario and
       (.generated_at | type == "string" and length > 0);
+    def nullable_number: type == "number" or . == null;
     length == 1 and
     (.[0] as $report |
       ($report | common) and
@@ -112,17 +110,38 @@ valid_report() {
           (.failures | type == "array")
         elif $scenario == "ledger-rules" then
           (.corpus | type == "string" and length > 0) and
+          (.implementation.name | type == "string" and length > 0) and
           (.totals | type == "object") and
-          (.scenarios | type == "array")
+          (.scenarios | type == "array") and
+          all(.scenarios[]; (.id | type == "string") and (.result | type == "string"))
         elif $scenario == "uplc-conformance" then
-          (.protocol_version | type == "string" and length > 0) and
-          (.cost_models | type == "array") and
-          (.totals | type == "object") and
-          (.scenarios | type == "array")
+          (.implementation.name | type == "string" and length > 0) and
+          (.scenarios | type == "array") and
+          all(.scenarios[];
+            (.id | type == "string") and
+            (.title | type == "string") and
+            (.group | type == "string") and
+            (.plutus_version | type == "string") and
+            (.protocol_version | type == "string") and
+            (.evaluation | type == "string") and
+            ((.budget == null) or
+              ((.budget | type == "object") and
+                (.budget.cpu | type == "number") and
+                (.budget.mem | type == "number")))
+          )
         elif $scenario == "uplc-turbo" then
           (.implementation.name | type == "string" and length > 0) and
           (.machine | type == "object") and
-          (.benchmarks | type == "array")
+          (.benchmarks | type == "array") and
+          all(.benchmarks[];
+            (.bench | type == "string") and
+            (.plutus_version | type == "string") and
+            (.protocol_version | type == "string") and
+            (.budget_cpu | nullable_number) and
+            (.budget_mem | nullable_number) and
+            (.cpu_us | type == "number") and
+            (.mem_bytes | nullable_number)
+          )
         else false end)
       end)
   ' "$report" >/dev/null 2>&1
@@ -160,30 +179,26 @@ run_generator() {
   rm -f "$log"
 }
 
-# prepare_turbo_corpus DIR
-# Downloads, verifies and unpacks the turbo corpus into DIR/corpus.
-prepare_turbo_corpus() {
+# prepare_ndc_corpus DIR ARCHIVE SHA256 TIMEOUT_SECONDS
+# Downloads, verifies and unpacks an NDC corpus archive into DIR/corpus.
+prepare_ndc_corpus() {
   local dir="$1"
-  timeout --signal=TERM --kill-after=5s "${TURBO_CORPUS_TIMEOUT_SECONDS}s" \
-    bash -s -- "$dir" "$TURBO_DATASET_REVISION" "$TURBO_DATASET_DATE" \
-      "$TURBO_SHARD_0000_SHA256" "$TURBO_SHARD_0001_SHA256" <<'PREPARE_TURBO_CORPUS'
+  local archive="$2"
+  local sha256="$3"
+  local timeout_seconds="$4"
+  timeout --signal=TERM --kill-after=5s "${timeout_seconds}s" \
+    bash -s -- "$dir" "$archive" "$sha256" <<'PREPARE_NDC_CORPUS'
 set -euo pipefail
 dir="$1"
-revision="$2"
-dataset_date="$3"
-sha256_0000="$4"
-sha256_0001="$5"
-base_url="https://raw.githubusercontent.com/r2rationality/turbocardano/${revision}/experiment/plutus-benchmark/${dataset_date}"
-for shard in 0000 0001; do
-  curl --fail --silent --show-error --location --retry 3 \
-    -o "${dir}/dataset.tar.${shard}.xz" "${base_url}/dataset.tar.${shard}.xz"
-done
-echo "${sha256_0000}  ${dir}/dataset.tar.0000.xz" | sha256sum --check --strict
-echo "${sha256_0001}  ${dir}/dataset.tar.0001.xz" | sha256sum --check --strict
+archive="$2"
+sha256="$3"
+base_url="https://pub-2239d82d9a074482b2eb2c886191cb4e.r2.dev"
+curl --fail --silent --show-error --location --retry 3 \
+  -o "${dir}/${archive}" "${base_url}/${archive}"
+echo "${sha256}  ${dir}/${archive}" | sha256sum --check --strict
 mkdir -p "${dir}/corpus"
-cat "${dir}/dataset.tar.0000.xz" "${dir}/dataset.tar.0001.xz" \
-  | tar -xJf - -C "${dir}/corpus"
-PREPARE_TURBO_CORPUS
+zstd -dc "${dir}/${archive}" | tar -xf - -C "${dir}/corpus"
+PREPARE_NDC_CORPUS
 }
 
 mkdir -p "$DIST_DIR"
@@ -209,17 +224,33 @@ run_generator "${prefix}-ledger-rules.json" ledger-rules "$LEDGER_GENERATOR_TIME
   -fixtures "${CONFORMANCE_DIR}/node-diversity-conformance/scenarios/ledger-rules/fixtures" \
   -output "${prefix}-ledger-rules.json"
 
-run_generator "${prefix}-uplc-conformance.json" uplc-conformance "$UPLC_GENERATOR_TIMEOUT_SECONDS" \
-  go run ./internal/uplcconformance/cmd \
-  -corpus "${CONFORMANCE_DIR}/amaru/crates/amaru-uplc/tests" \
-  -output "${prefix}-uplc-conformance.json"
-
+uplc_dir="$(mktemp -d)"
 turbo_dir="$(mktemp -d)"
-trap 'rm -rf "$turbo_dir"' EXIT
-if prepare_turbo_corpus "$turbo_dir" 2>"${turbo_dir}/prepare.log"; then
+trap 'rm -rf "$uplc_dir" "$turbo_dir"' EXIT
+if prepare_ndc_corpus "$uplc_dir" uplc-conformance.tar.zst "$UPLC_CORPUS_SHA256" \
+  "$UPLC_CORPUS_TIMEOUT_SECONDS" \
+  2>"${uplc_dir}/prepare.log"; then
+  run_generator "${prefix}-uplc-conformance.json" uplc-conformance "$UPLC_GENERATOR_TIMEOUT_SECONDS" \
+    go run ./internal/uplcconformance/cmd \
+    -corpus "${uplc_dir}/corpus" \
+    -output "${prefix}-uplc-conformance.json"
+else
+  prepare_status=$?
+  if [ "$prepare_status" -eq 124 ] || [ "$prepare_status" -eq 137 ]; then
+    prepare_error="UPLC corpus preparation exceeded its ${UPLC_CORPUS_TIMEOUT_SECONDS}s time limit (exit ${prepare_status})"
+  else
+    prepare_error="UPLC corpus could not be downloaded, verified or unpacked (exit ${prepare_status})"
+  fi
+  write_error_report "${prefix}-uplc-conformance.json" uplc-conformance \
+    "${prepare_error}: $(log_excerpt "${uplc_dir}/prepare.log")"
+fi
+
+if prepare_ndc_corpus "$turbo_dir" turbo.tar.zst "$TURBO_CORPUS_SHA256" \
+  "$TURBO_CORPUS_TIMEOUT_SECONDS" \
+  2>"${turbo_dir}/prepare.log"; then
   run_generator "${prefix}-uplc-turbo.json" uplc-turbo "$TURBO_GENERATOR_TIMEOUT_SECONDS" \
     go run ./internal/uplcconformance/turbocmd \
-    -corpus "${turbo_dir}/corpus/plutus-bench" \
+    -corpus "${turbo_dir}/corpus" \
     -samples "$TURBO_SAMPLES" \
     -max-programs "$TURBO_MAX_PROGRAMS" \
     -output "${prefix}-uplc-turbo.json"

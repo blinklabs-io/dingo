@@ -29,6 +29,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/safedecode"
+	"github.com/blinklabs-io/dingo/internal/txresponse"
 	"github.com/blinklabs-io/dingo/ledger"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -2160,9 +2161,9 @@ func leiosTxsFromBitmap(
 		if mask&(1<<uint(63-(idx%64))) == 0 {
 			continue
 		}
-		ret = append(ret, slices.Clone(tx))
+		ret = append(ret, tx)
 	}
-	return ret
+	return txresponse.Clone(ret)
 }
 
 func leiosAvailableTxsFromBitmap(

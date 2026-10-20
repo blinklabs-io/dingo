@@ -42,7 +42,7 @@ const (
 var turboVersionSuffix = regexp.MustCompile(`(?i)-v([123])(-p([0-9]+))?\.flat$`)
 
 type TurboReport struct {
-	SchemaVersion  string            `json:"schema_version"`
+	SchemaVersion  string            `json:"version"`
 	Scenario       string            `json:"scenario"`
 	GeneratedAt    string            `json:"generated_at"`
 	Implementation map[string]string `json:"implementation"`
@@ -63,10 +63,10 @@ type TurboBenchmark struct {
 	BudgetCPU       *int64   `json:"budget_cpu"`
 	BudgetMem       *int64   `json:"budget_mem"`
 	CPUUS           *float64 `json:"cpu_us"`
-	FlatUS          *float64 `json:"flat_us"`
 	MemBytes        *float64 `json:"mem_bytes"`
-	SizeBytes       int      `json:"size_bytes"`
-	Error           string   `json:"error,omitempty"`
+	FlatUS          *float64 `json:"-"`
+	SizeBytes       int      `json:"-"`
+	Error           string   `json:"-"`
 }
 
 type turboSample struct {
@@ -143,8 +143,7 @@ func GenerateTurboReport(
 		Scenario:      "uplc-turbo",
 		GeneratedAt:   generatedAt.UTC().Format(time.RFC3339),
 		Implementation: map[string]string{
-			"name":     "dingo",
-			"language": "Go",
+			"name": "dingo",
 		},
 		Machine: TurboMachine{
 			OS:           runtime.GOOS,
@@ -163,14 +162,12 @@ func GenerateTurboReport(
 			}
 			failure := turboBenchmarkError(tc, fmt.Errorf("read CBOR-wrapped Flat program: %w", err))
 			benchmarkErrors = append(benchmarkErrors, failure)
-			report.Benchmarks = append(report.Benchmarks, failedTurboBenchmark(tc, 0, failure))
 			continue
 		}
 		measurements, err := measureTurboCase(tc, programBytes, samples)
 		if err != nil {
 			failure := turboBenchmarkError(tc, err)
 			benchmarkErrors = append(benchmarkErrors, failure)
-			report.Benchmarks = append(report.Benchmarks, failedTurboBenchmark(tc, len(programBytes), failure))
 			continue
 		}
 		benchmark, err := makeTurboBenchmark(
@@ -181,7 +178,6 @@ func GenerateTurboReport(
 		if err != nil {
 			failure := turboBenchmarkError(tc, err)
 			benchmarkErrors = append(benchmarkErrors, failure)
-			report.Benchmarks = append(report.Benchmarks, failedTurboBenchmark(tc, len(programBytes), failure))
 			continue
 		}
 		report.Benchmarks = append(report.Benchmarks, benchmark)
@@ -210,16 +206,6 @@ func readTurboProgram(path string) ([]byte, error) {
 	return program, nil
 }
 
-func failedTurboBenchmark(tc turboCase, size int, err error) TurboBenchmark {
-	return TurboBenchmark{
-		Bench:           tc.name,
-		PlutusVersion:   tc.group,
-		ProtocolVersion: fmt.Sprintf("%d.0", tc.protocolMajor),
-		SizeBytes:       size,
-		Error:           err.Error(),
-	}
-}
-
 func turboBenchmarkError(tc turboCase, err error) error {
 	if pathErr, ok := errors.AsType[*os.PathError](err); ok {
 		err = pathErr.Err
@@ -242,6 +228,7 @@ func protocolMajorForEpoch(epoch int) int {
 
 func discoverTurboCases(root string) ([]turboCase, error) {
 	var cases []turboCase
+	benchmarkPaths := map[string]string{}
 	err := filepath.WalkDir(
 		root,
 		func(path string, entry os.DirEntry, walkErr error) error {
@@ -278,6 +265,16 @@ func discoverTurboCases(root string) ([]turboCase, error) {
 					return fmt.Errorf("turbo program has an invalid protocol version suffix: %s", path)
 				}
 			}
+			name := filepath.Base(path)
+			if previous, ok := benchmarkPaths[name]; ok {
+				return fmt.Errorf(
+					"duplicate benchmark ID %q in %q and %q",
+					name,
+					previous,
+					relativePath,
+				)
+			}
+			benchmarkPaths[name] = relativePath
 			version := lang.LanguageVersionV1
 			switch versionNumber {
 			case "2":
@@ -286,10 +283,8 @@ func discoverTurboCases(root string) ([]turboCase, error) {
 				version = lang.LanguageVersionV3
 			}
 			cases = append(cases, turboCase{
-				path: path,
-				name: filepath.ToSlash(
-					strings.TrimPrefix(path, root+string(filepath.Separator)),
-				),
+				path:          path,
+				name:          name,
 				version:       version,
 				group:         "V" + versionNumber,
 				protocolMajor: protocolMajor,

@@ -127,6 +127,23 @@ func (n *Node) chainsyncApplyEligible(
 	return n.chainSelector.ShouldApplyIngress(connId)
 }
 
+func (n *Node) chainsyncPrepareForecastWitness(
+	update chainselection.PeerTipUpdateEvent,
+) []ouroboros.ConnectionId {
+	if n.chainSelector == nil {
+		return nil
+	}
+	return n.chainSelector.PrepareForecastHorizonWitness(update)
+}
+
+func (n *Node) chainsyncRemoveForecastWitness(
+	update chainselection.PeerTipUpdateEvent,
+) {
+	if n.chainSelector != nil {
+		n.chainSelector.RemoveForecastHorizonWitness(update)
+	}
+}
+
 // chainsyncAwaitEagerness pauses a peer's header stream while its next header
 // is past the Limit on Eagerness. With no chain selector wired it never waits.
 func (n *Node) chainsyncAwaitEagerness(

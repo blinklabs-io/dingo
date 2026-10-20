@@ -4074,7 +4074,12 @@ remain included because the block budget constrains declared execution, not the
 UTxO outcome. Negative values and checked-add overflow fail closed. The forging
 selector uses the same transaction-wide declared-budget helper, so it cannot
 construct a candidate that inbound envelope validation would reject on that
-block-wide budget.
+block-wide budget. A block that skips the envelope validator because
+`ValidateHistorical: false` places it below the stability cutoff still has the
+aggregate `MaxBlockExUnits` budget enforced in `ledgerProcessBlock`, since
+per-transaction validation never checks the block-wide sum. `TrustedReplay`
+input and blocks inside an imported Mithril snapshot's certified range are
+exempt.
 
 A header or block may not belong to an earlier era than the block it extends
 (`chain.ErrEraRegression`). The hard-fork combinator only moves a chain's
@@ -4093,6 +4098,23 @@ signature and may share its parent's block number, could extend a post-Byron
 block on any network.
 
 During accepted block replay, Alonzo-and-newer validation runs the UTXO/Phase 1 rule set and keeps declared ExUnit limit checks. Plutus Phase 2 execution now always runs whenever per-tx validation runs at all, including for blocks at or before the immutable tip: the previous shortcut that trusted the block producer's `isValid` flag as authoritative for those blocks fired more broadly than intended -- on ordinary `ValidateHistorical=false` catch-up, not only a trusted-chain-dump import -- and was removed rather than narrowed. Volatile block replay, local transaction validation for mempool submission, and forging continue to run Plutus execution as before.
+
+`dingo load` replays blocks that never passed chainsync admission, so no header check has run on them. It sets `LedgerStateConfig.VerifyReplayHeaders`, which makes ledger apply treat every block outside Mithril-covered slots as a deferred header: `verifyDeferredBlockHeaderState` runs the full VRF, KES, operational-certificate and leader-eligibility check against the epoch nonce and stake snapshot for the block's own epoch, advancing the epoch cache across boundaries, before any mutation of the block. A failure fails closed: the batch transaction rolls back and load stops with the header error. The chain is also rewound to the ledger tip when that tip precedes the rejected block and the rollback stays above the Mithril boundary; otherwise the chain is left in place and the error still stops the load. Under manual block processing there is no pipeline loop to restart, so every recovery that rewinds a rejected block, including epoch-boundary, Leios and transaction-validation rejections, returns the rejection wrapped with `errRestartLedgerPipeline` rather than the bare sentinel. Byron blocks take the PBFT path instead of the Praos checks: their signature, genesis-delegate issuer, protocol magic and slot bound are verified, with no epoch nonce or stake lookup. Verification adds per-block cryptographic cost to bulk load.
+
+Replay chunks verify Praos header cryptography with at most eight workers,
+overlapping ordered application only for slots with a known epoch nonce.
+Input bindings and lazy header hashes are prepared before workers start inside
+the apply callback. Each batch-owned result is bound to
+the original header and body CBOR, directly read KES and operational-certificate
+fields, epoch nonce and KES parameters. Apply resolves the epoch again before
+waiting for and using a matching result; an absent or changed result takes the ordinary full
+verifier. Producer registration, stake and leader eligibility remain ordered
+apply-time checks. Receipts are consumed only while replay verification is enabled.
+Unknown epoch nonces and Byron PBFT headers stay on that
+ordered path. All workers drain before the apply callback returns, including
+after cancellation or failure, so none outlive commit or rollback. Cancellation
+does not classify a header as invalid. Verifier panics reach the existing
+apply-transaction recovery.
 
 Trusted immutable replay reduces repeated work without weakening that validation.
 It prefetches each committed chunk's referenced UTxOs and retains bounded
@@ -5429,6 +5451,10 @@ corroborated and becomes that connection's own reference, like a known peer's
 previous frontier: its next update is accepted within `securityParam` of its
 claim even when the corroborating frontier sits up to `securityParam` below
 it, and the entry is cleared once the connection is accepted.
+The stale-reference recovery also applies when the tracked reference is ahead
+of the local tip but still within the same `localTip + 2*securityParam`
+catch-up ceiling; a snapshot-backed local tip can lag its delivered peer
+references without making those references current enough to rule out catch-up.
 A delivered frontier beyond the catch-up allowance is not rejected outright.
 `checkPeerTipPlausibleLocked` holds bounded far-tip evidence per connection. A
 far frontier is supported by another distinct connection within
@@ -5954,8 +5980,16 @@ it. Dingo implements this as a **corroboration gate**
   until those parameters are applied. A header past the forecast horizon
   (`ledger.ErrHeaderBeyondForecastHorizon`),
   which ChainSync admission holds back until the ledger can forecast its slot,
-  so it never counts for selection, Genesis density, or corroboration before
-  it can be validated. A header whose
+  never counts for selection, Genesis density, eagerness, or ledger admission
+  before it can be validated. While the per-peer callback waits, its connected
+  point may exist in a separate corroboration-only view. That point can confirm
+  an independently verified staged candidate only when the slot and hash match
+  exactly. The selector then re-intersects the verified candidate's connection
+  so its withheld header is delivered again through the ordinary verification
+  and admission path, allowing ledger progress to move the forecast horizon.
+  The temporary witness is removed when the wait ends and is never promoted.
+  This avoids an empty-queue bootstrap deadlock without making an unverified
+  header selectable or applicable. A header whose
   point (slot and hash) is on the chain (`Chain.HoldsPoint`) at or below the
   ledger tip returns success without re-verification: it was fully verified
   when applied, and re-judging it against pool snapshots the 3-epoch
@@ -6495,6 +6529,15 @@ Four rules shape the deferred-header path beyond the marker itself.
 - **Peer attribution.** The deferred marker records the connection that supplied the block; persistence retains only its remote address. When apply-time validation rejects the block with a verdict on the block itself, rather than a gap in local state, recovery publishes a `ChainsyncResyncEvent` with reason `deferred header validation failure`. Live in-memory attribution lets the chainsync handler clear and close that exact connection as well as deny its remote address for the divergent-peer cooldown. After restart, the restored remote address still supports the cooldown, but does not identify the original connection lifetime for targeted history cleanup or closure.
 
 Header state verification resolves the producing pool's electing stake snapshot row once per header (`resolveElectingSnapshot`) for both the VRF-key cutoff and the leader stake.
+
+#### Leios-fetch Transaction Response Ownership
+
+Leios-fetch transaction responses copy their selected raw transaction bytes
+into a response-owned buffer through `internal/txresponse`. Each transaction
+view has its capacity capped at its own length, so appending cannot overwrite
+another transaction. The response retains only its selected bytes, independently
+of the cached closure. The storage benchmark uses the same response-copy routine
+for its cached-read model.
 
 #### Leios CertRB Serving (NtC)
 
@@ -9975,7 +10018,8 @@ before any hard-fork translation, as the live rollover does.
 Historical block validation before the stable anchor is controlled
 independently. With `ValidateHistorical: true` (the default), ledger replay
 validates the complete from-origin replay. Setting it to `false` is an explicit
-operator choice to trust the selected peer/intersection for older blocks;
+operator choice to trust the selected peer/intersection for older blocks, apart
+from the aggregate `MaxBlockExUnits` budget, which is still enforced;
 certificate verification of a Mithril artifact is not a substitute for future
 network-block validation.
 
@@ -11101,15 +11145,23 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
 - **Dingo:** read directly from Dingo's metadata database during the `check`
   phase — no HTTP endpoint on the Dingo node is contacted. Three backends are
   supported (`sqlite`, `postgres`, `mysql`), resolved with the same precedence
-  Dingo's own process uses: `--metadata-plugin`/`--metadata-dsn` (explicit
-  overrides) fall back to Dingo's own resolved `plugins.storage.metadata`
+  Dingo's own process uses: `--metadata-plugin`/`--metadata-dsn` or
+  `--metadata-dsn-file` (explicit overrides) fall back to Dingo's own resolved `plugins.storage.metadata`
   selection — loaded via `internal/config.LoadConfig` (`--dingo-config`, or the
   same `~/.dingo/dingo.yaml`/`/etc/dingo/dingo.yaml` search Dingo itself does),
   which applies `DINGO_PLUGINS_STORAGE_METADATA_PROVIDER`/`_CONFIG_*` the same
   way the real node does — then default to `sqlite`. The data directory
   likewise falls back through `--dingo-data`/`DINGO_DATA_DIR` (koios-parity-only
   overrides) to Dingo's resolved `DatabasePath` (`CARDANO_DATABASE_PATH` or
-  `dingo.yaml`), then `.dingo`.
+  `dingo.yaml`), then `.dingo`. Dingo's configuration is loaded only for a
+  value the flags leave unset: the backend when `--metadata-plugin` is absent,
+  the DSN of a `postgres`/`mysql` backend when neither DSN flag is passed (a
+  DSN flag passed empty still counts as set and clears the configured DSN),
+  and the data directory of a `sqlite` backend when `--dingo-data` and
+  `DINGO_DATA_DIR` are absent. Only `sqlite` reads the data directory. If the
+  configuration is needed and fails to load (for example a plugin `_FILE`
+  variable naming a missing file), the command fails rather than falling back
+  to defaults, which would inspect a different database.
   - `sqlite`: opens `{data-dir}/metadata.sqlite` in read-only WAL mode
   - `postgres` / `mysql`: a `dsn` config field is used verbatim; otherwise a
     DSN is assembled from discrete host/port/user/password/database/sslMode/
@@ -14342,6 +14394,31 @@ The `api.tls` shared defaults (`--api-tls-mode`/`DINGO_API_TLS_MODE`/
 security" under External Interfaces) participate in this same CLI >
 environment > YAML > defaults source precedence like any other `Config` field.
 
+A secret can be supplied from a file instead of a literal value, so it need
+not appear in a process listing or environment. `koiosParity.apiKeyFile`
+(`DINGO_KOIOS_PARITY_API_KEY_FILE`, `--koios-parity-api-key-file`) pairs with
+`koiosParity.apiKey`, and any generic plugin config field accepts a
+`DINGO_PLUGINS_<CAPABILITY>_CONFIG_<FIELD>_FILE` variable. The file must be a
+regular file of at most 64 KiB whose contents are not blank, and on Unix other
+users must have no access to it (`internal/secretfile` rejects mode bits
+`0o007`). Owner and group access is allowed, unlike a signing key: an
+orchestrator commonly grants the group, as a Kubernetes secret volume with mode
+`0440` and an `fsGroup` does. On Windows it applies the key file ACL check,
+which is stricter: the ACL may grant access only to the owner, Administrators,
+SYSTEM, CREATOR OWNER and OWNER RIGHTS, so group access fails there.
+Its contents are used as a plain string, never parsed as YAML,
+with trailing line endings removed. A literal and its file form are one
+setting: a higher-precedence source setting either replaces both, and one
+source setting both fails startup.
+Presence counts as set, even when empty: a YAML key, a defined environment
+variable, or a flag passed on the command line.
+`LoadConfig` reads plugin `_FILE` variables; `Config.ResolveSecretFiles` reads
+the remaining file paths once every source is merged and clears them. The
+`koios-parity` tool offers `--api-key-file`/`KOIOS_API_KEY_FILE` and
+`--metadata-dsn-file` beside its literal forms, and `node-parity from-genesis`
+offers `--koios-api-key-file`; both use `secretfile.Resolve` for the same
+both-set rule.
+
 `LoadConfig` (`internal/config`) only parses and merges the YAML and
 environment sources; it makes no semantic judgments about the merged values,
 because CLI flags are a higher-precedence source merged afterwards by
@@ -14355,7 +14432,7 @@ passed. `RecordSourceProvenance` runs as its own step rather than inside
 `*Config` that `LoadConfig` returns against a hand-built struct literal, and
 a literal cannot populate an unexported field.
 
-Immediately after `ApplyFlags`, `cmd/dingo` calls `settingsresolve.Apply(cfg)`
+After `ApplyFlags` and `Config.ResolveSecretFiles`, `cmd/dingo` calls `settingsresolve.Apply(cfg)`
 (`internal/settingsresolve`), which lets a data directory's already-persisted
 node settings supply the effective value for any override-eligible gate
 (`database/nodesettings.Gates`) the operator left at its built-in default —

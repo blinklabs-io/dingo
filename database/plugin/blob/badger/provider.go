@@ -91,6 +91,9 @@ func RegisterProvider(host *hostplugin.Host) error {
 			if deps.StorageMode == "core" && deps.RunMode == "sync" {
 				valueThreshold = DefaultCoreSyncValueThreshold
 			}
+			if deps.StorageMode == "core" && deps.RunMode == "leios" {
+				valueThreshold = DefaultCoreLeiosValueThreshold
+			}
 			if cfg.ValueThreshold != nil {
 				valueThreshold = *cfg.ValueThreshold
 			}

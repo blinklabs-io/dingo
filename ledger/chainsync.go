@@ -1311,6 +1311,14 @@ func (ls *LedgerState) verifyDeferredBlockHeaderState(
 	if err != nil {
 		return err
 	}
+	// A check that only VerifyReplayHeaders forces has no marker to clear,
+	// so it skips the per-block blob delete. Blocks below the eviction floor
+	// are already required above and still take the clear.
+	markerRequired := required
+	if !required && ls.config.VerifyReplayHeaders &&
+		!ls.slotCoveredByMithril(point.Slot) {
+		required = true
+	}
 	if !required {
 		return nil
 	}
@@ -1320,6 +1328,10 @@ func (ls *LedgerState) verifyDeferredBlockHeaderState(
 	if err := ls.verifyBlockHeaderCryptoWithEpochAdvance(
 		ctx, block, true, false,
 	); err != nil {
+		if errors.Is(err, context.Canceled) ||
+			errors.Is(err, context.DeadlineExceeded) {
+			return err
+		}
 		// Typed so the pipeline can rewind past this block instead of
 		// restarting onto it forever: the block is already persisted, so
 		// this failure is deterministic rather than transient. The block is
@@ -1333,6 +1345,9 @@ func (ls *LedgerState) verifyDeferredBlockHeaderState(
 			),
 			Source: source,
 		}
+	}
+	if !markerRequired {
+		return nil
 	}
 	if err := ls.clearPersistentDeferredHeaderValidation(point, txn); err != nil {
 		return err
@@ -5421,6 +5436,7 @@ func (ls *LedgerState) awaitForecastHorizon(
 	e ChainsyncEvent,
 ) error {
 	logged := false
+	witnessPublished := false
 	for {
 		published := ls.snapshotPublishedChan()
 		if !ls.headerBeyondForecastHorizon(ctx, e) {
@@ -5428,6 +5444,10 @@ func (ls *LedgerState) awaitForecastHorizon(
 		}
 		if ls.chainsyncHeaderDisconnected(ctx, e) {
 			return ErrChainsyncHeaderDisconnected
+		}
+		if !witnessPublished && e.ForecastHorizonWait != nil {
+			e.ForecastHorizonWait()
+			witnessPublished = true
 		}
 		if !logged && ls.config.Logger != nil {
 			ls.config.Logger.Debug(
