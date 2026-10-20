@@ -62,7 +62,7 @@ var ErrExtractUnexpectedMember = errors.New(
 const (
 	// maxArchiveEntries bounds the tar entries of one archive. Directories and
 	// empty files count: they cost inodes while adding nothing to the byte
-	// budget. A full v1 snapshot holds three files per immutable, about
+	// budget. A full database holds three files per immutable, about
 	// 40,000 entries on mainnet today.
 	maxArchiveEntries = 1 << 20
 

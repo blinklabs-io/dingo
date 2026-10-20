@@ -72,6 +72,10 @@ type Index struct {
 	Table string
 	// Columns is the ordered SQL column list.
 	Columns []string
+	// Where, when set, makes the index partial: a predicate over plain
+	// column names that the rebuild appends as the index's WHERE clause.
+	// MySQL has no partial indexes and builds the full index instead.
+	Where string
 	// Notes documents why this index is safe to defer. Surfaces
 	// in the manifest test failure message when the
 	// classification is questioned.
@@ -150,16 +154,19 @@ var Manifest = []Index{
 	{
 		Name: "idx_utxo_spent_at_tx_id", Table: "utxo",
 		Columns: []string{"spent_at_tx_id"},
+		Where:   "spent_at_tx_id IS NOT NULL",
 		Notes:   "Consumer transaction lookup and rollback repair", Critical: true,
 	},
 	{
 		Name: "idx_utxo_referenced_by_tx_id", Table: "utxo",
 		Columns: []string{"referenced_by_tx_id"},
+		Where:   "referenced_by_tx_id IS NOT NULL",
 		Notes:   "Reference-input lookup and rollback repair", Critical: true,
 	},
 	{
 		Name: "idx_utxo_collateral_by_tx_id", Table: "utxo",
 		Columns: []string{"collateral_by_tx_id"},
+		Where:   "collateral_by_tx_id IS NOT NULL",
 		Notes:   "Collateral lookup and rollback repair", Critical: true,
 	},
 	{

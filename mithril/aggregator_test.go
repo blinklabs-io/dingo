@@ -277,7 +277,7 @@ func (f *aggregatorFixture) verifyChain(
 ) *CertificateChainVerificationResult {
 	f.t.Helper()
 	result, err := VerifyCertificateChainWithMode(
-		context.Background(), f.client, certHash, "", VerificationModeSTM,
+		context.Background(), f.client, certHash, VerificationModeSTM,
 	)
 	require.NoError(f.t, err)
 	require.NoError(f.t, VerifyGenesisCertificateSignature(

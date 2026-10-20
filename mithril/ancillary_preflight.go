@@ -49,11 +49,15 @@ func readVerifiedAncillaryManifest(
 		return nil, nil, fmt.Errorf("creating ancillary preflight reader: %w", err)
 	}
 	defer zr.Close()
-	tr := tar.NewReader(&expansionReader{
-		reader: zr,
-		read:   &countingFile.read,
-		ratio:  maxExpansionRatio,
-		floor:  expansionFloor,
+	tr := tar.NewReader(&archiveStreamReader{
+		ctx: ctx,
+		reader: &expansionReader{
+			reader: zr,
+			read:   &countingFile.read,
+			ratio:  maxExpansionRatio,
+			floor:  expansionFloor,
+		},
+		maxBytes: archiveStreamLimit(ancillaryExpandedMaxBytes, maxAncillaryEntries),
 	})
 	var entries int
 	var expanded int64
