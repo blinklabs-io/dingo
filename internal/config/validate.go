@@ -137,7 +137,7 @@ var AcceptedChainsyncStrategies = []string{
 // empty string (which selects the default v2), matching cmd/dingo's
 // resolveMithrilBackend. Kept in sync by the same parity test in
 // cmd/dingo as AcceptedChainsyncStrategies.
-var AcceptedMithrilBackends = []string{"", "v1", "v2"}
+var AcceptedMithrilBackends = []string{"", "v2"}
 
 // FullPotRewardsStandardNetwork reports whether network/networkMagic identifies
 // a predefined non-devnet network where CIP-0163 full-pot rewards must not be
@@ -919,9 +919,14 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 	// AcceptedMithrilBackends, kept in sync with cmd/dingo's
 	// resolveMithrilBackend by a parity test in cmd/dingo (empty
 	// selects v2).
-	if !slices.Contains(AcceptedMithrilBackends, c.Mithril.Backend) {
+	if c.Mithril.Backend == "v1" {
+		errs = append(errs, errors.New(
+			"mithril.backend \"v1\" is no longer supported; "+
+				"remove the setting or use \"v2\"",
+		))
+	} else if !slices.Contains(AcceptedMithrilBackends, c.Mithril.Backend) {
 		errs = append(errs, fmt.Errorf(
-			"invalid mithril.backend %q: must be \"v1\" or \"v2\"",
+			"invalid mithril.backend %q: must be empty or \"v2\"",
 			c.Mithril.Backend,
 		))
 	}
@@ -987,6 +992,47 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 						"uses a non-loopback bindAddr",
 				))
 			}
+		}
+	}
+	// Node-managed Mithril sync runs only inside a serving node, so the
+	// one-shot `dingo mithril sync` and `dingo sync --mithril` paths are
+	// not gated by these settings.
+	if c.Mithril.Enabled && effectiveMode.RequiresListeners() {
+		if c.StorageMode == storageModeAPI {
+			errs = append(errs, errors.New(
+				"mithril.enabled requires core storage mode",
+			))
+		}
+		if c.Mithril.BatchChunks < 1 {
+			errs = append(errs, fmt.Errorf(
+				"invalid mithril.batchChunks %d: must be at least 1",
+				c.Mithril.BatchChunks,
+			))
+		}
+		if c.Mithril.WindowChunks < c.Mithril.BatchChunks {
+			errs = append(errs, fmt.Errorf(
+				"invalid mithril.windowChunks %d: must be at least "+
+					"mithril.batchChunks (%d)",
+				c.Mithril.WindowChunks, c.Mithril.BatchChunks,
+			))
+		}
+		if c.Mithril.DownloadWorkers < 1 {
+			errs = append(errs, fmt.Errorf(
+				"invalid mithril.downloadWorkers %d: must be at least 1",
+				c.Mithril.DownloadWorkers,
+			))
+		}
+		if c.Mithril.CheckInterval <= 0 {
+			errs = append(errs, fmt.Errorf(
+				"invalid mithril.checkInterval %s: must be positive",
+				c.Mithril.CheckInterval,
+			))
+		}
+		if c.Mithril.RetryBackoff <= 0 {
+			errs = append(errs, fmt.Errorf(
+				"invalid mithril.retryBackoff %s: must be positive",
+				c.Mithril.RetryBackoff,
+			))
 		}
 	}
 	if c.Mithril.DownloadMaxBytes < 0 {

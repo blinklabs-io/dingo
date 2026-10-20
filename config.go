@@ -249,6 +249,7 @@ type Config struct {
 	barkLifecycleOperatorCertificateFingerprints                                        []string
 	databaseLifecycle                                                                   internalconfig.DatabaseLifecycleConfig
 	historyExpiry                                                                       HistoryExpiryConfig
+	mithrilCatchUp                                                                      MithrilCatchUpFactory
 	koiosParity                                                                         KoiosParityConfig
 	corsAllowedOrigins                                                                  []string
 	networkMagic                                                                        uint32
@@ -1915,6 +1916,24 @@ func WithBarkLifecycleOperatorCertificateFingerprints(
 	return func(c *Config) {
 		c.cfg.BarkLifecycleOperatorCertificateFingerprints = slices.Clone(fingerprints)
 		c.barkLifecycleOperatorCertificateFingerprints = slices.Clone(fingerprints)
+	}
+}
+
+// WithMithrilConfig sets the Mithril configuration, including the
+// node-managed catch-up settings under mithril.enabled.
+func WithMithrilConfig(cfg internalconfig.MithrilConfig) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.Mithril = cfg
+	}
+}
+
+// WithMithrilCatchUp supplies the Mithril half of node-managed Mithril
+// catch-up. Run calls factory once; a nil MithrilCatchUp from it leaves the
+// node syncing from Ouroboros alone. Without this option the node never
+// contacts an aggregator, whatever mithril.enabled says.
+func WithMithrilCatchUp(factory MithrilCatchUpFactory) ConfigOptionFunc {
+	return func(c *Config) {
+		c.mithrilCatchUp = factory
 	}
 }
 

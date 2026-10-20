@@ -35,6 +35,13 @@ var errCatchUpLocalAhead = errors.New(
 	"local chain is ahead of the target Mithril artifact",
 )
 
+// ErrNotOnCertifiedChain reports a local chain whose tip is not on the chain
+// a Mithril certificate covers. Nothing certified can be applied on top of
+// it; the caller must leave the database alone and sync from peers instead.
+var ErrNotOnCertifiedChain = errors.New(
+	"local chain is not on the certified Mithril chain",
+)
+
 // ErrRewardStateRepairWaitingForSnapshot means the selected certified state
 // does not reach the database's existing stable Mithril ledger point.
 var ErrRewardStateRepairWaitingForSnapshot = errors.New(
@@ -46,14 +53,14 @@ var ErrRewardStateRepairWaitingForSnapshot = errors.New(
 // loaded is then the tree the bootstrap accepted, not whatever holds its name
 // by the time the load runs.
 //
-// A result without that handle is refused rather than opened by pathname. Both
-// bootstrap paths set it, so a missing one means the result did not come from a
-// vetted lookup — and falling back would silently reinstate the name-resolved
+// A result without that handle is refused rather than opened by pathname. The
+// bootstrap always sets it, so a missing one means the result did not come from
+// a vetted lookup — and falling back would silently reinstate the name-resolved
 // open this exists to replace, which is the kind of downgrade nobody notices
 // until it matters.
 //
-// Where the result also carries per-file digests, every file is checked against
-// them as it is opened, from the descriptor the read then goes through. The
+// Every file is checked against the result's per-file digests as it is opened,
+// from the descriptor the read then goes through. The
 // handle and the digests answer different questions: the handle says the tip
 // read, the catch-up check and the blob copy are about the directory the
 // bootstrap vetted, and the digests say the bytes in it are the certified
@@ -61,15 +68,10 @@ var ErrRewardStateRepairWaitingForSnapshot = errors.New(
 // file of their own over a verified one — never leaving the directory the
 // handle refers to — and the copy loads what they wrote.
 //
-// v2 always carries them. v1 does not: it certifies one archive rather than the
-// files inside it, so after extraction there is nothing to re-check against and
-// its reads are bound to the directory alone.
-//
-// The absence of a map, not its emptiness, is what selects that unverified
-// read. A map that is present but empty is a v2 result that lost its digests,
-// and treating it as v1 would answer "verify nothing" to a question nobody
-// asked — reachable by removing something, which is the direction a fail-open
-// always comes from. NewFromRootVerified refuses it instead.
+// A result without digests is refused for the same reason: reading unverified
+// bytes would answer "verify nothing" to a question nobody asked, and a missing
+// map is the direction a fail-open always comes from. An empty map is refused
+// by NewFromRootVerified.
 func openBootstrappedImmutable(
 	result *BootstrapResult,
 ) (*immutable.ImmutableDb, error) {
@@ -80,15 +82,16 @@ func openBootstrappedImmutable(
 			result.ImmutableDir,
 		)
 	}
-	var imm *immutable.ImmutableDb
-	var err error
-	if result.ImmutableDigests != nil {
-		imm, err = immutable.NewFromRootVerified(
-			result.ImmutableRoot, result.ImmutableDigests, "",
+	if result.ImmutableDigests == nil {
+		return nil, fmt.Errorf(
+			"opening certified ImmutableDB %s: bootstrap result carries no "+
+				"certified file digests",
+			result.ImmutableDir,
 		)
-	} else {
-		imm, err = immutable.NewFromRoot(result.ImmutableRoot)
 	}
+	imm, err := immutable.NewFromRootVerified(
+		result.ImmutableRoot, result.ImmutableDigests, "",
+	)
 	if err != nil {
 		return nil, fmt.Errorf(
 			"opening certified ImmutableDB: %w", err,
@@ -199,8 +202,9 @@ func verifyCatchupIntersection(
 			"local chain diverges from the target Mithril v2 artifact at "+
 				"slot %d (local block %x; artifact has slot %d block %x); "+
 				"the existing database was left untouched because catch-up "+
-				"cannot safely reconcile divergent chains",
+				"cannot safely reconcile divergent chains: %w",
 			tip.Slot, tip.Hash, first.Slot, first.Hash,
+			ErrNotOnCertifiedChain,
 		)
 	}
 	logger.Info(
@@ -225,9 +229,24 @@ func verifyLocalAheadOfArtifactTip(
 	if artifactTip == nil {
 		return errors.New("catch-up: target immutable DB has no chain tip")
 	}
+	return verifyLocalDescendsFromArtifactTip(
+		ctx, db, localTip, *artifactTip, logger,
+	)
+}
+
+// verifyLocalDescendsFromArtifactTip classifies a local tip above the last
+// certified block: errCatchUpLocalAhead when that block is an ancestor of the
+// local tip, an error wrapping ErrNotOnCertifiedChain when it is not.
+func verifyLocalDescendsFromArtifactTip(
+	ctx context.Context,
+	db *database.Database,
+	localTip models.Block,
+	artifactTip ocommon.Point,
+	logger *slog.Logger,
+) error {
 	containsArtifactTip, err := localChainDescendsFromPoint(
 		ctx,
-		db, localTip, *artifactTip,
+		db, localTip, artifactTip,
 	)
 	if err != nil {
 		return fmt.Errorf("checking local chain ancestry: %w", err)
@@ -246,8 +265,9 @@ func verifyLocalAheadOfArtifactTip(
 			"slot %d (local tip slot %d block %x; artifact tip block %x "+
 			"is not an ancestor of the local tip); the existing database was "+
 			"left untouched because catch-up cannot safely reconcile divergent "+
-			"chains",
+			"chains: %w",
 		artifactTip.Slot, localTip.Slot, localTip.Hash, artifactTip.Hash,
+		ErrNotOnCertifiedChain,
 	)
 }
 

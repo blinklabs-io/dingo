@@ -4038,7 +4038,9 @@ func TestCheckAndForgeProductionCertifiesLeiosEBAfterAdoption(t *testing.T) {
 				require.NotEmpty(t, leiosCaster.hash)
 				require.Equal(
 					t,
-					[][]byte{makeMinimalTxCbor(t, 0x22, 0)},
+					[][]byte{blockTxFromMempool(
+						t, makeMinimalTxCbor(t, 0x22, 0),
+					)},
 					leiosCaster.txBodies,
 				)
 			} else {

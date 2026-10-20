@@ -15,12 +15,22 @@
 package mesh
 
 import (
+	"bytes"
+	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"math/big"
 	"net/http"
+	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
+	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/mary"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
@@ -600,5 +610,402 @@ func TestAccountBalanceHonorsAdvertisedCapability(t *testing.T) {
 	}
 	requireMeshError(
 		t, rec, ErrNotImplemented, http.StatusNotImplemented,
+	)
+}
+
+// cursorPager serves utxos in order through UtxosByAddressBoundedPage,
+// honoring the cursor, row limit and byte budget the way the database does:
+// the first match always fits, and Next is nil only once the set is exhausted.
+func cursorPager(
+	t *testing.T,
+	utxos []models.Utxo,
+	calls *[]pageCall,
+) func(
+	context.Context,
+	*models.UtxoWithOrderingQuery,
+	int,
+	int64,
+) (models.UtxoAddressPage, error) {
+	t.Helper()
+	return func(
+		_ context.Context,
+		q *models.UtxoWithOrderingQuery,
+		maxCandidates int,
+		maxBytes int64,
+	) (models.UtxoAddressPage, error) {
+		*calls = append(*calls, pageCall{
+			limit: q.Limit, maxCandidates: maxCandidates,
+			maxBytes: maxBytes, after: q.After,
+		})
+		start := 0
+		if q.After != nil {
+			for i := range utxos {
+				if int(utxos[i].OutputIdx) == int(q.After.OutputIdx) {
+					start = i + 1
+				}
+			}
+		}
+		var page models.UtxoAddressPage
+		var retained int64
+		for i := start; i < len(utxos); i++ {
+			size := int64(len(utxos[i].Cbor))
+			if len(page.Utxos) == q.Limit ||
+				(len(page.Utxos) > 0 && retained+size > maxBytes) {
+				return page, nil
+			}
+			retained += size
+			page.Utxos = append(
+				page.Utxos, models.UtxoWithOrdering{Utxo: utxos[i]},
+			)
+			page.Next = &models.UtxoOrderingCursor{
+				OutputIdx: utxos[i].OutputIdx, TxId: utxos[i].TxId,
+			}
+		}
+		page.Next = nil
+		return page, nil
+	}
+}
+
+type pageCall struct {
+	limit         int
+	maxCandidates int
+	maxBytes      int64
+	after         *models.UtxoOrderingCursor
+}
+
+func TestAccountCoinsPassesRequestContextToLedger(t *testing.T) {
+	t.Parallel()
+
+	deps := newTestDeps()
+	addr := testAddress(
+		t, lcommon.AddressTypeKeyNone, testKeyHash(0x31), nil,
+	)
+	ctxErr := make(chan error, 1)
+	deps.ledger.boundedPage = func(
+		ctx context.Context,
+		_ *models.UtxoWithOrderingQuery,
+		_ int,
+		_ int64,
+	) (models.UtxoAddressPage, error) {
+		ctxErr <- ctx.Err()
+		return models.UtxoAddressPage{}, ctx.Err()
+	}
+	h := newTestHandler(t, deps)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	raw, err := json.Marshal(coinsRequest(addr))
+	require.NoError(t, err)
+	req := httptest.NewRequestWithContext(
+		ctx, http.MethodPost, "/account/coins", bytes.NewReader(raw),
+	)
+	h.ServeHTTP(httptest.NewRecorder(), req)
+
+	got := testutil.RequireReceive(
+		t, ctxErr, 5*time.Second, "ledger read to start",
+	)
+	require.ErrorIs(
+		t, got, context.Canceled,
+		"the ledger read must run under the request context",
+	)
+}
+
+func TestAccountCoinsPagesWithinBudgets(t *testing.T) {
+	t.Parallel()
+
+	deps := newTestDeps()
+	key := testKeyHash(0x32)
+	addr := testAddress(t, lcommon.AddressTypeKeyNone, key, nil)
+	out := testOutput(t, addr, 1_000_000)
+	outCbor, err := cbor.Encode(&out)
+	require.NoError(t, err)
+	size := int64(len(outCbor))
+	var utxos []models.Utxo
+	for i := range 7 {
+		u := testUtxo(testHash(0x40), uint32(i), 1_000_000, key, nil)
+		u.Cbor = outCbor
+		utxos = append(utxos, u)
+	}
+	var calls []pageCall
+	deps.ledger.boundedPage = cursorPager(t, utxos, &calls)
+	h := newTestHandler(t, deps, func(c *ServerConfig) {
+		c.accountCoinsPageSize = 3
+		c.accountCoinsMaxCandidates = 11
+		// Two outputs fit, a third does not: the byte budget cuts pages
+		// before the row limit does.
+		c.accountCoinsMaxBytes = 2*size + 1
+	})
+
+	var seen []string
+	var cursor any
+	pages := 0
+	for {
+		req := coinsRequest(addr)
+		req.Metadata = map[string]any{"paginate": true}
+		if cursor != nil {
+			req.Metadata["cursor"] = cursor
+		}
+		resp := decodeResponse[AccountCoinsResponse](
+			t, postJSON(t, h, "/account/coins", req),
+		)
+		pages++
+		require.LessOrEqual(t, len(resp.Coins), 2)
+		for _, c := range resp.Coins {
+			seen = append(seen, c.CoinIdentifier.Identifier)
+		}
+		next, more := resp.Metadata["next_cursor"]
+		if !more {
+			break
+		}
+		require.NotEmpty(t, next)
+		cursor = next
+		require.Less(t, pages, 20, "cursor must advance")
+	}
+
+	var want []string
+	for i := range utxos {
+		want = append(
+			want, fmt.Sprintf("%s:%d", hexString(utxos[i].TxId), i),
+		)
+	}
+	require.Equal(
+		t, want, seen,
+		"continuation must return every coin once, in order",
+	)
+	require.Equal(t, 4, pages)
+	for _, c := range calls {
+		require.Equal(t, 3, c.limit)
+		require.Equal(t, 11, c.maxCandidates)
+		require.Equal(t, 2*size+1, c.maxBytes)
+	}
+	require.Nil(t, calls[0].after)
+	require.NotNil(t, calls[1].after)
+}
+
+// TestAccountCoinsStandardRequestIsCompleteOrRefused pins the response a
+// client that does not opt into paging receives: every coin of the address
+// when one bounded read exhausts it, otherwise a limit error naming the
+// opt-in, and never a partial coin list.
+func TestAccountCoinsStandardRequestIsCompleteOrRefused(t *testing.T) {
+	t.Parallel()
+
+	key := testKeyHash(0x34)
+	addr := testAddress(t, lcommon.AddressTypeKeyNone, key, nil)
+	utxosOf := func(n int) []models.Utxo {
+		var utxos []models.Utxo
+		for i := range n {
+			utxos = append(
+				utxos,
+				testUtxo(testHash(0x41), uint32(i), 1_000_000, key, nil),
+			)
+		}
+		return utxos
+	}
+	serve := func(t *testing.T, n int) *httptest.ResponseRecorder {
+		t.Helper()
+		deps := newTestDeps()
+		var calls []pageCall
+		deps.ledger.boundedPage = cursorPager(t, utxosOf(n), &calls)
+		h := newTestHandler(t, deps, func(c *ServerConfig) {
+			c.accountCoinsPageSize = 3
+		})
+		return postJSON(t, h, "/account/coins", coinsRequest(addr))
+	}
+
+	t.Run("fits one read", func(t *testing.T) {
+		t.Parallel()
+		resp := decodeResponse[AccountCoinsResponse](t, serve(t, 3))
+		require.Len(t, resp.Coins, 3)
+		require.NotContains(t, resp.Metadata, "next_cursor")
+	})
+	t.Run("exceeds one read", func(t *testing.T) {
+		t.Parallel()
+		got := requireMeshError(
+			t, serve(t, 4), ErrInvalidRequest, http.StatusBadRequest,
+		)
+		require.Contains(t, got.Details["error"], "metadata.paginate")
+	})
+}
+
+func TestAccountCoinsRejectsNonBooleanPaginate(t *testing.T) {
+	t.Parallel()
+
+	deps := newTestDeps()
+	addr := testAddress(
+		t, lcommon.AddressTypeKeyNone, testKeyHash(0x35), nil,
+	)
+	called := false
+	deps.ledger.boundedPage = func(
+		context.Context,
+		*models.UtxoWithOrderingQuery,
+		int,
+		int64,
+	) (models.UtxoAddressPage, error) {
+		called = true
+		return models.UtxoAddressPage{}, nil
+	}
+	h := newTestHandler(t, deps)
+	req := coinsRequest(addr)
+	req.Metadata = map[string]any{"paginate": "yes"}
+
+	rec := postJSON(t, h, "/account/coins", req)
+
+	requireMeshError(t, rec, ErrInvalidRequest, http.StatusBadRequest)
+	require.False(t, called)
+}
+
+func TestAccountCoinsRejectsMalformedCursor(t *testing.T) {
+	t.Parallel()
+
+	for name, cursor := range map[string]any{
+		"not a cursor": "garbage",
+		"bad tx id":    "1:0:0:zz",
+		"not a string": 7,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			deps := newTestDeps()
+			addr := testAddress(
+				t, lcommon.AddressTypeKeyNone, testKeyHash(0x33), nil,
+			)
+			called := false
+			deps.ledger.boundedPage = func(
+				context.Context,
+				*models.UtxoWithOrderingQuery,
+				int,
+				int64,
+			) (models.UtxoAddressPage, error) {
+				called = true
+				return models.UtxoAddressPage{}, nil
+			}
+			h := newTestHandler(t, deps)
+			req := coinsRequest(addr)
+			req.Metadata = map[string]any{"cursor": cursor}
+
+			rec := postJSON(t, h, "/account/coins", req)
+
+			requireMeshError(
+				t, rec, ErrInvalidRequest, http.StatusBadRequest,
+			)
+			require.False(t, called)
+		})
+	}
+}
+
+func TestAccountCoinsReadsAssetsFromOutputCbor(t *testing.T) {
+	t.Parallel()
+
+	deps := newTestDeps()
+	key := testKeyHash(0x34)
+	addr := testAddress(t, lcommon.AddressTypeKeyNone, key, nil)
+	policy := lcommon.NewBlake2b224(testKeyHash(0xdd))
+	ma := lcommon.NewMultiAsset(
+		map[lcommon.Blake2b224]map[cbor.ByteString]lcommon.MultiAssetTypeOutput{
+			policy: {cbor.NewByteString([]byte("tok")): big.NewInt(9)},
+		},
+	)
+	out := testOutput(t, addr, 2_000_000)
+	out.OutputAmount = mary.MaryTransactionOutputValue{
+		Amount: 2_000_000, Assets: &ma,
+	}
+	raw, err := cbor.Encode(&out)
+	require.NoError(t, err)
+	txID := testHash(0x50)
+	u := testUtxo(txID, 0, 2_000_000, key, nil)
+	u.Cbor = raw
+	var calls []pageCall
+	deps.ledger.boundedPage = cursorPager(t, []models.Utxo{u}, &calls)
+	h := newTestHandler(t, deps)
+
+	resp := decodeResponse[AccountCoinsResponse](
+		t, postJSON(t, h, "/account/coins", coinsRequest(addr)),
+	)
+
+	require.Len(t, resp.Coins, 2)
+	require.Equal(
+		t,
+		hexString(txID)+":0:"+hexString(policy.Bytes())+":"+
+			hexString([]byte("tok")),
+		resp.Coins[1].CoinIdentifier.Identifier,
+	)
+	require.Equal(t, "9", resp.Coins[1].Amount.Value)
+	require.NotContains(t, resp.Metadata, "next_cursor")
+}
+
+func TestAccountCoinsAdmitsBoundedConcurrentReads(t *testing.T) {
+	t.Parallel()
+
+	deps := newTestDeps()
+	addr := testAddress(
+		t, lcommon.AddressTypeKeyNone, testKeyHash(0x35), nil,
+	)
+	entered := make(chan struct{}, 4)
+	release := make(chan struct{})
+	deps.ledger.boundedPage = func(
+		ctx context.Context,
+		_ *models.UtxoWithOrderingQuery,
+		_ int,
+		_ int64,
+	) (models.UtxoAddressPage, error) {
+		entered <- struct{}{}
+		select {
+		case <-release:
+		case <-ctx.Done():
+		}
+		return models.UtxoAddressPage{}, nil
+	}
+	h := newTestHandler(t, deps, func(c *ServerConfig) {
+		c.maxConcurrentBulkReads = 1
+	})
+	// Release before the test ends even when an assertion fails, so the
+	// blocked handler cannot outlive it.
+	var releaseOnce = func() func() {
+		done := false
+		return func() {
+			if !done {
+				done = true
+				close(release)
+			}
+		}
+	}()
+	defer releaseOnce()
+
+	first := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		first <- postJSON(t, h, "/account/coins", coinsRequest(addr))
+	}()
+	testutil.RequireReceive(
+		t, entered, 5*time.Second, "first read to hold its slot",
+	)
+
+	// The deadline only keeps a regression that admits this request from
+	// hanging the run: its handler would otherwise block in the fake.
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	raw, err := json.Marshal(coinsRequest(addr))
+	require.NoError(t, err)
+	refused := httptest.NewRecorder()
+	h.ServeHTTP(refused, httptest.NewRequestWithContext(
+		ctx, http.MethodPost, "/account/coins", bytes.NewReader(raw),
+	))
+	requireMeshError(
+		t, refused, ErrUnavailable, http.StatusServiceUnavailable,
+	)
+	select {
+	case <-entered:
+		t.Fatal("a refused request must not reach the ledger")
+	default:
+	}
+
+	releaseOnce()
+	decodeResponse[AccountCoinsResponse](
+		t,
+		testutil.RequireReceive(
+			t, first, 5*time.Second, "first read to finish",
+		),
+	)
+	// The slot is free again once the first read completes.
+	decodeResponse[AccountCoinsResponse](
+		t, postJSON(t, h, "/account/coins", coinsRequest(addr)),
 	)
 }

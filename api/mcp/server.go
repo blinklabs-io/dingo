@@ -143,14 +143,16 @@ func NewMCPServer(
 	}
 
 	// Register tools, resources & prompts
-	RegisterSQLiteTools(server, db, cfg.QueryTimeout, cfg.MaxRows)
-	RegisterCardanoTools(
+	limits := newReadLimits()
+	registerSQLiteTools(server, db, cfg.QueryTimeout, cfg.MaxRows, limits)
+	registerCardanoTools(
 		server,
 		db,
 		deps.LedgerState,
 		deps.Mempool,
 		deps.Network,
 		cfg.QueryTimeout,
+		limits,
 		addressLookup,
 	)
 	resourceLogger := deps.Logger

@@ -6088,6 +6088,33 @@ func TestCompareIncomingHeaderToLocalTip_Dijkstra(t *testing.T) {
 	}
 }
 
+func TestCompareIncomingHeaderToLocalTipIgnoresAdvertisedTip(t *testing.T) {
+	t.Parallel()
+
+	ls := &LedgerState{config: LedgerStateConfig{
+		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	}}
+	localTip := ochainsync.Tip{
+		Point:       ocommon.NewPoint(100, []byte("local-tip")),
+		BlockNumber: 50,
+	}
+	event := ChainsyncEvent{
+		BlockHeader: mockHeader{slot: 101, blockNumber: 50},
+		Point:       ocommon.NewPoint(101, []byte("peer-header")),
+		Tip: ochainsync.Tip{
+			Point:       ocommon.NewPoint(1_000, []byte("claimed-tip")),
+			BlockNumber: 1_000,
+		},
+	}
+
+	assert.Equal(
+		t,
+		praos.ChainEqual,
+		ls.compareIncomingHeaderToLocalTip(event, localTip),
+		"an unverified advertised height must not turn a tied header into a winning fork",
+	)
+}
+
 // make64ByteVRFFirstByteLedger mirrors consensus/praos's test helper of the
 // same shape; duplicated here since it is unexported in another package.
 func make64ByteVRFFirstByteLedger(first byte) []byte {
@@ -6632,12 +6659,21 @@ func TestPinnedForkRollbackResyncsWithoutGenerationLockDeadlock(t *testing.T) {
 		})
 		return false, 0
 	}
+	forkParent := mockHeader{
+		hash: lcommon.NewBlake2b256(
+			testHashBytes("pinned-rollback-parent"),
+		),
+		prevHash:    lcommon.NewBlake2b256(fixture.ancestorTip.Point.Hash),
+		blockNumber: fixture.ancestorTip.BlockNumber + 1,
+		slot:        fixture.currentTip.Point.Slot + 9,
+	}
+	recordVerifiedPeerHeader(fixture, forkParent)
 	header := mockHeader{
 		hash: lcommon.NewBlake2b256(
 			testHashBytes("pinned-rollback-resync"),
 		),
-		prevHash:    lcommon.NewBlake2b256(fixture.ancestorTip.Point.Hash),
-		blockNumber: fixture.ancestorTip.BlockNumber + 1,
+		prevHash:    forkParent.hash,
+		blockNumber: fixture.currentTip.BlockNumber + 1,
 		slot:        fixture.currentTip.Point.Slot + 10,
 	}
 	admission := make(chan bool, 1)
@@ -6654,10 +6690,9 @@ func TestPinnedForkRollbackResyncsWithoutGenerationLockDeadlock(t *testing.T) {
 			),
 			Tip: ochainsync.Tip{
 				Point: ocommon.NewPoint(
-					header.SlotNumber()+10,
-					testHashBytes("pinned-rollback-peer-tip"),
+					header.SlotNumber(), header.Hash().Bytes(),
 				),
-				BlockNumber: header.BlockNumber() + 1,
+				BlockNumber: header.BlockNumber(),
 			},
 			PeerTipAdmission: func(admitted bool) { admission <- admitted },
 		})
@@ -8204,6 +8239,21 @@ type chainsyncRollbackFixture struct {
 	forkPoint     ocommon.Point
 }
 
+func recordVerifiedPeerHeader(
+	fixture *chainsyncRollbackFixture,
+	header mockHeader,
+) {
+	fixture.ls.recordPeerHeaderHistory(ChainsyncEvent{
+		ConnectionId: fixture.connId,
+		HeaderCryptoVerificationGeneration: fixture.ls.
+			loadConsensusSnapshot().generation,
+		Point: ocommon.NewPoint(
+			header.SlotNumber(), header.Hash().Bytes(),
+		),
+		BlockHeader: header,
+	})
+}
+
 type testSecurityParamLedger struct {
 	securityParam int
 }
@@ -8950,11 +9000,19 @@ func TestTryResolveForkSynchronizesLedgerTip(t *testing.T) {
 
 	fixture := newChainsyncRollbackFixture(t)
 
-	forkHash := testHashBytes("fork-block")
-	header := mockHeader{
-		hash:        lcommon.NewBlake2b256(forkHash),
+	forkParentHash := testHashBytes("fork-block-parent")
+	forkParent := mockHeader{
+		hash:        lcommon.NewBlake2b256(forkParentHash),
 		prevHash:    lcommon.NewBlake2b256(fixture.ancestorTip.Point.Hash),
 		blockNumber: fixture.ancestorTip.BlockNumber + 1,
+		slot:        fixture.currentTip.Point.Slot + 9,
+	}
+	recordVerifiedPeerHeader(fixture, forkParent)
+	forkHash := testHashBytes("fork-block-winner")
+	header := mockHeader{
+		hash:        lcommon.NewBlake2b256(forkHash),
+		prevHash:    forkParent.hash,
+		blockNumber: fixture.currentTip.BlockNumber + 1,
 		slot:        fixture.currentTip.Point.Slot + 10,
 	}
 	err := fixture.ls.chain.AddBlockHeader(context.Background(), header)
@@ -8969,17 +9027,6 @@ func TestTryResolveForkSynchronizesLedgerTip(t *testing.T) {
 				header.Hash().Bytes(),
 			),
 			BlockHeader: header,
-			// The delivered header is the first block after the fork point and
-			// is contiguous with the common ancestor. The peer advertises a tip
-			// further ahead, so its chain is genuinely longer than ours and the
-			// fork is worth resolving.
-			Tip: ochainsync.Tip{
-				Point: ocommon.NewPoint(
-					header.SlotNumber()+10,
-					testHashBytes("fork-block-peer-tip-ahead"),
-				),
-				BlockNumber: header.BlockNumber() + 1,
-			},
 		},
 		notFitErr,
 		nil,
@@ -8994,7 +9041,7 @@ func TestTryResolveForkSynchronizesLedgerTip(t *testing.T) {
 		t,
 		bytes.Equal(fixture.ancestorNonce, fixture.ls.currentTipBlockNonce),
 	)
-	assert.Equal(t, 1, fixture.ls.chain.HeaderCount())
+	assert.Equal(t, 2, fixture.ls.chain.HeaderCount())
 
 	dbTip, err := fixture.ls.db.GetTip(nil)
 	require.NoError(t, err)
@@ -9203,11 +9250,19 @@ func TestTryResolveForkUsesPraosAfterGenesisExit(t *testing.T) {
 
 	// This candidate has no blocks in the Genesis window, but Genesis has
 	// exited and its greater block number must therefore win under Praos.
+	forkParentHash := testHashBytes("post-genesis-praos-parent")
+	forkParent := mockHeader{
+		hash:        lcommon.NewBlake2b256(forkParentHash),
+		prevHash:    lcommon.NewBlake2b256(fixture.ancestorTip.Point.Hash),
+		blockNumber: fixture.ancestorTip.BlockNumber + 1,
+		slot:        29,
+	}
+	recordVerifiedPeerHeader(fixture, forkParent)
 	forkHash := testHashBytes("post-genesis-praos-fork")
 	header := mockHeader{
 		hash:        lcommon.NewBlake2b256(forkHash),
-		prevHash:    lcommon.NewBlake2b256(fixture.ancestorTip.Point.Hash),
-		blockNumber: fixture.ancestorTip.BlockNumber + 1,
+		prevHash:    forkParent.hash,
+		blockNumber: fixture.currentTip.BlockNumber + 1,
 		slot:        30,
 	}
 	err := fixture.ls.chain.AddBlockHeader(context.Background(), header)
@@ -9219,10 +9274,6 @@ func TestTryResolveForkUsesPraosAfterGenesisExit(t *testing.T) {
 			ConnectionId: fixture.connId,
 			Point:        ocommon.NewPoint(header.slot, forkHash),
 			BlockHeader:  header,
-			Tip: ochainsync.Tip{
-				Point:       ocommon.NewPoint(header.slot, forkHash),
-				BlockNumber: fixture.currentTip.BlockNumber + 1,
-			},
 		},
 		notFitErr,
 		nil,
@@ -9232,7 +9283,7 @@ func TestTryResolveForkUsesPraosAfterGenesisExit(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, resolved)
 	assert.Equal(t, fixture.ancestorTip, fixture.ls.chain.Tip())
-	assert.Equal(t, 1, fixture.ls.chain.HeaderCount())
+	assert.Equal(t, 2, fixture.ls.chain.HeaderCount())
 }
 
 func TestHandleEventChainsyncBlockHeaderIgnoresObservedPredecessor(
@@ -9592,11 +9643,19 @@ func TestTryResolveForkDoesNotAdvanceLaggingLedgerTip(t *testing.T) {
 	)
 	preRollbackSeq := fixture.ls.lastLocalRollbackSeq
 
-	forkHash := testHashBytes("ahead-raw-chain-fork")
-	header := mockHeader{
-		hash:        lcommon.NewBlake2b256(forkHash),
+	forkParentHash := testHashBytes("ahead-raw-chain-fork-parent")
+	forkParent := mockHeader{
+		hash:        lcommon.NewBlake2b256(forkParentHash),
 		prevHash:    lcommon.NewBlake2b256(fixture.currentTip.Point.Hash),
 		blockNumber: fixture.currentTip.BlockNumber + 1,
+		slot:        fixture.currentTip.Point.Slot + 19,
+	}
+	recordVerifiedPeerHeader(fixture, forkParent)
+	forkHash := testHashBytes("ahead-raw-chain-fork-winner")
+	header := mockHeader{
+		hash:        lcommon.NewBlake2b256(forkHash),
+		prevHash:    forkParent.hash,
+		blockNumber: fixture.currentTip.BlockNumber + 2,
 		slot:        fixture.currentTip.Point.Slot + 20,
 	}
 	err := fixture.ls.chain.AddBlockHeader(context.Background(), header)
@@ -9611,16 +9670,6 @@ func TestTryResolveForkDoesNotAdvanceLaggingLedgerTip(t *testing.T) {
 				header.Hash().Bytes(),
 			),
 			BlockHeader: header,
-			// The delivered header forks off the current block and is contiguous
-			// with it. The peer advertises a tip further ahead, so its chain is
-			// longer than the local raw chain tip and the fork resolves.
-			Tip: ochainsync.Tip{
-				Point: ocommon.NewPoint(
-					header.SlotNumber()+10,
-					testHashBytes("ahead-raw-chain-fork-peer-tip-ahead"),
-				),
-				BlockNumber: header.BlockNumber() + 1,
-			},
 		},
 		notFitErr,
 		nil,
@@ -9636,7 +9685,7 @@ func TestTryResolveForkDoesNotAdvanceLaggingLedgerTip(t *testing.T) {
 		bytes.Equal(fixture.ancestorNonce, fixture.ls.currentTipBlockNonce),
 	)
 	assert.Equal(t, preRollbackSeq, fixture.ls.lastLocalRollbackSeq)
-	assert.Equal(t, 1, fixture.ls.chain.HeaderCount())
+	assert.Equal(t, 2, fixture.ls.chain.HeaderCount())
 
 	dbTip, err := fixture.ls.db.GetTip(nil)
 	require.NoError(t, err)
@@ -19904,11 +19953,22 @@ func TestForkResolutionInvalidatesTheIncomingHeaderVerdict(t *testing.T) {
 			// needed.
 			fixture.ls.chainsyncBlockfetchReadyChan = make(chan struct{})
 
+			forkParent := mockHeader{
+				hash: lcommon.NewBlake2b256(
+					[]byte("fork-announcing-parent"),
+				),
+				prevHash: lcommon.NewBlake2b256(
+					fixture.ancestorTip.Point.Hash,
+				),
+				blockNumber: fixture.ancestorTip.BlockNumber + 1,
+				slot:        fixture.currentTip.Point.Slot + 9,
+			}
+			recordVerifiedPeerHeader(fixture, forkParent)
 			header := announcingHeader(
 				fixture.currentTip.Point.Slot+10,
 				"fork-announcing-header",
-				lcommon.NewBlake2b256(fixture.ancestorTip.Point.Hash),
-				fixture.ancestorTip.BlockNumber+1,
+				forkParent.hash,
+				fixture.currentTip.BlockNumber+1,
 				lcommon.NewBlake2b256([]byte("fork-announced-eb")),
 			)
 			// The header does not fit the current tip; that failure is the
@@ -19924,23 +19984,32 @@ func TestForkResolutionInvalidatesTheIncomingHeaderVerdict(t *testing.T) {
 			if tc.cryptoVerified {
 				verificationGeneration = fixture.ls.loadConsensusSnapshot().generation
 			}
+			event := ChainsyncEvent{
+				ConnectionId: fixture.connId,
+				Point: ocommon.NewPoint(
+					header.slot,
+					header.hash.Bytes(),
+				),
+				BlockHeader: header,
+				Tip: ochainsync.Tip{
+					Point: ocommon.NewPoint(
+						advertisedSlot,
+						[]byte("unbound-fork-tip"),
+					),
+					BlockNumber: advertisedSlot,
+				},
+			}
+			require.Equal(
+				t,
+				praos.ChainABetter,
+				fixture.ls.compareIncomingHeaderToLocalTip(
+					event,
+					fixture.currentTip,
+				),
+			)
 
 			resolved, err := fixture.ls.tryResolveFork(
-				ChainsyncEvent{
-					ConnectionId: fixture.connId,
-					Point: ocommon.NewPoint(
-						header.slot,
-						header.hash.Bytes(),
-					),
-					BlockHeader: header,
-					Tip: ochainsync.Tip{
-						Point: ocommon.NewPoint(
-							advertisedSlot,
-							[]byte("unbound-fork-tip"),
-						),
-						BlockNumber: advertisedSlot,
-					},
-				},
+				event,
 				notFitErr,
 				nil,
 				verificationGeneration,
@@ -19950,7 +20019,7 @@ func TestForkResolutionInvalidatesTheIncomingHeaderVerdict(t *testing.T) {
 			// The header was queued through fork resolution, not direct
 			// admission.
 			require.Equal(t, fixture.ancestorTip, fixture.ls.chain.Tip())
-			require.Equal(t, 1, fixture.ls.chain.HeaderCount())
+			require.Equal(t, 2, fixture.ls.chain.HeaderCount())
 			fixture.ls.chain.PublishPendingChainUpdates()
 
 			// The rollback's invalidation precedes anything the fork

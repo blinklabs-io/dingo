@@ -197,6 +197,18 @@ func TestExtractArchiveRefusesUnexpectedMemberBeforeWriting(t *testing.T) {
 	require.ErrorIs(t, statErr, os.ErrNotExist)
 }
 
+func TestExtractArchiveRejectsRootFiles(t *testing.T) {
+	t.Parallel()
+
+	for _, entry := range []limitsTestEntry{
+		{name: ".", content: []byte("payload")},
+		{name: "."},
+	} {
+		_, err := extractWithLimits(t, []limitsTestEntry{entry}, archiveLimits{})
+		require.ErrorIs(t, err, ErrExtractUnexpectedMember)
+	}
+}
+
 func TestExtractArchiveVerifiesMemberDigest(t *testing.T) {
 	t.Parallel()
 

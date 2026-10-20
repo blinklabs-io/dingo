@@ -1007,8 +1007,9 @@ func TestCloudCatalogRecoversAfterStartupConstructorFailure(t *testing.T) {
 func TestCloudReconciliationSerializesConcurrentIncrementalMirror(t *testing.T) {
 	base := t.TempDir()
 	require.NoError(t, EnsureSnapshotCatalog(base, WithManifestKey(catalogTestTrustKey)))
-	manifestAt := func(second int64) Manifest {
-		dir := t.TempDir()
+	manifestAt := func(id string, second int64) Manifest {
+		dir := filepath.Join(t.TempDir(), id)
+		require.NoError(t, os.Mkdir(dir, 0o700))
 		require.NoError(t, WriteManifest(dir, Manifest{
 			CreatedAt: time.Unix(second, 0).UTC(), Trigger: TriggerManual,
 		}, WithManifestKey(catalogTestTrustKey)))
@@ -1017,7 +1018,7 @@ func TestCloudReconciliationSerializesConcurrentIncrementalMirror(t *testing.T) 
 		return manifest
 	}
 	provider := &blockingCatalogLister{
-		entries:  []SnapshotEntry{{ID: "scanned", Manifest: manifestAt(1)}},
+		entries:  []SnapshotEntry{{ID: "scanned", Manifest: manifestAt("scanned", 1)}},
 		captured: make(chan struct{}), release: make(chan struct{}),
 	}
 	registry := NewDestinationRegistry()
@@ -1025,7 +1026,7 @@ func TestCloudReconciliationSerializesConcurrentIncrementalMirror(t *testing.T) 
 		return provider, nil
 	})
 	const cloudDest = "interleavecatalog://bucket/snapshots"
-	mirroredManifest := manifestAt(2)
+	mirroredManifest := manifestAt("mirrored", 2)
 	reconcileDone := make(chan error, 1)
 	go func() {
 		_, err := ReconcileCloudSnapshotCatalogContext(
