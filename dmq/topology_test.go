@@ -223,6 +223,41 @@ func TestLoadTopologyPeersDeduplicates(t *testing.T) {
 	}, topo.Peers())
 }
 
+func TestLoadTopologyCleansHosts(t *testing.T) {
+	t.Parallel()
+	topo, err := LoadTopology(writeTopology(t, `{"localRoots": [{
+		"accessPoints": [
+			{"address": "[2001:db8::1]", "port": 3141},
+			{"address": "  relay.example.com  ", "port": 3142},
+			{"address": " [ ::1 ] ", "port": 3143}
+		],
+		"valency": 1
+	}]}`), nil)
+	require.NoError(t, err)
+	peers := topo.Peers()
+	assert.Equal(t, []Peer{
+		{Host: "2001:db8::1", Port: 3141},
+		{Host: "relay.example.com", Port: 3142},
+		{Host: "::1", Port: 3143},
+	}, peers)
+	assert.Equal(t, "[2001:db8::1]:3141", peers[0].Address())
+	assert.Equal(t, "relay.example.com:3142", peers[1].Address())
+	assert.Equal(t, "[::1]:3143", peers[2].Address())
+}
+
+func TestLoadTopologyBracketedAndBareHostAreOnePeer(t *testing.T) {
+	t.Parallel()
+	topo, err := LoadTopology(writeTopology(t, `{"localRoots": [{
+		"accessPoints": [
+			{"address": "[::1]", "port": 3141},
+			{"address": "::1", "port": 3141}
+		],
+		"valency": 1
+	}]}`), nil)
+	require.NoError(t, err)
+	assert.Equal(t, []Peer{{Host: "::1", Port: 3141}}, topo.Peers())
+}
+
 func TestLoadTopologyEmpty(t *testing.T) {
 	t.Parallel()
 	topo, err := LoadTopology(writeTopology(t, `{}`), nil)
@@ -269,6 +304,26 @@ func TestLoadTopologyErrors(t *testing.T) {
 				return writeTopology(t, `[]`)
 			},
 			wantErr: "parse topology file",
+		},
+		{
+			name: "null",
+			path: func(t *testing.T) string {
+				return writeTopology(t, `null`)
+			},
+			wantErr: "must be a JSON object",
+		},
+		{
+			name: "keys differing only in case",
+			path: func(t *testing.T) string {
+				return writeTopology(t, `{
+					"localRoots": [{
+						"accessPoints": [{"address": "10.0.0.1", "port": 3141}],
+						"valency": 1
+					}],
+					"LocalRoots": []
+				}`)
+			},
+			wantErr: `"LocalRoots" and "localRoots" differ only in case`,
 		},
 		{
 			name: "port out of range",

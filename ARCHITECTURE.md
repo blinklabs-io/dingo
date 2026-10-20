@@ -7829,9 +7829,13 @@ dmq-node does not support them: even a malformed one does not fail the load, a
 configured `bootstrapPeers` or `peerSnapshotFile` is logged as ignored, and a
 peer snapshot is never read from disk. Public roots read `valency` and
 `warmValency` only, and a missing `warmValency` becomes `valency`; `hotValency`
-is understood for local roots alone. `Topology.Peers` lists each distinct peer
-once, comparing hostnames without case or a trailing dot and IP literals by
-canonical form, without resolving names. Configuration validation rejects a
+is understood for local roots alone. A file must be a JSON object and may not
+hold two keys that differ only in case. Peer hosts lose surrounding whitespace
+and IPv6 brackets, and `Topology.Peers` lists each distinct peer once, comparing
+hostnames without case or a trailing dot and IP literals by canonical form,
+without resolving names. A file naming no peers loads as an empty topology,
+since ledger peer discovery can supply peers without one, and logs a warning.
+Configuration validation rejects a
 missing or non-regular file early; `startDMQ` then loads it, which is the
 authoritative read, before the DMQ stack opens its socket. A bad file stops
 startup through the node's normal failure path, after services that started

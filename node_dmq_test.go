@@ -309,29 +309,67 @@ func TestNodeRunRejectsBadDMQTopology(t *testing.T) {
 }
 
 // A topology file that loads lets startup continue, and the log reports how
-// many distinct peers it names.
+// many distinct peers it names. A file that names none is accepted with a
+// warning, because ledger peer discovery can supply peers without one.
 func TestNodeRunLoadsDMQTopology(t *testing.T) {
 	t.Parallel()
+	tests := []struct {
+		name     string
+		content  string
+		wantPeer string
+		wantWarn bool
+	}{
+		{
+			name: "peers",
+			content: `{
+				"localRoots": [{
+					"accessPoints": [
+						{"address": "10.0.0.1", "port": 3141},
+						{"address": "10.0.0.2", "port": 3141}
+					],
+					"valency": 2
+				}],
+				"publicRoots": [{
+					"accessPoints": [{"address": "10.0.0.1", "port": 3141}],
+					"valency": 1
+				}]
+			}`,
+			wantPeer: "peers=2",
+		},
+		{
+			name:     "no peers",
+			content:  `{}`,
+			wantPeer: "peers=0",
+			wantWarn: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			runNodeWithDMQTopology(t, tt.content, tt.wantPeer, tt.wantWarn)
+		})
+	}
+}
+
+func runNodeWithDMQTopology(
+	t *testing.T,
+	content, wantPeer string,
+	wantWarn bool,
+) {
+	t.Helper()
 	n := newAPIPluginRuntimeNode(t)
 	dir := t.TempDir()
 	topologyFile := filepath.Join(dir, "dmq-topology.json")
-	require.NoError(t, os.WriteFile(topologyFile, []byte(`{
-		"localRoots": [{
-			"accessPoints": [
-				{"address": "10.0.0.1", "port": 3141},
-				{"address": "10.0.0.2", "port": 3141}
-			],
-			"valency": 2
-		}],
-		"publicRoots": [{
-			"accessPoints": [{"address": "10.0.0.1", "port": 3141}],
-			"valency": 1
-		}]
-	}`), 0o600))
+	require.NoError(t, os.WriteFile(topologyFile, []byte(content), 0o600))
 	dmqCfg := internalconfig.DefaultDMQConfig()
 	dmqCfg.Enabled = true
 	dmqCfg.NetworkMagic = 42
-	dmqCfg.SocketPath = filepath.Join(dir, "dmq.sock")
+	// A Unix socket path is limited to about 100 bytes, which a subtest's
+	// t.TempDir path can exceed, so the socket gets a short directory.
+	socketDir, err := os.MkdirTemp("", "dmq")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(socketDir) })
+	dmqCfg.SocketPath = filepath.Join(socketDir, "dmq.sock")
 	dmqCfg.TopologyFile = topologyFile
 	n.config.cfg.DMQ = dmqCfg
 	logs := &syncLogBuffer{}
@@ -347,7 +385,12 @@ func TestNodeRunLoadsDMQTopology(t *testing.T) {
 	require.ErrorIs(t, n.Run(context.Background()), errProbe)
 	require.Equal(t, int32(1), probe.starts.Load())
 	require.Contains(t, logs.String(), "loaded dmq topology")
-	require.Contains(t, logs.String(), "peers=2")
+	require.Contains(t, logs.String(), wantPeer)
+	if wantWarn {
+		require.Contains(t, logs.String(), "dmq topology names no peers")
+	} else {
+		require.NotContains(t, logs.String(), "dmq topology names no peers")
+	}
 }
 
 // submitDMQ submits an unsigned message over a DMQ local socket and returns

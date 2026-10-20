@@ -94,7 +94,13 @@ var ignoredTopologyFields = []string{
 // bootstrapPeers and peerSnapshotFile are reported with a warning.
 //
 // Public roots read valency and warmValency only, as the Cardano topology
-// parser does; hotValency is understood for local roots alone.
+// parser does; hotValency is understood for local roots alone. Peer hosts are
+// returned without surrounding whitespace or IPv6 brackets.
+//
+// A file that names no peers loads as an empty topology, because ledger peer
+// discovery can supply peers without one; the caller decides whether that is
+// worth a warning. A file that is not a JSON object, or that has two keys
+// differing only in case, is an error.
 //
 // The file is read here, whatever configuration validation already checked of
 // it, so a file that changes or disappears after validation still fails the
@@ -120,6 +126,15 @@ func LoadTopology(path string, logger *slog.Logger) (*Topology, error) {
 	}
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(data, &fields); err != nil {
+		return nil, fmt.Errorf("dmq: parse topology file %q: %w", path, err)
+	}
+	// A JSON null unmarshals into a nil map without error.
+	if fields == nil {
+		return nil, fmt.Errorf(
+			"dmq: parse topology file %q: must be a JSON object", path,
+		)
+	}
+	if err := rejectCaseDuplicateKeys(fields); err != nil {
 		return nil, fmt.Errorf("dmq: parse topology file %q: %w", path, err)
 	}
 	// Go matches JSON keys to struct fields without regard to case, so the
@@ -168,6 +183,25 @@ func LoadTopology(path string, logger *slog.Logger) (*Topology, error) {
 	return t, nil
 }
 
+// rejectCaseDuplicateKeys refuses an object that has two keys differing only
+// in case. Go matches keys to struct fields without regard to case, so the
+// topology parser would otherwise pick one of them by position and silently
+// drop the other.
+func rejectCaseDuplicateKeys(fields map[string]json.RawMessage) error {
+	seen := make(map[string]string, len(fields))
+	for key := range fields {
+		folded := strings.ToLower(key)
+		if first, ok := seen[folded]; ok {
+			first, second := min(first, key), max(first, key)
+			return fmt.Errorf(
+				"keys %q and %q differ only in case", first, second,
+			)
+		}
+		seen[folded] = key
+	}
+	return nil
+}
+
 // warnIgnoredTopologyField logs an ignored field that carries a value worth
 // noticing: a non-empty bootstrapPeers or a peerSnapshotFile. A
 // useLedgerAfterSlot is dropped silently.
@@ -201,9 +235,20 @@ func peersFromAccessPoints(
 ) []Peer {
 	peers := make([]Peer, 0, len(points))
 	for _, ap := range points {
-		peers = append(peers, Peer{Host: ap.Address, Port: ap.Port})
+		peers = append(peers, Peer{Host: cleanHost(ap.Address), Port: ap.Port})
 	}
 	return peers
+}
+
+// cleanHost trims whitespace and the brackets around an IPv6 literal, so a
+// dial and Peer.Address, which brackets an IPv6 host itself, both see the bare
+// host.
+func cleanHost(host string) string {
+	host = strings.TrimSpace(host)
+	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
+		host = strings.TrimSpace(host[1 : len(host)-1])
+	}
+	return host
 }
 
 // Peers returns every distinct peer, local roots first and each in file

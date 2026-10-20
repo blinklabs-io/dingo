@@ -147,12 +147,20 @@ func (n *Node) startDMQ() error {
 		if err != nil {
 			return fmt.Errorf("loading dmq topology: %w", err)
 		}
+		peers := len(topo.Peers())
 		n.config.logger.Info(
 			"loaded dmq topology",
 			"component", "dmq",
 			"file", cfg.TopologyFile,
-			"peers", len(topo.Peers()),
+			"peers", peers,
 		)
+		if peers == 0 {
+			n.config.logger.Warn(
+				"dmq topology names no peers",
+				"component", "dmq",
+				"file", cfg.TopologyFile,
+			)
+		}
 	}
 	n.dmqStake.setLedgerState(n.ledgerState)
 	authenticator, err := ocommon.NewMessageAuthenticator(
