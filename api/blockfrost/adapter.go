@@ -3252,13 +3252,13 @@ func (a *NodeAdapter) exactAddressBalance(
 			}
 			count++
 			sums.add(batch[i].Utxo)
-		}
-		if len(sums.assets) > limits.maxAssets {
-			return nil, 0, fmt.Errorf(
-				"more than %d distinct assets: %w",
-				limits.maxAssets,
-				ErrAddressSummaryTooLarge,
-			)
+			if len(sums.assets) > limits.maxAssets {
+				return nil, 0, fmt.Errorf(
+					"more than %d distinct assets: %w",
+					limits.maxAssets,
+					ErrAddressSummaryTooLarge,
+				)
+			}
 		}
 		if len(batch) < limits.batch {
 			return sums, count, nil
