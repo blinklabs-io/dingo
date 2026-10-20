@@ -4127,33 +4127,14 @@ func (ls *LedgerState) compareIncomingHeaderToLocalTip(
 	localTip ochainsync.Tip,
 ) praos.ChainComparisonResult {
 	observedTip := observedHeaderTip(e)
-	if observedTip.BlockNumber == 0 && e.Tip.BlockNumber > 0 {
-		observedTip = e.Tip
-	}
 
 	incomingView, _ := praos.GetPraosTiebreakerView(e.BlockHeader)
-	result := praos.ComparePraosTips(
+	return praos.ComparePraosTips(
 		observedTip,
 		localTip,
 		incomingView,
 		ls.localTipPraosView(ls.lifecycleContext(), localTip),
 	)
-	if result != praos.ChainEqual {
-		return result
-	}
-
-	// If the peer has advertised a further tip than the header just delivered,
-	// use that only when block number alone decides the comparison. We do not
-	// have the advertised tip's Praos select view until its header arrives.
-	if e.Tip.BlockNumber > observedTip.BlockNumber {
-		switch {
-		case e.Tip.BlockNumber > localTip.BlockNumber:
-			return praos.ChainABetter
-		case e.Tip.BlockNumber < localTip.BlockNumber:
-			return praos.ChainBBetter
-		}
-	}
-	return result
 }
 
 func (ls *LedgerState) earlierHeaderCanBeatLocalTip(
