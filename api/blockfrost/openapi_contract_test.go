@@ -32,6 +32,8 @@ import (
 	"strings"
 	"testing"
 
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/btcsuite/btcd/btcutil/bech32"
 	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
 )
@@ -94,6 +96,52 @@ func (o openAPIOperation) key() string {
 
 func (o openAPIOperation) samplePath() string {
 	return openAPIPathParameter.ReplaceAllString(o.path, "sample")
+}
+
+// validSamplePath fills each path parameter with a value its handler accepts,
+// so a request reaches query validation instead of failing on the path.
+func (o openAPIOperation) validSamplePath(t *testing.T) string {
+	t.Helper()
+	policy := strings.Repeat("ab", 28)
+	committee, err := bech32.ConvertBits(
+		append(
+			[]byte{committeeCredentialHeader(false, false)},
+			make([]byte, 28)...),
+		8,
+		5,
+		true,
+	)
+	require.NoError(t, err)
+	committeeID, err := bech32.Encode("cc_hot", committee)
+	require.NoError(t, err)
+	govActionID := lcommon.GovActionId{}
+	govAction, err := govActionID.MarshalText()
+	require.NoError(t, err)
+	samples := map[string]string{
+		"address":        "addr1vx2fxv2umyhttkxyxp8x0dlpdt3k6cwng5pxj3jhsydzers66hrl8",
+		"asset":          policy + "6e7574",
+		"cc_id":          committeeID,
+		"cert_index":     "0",
+		"drep_id":        "drep1y2zpa7e9f23g7snuhfqss73ufeshsqhdt4qqfu74p9y4kfqcpsxym",
+		"gov_action_id":  string(govAction),
+		"hash_or_number": "1",
+		"label":          "1",
+		"number":         "1",
+		"policy_id":      policy,
+		"pool_id":        "pool1vzqtn3mtfvvuy8ghksy34gs9g97tszj5f8mr3sn7asy5vk577ec",
+		"script_hash":    policy,
+		"stake_address":  "stake1u98nnlkvkk23vtvf9273uq7cph5ww6u2yq2389psuqet90sv4xv9v",
+		"tx_hash":        strings.Repeat("ab", 32),
+	}
+	return openAPIPathParameter.ReplaceAllStringFunc(
+		o.path,
+		func(m string) string {
+			name := strings.Trim(m, "{}")
+			sample, ok := samples[name]
+			require.True(t, ok, "no valid sample for path parameter %q", name)
+			return sample
+		},
+	)
 }
 
 func registeredBlockfrostOperations(t *testing.T) []string {
@@ -257,10 +305,22 @@ func TestPinnedOpenAPIQueryBounds(t *testing.T) {
 				continue
 			}
 			t.Run(operation.key()+" "+name, func(t *testing.T) {
+				baseline := httptest.NewRecorder()
+				handler.ServeHTTP(baseline, httptest.NewRequest(
+					operation.method,
+					operation.validSamplePath(t),
+					nil,
+				))
+				require.NotEqual(
+					t,
+					http.StatusBadRequest,
+					baseline.Code,
+					"sample path is rejected before query validation",
+				)
 				recorder := httptest.NewRecorder()
 				request := httptest.NewRequest(
 					operation.method,
-					operation.samplePath()+"?"+name+"="+invalid,
+					operation.validSamplePath(t)+"?"+name+"="+invalid,
 					nil,
 				)
 				handler.ServeHTTP(recorder, request)
@@ -391,7 +451,7 @@ func resolveOpenAPIRef(root, value map[string]any) (map[string]any, error) {
 		return nil, fmt.Errorf("unsupported OpenAPI reference %q", ref)
 	}
 	var current any = root
-	for _, segment := range strings.Split(strings.TrimPrefix(ref, prefix), "/") {
+	for segment := range strings.SplitSeq(strings.TrimPrefix(ref, prefix), "/") {
 		object, ok := current.(map[string]any)
 		if !ok {
 			return nil, fmt.Errorf(
