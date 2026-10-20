@@ -15,10 +15,10 @@
 package mcp
 
 import (
-	"fmt"
 	"context"
-	"strings"
+	"fmt"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"

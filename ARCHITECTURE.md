@@ -10407,6 +10407,13 @@ asset rows. A policy or asset with more matching rows returns an explicit
 incomplete error, never a partial supply or holder count. `NewMCPServer` shares
 one slot budget across both tool sets; the exported `RegisterSQLiteTools` and
 `RegisterCardanoTools` each create their own.
+`get_mempool_info` without `tx_hash` lists at most `limit` pending transactions
+(default 10, at most 50) in the pool's own order, read through
+`Mempool.TransactionsBounded`, so only the rows shown are copied. The pending
+count is that call's total, and the buffered volume and saturation come from
+`mempool.Service.SizeBytes`, the maintained retained-byte counter that capacity
+and admission are measured against. A summary therefore costs in proportion to
+the rows shown, not the pool, and takes no execution slot.
 Markdown tables wrap their sanitized cells in explicit untrusted-chain-data
 delimiters. Chain-controlled text is HTML-escaped before rendering so it cannot
 terminate that envelope.
