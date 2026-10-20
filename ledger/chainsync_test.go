@@ -16791,6 +16791,8 @@ func TestCheckSlotBattle_DetectsConflict(t *testing.T) {
 	eventBus := newTestEventBus(t, nil)
 	defer eventBus.Stop()
 	ls.config.EventBus = eventBus
+	recorder := &countingSlotBattleRecorder{}
+	ls.SetSlotBattleRecorder(recorder)
 
 	localHash := f.rival.Hash().Bytes()
 	remoteHash := []byte{0x0A, 0x0B, 0x0C, 0x0D}
@@ -16803,11 +16805,8 @@ func TestCheckSlotBattle_DetectsConflict(t *testing.T) {
 
 	ls.config.ForgedBlockChecker = checker
 
-	// Subscribe to slot battle events
 	_, evtCh := eventBus.Subscribe(forging.SlotBattleEventType)
 
-	// An incoming block at the same slot with a different hash; the
-	// forged block is the one on the chain, so local won.
 	e := BlockfetchEvent{
 		Point: ocommon.Point{
 			Slot: siblingSlot,
@@ -16816,27 +16815,30 @@ func TestCheckSlotBattle_DetectsConflict(t *testing.T) {
 	}
 	ls.checkSlotBattle(e)
 
-	// Verify the event was emitted
-	evt := testutil.RequireReceive(
+	assert.Equal(t, int64(1), recorder.n.Load())
+	require.Len(t, ls.slotBattles.pending, 1)
+	pending := ls.slotBattles.pending[0]
+	assert.Equal(t, siblingSlot, pending.slot)
+	assert.Equal(t, localHash, pending.localHash)
+	assert.Equal(t, remoteHash, pending.remoteHash)
+	testutil.RequireNoReceive(
 		t,
 		evtCh,
-		testutil.AsyncWait,
-		"timeout waiting for SlotBattleEvent",
+		50*time.Millisecond,
+		"the winner is not known when the rival arrives",
 	)
-	battle, ok := evt.Data.(forging.SlotBattleEvent)
-	require.True(t, ok, "event data should be SlotBattleEvent")
-	assert.Equal(t, siblingSlot, battle.Slot)
-	assert.Equal(t, localHash, battle.LocalBlockHash)
-	assert.Equal(t, remoteHash, battle.RemoteBlockHash)
-	assert.True(t, battle.Won,
-		"local should win when its block is on the chain")
 }
 
+// A battle whose forged block never reaches the chain settles as lost once
+// the chain has advanced a security parameter of blocks.
 func TestCheckSlotBattle_RemoteWinsWhenAccepted(t *testing.T) {
 	t.Parallel()
 
 	f := newSiblingFixture(t)
 	ls := f.ls
+	ls.config.CardanoNodeConfig = newTestShelleyGenesisCfgWithK(t, 2)
+	ls.currentEra = eras.ConwayEraDesc
+	ls.publishSnapshotsLocked()
 	eventBus := newTestEventBus(t, nil)
 	defer eventBus.Stop()
 	ls.config.EventBus = eventBus
@@ -16854,14 +16856,29 @@ func TestCheckSlotBattle_RemoteWinsWhenAccepted(t *testing.T) {
 
 	_, evtCh := eventBus.Subscribe(forging.SlotBattleEventType)
 
-	// The forged block is not on the chain, so the rival won.
-	e := BlockfetchEvent{
-		Point: ocommon.Point{
-			Slot: siblingSlot,
-			Hash: remoteHash,
-		},
+	ls.checkSlotBattle(BlockfetchEvent{
+		Point: ocommon.Point{Slot: siblingSlot, Hash: remoteHash},
+	})
+	ls.resolveSlotBattles()
+	testutil.RequireNoReceive(
+		t,
+		evtCh,
+		50*time.Millisecond,
+		"the battle is not settled yet",
+	)
+
+	block := gledger.Block(f.rival)
+	for range 2 {
+		block = newSiblingTestBlock(
+			t, block.BlockNumber()+1, block.SlotNumber()+10,
+			block.Hash(), 0x44, 0x90, 1,
+		)
+		require.NoError(
+			t,
+			ls.chain.AddBlock(context.Background(), block, nil),
+		)
 	}
-	ls.checkSlotBattle(e)
+	ls.resolveSlotBattles()
 
 	evt := testutil.RequireReceive(
 		t,
@@ -17043,7 +17060,8 @@ func TestCheckSlotBattle_UnderWriteLock(t *testing.T) {
 
 	ls.config.ForgedBlockChecker = checker
 
-	_, evtCh := eventBus.Subscribe(forging.SlotBattleEventType)
+	recorder := &countingSlotBattleRecorder{}
+	ls.SetSlotBattleRecorder(recorder)
 
 	e := BlockfetchEvent{
 		Point: ocommon.Point{
@@ -17069,16 +17087,7 @@ func TestCheckSlotBattle_UnderWriteLock(t *testing.T) {
 		"checkSlotBattle deadlocked under write lock",
 	)
 
-	evt := testutil.RequireReceive(
-		t,
-		evtCh,
-		testutil.AsyncWait,
-		"timeout waiting for SlotBattleEvent",
-	)
-	battle, ok := evt.Data.(forging.SlotBattleEvent)
-	require.True(t, ok)
-	assert.Equal(t, siblingSlot, battle.Slot)
-	assert.True(t, battle.Won)
+	assert.Equal(t, int64(1), recorder.n.Load())
 }
 
 // newChainUpdateEvent builds a throwaway chain.update event for saturating the

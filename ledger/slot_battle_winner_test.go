@@ -15,59 +15,153 @@
 package ledger
 
 import (
-	"bytes"
+	"context"
+	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/forging"
+	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-// The winner of a detected slot battle is whichever block the chain holds,
-// not whether the rival was refused: chain.AddBlock accepting a block says it
-// was stored, not that it displaced ours.
-func TestCheckSlotBattleWinnerFollowsChain(t *testing.T) {
+type countingSlotBattleRecorder struct{ n atomic.Int64 }
+
+func (r *countingSlotBattleRecorder) RecordSlotBattle() { r.n.Add(1) }
+
+// slotBattleHarness drives slot battles through the real blockfetch flush on a
+// real chain. The chain starts at the shared parent with neither contender on
+// it, and the security parameter is 2.
+type slotBattleHarness struct {
+	f      *siblingFixture
+	forged gledger.Block
+	events <-chan event.Event
+	recs   *countingSlotBattleRecorder
+}
+
+func newSlotBattleHarness(t *testing.T) *slotBattleHarness {
+	t.Helper()
+	f := newSiblingFixture(t)
+	f.ls.config.CardanoNodeConfig = newTestShelleyGenesisCfgWithK(t, 2)
+	f.ls.currentEra = eras.ConwayEraDesc
+	f.ls.publishSnapshotsLocked()
+	require.NoError(t, f.ls.chain.Rollback(
+		context.Background(),
+		ocommon.NewPoint(f.parent.SlotNumber(), f.parent.Hash().Bytes()),
+	))
+	bus := newTestEventBus(t, nil)
+	f.ls.config.EventBus = bus
+	forged := f.newSibling(t, 0x01)
+	f.ls.config.ForgedBlockChecker = &mockForgedBlockChecker{
+		forgedSlots: map[uint64][]byte{siblingSlot: forged.Hash().Bytes()},
+	}
+	recs := &countingSlotBattleRecorder{}
+	f.ls.SetSlotBattleRecorder(recs)
+	_, evtCh := bus.Subscribe(forging.SlotBattleEventType)
+	return &slotBattleHarness{f: f, forged: forged, events: evtCh, recs: recs}
+}
+
+// deliver hands a block to the chain the way blockfetch does.
+func (h *slotBattleHarness) deliver(t *testing.T, block gledger.Block) {
+	t.Helper()
+	h.f.ls.pendingBlockfetchEvents = []BlockfetchEvent{{
+		Block: block,
+		Point: ocommon.NewPoint(block.SlotNumber(), block.Hash().Bytes()),
+	}}
+	require.NoError(t, h.f.ls.flushPendingBlockfetchBlocksDeferred(nil))
+}
+
+// extend delivers n blocks on top of base and returns the last one.
+func (h *slotBattleHarness) extend(
+	t *testing.T,
+	base gledger.Block,
+	n int,
+) gledger.Block {
+	t.Helper()
+	for range n {
+		base = newSiblingTestBlock(
+			t, base.BlockNumber()+1, base.SlotNumber()+10,
+			base.Hash(), 0x44, 0x90, 1,
+		)
+		h.deliver(t, base)
+	}
+	return base
+}
+
+func (h *slotBattleHarness) requireNoEvent(t *testing.T, msg string) {
+	t.Helper()
+	testutil.RequireNoReceive(t, h.events, 100*time.Millisecond, msg)
+}
+
+func (h *slotBattleHarness) requireWon(t *testing.T, want bool) {
+	t.Helper()
+	evt := testutil.RequireReceive(
+		t, h.events, testutil.AsyncWait,
+		"timeout waiting for SlotBattleEvent",
+	)
+	battle, ok := evt.Data.(forging.SlotBattleEvent)
+	require.True(t, ok)
+	assert.Equal(t, siblingSlot, battle.Slot)
+	assert.Equal(t, h.forged.Hash().Bytes(), battle.LocalBlockHash)
+	assert.Equal(t, h.f.rival.Hash().Bytes(), battle.RemoteBlockHash)
+	assert.Equal(t, want, battle.Won)
+}
+
+// The rival is accepted while our block is off the chain, so a verdict taken
+// when it arrives says we lost. Chain selection then switches to our block;
+// the battle must report that, and only once the slot is settled.
+func TestSlotBattleWinnerFollowsLaterChainSwitch(t *testing.T) {
 	t.Parallel()
 
-	rivalHash := []byte{0x0A, 0x0B, 0x0C, 0x0D}
-	for _, tc := range []struct {
-		name string
-		// localOnChain selects whether the block this node forged for the
-		// slot is the one the chain holds.
-		localOnChain bool
-	}{
-		{name: "forged block is on the chain", localOnChain: true},
-		{name: "forged block is not on the chain", localOnChain: false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
+	h := newSlotBattleHarness(t)
+	h.deliver(t, h.f.rival)
+	assert.Equal(t, int64(1), h.recs.n.Load(),
+		"the battle is counted when detected")
+	h.requireNoEvent(t, "winner must not be reported on arrival")
 
-			f := newSiblingFixture(t)
-			localHash := bytes.Repeat([]byte{0x01}, 32)
-			if tc.localOnChain {
-				localHash = f.rival.Hash().Bytes()
-			}
-			bus := newTestEventBus(t, nil)
-			f.ls.config.EventBus = bus
-			f.ls.config.ForgedBlockChecker = &mockForgedBlockChecker{
-				forgedSlots: map[uint64][]byte{siblingSlot: localHash},
-			}
-			_, evtCh := bus.Subscribe(forging.SlotBattleEventType)
+	pc := h.f.ls.chain
+	require.NoError(t, pc.Rollback(
+		context.Background(),
+		ocommon.NewPoint(h.f.parent.SlotNumber(), h.f.parent.Hash().Bytes()),
+	))
+	require.NoError(t, pc.AddBlock(context.Background(), h.forged, nil))
 
-			f.ls.checkSlotBattle(BlockfetchEvent{
-				Point: ocommon.Point{Slot: siblingSlot, Hash: rivalHash},
-			})
+	last := h.extend(t, h.forged, 1)
+	h.requireNoEvent(t, "winner must wait for the slot to settle")
+	h.extend(t, last, 1)
+	h.requireWon(t, true)
+}
 
-			evt := testutil.RequireReceive(
-				t, evtCh, testutil.AsyncWait,
-				"timeout waiting for SlotBattleEvent",
-			)
-			battle, ok := evt.Data.(forging.SlotBattleEvent)
-			require.True(t, ok)
-			assert.Equal(t, tc.localOnChain, battle.Won,
-				"Won must report whether the forged block is on the chain")
-		})
-	}
+// The rival is accepted and stays the chain: the forged block lost.
+func TestSlotBattleWinnerRivalKeepsChain(t *testing.T) {
+	t.Parallel()
+
+	h := newSlotBattleHarness(t)
+	h.deliver(t, h.f.rival)
+	last := h.extend(t, h.f.rival, 1)
+	h.requireNoEvent(t, "winner must wait for the slot to settle")
+	h.extend(t, last, 1)
+	h.requireWon(t, false)
+}
+
+// Our block is the tip when the rival arrives, so the chain refuses the
+// rival; the battle is still counted and reports the forged block as winner.
+func TestSlotBattleWinnerRefusedRivalLeavesForgedOnChain(t *testing.T) {
+	t.Parallel()
+
+	h := newSlotBattleHarness(t)
+	require.NoError(t, h.f.ls.chain.AddBlock(
+		context.Background(), h.forged, nil,
+	))
+	h.deliver(t, h.f.rival)
+	assert.Equal(t, int64(1), h.recs.n.Load())
+	last := h.extend(t, h.forged, 1)
+	h.requireNoEvent(t, "winner must wait for the slot to settle")
+	h.extend(t, last, 1)
+	h.requireWon(t, true)
 }
