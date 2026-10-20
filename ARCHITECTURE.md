@@ -5043,8 +5043,9 @@ the ledger tip (`GetLedgerTip`), the proposed protocol parameter update map
 (empty when the acquired point is in Conway or later, and refused in earlier
 eras), DRep state,
 account state, and the unfiltered stake distribution
-(`GetStakeDistribution`). Pool state, the version-1 pool distribution,
-non-myopic member rewards, reward info, reward provenance and the debug
+(`GetStakeDistribution`), and the version-1 pool distribution
+(`GetPoolDistr`, optionally filtered by pool). Pool state, non-myopic
+member rewards, reward info, reward provenance and the debug
 epoch-state queries are not answered, and the failed query ends the client's
 session. At node-to-client version 21 the Shelley genesis configuration
 encodes initial funds as an empty map, staking as a record of an empty pools

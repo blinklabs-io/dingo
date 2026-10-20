@@ -1236,8 +1236,8 @@ func (ls *LedgerState) queryShelley(ctx context.Context, query *olocalstatequery
 //
 // Point-pinning coverage audit (every case below, classified):
 //
-// Honors at today: ShelleyStakeDistributionQuery, ShelleyStakeDistribution2Query
-// and ShelleyPoolDistr2Query (the last two via PoolStakeDistribution, resolving at to its epoch and reading
+// Honors at today: ShelleyStakeDistributionQuery, ShelleyStakeDistribution2Query,
+// ShelleyPoolDistrQuery and ShelleyPoolDistr2Query (the last three via PoolStakeDistribution, resolving at to its epoch and reading
 // that epoch's persisted mark snapshot; StakeDistribution's circulating-
 // supply denominator additionally resolves historically via
 // GetNetworkStateAsOfSlot), ShelleyCurrentProtocolParamsQuery

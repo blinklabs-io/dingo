@@ -101,3 +101,67 @@ func TestQueryShelleyPoolDistrMatchesLegacyClientResult(t *testing.T) {
 	require.Empty(t, decodePoolDistrResult(t, emptyResult).Results,
 		"an explicit empty set selects no pools")
 }
+
+// TestQueryShelleyPoolDistr_ViaGetCBOR covers the legacy GetPoolDistr wrapped
+// in the GetCBOR combinator (queryShelleyCbor), a path distinct from the
+// direct query above. The tag-24 content must decode as the same
+// PoolDistrResult a direct reply does, with and without a pool filter.
+func TestQueryShelleyPoolDistr_ViaGetCBOR(t *testing.T) {
+	t.Parallel()
+	db := newTestDB(t)
+	vrfA := make([]byte, 32)
+	vrfB := make([]byte, 32)
+	for i := range vrfA {
+		vrfA[i] = 0xAA
+		vrfB[i] = 0xBB
+	}
+	poolA := make([]byte, 28)
+	poolB := make([]byte, 28)
+	for i := range poolA {
+		poolA[i] = 0x11
+		poolB[i] = 0x22
+	}
+	const snapshotEpoch = 0
+	pkhA := seedPoolDistr2Fixture(t, db, poolA, vrfA, 3_000_000, snapshotEpoch)
+	pkhB := seedPoolDistr2Fixture(t, db, poolB, vrfB, 1_000_000, snapshotEpoch)
+	ls := newPoolDistr2Ledger(t, db)
+
+	query := func(pools ...lcommon.PoolKeyHash) *localstatequery.BlockQuery {
+		inner := poolDistrQuery(pools...).Query.(*localstatequery.ShelleyQuery).Query
+		return &localstatequery.BlockQuery{Query: &localstatequery.ShelleyQuery{
+			Query: &localstatequery.ShelleyCborQuery{Query: inner},
+		}}
+	}
+	decode := func(q *localstatequery.BlockQuery) localstatequery.PoolDistrResult {
+		result, err := ls.Query(t.Context(), q, QueryPoint{})
+		require.NoError(t, err, "GetCBOR-wrapped GetPoolDistr must not error")
+		arr, ok := result.([]any)
+		require.True(t, ok, "expected the []any result wrapper")
+		require.Len(t, arr, 1)
+		tag, ok := arr[0].(cbor.Tag)
+		require.True(t, ok, "expected a tag-24 CBOR.Tag, got %T", arr[0])
+		require.EqualValues(t, cbor.CborTagCbor, tag.Number)
+		content, ok := tag.Content.([]byte)
+		require.True(t, ok, "tag content must be raw CBOR bytes, got %T", tag.Content)
+		var decoded localstatequery.PoolDistrResult
+		_, err = cbor.Decode(content, &decoded)
+		require.NoError(t, err, "tag-24 content must decode as a PoolDistrResult")
+		return decoded
+	}
+
+	all := decode(query())
+	require.Len(t, all.Results, 2)
+	entryA, ok := all.Results[lcommon.PoolId(pkhA)]
+	require.True(t, ok)
+	require.Equal(t, 0, entryA.StakeFraction.Cmp(big.NewRat(3, 4)))
+	entryB, ok := all.Results[lcommon.PoolId(pkhB)]
+	require.True(t, ok)
+	require.Equal(t, 0, entryB.StakeFraction.Cmp(big.NewRat(1, 4)))
+
+	filtered := decode(query(pkhA))
+	require.Len(t, filtered.Results, 1)
+	filteredA, ok := filtered.Results[lcommon.PoolId(pkhA)]
+	require.True(t, ok)
+	require.Equal(t, 0, filteredA.StakeFraction.Cmp(big.NewRat(3, 4)),
+		"filtering must not renormalize stake fractions")
+}
