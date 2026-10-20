@@ -1034,3 +1034,39 @@ func TestBlockApplyStagesAttributeBatchTime(t *testing.T) {
 		})
 	}
 }
+
+// TestBlockApplyStagesObservedOnlyWithBatchLatency pins prepare and commit to
+// the chunks dingo_ledger_block_apply_batch_latency_seconds observes. Crossing
+// an epoch boundary first commits a chunk that applies no block, which records
+// no batch latency; a prepare or commit sample from it would have no window to
+// fall inside.
+func TestBlockApplyStagesObservedOnlyWithBatchLatency(t *testing.T) {
+	t.Parallel()
+
+	ls, _, firstShelley := newByronShelleyBoundaryLedger(t)
+	results := make(chan readChainResult, 1)
+	results <- readChainResult{blocks: []gledger.Block{firstShelley}}
+	close(results)
+	require.NoError(t, ls.ledgerProcessBlocksFromSource(
+		context.Background(),
+		results,
+	))
+	rolloverCount, _ := blockStageSampleCount(
+		t, &ls.metrics, blockStageEpochRollover,
+	)
+	require.Equal(
+		t, uint64(1), rolloverCount,
+		"the scenario must cross an epoch boundary",
+	)
+
+	batchCount, _ := blockApplyBatchLatencySample(t, &ls.metrics)
+	require.Equal(t, uint64(1), batchCount)
+	for _, stage := range []string{blockStagePrepare, blockStageCommit} {
+		count, _ := blockStageSampleCount(t, &ls.metrics, stage)
+		assert.Equal(
+			t, batchCount, count,
+			"stage %q must be observed once per batch latency sample",
+			stage,
+		)
+	}
+}

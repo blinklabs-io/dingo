@@ -1048,10 +1048,15 @@ these series carries a connection or peer label.
   snapshot, replay header preparation), `validate` and `apply` run inside the
   transaction body on every path, batched or not, and `commit` is the
   transaction's time outside its body (tip and candidate checks, worker-pool
-  wait, begin, commit). The stages never sum to more than the batch latency;
-  the remainder is block processing outside `validate` and `apply` plus the
-  post-commit tip update. `header_verify` and `epoch_rollover` run outside
-  that window.
+  wait, begin, commit). `prepare` and `commit` are recorded only for a chunk
+  that commits at least one block, the same chunks the batch latency records;
+  `validate` and `apply` are also recorded for a chunk that fails or applies
+  no block. For a recorded chunk the four stages sum to no more than its batch
+  latency; the remainder is the rest of the transaction body (block
+  processing outside `validate`, including each validated transaction's
+  immediate state write, and the nonce, replay-row and tip writes) plus the
+  post-commit tip update. `header_verify` and `epoch_rollover` run
+  outside that window.
 - `dingo_ledger_blockfetch_batch_in_flight`,
   `dingo_ledger_blockfetch_continuation_pending` and
   `dingo_ledger_blockfetch_connection_selected` mirror

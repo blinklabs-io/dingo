@@ -9145,13 +9145,13 @@ func (ls *LedgerState) processBlocksFromSource(
 			preverifiedSignatures := preverifyTransactionSignatures(
 				trustedReplayTransactions,
 			)
-			ls.metrics.observeBlockStage(
-				blockStagePrepare,
-				time.Since(batchApplyStart),
-			)
+			// prepare and commit are observed only beside the batch latency
+			// below, so a chunk that applies no block or fails records
+			// neither.
+			prepareElapsed := time.Since(batchApplyStart)
 			submitStart := time.Now()
-			// Body time is subtracted from the submit's wall time to leave
-			// the commit stage; a retried body accumulates.
+			// The body's wall time, subtracted from the submit's to leave
+			// the commit stage.
 			var bodyElapsed time.Duration
 			err = ls.submitBlockApplyDBTxn(
 				ctx,
@@ -9159,7 +9159,7 @@ func (ls *LedgerState) processBlocksFromSource(
 				candidateTip,
 				func(txn *database.Txn) error { //nolint:contextcheck
 					bodyStart := time.Now()
-					defer func() { bodyElapsed += time.Since(bodyStart) }()
+					defer func() { bodyElapsed = time.Since(bodyStart) }()
 					replayWorkers := startReplayHeaderJobs(
 						ctx, nextBatch[i:end], verifiedReplayHeaders,
 						replayHeaderJobs, verifyReplayHeader,
@@ -9561,12 +9561,7 @@ func (ls *LedgerState) processBlocksFromSource(
 					return nil
 				},
 			)
-			if err == nil {
-				ls.metrics.observeBlockStage(
-					blockStageCommit,
-					max(time.Since(submitStart)-bodyElapsed, 0),
-				)
-			}
+			commitElapsed := max(time.Since(submitStart)-bodyElapsed, 0)
 			if err != nil {
 				clear(trustedReplayUtxos)
 				trustedReplayUtxos = nil
@@ -9680,6 +9675,8 @@ func (ls *LedgerState) processBlocksFromSource(
 					blocksProcessed,
 					time.Since(batchApplyStart),
 				)
+				ls.metrics.observeBlockStage(blockStagePrepare, prepareElapsed)
+				ls.metrics.observeBlockStage(blockStageCommit, commitElapsed)
 				// After advancing the tip, first honor any TestXHardForkAtEpoch
 				// override so queries surface the pinned epoch ahead of time;
 				// then classify an indefinite final era as
