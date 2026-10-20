@@ -242,6 +242,34 @@ func (a *NodeAdapter) decodedBlockByID(
 	return block, decoded, nil
 }
 
+// blockTransactions returns a block's transactions in block order. A
+// certifying ranking block carries none in its body: its transactions are the
+// endorser-block transactions it applied, as the node-to-client chain-sync
+// server serves them inlined. When those are unavailable (see
+// ledger.CertifiedEndorserTransactions: the persisted endorser-block
+// transaction list was pruned or never stored), and for every other block,
+// the decoded body is used.
+func (a *NodeAdapter) blockTransactions(
+	ctx context.Context,
+	decoded lcommon.Block,
+) ([]lcommon.Transaction, error) {
+	ebTxs, ok, err := a.ledgerState.CertifiedEndorserTransactions(
+		ctx,
+		decoded,
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"get endorser transactions for block %s: %w",
+			decoded.Hash().String(),
+			err,
+		)
+	}
+	if !ok {
+		return decoded.Transactions(), nil
+	}
+	return ebTxs, nil
+}
+
 // BlockTransactionHashes returns the transaction hashes of a block in block
 // order.
 func (a *NodeAdapter) BlockTransactionHashes(
@@ -252,7 +280,10 @@ func (a *NodeAdapter) BlockTransactionHashes(
 	if err != nil {
 		return nil, err
 	}
-	txs := decoded.Transactions()
+	txs, err := a.blockTransactions(ctx, decoded)
+	if err != nil {
+		return nil, err
+	}
 	ret := make([]string, 0, len(txs))
 	for _, tx := range txs {
 		ret = append(ret, tx.Hash().String())
@@ -261,9 +292,8 @@ func (a *NodeAdapter) BlockTransactionHashes(
 }
 
 func transactionCBORInfos(
-	block lcommon.Block,
+	txs []lcommon.Transaction,
 ) []BlockTransactionCBORInfo {
-	txs := block.Transactions()
 	ret := make([]BlockTransactionCBORInfo, 0, len(txs))
 	for _, tx := range txs {
 		ret = append(ret, BlockTransactionCBORInfo{
@@ -284,7 +314,11 @@ func (a *NodeAdapter) BlockTransactionCBOR(
 	if err != nil {
 		return nil, err
 	}
-	return transactionCBORInfos(decoded), nil
+	txs, err := a.blockTransactions(ctx, decoded)
+	if err != nil {
+		return nil, err
+	}
+	return transactionCBORInfos(txs), nil
 }
 
 // LatestBlockTransactionCBOR returns the transactions of the chain tip block
@@ -300,7 +334,11 @@ func (a *NodeAdapter) LatestBlockTransactionCBOR(
 	if err != nil {
 		return nil, err
 	}
-	return transactionCBORInfos(decoded), nil
+	txs, err := a.blockTransactions(ctx, decoded)
+	if err != nil {
+		return nil, err
+	}
+	return transactionCBORInfos(txs), nil
 }
 
 // BlockAddresses returns every address a block's transactions pay to or spend
@@ -331,7 +369,10 @@ func (a *NodeAdapter) BlockAddresses(
 		byHash[hex.EncodeToString(tx.Hash)] = tx
 	}
 
-	txs := decoded.Transactions()
+	txs, err := a.blockTransactions(ctx, decoded)
+	if err != nil {
+		return nil, err
+	}
 	outputAddresses := make([][]string, 0, len(txs))
 	spent := make([][]models.Utxo, 0, len(txs))
 	for _, tx := range txs {
