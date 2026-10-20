@@ -2350,6 +2350,12 @@ paths, where the point is to report before the goroutine unwinds.
   observes `LedgerState`'s shutdown context, so a chainsync subscriber already
   waiting for a reused connection can return before the terminal EventBus close
   waits for in-flight handlers.
+- Blockfetch header admission releases `chainsyncBlockfetchMutex` while it
+  performs epoch lookups and stateful header verification. It then reacquires
+  the mutex and accepts the result only if the event still belongs to the
+  active batch. Admission has the same 30-second bound as a busy blockfetch
+  batch. A deadline records deferred header validation, so the block is fully
+  rechecked during ledger apply rather than accepted without stateful checks.
 - `RequestRange`'s terminal outcome (success, `NoBlocks`, or any
   transport/protocol failure) always arrives asynchronously through its
   `RangeDoneFunc`, published as a `BlockfetchEvent` with `BatchDone` set and
@@ -2881,7 +2887,9 @@ publisher's Ed25519 public key; the signature binds a monotonic sequence, the
 HTTPS archive URL, its exact compressed size, and its BLAKE2b-256 digest.
 Manifest and archive requests require HTTPS at the initial URL and through
 every redirect, even when private mirror addresses are allowed. Archive bytes
-are counted and hashed through EOF before the metadata transaction begins.
+are copied to a bounded temporary file and checked against the signed size and
+digest before gzip or tar parsing; only an authenticated archive reaches the
+parser.
 
 The last applied manifest sequence and digest are stored with the snapshot
 rows in one metadata transaction. A lower sequence is rejected unless the
@@ -4347,8 +4355,8 @@ finite, a header past it fails with
 epoch/nonce cache.
 
 A known transition (`TransitionKnown`) is set by one of three
-`ls.evaluateXXX` methods, run in this order at every block-apply tip update,
-startup, and (a rollback-surviving subset of them) rollback:
+`ls.evaluateXXX` methods, considered in this order at every block-apply tip
+update, startup, and (a rollback-surviving subset of them) rollback:
 `evaluateTriggerAtEpoch` (the `TestXHardForkAtEpoch` config override, for the
 era's `TriggerAtEpoch` kind), `evaluateProtocolVersionBump` (the era's
 `TriggerAtVersion` kind: every historical Cardano hard fork before Conway's
@@ -4386,6 +4394,12 @@ rollback or restart recomputes it without stored state; an epoch shorter
 than `2 * stabilityWindow` counts from its own first slot. The forecast never
 changes `ls.currentEra` or what `processEpochRollover` actually enacts, both
 of which re-read the real quorum state independently at the boundary.
+Runtime evaluation snapshots the era, epoch, tip, parameters, and rollback
+generation under the ledger mutex, then performs the chain lookup and
+parameter forecast asynchronously. It publishes `TransitionKnown` only when
+the epoch and generation still match. Startup performs the same evaluation
+synchronously before event processing begins. This keeps iterator and
+database waits outside the ledger mutex while retaining rollback safety.
 Without this evaluator,
 `transitionInfo` stays `TransitionUnknown` for the entire epoch preceding
 any version-triggered hard fork, so the ordinary tip-anchored safe zone (see
@@ -8603,7 +8617,7 @@ Endorser-block transaction selection is bounded by the slot it belongs to. Every
 
 The node always validates the aggregate reference-script budget between steps 5 and 7, before adoption or diffusion, via `newForgedBlockValidator`'s mandatory `ValidateBlockReferenceScripts` call. Unless `validateForgedBlock` is explicitly disabled in config (enabled by default, fail closed), that same call additionally runs full self-validation: (a) VRF proof and KES signature verification of the block header, (b) body-hash non-zero guard, and (c) per-transaction ledger rule validation against the current UTxO state with an intra-block overlay so outputs created by earlier transactions in the same block are visible to later ones. A failing block is logged, counted in `dingo_forge_validation_failed_total`, and dropped without being adopted or diffused. Validation wall-clock time is recorded in the `dingo_forge_validation_duration_seconds` histogram. An operator may set `validateForgedBlock: false` to skip the full self-validation and accept that risk in exchange for lower forge-to-diffusion latency; the aggregate reference-script budget check still runs regardless, and retains the explicit Musashi prototype bypass.
 
-The per-transaction step runs in a transaction-validation session, which stops being current when a block apply, epoch rollover or rollback is in flight or publishes a new snapshot generation (`stillCurrent` reports false). A non-current session has judged nothing, and on a producer one is routinely in flight: often the apply of the forged block's own parent. `ValidateForgedBlock` therefore waits for the next snapshot publication or finished transition and opens a new session, as long as the ledger tip is still the one validation started from, has become the block's parent, or lies on the primary chain while that chain still ends at the parent. The last case is the trailing ledger the forger's tip gates admit: the block is built on the primary chain tip while the ledger may still have up to two blocks to apply, and applying one of them moves the ledger along the block's own chain. It gives up when the forged slot ends or its end cannot be placed, after a fixed number of attempts, or when the tip moves anywhere else, a chain the block does not extend, and returns `forging.ErrForgedBlockStateChanged`. The forger drops such a block unjudged: it is never adopted or diffused, `Forge_could_not_forge_int` moves, and the skip is logged at Warn without counting on `dingo_forge_validation_failed_total`, which stays reserved for a block self-validation found invalid.
+The per-transaction step runs in a transaction-validation session, which stops being current when a block apply, epoch rollover or rollback is in flight or publishes a new snapshot generation (`stillCurrent` reports false). A non-current session has judged nothing, and on a producer one is routinely in flight: often the apply of the forged block's own parent. A session also judges nothing while the applied ledger tip trails the block's parent along the primary chain: the per-block overlay carries only the block's own effects, so the spent inputs and certificates of the unapplied ancestors the forger admits would be in neither the ledger state nor the overlay, and a block valid there could be unapplicable on its own parent. `ValidateForgedBlock` therefore takes a verdict only once the ledger has reached the parent. A session whose tip is neither the parent nor on the primary chain still ending at it (a tip past the parent, such as an applied rival of an alternative block, a tip behind a parent the primary chain has since passed, or a tip off the primary chain) judges nothing and drops the block at once. While the tip trails the parent on that chain, validation waits for the next snapshot publication or finished transition and opens a new session, as long as the ledger tip is still the one validation started from, has become the block's parent, or lies on the primary chain while that chain still ends at the parent. The last case is the trailing ledger the forger's tip gates admit: the block is built on the primary chain tip while the ledger may still have up to two blocks to apply, and applying one of them moves the ledger along the block's own chain. It gives up when the forged slot ends or its end cannot be placed, after a fixed number of attempts, or when the tip moves anywhere else, a chain the block does not extend, and returns `forging.ErrForgedBlockStateChanged`. The forger drops such a block unjudged: it is never adopted or diffused, `Forge_could_not_forge_int` moves, and the skip is logged at Warn without counting on `dingo_forge_validation_failed_total`, which stays reserved for a block self-validation found invalid.
 
 ### Pool Credentials (`ledger/forging/keys.go`, `keystore/`)
 
@@ -8901,7 +8915,7 @@ Experimental Dijkstra top-N committee voting, active only under the Dijkstra/Lei
 - **Certificate admission**: before asynchronous certified endorser-block fetches or apply-time fetch and transaction application, ledger admission checks that the Dijkstra header certification flag agrees with body certificate presence, resolves the certified announcement from the CertRB's parent, loads the same historical committee and threshold used for voting, then rejects malformed signers, a keyless signer, insufficient signer stake, or an invalid aggregate signature. Replay and backfill use this same gate, so an unverified certificate cannot authorize endorser-block effects.
 - **State lifecycle**: all state is in-memory, split across two stores. Raw votes live in a TTL- and size-bounded *serving store* (10 minutes, 8192 entries, oldest evicted) used only for relaying to peers. Dedup and tally accounting live in a separate *record ledger* (one record per accepted `(slot, voter_id)`, including the vote's signing-context reference, admission-capped at 4x the serving store with reject-new semantics — the cap gates only unverified peer votes; verified and locally emitted votes bypass it, being unforgeable and dedup-bounded to one record per slot and registered voter) that is never size-evicted: records are pruned only in lockstep with their endorser-block/signing-context tally, so a vote whose tally is still accumulating can never be re-counted after its serving entry is evicted, and first-wins equivocation detection stays durable. The record cap also transitively bounds the tally map. Acquired EBs retain their slot and epoch, and epoch transitions or chain rollbacks prune stale acquisitions, announcements, corresponding pending candidates, and their exact global/per-connection counts together; rollbacks also drop votes, tallies, and records past the rollback point and clear the committee memo.
 
-The manager implements the `ouroboros.LeiosVoteHandler` interface and is assigned to the Ouroboros component post-construction. The LeiosVotes server callback must return exactly the requested number of votes, so it blocks (with a per-connection cursor over the append-ordered vote log, never echoing a vote back to its origin) until enough votes arrive or the protocol shuts down; dingo's LeiosVotes client requests one vote at a time with pipelining for streaming delivery.
+The manager implements the `ouroboros.LeiosVoteHandler` interface and is assigned to the Ouroboros component post-construction. The LeiosVotes server callback must return exactly the requested number of votes, so it blocks (with a per-connection cursor over the append-ordered vote log, never echoing a vote back to its origin) until enough votes arrive or the protocol shuts down. A requested count of zero or above gouroboros's `leiosvotes.MaxRequestNextCount` is rejected by both the callback and `VoteManager.NextVotes` (`ErrVoteRequestCount`) before any allocation or wait, so a peer-supplied count cannot size the result buffer; dingo's LeiosVotes client requests one vote at a time with pipelining for streaming delivery.
 
 ### Leios Pipeline (`ledger/leios/`)
 
@@ -8925,6 +8939,10 @@ verification key signs the ledger-state and in-progress immutable payload.
 The latter is ancillary-key-signed data, not stake-certified data. Normal
 Ouroboros validation resumes at the imported point and covers the gap and all
 future network blocks.
+Archive extraction counts decompressed bytes beneath Go's tar reader against a
+bootstrap-wide budget; ancillary preflight has a per-archive stream limit. Both
+readers check cancellation on each read, so metadata and skipped member bodies
+count toward these limits.
 
 The post-download ImmutableDB copy completes before ledger-state import starts.
 The copy persists block and transaction metadata as well as block blobs, so it
@@ -8989,8 +9007,10 @@ If the selected state predates the existing stable point, repair does not alter
 block or ledger contents, keeps the marker pending, and retries for a newer
 artifact.
 
-Two artifact backends are supported, selected by `mithril.backend`
-(`--mithril-backend`, `DINGO_MITHRIL_BACKEND`):
+One artifact backend is supported, selected by `mithril.backend`
+(`--mithril-backend`, `DINGO_MITHRIL_BACKEND`); the key accepts an empty value
+or `v2`. Setting it to `v1` fails configuration validation, and the `dingo
+mithril list`/`show` commands refuse it the same way:
 
 - `v2` (default): the incremental Cardano database backend
   (`CardanoDatabase` signed entity, `/artifact/cardano-database`). The
@@ -9005,24 +9025,16 @@ Two artifact backends are supported, selected by `mithril.backend`
   digest map (already-verified trios are skipped on resume), and the ancillary
   archive (ledger state) is verified via its Ed25519-signed
   `ancillary_manifest.json` using the per-network ancillary verification key.
-- `v1` (legacy): the full-database snapshot backend
-  (`CardanoImmutableFilesFull`, `/artifact/snapshots`), a single tarball
-  download bound to the certificate chain via the `snapshot_digest` protocol
-  message part. It has no signed ancillary-state boundary and is therefore
-  rejected when certificate verification is enabled. Upstream Mithril is
-  phasing this artifact type out. At the library level an empty
-  `BootstrapConfig.Backend`/`SyncConfig.Backend` selects v2; callers must
-  specify `v1` explicitly to use the legacy unverified workflow.
 
 Package layout:
 
-1. `client.go` / `client_v2.go` query the Mithril aggregator artifact and
-   certificate endpoints for the respective backends
+1. `client.go` / `client_v2.go` query the Mithril aggregator certificate and
+   Cardano database artifact endpoints
 2. `download.go` downloads and extracts archives, including resumable
-   downloads with idle-stall retry handling (shared by both backends)
-3. `bootstrap.go` verifies the certificate chain, dispatches on the
-   configured backend, and orchestrates the v1 snapshot workflow;
-   `bootstrap_v2.go` orchestrates the v2 digest/immutable/ancillary workflow
+   downloads with idle-stall retry handling
+3. `bootstrap.go` verifies the certificate chain and dispatches to
+   `bootstrap_v2.go`, which orchestrates the v2 digest/immutable/ancillary
+   workflow
 
 The certificate-chain walk (`bootstrap.go`) runs before any certificate is
 trusted, so it is bounded on every axis the aggregator controls. Each
@@ -9048,15 +9060,15 @@ also carry completed/total archive counts. Bootstrap logs add the phase,
 artifact, snapshot identity, and archive/destination paths so interleaved
 download and extraction output remains attributable to one operation.
 
-Compressed downloads have a per-object limit: 512 GiB for a v1 archive, and
-for v2 objects 1 GiB per immutable archive, 256 MiB for the digest list and
-64 GiB for the ancillary archive. Operators set `mithril.downloadMaxBytes`
-(`--mithril-download-max-bytes`, `DINGO_MITHRIL_DOWNLOAD_MAX_BYTES`); library
-callers can set `SyncConfig.DownloadMaxBytes`, `BootstrapConfig.DownloadMaxBytes`,
-or `DownloadConfig.MaxBytes`. Zero selects the built-in limit and negatives
-fail validation. A positive value replaces the limit of every v1 and v2
-object. `ExpectedSize`, when positive, remains
-an exact-size requirement and cannot exceed the configured maximum.
+Compressed downloads have a per-object limit: 1 GiB per immutable archive,
+256 MiB for the digest list and 64 GiB for the ancillary archive. Operators set
+`mithril.downloadMaxBytes` (`--mithril-download-max-bytes`,
+`DINGO_MITHRIL_DOWNLOAD_MAX_BYTES`); library callers can set
+`SyncConfig.DownloadMaxBytes`, `BootstrapConfig.DownloadMaxBytes`, or
+`DownloadConfig.MaxBytes`. Zero selects the built-in limit and negatives fail
+validation. A positive value replaces the limit of every object.
+`ExpectedSize`, when positive, remains an exact-size requirement and cannot
+exceed the configured maximum.
 Resumed prefixes count against the limit; responses without Content-Length
 are bounded while streaming. An extra byte is read only as an overflow
 probe and is never written. Size-limit errors are terminal for the downloader.
@@ -9088,11 +9100,13 @@ memory limit, configurable through `WithZstdLimits`.
 Extraction also bounds the archive's shape while it is read: an entry-count
 cap (directories and empty files count), per-member and aggregate expanded-byte
 caps, and an expansion bound of 256 times the compressed bytes read plus a
-64 MiB floor. Each archive type except the v1 full snapshot admits only the
+64 MiB floor. Each archive type admits only the
 members its consumer reads, and a refused member is never created. An
-immutable archive admits only its own certified trio and SHA-256-checks each
-file against the certified digest list as it is written. Ledger entries are
-accepted only from the ancillary archive. The
+immutable archive admits only its own certified trio under `immutable/`; any
+other member, including a `ledger/` tree, fails extraction with
+`ErrExtractUnexpectedMember` and nothing outside `immutable/` is written.
+Each trio file is SHA-256-checked against the certified digest list as it is
+written. Ledger entries are accepted only from the ancillary archive. The
 digest list archive admits one top-level JSON file of at most 64 MiB.
 
 A verified v2 ancillary archive is read twice through one open descriptor. The
@@ -9111,15 +9125,13 @@ its size limit against a 32 GiB budget. Raising the limit lowers concurrency;
 an override above 32 GiB allows only one download, with capacity equal to that
 override.
 
-Both backends produce the same `BootstrapResult` (immutable directory,
-ancillary ledger-state directory, synthesized snapshot metadata), so
-everything downstream of `Bootstrap()` is backend-agnostic.
+`Bootstrap()` returns a `BootstrapResult` (immutable directory,
+ancillary ledger-state directory, synthesized snapshot metadata).
 
-`snapshot.Network`/`Digest` (v1) and `artifact.Network`/`Hash` (v2) arrive
-from the aggregator before certificate/hash verification runs, so
-`bootstrap.go`'s `validateSnapshotIdentity` rejects them before either
-backend derives a filesystem path from them. The network must be either
-one of the default networks (`AcceptedNetworks()`, mirroring
+`artifact.Network`/`Hash` arrive from the aggregator before certificate/hash
+verification runs, so `bootstrap.go`'s `validateSnapshotIdentity` rejects them
+before the backend derives a filesystem path from them. The network must be
+either one of the default networks (`AcceptedNetworks()`, mirroring
 `AcceptedBackends()`) or an exact match for the operator's own configured
 `BootstrapConfig.Network` — trusted because it's already restricted to
 alphanumeric/hyphen/underscore by `internal/config`'s `ValidateNetworkName`
@@ -9207,7 +9219,7 @@ and one replaced via `WithReplaceDestination` both end that way.
 
 Destinations come in two shapes, selected by the caller:
 
-- **Exclusive** (v1 snapshot, ancillary, digests): extraction is staged in a
+- **Exclusive** (ancillary, digests): extraction is staged in a
   fresh `0700` directory alongside the destination and renamed into place only
   once complete, so a failed run publishes nothing and a pre-existing entry is
   discarded rather than merged with. A non-empty destination is refused unless
@@ -9279,11 +9291,11 @@ and a failed trio is removed through that handle. Removing
 to the file, so a symlink there would make a failed download unlink somebody
 else's files.
 
-The same rule governs the cache-reuse fast paths — `findImmutableDir` and the
-ancillary "already extracted, skipping" checks — which decide whether a
-previous run left a usable tree and, when they say yes, skip extraction
-entirely. A candidate reached through a symlink is refused and the snapshot
-reported absent. Extraction never creates a symlink, so one in an extracted
+The same rule governs the cache-reuse fast paths — the `chunkDirIn`
+lookup and the ancillary "already extracted, skipping" checks — which decide
+whether a previous run left a usable tree and, when they say yes, skip
+extraction entirely. A candidate reached through a symlink is refused and the
+snapshot reported absent. Extraction never creates a symlink, so one in an extracted
 tree is evidence of tampering rather than something this node produced;
 treating the tree as absent re-extracts it from the verified archive, which
 discards it. Accepting it would load the chain from a directory somebody else
@@ -9307,11 +9319,7 @@ the digest's to choose — `/../..` names the download directory's *parent*,
 `/../../..` its grandparent, and so on up — and whatever it names is then
 extracted into and, on `Cleanup`, removed with `os.RemoveAll`. v2 is closed by
 a check it already had, refusing an artifact whose hash is not the one it
-recomputes, and a computed hash is hex. v1 has nothing to recompute, so
-`validateSnapshotDigest` states the constraint directly and refuses anything
-that is not a single path element, before the first join. Refused rather than
-reduced: reducing it would give two different snapshots the same cache key, and
-a stale extraction would then be reused for the wrong artifact.
+recomputes, and a computed hash is hex.
 
 Reading through the handle is half of it. A name refers to whatever occupies it
 at the moment it is resolved, so a lookup that ends by handing back a pathname
@@ -9319,13 +9327,11 @@ discards everything the handle established: the consumer resolves that name
 afresh, and a tree swapped in behind it is read as though it were the one that
 was inspected. Each candidate is therefore opened once and then read *and*
 returned through that one handle — the immutable lookups
-(`findImmutableDir`, the v2 `<extract>/immutable` check) return a `vettedDir`,
+(the v2 `<extract>/immutable` check) return a `vettedDir`,
 which carries the open handle alongside the name. Comparing a fresh resolution
 of the name against another fresh resolution would not do — a candidate replaced
 after it was read appears on both sides, the two agree, and a tree that was never
-inspected is returned. `findImmutableDir` reads its layout enumeration through
-the handle for the same reason: names taken from a re-walked pathname would be
-checked against the tree that was opened while resolving into the replacement.
+inspected is returned.
 
 The handle then travels to the consumer rather than stopping at the package
 boundary. `BootstrapResult` carries three — `ImmutableRoot`, `AncillaryRoot`,
@@ -9338,9 +9344,9 @@ Every read of a bootstrapped tree goes through one of them:
 
 | tree | opened by | read by |
 |---|---|---|
-| immutable | `findImmutableDir` / `chunkDirUnder` | `immutable.NewFromRootVerified`, once, reused for the trust-boundary tip read, the catch-up divergence check, and the blob copy (`node.WithImmutableDB`) |
+| immutable | `chunkDirIn` | `immutable.NewFromRootVerified`, once, reused for the trust-boundary tip read, the catch-up divergence check, and the blob copy (`node.WithImmutableDB`) |
 | ancillary | `ledgerDir` | the signed-manifest verification and the ledger-state import (`ledgerstate.OpenSnapshotAtOrBefore`, falling back to `ledgerstate.OpenNewestSnapshot` when verified and nothing qualifies at or before the certified tip, `ParseSnapshotFile`, `ImportConfig.State.UTxOTableFile`) |
-| extraction | `openVerifiedDir` | the ledger-state import's fallback, for v1 snapshots that keep the state in `db/ledger` |
+| extraction | `openVerifiedDir` | held for cleanup; the immutable lookup derives its handle from it |
 
 The v2 pipelined copy reads through the same handle extraction is writing
 through, verified against the same digests and bounded to the contiguous prefix
@@ -9419,7 +9425,6 @@ reader keeps:
 | tree | what travels | where it is re-checked |
 |---|---|---|
 | immutable (v2) | `BootstrapResult.ImmutableDigests`, the certified digest list the certificate's merkle root covers | `immutable.NewFromRootVerified` reads entries up to 16 MiB once, hashes the buffer, and gives that buffer to the chunk and index parsers; larger entries use a streaming verification pass, then are read and hashed into a buffer sized to the certified length |
-| immutable (v1) | nothing — v1 certifies one archive rather than the files inside it | not re-checkable; these reads are bound to the directory alone |
 | ancillary state (v2, verified) | `BootstrapResult.AncillaryDigests`, the signed manifest's map | the state is read once into a buffer; `verifySignedState` hashes that buffer and `ParseSnapshotBytes` parses the same one |
 | ancillary table (v2, verified) | the manifest's entry for it, carried down as `ImportConfig.State.UTxOTableDigest` | the table is gigabytes and is mapped rather than read, so the digest is checked against the mapped bytes the decoder then walks |
 
@@ -9474,11 +9479,9 @@ defeatable by an attacker who creates the replacement, since inode numbers are
 reused and timestamps are settable. The buffered entry binds the parser to the
 bytes verified during its open without retaining those descriptors.
 
-A digest map that is present but empty is refused rather than treated as
-absent. Absence is v1, which certifies an archive and not the files in it;
-emptiness is a v2 result that lost its digests. Selecting the unverified read on
-emptiness would make "verify nothing" reachable by removing something, which is
-the direction a fail-open always comes from.
+A result carrying no digest map, or an empty one, is refused rather than read
+unverified. Reading without digests would make "verify nothing" reachable by
+removing something, which is the direction a fail-open always comes from.
 
 The pipelined copy is bounded as well as verified, because it reads a tree the
 download pool is still filling. Archives arrive out of order, so a chunk above
@@ -9556,21 +9559,16 @@ first and consulting the files only afterwards would let a legacy state at a
 newer slot be pre-empted by a directory at an older one.
 
 The same rule governs every choice between candidates, not just slot
-directories — which layout (`ledger/` before `db/ledger/`) and which tree (the
-ancillary one before the extraction directory) are picked the same way. Only a
-candidate that is genuinely absent moves on to the next; one that exists and is
-unusable fails the lookup. Otherwise making a candidate unopenable is a way of
-selecting the one after it.
+directories — which layout (`ledger/` before `db/ledger/`) is picked the same
+way. Only a candidate that is genuinely absent moves on to the next; one that
+exists and is unusable fails the lookup. Otherwise making a candidate
+unopenable is a way of selecting the one after it.
 
-Tree selection carries one rule more, because emptying a tree is destruction
-rather than planting and would otherwise slip past the above. Nothing is looked
-at after an ancillary tree whose contents the ancillary key signed
-(`AncillaryVerified`), when it yields no usable state at any slot: the
-extraction directory is not covered by that signature, so falling through would
-let whoever emptied the first tree choose the second. Where nothing was
-verified there is no downgrade to make and the fallback stays — v1 keeps its
-ledger state in the main archive, so looking there is how that layout works at
-all.
+The ledger state comes from the ancillary tree alone; there is no fallback to
+the extraction directory. An ancillary tree whose contents the ancillary key
+signed (`AncillaryVerified`) that yields no usable state at any slot fails the
+import, since emptying a signed tree is destruction rather than planting and
+nothing else vouches for a replacement.
 
 A verified ancillary tree holding only states newer than the certified
 ImmutableDB tip is the one case that is not treated as "yields no usable
@@ -9606,7 +9604,7 @@ has to be ours* above.
 
 A result carrying no handle is refused rather than opened by name — by
 `openBootstrappedImmutable` for the immutable side and by `importLedgerState`
-for the ancillary one. Both bootstrap paths set them, so an absent handle means
+for the ancillary one. The bootstrap always sets them, so an absent handle means
 the result did not come from a vetted lookup, and a fallback would be invisible:
 the load would succeed, having read a directory nothing checked. For the same
 reason `node.WithImmutableDB` treats a nil argument as an error rather than as a
@@ -9614,8 +9612,8 @@ pathname fallback.
 
 #### What a failed ancillary download leaves behind
 
-The ancillary downloaders (`downloadAncillary` for v1, `downloadAncillaryV2`
-for v2) return the archive path alongside every error, not only on success.
+The ancillary downloader (`downloadAncillaryV2`) returns the archive path
+alongside every error, not only on success.
 `Bootstrap` records it into `BootstrapResult.AncillaryArchivePath` whenever it
 is non-empty, and `Cleanup` removes the archive and the extracted tree as two
 separate paths.
@@ -9627,8 +9625,8 @@ leaves something:
 |---|---|---|
 | every download location failed | a partial file — `DownloadSnapshot` resumes, so it deliberately does not remove one, and it returns no path for it | none yet |
 | extraction failed | complete, reported | none published — exclusive extraction stages elsewhere and renames in only once complete |
-| extracted tree holds no ledger state (v1 and v2) | complete, reported | removed by the downloader |
-| ancillary manifest unverified (v2) | complete, reported | removed by the downloader |
+| extracted tree holds no ledger state | complete, reported | removed by the downloader |
+| ancillary manifest unverified | complete, reported | removed by the downloader |
 
 The bottom two rows are where both halves have to be done deliberately, and each
 half reads as though the other covered it.
@@ -9701,7 +9699,7 @@ spent/deregistered/retired and is marked inactive (UTxOs tombstoned via
 before the metadata tip is advanced to the snapshot tip — rows are never
 deleted. Complete API-mode databases with an immutable marker are rejected
 because incremental metadata replacement is not implemented; markerless API
-databases and the v1 backend use the bootstrap path. The marker is written
+databases use the bootstrap path. The marker is written
 after sync completion clears `sync_status`, so it survives across runs.
 
 ### Artifact pinning across interrupted imports
@@ -9717,7 +9715,7 @@ mid-flight against that artifact.
 
 A resuming run (`sync_status` non-empty) passes the pinned digest to
 `BootstrapConfig.PinnedDigest`, which resolves that exact artifact
-(`GetCardanoDatabaseSnapshot` for v2, `GetSnapshot` for v1) instead of the
+(`GetCardanoDatabaseSnapshot`) instead of the
 aggregator's latest. Without the pin, `Bootstrap` re-resolves the latest
 artifact on every run: if the aggregator advanced during the interruption, the
 resume imports a second snapshot's ledger state over the first's partially
@@ -10402,6 +10400,11 @@ connection, enable `query_only`, and apply 64 KiB value, 64 KiB SQL, and
 32-column limits before execution. Query results are also capped at 1 MiB of
 decoded cell data. The original settings are restored before the connection
 returns to an injected pool.
+`get_asset_info` takes one of the same slots and scans at most 50,000 live
+asset rows. A policy or asset with more matching rows returns an explicit
+incomplete error, never a partial supply or holder count. `NewMCPServer` shares
+one slot budget across both tool sets; the exported `RegisterSQLiteTools` and
+`RegisterCardanoTools` each create their own.
 Markdown tables wrap their sanitized cells in explicit untrusted-chain-data
 delimiters. Chain-controlled text is HTML-escaped before rendering so it cannot
 terminate that envelope.
@@ -17000,9 +17003,13 @@ it retries on the origin, then on the active best peer, and when those fail the 
 and a re-sync requested, since the wait cannot end while nothing fetches the
 queued blocks. The discarded headers' invalidation is published after the ledger
 locks are released, so their Leios announcements and derived votes are removed
-without waiting for another chain event. As in the reference, the forecast is
-measured from where the peer's chain leaves the local chain: a fork that left
-before the ledger tip gets that
+without waiting for another chain event. If no fetch is active and no queued
+headers can be fetched, admission rechecks the forecast and pending snapshot
+publication, then returns `ErrChainsyncHeaderNeedsResync`. Ouroboros
+re-intersects that peer from the local chain with a non-penalizing reason,
+instead of leaving its callback waiting for work that cannot start. As in the
+reference, the forecast is measured from where the peer's chain leaves the
+local chain: a fork that left before the ledger tip gets that
 point's shorter horizon (`chainsyncForkAnchor`, `forecastSummaryFrom`). The
 intersection is resolved from the peer's recorded headers; a header extending
 the local header chain resolves on the first step, and an intersection that

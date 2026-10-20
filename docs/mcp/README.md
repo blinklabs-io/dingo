@@ -719,7 +719,7 @@ Mirrors Kupo-style indexing by finding all unspent UTxOs containing assets under
 #### `get_asset_info`
 Consolidates on-chain and off-chain asset intelligence into a unified profile:
 - **Cardano Token Registry**: Pulls off-chain name, ticker, description, website URL, and decimals from the synchronized token registry.
-- **On-Chain Circulation**: Aggregates total live unspent quantity and the count of holding UTxOs. This count is not a unique wallet or address count.
+- **On-Chain Circulation**: Aggregates total live unspent quantity and the count of holding UTxOs. This count is not a unique wallet or address count. When more than 50,000 live asset rows match, the tool returns an incomplete-result error instead of partial totals.
 - **Mint / Burn History**: Shows initial mint transaction hash, slot, and total minted/burned quantity.
 - **CIP-25 NFT Metadata**: Returns sanitized, JSON-quoted text from transaction label 721 when available; the result is marked as untrusted data.
 

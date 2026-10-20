@@ -454,6 +454,7 @@ func verifyBlockHeaderHex(
 // an attacker from forging headers that bypass verification by
 // targeting the epoch boundary window.
 
+//nolint:unused // Retained as a test helper for full pre-apply verification.
 func (ls *LedgerState) verifyBlockHeaderCryptoBeforeApply(
 	block ledger.Block,
 ) error {

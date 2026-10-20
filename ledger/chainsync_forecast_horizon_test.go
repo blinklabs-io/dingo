@@ -89,6 +89,7 @@ func TestAwaitChainsyncHeaderAdmissionHoldsHeaderPastForecastHorizon(
 	systemStart := time.Date(2026, time.August, 22, 12, 0, 0, 0, time.UTC)
 	arrival := systemStart.Add(100 * time.Second)
 	ls, waits := newFutureHeaderTestLedger(t, systemStart, arrival)
+	ls.chainsyncBlockfetchReadyChan = make(chan struct{})
 	covered := &atomic.Bool{}
 	ls.slotClock.provider = gatedHorizonSlotTimeProvider{
 		SlotTimeProvider: ls.slotClock.provider,
@@ -145,6 +146,7 @@ func TestAwaitChainsyncHeaderAdmissionPastForecastHorizonHonorsCancellation(
 	systemStart := time.Date(2026, time.August, 22, 12, 0, 0, 0, time.UTC)
 	arrival := systemStart.Add(100 * time.Second)
 	ls, _ := newFutureHeaderTestLedger(t, systemStart, arrival)
+	ls.chainsyncBlockfetchReadyChan = make(chan struct{})
 	ls.slotClock.provider = pastHorizonSlotTimeProvider{
 		SlotTimeProvider: ls.slotClock.provider,
 		rejectedSlot:     90,
@@ -168,6 +170,100 @@ func TestAwaitChainsyncHeaderAdmissionPastForecastHorizonHonorsCancellation(
 	)
 	require.ErrorIs(t, got.err, context.Canceled)
 	require.False(t, got.accepted)
+}
+
+// A blockfetch request that ends without publishing a snapshot must still wake
+// a held header, which then finds no local work and asks for a resync.
+func TestAwaitChainsyncHeaderAdmissionWakesOnBlockfetchCapacityChange(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	systemStart := time.Date(2026, time.August, 22, 12, 0, 0, 0, time.UTC)
+	arrival := systemStart.Add(100 * time.Second)
+	ls, _ := newFutureHeaderTestLedger(t, systemStart, arrival)
+	ls.chainsyncBlockfetchReadyChan = make(chan struct{})
+	ls.slotClock.provider = pastHorizonSlotTimeProvider{
+		SlotTimeProvider: ls.slotClock.provider,
+		rejectedSlot:     90,
+	}
+
+	results := awaitAdmissionAsync(
+		t.Context(),
+		ls,
+		futureHeaderEvent(90, arrival),
+	)
+	testutil.RequireNoReceive(
+		t,
+		results,
+		100*time.Millisecond,
+		"a header past the forecast horizon must wait while fetch work exists",
+	)
+
+	ls.chainsyncBlockfetchMutex.Lock()
+	ls.chainsyncBlockfetchReadyChan = nil
+	ls.signalChainsyncCapacityChangedLocked()
+	ls.chainsyncBlockfetchMutex.Unlock()
+	got := testutil.RequireReceive(
+		t,
+		results,
+		testutil.AsyncWait,
+		"admission did not wake when blockfetch capacity changed",
+	)
+	require.ErrorIs(t, got.err, ErrChainsyncHeaderNeedsResync)
+	require.False(t, got.accepted)
+}
+
+// With no local work left to advance the forecast, the header rechecks
+// cancellation and the horizon before asking for a resync.
+func TestAwaitChainsyncHeaderAdmissionRechecksBeforeResync(t *testing.T) {
+	t.Parallel()
+
+	systemStart := time.Date(2026, time.August, 22, 12, 0, 0, 0, time.UTC)
+	arrival := systemStart.Add(100 * time.Second)
+
+	t.Run("cancelled", func(t *testing.T) {
+		t.Parallel()
+		ls, _ := newFutureHeaderTestLedger(t, systemStart, arrival)
+		ls.slotClock.provider = pastHorizonSlotTimeProvider{
+			SlotTimeProvider: ls.slotClock.provider,
+			rejectedSlot:     90,
+		}
+		ctx, cancel := context.WithCancel(t.Context())
+		e := futureHeaderEvent(90, arrival)
+		e.ForecastHorizonWait = cancel
+		results := awaitAdmissionAsync(ctx, ls, e)
+		got := testutil.RequireReceive(
+			t,
+			results,
+			testutil.AsyncWait,
+			"admission did not return after cancellation",
+		)
+		require.ErrorIs(t, got.err, context.Canceled)
+		require.False(t, got.accepted)
+	})
+
+	t.Run("horizon moved", func(t *testing.T) {
+		t.Parallel()
+		ls, _ := newFutureHeaderTestLedger(t, systemStart, arrival)
+		covered := &atomic.Bool{}
+		ls.slotClock.provider = gatedHorizonSlotTimeProvider{
+			SlotTimeProvider: ls.slotClock.provider,
+			slot:             90,
+			covered:          covered,
+		}
+		e := futureHeaderEvent(90, arrival)
+		e.ForecastHorizonWait = func() { covered.Store(true) }
+		results := awaitAdmissionAsync(t.Context(), ls, e)
+		got := testutil.RequireReceive(
+			t,
+			results,
+			testutil.AsyncWait,
+			"admission did not resume once the slot was forecastable",
+		)
+		require.NoError(t, got.err)
+		require.True(t, got.accepted)
+	})
 }
 
 func TestSnapshotPublishedChanClosesOnPublish(t *testing.T) {
@@ -605,6 +701,7 @@ func TestAwaitChainsyncHeaderAdmissionForecastsForkFromIntersection(
 		}},
 	}
 	ls.cachedShape.Store(&shape)
+	ls.chainsyncBlockfetchReadyChan = make(chan struct{})
 	ls.slotClock = NewSlotClock(
 		newSlotTimeConverterProvider(ls.timeConv()),
 		DefaultSlotClockConfig(),
@@ -1046,12 +1143,9 @@ func TestAwaitChainsyncHeaderAdmissionFlushFailureRequestsResync(
 	require.Zero(t, ls.chain.HeaderCount())
 }
 
-// A header past the forecast horizon whose predecessor is not the chain tip,
-// the header tip, or any header or block the local chain holds cannot be
-// released by applying blocks the node already has. Admission reports that
-// instead of waiting for a publication that cannot come; a header that does
-// build on the local chain still waits.
-func TestAwaitChainsyncHeaderAdmissionRejectsDisconnectedHeaderPastHorizon(
+// A connected header past the forecast horizon cannot wait when no queued or
+// in-flight blockfetch can publish the ledger state that releases it.
+func TestAwaitChainsyncHeaderAdmissionResyncsWhenNoWorkCanAdvanceForecast(
 	t *testing.T,
 ) {
 	t.Parallel()
@@ -1129,28 +1223,22 @@ func TestAwaitChainsyncHeaderAdmissionRejectsDisconnectedHeaderPastHorizon(
 		lcommon.NewBlake2b256(primary.Tip().Point.Hash),
 		"building",
 	)
-	ctx, cancel := context.WithCancel(t.Context())
-	results := awaitAdmissionAsync(ctx, ls, building)
-	testutil.RequireNoReceive(
-		t,
-		results,
-		100*time.Millisecond,
-		"a header building on the chain tip must keep waiting",
-	)
-	cancel()
+	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	defer cancel()
 	got := testutil.RequireReceive(
 		t,
-		results,
+		awaitAdmissionAsync(ctx, ls, building),
 		testutil.AsyncWait,
-		"admission did not return after its context ended",
+		"admission held a connected header with no queued block work",
 	)
-	require.ErrorIs(t, got.err, context.Canceled)
+	require.ErrorIs(t, got.err, ErrChainsyncHeaderNeedsResync)
+	require.False(t, got.accepted)
 
 	orphan := headerOn(
 		lcommon.Blake2b256Hash([]byte("unknown parent")),
 		"orphan",
 	)
-	results = awaitAdmissionAsync(t.Context(), ls, orphan)
+	results := awaitAdmissionAsync(t.Context(), ls, orphan)
 	got = testutil.RequireReceive(
 		t,
 		results,
