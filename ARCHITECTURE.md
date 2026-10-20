@@ -11243,6 +11243,22 @@ with the shared pagination rules. It pages transaction hashes in block-index
 order, reverses that order for descending requests, and reports pagination
 totals for the whole block. Empty or out-of-range pages return an empty array.
 
+The base and extended address summaries pass the request context to the
+adapter, so a client disconnect stops the scan and the handler writes nothing.
+A full address is aggregated by walking its coarse credential candidates in
+keyset batches of 1,000 and keeping those whose decoded address matches; the
+adapter walks the keyset itself because the database's exact-match page fill
+stops after 10,000 non-matching candidates per call, and an enterprise address
+shares its coarse match with every base address of its payment credential. A
+summary is rejected with HTTP 400 once it reads more than 50,000 candidate
+outputs or returns more than 5,000 distinct assets; a bare payment credential
+passes the same budget into `GetUtxoBalanceByAddress`, which stops its scan at
+the first output or distinct asset past it. The extended route likewise
+rejects more than 1,000 assets to enrich, since each costs three point reads
+and the route has no pagination. Both routes share one
+admission pool (4 active, 2 per client address) that answers 429 with
+`Retry-After` when full.
+
 Blockfrost submission and both evaluation endpoints bound request body reads
 by their existing byte limits and a 15-second read deadline. The deadline is
 cleared after a successful read, before transaction processing; stalled or
@@ -11659,6 +11675,28 @@ fills the queue is cut off with `ResourceExhausted`. `DumpHistory` uses
 at `MaxHistoryBytes` of serialized blocks with a `next_token`. A single block
 larger than the byte cap is returned whole; at tip that response has no
 `next_token` because no further block exists.
+
+`FollowTip` separates historical replay from live following per block: a block
+numbered below the primary chain tip at the moment it is served is replayed
+history, and a block at the tip is live. The primary chain tip is used rather
+than the ledger tip because the iterator reads the primary chain, and the
+ledger tip lags it while blocks are still being applied. Replay is bounded by
+limits held in `replayLimiter` (`api/utxorpc/replay_limits.go`), distinct from
+the stream caps: `MaxConcurrentReplays` (default 4) streams may be replaying at
+once across all clients and `MaxReplaysPerClient` (default 1) per client, and a
+stream that cannot take a slot ends with `ResourceExhausted` rather than
+queuing; `ReplayBlocksPerSecond` (default 1000) paces the blocks served to one
+client across all its streams by making each wait for its token, so a replay
+slows down but is not refused; and `MaxReplayBlocksPerClient` (default
+20,000,000) blocks per `ReplayBudgetWindow` (default 24h) caps the history one
+client may pull, after which its replay ends with `ResourceExhausted` until the
+window renews. A client is the remote host, as for the stream caps, so the
+per-client slot cap is what stops one host holding every slot. A stream that
+reaches the tip returns its replay slot and never needs one again: blocks it
+later falls behind on, after a fork switch or while blocks arrive faster than
+it reads, are still charged against the rate and budget, but a full slot cap
+cannot disconnect it. Rollbacks are not charged. A full-chain replay therefore
+still completes within those rates and budget.
 
 `FollowTip` populates `Timestamp` on a `Reset` block reference and on every
 response's `Tip` from `LedgerState.SlotToTime`. `Timestamp` is a plain proto3
