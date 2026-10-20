@@ -570,8 +570,9 @@ var (
 )
 
 type barkRecoveringCatalogDestination struct {
-	dir      string
-	failList *atomic.Bool
+	dir       string
+	failList  *atomic.Bool
+	listCalls *atomic.Int64
 }
 
 func (d *barkRecoveringCatalogDestination) UploadDir(
@@ -603,6 +604,9 @@ func (d *barkRecoveringCatalogDestination) ListSnapshotCatalog(
 	ctx context.Context,
 	_ lifecycle.SnapshotCatalogScanBudget,
 ) ([]lifecycle.SnapshotEntry, error) {
+	if d.listCalls != nil {
+		d.listCalls.Add(1)
+	}
 	if d.failList.Load() {
 		return nil, errors.New("provider unavailable")
 	}
@@ -881,12 +885,14 @@ func TestListAvailableSnapshotsRetriesIncompleteStartupListing(t *testing.T) {
 	snapshotDir := t.TempDir()
 	cloudRoot := t.TempDir()
 	var failList atomic.Bool
+	var listCalls atomic.Int64
 	failList.Store(true)
 	registry := lifecycle.NewDestinationRegistry()
 	registry.Register("recoveringcatalog", func(uri *url.URL) (lifecycle.CloudDestination, error) {
 		return &barkRecoveringCatalogDestination{
-			dir:      filepath.Join(cloudRoot, strings.TrimPrefix(uri.Path, "/")),
-			failList: &failList,
+			dir:       filepath.Join(cloudRoot, strings.TrimPrefix(uri.Path, "/")),
+			failList:  &failList,
+			listCalls: &listCalls,
 		}, nil
 	})
 	const cloudDest = "recoveringcatalog://bucket/snapshots"
@@ -916,8 +922,18 @@ func TestListAvailableSnapshotsRetriesIncompleteStartupListing(t *testing.T) {
 		connect.NewRequest(&databasev1alpha1.ListAvailableSnapshotsRequest{}),
 	)
 	require.NoError(t, err)
+	require.Empty(t, resp.Msg.GetSnapshots())
+	require.EqualValues(t, 1, listCalls.Load(),
+		"a failed startup scan must suppress provider retries during backoff")
+	h.catalogRetry.nextAttempt = time.Time{}
+	resp, err = h.ListAvailableSnapshots(
+		t.Context(),
+		connect.NewRequest(&databasev1alpha1.ListAvailableSnapshotsRequest{}),
+	)
+	require.NoError(t, err)
 	require.Len(t, resp.Msg.GetSnapshots(), 1)
 	require.Equal(t, "after-recovery", resp.Msg.GetSnapshots()[0].GetSnapshotId())
+	require.EqualValues(t, 2, listCalls.Load())
 }
 
 func TestListAvailableSnapshotsRetriesStartupConstructorFailure(t *testing.T) {
@@ -954,13 +970,24 @@ func TestListAvailableSnapshotsRetriesStartupConstructorFailure(t *testing.T) {
 		lifecycle.WithManifestKey(testSnapshotTrustKey),
 	))
 	require.NoError(t, lifecycle.RemoveSnapshotContext(t.Context(), dir))
+	constructorCallsBeforeListing := attempts.Load()
 	resp, err := h.ListAvailableSnapshots(
+		t.Context(),
+		connect.NewRequest(&databasev1alpha1.ListAvailableSnapshotsRequest{}),
+	)
+	require.NoError(t, err)
+	require.Empty(t, resp.Msg.GetSnapshots())
+	require.Equal(t, constructorCallsBeforeListing, attempts.Load(),
+		"a failed startup constructor must not be retried during backoff")
+	h.catalogRetry.nextAttempt = time.Time{}
+	resp, err = h.ListAvailableSnapshots(
 		t.Context(),
 		connect.NewRequest(&databasev1alpha1.ListAvailableSnapshotsRequest{}),
 	)
 	require.NoError(t, err)
 	require.Len(t, resp.Msg.GetSnapshots(), 1)
 	require.Equal(t, "after-constructor-recovery", resp.Msg.GetSnapshots()[0].GetSnapshotId())
+	require.Equal(t, constructorCallsBeforeListing+1, attempts.Load())
 }
 
 // ── Restore/VerifySnapshot/DeleteSnapshot cloud-fallback ──────────────────

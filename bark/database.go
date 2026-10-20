@@ -49,7 +49,39 @@ const (
 	maxCatalogPageSize       = lifecycle.SnapshotCatalogPageLimit
 	maxProgressStreams       = 32
 	maxClientProgressStreams = 4
+	initialCatalogRetry      = 30 * time.Second
+	maxCatalogRetry          = 5 * time.Minute
 )
+
+type catalogReconciliationRetry struct {
+	destination string
+	nextAttempt time.Time
+	delay       time.Duration
+}
+
+func (r *catalogReconciliationRetry) allow(destination string, now time.Time) bool {
+	return r.destination != destination || !now.Before(r.nextAttempt)
+}
+
+func (r *catalogReconciliationRetry) failed(destination string, now time.Time) {
+	if r.destination != destination {
+		r.delay = 0
+	}
+	if r.delay == 0 {
+		r.delay = initialCatalogRetry
+	} else {
+		r.delay *= 2
+		if r.delay > maxCatalogRetry {
+			r.delay = maxCatalogRetry
+		}
+	}
+	r.destination = destination
+	r.nextAttempt = now.Add(r.delay)
+}
+
+func (r *catalogReconciliationRetry) succeeded() {
+	*r = catalogReconciliationRetry{}
+}
 
 // streamProgressPollInterval is how often StreamOperationProgress polls
 // the operation's in-memory state. There is no push-based notification
@@ -119,6 +151,7 @@ type databaseServiceHandler struct {
 	// configured provider into the catalog. An empty value restricts available
 	// pages to the local index even if an older cloud source remains on disk.
 	catalogCloudDestination string
+	catalogRetry            catalogReconciliationRetry
 }
 
 func newDatabaseServiceHandler(
@@ -242,24 +275,38 @@ func (h *databaseServiceHandler) reconcileCloudSnapshotCatalog(
 	ctx context.Context,
 ) error {
 	b := h.bark
-	if b.config.SnapshotCloudDestination == "" {
+	destination := b.config.SnapshotCloudDestination
+	if destination == "" {
 		_, err := lifecycle.ReconcileCloudSnapshotCatalogContext(
 			ctx, b.config.SnapshotDir, b.config.DestinationRegistry, "",
 		)
+		if err != nil {
+			h.catalogRetry.failed(destination, time.Now())
+			return err
+		}
+		h.catalogCloudDestination = ""
+		h.catalogRetry.succeeded()
 		return err
 	}
 	manifestOpts, err := h.cloudManifestOptions()
 	if err != nil {
+		h.catalogRetry.failed(destination, time.Now())
 		return err
 	}
 	current, err := lifecycle.ReconcileCloudSnapshotCatalogContext(
 		ctx, b.config.SnapshotDir, b.config.DestinationRegistry,
-		b.config.SnapshotCloudDestination, manifestOpts...,
+		destination, manifestOpts...,
 	)
-	if current {
-		h.catalogCloudDestination = b.config.SnapshotCloudDestination
+	if !current && err == nil {
+		err = lifecycle.ErrSnapshotCatalogIncomplete
 	}
-	return err
+	if err != nil {
+		h.catalogRetry.failed(destination, time.Now())
+		return err
+	}
+	h.catalogCloudDestination = destination
+	h.catalogRetry.succeeded()
+	return nil
 }
 
 func (h *databaseServiceHandler) beginDiagnostic() (func(), error) {
@@ -901,7 +948,9 @@ func (h *databaseServiceHandler) mergedSnapshotCatalogPage(
 			fmt.Errorf("initialize snapshot catalog: %w", h.catalogErr),
 		)
 	}
-	if h.catalogCloudDestination != h.bark.config.SnapshotCloudDestination {
+	destination := h.bark.config.SnapshotCloudDestination
+	if h.catalogCloudDestination != destination &&
+		h.catalogRetry.allow(destination, time.Now()) {
 		if err := h.reconcileCloudSnapshotCatalog(ctx); err != nil {
 			h.bark.config.Logger.Warn(
 				"cloud snapshot catalog reconciliation failed",

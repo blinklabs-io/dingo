@@ -1025,7 +1025,7 @@ func TestCloudCatalogRecoversAfterStartupConstructorFailure(t *testing.T) {
 	require.Equal(t, cloudDest+"/mirrored", entries[0].Location)
 }
 
-func TestCloudReconciliationSerializesConcurrentIncrementalMirror(t *testing.T) {
+func TestCloudReconciliationDoesNotBlockIncrementalMirror(t *testing.T) {
 	base := t.TempDir()
 	require.NoError(t, EnsureSnapshotCatalog(base, WithManifestKey(catalogTestTrustKey)))
 	manifestAt := func(id string, second int64) Manifest {
@@ -1057,26 +1057,18 @@ func TestCloudReconciliationSerializesConcurrentIncrementalMirror(t *testing.T) 
 		reconcileDone <- err
 	}()
 	<-provider.captured
-	lockCtx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+	lockCtx, cancel := context.WithTimeout(t.Context(), time.Second)
 	defer cancel()
-	lockErr := lockSnapshotCatalog(lockCtx)
-	if lockErr == nil {
-		unlockSnapshotCatalog()
-	}
-	require.ErrorIs(t, lockErr, context.DeadlineExceeded,
-		"provider listing and replacement must hold the reconciliation gate")
-
-	updateDone := make(chan error, 1)
-	go func() {
-		updateDone <- updateCloudSnapshotCatalogIfPresent(
-			t.Context(), base,
-			SnapshotEntry{ID: "mirrored", Manifest: mirroredManifest}, cloudDest,
-			WithManifestKey(catalogTestTrustKey),
-		)
-	}()
+	require.NoError(t, lockSnapshotCatalog(lockCtx),
+		"provider listing must not hold the catalog gate")
+	unlockSnapshotCatalog()
+	require.NoError(t, updateCloudSnapshotCatalogIfPresent(
+		t.Context(), base,
+		SnapshotEntry{ID: "mirrored", Manifest: mirroredManifest}, cloudDest,
+		WithManifestKey(catalogTestTrustKey),
+	))
 	close(provider.release)
-	require.NoError(t, <-reconcileDone)
-	require.NoError(t, <-updateDone)
+	require.ErrorIs(t, <-reconcileDone, ErrSnapshotCatalogChanged)
 
 	entries, _, err := ListAvailableSnapshotPageContext(
 		t.Context(), base, cloudDest, 10, nil,
@@ -1086,7 +1078,7 @@ func TestCloudReconciliationSerializesConcurrentIncrementalMirror(t *testing.T) 
 	for _, entry := range entries {
 		ids = append(ids, entry.Entry.ID)
 	}
-	require.ElementsMatch(t, []string{"scanned", "mirrored"}, ids)
+	require.Equal(t, []string{"mirrored"}, ids)
 }
 
 func TestCloudReconciliationConstructsProviderBeforeGate(t *testing.T) {
