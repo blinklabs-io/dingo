@@ -5468,6 +5468,25 @@ of resolved CBOR in its assembled result, encodes at most a 32 MiB response,
 and has a 30-second server deadline. Workers may hold one additional resolved
 output apiece while delivering results. The checked encoding is cached so the
 protocol server does not serialize the full map again outside that deadline.
+
+`GetUTxOWhole` on an acquired view does not read through the view's snapshot.
+Its walk takes minutes on a large chain, and SQLite cannot restart its WAL
+while any reader holds a read transaction, so whole-UTxO queries one after
+another -- a node-parity replay asks for one at every epoch boundary -- kept
+the WAL growing without bound under every checkpoint strategy (42 GB live).
+Instead the view releases its read transaction
+(`QueryView.detachForUtxoWhole`) and the query reads the references as of the
+view's block -- the acquired point, or the snapshot's tip for a tip acquire --
+in pages of 10,000 rows, each in its own short read transaction
+(`database.IterateUtxoRefsAsOfPaged`, paging on the UTxO row id). The as-of
+predicate makes the pages agree: blocks applied meanwhile add rows after the
+slot, which it excludes, and spend rows after it, which it still includes. An
+acquired-point pin holds spent-row pruning at or below the slot for the walk,
+and the announced prune floor is checked once it ends. A rollback below the
+slot (`UtxosDeleteRolledback`, `UtxosUnspend`) marks the walk disturbed; the
+query re-verifies the point and restarts, up to three times. A later query on
+the same session reopens a snapshot pinned to that block, as an expired view
+does, keeping the forecast frozen at `Acquire`.
 Both queries exist to
 support cross-node ledger-state comparison in the devnet conformance
 harness (`internal/test/devnet`, see its README's "LocalStateQuery in

@@ -3856,6 +3856,34 @@ LEFT JOIN asset a ON a.utxo_id = u.id
 WHERE u.tx_id IN (decode($1, 'hex'), decode($2, 'hex'));
 ```
 
+### `UtxoRefsAsOfAfterID`
+
+One page of the UTxO references live as of a slot, for a whole-UTxO walk that
+must not hold one read transaction throughout
+(`database.IterateUtxoRefsAsOfPaged`, used by `GetUTxOWhole`):
+
+```sql
+SELECT id, tx_id, output_idx FROM utxo
+WHERE id > ? AND added_slot <= ? AND (deleted_slot = 0 OR deleted_slot > ?)
+ORDER BY id LIMIT ?
+```
+
+Each page is a range scan on the row id in its own read transaction, so the
+SQLite WAL can restart between pages. The pages describe one as-of set without
+a shared snapshot because of how `utxo` rows change: a row keeps its `id` for
+its whole life (spends and unspends update it in place; inserts after the walk
+starts carry a later `added_slot` and are excluded), later spends set a
+`deleted_slot` after the slot, which the predicate still includes, and
+`UtxosDeleteConsumed` removes only rows spent before the prune floor, which an
+acquired-point pin holds at or below the slot. A rollback below the slot
+deletes or unspends rows the walk may already have passed, so
+`UtxosDeleteRolledback` and `UtxosUnspend` mark every walk below whose slot they
+reach, once when they start and again when their transaction finishes, and the
+walk returns `ErrUtxoHistoryRolledBack`. Mithril import's re-import path can
+clear a spend on an existing row and gap-block recovery can insert a missing
+producer row; neither runs inside a pinned LocalStateQuery walk on a synced
+node, and both only correct rows to what the slot's state already was.
+
 ### `GetUtxosByRefsAsOf`
 
 `GetUtxosByRefs`'s point-pinned sibling, used

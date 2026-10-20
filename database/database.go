@@ -163,6 +163,11 @@ type Database struct {
 	// barrier, preserving their existing concurrency and avoiding nested-write
 	// deadlocks.
 	destructiveTransitionBarrier cancellableBarrier
+
+	// utxoAsOfReads are the paged as-of UTxO reads in progress, which a
+	// UTxO rollback below their slot marks disturbed (see noteUtxoRollback).
+	utxoAsOfReadsMu sync.Mutex
+	utxoAsOfReads   map[*utxoAsOfRead]struct{}
 }
 
 func (d *Database) acquireReadSnapshotAdmission(

@@ -766,3 +766,75 @@ func TestQueryViewStakeSnapshotsOmitZeroPoolsUsesFrozenProtocolVersion(
 		poolID,
 	)
 }
+
+// TestQueryViewUtxoWholeReleasesSnapshotAndAnswersAsOfAcquire proves a
+// GetUTxOWhole on a view does not hold the view's read transaction for its
+// walk -- one held for minutes keeps SQLite's WAL from restarting -- yet still
+// answers as of the acquired block: a spend and a new output committed after
+// acquire stay invisible, and a later query on the same view reopens a
+// snapshot at that block.
+func TestQueryViewUtxoWholeReleasesSnapshotAndAnswersAsOfAcquire(t *testing.T) {
+	t.Parallel()
+
+	ls, db := newDiskTestLedger(t)
+	addr := queryViewTestAddress(t)
+	spentLater := seedBabbageUtxo(t, db, 0xC3, 0, addr, 2_000_000)
+	pointHash := bytes.Repeat([]byte{0xAB}, 32)
+	seedBlockAtSlot(t, ls, 300, pointHash)
+	require.NoError(t, db.SetTip(ochainsync.Tip{
+		Point: ocommon.NewPoint(300, pointHash),
+	}, nil))
+	require.NoError(t, db.SetEpoch(
+		0, 0, nil, nil, nil, nil, 0, 1, 1000, nil,
+	))
+	require.NoError(t, db.Metadata().SetNetworkState(0, 0, 0, nil))
+
+	view, err := ls.AcquireQueryView(t.Context(), QueryPoint{})
+	require.NoError(t, err)
+	t.Cleanup(view.Close)
+	released := make(chan struct{})
+	view.txn.OnFinish(func() { close(released) })
+
+	require.NoError(t, db.MarkUtxosDeletedAtSlot(
+		context.Background(),
+		nil,
+		[]dbtypes.UtxoKey{{TxId: spentLater, OutputIdx: 0}},
+		400,
+	))
+	createdLater := bytes.Repeat([]byte{0xC4}, 32)
+	txn := db.Transaction(context.Background(), true)
+	require.NoError(t, db.CreateUtxo(context.Background(), txn, &models.Utxo{
+		TxId:      createdLater,
+		OutputIdx: 0,
+		AddedSlot: 400,
+	}))
+	require.NoError(t, txn.Commit())
+
+	result, err := view.Query(t.Context(), utxoWholeQuery(), 0)
+	require.NoError(t, err)
+	select {
+	case <-released:
+	default:
+		t.Fatal("GetUTxOWhole held the view's read transaction")
+	}
+	utxos := requireUtxoWholeMap(t, result)
+	require.Len(t, utxos, 1)
+	_, ok := utxos[olocalstatequery.UtxoId{
+		Hash: ledger.NewBlake2b256(spentLater), Idx: 0,
+	}]
+	require.True(t, ok, "a UTxO spent after acquire was live at the acquired block")
+
+	point, err := view.Query(t.Context(), &olocalstatequery.ChainPointQuery{}, 0)
+	require.NoError(t, err)
+	require.Equal(t, ocommon.NewPoint(300, pointHash), point)
+	txIn := ledger.MustNewShelleyTransactionInput(hex.EncodeToString(spentLater), 0)
+	byTxIn, err := view.Query(
+		t.Context(),
+		shelleyBlockQuery(&olocalstatequery.ShelleyUtxoByTxinQuery{
+			TxIns: []ledger.ShelleyTransactionInput{txIn},
+		}),
+		0,
+	)
+	require.NoError(t, err)
+	require.Equal(t, 1, utxoMapLen(t, byTxIn))
+}

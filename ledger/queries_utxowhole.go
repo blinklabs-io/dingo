@@ -257,6 +257,11 @@ func (ls *LedgerState) queryShelleyUtxoWholeWithLimits(
 		ctx, cancel = context.WithTimeout(ctx, limits.timeout)
 		defer cancel()
 	}
+	if detach := utxoWholeDetachFrom(ctx); detach != nil {
+		if point, ok := detach(); ok {
+			return ls.queryUtxoWholePaged(ctx, point, limits)
+		}
+	}
 	if txn == nil {
 		txn = ls.db.Transaction(ctx, false)
 		defer txn.Release()
@@ -313,6 +318,16 @@ func (ls *LedgerState) queryShelleyUtxoWholeWithLimits(
 		return nil, err
 	}
 
+	return ls.resolveUtxoWhole(ctx, live, limits)
+}
+
+// resolveUtxoWhole resolves and encodes the GetUTxOWhole reply for live. It
+// reads only the blob store, through per-worker blob transactions.
+func (ls *LedgerState) resolveUtxoWhole(
+	ctx context.Context,
+	live []database.UtxoRef,
+	limits utxoWholeLimits,
+) (any, error) {
 	type resolved struct {
 		id            olocalstatequery.UtxoId
 		txOut         ledger.TransactionOutput
@@ -509,6 +524,76 @@ func (ls *LedgerState) queryShelleyUtxoWholeWithLimits(
 		return nil, fmt.Errorf("encode whole UTxO result: %w", err)
 	}
 	return &utxoWholeResult{encoded: encoded}, nil
+}
+
+// utxoWholePageSize is how many UTxO rows queryUtxoWholePaged reads per
+// read transaction. Each page is one indexed range scan on the row id, so a
+// page holds the WAL for milliseconds rather than the whole walk's minutes.
+const utxoWholePageSize = 10_000
+
+// utxoWholeRollbackRetries bounds how many times queryUtxoWholePaged restarts
+// a walk that a rollback below its slot interrupted.
+const utxoWholeRollbackRetries = 3
+
+// queryUtxoWholePaged answers GetUTxOWhole as of point without holding one
+// database read transaction for the walk: a QueryView running it has
+// released its snapshot (QueryView.detachForUtxoWhole), and the UTxO refs are
+// read as of point's slot in short pages (database.IterateUtxoRefsAsOfPaged).
+// A pin on point keeps spent-row pruning at or below its slot for the walk,
+// and the announced prune floor is checked afterwards in case the pin's
+// backstop let it pass. A rollback below the slot restarts the walk, after
+// confirming point is still on the chain.
+func (ls *LedgerState) queryUtxoWholePaged(
+	ctx context.Context,
+	point QueryPoint,
+	limits utxoWholeLimits,
+) (any, error) {
+	releasePin := ls.PinAcquiredPoint(point.Slot)
+	defer releasePin()
+	var live []database.UtxoRef
+	for attempt := 0; ; attempt++ {
+		if err := ls.VerifyPointQueryable(ctx, nil, point); err != nil {
+			return nil, err
+		}
+		live = live[:0]
+		err := ls.db.IterateUtxoRefsAsOfPaged(
+			ctx,
+			point.Slot,
+			utxoWholePageSize,
+			func(ref database.UtxoRef) error {
+				if len(live) >= limits.maxItems {
+					return fmt.Errorf(
+						"%w: UTxO count exceeds %d",
+						errUtxoWholeLimitExceeded,
+						limits.maxItems,
+					)
+				}
+				live = append(live, ref)
+				return nil
+			},
+		)
+		if errors.Is(err, database.ErrUtxoHistoryRolledBack) &&
+			attempt < utxoWholeRollbackRetries {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		break
+	}
+	if floor := ls.announcedUtxoPruneFloor(); floor > point.Slot {
+		return nil, fmt.Errorf(
+			"%w: spent-UTxO pruning reached slot %d during a GetUTxOWhole "+
+				"walk as of slot %d",
+			ErrHistoricalStateUnavailable,
+			floor,
+			point.Slot,
+		)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return ls.resolveUtxoWhole(ctx, live, limits)
 }
 
 // decodeUtxoWholeCborFunc is decodeUtxoWholeCbor by default. resolveRow
