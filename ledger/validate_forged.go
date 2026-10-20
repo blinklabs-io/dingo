@@ -262,6 +262,37 @@ func (ls *LedgerState) forgedParentChainHolds(
 		bytes.Equal(primaryTip.Point.Hash, parentHash)
 }
 
+// forgedTipBeforeParent classifies an applied ledger tip that is not the
+// forged block's parent. A tip on the primary chain while that chain still
+// ends at the parent is an ancestor the ledger has yet to apply forward from,
+// so the session waits (errForgedParentNotApplied). Any other tip -- one the
+// primary chain has passed the parent beyond, one past the parent, one off the
+// primary chain, or one whose relation cannot be read -- is state the block
+// does not extend, and the block is dropped unjudged
+// (forging.ErrForgedBlockStateChanged). A ledger with no primary chain has no
+// ancestry to place the parent in, so its applied state is judged as is;
+// NewLedgerState always attaches one.
+func (ls *LedgerState) forgedTipBeforeParent(
+	tip ocommon.Point,
+	parentHash []byte,
+) error {
+	ls.RLock()
+	hasChain := ls.chain != nil
+	ls.RUnlock()
+	if !hasChain {
+		return nil
+	}
+	if ls.forgedParentChainHolds(tip, parentHash) {
+		return errForgedParentNotApplied
+	}
+	return fmt.Errorf(
+		"%w: ledger tip %x is not on the primary chain ending at the forged block's parent %x",
+		forging.ErrForgedBlockStateChanged,
+		tip.Hash,
+		parentHash,
+	)
+}
+
 // validateForgedTxsOnce runs one validation session over txs. It returns
 // errForgedValidationNotCurrent when the session stopped being current
 // before every transaction was judged.
@@ -294,10 +325,14 @@ func (ls *LedgerState) validateForgedTxsOnce(
 			if !stillCurrent() {
 				return errForgedValidationNotCurrent
 			}
-			if !bytes.Equal(tip.currentTip.Point.Hash, parentHash) &&
+			if !bytes.Equal(tip.currentTip.Point.Hash, parentHash) {
 				//nolint:contextcheck // chain.TipRelation takes no context; it reads one locked chain snapshot
-				ls.forgedParentChainHolds(tip.currentTip.Point, parentHash) {
-				return errForgedParentNotApplied
+				if err := ls.forgedTipBeforeParent(
+					tip.currentTip.Point,
+					parentHash,
+				); err != nil {
+					return err
+				}
 			}
 			consumedUtxos := make(map[utxoref.Key]struct{}, len(txs)*2)
 			createdUtxos := make(map[utxoref.Key]lcommon.Utxo, len(txs)*4)

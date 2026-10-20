@@ -617,3 +617,66 @@ func TestValidateForgedBlockDoesNotWaitWhenParentIsApplied(t *testing.T) {
 	require.Equal(t, int32(1), calls.Load())
 	require.Empty(t, waits)
 }
+
+// A verdict is taken only at the block's parent. A ledger tip that trails a
+// parent the primary chain has already passed, a tip past the parent (the
+// rival an alternative block competes with, once applied), and a tip off
+// the primary chain are each a state the block does not extend, so the
+// block is dropped unjudged at once instead of being judged there.
+func TestValidateForgedBlockTakesNoVerdictOffTheParent(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		tip    func(blocks []lcommon.Block) (lcommon.Block, bool)
+		parent func(blocks []lcommon.Block) lcommon.Blake2b256
+	}{
+		{
+			name: "trailing a parent the primary chain has passed",
+			tip: func(blocks []lcommon.Block) (lcommon.Block, bool) {
+				return blocks[0], true
+			},
+			parent: func(blocks []lcommon.Block) lcommon.Blake2b256 {
+				return blocks[1].Hash()
+			},
+		},
+		{
+			name: "past the parent",
+			tip: func(blocks []lcommon.Block) (lcommon.Block, bool) {
+				return blocks[2], true
+			},
+			parent: func(blocks []lcommon.Block) lcommon.Blake2b256 {
+				return blocks[1].Hash()
+			},
+		},
+		{
+			name: "off the primary chain",
+			tip: func([]lcommon.Block) (lcommon.Block, bool) {
+				return nil, false
+			},
+			parent: func(blocks []lcommon.Block) lcommon.Blake2b256 {
+				return blocks[2].Hash()
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ls, calls, waits := newForgedStateTestLedger(
+				t,
+				forgedStateTestHash(0x09),
+				errors.New("unknown voter"),
+			)
+			chainBlocks := newForgedStateTestChain(t, ls)
+			if tip, ok := tc.tip(chainBlocks); ok {
+				setForgedStateTestTipBlock(ls, tip)
+			}
+			block := newForgedStateTestBlock(tc.parent(chainBlocks))
+
+			err := ls.validateForgedTxs(t.Context(), block)
+
+			require.ErrorIs(t, err, forging.ErrForgedBlockStateChanged)
+			require.Zero(t, calls.Load(), "no verdict away from the parent")
+			require.Empty(t, waits)
+		})
+	}
+}
