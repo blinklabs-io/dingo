@@ -6010,10 +6010,15 @@ it. Dingo implements this as a **corroboration gate**
   re-intersection; the connection retains its header for later ancestry
   lookups but does not re-deliver it. Bounded-history exhaustion defers
   verification instead, so the peer is re-intersected after the applied tip
-  advances and the header can be checked again. A multi-epoch fork that
-  intersects at the applied tip uses the normal local-chain verifier. If the
-  applied tip advances to the candidate header's parent during lookup, the
-  header also uses the local-chain verifier; other multi-epoch forks remain
+  advances and the header can be checked again. Retained ancestry with a
+  missing or stale crypto-verification generation also defers the candidate
+  and re-intersects; a point that became applied during lookup is trusted as
+  part of the primary chain. A direct child of the applied tip can use the
+  local verifier's immutable next-epoch forecast when the shared epoch cache
+  has not yet reached its slot. A multi-epoch candidate uses
+  the normal local-chain verifier only when its immediate parent is the
+  applied tip, including when that tip advances during ancestry lookup; other
+  multi-epoch forks remain
   withheld because their intermediate epoch nonce cannot be reconstructed
   from the retained candidate path. A header whose
   point (slot and hash) is on the chain (`Chain.HoldsPoint`) at or below the

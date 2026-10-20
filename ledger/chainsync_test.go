@@ -3110,6 +3110,8 @@ func TestPeerHeaderForkPathCoversQueuedCatchupWindow(t *testing.T) {
 		return ChainsyncEvent{
 			Point:       ocommon.NewPoint(header.slot, hash),
 			BlockHeader: header,
+			HeaderCryptoVerificationGeneration: fixture.ls.
+				CurrentHeaderCryptoVerificationGeneration(),
 		}, header.PrevHash().Bytes(), true
 	}
 

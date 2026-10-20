@@ -181,7 +181,10 @@ func TestChainsyncPeerTipAdmissionUsesRevalidatedGeneration(t *testing.T) {
 		},
 	})
 	o.chainSelectionShouldVerifyHeaderCrypto = func(uint64) bool { return true }
-	o.chainSelectionVerifyHeaderCrypto = func(gledger.BlockHeader) (uint64, error) {
+	o.chainSelectionVerifyHeaderCrypto = func(
+		ouroboros.ConnectionId,
+		gledger.BlockHeader,
+	) (uint64, error) {
 		return 1, nil
 	}
 	header := newTestBlockHeader(100, 1, 0xaa)
@@ -1752,7 +1755,10 @@ func TestChainsyncClientRollForwardRejectsVerdictStaleBeforeObservation(
 		},
 	})
 	o.chainSelectionShouldVerifyHeaderCrypto = func(uint64) bool { return true }
-	o.chainSelectionVerifyHeaderCrypto = func(gledger.BlockHeader) (uint64, error) {
+	o.chainSelectionVerifyHeaderCrypto = func(
+		ouroboros.ConnectionId,
+		gledger.BlockHeader,
+	) (uint64, error) {
 		return 1, nil
 	}
 	header := newTestBlockHeader(202, 1, 0xde)

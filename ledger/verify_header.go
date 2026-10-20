@@ -312,7 +312,13 @@ func (ls *LedgerState) validateChainSelectionHeaderCrypto(
 		return nil
 	}
 	if peerRelative {
-		snapshot := ls.loadConsensusSnapshot()
+		snapshot, _ := ls.loadConsensusAndTipSnapshots()
+		if snapshot == nil {
+			return fmt.Errorf(
+				"%w: ledger verification context is unavailable",
+				errHeaderVerificationDeferred,
+			)
+		}
 		epochNonce, epoch, fork, err := ls.peerChainSelectionEpochNonce(
 			connId,
 			header,
