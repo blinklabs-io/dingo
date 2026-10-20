@@ -2881,7 +2881,9 @@ publisher's Ed25519 public key; the signature binds a monotonic sequence, the
 HTTPS archive URL, its exact compressed size, and its BLAKE2b-256 digest.
 Manifest and archive requests require HTTPS at the initial URL and through
 every redirect, even when private mirror addresses are allowed. Archive bytes
-are counted and hashed through EOF before the metadata transaction begins.
+are copied to a bounded temporary file and checked against the signed size and
+digest before gzip or tar parsing; only an authenticated archive reaches the
+parser.
 
 The last applied manifest sequence and digest are stored with the snapshot
 rows in one metadata transaction. A lower sequence is rejected unless the
