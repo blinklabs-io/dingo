@@ -30,6 +30,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"sync"
 	"time"
 
 	"github.com/blinklabs-io/dingo/internal/koiosparity"
@@ -63,6 +64,11 @@ const txInfoOpportunisticFlushThreshold = txInfoConcurrency * koiosparity.KoiosT
 var errAcquireWithoutLocalStateQuery = errors.New(
 	"acquire succeeded without a local state query client",
 )
+
+// errSessionEnded is what a chainsync callback returns when gouroboros
+// delivers it after RunFromGenesis has already ended that callback's
+// session; the state it would have written belongs to the next session.
+var errSessionEnded = errors.New("chainsync session already ended")
 
 // currentEpochNo Acquires point and asks Dingo directly which epoch it
 // falls in (queryShelleyEpochNo, an unbounded query with no retention
@@ -747,8 +753,32 @@ func RunFromGenesis(
 		return true, nil
 	}
 
+	// sessionMu orders each chainsync session's callbacks against this loop.
+	// gouroboros runs the callbacks on its own goroutines and its Close does
+	// not wait for one that is still running, so without it the loop below
+	// reads lastPoint and progressed, and the next session's callbacks write
+	// the shared state, while the previous session's last callback may still
+	// be writing them.
+	var sessionMu sync.Mutex
 	for {
 		progressed = false
+		// ended is per session. endSession sets it under sessionMu, which
+		// waits out a callback already running and turns away any that
+		// gouroboros delivers afterwards.
+		ended := false
+		endSession := func() {
+			sessionMu.Lock()
+			ended = true
+			sessionMu.Unlock()
+		}
+		enterCallback := func() error {
+			sessionMu.Lock()
+			if ended {
+				sessionMu.Unlock()
+				return errSessionEnded
+			}
+			return nil
+		}
 
 		rawConn, dialErr := dialRaw(ctx, protoFromAddr(dingoAddr), dingoAddr)
 		if dialErr != nil {
@@ -775,6 +805,10 @@ func RunFromGenesis(
 						blockData any,
 						_ chainsync.Tip,
 					) error {
+						if err := enterCallback(); err != nil {
+							return err
+						}
+						defer sessionMu.Unlock()
 						block, ok := blockData.(lcommon.Block)
 						if !ok {
 							return fmt.Errorf(
@@ -949,6 +983,10 @@ func RunFromGenesis(
 				),
 				chainsync.WithRollBackwardFunc(
 					func(_ chainsync.CallbackContext, point pcommon.Point, _ chainsync.Tip) error {
+						if err := enterCallback(); err != nil {
+							return err
+						}
+						defer sessionMu.Unlock()
 						// Recorded before any of this rollback's own work runs
 						// -- see lastPoint's doc comment above.
 						lastPoint = point
@@ -1061,11 +1099,13 @@ func RunFromGenesis(
 		if cs == nil || cs.Client == nil {
 			stopOnCancel()
 			csConn.Close() //nolint:errcheck
+			endSession()
 			return errors.New("ChainSync client unavailable")
 		}
 		if err := cs.Client.Sync([]pcommon.Point{lastPoint}); err != nil {
 			stopOnCancel()
 			csConn.Close() //nolint:errcheck
+			endSession()
 			ok, retryErr := retryOrStop(
 				fmt.Sprintf(
 					"nodeparity: start chainsync from slot %d failed",
@@ -1084,10 +1124,12 @@ func RunFromGenesis(
 		case <-ctx.Done():
 			stopOnCancel()
 			csConn.Close() //nolint:errcheck
+			endSession()
 			return ctx.Err()
 		case err, ok := <-csConn.ErrorChan():
 			stopOnCancel()
 			csConn.Close() //nolint:errcheck
+			endSession()
 			if !ok {
 				return nil
 			}
