@@ -2323,6 +2323,21 @@ rescanning. Every other caller (rollback sweeps, `DeleteUtxos`,
 retirement and expiry) is unchanged and still calls the original full-scan
 `refreshRewardLiveStakeAggregate`/`refreshRewardLiveStakeRefs`.
 
+A batch accumulator (`SetTransactionBatched`) writes each transaction's
+`utxo` rows immediately but queues its stake delta until
+`FlushBatchStakeDeltas` or `FlushBatch`, so between the two the `utxo` table is
+ahead of the stored running total by exactly the queued delta. A full-scan
+refresh that runs in that window -- a non-zero reward withdrawal
+(`applyTransactionWithdrawals`), a direct reward credit
+(`AddAccountRewardByCredential`), or a pending reward-round fold
+(`AddAccountRewardsByCredential`) -- therefore stores the scanned total less
+the credential's queued delta (`refreshRewardLiveStakeAggregateNetOfPending`),
+summed over the accumulators bound to the write transaction and the
+accumulator of the write itself. The flush then adds the delta once, and the
+result equals the per-transaction path for any order of stake changes and
+reward writes within a block. Queued deltas live in the accumulator, which
+savepoint and transaction rollback restore together with the `utxo` rows.
+
 This trades away the full-scan path's self-healing property for the
 credentials it accelerates, so the design leans on three layers instead of
 one:

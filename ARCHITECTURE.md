@@ -17888,12 +17888,20 @@ upsert, and coalesces each block's live-stake deltas, which
 `FlushBatchStakeDeltas` writes after every delta; `FlushBatch` writes the rest
 before `apply` returns, inside the same database transaction and before the
 next validated block runs, so stored state is identical to the per-row path.
+A reward withdrawal or reward credit that re-sums a credential's live stake
+from the `utxo` table while its delta is still queued stores the sum less that
+delta, so the flush counts the queued change once (`DATABASE.md`,
+"Incremental live-UTxO stake maintenance").
 Validated blocks apply each transaction as it is validated and keep the
 per-transaction path for the donation-only delta they return, as do Leios
 endorser-block applies and closure-context batches, in every storage mode.
 Regression tests: `TestApplyRowBatchingSerialEquivalence`,
 `TestApplyRowBatchingSameChunkDependencies` and
-`TestApplyRowBatchingSkipsValidatedDeltas` (`ledger/apply_row_batching_test.go`);
+`TestApplyRowBatchingSkipsValidatedDeltas` (`ledger/apply_row_batching_test.go`),
+`TestWithdrawalResumAfterSameBlockStakeChange`
+(`ledger/withdrawal_resum_test.go`) and
+`TestReSumCountsPendingBatchedStakeOnce`
+(`database/plugin/metadata/sqlstore/live_stake_pending_test.go`);
 the equivalence scenario populates every queued detail table and pins that a
 datum shared by two transactions of one chunk keeps the earlier slot.
 
