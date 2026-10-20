@@ -7068,6 +7068,75 @@ func TestPeerForkExtraEntropyDefersBeyondForecastHorizon(t *testing.T) {
 	require.Empty(t, extraEntropy)
 }
 
+func TestPeerHeaderForkPathDefersAtHistoryLimit(t *testing.T) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	t.Cleanup(func() { dbtest.CloseDatabase(db) }) //nolint:errcheck
+	manager, err := chain.NewManager(context.Background(), db, nil)
+	require.NoError(t, err)
+
+	ls := &LedgerState{db: db, chain: manager.PrimaryChain()}
+	ls.publishSnapshotsLocked()
+	limit := ls.peerHeaderHistoryLimit()
+	require.Positive(t, limit)
+
+	peerHeaders := make(map[string]mockHeader, limit)
+	previous := lcommon.NewBlake2b256([]byte("outside-retained-history"))
+	for i := 1; i <= limit; i++ {
+		var hash lcommon.Blake2b256
+		binary.BigEndian.PutUint64(hash[:8], uint64(i))
+		header := mockHeader{
+			hash:        hash,
+			prevHash:    previous,
+			blockNumber: uint64(i),
+			slot:        uint64(i),
+		}
+		peerHeaders[string(hash[:])] = header
+		previous = hash
+	}
+	var candidateHash lcommon.Blake2b256
+	binary.BigEndian.PutUint64(candidateHash[:8], uint64(limit+1))
+	candidate := mockHeader{
+		hash:        candidateHash,
+		prevHash:    previous,
+		blockNumber: uint64(limit + 1),
+		slot:        uint64(limit + 1),
+	}
+	lookupCalls := 0
+	ls.config.PeerHeaderLookupFunc = func(
+		connID ouroboros.ConnectionId,
+		hash []byte,
+	) (ChainsyncEvent, []byte, bool) {
+		lookupCalls++
+		header, ok := peerHeaders[string(hash)]
+		if !ok {
+			return ChainsyncEvent{}, nil, false
+		}
+		return ChainsyncEvent{
+			ConnectionId: connID,
+			Point: ocommon.NewPoint(
+				header.slot,
+				header.hash[:],
+			),
+			BlockHeader: header,
+			HeaderCryptoVerificationGeneration: ls.
+				CurrentHeaderCryptoVerificationGeneration(),
+		}, header.prevHash[:], true
+	}
+
+	_, _, found, err := ls.peerHeaderForkPath(
+		ouroboros.ConnectionId{},
+		candidate,
+	)
+	require.Equal(t, limit, lookupCalls)
+	require.False(t, found)
+	require.ErrorIs(t, err, errHeaderVerificationDeferred)
+	require.True(t, IsHeaderVerificationDeferred(err))
+	require.False(t, IsHeaderVerificationWithheld(err))
+}
+
 func TestValidatePeerChainSelectionHeaderCryptoUsesForkNonce(
 	t *testing.T,
 ) {
