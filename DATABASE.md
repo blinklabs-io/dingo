@@ -3940,7 +3940,11 @@ LIMIT 100;
 ### `GetUtxoBalanceByAddress`
 
 Aggregates live-UTxO balances for an address in SQL (used by the Blockfrost
-`/addresses/{address}` summary). Lovelace and count:
+`/addresses/{address}` summary for a bare payment credential; a full address
+needs the exact-address CBOR comparison, so its summary instead folds keyset
+pages of `Database.UtxosByAddressWithOrdering` into big-integer sums and fails
+with `ErrAddressSummaryTooLarge` past 50,000 live outputs or 5,000 distinct
+assets). Lovelace and count:
 
 ```sql
 SELECT COUNT(*) AS cnt, COALESCE(SUM(amount), 0) AS lovelace

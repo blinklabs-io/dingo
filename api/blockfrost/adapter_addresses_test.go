@@ -408,7 +408,7 @@ func TestNodeAdapterAddressTotalSeparatesKeyAndScriptCredentials(
 	require.NoError(t, err)
 	_, err = adapter.AddressTotal(context.Background(), scriptCred)
 	require.ErrorIs(t, err, ErrAddressNotFound)
-	_, err = adapter.Address(scriptCred)
+	_, err = adapter.Address(context.Background(), scriptCred)
 	require.ErrorIs(t, err, ErrAddressNotFound)
 }
 
@@ -437,4 +437,146 @@ func TestNodeAdapterAddressUTXOsRejectForeignNetwork(t *testing.T) {
 		page,
 	)
 	require.ErrorIs(t, err, ErrInvalidAddress)
+}
+
+func seedSummaryOutputs(
+	t *testing.T,
+	adapter *NodeAdapter,
+	raw *sql.DB,
+	db *database.Database,
+	addr lcommon.Address,
+	count int,
+	assets func(i int) []models.Asset,
+) {
+	t.Helper()
+	for i := range count {
+		var held []models.Asset
+		if assets != nil {
+			held = assets(i)
+		}
+		seedAddressOutput(
+			t, raw, db, addr, fill32(byte(0x40+i)), uint64(10+i),
+			2_000_000, held, nil,
+		)
+	}
+	require.NotNil(t, adapter)
+}
+
+func TestNodeAdapterAddressStopsOnCancelledContext(t *testing.T) {
+	t.Parallel()
+	adapter, raw, db := newDBBackedAdapter(t)
+	addr, _, _ := testKeyAddress(t, 0xb1, 0xb2)
+	seedSummaryOutputs(t, adapter, raw, db, addr, 2, nil)
+
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := adapter.Address(cancelled, addr.String())
+	require.ErrorIs(t, err, context.Canceled)
+
+	info, err := adapter.Address(context.Background(), addr.String())
+	require.NoError(t, err)
+	require.Equal(t, "4000000", info.Amount[0].Quantity)
+}
+
+// Batches smaller than the UTxO set must give the totals one unbounded read
+// would, including sums past the int64 range and the (policy id, name)
+// asset order, and must not count outputs at sibling address forms.
+func TestNodeAdapterAddressBatchedBalanceIsExact(t *testing.T) {
+	t.Parallel()
+	adapter, raw, db := newDBBackedAdapter(t)
+	addr, _, _ := testKeyAddress(t, 0xb3, 0xb4)
+	policy := bytes.Repeat([]byte{0xb5}, lcommon.AddressHashSize)
+	big := models.Asset{PolicyId: policy, Name: []byte("b"), Amount: 1 << 63}
+	small := models.Asset{PolicyId: policy, Name: []byte("a"), Amount: 3}
+	seedSummaryOutputs(
+		t, adapter, raw, db, addr, 5,
+		func(i int) []models.Asset {
+			if i < 2 {
+				return []models.Asset{big, small}
+			}
+			return nil
+		},
+	)
+	sibling, _, _ := testKeyAddress(t, 0xb3, 0xb6)
+	seedAddressOutput(
+		t, raw, db, sibling, fill32(0x7f), 30, 9_000_000, nil, nil,
+	)
+
+	want, err := adapter.Address(context.Background(), addr.String())
+	require.NoError(t, err)
+	adapter.summaryLimits = addressSummaryLimits{batch: 2}
+	got, err := adapter.Address(context.Background(), addr.String())
+	require.NoError(t, err)
+	require.Equal(t, want, got)
+
+	policyHex := hex.EncodeToString(policy)
+	require.Equal(t, []AddressAmountInfo{
+		{Unit: "lovelace", Quantity: "10000000"},
+		{Unit: policyHex + hex.EncodeToString([]byte("a")), Quantity: "6"},
+		{
+			Unit:     policyHex + hex.EncodeToString([]byte("b")),
+			Quantity: "18446744073709551616",
+		},
+	}, got.Amount)
+}
+
+func TestNodeAdapterAddressReadBudget(t *testing.T) {
+	t.Parallel()
+	adapter, raw, db := newDBBackedAdapter(t)
+	addr, _, _ := testKeyAddress(t, 0xb7, 0xb8)
+	policy := bytes.Repeat([]byte{0xb9}, lcommon.AddressHashSize)
+	seedSummaryOutputs(
+		t, adapter, raw, db, addr, 4,
+		func(i int) []models.Asset {
+			return []models.Asset{{
+				PolicyId: policy, Name: []byte{byte(i)}, Amount: 1,
+			}}
+		},
+	)
+
+	adapter.summaryLimits = addressSummaryLimits{batch: 2, maxUtxos: 3}
+	_, err := adapter.Address(context.Background(), addr.String())
+	require.ErrorIs(t, err, ErrAddressSummaryTooLarge)
+	_, err = adapter.AddressExtended(context.Background(), addr.String())
+	require.ErrorIs(t, err, ErrAddressSummaryTooLarge)
+
+	adapter.summaryLimits = addressSummaryLimits{batch: 2, maxUtxos: 4}
+	_, err = adapter.Address(context.Background(), addr.String())
+	require.NoError(t, err)
+
+	adapter.summaryLimits = addressSummaryLimits{maxAssets: 3}
+	_, err = adapter.Address(context.Background(), addr.String())
+	require.ErrorIs(t, err, ErrAddressSummaryTooLarge)
+	adapter.summaryLimits = addressSummaryLimits{maxAssets: 4}
+	_, err = adapter.Address(context.Background(), addr.String())
+	require.NoError(t, err)
+}
+
+func TestNodeAdapterAddressExtendedCapsEnrichment(t *testing.T) {
+	t.Parallel()
+	adapter, raw, db := newDBBackedAdapter(t)
+	addr, _, _ := testKeyAddress(t, 0xc1, 0xc2)
+	policy := bytes.Repeat([]byte{0xc3}, lcommon.AddressHashSize)
+	seedAddressOutput(
+		t, raw, db, addr, fill32(0x51), 6, 3_000_000,
+		[]models.Asset{
+			{PolicyId: policy, Name: []byte("a"), Amount: 1},
+			{PolicyId: policy, Name: []byte("b"), Amount: 1},
+			{PolicyId: policy, Name: []byte("c"), Amount: 1},
+		},
+		nil,
+	)
+
+	adapter.summaryLimits = addressSummaryLimits{maxEnrichedAssets: 2}
+	_, err := adapter.AddressExtended(context.Background(), addr.String())
+	require.ErrorIs(t, err, ErrAddressSummaryTooLarge)
+
+	// The base summary has no per-asset enrichment to cap.
+	_, err = adapter.Address(context.Background(), addr.String())
+	require.NoError(t, err)
+
+	adapter.summaryLimits = addressSummaryLimits{maxEnrichedAssets: 3}
+	got, err := adapter.AddressExtended(context.Background(), addr.String())
+	require.NoError(t, err)
+	require.Len(t, got.Amount, 4)
 }

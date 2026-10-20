@@ -630,7 +630,7 @@ func TestNodeAdapterAddressPointerIncludesSnapshotUtxos(t *testing.T) {
 		t, db, rows[2].TxId, rows[2].OutputIdx, otherAddr, 4_000_000,
 	)
 
-	info, err := adapter.Address(wantAddr.String())
+	info, err := adapter.Address(context.Background(), wantAddr.String())
 	require.NoError(t, err)
 	require.Len(t, info.Amount, 2)
 	assert.Equal(t, "lovelace", info.Amount[0].Unit)
@@ -658,7 +658,7 @@ func TestNodeAdapterAddressPointerRejectsMissingCandidateCbor(t *testing.T) {
 		Amount:     types.Uint64(2_000_000),
 	})
 
-	_, err := adapter.Address(addr.String())
+	_, err := adapter.Address(context.Background(), addr.String())
 	require.ErrorContains(t, err, "utxo cbor unavailable")
 }
 
@@ -706,7 +706,7 @@ func TestNodeAdapterEnterpriseAddressExcludesPointerUtxos(t *testing.T) {
 		}))
 	}
 
-	info, err := adapter.Address(enterprise.String())
+	info, err := adapter.Address(context.Background(), enterprise.String())
 	require.NoError(t, err)
 	require.Len(t, info.Amount, 1)
 	assert.Equal(t, "1000000", info.Amount[0].Quantity)

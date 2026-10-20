@@ -27,7 +27,6 @@ import (
 	"math/big"
 	"net/http"
 	"slices"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -163,7 +162,16 @@ type NodeAdapter struct {
 	// submitter does not expose the pool, which those endpoints report as
 	// ErrMempoolUnavailable.
 	mempool mempoolReader
+	// summaryLimits overrides the address summary read budget. The zero
+	// value selects the defaults.
+	summaryLimits addressSummaryLimits
 }
+
+// ErrAddressSummaryTooLarge reports an address summary whose read work
+// exceeded the per-request budget.
+var ErrAddressSummaryTooLarge = errors.New(
+	"address summary exceeds read budget",
+)
 
 // NewNodeAdapter creates a NodeAdapter that queries the
 // given LedgerState for blockchain data.
@@ -3153,81 +3161,77 @@ func parseAddressOrPaymentCred(
 }
 
 // exactAddressBalance aggregates balances after the database layer has
-// compared each candidate's complete decoded output address.
+// compared each candidate's complete decoded output address. Exact address
+// identity lives only in output CBOR, so the scan reads keyset batches and
+// folds each into big-integer sums rather than holding every row; the read
+// budget stops it before an address with an unbounded UTxO set can pin the
+// request.
 func (a *NodeAdapter) exactAddressBalance(
 	ctx context.Context,
 	addr lcommon.Address,
 	txn *database.Txn,
-) (models.AddressBalance, error) {
-	var ret models.AddressBalance
+) (*unitSums, int, error) {
 	pattern, err := models.ExactUtxoAddressPattern(addr)
 	if err != nil {
-		return ret, err
+		return nil, 0, err
 	}
-
-	candidates, err := a.ledgerState.Database().
-		UtxosByAddressWithOrdering(
-			ctx,
-			&models.UtxoWithOrderingQuery{
-				AddressPatterns: []models.UtxoAddressPattern{pattern},
-			},
-			txn,
-		)
-	if err != nil {
-		return ret, fmt.Errorf("get exact address UTxOs: %w", err)
+	limits := a.summaryLimits.withDefaults()
+	sums := newUnitSums()
+	count := 0
+	query := &models.UtxoWithOrderingQuery{
+		AddressPatterns: []models.UtxoAddressPattern{pattern},
+		Limit:           limits.batch,
 	}
-	for i := range candidates {
-		ret.UtxoCount++
-		ret.Lovelace += uint64(candidates[i].Amount)
-		for _, asset := range candidates[i].Assets {
-			ret.Assets = append(ret.Assets, models.AssetBalance{
-				PolicyId: asset.PolicyId,
-				Name:     asset.Name,
-				Amount:   uint64(asset.Amount),
-			})
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, 0, err
+		}
+		batch, err := a.ledgerState.Database().
+			UtxosByAddressWithOrdering(ctx, query, txn)
+		if err != nil {
+			return nil, 0, fmt.Errorf("get exact address UTxOs: %w", err)
+		}
+		for i := range batch {
+			count++
+			if count > limits.maxUtxos {
+				return nil, 0, fmt.Errorf(
+					"more than %d UTxOs: %w",
+					limits.maxUtxos,
+					ErrAddressSummaryTooLarge,
+				)
+			}
+			sums.add(batch[i].Utxo)
+		}
+		if len(sums.assets) > limits.maxAssets {
+			return nil, 0, fmt.Errorf(
+				"more than %d distinct assets: %w",
+				limits.maxAssets,
+				ErrAddressSummaryTooLarge,
+			)
+		}
+		if len(batch) < limits.batch {
+			return sums, count, nil
+		}
+		last := batch[len(batch)-1]
+		query.After = &models.UtxoOrderingCursor{
+			Slot:       last.TxSlot,
+			BlockIndex: last.TxBlockIndex,
+			OutputIdx:  last.OutputIdx,
+			TxId:       last.TxId,
 		}
 	}
-	// Merge duplicate asset units and restore the (policy id, name)
-	// ordering the SQL path provides.
-	merged := make(map[string]*models.AssetBalance)
-	for i := range ret.Assets {
-		key := string(
-			ret.Assets[i].PolicyId,
-		) + "\x00" + string(
-			ret.Assets[i].Name,
-		)
-		if existing, ok := merged[key]; ok {
-			existing.Amount += ret.Assets[i].Amount
-			continue
-		}
-		assetCopy := ret.Assets[i]
-		merged[key] = &assetCopy
-	}
-	ret.Assets = ret.Assets[:0]
-	for _, asset := range merged {
-		ret.Assets = append(ret.Assets, *asset)
-	}
-	sort.Slice(ret.Assets, func(i, j int) bool {
-		if c := bytes.Compare(
-			ret.Assets[i].PolicyId, ret.Assets[j].PolicyId,
-		); c != 0 {
-			return c < 0
-		}
-		return bytes.Compare(
-			ret.Assets[i].Name, ret.Assets[j].Name,
-		) < 0
-	})
-	return ret, nil
 }
 
 // Address returns summary details for the requested address, with balances
 // aggregated across its live UTxOs. Addresses never seen on chain map to
 // ErrAddressNotFound; addresses with spent history resolve with a zero
-// lovelace balance.
+// lovelace balance. A full address whose live UTxO set or asset count
+// exceeds the read budget fails with ErrAddressSummaryTooLarge.
 func (a *NodeAdapter) Address(
+	ctx context.Context,
 	address string,
 ) (AddressInfo, error) {
-	return a.addressSummary(context.Background(), address)
+	return a.addressSummary(ctx, address)
 }
 
 // parseQueryAddress parses an address or bare payment credential for an
@@ -3279,7 +3283,11 @@ func (a *NodeAdapter) addressSummary(
 	// forms sharing the payment credential are excluded; bare
 	// payment credentials (addr_vkh/script) deliberately aggregate
 	// across forms.
-	var balance models.AddressBalance
+	var (
+		balance   models.AddressBalance
+		sums      *unitSums
+		utxoCount int
+	)
 	if isPaymentCred {
 		balance, err = db.Metadata().
 			GetUtxoBalanceByAddress(
@@ -3287,8 +3295,9 @@ func (a *NodeAdapter) addressSummary(
 				models.UtxoAddressMatchPaymentCred,
 				txn.Metadata(),
 			)
+		utxoCount = int(balance.UtxoCount)
 	} else {
-		balance, err = a.exactAddressBalance(ctx, addr, txn)
+		sums, utxoCount, err = a.exactAddressBalance(ctx, addr, txn)
 	}
 	if err != nil {
 		return AddressInfo{}, fmt.Errorf(
@@ -3297,7 +3306,7 @@ func (a *NodeAdapter) addressSummary(
 			err,
 		)
 	}
-	if balance.UtxoCount == 0 {
+	if utxoCount == 0 {
 		var hasTransactions bool
 		if isPaymentCred {
 			// The synthetic enterprise address would only match
@@ -3332,20 +3341,26 @@ func (a *NodeAdapter) addressSummary(
 		}
 	}
 
-	// Balances are aggregated in SQL (see GetUtxoBalanceByAddress);
-	// assets arrive ordered by (policy id, name), which matches the
-	// hex-string unit ordering Blockfrost emits.
-	amounts := make([]AddressAmountInfo, 0, len(balance.Assets)+1)
-	amounts = append(amounts, AddressAmountInfo{
-		Unit:     "lovelace",
-		Quantity: strconv.FormatUint(balance.Lovelace, 10),
-	})
-	for _, asset := range balance.Assets {
+	// Payment credential balances are aggregated in SQL (see
+	// GetUtxoBalanceByAddress); assets arrive ordered by (policy id, name),
+	// which matches the hex-string unit ordering Blockfrost emits and
+	// unitSums reproduces for exact addresses.
+	var amounts []AddressAmountInfo
+	if sums != nil {
+		amounts = sums.amounts()
+	} else {
+		amounts = make([]AddressAmountInfo, 0, len(balance.Assets)+1)
 		amounts = append(amounts, AddressAmountInfo{
-			Unit: hex.EncodeToString(asset.PolicyId) +
-				hex.EncodeToString(asset.Name),
-			Quantity: strconv.FormatUint(asset.Amount, 10),
+			Unit:     "lovelace",
+			Quantity: strconv.FormatUint(balance.Lovelace, 10),
 		})
+		for _, asset := range balance.Assets {
+			amounts = append(amounts, AddressAmountInfo{
+				Unit: hex.EncodeToString(asset.PolicyId) +
+					hex.EncodeToString(asset.Name),
+				Quantity: strconv.FormatUint(asset.Amount, 10),
+			})
+		}
 	}
 
 	var stakeAddress *string
