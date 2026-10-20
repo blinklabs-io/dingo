@@ -1764,3 +1764,52 @@ func TestCheckStakeDistributionStillComparesASettledEpoch(t *testing.T) {
 		"a settled epoch that agrees must still compare clean, not be "+
 			"skipped as unpublished")
 }
+
+// TestCheckQueriesReportExpiredContext proves a dingo query that fails because
+// the caller's context ended reports that context error. Dial closes the
+// connection when the context ends, so without the wrap the query error reads
+// only "protocol is shutting down" and hides the deadline.
+func TestCheckQueriesReportExpiredContext(t *testing.T) {
+	t.Parallel()
+
+	const magic = 764824073
+
+	checks := map[string]func(
+		context.Context, *localstatequery.Client, *koiosparity.Cache,
+	) error{
+		"stake distribution": func(
+			ctx context.Context, c *localstatequery.Client,
+			cache *koiosparity.Cache,
+		) error {
+			_, err := CheckStakeDistribution(ctx, c, nil, cache, "preview", 500)
+			return err
+		},
+		"protocol params": func(
+			ctx context.Context, c *localstatequery.Client,
+			cache *koiosparity.Cache,
+		) error {
+			_, err := CheckProtocolParams(ctx, c, nil, cache, "preview", 500)
+			return err
+		},
+	}
+	for name, check := range checks {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			lsq := newWiringFakeLSQServer()
+			listener, err := net.Listen("tcp", "127.0.0.1:0")
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = listener.Close() })
+			lsq.serve(t, listener, magic)
+
+			ctx, cancel := context.WithCancel(context.Background())
+			client := dialWiringClient(t, ctx, listener.Addr().String(), magic)
+			cache := openTestCache(t)
+			cancel()
+
+			err = check(ctx, client, cache)
+			require.Error(t, err)
+			require.ErrorIs(t, err, context.Canceled,
+				"an expired caller context must not be reported only as a closed protocol")
+		})
+	}
+}
