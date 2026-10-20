@@ -22,8 +22,6 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 )
 
-const consensusDatabaseIdentityKey = "consensus_provider_identity"
-
 type consensusIdentityStore interface {
 	GetSyncState(string, *database.Txn) (string, error)
 	SetSyncState(string, string, *database.Txn) error
@@ -46,7 +44,7 @@ func enforceConsensusIdentity(
 	store consensusIdentityStore,
 	identity string,
 ) error {
-	persisted, err := store.GetSyncState(consensusDatabaseIdentityKey, nil)
+	persisted, err := store.GetSyncState(nodeconsensus.DatabaseIdentitySyncKey, nil)
 	if err != nil {
 		return fmt.Errorf("read consensus database identity: %w", err)
 	}
@@ -62,7 +60,7 @@ func enforceConsensusIdentity(
 			)
 		}
 		if err := store.SetSyncState(
-			consensusDatabaseIdentityKey,
+			nodeconsensus.DatabaseIdentitySyncKey,
 			identity,
 			nil,
 		); err != nil {

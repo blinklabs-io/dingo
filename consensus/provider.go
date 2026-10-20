@@ -31,6 +31,11 @@ const (
 	PraosProviderName = "praos"
 	// PraosIdentity versions persisted and network-visible Praos semantics.
 	PraosIdentity = "praos/v1"
+	// DatabaseIdentitySyncKey is the sync-state key that binds a database to
+	// the DatabaseIdentity of the provider that created it. It must outlive
+	// any bulk sync-state cleanup: a database that loses it is read as an
+	// unmarked Praos database on the next start.
+	DatabaseIdentitySyncKey = "consensus_provider_identity"
 )
 
 // HeaderVerifier exposes the ledger-owned Praos header checks to a provider.
