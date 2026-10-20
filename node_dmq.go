@@ -137,8 +137,11 @@ func (n *Node) startDMQ() error {
 	if !cfg.Enabled {
 		return nil
 	}
-	// Read the topology before opening any socket so that a bad file stops
-	// startup instead of surfacing when peers are first dialed.
+	// Read the topology before the DMQ stack opens its socket, so that a bad
+	// file stops startup instead of surfacing when peers are first dialed.
+	// Services that start earlier in Run are stopped by the usual startup
+	// failure path. Configuration validation has already rejected a missing
+	// file; this read is the one that parses it and is authoritative.
 	if cfg.TopologyFile != "" {
 		topo, err := dmq.LoadTopology(cfg.TopologyFile, n.config.logger)
 		if err != nil {

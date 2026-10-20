@@ -15,6 +15,7 @@
 package dingo
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -239,25 +240,114 @@ func TestNodeRunServesDMQSubmission(t *testing.T) {
 	)
 }
 
-// A topology file that does not parse stops startup before the DMQ socket
-// opens.
+// syncLogBuffer is a log sink that node goroutines may write while the test
+// reads it.
+type syncLogBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncLogBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncLogBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// A topology file that cannot be loaded stops startup before the DMQ stack
+// opens its socket and before any API provider starts.
 func TestNodeRunRejectsBadDMQTopology(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		path func(t *testing.T, dir string) string
+	}{
+		{
+			name: "malformed",
+			path: func(t *testing.T, dir string) string {
+				path := filepath.Join(dir, "dmq-topology.json")
+				require.NoError(t, os.WriteFile(path, []byte("{"), 0o600))
+				return path
+			},
+		},
+		{
+			name: "missing",
+			path: func(_ *testing.T, dir string) string {
+				return filepath.Join(dir, "absent.json")
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			n := newAPIPluginRuntimeNode(t)
+			dir := t.TempDir()
+			socket := filepath.Join(dir, "dmq.sock")
+			dmqCfg := internalconfig.DefaultDMQConfig()
+			dmqCfg.Enabled = true
+			dmqCfg.NetworkMagic = 42
+			dmqCfg.SocketPath = socket
+			dmqCfg.TopologyFile = tt.path(t, dir)
+			n.config.cfg.DMQ = dmqCfg
+			probe := &apiLifecycleProbe{}
+			registerAPIProbe(
+				t, n.pluginHost, plugin.CapabilityAPIBlockfrost, "probe", probe,
+			)
+			selectAPIProbe(n, plugin.CapabilityAPIBlockfrost, "probe", 13000)
+
+			err := n.Run(context.Background())
+			require.ErrorContains(t, err, "loading dmq topology")
+			require.NoFileExists(t, socket)
+			require.Zero(t, probe.starts.Load())
+		})
+	}
+}
+
+// A topology file that loads lets startup continue, and the log reports how
+// many distinct peers it names.
+func TestNodeRunLoadsDMQTopology(t *testing.T) {
 	t.Parallel()
 	n := newAPIPluginRuntimeNode(t)
 	dir := t.TempDir()
 	topologyFile := filepath.Join(dir, "dmq-topology.json")
-	require.NoError(t, os.WriteFile(topologyFile, []byte("{"), 0o600))
-	socket := filepath.Join(dir, "dmq.sock")
+	require.NoError(t, os.WriteFile(topologyFile, []byte(`{
+		"localRoots": [{
+			"accessPoints": [
+				{"address": "10.0.0.1", "port": 3141},
+				{"address": "10.0.0.2", "port": 3141}
+			],
+			"valency": 2
+		}],
+		"publicRoots": [{
+			"accessPoints": [{"address": "10.0.0.1", "port": 3141}],
+			"valency": 1
+		}]
+	}`), 0o600))
 	dmqCfg := internalconfig.DefaultDMQConfig()
 	dmqCfg.Enabled = true
 	dmqCfg.NetworkMagic = 42
-	dmqCfg.SocketPath = socket
+	dmqCfg.SocketPath = filepath.Join(dir, "dmq.sock")
 	dmqCfg.TopologyFile = topologyFile
 	n.config.cfg.DMQ = dmqCfg
+	logs := &syncLogBuffer{}
+	n.config.logger = slog.New(slog.NewTextHandler(logs, nil))
 
-	err := n.Run(context.Background())
-	require.ErrorContains(t, err, "loading dmq topology")
-	require.NoFileExists(t, socket)
+	errProbe := errors.New("probe done")
+	probe := &apiLifecycleProbe{onStart: func() error { return errProbe }}
+	registerAPIProbe(
+		t, n.pluginHost, plugin.CapabilityAPIBlockfrost, "probe", probe,
+	)
+	selectAPIProbe(n, plugin.CapabilityAPIBlockfrost, "probe", 13000)
+
+	require.ErrorIs(t, n.Run(context.Background()), errProbe)
+	require.Equal(t, int32(1), probe.starts.Load())
+	require.Contains(t, logs.String(), "loaded dmq topology")
+	require.Contains(t, logs.String(), "peers=2")
 }
 
 // submitDMQ submits an unsigned message over a DMQ local socket and returns

@@ -7823,11 +7823,19 @@ sees a reason before its first rejection.
 
 `dmq.topologyFile` names a dmq-node topology file, which uses cardano-node's
 P2P topology syntax and is separate from the Cardano topology. `dmq.LoadTopology`
-parses it into local and public root groups of peers; `bootstrapPeers`,
-`peerSnapshotFile` and `useLedgerAfterSlot` are ignored (the first two with a
-warning) because dmq-node does not support them, and a peer snapshot is never
-read from disk. `startDMQ` loads the file before opening any socket, so a bad
-file stops startup, and logs the peer count.
+parses it into local and public root groups of peers. `bootstrapPeers`,
+`peerSnapshotFile` and `useLedgerAfterSlot` are dropped before parsing, because
+dmq-node does not support them: even a malformed one does not fail the load, a
+configured `bootstrapPeers` or `peerSnapshotFile` is logged as ignored, and a
+peer snapshot is never read from disk. Public roots read `valency` and
+`warmValency` only, and a missing `warmValency` becomes `valency`; `hotValency`
+is understood for local roots alone. `Topology.Peers` lists each distinct peer
+once, comparing hostnames without case or a trailing dot and IP literals by
+canonical form, without resolving names. Configuration validation rejects a
+missing or non-regular file early; `startDMQ` then loads it, which is the
+authoritative read, before the DMQ stack opens its socket. A bad file stops
+startup through the node's normal failure path, after services that started
+earlier in `Run`, and a successful load logs the distinct peer count.
 
 Not yet provided: the node-to-node message submission transport, its listener,
 the peer manager that dials the topology peers within `dmq.minPeers` and

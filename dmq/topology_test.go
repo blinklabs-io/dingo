@@ -65,8 +65,12 @@ func TestLoadTopologyGroups(t *testing.T) {
 		Advertise:   true,
 	}, topo.LocalRoots[0])
 	require.Len(t, topo.PublicRoots, 1)
-	assert.Equal(t, uint(1), topo.PublicRoots[0].Valency)
-	assert.False(t, topo.PublicRoots[0].Trustable)
+	// A public root that names no warmValency gets its valency.
+	assert.Equal(t, RootGroup{
+		Peers:       []Peer{{Host: "2001:db8::1", Port: 3141}},
+		Valency:     1,
+		WarmValency: 1,
+	}, topo.PublicRoots[0])
 	assert.Equal(
 		t,
 		"[2001:db8::1]:3141",
@@ -74,28 +78,117 @@ func TestLoadTopologyGroups(t *testing.T) {
 	)
 }
 
+func TestLoadTopologyPublicRootWarmValency(t *testing.T) {
+	t.Parallel()
+	topo, err := LoadTopology(writeTopology(t, `{"publicRoots": [{
+		"accessPoints": [
+			{"address": "10.0.0.1", "port": 3141},
+			{"address": "10.0.0.2", "port": 3141},
+			{"address": "10.0.0.3", "port": 3141}
+		],
+		"valency": 1,
+		"warmValency": 3
+	}]}`), nil)
+	require.NoError(t, err)
+	assert.Equal(t, uint(1), topo.PublicRoots[0].Valency)
+	assert.Equal(t, uint(3), topo.PublicRoots[0].WarmValency)
+}
+
+func TestLoadTopologyPublicRootIsNeverTrustable(t *testing.T) {
+	t.Parallel()
+	topo, err := LoadTopology(writeTopology(t, `{"publicRoots": [{
+		"accessPoints": [{"address": "10.0.0.1", "port": 3141}],
+		"trustable": true,
+		"valency": 1
+	}]}`), nil)
+	require.NoError(t, err)
+	assert.False(t, topo.PublicRoots[0].Trustable)
+}
+
 func TestLoadTopologyIgnoresUnsupportedFields(t *testing.T) {
 	t.Parallel()
-	// The snapshot file does not exist: a loader that followed it would fail.
-	path := writeTopology(t, `{
-		"bootstrapPeers": [{"address": "boot.example.com", "port": 3001}],
-		"peerSnapshotFile": "missing-snapshot.json",
-		"useLedgerAfterSlot": 100,
-		"localRoots": [{
-			"accessPoints": [{"address": "10.0.0.1", "port": 3141}],
-			"valency": 1
-		}],
-		"publicRoots": []
-	}`)
-	var logs bytes.Buffer
-	topo, err := LoadTopology(
-		path,
-		slog.New(slog.NewTextHandler(&logs, nil)),
-	)
-	require.NoError(t, err)
-	assert.Equal(t, []Peer{{Host: "10.0.0.1", Port: 3141}}, topo.Peers())
-	assert.Contains(t, logs.String(), "ignoring bootstrapPeers")
-	assert.Contains(t, logs.String(), "ignoring peerSnapshotFile")
+	const roots = `"localRoots": [{
+		"accessPoints": [{"address": "10.0.0.1", "port": 3141}],
+		"valency": 1
+	}]`
+	tests := []struct {
+		name     string
+		fields   string
+		wantWarn []string
+		noWarn   []string
+	}{
+		{
+			name: "valid unsupported fields",
+			fields: `"bootstrapPeers": [{"address": "boot.example.com", "port": 3001}],
+				"peerSnapshotFile": "missing-snapshot.json",
+				"useLedgerAfterSlot": 100,`,
+			wantWarn: []string{
+				"ignoring bootstrapPeers", "ignoring peerSnapshotFile",
+			},
+		},
+		{
+			name: "malformed bootstrap peers",
+			fields: `"bootstrapPeers": [
+				{"address": "", "port": 0},
+				{"address": "boot.example.com", "port": 70000}
+			],`,
+			wantWarn: []string{"ignoring bootstrapPeers"},
+		},
+		{
+			name:     "bootstrap peers of the wrong type",
+			fields:   `"bootstrapPeers": "not a list",`,
+			wantWarn: []string{"ignoring bootstrapPeers"},
+		},
+		{
+			name:     "key in another case",
+			fields:   `"BootstrapPeers": [{"address": "", "port": 0}],`,
+			wantWarn: []string{"ignoring bootstrapPeers"},
+		},
+		{
+			name:   "negative useLedgerAfterSlot",
+			fields: `"useLedgerAfterSlot": -1,`,
+			noWarn: []string{"ignoring"},
+		},
+		{
+			name:   "huge useLedgerAfterSlot",
+			fields: `"useLedgerAfterSlot": 18446744073709551615,`,
+			noWarn: []string{"ignoring"},
+		},
+		{
+			name:   "non-numeric useLedgerAfterSlot",
+			fields: `"useLedgerAfterSlot": "soon",`,
+			noWarn: []string{"ignoring"},
+		},
+		{
+			name: "empty bootstrap peers and snapshot file",
+			fields: `"bootstrapPeers": [],
+				"peerSnapshotFile": "",`,
+			noWarn: []string{"ignoring"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			path := writeTopology(t, "{"+tt.fields+roots+"}")
+			var logs bytes.Buffer
+			topo, err := LoadTopology(
+				path,
+				slog.New(slog.NewTextHandler(&logs, nil)),
+			)
+			require.NoError(t, err)
+			assert.Equal(
+				t,
+				[]Peer{{Host: "10.0.0.1", Port: 3141}},
+				topo.Peers(),
+			)
+			for _, want := range tt.wantWarn {
+				assert.Contains(t, logs.String(), want)
+			}
+			for _, not := range tt.noWarn {
+				assert.NotContains(t, logs.String(), not)
+			}
+		})
+	}
 }
 
 func TestLoadTopologyPeersDeduplicates(t *testing.T) {
@@ -104,14 +197,18 @@ func TestLoadTopologyPeersDeduplicates(t *testing.T) {
 		"localRoots": [{
 			"accessPoints": [
 				{"address": "Relay.Example.com", "port": 3141},
-				{"address": "10.0.0.1", "port": 3141}
+				{"address": "10.0.0.1", "port": 3141},
+				{"address": "2001:DB8::1", "port": 3141}
 			],
 			"valency": 1
 		}],
 		"publicRoots": [{
 			"accessPoints": [
 				{"address": "relay.example.com", "port": 3141},
-				{"address": "relay.example.com", "port": 3142}
+				{"address": "relay.example.com.", "port": 3141},
+				{"address": "relay.example.com", "port": 3142},
+				{"address": "2001:db8:0::1", "port": 3141},
+				{"address": "::ffff:10.0.0.1", "port": 3141}
 			],
 			"valency": 1
 		}]
@@ -121,6 +218,7 @@ func TestLoadTopologyPeersDeduplicates(t *testing.T) {
 	assert.Equal(t, []Peer{
 		{Host: "Relay.Example.com", Port: 3141},
 		{Host: "10.0.0.1", Port: 3141},
+		{Host: "2001:DB8::1", Port: 3141},
 		{Host: "relay.example.com", Port: 3142},
 	}, topo.Peers())
 }
@@ -147,9 +245,28 @@ func TestLoadTopologyErrors(t *testing.T) {
 			wantErr: "open topology file",
 		},
 		{
+			name:    "directory",
+			path:    func(t *testing.T) string { return t.TempDir() },
+			wantErr: "read topology file",
+		},
+		{
+			name: "empty file",
+			path: func(t *testing.T) string {
+				return writeTopology(t, ``)
+			},
+			wantErr: "parse topology file",
+		},
+		{
 			name: "malformed json",
 			path: func(t *testing.T) string {
 				return writeTopology(t, `{"localRoots": [`)
+			},
+			wantErr: "parse topology file",
+		},
+		{
+			name: "not an object",
+			path: func(t *testing.T) string {
+				return writeTopology(t, `[]`)
 			},
 			wantErr: "parse topology file",
 		},
@@ -162,6 +279,26 @@ func TestLoadTopologyErrors(t *testing.T) {
 				}]}`)
 			},
 			wantErr: "localRoots[0].accessPoints[0].port",
+		},
+		{
+			name: "port zero",
+			path: func(t *testing.T) string {
+				return writeTopology(t, `{"localRoots": [{
+					"accessPoints": [{"address": "10.0.0.1", "port": 0}],
+					"valency": 1
+				}]}`)
+			},
+			wantErr: "localRoots[0].accessPoints[0].port",
+		},
+		{
+			name: "empty address",
+			path: func(t *testing.T) string {
+				return writeTopology(t, `{"publicRoots": [{
+					"accessPoints": [{"address": "", "port": 3141}],
+					"valency": 1
+				}]}`)
+			},
+			wantErr: "publicRoots[0].accessPoints[0].address",
 		},
 		{
 			name: "valency above the access points",
@@ -182,4 +319,14 @@ func TestLoadTopologyErrors(t *testing.T) {
 			assert.Contains(t, err.Error(), tt.wantErr)
 		})
 	}
+}
+
+func TestLoadTopologyRejectsOversizedFile(t *testing.T) {
+	t.Parallel()
+	path := writeTopology(t, `{"padding": "`+string(
+		bytes.Repeat([]byte("a"), maxTopologyBytes),
+	)+`"}`)
+	_, err := LoadTopology(path, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "exceeds maximum size")
 }
