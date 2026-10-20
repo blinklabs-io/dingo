@@ -6001,6 +6001,7 @@ func TestSubscribeChainsyncResyncClosesConnectionForFreshSyncReasons(
 		// still in flight, which the peer's replies then violate.
 		event.ChainsyncResyncReasonRollbackAhead,
 		event.ChainsyncResyncReasonHeaderValidationRecovery,
+		event.ChainsyncResyncReasonForecastCorroborationRecovery,
 		event.ChainsyncResyncReasonBlockfetchRangeUnavailable,
 		event.ChainsyncResyncReasonBlockfetchTimeoutRetryFailed,
 		event.ChainsyncResyncReasonForkQueueOverflowRestartFailed,
@@ -6618,6 +6619,10 @@ func TestChainsyncResyncDeniesPeerByReason(
 		},
 		{
 			reason:         event.ChainsyncResyncReasonChainSwitchCursorAhead,
+			wantDeniesPeer: false,
+		},
+		{
+			reason:         event.ChainsyncResyncReasonForecastCorroborationRecovery,
 			wantDeniesPeer: false,
 		},
 	}

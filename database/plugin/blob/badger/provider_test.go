@@ -16,6 +16,7 @@ package badger
 
 import (
 	"context"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -205,6 +206,18 @@ func TestProviderValueThresholdDefaults(t *testing.T) {
 			want:        DefaultValueThreshold,
 		},
 		{
+			name:        "core leios",
+			storageMode: "core",
+			runMode:     "leios",
+			want:        DefaultCoreLeiosValueThreshold,
+		},
+		{
+			name:        "api leios",
+			storageMode: "api",
+			runMode:     "leios",
+			want:        DefaultValueThreshold,
+		},
+		{
 			name:        "core load",
 			storageMode: "core",
 			runMode:     "load",
@@ -227,7 +240,10 @@ func TestProviderValueThresholdDefaults(t *testing.T) {
 					RunMode:     tt.runMode,
 				},
 			)
-			require.Equal(t, int64(tt.want), store.valueThreshold)
+			if store.valueThreshold != int64(tt.want) {
+				t.Fatalf("value threshold = %d, want %d",
+					store.valueThreshold, tt.want)
+			}
 		})
 	}
 }
@@ -269,6 +285,23 @@ func TestProviderExplicitZeroValueThresholdOverridesSyncDefault(t *testing.T) {
 		RunMode:     "sync",
 	})
 	require.Zero(t, store.valueThreshold)
+}
+
+func TestProviderExplicitValueThresholdOverridesLeiosDefault(t *testing.T) {
+	for _, threshold := range []uint64{0, 2048, DefaultValueThreshold} {
+		t.Run(strconv.FormatUint(threshold, 10), func(t *testing.T) {
+			store := resolveBadgerProvider(t, map[string]any{
+				"valueThreshold": threshold,
+			}, blob.ProviderDependencies{
+				StorageMode: "core",
+				RunMode:     "leios",
+			})
+			if store.valueThreshold != int64(threshold) {
+				t.Fatalf("explicit value threshold = %d, want %d",
+					store.valueThreshold, threshold)
+			}
+		})
+	}
 }
 
 func TestProviderStopDeadlineDuringValueLogGC(t *testing.T) {

@@ -249,12 +249,16 @@ type ChainSelector struct {
 	// One rolling snapshot per peer; candidate events retain only the bounded
 	// admission updates needed to promote or rebuild that snapshot.
 	pendingPeerTipFrontiers map[ouroboros.ConnectionId]*PeerChainTip
-	committedPeerTips       map[ouroboros.ConnectionId]uint64
-	eligible                map[ouroboros.ConnectionId]bool
-	priority                map[ouroboros.ConnectionId]int
-	evaluationTrigger       chan struct{}
-	bestPeerConn            *ouroboros.ConnectionId
-	localTip                ochainsync.Tip
+	// One unverified, connected header per peer may temporarily corroborate
+	// verified candidates while that peer waits for the forecast horizon. It
+	// is excluded from every selection and admission path.
+	forecastHorizonWitnesses map[ouroboros.ConnectionId]forecastHorizonWitness
+	committedPeerTips        map[ouroboros.ConnectionId]uint64
+	eligible                 map[ouroboros.ConnectionId]bool
+	priority                 map[ouroboros.ConnectionId]int
+	evaluationTrigger        chan struct{}
+	bestPeerConn             *ouroboros.ConnectionId
+	localTip                 ochainsync.Tip
 	// farTipClaims records, per connection, the most recent delivered
 	// frontier that exceeded the catch-up plausibility ceiling. Entries are
 	// provisional: they never enter peerTips and so never influence chain
@@ -374,6 +378,11 @@ type peerTipAdmissionCandidate struct {
 	update      PeerTipUpdateEvent
 	plausible   bool
 	farTipClaim *farTipClaim
+}
+
+type forecastHorizonWitness struct {
+	admissionID uint64
+	peerTip     *PeerChainTip
 }
 
 func cloneCandidateFarTipClaim(
@@ -517,22 +526,23 @@ func NewChainSelector(cfg ChainSelectorConfig) *ChainSelector {
 		cfg.MinCorroboratingPeers = 1
 	}
 	cs := &ChainSelector{
-		config:                  cfg,
-		securityParam:           cfg.SecurityParam,
-		maxTrackedPeers:         maxPeers,
-		mode:                    SelectionModePraos,
-		peerTips:                make(map[ouroboros.ConnectionId]*PeerChainTip),
-		pendingPeerTips:         make(map[ouroboros.ConnectionId][]peerTipAdmissionCandidate),
-		pendingPeerTipFrontiers: make(map[ouroboros.ConnectionId]*PeerChainTip),
-		farTipClaims:            make(map[ouroboros.ConnectionId]farTipClaim),
-		pendingFarTipClaims:     make(map[ouroboros.ConnectionId]farTipClaim),
-		committedPeerTips:       make(map[ouroboros.ConnectionId]uint64),
-		eligible:                make(map[ouroboros.ConnectionId]bool),
-		priority:                make(map[ouroboros.ConnectionId]int),
-		evaluationTrigger:       make(chan struct{}, 1),
-		nowFn:                   time.Now,
-		switchBackCooldown:      cfg.SwitchBackCooldown,
-		recentlyLeft:            make(map[ouroboros.ConnectionId]time.Time),
+		config:                   cfg,
+		securityParam:            cfg.SecurityParam,
+		maxTrackedPeers:          maxPeers,
+		mode:                     SelectionModePraos,
+		peerTips:                 make(map[ouroboros.ConnectionId]*PeerChainTip),
+		pendingPeerTips:          make(map[ouroboros.ConnectionId][]peerTipAdmissionCandidate),
+		pendingPeerTipFrontiers:  make(map[ouroboros.ConnectionId]*PeerChainTip),
+		forecastHorizonWitnesses: make(map[ouroboros.ConnectionId]forecastHorizonWitness),
+		farTipClaims:             make(map[ouroboros.ConnectionId]farTipClaim),
+		pendingFarTipClaims:      make(map[ouroboros.ConnectionId]farTipClaim),
+		committedPeerTips:        make(map[ouroboros.ConnectionId]uint64),
+		eligible:                 make(map[ouroboros.ConnectionId]bool),
+		priority:                 make(map[ouroboros.ConnectionId]int),
+		evaluationTrigger:        make(chan struct{}, 1),
+		nowFn:                    time.Now,
+		switchBackCooldown:       cfg.SwitchBackCooldown,
+		recentlyLeft:             make(map[ouroboros.ConnectionId]time.Time),
 	}
 	if cfg.GenesisMode {
 		cs.mode = SelectionModeGenesis
@@ -1138,6 +1148,69 @@ func (cs *ChainSelector) PreparePeerTipAdmissionDisposition(
 		return PeerTipUpdateRejected
 	}
 	return disposition
+}
+
+// PrepareForecastHorizonWitness records one connected header solely as a
+// Genesis corroboration witness while its ChainSync callback waits for the
+// ledger forecast horizon. The header has not passed consensus verification,
+// so it is kept outside every selection and admission path. The returned
+// connections have verified staged headers that the witness now corroborates
+// and should be re-intersected so those headers are delivered again.
+func (cs *ChainSelector) PrepareForecastHorizonWitness(
+	update PeerTipUpdateEvent,
+) []ouroboros.ConnectionId {
+	if update.AdmissionID == 0 ||
+		(cs.config.ConnectionLive != nil &&
+			!cs.config.ConnectionLive(update.ConnectionId)) {
+		return nil
+	}
+	cs.mutex.Lock()
+	defer cs.mutex.Unlock()
+	if !cs.genesisCorroborationActiveLocked() {
+		return nil
+	}
+	base := cs.latestPeerTipCandidateLocked(update.ConnectionId)
+	if base == nil {
+		base = cs.peerTips[update.ConnectionId]
+	}
+	if base == nil || update.ObservedTip.Point.Slot <= base.ObservedTip.Point.Slot ||
+		len(update.ObservedPrevHash) == 0 ||
+		!bytes.Equal(update.ObservedPrevHash, base.ObservedTip.Point.Hash) {
+		return nil
+	}
+	witnessTip := cs.clonePeerTipAdmissionFrontier(base)
+	cs.applyPeerTipAdmissionUpdateLocked(witnessTip, update)
+	cs.forecastHorizonWitnesses[update.ConnectionId] = forecastHorizonWitness{
+		admissionID: update.AdmissionID,
+		peerTip:     witnessTip,
+	}
+	var recoveries []ouroboros.ConnectionId
+	for connId := range cs.pendingPeerTips {
+		if connId == update.ConnectionId {
+			continue
+		}
+		candidate := cs.latestPeerTipCandidateLocked(connId)
+		if candidate != nil && cs.isPeerCorroboratedLocked(connId, candidate) {
+			recoveries = append(recoveries, connId)
+		}
+	}
+	slices.SortFunc(recoveries, func(a, b ouroboros.ConnectionId) int {
+		return cmp.Compare(a.String(), b.String())
+	})
+	return recoveries
+}
+
+// RemoveForecastHorizonWitness removes the temporary witness created for the
+// matching admission wait. A later wait on the same connection is unaffected.
+func (cs *ChainSelector) RemoveForecastHorizonWitness(
+	update PeerTipUpdateEvent,
+) {
+	cs.mutex.Lock()
+	defer cs.mutex.Unlock()
+	witness, ok := cs.forecastHorizonWitnesses[update.ConnectionId]
+	if ok && witness.admissionID == update.AdmissionID {
+		delete(cs.forecastHorizonWitnesses, update.ConnectionId)
+	}
 }
 
 func (cs *ChainSelector) admittedPeerTipPointLocked(
@@ -1984,10 +2057,9 @@ func (cs *ChainSelector) checkPeerTipPlausibleWithClaimsTrackedLocked(
 		// go stale while the network advances. A peer whose
 		// delta from the stale reference exceeds K looks
 		// implausible, but the network legitimately moved on.
-		// Accept the tip if it is within 2*K of the local tip
-		// AND the reference itself is stale (reference <=
-		// local tip, meaning the node hasn't updated peer
-		// records since the stall began).
+		// Keep the peer-relative K bound while the reference is within
+		// K of the local tip. A farther reference can be stale during
+		// snapshot catch-up, but only within the local 2*K ceiling.
 		// A corroborated far claim is this connection's own reference, as a
 		// known peer's previous frontier is in Case 1. The frontier that
 		// corroborated it may sit up to K below it, so the Case 2 ceiling
@@ -2001,12 +2073,20 @@ func (cs *ChainSelector) checkPeerTipPlausibleWithClaimsTrackedLocked(
 				}
 			}
 		}
+		catchUpCeiling := safeAddUint64(
+			cs.localTip.BlockNumber,
+			safeAddUint64(cs.securityParam, cs.securityParam),
+		)
+		catchUpFloor := safeAddUint64(
+			cs.localTip.BlockNumber,
+			cs.securityParam,
+		)
+		referenceStale := referenceBlock <= cs.localTip.BlockNumber
+		referenceAheadWithinCatchUpWindow := referenceBlock > catchUpFloor &&
+			referenceBlock <= catchUpCeiling
 		if observedReject && cs.localTip.BlockNumber > 0 &&
-			referenceBlock <= cs.localTip.BlockNumber {
-			maxPlausibleBlock = safeAddUint64(
-				cs.localTip.BlockNumber,
-				safeAddUint64(cs.securityParam, cs.securityParam),
-			)
+			(referenceStale || referenceAheadWithinCatchUpWindow) {
+			maxPlausibleBlock = catchUpCeiling
 			observedReject = observedBlock > maxPlausibleBlock
 			// The 2*K catch-up ceiling still assumes the honest network tip
 			// is at most a bounded stall away from the local tip. That
@@ -2017,13 +2097,14 @@ func (cs *ChainSelector) checkPeerTipPlausibleWithClaimsTrackedLocked(
 			// unreachable. A rejected frontier is never recorded, so it can
 			// never itself become a fresher reference -- a one-way ratchet.
 			//
-			// Every reference the selector holds is stale here (that is
-			// what put us in this branch), and nothing about this frontier
-			// can be verified yet: its epoch is beyond the ledger's forecast
-			// horizon, so header verification is deferred before any
-			// signature is checked. Require corroboration instead: another,
-			// distinct connection has delivered a frontier within K of it,
-			// or this connection has delivered a connected header chain
+			// References within this local catch-up ceiling can be stale
+			// while a snapshot-backed local tip lags behind the network.
+			// Nothing about this frontier can be verified yet: its epoch is
+			// beyond the ledger's forecast horizon, so header verification
+			// is deferred before any signature is checked. Require
+			// corroboration instead: another, distinct connection has
+			// delivered a frontier within K of it, or this connection has
+			// delivered a connected header chain
 			// (see corroborateFarTipClaimLocked). A single claim, honest or
 			// fabricated, cannot break the ratchet by itself.
 			if observedReject {
@@ -2518,6 +2599,7 @@ func (cs *ChainSelector) deletePeerLocked(connId ouroboros.ConnectionId) {
 	delete(cs.peerTips, connId)
 	delete(cs.pendingPeerTips, connId)
 	delete(cs.pendingPeerTipFrontiers, connId)
+	delete(cs.forecastHorizonWitnesses, connId)
 	delete(cs.committedPeerTips, connId)
 	delete(cs.eligible, connId)
 	delete(cs.priority, connId)

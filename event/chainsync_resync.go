@@ -44,6 +44,10 @@ const (
 	ChainsyncResyncReasonBlockfetchTimeoutRetryFailed      = "blockfetch timeout retry failed on all available connections"
 	ChainsyncResyncReasonBlockfetchRangeUnavailable        = "blockfetch could not obtain the queued header range"
 	ChainsyncResyncReasonHeaderValidationRecovery          = "deferred header validation recovery"
+	// ChainsyncResyncReasonForecastCorroborationRecovery replays a verified
+	// staged header after a peer waiting at the forecast horizon supplies the
+	// independent Genesis witness it lacked. It is not a peer-fault signal.
+	ChainsyncResyncReasonForecastCorroborationRecovery = "forecast corroboration recovery"
 	// ChainsyncResyncReasonDeferredHeaderValidationFailure names the peer that
 	// supplied a block whose deferred header validation failed with a verdict
 	// the peer is responsible for. Unlike HeaderValidationRecovery, which

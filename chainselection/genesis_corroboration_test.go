@@ -577,6 +577,52 @@ func TestPeerTipAdmissionCandidatesStayOutOfSelectionUntilAdmitted(t *testing.T)
 	assert.Nil(t, cs.pendingPeerTipFrontiers[applicant])
 }
 
+func TestForecastHorizonWitnessRecoversVerifiedCandidate(t *testing.T) {
+	t.Parallel()
+
+	cs := NewChainSelector(ChainSelectorConfig{
+		GenesisMode:           true,
+		SecurityParam:         20,
+		MinCorroboratingPeers: 1,
+	})
+	candidate := corrConn(21)
+	witness := corrConn(22)
+	for _, connId := range []ouroboros.ConnectionId{candidate, witness} {
+		feedFrontier(cs, connId,
+			genesisTip(100, "h100", 100),
+			genesisTip(105, "h105", 101),
+		)
+	}
+	update := PeerTipUpdateEvent{
+		ConnectionId:                       candidate,
+		AdmissionID:                        1,
+		Tip:                                genesisTip(110, "h110", 102),
+		ObservedTip:                        genesisTip(110, "h110", 102),
+		ObservedPrevHash:                   []byte("h105"),
+		HeaderCryptoVerificationGeneration: 1,
+	}
+	require.True(t, cs.PreparePeerTipAdmission(update))
+	require.False(t, cs.ShouldApplyIngress(candidate),
+		"a verified candidate must wait for a witness at its current point")
+
+	horizonUpdate := PeerTipUpdateEvent{
+		ConnectionId:     witness,
+		AdmissionID:      2,
+		Tip:              genesisTip(110, "h110", 102),
+		ObservedTip:      genesisTip(110, "h110", 102),
+		ObservedPrevHash: []byte("h105"),
+	}
+	recoveries := cs.PrepareForecastHorizonWitness(horizonUpdate)
+	require.Equal(t, []ouroboros.ConnectionId{candidate}, recoveries)
+	require.True(t, cs.ShouldApplyIngress(candidate))
+	require.Equal(t, uint64(105), cs.GetAllPeerTips()[witness].ObservedTip.Point.Slot,
+		"an unverified horizon header must stay outside normal peer state")
+
+	cs.RemoveForecastHorizonWitness(horizonUpdate)
+	require.False(t, cs.ShouldApplyIngress(candidate),
+		"the temporary witness must stop corroborating when its wait ends")
+}
+
 func TestStaleHeaderVerificationGenerationCannotCorroborate(t *testing.T) {
 	t.Parallel()
 

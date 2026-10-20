@@ -1328,6 +1328,10 @@ func (ls *LedgerState) verifyDeferredBlockHeaderState(
 	if err := ls.verifyBlockHeaderCryptoWithEpochAdvance(
 		ctx, block, true, false,
 	); err != nil {
+		if errors.Is(err, context.Canceled) ||
+			errors.Is(err, context.DeadlineExceeded) {
+			return err
+		}
 		// Typed so the pipeline can rewind past this block instead of
 		// restarting onto it forever: the block is already persisted, so
 		// this failure is deterministic rather than transient. The block is
@@ -5448,6 +5452,7 @@ func (ls *LedgerState) awaitForecastHorizon(
 	e ChainsyncEvent,
 ) error {
 	logged := false
+	witnessPublished := false
 	for {
 		published := ls.snapshotPublishedChan()
 		if !ls.headerBeyondForecastHorizon(ctx, e) {
@@ -5455,6 +5460,10 @@ func (ls *LedgerState) awaitForecastHorizon(
 		}
 		if ls.chainsyncHeaderDisconnected(ctx, e) {
 			return ErrChainsyncHeaderDisconnected
+		}
+		if !witnessPublished && e.ForecastHorizonWait != nil {
+			e.ForecastHorizonWait()
+			witnessPublished = true
 		}
 		if !logged && ls.config.Logger != nil {
 			ls.config.Logger.Debug(

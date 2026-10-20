@@ -8909,6 +8909,14 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 				nextBatch[i:end],
 				snapshotEpoch,
 			)
+			verifiedReplayHeaders, replayHeaderJobs, verifyErr := ls.prepareReplayHeaders(
+				ctx,
+				blocksBeforeEpochEnd(nextBatch[i:end], snapshotEpoch),
+			)
+			if verifyErr != nil {
+				completeReadResult()
+				return verifyErr
+			}
 			finishValidationTransition := ls.beginTxValidationTransition()
 			var transactionOpCertCounters *trustedReplayOpCertCounterCache
 			var transactionReplayUtxos map[utxoref.Key]lcommon.Utxo
@@ -8941,6 +8949,11 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 				snapshotTip,
 				candidateTip,
 				func(txn *database.Txn) error { //nolint:contextcheck
+					replayWorkers := startReplayHeaderJobs(
+						ctx, nextBatch[i:end], verifiedReplayHeaders,
+						replayHeaderJobs, verifyReplayHeader,
+					)
+					defer replayWorkers.stop()
 					deltaBatch = NewLedgerDeltaBatch()
 					if trustedReplayOpCertCounters != nil {
 						transactionOpCertCounters = &trustedReplayOpCertCounterCache{
@@ -9168,6 +9181,9 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 							aheadUtxos = aheadPrefetch.take(offset)
 						}
 						blockCtx := withAheadUtxos(ctx, aheadUtxos)
+						blockCtx = withReplayHeaderVerification(
+							blockCtx, verifiedReplayHeaders, offset,
+						)
 						blockCtx = withPreverifiedSignatures(
 							blockCtx,
 							preverifiedSignatures,
@@ -9319,7 +9335,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 							return fmt.Errorf("failed to set tip: %w", err)
 						}
 					}
-					return nil
+					return replayWorkers.wait()
 				},
 			)
 			if err != nil {
@@ -9636,6 +9652,15 @@ func (ls *LedgerState) ledgerProcessBlock(
 		if err := ls.validateBlockHeaderProtocolVersion(
 			block.Header(), pparams,
 		); err != nil {
+			return nil, err
+		}
+	} else if !ls.config.TrustedReplay && !ls.slotCoveredByMithril(point.Slot) {
+		// The aggregate maxBlockExUnits bound is a block-level ledger rule
+		// that per-transaction validation never repeats, so a peer-sourced
+		// block must meet it even when ValidateHistorical=false skips the
+		// rest of validation. Mithril-certified and TrustedReplay blocks are
+		// trusted input and keep skipping it.
+		if err := validateBlockExUnits(block, pparams); err != nil {
 			return nil, err
 		}
 	}

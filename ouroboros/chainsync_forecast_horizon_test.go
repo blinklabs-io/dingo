@@ -189,6 +189,70 @@ func TestChainsyncClientRollForwardRewaitsForecastHorizonBeforeObserving(
 	)
 }
 
+func TestForecastHorizonWaitRecoversVerifiedCandidate(t *testing.T) {
+	t.Parallel()
+
+	f := newForecastHorizonFixture(t, "10.0.0.29:3001")
+	t.Cleanup(f.o.stopFutureHeaderResyncs)
+	recoveryConn := newTestConnId("127.0.0.1:6020", "10.0.0.30:3001")
+	prepared := make(chan chainselection.PeerTipUpdateEvent, 1)
+	removed := make(chan chainselection.PeerTipUpdateEvent, 1)
+	f.o.config.ChainsyncPrepareForecastWitness = func(
+		update chainselection.PeerTipUpdateEvent,
+	) []ouroboros.ConnectionId {
+		prepared <- update
+		return []ouroboros.ConnectionId{recoveryConn}
+	}
+	f.o.config.ChainsyncRemoveForecastWitness = func(
+		update chainselection.PeerTipUpdateEvent,
+	) {
+		removed <- update
+	}
+	f.o.chainsyncHeaderAdmission = func(
+		_ context.Context,
+		e ledger.ChainsyncEvent,
+	) (bool, error) {
+		require.NotNil(t, e.ForecastHorizonWait)
+		e.ForecastHorizonWait()
+		return true, nil
+	}
+	_, resyncCh := f.o.eventBus.Subscribe(event.ChainsyncResyncEventType)
+	header := newTestBlockHeader(400, 1, 0xa3)
+	e := ledger.ChainsyncEvent{
+		ConnectionId: f.conn,
+		BlockHeader:  header,
+		Point:        ocommon.NewPoint(header.SlotNumber(), header.Hash().Bytes()),
+		Tip: ochainsync.Tip{
+			Point:       ocommon.NewPoint(header.SlotNumber(), header.Hash().Bytes()),
+			BlockNumber: header.BlockNumber(),
+		},
+	}
+	accepted, err := f.o.admitChainsyncHeader(
+		ochainsync.CallbackContext{ConnectionId: f.conn},
+		e,
+	)
+	require.NoError(t, err)
+	require.True(t, accepted)
+	staged := testutil.RequireReceive(
+		t, prepared, testutil.AsyncWait, "forecast witness was not staged",
+	)
+	require.Equal(t, f.conn, staged.ConnectionId)
+	require.Equal(t, e.Point, staged.ObservedTip.Point)
+	require.Equal(t, staged, testutil.RequireReceive(
+		t, removed, testutil.AsyncWait, "forecast witness was not removed",
+	))
+	resync := testutil.RequireReceive(
+		t, resyncCh, testutil.AsyncWait, "verified candidate was not replayed",
+	)
+	data, ok := resync.Data.(event.ChainsyncResyncEvent)
+	require.True(t, ok)
+	require.Equal(t, recoveryConn, data.ConnectionId)
+	require.Equal(t,
+		event.ChainsyncResyncReasonForecastCorroborationRecovery,
+		data.Reason,
+	)
+}
+
 // A connection that closes while a header waits in admission must end the
 // wait. The client's DoneChan cannot: it closes only after this callback's
 // protocol loop returns.
