@@ -115,6 +115,24 @@ full planner-statistics update runs instead. Resumed Mithril imports and other
 completed backfills retain the full update path. PostgreSQL and MySQL report
 the operation unsupported and use that fallback.
 
+The growth rule never corrects `utxo` statistics taken over an imported
+ledger state. Every imported UTxO is unspent and shares one `added_slot`, so
+the statistics record `spent_at_tx_id`, `referenced_by_tx_id`,
+`collateral_by_tx_id` and `added_slot` as single values covering the whole
+table. Live operation then holds only about a security window of spent rows
+in a table that never grows anywhere near 25-fold, so those statistics are
+never revisited. Under them, the rollback sweep's stake-credential lookup for
+the UTxOs spent by rolled-back transactions
+(`SELECT credential_tag, staking_key FROM utxo WHERE spent_at_tx_id IN (...)`
+in `DeleteTransactionsAfterSlot`) planned a chunk holding a single
+transaction hash as a pass over every `utxo` row, through
+`idx_utxo_staking_deleted_amount`, while the ledger held its write lock. On
+SQLite the statement therefore names `idx_utxo_spent_at_tx_id` with
+`INDEXED BY` whenever that index exists, and it carries no `DISTINCT`: the
+caller deduplicates the credentials in Go. The index is a critical deferred
+index, so while a bulk-load rebuild is pending the hint is omitted rather
+than failing the rollback; any plan scans without the index.
+
 A run counts as having changed statistics when a 64-bit FNV-1a hash of every
 `sqlite_stat1` row (`tbl`, `idx` and `stat`, in order) differs before and
 after. Only then does the store refresh state that keeps the old
