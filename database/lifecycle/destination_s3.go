@@ -113,48 +113,41 @@ func (d *s3Destination) objectKey(fileName string) string {
 	return path.Join(d.prefix, fileName)
 }
 
-// UploadDir uploads every regular file directly inside localDir (not
-// recursive — Snapshot's output directory is flat) to the destination.
-func (d *s3Destination) UploadDir(ctx context.Context, localDir string) error {
-	entries, err := os.ReadDir(localDir)
+// UploadDir uploads the manifest and its declared payloads to the destination.
+func (d *s3Destination) UploadDir(
+	ctx context.Context,
+	localDir string,
+) (retErr error) {
+	files, err := openSnapshotUploadFiles(localDir, d.maxManifestBytes)
 	if err != nil {
-		return fmt.Errorf("read snapshot directory %q: %w", localDir, err)
+		return err
 	}
+	defer func() {
+		retErr = errors.Join(retErr, closeSnapshotUploadFiles(files))
+	}()
 	// manager.Uploader is deprecated in favor of feature/s3/transfermanager,
 	// but remains fully supported; migrating is tracked as follow-up work
 	// rather than done here to avoid pulling in a newer, less-established
 	// API right alongside this package's initial real-cloud test coverage.
 	uploader := manager.NewUploader(d.client) //nolint:staticcheck
-	for _, entry := range orderEntriesManifestLast(entries) {
-		if !entry.Type().IsRegular() || entry.Name() == cloudMirrorMarkerName {
-			continue
-		}
-		localPath := filepath.Join(localDir, entry.Name())
-		f, err := os.Open(localPath)
-		if err != nil {
-			return fmt.Errorf("open %q for upload: %w", localPath, err)
-		}
-		key := d.objectKey(entry.Name())
+	for _, file := range files {
+		key := d.objectKey(file.name)
 		_, uploadErr := uploader.Upload( //nolint:staticcheck
 			ctx,
 			&s3.PutObjectInput{
 				Bucket: &d.bucket,
 				Key:    &key,
-				Body:   f,
+				Body:   file.file,
 			},
 		)
-		closeErr := f.Close()
 		if uploadErr != nil {
 			return fmt.Errorf(
-				"upload %q to s3://%s/%s: %w",
-				localPath,
+				"upload snapshot file %q to s3://%s/%s: %w",
+				file.name,
 				d.bucket,
 				key,
 				uploadErr,
 			)
-		}
-		if closeErr != nil {
-			return fmt.Errorf("close %q after upload: %w", localPath, closeErr)
 		}
 	}
 	key := d.objectKey(cloudMirrorMarkerName)

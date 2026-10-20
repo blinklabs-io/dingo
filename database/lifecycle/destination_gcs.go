@@ -23,7 +23,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"os"
 	"path"
 	"path/filepath"
 	"strings"
@@ -186,31 +185,27 @@ func (d *gcsDestination) objectKey(fileName string) string {
 	return path.Join(d.prefix, fileName)
 }
 
-// UploadDir uploads every regular file directly inside localDir (not
-// recursive — Snapshot's output directory is flat) to the destination.
-func (d *gcsDestination) UploadDir(ctx context.Context, localDir string) error {
-	entries, err := os.ReadDir(localDir)
+// UploadDir uploads the manifest and its declared payloads to the destination.
+func (d *gcsDestination) UploadDir(
+	ctx context.Context,
+	localDir string,
+) (retErr error) {
+	files, err := openSnapshotUploadFiles(localDir, d.maxManifestBytes)
 	if err != nil {
-		return fmt.Errorf("read snapshot directory %q: %w", localDir, err)
+		return err
 	}
-	for _, entry := range orderEntriesManifestLast(entries) {
-		if !entry.Type().IsRegular() || entry.Name() == cloudMirrorMarkerName {
-			continue
-		}
-		localPath := filepath.Join(localDir, entry.Name())
-		f, err := os.Open(localPath)
-		if err != nil {
-			return fmt.Errorf("open %q for upload: %w", localPath, err)
-		}
-		key := d.objectKey(entry.Name())
+	defer func() {
+		retErr = errors.Join(retErr, closeSnapshotUploadFiles(files))
+	}()
+	for _, file := range files {
+		key := d.objectKey(file.name)
 		w := d.bucket.Object(key).NewWriter(ctx)
-		_, copyErr := io.Copy(w, f)
+		_, copyErr := io.Copy(w, file.file)
 		closeWErr := w.Close()
-		closeFErr := f.Close()
 		if copyErr != nil {
 			return fmt.Errorf(
-				"upload %q to gcs object %q: %w",
-				localPath,
+				"upload snapshot file %q to gcs object %q: %w",
+				file.name,
 				key,
 				copyErr,
 			)
@@ -221,9 +216,6 @@ func (d *gcsDestination) UploadDir(ctx context.Context, localDir string) error {
 				key,
 				closeWErr,
 			)
-		}
-		if closeFErr != nil {
-			return fmt.Errorf("close %q after upload: %w", localPath, closeFErr)
 		}
 	}
 	key := d.objectKey(cloudMirrorMarkerName)

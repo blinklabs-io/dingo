@@ -18015,8 +18015,15 @@ both leave the same local snapshot directory present.
 small marker file (`lifecycle.CloudMirrorMarkerPath`) inside the local
 snapshot directory after its cloud upload and catalog update or repair both
 succeed. The marker records only a versioned digest of the exact destination
-URI. S3 and GCS exclude this reserved marker from uploads and downloads and
-remove any legacy remote marker after every successful upload.
+URI. Before an upload, `MirrorToCloud` requires the existing manifest to
+authenticate under the configured trust key and verifies both payloads against
+its signed sizes and digests. An unsigned local snapshot cannot acquire the
+cloud trust root through automatic retry; it must be recreated explicitly.
+S3 and GCS open the snapshot directory through one held `os.Root`, accept only
+stable regular-file handles for the two declared payloads and manifest, and
+upload the manifest last. They do not enumerate or upload other directory
+entries, and reject symlinks instead of reopening a classified path. Both
+providers remove any legacy remote marker after every successful upload.
 `lifecycle.IsCloudMirroredTo(dir, cloudDest)` checks both that the marker
 is present *and* that its digest matches the currently configured `cloudDest`, not
 just `lifecycle.IsCloudMirrored`'s bare presence check — a marker left over

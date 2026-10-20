@@ -127,19 +127,12 @@ func mirrorToCloud(
 	if err := requireManifestKey(opts); err != nil {
 		return err
 	}
-	manifest, err := ReadManifest(dir)
+	manifest, err := ReadManifest(dir, opts...)
 	if err != nil {
 		return fmt.Errorf("read snapshot before cloud mirror: %w", err)
 	}
-	if manifest.Authentication != "" {
-		if err := manifest.Authenticate(
-			append(
-				append([]ManifestOption(nil), opts...),
-				WithManifestID(snapshotIDForDir(dir)),
-			)...,
-		); err != nil {
-			return fmt.Errorf("authenticate snapshot before cloud mirror: %w", err)
-		}
+	if err := manifest.verifyPayloads(ctx, dir, true); err != nil {
+		return fmt.Errorf("verify snapshot before cloud mirror: %w", err)
 	}
 	snapshotCloudURI := JoinCloudURI(cloudDest, filepath.Base(dir))
 	markerValue, err := cloudDestinationIdentity(snapshotCloudURI)
@@ -154,11 +147,6 @@ func mirrorToCloud(
 		)
 	}
 	defer closeCloudDestination(dest)
-	if manifest.Authentication == "" {
-		if err := authenticateLegacySnapshot(ctx, dir, manifest, opts...); err != nil {
-			return fmt.Errorf("authenticate legacy snapshot before cloud mirror: %w", err)
-		}
-	}
 	if err := dest.UploadDir(ctx, dir); err != nil {
 		return fmt.Errorf(
 			"upload to %q failed: %w",
@@ -196,42 +184,6 @@ func mirrorToCloud(
 		)
 	}
 	return nil
-}
-
-// authenticateLegacySnapshot adds the current trust root to a local snapshot
-// written before manifest authentication and payload digests were required.
-// The manifest checksum and declared sizes are checked before deriving any
-// missing digests, so an incomplete or corrupted snapshot is never mirrored.
-func authenticateLegacySnapshot(
-	ctx context.Context,
-	dir string,
-	manifest Manifest,
-	opts ...ManifestOption,
-) error {
-	if err := manifest.verifyPayloads(ctx, dir, false); err != nil {
-		return err
-	}
-	for _, file := range manifest.payloadFiles() {
-		if file.sha256 != "" {
-			continue
-		}
-		digest, size, err := hashFileContext(ctx, filepath.Join(dir, file.name))
-		if err != nil {
-			return fmt.Errorf("hash legacy snapshot payload %q: %w", file.name, err)
-		}
-		if size != file.size {
-			return fmt.Errorf(
-				"%w: %s is %d bytes, manifest declares %d",
-				ErrSnapshotPayloadMismatch, file.name, size, file.size,
-			)
-		}
-		if file.name == BlobBackupFileName {
-			manifest.BlobSHA256 = digest
-		} else {
-			manifest.MetadataSHA256 = digest
-		}
-	}
-	return writeManifest(ctx, dir, manifest, opts...)
 }
 
 // SnapshotToCloud calls Snapshot to produce the local copy at dir exactly

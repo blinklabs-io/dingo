@@ -93,7 +93,7 @@ func TestMirrorToCloudRejectsIncompleteLegacySnapshot(t *testing.T) {
 	require.NoDirExists(t, filepath.Join(backingDir, "prefix", "unsigned"))
 }
 
-func TestMirrorToCloudAuthenticatesLegacySnapshot(t *testing.T) {
+func TestMirrorToCloudRejectsLegacySnapshot(t *testing.T) {
 	t.Parallel()
 
 	backingDir := t.TempDir()
@@ -118,21 +118,8 @@ func TestMirrorToCloudAuthenticatesLegacySnapshot(t *testing.T) {
 		"faketest://bucket/prefix",
 		lifecycle.WithManifestKey(testTrustKey),
 	)
-	require.NoError(t, err)
-
-	local, err := lifecycle.ReadManifest(
-		dir, lifecycle.WithManifestKey(testTrustKey),
-	)
-	require.NoError(t, err)
-	require.NotEmpty(t, local.BlobSHA256)
-	require.NotEmpty(t, local.MetadataSHA256)
-	require.NoError(t, local.Authenticate(lifecycle.WithManifestKey(testTrustKey)))
-	cloud, err := lifecycle.ReadManifest(
-		filepath.Join(backingDir, "prefix", "epoch-legacy"),
-		lifecycle.WithManifestKey(testTrustKey),
-	)
-	require.NoError(t, err)
-	require.Equal(t, local.Authentication, cloud.Authentication)
+	require.ErrorIs(t, err, lifecycle.ErrManifestUnauthenticated)
+	require.NoDirExists(t, filepath.Join(backingDir, "prefix", "epoch-legacy"))
 }
 
 // TestIsCloudMirroredToDetectsChangedDestination guards the gap a bare

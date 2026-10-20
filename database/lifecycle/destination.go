@@ -247,32 +247,6 @@ func EffectiveCloudDestination(base string, prefix string) string {
 	return JoinCloudURI(base, prefix)
 }
 
-// orderEntriesManifestLast returns entries reordered so that any entry
-// named ManifestFileName sorts last, with every other entry keeping its
-// original relative order. Both destination_s3.go's and
-// destination_gcs.go's UploadDir use this: a concurrent lister/fetcher
-// treats a cloud-visible manifest.json as "this snapshot is fully there"
-// (see FetchCloudManifest/ListCloudSnapshots), so uploading it before
-// blob.bak/metadata.sqlite finish would let that caller download or
-// restore an incomplete snapshot. Uploading the manifest last, after
-// every other file has actually succeeded, makes it a true completion
-// marker instead of just another file in directory order.
-func orderEntriesManifestLast(entries []os.DirEntry) []os.DirEntry {
-	ordered := make([]os.DirEntry, 0, len(entries))
-	var manifest os.DirEntry
-	for _, e := range entries {
-		if e.Name() == ManifestFileName {
-			manifest = e
-			continue
-		}
-		ordered = append(ordered, e)
-	}
-	if manifest != nil {
-		ordered = append(ordered, manifest)
-	}
-	return ordered
-}
-
 // CloudDestination mirrors a snapshot directory to/from object storage, in
 // addition to (not instead of) the local copy Snapshot/Restore already
 // produce/consume — see SnapshotToCloud and Restore's cloud-source
