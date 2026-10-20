@@ -64,6 +64,14 @@ func TestApplyPathHelpersRecordNamedStatements(t *testing.T) {
 	drep := bytes.Repeat([]byte{0x11}, 28)
 	stake := bytes.Repeat([]byte{0x22}, 28)
 	ref := models.NewStakeCredentialRef(0, credentialKeyForIndex(3))
+	proposal, err := store.writeDB.ExecContext(t.Context(), `
+INSERT INTO governance_proposal (
+    tx_hash, action_index, action_type, proposed_epoch, expires_epoch,
+    deposit, added_slot
+) VALUES (?, 0, 6, 1, 10, 1, 10)`, bytes.Repeat([]byte{0x01}, 32))
+	require.NoError(t, err)
+	proposalID, err := proposal.LastInsertId()
+	require.NoError(t, err)
 
 	inWrite := func(
 		fn func(ctx context.Context, db queryer) error,
@@ -101,6 +109,17 @@ func TestApplyPathHelpersRecordNamedStatements(t *testing.T) {
 		{"applyRewardLiveStakeAggregate", inWrite(func(ctx context.Context, db queryer) error {
 			return store.applyRewardLiveStakeAggregate(ctx, db, ref, 10, 0)
 		})},
+		{"SetGovernanceVote cast", func() error {
+			return store.SetGovernanceVote(&models.GovernanceVote{
+				ProposalID:      uint(proposalID),
+				VoterType:       models.VoterTypeDRep,
+				VoterCredential: drep,
+				Vote:            models.VoteYes,
+				AddedSlot:       10,
+				CastTxHash:      bytes.Repeat([]byte{0x55}, 32),
+				CastCertIndex:   0,
+			}, nil)
+		}},
 		{"SetBlockNonces", func() error {
 			return store.SetBlockNonces([]models.BlockNonce{{
 				Hash:  bytes.Repeat([]byte{0x33}, 32),

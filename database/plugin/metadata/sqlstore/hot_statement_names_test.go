@@ -192,6 +192,7 @@ func newlyPreparedHotStatements() map[string]string {
 		"GetSpendScriptHashByOutput":         spendScriptHashQuery,
 		"DeleteRedeemerScriptsByTransaction": deleteRedeemerScriptsSQL,
 		"UpsertUtxoReferenceScript":          upsertUtxoReferenceScriptQuery,
+		"GovernanceVoteCastExists":           governanceVoteCastExistsQuery,
 	}
 }
 

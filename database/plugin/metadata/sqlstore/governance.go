@@ -631,7 +631,7 @@ INSERT INTO governance_vote_history (
     cert_index
 ) VALUES (?, ?, ?, ?, ?, ?, ?)`
 
-const governanceVoteCastExistsQuery = `
+const governanceVoteCastExistsQuery = `-- name: GovernanceVoteCastExists :one
 SELECT COUNT(*) FROM governance_vote_history
 WHERE vote_id = ? AND tx_hash = ? AND cert_index = ?`
 

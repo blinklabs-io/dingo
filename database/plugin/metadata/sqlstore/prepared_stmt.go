@@ -60,6 +60,7 @@ var hotStatements = func() []string {
 		governanceVotePreviousQuery,
 		governanceVoteUpsertQuery,
 		governanceVoteHistoryInsertQuery,
+		governanceVoteCastExistsQuery,
 		poolByKeyHashQuery,
 		spendScriptHashQuery,
 		deleteRedeemerScriptsSQL,
