@@ -1041,6 +1041,17 @@ these series carries a connection or peer label.
   before that window's request is issued and so also for a request that then
   fails to start, and the second is observed only for events received through
   blockfetch.
+- `dingo_ledger_block_stage_duration_seconds` attributes the wall-clock time of
+  each applied chunk of blocks. Within the window timed by
+  `dingo_ledger_block_apply_batch_latency_seconds`, `prepare` is the work
+  before the database transaction (Leios endorser-block wait, block-apply
+  snapshot, replay header preparation), `validate` and `apply` run inside the
+  transaction body on every path, batched or not, and `commit` is the
+  transaction's time outside its body (tip and candidate checks, worker-pool
+  wait, begin, commit). The stages never sum to more than the batch latency;
+  the remainder is block processing outside `validate` and `apply` plus the
+  post-commit tip update. `header_verify` and `epoch_rollover` run outside
+  that window.
 - `dingo_ledger_blockfetch_batch_in_flight`,
   `dingo_ledger_blockfetch_continuation_pending` and
   `dingo_ledger_blockfetch_connection_selected` mirror

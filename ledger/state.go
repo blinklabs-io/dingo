@@ -9145,11 +9145,21 @@ func (ls *LedgerState) processBlocksFromSource(
 			preverifiedSignatures := preverifyTransactionSignatures(
 				trustedReplayTransactions,
 			)
+			ls.metrics.observeBlockStage(
+				blockStagePrepare,
+				time.Since(batchApplyStart),
+			)
+			submitStart := time.Now()
+			// Body time is subtracted from the submit's wall time to leave
+			// the commit stage; a retried body accumulates.
+			var bodyElapsed time.Duration
 			err = ls.submitBlockApplyDBTxn(
 				ctx,
 				snapshotTip,
 				candidateTip,
 				func(txn *database.Txn) error { //nolint:contextcheck
+					bodyStart := time.Now()
+					defer func() { bodyElapsed += time.Since(bodyStart) }()
 					replayWorkers := startReplayHeaderJobs(
 						ctx, nextBatch[i:end], verifiedReplayHeaders,
 						replayHeaderJobs, verifyReplayHeader,
@@ -9551,6 +9561,12 @@ func (ls *LedgerState) processBlocksFromSource(
 					return nil
 				},
 			)
+			if err == nil {
+				ls.metrics.observeBlockStage(
+					blockStageCommit,
+					max(time.Since(submitStart)-bodyElapsed, 0),
+				)
+			}
 			if err != nil {
 				clear(trustedReplayUtxos)
 				trustedReplayUtxos = nil

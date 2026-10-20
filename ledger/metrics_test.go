@@ -17,11 +17,13 @@ package ledger
 import (
 	"context"
 	"fmt"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
@@ -466,6 +468,8 @@ func TestObserveBlockStageRecordsUnderEachLabel(t *testing.T) {
 	m.observeBlockStage(blockStageApply, 30*time.Millisecond)
 	m.observeBlockStage(blockStageValidate, 5*time.Millisecond)
 	m.observeBlockStage(blockStageEpochRollover, 40*time.Second)
+	m.observeBlockStage(blockStagePrepare, 2*time.Millisecond)
+	m.observeBlockStage(blockStageCommit, 3*time.Millisecond)
 
 	count, _ := blockStageSampleCount(t, &m, blockStageHeaderVerify)
 	assert.Equal(t, uint64(1), count)
@@ -476,20 +480,24 @@ func TestObserveBlockStageRecordsUnderEachLabel(t *testing.T) {
 	assert.Equal(t, uint64(1), count)
 	count, _ = blockStageSampleCount(t, &m, blockStageEpochRollover)
 	assert.Equal(t, uint64(1), count)
+	count, _ = blockStageSampleCount(t, &m, blockStagePrepare)
+	assert.Equal(t, uint64(1), count)
+	count, _ = blockStageSampleCount(t, &m, blockStageCommit)
+	assert.Equal(t, uint64(1), count)
 
-	// Four distinct label series, no more.
+	// Six distinct label series, no more.
 	assert.Equal(
 		t,
-		4,
+		6,
 		testutil.CollectAndCount(m.blockStageDuration),
 	)
 }
 
 // TestObserveBlockStageIgnoresUnknownStage confirms an unrecognized stage
 // label is silently dropped rather than panicking or creating a stray label
-// series. init pre-materializes the four known stage series, so this
+// series. init pre-materializes the six known stage series, so this
 // checks their sample counts stay zero rather than the series count, which
-// is already 4 regardless of any observation.
+// is already 6 regardless of any observation.
 func TestObserveBlockStageIgnoresUnknownStage(t *testing.T) {
 	t.Parallel()
 
@@ -500,15 +508,17 @@ func TestObserveBlockStageIgnoresUnknownStage(t *testing.T) {
 
 	assert.Equal(
 		t,
-		4,
+		6,
 		testutil.CollectAndCount(m.blockStageDuration),
-		"init pre-materializes exactly the four known stage series",
+		"init pre-materializes exactly the six known stage series",
 	)
 	for _, stage := range []string{
 		blockStageHeaderVerify,
 		blockStageValidate,
 		blockStageApply,
 		blockStageEpochRollover,
+		blockStagePrepare,
+		blockStageCommit,
 	} {
 		count, _ := blockStageSampleCount(t, &m, stage)
 		assert.Zerof(
@@ -960,4 +970,67 @@ func TestLedgerProcessBlocksFromSourceObservesBlockApplyBatchLatency(
 		sizeSum,
 		"the committed chunk contained exactly one block",
 	)
+}
+
+// TestBlockApplyStagesAttributeBatchTime drives real block batches through
+// the production apply loop on the batched (row-batching) and unbatched
+// sync paths and requires that the stages cover the batch's wall-clock time:
+// apply is observed, the pre-transaction work and the transaction commit are
+// attributed to their own stages, and the in-window stages never sum to more
+// than dingo_ledger_block_apply_batch_latency_seconds.
+func TestBlockApplyStagesAttributeBatchTime(t *testing.T) {
+	t.Parallel()
+
+	blocks, _ := rowBatchingScenario(t)
+	for _, batching := range []bool{false, true} {
+		t.Run(fmt.Sprintf("rowBatching=%v", batching), func(t *testing.T) {
+			t.Parallel()
+			// Injected latency after the commit, so the commit stage has a
+			// known lower bound that does not depend on machine speed.
+			const commitDelay = 20 * time.Millisecond
+			run := runRowBatchingScenario(
+				t, blocks, types.StorageModeCore, batching, len(blocks),
+				func(ls *LedgerState) {
+					ls.afterLedgerWriteCommit = func() {
+						deadline := time.Now().Add(commitDelay)
+						for time.Now().Before(deadline) {
+							runtime.Gosched()
+						}
+					}
+				},
+			)
+			m := &run.ls.metrics
+
+			batchCount, batchSum := blockApplyBatchLatencySample(t, m)
+			require.Equal(t, uint64(1), batchCount)
+
+			var stageSum float64
+			for _, stage := range []string{
+				blockStagePrepare,
+				blockStageApply,
+				blockStageCommit,
+			} {
+				count, sum := blockStageSampleCount(t, m, stage)
+				assert.Equal(
+					t, uint64(1), count,
+					"stage %q must be observed once for the one batch",
+					stage,
+				)
+				stageSum += sum
+			}
+			// The scenario's blocks are unvalidated, so validate is zero
+			// and the three stages above are the whole in-window sum.
+			validateCount, _ := blockStageSampleCount(t, m, blockStageValidate)
+			require.Zero(t, validateCount)
+			_, commitSum := blockStageSampleCount(t, m, blockStageCommit)
+			assert.GreaterOrEqual(
+				t, commitSum, commitDelay.Seconds(),
+				"commit stage must include the post-commit window",
+			)
+			assert.LessOrEqual(
+				t, stageSum, batchSum,
+				"stages inside the batch window must not exceed its latency",
+			)
+		})
+	}
 }

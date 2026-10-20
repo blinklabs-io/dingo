@@ -101,6 +101,8 @@ type stateMetrics struct {
 	blockStageValidate      prometheus.Observer
 	blockStageApply         prometheus.Observer
 	blockStageEpochRollover prometheus.Observer
+	blockStagePrepare       prometheus.Observer
+	blockStageCommit        prometheus.Observer
 	// Per-stage maximum wall-clock duration ever observed since process
 	// start, each holding math.Float64bits of a seconds value and advanced
 	// by updateMaxDuration's compare-and-swap loop at the same
@@ -129,6 +131,8 @@ type stateMetrics struct {
 	blockStageValidateMax      atomic.Uint64
 	blockStageApplyMax         atomic.Uint64
 	blockStageEpochRolloverMax atomic.Uint64
+	blockStagePrepareMax       atomic.Uint64
+	blockStageCommitMax        atomic.Uint64
 	// Wall-clock time from the start of applying one committed
 	// DB-transaction chunk of blocks (ledger/state.go's batch loop, which
 	// commits at most batchSize=50 blocks per transaction) to the moment
@@ -424,6 +428,8 @@ const (
 	blockStageValidate      = "validate"
 	blockStageApply         = "apply"
 	blockStageEpochRollover = "epoch_rollover"
+	blockStagePrepare       = "prepare"
+	blockStageCommit        = "commit"
 )
 
 // observeBlockStage records one sample of wall-clock time spent in the named
@@ -451,6 +457,12 @@ func (m *stateMetrics) observeBlockStage(stage string, d time.Duration) {
 	case blockStageEpochRollover:
 		obs = m.blockStageEpochRollover
 		record = &m.blockStageEpochRolloverMax
+	case blockStagePrepare:
+		obs = m.blockStagePrepare
+		record = &m.blockStagePrepareMax
+	case blockStageCommit:
+		obs = m.blockStageCommit
+		record = &m.blockStageCommitMax
 	}
 	if obs == nil {
 		// Unknown stage, or metrics were never initialised: neither field
@@ -560,6 +572,8 @@ func (m *stateMetrics) registerBlockStageMaxDuration(
 		blockStageValidate:      &m.blockStageValidateMax,
 		blockStageApply:         &m.blockStageApplyMax,
 		blockStageEpochRollover: &m.blockStageEpochRolloverMax,
+		blockStagePrepare:       &m.blockStagePrepareMax,
+		blockStageCommit:        &m.blockStageCommitMax,
 	} {
 		factory.NewGaugeFunc(
 			prometheus.GaugeOpts{
@@ -1006,7 +1020,7 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 	m.blockStageDuration = promautoFactory.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name: "dingo_ledger_block_stage_duration_seconds",
-			Help: "wall-clock time spent in each ledger-owned stage of per-block processing, by stage: header_verify (VRF/KES/signature checks on blockfetch arrival), validate (one transaction's era ledger-rule validation, including Plutus evaluation), apply (writing a flushed delta batch's UTXO and transaction rows to the metadata store), epoch_rollover (the epoch-boundary transaction, including reward application and the governance tally, during which no block is applied)",
+			Help: "wall-clock time spent in each ledger-owned stage of per-block processing, by stage: header_verify (VRF/KES/signature checks on blockfetch arrival), validate (one transaction's era ledger-rule validation, including Plutus evaluation), apply (writing a flushed delta batch's UTXO and transaction rows to the metadata store), epoch_rollover (the epoch-boundary transaction, including reward application and the governance tally, during which no block is applied), prepare (per applied chunk: everything from the start of the chunk to the database transaction, including the Leios endorser-block wait, the block-apply snapshot and replay header preparation), commit (per applied chunk: the database transaction outside its body, covering the tip and candidate checks, the worker-pool wait, begin and commit); prepare, validate, apply and commit all fall inside the window of dingo_ledger_block_apply_batch_latency_seconds, and the remainder of that window is block processing outside validate and apply plus the post-commit tip update",
 			// 100us to ~419s. Most observations are sub-100ms (a single
 			// cheap signature check, one transaction's validation, one
 			// delta-batch flush), which is why resolution stays fine down
@@ -1029,6 +1043,12 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 	)
 	m.blockStageEpochRollover = m.blockStageDuration.WithLabelValues(
 		blockStageEpochRollover,
+	)
+	m.blockStagePrepare = m.blockStageDuration.WithLabelValues(
+		blockStagePrepare,
+	)
+	m.blockStageCommit = m.blockStageDuration.WithLabelValues(
+		blockStageCommit,
 	)
 	m.registerBlockStageMaxDuration(promautoFactory)
 	m.blockApplyBatchLatency = promautoFactory.NewHistogram(
