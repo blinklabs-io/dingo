@@ -17,6 +17,7 @@ package mithril
 import (
 	"archive/tar"
 	"context"
+	cryptorand "crypto/rand"
 	"crypto/sha256"
 	"crypto/tls"
 	"encoding/hex"
@@ -157,6 +158,10 @@ type DownloadConfig struct {
 	// conservative default is used. If negative, transient retries
 	// are disabled.
 	MaxTransientRetries int
+	// spaceBudget preserves the bootstrap filesystem's free-space reserve
+	// across concurrent artifact downloads. Standalone downloads create one
+	// after opening DestDir.
+	spaceBudget *downloadSpaceBudget
 	// HTTPClient, when non-nil, is reused for the download instead of
 	// constructing a fresh client per call. Callers that fetch many
 	// files (the v2 immutable pool) pass one shared keep-alive client so
@@ -456,8 +461,8 @@ func downloadDestinationPath(cfg DownloadConfig) string {
 // rootFileSize returns the size of filename (relative to root), or 0 if
 // it cannot be stat'd.
 func rootFileSize(root *os.Root, filename string) int64 {
-	fi, err := root.Stat(filename)
-	if err != nil {
+	fi, err := root.Lstat(filename)
+	if err != nil || !fi.Mode().IsRegular() || !downloadFileOwnedByProcess(fi) {
 		return 0
 	}
 	return fi.Size()
@@ -699,6 +704,13 @@ func downloadSnapshot(
 		_ = root.Close()
 		return "", nil, fmt.Errorf("creating download directory: %w", closeErr)
 	}
+	if cfg.spaceBudget == nil {
+		cfg.spaceBudget, err = newDownloadSpaceBudget(cleanDestDir)
+		if err != nil {
+			_ = root.Close()
+			return "", nil, err
+		}
+	}
 
 	filename := downloadFilename(cfg)
 	lastObservedSize := rootFileSize(root, filename)
@@ -772,6 +784,75 @@ func downloadSnapshot(
 	}
 }
 
+func prepareDownloadFile(
+	root *os.Root,
+	filename string,
+	limit int64,
+	spaceBudget *downloadSpaceBudget,
+) (*os.File, string, int64, error) {
+	tmpName := filename + ".partial-" + cryptorand.Text()
+	file, err := root.OpenFile(
+		tmpName,
+		os.O_CREATE|os.O_EXCL|os.O_WRONLY|openNoFollowFlag,
+		0o640,
+	)
+	if err != nil {
+		return nil, "", 0, fmt.Errorf("creating download staging file: %w", err)
+	}
+	cleanup := func(retErr error) (*os.File, string, int64, error) {
+		_ = file.Close()
+		_ = root.Remove(tmpName)
+		return nil, "", 0, retErr
+	}
+
+	info, err := root.Lstat(filename)
+	if errors.Is(err, os.ErrNotExist) {
+		return file, tmpName, 0, nil
+	}
+	if err != nil {
+		return cleanup(fmt.Errorf("inspecting partial download: %w", err))
+	}
+	if !info.Mode().IsRegular() || !downloadFileOwnedByProcess(info) {
+		return file, tmpName, 0, nil
+	}
+	if info.Size() > limit {
+		return file, tmpName, 0, nil
+	}
+
+	source, err := root.OpenFile(filename, os.O_RDONLY|openNoFollowFlag, 0)
+	if err != nil {
+		return file, tmpName, 0, nil
+	}
+	defer source.Close()
+	openedInfo, err := source.Stat()
+	if err != nil || !openedInfo.Mode().IsRegular() ||
+		!os.SameFile(info, openedInfo) {
+		return file, tmpName, 0, nil
+	}
+	if _, err := io.Copy(
+		&downloadSpaceWriter{writer: file, budget: spaceBudget},
+		io.LimitReader(source, limit),
+	); err != nil {
+		return cleanup(fmt.Errorf("copying partial download: %w", err))
+	}
+	return file, tmpName, info.Size(), nil
+}
+
+func resetDownloadFile(file *os.File) error {
+	if err := file.Truncate(0); err != nil {
+		return err
+	}
+	_, err := file.Seek(0, io.SeekStart)
+	return err
+}
+
+func publishDownloadFile(root *os.Root, tmpName, filename string) error {
+	if err := root.Rename(tmpName, filename); err != nil {
+		return fmt.Errorf("publishing download: %w", err)
+	}
+	return nil
+}
+
 func downloadSnapshotOnce(
 	ctx context.Context,
 	cfg DownloadConfig,
@@ -790,15 +871,21 @@ func downloadSnapshotOnce(
 	filename := downloadFilename(cfg)
 	destPath := downloadDestinationPath(cfg)
 
-	// Check for partial download to support resume
-	var existingSize int64
-	if fi, err := root.Stat(filename); err == nil {
-		existingSize = fi.Size()
-		if existingSize > cfg.sizeLimit() {
-			root.Remove(filename) //nolint:errcheck
-			return "", cfg.sizeLimitError()
-		}
+	file, tmpName, existingSize, err := prepareDownloadFile(
+		root, filename, cfg.sizeLimit(), cfg.spaceBudget,
+	)
+	if err != nil {
+		return "", err
 	}
+	published := false
+	defer func() {
+		if file != nil {
+			_ = file.Close()
+		}
+		if !published {
+			_ = root.Remove(tmpName)
+		}
+	}()
 
 	req, err := http.NewRequestWithContext(
 		downloadCtx,
@@ -850,7 +937,6 @@ func downloadSnapshotOnce(
 	defer func() { resp.Body.Close() }()
 
 	var totalSize int64
-	var file *os.File
 
 	switch resp.StatusCode {
 	case http.StatusOK:
@@ -865,14 +951,9 @@ func downloadSnapshotOnce(
 		if resp.ContentLength > cfg.sizeLimit() {
 			return "", cfg.sizeLimitError()
 		}
-		file, err = root.OpenFile(
-			filename,
-			os.O_CREATE|os.O_WRONLY|os.O_TRUNC,
-			0o640,
-		)
-		if err != nil {
+		if err := resetDownloadFile(file); err != nil {
 			return "", fmt.Errorf(
-				"creating destination file: %w",
+				"resetting download staging file: %w",
 				err,
 			)
 		}
@@ -900,14 +981,9 @@ func downloadSnapshotOnce(
 			)
 			// Discard partial file and restart from scratch
 			existingSize = 0
-			file, err = root.OpenFile(
-				filename,
-				os.O_CREATE|os.O_WRONLY|os.O_TRUNC,
-				0o640,
-			)
-			if err != nil {
+			if err := resetDownloadFile(file); err != nil {
 				return "", fmt.Errorf(
-					"creating destination file: %w",
+					"resetting download staging file: %w",
 					err,
 				)
 			}
@@ -919,7 +995,6 @@ func downloadSnapshotOnce(
 				nil,
 			)
 			if err != nil {
-				file.Close()
 				return "", fmt.Errorf(
 					"creating restart request: %w",
 					err,
@@ -936,7 +1011,6 @@ func downloadSnapshotOnce(
 				headerTimer = nil
 			}
 			if err != nil {
-				file.Close()
 				if cause := context.Cause(downloadCtx); errors.Is(
 					cause,
 					errDownloadIdleTimeout,
@@ -949,7 +1023,6 @@ func downloadSnapshotOnce(
 				)
 			}
 			if resp2 == nil || resp2.Body == nil {
-				file.Close()
 				return "", errors.New(
 					"nil response on download restart",
 				)
@@ -959,7 +1032,6 @@ func downloadSnapshotOnce(
 					io.LimitReader(resp2.Body, 1024),
 				)
 				resp2.Body.Close()
-				file.Close()
 				return "", redactLocationError(fmt.Errorf(
 					"restart download failed with "+
 						"status %d: %s",
@@ -971,7 +1043,6 @@ func downloadSnapshotOnce(
 			// fresh full-download stream.
 			resp.Body = resp2.Body
 			if resp2.ContentLength > cfg.sizeLimit() {
-				file.Close()
 				return "", cfg.sizeLimitError()
 			}
 			if resp2.ContentLength > 0 {
@@ -984,17 +1055,6 @@ func downloadSnapshotOnce(
 			}
 			if resp.ContentLength > 0 {
 				totalSize = existingSize + resp.ContentLength
-			}
-			file, err = root.OpenFile(
-				filename,
-				os.O_APPEND|os.O_WRONLY,
-				0o640,
-			)
-			if err != nil {
-				return "", fmt.Errorf(
-					"opening file for resume: %w",
-					err,
-				)
 			}
 			cfg.Logger.Debug(
 				"resuming download",
@@ -1015,7 +1075,7 @@ func downloadSnapshotOnce(
 			)
 		}
 		if expectedSize > 0 {
-			fi, err := root.Stat(filename)
+			fi, err := file.Stat()
 			if err != nil {
 				return "", fmt.Errorf(
 					"verifying existing download: %w",
@@ -1023,13 +1083,9 @@ func downloadSnapshotOnce(
 				)
 			}
 			if fi.Size() != expectedSize {
-				// Remove the corrupt/oversized file so
-				// the next attempt starts fresh instead
-				// of looping on the same 416 error.
-				root.Remove(filename) //nolint:errcheck
 				return "", fmt.Errorf(
 					"existing file size mismatch "+
-						"(removed): got %d, want %d",
+						"got %d, want %d",
 					fi.Size(), expectedSize,
 				)
 			}
@@ -1045,6 +1101,15 @@ func downloadSnapshotOnce(
 			"component", "mithril",
 			"path", destPath,
 		)
+		if err := file.Close(); err != nil {
+			file = nil
+			return "", fmt.Errorf("closing download file: %w", err)
+		}
+		file = nil
+		if err := publishDownloadFile(root, tmpName, filename); err != nil {
+			return "", err
+		}
+		published = true
 		return destPath, nil
 	default:
 		bodyBytes, _ := io.ReadAll(
@@ -1065,12 +1130,6 @@ func downloadSnapshotOnce(
 			EscapeText(string(bodyBytes)),
 		), cfg.URL)
 	}
-	defer func() {
-		if file != nil {
-			file.Close()
-		}
-	}() // safety net for panics/early returns
-
 	cfg.Logger.Debug(
 		"downloading snapshot",
 		"component", "mithril",
@@ -1080,7 +1139,10 @@ func downloadSnapshotOnce(
 	)
 
 	pw := &progressWriter{
-		writer:      file,
+		writer: &downloadSpaceWriter{
+			writer: file,
+			budget: cfg.spaceBudget,
+		},
 		total:       totalSize,
 		written:     existingSize,
 		startOffset: existingSize,
@@ -1112,11 +1174,21 @@ func downloadSnapshotOnce(
 	}
 	if copyErr != nil {
 		body.Stop()
-		file.Close()
+		closeErr := file.Close()
 		file = nil
-		if errors.Is(copyErr, ErrDownloadTooLarge) {
-			root.Remove(filename) //nolint:errcheck
+		if errors.Is(copyErr, ErrDownloadTooLarge) ||
+			errors.Is(copyErr, errDownloadFreeSpace) ||
+			errors.Is(copyErr, syscall.ENOSPC) {
 			return "", copyErr
+		}
+		if closeErr != nil {
+			return "", fmt.Errorf("closing partial download: %w", closeErr)
+		}
+		if pw.written > 0 {
+			if err := publishDownloadFile(root, tmpName, filename); err != nil {
+				return "", err
+			}
+			published = true
 		}
 		if cause := context.Cause(downloadCtx); errors.Is(
 			cause,
@@ -1128,6 +1200,19 @@ func downloadSnapshotOnce(
 	}
 	body.Stop()
 
+	if cfg.ExpectedSize > 0 {
+		fi, err := file.Stat()
+		if err != nil {
+			return "", fmt.Errorf("verifying download size: %w", err)
+		}
+		if fi.Size() != cfg.ExpectedSize {
+			return "", fmt.Errorf(
+				"download size mismatch: got %d bytes, expected %d bytes",
+				fi.Size(), cfg.ExpectedSize,
+			)
+		}
+	}
+
 	// Close the file explicitly so write errors (e.g. ENOSPC
 	// during a deferred flush) are not silently ignored.
 	if err := file.Close(); err != nil {
@@ -1135,6 +1220,10 @@ func downloadSnapshotOnce(
 		return "", fmt.Errorf("closing download file: %w", err)
 	}
 	file = nil
+	if err := publishDownloadFile(root, tmpName, filename); err != nil {
+		return "", err
+	}
+	published = true
 
 	// Final progress report
 	if cfg.OnProgress != nil {
@@ -1158,23 +1247,12 @@ func downloadSnapshotOnce(
 		"path", destPath,
 	)
 
-	// Verify file size if expected size was provided
+	// Report the verified size if expected size was provided.
 	if cfg.ExpectedSize > 0 {
-		fi, err := root.Stat(filename)
+		fi, err := root.Lstat(filename)
 		if err != nil {
 			return "", fmt.Errorf(
 				"verifying download size: %w", err,
-			)
-		}
-		if fi.Size() != cfg.ExpectedSize {
-			// Remove so the next attempt starts fresh
-			// instead of resuming from a corrupt file.
-			root.Remove(filename) //nolint:errcheck
-			return "", fmt.Errorf(
-				"download size mismatch "+
-					"(removed): got %d bytes, "+
-					"expected %d bytes",
-				fi.Size(), cfg.ExpectedSize,
 			)
 		}
 		cfg.Logger.Debug(
