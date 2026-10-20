@@ -162,3 +162,15 @@ func TestMempool_TransactionsBounded_DAGWalksOnlyPrefix(t *testing.T) {
 	require.Equal(t, txs[0].Hash, all[0].Hash,
 		"a full read reaches the unresolvable hash and falls back")
 }
+
+func TestMempool_SizeBytes_TracksRetainedBytes(t *testing.T) {
+	t.Parallel()
+	m := newBoundedTestMempool(t, false)
+	require.Zero(t, m.SizeBytes())
+
+	txs := addMockTransactionsOfSize(t, m, 4, 100)
+	require.Equal(t, int64(400), m.SizeBytes())
+
+	m.RemoveTransaction(txs[0].Hash)
+	require.Equal(t, int64(300), m.SizeBytes())
+}
