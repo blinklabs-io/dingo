@@ -476,6 +476,36 @@ func scrubRemoteImmutableText(text string, secrets []string) string {
 	for _, secret := range secrets {
 		text = strings.ReplaceAll(text, secret, remoteImmutableRedactedSecret)
 	}
+	// net/http quotes an unparseable Location with %q. A double quote or
+	// space inside that literal would split it into several words and leave
+	// the credential in a word without ?, # or @, so a quoted literal is
+	// judged and replaced whole.
+	var b strings.Builder
+	for {
+		i := strings.IndexByte(text, '"')
+		if i < 0 {
+			b.WriteString(scrubRemoteImmutableWords(text))
+			return b.String()
+		}
+		b.WriteString(scrubRemoteImmutableWords(text[:i]))
+		text = text[i:]
+		quoted, err := strconv.QuotedPrefix(text)
+		if err != nil {
+			b.WriteByte('"')
+			text = text[1:]
+			continue
+		}
+		if value, err := strconv.Unquote(quoted); err == nil &&
+			strings.ContainsAny(value, "?#@") {
+			b.WriteString(`"` + remoteImmutableRedactedURL + `"`)
+		} else {
+			b.WriteString(scrubRemoteImmutableWords(quoted))
+		}
+		text = text[len(quoted):]
+	}
+}
+
+func scrubRemoteImmutableWords(text string) string {
 	return remoteImmutableCredentialToken.ReplaceAllStringFunc(
 		text,
 		func(word string) string {

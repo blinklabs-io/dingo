@@ -1130,3 +1130,37 @@ func TestRemoteImmutableRequestErrorAsHidesRawURL(t *testing.T) {
 		require.NotContains(t, urlErr.Error(), "query-secret")
 	}
 }
+
+func TestFetchRemoteFileOnceRedactsQuotedRedirectQuery(t *testing.T) {
+	t.Parallel()
+	// The Location credential differs from the request URL, so only the
+	// quoted-literal scrub can remove it. A double quote or space inside the
+	// query must not split the credential out of the redacted text.
+	for name, location := range map[string]string{
+		"plain":        "/x%zz?sig=location-secret",
+		"double quote": `/x%zz?sig="location-secret`,
+		"space":        "/x%zz?sig=ab location-secret",
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			server := httptest.NewServer(http.HandlerFunc(
+				func(w http.ResponseWriter, _ *http.Request) {
+					w.Header().Set("Location", location)
+					w.WriteHeader(http.StatusFound)
+				},
+			))
+			t.Cleanup(server.Close)
+			partPath := filepath.Join(t.TempDir(), "00000.chunk.part")
+			client, budget := newRemoteImmutableTestClientAndBudget(
+				t, server.URL, filepath.Dir(partPath),
+				remoteImmutableLimits{imported: 17, cache: 17, concurrent: 1},
+			)
+			err := fetchRemoteFileOnceWithClient(
+				context.Background(), client, budget,
+				server.URL+"/00000.chunk", partPath, 16,
+			)
+			require.Error(t, err)
+			require.NotContains(t, err.Error(), "location-secret")
+		})
+	}
+}
