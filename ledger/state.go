@@ -1377,6 +1377,7 @@ type LedgerState struct {
 	hfiEvalGeneration           atomic.Uint64           // bumped on rollback to invalidate any in-flight HFI tally
 	hfiStabilityEvalInFlight    atomic.Bool             // guard against overlapping async HFI tallies
 	protocolVersionEvalInFlight atomic.Bool             // guard against overlapping async classic protocol-version evaluations
+	protocolVersionEvalRerun    atomic.Bool             // a queue request arrived while an evaluation was running
 	rewardInputGeneration       atomic.Uint64           // bracketed around rollback to invalidate in-flight reward calculations
 	rewardInputRollbackActive   atomic.Int64            // non-zero while rollback can mutate reward calculation inputs
 	// utxoByRefReads counts UTxO rows read from the database for
@@ -1918,6 +1919,12 @@ type LedgerState struct {
 	// replayWG tracks in-flight replayBufferedHeadersAsync goroutines so
 	// Close can drain them before the database is closed.
 	replayWG sync.WaitGroup
+	// protocolVersionEvalMu serializes protocolVersionEvalWG.Add with Close's
+	// protocolVersionEvalWG.Wait so no evaluation starts once Close has begun
+	// draining; Close waits for the evaluations before storage is closed.
+	protocolVersionEvalMu     sync.Mutex
+	protocolVersionEvalClosed bool
+	protocolVersionEvalWG     sync.WaitGroup
 	// rewardPrecomputeMu serializes rewardPrecomputeWG.Add with Close's
 	// rewardPrecomputeWG.Wait and protects the latest-event coalescing state so
 	// Close cannot return while precompute is still issuing database reads/writes.
@@ -3591,6 +3598,13 @@ func (ls *LedgerState) Close() (retErr error) {
 		"header replay goroutines finished",
 		"elapsed", time.Since(replayStart).Round(time.Millisecond),
 	)
+
+	// closed was set above, so no new classic protocol-version evaluation can
+	// register; the in-flight ones read the chain and database.
+	ls.protocolVersionEvalMu.Lock()
+	ls.protocolVersionEvalClosed = true
+	ls.protocolVersionEvalMu.Unlock()
+	ls.protocolVersionEvalWG.Wait()
 
 	ls.config.Logger.Info("waiting for in-flight reward precompute handlers")
 	rewardStart := time.Now()
@@ -10844,27 +10858,62 @@ func (ls *LedgerState) protocolVersionBumpDetected(
 // queueProtocolVersionBumpEvaluation snapshots inputs under the caller's
 // write lock, performs chain and database reads after the lock is released,
 // and publishes a result only if no rollback or epoch change invalidated it.
-func (ls *LedgerState) queueProtocolVersionBumpEvaluation(ctx context.Context) {
+// A request that arrives while an evaluation is running is not dropped: the
+// running evaluation re-queues one when it finishes, so a tip that moved
+// during a negative evaluation is still evaluated. The caller's context is
+// not used for the reads: the evaluation outlives it and runs on the ledger
+// lifecycle context instead.
+func (ls *LedgerState) queueProtocolVersionBumpEvaluation(
+	_ context.Context,
+) {
 	snapshot, ok := ls.protocolVersionBumpSnapshot()
-	if !ok || !ls.protocolVersionEvalInFlight.CompareAndSwap(false, true) {
+	if !ok {
 		return
 	}
-	go func() {
-		defer ls.protocolVersionEvalInFlight.Store(false)
-		if !ls.protocolVersionBumpDetected(ctx, snapshot) {
-			return
-		}
-		ls.Lock()
-		defer ls.Unlock()
-		if ls.hfiEvalGeneration.Load() != snapshot.generation ||
-			ls.currentEra.Id != snapshot.era.Id ||
-			ls.currentEpoch.EpochId != snapshot.epoch ||
-			ls.transitionInfo.State == hardfork.TransitionKnown {
-			return
-		}
+	if !ls.protocolVersionEvalInFlight.CompareAndSwap(false, true) {
+		ls.protocolVersionEvalRerun.Store(true)
+		return
+	}
+	ls.protocolVersionEvalMu.Lock()
+	if ls.protocolVersionEvalClosed {
+		ls.protocolVersionEvalMu.Unlock()
+		ls.protocolVersionEvalInFlight.Store(false)
+		return
+	}
+	ls.protocolVersionEvalWG.Add(1)
+	ls.protocolVersionEvalMu.Unlock()
+	go ls.runProtocolVersionBumpEvaluation( //nolint:contextcheck // the evaluation outlives the caller; Close drains it
+		ls.lifecycleContext(),
+		snapshot,
+	)
+}
+
+// runProtocolVersionBumpEvaluation reads with the ledger lifecycle context
+// rather than a caller's short-lived one: Close drains this goroutine before
+// storage is closed, and the database forecast takes no context to cancel.
+func (ls *LedgerState) runProtocolVersionBumpEvaluation(
+	ctx context.Context,
+	snapshot protocolVersionBumpSnapshot,
+) {
+	defer ls.protocolVersionEvalWG.Done()
+	detected := ls.protocolVersionBumpDetected(ctx, snapshot)
+	ls.Lock()
+	defer ls.Unlock()
+	// Cleared under the write lock that every queue request also holds, so a
+	// request either sees the evaluation in flight and sets the rerun flag
+	// before this point, or starts its own evaluation after it.
+	ls.protocolVersionEvalInFlight.Store(false)
+	if detected &&
+		ls.hfiEvalGeneration.Load() == snapshot.generation &&
+		ls.currentEra.Id == snapshot.era.Id &&
+		ls.currentEpoch.EpochId == snapshot.epoch &&
+		ls.transitionInfo.State != hardfork.TransitionKnown {
 		ls.transitionInfo = hardfork.NewTransitionKnown(snapshot.targetEpoch)
 		ls.publishSnapshotsLocked()
-	}()
+	}
+	if ls.protocolVersionEvalRerun.Swap(false) {
+		ls.queueProtocolVersionBumpEvaluation(ctx)
+	}
 }
 
 // pparamVotingCountStartSlot returns the first slot whose blocks count toward
