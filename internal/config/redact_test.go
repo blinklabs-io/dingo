@@ -1137,3 +1137,59 @@ func TestKoiosParityBaseURLIsRedactedAsURI(t *testing.T) {
 		)
 	}
 }
+
+func TestRedactCredentialsInText(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		in   string
+		want string
+		gone []string
+	}{
+		{
+			name: "userinfo",
+			in:   `Get "https://alice:hunter2@agg.example/x": timeout`,
+			gone: []string{"alice", "hunter2"},
+			want: `Get "https://***redacted***@agg.example/x": timeout`,
+		},
+		{
+			name: "credential params",
+			in: "https://s3.example/o?X-Amz-Credential=AKIA123&" +
+				"authorization=Bearer9&access_id=id77&part=1 failed",
+			gone: []string{"AKIA123", "Bearer9", "id77"},
+		},
+		{
+			name: "benign params",
+			in:   "https://h.example/p?design=a&keyboard=b: refused",
+			want: "https://h.example/p?design=a&keyboard=b: refused",
+		},
+		{
+			name: "multiple urls",
+			in: "from https://u:p1@a.example/ to " +
+				"http://v:p2@b.example/?token=t3",
+			gone: []string{"p1", "p2", "t3"},
+		},
+		{
+			name: "escaped quotes",
+			in:   `Get \"https://u:pw9@h.example/a?api_key=k9\": EOF`,
+			gone: []string{"pw9", "k9"},
+		},
+		{
+			name: "no url",
+			in:   "design=1 keyboard=2 at 10:00@home",
+			want: "design=1 keyboard=2 at 10:00@home",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := RedactCredentialsInText(tt.in)
+			for _, g := range tt.gone {
+				require.NotContains(t, got, g)
+			}
+			if tt.want != "" {
+				require.Equal(t, tt.want, got)
+			}
+		})
+	}
+}

@@ -3408,6 +3408,16 @@ type BulkLoadOptimizer interface {
 	RestoreNormalPragmas() error
 }
 
+// CatchUpPragmaTuner is an optional interface for metadata stores that can
+// speed up a long write burst on a database that keeps serving, such as a
+// node-managed Mithril stream catch-up. SetCatchUpPragmas changes only
+// settings that cannot lose a committed write on a crash or power loss;
+// RestoreNormalPragmas restores the normal settings.
+type CatchUpPragmaTuner interface {
+	SetCatchUpPragmas() error
+	RestoreNormalPragmas() error
+}
+
 // PlannerStatsUpdater is an optional interface for metadata stores that can
 // collect query-planner statistics. SQLite and PostgreSQL run ANALYZE; MySQL
 // refreshes statistics through deferred-index maintenance instead.

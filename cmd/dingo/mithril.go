@@ -586,6 +586,7 @@ func runMithrilSyncWithRepair(
 		Tracing:           cfg.Tracing,
 		Logger:            logger,
 		OnProgress:        onProgress,
+		Metrics:           metrics.pipeline,
 	})
 	if err != nil {
 		return err

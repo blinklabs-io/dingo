@@ -1012,7 +1012,37 @@ var flagSpecs = []flagSpec{
 	boolFlag(
 		"Mithril.Enabled",
 		"mithril-enabled",
-		"enable Mithril integration",
+		"sync from Mithril inside serve while behind the certified tip (core storage mode only)",
+	),
+	intFlag(
+		"Mithril.WindowChunks",
+		"mithril-window-chunks",
+		"maximum immutable chunks on disk during node-managed Mithril sync",
+	),
+	intFlag(
+		"Mithril.BatchChunks",
+		"mithril-batch-chunks",
+		"immutable chunks applied per ledger batch during node-managed Mithril sync",
+	),
+	intFlag(
+		"Mithril.DownloadWorkers",
+		"mithril-download-workers",
+		"concurrent chunk downloads during node-managed Mithril sync",
+	),
+	uint64Flag(
+		"Mithril.MinGapChunks",
+		"mithril-min-gap-chunks",
+		"minimum certified chunks ahead of the applied tip to start node-managed Mithril sync",
+	),
+	durationFlag(
+		"Mithril.CheckInterval",
+		"mithril-check-interval",
+		"how often a live node re-checks the Mithril aggregator for a gap",
+	),
+	durationFlag(
+		"Mithril.RetryBackoff",
+		"mithril-retry-backoff",
+		"wait after a Mithril failure before retrying node-managed sync",
 	),
 	stringFlag(
 		"Mithril.AggregatorURL",

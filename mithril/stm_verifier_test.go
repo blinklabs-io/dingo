@@ -80,12 +80,28 @@ func testCreateEncodedSTMProof(
 	msg []byte,
 ) (string, string) {
 	t.Helper()
+	return testCreateEncodedSTMProofWithKey(t, msg, testSTMSigningKey(t))
+}
 
+// testSTMSigningKey returns a random single-signer STM secret key.
+func testSTMSigningKey(t *testing.T) *big.Int {
+	t.Helper()
 	sk, err := rand.Int(rand.Reader, fr.Modulus())
 	require.NoError(t, err)
 	if sk.Sign() == 0 {
 		sk = big.NewInt(1)
 	}
+	return sk
+}
+
+// testCreateEncodedSTMProofWithKey signs msg with sk, so certificates signed
+// with one key share an AVK, as certificates of one epoch do.
+func testCreateEncodedSTMProofWithKey(
+	t *testing.T,
+	msg []byte,
+	sk *big.Int,
+) (string, string) {
+	t.Helper()
 	_, _, _, g2 := bls12381.Generators()
 
 	var vkJac bls12381.G2Jac
