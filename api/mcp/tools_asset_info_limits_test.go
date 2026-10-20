@@ -69,7 +69,9 @@ func newAssetInfoLimitSession(
 		require.NoError(t, err)
 		_, err = db.Exec(
 			`INSERT INTO asset (utxo_id, policy_id, name, amount) VALUES (?, ?, ?, '10')`,
-			i, policy, []byte("T"),
+			i,
+			policy,
+			[]byte("T"),
 		)
 		require.NoError(t, err)
 	}
@@ -159,4 +161,26 @@ func TestGetAssetInfoSharesConcurrencyLimit(t *testing.T) {
 	assert.False(t, res.IsError)
 	// The call must give its slot back.
 	require.True(t, limits.acquire())
+}
+
+func TestGetAssetInfoRowCapWithAssetName(t *testing.T) {
+	t.Parallel()
+
+	limits := newReadLimits()
+	limits.maxAssetRows = 5
+	cs := newAssetInfoLimitSession(t, limits, 6)
+	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{
+		Name: "get_asset_info",
+		Arguments: map[string]any{
+			"policy_id":  assetInfoLimitPolicy,
+			"asset_name": "T",
+		},
+	})
+	require.NoError(t, err)
+	require.True(t, res.IsError, "over-cap asset must not return a result")
+	text := res.Content[0].(*mcp.TextContent).Text
+	assert.Contains(t, text, "incomplete")
+	// The caller already narrowed by name, so the error must not tell
+	// them to do it again.
+	assert.NotContains(t, text, "Specify asset_name")
 }

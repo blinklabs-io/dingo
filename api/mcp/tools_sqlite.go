@@ -52,6 +52,9 @@ type SQLiteTableSchemaParams struct {
 }
 
 // RegisterSQLiteTools registers the SQLite inspection and querying tools with the MCP server.
+// Each call creates its own concurrency budget, separate from the one
+// RegisterCardanoTools creates; NewMCPServer shares one budget across both
+// tool sets.
 func RegisterSQLiteTools(
 	server *mcp.Server,
 	db *sql.DB,

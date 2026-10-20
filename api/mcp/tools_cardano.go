@@ -127,6 +127,9 @@ func formatHash(val any) string {
 type utxoAddressLookup func(context.Context, *models.UtxoWithOrderingQuery, int) (models.UtxoAddressPage, error)
 
 // RegisterCardanoTools registers domain-specific Cardano and db-sync aligned tools.
+// Each call creates its own concurrency budget for get_asset_info, separate
+// from the one RegisterSQLiteTools creates; NewMCPServer shares one budget
+// across both tool sets.
 func RegisterCardanoTools(
 	server *mcp.Server,
 	db *sql.DB,
@@ -1304,7 +1307,7 @@ func registerCardanoTools(
 	// Tool: get_asset_info
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "get_asset_info",
-		Description: "Detailed asset discovery and metadata inspection: queries off-chain Token Registry cache, on-chain circulating supply, mint/burn events, and CIP-25 NFT metadata (label 721).",
+		Description: "Detailed asset discovery and metadata inspection: queries off-chain Token Registry cache, on-chain circulating supply, mint/burn events, and CIP-25 NFT metadata (label 721). Returns an incomplete-result error instead of totals when more than 50,000 live asset rows match.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, input AssetInfoParams) (*mcp.CallToolResult, any, error) {
 		if db == nil {
 			return &mcp.CallToolResult{
@@ -1422,17 +1425,18 @@ func registerCardanoTools(
 			return rows.Err()
 		}(); err != nil {
 			if errors.Is(err, errAssetInfoIncomplete) {
+				text := fmt.Sprintf(
+					"Error: result incomplete: more than %d live asset rows match; "+
+						"supply and holder count were not computed.",
+					limits.maxAssetRows,
+				)
+				if len(rawName) == 0 {
+					text += " Specify asset_name to narrow the query."
+				}
 				return &mcp.CallToolResult{
 					IsError: true,
 					Content: []mcp.Content{
-						&mcp.TextContent{
-							Text: fmt.Sprintf(
-								"Error: result incomplete: more than %d live asset rows match; "+
-									"supply and holder count were not computed. "+
-									"Specify asset_name to narrow the query.",
-								limits.maxAssetRows,
-							),
-						},
+						&mcp.TextContent{Text: text},
 					},
 				}, nil, nil
 			}
