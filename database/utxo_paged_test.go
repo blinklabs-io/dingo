@@ -218,9 +218,7 @@ func TestIterateUtxoRefsAsOfPagedBoundsWALUnderBackToBackReads(t *testing.T) {
 	ctx, stop := context.WithCancel(t.Context())
 	defer stop()
 	var readers sync.WaitGroup
-	readers.Add(1)
-	go func() {
-		defer readers.Done()
+	readers.Go(func() {
 		// Whole-UTxO walks with no gap between them, each taking a few
 		// hundred milliseconds, while block application commits beneath.
 		for ctx.Err() == nil {
@@ -238,7 +236,7 @@ func TestIterateUtxoRefsAsOfPagedBoundsWALUnderBackToBackReads(t *testing.T) {
 				},
 			)
 		}
-	}()
+	})
 
 	walPath := filepath.Join(dataDir, "metadata.sqlite-wal")
 	payload := strings.Repeat("x", 64<<10)
