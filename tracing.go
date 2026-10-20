@@ -17,10 +17,8 @@ package dingo
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
 	"net/url"
-	"strings"
 
 	"github.com/blinklabs-io/dingo/internal/version"
 	"go.opentelemetry.io/otel"
@@ -74,7 +72,6 @@ func (n *Node) setupTracing(ctx context.Context) error {
 			opts = append(opts, otlptracehttp.WithEndpointURL(endpoint))
 		}
 		traceExporter, err = otlptracehttp.New(ctx, opts...)
-		err = redactEndpointError(err, n.config.tracingEndpoint)
 	}
 	if err != nil {
 		return err
@@ -120,48 +117,22 @@ func newTracerProvider(
 	)
 }
 
-// redactEndpointError returns err with every credential-bearing part of
-// endpoint (userinfo, password, query values) removed from its message, so
-// exporter errors that quote the endpoint cannot leak operator secrets.
-func redactEndpointError(err error, endpoint string) error {
-	if err == nil {
-		return nil
-	}
-	msg := err.Error()
-	secrets := []string{endpoint}
-	if u, parseErr := url.Parse(endpoint); parseErr == nil {
-		secrets = append(secrets, u.String())
-		if u.User != nil {
-			secrets = append(secrets, u.User.String(), u.User.Username())
-			if pw, ok := u.User.Password(); ok {
-				secrets = append(secrets, pw)
-			}
-		}
-		for _, values := range u.Query() {
-			secrets = append(secrets, values...)
-		}
-	}
-	for _, secret := range secrets {
-		if secret != "" {
-			msg = strings.ReplaceAll(msg, secret, "[redacted]")
-		}
-	}
-	return errors.New(msg)
-}
-
 // otlpTracesURL returns the OTLP traces URL for endpoint. WithEndpointURL
 // uses the path verbatim, so a bare collector address such as
 // http://localhost:4318 gets the standard /v1/traces path, as the
 // OTEL_EXPORTER_OTLP_ENDPOINT variable would.
+//
+// Errors never quote endpoint, and the result carries no userinfo, query or
+// fragment: the exporter sends only scheme, host and path, so dropping them
+// changes nothing on the wire and keeps credentials out of every later
+// exporter error.
 func otlpTracesURL(endpoint string) (string, error) {
 	u, err := url.Parse(endpoint)
 	if err != nil {
-		// *url.Error embeds the raw input, so keep only its cause.
-		var urlErr *url.Error
-		if errors.As(err, &urlErr) {
-			err = urlErr.Err
-		}
-		return "", fmt.Errorf("invalid tracing endpoint: %w", err)
+		// Even the cause of a *url.Error quotes input: a '/', '?' or '#'
+		// in a password ends the authority early, and the password is then
+		// reported as an invalid port.
+		return "", errors.New("invalid tracing endpoint: malformed URL")
 	}
 	// url.Parse reads a bare host:port as a scheme and an opaque part, which
 	// the exporter would accept and then send nowhere.
@@ -170,6 +141,9 @@ func otlpTracesURL(endpoint string) (string, error) {
 			"invalid tracing endpoint: want an http or https URL",
 		)
 	}
+	u.User = nil
+	u.RawQuery, u.ForceQuery = "", false
+	u.Fragment, u.RawFragment = "", ""
 	if u.Path == "" || u.Path == "/" {
 		u.Path = "/v1/traces"
 	}

@@ -17,7 +17,6 @@ package dingo
 import (
 	"bytes"
 	"context"
-	"errors"
 	"log"
 	"log/slog"
 	"net/http"
@@ -218,20 +217,31 @@ func TestOTLPTracesURLErrorOmitsCredentials(t *testing.T) {
 	}
 }
 
-func TestRedactEndpointErrorOmitsCredentials(t *testing.T) {
+func TestOTLPTracesURLErrorOmitsPasswordBeforeDelimiter(t *testing.T) {
 	t.Parallel()
 
-	const endpoint = "https://s3cr3tuser:hunter2@collector.example/otlp?token=tok3n"
-	src := errors.New(
-		`dial "` + endpoint + `": connection refused (user s3cr3tuser, pw hunter2, tok3n)`,
-	)
-	err := redactEndpointError(src, endpoint)
-	require.Error(t, err)
-	for _, secret := range []string{"hunter2", "s3cr3tuser", "tok3n"} {
-		require.NotContains(t, err.Error(), secret)
+	// A '/', '?' or '#' in the password ends the authority early, so
+	// url.Parse reads the password as a port and quotes it in its error.
+	for _, endpoint := range []string{
+		"http://s3cr3tuser:hunter2/x@collector.example:4318",
+		"http://s3cr3tuser:hunter2?x@collector.example:4318",
+		"http://s3cr3tuser:hunter2#x@collector.example:4318",
+	} {
+		_, err := otlpTracesURL(endpoint)
+		require.Error(t, err, endpoint)
+		require.NotContains(t, err.Error(), "hunter2", endpoint)
+		require.NotContains(t, err.Error(), "s3cr3tuser", endpoint)
 	}
-	require.Contains(t, err.Error(), "connection refused")
-	require.NoError(t, redactEndpointError(nil, endpoint))
+}
+
+func TestOTLPTracesURLDropsCredentials(t *testing.T) {
+	t.Parallel()
+
+	got, err := otlpTracesURL(
+		"https://s3cr3tuser:hunter2@collector.example:4318/otlp?token=tok3n#tok3n",
+	)
+	require.NoError(t, err)
+	require.Equal(t, "https://collector.example:4318/otlp", got)
 }
 
 func TestTracingEndpointEnablesTracing(t *testing.T) {
