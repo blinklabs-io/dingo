@@ -10884,8 +10884,10 @@ request error instead of panicking inside the handler.
 
 `POST /mempool` reads identifiers only, through `Mempool.TransactionHashes`,
 which walks the same order as `Transactions` but never clones transaction CBOR.
-The response has no cursor, so it lists at most 10000 hashes as a prefix of the
-mempool's own order and does not say whether it was truncated. At most 8
+The response must name every pending transaction and has no cursor, so a pool
+holding more than 10000 transactions is refused with the retriable
+`ErrUnavailable` (HTTP 503), its details giving the pool size, rather than
+answered with a prefix that silently hides the rest. At most 8
 listings run at once; a request that finds every slot held, after its body has
 validated, is refused with the retriable `ErrUnavailable` (HTTP 503) rather than
 queued.

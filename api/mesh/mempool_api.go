@@ -16,14 +16,17 @@ package mesh
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 )
 
-// handleMempool handles POST /mempool. It lists at most maxMempoolListing
-// hashes and refuses a request that finds every listing slot held, after the
-// body has validated so a malformed request never takes a slot.
+// handleMempool handles POST /mempool. It refuses a request that finds every
+// listing slot held, after the body has validated so a malformed request never
+// takes a slot. The response must name every pending transaction and has no
+// cursor, so a pool larger than maxMempoolListing is refused as retriable
+// rather than answered with a prefix that hides the rest.
 func (s *Server) handleMempool(
 	w http.ResponseWriter,
 	r *http.Request,
@@ -44,9 +47,17 @@ func (s *Server) handleMempool(
 		return
 	}
 
-	hashes, _ := s.config.Mempool.TransactionHashes(
+	hashes, total := s.config.Mempool.TransactionHashes(
 		s.config.maxMempoolListing,
 	)
+	if total > len(hashes) {
+		writeError(w, wrapErr(ErrUnavailable, fmt.Errorf(
+			"mempool holds %d transactions, more than the %d one "+
+				"response can list",
+			total, s.config.maxMempoolListing,
+		)))
+		return
+	}
 	txIDs := make(
 		[]*TransactionIdentifier, len(hashes),
 	)

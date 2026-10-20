@@ -202,12 +202,13 @@ func TestMempoolTransactionUndecodable(t *testing.T) {
 }
 
 // TestMempoolListingIsBounded asserts the handler asks the mempool for at
-// most the configured number of identifiers rather than the whole pool.
+// most the configured number of identifiers, and that a pool which fits the
+// bound exactly is listed in full.
 func TestMempoolListingIsBounded(t *testing.T) {
 	t.Parallel()
 
 	deps := newTestDeps()
-	for i := range 5 {
+	for i := range 3 {
 		deps.mempool.txs = append(
 			deps.mempool.txs,
 			mempool.MempoolTransaction{Hash: hexString(testHash(byte(i + 1)))},
@@ -224,6 +225,33 @@ func TestMempoolListingIsBounded(t *testing.T) {
 	require.Equal(
 		t, hexString(testHash(1)), resp.TransactionIdentifiers[0].Hash,
 	)
+	require.Equal(t, []int{3}, deps.mempool.listCalls)
+}
+
+// TestMempoolListingRejectsOversizedPool asserts a pool larger than the bound
+// is refused with a retriable error rather than answered with a prefix: the
+// Mesh response must name every identifier and has no cursor, so a prefix
+// would silently hide transactions that are still pending.
+func TestMempoolListingRejectsOversizedPool(t *testing.T) {
+	t.Parallel()
+
+	deps := newTestDeps()
+	for i := range 5 {
+		deps.mempool.txs = append(
+			deps.mempool.txs,
+			mempool.MempoolTransaction{Hash: hexString(testHash(byte(i + 1)))},
+		)
+	}
+	h := newTestHandler(t, deps, func(c *ServerConfig) {
+		c.maxMempoolListing = 3
+	})
+
+	rec := postJSON(t, h, "/mempool", networkReq())
+
+	got := requireMeshError(
+		t, rec, ErrUnavailable, http.StatusServiceUnavailable,
+	)
+	require.Contains(t, got.Details["error"], "5 transactions")
 	require.Equal(t, []int{3}, deps.mempool.listCalls)
 }
 

@@ -52,8 +52,8 @@ const (
 	defaultRequestBodyTimeout = 30 * time.Second
 
 	// defaultMaxMempoolListing caps the identifiers one /mempool response
-	// names. The Mesh response has no cursor, so a pool larger than this is
-	// listed as a prefix of the mempool's own order.
+	// names. The Mesh response has no cursor and must list every pending
+	// transaction, so a pool larger than this is refused as retriable.
 	defaultMaxMempoolListing = 10000
 
 	// defaultMaxConcurrentMempoolListings caps /mempool requests in flight.
