@@ -22,6 +22,8 @@ import (
 
 	"connectrpc.com/connect"
 	"github.com/blinklabs-io/dingo/database/models"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/utxorpc/go-codegen/utxorpc/v1alpha/sync"
@@ -71,7 +73,7 @@ func newTestReplayLimiter(
 	budget int64,
 	window time.Duration,
 ) *replayLimiter {
-	l := newReplayLimiter(maxConcurrent, perSecond, budget, window)
+	l := newReplayLimiter(maxConcurrent, 1, perSecond, budget, window)
 	l.now = clock.now
 	l.sleep = clock.sleep
 	return l
@@ -80,20 +82,37 @@ func newTestReplayLimiter(
 func TestReplayLimiterSlotCap(t *testing.T) {
 	t.Parallel()
 
-	l := newReplayLimiter(2, 1000, 1000, time.Hour)
-	rel1, err := l.acquireSlot()
+	l := newReplayLimiter(2, 1, 1000, 1000, time.Hour)
+	rel1, err := l.acquireSlot("10.0.0.1:1")
 	require.NoError(t, err)
-	_, err = l.acquireSlot()
+	_, err = l.acquireSlot("10.0.0.2:1")
 	require.NoError(t, err)
-	_, err = l.acquireSlot()
+	_, err = l.acquireSlot("10.0.0.3:1")
 	require.Equal(t, connect.CodeResourceExhausted, connect.CodeOf(err))
 
 	rel1()
 	rel1() // a second release must not free another slot
-	_, err = l.acquireSlot()
+	_, err = l.acquireSlot("10.0.0.3:1")
 	require.NoError(t, err)
-	_, err = l.acquireSlot()
+	_, err = l.acquireSlot("10.0.0.4:1")
 	require.Equal(t, connect.CodeResourceExhausted, connect.CodeOf(err))
+}
+
+func TestReplayLimiterSlotCapPerClient(t *testing.T) {
+	t.Parallel()
+
+	l := newReplayLimiter(4, 1, 1000, 1000, time.Hour)
+	rel, err := l.acquireSlot("10.0.0.1:1")
+	require.NoError(t, err)
+	// Another port of the same host is the same client.
+	_, err = l.acquireSlot("10.0.0.1:2")
+	require.Equal(t, connect.CodeResourceExhausted, connect.CodeOf(err))
+	_, err = l.acquireSlot("10.0.0.2:1")
+	require.NoError(t, err)
+
+	rel()
+	_, err = l.acquireSlot("10.0.0.1:2")
+	require.NoError(t, err)
 }
 
 func TestReplayLimiterPacesBlocksPerClient(t *testing.T) {
@@ -201,7 +220,7 @@ func TestConnect_FollowTipReplayRefusedWhenReplaySlotsHeld(t *testing.T) {
 	defer cancel()
 	blocks := loadTestChainBlocks(t, followTipReplayBlocks)
 
-	release, err := h.U.replays.acquireSlot()
+	release, err := h.U.replays.acquireSlot("192.0.2.1:1")
 	require.NoError(t, err)
 
 	// Historical replay needs a slot of its own.
@@ -280,3 +299,126 @@ func TestConnect_FollowTipReplayIsPaced(t *testing.T) {
 	require.Len(t, sleeps, followTipReplayBlocks-4)
 	assert.Equal(t, 500*time.Millisecond, sleeps[0])
 }
+
+// scriptedTipLedger reports a primary chain tip chosen per call, so a test can
+// move the tip between the blocks FollowTip serves. The ledger tip stays the
+// real one.
+type scriptedTipLedger struct {
+	UtxorpcLedgerState
+	mu       gosync.Mutex
+	calls    int
+	chainTip func(call int) ochainsync.Tip
+}
+
+func (l *scriptedTipLedger) PrimaryChainTip() ochainsync.Tip {
+	l.mu.Lock()
+	l.calls++
+	call := l.calls
+	l.mu.Unlock()
+	return l.chainTip(call)
+}
+
+func tipOf(b models.Block) ochainsync.Tip {
+	return ochainsync.Tip{
+		Point:       ocommon.NewPoint(b.Slot, b.Hash),
+		BlockNumber: b.Number,
+	}
+}
+
+func TestConnect_FollowTipReplayOneSlotPerClient(t *testing.T) {
+	t.Parallel()
+
+	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{
+		numBlocks: followTipReplayBlocks,
+	})
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	blocks := loadTestChainBlocks(t, followTipReplayBlocks)
+
+	// The harness client connects from loopback; another stream of the same
+	// host already holds a replay slot.
+	release, err := h.U.replays.acquireSlot("127.0.0.1:1")
+	require.NoError(t, err)
+	stream := followTipFrom(t, ctx, h, blocks[0])
+	require.False(t, stream.Receive())
+	require.Equal(t, connect.CodeResourceExhausted, connect.CodeOf(stream.Err()))
+
+	release()
+	stream = followTipFrom(t, ctx, h, blocks[0])
+	require.True(t, stream.Receive(), "replay refused: %v", stream.Err())
+}
+
+func TestConnect_FollowTipCaughtUpStreamNeedsNoReplaySlot(t *testing.T) {
+	t.Parallel()
+
+	const caughtUpAt = 5
+	blocks := loadTestChainBlocks(t, followTipReplayBlocks)
+	var h *utxorpcConnectHarness
+	var holdOnce gosync.Once
+	h = newUtxorpcConnectHarness(t, utxorpcHarnessOptions{
+		numBlocks: followTipReplayBlocks,
+		tune: func(cfg *UtxorpcConfig) {
+			cfg.MaxConcurrentReplays = 1
+			// Blocks 1..4 are behind a tip at block 5, which the stream
+			// then reaches. From block 6 the tip has moved to the last
+			// block, as after a fork switch, and another client holds the
+			// only replay slot.
+			cfg.LedgerState = &scriptedTipLedger{
+				UtxorpcLedgerState: cfg.LedgerState,
+				chainTip: func(call int) ochainsync.Tip {
+					if call <= caughtUpAt {
+						return tipOf(blocks[caughtUpAt])
+					}
+					holdOnce.Do(func() {
+						_, err := h.U.replays.acquireSlot("192.0.2.1:1")
+						assert.NoError(t, err)
+					})
+					return tipOf(blocks[len(blocks)-1])
+				},
+			}
+		},
+	})
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+
+	stream := followTipFrom(t, ctx, h, blocks[0])
+	for i := 1; i < len(blocks); i++ {
+		require.True(t, stream.Receive(), "block %d: %v", i, stream.Err())
+	}
+}
+
+func TestConnect_FollowTipChargesBlocksAheadOfLedgerTip(t *testing.T) {
+	t.Parallel()
+
+	const budget = 5
+	blocks := loadTestChainBlocks(t, followTipReplayBlocks)
+	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{
+		numBlocks: followTipReplayBlocks,
+		tune: func(cfg *UtxorpcConfig) {
+			cfg.MaxReplayBlocksPerClient = budget
+			// The ledger has applied only the first block while the chain
+			// holds them all, as while the ledger catches up.
+			cfg.LedgerState = &laggingLedger{
+				UtxorpcLedgerState: cfg.LedgerState,
+				tip:                tipOf(blocks[0]),
+			}
+		},
+	})
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+
+	stream := followTipFrom(t, ctx, h, blocks[0])
+	for i := range budget {
+		require.True(t, stream.Receive(), "block %d: %v", i, stream.Err())
+	}
+	require.False(t, stream.Receive())
+	require.Equal(t, connect.CodeResourceExhausted, connect.CodeOf(stream.Err()))
+}
+
+// laggingLedger reports a ledger tip behind the primary chain tip.
+type laggingLedger struct {
+	UtxorpcLedgerState
+	tip ochainsync.Tip
+}
+
+func (l *laggingLedger) Tip() ochainsync.Tip { return l.tip }

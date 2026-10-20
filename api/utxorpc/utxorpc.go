@@ -141,6 +141,10 @@ type UtxorpcConfig struct {
 	// behind the tip at once, across all clients; a further replay is refused
 	// with ResourceExhausted (0 = use default).
 	MaxConcurrentReplays int
+	// MaxReplaysPerClient caps the FollowTip streams one client may have
+	// serving blocks behind the tip at once, so one client cannot hold every
+	// MaxConcurrentReplays slot (0 = use default).
+	MaxReplaysPerClient int
 	// ReplayBlocksPerSecond paces the historical blocks FollowTip serves to
 	// one client across all its streams; replay slows down, it does not stop
 	// (0 = use default).
@@ -226,6 +230,9 @@ func NewUtxorpc(cfg UtxorpcConfig) *Utxorpc {
 	if cfg.MaxConcurrentReplays <= 0 {
 		cfg.MaxConcurrentReplays = DefaultMaxConcurrentReplays
 	}
+	if cfg.MaxReplaysPerClient <= 0 {
+		cfg.MaxReplaysPerClient = DefaultMaxReplaysPerClient
+	}
 	if cfg.ReplayBlocksPerSecond <= 0 {
 		cfg.ReplayBlocksPerSecond = DefaultReplayBlocksPerSecond
 	}
@@ -262,6 +269,7 @@ func NewUtxorpc(cfg UtxorpcConfig) *Utxorpc {
 		streams:   newStreamLimiter(cfg.MaxStreams, cfg.MaxStreamsPerClient),
 		replays: newReplayLimiter(
 			cfg.MaxConcurrentReplays,
+			cfg.MaxReplaysPerClient,
 			cfg.ReplayBlocksPerSecond,
 			cfg.MaxReplayBlocksPerClient,
 			cfg.ReplayBudgetWindow,

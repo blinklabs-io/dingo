@@ -71,6 +71,9 @@ type UtxorpcLedgerState interface {
 		txn *database.Txn,
 		maxPools int,
 	) (*ledger.PoolStakeDistribution, error)
+	// PrimaryChainTip is the tip of the chain FollowTip's iterator reads. It
+	// can be ahead of Tip while the ledger is still applying blocks.
+	PrimaryChainTip() ochainsync.Tip
 	// SecurityParam is the configured security parameter k, the deepest
 	// rollback a chain follower can be asked to undo.
 	SecurityParam() int

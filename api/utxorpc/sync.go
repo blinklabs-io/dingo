@@ -269,6 +269,12 @@ func (s *syncServiceServer) FollowTip(
 			releaseReplay()
 		}
 	}()
+	// caughtUp is set once the stream has served a block at the tip. A live
+	// follower that then falls behind, after a fork switch rolls forward
+	// several blocks or while blocks arrive faster than it reads, is still
+	// charged for those blocks but never needs a replay slot, so a full slot
+	// cap cannot disconnect it.
+	caughtUp := false
 
 	for {
 		// Check for available block
@@ -290,23 +296,31 @@ func (s *syncServiceServer) FollowTip(
 		if next != nil {
 			// A block behind the tip is replayed history and is charged
 			// against the replay limits; a block at the tip is live
-			// following and is not. A stream that catches up gives its
-			// replay slot back.
-			if !next.Rollback &&
-				next.Block.Number <
-					s.utxorpc.config.LedgerState.Tip().BlockNumber {
-				if releaseReplay == nil {
-					releaseReplay, err = s.utxorpc.replays.acquireSlot()
-					if err != nil {
+			// following and is not. The tip is the primary chain's, the
+			// stage the iterator reads: the ledger tip lags it while blocks
+			// are still being applied, and blocks in that gap would be
+			// served uncharged. Rollbacks are not charged.
+			if !next.Rollback {
+				tipNumber := s.utxorpc.config.LedgerState.PrimaryChainTip().BlockNumber
+				if next.Block.Number < tipNumber {
+					if !caughtUp && releaseReplay == nil {
+						releaseReplay, err = s.utxorpc.replays.acquireSlot(
+							peerAddr,
+						)
+						if err != nil {
+							return err
+						}
+					}
+					if err := s.utxorpc.replays.charge(ctx, peerAddr); err != nil {
 						return err
 					}
+				} else {
+					caughtUp = true
+					if releaseReplay != nil {
+						releaseReplay()
+						releaseReplay = nil
+					}
 				}
-				if err := s.utxorpc.replays.charge(ctx, peerAddr); err != nil {
-					return err
-				}
-			} else if releaseReplay != nil {
-				releaseReplay()
-				releaseReplay = nil
 			}
 			resp, err := s.followTipResponse(next)
 			if err != nil {

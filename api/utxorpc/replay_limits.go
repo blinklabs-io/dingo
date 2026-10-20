@@ -28,6 +28,7 @@ import (
 // Defaults for the FollowTip historical replay bounds on UtxorpcConfig.
 const (
 	DefaultMaxConcurrentReplays     = 4
+	DefaultMaxReplaysPerClient      = 1
 	DefaultReplayBlocksPerSecond    = 1000
 	DefaultMaxReplayBlocksPerClient = 20_000_000
 	DefaultReplayBudgetWindow       = 24 * time.Hour
@@ -36,20 +37,26 @@ const (
 // replayLimiter bounds the work FollowTip spends serving blocks that are
 // already behind the tip. Live tip following never touches it.
 //
-// Three independent limits apply: a process-wide cap on streams that are
-// replaying at once (refused, never queued), a per-client block rate that
-// slows replay down without ending it, and a per-client block count per
+// Three independent limits apply: a cap on streams that are replaying at once,
+// process-wide and per client (refused, never queued), a per-client block rate
+// that slows replay down without ending it, and a per-client block count per
 // window that ends a replay once spent. A client is the remote host, so
-// clients behind one proxy share a budget, as with streamLimiter.
+// clients behind one proxy share a budget, as with streamLimiter. The
+// per-client slot cap is what stops one host from holding every process-wide
+// slot: the stream cap admits many streams per client, and a stream holds its
+// slot while it waits on pacing or on a client that stopped reading.
 type replayLimiter struct {
-	slots     chan struct{}
-	rate      float64
-	burst     float64
-	budget    int64
-	window    time.Duration
-	mu        sync.Mutex
-	clients   map[string]*replayClient
-	nextSweep time.Time
+	maxSlots          int
+	maxSlotsPerClient int
+	active            int
+	activeByClient    map[string]int
+	rate              float64
+	burst             float64
+	budget            int64
+	window            time.Duration
+	mu                sync.Mutex
+	clients           map[string]*replayClient
+	nextSweep         time.Time
 
 	// now and sleep are seams for tests; production uses the wall clock.
 	now   func() time.Time
@@ -68,19 +75,22 @@ type replayClient struct {
 
 func newReplayLimiter(
 	maxConcurrent int,
+	maxPerClient int,
 	blocksPerSecond int,
 	budget int64,
 	window time.Duration,
 ) *replayLimiter {
 	return &replayLimiter{
-		slots:   make(chan struct{}, maxConcurrent),
-		rate:    float64(blocksPerSecond),
-		burst:   float64(max(blocksPerSecond, 1)),
-		budget:  budget,
-		window:  window,
-		clients: make(map[string]*replayClient),
-		now:     time.Now,
-		sleep:   sleepContext,
+		maxSlots:          maxConcurrent,
+		maxSlotsPerClient: maxPerClient,
+		activeByClient:    make(map[string]int),
+		rate:              float64(blocksPerSecond),
+		burst:             float64(max(blocksPerSecond, 1)),
+		budget:            budget,
+		window:            window,
+		clients:           make(map[string]*replayClient),
+		now:               time.Now,
+		sleep:             sleepContext,
 	}
 }
 
@@ -102,20 +112,40 @@ func replayClientKey(peerAddr string) string {
 	return peerAddr
 }
 
-// acquireSlot reserves one of the concurrent replay slots without waiting.
-func (l *replayLimiter) acquireSlot() (func(), error) {
-	select {
-	case l.slots <- struct{}{}:
-	default:
+// acquireSlot reserves one of the concurrent replay slots for the client at
+// peerAddr without waiting.
+func (l *replayLimiter) acquireSlot(peerAddr string) (func(), error) {
+	key := replayClientKey(peerAddr)
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.active >= l.maxSlots {
 		return nil, connect.NewError(
 			connect.CodeResourceExhausted,
 			fmt.Errorf(
 				"too many concurrent historical replays: limit is %d",
-				cap(l.slots),
+				l.maxSlots,
 			),
 		)
 	}
-	return sync.OnceFunc(func() { <-l.slots }), nil
+	if l.activeByClient[key] >= l.maxSlotsPerClient {
+		return nil, connect.NewError(
+			connect.CodeResourceExhausted,
+			fmt.Errorf(
+				"per-client concurrent historical replay limit of %d reached",
+				l.maxSlotsPerClient,
+			),
+		)
+	}
+	l.active++
+	l.activeByClient[key]++
+	return sync.OnceFunc(func() {
+		l.mu.Lock()
+		defer l.mu.Unlock()
+		l.active--
+		if l.activeByClient[key]--; l.activeByClient[key] == 0 {
+			delete(l.activeByClient, key)
+		}
+	}), nil
 }
 
 // charge accounts one replayed block to the client at peerAddr. It returns
