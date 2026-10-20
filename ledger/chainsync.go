@@ -5299,9 +5299,10 @@ var ErrChainsyncHeaderDisconnected = errors.New(
 )
 
 // ErrChainsyncHeaderNeedsResync is returned when a forecast-held header
-// connects to the local chain but no queued or in-flight blockfetch can
-// publish state that advances the forecast horizon. Re-intersection makes the
-// peer replay from the local chain; this is not a peer fault.
+// connects to the local chain but no queued or in-flight blockfetch, and no
+// stored block the ledger has yet to apply, can publish state that advances
+// the forecast horizon. Re-intersection makes the peer replay from the local
+// chain; this is not a peer fault.
 var ErrChainsyncHeaderNeedsResync = errors.New(
 	"chainsync header forecast has no local block work to advance it",
 )
@@ -5322,8 +5323,9 @@ var ErrChainsyncHeaderNeedsResync = errors.New(
 // selection or reach blockfetch. Such a header whose predecessor does not
 // connect to the local chain is not held: it returns an error wrapping
 // ErrChainsyncHeaderDisconnected. A connected header also returns
-// ErrChainsyncHeaderNeedsResync when no queued or in-flight blockfetch can
-// publish state to advance the forecast. Other conversion failures fail
+// ErrChainsyncHeaderNeedsResync when no queued or in-flight blockfetch, and no
+// stored block the ledger has yet to apply, can publish state to advance the
+// forecast. Other conversion failures fail
 // closed. A zero timestamp is retained for compatibility with
 // synthetic/internal events that never crossed the network ingress path. As
 // with other Go APIs that accept a context, ctx must not be nil.
@@ -5446,6 +5448,23 @@ func (ls *LedgerState) flushQueuedHeadersForHorizonWait(
 		ls.blockfetchContinuationPending
 }
 
+// chainAheadOfAppliedTip reports whether the primary chain holds blocks the
+// ledger has not applied yet. Applying them publishes the snapshots that move
+// the forecast horizon, so they are local work even when no header is queued
+// and no blockfetch is running, as while a block waits on data fetched by
+// another protocol. Re-intersecting instead closes the connections that work
+// may need, without advancing the horizon.
+func (ls *LedgerState) chainAheadOfAppliedTip() bool {
+	if ls.chain == nil {
+		return false
+	}
+	tip := ls.loadTipSnapshot()
+	if tip == nil {
+		return false
+	}
+	return ls.chain.Tip().Point.Slot > tip.currentTip.Point.Slot
+}
+
 // awaitForecastHorizon blocks until the published ledger state can forecast
 // e's slot, or ctx ends. The horizon only moves when a snapshot is published,
 // so it waits for publication, or for blockfetch capacity to change, rather
@@ -5485,7 +5504,8 @@ func (ls *LedgerState) awaitForecastHorizon(
 			)
 			logged = true
 		}
-		if !ls.flushQueuedHeadersForHorizonWait(e.ConnectionId) {
+		if !ls.flushQueuedHeadersForHorizonWait(e.ConnectionId) &&
+			!ls.chainAheadOfAppliedTip() {
 			if err := ctx.Err(); err != nil {
 				return err
 			}
