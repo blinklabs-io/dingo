@@ -4969,3 +4969,14 @@ func TestRunKeepsStorageOpenWhenLeiosPersistenceDrainIsUnconfirmed(
 	require.NoError(t, n.ouroboros().Close())
 	require.NoError(t, n.db.Close())
 }
+
+func TestLedgerStateConfigForwardsLedgerValidateAheadFlag(t *testing.T) {
+	t.Parallel()
+
+	off := (&Node{config: NewConfig()}).ledgerStateConfig()
+	assert.False(t, off.LedgerValidateAheadEnabled)
+	on := (&Node{
+		config: NewConfig(WithLedgerValidateAheadEnabled(true)),
+	}).ledgerStateConfig()
+	assert.True(t, on.LedgerValidateAheadEnabled)
+}

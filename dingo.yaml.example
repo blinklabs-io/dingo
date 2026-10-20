@@ -763,6 +763,16 @@
 # CLI: --ledger-prefetch-ahead-enabled
 # ledgerPrefetchAheadEnabled: false
 
+# Verify the witness signatures of every validated block of a block-apply
+# chunk on worker goroutines while earlier blocks of the chunk validate and
+# write (default: false). Not consensus-affecting: each result is bound to
+# its transaction, and every other rule still runs in order.
+#
+# Can be overridden with the DINGO_LEDGER_VALIDATE_AHEAD_ENABLED
+# environment variable
+# CLI: --ledger-validate-ahead-enabled
+# ledgerValidateAheadEnabled: false
+
 # In core storage mode, write the accumulated deltas of blocks that are not
 # validated with multi-row batched inserts instead of one statement group per
 # row (default: false), as API storage mode already does. Validated blocks,

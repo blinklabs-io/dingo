@@ -91,6 +91,9 @@ func (n *Node) ledgerStateConfig() ledger.LedgerStateConfig {
 		// Prefetch the next block's input UTxOs while the current block
 		// applies. Not consensus-affecting; off by default.
 		LedgerPrefetchAheadEnabled: n.config.ledgerPrefetchAheadEnabled,
+		// Verify validated blocks' witness signatures ahead of the apply
+		// loop. Not consensus-affecting; off by default.
+		LedgerValidateAheadEnabled: n.config.ledgerValidateAheadEnabled,
 		// Core-mode batched metadata writes for blocks that are not
 		// validated. Not consensus-affecting; off by default.
 		ApplyRowBatchingEnabled: n.config.ledgerApplyRowBatchingEnabled,

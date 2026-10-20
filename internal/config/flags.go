@@ -850,6 +850,11 @@ var flagSpecs = []flagSpec{
 		"ledger-prefetch-ahead-enabled",
 		"prefetch the next block's input UTxOs from a read-only transaction while the current block applies, for validated blocks only (not consensus-affecting; default off)",
 	),
+	boolFlag(
+		"LedgerValidateAheadEnabled",
+		"ledger-validate-ahead-enabled",
+		"verify the witness signatures of a block-apply chunk's validated blocks on worker goroutines while earlier blocks apply (not consensus-affecting; default off)",
+	),
 
 	boolFlag(
 		"LedgerApplyRowBatchingEnabled",

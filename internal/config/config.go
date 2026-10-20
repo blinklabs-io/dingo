@@ -881,6 +881,11 @@ type Config struct {
 	// separate goroutine while the current block applies, for blocks under
 	// normal validation only. Not consensus-affecting; off by default.
 	LedgerPrefetchAheadEnabled bool `yaml:"ledgerPrefetchAheadEnabled"          envconfig:"DINGO_LEDGER_PREFETCH_AHEAD_ENABLED"`
+	// LedgerValidateAheadEnabled verifies the witness signatures of the
+	// validated blocks of a block-apply chunk on worker goroutines while
+	// earlier blocks of the chunk apply. Not consensus-affecting; off by
+	// default.
+	LedgerValidateAheadEnabled bool `yaml:"ledgerValidateAheadEnabled"          envconfig:"DINGO_LEDGER_VALIDATE_AHEAD_ENABLED"`
 	// LedgerApplyRowBatchingEnabled writes the accumulated deltas of blocks
 	// that are not validated through the metadata store's batched path in core
 	// storage mode, as API storage mode already does, instead of one statement

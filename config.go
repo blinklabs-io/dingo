@@ -288,6 +288,7 @@ type Config struct {
 	blockPipelineEnabled                                                                bool
 	blockPipelineValidateEnabled                                                        bool
 	ledgerPrefetchAheadEnabled                                                          bool
+	ledgerValidateAheadEnabled                                                          bool
 	ledgerApplyRowBatchingEnabled                                                       bool
 	blockfetchLowWatermarkEnabled                                                       bool
 	minPoolMargin                                                                       uint
@@ -961,6 +962,7 @@ func (c *Config) syncCompatFields() {
 	c.blockPipelineEnabled = c.cfg.BlockPipelineEnabled
 	c.blockPipelineValidateEnabled = c.cfg.BlockPipelineValidateEnabled
 	c.ledgerPrefetchAheadEnabled = c.cfg.LedgerPrefetchAheadEnabled
+	c.ledgerValidateAheadEnabled = c.cfg.LedgerValidateAheadEnabled
 	c.ledgerApplyRowBatchingEnabled = c.cfg.LedgerApplyRowBatchingEnabled
 	c.blockfetchLowWatermarkEnabled = c.cfg.BlockfetchLowWatermarkEnabled
 	c.minPoolMargin, c.pledgeLeverageEnabled, c.pledgeLeverage = c.cfg.MinPoolMargin, c.cfg.PledgeLeverageEnabled, c.cfg.PledgeLeverage
@@ -1845,6 +1847,16 @@ func WithBlockPipelineValidateEnabled(enabled bool) ConfigOptionFunc {
 func WithLedgerPrefetchAheadEnabled(enabled bool) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.LedgerPrefetchAheadEnabled = enabled
+	}
+}
+
+// WithLedgerValidateAheadEnabled verifies the witness signatures of the
+// validated blocks of a block-apply chunk on worker goroutines while earlier
+// blocks of the chunk validate and write. Not consensus-affecting; off by
+// default. See LedgerStateConfig.LedgerValidateAheadEnabled.
+func WithLedgerValidateAheadEnabled(enabled bool) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.LedgerValidateAheadEnabled = enabled
 	}
 }
 
@@ -2806,6 +2818,12 @@ func (c *Config) BlockPipelineValidateEnabled() bool {
 // enabled.
 func (c *Config) LedgerPrefetchAheadEnabled() bool {
 	return c.cfg.LedgerPrefetchAheadEnabled
+}
+
+// LedgerValidateAheadEnabled returns whether state-independent validation
+// work runs ahead of the serial apply loop.
+func (c *Config) LedgerValidateAheadEnabled() bool {
+	return c.cfg.LedgerValidateAheadEnabled
 }
 
 // LedgerApplyRowBatchingEnabled returns whether blocks that are not validated

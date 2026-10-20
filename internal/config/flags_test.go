@@ -1723,3 +1723,23 @@ func TestBarkBlockDownloadAllowPrivateAddressesBindings(t *testing.T) {
 		require.True(t, cfg.BarkBlockDownloadAllowPrivateAddresses)
 	})
 }
+
+func TestLedgerValidateAheadEnabledEnvBinding(t *testing.T) {
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("DINGO_LEDGER_VALIDATE_AHEAD_ENABLED", "true")
+
+	tmpDir := t.TempDir()
+	configFile := filepath.Join(tmpDir, "dingo.yaml")
+	if err := os.WriteFile(configFile, []byte(""), 0o600); err != nil {
+		t.Fatalf("failed to write temp config file: %v", err)
+	}
+
+	cfg, err := LoadConfig(configFile)
+	if err != nil {
+		t.Fatalf("failed to load config: %v", err)
+	}
+	if !cfg.LedgerValidateAheadEnabled {
+		t.Fatal("expected env var to enable ahead signature verification")
+	}
+}
