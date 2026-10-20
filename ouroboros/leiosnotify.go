@@ -88,10 +88,13 @@ const (
 )
 
 type leiosAnnouncement struct {
-	raw    []byte
-	ebHash lcommon.Blake2b256
-	ebSize uint64
-	slot   uint64
+	// raw preserves the original wire envelope for relaying.
+	raw []byte
+	// headerRaw is the bare Dijkstra CBOR used by internal header consumers.
+	headerRaw []byte
+	ebHash    lcommon.Blake2b256
+	ebSize    uint64
+	slot      uint64
 	// electionKey lets pruning rebuild the bounded per-election index.
 	electionKey string
 }
@@ -176,13 +179,13 @@ func (o *Ouroboros) reserveLeiosAnnouncementValidation(
 	key string,
 	ebHash lcommon.Blake2b256,
 	ebSize uint64,
-	raw []byte,
+	headerRaw []byte,
 ) (bool, func(), error) {
 	o.leiosAnnouncementsMu.Lock()
 	if previous, exists := o.leiosAnnouncements[key]; exists {
 		o.leiosAnnouncementsMu.Unlock()
 		if previous.ebHash == ebHash && previous.ebSize == ebSize &&
-			bytes.Equal(previous.raw, raw) {
+			bytes.Equal(previous.headerRaw, headerRaw) {
 			return true, nil, nil
 		}
 		return false, nil, errors.New(
@@ -2285,6 +2288,13 @@ func (o *Ouroboros) acceptLeiosAnnouncementInternal(
 		}
 		return fmt.Errorf("decode ranking-block header: %w", err)
 	}
+	// A hard-fork-wrapped announcement retains its original bytes for
+	// duplicate detection and relay, while internal header consumers need the
+	// bare Dijkstra header bytes preserved by DecodeStoreCbor.
+	headerRaw := header.Cbor()
+	if len(headerRaw) == 0 {
+		return errors.New("decoded ranking-block header has no preserved CBOR")
+	}
 	ebHash, ebSize, ok := header.LeiosAnnouncement()
 	if !ok {
 		return errors.New(
@@ -2296,7 +2306,7 @@ func (o *Ouroboros) acceptLeiosAnnouncementInternal(
 		announcementKey,
 		ebHash,
 		ebSize,
-		raw,
+		headerRaw,
 	)
 	if err != nil {
 		return err
@@ -2395,6 +2405,7 @@ func (o *Ouroboros) acceptLeiosAnnouncementInternal(
 		// relay bound prevents an old message from propagating indefinitely.
 		return o.recordLeiosAnnouncement(
 			raw,
+			headerRaw,
 			ebHash,
 			ebSize,
 			header,
@@ -2402,7 +2413,15 @@ func (o *Ouroboros) acceptLeiosAnnouncementInternal(
 			false,
 		)
 	}
-	return o.recordLeiosAnnouncement(raw, ebHash, ebSize, header, source, true)
+	return o.recordLeiosAnnouncement(
+		raw,
+		headerRaw,
+		ebHash,
+		ebSize,
+		header,
+		source,
+		true,
+	)
 }
 
 func (o *Ouroboros) deferLeiosAnnouncement(
@@ -2565,6 +2584,7 @@ func (o *Ouroboros) pruneLeiosAnnouncements() {
 // peer-supplied slot.
 func (o *Ouroboros) recordLeiosAnnouncement(
 	raw []byte,
+	headerRaw []byte,
 	ebHash lcommon.Blake2b256,
 	ebSize uint64,
 	header *gdijkstra.DijkstraBlockHeader,
@@ -2592,6 +2612,7 @@ func (o *Ouroboros) recordLeiosAnnouncement(
 	if err == nil {
 		err = o.recordLeiosAnnouncementLocked(
 			raw,
+			headerRaw,
 			ebHash,
 			ebSize,
 			header,
@@ -2609,7 +2630,7 @@ func (o *Ouroboros) recordLeiosAnnouncement(
 		publish = o.bindLeiosEndorserBlockSlot(
 			ebHash.Bytes(),
 			header.SlotNumber(),
-			raw,
+			headerRaw,
 		)
 	}
 	o.leiosAnnouncementsMu.Unlock()
@@ -2623,6 +2644,7 @@ func (o *Ouroboros) recordLeiosAnnouncement(
 // The caller must hold leiosAnnouncementsMu.
 func (o *Ouroboros) recordLeiosAnnouncementLocked(
 	raw []byte,
+	headerRaw []byte,
 	ebHash lcommon.Blake2b256,
 	ebSize uint64,
 	header *gdijkstra.DijkstraBlockHeader,
@@ -2660,7 +2682,7 @@ func (o *Ouroboros) recordLeiosAnnouncementLocked(
 	slot := header.SlotNumber()
 	if previous, exists := o.leiosAnnouncements[key]; exists {
 		if previous.ebHash != ebHash || previous.ebSize != ebSize ||
-			string(previous.raw) != string(raw) {
+			string(previous.headerRaw) != string(headerRaw) {
 			return errors.New(
 				"announcement is inconsistent with a previously observed ranking block",
 			)
@@ -2684,6 +2706,7 @@ func (o *Ouroboros) recordLeiosAnnouncementLocked(
 	electionAnnouncements[key] = struct{}{}
 	o.leiosAnnouncements[key] = leiosAnnouncement{
 		raw:         append([]byte(nil), raw...),
+		headerRaw:   append([]byte(nil), headerRaw...),
 		ebHash:      ebHash,
 		ebSize:      ebSize,
 		slot:        slot,
@@ -2745,8 +2768,9 @@ func (o *Ouroboros) leiosAnnouncementBindsSlotLocked(
 	return true
 }
 
-// leiosAnnouncementHeaderLocked returns the exact announcement header that
-// binds one endorser-block occurrence. The caller holds leiosAnnouncementsMu.
+// leiosAnnouncementHeaderLocked returns the bare preserved Dijkstra header
+// that binds one endorser-block occurrence. The caller holds
+// leiosAnnouncementsMu.
 func (o *Ouroboros) leiosAnnouncementHeaderLocked(
 	ebHash []byte,
 	slot uint64,
@@ -2754,7 +2778,7 @@ func (o *Ouroboros) leiosAnnouncementHeaderLocked(
 	for _, announcement := range o.leiosAnnouncements {
 		if announcement.slot == slot &&
 			slices.Equal(announcement.ebHash.Bytes(), ebHash) {
-			return slices.Clone(announcement.raw)
+			return slices.Clone(announcement.headerRaw)
 		}
 	}
 	return nil
