@@ -65,8 +65,8 @@ func TestMempool_TransactionHashes_FollowsDAGOrder(t *testing.T) {
 	m := newBoundedTestMempool(t, true)
 	txs := addMockTransactions(t, m, 4)
 	m.Lock()
-	for i := len(txs) - 1; i >= 0; i-- {
-		m.dag.add(appliedTx{hash: txs[i].Hash})
+	for _, tx := range slices.Backward(txs) {
+		m.dag.add(appliedTx{hash: tx.Hash})
 	}
 	m.Unlock()
 
