@@ -12788,7 +12788,11 @@ than reporting a comparison that would trivially match. Each epoch's
 comparisons run on their own LocalStateQuery connections; one that dies
 during Acquire or a query is redialed and the check repeated, a bounded number
 of times, and the UTxO comparison only reads the reconstruction, so a retry
-cannot apply it twice. A session that ends
+cannot apply it twice. An epoch check's Acquire that Dingo refuses as too old
+is retried within the same bound: Dingo also gives that answer when it cannot
+open a read snapshot within its wait, as under commit contention at an epoch
+boundary, and a point still refused after the bound is reported as not run
+with the exhausted retries named. A session that ends
 for any reason, including Dingo closing the connection, is resumed from the
 last block processed after a backoff; only interruption ends the run. The
 rollback that opens a resumed session lands on the block already processed, so it changes nothing

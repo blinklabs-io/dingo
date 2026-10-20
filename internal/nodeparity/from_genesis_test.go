@@ -20,10 +20,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -989,6 +991,13 @@ type genesisFakeServer struct {
 	// point it cannot answer for.
 	refuseAcquireFn func(pcommon.Point) bool
 
+	// tooOldAfterFirstAcquire makes the Acquires of a slot after its first
+	// one fail with ErrAcquireFailurePointTooOld, that many times, as Dingo
+	// does when it cannot open a read snapshot within its own wait. The
+	// first Acquire is the epoch lookup, so the refusals land on the epoch
+	// checks that follow it.
+	tooOldAfterFirstAcquire map[uint64]int
+
 	// eraHistory, when non-nil, is the answer to HardForkEraHistoryQuery.
 	// Left nil, that query fails like any other unexpected one, so
 	// RunFromGenesis resolves every epoch through its per-point fallback.
@@ -1089,6 +1098,21 @@ func (s *genesisFakeServer) takeEpochNoFailure() bool {
 		return false
 	}
 	s.failEpochNoAtSlot[s.lastAcquiredSlot]--
+	return true
+}
+
+// takeTooOldAfterFirst reports whether this Acquire of slot is one of the
+// refusals tooOldAfterFirstAcquire armed. acquiredSlots already holds it.
+func (s *genesisFakeServer) takeTooOldAfterFirst(slot uint64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.tooOldAfterFirstAcquire[slot] <= 0 {
+		return false
+	}
+	if slices.Index(s.acquiredSlots, slot) == len(s.acquiredSlots)-1 {
+		return false
+	}
+	s.tooOldAfterFirstAcquire[slot]--
 	return true
 }
 
@@ -1301,6 +1325,9 @@ func (s *genesisFakeServer) lsqConfig() localstatequery.Config {
 						return localstatequery.ErrAcquireFailurePointTooOld
 					}
 					if s.refuseAcquireFn != nil && s.refuseAcquireFn(sp.Point) {
+						return localstatequery.ErrAcquireFailurePointTooOld
+					}
+					if s.takeTooOldAfterFirst(sp.Point.Slot) {
 						return localstatequery.ErrAcquireFailurePointTooOld
 					}
 					s.mu.Lock()
@@ -2142,6 +2169,112 @@ func TestRunFromGenesis_ReconnectsAfterDingoClosesConnection(t *testing.T) {
 		t.Fatalf("RunFromGenesis returned %v before ctx was cancelled", err)
 	default:
 	}
+
+	cancel()
+	select {
+	case err := <-done:
+		assert.True(t, err == nil || errors.Is(err, context.Canceled))
+	case <-time.After(10 * time.Second):
+		t.Fatal("RunFromGenesis did not exit after ctx cancellation")
+	}
+}
+
+// TestRunFromGenesis_EpochChecksRetryTooOldRefusal covers Dingo refusing an
+// epoch check's Acquire as too old for the block it just delivered. Live,
+// Dingo answers that when commit contention at an epoch boundary keeps it
+// from opening a read snapshot within its wait, and every check of the epoch
+// was reported as not run.
+//
+// Epochs 1-4 on blocks 0-3. At block 1 the checks' Acquires are refused three
+// times and must then run. At block 2 they are refused for good, which must
+// end as not run with a reason naming the exhausted retries, and the run must
+// go on to check block 3.
+func TestRunFromGenesis_EpochChecksRetryTooOldRefusal(t *testing.T) {
+	t.Parallel()
+	const magic = 42
+	const blockCount = 4
+
+	server := newGenesisFakeServer(t, blockCount)
+	server.epochBySlot = map[uint64]int{
+		server.chain.Points[0].Slot: 1,
+		server.chain.Points[1].Slot: 2,
+		server.chain.Points[2].Slot: 3,
+		server.chain.Points[3].Slot: 4,
+	}
+	transient := server.chain.Points[1].Slot
+	permanent := server.chain.Points[2].Slot
+	server.tooOldAfterFirstAcquire = map[uint64]int{
+		transient: 3,
+		permanent: math.MaxInt,
+	}
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = listener.Close() })
+	server.serve(t, listener, magic)
+
+	koiosSrv := httptest.NewServer(http.NotFoundHandler())
+	t.Cleanup(koiosSrv.Close)
+	koios, err := NewKoiosClient("preview", "", koiosSrv.URL, true, true)
+	require.NoError(t, err)
+
+	results := make(chan EpochResult, 8)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- RunFromGenesis(
+			ctx, listener.Addr().String(), "preview", magic, koios, nil,
+			func(r EpochResult) { results <- r },
+			nil, nil,
+		)
+	}()
+
+	recv := func() EpochResult {
+		t.Helper()
+		select {
+		case r := <-results:
+			return r
+		case <-time.After(20 * time.Second):
+			t.Fatal("timed out waiting for an epoch result")
+			return EpochResult{}
+		}
+	}
+	tooOld := localstatequery.ErrAcquireFailurePointTooOld
+
+	server.allowStep(t)
+
+	server.allowStep(t)
+	report := recv()
+	assert.Equal(t, uint64(2), report.Epoch)
+	assert.NotErrorIs(t, report.ProtocolParamsErr, tooOld)
+	assert.NotErrorIs(t, report.StakeErr, tooOld)
+	assert.True(t, report.UTxOAttempted)
+	assert.NoError(t, report.UTxOErr)
+	server.mu.Lock()
+	assert.Zero(t, server.tooOldAfterFirstAcquire[transient],
+		"the armed refusals must all have fired")
+	server.mu.Unlock()
+
+	server.allowStep(t)
+	report = recv()
+	assert.Equal(t, uint64(3), report.Epoch)
+	for name, err := range map[string]error{
+		"protocol params": report.ProtocolParamsErr,
+		"stake":           report.StakeErr,
+		"utxo":            report.UTxOErr,
+	} {
+		require.ErrorIs(t, err, tooOld, name)
+		assert.ErrorContains(t, err,
+			fmt.Sprintf("after %d attempts", acquireRetries), name)
+	}
+
+	server.allowStep(t)
+	report = recv()
+	assert.Equal(t, uint64(4), report.Epoch)
+	assert.True(t, report.UTxOAttempted)
+	assert.NoError(t, report.UTxOErr)
 
 	cancel()
 	select {

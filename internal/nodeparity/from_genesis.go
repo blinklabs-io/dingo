@@ -94,7 +94,9 @@ func currentEpochNo(
 	magic uint32,
 	point pcommon.Point,
 ) (uint64, error) {
-	conn, lsq, err := acquireWithRetry(ctx, dingoAddr, magic, point)
+	// A too-old refusal is not retried here: before validation starts it is
+	// the expected answer that makes RunFromGenesis skip the block.
+	conn, lsq, err := acquireWithRetry(ctx, dingoAddr, magic, point, false)
 	if err != nil {
 		return 0, err
 	}
@@ -119,9 +121,16 @@ func currentEpochNo(
 // connection that just delivered this exact block a moment ago (confirmed
 // live: without retrying, "point not on chain" fired on nearly every epoch,
 // even freshly dialed -- a propagation-delay race, not a permanent
-// rejection). ErrAcquireFailurePointTooOld is never retried: more attempts
-// only give Dingo's retention floor more time to advance, making a
-// genuinely-too-old point even more too-old, never less.
+// rejection).
+//
+// The epoch checks also retry ErrAcquireFailurePointTooOld (see
+// acquireWithRetry's retryTooOld). Dingo answers it not only for a point
+// below its retention floor but for any Acquire whose read snapshot it could
+// not open within its own server-side wait, which at an epoch boundary is
+// routinely commit contention on the block just delivered. Each such refusal
+// already spent that wait on Dingo's side, so the fixed budget here tolerates
+// tens of seconds of contention, while a point genuinely below the floor,
+// which Dingo refuses at once, still fails within a couple of seconds.
 //
 // The same budget also bounds retrying a failed Dial itself (confirmed
 // live: a v9 from-genesis run died at epoch 129/129 clean on a bare "dial:
@@ -228,12 +237,13 @@ func runProtocolParamsAndStake(
 			}
 		}
 
-		conn, lsq, err := acquireWithRetry(ctx, dingoAddr, magic, point)
+		conn, lsq, err := acquireWithRetry(ctx, dingoAddr, magic, point, true)
 		if err != nil {
-			// acquireWithRetry already retried a point-not-on-chain race
-			// internally -- a failure here is either ctx cancellation or a
-			// non-retryable acquire failure (e.g. the point has aged past
-			// Dingo's retention floor), neither of which this loop's own
+			// acquireWithRetry already retried a point-not-on-chain race and
+			// a too-old refusal internally -- a failure here is either ctx
+			// cancellation or an acquire failure that outlasted that budget
+			// (e.g. the point has aged past Dingo's retention floor), neither
+			// of which this loop's own
 			// retry can do anything about. Neither check ran at all, so
 			// reporting the same err for both is correct here (unlike the
 			// exhausted-retries return below, where the two checks DO run
@@ -325,7 +335,7 @@ func compareUTxOOnce(
 	point pcommon.Point,
 	want UTxOSet,
 ) (utxoComparison, error) {
-	conn, lsq, err := acquireWithRetry(ctx, dingoAddr, magic, point)
+	conn, lsq, err := acquireWithRetry(ctx, dingoAddr, magic, point, true)
 	if err != nil {
 		return utxoComparison{}, err
 	}
@@ -397,7 +407,9 @@ type FromGenesisReporter func(EpochResult)
 
 // acquireWithRetry dials a fresh connection and Acquires point on it,
 // retrying both a failed Dial and an Acquire that failed with
-// ErrAcquireFailurePointNotOnChain -- see acquireRetries' doc comment.
+// ErrAcquireFailurePointNotOnChain, plus one that failed with
+// ErrAcquireFailurePointTooOld when retryTooOld is set -- see
+// acquireRetries' doc comment.
 // Returns ok=false, with any connection it opened already closed, on any
 // failure other than context cancellation, on which it returns ctx.Err()
 // directly rather than a wrapped dial/acquire error.
@@ -406,6 +418,7 @@ func acquireWithRetry(
 	dingoAddr string,
 	magic uint32,
 	point pcommon.Point,
+	retryTooOld bool,
 ) (conn *ouroboros.Connection, lsq *localstatequery.LocalStateQuery, err error) {
 	var lastErr error
 	for attempt := range acquireRetries {
@@ -436,6 +449,14 @@ func acquireWithRetry(
 		}
 		dialConn.Close() //nolint:errcheck
 		lastErr = fmt.Errorf("acquire: %w", acquireErr)
+		tooOld := errors.Is(acquireErr, localstatequery.ErrAcquireFailurePointTooOld)
+		if tooOld && retryTooOld {
+			lastErr = fmt.Errorf(
+				"acquire: Dingo still refused slot %d as too old after %d attempts: %w",
+				point.Slot, acquireRetries, acquireErr,
+			)
+			continue
+		}
 		if !errors.Is(acquireErr, localstatequery.ErrAcquireFailurePointNotOnChain) {
 			return nil, nil, lastErr
 		}
@@ -471,7 +492,7 @@ func captureGenesisBaseline(
 	magic uint32,
 	point pcommon.Point,
 ) (UTxOSet, error) {
-	conn, lsq, err := acquireWithRetry(ctx, dingoAddr, magic, point)
+	conn, lsq, err := acquireWithRetry(ctx, dingoAddr, magic, point, true)
 	if err != nil {
 		return nil, err
 	}
