@@ -152,6 +152,7 @@ func NewMCPServer(
 	limits := newReadLimits()
 	if sqlitePath != "" {
 		limits.walBytes = walFileBytes(sqlitePath)
+		server.AddReceivingMiddleware(limits.walPressureMiddleware())
 	}
 	registerSQLiteTools(server, db, cfg.QueryTimeout, cfg.MaxRows, limits)
 	registerCardanoTools(

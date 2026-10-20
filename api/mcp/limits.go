@@ -15,8 +15,11 @@
 package mcp
 
 import (
+	"context"
 	"errors"
 	"os"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 const (
@@ -29,9 +32,9 @@ const (
 	maxAssetInfoRows = 50_000
 	// maxSQLiteWALBytes is the metadata WAL size above which new database
 	// reads are refused. It is twice the 64 MiB journal_size_limit the
-	// metadata store sets, so a WAL this large was not reset after its last
-	// checkpoint: a reader is pinning an old snapshot, and every further
-	// read prolongs that.
+	// metadata store sets, so a WAL this large has been neither reset nor
+	// truncated since it grew past the limit, and an open reader is one
+	// thing that prevents both.
 	maxSQLiteWALBytes = 128 << 20
 )
 
@@ -80,12 +83,52 @@ func walFileBytes(path string) func() int64 {
 	}
 }
 
-// admit takes a query slot for a database read, or refuses it. Every tool
-// that holds a read snapshot must admit through here so the WAL-pressure
-// check covers the whole class.
-func (l *readLimits) admit() error {
+// walPressure reports errWALPressure while the metadata WAL exceeds
+// maxWALBytes.
+func (l *readLimits) walPressure() error {
 	if l.walBytes != nil && l.walBytes() > l.maxWALBytes {
 		return errWALPressure
+	}
+	return nil
+}
+
+// walPressureMiddleware refuses every tool call and resource read while the
+// metadata WAL is over its limit. Gating at the method level covers the
+// tools and resources that read SQLite without a query slot, including
+// those served through the metadata store's own pool, so no MCP request can
+// keep a read snapshot open while the WAL waits for a reader-free interval.
+func (l *readLimits) walPressureMiddleware() mcp.Middleware {
+	return func(next mcp.MethodHandler) mcp.MethodHandler {
+		return func(
+			ctx context.Context,
+			method string,
+			req mcp.Request,
+		) (mcp.Result, error) {
+			if method != "tools/call" && method != "resources/read" {
+				return next(ctx, method, req)
+			}
+			err := l.walPressure()
+			if err == nil {
+				return next(ctx, method, req)
+			}
+			if method == "tools/call" {
+				return &mcp.CallToolResult{
+					IsError: true,
+					Content: []mcp.Content{
+						&mcp.TextContent{Text: err.Error()},
+					},
+				}, nil
+			}
+			return nil, err
+		}
+	}
+}
+
+// admit takes a query slot for a database read, or refuses it under WAL
+// pressure or when every slot is busy.
+func (l *readLimits) admit() error {
+	if err := l.walPressure(); err != nil {
+		return err
 	}
 	if !l.acquire() {
 		return errReadsBusy

@@ -22,6 +22,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -107,4 +109,89 @@ func TestWALFileBytes(t *testing.T) {
 
 	require.NoError(t, os.WriteFile(path+"-wal", make([]byte, 4096), 0o600))
 	assert.Equal(t, int64(4096), probe())
+}
+
+// TestNewMCPServerRefusesDatabaseReadsUnderWALPressure drives the composed
+// server against a file-backed metadata store whose -wal file is grown past
+// the limit, so it covers the probe path NewMCPServer derives as well as
+// every database-backed tool and resource, not only the slot-limited ones.
+func TestNewMCPServerRefusesDatabaseReadsUnderWALPressure(t *testing.T) {
+	t.Parallel()
+
+	nodeDB, err := dbtest.NewDatabaseWithOptions(t, dbtest.Options{
+		Config: &database.Config{DataDir: t.TempDir()},
+		Metadata: dbtest.StorageProvider{
+			Config: map[string]any{"dataDir": t.TempDir()},
+		},
+	})
+	require.NoError(t, err)
+	provider, ok := nodeDB.Metadata().(interface{ SQLitePath() string })
+	require.True(t, ok)
+	walPath := provider.SQLitePath() + "-wal"
+
+	server, ro, err := NewMCPServer(
+		t.Context(),
+		DefaultProviderConfig(),
+		ProviderDependencies{Database: nodeDB},
+	)
+	require.NoError(t, err)
+	require.NotNil(t, ro)
+	t.Cleanup(func() { _ = ro.Close() })
+	ct, st := mcp.NewInMemoryTransports()
+	_, err = server.Connect(t.Context(), st, nil)
+	require.NoError(t, err)
+	cs, err := mcp.NewClient(
+		&mcp.Implementation{Name: "test", Version: "1"}, nil,
+	).Connect(t.Context(), ct, nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = cs.Close() })
+
+	tools := map[string]map[string]any{
+		"sqlite_query":    {"query": "SELECT 1"},
+		"get_cardano_tip": {},
+		"get_block":       {"hash_or_slot": "1"},
+	}
+	setWAL := func(size int64) {
+		f, err := os.OpenFile(walPath, os.O_RDWR, 0)
+		require.NoError(t, err)
+		require.NoError(t, f.Truncate(size))
+		require.NoError(t, f.Close())
+	}
+
+	// Grow the live -wal file with a sparse tail past the limit, then
+	// restore its original length: SQLite ignores bytes past its last valid
+	// frame, while truncating valid frames away would corrupt the store.
+	info, err := os.Stat(walPath)
+	require.NoError(t, err)
+	setWAL(maxSQLiteWALBytes + 1)
+	for name, args := range tools {
+		res, err := cs.CallTool(t.Context(), &mcp.CallToolParams{
+			Name: name, Arguments: args,
+		})
+		require.NoError(t, err, name)
+		require.True(t, res.IsError, "%s admitted under WAL pressure", name)
+		assert.Contains(t, res.Content[0].(*mcp.TextContent).Text, "WAL", name)
+	}
+	_, err = cs.ReadResource(t.Context(), &mcp.ReadResourceParams{
+		URI: "dingo://node/status",
+	})
+	require.ErrorContains(t, err, "WAL")
+
+	// Once the WAL is back under the limit, reads resume.
+	setWAL(info.Size())
+	for name, args := range tools {
+		res, err := cs.CallTool(t.Context(), &mcp.CallToolParams{
+			Name: name, Arguments: args,
+		})
+		require.NoError(t, err, name)
+		if res.IsError {
+			assert.NotContains(
+				t, res.Content[0].(*mcp.TextContent).Text, "WAL", name,
+			)
+		}
+	}
+	_, err = cs.ReadResource(t.Context(), &mcp.ReadResourceParams{
+		URI: "dingo://node/status",
+	})
+	require.NoError(t, err)
 }
