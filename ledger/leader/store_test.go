@@ -15,6 +15,7 @@
 package leader
 
 import (
+	"fmt"
 	"testing"
 
 	nodeconsensus "github.com/blinklabs-io/dingo/consensus"
@@ -114,7 +115,33 @@ func TestSyncStateScheduleStoreLoadsZeroFormatVersionFromOldRecord(
 	require.NotNil(t, loaded)
 	assert.Equal(t, 0, loaded.FormatVersion,
 		"missing format_version must decode to 0 so validation rejects it")
-	assert.Equal(t, nodeconsensus.PraosIdentity, loaded.ConsensusIdentity)
+	assert.Empty(t, loaded.ConsensusIdentity,
+		"an identity the record never carried must not default to Praos")
+}
+
+func TestSyncStateScheduleStoreKeepsMissingIdentityOnCurrentFormat(
+	t *testing.T,
+) {
+	poolId := lcommon.PoolKeyHash{}
+	copy(poolId[:], []byte("testpool1234567890123"))
+
+	backingStore := newMockSyncStateStore()
+	backingStore.values[syncStateScheduleKey(42, poolId)] =
+		fmt.Sprintf(
+			`{"format_version":%d,"epoch":42,"pool_id":"%s",`+
+				`"pool_stake":1,"total_stake":1,"epoch_nonce":"",`+
+				`"leader_slots":[1]}`,
+			ScheduleFormatVersion,
+			hexEncode(poolId[:]),
+		)
+
+	loaded, err := NewSyncStateScheduleStore(backingStore).
+		LoadSchedule(42, poolId)
+	require.NoError(t, err)
+	require.NotNil(t, loaded)
+	assert.Equal(t, ScheduleFormatVersion, loaded.FormatVersion)
+	assert.Empty(t, loaded.ConsensusIdentity,
+		"the election must see no identity so it recomputes the schedule")
 }
 
 // TestSyncStateScheduleStoreSortsUnsortedRecord verifies that a persisted

@@ -104,9 +104,10 @@ func (s *syncStateScheduleStore) LoadSchedule(
 		record.TotalStake,
 		epochNonce,
 	)
-	if record.ConsensusIdentity != "" {
-		schedule.ConsensusIdentity = record.ConsensusIdentity
-	}
+	// Assigned even when empty: NewSchedule's Praos default must not stand in
+	// for an identity the record never carried, or a current-format record
+	// without one would be reused as if Praos had computed it.
+	schedule.ConsensusIdentity = record.ConsensusIdentity
 	// Carry the persisted format version through so validatePersistedSchedule
 	// can reject schedules written by builds with an incompatible compute
 	// path (missing field decodes to 0 ≠ ScheduleFormatVersion).

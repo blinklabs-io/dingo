@@ -42,7 +42,7 @@ identity. Existing unmarked databases are treated as `praos/v1` and marked on
 their next successful open. A different identity cannot open that database.
 Persisted leader schedules carry the same identity in addition to their format
 version, nonce, pool stake, and total stake, so a schedule computed by another
-algorithm is never reused. Alternative providers must define a distinct
+algorithm is never reused; a record that carries no identity is recomputed. Alternative providers must define a distinct
 identity and a network compatibility mechanism before registration.
 
 Storage lifecycle contexts cross the provider boundary. In particular, Badger

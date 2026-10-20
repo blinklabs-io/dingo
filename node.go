@@ -248,6 +248,18 @@ type Node struct {
 	rebuildableMetrics *rebuildableRegisterer
 }
 
+// consensusPluginSelection returns the consensus plugin selection, defaulting
+// an unset provider to Praos. A config built from a caller-supplied internal
+// config bypasses the loader's defaults, and an empty name would otherwise
+// fail startup with a missing-provider error.
+func (c *Config) consensusPluginSelection() plugin.Selection {
+	selection := c.pluginSelections[plugin.CapabilityConsensus]
+	if selection.Provider == "" {
+		selection.Provider = nodeconsensus.PraosProviderName
+	}
+	return selection
+}
+
 func (n *Node) selectedConsensusProvider() nodeconsensus.Provider {
 	if n != nil && n.consensusProvider != nil {
 		return n.consensusProvider
@@ -716,7 +728,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 			)
 		}
 	})
-	consensusSelection := n.config.pluginSelections[plugin.CapabilityConsensus]
+	consensusSelection := n.config.consensusPluginSelection()
 	provider, err := plugin.Resolve[nodeconsensus.Provider](
 		n.ctx,
 		n.pluginHost,

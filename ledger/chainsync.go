@@ -4132,25 +4132,31 @@ func (ls *LedgerState) compareIncomingHeaderToLocalTip(
 	}
 
 	incomingView, _ := praos.GetPraosTiebreakerView(e.BlockHeader)
+	localView := ls.localTipPraosView(ls.lifecycleContext(), localTip)
 	result := ls.compareConsensusTips(
 		observedTip,
 		localTip,
 		incomingView,
-		ls.localTipPraosView(ls.lifecycleContext(), localTip),
+		localView,
 	)
 	if result != praos.ChainEqual {
 		return result
 	}
 
-	// If the peer has advertised a further tip than the header just delivered,
-	// use that only when block number alone decides the comparison. We do not
-	// have the advertised tip's Praos select view until its header arrives.
-	if e.Tip.BlockNumber > observedTip.BlockNumber {
-		switch {
-		case e.Tip.BlockNumber > localTip.BlockNumber:
-			return praos.ChainABetter
-		case e.Tip.BlockNumber < localTip.BlockNumber:
-			return praos.ChainBBetter
+	// A peer that advertised a further tip than the header just delivered is
+	// asked about that tip too. Its select view is unavailable until its
+	// header arrives, so the answer is used only when the heights differ and
+	// the tie-break is not needed.
+	if e.Tip.BlockNumber > observedTip.BlockNumber &&
+		e.Tip.BlockNumber != localTip.BlockNumber {
+		advertised := ls.compareConsensusTips(
+			e.Tip,
+			localTip,
+			praos.PraosTiebreakerView{},
+			localView,
+		)
+		if advertised != praos.ChainEqual {
+			return advertised
 		}
 	}
 	return result
@@ -4161,12 +4167,6 @@ func (ls *LedgerState) earlierHeaderCanBeatLocalTip(
 	localTip ochainsync.Tip,
 ) bool {
 	observedTip := observedHeaderTip(e)
-	if observedTip.BlockNumber > localTip.BlockNumber {
-		return true
-	}
-	if observedTip.BlockNumber < localTip.BlockNumber {
-		return false
-	}
 	incomingView, _ := praos.GetPraosTiebreakerView(e.BlockHeader)
 	return ls.compareConsensusTips(
 		observedTip,

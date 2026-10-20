@@ -19,6 +19,8 @@ import (
 
 	nodeconsensus "github.com/blinklabs-io/dingo/consensus"
 	"github.com/blinklabs-io/dingo/database"
+	internalconfig "github.com/blinklabs-io/dingo/internal/config"
+	"github.com/blinklabs-io/dingo/plugin"
 	"github.com/stretchr/testify/require"
 )
 
@@ -69,4 +71,31 @@ func TestUnmarkedDatabaseIsPraos(t *testing.T) {
 		"tachys/v1",
 	)
 	require.ErrorContains(t, err, "unmarked database uses consensus")
+}
+
+func TestConsensusPluginSelectionDefaultsEmptyProviderToPraos(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := NewConfigFromInternal(
+		&internalconfig.Config{},
+		nil, nil, nil, nil,
+	)
+	require.NoError(t, err)
+	require.Empty(t, cfg.pluginSelections[plugin.CapabilityConsensus].Provider)
+	require.Equal(
+		t,
+		nodeconsensus.PraosProviderName,
+		cfg.consensusPluginSelection().Provider,
+	)
+
+	cfg, err = NewConfigFromInternal(
+		&internalconfig.Config{
+			Plugins: internalconfig.PluginsConfig{
+				Consensus: plugin.Selection{Provider: "custom"},
+			},
+		},
+		nil, nil, nil, nil,
+	)
+	require.NoError(t, err)
+	require.Equal(t, "custom", cfg.consensusPluginSelection().Provider)
 }
