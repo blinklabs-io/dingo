@@ -2288,9 +2288,9 @@ func (o *Ouroboros) acceptLeiosAnnouncementInternal(
 		}
 		return fmt.Errorf("decode ranking-block header: %w", err)
 	}
-	// A hard-fork-wrapped announcement retains its original bytes for
-	// duplicate detection and relay, while internal header consumers need the
-	// bare Dijkstra header bytes preserved by DecodeStoreCbor.
+	// Only relay uses the original wire bytes. Duplicate detection and
+	// semantic validation use the bare Dijkstra header preserved by
+	// DecodeStoreCbor, so era-wrapped and bare encodings of one header agree.
 	headerRaw := header.Cbor()
 	if len(headerRaw) == 0 {
 		return errors.New("decoded ranking-block header has no preserved CBOR")
