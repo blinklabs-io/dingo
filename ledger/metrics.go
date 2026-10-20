@@ -97,12 +97,13 @@ type stateMetrics struct {
 	epochRolloverPhaseDuration *prometheus.HistogramVec
 	// Pre-materialized observers for the stage label values, so the hot
 	// path does not resolve a label on every block or transaction.
-	blockStageHeaderVerify  prometheus.Observer
-	blockStageValidate      prometheus.Observer
-	blockStageApply         prometheus.Observer
-	blockStageEpochRollover prometheus.Observer
-	blockStagePrepare       prometheus.Observer
-	blockStageCommit        prometheus.Observer
+	blockStageHeaderVerify         prometheus.Observer
+	blockStageValidate             prometheus.Observer
+	blockStageApply                prometheus.Observer
+	blockStageEpochRollover        prometheus.Observer
+	blockStagePrepare              prometheus.Observer
+	blockStageCommit               prometheus.Observer
+	blockStageDeferredHeaderVerify prometheus.Observer
 	// Per-stage maximum wall-clock duration ever observed since process
 	// start, each holding math.Float64bits of a seconds value and advanced
 	// by updateMaxDuration's compare-and-swap loop at the same
@@ -127,12 +128,13 @@ type stateMetrics struct {
 	// Collector, real complexity for a question -- "did we ever see
 	// something this bad" -- that a simple non-resetting maximum already
 	// answers.
-	blockStageHeaderVerifyMax  atomic.Uint64
-	blockStageValidateMax      atomic.Uint64
-	blockStageApplyMax         atomic.Uint64
-	blockStageEpochRolloverMax atomic.Uint64
-	blockStagePrepareMax       atomic.Uint64
-	blockStageCommitMax        atomic.Uint64
+	blockStageHeaderVerifyMax         atomic.Uint64
+	blockStageValidateMax             atomic.Uint64
+	blockStageApplyMax                atomic.Uint64
+	blockStageEpochRolloverMax        atomic.Uint64
+	blockStagePrepareMax              atomic.Uint64
+	blockStageCommitMax               atomic.Uint64
+	blockStageDeferredHeaderVerifyMax atomic.Uint64
 	// Wall-clock time from the start of applying one committed
 	// DB-transaction chunk of blocks (ledger/state.go's batch loop, which
 	// commits at most batchSize=50 blocks per transaction) to the moment
@@ -430,6 +432,9 @@ const (
 	blockStageEpochRollover = "epoch_rollover"
 	blockStagePrepare       = "prepare"
 	blockStageCommit        = "commit"
+	// blockStageDeferredHeaderVerify is distinct from header_verify, which
+	// is observed on blockfetch arrival outside the block-apply window.
+	blockStageDeferredHeaderVerify = "deferred_header_verify"
 )
 
 // observeBlockStage records one sample of wall-clock time spent in the named
@@ -463,6 +468,9 @@ func (m *stateMetrics) observeBlockStage(stage string, d time.Duration) {
 	case blockStageCommit:
 		obs = m.blockStageCommit
 		record = &m.blockStageCommitMax
+	case blockStageDeferredHeaderVerify:
+		obs = m.blockStageDeferredHeaderVerify
+		record = &m.blockStageDeferredHeaderVerifyMax
 	}
 	if obs == nil {
 		// Unknown stage, or metrics were never initialised: neither field
@@ -568,12 +576,13 @@ func (m *stateMetrics) registerBlockStageMaxDuration(
 	factory promauto.Factory,
 ) {
 	for stage, record := range map[string]*atomic.Uint64{
-		blockStageHeaderVerify:  &m.blockStageHeaderVerifyMax,
-		blockStageValidate:      &m.blockStageValidateMax,
-		blockStageApply:         &m.blockStageApplyMax,
-		blockStageEpochRollover: &m.blockStageEpochRolloverMax,
-		blockStagePrepare:       &m.blockStagePrepareMax,
-		blockStageCommit:        &m.blockStageCommitMax,
+		blockStageHeaderVerify:         &m.blockStageHeaderVerifyMax,
+		blockStageValidate:             &m.blockStageValidateMax,
+		blockStageApply:                &m.blockStageApplyMax,
+		blockStageEpochRollover:        &m.blockStageEpochRolloverMax,
+		blockStagePrepare:              &m.blockStagePrepareMax,
+		blockStageCommit:               &m.blockStageCommitMax,
+		blockStageDeferredHeaderVerify: &m.blockStageDeferredHeaderVerifyMax,
 	} {
 		factory.NewGaugeFunc(
 			prometheus.GaugeOpts{
@@ -1020,7 +1029,7 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 	m.blockStageDuration = promautoFactory.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name: "dingo_ledger_block_stage_duration_seconds",
-			Help: "wall-clock time spent in each ledger-owned stage of per-block processing, by stage: header_verify (VRF/KES/signature checks on blockfetch arrival), validate (one transaction's era ledger-rule validation, including Plutus evaluation), apply (writing UTXO and transaction rows to the metadata store: one sample per flushed delta batch, including its replay-row flush, and, on a validating block, one per validated transaction's immediate write), epoch_rollover (the epoch-boundary transaction, including reward application and the governance tally, during which no block is applied), prepare (per chunk that commits at least one block: everything from the start of the chunk to the database transaction, including the Leios endorser-block wait, the block-apply snapshot and replay header preparation), commit (per chunk that commits at least one block: the database transaction outside its body, covering the tip and candidate checks, the worker-pool wait, begin and commit); prepare, validate, apply and commit all fall inside the window of dingo_ledger_block_apply_batch_latency_seconds, and the remainder of that window is the rest of the transaction body (block processing outside validate, and the nonce and tip writes) plus the post-commit tip update",
+			Help: "wall-clock time spent in each ledger-owned stage of per-block processing, by stage: header_verify (VRF/KES/signature checks on blockfetch arrival), validate (era ledger-rule validation: one sample per transaction, including Plutus evaluation, and one per validated block for resolving its inputs and its block-level reference-script check), apply (writing UTXO and transaction rows to the metadata store: one sample per flushed delta batch, including its replay-row flush, and, on a validating block, one per validated transaction's immediate write), epoch_rollover (the epoch-boundary transaction, including reward application and the governance tally, during which no block is applied), prepare (per chunk that commits at least one block: everything from the start of the chunk to the database transaction, including the Leios endorser-block wait, the block-apply snapshot and replay header preparation), commit (per chunk that commits at least one block: the database transaction outside its body, covering the tip and candidate checks, the worker-pool wait, begin and commit), deferred_header_verify (per applied block: the check whether admission deferred its header verification and, if it did, that VRF/KES/signature verification); prepare, validate, apply, commit and deferred_header_verify all fall inside the window of dingo_ledger_block_apply_batch_latency_seconds, and the remainder of that window is the rest of the transaction body (per-block bookkeeping, the nonce and tip writes) plus the post-commit tip update",
 			// 100us to ~419s. Most observations are sub-100ms (a single
 			// cheap signature check, one transaction's validation, one
 			// delta-batch flush), which is why resolution stays fine down
@@ -1049,6 +1058,9 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 	)
 	m.blockStageCommit = m.blockStageDuration.WithLabelValues(
 		blockStageCommit,
+	)
+	m.blockStageDeferredHeaderVerify = m.blockStageDuration.WithLabelValues(
+		blockStageDeferredHeaderVerify,
 	)
 	m.registerBlockStageMaxDuration(promautoFactory)
 	m.blockApplyBatchLatency = promautoFactory.NewHistogram(

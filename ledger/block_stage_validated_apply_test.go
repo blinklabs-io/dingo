@@ -40,6 +40,49 @@ import (
 func TestValidatedBlockTransactionWriteIsObservedAsApply(t *testing.T) {
 	t.Parallel()
 
+	ls := processValidatedTestBlock(t)
+	count, sum := blockStageSampleCount(t, &ls.metrics, blockStageApply)
+	assert.Equal(
+		t, uint64(1), count,
+		"the validated transaction's state write must be observed as apply",
+	)
+	assert.Positive(t, sum)
+}
+
+// TestValidatedBlockInputResolutionIsObservedAsValidate requires the
+// block-level part of validating a block, resolving its inputs and checking
+// its reference scripts, to be a validate sample beside the one per
+// transaction.
+func TestValidatedBlockInputResolutionIsObservedAsValidate(t *testing.T) {
+	t.Parallel()
+
+	ls := processValidatedTestBlock(t)
+	count, _ := blockStageSampleCount(t, &ls.metrics, blockStageValidate)
+	assert.Equal(
+		t, uint64(2), count,
+		"one block-level and one per-transaction validate sample",
+	)
+}
+
+// TestDeferredHeaderCheckIsObservedPerBlock requires the in-transaction
+// check of whether admission deferred a block's header verification, and
+// that verification when it was deferred, to be a sample of its own stage.
+func TestDeferredHeaderCheckIsObservedPerBlock(t *testing.T) {
+	t.Parallel()
+
+	ls := processValidatedTestBlock(t)
+	count, sum := blockStageSampleCount(
+		t, &ls.metrics, blockStageDeferredHeaderVerify,
+	)
+	assert.Equal(t, uint64(1), count)
+	assert.Positive(t, sum)
+}
+
+// processValidatedTestBlock applies one validating Dijkstra block holding a
+// single transaction through ledgerProcessBlock and returns its ledger state.
+func processValidatedTestBlock(t *testing.T) *LedgerState {
+	t.Helper()
+
 	db := newTestDB(t)
 	inputID := bytes.Repeat([]byte{0x41}, 32)
 	input, err := omockledger.NewSimpleTransactionInput(inputID, 0)
@@ -151,10 +194,5 @@ func TestValidatedBlockTransactionWriteIsObservedAsApply(t *testing.T) {
 		}))
 
 	require.Equal(t, 1, validated, "the block must take the validating path")
-	count, sum := blockStageSampleCount(t, &ls.metrics, blockStageApply)
-	assert.Equal(
-		t, uint64(1), count,
-		"the validated transaction's state write must be observed as apply",
-	)
-	assert.Positive(t, sum)
+	return ls
 }

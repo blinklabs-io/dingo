@@ -471,6 +471,7 @@ func TestObserveBlockStageRecordsUnderEachLabel(t *testing.T) {
 	m.observeBlockStage(blockStageEpochRollover, 40*time.Second)
 	m.observeBlockStage(blockStagePrepare, 2*time.Millisecond)
 	m.observeBlockStage(blockStageCommit, 3*time.Millisecond)
+	m.observeBlockStage(blockStageDeferredHeaderVerify, time.Millisecond)
 
 	count, _ := blockStageSampleCount(t, &m, blockStageHeaderVerify)
 	assert.Equal(t, uint64(1), count)
@@ -485,20 +486,22 @@ func TestObserveBlockStageRecordsUnderEachLabel(t *testing.T) {
 	assert.Equal(t, uint64(1), count)
 	count, _ = blockStageSampleCount(t, &m, blockStageCommit)
 	assert.Equal(t, uint64(1), count)
+	count, _ = blockStageSampleCount(t, &m, blockStageDeferredHeaderVerify)
+	assert.Equal(t, uint64(1), count)
 
-	// Six distinct label series, no more.
+	// Seven distinct label series, no more.
 	assert.Equal(
 		t,
-		6,
+		7,
 		testutil.CollectAndCount(m.blockStageDuration),
 	)
 }
 
 // TestObserveBlockStageIgnoresUnknownStage confirms an unrecognized stage
 // label is silently dropped rather than panicking or creating a stray label
-// series. init pre-materializes the six known stage series, so this
+// series. init pre-materializes the seven known stage series, so this
 // checks their sample counts stay zero rather than the series count, which
-// is already 6 regardless of any observation.
+// is already 7 regardless of any observation.
 func TestObserveBlockStageIgnoresUnknownStage(t *testing.T) {
 	t.Parallel()
 
@@ -509,9 +512,9 @@ func TestObserveBlockStageIgnoresUnknownStage(t *testing.T) {
 
 	assert.Equal(
 		t,
-		6,
+		7,
 		testutil.CollectAndCount(m.blockStageDuration),
-		"init pre-materializes exactly the six known stage series",
+		"init pre-materializes exactly the seven known stage series",
 	)
 	for _, stage := range []string{
 		blockStageHeaderVerify,
@@ -520,6 +523,7 @@ func TestObserveBlockStageIgnoresUnknownStage(t *testing.T) {
 		blockStageEpochRollover,
 		blockStagePrepare,
 		blockStageCommit,
+		blockStageDeferredHeaderVerify,
 	} {
 		count, _ := blockStageSampleCount(t, &m, stage)
 		assert.Zerof(
@@ -624,6 +628,9 @@ func TestBlockStageMaxDurationExportsRunningMaximum(t *testing.T) {
 		blockStageValidate,
 		blockStageApply,
 		blockStageEpochRollover,
+		blockStagePrepare,
+		blockStageCommit,
+		blockStageDeferredHeaderVerify,
 	} {
 		assert.Equal(
 			t,
@@ -657,6 +664,9 @@ func TestBlockStageMaxDurationExportsRunningMaximum(t *testing.T) {
 		blockStageHeaderVerify,
 		blockStageValidate,
 		blockStageEpochRollover,
+		blockStagePrepare,
+		blockStageCommit,
+		blockStageDeferredHeaderVerify,
 	} {
 		assert.Equal(
 			t,

@@ -10085,13 +10085,21 @@ func (ls *LedgerState) ledgerProcessBlock(
 		}
 	}
 
-	if err := ls.verifyDeferredBlockHeaderState(ctx, txn, point, block); err != nil {
-		return nil, err
+	deferredHeaderStart := time.Now()
+	headerErr := ls.verifyDeferredBlockHeaderState(ctx, txn, point, block)
+	ls.metrics.observeBlockStage(
+		blockStageDeferredHeaderVerify,
+		time.Since(deferredHeaderStart),
+	)
+	if headerErr != nil {
+		return nil, headerErr
 	}
 	// The aggregate reference-script check and the per-transaction validators
 	// resolve the same inputs, so one prefetch serves both. It runs after any
 	// endorser transactions have applied and before this block's own mutations.
+	// Both are the block-level part of validating it: one validate sample.
 	var prefetchedUtxos map[utxoref.Key]lcommon.Utxo
+	blockValidateStart := time.Now()
 	if shouldValidate {
 		prefetchedUtxos = ls.prefetchBlockUtxos(
 			ctx, txn, block.Transactions(), aheadUtxosFrom(ctx), nil,
@@ -10114,9 +10122,20 @@ func (ls *LedgerState) ledgerProcessBlock(
 			referenceParams,
 			refScriptsLV,
 		)
-		if err := storageFaultOrErr(refScriptsLV, err); err != nil {
+		err = storageFaultOrErr(refScriptsLV, err)
+		if err != nil {
+			ls.metrics.observeBlockStage(
+				blockStageValidate,
+				time.Since(blockValidateStart),
+			)
 			return nil, err
 		}
+	}
+	if shouldValidate {
+		ls.metrics.observeBlockStage(
+			blockStageValidate,
+			time.Since(blockValidateStart),
+		)
 	}
 	// Process transactions
 	// Steady-state, at-tip, validated application refuses to recover an absent
