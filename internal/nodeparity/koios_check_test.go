@@ -214,10 +214,6 @@ func TestCheckStakeDistribution_CacheHitSkipsLiveKoiosCall(t *testing.T) {
 	t.Cleanup(func() { _ = listener.Close() })
 	lsq.serve(t, listener, magic)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	client := dialWiringClient(t, ctx, listener.Addr().String(), magic)
-
 	koiosURL, reqCount := countingKoiosServer(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 	})
@@ -243,6 +239,12 @@ func TestCheckStakeDistribution_CacheHitSkipsLiveKoiosCall(t *testing.T) {
 		ActiveStake: "1000000",
 		FetchedAt:   time.Now().UTC(),
 	}))
+
+	// The deadline starts after cache setup, so it bounds only the dial and
+	// the query: slow SQLite setup cannot expire it before the query runs.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	client := dialWiringClient(t, ctx, listener.Addr().String(), magic)
 
 	mismatches, err := CheckStakeDistribution(ctx, client, koios, cache, "preview", epoch)
 	require.NoError(t, err)
