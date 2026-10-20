@@ -3651,7 +3651,6 @@ func TestLedgerStateConfigValidatesMusashiBlocks(t *testing.T) {
 		ouroboros.NetworkCardanoMusashi,
 		ouroboros.NetworkCardanoPreview,
 	} {
-		network := network
 		t.Run(network.Name, func(t *testing.T) {
 			n := &Node{config: Config{cfg: &internalconfig.Config{
 				Network:      network.Name,
@@ -3695,13 +3694,15 @@ func TestLedgerStateConfigMapsCertificateVerdicts(t *testing.T) {
 			KeyProvider:    startupLeiosKeyProvider{},
 		})
 		require.NoError(t, err)
-		return &Node{
+		n := &Node{
 			config: Config{cfg: &internalconfig.Config{
 				Network:      ouroboros.NetworkCardanoPreview.Name,
 				NetworkMagic: ouroboros.NetworkCardanoPreview.NetworkMagic,
 			}},
 			leiosVoteManager: voteManager,
 		}
+		n.leiosCertificateVerifier.Store(voteManager)
+		return n
 	}
 	signers := []byte{0x80}
 	aggregate := make([]byte, lcommon.LeiosBlsSignatureSize)

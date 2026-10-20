@@ -9755,10 +9755,7 @@ func (ls *LedgerState) strictConsumedInputsEnabled(
 //
 // The bypass applies to Dijkstra-era transactions only.
 // Transactions validated under any earlier era — Conway and before — still run
-// their full rule set even when the prototype flag is set, because the
-// prototype's trust argument (endorser transactions are stored but never
-// applied, so ranking-block transactions that spend endorser-resident outputs
-// are unresolvable) exists only in Dijkstra/Leios. Header validation is
+// their full rule set even when the flag is set. Header validation is
 // likewise unaffected: KES, VRF proof, registered-VRF-key binding and opcert
 // checks all still apply, and only the stake-derived leader threshold is
 // downgraded, by the separate SkipLeaderStakeThresholdCheck flag.

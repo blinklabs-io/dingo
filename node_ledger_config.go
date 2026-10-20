@@ -174,13 +174,14 @@ func (n *Node) ledgerStateConfig() ledger.LedgerStateConfig {
 			signers []byte,
 			aggregatedSignature []byte,
 		) error {
-			if n.leiosVoteManager == nil {
+			voteManager := n.leiosCertificateVerifier.Load()
+			if voteManager == nil {
 				return errors.New("leios vote manager is unavailable")
 			}
 			message := leios.PrototypeVoteMessageBytes(
 				lcommon.Blake2b256(announcingBlockHash),
 			)
-			err := n.leiosVoteManager.ValidateDijkstraCertificate(
+			err := voteManager.ValidateDijkstraCertificate(
 				epoch,
 				signers,
 				aggregatedSignature,
