@@ -4287,7 +4287,7 @@ func TestIsTrustedNtCListener(t *testing.T) {
 // TestConfigureListeners_UntrustedNtCListenerSkipsRelaxedTimeout covers the
 // actual fix, not just the trust decision in isolation: a UseNtC listener
 // ConfigureListeners cannot verify is local-only must not have
-// WithMuxerSegmentReadTimeout(0) among its ConnectionOpts at all, so
+// the extended mux read-idle deadline among its ConnectionOpts, so
 // gouroboros' own 120s default mux segment-read timeout stays in force for
 // it. There is no exported way to inspect a built ouroboros.ConnectionOptionFunc
 // slice's effect directly, so this counts the length of ConnectionOpts a
@@ -4325,7 +4325,7 @@ func TestConfigureListeners_UntrustedNtCListenerSkipsRelaxedTimeout(
 		len(configured[1].ConnectionOpts)+1,
 		"an untrusted NtC listener must receive exactly one fewer "+
 			"ConnectionOpts entry than a trusted one -- the omitted "+
-			"WithMuxerSegmentReadTimeout(0)",
+			"extended mux read-idle deadline",
 	)
 }
 
