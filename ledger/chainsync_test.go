@@ -171,7 +171,7 @@ func TestAwaitChainsyncHeaderCapacityBoundsAdmittedWork(t *testing.T) {
 	testutil.RequireReceive(
 		t,
 		waiting,
-		5*time.Second,
+		testutil.AsyncWait,
 		"capacity gate never paused at the bounded threshold",
 	)
 	testutil.RequireNoReceive(
