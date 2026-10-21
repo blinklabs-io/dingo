@@ -20,6 +20,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -28,7 +29,11 @@ import (
 	"github.com/blinklabs-io/dingo/database/types"
 )
 
-const offchainFetchClaimLease = 30 * time.Minute
+const (
+	offchainFetchClaimLease           = 30 * time.Minute
+	offchainPointerDiscoveryBatchSize = 64
+	offchainPointerDiscoveryCursorKey = "offchain-metadata-discovery:"
+)
 
 type offchainPointerSource struct {
 	sourceType string
@@ -100,13 +105,38 @@ func (s *Store) EnsureOffchainMetadataPointers(
 	}
 	q := s.operationalQueries(db)
 	created := 0
-	seen := make(map[string]struct{})
 	for _, source := range offchainPointerSources {
-		query := "SELECT " + source.urlColumn + ", " + source.hashColumn +
+		cursorKey := offchainPointerDiscoveryCursorKey + source.sourceType
+		rawCursor, err := q.GetSyncState(ctx, cursorKey)
+		if errors.Is(err, sql.ErrNoRows) {
+			rawCursor = ""
+		} else if err != nil {
+			return created, fmt.Errorf(
+				"read off-chain metadata discovery cursor for %s: %w",
+				source.table,
+				err,
+			)
+		}
+		var cursor int64
+		if rawCursor != "" {
+			cursor, err = strconv.ParseInt(rawCursor, 10, 64)
+			if err != nil || cursor < 0 {
+				return created, fmt.Errorf(
+					"invalid off-chain metadata discovery cursor for %s: %q",
+					source.table,
+					rawCursor,
+				)
+			}
+		}
+		query := "SELECT id, " + source.urlColumn + ", " + source.hashColumn +
 			" FROM " + source.table +
-			" WHERE " + source.urlColumn + " <> ''" +
-			" GROUP BY " + source.urlColumn + ", " + source.hashColumn
-		rows, err := db.QueryContext(ctx, query)
+			" WHERE id > ? ORDER BY id LIMIT ?"
+		rows, err := db.QueryContext(
+			ctx,
+			s.dialect.Rebind(query),
+			cursor,
+			offchainPointerDiscoveryBatchSize,
+		)
 		if err != nil {
 			return created, fmt.Errorf(
 				"query off-chain metadata pointers from %s: %w",
@@ -115,18 +145,20 @@ func (s *Store) EnsureOffchainMetadataPointers(
 			)
 		}
 		type pointer struct {
+			id   int64
 			url  string
 			hash []byte
 		}
-		pointers := make([]pointer, 0)
+		pointers := make([]pointer, 0, offchainPointerDiscoveryBatchSize)
 		for rows.Next() {
+			var id int64
 			var url string
 			var hash []byte
-			if err := rows.Scan(&url, &hash); err != nil {
+			if err := rows.Scan(&id, &url, &hash); err != nil {
 				rows.Close()
 				return created, err
 			}
-			pointers = append(pointers, pointer{url: url, hash: hash})
+			pointers = append(pointers, pointer{id: id, url: url, hash: hash})
 		}
 		if err := rows.Close(); err != nil {
 			return created, err
@@ -135,18 +167,14 @@ func (s *Store) EnsureOffchainMetadataPointers(
 			return created, err
 		}
 		for _, row := range pointers {
+			cursor = row.id
 			url := row.url
 			hash := row.hash
 			url = strings.TrimSpace(url)
 			if url == "" || len(hash) != 32 {
 				continue
 			}
-			key := source.sourceType + "\x00" + url + "\x00" + string(hash)
-			if _, ok := seen[key]; ok {
-				continue
-			}
-			seen[key] = struct{}{}
-			createdAt := time.Now()
+			createdAt := now
 			affected, err := q.InsertOffchainMetadataPointer(
 				ctx,
 				sqlitequery.InsertOffchainMetadataPointerParams{
@@ -176,6 +204,21 @@ func (s *Store) EnsureOffchainMetadataPointers(
 				)
 			}
 			created += int(affected)
+		}
+		if len(pointers) > 0 {
+			if err := q.SetSyncState(
+				ctx,
+				sqlitequery.SetSyncStateParams{
+					SyncKey: cursorKey,
+					Value:   strconv.FormatInt(cursor, 10),
+				},
+			); err != nil {
+				return created, fmt.Errorf(
+					"save off-chain metadata discovery cursor for %s: %w",
+					source.table,
+					err,
+				)
+			}
 		}
 	}
 	return created, nil

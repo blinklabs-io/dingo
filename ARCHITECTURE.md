@@ -2852,6 +2852,10 @@ as a background worker. The worker asks the metadata store to discover on-chain
 URL/hash pointers from pool registrations, DRep anchors, governance
 proposal/vote anchors, constitutions, and committee resignations. It then fetches
 due rows asynchronously into the `offchain_metadata` table.
+Discovery reads at most 64 rows from each source table per pass and records the
+last source-row ID under `offchain-metadata-discovery:<source type>` in
+`sync_state`. A restart resumes those keyset scans, so accumulated chain history
+cannot make one worker pass materialize every pointer in memory.
 
 Fetched content is never fed back into consensus or ledger validation. The
 on-chain Blake2b-256 hash remains authoritative: fetched bytes are stored as
