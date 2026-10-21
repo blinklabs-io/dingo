@@ -1,4 +1,4 @@
-# This image bundles Go 1.26.7; go.mod's toolchain is pinned to 1.26.9.
+# This image bundles Go 1.26.7; go.mod's toolchain is pinned to 1.26.10.
 # GOTOOLCHAIN is `auto` in this image, so the build fetches the patched toolchain
 # instead of using the bundled compiler. Update this tag when blinklabs-io/
 # docker-go publishes a matching image; never lower the module toolchain to
