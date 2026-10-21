@@ -963,7 +963,11 @@ func (h *databaseServiceHandler) cloudSnapshotExists(
 // resolveSnapshotSource resolves snapshotID to wherever it can actually be
 // read from for Restore/VerifySnapshot: its local directory if a valid
 // manifest exists there, otherwise the configured cloud destination if a
-// copy exists there. This is what lets a snapshot ListAvailableSnapshots
+// copy exists there. The local manifest is read with the configured trust
+// key, so a checksum-valid manifest whose authentication fails is not
+// chosen: that integrity failure is logged and the cloud mirror of the same
+// ID is used only if it authenticates on its own, and an error naming both
+// failures is returned otherwise. This is what lets a snapshot ListAvailableSnapshots
 // surfaced as cloud-only (its local copy deleted or pruned) actually be
 // restored/verified through bark, not just the offline CLI. Returns
 // CodeNotFound if the snapshot exists in neither place.
@@ -975,9 +979,16 @@ func (h *databaseServiceHandler) resolveSnapshotSource(
 	if err != nil {
 		return "", err
 	}
-	_, localErr := lifecycle.ReadManifest(localDir)
+	manifestOpts, err := h.cloudManifestOptions()
+	if err != nil {
+		return "", err
+	}
+	_, localErr := lifecycle.ReadManifest(localDir, manifestOpts...)
 	if localErr == nil {
 		return localDir, nil
+	}
+	if errors.Is(localErr, lifecycle.ErrManifestUnauthenticated) {
+		return h.resolveCloudAfterLocalAuthFailure(ctx, snapshotID, localErr)
 	}
 	if errors.Is(localErr, lifecycle.ErrManifestTooLarge) {
 		return "", connect.NewError(
@@ -1026,6 +1037,42 @@ func (h *databaseServiceHandler) resolveSnapshotSource(
 		fmt.Errorf(
 			"snapshot %q not found locally or in the configured cloud destination",
 			snapshotID,
+		),
+	)
+}
+
+// resolveCloudAfterLocalAuthFailure handles a local manifest that failed
+// trust-key authentication. The failure is logged, and the cloud mirror of
+// the same ID is returned only when its manifest authenticates
+// independently; otherwise the error names both the local and the cloud
+// outcome. An unauthenticated local copy is never returned as the source.
+func (h *databaseServiceHandler) resolveCloudAfterLocalAuthFailure(
+	ctx context.Context,
+	snapshotID string,
+	localErr error,
+) (string, error) {
+	logger := h.bark.config.Logger
+	logger.Error(
+		"local snapshot failed manifest authentication",
+		"component", "bark", "snapshot_id", snapshotID, "error", localErr,
+	)
+	cloudURI, exists, cloudErr := h.cloudSnapshotExists(ctx, snapshotID)
+	if cloudErr == nil && exists {
+		logger.Warn(
+			"using cloud mirror of snapshot whose local copy failed authentication",
+			"component", "bark", "snapshot_id", snapshotID,
+		)
+		return cloudURI, nil
+	}
+	cloudOutcome := errors.New("no copy in the configured cloud destination")
+	if cloudErr != nil {
+		cloudOutcome = fmt.Errorf("cloud copy failed authentication or could not be read: %w", cloudErr)
+	}
+	return "", connect.NewError(
+		connect.CodeDataLoss,
+		fmt.Errorf(
+			"snapshot %q local copy failed authentication: %w; cloud mirror unusable: %w",
+			snapshotID, localErr, cloudOutcome,
 		),
 	)
 }
