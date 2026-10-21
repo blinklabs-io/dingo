@@ -180,8 +180,8 @@ func TestExecutableReleaseInputsPinned(t *testing.T) {
 		"expected=h1:bVV5ZAuwaREn4klRSJusYaA+A7NXq8Qi9C/knCaQ2N4=",
 		"antithesis-sdk-go@${version}",
 		"antithesis-go-instrumentor@${version}",
-		"snapshot.debian.org/archive/debian/20261005T000000Z",
-		"snapshot.debian.org/archive/debian-security/20261005T000000Z",
+		"snapshot.debian.org/archive/debian/20261020T000000Z",
+		"snapshot.debian.org/archive/debian-security/20261020T000000Z",
 		"sha256sum --check --strict -",
 	}
 	for _, expected := range antithesisExpected {
