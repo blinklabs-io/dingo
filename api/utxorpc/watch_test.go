@@ -41,7 +41,7 @@ type watchTxLedgerStateProbe struct {
 	blockByHash func([]byte) (models.Block, error)
 }
 
-func (p *watchTxLedgerStateProbe) BlockByHash(
+func (p *watchTxLedgerStateProbe) BlockByHashIncludingRolledBack(
 	_ context.Context,
 	hash []byte,
 ) (models.Block, error) {
@@ -496,7 +496,7 @@ type securityParamProbe struct {
 
 func (p *securityParamProbe) SecurityParam() int { return p.k }
 
-func (p *securityParamProbe) BlockByHash(
+func (p *securityParamProbe) BlockByHashIncludingRolledBack(
 	_ context.Context,
 	hash []byte,
 ) (models.Block, error) {

@@ -15,9 +15,7 @@
 package utxorpc
 
 import (
-	"bytes"
 	"context"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -163,8 +161,10 @@ func TestWatchTxHistoryTracker_BlockCountStillApplies(t *testing.T) {
 }
 
 // End to end: when the byte cap evicts a block's undo entry, a later rollback
-// of that block must still produce its Undo messages, by rebuilding them from
-// persisted blocks.
+// of that block must still produce its Undo messages. The rolled-back block is
+// already deleted from the database by then, so the rebuild has to find it in
+// the chain manager's cache of rolled-back blocks. The ledger state is real:
+// nothing here substitutes the block lookup.
 func TestConnect_WatchTx_EvictedHistoryRollbackRebuildsFromBlocks(
 	t *testing.T,
 ) {
@@ -187,21 +187,8 @@ func TestConnect_WatchTx_EvictedHistoryRollbackRebuildsFromBlocks(
 	undoCount := requireFixtureWatchTxAppliedCount(t, blocks[txIdx])
 	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{blocks: blocks})
 	// One byte retains no transaction-bearing entry, so the rollback below
-	// can only be answered by rebuilding from persisted blocks.
+	// can only be answered by rebuilding from stored blocks.
 	h.U.config.MaxWatchHistoryBytes = 1
-	// A rolled-back block is gone from the live chain, so serve it from the
-	// fixture the way the persisted store would.
-	var reads atomic.Int32
-	h.U.config.LedgerState = &watchTxLedgerStateProbe{
-		UtxorpcLedgerState: h.LS,
-		blockByHash: func(hash []byte) (models.Block, error) {
-			reads.Add(1)
-			if bytes.Equal(hash, blocks[txIdx].Hash) {
-				return blocks[txIdx], nil
-			}
-			return h.LS.BlockByHash(context.Background(), hash)
-		},
-	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -220,12 +207,44 @@ func TestConnect_WatchTx_EvictedHistoryRollbackRebuildsFromBlocks(
 			blocks[txIdx-1].Hash,
 		)),
 	)
+	// The rollback deleted the block from the database.
+	_, err := h.LS.BlockByHash(context.Background(), blocks[txIdx].Hash)
+	require.ErrorIs(t, err, models.ErrBlockNotFound)
+
 	requireWatchTxUndos(t, stream, undoCount)
-	require.NotZero(
+}
+
+// If a rolled-back block cannot be found at all, the stream must fail rather
+// than end the rebuild early and leave the client on the abandoned chain.
+func TestConnect_WatchTx_UnavailableRolledBackBlockFailsStream(t *testing.T) {
+	scan := loadTestChainBlocksWithPeriodicTransactions(t, 80)
+	start := findEmptyFixtureRun(t, scan, 2)
+	blocks := scan[:start+2]
+	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{blocks: blocks})
+	// No entry is retained, so the rollback needs the rebuild path.
+	h.U.config.MaxWatchHistoryBytes = 1
+	h.U.config.LedgerState = &watchTxLedgerStateProbe{
+		UtxorpcLedgerState: h.LS,
+		blockByHash: func([]byte) (models.Block, error) {
+			return models.Block{}, models.ErrBlockNotFound
+		},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	stream := startWatchTxAt(t, ctx, h, blocks[start-1])
+	requireWatchTxIdle(t, stream)
+	requireWatchTxIdle(t, stream)
+
+	require.NoError(
 		t,
-		reads.Load(),
-		"undo was not rebuilt from persisted blocks",
+		h.LS.Chain().Rollback(context.Background(), ocommon.NewPoint(
+			blocks[start-1].Slot,
+			blocks[start-1].Hash,
+		)),
 	)
+	require.False(t, stream.Receive())
+	require.ErrorContains(t, stream.Err(), "is unavailable")
 }
 
 // End to end: after a rollback removes entries from a stream's undo history,

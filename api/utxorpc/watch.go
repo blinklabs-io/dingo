@@ -166,10 +166,24 @@ func (s *watchServiceServer) watchTxFetchRollbackUndoFromBlocks(
 		if len(hash) == 0 {
 			return out, nil
 		}
-		block, err := s.utxorpc.config.LedgerState.BlockByHash(ctx, hash)
+		// The blocks being undone were just rolled back, so they are no
+		// longer in the database; the lookup also reads the chain
+		// manager's cache of rolled-back blocks.
+		block, err := s.utxorpc.config.LedgerState.BlockByHashIncludingRolledBack(
+			ctx,
+			hash,
+		)
 		if err != nil {
 			if errors.Is(err, models.ErrBlockNotFound) {
-				return out, nil
+				// Ending the walk here would send the client fewer Undo
+				// messages than the rollback needs and leave it on the
+				// abandoned chain with no sign of it, so fail the stream
+				// and let the client resume from its own intersect.
+				return nil, fmt.Errorf(
+					"rolled-back block %x is unavailable: %w",
+					hash,
+					err,
+				)
 			}
 			return nil, err
 		}
