@@ -930,7 +930,7 @@ func (d *Database) UtxosWithHistoryBounded(
 	txn *Txn,
 ) ([]models.UtxoWithHistory, int, error) {
 	if maxCandidates < 0 {
-		return nil, 0, fmt.Errorf("maxCandidates must not be negative")
+		return nil, 0, errors.New("maxCandidates must not be negative")
 	}
 	return d.utxosWithHistory(q, maxCandidates, txn)
 }
@@ -1015,6 +1015,17 @@ func (d *Database) utxosWithHistory(
 		remaining := q.Limit - len(ret)
 		if len(filtered) > remaining {
 			filtered = filtered[:remaining]
+			// A paging caller resumes after the last returned match and reads
+			// the rest of this batch again, so charging those rows here would
+			// count them twice against a budget shared across pages.
+			keep := filtered[len(filtered)-1]
+			for i := len(batch) - 1; i >= 0; i-- {
+				if batch[i].OutputIdx == keep.OutputIdx &&
+					bytes.Equal(batch[i].TxId, keep.TxId) {
+					candidates -= len(batch) - 1 - i
+					break
+				}
+			}
 		}
 		ret = append(ret, filtered...)
 		if len(batch) < scanQuery.Limit || len(batch) == 0 {
