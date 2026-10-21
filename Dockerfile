@@ -59,8 +59,8 @@ FROM debian:bookworm-slim@sha256:7ff6ba31527b9e336162fa061746c366c4b2032f4d2cff2
 # (and re-verify pg_restore against every currently-supported server
 # version, not just the newest) if that becomes a real requirement.
 RUN sed -i \
-    -e 's|http://deb.debian.org/debian-security|http://snapshot.debian.org/archive/debian-security/20261005T000000Z|g' \
-    -e 's|http://deb.debian.org/debian|http://snapshot.debian.org/archive/debian/20261005T000000Z|g' \
+    -e 's|http://deb.debian.org/debian-security|http://snapshot.debian.org/archive/debian-security/20261020T000000Z|g' \
+    -e 's|http://deb.debian.org/debian|http://snapshot.debian.org/archive/debian/20261020T000000Z|g' \
     /etc/apt/sources.list.d/debian.sources && \
   apt-get -o Acquire::Check-Valid-Until=false update -y && \
   apt-get install -y --no-install-recommends \
