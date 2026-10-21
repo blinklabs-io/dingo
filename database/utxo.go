@@ -20,6 +20,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -1019,9 +1020,9 @@ func (d *Database) utxosWithHistory(
 			// the rest of this batch again, so charging those rows here would
 			// count them twice against a budget shared across pages.
 			keep := filtered[len(filtered)-1]
-			for i := len(batch) - 1; i >= 0; i-- {
-				if batch[i].OutputIdx == keep.OutputIdx &&
-					bytes.Equal(batch[i].TxId, keep.TxId) {
+			for i, u := range slices.Backward(batch) {
+				if u.OutputIdx == keep.OutputIdx &&
+					bytes.Equal(u.TxId, keep.TxId) {
 					candidates -= len(batch) - 1 - i
 					break
 				}
