@@ -91,6 +91,8 @@ func (s *Store) SetGenesisStakingWithDeposits(
 			registration.LeiosKeyPossessionProof = append(
 				[]byte(nil), certificate.LeiosKey.PossessionProof...,
 			)
+			genesisEpoch := genesisLeiosKeyEpoch
+			registration.LeiosKeyRegistrationEpoch = &genesisEpoch
 		}
 		if certificate.PoolMetadata != nil {
 			registration.MetadataUrl = certificate.PoolMetadata.Url

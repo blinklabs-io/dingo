@@ -23,6 +23,12 @@ import (
 	"sort"
 )
 
+// genesisLeiosKeyEpoch is the epoch the ledger registers genesis pools' BLS
+// keys in: mkStakePoolState (nesEL nes) SNothing, with an initial nesEL of
+// epoch 0 (cardano-ledger 9df9f98c, Shelley/Transition.hs: initialEpochNo and
+// the staking injection using nesELL).
+const genesisLeiosKeyEpoch uint64 = 0
+
 // leiosKeyState is the BLS key a pool holds and the epoch it was registered
 // in, which is the ledger's BlsKeyState. A nil epoch is an epoch the database
 // cannot establish: the key came from a snapshot that did not carry it.
@@ -213,7 +219,7 @@ SELECT pr.added_slot, `+fmt.Sprintf(executionSlot, "pr", "pr")+`,
        `+poolRegistrationBlockIndex+`, COALESCE(c.cert_index, 0),
        pr.certificate_id, pr.registration_index,
        pr.leios_key_public, pr.leios_key_possession_proof,
-       pr.leios_key_registration_epoch
+       pr.leios_key_registration_epoch, pr.leios_key_registration_age_unknown
 FROM pool_registration pr
 LEFT JOIN certs c ON c.id = pr.certificate_id
 WHERE pr.pool_id = ?
@@ -231,10 +237,11 @@ WHERE pr.pool_id = ?
 			registrationIndex                  uint
 			public, proof                      []byte
 			epoch                              sql.NullInt64
+			ageUnknown                         bool
 		)
 		if err := rows.Scan(
 			&addedSlot, &exec, &blockIdx, &certIdx, &certificateID,
-			&registrationIndex, &public, &proof, &epoch,
+			&registrationIndex, &public, &proof, &epoch, &ageUnknown,
 		); err != nil {
 			rows.Close()
 			return nil, err
@@ -251,8 +258,15 @@ WHERE pr.pool_id = ?
 		}
 		if len(public) > 0 && len(proof) > 0 {
 			event.state = &leiosKeyState{public: public, proof: proof}
-			if event.snapshot && epoch.Valid {
+			switch {
+			case event.snapshot && epoch.Valid:
 				value := uint64(epoch.Int64)
+				event.state.epoch = &value
+			case event.snapshot && !ageUnknown:
+				// A keyed row with no certificate, no epoch and a known
+				// age is a genesis pool written before genesis recorded its
+				// epoch. Imports of unknown age are marked age_unknown.
+				value := genesisLeiosKeyEpoch
 				event.state.epoch = &value
 			}
 		}
