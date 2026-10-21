@@ -1089,7 +1089,9 @@ func replayChainBlocksAheadOfLedger(
 		)
 	}
 	defer iter.Cancel()
-	verifyCfg := lcommon.VerifyConfig{SkipBodyHashValidation: true}
+	// The blob-only copy never decoded these blocks, so verify their body
+	// hashes here as the immutable copy does.
+	verifyCfg := lcommon.VerifyConfig{}
 	var replayed int
 	for done := false; !done; {
 		batch := make([]gledger.Block, 0, loadBlockBatchSize)
