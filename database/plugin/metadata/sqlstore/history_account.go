@@ -383,30 +383,57 @@ func (s *Store) GetAccountAddressTotals(
 	}
 	ret.ReceivedAssets = sortedAssetQuantities(received)
 	ret.SentAssets = sortedAssetQuantities(sent)
-	// A transaction either creates or spends an output the lovelace sums
-	// already bounded, so twice that bound covers every distinct one.
-	txQuery := `SELECT COUNT(*) FROM (SELECT DISTINCT transaction_id
-FROM address_transaction
-WHERE credential_tag = ? AND staking_key = ?`
-	txArgs := []any{credentialTag, stakingKey}
-	if limits.MaxUtxos > 0 {
-		txQuery += " LIMIT ?"
-		txArgs = append(txArgs, 2*limits.MaxUtxos+1)
+	// Each output the lovelace sums admitted is created by one transaction
+	// and spent by at most one, so twice MaxUtxos covers those. A transaction
+	// that only names an output as a reference or unspent collateral input is
+	// recorded too and can push the count past it; that is refused, not
+	// counted.
+	maxTxs := 2 * limits.MaxUtxos
+	countLimit := 0
+	if maxTxs > 0 {
+		countLimit = maxTxs + 1
 	}
-	txQuery += ") distinct_transactions"
-	if err := db.QueryRowContext(ctx, txQuery, txArgs...).Scan(
-		&ret.TxCount,
-	); err != nil {
+	txCount, err := countAccountTransactions(
+		ctx, db, credentialTag, stakingKey, countLimit,
+	)
+	if err != nil {
 		return ret, fmt.Errorf("count account transactions: %w", err)
 	}
-	if limits.MaxUtxos > 0 && ret.TxCount > 2*limits.MaxUtxos {
+	if maxTxs > 0 && txCount > maxTxs {
 		return ret, fmt.Errorf(
 			"more than %d transactions: %w",
-			2*limits.MaxUtxos,
+			maxTxs,
 			models.ErrAccountAggregateLimit,
 		)
 	}
+	ret.TxCount = txCount
 	return ret, nil
+}
+
+// countAccountTransactions counts the distinct transactions recorded against
+// a credential. A positive limit caps the distinct ids the database reads,
+// so the result is then at most limit.
+func countAccountTransactions(
+	ctx context.Context,
+	db queryer,
+	credentialTag uint8,
+	stakingKey []byte,
+	limit int,
+) (int, error) {
+	query := `SELECT COUNT(*) FROM (SELECT DISTINCT transaction_id
+FROM address_transaction
+WHERE credential_tag = ? AND staking_key = ?`
+	args := []any{credentialTag, stakingKey}
+	if limit > 0 {
+		query += " LIMIT ?"
+		args = append(args, limit)
+	}
+	query += ") distinct_transactions"
+	var count int
+	if err := db.QueryRowContext(ctx, query, args...).Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
 }
 
 func sortedAssetQuantities(

@@ -16,6 +16,9 @@ package sqlstore
 
 import (
 	"bytes"
+	"context"
+	"database/sql"
+	"math/big"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -173,4 +176,134 @@ func TestGetAccountAggregatesWithinLimits(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "1000000", totals.ReceivedLovelace.String())
 	require.Len(t, totals.ReceivedAssets, 2)
+}
+
+// statementRowsQueryer records, for every query it serves, how many rows the
+// statement yields when read to the end. A Go-side row check stops the scan
+// on SQLite whatever the SQL says, but PostgreSQL and MySQL drivers drain the
+// rest of a result set on close, so only the statement's own LIMIT bounds
+// what the database produces and sends.
+type statementRowsQueryer struct {
+	queryer
+	t    *testing.T
+	rows []int
+}
+
+func (q *statementRowsQueryer) QueryContext(
+	ctx context.Context,
+	query string,
+	args ...any,
+) (*sql.Rows, error) {
+	var n int
+	require.NoError(q.t, q.queryer.QueryRowContext(
+		ctx, "SELECT COUNT(*) FROM ("+query+") counted", args...,
+	).Scan(&n))
+	q.rows = append(q.rows, n)
+	return q.queryer.QueryContext(ctx, query, args...)
+}
+
+func TestAccountAggregateLimits(t *testing.T) {
+	t.Parallel()
+	testAccountAggregateLimits(t, newMigratedSQLiteStore(t))
+}
+
+// testAccountAggregateLimits runs the account aggregate bounds against any
+// dialect: five UTxOs holding two assets each, and twelve transactions.
+func testAccountAggregateLimits(t *testing.T, store *Store) {
+	t.Helper()
+	ctx := context.Background()
+	stakingKey := bytes.Repeat([]byte{0x57}, 28)
+	policy := bytes.Repeat([]byte{0x58}, 28)
+	var utxos []models.Utxo
+	for i := range 5 {
+		held := accountLimitsUtxo(t, byte(0x10+i), stakingKey)
+		held.Assets = []models.Asset{
+			{PolicyId: policy, Name: []byte{'a' + byte(i)}, Amount: 1},
+			{PolicyId: policy, Name: []byte{'k' + byte(i)}, Amount: 2},
+		}
+		utxos = append(utxos, held)
+	}
+	require.NoError(t, store.ImportUtxos(utxos, nil))
+	for i := range 12 {
+		_, err := store.writeDB.ExecContext(ctx, store.dialect.Rebind(
+			`INSERT INTO address_transaction
+    (staking_key, credential_tag, transaction_id, slot, tx_index)
+VALUES (?, 0, ?, ?, 0)`), stakingKey, 1000+i, 1000+i)
+		require.NoError(t, err)
+	}
+
+	t.Run("statements stop one row past the bound", func(t *testing.T) {
+		db := &statementRowsQueryer{
+			queryer: store.instrumentedQueryer(store.readDB),
+			t:       t,
+		}
+		_, err := sumSignedRowsBounded(
+			ctx, db,
+			`SELECT amount FROM utxo WHERE credential_tag = ? AND staking_key = ?`,
+			2, models.ErrAccountAggregateLimit, uint8(0), stakingKey,
+		)
+		require.ErrorIs(t, err, models.ErrAccountAggregateLimit)
+		err = accountAssetRows(
+			ctx, db, 0, stakingKey, false, "asc", 2,
+			func([]byte, []byte, *big.Int, bool) error { return nil },
+		)
+		require.ErrorIs(t, err, models.ErrAccountAggregateLimit)
+		require.Equal(t, []int{3, 3}, db.rows)
+
+		count, err := countAccountTransactions(ctx, db, 0, stakingKey, 4)
+		require.NoError(t, err)
+		require.Equal(t, 4, count)
+		count, err = countAccountTransactions(ctx, db, 0, stakingKey, 0)
+		require.NoError(t, err)
+		require.Equal(t, 12, count)
+	})
+
+	t.Run("within the bounds", func(t *testing.T) {
+		limits := models.AccountAggregateLimits{
+			MaxUtxos: 6, MaxAssetRows: 10, MaxAssets: 10,
+		}
+		balances, total, err := store.GetAccountAssetBalances(
+			0, stakingKey, 3, 0, "desc", limits, nil,
+		)
+		require.NoError(t, err)
+		require.Equal(t, 10, total)
+		var names []string
+		for _, balance := range balances {
+			names = append(names, string(balance.Name))
+		}
+		require.Equal(t, []string{"o", "n", "m"}, names)
+
+		totals, err := store.GetAccountAddressTotals(
+			0, stakingKey, limits, nil,
+		)
+		require.NoError(t, err)
+		require.Equal(t, "5000000", totals.ReceivedLovelace.String())
+		require.Len(t, totals.ReceivedAssets, 10)
+		require.Equal(t, 12, totals.TxCount)
+	})
+
+	for name, limits := range map[string]models.AccountAggregateLimits{
+		"utxos":        {MaxUtxos: 4},
+		"transactions": {MaxUtxos: 5},
+		"asset rows":   {MaxAssetRows: 9},
+		"assets":       {MaxAssets: 9},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := store.GetAccountAddressTotals(
+				0, stakingKey, limits, nil,
+			)
+			require.ErrorIs(t, err, models.ErrAccountAggregateLimit)
+		})
+	}
+	for name, limits := range map[string]models.AccountAggregateLimits{
+		"asset rows": {MaxAssetRows: 9},
+		"assets":     {MaxAssets: 9},
+	} {
+		t.Run("balances "+name, func(t *testing.T) {
+			_, _, err := store.GetAccountAssetBalances(
+				0, stakingKey, 3, 0, "asc", limits, nil,
+			)
+			require.ErrorIs(t, err, models.ErrAccountAggregateLimit)
+		})
+	}
 }
