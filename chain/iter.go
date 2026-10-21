@@ -59,15 +59,7 @@ func newChainIteratorWithContext(
 	if parentCtx == nil {
 		return nil, errors.New("chain iterator context is nil")
 	}
-	iterCtx, cancel := context.WithCancel(parentCtx)
-	ci := &ChainIterator{
-		chain:          chain,
-		startPoint:     startPoint,
-		nextBlockIndex: initialBlockIndex,
-		reverse:        reverse,
-		ctx:            iterCtx,
-		cancel:         cancel,
-	}
+	startBlockIndex := initialBlockIndex
 	// Lookup start block in metadata DB if not origin
 	if startPoint.Slot > 0 || len(startPoint.Hash) > 0 {
 		tmpBlock, err := chain.BlockByPoint(ctx, startPoint, nil)
@@ -87,32 +79,56 @@ func newChainIteratorWithContext(
 		// over (blockfetch answers NoBlocks).
 		if !chain.holdsBlockAtIndex(ctx, tmpBlock.ID, startPoint.Hash) {
 			if err := ctx.Err(); err != nil {
-				cancel()
 				return nil, err
 			}
 			return nil, models.ErrBlockNotFound
 		}
-		ci.nextBlockIndex = tmpBlock.ID
-		if !inclusive {
-			if reverse {
-				// Walking backward: the first block returned must
-				// precede startPoint.
-				if ci.nextBlockIndex <= initialBlockIndex {
-					// Non-inclusive reverse from the first block has
-					// no predecessor; mark as already past origin.
-					ci.nextBlockIndex = 0
-				} else {
-					ci.nextBlockIndex--
-				}
-			} else {
-				ci.nextBlockIndex++
-			}
-		}
-	} else if reverse {
+		startBlockIndex = tmpBlock.ID
+	}
+	return newChainIteratorAtIndex(
+		parentCtx,
+		chain,
+		startPoint,
+		startBlockIndex,
+		inclusive,
+		reverse,
+	), nil
+}
+
+// newChainIteratorAtIndex constructs an iterator after the caller has verified
+// that startBlockIndex is the active index entry for startPoint.
+func newChainIteratorAtIndex(
+	parentCtx context.Context,
+	chain *Chain,
+	startPoint ocommon.Point,
+	startBlockIndex uint64,
+	inclusive bool,
+	reverse bool,
+) *ChainIterator {
+	iterCtx, cancel := context.WithCancel(parentCtx)
+	ci := &ChainIterator{
+		chain:          chain,
+		startPoint:     startPoint,
+		nextBlockIndex: startBlockIndex,
+		reverse:        reverse,
+		ctx:            iterCtx,
+		cancel:         cancel,
+	}
+	if startPoint.Slot == 0 && len(startPoint.Hash) == 0 && reverse {
 		// Reverse iteration from origin has no blocks to deliver.
 		ci.nextBlockIndex = 0
+	} else if (startPoint.Slot > 0 || len(startPoint.Hash) > 0) && !inclusive {
+		if reverse {
+			if ci.nextBlockIndex <= initialBlockIndex {
+				ci.nextBlockIndex = 0
+			} else {
+				ci.nextBlockIndex--
+			}
+		} else {
+			ci.nextBlockIndex++
+		}
 	}
-	return ci, nil
+	return ci
 }
 
 func (ci *ChainIterator) startCancelWatcher() {

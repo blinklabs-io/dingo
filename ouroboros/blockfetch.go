@@ -54,6 +54,11 @@ const blockfetchMaxBlocksFloor = 10 * ledger.BlockfetchBatchSize
 // expected size of outstanding pipelined block-fetch ranges.
 const blockfetchMaxInFlightBytes = 3 * ledger.BlockfetchMaxRangeBytes
 
+// blockfetchMaxConcurrentPointLookups bounds point validation across all
+// peers. A saturated server answers NoBlocks before opening another database
+// transaction.
+const blockfetchMaxConcurrentPointLookups = 32
+
 // maxBlockFetchBlocksForSecurityParam returns the maximum number of blocks
 // served for a single BlockFetch range request. The bound is on the actual
 // resource cost (blocks iterated and sent) rather than on slot distance: on
@@ -100,33 +105,17 @@ var errBlockfetchRangeExceededMaxBlocks = errors.New(
 	"blockfetch range exceeded maximum block count",
 )
 
-// blockfetchMaxConsecutiveNoBlocks is the number of consecutive NoBlocks
-// responses for the same (connId, start) tuple before closing the connection.
-//
-// "Consecutive" is strict: blockfetchRecordNoBlocks restarts the count at 1
-// when the start point differs from the last one recorded, and every
-// successfully validated range request from that peer calls
-// blockfetchResetNoBlocks. The valve therefore fires only for a peer stuck
-// re-requesting one point it has been told we do not have, and stays silent
-// when a peer asks for a handful of different unavailable points among normal
-// traffic — which is what a tip slot battle produces, where both sides roll
-// their own block back and briefly ask each other for a body neither still
-// has. Not firing there is intended: those are healthy peers.
+// blockfetchMaxConsecutiveNoBlocks is the number of failed range lookups one
+// connection may make without a successful range between them. The allowance
+// covers the few different unavailable points a healthy tip race can produce,
+// while rotating the requested point cannot reset the budget.
 const blockfetchMaxConsecutiveNoBlocks = 5
 
 // blockfetchServerSendDrainTimeout is the maximum time the range server waits
 // for the underlying protocol send queue to drain between blockfetch messages.
 const blockfetchServerSendDrainTimeout = 60 * time.Second
 
-// blockfetchNoBlocksPoint identifies the start point used by the last
-// NoBlocks response tracked for a connection.
-type blockfetchNoBlocksPoint struct {
-	Slot uint64
-	Hash string
-}
-
 type blockfetchNoBlocksState struct {
-	Point blockfetchNoBlocksPoint
 	Count int
 }
 
@@ -383,6 +372,23 @@ func (o *Ouroboros) blockfetchServerRequestRange(
 			release()
 		}
 	}()
+	select {
+	case o.blockfetchLookupSlots <- struct{}{}:
+		defer func() { <-o.blockfetchLookupSlots }()
+	default:
+		o.config.Logger.Debug(
+			"blockfetch: point lookup admission saturated, sending NoBlocks",
+			"connection_id", ctx.ConnectionId.String(),
+			"start_slot", start.Slot,
+		)
+		if err := ctx.Server.NoBlocks(); err != nil {
+			return fmt.Errorf(
+				"blockfetch NoBlocks after lookup saturation: %w",
+				err,
+			)
+		}
+		return nil
+	}
 	// The requested slot span is not validated here: on a sparse or
 	// low-active-slot-coefficient network, a valid run of consecutive
 	// blocks can span far more slots than mainnet's stability window.
@@ -822,23 +828,15 @@ func (o *Ouroboros) blockfetchRecordNoBlocksAndMaybeClose(
 	o.closeBlockfetchConnection(conn, connId.String(), closeReason)
 }
 
-// blockfetchRecordNoBlocks increments the consecutive NoBlocks counter for
-// (connId, start) and returns true when blockfetchMaxConsecutiveNoBlocks is reached.
+// blockfetchRecordNoBlocks increments the failed-lookup counter for connId and
+// returns true when blockfetchMaxConsecutiveNoBlocks is reached.
 func (o *Ouroboros) blockfetchRecordNoBlocks(
 	connId ouroboros.ConnectionId,
-	start ocommon.Point,
+	_ ocommon.Point,
 ) bool {
-	key := blockfetchNoBlocksPoint{Slot: start.Slot, Hash: string(start.Hash)}
 	o.blockFetchMutex.Lock()
 	defer o.blockFetchMutex.Unlock()
-	state, ok := o.blockfetchNoBlocksCounts[connId]
-	if !ok || state.Point != key {
-		o.blockfetchNoBlocksCounts[connId] = blockfetchNoBlocksState{
-			Point: key,
-			Count: 1,
-		}
-		return false
-	}
+	state := o.blockfetchNoBlocksCounts[connId]
 	state.Count++
 	o.blockfetchNoBlocksCounts[connId] = state
 	return state.Count >= blockfetchMaxConsecutiveNoBlocks
