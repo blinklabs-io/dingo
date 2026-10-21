@@ -10225,9 +10225,8 @@ func (ls *LedgerState) ledgerProcessBlock(
 			// Standard Dijkstra/CIP profiles validate ranking-block transactions
 			// even when the referenced endorser block is unavailable; missing
 			// endorser-resident inputs then produce a validation error. Skip
-			// Dijkstra validation only on the Musashi prototype
-			// (SkipDijkstraTxValidation), which trusts its ranking-block
-			// transactions.
+			// Dijkstra validation only under an explicit
+			// SkipDijkstraTxValidation override; no network profile sets it.
 			skipDijkstraValidation := ls.skipDijkstraTxValidation(
 				validationEra.Id,
 			)

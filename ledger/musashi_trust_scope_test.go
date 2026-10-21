@@ -39,7 +39,7 @@ import (
 // unresolvable and disagree on essentially every transaction — only exists in
 // Dijkstra/Leios. Every earlier era therefore keeps its full per-transaction
 // rule set even on a Musashi node. If this test starts failing because a
-// pre-Dijkstra era began skipping validation, the prototype bypass has widened
+// pre-Dijkstra era began skipping validation, the explicit override has widened
 // beyond its justification.
 func TestSkipDijkstraTxValidationScope(t *testing.T) {
 	t.Parallel()
@@ -114,7 +114,7 @@ func TestDijkstraTxValidationErrorsRequireOverride(t *testing.T) {
 				t,
 				profile.wantTrust,
 				ls.trustDijkstraTxValidationError(dijkstra.EraIdDijkstra),
-				"Dijkstra validation trust must match the prototype bypass",
+				"Dijkstra validation trust must match the explicit override",
 			)
 			assert.False(
 				t,

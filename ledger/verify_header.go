@@ -2149,11 +2149,9 @@ func (ls *LedgerState) verifyBlockLeaderEligibilityFromSnapshot(
 		// That was stale, and a wedge diagnosis was built on it rather
 		// than on the code.
 		//
-		// On the concentrated prototype topology this check still rejected
-		// the dominant pool's eligible blocks and wedged the chain, so it is
-		// downgraded to a warning there; all cryptographic header checks
-		// above still passed. See
-		// LedgerStateConfig.SkipLeaderStakeThresholdCheck.
+		// An explicit SkipLeaderStakeThresholdCheck override downgrades this
+		// rejection to a warning; all cryptographic header checks above
+		// still passed. No network profile sets it.
 		if ls.config.SkipLeaderStakeThresholdCheck {
 			ls.config.Logger.Warn(
 				"producer pool does not satisfy leader eligibility; trusting block (explicit override)",

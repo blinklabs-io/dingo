@@ -4044,9 +4044,9 @@ func TestVerifyBlockLeaderEligibility_ReconstructedHistoricalMarkRejectsStandard
 }
 
 // TestVerifyBlockLeaderEligibility_ReconstructedHistoricalMarkPrototypeAccepts
-// pins the one profile that may still bypass an unevaluable reconstructed
-// mark row: the explicitly selected Musashi prototype
-// (SkipLeaderStakeThresholdCheck), mirroring the other eligibility guards'
+// pins the one configuration that may still bypass an unevaluable
+// reconstructed mark row: an explicit SkipLeaderStakeThresholdCheck override,
+// mirroring the other eligibility guards'
 // Rejects/PrototypeAccepts pairs in this file.
 func TestVerifyBlockLeaderEligibility_ReconstructedHistoricalMarkPrototypeAccepts(
 	t *testing.T,
@@ -4274,7 +4274,7 @@ func TestVerifyBlockLeaderEligibility_LiveComputedHistoricalMarkStillChecks(
 // newCoeffGuardLedger builds a ledger whose pool stake is already seeded, so
 // verifyBlockLeaderEligibility reaches the active-slot-coefficient guard. cfg
 // is the Shelley genesis under test (nil for "genesis never loaded"), and
-// prototypeProfile selects the Musashi prototype bypass.
+// prototypeProfile sets the explicit SkipLeaderStakeThresholdCheck override.
 func newCoeffGuardLedger(
 	t *testing.T,
 	tb *testBlockResult,
@@ -4368,10 +4368,10 @@ func TestVerifyBlockLeaderEligibility_ZeroActiveSlotsCoeffRejects(
 }
 
 // TestVerifyBlockLeaderEligibility_MissingActiveSlotsCoeffPrototypeAccepts
-// pins the one profile that may still bypass the check. The Musashi prototype
-// already trusts stake-derived threshold failures
-// (SkipLeaderStakeThresholdCheck); an unevaluable threshold is bypassed under
-// the same explicitly selected profile and nowhere else.
+// pins the one configuration that may still bypass the check. An explicit
+// SkipLeaderStakeThresholdCheck override already trusts stake-derived
+// threshold failures; an unevaluable threshold is bypassed under the same
+// override and nowhere else.
 func TestVerifyBlockLeaderEligibility_MissingActiveSlotsCoeffPrototypeAccepts(
 	t *testing.T,
 ) {
@@ -4385,7 +4385,7 @@ func TestVerifyBlockLeaderEligibility_MissingActiveSlotsCoeffPrototypeAccepts(
 }
 
 // TestVerifyBlockLeaderEligibility_ZeroActiveSlotsCoeffPrototypeAccepts is the
-// zero-coefficient half of the prototype bypass.
+// zero-coefficient half of the explicit override.
 func TestVerifyBlockLeaderEligibility_ZeroActiveSlotsCoeffPrototypeAccepts(
 	t *testing.T,
 ) {
@@ -4439,7 +4439,7 @@ func TestVerifyBlockLeaderEligibility_ZeroTotalActiveStakeRejects(
 }
 
 // TestVerifyBlockLeaderEligibility_ZeroTotalActiveStakePrototypeAccepts pins
-// the prototype bypass for the stake half of the guard.
+// the explicit override for the stake half of the guard.
 func TestVerifyBlockLeaderEligibility_ZeroTotalActiveStakePrototypeAccepts(
 	t *testing.T,
 ) {

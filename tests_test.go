@@ -32,6 +32,7 @@ import (
 	"github.com/blinklabs-io/dingo/ledger/leios"
 	"github.com/blinklabs-io/dingo/ledger/snapshot"
 	"github.com/blinklabs-io/dingo/topology"
+	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -187,14 +188,29 @@ func TestNetworkProfilesDoNotRelaxLedgerValidation(t *testing.T) {
 			name,
 		)
 	}
-	n := &Node{config: Config{cfg: &internalconfig.Config{
-		Network:      "musashi",
-		NetworkMagic: 164,
-	}}}
-	cfg := reflect.ValueOf(n.ledgerStateConfig())
-	for name := range knownTrustSettings {
-		assert.False(t, cfg.FieldByName(name).Bool(),
-			"network profile enabled validation-relaxing setting %q", name)
+	for _, network := range []ouroboros.Network{
+		ouroboros.NetworkCardanoMainnet,
+		ouroboros.NetworkCardanoPreprod,
+		ouroboros.NetworkCardanoPreview,
+		ouroboros.NetworkCardanoSancho,
+		ouroboros.NetworkCardanoMusashi,
+		ouroboros.NetworkPrimeMainnet,
+		ouroboros.NetworkPrimeTestnet,
+		ouroboros.NetworkDevnet,
+	} {
+		n := &Node{config: Config{
+			network: network.Name,
+			cfg: &internalconfig.Config{
+				Network:      network.Name,
+				NetworkMagic: network.NetworkMagic,
+			},
+		}}
+		cfg := reflect.ValueOf(n.ledgerStateConfig())
+		for name := range knownTrustSettings {
+			assert.False(t, cfg.FieldByName(name).Bool(),
+				"network profile %q enabled validation-relaxing setting %q",
+				network.Name, name)
+		}
 	}
 }
 
