@@ -174,8 +174,8 @@ func TestNetworkProfilesDoNotRelaxLedgerValidation(t *testing.T) {
 			t,
 			knownTrustSettings,
 			name,
-			"new validation-relaxing setting %q must be classified as "+
-				"validation-relaxing setting must be classified here; see this test's doc comment",
+			"LedgerStateConfig.%s relaxes validation and must be "+
+				"classified in knownTrustSettings; see this test's doc comment",
 			name,
 		)
 	}
