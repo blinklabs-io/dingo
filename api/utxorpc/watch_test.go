@@ -165,12 +165,10 @@ func TestConnect_WatchTx_InHistoryRollbackSkipsPersistedFetch(t *testing.T) {
 
 func requireFixtureWatchTxAppliedCount(t *testing.T, block models.Block) int {
 	t.Helper()
-	applied, _, err := watchTxBuildForwardMessages(
-		block.Type,
-		block.Cbor,
-		block.Slot,
-		block.Number,
-		block.Hash,
+	decoded, err := gledger.NewBlockFromCbor(block.Type, block.Cbor)
+	require.NoError(t, err)
+	applied, _, err := watchTxBuildForwardMessagesForTransactions(
+		decoded.Transactions(), block.Slot, block.Number, block.Hash,
 		func(gledger.Transaction) bool { return true },
 	)
 	require.NoError(t, err)
@@ -349,9 +347,8 @@ func TestWatchTxBuildMessages_IdleOnEmptyBlock(t *testing.T) {
 	require.Empty(t, blk.Transactions())
 
 	wantHash := append([]byte(nil), blk.Hash().Bytes()...)
-	appliedTxs, out, err := watchTxBuildForwardMessages(
-		uint(block.Type()),
-		block.Cbor(),
+	appliedTxs, out, err := watchTxBuildForwardMessagesForTransactions(
+		blk.Transactions(),
 		blk.SlotNumber(),
 		blk.BlockNumber(),
 		blk.Hash().Bytes(),
@@ -378,9 +375,8 @@ func TestWatchTxBuildMessages_IdleWhenNoPredicateMatch(t *testing.T) {
 	require.NotEmpty(t, blk.Transactions())
 
 	metaHash := append([]byte(nil), blk.Hash().Bytes()...)
-	appliedTxs, out, err := watchTxBuildForwardMessages(
-		uint(block.Type()),
-		block.Cbor(),
+	appliedTxs, out, err := watchTxBuildForwardMessagesForTransactions(
+		blk.Transactions(),
 		blk.SlotNumber(),
 		blk.BlockNumber(),
 		metaHash,
@@ -405,9 +401,8 @@ func TestWatchTxBuildMessages_ApplyWhenMatching(t *testing.T) {
 	blk, err := ledger.NewBlockFromCbor(uint(block.Type()), block.Cbor())
 	require.NoError(t, err)
 
-	appliedTxs, out, err := watchTxBuildForwardMessages(
-		uint(block.Type()),
-		block.Cbor(),
+	appliedTxs, out, err := watchTxBuildForwardMessagesForTransactions(
+		blk.Transactions(),
 		blk.SlotNumber(),
 		blk.BlockNumber(),
 		blk.Hash().Bytes(),
@@ -495,6 +490,17 @@ type securityParamProbe struct {
 }
 
 func (p *securityParamProbe) SecurityParam() int { return p.k }
+
+func (p *securityParamProbe) BlockTransactions(
+	_ context.Context,
+	block models.Block,
+) ([]gledger.Transaction, error) {
+	decoded, err := block.Decode()
+	if err != nil {
+		return nil, err
+	}
+	return decoded.Transactions(), nil
+}
 
 func (p *securityParamProbe) BlockByHashIncludingRolledBack(
 	_ context.Context,
@@ -634,15 +640,15 @@ func TestWatchTxBuildMessages_SkipsConversionWhenPredicateRejects(
 	block := blocks[0]
 	blk, err := ledger.NewBlockFromCbor(uint(block.Type()), block.Cbor())
 	require.NoError(t, err)
-	require.NotEmpty(t, blk.Transactions())
+	txs := blk.Transactions()
+	require.NotEmpty(t, txs)
 
-	// build returns a function that processes the block with a predicate that
-	// accepts or rejects every transaction.
+	// build returns a function that processes the block's transactions with a
+	// predicate that accepts or rejects every one of them.
 	build := func(send bool) func() {
 		return func() {
-			_, _, err := watchTxBuildForwardMessages(
-				uint(block.Type()),
-				block.Cbor(),
+			_, _, err := watchTxBuildForwardMessagesForTransactions(
+				txs,
 				blk.SlotNumber(),
 				blk.BlockNumber(),
 				blk.Hash().Bytes(),
@@ -653,7 +659,7 @@ func TestWatchTxBuildMessages_SkipsConversionWhenPredicateRejects(
 	}
 	rejected := testing.AllocsPerRun(20, build(false))
 	accepted := testing.AllocsPerRun(20, build(true))
-	// Both runs decode the block; only the accepted run converts its
-	// transactions to the UTxO RPC form.
+	// The transactions are already decoded, so the only difference between
+	// the runs is converting them to the UTxO RPC form.
 	require.Less(t, rejected, accepted)
 }
