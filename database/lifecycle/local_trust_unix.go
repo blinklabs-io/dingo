@@ -81,7 +81,8 @@ func inspectSnapshotPath(path string, requireLeaf bool) (fs.FileInfo, error) {
 	if err != nil {
 		return nil, fmt.Errorf("resolve snapshot path %q: %w", path, err)
 	}
-	current := filepath.Clean(absPath)
+	absPath = filepath.Clean(absPath)
+	current := absPath
 	var leaf fs.FileInfo
 	for {
 		info, err := os.Lstat(current)
@@ -92,17 +93,25 @@ func inspectSnapshotPath(path string, requireLeaf bool) (fs.FileInfo, error) {
 		} else {
 			if leaf == nil {
 				leaf = info
+			}
+			if current == absPath {
 				if requireLeaf && (!info.IsDir() || info.Mode()&os.ModeSymlink != 0) {
 					return nil, fmt.Errorf("snapshot path %q is not a real directory", current)
 				}
 			}
-			if info.IsDir() && info.Mode().Perm()&0o022 != 0 &&
-				info.Mode()&os.ModeSticky == 0 {
-				return nil, fmt.Errorf(
-					"snapshot path ancestor %q is writable by group or other without the sticky bit",
-					current,
-				)
+			if err := validateSnapshotAncestorChain(current); err != nil {
+				return nil, err
 			}
+			resolved, err := filepath.EvalSymlinks(current)
+			if err != nil {
+				return nil, fmt.Errorf("resolve snapshot path %q: %w", current, err)
+			}
+			if resolved != current {
+				if err := validateSnapshotAncestorChain(resolved); err != nil {
+					return nil, err
+				}
+			}
+			break
 		}
 		parent := filepath.Dir(current)
 		if parent == current {
@@ -114,6 +123,30 @@ func inspectSnapshotPath(path string, requireLeaf bool) (fs.FileInfo, error) {
 		return nil, fmt.Errorf("snapshot path %q has no existing ancestor", path)
 	}
 	return leaf, nil
+}
+
+func validateSnapshotAncestorChain(path string) error {
+	for current := filepath.Clean(path); ; current = filepath.Dir(current) {
+		info, err := os.Lstat(current)
+		if err != nil {
+			return fmt.Errorf("inspect snapshot path %q: %w", current, err)
+		}
+		if info.IsDir() {
+			if err := requireTrustedSnapshotOwner(current, info); err != nil {
+				return fmt.Errorf("snapshot path ancestor: %w", err)
+			}
+			if info.Mode().Perm()&0o022 != 0 && info.Mode()&os.ModeSticky == 0 {
+				return fmt.Errorf(
+					"snapshot path ancestor %q is writable by group or other without the sticky bit",
+					current,
+				)
+			}
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return nil
+		}
+	}
 }
 
 func requireTrustedSnapshotOwner(path string, info fs.FileInfo) error {

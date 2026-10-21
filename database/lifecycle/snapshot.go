@@ -216,6 +216,12 @@ func Snapshot(
 	// "capture a version now" from "stream that version" — a larger
 	// rework of both, not attempted here.
 	metadataPath := filepath.Join(dir, MetadataBackupFileName)
+	metadataStageDir, err := os.MkdirTemp("", "dingo-snapshot-metadata-*")
+	if err != nil {
+		return Manifest{}, fmt.Errorf("create private metadata staging directory: %w", err)
+	}
+	defer os.RemoveAll(metadataStageDir) //nolint:errcheck // best-effort removal of private temporary data
+	metadataStagePath := filepath.Join(metadataStageDir, MetadataBackupFileName)
 	if err := snapshotRootMatchesPath(snapshotRoot, dir); err != nil {
 		return Manifest{}, err
 	}
@@ -340,7 +346,7 @@ func Snapshot(
 	go func() {
 		backupResults <- backupResult{
 			store: "metadata",
-			err:   metadataBackuper.BackupTo(backupCtx, metadataPath),
+			err:   metadataBackuper.BackupTo(backupCtx, metadataStagePath),
 		}
 	}()
 	var backupErr, metadataErr error
@@ -431,13 +437,32 @@ func Snapshot(
 	if err := blobFile.Close(); err != nil {
 		return Manifest{}, fmt.Errorf("close %q: %w", blobPath, err)
 	}
-	metadataFile, err := snapshotRoot.OpenFile(MetadataBackupFileName, os.O_WRONLY, 0)
+	metadataStageFile, err := os.Open(metadataStagePath)
 	if err != nil {
+		return Manifest{}, fmt.Errorf("open staged metadata backup: %w", err)
+	}
+	metadataFile, err := snapshotRoot.OpenFile(
+		MetadataBackupFileName,
+		os.O_WRONLY|os.O_CREATE|os.O_EXCL,
+		0o644,
+	)
+	if err != nil {
+		_ = metadataStageFile.Close()
 		return Manifest{}, fmt.Errorf("open %q for sync: %w", metadataPath, err)
 	}
+	_, metadataCopyErr := io.Copy(
+		metadataFile,
+		&payloadContextReader{ctx: ctx, reader: metadataStageFile},
+	)
+	metadataStageCloseErr := metadataStageFile.Close()
 	metadataSyncErr := syncSnapshotFile(metadataFile)
 	metadataCloseErr := metadataFile.Close()
-	if err := errors.Join(metadataSyncErr, metadataCloseErr); err != nil {
+	if err := errors.Join(
+		metadataCopyErr,
+		metadataStageCloseErr,
+		metadataSyncErr,
+		metadataCloseErr,
+	); err != nil {
 		return Manifest{}, fmt.Errorf(
 			"sync and close %q: %w",
 			metadataPath,
