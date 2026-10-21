@@ -2303,45 +2303,6 @@ func TestValidateDMQBounds(t *testing.T) {
 	}
 }
 
-func TestValidateRejectsNegativeLocalStateQueryUtxoWholeLimits(t *testing.T) {
-	t.Parallel()
-	for _, tc := range []struct {
-		name   string
-		mutate func(*Config)
-		field  string
-	}{
-		{
-			"items",
-			func(c *Config) { c.LocalStateQueryUtxoWholeMaxItems = -1 },
-			"localStateQueryUtxoWholeMaxItems",
-		},
-		{
-			"retained bytes",
-			func(c *Config) { c.LocalStateQueryUtxoWholeMaxRetainedBytes = -1 },
-			"localStateQueryUtxoWholeMaxRetainedBytes",
-		},
-		{
-			"response bytes",
-			func(c *Config) { c.LocalStateQueryUtxoWholeMaxResponseBytes = -1 },
-			"localStateQueryUtxoWholeMaxResponseBytes",
-		},
-		{
-			"timeout",
-			func(c *Config) { c.LocalStateQueryUtxoWholeTimeout = -1 },
-			"localStateQueryUtxoWholeTimeout",
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			cfg := validTestConfig()
-			tc.mutate(cfg)
-			err := cfg.validate(cfg.RunMode, minUnprivilegedPort)
-			require.ErrorContains(t, err, tc.field)
-			require.ErrorContains(t, err, "must not be negative")
-		})
-	}
-}
-
 func validMithrilAggregator() MithrilAggregatorConfig {
 	return MithrilAggregatorConfig{
 		Enabled:               true,

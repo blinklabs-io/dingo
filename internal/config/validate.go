@@ -582,23 +582,6 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 			c.BarkArchiveMaxConcurrentFetches,
 		))
 	}
-	for _, limit := range []struct {
-		name  string
-		value int64
-	}{
-		{"localStateQueryUtxoWholeMaxItems", int64(c.LocalStateQueryUtxoWholeMaxItems)},
-		{"localStateQueryUtxoWholeMaxRetainedBytes", c.LocalStateQueryUtxoWholeMaxRetainedBytes},
-		{"localStateQueryUtxoWholeMaxResponseBytes", c.LocalStateQueryUtxoWholeMaxResponseBytes},
-		{"localStateQueryUtxoWholeTimeout", int64(c.LocalStateQueryUtxoWholeTimeout)},
-	} {
-		if limit.value < 0 {
-			errs = append(errs, fmt.Errorf(
-				"invalid %s %d: must not be negative",
-				limit.name,
-				limit.value,
-			))
-		}
-	}
 
 	// Bark's DatabaseService is mounted whenever bark is enabled with a snapshot
 	// directory configured. Every method must authenticate its caller, and its

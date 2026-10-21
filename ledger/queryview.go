@@ -257,6 +257,12 @@ func (v *QueryView) detachForUtxoWhole() (QueryPoint, bool) {
 		}
 		point = QueryPoint{Slot: tip.Point.Slot, Hash: tip.Point.Hash}
 	}
+	// A volatile-tip session has no connection-level acquired-point pin.
+	// Establish the view's pin before releasing the snapshot so pruning can
+	// never pass the acquired point between GetUTxOWhole and reattachment.
+	if v.releasePin == nil {
+		v.releasePin = v.ls.PinAcquiredPoint(point.Slot)
+	}
 	v.txn.Release()
 	v.cancel()
 	v.txn = nil

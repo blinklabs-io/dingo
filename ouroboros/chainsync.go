@@ -1166,20 +1166,48 @@ func (o *Ouroboros) chainsyncServerAwaitNext(
 	if nextErr == nil && next != nil && waitForLedger &&
 		o.chainsyncServerAheadOfLedger(next) {
 		waitCtx, cancel := context.WithCancel(context.Background())
-		stop := make(chan struct{})
+		applied := make(chan error, 1)
 		go func() {
+			applied <- o.ledgerState.AwaitAppliedSlot(waitCtx, next.Point.Slot)
+		}()
+		ticker := time.NewTicker(10 * time.Millisecond)
+		defer ticker.Stop()
+		for {
 			select {
 			case <-conn.Done():
 				cancel()
-			case <-stop:
+				o.closeAbandonedChainsyncServerConn(ctx, conn)
+				return
+			case <-ticker.C:
+				if clientState.ChainIter.HasPendingRollback() {
+					cancel()
+					next, nextErr = clientState.ChainIter.Next(false)
+					o.chainsyncServerServeAwaited(ctx, conn, next, nextErr)
+					return
+				}
+			case err := <-applied:
+				if err != nil {
+					cancel()
+					o.closeAbandonedChainsyncServerConn(ctx, conn)
+					return
+				}
+				if clientState.ChainIter.HasPendingRollback() {
+					cancel()
+					next, nextErr = clientState.ChainIter.Next(false)
+					o.chainsyncServerServeAwaited(ctx, conn, next, nextErr)
+					return
+				}
+				appliedTip := o.ledgerState.Tip().Point
+				if appliedTip.Slot == next.Point.Slot &&
+					!bytes.Equal(appliedTip.Hash, next.Point.Hash) {
+					// A different block reached the same slot. Wait for the
+					// iterator's rollback event and serve that instead.
+					continue
+				}
+				cancel()
+				o.chainsyncServerServeAwaited(ctx, conn, next, nextErr)
+				return
 			}
-		}()
-		err := o.ledgerState.AwaitAppliedSlot(waitCtx, next.Point.Slot)
-		close(stop)
-		cancel()
-		if err != nil {
-			o.closeAbandonedChainsyncServerConn(ctx, conn)
-			return
 		}
 	}
 	o.chainsyncServerServeAwaited(ctx, conn, next, nextErr)

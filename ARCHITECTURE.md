@@ -5471,16 +5471,13 @@ against a real Preview cardano-node: 36 real pools reported by cardano-node
 were completely absent from dingo's reply for no reason other than that
 snapshot lag. `GetUTxOWhole` enumerates live references, resolves their stored
 CBOR through a fixed worker pool, and decodes them into the node-to-client
-reply shape. Unless configured, the query admits at most 50,000 references,
-retains at most 32 MiB of resolved CBOR in its assembled result, encodes at most
-a 32 MiB response, and has a 30-second server deadline. Operators set each bound through
-`LedgerStateConfig.UtxoWholeQueryLimits` (`localStateQueryUtxoWhole*` in YAML,
-with matching environment variables and flags): zero keeps the built-in bound
-and negative values are rejected. Exceeding a bound fails the query, and since
-LocalStateQuery has no failure reply for `MsgQuery`, the protocol server ends
-the client's node-to-client connection. Workers may hold one additional resolved
-output apiece while delivering results. The checked encoding is cached so the
-protocol server does not serialize the full map again outside that deadline.
+reply shape. A successful response always contains the complete UTxO set at
+the acquired point. Pagination, offsets, item limits, byte limits, time limits,
+truncation, and partial success are forbidden for this protocol result. If the
+complete set cannot be produced, the query fails without returning a successful
+partial result. Internal database pages only shorten read transactions; they
+are assembled into one complete protocol response. This contract must remain
+explicit in implementation and protocol documentation.
 
 `GetUTxOWhole` on an acquired view does not read through the view's snapshot.
 Its walk takes minutes on a large chain, and SQLite cannot restart its WAL

@@ -2158,20 +2158,6 @@ func WithLocalStateQueryViewMaxLifetime(
 	}
 }
 
-// WithLocalStateQueryUtxoWholeLimits bounds each node-to-client
-// LocalStateQuery GetUTxOWhole request. A zero field keeps that limit's
-// built-in default. Negative fields are invalid; see ledger.UtxoWholeQueryLimits.
-func WithLocalStateQueryUtxoWholeLimits(
-	limits ledger.UtxoWholeQueryLimits,
-) ConfigOptionFunc {
-	return func(c *Config) {
-		c.cfg.LocalStateQueryUtxoWholeMaxItems = limits.MaxItems
-		c.cfg.LocalStateQueryUtxoWholeMaxRetainedBytes = limits.MaxRetainedBytes
-		c.cfg.LocalStateQueryUtxoWholeMaxResponseBytes = limits.MaxResponseBytes
-		c.cfg.LocalStateQueryUtxoWholeTimeout = limits.Timeout
-	}
-}
-
 // WithChainsyncStallTimeout specifies the duration after
 // which a chainsync client with no activity is considered
 // stalled. Default is 2 minutes.
@@ -2658,16 +2644,6 @@ func (c *Config) ChainsyncStallTimeoutDuration() time.Duration {
 		}
 	}
 	return 2 * time.Minute
-}
-
-// LocalStateQueryUtxoWholeLimits returns the configured GetUTxOWhole limits.
-func (c *Config) LocalStateQueryUtxoWholeLimits() ledger.UtxoWholeQueryLimits {
-	return ledger.UtxoWholeQueryLimits{
-		MaxItems:         c.cfg.LocalStateQueryUtxoWholeMaxItems,
-		MaxRetainedBytes: c.cfg.LocalStateQueryUtxoWholeMaxRetainedBytes,
-		MaxResponseBytes: c.cfg.LocalStateQueryUtxoWholeMaxResponseBytes,
-		Timeout:          c.cfg.LocalStateQueryUtxoWholeTimeout,
-	}
 }
 
 // LocalStateQueryViewMaxLifetimeDuration returns the parsed LocalStateQuery

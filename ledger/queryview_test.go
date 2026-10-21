@@ -819,6 +819,11 @@ func TestQueryViewUtxoWholeReleasesSnapshotAndAnswersAsOfAcquire(t *testing.T) {
 	}
 	utxos := requireUtxoWholeMap(t, result)
 	require.Len(t, utxos, 1)
+	ls.acquiredPins.mu.Lock()
+	pinnedSlot, pinned := ls.acquiredPins.oldestPinnedSlotLocked()
+	ls.acquiredPins.mu.Unlock()
+	require.True(t, pinned, "the detached view must retain its acquired-point pin")
+	require.Equal(t, uint64(300), pinnedSlot)
 	_, ok := utxos[olocalstatequery.UtxoId{
 		Hash: ledger.NewBlake2b256(spentLater), Idx: 0,
 	}]

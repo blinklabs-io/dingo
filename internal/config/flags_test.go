@@ -841,59 +841,6 @@ tokenRegistry:
 	require.True(t, cfg.TokenRegistry.AllowRollback)
 }
 
-func TestLocalStateQueryUtxoWholeLimitsSources(t *testing.T) {
-	resetGlobalConfig()
-	t.Setenv("HOME", t.TempDir())
-	configFile := filepath.Join(t.TempDir(), "dingo.yaml")
-	require.NoError(t, os.WriteFile(configFile, nil, 0o600))
-	cfg, err := LoadConfig(configFile)
-	require.NoError(t, err)
-	require.Zero(t, cfg.LocalStateQueryUtxoWholeMaxItems)
-	require.Zero(t, cfg.LocalStateQueryUtxoWholeMaxRetainedBytes)
-	require.Zero(t, cfg.LocalStateQueryUtxoWholeMaxResponseBytes)
-	require.Zero(t, cfg.LocalStateQueryUtxoWholeTimeout)
-
-	resetGlobalConfig()
-	require.NoError(t, os.WriteFile(configFile, []byte(`
-localStateQueryUtxoWholeMaxItems: 3001
-localStateQueryUtxoWholeMaxRetainedBytes: 3002
-localStateQueryUtxoWholeMaxResponseBytes: 3003
-localStateQueryUtxoWholeTimeout: 3m
-`), 0o600))
-	cfg, err = LoadConfig(configFile)
-	require.NoError(t, err)
-	require.Equal(t, 3001, cfg.LocalStateQueryUtxoWholeMaxItems)
-	require.Equal(t, int64(3002), cfg.LocalStateQueryUtxoWholeMaxRetainedBytes)
-	require.Equal(t, int64(3003), cfg.LocalStateQueryUtxoWholeMaxResponseBytes)
-	require.Equal(t, 3*time.Minute, cfg.LocalStateQueryUtxoWholeTimeout)
-
-	resetGlobalConfig()
-	t.Setenv("DINGO_LOCAL_STATE_QUERY_UTXO_WHOLE_MAX_ITEMS", "1001")
-	t.Setenv("DINGO_LOCAL_STATE_QUERY_UTXO_WHOLE_MAX_RETAINED_BYTES", "1002")
-	t.Setenv("DINGO_LOCAL_STATE_QUERY_UTXO_WHOLE_MAX_RESPONSE_BYTES", "1003")
-	t.Setenv("DINGO_LOCAL_STATE_QUERY_UTXO_WHOLE_TIMEOUT", "1m")
-	cfg, err = LoadConfig(configFile)
-	require.NoError(t, err)
-	require.Equal(t, 1001, cfg.LocalStateQueryUtxoWholeMaxItems)
-	require.Equal(t, int64(1002), cfg.LocalStateQueryUtxoWholeMaxRetainedBytes)
-	require.Equal(t, int64(1003), cfg.LocalStateQueryUtxoWholeMaxResponseBytes)
-	require.Equal(t, time.Minute, cfg.LocalStateQueryUtxoWholeTimeout)
-
-	cmd := &cobra.Command{Use: "dingo"}
-	RegisterFlags(cmd)
-	require.NoError(t, cmd.ParseFlags([]string{
-		"--local-state-query-utxo-whole-max-items=-1",
-		"--local-state-query-utxo-whole-max-retained-bytes=2002",
-		"--local-state-query-utxo-whole-max-response-bytes=2003",
-		"--local-state-query-utxo-whole-timeout=2m",
-	}))
-	require.NoError(t, ApplyFlags(cmd, cfg))
-	require.Equal(t, -1, cfg.LocalStateQueryUtxoWholeMaxItems)
-	require.Equal(t, int64(2002), cfg.LocalStateQueryUtxoWholeMaxRetainedBytes)
-	require.Equal(t, int64(2003), cfg.LocalStateQueryUtxoWholeMaxResponseBytes)
-	require.Equal(t, 2*time.Minute, cfg.LocalStateQueryUtxoWholeTimeout)
-}
-
 func TestMempoolProviderSourcePrecedence(t *testing.T) {
 	resetGlobalConfig()
 	t.Setenv("HOME", t.TempDir())

@@ -20,7 +20,6 @@ import (
 	"errors"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
@@ -205,158 +204,6 @@ func TestQueryShelleyUtxoWhole_CachesCheckedEncoding(t *testing.T) {
 	require.Equal(t, canonical, bounded.encoded)
 }
 
-func TestQueryShelleyUtxoWhole_BoundsAggregateWork(t *testing.T) {
-	t.Parallel()
-	db := newTestDB(t)
-	addr, err := lcommon.NewAddressFromParts(
-		lcommon.AddressTypeKeyNone,
-		lcommon.AddressNetworkTestnet,
-		bytes.Repeat([]byte{0xAA}, lcommon.AddressHashSize),
-		nil,
-	)
-	require.NoError(t, err)
-	seedBabbageUtxo(t, db, 0xA1, 0, addr, 1_000_000)
-	seedBabbageUtxo(t, db, 0xA2, 0, addr, 2_000_000)
-	ls := newPoolDistr2Ledger(t, db)
-	limits := UtxoWholeQueryLimits{}.resolve()
-	limits.maxItems = 1
-
-	_, err = ls.queryShelleyUtxoWholeWithLimits(
-		t.Context(), QueryPoint{}, nil, limits,
-	)
-	require.ErrorIs(t, err, errUtxoWholeLimitExceeded)
-}
-
-func TestQueryShelleyUtxoWhole_BoundsRetainedAndEncodedBytes(t *testing.T) {
-	t.Parallel()
-	db := newTestDB(t)
-	addr, err := lcommon.NewAddressFromParts(
-		lcommon.AddressTypeKeyNone,
-		lcommon.AddressNetworkTestnet,
-		bytes.Repeat([]byte{0xAB}, lcommon.AddressHashSize),
-		nil,
-	)
-	require.NoError(t, err)
-	seedBabbageUtxo(t, db, 0xB1, 0, addr, 1_000_000)
-	ls := newPoolDistr2Ledger(t, db)
-
-	retained := UtxoWholeQueryLimits{}.resolve()
-	retained.maxRetainedBytes = 1
-	_, err = ls.queryShelleyUtxoWholeWithLimits(
-		t.Context(), QueryPoint{}, nil, retained,
-	)
-	require.ErrorIs(t, err, errUtxoWholeLimitExceeded)
-
-	encoded := UtxoWholeQueryLimits{}.resolve()
-	encoded.maxResponseBytes = 3
-	_, err = ls.queryShelleyUtxoWholeWithLimits(
-		t.Context(), QueryPoint{}, nil, encoded,
-	)
-	require.ErrorIs(t, err, errUtxoWholeLimitExceeded)
-}
-
-// TestQueryShelleyUtxoWhole_HonorsConfiguredLimits drives the wire path
-// (ls.Query) so a configured limit must reach the query, not just the
-// internal WithLimits entry point.
-func TestQueryShelleyUtxoWhole_HonorsConfiguredLimits(t *testing.T) {
-	t.Parallel()
-	db := newTestDB(t)
-	addr, err := lcommon.NewAddressFromParts(
-		lcommon.AddressTypeKeyNone,
-		lcommon.AddressNetworkTestnet,
-		bytes.Repeat([]byte{0xAD}, lcommon.AddressHashSize),
-		nil,
-	)
-	require.NoError(t, err)
-	seedBabbageUtxo(t, db, 0xD1, 0, addr, 1_000_000)
-	seedBabbageUtxo(t, db, 0xD2, 0, addr, 2_000_000)
-	seedBabbageUtxo(t, db, 0xD3, 0, addr, 3_000_000)
-
-	tests := []struct {
-		name     string
-		limits   UtxoWholeQueryLimits
-		rejected bool
-	}{
-		{
-			name:     "below set size",
-			limits:   UtxoWholeQueryLimits{MaxItems: 2},
-			rejected: true,
-		},
-		{name: "raised", limits: UtxoWholeQueryLimits{MaxItems: 10}},
-		{
-			name:     "retained bytes",
-			limits:   UtxoWholeQueryLimits{MaxRetainedBytes: 1},
-			rejected: true,
-		},
-		{
-			name:     "response bytes",
-			limits:   UtxoWholeQueryLimits{MaxResponseBytes: 3},
-			rejected: true,
-		},
-		{name: "defaults", limits: UtxoWholeQueryLimits{}},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			ls := newPoolDistr2Ledger(t, db)
-			ls.config.UtxoWholeQueryLimits = tc.limits
-			result, err := ls.Query(t.Context(), utxoWholeQuery(), QueryPoint{})
-			if tc.rejected {
-				require.ErrorIs(t, err, errUtxoWholeLimitExceeded)
-				return
-			}
-			require.NoError(t, err)
-			require.Len(t, requireUtxoWholeMap(t, result), 3)
-		})
-	}
-	ls := newPoolDistr2Ledger(t, db)
-	ls.config.UtxoWholeQueryLimits.MaxItems = -1
-	_, err = ls.Query(t.Context(), utxoWholeQuery(), QueryPoint{})
-	require.ErrorContains(t, err, "MaxItems must not be negative")
-}
-
-func TestUtxoWholeQueryLimitsResolve(t *testing.T) {
-	t.Parallel()
-	require.Equal(t, utxoWholeLimits{
-		maxItems:         50_000,
-		maxRetainedBytes: 32 << 20,
-		maxResponseBytes: 32 << 20,
-		timeout:          30 * time.Second,
-	}, UtxoWholeQueryLimits{}.resolve())
-	require.Equal(t, utxoWholeLimits{
-		maxItems:         7,
-		maxRetainedBytes: 8,
-		maxResponseBytes: 9,
-		timeout:          time.Minute,
-	}, UtxoWholeQueryLimits{
-		MaxItems:         7,
-		MaxRetainedBytes: 8,
-		MaxResponseBytes: 9,
-		Timeout:          time.Minute,
-	}.resolve())
-}
-
-func TestUtxoWholeQueryLimitsRejectNegativeValues(t *testing.T) {
-	t.Parallel()
-	for _, tc := range []struct {
-		name   string
-		limits UtxoWholeQueryLimits
-	}{
-		{"items", UtxoWholeQueryLimits{MaxItems: -1}},
-		{"retained bytes", UtxoWholeQueryLimits{MaxRetainedBytes: -1}},
-		{"response bytes", UtxoWholeQueryLimits{MaxResponseBytes: -1}},
-		{"timeout", UtxoWholeQueryLimits{Timeout: -1}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			require.ErrorContains(
-				t,
-				tc.limits.validate(),
-				"must not be negative",
-			)
-		})
-	}
-}
-
 func TestQueryShelleyUtxoWholeViaGetCBOR(t *testing.T) {
 	t.Parallel()
 	db := newTestDB(t)
@@ -390,19 +237,6 @@ func TestQueryShelleyUtxoWholeViaGetCBOR(t *testing.T) {
 	_, err = cbor.Decode(content, &decoded)
 	require.NoError(t, err)
 	require.Len(t, decoded, 1)
-}
-
-func TestQueryShelleyUtxoWhole_HasServerDeadline(t *testing.T) {
-	t.Parallel()
-	db := newTestDB(t)
-	ls := newPoolDistr2Ledger(t, db)
-	limits := UtxoWholeQueryLimits{}.resolve()
-	limits.timeout = time.Nanosecond
-
-	_, err := ls.queryShelleyUtxoWholeWithLimits(
-		t.Context(), QueryPoint{}, nil, limits,
-	)
-	require.ErrorIs(t, err, context.DeadlineExceeded)
 }
 
 func TestQueryShelleyUtxoWholeRejectsWrongLengthTransactionID(t *testing.T) {

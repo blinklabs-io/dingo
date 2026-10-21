@@ -14110,18 +14110,6 @@ func TestNewLedgerStateRejectsNegativeEvaluationCapacity(t *testing.T) {
 	require.ErrorContains(t, err, "MaxConcurrentEvaluations must not be negative")
 }
 
-func TestNewLedgerStateRejectsNegativeUtxoWholeLimit(t *testing.T) {
-	db := newTestDB(t)
-	cm, err := chain.NewManager(t.Context(), db, nil)
-	require.NoError(t, err)
-	_, err = NewLedgerState(LedgerStateConfig{
-		Database:             db,
-		ChainManager:         cm,
-		UtxoWholeQueryLimits: UtxoWholeQueryLimits{MaxItems: -1},
-	})
-	require.ErrorContains(t, err, "MaxItems must not be negative")
-}
-
 // TestAtTipRecoveryRewindKeepsRolloverBeforeFirstEpochBlock covers a failure in
 // the first block of an epoch. The rollover commits before that block applies,
 // so the ledger tip is still in the previous epoch while the current epoch

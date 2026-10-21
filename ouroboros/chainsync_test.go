@@ -4031,6 +4031,19 @@ func TestChainsyncServerLocalClientNotServedAheadOfLedger(t *testing.T) {
 	require.True(t, f.observe(t).IsAwaitReply(), "expected AwaitReply")
 	block3, point3 := appendChild(block2, 0x03)
 	requireServedOnceApplied(block3, point3)
+
+	// A block rolled back before application must never be served. The
+	// iterator's rollback is delivered even while the applied tip remains
+	// below the abandoned block's slot.
+	_, _ = appendChild(block3, 0x04)
+	require.NoError(t, f.h.RequestNext())
+	require.True(t, f.observe(t).IsAwaitReply(), "expected AwaitReply")
+	require.NoError(t, f.o.ledgerState.Chain().Rollback(t.Context(), point3))
+	rollback := f.observe(t)
+	require.True(t, rollback.IsRollBackward(), "expected RollBackward")
+	rollbackPoint, ok := rollback.Point()
+	require.True(t, ok)
+	require.Equal(t, point3, rollbackPoint)
 }
 
 // =============================================================================
