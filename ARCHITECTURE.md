@@ -6034,8 +6034,8 @@ it. Dingo implements this as a **corroboration gate**
   diversity group (`PeerGovernor.DiversityGroupByConnId`, wired through
   `ChainSelectorConfig.PeerIdentity`): the topology group ID, else the /24
   (IPv4) or /64 (IPv6) prefix, else the host name. A connection the hook
-  cannot place, such as an inbound connection peer governance declined to
-  track at its peer-list cap, has no identity and fails closed: as a candidate
+  cannot place, such as an inbound connection peer governance rejected and is
+  closing at its peer-list cap, has no identity and fails closed: as a candidate
   it has no corroborators, and as a witness it does not count. Keying it by
   remote host instead would put it in a different namespace from its tracked
   siblings, so one operator could corroborate itself. Without a hook the
