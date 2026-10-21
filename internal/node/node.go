@@ -870,6 +870,12 @@ func buildDingoConfig(
 		dingo.WithBarkArchiveMaxConcurrentFetches(
 			cfg.BarkArchiveMaxConcurrentFetches,
 		),
+		dingo.WithBarkArchiveLookupsPerSecond(
+			cfg.BarkArchiveLookupsPerSecond,
+		),
+		dingo.WithBarkArchiveCallerLookupsPerSecond(
+			cfg.BarkArchiveCallerLookupsPerSecond,
+		),
 		dingo.WithBarkOperatorCertificateFingerprints(
 			cfg.BarkOperatorCertificateFingerprints,
 		),
