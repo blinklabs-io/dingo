@@ -1025,6 +1025,47 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 			}
 		}
 	}
+	// Node-managed Mithril sync runs only inside a serving node, so the
+	// one-shot `dingo mithril sync` and `dingo sync --mithril` paths are
+	// not gated by these settings.
+	if c.Mithril.Enabled && effectiveMode.RequiresListeners() {
+		if c.StorageMode == storageModeAPI {
+			errs = append(errs, errors.New(
+				"mithril.enabled requires core storage mode",
+			))
+		}
+		if c.Mithril.BatchChunks < 1 {
+			errs = append(errs, fmt.Errorf(
+				"invalid mithril.batchChunks %d: must be at least 1",
+				c.Mithril.BatchChunks,
+			))
+		}
+		if c.Mithril.WindowChunks < c.Mithril.BatchChunks {
+			errs = append(errs, fmt.Errorf(
+				"invalid mithril.windowChunks %d: must be at least "+
+					"mithril.batchChunks (%d)",
+				c.Mithril.WindowChunks, c.Mithril.BatchChunks,
+			))
+		}
+		if c.Mithril.DownloadWorkers < 1 {
+			errs = append(errs, fmt.Errorf(
+				"invalid mithril.downloadWorkers %d: must be at least 1",
+				c.Mithril.DownloadWorkers,
+			))
+		}
+		if c.Mithril.CheckInterval <= 0 {
+			errs = append(errs, fmt.Errorf(
+				"invalid mithril.checkInterval %s: must be positive",
+				c.Mithril.CheckInterval,
+			))
+		}
+		if c.Mithril.RetryBackoff <= 0 {
+			errs = append(errs, fmt.Errorf(
+				"invalid mithril.retryBackoff %s: must be positive",
+				c.Mithril.RetryBackoff,
+			))
+		}
+	}
 	if c.Mithril.DownloadMaxBytes < 0 {
 		errs = append(errs, fmt.Errorf(
 			"invalid mithril.downloadMaxBytes %d: must not be negative",

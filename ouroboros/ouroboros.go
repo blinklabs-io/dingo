@@ -229,6 +229,8 @@ type Ouroboros struct {
 	// requested on any connection; see claimBehindTipRecycle.
 	behindTipRecycleMu sync.Mutex
 	behindTipRecycleAt time.Time
+	// heldTips refreshes held clients' tips. See chainsync_hold.go.
+	heldTips heldTipRefresher
 	// chainSelectionShouldVerifyHeaderCrypto and chainSelectionVerifyHeaderCrypto
 	// gate whether a peer-reported header may influence Genesis chain-selection
 	// density or corroboration before its VRF/KES cryptography (and, once local
@@ -249,6 +251,18 @@ type Ouroboros struct {
 	futureHeaderResyncClosed bool
 	deferredHeaderRecoveryMu sync.Mutex
 	deferredHeaderRecovery   map[ouroboros.ConnectionId]ochainsync.Tip
+	// chainsyncLocalChainTips returns the hashes of the local block tip and
+	// header-queue tip. Tests override it without a LedgerState.
+	chainsyncLocalChainTips func() (tipHash, headerTipHash []byte)
+	// deferredHeaderIdleRetry records, per connection, the applied tip at
+	// which a deferred header last forced an immediate re-intersection.
+	deferredHeaderIdleRetry map[ouroboros.ConnectionId][]byte
+	// acceptedHeaderMu guards acceptedHeaderTips, the hash of the last header
+	// from each connection that passed producer-authorization gating. Ledger
+	// admission is asynchronous, so a pipelined child can arrive before its
+	// parent reaches the queue.
+	acceptedHeaderMu   sync.Mutex
+	acceptedHeaderTips map[ouroboros.ConnectionId][]byte
 	// Per-peer rate limiter for TxSubmission server
 	txSubmissionRateLimiter *txSubmissionRateLimiter
 	// Cached Leios EB material fetched from peers. This lets NtC
@@ -789,6 +803,13 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 		}
 		o.chainSelectionShouldVerifyHeaderCrypto = o.ledgerState.ShouldVerifyChainSelectionHeaderCrypto
 		o.chainSelectionVerifyHeaderCrypto = o.ledgerState.ValidateChainSelectionHeaderCryptoWithGeneration
+		o.chainsyncLocalChainTips = func() ([]byte, []byte) {
+			c := o.ledgerState.Chain()
+			if c == nil {
+				return nil, nil
+			}
+			return c.Tip().Point.Hash, c.HeaderTip().Point.Hash
+		}
 	}
 	// Initialize per-peer TxSubmission rate limiter
 	txRate := cfg.MaxTxSubmissionsPerSecond
@@ -1193,6 +1214,7 @@ func (o *Ouroboros) HandleConnClosedEvent(evt event.Event) {
 	connId := e.ConnectionId
 	o.cancelFutureHeaderResync(connId)
 	o.clearDeferredHeaderRecovery(connId)
+	o.forgetAcceptedHeaderTip(connId)
 	o.forgetServedActivity(connId)
 
 	// Counts keep-alive pong timeouts.

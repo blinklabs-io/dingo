@@ -189,8 +189,9 @@ func (d *Database) MaxLeiosEBSlotContext(
 
 // SetLeiosEBTxs persists the complete raw transaction bodies of a Leios
 // endorser block to the blob store, keyed by the exact (slot, hash)
-// occurrence. txsRaw is the CBOR-in-CBOR wrapped tx list from leios-fetch
-// MsgBlockTxs, stored as a CBOR-encoded []cbor.RawMessage.
+// occurrence. txsRaw is the list of block_transaction CBOR values from
+// leios-fetch MsgBlockTxs after its tag-24 wrapping is removed, stored as a
+// CBOR-encoded []cbor.RawMessage.
 // Only call this when the transaction cache is complete (all txCount txs).
 // key: "et" + hash(32) + slot(8) → value: CBOR-encoded []cbor.RawMessage.
 func (d *Database) SetLeiosEBTxs(
@@ -226,8 +227,8 @@ func (d *Database) SetLeiosEBTxs(
 
 // GetLeiosEBTxs retrieves the raw transaction bodies for the exact (slot,
 // hash) occurrence named. Returns ErrBlobKeyNotFound when no txs have been
-// stored for that occurrence. The returned slice is in the same CBOR-in-CBOR
-// wrapped format used by the leios-fetch MsgBlockTxs wire message.
+// stored for that occurrence. The returned slice holds the block_transaction
+// CBOR values exactly as SetLeiosEBTxs stored them.
 //
 // On a miss it also tries the legacy key (hash only, see
 // GetLeiosEBManifest), gated on the legacy "em" record's embedded slot

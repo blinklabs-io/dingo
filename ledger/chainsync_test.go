@@ -6296,47 +6296,89 @@ func TestChainsyncHeaderVerificationRejectsStaleIngressVerdict(t *testing.T) {
 	err = ls.handleEventChainsyncBlockHeader(event)
 	require.ErrorContains(t, err, "block header crypto verification failed")
 
+	// A verification context that cannot be pinned (a durable state transition
+	// is in flight) defers producer authorization rather than failing it. The
+	// header still joins the block-fetch queue, whose body path verifies it
+	// before application: withholding it deadlocked sync whenever only
+	// applying queued blocks could make its authorization verifiable, as at
+	// the Byron->Shelley boundary. It carries no verification verdict, so it
+	// cannot advance the admitted frontier or roll back canonical state.
 	event.HeaderCryptoVerificationGeneration = ls.loadConsensusSnapshot().generation
+	// Like the ouroboros ingress owner, the admission callback commits the
+	// update it shares with the event, read when admission resolves.
+	peerTipUpdate := &chainselection.PeerTipUpdateEvent{
+		ConnectionId:                       event.ConnectionId,
+		AdmissionID:                        1,
+		HeaderCryptoVerificationGeneration: event.HeaderCryptoVerificationGeneration,
+	}
+	event.PeerTipUpdate = peerTipUpdate
 	admissionResolved := false
-	admitted := true
+	admitted := false
+	var admittedGeneration uint64
 	event.PeerTipAdmission = func(value bool) {
 		admissionResolved = true
 		admitted = value
+		admittedGeneration = peerTipUpdate.HeaderCryptoVerificationGeneration
 	}
 	finishTransition := ls.beginTxValidationTransition()
 	err = ls.handleEventChainsyncBlockHeader(event)
 	finishTransition()
 	require.NoError(t, err)
 	require.True(t, admissionResolved)
-	require.False(t, admitted, "deferred authorization must reject selector admission")
-	require.Empty(
+	require.True(t, admitted, "a queued header resolves its admission")
+	require.Zero(
 		t,
-		ls.peerHeaderHistory[connIdKey(event.ConnectionId)],
-		"deferred authorization must not enter trusted peer history",
+		admittedGeneration,
+		"the admission callback must not commit the stale generation without its pin",
 	)
+	history := ls.peerHeaderHistory[connIdKey(event.ConnectionId)]
+	require.NotNil(t, history)
+	for _, record := range history.byHash {
+		require.Zero(
+			t,
+			record.event.HeaderCryptoVerificationGeneration,
+			"deferred authorization must not enter peer history as verified",
+		)
+	}
 	require.False(
 		t,
 		ls.chain.FirstVerifiedHeaderMatchesPoint(event.Point),
 		"a durable state transition must not retain a stale verification verdict",
 	)
-	require.Zero(t, ls.chain.HeaderCount(), "deferred header must stay out of the queue")
+	require.Equal(t, 1, ls.chain.HeaderCount(), "deferred header joins the queue unverified")
 
 	// A rollback can remove the epoch nonce at the same time it invalidates
-	// the ingress verdict. The missing nonce must not turn that stale verdict
-	// into permission to queue the header for later body validation.
-	event.HeaderCryptoVerificationGeneration = ls.loadConsensusSnapshot().generation
+	// the ingress verdict. The stale verdict must not survive into the queue:
+	// the header is handled exactly like one whose nonce was never available.
+	child := mockHeader{
+		hash:        lcommon.Blake2b256{0x01},
+		prevHash:    header.Hash(),
+		slot:        1020,
+		blockNumber: 101,
+	}
+	childEvent := event
+	childEvent.BlockHeader = child
+	childEvent.Point = ocommon.NewPoint(child.SlotNumber(), child.Hash().Bytes())
+	childEvent.HeaderCryptoVerificationGeneration = ls.loadConsensusSnapshot().generation
+	peerTipUpdate = &chainselection.PeerTipUpdateEvent{
+		ConnectionId:                       childEvent.ConnectionId,
+		AdmissionID:                        2,
+		HeaderCryptoVerificationGeneration: childEvent.HeaderCryptoVerificationGeneration,
+	}
+	childEvent.PeerTipUpdate = peerTipUpdate
 	ls.Lock()
 	ls.epochCache[0].Nonce = nil
 	ls.publishSnapshotsLocked()
 	ls.Unlock()
 	admissionResolved = false
-	admitted = true
-	err = ls.handleEventChainsyncBlockHeader(event)
+	admitted = false
+	err = ls.handleEventChainsyncBlockHeader(childEvent)
 	require.NoError(t, err)
 	require.True(t, admissionResolved)
-	require.False(t, admitted)
-	require.Empty(t, ls.peerHeaderHistory[connIdKey(event.ConnectionId)])
-	require.Zero(t, ls.chain.HeaderCount())
+	require.True(t, admitted)
+	require.Zero(t, admittedGeneration)
+	require.False(t, ls.chain.FirstVerifiedHeaderMatchesPoint(childEvent.Point))
+	require.Equal(t, 2, ls.chain.HeaderCount())
 }
 
 func TestBufferedHeaderReplayRemovesHistoryWhenAdmissionBecomesStale(
@@ -18699,9 +18741,9 @@ WHERE spent_at_tx_id IS NOT NULL
 // The Musashi Conway genesis declares three genesis committee members, all
 // key-hash cold credentials, each expiring at epoch 293.
 var musashiGenesisCommitteeColdKeys = []string{
-	"0fa32e5f69a89afa3f5e1074660b975dde8e5a89c1b8004d49501e33",
-	"518a0c96344656d332625e33aa680b6c25bbce6b5972a30adf1dce8d",
-	"8feda2412bec6f79bc5996a5055bcff28d230cb9c85fb9d5e8743a46",
+	"05af229dbbca7476e58911b5d261c4a8893e278a3da4c113cf36d596",
+	"58104d23f4d80b24a6e0b90d365b1d118ce874e5a8cee71b1b7ceade",
+	"db06f928b6ab05a2195e92dbec341fe85a9414b87b7564b7127ba0df",
 }
 
 // TestCreateGenesisBlockSeedsCommitteeOnExistingDatabase covers the upgrade
@@ -18931,8 +18973,8 @@ const (
 		"bafkreiazhhawe7sjwuthcfgl3mmv2swec7sukvclu3oli7qdyz4uhhuvmy"
 	musashiConstitutionAnchorHash = "2a61e2f4b63442978140c77a70daab396" +
 		"1b22b12b63b13949a390c097214d1c5"
-	musashiConstitutionScriptHash = "fa24fb305126805cf2164c161d852a0e" +
-		"7330cf988f1fe558cf7d4a64"
+	musashiConstitutionScriptHash = "e3172285605e502bde008a7efe2b2eec" +
+		"516958b7bae911947a5c9373"
 )
 
 // genesisConstitutionTestState builds a LedgerState over a file-backed test

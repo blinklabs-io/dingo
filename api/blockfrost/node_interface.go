@@ -131,8 +131,9 @@ type BlockfrostNode interface {
 	PoolsList(ctx context.Context, params PaginationParams) ([]string, int, error)
 
 	// Address returns summary information for an address,
-	// including balances aggregated across its live UTxOs.
-	Address(address string) (AddressInfo, error)
+	// including balances aggregated across its live UTxOs. The read stops
+	// when ctx is cancelled.
+	Address(ctx context.Context, address string) (AddressInfo, error)
 
 	// PoolsRetiring returns the paginated list of pools with a
 	// pending retirement announcement, along with the total number
