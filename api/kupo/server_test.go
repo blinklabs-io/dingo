@@ -84,8 +84,6 @@ func (i *sliceMatchIterator) Next() (Match, bool, error) {
 	return match, true, nil
 }
 
-func (*sliceMatchIterator) Resume() (*MatchCursor, bool) { return nil, false }
-
 func (*sliceMatchIterator) Close() {}
 
 func (m *mockNode) Datum(
@@ -740,8 +738,6 @@ func (i *endlessMatchIterator) Next() (Match, bool, error) {
 		Value:         Value{Coins: 1},
 	}, true, nil
 }
-
-func (*endlessMatchIterator) Resume() (*MatchCursor, bool) { return nil, false }
 
 func (i *endlessMatchIterator) Close() { close(i.closed) }
 

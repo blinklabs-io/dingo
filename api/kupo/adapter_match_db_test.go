@@ -18,12 +18,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
-	"encoding/json"
 	"fmt"
-	"net/http"
-	"net/http/httptest"
-	"net/url"
-	"slices"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/chain"
@@ -57,21 +52,6 @@ func historyFixtureEnterprise(t *testing.T) lcommon.Address {
 	return addr
 }
 
-// historyFixturePointer shares the enterprise address's payment credential,
-// so the credential-level storage predicate selects it while the Kupo address
-// pattern rejects it.
-func historyFixturePointer(t *testing.T) lcommon.Address {
-	t.Helper()
-	raw := []byte{
-		(lcommon.AddressTypeKeyPointer << 4) | lcommon.AddressNetworkTestnet,
-	}
-	raw = append(raw, historyFixturePayment...)
-	raw = append(raw, 0x01, 0x00, 0x00)
-	addr, err := lcommon.NewAddressFromBytes(raw)
-	require.NoError(t, err)
-	return addr
-}
-
 // newHistoryFixtureAdapter seeds one output per row in stored order and pays
 // row i to addrFor(i).
 func newHistoryFixtureAdapter(
@@ -79,7 +59,22 @@ func newHistoryFixtureAdapter(
 	addrFor func(row int) lcommon.Address,
 ) (*NodeAdapter, []string) {
 	t.Helper()
-	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	adapter, _, keys := newHistoryFixture(t, addrFor, 0)
+	return adapter, keys
+}
+
+// newHistoryFixture is newHistoryFixtureAdapter with the metadata read pool
+// sized to maxConnections (zero keeps the default) and the database exposed.
+func newHistoryFixture(
+	t *testing.T,
+	addrFor func(row int) lcommon.Address,
+	maxConnections int,
+) (*NodeAdapter, *database.Database, []string) {
+	t.Helper()
+	db, err := dbtest.NewDatabaseWithOptions(t, dbtest.Options{
+		Config:         &database.Config{DataDir: t.TempDir()},
+		MaxConnections: maxConnections,
+	})
 	require.NoError(t, err)
 	raw, err := dbtest.RawSQLiteMetadata(t, db)
 	require.NoError(t, err)
@@ -163,202 +158,5 @@ INSERT INTO utxo (
 	for i, r := range refs {
 		keys[i] = fmt.Sprintf("%x#%d", r.txID, r.output)
 	}
-	return adapter, keys
-}
-
-func drainMatches(
-	t *testing.T,
-	adapter *NodeAdapter,
-	query MatchQuery,
-	limit int,
-) ([]string, *MatchCursor, bool) {
-	t.Helper()
-	iter, err := adapter.Matches(context.Background(), query)
-	require.NoError(t, err)
-	defer iter.Close()
-	var got []string
-	for limit <= 0 || len(got) < limit {
-		match, ok, err := iter.Next()
-		require.NoError(t, err)
-		if !ok {
-			break
-		}
-		got = append(
-			got,
-			fmt.Sprintf("%s#%d", match.TransactionID, match.OutputIndex),
-		)
-	}
-	cursor, truncated := iter.Resume()
-	return got, cursor, truncated
-}
-
-// TestNodeMatchesScanBudgetResumesStoredOrderInBothDirections drives the
-// storage-backed iterator through the scan budget and the cursor in both
-// result orders, over rows that tie on slot and on transaction index.
-func TestNodeMatchesScanBudgetResumesStoredOrderInBothDirections(
-	t *testing.T,
-) {
-	t.Parallel()
-
-	enterprise := historyFixtureEnterprise(t)
-	adapter, keys := newHistoryFixtureAdapter(
-		t,
-		func(int) lcommon.Address { return enterprise },
-	)
-	for _, oldestFirst := range []bool{true, false} {
-		t.Run(fmt.Sprintf("oldest_first=%t", oldestFirst), func(t *testing.T) {
-			want := slices.Clone(keys)
-			if !oldestFirst {
-				slices.Reverse(want)
-			}
-			query := MatchQuery{
-				Pattern:     "*",
-				OldestFirst: oldestFirst,
-				MaxScan:     matchPageSize,
-			}
-			var all []string
-			var sizes []int
-			for range 5 {
-				got, cursor, truncated := drainMatches(t, adapter, query, 0)
-				all = append(all, got...)
-				sizes = append(sizes, len(got))
-				if !truncated {
-					break
-				}
-				require.NotNil(t, cursor)
-				query.Cursor = cursor
-			}
-			require.Equal(t, []int{512, 512, len(keys) - 1024}, sizes)
-			require.Equal(t, want, all)
-		})
-	}
-}
-
-// TestNodeMatchesCursorResumesAfterTheLastReturnedRow pins the position a
-// response cut short by its row or byte budget resumes from: the row after
-// the last one returned, even in the middle of a storage page.
-func TestNodeMatchesCursorResumesAfterTheLastReturnedRow(t *testing.T) {
-	t.Parallel()
-
-	enterprise := historyFixtureEnterprise(t)
-	adapter, keys := newHistoryFixtureAdapter(
-		t,
-		func(int) lcommon.Address { return enterprise },
-	)
-	for _, oldestFirst := range []bool{true, false} {
-		t.Run(fmt.Sprintf("oldest_first=%t", oldestFirst), func(t *testing.T) {
-			want := slices.Clone(keys)
-			if !oldestFirst {
-				slices.Reverse(want)
-			}
-			query := MatchQuery{Pattern: "*", OldestFirst: oldestFirst}
-			head, cursor, truncated := drainMatches(t, adapter, query, 101)
-			require.False(t, truncated)
-			require.Equal(t, want[:101], head)
-			query.Cursor = cursor
-			rest, _, truncated := drainMatches(t, adapter, query, 0)
-			require.False(t, truncated)
-			require.Equal(t, want[101:], rest)
-		})
-	}
-}
-
-// TestNodeMatchesScanBudgetCountsRowsTheAddressPatternRejects pins what the
-// scan budget measures: every row storage returns, including outputs that
-// share the requested payment credential but not the requested address. An
-// address query whose only match follows more rejected rows than the budget
-// therefore ends with a cursor instead of reading them all.
-func TestNodeMatchesScanBudgetCountsRowsTheAddressPatternRejects(
-	t *testing.T,
-) {
-	t.Parallel()
-
-	target := historyFixtureEnterprise(t)
-	sibling := historyFixturePointer(t)
-	const rows = historyFixtureSlots * 4
-	adapter, keys := newHistoryFixtureAdapter(
-		t,
-		func(row int) lcommon.Address {
-			if row == rows-1 {
-				return target
-			}
-			return sibling
-		},
-	)
-	query := MatchQuery{
-		Pattern:     target.String(),
-		OldestFirst: true,
-		MaxScan:     matchPageSize,
-	}
-	var all []string
-	var sizes []int
-	for range 5 {
-		got, cursor, truncated := drainMatches(t, adapter, query, 0)
-		all = append(all, got...)
-		sizes = append(sizes, len(got))
-		if !truncated {
-			break
-		}
-		require.NotNil(t, cursor)
-		query.Cursor = cursor
-	}
-	require.Equal(t, []int{0, 0, 1}, sizes)
-	require.Equal(t, []string{keys[rows-1]}, all)
-}
-
-// TestStoredMatchesPageOverHTTPAndRefuseUnpagedOverflow runs the handler over
-// the storage-backed iterator: an opted-in client pages through every row in
-// both orders, and a client without limit is refused rather than truncated.
-func TestStoredMatchesPageOverHTTPAndRefuseUnpagedOverflow(t *testing.T) {
-	t.Parallel()
-
-	enterprise := historyFixtureEnterprise(t)
-	adapter, keys := newHistoryFixtureAdapter(
-		t,
-		func(int) lcommon.Address { return enterprise },
-	)
-	server := New(Config{ListenAddress: ":0"}, adapter, nil)
-	server.maxMatchRows = len(keys) - 1
-	httpServer := httptest.NewServer(server.handler())
-	t.Cleanup(httpServer.Close)
-
-	for _, order := range []string{"oldest_first", "most_recent_first"} {
-		want := slices.Clone(keys)
-		if order == "most_recent_first" {
-			slices.Reverse(want)
-		}
-		var got []string
-		cursor := ""
-		for range 10 {
-			target := httpServer.URL + "/matches?limit=300&order=" + order
-			if cursor != "" {
-				target += "&cursor=" + url.QueryEscape(cursor)
-			}
-			resp, err := http.Get(target) // #nosec G107 G704 -- local test server
-			require.NoError(t, err)
-			var rows []struct {
-				TransactionID string `json:"transaction_id"`
-				OutputIndex   uint32 `json:"output_index"`
-			}
-			require.Equal(t, http.StatusOK, resp.StatusCode)
-			require.NoError(t, json.NewDecoder(resp.Body).Decode(&rows))
-			require.NoError(t, resp.Body.Close())
-			for _, row := range rows {
-				got = append(
-					got,
-					fmt.Sprintf("%s#%d", row.TransactionID, row.OutputIndex),
-				)
-			}
-			cursor = resp.Header.Get(nextCursorHeader)
-			if cursor == "" {
-				break
-			}
-		}
-		require.Equal(t, want, got, order)
-	}
-
-	resp, err := http.Get(httpServer.URL + "/matches") // #nosec G107 G704 -- local test server
-	require.NoError(t, err)
-	require.NoError(t, resp.Body.Close())
-	require.Equal(t, http.StatusUnprocessableEntity, resp.StatusCode)
+	return adapter, db, keys
 }

@@ -11218,36 +11218,30 @@ reserves a metadata read connection before briefly taking the commit barriers,
 keeping an exhausted-pool wait outside them. Admission remains held for the
 snapshot's lifetime and is capped at one below the provider's read-pool size,
 so client-paced responses cannot consume the connection destructive rollback
-needs for operational reads. Kupo admits at most three `/matches` requests
-globally and one per remote address, so any two clients leave a slot for a
-third, and each request has a five-minute lifetime. Excess requests receive
-HTTP 429.
+needs for operational reads. Kupo admits at most three match streams globally
+and one per remote address, so any two clients leave a slot for a third, and
+each stream has a five-minute lifetime. Excess streams receive HTTP 429. A
+30-second write deadline is also re-armed before every response write, so a
+client that stops reading ends its stream before the lifetime expires.
 
-A `/matches` response is collected in memory before its status line is
-written, bounded to 10,000 rows, 8 MiB (one oversized match may exceed it
-alone) and 20,000 rows read from storage, the last checked at 512-row page
-boundaries. The iterator, and with it the read snapshot, is released before
-the body is written, so a slow reader holds an admission slot and at most one
-buffered page, never a snapshot. Kupo defines no pagination and its clients
-treat a 200 array as the complete result, so a request without `limit` either
-receives its complete result or, when any bound is reached, HTTP 422 with a
-hint naming `limit` and `cursor`; it never receives a successful prefix.
-Pagination is a Dingo extension: `limit` (1 to 10,000) opts in and sets the
-page size, and when more matches may remain the `X-Kupo-Next-Cursor` response
-header carries `slot:transaction_index:output_index:tx_id`. The `cursor`
-parameter, accepted only with `limit`, resumes strictly after that position
-with the same order and filters, in either order. A page that ends at the last
-match carries no cursor; a page cut by the storage-read budget always does,
-since more matches may follow. A 30-second write deadline is re-armed before
-every response write, and the request lifetime is checked between rows, so a
-client that stops reading releases its slot.
-
-The match iterator reads 512-row pages through an ordering cursor, hydrates
-spending details only for the current page, and checks request cancellation
-between rows. Slot lookups avoid reverse blob iteration: metadata uses a
-forward seek, while non-strict checkpoints binary-search the
-ordered block index bounded by the snapshot tip. This matters for S3 and GCS,
-whose reverse iterators list the complete key prefix before seeking.
+`/matches` follows the upstream Kupo contract: an ordinary request streams the
+complete filtered array, with no Dingo pagination parameters, headers or
+size-based error. Resource use is bounded internally instead. Match results
+are read in 512-row pages through an ordering cursor; each page is fully
+hydrated, spending details included, under its own read snapshot, and that
+snapshot is released before the page is streamed. A slow reader therefore
+holds one Kupo stream slot and at most one hydrated page, never a snapshot or
+a read connection, and database work for match streams is bounded by the
+three stream slots. The first page shares the snapshot that produced the
+`X-Most-Recent-Checkpoint`/`ETag` headers; later pages read later snapshots
+that still exclude outputs created after that tip, so spend status and
+rollbacks are consistent per page rather than across the stream, unlike
+upstream's single transaction. Request cancellation is checked
+between rows and results are flushed every 128. Slot lookups avoid reverse
+blob iteration: metadata uses a forward seek, while non-strict checkpoints
+binary-search the ordered block index bounded by the snapshot tip. This
+matters for S3 and GCS, whose reverse iterators list the complete key prefix
+before seeking.
 
 ### Blockfrost API (`api/blockfrost/`)
 

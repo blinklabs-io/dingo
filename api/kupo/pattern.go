@@ -217,10 +217,6 @@ func (p parsedPattern) addressQuery() (bool, []models.UtxoAddressPattern, error)
 		if len(pattern.PaymentPart) == 0 && len(pattern.DelegationPart) == 0 {
 			return true, nil, nil
 		}
-		// Credential-only on purpose: matchesAddress applies the exact
-		// address after storage returns each row, so the match scan budget
-		// counts every rejected row. An ExactAddress pattern would move that
-		// filtering into an uncounted database candidate scan.
 		return false, []models.UtxoAddressPattern{pattern}, nil
 	case patternCredentials:
 		pattern := models.UtxoAddressPattern{}

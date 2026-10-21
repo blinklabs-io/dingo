@@ -36,9 +36,6 @@ const (
 	matchStreamTimeout        = 5 * time.Minute
 	maxConcurrentMatchStreams = 3
 	maxMatchStreamsPerClient  = 1
-	maxMatchRows              = 10_000
-	maxMatchBytes             = 8 << 20
-	maxMatchScan              = 20_000
 )
 
 // Server is a Kupo-compatible HTTP API backed by Dingo's complete index.
@@ -50,9 +47,6 @@ type Server struct {
 	responseWriteTimeout time.Duration
 	matchStreamTimeout   time.Duration
 	matchAdmission       *matchAdmission
-	maxMatchRows         int
-	maxMatchBytes        int
-	maxMatchScan         int
 }
 
 // New creates a Kupo-compatible server.
@@ -71,9 +65,6 @@ func New(cfg Config, node KupoNode, logger *slog.Logger) *Server {
 		listener:             apilistener.New("Kupo API", logger),
 		responseWriteTimeout: responseWriteTimeout,
 		matchStreamTimeout:   matchStreamTimeout,
-		maxMatchRows:         maxMatchRows,
-		maxMatchBytes:        maxMatchBytes,
-		maxMatchScan:         maxMatchScan,
 		matchAdmission: newMatchAdmission(
 			maxConcurrentMatchStreams,
 			maxMatchStreamsPerClient,
