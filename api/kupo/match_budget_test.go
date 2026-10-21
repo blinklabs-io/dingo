@@ -21,10 +21,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/stretchr/testify/require"
@@ -102,15 +104,17 @@ type budgetPage struct {
 	cursor  string
 }
 
+// fetchBudgetPage requests one opted-in page of at most limit rows.
 func fetchBudgetPage(
 	t *testing.T,
 	baseURL string,
+	limit int,
 	cursor string,
 ) budgetPage {
 	t.Helper()
-	target := baseURL + "/matches"
+	target := baseURL + "/matches?limit=" + strconv.Itoa(limit)
 	if cursor != "" {
-		target += "?cursor=" + url.QueryEscape(cursor)
+		target += "&cursor=" + url.QueryEscape(cursor)
 	}
 	resp, err := http.Get(target) // #nosec G107 G704 -- local test server
 	require.NoError(t, err)
@@ -122,28 +126,24 @@ func fetchBudgetPage(
 		OutputIndex uint32 `json:"output_index"`
 	}
 	require.NoError(t, json.Unmarshal(body, &rows))
-	page := budgetPage{cursor: resp.Trailer.Get(nextCursorTrailer)}
+	page := budgetPage{cursor: resp.Header.Get(nextCursorHeader)}
 	for _, row := range rows {
 		page.outputs = append(page.outputs, row.OutputIndex)
 	}
 	return page
 }
 
-func TestMatchesRowBudgetTruncatesAndResumesWithoutGapsOrDuplicates(
+func fetchAllPages(
 	t *testing.T,
-) {
-	t.Parallel()
-
-	server := newTestServer(&pagedNode{total: 25})
-	server.maxMatchRows = 10
-	httpServer := httptest.NewServer(server.handler())
-	t.Cleanup(httpServer.Close)
-
+	baseURL string,
+	limit int,
+) ([]uint32, []int) {
+	t.Helper()
 	var all []uint32
 	var sizes []int
 	cursor := ""
-	for range 10 {
-		page := fetchBudgetPage(t, httpServer.URL, cursor)
+	for range 200 {
+		page := fetchBudgetPage(t, baseURL, limit, cursor)
 		all = append(all, page.outputs...)
 		sizes = append(sizes, len(page.outputs))
 		if page.cursor == "" {
@@ -151,15 +151,97 @@ func TestMatchesRowBudgetTruncatesAndResumesWithoutGapsOrDuplicates(
 		}
 		cursor = page.cursor
 	}
-	require.Equal(t, []int{10, 10, 5}, sizes)
-	want := make([]uint32, 25)
-	for i := range want {
-		want[i] = uint32(i) // #nosec G115 -- test index is small
-	}
-	require.Equal(t, want, all)
+	return all, sizes
 }
 
-func TestMatchesByteBudgetTruncatesWithCursor(t *testing.T) {
+func sequence(n int) []uint32 {
+	ret := make([]uint32, n)
+	for i := range ret {
+		ret[i] = uint32(i) // #nosec G115 -- test index is small
+	}
+	return ret
+}
+
+func requireIncompleteResultRefused(t *testing.T, resp *httptest.ResponseRecorder) {
+	t.Helper()
+	require.Equal(t, http.StatusUnprocessableEntity, resp.Code)
+	var rows []json.RawMessage
+	require.Error(
+		t,
+		json.Unmarshal(resp.Body.Bytes(), &rows),
+		"a refused result must not decode as a match array",
+	)
+	var hint struct {
+		Hint string `json:"hint"`
+	}
+	require.NoError(t, json.Unmarshal(resp.Body.Bytes(), &hint))
+	require.Contains(t, hint.Hint, "limit")
+	require.Empty(t, resp.Header().Get(nextCursorHeader))
+}
+
+func TestMatchesWithoutLimitRefusesMoreThanTheRowBudget(t *testing.T) {
+	t.Parallel()
+
+	resp := serve(t, newTestServer(&pagedNode{total: maxMatchRows + 1}),
+		http.MethodGet, "/matches", nil)
+	requireIncompleteResultRefused(t, resp)
+}
+
+func TestMatchesWithoutLimitReturnsAResultThatFillsTheRowBudget(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	resp := serve(t, newTestServer(&pagedNode{total: maxMatchRows}),
+		http.MethodGet, "/matches", nil)
+	require.Equal(t, http.StatusOK, resp.Code)
+	var rows []json.RawMessage
+	require.NoError(t, json.Unmarshal(resp.Body.Bytes(), &rows))
+	require.Len(t, rows, maxMatchRows)
+	require.Empty(t, resp.Header().Get(nextCursorHeader))
+}
+
+func TestMatchesWithoutLimitRefusesMoreThanTheByteBudget(t *testing.T) {
+	t.Parallel()
+
+	server := newTestServer(&pagedNode{total: 100})
+	server.maxMatchBytes = 1500
+	requireIncompleteResultRefused(
+		t,
+		serve(t, server, http.MethodGet, "/matches", nil),
+	)
+}
+
+func TestMatchesWithoutLimitRefusesAScanLimitedResult(t *testing.T) {
+	t.Parallel()
+
+	server := newTestServer(&pagedNode{total: 100, scanLimit: 7})
+	requireIncompleteResultRefused(
+		t,
+		serve(t, server, http.MethodGet, "/matches", nil),
+	)
+}
+
+func TestMatchesLimitPagesWithoutGapsOrDuplicates(t *testing.T) {
+	t.Parallel()
+
+	for _, total := range []int{25, 20} {
+		httpServer := httptest.NewServer(
+			newTestServer(&pagedNode{total: uint64(total)}).handler(),
+		)
+		all, sizes := fetchAllPages(t, httpServer.URL, 10)
+		httpServer.Close()
+		require.Equal(t, sequence(total), all)
+		// A page that ends exactly at the last row carries no cursor.
+		want := []int{10, 10}
+		if total == 25 {
+			want = append(want, 5)
+		}
+		require.Equal(t, want, sizes)
+	}
+}
+
+func TestMatchesLimitByteBudgetEndsThePageWithACursor(t *testing.T) {
 	t.Parallel()
 
 	server := newTestServer(&pagedNode{total: 100})
@@ -167,40 +249,27 @@ func TestMatchesByteBudgetTruncatesWithCursor(t *testing.T) {
 	httpServer := httptest.NewServer(server.handler())
 	t.Cleanup(httpServer.Close)
 
-	page := fetchBudgetPage(t, httpServer.URL, "")
-	require.NotEmpty(t, page.outputs)
-	require.Less(t, len(page.outputs), 100)
-	require.NotEmpty(t, page.cursor)
-	next := fetchBudgetPage(t, httpServer.URL, page.cursor)
-	require.NotEmpty(t, next.outputs)
-	require.Equal(t, page.outputs[len(page.outputs)-1]+1, next.outputs[0])
+	first := fetchBudgetPage(t, httpServer.URL, maxMatchRows, "")
+	require.NotEmpty(t, first.outputs)
+	require.Less(t, len(first.outputs), 100)
+	require.NotEmpty(t, first.cursor)
+	all, _ := fetchAllPages(t, httpServer.URL, maxMatchRows)
+	require.Equal(t, sequence(100), all)
 }
 
-func TestMatchesScanBudgetReturnsCursorEvenWithoutRows(t *testing.T) {
+func TestMatchesLimitScanBudgetEndsThePageWithACursor(t *testing.T) {
 	t.Parallel()
 
 	server := newTestServer(&pagedNode{total: 100, scanLimit: 7})
 	httpServer := httptest.NewServer(server.handler())
 	t.Cleanup(httpServer.Close)
 
-	page := fetchBudgetPage(t, httpServer.URL, "")
+	page := fetchBudgetPage(t, httpServer.URL, 50, "")
 	require.Len(t, page.outputs, 7)
 	require.Equal(t, budgetCursor(6).String(), page.cursor)
 }
 
-func TestMatchesCompleteResultCarriesNoCursor(t *testing.T) {
-	t.Parallel()
-
-	server := newTestServer(&pagedNode{total: 3})
-	httpServer := httptest.NewServer(server.handler())
-	t.Cleanup(httpServer.Close)
-
-	page := fetchBudgetPage(t, httpServer.URL, "")
-	require.Len(t, page.outputs, 3)
-	require.Empty(t, page.cursor)
-}
-
-func TestMatchesRequestsHonourScanBudgetAndCursorParameter(t *testing.T) {
+func TestMatchesRequestsHonourScanBudgetLimitAndCursor(t *testing.T) {
 	t.Parallel()
 
 	node := &pagedNode{total: 5}
@@ -209,16 +278,87 @@ func TestMatchesRequestsHonourScanBudgetAndCursorParameter(t *testing.T) {
 	cursor := budgetCursor(2)
 
 	resp := serve(t, server, http.MethodGet,
-		"/matches?cursor="+url.QueryEscape(cursor.String()), nil)
+		"/matches?limit=7&cursor="+url.QueryEscape(cursor.String()), nil)
 	require.Equal(t, http.StatusOK, resp.Code)
 	require.Equal(t, 123, node.lastQuery.MaxScan)
+	require.Equal(t, 7, node.lastQuery.Limit)
 	require.Equal(t, cursor, node.lastQuery.Cursor)
 
-	for _, bad := range []string{"1", "a:b:c:d", "1:2:3:zz", "1:2:3:abcd"} {
-		resp := serve(t, server, http.MethodGet,
-			"/matches?cursor="+url.QueryEscape(bad), nil)
+	for _, bad := range []string{
+		"limit=1&cursor=1",
+		"limit=1&cursor=a:b:c:d",
+		"limit=1&cursor=1:2:3:zz",
+		"limit=1&cursor=1:2:3:abcd",
+		"cursor=" + url.QueryEscape(cursor.String()),
+		"limit=0",
+		"limit=-1",
+		"limit=abc",
+		"limit=" + strconv.Itoa(maxMatchRows+1),
+	} {
+		resp := serve(t, server, http.MethodGet, "/matches?"+bad, nil)
 		require.Equal(t, http.StatusBadRequest, resp.Code, bad)
 	}
+}
+
+// closeOrderIterator records whether the iterator, which stands for the
+// read snapshot, was closed before the response body was first written.
+type closeOrderIterator struct {
+	pagedIterator
+	closed *atomic.Bool
+}
+
+func (i *closeOrderIterator) Close() { i.closed.Store(true) }
+
+type closeOrderNode struct {
+	mockNode
+	closed *atomic.Bool
+}
+
+func (n *closeOrderNode) Matches(
+	context.Context,
+	MatchQuery,
+) (MatchIterator, error) {
+	return &closeOrderIterator{
+		pagedIterator: pagedIterator{total: 3},
+		closed:        n.closed,
+	}, nil
+}
+
+type firstWriteRecorder struct {
+	*httptest.ResponseRecorder
+	closed        *atomic.Bool
+	closedAtFirst bool
+	sawWrite      bool
+}
+
+func (w *firstWriteRecorder) Write(p []byte) (int, error) {
+	if !w.sawWrite {
+		w.sawWrite = true
+		w.closedAtFirst = w.closed.Load()
+	}
+	return w.ResponseRecorder.Write(p)
+}
+
+func TestMatchesReleaseTheSnapshotBeforeWritingTheBody(t *testing.T) {
+	t.Parallel()
+
+	closed := &atomic.Bool{}
+	server := newTestServer(&closeOrderNode{closed: closed})
+	w := &firstWriteRecorder{
+		ResponseRecorder: httptest.NewRecorder(),
+		closed:           closed,
+	}
+	server.handler().ServeHTTP(
+		w,
+		httptest.NewRequest(http.MethodGet, "/matches", nil),
+	)
+	require.Equal(t, http.StatusOK, w.Code)
+	require.True(t, w.sawWrite)
+	require.True(
+		t,
+		w.closedAtFirst,
+		"a client-paced body write must not hold the read snapshot",
+	)
 }
 
 func TestMatchCursorRoundTrip(t *testing.T) {
@@ -305,4 +445,41 @@ func TestMatchesTwoLongStreamsLeaveCapacityForAThirdClient(t *testing.T) {
 		recorder.Code,
 		"a third client must not be refused while two streams run",
 	)
+}
+
+// stallingNode returns a few matches and then blocks until the request
+// lifetime ends, standing in for a slow storage scan.
+type stallingNode struct{ mockNode }
+
+func (*stallingNode) Matches(
+	ctx context.Context,
+	_ MatchQuery,
+) (MatchIterator, error) {
+	return &stallingIterator{pagedIterator: pagedIterator{total: 10}, ctx: ctx}, nil
+}
+
+type stallingIterator struct {
+	pagedIterator
+	ctx context.Context
+}
+
+func (i *stallingIterator) Next() (Match, bool, error) {
+	if i.next < 3 {
+		return i.pagedIterator.Next()
+	}
+	<-i.ctx.Done()
+	return Match{}, false, i.ctx.Err()
+}
+
+func TestMatchesPastTheRequestLifetimeFailInsteadOfReturningAPrefix(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	server := newTestServer(&stallingNode{})
+	server.matchStreamTimeout = 50 * time.Millisecond
+	resp := serve(t, server, http.MethodGet, "/matches", nil)
+	require.Equal(t, http.StatusServiceUnavailable, resp.Code)
+	var rows []json.RawMessage
+	require.Error(t, json.Unmarshal(resp.Body.Bytes(), &rows))
 }

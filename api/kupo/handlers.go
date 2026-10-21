@@ -29,10 +29,24 @@ import (
 
 const jsonContentType = "application/json;charset=utf-8"
 
-// nextCursorTrailer carries the cursor that resumes a match response cut
-// short by its row, byte or scan budget. It is absent when the response holds
-// the complete result.
-const nextCursorTrailer = "X-Kupo-Next-Cursor"
+// nextCursorHeader carries the cursor that resumes a paginated match
+// response cut short by its row, byte or scan budget. It is absent when the
+// page ends the result.
+const nextCursorHeader = "X-Kupo-Next-Cursor"
+
+// errIncompleteMatches refuses a request that did not opt into pagination
+// when its result exceeds a response budget. Kupo clients decode a 200 array
+// as the complete result, so returning a prefix would silently drop matches.
+var errIncompleteMatches = fmt.Errorf(
+	"the result exceeds %d matches, %d bytes or %d scanned rows; "+
+		"request it in pages with limit (at most %d) and follow the %s "+
+		"response header with cursor",
+	maxMatchRows,
+	maxMatchBytes,
+	maxMatchScan,
+	maxMatchRows,
+	nextCursorHeader,
+)
 
 func (s *Server) handleMatches(w http.ResponseWriter, r *http.Request) {
 	query, err := parseMatchQuery(r)
@@ -59,7 +73,14 @@ func (s *Server) handleMatches(w http.ResponseWriter, r *http.Request) {
 		s.writeNodeError(w, err)
 		return
 	}
-	defer matches.Close()
+	closed := false
+	closeMatches := func() {
+		if !closed {
+			closed = true
+			matches.Close()
+		}
+	}
+	defer closeMatches()
 	if notModifiedAt(w, r, matches.Tip()) {
 		return
 	}
@@ -67,72 +88,128 @@ func (s *Server) handleMatches(w http.ResponseWriter, r *http.Request) {
 		r.Header.Get("Accept"),
 		"asset-quantity=string",
 	)
+	page, err := s.collectMatches(
+		matches,
+		query,
+		stringQuantities,
+	)
+	// The page is fully buffered, so the read snapshot is released before
+	// the client-paced body write starts.
+	closeMatches()
+	if err != nil {
+		if errors.Is(err, errIncompleteMatches) {
+			writeError(w, http.StatusUnprocessableEntity, err)
+			return
+		}
+		if ctx.Err() != nil {
+			writeError(
+				w,
+				http.StatusServiceUnavailable,
+				errors.New("match query exceeded its time limit"),
+			)
+			return
+		}
+		s.writeNodeError(w, err)
+		return
+	}
 	contentType := jsonContentType
 	if stringQuantities {
 		contentType = "application/json;charset=utf-8;asset-quantity=string"
 	}
 	w.Header().Set("Content-Type", contentType)
-	// Whether the response was cut short is only known once the body ends,
-	// so the continuation cursor travels as a trailer.
-	w.Header().Set("Trailer", nextCursorTrailer)
-
-	first, ok, err := matches.Next()
-	if err != nil {
-		s.writeNodeError(w, err)
-		return
+	if page.next != nil {
+		w.Header().Set(nextCursorHeader, page.next.String())
 	}
+	length := len("[]\n")
+	for i, row := range page.rows {
+		length += len(row)
+		if i > 0 {
+			length++
+		}
+	}
+	w.Header().Set("Content-Length", strconv.Itoa(length))
 	w.WriteHeader(http.StatusOK)
 	if _, err := io.WriteString(w, "["); err != nil {
 		return
 	}
-	written := 0
-	writtenBytes := 0
-	budgetReached := false
-	for ok {
-		if written > 0 {
+	for i, row := range page.rows {
+		// The stream lifetime still bounds a client that keeps every write
+		// under its deadline but reads the body arbitrarily slowly.
+		if ctx.Err() != nil {
+			return
+		}
+		if i > 0 {
 			if _, err := io.WriteString(w, ","); err != nil {
 				return
 			}
 		}
+		if _, err := w.Write(row); err != nil {
+			return
+		}
+	}
+	_, _ = io.WriteString(w, "]\n")
+}
+
+type matchPage struct {
+	rows [][]byte
+	next *MatchCursor
+}
+
+// collectMatches encodes one response worth of matches. A request without
+// limit gets the complete result or errIncompleteMatches. With limit, the
+// page ends on the first budget reached and next resumes after its last row;
+// next is nil only when no further match exists.
+func (s *Server) collectMatches(
+	matches MatchIterator,
+	query MatchQuery,
+	stringQuantities bool,
+) (matchPage, error) {
+	maxRows := s.maxMatchRows
+	if query.Limit > 0 {
+		maxRows = min(query.Limit, maxRows)
+	}
+	var page matchPage
+	size := 0
+	var cursor *MatchCursor
+	for {
+		match, ok, err := matches.Next()
+		if err != nil {
+			return matchPage{}, err
+		}
+		if !ok {
+			next, scanLimited := matches.Resume()
+			if !scanLimited {
+				return page, nil
+			}
+			if query.Limit == 0 {
+				return matchPage{}, errIncompleteMatches
+			}
+			page.next = next
+			return page, nil
+		}
 		encoded, err := json.Marshal(matchJSON(
-			first,
+			match,
 			query.ResolveHashes,
 			stringQuantities,
 		))
 		if err != nil {
-			s.logger.Error("encode Kupo match", "error", err)
-			return
+			return matchPage{}, fmt.Errorf("encode Kupo match: %w", err)
 		}
-		if _, err := w.Write(encoded); err != nil {
-			return
-		}
-		written++
-		writtenBytes += len(encoded) + 1
-		// The budget is checked before the next row is fetched, so the
-		// resume cursor never skips a row that was examined but not sent.
-		if written >= s.maxMatchRows || writtenBytes >= s.maxMatchBytes {
-			budgetReached = true
-			break
-		}
-		if written%128 == 0 {
-			if err := http.NewResponseController(w).Flush(); err != nil {
-				return
+		// A match that would cross a budget is left for the next page; a
+		// single oversized match still goes out alone so paging progresses.
+		if len(page.rows) >= maxRows ||
+			(len(page.rows) > 0 && size+len(encoded)+1 > s.maxMatchBytes) {
+			if query.Limit == 0 {
+				return matchPage{}, errIncompleteMatches
 			}
+			page.next = cursor
+			return page, nil
 		}
-		first, ok, err = matches.Next()
-		if err != nil {
-			if ctx.Err() == nil {
-				s.logger.Error("stream Kupo matches", "error", err)
-			}
-			return
-		}
-	}
-	if _, err := io.WriteString(w, "]\n"); err != nil {
-		return
-	}
-	cursor, scanLimited := matches.Resume()
-	if (budgetReached || scanLimited) && cursor != nil {
-		w.Header().Set(nextCursorTrailer, cursor.String())
+		page.rows = append(page.rows, encoded)
+		size += len(encoded) + 1
+		// Resume reports the row Next just returned, so this is the
+		// position to continue after if the following match does not fit.
+		cursor, _ = matches.Resume()
 	}
 }
 
@@ -152,6 +229,7 @@ func parseMatchQuery(r *http.Request) (MatchQuery, error) {
 		"transaction_id": true,
 		"output_index":   true,
 		"cursor":         true,
+		"limit":          true,
 	}
 	if err := rejectUnknownQuery(values, allowed); err != nil {
 		return MatchQuery{}, err
@@ -251,8 +329,25 @@ func parseMatchQuery(r *http.Request) (MatchQuery, error) {
 		idx := uint32(parsed)
 		ret.OutputIndex = &idx
 	}
-	if value := values.Get("cursor"); value != "" {
-		if ret.Cursor, err = ParseMatchCursor(value); err != nil {
+	if values.Has("limit") {
+		limit, err := strconv.Atoi(values.Get("limit"))
+		if err != nil || limit < 1 || limit > maxMatchRows {
+			return ret, fmt.Errorf(
+				"%w: limit must be an integer from 1 to %d",
+				ErrInvalidRequest,
+				maxMatchRows,
+			)
+		}
+		ret.Limit = limit
+	}
+	if values.Has("cursor") {
+		if ret.Limit == 0 {
+			return ret, fmt.Errorf(
+				"%w: cursor requires limit",
+				ErrInvalidRequest,
+			)
+		}
+		if ret.Cursor, err = ParseMatchCursor(values.Get("cursor")); err != nil {
 			return ret, err
 		}
 	}

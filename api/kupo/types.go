@@ -59,12 +59,16 @@ type MatchQuery struct {
 	AssetName     []byte
 	TransactionID []byte
 	OutputIndex   *uint32
-	// Cursor resumes a previous response after the last row it examined. It
-	// is only meaningful with the same order and filters as that response.
+	// Cursor resumes strictly after a position a previous page reported in
+	// X-Kupo-Next-Cursor. It is only meaningful with the same order and
+	// filters as that page.
 	Cursor *MatchCursor
 	// MaxScan bounds how many stored rows one iterator examines. Zero means
 	// unbounded.
 	MaxScan int
+	// Limit is the page size a client asked for with the limit parameter.
+	// Zero means the client did not opt into pagination.
+	Limit int
 }
 
 // MatchCursor is a position in a match result, in the stable

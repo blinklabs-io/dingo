@@ -18,7 +18,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"slices"
 	"testing"
 
@@ -300,4 +304,61 @@ func TestNodeMatchesScanBudgetCountsRowsTheAddressPatternRejects(
 	}
 	require.Equal(t, []int{0, 0, 1}, sizes)
 	require.Equal(t, []string{keys[rows-1]}, all)
+}
+
+// TestStoredMatchesPageOverHTTPAndRefuseUnpagedOverflow runs the handler over
+// the storage-backed iterator: an opted-in client pages through every row in
+// both orders, and a client without limit is refused rather than truncated.
+func TestStoredMatchesPageOverHTTPAndRefuseUnpagedOverflow(t *testing.T) {
+	t.Parallel()
+
+	enterprise := historyFixtureEnterprise(t)
+	adapter, keys := newHistoryFixtureAdapter(
+		t,
+		func(int) lcommon.Address { return enterprise },
+	)
+	server := New(Config{ListenAddress: ":0"}, adapter, nil)
+	server.maxMatchRows = len(keys) - 1
+	httpServer := httptest.NewServer(server.handler())
+	t.Cleanup(httpServer.Close)
+
+	for _, order := range []string{"oldest_first", "most_recent_first"} {
+		want := slices.Clone(keys)
+		if order == "most_recent_first" {
+			slices.Reverse(want)
+		}
+		var got []string
+		cursor := ""
+		for range 10 {
+			target := httpServer.URL + "/matches?limit=300&order=" + order
+			if cursor != "" {
+				target += "&cursor=" + url.QueryEscape(cursor)
+			}
+			resp, err := http.Get(target) // #nosec G107 G704 -- local test server
+			require.NoError(t, err)
+			var rows []struct {
+				TransactionID string `json:"transaction_id"`
+				OutputIndex   uint32 `json:"output_index"`
+			}
+			require.Equal(t, http.StatusOK, resp.StatusCode)
+			require.NoError(t, json.NewDecoder(resp.Body).Decode(&rows))
+			require.NoError(t, resp.Body.Close())
+			for _, row := range rows {
+				got = append(
+					got,
+					fmt.Sprintf("%s#%d", row.TransactionID, row.OutputIndex),
+				)
+			}
+			cursor = resp.Header.Get(nextCursorHeader)
+			if cursor == "" {
+				break
+			}
+		}
+		require.Equal(t, want, got, order)
+	}
+
+	resp, err := http.Get(httpServer.URL + "/matches") // #nosec G107 G704 -- local test server
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+	require.Equal(t, http.StatusUnprocessableEntity, resp.StatusCode)
 }
