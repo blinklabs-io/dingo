@@ -456,7 +456,7 @@ func (a *NodeAdapter) blockInfoFromBlock(
 		Epoch:     epoch.EpochId,
 		EpochSlot: block.Slot - epoch.StartSlot,
 		Time:      slotTime.Unix(),
-		Size:      uint64(len(block.Cbor)),
+		Size:      blockSize(block, decodedBlock),
 		TxCount:   len(decodedBlock.Transactions()),
 		SlotLeader: blockIssuer(
 			decodedBlock.IssuerVkey(),
@@ -539,6 +539,19 @@ func (a *NodeAdapter) nextBlockHash(
 	}
 	hash := hex.EncodeToString(next.Hash)
 	return &hash, nil
+}
+
+// blockSize returns the Blockfrost block size. cardano-db-sync stores the
+// header's block_body_size for Shelley-based blocks (pHeaderBlockSize) and
+// the length of the whole encoded block for Byron, whose headers carry no
+// body size (Byron.blockLength and boundaryBlockLength).
+func blockSize(block models.Block, decoded gledger.Block) uint64 {
+	switch block.Type {
+	case gledger.BlockTypeByronEbb, gledger.BlockTypeByronMain:
+		return uint64(len(block.Cbor))
+	default:
+		return decoded.Header().BlockBodySize()
+	}
 }
 
 // praosHeaderFields extracts the Blockfrost block_vrf, op_cert, and
