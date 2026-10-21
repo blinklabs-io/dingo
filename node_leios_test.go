@@ -678,10 +678,19 @@ func TestLedgerCertificateCallbackReadsVoteManagerSafely(t *testing.T) {
 			}
 		}
 	})
+	var stopOnce sync.Once
+	stopWorker := func() {
+		stopOnce.Do(func() { close(done) })
+		wg.Wait()
+	}
+	t.Cleanup(func() {
+		stopWorker()
+		if n.leiosVoteManager != nil {
+			_ = n.leiosVoteManager.Stop()
+		}
+	})
 	require.NoError(t, n.initLeiosVoteManager(t.Context()))
-	close(done)
-	wg.Wait()
-	t.Cleanup(func() { _ = n.leiosVoteManager.Stop() })
+	stopWorker()
 
 	err := validate(0, make([]byte, 32), nil, nil)
 	assert.NotContains(t, fmt.Sprint(err), "vote manager is unavailable",
