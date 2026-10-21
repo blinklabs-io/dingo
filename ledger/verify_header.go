@@ -1087,9 +1087,12 @@ func (ls *LedgerState) forecastBoundaryEra(
 		if !ok {
 			return sourceEraID, false
 		}
-		boundary := entry.NextEraTrigger.Kind == hardfork.TriggerAtEpoch &&
-			entry.NextEraTrigger.Epoch <= targetEpochID
-		if eraID == sourceEraID &&
+		// A configured epoch trigger is authoritative over the published
+		// transition, as in validateEpochCacheForecast and the rollover, so a
+		// disagreeing TransitionKnown must not move the forecast early.
+		atEpoch := entry.NextEraTrigger.Kind == hardfork.TriggerAtEpoch
+		boundary := atEpoch && entry.NextEraTrigger.Epoch <= targetEpochID
+		if !atEpoch && eraID == sourceEraID &&
 			transition.State == hardfork.TransitionKnown &&
 			transition.KnownEpoch <= targetEpochID {
 			boundary = true
