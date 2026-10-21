@@ -166,6 +166,12 @@ func Snapshot(
 		return Manifest{}, fmt.Errorf("open snapshot directory %q: %w", dir, err)
 	}
 	defer snapshotRoot.Close() //nolint:errcheck // the directory handle has no buffered data
+	// Mkdir and OpenRoot are separate operations. Confirm the handle still
+	// names the directory we created before writing any backup bytes through
+	// it; after this check the handle pins all writes even if the path moves.
+	if err := snapshotRootMatchesPath(snapshotRoot, dir); err != nil {
+		return Manifest{}, err
+	}
 	// Best-effort cleanup so a failed snapshot doesn't permanently block
 	// retrying at the same path with an "already exists" error. Safe from
 	// this point on: the Mkdir above guarantees this call exclusively
