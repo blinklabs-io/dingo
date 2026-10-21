@@ -90,6 +90,7 @@ const (
 	addressTransactionCredentialKindSchemaRelease       = "address-transaction-credential-kind"
 	opCertCounterEncodingSchemaRelease                  = "opcert-counter-unsigned-order"
 	utxoSpenderPartialIndexSchemaRelease                = "utxo-spender-partial-indexes"
+	leiosKeyRegistrationEpochBackfillSchemaRelease      = "leios-key-registration-epoch-backfill"
 )
 
 const mithrilRewardRepairPendingKey = "mithril_reward_repair_pending"
@@ -252,6 +253,11 @@ var schemaVersions = []struct {
 	{Version: 48, Name: governanceVoteCastSchemaRelease, Dir: "v48"},
 	{Version: 49, Name: opCertCounterEncodingSchemaRelease, Dir: "v49"},
 	{Version: 50, Name: utxoSpenderPartialIndexSchemaRelease, Dir: "v50"},
+	{
+		Version: 51,
+		Name:    leiosKeyRegistrationEpochBackfillSchemaRelease,
+		Dir:     "v51",
+	},
 }
 
 // SQLiteRegistry returns the checked-in SQLite migration registry.
@@ -390,6 +396,10 @@ func registryForDialect(dialect string) ([]Migration, error) {
 		if version.Name == accountDRepClearSchemaRelease {
 			migration.BackfillRevision = "1"
 			migration.Backfill = accountDRepClearBackfill
+		}
+		if version.Name == leiosKeyRegistrationEpochBackfillSchemaRelease {
+			migration.BackfillRevision = "1"
+			migration.Backfill = leiosKeyRegistrationEpochBackfill
 		}
 		if version.Name == committeeRenewalTermStartSchemaRelease {
 			migration.BackfillRevision = "1"
