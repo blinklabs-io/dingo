@@ -1340,7 +1340,7 @@ func (ls *LedgerState) queryShelleyLeaf(ctx context.Context, query any,
 	case *olocalstatequery.ShelleyStakeDelegDepositsQuery:
 		return ls.queryShelleyStakeDelegDeposits(ctx, q.Creds.Items(), at, txn)
 	case *olocalstatequery.ShelleyGetLedgerPeerSnapshotQuery:
-		return ls.queryLedgerPeerSnapshot(ctx, q.PeerKind, txn)
+		return ls.queryLedgerPeerSnapshot(ctx, q, txn)
 	case *olocalstatequery.ShelleyStakePoolsQuery:
 		return ls.queryShelleyStakePools(ctx, at, txn)
 	case *olocalstatequery.ShelleyDRepStateQuery:
