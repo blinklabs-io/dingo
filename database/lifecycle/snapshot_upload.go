@@ -15,10 +15,14 @@
 package lifecycle
 
 import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	"strings"
 )
 
 type snapshotUploadFile struct {
@@ -31,12 +35,14 @@ type snapshotUploadFile struct {
 // and each file are held by handle while names are checked, so replacing the
 // directory or an entry cannot redirect a later upload.
 func openSnapshotUploadFiles(
+	ctx context.Context,
 	dir string,
 	maxManifestBytes int64,
-) (_ []snapshotUploadFile, retErr error) {
+	opts ...ManifestOption,
+) (_ []snapshotUploadFile, _ Manifest, retErr error) {
 	root, err := os.OpenRoot(dir)
 	if err != nil {
-		return nil, fmt.Errorf("open snapshot directory %q: %w", dir, err)
+		return nil, Manifest{}, fmt.Errorf("open snapshot directory %q: %w", dir, err)
 	}
 	var files []snapshotUploadFile
 	defer func() {
@@ -48,7 +54,7 @@ func openSnapshotUploadFiles(
 
 	manifestFile, err := openSnapshotUploadFile(root, ManifestFileName)
 	if err != nil {
-		return nil, err
+		return nil, Manifest{}, err
 	}
 	files = []snapshotUploadFile{{name: ManifestFileName, file: manifestFile}}
 
@@ -57,30 +63,80 @@ func openSnapshotUploadFiles(
 		[]ManifestOption{WithManifestMaxBytes(maxManifestBytes)},
 	)
 	if err != nil {
-		return nil, fmt.Errorf("read snapshot manifest for upload: %w", err)
+		return nil, Manifest{}, fmt.Errorf("read snapshot manifest for upload: %w", err)
 	}
-	manifest, err := ParseManifest(
-		data,
-		WithManifestMaxBytes(maxManifestBytes),
+	idOpts := append(
+		[]ManifestOption{WithManifestID(snapshotIDForDir(dir))},
+		opts...,
 	)
+	idOpts = append(idOpts, WithManifestMaxBytes(maxManifestBytes))
+	manifest, err := ParseManifest(data, idOpts...)
 	if err != nil {
-		return nil, fmt.Errorf("parse snapshot manifest for upload: %w", err)
+		return nil, Manifest{}, fmt.Errorf("parse snapshot manifest for upload: %w", err)
 	}
 	if _, err := manifestFile.Seek(0, io.SeekStart); err != nil {
-		return nil, fmt.Errorf("rewind snapshot manifest for upload: %w", err)
+		return nil, Manifest{}, fmt.Errorf("rewind snapshot manifest for upload: %w", err)
 	}
 
 	ordered := make([]snapshotUploadFile, 0, len(manifest.payloadFiles())+1)
 	for _, payload := range manifest.payloadFiles() {
 		file, err := openSnapshotUploadFile(root, payload.name)
 		if err != nil {
-			return nil, err
+			return nil, Manifest{}, err
 		}
 		files = append(files, snapshotUploadFile{name: payload.name, file: file})
+		if payload.sha256 == "" {
+			return nil, Manifest{}, fmt.Errorf(
+				"%w: manifest declares no digest for %s",
+				ErrSnapshotPayloadMismatch,
+				payload.name,
+			)
+		}
+		digest, size, err := hashSnapshotUploadFile(ctx, file)
+		if err != nil {
+			return nil, Manifest{}, fmt.Errorf(
+				"hash snapshot upload file %q: %w", payload.name, err,
+			)
+		}
+		if size != payload.size {
+			return nil, Manifest{}, fmt.Errorf(
+				"%w: %s is %d bytes, manifest declares %d",
+				ErrSnapshotPayloadMismatch,
+				payload.name,
+				size,
+				payload.size,
+			)
+		}
+		if !strings.EqualFold(digest, payload.sha256) {
+			return nil, Manifest{}, fmt.Errorf(
+				"%w: %s digest %s, manifest declares %s",
+				ErrSnapshotPayloadMismatch,
+				payload.name,
+				digest,
+				payload.sha256,
+			)
+		}
+		if _, err := file.Seek(0, io.SeekStart); err != nil {
+			return nil, Manifest{}, fmt.Errorf(
+				"rewind snapshot upload file %q: %w", payload.name, err,
+			)
+		}
 		ordered = append(ordered, snapshotUploadFile{name: payload.name, file: file})
 	}
 	ordered = append(ordered, files[0])
-	return ordered, nil
+	return ordered, manifest, nil
+}
+
+func hashSnapshotUploadFile(
+	ctx context.Context,
+	file *os.File,
+) (string, int64, error) {
+	h := sha256.New()
+	size, err := io.Copy(h, payloadContextReader{ctx: ctx, reader: file})
+	if err != nil {
+		return "", 0, err
+	}
+	return hex.EncodeToString(h.Sum(nil)), size, nil
 }
 
 func openSnapshotUploadFile(root *os.Root, name string) (*os.File, error) {

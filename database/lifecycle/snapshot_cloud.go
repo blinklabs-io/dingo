@@ -127,13 +127,6 @@ func mirrorToCloud(
 	if err := requireManifestKey(opts); err != nil {
 		return err
 	}
-	manifest, err := ReadManifest(dir, opts...)
-	if err != nil {
-		return fmt.Errorf("read snapshot before cloud mirror: %w", err)
-	}
-	if err := manifest.verifyPayloads(ctx, dir, true); err != nil {
-		return fmt.Errorf("verify snapshot before cloud mirror: %w", err)
-	}
 	snapshotCloudURI := JoinCloudURI(cloudDest, filepath.Base(dir))
 	markerValue, err := cloudDestinationIdentity(snapshotCloudURI)
 	if err != nil {
@@ -147,16 +140,30 @@ func mirrorToCloud(
 		)
 	}
 	defer closeCloudDestination(dest)
-	if err := dest.UploadDir(ctx, dir); err != nil {
+	var manifest Manifest
+	if uploader, ok := dest.(interface {
+		uploadAuthenticatedSnapshot(
+			context.Context,
+			string,
+			...ManifestOption,
+		) (Manifest, error)
+	}); ok {
+		manifest, err = uploader.uploadAuthenticatedSnapshot(ctx, dir, opts...)
+	} else {
+		manifest, err = ReadManifest(dir, opts...)
+		if err == nil {
+			err = manifest.verifyPayloads(ctx, dir, true)
+		}
+		if err == nil {
+			err = dest.UploadDir(ctx, dir)
+		}
+	}
+	if err != nil {
 		return fmt.Errorf(
 			"upload to %q failed: %w",
 			CloudDestinationDisplay(snapshotCloudURI),
 			sanitizeCloudError(snapshotCloudURI, err),
 		)
-	}
-	manifest, err = ReadManifest(dir, opts...)
-	if err != nil {
-		return fmt.Errorf("read mirrored snapshot manifest: %w", err)
 	}
 	if err := updateCloudSnapshotCatalogIfPresent(
 		context.WithoutCancel(ctx),

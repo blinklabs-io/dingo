@@ -159,7 +159,12 @@ func writeTestUploadSnapshot(t *testing.T, dir string) {
 		filepath.Join(dir, MetadataBackupFileName), []byte("metadata"), 0o600,
 	))
 	require.NoError(t, WriteManifest(dir, Manifest{
-		BlobBytes: 4, MetadataBytes: 8,
+		BlobBytes:     4,
+		MetadataBytes: 8,
+		BlobSHA256: "fa2c8cc4f28176bbeed4b736df569a34" +
+			"c79cd3723e9ec42f9674b4d46ac6b8b8",
+		MetadataSHA256: "45447b7afbd5e544f7d0f1df0fccd260" +
+			"14d9850130abd3f020b89ff96b82079f",
 	}))
 }
 
@@ -172,7 +177,9 @@ func TestOpenSnapshotUploadFilesUsesDeclaredFilesInPublicationOrder(t *testing.T
 		filepath.Join(dir, "unrelated"), []byte("secret"), 0o600,
 	))
 
-	files, err := openSnapshotUploadFiles(dir, MaxManifestBytes)
+	files, _, err := openSnapshotUploadFiles(
+		t.Context(), dir, MaxManifestBytes,
+	)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, closeSnapshotUploadFiles(files)) })
 
@@ -197,7 +204,9 @@ func TestOpenSnapshotUploadFilesRejectsSymlink(t *testing.T) {
 	require.NoError(t, os.Remove(filepath.Join(dir, BlobBackupFileName)))
 	require.NoError(t, os.Symlink(outside, filepath.Join(dir, BlobBackupFileName)))
 
-	files, err := openSnapshotUploadFiles(dir, MaxManifestBytes)
+	files, _, err := openSnapshotUploadFiles(
+		t.Context(), dir, MaxManifestBytes,
+	)
 	require.ErrorContains(t, err, "open snapshot upload file")
 	require.Empty(t, files)
 }
@@ -207,7 +216,9 @@ func TestOpenSnapshotUploadFilesKeepsOpenedFileAfterPathSwap(t *testing.T) {
 
 	dir := t.TempDir()
 	writeTestUploadSnapshot(t, dir)
-	files, err := openSnapshotUploadFiles(dir, MaxManifestBytes)
+	files, _, err := openSnapshotUploadFiles(
+		t.Context(), dir, MaxManifestBytes,
+	)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, closeSnapshotUploadFiles(files)) })
 

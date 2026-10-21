@@ -190,9 +190,20 @@ func (d *gcsDestination) UploadDir(
 	ctx context.Context,
 	localDir string,
 ) (retErr error) {
-	files, err := openSnapshotUploadFiles(localDir, d.maxManifestBytes)
+	_, err := d.uploadAuthenticatedSnapshot(ctx, localDir)
+	return err
+}
+
+func (d *gcsDestination) uploadAuthenticatedSnapshot(
+	ctx context.Context,
+	localDir string,
+	opts ...ManifestOption,
+) (_ Manifest, retErr error) {
+	files, manifest, err := openSnapshotUploadFiles(
+		ctx, localDir, d.maxManifestBytes, opts...,
+	)
 	if err != nil {
-		return err
+		return Manifest{}, err
 	}
 	defer func() {
 		retErr = errors.Join(retErr, closeSnapshotUploadFiles(files))
@@ -203,7 +214,7 @@ func (d *gcsDestination) UploadDir(
 		_, copyErr := io.Copy(w, file.file)
 		closeWErr := w.Close()
 		if copyErr != nil {
-			return fmt.Errorf(
+			return Manifest{}, fmt.Errorf(
 				"upload snapshot file %q to gcs object %q: %w",
 				file.name,
 				key,
@@ -211,7 +222,7 @@ func (d *gcsDestination) UploadDir(
 			)
 		}
 		if closeWErr != nil {
-			return fmt.Errorf(
+			return Manifest{}, fmt.Errorf(
 				"close gcs object %q after upload: %w",
 				key,
 				closeWErr,
@@ -221,9 +232,9 @@ func (d *gcsDestination) UploadDir(
 	key := d.objectKey(cloudMirrorMarkerName)
 	if err := d.bucket.Object(key).Delete(ctx); err != nil &&
 		!errors.Is(err, storage.ErrObjectNotExist) {
-		return fmt.Errorf("remove legacy cloud mirror marker object %q: %w", key, err)
+		return Manifest{}, fmt.Errorf("remove legacy cloud mirror marker object %q: %w", key, err)
 	}
-	return nil
+	return manifest, nil
 }
 
 // DownloadFiles downloads exactly the named objects into localDir, never

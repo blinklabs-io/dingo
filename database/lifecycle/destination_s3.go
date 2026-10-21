@@ -118,9 +118,20 @@ func (d *s3Destination) UploadDir(
 	ctx context.Context,
 	localDir string,
 ) (retErr error) {
-	files, err := openSnapshotUploadFiles(localDir, d.maxManifestBytes)
+	_, err := d.uploadAuthenticatedSnapshot(ctx, localDir)
+	return err
+}
+
+func (d *s3Destination) uploadAuthenticatedSnapshot(
+	ctx context.Context,
+	localDir string,
+	opts ...ManifestOption,
+) (_ Manifest, retErr error) {
+	files, manifest, err := openSnapshotUploadFiles(
+		ctx, localDir, d.maxManifestBytes, opts...,
+	)
 	if err != nil {
-		return err
+		return Manifest{}, err
 	}
 	defer func() {
 		retErr = errors.Join(retErr, closeSnapshotUploadFiles(files))
@@ -141,7 +152,7 @@ func (d *s3Destination) UploadDir(
 			},
 		)
 		if uploadErr != nil {
-			return fmt.Errorf(
+			return Manifest{}, fmt.Errorf(
 				"upload snapshot file %q to s3://%s/%s: %w",
 				file.name,
 				d.bucket,
@@ -155,9 +166,9 @@ func (d *s3Destination) UploadDir(
 		Bucket: &d.bucket,
 		Key:    &key,
 	}); err != nil && !isS3NotFoundError(err) {
-		return fmt.Errorf("remove legacy cloud mirror marker object %q: %w", key, err)
+		return Manifest{}, fmt.Errorf("remove legacy cloud mirror marker object %q: %w", key, err)
 	}
-	return nil
+	return manifest, nil
 }
 
 // DownloadFiles downloads exactly the named objects into localDir, never
