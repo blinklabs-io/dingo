@@ -6,7 +6,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -85,5 +87,52 @@ func TestEntrypointLogFileRefusesExistingPath(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "keep", string(data))
 	_, err = os.Lstat(filepath.Join(root, "absent"))
+	require.True(t, os.IsNotExist(err))
+}
+
+func TestEntrypointLogFileRefusesFifo(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	fifo := filepath.Join(root, "dingo.log")
+	require.NoError(t, syscall.Mkfifo(fifo, 0o600))
+
+	type result struct {
+		out []byte
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		out, err := runEntrypointWithLogFile(t, root, fifo)
+		done <- result{out, err}
+	}()
+	select {
+	case res := <-done:
+		require.Error(t, res.err, string(res.out))
+		require.Contains(
+			t,
+			string(res.out),
+			"DINGO_LOG_FILE must name a new file",
+		)
+	case <-time.After(20 * time.Second):
+		t.Fatal("entrypoint blocked opening a pre-existing FIFO")
+	}
+}
+
+func TestEntrypointLogFileRefusesSymlinkedParent(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	evil := filepath.Join(root, "evil")
+	require.NoError(t, os.MkdirAll(evil, 0o700))
+	intended := filepath.Join(root, "logs")
+	require.NoError(t, os.Symlink(evil, intended))
+
+	out, err := runEntrypointWithLogFile(
+		t,
+		root,
+		filepath.Join(intended, "dingo.log"),
+	)
+	require.Error(t, err, string(out))
+	require.Contains(t, string(out), "must not traverse a symlink")
+	_, err = os.Lstat(filepath.Join(evil, "dingo.log"))
 	require.True(t, os.IsNotExist(err))
 }

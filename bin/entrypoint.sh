@@ -301,8 +301,22 @@ open_dingo_log() {
   local path="$1"
   local previous_umask
   local enabled_noclobber="false"
+  local dir component
 
-  mkdir -p "$(dirname "${path}")"
+  # Refuse any existing target, including FIFOs and devices that noclobber
+  # would open, and any symlinked component that could redirect the log.
+  if [[ -e "${path}" || -L "${path}" ]]; then
+    die "DINGO_LOG_FILE must name a new file: ${path}"
+  fi
+  dir="$(dirname "${path}")"
+  component="${dir}"
+  while [[ "${component}" != "/" && "${component}" != "." ]]; do
+    if [[ -L "${component}" ]]; then
+      die "DINGO_LOG_FILE must not traverse a symlink: ${component}"
+    fi
+    component="$(dirname "${component}")"
+  done
+  mkdir -p "${dir}"
   previous_umask="$(umask)"
   umask 0133
   if [[ ! -o noclobber ]]; then
@@ -320,6 +334,10 @@ open_dingo_log() {
     set +o noclobber
   fi
   umask "${previous_umask}"
+  if [[ ! -f "/dev/fd/${DINGO_LOG_FD}" ]]; then
+    exec {DINGO_LOG_FD}>&-
+    die "DINGO_LOG_FILE must name a regular file: ${path}"
+  fi
 }
 
 # --------------------------------------------------------------------------- #
