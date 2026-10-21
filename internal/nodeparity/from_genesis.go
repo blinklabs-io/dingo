@@ -1015,6 +1015,7 @@ func RunFromGenesis(
 			ouroboros.WithNodeToNode(false),
 			ouroboros.WithMuxerSegmentReadTimeout(0),
 			ouroboros.WithChainSyncConfig(chainsync.NewConfig(
+				chainsync.WithPipelineLimit(1),
 				chainsync.WithRollForwardFunc(
 					func(
 						_ chainsync.CallbackContext,
