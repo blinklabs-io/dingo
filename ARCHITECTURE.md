@@ -6143,11 +6143,44 @@ it. Dingo implements this as a **corroboration gate**
   from peer-reported headers that had not passed any check. The roll-forward
   handler now verifies a header's VRF/KES cryptography and, once local ledger
   state has caught up, its leader eligibility
-  (`LedgerState.ValidateChainSelectionHeaderCrypto`, gated by
+  (`LedgerState.ValidatePeerChainSelectionHeaderCrypto`, gated by
   `ShouldVerifyChainSelectionHeaderCrypto`) *before* it is observed, for every
   ingress-eligible peer — not only the currently apply-eligible one, since a
   competing candidate's headers never reach the ledger's own chainsync
   header-queue verification (that only runs for headers actually applied).
+  For a competing fork, verification follows the retained headers for that
+  peer back to a primary-chain intersection and rolls the evolving and
+  candidate nonces separately through every crossed epoch. Each epoch's eta
+  combines its candidate nonce with the carried last-epoch-block nonce and,
+  in TPraos eras, the protocol-parameter extraEntropy. The evolving nonce
+  folds every header through the epoch end; the candidate nonce follows it only
+  before that epoch's stability cutoff, then stays frozen while the evolving
+  nonce continues. Each next epoch nonce is assembled from that epoch's
+  candidate nonce and the carried last-epoch-block nonce. A per-connection,
+  per-epoch nonce-prefix cache resumes folding at the first newly added header,
+  keyed by the last folded hash, source epoch and nonce, cutoff, and both
+  initial nonce states; entries for epochs outside the currently retained
+  candidate path are discarded. This retains the same pool-key, leader-eligibility,
+  size, KES, and operational-certificate checks for every folded header. Hash
+  links, slots, block numbers, and era order are validated across the
+  reconstructed path before it can affect selection. The verifier receives the
+  ChainSync connection identity so ancestry from one peer cannot be used for
+  another peer's header. A per-connection path cache reuses a resolved ancestor
+  while that intersection remains on the applied chain, the next header
+  directly extends the cached path, and the ledger's consensus context has not
+  changed since the path was resolved. Each published `consensusSnapshot`
+  carries a `contextGeneration`: the generation of the earliest publication
+  with the same header-verification inputs (epoch cache with its nonces,
+  current epoch apart from its evolving nonce, era, protocol parameters,
+  hard-fork transition). Stake snapshots and registered VRF keys are keyed by
+  epoch and change only with the epoch cache. A publication that only moves the
+  applied tip keeps the context, so an unapplied ancestor's crypto verdict, and
+  the cached path built from such verdicts, stays usable while catch-up applies
+  blocks. A verdict stamped before the context began is stale. This matches
+  the reference ChainSync client, which validates each candidate header once
+  against the candidate's own header state and only trims the candidate when
+  the local selection advances. Peer rollbacks and disconnects also clear the
+  cache.
   Verification is skipped only for a slot an imported Mithril snapshot
   already covers, the same exemption the ledger's own header-queue path
   applies. A result showing local state has not caught up to the header's slot
@@ -6157,21 +6190,27 @@ it. Dingo implements this as a **corroboration gate**
   header-queue tip, or the last header the same connection passed through this
   gate — still updates the selector and reaches the ledger queue with no
   verification generation; block-fetch verifies its body before application.
-  Withholding it deadlocks sync whenever only applying that block can make its
-  authorization verifiable: at the Byron->Shelley boundary the first Shelley
-  epoch's state does not exist until a Shelley block is applied. Any other
-  deferred header is withheld from selection, density, corroboration and the
-  ledger. ChainSync records that the peer needs recovery and re-intersects it
-  after the applied ledger advances, or at once (once per connection and
-  applied tip) when nothing is queued, since then no block can be applied to
-  trigger it. The peer then delivers its linked suffix parent-first. The ledger
-  queues a header whose authorization it cannot confirm (deferred, or a stale
-  ingress verdict) the same way, without a verification generation, so it can
-  neither advance the admitted frontier nor clear the queue or roll back
-  canonical state when it does not fit. It clears the generation on the
-  update the ingress owner's admission callback commits as well, so the
-  selector receives a generation-0 update rather than a stale verdict without
-  its pin.
+  A header withheld because its fork ancestry cannot be authenticated never
+  becomes that connection's last passed header. Withholding a linear extension
+  deadlocks sync whenever only applying that block can make its authorization
+  verifiable: at the Byron->Shelley boundary the first Shelley epoch's state
+  does not exist until a Shelley block is applied. Any other deferred header
+  is withheld from selection, density, corroboration and the ledger. ChainSync
+  records that the peer needs recovery and re-intersects it after the applied
+  ledger advances, or at once (once per connection and applied tip) when
+  nothing is queued, since then no block can be applied to trigger it. If the
+  ledger advances during ancestry verification, recording the deferred marker
+  detects that tip change and schedules recovery immediately. Closing the
+  connection clears its marker, and a failed retry does not restore the marker
+  after the connection has left the manager. The peer then delivers its linked
+  suffix parent-first, and each header must pass verification before entering
+  observed ancestry. The ledger queues a header whose authorization it cannot
+  confirm (deferred, or a stale ingress verdict) the same way, without a
+  verification generation, so it can neither advance the admitted frontier nor
+  clear the queue or roll back canonical state when it does not fit. It clears
+  the generation on the update the ingress owner's admission callback commits
+  as well, so the selector receives a generation-0 update rather than a stale
+  verdict without its pin.
   The verification snapshot generation travels with the staged selector
   candidate and ledger event; a rollback or concurrent publication that makes
   it stale removes the candidate from corroboration and triggers recovery. A
@@ -6194,7 +6233,23 @@ it. Dingo implements this as a **corroboration gate**
   and admission path, allowing ledger progress to move the forecast horizon.
   The temporary witness is removed when the wait ends and is never promoted.
   This avoids an empty-queue bootstrap deadlock without making an unverified
-  header selectable or applicable. A header whose
+  header selectable or applicable. Missing or unsafe fork ancestry
+  (`ledger.IsHeaderVerificationWithheld`) excludes a header from selector
+  observation and ledger ingress without recycling the peer or scheduling
+  re-intersection; the connection retains its header for later ancestry
+  lookups but does not re-deliver it. Bounded-history exhaustion defers
+  verification instead, so the peer is re-intersected after the applied tip
+  advances and the header can be checked again. Retained ancestry with a
+  missing crypto-verification generation, or one stamped before the current
+  consensus context began, also defers the candidate
+  and re-intersects; a point that became applied during lookup is trusted as
+  part of the primary chain. A direct child of the applied tip can use the
+  local verifier's immutable next-epoch forecast when the shared epoch cache
+  has not yet reached its slot. Multi-epoch peer forks derive each
+  intermediate epoch nonce from the retained, verified candidate path. When
+  the applied tip advances during ancestry lookup and becomes the candidate's
+  parent, verification switches to the local-chain verifier against the newly
+  published ledger state. A header whose
   point (slot and hash) is on the chain (`Chain.HoldsPoint`) at or below the
   ledger tip returns success without re-verification: it was fully verified
   when applied, and re-judging it against pool snapshots the 3-epoch
@@ -6295,7 +6350,9 @@ tokens per second. It follows the reference ChainSync client:
   `ouroboros.chainsyncClientRollForwardAt` charges the peer only up to the
   header's network arrival (`PatienceMessageArrived`) and resumes after the
   callback (`PatienceHeaderAccepted`), so decoding, future-header admission
-  waits, verification and ledger backpressure are not charged. A new bucket starts paused
+  waits, verification and ledger backpressure are not charged. A withheld or
+  rejected ingress-eligible header resumes leakage through
+  `PatienceMessageProcessed` without earning a token. A new bucket starts paused
   until the peer's first accepted header or rollback, because tracked clients
   are registered inside their first callback. Headers from a peer that is
   not ingress-eligible are not verified, so they pause the bucket rather than

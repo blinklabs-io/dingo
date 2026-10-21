@@ -2533,6 +2533,7 @@ func (ls *LedgerState) evictOldestPeerHeaderRecord(historyKey string) bool {
 }
 
 func (ls *LedgerState) removePeerHeaderHistory(historyKey string) {
+	ls.removePeerForkNoncePrefix(historyKey)
 	history := ls.peerHeaderHistory[historyKey]
 	if history == nil {
 		return
@@ -2670,6 +2671,9 @@ func (ls *LedgerState) genesisSelectionState() (bool, uint64) {
 
 func (ls *LedgerState) peerHeaderHistoryLimit() int {
 	limit := maxPeerHeaderHistoryPerConn
+	if ls.chain != nil {
+		limit = max(limit, ls.allowedQueuedHeaders())
+	}
 	active, window := ls.genesisSelectionState()
 	if !active || window <= uint64(limit) {
 		return limit
@@ -3596,6 +3600,9 @@ func (ls *LedgerState) handleEventChainsyncRollback(
 	e ChainsyncEvent,
 	pending *pendingPublishes,
 ) error {
+	connKey := connIdKey(e.ConnectionId)
+	ls.removePeerForkNoncePrefix(connKey)
+
 	// Filter events from non-active connections when chain selection is enabled
 	if activeConnId, configured := ls.detectConnectionSwitch(pending); configured {
 		if activeConnId == nil {
@@ -3658,7 +3665,6 @@ func (ls *LedgerState) handleEventChainsyncRollback(
 	// Rollback loop detection: track recent rollbacks and skip if
 	// the same peer repeats the same rollback point too frequently
 	// within the detection window.
-	connKey := connIdKey(e.ConnectionId)
 	slotCount := ls.recordRollback(connKey, e.Point, time.Now())
 	if slotCount >= rollbackLoopThreshold {
 		// Exempt rollbacks to slots where we forged a block — fork
@@ -5875,6 +5881,30 @@ func (ls *LedgerState) CurrentHeaderCryptoVerificationGeneration() uint64 {
 		return 0
 	}
 	return consensus.generation
+}
+
+// currentHeaderVerificationContext returns the current generation and the
+// generation at which its consensus context began, or zeros while the
+// consensus and tip snapshots are not jointly stable.
+func (ls *LedgerState) currentHeaderVerificationContext() (uint64, uint64) {
+	if ls.txValidationTransitions.Load() != 0 {
+		return 0, 0
+	}
+	consensus := ls.loadConsensusSnapshot()
+	tip := ls.loadTipSnapshot()
+	if consensus == nil || tip == nil || consensus.generation != tip.generation ||
+		ls.txValidationTransitions.Load() != 0 {
+		return 0, 0
+	}
+	return consensus.generation, consensus.contextGeneration
+}
+
+// headerVerdictInContext reports whether a verdict stamped with generation
+// was made within the consensus context that began at contextGeneration and
+// is current at generation current.
+func headerVerdictInContext(stamp, contextGeneration, current uint64) bool {
+	return stamp != 0 && contextGeneration != 0 &&
+		stamp >= contextGeneration && stamp <= current
 }
 
 // PinHeaderCryptoVerificationGeneration keeps a current producer-
