@@ -38,26 +38,6 @@ type watchTxHistoryEntry struct {
 	appliedTxs []*watch.AnyChainTx
 }
 
-// watchTxBuildForwardMessages returns stream messages for one forward block.
-// For a forward block with no predicate matches, out contains a single Idle
-// heartbeat with the block reference. The returned appliedTxs are used to build
-// Undo messages if a rollback later invalidates this block.
-func watchTxBuildForwardMessages(
-	blockType uint,
-	blockCbor []byte,
-	blockSlot, blockHeight uint64,
-	blockHash []byte,
-	shouldSendTx func(ledger.Transaction) bool,
-) (appliedTxs []*watch.AnyChainTx, out []*watch.WatchTxResponse, err error) {
-	block, err := models.DecodeBlockCbor(blockType, blockCbor)
-	if err != nil {
-		return nil, nil, err
-	}
-	return watchTxBuildForwardMessagesForTransactions(
-		block.Transactions(), blockSlot, blockHeight, blockHash, shouldSendTx,
-	)
-}
-
 func watchTxBuildForwardMessagesForTransactions(
 	txs []ledger.Transaction,
 	blockSlot, blockHeight uint64,

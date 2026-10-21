@@ -219,23 +219,15 @@ func (a *NodeAdapter) BlockByEpochSlot(
 	return a.blockInfoFromBlock(ctx, block)
 }
 
-func (a *NodeAdapter) decodedBlockByID(
+func (a *NodeAdapter) blockByID(
 	ctx context.Context,
 	id string,
-) (models.Block, lcommon.Block, error) {
+) (models.Block, error) {
 	block, err := a.resolveBlock(ctx, id)
 	if err != nil {
-		return models.Block{}, nil, err
+		return models.Block{}, err
 	}
-	decoded, err := block.Decode()
-	if err != nil {
-		return models.Block{}, nil, fmt.Errorf(
-			"decode block %x: %w",
-			block.Hash,
-			err,
-		)
-	}
-	return block, decoded, nil
+	return block, nil
 }
 
 // BlockTransactionHashes returns the transaction hashes of a block in block
@@ -244,7 +236,7 @@ func (a *NodeAdapter) BlockTransactionHashes(
 	ctx context.Context,
 	id string,
 ) ([]string, error) {
-	block, _, err := a.decodedBlockByID(ctx, id)
+	block, err := a.blockByID(ctx, id)
 	if err != nil {
 		return nil, err
 	}
@@ -278,7 +270,7 @@ func (a *NodeAdapter) BlockTransactionCBOR(
 	ctx context.Context,
 	id string,
 ) ([]BlockTransactionCBORInfo, error) {
-	block, _, err := a.decodedBlockByID(ctx, id)
+	block, err := a.blockByID(ctx, id)
 	if err != nil {
 		return nil, err
 	}
@@ -295,7 +287,7 @@ func (a *NodeAdapter) LatestBlockTransactionCBOR(
 	ctx context.Context,
 ) ([]BlockTransactionCBORInfo, error) {
 	tip := a.ledgerState.Tip()
-	block, _, err := a.decodedBlockByID(
+	block, err := a.blockByID(
 		ctx,
 		hex.EncodeToString(tip.Point.Hash),
 	)
@@ -319,7 +311,7 @@ func (a *NodeAdapter) BlockAddresses(
 	ctx context.Context,
 	id string,
 ) ([]BlockAddressInfo, error) {
-	block, _, err := a.decodedBlockByID(ctx, id)
+	block, err := a.blockByID(ctx, id)
 	if err != nil {
 		return nil, err
 	}

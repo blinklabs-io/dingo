@@ -433,7 +433,7 @@ func (a *NodeAdapter) blockInfoFromBlock(
 		confirmations = tip.BlockNumber - block.Number
 	}
 
-	output, fees, err := a.blockOutputAndFees(block.Hash)
+	output, fees, err := a.blockOutputAndFees(ctx, block.Hash)
 	if err != nil {
 		return BlockInfo{}, fmt.Errorf(
 			"aggregate output and fees for block %x: %w",
@@ -486,9 +486,10 @@ func (a *NodeAdapter) blockInfoFromBlock(
 // discarded outputs) counts toward the block output, matching the
 // per-transaction endpoint.
 func (a *NodeAdapter) blockOutputAndFees(
+	ctx context.Context,
 	blockHash []byte,
 ) (output string, fees string, err error) {
-	txs, err := a.ledgerState.GetTransactionsByBlockHash(blockHash)
+	txs, err := a.ledgerState.Database().GetTransactionsByBlockHash(ctx, blockHash, nil)
 	if err != nil {
 		return "", "", fmt.Errorf(
 			"get transactions for block %x: %w",
@@ -1754,32 +1755,6 @@ func (a *NodeAdapter) drepAnchorMetadata(
 		ret.JSONMetadata = json.RawMessage(doc.Content)
 	}
 	return ret
-}
-
-func (a *NodeAdapter) latestBlockData(
-	hash []byte,
-) (
-	models.Block,
-	lcommon.Block,
-	error,
-) {
-	block, err := a.ledgerState.BlockByHash(context.Background(), hash)
-	if err != nil {
-		return models.Block{}, nil, fmt.Errorf(
-			"get block by hash %x: %w",
-			hash,
-			err,
-		)
-	}
-	decodedBlock, err := block.Decode()
-	if err != nil {
-		return models.Block{}, nil, fmt.Errorf(
-			"decode block %x: %w",
-			hash,
-			err,
-		)
-	}
-	return block, decodedBlock, nil
 }
 
 // liveStake sums delegated stake across every active pool for the

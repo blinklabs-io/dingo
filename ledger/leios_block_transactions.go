@@ -51,7 +51,7 @@ func (ls *LedgerState) BlockTransactions(
 	header, ok := decoded.Header().(leiosBlockCertifierHeader)
 	if !ok {
 		if block.Type == uint(dijkstra.BlockTypeDijkstra) {
-			return nil, fmt.Errorf("Dijkstra block %x has no Leios header", block.Hash)
+			return nil, fmt.Errorf("dijkstra block %x has no Leios header", block.Hash)
 		}
 		return transactions, nil
 	}
@@ -76,11 +76,11 @@ func (ls *LedgerState) BlockTransactions(
 	}
 	announcer, ok := parentBlock.Header().(leiosBlockAnnouncerHeader)
 	if !ok {
-		return nil, fmt.Errorf("certifying block parent has no Leios announcement")
+		return nil, errors.New("certifying block parent has no Leios announcement")
 	}
 	ebHash, _, announced := announcer.LeiosAnnouncement()
 	if !announced {
-		return nil, fmt.Errorf("certifying block parent announced no endorser block")
+		return nil, errors.New("certifying block parent announced no endorser block")
 	}
 
 	manifestRaw, manifestErr := ls.db.GetLeiosEBManifest(ebHash.Bytes(), parent.Slot)
@@ -118,7 +118,7 @@ func (ls *LedgerState) BlockTransactions(
 		return nil, fmt.Errorf("validate certified endorser-block manifest: %w", err)
 	}
 	if manifest.Hash() != ebHash {
-		return nil, fmt.Errorf("certified endorser-block manifest hash mismatch")
+		return nil, errors.New("certified endorser-block manifest hash mismatch")
 	}
 
 	if len(blockTransactions) != len(manifest.TransactionReferences) {
