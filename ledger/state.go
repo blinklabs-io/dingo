@@ -910,6 +910,7 @@ type LedgerStateConfig struct {
 	ForgedBlockChecker            ForgedBlockChecker
 	SlotBattleRecorder            SlotBattleRecorder
 	EndorserBlockProvider         EndorserBlockProviderFunc
+	EndorserBlockDataProvider     EndorserBlockDataProviderFunc
 	EndorserBlockValidation       EndorserBlockValidationFunc
 	// RecordBlockfetchThroughputFunc receives each completed batch's
 	// delivery rate: the bytes that followed the first block and the time
@@ -1147,6 +1148,15 @@ type EndorserBlockProviderFunc func(
 	ebHash []byte,
 	ebSlot uint64,
 ) (txs []cbor.RawMessage, ok bool)
+
+// EndorserBlockDataProviderFunc returns the verified manifest and complete
+// transaction bodies for the exact endorser-block occurrence. It lets ledger
+// read paths serve a just-applied certified block before asynchronous
+// historical persistence finishes.
+type EndorserBlockDataProviderFunc func(
+	ebHash []byte,
+	ebSlot uint64,
+) (manifest []byte, txs []cbor.RawMessage, ok bool)
 
 // EndorserBlockValidationStatus reports the semantic-validation state of one
 // cached endorser-block occurrence.
