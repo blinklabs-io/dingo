@@ -3590,6 +3590,22 @@ func TestLedgerStateConfigCallbacksTolerateMissingOuroboros(t *testing.T) {
 		assert.Empty(t, txs)
 	})
 
+	t.Run("endorser block data provider reports unavailable", func(t *testing.T) {
+		t.Parallel()
+		cfg := newConfig(t)
+		var (
+			manifest []byte
+			txs      []cbor.RawMessage
+			ok       bool
+		)
+		require.NotPanics(t, func() {
+			manifest, txs, ok = cfg.EndorserBlockDataProvider([]byte("eb-hash"), 660070)
+		})
+		assert.False(t, ok, "an endorser block must not be reported present")
+		assert.Empty(t, manifest)
+		assert.Empty(t, txs)
+	})
+
 	t.Run("endorser block fetcher returns an error", func(t *testing.T) {
 		t.Parallel()
 		cfg := newConfig(t)

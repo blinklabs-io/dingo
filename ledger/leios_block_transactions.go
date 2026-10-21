@@ -16,9 +16,11 @@ package ledger
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/safedecode"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
@@ -81,9 +83,32 @@ func (ls *LedgerState) BlockTransactions(
 		return nil, fmt.Errorf("certifying block parent announced no endorser block")
 	}
 
-	manifestRaw, err := ls.db.GetLeiosEBManifest(ebHash.Bytes(), parent.Slot)
-	if err != nil {
-		return nil, fmt.Errorf("load certified endorser-block manifest: %w", err)
+	manifestRaw, manifestErr := ls.db.GetLeiosEBManifest(ebHash.Bytes(), parent.Slot)
+	blockTransactions, txErr := ls.db.GetLeiosEBTxs(ebHash.Bytes(), parent.Slot)
+	if manifestErr != nil && !errors.Is(manifestErr, types.ErrBlobKeyNotFound) {
+		return nil, fmt.Errorf("load certified endorser-block manifest: %w", manifestErr)
+	}
+	if txErr != nil && !errors.Is(txErr, types.ErrBlobKeyNotFound) {
+		return nil, fmt.Errorf("load certified endorser-block transactions: %w", txErr)
+	}
+	if errors.Is(manifestErr, types.ErrBlobKeyNotFound) ||
+		errors.Is(txErr, types.ErrBlobKeyNotFound) {
+		if ls.config.EndorserBlockDataProvider == nil {
+			if manifestErr != nil {
+				return nil, fmt.Errorf("load certified endorser-block manifest: %w", manifestErr)
+			}
+			return nil, fmt.Errorf("load certified endorser-block transactions: %w", txErr)
+		}
+		var ok bool
+		manifestRaw, blockTransactions, ok = ls.config.EndorserBlockDataProvider(
+			ebHash.Bytes(), parent.Slot,
+		)
+		if !ok {
+			if manifestErr != nil {
+				return nil, fmt.Errorf("load certified endorser-block manifest: %w", manifestErr)
+			}
+			return nil, fmt.Errorf("load certified endorser-block transactions: %w", txErr)
+		}
 	}
 	manifest, err := lcommon.NewLeiosEndorserBlockFromCbor(manifestRaw)
 	if err != nil {
@@ -96,10 +121,6 @@ func (ls *LedgerState) BlockTransactions(
 		return nil, fmt.Errorf("certified endorser-block manifest hash mismatch")
 	}
 
-	blockTransactions, err := ls.db.GetLeiosEBTxs(ebHash.Bytes(), parent.Slot)
-	if err != nil {
-		return nil, fmt.Errorf("load certified endorser-block transactions: %w", err)
-	}
 	if len(blockTransactions) != len(manifest.TransactionReferences) {
 		return nil, fmt.Errorf(
 			"certified endorser-block transaction count mismatch: got %d, want %d",

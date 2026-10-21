@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"bytes"
 	"context"
 	"testing"
 
@@ -43,6 +44,36 @@ func TestBlockTransactionsForCertifiedEndorserBlock(t *testing.T) {
 		PrevHash: certifier.PrevHash().Bytes(), Number: certifier.BlockNumber(),
 		Type: gledger.BlockTypeDijkstra, Cbor: certifier.Cbor(),
 	}
+	txs, err := f.ls.BlockTransactions(context.Background(), stored)
+	require.NoError(t, err)
+	require.Len(t, txs, 1)
+	require.Equal(t, f.ebTx.Hash(), txs[0].Hash())
+	require.Equal(t, f.ebTx.Cbor(), txs[0].Cbor())
+}
+
+func TestBlockTransactionsUsesLiveEndorserBlockBeforePersistence(t *testing.T) {
+	t.Parallel()
+	f := newLeiosCertApplyFixture(t)
+	manifest := testLeiosManifest(f)
+	f.ebHash = manifest.Hash()
+	parent := f.announce()
+	certifier, _, _ := f.certifyingChild(parent)
+	manifestCbor, err := manifest.MarshalCBOR()
+	require.NoError(t, err)
+	f.ls.config.EndorserBlockDataProvider = func(hash []byte, slot uint64) ([]byte, []cbor.RawMessage, bool) {
+		if !bytes.Equal(hash, f.ebHash.Bytes()) || slot != parent.SlotNumber() {
+			return nil, nil, false
+		}
+		return manifestCbor, f.ebTxs, true
+	}
+	stored := models.Block{
+		Slot: certifier.SlotNumber(), Hash: certifier.Hash().Bytes(),
+		PrevHash: certifier.PrevHash().Bytes(), Number: certifier.BlockNumber(),
+		Type: gledger.BlockTypeDijkstra, Cbor: certifier.Cbor(),
+	}
+
+	// Leios block persistence is asynchronous, but a certified ranking block
+	// can be applied while its verified endorser block is still in memory.
 	txs, err := f.ls.BlockTransactions(context.Background(), stored)
 	require.NoError(t, err)
 	require.Len(t, txs, 1)

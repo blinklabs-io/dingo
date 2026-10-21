@@ -3343,6 +3343,16 @@ func TestStoreLeiosEndorserBlockManifestDoesNotClobberCachedTxs(t *testing.T) {
 	gotTxs, ok := o.EndorserBlockTxsByHash(point.Hash, point.Slot)
 	require.True(t, ok)
 	require.Equal(t, txsRaw, gotTxs)
+	gotManifest, gotTxs, ok := o.EndorserBlockDataByHash(point.Hash, point.Slot)
+	require.True(t, ok)
+	require.Equal(t, []byte(blockRaw), gotManifest)
+	require.Equal(t, txsRaw, gotTxs)
+	gotManifest[0] ^= 0xff
+	gotTxs[0][0] ^= 0xff
+	gotManifest, gotTxs, ok = o.EndorserBlockDataByHash(point.Hash, point.Slot)
+	require.True(t, ok)
+	require.Equal(t, []byte(blockRaw), gotManifest)
+	require.Equal(t, txsRaw, gotTxs)
 
 	// Every remaining connection's redundant manifest fetch must leave the
 	// completed transaction set intact.

@@ -114,6 +114,16 @@ func (n *Node) ledgerStateConfig() ledger.LedgerStateConfig {
 			}
 			return o.EndorserBlockTxsByHash(ebHash, ebSlot)
 		},
+		EndorserBlockDataProvider: func(
+			ebHash []byte,
+			ebSlot uint64,
+		) ([]byte, []cbor.RawMessage, bool) {
+			o := n.ouroboros()
+			if o == nil {
+				return nil, nil, false
+			}
+			return o.EndorserBlockDataByHash(ebHash, ebSlot)
+		},
 		EndorserBlockValidation: func(
 			ebHash []byte,
 			ebSlot uint64,

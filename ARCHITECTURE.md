@@ -11319,10 +11319,11 @@ Block transaction hashes, CBOR, counts, affected addresses, latest-block
 transaction lists, and transaction-by-hash lookup use the ledger transaction
 view. For a certified Dijkstra ranking block, that view resolves the parent
 ranking block's endorser-block announcement and loads the matching persisted
-manifest and transaction bodies. It verifies the manifest and each body
-against the announced hash, ordered references, transaction hashes, and encoded
-sizes before exposing them. A missing or inconsistent certified body is an
-error rather than an empty transaction list.
+manifest and transaction bodies, using the verified in-memory endorser-block
+cache when asynchronous persistence has not completed. It verifies the
+manifest and each body against the announced hash, ordered references,
+transaction hashes, and encoded sizes before exposing them. A missing or
+inconsistent certified body is an error rather than an empty transaction list.
 The root document is served only at the literal `/` path (`GET /{$}`).
 Documented operations without a handler return `501`; unknown paths fall
 through to a catch-all `404` handler instead of the root document.
