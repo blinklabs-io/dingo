@@ -4145,6 +4145,12 @@ address bytes, because the pointer payload is not represented in the
 
 ### `GetUtxosByAddress`, `GetUtxosByAddressAsOf`, `GetUtxosByAddressAtSlot`, and `GetControlledAmountByCredential`
 
+`GetControlledAmountByCredential` sums live `utxo.amount` for the credential
+with the same overflow-free engine-side aggregate as
+`GetAccountSumsByCredential` (NUMERIC, DECIMAL(65, 0), or `dingo_bigint_sum`),
+so no UTxO row is streamed to the caller. It runs on the caller's transaction
+context.
+
 `GetUtxosByAddress` accepts multiple address patterns and OR-joins their coarse
 SQL branches into a single query, mirroring `GetUtxosByAddressWithOrdering`.
 The coordinated `Database.UtxosByAddress` builds one exact-address pattern per
@@ -5141,26 +5147,30 @@ Backs the Blockfrost account `withdrawals_sum`, `reserves_sum`, and
 `treasury_sum` fields. All three totals are reconstructed from rollback-aware
 persisted rows rather than stored as running counters:
 
-Each total selects its rows and adds them in Go rather than asking the engine
-for a `SUM`: the amount columns are decimal text, and coercing them to a signed
-engine integer differs across SQLite, PostgreSQL, and MySQL and cannot span the
-full `uint64` range.
+Each total is one engine-side aggregate over the decimal text column, so no row
+stream reaches the caller and the work in Go does not grow with the account's
+history. The aggregate cannot overflow: PostgreSQL sums `CAST(amount AS
+NUMERIC)`, MySQL `CAST(amount AS DECIMAL(65, 0))`, and SQLite the
+arbitrary-precision `dingo_bigint_sum` function registered by the `sqlstore`
+package (SQLite's own `SUM` raises an integer-overflow error and `TOTAL` is a
+float). The result is read back as a decimal string. The sums run on the
+caller's transaction, so cancelling its context cancels the statements.
 
 ```sql
 -- withdrawals_sum
-SELECT amount
+SELECT SUM(CAST(amount AS NUMERIC))
 FROM account_reward_delta
 WHERE withdrawal = true AND credential_tag = $1 AND staking_key = decode($2, 'hex');
 
 -- reserves_sum (pot = 0) / treasury_sum (pot = 1)
-SELECT r.amount
+SELECT SUM(CAST(r.amount AS NUMERIC))
 FROM move_instantaneous_rewards_reward r
 JOIN move_instantaneous_rewards mir ON mir.id = r.mir_id
 WHERE mir.pot = $pot AND r.credential_tag = $1 AND r.credential = decode($2, 'hex');
 ```
 
-A withdrawal is `coin`, so `withdrawals_sum` is accumulated as `uint64` and a
-negative row is an error. A MIR reward is `delta_coin`, so `reserves_sum` and
+A withdrawal is `coin`, so `withdrawals_sum` must total a value in the
+`uint64` range and any other total is an error. A MIR reward is `delta_coin`, so `reserves_sum` and
 `treasury_sum` are accumulated as signed unbounded values and are rendered with
 their sign.
 

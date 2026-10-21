@@ -507,7 +507,10 @@ WHERE deleted_slot = 0 AND ` + addressPredicate
 LIMIT ?`
 		amountArgs = append(slices.Clip(args), limits.MaxUtxos+1)
 	}
-	rows, err := db.QueryContext(ctx, s.dialect.Rebind(amountQuery), amountArgs...)
+	rows, err := db.QueryContext(
+		ctx,
+		s.dialect.Rebind(amountQuery),
+		amountArgs...)
 	if err != nil {
 		return ret, fmt.Errorf("sum utxo balance by address: %w", err)
 	}
@@ -2589,9 +2592,13 @@ func (s *Store) GetControlledAmountByCredential(
 	if err != nil {
 		return 0, err
 	}
-	return sumUint64Rows(ctx, db, s.dialect.Rebind(`
-SELECT amount FROM utxo
-WHERE credential_tag = ? AND staking_key = ? AND deleted_slot = 0`), credentialTag, stakingKey)
+	return s.sumWideUint64(ctx, db, `
+SELECT `+s.wideSumExpr("amount")+`
+FROM utxo
+WHERE credential_tag = ? AND staking_key = ? AND deleted_slot = 0`,
+		credentialTag,
+		stakingKey,
+	)
 }
 
 func (s *Store) GetUtxoPaymentScriptByCredential(
@@ -2745,7 +2752,9 @@ func assetUtxoAddress(utxo *models.Utxo) ([]byte, error) {
 		address = []byte(output.Address().String())
 	}
 	if len(address) == 0 {
-		return nil, errors.New("persist asset UTxO address: address is unavailable")
+		return nil, errors.New(
+			"persist asset UTxO address: address is unavailable",
+		)
 	}
 	return address, nil
 }
@@ -2797,12 +2806,15 @@ func (s *Store) SetUtxoAddress(
 	if len(address) == 0 {
 		return errors.New("UTxO address must not be empty")
 	}
-	return s.withWriteTransaction(txn, func(db queryer, ctx context.Context) error {
-		_, err := db.ExecContext(ctx, `
+	return s.withWriteTransaction(
+		txn,
+		func(db queryer, ctx context.Context) error {
+			_, err := db.ExecContext(ctx, `
 INSERT INTO utxo_address (utxo_id, address) VALUES (?, ?)
 ON CONFLICT (utxo_id) DO UPDATE SET address = excluded.address`, utxoID, address)
-		return err
-	})
+			return err
+		},
+	)
 }
 
 func (s *Store) IterateLiveUtxos(

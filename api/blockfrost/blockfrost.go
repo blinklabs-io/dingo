@@ -42,6 +42,8 @@ const (
 	defaultMaxDRepDetailsPerClient              = 1
 	defaultMaxAddressSummaries             uint = 4
 	defaultMaxAddressSummariesPerClient         = 2
+	defaultMaxAccountSummaries             uint = 4
+	defaultMaxAccountSummariesPerClient         = 2
 )
 
 // Blockfrost is the Blockfrost-compatible REST API server.
@@ -56,6 +58,9 @@ type Blockfrost struct {
 	// addressSummaryAdmission is shared by the base and extended address
 	// summaries, which scan every live output of an address.
 	addressSummaryAdmission *requestAdmission
+	// accountSummaryAdmission bounds concurrent GET /accounts/{stake_address}
+	// requests, each of which aggregates every live UTxO of the credential.
+	accountSummaryAdmission *requestAdmission
 	// listener owns the start/stop protocol, including releasing the
 	// listening socket as part of what Stop waits for -- see
 	// internal/apilistener.
@@ -102,6 +107,10 @@ func New(
 		addressSummaryAdmission: newRequestAdmission(
 			defaultMaxAddressSummaries,
 			defaultMaxAddressSummariesPerClient,
+		),
+		accountSummaryAdmission: newRequestAdmission(
+			defaultMaxAccountSummaries,
+			defaultMaxAccountSummariesPerClient,
 		),
 		listener: apilistener.New("Blockfrost API", logger),
 	}

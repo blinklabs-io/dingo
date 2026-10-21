@@ -11390,7 +11390,10 @@ transaction content/CBOR/metadata/UTxOs/certificates/redeemers/required
 signers, and account/delegation/registration/reward/UTxOs/withdrawals/
 transactions endpoints. It uses an adapter pattern to translate between
 Dingo's internal state and Blockfrost response types and supports
-Blockfrost-style pagination headers. Pool and account list routes reject
+Blockfrost-style pagination headers. `GET /accounts/{stake_address}` passes
+the request context to the adapter and its database reads, and shares a
+bounded admission pool (4 active, 2 per client, otherwise 429 with
+`Retry-After`) because it aggregates every live UTxO of the credential. Pool and account list routes reject
 out-of-range count and page values before calling the adapter, using the
 shared strict pagination parser (count 1–100, page 1–21474836). The epoch
 next, previous and stakes lists, whose Blockfrost schema defines only count and

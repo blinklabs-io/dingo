@@ -2188,7 +2188,22 @@ func (b *Blockfrost) handleAccount(
 	w http.ResponseWriter,
 	r *http.Request,
 ) {
-	account, err := b.node.Account(r.PathValue("stake_address"))
+	release, ok := b.accountSummaryAdmission.acquire(
+		r.Context(),
+		requestClient(r),
+	)
+	if !ok {
+		w.Header().Set("Retry-After", "1")
+		writeError(
+			w,
+			http.StatusTooManyRequests,
+			"Too Many Requests",
+			"account summary capacity reached, try again later",
+		)
+		return
+	}
+	defer release()
+	account, err := b.node.Account(r.Context(), r.PathValue("stake_address"))
 	if err != nil {
 		b.writeAccountError(w, err, "failed to retrieve account")
 		return
@@ -2279,6 +2294,8 @@ func (b *Blockfrost) writeAccountError(
 	internalMessage string,
 ) {
 	switch {
+	case errors.Is(err, context.Canceled):
+		// The client is gone, so there is nobody to answer.
 	case errors.Is(err, ErrInvalidStakeAddress):
 		writeError(
 			w,
