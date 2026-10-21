@@ -1163,7 +1163,7 @@ func (o *Ouroboros) chainsyncServerAwaitNext(
 			return
 		}
 	}
-	if nextErr == nil && waitForLedger &&
+	if nextErr == nil && next != nil && waitForLedger &&
 		o.chainsyncServerAheadOfLedger(next) {
 		waitCtx, cancel := context.WithCancel(context.Background())
 		stop := make(chan struct{})

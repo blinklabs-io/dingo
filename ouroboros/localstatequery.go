@@ -311,7 +311,8 @@ func (o *Ouroboros) localstatequeryServerAcquire(
 		o.localstatequeryVerifiedHook()
 	}
 	sessionPoint := point
-	if !isSpecific && !deferOpen {
+	// view is nil exactly when the open was deferred.
+	if !isSpecific && view != nil {
 		sessionPoint = localStateQueryViewTip(requestCtx, view)
 	}
 	now := time.Now()
@@ -484,7 +485,15 @@ func (o *Ouroboros) localstatequeryServerQuery(
 			protocolVersion, _ = conn.ProtocolVersion()
 		}
 	}
-	if session != nil && view == nil {
+	if session == nil {
+		return o.ledgerState.QueryWithProtocolVersion(
+			requestCtx,
+			query.Query,
+			at,
+			protocolVersion,
+		)
+	}
+	if view == nil {
 		var err error
 		view, err = o.openDeferredLocalStateQuerySession(
 			requestCtx,
@@ -495,31 +504,23 @@ func (o *Ouroboros) localstatequeryServerQuery(
 			return nil, err
 		}
 	}
-	if session != nil {
-		result, err := view.Query(requestCtx, query.Query, protocolVersion)
-		if !errors.Is(err, ledger.ErrQueryViewClosed) {
-			return result, err
-		}
-		// The protocol has no reply for a failed query, so an error here
-		// ends the connection. A view the lifetime timer closed is reopened
-		// at the same block instead, which answers exactly as the closed one
-		// would have.
-		view, err = o.reopenExpiredLocalStateQuerySession(
-			requestCtx,
-			ctx.ConnectionId,
-			session,
-		)
-		if err != nil {
-			return nil, err
-		}
-		return view.Query(requestCtx, query.Query, protocolVersion)
+	result, err := view.Query(requestCtx, query.Query, protocolVersion)
+	if !errors.Is(err, ledger.ErrQueryViewClosed) {
+		return result, err
 	}
-	return o.ledgerState.QueryWithProtocolVersion(
+	// The protocol has no reply for a failed query, so an error here
+	// ends the connection. A view the lifetime timer closed is reopened
+	// at the same block instead, which answers exactly as the closed one
+	// would have.
+	view, err = o.reopenExpiredLocalStateQuerySession(
 		requestCtx,
-		query.Query,
-		at,
-		protocolVersion,
+		ctx.ConnectionId,
+		session,
 	)
+	if err != nil {
+		return nil, err
+	}
+	return view.Query(requestCtx, query.Query, protocolVersion)
 }
 
 func (o *Ouroboros) localstatequeryServerRelease(
