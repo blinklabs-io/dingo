@@ -988,6 +988,14 @@ type LedgerStateConfig struct {
 	// reject rather than trust an unevaluated producer, and this flag is the
 	// only way to bypass that.
 	SkipLeaderStakeThresholdCheck bool
+	// StakePoolStateQuery answers the GetStakePoolState local state query
+	// (Shelley sub-query 40). Released Haskell nodes do not support that
+	// query, so it is a Leios prototype extension: node_ledger_config.go sets
+	// it only from Config.prototypeTrustBypassesEnabled, whose strict identity
+	// check cannot be met by a mainnet, preprod, preview or sancho
+	// configuration. The zero value leaves the query unsupported, exactly as
+	// for any other query dingo does not answer.
+	StakePoolStateQuery bool
 	// SkipDijkstraTxValidation, when true, skips the Dijkstra per-transaction
 	// validation rule set entirely. On Musashi, ranking-block transactions are
 	// trusted because the prototype does not validate them. Running dingo's

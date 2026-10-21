@@ -1300,12 +1300,16 @@ func (ls *LedgerState) queryShelley(ctx context.Context, query *olocalstatequery
 // ShelleyGetLedgerPeerSnapshotQuery (peer/networking bootstrap data, not
 // ledger state at all).
 //
-// Not point-aware, real gap: ShelleyStakePoolParamsQuery reads live pool
-// registration rows, which carry no per-point history.
+// Not point-aware, real gap: ShelleyStakePoolParamsQuery and
+// ShelleyStakePoolStateQuery read live pool registration and delegation rows,
+// which carry no per-point history.
 //
 // Not answered, so the call fails with "unsupported query type":
 // ShelleyPoolStateQuery, ShelleyPoolDistrQuery and
 // ShelleyNonMyopicMemberRewardsQuery, which decode but have no handler here;
+// ShelleyStakePoolStateQuery on every network but the Leios prototype's
+// (LedgerStateConfig.StakePoolStateQuery), because released nodes do not
+// support it;
 // ShelleyRewardInfoPoolsQuery, ShelleyRewardProvenanceQuery,
 // ShelleyDebugEpochStateQuery and ShelleyDebugNewEpochStateQuery, which need
 // reward-calculation and full epoch state that is not tracked.
@@ -1374,6 +1378,14 @@ func (ls *LedgerState) queryShelleyLeaf(ctx context.Context, query any,
 		return ls.queryShelleyProposedProtocolParamsUpdates(ctx, q, at, txn)
 	case *olocalstatequery.ShelleyStakePoolParamsQuery:
 		return ls.queryShelleyStakePoolParams(ctx, q.PoolIds.Items())
+	case *olocalstatequery.ShelleyStakePoolStateQuery:
+		// Released nodes do not support GetStakePoolState, so only the Leios
+		// prototype answers it; elsewhere it is unsupported like any other
+		// query dingo does not implement.
+		if !ls.config.StakePoolStateQuery {
+			return nil, fmt.Errorf("unsupported query type: %T", q)
+		}
+		return ls.queryShelleyStakePoolState(ctx, q, txn)
 	// TODO: implement the remaining Shelley ledger queries below.
 	/*
 		case *olocalstatequery.ShelleyNonMyopicMemberRewardsQuery:

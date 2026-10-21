@@ -945,6 +945,19 @@ RETURNING id`,
 	if err != nil {
 		return 0, err
 	}
+	// Only a registration carrying a BLS key records a registration epoch;
+	// every other registration keeps the column NULL.
+	var leiosKeyEpoch *uint64
+	var leiosKeyAgeUnknown bool
+	if len(leiosKeyPublic) > 0 {
+		leiosKeyEpoch, leiosKeyAgeUnknown, err = poolLeiosKeyRegistration(
+			ctx, db, poolID, at, executionSlot,
+			leiosKeyPublic, leiosKeyPoP,
+		)
+		if err != nil {
+			return 0, err
+		}
+	}
 	registrationID, err := insertPoolRegistration(ctx, db, []any{
 		margin,
 		metadataURL,
@@ -963,8 +976,8 @@ RETURNING id`,
 		nullableDecimalUint64(held),
 		nullBytes(leiosKeyPublic),
 		nullBytes(leiosKeyPoP),
-		false,
-		nil,
+		leiosKeyAgeUnknown,
+		leiosKeyEpoch,
 	}, poolID, slot, certificateID, 0)
 	if err != nil {
 		return 0, err

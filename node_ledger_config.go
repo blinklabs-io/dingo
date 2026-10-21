@@ -207,6 +207,10 @@ func (n *Node) ledgerStateConfig() ledger.LedgerStateConfig {
 		// bootstrap pool-threshold checks are waived separately inside
 		// header validation after genesis overlay slots are handled.
 		SkipLeaderStakeThresholdCheck: n.config.prototypeTrustBypassesEnabled(),
+		// GetStakePoolState is not part of released nodes' query set, so it
+		// is answered only on the Leios prototype network, under the same
+		// strict identity as the trust bypasses.
+		StakePoolStateQuery: n.config.prototypeTrustBypassesEnabled(),
 		// On Musashi, certified endorser txs and Dijkstra ranking-block txs are
 		// trusted by the prototype; skip dingo's per-tx validation to match it
 		// and keep block application at the production rate.
