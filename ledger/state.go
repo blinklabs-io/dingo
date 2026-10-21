@@ -1007,6 +1007,17 @@ type LedgerStateConfig struct {
 	// transactions only — see LedgerState.skipDijkstraTxValidation. Interim
 	// until the Leios certificate / endorser-availability surface is complete.
 	SkipDijkstraTxValidation bool
+	// Praos2ChainDepState selects the Praos2 serialisation of the
+	// chain-dependent state in a GetChainDepState reply for the Dijkstra
+	// era: version 1 with nine fields, the ninth being the Leios
+	// announcement of the last applied header. Only the Leios prototype
+	// network (Musashi) runs the Dijkstra era on Praos2; released Haskell
+	// consensus runs Dijkstra on plain Praos, so the era alone must never
+	// select it. The zero value keeps the Praos layout, and node_ledger_config.go
+	// sets it only from Config.prototypeTrustBypassesEnabled, whose strict
+	// identity check cannot be met by a mainnet, preprod, preview or sancho
+	// configuration.
+	Praos2ChainDepState bool
 	// MinPoolMargin is the CIP-23 minimum pool margin (minimum variable fee) in
 	// basis points, [0, 10000] (150 = 1.5%); 0 disables it. It is a consensus-
 	// affecting operator setting (not derived from the network) that takes

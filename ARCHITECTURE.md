@@ -5336,6 +5336,15 @@ and the threshold. Byron, which ran PBFT and
 has no state of this shape, maps to CPraos there and so takes the modern layout,
 along with any era not explicitly listed.
 
+The Leios prototype network's Dijkstra era runs Praos2 instead: version 1 (the
+number TPraos uses; the field count tells them apart) wrapping the eight Praos
+fields and a ninth, the announcement of the last applied header as an empty
+list or `[issuer key hash, endorser block hash, size]`, read from the acquired
+block's header. Released consensus runs Dijkstra on plain Praos, so the era
+alone never selects Praos2: it also needs `LedgerStateConfig.Praos2ChainDepState`,
+which the node sets only from the strict Musashi identity
+(`prototypeTrustBypassesEnabled`).
+
 `GetPoolDistr2` reports each pool's share of the active stake from the mark
 snapshot at `praos.StakeSnapshotEpoch` — the snapshot leader election itself
 reads — rather than from live stake, so a schedule computed from it agrees with
