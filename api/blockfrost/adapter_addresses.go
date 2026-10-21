@@ -336,12 +336,13 @@ func (a *NodeAdapter) AddressTotal(
 			return AddressTotalInfo{}, err
 		}
 		// The read runs in txn, which carries ctx.
-		//nolint:contextcheck // UtxosWithHistory takes its context from txn
 		var batch []models.UtxoWithHistory
 		if isPaymentCred {
+			//nolint:contextcheck // UtxosWithHistory takes its context from txn
 			batch, err = db.UtxosWithHistory(query, txn)
 		} else {
 			var read int
+			//nolint:contextcheck // UtxosWithHistoryBounded takes its context from txn
 			batch, read, err = db.UtxosWithHistoryBounded(
 				query,
 				limits.maxTotalOutputs-candidates,
