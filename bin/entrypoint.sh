@@ -276,7 +276,7 @@ run_managed_dingo() {
   fi
 
   if [[ -n "${output_fd}" ]]; then
-    dingo "$@" >&"${output_fd}" &
+    dingo "$@" >&"${output_fd}" 2>&1 &
   else
     dingo "$@" &
   fi
