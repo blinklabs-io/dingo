@@ -51,6 +51,16 @@ const (
 	// connection open.
 	defaultRequestBodyTimeout = 30 * time.Second
 
+	// defaultMaxMempoolListing caps the identifiers one /mempool response
+	// names. The Mesh response has no cursor and must list every pending
+	// transaction, so a pool larger than this is refused as retriable.
+	defaultMaxMempoolListing = 10000
+
+	// defaultMaxConcurrentMempoolListings caps /mempool requests in flight.
+	// A request over the cap is refused rather than queued, so unauthenticated
+	// callers cannot pile up pool walks behind one another.
+	defaultMaxConcurrentMempoolListings = 8
+
 	// listenerReadTimeout bounds the whole request read at the
 	// connection, covering the requests whose body no handler reads --
 	// such as an unknown route -- which the per-request deadline above
@@ -110,6 +120,10 @@ type ServerConfig struct {
 	accountCoinsMaxCandidates int
 	accountCoinsMaxBytes      int64
 	maxConcurrentBulkReads    int
+	// maxMempoolListing and maxConcurrentMempoolListings are unexported and
+	// defaulted the same way.
+	maxMempoolListing            int
+	maxConcurrentMempoolListings int
 }
 
 // Server is the Mesh-compatible REST API server.
@@ -126,6 +140,8 @@ type Server struct {
 	// bulkSlots admits at most maxConcurrentBulkReads concurrent
 	// result-size-scaled reads.
 	bulkSlots chan struct{}
+	// mempoolSlots holds one token per /mempool request in flight.
+	mempoolSlots chan struct{}
 }
 
 // NewServer creates a new Mesh API server instance.
@@ -182,6 +198,12 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		cfg.requestBodyTimeout = defaultRequestBodyTimeout
 	}
 
+	if cfg.maxMempoolListing <= 0 {
+		cfg.maxMempoolListing = defaultMaxMempoolListing
+	}
+	if cfg.maxConcurrentMempoolListings <= 0 {
+		cfg.maxConcurrentMempoolListings = defaultMaxConcurrentMempoolListings
+	}
 	if cfg.accountCoinsPageSize <= 0 {
 		cfg.accountCoinsPageSize = defaultAccountCoinsPageSize
 	}
@@ -213,6 +235,7 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	return &Server{
 		config:        cfg,
 		logger:        logger,
+		mempoolSlots:  make(chan struct{}, cfg.maxConcurrentMempoolListings),
 		networkID:     networkID,
 		genesisID:     genesisID,
 		addrNetworkID: addrNetID,

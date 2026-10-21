@@ -992,9 +992,7 @@ func (n *Node) reinitializeNetworkingCore(ctx context.Context) error {
 	// disabled. This matches Run's own long-lived subscription.
 	n.ouroboros().SubscribeChainsyncResync(n.ctx) //nolint:contextcheck
 
-	genesisSelectionMode := n.config.genesisBootstrap &&
-		!n.config.intersectTip &&
-		len(n.config.intersectPoints) == 0
+	genesisSelectionMode := n.config.genesisSelectionMode()
 	if n.config.topologyConfig != nil {
 		topologyConfig := n.config.topologyConfig
 		usePeerSnapshot := genesisSelectionMode &&

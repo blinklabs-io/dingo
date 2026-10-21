@@ -1904,6 +1904,263 @@ func TestChainsyncClientRollForwardRejectsVerdictStaleBeforeObservation(
 	require.False(t, retained)
 }
 
+// deferredHeaderFixture drives chainsyncClientRollForward with a verifier that
+// always defers and a local chain whose block and header-queue tip is
+// localTip.
+type deferredHeaderFixture struct {
+	o        *Ouroboros
+	state    *dchainsync.State
+	conn     ouroboros.ConnectionId
+	tipCh    <-chan event.Event
+	ledgerCh <-chan event.Event
+	resyncCh <-chan event.Event
+}
+
+func newDeferredHeaderFixture(
+	t *testing.T,
+	localTip gledger.Blake2b256,
+) deferredHeaderFixture {
+	t.Helper()
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Close)
+	_, tipCh := bus.Subscribe(chainselection.PeerTipUpdateEventType)
+	_, ledgerCh := bus.Subscribe(ledger.ChainsyncEventType)
+	_, resyncCh := bus.Subscribe(event.ChainsyncResyncEventType)
+	state := dchainsync.NewState(bus, nil)
+	conn := newTestConnId("127.0.0.1:6021", "1.1.1.5:3001")
+	require.True(t, state.AddClientConnId(conn))
+	ls := newTestLedgerState(t)
+	o := newOuroboros(OuroborosConfig{
+		EventBus:       bus,
+		LedgerState:    ls,
+		ChainsyncState: state,
+		ChainsyncIngressEligible: func(ouroboros.ConnectionId) bool {
+			return true
+		},
+		ChainsyncApplyEligible: func(ouroboros.ConnectionId) bool {
+			return true
+		},
+	})
+	deferredErr := ls.ValidateChainSelectionHeaderCrypto(
+		nonByronTestHeader{&testBlockHeader{blockNumber: 1, slotNumber: 200}},
+	)
+	require.True(t, ledger.IsHeaderVerificationDeferred(deferredErr))
+	o.chainSelectionShouldVerifyHeaderCrypto = func(uint64) bool { return true }
+	o.chainSelectionVerifyHeaderCrypto = func(ouroboros.ConnectionId, gledger.BlockHeader) (uint64, error) {
+		return 0, deferredErr
+	}
+	o.chainsyncLocalChainTips = func() ([]byte, []byte) {
+		return localTip.Bytes(), localTip.Bytes()
+	}
+	return deferredHeaderFixture{
+		o:        o,
+		state:    state,
+		conn:     conn,
+		tipCh:    tipCh,
+		ledgerCh: ledgerCh,
+		resyncCh: resyncCh,
+	}
+}
+
+func (f deferredHeaderFixture) rollForward(
+	t *testing.T,
+	header gledger.BlockHeader,
+) {
+	t.Helper()
+	require.NoError(t, f.o.chainsyncClientRollForward(
+		ochainsync.CallbackContext{ConnectionId: f.conn},
+		0,
+		header,
+		ochainsync.Tip{
+			Point: ocommon.NewPoint(
+				header.SlotNumber(),
+				header.Hash().Bytes(),
+			),
+			BlockNumber: header.BlockNumber(),
+		},
+	))
+}
+
+// TestChainsyncClientRollForwardQueuesDeferredHeaderExtendingLocalChain is the
+// Byron->Shelley regression: the first header of an epoch the local ledger has
+// not entered defers producer authorization, and only applying its own block
+// can clear that. Withholding it from block-fetch stalled sync for good, so a
+// deferred header that extends the local chain, and its pipelined child, must
+// reach the ledger queue and keep the selector following the peer, while
+// staying out of trusted history.
+func TestChainsyncClientRollForwardQueuesDeferredHeaderExtendingLocalChain(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	var localTip, firstHash, childHash gledger.Blake2b256
+	localTip[0], firstHash[0], childHash[0] = 0x01, 0x02, 0x03
+	f := newDeferredHeaderFixture(t, localTip)
+	first := nonByronTestHeader{&testBlockHeader{
+		hash:        firstHash,
+		prevHash:    localTip,
+		blockNumber: 10,
+		slotNumber:  86400,
+	}}
+	// The child arrives before the ledger has queued its parent: the local
+	// tips still read localTip when it is evaluated.
+	child := nonByronTestHeader{&testBlockHeader{
+		hash:        childHash,
+		prevHash:    firstHash,
+		blockNumber: 11,
+		slotNumber:  86420,
+	}}
+
+	for _, header := range []gledger.BlockHeader{first, child} {
+		f.rollForward(t, header)
+		tipEvt := testutil.RequireReceive(
+			t,
+			f.tipCh,
+			5*time.Second,
+			"a linear deferred header must keep the selector following the peer",
+		)
+		update, ok := tipEvt.Data.(chainselection.PeerTipUpdateEvent)
+		require.True(t, ok)
+		require.Zero(t, update.HeaderCryptoVerificationGeneration)
+		evt := testutil.RequireReceive(
+			t,
+			f.ledgerCh,
+			5*time.Second,
+			"a deferred header extending the local chain must reach the ledger queue",
+		)
+		data, ok := evt.Data.(ledger.ChainsyncEvent)
+		require.True(t, ok)
+		require.Equal(t, header.Hash().Bytes(), data.Point.Hash)
+		require.Zero(t, data.HeaderCryptoVerificationGeneration)
+		_, _, observed := f.state.LookupObservedHeader(
+			f.conn,
+			header.Hash().Bytes(),
+		)
+		require.False(t, observed, "a deferred header must not enter trusted history")
+	}
+	f.o.deferredHeaderRecoveryMu.Lock()
+	_, marked := f.o.deferredHeaderRecovery[f.conn]
+	f.o.deferredHeaderRecoveryMu.Unlock()
+	require.False(t, marked)
+}
+
+// TestChainsyncClientRollForwardWithheldAncestryHeaderIsNotAcceptedTip pins
+// that a header withheld because its fork ancestry cannot be authenticated
+// does not become the connection's accepted tip. Otherwise its deferred child
+// would pass as a linear extension of the local chain and reach the selector
+// and the ledger queue although nothing below it was verified.
+func TestChainsyncClientRollForwardWithheldAncestryHeaderIsNotAcceptedTip(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	var localTip, forkParent, withheldHash, childHash gledger.Blake2b256
+	localTip[0], forkParent[0], withheldHash[0], childHash[0] = 0x01, 0x0f, 0x20, 0x21
+	f := newDeferredHeaderFixture(t, localTip)
+	deferred := f.o.chainSelectionVerifyHeaderCrypto
+	f.o.chainSelectionVerifyHeaderCrypto = func(
+		conn ouroboros.ConnectionId,
+		header gledger.BlockHeader,
+	) (uint64, error) {
+		if bytes.Equal(header.Hash().Bytes(), withheldHash.Bytes()) {
+			return 0, ledger.ErrHeaderVerificationWithheld
+		}
+		return deferred(conn, header)
+	}
+	withheld := nonByronTestHeader{&testBlockHeader{
+		hash:        withheldHash,
+		prevHash:    forkParent,
+		blockNumber: 10,
+		slotNumber:  86400,
+	}}
+	child := nonByronTestHeader{&testBlockHeader{
+		hash:        childHash,
+		prevHash:    withheldHash,
+		blockNumber: 11,
+		slotNumber:  86420,
+	}}
+
+	f.rollForward(t, withheld)
+	f.o.acceptedHeaderMu.Lock()
+	_, accepted := f.o.acceptedHeaderTips[f.conn]
+	f.o.acceptedHeaderMu.Unlock()
+	require.False(t, accepted, "a withheld header must not become the accepted tip")
+
+	f.rollForward(t, child)
+	testutil.RequireNoReceive(
+		t,
+		f.ledgerCh,
+		100*time.Millisecond,
+		"a deferred child of a withheld header must not enter the ledger queue",
+	)
+	testutil.RequireNoReceive(
+		t,
+		f.tipCh,
+		100*time.Millisecond,
+		"a deferred child of a withheld header must not enter chain selection",
+	)
+}
+
+// TestChainsyncClientRollForwardWithholdsDeferredForkHeader proves the
+// linear-extension allowance does not reopen #5219: a deferred header whose
+// parent is not on the local chain stays out of chain selection and the ledger.
+// With nothing queued no applied-chain update can come to re-intersect the
+// peer, so it is re-intersected at once, but only once per applied tip.
+func TestChainsyncClientRollForwardWithholdsDeferredForkHeader(t *testing.T) {
+	t.Parallel()
+
+	var localTip, forkParent, forkHash gledger.Blake2b256
+	localTip[0], forkParent[0], forkHash[0] = 0x01, 0x0f, 0x10
+	f := newDeferredHeaderFixture(t, localTip)
+	fork := nonByronTestHeader{&testBlockHeader{
+		hash:        forkHash,
+		prevHash:    forkParent,
+		blockNumber: 10,
+		slotNumber:  86400,
+	}}
+
+	f.rollForward(t, fork)
+	testutil.RequireNoReceive(
+		t,
+		f.ledgerCh,
+		100*time.Millisecond,
+		"a deferred fork header must not enter the ledger queue",
+	)
+	testutil.RequireNoReceive(
+		t,
+		f.tipCh,
+		100*time.Millisecond,
+		"a deferred fork header must not enter chain selection",
+	)
+	f.o.deferredHeaderRecoveryMu.Lock()
+	_, marked := f.o.deferredHeaderRecovery[f.conn]
+	f.o.deferredHeaderRecoveryMu.Unlock()
+	require.True(t, marked)
+	resync := testutil.RequireReceive(
+		t,
+		f.resyncCh,
+		5*time.Second,
+		"an idle queue must re-intersect the withheld peer",
+	)
+	resyncData, ok := resync.Data.(event.ChainsyncResyncEvent)
+	require.True(t, ok)
+	require.Equal(t, f.conn, resyncData.ConnectionId)
+	require.Equal(
+		t,
+		event.ChainsyncResyncReasonHeaderValidationRecovery,
+		resyncData.Reason,
+	)
+
+	f.o.cancelFutureHeaderResync(f.conn)
+	f.rollForward(t, fork)
+	testutil.RequireNoReceive(
+		t,
+		f.resyncCh,
+		100*time.Millisecond,
+		"a fork peer must not be re-intersected again at the same applied tip",
+	)
+}
+
 // TestChainsyncClientRollForwardCompetingPeersOnlyVerifiedHeaderCounted
 // proves the verification gate applies independently to every ingress-eligible
 // peer, not only the currently apply-eligible one -- covering the acceptance

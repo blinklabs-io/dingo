@@ -4711,6 +4711,25 @@ func queuePeerTipAdmission(
 	})
 }
 
+// clearChainsyncHeaderAuthorization queues a header whose producer
+// authorization cannot be confirmed now, as pre-authorization ledger admission
+// did: block-fetch verifies its body before application, and an unauthorized
+// header that does not fit the queue still cannot clear it or roll back
+// canonical state. Withholding it instead deadlocks sync whenever only applying
+// queued blocks can make its authorization verifiable, as at the Byron->Shelley
+// boundary.
+//
+// The update is cleared in place, never replaced by a copy: the ingress
+// owner's PeerTipAdmission callback commits the update it shares with this
+// event, and a copy would leave it committing the stale generation as if the
+// ledger still held that generation's pin.
+func clearChainsyncHeaderAuthorization(e *ChainsyncEvent) {
+	e.HeaderCryptoVerificationGeneration = 0
+	if e.PeerTipUpdate != nil {
+		e.PeerTipUpdate.HeaderCryptoVerificationGeneration = 0
+	}
+}
+
 func queuePeerHeaderHistoryInvalidation(
 	pending *pendingPublishes,
 	e ChainsyncEvent,
@@ -4768,32 +4787,40 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 	if headerCryptoVerificationGeneration != 0 &&
 		!headerCryptoVerified && !headerTrusted && !headerValidationRequired {
 		ls.config.Logger.Debug(
-			"withholding chainsync header after its producer authorization became stale",
+			"queueing chainsync header without producer authorization after it became stale",
 			"component", "ledger",
 			"slot", e.Point.Slot,
 			"hash", hex.EncodeToString(e.Point.Hash),
 		)
-		return nil
+		headerCryptoVerificationGeneration = 0
+		producerAuthorizationGeneration = 0
+		clearChainsyncHeaderAuthorization(&e)
 	}
 	if headerValidationRequired && !headerCryptoVerified {
 		var err error
 		headerCryptoVerificationGeneration, err = ls.
 			ValidateChainSelectionHeaderCryptoWithGeneration(e.BlockHeader)
-		if err != nil {
-			if IsHeaderVerificationDeferred(err) {
-				ls.config.Logger.Debug(
-					"withholding chainsync header until producer authorization can be verified",
-					"component",
-					"ledger",
-					"slot",
-					e.Point.Slot,
-					"hash",
-					hex.EncodeToString(e.Point.Hash),
-					"error",
-					err,
-				)
-				return nil
-			} else {
+		switch {
+		case err == nil:
+			headerCryptoVerified = true
+			e.HeaderCryptoVerificationGeneration = headerCryptoVerificationGeneration
+			if e.PeerTipUpdate != nil {
+				e.PeerTipUpdate.HeaderCryptoVerificationGeneration = headerCryptoVerificationGeneration
+			}
+			producerAuthorizationGeneration = headerCryptoVerificationGeneration
+		case IsHeaderVerificationDeferred(err):
+			ls.config.Logger.Debug(
+				"queueing chainsync header until producer authorization can be verified",
+				"component", "ledger",
+				"slot", e.Point.Slot,
+				"hash", hex.EncodeToString(e.Point.Hash),
+				"error", err,
+			)
+			headerCryptoVerificationGeneration = 0
+			producerAuthorizationGeneration = 0
+			clearChainsyncHeaderAuthorization(&e)
+		default:
+			{
 				if ls.config.EventBus != nil {
 					ls.config.Logger.Warn(
 						"recycling connection after header verification failure",
@@ -4820,12 +4847,6 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 				)
 			}
 		}
-		headerCryptoVerified = true
-		e.HeaderCryptoVerificationGeneration = headerCryptoVerificationGeneration
-		if e.PeerTipUpdate != nil {
-			e.PeerTipUpdate.HeaderCryptoVerificationGeneration = headerCryptoVerificationGeneration
-		}
-		producerAuthorizationGeneration = headerCryptoVerificationGeneration
 	}
 	var releaseVerificationGeneration func()
 	verificationGenerationReleased := false
@@ -5294,9 +5315,10 @@ var ErrChainsyncHeaderDisconnected = errors.New(
 )
 
 // ErrChainsyncHeaderNeedsResync is returned when a forecast-held header
-// connects to the local chain but no queued or in-flight blockfetch can
-// publish state that advances the forecast horizon. Re-intersection makes the
-// peer replay from the local chain; this is not a peer fault.
+// connects to the local chain but no queued or in-flight blockfetch, and no
+// stored block the ledger has yet to apply, can publish state that advances
+// the forecast horizon. Re-intersection makes the peer replay from the local
+// chain; this is not a peer fault.
 var ErrChainsyncHeaderNeedsResync = errors.New(
 	"chainsync header forecast has no local block work to advance it",
 )
@@ -5317,8 +5339,9 @@ var ErrChainsyncHeaderNeedsResync = errors.New(
 // selection or reach blockfetch. Such a header whose predecessor does not
 // connect to the local chain is not held: it returns an error wrapping
 // ErrChainsyncHeaderDisconnected. A connected header also returns
-// ErrChainsyncHeaderNeedsResync when no queued or in-flight blockfetch can
-// publish state to advance the forecast. Other conversion failures fail
+// ErrChainsyncHeaderNeedsResync when no queued or in-flight blockfetch, and no
+// stored block the ledger has yet to apply, can publish state to advance the
+// forecast. Other conversion failures fail
 // closed. A zero timestamp is retained for compatibility with
 // synthetic/internal events that never crossed the network ingress path. As
 // with other Go APIs that accept a context, ctx must not be nil.
@@ -5441,6 +5464,23 @@ func (ls *LedgerState) flushQueuedHeadersForHorizonWait(
 		ls.blockfetchContinuationPending
 }
 
+// chainAheadOfAppliedTip reports whether the primary chain holds blocks the
+// ledger has not applied yet. Applying them publishes the snapshots that move
+// the forecast horizon, so they are local work even when no header is queued
+// and no blockfetch is running, as while a block waits on data fetched by
+// another protocol. Re-intersecting instead closes the connections that work
+// may need, without advancing the horizon.
+func (ls *LedgerState) chainAheadOfAppliedTip() bool {
+	if ls.chain == nil {
+		return false
+	}
+	tip := ls.loadTipSnapshot()
+	if tip == nil {
+		return false
+	}
+	return ls.chain.Tip().Point.Slot > tip.currentTip.Point.Slot
+}
+
 // awaitForecastHorizon blocks until the published ledger state can forecast
 // e's slot, or ctx ends. The horizon only moves when a snapshot is published,
 // so it waits for publication, or for blockfetch capacity to change, rather
@@ -5480,7 +5520,8 @@ func (ls *LedgerState) awaitForecastHorizon(
 			)
 			logged = true
 		}
-		if !ls.flushQueuedHeadersForHorizonWait(e.ConnectionId) {
+		if !ls.flushQueuedHeadersForHorizonWait(e.ConnectionId) &&
+			!ls.chainAheadOfAppliedTip() {
 			if err := ctx.Err(); err != nil {
 				return err
 			}

@@ -302,14 +302,21 @@ before faucet export was available.
 The command refreshes the Byron and Shelley start times and starts the same executable with dev mode and block production
 enabled. The key bundle is separate from embedded network configuration, and
 normal node key paths still come from the operator. The child process runs the ordinary `serveRun`
-and `internal/node` composition with an isolated database and no configured
-peers. The command forwards shutdown signals and removes its temporary
+and `internal/node` composition with an isolated database, no configured
+peers, and a loopback-only bind address (`127.0.0.1`). The command forwards shutdown signals and removes its temporary
 directory after the node stops; the npm wrapper passes `devnet` through to the
 same binary command. Supplying `--data-dir` keeps the generated configuration
 and database for the next run; `--reset` rebuilds those managed paths with
 fresh genesis start times. The CLI holds an exclusive state-directory lock
 until the child exits and rewrites the path-bearing node configuration when
-reusing copied state.
+reusing copied state. State preparation and reset open the directory with
+`os.Root` and pin it by file identity: a symlinked `--data-dir` is resolved once
+at startup, and a symlink introduced while those operations run is rejected
+rather than followed. Each `cardano/keys/` directory component is opened the
+same way, so a symlinked intermediate directory cannot redirect key writes
+outside the state directory. The child node later opens its configuration,
+database, and keys from the generated absolute paths; the preparation handle
+does not pin those child-process opens.
 
 Dingo's architecture is built on several key principles:
 
@@ -561,12 +568,12 @@ sequenceDiagram
     Note over Peer,DB: Stage 1 — Header Discovery (ChainSync)
     Peer->>OB: RollForward(header, tip)
     OB->>OB: strictly verify header crypto against current ledger generation
-    Note over OB: If verification is deferred, retain only bounded raw ancestry; do not update peer selection or ledger state
+    Note over OB: If verification is deferred, forward only a header extending the local chain, unverified; withhold any other from peer selection and ledger state
     OB->>LS: await bounded header capacity
     LS->>ChM: wait for header queue drain
     OB->>EB: publish ChainsyncEvent(header)
     EB->>LS: handleEventChainsyncBlockHeader()
-    LS->>LS: recheck header crypto against current ledger generation
+    LS->>LS: recheck header crypto; queue a deferred header unverified, never as a rollback trigger
     LS->>ChM: enqueue header in chain.headers[]
 
     Note over Peer,DB: Stage 2 — Full Block Retrieval (BlockFetch)
@@ -3794,7 +3801,7 @@ read from the database once; an input it does not return is read by each check
 that needs it. A block of the era listed before the ledger's era is judged under
 the previous era's parameters, the same rule applied to its transactions.
 With `LedgerStateConfig.LedgerPrefetchAheadEnabled` (`ledgerPrefetchAheadEnabled`,
-default off), the block-apply chunk also resolves block k+1's inputs on a
+on by default in node configuration), the block-apply chunk also resolves block k+1's inputs on a
 separate goroutine (`utxoPrefetchAhead`, `ledger/utxo_prefetch_ahead.go`) from a
 read-pool transaction while block k applies; the chunk's write transaction is
 never shared with it. Only blocks under normal validation are prefetched:
@@ -4006,7 +4013,10 @@ prototype release also changes `MsgLeiosBlockAnnouncement` from a null
 placeholder to the full ranking-block header. The LeiosNotify client accepts
 that header. Announcements wrap it as `[era_id, header]`; Dingo unwraps the
 Dijkstra-era envelope and rejects envelopes tagged with another era, while
-retaining support for bare Dijkstra headers used by local diffusion. In
+retaining support for bare Dijkstra headers used by local diffusion. Dingo
+retains the original announcement bytes for relay while comparing the decoded
+bare Dijkstra header bytes for duplicates and asynchronous semantic
+validation. In
 prototype-2026w31, `ouroboros/` decodes the Dijkstra header,
 requires a valid `leios_announcement`, rejects future or more-than-ten-minute-
 old announcements, and rejects a repeated endorser-block hash whose size
@@ -4532,7 +4542,12 @@ reads `TestDijkstraHardForkAtEpoch` only when that flag is true. The same
 trigger bounds `boundaryEraForBlock`'s two-era elevation: a boundary block's
 header protocol major is cardano-node's advertised `cardanoProtocolVersion`
 (11, or 12 with the flag), not its era, so it cannot carry the ledger into a
-successor whose configured epoch has not arrived. The classic update-proposal system has a voting
+successor whose configured epoch has not arrived. Leaving Byron, only a
+`TriggerAtEpoch` successor admits the elevation at all: Byron carries no
+protocol version for `ledgerBoundaryEra` to decide from, and a version
+trigger reads the entered era's own enacted parameters, which do not exist
+before its first epoch. Preprod's first Shelley blocks advertise major 3, yet
+epoch 4 runs Shelley at major 2 and Allegra begins at epoch 5. The classic update-proposal system has a voting
 deadline too: a proposal for the next epoch can be submitted or superseded
 only before `2 * stabilityWindow` before that epoch starts (the Shelley PPUP
 rule). `evaluateProtocolVersionBump` therefore reports the transition only
@@ -4582,11 +4597,17 @@ slot and reads that epoch's effective parameter row. At a hard-fork boundary,
 when the block body still uses the predecessor-era encoding while the header
 announces the successor, it instead uses the predecessor era's parameter row.
 This keeps either boundary from mistaking an epoch-boundary decentralization
-update for the wrong overlay schedule. When the target epoch's parameter row
-is not persisted yet (a from-genesis node still one epoch behind the header),
-`ProtocolParamsForSlot` forecasts it: for a slot one epoch ahead it applies,
-on top of any era `HardForkFunc`, the pending in-era protocol-parameter update
-the rollover will enact at that boundary. The forecast mirrors the rollover's
+update for the wrong overlay schedule. For an epoch after the applied one,
+only a row persisted for exactly that epoch is used: the persisted lookup
+returns the newest row at or before the requested epoch, and the published
+epoch cache can already describe the next epoch before its rollover writes a
+row, so that lookup would return an older epoch's parameters without the
+pending update. When no such row exists (a from-genesis node still one epoch
+behind the header), the parameters are forecast. A block encoded in the
+current era takes the current parameters with the pending in-era
+protocol-parameter update the rollover will enact at that boundary applied;
+any other future slot goes through `ProtocolParamsForSlot`, which applies the
+same pending update and then any era `HardForkFunc`. The forecast mirrors the rollover's
 enactment exactly — it selects the proposals submitted in the current epoch
 (Shelley update system: a proposal submitted in epoch `e` is enacted as epoch
 `e+1`'s parameters), applies the same `UpdateQuorum` rule, and reads the
@@ -5786,7 +5807,9 @@ stranding ChainSync when the bootstrap peer is still the only usable upstream.
 #### Ouroboros Genesis trust model
 
 Genesis mode (`genesisBootstrap`, active only for from-origin sync with no
-`intersectTip`/`intersectPoints`) selects the chain by observed header
+`intersectTip`/`intersectPoints`, and never when the Cardano node configuration
+names `ConsensusMode: PraosMode`, which makes the node follow its peers by Praos
+rules as the reference node does) selects the chain by observed header
 *density* within a window of `3k/f` slots rather than by longest-chain length,
 so a from-origin node can prefer the denser (honest) chain before it has the
 history to run the full Praos comparison. The window is derived from Shelley
@@ -6161,16 +6184,33 @@ it. Dingo implements this as a **corroboration gate**
   Verification is skipped only for a slot an imported Mithril snapshot
   already covers, the same exemption the ledger's own header-queue path
   applies. A result showing local state has not caught up to the header's slot
-  (`IsHeaderVerificationDeferred`) withholds the header from chain selection,
-  density, corroboration, and the observed ancestry used by fork resolution or
-  rollback replay without penalizing the peer. ChainSync records that the peer
-  needs recovery and re-intersects it after the applied ledger advances. If the
+  (`IsHeaderVerificationDeferred`) never enters the observed ancestry used by
+  fork resolution or rollback replay, and never penalizes the peer. A deferred
+  header that extends the local chain — its parent is the block tip, the
+  header-queue tip, or the last header the same connection passed through this
+  gate — still updates the selector and reaches the ledger queue with no
+  verification generation; block-fetch verifies its body before application.
+  A header withheld because its fork ancestry cannot be authenticated never
+  becomes that connection's last passed header. Withholding a linear extension
+  deadlocks sync whenever only applying that block can make its authorization
+  verifiable: at the Byron->Shelley boundary the first Shelley epoch's state
+  does not exist until a Shelley block is applied. Any other deferred header
+  is withheld from selection, density, corroboration and the ledger. ChainSync
+  records that the peer needs recovery and re-intersects it after the applied
+  ledger advances, or at once (once per connection and applied tip) when
+  nothing is queued, since then no block can be applied to trigger it. If the
   ledger advances during ancestry verification, recording the deferred marker
   detects that tip change and schedules recovery immediately. Closing the
   connection clears its marker, and a failed retry does not restore the marker
   after the connection has left the manager. The peer then delivers its linked
-  suffix parent-first, and each header must pass
-  verification before entering observed ancestry or the ledger queue.
+  suffix parent-first, and each header must pass verification before entering
+  observed ancestry. The ledger queues a header whose authorization it cannot
+  confirm (deferred, or a stale ingress verdict) the same way, without a
+  verification generation, so it can neither advance the admitted frontier nor
+  clear the queue or roll back canonical state when it does not fit. It clears
+  the generation on the update the ingress owner's admission callback commits
+  as well, so the selector receives a generation-0 update rather than a stale
+  verdict without its pin.
   The verification snapshot generation travels with the staged selector
   candidate and ledger event; a rollback or concurrent publication that makes
   it stale removes the candidate from corroboration and triggers recovery. A
@@ -8029,11 +8069,36 @@ which a live restore unregisters) and are all prefixed `dingo_dmq_`:
 `connections`. Every `reason` series exists from startup, so a `rate()` alert
 sees a reason before its first rejection.
 
+`dmq.topologyFile` names a dmq-node topology file, which uses cardano-node's
+P2P topology syntax and is separate from the Cardano topology. `dmq.LoadTopology`
+parses it into local and public root groups of peers with its own decoder, not
+the shared Cardano reader: that reader refuses a valency above the number of
+access points, and the topology the Mithril documentation publishes has a local
+root with valency 2 and one access point. Here a valency is a target that may
+exceed the peers listed. An access point still needs a non-empty host and a
+port from 1 to 65535, and a `warmValency` may not be below the valency; a
+missing `warmValency` becomes the valency, and `hotValency` is accepted as a
+spelling of `valency` in both groups. `bootstrapPeers`, `peerSnapshotFile` and
+`useLedgerAfterSlot` are never decoded, because dmq-node does not support them:
+even a malformed one does not fail the load, a configured `bootstrapPeers` or
+`peerSnapshotFile` is logged as ignored, and a peer snapshot is never read from
+disk. A file must be a JSON object and may not hold two keys that differ only
+in case. Peer hosts lose surrounding whitespace and IPv6 brackets, and
+`Topology.Peers` lists each distinct peer once, comparing hostnames without case
+or a trailing dot and IP literals by canonical form, without resolving names. A
+file naming no peers loads as an empty topology, since ledger peer discovery can
+supply peers without one, and logs a warning. Configuration validation rejects a
+missing or non-regular file early; `startDMQ` then loads it, which is the
+authoritative read, before the DMQ stack opens its socket. A bad file stops
+startup through the node's normal failure path, after services that started
+earlier in `Run`, and a successful load logs the distinct peer count.
+
 Not yet provided: the node-to-node message submission transport, its listener,
-topology, peer limits and ledger peer discovery, which the DMQ stack needs
-before it can exchange messages with other nodes. `n2n_port`, `listen_address`,
-`topology_file`, `min_peers` and `max_peers` are therefore not configuration
-keys yet.
+the peer manager that dials the topology peers within `dmq.minPeers` and
+`dmq.maxPeers`, and ledger peer discovery, which the DMQ stack needs before it
+can exchange messages with other nodes. `dmq.n2nPort`, `dmq.listenAddress`,
+`dmq.listenIpv6Address`, `dmq.minPeers` and `dmq.maxPeers` are validated
+configuration keys that nothing reads yet.
 
 ### DMQ Message Authentication
 
@@ -11527,6 +11592,16 @@ Construction requests reject null operation, public-key, and signature elements
 before dereferencing them. Input indices must fit both the constructor's native
 integer and the serialized uint32 field; invalid inputs return the existing
 request error instead of panicking inside the handler.
+
+`POST /mempool` reads identifiers only, through `Mempool.TransactionHashes`,
+which walks the same order as `Transactions` but never clones transaction CBOR.
+The response must name every pending transaction and has no cursor, so a pool
+holding more than 10000 transactions is refused with the retriable
+`ErrUnavailable` (HTTP 503), its details giving the pool size, rather than
+answered with a prefix that silently hides the rest. At most 8
+listings run at once; a request that finds every slot held, after its body has
+validated, is refused with the retriable `ErrUnavailable` (HTTP 503) rather than
+queued.
 
 TLS is configured through `plugins.api.mesh.config.tls`; see "API security"
 above.
@@ -17688,9 +17763,13 @@ it retries on the origin, then on the active best peer, and when those fail the 
 and a re-sync requested, since the wait cannot end while nothing fetches the
 queued blocks. The discarded headers' invalidation is published after the ledger
 locks are released, so their Leios announcements and derived votes are removed
-without waiting for another chain event. If no fetch is active and no queued
-headers can be fetched, admission rechecks the forecast and pending snapshot
-publication, then returns `ErrChainsyncHeaderNeedsResync`. Ouroboros
+without waiting for another chain event. Stored blocks the ledger has not
+applied yet (`chainAheadOfAppliedTip`) also count as local work, so admission
+keeps waiting for the snapshot publication their application brings rather
+than closing a connection that work may need, such as one serving endorser
+block backfill. If no fetch is active, no queued headers can be fetched and
+nothing stored is left to apply, admission rechecks the forecast and pending
+snapshot publication, then returns `ErrChainsyncHeaderNeedsResync`. Ouroboros
 re-intersects that peer from the local chain with a non-penalizing reason,
 instead of leaving its callback waiting for work that cannot start. As in the
 reference, the forecast is measured from where the peer's chain leaves the
@@ -18331,6 +18410,65 @@ epoch rollover and retry semantics. Neither is warranted by throughput,
 since the parallelizable work is already parallel. Library contract changes
 must be evaluated against these integration requirements, not pinned to
 historical upstream implementation behavior.
+
+#### Overlapping block application with validation
+
+Block application stays on one goroutine and one write transaction per
+`batchSize` chunk. Inside the chunk each validated transaction's delta is
+written as soon as the transaction is validated, because the next
+transaction's rules read that state back through the same transaction. What
+overlaps the apply loop is work that reads no ledger state, or reads only
+state committed before the chunk:
+
+- `LedgerPrefetchAheadEnabled` resolves block k+1's input UTxOs from a
+  read-pool transaction while block k applies (see "Era-Specific
+  Validation").
+- `LedgerValidateAheadEnabled` (`ledgerValidateAheadEnabled` /
+  `DINGO_LEDGER_VALIDATE_AHEAD_ENABLED` / `--ledger-validate-ahead-enabled`;
+  on by default in node configuration) verifies the vkey and bootstrap witness signatures of every
+  validated block of the chunk on `GOMAXPROCS` worker goroutines
+  (`signaturePreverifyAhead`, `ledger/signature_preverify.go`), queued in
+  block order. Before applying block k the loop waits for block k's results
+  and hands them to `ledgerProcessBlock` by transaction position. Each result
+  is gouroboros' `PreverifiedSignatures`, bound to the transaction body and
+  witness set: the era signature rule reuses it only for the transaction it
+  was computed from, still checks that every required witness is present, and
+  returns a recorded failure unchanged. A result for any other transaction is
+  ignored and the signature is verified inline. The workers are cancelled and
+  joined on every exit from the chunk callback, and their results are
+  discarded with it, so a failed or rolled-back chunk leaves nothing behind.
+  Byron blocks are not covered, since their witnesses are always verified
+  inline, nor are Dijkstra chunks or `TrustedReplay`, which preverifies the
+  whole chunk's signatures before its transaction opens.
+
+Both flags change only when work happens, never what it computes: verdicts
+and stored state are identical to the serial path.
+`TestLedgerValidateAheadMatchesSerialState` and
+`TestLedgerValidateAheadRejectsBadSignature` (`ledger/`) replay one chain with
+the flags off and on and compare stored state and rejection errors, and
+`TestConformanceVectorsPreverifiedSignaturesMatchInline`
+(`internal/test/conformance/`) validates every corpus transaction with and
+without a result computed on another goroutine and requires the same
+verdict.
+
+Two wider overlap models were considered and rejected:
+
+- **Validating block N+1 against an in-memory overlay while N's writes commit
+  on a writer goroutine.** SQLite has one writer, and N's uncommitted writes
+  are visible only on N's connection, so N+1's rules would read every effect
+  of N from the overlay. The rules reach state through the whole `LedgerView`
+  surface (UTxOs, stake and reward accounts, pools, DReps, committee,
+  proposals, deposits, op-cert counters, and more), and any query the overlay
+  answered from the snapshot alone would change a verdict without an error.
+  Committing per block would also give up the chunk transaction.
+- **Staged pipelining across commit batches.** Chunk C+1's validation needs
+  C's committed state, so before C commits it can only do work that reads no
+  state or reads the state committed before C. That is the work the two flags
+  above already move off the apply loop.
+
+The ledger-state work therefore stays serial for the reason given in "Why
+dingo's ledger apply is not wired into `pipeline.ApplyFunc`": each block's
+state depends on the previous block's.
 
 ### Ledger-Tip/Chain-Iterator Rollback Synchronization
 

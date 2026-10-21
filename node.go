@@ -1278,9 +1278,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		chainSelectorSecurityParam,
 		n.ledgerState.ActiveSlotCoeffRat(),
 	)
-	genesisSelectionMode := n.config.genesisBootstrap &&
-		!n.config.intersectTip &&
-		len(n.config.intersectPoints) == 0
+	genesisSelectionMode := n.config.genesisSelectionMode()
 	chainSelectorConfig := n.buildChainSelectorConfig(
 		chainSelectorSecurityParam,
 		genesisSelectionMode,
