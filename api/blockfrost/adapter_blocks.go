@@ -100,10 +100,10 @@ func (a *NodeAdapter) neighborBlocks(
 	return ret, total, nil
 }
 
-func (a *NodeAdapter) blockInfos(blocks []models.Block) ([]BlockInfo, error) {
+func (a *NodeAdapter) blockInfos(ctx context.Context, blocks []models.Block) ([]BlockInfo, error) {
 	ret := make([]BlockInfo, 0, len(blocks))
 	for _, block := range blocks {
-		info, err := a.blockInfoFromBlock(block)
+		info, err := a.blockInfoFromBlock(ctx, block)
 		if err != nil {
 			return nil, err
 		}
@@ -122,8 +122,7 @@ func (a *NodeAdapter) BlockNext(
 	if err != nil {
 		return nil, 0, err
 	}
-	//nolint:contextcheck // block aggregates are read through the ledger state, which takes no context
-	infos, err := a.blockInfos(blocks)
+	infos, err := a.blockInfos(ctx, blocks)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -140,8 +139,7 @@ func (a *NodeAdapter) BlockPrevious(
 	if err != nil {
 		return nil, 0, err
 	}
-	//nolint:contextcheck // block aggregates are read through the ledger state, which takes no context
-	infos, err := a.blockInfos(blocks)
+	infos, err := a.blockInfos(ctx, blocks)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -175,8 +173,7 @@ func (a *NodeAdapter) BlockBySlot(
 	if err != nil {
 		return BlockInfo{}, err
 	}
-	//nolint:contextcheck // block aggregates are read through the ledger state, which takes no context
-	return a.blockInfoFromBlock(block)
+	return a.blockInfoFromBlock(ctx, block)
 }
 
 func (a *NodeAdapter) blockAtEpochSlot(
@@ -219,8 +216,7 @@ func (a *NodeAdapter) BlockByEpochSlot(
 	if err != nil {
 		return BlockInfo{}, err
 	}
-	//nolint:contextcheck // block aggregates are read through the ledger state, which takes no context
-	return a.blockInfoFromBlock(block)
+	return a.blockInfoFromBlock(ctx, block)
 }
 
 func (a *NodeAdapter) decodedBlockByID(

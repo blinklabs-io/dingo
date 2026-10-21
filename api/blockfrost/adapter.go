@@ -304,29 +304,30 @@ func (a *NodeAdapter) ChainTip() (
 }
 
 // LatestBlock returns information about the latest block.
-func (a *NodeAdapter) LatestBlock() (
+func (a *NodeAdapter) LatestBlock(ctx context.Context) (
 	BlockInfo, error,
 ) {
 	tip := a.ledgerState.Tip()
 	block, err := a.ledgerState.BlockByHash(
-		context.Background(),
+		ctx,
 		tip.Point.Hash,
 	)
 	if err != nil {
 		return BlockInfo{}, err
 	}
-	return a.blockInfoFromBlock(block)
+	return a.blockInfoFromBlock(ctx, block)
 }
 
 // BlockByHashOrNumber returns block information by hash or height.
 func (a *NodeAdapter) BlockByHashOrNumber(
+	ctx context.Context,
 	id string,
 ) (BlockInfo, error) {
-	block, err := a.resolveBlock(context.Background(), id)
+	block, err := a.resolveBlock(ctx, id)
 	if err != nil {
 		return BlockInfo{}, err
 	}
-	return a.blockInfoFromBlock(block)
+	return a.blockInfoFromBlock(ctx, block)
 }
 
 // resolveBlock loads the block named by a 64-character hex hash or a decimal
@@ -395,6 +396,7 @@ func (a *NodeAdapter) resolveBlock(
 }
 
 func (a *NodeAdapter) blockInfoFromBlock(
+	ctx context.Context,
 	block models.Block,
 ) (BlockInfo, error) {
 	decodedBlock, err := block.Decode()
@@ -405,7 +407,7 @@ func (a *NodeAdapter) blockInfoFromBlock(
 			err,
 		)
 	}
-	blockTransactions, err := a.ledgerState.BlockTransactions(context.Background(), block)
+	blockTransactions, err := a.ledgerState.BlockTransactions(ctx, block)
 	if err != nil {
 		return BlockInfo{}, fmt.Errorf("get transactions for block %x: %w", block.Hash, err)
 	}
@@ -616,15 +618,15 @@ func bech32EncodeData(hrp string, data []byte) (string, error) {
 
 // LatestBlockTxHashes returns transaction hashes from the
 // latest block.
-func (a *NodeAdapter) LatestBlockTxHashes() (
+func (a *NodeAdapter) LatestBlockTxHashes(ctx context.Context) (
 	[]string, error,
 ) {
 	tip := a.ledgerState.Tip()
-	block, err := a.ledgerState.BlockByHash(context.Background(), tip.Point.Hash)
+	block, err := a.ledgerState.BlockByHash(ctx, tip.Point.Hash)
 	if err != nil {
 		return nil, fmt.Errorf("get latest block: %w", err)
 	}
-	txs, err := a.ledgerState.BlockTransactions(context.Background(), block)
+	txs, err := a.ledgerState.BlockTransactions(ctx, block)
 	if err != nil {
 		return nil, fmt.Errorf("get transactions for latest block: %w", err)
 	}

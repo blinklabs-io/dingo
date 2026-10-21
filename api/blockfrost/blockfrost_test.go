@@ -1063,19 +1063,20 @@ func (m *mockNode) ChainTip() (
 	return m.chainTip, m.chainTipErr
 }
 
-func (m *mockNode) LatestBlock() (
+func (m *mockNode) LatestBlock(_ context.Context) (
 	BlockInfo, error,
 ) {
 	return m.block, m.blockErr
 }
 
 func (m *mockNode) BlockByHashOrNumber(
+	_ context.Context,
 	_ string,
 ) (BlockInfo, error) {
 	return m.blockByID, m.blockByIDErr
 }
 
-func (m *mockNode) LatestBlockTxHashes() (
+func (m *mockNode) LatestBlockTxHashes(_ context.Context) (
 	[]string, error,
 ) {
 	return m.txHashes, m.txHashesErr

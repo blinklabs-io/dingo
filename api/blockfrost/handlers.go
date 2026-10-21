@@ -125,9 +125,9 @@ func (b *Blockfrost) handleHealth(
 // returns the latest block.
 func (b *Blockfrost) handleLatestBlock(
 	w http.ResponseWriter,
-	_ *http.Request,
+	r *http.Request,
 ) {
-	info, err := b.node.LatestBlock()
+	info, err := b.node.LatestBlock(r.Context())
 	if err != nil {
 		b.logger.Error(
 			"failed to get latest block",
@@ -150,6 +150,7 @@ func (b *Blockfrost) handleBlock(
 	r *http.Request,
 ) {
 	info, err := b.node.BlockByHashOrNumber(
+		r.Context(),
 		r.PathValue("hash_or_number"),
 	)
 	if err != nil {
@@ -198,7 +199,7 @@ func (b *Blockfrost) handleLatestBlockTxs(
 	if !ok {
 		return
 	}
-	hashes, err := b.node.LatestBlockTxHashes()
+	hashes, err := b.node.LatestBlockTxHashes(r.Context())
 	if err != nil {
 		b.logger.Error(
 			"failed to get latest block txs",

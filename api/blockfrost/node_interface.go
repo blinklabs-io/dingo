@@ -35,15 +35,15 @@ type BlockfrostNode interface {
 
 	// LatestBlock returns information about the latest
 	// block on the chain.
-	LatestBlock() (BlockInfo, error)
+	LatestBlock(ctx context.Context) (BlockInfo, error)
 
 	// BlockByHashOrNumber returns information about a block
 	// identified by a 64-character hex hash or decimal height.
-	BlockByHashOrNumber(id string) (BlockInfo, error)
+	BlockByHashOrNumber(ctx context.Context, id string) (BlockInfo, error)
 
 	// LatestBlockTxHashes returns the transaction hashes
 	// for the latest block.
-	LatestBlockTxHashes() ([]string, error)
+	LatestBlockTxHashes(ctx context.Context) ([]string, error)
 
 	// CurrentEpoch returns information about the current
 	// epoch.
