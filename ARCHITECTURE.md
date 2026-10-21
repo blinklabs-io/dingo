@@ -6257,7 +6257,14 @@ it. Dingo implements this as a **corroboration gate**
   gate — still updates the selector and reaches the ledger queue with no
   verification generation; block-fetch verifies its body before application.
   A header withheld because its fork ancestry cannot be authenticated never
-  becomes that connection's last passed header. Withholding a linear extension
+  becomes that connection's last passed header. Missing ancestry does not
+  withhold a header whose parent is queued on the local header chain: such a
+  queued parent is often itself a deferred linear extension, kept out of
+  observed ancestry, so its child is verified against the local chain like
+  its parent was. Withholding it instead drops it, defers every later header
+  from the peer behind it, and leaves the queue too short to start
+  block-fetch, which stalled catch-up just before an epoch boundary whose
+  nonce was not yet computed. Withholding a linear extension
   deadlocks sync whenever only applying that block can make its authorization
   verifiable: at the Byron->Shelley boundary the first Shelley epoch's state
   does not exist until a Shelley block is applied. Any other deferred header
