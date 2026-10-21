@@ -52,6 +52,15 @@ func (b *Blockfrost) writeHistoryError(
 			"Not Found",
 			"The requested history is not retained by this node.",
 		)
+	case errors.Is(err, ErrAddressSummaryTooLarge):
+		writeError(
+			w,
+			http.StatusBadRequest,
+			"Bad Request",
+			"The account holds too many outputs or assets to summarize.",
+		)
+	case errors.Is(err, context.Canceled):
+		// The client is gone, so there is nobody to answer.
 	case errors.Is(err, ErrEpochNotFound),
 		errors.Is(err, ErrDRepNotFound),
 		errors.Is(err, models.ErrGovernanceProposalNotFound),

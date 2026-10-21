@@ -11250,9 +11250,21 @@ outputs or returns more than 5,000 distinct assets; a bare payment credential
 passes the same budget into `GetUtxoBalanceByAddress`, which stops its scan at
 the first output or distinct asset past it. The extended route likewise
 rejects more than 1,000 assets to enrich, since each costs three point reads
-and the route has no pagination. Both routes share one
-admission pool (4 active, 2 per client address) that answers 429 with
-`Retry-After` when full.
+and the route has no pagination.
+
+The address total reads the output history, spent outputs included, in keyset
+batches sized so no read passes the budget: more than 100,000 outputs or more
+than 5,000 distinct received assets is rejected with HTTP 400. The account
+address total and account address assets routes pass
+`models.AccountAggregateLimits` to the store: 100,000 UTxO rows, 200,000 asset
+holdings and 5,000 distinct assets, with the transaction count capped at twice
+the UTxO bound. Exceeding any of them is rejected with HTTP 400. The asset
+page count needs the distinct total, so that route reads every live holding up
+to the budget instead of a single page.
+
+The base and extended summaries, the address total, and the two account
+aggregate routes share one admission pool (4 active, 2 per client address) that
+answers 429 with `Retry-After` when full.
 
 Blockfrost submission and both evaluation endpoints bound request body reads
 by their existing byte limits and a 15-second read deadline. The deadline is

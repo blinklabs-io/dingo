@@ -4064,6 +4064,26 @@ ORDER BY payment_key ASC
 LIMIT 100;
 ```
 
+### `GetAccountAssetBalances` and `GetAccountAddressTotals`
+
+Read the live asset balances and the lifetime received and sent totals of a
+stake credential (Blockfrost `/accounts/{stake_address}/addresses/assets` and
+`/accounts/{stake_address}/addresses/total`). Both take
+`models.AccountAggregateLimits` and return
+`models.ErrAccountAggregateLimit` once a bound is passed; a zero field leaves
+that dimension unbounded.
+
+- `MaxUtxos` adds a `LIMIT` of one row past the bound to each lovelace sum.
+  The transaction count counts distinct `address_transaction` transaction ids
+  under a `LIMIT` of twice that bound plus one.
+- `MaxAssetRows` caps the asset holdings read. The holdings are selected under
+  a `LIMIT` of one row past the bound in a subquery and ordered outside it, so
+  the ordering sorts at most that many rows.
+- `MaxAssets` fails the read at the first distinct asset past the bound.
+
+The Blockfrost adapter passes 100,000 UTxO rows, 200,000 asset holdings and
+5,000 distinct assets, and reports the sentinel as `ErrAddressSummaryTooLarge`.
+
 ### `GetUtxoBalanceByAddress`
 
 Reads live-UTxO balances for an address (used by the Blockfrost
