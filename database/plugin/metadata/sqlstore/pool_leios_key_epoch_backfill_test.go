@@ -36,7 +36,7 @@ func legacyEpochStore(t *testing.T) (*Store, *sql.DB, func()) {
 	path := filepath.Join(t.TempDir(), "metadata.sqlite")
 	db, err := sql.Open(
 		"sqlite",
-		"file:"+path+"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)",
+		"file:"+path+"?_pragma=busy_timeout(5000)&_pragma=synchronous(OFF)&_pragma=journal_mode(MEMORY)",
 	)
 	require.NoError(t, err)
 	registry, err := migrations.SQLiteRegistry()
