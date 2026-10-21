@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/config/cardano"
+	nodeconsensus "github.com/blinklabs-io/dingo/consensus"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
@@ -168,6 +169,7 @@ func updateMithrilReadyState(
 			for _, key := range keys {
 				if key == deferred.SyncStateKey ||
 					key == metadata.PlannerStatsBackfillSyncKey ||
+					key == nodeconsensus.DatabaseIdentitySyncKey ||
 					strings.HasPrefix(key, forging.ForgeFenceSyncKeyPrefix) {
 					continue
 				}

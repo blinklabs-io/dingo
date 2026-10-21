@@ -19,8 +19,12 @@ package devnetkeys
 import (
 	"crypto/rand"
 	"embed"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
+	"path/filepath"
+	"strings"
 )
 
 //go:embed keys/vrf.skey keys/kes.skey keys/opcert.cert
@@ -37,12 +41,45 @@ func InstallLocalTestKeys(dir string) error {
 	})
 }
 
+// InstallLocalTestKeysInRoot copies the local DevNet credentials into dir,
+// resolving every operation beneath root.
+func InstallLocalTestKeysInRoot(root *os.Root, dir string) error {
+	return installLocalTestKeysInRoot(root, dir, []string{
+		"vrf.skey", "kes.skey", "opcert.cert",
+		"faucet.skey", "faucet.vkey", "faucet.addr",
+	})
+}
+
 // InstallLocalTestFaucet copies only the bundled faucet credentials into dir
 // with owner-only permissions, preserving existing producer credentials.
 func InstallLocalTestFaucet(dir string) error {
 	return installLocalTestKeys(dir, []string{
 		"faucet.skey", "faucet.vkey", "faucet.addr",
 	})
+}
+
+// InstallLocalTestFaucetInRoot copies the bundled faucet credentials into dir,
+// resolving every operation beneath root.
+func InstallLocalTestFaucetInRoot(root *os.Root, dir string) error {
+	return installLocalTestKeysInRoot(root, dir, []string{
+		"faucet.skey", "faucet.vkey", "faucet.addr",
+	})
+}
+
+// RestrictLocalTestDirectory limits an opened DevNet directory to its owner.
+func RestrictLocalTestDirectory(root *os.Root) error {
+	dirFile, err := root.Open(".")
+	if err != nil {
+		return fmt.Errorf("opening local DevNet directory: %w", err)
+	}
+	if err := restrictLocalTestKeyPath(dirFile, 0o700); err != nil {
+		_ = dirFile.Close()
+		return fmt.Errorf("restricting local DevNet directory: %w", err)
+	}
+	if err := dirFile.Close(); err != nil {
+		return fmt.Errorf("closing local DevNet directory: %w", err)
+	}
+	return nil
 }
 
 func installLocalTestKeys(dir string, names []string) error {
@@ -61,16 +98,73 @@ func installLocalTestKeys(dir string, names []string) error {
 		return err
 	}
 	defer root.Close() //nolint:errcheck // read/write errors are reported below
-	dirFile, err := root.Open(".")
+	return installLocalTestKeysIntoRoot(root, names)
+}
+
+func installLocalTestKeysInRoot(
+	root *os.Root,
+	dir string,
+	names []string,
+) error {
+	current := root
+	for part := range strings.SplitSeq(
+		filepath.ToSlash(filepath.Clean(dir)),
+		"/",
+	) {
+		if part == "." {
+			continue
+		}
+		next, err := openLocalTestKeyChild(current, part)
+		if current != root {
+			_ = current.Close()
+		}
+		if err != nil {
+			return err
+		}
+		current = next
+	}
+	if current != root {
+		defer current.Close() //nolint:errcheck // read/write errors are reported below
+	}
+	return installLocalTestKeysIntoRoot(current, names)
+}
+
+// openLocalTestKeyChild opens one directory component beneath parent without
+// following a symlink, creating it when absent, so a symlinked intermediate
+// directory cannot redirect the key files to another directory in the root.
+func openLocalTestKeyChild(parent *os.Root, name string) (*os.Root, error) {
+	if err := parent.Mkdir(name, 0o700); err != nil && !errors.Is(err, fs.ErrExist) {
+		return nil, fmt.Errorf("creating local DevNet key directory: %w", err)
+	}
+	info, err := parent.Lstat(name)
 	if err != nil {
-		return fmt.Errorf("opening local DevNet key directory: %w", err)
+		return nil, fmt.Errorf("checking local DevNet key directory: %w", err)
 	}
-	if err := restrictLocalTestKeyPath(dirFile, 0o700); err != nil {
-		_ = dirFile.Close()
-		return fmt.Errorf("restricting local DevNet key directory: %w", err)
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return nil, fmt.Errorf("local DevNet key path %q is not a directory", name)
 	}
-	if err := dirFile.Close(); err != nil {
-		return fmt.Errorf("closing local DevNet key directory: %w", err)
+	child, err := parent.OpenRoot(name)
+	if err != nil {
+		return nil, fmt.Errorf("opening local DevNet key directory: %w", err)
+	}
+	opened, err := child.Stat(".")
+	if err != nil {
+		_ = child.Close()
+		return nil, fmt.Errorf("checking opened local DevNet key directory: %w", err)
+	}
+	if !opened.IsDir() || !os.SameFile(info, opened) {
+		_ = child.Close()
+		return nil, fmt.Errorf(
+			"local DevNet key directory %q changed while it was opened",
+			name,
+		)
+	}
+	return child, nil
+}
+
+func installLocalTestKeysIntoRoot(root *os.Root, names []string) error {
+	if err := RestrictLocalTestDirectory(root); err != nil {
+		return err
 	}
 	for _, name := range names {
 		data, err := localKeys.ReadFile("keys/" + name)

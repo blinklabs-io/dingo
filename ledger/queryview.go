@@ -37,7 +37,10 @@ var ErrQueryViewClosed = errors.New("ledger query view is closed")
 //
 // A view pins a database read transaction for its whole lifetime, which holds
 // back WAL checkpoints and a read connection; owners must Close it promptly
-// and bound how long they let it live.
+// and bound how long they let it live. The one exception is GetUTxOWhole,
+// which can run for minutes: it releases the view's transaction and answers
+// as of the view's block from short transactions, and a later query reopens
+// a snapshot pinned to that block (see detachForUtxoWhole).
 type QueryView struct {
 	ls  *LedgerState
 	at  QueryPoint
@@ -54,6 +57,12 @@ type QueryView struct {
 	mu       sync.Mutex
 	inFlight int
 	closed   bool
+	// detachedAt is the block a view that released its transaction for
+	// GetUTxOWhole answers for; txn is nil until reattach reopens it there.
+	detachedAt QueryPoint
+	// releasePin drops the acquired-point pin reattach takes, which keeps
+	// pruning off detachedAt for a view acquired at the tip.
+	releasePin func()
 }
 
 // AcquireQueryView opens a snapshot of the ledger and validates at against it.
@@ -68,6 +77,8 @@ type QueryView struct {
 // the rest of the node however many views are held. When the cap is reached
 // AcquireQueryView waits for a view to close, and returns ctx's error if ctx
 // ends first. ctx bounds only opening the view, not the view's lifetime.
+// Opening also waits for the latest epoch boundary's deferred job, and an
+// error from a ctx that ends during that wait wraps ErrEpochBoundaryJobPending.
 func (ls *LedgerState) AcquireQueryView(
 	ctx context.Context,
 	at QueryPoint,
@@ -147,7 +158,7 @@ func (ls *LedgerState) waitPendingBoundaryJob(
 				return nil
 			}
 		case <-ctx.Done():
-			return fmt.Errorf("wait for epoch boundary job: %w", ctx.Err())
+			return epochBoundaryJobWaitError(ctx, pending.Epoch)
 		}
 	}
 }
@@ -162,12 +173,18 @@ func (ls *LedgerState) openQueryViewSnapshot(
 	txn, _, err := database.NewReadSnapshotContext(viewCtx, ls.db)
 	if !stopWatch() {
 		// ctx ended while the snapshot was opening and cancelled viewCtx,
-		// which also ends a transaction that did open.
+		// which also ends a transaction that did open. err names the stage
+		// the open was waiting in (admission, read connection, commit
+		// barrier), which ctx's error alone does not.
 		if err == nil {
 			txn.Release()
+			cancelView()
+			return nil, nil, fmt.Errorf("open ledger snapshot: %w", ctx.Err())
 		}
 		cancelView()
-		return nil, nil, fmt.Errorf("open ledger snapshot: %w", ctx.Err())
+		return nil, nil, fmt.Errorf(
+			"open ledger snapshot: %w: %w", ctx.Err(), err,
+		)
 	}
 	if err != nil {
 		cancelView()
@@ -189,6 +206,7 @@ func (v *QueryView) Query(
 		return nil, ErrQueryViewClosed
 	}
 	v.inFlight++
+	detached := v.txn == nil
 	v.mu.Unlock()
 	defer v.finishQuery()
 	// Follow Txn.Do's panic contract: a panic in a store helper fails this
@@ -206,9 +224,88 @@ func (v *QueryView) Query(
 			result, err = nil, database.NewTxnPanicError("query view", r)
 		}
 	}()
+	if detached {
+		if err := v.reattach(ctx); err != nil {
+			return nil, err
+		}
+	}
+	v.mu.Lock()
+	at, txn := v.at, v.txn
+	v.mu.Unlock()
 	return v.ls.queryInTxnWithTransition(
-		ctx, query, v.at, protocolVersion, v.txn, &v.transitionInfo,
+		withUtxoWholeDetach(ctx, v.detachForUtxoWhole),
+		query, at, protocolVersion, txn, &v.transitionInfo,
 	)
+}
+
+// detachForUtxoWhole releases the view's read transaction for a GetUTxOWhole
+// running on it and returns the block the view answers for, which the query
+// then reads as of from short transactions. It declines -- and the query
+// keeps the snapshot -- when another query is in flight on the view, or the
+// view has no block to answer for.
+func (v *QueryView) detachForUtxoWhole() (QueryPoint, bool) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if v.closed || v.inFlight != 1 || v.txn == nil {
+		return QueryPoint{}, false
+	}
+	point := v.at
+	if !point.pinned() {
+		tip, err := v.ls.db.GetTip(v.txn)
+		if err != nil || len(tip.Point.Hash) == 0 {
+			return QueryPoint{}, false
+		}
+		point = QueryPoint{Slot: tip.Point.Slot, Hash: tip.Point.Hash}
+	}
+	// A volatile-tip session has no connection-level acquired-point pin.
+	// Establish the view's pin before releasing the snapshot so pruning can
+	// never pass the acquired point between GetUTxOWhole and reattachment.
+	if v.releasePin == nil {
+		v.releasePin = v.ls.PinAcquiredPoint(point.Slot)
+	}
+	v.txn.Release()
+	v.cancel()
+	v.txn = nil
+	v.cancel = nil
+	v.detachedAt = point
+	return point, true
+}
+
+// reattach reopens a detached view's snapshot pinned to the block it answers
+// for, so a query after GetUTxOWhole answers as the released snapshot would
+// have. The forecast frozen at Acquire is kept.
+func (v *QueryView) reattach(ctx context.Context) error {
+	v.mu.Lock()
+	point := v.detachedAt
+	v.mu.Unlock()
+	releasePin := v.ls.PinAcquiredPoint(point.Slot)
+	reopened, err := v.ls.AcquireQueryView(ctx, point)
+	if err != nil {
+		releasePin()
+		return fmt.Errorf(
+			"reopen ledger snapshot at slot %d after GetUTxOWhole: %w",
+			point.Slot,
+			err,
+		)
+	}
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if v.closed || v.txn != nil {
+		reopened.release()
+		releasePin()
+		if v.closed {
+			return ErrQueryViewClosed
+		}
+		return nil
+	}
+	v.txn = reopened.txn
+	v.cancel = reopened.cancel
+	v.at = point
+	if v.releasePin != nil {
+		v.releasePin()
+	}
+	v.releasePin = releasePin
+	return nil
 }
 
 func (v *QueryView) finishQuery() {
@@ -236,6 +333,30 @@ func (v *QueryView) Close() {
 }
 
 func (v *QueryView) release() {
-	v.txn.Release()
-	v.cancel()
+	if v.txn != nil {
+		v.txn.Release()
+		v.cancel()
+		v.txn = nil
+		v.cancel = nil
+	}
+	if v.releasePin != nil {
+		v.releasePin()
+		v.releasePin = nil
+	}
+}
+
+type utxoWholeDetachKey struct{}
+
+// withUtxoWholeDetach lets a GetUTxOWhole dispatched through a QueryView
+// release that view's snapshot; see QueryView.detachForUtxoWhole.
+func withUtxoWholeDetach(
+	ctx context.Context,
+	detach func() (QueryPoint, bool),
+) context.Context {
+	return context.WithValue(ctx, utxoWholeDetachKey{}, detach)
+}
+
+func utxoWholeDetachFrom(ctx context.Context) func() (QueryPoint, bool) {
+	detach, _ := ctx.Value(utxoWholeDetachKey{}).(func() (QueryPoint, bool))
+	return detach
 }

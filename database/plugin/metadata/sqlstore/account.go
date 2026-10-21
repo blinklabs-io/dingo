@@ -1584,11 +1584,13 @@ UPDATE account SET reward = ? WHERE id = ?`,
 			if affected == 0 {
 				return models.ErrAccountNotFound
 			}
-			return s.refreshRewardLiveStakeAggregate(
-				ctx,
-				db,
-				models.NewStakeCredentialRef(credentialTag, stakeKey),
-				slot,
+			ref := models.NewStakeCredentialRef(credentialTag, stakeKey)
+			pending, err := pendingUtxoStakeDelta(txn, nil, ref)
+			if err != nil {
+				return err
+			}
+			return s.refreshRewardLiveStakeAggregateNetOfPending(
+				ctx, db, ref, slot, pending,
 			)
 		},
 	)
@@ -1631,7 +1633,7 @@ func (s *Store) AddAccountRewardsByCredential(
 			for start := 0; start < len(credits); start += batchSize {
 				end := min(start+batchSize, len(credits))
 				if err := s.addAccountRewardCreditBatch(
-					ctx, db, credits[start:end],
+					ctx, db, credits[start:end], txn,
 				); err != nil {
 					return err
 				}
@@ -1648,6 +1650,7 @@ func (s *Store) addAccountRewardCreditBatch(
 	ctx context.Context,
 	db queryer,
 	credits []models.AccountRewardCredit,
+	txn types.Txn,
 ) error {
 	type pendingCredit struct {
 		key    rewardCreditJournalKey
@@ -1856,8 +1859,12 @@ ON CONFLICT (
 		); err != nil {
 			return fmt.Errorf("credit account reward: %w", err)
 		}
-		if err := s.refreshRewardLiveStakeAggregate(
-			ctx, db, entry.ref, entry.slot,
+		pendingStake, err := pendingUtxoStakeDelta(txn, nil, entry.ref)
+		if err != nil {
+			return err
+		}
+		if err := s.refreshRewardLiveStakeAggregateNetOfPending(
+			ctx, db, entry.ref, entry.slot, pendingStake,
 		); err != nil {
 			return err
 		}

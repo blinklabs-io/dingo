@@ -239,8 +239,11 @@ type Ouroboros struct {
 	// tests exercising a single protocol handler can override either seam
 	// directly instead of standing up a full LedgerState.
 	chainSelectionShouldVerifyHeaderCrypto func(slot uint64) bool
-	chainSelectionVerifyHeaderCrypto       func(header gledger.BlockHeader) (uint64, error)
-	chainsyncScheduleAt                    chainsyncScheduleAtFunc
+	chainSelectionVerifyHeaderCrypto       func(
+		ouroboros.ConnectionId,
+		gledger.BlockHeader,
+	) (uint64, error)
+	chainsyncScheduleAt chainsyncScheduleAtFunc
 	// chainsyncArrivalNow is an instance-local clock seam for deterministic
 	// arrival-order tests. Production instances use time.Now.
 	chainsyncArrivalNow      func() time.Time
@@ -251,6 +254,18 @@ type Ouroboros struct {
 	futureHeaderResyncClosed bool
 	deferredHeaderRecoveryMu sync.Mutex
 	deferredHeaderRecovery   map[ouroboros.ConnectionId]ochainsync.Tip
+	// chainsyncLocalChainTips returns the hashes of the local block tip and
+	// header-queue tip. Tests override it without a LedgerState.
+	chainsyncLocalChainTips func() (tipHash, headerTipHash []byte)
+	// deferredHeaderIdleRetry records, per connection, the applied tip at
+	// which a deferred header last forced an immediate re-intersection.
+	deferredHeaderIdleRetry map[ouroboros.ConnectionId][]byte
+	// acceptedHeaderMu guards acceptedHeaderTips, the hash of the last header
+	// from each connection that passed producer-authorization gating. Ledger
+	// admission is asynchronous, so a pipelined child can arrive before its
+	// parent reaches the queue.
+	acceptedHeaderMu   sync.Mutex
+	acceptedHeaderTips map[ouroboros.ConnectionId][]byte
 	// Per-peer rate limiter for TxSubmission server
 	txSubmissionRateLimiter *txSubmissionRateLimiter
 	// Cached Leios EB material fetched from peers. This lets NtC
@@ -790,7 +805,14 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 			return o.ledgerState.Tip().BlockNumber, uint64(k)
 		}
 		o.chainSelectionShouldVerifyHeaderCrypto = o.ledgerState.ShouldVerifyChainSelectionHeaderCrypto
-		o.chainSelectionVerifyHeaderCrypto = o.ledgerState.ValidateChainSelectionHeaderCryptoWithGeneration
+		o.chainSelectionVerifyHeaderCrypto = o.ledgerState.ValidatePeerChainSelectionHeaderCryptoWithGeneration
+		o.chainsyncLocalChainTips = func() ([]byte, []byte) {
+			c := o.ledgerState.Chain()
+			if c == nil {
+				return nil, nil
+			}
+			return c.Tip().Point.Hash, c.HeaderTip().Point.Hash
+		}
 	}
 	// Initialize per-peer TxSubmission rate limiter
 	txRate := cfg.MaxTxSubmissionsPerSecond
@@ -1195,6 +1217,7 @@ func (o *Ouroboros) HandleConnClosedEvent(evt event.Event) {
 	connId := e.ConnectionId
 	o.cancelFutureHeaderResync(connId)
 	o.clearDeferredHeaderRecovery(connId)
+	o.forgetAcceptedHeaderTip(connId)
 	o.forgetServedActivity(connId)
 
 	// Counts keep-alive pong timeouts.

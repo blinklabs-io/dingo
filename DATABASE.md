@@ -67,6 +67,15 @@ itself distinguish which of the two classes above produced it.
 
 ## Storage provider ownership
 
+The `consensus_provider_identity` sync-state key binds a database to the
+versioned consensus semantics that created it. Databases without the key are
+existing Praos databases and are treated as `praos/v1`; opening one with Praos
+writes the marker. The sync-state cleanup that ends a Mithril import keeps the
+key. Startup rejects a different selected identity before ledger
+processing. Leader schedule records separately carry the same identity and a
+format version, so cached production schedules are reused only by the provider
+that computed them.
+
 Blob and metadata stores are constructed by the application plugin host and
 injected with `database.New(config, database.Stores{Blob: ..., Metadata: ...})`.
 The database drains only database-owned workers; the host closes providers
@@ -195,7 +204,17 @@ provider's resolved file location, exposed through the optional
 therefore also controls MCP's read target. Other backends and in-memory SQLite
 return no file location. MCP owns the extra connection pool and closes it when
 the API stops; it never borrows or closes the provider's pools. At most four
-SQL-tool calls execute concurrently; excess calls fail immediately. SQL row
+SQL-tool calls execute concurrently; excess calls fail immediately.
+While the metadata `-wal` file exceeds 128 MiB, twice the `journal_size_limit`,
+every MCP tool call and resource read is refused: at that size the WAL has been
+neither reset nor truncated since it grew past the limit, and an open reader
+prevents both. The in-flight reads finish within the query timeout, which gives
+the periodic TRUNCATE checkpoint a reader-free interval from MCP; requests are
+admitted again once the file is back under the limit. The probe is a `stat` of
+the `-wal` file next to `SQLitePath()`: a missing file reads as empty, and
+any other stat error counts as pressure and is logged at most once a minute.
+Callers that inject their own SQLite
+pool without a metadata store get no WAL check. SQL row
 limits are enforced during iteration, including PRAGMA results. Arbitrary
 queries and EXPLAIN use a dedicated borrowed connection with `query_only` and
 SQLite limits: 64 KiB per value or encoded row, 64 KiB SQL, and 32 result
@@ -987,7 +1006,7 @@ new ancestor entry is synchronized before publishing the manifest as well.
 
 **Snapshot catalog** (`database/lifecycle/catalog.go` and `catalog_index.go`): `ListSnapshots` scans a base directory's immediate subdirectories for a valid `manifest.json`, returning one `SnapshotEntry{ID, Manifest}` per readable snapshot (directory name as ID), newest first. Those durable directories and the configured cloud destination are authoritative; `.dingo-snapshot-catalog-v1.sqlite` is a disposable index that Bark rebuilds from local directories and a compatibility scan of the cloud provider before accepting requests. Cloud rows store only a manifest authenticated by the configured trust key, keyed by snapshot ID; both full reconciliation and incremental mirror updates authenticate each entry before publishing it. Their returned `SnapshotInfo.location` is a credential-free display URI derived from the active configuration at read time. It is not an authenticated provider URI and cannot be used for restore, verify, or delete; those RPCs accept the snapshot ID and resolve the configured destination on the server. Catalog metadata binds the cloud set to a versioned SHA-256 digest of the exact parsed destination passed to the provider factory, including user information, query, and fragment without storing those raw values in the catalog. Pages include cloud rows only when that digest matches the reconciled current configuration. Provider reconciliation uses `SnapshotCatalogLister` with fixed positive limits for page requests, listed prefixes and objects, manifest fetches, retained entries, and reported problems. GCS catalog discovery uses one explicit JSON list request per charged page while snapshot data operations retain the gRPC client. Cancellation, a provider error, or `ErrSnapshotCatalogScanLimit` makes the scan incomplete: Bark does not replace or publish its entries, and local-only pages remain usable. An explicitly empty destination clears the old cloud set. After an incomplete startup scan, each listing request retries reconciliation until a complete scan publishes the current source. A materialized `available_snapshots` table keeps exactly one effective row per ID; a local row takes precedence over its cloud duplicate. Its `(created_sec DESC, created_ns DESC, id DESC)` index lets both first and continuation pages stop after `pageSize+1` index entries without a union scan or temporary sort. Provider construction finishes before acquiring the catalog gate. Provider scans and catalog replacement share the gate with incremental mirror and delete updates, so a mirror completed during startup reconciliation cannot be erased by an earlier scan result. Successful mirrors and cloud deletes update the source and effective rows in one transaction, while local pruning switches the effective row to its cloud source, so a cloud-only snapshot remains listed. A malformed catalog or invalid metadata schema/value is replaced during that rebuild. Recovery assigns a fresh random positive 63-bit generation rather than restarting at generation 1, making a collision with a token retained from before corruption negligible. SQLite `CORRUPT` and `NOTADB` result codes authorize recovery, as do the fixed metadata query's missing table or column errors; operational failures such as cancellation, lock contention, permissions, read-only storage, inability to open the file, and filesystem I/O remain errors. The catalog uses WAL mode, a five-second SQLite busy timeout, context-aware operations, and one in-process gate whose acquisition also observes cancellation. Atomic replacement removes stale target WAL and shared-memory sidecars after closing the rebuilt database and before renaming it into place. Page reads open an existing database in read/write mode and therefore cannot create an empty file when initialization has not run. The index orders by manifest `CreatedAt` descending with the snapshot ID descending as a stable tie-breaker, and keyset page tokens include the catalog generation and last ordering tuple. A create, label change, repair, mirror, or delete updates the index transactionally; a changed generation invalidates an older page token instead of returning a page from two catalog states. Once cloud reconciliation is current, each request reads at most one more index row than its capped page size, reads manifests only for that page, and performs no provider listing or cloud manifest fetch. Invalid cloud IDs and manifests make reconciliation incomplete rather than publishing a partial replacement. Partial local or cloud reconciliation retains ErrSnapshotCatalogIncomplete even when joined with another error, and a configured provider without bounded snapshot-listing support is incomplete rather than successful. A local rebuild carries forward readable, validated cloud rows. `SnapshotToCloud` supplies manifest publication with a provider-aware repair callback, so even total catalog corruption is rebuilt from both authoritative sources rather than returning success with cloud-only rows missing. If a durable mirror or cloud deletion cannot update the disposable catalog, the catalog is rebuilt immediately from local directories and the cloud provider; the operation succeeds only when that repair reconciles the authoritative sources. If manifest publication succeeds but neither its catalog update nor repair succeeds, the complete snapshot remains available for a later rebuild and the caller receives `ErrSnapshotCatalogUpdate`; cleanup is limited to failures before durable manifest publication. A snapshot directory or cloud object written while Bark is stopped is imported by the next startup rebuild. Automatic snapshots and all local callers of `WriteManifest` update the live local index directly. `MirrorToCloud` updates or repairs the cloud catalog before writing its digest-only completion marker, so a failed catalog repair remains retryable. The node derives one effective destination by appending `SnapshotCloudDestinationPrefix` to the configured base and passes that same value to manual snapshots, automatic mirror and retention operations, and Bark reconciliation. A subdirectory that exists but lacks a valid manifest (still being written, or failed partway through) is silently skipped by discovery.
 
-**Snapshot manifest and payload integrity.** `manifest.json` declares the only two payload files a snapshot holds, `blob.bak` and `metadata.sqlite` (the metadata file keeps that name for every metadata backend), by size (`blobBytes`, `metadataBytes`) and SHA-256 (`blobSha256`, `metadataSha256`). When `databaseLifecycle.snapshotTrustKeyFile` names a regular, non-symlink file holding a shared secret (at least 16 bytes and at most 1 KiB), `Snapshot` also writes `authentication`, an HMAC-SHA256 under that secret over the manifest with `checksum` and `authentication` blanked; the unkeyed `checksum` stays a corruption check only. The node reads the key from one validated file handle and enforces platform-specific ownership and access-control rules: Unix requires the current user to own the file with no group or other access; Windows accepts ownership by the current user or by `BUILTIN\Administrators` when the process belongs to that group, and allows only the owner, Administrators, SYSTEM, Creator Owner, and Owner Rights DACL trustees (plus the restricted local Administrator ACE when Administrators owns the file). Cloud snapshot creation, manifest inspection, and restore require this trust key so a writer to the bucket cannot replace both the payloads and their declared sizes or digests. Local-only snapshots and restores may remain unkeyed only when no trust key is configured. A restore reads the manifest first and, under a trust key, refuses one whose tag is missing or wrong (`ErrManifestUnauthenticated`) or that declares no digests. `FormatVersion` 2 adds `id`, the snapshot ID (the snapshot directory name or cloud prefix segment), inside the authenticated bytes. Under a trust key, `ReadManifest`, `PeekManifest`, `FetchCloudManifest`, restore, verify, and catalog listing and reconciliation require the signed `id` to equal the directory name or object-prefix segment the snapshot was requested by, so a complete older snapshot copied under a newer name fails with `ErrManifestIDMismatch` (wrapping `ErrManifestUnauthenticated`). A symlinked snapshot directory is addressed by the link's name. `WithManifestID` supplies the expected ID where the manifest is read from a location whose name is not the ID, such as a temporary download directory. A format 1 manifest carries no signed ID, so a keyed verification refuses it with `ErrManifestLegacyFormat` (also wrapping `ErrManifestUnauthenticated`): the snapshot predates signed IDs and must be re-created. Without a trust key nothing is authenticated, so neither the ID nor the format version is checked, as before. The expected cloud ID is the last segment of the cleaned URI path the destination reads, and a keyed read of a URI with no path segment, such as the bucket root, is refused with `ErrManifestIDMismatch`, since snapshots are always written one segment below the destination. `MirrorToCloud` applies the same checks to a signed local manifest before uploading it. Only after that does it fetch payloads: a cloud snapshot downloads `manifest.json`, then exactly the two declared files through `CloudDestination.DownloadFiles`, each stopped at its authenticated declared size, never listing the prefix, so an extra or oversized object under it is never read. Before any target or external store is touched, each payload is checked against its declared size and digest (`ErrSnapshotPayloadMismatch`), for local snapshot directories too. A manifest written before these fields existed has no digests and is checked by size only, which is refused when a trust key is configured. Every node that restores another node's snapshots needs the same secret file.
+**Snapshot manifest and payload integrity.** `manifest.json` declares the only two payload files a snapshot holds, `blob.bak` and `metadata.sqlite` (the metadata file keeps that name for every metadata backend), by size (`blobBytes`, `metadataBytes`) and SHA-256 (`blobSha256`, `metadataSha256`). When `databaseLifecycle.snapshotTrustKeyFile` names a regular, non-symlink file holding a shared secret (at least 16 bytes and at most 1 KiB), `Snapshot` also writes `authentication`, an HMAC-SHA256 under that secret over the manifest with `checksum` and `authentication` blanked; the unkeyed `checksum` stays a corruption check only. The node reads the key from one validated file handle and enforces platform-specific ownership and access-control rules: Unix requires the current user to own the file with no group or other access; Windows accepts ownership by the current user or by `BUILTIN\Administrators` when the process belongs to that group, and allows only the owner, Administrators, SYSTEM, Creator Owner, and Owner Rights DACL trustees (plus the restricted local Administrator ACE when Administrators owns the file). Cloud snapshot creation, manifest inspection, and restore require this trust key so a writer to the bucket cannot replace both the payloads and their declared sizes or digests. Local-only snapshots and restores may remain unkeyed only when no trust key is configured. A restore reads the manifest first and, under a trust key, refuses one whose tag is missing or wrong (`ErrManifestUnauthenticated`) or that declares no digests. `FormatVersion` 2 adds `id`, the snapshot ID (the snapshot directory name or cloud prefix segment), inside the authenticated bytes. Under a trust key, `ReadManifest`, `PeekManifest`, `FetchCloudManifest`, restore, verify, and catalog listing and reconciliation require the signed `id` to equal the directory name or object-prefix segment the snapshot was requested by, so a complete older snapshot copied under a newer name fails with `ErrManifestIDMismatch` (wrapping `ErrManifestUnauthenticated`). A symlinked snapshot directory is addressed by the link's name. `WithManifestID` supplies the expected ID where the manifest is read from a location whose name is not the ID, such as a temporary download directory. A format 1 manifest carries no signed ID, so a keyed verification refuses it with `ErrManifestLegacyFormat` (also wrapping `ErrManifestUnauthenticated`): the snapshot predates signed IDs and must be re-created. Without a trust key nothing is authenticated, so neither the ID nor the format version is checked, as before. The expected cloud ID is the last segment of the cleaned URI path the destination reads, and a keyed read of a URI with no path segment, such as the bucket root, is refused with `ErrManifestIDMismatch`, since snapshots are always written one segment below the destination. `MirrorToCloud` applies the same checks to a signed local manifest before uploading it. Only after that does it fetch payloads: a cloud snapshot downloads `manifest.json`, then exactly the two declared files through `CloudDestination.DownloadFiles`, each stopped at its authenticated declared size, never listing the prefix, so an extra or oversized object under it is never read. Before any target or external store is touched, each payload is checked against its declared size and digest (`ErrSnapshotPayloadMismatch`), for local snapshot directories too. A manifest written before these fields existed has no digests and is checked by size only, which is refused when a trust key is configured. Bark's `Restore` and `VerifySnapshot` probe a local snapshot's manifest with the same trust key (unkeyed only when none is configured). Under a trust key, a local manifest that fails authentication, its checksum, or its size bound is logged with the snapshot ID and is not used, since a writer to the snapshot directory can cause any of the three; the cloud mirror of the same ID is selected, with a log line, only if its own manifest authenticates, and otherwise the RPC returns the local failure's code (`CodeDataLoss`, or `CodeResourceExhausted` for the size bound) naming both outcomes. Without a key a corrupted or oversized local manifest is reported without consulting the cloud copy. Any other local manifest that exists but cannot be read is logged before the cloud destination is checked. Every node that restores another node's snapshots needs the same secret file.
 
 `lifecycle.Restore` restores both stores into a target data directory (which must not already exist, or must be empty), then opens the result with `database.New` so its own startup consistency checks (`CheckNodeSettings`, `checkCommitTimestamp`) validate the restore for free, and additionally compares the restored tip against the manifest's recorded tip before returning success.
 
@@ -2323,6 +2342,21 @@ rescanning. Every other caller (rollback sweeps, `DeleteUtxos`,
 retirement and expiry) is unchanged and still calls the original full-scan
 `refreshRewardLiveStakeAggregate`/`refreshRewardLiveStakeRefs`.
 
+A batch accumulator (`SetTransactionBatched`) writes each transaction's
+`utxo` rows immediately but queues its stake delta until
+`FlushBatchStakeDeltas` or `FlushBatch`, so between the two the `utxo` table is
+ahead of the stored running total by exactly the queued delta. A full-scan
+refresh that runs in that window -- a non-zero reward withdrawal
+(`applyTransactionWithdrawals`), a direct reward credit
+(`AddAccountRewardByCredential`), or a pending reward-round fold
+(`AddAccountRewardsByCredential`) -- therefore stores the scanned total less
+the credential's queued delta (`refreshRewardLiveStakeAggregateNetOfPending`),
+summed over the accumulators bound to the write transaction and the
+accumulator of the write itself. The flush then adds the delta once, and the
+result equals the per-transaction path for any order of stake changes and
+reward writes within a block. Queued deltas live in the accumulator, which
+savepoint and transaction rollback restore together with the `utxo` rows.
+
 This trades away the full-scan path's self-healing property for the
 credentials it accelerates, so the design leans on three layers instead of
 one:
@@ -2330,8 +2364,11 @@ one:
 1. **Crash atomicity.** The delta is applied inside the same write
    transaction as the UTxO row mutation it accounts for (the same
    `withWriteTransaction` scope every other write in this package already
-   uses), so a crash mid-apply rolls both back together. There is no window
-   where the UTxO table changes but the running total does not, or vice versa.
+   uses), so a crash mid-apply rolls both back together. There is no committed
+   window where the UTxO table changes but the running total does not, or vice
+   versa. The mismatch between a batch accumulator's UTxO writes and its queued
+   delta exists only inside the open write transaction and is rolled back if it
+   fails.
 2. **Every full-scan touch re-syncs.** A rollback sweep, `DeleteUtxos`, or any
    other caller still on the authoritative path recomputes and overwrites
    `utxo_stake` from scratch for whatever credentials it touches, healing any
@@ -3040,6 +3077,17 @@ process's lifetime, with no later call able to repair it, and the next
 `PauseCommits`/`PauseCommitsContext` would then wait on a reader that never
 releases while the barrier's writer preference blocked every read-write `Txn`
 constructed behind it.
+
+Coordinated read snapshots (`NewReadSnapshotContext`) do not take that
+barrier's exclusive side. A read-write `Txn` holding the shared side also holds
+a narrower commit-phase barrier's shared side for the duration of `Commit`
+alone -- the commit timestamp update and both store commits -- and snapshot
+construction takes the commit phase exclusively while it opens the metadata
+and then the blob view. Uncommitted writes are invisible to both views, so the
+pair still shares one commit boundary, while construction waits only for a
+commit in progress rather than for every open read-write `Txn` to finish.
+`lifecycle.Snapshot` keeps `PauseCommits`, because its metadata backup needs
+the write connection an open read-write `Txn` holds.
 
 `Txn.OnFinish` exposes that same terminal transition to callers. It registers a
 callback that runs exactly once when the transaction reaches its terminal state
@@ -3836,6 +3884,34 @@ LEFT JOIN asset a ON a.utxo_id = u.id
 WHERE u.tx_id IN (decode($1, 'hex'), decode($2, 'hex'));
 ```
 
+### `UtxoRefsAsOfAfterID`
+
+One page of the UTxO references live as of a slot, for a whole-UTxO walk that
+must not hold one read transaction throughout
+(`database.IterateUtxoRefsAsOfPaged`, used by `GetUTxOWhole`):
+
+```sql
+SELECT id, tx_id, output_idx FROM utxo
+WHERE id > ? AND added_slot <= ? AND (deleted_slot = 0 OR deleted_slot > ?)
+ORDER BY id LIMIT ?
+```
+
+Each page is a range scan on the row id in its own read transaction, so the
+SQLite WAL can restart between pages. The pages describe one as-of set without
+a shared snapshot because of how `utxo` rows change: a row keeps its `id` for
+its whole life (spends and unspends update it in place; inserts after the walk
+starts carry a later `added_slot` and are excluded), later spends set a
+`deleted_slot` after the slot, which the predicate still includes, and
+`UtxosDeleteConsumed` removes only rows spent before the prune floor, which an
+acquired-point pin holds at or below the slot. A rollback below the slot
+deletes or unspends rows the walk may already have passed, so
+`UtxosDeleteRolledback` and `UtxosUnspend` mark every walk below whose slot they
+reach, once when they start and again when their transaction finishes, and the
+walk returns `ErrUtxoHistoryRolledBack`. Mithril import's re-import path can
+clear a spend on an existing row and gap-block recovery can insert a missing
+producer row; neither runs inside a pinned LocalStateQuery walk on a synced
+node, and both only correct rows to what the slot's state already was.
+
 ### `GetUtxosByRefsAsOf`
 
 `GetUtxosByRefs`'s point-pinned sibling, used
@@ -4057,27 +4133,41 @@ LIMIT 100;
 
 ### `GetUtxoBalanceByAddress`
 
-Aggregates live-UTxO balances for an address in SQL (used by the Blockfrost
-`/addresses/{address}` summary). Lovelace and count:
+Reads live-UTxO balances for an address (used by the Blockfrost
+`/addresses/{address}` summary for a bare payment credential; a full address
+needs the exact-address CBOR comparison, so its summary instead reads keyset
+pages of coarse credential candidates through
+`Database.UtxosByAddressWithOrdering`, keeps outputs whose decoded address
+matches, folds them into big-integer sums, and fails with
+`ErrAddressSummaryTooLarge` past 50,000 candidates read or 5,000 distinct
+assets). Amounts are stored as text, so the store sums them in Go rather than
+with SQL `SUM`, checking for `uint64` overflow.
+
+`models.AddressBalanceLimits` bounds the read: `MaxUtxos` adds a `LIMIT` of one
+row past the limit to the lovelace scan, and `MaxAssets` stops the asset scan
+at the first distinct asset past the limit, which the `(policy id, name)`
+ordering makes the point the distinct count first exceeds it. Either returns
+`models.ErrAddressBalanceLimit` before the rest of the set is read. A zero
+field leaves that dimension unbounded. Both queries run under the read
+transaction's context, so cancellation stops them. The summary passes 50,000
+outputs and 5,000 assets. Lovelace and count:
 
 ```sql
-SELECT COUNT(*) AS cnt, COALESCE(SUM(amount), 0) AS lovelace
+SELECT amount
 FROM utxo
-WHERE utxo.deleted_slot = 0
-  AND (utxo.payment_script = $1 AND utxo.payment_key = decode($2, 'hex')
-       AND utxo.credential_tag = $3 AND utxo.staking_key = decode($4, 'hex'));
+WHERE deleted_slot = 0
+  AND (utxo.payment_script = $1 AND utxo.payment_key = decode($2, 'hex'))
+LIMIT $3;
 ```
 
-Per-asset balances, ordered for deterministic unit output:
+Per-asset balances, merged by `(policy_id, name)` as they arrive:
 
 ```sql
-SELECT asset.policy_id, asset.name, COALESCE(SUM(asset.amount), 0) AS amount
-FROM asset
-JOIN utxo ON asset.utxo_id = utxo.id
+SELECT asset.policy_id, asset.name, asset.amount
+FROM utxo
+JOIN asset ON asset.utxo_id = utxo.id
 WHERE utxo.deleted_slot = 0
-  AND (utxo.payment_script = $1 AND utxo.payment_key = decode($2, 'hex')
-       AND utxo.credential_tag = $3 AND utxo.staking_key = decode($4, 'hex'))
-GROUP BY asset.policy_id, asset.name
+  AND (utxo.payment_script = $1 AND utxo.payment_key = decode($2, 'hex'))
 ORDER BY asset.policy_id, asset.name;
 ```
 

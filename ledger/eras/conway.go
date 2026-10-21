@@ -123,6 +123,11 @@ func HardForkConway(
 	if err := ret.UpdateFromGenesis(conwayGenesis); err != nil {
 		return nil, err
 	}
+	models, err := applyAlonzoExtraConfigCostModels(nodeConfig, ret.CostModels)
+	if err != nil {
+		return nil, err
+	}
+	ret.CostModels = models
 	// Bump ProtocolVersion.Major to Conway's range when entering the
 	// era. gouroboros's UpgradePParams carries the prior major
 	// forward unchanged; schedule-driven transitions would otherwise

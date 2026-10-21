@@ -32,13 +32,14 @@ type syncStateStore interface {
 }
 
 type syncStateScheduleRecord struct {
-	FormatVersion int      `json:"format_version"`
-	Epoch         uint64   `json:"epoch"`
-	PoolID        string   `json:"pool_id"`
-	PoolStake     uint64   `json:"pool_stake"`
-	TotalStake    uint64   `json:"total_stake"`
-	EpochNonce    string   `json:"epoch_nonce"`
-	LeaderSlots   []uint64 `json:"leader_slots"`
+	FormatVersion     int      `json:"format_version"`
+	ConsensusIdentity string   `json:"consensus_identity,omitempty"`
+	Epoch             uint64   `json:"epoch"`
+	PoolID            string   `json:"pool_id"`
+	PoolStake         uint64   `json:"pool_stake"`
+	TotalStake        uint64   `json:"total_stake"`
+	EpochNonce        string   `json:"epoch_nonce"`
+	LeaderSlots       []uint64 `json:"leader_slots"`
 }
 
 // syncStateScheduleStore persists schedules in metadata sync state.
@@ -103,6 +104,10 @@ func (s *syncStateScheduleStore) LoadSchedule(
 		record.TotalStake,
 		epochNonce,
 	)
+	// Assigned even when empty: NewSchedule's Praos default must not stand in
+	// for an identity the record never carried, or a current-format record
+	// without one would be reused as if Praos had computed it.
+	schedule.ConsensusIdentity = record.ConsensusIdentity
 	// Carry the persisted format version through so validatePersistedSchedule
 	// can reject schedules written by builds with an incompatible compute
 	// path (missing field decodes to 0 ≠ ScheduleFormatVersion).
@@ -124,13 +129,14 @@ func (s *syncStateScheduleStore) SaveSchedule(schedule *Schedule) error {
 		return nil
 	}
 	record := syncStateScheduleRecord{
-		FormatVersion: schedule.FormatVersion,
-		Epoch:         schedule.Epoch,
-		PoolID:        hex.EncodeToString(schedule.PoolId[:]),
-		PoolStake:     schedule.PoolStake,
-		TotalStake:    schedule.TotalStake,
-		EpochNonce:    hex.EncodeToString(schedule.EpochNonce),
-		LeaderSlots:   schedule.LeaderSlotsSnapshot(),
+		FormatVersion:     schedule.FormatVersion,
+		ConsensusIdentity: schedule.ConsensusIdentity,
+		Epoch:             schedule.Epoch,
+		PoolID:            hex.EncodeToString(schedule.PoolId[:]),
+		PoolStake:         schedule.PoolStake,
+		TotalStake:        schedule.TotalStake,
+		EpochNonce:        hex.EncodeToString(schedule.EpochNonce),
+		LeaderSlots:       schedule.LeaderSlotsSnapshot(),
 	}
 	payload, err := json.Marshal(record)
 	if err != nil {

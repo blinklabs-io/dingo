@@ -38,6 +38,7 @@ import (
 	"github.com/blinklabs-io/dingo/chainselection"
 	"github.com/blinklabs-io/dingo/chainsync"
 	"github.com/blinklabs-io/dingo/connmanager"
+	nodeconsensus "github.com/blinklabs-io/dingo/consensus"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/lifecycle"
 	"github.com/blinklabs-io/dingo/database/models"
@@ -59,7 +60,6 @@ import (
 	"github.com/blinklabs-io/dingo/kesagent"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/forging"
-	"github.com/blinklabs-io/dingo/ledger/leader"
 	"github.com/blinklabs-io/dingo/ledger/leios"
 	"github.com/blinklabs-io/dingo/ledger/snapshot"
 	"github.com/blinklabs-io/dingo/mempool"
@@ -99,6 +99,7 @@ type Node struct {
 	equivocation            *equivocationDetector
 	eventBus                *event.EventBus
 	pluginHost              *plugin.Host
+	consensusProvider       nodeconsensus.Provider
 	destinationRegistry     *lifecycle.DestinationRegistry
 	mempool                 mempool.Service
 	chainManager            *chain.ChainManager
@@ -145,7 +146,7 @@ type Node struct {
 	kesAgentClient               *kesagent.Client
 	kesAgentCancel               context.CancelFunc
 	kesAgentMetrics              *kesagent.Metrics
-	leaderElection               *leader.Election
+	leaderElection               nodeconsensus.LeaderScheduler
 	rtsMetrics                   *rtsMetrics
 	shutdownFuncs                []func(context.Context) error
 	deferredIndexMaintenanceDone chan struct{}
@@ -270,6 +271,25 @@ type Node struct {
 	// rebuild re-registers fresh ones under the same names. See
 	// metrics_registerer.go.
 	rebuildableMetrics *rebuildableRegisterer
+}
+
+// consensusPluginSelection returns the consensus plugin selection, defaulting
+// an unset provider to Praos. A config built from a caller-supplied internal
+// config bypasses the loader's defaults, and an empty name would otherwise
+// fail startup with a missing-provider error.
+func (c *Config) consensusPluginSelection() plugin.Selection {
+	selection := c.pluginSelections[plugin.CapabilityConsensus]
+	if selection.Provider == "" {
+		selection.Provider = nodeconsensus.PraosProviderName
+	}
+	return selection
+}
+
+func (n *Node) selectedConsensusProvider() nodeconsensus.Provider {
+	if n != nil && n.consensusProvider != nil {
+		return n.consensusProvider
+	}
+	return nodeconsensus.NewPraosProvider()
 }
 
 func New(cfg Config) (*Node, error) {
@@ -743,6 +763,19 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 			)
 		}
 	})
+	consensusSelection := n.config.consensusPluginSelection()
+	provider, err := plugin.Resolve[nodeconsensus.Provider](
+		n.ctx,
+		n.pluginHost,
+		plugin.CapabilityConsensus,
+		consensusSelection.Provider,
+		consensusSelection.Config,
+		struct{}{},
+	)
+	if err != nil {
+		return fmt.Errorf("failed to resolve consensus plugin: %w", err)
+	}
+	n.consensusProvider = provider
 
 	// Reconcile a live Restore's directory swap (node_lifecycle.go's
 	// swapInRestoredDataDir) that was interrupted by a crash, process
@@ -832,8 +865,13 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		n.config.logger.Info(
 			"node settings gate enforcement deferred until database recovery completes",
 		)
-	} else if err := n.db.EnforceNodeSettings(ctx, n.nodeSettingsGateValues()); err != nil {
-		return fmt.Errorf("node settings: %w", err)
+	} else {
+		if err := n.enforceConsensusDatabaseIdentity(); err != nil {
+			return fmt.Errorf("consensus database compatibility: %w", err)
+		}
+		if err := n.db.EnforceNodeSettings(ctx, n.nodeSettingsGateValues()); err != nil {
+			return fmt.Errorf("node settings: %w", err)
+		}
 	}
 	if pending, pendingErr := lifecycle.GetPendingTruncate(n.db); pendingErr != nil {
 		return fmt.Errorf(
@@ -963,6 +1001,9 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	if dbNeedsRecovery {
 		if err := n.ledgerState.RecoverCommitTimestampConflict(ctx); err != nil {
 			return fmt.Errorf("failed to recover database: %w", err)
+		}
+		if err := n.enforceConsensusDatabaseIdentity(); err != nil {
+			return fmt.Errorf("consensus database compatibility: %w", err)
 		}
 		if err := n.enforceRecoveredNodeSettings(ctx); err != nil {
 			return fmt.Errorf(
@@ -1237,9 +1278,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		chainSelectorSecurityParam,
 		n.ledgerState.ActiveSlotCoeffRat(),
 	)
-	genesisSelectionMode := n.config.genesisBootstrap &&
-		!n.config.intersectTip &&
-		len(n.config.intersectPoints) == 0
+	genesisSelectionMode := n.config.genesisSelectionMode()
 	chainSelectorConfig := n.buildChainSelectorConfig(
 		chainSelectorSecurityParam,
 		genesisSelectionMode,
@@ -1491,6 +1530,8 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 			CORSAllowedOrigins:                       n.config.corsAllowedOrigins,
 			DestinationRegistry:                      n.destinationRegistry,
 			ArchiveMaxConcurrentFetches:              n.config.barkArchiveMaxConcurrentFetches,
+			ArchiveLookupsPerSecond:                  n.config.barkArchiveLookupsPerSecond,
+			ArchiveCallerLookupsPerSecond:            n.config.barkArchiveCallerLookupsPerSecond,
 		}
 		if remoteLifecycleEnabled {
 			barkConfig.Node = n
@@ -2111,6 +2152,7 @@ func (n *Node) buildChainSelectorConfig(
 	genesisWindowSlots uint64,
 ) chainselection.ChainSelectorConfig {
 	config := chainselection.ChainSelectorConfig{
+		Consensus:             n.selectedConsensusProvider(),
 		Logger:                n.config.logger,
 		EventBus:              n.eventBus,
 		SecurityParam:         securityParam,
