@@ -687,6 +687,22 @@ observes it and before the ledger apply gate runs. This bookkeeping does not
 count a rollback as a delivered header or record it in the header deduplication
 cache. A callback for a removed client does not recreate its tracked state.
 
+The ledger defers the rollback that opens a ChainSync session when the
+connection has not yet delivered a header and the point is a queued header or a
+primary-chain block behind the header tip (`deferOpeningChainsyncRollback`).
+That point is only the session's intersection: a reconnecting peer intersects
+at the tip as of its FindIntersect, and the tip often advances before the reply
+is handled. The peer's first header settles it
+(`resolveOpeningChainsyncRollback`). The rollback is applied as before only
+when that header builds on the point and is not already on the local chain,
+meaning the peer's chain leaves ours there. A header the local chain holds is a
+replay, and a header that does not build on the point (the ingress apply gate
+can withhold a session's headers until the peer is selected) is left to the
+ordinary header path and its fork resolution; either way the rollback only
+moved the peer's cursor and is dropped. A rollback from a session that has
+delivered a header is applied immediately. The deferred state is per
+connection, held under `chainsyncMutex`, and cleared on `ledger.conn_closed`.
+
 `ledger.tx` is published with `PublishOrdered`, not `PublishAsync`, so a
 subscriber deriving state from it sees a block's transactions in index order
 and sees a rollback's undo events (`Rollback: true`) before any transaction
@@ -3814,7 +3830,7 @@ anything the result lacks is read in the write transaction as with the flag off.
 The goroutine runs at most one block ahead (block 1 overlaps block 0) and the
 apply worker never waits for it to acquire its read-pool connection: until the
 read transaction is open every block reads its own inputs, because snapshot
-opens parked on the chunk's commit barrier can hold the pool. It is cancelled
+opens parked on the chunk's commit can hold the pool. It is cancelled
 and joined, and its read transaction released, on every exit from the chunk
 callback. Dijkstra chunks do not use it, because endorser-block application
 consumes inputs that no ranking-block transaction names.
@@ -5143,7 +5159,15 @@ snapshot
 one commit boundary), and validates the point against it with
 `VerifyPointQueryable`. A boundary can commit before its job is published, so
 a snapshot that still contains the boundary's pending-ratification record is
-dropped and the open retried once the job settles. The
+dropped and the open retried once the job settles. A wait that outlasts the
+caller's deadline fails with `ledger.ErrEpochBoundaryJobPending`, naming the
+boundary's epoch. A volatile-tip Acquire does not wait for the job: the job
+can outlast the Acquire budget (seconds on preprod, tens of seconds beside a
+whole-UTxO query) and a failed tip Acquire has no failure reply, so while
+`LedgerState.EpochBoundaryJobPending` reports one, or the open fails with that
+error, the session is recorded without a view and its first `Query` opens it
+once the job settles (bounded by `localStateQueryDeferredOpenWait`, below the
+client's default query timeout), at the tip current then. The
 returned `ledger.QueryView` is held in `Ouroboros.localstatequerySessions`
 beside the acquired point and owner maps, and every `Query` on the connection
 is answered by `QueryView.Query`, which runs the ordinary query handlers
@@ -5170,8 +5194,15 @@ A snapshot pins a database read transaction (holding back WAL checkpoints and
 one read connection), so both its number and its lifetime are bounded. It
 counts against the database's read-snapshot admission cap, which always leaves
 one metadata read connection free for the rest of the node; once the cap is
-reached an `Acquire` waits up to five seconds for a snapshot to close and then
-fails. It is closed on `Release`,
+reached an `Acquire` waits up to four seconds for a snapshot to close and then
+fails. The wait stays below the gouroboros client's default five-second
+`Acquire` timeout, whose timer starts before the request arrives, so a client
+receives the `AcquireFailure` instead of timing out in `Acquiring` and closing
+the connection. Opening the snapshot waits for a commit in progress, not for
+every open read-write transaction to finish, so a long block-apply chunk or
+epoch-boundary write does not hold an `Acquire` past that bound. A timed-out
+open names the stage it was waiting in: admission, a read connection, or the
+commit barriers. It is closed on `Release`,
 on re-`Acquire` (before the replacement opens, so a connection never needs a
 second admission slot; a failed `Acquire` returns the protocol to idle with no
 session), on the connection closing, and on
@@ -5386,6 +5417,14 @@ retention-floor pruning committed afterwards does not reach the session. Only a
 snapshot closed by the lifetime bound above reproduces this connection-teardown
 behavior.
 
+"Ahead of the tip" means ahead of the applied ledger tip, and the chain
+iterator runs ahead of it during sync. So the node-to-client ChainSync server
+(`chainsyncServerRequestNext` with `waitForLedger`) holds a roll-forward
+behind `MsgAwaitReply` until `LedgerState.AwaitAppliedSlot` sees the ledger
+reach the block, as cardano-node serves local clients only blocks it has
+already validated. A local client can therefore Acquire every point ChainSync
+delivers to it. Node-to-node peers are still served ahead of the ledger.
+
 A specific acquired point is also pinned against pruning
 (`ledger/acquired_point_pins.go`). Acquire calls `LedgerState.PinAcquiredPoint`
 *before* `AcquireQueryView` verifies the point, and the consumed-UTxO cleanup
@@ -5445,11 +5484,32 @@ against a real Preview cardano-node: 36 real pools reported by cardano-node
 were completely absent from dingo's reply for no reason other than that
 snapshot lag. `GetUTxOWhole` enumerates live references, resolves their stored
 CBOR through a fixed worker pool, and decodes them into the node-to-client
-reply shape. The query admits at most 50,000 references, retains at most 32 MiB
-of resolved CBOR in its assembled result, encodes at most a 32 MiB response,
-and has a 30-second server deadline. Workers may hold one additional resolved
-output apiece while delivering results. The checked encoding is cached so the
-protocol server does not serialize the full map again outside that deadline.
+reply shape. A successful response always contains the complete UTxO set at
+the acquired point. Pagination, offsets, item limits, byte limits, time limits,
+truncation, and partial success are forbidden for this protocol result. If the
+complete set cannot be produced, the query fails without returning a successful
+partial result. Internal database pages only shorten read transactions; they
+are assembled into one complete protocol response. This contract must remain
+explicit in implementation and protocol documentation.
+
+`GetUTxOWhole` on an acquired view does not read through the view's snapshot.
+Its walk takes minutes on a large chain, and SQLite cannot restart its WAL
+while any reader holds a read transaction, so whole-UTxO queries one after
+another -- a node-parity replay asks for one at every epoch boundary -- kept
+the WAL growing without bound under every checkpoint strategy (42 GB live).
+Instead the view releases its read transaction
+(`QueryView.detachForUtxoWhole`) and the query reads the references as of the
+view's block -- the acquired point, or the snapshot's tip for a tip acquire --
+in pages of 10,000 rows, each in its own short read transaction
+(`database.IterateUtxoRefsAsOfPaged`, paging on the UTxO row id). The as-of
+predicate makes the pages agree: blocks applied meanwhile add rows after the
+slot, which it excludes, and spend rows after it, which it still includes. An
+acquired-point pin holds spent-row pruning at or below the slot for the walk,
+and the announced prune floor is checked once it ends. A rollback below the
+slot (`UtxosDeleteRolledback`, `UtxosUnspend`) marks the walk disturbed; the
+query re-verifies the point and restarts, up to three times. A later query on
+the same session reopens a snapshot pinned to that block, as an expired view
+does, keeping the forecast frozen at `Acquire`.
 Both queries exist to
 support cross-node ledger-state comparison in the devnet conformance
 harness (`internal/test/devnet`, see its README's "LocalStateQuery in
@@ -5612,7 +5672,13 @@ carries the highest point the previous and new peers' candidate fragments
 share. It is not intersected with the local chain and can lie above the local
 tip; it is nil when the fragments share no retained point. Before the
 node has applied any local block, new peers' advertisements remain bounded
-against the first bootstrap peer; after a local tip exists, the delivered
+against the highest advertisement of the peers that delivered a header, unless
+a connection from another remote host advertises a tip within `securityParam`
+of the claim. Refused advertisements are kept as witnesses
+(`ChainSelector.rejectedAdvertisedClaims`, bounded to `maxTrackedPeers` and
+outliving their connection), so a lagging first peer cannot refuse every
+honest peer in turn, while a lone far claim, or one host reconnecting to vouch
+for itself, is still refused. After a local tip exists, the delivered
 frontier is the authority. This lets a node resume when the honest advertised
 tip is arbitrarily far ahead: the next delivered header is still checked
 incrementally against the previous delivered frontier (with the local-tip
@@ -15245,6 +15311,16 @@ Finishing a transition, like publishing a snapshot, wakes callers that wait to
 retry a non-current session; forged-block self-validation is one. Starting a
 transition also waits for any commit callback already holding the mutex, so a
 writer cannot make database state durable midway through that callback.
+
+A header-crypto generation pin (`PinHeaderCryptoVerificationGeneration`) is a
+read lock on the same mutex, and no path may take it while already holding
+one: Go's `RWMutex` admits no new reader once a writer waits, so a second pin
+blocks behind a queued transition that is itself waiting for the first. The
+ChainSync admission callback runs under the ledger's pin, so
+`ChainSelector.CommitPeerTipAdmissionPinned`, and a selector commit that took
+its own admission pin, pass that pin to every peer-tip update, peer removal,
+and chain-selection evaluation they trigger instead of re-pinning the current
+generation.
 
 ## Configuration
 

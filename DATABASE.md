@@ -3078,6 +3078,17 @@ process's lifetime, with no later call able to repair it, and the next
 releases while the barrier's writer preference blocked every read-write `Txn`
 constructed behind it.
 
+Coordinated read snapshots (`NewReadSnapshotContext`) do not take that
+barrier's exclusive side. A read-write `Txn` holding the shared side also holds
+a narrower commit-phase barrier's shared side for the duration of `Commit`
+alone -- the commit timestamp update and both store commits -- and snapshot
+construction takes the commit phase exclusively while it opens the metadata
+and then the blob view. Uncommitted writes are invisible to both views, so the
+pair still shares one commit boundary, while construction waits only for a
+commit in progress rather than for every open read-write `Txn` to finish.
+`lifecycle.Snapshot` keeps `PauseCommits`, because its metadata backup needs
+the write connection an open read-write `Txn` holds.
+
 `Txn.OnFinish` exposes that same terminal transition to callers. It registers a
 callback that runs exactly once when the transaction reaches its terminal state
 on any path -- a successful commit, a failed commit, an explicit `Rollback`, a
@@ -3872,6 +3883,34 @@ FROM utxo u
 LEFT JOIN asset a ON a.utxo_id = u.id
 WHERE u.tx_id IN (decode($1, 'hex'), decode($2, 'hex'));
 ```
+
+### `UtxoRefsAsOfAfterID`
+
+One page of the UTxO references live as of a slot, for a whole-UTxO walk that
+must not hold one read transaction throughout
+(`database.IterateUtxoRefsAsOfPaged`, used by `GetUTxOWhole`):
+
+```sql
+SELECT id, tx_id, output_idx FROM utxo
+WHERE id > ? AND added_slot <= ? AND (deleted_slot = 0 OR deleted_slot > ?)
+ORDER BY id LIMIT ?
+```
+
+Each page is a range scan on the row id in its own read transaction, so the
+SQLite WAL can restart between pages. The pages describe one as-of set without
+a shared snapshot because of how `utxo` rows change: a row keeps its `id` for
+its whole life (spends and unspends update it in place; inserts after the walk
+starts carry a later `added_slot` and are excluded), later spends set a
+`deleted_slot` after the slot, which the predicate still includes, and
+`UtxosDeleteConsumed` removes only rows spent before the prune floor, which an
+acquired-point pin holds at or below the slot. A rollback below the slot
+deletes or unspends rows the walk may already have passed, so
+`UtxosDeleteRolledback` and `UtxosUnspend` mark every walk below whose slot they
+reach, once when they start and again when their transaction finishes, and the
+walk returns `ErrUtxoHistoryRolledBack`. Mithril import's re-import path can
+clear a spend on an existing row and gap-block recovery can insert a missing
+producer row; neither runs inside a pinned LocalStateQuery walk on a synced
+node, and both only correct rows to what the slot's state already was.
 
 ### `GetUtxosByRefsAsOf`
 
