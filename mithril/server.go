@@ -475,10 +475,10 @@ func (w *progressResponseWriter) Unwrap() http.ResponseWriter {
 func (w *progressResponseWriter) Write(p []byte) (int, error) {
 	deadline := time.Now().Add(w.timeout)
 	if w.minimumBytesPerSecond > 0 {
-		allowed := time.Duration(
-			(w.written + int64(len(p))) * int64(time.Second) /
-				w.minimumBytesPerSecond,
-		)
+		total := w.written + int64(len(p))
+		allowed := time.Duration(total/w.minimumBytesPerSecond)*time.Second +
+			time.Duration(total%w.minimumBytesPerSecond)*time.Second/
+				time.Duration(w.minimumBytesPerSecond)
 		transferDeadline := w.transferStarted.Add(w.transferGrace + allowed)
 		if transferDeadline.Before(deadline) {
 			deadline = transferDeadline
