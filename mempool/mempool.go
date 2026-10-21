@@ -53,7 +53,10 @@ const (
 	DefaultCleanupInterval      = 1 * time.Minute
 	DefaultRevalidationDeltaCap = 64
 	DefaultConsumerCacheSize    = 1024
-	defaultConsumerCacheShare   = 4
+	// DefaultMaxConcurrentSubmissions leaves one connection in SQLite's
+	// default five-connection read pool available to chain and query work.
+	DefaultMaxConcurrentSubmissions = 4
+	defaultConsumerCacheShare       = 4
 	// minConsumerCacheBytes floors the per-consumer relay cache budget derived
 	// from MempoolCapacity when ConsumerCacheBytes is left at zero. NextTx
 	// permanently skips any body whose size exceeds this budget, so an
@@ -246,6 +249,7 @@ type Mempool struct {
 	overlay           *utxoOverlay
 	dag               *transactionDAG
 	headroomChanged   chan struct{}
+	submissionSlots   chan struct{}
 
 	// rebuildMutex permits one double-buffer rebuild at a time. mutationSeq and
 	// mutationJournal are protected by mutationMutex and let that rebuild catch
@@ -590,6 +594,23 @@ var ErrNilValidator = errors.New("mempool: validator is nil")
 // ErrMempoolStopped is returned when admission is attempted after shutdown.
 var ErrMempoolStopped = errors.New("mempool: stopped")
 
+// ErrSubmissionBusy reports that every transaction-submission validation
+// slot is in use. Admission is fail-fast so callers cannot occupy request or
+// protocol goroutines while waiting for a metadata read transaction.
+var ErrSubmissionBusy = errors.New("transaction submission capacity exhausted")
+
+type submissionAdmissionKey struct{}
+
+type submissionAdmission struct {
+	mempool *Mempool
+}
+
+// SubmissionAdmitter is implemented by a mempool that can reserve validation
+// capacity before an API decodes an untrusted transaction body.
+type SubmissionAdmitter interface {
+	AdmitSubmission(context.Context) (context.Context, func(), error)
+}
+
 // MempoolFullError reports an admission refused for capacity. CurrentSize and
 // TxSize are in the units capacity is charged in: a transaction's CBOR plus
 // the CBOR of the decoded outputs the pool keeps for it.
@@ -682,6 +703,10 @@ func newMempool(
 		rejectionWatermark:     rejectionWatermark,
 		revalidationDeltaCap:   revalidationDeltaCap,
 		revalidationJournalCap: defaultRevalidationJournalCap,
+		submissionSlots: make(
+			chan struct{},
+			DefaultMaxConcurrentSubmissions,
+		),
 	}
 	if implementation == ImplementationDAG {
 		m.dag = newTransactionDAG()
@@ -1822,6 +1847,14 @@ func (m *Mempool) AddTransaction(
 	txType uint,
 	txBytes []byte,
 ) (err error) {
+	if admission, _ := ctx.Value(submissionAdmissionKey{}).(submissionAdmission); admission.mempool != m {
+		var release func()
+		ctx, release, err = m.AdmitSubmission(ctx)
+		if err != nil {
+			return err
+		}
+		defer release()
+	}
 	_, span := tracing.Start(ctx, "mempool.add_transaction")
 	defer func() {
 		result := "accepted"
@@ -1908,6 +1941,31 @@ func (m *Mempool) AddTransaction(
 		}
 	}
 	return nil
+}
+
+// AdmitSubmission reserves a validation slot and marks the returned context
+// so AddTransaction can reuse the reservation. API handlers call this before
+// decoding request data; direct callers are admitted inside AddTransaction.
+func (m *Mempool) AdmitSubmission(
+	ctx context.Context,
+) (context.Context, func(), error) {
+	if err := ctx.Err(); err != nil {
+		return ctx, nil, err
+	}
+	select {
+	case m.submissionSlots <- struct{}{}:
+		var once sync.Once
+		release := func() {
+			once.Do(func() { <-m.submissionSlots })
+		}
+		return context.WithValue(
+			ctx,
+			submissionAdmissionKey{},
+			submissionAdmission{mempool: m},
+		), release, nil
+	default:
+		return ctx, nil, ErrSubmissionBusy
+	}
 }
 
 // addTransactionAttempt validates and admits one transaction. On

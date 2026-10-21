@@ -24,6 +24,7 @@ import (
 	"strings"
 
 	"github.com/blinklabs-io/dingo/internal/safedecode"
+	"github.com/blinklabs-io/dingo/mempool"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -922,6 +923,17 @@ func (s *Server) handleConstructionSubmit(
 	w http.ResponseWriter,
 	r *http.Request,
 ) {
+	ctx := r.Context()
+	if admitter, ok := s.config.Mempool.(mempool.SubmissionAdmitter); ok {
+		var release func()
+		var err error
+		ctx, release, err = admitter.AdmitSubmission(ctx)
+		if err != nil {
+			writeError(w, wrapErr(ErrUnavailable, err))
+			return
+		}
+		defer release()
+	}
 	var req ConstructionSubmitRequest
 	if meshErr := s.decodeAndValidate(
 		w, r, &req,
@@ -966,7 +978,7 @@ func (s *Server) handleConstructionSubmit(
 	}
 
 	if err := s.config.Mempool.AddTransaction(
-		r.Context(), txType, txBytes,
+		ctx, txType, txBytes,
 	); err != nil {
 		writeError(w, wrapErr(
 			ErrSubmitFailed,
