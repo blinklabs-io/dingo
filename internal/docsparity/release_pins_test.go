@@ -162,7 +162,7 @@ func TestExecutableReleaseInputsPinned(t *testing.T) {
 		}
 	}
 
-	cardanoNode := "ghcr.io/blinklabs-io/cardano-node:11.0.1@sha256:d5ede07a890e9b6a0a5182cdba9dbaf73756336762235e0934a11690beedae02"
+	cardanoNode := "ghcr.io/blinklabs-io/cardano-node:11.1.3-2@sha256:dc2b885811294fc497bcd50224bdf1e51d693f6113c749a3b21be1428af79ef8"
 	for _, path := range []string{
 		"internal/test/devnet/Dockerfile.configurator",
 		"internal/test/devnet/docker-compose.yml",
