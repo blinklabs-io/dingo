@@ -119,6 +119,46 @@ func TestHandleAccountAdmissionCap(t *testing.T) {
 	wg.Wait()
 }
 
+// TestHandleAccountSharesAddressSummaryAdmission proves the account summary
+// draws on the same admission pool as the address summaries, so a client
+// cannot double its share of whole-history scans by mixing the routes.
+func TestHandleAccountSharesAddressSummaryAdmission(t *testing.T) {
+	t.Parallel()
+	node := newBlockingAccountNode()
+	b := newTestBlockfrost(node)
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(node.release) }) }
+	defer release()
+
+	var wg sync.WaitGroup
+	for range 2 {
+		wg.Go(func() {
+			b.handler().ServeHTTP(
+				httptest.NewRecorder(),
+				addressSummaryRequest(
+					context.Background(), "/api/v0/accounts/stake_test1",
+				),
+			)
+		})
+	}
+	for range 2 {
+		testutil.RequireReceive(
+			t, node.entered, 5*time.Second, "request admitted",
+		)
+	}
+
+	w := httptest.NewRecorder()
+	b.handler().ServeHTTP(
+		w,
+		addressSummaryRequest(context.Background(), "/api/v0/addresses/addr1"),
+	)
+	require.Equal(t, http.StatusTooManyRequests, w.Code)
+	require.Equal(t, "1", w.Header().Get("Retry-After"))
+
+	release()
+	wg.Wait()
+}
+
 func TestNodeAdapterAccountHonorsContext(t *testing.T) {
 	t.Parallel()
 	adapter, _, db := newDBBackedAdapter(t)

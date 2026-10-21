@@ -2188,18 +2188,8 @@ func (b *Blockfrost) handleAccount(
 	w http.ResponseWriter,
 	r *http.Request,
 ) {
-	release, ok := b.accountSummaryAdmission.acquire(
-		r.Context(),
-		requestClient(r),
-	)
+	release, ok := b.admitAddressSummary(w, r)
 	if !ok {
-		w.Header().Set("Retry-After", "1")
-		writeError(
-			w,
-			http.StatusTooManyRequests,
-			"Too Many Requests",
-			"account summary capacity reached, try again later",
-		)
 		return
 	}
 	defer release()
