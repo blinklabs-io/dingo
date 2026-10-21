@@ -265,11 +265,11 @@ func (o *Ouroboros) cancelFutureHeaderResync(
 
 func (o *Ouroboros) markDeferredHeaderRecovery(
 	connId ouroboros.ConnectionId,
+	baseline ochainsync.Tip,
 ) {
 	if o.ledgerState == nil {
 		return
 	}
-	baseline := o.ledgerState.Tip()
 	baseline.Point.Hash = append([]byte(nil), baseline.Point.Hash...)
 	// Recovery normally waits for the next applied block. With no queued
 	// header there is none to apply, so that wait never ends (for example
@@ -281,25 +281,44 @@ func (o *Ouroboros) markDeferredHeaderRecovery(
 		tipHash, headerTipHash := o.chainsyncLocalChainTips()
 		idle = len(tipHash) > 0 && bytes.Equal(tipHash, headerTipHash)
 	}
-	retryNow := false
 	o.deferredHeaderRecoveryMu.Lock()
 	if o.deferredHeaderRecovery == nil {
 		o.deferredHeaderRecovery = make(
 			map[ouroboros.ConnectionId]ochainsync.Tip,
 		)
 	}
-	o.deferredHeaderRecovery[connId] = baseline
-	retried, seen := o.deferredHeaderIdleRetry[connId]
-	if idle && (!seen || !bytes.Equal(retried, baseline.Point.Hash)) {
-		if o.deferredHeaderIdleRetry == nil {
-			o.deferredHeaderIdleRetry = make(
-				map[ouroboros.ConnectionId][]byte,
-			)
-		}
-		o.deferredHeaderIdleRetry[connId] = baseline.Point.Hash
-		retryNow = true
+	if _, alreadyDeferred := o.deferredHeaderRecovery[connId]; !alreadyDeferred {
+		o.deferredHeaderRecovery[connId] = baseline
+	} else {
+		baseline = o.deferredHeaderRecovery[connId]
 	}
 	o.deferredHeaderRecoveryMu.Unlock()
+	current := o.ledgerState.Tip().Point
+	if current.Slot != baseline.Point.Slot ||
+		!bytes.Equal(current.Hash, baseline.Point.Hash) {
+		// The ledger may have advanced during ancestry lookup, before this
+		// connection was registered for the corresponding ChainUpdate event.
+		o.retryDeferredHeadersAfterLedgerAdvance(event.NewEvent(
+			chain.ChainUpdateEventType,
+			chain.ChainBlockEvent{Point: current},
+		))
+		return
+	}
+	retryNow := false
+	if idle {
+		o.deferredHeaderRecoveryMu.Lock()
+		retried, seen := o.deferredHeaderIdleRetry[connId]
+		if !seen || !bytes.Equal(retried, baseline.Point.Hash) {
+			if o.deferredHeaderIdleRetry == nil {
+				o.deferredHeaderIdleRetry = make(
+					map[ouroboros.ConnectionId][]byte,
+				)
+			}
+			o.deferredHeaderIdleRetry[connId] = baseline.Point.Hash
+			retryNow = true
+		}
+		o.deferredHeaderRecoveryMu.Unlock()
+	}
 	if retryNow {
 		o.scheduleHeaderResync(
 			connId,
@@ -413,8 +432,12 @@ func (o *Ouroboros) retryDeferredHeadersAfterLedgerAdvance(evt event.Event) {
 			continue
 		}
 		o.deferredHeaderRecoveryMu.Lock()
-		if _, alreadyDeferred := o.deferredHeaderRecovery[candidate.conn]; !alreadyDeferred {
-			o.deferredHeaderRecovery[candidate.conn] = candidate.baseline
+		connectionClosed := o.connManager != nil &&
+			o.connManager.GetConnectionById(candidate.conn) == nil
+		if !connectionClosed {
+			if _, alreadyDeferred := o.deferredHeaderRecovery[candidate.conn]; !alreadyDeferred {
+				o.deferredHeaderRecovery[candidate.conn] = candidate.baseline
+			}
 		}
 		o.deferredHeaderRecoveryMu.Unlock()
 	}
@@ -1459,6 +1482,7 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 		// verification, or ledger backpressure below. A header that clears
 		// verification resumes the leak when the callback returns.
 		patienceGrant := false
+		patienceResume := false
 		if o.chainsyncState != nil {
 			o.chainsyncState.PatienceMessageArrived(
 				ctx.ConnectionId,
@@ -1472,6 +1496,8 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 						point.Slot == tip.Point.Slot &&
 							bytes.Equal(point.Hash, tip.Point.Hash),
 					)
+				} else if patienceResume {
+					o.chainsyncState.PatienceMessageProcessed(ctx.ConnectionId)
 				}
 			}()
 		}
@@ -1491,6 +1517,7 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 			ctx.ConnectionId,
 			o.shouldPublishChainsyncToLedger(ctx.ConnectionId),
 		)
+		patienceResume = ingressEligible
 		if ingressEligible && o.chainsyncHeaderBackpressure != nil {
 			admissionCtx, cancelAdmission := chainsyncAdmissionContext(ctx)
 			defer cancelAdmission()
@@ -1595,15 +1622,24 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 		// deferredHeaderExtendsLocalChain); any other is withheld from both,
 		// and once an applied ledger update makes its validation context
 		// advance, a fresh intersection replays the peer's linked suffix
-		// through this verifier.
-		// A header past the forecast horizon cannot reach blockfetch yet and is
-		// re-intersected separately. A definite crypto/eligibility failure
+		// through this verifier. A header past the forecast horizon cannot
+		// reach blockfetch yet and is re-intersected separately. A header whose
+		// fork ancestry cannot be authenticated is also excluded from
+		// observation, but the connection keeps it for later ancestry lookups
+		// and neither resyncs nor recycles. A definite crypto/eligibility failure
 		// excludes the header and recycles the connection.
 		selectionEligible := ingressEligible
 		deferredVerification := false
+		var verificationTipBaseline ochainsync.Tip
 		if ingressEligible && o.chainSelectionShouldVerifyHeaderCrypto != nil &&
 			o.chainSelectionShouldVerifyHeaderCrypto(blockSlot) {
-			verificationGeneration, verifyErr := o.chainSelectionVerifyHeaderCrypto(v)
+			if o.ledgerState != nil {
+				verificationTipBaseline = o.ledgerState.Tip()
+			}
+			verificationGeneration, verifyErr := o.chainSelectionVerifyHeaderCrypto(
+				ctx.ConnectionId,
+				v,
+			)
 			if errors.Is(verifyErr, ledger.ErrHeaderBeyondForecastHorizon) &&
 				o.chainsyncHeaderAdmission != nil {
 				// Admission waited for the horizon, so it has since moved
@@ -1615,7 +1651,13 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 				if o.recordHeldChainsyncTip(ctx.ConnectionId, tip) {
 					return ochainsync.ErrStopSyncProcess
 				}
-				verificationGeneration, verifyErr = o.chainSelectionVerifyHeaderCrypto(v)
+				if o.ledgerState != nil {
+					verificationTipBaseline = o.ledgerState.Tip()
+				}
+				verificationGeneration, verifyErr = o.chainSelectionVerifyHeaderCrypto(
+					ctx.ConnectionId,
+					v,
+				)
 			}
 			if verifyErr == nil {
 				chainsyncEvent.HeaderCryptoVerificationGeneration = verificationGeneration
@@ -1635,7 +1677,9 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 				return nil
 			}
 			if verifyErr != nil {
-				if ledger.IsHeaderVerificationDeferred(verifyErr) {
+				if ledger.IsHeaderVerificationWithheld(verifyErr) {
+					selectionEligible = false
+				} else if ledger.IsHeaderVerificationDeferred(verifyErr) {
 					selectionEligible = false
 					deferredVerification = true
 					o.config.Logger.Debug(
@@ -1647,6 +1691,7 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 					)
 				} else {
 					selectionEligible = false
+					patienceResume = false
 					o.config.Logger.Warn(
 						"chainsync: excluding header from chain selection after verification failure",
 						"component", "ouroboros",
@@ -1665,10 +1710,7 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 						),
 					)
 					if o.chainsyncState != nil {
-						o.chainsyncState.SetClientObservabilityOnly(
-							ctx.ConnectionId,
-							true,
-						)
+						o.chainsyncState.MarkClientFailed(ctx.ConnectionId)
 					}
 					ingressEligible = false
 				}
@@ -1681,7 +1723,10 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 				// verification. Observed history is trusted by fork-density and
 				// rollback-replay paths, so it must contain only independently
 				// verified headers.
-				o.markDeferredHeaderRecovery(ctx.ConnectionId)
+				o.markDeferredHeaderRecovery(
+					ctx.ConnectionId,
+					verificationTipBaseline,
+				)
 				o.updateChainsyncMetrics(ctx.ConnectionId, tip)
 				return nil
 			}
@@ -1691,7 +1736,10 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 			// the ledger is behind the header's epoch.
 			selectionEligible = true
 		}
-		if ingressEligible {
+		// A header withheld for unauthenticated fork ancestry is not an
+		// accepted tip: a deferred child of it must not pass as a linear
+		// extension of the local chain.
+		if ingressEligible && selectionEligible {
 			o.recordAcceptedHeaderTip(ctx.ConnectionId, blockHash)
 		}
 		// Observe the tip for chain selection FIRST, so the apply-eligibility
@@ -1747,7 +1795,7 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 		// header. A peer can be ingress-eligible yet not apply-eligible (an
 		// uncorroborated Genesis fast source): its tips are observed but its
 		// blocks are withheld from the ledger.
-		applyEligible := ingressEligible &&
+		applyEligible := selectionEligible &&
 			o.shouldApplyChainsyncToLedger(ctx.ConnectionId)
 		// Limit on Eagerness: the tip was observed above, so the limit already
 		// accounts for this header. Wait before recording cross-peer dedup state:
@@ -1773,7 +1821,7 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 				return ochainsync.ErrStopSyncProcess
 			}
 		}
-		patienceGrant = ingressEligible
+		patienceGrant = selectionEligible && ingressEligible
 		// Record the cross-peer dedup entry only for headers we will actually
 		// apply. A header withheld from an uncorroborated peer must not suppress
 		// a later delivery from a corroborated, apply-eligible peer.
@@ -1809,6 +1857,10 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 		}
 		if o.chainsyncState != nil {
 			o.chainsyncState.RecordClientDelivery(ctx.ConnectionId, point)
+		}
+		if !selectionEligible {
+			o.updateChainsyncMetrics(ctx.ConnectionId, tip)
+			return nil
 		}
 		// Header-sync strategy gate: cross-peer deduplication (isNew) has run
 		// above; the configured strategy now decides whether this eligible
@@ -1914,7 +1966,12 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 					resolvePeerTip(true)
 					return
 				}
-				o.markDeferredHeaderRecovery(ctx.ConnectionId)
+				if o.ledgerState != nil {
+					o.markDeferredHeaderRecovery(
+						ctx.ConnectionId,
+						o.ledgerState.Tip(),
+					)
+				}
 				resolvePeerTip(false)
 			}
 		}

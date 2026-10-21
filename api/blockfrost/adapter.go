@@ -304,29 +304,30 @@ func (a *NodeAdapter) ChainTip() (
 }
 
 // LatestBlock returns information about the latest block.
-func (a *NodeAdapter) LatestBlock() (
+func (a *NodeAdapter) LatestBlock(ctx context.Context) (
 	BlockInfo, error,
 ) {
 	tip := a.ledgerState.Tip()
 	block, err := a.ledgerState.BlockByHash(
-		context.Background(),
+		ctx,
 		tip.Point.Hash,
 	)
 	if err != nil {
 		return BlockInfo{}, err
 	}
-	return a.blockInfoFromBlock(block)
+	return a.blockInfoFromBlock(ctx, block)
 }
 
 // BlockByHashOrNumber returns block information by hash or height.
 func (a *NodeAdapter) BlockByHashOrNumber(
+	ctx context.Context,
 	id string,
 ) (BlockInfo, error) {
-	block, err := a.resolveBlock(context.Background(), id)
+	block, err := a.resolveBlock(ctx, id)
 	if err != nil {
 		return BlockInfo{}, err
 	}
-	return a.blockInfoFromBlock(block)
+	return a.blockInfoFromBlock(ctx, block)
 }
 
 // resolveBlock loads the block named by a 64-character hex hash or a decimal
@@ -395,6 +396,7 @@ func (a *NodeAdapter) resolveBlock(
 }
 
 func (a *NodeAdapter) blockInfoFromBlock(
+	ctx context.Context,
 	block models.Block,
 ) (BlockInfo, error) {
 	decodedBlock, err := block.Decode()
@@ -404,6 +406,10 @@ func (a *NodeAdapter) blockInfoFromBlock(
 			block.Hash,
 			err,
 		)
+	}
+	blockTransactions, err := a.ledgerState.BlockTransactions(ctx, block)
+	if err != nil {
+		return BlockInfo{}, fmt.Errorf("get transactions for block %x: %w", block.Hash, err)
 	}
 	epoch, err := a.ledgerState.SlotToEpoch(block.Slot)
 	if err != nil {
@@ -427,7 +433,7 @@ func (a *NodeAdapter) blockInfoFromBlock(
 		confirmations = tip.BlockNumber - block.Number
 	}
 
-	output, fees, err := a.blockOutputAndFees(block.Hash)
+	output, fees, err := a.blockOutputAndFees(ctx, block.Hash)
 	if err != nil {
 		return BlockInfo{}, fmt.Errorf(
 			"aggregate output and fees for block %x: %w",
@@ -457,7 +463,7 @@ func (a *NodeAdapter) blockInfoFromBlock(
 		EpochSlot: block.Slot - epoch.StartSlot,
 		Time:      slotTime.Unix(),
 		Size:      uint64(len(block.Cbor)),
-		TxCount:   len(decodedBlock.Transactions()),
+		TxCount:   len(blockTransactions),
 		SlotLeader: blockIssuer(
 			decodedBlock.IssuerVkey(),
 		),
@@ -480,9 +486,10 @@ func (a *NodeAdapter) blockInfoFromBlock(
 // discarded outputs) counts toward the block output, matching the
 // per-transaction endpoint.
 func (a *NodeAdapter) blockOutputAndFees(
+	ctx context.Context,
 	blockHash []byte,
 ) (output string, fees string, err error) {
-	txs, err := a.ledgerState.GetTransactionsByBlockHash(blockHash)
+	txs, err := a.ledgerState.Database().GetTransactionsByBlockHash(ctx, blockHash, nil)
 	if err != nil {
 		return "", "", fmt.Errorf(
 			"get transactions for block %x: %w",
@@ -612,18 +619,20 @@ func bech32EncodeData(hrp string, data []byte) (string, error) {
 
 // LatestBlockTxHashes returns transaction hashes from the
 // latest block.
-func (a *NodeAdapter) LatestBlockTxHashes() (
+func (a *NodeAdapter) LatestBlockTxHashes(ctx context.Context) (
 	[]string, error,
 ) {
 	tip := a.ledgerState.Tip()
-	_, decodedBlock, err := a.latestBlockData(
-		tip.Point.Hash,
-	)
+	block, err := a.ledgerState.BlockByHash(ctx, tip.Point.Hash)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("get latest block: %w", err)
 	}
-	ret := make([]string, 0, len(decodedBlock.Transactions()))
-	for _, tx := range decodedBlock.Transactions() {
+	txs, err := a.ledgerState.BlockTransactions(ctx, block)
+	if err != nil {
+		return nil, fmt.Errorf("get transactions for latest block: %w", err)
+	}
+	ret := make([]string, 0, len(txs))
+	for _, tx := range txs {
 		ret = append(ret, tx.Hash().String())
 	}
 	return ret, nil
@@ -1746,32 +1755,6 @@ func (a *NodeAdapter) drepAnchorMetadata(
 		ret.JSONMetadata = json.RawMessage(doc.Content)
 	}
 	return ret
-}
-
-func (a *NodeAdapter) latestBlockData(
-	hash []byte,
-) (
-	models.Block,
-	lcommon.Block,
-	error,
-) {
-	block, err := a.ledgerState.BlockByHash(context.Background(), hash)
-	if err != nil {
-		return models.Block{}, nil, fmt.Errorf(
-			"get block by hash %x: %w",
-			hash,
-			err,
-		)
-	}
-	decodedBlock, err := block.Decode()
-	if err != nil {
-		return models.Block{}, nil, fmt.Errorf(
-			"decode block %x: %w",
-			hash,
-			err,
-		)
-	}
-	return block, decodedBlock, nil
 }
 
 // liveStake sums delegated stake across every active pool for the
@@ -3938,9 +3921,10 @@ func (a *NodeAdapter) MetadataTransactionsCBOR(
 
 // Transaction returns summary details for the requested transaction.
 func (a *NodeAdapter) Transaction(
+	ctx context.Context,
 	hash []byte,
 ) (TransactionInfo, error) {
-	tx, block, decodedTx, err := a.decodedTransactionByHash(hash)
+	tx, block, decodedTx, err := a.decodedTransactionByHash(ctx, hash)
 	if err != nil {
 		return TransactionInfo{}, err
 	}
@@ -3983,7 +3967,7 @@ func (a *NodeAdapter) Transaction(
 	if tx.CollateralReturn != nil && !tx.Valid {
 		utxoCount++
 	}
-	deposit, err := a.transactionDeposit(decodedTx, block.Type, tx.Slot)
+	deposit, err := a.transactionDeposit(ctx, decodedTx, block.Type, tx.Slot)
 	if err != nil {
 		return TransactionInfo{}, fmt.Errorf(
 			"calculate deposit for transaction %x: %w",
@@ -4191,9 +4175,10 @@ func (a *NodeAdapter) TransactionEvaluate(
 // TransactionCBOR returns raw signed transaction CBOR bytes for the requested
 // transaction hash.
 func (a *NodeAdapter) TransactionCBOR(
+	ctx context.Context,
 	hash []byte,
 ) ([]byte, error) {
-	_, _, decodedTx, err := a.decodedTransactionByHash(hash)
+	_, _, decodedTx, err := a.decodedTransactionByHash(ctx, hash)
 	if err != nil {
 		return nil, err
 	}
@@ -4210,9 +4195,10 @@ func (a *NodeAdapter) TransactionCBOR(
 // TransactionMetadata returns metadata labels for the requested transaction as
 // JSON values.
 func (a *NodeAdapter) TransactionMetadata(
+	ctx context.Context,
 	hash []byte,
 ) ([]TransactionMetadataInfo, error) {
-	entries, err := a.transactionMetadataEntries(hash)
+	entries, err := a.transactionMetadataEntries(ctx, hash)
 	if err != nil {
 		return nil, err
 	}
@@ -4233,9 +4219,10 @@ func (a *NodeAdapter) TransactionMetadata(
 // TransactionMetadataCBOR returns metadata labels for the requested transaction
 // as CBOR hex values.
 func (a *NodeAdapter) TransactionMetadataCBOR(
+	ctx context.Context,
 	hash []byte,
 ) ([]TransactionMetadataCBORInfo, error) {
-	entries, err := a.transactionMetadataEntries(hash)
+	entries, err := a.transactionMetadataEntries(ctx, hash)
 	if err != nil {
 		return nil, err
 	}
@@ -4251,9 +4238,10 @@ func (a *NodeAdapter) TransactionMetadataCBOR(
 
 // TransactionUTXOs returns inputs and outputs for the requested transaction.
 func (a *NodeAdapter) TransactionUTXOs(
+	ctx context.Context,
 	hash []byte,
 ) (TransactionUTXOsInfo, error) {
-	tx, _, decodedTx, err := a.decodedTransactionByHash(hash)
+	tx, _, decodedTx, err := a.decodedTransactionByHash(ctx, hash)
 	if err != nil {
 		return TransactionUTXOsInfo{}, err
 	}
@@ -4435,9 +4423,10 @@ func transactionInputRef(input lcommon.TransactionInput) database.UtxoRef {
 // TransactionDelegations returns delegation certificates in the requested
 // transaction.
 func (a *NodeAdapter) TransactionDelegations(
+	ctx context.Context,
 	hash []byte,
 ) ([]TransactionDelegationInfo, error) {
-	tx, _, decodedTx, err := a.decodedTransactionByHash(hash)
+	tx, _, decodedTx, err := a.decodedTransactionByHash(ctx, hash)
 	if err != nil {
 		return nil, err
 	}
@@ -4510,9 +4499,10 @@ func (a *NodeAdapter) TransactionDelegations(
 // TransactionStakeAddresses returns stake registration/deregistration
 // certificates in the requested transaction.
 func (a *NodeAdapter) TransactionStakeAddresses(
+	ctx context.Context,
 	hash []byte,
 ) ([]TransactionStakeAddressInfo, error) {
-	tx, _, decodedTx, err := a.decodedTransactionByHash(hash)
+	tx, _, decodedTx, err := a.decodedTransactionByHash(ctx, hash)
 	if err != nil {
 		return nil, err
 	}
@@ -4581,9 +4571,10 @@ func (a *NodeAdapter) TransactionStakeAddresses(
 // TransactionWithdrawals returns reward withdrawals in the requested
 // transaction.
 func (a *NodeAdapter) TransactionWithdrawals(
+	ctx context.Context,
 	hash []byte,
 ) ([]TransactionWithdrawalInfo, error) {
-	_, _, decodedTx, err := a.decodedTransactionByHash(hash)
+	_, _, decodedTx, err := a.decodedTransactionByHash(ctx, hash)
 	if err != nil {
 		return nil, err
 	}
@@ -4604,9 +4595,10 @@ func (a *NodeAdapter) TransactionWithdrawals(
 // TransactionMIRs returns MIR certificate reward targets in the requested
 // transaction.
 func (a *NodeAdapter) TransactionMIRs(
+	ctx context.Context,
 	hash []byte,
 ) ([]TransactionMIRInfo, error) {
-	tx, _, decodedTx, err := a.decodedTransactionByHash(hash)
+	tx, _, decodedTx, err := a.decodedTransactionByHash(ctx, hash)
 	if err != nil {
 		return nil, err
 	}
@@ -4674,9 +4666,10 @@ func (a *NodeAdapter) TransactionMIRs(
 // TransactionPoolUpdates returns pool registration certificates in the
 // requested transaction.
 func (a *NodeAdapter) TransactionPoolUpdates(
+	ctx context.Context,
 	hash []byte,
 ) ([]TransactionPoolUpdateInfo, error) {
-	tx, _, decodedTx, err := a.decodedTransactionByHash(hash)
+	tx, _, decodedTx, err := a.decodedTransactionByHash(ctx, hash)
 	if err != nil {
 		return nil, err
 	}
@@ -4767,9 +4760,10 @@ func (a *NodeAdapter) TransactionPoolUpdates(
 // TransactionPoolRetires returns pool retirement certificates in the requested
 // transaction.
 func (a *NodeAdapter) TransactionPoolRetires(
+	ctx context.Context,
 	hash []byte,
 ) ([]TransactionPoolRetireInfo, error) {
-	tx, _, decodedTx, err := a.decodedTransactionByHash(hash)
+	tx, _, decodedTx, err := a.decodedTransactionByHash(ctx, hash)
 	if err != nil {
 		return nil, err
 	}
@@ -4801,9 +4795,10 @@ func (a *NodeAdapter) TransactionPoolRetires(
 // TransactionRedeemers returns Plutus redeemers stored for the requested
 // transaction.
 func (a *NodeAdapter) TransactionRedeemers(
+	ctx context.Context,
 	hash []byte,
 ) ([]TransactionRedeemerInfo, error) {
-	tx, _, decodedTx, err := a.decodedTransactionByHash(hash)
+	tx, _, decodedTx, err := a.decodedTransactionByHash(ctx, hash)
 	if err != nil {
 		return nil, err
 	}
@@ -4819,7 +4814,7 @@ func (a *NodeAdapter) TransactionRedeemers(
 		return []TransactionRedeemerInfo{}, nil
 	}
 
-	pparams, err := a.protocolParamsForSlot(tx.Slot)
+	pparams, err := a.protocolParamsForSlot(ctx, tx.Slot)
 	if err != nil {
 		return nil, fmt.Errorf(
 			"get protocol parameters for transaction %x redeemer fees: %w",
@@ -4892,9 +4887,10 @@ func (a *NodeAdapter) TransactionRedeemers(
 // TransactionRequiredSigners returns the required signers (extra signing key
 // hashes) declared in the requested transaction.
 func (a *NodeAdapter) TransactionRequiredSigners(
+	ctx context.Context,
 	hash []byte,
 ) ([]TransactionRequiredSignerInfo, error) {
-	_, _, decodedTx, err := a.decodedTransactionByHash(hash)
+	_, _, decodedTx, err := a.decodedTransactionByHash(ctx, hash)
 	if err != nil {
 		return nil, err
 	}
@@ -4941,17 +4937,13 @@ func (a *NodeAdapter) addressUtxoBlockHashes(
 	return ret, nil
 }
 
-func findTransactionInBlock(
-	block lcommon.Block,
+func findTransactionInSlice(
+	txs []lcommon.Transaction,
 	hash []byte,
 	index uint32,
 ) lcommon.Transaction {
-	txs := block.Transactions()
-	if int(index) < len(txs) {
-		tx := txs[index]
-		if bytes.Equal(tx.Hash().Bytes(), hash) {
-			return tx
-		}
+	if int(index) < len(txs) && bytes.Equal(txs[index].Hash().Bytes(), hash) {
+		return txs[index]
 	}
 	for _, tx := range txs {
 		if bytes.Equal(tx.Hash().Bytes(), hash) {
@@ -4962,9 +4954,10 @@ func findTransactionInBlock(
 }
 
 func (a *NodeAdapter) decodedTransactionByHash(
+	ctx context.Context,
 	hash []byte,
 ) (*models.Transaction, models.Block, lcommon.Transaction, error) {
-	tx, err := a.ledgerState.TransactionByHash(context.Background(), hash)
+	tx, err := a.ledgerState.TransactionByHash(ctx, hash)
 	if err != nil {
 		return nil, models.Block{}, nil, fmt.Errorf(
 			"get transaction by hash %x: %w",
@@ -4979,7 +4972,7 @@ func (a *NodeAdapter) decodedTransactionByHash(
 			ErrTransactionNotFound,
 		)
 	}
-	block, err := a.ledgerState.BlockByHash(context.Background(), tx.BlockHash)
+	block, err := a.ledgerState.BlockByHash(ctx, tx.BlockHash)
 	if err != nil {
 		if errors.Is(err, models.ErrBlockNotFound) {
 			return nil, models.Block{}, nil, fmt.Errorf(
@@ -4995,16 +4988,16 @@ func (a *NodeAdapter) decodedTransactionByHash(
 			err,
 		)
 	}
-	decodedBlock, err := block.Decode()
+	decodedTransactions, err := a.ledgerState.BlockTransactions(ctx, block)
 	if err != nil {
 		return nil, models.Block{}, nil, fmt.Errorf(
-			"decode block %x for transaction %x: %w",
+			"get transactions for block %x for transaction %x: %w",
 			tx.BlockHash,
 			hash,
 			err,
 		)
 	}
-	decodedTx := findTransactionInBlock(decodedBlock, hash, tx.BlockIndex)
+	decodedTx := findTransactionInSlice(decodedTransactions, hash, tx.BlockIndex)
 	if decodedTx == nil {
 		return nil, models.Block{}, nil, fmt.Errorf(
 			"transaction %x not found in block %x: %w",
@@ -5027,9 +5020,10 @@ type transactionRedeemerMetadata struct {
 }
 
 func (a *NodeAdapter) transactionMetadataEntries(
+	ctx context.Context,
 	hash []byte,
 ) ([]labelcodec.Entry, error) {
-	tx, err := a.ledgerState.TransactionByHash(context.Background(), hash)
+	tx, err := a.ledgerState.TransactionByHash(ctx, hash)
 	if err != nil {
 		return nil, fmt.Errorf(
 			"get transaction by hash %x: %w",
@@ -5561,6 +5555,7 @@ func aggregateTransactionOutputAmount(
 }
 
 func (a *NodeAdapter) transactionDeposit(
+	ctx context.Context,
 	tx lcommon.Transaction,
 	blockEraID uint,
 	slot uint64,
@@ -5569,7 +5564,7 @@ func (a *NodeAdapter) transactionDeposit(
 	if blockEra == nil || blockEra.CertDepositFunc == nil {
 		return 0, nil
 	}
-	pparams, err := a.protocolParamsForSlot(slot)
+	pparams, err := a.protocolParamsForSlot(ctx, slot)
 	if err != nil {
 		return 0, err
 	}
@@ -5588,10 +5583,11 @@ func (a *NodeAdapter) transactionDeposit(
 }
 
 func (a *NodeAdapter) protocolParamsForSlot(
+	ctx context.Context,
 	slot uint64,
 ) (lcommon.ProtocolParameters, error) {
 	db := a.ledgerState.Database()
-	txn := db.Transaction(context.Background(), false)
+	txn := db.Transaction(ctx, false)
 	defer txn.Release()
 	epoch, err := db.GetEpochBySlot(slot, txn)
 	if err != nil {

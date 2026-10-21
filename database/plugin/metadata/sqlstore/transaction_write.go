@@ -919,6 +919,8 @@ func (s *Store) setTransactionWithAccumulator(
 					hash,
 					skipWithdrawalWitness,
 					historicalBackfill,
+					txn,
+					batchedAccumulator,
 				); err != nil {
 					return err
 				}
@@ -1894,6 +1896,8 @@ func (s *Store) applyTransactionWithdrawals(
 	txHash []byte,
 	skipWithdrawalWitness bool,
 	historicalBackfill bool,
+	txn types.Txn,
+	batchedAccumulator *transactionBatchAccumulator,
 ) error {
 	for address, amount := range transaction.Withdrawals() {
 		if address == nil || amount == nil {
@@ -2031,10 +2035,13 @@ ON CONFLICT (
 			return err
 		}
 		if !historicalBackfill {
-			if err := s.refreshRewardLiveStakeAggregate(
-				ctx, db,
-				models.NewStakeCredentialRef(tag, stakeKey.Bytes()),
-				slot,
+			ref := models.NewStakeCredentialRef(tag, stakeKey.Bytes())
+			pending, err := pendingUtxoStakeDelta(txn, batchedAccumulator, ref)
+			if err != nil {
+				return err
+			}
+			if err := s.refreshRewardLiveStakeAggregateNetOfPending(
+				ctx, db, ref, slot, pending,
 			); err != nil {
 				return err
 			}

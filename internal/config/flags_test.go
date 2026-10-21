@@ -1757,3 +1757,59 @@ func TestBarkArchiveLookupRatesEnvFlagsAndYAML(t *testing.T) {
 	require.Equal(t, 2001, cfg.BarkArchiveLookupsPerSecond)
 	require.Equal(t, 2002, cfg.BarkArchiveCallerLookupsPerSecond)
 }
+
+func TestLedgerValidateAheadEnabledEnvBinding(t *testing.T) {
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("DINGO_LEDGER_VALIDATE_AHEAD_ENABLED", "true")
+
+	tmpDir := t.TempDir()
+	configFile := filepath.Join(tmpDir, "dingo.yaml")
+	if err := os.WriteFile(configFile, []byte(""), 0o600); err != nil {
+		t.Fatalf("failed to write temp config file: %v", err)
+	}
+
+	cfg, err := LoadConfig(configFile)
+	if err != nil {
+		t.Fatalf("failed to load config: %v", err)
+	}
+	if !cfg.LedgerValidateAheadEnabled {
+		t.Fatal("expected env var to enable ahead signature verification")
+	}
+}
+
+func TestLedgerApplyAheadDefaultsOn(t *testing.T) {
+	require.True(t, newDefaultConfig().LedgerPrefetchAheadEnabled)
+	require.True(t, newDefaultConfig().LedgerValidateAheadEnabled)
+
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+
+	cfg, err := LoadConfig("")
+	require.NoError(t, err)
+	require.True(t, cfg.LedgerPrefetchAheadEnabled)
+	require.True(t, cfg.LedgerValidateAheadEnabled)
+
+	cmd := &cobra.Command{Use: "dingo"}
+	RegisterFlags(cmd)
+	for _, name := range []string{
+		"ledger-prefetch-ahead-enabled",
+		"ledger-validate-ahead-enabled",
+	} {
+		got, err := cmd.PersistentFlags().GetBool(name)
+		require.NoError(t, err)
+		require.True(t, got, "--%s must default to true", name)
+	}
+}
+
+func TestLedgerApplyAheadCanBeDisabledByEnv(t *testing.T) {
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("DINGO_LEDGER_PREFETCH_AHEAD_ENABLED", "false")
+	t.Setenv("DINGO_LEDGER_VALIDATE_AHEAD_ENABLED", "false")
+
+	cfg, err := LoadConfig("")
+	require.NoError(t, err)
+	require.False(t, cfg.LedgerPrefetchAheadEnabled)
+	require.False(t, cfg.LedgerValidateAheadEnabled)
+}

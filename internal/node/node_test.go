@@ -1580,3 +1580,29 @@ func TestBuildDingoConfigWiresBarkArchiveLookupRates(t *testing.T) {
 		t.Fatalf("expected per-caller archive lookup rate 402, got %d", got)
 	}
 }
+
+func TestBuildDingoConfigWiresLedgerValidateAheadFlag(t *testing.T) {
+	t.Parallel()
+
+	logger := slog.New(slog.NewTextHandler(new(bytes.Buffer), nil))
+	for _, enabled := range []bool{false, true} {
+		built := buildDingoConfig(
+			&config.Config{LedgerValidateAheadEnabled: enabled},
+			logger,
+			nil,
+			nil,
+			false,
+			dingo.StorageModeCore,
+			30*time.Second,
+			chainsync.DefaultStallTimeout,
+			chainsync.HeaderSyncStrategyPrimary,
+		)
+		if built.LedgerValidateAheadEnabled() != enabled {
+			t.Fatalf(
+				"LedgerValidateAheadEnabled = %v, want %v",
+				built.LedgerValidateAheadEnabled(),
+				enabled,
+			)
+		}
+	}
+}
