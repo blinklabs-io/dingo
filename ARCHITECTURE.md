@@ -3794,7 +3794,7 @@ read from the database once; an input it does not return is read by each check
 that needs it. A block of the era listed before the ledger's era is judged under
 the previous era's parameters, the same rule applied to its transactions.
 With `LedgerStateConfig.LedgerPrefetchAheadEnabled` (`ledgerPrefetchAheadEnabled`,
-default off), the block-apply chunk also resolves block k+1's inputs on a
+on by default in node configuration), the block-apply chunk also resolves block k+1's inputs on a
 separate goroutine (`utxoPrefetchAhead`, `ledger/utxo_prefetch_ahead.go`) from a
 read-pool transaction while block k applies; the chunk's write transaction is
 never shared with it. Only blocks under normal validation are prefetched:
@@ -18355,7 +18355,7 @@ state committed before the chunk:
   Validation").
 - `LedgerValidateAheadEnabled` (`ledgerValidateAheadEnabled` /
   `DINGO_LEDGER_VALIDATE_AHEAD_ENABLED` / `--ledger-validate-ahead-enabled`;
-  default off) verifies the vkey and bootstrap witness signatures of every
+  on by default in node configuration) verifies the vkey and bootstrap witness signatures of every
   validated block of the chunk on `GOMAXPROCS` worker goroutines
   (`signaturePreverifyAhead`, `ledger/signature_preverify.go`), queued in
   block order. Before applying block k the loop waits for block k's results

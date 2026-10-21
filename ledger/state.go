@@ -1103,8 +1103,8 @@ type LedgerStateConfig struct {
 	// chunk are never served from it, and any input it does not resolve is
 	// read inside the write transaction as without the flag. Only blocks
 	// under normal validation are prefetched; historical, TrustedReplay and
-	// Mithril-covered blocks read no inputs. Not consensus-affecting; off by
-	// default.
+	// Mithril-covered blocks read no inputs. Not consensus-affecting. The
+	// zero value is off; node configuration turns it on by default.
 	LedgerPrefetchAheadEnabled bool
 	// ApplyRowBatchingEnabled writes the accumulated deltas of blocks that
 	// are not validated through the metadata store's batched path in core
@@ -1122,7 +1122,8 @@ type LedgerStateConfig struct {
 	// every rule still runs against the write transaction, so verdicts and
 	// stored state are identical either way. Byron blocks, Dijkstra chunks
 	// and TrustedReplay (which preverifies the whole chunk itself) are not
-	// covered. Not consensus-affecting; off by default.
+	// covered. Not consensus-affecting. The zero value is off; node
+	// configuration turns it on by default.
 	LedgerValidateAheadEnabled bool
 	// BlockfetchLowWatermarkEnabled starts blockfetch once one blockfetch
 	// range of headers is queued while the node is far from the peer tip,

@@ -1743,3 +1743,39 @@ func TestLedgerValidateAheadEnabledEnvBinding(t *testing.T) {
 		t.Fatal("expected env var to enable ahead signature verification")
 	}
 }
+
+func TestLedgerApplyAheadDefaultsOn(t *testing.T) {
+	require.True(t, newDefaultConfig().LedgerPrefetchAheadEnabled)
+	require.True(t, newDefaultConfig().LedgerValidateAheadEnabled)
+
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+
+	cfg, err := LoadConfig("")
+	require.NoError(t, err)
+	require.True(t, cfg.LedgerPrefetchAheadEnabled)
+	require.True(t, cfg.LedgerValidateAheadEnabled)
+
+	cmd := &cobra.Command{Use: "dingo"}
+	RegisterFlags(cmd)
+	for _, name := range []string{
+		"ledger-prefetch-ahead-enabled",
+		"ledger-validate-ahead-enabled",
+	} {
+		got, err := cmd.PersistentFlags().GetBool(name)
+		require.NoError(t, err)
+		require.True(t, got, "--%s must default to true", name)
+	}
+}
+
+func TestLedgerApplyAheadCanBeDisabledByEnv(t *testing.T) {
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("DINGO_LEDGER_PREFETCH_AHEAD_ENABLED", "false")
+	t.Setenv("DINGO_LEDGER_VALIDATE_AHEAD_ENABLED", "false")
+
+	cfg, err := LoadConfig("")
+	require.NoError(t, err)
+	require.False(t, cfg.LedgerPrefetchAheadEnabled)
+	require.False(t, cfg.LedgerValidateAheadEnabled)
+}

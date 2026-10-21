@@ -756,6 +756,10 @@ func NewConfig(opts ...ConfigOptionFunc) Config {
 			// SQLite planner statistics stay current unless an operator
 			// opts out; see internalconfig.Config.PlannerStatsRefreshEnabled.
 			PlannerStatsRefreshEnabled: true,
+			// Mirrors internalconfig's default: block apply overlaps input
+			// reads and signature checks with earlier blocks of its chunk.
+			LedgerPrefetchAheadEnabled: true,
+			LedgerValidateAheadEnabled: true,
 			Plugins: internalconfig.PluginsConfig{
 				Consensus: hostplugin.Selection{
 					Provider: "praos",
@@ -1842,7 +1846,7 @@ func WithBlockPipelineValidateEnabled(enabled bool) ConfigOptionFunc {
 
 // WithLedgerPrefetchAheadEnabled prefetches the next block's input UTxOs from a
 // read-only transaction while the current block applies, for blocks under
-// normal validation only. Not consensus-affecting; off by default. See
+// normal validation only. Not consensus-affecting; on by default. See
 // LedgerStateConfig.LedgerPrefetchAheadEnabled.
 func WithLedgerPrefetchAheadEnabled(enabled bool) ConfigOptionFunc {
 	return func(c *Config) {
@@ -1852,7 +1856,7 @@ func WithLedgerPrefetchAheadEnabled(enabled bool) ConfigOptionFunc {
 
 // WithLedgerValidateAheadEnabled verifies the witness signatures of the
 // validated blocks of a block-apply chunk on worker goroutines while earlier
-// blocks of the chunk validate and write. Not consensus-affecting; off by
+// blocks of the chunk validate and write. Not consensus-affecting; on by
 // default. See LedgerStateConfig.LedgerValidateAheadEnabled.
 func WithLedgerValidateAheadEnabled(enabled bool) ConfigOptionFunc {
 	return func(c *Config) {

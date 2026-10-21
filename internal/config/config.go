@@ -879,11 +879,11 @@ type Config struct {
 	BlockPipelineValidateEnabled bool `yaml:"blockPipelineValidateEnabled"        envconfig:"DINGO_BLOCK_PIPELINE_VALIDATE_ENABLED"`
 	// LedgerPrefetchAheadEnabled resolves the next block's input UTxOs on a
 	// separate goroutine while the current block applies, for blocks under
-	// normal validation only. Not consensus-affecting; off by default.
+	// normal validation only. Not consensus-affecting; on by default.
 	LedgerPrefetchAheadEnabled bool `yaml:"ledgerPrefetchAheadEnabled"          envconfig:"DINGO_LEDGER_PREFETCH_AHEAD_ENABLED"`
 	// LedgerValidateAheadEnabled verifies the witness signatures of the
 	// validated blocks of a block-apply chunk on worker goroutines while
-	// earlier blocks of the chunk apply. Not consensus-affecting; off by
+	// earlier blocks of the chunk apply. Not consensus-affecting; on by
 	// default.
 	LedgerValidateAheadEnabled bool `yaml:"ledgerValidateAheadEnabled"          envconfig:"DINGO_LEDGER_VALIDATE_AHEAD_ENABLED"`
 	// LedgerApplyRowBatchingEnabled writes the accumulated deltas of blocks
@@ -1664,6 +1664,10 @@ func newDefaultConfig() *Config {
 		ValidateForgedBlock: true,
 		// SQLite planner statistics stay current unless an operator opts out.
 		PlannerStatsRefreshEnabled: true,
+		// Block apply overlaps input reads and signature checks with earlier
+		// blocks of its chunk. Neither changes a verdict or stored state.
+		LedgerPrefetchAheadEnabled: true,
+		LedgerValidateAheadEnabled: true,
 	}
 }
 

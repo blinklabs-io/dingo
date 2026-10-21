@@ -89,10 +89,10 @@ func (n *Node) ledgerStateConfig() ledger.LedgerStateConfig {
 		// Off by default; requires BlockPipelineEnabled.
 		BlockPipelineValidateEnabled: n.config.blockPipelineValidateEnabled,
 		// Prefetch the next block's input UTxOs while the current block
-		// applies. Not consensus-affecting; off by default.
+		// applies. Not consensus-affecting; on by default.
 		LedgerPrefetchAheadEnabled: n.config.ledgerPrefetchAheadEnabled,
 		// Verify validated blocks' witness signatures ahead of the apply
-		// loop. Not consensus-affecting; off by default.
+		// loop. Not consensus-affecting; on by default.
 		LedgerValidateAheadEnabled: n.config.ledgerValidateAheadEnabled,
 		// Core-mode batched metadata writes for blocks that are not
 		// validated. Not consensus-affecting; off by default.

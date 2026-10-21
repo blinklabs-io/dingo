@@ -3539,7 +3539,9 @@ func TestLedgerStateConfigForwardsBlockPipelineFlags(t *testing.T) {
 func TestLedgerStateConfigForwardsLedgerPrefetchAheadFlag(t *testing.T) {
 	t.Parallel()
 
-	off := (&Node{config: NewConfig()}).ledgerStateConfig()
+	off := (&Node{
+		config: NewConfig(WithLedgerPrefetchAheadEnabled(false)),
+	}).ledgerStateConfig()
 	assert.False(t, off.LedgerPrefetchAheadEnabled)
 	on := (&Node{
 		config: NewConfig(WithLedgerPrefetchAheadEnabled(true)),
@@ -4973,10 +4975,26 @@ func TestRunKeepsStorageOpenWhenLeiosPersistenceDrainIsUnconfirmed(
 func TestLedgerStateConfigForwardsLedgerValidateAheadFlag(t *testing.T) {
 	t.Parallel()
 
-	off := (&Node{config: NewConfig()}).ledgerStateConfig()
+	off := (&Node{
+		config: NewConfig(WithLedgerValidateAheadEnabled(false)),
+	}).ledgerStateConfig()
 	assert.False(t, off.LedgerValidateAheadEnabled)
 	on := (&Node{
 		config: NewConfig(WithLedgerValidateAheadEnabled(true)),
 	}).ledgerStateConfig()
 	assert.True(t, on.LedgerValidateAheadEnabled)
+}
+
+func TestNewConfigEnablesLedgerApplyAheadByDefault(t *testing.T) {
+	t.Parallel()
+
+	cfg := (&Node{config: NewConfig()}).ledgerStateConfig()
+	assert.True(t, cfg.LedgerPrefetchAheadEnabled)
+	assert.True(t, cfg.LedgerValidateAheadEnabled)
+	off := (&Node{config: NewConfig(
+		WithLedgerPrefetchAheadEnabled(false),
+		WithLedgerValidateAheadEnabled(false),
+	)}).ledgerStateConfig()
+	assert.False(t, off.LedgerPrefetchAheadEnabled)
+	assert.False(t, off.LedgerValidateAheadEnabled)
 }
