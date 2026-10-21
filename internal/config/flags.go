@@ -58,6 +58,12 @@ var flagSpecs = []flagSpec{
 	),
 	stringFlag("Plugins.Mempool.Provider", "mempool", "", "mempool provider"),
 	stringFlag(
+		"Plugins.Consensus.Provider",
+		"consensus",
+		"",
+		"consensus provider",
+	),
+	stringFlag(
 		"DatabasePath",
 		"data-dir",
 		"",
@@ -842,7 +848,12 @@ var flagSpecs = []flagSpec{
 	boolFlag(
 		"LedgerPrefetchAheadEnabled",
 		"ledger-prefetch-ahead-enabled",
-		"prefetch the next block's input UTxOs from a read-only transaction while the current block applies, for validated blocks only (not consensus-affecting; default off)",
+		"prefetch the next block's input UTxOs from a read-only transaction while the current block applies, for validated blocks only (not consensus-affecting; default on)",
+	),
+	boolFlag(
+		"LedgerValidateAheadEnabled",
+		"ledger-validate-ahead-enabled",
+		"verify the witness signatures of a block-apply chunk's validated blocks on worker goroutines while earlier blocks apply (not consensus-affecting; default on)",
 	),
 
 	boolFlag(
@@ -1012,7 +1023,37 @@ var flagSpecs = []flagSpec{
 	boolFlag(
 		"Mithril.Enabled",
 		"mithril-enabled",
-		"enable Mithril integration",
+		"sync from Mithril inside serve while behind the certified tip (core storage mode only)",
+	),
+	intFlag(
+		"Mithril.WindowChunks",
+		"mithril-window-chunks",
+		"maximum immutable chunks on disk during node-managed Mithril sync",
+	),
+	intFlag(
+		"Mithril.BatchChunks",
+		"mithril-batch-chunks",
+		"immutable chunks applied per ledger batch during node-managed Mithril sync",
+	),
+	intFlag(
+		"Mithril.DownloadWorkers",
+		"mithril-download-workers",
+		"concurrent chunk downloads during node-managed Mithril sync",
+	),
+	uint64Flag(
+		"Mithril.MinGapChunks",
+		"mithril-min-gap-chunks",
+		"minimum certified chunks ahead of the applied tip to start node-managed Mithril sync",
+	),
+	durationFlag(
+		"Mithril.CheckInterval",
+		"mithril-check-interval",
+		"how often a live node re-checks the Mithril aggregator for a gap",
+	),
+	durationFlag(
+		"Mithril.RetryBackoff",
+		"mithril-retry-backoff",
+		"wait after a Mithril failure before retrying node-managed sync",
 	),
 	stringFlag(
 		"Mithril.AggregatorURL",

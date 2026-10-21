@@ -124,6 +124,7 @@ func TestRegisterFlags_CoversAllExportedConfigFields(t *testing.T) {
 		"MetricsAuthToken":                     {},
 		"Plugins.Storage.Blob.Config":          {},
 		"Plugins.Storage.Metadata.Config":      {},
+		"Plugins.Consensus.Config":             {},
 		"Plugins.Mempool.Config":               {},
 		"Plugins.API.Blockfrost.Config":        {},
 		"Plugins.API.Kupo.Config":              {},
@@ -178,6 +179,27 @@ func TestRegisterFlags_CoversAllExportedConfigFields(t *testing.T) {
 			)
 		}
 	}
+}
+
+func TestConsensusProviderSourcePrecedence(t *testing.T) {
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("DINGO_PLUGINS_CONSENSUS_PROVIDER", "environment")
+	configFile := filepath.Join(t.TempDir(), "dingo.yaml")
+	require.NoError(t, os.WriteFile(
+		configFile,
+		[]byte("plugins:\n  consensus:\n    provider: yaml\n"),
+		0o600,
+	))
+	cfg, err := LoadConfig(configFile)
+	require.NoError(t, err)
+	require.Equal(t, "environment", cfg.Plugins.Consensus.Provider)
+
+	cmd := &cobra.Command{Use: "dingo"}
+	RegisterFlags(cmd)
+	require.NoError(t, cmd.ParseFlags([]string{"--consensus=cli"}))
+	require.NoError(t, ApplyFlags(cmd, cfg))
+	require.Equal(t, "cli", cfg.Plugins.Consensus.Provider)
 }
 
 func TestPledgeLeverageEnvBinding(t *testing.T) {
@@ -1700,4 +1722,60 @@ func TestBarkBlockDownloadAllowPrivateAddressesBindings(t *testing.T) {
 		require.NoError(t, ApplyFlags(cmd, cfg))
 		require.True(t, cfg.BarkBlockDownloadAllowPrivateAddresses)
 	})
+}
+
+func TestLedgerValidateAheadEnabledEnvBinding(t *testing.T) {
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("DINGO_LEDGER_VALIDATE_AHEAD_ENABLED", "true")
+
+	tmpDir := t.TempDir()
+	configFile := filepath.Join(tmpDir, "dingo.yaml")
+	if err := os.WriteFile(configFile, []byte(""), 0o600); err != nil {
+		t.Fatalf("failed to write temp config file: %v", err)
+	}
+
+	cfg, err := LoadConfig(configFile)
+	if err != nil {
+		t.Fatalf("failed to load config: %v", err)
+	}
+	if !cfg.LedgerValidateAheadEnabled {
+		t.Fatal("expected env var to enable ahead signature verification")
+	}
+}
+
+func TestLedgerApplyAheadDefaultsOn(t *testing.T) {
+	require.True(t, newDefaultConfig().LedgerPrefetchAheadEnabled)
+	require.True(t, newDefaultConfig().LedgerValidateAheadEnabled)
+
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+
+	cfg, err := LoadConfig("")
+	require.NoError(t, err)
+	require.True(t, cfg.LedgerPrefetchAheadEnabled)
+	require.True(t, cfg.LedgerValidateAheadEnabled)
+
+	cmd := &cobra.Command{Use: "dingo"}
+	RegisterFlags(cmd)
+	for _, name := range []string{
+		"ledger-prefetch-ahead-enabled",
+		"ledger-validate-ahead-enabled",
+	} {
+		got, err := cmd.PersistentFlags().GetBool(name)
+		require.NoError(t, err)
+		require.True(t, got, "--%s must default to true", name)
+	}
+}
+
+func TestLedgerApplyAheadCanBeDisabledByEnv(t *testing.T) {
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("DINGO_LEDGER_PREFETCH_AHEAD_ENABLED", "false")
+	t.Setenv("DINGO_LEDGER_VALIDATE_AHEAD_ENABLED", "false")
+
+	cfg, err := LoadConfig("")
+	require.NoError(t, err)
+	require.False(t, cfg.LedgerPrefetchAheadEnabled)
+	require.False(t, cfg.LedgerValidateAheadEnabled)
 }

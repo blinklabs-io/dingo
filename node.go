@@ -38,6 +38,7 @@ import (
 	"github.com/blinklabs-io/dingo/chainselection"
 	"github.com/blinklabs-io/dingo/chainsync"
 	"github.com/blinklabs-io/dingo/connmanager"
+	nodeconsensus "github.com/blinklabs-io/dingo/consensus"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/lifecycle"
 	"github.com/blinklabs-io/dingo/database/models"
@@ -59,7 +60,6 @@ import (
 	"github.com/blinklabs-io/dingo/kesagent"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/forging"
-	"github.com/blinklabs-io/dingo/ledger/leader"
 	"github.com/blinklabs-io/dingo/ledger/leios"
 	"github.com/blinklabs-io/dingo/ledger/snapshot"
 	"github.com/blinklabs-io/dingo/mempool"
@@ -73,6 +73,7 @@ import (
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	okeepalive "github.com/blinklabs-io/gouroboros/protocol/keepalive"
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 type Node struct {
@@ -98,6 +99,7 @@ type Node struct {
 	equivocation            *equivocationDetector
 	eventBus                *event.EventBus
 	pluginHost              *plugin.Host
+	consensusProvider       nodeconsensus.Provider
 	destinationRegistry     *lifecycle.DestinationRegistry
 	mempool                 mempool.Service
 	chainManager            *chain.ChainManager
@@ -144,7 +146,7 @@ type Node struct {
 	kesAgentClient               *kesagent.Client
 	kesAgentCancel               context.CancelFunc
 	kesAgentMetrics              *kesagent.Metrics
-	leaderElection               *leader.Election
+	leaderElection               nodeconsensus.LeaderScheduler
 	rtsMetrics                   *rtsMetrics
 	shutdownFuncs                []func(context.Context) error
 	deferredIndexMaintenanceDone chan struct{}
@@ -203,6 +205,30 @@ type Node struct {
 	// whether an unrelated, non-rebuilding Snapshot happens to be
 	// running, which this mutex would otherwise make indistinguishable.
 	liveLifecycleMu sync.Mutex
+	// ingestHold carries the network ingest hold across chainsync state
+	// rebuilds. Created by networkIngestHold.
+	ingestHoldOnce sync.Once
+	ingestHold     *chainsync.IngestHold
+	// mithrilCoordinator runs node-managed Mithril catch-up, when enabled.
+	// Set once at startup under liveLifecycleMu; a live Restore, Truncate or
+	// shutdown aborts its run in progress through quiesceComponentStops.
+	mithrilCoordinator *mithrilCoordinator
+	// mithrilSource is the Mithril half of node-managed Mithril, nil when it
+	// is not enabled. Built before the chain manager, so snapshot mode can
+	// restore into the database before anything reads it.
+	mithrilSource MithrilCatchUp
+	// mithrilSuppressedUntil holds the coordinator's first check back after
+	// a failed startup restore, as a failed check does.
+	mithrilSuppressedUntil time.Time
+	// mithrilRestore is the startup snapshot restore's progress, for the
+	// readiness probe; nil when none is running.
+	mithrilRestore atomic.Pointer[mithrilRestoreStatus]
+	// mithrilRestoreGauge is dingo_mithril_snapshot_restore_state, nil
+	// without a metrics registry.
+	mithrilRestoreGauge prometheus.Gauge
+	// mithrilMetrics counts source decisions and fallbacks; nil without a
+	// metrics registry.
+	mithrilMetrics *mithrilNodeMetrics
 
 	// wallClockLedger is n.ledgerState once its Start has returned, for the
 	// chain selector's wall-clock hook, which runs on the selector's goroutine
@@ -245,6 +271,25 @@ type Node struct {
 	// rebuild re-registers fresh ones under the same names. See
 	// metrics_registerer.go.
 	rebuildableMetrics *rebuildableRegisterer
+}
+
+// consensusPluginSelection returns the consensus plugin selection, defaulting
+// an unset provider to Praos. A config built from a caller-supplied internal
+// config bypasses the loader's defaults, and an empty name would otherwise
+// fail startup with a missing-provider error.
+func (c *Config) consensusPluginSelection() plugin.Selection {
+	selection := c.pluginSelections[plugin.CapabilityConsensus]
+	if selection.Provider == "" {
+		selection.Provider = nodeconsensus.PraosProviderName
+	}
+	return selection
+}
+
+func (n *Node) selectedConsensusProvider() nodeconsensus.Provider {
+	if n != nil && n.consensusProvider != nil {
+		return n.consensusProvider
+	}
+	return nodeconsensus.NewPraosProvider()
 }
 
 func New(cfg Config) (*Node, error) {
@@ -315,6 +360,16 @@ func New(cfg Config) (*Node, error) {
 	var equivocationRegistration *promutil.Registration
 	if n.config.promRegistry != nil {
 		equivocationRegistration = metricsRegistration
+		n.mithrilRestoreGauge = promutil.Register(
+			metricsRegistration,
+			prometheus.NewGauge(prometheus.GaugeOpts{
+				Name: "dingo_mithril_snapshot_restore_state",
+				Help: "startup Mithril snapshot restore: 0 none running, " +
+					"1 restoring, 2 stuck (failing without progress), " +
+					"3 waiting on the Mithril source",
+			}),
+		)
+		n.mithrilMetrics = newMithrilNodeMetrics(metricsRegistration)
 	}
 	n.equivocation = newEquivocationDetector(
 		equivocationRegistration,
@@ -708,6 +763,19 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 			)
 		}
 	})
+	consensusSelection := n.config.consensusPluginSelection()
+	provider, err := plugin.Resolve[nodeconsensus.Provider](
+		n.ctx,
+		n.pluginHost,
+		plugin.CapabilityConsensus,
+		consensusSelection.Provider,
+		consensusSelection.Config,
+		struct{}{},
+	)
+	if err != nil {
+		return fmt.Errorf("failed to resolve consensus plugin: %w", err)
+	}
+	n.consensusProvider = provider
 
 	// Reconcile a live Restore's directory swap (node_lifecycle.go's
 	// swapInRestoredDataDir) that was interrupted by a crash, process
@@ -777,6 +845,13 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		)
 		dbNeedsRecovery = true
 	}
+	// Built before the node settings gate persists anything: a setting the
+	// gate would latch can make the node's own interrupted snapshot restore
+	// impossible to finish, and refusing first keeps the setting reversible.
+	n.mithrilSource = n.newMithrilSource()
+	if err := n.checkSnapshotRestoreSettings(n.ctx); err != nil {
+		return err
+	}
 	if dbNeedsRecovery {
 		// A database awaiting recovery has a known-inconsistent commit
 		// state. Enforcing gates against it here could report a spurious
@@ -790,8 +865,13 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		n.config.logger.Info(
 			"node settings gate enforcement deferred until database recovery completes",
 		)
-	} else if err := n.db.EnforceNodeSettings(ctx, n.nodeSettingsGateValues()); err != nil {
-		return fmt.Errorf("node settings: %w", err)
+	} else {
+		if err := n.enforceConsensusDatabaseIdentity(); err != nil {
+			return fmt.Errorf("consensus database compatibility: %w", err)
+		}
+		if err := n.db.EnforceNodeSettings(ctx, n.nodeSettingsGateValues()); err != nil {
+			return fmt.Errorf("node settings: %w", err)
+		}
 	}
 	if pending, pendingErr := lifecycle.GetPendingTruncate(n.db); pendingErr != nil {
 		return fmt.Errorf(
@@ -804,6 +884,17 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 			pending.TargetSlot,
 			pending.TargetID,
 		)
+	}
+	// Before the ledger is built: its commit-timestamp recovery rolls back,
+	// and so does the chain ingest it starts.
+	if err := n.repairCriticalIndexesBeforeIngest(ctx); err != nil {
+		return err
+	}
+	// Snapshot mode restores into an empty database here, before the chain
+	// manager and the ledger state read it, so both are built on the
+	// restored chain and the node goes live only once the restore is done.
+	if err := n.mithrilSnapshotStartup(n.ctx); err != nil {
+		return err
 	}
 	// Load chain manager
 	cm, err := chain.NewManager(
@@ -910,6 +1001,9 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	if dbNeedsRecovery {
 		if err := n.ledgerState.RecoverCommitTimestampConflict(ctx); err != nil {
 			return fmt.Errorf("failed to recover database: %w", err)
+		}
+		if err := n.enforceConsensusDatabaseIdentity(); err != nil {
+			return fmt.Errorf("consensus database compatibility: %w", err)
 		}
 		if err := n.enforceRecoveredNodeSettings(ctx); err != nil {
 			return fmt.Errorf(
@@ -1151,11 +1245,11 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	// for this initial publication so late-bound ledger callbacks cannot
 	// observe the state while its constructor is still writing it.
 	n.liveLifecycleMu.Lock()
-	n.chainsyncState = chainsync.NewStateWithConfig(
+	n.publishChainsyncState(chainsync.NewStateWithConfig(
 		n.eventBus,
 		n.ledgerState,
 		chainsyncCfg,
-	)
+	))
 	n.liveLifecycleMu.Unlock()
 	// Both consumers update state from one-shot eligibility transitions; a
 	// detach would leave peer governance or connection routing stale forever.
@@ -1184,9 +1278,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		chainSelectorSecurityParam,
 		n.ledgerState.ActiveSlotCoeffRat(),
 	)
-	genesisSelectionMode := n.config.genesisBootstrap &&
-		!n.config.intersectTip &&
-		len(n.config.intersectPoints) == 0
+	genesisSelectionMode := n.config.genesisSelectionMode()
 	chainSelectorConfig := n.buildChainSelectorConfig(
 		chainSelectorSecurityParam,
 		genesisSelectionMode,
@@ -1703,6 +1795,10 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		}
 	}
 
+	// Node-managed Mithril starts last, once Ouroboros and the ledger it
+	// holds off and hands back to are running.
+	started = append(started, n.startMithrilCoordinator(n.ctx)) //nolint:contextcheck
+
 	// All components started successfully
 	n.startupLifecycleMu.Unlock()
 	startupGateHeld = false
@@ -2054,6 +2150,7 @@ func (n *Node) buildChainSelectorConfig(
 	genesisWindowSlots uint64,
 ) chainselection.ChainSelectorConfig {
 	config := chainselection.ChainSelectorConfig{
+		Consensus:             n.selectedConsensusProvider(),
 		Logger:                n.config.logger,
 		EventBus:              n.eventBus,
 		SecurityParam:         securityParam,
@@ -2474,6 +2571,88 @@ func (n *Node) backfillRewardLiveStake(ctx context.Context) error {
 			staleEpochs,
 		)
 	}
+	return nil
+}
+
+// repairCriticalIndexesBeforeIngest rebuilds the critical deferred indexes a
+// pending bulk-load cycle left missing in n.db, before anything builds the
+// ledger that ingests. Run calls it at startup and reinitializeCoreStorage
+// after a live Restore or Truncate reopens storage. Core mode only: API mode
+// rebuilds the critical subset before Run, while it resumes its backfill,
+// and finishes the rest in startDeferredIndexMaintenance.
+func (n *Node) repairCriticalIndexesBeforeIngest(ctx context.Context) error {
+	if n.config.storageMode.IsAPI() {
+		return nil
+	}
+	return repairPendingCriticalIndexes(ctx, n.db, n.config.logger)
+}
+
+// repairPendingCriticalIndexes rebuilds db's missing critical deferred
+// indexes when a bulk-load cycle is pending, logging each index and the
+// total. A node-managed Mithril catch-up drops critical indexes that
+// rollback reads and normally rebuilds them before it hands the ledger back;
+// a process that died in between, a live Restore or Truncate that aborted
+// the run, or a snapshot taken during it leaves them missing behind the
+// marker. Building one on a mainnet-size utxo table takes minutes, and the
+// caller is blocked for all of it, so the log says what it is waiting on.
+func repairPendingCriticalIndexes(
+	ctx context.Context,
+	db *database.Database,
+	logger *slog.Logger,
+) error {
+	manager, ok := db.Metadata().(metadata.DeferredIndexManager)
+	if !ok {
+		return nil
+	}
+	pending, err := manager.HasDeferredIndexesPending()
+	if err != nil {
+		return fmt.Errorf("checking deferred-index state: %w", err)
+	}
+	if !pending {
+		return nil
+	}
+	var missing []string
+	if lister, ok := manager.(metadata.ContextMissingCriticalDeferredIndexLister); ok {
+		missing, err = lister.MissingCriticalDeferredIndexesContext(ctx)
+		if err != nil {
+			return fmt.Errorf("listing missing critical indexes: %w", err)
+		}
+		if len(missing) == 0 {
+			return nil
+		}
+	}
+	start := time.Now()
+	logger.Warn(
+		"critical deferred metadata indexes pending from a prior run; "+
+			"rebuilding before chain ingest",
+		"indexes", missing,
+	)
+	if builder, ok := manager.(metadata.CriticalDeferredIndexProgressBuilder); ok {
+		err = builder.BuildCriticalDeferredIndexesContextWithProgress(
+			ctx,
+			func(index string) {
+				logger.Info("building critical metadata index", "index", index)
+			},
+			func(index string, took time.Duration) {
+				logger.Info(
+					"critical metadata index ready",
+					"index", index,
+					"duration", took,
+				)
+			},
+		)
+	} else if builder, ok := manager.(metadata.ContextCriticalDeferredIndexBuilder); ok {
+		err = builder.BuildCriticalDeferredIndexesContext(ctx)
+	} else {
+		err = manager.BuildCriticalDeferredIndexes()
+	}
+	if err != nil {
+		return fmt.Errorf("rebuilding critical deferred indexes: %w", err)
+	}
+	logger.Info(
+		"critical deferred metadata indexes rebuilt",
+		"duration", time.Since(start),
+	)
 	return nil
 }
 

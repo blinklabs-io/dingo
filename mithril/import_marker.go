@@ -55,6 +55,43 @@ func setImmutableImportMarker(db *database.Database, num uint64) error {
 	return nil
 }
 
+// syncKeyImmutableStreamOnly marks an immutable-import marker that stream
+// catch-up created on a database no Mithril snapshot ever populated. Stream
+// catch-up applies every block from genesis, so such a database holds the
+// full ledger state and WasBootstrapped must not report it. Durable like the
+// marker; a later snapshot import's completion clear removes it, and that
+// import records the trust boundary WasBootstrapped then keys on.
+const syncKeyImmutableStreamOnly = "mithril_immutable_stream_only"
+
+// setStreamImportMarker records num as the highest immutable file whose blocks
+// stream catch-up has committed. On a database without a marker that Mithril
+// never bootstrapped it first records that the marker is stream-only; the
+// flag goes first so an interruption between the writes leaves a flag with no
+// marker, which WasBootstrapped ignores.
+func setStreamImportMarker(db *database.Database, num uint64) error {
+	_, ok, err := getImmutableImportMarker(db)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		bootstrapped, err := WasBootstrapped(db)
+		if err != nil {
+			return err
+		}
+		if !bootstrapped {
+			if err := db.SetSyncState(
+				syncKeyImmutableStreamOnly, "1", nil,
+			); err != nil {
+				return fmt.Errorf(
+					"marking mithril immutable import marker stream-only: %w",
+					err,
+				)
+			}
+		}
+	}
+	return setImmutableImportMarker(db, num)
+}
+
 // WasBootstrapped reports whether db was populated by a Mithril bootstrap. It
 // checks the durable immutable-import marker a completed Mithril sync leaves in
 // sync_state (written after the completion clear, and never removed by normal
@@ -70,9 +107,24 @@ func setImmutableImportMarker(db *database.Database, num uint64) error {
 // completion path (updateMithrilReadyState, sync_import.go) and never by a
 // genesis sync, so keying on its presence cannot misclassify a genesis-synced
 // database as bootstrapped.
+//
+// A marker that stream catch-up created (syncKeyImmutableStreamOnly) does not
+// count: that database replayed every block and imported no snapshot state.
 func WasBootstrapped(db *database.Database) (bool, error) {
-	if _, ok, err := getImmutableImportMarker(db); err != nil || ok {
-		return ok, err
+	_, ok, err := getImmutableImportMarker(db)
+	if err != nil {
+		return false, err
+	}
+	if ok {
+		streamOnly, err := db.GetSyncState(syncKeyImmutableStreamOnly, nil)
+		if err != nil {
+			return false, fmt.Errorf(
+				"reading mithril stream-only marker flag: %w", err,
+			)
+		}
+		if streamOnly == "" {
+			return true, nil
+		}
 	}
 	// Legacy fallback: the durable trust boundary written by every completed
 	// Mithril import before the immutable-import marker was introduced.

@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"math/rand/v2"
 	"regexp"
 	"slices"
@@ -1332,6 +1333,27 @@ func (s *Store) SetBulkLoadPragmas() error {
 	return nil
 }
 
+// SetCatchUpPragmas applies the backend's crash-safe catch-up tuning to the
+// write connection. Unlike SetBulkLoadPragmas it leaves durability alone and
+// does not enter bulk mode, so checkpoints and planner maintenance carry on.
+// RestoreNormalPragmas undoes it. Backends without a SQLite write pool are
+// left untouched.
+func (s *Store) SetCatchUpPragmas() error {
+	s.scheduledWorkMu.Lock()
+	defer s.scheduledWorkMu.Unlock()
+	s.startMu.Lock()
+	defer s.startMu.Unlock()
+	if s.closed.Load() {
+		return errors.New("sqlstore: store is closed")
+	}
+	if s.dialect.Name() != "sqlite" {
+		return nil
+	}
+	s.bulkMu.Lock()
+	defer s.bulkMu.Unlock()
+	return s.dialect.SetCatchUpMode(context.Background(), s.writeDB)
+}
+
 // RestoreNormalPragmas restores safe backend defaults.
 func (s *Store) RestoreNormalPragmas() error {
 	s.scheduledWorkMu.Lock()
@@ -1397,6 +1419,15 @@ func (t *sqlTxn) bindBatch(accumulator *transactionBatchAccumulator) error {
 		checkpoint[accumulator] = accumulator.checkpoint()
 	}
 	return nil
+}
+
+func (t *sqlTxn) boundBatches() []*transactionBatchAccumulator {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if len(t.batchBefore) == 0 {
+		return nil
+	}
+	return slices.Collect(maps.Keys(t.batchBefore))
 }
 
 func (t *sqlTxn) restoreBatches(

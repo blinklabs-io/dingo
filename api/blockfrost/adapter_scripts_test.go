@@ -204,6 +204,7 @@ type fakeRedeemerSource struct {
 }
 
 func (f *fakeRedeemerSource) TransactionRedeemers(
+	_ context.Context,
 	hash []byte,
 ) ([]TransactionRedeemerInfo, error) {
 	key := hex.EncodeToString(hash)
@@ -263,7 +264,7 @@ func TestBuildScriptRedeemerInfos(t *testing.T) {
 		{TxHash: txB, Tag: uint8(lcommon.RedeemerTagReward), Index: 2},
 		{TxHash: txA, Tag: uint8(lcommon.RedeemerTagSpend), Index: 0},
 	}
-	got, err := buildScriptRedeemerInfos(refs, source)
+	got, err := buildScriptRedeemerInfos(context.Background(), refs, source)
 	require.NoError(t, err)
 	require.Equal(t, []ScriptRedeemerInfo{
 		{
@@ -310,6 +311,7 @@ func TestBuildScriptRedeemerInfos(t *testing.T) {
 	// A redeemer the index names but the transaction does not carry means the
 	// index and the transaction disagree; it must not be skipped silently.
 	_, err = buildScriptRedeemerInfos(
+		context.Background(),
 		[]models.ScriptRedeemerRef{
 			{TxHash: txB, Tag: uint8(lcommon.RedeemerTagSpend), Index: 9},
 		},
@@ -318,7 +320,7 @@ func TestBuildScriptRedeemerInfos(t *testing.T) {
 	require.Error(t, err)
 
 	source.err = errors.New("boom")
-	_, err = buildScriptRedeemerInfos(refs, source)
+	_, err = buildScriptRedeemerInfos(context.Background(), refs, source)
 	require.ErrorContains(t, err, "boom")
 }
 
