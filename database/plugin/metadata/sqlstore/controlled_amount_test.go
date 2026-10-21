@@ -15,6 +15,7 @@
 package sqlstore
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"database/sql/driver"
@@ -24,6 +25,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	_ "github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite/bigintsum"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/migrations"
 	"github.com/stretchr/testify/require"
 )
@@ -259,4 +261,113 @@ func TestGetAccountSumsByCredentialMIRBeyondInt64(t *testing.T) {
 		sums.ReservesSum.String(),
 	)
 	require.Equal(t, "0", sums.TreasurySum.String())
+}
+
+// testAccountAggregateContract pins the account total contract every dialect
+// must meet: exact totals past int64, a controlled amount at the uint64
+// ceiling, signed MIR totals, zero for a credential with no rows, and an
+// error rather than a wrapped value when a coin total leaves uint64.
+func testAccountAggregateContract(t *testing.T, store *Store) {
+	t.Helper()
+	ctx := context.Background()
+	exec := func(query string, args ...any) {
+		t.Helper()
+		_, err := store.writeDB.ExecContext(
+			ctx,
+			store.dialect.Rebind(query),
+			args...,
+		)
+		require.NoError(t, err)
+	}
+	keyA := bytes.Repeat([]byte{0x5a}, 28)
+	keyB := bytes.Repeat([]byte{0x5b}, 28)
+	keyEmpty := bytes.Repeat([]byte{0x5c}, 28)
+	for i, row := range []struct {
+		key     []byte
+		amount  string
+		deleted int64
+	}{
+		{keyA, "18446744073709551614", 0},
+		{keyA, "1", 0},
+		{keyA, "5", 100},
+		{keyB, "18446744073709551615", 0},
+		{keyB, "1", 0},
+	} {
+		exec(`
+INSERT INTO utxo (
+    tx_id, output_idx, staking_key, credential_tag, added_slot, deleted_slot,
+    amount
+) VALUES (?, 0, ?, 0, 1, ?, ?)`,
+			bytes.Repeat([]byte{byte(i + 1)}, 32),
+			row.key,
+			row.deleted,
+			row.amount,
+		)
+	}
+	for i, row := range []struct {
+		amount     string
+		withdrawal bool
+	}{
+		{"9223372036854775807", true},
+		{"9223372036854775807", true},
+		{"5", false},
+	} {
+		exec(`
+INSERT INTO account_reward_delta (
+    staking_key, credential_tag, tx_hash, amount, added_slot, withdrawal
+) VALUES (?, 0, ?, ?, 10, ?)`,
+			keyA,
+			bytes.Repeat([]byte{byte(i + 1)}, 32),
+			row.amount,
+			row.withdrawal,
+		)
+	}
+	exec(`
+INSERT INTO move_instantaneous_rewards (
+    id, pot, certificate_id, added_slot, other_pot
+) VALUES (1, 0, 0, 100, '0'), (2, 1, 0, 100, '0')`)
+	for _, row := range []struct {
+		mirID  int64
+		amount string
+	}{
+		{1, "-30000000000000000000000"},
+		{1, "50000000000000000000000"},
+		{1, "-1"},
+		{2, "-5"},
+	} {
+		exec(`
+INSERT INTO move_instantaneous_rewards_reward (
+    credential, credential_tag, amount, mir_id
+) VALUES (?, 0, ?, ?)`,
+			keyA,
+			row.amount,
+			row.mirID,
+		)
+	}
+
+	controlled, err := store.GetControlledAmountByCredential(0, keyA, nil)
+	require.NoError(t, err)
+	require.Equal(t, uint64(18446744073709551615), controlled)
+	sums, err := store.GetAccountSumsByCredential(0, keyA, nil)
+	require.NoError(t, err)
+	require.Equal(t, uint64(18446744073709551614), sums.WithdrawalsSum)
+	require.Equal(t, "19999999999999999999999", sums.ReservesSum.String())
+	require.Equal(t, "-5", sums.TreasurySum.String())
+
+	_, err = store.GetControlledAmountByCredential(0, keyB, nil)
+	require.ErrorContains(t, err, "outside uint64")
+
+	controlled, err = store.GetControlledAmountByCredential(0, keyEmpty, nil)
+	require.NoError(t, err)
+	require.Zero(t, controlled)
+	sums, err = store.GetAccountSumsByCredential(0, keyEmpty, nil)
+	require.NoError(t, err)
+	require.Zero(t, sums.WithdrawalsSum)
+	require.Equal(t, "0", sums.ReservesSum.String())
+	require.Equal(t, "0", sums.TreasurySum.String())
+}
+
+func TestSQLiteAccountAggregateContract(t *testing.T) {
+	t.Parallel()
+	testAccountAggregateContract(t, newMigratedSQLiteStore(t))
 }

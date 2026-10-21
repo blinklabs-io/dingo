@@ -5151,10 +5151,11 @@ Each total is one engine-side aggregate over the decimal text column, so no row
 stream reaches the caller and the work in Go does not grow with the account's
 history. The aggregate cannot overflow: PostgreSQL sums `CAST(amount AS
 NUMERIC)`, MySQL `CAST(amount AS DECIMAL(65, 0))`, and SQLite the
-arbitrary-precision `dingo_bigint_sum` function registered by the `sqlstore`
-package (SQLite's own `SUM` raises an integer-overflow error and `TOTAL` is a
-float). The result is read back as a decimal string. The sums run on the
-caller's transaction, so cancelling its context cancels the statements.
+arbitrary-precision `dingo_bigint_sum` aggregate the SQLite provider registers
+(`database/plugin/metadata/sqlite/bigintsum`; SQLite's own `SUM` raises an
+integer-overflow error and `TOTAL` is a float). The result is read back as a
+decimal string. The sums run on the caller's transaction, so cancelling its
+context cancels the statements.
 
 ```sql
 -- withdrawals_sum
@@ -5170,9 +5171,9 @@ WHERE mir.pot = $pot AND r.credential_tag = $1 AND r.credential = decode($2, 'he
 ```
 
 A withdrawal is `coin`, so `withdrawals_sum` must total a value in the
-`uint64` range and any other total is an error. A MIR reward is `delta_coin`, so `reserves_sum` and
-`treasury_sum` are accumulated as signed unbounded values and are rendered with
-their sign.
+`uint64` range and any other total is an error. A MIR reward is `delta_coin`,
+so `reserves_sum` and `treasury_sum` are accumulated as signed unbounded values
+and are rendered with their sign.
 
 ### `GetStakeRegistrationsByCredential`
 

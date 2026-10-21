@@ -12,7 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package sqlstore
+// Package bigintsum registers the dingo_bigint_sum SQLite aggregate with the
+// pure-Go SQLite driver. Importing it is enough: registration happens once at
+// package initialization and applies to every connection the driver opens
+// afterwards.
+//
+// The aggregate sums signed decimal text exactly. SQLite's own SUM raises an
+// integer-overflow error past 64 bits and TOTAL is a float, so neither is
+// exact for the unbounded delta_coin columns. It ignores NULL inputs and
+// returns the total as decimal text, "0" when no row contributed.
+//
+// It lives beside the SQLite provider rather than in the shared sqlstore
+// package so that the PostgreSQL and MySQL providers do not link the SQLite
+// driver.
+package bigintsum
 
 import (
 	"database/sql/driver"
@@ -22,10 +35,8 @@ import (
 	driversqlite "modernc.org/sqlite"
 )
 
-// sqliteBigintSumFunc is the SQLite aggregate behind wideSumExpr. SQLite's
-// SUM raises an integer-overflow error past 64 bits and TOTAL is a float, so
-// neither is exact for the signed, unbounded delta_coin columns.
-const sqliteBigintSumFunc = "dingo_bigint_sum"
+// Name is the SQL name of the aggregate.
+const Name = "dingo_bigint_sum"
 
 type bigintSum struct {
 	total big.Int
@@ -38,12 +49,20 @@ func bigintSumArg(arg driver.Value) (*big.Int, error) {
 	case int64:
 		return big.NewInt(value), nil
 	case string:
-		return parseBigInt("amount", value)
+		return parseDecimal(value)
 	case []byte:
-		return parseBigInt("amount", string(value))
+		return parseDecimal(string(value))
 	default:
-		return nil, fmt.Errorf("bigint sum: unsupported amount type %T", arg)
+		return nil, fmt.Errorf("%s: unsupported amount type %T", Name, arg)
 	}
+}
+
+func parseDecimal(value string) (*big.Int, error) {
+	ret, ok := new(big.Int).SetString(value, 10)
+	if !ok {
+		return nil, fmt.Errorf("%s: invalid decimal %q", Name, value)
+	}
+	return ret, nil
 }
 
 func (s *bigintSum) Step(
@@ -80,7 +99,7 @@ func (*bigintSum) Final(_ *driversqlite.FunctionContext) {}
 
 func init() {
 	driversqlite.MustRegisterFunction(
-		sqliteBigintSumFunc,
+		Name,
 		&driversqlite.FunctionImpl{
 			NArgs:         1,
 			Deterministic: true,

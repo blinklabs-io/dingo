@@ -206,6 +206,11 @@ func parseNullBigInt(
 	return parseBigInt(description, value.String)
 }
 
+// sqliteBigintSumFunc is the SQLite aggregate behind wideSumExpr. The SQLite
+// provider registers it with the driver (package sqlite/bigintsum), which
+// keeps the driver out of this dialect-neutral package.
+const sqliteBigintSumFunc = "dingo_bigint_sum"
+
 // wideSumExpr returns a SQL aggregate over a decimal text column that cannot
 // overflow, so the database can sum without streaming rows to the caller.
 // PostgreSQL NUMERIC is unbounded, MySQL DECIMAL(65,0) holds 65 digits, and
