@@ -11097,6 +11097,10 @@ asset rows. A policy or asset with more matching rows returns an explicit
 incomplete error, never a partial supply or holder count. `NewMCPServer` shares
 one slot budget across both tool sets; the exported `RegisterSQLiteTools` and
 `RegisterCardanoTools` each create their own.
+When the metadata store is file-backed SQLite, `NewMCPServer` also installs a
+receiving middleware that refuses every tool call and resource read while the
+store's `-wal` file exceeds 128 MiB, so MCP readers drain and the periodic
+TRUNCATE checkpoint can run.
 Markdown tables wrap their sanitized cells in explicit untrusted-chain-data
 delimiters. Chain-controlled text is HTML-escaped before rendering so it cannot
 terminate that envelope.

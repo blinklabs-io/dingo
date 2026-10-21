@@ -1352,8 +1352,8 @@ func registerCardanoTools(
 		}
 		subject := policyHex + hexName
 
-		if !limits.acquire() {
-			return nil, nil, errors.New("too many concurrent expensive queries")
+		if err := limits.admit(); err != nil {
+			return nil, nil, err
 		}
 		defer limits.release()
 

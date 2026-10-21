@@ -204,7 +204,17 @@ provider's resolved file location, exposed through the optional
 therefore also controls MCP's read target. Other backends and in-memory SQLite
 return no file location. MCP owns the extra connection pool and closes it when
 the API stops; it never borrows or closes the provider's pools. At most four
-SQL-tool calls execute concurrently; excess calls fail immediately. SQL row
+SQL-tool calls execute concurrently; excess calls fail immediately.
+While the metadata `-wal` file exceeds 128 MiB, twice the `journal_size_limit`,
+every MCP tool call and resource read is refused: at that size the WAL has been
+neither reset nor truncated since it grew past the limit, and an open reader
+prevents both. The in-flight reads finish within the query timeout, which gives
+the periodic TRUNCATE checkpoint a reader-free interval from MCP; requests are
+admitted again once the file is back under the limit. The probe is a `stat` of
+the `-wal` file next to `SQLitePath()`: a missing file reads as empty, and
+any other stat error counts as pressure and is logged at most once a minute.
+Callers that inject their own SQLite
+pool without a metadata store get no WAL check. SQL row
 limits are enforced during iteration, including PRAGMA results. Arbitrary
 queries and EXPLAIN use a dedicated borrowed connection with `query_only` and
 SQLite limits: 64 KiB per value or encoded row, 64 KiB SQL, and 32 result
