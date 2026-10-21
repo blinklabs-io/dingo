@@ -4670,6 +4670,28 @@ vote power. The snapshot manager supplies the snapshot slot, epoch, and period;
 the public `Calculator.CalculateStakeDistribution` path passes zero values (gate
 off).
 
+`historicalExpirationSQL` emits `historical_expiration` over a single reference
+to `active_delegation`. `historical_witness` reads each credential's witness
+history with correlated per-credential lookups on the witness tables'
+`(credential_tag, staking_key)` indexes: the greatest witness slot at or before
+`slot` (resolved to its containing epoch) and the greatest witness slot overall.
+It is `SELECT DISTINCT`, which changes no rows because `active_delegation` holds
+one row per credential, so that no backend flattens it and copies the lookups
+into each `CASE` arm that reads them. The stake CTE then selects from
+`historical_expiration` in place of `active_delegation` rather than joining the
+two. The shape is a correctness constraint on SQLite, not only a cost: SQLite
+expands every reference to a CTE into its own copy of the CTEs beneath it, and
+from SQLite 3.54 a statement whose copies reach `SQLITE_LIMIT_EXPR_DEPTH`
+cursors (1000 as compiled into `modernc.org/sqlite`, and not raisable at run
+time) fails to prepare with "VIEWs and/or subqueries nested too deep". Joining
+each witness source to `active_delegation` copies that CTE once per source and
+per reference to the summary, which takes the gated statement past 3000 cursors
+(over 6000 with pointer stake). The bounded shape opens under 300 cursors, or
+about 550 with pointer stake, a figure set by the two `active_delegation`
+copies the pointer branch already needs.
+`TestHistoricalStakeQueryCursorsStayBounded` pins it under 600 for every
+combination of pointer stake, the gate, and the activation floor.
+
 ```sql
 -- Predicate used by sqlite/postgres/mysql implementations after resolving
 -- active_delegation(pool_key_hash, credential_tag, staking_key)
@@ -4678,20 +4700,20 @@ WITH active_delegator_stake AS (
          active_delegation.credential_tag,
          active_delegation.staking_key,
          COALESCE(SUM(CAST(utxo.amount AS BIGINT)), 0) AS utxo_stake
+  -- With the CIP-0163 gate on (expiryEpoch > 0) this reads
+  -- "FROM historical_expiration active_delegation" instead: the preceding
+  -- historical_expiration CTE holds every active_delegation row plus its
+  -- expiration at the requested slot.
   FROM active_delegation
   LEFT JOIN utxo
     ON utxo.credential_tag = active_delegation.credential_tag
    AND utxo.staking_key = active_delegation.staking_key
    AND utxo.added_slot <= $1
    AND (utxo.deleted_slot = 0 OR utxo.deleted_slot > $1)
-  -- CIP-0163 gate (emitted only when expiryEpoch > 0). The preceding
-  -- historical_expiration CTE derives expiration at the requested slot.
-  LEFT JOIN historical_expiration expiry_acct
-    ON expiry_acct.credential_tag = active_delegation.credential_tag
-   AND expiry_acct.staking_key = active_delegation.staking_key
-  WHERE (expiry_acct.expiration_epoch = 0
-         OR expiry_acct.expiration_epoch >= $expiryEpoch
-         OR expiry_acct.expiration_epoch IS NULL) AND
+  -- Gate predicate, emitted only when expiryEpoch > 0.
+  WHERE (active_delegation.expiration_epoch = 0
+         OR active_delegation.expiration_epoch >= $expiryEpoch
+         OR active_delegation.expiration_epoch IS NULL) AND
         active_delegation.pool_key_hash IN (...)
   GROUP BY active_delegation.pool_key_hash,
            active_delegation.credential_tag,
