@@ -2008,6 +2008,24 @@ func (ls *LedgerState) queryShelleyGenesisConfig(ctx context.Context, protocolVe
 	if err != nil {
 		return nil, err
 	}
+	// Node-to-client versions 21 to 23 are the 15-field record with the
+	// current 17-field protocol parameters and no extra config. Released
+	// clients decode exactly that there (cardano-cli up to 11.0 and from
+	// 11.2.3.0, Ogmios, cardano-wallet, db-sync, the Leios rc-2026w42 CLI):
+	// ouroboros-consensus 4.0.0.0 to 4.2.0.1 sent a sixteenth field at these
+	// versions, which upstream fixed as a regression in 4.2.1.0 (#2251,
+	// #2258). The layout is set explicitly; Auto with no extra config would
+	// select the legacy 18-field protocol parameters.
+	//
+	// From version 24 the record keeps its sixteenth field. Neither
+	// gouroboros nor Dingo can negotiate version 24 yet, so that branch is
+	// dormant. Upstream's version 24 (ShelleyNodeToClientVersion16) writes the
+	// field as an empty StrictMaybe (0x80), because compactGenesis sets
+	// sgExtraConfig to SNothing; revisit this branch when version 24 exists.
+	if protocolVersion < 24+protocol.ProtocolVersionNtCOffset {
+		result.Layout = olocalstatequery.GenesisConfigLayoutNoExtraConfig
+		result.ExtraConfig = nil
+	}
 	return []any{result}, nil
 }
 

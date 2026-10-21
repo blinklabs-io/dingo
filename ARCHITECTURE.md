@@ -5082,12 +5082,16 @@ account state, and the unfiltered stake distribution
 (`GetStakeDistribution`). Pool state, the version-1 pool distribution,
 non-myopic member rewards, reward info, reward provenance and the debug
 epoch-state queries are not answered, and the failed query ends the client's
-session. At node-to-client version 21 the Shelley genesis configuration
-encodes initial funds as an empty map, staking as a record of an empty pools
-map and an empty stake map, and the genesis injection
+session. At node-to-client versions 21 to 23 the Shelley genesis configuration
+is the 15-field record with the current 17-field protocol parameters, initial
+funds as an empty map and staking as a record of an empty pools map and an
+empty stake map, and no extra config, which is what released clients decode
+there; earlier versions keep the legacy layout. From version 24, not yet
+negotiable, the record keeps a sixteenth field holding the genesis injection
 data as the ledger's three-field `ShelleyExtraConfig` record, encoded at the
 Shelley protocol version (pool owners as a plain array) with an absent
-section as `NoInjection`; earlier versions keep the legacy layout. `GetCBOR` is a query
+section as `NoInjection`; upstream writes that field as an empty
+`StrictMaybe` there, so this branch is revisited when version 24 exists. `GetCBOR` is a query
 combinator: it re-runs the wrapped inner query through the same dispatch path
 and returns the result as a tag-24 CBOR-in-CBOR `Serialised` value, matching
 cardano-node. `GetStakeSnapshots`
