@@ -989,16 +989,28 @@ func LoadWithDB(
 		blocksCopied     int
 		immutableTipSlot uint64
 	)
-	if remoteImmutable {
-		blocksCopied, immutableTipSlot, err = copyBlocksRemote(
-			replayCtx, logger, immutableDir,
-			filepath.Join(cfg.DatabasePath, remoteImmutableCacheDir),
-			remoteLimits, c, replayBatches,
-		)
-	} else {
-		blocksCopied, immutableTipSlot, err = copyBlocksDirect(
-			replayCtx, logger, immutableDir, c, replayBatches, false,
-		)
+	gapBlocks, err := replayChainBlocksAheadOfLedger(
+		replayCtx, c, ls.Tip().Point, replayBatches,
+	)
+	if err == nil {
+		if gapBlocks > 0 {
+			logger.Info(
+				"replayed chain blocks the ledger had not applied",
+				"blocks", gapBlocks,
+				"chain_tip_slot", c.Tip().Point.Slot,
+			)
+		}
+		if remoteImmutable {
+			blocksCopied, immutableTipSlot, err = copyBlocksRemote(
+				replayCtx, logger, immutableDir,
+				filepath.Join(cfg.DatabasePath, remoteImmutableCacheDir),
+				remoteLimits, c, replayBatches,
+			)
+		} else {
+			blocksCopied, immutableTipSlot, err = copyBlocksDirect(
+				replayCtx, logger, immutableDir, c, replayBatches, false,
+			)
+		}
 	}
 	close(replayBatches)
 	if err != nil {
@@ -1051,6 +1063,72 @@ func LoadWithDB(
 		)
 	}
 	return nil
+}
+
+// replayChainBlocksAheadOfLedger sends the primary chain's blocks after
+// ledgerTip to the replay. The immutable copy starts at the chain tip, so a
+// chain that already holds blocks the ledger has not applied -- the blob-only
+// copy `dingo mithril sync` makes past its ledger-state snapshot -- would
+// otherwise hand the ledger a first block that does not extend its tip.
+func replayChainBlocksAheadOfLedger(
+	ctx context.Context,
+	c *chain.Chain,
+	ledgerTip ocommon.Point,
+	replayBatches chan<- []gledger.Block,
+) (int, error) {
+	chainTip := c.Tip().Point
+	if chainTip.Slot == ledgerTip.Slot &&
+		bytes.Equal(chainTip.Hash, ledgerTip.Hash) {
+		return 0, nil
+	}
+	iter, err := c.FromPointContext(ctx, ledgerTip, false)
+	if err != nil {
+		return 0, fmt.Errorf(
+			"ledger tip (slot %d) is not on the primary chain: %w",
+			ledgerTip.Slot, err,
+		)
+	}
+	defer iter.Cancel()
+	verifyCfg := lcommon.VerifyConfig{SkipBodyHashValidation: true}
+	var replayed int
+	for done := false; !done; {
+		batch := make([]gledger.Block, 0, loadBlockBatchSize)
+		for len(batch) < cap(batch) {
+			next, err := iter.Next(false)
+			if errors.Is(err, chain.ErrIteratorChainTip) {
+				done = true
+				break
+			}
+			if err != nil {
+				return replayed, fmt.Errorf(
+					"reading chain block after ledger tip: %w", err,
+				)
+			}
+			if next.Rollback {
+				return replayed, errors.New(
+					"primary chain rolled back during load",
+				)
+			}
+			blk, err := next.Block.Decode(verifyCfg)
+			if err != nil {
+				return replayed, fmt.Errorf(
+					"decoding chain block at slot %d: %w",
+					next.Block.Slot, err,
+				)
+			}
+			batch = append(batch, blk)
+		}
+		if len(batch) == 0 {
+			break
+		}
+		select {
+		case replayBatches <- batch:
+		case <-ctx.Done():
+			return replayed, fmt.Errorf("loading blocks: %w", ctx.Err())
+		}
+		replayed += len(batch)
+	}
+	return replayed, nil
 }
 
 func loadReplayFailure(

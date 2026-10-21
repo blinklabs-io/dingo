@@ -10383,6 +10383,14 @@ ledger-state import, ImmutableDB loading, and API-mode metadata backfill are
 orchestrated by `cmd/dingo` and `internal/node`. This is exposed via the
 `dingo mithril` CLI subcommand and the `dingo load` command.
 
+`dingo mithril sync` imports the ledger state at the snapshot's ledger slot
+but copies the immutable files past it as blobs only, so its database holds
+primary-chain blocks the ledger has not applied. `dingo load` copies from the
+chain tip, not the ledger tip, so before copying it replays those chain blocks
+(`replayChainBlocksAheadOfLedger`, from the ledger tip to the chain tip) into
+the same trusted batch stream. Without that, the first copied block does not
+extend the ledger tip and the blocks in between are never applied.
+
 `dingo load` also reads an ImmutableDB served over HTTPS. Loopback HTTP is
 accepted for local development. A source that parses as an `http://` or
 `https://` URL with a host, whether from the
