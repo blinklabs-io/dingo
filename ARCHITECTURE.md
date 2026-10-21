@@ -14480,7 +14480,20 @@ signing/storage work and response growth, and takes one of
 `BarkConfig.ArchiveMaxConcurrentFetches` slots (`barkArchiveMaxConcurrentFetches`,
 default 16, negative rejected) before touching storage. A request that finds no
 free slot is refused with `RESOURCE_EXHAUSTED` rather than queued, so the work an
-unauthenticated caller can have in flight is bounded by configuration, and every
+unauthenticated caller can have in flight is bounded by configuration. The
+sustained rate is bounded separately (`bark/archive_budget.go`): a hash+slot
+reference is served without reading any local index, so each reference, present
+or not, costs a cloud lookup, and the concurrency cap alone does not limit
+repetition. `FetchBlock` therefore charges its whole batch against a
+per-caller token bucket (`BarkConfig.ArchiveCallerLookupsPerSecond`, default 50,
+keyed by the peer host) and a global bucket
+(`BarkConfig.ArchiveLookupsPerSecond`, default 200) before acquiring the
+database, and refuses the batch with `RESOURCE_EXHAUSTED` when either is short.
+Each bucket holds at least one maximum-size batch, a global refusal does not
+charge the caller, and the per-caller table is capped at 4096 hosts with an
+overflow bucket beyond that. Callers behind one proxy share a host and an
+allowance. These two limits are `BarkConfig` fields only; they have no
+`dingo.yaml` key. Every
 height lookup is a bounded probe rather than a scan of the index; there is no
 setting that leaves an unbounded cloud scan reachable from ArchiveService. The HTTP server applies a 60-second
 request read timeout but no write timeout, so slow request bodies are bounded
