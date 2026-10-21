@@ -191,7 +191,6 @@ func (ls *LedgerState) queryShelleyStakePoolState(
 			return nil, err
 		}
 		reg := &effective[i]
-		key := string(reg.PoolKeyHash)
 		params, err := stakePoolParamsFromRegistration(
 			reg,
 			networkID,
@@ -213,8 +212,8 @@ func (ls *LedgerState) queryShelleyStakePoolState(
 			},
 			Relays:        params.Relays,
 			Metadata:      params.Metadata,
-			Deposit:       deposits[key],
-			NumDelegators: int(delegatorCounts[key]), // #nosec G115 -- bounded by the account table
+			Deposit:       deposits[string(reg.PoolKeyHash)],
+			NumDelegators: int(delegatorCounts[string(reg.PoolKeyHash)]), // #nosec G115 -- bounded by the account table
 		}
 		if params.Owners != nil {
 			entry.Owners = *params.Owners
@@ -235,8 +234,8 @@ func (ls *LedgerState) queryShelleyStakePoolState(
 			}
 		}
 		if q.IncludeDelegators {
-			credentials := make([]lcommon.Credential, 0, len(delegators[key]))
-			for _, ref := range delegators[key] {
+			credentials := make([]lcommon.Credential, 0, len(delegators[string(reg.PoolKeyHash)]))
+			for _, ref := range delegators[string(reg.PoolKeyHash)] {
 				hash, err := lcommon.NewBlake2b224Checked(ref.Key)
 				if err != nil {
 					return nil, fmt.Errorf("pool delegator: %w", err)
@@ -249,12 +248,12 @@ func (ls *LedgerState) queryShelleyStakePoolState(
 			set := cbor.NewSetType(credentials, true)
 			entry.Delegators = &set
 		}
-		if epochNo, ok := retiring[key]; ok {
+		if epochNo, ok := retiring[string(reg.PoolKeyHash)]; ok {
 			entry.Retiring = &epochNo
 		}
 		// A registration after the epoch began, on top of one in effect, is
 		// the ledger's future parameters until the next boundary.
-		if next := latestByPool[key]; next != nil &&
+		if next := latestByPool[string(reg.PoolKeyHash)]; next != nil &&
 			next.ID != reg.ID &&
 			next.AddedSlot >= epoch.StartSlot {
 			future, err := stakePoolParamsFromRegistration(
