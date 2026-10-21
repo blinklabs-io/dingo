@@ -26,6 +26,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/tracing"
 	"github.com/blinklabs-io/gouroboros/ledger"
@@ -2803,6 +2804,12 @@ func (c *Chain) fromPersistentPointContext(
 	point ocommon.Point,
 	inclusive bool,
 ) (*ChainIterator, error) {
+	// A malformed point is a caller error, not an absent block.
+	if _, err := database.BlockBlobKeyToPoint(
+		types.BlockBlobKey(point.Slot, point.Hash),
+	); err != nil {
+		return nil, fmt.Errorf("parsing block key: %w", err)
+	}
 	for {
 		c.mutex.RLock()
 		generation := c.mutationGeneration
