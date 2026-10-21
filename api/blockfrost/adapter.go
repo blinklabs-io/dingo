@@ -435,6 +435,10 @@ func (a *NodeAdapter) blockInfoFromBlock(
 			err,
 		)
 	}
+	txs, err := a.blockTransactions(context.Background(), decodedBlock)
+	if err != nil {
+		return BlockInfo{}, err
+	}
 
 	blockVRF, opCert, opCertCounter := praosHeaderFields(
 		decodedBlock.Header(),
@@ -457,7 +461,7 @@ func (a *NodeAdapter) blockInfoFromBlock(
 		EpochSlot: block.Slot - epoch.StartSlot,
 		Time:      slotTime.Unix(),
 		Size:      uint64(len(block.Cbor)),
-		TxCount:   len(decodedBlock.Transactions()),
+		TxCount:   len(txs),
 		SlotLeader: blockIssuer(
 			decodedBlock.IssuerVkey(),
 		),
@@ -622,8 +626,12 @@ func (a *NodeAdapter) LatestBlockTxHashes() (
 	if err != nil {
 		return nil, err
 	}
-	ret := make([]string, 0, len(decodedBlock.Transactions()))
-	for _, tx := range decodedBlock.Transactions() {
+	txs, err := a.blockTransactions(context.Background(), decodedBlock)
+	if err != nil {
+		return nil, err
+	}
+	ret := make([]string, 0, len(txs))
+	for _, tx := range txs {
 		ret = append(ret, tx.Hash().String())
 	}
 	return ret, nil
@@ -5005,6 +5013,31 @@ func (a *NodeAdapter) decodedTransactionByHash(
 		)
 	}
 	decodedTx := findTransactionInBlock(decodedBlock, hash, tx.BlockIndex)
+	if decodedTx == nil {
+		// A certifying ranking block's transactions are the endorser-block
+		// transactions it applied, stored under its hash with no copy in its
+		// body. When they are unavailable the lookup fails as for any absent
+		// transaction (see ledger.CertifiedEndorserTransactions).
+		ebTxs, ok, err := a.ledgerState.CertifiedEndorserTransactions(
+			context.Background(),
+			decodedBlock,
+		)
+		if err != nil {
+			return nil, models.Block{}, nil, fmt.Errorf(
+				"get endorser transactions for block %x: %w",
+				tx.BlockHash,
+				err,
+			)
+		}
+		if ok {
+			for _, ebTx := range ebTxs {
+				if bytes.Equal(ebTx.Hash().Bytes(), hash) {
+					decodedTx = ebTx
+					break
+				}
+			}
+		}
+	}
 	if decodedTx == nil {
 		return nil, models.Block{}, nil, fmt.Errorf(
 			"transaction %x not found in block %x: %w",
