@@ -341,6 +341,9 @@ func newServerHandler(
 	}
 	publicBaseURL, publicBaseURLErr := parsePublicBaseURL(cfg.PublicBaseURL)
 	catalog := newSnapshotCatalog(cfg.Store)
+	if cfg.Aggregator != nil {
+		cfg.Aggregator.watchCatalog(catalog)
+	}
 	s := &snapshotServer{
 		cfg:                  cfg,
 		catalog:              catalog,

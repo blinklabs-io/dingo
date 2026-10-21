@@ -86,6 +86,11 @@ type Aggregator struct {
 	open    *openMessage
 	now     func() time.Time
 	catalog *snapshotCatalog
+
+	// publicCatalogs are the listing caches of the handlers serving this
+	// aggregator's store; certification invalidates them with its own.
+	publicCatalogsMu sync.Mutex
+	publicCatalogs   []*snapshotCatalog
 }
 
 type persistedSigner struct {
@@ -907,7 +912,7 @@ func (a *Aggregator) tryCertify(
 	snapshot := open.snapshot
 	snapshot.CertificateHash = cert.Hash
 	err = publishSnapshot(ctx, a.cfg.Store, &snapshot)
-	a.catalog.invalidate()
+	a.invalidateCatalogs()
 	if errors.Is(err, ErrSnapshotArchivesMissing) {
 		// Retention removed the snapshot after ensureOpen read it. The
 		// certificate stays in the chain and signing moves on.
@@ -972,4 +977,21 @@ func (a *Aggregator) handleDistribution(
 		return
 	}
 	writeJSON(w, dist)
+}
+
+// watchCatalog registers a listing cache to be invalidated whenever the
+// aggregator publishes a certified snapshot.
+func (a *Aggregator) watchCatalog(c *snapshotCatalog) {
+	a.publicCatalogsMu.Lock()
+	a.publicCatalogs = append(a.publicCatalogs, c)
+	a.publicCatalogsMu.Unlock()
+}
+
+func (a *Aggregator) invalidateCatalogs() {
+	a.catalog.invalidate()
+	a.publicCatalogsMu.Lock()
+	defer a.publicCatalogsMu.Unlock()
+	for _, c := range a.publicCatalogs {
+		c.invalidate()
+	}
 }
