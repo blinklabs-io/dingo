@@ -1531,6 +1531,8 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 			CORSAllowedOrigins:                       n.config.corsAllowedOrigins,
 			DestinationRegistry:                      n.destinationRegistry,
 			ArchiveMaxConcurrentFetches:              n.config.barkArchiveMaxConcurrentFetches,
+			ArchiveLookupsPerSecond:                  n.config.barkArchiveLookupsPerSecond,
+			ArchiveCallerLookupsPerSecond:            n.config.barkArchiveCallerLookupsPerSecond,
 		}
 		if remoteLifecycleEnabled {
 			barkConfig.Node = n

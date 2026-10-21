@@ -3065,6 +3065,66 @@ func TestRecoverPeerHeaderHistoryPathWorkHonorsDepthLimit(t *testing.T) {
 	assert.Equal(t, limit, peerLookupCalls)
 }
 
+func TestPeerHeaderForkPathCoversQueuedCatchupWindow(t *testing.T) {
+	t.Parallel()
+
+	fixture := newChainsyncRollbackFixture(t)
+	fixture.ls.lookupBlockByHash = func(hash []byte) (models.Block, error) {
+		if bytes.Equal(hash, fixture.currentTip.Point.Hash) {
+			return models.Block{
+				Hash:   fixture.currentTip.Point.Hash,
+				Slot:   fixture.currentTip.Point.Slot,
+				Number: fixture.currentTip.BlockNumber,
+				Type:   uint(gledger.BlockTypeBabbage),
+			}, nil
+		}
+		return models.Block{}, models.ErrBlockNotFound
+	}
+	headerCount := fixture.ls.allowedQueuedHeaders()
+	require.Greater(t, headerCount, maxPeerHeaderHistoryPerConn)
+	headers := make([]mockHeader, headerCount)
+	prevHash := fixture.currentTip.Point.Hash
+	for i := range headerCount {
+		headers[i] = mockHeader{
+			hash: lcommon.NewBlake2b256(
+				testHashBytes(fmt.Sprintf("queued-catchup-%d", i)),
+			),
+			prevHash:    lcommon.NewBlake2b256(prevHash),
+			blockNumber: fixture.currentTip.BlockNumber + uint64(i) + 1,
+			slot:        fixture.currentTip.Point.Slot + uint64(i) + 1,
+		}
+		prevHash = headers[i].Hash().Bytes()
+	}
+	byHash := make(map[string]mockHeader, len(headers)-1)
+	for _, header := range headers[:len(headers)-1] {
+		byHash[string(header.Hash().Bytes())] = header
+	}
+	fixture.ls.config.PeerHeaderLookupFunc = func(
+		_ ouroboros.ConnectionId,
+		hash []byte,
+	) (ChainsyncEvent, []byte, bool) {
+		header, ok := byHash[string(hash)]
+		if !ok {
+			return ChainsyncEvent{}, nil, false
+		}
+		return ChainsyncEvent{
+			Point:       ocommon.NewPoint(header.slot, hash),
+			BlockHeader: header,
+			HeaderCryptoVerificationGeneration: fixture.ls.
+				CurrentHeaderCryptoVerificationGeneration(),
+		}, header.PrevHash().Bytes(), true
+	}
+
+	ancestor, path, found, err := fixture.ls.peerHeaderForkPath(
+		fixture.connId,
+		headers[len(headers)-1],
+	)
+	require.NoError(t, err)
+	require.True(t, found)
+	assert.Equal(t, fixture.currentTip.Point, ancestor)
+	assert.Len(t, path, headerCount)
+}
+
 func TestFindPeerForkPathCachedTreatsMalformedRetainedRecordAsMissing(
 	t *testing.T,
 ) {
@@ -6533,6 +6593,66 @@ func TestHeaderCryptoVerificationGenerationPinBlocksPublication(t *testing.T) {
 	testutil.RequireReceive(t, published, time.Second,
 		"snapshot publication should resume after the generation pin releases")
 	require.False(t, ls.HeaderCryptoVerificationGenerationCurrent(generation))
+}
+
+// The selector callback runs while chainsync holds the generation pin. Its
+// chain-selection evaluation must not read-lock the generation again: a
+// validation transition queued in between would block that second read lock
+// while itself waiting for the first.
+func TestPinnedPeerTipAdmissionCompletesWithQueuedTransition(t *testing.T) {
+	t.Parallel()
+
+	ls := &LedgerState{}
+	ls.publishSnapshotsLocked()
+	generation := ls.loadConsensusSnapshot().generation
+	cs := chainselection.NewChainSelector(chainselection.ChainSelectorConfig{
+		HeaderCryptoVerificationGenerationCurrent: ls.HeaderCryptoVerificationGenerationCurrent,
+		CurrentHeaderCryptoVerificationGeneration: ls.CurrentHeaderCryptoVerificationGeneration,
+		PinHeaderCryptoVerificationGeneration:     ls.PinHeaderCryptoVerificationGeneration,
+	})
+	release, current := ls.PinHeaderCryptoVerificationGeneration(generation)
+	require.True(t, current)
+	transition := make(chan func(), 1)
+	go func() {
+		transition <- ls.beginTxValidationTransition()
+	}()
+	commitDone := make(chan struct{})
+	t.Cleanup(func() {
+		release()
+		testutil.RequireReceive(t, transition, testutil.AsyncWait,
+			"validation transition did not start")()
+		testutil.RequireReceive(t, commitDone, testutil.AsyncWait,
+			"selector commit did not return")
+	})
+	// A failed TryRLock while this test holds a read lock means a writer waits.
+	testutil.WaitForCondition(t, func() bool {
+		if ls.txValidationCommitMutex.TryRLock() {
+			ls.txValidationCommitMutex.RUnlock()
+			return false
+		}
+		return true
+	}, testutil.AsyncWait, "validation transition did not queue")
+
+	update := chainselection.PeerTipUpdateEvent{
+		ConnectionId: ouroboros.ConnectionId{
+			LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3001},
+			RemoteAddr: &net.TCPAddr{IP: net.ParseIP("10.0.0.1"), Port: 3001},
+		},
+		AdmissionID: 1,
+		Tip: ochainsync.Tip{
+			Point:       ocommon.Point{Slot: 100, Hash: []byte("h100")},
+			BlockNumber: 100,
+		},
+		HeaderCryptoVerificationGeneration: generation,
+	}
+	update.ObservedTip = update.Tip
+	commit := make(chan bool, 1)
+	go func() {
+		defer close(commitDone)
+		commit <- cs.CommitPeerTipAdmissionPinned(update)
+	}()
+	assert.True(t, testutil.RequireReceive(t, commit, testutil.AsyncWait,
+		"pinned selector commit deadlocked behind a queued transition"))
 }
 
 func TestBlockfetchHeaderVerificationAvoidsGenerationLockInversion(

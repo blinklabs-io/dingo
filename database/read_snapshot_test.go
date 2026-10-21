@@ -242,10 +242,17 @@ func (*destructiveReadSnapshotMetadata) SetCommitTimestamp(
 	return nil
 }
 
+// destructiveReadSnapshotBlob deletes the referenced CBOR when a read-write
+// transaction commits. beforeCommit runs at the start of that blob commit,
+// after the commit timestamp is written and before metadata commits;
+// beforeReadView runs after the snapshot fixed its metadata view and before
+// it opens the blob view. Either may block to hold the other side at the
+// disputed boundary.
 type destructiveReadSnapshotBlob struct {
 	blob.BlobStore
-	state                 *destructiveReadSnapshotState
-	destructiveCommitDone <-chan struct{}
+	state          *destructiveReadSnapshotState
+	beforeCommit   func()
+	beforeReadView func()
 }
 
 func (s *destructiveReadSnapshotBlob) NewTransaction(
@@ -254,6 +261,9 @@ func (s *destructiveReadSnapshotBlob) NewTransaction(
 	if readWrite {
 		return &destructiveReadSnapshotTxn{
 			commit: func() {
+				if s.beforeCommit != nil {
+					s.beforeCommit()
+				}
 				s.state.mu.Lock()
 				s.state.blobCBORPresent = false
 				s.state.mu.Unlock()
@@ -261,10 +271,9 @@ func (s *destructiveReadSnapshotBlob) NewTransaction(
 		}
 	}
 
-	// Force the blob read view to open after the destructive combined commit.
-	// Without the construction barrier, the metadata view has already opened
-	// by this point and retains the row that references this now-missing CBOR.
-	<-s.destructiveCommitDone
+	if s.beforeReadView != nil {
+		s.beforeReadView()
+	}
 	s.state.mu.Lock()
 	present := s.state.blobCBORPresent
 	s.state.mu.Unlock()
@@ -320,88 +329,182 @@ func (c *observedDoneContext) Done() <-chan struct{} {
 // view opens, leaving retained metadata that refers to missing CBOR.
 func TestNewReadSnapshotContextDoesNotStraddleDestructiveCommit(t *testing.T) {
 	t.Parallel()
+	testReadSnapshotDoesNotStraddleDestructiveCommit(
+		t,
+		func(
+			state *destructiveReadSnapshotState,
+			blobStore *destructiveReadSnapshotBlob,
+		) *Database {
+			return &Database{
+				metadata: &destructiveReadSnapshotMetadata{state: state},
+				blobRef:  newBlobStoreRef(blobStore),
+			}
+		},
+	)
+}
 
-	destructiveCommitDone := make(chan struct{})
-	var finishCommit sync.Once
-	finishDestructiveCommit := func() {
-		finishCommit.Do(func() { close(destructiveCommitDone) })
-	}
-	defer finishDestructiveCommit()
-
-	state := &destructiveReadSnapshotState{
+func newDestructiveReadSnapshotState() *destructiveReadSnapshotState {
+	return &destructiveReadSnapshotState{
 		metadataReferencesCBOR: true,
 		blobCBORPresent:        true,
 		metadataSnapshotOpened: make(chan struct{}),
 	}
-	metadataStore := &destructiveReadSnapshotMetadata{state: state}
-	blobStore := &destructiveReadSnapshotBlob{
-		state:                 state,
-		destructiveCommitDone: destructiveCommitDone,
-	}
-	db := &Database{metadata: metadataStore, blobRef: newBlobStoreRef(blobStore)}
+}
 
-	// Construct the writer first so it already holds the shared side of the
-	// commit barrier when snapshot construction begins.
-	writer := NewTxnContext(t.Context(), db, true)
-	t.Cleanup(writer.Release)
-
-	resultCh := make(chan destructiveReadSnapshotResult, 1)
-	go func() {
-		txn, tip, err := NewReadSnapshotContext(t.Context(), db)
-		resultCh <- destructiveReadSnapshotResult{txn: txn, tip: tip, err: err}
-	}()
-
-	// This handshake works on both sides of the regression. With the fix, the
-	// snapshot is queued on the barrier; without it, the metadata snapshot has
-	// already opened. In either case, the destructive commit starts only after
-	// snapshot construction has reached the disputed boundary.
-	testutil.WaitForCondition(
-		t,
-		func() bool {
-			select {
-			case <-state.metadataSnapshotOpened:
-				return true
-			default:
-			}
-			db.commitBarrier.mu.Lock()
-			defer db.commitBarrier.mu.Unlock()
-			return db.commitBarrier.writerWaiting
-		},
-		5*time.Second,
-		"read snapshot must either wait at the commit barrier or open metadata",
-	)
-
-	commitErr := writer.Commit()
-	finishDestructiveCommit()
-	require.NoError(t, commitErr)
-
-	result := testutil.RequireReceive(
-		t,
-		resultCh,
-		5*time.Second,
-		"read snapshot must finish after the destructive commit",
-	)
+func requireDestructiveSnapshotView(
+	t *testing.T,
+	blobStore *destructiveReadSnapshotBlob,
+	result destructiveReadSnapshotResult,
+	afterCommit bool,
+) {
+	t.Helper()
 	require.NoError(t, result.err)
 	require.NotNil(t, result.txn)
 	t.Cleanup(result.txn.Release)
-
 	_, blobErr := blobStore.Get(result.txn.Blob(), []byte("referenced-cbor"))
-	require.ErrorIs(
+	if afterCommit {
+		require.ErrorIs(
+			t,
+			blobErr,
+			types.ErrBlobKeyNotFound,
+			"the destructive commit must be visible in the blob snapshot",
+		)
+		require.Zero(
+			t,
+			result.tip.BlockNumber,
+			"metadata snapshot retained a reference to CBOR deleted before the blob snapshot opened",
+		)
+		return
+	}
+	require.NoError(
 		t,
 		blobErr,
-		types.ErrBlobKeyNotFound,
-		"the destructive commit must be visible in the blob snapshot",
+		"blob snapshot saw a commit its metadata snapshot predates",
 	)
-	require.Zero(
-		t,
-		result.tip.BlockNumber,
-		"metadata snapshot retained a reference to CBOR deleted before the blob snapshot opened",
-	)
+	require.Equal(t, uint64(42), result.tip.BlockNumber)
+}
 
-	// The read transaction remains open, but the construction-only barrier
-	// hold must already be gone so unrelated commits can proceed.
-	requireCommitBarrierFree(t, db)
-	requireDestructiveTransitionBarrierFree(t, db)
+// testReadSnapshotDoesNotStraddleDestructiveCommit runs both orders in which
+// a snapshot and a destructive commit can meet. A commit already in progress
+// is waited for, so both views see it; a snapshot that has fixed its metadata
+// view holds the commit off until its blob view is open, so neither does.
+// Neither order lets an open, not yet committing, read-write Txn delay the
+// snapshot.
+func testReadSnapshotDoesNotStraddleDestructiveCommit(
+	t *testing.T,
+	newDB func(*destructiveReadSnapshotState, *destructiveReadSnapshotBlob) *Database,
+) {
+	t.Run("commit in progress", func(t *testing.T) {
+		t.Parallel()
+		state := newDestructiveReadSnapshotState()
+		entered := make(chan struct{})
+		release := make(chan struct{})
+		var releaseOnce sync.Once
+		releaseCommit := func() { releaseOnce.Do(func() { close(release) }) }
+		defer releaseCommit()
+		blobStore := &destructiveReadSnapshotBlob{
+			state: state,
+			beforeCommit: func() {
+				close(entered)
+				<-release
+			},
+		}
+		db := newDB(state, blobStore)
+
+		writer := NewTxnContext(t.Context(), db, true)
+		t.Cleanup(writer.Release)
+		commitDone := make(chan error, 1)
+		go func() { commitDone <- writer.Commit() }()
+		testutil.RequireReceive(
+			t, entered, 5*time.Second, "the commit must reach its blob commit",
+		)
+
+		resultCh := make(chan destructiveReadSnapshotResult, 1)
+		go func() {
+			txn, tip, err := NewReadSnapshotContext(t.Context(), db)
+			resultCh <- destructiveReadSnapshotResult{txn: txn, tip: tip, err: err}
+		}()
+		testutil.WaitForCondition(
+			t,
+			func() bool {
+				db.commitPhase.mu.Lock()
+				defer db.commitPhase.mu.Unlock()
+				return db.commitPhase.writerWaiting
+			},
+			5*time.Second,
+			"read snapshot must wait for the commit in progress",
+		)
+		select {
+		case <-state.metadataSnapshotOpened:
+			t.Fatal("metadata view opened while a commit was in progress")
+		default:
+		}
+
+		releaseCommit()
+		require.NoError(t, testutil.RequireReceive(
+			t, commitDone, 5*time.Second, "commit must finish",
+		))
+		result := testutil.RequireReceive(
+			t, resultCh, 5*time.Second,
+			"read snapshot must finish after the destructive commit",
+		)
+		requireDestructiveSnapshotView(t, blobStore, result, true)
+		requireCommitBarrierFree(t, db)
+		requireDestructiveTransitionBarrierFree(t, db)
+	})
+
+	t.Run("snapshot first", func(t *testing.T) {
+		t.Parallel()
+		state := newDestructiveReadSnapshotState()
+		opening := make(chan struct{})
+		proceed := make(chan struct{})
+		var proceedOnce sync.Once
+		proceedSnapshot := func() { proceedOnce.Do(func() { close(proceed) }) }
+		defer proceedSnapshot()
+		blobStore := &destructiveReadSnapshotBlob{
+			state: state,
+			beforeReadView: func() {
+				close(opening)
+				<-proceed
+			},
+		}
+		db := newDB(state, blobStore)
+
+		// The writer is open before the snapshot starts and stays open
+		// while it runs: only its commit, not its lifetime, may hold the
+		// snapshot off.
+		writer := NewTxnContext(t.Context(), db, true)
+		t.Cleanup(writer.Release)
+
+		resultCh := make(chan destructiveReadSnapshotResult, 1)
+		go func() {
+			txn, tip, err := NewReadSnapshotContext(t.Context(), db)
+			resultCh <- destructiveReadSnapshotResult{txn: txn, tip: tip, err: err}
+		}()
+		testutil.RequireReceive(
+			t, opening, 5*time.Second,
+			"an open read-write Txn must not keep the snapshot from opening",
+		)
+
+		commitDone := make(chan error, 1)
+		go func() { commitDone <- writer.Commit() }()
+		testutil.RequireNoReceive(
+			t, commitDone, 100*time.Millisecond,
+			"a commit must not land between the snapshot's two views",
+		)
+		proceedSnapshot()
+
+		result := testutil.RequireReceive(
+			t, resultCh, 5*time.Second, "read snapshot must finish",
+		)
+		requireDestructiveSnapshotView(t, blobStore, result, false)
+		require.NoError(t, testutil.RequireReceive(
+			t, commitDone, 5*time.Second,
+			"the commit must proceed once the snapshot's views are open",
+		))
+		requireCommitBarrierFree(t, db)
+		requireDestructiveTransitionBarrierFree(t, db)
+	})
 }
 
 // TestNewReadSnapshotContextWaitsForLogicalDestructiveTransition covers the
@@ -415,8 +518,6 @@ func TestNewReadSnapshotContextWaitsForLogicalDestructiveTransition(
 ) {
 	t.Parallel()
 
-	destructiveCommitDone := make(chan struct{})
-	close(destructiveCommitDone)
 	state := &destructiveReadSnapshotState{
 		metadataReferencesCBOR: true,
 		blobCBORPresent:        true,
@@ -425,8 +526,7 @@ func TestNewReadSnapshotContextWaitsForLogicalDestructiveTransition(
 	db := &Database{
 		metadata: &destructiveReadSnapshotMetadata{state: state},
 		blobRef: newBlobStoreRef(&destructiveReadSnapshotBlob{
-			state:                 state,
-			destructiveCommitDone: destructiveCommitDone,
+			state: state,
 		}),
 	}
 

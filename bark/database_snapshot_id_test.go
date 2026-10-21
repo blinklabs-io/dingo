@@ -114,16 +114,12 @@ func TestSnapshotRPCRejectsSnapshotCopiedUnderNewerID(t *testing.T) {
 				}
 
 				if source == "local" {
-					// Local resolution only checks that a manifest exists;
-					// the keyed read inside the operation must reject it.
-					opID, err := invoke(newerID)
-					require.NoError(t, err)
-					progress := operationStatus(opID)
-					require.Equal(
-						t, databasev1alpha1.OperationStatus_OPERATION_STATUS_FAILED,
-						progress.GetStatus(), progress.GetMessage(),
-					)
-					require.Contains(t, progress.GetMessage(), lifecycle.ErrManifestIDMismatch.Error())
+					// Resolution reads the local manifest with the trust
+					// key, so the foreign-ID copy is refused up front.
+					_, err := invoke(newerID)
+					require.Error(t, err)
+					require.Equal(t, connect.CodeDataLoss, connect.CodeOf(err))
+					require.ErrorIs(t, err, lifecycle.ErrManifestIDMismatch)
 				} else {
 					// Remove the local copies so resolution reaches the cloud.
 					h.bark.config.SnapshotDir = t.TempDir()
