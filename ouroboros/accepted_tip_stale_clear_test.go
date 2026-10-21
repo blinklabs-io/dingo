@@ -11,9 +11,9 @@ import (
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 )
 
-// TestChainsyncClientAcceptedTipSurvivesStaleLedgerRejection shows that a late ledger
-// rejection of an OLDER header clears the connection's accepted header tip even
-// though the tip now names a NEWER accepted header.
+// TestChainsyncClientAcceptedTipSurvivesStaleLedgerRejection checks that a late ledger
+// rejection of an OLDER header leaves the connection's accepted header tip
+// alone while the tip names a NEWER accepted header.
 func TestChainsyncClientAcceptedTipSurvivesStaleLedgerRejection(t *testing.T) {
 	t.Parallel()
 

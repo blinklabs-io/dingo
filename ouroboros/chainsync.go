@@ -1780,9 +1780,13 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 			)
 			cancelAdmission()
 			if err != nil {
+				// The header never reaches the ledger queue.
+				tipAccepted = false
 				return fmt.Errorf("wait for eagerness limit: %w", err)
 			}
 			if o.recordHeldChainsyncTip(ctx.ConnectionId, tip) {
+				// Dropped by the held-ingress check, so never queued.
+				tipAccepted = false
 				return ochainsync.ErrStopSyncProcess
 			}
 		}

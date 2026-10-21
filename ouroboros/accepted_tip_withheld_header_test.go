@@ -11,12 +11,11 @@ import (
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 )
 
-// TestChainsyncClientWithheldHeaderIsNotAcceptedTip shows that a header the
+// TestChainsyncClientWithheldHeaderIsNotAcceptedTip checks that a header the
 // ledger never sees (here: withheld because the peer is not apply eligible)
-// still becomes the connection's accepted header tip, although the invariant
-// documented at ouroboros/chainsync.go ("so a later deferred header cannot
-// count as a linear extension of one that never reached the ledger queue")
-// requires it to be cleared.
+// does not become the connection's accepted header tip, so a later deferred
+// header cannot count as a linear extension of one that never reached the
+// ledger queue.
 func TestChainsyncClientWithheldHeaderIsNotAcceptedTip(t *testing.T) {
 	t.Parallel()
 
