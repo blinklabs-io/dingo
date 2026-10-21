@@ -9449,7 +9449,17 @@ next run fetches it again instead of re-accepting the same bad bytes. A failed
 download keeps its partial file for resumption, and a cancelled run keeps its
 archive, since neither says anything about the bytes already on disk.
 The zstd decoder separately defaults to a 512 MiB window and 256 MiB decoder
-memory limit, configurable through `WithZstdLimits`.
+memory limit, configurable through `WithZstdLimits`. For a streaming decode
+the smaller of the two bounds the history buffer the decoder allocates from the
+frame's declared window, before tar framing or digests are checked, so a
+hostile frame can claim the full 256 MiB per decoder. The download semaphore
+charges compressed bytes only, so every extraction and the ancillary manifest
+preflight first reserve that worst case plus fixed overhead from one 2 GiB
+`decoderMemoryBudget` shared by the bootstrap, its kept chunk feed and the
+ancillary archive. Decoder concurrency therefore follows memory, not the
+download worker count; the reservation is held only while an archive decodes,
+so downloads still overlap. A feed started without a bootstrap's budget creates
+its own.
 
 Extraction also bounds the archive's shape while it is read: an entry-count
 cap (directories and empty files count), per-member and aggregate expanded-byte
