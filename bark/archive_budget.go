@@ -16,6 +16,7 @@ package bark
 
 import (
 	"net"
+	"net/netip"
 	"sync"
 	"time"
 
@@ -77,13 +78,24 @@ func newArchiveBudget(globalPerSecond, callerPerSecond int) *archiveBudget {
 }
 
 // archiveCallerKey identifies the caller by host, ignoring the ephemeral
-// source port so reconnecting does not mint a fresh allowance.
+// source port so reconnecting does not mint a fresh allowance. An IPv6 caller
+// is keyed by its /64: a single subscriber is routinely delegated at least
+// that much, so keying by full address would hand one client an allowance
+// per address it chooses to source from.
 func archiveCallerKey(peerAddr string) string {
 	host, _, err := net.SplitHostPort(peerAddr)
 	if err != nil {
-		return peerAddr
+		host = peerAddr
 	}
-	return host
+	addr, err := netip.ParseAddr(host)
+	if err != nil {
+		return host
+	}
+	addr = addr.Unmap().WithZone("")
+	if addr.Is6() {
+		return netip.PrefixFrom(addr, 64).Masked().String()
+	}
+	return addr.String()
 }
 
 // allow takes n lookups from the caller's allowance and the global budget,

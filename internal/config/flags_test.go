@@ -1723,3 +1723,37 @@ func TestBarkBlockDownloadAllowPrivateAddressesBindings(t *testing.T) {
 		require.True(t, cfg.BarkBlockDownloadAllowPrivateAddresses)
 	})
 }
+
+// TestBarkArchiveLookupRatesEnvFlagsAndYAML pins that both ArchiveService
+// lookup budgets are reachable from YAML, the environment and the CLI.
+func TestBarkArchiveLookupRatesEnvFlagsAndYAML(t *testing.T) {
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+	configFile := filepath.Join(t.TempDir(), "dingo.yaml")
+	require.NoError(t, os.WriteFile(configFile, []byte(
+		"barkArchiveLookupsPerSecond: 301\n"+
+			"barkArchiveCallerLookupsPerSecond: 302\n",
+	), 0o600))
+	cfg, err := LoadConfig(configFile)
+	require.NoError(t, err)
+	require.Equal(t, 301, cfg.BarkArchiveLookupsPerSecond)
+	require.Equal(t, 302, cfg.BarkArchiveCallerLookupsPerSecond)
+
+	resetGlobalConfig()
+	t.Setenv("DINGO_BARK_ARCHIVE_LOOKUPS_PER_SECOND", "1001")
+	t.Setenv("DINGO_BARK_ARCHIVE_CALLER_LOOKUPS_PER_SECOND", "1002")
+	cfg, err = LoadConfig(configFile)
+	require.NoError(t, err)
+	require.Equal(t, 1001, cfg.BarkArchiveLookupsPerSecond)
+	require.Equal(t, 1002, cfg.BarkArchiveCallerLookupsPerSecond)
+
+	cmd := &cobra.Command{Use: "dingo"}
+	RegisterFlags(cmd)
+	require.NoError(t, cmd.ParseFlags([]string{
+		"--bark-archive-lookups-per-second=2001",
+		"--bark-archive-caller-lookups-per-second=2002",
+	}))
+	require.NoError(t, ApplyFlags(cmd, cfg))
+	require.Equal(t, 2001, cfg.BarkArchiveLookupsPerSecond)
+	require.Equal(t, 2002, cfg.BarkArchiveCallerLookupsPerSecond)
+}

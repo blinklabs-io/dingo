@@ -14485,15 +14485,19 @@ sustained rate is bounded separately (`bark/archive_budget.go`): a hash+slot
 reference is served without reading any local index, so each reference, present
 or not, costs a cloud lookup, and the concurrency cap alone does not limit
 repetition. `FetchBlock` therefore charges its whole batch against a
-per-caller token bucket (`BarkConfig.ArchiveCallerLookupsPerSecond`, default 50,
-keyed by the peer host) and a global bucket
-(`BarkConfig.ArchiveLookupsPerSecond`, default 200) before acquiring the
-database, and refuses the batch with `RESOURCE_EXHAUSTED` when either is short.
+per-caller token bucket (`BarkConfig.ArchiveCallerLookupsPerSecond`,
+`barkArchiveCallerLookupsPerSecond`, default 50) and a global bucket
+(`BarkConfig.ArchiveLookupsPerSecond`, `barkArchiveLookupsPerSecond`, default
+200) before acquiring the database, and refuses the batch with
+`RESOURCE_EXHAUSTED` when either is short; negative values are rejected. A
+caller is the connection's TCP peer address with the port dropped, an IPv6 peer
+reduced to its /64 so one subscriber prefix cannot mint an allowance per
+address. Bark reads no forwarding headers, so callers behind one proxy share an
+allowance, and a Dingo node reading expired history through `barkBaseUrl` is a
+single caller whose archive reads beyond its allowance fail rather than wait.
 Each bucket holds at least one maximum-size batch, a global refusal does not
-charge the caller, and the per-caller table is capped at 4096 hosts with an
-overflow bucket beyond that. Callers behind one proxy share a host and an
-allowance. These two limits are `BarkConfig` fields only; they have no
-`dingo.yaml` key. Every
+charge the caller, and the per-caller table is capped at 4096 entries with an
+overflow bucket beyond that. Every
 height lookup is a bounded probe rather than a scan of the index; there is no
 setting that leaves an unbounded cloud scan reachable from ArchiveService. The HTTP server applies a 60-second
 request read timeout but no write timeout, so slow request bodies are bounded

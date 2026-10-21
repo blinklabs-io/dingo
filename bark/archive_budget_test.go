@@ -160,3 +160,35 @@ func TestNewBarkRejectsNegativeArchiveLookupRates(t *testing.T) {
 	_, err = NewBark(BarkConfig{DB: db, ArchiveCallerLookupsPerSecond: -1})
 	require.ErrorContains(t, err, "ArchiveCallerLookupsPerSecond")
 }
+
+// TestArchiveCallerKey pins how a connection's remote address maps to an
+// allowance: the port never matters, an IPv6 caller is keyed by its /64 so
+// one subscriber prefix cannot mint an allowance per address, and an address
+// that does not parse still maps to a single bounded entry.
+func TestArchiveCallerKey(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name, a, b string
+		same       bool
+	}{
+		{"ipv4 port ignored", "192.0.2.1:1", "192.0.2.1:2", true},
+		{"ipv4 hosts differ", "192.0.2.1:1", "192.0.2.2:1", false},
+		{"ipv6 same /64", "[2001:db8:1:2::1]:1", "[2001:db8:1:2:ffff::9]:2", true},
+		{"ipv6 other /64", "[2001:db8:1:2::1]:1", "[2001:db8:1:3::1]:1", false},
+		{"ipv6 zone ignored", "[fe80::1%eth0]:1", "[fe80::2%eth1]:1", true},
+		{"ipv4-mapped is ipv4", "[::ffff:192.0.2.1]:1", "192.0.2.1:1", true},
+		{"ipv4-mapped hosts differ", "[::ffff:192.0.2.1]:1", "192.0.2.2:1", false},
+		{"unparseable is stable", "not-an-address", "not-an-address", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ka, kb := archiveCallerKey(tc.a), archiveCallerKey(tc.b)
+			if tc.same {
+				require.Equal(t, ka, kb)
+			} else {
+				require.NotEqual(t, ka, kb)
+			}
+		})
+	}
+}

@@ -223,9 +223,10 @@ type BarkConfig struct {
 	// than one maximum-size batch. Zero selects
 	// DefaultArchiveLookupsPerSecond; a negative value is invalid.
 	ArchiveLookupsPerSecond int
-	// ArchiveCallerLookupsPerSecond is the same rate for one caller address,
-	// so a single client cannot spend the whole global budget. Callers
-	// behind one proxy share an address and therefore an allowance. Zero
+	// ArchiveCallerLookupsPerSecond is the same rate for one caller, keyed
+	// by IPv4 address or IPv6 /64, so a single client cannot spend the whole
+	// global budget. Callers behind one proxy share an address and therefore
+	// an allowance. Zero
 	// selects DefaultArchiveCallerLookupsPerSecond; a negative value is
 	// invalid.
 	ArchiveCallerLookupsPerSecond int
