@@ -23,6 +23,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/internal/certutil"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/leioskeyepoch"
 	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -950,9 +951,14 @@ RETURNING id`,
 	var leiosKeyEpoch *uint64
 	var leiosKeyAgeUnknown bool
 	if len(leiosKeyPublic) > 0 {
-		leiosKeyEpoch, leiosKeyAgeUnknown, err = poolLeiosKeyRegistration(
-			ctx, db, poolID, at, executionSlot,
-			leiosKeyPublic, leiosKeyPoP,
+		leiosKeyEpoch, leiosKeyAgeUnknown, err = leioskeyepoch.Registration(
+			ctx, db, poolID,
+			leioskeyepoch.Position{
+				Slot:       at.slot,
+				BlockIndex: at.blockIndex,
+				CertIndex:  at.certIndex,
+			},
+			executionSlot, leiosKeyPublic, leiosKeyPoP,
 		)
 		if err != nil {
 			return 0, err
