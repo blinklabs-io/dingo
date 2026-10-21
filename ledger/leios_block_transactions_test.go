@@ -108,7 +108,7 @@ func TestBlockTransactionsForCertifiedEndorserBlockRejectsInvalidStoredBody(t *t
 func testLeiosManifest(f *leiosCertApplyFixture) *lcommon.LeiosEndorserBlock {
 	return &lcommon.LeiosEndorserBlock{
 		TransactionReferences: []lcommon.LeiosTransactionReference{{
-			TransactionHash: f.ebTx.Hash(),
+			TransactionHash: lcommon.Blake2b256Hash(f.ebTxs[0]),
 			TransactionSize: uint32(len(f.ebTxs[0])),
 		}},
 	}

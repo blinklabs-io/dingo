@@ -136,7 +136,9 @@ func (ls *LedgerState) BlockTransactions(
 			return nil, fmt.Errorf("decode certified endorser transaction %d: %w", i, err)
 		}
 		reference := manifest.TransactionReferences[i]
-		if tx.Hash() != reference.TransactionHash {
+		// The manifest reference hashes the full block_transaction CBOR,
+		// not the Cardano transaction body.
+		if lcommon.Blake2b256Hash(raw) != reference.TransactionHash {
 			return nil, fmt.Errorf("certified endorser transaction %d hash mismatch", i)
 		}
 		if uint64(len(raw)) != uint64(reference.TransactionSize) {
