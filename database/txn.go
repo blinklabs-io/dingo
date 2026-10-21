@@ -385,12 +385,13 @@ func newDatabaseTxnContext(
 }
 
 // NewReadSnapshotContext creates a coordinated read transaction and returns
-// the metadata tip that anchors it. PauseCommitsContext brackets construction
-// with both the logical destructive-transition barrier and the physical commit
-// barrier, so neither a multi-transaction rollback nor a combined write can
-// change blob data between opening the metadata and blob views. Both holds are
-// released as soon as the views are fixed; they are not held for the lifetime
-// of the read.
+// the metadata tip that anchors it. pauseCommitPhaseContext brackets
+// construction with both the logical destructive-transition barrier and the
+// commit-phase barrier, so neither a multi-transaction rollback nor a combined
+// commit can change blob data between opening the metadata and blob views.
+// Construction waits for a commit in progress, not for every open read-write
+// Txn to finish. Both holds are released as soon as the views are fixed; they
+// are not held for the lifetime of the read.
 //
 // The metadata store's read-pool connection is reserved BEFORE those holds are
 // taken, when the store supports it (types.ReadReserver). Beginning the read
@@ -442,7 +443,7 @@ func NewReadSnapshotContext(
 		defer reservation.Release()
 	}
 
-	resume, err := db.PauseCommitsContext(ctx)
+	resume, err := db.pauseCommitPhaseContext(ctx)
 	if err != nil {
 		return nil, ochainsync.Tip{}, fmt.Errorf(
 			"pause commits for read snapshot: %w",
@@ -1078,6 +1079,7 @@ func safeRollback(t *Txn) (err error) {
 func (t *Txn) Commit() error {
 	t.lock.Lock()
 	dispatchAfterUnlock := false
+	commitPhaseHeld := false
 	defer func() {
 		// A provider may panic while updating the commit timestamp or
 		// committing either store. Release both synchronization primitives
@@ -1092,6 +1094,9 @@ func (t *Txn) Commit() error {
 		// SetBlobStore's drain return -- and its caller close that store --
 		// while the rollback is still running against it. finishLocked
 		// releases it once the rollback concludes.
+		if commitPhaseHeld {
+			t.db.commitPhase.RUnlock()
+		}
 		t.releaseCommitBarrierLocked()
 		t.lock.Unlock()
 		// Release lifetime holds before running after-commit side effects:
@@ -1130,6 +1135,13 @@ func (t *Txn) Commit() error {
 	// to decide (not reachable by any caller today,
 	// since the only current sharedBlob wrapper is only ever
 	// Released/Rolled back, never committed).
+	// A read snapshot opening its metadata view before this commit and its
+	// blob view after it would pair two commit boundaries, so the timestamp
+	// update and both store commits run under commitPhase's shared side.
+	if t.barrierHeld {
+		t.db.holdCommitPhase()
+		commitPhaseHeld = true
+	}
 	var commitTimestamp int64
 	if t.blobTxn != nil && t.metadataTxn != nil &&
 		!t.sharedBlob && !t.sharedMetadata {

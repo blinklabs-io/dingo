@@ -125,9 +125,9 @@ func (b *Blockfrost) handleHealth(
 // returns the latest block.
 func (b *Blockfrost) handleLatestBlock(
 	w http.ResponseWriter,
-	_ *http.Request,
+	r *http.Request,
 ) {
-	info, err := b.node.LatestBlock()
+	info, err := b.node.LatestBlock(r.Context())
 	if err != nil {
 		b.logger.Error(
 			"failed to get latest block",
@@ -150,6 +150,7 @@ func (b *Blockfrost) handleBlock(
 	r *http.Request,
 ) {
 	info, err := b.node.BlockByHashOrNumber(
+		r.Context(),
 		r.PathValue("hash_or_number"),
 	)
 	if err != nil {
@@ -198,7 +199,7 @@ func (b *Blockfrost) handleLatestBlockTxs(
 	if !ok {
 		return
 	}
-	hashes, err := b.node.LatestBlockTxHashes()
+	hashes, err := b.node.LatestBlockTxHashes(r.Context())
 	if err != nil {
 		b.logger.Error(
 			"failed to get latest block txs",
@@ -1130,7 +1131,7 @@ func (b *Blockfrost) handleTransaction(
 		return
 	}
 
-	tx, err := b.node.Transaction(hash)
+	tx, err := b.node.Transaction(r.Context(), hash)
 	if err != nil {
 		if errors.Is(err, ErrTransactionNotFound) {
 			writeError(
@@ -1354,7 +1355,7 @@ func (b *Blockfrost) handleTransactionCBOR(
 		return
 	}
 
-	txCbor, err := b.node.TransactionCBOR(hash)
+	txCbor, err := b.node.TransactionCBOR(r.Context(), hash)
 	if err != nil {
 		if errors.Is(err, ErrTransactionNotFound) {
 			writeError(
@@ -1395,7 +1396,7 @@ func (b *Blockfrost) handleTransactionMetadata(
 		return
 	}
 
-	rows, err := b.node.TransactionMetadata(hash)
+	rows, err := b.node.TransactionMetadata(r.Context(), hash)
 	if err != nil {
 		if errors.Is(err, ErrTransactionNotFound) {
 			writeError(
@@ -1438,7 +1439,7 @@ func (b *Blockfrost) handleTransactionMetadataCBOR(
 		return
 	}
 
-	rows, err := b.node.TransactionMetadataCBOR(hash)
+	rows, err := b.node.TransactionMetadataCBOR(r.Context(), hash)
 	if err != nil {
 		if errors.Is(err, ErrTransactionNotFound) {
 			writeError(
@@ -1486,7 +1487,7 @@ func (b *Blockfrost) handleTransactionUTXOs(
 		return
 	}
 
-	utxos, err := b.node.TransactionUTXOs(hash)
+	utxos, err := b.node.TransactionUTXOs(r.Context(), hash)
 	if err != nil {
 		if errors.Is(err, ErrTransactionNotFound) {
 			writeError(
@@ -1555,7 +1556,7 @@ func (b *Blockfrost) handleTransactionDelegations(
 		return
 	}
 
-	rows, err := b.node.TransactionDelegations(hash)
+	rows, err := b.node.TransactionDelegations(r.Context(), hash)
 	if err != nil {
 		b.writeTransactionEndpointError(
 			w,
@@ -1585,7 +1586,7 @@ func (b *Blockfrost) handleTransactionStakeAddresses(
 		return
 	}
 
-	rows, err := b.node.TransactionStakeAddresses(hash)
+	rows, err := b.node.TransactionStakeAddresses(r.Context(), hash)
 	if err != nil {
 		b.writeTransactionEndpointError(
 			w,
@@ -1615,7 +1616,7 @@ func (b *Blockfrost) handleTransactionWithdrawals(
 		return
 	}
 
-	rows, err := b.node.TransactionWithdrawals(hash)
+	rows, err := b.node.TransactionWithdrawals(r.Context(), hash)
 	if err != nil {
 		b.writeTransactionEndpointError(
 			w,
@@ -1645,7 +1646,7 @@ func (b *Blockfrost) handleTransactionMIRs(
 		return
 	}
 
-	rows, err := b.node.TransactionMIRs(hash)
+	rows, err := b.node.TransactionMIRs(r.Context(), hash)
 	if err != nil {
 		b.writeTransactionEndpointError(
 			w,
@@ -1675,7 +1676,7 @@ func (b *Blockfrost) handleTransactionPoolUpdates(
 		return
 	}
 
-	rows, err := b.node.TransactionPoolUpdates(hash)
+	rows, err := b.node.TransactionPoolUpdates(r.Context(), hash)
 	if err != nil {
 		b.writeTransactionEndpointError(
 			w,
@@ -1717,7 +1718,7 @@ func (b *Blockfrost) handleTransactionPoolRetires(
 		return
 	}
 
-	rows, err := b.node.TransactionPoolRetires(hash)
+	rows, err := b.node.TransactionPoolRetires(r.Context(), hash)
 	if err != nil {
 		b.writeTransactionEndpointError(
 			w,
@@ -1747,7 +1748,7 @@ func (b *Blockfrost) handleTransactionRedeemers(
 		return
 	}
 
-	rows, err := b.node.TransactionRedeemers(hash)
+	rows, err := b.node.TransactionRedeemers(r.Context(), hash)
 	if err != nil {
 		b.writeTransactionEndpointError(
 			w,
@@ -1777,7 +1778,7 @@ func (b *Blockfrost) handleTransactionRequiredSigners(
 		return
 	}
 
-	rows, err := b.node.TransactionRequiredSigners(hash)
+	rows, err := b.node.TransactionRequiredSigners(r.Context(), hash)
 	if err != nil {
 		b.writeTransactionEndpointError(
 			w,
