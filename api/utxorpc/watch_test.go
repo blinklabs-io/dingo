@@ -41,7 +41,7 @@ type watchTxLedgerStateProbe struct {
 	blockByHash func([]byte) (models.Block, error)
 }
 
-func (p *watchTxLedgerStateProbe) BlockByHash(
+func (p *watchTxLedgerStateProbe) BlockByHashIncludingRolledBack(
 	_ context.Context,
 	hash []byte,
 ) (models.Block, error) {
@@ -502,7 +502,7 @@ func (p *securityParamProbe) BlockTransactions(
 	return decoded.Transactions(), nil
 }
 
-func (p *securityParamProbe) BlockByHash(
+func (p *securityParamProbe) BlockByHashIncludingRolledBack(
 	_ context.Context,
 	hash []byte,
 ) (models.Block, error) {
@@ -560,4 +560,106 @@ func TestWatchTxRollbackWalkDepthIsSecurityParam(t *testing.T) {
 			require.Equal(t, tc.wantReads, probe.reads)
 		})
 	}
+}
+
+// Regression test for #5412: trimming the undo history must not leave the
+// evicted entries reachable through the slice's backing array, or their
+// transaction graphs stay in memory for as long as the stream is open.
+func TestWatchTxTrimHistory_ClearsEvictedEntries(t *testing.T) {
+	t.Parallel()
+	// Build four entries, each holding one transaction.
+	history := make([]watchTxHistoryEntry, 0, 4)
+	for i := range 4 {
+		history = append(history, watchTxHistoryEntry{
+			point: ocommon.NewPoint(uint64(i), []byte{byte(i)}),
+			appliedTxs: []*watch.AnyChainTx{
+				{Chain: &watch.AnyChainTx_Cardano{}},
+			},
+		})
+	}
+	// Keep a view of the whole backing array so we can inspect the slots
+	// that fall outside the trimmed slice.
+	backing := history[:cap(history)]
+
+	history = watchTxTrimHistory(history, 2)
+
+	// The two newest entries survive, oldest first.
+	require.Len(t, history, 2)
+	require.Equal(t, uint64(2), history[0].point.Slot)
+	require.Equal(t, uint64(3), history[1].point.Slot)
+	// Every slot past the survivors must be zeroed, not just hidden.
+	for i := len(history); i < len(backing); i++ {
+		require.Nil(t, backing[i].appliedTxs, "slot %d still reachable", i)
+		require.Nil(t, backing[i].point.Hash, "slot %d still reachable", i)
+	}
+}
+
+// Regression test for #5412: entries removed by a rollback must be cleared
+// too, since the popped slot stays in the backing array until overwritten.
+func TestWatchTxBuildRollbackMessages_ClearsPoppedEntries(t *testing.T) {
+	t.Parallel()
+	// Slot 1 is the rollback target; slot 2 carries a transaction and will
+	// be popped.
+	history := []watchTxHistoryEntry{
+		{
+			point: ocommon.NewPoint(1, []byte{0x01}),
+		},
+		{
+			point: ocommon.NewPoint(2, []byte{0x02}),
+			appliedTxs: []*watch.AnyChainTx{
+				{Chain: &watch.AnyChainTx_Cardano{}},
+			},
+		},
+	}
+	// Keep the original slice header to look at the popped slot afterwards.
+	backing := history
+	_, found := watchTxBuildRollbackMessages(
+		&history,
+		ocommon.NewPoint(1, []byte{0x01}),
+	)
+	require.True(t, found)
+	require.Len(t, history, 1)
+	// The popped slot must hold no transactions and no point.
+	require.Nil(t, backing[1].appliedTxs)
+	require.Nil(t, backing[1].point.Hash)
+}
+
+// Regression test for #5411: a transaction the caller's predicate rejects must
+// not be converted to the UTxO RPC form. Conversion is not directly
+// observable, so the test compares allocations: a rejecting predicate must
+// allocate less than an accepting one on the same block.
+//
+// Not t.Parallel: testing.AllocsPerRun takes a process-wide measurement.
+func TestWatchTxBuildMessages_SkipsConversionWhenPredicateRejects(
+	t *testing.T,
+) {
+	// A one-block chain whose block carries transactions.
+	blocks, err := testfixtures.GenerateConwayChainWithTransactions(1)
+	require.NoError(t, err)
+	require.Len(t, blocks, 1)
+	block := blocks[0]
+	blk, err := ledger.NewBlockFromCbor(uint(block.Type()), block.Cbor())
+	require.NoError(t, err)
+	txs := blk.Transactions()
+	require.NotEmpty(t, txs)
+
+	// build returns a function that processes the block's transactions with a
+	// predicate that accepts or rejects every one of them.
+	build := func(send bool) func() {
+		return func() {
+			_, _, err := watchTxBuildForwardMessagesForTransactions(
+				txs,
+				blk.SlotNumber(),
+				blk.BlockNumber(),
+				blk.Hash().Bytes(),
+				func(ledger.Transaction) bool { return send },
+			)
+			require.NoError(t, err)
+		}
+	}
+	rejected := testing.AllocsPerRun(20, build(false))
+	accepted := testing.AllocsPerRun(20, build(true))
+	// The transactions are already decoded, so the only difference between
+	// the runs is converting them to the UTxO RPC form.
+	require.Less(t, rejected, accepted)
 }

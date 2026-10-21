@@ -14646,6 +14646,20 @@ func (ls *LedgerState) BlockByHash(
 	return database.BlockByHash(ctx, ls.db, hash)
 }
 
+// BlockByHashIncludingRolledBack returns a block by its hash, also finding a
+// block that a primary-chain rollback removed from the database but the chain
+// manager still caches. Use it only to reconstruct what a rollback undid;
+// BlockByHash is the lookup for blocks on the current chain.
+func (ls *LedgerState) BlockByHashIncludingRolledBack(
+	ctx context.Context,
+	hash []byte,
+) (models.Block, error) {
+	if ls.chain != nil {
+		return ls.chain.BlockByHash(ctx, hash)
+	}
+	return database.BlockByHash(ctx, ls.db, hash)
+}
+
 // CardanoNodeConfig returns the Cardano node configuration used for this ledger state.
 func (ls *LedgerState) CardanoNodeConfig() *cardano.CardanoNodeConfig {
 	return ls.config.CardanoNodeConfig

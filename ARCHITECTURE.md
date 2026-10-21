@@ -11792,6 +11792,13 @@ it reads, are still charged against the rate and budget, but a full slot cap
 cannot disconnect it. Rollbacks are not charged. A full-chain replay therefore
 still completes within those rates and budget.
 
+`WatchTx` replay is charged to the same `replayLimiter`, per forward block and
+before the block is decoded: a block behind the primary chain tip takes a
+replay slot (until the stream reaches the tip) and spends the client's rate
+and window budget, which `FollowTip` streams from the same host share.
+Rollback and tip blocks are not charged. The `MaxReplayBlocks` start-distance
+check still applies first.
+
 `FollowTip` populates `Timestamp` on a `Reset` block reference and on every
 response's `Tip` from `LedgerState.SlotToTime`. `Timestamp` is a plain proto3
 `uint64` with the same "unknown" ambiguity `height` has (see the UTxO RPC
@@ -11801,13 +11808,27 @@ was produced at the Unix epoch, which a client cannot tell apart from a
 rather than reporting `Timestamp: 0`. A `Reset` to the origin point names no
 block and keeps `Timestamp: 0`.
 
-`WatchTx` retains up to 256 forward blocks in a per-stream undo history. A
-rollback within that history builds its `Undo` responses without reading
-persisted blocks. A deeper rollback walks persisted predecessors synchronously
+`WatchTx` retains up to 256 forward blocks in a per-stream undo history, also
+bounded in bytes: `MaxWatchHistoryBytes` (default 16 MiB) per stream and
+`MaxWatchHistoryBytesTotal` (default 256 MiB) across all streams
+(`api/utxorpc/watch_history.go`). Sizes are protobuf wire sizes, a lower bound
+on heap use. When a limit is reached a stream evicts its own oldest entries,
+and an entry that cannot fit is not retained; entries leave the budget on
+eviction, rollback and stream end. A rollback within the retained history
+builds its `Undo` responses without reading stored blocks. A deeper
+rollback, including one past evicted entries, walks predecessors synchronously
 inside the stream handler, keeping cancellation and conversion errors in the
-request lifecycle; an unexpected persisted-block conversion failure is
-returned as a stream error. That walk reads at most the ledger's security
-parameter plus one blocks, the deepest rollback a follower can need.
+request lifecycle; an unexpected block conversion failure is returned as a
+stream error. The blocks it walks were just rolled back, so a primary-chain
+rollback has already deleted them from the database and left them only in the
+chain manager's block cache. The walk therefore resolves them with
+`LedgerState.BlockByHashIncludingRolledBack` (`Chain.BlockByHash`), which
+checks that cache before the database; `LedgerState.BlockByHash` stays
+database-only for blocks on the current chain. A block that is in neither fails
+the stream rather than ending the walk early, since fewer `Undo` messages than
+the rollback needs would leave the client on the abandoned chain without any
+sign of it. That walk reads at most the ledger's security parameter plus one
+blocks, the deepest rollback a follower can need.
 
 Transaction evaluation (`LedgerState.EvaluateTx`, shared by the Blockfrost and
 UTxO RPC front ends) admits at most `LedgerStateConfig.MaxConcurrentEvaluations`
