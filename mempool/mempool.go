@@ -611,6 +611,10 @@ type SubmissionAdmitter interface {
 	AdmitSubmission(context.Context) (context.Context, func(), error)
 }
 
+type submissionCapacityProvider interface {
+	MempoolSubmissionCapacity() int
+}
+
 // MempoolFullError reports an admission refused for capacity. CurrentSize and
 // TxSize are in the units capacity is charged in: a transaction's CBOR plus
 // the CBOR of the decoded outputs the pool keeps for it.
@@ -639,6 +643,12 @@ func newMempool(
 ) (*Mempool, error) {
 	if config.Validator == nil {
 		return nil, ErrNilValidator
+	}
+	submissionCapacity := DefaultMaxConcurrentSubmissions
+	if provider, ok := config.Validator.(submissionCapacityProvider); ok {
+		if limit := provider.MempoolSubmissionCapacity(); limit > 0 {
+			submissionCapacity = min(submissionCapacity, limit)
+		}
 	}
 	if !implementation.Valid() {
 		return nil, fmt.Errorf(
@@ -705,7 +715,7 @@ func newMempool(
 		revalidationJournalCap: defaultRevalidationJournalCap,
 		submissionSlots: make(
 			chan struct{},
-			DefaultMaxConcurrentSubmissions,
+			submissionCapacity,
 		),
 	}
 	if implementation == ImplementationDAG {

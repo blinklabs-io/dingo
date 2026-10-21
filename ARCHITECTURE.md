@@ -11743,12 +11743,14 @@ node-to-node and node-to-client submissions), and endorser-block transaction
 decoding. Mesh
 `details.error` is omitted for internal errors; the cause goes to the log.
 
-Mempool transaction admission has four process-wide fail-fast validation slots,
-leaving one connection in SQLite's default five-connection read pool for chain
-and query work. Mesh and UTxO RPC reserve a slot before decoding request data;
-direct node-to-node and node-to-client callers reserve inside `AddTransaction`.
-Node-to-node validation inherits connection cancellation so a disconnected peer
-cannot retain a slot or ledger snapshot.
+Mempool transaction admission has at most four process-wide fail-fast
+validation slots and is reduced to the metadata store's coordinated read
+snapshot limit when it exposes one. This leaves operational read capacity for
+chain and query work even when SQLite's pool is configured below its default
+of five connections. Mesh and UTxO RPC reserve a slot before decoding request
+data; direct node-to-node and node-to-client callers reserve inside
+`AddTransaction`. Node-to-node validation inherits connection cancellation so
+a disconnected peer cannot retain a slot or ledger snapshot.
 
 ### Blockfrost unsupported operations
 

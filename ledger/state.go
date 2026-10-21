@@ -15474,6 +15474,20 @@ func (ls *LedgerState) ValidateTxWithOverlay(
 	})
 }
 
+// MempoolSubmissionCapacity returns the coordinated metadata snapshot limit.
+// The mempool uses it to keep validation below the backing read pool's
+// operational reserve.
+func (ls *LedgerState) MempoolSubmissionCapacity() int {
+	if ls == nil || ls.db == nil {
+		return 0
+	}
+	reserver, ok := ls.db.Metadata().(types.ReadReserver)
+	if !ok {
+		return 0
+	}
+	return reserver.ReadSnapshotLimit()
+}
+
 // ErrEvaluationBusy reports that every transaction-evaluation slot is in use.
 // Evaluation runs scripts on the caller's goroutine, so admission is refused
 // outright rather than queued.
