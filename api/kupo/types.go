@@ -16,7 +16,11 @@ package kupo
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
+	"fmt"
+	"strconv"
+	"strings"
 )
 
 var (
@@ -55,6 +59,63 @@ type MatchQuery struct {
 	AssetName     []byte
 	TransactionID []byte
 	OutputIndex   *uint32
+	// Cursor resumes a previous response after the last row it examined. It
+	// is only meaningful with the same order and filters as that response.
+	Cursor *MatchCursor
+	// MaxScan bounds how many stored rows one iterator examines. Zero means
+	// unbounded.
+	MaxScan int
+}
+
+// MatchCursor is a position in a match result, in the stable
+// (slot, transaction index, output index, transaction id) ordering shared by
+// both result orders.
+type MatchCursor struct {
+	Slot             uint64
+	TransactionIndex uint32
+	OutputIndex      uint32
+	TransactionID    []byte
+}
+
+// String renders the cursor as slot:transaction_index:output_index:tx_id.
+func (c MatchCursor) String() string {
+	return fmt.Sprintf(
+		"%d:%d:%d:%s",
+		c.Slot,
+		c.TransactionIndex,
+		c.OutputIndex,
+		hex.EncodeToString(c.TransactionID),
+	)
+}
+
+// ParseMatchCursor parses the form produced by MatchCursor.String.
+func ParseMatchCursor(value string) (*MatchCursor, error) {
+	parts := strings.Split(value, ":")
+	if len(parts) != 4 {
+		return nil, fmt.Errorf("%w: invalid cursor", ErrInvalidRequest)
+	}
+	slot, err := strconv.ParseUint(parts[0], 10, 64)
+	if err != nil {
+		return nil, fmt.Errorf("%w: invalid cursor", ErrInvalidRequest)
+	}
+	txIndex, err := strconv.ParseUint(parts[1], 10, 32)
+	if err != nil {
+		return nil, fmt.Errorf("%w: invalid cursor", ErrInvalidRequest)
+	}
+	outputIndex, err := strconv.ParseUint(parts[2], 10, 32)
+	if err != nil {
+		return nil, fmt.Errorf("%w: invalid cursor", ErrInvalidRequest)
+	}
+	txID, err := hex.DecodeString(parts[3])
+	if err != nil || len(txID) != 32 {
+		return nil, fmt.Errorf("%w: invalid cursor", ErrInvalidRequest)
+	}
+	return &MatchCursor{
+		Slot:             slot,
+		TransactionIndex: uint32(txIndex),
+		OutputIndex:      uint32(outputIndex),
+		TransactionID:    txID,
+	}, nil
 }
 
 type Value struct {
@@ -118,6 +179,10 @@ type Health struct {
 type MatchIterator interface {
 	Tip() Point
 	Next() (Match, bool, error)
+	// Resume reports the position after the last row Next examined and
+	// whether iteration stopped on the scan budget before exhausting the
+	// result. The cursor is nil until a row has been examined.
+	Resume() (*MatchCursor, bool)
 	Close()
 }
 

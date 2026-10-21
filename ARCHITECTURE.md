@@ -11218,9 +11218,17 @@ reserves a metadata read connection before briefly taking the commit barriers,
 keeping an exhausted-pool wait outside them. Admission remains held for the
 snapshot's lifetime and is capped at one below the provider's read-pool size,
 so client-paced `/matches` streams cannot consume the connection destructive
-rollback needs for operational reads. Kupo admits at most two match streams
-globally and one per remote address, and each stream has a five-minute
-lifetime. Excess streams receive HTTP 429. A 30-second write deadline is also
+rollback needs for operational reads. Kupo admits at most three match streams
+globally and one per remote address, so any two clients leave a slot for a
+third, and each stream has a five-minute lifetime. Excess streams receive
+HTTP 429. Each `/matches` response is also bounded to 10,000 rows, 8 MiB and
+20,000 examined storage rows; when a bound is reached the response is still a
+valid JSON array and an `X-Kupo-Next-Cursor` trailer carries
+`slot:transaction_index:output_index:tx_id`, which the `cursor` query
+parameter resumes after, with the same order and filters, in either order. The
+cursor is absent when the result is complete; a resumed response may be empty
+when the previous one ended exactly at its bound. Kupo defines no pagination,
+so this is a Dingo extension that leaves unmodified Kupo requests unchanged. A 30-second write deadline is also
 re-armed before every response write, so a client that stops reading releases
 its snapshot before the stream lifetime expires.
 

@@ -29,12 +29,18 @@ import (
 
 const jsonContentType = "application/json;charset=utf-8"
 
+// nextCursorTrailer carries the cursor that resumes a match response cut
+// short by its row, byte or scan budget. It is absent when the response holds
+// the complete result.
+const nextCursorTrailer = "X-Kupo-Next-Cursor"
+
 func (s *Server) handleMatches(w http.ResponseWriter, r *http.Request) {
 	query, err := parseMatchQuery(r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	query.MaxScan = s.maxMatchScan
 	release, ok := s.matchAdmission.acquire(r.Context(), matchClient(r))
 	if !ok {
 		w.Header().Set("Retry-After", "1")
@@ -66,6 +72,9 @@ func (s *Server) handleMatches(w http.ResponseWriter, r *http.Request) {
 		contentType = "application/json;charset=utf-8;asset-quantity=string"
 	}
 	w.Header().Set("Content-Type", contentType)
+	// Whether the response was cut short is only known once the body ends,
+	// so the continuation cursor travels as a trailer.
+	w.Header().Set("Trailer", nextCursorTrailer)
 
 	first, ok, err := matches.Next()
 	if err != nil {
@@ -77,6 +86,8 @@ func (s *Server) handleMatches(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	written := 0
+	writtenBytes := 0
+	budgetReached := false
 	for ok {
 		if written > 0 {
 			if _, err := io.WriteString(w, ","); err != nil {
@@ -96,6 +107,13 @@ func (s *Server) handleMatches(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		written++
+		writtenBytes += len(encoded) + 1
+		// The budget is checked before the next row is fetched, so the
+		// resume cursor never skips a row that was examined but not sent.
+		if written >= s.maxMatchRows || writtenBytes >= s.maxMatchBytes {
+			budgetReached = true
+			break
+		}
 		if written%128 == 0 {
 			if err := http.NewResponseController(w).Flush(); err != nil {
 				return
@@ -109,7 +127,13 @@ func (s *Server) handleMatches(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	_, _ = io.WriteString(w, "]\n")
+	if _, err := io.WriteString(w, "]\n"); err != nil {
+		return
+	}
+	cursor, scanLimited := matches.Resume()
+	if (budgetReached || scanLimited) && cursor != nil {
+		w.Header().Set(nextCursorTrailer, cursor.String())
+	}
 }
 
 func parseMatchQuery(r *http.Request) (MatchQuery, error) {
@@ -127,6 +151,7 @@ func parseMatchQuery(r *http.Request) (MatchQuery, error) {
 		"asset_name":     true,
 		"transaction_id": true,
 		"output_index":   true,
+		"cursor":         true,
 	}
 	if err := rejectUnknownQuery(values, allowed); err != nil {
 		return MatchQuery{}, err
@@ -225,6 +250,11 @@ func parseMatchQuery(r *http.Request) (MatchQuery, error) {
 		}
 		idx := uint32(parsed)
 		ret.OutputIndex = &idx
+	}
+	if value := values.Get("cursor"); value != "" {
+		if ret.Cursor, err = ParseMatchCursor(value); err != nil {
+			return ret, err
+		}
 	}
 	if len(ret.PolicyID) > 0 && len(ret.TransactionID) > 0 {
 		return ret, fmt.Errorf(

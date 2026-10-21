@@ -100,6 +100,10 @@ type nodeMatchIterator struct {
 	pageIndex int
 	exhausted bool
 	closed    bool
+	started   bool
+	scanned   int
+	last      *MatchCursor
+	truncated bool
 	spenders  map[string]*spendingTransactionDetails
 }
 
@@ -167,6 +171,14 @@ func (a *NodeAdapter) Matches(
 		createdBefore := dbTip.Point.Slot
 		storageQuery.CreatedBefore = &createdBefore
 	}
+	if query.Cursor != nil {
+		storageQuery.After = &models.UtxoOrderingCursor{
+			Slot:       query.Cursor.Slot,
+			BlockIndex: query.Cursor.TransactionIndex,
+			OutputIdx:  query.Cursor.OutputIndex,
+			TxId:       append([]byte(nil), query.Cursor.TransactionID...),
+		}
+	}
 	releaseOnError = false
 	return &nodeMatchIterator{
 		ctx:     ctx,
@@ -197,7 +209,12 @@ func (i *nodeMatchIterator) Next() (Match, bool, error) {
 				i.releaseSnapshot()
 				return Match{}, false, nil
 			}
-			if i.storage.After != nil {
+			if i.query.MaxScan > 0 && i.scanned >= i.query.MaxScan {
+				i.truncated = true
+				i.releaseSnapshot()
+				return Match{}, false, nil
+			}
+			if i.started {
 				i.releaseSnapshot()
 				txn, _, err := database.NewReadSnapshotContext(
 					i.ctx,
@@ -211,6 +228,7 @@ func (i *nodeMatchIterator) Next() (Match, bool, error) {
 				}
 				i.txn = txn
 			}
+			i.started = true
 			i.storage.Limit = matchPageSize
 			page, err := i.adapter.ledgerState.Database().UtxosWithHistory(
 				i.storage,
@@ -224,6 +242,7 @@ func (i *nodeMatchIterator) Next() (Match, bool, error) {
 			}
 			i.page = page
 			i.pageIndex = 0
+			i.scanned += len(page)
 			i.exhausted = len(page) < matchPageSize
 			// Bound spender hydration to the current result page. A consuming
 			// transaction commonly spends several returned outputs, while a
@@ -243,6 +262,12 @@ func (i *nodeMatchIterator) Next() (Match, bool, error) {
 
 		utxo := i.page[i.pageIndex]
 		i.pageIndex++
+		i.last = &MatchCursor{
+			Slot:             utxo.TxSlot,
+			TransactionIndex: utxo.TxBlockIndex,
+			OutputIndex:      utxo.OutputIdx,
+			TransactionID:    append([]byte(nil), utxo.TxId...),
+		}
 		output, err := utxo.Decode()
 		if err != nil {
 			return Match{}, false, fmt.Errorf(
@@ -354,6 +379,10 @@ func newSpendingTransactionDetails(
 func utxoReference(utxo models.Utxo) string {
 	return hex.EncodeToString(utxo.TxId) + "#" +
 		strconv.FormatUint(uint64(utxo.OutputIdx), 10)
+}
+
+func (i *nodeMatchIterator) Resume() (*MatchCursor, bool) {
+	return i.last, i.truncated
 }
 
 func (i *nodeMatchIterator) Close() {
