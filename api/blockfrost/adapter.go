@@ -3946,9 +3946,10 @@ func (a *NodeAdapter) MetadataTransactionsCBOR(
 
 // Transaction returns summary details for the requested transaction.
 func (a *NodeAdapter) Transaction(
+	ctx context.Context,
 	hash []byte,
 ) (TransactionInfo, error) {
-	tx, block, decodedTx, err := a.decodedTransactionByHash(hash)
+	tx, block, decodedTx, err := a.decodedTransactionByHash(ctx, hash)
 	if err != nil {
 		return TransactionInfo{}, err
 	}
@@ -3991,7 +3992,7 @@ func (a *NodeAdapter) Transaction(
 	if tx.CollateralReturn != nil && !tx.Valid {
 		utxoCount++
 	}
-	deposit, err := a.transactionDeposit(decodedTx, block.Type, tx.Slot)
+	deposit, err := a.transactionDeposit(ctx, decodedTx, block.Type, tx.Slot)
 	if err != nil {
 		return TransactionInfo{}, fmt.Errorf(
 			"calculate deposit for transaction %x: %w",
@@ -4199,9 +4200,10 @@ func (a *NodeAdapter) TransactionEvaluate(
 // TransactionCBOR returns raw signed transaction CBOR bytes for the requested
 // transaction hash.
 func (a *NodeAdapter) TransactionCBOR(
+	ctx context.Context,
 	hash []byte,
 ) ([]byte, error) {
-	_, _, decodedTx, err := a.decodedTransactionByHash(hash)
+	_, _, decodedTx, err := a.decodedTransactionByHash(ctx, hash)
 	if err != nil {
 		return nil, err
 	}
@@ -4218,9 +4220,10 @@ func (a *NodeAdapter) TransactionCBOR(
 // TransactionMetadata returns metadata labels for the requested transaction as
 // JSON values.
 func (a *NodeAdapter) TransactionMetadata(
+	ctx context.Context,
 	hash []byte,
 ) ([]TransactionMetadataInfo, error) {
-	entries, err := a.transactionMetadataEntries(hash)
+	entries, err := a.transactionMetadataEntries(ctx, hash)
 	if err != nil {
 		return nil, err
 	}
@@ -4241,9 +4244,10 @@ func (a *NodeAdapter) TransactionMetadata(
 // TransactionMetadataCBOR returns metadata labels for the requested transaction
 // as CBOR hex values.
 func (a *NodeAdapter) TransactionMetadataCBOR(
+	ctx context.Context,
 	hash []byte,
 ) ([]TransactionMetadataCBORInfo, error) {
-	entries, err := a.transactionMetadataEntries(hash)
+	entries, err := a.transactionMetadataEntries(ctx, hash)
 	if err != nil {
 		return nil, err
 	}
@@ -4259,9 +4263,10 @@ func (a *NodeAdapter) TransactionMetadataCBOR(
 
 // TransactionUTXOs returns inputs and outputs for the requested transaction.
 func (a *NodeAdapter) TransactionUTXOs(
+	ctx context.Context,
 	hash []byte,
 ) (TransactionUTXOsInfo, error) {
-	tx, _, decodedTx, err := a.decodedTransactionByHash(hash)
+	tx, _, decodedTx, err := a.decodedTransactionByHash(ctx, hash)
 	if err != nil {
 		return TransactionUTXOsInfo{}, err
 	}
@@ -4443,9 +4448,10 @@ func transactionInputRef(input lcommon.TransactionInput) database.UtxoRef {
 // TransactionDelegations returns delegation certificates in the requested
 // transaction.
 func (a *NodeAdapter) TransactionDelegations(
+	ctx context.Context,
 	hash []byte,
 ) ([]TransactionDelegationInfo, error) {
-	tx, _, decodedTx, err := a.decodedTransactionByHash(hash)
+	tx, _, decodedTx, err := a.decodedTransactionByHash(ctx, hash)
 	if err != nil {
 		return nil, err
 	}
@@ -4518,9 +4524,10 @@ func (a *NodeAdapter) TransactionDelegations(
 // TransactionStakeAddresses returns stake registration/deregistration
 // certificates in the requested transaction.
 func (a *NodeAdapter) TransactionStakeAddresses(
+	ctx context.Context,
 	hash []byte,
 ) ([]TransactionStakeAddressInfo, error) {
-	tx, _, decodedTx, err := a.decodedTransactionByHash(hash)
+	tx, _, decodedTx, err := a.decodedTransactionByHash(ctx, hash)
 	if err != nil {
 		return nil, err
 	}
@@ -4589,9 +4596,10 @@ func (a *NodeAdapter) TransactionStakeAddresses(
 // TransactionWithdrawals returns reward withdrawals in the requested
 // transaction.
 func (a *NodeAdapter) TransactionWithdrawals(
+	ctx context.Context,
 	hash []byte,
 ) ([]TransactionWithdrawalInfo, error) {
-	_, _, decodedTx, err := a.decodedTransactionByHash(hash)
+	_, _, decodedTx, err := a.decodedTransactionByHash(ctx, hash)
 	if err != nil {
 		return nil, err
 	}
@@ -4612,9 +4620,10 @@ func (a *NodeAdapter) TransactionWithdrawals(
 // TransactionMIRs returns MIR certificate reward targets in the requested
 // transaction.
 func (a *NodeAdapter) TransactionMIRs(
+	ctx context.Context,
 	hash []byte,
 ) ([]TransactionMIRInfo, error) {
-	tx, _, decodedTx, err := a.decodedTransactionByHash(hash)
+	tx, _, decodedTx, err := a.decodedTransactionByHash(ctx, hash)
 	if err != nil {
 		return nil, err
 	}
@@ -4682,9 +4691,10 @@ func (a *NodeAdapter) TransactionMIRs(
 // TransactionPoolUpdates returns pool registration certificates in the
 // requested transaction.
 func (a *NodeAdapter) TransactionPoolUpdates(
+	ctx context.Context,
 	hash []byte,
 ) ([]TransactionPoolUpdateInfo, error) {
-	tx, _, decodedTx, err := a.decodedTransactionByHash(hash)
+	tx, _, decodedTx, err := a.decodedTransactionByHash(ctx, hash)
 	if err != nil {
 		return nil, err
 	}
@@ -4775,9 +4785,10 @@ func (a *NodeAdapter) TransactionPoolUpdates(
 // TransactionPoolRetires returns pool retirement certificates in the requested
 // transaction.
 func (a *NodeAdapter) TransactionPoolRetires(
+	ctx context.Context,
 	hash []byte,
 ) ([]TransactionPoolRetireInfo, error) {
-	tx, _, decodedTx, err := a.decodedTransactionByHash(hash)
+	tx, _, decodedTx, err := a.decodedTransactionByHash(ctx, hash)
 	if err != nil {
 		return nil, err
 	}
@@ -4809,9 +4820,10 @@ func (a *NodeAdapter) TransactionPoolRetires(
 // TransactionRedeemers returns Plutus redeemers stored for the requested
 // transaction.
 func (a *NodeAdapter) TransactionRedeemers(
+	ctx context.Context,
 	hash []byte,
 ) ([]TransactionRedeemerInfo, error) {
-	tx, _, decodedTx, err := a.decodedTransactionByHash(hash)
+	tx, _, decodedTx, err := a.decodedTransactionByHash(ctx, hash)
 	if err != nil {
 		return nil, err
 	}
@@ -4827,7 +4839,7 @@ func (a *NodeAdapter) TransactionRedeemers(
 		return []TransactionRedeemerInfo{}, nil
 	}
 
-	pparams, err := a.protocolParamsForSlot(tx.Slot)
+	pparams, err := a.protocolParamsForSlot(ctx, tx.Slot)
 	if err != nil {
 		return nil, fmt.Errorf(
 			"get protocol parameters for transaction %x redeemer fees: %w",
@@ -4900,9 +4912,10 @@ func (a *NodeAdapter) TransactionRedeemers(
 // TransactionRequiredSigners returns the required signers (extra signing key
 // hashes) declared in the requested transaction.
 func (a *NodeAdapter) TransactionRequiredSigners(
+	ctx context.Context,
 	hash []byte,
 ) ([]TransactionRequiredSignerInfo, error) {
-	_, _, decodedTx, err := a.decodedTransactionByHash(hash)
+	_, _, decodedTx, err := a.decodedTransactionByHash(ctx, hash)
 	if err != nil {
 		return nil, err
 	}
@@ -4966,9 +4979,10 @@ func findTransactionInSlice(
 }
 
 func (a *NodeAdapter) decodedTransactionByHash(
+	ctx context.Context,
 	hash []byte,
 ) (*models.Transaction, models.Block, lcommon.Transaction, error) {
-	tx, err := a.ledgerState.TransactionByHash(context.Background(), hash)
+	tx, err := a.ledgerState.TransactionByHash(ctx, hash)
 	if err != nil {
 		return nil, models.Block{}, nil, fmt.Errorf(
 			"get transaction by hash %x: %w",
@@ -4983,7 +4997,7 @@ func (a *NodeAdapter) decodedTransactionByHash(
 			ErrTransactionNotFound,
 		)
 	}
-	block, err := a.ledgerState.BlockByHash(context.Background(), tx.BlockHash)
+	block, err := a.ledgerState.BlockByHash(ctx, tx.BlockHash)
 	if err != nil {
 		if errors.Is(err, models.ErrBlockNotFound) {
 			return nil, models.Block{}, nil, fmt.Errorf(
@@ -4999,7 +5013,7 @@ func (a *NodeAdapter) decodedTransactionByHash(
 			err,
 		)
 	}
-	decodedTransactions, err := a.ledgerState.BlockTransactions(context.Background(), block)
+	decodedTransactions, err := a.ledgerState.BlockTransactions(ctx, block)
 	if err != nil {
 		return nil, models.Block{}, nil, fmt.Errorf(
 			"get transactions for block %x for transaction %x: %w",
@@ -5031,9 +5045,10 @@ type transactionRedeemerMetadata struct {
 }
 
 func (a *NodeAdapter) transactionMetadataEntries(
+	ctx context.Context,
 	hash []byte,
 ) ([]labelcodec.Entry, error) {
-	tx, err := a.ledgerState.TransactionByHash(context.Background(), hash)
+	tx, err := a.ledgerState.TransactionByHash(ctx, hash)
 	if err != nil {
 		return nil, fmt.Errorf(
 			"get transaction by hash %x: %w",
@@ -5565,6 +5580,7 @@ func aggregateTransactionOutputAmount(
 }
 
 func (a *NodeAdapter) transactionDeposit(
+	ctx context.Context,
 	tx lcommon.Transaction,
 	blockEraID uint,
 	slot uint64,
@@ -5573,7 +5589,7 @@ func (a *NodeAdapter) transactionDeposit(
 	if blockEra == nil || blockEra.CertDepositFunc == nil {
 		return 0, nil
 	}
-	pparams, err := a.protocolParamsForSlot(slot)
+	pparams, err := a.protocolParamsForSlot(ctx, slot)
 	if err != nil {
 		return 0, err
 	}
@@ -5592,10 +5608,11 @@ func (a *NodeAdapter) transactionDeposit(
 }
 
 func (a *NodeAdapter) protocolParamsForSlot(
+	ctx context.Context,
 	slot uint64,
 ) (lcommon.ProtocolParameters, error) {
 	db := a.ledgerState.Database()
-	txn := db.Transaction(context.Background(), false)
+	txn := db.Transaction(ctx, false)
 	defer txn.Release()
 	epoch, err := db.GetEpochBySlot(slot, txn)
 	if err != nil {

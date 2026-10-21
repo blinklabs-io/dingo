@@ -825,11 +825,11 @@ func TestMetadataTransactionsCollisionKeepsLabelAndRawCBOR(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, cborRows, 2)
 	require.Equal(t, "a20163696e7461316474657874", cborRows[1].Metadata)
-	transactionJSON, err := adapter.TransactionMetadata(ambiguousHash)
+	transactionJSON, err := adapter.TransactionMetadata(context.Background(), ambiguousHash)
 	require.NoError(t, err)
 	require.Len(t, transactionJSON, 1)
 	require.Equal(t, "", string(transactionJSON[0].JSONMetadata))
-	transactionCBOR, err := adapter.TransactionMetadataCBOR(ambiguousHash)
+	transactionCBOR, err := adapter.TransactionMetadataCBOR(context.Background(), ambiguousHash)
 	require.NoError(t, err)
 	require.Len(t, transactionCBOR, 1)
 	require.Equal(t, "a20163696e7461316474657874", transactionCBOR[0].CBORMetadata)
@@ -880,7 +880,7 @@ func TestMetadataEndpointsDeterministicAcrossRepeatsAndKeyOrders(t *testing.T) {
 		for i, mt := range txs {
 			hash := bytes.Repeat([]byte{mt.hashByte}, 32)
 
-			jsonLabels, err := adapter.TransactionMetadata(hash)
+			jsonLabels, err := adapter.TransactionMetadata(context.Background(), hash)
 			require.NoError(t, err, "pass %d tx %d", pass, i)
 			require.Len(t, jsonLabels, 2)
 			require.Equal(t, "1", jsonLabels[0].Label)
@@ -888,7 +888,7 @@ func TestMetadataEndpointsDeterministicAcrossRepeatsAndKeyOrders(t *testing.T) {
 			require.Equal(t, "721", jsonLabels[1].Label)
 			require.Empty(t, jsonLabels[1].JSONMetadata, "pass %d tx %d", pass, i)
 
-			cborLabels, err := adapter.TransactionMetadataCBOR(hash)
+			cborLabels, err := adapter.TransactionMetadataCBOR(context.Background(), hash)
 			require.NoError(t, err)
 			require.Len(t, cborLabels, 2)
 			require.Equal(t, "1", cborLabels[0].Label)
@@ -979,6 +979,7 @@ type mockNode struct {
 	metadataJSON                  []MetadataTransactionJSONInfo
 	metadataCBOR                  []MetadataTransactionCBORInfo
 	transaction                   TransactionInfo
+	transactionCtx                context.Context
 	transactionSubmitHash         string
 	transactionEvaluation         TransactionEvaluationResponse
 	transactionEvaluationCtx      context.Context
@@ -1237,8 +1238,10 @@ func (m *mockNode) MetadataTransactionsCBOR(
 }
 
 func (m *mockNode) Transaction(
+	ctx context.Context,
 	_ []byte,
 ) (TransactionInfo, error) {
+	m.transactionCtx = ctx
 	return m.transaction, m.transactionErr
 }
 
@@ -1259,72 +1262,84 @@ func (m *mockNode) TransactionEvaluate(
 }
 
 func (m *mockNode) TransactionCBOR(
+	_ context.Context,
 	_ []byte,
 ) ([]byte, error) {
 	return m.transactionCBOR, m.transactionCBORErr
 }
 
 func (m *mockNode) TransactionMetadata(
+	_ context.Context,
 	_ []byte,
 ) ([]TransactionMetadataInfo, error) {
 	return m.transactionMetadata, m.transactionMetadataErr
 }
 
 func (m *mockNode) TransactionMetadataCBOR(
+	_ context.Context,
 	_ []byte,
 ) ([]TransactionMetadataCBORInfo, error) {
 	return m.transactionMetadataCBOR, m.transactionMetadataCBORErr
 }
 
 func (m *mockNode) TransactionUTXOs(
+	_ context.Context,
 	_ []byte,
 ) (TransactionUTXOsInfo, error) {
 	return m.transactionUTXOs, m.transactionUTXOsErr
 }
 
 func (m *mockNode) TransactionDelegations(
+	_ context.Context,
 	_ []byte,
 ) ([]TransactionDelegationInfo, error) {
 	return m.transactionDelegations, m.transactionDelegationsErr
 }
 
 func (m *mockNode) TransactionStakeAddresses(
+	_ context.Context,
 	_ []byte,
 ) ([]TransactionStakeAddressInfo, error) {
 	return m.transactionStakes, m.transactionStakesErr
 }
 
 func (m *mockNode) TransactionWithdrawals(
+	_ context.Context,
 	_ []byte,
 ) ([]TransactionWithdrawalInfo, error) {
 	return m.transactionWithdrawals, m.transactionWithdrawalsErr
 }
 
 func (m *mockNode) TransactionMIRs(
+	_ context.Context,
 	_ []byte,
 ) ([]TransactionMIRInfo, error) {
 	return m.transactionMIRs, m.transactionMIRsErr
 }
 
 func (m *mockNode) TransactionPoolUpdates(
+	_ context.Context,
 	_ []byte,
 ) ([]TransactionPoolUpdateInfo, error) {
 	return m.transactionPoolUpdates, m.transactionPoolUpdatesErr
 }
 
 func (m *mockNode) TransactionPoolRetires(
+	_ context.Context,
 	_ []byte,
 ) ([]TransactionPoolRetireInfo, error) {
 	return m.transactionPoolRetires, m.transactionPoolRetiresErr
 }
 
 func (m *mockNode) TransactionRedeemers(
+	_ context.Context,
 	_ []byte,
 ) ([]TransactionRedeemerInfo, error) {
 	return m.transactionRedeemers, m.transactionRedeemersErr
 }
 
 func (m *mockNode) TransactionRequiredSigners(
+	_ context.Context,
 	_ []byte,
 ) ([]TransactionRequiredSignerInfo, error) {
 	return m.transactionRequiredSigners, m.transactionRequiredSignersErr
@@ -2912,10 +2927,14 @@ func TestHandleTransaction(t *testing.T) {
 		"hash",
 		"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
 	)
+	requestCtx, cancel := context.WithCancel(req.Context())
+	cancel()
+	req = req.WithContext(requestCtx)
 	w := httptest.NewRecorder()
 	b.handleTransaction(w, req)
 
 	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Same(t, requestCtx, mock.transactionCtx)
 
 	var resp TransactionResponse
 	err := json.NewDecoder(w.Body).Decode(&resp)
