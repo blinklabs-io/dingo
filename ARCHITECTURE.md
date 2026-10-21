@@ -3801,7 +3801,7 @@ read from the database once; an input it does not return is read by each check
 that needs it. A block of the era listed before the ledger's era is judged under
 the previous era's parameters, the same rule applied to its transactions.
 With `LedgerStateConfig.LedgerPrefetchAheadEnabled` (`ledgerPrefetchAheadEnabled`,
-default off), the block-apply chunk also resolves block k+1's inputs on a
+on by default in node configuration), the block-apply chunk also resolves block k+1's inputs on a
 separate goroutine (`utxoPrefetchAhead`, `ledger/utxo_prefetch_ahead.go`) from a
 read-pool transaction while block k applies; the chunk's write transaction is
 never shared with it. Only blocks under normal validation are prefetched:
@@ -18347,6 +18347,65 @@ epoch rollover and retry semantics. Neither is warranted by throughput,
 since the parallelizable work is already parallel. Library contract changes
 must be evaluated against these integration requirements, not pinned to
 historical upstream implementation behavior.
+
+#### Overlapping block application with validation
+
+Block application stays on one goroutine and one write transaction per
+`batchSize` chunk. Inside the chunk each validated transaction's delta is
+written as soon as the transaction is validated, because the next
+transaction's rules read that state back through the same transaction. What
+overlaps the apply loop is work that reads no ledger state, or reads only
+state committed before the chunk:
+
+- `LedgerPrefetchAheadEnabled` resolves block k+1's input UTxOs from a
+  read-pool transaction while block k applies (see "Era-Specific
+  Validation").
+- `LedgerValidateAheadEnabled` (`ledgerValidateAheadEnabled` /
+  `DINGO_LEDGER_VALIDATE_AHEAD_ENABLED` / `--ledger-validate-ahead-enabled`;
+  on by default in node configuration) verifies the vkey and bootstrap witness signatures of every
+  validated block of the chunk on `GOMAXPROCS` worker goroutines
+  (`signaturePreverifyAhead`, `ledger/signature_preverify.go`), queued in
+  block order. Before applying block k the loop waits for block k's results
+  and hands them to `ledgerProcessBlock` by transaction position. Each result
+  is gouroboros' `PreverifiedSignatures`, bound to the transaction body and
+  witness set: the era signature rule reuses it only for the transaction it
+  was computed from, still checks that every required witness is present, and
+  returns a recorded failure unchanged. A result for any other transaction is
+  ignored and the signature is verified inline. The workers are cancelled and
+  joined on every exit from the chunk callback, and their results are
+  discarded with it, so a failed or rolled-back chunk leaves nothing behind.
+  Byron blocks are not covered, since their witnesses are always verified
+  inline, nor are Dijkstra chunks or `TrustedReplay`, which preverifies the
+  whole chunk's signatures before its transaction opens.
+
+Both flags change only when work happens, never what it computes: verdicts
+and stored state are identical to the serial path.
+`TestLedgerValidateAheadMatchesSerialState` and
+`TestLedgerValidateAheadRejectsBadSignature` (`ledger/`) replay one chain with
+the flags off and on and compare stored state and rejection errors, and
+`TestConformanceVectorsPreverifiedSignaturesMatchInline`
+(`internal/test/conformance/`) validates every corpus transaction with and
+without a result computed on another goroutine and requires the same
+verdict.
+
+Two wider overlap models were considered and rejected:
+
+- **Validating block N+1 against an in-memory overlay while N's writes commit
+  on a writer goroutine.** SQLite has one writer, and N's uncommitted writes
+  are visible only on N's connection, so N+1's rules would read every effect
+  of N from the overlay. The rules reach state through the whole `LedgerView`
+  surface (UTxOs, stake and reward accounts, pools, DReps, committee,
+  proposals, deposits, op-cert counters, and more), and any query the overlay
+  answered from the snapshot alone would change a verdict without an error.
+  Committing per block would also give up the chunk transaction.
+- **Staged pipelining across commit batches.** Chunk C+1's validation needs
+  C's committed state, so before C commits it can only do work that reads no
+  state or reads the state committed before C. That is the work the two flags
+  above already move off the apply loop.
+
+The ledger-state work therefore stays serial for the reason given in "Why
+dingo's ledger apply is not wired into `pipeline.ApplyFunc`": each block's
+state depends on the previous block's.
 
 ### Ledger-Tip/Chain-Iterator Rollback Synchronization
 
