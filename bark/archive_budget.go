@@ -34,6 +34,13 @@ const (
 	// maxArchiveCallers bounds the per-caller table so a client cycling
 	// source addresses cannot grow it without limit.
 	maxArchiveCallers = 4096
+
+	// archiveCallerSweepInterval bounds how often a full caller table is
+	// scanned for evictable entries. The scan is O(maxArchiveCallers) under
+	// archiveBudget.mu and runs before either bucket can refuse, so without
+	// this bound a client rotating source addresses makes every request pay
+	// it.
+	archiveCallerSweepInterval = time.Second
 )
 
 // archiveBudget rations the storage lookups ArchiveService performs for
@@ -49,6 +56,7 @@ type archiveBudget struct {
 	callerRate  rate.Limit
 	callerBurst int
 	callers     map[string]*rate.Limiter
+	lastSweep   time.Time
 	// overflow serves every caller that arrives while callers is full of
 	// active entries, so the table stays bounded without exempting anyone.
 	overflow *rate.Limiter
@@ -130,10 +138,13 @@ func (b *archiveBudget) callerLimiter(
 		return l
 	}
 	if len(b.callers) >= maxArchiveCallers {
-		// An entry holding a full bucket has no history worth keeping.
-		for k, l := range b.callers {
-			if l.TokensAt(now) >= float64(b.callerBurst) {
-				delete(b.callers, k)
+		if now.Sub(b.lastSweep) >= archiveCallerSweepInterval {
+			b.lastSweep = now
+			// An entry holding a full bucket has no history worth keeping.
+			for k, l := range b.callers {
+				if l.TokensAt(now) >= float64(b.callerBurst) {
+					delete(b.callers, k)
+				}
 			}
 		}
 		if len(b.callers) >= maxArchiveCallers {

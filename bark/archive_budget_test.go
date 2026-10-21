@@ -151,6 +151,39 @@ func TestArchiveBudgetBoundsCallerTable(t *testing.T) {
 	require.LessOrEqual(t, len(b.callers), maxArchiveCallers)
 }
 
+// TestArchiveBudgetThrottlesCallerTableSweep pins that a full table is scanned
+// for evictable entries at most once per archiveCallerSweepInterval, so a
+// client rotating caller keys cannot make every request an O(table) scan
+// under the budget mutex.
+func TestArchiveBudgetThrottlesCallerTableSweep(t *testing.T) {
+	t.Parallel()
+
+	b := newArchiveBudget(1000000, 10)
+	start := time.Now()
+	now := start
+	b.now = func() time.Time { return now }
+	for i := range maxArchiveCallers {
+		require.True(
+			t,
+			b.allow(hex.EncodeToString([]byte{byte(i), byte(i >> 8)}), 1),
+		)
+	}
+	require.True(t, b.allow("first-new", 1))
+	_, ok := b.callers["first-new"]
+	require.False(t, ok, "a table of active entries must send it to overflow")
+
+	// Every entry has refilled, but the previous sweep is too recent.
+	now = start.Add(archiveCallerSweepInterval / 2)
+	require.True(t, b.allow("second-new", 1))
+	_, ok = b.callers["second-new"]
+	require.False(t, ok, "swept again before the interval elapsed")
+
+	now = start.Add(archiveCallerSweepInterval)
+	require.True(t, b.allow("third-new", 1))
+	_, ok = b.callers["third-new"]
+	require.True(t, ok, "idle entries were not evicted once the interval elapsed")
+}
+
 func TestNewBarkRejectsNegativeArchiveLookupRates(t *testing.T) {
 	t.Parallel()
 
