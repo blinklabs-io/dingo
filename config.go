@@ -244,6 +244,8 @@ type Config struct {
 	barkHost                                                                            string
 	barkClientCAFilePath                                                                string
 	barkArchiveMaxConcurrentFetches                                                     int
+	barkArchiveLookupsPerSecond                                                         int
+	barkArchiveCallerLookupsPerSecond                                                   int
 	barkOperatorCertificateFingerprints                                                 []string
 	barkLifecycleEnabled                                                                bool
 	barkLifecycleOperatorCertificateFingerprints                                        []string
@@ -844,6 +846,8 @@ func (c *Config) syncCompatFields() {
 	c.barkHost = c.cfg.BarkHost
 	c.barkClientCAFilePath = c.cfg.BarkClientCAFilePath
 	c.barkArchiveMaxConcurrentFetches = c.cfg.BarkArchiveMaxConcurrentFetches
+	c.barkArchiveLookupsPerSecond = c.cfg.BarkArchiveLookupsPerSecond
+	c.barkArchiveCallerLookupsPerSecond = c.cfg.BarkArchiveCallerLookupsPerSecond
 	c.barkOperatorCertificateFingerprints = slices.Clone(
 		c.cfg.BarkOperatorCertificateFingerprints,
 	)
@@ -1956,6 +1960,26 @@ func WithBarkArchiveMaxConcurrentFetches(limit int) ConfigOptionFunc {
 	}
 }
 
+// WithBarkArchiveLookupsPerSecond sets the sustained rate of Bark
+// ArchiveService block lookups across all callers. Zero selects Bark's
+// default.
+func WithBarkArchiveLookupsPerSecond(rate int) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.BarkArchiveLookupsPerSecond = rate
+		c.barkArchiveLookupsPerSecond = rate
+	}
+}
+
+// WithBarkArchiveCallerLookupsPerSecond sets the sustained rate of Bark
+// ArchiveService block lookups for one caller address. Zero selects Bark's
+// default.
+func WithBarkArchiveCallerLookupsPerSecond(rate int) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.BarkArchiveCallerLookupsPerSecond = rate
+		c.barkArchiveCallerLookupsPerSecond = rate
+	}
+}
+
 // WithBarkOperatorCertificateFingerprints sets the SHA-256 client certificate
 // fingerprints authorized to invoke destructive DatabaseService RPCs.
 func WithBarkOperatorCertificateFingerprints(
@@ -2358,6 +2382,18 @@ func (c *Config) BarkOperatorCertificateFingerprints() []string {
 
 // BarkLifecycleEnabled reports whether Bark's remote node lifecycle service
 // is explicitly enabled.
+// BarkArchiveLookupsPerSecond returns the configured global ArchiveService
+// lookup rate; zero means Bark's default.
+func (c *Config) BarkArchiveLookupsPerSecond() int {
+	return c.barkArchiveLookupsPerSecond
+}
+
+// BarkArchiveCallerLookupsPerSecond returns the configured per-caller
+// ArchiveService lookup rate; zero means Bark's default.
+func (c *Config) BarkArchiveCallerLookupsPerSecond() int {
+	return c.barkArchiveCallerLookupsPerSecond
+}
+
 func (c *Config) BarkLifecycleEnabled() bool {
 	return c.cfg.BarkLifecycleEnabled
 }

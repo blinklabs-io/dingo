@@ -1552,6 +1552,35 @@ func TestBuildDingoConfigWiresBlockfetchLowWatermarkFlag(t *testing.T) {
 	}
 }
 
+// TestBuildDingoConfigWiresBarkArchiveLookupRates pins that the loaded
+// ArchiveService lookup budgets reach the root configuration Bark is built
+// from.
+func TestBuildDingoConfigWiresBarkArchiveLookupRates(t *testing.T) {
+	t.Parallel()
+
+	built := buildDingoConfig(
+		&config.Config{
+			BarkArchiveLookupsPerSecond:       401,
+			BarkArchiveCallerLookupsPerSecond: 402,
+		},
+		slog.New(slog.NewTextHandler(new(bytes.Buffer), nil)),
+		nil,
+		nil,
+		false,
+		dingo.StorageModeCore,
+		30*time.Second,
+		chainsync.DefaultStallTimeout,
+		chainsync.HeaderSyncStrategyPrimary,
+	)
+
+	if got := built.BarkArchiveLookupsPerSecond(); got != 401 {
+		t.Fatalf("expected global archive lookup rate 401, got %d", got)
+	}
+	if got := built.BarkArchiveCallerLookupsPerSecond(); got != 402 {
+		t.Fatalf("expected per-caller archive lookup rate 402, got %d", got)
+	}
+}
+
 func TestBuildDingoConfigWiresLedgerValidateAheadFlag(t *testing.T) {
 	t.Parallel()
 

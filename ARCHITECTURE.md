@@ -11125,6 +11125,13 @@ asset rows. A policy or asset with more matching rows returns an explicit
 incomplete error, never a partial supply or holder count. `NewMCPServer` shares
 one slot budget across both tool sets; the exported `RegisterSQLiteTools` and
 `RegisterCardanoTools` each create their own.
+`get_mempool_info` without `tx_hash` lists at most `limit` pending transactions
+(default 10, at most 50) in the pool's own order, read through
+`Mempool.TransactionsBounded`, so only the rows shown are copied. The pending
+count is that call's total, and the buffered volume and saturation come from
+`mempool.Service.SizeBytes`, the maintained retained-byte counter that capacity
+and admission are measured against. A summary therefore costs in proportion to
+the rows shown, not the pool, and takes no execution slot.
 When the metadata store is file-backed SQLite, `NewMCPServer` also installs a
 receiving middleware that refuses every tool call and resource read while the
 store's `-wal` file exceeds 128 MiB, so MCP readers drain and the periodic
@@ -11819,6 +11826,13 @@ it reads, are still charged against the rate and budget, but a full slot cap
 cannot disconnect it. Rollbacks are not charged. A full-chain replay therefore
 still completes within those rates and budget.
 
+`WatchTx` replay is charged to the same `replayLimiter`, per forward block and
+before the block is decoded: a block behind the primary chain tip takes a
+replay slot (until the stream reaches the tip) and spends the client's rate
+and window budget, which `FollowTip` streams from the same host share.
+Rollback and tip blocks are not charged. The `MaxReplayBlocks` start-distance
+check still applies first.
+
 `FollowTip` populates `Timestamp` on a `Reset` block reference and on every
 response's `Tip` from `LedgerState.SlotToTime`. `Timestamp` is a plain proto3
 `uint64` with the same "unknown" ambiguity `height` has (see the UTxO RPC
@@ -11828,13 +11842,27 @@ was produced at the Unix epoch, which a client cannot tell apart from a
 rather than reporting `Timestamp: 0`. A `Reset` to the origin point names no
 block and keeps `Timestamp: 0`.
 
-`WatchTx` retains up to 256 forward blocks in a per-stream undo history. A
-rollback within that history builds its `Undo` responses without reading
-persisted blocks. A deeper rollback walks persisted predecessors synchronously
+`WatchTx` retains up to 256 forward blocks in a per-stream undo history, also
+bounded in bytes: `MaxWatchHistoryBytes` (default 16 MiB) per stream and
+`MaxWatchHistoryBytesTotal` (default 256 MiB) across all streams
+(`api/utxorpc/watch_history.go`). Sizes are protobuf wire sizes, a lower bound
+on heap use. When a limit is reached a stream evicts its own oldest entries,
+and an entry that cannot fit is not retained; entries leave the budget on
+eviction, rollback and stream end. A rollback within the retained history
+builds its `Undo` responses without reading stored blocks. A deeper
+rollback, including one past evicted entries, walks predecessors synchronously
 inside the stream handler, keeping cancellation and conversion errors in the
-request lifecycle; an unexpected persisted-block conversion failure is
-returned as a stream error. That walk reads at most the ledger's security
-parameter plus one blocks, the deepest rollback a follower can need.
+request lifecycle; an unexpected block conversion failure is returned as a
+stream error. The blocks it walks were just rolled back, so a primary-chain
+rollback has already deleted them from the database and left them only in the
+chain manager's block cache. The walk therefore resolves them with
+`LedgerState.BlockByHashIncludingRolledBack` (`Chain.BlockByHash`), which
+checks that cache before the database; `LedgerState.BlockByHash` stays
+database-only for blocks on the current chain. A block that is in neither fails
+the stream rather than ending the walk early, since fewer `Undo` messages than
+the rollback needs would leave the client on the abandoned chain without any
+sign of it. That walk reads at most the ledger's security parameter plus one
+blocks, the deepest rollback a follower can need.
 
 Transaction evaluation (`LedgerState.EvaluateTx`, shared by the Blockfrost and
 UTxO RPC front ends) admits at most `LedgerStateConfig.MaxConcurrentEvaluations`
@@ -13587,8 +13615,51 @@ Koios. The UTxO side is a running reconstruction seeded from Dingo at the
 start point and advanced by Koios's own `/tx_info` answers for every
 transaction on the chain, so it stays independent of Dingo after its seed; a
 rollback re-baselines it and marks that epoch's UTxO verdict "not run" rather
-than reporting a comparison that would trivially match. `--koios-cache-path`
-makes those lookups cache-first against a `koios-parity` `cache.db`, which
+than reporting a comparison that would trivially match. Each epoch's
+comparisons run on their own LocalStateQuery connections; one that dies
+during Acquire or a query is redialed and the check repeated, a bounded number
+of times, and the UTxO comparison only reads the reconstruction, so a retry
+cannot apply it twice. An epoch check's Acquire that Dingo refuses as too old
+is retried within the same bound: Dingo also gives that answer when it cannot
+open a read snapshot within its wait, as under commit contention at an epoch
+boundary, and a point still refused after the bound is reported as not run
+with the exhausted retries named. Every connection `Dial` opens enables
+ingress backpressure for LocalStateQuery, so a whole-UTxO reply larger than
+the muxer's 64MiB connection ingress budget is read at the client's pace
+instead of overflowing it and closing the connection. A session that ends
+for any reason, including Dingo closing the connection, is resumed from the
+last block processed after a backoff; only interruption ends the run. The
+rollback that opens a resumed session lands on the block already processed, so it changes nothing
+and keeps the comparison. A "not run" verdict names its cause: a failed
+`/tx_info` fetch, a rollback and its slot, or a baseline captured at that
+boundary.
+
+Every session opens with a rollback to the origin, which Dingo refuses to
+acquire; the origin is epoch 0, so the tool does not ask. Each block's epoch
+is resolved locally from Dingo's era history (`HardForkEraHistoryQuery`, read
+on a connection acquired at the volatile tip and cached, refetched only when a
+slot falls outside it), so no block's point is acquired just to learn its
+epoch. When the history is unavailable or does not cover a slot, the tool
+falls back to acquiring the point and asking `GetEpochNo`, logging the
+fallback once. Byron blocks (preprod, epochs 0-3) are never checked -- there
+are no protocol parameters or stake there, and Koios holds none either -- so
+they are skipped by era, still feed the UTxO reconstruction, and validation
+starts, with a log line, at the first Shelley-era epoch. In the fallback path
+the tool also skips blocks Dingo refuses as too old until validation starts:
+the first post-Byron block whose epoch resolves, by the era history or by
+Dingo. Any later refusal is a real failure that ends the session. Every
+query the ChainSync callbacks make -- the epoch lookup, the UTxO baseline
+captures, the `/tx_info` flushes, and the protocol-parameter, stake and UTxO
+checks -- runs under a per-session context, so its connections close when the
+session ends and the run resumes instead of waiting on a query Dingo never
+answers. The epoch lookup is also bounded at five minutes, since an idle
+session reports no error to end it; the whole-UTxO queries carry no deadline.
+An epoch whose checks a session end cuts off is not reported: buffered
+`/tx_info` hashes stay unapplied, the comparison neither taints nor
+re-baselines the reconstruction, and the checks run again at that epoch's next
+block on the resumed session.
+
+`--koios-cache-path` makes those lookups cache-first against a `koios-parity` `cache.db`, which
 may be the one a dingo instance's own embedded observer is writing, provided
 its recorded Koios API root matches `--koios-base-url`.
 
@@ -13604,6 +13675,7 @@ internal/nodeparity/       # shared library, untagged and importable
   watch.go                  # Watcher, WatchBlocks: persistent per-node ChainSync subscription with reconnect (full mode)
   incremental.go            # IncrementalCursor, RunIncremental: sequential per-block UTxO-delta orchestration (incremental mode)
   from_genesis.go           # RunFromGenesis: reconnecting from-genesis ChainSync walk, per-epoch checks (Koios mode)
+  epoch_oracle.go           # epochOracle: slot-to-epoch resolution from Dingo's cached era history
   koios_check.go            # CheckProtocolParams/CheckStakeDistribution/UTxOChanges: the Koios-backed comparisons
 
 cmd/node-parity/           # thin Cobra CLI wrapper: 'check', 'watch' and 'from-genesis' are the subcommands
@@ -14596,7 +14668,24 @@ signing/storage work and response growth, and takes one of
 `BarkConfig.ArchiveMaxConcurrentFetches` slots (`barkArchiveMaxConcurrentFetches`,
 default 16, negative rejected) before touching storage. A request that finds no
 free slot is refused with `RESOURCE_EXHAUSTED` rather than queued, so the work an
-unauthenticated caller can have in flight is bounded by configuration, and every
+unauthenticated caller can have in flight is bounded by configuration. The
+sustained rate is bounded separately (`bark/archive_budget.go`): a hash+slot
+reference is served without reading any local index, so each reference, present
+or not, costs a cloud lookup, and the concurrency cap alone does not limit
+repetition. `FetchBlock` therefore charges its whole batch against a
+per-caller token bucket (`BarkConfig.ArchiveCallerLookupsPerSecond`,
+`barkArchiveCallerLookupsPerSecond`, default 50) and a global bucket
+(`BarkConfig.ArchiveLookupsPerSecond`, `barkArchiveLookupsPerSecond`, default
+200) before acquiring the database, and refuses the batch with
+`RESOURCE_EXHAUSTED` when either is short; negative values are rejected. A
+caller is the connection's TCP peer address with the port dropped, an IPv6 peer
+reduced to its /64 so one subscriber prefix cannot mint an allowance per
+address. Bark reads no forwarding headers, so callers behind one proxy share an
+allowance, and a Dingo node reading expired history through `barkBaseUrl` is a
+single caller whose archive reads beyond its allowance fail rather than wait.
+Each bucket holds at least one maximum-size batch, a global refusal does not
+charge the caller, and the per-caller table is capped at 4096 entries with an
+overflow bucket beyond that. Every
 height lookup is a bounded probe rather than a scan of the index; there is no
 setting that leaves an unbounded cloud scan reachable from ArchiveService. The HTTP server applies a 60-second
 request read timeout but no write timeout, so slow request bodies are bounded

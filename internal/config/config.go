@@ -767,6 +767,18 @@ type Config struct {
 	// so this is what bounds the storage work an anonymous caller can cause.
 	// Zero selects Bark's default (16); a negative value is rejected.
 	BarkArchiveMaxConcurrentFetches int `yaml:"barkArchiveMaxConcurrentFetches"     envconfig:"DINGO_BARK_ARCHIVE_MAX_CONCURRENT_FETCHES"`
+	// BarkArchiveLookupsPerSecond is the sustained rate of block lookups
+	// ArchiveService serves across all callers combined. Each lookup can cost
+	// a cloud storage request whether or not the block exists, so a FetchBlock
+	// whose references do not fit the remaining budget is refused whole. Zero
+	// selects Bark's default (200); a negative value is rejected.
+	BarkArchiveLookupsPerSecond int `yaml:"barkArchiveLookupsPerSecond" envconfig:"DINGO_BARK_ARCHIVE_LOOKUPS_PER_SECOND"`
+	// BarkArchiveCallerLookupsPerSecond is the same rate for one caller
+	// address (one IPv4 address or one IPv6 /64), so a single client cannot
+	// spend the whole global budget. Callers behind one proxy share an
+	// allowance. Zero selects Bark's default (50); a negative value is
+	// rejected.
+	BarkArchiveCallerLookupsPerSecond int `yaml:"barkArchiveCallerLookupsPerSecond" envconfig:"DINGO_BARK_ARCHIVE_CALLER_LOOKUPS_PER_SECOND"`
 	// BarkOperatorCertificateFingerprints is the explicit operator allowlist
 	// for destructive DatabaseService RPCs. Every DatabaseService caller must
 	// authenticate with BarkClientCAFilePath; only these SHA-256 certificate

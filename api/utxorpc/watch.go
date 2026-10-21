@@ -36,6 +36,8 @@ type watchTxHistoryEntry struct {
 	point      ocommon.Point
 	prevHash   []byte
 	appliedTxs []*watch.AnyChainTx
+	// size is the retained byte cost charged to the history budget.
+	size int64
 }
 
 func watchTxBuildForwardMessagesForTransactions(
@@ -47,12 +49,14 @@ func watchTxBuildForwardMessagesForTransactions(
 	applies := make([]*watch.WatchTxResponse, 0, len(txs))
 	applied := make([]*watch.AnyChainTx, 0, len(txs))
 	for _, tx := range txs {
+		// Evaluate the predicate first: converting a transaction is the
+		// expensive step, and rejected transactions must not pay for it.
+		if !shouldSendTx(tx) {
+			continue
+		}
 		tmpTx, err := tx.Utxorpc()
 		if err != nil {
 			return nil, nil, fmt.Errorf("convert transaction: %w", err)
-		}
-		if !shouldSendTx(tx) {
-			continue
 		}
 		var act watch.AnyChainTx
 		act.Chain = &watch.AnyChainTx_Cardano{Cardano: tmpTx}
@@ -75,6 +79,22 @@ func watchTxBuildForwardMessagesForTransactions(
 		return applied, []*watch.WatchTxResponse{idle}, nil
 	}
 	return applied, applies, nil
+}
+
+// watchTxTrimHistory drops the oldest entries beyond limit. Dropped entries
+// are zeroed, and the survivors are moved to the front of the backing array,
+// so evicted transaction graphs are not left reachable through it.
+func watchTxTrimHistory(
+	history []watchTxHistoryEntry,
+	limit int,
+) []watchTxHistoryEntry {
+	drop := len(history) - limit
+	if drop <= 0 {
+		return history
+	}
+	kept := copy(history, history[drop:])
+	clear(history[kept:])
+	return history[:kept]
 }
 
 func pointsEqual(a, b ocommon.Point) bool {
@@ -100,6 +120,7 @@ func watchTxBuildRollbackMessages(
 				},
 			})
 		}
+		h[len(h)-1] = watchTxHistoryEntry{}
 		h = h[:len(h)-1]
 	}
 	*history = h
@@ -135,10 +156,24 @@ func (s *watchServiceServer) watchTxFetchRollbackUndoFromBlocks(
 		if len(hash) == 0 {
 			return out, nil
 		}
-		block, err := s.utxorpc.config.LedgerState.BlockByHash(ctx, hash)
+		// The blocks being undone were just rolled back, so they are no
+		// longer in the database; the lookup also reads the chain
+		// manager's cache of rolled-back blocks.
+		block, err := s.utxorpc.config.LedgerState.BlockByHashIncludingRolledBack(
+			ctx,
+			hash,
+		)
 		if err != nil {
 			if errors.Is(err, models.ErrBlockNotFound) {
-				return out, nil
+				// Ending the walk here would send the client fewer Undo
+				// messages than the rollback needs and leave it on the
+				// abandoned chain with no sign of it, so fail the stream
+				// and let the client resume from its own intersect.
+				return nil, fmt.Errorf(
+					"rolled-back block %x is unavailable: %w",
+					hash,
+					err,
+				)
 			}
 			return nil, err
 		}
@@ -283,6 +318,22 @@ func (s *watchServiceServer) WatchTx(
 		return s.utxorpc.matchTxPredicateNode(tx, predTree)
 	}
 	history := make([]watchTxHistoryEntry, 0, 256)
+	historyBytes := newWatchTxHistoryTracker(
+		s.utxorpc.watchHistory,
+		watchTxUndoHistoryBlocks,
+		s.utxorpc.config.MaxWatchHistoryBytes,
+	)
+	defer historyBytes.close()
+	peerAddr := req.Peer().Addr
+	var releaseReplay func()
+	defer func() {
+		if releaseReplay != nil {
+			releaseReplay()
+		}
+	}()
+	// caughtUp is set once the stream has reached the tip; from then on
+	// blocks it falls behind on are charged but never need a replay slot.
+	caughtUp := false
 	cursorHash := append([]byte(nil), point.Hash...)
 
 	for {
@@ -314,6 +365,7 @@ func (s *watchServiceServer) WatchTx(
 				&history,
 				next.Point,
 			)
+			historyBytes.rolledBack(history)
 			msgs = append(msgs, historyMsgs...)
 			if !found && len(startHash) > 0 {
 				fetchedMsgs, err := s.watchTxFetchRollbackUndoFromBlocks(
@@ -339,6 +391,29 @@ func (s *watchServiceServer) WatchTx(
 				"undo_count", len(msgs),
 			)
 		} else {
+			// A block behind the primary chain tip is replayed history and
+			// is charged against the replay limits shared with FollowTip,
+			// before it is decoded; a block at the tip is live following.
+			tipNumber := s.utxorpc.config.LedgerState.PrimaryChainTip().BlockNumber
+			if next.Block.Number < tipNumber {
+				if !caughtUp && releaseReplay == nil {
+					releaseReplay, err = s.utxorpc.replays.acquireSlot(
+						peerAddr,
+					)
+					if err != nil {
+						return err
+					}
+				}
+				if err := s.utxorpc.replays.charge(ctx, peerAddr); err != nil {
+					return err
+				}
+			} else {
+				caughtUp = true
+				if releaseReplay != nil {
+					releaseReplay()
+					releaseReplay = nil
+				}
+			}
 			transactions, err := s.utxorpc.config.LedgerState.BlockTransactions(ctx, next.Block)
 			if err != nil {
 				s.utxorpc.config.Logger.Error("failed to get block transactions", "error", err)
@@ -355,14 +430,11 @@ func (s *watchServiceServer) WatchTx(
 				return err
 			}
 			msgs = forwardMsgs
-			history = append(history, watchTxHistoryEntry{
+			history = historyBytes.push(history, watchTxHistoryEntry{
 				point:      ocommon.NewPoint(next.Block.Slot, next.Block.Hash),
 				prevHash:   append([]byte(nil), next.Block.PrevHash...),
 				appliedTxs: appliedTxs,
 			})
-			if len(history) > watchTxUndoHistoryBlocks {
-				history = history[len(history)-watchTxUndoHistoryBlocks:]
-			}
 			cursorHash = append([]byte(nil), next.Block.Hash...)
 		}
 		for _, resp := range msgs {

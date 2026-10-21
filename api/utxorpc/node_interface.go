@@ -37,6 +37,12 @@ import (
 type UtxorpcLedgerState interface {
 	BlockTransactions(ctx context.Context, block models.Block) ([]lcommon.Transaction, error)
 	BlockByHash(ctx context.Context, hash []byte) (models.Block, error)
+	// BlockByHashIncludingRolledBack also finds blocks a primary-chain
+	// rollback has already removed from the database.
+	BlockByHashIncludingRolledBack(
+		ctx context.Context,
+		hash []byte,
+	) (models.Block, error)
 	CardanoNodeConfig() *cardano.CardanoNodeConfig
 	Datum(hash []byte) (*models.Datum, error)
 	EvaluateTxContext(

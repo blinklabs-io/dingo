@@ -66,7 +66,13 @@ func (ls *LedgerState) BlockTransactions(
 		)
 	}
 
-	parent, err := ls.BlockByHash(ctx, header.PrevHash().Bytes())
+	// The parent may itself have been rolled back, as when WatchTx rebuilds
+	// the undo of a rolled-back chain, so it is also read from the rollback
+	// cache.
+	parent, err := ls.BlockByHashIncludingRolledBack(
+		ctx,
+		header.PrevHash().Bytes(),
+	)
 	if err != nil {
 		return nil, fmt.Errorf("load certifying block parent: %w", err)
 	}
