@@ -715,3 +715,36 @@ func protocolBlockLimits(
 		return blockProtocolLimits{}, false
 	}
 }
+
+// MaxTxSize returns the MaxTxSize of the current protocol parameters. It
+// reports false when the parameters are unknown or of an era without the
+// parameter, in which case callers leave the check to the ledger rules.
+func (ls *LedgerState) MaxTxSize() (uint, bool) {
+	switch pp := ls.GetCurrentPParams().(type) {
+	case *shelley.ShelleyProtocolParameters:
+		if pp != nil {
+			return pp.MaxTxSize, true
+		}
+	case *mary.MaryProtocolParameters:
+		if pp != nil {
+			return pp.MaxTxSize, true
+		}
+	case *alonzo.AlonzoProtocolParameters:
+		if pp != nil {
+			return pp.MaxTxSize, true
+		}
+	case *babbage.BabbageProtocolParameters:
+		if pp != nil {
+			return pp.MaxTxSize, true
+		}
+	case *conway.ConwayProtocolParameters:
+		if pp != nil {
+			return pp.MaxTxSize, true
+		}
+	case *dijkstra.DijkstraProtocolParameters:
+		if pp != nil {
+			return pp.MaxTxSize, true
+		}
+	}
+	return 0, false
+}

@@ -1926,6 +1926,16 @@ arrive before the rebuild, their older transactions are placed ahead of the
 already queued restores. Revalidation therefore sees transactions in ledger
 order.
 
+`Mempool.AddTransaction` refuses a submission larger than the current
+`MaxTxSize` before decoding it, taking `mutationMutex`, or running ledger
+rules. The size is measured as `common.TxSize` does (the raw CBOR length, less
+the leading array byte from Alonzo on), so the early rejection never refuses a
+transaction the ledger rule would accept; the rule still decides everything
+that passes. The limit comes from the optional `mempool.TxSizeLimitProvider`
+implemented by `LedgerState`, and the rejection is the ledger's own
+`shelley.MaxTxSizeUtxoError`, so every submit path reports it as an ordinary
+transaction rejection.
+
 Mempool admission, revalidation, block-candidate selection and forged-block
 validation each validate a transaction against the UTxO overlay and a state
 overlay (`utxoref.StateOverlay`) holding the earlier pending or selected

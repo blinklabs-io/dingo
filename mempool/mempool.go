@@ -38,6 +38,7 @@ import (
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"go.opentelemetry.io/otel/attribute"
@@ -168,6 +169,15 @@ type TxValidationSessionProvider interface {
 		stillCurrent func() bool,
 		commitIfCurrent func(func() error) (bool, error),
 	) error) error
+}
+
+// TxSizeLimitProvider optionally reports the active protocol's MaxTxSize so
+// admission can refuse an oversized submission before decoding it, taking the
+// mutation gate, or running ledger rules. LedgerState implements it; validators
+// that do not simply skip the early check and rely on the ledger's own rule.
+type TxSizeLimitProvider interface {
+	// MaxTxSize returns the current MaxTxSize and whether it is known.
+	MaxTxSize() (uint, bool)
 }
 
 type MempoolConfig struct {
@@ -1850,6 +1860,9 @@ func (m *Mempool) AddTransaction(
 		// transaction, and an API surface has to be able to tell them apart.
 		return fmt.Errorf("%w in AddTransaction", ErrNilValidator)
 	}
+	if err := m.rejectOversizedTx(txType, txBytes); err != nil {
+		return err
+	}
 	// Decode transaction outside the lock (CPU-bound, no shared state)
 	tmpTx, err := safedecode.Transaction(txType, txBytes)
 	if err != nil {
@@ -1912,6 +1925,34 @@ func (m *Mempool) AddTransaction(
 		}
 	}
 	return nil
+}
+
+// rejectOversizedTx applies the ledger's MaxTxSize rule to the raw submission
+// before any decode, lock, or rule work. The ledger measures a transaction
+// from Alonzo onward without its leading array byte (common.TxSize), so the
+// early measure is the same and an early rejection implies the ledger rule
+// would reject it too. The ledger rule stays authoritative for everything
+// this lets through.
+func (m *Mempool) rejectOversizedTx(txType uint, txBytes []byte) error {
+	provider, ok := m.validator.(TxSizeLimitProvider)
+	if !ok {
+		return nil
+	}
+	maxSize, known := provider.MaxTxSize()
+	if !known {
+		return nil
+	}
+	size := uint(len(txBytes))
+	if txType >= uint(gledger.TxTypeAlonzo) && size > 0 {
+		size--
+	}
+	if size <= maxSize {
+		return nil
+	}
+	return fmt.Errorf(
+		"validate transaction: %w",
+		shelley.MaxTxSizeUtxoError{TxSize: size, MaxTxSize: maxSize},
+	)
 }
 
 // addTransactionAttempt validates and admits one transaction. On
