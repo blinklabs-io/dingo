@@ -2353,8 +2353,7 @@ func registerEvaluateTxTool(
 				return evaluationResult{fee, total, redeemers}, err
 			},
 		)
-		var invalid invalidTransactionError
-		if errors.As(err, &invalid) {
+		if invalid, ok := errors.AsType[invalidTransactionError](err); ok {
 			return &mcp.CallToolResult{
 				IsError: true,
 				Content: []mcp.Content{

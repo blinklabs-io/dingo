@@ -115,7 +115,10 @@ func TestCheckEncodedPayloadSizeBoundary(t *testing.T) {
 		checkEncodedPayloadSize("payload", strings.Repeat("0", limit+1)),
 		"too large",
 	)
-	require.NoError(t, checkDecodedPayloadSize("payload", maxCardanoPayloadBytes))
+	require.NoError(
+		t,
+		checkDecodedPayloadSize("payload", maxCardanoPayloadBytes),
+	)
 	require.ErrorContains(
 		t,
 		checkDecodedPayloadSize("payload", maxCardanoPayloadBytes+1),
@@ -141,7 +144,13 @@ func TestEvaluateTxRejectsOversizedPayloadWithoutParsing(t *testing.T) {
 		),
 	} {
 		t.Run(name, func(t *testing.T) {
-			text := callTool(t, cs, "evaluate_tx", map[string]any{"cbor": payload}, true)
+			text := callTool(
+				t,
+				cs,
+				"evaluate_tx",
+				map[string]any{"cbor": payload},
+				true,
+			)
 			require.Contains(t, text, "too large")
 			require.NotContains(t, text, "Invalid transaction CBOR")
 		})
@@ -183,7 +192,12 @@ func TestEvaluateTxAdmitsBeforeParsing(t *testing.T) {
 			false,
 		)
 	}()
-	testutil.RequireReceive(t, evaluator.entered, 5*time.Second, "first evaluation")
+	testutil.RequireReceive(
+		t,
+		evaluator.entered,
+		5*time.Second,
+		"first evaluation",
+	)
 
 	text := callTool(t, cs, "evaluate_tx", map[string]any{"cbor": "80ff"}, true)
 	require.Contains(t, text, "busy")
@@ -233,7 +247,9 @@ func TestCalculateMinUtxoAcceptsOutputAtTheCap(t *testing.T) {
 		t,
 		cs,
 		"calculate_min_utxo",
-		map[string]any{"output_cbor_hex": strings.Repeat("00", maxCardanoPayloadBytes)},
+		map[string]any{
+			"output_cbor_hex": strings.Repeat("00", maxCardanoPayloadBytes),
+		},
 		true,
 	)
 	require.NotContains(t, text, "too large")
