@@ -10799,7 +10799,9 @@ S3-compatible endpoint) and serve ranged reads by lazy ranged GETs.
 Archive confirmation and snapshot listing keep up to 16 store requests in
 flight rather than one per archive or snapshot in turn. Public listing and the
 aggregator each retain a 30-second catalog index and coalesce concurrent cache
-misses into one store scan. The aggregator completes that catalog I/O before
+misses into one store scan. Certifying a snapshot invalidates both indexes,
+so it lists at once, and the aggregator confirms the open snapshot is still in
+the store before it spends a certificate on it. The aggregator completes that catalog I/O before
 locking signer state; malformed signature submissions and unknown signers are
 rejected before any catalog access. A cancelled confirmation fails rather than
 reporting the archives present.

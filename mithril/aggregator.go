@@ -877,6 +877,18 @@ func (a *Aggregator) tryCertify(
 	); err != nil {
 		return fmt.Errorf("aggregated signature does not verify: %w", err)
 	}
+	// The cached listing may still show a snapshot that retention has
+	// pruned, so confirm the store holds it before a certificate is spent.
+	if _, err := readSnapshot(
+		ctx, a.cfg.Store, open.snapshot.Hash,
+	); err != nil {
+		if !errors.Is(err, ErrArtifactNotFound) {
+			return err
+		}
+		a.open = nil
+		a.invalidateCatalogs()
+		return conflict("the open snapshot was removed before certification")
+	}
 	entity, err := newSignedEntityType(
 		signedEntityTypeCardanoDatabase, open.snapshot.Beacon,
 	)
