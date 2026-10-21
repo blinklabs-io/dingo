@@ -29,7 +29,7 @@
 #   DINGO_SOCKET_PATH     - Unix socket path for NtC (default: /ipc/dingo.socket)
 #   DINGO_DEBUG           - Set to any value to enable debug logging and set -x
 #                           (tracing stops before the dingo command line is built)
-#   DINGO_LOG_FILE        - Optional file receiving dingo stdout/stderr
+#   DINGO_LOG_FILE        - Optional new file receiving dingo stdout/stderr
 #   RESTORE_SNAPSHOT      - Set to any value to bootstrap from Mithril snapshot on first run
 
 set -euo pipefail
@@ -267,7 +267,7 @@ forward_signal() {
 }
 
 run_managed_dingo() {
-  local output_file="$1"
+  local output_fd="$1"
   shift
 
   # A shutdown request received before a child exists must not start new work.
@@ -275,8 +275,8 @@ run_managed_dingo() {
     exit "${PENDING_SIGNAL_EXIT_CODE}"
   fi
 
-  if [[ -n "${output_file}" ]]; then
-    dingo "$@" >>"${output_file}" 2>&1 &
+  if [[ -n "${output_fd}" ]]; then
+    dingo "$@" >&"${output_fd}" &
   else
     dingo "$@" &
   fi
@@ -295,6 +295,31 @@ run_managed_dingo() {
   fi
   MANAGED_CHILD_PID=""
   return "${child_exit_code}"
+}
+
+open_dingo_log() {
+  local path="$1"
+  local previous_umask
+  local enabled_noclobber="false"
+
+  mkdir -p "$(dirname "${path}")"
+  previous_umask="$(umask)"
+  umask 0133
+  if [[ ! -o noclobber ]]; then
+    set -o noclobber
+    enabled_noclobber="true"
+  fi
+  if ! exec {DINGO_LOG_FD}>"${path}"; then
+    if [[ "${enabled_noclobber}" == "true" ]]; then
+      set +o noclobber
+    fi
+    umask "${previous_umask}"
+    die "DINGO_LOG_FILE must name a new file: ${path}"
+  fi
+  if [[ "${enabled_noclobber}" == "true" ]]; then
+    set +o noclobber
+  fi
+  umask "${previous_umask}"
 }
 
 # --------------------------------------------------------------------------- #
@@ -479,14 +504,13 @@ log "Starting dingo $(redact_args "${DINGO_ARGS[@]}")"
 
 # Persist structured output for test harnesses when requested, while keeping
 # stdout as the default for normal deployments.
+DINGO_LOG_FD=""
 if [[ -n "${DINGO_LOG_FILE:-}" ]]; then
-  mkdir -p "$(dirname "${DINGO_LOG_FILE}")"
-  touch "${DINGO_LOG_FILE}"
-  chmod 0644 "${DINGO_LOG_FILE}"
+  open_dingo_log "${DINGO_LOG_FILE}"
 fi
 
 # Start dingo and preserve its exit status, including after a forwarded signal.
-if run_managed_dingo "${DINGO_LOG_FILE:-}" "${DINGO_ARGS[@]}"; then
+if run_managed_dingo "${DINGO_LOG_FD}" "${DINGO_ARGS[@]}"; then
   exit_code=0
 else
   exit_code=$?
