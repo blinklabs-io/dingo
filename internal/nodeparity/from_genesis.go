@@ -30,6 +30,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"sync"
 	"time"
 
 	"github.com/blinklabs-io/dingo/internal/koiosparity"
@@ -570,6 +571,9 @@ func RunFromGenesis(
 	}
 
 	var (
+		// The ChainSync callbacks and reconnect loop access this shared state
+		// from different goroutines.
+		stateMu            sync.Mutex
 		lastEpoch          uint64
 		haveLastEpoch      bool
 		utxoRefs           UTxOSet
@@ -734,8 +738,11 @@ func RunFromGenesis(
 		if ctx.Err() != nil {
 			return false, ctx.Err()
 		}
+		stateMu.Lock()
+		sessionProgressed := progressed
+		stateMu.Unlock()
 		sleepFor, next := nextSessionRetryDelay(
-			delay, progressed, sessionRetryDelay, sessionRetryMaxDelay,
+			delay, sessionProgressed, sessionRetryDelay, sessionRetryMaxDelay,
 		)
 		logf(logMsg+" (retrying in %s): %v", sleepFor, cause)
 		select {
@@ -748,7 +755,9 @@ func RunFromGenesis(
 	}
 
 	for {
+		stateMu.Lock()
 		progressed = false
+		stateMu.Unlock()
 
 		rawConn, dialErr := dialRaw(ctx, protoFromAddr(dingoAddr), dingoAddr)
 		if dialErr != nil {
@@ -775,6 +784,8 @@ func RunFromGenesis(
 						blockData any,
 						_ chainsync.Tip,
 					) error {
+						stateMu.Lock()
+						defer stateMu.Unlock()
 						block, ok := blockData.(lcommon.Block)
 						if !ok {
 							return fmt.Errorf(
@@ -949,6 +960,8 @@ func RunFromGenesis(
 				),
 				chainsync.WithRollBackwardFunc(
 					func(_ chainsync.CallbackContext, point pcommon.Point, _ chainsync.Tip) error {
+						stateMu.Lock()
+						defer stateMu.Unlock()
 						// Recorded before any of this rollback's own work runs
 						// -- see lastPoint's doc comment above.
 						lastPoint = point
@@ -1063,13 +1076,16 @@ func RunFromGenesis(
 			csConn.Close() //nolint:errcheck
 			return errors.New("ChainSync client unavailable")
 		}
-		if err := cs.Client.Sync([]pcommon.Point{lastPoint}); err != nil {
+		stateMu.Lock()
+		sessionStartPoint := lastPoint
+		stateMu.Unlock()
+		if err := cs.Client.Sync([]pcommon.Point{sessionStartPoint}); err != nil {
 			stopOnCancel()
 			csConn.Close() //nolint:errcheck
 			ok, retryErr := retryOrStop(
 				fmt.Sprintf(
 					"nodeparity: start chainsync from slot %d failed",
-					lastPoint.Slot,
+					sessionStartPoint.Slot,
 				),
 				err,
 			)
@@ -1094,10 +1110,13 @@ func RunFromGenesis(
 			sessionErr = err
 		}
 
+		stateMu.Lock()
+		sessionEndSlot := lastPoint.Slot
+		stateMu.Unlock()
 		ok, err := retryOrStop(
 			fmt.Sprintf(
 				"nodeparity: chainsync session ended, resuming from slot %d",
-				lastPoint.Slot,
+				sessionEndSlot,
 			),
 			sessionErr,
 		)

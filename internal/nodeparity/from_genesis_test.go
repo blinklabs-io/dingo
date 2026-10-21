@@ -170,6 +170,7 @@ func TestRunFromGenesis_EpochNoFailureDoesNotHangSession(t *testing.T) {
 		)
 	}()
 
+	server.waitForSessions(t, 1)
 	// Block 0 shares its epoch with the mandatory initial rollback, so it
 	// only captures the baseline and reports nothing.
 	server.allowStep(t)
@@ -252,12 +253,23 @@ func TestRunFromGenesis_EpochNoFailureDoesNotSkipEpoch(t *testing.T) {
 		case r := <-results:
 			return r
 		case <-time.After(20 * time.Second):
-			t.Fatal("timed out waiting for an epoch result")
+			server.mu.Lock()
+			var cursor int
+			if server.activeSession != nil {
+				cursor = server.activeSession.cursor
+			}
+			sessions := server.sessions
+			server.mu.Unlock()
+			t.Fatalf(
+				"timed out waiting for an epoch result; cursor=%d sessions=%d logs: %v",
+				cursor, sessions, logs.all(),
+			)
 			return EpochResult{}
 		}
 	}
 
 	// Block 0: baseline only, same epoch as the initial rollback.
+	server.waitForSessions(t, 1)
 	server.allowStep(t)
 	// Block 1: first epoch-2 block, its currentEpochNo fails.
 	server.allowStep(t)
@@ -660,50 +672,26 @@ func TestNextSessionRetryDelay(t *testing.T) {
 // initial forced RollBackward matching a real session's own
 // NeedsInitialRollback behavior, a step-gated real block feed, and one
 // deliberate extra RollBackward once rollbackAfterCursor blocks have been
-// delivered) with the exact LocalStateQuery answers RunFromGenesis needs
+// delivered and the test permits it) with the exact LocalStateQuery answers
+// RunFromGenesis needs
 // (HardForkCurrentEraQuery, ShelleyCurrentProtocolParamsQuery,
 // ShelleyPoolDistr2Query, ShelleyUtxoWholeQuery, ShelleyEpochNoQuery).
 //
-// GetEpochNo's answer is resolved from epochBySlot, keyed by the slot most
-// recently Acquired, rather than a single mutable field a test flips
-// between allowStep calls: RunFromGenesis calls currentEpochNo on its own,
-// separately-dialed connection from both its roll-forward and
-// roll-backward callbacks, and the deliberate RollBackward below fires
-// automatically on the chainsync session's own background goroutine as
-// soon as the prior callback returns -- not synchronized with the test
-// goroutine at all. A shared mutable "current epoch" field would race that
-// goroutine's own currentEpochNo call against the test's next setEpoch.
-// Keying the answer to the Acquired point instead removes the race:
-// epochBySlot is fixed once, before RunFromGenesis ever starts.
+// GetEpochNo's answer is resolved from epochBySlot, keyed by the acquired
+// point for its connection. The epoch map is fixed before RunFromGenesis
+// starts, and separate LocalStateQuery sessions can be active concurrently.
 type genesisFakeServer struct {
-	mu                 sync.Mutex
-	chain              csmock.Chain
-	cursor             int
-	rolledBack         bool
-	rollbackTo         *pcommon.Point
-	firedExtraRollback bool
+	mu         sync.Mutex
+	chain      csmock.Chain
+	rollbackTo *pcommon.Point
 	// rollbackAfterCursor delays the deliberate RollBackward until cursor
 	// has advanced past it (i.e. that many real blocks have been
 	// delivered), instead of firing on the very next requestNext call --
 	// letting a test observe at least one genuine clean epoch report
 	// before the rollback, not just epochs after it.
 	rollbackAfterCursor int
-	// step gates every real RollForward reply (not either RollBackward
-	// branch): a test calls allowStep once per block it wants delivered,
-	// so a state change (nothing here yet, but see epochBySlot) lands at a
-	// precise point instead of racing an ungated server.
-	step chan struct{}
-	// sessionGone is closed when a new session begins (findIntersect), and
-	// releases any previous session's handler still parked on step.
-	//
-	// Without it, a session whose client abandoned it mid-feed leaves its
-	// handler blocked on the shared step channel, where it silently consumes
-	// the next allowStep meant for the reconnected session -- which then
-	// waits forever for a block the test believes it already released. Only
-	// a test that drives a reconnect (see
-	// from_genesis_test.go) can reach that state; a
-	// single-session test closes nothing.
-	sessionGone chan struct{}
+	activeSession       *genesisFakeSession
+	protocolErrors      []error
 	// sessions counts FindIntersect calls, i.e. how many chainsync sessions
 	// this fake has served. waitForSessions lets a test that drives a
 	// reconnect resume stepping only once the NEW session is actually
@@ -713,8 +701,8 @@ type genesisFakeServer struct {
 	sessions       int
 	sessionStarted chan struct{}
 
-	epochBySlot      map[uint64]int
-	lastAcquiredSlot uint64
+	epochBySlot        map[uint64]int
+	acquiredSlotByConn map[ouroboros.ConnectionId]uint64
 
 	// failUtxoWholeCount, when nonzero, makes the first failUtxoWholeCount
 	// calls to ShelleyUtxoWholeQuery (i.e. every GetUTxOWhole call, whether
@@ -729,6 +717,7 @@ type genesisFakeServer struct {
 	// never fails, leaving every other test's behavior unchanged.
 	failUtxoWholeCount int
 	utxoWholeCalls     int
+	utxoWholeCalled    chan struct{}
 
 	// failEpochNoAtSlot, when non-nil, makes ShelleyEpochNoQuery fail once
 	// for each slot in it whose count is still above zero, decrementing as
@@ -738,6 +727,15 @@ type genesisFakeServer struct {
 	// which is the whole point: see
 	// TestRunFromGenesis_EpochNoFailureDoesNotHangSession.
 	failEpochNoAtSlot map[uint64]int
+}
+
+type genesisFakeSession struct {
+	cursor             int
+	rolledBack         bool
+	firedExtraRollback bool
+	step               chan struct{}
+	rollbackStep       chan struct{}
+	closed             chan struct{}
 }
 
 // failEpochNoOnce arranges for the next ShelleyEpochNoQuery Acquired at slot
@@ -751,15 +749,15 @@ func (s *genesisFakeServer) failEpochNoOnce(slot uint64) {
 	s.failEpochNoAtSlot[slot]++
 }
 
-// takeEpochNoFailure reports whether this ShelleyEpochNoQuery, for the most
-// recently Acquired slot, is one of the failures failEpochNoOnce armed.
-func (s *genesisFakeServer) takeEpochNoFailure() bool {
+// takeEpochNoFailure reports whether this ShelleyEpochNoQuery, for this
+// connection's acquired slot, is one of the failures failEpochNoOnce armed.
+func (s *genesisFakeServer) takeEpochNoFailure(connID ouroboros.ConnectionId) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.failEpochNoAtSlot[s.lastAcquiredSlot] <= 0 {
+	if s.failEpochNoAtSlot[s.acquiredSlotByConn[connID]] <= 0 {
 		return false
 	}
-	s.failEpochNoAtSlot[s.lastAcquiredSlot]--
+	s.failEpochNoAtSlot[s.acquiredSlotByConn[connID]]--
 	return true
 }
 
@@ -768,9 +766,9 @@ func newGenesisFakeServer(t *testing.T, blockCount int) *genesisFakeServer {
 	chain, err := csmock.BuildChain(1, ledger.Blake2b256{}, 100, 20, blockCount)
 	require.NoError(t, err)
 	return &genesisFakeServer{
-		chain:          chain,
-		step:           make(chan struct{}),
-		sessionStarted: make(chan struct{}, 16),
+		chain:           chain,
+		sessionStarted:  make(chan struct{}, 16),
+		utxoWholeCalled: make(chan struct{}, blockCount+1),
 	}
 }
 
@@ -790,6 +788,24 @@ func (s *genesisFakeServer) waitForSessions(t *testing.T, n int) {
 		case <-s.sessionStarted:
 		case <-deadline:
 			t.Fatalf("only %d chainsync sessions started, wanted %d", got, n)
+		}
+	}
+}
+
+func (s *genesisFakeServer) waitForUTxOWholeCalls(t *testing.T, n int) {
+	t.Helper()
+	deadline := time.After(10 * time.Second)
+	for {
+		s.mu.Lock()
+		got := s.utxoWholeCalls
+		s.mu.Unlock()
+		if got >= n {
+			return
+		}
+		select {
+		case <-s.utxoWholeCalled:
+		case <-deadline:
+			t.Fatalf("only %d whole UTxO queries started, wanted %d", got, n)
 		}
 	}
 }
@@ -822,9 +838,9 @@ func newGenesisFakeServerWithTransactions(
 		chain.Tips[i] = csmock.TipOf(block)
 	}
 	return &genesisFakeServer{
-		chain:          chain,
-		step:           make(chan struct{}),
-		sessionStarted: make(chan struct{}, 16),
+		chain:           chain,
+		sessionStarted:  make(chan struct{}, 16),
+		utxoWholeCalled: make(chan struct{}, blockCount+1),
 	}
 }
 
@@ -832,19 +848,38 @@ func newGenesisFakeServerWithTransactions(
 func (s *genesisFakeServer) allowStep(t *testing.T) {
 	t.Helper()
 	s.mu.Lock()
-	step := s.step
+	session := s.activeSession
 	s.mu.Unlock()
+	if session == nil {
+		t.Fatal("no active chainsync session to release")
+	}
 	select {
-	case step <- struct{}{}:
-	case <-time.After(15 * time.Second):
-		t.Fatal("server did not consume the step signal in time")
+	case session.step <- struct{}{}:
+	case <-session.closed:
+		t.Fatal("chainsync session closed before consuming the step signal")
+	}
+}
+
+// allowRollback releases one eligible deliberate rollback.
+func (s *genesisFakeServer) allowRollback(t *testing.T) {
+	t.Helper()
+	s.mu.Lock()
+	session := s.activeSession
+	s.mu.Unlock()
+	if session == nil {
+		t.Fatal("no active chainsync session to release")
+	}
+	select {
+	case session.rollbackStep <- struct{}{}:
+	case <-session.closed:
+		t.Fatal("chainsync session closed before accepting the rollback signal")
 	}
 }
 
 // findIntersect resumes at an offered chain point or origin. Empty tip
 // probes have no possible intersection and do not start a sync session.
 func (s *genesisFakeServer) findIntersect(
-	_ chainsync.CallbackContext, points []pcommon.Point,
+	session *genesisFakeSession, _ chainsync.CallbackContext, points []pcommon.Point,
 ) (pcommon.Point, chainsync.Tip, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -852,29 +887,25 @@ func (s *genesisFakeServer) findIntersect(
 		return pcommon.Point{}, s.chain.Tip(),
 			chainsync.ErrIntersectNotFound
 	}
-	// FindIntersect starts a session, and a real server opens every session
-	// with a RollBackward (NeedsInitialRollback), not just the first one.
-	// Clearing the flag here is what makes a reconnect after a failed
-	// session behave like a real one -- which is the whole subject of
-	// TestRunFromGenesis_EpochNoFailureDoesNotSkipEpoch. A run that never
-	// reconnects calls this exactly once, so nothing else changes.
-	s.rolledBack = false
-	if s.sessionGone != nil {
-		close(s.sessionGone)
+	if s.activeSession != nil {
+		close(s.activeSession.closed)
 	}
-	s.sessionGone = make(chan struct{})
+	session.cursor = 0
+	session.rolledBack = false
+	session.firedExtraRollback = false
 	s.sessions++
+	s.activeSession = session
 	select {
 	case s.sessionStarted <- struct{}{}:
 	default:
 	}
 	for i, p := range s.chain.Points {
 		if p.Slot == points[0].Slot {
-			s.cursor = i + 1
+			session.cursor = i + 1
 			return points[0], s.chain.Tips[i], nil
 		}
 	}
-	s.cursor = 0
+	session.cursor = 0
 	return intersectOrNotFound(points, s.chain.Tip())
 }
 
@@ -883,51 +914,65 @@ func (s *genesisFakeServer) findIntersect(
 // real block feed) -- see that function's own doc comment in
 // incremental_test.go for why the initial rollback exists
 // unconditionally on every session.
-func (s *genesisFakeServer) requestNext(ctx chainsync.CallbackContext) error {
+func (s *genesisFakeServer) requestNext(
+	session *genesisFakeSession, ctx chainsync.CallbackContext,
+) error {
 	s.mu.Lock()
-	if !s.rolledBack {
-		s.rolledBack = true
+	if !session.rolledBack {
+		session.rolledBack = true
 		defer s.mu.Unlock()
 		return ctx.Server.RollBackward(
-			s.chain.Points[max(s.cursor-1, 0)], s.chain.Tip(),
+			s.chain.Points[max(session.cursor-1, 0)], s.chain.Tip(),
 		)
 	}
-	if s.rollbackTo != nil && !s.firedExtraRollback &&
-		s.cursor > s.rollbackAfterCursor && s.cursor < s.chain.Len() {
-		s.firedExtraRollback = true
-		defer s.mu.Unlock()
-		return ctx.Server.RollBackward(*s.rollbackTo, s.chain.Tip())
-	}
-	if s.cursor >= s.chain.Len() {
+	rollbackEligible := s.rollbackTo != nil && !session.firedExtraRollback &&
+		session.cursor > s.rollbackAfterCursor && session.cursor < s.chain.Len()
+	if session.cursor >= s.chain.Len() {
 		defer s.mu.Unlock()
 		return ctx.Server.AwaitReply()
 	}
-	step := s.step
-	gone := s.sessionGone
+	rollbackStep := (<-chan struct{})(nil)
+	if rollbackEligible {
+		rollbackStep = session.rollbackStep
+	}
 	s.mu.Unlock()
 	select {
-	case <-step:
-	case <-gone:
+	case <-rollbackStep:
+		s.mu.Lock()
+		if s.activeSession != session || session.firedExtraRollback {
+			s.mu.Unlock()
+			return errors.New("chainsync session superseded")
+		}
+		session.firedExtraRollback = true
+		point := *s.rollbackTo
+		tip := s.chain.Tip()
+		s.mu.Unlock()
+		return ctx.Server.RollBackward(point, tip)
+	case <-session.step:
+	case <-session.closed:
 		// A newer session has started; stop feeding this one rather than
 		// consuming a step meant for its successor.
 		return errors.New("chainsync session superseded")
 	}
 
 	s.mu.Lock()
+	if s.activeSession != session {
+		s.mu.Unlock()
+		return errors.New("chainsync session superseded")
+	}
 	defer s.mu.Unlock()
-	block := s.chain.Blocks[s.cursor]
-	tip := s.chain.Tips[s.cursor]
-	s.cursor++
+	block := s.chain.Blocks[session.cursor]
+	tip := s.chain.Tips[session.cursor]
+	session.cursor++
 	return ctx.Server.RollForward(uint(block.Type()), block.Cbor(), tip)
 }
 
-// epochForLastAcquired returns epochBySlot's answer for the most recently
-// Acquired slot -- see this type's own doc comment for why this, not a
-// single mutable field, is what GetEpochNo answers from.
-func (s *genesisFakeServer) epochForLastAcquired() int {
+// epochForAcquired returns epochBySlot's answer for this connection's
+// acquired slot.
+func (s *genesisFakeServer) epochForAcquired(connID ouroboros.ConnectionId) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.epochBySlot[s.lastAcquiredSlot]
+	return s.epochBySlot[s.acquiredSlotByConn[connID]]
 }
 
 // lsqConfig answers exactly the query types RunFromGenesis needs:
@@ -943,13 +988,16 @@ func (s *genesisFakeServer) lsqConfig() localstatequery.Config {
 	return localstatequery.NewConfig(
 		localstatequery.WithAcquireFunc(
 			func(
-				_ localstatequery.CallbackContext,
+				ctx localstatequery.CallbackContext,
 				target localstatequery.AcquireTarget,
 				_ bool,
 			) error {
 				if sp, ok := target.(localstatequery.AcquireSpecificPoint); ok {
 					s.mu.Lock()
-					s.lastAcquiredSlot = sp.Point.Slot
+					if s.acquiredSlotByConn == nil {
+						s.acquiredSlotByConn = make(map[ouroboros.ConnectionId]uint64)
+					}
+					s.acquiredSlotByConn[ctx.ConnectionId] = sp.Point.Slot
 					s.mu.Unlock()
 				}
 				return nil
@@ -957,7 +1005,7 @@ func (s *genesisFakeServer) lsqConfig() localstatequery.Config {
 		),
 		localstatequery.WithQueryFunc(
 			func(
-				_ localstatequery.CallbackContext,
+				ctx localstatequery.CallbackContext,
 				q localstatequery.QueryWrapper,
 			) (any, error) {
 				block, ok := q.Query.(*localstatequery.BlockQuery)
@@ -985,6 +1033,10 @@ func (s *genesisFakeServer) lsqConfig() localstatequery.Config {
 					case *localstatequery.ShelleyUtxoWholeQuery:
 						s.mu.Lock()
 						s.utxoWholeCalls++
+						select {
+						case s.utxoWholeCalled <- struct{}{}:
+						default:
+						}
 						fail := s.utxoWholeCalls <= s.failUtxoWholeCount
 						s.mu.Unlock()
 						if fail {
@@ -997,12 +1049,12 @@ func (s *genesisFakeServer) lsqConfig() localstatequery.Config {
 							Results: map[localstatequery.UtxoId]ledger.BabbageTransactionOutput{},
 						}, nil
 					case *localstatequery.ShelleyEpochNoQuery:
-						if s.takeEpochNoFailure() {
+						if s.takeEpochNoFailure(ctx.ConnectionId) {
 							return nil, errors.New(
 								"simulated epoch-number query failure",
 							)
 						}
-						return []any{s.epochForLastAcquired()}, nil
+						return []any{s.epochForAcquired(ctx.ConnectionId)}, nil
 					default:
 						return nil, fmt.Errorf("unexpected shelley query %T", inner.Query)
 					}
@@ -1031,14 +1083,25 @@ func (s *genesisFakeServer) serve(t *testing.T, listener net.Listener, magic uin
 				return
 			}
 			go func() {
+				session := &genesisFakeSession{
+					step:         make(chan struct{}, s.chain.Len()+1),
+					rollbackStep: make(chan struct{}, 1),
+					closed:       make(chan struct{}),
+				}
 				oconn, err := ouroboros.New(
 					ouroboros.WithConnection(conn),
 					ouroboros.WithServer(true),
 					ouroboros.WithNetworkMagic(magic),
 					ouroboros.WithNodeToNode(false),
 					ouroboros.WithChainSyncConfig(chainsync.NewConfig(
-						chainsync.WithFindIntersectFunc(s.findIntersect),
-						chainsync.WithRequestNextFunc(s.requestNext),
+						chainsync.WithFindIntersectFunc(func(
+							ctx chainsync.CallbackContext, points []pcommon.Point,
+						) (pcommon.Point, chainsync.Tip, error) {
+							return s.findIntersect(session, ctx, points)
+						}),
+						chainsync.WithRequestNextFunc(func(ctx chainsync.CallbackContext) error {
+							return s.requestNext(session, ctx)
+						}),
 					)),
 					ouroboros.WithLocalStateQueryConfig(s.lsqConfig()),
 				)
@@ -1047,7 +1110,11 @@ func (s *genesisFakeServer) serve(t *testing.T, listener net.Listener, magic uin
 					return
 				}
 				defer oconn.Close() //nolint:errcheck
-				<-oconn.ErrorChan()
+				if err, ok := <-oconn.ErrorChan(); ok && err != nil {
+					s.mu.Lock()
+					s.protocolErrors = append(s.protocolErrors, err)
+					s.mu.Unlock()
+				}
 			}()
 		}
 	}()
@@ -1124,11 +1191,24 @@ func TestRunFromGenesis_UTxOTaintLifecycle(t *testing.T) {
 		case r := <-results:
 			return r
 		case <-time.After(10 * time.Second):
-			t.Fatal("timed out waiting for an epoch result")
+			server.mu.Lock()
+			var cursor int
+			if server.activeSession != nil {
+				cursor = server.activeSession.cursor
+			}
+			sessions := server.sessions
+			protocolErrors := append([]error(nil), server.protocolErrors...)
+			server.mu.Unlock()
+			t.Fatalf(
+				"timed out waiting for an epoch result; cursor=%d "+
+					"sessions=%d protocol errors=%v",
+				cursor, sessions, protocolErrors,
+			)
 			return EpochResult{}
 		}
 	}
 
+	server.waitForSessions(t, 1)
 	// Block 0: genesis baseline capture only -- shares its epoch with the
 	// mandatory initial rollback, so it never starts a new epoch boundary
 	// and reports nothing.
@@ -1140,12 +1220,11 @@ func TestRunFromGenesis_UTxOTaintLifecycle(t *testing.T) {
 	report1 := recv()
 	assert.True(t, report1.UTxOAttempted)
 	assert.NoError(t, report1.UTxOErr)
-
-	// The deliberate rollback fires automatically on the chainsync
-	// session's own next requestNext call, once rollbackAfterCursor blocks
-	// have been delivered -- the step gate only applies to a genuine block
-	// delivery, not either RollBackward branch, so nothing here needs to
-	// wait for it explicitly before the next allowStep.
+	// Calls one and two are the initial baseline and this epoch's comparison.
+	// Release the rollback only after the report, then wait until its
+	// re-baseline query starts before releasing the next block.
+	server.allowRollback(t)
+	server.waitForUTxOWholeCalls(t, 3)
 	server.allowStep(t)
 
 	// Block 2: the epoch right after the rollback -- must be tainted, not
@@ -1245,6 +1324,7 @@ func TestRunFromGenesis_TxInfoChunkFailureTaintsEpoch(t *testing.T) {
 		}
 	}
 
+	server.waitForSessions(t, 1)
 	// Block 0: genesis baseline capture only -- reports nothing.
 	server.allowStep(t)
 
@@ -1343,6 +1423,7 @@ func TestRunFromGenesis_UTxOBaselineRetryRecovers(t *testing.T) {
 		}
 	}
 
+	server.waitForSessions(t, 1)
 	// Block 0: genesis baseline capture attempted and fails (GetUTxOWhole
 	// call #1, the only call configured to fail) -- shares its epoch with
 	// the mandatory initial rollback, so it never starts a new epoch
