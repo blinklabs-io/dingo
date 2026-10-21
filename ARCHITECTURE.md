@@ -11314,6 +11314,15 @@ shared strict pagination parser (count 1–100, page 1–21474836). The epoch
 next, previous and stakes lists, whose Blockfrost schema defines only count and
 page, drop `order` before parsing, so it is ignored like any other undefined
 query parameter.
+
+Block transaction hashes, CBOR, counts, affected addresses, latest-block
+transaction lists, and transaction-by-hash lookup use the ledger transaction
+view. For a certified Dijkstra ranking block, that view resolves the parent
+ranking block's endorser-block announcement and loads the matching persisted
+manifest and transaction bodies. It verifies the manifest and each body
+against the announced hash, ordered references, transaction hashes, and encoded
+sizes before exposing them. A missing or inconsistent certified body is an
+error rather than an empty transaction list.
 The root document is served only at the literal `/` path (`GET /{$}`).
 Documented operations without a handler return `501`; unknown paths fall
 through to a catch-all `404` handler instead of the root document.
@@ -11635,7 +11644,11 @@ as an ordered SQL limit before materializing the distribution; final protobuf
 sizing still rejects responses whose variable fields cross the byte budget.
 
 `ReadTx` rejects hashes that are not exactly 32 bytes before database access and
-uses a constant-size not-found error.
+uses a constant-size not-found error. Its transaction lookup uses the ledger
+transaction view, so a Dijkstra certifying ranking block returns its certified
+endorser-block transaction body rather than searching only the empty ranking
+block body. `WatchTx` uses the same view for forward applies and rollback
+undos, keeping its stream and query results consistent.
 
 `WaitForTx` rejects references that are not exactly 32 bytes before logging,
 allocating pending state, subscribing, or looking up transactions. Empty

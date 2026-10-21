@@ -405,6 +405,10 @@ func (a *NodeAdapter) blockInfoFromBlock(
 			err,
 		)
 	}
+	blockTransactions, err := a.ledgerState.BlockTransactions(context.Background(), block)
+	if err != nil {
+		return BlockInfo{}, fmt.Errorf("get transactions for block %x: %w", block.Hash, err)
+	}
 	epoch, err := a.ledgerState.SlotToEpoch(block.Slot)
 	if err != nil {
 		return BlockInfo{}, fmt.Errorf(
@@ -457,7 +461,7 @@ func (a *NodeAdapter) blockInfoFromBlock(
 		EpochSlot: block.Slot - epoch.StartSlot,
 		Time:      slotTime.Unix(),
 		Size:      uint64(len(block.Cbor)),
-		TxCount:   len(decodedBlock.Transactions()),
+		TxCount:   len(blockTransactions),
 		SlotLeader: blockIssuer(
 			decodedBlock.IssuerVkey(),
 		),
@@ -616,14 +620,16 @@ func (a *NodeAdapter) LatestBlockTxHashes() (
 	[]string, error,
 ) {
 	tip := a.ledgerState.Tip()
-	_, decodedBlock, err := a.latestBlockData(
-		tip.Point.Hash,
-	)
+	block, err := a.ledgerState.BlockByHash(context.Background(), tip.Point.Hash)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("get latest block: %w", err)
 	}
-	ret := make([]string, 0, len(decodedBlock.Transactions()))
-	for _, tx := range decodedBlock.Transactions() {
+	txs, err := a.ledgerState.BlockTransactions(context.Background(), block)
+	if err != nil {
+		return nil, fmt.Errorf("get transactions for latest block: %w", err)
+	}
+	ret := make([]string, 0, len(txs))
+	for _, tx := range txs {
 		ret = append(ret, tx.Hash().String())
 	}
 	return ret, nil
@@ -4941,17 +4947,13 @@ func (a *NodeAdapter) addressUtxoBlockHashes(
 	return ret, nil
 }
 
-func findTransactionInBlock(
-	block lcommon.Block,
+func findTransactionInSlice(
+	txs []lcommon.Transaction,
 	hash []byte,
 	index uint32,
 ) lcommon.Transaction {
-	txs := block.Transactions()
-	if int(index) < len(txs) {
-		tx := txs[index]
-		if bytes.Equal(tx.Hash().Bytes(), hash) {
-			return tx
-		}
+	if int(index) < len(txs) && bytes.Equal(txs[index].Hash().Bytes(), hash) {
+		return txs[index]
 	}
 	for _, tx := range txs {
 		if bytes.Equal(tx.Hash().Bytes(), hash) {
@@ -4995,16 +4997,16 @@ func (a *NodeAdapter) decodedTransactionByHash(
 			err,
 		)
 	}
-	decodedBlock, err := block.Decode()
+	decodedTransactions, err := a.ledgerState.BlockTransactions(context.Background(), block)
 	if err != nil {
 		return nil, models.Block{}, nil, fmt.Errorf(
-			"decode block %x for transaction %x: %w",
+			"get transactions for block %x for transaction %x: %w",
 			tx.BlockHash,
 			hash,
 			err,
 		)
 	}
-	decodedTx := findTransactionInBlock(decodedBlock, hash, tx.BlockIndex)
+	decodedTx := findTransactionInSlice(decodedTransactions, hash, tx.BlockIndex)
 	if decodedTx == nil {
 		return nil, models.Block{}, nil, fmt.Errorf(
 			"transaction %x not found in block %x: %w",

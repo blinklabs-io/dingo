@@ -1,0 +1,84 @@
+// Copyright 2026 Blink Labs Software
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package ledger
+
+import (
+	"context"
+	"testing"
+
+	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/gouroboros/cbor"
+	gledger "github.com/blinklabs-io/gouroboros/ledger"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/stretchr/testify/require"
+)
+
+func TestBlockTransactionsForCertifiedEndorserBlock(t *testing.T) {
+	t.Parallel()
+	f := newLeiosCertApplyFixture(t)
+	manifest := testLeiosManifest(f)
+	f.ebHash = manifest.Hash()
+	parent := f.announce()
+	certifier, _, _ := f.certifyingChild(parent)
+	manifestCbor, err := manifest.MarshalCBOR()
+	require.NoError(t, err)
+	require.NoError(t, f.db.SetLeiosEB(
+		parent.SlotNumber(), f.ebHash.Bytes(), manifestCbor, f.ebTxs,
+	))
+
+	stored := models.Block{
+		Slot: certifier.SlotNumber(), Hash: certifier.Hash().Bytes(),
+		PrevHash: certifier.PrevHash().Bytes(), Number: certifier.BlockNumber(),
+		Type: gledger.BlockTypeDijkstra, Cbor: certifier.Cbor(),
+	}
+	txs, err := f.ls.BlockTransactions(context.Background(), stored)
+	require.NoError(t, err)
+	require.Len(t, txs, 1)
+	require.Equal(t, f.ebTx.Hash(), txs[0].Hash())
+	require.Equal(t, f.ebTx.Cbor(), txs[0].Cbor())
+}
+
+func TestBlockTransactionsForCertifiedEndorserBlockRejectsInvalidStoredBody(t *testing.T) {
+	t.Parallel()
+	f := newLeiosCertApplyFixture(t)
+	manifest := testLeiosManifest(f)
+	f.ebHash = manifest.Hash()
+	parent := f.announce()
+	certifier, _, _ := f.certifyingChild(parent)
+	manifestCbor, err := manifest.MarshalCBOR()
+	require.NoError(t, err)
+	badBody, err := cbor.Encode([]any{cbor.RawMessage{0x80}})
+	require.NoError(t, err)
+	require.NoError(t, f.db.SetLeiosEB(
+		parent.SlotNumber(), f.ebHash.Bytes(), manifestCbor,
+		[]cbor.RawMessage{badBody},
+	))
+	stored := models.Block{
+		Slot: certifier.SlotNumber(), Hash: certifier.Hash().Bytes(),
+		PrevHash: certifier.PrevHash().Bytes(), Number: certifier.BlockNumber(),
+		Type: gledger.BlockTypeDijkstra, Cbor: certifier.Cbor(),
+	}
+	_, err = f.ls.BlockTransactions(context.Background(), stored)
+	require.Error(t, err)
+}
+
+func testLeiosManifest(f *leiosCertApplyFixture) *lcommon.LeiosEndorserBlock {
+	return &lcommon.LeiosEndorserBlock{
+		TransactionReferences: []lcommon.LeiosTransactionReference{{
+			TransactionHash: f.ebTx.Hash(),
+			TransactionSize: uint32(len(f.ebTxs[0])),
+		}},
+	}
+}
