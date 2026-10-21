@@ -1066,8 +1066,12 @@ these series carries a connection or peer label.
   more than its batch latency; the remainder is per-block bookkeeping in the
   transaction body (CBOR offsets, delta assembly, the evolving nonce), the
   nonce and tip writes, the trusted-replay input prefetch, and the
-  post-commit tip update. `header_verify` is observed on blockfetch arrival
-  and `epoch_rollover` is its own transaction, both outside that window.
+  post-commit tip update. On a validating Preview sync from a Mithril
+  snapshot the remainder measured 6.5% of batch latency over 1,778 blocks of
+  catch-up in 57 chunks, and 14.5% over 136 single-block chunks at the tip,
+  where the per-chunk tip and nonce writes are a larger share of a short
+  batch. `header_verify` is observed on blockfetch arrival and
+  `epoch_rollover` is its own transaction, both outside that window.
 - `dingo_ledger_blockfetch_batch_in_flight`,
   `dingo_ledger_blockfetch_continuation_pending` and
   `dingo_ledger_blockfetch_connection_selected` mirror
