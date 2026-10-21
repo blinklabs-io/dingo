@@ -332,6 +332,28 @@ func (a *NodeAdapter) BlockAddresses(
 	for _, tx := range indexed {
 		byHash[hex.EncodeToString(tx.Hash)] = tx
 	}
+	// The ledger applies a transaction repeated by a later endorser block
+	// once, so its row stays under the earlier certifying block.
+	var missing [][]byte
+	for _, tx := range txs {
+		if _, ok := byHash[tx.Hash().String()]; !ok {
+			missing = append(missing, tx.Hash().Bytes())
+		}
+	}
+	if len(missing) > 0 {
+		applied, err := a.ledgerState.Database().
+			GetTransactionsByHashes(ctx, missing, nil)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"get transactions for block %x: %w",
+				block.Hash,
+				err,
+			)
+		}
+		for _, tx := range applied {
+			byHash[hex.EncodeToString(tx.Hash)] = tx
+		}
+	}
 
 	outputAddresses := make([][]string, 0, len(txs))
 	spent := make([][]models.Utxo, 0, len(txs))

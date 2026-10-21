@@ -19,11 +19,18 @@ import (
 	"encoding/hex"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/internal/safedecode"
 	testfixtures "github.com/blinklabs-io/dingo/internal/test/fixtures"
+	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
+	"github.com/blinklabs-io/gouroboros/ledger/babbage"
+	"github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
 )
 
@@ -131,4 +138,172 @@ func TestNodeAdapterCertifiedEndorserBlockMissingBody(t *testing.T) {
 		context.Background(), other.Certifier.Hash().String(),
 	)
 	require.ErrorContains(t, err, "load certified endorser-block")
+}
+
+// certifiedRankingBlock builds a Dijkstra ranking block the way the shared
+// fixture does, so a test can announce an existing endorser block again.
+func certifiedRankingBlock(
+	number, slot uint64,
+	prevHash common.Blake2b256,
+	certified bool,
+	announcement []byte,
+) (*dijkstra.DijkstraBlock, error) {
+	certifiedFlag, err := cbor.Encode(certified)
+	if err != nil {
+		return nil, err
+	}
+	block := &dijkstra.DijkstraBlock{
+		BlockHeader: &dijkstra.DijkstraBlockHeader{
+			BabbageBlockHeader: babbage.BabbageBlockHeader{
+				Body: babbage.BabbageBlockHeaderBody{
+					BlockNumber: number,
+					Slot:        slot,
+					PrevHash:    prevHash,
+					VrfKey:      make([]byte, 32),
+					VrfResult: common.VrfResult{
+						Output: make([]byte, 64),
+						Proof:  make([]byte, 80),
+					},
+					OpCert: babbage.BabbageOpCert{
+						HotVkey:   make([]byte, 32),
+						Signature: make([]byte, 64),
+					},
+					ProtoVersion: babbage.BabbageProtoVersion{
+						Major: dijkstra.MinProtocolVersionDijkstra,
+					},
+				},
+				Signature: make([]byte, 448),
+			},
+			LeiosHeaderExtension: []cbor.RawMessage{
+				certifiedFlag,
+				announcement,
+			},
+		},
+	}
+	if certified {
+		block.BlockBody.LeiosCertificate = &dijkstra.DijkstraLeiosCertificate{
+			Signers:             []byte{0x80},
+			AggregatedSignature: make([]byte, 48),
+		}
+	}
+	block.BlockHeader.Body.BlockBodyHash = block.BlockBody.Hash()
+	bodyCbor, err := block.BlockBody.MarshalCBOR()
+	if err != nil {
+		return nil, err
+	}
+	block.BlockHeader.Body.BlockBodySize = uint64(len(bodyCbor))
+	blockCbor, err := block.MarshalCBOR()
+	if err != nil {
+		return nil, err
+	}
+	return dijkstra.NewDijkstraBlockFromCbor(blockCbor)
+}
+
+func TestNodeAdapterCertifiedEndorserBlockBlockInfo(t *testing.T) {
+	t.Parallel()
+	nodeConfig, err := cardano.NewCardanoNodeConfigFromEmbedFS(
+		cardano.EmbeddedConfigFS,
+		cardano.EmbeddedConfigPath("preview"),
+	)
+	require.NoError(t, err)
+	adapter, raw, db := newDBBackedAdapter(t, nodeConfig)
+	f, txHash := seedCertifiedEndorserBlock(t, db)
+	ctx := context.Background()
+	certifierHash := f.Certifier.Hash().String()
+
+	_, err = raw.Exec(
+		`INSERT INTO epoch (epoch_id, start_slot, length_in_slots, slot_length, era_id) VALUES (0, 0, 86400, 1000, 6)`,
+	)
+	require.NoError(t, err)
+	require.NoError(
+		t,
+		adapter.ledgerState.PrepareEpochCacheForStartup(ctx),
+	)
+	adapter.ledgerState.SetTipForTesting(ochainsync.Tip{
+		Point: ocommon.NewPoint(
+			f.Certifier.SlotNumber(),
+			f.Certifier.Hash().Bytes(),
+		),
+		BlockNumber: f.Certifier.BlockNumber(),
+	})
+	hashBytes, err := hex.DecodeString(txHash)
+	require.NoError(t, err)
+	insertAdapterTransaction(t, raw, &models.Transaction{
+		Hash:       hashBytes,
+		BlockHash:  f.Certifier.Hash().Bytes(),
+		BlockIndex: 0,
+		Slot:       f.Certifier.SlotNumber(),
+		Valid:      true,
+	})
+
+	info, err := adapter.BlockByHashOrNumber(ctx, certifierHash)
+	require.NoError(t, err)
+	require.Equal(t, 1, info.TxCount)
+
+	latest, err := adapter.LatestBlock(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 1, latest.TxCount)
+
+	hashes, err := adapter.LatestBlockTxHashes(ctx)
+	require.NoError(t, err)
+	require.Equal(t, []string{txHash}, hashes)
+
+	addresses, err := adapter.BlockAddresses(ctx, certifierHash)
+	require.NoError(t, err)
+	// The fixture transaction has no outputs or inputs to touch.
+	require.Empty(t, addresses)
+}
+
+func TestNodeAdapterBlockAddressesRepeatedEndorserTransaction(t *testing.T) {
+	t.Parallel()
+	adapter, raw, db := newDBBackedAdapter(t)
+	f, txHash := seedCertifiedEndorserBlock(t, db)
+	ctx := context.Background()
+
+	// The first certified block applied the endorser transaction, so its row
+	// is indexed under that block.
+	hashBytes, err := hex.DecodeString(txHash)
+	require.NoError(t, err)
+	insertAdapterTransaction(t, raw, &models.Transaction{
+		Hash:       hashBytes,
+		BlockHash:  f.Certifier.Hash().Bytes(),
+		BlockIndex: 0,
+		Slot:       f.Certifier.SlotNumber(),
+		Valid:      true,
+	})
+
+	// A second certified block announces the same endorser block; the
+	// ledger skips the already applied transaction.
+	announcement, err := cbor.Encode([]any{f.EndorserHash.Bytes(), uint64(4096)})
+	require.NoError(t, err)
+	announcer2, err := certifiedRankingBlock(
+		3, 200, f.Certifier.Hash(), false, announcement,
+	)
+	require.NoError(t, err)
+	certifier2, err := certifiedRankingBlock(
+		4, 201, announcer2.Hash(), true, []byte{0xf6},
+	)
+	require.NoError(t, err)
+	for _, block := range []*dijkstra.DijkstraBlock{announcer2, certifier2} {
+		require.NoError(t, db.BlockCreate(models.Block{
+			Hash:     block.Hash().Bytes(),
+			PrevHash: block.PrevHash().Bytes(),
+			Slot:     block.SlotNumber(),
+			Number:   block.BlockNumber(),
+			ID:       block.BlockNumber() + database.BlockInitialIndex,
+			Type:     uint(block.Type()),
+			Cbor:     block.Cbor(),
+		}, nil))
+	}
+	require.NoError(t, db.SetLeiosEB(
+		announcer2.SlotNumber(), f.EndorserHash.Bytes(), f.Manifest,
+		f.Transactions,
+	))
+
+	hashes, err := adapter.BlockTransactionHashes(ctx, certifier2.Hash().String())
+	require.NoError(t, err)
+	require.Equal(t, []string{txHash}, hashes)
+
+	_, err = adapter.BlockAddresses(ctx, certifier2.Hash().String())
+	require.NoError(t, err)
 }
