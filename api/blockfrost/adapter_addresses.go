@@ -17,11 +17,13 @@ package blockfrost
 import (
 	"context"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"math/big"
 	"slices"
 	"strings"
 
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
@@ -322,6 +324,7 @@ func (a *NodeAdapter) AddressTotal(
 	received := newUnitSums()
 	sent := newUnitSums()
 	outputs := 0
+	candidates := 0
 	query := &models.UtxoHistoryQuery{
 		AddressPatterns: []models.UtxoAddressPattern{pattern},
 		Status:          models.UtxoHistoryStatusAll,
@@ -334,8 +337,26 @@ func (a *NodeAdapter) AddressTotal(
 		}
 		// The read runs in txn, which carries ctx.
 		//nolint:contextcheck // UtxosWithHistory takes its context from txn
-		batch, err := db.UtxosWithHistory(query, txn)
+		var batch []models.UtxoWithHistory
+		if isPaymentCred {
+			batch, err = db.UtxosWithHistory(query, txn)
+		} else {
+			var read int
+			batch, read, err = db.UtxosWithHistoryBounded(
+				query,
+				limits.maxTotalOutputs-candidates,
+				txn,
+			)
+			candidates += read
+		}
 		if err != nil {
+			if errors.Is(err, database.ErrUtxoHistoryCandidateLimit) {
+				return AddressTotalInfo{}, fmt.Errorf(
+					"more than %d output candidates: %w",
+					limits.maxTotalOutputs,
+					ErrAddressSummaryTooLarge,
+				)
+			}
 			return AddressTotalInfo{}, fmt.Errorf(
 				"get output history for %q: %w",
 				address,

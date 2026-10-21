@@ -35,6 +35,12 @@ import (
 // view). Callers may use errors.Is to detect a genuinely-absent row.
 var ErrUtxoNotFound = types.ErrUtxoNotFound
 
+// ErrUtxoHistoryCandidateLimit reports that exact-address history matching
+// exhausted its coarse-candidate budget before completing the query.
+var ErrUtxoHistoryCandidateLimit = errors.New(
+	"utxo history candidate limit exceeded",
+)
+
 // MaxUtxosByAddressResults is the default bound passed to UtxosByAddress
 // for callers with no more specific limit of their own. It caps how many
 // candidate rows a broad multi-address query (or a single address with an
@@ -911,8 +917,31 @@ func (d *Database) UtxosWithHistory(
 	q *models.UtxoHistoryQuery,
 	txn *Txn,
 ) ([]models.UtxoWithHistory, error) {
+	utxos, _, err := d.utxosWithHistory(q, -1, txn)
+	return utxos, err
+}
+
+// UtxosWithHistoryBounded is UtxosWithHistory with a limit on the coarse
+// candidates examined while completing exact-address matching. It returns the
+// number of candidates read so callers can enforce one budget across pages.
+func (d *Database) UtxosWithHistoryBounded(
+	q *models.UtxoHistoryQuery,
+	maxCandidates int,
+	txn *Txn,
+) ([]models.UtxoWithHistory, int, error) {
+	if maxCandidates < 0 {
+		return nil, 0, fmt.Errorf("maxCandidates must not be negative")
+	}
+	return d.utxosWithHistory(q, maxCandidates, txn)
+}
+
+func (d *Database) utxosWithHistory(
+	q *models.UtxoHistoryQuery,
+	maxCandidates int,
+	txn *Txn,
+) ([]models.UtxoWithHistory, int, error) {
 	if q == nil {
-		return nil, models.ErrNilUtxoHistoryQuery
+		return nil, 0, models.ErrNilUtxoHistoryQuery
 	}
 	if txn == nil {
 		txn = d.TransactionContext(context.Background(), false)
@@ -921,18 +950,29 @@ func (d *Database) UtxosWithHistory(
 	requiresExact := !q.MatchAllAddresses &&
 		models.RequiresExactAddressFilter(q.AddressPatterns)
 	if !requiresExact || q.Limit <= 0 {
+		readQuery := q
+		if maxCandidates >= 0 &&
+			(q.Limit <= 0 || q.Limit > maxCandidates+1) {
+			boundedQuery := *q
+			boundedQuery.Limit = maxCandidates + 1
+			readQuery = &boundedQuery
+		}
 		utxos, err := d.utxoStore().GetUtxosWithHistory(
-			q,
+			readQuery,
 			txn.Metadata(),
 		)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
+		}
+		if maxCandidates >= 0 && len(utxos) > maxCandidates {
+			return nil, len(utxos), ErrUtxoHistoryCandidateLimit
 		}
 		patterns := q.AddressPatterns
 		if !requiresExact {
 			patterns = nil
 		}
-		return d.loadAndFilterHistoricalUtxos(utxos, patterns, txn)
+		ret, err := d.loadAndFilterHistoricalUtxos(utxos, patterns, txn)
+		return ret, len(utxos), err
 	}
 
 	// Exact address identity is only available in output CBOR. Scan coarse SQL
@@ -946,13 +986,23 @@ func (d *Database) UtxosWithHistory(
 	// exact match is not a correctness boundary.
 	scanQuery.Limit = min(max(q.Limit, 128), 1024)
 	ret := make([]models.UtxoWithHistory, 0, q.Limit)
+	candidates := 0
 	for len(ret) < q.Limit {
+		batchLimit := scanQuery.Limit
+		if maxCandidates >= 0 {
+			batchLimit = min(batchLimit, maxCandidates-candidates+1)
+		}
+		scanQuery.Limit = batchLimit
 		batch, err := d.utxoStore().GetUtxosWithHistory(
 			&scanQuery,
 			txn.Metadata(),
 		)
 		if err != nil {
-			return nil, err
+			return nil, candidates, err
+		}
+		candidates += len(batch)
+		if maxCandidates >= 0 && candidates > maxCandidates {
+			return nil, candidates, ErrUtxoHistoryCandidateLimit
 		}
 		filtered, err := d.loadAndFilterHistoricalUtxos(
 			batch,
@@ -960,7 +1010,7 @@ func (d *Database) UtxosWithHistory(
 			txn,
 		)
 		if err != nil {
-			return nil, err
+			return nil, candidates, err
 		}
 		remaining := q.Limit - len(ret)
 		if len(filtered) > remaining {
@@ -978,7 +1028,7 @@ func (d *Database) UtxosWithHistory(
 			TxId:       last.TxId,
 		}
 	}
-	return ret, nil
+	return ret, candidates, nil
 }
 
 func (d *Database) loadAndFilterHistoricalUtxos(

@@ -11253,8 +11253,10 @@ rejects more than 1,000 assets to enrich, since each costs three point reads
 and the route has no pagination.
 
 The address total reads the output history, spent outputs included, in keyset
-batches sized so no read passes the budget: more than 100,000 outputs or more
-than 5,000 distinct received assets is rejected with HTTP 400. The account
+batches sized so no read passes the budget. A full-address query counts every
+coarse credential candidate examined while completing exact CBOR matching;
+more than 100,000 candidates or returned outputs, or more than 5,000 distinct
+received assets, is rejected with HTTP 400. The account
 address total and account address assets routes pass
 `models.AccountAggregateLimits` to the store: 100,000 UTxO rows, 200,000 asset
 holdings and 5,000 distinct assets, with the transaction count capped at twice

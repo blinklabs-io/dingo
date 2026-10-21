@@ -205,7 +205,9 @@ WHERE u.credential_tag = ? AND u.staking_key = ?`
 	}
 	args := []any{credentialTag, stakingKey}
 	if maxRows > 0 {
-		query += " LIMIT ?"
+		// OFFSET prevents SQLite from flattening the capped subquery and
+		// sorting every matching holding before applying the limit.
+		query += " LIMIT ? OFFSET 0"
 		args = append(args, maxRows+1)
 	}
 	dir := orderDirectionFromString(order)
