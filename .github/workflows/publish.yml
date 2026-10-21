@@ -213,7 +213,7 @@ jobs:
   # always had, uninstrumented: the conformance package alone approaches the
   # per-package timeout when PostgreSQL and MySQL run alongside SQLite under
   # -race, so service-backed coverage and race coverage are separate jobs.
-  # See go-test.yml's go-test step for why that timeout is 60m.
+  # See go-test.yml's go-test step for why that timeout is 20m.
   go-test-linux:
     name: go-test (Linux)
     needs: [go-test-linux-quick]
@@ -221,7 +221,7 @@ jobs:
       matrix:
         go-version: [1.26.x]
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 60
     services:
       minio:
         image: ghcr.io/blinklabs-io/minio:main@sha256:4682bc04bc46ae19aca740dfcdb7341399669fd7fe23f74271e9d09d36a88ada
@@ -358,7 +358,7 @@ jobs:
       - name: go-test-live-lifecycle
         run: make test-live-lifecycle
       - name: go-test
-        run: go test -v -tags dingo_extra_plugins -ldflags="-s -w" -timeout 60m ./...
+        run: go test -v -tags dingo_extra_plugins -ldflags="-s -w" -timeout 20m ./...
       - name: runner-probe-end
         if: always()
         run: python3 .github/scripts/runner-probe.py end

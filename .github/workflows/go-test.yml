@@ -330,8 +330,10 @@ jobs:
     # Backstop only, replacing GitHub's 360-minute default; the per-step
     # -timeout values are the diagnostics. Higher than the other jobs here
     # because this one's slow steps serialize: db-integration (10m),
-    # live-lifecycle (20m) and go-test (60m) all precede each other.
-    timeout-minutes: 120
+    # live-lifecycle (20m) and go-test (20m) all precede each other. 60m is
+    # about twice the slowest of 92 passing jobs from 10 to 20 October
+    # (29.1m) and clears those three step bounds plus setup.
+    timeout-minutes: 60
     services:
       minio:
         image: ghcr.io/blinklabs-io/minio:main@sha256:4682bc04bc46ae19aca740dfcdb7341399669fd7fe23f74271e9d09d36a88ada
@@ -484,19 +486,17 @@ jobs:
         #
         # -timeout is a hang diagnostic rather than a budget: it panics with a
         # goroutine dump naming the stuck test, which this job's
-        # timeout-minutes cannot do. That only holds while it sits clear of
-        # what the suite legitimately takes, and the previous 30m did not.
-        # This job's service DSNs put internal/test/conformance on real
-        # Postgres and MySQL as well as SQLite, which makes that package the
-        # long pole: it took 707-1238s across ten consecutive runs, a 1.75x
-        # spread on identical work, and reached 1800s in run 35509830038 with
-        # TestRulesConformanceVectorsMysql still issuing TRUNCATE statements
-        # rather than deadlocked. A ceiling 1.45x above the worst passing run
-        # fails pull requests for runner speed instead of for cause. 60m is
-        # 2.9x that worst run and leaves the 120m backstop 30m clear of this
-        # job's serialized 10m + 20m + 60m; internal/docsparity's
-        # TestPackageTimeoutsStayUnderJobBackstops keeps that ordering.
-        run: go test -v -tags dingo_extra_plugins -ldflags="-s -w" -timeout 60m ./...
+        # timeout-minutes cannot do. It applies per package, and this job's
+        # service DSNs make internal/test/conformance, which replays the corpus
+        # on SQLite, Postgres and MySQL, the longest package. Across 92 passing
+        # jobs from 10 to 20 October that package took 352s at the median and
+        # 401s at the slowest; 20m is three times the slowest, so a runner
+        # three times slower than any seen still passes, and a hang is named
+        # 40 minutes sooner than under the previous 60m. The 120m job
+        # backstop it was sized against is now 60m, and
+        # internal/docsparity's TestPackageTimeoutsStayUnderJobBackstops keeps
+        # the step bounds under it.
+        run: go test -v -tags dingo_extra_plugins -ldflags="-s -w" -timeout 20m ./...
       - name: runner-probe-end
         if: always()
         run: python3 .github/scripts/runner-probe.py end
