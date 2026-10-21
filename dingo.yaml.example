@@ -33,9 +33,9 @@
 # output CBOR held in memory while resolving, the encoded reply size, and the
 # run time. A request over any bound fails, and because LocalStateQuery has no
 # failure reply for a query, the client's connection is closed. Zero keeps the
-# default; a negative value removes the bound. Raising or removing these lets
-# one client make the node hold the whole UTxO set in memory (millions of
-# entries on a public network), so only do so for trusted clients.
+# default; negative values are rejected. Raising these lets one client make the
+# node hold more of the UTxO set in memory, so keep finite values appropriate
+# for the clients allowed to connect.
 # Defaults: 50000 UTxOs, 33554432 bytes (32 MiB), 33554432 bytes (32 MiB), "30s"
 # CLI: --local-state-query-utxo-whole-max-items,
 #      --local-state-query-utxo-whole-max-retained-bytes,

@@ -5476,7 +5476,7 @@ retains at most 32 MiB of resolved CBOR in its assembled result, encodes at most
 a 32 MiB response, and has a 30-second server deadline. Operators set each bound through
 `LedgerStateConfig.UtxoWholeQueryLimits` (`localStateQueryUtxoWhole*` in YAML,
 with matching environment variables and flags): zero keeps the built-in bound
-and a negative value removes it. Exceeding a bound fails the query, and since
+and negative values are rejected. Exceeding a bound fails the query, and since
 LocalStateQuery has no failure reply for `MsgQuery`, the protocol server ends
 the client's node-to-client connection. Workers may hold one additional resolved
 output apiece while delivering results. The checked encoding is cached so the

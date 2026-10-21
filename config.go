@@ -2160,8 +2160,7 @@ func WithLocalStateQueryViewMaxLifetime(
 
 // WithLocalStateQueryUtxoWholeLimits bounds each node-to-client
 // LocalStateQuery GetUTxOWhole request. A zero field keeps that limit's
-// built-in default and a negative field removes it; see
-// ledger.UtxoWholeQueryLimits.
+// built-in default. Negative fields are invalid; see ledger.UtxoWholeQueryLimits.
 func WithLocalStateQueryUtxoWholeLimits(
 	limits ledger.UtxoWholeQueryLimits,
 ) ConfigOptionFunc {

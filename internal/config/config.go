@@ -748,8 +748,8 @@ type Config struct {
 	LocalStateQueryViewMaxLifetime string `yaml:"localStateQueryViewMaxLifetime" envconfig:"DINGO_LOCAL_STATE_QUERY_VIEW_MAX_LIFETIME"`
 	// LocalStateQueryUtxoWhole* bound one LocalStateQuery GetUTxOWhole
 	// request. Zero selects the built-in default (50000 UTxOs, 32 MiB
-	// retained CBOR, 32 MiB encoded response, 30s) and a negative value
-	// removes that bound.
+	// retained CBOR, 32 MiB encoded response, 30s). Negative values are
+	// rejected.
 	LocalStateQueryUtxoWholeMaxItems         int           `yaml:"localStateQueryUtxoWholeMaxItems"         envconfig:"DINGO_LOCAL_STATE_QUERY_UTXO_WHOLE_MAX_ITEMS"`
 	LocalStateQueryUtxoWholeMaxRetainedBytes int64         `yaml:"localStateQueryUtxoWholeMaxRetainedBytes" envconfig:"DINGO_LOCAL_STATE_QUERY_UTXO_WHOLE_MAX_RETAINED_BYTES"`
 	LocalStateQueryUtxoWholeMaxResponseBytes int64         `yaml:"localStateQueryUtxoWholeMaxResponseBytes" envconfig:"DINGO_LOCAL_STATE_QUERY_UTXO_WHOLE_MAX_RESPONSE_BYTES"`

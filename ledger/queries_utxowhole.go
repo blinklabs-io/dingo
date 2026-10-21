@@ -21,7 +21,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"math"
 	"sort"
 	"sync"
 	"time"
@@ -78,8 +77,8 @@ var errUtxoWholeLimitExceeded = errors.New(
 
 // UtxoWholeQueryLimits bounds one LocalStateQuery GetUTxOWhole request.
 // For every field, zero selects the built-in default (50,000 UTxOs, 32 MiB
-// of retained CBOR, a 32 MiB encoded response, 30 seconds) and a negative
-// value removes that bound. A request that exceeds a bound fails, and
+// of retained CBOR, a 32 MiB encoded response, 30 seconds). Negative values
+// are invalid. A request that exceeds a bound fails, and
 // because LocalStateQuery has no failure reply for a query, the client's
 // node-to-client connection is closed.
 type UtxoWholeQueryLimits struct {
@@ -101,35 +100,59 @@ type utxoWholeLimits struct {
 	timeout          time.Duration
 }
 
-// resolve applies the zero-is-default, negative-is-unbounded convention. An
-// unbounded timeout is zero because queryShelleyUtxoWholeWithLimits skips the
-// deadline for a non-positive timeout.
+func (l UtxoWholeQueryLimits) validate() error {
+	switch {
+	case l.MaxItems < 0:
+		return fmt.Errorf(
+			"GetUTxOWhole MaxItems must not be negative: %d",
+			l.MaxItems,
+		)
+	case l.MaxRetainedBytes < 0:
+		return fmt.Errorf(
+			"GetUTxOWhole MaxRetainedBytes must not be negative: %d",
+			l.MaxRetainedBytes,
+		)
+	case l.MaxResponseBytes < 0:
+		return fmt.Errorf(
+			"GetUTxOWhole MaxResponseBytes must not be negative: %d",
+			l.MaxResponseBytes,
+		)
+	case l.Timeout < 0:
+		return fmt.Errorf(
+			"GetUTxOWhole Timeout must not be negative: %s",
+			l.Timeout,
+		)
+	default:
+		return nil
+	}
+}
+
+// resolve applies the zero-is-default convention after validation.
 func (l UtxoWholeQueryLimits) resolve() utxoWholeLimits {
 	return utxoWholeLimits{
-		maxItems: resolveUtxoWholeLimit(
-			l.MaxItems, maxUtxoWholeItems, math.MaxInt,
-		),
+		maxItems: resolveUtxoWholeLimit(l.MaxItems, maxUtxoWholeItems),
 		maxRetainedBytes: resolveUtxoWholeLimit(
-			l.MaxRetainedBytes, maxUtxoWholeRetainedBytes, math.MaxInt64,
+			l.MaxRetainedBytes,
+			maxUtxoWholeRetainedBytes,
 		),
 		maxResponseBytes: resolveUtxoWholeLimit(
-			l.MaxResponseBytes, maxUtxoWholeResponseBytes, math.MaxInt64,
+			l.MaxResponseBytes,
+			maxUtxoWholeResponseBytes,
 		),
-		timeout: resolveUtxoWholeLimit(l.Timeout, utxoWholeQueryTimeout, 0),
+		timeout: resolveUtxoWholeLimit(
+			l.Timeout,
+			utxoWholeQueryTimeout,
+		),
 	}
 }
 
 func resolveUtxoWholeLimit[T int | int64 | time.Duration](
-	configured, def, unbounded T,
+	configured, def T,
 ) T {
-	switch {
-	case configured == 0:
+	if configured == 0 {
 		return def
-	case configured < 0:
-		return unbounded
-	default:
-		return configured
 	}
+	return configured
 }
 
 // utxoWholeResult caches the checked wire representation. LocalStateQuery's
@@ -279,6 +302,9 @@ func encodeUtxoWholeResult(
 func (ls *LedgerState) queryShelleyUtxoWhole(ctx context.Context, at QueryPoint,
 	txn *database.Txn,
 ) (any, error) {
+	if err := ls.config.UtxoWholeQueryLimits.validate(); err != nil {
+		return nil, err
+	}
 	return ls.queryShelleyUtxoWholeWithLimits(
 		ctx,
 		at,

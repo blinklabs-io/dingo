@@ -18,7 +18,6 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"math"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -284,7 +283,6 @@ func TestQueryShelleyUtxoWhole_HonorsConfiguredLimits(t *testing.T) {
 			rejected: true,
 		},
 		{name: "raised", limits: UtxoWholeQueryLimits{MaxItems: 10}},
-		{name: "unbounded", limits: UtxoWholeQueryLimits{MaxItems: -1}},
 		{
 			name:     "retained bytes",
 			limits:   UtxoWholeQueryLimits{MaxRetainedBytes: 1},
@@ -310,6 +308,10 @@ func TestQueryShelleyUtxoWhole_HonorsConfiguredLimits(t *testing.T) {
 			require.Len(t, requireUtxoWholeMap(t, result), 3)
 		})
 	}
+	ls := newPoolDistr2Ledger(t, db)
+	ls.config.UtxoWholeQueryLimits.MaxItems = -1
+	_, err = ls.Query(t.Context(), utxoWholeQuery(), QueryPoint{})
+	require.ErrorContains(t, err, "MaxItems must not be negative")
 }
 
 func TestUtxoWholeQueryLimitsResolve(t *testing.T) {
@@ -331,16 +333,28 @@ func TestUtxoWholeQueryLimitsResolve(t *testing.T) {
 		MaxResponseBytes: 9,
 		Timeout:          time.Minute,
 	}.resolve())
-	require.Equal(t, utxoWholeLimits{
-		maxItems:         math.MaxInt,
-		maxRetainedBytes: math.MaxInt64,
-		maxResponseBytes: math.MaxInt64,
-	}, UtxoWholeQueryLimits{
-		MaxItems:         -1,
-		MaxRetainedBytes: -1,
-		MaxResponseBytes: -1,
-		Timeout:          -1,
-	}.resolve())
+}
+
+func TestUtxoWholeQueryLimitsRejectNegativeValues(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name   string
+		limits UtxoWholeQueryLimits
+	}{
+		{"items", UtxoWholeQueryLimits{MaxItems: -1}},
+		{"retained bytes", UtxoWholeQueryLimits{MaxRetainedBytes: -1}},
+		{"response bytes", UtxoWholeQueryLimits{MaxResponseBytes: -1}},
+		{"timeout", UtxoWholeQueryLimits{Timeout: -1}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			require.ErrorContains(
+				t,
+				tc.limits.validate(),
+				"must not be negative",
+			)
+		})
+	}
 }
 
 func TestQueryShelleyUtxoWholeViaGetCBOR(t *testing.T) {
