@@ -16,8 +16,11 @@ package lifecycle
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -136,10 +139,17 @@ func Snapshot(
 			break
 		}
 	}
-	if err := os.MkdirAll(filepath.Dir(dir), 0o755); err != nil {
+	parentDir := filepath.Dir(dir)
+	if err := requirePrivateSnapshotParent(parentDir); err != nil {
+		return Manifest{}, err
+	}
+	if err := os.MkdirAll(parentDir, 0o755); err != nil {
 		return Manifest{}, fmt.Errorf(
-			"create snapshot parent directory %q: %w", filepath.Dir(dir), err,
+			"create snapshot parent directory %q: %w", parentDir, err,
 		)
+	}
+	if err := requirePrivateSnapshotParent(parentDir); err != nil {
+		return Manifest{}, err
 	}
 	if err := os.Mkdir(dir, 0o755); err != nil {
 		if errors.Is(err, fs.ErrExist) {
@@ -151,19 +161,28 @@ func Snapshot(
 			"create snapshot directory %q: %w", dir, err,
 		)
 	}
+	snapshotRoot, err := os.OpenRoot(dir)
+	if err != nil {
+		return Manifest{}, fmt.Errorf("open snapshot directory %q: %w", dir, err)
+	}
+	defer snapshotRoot.Close() //nolint:errcheck // the directory handle has no buffered data
 	// Best-effort cleanup so a failed snapshot doesn't permanently block
 	// retrying at the same path with an "already exists" error. Safe from
 	// this point on: the Mkdir above guarantees this call exclusively
 	// created dir, so nothing else can be concurrently writing into it.
 	defer func() {
 		if err != nil && !errors.Is(err, ErrSnapshotCatalogUpdate) {
-			_ = RemoveSnapshotContext(context.WithoutCancel(ctx), dir)
+			if snapshotRootMatchesPath(snapshotRoot, dir) == nil {
+				_ = RemoveSnapshotContext(context.WithoutCancel(ctx), dir)
+			} else {
+				removeSnapshotRootContents(snapshotRoot)
+			}
 		}
 	}()
 
 	blobPath := filepath.Join(dir, BlobBackupFileName)
-	blobFile, err := os.OpenFile(
-		blobPath,
+	blobFile, err := snapshotRoot.OpenFile(
+		BlobBackupFileName,
 		os.O_WRONLY|os.O_CREATE|os.O_EXCL,
 		0o644,
 	)
@@ -197,6 +216,9 @@ func Snapshot(
 	// "capture a version now" from "stream that version" — a larger
 	// rework of both, not attempted here.
 	metadataPath := filepath.Join(dir, MetadataBackupFileName)
+	if err := snapshotRootMatchesPath(snapshotRoot, dir); err != nil {
+		return Manifest{}, err
+	}
 	logger := db.Logger()
 	if logger != nil {
 		logger.Debug(
@@ -393,6 +415,9 @@ func Snapshot(
 	if metadataErr != nil {
 		return Manifest{}, fmt.Errorf("backup metadata store: %w", metadataErr)
 	}
+	if err := snapshotRootMatchesPath(snapshotRoot, dir); err != nil {
+		return Manifest{}, err
+	}
 	if err := ctx.Err(); err != nil {
 		return Manifest{}, err
 	}
@@ -406,7 +431,7 @@ func Snapshot(
 	if err := blobFile.Close(); err != nil {
 		return Manifest{}, fmt.Errorf("close %q: %w", blobPath, err)
 	}
-	metadataFile, err := os.OpenFile(metadataPath, os.O_WRONLY, 0)
+	metadataFile, err := snapshotRoot.OpenFile(MetadataBackupFileName, os.O_WRONLY, 0)
 	if err != nil {
 		return Manifest{}, fmt.Errorf("open %q for sync: %w", metadataPath, err)
 	}
@@ -420,7 +445,7 @@ func Snapshot(
 		)
 	}
 	// Persist the backup names before a manifest can make them discoverable.
-	if err := syncDir(dir); err != nil {
+	if err := syncSnapshotRoot(snapshotRoot); err != nil {
 		return Manifest{}, fmt.Errorf("sync snapshot directory: %w", err)
 	}
 	if err := syncDir(filepath.Dir(dir)); err != nil {
@@ -436,20 +461,20 @@ func Snapshot(
 		}
 	}
 
-	blobInfo, err := os.Stat(blobPath)
+	blobInfo, err := snapshotRoot.Stat(BlobBackupFileName)
 	if err != nil {
 		return Manifest{}, fmt.Errorf("stat %q: %w", blobPath, err)
 	}
-	metadataInfo, err := os.Stat(metadataPath)
+	metadataInfo, err := snapshotRoot.Stat(MetadataBackupFileName)
 	if err != nil {
 		return Manifest{}, fmt.Errorf("stat %q: %w", metadataPath, err)
 	}
 
-	blobDigest, _, err := hashFileContext(ctx, blobPath)
+	blobDigest, _, err := hashSnapshotRootFile(ctx, snapshotRoot, BlobBackupFileName)
 	if err != nil {
 		return Manifest{}, fmt.Errorf("hash %q: %w", blobPath, err)
 	}
-	metadataDigest, _, err := hashFileContext(ctx, metadataPath)
+	metadataDigest, _, err := hashSnapshotRootFile(ctx, snapshotRoot, MetadataBackupFileName)
 	if err != nil {
 		return Manifest{}, fmt.Errorf("hash %q: %w", metadataPath, err)
 	}
@@ -477,17 +502,61 @@ func Snapshot(
 	if err := ctx.Err(); err != nil {
 		return Manifest{}, err
 	}
-	if err := writeManifest(ctx, dir, manifest, opts...); err != nil {
+	written, err := writeManifestAtRoot(ctx, snapshotRoot, dir, manifest, opts...)
+	if err != nil {
 		return Manifest{}, err
 	}
-	// WriteManifest computes the checksum (and fills in FormatVersion) on
-	// its own local copy of manifest, passed by value — the caller's copy
-	// here is never updated, so re-read what was actually written rather
-	// than return a Manifest whose Checksum/FormatVersion don't match the
-	// file this function just produced.
-	written, err := ReadManifest(dir, opts...)
-	if err != nil {
-		return Manifest{}, fmt.Errorf("re-read manifest after write: %w", err)
-	}
 	return written, nil
+}
+
+func snapshotRootMatchesPath(root *os.Root, dir string) error {
+	rootInfo, err := root.Stat(".")
+	if err != nil {
+		return fmt.Errorf("stat opened snapshot directory: %w", err)
+	}
+	pathInfo, err := os.Lstat(dir)
+	if err != nil {
+		return fmt.Errorf("%w: inspect %q: %w", ErrSnapshotDirectoryReplaced, dir, err)
+	}
+	if pathInfo.Mode()&os.ModeSymlink != 0 || !pathInfo.IsDir() ||
+		!os.SameFile(rootInfo, pathInfo) {
+		return fmt.Errorf("%w: %q", ErrSnapshotDirectoryReplaced, dir)
+	}
+	return nil
+}
+
+func removeSnapshotRootContents(root *os.Root) {
+	entries, err := fs.ReadDir(root.FS(), ".")
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		_ = root.RemoveAll(entry.Name())
+	}
+}
+
+func syncSnapshotRoot(root *os.Root) error {
+	dir, err := root.Open(".")
+	if err != nil {
+		return err
+	}
+	return errors.Join(dir.Sync(), dir.Close())
+}
+
+func hashSnapshotRootFile(
+	ctx context.Context,
+	root *os.Root,
+	name string,
+) (string, int64, error) {
+	file, err := root.Open(name)
+	if err != nil {
+		return "", 0, err
+	}
+	defer file.Close() //nolint:errcheck // read error is reported by io.Copy
+	hash := sha256.New()
+	n, err := io.Copy(hash, &payloadContextReader{ctx: ctx, reader: file})
+	if err != nil {
+		return "", n, err
+	}
+	return hex.EncodeToString(hash.Sum(nil)), n, nil
 }
