@@ -38,22 +38,12 @@ type watchTxHistoryEntry struct {
 	appliedTxs []*watch.AnyChainTx
 }
 
-// watchTxBuildForwardMessages returns stream messages for one forward block.
-// For a forward block with no predicate matches, out contains a single Idle
-// heartbeat with the block reference. The returned appliedTxs are used to build
-// Undo messages if a rollback later invalidates this block.
-func watchTxBuildForwardMessages(
-	blockType uint,
-	blockCbor []byte,
+func watchTxBuildForwardMessagesForTransactions(
+	txs []ledger.Transaction,
 	blockSlot, blockHeight uint64,
 	blockHash []byte,
 	shouldSendTx func(ledger.Transaction) bool,
 ) (appliedTxs []*watch.AnyChainTx, out []*watch.WatchTxResponse, err error) {
-	block, err := models.DecodeBlockCbor(blockType, blockCbor)
-	if err != nil {
-		return nil, nil, err
-	}
-	txs := block.Transactions()
 	applies := make([]*watch.WatchTxResponse, 0, len(txs))
 	applied := make([]*watch.AnyChainTx, 0, len(txs))
 	for _, tx := range txs {
@@ -166,13 +156,12 @@ func (s *watchServiceServer) watchTxFetchRollbackUndoFromBlocks(
 				!bytes.Equal(block.Hash, rollbackPoint.Hash)) {
 			return out, nil
 		}
-		appliedTxs, _, err := watchTxBuildForwardMessages(
-			block.Type,
-			block.Cbor,
-			block.Slot,
-			block.Number,
-			block.Hash,
-			shouldSendTx,
+		transactions, err := s.utxorpc.config.LedgerState.BlockTransactions(ctx, block)
+		if err != nil {
+			return nil, err
+		}
+		appliedTxs, _, err := watchTxBuildForwardMessagesForTransactions(
+			transactions, block.Slot, block.Number, block.Hash, shouldSendTx,
 		)
 		if err != nil {
 			return nil, err
@@ -350,13 +339,13 @@ func (s *watchServiceServer) WatchTx(
 				"undo_count", len(msgs),
 			)
 		} else {
-			appliedTxs, forwardMsgs, err := watchTxBuildForwardMessages(
-				next.Block.Type,
-				next.Block.Cbor,
-				next.Block.Slot,
-				next.Block.Number,
-				next.Block.Hash,
-				shouldSend,
+			transactions, err := s.utxorpc.config.LedgerState.BlockTransactions(ctx, next.Block)
+			if err != nil {
+				s.utxorpc.config.Logger.Error("failed to get block transactions", "error", err)
+				return err
+			}
+			appliedTxs, forwardMsgs, err := watchTxBuildForwardMessagesForTransactions(
+				transactions, next.Block.Slot, next.Block.Number, next.Block.Hash, shouldSend,
 			)
 			if err != nil {
 				s.utxorpc.config.Logger.Error(

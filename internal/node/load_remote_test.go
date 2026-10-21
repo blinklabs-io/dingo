@@ -472,7 +472,6 @@ func localBlockCount(t *testing.T, dir string) int {
 		dir,
 		cm.PrimaryChain(),
 		batches,
-		false,
 	)
 	close(batches)
 	require.NoError(t, err)
