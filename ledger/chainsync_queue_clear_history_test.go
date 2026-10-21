@@ -177,18 +177,18 @@ func TestQueueClearDoesNotCascadeIntoPersistentFork(t *testing.T) {
 	}
 }
 
-// Retention past the count limit applies only to headers still ahead of the
-// local tip; headers the chain already holds stay bounded by the limit.
+// Header history stays within its effective count and byte budgets. An
+// unapplied path can exceed the base count limit only while the queue can
+// still hold that path.
 func TestPeerHeaderHistoryRetainsOnlyUnappliedPastLimit(t *testing.T) {
 	t.Parallel()
 
 	for _, tc := range []struct {
 		name    string
 		applied bool
-		want    int
 	}{
-		{"ahead of tip", false, 300},
-		{"at or behind tip", true, maxPeerHeaderHistoryPerConn},
+		{"ahead of tip", false},
+		{"at or behind tip", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -207,7 +207,16 @@ func TestPeerHeaderHistoryRetainsOnlyUnappliedPastLimit(t *testing.T) {
 			}
 			history := fixture.ls.peerHeaderHistory[connIdKey(fixture.connId)]
 			require.NotNil(t, history)
-			require.Equal(t, tc.want, len(history.order))
+			recordBytes := peerHeaderHistoryRecordOverhead +
+				len(headers[0].Cbor()) +
+				len(headers[0].PrevHash().Bytes()) +
+				len(headers[0].Hash().Bytes())
+			want := min(
+				len(headers),
+				fixture.ls.peerHeaderHistoryLimit(),
+				fixture.ls.peerHeaderHistoryByteBudget(history)/recordBytes,
+			)
+			require.Equal(t, want, len(history.order))
 		})
 	}
 }

@@ -21,6 +21,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"math"
+	"slices"
 	"strings"
 	"time"
 
@@ -76,6 +78,21 @@ func (s *Store) refreshRewardLiveStakeAggregate(
 	ref models.StakeCredentialRef,
 	slot uint64,
 ) error {
+	return s.refreshRewardLiveStakeAggregateNetOfPending(ctx, db, ref, slot, 0)
+}
+
+// refreshRewardLiveStakeAggregateNetOfPending recomputes ref's live UTxO
+// total from the utxo table and stores it less pending, the delta of rows a
+// batch accumulator has written but not yet folded into the running total.
+// Storing the full sum would count those rows twice: once here and again
+// when the accumulator flushes its delta onto the stored total.
+func (s *Store) refreshRewardLiveStakeAggregateNetOfPending(
+	ctx context.Context,
+	db queryer,
+	ref models.StakeCredentialRef,
+	slot uint64,
+	pending int64,
+) error {
 	if len(ref.Key) == 0 {
 		return nil
 	}
@@ -83,7 +100,49 @@ func (s *Store) refreshRewardLiveStakeAggregate(
 	if err != nil {
 		return fmt.Errorf("sum reward live stake UTxOs: %w", err)
 	}
+	if pending != 0 {
+		if pending == math.MinInt64 {
+			return fmt.Errorf(
+				"pending live stake delta out of range for %d:%x",
+				ref.Tag,
+				ref.Key,
+			)
+		}
+		utxoStake, err = applyUtxoStakeDelta(utxoStake, -pending, ref)
+		if err != nil {
+			return err
+		}
+	}
 	return s.applyRewardLiveStakeAggregate(ctx, db, ref, slot, utxoStake)
+}
+
+// pendingUtxoStakeDelta returns ref's stake delta queued in extra and in
+// every batch accumulator bound to txn. Those accumulators' utxo rows are
+// already visible to txn, but their deltas reach reward_live_stake only when
+// the accumulator flushes.
+func pendingUtxoStakeDelta(
+	txn types.Txn,
+	extra *transactionBatchAccumulator,
+	ref models.StakeCredentialRef,
+) (int64, error) {
+	var accumulators []*transactionBatchAccumulator
+	if transaction, ok := txn.(*sqlTxn); ok {
+		accumulators = transaction.boundBatches()
+	}
+	if extra != nil && !slices.Contains(accumulators, extra) {
+		accumulators = append(accumulators, extra)
+	}
+	key := ref.MapKey()
+	var total int64
+	for _, accumulator := range accumulators {
+		delta := accumulator.stakeDeltas[key].delta
+		if (delta > 0 && total > math.MaxInt64-delta) ||
+			(delta < 0 && total < math.MinInt64-delta) {
+			return 0, errors.New("reward live stake delta overflow")
+		}
+		total += delta
+	}
+	return total, nil
 }
 
 // rewardLiveStakeUtxoStakeQuery reads the running live-UTxO total

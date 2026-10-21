@@ -93,6 +93,9 @@ func resetGlobalConfig() {
 		// ValidateForgedBlock's production default is an unconditional
 		// literal with no separate fill-in step to test around.
 		ValidateForgedBlock: true,
+		// Mirrors newDefaultConfig: the apply-ahead work is on by default.
+		LedgerPrefetchAheadEnabled: true,
+		LedgerValidateAheadEnabled: true,
 	}
 	globalTopologyConfig = &topology.TopologyConfig{}
 }
@@ -298,6 +301,8 @@ mithril:
 		ForgeAppliedTipStalenessSlots:    DefaultForgeAppliedTipStalenessSlots,
 		ForgeEndorserBlockStalenessSlots: DefaultForgeEndorserBlockStalenessSlots,
 		ValidateForgedBlock:              true,
+		LedgerPrefetchAheadEnabled:       true,
+		LedgerValidateAheadEnabled:       true,
 		ForgeEBMaxTxRefs:                 forgeEBCapDefault(777),
 		ForgeEBMaxBytes:                  forgeEBCapDefault(888888),
 		ForgeEBSelectionReserve:          750 * time.Millisecond,
@@ -429,6 +434,8 @@ func TestLoad_WithoutConfigFile_UsesDefaults(t *testing.T) {
 		ForgeAppliedTipStalenessSlots:    DefaultForgeAppliedTipStalenessSlots,
 		ForgeEndorserBlockStalenessSlots: DefaultForgeEndorserBlockStalenessSlots,
 		ValidateForgedBlock:              true,
+		LedgerPrefetchAheadEnabled:       true,
+		LedgerValidateAheadEnabled:       true,
 		ForgeEBMaxTxRefs:                 forgeEBCapDefault(DefaultForgeEBMaxTxRefs),
 		ForgeEBMaxBytes:                  forgeEBCapDefault(DefaultForgeEBMaxBytes),
 		ForgeEBSelectionReserve:          DefaultForgeEBSelectionReserve,

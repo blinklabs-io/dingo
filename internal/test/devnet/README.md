@@ -796,7 +796,7 @@ harness and the compose port mappings always agree.
 | `testnet.yaml`               | Canonical network spec for conformance mode: 2 pools |
 | `testnet-dingo-accelerated.yaml` | Accelerated dingo-mode spec: 60s epochs, `k: 10`, 0.5s slots |
 | `testnet-accelerated.yaml`   | Accelerated conformance-mode spec: same timing, 2 pools |
-| `testnet-dingo-leios.yaml`   | Dijkstra/Leios all-Dingo integration spec: Dijkstra at genesis, 300-slot epochs, 0.5s slots |
+| `testnet-dingo-leios.yaml`   | Dijkstra/Leios all-Dingo integration spec: Conway in epoch 0, Dijkstra from epoch 1, 300-slot epochs, 0.5s slots |
 | `topology/dingo-1.json`, `dingo-2.json`, `dingo-3.json`, `dingo-relay.json` | Static peer lists for dingo mode |
 | `topology/dingo-producer.json`, `cardano-producer.json`, `relay.json` | Static peer lists for conformance mode |
 | `.env`                       | Sets the default `COMPOSE_PROFILES=dingo` |
