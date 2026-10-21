@@ -302,14 +302,21 @@ before faucet export was available.
 The command refreshes the Byron and Shelley start times and starts the same executable with dev mode and block production
 enabled. The key bundle is separate from embedded network configuration, and
 normal node key paths still come from the operator. The child process runs the ordinary `serveRun`
-and `internal/node` composition with an isolated database and no configured
-peers. The command forwards shutdown signals and removes its temporary
+and `internal/node` composition with an isolated database, no configured
+peers, and a loopback-only bind address (`127.0.0.1`). The command forwards shutdown signals and removes its temporary
 directory after the node stops; the npm wrapper passes `devnet` through to the
 same binary command. Supplying `--data-dir` keeps the generated configuration
 and database for the next run; `--reset` rebuilds those managed paths with
 fresh genesis start times. The CLI holds an exclusive state-directory lock
 until the child exits and rewrites the path-bearing node configuration when
-reusing copied state.
+reusing copied state. State preparation and reset open the directory with
+`os.Root` and pin it by file identity: a symlinked `--data-dir` is resolved once
+at startup, and a symlink introduced while those operations run is rejected
+rather than followed. Each `cardano/keys/` directory component is opened the
+same way, so a symlinked intermediate directory cannot redirect key writes
+outside the state directory. The child node later opens its configuration,
+database, and keys from the generated absolute paths; the preparation handle
+does not pin those child-process opens.
 
 Dingo's architecture is built on several key principles:
 
