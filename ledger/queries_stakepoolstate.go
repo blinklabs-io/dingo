@@ -51,9 +51,9 @@ import (
 // transaction, like every row, so a QueryView answers for the epoch it froze
 // even after a boundary has moved the live snapshots on.
 //
-// Gaps against the ledger record, all reported as the type's absent value:
-// the BLS key's registration epoch is 0 when the registration row does not
-// carry one, and a deposit that was never recorded is 0.
+// Gaps against the ledger record: a BLS key whose registration row carries
+// no registration epoch is left out of the entry, and a deposit that was
+// never recorded is 0.
 //
 // Live-only: pool registrations and delegations carry no per-point history to
 // read back here.
