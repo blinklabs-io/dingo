@@ -1457,6 +1457,15 @@ func filterUtxoViews[T any](
 		return utxos, nil
 	}
 	result := make([]T, 0, len(utxos))
+	// A filter of only exact addresses is matched by keyed lookup; a linear
+	// scan would cost candidates x patterns.
+	var exactSet map[string]struct{}
+	if exactOnly := onlyExactPatterns(patterns); exactOnly {
+		exactSet = make(map[string]struct{}, len(patterns))
+		for i := range patterns {
+			exactSet[string(patterns[i].ExactAddress)] = struct{}{}
+		}
+	}
 	for i := range utxos {
 		item := utxo(&utxos[i])
 		output, err := item.Decode()
@@ -1465,6 +1474,16 @@ func filterUtxoViews[T any](
 				"decode %s %x#%d for exact address match: %w",
 				description, item.TxId, item.OutputIdx, err,
 			)
+		}
+		if exactSet != nil {
+			addrBytes, err := output.Address().Bytes()
+			if err != nil {
+				return nil, fmt.Errorf("encode output address: %w", err)
+			}
+			if _, ok := exactSet[string(addrBytes)]; ok {
+				result = append(result, utxos[i])
+			}
+			continue
 		}
 		match, err := models.MatchesUtxoAddressPatterns(output.Address(), patterns)
 		if err != nil {
@@ -1475,6 +1494,20 @@ func filterUtxoViews[T any](
 		}
 	}
 	return result, nil
+}
+
+// onlyExactPatterns reports whether every pattern is a bare exact address,
+// the only shape a set lookup answers identically to the pattern contract.
+func onlyExactPatterns(patterns []models.UtxoAddressPattern) bool {
+	for i := range patterns {
+		p := patterns[i]
+		if len(p.ExactAddress) == 0 ||
+			len(p.PaymentPart) > 0 ||
+			len(p.DelegationPart) > 0 {
+			return false
+		}
+	}
+	return len(patterns) > 0
 }
 
 func (d *Database) loadAndFilterOrderedUtxos(

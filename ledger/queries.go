@@ -2606,8 +2606,11 @@ func (ls *LedgerState) queryShelleyUtxoByAddress(
 	if len(addrs) == 0 {
 		return []any{ret}, nil
 	}
+	addrs, err := dedupeAddresses(addrs)
+	if err != nil {
+		return nil, err
+	}
 	var utxos []models.Utxo
-	var err error
 	if at.pinned() {
 		var release func()
 		txn, release = ls.readTxn(ctx, txn)
@@ -2649,6 +2652,26 @@ func (ls *LedgerState) queryShelleyUtxoByAddress(
 		ret[utxoId] = txOut
 	}
 	return []any{ret}, nil
+}
+
+// dedupeAddresses drops repeated addresses, keyed by serialized bytes, so a
+// repeated entry cannot multiply SQL branches or postfilter comparisons. The
+// reply is a map keyed by UTxO id, so it is unchanged.
+func dedupeAddresses(addrs []ledger.Address) ([]ledger.Address, error) {
+	seen := make(map[string]struct{}, len(addrs))
+	ret := make([]ledger.Address, 0, len(addrs))
+	for _, addr := range addrs {
+		b, err := addr.Bytes()
+		if err != nil {
+			return nil, fmt.Errorf("encode exact address: %w", err)
+		}
+		if _, dup := seen[string(b)]; dup {
+			continue
+		}
+		seen[string(b)] = struct{}{}
+		ret = append(ret, addr)
+	}
+	return ret, nil
 }
 
 // queryShelleyFilteredDelegationAndRewardAccounts answers
