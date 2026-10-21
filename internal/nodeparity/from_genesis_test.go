@@ -1102,6 +1102,32 @@ type genesisFakeServer struct {
 	// the session while its callback waits on the query.
 	hangEpochNoAtSlot *uint64
 	hangRelease       chan struct{}
+	// stallUtxoWholeAtSlot and stallPoolDistrAtSlot, when set, make the
+	// first ShelleyUtxoWholeQuery or ShelleyPoolDistr2Query for a point
+	// Acquired at that slot close the chainsync session's connection and
+	// then go unanswered until hangRelease is closed: Dingo dropping the
+	// session while an epoch check waits on its answer.
+	stallUtxoWholeAtSlot *uint64
+	stallPoolDistrAtSlot *uint64
+}
+
+// takeQueryStall implements stallUtxoWholeAtSlot and stallPoolDistrAtSlot
+// for the one at names, returning the channel to wait on, or nil when this
+// query is answered.
+func (s *genesisFakeServer) takeQueryStall(at **uint64) <-chan struct{} {
+	s.mu.Lock()
+	if *at == nil || **at != s.lastAcquiredSlot {
+		s.mu.Unlock()
+		return nil
+	}
+	*at = nil
+	conn := s.conns[s.chainSyncAddr]
+	release := s.hangRelease
+	s.mu.Unlock()
+	if conn != nil {
+		_ = conn.Close()
+	}
+	return release
 }
 
 // takeEpochNoHang implements hangEpochNoAtSlot, returning the channel to
@@ -1467,6 +1493,14 @@ func (s *genesisFakeServer) lsqConfig() localstatequery.Config {
 					case *localstatequery.ShelleyCurrentProtocolParamsQuery:
 						return []any{pp}, nil
 					case *localstatequery.ShelleyPoolDistr2Query:
+						if release := s.takeQueryStall(
+							&s.stallPoolDistrAtSlot,
+						); release != nil {
+							<-release
+							return nil, errors.New(
+								"simulated unanswered stake distribution query",
+							)
+						}
 						s.mu.Lock()
 						s.acquireFailuresArmed = s.failAcquiresAfterStake
 						s.failAcquiresAfterStake = 0
@@ -1477,6 +1511,14 @@ func (s *genesisFakeServer) lsqConfig() localstatequery.Config {
 							},
 						}, nil
 					case *localstatequery.ShelleyUtxoWholeQuery:
+						if release := s.takeQueryStall(
+							&s.stallUtxoWholeAtSlot,
+						); release != nil {
+							<-release
+							return nil, errors.New(
+								"simulated unanswered UTxO query",
+							)
+						}
 						s.mu.Lock()
 						s.utxoWholeCalls++
 						fail := s.utxoWholeCalls > s.failUtxoWholeSkip &&
@@ -2414,6 +2456,163 @@ func TestRunFromGenesis_ReconnectsWhenEpochLookupStalls(t *testing.T) {
 		}),
 		"logs: %v", logs,
 	)
+}
+
+// runWithStalledEpochCheck runs RunFromGenesis against a chain with epochs
+// 1, 2, 2, 3, 3, 3 on blocks 0-5, after stall arms one of the fake's query
+// stalls at block 1, the first block of epoch 2. It returns every result
+// reported, the number of chainsync sessions served, and the run's log.
+func runWithStalledEpochCheck(
+	t *testing.T, stall func(*genesisFakeServer, *uint64),
+) (results []EpochResult, sessions int, logs []string) {
+	t.Helper()
+	const magic = 42
+	const blockCount = 6
+
+	server := newGenesisFakeServer(t, blockCount)
+	server.ungated = true
+	server.epochBySlot = make(map[uint64]int, blockCount)
+	for i, p := range server.chain.Points {
+		switch {
+		case i == 0:
+			server.epochBySlot[p.Slot] = 1
+		case i < 3:
+			server.epochBySlot[p.Slot] = 2
+		default:
+			server.epochBySlot[p.Slot] = 3
+		}
+	}
+	stallAt := server.chain.Points[1].Slot
+	server.hangRelease = make(chan struct{})
+	stall(server, &stallAt)
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = listener.Close() })
+	server.serve(t, listener, magic)
+	t.Cleanup(func() { close(server.hangRelease) })
+
+	koiosSrv := httptest.NewServer(http.NotFoundHandler())
+	t.Cleanup(koiosSrv.Close)
+	koios, err := NewKoiosClient("preview", "", koiosSrv.URL, true, true)
+	require.NoError(t, err)
+
+	logc := newLogCollector()
+	reported := make(chan EpochResult, 8)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- RunFromGenesis(
+			ctx, listener.Addr().String(), "preview", magic, koios, nil,
+			func(r EpochResult) { reported <- r },
+			logc.logf, nil,
+		)
+	}()
+
+	for _, want := range []uint64{2, 3} {
+		select {
+		case r := <-reported:
+			require.Equal(t, want, r.Epoch, "logs: %v", logc.all())
+			results = append(results, r)
+		case err := <-done:
+			t.Fatalf(
+				"RunFromGenesis returned %v before ctx was cancelled; logs: %v",
+				err, logc.all(),
+			)
+		case <-time.After(30 * time.Second):
+			t.Fatalf(
+				"timed out waiting for epoch %d; logs: %v", want, logc.all(),
+			)
+		}
+	}
+	// Every block has been delivered by now, so no further boundary can
+	// produce a result: anything else would be a second report of one.
+	testutil.RequireNoReceive(
+		t, reported, 200*time.Millisecond, "a duplicate epoch report",
+	)
+	cancel()
+	err = testutil.RequireReceive(
+		t, done, 10*time.Second, "RunFromGenesis exit after ctx cancellation",
+	)
+	assert.True(t, err == nil || errors.Is(err, context.Canceled))
+
+	server.mu.Lock()
+	sessions = server.sessions
+	assert.Nil(t, server.stallUtxoWholeAtSlot, "the UTxO stall must have fired")
+	assert.Nil(t, server.stallPoolDistrAtSlot, "the stake stall must have fired")
+	server.mu.Unlock()
+	return results, sessions, logc.all()
+}
+
+// assertEpochChecksInterruptedAndRerun asserts that the session ending
+// during epoch 2's checks reported neither a cancellation nor a dropped
+// connection for any of them, and that the checks ran again: epoch 2 is
+// reported once, with the same outcome as the uninterrupted epoch 3.
+func assertEpochChecksInterruptedAndRerun(
+	t *testing.T, results []EpochResult, sessions int, logs []string,
+) {
+	t.Helper()
+	require.Len(t, results, 2)
+	epoch2, epoch3 := results[0], results[1]
+	assert.GreaterOrEqual(t, sessions, 2)
+	assert.True(
+		t,
+		slices.ContainsFunc(logs, func(line string) bool {
+			return strings.Contains(line, errEpochChecksInterrupted.Error()+
+				": epoch 2 at slot ")
+		}),
+		"logs: %v", logs,
+	)
+	for _, err := range []error{
+		epoch2.ProtocolParamsErr, epoch2.StakeErr, epoch2.UTxOErr,
+	} {
+		assert.NotErrorIs(t, err, context.Canceled)
+		assert.False(t, isRetryableDingoConnErr(err), "error: %v", err)
+	}
+	assert.True(t, epoch2.UTxOAttempted)
+	assert.NoError(t, epoch2.UTxOErr, "the UTxO comparison must match")
+	assert.Empty(t, epoch2.UTxOMissing)
+	assert.Empty(t, epoch2.UTxOExtra)
+	assert.Empty(t, epoch2.UTxODiffers)
+	assert.Equal(t, epoch3.ProtocolParamsErr == nil, epoch2.ProtocolParamsErr == nil)
+	assert.Equal(t, epoch3.StakeErr == nil, epoch2.StakeErr == nil)
+	assert.Equal(t, epoch3.UTxOAttempted, epoch2.UTxOAttempted)
+	assert.NoError(t, epoch3.UTxOErr)
+}
+
+// TestRunFromGenesis_ReconnectsWhenSessionEndsDuringUTxOComparison covers
+// Dingo closing the chainsync connection while the roll-forward callback
+// waits on an epoch's whole-UTxO query Dingo never answers. The comparison
+// ran under the run's context, which a session ending does not cancel, so
+// the reconnect loop's wait for the callback never ended. The epoch must not
+// be reported from the cut-off comparison, and must not be lost: the next
+// session checks it again.
+func TestRunFromGenesis_ReconnectsWhenSessionEndsDuringUTxOComparison(
+	t *testing.T,
+) {
+	t.Parallel()
+	results, sessions, logs := runWithStalledEpochCheck(
+		t, func(s *genesisFakeServer, slot *uint64) {
+			s.stallUtxoWholeAtSlot = slot
+		},
+	)
+	assertEpochChecksInterruptedAndRerun(t, results, sessions, logs)
+}
+
+// TestRunFromGenesis_ReconnectsWhenSessionEndsDuringStakeCheck is the same
+// for the stake distribution query, which shares the protocol-parameters
+// check's connection.
+func TestRunFromGenesis_ReconnectsWhenSessionEndsDuringStakeCheck(
+	t *testing.T,
+) {
+	t.Parallel()
+	results, sessions, logs := runWithStalledEpochCheck(
+		t, func(s *genesisFakeServer, slot *uint64) {
+			s.stallPoolDistrAtSlot = slot
+		},
+	)
+	assertEpochChecksInterruptedAndRerun(t, results, sessions, logs)
 }
 
 // TestRunFromGenesis_EpochChecksRetryTooOldRefusal covers Dingo refusing an

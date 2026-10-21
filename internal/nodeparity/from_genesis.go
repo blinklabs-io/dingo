@@ -193,6 +193,14 @@ var epochLookupTimeout = 5 * time.Minute
 
 var errEpochLookupTimedOut = errors.New("no answer from Dingo to the epoch lookup")
 
+// errEpochChecksInterrupted ends a chainsync session whose roll-forward
+// callback was running an epoch's checks when the session ended. The epoch is
+// not reported: its checks run again at the next block of that epoch the
+// following session delivers.
+var errEpochChecksInterrupted = errors.New(
+	"chainsync session ended during the epoch checks",
+)
+
 // callbackErr builds the error a chainsync roll-forward or roll-backward
 // callback returns, flattening any cause that satisfies
 // errors.Is(err, protocol.ErrProtocolShuttingDown) into a plain error
@@ -757,6 +765,13 @@ func RunFromGenesis(
 		// It holds the first cause seen this epoch, so the verdict can say
 		// which one it was; empty means untainted.
 		utxoTaintCause string
+		// lastEpochInterrupted is set when lastEpoch's checks were abandoned
+		// because the session ended while they ran (errEpochChecksInterrupted),
+		// so the next block in lastEpoch runs them instead of being skipped as
+		// already checked. A resumed session starts after lastPoint, the block
+		// whose checks were abandoned, so the re-run is at a later block of the
+		// same epoch.
+		lastEpochInterrupted bool
 	)
 	// taint records cause unless an earlier one this epoch already did.
 	taint := func(cause string) {
@@ -800,7 +815,10 @@ func RunFromGenesis(
 	// sessionCtx is cancelled when the chainsync session calling it ends,
 	// which closes the lookup's connections, so a callback blocked in one
 	// returns: the reconnect loop waits for that callback before starting the
-	// next session.
+	// next session. Every other query the callbacks make -- the UTxO baseline
+	// captures, the /tx_info flushes and the epoch checks -- runs under the
+	// same sessionCtx for the same reason; only the lookup carries a
+	// deadline, since a whole-UTxO reply can legitimately take minutes.
 	epochAt := func(
 		sessionCtx context.Context, point pcommon.Point,
 	) (epoch uint64, skip bool, err error) {
@@ -892,9 +910,19 @@ func RunFromGenesis(
 	// rollback -- discards the untrustworthy incremental state in favor of
 	// Dingo's own live truth, rather than silently comparing a
 	// known-incomplete set.
-	flushPendingTxInfos := func(point pcommon.Point) {
+	//
+	// It returns sessionCtx's error, and changes nothing, when the session
+	// ended during the fetches: they failed because of the cancellation, not
+	// because of Koios, so applying the chunks that did succeed and
+	// re-baselining would discard an exact reconstruction. The hashes stay
+	// buffered and the next session fetches each one once. A session that
+	// ends during the re-baseline after a real failure leaves utxoRefs nil,
+	// as any failed re-baseline does.
+	flushPendingTxInfos := func(
+		sessionCtx context.Context, point pcommon.Point,
+	) error {
 		if utxoRefs == nil || len(pendingTxHashes) == 0 {
-			return
+			return nil
 		}
 		chunks := make([][]string, 0, (len(pendingTxHashes)+koiosparity.KoiosTxInfoBatchSize-1)/koiosparity.KoiosTxInfoBatchSize)
 		for start := 0; start < len(pendingTxHashes); start += koiosparity.KoiosTxInfoBatchSize {
@@ -905,7 +933,7 @@ func RunFromGenesis(
 		errs := make([]error, len(chunks))
 
 		flushStart := time.Now()
-		g, gctx := errgroup.WithContext(ctx)
+		g, gctx := errgroup.WithContext(sessionCtx)
 		g.SetLimit(txInfoConcurrency)
 		for i, chunk := range chunks {
 			g.Go(func() error {
@@ -918,6 +946,9 @@ func RunFromGenesis(
 			})
 		}
 		_ = g.Wait() // errors are per-chunk in errs; nothing here to fail on
+		if err := sessionCtx.Err(); err != nil {
+			return err
+		}
 		txInfoFlushCount++
 		txInfoFlushElapsed += time.Since(flushStart)
 
@@ -926,9 +957,14 @@ func RunFromGenesis(
 
 		if failed {
 			taint(taintCauseTxInfo)
-			refs, err := captureGenesisBaseline(ctx, dingoAddr, magic, point)
+			refs, err := captureGenesisBaseline(
+				sessionCtx, dingoAddr, magic, point,
+			)
 			if err != nil {
 				utxoRefs = nil
+				if sessionErr := sessionCtx.Err(); sessionErr != nil {
+					return sessionErr
+				}
 				logf(
 					"nodeparity: re-baseline after tx_info failure also failed "+
 						"(UTxO comparison skipped this epoch, will retry at the "+
@@ -944,6 +980,7 @@ func RunFromGenesis(
 				)
 			}
 		}
+		return nil
 	}
 
 	// sessionRetryDelay/sessionRetryMaxDelay bound the backoff between
@@ -1039,7 +1076,20 @@ func RunFromGenesis(
 
 						if !utxoAttempted {
 							utxoAttempted = true
-							refs, err := captureGenesisBaseline(ctx, dingoAddr, magic, point)
+							refs, err := captureGenesisBaseline(
+								sessionCtx, dingoAddr, magic, point,
+							)
+							if sessionErr := sessionCtx.Err(); sessionErr != nil {
+								// Not a failed capture: the next session
+								// captures at its first block instead, which
+								// covers this one, since a resumed session
+								// starts after it.
+								utxoAttempted = false
+								return callbackErr(
+									"capture UTxO baseline at slot %d: %w",
+									point.Slot, sessionErr,
+								)
+							}
 							if err != nil {
 								logf(
 									"nodeparity: genesis UTxO baseline unavailable "+
@@ -1061,7 +1111,14 @@ func RunFromGenesis(
 								)
 							}
 							if len(pendingTxHashes) >= txInfoOpportunisticFlushThreshold {
-								flushPendingTxInfos(point)
+								if err := flushPendingTxInfos(
+									sessionCtx, point,
+								); err != nil {
+									return callbackErr(
+										"flush tx_info at slot %d: %w",
+										point.Slot, err,
+									)
+								}
 							}
 						}
 
@@ -1095,11 +1152,47 @@ func RunFromGenesis(
 							return nil
 						}
 						acquirable = true
-						if haveLastEpoch && epoch <= lastEpoch {
+						if haveLastEpoch && (epoch < lastEpoch ||
+							epoch == lastEpoch && !lastEpochInterrupted) {
 							return nil
 						}
+						if lastEpochInterrupted && epoch != lastEpoch {
+							logf(
+								"nodeparity: epoch %d is not checked: its "+
+									"checks were interrupted by the session "+
+									"ending, and the resumed session's next "+
+									"block is in epoch %d",
+								lastEpoch, epoch,
+							)
+						}
+						lastEpochInterrupted = false
 						haveLastEpoch = true
 						lastEpoch = epoch
+						// interrupted abandons this epoch's checks when the
+						// session ends while they run. Every check below
+						// queries Dingo or Koios under sessionCtx, so a
+						// cancelled one fails with the cancellation rather
+						// than a finding; reporting it would record a
+						// verdict for a check that never ran. The next
+						// block of this epoch runs them again.
+						//
+						// Logged here because the reconnect loop usually
+						// reports the session's own end instead: the
+						// callback error arrives after it.
+						interrupted := func() error {
+							lastEpochInterrupted = true
+							err := callbackErr(
+								"%w: epoch %d at slot %d: %w",
+								errEpochChecksInterrupted, epoch,
+								point.Slot, context.Cause(sessionCtx),
+							)
+							logf(
+								"nodeparity: %v (they run again at the "+
+									"next block of epoch %d)",
+								err, epoch,
+							)
+							return err
+						}
 						if skippedByron > 0 {
 							logf(
 								"nodeparity: validation starts at slot "+
@@ -1116,7 +1209,11 @@ func RunFromGenesis(
 						// flush any hashes still buffered below the threshold
 						// above so the reconstruction is current through this
 						// block, not just through the last flush.
-						flushPendingTxInfos(point)
+						if err := flushPendingTxInfos(
+							sessionCtx, point,
+						); err != nil {
+							return interrupted()
+						}
 
 						result := EpochResult{Epoch: epoch}
 
@@ -1131,9 +1228,12 @@ func RunFromGenesis(
 						psStart := time.Now()
 						result.ProtocolParamsMismatches, result.ProtocolParamsErr,
 							result.StakeMismatches, result.StakeErr = runProtocolParamsAndStake(
-							ctx, dingoAddr, magic, point, koios, cache, network, epoch,
+							sessionCtx, dingoAddr, magic, point, koios, cache, network, epoch,
 						)
 						result.ProtocolParamsAndStakeElapsed = time.Since(psStart)
+						if sessionCtx.Err() != nil {
+							return interrupted()
+						}
 
 						utxoStart := time.Now()
 						// No trustworthy baseline is currently held -- either
@@ -1153,7 +1253,14 @@ func RunFromGenesis(
 						// attempt above (same block, same point) is not
 						// immediately redialed a second time here.
 						if utxoAttempted && utxoRefs == nil {
-							refs, err := captureGenesisBaseline(ctx, dingoAddr, magic, point)
+							refs, err := captureGenesisBaseline(
+								sessionCtx, dingoAddr, magic, point,
+							)
+							if sessionCtx.Err() != nil {
+								// utxoRefs is still nil, so the rerun
+								// retries the capture.
+								return interrupted()
+							}
 							if err != nil {
 								logf(
 									"nodeparity: UTxO baseline retry failed this "+
@@ -1189,8 +1296,15 @@ func RunFromGenesis(
 						case utxoVerdictCompare:
 							result.UTxOAttempted = true
 							cmp, err := compareUTxOWithRetry(
-								ctx, dingoAddr, magic, point, utxoRefs,
+								sessionCtx, dingoAddr, magic, point, utxoRefs,
 							)
+							if sessionCtx.Err() != nil {
+								// The comparison only reads utxoRefs, and
+								// utxoTaintCause is reset only once a
+								// result is reported, so the rerun compares
+								// the same reconstruction.
+								return interrupted()
+							}
 							if err != nil {
 								result.UTxOErr = err
 							} else {
@@ -1264,9 +1378,20 @@ func RunFromGenesis(
 							// Taint this epoch the same way so the verdict
 							// reports "not run" instead of a false match.
 							taint(taintCauseRollback(point.Slot))
-							refs, err := captureGenesisBaseline(ctx, dingoAddr, magic, point)
+							refs, err := captureGenesisBaseline(
+								sessionCtx, dingoAddr, magic, point,
+							)
 							if err != nil {
+								// The reconstruction is invalid whether or
+								// not the session ended, and nil makes the
+								// next epoch boundary capture a baseline.
 								utxoRefs = nil
+								if sessionErr := sessionCtx.Err(); sessionErr != nil {
+									return callbackErr(
+										"re-baseline UTxO at rollback slot %d: %w",
+										point.Slot, sessionErr,
+									)
+								}
 								logf(
 									"nodeparity: rollback to slot %d invalidated the "+
 										"UTxO reconstruction and re-baselining failed "+
@@ -1326,9 +1451,14 @@ func RunFromGenesis(
 						// would then return early for every remaining block in
 						// it. An epoch is confirmed by being checked, which
 						// only happens in the roll-forward callback.
+						//
+						// A retreat also drops an interrupted epoch's pending
+						// re-run: the chain crosses into that epoch again and
+						// checks it then.
 						if !haveLastEpoch || epoch < lastEpoch {
 							haveLastEpoch = true
 							lastEpoch = epoch
+							lastEpochInterrupted = false
 						}
 						return nil
 					},
@@ -1405,7 +1535,7 @@ func RunFromGenesis(
 		// can end the session while a callback is still running, so wait
 		// for the protocol's receive loop, which runs them, to exit. That
 		// wait ends only once the callback returns; endSession above has
-		// already closed any epoch lookup it is blocked in.
+		// already closed any query it is blocked in.
 		select {
 		case <-csDone:
 		case <-ctx.Done():
