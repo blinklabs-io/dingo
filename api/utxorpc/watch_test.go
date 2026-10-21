@@ -496,6 +496,17 @@ type securityParamProbe struct {
 
 func (p *securityParamProbe) SecurityParam() int { return p.k }
 
+func (p *securityParamProbe) BlockTransactions(
+	_ context.Context,
+	block models.Block,
+) ([]gledger.Transaction, error) {
+	decoded, err := block.Decode()
+	if err != nil {
+		return nil, err
+	}
+	return decoded.Transactions(), nil
+}
+
 func (p *securityParamProbe) BlockByHash(
 	_ context.Context,
 	hash []byte,
