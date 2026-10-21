@@ -39,30 +39,51 @@ import (
 // more than two match pages.
 const historyFixtureSlots = 275
 
-func newHistoryFixtureAdapter(t *testing.T) (*NodeAdapter, []string) {
+var historyFixturePayment = bytes.Repeat([]byte{0x5a}, lcommon.AddressHashSize)
+
+func historyFixtureEnterprise(t *testing.T) lcommon.Address {
+	t.Helper()
+	addr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyNone,
+		lcommon.AddressNetworkTestnet,
+		historyFixturePayment,
+		nil,
+	)
+	require.NoError(t, err)
+	return addr
+}
+
+// historyFixturePointer shares the enterprise address's payment credential,
+// so the credential-level storage predicate selects it while the Kupo address
+// pattern rejects it.
+func historyFixturePointer(t *testing.T) lcommon.Address {
+	t.Helper()
+	raw := []byte{
+		(lcommon.AddressTypeKeyPointer << 4) | lcommon.AddressNetworkTestnet,
+	}
+	raw = append(raw, historyFixturePayment...)
+	raw = append(raw, 0x01, 0x00, 0x00)
+	addr, err := lcommon.NewAddressFromBytes(raw)
+	require.NoError(t, err)
+	return addr
+}
+
+// newHistoryFixtureAdapter seeds one output per row in stored order and pays
+// row i to addrFor(i).
+func newHistoryFixtureAdapter(
+	t *testing.T,
+	addrFor func(row int) lcommon.Address,
+) (*NodeAdapter, []string) {
 	t.Helper()
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
 	require.NoError(t, err)
 	raw, err := dbtest.RawSQLiteMetadata(t, db)
 	require.NoError(t, err)
 
-	payment := bytes.Repeat([]byte{0x5a}, lcommon.AddressHashSize)
-	addr, err := lcommon.NewAddressFromParts(
-		lcommon.AddressTypeKeyNone,
-		lcommon.AddressNetworkTestnet,
-		payment,
-		nil,
-	)
-	require.NoError(t, err)
-	encoded, err := cbor.Encode(&shelley.ShelleyTransactionOutput{
-		OutputAddress: addr,
-		OutputAmount:  1_000_000,
-	})
-	require.NoError(t, err)
-
 	type ref struct {
-		txID   []byte
-		output uint32
+		txID    []byte
+		output  uint32
+		encoded []byte
 	}
 	var refs []ref
 	tx, err := raw.Begin()
@@ -85,15 +106,23 @@ INSERT INTO "transaction" (
 			)
 			require.NoError(t, err)
 			for output := range uint32(2) {
-				_, err := tx.Exec(`
+				encoded, err := cbor.Encode(&shelley.ShelleyTransactionOutput{
+					OutputAddress: addrFor(len(refs)),
+					OutputAmount:  1_000_000,
+				})
+				require.NoError(t, err)
+				_, err = tx.Exec(`
 INSERT INTO utxo (
     transaction_id, tx_id, payment_key, added_slot, deleted_slot, amount,
     output_idx, payment_script
 ) VALUES (?, ?, ?, ?, 0, '1000000', ?, FALSE)`,
-					txRowID, txID, payment, slot, output,
+					txRowID, txID, historyFixturePayment, slot, output,
 				)
 				require.NoError(t, err)
-				refs = append(refs, ref{txID: txID, output: output})
+				refs = append(
+					refs,
+					ref{txID: txID, output: output, encoded: encoded},
+				)
 			}
 		}
 	}
@@ -101,7 +130,7 @@ INSERT INTO utxo (
 	require.NoError(t, db.BlobTxn(true).Do(func(txn *database.Txn) error {
 		for _, r := range refs {
 			if err := db.Blob().SetUtxo(
-				txn.Blob(), r.txID, r.output, encoded,
+				txn.Blob(), r.txID, r.output, r.encoded,
 			); err != nil {
 				return err
 			}
@@ -167,7 +196,11 @@ func TestNodeMatchesScanBudgetResumesStoredOrderInBothDirections(
 ) {
 	t.Parallel()
 
-	adapter, keys := newHistoryFixtureAdapter(t)
+	enterprise := historyFixtureEnterprise(t)
+	adapter, keys := newHistoryFixtureAdapter(
+		t,
+		func(int) lcommon.Address { return enterprise },
+	)
 	for _, oldestFirst := range []bool{true, false} {
 		t.Run(fmt.Sprintf("oldest_first=%t", oldestFirst), func(t *testing.T) {
 			want := slices.Clone(keys)
@@ -203,7 +236,11 @@ func TestNodeMatchesScanBudgetResumesStoredOrderInBothDirections(
 func TestNodeMatchesCursorResumesAfterTheLastReturnedRow(t *testing.T) {
 	t.Parallel()
 
-	adapter, keys := newHistoryFixtureAdapter(t)
+	enterprise := historyFixtureEnterprise(t)
+	adapter, keys := newHistoryFixtureAdapter(
+		t,
+		func(int) lcommon.Address { return enterprise },
+	)
 	for _, oldestFirst := range []bool{true, false} {
 		t.Run(fmt.Sprintf("oldest_first=%t", oldestFirst), func(t *testing.T) {
 			want := slices.Clone(keys)
@@ -220,4 +257,47 @@ func TestNodeMatchesCursorResumesAfterTheLastReturnedRow(t *testing.T) {
 			require.Equal(t, want[101:], rest)
 		})
 	}
+}
+
+// TestNodeMatchesScanBudgetCountsRowsTheAddressPatternRejects pins what the
+// scan budget measures: every row storage returns, including outputs that
+// share the requested payment credential but not the requested address. An
+// address query whose only match follows more rejected rows than the budget
+// therefore ends with a cursor instead of reading them all.
+func TestNodeMatchesScanBudgetCountsRowsTheAddressPatternRejects(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	target := historyFixtureEnterprise(t)
+	sibling := historyFixturePointer(t)
+	const rows = historyFixtureSlots * 4
+	adapter, keys := newHistoryFixtureAdapter(
+		t,
+		func(row int) lcommon.Address {
+			if row == rows-1 {
+				return target
+			}
+			return sibling
+		},
+	)
+	query := MatchQuery{
+		Pattern:     target.String(),
+		OldestFirst: true,
+		MaxScan:     matchPageSize,
+	}
+	var all []string
+	var sizes []int
+	for range 5 {
+		got, cursor, truncated := drainMatches(t, adapter, query, 0)
+		all = append(all, got...)
+		sizes = append(sizes, len(got))
+		if !truncated {
+			break
+		}
+		require.NotNil(t, cursor)
+		query.Cursor = cursor
+	}
+	require.Equal(t, []int{0, 0, 1}, sizes)
+	require.Equal(t, []string{keys[rows-1]}, all)
 }
