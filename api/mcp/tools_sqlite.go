@@ -77,7 +77,6 @@ func registerSQLiteTools(
 	if maxRows <= 0 {
 		maxRows = 100
 	}
-	acquireQuery := limits.acquire
 	releaseQuery := limits.release
 
 	// Tool: sqlite_query
@@ -106,8 +105,8 @@ func registerSQLiteTools(
 				},
 			}, nil, nil
 		}
-		if !acquireQuery() {
-			return nil, nil, errors.New("too many concurrent SQLite queries")
+		if err := limits.admit(); err != nil {
+			return nil, nil, err
 		}
 		defer releaseQuery()
 
@@ -258,8 +257,8 @@ func registerSQLiteTools(
 				},
 			}, nil, nil
 		}
-		if !acquireQuery() {
-			return nil, nil, errors.New("too many concurrent SQLite queries")
+		if err := limits.admit(); err != nil {
+			return nil, nil, err
 		}
 		defer releaseQuery()
 
@@ -337,8 +336,8 @@ func registerSQLiteTools(
 				},
 			}, nil, nil
 		}
-		if !acquireQuery() {
-			return nil, nil, errors.New("too many concurrent SQLite queries")
+		if err := limits.admit(); err != nil {
+			return nil, nil, err
 		}
 		defer releaseQuery()
 

@@ -10491,8 +10491,9 @@ Trust: remote chunk files carry no signature or digest, so authenticated
 transport establishes the remote root as the source. `dingo load` decodes
 every block and
 `Chain.AddBlocks` links each header to its predecessor, so a corrupt, truncated
-or reordered chunk fails the load. Remote imports also verify each block body
-against its header commitment before persistence. A root can still serve a
+or reordered chunk fails the load. Remote and local imports also verify each
+block body against its header's body hash before persistence, so a body
+substituted under a genuine header fails the load. A root can still serve a
 self-consistent alternative history, so load only from a root you trust.
 Block batches enter the blob store before the asynchronous ledger worker
 applies their metadata. If that worker rejects a batch or fails, or the copy or replay is cancelled,
@@ -11097,6 +11098,10 @@ asset rows. A policy or asset with more matching rows returns an explicit
 incomplete error, never a partial supply or holder count. `NewMCPServer` shares
 one slot budget across both tool sets; the exported `RegisterSQLiteTools` and
 `RegisterCardanoTools` each create their own.
+When the metadata store is file-backed SQLite, `NewMCPServer` also installs a
+receiving middleware that refuses every tool call and resource read while the
+store's `-wal` file exceeds 128 MiB, so MCP readers drain and the periodic
+TRUNCATE checkpoint can run.
 Markdown tables wrap their sanitized cells in explicit untrusted-chain-data
 delimiters. Chain-controlled text is HTML-escaped before rendering so it cannot
 terminate that envelope.
