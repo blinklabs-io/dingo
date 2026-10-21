@@ -334,6 +334,56 @@ func TestQueryStakePoolState_FutureParamsAndBlsKey(t *testing.T) {
 	require.Equal(t, pool, entry.FutureStakePoolParams.Id[:])
 }
 
+// The ledger's BlsKeyState always carries the epoch the key was registered in,
+// so a key whose epoch the database cannot establish has no faithful encoding.
+// The reply omits the key (SNothing) rather than report an invented epoch,
+// and still answers the pool's parameters and the rest of the entry.
+func TestQueryStakePoolState_BlsKeyWithUnknownEpochIsOmitted(t *testing.T) {
+	t.Parallel()
+	ls := newStakePoolStateLedger(t)
+	placeStakePoolStateTip(t, ls, 160)
+	pp := &conway.ConwayProtocolParameters{}
+	pp.ProtocolVersion.Major = 12
+	ls.currentPParams = pp
+	ls.publishSnapshotsLocked()
+	cases := []struct {
+		name       string
+		pool       []byte
+		ageUnknown bool
+	}{
+		{"imported without an epoch", repeatedBytes(28, 0x31), true},
+		{"known age with no stored epoch", repeatedBytes(28, 0x32), false},
+	}
+	for _, c := range cases {
+		require.NoError(t, ls.db.Metadata().ImportPool(
+			&models.Pool{
+				PoolKeyHash:   c.pool,
+				VrfKeyHash:    repeatedBytes(32, 0xAA),
+				RewardAccount: repeatedBytes(28, 0x22),
+			},
+			&models.PoolRegistration{
+				PoolKeyHash:                    c.pool,
+				VrfKeyHash:                     repeatedBytes(32, 0xAA),
+				RewardAccount:                  repeatedBytes(28, 0x22),
+				Pledge:                         dbtypes.Uint64(1_000_000),
+				AddedSlot:                      5,
+				LeiosKeyPublic:                 repeatedBytes(96, 0x66),
+				LeiosKeyPossessionProof:        repeatedBytes(48, 0x77),
+				LeiosKeyRegistrationAgeUnknown: c.ageUnknown,
+			},
+			nil,
+		))
+	}
+
+	for _, c := range cases {
+		got := runStakePoolState(t, ls, stakePoolStateQuery(false, [][]byte{c.pool}))
+		entry, ok := got[gledger.PoolId(c.pool)]
+		require.True(t, ok, c.name)
+		require.Equal(t, uint64(1_000_000), entry.Pledge, c.name)
+		require.Nil(t, entry.BlsKey, c.name)
+	}
+}
+
 // seedStakePoolRetirement records a retirement certificate for the pool at
 // slot, naming epoch.
 func seedStakePoolRetirement(

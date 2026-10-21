@@ -219,17 +219,19 @@ func (ls *LedgerState) queryShelleyStakePoolState(
 		if params.Owners != nil {
 			entry.Owners = *params.Owners
 		}
-		if params.BlsKey != nil {
-			var registeredIn uint64
-			if reg.LeiosKeyRegistrationEpoch != nil {
-				registeredIn = *reg.LeiosKeyRegistrationEpoch
-			}
+		// The ledger's BlsKeyState always carries its registration epoch. A
+		// key with no stored epoch has none to report: it is an imported key
+		// of unknown age, which rotation treats as not eligible, or a row
+		// whose slot the epoch history cannot place, where rotation's own
+		// fallback cannot place it either. It is left out rather than
+		// reported with an invented epoch.
+		if params.BlsKey != nil && reg.LeiosKeyRegistrationEpoch != nil {
 			entry.BlsKey = &olocalstatequery.BlsKeyState{
 				Key: olocalstatequery.BlsKey{
 					PublicKey:       params.BlsKey.PublicKey,
 					PossessionProof: params.BlsKey.PossessionProof,
 				},
-				RegisteredIn: registeredIn,
+				RegisteredIn: *reg.LeiosKeyRegistrationEpoch,
 			}
 		}
 		if q.IncludeDelegators {
