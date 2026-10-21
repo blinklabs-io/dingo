@@ -208,6 +208,7 @@ var logPlainConfigFields = []string{
 	"LedgerCatchupTimeout",
 	"LeiosPersistenceRetentionSlots",
 	"LedgerPrefetchAheadEnabled",
+	"LedgerValidateAheadEnabled",
 	"LeiosVoteSigningKeyFile",
 	"LocalStateQueryViewMaxLifetime",
 	"Logging.Format",

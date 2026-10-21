@@ -2332,6 +2332,21 @@ rescanning. Every other caller (rollback sweeps, `DeleteUtxos`,
 retirement and expiry) is unchanged and still calls the original full-scan
 `refreshRewardLiveStakeAggregate`/`refreshRewardLiveStakeRefs`.
 
+A batch accumulator (`SetTransactionBatched`) writes each transaction's
+`utxo` rows immediately but queues its stake delta until
+`FlushBatchStakeDeltas` or `FlushBatch`, so between the two the `utxo` table is
+ahead of the stored running total by exactly the queued delta. A full-scan
+refresh that runs in that window -- a non-zero reward withdrawal
+(`applyTransactionWithdrawals`), a direct reward credit
+(`AddAccountRewardByCredential`), or a pending reward-round fold
+(`AddAccountRewardsByCredential`) -- therefore stores the scanned total less
+the credential's queued delta (`refreshRewardLiveStakeAggregateNetOfPending`),
+summed over the accumulators bound to the write transaction and the
+accumulator of the write itself. The flush then adds the delta once, and the
+result equals the per-transaction path for any order of stake changes and
+reward writes within a block. Queued deltas live in the accumulator, which
+savepoint and transaction rollback restore together with the `utxo` rows.
+
 This trades away the full-scan path's self-healing property for the
 credentials it accelerates, so the design leans on three layers instead of
 one:
@@ -2339,8 +2354,11 @@ one:
 1. **Crash atomicity.** The delta is applied inside the same write
    transaction as the UTxO row mutation it accounts for (the same
    `withWriteTransaction` scope every other write in this package already
-   uses), so a crash mid-apply rolls both back together. There is no window
-   where the UTxO table changes but the running total does not, or vice versa.
+   uses), so a crash mid-apply rolls both back together. There is no committed
+   window where the UTxO table changes but the running total does not, or vice
+   versa. The mismatch between a batch accumulator's UTxO writes and its queued
+   delta exists only inside the open write transaction and is rolled back if it
+   fails.
 2. **Every full-scan touch re-syncs.** A rollback sweep, `DeleteUtxos`, or any
    other caller still on the authoritative path recomputes and overwrites
    `utxo_stake` from scratch for whatever credentials it touches, healing any

@@ -29,6 +29,7 @@ import (
 	"math/big"
 	"math/bits"
 	"net"
+	"reflect"
 	"runtime"
 	"runtime/debug"
 	"slices"
@@ -1103,8 +1104,8 @@ type LedgerStateConfig struct {
 	// chunk are never served from it, and any input it does not resolve is
 	// read inside the write transaction as without the flag. Only blocks
 	// under normal validation are prefetched; historical, TrustedReplay and
-	// Mithril-covered blocks read no inputs. Not consensus-affecting; off by
-	// default.
+	// Mithril-covered blocks read no inputs. Not consensus-affecting. The
+	// zero value is off; node configuration turns it on by default.
 	LedgerPrefetchAheadEnabled bool
 	// ApplyRowBatchingEnabled writes the accumulated deltas of blocks that
 	// are not validated through the metadata store's batched path in core
@@ -1114,6 +1115,17 @@ type LedgerStateConfig struct {
 	// state is identical either way. See ARCHITECTURE.md ("Block Processing
 	// Pipeline").
 	ApplyRowBatchingEnabled bool
+	// LedgerValidateAheadEnabled runs the validation work that reads no ledger
+	// state ahead of the serial apply loop: the vkey and bootstrap witness
+	// signatures of every validated block of a block-apply chunk are verified
+	// on worker goroutines while earlier blocks of the chunk validate and
+	// write. Each result is bound to its transaction body and witness set, and
+	// every rule still runs against the write transaction, so verdicts and
+	// stored state are identical either way. Byron blocks, Dijkstra chunks
+	// and TrustedReplay (which preverifies the whole chunk itself) are not
+	// covered. Not consensus-affecting. The zero value is off; node
+	// configuration turns it on by default.
+	LedgerValidateAheadEnabled bool
 	// BlockfetchLowWatermarkEnabled starts blockfetch once one blockfetch
 	// range of headers is queued while the node is far from the peer tip,
 	// instead of waiting for allowedQueuedHeaders. The header queue capacity
@@ -1292,13 +1304,20 @@ type slotBattleRecorderHolder struct {
 // snapshot containers and their owned slices are immutable. Protocol parameter
 // values are shared with writer state and must be treated as read-only.
 type consensusSnapshot struct {
-	generation     uint64
-	currentEpoch   models.Epoch
-	currentEra     eras.EraDesc
-	currentPParams lcommon.ProtocolParameters
-	prevEraPParams lcommon.ProtocolParameters
-	epochCache     []models.Epoch
-	transitionInfo hardfork.TransitionInfo
+	generation uint64
+	// contextGeneration is the generation of the earliest publication whose
+	// header-verification inputs (epoch cache with its nonces, current epoch,
+	// era, protocol parameters, hard-fork transition) equal this one's. A
+	// header verdict stamped with a generation at or after it was made against
+	// the same consensus context, so a publication that only moves the applied
+	// tip does not invalidate it.
+	contextGeneration uint64
+	currentEpoch      models.Epoch
+	currentEra        eras.EraDesc
+	currentPParams    lcommon.ProtocolParameters
+	prevEraPParams    lcommon.ProtocolParameters
+	epochCache        []models.Epoch
+	transitionInfo    hardfork.TransitionInfo
 	// syntheticV2CostModelInEffect mirrors LedgerState.syntheticV2CostModel;
 	// see that field's doc comment.
 	syntheticV2CostModelInEffect bool
@@ -1418,6 +1437,10 @@ type LedgerState struct {
 	// goroutine's read transaction instead of serving nothing, so tests can
 	// count served UTxOs deterministically. Tests only.
 	utxoPrefetchAheadAwaitReady bool
+	// signaturePreverifyAheadServed counts transactions whose validation was
+	// given a signaturePreverifyAhead result. Tests read it to tell a run that
+	// used the results from one that verified inline.
+	signaturePreverifyAheadServed atomic.Uint64
 	// mempool is installed by SetMempool but read by the forger on its own
 	// goroutine, so it is an atomic pointer: a late or repeated SetMempool
 	// is race-free and the latest provider wins.
@@ -2096,6 +2119,9 @@ type LedgerState struct {
 	peerHeaderHistory         map[string]*peerHeaderChain
 	peerHeaderHistoryBytes    int
 	peerHeaderHistorySequence uint64
+	forkHeaderNonceCacheMutex sync.Mutex
+	forkHeaderNonceCache      map[string]map[uint64]peerForkNoncePrefix
+	forkHeaderPathCache       map[string]peerForkPathPrefix
 	// Test hook for fork ancestor lookups.
 	lookupBlockByHash func([]byte) (models.Block, error)
 	// Test hook called after Close releases the blockfetch continuation mutex
@@ -2325,7 +2351,7 @@ func (ls *LedgerState) publishSnapshotsLocked() {
 	// visible to an already-published snapshot. Element updates still require
 	// replacing the cache and its slice-backed Epoch fields.
 	ls.epochCache = slices.Clip(ls.epochCache)
-	ls.consensus.Store(&consensusSnapshot{
+	next := &consensusSnapshot{
 		generation:     generation,
 		currentEpoch:   cloneEpoch(ls.currentEpoch),
 		currentEra:     ls.currentEra,
@@ -2338,13 +2364,57 @@ func (ls *LedgerState) publishSnapshotsLocked() {
 		epochCache:                   ls.epochCache,
 		transitionInfo:               ls.transitionInfo,
 		syntheticV2CostModelInEffect: ls.syntheticV2CostModel,
-	})
+	}
+	next.contextGeneration = generation
+	if prev := ls.consensus.Load(); prev != nil &&
+		sameHeaderVerificationContext(prev, next) {
+		next.contextGeneration = prev.contextGeneration
+	}
+	ls.consensus.Store(next)
 	ls.tip.Store(&tipSnapshot{
 		generation:           generation,
 		currentTip:           cloneTip(ls.currentTip),
 		currentTipBlockNonce: cloneSnapshotBytes(ls.currentTipBlockNonce),
 	})
 	ls.notifySnapshotPublished()
+}
+
+// sameHeaderVerificationContext reports whether two consensus snapshots give
+// header verification the same inputs. The current epoch's evolving nonce is
+// excluded: it advances with every applied block, and verification reads only
+// the epoch nonces, frozen candidate nonces and labs held in the epoch cache.
+// Stake snapshots and registered VRF keys are keyed by epoch, so they can only
+// change together with the epoch cache.
+func sameHeaderVerificationContext(a, b *consensusSnapshot) bool {
+	if a.currentEra.Id != b.currentEra.Id ||
+		a.transitionInfo != b.transitionInfo ||
+		a.syntheticV2CostModelInEffect != b.syntheticV2CostModelInEffect ||
+		!sameProtocolParameters(a.currentPParams, b.currentPParams) ||
+		!sameProtocolParameters(a.prevEraPParams, b.prevEraPParams) {
+		return false
+	}
+	aEpoch, bEpoch := a.currentEpoch, b.currentEpoch
+	aEpoch.EvolvingNonce, bEpoch.EvolvingNonce = nil, nil
+	if !reflect.DeepEqual(aEpoch, bEpoch) {
+		return false
+	}
+	if len(a.epochCache) == len(b.epochCache) &&
+		(len(a.epochCache) == 0 || &a.epochCache[0] == &b.epochCache[0]) {
+		return true
+	}
+	return reflect.DeepEqual(a.epochCache, b.epochCache)
+}
+
+// sameProtocolParameters compares parameter sets by identity. Writers install
+// a new value when parameters change; a replacement with equal content is
+// treated as a change, which only costs a re-verification.
+func sameProtocolParameters(a, b lcommon.ProtocolParameters) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	av, bv := reflect.ValueOf(a), reflect.ValueOf(b)
+	return av.Type() == bv.Type() && av.Kind() == reflect.Pointer &&
+		av.Pointer() == bv.Pointer()
 }
 
 // snapshotPublishedChan returns a channel closed by the next snapshot
@@ -9202,29 +9272,45 @@ func (ls *LedgerState) processBlocksFromSource(
 					// ledgerProcessBlock, consuming UTxOs no ranking-block
 					// transaction names, so the read-only snapshot cannot be
 					// filtered from the blocks alone.
-					if ls.config.LedgerPrefetchAheadEnabled &&
-						!dijkstraEraGate(snapshotEra) &&
-						end-i > 1 {
-						epochEndSlot := snapshotEpoch.StartSlot +
-							uint64(snapshotEpoch.LengthInSlots)
+					var aheadSignatures *signaturePreverifyAhead
+					prefetchAhead := ls.config.LedgerPrefetchAheadEnabled &&
+						end-i > 1
+					// Trusted replay preverifies the whole chunk's signatures
+					// before the transaction instead.
+					signaturesAhead := ls.config.LedgerValidateAheadEnabled &&
+						!trustedReplay
+					if (prefetchAhead || signaturesAhead) &&
+						!dijkstraEraGate(snapshotEra) {
 						chunk := nextBatch[i:end]
-						wanted := make([]bool, len(chunk))
-						for k, blk := range chunk {
-							shouldValidateBlock, _ := historicalBlockValidationDecision(
-								snapshotValidationEnabled,
-								trustedReplay,
-								snapshotChainsyncState,
-								blk.SlotNumber(),
-								cutoffSlot,
-								snapshotMithrilSlot,
-							)
-							wanted[k] = shouldValidateBlock &&
-								blk.SlotNumber() < epochEndSlot
-						}
-						aheadPrefetch = ls.startUtxoPrefetchAhead(
-							ctx, chunk, wanted,
+						validated := chunkValidatedBlocks(
+							chunk,
+							snapshotEpoch,
+							func(slot uint64) bool {
+								shouldValidateBlock, _ := historicalBlockValidationDecision(
+									snapshotValidationEnabled,
+									trustedReplay,
+									snapshotChainsyncState,
+									slot,
+									cutoffSlot,
+									snapshotMithrilSlot,
+								)
+								return shouldValidateBlock
+							},
 						)
-						defer aheadPrefetch.stop()
+						if prefetchAhead {
+							aheadPrefetch = ls.startUtxoPrefetchAhead(
+								ctx, chunk, validated,
+							)
+							defer aheadPrefetch.stop()
+						}
+						if signaturesAhead {
+							aheadSignatures = startSignaturePreverifyAhead(
+								ctx,
+								chunk,
+								signatureCheckedBlocks(chunk, validated),
+							)
+							defer aheadSignatures.stop()
+						}
 					}
 					for offset, next := range nextBatch[i:end] {
 						tmpPoint := ocommon.Point{
@@ -9404,6 +9490,10 @@ func (ls *LedgerState) processBlocksFromSource(
 						blockCtx = withPreverifiedSignatures(
 							blockCtx,
 							preverifiedSignatures,
+						)
+						blockCtx = withBlockPreverifiedSignatures(
+							blockCtx,
+							aheadSignatures.forBlock(offset),
 						)
 						if trustedReplayRows != nil {
 							blockCtx = withValidatedReplayAccumulator(
@@ -10188,6 +10278,12 @@ func (ls *LedgerState) ledgerProcessBlock(
 					isCurrentEraPParams,
 					syntheticV2CostModel,
 				)
+				txSignatures, aheadSignature := preverifiedSignaturesForTx(
+					ctx, i, tx,
+				)
+				if aheadSignature {
+					ls.signaturePreverifyAheadServed.Add(1)
+				}
 				lv := (&LedgerView{
 					txn:                  txn,
 					ls:                   ls,
@@ -10204,7 +10300,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 					horizonAnchorSlot:     parent.slot,
 					epochStartSlot:        epochStartSlot,
 					byronParamsFromBlock:  true,
-					preverifiedSignatures: preverifiedSignaturesFrom(ctx, tx),
+					preverifiedSignatures: txSignatures,
 				}).pinCommitteeState(committeeEpoch, pp).
 					pinSyntheticV2CostModel(synthetic)
 				validateStart := time.Now()
