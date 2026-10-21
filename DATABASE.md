@@ -67,6 +67,15 @@ itself distinguish which of the two classes above produced it.
 
 ## Storage provider ownership
 
+The `consensus_provider_identity` sync-state key binds a database to the
+versioned consensus semantics that created it. Databases without the key are
+existing Praos databases and are treated as `praos/v1`; opening one with Praos
+writes the marker. The sync-state cleanup that ends a Mithril import keeps the
+key. Startup rejects a different selected identity before ledger
+processing. Leader schedule records separately carry the same identity and a
+format version, so cached production schedules are reused only by the provider
+that computed them.
+
 Blob and metadata stores are constructed by the application plugin host and
 injected with `database.New(config, database.Stores{Blob: ..., Metadata: ...})`.
 The database drains only database-owned workers; the host closes providers
@@ -4057,27 +4066,41 @@ LIMIT 100;
 
 ### `GetUtxoBalanceByAddress`
 
-Aggregates live-UTxO balances for an address in SQL (used by the Blockfrost
-`/addresses/{address}` summary). Lovelace and count:
+Reads live-UTxO balances for an address (used by the Blockfrost
+`/addresses/{address}` summary for a bare payment credential; a full address
+needs the exact-address CBOR comparison, so its summary instead reads keyset
+pages of coarse credential candidates through
+`Database.UtxosByAddressWithOrdering`, keeps outputs whose decoded address
+matches, folds them into big-integer sums, and fails with
+`ErrAddressSummaryTooLarge` past 50,000 candidates read or 5,000 distinct
+assets). Amounts are stored as text, so the store sums them in Go rather than
+with SQL `SUM`, checking for `uint64` overflow.
+
+`models.AddressBalanceLimits` bounds the read: `MaxUtxos` adds a `LIMIT` of one
+row past the limit to the lovelace scan, and `MaxAssets` stops the asset scan
+at the first distinct asset past the limit, which the `(policy id, name)`
+ordering makes the point the distinct count first exceeds it. Either returns
+`models.ErrAddressBalanceLimit` before the rest of the set is read. A zero
+field leaves that dimension unbounded. Both queries run under the read
+transaction's context, so cancellation stops them. The summary passes 50,000
+outputs and 5,000 assets. Lovelace and count:
 
 ```sql
-SELECT COUNT(*) AS cnt, COALESCE(SUM(amount), 0) AS lovelace
+SELECT amount
 FROM utxo
-WHERE utxo.deleted_slot = 0
-  AND (utxo.payment_script = $1 AND utxo.payment_key = decode($2, 'hex')
-       AND utxo.credential_tag = $3 AND utxo.staking_key = decode($4, 'hex'));
+WHERE deleted_slot = 0
+  AND (utxo.payment_script = $1 AND utxo.payment_key = decode($2, 'hex'))
+LIMIT $3;
 ```
 
-Per-asset balances, ordered for deterministic unit output:
+Per-asset balances, merged by `(policy_id, name)` as they arrive:
 
 ```sql
-SELECT asset.policy_id, asset.name, COALESCE(SUM(asset.amount), 0) AS amount
-FROM asset
-JOIN utxo ON asset.utxo_id = utxo.id
+SELECT asset.policy_id, asset.name, asset.amount
+FROM utxo
+JOIN asset ON asset.utxo_id = utxo.id
 WHERE utxo.deleted_slot = 0
-  AND (utxo.payment_script = $1 AND utxo.payment_key = decode($2, 'hex')
-       AND utxo.credential_tag = $3 AND utxo.staking_key = decode($4, 'hex'))
-GROUP BY asset.policy_id, asset.name
+  AND (utxo.payment_script = $1 AND utxo.payment_key = decode($2, 'hex'))
 ORDER BY asset.policy_id, asset.name;
 ```
 

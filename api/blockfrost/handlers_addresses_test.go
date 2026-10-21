@@ -15,11 +15,16 @@
 package blockfrost
 
 import (
+	"context"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -199,4 +204,171 @@ func TestHandleAddressAssetUTXOsRejectsBadInput(t *testing.T) {
 	w := serve(t, node, "/api/v0/addresses/a/utxos/"+testAsset)
 	require.Equal(t, http.StatusBadRequest, w.Code)
 	require.Contains(t, w.Body.String(), "Invalid address")
+}
+
+// blockingAddressNode parks both summary routes until released or until the
+// request context ends.
+type blockingAddressNode struct {
+	*mockNode
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (n *blockingAddressNode) wait(ctx context.Context) error {
+	n.entered <- struct{}{}
+	select {
+	case <-n.release:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (n *blockingAddressNode) Address(
+	ctx context.Context,
+	_ string,
+) (AddressInfo, error) {
+	return AddressInfo{Address: "addr1"}, n.wait(ctx)
+}
+
+func (n *blockingAddressNode) AddressExtended(
+	ctx context.Context,
+	_ string,
+) (AddressExtendedInfo, error) {
+	return AddressExtendedInfo{Address: "addr1"}, n.wait(ctx)
+}
+
+func newBlockingAddressNode() *blockingAddressNode {
+	return &blockingAddressNode{
+		mockNode: &mockNode{},
+		entered:  make(chan struct{}, 8),
+		release:  make(chan struct{}),
+	}
+}
+
+func addressSummaryRequest(
+	ctx context.Context,
+	path string,
+) *http.Request {
+	req := httptest.NewRequest(http.MethodGet, path, nil).WithContext(ctx)
+	req.RemoteAddr = "192.0.2.7:4000"
+	return req
+}
+
+func TestHandleAddressPropagatesRequestContext(t *testing.T) {
+	t.Parallel()
+	for _, path := range []string{
+		"/api/v0/addresses/addr1",
+		"/api/v0/addresses/addr1/extended",
+	} {
+		t.Run(path, func(t *testing.T) {
+			t.Parallel()
+			node := newBlockingAddressNode()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			var releaseOnce sync.Once
+			release := func() {
+				releaseOnce.Do(func() { close(node.release) })
+			}
+			defer release()
+			done := make(chan *httptest.ResponseRecorder, 1)
+			go func() {
+				w := httptest.NewRecorder()
+				newTestBlockfrost(node).handler().ServeHTTP(
+					w, addressSummaryRequest(ctx, path),
+				)
+				done <- w
+			}()
+			testutil.RequireReceive(
+				t, node.entered, 5*time.Second, "request reached node",
+			)
+			cancel()
+			w := testutil.RequireReceive(
+				t, done, 5*time.Second,
+				"handler returns once the client cancels",
+			)
+			// A cancelled request has no reader, so nothing is written.
+			require.Equal(t, 0, w.Body.Len())
+		})
+	}
+}
+
+func TestHandleAddressSummaryAdmissionCap(t *testing.T) {
+	t.Parallel()
+	node := newBlockingAddressNode()
+	b := newTestBlockfrost(node)
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(node.release) }) }
+	defer release()
+
+	var wg sync.WaitGroup
+	serveAsync := func(path string) {
+		wg.Go(func() {
+			b.handler().ServeHTTP(
+				httptest.NewRecorder(),
+				addressSummaryRequest(context.Background(), path),
+			)
+		})
+	}
+	// One base and one extended request fill the per-client cap, so the
+	// cap is shared between the two routes.
+	serveAsync("/api/v0/addresses/addr1")
+	serveAsync("/api/v0/addresses/addr1/extended")
+	for range 2 {
+		testutil.RequireReceive(
+			t, node.entered, 5*time.Second, "request admitted",
+		)
+	}
+
+	for _, path := range []string{
+		"/api/v0/addresses/addr1",
+		"/api/v0/addresses/addr1/extended",
+	} {
+		// A rejected request returns at once; the deadline only keeps a
+		// wrongly admitted one from parking the test.
+		ctx, cancel := context.WithTimeout(
+			context.Background(), 2*time.Second,
+		)
+		w := httptest.NewRecorder()
+		b.handler().ServeHTTP(w, addressSummaryRequest(ctx, path))
+		cancel()
+		require.Equal(t, http.StatusTooManyRequests, w.Code, path)
+		require.Equal(t, "1", w.Header().Get("Retry-After"))
+	}
+
+	// A different client is not affected by the first one's cap.
+	other := addressSummaryRequest(
+		context.Background(), "/api/v0/addresses/addr1",
+	)
+	other.RemoteAddr = "192.0.2.8:4000"
+	go b.handler().ServeHTTP(httptest.NewRecorder(), other)
+	testutil.RequireReceive(
+		t, node.entered, 5*time.Second, "other client admitted",
+	)
+
+	release()
+	wg.Wait()
+
+	// The slots are free again once the requests finish.
+	w := httptest.NewRecorder()
+	b.handler().ServeHTTP(
+		w, addressSummaryRequest(
+			context.Background(), "/api/v0/addresses/addr1",
+		),
+	)
+	require.Equal(t, http.StatusOK, w.Code)
+}
+
+func TestHandleAddressSummaryTooLarge(t *testing.T) {
+	t.Parallel()
+	for _, path := range []string{
+		"/api/v0/addresses/addr1",
+		"/api/v0/addresses/addr1/extended",
+	} {
+		node := &mockNode{addressInfoErr: ErrAddressSummaryTooLarge}
+		node.addressErr = ErrAddressSummaryTooLarge
+		w := serve(t, node, path)
+		require.Equal(t, http.StatusBadRequest, w.Code, path)
+		require.Contains(t, w.Body.String(), "too many outputs or assets")
+	}
 }

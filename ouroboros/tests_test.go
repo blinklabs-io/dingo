@@ -759,6 +759,7 @@ func recordTestLeiosAnnouncement(
 		t,
 		o.recordLeiosAnnouncement(
 			headerRaw,
+			header.Cbor(),
 			ebHash,
 			ebSize,
 			header,
@@ -784,6 +785,7 @@ func recordTestLeiosAnnouncementNoFail(o *Ouroboros, headerRaw []byte) error {
 	}
 	return o.recordLeiosAnnouncement(
 		headerRaw,
+		header.Cbor(),
 		ebHash,
 		ebSize,
 		header,

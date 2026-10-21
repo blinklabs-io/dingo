@@ -879,8 +879,13 @@ type Config struct {
 	BlockPipelineValidateEnabled bool `yaml:"blockPipelineValidateEnabled"        envconfig:"DINGO_BLOCK_PIPELINE_VALIDATE_ENABLED"`
 	// LedgerPrefetchAheadEnabled resolves the next block's input UTxOs on a
 	// separate goroutine while the current block applies, for blocks under
-	// normal validation only. Not consensus-affecting; off by default.
+	// normal validation only. Not consensus-affecting; on by default.
 	LedgerPrefetchAheadEnabled bool `yaml:"ledgerPrefetchAheadEnabled"          envconfig:"DINGO_LEDGER_PREFETCH_AHEAD_ENABLED"`
+	// LedgerValidateAheadEnabled verifies the witness signatures of the
+	// validated blocks of a block-apply chunk on worker goroutines while
+	// earlier blocks of the chunk apply. Not consensus-affecting; on by
+	// default.
+	LedgerValidateAheadEnabled bool `yaml:"ledgerValidateAheadEnabled"          envconfig:"DINGO_LEDGER_VALIDATE_AHEAD_ENABLED"`
 	// LedgerApplyRowBatchingEnabled writes the accumulated deltas of blocks
 	// that are not validated through the metadata store's batched path in core
 	// storage mode, as API storage mode already does, instead of one statement
@@ -1119,9 +1124,10 @@ type Config struct {
 // PluginsConfig is the canonical configuration tree for compiled-in plugin
 // capabilities.
 type PluginsConfig struct {
-	Storage StoragePluginsConfig `yaml:"storage"`
-	Mempool hostplugin.Selection `yaml:"mempool"`
-	API     APIPluginsConfig     `yaml:"api"`
+	Storage   StoragePluginsConfig `yaml:"storage"`
+	Consensus hostplugin.Selection `yaml:"consensus"`
+	Mempool   hostplugin.Selection `yaml:"mempool"`
+	API       APIPluginsConfig     `yaml:"api"`
 }
 
 type StoragePluginsConfig struct {
@@ -1166,6 +1172,10 @@ func defaultPluginsConfig() PluginsConfig {
 				Provider: "sqlite",
 				Config:   map[string]any{},
 			},
+		},
+		Consensus: hostplugin.Selection{
+			Provider: "praos",
+			Config:   map[string]any{},
 		},
 		Mempool: hostplugin.Selection{
 			Provider: DefaultMempoolImplementation,
@@ -1654,6 +1664,10 @@ func newDefaultConfig() *Config {
 		ValidateForgedBlock: true,
 		// SQLite planner statistics stay current unless an operator opts out.
 		PlannerStatsRefreshEnabled: true,
+		// Block apply overlaps input reads and signature checks with earlier
+		// blocks of its chunk. Neither changes a verdict or stored state.
+		LedgerPrefetchAheadEnabled: true,
+		LedgerValidateAheadEnabled: true,
 	}
 }
 
@@ -1769,6 +1783,7 @@ func cloneConfig(cfg *Config) *Config {
 	clone.Plugins.Storage.Metadata = clonePluginSelection(
 		cfg.Plugins.Storage.Metadata,
 	)
+	clone.Plugins.Consensus = clonePluginSelection(cfg.Plugins.Consensus)
 	clone.Plugins.Mempool = clonePluginSelection(cfg.Plugins.Mempool)
 	clone.Plugins.API.Blockfrost = clonePluginSelection(
 		cfg.Plugins.API.Blockfrost,
@@ -1898,6 +1913,7 @@ func LoadConfig(configFile string) (*Config, error) {
 	}{
 		{hostplugin.CapabilityStorageBlob, &cfg.Plugins.Storage.Blob},
 		{hostplugin.CapabilityStorageMetadata, &cfg.Plugins.Storage.Metadata},
+		{hostplugin.CapabilityConsensus, &cfg.Plugins.Consensus},
 		{hostplugin.CapabilityMempool, &cfg.Plugins.Mempool},
 		{hostplugin.CapabilityAPIBlockfrost, &cfg.Plugins.API.Blockfrost},
 		{hostplugin.CapabilityAPIKupo, &cfg.Plugins.API.Kupo},

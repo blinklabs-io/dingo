@@ -927,27 +927,14 @@ func (b *Blockfrost) handleAddress(
 	r *http.Request,
 ) {
 	address := r.PathValue("address")
-	info, err := b.node.Address(address)
+	release, ok := b.admitAddressSummary(w, r)
+	if !ok {
+		return
+	}
+	defer release()
+	info, err := b.node.Address(r.Context(), address)
 	if err != nil {
-		if errors.Is(err, ErrAddressNotFound) {
-			writeError(
-				w,
-				http.StatusNotFound,
-				"Not Found",
-				"The requested component has not been found.",
-			)
-			return
-		}
-		b.logger.Error(
-			"failed to get address",
-			"address", address,
-			"error", err,
-		)
-		writeNodeQueryError(
-			w,
-			err,
-			"failed to retrieve address",
-		)
+		b.writeAddressQueryError(w, err, address, "address")
 		return
 	}
 
@@ -2025,6 +2012,17 @@ func writeNodeQueryError(
 			http.StatusBadRequest,
 			"Bad Request",
 			"Invalid address for this network or malformed address format.",
+		)
+		return
+	}
+	// Blockfrost documents 400 for requests past a service limit; 422 is
+	// outside the status set its clients expect from these routes.
+	if errors.Is(err, ErrAddressSummaryTooLarge) {
+		writeError(
+			w,
+			http.StatusBadRequest,
+			"Bad Request",
+			"The address holds too many outputs or assets to summarize.",
 		)
 		return
 	}
