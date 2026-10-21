@@ -178,7 +178,11 @@ func (n *Node) quiesceComponentStops() []namedStop {
 	if n.leiosVoteManager != nil {
 		stops = append(stops, namedStop{
 			name: "leios vote manager",
-			stop: n.leiosVoteManager.Stop,
+			stop: func() error {
+				err := n.leiosVoteManager.Stop()
+				n.leiosCertificateVerifier.Store(nil)
+				return err
+			},
 		})
 	}
 	if n.snapshotMgr != nil {
