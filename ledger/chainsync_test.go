@@ -6595,6 +6595,66 @@ func TestHeaderCryptoVerificationGenerationPinBlocksPublication(t *testing.T) {
 	require.False(t, ls.HeaderCryptoVerificationGenerationCurrent(generation))
 }
 
+// The selector callback runs while chainsync holds the generation pin. Its
+// chain-selection evaluation must not read-lock the generation again: a
+// validation transition queued in between would block that second read lock
+// while itself waiting for the first.
+func TestPinnedPeerTipAdmissionCompletesWithQueuedTransition(t *testing.T) {
+	t.Parallel()
+
+	ls := &LedgerState{}
+	ls.publishSnapshotsLocked()
+	generation := ls.loadConsensusSnapshot().generation
+	cs := chainselection.NewChainSelector(chainselection.ChainSelectorConfig{
+		HeaderCryptoVerificationGenerationCurrent: ls.HeaderCryptoVerificationGenerationCurrent,
+		CurrentHeaderCryptoVerificationGeneration: ls.CurrentHeaderCryptoVerificationGeneration,
+		PinHeaderCryptoVerificationGeneration:     ls.PinHeaderCryptoVerificationGeneration,
+	})
+	release, current := ls.PinHeaderCryptoVerificationGeneration(generation)
+	require.True(t, current)
+	transition := make(chan func(), 1)
+	go func() {
+		transition <- ls.beginTxValidationTransition()
+	}()
+	commitDone := make(chan struct{})
+	t.Cleanup(func() {
+		release()
+		testutil.RequireReceive(t, transition, testutil.AsyncWait,
+			"validation transition did not start")()
+		testutil.RequireReceive(t, commitDone, testutil.AsyncWait,
+			"selector commit did not return")
+	})
+	// A failed TryRLock while this test holds a read lock means a writer waits.
+	testutil.WaitForCondition(t, func() bool {
+		if ls.txValidationCommitMutex.TryRLock() {
+			ls.txValidationCommitMutex.RUnlock()
+			return false
+		}
+		return true
+	}, testutil.AsyncWait, "validation transition did not queue")
+
+	update := chainselection.PeerTipUpdateEvent{
+		ConnectionId: ouroboros.ConnectionId{
+			LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3001},
+			RemoteAddr: &net.TCPAddr{IP: net.ParseIP("10.0.0.1"), Port: 3001},
+		},
+		AdmissionID: 1,
+		Tip: ochainsync.Tip{
+			Point:       ocommon.Point{Slot: 100, Hash: []byte("h100")},
+			BlockNumber: 100,
+		},
+		HeaderCryptoVerificationGeneration: generation,
+	}
+	update.ObservedTip = update.Tip
+	commit := make(chan bool, 1)
+	go func() {
+		defer close(commitDone)
+		commit <- cs.CommitPeerTipAdmissionPinned(update)
+	}()
+	assert.True(t, testutil.RequireReceive(t, commit, testutil.AsyncWait,
+		"pinned selector commit deadlocked behind a queued transition"))
+}
+
 func TestBlockfetchHeaderVerificationAvoidsGenerationLockInversion(
 	t *testing.T,
 ) {

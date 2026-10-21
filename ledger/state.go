@@ -2119,6 +2119,14 @@ type LedgerState struct {
 
 	lastActiveConnId *ouroboros.ConnectionId // tracks active connection for switch detection
 
+	// chainsyncOpeningRollbacks holds a session's opening rollback while
+	// deferOpeningChainsyncRollback waits for the peer's first header, and
+	// chainsyncHeaderSessions marks the connections that have delivered one.
+	// Both are keyed by connIdKey, guarded by chainsyncMutex, and cleared
+	// when the connection closes.
+	chainsyncOpeningRollbacks map[string]ChainsyncEvent
+	chainsyncHeaderSessions   map[string]struct{}
+
 	// Header mismatch tracking for fork detection and re-sync
 	// headerMismatchMu guards headerMismatchCounts. The header handler
 	// counts under chainsyncMutex, but blockfetch paths reset a count through
@@ -13632,6 +13640,27 @@ func (ls *LedgerState) GetChainFromPointReverseContext(
 // Tip returns the current chain tip
 func (ls *LedgerState) Tip() ochainsync.Tip {
 	return cloneTip(ls.loadTipSnapshot().currentTip)
+}
+
+// AwaitAppliedSlot blocks until the applied ledger tip has reached slot, or
+// ctx ends, in which case it returns ctx's error. The applied tip is
+// published only after the block's transaction commits, so once this returns
+// a fresh read snapshot sees a tip at or beyond slot.
+func (ls *LedgerState) AwaitAppliedSlot(
+	ctx context.Context,
+	slot uint64,
+) error {
+	for {
+		published := ls.snapshotPublishedChan()
+		if ls.loadTipSnapshot().currentTip.Point.Slot >= slot {
+			return nil
+		}
+		select {
+		case <-published:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 }
 
 // ImmutablePoint returns the primary-chain point k blocks behind the applied

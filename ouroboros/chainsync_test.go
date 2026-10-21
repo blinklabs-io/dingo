@@ -3549,6 +3549,21 @@ func newChainsyncServerFixtureWithConfig(
 	tweaks ...func(*Ouroboros),
 ) *chainsyncServerFixture {
 	t.Helper()
+	return newChainsyncServerFixtureServing(t, mode, cfg, false, tweaks...)
+}
+
+// newChainsyncServerFixtureServing builds the fixture with the server's
+// waitForLedger behaviour chosen explicitly. The other constructors leave it
+// off, so their blocks are served as soon as the chain has them, without the
+// ledger applying them.
+func newChainsyncServerFixtureServing(
+	t *testing.T,
+	mode csmock.Mode,
+	cfg OuroborosConfig,
+	waitForLedger bool,
+	tweaks ...func(*Ouroboros),
+) *chainsyncServerFixture {
+	t.Helper()
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	bus := event.NewEventBus(nil, logger)
 	t.Cleanup(bus.Close)
@@ -3599,7 +3614,11 @@ func newChainsyncServerFixtureWithConfig(
 	// callbacks run. These shims only record the ID and delegate; the real
 	// callbacks (and their instrumentation wrappers) still do all the work.
 	serverCfg := ochainsync.NewConfig(
-		o.chainsyncServerConnOpts(context.Background(), limiter)...)
+		o.chainsyncServerConnOpts(
+			context.Background(),
+			limiter,
+			waitForLedger,
+		)...)
 	findIntersect := serverCfg.FindIntersectFunc
 	serverCfg.FindIntersectFunc = func(
 		ctx ochainsync.CallbackContext,
@@ -4279,6 +4298,93 @@ func TestChainsyncServerRequestNextIteratorCancelDoesNotCloseConnection(
 	)
 }
 
+// TestChainsyncServerLocalClientNotServedAheadOfLedger verifies a
+// node-to-client server holds back a block the chain has but the ledger has
+// not applied, on both the synchronous and the post-AwaitReply path, and
+// serves it once the ledger tip reaches it. A local client acquires the
+// points chainsync delivers; one served ahead of the ledger failed Acquire
+// with AcquireFailurePointNotOnChain until the ledger caught up.
+func TestChainsyncServerLocalClientNotServedAheadOfLedger(t *testing.T) {
+	t.Parallel()
+
+	f := newChainsyncServerFixtureServing(
+		t,
+		csmock.ModeNtC,
+		OuroborosConfig{},
+		true,
+	)
+	block1, point1 := f.appendBlock(t, 1, 1, 0x01)
+	f.setTip(block1, point1)
+	f.drainInitialRollback(t, csmock.OriginPoint())
+
+	require.NoError(t, f.h.RequestNext())
+	require.True(t, f.observe(t).IsRollForward(), "applied block is served")
+
+	requireServedOnceApplied := func(block *testBlock, point ocommon.Point) {
+		t.Helper()
+		testutil.RequireNoReceive(
+			t,
+			f.h.Observed(),
+			100*time.Millisecond,
+			"a block the ledger has not applied must not be served",
+		)
+		f.setTip(block, point)
+		msg := f.observe(t)
+		require.True(t, msg.IsRollForward(), "expected RollForward")
+		tip, ok := msg.Tip()
+		require.True(t, ok)
+		require.GreaterOrEqual(t, tip.Point.Slot, point.Slot)
+	}
+
+	appendChild := func(
+		parent *testBlock,
+		hashByte byte,
+	) (*testBlock, ocommon.Point) {
+		t.Helper()
+		header, ok := newTestBlockHeader(
+			parent.SlotNumber()+1,
+			parent.BlockNumber()+1,
+			hashByte,
+		).(*testBlockHeader)
+		require.True(t, ok)
+		header.prevHash = parent.Hash()
+		block := &testBlock{BlockHeader: header, blockType: 1, cbor: []byte{0x80}}
+		require.NoError(
+			t,
+			f.o.ledgerState.Chain().AddBlock(context.Background(), block, nil),
+		)
+		return block, ocommon.NewPoint(
+			block.SlotNumber(),
+			block.Hash().Bytes(),
+		)
+	}
+
+	// The chain already has the block when the client asks for it.
+	block2, point2 := appendChild(block1, 0x02)
+	require.NoError(t, f.h.RequestNext())
+	require.True(t, f.observe(t).IsAwaitReply(), "expected AwaitReply")
+	requireServedOnceApplied(block2, point2)
+
+	// The client is parked when the chain gets the block.
+	require.NoError(t, f.h.RequestNext())
+	require.True(t, f.observe(t).IsAwaitReply(), "expected AwaitReply")
+	block3, point3 := appendChild(block2, 0x03)
+	requireServedOnceApplied(block3, point3)
+
+	// A block rolled back before application must never be served. The
+	// iterator's rollback is delivered even while the applied tip remains
+	// below the abandoned block's slot.
+	_, _ = appendChild(block3, 0x04)
+	require.NoError(t, f.h.RequestNext())
+	require.True(t, f.observe(t).IsAwaitReply(), "expected AwaitReply")
+	require.NoError(t, f.o.ledgerState.Chain().Rollback(t.Context(), point3))
+	rollback := f.observe(t)
+	require.True(t, rollback.IsRollBackward(), "expected RollBackward")
+	rollbackPoint, ok := rollback.Point()
+	require.True(t, ok)
+	require.Equal(t, point3, rollbackPoint)
+}
+
 // =============================================================================
 // RequestNext error paths
 //
@@ -4302,7 +4408,7 @@ func TestChainsyncServerRequestNextSyncIteratorErrorPropagates(t *testing.T) {
 	// lookup error.
 	require.NoError(t, dbtest.CloseDatabase(f.o.ledgerState.Database()))
 
-	err := f.o.chainsyncServerRequestNext(f.callbackContext())
+	err := f.o.chainsyncServerRequestNext(f.callbackContext(), false)
 
 	require.Error(t, err)
 	require.NotErrorIs(t, err, chain.ErrIteratorChainTip)
@@ -4320,7 +4426,7 @@ func TestChainsyncServerRequestNextAwaitReplyErrorPropagates(t *testing.T) {
 	// Stop the protocol so the AwaitReply send itself fails.
 	f.h.Server().Stop()
 
-	require.Error(t, f.o.chainsyncServerRequestNext(f.callbackContext()))
+	require.Error(t, f.o.chainsyncServerRequestNext(f.callbackContext(), false))
 }
 
 // TestChainsyncServerRequestNextErrorsNameTheFailedStep verifies the callback
@@ -4336,7 +4442,7 @@ func TestChainsyncServerRequestNextErrorsNameTheFailedStep(t *testing.T) {
 		f.registerClientAtOrigin(t)
 		require.NoError(t, dbtest.CloseDatabase(f.o.ledgerState.Database()))
 
-		err := f.o.chainsyncServerRequestNext(f.callbackContext())
+		err := f.o.chainsyncServerRequestNext(f.callbackContext(), false)
 
 		require.ErrorContains(t, err, "chainsync server: next chain event")
 		require.NotErrorIs(t, err, chain.ErrIteratorChainTip)
@@ -4349,7 +4455,7 @@ func TestChainsyncServerRequestNextErrorsNameTheFailedStep(t *testing.T) {
 		f.registerClientAtOrigin(t)
 		f.h.Server().Stop()
 
-		err := f.o.chainsyncServerRequestNext(f.callbackContext())
+		err := f.o.chainsyncServerRequestNext(f.callbackContext(), false)
 
 		require.ErrorContains(t, err, "chainsync server: send AwaitReply")
 		require.Error(t, errors.Unwrap(err), "the send error must stay wrapped")
@@ -4370,7 +4476,7 @@ func TestChainsyncServerRequestNextMissingConnectionAfterAwaitReply(
 
 	require.True(t, f.o.connManager.RemoveConnection(f.conn.Id(), f.conn))
 
-	err := f.o.chainsyncServerRequestNext(f.callbackContext())
+	err := f.o.chainsyncServerRequestNext(f.callbackContext(), false)
 
 	require.ErrorContains(t, err, "not found")
 }
@@ -4518,7 +4624,7 @@ func TestChainsyncServerAwaitedWaiterClosesOnConnectionTeardown(
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		f.o.chainsyncServerAwaitNext(f.callbackContext(), conn, clientState)
+		f.o.chainsyncServerAwaitNext(f.callbackContext(), conn, clientState, nil, false)
 	}()
 
 	close(conn.done)
@@ -4880,6 +4986,7 @@ func TestChainsyncConnOptsUseConfiguredBlockTimeout(t *testing.T) {
 		o.chainsyncServerConnOpts(
 			context.Background(),
 			newChainsyncFindIntersectRateLimiter(200, 1000),
+			false,
 		)...)
 
 	require.Equal(t, blockTimeout, clientCfg.BlockTimeout)
@@ -5157,6 +5264,7 @@ func TestChainsyncServerRequestNext_AddClientFailure(
 	// Enter RequestNext before any protocol response can be sent.
 	err := o.chainsyncServerRequestNext(
 		ochainsync.CallbackContext{ConnectionId: connId},
+		false,
 	)
 
 	// AddClient failure is returned directly from the callback.
