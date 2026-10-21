@@ -139,6 +139,7 @@ func (a *NodeAdapter) confirmedInputAddresses(
 }
 
 func (a *NodeAdapter) mempoolDeposit(
+	ctx context.Context,
 	tx lcommon.Transaction,
 ) (uint64, error) {
 	if len(tx.Certificates()) == 0 {
@@ -146,14 +147,16 @@ func (a *NodeAdapter) mempoolDeposit(
 	}
 	db := a.ledgerState.Database()
 	slot := a.ledgerState.Tip().Point.Slot
-	epoch, err := db.GetEpochBySlot(slot, nil)
+	txn := db.Transaction(ctx, false)
+	defer txn.Release()
+	epoch, err := db.GetEpochBySlot(slot, txn)
 	if err != nil {
 		return 0, fmt.Errorf("get epoch for slot %d: %w", slot, err)
 	}
 	if epoch == nil {
 		return 0, nil
 	}
-	return a.transactionDeposit(tx, epoch.EraId, slot)
+	return a.transactionDeposit(ctx, tx, epoch.EraId, slot)
 }
 
 // outputAsUtxo carries the lovelace and native asset amounts of a decoded
@@ -301,8 +304,7 @@ func (a *NodeAdapter) MempoolTransaction(
 		})
 	}
 
-	//nolint:contextcheck // protocol parameters are read through the ledger state, which takes no context
-	deposit, err := a.mempoolDeposit(tx)
+	deposit, err := a.mempoolDeposit(ctx, tx)
 	if err != nil {
 		return MempoolTransactionInfo{}, fmt.Errorf(
 			"calculate deposit for mempool transaction %x: %w",
