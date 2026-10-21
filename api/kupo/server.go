@@ -123,6 +123,17 @@ func matchClient(r *http.Request) string {
 	return r.RemoteAddr
 }
 
+// corsExposeHeaders lists every response header this API sets that is not
+// CORS-safelisted. A browser hides any other header from scripts, so a client
+// on an allowed origin could not read the checkpoint, ETag or block hash the
+// Kupo contract returns.
+var corsExposeHeaders = []string{
+	"ETag",
+	"Retry-After",
+	"X-Block-Header-Hash",
+	"X-Most-Recent-Checkpoint",
+}
+
 func (s *Server) handler() http.Handler {
 	mux := http.NewServeMux()
 	for _, prefix := range []string{"", "/v1"} {
@@ -134,6 +145,7 @@ func (s *Server) handler() http.Handler {
 	limited := http.MaxBytesHandler(s.boundWrites(mux), maxRequestBodyBytes)
 	return httpcors.Handler(limited, httpcors.Config{
 		AllowedOrigins: s.config.CORSAllowedOrigins,
+		ExposeHeaders:  corsExposeHeaders,
 	})
 }
 

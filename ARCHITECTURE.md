@@ -11222,7 +11222,12 @@ needs for operational reads. Kupo admits at most three match streams globally
 and one per remote address, so any two clients leave a slot for a third, and
 each stream has a five-minute lifetime. Excess streams receive HTTP 429. A
 30-second write deadline is also re-armed before every response write, so a
-client that stops reading ends its stream before the lifetime expires.
+client that stops reading ends its stream before the lifetime expires. For an
+origin allowed by `corsAllowedOrigins`, `Access-Control-Expose-Headers` also
+names `ETag`, `Retry-After`, `X-Block-Header-Hash` and
+`X-Most-Recent-Checkpoint`, the non-safelisted headers Kupo sets, which
+browsers otherwise hide from scripts; other API servers expose only the gRPC
+status headers.
 
 `/matches` follows the upstream Kupo contract: an ordinary request streams the
 complete filtered array, with no Dingo pagination parameters, headers or
