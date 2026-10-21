@@ -280,3 +280,165 @@ func TestUnkeyedLocalProbeUnchangedWithoutTrustKey(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, f.localDir, source)
 }
+
+// signManifestForOtherID replaces dir's manifest with one the trust key signs
+// for a different snapshot ID, as a complete snapshot copied under this ID
+// presents.
+func signManifestForOtherID(t *testing.T, dir string) {
+	t.Helper()
+	m, err := lifecycle.ReadManifest(
+		dir, lifecycle.WithManifestKey(testSnapshotTrustKey),
+	)
+	require.NoError(t, err)
+	otherDir := filepath.Join(t.TempDir(), "other-snap")
+	require.NoError(t, os.MkdirAll(otherDir, 0o700))
+	require.NoError(t, lifecycle.WriteManifest(
+		otherDir, m, lifecycle.WithManifestKey(testSnapshotTrustKey),
+	))
+	data, err := os.ReadFile(filepath.Join(otherDir, lifecycle.ManifestFileName))
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(
+		filepath.Join(dir, lifecycle.ManifestFileName), data, 0o600,
+	))
+	_, err = lifecycle.ReadManifest(
+		dir, lifecycle.WithManifestKey(testSnapshotTrustKey),
+	)
+	require.ErrorIs(t, err, lifecycle.ErrManifestIDMismatch)
+}
+
+func oversizeManifest(t *testing.T, dir string) {
+	t.Helper()
+	require.NoError(t, os.WriteFile(
+		filepath.Join(dir, lifecycle.ManifestFileName),
+		[]byte(strings.Repeat("x", lifecycle.MaxManifestBytes+1)), 0o600,
+	))
+}
+
+// Under a trust key the unkeyed checksum and the size bound are no stronger
+// than the tag: a writer to the snapshot directory can fail any of them, so
+// none may make the authenticated cloud mirror of the same ID unavailable.
+//
+// Not t.Parallel: uses the process-global barkFakeCloudDir fixture.
+func TestKeyedLocalManifestFailureUsesAuthenticatedCloudMirror(t *testing.T) {
+	cases := []struct {
+		name   string
+		damage func(t *testing.T, dir string)
+		logMsg string
+	}{
+		{
+			name: "corrupted checksum",
+			damage: func(t *testing.T, dir string) {
+				tamperManifestChecksum(
+					t, filepath.Join(dir, lifecycle.ManifestFileName),
+				)
+			},
+			logMsg: "local snapshot failed manifest checksum validation",
+		},
+		{
+			name:   "oversized",
+			damage: oversizeManifest,
+			logMsg: "local snapshot failed manifest size check",
+		},
+		{
+			name: "unparseable",
+			damage: func(t *testing.T, dir string) {
+				require.NoError(t, os.WriteFile(
+					filepath.Join(dir, lifecycle.ManifestFileName),
+					[]byte("{"), 0o600,
+				))
+			},
+			logMsg: "local snapshot manifest is unreadable",
+		},
+		{
+			name:   "signed for another ID",
+			damage: signManifestForOtherID,
+			logMsg: "local snapshot failed manifest authentication",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newLocalAuthFixture(t)
+			tc.damage(t, f.localDir)
+
+			source, err := f.h.resolveSnapshotSource(
+				context.Background(), localAuthSnapshotID,
+			)
+			require.NoError(t, err)
+			require.NotEqual(t, f.localDir, source)
+
+			require.NoError(t, f.verify())
+			f.awaitCompleted(t)
+			logs := f.logs.String()
+			require.Contains(t, logs, tc.logMsg)
+			require.Contains(t, logs, "snapshot_id="+localAuthSnapshotID)
+			if tc.name != "unparseable" {
+				require.Contains(t, logs, "using cloud mirror")
+			}
+		})
+	}
+}
+
+// Without a usable cloud mirror a keyed local failure keeps the code the
+// local failure alone would produce.
+//
+// Not t.Parallel: uses the process-global barkFakeCloudDir fixture.
+func TestKeyedLocalManifestFailureWithoutCloudKeepsLocalCode(t *testing.T) {
+	t.Run("corrupted", func(t *testing.T) {
+		f := newLocalAuthFixture(t)
+		require.NoError(t, os.RemoveAll(f.cloudDir))
+		tamperManifestChecksum(
+			t, filepath.Join(f.localDir, lifecycle.ManifestFileName),
+		)
+		err := f.verify()
+		require.Equal(t, connect.CodeDataLoss, connect.CodeOf(err))
+		require.ErrorIs(t, err, lifecycle.ErrManifestCorrupted)
+		require.Contains(t, err.Error(), "no copy in the configured cloud destination")
+	})
+	t.Run("oversized", func(t *testing.T) {
+		f := newLocalAuthFixture(t)
+		require.NoError(t, os.RemoveAll(f.cloudDir))
+		oversizeManifest(t, f.localDir)
+		err := f.restore()
+		require.Equal(t, connect.CodeResourceExhausted, connect.CodeOf(err))
+		require.ErrorIs(t, err, lifecycle.ErrManifestTooLarge)
+		require.Contains(t, err.Error(), "no copy in the configured cloud destination")
+	})
+}
+
+// A configured trust key that cannot be loaded fails the request before any
+// snapshot is read, rather than probing the local copy unkeyed.
+//
+// Not t.Parallel: uses the process-global barkFakeCloudDir fixture.
+func TestUnloadableTrustKeyFailsResolutionClosed(t *testing.T) {
+	f := newLocalAuthFixture(t)
+	h := newTestDatabaseServiceHandlerWithConfig(
+		t, nil, filepath.Join(t.TempDir(), "target"),
+		filepath.Join(t.TempDir(), "missing-trust-key"),
+	)
+	h.bark.config.SnapshotDir = f.h.bark.config.SnapshotDir
+	h.bark.config.SnapshotCloudDestination = f.cloudDest
+	for _, op := range []func() error{
+		func() error {
+			_, err := h.Restore(context.Background(), connect.NewRequest(
+				&databasev1alpha1.RestoreRequest{SnapshotId: localAuthSnapshotID},
+			))
+			return err
+		},
+		func() error {
+			_, err := h.VerifySnapshot(context.Background(), connect.NewRequest(
+				&databasev1alpha1.VerifySnapshotRequest{
+					SnapshotId: localAuthSnapshotID,
+				},
+			))
+			return err
+		},
+	} {
+		err := op()
+		require.Equal(t, connect.CodeFailedPrecondition, connect.CodeOf(err))
+		require.Contains(t, err.Error(), "trust key")
+		h.mu.Lock()
+		busy := h.busy
+		h.mu.Unlock()
+		require.False(t, busy, "a refused request must release ownership")
+	}
+}
