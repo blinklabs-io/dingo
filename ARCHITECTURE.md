@@ -2855,7 +2855,9 @@ due rows asynchronously into the `offchain_metadata` table.
 Discovery reads at most 64 rows from each source table per pass and records the
 last source-row ID under `offchain-metadata-discovery:<source type>` in
 `sync_state`. A restart resumes those keyset scans, so accumulated chain history
-cannot make one worker pass materialize every pointer in memory.
+cannot make one worker pass materialize every pointer in memory. When a scan
+reaches the end of a table the cursor wraps to zero, so rows whose anchor was
+updated in place are re-read on a later pass.
 
 Fetched content is never fed back into consensus or ledger validation. The
 on-chain Blake2b-256 hash remains authoritative: fetched bytes are stored as

@@ -152,13 +152,16 @@ func (s *Store) EnsureOffchainMetadataPointers(
 		pointers := make([]pointer, 0, offchainPointerDiscoveryBatchSize)
 		for rows.Next() {
 			var id int64
-			var url string
+			var url sql.NullString
 			var hash []byte
 			if err := rows.Scan(&id, &url, &hash); err != nil {
 				rows.Close()
 				return created, err
 			}
-			pointers = append(pointers, pointer{id: id, url: url, hash: hash})
+			pointers = append(
+				pointers,
+				pointer{id: id, url: url.String, hash: hash},
+			)
 		}
 		if err := rows.Close(); err != nil {
 			return created, err
@@ -205,7 +208,15 @@ func (s *Store) EnsureOffchainMetadataPointers(
 			}
 			created += int(affected)
 		}
-		if len(pointers) > 0 {
+		// A short page means the scan reached the end of the table. Wrap
+		// the cursor so the next pass re-reads from the start: source rows
+		// such as drep and governance_vote update their anchor in place and
+		// keep their id, so a cursor that only moves forward would never
+		// discover the new anchor. Inserts are idempotent.
+		if len(pointers) < offchainPointerDiscoveryBatchSize {
+			cursor = 0
+		}
+		if len(pointers) > 0 || rawCursor != strconv.FormatInt(cursor, 10) {
 			if err := q.SetSyncState(
 				ctx,
 				sqlitequery.SetSyncStateParams{
