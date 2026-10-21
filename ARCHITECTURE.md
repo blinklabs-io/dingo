@@ -4597,11 +4597,17 @@ slot and reads that epoch's effective parameter row. At a hard-fork boundary,
 when the block body still uses the predecessor-era encoding while the header
 announces the successor, it instead uses the predecessor era's parameter row.
 This keeps either boundary from mistaking an epoch-boundary decentralization
-update for the wrong overlay schedule. When the target epoch's parameter row
-is not persisted yet (a from-genesis node still one epoch behind the header),
-`ProtocolParamsForSlot` forecasts it: for a slot one epoch ahead it applies,
-on top of any era `HardForkFunc`, the pending in-era protocol-parameter update
-the rollover will enact at that boundary. The forecast mirrors the rollover's
+update for the wrong overlay schedule. For an epoch after the applied one,
+only a row persisted for exactly that epoch is used: the persisted lookup
+returns the newest row at or before the requested epoch, and the published
+epoch cache can already describe the next epoch before its rollover writes a
+row, so that lookup would return an older epoch's parameters without the
+pending update. When no such row exists (a from-genesis node still one epoch
+behind the header), the parameters are forecast. A block encoded in the
+current era takes the current parameters with the pending in-era
+protocol-parameter update the rollover will enact at that boundary applied;
+any other future slot goes through `ProtocolParamsForSlot`, which applies the
+same pending update and then any era `HardForkFunc`. The forecast mirrors the rollover's
 enactment exactly — it selects the proposals submitted in the current epoch
 (Shelley update system: a proposal submitted in epoch `e` is enacted as epoch
 `e+1`'s parameters), applies the same `UpdateQuorum` rule, and reads the
