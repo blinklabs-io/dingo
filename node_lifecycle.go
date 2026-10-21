@@ -179,9 +179,10 @@ func (n *Node) quiesceComponentStops() []namedStop {
 		stops = append(stops, namedStop{
 			name: "leios vote manager",
 			stop: func() error {
-				err := n.leiosVoteManager.Stop()
+				// Unpublish first so the ledger's certificate callback
+				// cannot reach a manager that is stopping.
 				n.leiosCertificateVerifier.Store(nil)
-				return err
+				return n.leiosVoteManager.Stop()
 			},
 		})
 	}
