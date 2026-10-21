@@ -63,7 +63,10 @@ var (
 // unbounded-cost database reads. Every tool registered on one server must
 // share one value so the concurrency slots are a server-wide budget.
 type readLimits struct {
-	slots        chan struct{}
+	slots chan struct{}
+	// parseSlots bounds the caller-supplied payloads parsed at once; see
+	// runAdmitted.
+	parseSlots   chan struct{}
 	maxAssetRows int
 	// walBytes reports the metadata WAL size. Nil disables the pressure
 	// check, as when the server has no file-backed metadata store.
@@ -74,6 +77,7 @@ type readLimits struct {
 func newReadLimits() *readLimits {
 	return &readLimits{
 		slots:        make(chan struct{}, maxConcurrentSQLiteQueries),
+		parseSlots:   make(chan struct{}, maxConcurrentPayloadParses),
 		maxAssetRows: maxAssetInfoRows,
 		maxWALBytes:  maxSQLiteWALBytes,
 	}

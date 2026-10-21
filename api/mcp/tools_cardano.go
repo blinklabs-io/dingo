@@ -159,7 +159,9 @@ func registerCardanoTools(
 		queryTimeout = defaultQueryTimeout
 	}
 
-	registerExtendedCardanoTools(server, db, ls, mp, network, queryTimeout)
+	registerExtendedCardanoTools(
+		server, db, ls, mp, network, queryTimeout, limits,
+	)
 	var evaluator txEvaluator
 	if ls != nil {
 		evaluator = ls
@@ -2255,6 +2257,18 @@ func decodeEvaluateTransactionWith(
 	})
 }
 
+// invalidTransactionError marks a transaction payload that failed to decode,
+// so the handler can report it as a bad request rather than a failed
+// evaluation.
+type invalidTransactionError struct{ err error }
+
+func (e invalidTransactionError) Error() string { return e.err.Error() }
+
+func (e invalidTransactionError) Unwrap() error { return e.err }
+
+// errLedgerStateUnavailable reports that evaluate_tx has no ledger state.
+var errLedgerStateUnavailable = errors.New("ledger state is not initialized")
+
 func registerEvaluateTxTool(
 	server *mcp.Server,
 	evaluator txEvaluator,
@@ -2273,6 +2287,15 @@ func registerEvaluateTxTool(
 					&mcp.TextContent{
 						Text: "Error: Transaction payload is empty. Please provide hex-encoded or base64-encoded transaction CBOR.",
 					},
+				},
+			}, nil, nil
+		}
+
+		if err := checkEncodedPayloadSize("Transaction payload", trimmed); err != nil {
+			return &mcp.CallToolResult{
+				IsError: true,
+				Content: []mcp.Content{
+					&mcp.TextContent{Text: "Error: " + err.Error()},
 				},
 			}, nil, nil
 		}
@@ -2301,22 +2324,50 @@ func registerEvaluateTxTool(
 			}, nil, nil
 		}
 
-		tx, err := decodeEvaluateTransaction(txBytes)
-		if err != nil {
+		if err := checkDecodedPayloadSize("Transaction payload", len(txBytes)); err != nil {
+			return &mcp.CallToolResult{
+				IsError: true,
+				Content: []mcp.Content{
+					&mcp.TextContent{Text: "Error: " + err.Error()},
+				},
+			}, nil, nil
+		}
+
+		// The payload is parsed inside the evaluation slot and under the
+		// deadline, so concurrent callers cannot spend parsing CPU and memory
+		// outside either limit.
+		evalCtx, cancel := context.WithTimeout(ctx, queryTimeout)
+		defer cancel()
+		result, err := runBoundedEvaluation(
+			evalCtx,
+			evaluationGate,
+			func(ctx context.Context) (evaluationResult, error) {
+				tx, err := decodeEvaluateTransaction(txBytes)
+				if err != nil {
+					return evaluationResult{}, invalidTransactionError{err}
+				}
+				if evaluator == nil {
+					return evaluationResult{}, errLedgerStateUnavailable
+				}
+				fee, total, redeemers, err := evaluator.EvaluateTxContext(ctx, tx)
+				return evaluationResult{fee, total, redeemers}, err
+			},
+		)
+		var invalid invalidTransactionError
+		if errors.As(err, &invalid) {
 			return &mcp.CallToolResult{
 				IsError: true,
 				Content: []mcp.Content{
 					&mcp.TextContent{
 						Text: fmt.Sprintf(
 							"Error: Invalid transaction CBOR: %v",
-							err,
+							invalid.err,
 						),
 					},
 				},
 			}, nil, nil
 		}
-
-		if evaluator == nil {
+		if errors.Is(err, errLedgerStateUnavailable) {
 			return &mcp.CallToolResult{
 				IsError: true,
 				Content: []mcp.Content{
@@ -2326,17 +2377,6 @@ func registerEvaluateTxTool(
 				},
 			}, nil, nil
 		}
-
-		evalCtx, cancel := context.WithTimeout(ctx, queryTimeout)
-		defer cancel()
-		result, err := runBoundedEvaluation(
-			evalCtx,
-			evaluationGate,
-			func(ctx context.Context) (evaluationResult, error) {
-				fee, total, redeemers, err := evaluator.EvaluateTxContext(ctx, tx)
-				return evaluationResult{fee, total, redeemers}, err
-			},
-		)
 		fee, totalExUnits, redeemerExUnits := result.fee, result.total, result.redeemers
 		if err != nil {
 			return &mcp.CallToolResult{
@@ -2408,43 +2448,13 @@ func runBoundedEvaluation(
 	gate chan struct{},
 	evaluate func(context.Context) (evaluationResult, error),
 ) (evaluationResult, error) {
-	if err := ctx.Err(); err != nil {
-		return evaluationResult{}, err
-	}
-	select {
-	case gate <- struct{}{}:
-	default:
-		return evaluationResult{}, errors.New(
+	return runAdmitted(
+		ctx,
+		gate,
+		errors.New(
 			"transaction evaluator busy; retry after the current evaluation completes",
-		)
-	}
-	type response struct {
-		result evaluationResult
-		err    error
-	}
-	done := make(chan response, 1)
-	go func() {
-		var res response
-		defer func() {
-			<-gate
-			if recovered := recover(); recovered != nil {
-				res.err = fmt.Errorf(
-					"transaction evaluation panicked: %v",
-					recovered,
-				)
-			}
-			done <- res
-		}()
-		if err := ctx.Err(); err != nil {
-			res.err = err
-			return
-		}
-		res.result, res.err = evaluate(ctx)
-	}()
-	select {
-	case <-ctx.Done():
-		return evaluationResult{}, ctx.Err()
-	case res := <-done:
-		return res.result, res.err
-	}
+		),
+		"transaction evaluation",
+		evaluate,
+	)
 }
