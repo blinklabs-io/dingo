@@ -802,3 +802,115 @@ func TestServerAdmitsOneBootstrapAtFullConcurrency(t *testing.T) {
 		assert.Equal(t, http.StatusOK, code)
 	}
 }
+
+// rangeCountingStore reports itself as remote and counts the backend range
+// requests an objectReader-style reader would issue: one each time a read
+// starts after the position moved.
+type rangeCountingStore struct {
+	ArtifactStore
+	opens atomic.Int64
+}
+
+func (s *rangeCountingStore) streamsRemoteObjects() bool { return true }
+
+func (s *rangeCountingStore) Open(
+	ctx context.Context,
+	key string,
+) (io.ReadSeekCloser, error) {
+	inner, err := s.ArtifactStore.Open(ctx, key)
+	if err != nil {
+		return nil, err
+	}
+	return &rangeCountingReader{ReadSeekCloser: inner, store: s}, nil
+}
+
+type rangeCountingReader struct {
+	io.ReadSeekCloser
+	store   *rangeCountingStore
+	started bool
+}
+
+func (r *rangeCountingReader) Read(p []byte) (int, error) {
+	if !r.started {
+		r.started = true
+		r.store.opens.Add(1)
+	}
+	return r.ReadSeekCloser.Read(p)
+}
+
+func (r *rangeCountingReader) Seek(off int64, whence int) (int64, error) {
+	cur, err := r.ReadSeekCloser.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return 0, err
+	}
+	next, err := r.ReadSeekCloser.Seek(off, whence)
+	if err == nil && next != cur {
+		r.started = false
+	}
+	return next, err
+}
+
+func TestServerLimitsMultipartRangesOnRemoteStores(t *testing.T) {
+	t.Parallel()
+
+	f := newServerFixture(t, ServerConfig{})
+	counting := &rangeCountingStore{ArtifactStore: f.store}
+	srv := newMithrilTestServer(t, ServerConfig{
+		Store: counting, Logger: slog.New(slog.DiscardHandler),
+	})
+	name := "/download/" + f.artifact.Hash + "/00001.tar.zst"
+	full, err := os.ReadFile( //nolint:gosec // test temp dir
+		filepath.Join(f.dir, f.artifact.Hash, "00001.tar.zst"),
+	)
+	require.NoError(t, err)
+	require.Greater(t, len(full), 20)
+
+	// A single range, including padded and empty list elements, is served.
+	for _, h := range []string{"bytes=10-19", "bytes= 10-19 ,", "bytes=,10-19"} {
+		before := counting.opens.Load()
+		resp := get(t, srv.URL+name, "Range", h)
+		require.Equal(t, http.StatusPartialContent, resp.StatusCode, h)
+		assert.Equal(t, full[10:20], getBody(t, resp), h)
+		assert.Equal(t, int64(1), counting.opens.Load()-before, h)
+	}
+
+	// More than one range is answered as the whole object from one backend
+	// read, never as a multipart body.
+	for _, h := range []string{
+		"bytes=0-0,2-2",
+		"bytes=0-0, 2-2",
+		"bytes=0-9,5-14,10-19",
+		"bytes=0-0" + strings.Repeat(",0-0", 50),
+	} {
+		before := counting.opens.Load()
+		resp := get(t, srv.URL+name, "Range", h)
+		require.Equal(t, http.StatusOK, resp.StatusCode, h)
+		assert.Empty(t, resp.Header.Get("Content-Range"), h)
+		assert.NotContains(t, resp.Header.Get("Content-Type"), "multipart", h)
+		assert.Equal(t, full, getBody(t, resp), h)
+		assert.Equal(t, int64(1), counting.opens.Load()-before, h)
+	}
+
+	// The metadata of a stored certificate is limited the same way.
+	certHash := strings.Repeat("c", 64)
+	body := `{"hash":"` + certHash + `"}`
+	require.NoError(t, counting.Put(
+		t.Context(), "certificates/"+certHash+".json", strings.NewReader(body),
+	))
+	resp := get(t, srv.URL+"/certificate/"+certHash, "Range", "bytes=0-0,2-2")
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, body, string(getBody(t, resp)))
+}
+
+func TestServerKeepsMultipartRangesOnLocalStores(t *testing.T) {
+	t.Parallel()
+
+	f := newServerFixture(t, ServerConfig{})
+	resp := get(
+		t, f.srv.URL+"/download/"+f.artifact.Hash+"/00001.tar.zst",
+		"Range", "bytes=0-0,2-2",
+	)
+	require.Equal(t, http.StatusPartialContent, resp.StatusCode)
+	assert.Contains(t, resp.Header.Get("Content-Type"), "multipart/byteranges")
+	_ = getBody(t, resp)
+}
