@@ -65,8 +65,8 @@ func unsigned(value int64) (uint64, error) {
 
 // GenesisEpoch is the epoch the ledger registers genesis pools' BLS
 // keys in: mkStakePoolState (nesEL nes) SNothing, with an initial nesEL of
-// epoch 0 (cardano-ledger 9df9f98c, Shelley/Transition.hs: initialEpochNo and
-// the staking injection using nesELL).
+// epoch 0 (cardano-ledger 9df9f98c, Shelley/Transition.hs:462 initialEpochNo and
+// the staking injection using nesELL at lines 543 and 561).
 const GenesisEpoch uint64 = 0
 
 // leiosKeyState is the BLS key a pool holds and the epoch it was registered
@@ -103,17 +103,22 @@ type poolLeiosEvent struct {
 // certificate being written at `at`, which carries the BLS key public/proof.
 //
 // It follows cardano-ledger's Dijkstra rules (IntersectMBO/cardano-ledger at
-// 9df9f98c). POOL (Rules/Pool.hs, the not-registered branch) builds a new
-// pool's state with mkStakePoolState cEpoch SNothing, so a key registered by a
-// first registration is registered in the epoch of the transaction. POOL's
-// re-registration branch only stages the parameters in
-// psFutureStakePoolParams, replacing any earlier staged ones. POOLREAP
-// (Rules/PoolReap.hs) adopts them at the next epoch boundary through
-// mkStakePoolState e (current BLS state) (State/StakePool.hs): a key equal to
-// the active one keeps its registration epoch, and any other key, including
-// one added to a pool that had none, is registered in e, the epoch after the
-// transaction's. BlsKey equality covers the public key and the possession
-// proof.
+// 9df9f98c; paths below are under eras/dijkstra/impl/src/Cardano/Ledger/
+// Dijkstra/ unless they name another package). POOL (Rules/Pool.hs:261, the
+// not-registered branch) builds a new pool's state with mkStakePoolState
+// cEpoch SNothing, so a key registered by a first registration is registered
+// in the epoch of the transaction. POOL's re-registration branch only stages
+// the parameters in psFutureStakePoolParams, replacing any earlier staged
+// ones. POOLREAP (Rules/PoolReap.hs:130) adopts them at the next epoch
+// boundary through mkStakePoolState e (current BLS state)
+// (libs/cardano-ledger-core/src/Cardano/Ledger/State/StakePool.hs:288): a key
+// equal to the active one keeps its registration epoch, and any other key,
+// including one added to a pool that had none, is registered in e, the epoch
+// after the transaction's. BlsKey equality covers the public key and the
+// possession proof. Dijkstra has no NEWEPOCH rule of its own: Era.hs:202 sets
+// EraRule "NEWEPOCH" to Conway's, which on an epoch change runs EPOCH
+// (eras/conway/impl/src/Cardano/Ledger/Conway/Rules/NewEpoch.hs:153-165), and
+// Dijkstra's EPOCH calls POOLREAP (Rules/Epoch.hs:171).
 //
 // The pool's earlier registrations and retirements, strictly before `at`, are
 // replayed through those rules, so the result is a function of the chain up to

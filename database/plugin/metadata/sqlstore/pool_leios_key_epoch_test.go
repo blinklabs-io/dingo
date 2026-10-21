@@ -27,10 +27,11 @@ import (
 // The registered-in epoch of a pool's BLS key follows cardano-ledger's
 // Dijkstra POOL and POOLREAP rules (IntersectMBO/cardano-ledger at
 // 9df9f98c): a pool that is not registered gets the epoch of the registering
-// transaction (Rules/Pool.hs, mkStakePoolState cEpoch SNothing); a
+// transaction (Dijkstra Rules/Pool.hs:261, mkStakePoolState cEpoch SNothing); a
 // re-registration is staged and adopted at the next epoch boundary, keeping
 // the active key's epoch when the key is unchanged and otherwise taking the
-// boundary's epoch (Rules/PoolReap.hs, State/StakePool.hs mkStakePoolState).
+// boundary's epoch (Dijkstra Rules/PoolReap.hs:130, State/StakePool.hs
+// mkStakePoolState). See leioskeyepoch.Registration for the rule chain.
 // These tests drive SetTransaction and read the persisted column, using
 // nonzero epochs throughout so an unwritten column cannot pass for epoch 0.
 
