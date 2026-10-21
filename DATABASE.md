@@ -2345,8 +2345,11 @@ one:
 1. **Crash atomicity.** The delta is applied inside the same write
    transaction as the UTxO row mutation it accounts for (the same
    `withWriteTransaction` scope every other write in this package already
-   uses), so a crash mid-apply rolls both back together. There is no window
-   where the UTxO table changes but the running total does not, or vice versa.
+   uses), so a crash mid-apply rolls both back together. There is no committed
+   window where the UTxO table changes but the running total does not, or vice
+   versa. The mismatch between a batch accumulator's UTxO writes and its queued
+   delta exists only inside the open write transaction and is rolled back if it
+   fails.
 2. **Every full-scan touch re-syncs.** A rollback sweep, `DeleteUtxos`, or any
    other caller still on the authoritative path recomputes and overwrites
    `utxo_stake` from scratch for whatever credentials it touches, healing any
