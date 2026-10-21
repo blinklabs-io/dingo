@@ -1850,6 +1850,7 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 				"slot", blockSlot,
 				"connection_id", ctx.ConnectionId.String(),
 			)
+			o.forgetAcceptedHeaderTip(ctx.ConnectionId)
 			o.updateChainsyncMetrics(ctx.ConnectionId, tip)
 			return nil
 		}
@@ -1867,6 +1868,7 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 				"slot", blockSlot,
 				"connection_id", ctx.ConnectionId.String(),
 			)
+			o.forgetAcceptedHeaderTip(ctx.ConnectionId)
 			o.updateChainsyncMetrics(ctx.ConnectionId, tip)
 			return nil
 		}
@@ -1927,7 +1929,11 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 					resolvePeerTip(true)
 					return
 				}
-				o.forgetAcceptedHeaderTip(ctx.ConnectionId)
+				o.acceptedHeaderMu.Lock()
+				if bytes.Equal(o.acceptedHeaderTips[ctx.ConnectionId], blockHash) {
+					delete(o.acceptedHeaderTips, ctx.ConnectionId)
+				}
+				o.acceptedHeaderMu.Unlock()
 				o.markDeferredHeaderRecovery(ctx.ConnectionId)
 				resolvePeerTip(false)
 			}
