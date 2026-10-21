@@ -4060,8 +4060,11 @@ func (ls *LedgerState) resetChainsyncResyncState(
 ) {
 	ls.clearRollbackHistory()
 	ls.clearHeaderMismatches()
-	ls.setSelectedBlockfetchConnId(ouroboros.ConnectionId{})
 	ls.chainsyncBlockfetchMutex.Lock()
+	// The selection is guarded by chainsyncBlockfetchMutex like every other
+	// field cleared here: startQueuedBlockfetchOnLocked compares it across
+	// the request it sends outside the lock.
+	ls.setSelectedBlockfetchConnId(ouroboros.ConnectionId{})
 	// clearQueuedHeaders mutates headerPipelineConnId, which every other
 	// mutator guards with chainsyncBlockfetchMutex -- moved inside this
 	// lock (rather than called before it, as this used to) to close that
@@ -4641,8 +4644,11 @@ func (ls *LedgerState) RecoverAfterLocalRollback(
 	// successful replay reassigns this field before its blockfetch attempt, so
 	// nothing downstream currently reads a stale value -- but that makes the
 	// invariant depend on every future writer reassigning first, which is not a
-	// property worth relying on.
+	// property worth relying on. The loop above has released
+	// chainsyncBlockfetchMutex, which guards the selection.
+	ls.chainsyncBlockfetchMutex.Lock()
 	ls.setSelectedBlockfetchConnId(ouroboros.ConnectionId{})
+	ls.chainsyncBlockfetchMutex.Unlock()
 	return LocalRollbackRecoveryResult{}
 }
 
