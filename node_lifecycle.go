@@ -1937,6 +1937,10 @@ func (n *Node) restoreStorageConfig() lifecycle.RestoreStorageConfig {
 		Blob:          n.config.pluginSelections[plugin.CapabilityStorageBlob].Config,
 		Metadata:      n.config.pluginSelections[plugin.CapabilityStorageMetadata].Config,
 		ActiveDataDir: n.config.dataDir,
+		RecoveryMarkerDirs: []string{
+			n.config.dataDir,
+			n.config.dataDir + preRestoreBackupSuffix,
+		},
 		AlonzoLovelacePerUtxoWord: cardano.AlonzoLovelacePerUtxoWord(
 			n.config.cardanoNodeConfig, "", n.config.network,
 		),

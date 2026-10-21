@@ -35,6 +35,7 @@ import (
 // RPC server. Using this interface keeps the server and service handlers free
 // of a direct *ledger.LedgerState dependency.
 type UtxorpcLedgerState interface {
+	BlockTransactions(ctx context.Context, block models.Block) ([]lcommon.Transaction, error)
 	BlockByHash(ctx context.Context, hash []byte) (models.Block, error)
 	CardanoNodeConfig() *cardano.CardanoNodeConfig
 	Datum(hash []byte) (*models.Datum, error)
