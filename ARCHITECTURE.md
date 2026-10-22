@@ -15083,7 +15083,13 @@ terminal status is published only after the next operation can start.
 `StreamOperationProgress` is a plain poll loop over the
 operation's in-memory state (no push notification from the goroutine to a
 concurrently open stream) — adequate given operations run for seconds to
-hours, far coarser than the poll interval.
+hours, far coarser than the poll interval. The handler admits at most 32
+progress streams globally and four for one verified client-certificate
+fingerprint. It rejects an excess stream before allocating its ticker. An
+admitted stream ends when the operation becomes terminal, its request context
+is cancelled, or its 15-minute lifetime expires; a client following a longer
+operation reconnects to renew the stream. Admission, release, and rejection
+logs include the fingerprint plus the active global and per-client counts.
 
 Because `GetRestoreStatus`/`GetTruncateStatus` need to stay pollable for the
 whole duration of a live Restore/Truncate — which quiesces everything else on
