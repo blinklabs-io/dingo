@@ -54,7 +54,7 @@ type MatchQuery struct {
 	PolicyID      []byte
 	AssetName     []byte
 	TransactionID []byte
-	OutputIndex   *uint32
+	OutputIndex   *uint64
 }
 
 type Value struct {

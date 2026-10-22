@@ -11472,6 +11472,21 @@ in API storage mode with a nonzero port. It uses the shared
 `internal/apilistener` lifecycle and serves every route at both the root and
 Kupo's `/v1` prefix. TLS is optional and requests require no credentials.
 
+Kupo's official v2.12.0 OpenAPI document is pinned under `api/kupo/testdata`.
+The API conformance test inventories every operation, registered route, query
+parameter, request body, response schema, error body and documented bound.
+Changes to this surface must update against an immutable official upstream
+revision. Kupo's v2.12 routing source also accepts the `/v1` prefix and one or
+two path segments for patterns, so those source-defined aliases remain part of
+the registered route inventory even though its OpenAPI document lists only the
+canonical templates.
+
+Kupo v2.12 defines script languages only through `plutus:v3`. Dingo can store
+newer scripts for ledger operation, but this compatibility surface represents a
+Plutus V4 script as unavailable: direct lookup returns JSON `null`, and a
+resolved match carries a `null` script. Emitting an invented language enum
+would make the response invalid for Kupo clients.
+
 `NodeAdapter` is the only layer that reaches ledger and database types. Dingo
 indexes every output in API mode, so its installed pattern set is permanently
 `["*"]`: pattern additions are idempotent, while pattern or match deletion is
@@ -11859,24 +11874,23 @@ queued.
 TLS is configured through `plugins.api.mesh.config.tls`; see "API security"
 above.
 
-`/account/coins` runs under the request context and reads one
-`UtxosByAddressBoundedPage` page (500 UTxOs, 5000 scanned candidates, 1 MiB
-of retained output CBOR) for the exact address; native assets come from the
-retained CBOR. A standard request receives every coin of the address when
-that read exhausts it, and otherwise fails with `ErrInvalidRequest` naming
-the opt-in, because Mesh clients treat an omitted coin as absent. Paging is
-opt-in: request `metadata.paginate: true` returns the page, with
-`metadata.next_cursor` (an opaque `slot:block_index:output_idx:tx_id` token)
-when the address is not exhausted, and the client continues by sending it as
-request `metadata.cursor`, which implies paging. A paged response can carry
-no coins and still a cursor when the page examined only other addresses
-sharing the payment credential. A malformed cursor or non-boolean `paginate`
-is `ErrInvalidRequest`. At most 8 such reads run at once; a request that finds
-no free slot is refused at once with `ErrUnavailable` instead of queueing. A
-cancelled request stops the read between rows.
+`/account/coins` reads the exact address's complete UTxO set and returns every
+coin in one response. The request and response expose no pagination, cursor,
+limit, offset or truncation state because a Mesh client treats omitted coins as
+absent. At most 8 complete reads run at once; a request that finds no free slot
+is refused before starting its ledger query with `ErrUnavailable` rather than
+queued. Every successful request still returns the complete result.
 `/account/balance` is unchanged.
 
 Implements the Mesh (formerly Rosetta) API specification for wallet integration and chain analysis. Provides endpoints for network status, account balances, block queries, transaction construction, and mempool access.
+
+The official Coinbase Mesh v1.4.15 tag's OpenAPI artifact is pinned under
+`api/mesh/testdata`, and conformance tests inventory every implemented route and
+wire type. The tagged artifact retains the older `info.version` value 1.4.13;
+the protocol version advertised by `/network/options` follows the immutable
+v1.4.15 release tag. API changes must keep the pinned route, parameter, schema,
+nullability and numeric format checks passing. Unsupported upstream operations
+must remain explicitly listed as `Not implemented`.
 
 Mesh `network/status` reports `synced` only when the optional ledger sync
 progress capability reports 1: the applied ledger has caught up with its known

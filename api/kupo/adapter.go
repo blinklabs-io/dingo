@@ -122,12 +122,22 @@ func (a *NodeAdapter) Matches(
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrInvalidRequest, err)
 	}
+	var outputIndex *uint32
+	outputIndexOutsideStorage := false
+	if query.OutputIndex != nil {
+		if *query.OutputIndex > math.MaxUint32 {
+			outputIndexOutsideStorage = true
+		} else {
+			idx := uint32(*query.OutputIndex)
+			outputIndex = &idx
+		}
+	}
 	storageQuery := &models.UtxoHistoryQuery{
 		MatchAllAddresses: matchAll,
 		AddressPatterns:   addressPatterns,
 		Descending:        !query.OldestFirst,
 		TransactionID:     append([]byte(nil), query.TransactionID...),
-		OutputIndex:       query.OutputIndex,
+		OutputIndex:       outputIndex,
 	}
 	switch query.Status {
 	case MatchStatusAny:
@@ -146,7 +156,7 @@ func (a *NodeAdapter) Matches(
 			storageQuery.AssetName = query.AssetName
 		}
 	}
-	empty := applyPatternFilters(storageQuery, pattern)
+	empty := outputIndexOutsideStorage || applyPatternFilters(storageQuery, pattern)
 	db := a.ledgerState.Database()
 	txn, dbTip, err := database.NewReadSnapshotContext(ctx, db)
 	if err != nil {
@@ -566,7 +576,7 @@ func scriptFromLedger(script lcommon.Script) *Script {
 	case lcommon.PlutusV3Script:
 		language = "plutus:v3"
 	case lcommon.PlutusV4Script:
-		language = "plutus:v4"
+		return nil
 	}
 	return &Script{
 		Language: language,
@@ -617,6 +627,9 @@ func (a *NodeAdapter) Script(
 	if err != nil {
 		return nil, Point{}, err
 	}
+	if language == "" {
+		return nil, snapshotTip, nil
+	}
 	return &Script{
 		Language: language,
 		Script:   hex.EncodeToString(script.Content),
@@ -634,7 +647,7 @@ func scriptLanguage(scriptType uint8) (string, error) {
 	case lcommon.ScriptRefTypePlutusV3:
 		return "plutus:v3", nil
 	case lcommon.ScriptRefTypePlutusV4:
-		return "plutus:v4", nil
+		return "", nil
 	default:
 		return "", fmt.Errorf("unsupported Kupo script type %d", scriptType)
 	}

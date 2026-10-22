@@ -14863,6 +14863,15 @@ func (ls *LedgerState) UtxosByAddress(
 	return ret, nil
 }
 
+// UtxosByAddressComplete returns every UTxO for the requested addresses and
+// stops the read when ctx is canceled.
+func (ls *LedgerState) UtxosByAddressComplete(
+	ctx context.Context,
+	addrs []ledger.Address,
+) ([]models.Utxo, error) {
+	return ls.db.UtxosByAddressComplete(ctx, addrs, nil)
+}
+
 // UtxosByAddressBoundedPage returns an ordered, resumable UTxO page while
 // bounding candidate work and retained CBOR.
 func (ls *LedgerState) UtxosByAddressBoundedPage(

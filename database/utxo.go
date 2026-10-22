@@ -20,6 +20,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math"
 	"slices"
 	"sync/atomic"
 	"time"
@@ -859,11 +860,28 @@ func (d *Database) UtxosByAddress(
 		return nil, err
 	}
 	for i := range utxos {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if err := loadCbor(&utxos[i], txn); err != nil {
 			return nil, err
 		}
 	}
-	return filterUtxosByAddressPatterns(utxos, patterns)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return filterUtxosByAddressPatterns(ctx, utxos, patterns)
+}
+
+// UtxosByAddressComplete returns every live UTxO belonging to any requested
+// address. It applies no row limit; callers must provide their own admission
+// control when exposing this query to untrusted clients.
+func (d *Database) UtxosByAddressComplete(
+	ctx context.Context,
+	addrs []ledger.Address,
+	txn *Txn,
+) ([]models.Utxo, error) {
+	return d.UtxosByAddress(ctx, addrs, math.MaxInt, txn)
 }
 
 // UtxosByAddressAsOf is UtxosByAddress as the outputs stood at atSlot (see
@@ -906,7 +924,7 @@ func (d *Database) UtxosByAddressAsOf(
 			return nil, err
 		}
 	}
-	return filterUtxosByAddressPatterns(utxos, patterns)
+	return filterUtxosByAddressPatterns(ctx, utxos, patterns)
 }
 
 // UtxosWithHistory returns retained live and spent outputs with their
@@ -1054,7 +1072,7 @@ func (d *Database) loadAndFilterHistoricalUtxos(
 			return nil, err
 		}
 	}
-	return filterUtxoViews(utxos, patterns, "historical UTxO",
+	return filterUtxoViews(context.Background(), utxos, patterns, "historical UTxO",
 		func(item *models.UtxoWithHistory) *models.Utxo { return &item.Utxo })
 }
 
@@ -1356,7 +1374,7 @@ func (d *Database) UtxosByAddressAtSlot(
 			return nil, err
 		}
 	}
-	return filterUtxosByAddressPatterns(utxos, []models.UtxoAddressPattern{
+	return filterUtxosByAddressPatterns(ctx, utxos, []models.UtxoAddressPattern{
 		pattern,
 	})
 }
@@ -1502,14 +1520,16 @@ func (d *Database) backfillLiveAssetUtxoAddressBatch(
 }
 
 func filterUtxosByAddressPatterns(
+	ctx context.Context,
 	utxos []models.Utxo,
 	patterns []models.UtxoAddressPattern,
 ) ([]models.Utxo, error) {
-	return filterUtxoViews(utxos, patterns, "UTxO",
+	return filterUtxoViews(ctx, utxos, patterns, "UTxO",
 		func(item *models.Utxo) *models.Utxo { return item })
 }
 
 func filterUtxoViews[T any](
+	ctx context.Context,
 	utxos []T,
 	patterns []models.UtxoAddressPattern,
 	description string,
@@ -1529,6 +1549,9 @@ func filterUtxoViews[T any](
 		}
 	}
 	for i := range utxos {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		item := utxo(&utxos[i])
 		output, err := item.Decode()
 		if err != nil {
@@ -1582,7 +1605,7 @@ func (d *Database) loadAndFilterOrderedUtxos(
 			return nil, err
 		}
 	}
-	return filterUtxoViews(utxos, patterns, "UTxO",
+	return filterUtxoViews(context.Background(), utxos, patterns, "UTxO",
 		func(item *models.UtxoWithOrdering) *models.Utxo { return &item.Utxo })
 }
 
