@@ -89,8 +89,11 @@ func (n *Node) ledgerStateConfig() ledger.LedgerStateConfig {
 		// Off by default; requires BlockPipelineEnabled.
 		BlockPipelineValidateEnabled: n.config.blockPipelineValidateEnabled,
 		// Prefetch the next block's input UTxOs while the current block
-		// applies. Not consensus-affecting; off by default.
+		// applies. Not consensus-affecting; on by default.
 		LedgerPrefetchAheadEnabled: n.config.ledgerPrefetchAheadEnabled,
+		// Verify validated blocks' witness signatures ahead of the apply
+		// loop. Not consensus-affecting; on by default.
+		LedgerValidateAheadEnabled: n.config.ledgerValidateAheadEnabled,
 		// Core-mode batched metadata writes for blocks that are not
 		// validated. Not consensus-affecting; off by default.
 		ApplyRowBatchingEnabled: n.config.ledgerApplyRowBatchingEnabled,
@@ -113,6 +116,16 @@ func (n *Node) ledgerStateConfig() ledger.LedgerStateConfig {
 				return nil, false
 			}
 			return o.EndorserBlockTxsByHash(ebHash, ebSlot)
+		},
+		EndorserBlockDataProvider: func(
+			ebHash []byte,
+			ebSlot uint64,
+		) ([]byte, []cbor.RawMessage, bool) {
+			o := n.ouroboros()
+			if o == nil {
+				return nil, nil, false
+			}
+			return o.EndorserBlockDataByHash(ebHash, ebSlot)
 		},
 		EndorserBlockValidation: func(
 			ebHash []byte,

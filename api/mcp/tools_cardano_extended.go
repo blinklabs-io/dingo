@@ -173,19 +173,6 @@ func registerExtendedCardanoTools(
 			}, nil, nil
 		}
 
-		// Summary listing
-		txs := mp.Transactions()
-		capacityBytes := mp.CapacityBytes()
-		var totalBytes int64
-		for _, tx := range txs {
-			totalBytes += int64(len(tx.Cbor))
-		}
-
-		saturation := 0.0
-		if capacityBytes > 0 {
-			saturation = (float64(totalBytes) / float64(capacityBytes)) * 100
-		}
-
 		limit := input.Limit
 		if limit <= 0 {
 			limit = 10
@@ -193,9 +180,21 @@ func registerExtendedCardanoTools(
 			limit = 50
 		}
 
+		// Enumerate only the displayed prefix: the item bound limits cloning
+		// to the rows shown, while the total count and byte volume come from
+		// counters the pool maintains.
+		txs, txCount := mp.TransactionsBounded(limit, 0)
+		capacityBytes := mp.CapacityBytes()
+		totalBytes := mp.SizeBytes()
+
+		saturation := 0.0
+		if capacityBytes > 0 {
+			saturation = (float64(totalBytes) / float64(capacityBytes)) * 100
+		}
+
 		var sb strings.Builder
 		sb.WriteString("### Dingo In-Memory Mempool Status\n\n")
-		fmt.Fprintf(&sb, "- **Pending Transactions**: %d\n", len(txs))
+		fmt.Fprintf(&sb, "- **Pending Transactions**: %d\n", txCount)
 		fmt.Fprintf(
 			&sb,
 			"- **Buffered Volume**: %d bytes (%s)\n",
@@ -210,20 +209,17 @@ func registerExtendedCardanoTools(
 		)
 		fmt.Fprintf(&sb, "- **Saturation**: %.2f%%\n\n", saturation)
 
-		if len(txs) == 0 {
+		if txCount == 0 {
 			sb.WriteString(
 				"*Mempool is currently empty. No pending in-flight transactions.*\n",
 			)
 		} else {
-			fmt.Fprintf(&sb, "#### Recent Pending Transactions (showing up to %d of %d)\n\n", limit, len(txs))
+			fmt.Fprintf(&sb, "#### Pending Transactions in queue order (showing up to %d of %d)\n\n", limit, txCount)
 			sb.WriteString("| Transaction Hash | Size (bytes) | Type | Age |\n")
 			sb.WriteString("| :--- | :--- | :--- | :--- |\n")
-			count := 0
-			for i := len(txs) - 1; i >= 0 && count < limit; i-- {
-				tx := txs[i]
+			for _, tx := range txs {
 				age := time.Since(tx.LastSeen).Truncate(time.Second)
 				fmt.Fprintf(&sb, "| `%s` | %d | %d | %s |\n", tx.Hash, len(tx.Cbor), tx.Type, age)
-				count++
 			}
 		}
 

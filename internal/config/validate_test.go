@@ -2357,3 +2357,26 @@ func TestValidateDMQRejectsUnknownTopic(t *testing.T) {
 	cfg.DMQ.Topic = "typo"
 	require.ErrorContains(t, cfg.validate(cfg.RunMode, minUnprivilegedPort), "dmq.topic must be mithril")
 }
+
+func TestValidateRejectsNegativeBarkArchiveLookupRates(t *testing.T) {
+	t.Parallel()
+
+	cfg := validTestConfig()
+	cfg.BarkArchiveLookupsPerSecond = -1
+	require.ErrorContains(
+		t,
+		cfg.validate(RunModeServe, minUnprivilegedPort),
+		"invalid barkArchiveLookupsPerSecond -1",
+	)
+
+	cfg = validTestConfig()
+	cfg.BarkArchiveCallerLookupsPerSecond = -1
+	require.ErrorContains(
+		t,
+		cfg.validate(RunModeServe, minUnprivilegedPort),
+		"invalid barkArchiveCallerLookupsPerSecond -1",
+	)
+
+	cfg = validTestConfig()
+	require.NoError(t, cfg.validate(RunModeServe, minUnprivilegedPort))
+}

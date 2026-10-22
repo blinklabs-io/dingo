@@ -126,6 +126,15 @@ func (ls *LedgerState) capUtxoPruneFloor(
 	return floor
 }
 
+// announcedUtxoPruneFloor returns the highest floor spent-UTxO pruning has
+// announced. Rows spent before it may be gone.
+func (ls *LedgerState) announcedUtxoPruneFloor() uint64 {
+	p := &ls.acquiredPins
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.utxoFloorSlot
+}
+
 // capPoolSnapshotPruneBefore lowers before -- the epoch below which pool-stake
 // snapshots are pruned -- so no acquired point loses the mark snapshot its
 // stake distribution is computed from, clamps it back up to minBefore, and
