@@ -357,8 +357,9 @@ func (o *Ouroboros) forgetAcceptedHeaderTip(connId ouroboros.ConnectionId) {
 
 // deferredHeaderExtendsLocalChain reports whether a header whose producer
 // authorization is deferred builds directly on the local chain: on the block
-// tip, the header-queue tip, or this connection's last header that passed
-// this gate. Such a header cannot be a competing fork, so it may reach the
+// tip, the header-queue tip, or this connection's accepted header tip, the
+// last header that itself extended the local chain and that chain selection
+// accepted. Such a header cannot be a competing fork, so it may reach the
 // block-fetch queue, where the body path verifies it before application.
 // Withholding it instead deadlocks whenever the deferral clears only by
 // applying the header's own block, as at the Byron->Shelley boundary, where
@@ -1579,6 +1580,15 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 ) (err error) {
 	switch v := blockData.(type) {
 	case gledger.BlockHeader:
+		// Every path that does not accept this header clears the
+		// connection's accepted tip, so a later deferred header cannot count
+		// as a linear extension of one that never reached the ledger queue.
+		tipAccepted := false
+		defer func() {
+			if !tipAccepted {
+				o.forgetAcceptedHeaderTip(ctx.ConnectionId)
+			}
+		}()
 		if o.recordHeldChainsyncTip(ctx.ConnectionId, tip) {
 			return ochainsync.ErrStopSyncProcess
 		}
@@ -1832,8 +1842,10 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 				}
 			}
 		}
+		extendsLocalChain := ingressEligible &&
+			o.deferredHeaderExtendsLocalChain(ctx.ConnectionId, v)
 		if deferredVerification {
-			if !o.deferredHeaderExtendsLocalChain(ctx.ConnectionId, v) {
+			if !extendsLocalChain {
 				// Do not advance peer cursors, history, dedup state, or publish
 				// to selector/ledger until this header passes strict
 				// verification. Observed history is trusted by fork-density and
@@ -1851,12 +1863,6 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 			// feeding the queue or apply eligibility stalls for as long as
 			// the ledger is behind the header's epoch.
 			selectionEligible = true
-		}
-		// A header withheld for unauthenticated fork ancestry is not an
-		// accepted tip: a deferred child of it must not pass as a linear
-		// extension of the local chain.
-		if ingressEligible && selectionEligible {
-			o.recordAcceptedHeaderTip(ctx.ConnectionId, blockHash)
 		}
 		// Observe the tip for chain selection FIRST, so the apply-eligibility
 		// decision below reflects this header. Only ingress-eligible peers are
@@ -1968,9 +1974,13 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 			)
 			cancelAdmission()
 			if err != nil {
+				// The header never reaches the ledger queue.
+				tipAccepted = false
 				return fmt.Errorf("wait for eagerness limit: %w", err)
 			}
 			if o.recordHeldChainsyncTip(ctx.ConnectionId, tip) {
+				// Dropped by the held-ingress check, so never queued.
+				tipAccepted = false
 				return ochainsync.ErrStopSyncProcess
 			}
 		}
@@ -2042,6 +2052,7 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 				"slot", blockSlot,
 				"connection_id", ctx.ConnectionId.String(),
 			)
+			o.forgetAcceptedHeaderTip(ctx.ConnectionId)
 			o.updateChainsyncMetrics(ctx.ConnectionId, tip)
 			return nil
 		}
@@ -2059,6 +2070,7 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 				"slot", blockSlot,
 				"connection_id", ctx.ConnectionId.String(),
 			)
+			o.forgetAcceptedHeaderTip(ctx.ConnectionId)
 			o.updateChainsyncMetrics(ctx.ConnectionId, tip)
 			return nil
 		}
@@ -2119,6 +2131,11 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 					resolvePeerTip(true)
 					return
 				}
+				o.acceptedHeaderMu.Lock()
+				if bytes.Equal(o.acceptedHeaderTips[ctx.ConnectionId], blockHash) {
+					delete(o.acceptedHeaderTips, ctx.ConnectionId)
+				}
+				o.acceptedHeaderMu.Unlock()
 				if o.ledgerState != nil {
 					o.markDeferredHeaderRecovery(
 						ctx.ConnectionId,
@@ -2127,6 +2144,10 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 				}
 				resolvePeerTip(false)
 			}
+		}
+		if ingressEligible && extendsLocalChain {
+			o.recordAcceptedHeaderTip(ctx.ConnectionId, blockHash)
+			tipAccepted = true
 		}
 		if err := o.eventBus.PublishBlocking(
 			ledger.ChainsyncEventType,

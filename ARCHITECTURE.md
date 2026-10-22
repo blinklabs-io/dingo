@@ -6343,8 +6343,12 @@ it. Dingo implements this as a **corroboration gate**
   header-queue tip, or the last header the same connection passed through this
   gate — still updates the selector and reaches the ledger queue with no
   verification generation; block-fetch verifies its body before application.
-  A header withheld because its fork ancestry cannot be authenticated never
-  becomes that connection's last passed header. Missing ancestry does not
+  The accepted header tip names only a header that extended the local chain
+  and passed the selection and publication gates. Any other outcome for that
+  connection's header — withheld, past the forecast horizon, failed
+  verification, pending or rejected by the selector, refused by admission or
+  by the ledger — clears it, so a deferred child cannot extend a header that
+  never reached the ledger queue. Missing ancestry does not
   withhold a header whose parent is queued on the local header chain: such a
   queued parent is often itself a deferred linear extension, kept out of
   observed ancestry, so its child is verified against the local chain like
@@ -18164,8 +18168,10 @@ and a re-sync requested, since the wait cannot end while nothing fetches the
 queued blocks. The discarded headers' invalidation is published after the ledger
 locks are released, so their Leios announcements and derived votes are removed
 without waiting for another chain event. Stored blocks the ledger has not
-applied yet (`chainAheadOfAppliedTip`) also count as local work, so admission
-keeps waiting for the snapshot publication their application brings rather
+applied yet (`chainAheadOfAppliedTip`: a primary chain tip in a later slot
+than the applied tip, or in the same slot under another hash; a chain tip in an
+earlier slot is a rollback the ledger has yet to follow and does not count)
+also count as local work, so admission keeps waiting for the snapshot publication their application brings rather
 than closing a connection that work may need, such as one serving endorser
 block backfill. If no fetch is active, no queued headers can be fetched and
 nothing stored is left to apply, admission rechecks the forecast and pending
