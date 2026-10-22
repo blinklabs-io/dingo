@@ -89,10 +89,16 @@ type MempoolTransaction struct {
 	// outputBytes is the CBOR the UTxO overlay retains with the decoded
 	// outputs of this transaction, which decoding copies out of Cbor.
 	outputBytes int64
+	// addresses are the addresses the pool indexes this transaction under,
+	// and seq orders transactions by admission.
+	addresses []string
+	seq       uint64
 }
 
 // retainedBytes is what the pool charges this transaction against its
-// capacity: its own CBOR and the decoded outputs the UTxO overlay keeps.
+// capacity: its own CBOR and the decoded outputs the UTxO overlay keeps. The
+// address index is not charged, so capacity stays measured in CBOR; its
+// heap cost is bounded by the inputs and outputs that CBOR carries.
 func (tx *MempoolTransaction) retainedBytes() int64 {
 	return int64(len(tx.Cbor)) + tx.outputBytes
 }
@@ -219,6 +225,8 @@ type Mempool struct {
 	transactions           []*MempoolTransaction
 	txByHash               map[string]*MempoolTransaction // O(1) lookup by hash
 	currentSizeBytes       int64                          // Cached total size of all transactions in bytes
+	addresses              addressIndex
+	nextSeq                uint64
 	transactionTTL         time.Duration
 	cleanupInterval        time.Duration
 	evictionWatermark      float64
@@ -674,6 +682,7 @@ func newMempool(
 			map[ouroboros.ConnectionId]*MempoolConsumer,
 		),
 		txByHash:               make(map[string]*MempoolTransaction),
+		addresses:              newAddressIndex(),
 		overlay:                newUtxoOverlay(),
 		validator:              config.Validator,
 		implementation:         implementation,
@@ -931,6 +940,7 @@ func (m *Mempool) Stop(ctx context.Context) error {
 
 		m.transactions = []*MempoolTransaction{}
 		m.txByHash = make(map[string]*MempoolTransaction)
+		m.addresses = newAddressIndex()
 		m.currentSizeBytes = 0
 		m.overlay.reset()
 		if m.dag != nil {
@@ -1510,6 +1520,7 @@ func (m *Mempool) rebuildOverlayAttempt(ctx context.Context) ([]event.Event, err
 					m.overlay = candidate.overlay
 					m.transactions = candidate.transactions
 					m.txByHash = candidate.txByHash
+					m.addresses.rebuild(candidate.transactions)
 					m.currentSizeBytes = candidate.sizeBytes
 					if m.dag != nil {
 						m.dag.rebuild(candidate.overlay.applied)
@@ -1883,6 +1894,14 @@ func (m *Mempool) AddTransaction(
 		addEvent, evictedEvents, seen, err = m.addTransactionAttempt(
 			ctx, txType, txBytes, tmpTx, txHash,
 		)
+		if errors.Is(err, errAddressInputsMoved) {
+			// The pool moved, not the ledger view: the next attempt reads
+			// the parent's output as confirmed.
+			if attempt == maxAdmissionReconciles {
+				return fmt.Errorf("index transaction: %w", err)
+			}
+			continue
+		}
 		if !errors.Is(err, ErrPendingStateMoved) {
 			break
 		}
@@ -1926,7 +1945,12 @@ func (m *Mempool) addTransactionAttempt(
 	var addEvent *event.Event
 	var evictedEvents []event.Event
 	var seen *utxoOverlay
-	err := m.withTxValidationSession(ctx, func(
+	outputAddrs := outputAddresses(tmpTx)
+	resolved, pooled, err := m.confirmedInputAddresses(tmpTx)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	err = m.withTxValidationSession(ctx, func(
 		validate func(
 			gledger.Transaction,
 			map[utxoref.Key]struct{},
@@ -2020,6 +2044,14 @@ func (m *Mempool) addTransactionAttempt(
 			return fmt.Errorf("validate transaction: %w", validateErr)
 		}
 
+		inputAddrs, err := inputAddresses(
+			tmpTx, validCreated, resolved, pooled,
+		)
+		if err != nil {
+			return err
+		}
+		addresses := mergeAddresses(outputAddrs, inputAddrs)
+
 		committed, err := commitIfCurrent(func() error {
 			m.Lock()
 			m.consumersMutex.Lock()
@@ -2043,9 +2075,13 @@ func (m *Mempool) addTransactionAttempt(
 				Cbor:        txCbor,
 				LastSeen:    time.Now(),
 				outputBytes: outputBytes,
+				addresses:   addresses,
+				seq:         m.nextSeq,
 			}
+			m.nextSeq++
 			m.transactions = append(m.transactions, tx)
 			m.txByHash[txHash] = tx
+			m.addresses.add(tx)
 			m.currentSizeBytes += txSize
 			m.notifyHeadroomChangedLocked()
 			m.logger.Debug(
@@ -2535,6 +2571,7 @@ func (m *Mempool) removeTransactionByIndexLocked(
 		txIdx+1,
 	)
 	delete(m.txByHash, tx.Hash)
+	m.addresses.remove(tx)
 	m.currentSizeBytes -= txSize
 	m.notifyHeadroomChangedLocked()
 	m.metrics.txsInMempool.Dec()
@@ -2597,6 +2634,7 @@ func (m *Mempool) evictOldestLocked(targetBytes int64) []event.Event {
 		tx := m.transactions[i]
 		txSize := tx.retainedBytes()
 		delete(m.txByHash, tx.Hash)
+		m.addresses.remove(tx)
 		m.metrics.txsInMempool.Dec()
 		m.metrics.mempoolBytes.Sub(float64(txSize))
 		if m.eventBus != nil {

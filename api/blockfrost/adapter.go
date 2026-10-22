@@ -162,6 +162,10 @@ type NodeAdapter struct {
 	// submitter does not expose the pool, which those endpoints report as
 	// ErrMempoolUnavailable.
 	mempool mempoolReader
+	// mempoolAddresses is nil when the submitter does not expose the pool's
+	// address index, which the address endpoint reports as
+	// ErrMempoolUnavailable.
+	mempoolAddresses mempoolAddressReader
 	// summaryLimits overrides the address summary read budget. The zero
 	// value selects the defaults.
 	summaryLimits addressSummaryLimits
@@ -185,11 +189,13 @@ func NewNodeAdapter(
 		)
 	}
 	reader, _ := submitter.(mempoolReader)
+	addresses, _ := submitter.(mempoolAddressReader)
 	return &NodeAdapter{
-		ledgerState: ls,
-		submitter:   submitter,
-		evaluator:   ls,
-		mempool:     reader,
+		ledgerState:      ls,
+		submitter:        submitter,
+		evaluator:        ls,
+		mempool:          reader,
+		mempoolAddresses: addresses,
 	}, nil
 }
 
