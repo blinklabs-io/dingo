@@ -926,6 +926,9 @@ func (s *State) SetClientObservabilityOnly(
 		if !exists {
 			return false
 		}
+		if !observabilityOnly && tc.Status == ClientStatusFailed {
+			return false
+		}
 		if tc.ObservabilityOnly == observabilityOnly {
 			return true
 		}
@@ -1199,7 +1202,9 @@ func (s *State) UpdateClientRollback(
 	setDeliveryWatermark(tc, point)
 	if !noOp {
 		tc.LastActivity = s.now()
-		tc.Status = ClientStatusSyncing
+		if tc.Status != ClientStatusFailed {
+			tc.Status = ClientStatusSyncing
+		}
 	}
 	s.resumePatienceAfterRollbackLocked(tc, point, tip, active)
 	return true
@@ -1252,7 +1257,9 @@ func (s *State) RewindTrackedClientsTo(
 			Slot: point.Slot,
 			Hash: cloneBytes(point.Hash),
 		}
-		tc.Status = ClientStatusSyncing
+		if tc.Status != ClientStatusFailed {
+			tc.Status = ClientStatusSyncing
+		}
 		tc.LastActivity = s.now()
 		ret = append(ret, connId)
 	}
@@ -1528,6 +1535,20 @@ func sameTrackedNetAddr(a, b net.Addr) bool {
 	return a.String() == b.String()
 }
 
+// MarkClientFailed excludes a tracked client until its connection is removed.
+func (s *State) MarkClientFailed(connId ouroboros.ConnectionId) bool {
+	s.clientConnIdMutex.Lock()
+	tc, exists := s.trackedClients[connId]
+	if exists {
+		tc.Status = ClientStatusFailed
+	}
+	s.clientConnIdMutex.Unlock()
+	if !exists {
+		return false
+	}
+	return s.SetClientObservabilityOnly(connId, true)
+}
+
 // MarkClientSynced marks a tracked client as synced (at chain
 // tip).
 func (s *State) MarkClientSynced(
@@ -1536,7 +1557,8 @@ func (s *State) MarkClientSynced(
 	s.clientConnIdMutex.Lock()
 	tc, exists := s.trackedClients[connId]
 	var changed bool
-	if exists && tc.Status != ClientStatusSynced {
+	if exists && tc.Status != ClientStatusSynced &&
+		tc.Status != ClientStatusFailed {
 		tc.Status = ClientStatusSynced
 		tc.LastActivity = s.now()
 		changed = true

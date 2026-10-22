@@ -367,6 +367,22 @@
 # CLI: --bark-archive-max-concurrent-fetches
 # barkArchiveMaxConcurrentFetches: 0
 
+# Sustained ArchiveService block lookups per second across all callers. A
+# reference that names no block still costs a storage lookup, so a FetchBlock
+# whose references do not fit the remaining budget is refused whole with
+# RESOURCE_EXHAUSTED. 0 selects the default of 200.
+# Can be overridden with DINGO_BARK_ARCHIVE_LOOKUPS_PER_SECOND
+# CLI: --bark-archive-lookups-per-second
+# barkArchiveLookupsPerSecond: 0
+
+# Sustained ArchiveService block lookups per second for one caller, keyed by
+# IPv4 address or IPv6 /64. Callers behind one proxy share an allowance, and
+# a Dingo node reading expired history through barkBaseUrl is one caller. 0
+# selects the default of 50.
+# Can be overridden with DINGO_BARK_ARCHIVE_CALLER_LOOKUPS_PER_SECOND
+# CLI: --bark-archive-caller-lookups-per-second
+# barkArchiveCallerLookupsPerSecond: 0
+
 # SHA-256 fingerprints of client certificate DER bytes authorized to invoke
 # destructive DatabaseService RPCs (CreateSnapshot, DeleteSnapshot,
 # VerifySnapshot, Restore, Truncate, CancelOperation). Hex is matched
@@ -753,7 +769,7 @@
 # blockPipelineValidateEnabled: false
 
 # Prefetch the next block's input UTxOs on a separate goroutine from a
-# read-only transaction while the current block applies (default: false).
+# read-only transaction while the current block applies (default: true).
 # Not consensus-affecting. Inputs spent by earlier blocks of the same
 # block-apply chunk are never served from the prefetch, and any input it
 # misses is read as without the flag.
@@ -761,7 +777,17 @@
 # Can be overridden with the DINGO_LEDGER_PREFETCH_AHEAD_ENABLED
 # environment variable
 # CLI: --ledger-prefetch-ahead-enabled
-# ledgerPrefetchAheadEnabled: false
+# ledgerPrefetchAheadEnabled: true
+
+# Verify the witness signatures of every validated block of a block-apply
+# chunk on worker goroutines while earlier blocks of the chunk validate and
+# write (default: true). Not consensus-affecting: each result is bound to
+# its transaction, and every other rule still runs in order.
+#
+# Can be overridden with the DINGO_LEDGER_VALIDATE_AHEAD_ENABLED
+# environment variable
+# CLI: --ledger-validate-ahead-enabled
+# ledgerValidateAheadEnabled: true
 
 # In core storage mode, write the accumulated deltas of blocks that are not
 # validated with multi-row batched inserts instead of one statement group per

@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"sync/atomic"
 	"time"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -1758,6 +1759,7 @@ func (d *Database) UtxosDeleteRolledback(
 			}
 		}()
 	}
+	d.noteUtxoRollback(slot, txn)
 	utxos, err := d.utxoStore().GetUtxosAddedAfterSlot(slot, txn.Metadata())
 	if err != nil {
 		return err
@@ -1860,6 +1862,7 @@ func (d *Database) UtxosUnspend(
 			}
 		}()
 	}
+	d.noteUtxoRollback(slot, txn)
 	if err := d.utxoStore().SetUtxosNotDeletedAfterSlot(
 		slot,
 		txn.Metadata(),
@@ -1961,6 +1964,118 @@ func (d *Database) IterateUtxoRefsAsOf(
 	return d.Transaction(ctx, false).Do(func(t *Txn) error {
 		return iterator.IterateUtxosAsOfContext(ctx, atSlot, t.Metadata(), fn)
 	})
+}
+
+// ErrUtxoHistoryRolledBack reports that a paged as-of UTxO read overlapped a
+// rollback below its slot. Rows the rollback removed or unspent may already
+// have been read or skipped, so the pages no longer describe one state; the
+// caller retries or fails the read.
+var ErrUtxoHistoryRolledBack = errors.New(
+	"UTxO history rolled back below the slot of a paged read",
+)
+
+// utxoAsOfRead is one paged as-of read in progress. disturbed is set when a
+// rollback below atSlot may have changed the rows it walks.
+type utxoAsOfRead struct {
+	atSlot    uint64
+	disturbed atomic.Bool
+}
+
+// noteUtxoRollback marks every paged read below whose slot a rollback to slot
+// rewrites UTxO history. A rollback to slot deletes rows added after it and
+// unspends rows spent after it, which leaves the set live as of any slot at or
+// below it unchanged. It marks before the rollback writes and again when txn
+// finishes, so a read that starts while the rollback is in flight is caught by
+// the second mark.
+func (d *Database) noteUtxoRollback(slot uint64, txn *Txn) {
+	mark := func() {
+		d.utxoAsOfReadsMu.Lock()
+		defer d.utxoAsOfReadsMu.Unlock()
+		for r := range d.utxoAsOfReads {
+			if slot < r.atSlot {
+				r.disturbed.Store(true)
+			}
+		}
+	}
+	mark()
+	if txn != nil {
+		txn.OnFinish(mark)
+	}
+}
+
+// IterateUtxoRefsAsOfPaged invokes fn once for each UTxO live as of atSlot,
+// like IterateUtxoRefsAsOf, but reads pageSize rows per short read
+// transaction instead of holding one for the whole walk. Over SQLite a
+// transaction held for a whole-UTxO walk -- minutes on a large chain -- keeps
+// the WAL from restarting, and one walk after another keeps it growing.
+//
+// The pages agree with one another without sharing a snapshot because of
+// how UTxO rows change. Blocks applied after atSlot add rows with a later
+// added_slot and spend rows at a later slot, and the as-of predicate already
+// excludes the first and includes the second. Spent-row pruning removes only
+// rows spent before the prune floor, which an acquired-point pin holds at or
+// below atSlot. Rows keep their id, so paging on it neither repeats nor skips
+// a row. The one change that alters the as-of set is a rollback below atSlot,
+// which noteUtxoRollback reports: this returns ErrUtxoHistoryRolledBack and
+// the caller decides whether to retry. Callers must hold pruning at or below
+// atSlot themselves.
+func (d *Database) IterateUtxoRefsAsOfPaged(
+	ctx context.Context,
+	atSlot uint64,
+	pageSize int,
+	fn func(UtxoRef) error,
+) error {
+	if pageSize <= 0 {
+		return errors.New("iterate UTxO refs as of slot: page size must be positive")
+	}
+	read := &utxoAsOfRead{atSlot: atSlot}
+	d.utxoAsOfReadsMu.Lock()
+	if d.utxoAsOfReads == nil {
+		d.utxoAsOfReads = make(map[*utxoAsOfRead]struct{})
+	}
+	d.utxoAsOfReads[read] = struct{}{}
+	d.utxoAsOfReadsMu.Unlock()
+	defer func() {
+		d.utxoAsOfReadsMu.Lock()
+		delete(d.utxoAsOfReads, read)
+		d.utxoAsOfReadsMu.Unlock()
+	}()
+
+	var afterID uint
+	for {
+		var page []models.Utxo
+		err := d.MetadataTxn(ctx, false).Do(func(t *Txn) error {
+			var err error
+			page, err = d.utxoStore().UtxoRefsAsOfAfterID(
+				ctx, atSlot, afterID, pageSize, t.Metadata(),
+			)
+			return err
+		})
+		if err != nil {
+			return err
+		}
+		if read.disturbed.Load() {
+			return ErrUtxoHistoryRolledBack
+		}
+		for i := range page {
+			if len(page[i].TxId) != len(UtxoRef{}.TxId) {
+				return fmt.Errorf(
+					"iterate UTxO refs as of slot: row %d has a %d-byte tx id",
+					page[i].ID, len(page[i].TxId),
+				)
+			}
+			var ref UtxoRef
+			copy(ref.TxId[:], page[i].TxId)
+			ref.OutputIdx = page[i].OutputIdx
+			if err := fn(ref); err != nil {
+				return err
+			}
+			afterID = page[i].ID
+		}
+		if len(page) < pageSize {
+			return nil
+		}
+	}
 }
 
 // MarkUtxosDeletedAtSlot marks every live UTxO row matching one of

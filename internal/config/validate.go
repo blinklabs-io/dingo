@@ -582,6 +582,18 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 			c.BarkArchiveMaxConcurrentFetches,
 		))
 	}
+	if c.BarkArchiveLookupsPerSecond < 0 {
+		errs = append(errs, fmt.Errorf(
+			"invalid barkArchiveLookupsPerSecond %d: must not be negative",
+			c.BarkArchiveLookupsPerSecond,
+		))
+	}
+	if c.BarkArchiveCallerLookupsPerSecond < 0 {
+		errs = append(errs, fmt.Errorf(
+			"invalid barkArchiveCallerLookupsPerSecond %d: must not be negative",
+			c.BarkArchiveCallerLookupsPerSecond,
+		))
+	}
 
 	// Bark's DatabaseService is mounted whenever bark is enabled with a snapshot
 	// directory configured. Every method must authenticate its caller, and its
