@@ -17,6 +17,7 @@ package blockfrost
 import (
 	"context"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"math/big"
 	"strconv"
@@ -206,6 +207,15 @@ func (a *NodeAdapter) AccountMIRs(
 	return ret, total, nil
 }
 
+// accountAggregateError wraps a store error, mapping an exhausted read
+// budget to ErrAddressSummaryTooLarge.
+func accountAggregateError(what string, err error) error {
+	if errors.Is(err, models.ErrAccountAggregateLimit) {
+		return fmt.Errorf("%s: %w: %w", what, ErrAddressSummaryTooLarge, err)
+	}
+	return fmt.Errorf("%s: %w", what, err)
+}
+
 // AccountAddressAssets returns the native assets held across the addresses
 // of an account.
 func (a *NodeAdapter) AccountAddressAssets(
@@ -225,10 +235,11 @@ func (a *NodeAdapter) AccountAddressAssets(
 	txn := db.Transaction(ctx, false)
 	defer txn.Release()
 	rows, total, err := db.Metadata().GetAccountAssetBalances(
-		tag, key, params.Count, offset, params.Order, txn.Metadata(),
+		tag, key, params.Count, offset, params.Order,
+		a.summaryLimits.accountLimits(), txn.Metadata(),
 	)
 	if err != nil {
-		return nil, 0, fmt.Errorf("get account address assets: %w", err)
+		return nil, 0, accountAggregateError("get account address assets", err)
 	}
 	return assetAmounts(rows), total, nil
 }
@@ -247,11 +258,11 @@ func (a *NodeAdapter) AccountAddressTotal(
 	txn := db.Transaction(ctx, false)
 	defer txn.Release()
 	totals, err := db.Metadata().GetAccountAddressTotals(
-		tag, key, txn.Metadata(),
+		tag, key, a.summaryLimits.accountLimits(), txn.Metadata(),
 	)
 	if err != nil {
-		return AccountAddressTotalInfo{}, fmt.Errorf(
-			"get account address totals: %w", err,
+		return AccountAddressTotalInfo{}, accountAggregateError(
+			"get account address totals", err,
 		)
 	}
 	amounts := func(lovelace *big.Int, assets []models.AssetQuantity) []AddressAmountInfo {

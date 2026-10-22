@@ -416,7 +416,9 @@ func newRegistryServer(t *testing.T, body []byte) *registryServer {
 				select {
 				case <-timer.C:
 				case <-r.Context().Done():
-					return
+					// Abort rather than return: see
+					// TestTokenRegistrySyncFetchErrorStaysIdentifiable.
+					panic(http.ErrAbortHandler)
 				}
 			}
 			if r.URL.Path == "/manifest" {

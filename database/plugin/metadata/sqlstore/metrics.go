@@ -193,8 +193,10 @@ func newSQLQueryDurationHistogram(
 		Name: sqlMetricNamePrefix + "query_duration_seconds",
 		Help: "Wall-clock duration of each SQL statement issued against " +
 			"the metadata store, labeled by classifySQLStatement's op " +
-			"classification and, when known, the sqlc-generated query " +
-			"name. Counted at the same chokepoint as " +
+			"classification and the statement's fixed query name, taken " +
+			"from its leading \"-- name: X\" comment (sqlc-generated or " +
+			"hand-written); \"unknown\" for a statement with no such " +
+			"comment. Counted at the same chokepoint as " +
 			"dingo_database_sql_operations_total, including the " +
 			"hot-statement cache's cached calls (queryRowCached/execCached " +
 			"in prepared_stmt.go). For a multi-row SELECT dispatched " +
@@ -285,20 +287,21 @@ func safeRegisterCounterFunc(
 // sqlc-generated query embeds that comment (see
 // internal/query/{sqlite,postgres,mysql}/*.sql.go, generated from the
 // "-- name:" annotation sqlc requires on every query in
-// internal/query/*.sql); this walks past that comment (and any further
-// leading comment lines) before checking the real statement's leading
-// keyword. A CTE (WITH ...), PRAGMA, or DDL statement is classified "other"
-// rather than guessed at -- a wrong label would be worse than an honest
-// catch-all, and none of dingo's own hot paths are CTEs today. name is
-// "unknown" when no "-- name:" comment is present -- a hand-written query
-// (a PRAGMA, a schema-inspection SELECT in a test) rather than a
-// sqlc-generated one.
+// internal/query/*.sql), and every hand-written statement on the apply path
+// carries the same comment by convention (DATABASE.md, "SQL Conventions");
+// this walks past that comment (and any further leading comment lines)
+// before checking the real statement's leading keyword. A CTE (WITH ...),
+// PRAGMA, or DDL statement is classified "other" rather than guessed at --
+// a wrong label would be worse than an honest catch-all, and none of
+// dingo's own hot paths are CTEs today. name is
+// "unknown" when no "-- name:" comment is present: a PRAGMA, or a
+// hand-written statement off the block-apply path that has not been named.
 //
 // name is safe to use as a Prometheus label despite being derived from
-// query text: sqlc query names are not user input or raw SQL text, they are
-// a small, fixed set fully determined by the "-- name:" annotations checked
-// into internal/query/*.sql at build time (dozens of entries, one per
-// generated query function), so this label's cardinality is bounded by the
+// query text: it is a literal in the Go source or in internal/query/*.sql,
+// never built from data. A statement assembled at runtime (a multi-row
+// INSERT, an IN list sized to the batch) carries one fixed name per
+// builder and shape, so this label's cardinality is bounded by the
 // codebase, not by anything a caller or attacker controls.
 func classifySQLStatement(query string) (op, name string) {
 	name = "unknown"

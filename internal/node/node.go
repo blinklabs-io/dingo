@@ -402,7 +402,11 @@ func NewHealthServer(
 			cfg.BindAddr,
 			strconv.FormatUint(uint64(cfg.HealthPort), 10),
 		),
-		Handler:           health.NewMux(logger, tipGap, readyTipGapSlots, checks...),
+		Handler: health.NewMux(
+			logger,
+			tipGap,
+			readyTipGapSlots,
+			checks...),
 		ReadHeaderTimeout: 10 * time.Second,
 		WriteTimeout:      10 * time.Second,
 		IdleTimeout:       60 * time.Second,
@@ -681,7 +685,12 @@ func Run(
 		if listener := bindAuxiliaryListener(
 			"health", healthServer, logger,
 		); listener != nil {
-			go serveAuxiliaryListenerOn("health", healthServer, listener, logger)
+			go serveAuxiliaryListenerOn(
+				"health",
+				healthServer,
+				listener,
+				logger,
+			)
 		}
 	}
 	// A remote stop or restart ends the run exactly like a signal does;
@@ -814,6 +823,10 @@ func buildDingoConfig(
 			cfg.Plugins.Storage.Metadata,
 		),
 		dingo.WithPluginSelection(
+			plugin.CapabilityConsensus,
+			cfg.Plugins.Consensus,
+		),
+		dingo.WithPluginSelection(
 			plugin.CapabilityMempool,
 			cfg.Plugins.Mempool,
 		),
@@ -856,6 +869,12 @@ func buildDingoConfig(
 		dingo.WithBarkClientCAFilePath(cfg.BarkClientCAFilePath),
 		dingo.WithBarkArchiveMaxConcurrentFetches(
 			cfg.BarkArchiveMaxConcurrentFetches,
+		),
+		dingo.WithBarkArchiveLookupsPerSecond(
+			cfg.BarkArchiveLookupsPerSecond,
+		),
+		dingo.WithBarkArchiveCallerLookupsPerSecond(
+			cfg.BarkArchiveCallerLookupsPerSecond,
 		),
 		dingo.WithBarkOperatorCertificateFingerprints(
 			cfg.BarkOperatorCertificateFingerprints,
@@ -955,7 +974,9 @@ func buildDingoConfig(
 		dingo.WithRunMode(string(cfg.RunMode)),
 		dingo.WithStartEra(string(cfg.StartEra)),
 		dingo.WithShutdownTimeout(shutdownTimeout),
-		dingo.WithLocalStateQueryViewMaxLifetime(localStateQueryViewMaxLifetime),
+		dingo.WithLocalStateQueryViewMaxLifetime(
+			localStateQueryViewMaxLifetime,
+		),
 		// Enable metrics with default prometheus registry
 		dingo.WithPrometheusRegistry(prometheus.DefaultRegisterer),
 		dingo.WithTracing(cfg.Tracing),
@@ -1010,7 +1031,9 @@ func buildDingoConfig(
 		dingo.WithMaxNtCConns(cfg.MaxNtCConns),
 		dingo.WithMaxNtCConnectionsPerIP(cfg.MaxNtCConnectionsPerIP),
 		dingo.WithMaxTrustedLocalNtCConns(cfg.MaxTrustedLocalNtCConns),
-		dingo.WithSkipRewardLiveStakeBackfillCheck(cfg.SkipRewardLiveStakeBackfillCheck),
+		dingo.WithSkipRewardLiveStakeBackfillCheck(
+			cfg.SkipRewardLiveStakeBackfillCheck,
+		),
 		dingo.WithCacheConfig(
 			cfg.Cache.BlockLRUEntries,
 			cfg.Cache.HotUtxoEntries,
@@ -1086,6 +1109,7 @@ func buildDingoConfig(
 			cfg.BlockPipelineValidateEnabled,
 		),
 		dingo.WithLedgerPrefetchAheadEnabled(cfg.LedgerPrefetchAheadEnabled),
+		dingo.WithLedgerValidateAheadEnabled(cfg.LedgerValidateAheadEnabled),
 		dingo.WithLedgerApplyRowBatchingEnabled(
 			cfg.LedgerApplyRowBatchingEnabled,
 		),

@@ -16,6 +16,7 @@ package blockfrost
 
 import (
 	"bytes"
+	"context"
 	"encoding/hex"
 	"io"
 	"log/slog"
@@ -115,7 +116,7 @@ func TestPersistedMetadataEndpointsDeterministicAcrossKeyOrders(t *testing.T) {
 		for i, mt := range txs {
 			hash := bytes.Repeat([]byte{mt.hashByte}, 32)
 
-			jsonLabels, err := adapter.TransactionMetadata(hash)
+			jsonLabels, err := adapter.TransactionMetadata(context.Background(), hash)
 			require.NoError(t, err, "pass %d tx %d", pass, i)
 			require.Len(t, jsonLabels, 2)
 			require.Equal(t, "1", jsonLabels[0].Label)
@@ -129,7 +130,7 @@ func TestPersistedMetadataEndpointsDeterministicAcrossKeyOrders(t *testing.T) {
 				i,
 			)
 
-			cborLabels, err := adapter.TransactionMetadataCBOR(hash)
+			cborLabels, err := adapter.TransactionMetadataCBOR(context.Background(), hash)
 			require.NoError(t, err)
 			require.Len(t, cborLabels, 2)
 			require.Equal(t, "6161", cborLabels[0].CBORMetadata)
