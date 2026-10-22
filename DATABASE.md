@@ -4506,18 +4506,21 @@ live UTxOs can still read more than a live scan would. With an address filter
 the asset filter remains a per-row `EXISTS` over
 the already narrowed set.
 
-`AddressUTXOs` (exact address) cannot use `Offset`/`Count`, since an exact
-total requires CBOR-decoding every coarse candidate either way. Instead
-`MatchingUtxoRefsByAddressWithOrdering` scans coarse candidates in keyset
-batches (mirroring `GetUtxosByAddressWithOrdering`'s own exact-filter loop)
-with `SkipAssets` set, CBOR-decodes each only to confirm the match, and
-returns bare `(TxId, OutputIdx)` references rather than full rows — the
-result's length is the accurate total, and the caller slices it for one
-page's worth of references and fetches full rows (with assets) for just
-that page via `GetUtxosByRefs`. This bounds the expensive part (asset
-loading, full-row retention) to one page instead of the address's entire
-live UTxO history, while the CBOR-decode-only candidate scan remains
-unavoidable for the total.
+`AddressUTXOs` (exact address) pages through the API-mode `utxo_address`
+index once its startup backfill has completed: `UtxoRefsByIndexedAddressPage`
+applies the rendered-address predicate, ordering, `Offset`, and `Count` in SQL
+and counts the total in SQL, so deep and descending pages decode no CBOR.
+Without a completed index, or with an asset filter (the index carries no asset
+predicate), `MatchingUtxoRefsByAddressWithOrderingBounded` scans coarse
+candidates in the requested order in keyset batches with `SkipAssets` set,
+CBOR-decodes each only to confirm the match, and returns bare
+`(TxId, OutputIdx)` references. The scan stops after
+`ExactAddressCandidateScanLimit` candidates, and loading more than
+`DefaultPublicUtxoCborBudget` bytes of output CBOR returns
+`ErrUtxoQueryBudgetExceeded`. A page that ends before the scan is exhausted is
+served without a total, and a page the candidate budget cannot reach returns
+`ErrUtxoQueryBudgetExceeded`. Full rows (with assets) are fetched for just the
+page via `GetUtxosByRefs`.
 
 Both `AccountUTXOs` and `AddressUTXOs` open one read `Txn`
 (`Database.Transaction(ctx, false)`) and pass it to both their count/scan call

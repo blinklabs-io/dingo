@@ -11933,10 +11933,14 @@ Two contracts follow from that boundary:
 - **Historical balances are pinned to the requested point.**
   `/network/options` advertises `historical_balance_lookup: true`, and
   `/account/balance` honors it. A request carrying a `block_identifier`
-  resolves that block through the same lookup `/block` uses, reads the UTxO set
-  at the block's slot via `MeshLedgerState.UtxosByAddressAtSlot` (UTxOs added
-  at or before the slot and not spent until after it), and echoes the resolved
-  block back as the response's `block_identifier` — never the tip. A point the
+  resolves that block through the same lookup `/block` uses, aggregates the
+  address balance at the block's slot via
+  `MeshLedgerState.UtxoBalanceByAddressAtSlot` (UTxOs added at or before the
+  slot and not spent until after it, summed in metadata storage without
+  materializing them), and echoes the resolved block back as the response's
+  `block_identifier` — never the tip. An address holding more than
+  `database.ExactAddressCandidateScanLimit` outputs at that slot fails with an
+  invalid-request error rather than a partial balance. A point the
   node cannot resolve, including the hash of a rolled-back block, fails with
   `block not found` rather than falling back to another point. An identifier
   carrying neither hash nor index is treated as absent, since clients commonly
