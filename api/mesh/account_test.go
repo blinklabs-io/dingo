@@ -27,8 +27,8 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/database/models"
-	dledger "github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
+	dledger "github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/mary"
