@@ -32,6 +32,7 @@ import (
 	"io"
 	"net"
 	"slices"
+	"sync"
 	"time"
 
 	"github.com/blinklabs-io/dingo/internal/koiosparity"
@@ -142,6 +143,11 @@ func fetchTxInfoChunks(
 var errAcquireWithoutLocalStateQuery = errors.New(
 	"acquire succeeded without a local state query client",
 )
+
+// errSessionEnded is what a chainsync callback returns when gouroboros
+// delivers it after RunFromGenesis has already ended that callback's
+// session; the state it would have written belongs to the next session.
+var errSessionEnded = errors.New("chainsync session already ended")
 
 // currentEpochNo Acquires point and asks Dingo directly which epoch it
 // falls in (queryShelleyEpochNo, an unbounded query with no retention
@@ -1104,8 +1110,35 @@ func RunFromGenesis(
 		return true, nil
 	}
 
+	// sessionMu orders each chainsync session's callbacks against this loop.
+	// gouroboros runs the callbacks on its own goroutines and its Close does
+	// not wait for one that is still running, so without it the loop below
+	// reads lastPoint and progressed, and the next session's callbacks write
+	// the shared state, while the previous session's last callback may still
+	// be writing them.
+	var sessionMu sync.Mutex
 	for {
 		progressed = false
+		// ended is per session. retireSession sets it under sessionMu, which
+		// waits out a callback already running and turns away any that
+		// gouroboros delivers afterwards. Call it only after endSession has
+		// cancelled sessionCtx and the connection is closed: a callback holds
+		// sessionMu while it waits on a query, and only that cancellation
+		// ends the wait.
+		ended := false
+		retireSession := func() {
+			sessionMu.Lock()
+			ended = true
+			sessionMu.Unlock()
+		}
+		enterCallback := func() error {
+			sessionMu.Lock()
+			if ended {
+				sessionMu.Unlock()
+				return errSessionEnded
+			}
+			return nil
+		}
 
 		rawConn, dialErr := dialRaw(ctx, protoFromAddr(dingoAddr), dingoAddr)
 		if dialErr != nil {
@@ -1134,6 +1167,10 @@ func RunFromGenesis(
 						blockData any,
 						_ chainsync.Tip,
 					) error {
+						if err := enterCallback(); err != nil {
+							return err
+						}
+						defer sessionMu.Unlock()
 						block, ok := blockData.(lcommon.Block)
 						if !ok {
 							return fmt.Errorf(
@@ -1404,6 +1441,10 @@ func RunFromGenesis(
 				),
 				chainsync.WithRollBackwardFunc(
 					func(_ chainsync.CallbackContext, point pcommon.Point, _ chainsync.Tip) error {
+						if err := enterCallback(); err != nil {
+							return err
+						}
+						defer sessionMu.Unlock()
 						// A rollback to lastPoint itself invalidates nothing.
 						// Every reconnect opens with exactly this rollback,
 						// since the session resumes from lastPoint, the block
@@ -1562,12 +1603,14 @@ func RunFromGenesis(
 			endSession()
 			stopOnCancel()
 			csConn.Close() //nolint:errcheck
+			retireSession()
 			return errors.New("ChainSync client unavailable")
 		}
 		if err := cs.Client.Sync([]pcommon.Point{lastPoint}); err != nil {
 			endSession()
 			stopOnCancel()
 			csConn.Close() //nolint:errcheck
+			retireSession()
 			ok, retryErr := retryOrStop(
 				fmt.Sprintf(
 					"nodeparity: start chainsync from slot %d failed",
@@ -1588,11 +1631,13 @@ func RunFromGenesis(
 			endSession()
 			stopOnCancel()
 			csConn.Close() //nolint:errcheck
+			retireSession()
 			return ctx.Err()
 		case err, ok := <-csConn.ErrorChan():
 			endSession()
 			stopOnCancel()
 			csConn.Close() //nolint:errcheck
+			retireSession()
 			// gouroboros closes ErrorChan without sending anything when the
 			// peer closes the connection while every protocol is idle,
 			// which includes chainsync with no RequestNext outstanding --
@@ -1604,12 +1649,10 @@ func RunFromGenesis(
 			}
 			sessionErr = err
 		}
-		// The callbacks write this run's state without a lock, relying on
-		// the session being over before the next one starts. A peer close
-		// can end the session while a callback is still running, so wait
-		// for the protocol's receive loop, which runs them, to exit. That
-		// wait ends only once the callback returns; endSession above has
-		// already closed any query it is blocked in.
+		// retireSession above has already waited out a running callback
+		// and turned away later ones. Waiting for the protocol's receive
+		// loop, which runs them, to exit as well keeps the next session from
+		// starting while this one's connection is still delivering.
 		select {
 		case <-csDone:
 		case <-ctx.Done():

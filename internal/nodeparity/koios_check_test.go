@@ -216,10 +216,6 @@ func TestCheckStakeDistribution_CacheHitSkipsLiveKoiosCall(t *testing.T) {
 	t.Cleanup(func() { _ = listener.Close() })
 	lsq.serve(t, listener, magic)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	client := dialWiringClient(t, ctx, listener.Addr().String(), magic)
-
 	koiosURL, reqCount := countingKoiosServer(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 	})
@@ -245,6 +241,12 @@ func TestCheckStakeDistribution_CacheHitSkipsLiveKoiosCall(t *testing.T) {
 		ActiveStake: "1000000",
 		FetchedAt:   time.Now().UTC(),
 	}))
+
+	// The deadline starts after cache setup, so it bounds only the dial and
+	// the query: slow SQLite setup cannot expire it before the query runs.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	client := dialWiringClient(t, ctx, listener.Addr().String(), magic)
 
 	mismatches, err := CheckStakeDistribution(ctx, client, koios, cache, "preview", epoch)
 	require.NoError(t, err)
@@ -1117,6 +1119,11 @@ type wiringFakeLSQServer struct {
 	// killNextPoolDistr models).
 	killAllPoolDistr atomic.Bool
 	activeConn       atomic.Pointer[ouroboros.Connection]
+	// cancelOnQuery, when set before serve, is called as the first query
+	// arrives, and that query's connection is then closed unanswered. The
+	// cancel happens before the close, so the client sees its query fail
+	// with the caller's context already ended.
+	cancelOnQuery context.CancelFunc
 }
 
 // killNextPoolDistr arms killConnOnNextPoolDistr -- see that field's doc
@@ -1190,6 +1197,15 @@ func (s *wiringFakeLSQServer) config() localstatequery.Config {
 				_ localstatequery.CallbackContext,
 				q localstatequery.QueryWrapper,
 			) (any, error) {
+				if s.cancelOnQuery != nil {
+					s.cancelOnQuery()
+					if conn := s.activeConn.Load(); conn != nil {
+						_ = conn.Close()
+					}
+					return nil, errors.New(
+						"wiringFakeLSQServer: context ended mid-query",
+					)
+				}
 				eraID, eraErr, pp, poolDistr := s.snapshot()
 				block, ok := q.Query.(*localstatequery.BlockQuery)
 				if !ok {
@@ -2157,4 +2173,110 @@ func TestCheckStakeDistributionStillReportsOnePoolMissingARow(t *testing.T) {
 	assert.Equal(t, ReasonNoKoiosPoolHistoryRow, mismatches[0].Reason)
 	assert.False(t, mismatches[0].KoiosFault)
 	assert.Equal(t, 0, f.probeCount())
+}
+
+// TestCheckQueriesReportExpiredContext proves a dingo query that fails because
+// the caller's context ended reports that context error. Dial closes the
+// connection when the context ends, so without the wrap the query error reads
+// only "protocol is shutting down" and hides the deadline.
+func TestCheckQueriesReportExpiredContext(t *testing.T) {
+	t.Parallel()
+
+	const magic = 764824073
+
+	checks := map[string]func(
+		context.Context, *localstatequery.Client, *koiosparity.Cache,
+	) error{
+		"stake distribution": func(
+			ctx context.Context, c *localstatequery.Client,
+			cache *koiosparity.Cache,
+		) error {
+			_, err := CheckStakeDistribution(ctx, c, nil, cache, "preview", 500)
+			return err
+		},
+		"protocol params": func(
+			ctx context.Context, c *localstatequery.Client,
+			cache *koiosparity.Cache,
+		) error {
+			_, err := CheckProtocolParams(ctx, c, nil, cache, "preview", 500)
+			return err
+		},
+	}
+	for name, check := range checks {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			lsq := newWiringFakeLSQServer()
+			listener, err := net.Listen("tcp", "127.0.0.1:0")
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = listener.Close() })
+			lsq.serve(t, listener, magic)
+
+			ctx, cancel := context.WithCancel(context.Background())
+			client := dialWiringClient(t, ctx, listener.Addr().String(), magic)
+			cache := openTestCache(t)
+			cancel()
+
+			err = check(ctx, client, cache)
+			require.Error(t, err)
+			require.ErrorIs(
+				t, err, context.Canceled,
+				"an expired caller context must not be "+
+					"reported only as a closed protocol",
+			)
+		})
+	}
+}
+
+// TestCheckQueriesReportContextEndedMidQuery proves the context error is
+// reported when the caller's context ends while a dingo query is in flight,
+// past the pre-query ctx.Err() check. The server cancels the context and
+// then closes the connection, so the query fails only after the context
+// ended.
+func TestCheckQueriesReportContextEndedMidQuery(t *testing.T) {
+	t.Parallel()
+
+	const magic = 764824073
+
+	checks := map[string]func(
+		context.Context, *localstatequery.Client, *koiosparity.Cache,
+	) error{
+		"stake distribution": func(
+			ctx context.Context, c *localstatequery.Client,
+			cache *koiosparity.Cache,
+		) error {
+			_, err := CheckStakeDistribution(ctx, c, nil, cache, "preview", 500)
+			return err
+		},
+		"protocol params": func(
+			ctx context.Context, c *localstatequery.Client,
+			cache *koiosparity.Cache,
+		) error {
+			_, err := CheckProtocolParams(ctx, c, nil, cache, "preview", 500)
+			return err
+		},
+	}
+	for name, check := range checks {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			ctx, cancel := context.WithCancel(context.Background())
+			t.Cleanup(cancel)
+			cache := openTestCache(t)
+
+			lsq := newWiringFakeLSQServer()
+			lsq.cancelOnQuery = cancel
+			listener, err := net.Listen("tcp", "127.0.0.1:0")
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = listener.Close() })
+			lsq.serve(t, listener, magic)
+			client := dialWiringClient(t, ctx, listener.Addr().String(), magic)
+
+			err = check(ctx, client, cache)
+			require.Error(t, err)
+			require.ErrorIs(
+				t, err, context.Canceled,
+				"a context that ends mid-query must not be "+
+					"reported only as a closed protocol",
+			)
+		})
+	}
 }
