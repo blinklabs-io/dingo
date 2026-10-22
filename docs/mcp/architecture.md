@@ -80,7 +80,10 @@ The server exposes 21 specialized tools categorized into SQLite introspection (3
 | `sqlite_table_schema` | Inspect table DDL, column types, nullability, and indices | `table_name` (string) |
 
 The three SQL tools and `get_asset_info` share four execution slots and fail
-immediately when all slots are occupied. SQLite rejects values over 64 KiB and result sets over 32
+immediately when all slots are occupied. While the metadata SQLite `-wal` file
+exceeds 128 MiB, every tool call and resource read fails until the WAL is back
+under that size, so MCP reads cannot hold the snapshot that blocks the periodic
+TRUNCATE checkpoint. SQLite rejects values over 64 KiB and result sets over 32
 columns before Go materializes them; `sqlite_query` stops after 1 MiB of decoded
 cell data.
 
