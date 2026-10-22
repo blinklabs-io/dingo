@@ -2821,6 +2821,10 @@ records and both placements remain readable. Badger fixes the threshold when
 the store opens, so node-managed Mithril restores and stream catch-up, which run
 inside `serve` on the store `serve` opened, keep the serve default.
 
+Core sync mode uses a 512 MiB Badger memtable by default to improve bulk-import
+throughput. Other storage modes and run modes retain the 128 MiB default. The
+blob provider's `memTableSize` setting overrides the selected default.
+
 ### Badger Close and the Directory Lock
 
 Badger holds an exclusive `flock` on its `blob` directory and releases it only
@@ -3090,6 +3094,17 @@ process's lifetime, with no later call able to repair it, and the next
 releases while the barrier's writer preference blocked every read-write `Txn`
 constructed behind it.
 
+Coordinated read snapshots (`NewReadSnapshotContext`) do not take that
+barrier's exclusive side. A read-write `Txn` holding the shared side also holds
+a narrower commit-phase barrier's shared side for the duration of `Commit`
+alone -- the commit timestamp update and both store commits -- and snapshot
+construction takes the commit phase exclusively while it opens the metadata
+and then the blob view. Uncommitted writes are invisible to both views, so the
+pair still shares one commit boundary, while construction waits only for a
+commit in progress rather than for every open read-write `Txn` to finish.
+`lifecycle.Snapshot` keeps `PauseCommits`, because its metadata backup needs
+the write connection an open read-write `Txn` holds.
+
 `Txn.OnFinish` exposes that same terminal transition to callers. It registers a
 callback that runs exactly once when the transaction reaches its terminal state
 on any path -- a successful commit, a failed commit, an explicit `Rollback`, a
@@ -3232,7 +3247,7 @@ legacy occurrence checks are unchanged.
 | Logical key | Value | Used by |
 |---|---|---|
 | `bp` + big-endian slot `uint64` + block hash bytes | Raw block CBOR, or expired-history marker `DBT1` | `BlobStore.SetBlock`, `GetBlock`, `TombstoneBlock`, block iterators |
-| `bp..._metadata` | `types.BlockMetadata`: `id`, `type`, `height`, `prev_hash` encoded as CBOR; Badger can use compact `DBM1` binary metadata (run mode `serve`/`leios` with storage mode `core`). Which encoding is present depends on the configuration of the node that wrote the block, so decode with `types.UnmarshalBlockMetadata` rather than as CBOR — code outside the plugins reads this key directly. | `GetBlock`, the block-number search, and archive-proxy/history-expiry paths |
+| `bp..._metadata` | `types.BlockMetadata`: `id`, `type`, `height`, `prev_hash` encoded as CBOR; Badger can use compact `DBM1` binary metadata (run mode `serve`/`leios` with storage mode `core`). Which encoding is present depends on the configuration of the node that wrote the block, so decode with `types.UnmarshalBlockMetadata` rather than as CBOR — code outside the plugins reads this key directly. | `GetBlock`, the block-number search, FindIntersect point membership, and archive-proxy/history-expiry paths |
 | `bi` + big-endian internal block ID `uint64` | The corresponding `bp...` block key | Block iteration and block-by-index lookup |
 | `bh` + block hash bytes | The corresponding `bp...` block key | Fast block-by-hash lookup |
 | `u` + tx hash bytes + big-endian output index `uint32` | UTxO CBOR or a 52-byte `DOFF` CBOR-offset reference into a block | UTxO resolution and history expiry |
@@ -3280,6 +3295,10 @@ probe exact points from pre-hash-index databases without turning an unknown
 fork hash into a remote request. Tombstones retain `bp..._metadata` in every
 backend so the local ID remains available; a legacy cloud tombstone that has
 already lost that metadata is a non-match rather than block ID zero.
+`Database.BlockIDByPointMetadataTxn` answers the same question from the
+`bp..._metadata` key alone, without the block body read and hash check that
+`GetBlock` performs; ChainSync FindIntersect uses it for peer-supplied points.
+An ID of zero marks a synthetic entry and is a non-match.
 
 `Database.CountBlocksAndOldestSlot` (`database/block_inventory.go`) reads the retained block count and oldest retained slot from the checksummed `dingo:block-inventory:v1` blob record. `database.New` creates the record and an ordered retained-block membership index before the database becomes available, scanning legacy block content once only when the record is absent. Block insert, delete, history-expiry tombstone, rollback, truncate, and orphan cleanup paths update both in the same blob transaction as the block mutation. Stores without optimistic write-conflict detection serialize block-inventory mutations before opening backend transactions; conflict-detecting stores rely on backend write conflicts to prevent lost updates. Deleting or tombstoning the current oldest block seeks the first membership key to resolve its successor, including another retained block at the same slot, without walking block content. Bark's `GetDatabaseInfo` reads this record and never walks the block keyspace in request handling.
 
@@ -3885,6 +3904,34 @@ LEFT JOIN asset a ON a.utxo_id = u.id
 WHERE u.tx_id IN (decode($1, 'hex'), decode($2, 'hex'));
 ```
 
+### `UtxoRefsAsOfAfterID`
+
+One page of the UTxO references live as of a slot, for a whole-UTxO walk that
+must not hold one read transaction throughout
+(`database.IterateUtxoRefsAsOfPaged`, used by `GetUTxOWhole`):
+
+```sql
+SELECT id, tx_id, output_idx FROM utxo
+WHERE id > ? AND added_slot <= ? AND (deleted_slot = 0 OR deleted_slot > ?)
+ORDER BY id LIMIT ?
+```
+
+Each page is a range scan on the row id in its own read transaction, so the
+SQLite WAL can restart between pages. The pages describe one as-of set without
+a shared snapshot because of how `utxo` rows change: a row keeps its `id` for
+its whole life (spends and unspends update it in place; inserts after the walk
+starts carry a later `added_slot` and are excluded), later spends set a
+`deleted_slot` after the slot, which the predicate still includes, and
+`UtxosDeleteConsumed` removes only rows spent before the prune floor, which an
+acquired-point pin holds at or below the slot. A rollback below the slot
+deletes or unspends rows the walk may already have passed, so
+`UtxosDeleteRolledback` and `UtxosUnspend` mark every walk below whose slot they
+reach, once when they start and again when their transaction finishes, and the
+walk returns `ErrUtxoHistoryRolledBack`. Mithril import's re-import path can
+clear a spend on an existing row and gap-block recovery can insert a missing
+producer row; neither runs inside a pinned LocalStateQuery walk on a synced
+node, and both only correct rows to what the slot's state already was.
+
 ### `GetUtxosByRefsAsOf`
 
 `GetUtxosByRefs`'s point-pinned sibling, used
@@ -4156,6 +4203,12 @@ address bytes, because the pointer payload is not represented in the
 `utxo` table.
 
 ### `GetUtxosByAddress`, `GetUtxosByAddressAsOf`, `GetUtxosByAddressAtSlot`, and `GetControlledAmountByCredential`
+
+`GetControlledAmountByCredential` sums live `utxo.amount` for the credential
+with the same overflow-free engine-side aggregate as
+`GetAccountSumsByCredential` (NUMERIC, DECIMAL(65, 0), or `dingo_bigint_sum`),
+so no UTxO row is streamed to the caller. It runs on the caller's transaction
+context.
 
 `GetUtxosByAddress` accepts multiple address patterns and OR-joins their coarse
 SQL branches into a single query, mirroring `GetUtxosByAddressWithOrdering`.
@@ -5153,28 +5206,33 @@ Backs the Blockfrost account `withdrawals_sum`, `reserves_sum`, and
 `treasury_sum` fields. All three totals are reconstructed from rollback-aware
 persisted rows rather than stored as running counters:
 
-Each total selects its rows and adds them in Go rather than asking the engine
-for a `SUM`: the amount columns are decimal text, and coercing them to a signed
-engine integer differs across SQLite, PostgreSQL, and MySQL and cannot span the
-full `uint64` range.
+Each total is one engine-side aggregate over the decimal text column, so no row
+stream reaches the caller and the work in Go does not grow with the account's
+history. The aggregate cannot overflow: PostgreSQL sums `CAST(amount AS
+NUMERIC)`, MySQL `CAST(amount AS DECIMAL(65, 0))`, and SQLite the
+arbitrary-precision `dingo_bigint_sum` aggregate the SQLite provider registers
+(`database/plugin/metadata/sqlite/bigintsum`; SQLite's own `SUM` raises an
+integer-overflow error and `TOTAL` is a float). The result is read back as a
+decimal string. The sums run on the caller's transaction, so cancelling its
+context cancels the statements.
 
 ```sql
 -- withdrawals_sum
-SELECT amount
+SELECT SUM(CAST(amount AS NUMERIC))
 FROM account_reward_delta
 WHERE withdrawal = true AND credential_tag = $1 AND staking_key = decode($2, 'hex');
 
 -- reserves_sum (pot = 0) / treasury_sum (pot = 1)
-SELECT r.amount
+SELECT SUM(CAST(r.amount AS NUMERIC))
 FROM move_instantaneous_rewards_reward r
 JOIN move_instantaneous_rewards mir ON mir.id = r.mir_id
 WHERE mir.pot = $pot AND r.credential_tag = $1 AND r.credential = decode($2, 'hex');
 ```
 
-A withdrawal is `coin`, so `withdrawals_sum` is accumulated as `uint64` and a
-negative row is an error. A MIR reward is `delta_coin`, so `reserves_sum` and
-`treasury_sum` are accumulated as signed unbounded values and are rendered with
-their sign.
+A withdrawal is `coin`, so `withdrawals_sum` must total a value in the
+`uint64` range and any other total is an error. A MIR reward is `delta_coin`,
+so `reserves_sum` and `treasury_sum` are accumulated as signed unbounded values
+and are rendered with their sign.
 
 ### `GetStakeRegistrationsByCredential`
 

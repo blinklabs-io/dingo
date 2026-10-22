@@ -45,7 +45,7 @@ func TestRulesConformanceVectors(t *testing.T) {
 	testutil.SkipUnderRace(
 		t,
 		"a single-goroutine replay of the corpus through the SQLite state "+
-			"manager; go-test (Linux) and go-test (Linux, quick) replay it "+
+			"manager; CI's check and gate (services) jobs replay it "+
 			"un-instrumented",
 	)
 	results := sqliteCorpusResults(t)

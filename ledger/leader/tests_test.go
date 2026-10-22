@@ -155,7 +155,7 @@ func TestLeaderEligibilityNodeSchedules(t *testing.T) {
 	testutil.SkipUnderRace(
 		t,
 		"each case is a single-goroutine pass over every slot of an epoch; "+
-			"go-test (Linux) replays the same cases un-instrumented",
+			"CI's check job replays the same cases un-instrumented",
 	)
 	for i, c := range e34ScheduleCases(t) {
 		t.Run(fmt.Sprintf("%02d_%s", i, c.Mode), func(t *testing.T) {

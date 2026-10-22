@@ -205,3 +205,67 @@ func parseNullBigInt(
 	}
 	return parseBigInt(description, value.String)
 }
+
+// sqliteBigintSumFunc is the SQLite aggregate behind wideSumExpr. The SQLite
+// provider registers it with the driver (package sqlite/bigintsum), which
+// keeps the driver out of this dialect-neutral package.
+const sqliteBigintSumFunc = "dingo_bigint_sum"
+
+// wideSumExpr returns a SQL aggregate over a decimal text column that cannot
+// overflow, so the database can sum without streaming rows to the caller.
+// PostgreSQL NUMERIC is unbounded, MySQL DECIMAL(65,0) holds 65 digits, and
+// SQLite uses the registered arbitrary-precision aggregate.
+func (s *Store) wideSumExpr(column string) string {
+	switch s.dialect.Name() {
+	case "postgres":
+		return "SUM(CAST(" + column + " AS NUMERIC))"
+	case "mysql":
+		return "SUM(CAST(" + column + " AS DECIMAL(65, 0)))"
+	default:
+		return sqliteBigintSumFunc + "(" + column + ")"
+	}
+}
+
+// sumWide runs a one-row wideSumExpr query and returns the exact signed total.
+// A query matching no rows yields zero.
+func (s *Store) sumWide(
+	ctx context.Context,
+	db queryer,
+	query string,
+	args ...any,
+) (*big.Int, error) {
+	var raw any
+	if err := db.QueryRowContext(
+		ctx,
+		s.dialect.Rebind(query),
+		args...,
+	).Scan(&raw); err != nil {
+		return nil, err
+	}
+	text, err := signedAmountText(raw)
+	if err != nil {
+		return nil, err
+	}
+	if text == "" {
+		return new(big.Int), nil
+	}
+	return parseBigInt("amount sum", text)
+}
+
+// sumWideUint64 is sumWide for coin columns, which must total a value in the
+// uint64 range.
+func (s *Store) sumWideUint64(
+	ctx context.Context,
+	db queryer,
+	query string,
+	args ...any,
+) (uint64, error) {
+	total, err := s.sumWide(ctx, db, query, args...)
+	if err != nil {
+		return 0, err
+	}
+	if total.Sign() < 0 || !total.IsUint64() {
+		return 0, fmt.Errorf("amount sum %s outside uint64", total)
+	}
+	return total.Uint64(), nil
+}
