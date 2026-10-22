@@ -264,6 +264,7 @@ func testSnapshotTrustKeyFile(t *testing.T) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "snapshot-trust-key")
 	require.NoError(t, os.WriteFile(path, testSnapshotTrustKey, 0o600))
+	testutil.RestrictFileToCurrentUser(t, path)
 	return path
 }
 
@@ -1535,24 +1536,26 @@ func TestListAvailableSnapshotsPaginatesAcrossMixedLocalAndCloud(t *testing.T) {
 func TestListAvailableSnapshotsPagesWithoutProviderRescan(t *testing.T) {
 	const cloudCount = 240
 	snapshotDir := t.TempDir()
-	manifestDir := t.TempDir()
+	manifestRoot := t.TempDir()
 	provider := &countingSnapshotListerDestination{
 		entries: make([]lifecycle.SnapshotEntry, 0, cloudCount),
 	}
-	manifest := lifecycle.Manifest{
-		CreatedAt: time.Unix(1, 0).UTC(),
-		Trigger:   lifecycle.TriggerManual,
-	}
-	require.NoError(t, lifecycle.WriteManifest(
-		manifestDir, manifest,
-		lifecycle.WithManifestKey(testSnapshotTrustKey),
-	))
-	manifest, err := lifecycle.ReadManifest(
-		manifestDir, lifecycle.WithManifestKey(testSnapshotTrustKey),
-	)
-	require.NoError(t, err)
 	for i := range cloudCount {
 		id := fmt.Sprintf("cloud-%03d", i)
+		manifestDir := filepath.Join(manifestRoot, id)
+		require.NoError(t, os.Mkdir(manifestDir, 0o700))
+		require.NoError(t, lifecycle.WriteManifest(
+			manifestDir,
+			lifecycle.Manifest{
+				CreatedAt: time.Unix(1, 0).UTC(),
+				Trigger:   lifecycle.TriggerManual,
+			},
+			lifecycle.WithManifestKey(testSnapshotTrustKey),
+		))
+		manifest, err := lifecycle.ReadManifest(
+			manifestDir, lifecycle.WithManifestKey(testSnapshotTrustKey),
+		)
+		require.NoError(t, err)
 		provider.entries = append(provider.entries, lifecycle.SnapshotEntry{
 			ID: id, Manifest: manifest,
 		})

@@ -40,6 +40,7 @@ import (
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/snapshot"
 	"github.com/blinklabs-io/dingo/plugin"
@@ -1139,6 +1140,95 @@ func TestLoadWithDBConfiguresRawChainSecurityParamBeforeHooks(t *testing.T) {
 	}
 }
 
+// Not t.Parallel: this test swaps processTrustedBlockBatchesForLoad.
+func TestLoadWithDBRewindsBlocksRejectedDuringReplay(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	db := newTestDB(t)
+	rejected := errors.New("reject trusted replay batch")
+	noBatch := errors.New("trusted replay ended without a batch")
+	firstBatchReceived := make(chan struct{})
+	rejectReplay := make(chan struct{})
+
+	var firstCopiedTip ochainsync.Tip
+	var rejectedCopiedTip ochainsync.Tip
+	var appliedTip ochainsync.Tip
+	var replayState *ledger.LedgerState
+	oldProcess := processTrustedBlockBatchesForLoad
+	processTrustedBlockBatchesForLoad = func(
+		ls *ledger.LedgerState,
+		ctx context.Context,
+		batches <-chan []gledger.Block,
+	) error {
+		select {
+		case _, ok := <-batches:
+			if !ok {
+				return noBatch
+			}
+			replayState = ls
+			firstCopiedTip = ls.PrimaryChainTip()
+			close(firstBatchReceived)
+			select {
+			case <-rejectReplay:
+				rejectedCopiedTip = ls.PrimaryChainTip()
+				appliedTip = ls.Tip()
+				return rejected
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	t.Cleanup(func() {
+		processTrustedBlockBatchesForLoad = oldProcess
+	})
+
+	immutableDir := filepath.Join(
+		"..",
+		"..",
+		"database",
+		"immutable",
+		"testdata",
+	)
+	loadErr := make(chan error, 1)
+	go func() {
+		loadErr <- LoadWithDB(
+			t.Context(),
+			&config.Config{Network: "preview"},
+			logger,
+			immutableDir,
+			db,
+		)
+	}()
+	testutil.RequireReceive(
+		t, firstBatchReceived, 5*time.Second, "first replay batch",
+	)
+	testutil.WaitForCondition(
+		t,
+		func() bool {
+			return replayState.PrimaryChainTip().BlockNumber >
+				firstCopiedTip.BlockNumber
+		},
+		5*time.Second,
+		"the copier must persist a later batch before replay rejects the first",
+	)
+	close(rejectReplay)
+	err := testutil.RequireReceive(
+		t, loadErr, 5*time.Second, "load failure after replay rejection",
+	)
+	require.ErrorIs(t, err, rejected)
+	require.Greater(
+		t,
+		rejectedCopiedTip.BlockNumber,
+		firstCopiedTip.BlockNumber,
+	)
+	require.NotEqual(t, appliedTip.Point, rejectedCopiedTip.Point)
+
+	cm, err := chain.NewManager(t.Context(), db, nil)
+	require.NoError(t, err)
+	require.Equal(t, appliedTip, cm.PrimaryChain().Tip())
+}
+
 // TestLoadWithDBPropagatesFullPotRewards verifies that the CIP-0163 full-pot
 // feature gate flows from the loaded config into the load-mode ledger config,
 // so `dingo load` computes the same reward state as an enabled serve node
@@ -1730,5 +1820,198 @@ func TestLoadWithDBDefaultConfigCertifiesLegacySnapshots(t *testing.T) {
 		require.NoError(t, sqlDB.QueryRowContext(t.Context(),
 			"SELECT calculation_version FROM "+table).Scan(&version))
 		require.Equal(t, models.RewardStakeCalculationVersion, version)
+	}
+}
+
+// TestCopyBlocksDirectRejectsBlockBodyOutsideSignedHeader pins that the local
+// ImmutableDB load verifies each block body against the body hash committed
+// in its header. The header's body hash field is altered in the chunk file,
+// which leaves the block decodable but its body no longer matching the hash.
+func TestCopyBlocksDirectRejectsBlockBodyOutsideSignedHeader(t *testing.T) {
+	t.Parallel()
+
+	dir := filepath.Join(t.TempDir(), "immutable")
+	requireChunkTrio(t, "00000", dir)
+
+	imm, err := immutable.New(dir)
+	require.NoError(t, err)
+	iter, err := imm.BlocksFromPoint(ocommon.Point{})
+	require.NoError(t, err)
+	first, err := iter.Next()
+	require.NoError(t, err)
+	require.NotNil(t, first)
+	iter.Close()
+	require.NotEqual(t, uint(0), first.Type)
+	block, err := models.DecodeBlockCbor(
+		first.Type, first.Cbor,
+		lcommon.VerifyConfig{SkipBodyHashValidation: true},
+	)
+	require.NoError(t, err)
+	bodyHash := block.BlockBodyHash().Bytes()
+
+	chunkPath := filepath.Join(dir, "00000.chunk")
+	chunk, err := os.ReadFile(chunkPath)
+	require.NoError(t, err)
+	// The first occurrence is the first block's header: it precedes that
+	// block's body, and no earlier block exists.
+	idx := bytes.Index(chunk, bodyHash)
+	require.GreaterOrEqual(t, idx, 0)
+	chunk[idx+len(bodyHash)-1] ^= 0xff
+	require.NoError(t, os.WriteFile(chunkPath, chunk, 0o600))
+
+	cm, err := chain.NewManager(context.Background(), newTestDB(t), nil)
+	require.NoError(t, err)
+	batches := make(chan []gledger.Block, 1024)
+	_, _, err = copyBlocksDirect(
+		context.Background(),
+		slog.New(slog.DiscardHandler),
+		dir,
+		cm.PrimaryChain(),
+		batches,
+	)
+	require.Error(t, err, "a block body that does not match its header "+
+		"body hash must be rejected")
+	var validationErr *lcommon.ValidationError
+	require.ErrorAs(t, err, &validationErr)
+	assert.Equal(t, lcommon.ValidationErrorTypeBodyHash, validationErr.Type)
+}
+
+// TestCopyBlocksDirectRejectsAlteredBlockBody pins the body-substitution case:
+// the header, and so the block hash and chain linkage, is left intact while a
+// witness signature inside the body changes. Without body-hash verification
+// such a block chains and imports normally.
+func TestCopyBlocksDirectRejectsAlteredBlockBody(t *testing.T) {
+	t.Parallel()
+
+	dir := filepath.Join(t.TempDir(), "immutable")
+	requireChunkTrio(t, "00000", dir)
+
+	imm, err := immutable.New(dir)
+	require.NoError(t, err)
+	iter, err := imm.BlocksFromPoint(ocommon.Point{})
+	require.NoError(t, err)
+	var signature []byte
+	for signature == nil {
+		next, err := iter.Next()
+		require.NoError(t, err)
+		require.NotNil(t, next, "chunk 00000 has no vkey-witnessed transaction")
+		if next.Type == 0 {
+			continue
+		}
+		block, err := models.DecodeBlockCbor(
+			next.Type, next.Cbor,
+			lcommon.VerifyConfig{SkipBodyHashValidation: true},
+		)
+		require.NoError(t, err)
+		for _, tx := range block.Transactions() {
+			if vkeys := tx.Witnesses().Vkey(); len(vkeys) > 0 {
+				signature = vkeys[0].Signature
+				break
+			}
+		}
+	}
+	iter.Close()
+
+	chunkPath := filepath.Join(dir, "00000.chunk")
+	chunk, err := os.ReadFile(chunkPath)
+	require.NoError(t, err)
+	idx := bytes.Index(chunk, signature)
+	require.GreaterOrEqual(t, idx, 0)
+	require.Equal(t, -1, bytes.Index(chunk[idx+1:], signature),
+		"the witness signature must occur once in the chunk")
+	chunk[idx] ^= 0xff
+	require.NoError(t, os.WriteFile(chunkPath, chunk, 0o600))
+
+	cm, err := chain.NewManager(context.Background(), newTestDB(t), nil)
+	require.NoError(t, err)
+	batches := make(chan []gledger.Block, 1024)
+	_, _, err = copyBlocksDirect(
+		context.Background(),
+		slog.New(slog.DiscardHandler),
+		dir,
+		cm.PrimaryChain(),
+		batches,
+	)
+	require.Error(t, err, "a block body altered under an intact header "+
+		"must be rejected")
+	var validationErr *lcommon.ValidationError
+	require.ErrorAs(t, err, &validationErr)
+	assert.Equal(t, lcommon.ValidationErrorTypeBodyHash, validationErr.Type)
+}
+
+// CopyImmutableBlocks follows the storage-mode rule of the bulk copy: Core
+// resolution never reads produced-UTxO offsets, so only API mode stores them.
+func TestCopyImmutableBlocksStoresUtxoOffsetsOnlyInAPIMode(t *testing.T) {
+	t.Parallel()
+
+	imm, err := immutable.New(filepath.Join(
+		"..", "..", "database", "immutable", "testdata",
+	))
+	require.NoError(t, err)
+	iter, err := imm.BlocksFromPoint(ocommon.Point{})
+	require.NoError(t, err)
+	defer iter.Close()
+
+	var blocks []immutable.Block
+	var txHash []byte
+	var outputIdx uint32
+	for range 10_000 {
+		block, err := iter.Next()
+		require.NoError(t, err)
+		if block == nil {
+			break
+		}
+		blocks = append(blocks, *block)
+		if block.IsEbb {
+			continue
+		}
+		decoded, err := gledger.NewBlockFromCbor(
+			block.Type,
+			block.Cbor,
+			lcommon.VerifyConfig{SkipBodyHashValidation: true},
+		)
+		require.NoError(t, err)
+		for _, tx := range decoded.Transactions() {
+			if produced := tx.Produced(); len(produced) > 0 {
+				txHash = bytes.Clone(tx.Hash().Bytes())
+				outputIdx = produced[0].Id.Index()
+				break
+			}
+		}
+		if len(txHash) > 0 {
+			break
+		}
+	}
+	require.NotEmpty(t, txHash, "fixture has no produced UTxO")
+
+	for _, mode := range []string{types.StorageModeCore, types.StorageModeAPI} {
+		t.Run(mode, func(t *testing.T) {
+			t.Parallel()
+			db, err := dbtest.NewDatabase(t, &database.Config{
+				Logger:      slog.New(slog.DiscardHandler),
+				StorageMode: mode,
+			})
+			require.NoError(t, err)
+			t.Cleanup(func() {
+				dbtest.CloseDatabase(db) //nolint:errcheck
+			})
+			cm, err := chain.NewManager(t.Context(), db, nil)
+			require.NoError(t, err)
+
+			copied, err := CopyImmutableBlocks(
+				t.Context(), cm.PrimaryChain(), blocks,
+			)
+			require.NoError(t, err)
+			require.Equal(t, len(blocks), copied)
+
+			blobTxn := db.BlobTxn(false)
+			defer blobTxn.Rollback() //nolint:errcheck
+			_, err = db.Blob().GetUtxo(blobTxn.Blob(), txHash, outputIdx)
+			if mode == types.StorageModeCore {
+				require.ErrorIs(t, err, types.ErrBlobKeyNotFound)
+			} else {
+				require.NoError(t, err)
+			}
+		})
 	}
 }

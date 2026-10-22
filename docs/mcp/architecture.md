@@ -57,6 +57,7 @@ api/mcp/
 ### 2.3 Security & Guardrails (`security.go`, `sanitize.go`)
 - **Bearer Authentication**: Optional shared secret token configured via `DINGO_PLUGINS_API_MCP_CONFIG_AUTH_TOKEN` or YAML `plugins.api.mcp.config.authToken`.
 - **Rate Limiting**: Thread-safe token bucket rate limiter (default: 60 requests/sec with burst capacity of 15) keyed per client IP address. Pre-authentication state is capped at 4096 identities and one timer removes entries after 30 idle minutes.
+- **Session Admission**: Streamable HTTP and legacy SSE share a 128-session cap, with at most eight sessions per client address. New sessions fail with HTTP 429 when either cap is full. Sessions close after five idle minutes, after one hour of total lifetime, or during server shutdown.
 - **Strict Read-Only SQL Validator**:
   - Identifies the main statement after CTE definitions, accounting for comments, quoted data and nested expressions; permits SELECT/VALUES reads and EXPLAIN without executing DDL or DML.
   - Enforces single-statement execution (blocks `;` statement chaining).
@@ -77,6 +78,14 @@ The server exposes 21 specialized tools categorized into SQLite introspection (3
 | `sqlite_query` | Execute read-only SQL queries with pagination and Markdown formatting | `query` (string), `limit` (int, default 50, capped by configured maxRows and 200), `offset` (int) |
 | `sqlite_explain` | Analyze query execution plans via `EXPLAIN QUERY PLAN` | `query` (string) |
 | `sqlite_table_schema` | Inspect table DDL, column types, nullability, and indices | `table_name` (string) |
+
+The three SQL tools and `get_asset_info` share four execution slots and fail
+immediately when all slots are occupied. While the metadata SQLite `-wal` file
+exceeds 128 MiB, every tool call and resource read fails until the WAL is back
+under that size, so MCP reads cannot hold the snapshot that blocks the periodic
+TRUNCATE checkpoint. SQLite rejects values over 64 KiB and result sets over 32
+columns before Go materializes them; `sqlite_query` stops after 1 MiB of decoded
+cell data.
 
 ### 3.2 Cardano Domain Tools (`tools_cardano.go`, `tools_cardano_extended.go`)
 
@@ -227,8 +236,10 @@ handling. Only same-origin on loopback or explicitly allowed origins pass; the s
 wildcard is ignored for MCP. Native clients without Origin remain supported.
 `DINGO_MCP_AUTH_TOKEN` is a compatibility alias below the canonical plugin
 environment setting in precedence. HTTP has no absolute write deadline because
-SSE responses span client sessions. The limiter's idle-expiry timer reclaims
-entries even when no requests arrive and is stopped when its server shuts down.
+SSE responses span client sessions. The session admission layer supplies the
+finite idle and lifetime bounds for both transports. The limiter's idle-expiry
+timer reclaims entries even when no requests arrive and is stopped when its
+server shuts down.
 
 ### Upstream references
 

@@ -19,6 +19,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -188,8 +189,9 @@ func (d *Database) MaxLeiosEBSlotContext(
 
 // SetLeiosEBTxs persists the complete raw transaction bodies of a Leios
 // endorser block to the blob store, keyed by the exact (slot, hash)
-// occurrence. txsRaw is the CBOR-in-CBOR wrapped tx list from leios-fetch
-// MsgBlockTxs, stored as a CBOR-encoded []cbor.RawMessage.
+// occurrence. txsRaw is the list of block_transaction CBOR values from
+// leios-fetch MsgBlockTxs after its tag-24 wrapping is removed, stored as a
+// CBOR-encoded []cbor.RawMessage.
 // Only call this when the transaction cache is complete (all txCount txs).
 // key: "et" + hash(32) + slot(8) → value: CBOR-encoded []cbor.RawMessage.
 func (d *Database) SetLeiosEBTxs(
@@ -225,8 +227,8 @@ func (d *Database) SetLeiosEBTxs(
 
 // GetLeiosEBTxs retrieves the raw transaction bodies for the exact (slot,
 // hash) occurrence named. Returns ErrBlobKeyNotFound when no txs have been
-// stored for that occurrence. The returned slice is in the same CBOR-in-CBOR
-// wrapped format used by the leios-fetch MsgBlockTxs wire message.
+// stored for that occurrence. The returned slice holds the block_transaction
+// CBOR values exactly as SetLeiosEBTxs stored them.
 //
 // On a miss it also tries the legacy key (hash only, see
 // GetLeiosEBManifest), gated on the legacy "em" record's embedded slot
@@ -274,11 +276,37 @@ func (d *Database) GetLeiosEBTxs(
 			return nil, err
 		}
 	}
-	var txsRaw []cbor.RawMessage
-	if _, err := cbor.Decode(val, &txsRaw); err != nil {
+	txsRaw, err := decodeLeiosEBTxs(val)
+	if err != nil {
 		return nil, fmt.Errorf("GetLeiosEBTxs: decode: %w", err)
 	}
 	return txsRaw, nil
+}
+
+// The blob read owns val. Retaining views of it avoids another payload copy
+// per transaction while keeping separate database reads independent.
+func decodeLeiosEBTxs(val []byte) ([]cbor.RawMessage, error) {
+	var views []leiosTxView
+	if _, err := cbor.Decode(val, &views); err != nil {
+		return nil, err
+	}
+	if views == nil {
+		return nil, nil
+	}
+	txs := make([]cbor.RawMessage, len(views))
+	for i, view := range views {
+		txs[i] = cbor.RawMessage(view)
+	}
+	return txs, nil
+}
+
+type leiosTxView []byte
+
+func (view *leiosTxView) UnmarshalCBOR(data []byte) error {
+	// Decode reads the caller-owned blob directly without reusing its buffer.
+	// Cap each view so append cannot overwrite the following transaction.
+	*view = slices.Clip(data)
+	return nil
 }
 
 // SetLeiosEB persists an endorser block's manifest and, when txsRaw is non-nil,

@@ -48,12 +48,13 @@ const (
 )
 
 type Report struct {
-	SchemaVersion string        `json:"schema_version"`
-	Scenario      string        `json:"scenario"`
-	GeneratedAt   string        `json:"generated_at"`
-	Corpus        string        `json:"corpus"`
-	Totals        Totals        `json:"totals"`
-	Scenarios     []CaseOutcome `json:"scenarios"`
+	SchemaVersion  string            `json:"version"`
+	Scenario       string            `json:"scenario"`
+	GeneratedAt    string            `json:"generated_at"`
+	Implementation map[string]string `json:"implementation"`
+	Corpus         string            `json:"corpus"`
+	Totals         Totals            `json:"totals"`
+	Scenarios      []CaseOutcome     `json:"scenarios"`
 }
 
 type Totals struct {
@@ -202,10 +203,12 @@ type protocolParametersDoc struct {
 	MaxExecutionUnitsPerTransaction exUnitsDoc `json:"max_execution_units_per_transaction"`
 	MaxExecutionUnitsPerBlock       exUnitsDoc `json:"max_execution_units_per_block"`
 	MaxValueSize                    uint       `json:"max_value_size"`
-	MaxReferenceScriptsSize         *uint64    `json:"max_reference_scripts_size"`
-	CollateralPercentage            uint       `json:"collateral_percentage"`
-	MaxCollateralInputs             uint       `json:"max_collateral_inputs"`
-	StakePoolVotingThresholds       struct {
+	// Conway fixes the per-transaction reference-script limit, so Dingo parses
+	// but does not apply this value.
+	MaxReferenceScriptsSize   *uint64 `json:"max_reference_scripts_size"`
+	CollateralPercentage      uint    `json:"collateral_percentage"`
+	MaxCollateralInputs       uint    `json:"max_collateral_inputs"`
+	StakePoolVotingThresholds struct {
 		MotionNoConfidence      ratioDoc `json:"motion_no_confidence"`
 		CommitteeNormal         ratioDoc `json:"committee_normal"`
 		CommitteeNoConfidence   ratioDoc `json:"committee_no_confidence"`
@@ -260,11 +263,12 @@ func GenerateReport(
 	sort.Strings(files)
 
 	report := Report{
-		SchemaVersion: schemaVersion,
-		Scenario:      "ledger-rules",
-		GeneratedAt:   generatedAt.UTC().Format(time.RFC3339),
-		Corpus:        "pragma-org/node-diversity-conformance/ledger-rules-v2",
-		Scenarios:     make([]CaseOutcome, 0, len(files)),
+		SchemaVersion:  schemaVersion,
+		Scenario:       "ledger-rules",
+		GeneratedAt:    generatedAt.UTC().Format(time.RFC3339),
+		Implementation: map[string]string{"name": "dingo"},
+		Corpus:         "pragma-org/node-diversity-conformance/ledger-rules-v2",
+		Scenarios:      make([]CaseOutcome, 0, len(files)),
 	}
 	failures := make([]Failure, 0)
 	type indexedResult struct {
@@ -407,7 +411,7 @@ func runFixture(
 			)
 		}
 		if transactionFailsToDecode(transactionCBOR) {
-			return CaseOutcome{ID: id, Result: "pass"}, nil, nil
+			return CaseOutcome{ID: id, Result: "DecodingFailure"}, nil, nil
 		}
 		return mismatch(id, expected, "transaction decoded successfully")
 	}
@@ -465,12 +469,6 @@ func runFixture(
 		provider,
 		pp,
 	)
-	validationErr = applyReferenceScriptSizeOverride(
-		tx,
-		provider,
-		protocolParameters.MaxReferenceScriptsSize,
-		validationErr,
-	)
 	if expected.Predicate == "" {
 		if validationErr == nil {
 			return CaseOutcome{ID: id, Result: "pass"}, nil, nil
@@ -481,84 +479,9 @@ func runFixture(
 		return mismatch(id, expected, "transaction accepted")
 	}
 	if predicateMatches(validationErr, expected) {
-		return CaseOutcome{ID: id, Result: "pass"}, nil, nil
+		return CaseOutcome{ID: id, Result: expected.Predicate}, nil, nil
 	}
 	return mismatch(id, expected, "rejected: "+validationErr.Error())
-}
-
-// Conformance fixtures can override Conway's fixed limit to exercise small
-// boundary values; this override applies only to report evaluation.
-func applyReferenceScriptSizeOverride(
-	tx common.Transaction,
-	ls common.LedgerState,
-	maxSize *uint64,
-	validationErr error,
-) error {
-	if maxSize == nil || *maxSize == conway.MaxRefScriptSizePerTx || !tx.IsValid() {
-		return validationErr
-	}
-
-	sizeError, siblings, found := splitRefScriptSizeError(validationErr)
-	var totalSize uint64
-	switch {
-	case found:
-		totalSize = sizeError.TxSize
-	case validationErr != nil:
-		return validationErr
-	default:
-		var err error
-		totalSize, err = eras.ReferencedScriptSize(tx, ls)
-		if err != nil {
-			return fmt.Errorf("calculating reference script size: %w", err)
-		}
-	}
-	if totalSize > *maxSize {
-		return errors.Join(append(
-			siblings,
-			common.RefScriptSizePerTxTooLargeError{
-				TxSize:  totalSize,
-				MaxSize: *maxSize,
-			},
-		)...)
-	}
-	return errors.Join(siblings...)
-}
-
-// splitRefScriptSizeError separates the reference-script size verdict from the
-// sibling errors ValidateTxConway joins together, so the override can replace
-// the size verdict alone and still reject a transaction that failed another
-// rule.
-func splitRefScriptSizeError(err error) (
-	common.RefScriptSizePerTxTooLargeError,
-	[]error,
-	bool,
-) {
-	if err == nil {
-		return common.RefScriptSizePerTxTooLargeError{}, nil, false
-	}
-	asSizeError := errors.AsType[common.RefScriptSizePerTxTooLargeError]
-	joined, ok := err.(interface{ Unwrap() []error })
-	if !ok {
-		if sizeError, ok := asSizeError(err); ok {
-			return sizeError, nil, true
-		}
-		return common.RefScriptSizePerTxTooLargeError{}, nil, false
-	}
-	var (
-		sizeError common.RefScriptSizePerTxTooLargeError
-		siblings  []error
-		found     bool
-	)
-	for _, child := range joined.Unwrap() {
-		matchedSizeError, ok := asSizeError(child)
-		if !found && ok {
-			sizeError = matchedSizeError
-			found = true
-			continue
-		}
-		siblings = append(siblings, child)
-	}
-	return sizeError, siblings, found
 }
 
 func transactionFailsToDecode(transactionCBOR []byte) bool {
@@ -566,11 +489,21 @@ func transactionFailsToDecode(transactionCBOR []byte) bool {
 	return err != nil
 }
 
+// unmappedLedgerResult is reported for observations that map to no NDC
+// predicate, so the scenario fails without discarding the rest of the report.
+const unmappedLedgerResult = "Unknown"
+
 func mismatch(
 	id string,
 	expected expectedDoc,
 	observed string,
 ) (CaseOutcome, *Failure, error) {
+	result, ok := observedLedgerResult(observed)
+	if !ok {
+		// An unrecognised rejection must not abort the whole report; emit a
+		// result that no NDC expectation can equal and keep the Failure.
+		result = unmappedLedgerResult
+	}
 	expectedText := "Pass"
 	if expected.DecodingFailure {
 		expectedText = "decoding_failure"
@@ -580,11 +513,55 @@ func mismatch(
 			expectedText += ":" + expected.Description
 		}
 	}
-	return CaseOutcome{ID: id, Result: "fail"}, &Failure{
+	return CaseOutcome{ID: id, Result: result}, &Failure{
 		ID:       id,
 		Expected: expectedText,
 		Observed: observed,
 	}, nil
+}
+
+// observedLedgerResult emits the ledger outcome that NDC compares with its
+// fixture expectation.
+func observedLedgerResult(observed string) (string, bool) {
+	switch {
+	case observed == "transaction accepted" || observed == "transaction decoded successfully":
+		return "pass", true
+	case strings.HasPrefix(observed, "transaction decoding failure:"):
+		return "DecodingFailure", true
+	case strings.HasPrefix(observed, "rejected: "):
+		return ledgerPredicateFromError(strings.TrimPrefix(observed, "rejected: "))
+	default:
+		return "", false
+	}
+}
+
+func ledgerPredicateFromError(errText string) (string, bool) {
+	text := strings.ToLower(errText)
+	predicates := make([]string, 0, len(ledgerPredicateErrorPatterns))
+	for predicate := range ledgerPredicateErrorPatterns {
+		predicates = append(predicates, predicate)
+	}
+	sort.Strings(predicates)
+
+	var result string
+	bestPatternLength := 0
+	for _, predicate := range predicates {
+		reportResult := predicate
+		if separator := strings.IndexByte(reportResult, ':'); separator >= 0 {
+			reportResult = reportResult[:separator]
+		}
+		if listed, ok := ndcPredicateAliases[reportResult]; ok {
+			reportResult = listed
+		}
+		for _, pattern := range ledgerPredicateErrorPatterns[predicate] {
+			pattern = strings.ToLower(pattern)
+			if len(pattern) > bestPatternLength && strings.Contains(text, pattern) {
+				result = reportResult
+				bestPatternLength = len(pattern)
+			}
+		}
+	}
+	return result, result != ""
 }
 
 func parseExpected(raw json.RawMessage) (expectedDoc, error) {
@@ -620,12 +597,29 @@ func predicateMatches(err error, expected expectedDoc) bool {
 	if !ok {
 		patterns = []string{predicate}
 	}
+	for alias, listed := range ndcPredicateAliases {
+		if listed == predicate {
+			patterns = append(slices.Clone(patterns), ledgerPredicateErrorPatterns[alias]...)
+		}
+	}
 	for _, pattern := range patterns {
 		if strings.Contains(text, strings.ToLower(pattern)) {
 			return true
 		}
 	}
 	return false
+}
+
+// ndcPredicateAliases names the listed predicate that reports a Dingo rule
+// which the scenario's closed predicate list lacks. The scenario asks each
+// implementation to map its own failures onto that list. Only the report is
+// affected: the validator still raises the distinct rule.
+//
+// UnelectedCommitteeVoters, raised for a committee hot credential whose cold
+// credential holds no seat, is reported as VotersDoNotExist, the listed
+// predicate for a vote cast by a voter that cannot vote.
+var ndcPredicateAliases = map[string]string{
+	"UnelectedCommitteeVoters": "VotersDoNotExist",
 }
 
 var ledgerPredicateErrorPatterns = map[string][]string{
@@ -760,7 +754,6 @@ var ledgerPredicateErrorPatterns = map[string][]string{
 	"ValueNotConservedUTxO": {"value not conserved"},
 	"VotersDoNotExist": {
 		"vote cast by unknown voter",
-		"committee voter is not elected",
 	},
 	"UnelectedCommitteeVoters": {
 		"committee voter is not elected",

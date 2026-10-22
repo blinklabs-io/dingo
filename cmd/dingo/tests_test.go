@@ -270,6 +270,15 @@ func TestMithrilBackendWhitelistParity(t *testing.T) {
 	)
 }
 
+// TestResolveMithrilBackendRejectsV1 pins the removed backend's error.
+func TestResolveMithrilBackendRejectsV1(t *testing.T) {
+	t.Parallel()
+
+	_, err := resolveMithrilBackend("v1")
+	require.Error(t, err)
+	require.ErrorContains(t, err, "no longer supported")
+}
+
 // assertWhitelistParity verifies that configList (the values
 // internal/config accepts) and canonical (the downstream parser's
 // contract) describe the same set, and that both are actually accepted

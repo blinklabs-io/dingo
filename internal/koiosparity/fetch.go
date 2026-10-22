@@ -708,6 +708,67 @@ func FetchEpochWithPools(
 	)
 }
 
+// poolHistoryFetchState retains completed pool-history requests while a caller
+// retries one epoch. A nil row records a successful request for a pool that had
+// no history in the epoch, so it is not requested again either.
+type poolHistoryFetchState struct {
+	mu      sync.Mutex
+	results map[string]*KoiosPoolEpoch
+}
+
+func newPoolHistoryFetchState() *poolHistoryFetchState {
+	return &poolHistoryFetchState{
+		results: make(map[string]*KoiosPoolEpoch),
+	}
+}
+
+func (s *poolHistoryFetchState) pending(
+	poolIDs []string,
+) ([]string, int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	pending := make([]string, 0, len(poolIDs))
+	completed := 0
+	for _, poolID := range poolIDs {
+		if _, ok := s.results[poolID]; ok {
+			completed++
+			continue
+		}
+		pending = append(pending, poolID)
+	}
+	return pending, completed
+}
+
+func (s *poolHistoryFetchState) store(
+	poolID string,
+	row *KoiosPoolEpoch,
+) {
+	s.mu.Lock()
+	s.results[poolID] = row
+	s.mu.Unlock()
+}
+
+func (s *poolHistoryFetchState) rows(
+	poolIDs []string,
+) ([]KoiosPoolEpoch, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rows := make([]KoiosPoolEpoch, 0, len(s.results))
+	for _, poolID := range poolIDs {
+		row, ok := s.results[poolID]
+		if !ok {
+			return nil, fmt.Errorf(
+				"pool %s history has no completed result",
+				poolID,
+			)
+		}
+		if row != nil {
+			rows = append(rows, *row)
+		}
+	}
+	return rows, nil
+}
+
 // resolvePoolUniverse fetches the full historical pool ID list and each
 // pool's true first-active epoch — the two requests every fetchEpoch call
 // needs beyond the target epoch's own history. Factored out so callers that
@@ -745,6 +806,33 @@ func fetchEpoch(
 	firstActiveEpochs map[string]uint64,
 	logger *slog.Logger,
 ) (int, error) {
+	return fetchEpochWithPoolState(
+		ctx,
+		koios,
+		cache,
+		network,
+		epoch,
+		poolIDs,
+		firstActiveEpochs,
+		logger,
+		newPoolHistoryFetchState(),
+	)
+}
+
+func fetchEpochWithPoolState(
+	ctx context.Context,
+	koios *KoiosClient,
+	cache *Cache,
+	network string,
+	epoch uint64,
+	poolIDs []string,
+	firstActiveEpochs map[string]uint64,
+	logger *slog.Logger,
+	poolState *poolHistoryFetchState,
+) (int, error) {
+	if poolState == nil {
+		poolState = newPoolHistoryFetchState()
+	}
 	// 1. Fetch epoch info (not written yet).
 	info, err := koios.GetEpochInfo(ctx, epoch)
 	if err != nil {
@@ -885,10 +973,8 @@ func fetchEpoch(
 	// Pool rows are accumulated in memory and written atomically at the end so
 	// that a force-refresh or partial failure cannot leave a mixed old+new set
 	// in the cache for this epoch.
-	var poolRows []KoiosPoolEpoch
 	poolSem := make(chan struct{}, 5)
 	var poolWg sync.WaitGroup
-	var poolMu sync.Mutex
 	// poolErrMu guards poolErr. A mutex (rather than a buffered channel) is
 	// used so a permanent error can never be lost to a same-instant transient
 	// one: whichever goroutine takes the lock next always applies the "a
@@ -896,7 +982,9 @@ func fetchEpoch(
 	// buffer slot.
 	var poolErrMu sync.Mutex
 	var poolErr error
+	pendingPoolIDs, completedPools := poolState.pending(activePoolIDs)
 	var poolsDone atomic.Int64
+	poolsDone.Store(int64(completedPools))
 	poolTotal := len(activePoolIDs)
 
 	// poolCtx is cancelled the moment any pool request hits a permanent
@@ -936,7 +1024,7 @@ func fetchEpoch(
 	// An early return here would let running goroutines race poolRows after
 	// the caller proceeds.
 outer:
-	for _, poolID := range activePoolIDs {
+	for _, poolID := range pendingPoolIDs {
 		select {
 		case <-poolCtx.Done():
 			break outer
@@ -947,7 +1035,6 @@ outer:
 		go func(id string) {
 			defer poolWg.Done()
 			defer func() { <-poolSem }()
-			defer poolsDone.Add(1)
 
 			item, histErr := koios.GetPoolEpochHistory(poolCtx, id, epoch)
 			if histErr != nil {
@@ -969,15 +1056,14 @@ outer:
 				return
 			}
 			if item == nil {
+				poolState.store(id, nil)
+				poolsDone.Add(1)
 				return // Pool wasn't active this epoch.
 			}
 
-			poolMu.Lock()
-			poolRows = append(
-				poolRows,
-				PoolEpochFromKoiosHistoryItem(network, epoch, id, item, now),
-			)
-			poolMu.Unlock()
+			row := PoolEpochFromKoiosHistoryItem(network, epoch, id, item, now)
+			poolState.store(id, &row)
+			poolsDone.Add(1)
 		}(poolID)
 	}
 
@@ -995,6 +1081,10 @@ outer:
 	poolErrMu.Unlock()
 	if err != nil {
 		return 0, classifyFetchErr(err)
+	}
+	poolRows, err := poolState.rows(activePoolIDs)
+	if err != nil {
+		return 0, err
 	}
 
 	// 3. Commit pool rows and epoch info atomically.

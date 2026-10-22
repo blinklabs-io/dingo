@@ -300,7 +300,7 @@ func (d *LedgerDelta) applyWithDonationRecording(
 			}
 			opts := database.BatchedTxIngestOpts{
 				SkipConsumedInputRecovery:      d.skipConsumedInputRecovery,
-				TrustedImmutableReplay:         ls.config.TrustedReplay,
+				TrustedImmutableReplay:         ls.trustedReplayActive(),
 				LedgerContextSlot:              d.closureContextSlot,
 				StrictAppliedInputConservation: d.strictConsumedInputs,
 				SkipWithdrawalWitnessWrite:     !ls.config.DelegatorInactivityEnabled,
@@ -719,10 +719,12 @@ func (b *LedgerDeltaBatch) apply(
 	ls *LedgerState,
 	txn *database.Txn,
 ) error {
-	// API mode batches without the flag. Other storage modes batch only when
-	// ApplyRowBatchingEnabled is set; the stored state is the same either way.
+	// API mode and ApplyTrustedBatch batch without the flag. Other storage
+	// modes batch only when ApplyRowBatchingEnabled is set; the stored state
+	// is the same either way.
 	if ls.db.StorageMode() != types.StorageModeAPI &&
-		!ls.config.ApplyRowBatchingEnabled {
+		!ls.config.ApplyRowBatchingEnabled &&
+		!ls.externalIngest.trusted.Load() {
 		return b.applyUnbatched(ctx, ls, txn)
 	}
 	// The accumulator path does not implement Leios closure context or its

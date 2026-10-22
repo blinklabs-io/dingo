@@ -630,27 +630,20 @@ func (s *queryServiceServer) SearchUtxos(
 		AssetName:         assetName,
 	}
 
-	utxos, err := s.utxorpc.config.LedgerState.UtxosByAddressWithOrdering(utxoQ)
+	page, err := s.utxorpc.config.LedgerState.UtxosByAddressBoundedPage(
+		ctx,
+		utxoQ,
+		int(maxAllowed)+1,
+		s.utxorpc.config.MaxResponseBytes,
+	)
 	if err != nil {
 		return nil, err
 	}
 
 	pageCap := int(effectiveMax)
-	hasMore := len(utxos) > pageCap
-	if hasMore {
-		utxos = utxos[:pageCap]
-	}
-	budget := byteBudget{limit: s.utxorpc.config.MaxResponseBytes}
+	utxos, cursor := trimSearchUtxoPage(page, pageCap)
 	items := make([]*query.AnyUtxoData, 0, len(utxos))
 	for i := range utxos {
-		if !budget.fits(len(utxos[i].Cbor)) {
-			// Truncate the page here; the token below resumes after the
-			// last item that fit.
-			utxos = utxos[:i]
-			hasMore = true
-			break
-		}
-		budget.add(len(utxos[i].Cbor))
 		aud, err := searchUtxoModelToAnyData(&utxos[i])
 		if err != nil {
 			return nil, err
@@ -658,19 +651,33 @@ func (s *queryServiceServer) SearchUtxos(
 		items = append(items, aud)
 	}
 	resp.Items = items
-	if hasMore && len(utxos) > 0 {
-		last := utxos[len(utxos)-1]
+	if cursor != nil {
 		resp.NextToken = fmt.Sprintf(
 			"%d:%d:%d:%x",
-			last.TxSlot,
-			last.TxBlockIndex,
-			last.OutputIdx,
-			last.TxId,
+			cursor.Slot,
+			cursor.BlockIndex,
+			cursor.OutputIdx,
+			cursor.TxId,
 		)
 	}
 
 	resp.LedgerTip = s.searchUtxosLedgerTip()
 	return connect.NewResponse(resp), nil
+}
+
+func trimSearchUtxoPage(
+	page models.UtxoAddressPage,
+	pageCap int,
+) ([]models.UtxoWithOrdering, *models.UtxoOrderingCursor) {
+	if len(page.Utxos) <= pageCap {
+		return page.Utxos, page.Next
+	}
+	utxos := page.Utxos[:pageCap]
+	last := utxos[len(utxos)-1]
+	return utxos, &models.UtxoOrderingCursor{
+		Slot: last.TxSlot, BlockIndex: last.TxBlockIndex,
+		OutputIdx: last.OutputIdx, TxId: last.TxId,
+	}
 }
 
 // ReadData
@@ -770,10 +777,10 @@ func (s *queryServiceServer) ReadTx(
 ) (*connect.Response[query.ReadTxResponse], error) {
 	hash := req.Msg.GetHash()
 
-	if len(hash) == 0 {
+	if len(hash) != 32 {
 		return nil, connect.NewError(
 			connect.CodeInvalidArgument,
-			errors.New("hash is required"),
+			errors.New("transaction hash must be 32 bytes"),
 		)
 	}
 	s.utxorpc.config.Logger.Info(
@@ -789,7 +796,7 @@ func (s *queryServiceServer) ReadTx(
 	if txRecord == nil {
 		return nil, connect.NewError(
 			connect.CodeNotFound,
-			fmt.Errorf("transaction not found: %x", hash),
+			errors.New("transaction not found"),
 		)
 	}
 
@@ -808,15 +815,13 @@ func (s *queryServiceServer) ReadTx(
 		return nil, fmt.Errorf("lookup block: %w", err)
 	}
 
-	// Decode the block CBOR into a ledger block.
-	ledgerBlock, err := models.DecodeBlockCbor(block.Type, block.Cbor)
+	transactions, err := s.utxorpc.config.LedgerState.BlockTransactions(ctx, block)
 	if err != nil {
-		return nil, fmt.Errorf("decode block: %w", err)
+		return nil, fmt.Errorf("get block transactions: %w", err)
 	}
 
 	// Find the transaction by index first, then fall back to a hash scan.
 	var tx lcommon.Transaction
-	transactions := ledgerBlock.Transactions()
 	if int(txRecord.BlockIndex) < len(transactions) {
 		value := transactions[txRecord.BlockIndex]
 		if bytes.Equal(value.Hash().Bytes(), hash) {

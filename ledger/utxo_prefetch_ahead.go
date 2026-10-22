@@ -19,6 +19,7 @@ import (
 	"sync"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/utxoref"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -234,4 +235,21 @@ func withAheadUtxos(
 func aheadUtxosFrom(ctx context.Context) map[utxoref.Key]lcommon.Utxo {
 	utxos, _ := ctx.Value(aheadUtxosKey{}).(map[utxoref.Key]lcommon.Utxo)
 	return utxos
+}
+
+// chunkValidatedBlocks reports, for each block of a block-apply chunk, whether
+// it is validated: shouldValidate says so for its slot and it precedes the end
+// of the chunk's epoch, where the apply loop stops for the rollover.
+func chunkValidatedBlocks(
+	chunk []ledger.Block,
+	epoch models.Epoch,
+	shouldValidate func(slot uint64) bool,
+) []bool {
+	epochEndSlot := epoch.StartSlot + uint64(epoch.LengthInSlots)
+	validated := make([]bool, len(chunk))
+	for k, blk := range chunk {
+		validated[k] = shouldValidate(blk.SlotNumber()) &&
+			blk.SlotNumber() < epochEndSlot
+	}
+	return validated
 }

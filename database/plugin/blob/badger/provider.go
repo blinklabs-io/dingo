@@ -34,9 +34,10 @@ type Config struct {
 	BlockCacheSize   *uint64 `yaml:"blockCacheSize"`
 	IndexCacheSize   *uint64 `yaml:"indexCacheSize"`
 	ValueLogFileSize uint64  `yaml:"valueLogFileSize"`
-	MemTableSize     uint64  `yaml:"memTableSize"`
-	ValueThreshold   *uint64 `yaml:"valueThreshold"`
-	GC               *bool   `yaml:"gc"`
+	// MemTableSize overrides the run-mode default. Zero selects the default.
+	MemTableSize   uint64  `yaml:"memTableSize"`
+	ValueThreshold *uint64 `yaml:"valueThreshold"`
+	GC             *bool   `yaml:"gc"`
 	// GCInterval is how often value-log GC runs, such as "5m". Zero uses
 	// DefaultGCInterval.
 	GCInterval time.Duration `yaml:"gcInterval"`
@@ -50,9 +51,18 @@ type Config struct {
 func defaultConfig() Config {
 	return Config{
 		ValueLogFileSize: DefaultValueLogFileSize,
-		MemTableSize:     DefaultMemTableSize,
 		CompressionLevel: DefaultCompressionLevel,
 	}
+}
+
+func resolvedMemTableSize(configured uint64, deps blob.ProviderDependencies) uint64 {
+	if configured != 0 {
+		return configured
+	}
+	if deps.StorageMode == "core" && deps.RunMode == "sync" {
+		return DefaultCoreSyncMemTableSize
+	}
+	return DefaultMemTableSize
 }
 
 // RegisterProvider registers the Badger blob provider with host.
@@ -91,6 +101,9 @@ func RegisterProvider(host *hostplugin.Host) error {
 			if deps.StorageMode == "core" && deps.RunMode == "sync" {
 				valueThreshold = DefaultCoreSyncValueThreshold
 			}
+			if deps.StorageMode == "core" && deps.RunMode == "leios" {
+				valueThreshold = DefaultCoreLeiosValueThreshold
+			}
 			if cfg.ValueThreshold != nil {
 				valueThreshold = *cfg.ValueThreshold
 			}
@@ -108,6 +121,7 @@ func RegisterProvider(host *hostplugin.Host) error {
 			if cfg.GCDiscardRatio != nil {
 				gcDiscardRatio = *cfg.GCDiscardRatio
 			}
+			memTableSize := resolvedMemTableSize(cfg.MemTableSize, deps)
 			store, err := New(
 				WithDataDir(dataDir),
 				WithLogger(deps.Logger),
@@ -120,7 +134,7 @@ func RegisterProvider(host *hostplugin.Host) error {
 				),
 				// #nosec G115 -- values are capped to the destination maximum.
 				WithMemTableSize(
-					int64(min(cfg.MemTableSize, uint64(math.MaxInt64))),
+					int64(min(memTableSize, uint64(math.MaxInt64))),
 				),
 				// #nosec G115 -- values are capped to the destination maximum.
 				WithValueThreshold(

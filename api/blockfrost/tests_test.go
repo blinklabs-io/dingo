@@ -824,7 +824,7 @@ func TestPredefinedDRepAmountIncludesActiveProposalDeposit(t *testing.T) {
 	)
 
 	drepType := models.DrepTypeAlwaysNoConfidence
-	info, err := adapter.DRep(DRepCredential{
+	info, err := adapter.DRep(context.Background(), DRepCredential{
 		ID:         "drep_always_no_confidence",
 		Predefined: &drepType,
 	})
@@ -1613,7 +1613,7 @@ func TestProtocolParamsForSlot_ByronEraSentinel(t *testing.T) {
 
 	adapter, _, _ := newDBBackedAdapter(t)
 
-	pparams, err := adapter.protocolParamsForSlot(0)
+	pparams, err := adapter.protocolParamsForSlot(context.Background(), 0)
 
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrProtocolParamsUnavailable)
@@ -1830,7 +1830,7 @@ VALUES (?, ?, ?, ?)`,
 	)
 	require.NoError(t, err)
 
-	pparams, err := adapter.protocolParamsForSlot(50)
+	pparams, err := adapter.protocolParamsForSlot(context.Background(), 50)
 
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrProtocolParamsUnavailable)
@@ -2010,7 +2010,9 @@ func TestTransactionBodyReadDeadline(t *testing.T) {
 		t.Run(route.path, func(t *testing.T) {
 			for _, mode := range []string{"complete", "truncated", "stalled"} {
 				t.Run(mode, func(t *testing.T) {
-					b := New(BlockfrostConfig{}, &mockNode{}, nil)
+					b := New(BlockfrostConfig{
+						AuthToken: testMutationAuthToken,
+					}, &mockNode{}, nil)
 					b.requestBodyTimeout = 100 * time.Millisecond
 					server := httptest.NewServer(b.handler())
 					defer server.Close()
@@ -2028,9 +2030,10 @@ func TestTransactionBodyReadDeadline(t *testing.T) {
 					}
 					_, err = fmt.Fprintf(
 						conn,
-						"POST %s HTTP/1.1\r\nHost: localhost\r\nContent-Type: %s\r\nContent-Length: %d\r\n\r\n%s",
+						"POST %s HTTP/1.1\r\nHost: localhost\r\nContent-Type: %s\r\nproject_id: %s\r\nContent-Length: %d\r\n\r\n%s",
 						route.path,
 						route.contentType,
+						testMutationAuthToken,
 						length,
 						route.body,
 					)

@@ -107,7 +107,7 @@ type eventStore interface {
 // (start_block, start_tx_index), ordered by (block_number, tx_index)
 // ascending and capped at utxo_capacity rows.
 func (s *service) GetAssetCreates(
-	_ context.Context,
+	ctx context.Context,
 	req *midnight.AssetCreatesRequest,
 ) (*midnight.AssetCreatesResponse, error) {
 	if s.metadata == nil {
@@ -116,11 +116,16 @@ func (s *service) GetAssetCreates(
 			"method GetAssetCreates not implemented",
 		)
 	}
+	txn := s.metadata.ReadTransaction(ctx)
+	if txn == nil {
+		return nil, s.internalError("open asset creates query", types.ErrNilTxn)
+	}
+	defer txn.Rollback() //nolint:errcheck
 	rows, err := s.metadata.FindMidnightAssetCreatesFrom(
 		uint64(req.GetStartBlock()),
 		req.GetStartTxIndex(),
 		effectivePageSize(req.GetUtxoCapacity()),
-		nil,
+		txn,
 	)
 	if err != nil {
 		return nil, s.internalError("query asset creates", err)
@@ -140,7 +145,7 @@ func (s *service) GetAssetCreates(
 // (start_block, start_tx_index), ordered by (block_number, tx_index)
 // ascending and capped at utxo_capacity rows.
 func (s *service) GetAssetSpends(
-	_ context.Context,
+	ctx context.Context,
 	req *midnight.AssetSpendsRequest,
 ) (*midnight.AssetSpendsResponse, error) {
 	if s.metadata == nil {
@@ -149,11 +154,16 @@ func (s *service) GetAssetSpends(
 			"method GetAssetSpends not implemented",
 		)
 	}
+	txn := s.metadata.ReadTransaction(ctx)
+	if txn == nil {
+		return nil, s.internalError("open asset spends query", types.ErrNilTxn)
+	}
+	defer txn.Rollback() //nolint:errcheck
 	rows, err := s.metadata.FindMidnightAssetSpendsFrom(
 		uint64(req.GetStartBlock()),
 		req.GetStartTxIndex(),
 		effectivePageSize(req.GetUtxoCapacity()),
-		nil,
+		txn,
 	)
 	if err != nil {
 		return nil, s.internalError("query asset spends", err)
@@ -173,7 +183,7 @@ func (s *service) GetAssetSpends(
 // after (start_block, start_tx_index), ordered by (block_number, tx_index)
 // ascending and capped at utxo_capacity rows.
 func (s *service) GetRegistrations(
-	_ context.Context,
+	ctx context.Context,
 	req *midnight.RegistrationsRequest,
 ) (*midnight.RegistrationsResponse, error) {
 	if s.metadata == nil {
@@ -182,11 +192,16 @@ func (s *service) GetRegistrations(
 			"method GetRegistrations not implemented",
 		)
 	}
+	txn := s.metadata.ReadTransaction(ctx)
+	if txn == nil {
+		return nil, s.internalError("open registrations query", types.ErrNilTxn)
+	}
+	defer txn.Rollback() //nolint:errcheck
 	rows, err := s.metadata.FindMidnightRegistrationsFrom(
 		uint64(req.GetStartBlock()),
 		req.GetStartTxIndex(),
 		effectivePageSize(req.GetUtxoCapacity()),
-		nil,
+		txn,
 	)
 	if err != nil {
 		return nil, s.internalError("query registrations", err)
@@ -206,7 +221,7 @@ func (s *service) GetRegistrations(
 // strictly after (start_block, start_tx_index), ordered by (block_number,
 // tx_index) ascending and capped at utxo_capacity rows.
 func (s *service) GetDeregistrations(
-	_ context.Context,
+	ctx context.Context,
 	req *midnight.DeregistrationsRequest,
 ) (*midnight.DeregistrationsResponse, error) {
 	if s.metadata == nil {
@@ -215,11 +230,16 @@ func (s *service) GetDeregistrations(
 			"method GetDeregistrations not implemented",
 		)
 	}
+	txn := s.metadata.ReadTransaction(ctx)
+	if txn == nil {
+		return nil, s.internalError("open deregistrations query", types.ErrNilTxn)
+	}
+	defer txn.Rollback() //nolint:errcheck
 	rows, err := s.metadata.FindMidnightDeregistrationsFrom(
 		uint64(req.GetStartBlock()),
 		req.GetStartTxIndex(),
 		effectivePageSize(req.GetUtxoCapacity()),
-		nil,
+		txn,
 	)
 	if err != nil {
 		return nil, s.internalError("query deregistrations", err)
@@ -286,6 +306,9 @@ func (s *service) GetUtxoEvents(
 	// most recently committed, so the four reads could straddle a block
 	// commit and disagree on "as of" which block/tx they cover.
 	txn := s.metadata.ReadTransaction(ctx)
+	if txn == nil {
+		return nil, s.internalError("open UTxO events query", types.ErrNilTxn)
+	}
 	defer txn.Rollback() //nolint:errcheck
 
 	creates, err := s.metadata.FindMidnightAssetCreatesFrom(

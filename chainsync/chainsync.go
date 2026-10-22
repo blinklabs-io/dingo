@@ -23,6 +23,7 @@ import (
 	"net"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
@@ -169,6 +170,10 @@ type TrackedClient struct {
 	blockfetchThroughputSamples uint64
 	// Patience is the client's Genesis Limit on Patience bucket.
 	Patience PatienceState
+	// ingestHeld marks a client that existed while network ingest was
+	// held. Its cursor ran ahead of the chain with its headers dropped, so
+	// it stays held until the connection closes.
+	ingestHeld bool
 }
 
 // Config holds configuration for the chainsync State.
@@ -232,14 +237,15 @@ type ChainProvider interface {
 // before cross-peer deduplication may suppress it. It carries enough context
 // for fork resolution to reconstruct a peer's candidate fragment later.
 type ObservedHeader struct {
-	ConnectionId ouroboros.ConnectionId
-	BlockHeader  gledger.BlockHeader
-	ArrivalTime  time.Time
-	Point        ocommon.Point
-	Tip          ochainsync.Tip
-	BlockNumber  uint64
-	Type         uint
-	Rollback     bool
+	ConnectionId                       ouroboros.ConnectionId
+	BlockHeader                        gledger.BlockHeader
+	HeaderCryptoVerificationGeneration uint64
+	ArrivalTime                        time.Time
+	Point                              ocommon.Point
+	Tip                                ochainsync.Tip
+	BlockNumber                        uint64
+	Type                               uint
+	Rollback                           bool
 }
 
 // State manages chainsync client connections and header
@@ -261,6 +267,11 @@ type State struct {
 	// roundRobinIndex is the rotation cursor for the round-robin header-sync
 	// strategy. Guarded by clientConnIdMutex.
 	roundRobinIndex uint64
+	// ingestHeld marks every client tracked while network ingest is held.
+	// Guarded by clientConnIdMutex. ingestHeldClients counts the marked
+	// clients so the unheld hot path reads one atomic and takes no lock.
+	ingestHeld        bool
+	ingestHeldClients atomic.Int64
 
 	// Header deduplication: maps slot -> list of distinct
 	// block hashes seen at that slot
@@ -626,6 +637,9 @@ func (s *State) removeClientConnId(
 	wasPrimary := s.activeClientConnId != nil &&
 		*s.activeClientConnId == connId
 	wasEligible := exists && tc != nil && !tc.ObservabilityOnly
+	if exists && tc != nil && tc.ingestHeld {
+		s.ingestHeldClients.Add(-1)
+	}
 	delete(s.trackedClients, connId)
 	peer, connectionID := blockfetchLatencyMetricLabels(connId)
 	s.blockfetchLatencyGauge.DeleteLabelValues(peer, connectionID)
@@ -678,7 +692,14 @@ func (s *State) addTrackedClientLocked(
 	observabilityOnly bool,
 	startedAsOutbound bool,
 ) *ClientAddedEvent {
+	if old := s.trackedClients[connId]; old != nil && old.ingestHeld {
+		s.ingestHeldClients.Add(-1)
+	}
+	if s.ingestHeld {
+		s.ingestHeldClients.Add(1)
+	}
 	s.trackedClients[connId] = &TrackedClient{
+		ingestHeld:        s.ingestHeld,
 		ConnId:            connId,
 		Status:            ClientStatusSyncing,
 		ObservabilityOnly: observabilityOnly,
@@ -905,6 +926,9 @@ func (s *State) SetClientObservabilityOnly(
 		if !exists {
 			return false
 		}
+		if !observabilityOnly && tc.Status == ClientStatusFailed {
+			return false
+		}
 		if tc.ObservabilityOnly == observabilityOnly {
 			return true
 		}
@@ -1048,6 +1072,83 @@ func (s *State) AdmitClientTip(
 	return true
 }
 
+// RecordHeldClientTip records the tip a tracked client reported while network
+// ingest is held. It moves neither the admitted cursor nor the delivery
+// watermark, since the header itself was dropped, but it refreshes the stall
+// clock: the peer is delivering. It reports whether the client is tracked.
+func (s *State) RecordHeldClientTip(
+	connId ouroboros.ConnectionId,
+	tip ochainsync.Tip,
+) bool {
+	s.clientConnIdMutex.Lock()
+	defer s.clientConnIdMutex.Unlock()
+	tc, exists := s.trackedClients[connId]
+	if !exists {
+		return false
+	}
+	tip.Point.Hash = cloneBytes(tip.Point.Hash)
+	tc.Tip = tip
+	tc.LastActivity = s.now()
+	if tc.Status == ClientStatusStalled {
+		tc.Status = ClientStatusSyncing
+	}
+	return true
+}
+
+// SetNetworkIngestHeld records that network ingest is now held or released.
+// Holding marks every tracked client, and every client tracked until the
+// release; a release stops marking new clients but leaves the marks, which
+// last until each client is removed.
+func (s *State) SetNetworkIngestHeld(held bool) {
+	s.clientConnIdMutex.Lock()
+	defer s.clientConnIdMutex.Unlock()
+	s.ingestHeld = held
+	if !held {
+		return
+	}
+	for _, tc := range s.trackedClients {
+		if !tc.ingestHeld {
+			tc.ingestHeld = true
+			s.ingestHeldClients.Add(1)
+		}
+	}
+}
+
+// ConnectionIngestHeld reports whether connId is a tracked client marked by
+// SetNetworkIngestHeld.
+func (s *State) ConnectionIngestHeld(connId ouroboros.ConnectionId) bool {
+	if s.ingestHeldClients.Load() == 0 {
+		return false
+	}
+	s.clientConnIdMutex.RLock()
+	defer s.clientConnIdMutex.RUnlock()
+	tc, exists := s.trackedClients[connId]
+	return exists && tc != nil && tc.ingestHeld
+}
+
+// PeerTipSlot returns the highest tip slot any tracked, ingress-eligible
+// client has reported, and false when none has reported a tip. An
+// observability-only client is excluded, so a random inbound peer cannot
+// inflate it.
+func (s *State) PeerTipSlot() (uint64, bool) {
+	s.clientConnIdMutex.RLock()
+	defer s.clientConnIdMutex.RUnlock()
+	var (
+		best  uint64
+		found bool
+	)
+	for _, tc := range s.trackedClients {
+		if tc.ObservabilityOnly || len(tc.Tip.Point.Hash) == 0 {
+			continue
+		}
+		if !found || tc.Tip.Point.Slot > best {
+			best = tc.Tip.Point.Slot
+			found = true
+		}
+	}
+	return best, found
+}
+
 // RecordClientDelivery counts a header delivered by a tracked client without
 // moving its admitted cursor or tip. A delivery refreshes the
 // stall clock only when it advances the client's delivery watermark, so replay
@@ -1101,7 +1202,9 @@ func (s *State) UpdateClientRollback(
 	setDeliveryWatermark(tc, point)
 	if !noOp {
 		tc.LastActivity = s.now()
-		tc.Status = ClientStatusSyncing
+		if tc.Status != ClientStatusFailed {
+			tc.Status = ClientStatusSyncing
+		}
 	}
 	s.resumePatienceAfterRollbackLocked(tc, point, tip, active)
 	return true
@@ -1154,7 +1257,9 @@ func (s *State) RewindTrackedClientsTo(
 			Slot: point.Slot,
 			Hash: cloneBytes(point.Hash),
 		}
-		tc.Status = ClientStatusSyncing
+		if tc.Status != ClientStatusFailed {
+			tc.Status = ClientStatusSyncing
+		}
 		tc.LastActivity = s.now()
 		ret = append(ret, connId)
 	}
@@ -1200,7 +1305,11 @@ func (s *State) RecordObservedHeader(h ObservedHeader) {
 	}
 
 	hashKey := hex.EncodeToString(h.Point.Hash)
-	if _, exists := chainHistory.byHash[hashKey]; exists {
+	if existing, exists := chainHistory.byHash[hashKey]; exists {
+		if h.HeaderCryptoVerificationGeneration != 0 {
+			existing.header.HeaderCryptoVerificationGeneration = h.HeaderCryptoVerificationGeneration
+			chainHistory.byHash[hashKey] = existing
+		}
 		return
 	}
 	h.Point.Hash = cloneBytes(h.Point.Hash)
@@ -1261,6 +1370,41 @@ func (s *State) ClearObservedHeaderHistory(
 	connId ouroboros.ConnectionId,
 ) {
 	s.clearObservedHeaderHistory(connId)
+}
+
+// ClearObservedHeaderHistoryFrom removes a rejected header and every header
+// observed after it while retaining the independently verified prefix. When
+// the rejected hash is not retained, removal starts at the first retained
+// header at or beyond the point's slot; if none exists, the history is kept.
+func (s *State) ClearObservedHeaderHistoryFrom(
+	connId ouroboros.ConnectionId,
+	point ocommon.Point,
+) {
+	s.observedHeadersMutex.Lock()
+	defer s.observedHeadersMutex.Unlock()
+
+	chainHistory := s.observedHeaders[connId]
+	if chainHistory == nil {
+		return
+	}
+	index := slices.Index(chainHistory.order, hex.EncodeToString(point.Hash))
+	if index < 0 {
+		index = slices.IndexFunc(chainHistory.order, func(hashKey string) bool {
+			record, ok := chainHistory.byHash[hashKey]
+			return ok && record.header.Point.Slot >= point.Slot
+		})
+		if index < 0 {
+			return
+		}
+	}
+	for _, hashKey := range chainHistory.order[index:] {
+		delete(chainHistory.byHash, hashKey)
+	}
+	if index == 0 {
+		delete(s.observedHeaders, connId)
+		return
+	}
+	chainHistory.order = append([]string(nil), chainHistory.order[:index]...)
 }
 
 func (s *State) updateTrackedClientTip(
@@ -1391,6 +1535,20 @@ func sameTrackedNetAddr(a, b net.Addr) bool {
 	return a.String() == b.String()
 }
 
+// MarkClientFailed excludes a tracked client until its connection is removed.
+func (s *State) MarkClientFailed(connId ouroboros.ConnectionId) bool {
+	s.clientConnIdMutex.Lock()
+	tc, exists := s.trackedClients[connId]
+	if exists {
+		tc.Status = ClientStatusFailed
+	}
+	s.clientConnIdMutex.Unlock()
+	if !exists {
+		return false
+	}
+	return s.SetClientObservabilityOnly(connId, true)
+}
+
 // MarkClientSynced marks a tracked client as synced (at chain
 // tip).
 func (s *State) MarkClientSynced(
@@ -1399,7 +1557,8 @@ func (s *State) MarkClientSynced(
 	s.clientConnIdMutex.Lock()
 	tc, exists := s.trackedClients[connId]
 	var changed bool
-	if exists && tc.Status != ClientStatusSynced {
+	if exists && tc.Status != ClientStatusSynced &&
+		tc.Status != ClientStatusFailed {
 		tc.Status = ClientStatusSynced
 		tc.LastActivity = s.now()
 		changed = true

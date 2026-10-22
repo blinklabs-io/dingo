@@ -178,3 +178,43 @@ func TestTransactionRejectsTrailingDataInEveryEra(t *testing.T) {
 		})
 	}
 }
+
+func TestDijkstraBlockTransaction(t *testing.T) {
+	t.Parallel()
+
+	encode := func(parts ...any) []byte {
+		out, err := cbor.Encode(parts)
+		require.NoError(t, err)
+		return out
+	}
+	body := map[uint]any{
+		0: cbor.Tag{Number: 258, Content: []any{}},
+		1: []any{},
+		2: uint64(1),
+	}
+	witnesses := map[uint]any{}
+
+	for _, isValid := range []bool{true, false} {
+		raw := encode(body, witnesses, nil, isValid)
+		tx, err := safedecode.DijkstraBlockTransaction(raw)
+		require.NoError(t, err)
+		require.Equal(t, isValid, tx.IsValid())
+		require.Equal(t, raw, tx.Cbor())
+	}
+
+	t.Run("rejects standalone forms", func(t *testing.T) {
+		t.Parallel()
+		for name, raw := range map[string][]byte{
+			"three elements": encode(body, witnesses, nil),
+			"mempool order":  encode(body, witnesses, true, nil),
+			"trailing bytes": append(
+				encode(body, witnesses, nil, true), 0x00,
+			),
+			"byte string":         {0x41, 0x00},
+			"validity not a bool": encode(body, witnesses, nil, uint64(1)),
+		} {
+			_, err := safedecode.DijkstraBlockTransaction(raw)
+			require.Errorf(t, err, name)
+		}
+	})
+}

@@ -16,7 +16,6 @@ package mithril
 
 import (
 	"bytes"
-	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
@@ -709,12 +708,6 @@ type NetworkConfig struct {
 	AncillaryVerificationKeyURL string
 }
 
-// ErrNoSnapshotsAvailable indicates that the aggregator responded
-// successfully but currently has no snapshots to serve.
-var ErrNoSnapshotsAvailable = errors.New(
-	"no snapshots available from aggregator",
-)
-
 // Default network configuration for each supported Cardano network. The
 // verification key URLs follow the official Mithril network configurations.
 var defaultNetworkConfigs = map[string]NetworkConfig{
@@ -838,11 +831,24 @@ func NewClient(
 	}
 	if c.httpClient == nil {
 		c.httpClient = newMithrilHTTPClient(
-			30*time.Second,
+			aggregatorRequestTimeout,
 			c.allowInsecureHTTP,
 		)
 	}
 	return c
+}
+
+// aggregatorRequestTimeout bounds each aggregator API request. Artifact
+// downloads run on their own client with no per-request timeout.
+const aggregatorRequestTimeout = 30 * time.Second
+
+// aggregatorHTTPClient shares base's transport and redirect policy with the
+// aggregator client while keeping its per-request timeout, which base (built
+// for long artifact downloads) does not carry.
+func aggregatorHTTPClient(base *http.Client) *http.Client {
+	client := *base
+	client.Timeout = aggregatorRequestTimeout
+	return &client
 }
 
 // newMithrilClient constructs a Client, applying WithAllowInsecureHTTP
@@ -915,60 +921,6 @@ func requireSecureURL(
 		return fmt.Errorf("%s IP %s is not allowed", label, ip)
 	}
 	return nil
-}
-
-// ListSnapshots retrieves the list of available snapshots from the
-// aggregator. Corresponds to GET /artifact/snapshots.
-func (c *Client) ListSnapshots(
-	ctx context.Context,
-) ([]SnapshotListItem, error) {
-	reqURL := c.aggregatorURL + "/artifact/snapshots"
-	body, err := c.doGet(ctx, reqURL)
-	if err != nil {
-		return nil, fmt.Errorf(
-			"listing snapshots: %w",
-			err,
-		)
-	}
-	defer body.Close()
-
-	var snapshots []SnapshotListItem
-	if err := json.NewDecoder(body).Decode(&snapshots); err != nil {
-		return nil, fmt.Errorf(
-			"decoding snapshot list: %w",
-			err,
-		)
-	}
-	return snapshots, nil
-}
-
-// GetSnapshot retrieves the details of a specific snapshot by its
-// digest. Corresponds to GET /artifact/snapshot/{digest}.
-func (c *Client) GetSnapshot(
-	ctx context.Context,
-	digest string,
-) (*SnapshotListItem, error) {
-	reqURL := c.aggregatorURL + "/artifact/snapshot/" +
-		url.PathEscape(digest)
-	body, err := c.doGet(ctx, reqURL)
-	if err != nil {
-		return nil, fmt.Errorf(
-			"getting snapshot %s: %w",
-			digest,
-			err,
-		)
-	}
-	defer body.Close()
-
-	var snapshot SnapshotListItem
-	if err := json.NewDecoder(body).Decode(&snapshot); err != nil {
-		return nil, fmt.Errorf(
-			"decoding snapshot %s: %w",
-			digest,
-			err,
-		)
-	}
-	return &snapshot, nil
 }
 
 // ListMithrilStakeDistributions retrieves available Mithril stake
@@ -1136,31 +1088,6 @@ func (c *Client) getCertificateWithLimit(
 	return &cert, int64(len(data)), nil
 }
 
-// GetLatestSnapshot returns the most recent snapshot from the
-// aggregator, sorted by epoch (descending) with immutable file
-// number as tie-breaker.
-func (c *Client) GetLatestSnapshot(
-	ctx context.Context,
-) (*SnapshotListItem, error) {
-	snapshots, err := c.ListSnapshots(ctx)
-	if err != nil {
-		return nil, err
-	}
-	if len(snapshots) == 0 {
-		return nil, ErrNoSnapshotsAvailable
-	}
-	slices.SortFunc(snapshots, func(a, b SnapshotListItem) int {
-		if a.Beacon.Epoch != b.Beacon.Epoch {
-			return cmp.Compare(b.Beacon.Epoch, a.Beacon.Epoch)
-		}
-		return cmp.Compare(
-			b.Beacon.ImmutableFileNumber,
-			a.Beacon.ImmutableFileNumber,
-		)
-	})
-	return &snapshots[0], nil
-}
-
 // doGet performs an HTTP GET request and returns the response body.
 // The caller is responsible for closing the returned ReadCloser.
 func (c *Client) doGet(
@@ -1207,17 +1134,33 @@ func (c *Client) doGet(
 		bodyBytes, _ := io.ReadAll(
 			io.LimitReader(resp.Body, 1024),
 		)
-		return nil, redactLocationError(fmt.Errorf(
-			"unexpected status %d: %s",
-			resp.StatusCode,
-			EscapeText(string(bodyBytes)),
-		), reqURL)
+		return nil, redactLocationError(&aggregatorStatusError{
+			code: resp.StatusCode,
+			body: EscapeText(string(bodyBytes)),
+		}, reqURL)
 	}
 
 	return &limitedReadCloser{
 		Reader: io.LimitReader(resp.Body, maxResponseBytes),
 		Closer: resp.Body,
 	}, nil
+}
+
+// aggregatorStatusError is an aggregator response other than 200 OK.
+type aggregatorStatusError struct {
+	code int
+	body string
+}
+
+func (e *aggregatorStatusError) Error() string {
+	return fmt.Sprintf("unexpected status %d: %s", e.code, e.body)
+}
+
+// isAggregatorNotFound reports whether err is the aggregator answering 404:
+// it no longer serves, or never served, what was asked for.
+func isAggregatorNotFound(err error) bool {
+	var statusErr *aggregatorStatusError
+	return errors.As(err, &statusErr) && statusErr.code == http.StatusNotFound
 }
 
 func decodePrimaryEncodedBytes(data string) ([]byte, bool) {

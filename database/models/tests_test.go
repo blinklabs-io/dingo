@@ -16,12 +16,14 @@ package models
 
 import (
 	"bytes"
+	"errors"
 	"maps"
 	"math"
 	"math/big"
 	"strings"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/internal/safedecode"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
@@ -29,6 +31,21 @@ import (
 	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/stretchr/testify/require"
 )
+
+func TestDecodeBlockCborContainsDecoderPanic(t *testing.T) {
+	t.Parallel()
+	decoderPanic := errors.New("era decoder panic")
+	_, err := decodeBlockCborGuarded(
+		gledger.BlockTypeConway,
+		nil,
+		nil,
+		func(uint, []byte, ...lcommon.VerifyConfig) (gledger.Block, error) {
+			panic(decoderPanic)
+		},
+	)
+	require.ErrorIs(t, err, safedecode.ErrDecodePanic)
+	require.ErrorIs(t, err, decoderPanic)
+}
 
 // Conway transaction-body and certificate shapes that the CDDL forbids must
 // fail block decode through DecodeBlockCbor, the decoder every stored and

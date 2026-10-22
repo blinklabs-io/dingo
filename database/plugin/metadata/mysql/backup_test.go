@@ -156,12 +156,13 @@ func TestConnArgsMapsSSLMode(t *testing.T) {
 	tests := []struct {
 		tlsConfig string
 		wantArgs  []string
+		wantErr   bool
 	}{
-		{"", []string{"--skip-ssl"}},
-		{"false", []string{"--skip-ssl"}},
-		{"true", []string{"--ssl", "--ssl-verify-server-cert"}},
-		{"skip-verify", []string{"--ssl"}},
-		{"preferred", []string{"--ssl"}},
+		{"", []string{"--skip-ssl"}, false},
+		{"false", []string{"--skip-ssl"}, false},
+		{"true", []string{"--ssl", "--ssl-verify-server-cert"}, false},
+		{"skip-verify", nil, true},
+		{"preferred", []string{"--ssl"}, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.tlsConfig, func(t *testing.T) {
@@ -170,6 +171,10 @@ func TestConnArgsMapsSSLMode(t *testing.T) {
 				dsn += "?tls=" + tt.tlsConfig
 			}
 			_, args, _, err := connArgs(dsn)
+			if tt.wantErr {
+				require.Error(t, err)
+				return
+			}
 			require.NoError(t, err)
 			for _, want := range tt.wantArgs {
 				require.Contains(t, args, want)

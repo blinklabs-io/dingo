@@ -67,12 +67,9 @@ func (f fileEntry) Size() (int64, error) {
 	return stat.Size(), nil
 }
 
-// bytesEntry serves an entry that was read and verified in one go, so the
-// bytes the digest covered are the bytes the parser walks.
-//
-// This holds one entry in memory at a time, bounded by the certified size of
-// the file rather than by its actual size — see readVerifiedEntry, which
-// establishes the one before allocating for the other.
+// bytesEntry serves the verified buffer the parser walks. readVerifiedEntry
+// reads entries up to 16 MiB into this buffer in one pass; larger entries use
+// streaming verification before allocating to their certified size.
 type bytesEntry struct {
 	data   []byte
 	reader *bytes.Reader

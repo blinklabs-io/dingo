@@ -62,7 +62,7 @@ var ErrExtractUnexpectedMember = errors.New(
 const (
 	// maxArchiveEntries bounds the tar entries of one archive. Directories and
 	// empty files count: they cost inodes while adding nothing to the byte
-	// budget. A full v1 snapshot holds three files per immutable, about
+	// budget. A full database holds three files per immutable, about
 	// 40,000 entries on mainnet today.
 	maxArchiveEntries = 1 << 20
 
@@ -87,6 +87,9 @@ type archiveLimits struct {
 	// digests maps an entry name to its expected SHA-256 (hex). A listed
 	// entry is hashed as it is written and refused on a mismatch.
 	digests map[string]string
+	// budget, when set, accounts for entries and expanded bytes across every
+	// archive extracted by one bootstrap.
+	budget *bootstrapExtractionBudget
 }
 
 // withArchiveLimits narrows the default archive shape limits for one
@@ -95,6 +98,7 @@ func withArchiveLimits(l archiveLimits) ExtractOption {
 	return func(c *extractConfig) {
 		c.limits.allow = l.allow
 		c.limits.digests = l.digests
+		c.limits.budget = l.budget
 		if l.maxEntries > 0 {
 			c.limits.maxEntries = l.maxEntries
 		}
@@ -119,6 +123,7 @@ type extractConfig struct {
 	replace           bool
 	maxZstdWindowSize uint64
 	maxZstdMemory     uint64
+	decoders          *decoderMemoryBudget
 	limits            archiveLimits
 }
 
@@ -161,6 +166,12 @@ func WithZstdLimits(maxWindow, maxMemory uint64) ExtractOption {
 			c.maxZstdMemory = maxMemory
 		}
 	}
+}
+
+// withDecoderBudget makes the extraction reserve its decoder's worst-case
+// memory from a budget shared with every other extraction using it.
+func withDecoderBudget(b *decoderMemoryBudget) ExtractOption {
+	return func(c *extractConfig) { c.decoders = b }
 }
 
 func newExtractConfig(opts []ExtractOption) extractConfig {

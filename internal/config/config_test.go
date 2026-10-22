@@ -75,7 +75,12 @@ func resetGlobalConfig() {
 		ForgeEBMaxBytes:                  forgeEBCapDefault(DefaultForgeEBMaxBytes),
 		ForgeEBSelectionReserve:          DefaultForgeEBSelectionReserve,
 		Mithril: MithrilConfig{
-			Enabled:            true,
+			WindowChunks:       DefaultMithrilWindowChunks,
+			BatchChunks:        DefaultMithrilBatchChunks,
+			DownloadWorkers:    DefaultMithrilDownloadWorkers,
+			MinGapChunks:       DefaultMithrilMinGapChunks,
+			CheckInterval:      DefaultMithrilCheckInterval,
+			RetryBackoff:       DefaultMithrilRetryBackoff,
 			CleanupAfterLoad:   true,
 			VerifyCertificates: true,
 		},
@@ -88,6 +93,9 @@ func resetGlobalConfig() {
 		// ValidateForgedBlock's production default is an unconditional
 		// literal with no separate fill-in step to test around.
 		ValidateForgedBlock: true,
+		// Mirrors newDefaultConfig: the apply-ahead work is on by default.
+		LedgerPrefetchAheadEnabled: true,
+		LedgerValidateAheadEnabled: true,
 	}
 	globalTopologyConfig = &topology.TopologyConfig{}
 }
@@ -263,7 +271,8 @@ mithril:
 			Enabled:                     false,
 			WindowSlots:                 4321,
 			PromotionMinDiversityGroups: 4,
-			// Unset in the file, so the default survives.
+			CorroborationPeers:          1,
+			// Unset in the file, so the defaults survive.
 			LimitOnPatienceEnabled: true,
 		},
 		HistoryExpiry: DefaultHistoryExpiryConfig(),
@@ -292,11 +301,19 @@ mithril:
 		ForgeAppliedTipStalenessSlots:    DefaultForgeAppliedTipStalenessSlots,
 		ForgeEndorserBlockStalenessSlots: DefaultForgeEndorserBlockStalenessSlots,
 		ValidateForgedBlock:              true,
+		LedgerPrefetchAheadEnabled:       true,
+		LedgerValidateAheadEnabled:       true,
 		ForgeEBMaxTxRefs:                 forgeEBCapDefault(777),
 		ForgeEBMaxBytes:                  forgeEBCapDefault(888888),
 		ForgeEBSelectionReserve:          750 * time.Millisecond,
 		Mithril: MithrilConfig{
 			Enabled:                false,
+			WindowChunks:           DefaultMithrilWindowChunks,
+			BatchChunks:            DefaultMithrilBatchChunks,
+			DownloadWorkers:        DefaultMithrilDownloadWorkers,
+			MinGapChunks:           DefaultMithrilMinGapChunks,
+			CheckInterval:          DefaultMithrilCheckInterval,
+			RetryBackoff:           DefaultMithrilRetryBackoff,
 			AggregatorURL:          "https://mithril.example.net",
 			DownloadDir:            "/tmp/mithril",
 			DownloadIdleTimeout:    "5m",
@@ -324,6 +341,12 @@ mithril:
 func TestDefaultMempoolProviderIsFIFO(t *testing.T) {
 	if got := defaultPluginsConfig().Mempool.Provider; got != "fifo" {
 		t.Fatalf("default mempool provider = %q, want fifo", got)
+	}
+}
+
+func TestDefaultConsensusProviderIsPraos(t *testing.T) {
+	if got := defaultPluginsConfig().Consensus.Provider; got != "praos" {
+		t.Fatalf("default consensus provider = %q, want praos", got)
 	}
 }
 
@@ -411,11 +434,18 @@ func TestLoad_WithoutConfigFile_UsesDefaults(t *testing.T) {
 		ForgeAppliedTipStalenessSlots:    DefaultForgeAppliedTipStalenessSlots,
 		ForgeEndorserBlockStalenessSlots: DefaultForgeEndorserBlockStalenessSlots,
 		ValidateForgedBlock:              true,
+		LedgerPrefetchAheadEnabled:       true,
+		LedgerValidateAheadEnabled:       true,
 		ForgeEBMaxTxRefs:                 forgeEBCapDefault(DefaultForgeEBMaxTxRefs),
 		ForgeEBMaxBytes:                  forgeEBCapDefault(DefaultForgeEBMaxBytes),
 		ForgeEBSelectionReserve:          DefaultForgeEBSelectionReserve,
 		Mithril: MithrilConfig{
-			Enabled:            true,
+			WindowChunks:       DefaultMithrilWindowChunks,
+			BatchChunks:        DefaultMithrilBatchChunks,
+			DownloadWorkers:    DefaultMithrilDownloadWorkers,
+			MinGapChunks:       DefaultMithrilMinGapChunks,
+			CheckInterval:      DefaultMithrilCheckInterval,
+			RetryBackoff:       DefaultMithrilRetryBackoff,
 			CleanupAfterLoad:   true,
 			VerifyCertificates: true,
 		},
@@ -498,6 +528,30 @@ func TestLoad_GenesisBootstrapEnvVars(t *testing.T) {
 			cfg.GenesisBootstrap.CorroborationPeers,
 		)
 	}
+}
+
+func TestLoad_GenesisCorroborationDefaultsSecurely(t *testing.T) {
+	// Not t.Parallel: LoadConfig and resetGlobalConfig replace process-global
+	// configuration state.
+	unsetEnv(t, "DINGO_GENESIS_BOOTSTRAP_CORROBORATION_PEERS")
+	unsetEnv(t, "CARDANO_DINGO_GENESIS_BOOTSTRAP_CORROBORATION_PEERS")
+
+	emptyConfig := filepath.Join(t.TempDir(), "empty.yaml")
+	require.NoError(t, os.WriteFile(emptyConfig, nil, 0o600))
+	resetGlobalConfig()
+	cfg, err := LoadConfig(emptyConfig)
+	require.NoError(t, err)
+	require.Equal(t, 1, cfg.GenesisBootstrap.CorroborationPeers)
+
+	explicitDisable := filepath.Join(t.TempDir(), "disable.yaml")
+	require.NoError(t, os.WriteFile(explicitDisable, []byte(`
+genesisBootstrap:
+  corroborationPeers: 0
+`), 0o600))
+	resetGlobalConfig()
+	cfg, err = LoadConfig(explicitDisable)
+	require.NoError(t, err)
+	require.Zero(t, cfg.GenesisBootstrap.CorroborationPeers)
 }
 
 func TestLoad_HistoryExpiryConfig(t *testing.T) {

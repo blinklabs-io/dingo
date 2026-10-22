@@ -1,0 +1,3 @@
+-- No schema statements. The backfill rebuilds idx_utxo_spent_at_tx_id,
+-- idx_utxo_collateral_by_tx_id and idx_utxo_referenced_by_tx_id as partial
+-- indexes over non-NULL rows, unless a deferred-index rebuild is pending.

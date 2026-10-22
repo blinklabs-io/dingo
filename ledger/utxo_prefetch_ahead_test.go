@@ -405,6 +405,21 @@ func newAheadReplayEnv(
 	build func(f *requiredDatumFixture, freeTxId []byte) [][]byte,
 ) *aheadReplayEnv {
 	t.Helper()
+	return newAheadReplayEnvWith(
+		t,
+		func(cfg *LedgerStateConfig) { cfg.LedgerPrefetchAheadEnabled = ahead },
+		build,
+	)
+}
+
+// newAheadReplayEnvWith is newAheadReplayEnv with the ledger configuration's
+// apply-loop flags set by configure.
+func newAheadReplayEnvWith(
+	t *testing.T,
+	configure func(cfg *LedgerStateConfig),
+	build func(f *requiredDatumFixture, freeTxId []byte) [][]byte,
+) *aheadReplayEnv {
+	t.Helper()
 	f := newRequiredDatumFixture(t, alwaysSucceedsV1(t), true)
 	// A third live UTxO that no transaction of the first block touches.
 	freeTxId := bytes.Repeat([]byte{0xd4}, 32)
@@ -491,21 +506,22 @@ func newAheadReplayEnv(
 	require.NoError(t, cm.PrimaryChain().AddRawBlocks(t.Context(), raw))
 	nodeConfig := newTestShelleyGenesisCfg(t)
 	nodeConfig.ShelleyGenesis().NetworkId = "Testnet"
-	ls, err := NewLedgerState(LedgerStateConfig{
-		Database:                   f.db,
-		ChainManager:               cm,
-		CardanoNodeConfig:          nodeConfig,
-		Logger:                     testLogger(),
-		PromRegistry:               prometheus.NewRegistry(),
-		ValidateHistorical:         true,
-		ManualBlockProcessing:      true,
-		LedgerPrefetchAheadEnabled: ahead,
-	})
+	cfg := LedgerStateConfig{
+		Database:              f.db,
+		ChainManager:          cm,
+		CardanoNodeConfig:     nodeConfig,
+		Logger:                testLogger(),
+		PromRegistry:          prometheus.NewRegistry(),
+		ValidateHistorical:    true,
+		ManualBlockProcessing: true,
+	}
+	configure(&cfg)
+	ls, err := NewLedgerState(cfg)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, ls.Close()) })
 	setReplayTestLedgerOrigin(ls, eras.ConwayEraDesc, pp)
 	require.NoError(t, cm.SetLedger(ls))
-	ls.utxoPrefetchAheadAwaitReady = ahead
+	ls.utxoPrefetchAheadAwaitReady = cfg.LedgerPrefetchAheadEnabled
 	env.ls = ls
 	return env
 }

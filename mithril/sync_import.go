@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/config/cardano"
+	nodeconsensus "github.com/blinklabs-io/dingo/consensus"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
@@ -168,6 +169,7 @@ func updateMithrilReadyState(
 			for _, key := range keys {
 				if key == deferred.SyncStateKey ||
 					key == metadata.PlannerStatsBackfillSyncKey ||
+					key == nodeconsensus.DatabaseIdentitySyncKey ||
 					strings.HasPrefix(key, forging.ForgeFenceSyncKeyPrefix) {
 					continue
 				}
@@ -220,10 +222,10 @@ func updateMithrilReadyState(
 	return nil
 }
 
-// selectLedgerStateSnapshot searches result's verified ancillary tree, then
-// its unverified extraction tree, for the ledger state to import.
+// selectLedgerStateSnapshot searches result's ancillary tree for the ledger
+// state to import.
 //
-// Both are searched through the handle the bootstrap vetted them with, and
+// It is searched through the handle the bootstrap vetted it with, and
 // discovery hands back the state and UTxO table already open rather than
 // names for them. That is what makes the manifest verification mean something
 // downstream: the bytes imported come from the files that were verified, and
@@ -276,12 +278,12 @@ func selectLedgerStateSnapshot(
 			result.AncillaryVerified,
 		})
 	}
-	if result.ExtractRoot != nil {
-		searchTrees = append(searchTrees, searchTree{
-			result.ExtractDir, result.ExtractRoot, nil, false,
-		})
-	}
 	if len(searchTrees) == 0 {
+		if !result.CertificateVerified {
+			return nil, "", nil, false, errors.New(
+				"bootstrap produced no ancillary ledger state to import",
+			)
+		}
 		return nil, "", nil, false, errors.New(
 			"bootstrap result carries no verified directory handle to " +
 				"import ledger state from",
@@ -296,11 +298,9 @@ func selectLedgerStateSnapshot(
 		if findErr == nil {
 			return files, tree.name, tree.digests, false, nil
 		}
-		// Only a tree with no usable ledger state moves on to the next. One
-		// holding something unusable — a symlink, a substitution, a state that
-		// exists but will not open — fails the import, because falling through
-		// would let a planted ancillary tree choose the extraction directory
-		// as the source instead.
+		// A tree holding something unusable — a symlink, a substitution, a
+		// state that exists but will not open — fails the import rather than
+		// being treated as empty.
 		if !errors.Is(findErr, ledgerstate.ErrNoUsableLedgerState) {
 			return nil, "", nil, false, fmt.Errorf(
 				"inspecting ledger state in %s: %w", tree.name, findErr,
@@ -365,8 +365,8 @@ func selectLedgerStateSnapshot(
 }
 
 // importLedgerState finds, parses, and imports the ledger state
-// from the extracted Mithril snapshot. It searches both the main
-// extract directory and the ancillary directory for the state file.
+// from the extracted Mithril snapshot. It searches the ancillary directory
+// for the state file.
 func importLedgerState(
 	ctx context.Context,
 	db *database.Database,
@@ -532,15 +532,7 @@ func importPreparedLedgerState(
 	// disabled by leaving the import key empty.
 	importKey := ""
 	if !reconcile && result.Snapshot != nil && result.Snapshot.Digest != "" {
-		digest := result.Snapshot.Digest
-		if len(digest) > 16 {
-			digest = digest[:16]
-		}
-		importKey = fmt.Sprintf(
-			"%s:%d",
-			digest,
-			state.Tip.Slot,
-		)
+		importKey = ledgerImportKey(result.Snapshot.Digest, state.Tip.Slot)
 	}
 
 	// Import the ledger state
@@ -597,6 +589,15 @@ func importPreparedLedgerState(
 		return 0, nil, false, fmt.Errorf("importing ledger state: %w", err)
 	}
 	return state.Tip.Slot, state.Tip.BlockHash, beyondCertifiedTip, nil
+}
+
+// ledgerImportKey is the ledger-state import checkpoint key for an
+// artifact's state at slot: "{digest prefix}:{slot}".
+func ledgerImportKey(digest string, slot uint64) string {
+	if len(digest) > 16 {
+		digest = digest[:16]
+	}
+	return fmt.Sprintf("%s:%d", digest, slot)
 }
 
 // errAncillaryDigestMismatch reports a file selected for import whose bytes are
@@ -680,7 +681,7 @@ func attachSignedTable(
 // signedTableDigest returns the digest the manifest holds for a UTxO-HD table.
 //
 // A table the manifest does not cover is refused rather than passed on with no
-// digest. An empty digest is how an unsigned tree is decoded — v1, and any tree
+// digest. An empty digest is how an unsigned tree is decoded — any tree
 // nothing vouched for — so letting one through here would turn "nobody signed
 // this file" into "nothing needs checking", which is the direction that must
 // never be reachable by removing an entry.

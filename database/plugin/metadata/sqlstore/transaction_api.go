@@ -185,7 +185,8 @@ func utxoReferencePredicate(inputCount int, alias string) string {
 }
 
 func utxoReferenceInsertBatchSQL(associationTable string, inputCount int) string {
-	return `INSERT INTO ` + associationTable + ` (utxo_id, transaction_hash)
+	return `-- name: InsertUtxoReferenceBatch :execrows
+INSERT INTO ` + associationTable + ` (utxo_id, transaction_hash)
 SELECT u.id, ? FROM utxo AS u
 WHERE (` + utxoReferencePredicate(inputCount, "u.") + `)
   AND NOT EXISTS (
@@ -195,7 +196,8 @@ WHERE (` + utxoReferencePredicate(inputCount, "u.") + `)
 }
 
 func utxoReferenceUpdateBatchSQL(column string, inputCount int) string {
-	return "UPDATE utxo SET " + column + " = ? WHERE (" +
+	return "-- name: UpdateUtxoReferenceBatch :execrows\n" +
+		"UPDATE utxo SET " + column + " = ? WHERE (" +
 		utxoReferencePredicate(inputCount, "") + ")"
 }
 
@@ -273,19 +275,27 @@ type addressIndexKey struct {
 }
 
 const (
-	deleteAddressTransactionSQL    = "DELETE FROM address_transaction WHERE transaction_id = ?"
+	deleteAddressTransactionSQL    = "-- name: DeleteAddressTransactionByTransaction :exec\nDELETE FROM address_transaction WHERE transaction_id = ?"
 	maxCachedAddressInputQuerySize = 32
 )
 
 var cachedAddressInputQuerySizes = [...]int{1, 2, 4, 8, 16, 32}
 
-// A wide OR of (tx_id, output_idx) pairs can make SQLite abandon
-// tx_id_output_idx. Query by tx_id and filter other outputs in Go.
+const addressTransactionInputQueryParamsPerRef = 2
+
+// Separate lookups keep SQLite on tx_id_output_idx for every input.
 func addressTransactionInputQuery(size int) string {
-	placeholders := strings.TrimSuffix(strings.Repeat("?,", size), ",")
-	return `
-SELECT tx_id, output_idx, payment_key, payment_script, credential_tag, staking_key
-FROM utxo WHERE tx_id IN (` + placeholders + `)`
+	var query strings.Builder
+	query.WriteString("-- name: GetAddressTransactionInputs :many")
+	for i := range size {
+		if i > 0 {
+			query.WriteString(" UNION ALL ")
+		}
+		query.WriteString(`
+SELECT payment_key, payment_script, credential_tag, staking_key
+FROM utxo WHERE tx_id = ? AND output_idx = ?`)
+	}
+	return query.String()
 }
 
 func (s *Store) indexTransactionAddresses(
@@ -339,22 +349,29 @@ func (s *Store) indexTransactionAddresses(
 			Idx:  input.Index(),
 		})
 	}
-	txIDs, wanted := distinctUtxoTxIDs(refs)
+	inputRefs := dedupeUtxoIDs(refs)
 	inputBatchSize := 1
-	for inputBatchSize*2 <= parameterLimit &&
-		inputBatchSize*2 <= maxCachedAddressInputQuerySize {
+	maxInputBatchSize := min(
+		maxCachedAddressInputQuerySize,
+		parameterLimit/addressTransactionInputQueryParamsPerRef,
+	)
+	for inputBatchSize*2 <= maxInputBatchSize {
 		inputBatchSize *= 2
 	}
-	for start := 0; start < len(txIDs); start += inputBatchSize {
-		end := min(start+inputBatchSize, len(txIDs))
-		batch := txIDs[start:end]
+	for start := 0; start < len(inputRefs); start += inputBatchSize {
+		end := min(start+inputBatchSize, len(inputRefs))
+		batch := inputRefs[start:end]
 		querySize := 1
 		for querySize < len(batch) {
 			querySize *= 2
 		}
-		args := make([]any, querySize)
-		for i, txID := range batch {
-			args[i] = txID
+		args := make(
+			[]any,
+			querySize*addressTransactionInputQueryParamsPerRef,
+		)
+		for i, ref := range batch {
+			args[i*addressTransactionInputQueryParamsPerRef] = ref.Hash
+			args[i*addressTransactionInputQueryParamsPerRef+1] = ref.Idx
 		}
 		inputRows, err := s.queryRowsCached(
 			ctx, db, addressTransactionInputQuery(querySize), args...,
@@ -372,22 +389,13 @@ func (s *Store) indexTransactionAddresses(
 			}()
 			for inputRows.Next() {
 				var (
-					txID          []byte
-					output        uint32
 					payment       []byte
 					paymentScript sql.NullBool
 					staking       []byte
 					tag           uint8
 				)
-				if err := inputRows.Scan(&txID, &output, &payment, &paymentScript, &tag, &staking); err != nil {
+				if err := inputRows.Scan(&payment, &paymentScript, &tag, &staking); err != nil {
 					return fmt.Errorf("scan input address for transaction %d: %w", transactionID, err)
-				}
-				outputs, ok := wanted[string(txID)]
-				if !ok {
-					continue
-				}
-				if _, ok := outputs[output]; !ok {
-					continue
 				}
 				// A NULL payment_script reads as a key credential, as every
 				// other utxo read does.
@@ -440,7 +448,8 @@ func TransactionWitnessTables() []string {
 // actually runs. Replay deletes can still scan while their index is deferred;
 // normal import assigns a new transaction ID and skips these deletes.
 func TransactionWitnessCleanupSQL(table string) string {
-	return "DELETE FROM " + table + " WHERE transaction_id = ?"
+	return "-- name: DeleteTransactionWitnessByTransaction :exec\n" +
+		"DELETE FROM " + table + " WHERE transaction_id = ?"
 }
 
 func (s *Store) storeTransactionWitnesses(
@@ -643,7 +652,7 @@ func storeScriptContent[T lcommon.Script](
 	scriptType uint8,
 	slot uint64,
 ) error {
-	if _, err := db.ExecContext(ctx, `
+	if _, err := db.ExecContext(ctx, `-- name: InsertScriptIfAbsent :exec
 INSERT INTO script (hash, content, created_slot, type)
 VALUES (?, ?, ?, ?)
 ON CONFLICT (hash) DO NOTHING`,

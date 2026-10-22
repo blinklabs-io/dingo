@@ -237,15 +237,20 @@ func TestGetUtxosByRefsUsesTxIDIndex(t *testing.T) {
 	}
 }
 
-func TestAddressTransactionInputQueryUsesTxIDIndex(t *testing.T) {
+func TestAddressTransactionInputQueryUsesCompositeIndex(t *testing.T) {
 	skipPlanTestUnderRace(t)
 	t.Parallel()
 	store := newMigratedSQLiteStore(t)
 	seedStakeRefLookupUtxos(t, store, 50_000, 256)
 
-	args := make([]any, maxCachedAddressInputQuerySize)
-	for i := range args {
-		args[i] = utxoIDAt(i * 7).Hash
+	args := make(
+		[]any,
+		maxCachedAddressInputQuerySize*addressTransactionInputQueryParamsPerRef,
+	)
+	for i := range maxCachedAddressInputQuerySize {
+		ref := utxoIDAt(i * 7)
+		args[i*addressTransactionInputQueryParamsPerRef] = ref.Hash
+		args[i*addressTransactionInputQueryParamsPerRef+1] = ref.Idx
 	}
 	plan := queryPlan(
 		t,
@@ -1357,7 +1362,7 @@ func legacyUtxoStakeRefsQuery(
 // skipPlanTestUnderRace skips a test that asserts SQLite query plans over a
 // fixture of tens of thousands of rows inserted by one goroutine. The race
 // detector cannot inform such a test and slows it several times over;
-// go-test (Linux) and go-test (Linux, quick) run it un-instrumented. Correctness
+// CI's check and gate (services) jobs run it un-instrumented. Correctness
 // tests that share the seeders keep running under race.
 func skipPlanTestUnderRace(t testing.TB) {
 	t.Helper()

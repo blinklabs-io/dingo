@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"math"
 	"math/big"
 	"slices"
 	"strings"
@@ -36,6 +37,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	oleiosvotes "github.com/blinklabs-io/gouroboros/protocol/leiosvotes"
 	bls12381 "github.com/consensys/gnark-crypto/ecc/bls12-381"
 	"github.com/prometheus/client_golang/prometheus"
 	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
@@ -3226,6 +3228,40 @@ func TestVoteManagerRemoveConnectionResetsCursor(t *testing.T) {
 	)
 	require.NoError(t, result.err)
 	require.Len(t, result.votes, 1)
+}
+
+func TestVoteManagerNextVotesRejectsOversizedCount(t *testing.T) {
+	t.Parallel()
+
+	fixture := newManagerFixture(t)
+	// A closed done channel makes an unbounded request return an abort
+	// error instead of blocking, so only the count check can produce
+	// ErrVoteRequestCount.
+	done := make(chan struct{})
+	close(done)
+	for _, count := range []uint64{
+		oleiosvotes.MaxRequestNextCount + 1,
+		math.MaxUint64,
+	} {
+		votes, err := fixture.mgr.NextVotes(done, "conn-b", count)
+		require.ErrorIs(t, err, ErrVoteRequestCount, "count %d", count)
+		assert.Nil(t, votes)
+	}
+}
+
+func TestVoteManagerNextVotesAcceptsMaxCount(t *testing.T) {
+	t.Parallel()
+
+	fixture := newManagerFixture(t)
+	done := make(chan struct{})
+	close(done)
+	_, err := fixture.mgr.NextVotes(
+		done,
+		"conn-b",
+		oleiosvotes.MaxRequestNextCount,
+	)
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, ErrVoteRequestCount)
 }
 
 func TestVoteManagerNextVotesAccumulatesAcrossInserts(t *testing.T) {
