@@ -11154,6 +11154,23 @@ request at once; the ledger call stops at its next cancellation check, including
 during CEK execution. The admission slot is held until the ledger call returns,
 so further evaluations receive a busy error and
 canceled requests cannot accumulate workers.
+
+`evaluate_tx` and `calculate_min_utxo` bound the caller-supplied CBOR before
+and while parsing it (`api/mcp/admission.go`). Text longer than the hex
+encoding of 128 KiB is refused before it is decoded, and a payload that decodes
+to more than 128 KiB is refused before it is parsed. The cap is a transaction
+or single-output ceiling about eight times the mainnet `MaxTxSize`, as an
+output sits inside a transaction. The parse itself runs in an admitted worker
+under the request deadline: `evaluate_tx` parses inside its one evaluation slot
+(after the size checks, so a request that finds the slot held gets the busy
+error without being parsed), and `calculate_min_utxo` decodes and sizes its
+output through a four-slot parse pool, refusing with a busy error when it is
+full.
+As with evaluation, a slot is held until its parse returns, so a request that
+times out cannot let parses accumulate. `NewMCPServer` shares the parse pool
+across tools through `readLimits`; the exported `RegisterCardanoTools` creates
+its own.
+
 SQLite tools share four fail-fast execution slots. Arbitrary queries borrow one
 connection, enable `query_only`, and apply 64 KiB value, 64 KiB SQL, and
 32-column limits before execution. Query results are also capped at 1 MiB of
