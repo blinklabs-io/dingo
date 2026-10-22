@@ -2491,6 +2491,13 @@ paths, where the point is to report before the goroutine unwinds.
   every connection, so separate clients cannot share budget state or recreate
   a removed bucket after close. The budget remains after point-list
   deduplication and before the database intersection lookup.
+- `LedgerState.GetIntersectPoint` resolves each peer-supplied point by
+  reading only its `bp..._metadata` key
+  (`database.BlockIDByPointMetadataTxn`), then confirms the ID against the
+  `bi` index. It never loads a block body and never reaches the Bark archive
+  fallback, so each budgeted point costs at most two small key reads. On the
+  `s3` and `gcs` blob plugins those keys are objects, so a point still costs
+  one object read, or two when held.
 - Prometheus metrics for event delivery tracking and latency, including
   `event_delivery_blocked_total{type,kind}` and
   `event_async_enqueue_blocked_total{type}` for backpressure, and
