@@ -310,7 +310,7 @@ func NewTokenRegistrySync(
 	}
 	userAgent := cfg.UserAgent
 	if userAgent == "" {
-		userAgent = httpuseragent.Default("token-registry")
+		userAgent = httpuseragent.Default()
 	}
 	maxBytes := cfg.MaxBytes
 	if maxBytes <= 0 {

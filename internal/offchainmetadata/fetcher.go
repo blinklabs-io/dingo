@@ -126,7 +126,7 @@ func New(cfg Config) (*Fetcher, error) {
 	}
 	userAgent := cfg.UserAgent
 	if userAgent == "" {
-		userAgent = httpuseragent.Default("offchain-metadata")
+		userAgent = httpuseragent.Default()
 	}
 	ipfsGatewayURL := cfg.IPFSGatewayURL
 	if ipfsGatewayURL == "" {

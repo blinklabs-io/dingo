@@ -16,6 +16,8 @@ package httpuseragent
 
 import (
 	"fmt"
+	"net/http"
+	"os"
 	"runtime"
 
 	"github.com/blinklabs-io/dingo/internal/version"
@@ -23,12 +25,21 @@ import (
 
 // Default returns Dingo's default HTTP user-agent, including its version and
 // the platform on which it was built.
-func Default(component string) string {
+func Default() string {
+	if userAgent := os.Getenv("DINGO_HTTP_USER_AGENT"); userAgent != "" {
+		return userAgent
+	}
 	return fmt.Sprintf(
-		"dingo-%s/%s (%s/%s)",
-		component,
+		"dingo/%s (%s/%s)",
 		version.GetVersionString(),
 		runtime.GOOS,
 		runtime.GOARCH,
 	)
+}
+
+// Set sets Dingo's default user-agent unless the caller already supplied one.
+func Set(req *http.Request) {
+	if req != nil && req.Header.Get("User-Agent") == "" {
+		req.Header.Set("User-Agent", Default())
+	}
 }
