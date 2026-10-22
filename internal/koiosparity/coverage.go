@@ -336,11 +336,11 @@ var koiosCoverageMatrix = []KoiosFieldCoverage{
 	{
 		Endpoint: "/pool_history",
 		Field:    "member_rewards",
-		Class:    CoverageDerivedMatch,
-		DingoField: "sum(reward_account_output.amount) where spendable " +
-			"and not guarded, reward_type member, at K-1",
-		Reason: "exact lovelace equality against Dingo's per-member spendable " +
-			"aggregate, once the epoch's rewards have been applied",
+		Class:    CoverageIntentionallyIncomparable,
+		Reason: "a cached per-pool total that can include rewards the " +
+			"ledger forfeited and differs between Koios instances; " +
+			"never decides a verdict, and a disagreement with Koios's own " +
+			"per-account sum is recorded as koios_pool_history_inconsistent",
 	},
 	{
 		Endpoint: "/pool_history",
@@ -769,6 +769,6 @@ var koiosCoverageMatrix = []KoiosFieldCoverage{
 		Field:      "pool_id_bech32",
 		Class:      CoverageDerivedMatch,
 		DingoField: "reward_account_output.pool_key_hash converted to pool ID",
-		Reason:     "distinct pool contributions are aggregated and then compared per pool; repeated same-pool rows remain duplicate failures",
+		Reason:     "distinct pool contributions are aggregated and then compared per pool; repeated same-pool rows remain duplicate failures; member rows are also summed per pool and compared exactly with Dingo's spendable member sum once the epoch's account coverage is complete",
 	},
 }

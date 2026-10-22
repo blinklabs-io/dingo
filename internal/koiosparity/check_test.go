@@ -1036,7 +1036,7 @@ func TestCompareEpochAccountsSkipsWithheldAndAggregatesSharedAccounts(t *testing
 		time.Now(),
 	))
 
-	mismatches := compareEpochAccounts(
+	mismatches, _, _ := compareEpochAccounts(
 		context.Background(),
 		cache,
 		dingo,

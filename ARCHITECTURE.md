@@ -12237,12 +12237,12 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
   | `/pool_history` | derived-match | `block_cnt` | Exact value against `reward_pool_input` at parameter epoch K+1. |
   | `/pool_history` | derived-match | `fixed_cost` | Exact value against `reward_pool_input` at stake epoch K-1: a mark snapshot records the pool parameters in force for the epoch it is the basis for. |
   | `/pool_history` | derived-match | `margin` | K-1 values compared as equivalent rational numbers. |
-  | `/pool_history` | derived-match | `member_rewards` | Exact lovelace equality with the sum of K-1 `reward_account_output` member rows the ledger credits (`spendable`, not `guarded`), falling back to `reward_pool_output.member_reward_total` only when that row's `unspendable` is zero. |
+  | `/pool_history` | intentionally-incomparable | `member_rewards` | A cached per-pool total that can include rewards the ledger forfeited and differs between Koios instances; it never decides a verdict. A disagreement with Koios's own per-account sum for the pool and epoch is recorded as `koios_pool_history_inconsistent`. |
   | `/pool_history` | intentionally-incomparable | `pool_fees`, `deleg_rewards` | Koios derives these from an approximation that omits the pledge/owner-stake bonus and rounds components. |
   | `/pool_history` | unsupported | `active_stake_pct`, `saturation_pct`, `epoch_ros` | Dingo has no matching persisted pool aggregate. |
   | `/account_reward_history` | exact-match | `stake_address`, `earned_epoch` | Identifies the `(stake_address, type)` aggregate `CompareAccountEpoch` matches on; response identity must equal the requested epoch. |
   | `/account_reward_history` | exact-match | `amount`, `type` | Exact integer lovelace equality against `reward_account_output.amount`/`reward_type` (and, for `proposal_refund`, against the proposal-deposit credit in `account_reward_delta.amount`) for member/leader/proposal_refund rows, compared as per-`(stake_address, type)` totals summed across pool contributions, and then per pool contribution, so a disagreement that preserves the total (equal and opposite per-pool errors, or a total attributed to one of the pools the other side splits it between) is reported as `account_reward_pool_amount` rather than passing; repeated `proposal_refund` rows sum as separate deposits; a type that is neither modeled nor filtered by `koiosAccountRewardTypesOutOfScope` is `reward_type_unmodeled`, an ERROR rather than a parity failure, so the account check cannot pass. |
-  | `/account_reward_history` | derived-match | `pool_id_bech32` | Decoded to `reward_account_output.pool_key_hash`'s pool ID to identify each contribution to a shared reward account; distinct pools aggregate and are then compared per pool, a repeated same-pool row is `acct_duplicate`. A side that names no pool for a key makes no per-pool statement to disagree with, so the totals are the whole verdict there. |
+  | `/account_reward_history` | derived-match | `pool_id_bech32` | Decoded to `reward_account_output.pool_key_hash`'s pool ID to identify each contribution to a shared reward account; distinct pools aggregate and are then compared per pool, a repeated same-pool row is `acct_duplicate`. A side that names no pool for a key makes no per-pool statement to disagree with, so the totals are the whole verdict there. Member rows are also summed per pool and compared exactly with Dingo's spendable member sum (`reward_account_output` member rows that are `spendable` and not `guarded`, at K-1), in both directions, once the epoch's account coverage is complete. |
   | `/account_reward_history` | unsupported | `spendable_epoch` | Stored for reference only; not currently compared against Dingo's schema. |
   | `/epoch_params` | exact-match | `epoch_no` | The filtered response must contain exactly the requested reporting epoch K. |
   | `/epoch_params` | exact-match | `era` | Dingo's `epoch.era_id` name; the era decides which validation rules run at all. |
@@ -12443,14 +12443,39 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
   `pool_fees` from `fixed_cost`+`margin` alone, omitting the pledge/owner-stake
   bonus the Shelley ledger spec folds into the true leader reward, so it
   systematically diverges from Dingo's exact value for any pool with owner
-  stake. `member_rewards` has no such approximation — it is a direct sum of
-  per-delegator reward amounts — but the Dingo side of it is deliberately not
-  `reward_pool_output.member_reward_total`. `Result.addReward`
-  (`ledger/rewards/rewards.go`) accumulates that column from every member
-  reward the calculation produced, spendable or not, while Koios reports what
-  members actually received, so the two differ by exactly the pool's
-  unspendable member rewards and any pool holding one failed against a node
-  that was right. The row's own `unspendable` column is not a
+  stake. `member_rewards` is not compared against `pool_history` at all.
+  `pool_history.member_rewards` is a cached per-pool total: it can include
+  member rewards the ledger forfeited at application (the stake address was
+  deregistered before the application boundary), and two Koios instances can
+  disagree on it for the same pool and epoch. Koios's per-account
+  `account_reward_history` rows agree across instances and with the ledger's
+  ADA pots, so the reference is the sum of the per-account `member` rows for
+  the pool at reporting epoch K, and `CompareMemberRewards` requires exact
+  lovelace equality with Dingo's spendable member sum in both directions. A
+  reward Dingo forfeits that Koios pays, or pays that Koios does not, is a
+  `value_mismatch`. Widening the check to tolerate the cached value would
+  accept a wrong Dingo forfeiture, so it is not done.
+
+  Because the reference is the per-account rows, the comparison runs in the
+  account phase and only once the epoch's account coverage is complete; the
+  fast aggregate phase produces no `member_rewards` row and cannot strict-halt
+  on the cached value. It compares against the same rows the per-account
+  comparison read: `Cache.GetAccountReference` reads the coverage record and
+  the rows in one read transaction, once per epoch check, so an account fetch
+  committing or downgrading coverage mid-check cannot leave `member_rewards`
+  unexamined while the account scope passes. A failed read of Dingo's pool
+  data, which leaves `member_rewards` unexamined, is a `dingo_db_error` in the
+  account scope as well as the aggregate one. With account checking off (the standalone CLI without
+  `--accounts`), member rewards are therefore not checked at all. Where `pool_history.member_rewards` disagrees with
+  Koios's own per-account sum, the pool is recorded under the informational
+  category `koios_pool_history_inconsistent`, carrying both Koios values. It
+  never fails Dingo and is never used to excuse a Dingo difference.
+
+  The Dingo side is deliberately not `reward_pool_output.member_reward_total`.
+  `Result.addReward` (`ledger/rewards/rewards.go`) accumulates that column
+  from every member reward the calculation produced, spendable or not, while
+  the ledger credits only the rest, so the two differ by exactly the pool's
+  unspendable member rewards. The row's own `unspendable` column is not a
   usable correction, since it accumulates unspendable *leader* rewards too.
 
   The comparable quantity is the sum over the stake epoch's
@@ -12479,7 +12504,7 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
   Before that point Dingo's reward figures are still provisional — the
   spendable flags are not final, so Dingo reads high by forfeitures that have
   not happened yet — and a row it has not written yet is absent for a reason
-  that is not a divergence. Both `ComparePoolEpoch` and `CompareAccountEpoch`
+  that is not a divergence. Both `CompareMemberRewards` and `CompareAccountEpoch`
   fold that into `reference_lag`, for presence and for amount alike.
 
   The wall-clock window alone is not enough because it compares against the
@@ -12655,7 +12680,10 @@ per-account categories: `acct_only_dingo`,
 reward_type, pool) row within one side — a data-integrity problem, not a
 value disagreement; the same (stake_address, reward_type) from two
 different pools is a shared reward account, which aggregates instead),
-`reward_type_unmodeled` (ERROR: a Koios reward type with no model here, so
+`koios_pool_history_inconsistent` (informational: Koios's own
+`pool_history.member_rewards` disagrees with the sum of its per-account member
+rows for the pool and epoch; Dingo is judged against the per-account sum
+alone), `reward_type_unmodeled` (ERROR: a Koios reward type with no model here, so
 the account's rewards were not fully validated and the epoch cannot pass),
 `acct_zero_reward_row` (informational: a reward row worth zero
 lovelace present on one side only — nothing was credited either way, so the
@@ -13349,9 +13377,10 @@ never the reverse.
   skips the per-account comparison for that epoch entirely — mirroring how a
   missing `koios_totals` row already gates `CompareEpochTotals`. This is the
   invariant the chunked fetch must never violate: no code path may ever
-  set `complete = true` after a partial fetch. `Cache.GetAccountCoverage`
-  propagates `sql.ErrNoRows` unwrapped for "no fetch attempted yet" — every
-  caller (`compareEpochAccounts`, `Observer.fetchAccountsIfNeeded`) treats
+  set `complete = true` after a partial fetch. `Cache.GetAccountCoverage` and
+  `Cache.GetAccountReference` propagate `sql.ErrNoRows` unwrapped for "no
+  fetch attempted yet" — every caller (`compareEpochAccounts`,
+  `Observer.fetchAccountsIfNeeded`) treats
   that specific error as incomplete coverage, but any other error from the
   query is a genuine cache/DB failure and is surfaced as `dingo_db_error`
   (or a propagated error, for the observer) rather than being conflated with
