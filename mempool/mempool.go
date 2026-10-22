@@ -172,13 +172,17 @@ type TxValidationSessionProvider interface {
 	) error) error
 }
 
-// TxSizeLimitProvider optionally reports the active protocol's MaxTxSize so
-// admission can refuse an oversized submission before decoding it, taking the
-// mutation gate, or running ledger rules. LedgerState implements it; validators
-// that do not simply skip the early check and rely on the ledger's own rule.
+// TxSizeLimitProvider optionally reports the MaxTxSize ledger validation
+// applies to a transaction of a given era, so admission can refuse an
+// oversized submission before decoding it, taking the mutation gate, or
+// running ledger rules. LedgerState implements it; validators that do not
+// simply skip the early check and rely on the ledger's own rule.
 type TxSizeLimitProvider interface {
-	// MaxTxSize returns the current MaxTxSize and whether it is known.
-	MaxTxSize() (uint, bool)
+	// MaxTxSize returns the MaxTxSize the ledger would apply to a transaction
+	// of era txType, and whether it is known. It must report false rather
+	// than a smaller limit than the ledger would apply, so the early check
+	// never refuses what the ledger rule accepts.
+	MaxTxSize(txType uint) (uint, bool)
 }
 
 type MempoolConfig struct {
@@ -1937,7 +1941,7 @@ func (m *Mempool) rejectOversizedTx(txType uint, txBytes []byte) error {
 	if !ok {
 		return nil
 	}
-	maxSize, known := provider.MaxTxSize()
+	maxSize, known := provider.MaxTxSize(txType)
 	if !known {
 		return nil
 	}

@@ -1926,12 +1926,16 @@ arrive before the rebuild, their older transactions are placed ahead of the
 already queued restores. Revalidation therefore sees transactions in ledger
 order.
 
-`Mempool.AddTransaction` refuses a submission larger than the current
-`MaxTxSize` before decoding it, taking `mutationMutex`, or running ledger
-rules. The size is measured as `common.TxSize` does (the raw CBOR length, one
-byte less for a four-element transaction from Alonzo on), so the early
-rejection never refuses a transaction the ledger rule would accept; the rule
-still decides everything that passes. The limit comes from the optional `mempool.TxSizeLimitProvider`
+`Mempool.AddTransaction` refuses a submission larger than the `MaxTxSize`
+ledger validation would apply to it before decoding it, taking
+`mutationMutex`, or running ledger rules. That limit follows the submitted era
+as transaction validation does: the current era's parameters, or the previous
+era's for a previous-era transaction; for any other era no limit is reported
+and the ledger's era-mismatch rejection stands. The size is measured as
+`common.TxSize` does (the raw CBOR length, one byte less for a four-element
+transaction from Alonzo on), so the early rejection never refuses a
+transaction the ledger rule would accept; the rule still decides everything
+that passes. The limit comes from the optional `mempool.TxSizeLimitProvider`
 implemented by `LedgerState`, and the rejection is the ledger's own
 `shelley.MaxTxSizeUtxoError`, so every submit path reports it as an ordinary
 transaction rejection.

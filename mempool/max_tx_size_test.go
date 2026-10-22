@@ -31,15 +31,21 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// sizeLimitValidator reports a fixed MaxTxSize and counts how many
-// transactions reach ledger validation.
+// sizeLimitValidator reports a fixed MaxTxSize, or a per-era one from
+// eraLimits when set, and counts how many transactions reach ledger
+// validation.
 type sizeLimitValidator struct {
 	validated atomic.Int64
+	eraLimits map[uint]uint
 	maxSize   uint
 	known     bool
 }
 
-func (v *sizeLimitValidator) MaxTxSize() (uint, bool) {
+func (v *sizeLimitValidator) MaxTxSize(txType uint) (uint, bool) {
+	if v.eraLimits != nil {
+		limit, ok := v.eraLimits[txType]
+		return limit, ok
+	}
 	return v.maxSize, v.known
 }
 
@@ -162,4 +168,24 @@ func TestAddTransactionRejectsOversizedThreeElementDijkstraTx(t *testing.T) {
 	require.Equal(t, uint(ledgerSize), sizeErr.TxSize)
 	require.Zero(t, v.validated.Load(), "ledger rules ran for oversized tx")
 	require.Empty(t, m.Transactions())
+}
+
+// The limit is the one for the submitted era, not a single current limit.
+func TestAddTransactionAppliesLimitOfSubmittedEra(t *testing.T) {
+	t.Parallel()
+	txBytes, ledgerSize := decodeTestTx(t)
+	v := &sizeLimitValidator{eraLimits: map[uint]uint{
+		uint(conway.EraIdConway):    uint(ledgerSize - 1),
+		uint(gledger.TxTypeBabbage): uint(ledgerSize),
+	}}
+	m := newTestMempoolWithValidator(t, v)
+	defer m.Stop(context.Background())
+
+	err := m.AddTransaction(
+		context.Background(), uint(conway.EraIdConway), txBytes,
+	)
+	var sizeErr shelley.MaxTxSizeUtxoError
+	require.ErrorAs(t, err, &sizeErr)
+	require.Equal(t, uint(ledgerSize-1), sizeErr.MaxTxSize)
+	require.Zero(t, v.validated.Load(), "ledger rules ran for oversized tx")
 }

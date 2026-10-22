@@ -716,11 +716,34 @@ func protocolBlockLimits(
 	}
 }
 
-// MaxTxSize returns the MaxTxSize of the current protocol parameters. It
-// reports false when the parameters are unknown or of an era without the
-// parameter, in which case callers leave the check to the ledger rules.
-func (ls *LedgerState) MaxTxSize() (uint, bool) {
-	switch pp := ls.GetCurrentPParams().(type) {
+// MaxTxSize returns the MaxTxSize that ledger validation applies to a
+// transaction of the given era: the current era's parameters, or the previous
+// era's for a transaction of the immediately previous era, chosen as
+// validationContext chooses them and read from one snapshot. It reports false
+// when the era is not one the ledger would validate, or when the parameters
+// are unknown or of an era without the parameter; callers then leave the check
+// to the ledger rules.
+func (ls *LedgerState) MaxTxSize(txEraId uint) (uint, bool) {
+	consensusState := ls.loadConsensusSnapshot()
+	snapshot := txValidationSnapshot{
+		currentEra:     consensusState.currentEra,
+		currentPParams: consensusState.currentPParams,
+		prevEraPParams: consensusState.prevEraPParams,
+		eraList:        ls.eraList(),
+	}
+	if !eras.IsCompatibleEraIn(
+		snapshot.eraList,
+		txEraId,
+		snapshot.currentEra.Id,
+	) || eras.GetEraByIdIn(snapshot.eraList, txEraId) == nil {
+		return 0, false
+	}
+	pp, _ := snapshot.validationPParams(txEraId)
+	return protocolMaxTxSize(pp)
+}
+
+func protocolMaxTxSize(pparams lcommon.ProtocolParameters) (uint, bool) {
+	switch pp := pparams.(type) {
 	case *shelley.ShelleyProtocolParameters:
 		if pp != nil {
 			return pp.MaxTxSize, true
