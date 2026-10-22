@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"slices"
 	"strconv"
 )
 
@@ -127,24 +128,43 @@ func signedAmountText(value any) (string, error) {
 	}
 }
 
-// sumSignedRows sums a signed decimal column in Go instead of asking SQL to
-// coerce it. It is the delta_coin counterpart of sumUint64Rows: the column is
-// persisted as decimal text carrying its own sign, and the total is
+// sumSignedRowsBounded sums a signed decimal column in Go instead of asking
+// SQL to coerce it. It is the delta_coin counterpart of sumUint64Rows: the
+// column is persisted as decimal text carrying its own sign, and the total is
 // accumulated without a width bound so a row larger than any pot is summed
 // rather than silently truncated. The returned total is never nil.
-func sumSignedRows(
+//
+// It reads at most maxRows rows and reports errLimit when the query has more.
+// A maxRows of zero is unbounded. The query gains a LIMIT one row past the
+// bound, so the database stops there too.
+func sumSignedRowsBounded(
 	ctx context.Context,
 	db queryer,
 	query string,
+	maxRows int,
+	errLimit error,
 	args ...any,
 ) (*big.Int, error) {
+	if maxRows > 0 {
+		query += " LIMIT ?"
+		args = append(slices.Clip(args), maxRows+1)
+	}
 	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	total := new(big.Int)
+	read := 0
 	for rows.Next() {
+		read++
+		if maxRows > 0 && read > maxRows {
+			return nil, fmt.Errorf(
+				"more than %d rows: %w",
+				maxRows,
+				errLimit,
+			)
+		}
 		var raw any
 		if err := rows.Scan(&raw); err != nil {
 			return nil, err

@@ -696,7 +696,7 @@ func TestLeiosTxsOfferDeadlineHandsDribblingOwnerToHealthyWaiter(t *testing.T) {
 		data, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
 		return ok && data.completeTxCache() &&
 			ownerGuard.inflight.Load() == 0 && waiterGuard.inflight.Load() == 0
-	}, 5*time.Second, "deadline did not hand off to the healthy waiter")
+	}, testutil.AsyncWait, "deadline did not hand off to the healthy waiter")
 	require.Positive(t, owner.requests)
 	require.Less(t, owner.requests, len(txs))
 	require.Equal(t, 1, healthy.requests)

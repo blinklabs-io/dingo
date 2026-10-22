@@ -1872,6 +1872,9 @@ func (ls *LedgerState) AwaitChainsyncHeaderCapacity(
 			return nil
 		}
 		resumeAt := max(pauseAt-BlockfetchBatchSize, 0)
+		if hook := ls.chainsyncCapacityWaitHook; hook != nil {
+			hook()
+		}
 		if err := ls.chain.WaitForHeaderCountBelowOrSignal(ctx, resumeAt+1, changed); err != nil {
 			return err
 		}
@@ -5441,6 +5444,10 @@ func (ls *LedgerState) flushQueuedHeadersForHorizonWait(
 // and no blockfetch is running, as while a block waits on data fetched by
 // another protocol. Re-intersecting instead closes the connections that work
 // may need, without advancing the horizon.
+//
+// A chain tip in the applied tip's slot under another hash is such a block. A
+// chain tip in an earlier slot is a rollback the ledger has yet to follow, and
+// nothing at or below the applied slot can move the horizon past where it is.
 func (ls *LedgerState) chainAheadOfAppliedTip() bool {
 	if ls.chain == nil {
 		return false
@@ -5449,7 +5456,12 @@ func (ls *LedgerState) chainAheadOfAppliedTip() bool {
 	if tip == nil {
 		return false
 	}
-	return ls.chain.Tip().Point.Slot > tip.currentTip.Point.Slot
+	chainTip := ls.chain.Tip().Point
+	applied := tip.currentTip.Point
+	if chainTip.Slot != applied.Slot {
+		return chainTip.Slot > applied.Slot
+	}
+	return !pointMatches(chainTip, applied)
 }
 
 // awaitForecastHorizon blocks until the published ledger state can forecast

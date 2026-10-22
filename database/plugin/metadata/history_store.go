@@ -161,22 +161,28 @@ type HistoryStore interface {
 
 	// GetAccountAssetBalances returns the native assets held by the live
 	// UTxOs of a credential, one entry per asset ordered by policy then
-	// name, along with the number of distinct assets.
+	// name, along with the number of distinct assets. It returns
+	// models.ErrAccountAggregateLimit when the credential holds more than
+	// limits allows.
 	GetAccountAssetBalances(
 		credentialTag uint8,
 		stakingKey []byte,
 		limit int,
 		offset int,
 		order string,
+		limits models.AccountAggregateLimits,
 		txn types.Txn,
 	) ([]models.AssetQuantity, int, error)
 
 	// GetAccountAddressTotals returns the lifetime received and sent totals
 	// of every address carrying a stake credential. Sent totals need spent
-	// UTxOs, which the store retains in API storage mode.
+	// UTxOs, which the store retains in API storage mode. It returns
+	// models.ErrAccountAggregateLimit when the credential holds more than
+	// limits allows.
 	GetAccountAddressTotals(
 		credentialTag uint8,
 		stakingKey []byte,
+		limits models.AccountAggregateLimits,
 		txn types.Txn,
 	) (models.AccountAddressTotals, error)
 
