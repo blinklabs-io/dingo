@@ -1247,15 +1247,15 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 	}
 
 	// Koios parity observer: network mirrors the same
-	// preview/preprod restriction internal/koiosparity.NewObserver enforces
+	// preview/preprod/mainnet restriction internal/koiosparity.NewObserver enforces
 	// at construction time, checked here too so a bad value fails fast at
 	// config-validation time instead of only once the node reaches
 	// startKoiosParityObserver. Empty is valid -- it defers to the node's
 	// own configured Network.
 	if net := c.KoiosParity.Network; net != "" && net != "preview" &&
-		net != "preprod" {
+		net != "preprod" && net != "mainnet" {
 		errs = append(errs, fmt.Errorf(
-			"invalid koiosParity.network %q: must be empty, \"preview\", or \"preprod\"",
+			"invalid koiosParity.network %q: must be empty, \"preview\", \"preprod\", or \"mainnet\"",
 			net,
 		))
 	}

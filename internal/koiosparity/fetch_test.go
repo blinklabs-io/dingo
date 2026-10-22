@@ -695,8 +695,8 @@ func TestIsPreStakingEpochIsPerNetwork(t *testing.T) {
 		{"preview", 2, false},
 		{"preprod", 5, true},
 		{"preprod", 6, false},
-		{"mainnet", 1, true},
-		{"mainnet", 2, false},
+		{"mainnet", 209, true},
+		{"mainnet", 210, false},
 	} {
 		require.Equal(t, tc.want, IsPreStakingEpoch(tc.network, tc.epoch),
 			"%s epoch %d", tc.network, tc.epoch)

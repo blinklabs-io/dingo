@@ -221,6 +221,30 @@ func TestValidate_InvalidAPITLSMode(t *testing.T) {
 	assert.Contains(t, err.Error(), "invalid mode")
 }
 
+// TestValidate_KoiosParityNetwork pins the accepted koiosParity.network set.
+// Not t.Parallel: resetGlobalConfig replaces the process-global config that
+// GetConfig and Validate read.
+func TestValidate_KoiosParityNetwork(t *testing.T) {
+	for _, net := range []string{"", "preview", "preprod", "mainnet"} {
+		resetGlobalConfig()
+		cfg := GetConfig()
+		cfg.ApplyDefaults()
+		cfg.KoiosParity.Network = net
+		err := cfg.Validate(RunModeLoad)
+		if err != nil {
+			assert.NotContains(t, err.Error(), "koiosParity.network", net)
+		}
+	}
+
+	resetGlobalConfig()
+	cfg := GetConfig()
+	cfg.ApplyDefaults()
+	cfg.KoiosParity.Network = "sanchonet"
+	err := cfg.Validate(RunModeLoad)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid koiosParity.network")
+}
+
 // TestGetConfigSnapshotDoesNotShareAPIPolicy asserts GetConfig's snapshot
 // deep-copies api.tls pointer fields, matching the existing
 // nested-plugin-config isolation guarantee: mutating one snapshot's

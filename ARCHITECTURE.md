@@ -12106,7 +12106,7 @@ recognized as the same operation.
 ### Koios Parity Tracker (`cmd/koios-parity/`, `internal/koiosparity/`)
 
 An operator tool that validates Dingo's closed-epoch reward inputs against Koios
-reference data on preview and preprod networks. Its original, still-supported
+reference data on preview, preprod and mainnet networks. Its original, still-supported
 form is a standalone binary built from `cmd/koios-parity/` that polls a
 separately synced copy of Dingo's metadata database. Dingo also has a
 second, in-process mode — an epoch-boundary observer the node itself can
@@ -13601,11 +13601,13 @@ never the reverse.
   `KoiosClient` (they work entirely from the cache), so unlike `Fetch` they
   don't get `NewKoiosClient`'s network-allow-list check for free — both call
   `validateKoiosNetwork` (`koios_client.go`) explicitly. This matters
-  specifically for `StakeAddressFromCredential` (`dingo_db.go`), which
-  hardcodes the Cardano testnet address network ID since preview/preprod are
-  the only networks this tool ever validates against: an unvalidated
-  `network` value reaching `compareEpochAccounts` could otherwise silently
-  generate wrong-network-tagged stake addresses instead of erroring.
+  specifically for `StakeAddressFromCredential` (`dingo_db.go`), which takes
+  the network and encodes the mainnet address network ID for `mainnet` and the
+  testnet ID for `preview`/`preprod`, returning an error for any other value:
+  an unvalidated `network` value reaching `compareEpochAccounts` could
+  otherwise silently generate wrong-network-tagged stake addresses. Mainnet's
+  pre-staking range (`preStakingThroughEpochByNetwork`) runs through epoch 209,
+  since Shelley starts at epoch 208.
 
 #### Chunked, checkpointed account-reward fetch
 

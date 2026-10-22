@@ -247,7 +247,8 @@ func koiosRefundRows(
 	t.Helper()
 	var rows []KoiosAccountRewards
 	for _, key := range keys {
-		addr, err := StakeAddressFromCredential(key, 0)
+		addr, err := StakeAddressFromCredential(
+			"preview", key, 0)
 		require.NoError(t, err)
 		rows = append(rows, KoiosAccountRewards{
 			StakeAddress: addr,

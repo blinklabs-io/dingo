@@ -533,7 +533,7 @@
   # Can be overridden with DINGO_KOIOS_PARITY_ENABLED
   # CLI: --koios-parity-enabled
   # enabled: false
-  # Koios network to validate against: preview or preprod. Empty defaults to
+  # Koios network to validate against: preview, preprod or mainnet. Empty defaults to
   # this node's own `network` setting.
   # Can be overridden with DINGO_KOIOS_PARITY_NETWORK
   # CLI: --koios-parity-network

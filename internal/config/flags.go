@@ -570,7 +570,7 @@ var flagSpecs = []flagSpec{
 		"KoiosParity.Network",
 		"koios-parity-network",
 		"",
-		"Koios network to validate against: preview or preprod (default: node's own --network)",
+		"Koios network to validate against: preview, preprod or mainnet (default: node's own --network)",
 	),
 	stringFlag(
 		"KoiosParity.CachePath",
