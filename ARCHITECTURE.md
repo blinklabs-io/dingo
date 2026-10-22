@@ -11617,7 +11617,9 @@ the session holds a metadata read connection and sessions are opened before
 the mutation gate, so a second read inside one could wait on connections that
 admissions queued behind the gate never release. An input the batch skipped
 as a pool output whose parent has left the pool by validation time restarts
-the admission attempt. A phase-2-invalid transaction is indexed by its
+the admission attempt; when the attempts run out the admission ends with
+`mempool.ErrPendingStateMoved`, the same no-verdict result as a ledger that
+kept moving. A phase-2-invalid transaction is indexed by its
 collateral return and collateral inputs only. Every removal path (explicit
 removal, block inclusion, eviction, expiry, revalidation and stop) updates the
 index under the pool lock, and a revalidation swap rebuilds it from the

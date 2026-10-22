@@ -699,6 +699,9 @@ type sessionConnValidator struct {
 	// connection.
 	beforeSession func()
 	once          sync.Once
+	// eachSession, when set, runs before every session takes its
+	// connection.
+	eachSession func()
 }
 
 func (v *sessionConnValidator) WithTxValidationSession(
@@ -716,6 +719,9 @@ func (v *sessionConnValidator) WithTxValidationSession(
 ) error {
 	if v.beforeSession != nil {
 		v.once.Do(v.beforeSession)
+	}
+	if v.eachSession != nil {
+		v.eachSession()
 	}
 	v.conns <- struct{}{}
 	defer func() { <-v.conns }()
@@ -843,4 +849,116 @@ func TestAddressIndexResolverFailureKeepsRolledBackTransaction(t *testing.T) {
 	require.Equal(t, []string{hash},
 		m.TransactionHashesByAddress(spender.String()))
 	requireIndexMatchesPool(t, m)
+}
+
+// parentsLeavingFixture admits three parents and builds a child spending one
+// output of each. Once armed, every admission session outside a pool rebuild
+// confirms one remaining parent and removes it from the pool, so each
+// admission attempt for the child finds a skipped pool parent gone.
+type parentsLeavingFixture struct {
+	m        *Mempool
+	v        *sessionConnValidator
+	payees   []lcommon.Address
+	parents  []string
+	childRaw []byte
+	child    string
+	armed    atomic.Bool
+}
+
+func newParentsLeavingFixture(t *testing.T) *parentsLeavingFixture {
+	t.Helper()
+	f := &parentsLeavingFixture{
+		v: &sessionConnValidator{
+			resolvingValidator: newResolvingValidator(),
+			conns:              make(chan struct{}, 1),
+		},
+	}
+	f.m = newIndexTestPool(t, f.v, false, nil)
+	var childInputs []indexTxInput
+	var outs []indexTxInput
+	for i := range 3 {
+		payee := indexTestAddress(t, byte(0x70+i))
+		raw, tx := buildIndexTx(t, indexTxSpec{
+			inputs:  []indexTxInput{{hash: [32]byte{0x71, byte(i)}}},
+			outputs: []lcommon.Address{payee},
+		})
+		require.NoError(t, f.m.AddTransaction(
+			context.Background(), uint(conway.EraIdConway), raw,
+		))
+		out := indexTxInput{hash: [32]byte(tx.Hash().Bytes())}
+		f.payees = append(f.payees, payee)
+		f.parents = append(f.parents, tx.Hash().String())
+		outs = append(outs, out)
+		childInputs = append(childInputs, out)
+	}
+	raw, tx := buildIndexTx(t, indexTxSpec{
+		inputs:  childInputs,
+		outputs: []lcommon.Address{indexTestAddress(t, 0x7f)},
+	})
+	f.childRaw, f.child = raw, tx.Hash().String()
+	next := 0
+	f.v.eachSession = func() {
+		if !f.armed.Load() || next == len(outs) {
+			return
+		}
+		// A pool rebuild holds rebuildMutex; only admission sessions run
+		// without it.
+		if !f.m.rebuildMutex.TryLock() {
+			return
+		}
+		f.m.rebuildMutex.Unlock()
+		f.v.confirm(outs[next], f.payees[next])
+		f.m.RemoveTxsByHash([]string{f.parents[next]})
+		next++
+	}
+	return f
+}
+
+// TestAddressIndexExhaustedParentRetriesAreNotAVerdict pins that running
+// out of admission attempts while pool parents keep confirming reports the
+// public retryable ErrPendingStateMoved, which every submission surface
+// classifies as no verdict, rather than a rejection.
+func TestAddressIndexExhaustedParentRetriesAreNotAVerdict(t *testing.T) {
+	t.Parallel()
+	f := newParentsLeavingFixture(t)
+	f.armed.Store(true)
+	err := f.m.AddTransaction(
+		context.Background(), uint(conway.EraIdConway), f.childRaw,
+	)
+	require.ErrorIs(t, err, ErrPendingStateMoved)
+	_, ok := f.m.GetTransaction(f.child)
+	require.False(t, ok)
+	requireIndexMatchesPool(t, f.m)
+
+	// With every parent confirmed the same child is admitted and indexed
+	// under each parent's address.
+	require.NoError(t, f.m.AddTransaction(
+		context.Background(), uint(conway.EraIdConway), f.childRaw,
+	))
+	for _, payee := range f.payees {
+		require.Equal(t, []string{f.child},
+			f.m.TransactionHashesByAddress(payee.String()))
+	}
+}
+
+// TestAddressIndexExhaustedParentRetriesKeepRolledBackTransaction is the
+// rollback readmission side: the restored transaction stays pending.
+func TestAddressIndexExhaustedParentRetriesKeepRolledBackTransaction(
+	t *testing.T,
+) {
+	t.Parallel()
+	f := newParentsLeavingFixture(t)
+	block := blockCarryingTx(t, f.childRaw)
+	f.m.noteChainUpdate(chainUpdate(chain.ChainRollbackEvent{
+		RolledBackBlocks: []models.Block{block},
+	}))
+	f.armed.Store(true)
+	require.ErrorIs(t, f.m.rebuildAfterChainUpdate(context.Background()),
+		ErrPendingStateMoved)
+	require.Equal(t, []string{f.child}, f.m.pendingRolledBackOrder)
+
+	require.NoError(t, f.m.rebuildAfterChainUpdate(context.Background()))
+	_, ok := f.m.GetTransaction(f.child)
+	require.True(t, ok)
+	requireIndexMatchesPool(t, f.m)
 }

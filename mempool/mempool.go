@@ -1312,9 +1312,10 @@ const maxRevalidationCatchupRounds = 16
 const maxAdmissionReconciles = 2
 
 // ErrPendingStateMoved is returned by AddTransaction when the ledger kept
-// publishing new state while the transaction was being admitted, so no
-// verdict was reached. It is not a rejection: the same transaction may be
-// admitted once the ledger settles.
+// publishing new state, or the pool parents of the transaction's inputs kept
+// leaving the pool, while the transaction was being admitted, so no verdict
+// was reached. It is not a rejection: the same transaction may be admitted
+// once the ledger settles.
 var ErrPendingStateMoved = errors.New(
 	"mempool: ledger moved since pending transactions were validated",
 )
@@ -1898,8 +1899,14 @@ func (m *Mempool) AddTransaction(
 		if errors.Is(err, errAddressInputsMoved) {
 			// The pool moved, not the ledger view: the next attempt reads
 			// the parent's output as confirmed.
+			// Running out of attempts reaches no verdict either, so it
+			// carries the sentinel every caller already treats as retryable.
 			if attempt == maxAdmissionReconciles {
-				return fmt.Errorf("index transaction: %w", err)
+				return fmt.Errorf(
+					"index transaction: %w: %w",
+					ErrPendingStateMoved,
+					err,
+				)
 			}
 			continue
 		}
