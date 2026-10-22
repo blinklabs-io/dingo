@@ -420,8 +420,8 @@ func TestDingoEraEntryPointsReportsMissingValidator(t *testing.T) {
 func TestConformanceVectorsExerciseDingoEraEntryPoints(t *testing.T) {
 	testutil.SkipUnderRace(
 		t,
-		"a single-goroutine corpus replay; go-test (Linux) and go-test "+
-			"(Linux, quick) run the same entry-point assertions un-instrumented",
+		"a single-goroutine corpus replay; CI's check and gate (services) "+
+			"jobs run the same entry-point assertions un-instrumented",
 	)
 	run := entryPointCorpusEvidence(t)
 	require.NotEmpty(
@@ -479,8 +479,8 @@ func TestConformanceVectorsExerciseDingoEraEntryPoints(t *testing.T) {
 func TestConformanceVectorsPreverifiedSignaturesMatchInline(t *testing.T) {
 	testutil.SkipUnderRace(
 		t,
-		"a single-goroutine corpus replay; go-test (Linux) and go-test "+
-			"(Linux, quick) run the same assertions un-instrumented",
+		"a single-goroutine corpus replay; CI's check and gate (services) "+
+			"jobs run the same assertions un-instrumented",
 	)
 	run := entryPointCorpusEvidence(t)
 	var compared, rejected int
