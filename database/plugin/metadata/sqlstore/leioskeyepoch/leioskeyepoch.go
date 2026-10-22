@@ -133,16 +133,19 @@ func (r retirementRow) after(registration registrationRow) bool {
 //
 // Every keyed row already stores the epoch its key holds once the row is in
 // effect, so the result only needs the key state active in the transaction's
-// epoch, which is a stored row: the pool's latest registration before that
-// epoch, unless a retirement reaped the pool before it or the pool was
-// registered afresh within it, when it is the epoch's first registration. A
-// constant number of indexed reads finds these rows, whatever the length of
-// the pool's history, and nothing is kept outside the rows, so a rollback that
-// deletes rows leaves nothing to undo. A snapshot-imported registration is the
-// state the snapshot carried, with its epoch, or without one when the snapshot
-// had none; a key kept from it keeps the absence. A snapshot's staged
-// parameters (registration index above zero) carry no epoch and are adopted
-// against the snapshot's current parameters at the boundary after the import.
+// epoch, which is a stored row: the current parameters of the pool's latest
+// snapshot import in that epoch when there is one, because an import
+// replaces the pool state where it lands, and otherwise the pool's latest
+// registration before that epoch, unless a retirement reaped the pool before
+// it or the pool was registered afresh within it, when it is the epoch's
+// first registration. A constant number of indexed reads finds these rows,
+// whatever the length of the pool's history, and nothing is kept outside the
+// rows, so a rollback that deletes rows leaves nothing to undo. A
+// snapshot-imported registration is the state the snapshot carried, with its
+// epoch, or without one when the snapshot had none; a key kept from it keeps
+// the absence. A snapshot's staged parameters (registration index above
+// zero) carry no epoch and are adopted against the snapshot's current
+// parameters at the boundary after the import.
 //
 // Chain validity bounds what the rows can hold: POOL accepts a retirement only
 // for a registered pool and only naming a later epoch, so the latest retirement
@@ -209,10 +212,12 @@ func Registration(
 }
 
 // activeWithinEpoch resolves the key state active in epoch current when the
-// pool already registered in it before `at`: the latest registration before
-// the epoch, unless there is none or a retirement reaped the pool before the
-// epoch, when the epoch's first registration registered the pool afresh. A
-// snapshot's current parameters set the active state wherever they occur.
+// pool already registered in it before `at`: the current parameters of the
+// pool's latest snapshot import in the epoch when there is one, because an
+// import replaces the pool state where it lands; the latest registration
+// before the epoch otherwise, unless there is none or a retirement reaped
+// the pool before the epoch, when the epoch's first registration registered
+// the pool afresh.
 func activeWithinEpoch(
 	ctx context.Context,
 	db Querier,
@@ -222,6 +227,13 @@ func activeWithinEpoch(
 	current uint64,
 	latest registrationRow,
 ) (keyState, bool, error) {
+	imported, ok, err := latestSnapshotCurrent(ctx, db, poolID, at, start)
+	if err != nil {
+		return keyState{}, false, err
+	}
+	if ok {
+		return imported.stored, true, nil
+	}
 	first, ok, err := firstRegistrationFrom(ctx, db, poolID, at, start)
 	if err != nil {
 		return keyState{}, false, err
@@ -230,9 +242,6 @@ func activeWithinEpoch(
 		// latest executed in the epoch, so it is the epoch's first
 		// registration when no earlier row qualifies.
 		first = latest
-	}
-	if first.snapshot && first.registrationIndex == 0 {
-		return effectiveState(ctx, db, poolID, first)
 	}
 	prior, ok, err := latestRegistration(ctx, db, poolID, at, &start)
 	if err != nil {
@@ -358,6 +367,30 @@ ORDER BY pr.added_slot ASC, ` + registrationBlockIndex + ` ASC,
 LIMIT 1`
 	args = append([]any{poolID, at.Slot}, args...)
 	args = append(args, start, start)
+	return scanRegistration(db.QueryRowContext(ctx, query, args...))
+}
+
+// latestSnapshotCurrent reads the pool's latest snapshot-imported current
+// parameters -- its registration without a certificate at index zero --
+// executed at or after slot start and strictly before `at`. A snapshot row's
+// execution slot is the slot it was added at, so the added-slot lower bound
+// keeps the scan on the (pool_id, added_slot) index.
+func latestSnapshotCurrent(
+	ctx context.Context,
+	db Querier,
+	poolID int64,
+	at Position,
+	start uint64,
+) (registrationRow, bool, error) {
+	predicate, args := positionPredicate("pr", at, registrationBlockIndex)
+	query := registrationColumns + predicate + `
+  AND pr.added_slot >= ?
+  AND COALESCE(pr.certificate_id, 0) = 0
+  AND pr.registration_index = 0
+ORDER BY pr.added_slot DESC, pr.id DESC
+LIMIT 1`
+	args = append([]any{poolID, at.Slot}, args...)
+	args = append(args, start)
 	return scanRegistration(db.QueryRowContext(ctx, query, args...))
 }
 

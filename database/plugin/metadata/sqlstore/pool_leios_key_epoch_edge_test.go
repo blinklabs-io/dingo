@@ -242,6 +242,34 @@ func TestPoolLeiosKeyEpochSnapshotStagedKeyIsAdoptedAtNextEpoch(t *testing.T) {
 	require.Equal(t, int64(7), rotated[len(rotated)-1])
 }
 
+// A snapshot import replaces the pool's state where it lands, even when the
+// pool registered earlier in the same epoch: the import's current parameters
+// are the active state for the rest of the epoch. A re-registration keeping
+// the snapshot's key keeps the snapshot's epoch, and one registering the
+// pre-import key stages it for the next boundary.
+func TestPoolLeiosKeyEpochSnapshotImportReplacesSameEpochLiveState(t *testing.T) {
+	t.Parallel()
+	store := newDepositHeldStore(t)
+	depositHeldEpochs(t, store, 12)
+	kept := depositHeldPoolKey(0xdb)
+	stale := depositHeldPoolKey(0xdc)
+
+	// Both pools register live in epoch 4 with key 0x11, told apart by the
+	// block index of their transaction.
+	writeDepositHeldCert(t, store, 4_100, 0, leiosKeyEpochCert(kept, 0x11, 0x21), 500)
+	writeDepositHeldCert(t, store, 4_100, 1, leiosKeyEpochCert(stale, 0x11, 0x21), 500)
+	// A snapshot import later in the same epoch carries key 0x12 registered
+	// in epoch 2: the live row's key no longer reflects the ledger state.
+	importLeiosKeyPoolStaged(t, store, kept, 4_500, 0x12, 2, 0x13)
+	importLeiosKeyPoolStaged(t, store, stale, 4_501, 0x12, 2, 0x13)
+
+	writeDepositHeldCert(t, store, 4_600, 0, leiosKeyEpochCert(kept, 0x12, 0x22), 0)
+	writeDepositHeldCert(t, store, 4_600, 1, leiosKeyEpochCert(stale, 0x11, 0x21), 0)
+
+	requireLeiosKeyEpoch(t, store, kept, 4_600, 2)
+	requireLeiosKeyEpoch(t, store, stale, 4_600, 5)
+}
+
 // A pool reaped before the epoch and registered afresh in it holds the fresh
 // registration's key for the rest of the epoch, not the key of its earlier
 // lifetime: a later re-registration in the same epoch is compared with it.
