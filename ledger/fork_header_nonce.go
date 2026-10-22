@@ -67,6 +67,14 @@ func (ls *LedgerState) peerChainSelectionEpochNonce(
 		if len(ls.chain.Tip().Point.Hash) == 0 {
 			return nil, models.Epoch{}, false, nil
 		}
+		// A deferred header queued as a linear extension of the local chain
+		// stays out of the peer's observed history, so its child has no
+		// recorded ancestry. The child still extends the local chain and is
+		// verified against it, as its queued parent was; withholding it would
+		// drop it and strand every later header from the peer behind it.
+		if ls.chain.HoldsQueuedHeaderHash(header.PrevHash().Bytes()) {
+			return nil, models.Epoch{}, false, nil
+		}
 		return nil, models.Epoch{}, false, fmt.Errorf(
 			"%w: candidate ancestry is unavailable for header at slot %d",
 			ErrHeaderVerificationWithheld,
