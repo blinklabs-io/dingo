@@ -2772,3 +2772,238 @@ func TestDial_ReceivesUTxOWholeLargerThanIngressBudget(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, utxos.Results, utxoCount)
 }
+
+// txInfoChunkFake answers each chunk, by its first hash, with respond(attempt)
+// and counts the attempts.
+type txInfoChunkFake struct {
+	mu       sync.Mutex
+	attempts map[string]int
+	respond  func(chunk []string, attempt int) error
+}
+
+func (f *txInfoChunkFake) fetch(
+	_ context.Context, chunk []string,
+) ([]koiosparity.KoiosTxInfoItem, error) {
+	f.mu.Lock()
+	f.attempts[chunk[0]]++
+	attempt := f.attempts[chunk[0]]
+	f.mu.Unlock()
+	if err := f.respond(chunk, attempt); err != nil {
+		return nil, err
+	}
+	items := make([]koiosparity.KoiosTxInfoItem, 0, len(chunk))
+	for _, h := range chunk {
+		items = append(items, koiosparity.KoiosTxInfoItem{TxHash: h})
+	}
+	return items, nil
+}
+
+func (f *txInfoChunkFake) attemptsFor(hash string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.attempts[hash]
+}
+
+func errTxNotIndexed(hash string) error {
+	return fmt.Errorf("%w %s", koiosparity.ErrTxInfoMissing, hash)
+}
+
+// TestFetchTxInfoChunksRetriesATxKoiosHasNotIndexed pins the live preprod
+// failure at the tip: Koios had no /tx_info result yet for a hash Dingo had
+// just served, and the flush re-baselined the reconstruction. A chunk that
+// fails only that way is fetched again after a wait and then applies.
+func TestFetchTxInfoChunksRetriesATxKoiosHasNotIndexed(t *testing.T) {
+	t.Parallel()
+	chunks := [][]string{{"aa", "ab"}, {"ba", "bb"}}
+	f := &txInfoChunkFake{
+		attempts: map[string]int{},
+		respond: func(chunk []string, attempt int) error {
+			if chunk[0] == "ba" && attempt == 1 {
+				return errTxNotIndexed("bb")
+			}
+			return nil
+		},
+	}
+	waits := &recordingWait{}
+	schedule := []time.Duration{time.Second, 2 * time.Second}
+
+	results, errs, err := fetchTxInfoChunks(
+		context.Background(), chunks, f.fetch, schedule, waits.wait,
+		func(string, ...any) {},
+	)
+	require.NoError(t, err)
+	assert.Equal(t, []error{nil, nil}, errs)
+	assert.Equal(t, schedule[:1], waits.waits)
+	assert.Equal(t, 1, f.attemptsFor("aa"), "a fetched chunk is not refetched")
+	assert.Equal(t, 2, f.attemptsFor("ba"))
+
+	refs := UTxOSet{}
+	assert.False(t,
+		applyTxInfoResults(refs, chunks, results, errs, t.Logf),
+		"a tx Koios indexed within the waits must not taint the epoch",
+	)
+}
+
+// TestFetchTxInfoChunksGivesUpAfterTheLastWait proves the waits are bounded:
+// a hash still missing after the last one fails its chunk, which taints the
+// epoch as before, and a failure of any other kind is not fetched again.
+func TestFetchTxInfoChunksGivesUpAfterTheLastWait(t *testing.T) {
+	t.Parallel()
+	chunks := [][]string{{"aa"}, {"ba"}, {"ca"}}
+	f := &txInfoChunkFake{
+		attempts: map[string]int{},
+		respond: func(chunk []string, _ int) error {
+			switch chunk[0] {
+			case "aa":
+				return errTxNotIndexed("aa")
+			case "ba":
+				return errors.New("koios /tx_info: status 500")
+			}
+			return nil
+		},
+	}
+	waits := &recordingWait{}
+	schedule := []time.Duration{time.Second, 2 * time.Second, 4 * time.Second}
+
+	results, errs, err := fetchTxInfoChunks(
+		context.Background(), chunks, f.fetch, schedule, waits.wait,
+		func(string, ...any) {},
+	)
+	require.NoError(t, err)
+	assert.ErrorIs(t, errs[0], koiosparity.ErrTxInfoMissing)
+	assert.Error(t, errs[1])
+	assert.NoError(t, errs[2])
+	assert.Equal(t, schedule, waits.waits)
+	assert.Equal(t, 1+len(schedule), f.attemptsFor("aa"))
+	assert.Equal(t, 1, f.attemptsFor("ba"))
+	assert.Equal(t, 1, f.attemptsFor("ca"))
+
+	assert.True(t,
+		applyTxInfoResults(UTxOSet{}, chunks, results, errs, t.Logf),
+		"a hash still missing after the last wait must taint the epoch",
+	)
+}
+
+// TestFetchTxInfoChunksStopsWaitingWhenCancelled proves a session end during
+// a wait returns the cancellation at once, with no further fetch.
+func TestFetchTxInfoChunksStopsWaitingWhenCancelled(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	f := &txInfoChunkFake{
+		attempts: map[string]int{},
+		respond: func(chunk []string, _ int) error {
+			return errTxNotIndexed(chunk[0])
+		},
+	}
+	cancelThenWait := func(ctx context.Context, d time.Duration) error {
+		cancel()
+		return waitStakeRetry(ctx, d)
+	}
+
+	type result struct {
+		results [][]koiosparity.KoiosTxInfoItem
+		errs    []error
+		err     error
+	}
+	done := make(chan result, 1)
+	go func() {
+		r, e, err := fetchTxInfoChunks(
+			ctx, [][]string{{"aa"}}, f.fetch, []time.Duration{time.Hour},
+			cancelThenWait, func(string, ...any) {},
+		)
+		done <- result{r, e, err}
+	}()
+	got := testutil.RequireReceive(
+		t, done, 5*time.Second, "fetchTxInfoChunks after cancellation",
+	)
+	require.ErrorIs(t, got.err, context.Canceled)
+	assert.Nil(t, got.results)
+	assert.Nil(t, got.errs)
+	assert.Equal(t, 1, f.attemptsFor("aa"), "no fetch runs after cancellation")
+}
+
+// TestRunFromGenesis_TxInfoIndexLagDoesNotTaintEpoch drives the whole flush:
+// /tx_info first answers without the boundary block's transaction, as Koios
+// does before it has indexed the block, then with it. The epoch's UTxO
+// comparison must run rather than be tainted by a re-baseline.
+//
+// Not t.Parallel: it shortens the package-level txInfoIndexWaits.
+func TestRunFromGenesis_TxInfoIndexLagDoesNotTaintEpoch(t *testing.T) {
+	prevWaits := txInfoIndexWaits
+	txInfoIndexWaits = []time.Duration{time.Millisecond}
+	t.Cleanup(func() { txInfoIndexWaits = prevWaits })
+
+	const magic = 42
+	server := newGenesisFakeServerWithTransactions(t, 2)
+	server.epochBySlot = map[uint64]int{
+		server.chain.Points[0].Slot: 1,
+		server.chain.Points[1].Slot: 2,
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = listener.Close() })
+	server.serve(t, listener, magic)
+
+	var txInfoCalls atomic.Int32
+	koiosSrv := httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			if !strings.HasSuffix(r.URL.Path, "/tx_info") {
+				http.NotFound(w, r)
+				return
+			}
+			var body struct {
+				TxHashes []string `json:"_tx_hashes"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			items := []koiosparity.KoiosTxInfoItem{}
+			if txInfoCalls.Add(1) > 1 {
+				for _, h := range body.TxHashes {
+					items = append(
+						items, koiosparity.KoiosTxInfoItem{TxHash: h},
+					)
+				}
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(items)
+		},
+	))
+	t.Cleanup(koiosSrv.Close)
+	koios, err := NewKoiosClient("preview", "", koiosSrv.URL, true, true)
+	require.NoError(t, err)
+
+	logs := newLogCollector()
+	results := make(chan EpochResult, 8)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- RunFromGenesis(
+			ctx, listener.Addr().String(), "preview", magic, koios, nil,
+			func(r EpochResult) { results <- r },
+			logs.logf, nil,
+		)
+	}()
+
+	server.allowStep(t)
+	server.allowStep(t)
+	report := testutil.RequireReceive(
+		t, results, 10*time.Second, "epoch 2 result",
+	)
+	assert.True(t, report.UTxOAttempted)
+	assert.NoError(t, report.UTxOErr,
+		"a tx Koios indexed after one wait must not taint the epoch")
+	assert.Equal(t, int32(2), txInfoCalls.Load())
+	for _, line := range logs.all() {
+		assert.NotContains(t, line, "re-baselined")
+	}
+
+	cancel()
+	err = testutil.RequireReceive(
+		t, done, 10*time.Second, "RunFromGenesis exit after cancellation",
+	)
+	assert.True(t, err == nil || errors.Is(err, context.Canceled))
+}

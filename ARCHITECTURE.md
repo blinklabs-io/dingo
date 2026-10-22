@@ -13864,7 +13864,12 @@ Koios. The UTxO side is a running reconstruction seeded from Dingo at the
 start point and advanced by Koios's own `/tx_info` answers for every
 transaction on the chain, so it stays independent of Dingo after its seed; a
 rollback re-baselines it and marks that epoch's UTxO verdict "not run" rather
-than reporting a comparison that would trivially match. Each epoch's
+than reporting a comparison that would trivially match. A `/tx_info` chunk
+that fails only because Koios has no result yet for a hash, as happens at the
+tip before Koios has indexed a block Dingo already served, is fetched again,
+whole, after waits of 10s, 20s and 40s; a hash still missing after the last
+wait fails its chunk, which re-baselines the reconstruction and marks the
+epoch "not run" as any other `/tx_info` failure does. Each epoch's
 comparisons run on their own LocalStateQuery connections; one that dies
 during Acquire or a query is redialed and the check repeated, a bounded number
 of times, and the UTxO comparison only reads the reconstruction, so a retry
@@ -13881,7 +13886,20 @@ last block processed after a backoff; only interruption ends the run. The
 rollback that opens a resumed session lands on the block already processed, so it changes nothing
 and keeps the comparison. A "not run" verdict names its cause: a failed
 `/tx_info` fetch, a rollback and its slot, or a baseline captured at that
-boundary.
+boundary. The stake comparison fetches each pool's `/pool_history`
+independently, so one failed request no longer abandons the epoch: the
+failed pools are fetched again after waits of 30s, 60s and 120s (permanent
+rejections are not), and pools still unfetched after the last round make the
+stake verdict incomplete, naming them, while a divergence found on any pool
+that did fetch is still reported. The shared Koios client's own timeouts and
+retries are unchanged; the session ending stops the rounds. Koios answers
+`/epoch_info` for an epoch days before it publishes that epoch's
+`/pool_history`, so when no pool Dingo reports has a row for the epoch and
+Koios's newest row for the missing pool with the most stake is for an earlier
+epoch, the stake verdict is one incomplete fault rather than one mismatch per
+pool. A pool missing a row while any other pool has one, or one Koios has no
+row for at any epoch, is still a mismatch, and the epoch-total comparison runs
+either way.
 
 Every session opens with a rollback to the origin, which Dingo refuses to
 acquire; the origin is epoch 0, so the tool does not ask. Each block's epoch
