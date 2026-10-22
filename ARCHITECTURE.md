@@ -5716,6 +5716,16 @@ The stale-reference recovery also applies when the tracked reference is ahead
 of the local tip but still within the same `localTip + 2*securityParam`
 catch-up ceiling; a snapshot-backed local tip can lag its delivered peer
 references without making those references current enough to rule out catch-up.
+Staging a peer tip reads the local tip from `ChainSelectorConfig.AppliedTip`
+(the live applied ledger tip) rather than from the last `SetLocalTip`, which
+the node calls only at startup and on the stall recycler's tick. A node
+replaying blocks it already stored, as after a Mithril import, applies
+hundreds of blocks in that interval, and a ceiling measured from the tip it
+started at rejects headers the ledger has already passed.
+A peer whose advertised tip is wall-clock stale is never a new peer's
+reference. It serves an abandoned chain and is never selectable; from
+genesis, where the advertised bound applies, its short advertisement would
+otherwise reject every honest peer that advertises the real tip.
 A delivered frontier beyond the catch-up allowance is not rejected outright.
 `checkPeerTipPlausibleLocked` holds bounded far-tip evidence per connection. A
 far frontier is supported by another distinct connection within
@@ -6152,8 +6162,34 @@ it. Dingo implements this as a **corroboration gate**
   (`ouroboros/chainsync.go`): while Genesis corroboration is active, only
   corroborated peers are *apply-eligible*. An uncorroborated peer is still
   **observed** — its `PeerTipUpdateEvent` tips feed corroboration — but its
-  `ledger.ChainsyncEvent` (and therefore blockfetch) is withheld, so it cannot
-  steer the ledger. When no peer is corroborated, nothing is applied and the
+  `ledger.ChainsyncEvent` (and therefore blockfetch) is held, so it cannot
+  steer the ledger. The roll-forward callback blocks in
+  `ChainSelector.AwaitIngressCorroboration` (wired to
+  `OuroborosConfig.ChainsyncAwaitCorroboration`) until another connection
+  stages the same header, and then hands the header to the ledger; the peer's
+  cursor stays on the held header meanwhile. A header that is withheld while
+  the cursor moves on is lost to the ledger, and the peer that ran ahead keeps
+  only its most recent staged headers as evidence, so once it is further ahead
+  of every other peer than that window no peer can corroborate another and the
+  first header that becomes eligible no longer connects to the ledger's header
+  queue. This is the same rule upstream follows: candidate fragments are
+  anchored at the immutable tip (`sharedCandidatePrefix` in
+  `Ouroboros/Consensus/Genesis/Governor.hs`), and a block past the Limit on
+  Eagerness is stored and reprocessed later rather than discarded
+  (`ChainSelReprocessLoEBlocks` in
+  `Ouroboros/Consensus/Storage/ChainDB/Impl/ChainSel.hs`). Only the
+  corroboration denial is held: a wall-clock-stale advertised tip, an untracked
+  peer, or corroboration being off withholds at once. A hold is bounded
+  (`defaultCorroborationHoldTimeout`, 5s): the held callback stops the
+  protocol's receive loop, gouroboros fails a pipelined client that consumes no
+  reply within its 10s CanAwait timeout, and a hold no witness can end (the
+  witnesses were recycled, or every tracked client slot is held) would
+  otherwise last forever. When it expires the header is withheld and the
+  connection re-intersects
+  (`ChainsyncResyncReasonGenesisCorroborationHoldExpired`), which delivers the
+  header again and frees the client slot meanwhile. A chain's first block may
+  sit at slot 0, as Preview's does; it carries a hash and is a delivered point
+  like any other, and only the hashless origin clears a peer's frontier. When no peer is corroborated, nothing is applied and the
   ledger genuinely stalls. Observation happening before the apply gate is what
   avoids a deadlock (a peer must be observed to become corroborated). While the
   gate is active the observation is made **synchronously** with the gate
