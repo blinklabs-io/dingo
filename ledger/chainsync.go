@@ -42,7 +42,6 @@ import (
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/tracing"
 	"github.com/blinklabs-io/dingo/ledger/eras"
-	"github.com/blinklabs-io/dingo/ledger/forging"
 	"github.com/blinklabs-io/dingo/ledger/governance"
 	"github.com/blinklabs-io/dingo/ledger/hardfork"
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -7725,7 +7724,7 @@ func (ls *LedgerState) flushPendingBlockfetchBlocksDeferred(
 			// fork transactions.
 			validationEnabled, _ := ls.validationStateSnapshot()
 			ls.auditContinuationBlock(pendingEvent, validationEnabled)
-			ls.checkSlotBattle(pendingEvent, nil)
+			ls.checkSlotBattle(pendingEvent)
 			// The block extended the chain, so the range it belongs to
 			// is fetchable after all and any failure record for it is
 			// stale. Noting it here rather than on arrival is what keeps
@@ -7795,7 +7794,7 @@ func (ls *LedgerState) flushPendingBlockfetchBlocksDeferred(
 				pubs,
 			)
 		}
-		ls.checkSlotBattle(pendingEvent, addBlockErr)
+		ls.checkSlotBattle(pendingEvent)
 	}
 	ls.chain.NotifyIterators()
 	return nil
@@ -10092,20 +10091,18 @@ func (ls *LedgerState) cleanupBlockNoncesBefore(
 
 // checkSlotBattle checks whether an incoming block from a peer
 // occupies a slot for which the local node has already forged a
-// block. If so, it emits a SlotBattleEvent and logs a warning.
+// block. If so, it counts and logs the battle and registers it so the winner
+// is reported once the slot is settled.
 //
-// The addBlockErr parameter is the error (if any) returned by
-// chain.AddBlock for the incoming block. A nil error means the
-// remote block was accepted onto the chain (remote won); a
-// non-nil error means it was rejected (local won).
+// The winner cannot be read when the rival arrives. chain.AddBlock only
+// accepts a block that extends the tip, so an accepted rival means the forged
+// block is off the chain at that moment, and a refused one leaves ours at the
+// tip; either can still reverse when chain selection switches branches (see
+// AdoptLocalForgedSibling). resolveSlotBattles reports the winner from the
+// chain once the tip is a security parameter of blocks past the arrival.
 //
-// The caller must hold ls.Lock() (write lock). This method must not
-// acquire ls.RLock(), because sync.RWMutex is not reentrant and
-// attempting a read lock while holding the write lock deadlocks.
-func (ls *LedgerState) checkSlotBattle(
-	e BlockfetchEvent,
-	addBlockErr error,
-) {
+// It takes no ledger lock, so it is safe whichever one the caller holds.
+func (ls *LedgerState) checkSlotBattle(e BlockfetchEvent) {
 	checker := ls.loadForgedBlockChecker()
 	if checker == nil {
 		return
@@ -10124,17 +10121,12 @@ func (ls *LedgerState) checkSlotBattle(
 		return
 	}
 
-	// Determine winner: if the remote block was rejected (addBlockErr
-	// != nil), our local block remains on chain, so we won.
-	localWon := addBlockErr != nil
-
 	ls.config.Logger.Warn(
 		"slot battle detected",
 		"component", "ledger",
 		"slot", incomingSlot,
 		"local_block_hash", hex.EncodeToString(localHash),
 		"remote_block_hash", hex.EncodeToString(remoteHash),
-		"local_won", localWon,
 	)
 
 	// Increment slot battle metric
@@ -10142,20 +10134,12 @@ func (ls *LedgerState) checkSlotBattle(
 		recorder.RecordSlotBattle()
 	}
 
-	if ls.config.EventBus != nil {
-		ls.config.EventBus.PublishAsync(
-			forging.SlotBattleEventType,
-			event.NewEvent(
-				forging.SlotBattleEventType,
-				forging.SlotBattleEvent{
-					Slot:            incomingSlot,
-					LocalBlockHash:  localHash,
-					RemoteBlockHash: remoteHash,
-					Won:             localWon,
-				},
-			),
-		)
-	}
+	ls.slotBattles.add(slotBattle{
+		slot:       incomingSlot,
+		localHash:  localHash,
+		remoteHash: remoteHash,
+		settleAt:   ls.chain.Tip().BlockNumber + ls.slotBattleSettleDepth(),
+	})
 }
 
 // selectInitialBlockfetchConn picks the connection to fetch the queued range
