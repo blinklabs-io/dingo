@@ -10952,7 +10952,9 @@ than the newest N fails, since retention has removed it.
 `mithril.server.publicBaseUrl` is the absolute origin used in artifact download
 locations; it must use HTTPS except for a loopback HTTP origin. Request Host and
 forwarded headers do not affect generated links. Archive downloads use
-`http.ServeContent`, giving range and HEAD support; with
+`http.ServeContent`, giving range and HEAD support. From a remote store, a
+request naming more than one range is answered with the whole object instead:
+each range would cost a separate ranged backend read. With
 `mithril.server.redirectBaseUrl` set they instead redirect to that base URL plus
 the object key. Path segments reaching the store are matched against a
 64-hex-digit hash and a fixed archive-name pattern first. With the aggregator
