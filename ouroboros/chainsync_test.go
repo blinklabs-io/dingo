@@ -2280,12 +2280,13 @@ func TestChainsyncClientRollForwardAcceptedHeaderTipIsRooted(t *testing.T) {
 			f := newDeferredHeaderFixture(t, localTip)
 			deferredVerify := f.o.chainSelectionVerifyHeaderCrypto
 			f.o.chainSelectionVerifyHeaderCrypto = func(
+				conn ouroboros.ConnectionId,
 				h gledger.BlockHeader,
 			) (uint64, error) {
 				if tc.verify != nil && isSecond(h.Hash().Bytes()) {
 					return tc.verify()
 				}
-				return deferredVerify(h)
+				return deferredVerify(conn, h)
 			}
 			f.o.config.ChainsyncObservePeerTip = func(
 				u chainselection.PeerTipUpdateEvent,
@@ -2404,12 +2405,13 @@ func TestChainsyncClientRollForwardWithholdsDeferredChildOfVerifiedFork(
 	}}
 	deferredVerify := f.o.chainSelectionVerifyHeaderCrypto
 	f.o.chainSelectionVerifyHeaderCrypto = func(
+		conn ouroboros.ConnectionId,
 		h gledger.BlockHeader,
 	) (uint64, error) {
 		if bytes.Equal(h.Hash().Bytes(), forkHash.Bytes()) {
 			return 1, nil
 		}
-		return deferredVerify(h)
+		return deferredVerify(conn, h)
 	}
 
 	f.rollForward(t, fork)
