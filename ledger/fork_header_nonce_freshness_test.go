@@ -260,6 +260,50 @@ func TestPeerChainSelectionEpochNonceTreatsQueuedParentAsLocalChain(
 	require.False(t, fork)
 }
 
+func TestPeerChainSelectionEpochNonceTreatsUnverifiedQueuedParentAsLocalChain(
+	t *testing.T,
+) {
+	t.Parallel()
+	f := newForkPathFreshnessFixture(t, 2)
+	connID := ouroboros.ConnectionId{}
+	parentKey := string(f.headers[0].hash[:])
+	f.stamps[parentKey] = 0
+	require.NoError(
+		t,
+		f.ls.chain.AddBlockHeader(context.Background(), f.headers[0]),
+	)
+	snapshot, _ := f.ls.loadConsensusAndTipSnapshots()
+
+	_, _, fork, err := f.ls.peerChainSelectionEpochNonce(
+		connID,
+		f.headers[1],
+		snapshot,
+	)
+	require.NoError(t, err)
+	require.False(t, fork)
+}
+
+func TestPeerHeaderForkPathTreatsUnverifiedQueuedParentAsLocalChain(
+	t *testing.T,
+) {
+	t.Parallel()
+	f := newForkPathFreshnessFixture(t, 2)
+	connID := ouroboros.ConnectionId{}
+	f.stamp(0)
+	_, _, found, err := f.ls.peerHeaderForkPath(connID, f.headers[0])
+	require.NoError(t, err)
+	require.True(t, found)
+	require.NoError(
+		t,
+		f.ls.chain.AddBlockHeader(context.Background(), f.headers[0]),
+	)
+	f.stamps[string(f.headers[0].hash[:])] = 0
+
+	_, _, found, err = f.ls.peerHeaderForkPath(connID, f.headers[1])
+	require.NoError(t, err)
+	require.False(t, found)
+}
+
 // TestPeerChainSelectionEpochNonceWithholdsUnknownParent keeps the other half:
 // a header whose parent is neither queued nor in the peer's history still
 // cannot be authenticated for chain selection.

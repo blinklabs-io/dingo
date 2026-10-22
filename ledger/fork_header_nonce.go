@@ -723,6 +723,9 @@ func (ls *LedgerState) peerHeaderForkPath(
 				contextGeneration,
 				verificationGeneration,
 			)) && !ls.chain.HoldsPoint(context.Background(), parentPoint) {
+				if ls.chain.HoldsQueuedHeaderHash(parentPoint.Hash) {
+					return ocommon.Point{}, nil, false, nil
+				}
 				return ocommon.Point{}, nil, false, fmt.Errorf(
 					"%w: candidate parent at slot %d has no current crypto verdict",
 					errHeaderVerificationDeferred,
@@ -834,6 +837,9 @@ func (ls *LedgerState) peerHeaderForkPath(
 			verificationGeneration,
 		) &&
 			!ls.chain.HoldsPoint(context.Background(), event.Point) {
+			if ls.chain.HoldsQueuedHeaderHash(prevHash) {
+				return ocommon.Point{}, nil, false, nil
+			}
 			return ocommon.Point{}, nil, false, fmt.Errorf(
 				"%w: candidate ancestor at slot %d has no current crypto verdict",
 				errHeaderVerificationDeferred,
