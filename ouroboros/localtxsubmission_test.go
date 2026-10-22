@@ -25,6 +25,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/mempool"
 	gouroboros "github.com/blinklabs-io/gouroboros"
@@ -820,4 +821,51 @@ func TestLocalTxSubmissionServerSubmitTx_BudgetSurvivesDisconnect(
 		localTxSubmissionTestCtx(),
 		localTxSubmissionTestMsg([]byte{0x80}),
 	), "slots must be released once callbacks return")
+}
+
+// The listener starts an NtC connection's protocols before registering it with
+// the connection manager, so a submission can arrive while the manager knows
+// nothing of the connection. Closing the bearer must still cancel validation.
+func TestLocalTxSubmissionProtocol_UnregisteredConnCloseCancels(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	cm := connmanager.NewConnectionManager(
+		connmanager.ConnectionManagerConfig{},
+	)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		require.NoError(t, cm.Stop(ctx))
+	})
+	o := newOuroboros(OuroborosConfig{ConnManager: cm})
+	pool := newBlockingLocalTxMempool()
+	o.mempool = pool
+	t.Cleanup(func() { close(pool.release) })
+	conn := newNtCTestClientConn(
+		t,
+		gouroboros.WithLocalTxSubmissionConfig(
+			olocaltxsubmission.NewConfig(
+				o.localtxsubmissionServerConnOpts()...,
+			),
+		),
+	)
+	client := conn.LocalTxSubmission().Client
+	require.NotNil(t, client)
+	go func() {
+		_ = client.SubmitTx(gledger.EraIdConway, []byte{0x80})
+	}()
+	valCtx := testutil.RequireReceive(
+		t, pool.entered, 5*time.Second, "validation start",
+	)
+	require.NoError(t, valCtx.Err())
+
+	require.NoError(t, conn.Close())
+
+	select {
+	case <-valCtx.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("validation context not cancelled when the bearer closed")
+	}
 }

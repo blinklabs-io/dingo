@@ -106,13 +106,23 @@ func (o *Ouroboros) localtxsubmissionServerSubmitTx(
 			errLocalTxSubmissionBusy,
 		)
 	}
+	// The listener starts protocols before registering the connection, so the
+	// manager's teardown signal can be absent here. The protocol's stop signal
+	// closes on every bearer teardown regardless of registration; its done
+	// signal cannot be used, as it closes only after this callback returns.
 	connDone := o.localTxSubmissionConnDone(ctx.ConnectionId)
+	var protoStop <-chan struct{}
+	if ctx.Server != nil && ctx.Server.Protocol != nil {
+		protoStop = ctx.Server.StopChan()
+	}
 	valCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	if connDone != nil {
+	if connDone != nil || protoStop != nil {
 		go func() {
 			select {
 			case <-connDone:
+				cancel()
+			case <-protoStop:
 				cancel()
 			case <-valCtx.Done():
 			}
@@ -194,11 +204,9 @@ func newLocalTxSubmissionRejectReason(
 	return &unrepresentableTxSubmissionError{err: err}
 }
 
-// localTxSubmissionConnDone returns a channel closed when the connection is
-// torn down, or nil when the connection is not registered (or no manager is
-// wired) and its lifetime cannot be observed. The callback runs on the
-// connection's own protocol goroutine, so a registered connection is the norm;
-// the in-flight budget still bounds the unobservable case.
+// localTxSubmissionConnDone returns the connection manager's teardown signal
+// for the connection, or nil when the connection is not registered yet or no
+// manager is wired.
 func (o *Ouroboros) localTxSubmissionConnDone(
 	connId ouroboros.ConnectionId,
 ) <-chan struct{} {

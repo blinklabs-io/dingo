@@ -1220,7 +1220,10 @@ the connection through the protocol error path instead of fabricating a ledger
 failure. Clients must reconnect after that termination.
 
 LocalTxSubmission validation runs under a context that is cancelled when the
-connection manager reports the connection torn down; the mempool checks that
+bearer closes. The listener starts an NtC connection's protocols before it
+registers the connection, so the handler watches the mini-protocol's stop
+signal, which closes on teardown whether or not the connection is registered,
+as well as the connection manager's teardown signal. The mempool checks that
 context once it acquires the mutation gate, which cannot itself be waited on
 with a context, so a cancelled caller never validates or admits. A fixed
 in-flight budget (eight validations across all NtC connections) is held until
