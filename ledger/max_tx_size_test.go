@@ -22,6 +22,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
+	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"github.com/stretchr/testify/require"
 )
 
@@ -49,10 +50,10 @@ func TestLedgerStateMaxTxSize(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, uint(16_384), got)
 	// Without previous-era parameters the ledger validates a previous-era
-	// transaction with the current ones.
-	got, ok = ls.MaxTxSize(babbage.EraIdBabbage)
-	require.True(t, ok)
-	require.Equal(t, uint(16_384), got)
+	// transaction with the current ones, which Babbage validation refuses
+	// before any size rule, so no limit applies.
+	_, ok = ls.MaxTxSize(babbage.EraIdBabbage)
+	require.False(t, ok)
 
 	dpp := &dijkstra.DijkstraProtocolParameters{}
 	dpp.MaxTxSize = 32_768
@@ -94,4 +95,47 @@ func TestLedgerStateMaxTxSizeUsesTransactionEraParameters(t *testing.T) {
 	require.False(t, ok, "an era two back is refused by the ledger")
 	_, ok = ls.MaxTxSize(dijkstra.EraIdDijkstra)
 	require.False(t, ok, "a later era is refused by the ledger")
+}
+
+// Whenever the ledger would accept a transaction without reaching a MaxTxSize
+// rule for the resolved parameters, no limit is reported.
+func TestLedgerStateMaxTxSizeUnknownWhenLedgerSkipsSizeRule(t *testing.T) {
+	t.Parallel()
+
+	conwayEra := eraDesc(t, eras.Eras, conway.EraIdConway)
+	// Parameters of another era's type fail Conway validation.
+	ls := &LedgerState{
+		currentEra:     conwayEra,
+		currentPParams: &shelley.ShelleyProtocolParameters{MaxTxSize: 16_384},
+	}
+	ls.publishSnapshotsLocked()
+	_, ok := ls.MaxTxSize(conway.EraIdConway)
+	require.False(t, ok, "mismatched pparams type")
+
+	// An era without a ValidateTxFunc accepts every transaction.
+	bare := conwayEra
+	bare.ValidateTxFunc = nil
+	ls = &LedgerState{
+		activeEras:     []eras.EraDesc{bare},
+		currentEra:     bare,
+		currentPParams: &conway.ConwayProtocolParameters{MaxTxSize: 16_384},
+	}
+	ls.publishSnapshotsLocked()
+	_, ok = ls.MaxTxSize(conway.EraIdConway)
+	require.False(t, ok, "era without validation")
+
+	// Configured Dijkstra validation skipping accepts every Dijkstra
+	// transaction.
+	dpp := &dijkstra.DijkstraProtocolParameters{}
+	dpp.MaxTxSize = 32_768
+	active := eras.ActiveEras(true)
+	ls = &LedgerState{
+		activeEras:     active,
+		currentEra:     eraDesc(t, active, dijkstra.EraIdDijkstra),
+		currentPParams: dpp,
+		config:         LedgerStateConfig{SkipDijkstraTxValidation: true},
+	}
+	ls.publishSnapshotsLocked()
+	_, ok = ls.MaxTxSize(dijkstra.EraIdDijkstra)
+	require.False(t, ok, "Dijkstra validation skipped")
 }

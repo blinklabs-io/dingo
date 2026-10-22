@@ -26,6 +26,7 @@ import (
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
+	"github.com/blinklabs-io/gouroboros/ledger/allegra"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
@@ -717,12 +718,15 @@ func protocolBlockLimits(
 }
 
 // MaxTxSize returns the MaxTxSize that ledger validation applies to a
-// transaction of the given era: the current era's parameters, or the previous
-// era's for a transaction of the immediately previous era, chosen as
-// validationContext chooses them and read from one snapshot. It reports false
-// when the era is not one the ledger would validate, or when the parameters
-// are unknown or of an era without the parameter; callers then leave the check
-// to the ledger rules.
+// transaction of the given era, resolved from one snapshot as
+// validateTxCore resolves it: the era must be one the ledger validates
+// against its current era, and the parameters are the current era's or, for a
+// previous-era transaction, the previous era's. It reports false whenever the
+// ledger would not reach a MaxTxSize rule with those parameters: an era it
+// refuses, an era without a ValidateTxFunc, Dijkstra validation skipped by
+// configuration, or parameters that are unknown or not the type the era's
+// validation requires. Callers then leave the decision to the ledger, so an
+// early rejection based on this limit is never stricter than the ledger.
 func (ls *LedgerState) MaxTxSize(txEraId uint) (uint, bool) {
 	consensusState := ls.loadConsensusSnapshot()
 	snapshot := txValidationSnapshot{
@@ -735,37 +739,50 @@ func (ls *LedgerState) MaxTxSize(txEraId uint) (uint, bool) {
 		snapshot.eraList,
 		txEraId,
 		snapshot.currentEra.Id,
-	) || eras.GetEraByIdIn(snapshot.eraList, txEraId) == nil {
+	) {
 		return 0, false
 	}
-	pp, _ := snapshot.validationPParams(txEraId)
-	return protocolMaxTxSize(pp)
+	validationEra := eras.GetEraByIdIn(snapshot.eraList, txEraId)
+	if validationEra == nil || validationEra.ValidateTxFunc == nil ||
+		ls.skipDijkstraTxValidation(validationEra.Id) {
+		return 0, false
+	}
+	pp, _ := snapshot.validationPParams(validationEra.Id)
+	return eraMaxTxSize(validationEra.Id, pp)
 }
 
-func protocolMaxTxSize(pparams lcommon.ProtocolParameters) (uint, bool) {
+// eraMaxTxSize returns MaxTxSize from pparams only when they are the type the
+// era's transaction validation accepts. Any other type fails that validation
+// before a size rule could accept the transaction, so no limit is reported.
+func eraMaxTxSize(
+	eraId uint,
+	pparams lcommon.ProtocolParameters,
+) (uint, bool) {
 	switch pp := pparams.(type) {
 	case *shelley.ShelleyProtocolParameters:
-		if pp != nil {
+		// Allegra's parameters are an alias of Shelley's.
+		if pp != nil && (eraId == shelley.EraIdShelley ||
+			eraId == allegra.EraIdAllegra) {
 			return pp.MaxTxSize, true
 		}
 	case *mary.MaryProtocolParameters:
-		if pp != nil {
+		if pp != nil && eraId == mary.EraIdMary {
 			return pp.MaxTxSize, true
 		}
 	case *alonzo.AlonzoProtocolParameters:
-		if pp != nil {
+		if pp != nil && eraId == alonzo.EraIdAlonzo {
 			return pp.MaxTxSize, true
 		}
 	case *babbage.BabbageProtocolParameters:
-		if pp != nil {
+		if pp != nil && eraId == babbage.EraIdBabbage {
 			return pp.MaxTxSize, true
 		}
 	case *conway.ConwayProtocolParameters:
-		if pp != nil {
+		if pp != nil && eraId == conway.EraIdConway {
 			return pp.MaxTxSize, true
 		}
 	case *dijkstra.DijkstraProtocolParameters:
-		if pp != nil {
+		if pp != nil && eraId == dijkstra.EraIdDijkstra {
 			return pp.MaxTxSize, true
 		}
 	}
