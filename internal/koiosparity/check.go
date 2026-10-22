@@ -292,6 +292,10 @@ func CheckEpoch(
 	)
 }
 
+// poolHistoryMismatchField is the mismatch field recorded when Koios has
+// epoch_info for an epoch but no pool_history yet.
+const poolHistoryMismatchField = "pool_history"
+
 // defaultPreStakingThroughEpoch is the last Koios reporting epoch that
 // predates a valid "go" stake snapshot on a network with no entry in
 // preStakingThroughEpochByNetwork (see koiosStakeEpoch's doc comment for the
@@ -982,7 +986,27 @@ func checkEpoch(
 	// Skipped when bulk DB query failed (dingoPoolMap is nil/invalid).
 	// Convert key-hash hex back to bech32 so PoolBech32 is consistently formatted.
 	var onlyDingo []string
-	if dingoPoolErr == nil {
+	if dingoPoolErr == nil && len(koiosPools) == 0 {
+		// An epoch with active stake always has pools, so an empty set means
+		// Koios has not published pool_history yet, not that it reported zero
+		// pools. This is not bounded by the grace window: Koios can publish
+		// epoch_info well before pool_history, and a presence verdict against
+		// an absent reference is meaningless at any age.
+		for _, dingoPool := range dingoPoolMap {
+			if dingoPool.StakePresent {
+				allMismatches = append(allMismatches, CheckMismatch{
+					Network:    network,
+					Epoch:      epoch,
+					Field:      poolHistoryMismatchField,
+					DingoValue: "present",
+					KoiosValue: "",
+					Category:   CategoryReferenceLag,
+					CheckedAt:  now,
+				})
+				break
+			}
+		}
+	} else if dingoPoolErr == nil {
 		for keyHex, dingoPool := range dingoPoolMap {
 			// GetPoolEpochDataMap returns the union of the stake-epoch
 			// (K-1) and param-epoch (K+1) reads, so a pool that registered

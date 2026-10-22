@@ -2450,3 +2450,148 @@ func TestObserverSeedBacklogFailsClosedOnUnresolvableBoundary(t *testing.T) {
 			"resolved",
 	)
 }
+
+// poolHistoryRefetchFixture serves one pool whose /pool_history is empty
+// until publish is set, and counts /pool_history requests. The cache is
+// seeded the way a fetch of an unpublished epoch leaves it: an epoch_info
+// row, no pool rows, and (when withLagMismatch) the pool_history
+// reference_lag mismatch the check records for that state.
+func poolHistoryRefetchFixture(
+	t *testing.T,
+	refetchDelay time.Duration,
+	withLagMismatch bool,
+) (o *Observer, publish *atomic.Bool, historyCalls *atomic.Int32) {
+	t.Helper()
+
+	const network = "preview"
+	const epoch = uint64(5)
+	publish = &atomic.Bool{}
+	historyCalls = &atomic.Int32{}
+	srv := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			q := r.URL.Query()
+			switch r.URL.Path {
+			case "/pool_list":
+				_, _ = w.Write([]byte(`[{"pool_id_bech32":"pool1fake"}]`))
+			case "/pool_updates":
+				_, _ = w.Write([]byte(`[]`))
+			case "/epoch_info":
+				_, _ = fmt.Fprintf(w, validEpochInfoTmpl, q.Get("_epoch_no"))
+			case "/epoch_params":
+				_, _ = fmt.Fprintf(w, validEpochParamsTmpl, q.Get("_epoch_no"))
+			case "/totals":
+				_, _ = fmt.Fprintf(w, validTotalsTmpl, q.Get("_epoch_no"))
+			case "/pool_history":
+				historyCalls.Add(1)
+				if !publish.Load() {
+					_, _ = w.Write([]byte(`[]`))
+					return
+				}
+				_, _ = fmt.Fprintf(
+					w,
+					`[{"epoch_no":%s,"active_stake":"5000000","block_cnt":1,`+
+						`"delegator_cnt":1,"fixed_cost":"340000000",`+
+						`"pool_fees":"0","deleg_rewards":"0"}]`,
+					q.Get("_epoch_no"),
+				)
+			default:
+				_, _ = w.Write([]byte(`[]`))
+			}
+		}),
+	)
+	t.Cleanup(srv.Close)
+
+	db := newTestDatabaseSourceDB(t)
+	source, err := NewDatabaseSource(db)
+	require.NoError(t, err)
+	cachePath := filepath.Join(t.TempDir(), "cache.db")
+	cache, err := openTestCache(cachePath, nil)
+	require.NoError(t, err)
+	seedKoiosSource(t, cache, network, srv.URL)
+	fetchedAt := time.Now().UTC().Add(-time.Hour)
+	require.NoError(t, cache.CommitEpochData(KoiosEpochInfo{
+		Network:      network,
+		Epoch:        epoch,
+		ActiveStake:  "12345",
+		EpochEndTime: fetchedAt,
+		FetchedAt:    fetchedAt,
+	}, nil, &KoiosTotals{
+		Treasury: "1", Reserves: "1", Fees: "1", Reward: "1",
+		FetchedAt: fetchedAt,
+	}))
+	if withLagMismatch {
+		require.NoError(t, cache.CommitEpochMismatches(network, epoch,
+			[]CheckMismatch{{
+				Network:    network,
+				Epoch:      epoch,
+				Field:      "pool_history",
+				DingoValue: "present",
+				Category:   CategoryReferenceLag,
+				CheckedAt:  fetchedAt,
+			}}))
+	}
+	require.NoError(t, cache.Close())
+
+	o, err = NewObserver(ObserverConfig{
+		BaseURL:                 srv.URL,
+		AllowInsecureHTTP:       true,
+		AllowPrivateAddresses:   true,
+		Network:                 network,
+		CachePath:               cachePath,
+		Source:                  source,
+		Logger:                  slog.New(slog.DiscardHandler),
+		FetchRetryAttempts:      2,
+		FetchRetryDelay:         5 * time.Millisecond,
+		PoolHistoryRefetchDelay: refetchDelay,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = o.Stop(context.Background()) })
+	return o, publish, historyCalls
+}
+
+// An epoch cached with an empty pool set and a recorded pool_history
+// reference_lag must be fetched again, or Koios publishing pool_history later
+// never reaches the comparison.
+func TestObserverRefetchesEpochCachedWithUnpublishedPoolHistory(t *testing.T) {
+	t.Parallel()
+
+	o, publish, _ := poolHistoryRefetchFixture(t, time.Nanosecond, true)
+	ctx := context.Background()
+
+	require.NoError(t, o.fetchIfNeeded(ctx, 5))
+	pools, err := o.cache.GetAllPoolsForEpoch("preview", 5)
+	require.NoError(t, err)
+	require.Empty(t, pools, "Koios has not published pool_history yet")
+
+	publish.Store(true)
+	require.NoError(t, o.fetchIfNeeded(ctx, 5))
+	pools, err = o.cache.GetAllPoolsForEpoch("preview", 5)
+	require.NoError(t, err)
+	require.Len(t, pools, 1, "published pool_history must be cached")
+}
+
+// The refetch costs one /pool_history request per pool, so it is rate
+// limited per epoch.
+func TestObserverPoolHistoryRefetchIsRateLimited(t *testing.T) {
+	t.Parallel()
+
+	o, _, calls := poolHistoryRefetchFixture(t, time.Hour, true)
+	ctx := context.Background()
+
+	require.NoError(t, o.fetchIfNeeded(ctx, 5))
+	first := calls.Load()
+	require.Positive(t, first, "first attempt must refetch")
+	require.NoError(t, o.fetchIfNeeded(ctx, 5))
+	require.Equal(t, first, calls.Load(), "second attempt is inside the delay")
+}
+
+// An empty pool set with no recorded pool_history lag is a cached result, not
+// something to refetch.
+func TestObserverDoesNotRefetchEmptyPoolSetWithoutLagMismatch(t *testing.T) {
+	t.Parallel()
+
+	o, _, calls := poolHistoryRefetchFixture(t, time.Nanosecond, false)
+
+	require.NoError(t, o.fetchIfNeeded(context.Background(), 5))
+	require.Zero(t, calls.Load())
+}
