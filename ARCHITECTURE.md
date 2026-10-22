@@ -1078,6 +1078,37 @@ these series carries a connection or peer label.
   before that window's request is issued and so also for a request that then
   fails to start, and the second is observed only for events received through
   blockfetch.
+- `dingo_ledger_block_stage_duration_seconds` attributes the wall-clock time of
+  each applied chunk of blocks. Within the window timed by
+  `dingo_ledger_block_apply_batch_latency_seconds`, `prepare` is the work
+  before the database transaction (Leios endorser-block wait, block-apply
+  snapshot, replay header preparation); `deferred_header_verify`, `validate`
+  and `apply` run inside the transaction body on every path, batched or not;
+  and `commit` is the transaction's time outside its body (tip and candidate
+  checks, worker-pool wait, begin, commit). `deferred_header_verify` takes one
+  sample per applied block: the check whether admission deferred the block's
+  header verification and, if it did, that verification. `validate` takes one
+  sample per validated transaction and one per validated block, covering the
+  block's input resolution and its block-level reference-script check.
+  `apply` takes one sample per delta-batch flush (which includes the
+  replay-row flush) and, on a validating block, one sample per validated
+  transaction, because that write happens as soon as the transaction
+  validates and leaves the chunk's batch flush nearly empty. A certified Leios
+  endorser block's transactions take the same per-transaction `validate` and
+  `apply` samples; when its closure is applied at an epoch boundary those
+  samples fall inside `epoch_rollover`. `prepare` and `commit` are recorded
+  only for a chunk that commits at least one block, the same chunks the batch
+  latency records; the in-body stages are also recorded for a chunk that
+  fails or applies no block. For a recorded chunk the five stages sum to no
+  more than its batch latency; the remainder is per-block bookkeeping in the
+  transaction body (CBOR offsets, delta assembly, the evolving nonce), the
+  nonce and tip writes, the trusted-replay input prefetch, and the
+  post-commit tip update. On a validating Preview sync from a Mithril
+  snapshot the remainder measured 6.5% of batch latency over 1,778 blocks of
+  catch-up in 57 chunks, and 14.5% over 136 single-block chunks at the tip,
+  where the per-chunk tip and nonce writes are a larger share of a short
+  batch. `header_verify` is observed on blockfetch arrival and
+  `epoch_rollover` is its own transaction, both outside that window.
 - `dingo_ledger_blockfetch_batch_in_flight`,
   `dingo_ledger_blockfetch_continuation_pending` and
   `dingo_ledger_blockfetch_connection_selected` mirror

@@ -1953,6 +1953,10 @@ type LedgerState struct {
 	// they write through the batched metadata path, so a test can tell that
 	// path from the per-row one, which stores the same state.
 	afterBatchedTransactionWrite func()
+	// beforeReplayRowFlush is a test-only observation hook, nil in
+	// production. It runs immediately before a chunk's replay-row flush, so a
+	// test can place a known delay inside that flush's apply sample.
+	beforeReplayRowFlush func()
 	// externalIngest pauses the chain-iterator loop so ApplyTrustedBatch can
 	// be the only block-apply writer. See external_ingest.go.
 	externalIngest externalIngestState
@@ -9268,11 +9272,21 @@ func (ls *LedgerState) processBlocksFromSource(
 			preverifiedSignatures := preverifyTransactionSignatures(
 				trustedReplayTransactions,
 			)
+			// prepare and commit are observed only beside the batch latency
+			// below, so a chunk that applies no block or fails records
+			// neither.
+			prepareElapsed := time.Since(batchApplyStart)
+			submitStart := time.Now()
+			// The body's wall time, subtracted from the submit's to leave
+			// the commit stage.
+			var bodyElapsed time.Duration
 			err = ls.submitBlockApplyDBTxn(
 				ctx,
 				snapshotTip,
 				candidateTip,
 				func(txn *database.Txn) error { //nolint:contextcheck
+					bodyStart := time.Now()
+					defer func() { bodyElapsed = time.Since(bodyStart) }()
 					replayWorkers := startReplayHeaderJobs(
 						ctx, nextBatch[i:end], verifiedReplayHeaders,
 						replayHeaderJobs, verifyReplayHeader,
@@ -9662,19 +9676,29 @@ func (ls *LedgerState) processBlocksFromSource(
 					// Apply delta batch
 					applyStart := time.Now()
 					err := deltaBatch.apply(ctx, ls, txn)
-					ls.metrics.observeBlockStage(
-						blockStageApply,
-						time.Since(applyStart),
-					)
 					if err != nil {
+						ls.metrics.observeBlockStage(
+							blockStageApply,
+							time.Since(applyStart),
+						)
 						deltaBatch.Release()
 						return err
 					}
 					deltaBatch.Release()
-					if err := ls.db.FlushBatch(trustedReplayRows, txn); err != nil {
+					// The replay-row flush is part of the same sample: it is
+					// the metadata write for this delta batch's rows.
+					if ls.beforeReplayRowFlush != nil {
+						ls.beforeReplayRowFlush()
+					}
+					flushErr := ls.db.FlushBatch(trustedReplayRows, txn)
+					ls.metrics.observeBlockStage(
+						blockStageApply,
+						time.Since(applyStart),
+					)
+					if flushErr != nil {
 						return fmt.Errorf(
 							"flush trusted replay metadata batch: %w",
-							err,
+							flushErr,
 						)
 					}
 					// Update tip in database only if blocks were processed
@@ -9694,6 +9718,7 @@ func (ls *LedgerState) processBlocksFromSource(
 					return nil
 				},
 			)
+			commitElapsed := max(time.Since(submitStart)-bodyElapsed, 0)
 			if err != nil {
 				clear(trustedReplayUtxos)
 				trustedReplayUtxos = nil
@@ -9807,6 +9832,8 @@ func (ls *LedgerState) processBlocksFromSource(
 					blocksProcessed,
 					time.Since(batchApplyStart),
 				)
+				ls.metrics.observeBlockStage(blockStagePrepare, prepareElapsed)
+				ls.metrics.observeBlockStage(blockStageCommit, commitElapsed)
 				// After advancing the tip, first honor any TestXHardForkAtEpoch
 				// override so queries surface the pinned epoch ahead of time;
 				// then classify an indefinite final era as
@@ -10201,13 +10228,21 @@ func (ls *LedgerState) ledgerProcessBlock(
 		}
 	}
 
-	if err := ls.verifyDeferredBlockHeaderState(ctx, txn, point, block); err != nil {
-		return nil, err
+	deferredHeaderStart := time.Now()
+	headerErr := ls.verifyDeferredBlockHeaderState(ctx, txn, point, block)
+	ls.metrics.observeBlockStage(
+		blockStageDeferredHeaderVerify,
+		time.Since(deferredHeaderStart),
+	)
+	if headerErr != nil {
+		return nil, headerErr
 	}
 	// The aggregate reference-script check and the per-transaction validators
 	// resolve the same inputs, so one prefetch serves both. It runs after any
 	// endorser transactions have applied and before this block's own mutations.
+	// Both are the block-level part of validating it: one validate sample.
 	var prefetchedUtxos map[utxoref.Key]lcommon.Utxo
+	blockValidateStart := time.Now()
 	if shouldValidate {
 		prefetchedUtxos = ls.prefetchBlockUtxos(
 			ctx, txn, block.Transactions(), aheadUtxosFrom(ctx), nil,
@@ -10230,9 +10265,20 @@ func (ls *LedgerState) ledgerProcessBlock(
 			referenceParams,
 			refScriptsLV,
 		)
-		if err := storageFaultOrErr(refScriptsLV, err); err != nil {
+		err = storageFaultOrErr(refScriptsLV, err)
+		if err != nil {
+			ls.metrics.observeBlockStage(
+				blockStageValidate,
+				time.Since(blockValidateStart),
+			)
 			return nil, err
 		}
+	}
+	if shouldValidate {
+		ls.metrics.observeBlockStage(
+			blockStageValidate,
+			time.Since(blockValidateStart),
+		)
 	}
 	// Process transactions
 	// Steady-state, at-tip, validated application refuses to recover an absent
@@ -10473,6 +10519,10 @@ func (ls *LedgerState) ledgerProcessBlock(
 
 		// Apply delta immediately if we may need the data to validate the next TX
 		if shouldValidate {
+			// The write is a separate apply sample per transaction: a
+			// validating block leaves its chunk's delta batch empty, so
+			// the batch flush alone would hide this time.
+			applyStart := time.Now()
 			validatedReplayRows := validatedReplayAccumulatorFrom(ctx)
 			var applyErr error
 			if validatedReplayRows != nil {
@@ -10491,6 +10541,10 @@ func (ls *LedgerState) ledgerProcessBlock(
 			} else {
 				applyErr = delta.applyWithoutRecordingDonations(ctx, ls, txn)
 			}
+			ls.metrics.observeBlockStage(
+				blockStageApply,
+				time.Since(applyStart),
+			)
 			if applyErr != nil {
 				delta.Release()
 				if errors.Is(applyErr, models.ErrRewardWithdrawalExceedsBalance) {
