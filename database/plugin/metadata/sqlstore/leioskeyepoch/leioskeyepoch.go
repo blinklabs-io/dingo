@@ -13,9 +13,7 @@
 // limitations under the License.
 
 // Package leioskeyepoch derives the epoch a pool's BLS key was registered in
-// from the pool's earlier registrations and retirements. The write path and
-// the schema backfill share it so that a database written live and one
-// migrated from an older release agree on every row.
+// from the pool's earlier registrations and retirements.
 package leioskeyepoch
 
 import (
@@ -342,12 +340,6 @@ WHERE pr.pool_id = ?
 				if err != nil {
 					return nil, err
 				}
-				event.state.epoch = &value
-			case event.snapshot && !ageUnknown:
-				// A keyed row with no certificate, no epoch and a known
-				// age is a genesis pool written before genesis recorded its
-				// epoch. Imports of unknown age are marked age_unknown.
-				value := GenesisEpoch
 				event.state.epoch = &value
 			}
 		}

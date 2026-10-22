@@ -786,18 +786,6 @@ counter's sign bit at its SQL boundary, so signed `INTEGER`/`BIGINT` ordering
 matches the ledger's complete `uint64` domain while public values remain
 unchanged.
 
-Migration `v51` (`leios-key-registration-epoch-backfill`, integer version 51)
-stores epoch 0 on genesis pool registrations that carry a BLS key (certificate
-ID zero, `added_slot` 0, known age, no epoch), which the ledger registers at its
-initial epoch, and recomputes `leios_key_registration_epoch` for live keyed
-registrations that still hold NULL with a known age, replaying the pool's
-earlier registrations and retirements through the same code the write path
-uses (`leioskeyepoch.Registration`). A key kept from an imported registration
-of unknown age sets `leios_key_registration_age_unknown`. Only rows with a
-BLS key are read, in `pool_registration` id order, so a network that never
-carried one finishes in the first batch without writing. Already-captured
-`pool_stake_snapshot` epochs are not recomputed.
-
 The upgrade runner owns a `schema_migrations` row per contiguous integer version with
 `version`, stable `name`, SHA-256 `checksum`, `phase`, opaque `cursor`, `dirty`,
 Unix-millisecond `started_at`/`updated_at`, and nullable `completed_at`.

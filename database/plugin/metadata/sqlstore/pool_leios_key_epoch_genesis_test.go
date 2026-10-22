@@ -85,19 +85,3 @@ func TestPoolLeiosKeyEpochGenesisRotatedKeyTakesNextBoundary(t *testing.T) {
 
 	requireLeiosKeyEpoch(t, store, pool, 6_100, 7)
 }
-
-// Rows written before genesis recorded an epoch (certificate_id 0, added_slot
-// 0, epoch NULL, age not unknown) are still genesis rows, and are treated as
-// registered in epoch 0, while an imported row of unknown age keeps its
-// absence.
-func TestPoolLeiosKeyEpochLegacyGenesisRowIsEpochZero(t *testing.T) {
-	t.Parallel()
-	store := newDepositHeldStore(t)
-	depositHeldEpochs(t, store, 12)
-	pool := depositHeldPoolKey(0xc4)
-
-	importLeiosKeyPool(t, store, pool, 0, nil, false)
-	writeDepositHeldCert(t, store, 6_100, 0, leiosKeyEpochCert(pool, 0x11, 0x21), 0)
-
-	requireLeiosKeyEpoch(t, store, pool, 6_100, 0)
-}
