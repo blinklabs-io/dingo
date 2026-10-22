@@ -11465,19 +11465,36 @@ Every data route opens a coordinated snapshot through
 reserves a metadata read connection before briefly taking the commit barriers,
 keeping an exhausted-pool wait outside them. Admission remains held for the
 snapshot's lifetime and is capped at one below the provider's read-pool size,
-so client-paced `/matches` streams cannot consume the connection destructive
-rollback needs for operational reads. Kupo admits at most two match streams
-globally and one per remote address, and each stream has a five-minute
-lifetime. Excess streams receive HTTP 429. A 30-second write deadline is also
-re-armed before every response write, so a client that stops reading releases
-its snapshot before the stream lifetime expires.
+so client-paced responses cannot consume the connection destructive rollback
+needs for operational reads. Kupo admits at most three match streams globally
+and one per remote address, so any two clients leave a slot for a third, and
+each stream has a five-minute lifetime. Excess streams receive HTTP 429. A
+30-second write deadline is also re-armed before every response write, so a
+client that stops reading ends its stream before the lifetime expires. For an
+origin allowed by `corsAllowedOrigins`, `Access-Control-Expose-Headers` also
+names `ETag`, `Retry-After`, `X-Block-Header-Hash` and
+`X-Most-Recent-Checkpoint`, the non-safelisted headers Kupo sets, which
+browsers otherwise hide from scripts; other API servers expose only the gRPC
+status headers.
 
-Match results stream in 512-row pages through an ordering cursor, hydrate
-spending details only for the current page, check request cancellation between
-rows, and flush every 128 results. Slot lookups avoid reverse blob iteration:
-metadata uses a forward seek, while non-strict checkpoints binary-search the
-ordered block index bounded by the snapshot tip. This matters for S3 and GCS,
-whose reverse iterators list the complete key prefix before seeking.
+`/matches` follows the upstream Kupo contract: an ordinary request streams the
+complete filtered array, with no Dingo pagination parameters, headers or
+size-based error. Resource use is bounded internally instead. Match results
+are read in 512-row pages through an ordering cursor; each page is fully
+hydrated, spending details included, under its own read snapshot, and that
+snapshot is released before the page is streamed. A slow reader therefore
+holds one Kupo stream slot and at most one hydrated page, never a snapshot or
+a read connection, and database work for match streams is bounded by the
+three stream slots. The first page shares the snapshot that produced the
+`X-Most-Recent-Checkpoint`/`ETag` headers; later pages read later snapshots
+that still exclude outputs created after that tip, so spend status and
+rollbacks are consistent per page rather than across the stream, unlike
+upstream's single transaction. Request cancellation is checked
+between rows and results are flushed every 128. Slot lookups avoid reverse
+blob iteration: metadata uses a forward seek, while non-strict checkpoints
+binary-search the ordered block index bounded by the snapshot tip. This
+matters for S3 and GCS, whose reverse iterators list the complete key prefix
+before seeking.
 
 ### Blockfrost API (`api/blockfrost/`)
 
