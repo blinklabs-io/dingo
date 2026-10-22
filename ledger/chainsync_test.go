@@ -21262,3 +21262,151 @@ func (ls *LedgerState) hasAdmissionVerifiedRecord(slot uint64) bool {
 	ls.admissionVerifiedMu.Unlock()
 	return ok && ls.headerCryptoVerificationGenerationCurrent(record.generation)
 }
+
+// readSelectionUnderBlockfetchLock keeps reading selectedBlockfetchConnId the
+// way every guarded reader does, holding chainsyncBlockfetchMutex, while the
+// caller runs write. A write that skips that lock is ordered against none of
+// those reads, so the race detector reports it whichever comes first; a write
+// under the lock is ordered by the lock.
+func readSelectionUnderBlockfetchLock(
+	t *testing.T,
+	ls *LedgerState,
+	write func(),
+) {
+	t.Helper()
+	started := make(chan struct{})
+	stop := make(chan struct{})
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		for i := 0; ; i++ {
+			ls.chainsyncBlockfetchMutex.Lock()
+			_ = connIdKey(ls.selectedBlockfetchConnId)
+			ls.chainsyncBlockfetchMutex.Unlock()
+			if i == 0 {
+				close(started)
+			}
+			select {
+			case <-stop:
+				return
+			default:
+			}
+		}
+	}()
+	<-started
+	write()
+	close(stop)
+	testutil.RequireReceive(t, stopped, testutil.AsyncWait, "guarded reader")
+}
+
+// The resync reset clears the blockfetch selection. Every other writer holds
+// chainsyncBlockfetchMutex for it, and startQueuedBlockfetchOnLocked compares
+// the selection across the request it sends outside that lock, so the reset
+// must take the lock too. Meaningful under -race, as CI runs this package.
+func TestResetChainsyncResyncStateClearsSelectionUnderBlockfetchLock(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	fixture := newChainsyncRollbackFixture(t)
+	ls := fixture.ls
+	ls.selectedBlockfetchConnId = fixture.connId
+	var pending pendingPublishes
+	readSelectionUnderBlockfetchLock(t, ls, func() {
+		ls.chainsyncMutex.Lock()
+		ls.resetChainsyncResyncState(&pending)
+		ls.chainsyncMutex.Unlock()
+	})
+	pending.flush()
+	assert.Empty(t, connIdKey(ls.selectedBlockfetchConnId))
+}
+
+// A local rollback recovery with no connection left to replay on clears the
+// selection after its loop has released chainsyncBlockfetchMutex, so it must
+// take the lock again for that write. Meaningful under -race.
+func TestRecoverAfterLocalRollbackClearsSelectionUnderBlockfetchLock(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	fixture := newChainsyncRollbackFixture(t)
+	ls := fixture.ls
+	ls.selectedBlockfetchConnId = fixture.connId
+	readSelectionUnderBlockfetchLock(t, ls, func() {
+		result := ls.RecoverAfterLocalRollback(
+			context.Background(),
+			nil,
+			fixture.ancestorTip.Point,
+		)
+		assert.False(t, result.Recovered)
+	})
+	assert.Empty(t, connIdKey(ls.selectedBlockfetchConnId))
+}
+
+// A local rollback recovery that replays retained headers assigns the
+// selection to the replaying connection. That write must hold
+// chainsyncBlockfetchMutex like every other selection writer. Meaningful
+// under -race.
+func TestRecoverAfterLocalRollbackReplaySelectsUnderBlockfetchLock(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	fixture := newChainsyncRollbackFixture(t)
+	ls := fixture.ls
+	require.NoError(
+		t,
+		ls.chain.Rollback(context.Background(), fixture.ancestorTip.Point),
+	)
+	require.NoError(t, ls.db.SetTip(fixture.ancestorTip, nil))
+	ls.currentTip = fixture.ancestorTip
+	ls.currentTipBlockNonce = append([]byte(nil), fixture.ancestorNonce...)
+
+	connId := fixture.connId
+	ls.config.GetActiveConnectionFunc = func() *ouroboros.ConnectionId {
+		return &connId
+	}
+	ls.config.BlockfetchRequestRangeFunc = func(
+		ouroboros.ConnectionId,
+		ocommon.Point,
+		ocommon.Point,
+	) (uint64, error) {
+		return 0, nil
+	}
+	header1 := mockHeader{
+		hash:        lcommon.NewBlake2b256(testHashBytes("replay-lock-1")),
+		prevHash:    lcommon.NewBlake2b256(fixture.ancestorTip.Point.Hash),
+		blockNumber: fixture.ancestorTip.BlockNumber + 1,
+		slot:        fixture.ancestorTip.Point.Slot + 1,
+	}
+	header2 := mockHeader{
+		hash:        lcommon.NewBlake2b256(testHashBytes("replay-lock-2")),
+		prevHash:    header1.hash,
+		blockNumber: fixture.ancestorTip.BlockNumber + 2,
+		slot:        fixture.ancestorTip.Point.Slot + 2,
+	}
+	tip := ochainsync.Tip{
+		Point:       ocommon.NewPoint(header2.slot, header2.hash.Bytes()),
+		BlockNumber: header2.blockNumber,
+	}
+	for _, header := range []mockHeader{header1, header2} {
+		ls.recordPeerHeaderHistory(ChainsyncEvent{
+			ConnectionId: connId,
+			HeaderCryptoVerificationGeneration: ls.
+				loadConsensusSnapshot().generation,
+			Point:       ocommon.NewPoint(header.slot, header.hash.Bytes()),
+			Tip:         tip,
+			BlockHeader: header,
+		})
+	}
+
+	readSelectionUnderBlockfetchLock(t, ls, func() {
+		result := ls.RecoverAfterLocalRollback(
+			context.Background(),
+			[]ouroboros.ConnectionId{connId},
+			fixture.ancestorTip.Point,
+		)
+		assert.True(t, result.Recovered)
+	})
+	assert.True(t, sameConnectionId(ls.selectedBlockfetchConnId, connId))
+}
