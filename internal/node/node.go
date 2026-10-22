@@ -870,6 +870,12 @@ func buildDingoConfig(
 		dingo.WithBarkArchiveMaxConcurrentFetches(
 			cfg.BarkArchiveMaxConcurrentFetches,
 		),
+		dingo.WithBarkArchiveLookupsPerSecond(
+			cfg.BarkArchiveLookupsPerSecond,
+		),
+		dingo.WithBarkArchiveCallerLookupsPerSecond(
+			cfg.BarkArchiveCallerLookupsPerSecond,
+		),
 		dingo.WithBarkOperatorCertificateFingerprints(
 			cfg.BarkOperatorCertificateFingerprints,
 		),
@@ -1103,6 +1109,7 @@ func buildDingoConfig(
 			cfg.BlockPipelineValidateEnabled,
 		),
 		dingo.WithLedgerPrefetchAheadEnabled(cfg.LedgerPrefetchAheadEnabled),
+		dingo.WithLedgerValidateAheadEnabled(cfg.LedgerValidateAheadEnabled),
 		dingo.WithLedgerApplyRowBatchingEnabled(
 			cfg.LedgerApplyRowBatchingEnabled,
 		),

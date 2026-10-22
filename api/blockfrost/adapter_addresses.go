@@ -34,6 +34,43 @@ const lovelaceDecimals = 6
 // totals scan loads.
 const addressTotalBatch = 1000
 
+const (
+	// addressSummaryMaxUTxOs bounds the live outputs one address summary
+	// reads.
+	addressSummaryMaxUTxOs = 50_000
+	// addressSummaryMaxAssets bounds the distinct assets one address
+	// summary accumulates and returns.
+	addressSummaryMaxAssets = 5_000
+	// addressExtendedMaxAssets bounds the assets the extended summary
+	// enriches; each costs three point reads and the route is unpaginated.
+	addressExtendedMaxAssets = 1_000
+)
+
+// addressSummaryLimits is the read budget of one address summary request.
+// A zero field selects its default.
+type addressSummaryLimits struct {
+	batch             int
+	maxUtxos          int
+	maxAssets         int
+	maxEnrichedAssets int
+}
+
+func (l addressSummaryLimits) withDefaults() addressSummaryLimits {
+	if l.batch <= 0 {
+		l.batch = addressTotalBatch
+	}
+	if l.maxUtxos <= 0 {
+		l.maxUtxos = addressSummaryMaxUTxOs
+	}
+	if l.maxAssets <= 0 {
+		l.maxAssets = addressSummaryMaxAssets
+	}
+	if l.maxEnrichedAssets <= 0 {
+		l.maxEnrichedAssets = addressExtendedMaxAssets
+	}
+	return l
+}
+
 // AddressAssetUTXOs returns the paginated current UTxOs of an address that
 // hold the given asset.
 func (a *NodeAdapter) AddressAssetUTXOs(
@@ -66,6 +103,16 @@ func (a *NodeAdapter) AddressExtended(
 	info, err := a.addressSummary(ctx, address)
 	if err != nil {
 		return AddressExtendedInfo{}, err
+	}
+	// The first amount is lovelace.
+	if maxAssets := a.summaryLimits.withDefaults().maxEnrichedAssets; len(
+		info.Amount,
+	)-1 > maxAssets {
+		return AddressExtendedInfo{}, fmt.Errorf(
+			"more than %d assets to enrich: %w",
+			maxAssets,
+			ErrAddressSummaryTooLarge,
+		)
 	}
 	amounts := make([]AddressExtendedAmountInfo, 0, len(info.Amount))
 	for _, amount := range info.Amount {

@@ -997,7 +997,7 @@ func LoadWithDB(
 		)
 	} else {
 		blocksCopied, immutableTipSlot, err = copyBlocksDirect(
-			replayCtx, logger, immutableDir, c, replayBatches, false,
+			replayCtx, logger, immutableDir, c, replayBatches,
 		)
 	}
 	close(replayBatches)
@@ -1241,7 +1241,6 @@ func copyBlocksDirect(
 	immutableDir string,
 	c *chain.Chain,
 	replayBatches chan<- []gledger.Block,
-	validateBodyHash bool,
 ) (int, uint64, error) {
 	immDB, err := immutable.New(immutableDir)
 	if err != nil {
@@ -1278,9 +1277,9 @@ func copyBlocksDirect(
 	startTime := time.Now()
 	lastProgressLog := time.Time{}
 	var lastProgressSlot uint64
-	verifyCfg := lcommon.VerifyConfig{
-		SkipBodyHashValidation: !validateBodyHash,
-	}
+	// The chunk files may come from another party, so every block's body must
+	// match the body hash its signed header commits to.
+	verifyCfg := lcommon.VerifyConfig{}
 	for {
 		rawBatch := make([]immutable.Block, 0, loadBlockBatchSize)
 		for {
