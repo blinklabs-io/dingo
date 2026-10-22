@@ -9514,12 +9514,15 @@ probe and is never written. Size-limit errors are terminal for the downloader.
 Every transfer writes to an exclusively created staging file through the
 verified destination-directory handle, then atomically replaces the cache entry.
 A resume copies only a regular, singly linked partial file owned by the node
-into that staging file before requesting the remaining range; other existing
-entries are replaced only after a complete download. A malformed-range restart
-truncates the private staging file before checking the replacement response.
-Transfer failures publish an owned partial atomically for the next retry, while
-size-limit, free-space-reserve, and filesystem-space failures discard the
-staging file.
+into that staging file before requesting the remaining range; other regular
+files are replaced only after a complete download, and a non-regular entry such
+as a symlink is refused. An owned partial already over the size limit is removed
+before any request. A malformed-range restart truncates the private staging file
+before checking the replacement response. Transfer failures publish an owned
+partial atomically for the next retry. Size-limit, free-space-reserve, and
+filesystem-space failures discard the staging file; a streaming size-limit
+failure, or a 416 whose total disagrees with the partial, also removes the owned
+partial so later attempts do not resume it into the same failure.
 
 The v2 bootstrap admits at most four unique locations per artifact component.
 Aggregator locations must retain the configured aggregator origin; cloud

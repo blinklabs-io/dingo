@@ -784,58 +784,72 @@ func downloadSnapshot(
 	}
 }
 
+// prepareDownloadFile creates the private staging file for one attempt and,
+// when the cache entry is a singly linked regular file owned by this process,
+// copies it in as the resume prefix. ownedPartial reports that such an entry
+// exists, so the caller may remove it when it is proven unusable. A
+// non-regular entry, such as a symlink, is refused rather than replaced.
 func prepareDownloadFile(
 	root *os.Root,
 	filename string,
 	limit int64,
+	limitErr error,
 	spaceBudget *downloadSpaceBudget,
-) (*os.File, string, int64, error) {
-	tmpName := filename + ".partial-" + cryptorand.Text()
-	file, err := root.OpenFile(
-		tmpName,
-		os.O_CREATE|os.O_EXCL|os.O_WRONLY|openNoFollowFlag,
-		0o640,
-	)
-	if err != nil {
-		return nil, "", 0, fmt.Errorf("creating download staging file: %w", err)
+) (file *os.File, tmpName string, existingSize int64, ownedPartial bool, err error) {
+	createStaging := func() (*os.File, string, error) {
+		name := filename + ".partial-" + cryptorand.Text()
+		f, err := root.OpenFile(
+			name,
+			os.O_CREATE|os.O_EXCL|os.O_WRONLY|openNoFollowFlag,
+			0o640,
+		)
+		if err != nil {
+			return nil, "", fmt.Errorf("creating download staging file: %w", err)
+		}
+		return f, name, nil
 	}
-	cleanup := func(retErr error) (*os.File, string, int64, error) {
-		_ = file.Close()
-		_ = root.Remove(tmpName)
-		return nil, "", 0, retErr
-	}
-
 	info, err := root.Lstat(filename)
 	if errors.Is(err, os.ErrNotExist) {
-		return file, tmpName, 0, nil
+		file, tmpName, err = createStaging()
+		return file, tmpName, 0, false, err
 	}
 	if err != nil {
-		return cleanup(fmt.Errorf("inspecting partial download: %w", err))
+		return nil, "", 0, false, fmt.Errorf("inspecting partial download: %w", err)
 	}
-	if !info.Mode().IsRegular() || !downloadFileOwnedByProcess(info) {
-		return file, tmpName, 0, nil
+	if !info.Mode().IsRegular() {
+		return nil, "", 0, false, fmt.Errorf(
+			"download destination %s is not a regular file", filename,
+		)
 	}
-	if info.Size() > limit {
-		return file, tmpName, 0, nil
+	ownedPartial = downloadFileOwnedByProcess(info)
+	if ownedPartial && info.Size() > limit {
+		_ = root.Remove(filename)
+		return nil, "", 0, false, limitErr
+	}
+	file, tmpName, err = createStaging()
+	if err != nil || !ownedPartial {
+		return file, tmpName, 0, false, err
 	}
 
 	source, err := root.OpenFile(filename, os.O_RDONLY|openNoFollowFlag, 0)
 	if err != nil {
-		return file, tmpName, 0, nil
+		return file, tmpName, 0, false, nil
 	}
 	defer source.Close()
 	openedInfo, err := source.Stat()
 	if err != nil || !openedInfo.Mode().IsRegular() ||
 		!os.SameFile(info, openedInfo) {
-		return file, tmpName, 0, nil
+		return file, tmpName, 0, false, nil
 	}
 	if _, err := io.Copy(
 		&downloadSpaceWriter{writer: file, budget: spaceBudget},
 		io.LimitReader(source, limit),
 	); err != nil {
-		return cleanup(fmt.Errorf("copying partial download: %w", err))
+		_ = file.Close()
+		_ = root.Remove(tmpName)
+		return nil, "", 0, false, fmt.Errorf("copying partial download: %w", err)
 	}
-	return file, tmpName, info.Size(), nil
+	return file, tmpName, info.Size(), true, nil
 }
 
 func resetDownloadFile(file *os.File) error {
@@ -871,11 +885,18 @@ func downloadSnapshotOnce(
 	filename := downloadFilename(cfg)
 	destPath := downloadDestinationPath(cfg)
 
-	file, tmpName, existingSize, err := prepareDownloadFile(
-		root, filename, cfg.sizeLimit(), cfg.spaceBudget,
+	file, tmpName, existingSize, ownedPartial, err := prepareDownloadFile(
+		root, filename, cfg.sizeLimit(), cfg.sizeLimitError(), cfg.spaceBudget,
 	)
 	if err != nil {
 		return "", err
+	}
+	// discardPartial removes a resume prefix proven unusable, so later
+	// attempts, mirrors, and restarts do not resume it into the same failure.
+	discardPartial := func() {
+		if ownedPartial {
+			_ = root.Remove(filename)
+		}
 	}
 	published := false
 	defer func() {
@@ -1083,9 +1104,10 @@ func downloadSnapshotOnce(
 				)
 			}
 			if fi.Size() != expectedSize {
+				discardPartial()
 				return "", fmt.Errorf(
 					"existing file size mismatch "+
-						"got %d, want %d",
+						"(removed): got %d, want %d",
 					fi.Size(), expectedSize,
 				)
 			}
@@ -1176,8 +1198,11 @@ func downloadSnapshotOnce(
 		body.Stop()
 		closeErr := file.Close()
 		file = nil
-		if errors.Is(copyErr, ErrDownloadTooLarge) ||
-			errors.Is(copyErr, errDownloadFreeSpace) ||
+		if errors.Is(copyErr, ErrDownloadTooLarge) {
+			discardPartial()
+			return "", copyErr
+		}
+		if errors.Is(copyErr, errDownloadFreeSpace) ||
 			errors.Is(copyErr, syscall.ENOSPC) {
 			return "", copyErr
 		}

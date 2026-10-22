@@ -1932,3 +1932,31 @@ func TestValidRelPath(t *testing.T) {
 		})
 	}
 }
+
+// TestDownloadSnapshotRangeNotSatisfiableMismatchDiscardsPartial pins that a
+// 416 whose total disagrees with the partial removes the partial. Keeping it
+// would make every later attempt, mirror, and restart resume the same prefix
+// and fail on the same 416.
+func TestDownloadSnapshotRangeNotSatisfiableMismatchDiscardsPartial(t *testing.T) {
+	dir := t.TempDir()
+	dest := filepath.Join(dir, "archive")
+	require.NoError(t, os.WriteFile(dest, []byte("ab"), 0o600))
+	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusRequestedRangeNotSatisfiable,
+			Body:       io.NopCloser(bytes.NewReader(nil)),
+			Header:     http.Header{"Content-Range": {"bytes */3"}},
+		}, nil
+	})}
+	path, err := DownloadSnapshot(context.Background(), DownloadConfig{
+		URL: "https://example.test/archive", AllowInsecureHTTP: true,
+		DestDir: dir, Filename: "archive", HTTPClient: client,
+		MaxTransientRetries: -1,
+	})
+	require.ErrorContains(t, err, "existing file size mismatch")
+	require.Empty(t, path)
+	require.NoFileExists(t, dest)
+	entries, err := os.ReadDir(dir)
+	require.NoError(t, err)
+	require.Empty(t, entries, "staging files must not be left behind")
+}

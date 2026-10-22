@@ -29,7 +29,7 @@ const (
 	freeSpaceCheckInterval     = 64 << 20
 )
 
-var errDownloadFreeSpace = errors.New("Mithril download free-space reserve reached")
+var errDownloadFreeSpace = errors.New("mithril download free-space reserve reached")
 
 type bootstrapExtractionBudget struct {
 	mu             sync.Mutex
@@ -126,10 +126,7 @@ func (b *downloadSpaceBudget) reserveWrite(size int) error {
 	if needed < b.freeSpaceReserve || available < needed {
 		return errDownloadFreeSpace
 	}
-	b.bytesUntilCheck = freeSpaceCheckInterval - int64(size)
-	if b.bytesUntilCheck < 0 {
-		b.bytesUntilCheck = 0
-	}
+	b.bytesUntilCheck = max(freeSpaceCheckInterval-int64(size), 0)
 	return nil
 }
 
