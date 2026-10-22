@@ -21344,3 +21344,71 @@ func TestRecoverAfterLocalRollbackClearsSelectionUnderBlockfetchLock(
 	})
 	assert.Empty(t, connIdKey(ls.selectedBlockfetchConnId))
 }
+
+// A local rollback recovery that replays retained headers assigns the
+// selection to the replaying connection. That write must hold
+// chainsyncBlockfetchMutex like every other selection writer. Meaningful
+// under -race.
+func TestRecoverAfterLocalRollbackReplaySelectsUnderBlockfetchLock(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	fixture := newChainsyncRollbackFixture(t)
+	ls := fixture.ls
+	require.NoError(
+		t,
+		ls.chain.Rollback(context.Background(), fixture.ancestorTip.Point),
+	)
+	require.NoError(t, ls.db.SetTip(fixture.ancestorTip, nil))
+	ls.currentTip = fixture.ancestorTip
+	ls.currentTipBlockNonce = append([]byte(nil), fixture.ancestorNonce...)
+
+	connId := fixture.connId
+	ls.config.GetActiveConnectionFunc = func() *ouroboros.ConnectionId {
+		return &connId
+	}
+	ls.config.BlockfetchRequestRangeFunc = func(
+		ouroboros.ConnectionId,
+		ocommon.Point,
+		ocommon.Point,
+	) (uint64, error) {
+		return 0, nil
+	}
+	header1 := mockHeader{
+		hash:        lcommon.NewBlake2b256(testHashBytes("replay-lock-1")),
+		prevHash:    lcommon.NewBlake2b256(fixture.ancestorTip.Point.Hash),
+		blockNumber: fixture.ancestorTip.BlockNumber + 1,
+		slot:        fixture.ancestorTip.Point.Slot + 1,
+	}
+	header2 := mockHeader{
+		hash:        lcommon.NewBlake2b256(testHashBytes("replay-lock-2")),
+		prevHash:    header1.hash,
+		blockNumber: fixture.ancestorTip.BlockNumber + 2,
+		slot:        fixture.ancestorTip.Point.Slot + 2,
+	}
+	tip := ochainsync.Tip{
+		Point:       ocommon.NewPoint(header2.slot, header2.hash.Bytes()),
+		BlockNumber: header2.blockNumber,
+	}
+	for _, header := range []mockHeader{header1, header2} {
+		ls.recordPeerHeaderHistory(ChainsyncEvent{
+			ConnectionId: connId,
+			HeaderCryptoVerificationGeneration: ls.
+				loadConsensusSnapshot().generation,
+			Point:       ocommon.NewPoint(header.slot, header.hash.Bytes()),
+			Tip:         tip,
+			BlockHeader: header,
+		})
+	}
+
+	readSelectionUnderBlockfetchLock(t, ls, func() {
+		result := ls.RecoverAfterLocalRollback(
+			context.Background(),
+			[]ouroboros.ConnectionId{connId},
+			fixture.ancestorTip.Point,
+		)
+		assert.True(t, result.Recovered)
+	})
+	assert.True(t, sameConnectionId(ls.selectedBlockfetchConnId, connId))
+}

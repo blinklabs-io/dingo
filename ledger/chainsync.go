@@ -4465,8 +4465,8 @@ func (ls *LedgerState) recoverPeerHeaderHistoryFromPointLocked(
 		}
 		ls.chainsyncBlockfetchMutex.Lock()
 		ls.headerPipelineConnId = connId
-		ls.chainsyncBlockfetchMutex.Unlock()
 		ls.setSelectedBlockfetchConnId(connId)
+		ls.chainsyncBlockfetchMutex.Unlock()
 		return ls.chain.HeaderCount(), nil
 	}
 	return 0, nil
