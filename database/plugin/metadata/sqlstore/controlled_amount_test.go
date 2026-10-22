@@ -265,8 +265,9 @@ func TestGetAccountSumsByCredentialMIRBeyondInt64(t *testing.T) {
 
 // testAccountAggregateContract pins the account total contract every dialect
 // must meet: exact totals past int64, a controlled amount at the uint64
-// ceiling, signed MIR totals, zero for a credential with no rows, and an
-// error rather than a wrapped value when a coin total leaves uint64.
+// ceiling, signed MIR totals, zero for a credential with no rows, an empty
+// amount contributing nothing (as NULL does), and an error rather than a
+// wrapped value when a coin total leaves uint64.
 func testAccountAggregateContract(t *testing.T, store *Store) {
 	t.Helper()
 	ctx := context.Background()
@@ -290,6 +291,7 @@ func testAccountAggregateContract(t *testing.T, store *Store) {
 		{keyA, "18446744073709551614", 0},
 		{keyA, "1", 0},
 		{keyA, "5", 100},
+		{keyA, "", 0},
 		{keyB, "18446744073709551615", 0},
 		{keyB, "1", 0},
 	} {
@@ -311,6 +313,7 @@ INSERT INTO utxo (
 		{"9223372036854775807", true},
 		{"9223372036854775807", true},
 		{"5", false},
+		{"", true},
 	} {
 		exec(`
 INSERT INTO account_reward_delta (
@@ -333,6 +336,7 @@ INSERT INTO move_instantaneous_rewards (
 		{1, "-30000000000000000000000"},
 		{1, "50000000000000000000000"},
 		{1, "-1"},
+		{1, ""},
 		{2, "-5"},
 	} {
 		exec(`

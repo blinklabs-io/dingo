@@ -5194,16 +5194,20 @@ arbitrary-precision `dingo_bigint_sum` aggregate the SQLite provider registers
 (`database/plugin/metadata/sqlite/bigintsum`; SQLite's own `SUM` raises an
 integer-overflow error and `TOTAL` is a float). The result is read back as a
 decimal string. The sums run on the caller's transaction, so cancelling its
-context cancels the statements.
+context cancels the statements. Each column is wrapped in `NULLIF(amount, '')`,
+so an empty or NULL amount contributes nothing on every engine. Any other
+non-decimal text is an error on SQLite and PostgreSQL; MySQL's `CAST` cannot
+raise one and reads it as 0. Dingo writes these columns only from integer
+values, so neither form occurs in rows it wrote.
 
 ```sql
 -- withdrawals_sum
-SELECT SUM(CAST(amount AS NUMERIC))
+SELECT SUM(CAST(NULLIF(amount, '') AS NUMERIC))
 FROM account_reward_delta
 WHERE withdrawal = true AND credential_tag = $1 AND staking_key = decode($2, 'hex');
 
 -- reserves_sum (pot = 0) / treasury_sum (pot = 1)
-SELECT SUM(CAST(r.amount AS NUMERIC))
+SELECT SUM(CAST(NULLIF(r.amount, '') AS NUMERIC))
 FROM move_instantaneous_rewards_reward r
 JOIN move_instantaneous_rewards mir ON mir.id = r.mir_id
 WHERE mir.pot = $pot AND r.credential_tag = $1 AND r.credential = decode($2, 'hex');

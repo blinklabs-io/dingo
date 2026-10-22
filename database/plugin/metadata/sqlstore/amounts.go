@@ -215,14 +215,19 @@ const sqliteBigintSumFunc = "dingo_bigint_sum"
 // overflow, so the database can sum without streaming rows to the caller.
 // PostgreSQL NUMERIC is unbounded, MySQL DECIMAL(65,0) holds 65 digits, and
 // SQLite uses the registered arbitrary-precision aggregate.
+//
+// An empty string contributes nothing, as NULL does, which is what the
+// row-wise readers did. Without NULLIF the dialects disagree on it: the
+// SQLite aggregate rejects it while MySQL's CAST reads it as 0.
 func (s *Store) wideSumExpr(column string) string {
+	value := "NULLIF(" + column + ", '')"
 	switch s.dialect.Name() {
 	case "postgres":
-		return "SUM(CAST(" + column + " AS NUMERIC))"
+		return "SUM(CAST(" + value + " AS NUMERIC))"
 	case "mysql":
-		return "SUM(CAST(" + column + " AS DECIMAL(65, 0)))"
+		return "SUM(CAST(" + value + " AS DECIMAL(65, 0)))"
 	default:
-		return sqliteBigintSumFunc + "(" + column + ")"
+		return sqliteBigintSumFunc + "(" + value + ")"
 	}
 }
 
