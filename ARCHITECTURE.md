@@ -11607,8 +11607,12 @@ asks it through the package-local `mempoolAddressReader`. A transaction's
 addresses are fixed once, when it enters the pool: its output addresses, the
 addresses of inputs that are outputs of other pool transactions, and the
 addresses of confirmed inputs, which one `UtxosByRefs` batch on the validator
-(`mempool.UtxoResolver`) resolves during admission; a lookup failure rejects
-the admission. The batch runs before the ledger validation session opens:
+(`mempool.UtxoResolver`) resolves during admission. A lookup failure ends
+the admission with `mempool.ErrInputResolution`, which reaches no verdict:
+Blockfrost submission answers it as a ledger-unavailable error, local
+transaction submission as a generic unavailable reason rather than a ledger
+rejection, and a transaction restored from a rolled-back block stays pending
+for the next rebuild. The batch runs before the ledger validation session opens:
 the session holds a metadata read connection and sessions are opened before
 the mutation gate, so a second read inside one could wait on connections that
 admissions queued behind the gate never release. An input the batch skipped

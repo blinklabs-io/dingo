@@ -27,6 +27,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/utxoref"
@@ -157,11 +158,11 @@ func (v *resolvingValidator) UtxosByRefs(
 ) ([]models.Utxo, error) {
 	v.calls.Add(1)
 	v.refs.Add(int64(len(refs)))
+	v.mu.Lock()
+	defer v.mu.Unlock()
 	if v.err != nil {
 		return nil, v.err
 	}
-	v.mu.Lock()
-	defer v.mu.Unlock()
 	var ret []models.Utxo
 	for _, ref := range refs {
 		owner, ok := v.confirmed[utxoref.Key{
@@ -795,5 +796,51 @@ func TestAddressIndexRetriesWhenPoolParentLeaves(t *testing.T) {
 	})
 	require.Equal(t, []string{child},
 		m.TransactionHashesByAddress(parentPayee.String()))
+	requireIndexMatchesPool(t, m)
+}
+
+// TestAddressIndexResolverFailureKeepsRolledBackTransaction pins that a
+// storage fault while resolving input addresses is not a verdict: a
+// transaction restored from a rolled-back block stays pending for the next
+// rebuild instead of being dropped as invalid on the selected chain.
+func TestAddressIndexResolverFailureKeepsRolledBackTransaction(t *testing.T) {
+	t.Parallel()
+	v := newResolvingValidator()
+	m := newIndexTestPool(t, v, false, nil)
+	in := indexTxInput{hash: [32]byte{0x61}}
+	spender := indexTestAddress(t, 2)
+	v.confirm(in, spender)
+	raw, tx := buildIndexTx(t, indexTxSpec{
+		inputs:  []indexTxInput{in},
+		outputs: []lcommon.Address{indexTestAddress(t, 1)},
+	})
+	hash := tx.Hash().String()
+	require.NoError(t, m.AddTransaction(
+		context.Background(), uint(conway.EraIdConway), raw,
+	))
+	block := blockCarryingTx(t, raw)
+	m.noteChainUpdate(chainUpdate(chain.ChainBlockEvent{Block: block}))
+	require.NoError(t, m.rebuildAfterChainUpdate(context.Background()))
+	_, ok := m.GetTransaction(hash)
+	require.False(t, ok, "control: the block confirmed the transaction")
+
+	v.mu.Lock()
+	v.err = errors.New("database is locked")
+	v.mu.Unlock()
+	m.noteChainUpdate(chainUpdate(chain.ChainRollbackEvent{
+		RolledBackBlocks: []models.Block{block},
+	}))
+	require.ErrorIs(t, m.rebuildAfterChainUpdate(context.Background()),
+		ErrInputResolution)
+	require.Equal(t, []string{hash}, m.pendingRolledBackOrder)
+
+	v.mu.Lock()
+	v.err = nil
+	v.mu.Unlock()
+	require.NoError(t, m.rebuildAfterChainUpdate(context.Background()))
+	_, ok = m.GetTransaction(hash)
+	require.True(t, ok)
+	require.Equal(t, []string{hash},
+		m.TransactionHashesByAddress(spender.String()))
 	requireIndexMatchesPool(t, m)
 }

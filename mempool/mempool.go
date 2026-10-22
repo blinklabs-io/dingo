@@ -1244,6 +1244,7 @@ func (m *Mempool) rebuildAfterChainUpdate(ctx context.Context) error {
 
 func isRetryableRolledBackAdmissionError(err error) bool {
 	return errors.Is(err, ErrPendingStateMoved) ||
+		errors.Is(err, ErrInputResolution) ||
 		errors.Is(err, ErrNilValidator) ||
 		errors.Is(err, ErrMempoolStopped) ||
 		errors.Is(err, context.Canceled) ||

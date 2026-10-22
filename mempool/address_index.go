@@ -92,6 +92,13 @@ func outputAddresses(tx gledger.Transaction) []string {
 	return addresses
 }
 
+// ErrInputResolution reports that admission could not read the addresses
+// of a transaction's confirmed inputs from storage. No verdict was reached
+// on the transaction.
+var ErrInputResolution = errors.New(
+	"mempool: confirmed input address resolution failed",
+)
+
 // errAddressInputsMoved reports that an input the confirmed-input lookup
 // skipped as another pool transaction's output was no longer one when the
 // transaction was validated, so its address was resolved by neither.
@@ -142,7 +149,9 @@ func (m *Mempool) confirmedInputAddresses(
 	utxos, err := resolver.UtxosByRefs(refs)
 	if err != nil {
 		return nil, nil, fmt.Errorf(
-			"resolve confirmed input addresses: %w", err,
+			"resolve confirmed input addresses: %w: %w",
+			ErrInputResolution,
+			err,
 		)
 	}
 	for _, utxo := range utxos {
