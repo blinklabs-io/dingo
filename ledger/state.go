@@ -14879,15 +14879,6 @@ func (ls *LedgerState) UtxosByAddressBoundedPage(
 	)
 }
 
-// UtxosByAddressAtSlot returns all UTxOs belonging to the
-// specified address that existed at the given slot.
-func (ls *LedgerState) UtxosByAddressAtSlot(
-	addr lcommon.Address,
-	slot uint64,
-) ([]models.Utxo, error) {
-	return ls.db.UtxosByAddressAtSlot(context.Background(), addr, slot, nil)
-}
-
 // UtxoBalanceByAddressAtSlot aggregates a historical address balance without
 // materializing its UTxO set.
 func (ls *LedgerState) UtxoBalanceByAddressAtSlot(
