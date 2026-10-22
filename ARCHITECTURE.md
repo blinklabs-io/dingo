@@ -9520,9 +9520,10 @@ as a symlink is refused. An owned partial already over the size limit is removed
 before any request. A malformed-range restart truncates the private staging file
 before checking the replacement response. Transfer failures publish an owned
 partial atomically for the next retry. Size-limit, free-space-reserve, and
-filesystem-space failures discard the staging file; a streaming size-limit
-failure, or a 416 whose total disagrees with the partial, also removes the owned
-partial so later attempts do not resume it into the same failure.
+filesystem-space failures discard the staging file and the owned partial, as
+does a 416 whose total disagrees with the partial, so disk pressure does not
+persist and later attempts do not resume into the same failure. Header-only
+size rejection keeps an in-budget partial for a different mirror.
 
 The v2 bootstrap admits at most four unique locations per artifact component.
 Aggregator locations must retain the configured aggregator origin; cloud

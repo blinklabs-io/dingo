@@ -1960,3 +1960,38 @@ func TestDownloadSnapshotRangeNotSatisfiableMismatchDiscardsPartial(t *testing.T
 	require.NoError(t, err)
 	require.Empty(t, entries, "staging files must not be left behind")
 }
+
+// TestDownloadSnapshotFreeSpaceFailureDiscardsPartials pins that a download
+// stopped by the free-space reserve leaves neither its staging file nor the
+// owned partial it resumed from, so disk pressure does not persist.
+func TestDownloadSnapshotFreeSpaceFailureDiscardsPartials(t *testing.T) {
+	for _, prefix := range []string{"", "a"} {
+		t.Run(fmt.Sprintf("prefix=%q", prefix), func(t *testing.T) {
+			dir := t.TempDir()
+			if prefix != "" {
+				require.NoError(t, os.WriteFile(filepath.Join(dir, "archive"), []byte(prefix), 0o600))
+			}
+			client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode:    http.StatusOK,
+					Body:          io.NopCloser(bytes.NewReader([]byte("abc"))),
+					ContentLength: -1,
+					Header:        make(http.Header),
+				}, nil
+			})}
+			_, err := DownloadSnapshot(context.Background(), DownloadConfig{
+				URL: "https://example.test/archive", AllowInsecureHTTP: true,
+				DestDir: dir, Filename: "archive", HTTPClient: client,
+				MaxTransientRetries: -1,
+				spaceBudget: &downloadSpaceBudget{
+					freeSpaceReserve: math.MaxUint64 / 2,
+					filesystemPath:   dir,
+				},
+			})
+			require.ErrorIs(t, err, errDownloadFreeSpace)
+			entries, err := os.ReadDir(dir)
+			require.NoError(t, err)
+			require.Empty(t, entries)
+		})
+	}
+}

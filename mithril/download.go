@@ -847,9 +847,19 @@ func prepareDownloadFile(
 	); err != nil {
 		_ = file.Close()
 		_ = root.Remove(tmpName)
+		if isDownloadSpaceError(err) {
+			_ = root.Remove(filename)
+		}
 		return nil, "", 0, false, fmt.Errorf("copying partial download: %w", err)
 	}
 	return file, tmpName, info.Size(), true, nil
+}
+
+// isDownloadSpaceError reports a write stopped by the free-space reserve or
+// by the filesystem itself; partial data is discarded so the pressure does
+// not outlive the failed attempt.
+func isDownloadSpaceError(err error) bool {
+	return errors.Is(err, errDownloadFreeSpace) || errors.Is(err, syscall.ENOSPC)
 }
 
 func resetDownloadFile(file *os.File) error {
@@ -1198,12 +1208,9 @@ func downloadSnapshotOnce(
 		body.Stop()
 		closeErr := file.Close()
 		file = nil
-		if errors.Is(copyErr, ErrDownloadTooLarge) {
+		if errors.Is(copyErr, ErrDownloadTooLarge) ||
+			isDownloadSpaceError(copyErr) {
 			discardPartial()
-			return "", copyErr
-		}
-		if errors.Is(copyErr, errDownloadFreeSpace) ||
-			errors.Is(copyErr, syscall.ENOSPC) {
 			return "", copyErr
 		}
 		if closeErr != nil {
