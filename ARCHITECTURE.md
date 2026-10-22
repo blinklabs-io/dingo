@@ -11415,8 +11415,8 @@ outputs or returns more than 5,000 distinct assets; a bare payment credential
 passes the same budget into `GetUtxoBalanceByAddress`, which stops its scan at
 the first output or distinct asset past it. The extended route likewise
 rejects more than 1,000 assets to enrich, since each costs three point reads
-and the route has no pagination. Both routes share one
-admission pool (4 active, 2 per client address) that answers 429 with
+and the route has no pagination. Both routes and the account summary share
+one admission pool (4 active, 2 per client address) that answers 429 with
 `Retry-After` when full.
 
 Blockfrost submission and both evaluation endpoints bound request body reads
@@ -11473,7 +11473,10 @@ transaction content/CBOR/metadata/UTxOs/certificates/redeemers/required
 signers, and account/delegation/registration/reward/UTxOs/withdrawals/
 transactions endpoints. It uses an adapter pattern to translate between
 Dingo's internal state and Blockfrost response types and supports
-Blockfrost-style pagination headers. Pool and account list routes reject
+Blockfrost-style pagination headers. `GET /accounts/{stake_address}` passes
+the request context to the adapter and its database reads, and takes a slot
+in the address summary admission pool because it aggregates every live UTxO
+of the credential. Pool and account list routes reject
 out-of-range count and page values before calling the adapter, using the
 shared strict pagination parser (count 1–100, page 1–21474836). The epoch
 next, previous and stakes lists, whose Blockfrost schema defines only count and
