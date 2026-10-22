@@ -2839,6 +2839,17 @@ func (c *Chain) removeIterator(iter *ChainIterator) {
 	}
 }
 
+// BlockByHash returns the block with the given hash. Unlike a database lookup
+// it also finds a block that a primary-chain rollback just removed: the
+// manager keeps such blocks in its block cache after deleting them from the
+// database. A block that is in neither is reported as ErrBlockNotFound.
+func (c *Chain) BlockByHash(
+	ctx context.Context,
+	hash []byte,
+) (models.Block, error) {
+	return c.manager.blockByHash(ctx, hash)
+}
+
 func (c *Chain) BlockByPoint(
 	ctx context.Context,
 	point ocommon.Point,

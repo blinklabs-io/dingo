@@ -113,7 +113,8 @@ func (s *Store) dropDeferredIndexes(
 		func(db queryer, ctx context.Context) error {
 			if _, err := db.ExecContext(
 				ctx,
-				`INSERT INTO sync_state (sync_key, value) VALUES (?, ?)
+				`-- name: UpsertSyncState :exec
+				 INSERT INTO sync_state (sync_key, value) VALUES (?, ?)
 				 ON CONFLICT (sync_key) DO UPDATE SET value = excluded.value`,
 				deferred.SyncStateKey,
 				deferred.SyncStateValue,
@@ -491,15 +492,18 @@ func (s *Store) deferredIndexExists(
 	var args []any
 	switch s.dialect.Name() {
 	case "mysql":
-		query = `SELECT 1 FROM information_schema.statistics
+		query = `-- name: MySQLIndexExists :one
+SELECT 1 FROM information_schema.statistics
 WHERE table_schema = DATABASE() AND table_name = ? AND index_name = ? LIMIT 1`
 		args = []any{index.Table, index.Name}
 	case "postgres":
-		query = `SELECT 1 FROM pg_indexes
+		query = `-- name: PostgresIndexExists :one
+SELECT 1 FROM pg_indexes
 WHERE schemaname = current_schema() AND tablename = ? AND indexname = ? LIMIT 1`
 		args = []any{index.Table, index.Name}
 	default:
-		query = `SELECT 1 FROM sqlite_master
+		query = `-- name: SQLiteIndexExists :one
+SELECT 1 FROM sqlite_master
 WHERE type = 'index' AND name = ? LIMIT 1`
 		args = []any{index.Name}
 	}

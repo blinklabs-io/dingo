@@ -532,3 +532,20 @@ func TestLocalStateQueryRepeatedOverLimitRequestsRemainBounded(t *testing.T) {
 	// Rejected requests do not poison later normal-sized requests.
 	require.NoError(t, checkLocalStateQueryItemLimit("normal", 3))
 }
+
+func TestDedupeAddresses(t *testing.T) {
+	t.Parallel()
+	mk := func(b byte) lcommon.Address {
+		a, err := lcommon.NewAddressFromParts(
+			lcommon.AddressTypeKeyNone,
+			lcommon.AddressNetworkTestnet,
+			bytes.Repeat([]byte{b}, 28),
+			nil,
+		)
+		require.NoError(t, err)
+		return a
+	}
+	got, err := dedupeAddresses([]lcommon.Address{mk(1), mk(2), mk(1), mk(2)})
+	require.NoError(t, err)
+	require.Len(t, got, 2)
+}

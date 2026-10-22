@@ -31,7 +31,7 @@ func TestRewardLiveStakeRefreshesTransactionPlannerStats(t *testing.T) {
 	testutil.SkipUnderRace(
 		t,
 		"asserts SQLite planner statistics over a single-goroutine fixture; "+
-			"go-test (Linux) runs it un-instrumented",
+			"CI's check and gate (services) jobs run it un-instrumented",
 	)
 	t.Parallel()
 	db, err := OpenDB("sqlite", filepath.Join(t.TempDir(), "metadata.sqlite"), "sqlite", false)
