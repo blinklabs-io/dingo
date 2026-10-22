@@ -1460,7 +1460,7 @@ sequenceDiagram
 
     Note over SC,EB: Slot Battle Detection
     LS->>LS: blockfetch delivers a peer block at a forged slot, counted and held pending
-    LS->>PC: once the tip is a security parameter of blocks past it, is the forged block on the chain?
+    LS->>PC: on each chain.update, fetched or forged, once the tip is a security parameter of blocks past it: is the forged block on the chain?
     LS->>EB: publish SlotBattleEvent(Won)
 ```
 

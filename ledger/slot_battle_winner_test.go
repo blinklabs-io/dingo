@@ -20,6 +20,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/chain"
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger/eras"
@@ -74,6 +76,47 @@ func (h *slotBattleHarness) deliver(t *testing.T, block gledger.Block) {
 		Point: ocommon.NewPoint(block.SlotNumber(), block.Hash().Bytes()),
 	}}
 	require.NoError(t, h.f.ls.flushPendingBlockfetchBlocksDeferred(nil))
+	if string(h.f.ls.chain.Tip().Point.Hash) == string(block.Hash().Bytes()) {
+		h.chainUpdate(block)
+	}
+}
+
+// chainUpdate hands the ledger the chain.update a primary-chain addition
+// publishes. The fixture's chain has no event bus, so the harness delivers
+// what the ledger's subscription would receive.
+func (h *slotBattleHarness) chainUpdate(block gledger.Block) {
+	h.f.ls.handleEventChainUpdate(event.NewEvent(
+		chain.ChainUpdateEventType,
+		chain.ChainBlockEvent{
+			Point: ocommon.NewPoint(block.SlotNumber(), block.Hash().Bytes()),
+			Block: models.Block{
+				Hash:   block.Hash().Bytes(),
+				Slot:   block.SlotNumber(),
+				Number: block.BlockNumber(),
+			},
+		},
+	))
+}
+
+// forge adds n locally forged blocks on top of base the way the forger does
+// and returns the last one.
+func (h *slotBattleHarness) forge(
+	t *testing.T,
+	base gledger.Block,
+	n int,
+) gledger.Block {
+	t.Helper()
+	for range n {
+		base = newSiblingTestBlock(
+			t, base.BlockNumber()+1, base.SlotNumber()+10,
+			base.Hash(), 0x55, 0x30, 1,
+		)
+		require.NoError(t, h.f.ls.chain.AddLocalBlock(
+			context.Background(), base,
+		))
+		h.chainUpdate(base)
+	}
+	return base
 }
 
 // extend delivers n blocks on top of base and returns the last one.
@@ -163,5 +206,23 @@ func TestSlotBattleWinnerRefusedRivalLeavesForgedOnChain(t *testing.T) {
 	last := h.extend(t, h.forged, 1)
 	h.requireNoEvent(t, "winner must wait for the slot to settle")
 	h.extend(t, last, 1)
+	h.requireWon(t, true)
+}
+
+// After the rival, the chain grows only by blocks this node forges. They never
+// pass through blockfetch, so settlement must not depend on a peer block
+// arriving after the battle.
+func TestSlotBattleWinnerSettlesOnLocalChainGrowth(t *testing.T) {
+	t.Parallel()
+
+	h := newSlotBattleHarness(t)
+	require.NoError(t, h.f.ls.chain.AddLocalBlock(
+		context.Background(), h.forged,
+	))
+	h.deliver(t, h.f.rival)
+	assert.Equal(t, int64(1), h.recs.n.Load())
+	last := h.forge(t, h.forged, 1)
+	h.requireNoEvent(t, "winner must wait for the slot to settle")
+	h.forge(t, last, 1)
 	h.requireWon(t, true)
 }

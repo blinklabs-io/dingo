@@ -7796,7 +7796,6 @@ func (ls *LedgerState) flushPendingBlockfetchBlocksDeferred(
 		}
 		ls.checkSlotBattle(pendingEvent)
 	}
-	ls.resolveSlotBattles()
 	ls.chain.NotifyIterators()
 	return nil
 }
