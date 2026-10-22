@@ -909,7 +909,7 @@ func TestHorizonFlushPublishesHeaderInvalidation(t *testing.T) {
 func newHorizonFlushTestLedger(
 	t *testing.T,
 	live func(ouroboros.ConnectionId) bool,
-) (*LedgerState, <-chan horizonFlushRequest) {
+) (*LedgerState, chan horizonFlushRequest) {
 	t.Helper()
 	cm, err := chain.NewManager(context.Background(), nil, nil)
 	require.NoError(t, err)
