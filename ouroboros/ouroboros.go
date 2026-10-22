@@ -1067,7 +1067,7 @@ func (o *Ouroboros) ConfigureListeners(
 			l.TrustedLocal = trusted
 			ntcOpts := []ouroboros.ConnectionOptionFunc{
 				ouroboros.WithNetworkMagic(o.config.NetworkMagic),
-				o.chainsyncConnectionConfigOption(ctx, false),
+				o.chainsyncConnectionConfigOption(ctx, false, trusted),
 				ouroboros.WithLocalStateQueryConfig(
 					olocalstatequery.NewConfig(
 						o.localstatequeryServerConnOpts(trusted)...,
@@ -1075,12 +1075,12 @@ func (o *Ouroboros) ConfigureListeners(
 				),
 				ouroboros.WithLocalTxMonitorConfig(
 					olocaltxmonitor.NewConfig(
-						o.localtxmonitorServerConnOpts()...,
+						o.localtxmonitorServerConnOpts(trusted)...,
 					),
 				),
 				ouroboros.WithLocalTxSubmissionConfig(
 					olocaltxsubmission.NewConfig(
-						o.localtxsubmissionServerConnOpts()...,
+						o.localtxsubmissionServerConnOpts(trusted)...,
 					),
 				),
 			}

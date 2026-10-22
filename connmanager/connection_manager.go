@@ -106,6 +106,9 @@ type ConnectionManager struct {
 	ntcCount                     int
 	trustedLocalNtCCount         int
 	ntcIPConns                   map[string]int
+	trustedNtCActivityMutex      sync.Mutex
+	trustedNtCActivities         map[ouroboros.ConnectionId]*trustedNtCActivity
+	trustedNtCActivityOwners     map[ouroboros.ConnectionId]*ouroboros.Connection
 	ntcTrustedLocalBufferedBytes atomic.Int64
 	ntcRemoteBufferedBytes       atomic.Int64
 }
@@ -146,6 +149,9 @@ type ConnectionManagerConfig struct {
 	MaxNtCConns             int
 	MaxNtCConnectionsPerIP  int
 	MaxTrustedLocalNtCConns int
+	// trustedNtCPostHandshakeTimeout overrides the trusted local NtC
+	// post-handshake segment deadline in tests.
+	trustedNtCPostHandshakeTimeout time.Duration
 }
 
 type connectionManagerMetrics struct {
@@ -226,6 +232,12 @@ func NewConnectionManager(cfg ConnectionManagerConfig) *ConnectionManager {
 		pendingConns:     make(map[net.Conn]struct{}),
 		ipConns:          make(map[string]int),
 		ntcIPConns:       make(map[string]int),
+		trustedNtCActivities: make(
+			map[ouroboros.ConnectionId]*trustedNtCActivity,
+		),
+		trustedNtCActivityOwners: make(
+			map[ouroboros.ConnectionId]*ouroboros.Connection,
+		),
 	}
 	if cfg.PromRegistry != nil {
 		c.initMetrics()
@@ -948,6 +960,9 @@ func (c *ConnectionManager) addConnectionImplWithTrust(
 	c.updateConnectionMetrics()
 	go func() {
 		defer c.goroutineWg.Done()
+		if isNtC && trustedLocal {
+			defer c.unregisterTrustedNtCActivity(connId, conn)
+		}
 		if onClose != nil {
 			defer onClose()
 		}

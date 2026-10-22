@@ -14255,6 +14255,17 @@ unspecified address, not a loopback one) gets gouroboros' own defaults
 instead, the same as it would for any other NtC server reachable beyond
 this machine.
 
+Trusted-local admission still has a bounded idle state. After negotiation,
+`connmanager` gives an idle client two minutes to complete the next mux
+segment; only a complete segment refreshes that deadline, so partial header or
+payload traffic cannot extend it. The deadline is suspended while a decoded
+NtC request is executing and while its first response segment is being
+prepared, then every complete response segment refreshes it. ChainSync keeps
+the request active across `AwaitReply` until the deferred reply finishes.
+This preserves the protocol's unbounded LocalStateQuery work and ChainSync
+waits, including one complete whole-UTxO result, while reclaiming the admission
+slot after a client becomes idle before or after protocol activity.
+
 It always starts with one full `Check` pinned at the live tip
 (`establishBaseline`) before validating anything incrementally -- the
 trust-reestablishing check a process start needs regardless of whether a

@@ -48,11 +48,14 @@ var errLocalTxSubmissionBusy = errors.New(
 // held until the callback returns, never until the socket closes.
 const localTxSubmissionMaxInFlight = 8
 
-func (o *Ouroboros) localtxsubmissionServerConnOpts() []olocaltxsubmission.LocalTxSubmissionOptionFunc {
+func (o *Ouroboros) localtxsubmissionServerConnOpts(
+	trackActivity ...bool,
+) []olocaltxsubmission.LocalTxSubmissionOptionFunc {
 	return []olocaltxsubmission.LocalTxSubmissionOptionFunc{
 		olocaltxsubmission.WithSubmitTxFunc(
 			o.instrumentLocaltxsubmissionSubmitTx(
 				o.localtxsubmissionServerSubmitTx,
+				activityTrackingEnabled(trackActivity),
 			),
 		),
 	}
@@ -60,11 +63,18 @@ func (o *Ouroboros) localtxsubmissionServerConnOpts() []olocaltxsubmission.Local
 
 func (o *Ouroboros) instrumentLocaltxsubmissionSubmitTx(
 	fn func(olocaltxsubmission.CallbackContext, olocaltxsubmission.MsgSubmitTxTransaction) error,
+	trackActivity bool,
 ) func(olocaltxsubmission.CallbackContext, olocaltxsubmission.MsgSubmitTxTransaction) error {
 	return func(
 		ctx olocaltxsubmission.CallbackContext,
 		tx olocaltxsubmission.MsgSubmitTxTransaction,
 	) error {
+		endActivity := o.beginTrustedNtCActivity(
+			trackActivity,
+			ctx.ConnectionId,
+			olocaltxsubmission.ProtocolId,
+		)
+		defer endActivity()
 		start := time.Now()
 		err := fn(ctx, tx)
 		o.recordProtocolMessage("localtxsubmission", err, time.Since(start))
