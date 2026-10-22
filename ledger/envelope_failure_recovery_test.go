@@ -199,9 +199,9 @@ func TestLedgerProcessBlockClassifiesEnvelopeFailure(t *testing.T) {
 }
 
 // A peer block whose own body exceeds maxBlockExUnits is rejected without
-// stopping the pipeline: recovery rewinds the primary chain past it, and the
-// valid fork chain selection offers next applies.
-func TestLedgerRejectsOverBudgetPeerBlockAndAdoptsFork(t *testing.T) {
+// stopping the pipeline: recovery rewinds the primary chain past it, and a
+// replacement block appended at the rewind point then applies.
+func TestLedgerRejectsOverBudgetPeerBlockAndAppliesReplacement(t *testing.T) {
 	t.Parallel()
 
 	const badSlot = uint64(10)
@@ -234,6 +234,14 @@ func TestLedgerRejectsOverBudgetPeerBlockAndAdoptsFork(t *testing.T) {
 		t,
 		cm.PrimaryChain().Tip().Point.Slot,
 		"the rejected block must be dropped from the primary chain",
+	)
+	ls.RLock()
+	ledgerTip := ls.currentTip.Point
+	ls.RUnlock()
+	require.Zero(
+		t,
+		ledgerTip.Slot,
+		"the rejected block must not be applied to the ledger",
 	)
 
 	require.NoError(t, cm.PrimaryChain().AddRawBlocks(
