@@ -62,6 +62,8 @@ type ImmutableDb struct {
 	maxChunk string
 }
 
+const maxSinglePassVerifiedEntrySize = 16 << 20
+
 var ErrPointBeyondLastChunk = errors.New(
 	"immutable DB: point is beyond the last chunk",
 )
@@ -162,8 +164,8 @@ func NewFromRoot(root *os.Root) (*ImmutableDb, error) {
 }
 
 // NewFromRootVerified is NewFromRoot for a tree whose files are individually
-// certified: every file is read once, checked against digests, and parsed from
-// the bytes that were checked.
+// certified. Each entry is checked against its digest, then parsed from the
+// checked buffer; a fixed cap bounds the single-pass path.
 //
 // NewFromRoot binds the reads to a directory. This binds them to the bytes.
 // The two are not the same guarantee, and the difference is the whole point
@@ -182,10 +184,8 @@ func NewFromRoot(root *os.Root) (*ImmutableDb, error) {
 // buffer, and the parser walks the same buffer. Nothing that happens to the
 // file afterwards is reachable from it.
 //
-// This holds one entry in memory at a time, bounded by the certified size of
-// the largest file, which is what the guarantee costs. The file is read twice —
-// once streaming, to learn that size without trusting it, and once into the
-// buffer — so it is the parser's read that is removed, not one of the two.
+// This holds one entry in memory at a time. Small entries use a bounded
+// single-pass read; larger entries are measured before allocation.
 //
 // digests maps a name directly beneath the data directory ("00000.chunk") to
 // its lowercase hex SHA-256. An empty or nil map is refused: it would verify
@@ -238,8 +238,7 @@ func (i *ImmutableDb) entryPath(name string) string {
 // place changes what the parser reads without changing anything the hash could
 // have noticed. What closes that is not checking harder but giving the parser
 // something nobody else can reach, which is a buffer whose own digest was
-// compared. See readVerifiedEntry for why it takes two passes over the file to
-// produce one safely.
+// compared. See readVerifiedEntry for its bounded small-file fast path.
 func (i *ImmutableDb) openEntry(name string) (entryReader, error) {
 	var f *os.File
 	var err error
@@ -261,27 +260,8 @@ func (i *ImmutableDb) openEntry(name string) (entryReader, error) {
 	return i.readVerifiedEntry(f, name)
 }
 
-// readVerifiedEntry returns an entry's bytes, but only if they are the
-// certified ones, and only after establishing how many of them there may be.
-//
-// Two passes, and the first one is what makes the second safe to allocate for.
-// How large a file is, is whoever wrote it's choice; how large the *certified*
-// file is, is not. So the streaming pass measures and checks the entry without
-// holding it, and the buffered pass then reads that many bytes and confirms the
-// digest over the buffer it is about to hand the parser. Reading straight into
-// memory instead would size an allocation from an untrusted file — a planted
-// entry of any size at all would be materialised in full before its digest
-// could be found wrong, which turns a refusal into an out-of-memory kill.
-//
-// The point of the second pass is not to check again but to check *the buffer*.
-// A digest taken during the first pass describes what the descriptor held then;
-// the parser reads the buffer, so the buffer is what has to be compared. That
-// is also what makes an in-place write between the passes harmless rather than
-// undetected: it changes the bytes, so it changes the digest, so it is refused.
-//
-// A file that grew between the passes is read only to its certified length, and
-// what follows is never looked at. One that shrank fails to fill the buffer,
-// which is a mismatch like any other.
+// readVerifiedEntry returns only bytes whose digest is certified. The parser
+// receives a buffer, never a descriptor another writer can mutate.
 func (i *ImmutableDb) readVerifiedEntry(
 	f *os.File,
 	name string,
@@ -291,6 +271,28 @@ func (i *ImmutableDb) readVerifiedEntry(
 		return nil, fmt.Errorf(
 			"%w: %s is not certified", ErrDigestMismatch, name,
 		)
+	}
+	if info, err := f.Stat(); err == nil &&
+		info.Size() >= 0 && info.Size() <= maxSinglePassVerifiedEntrySize {
+		data, err := io.ReadAll(io.LimitReader(
+			f, maxSinglePassVerifiedEntrySize+1,
+		))
+		if err != nil {
+			return nil, fmt.Errorf("reading %s: %w", i.entryPath(name), err)
+		}
+		if int64(len(data)) <= maxSinglePassVerifiedEntrySize {
+			sum := sha256.Sum256(data)
+			if got := hex.EncodeToString(sum[:]); got != expected {
+				return nil, fmt.Errorf(
+					"%w: %s computed %s, certified %s",
+					ErrDigestMismatch, name, got, expected,
+				)
+			}
+			return newBytesEntry(data), nil
+		}
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return nil, fmt.Errorf("rewinding %s: %w", i.entryPath(name), err)
 	}
 	certifiedSize, err := i.measureVerifiedEntry(f, name, expected)
 	if err != nil {
@@ -619,6 +621,74 @@ func (i *ImmutableDb) getChunk(chunkName string) (*chunk, error) {
 	return chunk, nil
 }
 
+// ValidateChunkBlockSpans checks every block boundary in a chunk without
+// reading block bodies. Remote loaders use this before publishing a downloaded
+// chunk, so an untrusted index cannot make the normal iterator allocate an
+// oversized block buffer.
+func (i *ImmutableDb) ValidateChunkBlockSpans(
+	chunkName string,
+) (retErr error) {
+	secondary, err := i.getChunkSecondaryIndex(chunkName)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		retErr = errors.Join(retErr, secondary.Close())
+	}()
+	chunkFileName := chunkName + chunkFileExtension
+	f, err := i.openEntry(chunkFileName)
+	if err != nil {
+		return fmt.Errorf(
+			"failed to read chunk: %s: %w",
+			i.entryPath(chunkFileName),
+			err,
+		)
+	}
+	defer func() {
+		retErr = errors.Join(retErr, f.Close())
+	}()
+	fileSize, err := f.Size()
+	if err != nil {
+		return err
+	}
+	if fileSize < 0 {
+		return fmt.Errorf(
+			"%w: negative chunk size %d",
+			ErrInvalidChunkOffset,
+			fileSize,
+		)
+	}
+	var current *secondaryIndexEntry
+	for {
+		next, err := secondary.Next()
+		if err != nil {
+			return err
+		}
+		if next == nil {
+			break
+		}
+		if current != nil {
+			if _, _, err := validBlockSpan(
+				current.BlockOffset,
+				next.BlockOffset,
+				fileSize,
+			); err != nil {
+				return err
+			}
+		}
+		current = next
+	}
+	if current == nil {
+		return nil
+	}
+	_, _, err = validBlockSpan(
+		current.BlockOffset,
+		uint64(fileSize), // #nosec G115 -- negative sizes are rejected above
+		fileSize,
+	)
+	return err
+}
+
 func (i *ImmutableDb) GetTip() (*ocommon.Point, error) {
 	chunkNames, err := i.getChunkNames()
 	if err != nil {
@@ -806,6 +876,21 @@ func (i *ImmutableDb) BlocksFromPoint(
 		startPoint: point,
 	}
 	return ret, nil
+}
+
+// BlocksInChunk returns an iterator over the blocks of the single immutable
+// file numbered num, in order, and nothing from any other chunk.
+//
+// By number, and without listing the directory: a verified database whose
+// directory holds several chunks at once (a bounded window of a streaming
+// download) reads exactly the one it was asked for, and a missing chunk
+// surfaces as an error from the first Next rather than as a silent empty
+// range.
+func (i *ImmutableDb) BlocksInChunk(num uint64) (*BlockIterator, error) {
+	return &BlockIterator{
+		db:         i,
+		chunkNames: []string{ChunkName(num)},
+	}, nil
 }
 
 type BlockIterator struct {

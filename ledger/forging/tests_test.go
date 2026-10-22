@@ -1089,6 +1089,7 @@ func TestEqualSlotAlternativeCarriesNoLeiosData(t *testing.T) {
 		ChainContext:                    newAltTestChainContext(10),
 		SiblingAdopter:                  adopter,
 		LeiosCertificateProvider:        leiosCerts,
+		LeiosCertificationTimingChecker: forgerTestCertTiming{},
 		LeiosParentAnnouncementProvider: parent,
 		PromRegistry:                    prometheus.NewRegistry(),
 	})
@@ -2841,6 +2842,7 @@ func TestForgeReResolvesLeiosDataWhenParentChanges(t *testing.T) {
 			slotEnd:           time.Now().Add(time.Hour),
 		},
 		LeiosCertificateProvider:        certs,
+		LeiosCertificationTimingChecker: forgerTestCertTiming{},
 		LeiosParentAnnouncementProvider: parent,
 		PromRegistry:                    prometheus.NewRegistry(),
 	})
@@ -2913,6 +2915,7 @@ func TestForgeDropsStaleAnnouncementWhenParentChanges(t *testing.T) {
 			txs: leiosAnnouncementTxs(t),
 		},
 		LeiosCertificateProvider:        certs,
+		LeiosCertificationTimingChecker: forgerTestCertTiming{},
 		LeiosParentAnnouncementProvider: parent,
 		PromRegistry:                    prometheus.NewRegistry(),
 	})
@@ -2978,6 +2981,7 @@ func TestForgeKeepsLeiosDataWhenParentIsUnchanged(t *testing.T) {
 			slotEnd:           time.Now().Add(time.Hour),
 		},
 		LeiosCertificateProvider:        certs,
+		LeiosCertificationTimingChecker: forgerTestCertTiming{},
 		LeiosParentAnnouncementProvider: parent,
 		PromRegistry:                    prometheus.NewRegistry(),
 	})
@@ -3073,6 +3077,7 @@ func TestForgeReResolvesLeiosDataForEmptyFallback(t *testing.T) {
 			slotEnd: time.Now(),
 		},
 		LeiosCertificateProvider:        certs,
+		LeiosCertificationTimingChecker: forgerTestCertTiming{},
 		LeiosParentAnnouncementProvider: parent,
 		PromRegistry:                    prometheus.NewRegistry(),
 	})
@@ -3130,6 +3135,7 @@ func TestForgeKeepsAnnouncementWhenParentIsUnchanged(t *testing.T) {
 			txs: leiosAnnouncementTxs(t),
 		},
 		LeiosCertificateProvider:        &forgerTestLeiosCerts{},
+		LeiosCertificationTimingChecker: forgerTestCertTiming{},
 		LeiosParentAnnouncementProvider: parent,
 		PromRegistry:                    prometheus.NewRegistry(),
 	})
@@ -3213,6 +3219,7 @@ func TestForgeReResolvesLeiosDataWhenParentChangesBeforeTheFirstBuild(
 			slotEnd:           time.Now().Add(time.Hour),
 		},
 		LeiosCertificateProvider:        certs,
+		LeiosCertificationTimingChecker: forgerTestCertTiming{},
 		LeiosParentAnnouncementProvider: parent,
 		LeiosProduceChecker:             leiosChecker,
 		LeiosEBBroadcaster:              &forgerTestLeiosCaster{},
@@ -3314,6 +3321,7 @@ func TestForgeMarksTheReResolvedEndorserBlockSlot(t *testing.T) {
 			slotEnd:           time.Now().Add(time.Hour),
 		},
 		LeiosCertificateProvider:        certs,
+		LeiosCertificationTimingChecker: forgerTestCertTiming{},
 		LeiosParentAnnouncementProvider: parent,
 		PromRegistry:                    prometheus.NewRegistry(),
 	})
@@ -4784,10 +4792,10 @@ func TestForgeCountsAStaleTipAheadOfASlotBattleOnTheRetry(t *testing.T) {
 // the bodies too, so body i stays aligned with reference i.
 func TestBuildLeiosEBBodiesAlignWithRefs(t *testing.T) {
 	txs := []MempoolTransaction{
-		{Hash: strings.Repeat("11", 32), Cbor: []byte{0x01}},
-		{Hash: "not-hex", Cbor: []byte{0x02}},            // dropped: bad hash
-		{Hash: strings.Repeat("22", 32), Cbor: []byte{}}, // dropped: zero size
-		{Hash: strings.Repeat("33", 32), Cbor: []byte{0x03, 0x04}},
+		{Hash: strings.Repeat("11", 32), Cbor: makeMinimalTxCbor(t, 0x01, 0)},
+		{Hash: "not-hex", Cbor: makeMinimalTxCbor(t, 0x02, 0)}, // bad hash
+		{Hash: strings.Repeat("22", 32), Cbor: []byte{}},       // zero size
+		{Hash: strings.Repeat("33", 32), Cbor: makeMinimalTxCbor(t, 0x03, 0)},
 	}
 
 	ebCbor, ebHash, bodies, err := buildLeiosEB(txs, leiosEBCaps{})
@@ -4796,8 +4804,8 @@ func TestBuildLeiosEBBodiesAlignWithRefs(t *testing.T) {
 
 	// Only the two valid transactions survive, in input order.
 	require.Len(t, bodies, 2)
-	require.Equal(t, []byte{0x01}, bodies[0])
-	require.Equal(t, []byte{0x03, 0x04}, bodies[1])
+	require.Equal(t, blockTxFromMempool(t, txs[0].Cbor), bodies[0])
+	require.Equal(t, blockTxFromMempool(t, txs[3].Cbor), bodies[1])
 
 	// The manifest references match the surviving bodies in order and size.
 	eb, err := lcommon.NewLeiosEndorserBlockFromCbor(ebCbor)
@@ -4818,11 +4826,13 @@ func TestBuildLeiosEBBodiesAlignWithRefs(t *testing.T) {
 // reference size is a 32-bit field: a transaction past 65535 bytes is
 // referenced with its true size, not dropped as unrepresentable.
 func TestBuildLeiosEBKeepsATransactionLargerThan16Bits(t *testing.T) {
-	const size = 70_000
-	tx := MempoolTransaction{
-		Hash: strings.Repeat("11", 32),
-		Cbor: make([]byte, size),
-	}
+	// Auxiliary data pads the transaction past the old 16-bit limit; the
+	// conversion only reorders elements, so it need not decode as metadata.
+	padded, err := cbor.Encode([]any{
+		map[uint]any{}, map[uint]any{}, true, make([]byte, 70_000),
+	})
+	require.NoError(t, err)
+	tx := MempoolTransaction{Hash: strings.Repeat("11", 32), Cbor: padded}
 	require.True(t, validLeiosTransactionReference(tx))
 
 	ebCbor, _, bodies, err := buildLeiosEB(
@@ -4835,6 +4845,8 @@ func TestBuildLeiosEBKeepsATransactionLargerThan16Bits(t *testing.T) {
 	eb, err := lcommon.NewLeiosEndorserBlockFromCbor(ebCbor)
 	require.NoError(t, err)
 	require.Len(t, eb.TransactionReferences, 1)
+	size := len(bodies[0])
+	require.Greater(t, size, math.MaxUint16)
 	require.Equal(t, uint32(size), eb.TransactionReferences[0].TransactionSize)
 }
 
@@ -4842,7 +4854,7 @@ func TestBuildLeiosEBKeepsATransactionLargerThan16Bits(t *testing.T) {
 // when no transaction yields a valid reference.
 func TestBuildLeiosEBNoValidRefs(t *testing.T) {
 	_, _, bodies, err := buildLeiosEB([]MempoolTransaction{
-		{Hash: "not-hex", Cbor: []byte{0x01}},
+		{Hash: "not-hex", Cbor: makeMinimalTxCbor(t, 0x01, 0)},
 	}, leiosEBCaps{})
 	require.ErrorIs(t, err, errNoValidTxRefs)
 	require.Nil(t, bodies)
@@ -4987,8 +4999,8 @@ func TestSelectValidLeiosTransactionsRejectsUnrepresentableParent(
 // forged EB validates every tx instead of rejecting it.
 func TestBuildLeiosEBReferencesUseFullTransactionHash(t *testing.T) {
 	txs := []MempoolTransaction{
-		{Hash: strings.Repeat("11", 32), Cbor: []byte{0x01, 0x02, 0x03}},
-		{Hash: strings.Repeat("aa", 32), Cbor: []byte{0xde, 0xad, 0xbe, 0xef}},
+		{Hash: strings.Repeat("11", 32), Cbor: makeMinimalTxCbor(t, 0x01, 0)},
+		{Hash: strings.Repeat("aa", 32), Cbor: makeMinimalTxCbor(t, 0x02, 0)},
 	}
 
 	ebCbor, _, bodies, err := buildLeiosEB(txs, leiosEBCaps{})

@@ -129,6 +129,7 @@ var utxoStoreMethods = []string{
 	"SetUtxoDeletedAtSlot",
 	"SetUtxosNotDeletedAfterSlot",
 	"GetSpentUtxosMissingAddressAfterSlot",
+	"UtxoRefsAsOfAfterID",
 	"MarkUtxosDeletedAtSlot",
 	"AddUtxos",
 	"ImportUtxos",
@@ -156,7 +157,9 @@ var utxoStoreMethods = []string{
 	"GetUtxosMissingAddress",
 	"SetUtxoAddress",
 	"IterateLiveUtxos",
+	"IterateLiveUtxosContext",
 	"IterateUtxosAsOf",
+	"IterateUtxosAsOfContext",
 }
 
 // transactionStoreMethods is the chain-transaction domain: sqlstore's
@@ -237,6 +240,7 @@ var stakeSnapshotStoreMethods = []string{
 	"SavePoolStakeSnapshots",
 	"GetPoolStakeSnapshot",
 	"GetPoolStakeSnapshotsByEpoch",
+	"GetPoolStakeSnapshotsByEpochBounded",
 	"GetPoolStakeSnapshotsForPools",
 	"GetTotalActiveStake",
 	"SaveEpochSummary",

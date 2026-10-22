@@ -93,12 +93,18 @@ func NewMCPServer(
 	}
 	var db *sql.DB
 	var openedDB *sql.DB
+	var sqlitePath string
+	if deps.Database != nil {
+		if provider, ok := deps.Database.Metadata().(interface{ SQLitePath() string }); ok {
+			sqlitePath = provider.SQLitePath()
+		}
+	}
 
 	if deps.SQLDB != nil {
 		db = deps.SQLDB
 	} else if deps.Database != nil {
-		if provider, ok := deps.Database.Metadata().(interface{ SQLitePath() string }); ok && provider.SQLitePath() != "" {
-			readDB, err := OpenReadOnlySQLite(ctx, provider.SQLitePath())
+		if sqlitePath != "" {
+			readDB, err := OpenReadOnlySQLite(ctx, sqlitePath)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -143,14 +149,24 @@ func NewMCPServer(
 	}
 
 	// Register tools, resources & prompts
-	RegisterSQLiteTools(server, db, cfg.QueryTimeout, cfg.MaxRows)
-	RegisterCardanoTools(
+	limits := newReadLimits()
+	if sqlitePath != "" {
+		walLogger := deps.Logger
+		if walLogger == nil {
+			walLogger = slog.Default()
+		}
+		limits.walBytes = walFileBytes(sqlitePath, walLogger)
+		server.AddReceivingMiddleware(limits.walPressureMiddleware())
+	}
+	registerSQLiteTools(server, db, cfg.QueryTimeout, cfg.MaxRows, limits)
+	registerCardanoTools(
 		server,
 		db,
 		deps.LedgerState,
 		deps.Mempool,
 		deps.Network,
 		cfg.QueryTimeout,
+		limits,
 		addressLookup,
 	)
 	resourceLogger := deps.Logger

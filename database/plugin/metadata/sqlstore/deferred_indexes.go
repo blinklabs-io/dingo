@@ -29,12 +29,16 @@ import (
 var (
 	_ metadata.DeferredIndexManager                      = (*Store)(nil)
 	_ metadata.ContextDeferredIndexDropper               = (*Store)(nil)
+	_ metadata.LazyDeferredIndexDropper                  = (*Store)(nil)
+	_ metadata.CatchUpIndexManager                       = (*Store)(nil)
+	_ metadata.CatchUpPragmaTuner                        = (*Store)(nil)
 	_ metadata.MissingCriticalDeferredIndexLister        = (*Store)(nil)
 	_ metadata.ContextMissingCriticalDeferredIndexLister = (*Store)(nil)
 	_ metadata.MissingDeferredIndexLister                = (*Store)(nil)
 	_ metadata.ContextDeferredIndexBuilder               = (*Store)(nil)
 	_ metadata.ContextCriticalDeferredIndexBuilder       = (*Store)(nil)
 	_ metadata.DeferredIndexProgressBuilder              = (*Store)(nil)
+	_ metadata.CriticalDeferredIndexProgressBuilder      = (*Store)(nil)
 )
 
 // withDeferredIndexWriteContext runs fn in one write transaction, with every
@@ -74,19 +78,50 @@ func (s *Store) DropDeferredIndexes() error {
 
 // DropDeferredIndexesContext is DropDeferredIndexes bound to ctx.
 func (s *Store) DropDeferredIndexesContext(ctx context.Context) error {
+	return s.dropDeferredIndexes(ctx, deferred.Manifest)
+}
+
+// DropLazyDeferredIndexesContext records the recovery marker and drops only
+// the non-critical manifest entries, in one transaction.
+func (s *Store) DropLazyDeferredIndexesContext(ctx context.Context) error {
+	return s.dropDeferredIndexes(ctx, deferred.LazyManifest())
+}
+
+// DropCatchUpIndexesContext records the recovery marker and drops the lazy
+// and catch-up droppable manifest entries, in one transaction.
+func (s *Store) DropCatchUpIndexesContext(ctx context.Context) error {
+	return s.dropDeferredIndexes(
+		ctx,
+		append(deferred.LazyManifest(), deferred.CatchUpDroppableManifest()...),
+	)
+}
+
+// BuildCatchUpIndexesContext rebuilds any missing catch-up droppable entry and
+// leaves the recovery marker for the full rebuild to clear.
+func (s *Store) BuildCatchUpIndexesContext(ctx context.Context) error {
+	return s.buildDeferredIndexes(
+		ctx, deferred.CatchUpDroppableManifest(), false,
+	)
+}
+
+func (s *Store) dropDeferredIndexes(
+	ctx context.Context,
+	indexes []deferred.Index,
+) error {
 	return s.withDeferredIndexWriteContext(
 		ctx,
 		func(db queryer, ctx context.Context) error {
 			if _, err := db.ExecContext(
 				ctx,
-				`INSERT INTO sync_state (sync_key, value) VALUES (?, ?)
+				`-- name: UpsertSyncState :exec
+				 INSERT INTO sync_state (sync_key, value) VALUES (?, ?)
 				 ON CONFLICT (sync_key) DO UPDATE SET value = excluded.value`,
 				deferred.SyncStateKey,
 				deferred.SyncStateValue,
 			); err != nil {
 				return fmt.Errorf("mark deferred indexes pending: %w", err)
 			}
-			for _, index := range deferred.Manifest {
+			for _, index := range indexes {
 				if !s.dialect.CanDropIndex(index.Name, index.Table) {
 					continue
 				}
@@ -150,6 +185,18 @@ func (s *Store) BuildCriticalDeferredIndexesContext(
 	ctx context.Context,
 ) error {
 	return s.buildDeferredIndexes(ctx, deferred.CriticalManifest(), false)
+}
+
+// BuildCriticalDeferredIndexesContextWithProgress is
+// BuildCriticalDeferredIndexesContext with per-index progress callbacks.
+func (s *Store) BuildCriticalDeferredIndexesContextWithProgress(
+	ctx context.Context,
+	before func(string),
+	after func(string, time.Duration),
+) error {
+	return s.buildDeferredIndexesWithProgress(
+		ctx, deferred.CriticalManifest(), false, before, after,
+	)
 }
 
 // BuildDeferredIndexes restores the full manifest and clears the durable
@@ -255,11 +302,7 @@ func (s *Store) buildDeferredIndexesWithProgress(
 					before(index.Name)
 				}
 				started := time.Now()
-				statement := s.dialect.CreateIndexSQL(
-					index.Name,
-					index.Table,
-					index.Columns,
-				)
+				statement := deferredIndexCreateSQL(s.dialect, index)
 				if _, err := db.ExecContext(
 					ctx,
 					statement,
@@ -322,11 +365,7 @@ func (s *Store) buildSQLiteDeferredIndexesWithProgress(
 					if before != nil {
 						before(index.Name)
 					}
-					statement := s.dialect.CreateIndexSQL(
-						index.Name,
-						index.Table,
-						index.Columns,
-					)
+					statement := deferredIndexCreateSQL(s.dialect, index)
 					started = time.Now()
 					if _, err := db.ExecContext(
 						txCtx,
@@ -428,11 +467,7 @@ func (s *Store) ensureRetainedIndexes(
 		if exists {
 			continue
 		}
-		statement := s.dialect.CreateIndexSQL(
-			index.Name,
-			index.Table,
-			index.Columns,
-		)
+		statement := deferredIndexCreateSQL(s.dialect, index)
 		if _, err := db.ExecContext(
 			ctx,
 			statement,
@@ -457,15 +492,18 @@ func (s *Store) deferredIndexExists(
 	var args []any
 	switch s.dialect.Name() {
 	case "mysql":
-		query = `SELECT 1 FROM information_schema.statistics
+		query = `-- name: MySQLIndexExists :one
+SELECT 1 FROM information_schema.statistics
 WHERE table_schema = DATABASE() AND table_name = ? AND index_name = ? LIMIT 1`
 		args = []any{index.Table, index.Name}
 	case "postgres":
-		query = `SELECT 1 FROM pg_indexes
+		query = `-- name: PostgresIndexExists :one
+SELECT 1 FROM pg_indexes
 WHERE schemaname = current_schema() AND tablename = ? AND indexname = ? LIMIT 1`
 		args = []any{index.Table, index.Name}
 	default:
-		query = `SELECT 1 FROM sqlite_master
+		query = `-- name: SQLiteIndexExists :one
+SELECT 1 FROM sqlite_master
 WHERE type = 'index' AND name = ? LIMIT 1`
 		args = []any{index.Name}
 	}
@@ -563,4 +601,14 @@ func (s *Store) HasDeferredIndexesPending() (bool, error) {
 		return false, fmt.Errorf("read deferred indexes marker: %w", err)
 	}
 	return value != "", nil
+}
+
+// deferredIndexCreateSQL builds the CREATE INDEX for a manifest or retained
+// entry, keeping a partial entry partial on the engines that support it.
+func deferredIndexCreateSQL(d Dialect, index deferred.Index) string {
+	statement := d.CreateIndexSQL(index.Name, index.Table, index.Columns)
+	if index.Where == "" || d.Name() == "mysql" {
+		return statement
+	}
+	return statement + " WHERE " + index.Where
 }

@@ -227,6 +227,39 @@ func TestLedgerProcessBlockByronReferenceRules(t *testing.T) {
 			},
 		},
 		{
+			name: "missing positional witness is rejected",
+			build: func(t *testing.T, db *database.Database) *byron.ByronTransaction {
+				a := seedByronUtxoWithAmount(t, db, 0x01, keyA.address, 1_000)
+				b := seedByronUtxoWithAmount(t, db, 0x02, keyB.address, 1_000)
+				return buildByronBlockTestTx(t, protocolMagic,
+					[]byronBlockTestInput{{a, 0}, {b, 0}},
+					[]byronBlockTestOutput{{payTo, 1_500}},
+					nil, []byronBlockTestKey{keyA})
+			},
+			check: func(t *testing.T, err error) {
+				var count eras.WitnessCountByronError
+				require.ErrorAs(t, err, &count)
+				require.Equal(t, 2, count.Inputs)
+				require.Equal(t, 1, count.Witnesses)
+			},
+		},
+		{
+			name: "extra positional witness is rejected",
+			build: func(t *testing.T, db *database.Database) *byron.ByronTransaction {
+				a := seedByronUtxoWithAmount(t, db, 0x01, keyA.address, 1_000)
+				return buildByronBlockTestTx(t, protocolMagic,
+					[]byronBlockTestInput{{a, 0}},
+					[]byronBlockTestOutput{{payTo, 800}},
+					nil, []byronBlockTestKey{keyA, keyB})
+			},
+			check: func(t *testing.T, err error) {
+				var count eras.WitnessCountByronError
+				require.ErrorAs(t, err, &count)
+				require.Equal(t, 1, count.Inputs)
+				require.Equal(t, 2, count.Witnesses)
+			},
+		},
+		{
 			name: "repeated input is accepted",
 			build: func(t *testing.T, db *database.Database) *byron.ByronTransaction {
 				x := seedByronUtxoWithAmount(t, db, 0x01, keyA.address, 1_000)

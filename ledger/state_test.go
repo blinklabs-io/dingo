@@ -193,6 +193,28 @@ func TestLedgerStatePublishedEpochCacheRejectsInPlaceAppend(t *testing.T) {
 	require.Equal(t, uint64(7), oldConsensus.epochCache[0].EpochId)
 }
 
+func TestHeaderCryptoVerificationGenerationUniqueAcrossLedgerStates(t *testing.T) {
+	first := &LedgerState{}
+	first.publishSnapshotsLocked()
+	firstGeneration := first.CurrentHeaderCryptoVerificationGeneration()
+	require.NotZero(t, firstGeneration)
+
+	replacement := &LedgerState{}
+	replacement.publishSnapshotsLocked()
+	replacementGeneration := replacement.CurrentHeaderCryptoVerificationGeneration()
+	require.NotZero(t, replacementGeneration)
+	require.NotEqual(t, firstGeneration, replacementGeneration,
+		"replacement ledger reused a producer-authorization generation")
+	require.False(t,
+		replacement.HeaderCryptoVerificationGenerationCurrent(firstGeneration),
+	)
+	release, current := replacement.PinHeaderCryptoVerificationGeneration(
+		firstGeneration,
+	)
+	require.False(t, current)
+	require.Nil(t, release)
+}
+
 // TestSetEpochCachePublishesPartialStateOnError verifies that startup cache
 // mutations are published even when validation returns an error afterward.
 func TestSetEpochCachePublishesPartialStateOnError(t *testing.T) {
@@ -215,7 +237,7 @@ func TestSetEpochCachePublishesPartialStateOnError(t *testing.T) {
 	// The deferred publication must expose the mutation through the atomic
 	// reader path despite setEpochCache returning before normal completion.
 	snapshot := ls.consensus.Load()
-	require.Equal(t, previousGeneration+1, snapshot.generation)
+	require.Greater(t, snapshot.generation, previousGeneration)
 	require.Equal(t, invalidEpoch.EpochId, snapshot.currentEpoch.EpochId)
 	require.Equal(t, invalidEpoch.EraId, snapshot.currentEpoch.EraId)
 	require.Len(t, snapshot.epochCache, 1)
@@ -10906,7 +10928,9 @@ func TestLedgerReadChainIteratorCoalescesGapsDuringBulkReplay(t *testing.T) {
 	// Not t.Parallel: swaps the package-level
 	// gatherCoalesceRetryInterval/gatherCoalesceMaxAttempts seam via
 	// shrinkGatherCoalesceRetryInterval.
-	shrinkGatherCoalesceRetryInterval(t, time.Millisecond, 5)
+	// The script below has seven gaps in one pass, and the budget is spent
+	// per pass, so it must cover all of them.
+	shrinkGatherCoalesceRetryInterval(t, time.Millisecond, 10)
 
 	block1, point1 := buildDecodableTestBlock(t, 10, 1)
 	block2, point2 := buildDecodableTestBlock(t, 20, 2)
@@ -10954,6 +10978,165 @@ func TestLedgerReadChainIteratorCoalescesGapsDuringBulkReplay(t *testing.T) {
 		5,
 		"gaps during bulk replay should be coalesced into one batch instead "+
 			"of flushing on the very first empty non-blocking check",
+	)
+	close(result.done)
+}
+
+// TestLedgerReadChainIteratorBoundsCoalesceWaitPerPass pins the coalescing
+// budget to the whole gather pass rather than to each gap. Blockfetch exposes
+// blocks to the chain in small groups, so a catch-up pass meets one gap per
+// group. A per-gap budget either flushes every group as its own commit, which
+// multiplies SQLite's write volume, or, raised far enough to bridge the
+// groups, lets one pass hold blockPipelineGatherMutex for batchSize times the
+// budget. Spending one budget per pass bounds that hold to the budget itself.
+//
+// Each gap here is shorter than the budget, so a per-gap budget gathers all
+// four blocks. Spent per pass, the budget runs out in the second gap and the
+// pass flushes the two blocks it has.
+func TestLedgerReadChainIteratorBoundsCoalesceWaitPerPass(t *testing.T) {
+	// Not t.Parallel: swaps the package-level
+	// gatherCoalesceRetryInterval/gatherCoalesceMaxAttempts seam via
+	// shrinkGatherCoalesceRetryInterval.
+	shrinkGatherCoalesceRetryInterval(t, time.Millisecond, 4)
+
+	block1, point1 := buildDecodableTestBlock(t, 10, 1)
+	block2, point2 := buildDecodableTestBlock(t, 20, 2)
+	block3, point3 := buildDecodableTestBlock(t, 30, 3)
+	block4, point4 := buildDecodableTestBlock(t, 40, 4)
+
+	script := []*chain.ChainIteratorResult{
+		{Point: point1, Block: block1},
+		nil, nil, nil,
+		{Point: point2, Block: block2},
+		nil, nil, nil,
+		{Point: point3, Block: block3},
+		nil, nil, nil,
+		{Point: point4, Block: block4},
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	iter := &scriptedGapLedgerReadIterator{ctx: ctx, script: script}
+
+	ls := &LedgerState{config: LedgerStateConfig{Logger: testLogger()}}
+	ls.advanceUpstreamTipSlot(farUpstreamTipSlot)
+
+	resultCh := make(chan readChainResult, 1)
+	go ls.ledgerReadChainIterator(ctx, iter, resultCh)
+
+	result := testutil.RequireReceive(
+		t, resultCh, testutil.AsyncWait,
+		"reader never delivered a batch",
+	)
+	require.NoError(t, result.err)
+	require.False(t, result.rollback)
+	require.Len(
+		t,
+		result.blocks,
+		2,
+		"the coalescing budget must be spent once per gather pass; a "+
+			"budget that resets at every gap lets one pass wait once per "+
+			"block it gathers",
+	)
+	close(result.done)
+}
+
+// TestLedgerReadChainIteratorFlushesWhenChainStopsGrowing pins the per-gap
+// cap that sits inside the per-pass budget. A pass that has gathered blocks
+// the chain will not follow up for a while -- a few blocks added with nothing
+// behind them, or an upstream that went quiet -- must apply them once one gap
+// outlasts gatherCoalesceMaxGapAttempts, not hold them for the whole pass
+// budget.
+func TestLedgerReadChainIteratorFlushesWhenChainStopsGrowing(t *testing.T) {
+	// Not t.Parallel: swaps the package-level gatherCoalesce* seams.
+	shrinkGatherCoalesceRetryInterval(t, time.Millisecond, 100)
+	prevGap := gatherCoalesceMaxGapAttempts
+	gatherCoalesceMaxGapAttempts = 3
+	t.Cleanup(func() { gatherCoalesceMaxGapAttempts = prevGap })
+
+	block1, point1 := buildDecodableTestBlock(t, 10, 1)
+	block2, point2 := buildDecodableTestBlock(t, 20, 2)
+	block3, point3 := buildDecodableTestBlock(t, 30, 3)
+
+	// The first gap fits the gap cap; the second, four probes long, does not.
+	script := []*chain.ChainIteratorResult{
+		{Point: point1, Block: block1},
+		nil, nil,
+		{Point: point2, Block: block2},
+		nil, nil, nil, nil,
+		{Point: point3, Block: block3},
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	iter := &scriptedGapLedgerReadIterator{ctx: ctx, script: script}
+
+	ls := &LedgerState{config: LedgerStateConfig{Logger: testLogger()}}
+	ls.advanceUpstreamTipSlot(farUpstreamTipSlot)
+
+	resultCh := make(chan readChainResult, 1)
+	go ls.ledgerReadChainIterator(ctx, iter, resultCh)
+
+	result := testutil.RequireReceive(
+		t, resultCh, testutil.AsyncWait,
+		"reader never delivered a batch",
+	)
+	require.NoError(t, result.err)
+	require.False(t, result.rollback)
+	require.Len(
+		t,
+		result.blocks,
+		2,
+		"a gap longer than gatherCoalesceMaxGapAttempts must flush the "+
+			"pass even while its per-pass budget remains",
+	)
+	close(result.done)
+}
+
+// TestLedgerReadChainIteratorGapCapResetsPerBlock is the other side of the
+// gap cap: it measures one gap, so short gaps between blockfetch groups never
+// add up to it. Each gap here fits the cap while their sum does not, and the
+// pass must still gather every block.
+func TestLedgerReadChainIteratorGapCapResetsPerBlock(t *testing.T) {
+	// Not t.Parallel: swaps the package-level gatherCoalesce* seams.
+	shrinkGatherCoalesceRetryInterval(t, time.Millisecond, 100)
+	prevGap := gatherCoalesceMaxGapAttempts
+	gatherCoalesceMaxGapAttempts = 3
+	t.Cleanup(func() { gatherCoalesceMaxGapAttempts = prevGap })
+
+	block1, point1 := buildDecodableTestBlock(t, 10, 1)
+	block2, point2 := buildDecodableTestBlock(t, 20, 2)
+	block3, point3 := buildDecodableTestBlock(t, 30, 3)
+
+	script := []*chain.ChainIteratorResult{
+		{Point: point1, Block: block1},
+		nil, nil,
+		{Point: point2, Block: block2},
+		nil, nil,
+		{Point: point3, Block: block3},
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	iter := &scriptedGapLedgerReadIterator{ctx: ctx, script: script}
+
+	ls := &LedgerState{config: LedgerStateConfig{Logger: testLogger()}}
+	ls.advanceUpstreamTipSlot(farUpstreamTipSlot)
+
+	resultCh := make(chan readChainResult, 1)
+	go ls.ledgerReadChainIterator(ctx, iter, resultCh)
+
+	result := testutil.RequireReceive(
+		t, resultCh, testutil.AsyncWait,
+		"reader never delivered a batch",
+	)
+	require.NoError(t, result.err)
+	require.False(t, result.rollback)
+	require.Len(
+		t,
+		result.blocks,
+		3,
+		"the gap cap must restart at every gathered block",
 	)
 	close(result.done)
 }
@@ -11542,7 +11725,7 @@ func (c *countingGapLedgerReadIterator) counts() (int, int) {
 	return c.probes, c.inSpan
 }
 
-// TestLedgerReadChainIteratorBoundsChainProbesPerCoalesceGap pins the
+// TestLedgerReadChainIteratorBoundsChainProbesPerCoalescePass pins the
 // multiplier in the coalescing bound ARCHITECTURE.md states. The sleeping is
 // bounded by the gatherCoalesce* settings, but each retry also re-probes the
 // iterator while blockPipelineGatherMutex is still held, and that probe
@@ -11556,7 +11739,7 @@ func (c *countingGapLedgerReadIterator) counts() (int, int) {
 // plus one per retry the budget allows. Dropping the
 // coalesceAttempts < gatherCoalesceMaxAttempts term in place makes the
 // reader probe forever and never deliver the batch.
-func TestLedgerReadChainIteratorBoundsChainProbesPerCoalesceGap(
+func TestLedgerReadChainIteratorBoundsChainProbesPerCoalescePass(
 	t *testing.T,
 ) {
 	// Not t.Parallel: swaps the package-level
@@ -11601,7 +11784,7 @@ func TestLedgerReadChainIteratorBoundsChainProbesPerCoalesceGap(
 		t, attempts+1, probes,
 		"a gap that never resolves must cost one chain probe to find the "+
 			"tip plus one per allowed retry; ARCHITECTURE.md's worst case "+
-			"multiplies batchSize by gatherCoalesceMaxAttempts on that basis",
+			"counts gatherCoalesceMaxAttempts probes per pass on that basis",
 	)
 	require.Equal(
 		t, probes, inSpan,

@@ -158,7 +158,7 @@ func persistUtxoPointer(
 	if err != nil {
 		return nil //nolint:nilerr // unrepresentable position: see above
 	}
-	if _, err := db.ExecContext(ctx, `
+	if _, err := db.ExecContext(ctx, `-- name: UpsertUtxoPointer :exec
 INSERT INTO utxo_pointer (utxo_id, ptr_slot, ptr_tx_index, ptr_cert_index)
 VALUES (?, ?, ?, ?)
 ON CONFLICT (utxo_id) DO UPDATE SET

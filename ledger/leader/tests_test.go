@@ -19,6 +19,7 @@ import (
 	"strings"
 	"testing"
 
+	nodeconsensus "github.com/blinklabs-io/dingo/consensus"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/gouroboros/consensus"
 	"github.com/blinklabs-io/ouroboros-mock/fixtures"
@@ -154,7 +155,7 @@ func TestLeaderEligibilityNodeSchedules(t *testing.T) {
 	testutil.SkipUnderRace(
 		t,
 		"each case is a single-goroutine pass over every slot of an epoch; "+
-			"go-test (Linux) replays the same cases un-instrumented",
+			"CI's check job replays the same cases un-instrumented",
 	)
 	for i, c := range e34ScheduleCases(t) {
 		t.Run(fmt.Sprintf("%02d_%s", i, c.Mode), func(t *testing.T) {
@@ -229,7 +230,7 @@ func TestE34ScheduleVersionInvalidation(t *testing.T) {
 	}
 	require.NotZero(t, reference.SlotCount)
 	f, pool, total, nonce, seed, _ := reference.inputs(t)
-	for _, mutation := range []string{"version4", "absent_version", "nonce", "pool_stake", "total_stake", "out_of_range"} {
+	for _, mutation := range []string{"version5", "absent_version", "consensus_identity", "nonce", "pool_stake", "total_stake", "out_of_range"} {
 		t.Run(mutation, func(t *testing.T) {
 			backing := newMockSyncStateStore()
 			store := NewSyncStateScheduleStore(backing)
@@ -238,8 +239,10 @@ func TestE34ScheduleVersionInvalidation(t *testing.T) {
 				stale.AddLeaderSlot(slot)
 			}
 			switch mutation {
-			case "version4":
-				stale.FormatVersion = 4
+			case "version5":
+				stale.FormatVersion = 5
+			case "consensus_identity":
+				stale.ConsensusIdentity = "tachys/v1"
 			case "nonce":
 				stale.EpochNonce = makeDistinctNonce(nonce)
 			case "pool_stake":
@@ -301,7 +304,8 @@ func TestE34ScheduleVersionInvalidation(t *testing.T) {
 			)
 			saved, err := store.LoadSchedule(11, coeffTestPoolID)
 			require.NoError(t, err)
-			require.Equal(t, 5, saved.FormatVersion)
+			require.Equal(t, ScheduleFormatVersion, saved.FormatVersion)
+			require.Equal(t, nodeconsensus.PraosIdentity, saved.ConsensusIdentity)
 			require.Equal(
 				t,
 				reference.AssignedSlots,
@@ -316,7 +320,7 @@ func TestE34ScheduleVersionInvalidation(t *testing.T) {
 				t,
 				1,
 				calls,
-				"valid version-5 restart must reuse, not sign",
+				"valid schedule restart must reuse, not sign",
 			)
 			require.Equal(
 				t,

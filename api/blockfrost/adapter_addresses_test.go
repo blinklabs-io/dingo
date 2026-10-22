@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/binary"
 	"encoding/hex"
 	"testing"
 	"time"
@@ -27,6 +28,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"github.com/btcsuite/btcd/btcutil/bech32"
 	"github.com/stretchr/testify/require"
 )
@@ -408,7 +410,7 @@ func TestNodeAdapterAddressTotalSeparatesKeyAndScriptCredentials(
 	require.NoError(t, err)
 	_, err = adapter.AddressTotal(context.Background(), scriptCred)
 	require.ErrorIs(t, err, ErrAddressNotFound)
-	_, err = adapter.Address(scriptCred)
+	_, err = adapter.Address(context.Background(), scriptCred)
 	require.ErrorIs(t, err, ErrAddressNotFound)
 }
 
@@ -437,4 +439,356 @@ func TestNodeAdapterAddressUTXOsRejectForeignNetwork(t *testing.T) {
 		page,
 	)
 	require.ErrorIs(t, err, ErrInvalidAddress)
+}
+
+func seedSummaryOutputs(
+	t *testing.T,
+	adapter *NodeAdapter,
+	raw *sql.DB,
+	db *database.Database,
+	addr lcommon.Address,
+	count int,
+	assets func(i int) []models.Asset,
+) {
+	t.Helper()
+	for i := range count {
+		var held []models.Asset
+		if assets != nil {
+			held = assets(i)
+		}
+		seedAddressOutput(
+			t, raw, db, addr, fill32(byte(0x40+i)), uint64(10+i),
+			2_000_000, held, nil,
+		)
+	}
+	require.NotNil(t, adapter)
+}
+
+func TestNodeAdapterAddressStopsOnCancelledContext(t *testing.T) {
+	t.Parallel()
+	adapter, raw, db := newDBBackedAdapter(t)
+	addr, _, _ := testKeyAddress(t, 0xb1, 0xb2)
+	seedSummaryOutputs(t, adapter, raw, db, addr, 2, nil)
+
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := adapter.Address(cancelled, addr.String())
+	require.ErrorIs(t, err, context.Canceled)
+
+	info, err := adapter.Address(context.Background(), addr.String())
+	require.NoError(t, err)
+	require.Equal(t, "4000000", info.Amount[0].Quantity)
+}
+
+// Batches smaller than the UTxO set must give the totals one unbounded read
+// would, including sums past the int64 range and the (policy id, name)
+// asset order, and must not count outputs at sibling address forms.
+func TestNodeAdapterAddressBatchedBalanceIsExact(t *testing.T) {
+	t.Parallel()
+	adapter, raw, db := newDBBackedAdapter(t)
+	addr, _, _ := testKeyAddress(t, 0xb3, 0xb4)
+	policy := bytes.Repeat([]byte{0xb5}, lcommon.AddressHashSize)
+	big := models.Asset{PolicyId: policy, Name: []byte("b"), Amount: 1 << 63}
+	small := models.Asset{PolicyId: policy, Name: []byte("a"), Amount: 3}
+	seedSummaryOutputs(
+		t, adapter, raw, db, addr, 5,
+		func(i int) []models.Asset {
+			if i < 2 {
+				return []models.Asset{big, small}
+			}
+			return nil
+		},
+	)
+	sibling, _, _ := testKeyAddress(t, 0xb3, 0xb6)
+	seedAddressOutput(
+		t, raw, db, sibling, fill32(0x7f), 30, 9_000_000, nil, nil,
+	)
+
+	want, err := adapter.Address(context.Background(), addr.String())
+	require.NoError(t, err)
+	adapter.summaryLimits = addressSummaryLimits{batch: 2}
+	got, err := adapter.Address(context.Background(), addr.String())
+	require.NoError(t, err)
+	require.Equal(t, want, got)
+
+	policyHex := hex.EncodeToString(policy)
+	require.Equal(t, []AddressAmountInfo{
+		{Unit: "lovelace", Quantity: "10000000"},
+		{Unit: policyHex + hex.EncodeToString([]byte("a")), Quantity: "6"},
+		{
+			Unit:     policyHex + hex.EncodeToString([]byte("b")),
+			Quantity: "18446744073709551616",
+		},
+	}, got.Amount)
+}
+
+func TestNodeAdapterAddressReadBudget(t *testing.T) {
+	t.Parallel()
+	adapter, raw, db := newDBBackedAdapter(t)
+	addr, _, _ := testKeyAddress(t, 0xb7, 0xb8)
+	policy := bytes.Repeat([]byte{0xb9}, lcommon.AddressHashSize)
+	seedSummaryOutputs(
+		t, adapter, raw, db, addr, 4,
+		func(i int) []models.Asset {
+			return []models.Asset{{
+				PolicyId: policy, Name: []byte{byte(i)}, Amount: 1,
+			}}
+		},
+	)
+
+	adapter.summaryLimits = addressSummaryLimits{batch: 2, maxUtxos: 3}
+	_, err := adapter.Address(context.Background(), addr.String())
+	require.ErrorIs(t, err, ErrAddressSummaryTooLarge)
+	_, err = adapter.AddressExtended(context.Background(), addr.String())
+	require.ErrorIs(t, err, ErrAddressSummaryTooLarge)
+
+	adapter.summaryLimits = addressSummaryLimits{batch: 2, maxUtxos: 4}
+	_, err = adapter.Address(context.Background(), addr.String())
+	require.NoError(t, err)
+
+	adapter.summaryLimits = addressSummaryLimits{maxAssets: 3}
+	_, err = adapter.Address(context.Background(), addr.String())
+	require.ErrorIs(t, err, ErrAddressSummaryTooLarge)
+	adapter.summaryLimits = addressSummaryLimits{maxAssets: 4}
+	_, err = adapter.Address(context.Background(), addr.String())
+	require.NoError(t, err)
+}
+
+func TestNodeAdapterAddressExtendedCapsEnrichment(t *testing.T) {
+	t.Parallel()
+	adapter, raw, db := newDBBackedAdapter(t)
+	addr, _, _ := testKeyAddress(t, 0xc1, 0xc2)
+	policy := bytes.Repeat([]byte{0xc3}, lcommon.AddressHashSize)
+	seedAddressOutput(
+		t, raw, db, addr, fill32(0x51), 6, 3_000_000,
+		[]models.Asset{
+			{PolicyId: policy, Name: []byte("a"), Amount: 1},
+			{PolicyId: policy, Name: []byte("b"), Amount: 1},
+			{PolicyId: policy, Name: []byte("c"), Amount: 1},
+		},
+		nil,
+	)
+
+	adapter.summaryLimits = addressSummaryLimits{maxEnrichedAssets: 2}
+	_, err := adapter.AddressExtended(context.Background(), addr.String())
+	require.ErrorIs(t, err, ErrAddressSummaryTooLarge)
+
+	// The base summary has no per-asset enrichment to cap.
+	_, err = adapter.Address(context.Background(), addr.String())
+	require.NoError(t, err)
+
+	adapter.summaryLimits = addressSummaryLimits{maxEnrichedAssets: 3}
+	got, err := adapter.AddressExtended(context.Background(), addr.String())
+	require.NoError(t, err)
+	require.Len(t, got.Amount, 4)
+}
+
+// seedSiblingOutputs stores count live outputs at sibling, each with its
+// output CBOR, at slots 1..count.
+func seedSiblingOutputs(
+	t *testing.T,
+	raw *sql.DB,
+	db *database.Database,
+	sibling lcommon.Address,
+	count int,
+) {
+	t.Helper()
+	siblingCbor, err := cbor.Encode(&shelley.ShelleyTransactionOutput{
+		OutputAddress: sibling,
+		OutputAmount:  1_000_000,
+	})
+	require.NoError(t, err)
+	tx, err := raw.Begin()
+	require.NoError(t, err)
+	stmt, err := tx.Prepare(`
+INSERT INTO utxo (tx_id, payment_key, staking_key, credential_tag,
+    added_slot, deleted_slot, amount, output_idx, payment_script)
+VALUES (?, ?, ?, 0, ?, 0, '1000000', 0, ?)`)
+	require.NoError(t, err)
+	ids := make([][]byte, count)
+	for i := range count {
+		id := make([]byte, 32)
+		binary.BigEndian.PutUint64(id, uint64(i)+1)
+		id[31] = 0xee
+		ids[i] = id
+		_, err = stmt.Exec(
+			id,
+			sibling.PaymentKeyHash().Bytes(),
+			stakingKeyOf(sibling),
+			uint64(i)+1,
+			models.PaymentScriptFromAddress(sibling),
+		)
+		require.NoError(t, err)
+	}
+	require.NoError(t, stmt.Close())
+	require.NoError(t, tx.Commit())
+	for start := 0; start < count; start += 1000 {
+		chunk := ids[start:min(start+1000, count)]
+		require.NoError(t, db.BlobTxn(true).Do(func(txn *database.Txn) error {
+			for _, id := range chunk {
+				if err := db.Blob().SetUtxo(
+					txn.Blob(), id, 0, siblingCbor,
+				); err != nil {
+					return err
+				}
+			}
+			return nil
+		}))
+	}
+}
+
+// An enterprise address shares its coarse credential match with every base
+// address of the same payment credential. Sibling outputs ahead of the
+// address's own outputs must not exhaust the database's per-call candidate
+// cap and fail the summary.
+func TestNodeAdapterAddressSkipsManySiblingForms(t *testing.T) {
+	t.Parallel()
+	adapter, raw, db := newDBBackedAdapter(t)
+	addr, _, _ := testKeyAddress(t, 0xd1, 0)
+	sibling, _, _ := testKeyAddress(t, 0xd1, 0xd3)
+	seedSiblingOutputs(t, raw, db, sibling, 10_050)
+	seedAddressOutput(
+		t, raw, db, addr, fill32(0xd7), 20_000, 2_000_000, nil, nil,
+	)
+	seedAddressOutput(
+		t, raw, db, addr, fill32(0xd8), 20_001, 3_000_000, nil, nil,
+	)
+
+	info, err := adapter.Address(context.Background(), addr.String())
+	require.NoError(t, err)
+	require.Equal(t, []AddressAmountInfo{
+		{Unit: "lovelace", Quantity: "5000000"},
+	}, info.Amount)
+}
+
+// The read budget counts every output the summary reads and decodes,
+// including sibling forms the exact comparison then discards.
+func TestNodeAdapterAddressBudgetCountsSiblingCandidates(t *testing.T) {
+	t.Parallel()
+	adapter, raw, db := newDBBackedAdapter(t)
+	addr, _, _ := testKeyAddress(t, 0xd4, 0)
+	sibling, _, _ := testKeyAddress(t, 0xd4, 0xd5)
+	seedSiblingOutputs(t, raw, db, sibling, 5)
+	seedAddressOutput(
+		t, raw, db, addr, fill32(0xd6), 100, 2_000_000, nil, nil,
+	)
+
+	adapter.summaryLimits = addressSummaryLimits{batch: 2, maxUtxos: 5}
+	_, err := adapter.Address(context.Background(), addr.String())
+	require.ErrorIs(t, err, ErrAddressSummaryTooLarge)
+
+	adapter.summaryLimits = addressSummaryLimits{batch: 2, maxUtxos: 6}
+	info, err := adapter.Address(context.Background(), addr.String())
+	require.NoError(t, err)
+	require.Equal(t, "2000000", info.Amount[0].Quantity)
+}
+
+// A bare payment credential aggregates in SQL, and its distinct asset count
+// is held to the same budget as a full address.
+func TestNodeAdapterAddressPaymentCredAssetBudget(t *testing.T) {
+	t.Parallel()
+	adapter, raw, db := newDBBackedAdapter(t)
+	addr, payment, _ := testKeyAddress(t, 0xe1, 0xe2)
+	policy := bytes.Repeat([]byte{0xe3}, lcommon.AddressHashSize)
+	seedAddressOutput(
+		t, raw, db, addr, fill32(0x61), 7, 2_000_000,
+		[]models.Asset{
+			{PolicyId: policy, Name: []byte("b"), Amount: 2},
+			{PolicyId: policy, Name: []byte("a"), Amount: 1},
+			{PolicyId: policy, Name: []byte("c"), Amount: 3},
+		},
+		nil,
+	)
+	credID, err := bech32EncodeData("addr_vkh", payment)
+	require.NoError(t, err)
+
+	adapter.summaryLimits = addressSummaryLimits{maxAssets: 2}
+	_, err = adapter.Address(context.Background(), credID)
+	require.ErrorIs(t, err, ErrAddressSummaryTooLarge)
+
+	adapter.summaryLimits = addressSummaryLimits{maxAssets: 3}
+	info, err := adapter.Address(context.Background(), credID)
+	require.NoError(t, err)
+	policyHex := hex.EncodeToString(policy)
+	require.Equal(t, []AddressAmountInfo{
+		{Unit: "lovelace", Quantity: "2000000"},
+		{Unit: policyHex + hex.EncodeToString([]byte("a")), Quantity: "1"},
+		{Unit: policyHex + hex.EncodeToString([]byte("b")), Quantity: "2"},
+		{Unit: policyHex + hex.EncodeToString([]byte("c")), Quantity: "3"},
+	}, info.Amount)
+}
+
+// A bare payment credential's read is held to the output budget too.
+func TestNodeAdapterAddressPaymentCredUtxoBudget(t *testing.T) {
+	t.Parallel()
+	adapter, raw, db := newDBBackedAdapter(t)
+	addr, payment, _ := testKeyAddress(t, 0xe4, 0)
+	seedSummaryOutputs(t, adapter, raw, db, addr, 3, nil)
+	credID, err := bech32EncodeData("addr_vkh", payment)
+	require.NoError(t, err)
+
+	adapter.summaryLimits = addressSummaryLimits{maxUtxos: 2}
+	_, err = adapter.Address(context.Background(), credID)
+	require.ErrorIs(t, err, ErrAddressSummaryTooLarge)
+	_, err = adapter.AddressExtended(context.Background(), credID)
+	require.ErrorIs(t, err, ErrAddressSummaryTooLarge)
+
+	adapter.summaryLimits = addressSummaryLimits{maxUtxos: 3}
+	info, err := adapter.Address(context.Background(), credID)
+	require.NoError(t, err)
+	require.Equal(t, "6000000", info.Amount[0].Quantity)
+}
+
+func TestNodeAdapterAddressTotalReadBudget(t *testing.T) {
+	t.Parallel()
+	adapter, raw, db := newDBBackedAdapter(t)
+	addr, _, _ := testKeyAddress(t, 0xd1, 0xd2)
+	policy := bytes.Repeat([]byte{0xd3}, lcommon.AddressHashSize)
+	insertAdapterTransaction(
+		t, raw, &models.Transaction{Hash: fill32(0x7e), Slot: 9, Valid: true},
+	)
+	// Four outputs, two of them spent, each holding its own asset.
+	for i := range 4 {
+		var spentBy []byte
+		if i < 2 {
+			spentBy = fill32(0x7e)
+		}
+		seedAddressOutput(
+			t, raw, db, addr, fill32(byte(0x60+i)), uint64(10+i), 2_000_000,
+			[]models.Asset{{
+				PolicyId: policy, Name: []byte{byte(i)}, Amount: 1,
+			}},
+			spentBy,
+		)
+	}
+	ctx := context.Background()
+
+	adapter.summaryLimits = addressSummaryLimits{batch: 2, maxTotalOutputs: 3}
+	_, err := adapter.AddressTotal(ctx, addr.String())
+	require.ErrorIs(t, err, ErrAddressSummaryTooLarge)
+
+	adapter.summaryLimits = addressSummaryLimits{batch: 2, maxTotalOutputs: 4}
+	got, err := adapter.AddressTotal(ctx, addr.String())
+	require.NoError(t, err)
+	require.Equal(t, "8000000", got.ReceivedSum[0].Quantity)
+	require.Equal(t, "4000000", got.SentSum[0].Quantity)
+
+	adapter.summaryLimits = addressSummaryLimits{maxAssets: 3}
+	_, err = adapter.AddressTotal(ctx, addr.String())
+	require.ErrorIs(t, err, ErrAddressSummaryTooLarge)
+	adapter.summaryLimits = addressSummaryLimits{maxAssets: 4}
+	_, err = adapter.AddressTotal(ctx, addr.String())
+	require.NoError(t, err)
+}
+
+func TestNodeAdapterAddressTotalStopsOnCancelledContext(t *testing.T) {
+	t.Parallel()
+	adapter, raw, db := newDBBackedAdapter(t)
+	addr, _, _ := testKeyAddress(t, 0xd4, 0xd5)
+	seedSummaryOutputs(t, adapter, raw, db, addr, 2, nil)
+
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := adapter.AddressTotal(cancelled, addr.String())
+	require.ErrorIs(t, err, context.Canceled)
 }

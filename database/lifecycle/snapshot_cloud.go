@@ -132,7 +132,12 @@ func mirrorToCloud(
 		return fmt.Errorf("read snapshot before cloud mirror: %w", err)
 	}
 	if manifest.Authentication != "" {
-		if err := manifest.Authenticate(opts...); err != nil {
+		if err := manifest.Authenticate(
+			append(
+				append([]ManifestOption(nil), opts...),
+				WithManifestID(snapshotIDForDir(dir)),
+			)...,
+		); err != nil {
 			return fmt.Errorf("authenticate snapshot before cloud mirror: %w", err)
 		}
 	}

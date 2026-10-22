@@ -51,6 +51,12 @@ three producers so block diffusion is exercised in addition to direct
 producer-to-producer sync. Network spec: `testnet-dingo.yaml` (3 pools,
 `poolPledge: 0` — required for the CIP-50 scenario below).
 
+The controlled DevNet containers explicitly set
+`DINGO_GENESIS_BOOTSTRAP_CORROBORATION_PEERS=0`: they start with no shared
+chain history, and the scenarios verify deterministic propagation rather than
+bootstrap quorum behavior. Genesis corroboration itself is covered by the
+chain-selection tests.
+
 ## Topology — conformance mode (`--conformance`)
 
 | Service            | Role                                 | Container IP  | NtN host port | NtC (LocalStateQuery) host port |
@@ -157,7 +163,7 @@ someone quietly speeds them up.
 - Docker with the Compose plugin (`docker compose version` must work).
 - Go 1.26+ on the host (matching `go.mod`) to run the integration tests.
 - Outbound network access on first run to pull
-  `ghcr.io/blinklabs-io/cardano-node:11.0.1` (conformance mode only) and to
+  `ghcr.io/blinklabs-io/cardano-node:11.1.3-2` (conformance mode only) and to
   clone `cardano-foundation/testnet-generation-tool` inside the configurator
   image.
 - Local build of Dingo via the repo root `Dockerfile` — Compose builds it

@@ -19,7 +19,9 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/blinklabs-io/dingo/internal/apilistener"
@@ -29,7 +31,12 @@ import (
 // responseWriteTimeout bounds how long one response write may block on a
 // client that has stopped reading. It is refreshed before every write, so a
 // steadily read stream of any length is unaffected.
-const responseWriteTimeout = 30 * time.Second
+const (
+	responseWriteTimeout      = 30 * time.Second
+	matchStreamTimeout        = 5 * time.Minute
+	maxConcurrentMatchStreams = 3
+	maxMatchStreamsPerClient  = 1
+)
 
 // Server is a Kupo-compatible HTTP API backed by Dingo's complete index.
 type Server struct {
@@ -38,6 +45,8 @@ type Server struct {
 	node                 KupoNode
 	listener             *apilistener.Listener
 	responseWriteTimeout time.Duration
+	matchStreamTimeout   time.Duration
+	matchAdmission       *matchAdmission
 }
 
 // New creates a Kupo-compatible server.
@@ -55,7 +64,74 @@ func New(cfg Config, node KupoNode, logger *slog.Logger) *Server {
 		node:                 node,
 		listener:             apilistener.New("Kupo API", logger),
 		responseWriteTimeout: responseWriteTimeout,
+		matchStreamTimeout:   matchStreamTimeout,
+		matchAdmission: newMatchAdmission(
+			maxConcurrentMatchStreams,
+			maxMatchStreamsPerClient,
+		),
 	}
+}
+
+type matchAdmission struct {
+	mu           sync.Mutex
+	active       int
+	activeClient map[string]int
+	maxActive    int
+	maxClient    int
+}
+
+func newMatchAdmission(maxActive, maxClient int) *matchAdmission {
+	return &matchAdmission{
+		activeClient: make(map[string]int),
+		maxActive:    maxActive,
+		maxClient:    maxClient,
+	}
+}
+
+func (a *matchAdmission) acquire(ctx context.Context, client string) (func(), bool) {
+	select {
+	case <-ctx.Done():
+		return nil, false
+	default:
+	}
+
+	a.mu.Lock()
+	if a.active >= a.maxActive || a.activeClient[client] >= a.maxClient {
+		a.mu.Unlock()
+		return nil, false
+	}
+	a.active++
+	a.activeClient[client]++
+	a.mu.Unlock()
+
+	return func() {
+		a.mu.Lock()
+		a.active--
+		a.activeClient[client]--
+		if a.activeClient[client] == 0 {
+			delete(a.activeClient, client)
+		}
+		a.mu.Unlock()
+	}, true
+}
+
+func matchClient(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err == nil {
+		return host
+	}
+	return r.RemoteAddr
+}
+
+// corsExposeHeaders lists every response header this API sets that is not
+// CORS-safelisted. A browser hides any other header from scripts, so a client
+// on an allowed origin could not read the checkpoint, ETag or block hash the
+// Kupo contract returns.
+var corsExposeHeaders = []string{
+	"ETag",
+	"Retry-After",
+	"X-Block-Header-Hash",
+	"X-Most-Recent-Checkpoint",
 }
 
 func (s *Server) handler() http.Handler {
@@ -69,6 +145,7 @@ func (s *Server) handler() http.Handler {
 	limited := http.MaxBytesHandler(s.boundWrites(mux), maxRequestBodyBytes)
 	return httpcors.Handler(limited, httpcors.Config{
 		AllowedOrigins: s.config.CORSAllowedOrigins,
+		ExposeHeaders:  corsExposeHeaders,
 	})
 }
 

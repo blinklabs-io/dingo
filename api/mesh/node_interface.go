@@ -48,6 +48,16 @@ type MeshLedgerState interface {
 	GetCurrentPParamsForReporting() lcommon.ProtocolParameters
 	SlotToTime(slot uint64) (time.Time, error)
 	UtxosByAddress(addrs []lcommon.Address) ([]models.Utxo, error)
+	// UtxosByAddressBoundedPage returns one ordered, resumable page of UTxOs
+	// while bounding the candidate rows examined and the CBOR retained. The
+	// page carries each output's CBOR but not its native assets. It backs
+	// /account/coins.
+	UtxosByAddressBoundedPage(
+		ctx context.Context,
+		q *models.UtxoWithOrderingQuery,
+		maxCandidates int,
+		maxBytes int64,
+	) (models.UtxoAddressPage, error)
 	// UtxoBalanceByAddressAtSlot aggregates balances for outputs held at a
 	// historical point without materializing the matching UTxOs.
 	UtxoBalanceByAddressAtSlot(
@@ -69,5 +79,7 @@ type MeshSyncProgress interface {
 type MeshMempool interface {
 	AddTransaction(ctx context.Context, txType uint, txBytes []byte) error
 	GetTransaction(hash string) (mempool.MempoolTransaction, bool)
-	Transactions() []mempool.MempoolTransaction
+	// TransactionHashes lists at most maxItems transaction hashes without
+	// copying transaction bodies, plus the total pool size.
+	TransactionHashes(maxItems int) ([]string, int)
 }

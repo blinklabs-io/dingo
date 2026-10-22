@@ -68,19 +68,23 @@ var (
 		`regression_case!\(\s*([a-z0-9_]+)\s*,\s*"([^"]+)"` +
 			`(?:\s*,\s*PlutusVersion::V([123])\s*,\s*PROTOCOL_VERSION_([0-9]+))?\s*\)`,
 	)
+	ndcCorpusPathPattern = regexp.MustCompile(
+		`^protocol-version-([0-9]+)/v([123])/(.+)/[^/]+\.uplc$`,
+	)
 	protocol10CostsPattern = regexp.MustCompile(
 		`(?s)let v3_costs: &\[i64\] = &\[(.*?)\];`,
 	)
 )
 
 type Report struct {
-	SchemaVersion   string       `json:"schema_version"`
-	Scenario        string       `json:"scenario"`
-	GeneratedAt     string       `json:"generated_at"`
-	ProtocolVersion string       `json:"protocol_version"`
-	CostModels      []CostModel  `json:"cost_models"`
-	Totals          Totals       `json:"totals"`
-	Scenarios       []CaseResult `json:"scenarios"`
+	SchemaVersion   string            `json:"version"`
+	Scenario        string            `json:"scenario"`
+	GeneratedAt     string            `json:"generated_at"`
+	Implementation  map[string]string `json:"implementation"`
+	ProtocolVersion string            `json:"-"`
+	CostModels      []CostModel       `json:"-"`
+	Totals          Totals            `json:"-"`
+	Scenarios       []CaseResult      `json:"scenarios"`
 }
 
 type CostModel struct {
@@ -106,9 +110,15 @@ type DimensionTotal struct {
 }
 
 type Outcome struct {
-	Expected any   `json:"expected"`
-	Actual   any   `json:"actual"`
-	Passed   *bool `json:"passed"`
+	Expected any
+	Actual   any
+	Passed   *bool
+}
+
+// MarshalJSON exposes the observed value; expectations and pass bookkeeping
+// are internal to Dingo's report generation.
+func (o Outcome) MarshalJSON() ([]byte, error) {
+	return json.Marshal(o.Actual)
 }
 
 type CaseResult struct {
@@ -116,11 +126,11 @@ type CaseResult struct {
 	Title           string  `json:"title"`
 	Group           string  `json:"group"`
 	PlutusVersion   string  `json:"plutus_version"`
-	ProtocolVersion uint    `json:"protocol_version"`
-	CostModelID     string  `json:"cost_model_id"`
+	ProtocolVersion string  `json:"protocol_version"`
+	CostModelID     string  `json:"-"`
 	Evaluation      Outcome `json:"evaluation"`
 	Budget          Outcome `json:"budget"`
-	Passed          bool    `json:"passed"`
+	Passed          bool    `json:"-"`
 	Error           string  `json:"error,omitempty"`
 }
 
@@ -133,6 +143,7 @@ type testCase struct {
 	language lang.LanguageVersion
 	protocol uint
 	costs    costModelKey
+	ndc      bool
 }
 
 type costModelKey struct {
@@ -187,30 +198,58 @@ func GenerateReport(root string, generatedAt time.Time) (Report, error) {
 	}
 	defer corpusFS.Close()
 
-	cases, err := discoverMainCases(root)
-	if err != nil {
-		return Report{}, err
+	var cases []testCase
+	var protocol10Costs []int64
+	corpusCostModels := map[costModelKey][]int64{}
+	if info, err := os.Stat(filepath.Join(root, "protocol-version-10")); err == nil && info.IsDir() {
+		cases, corpusCostModels, err = discoverNDCCases(root, corpusFS)
+		if err != nil {
+			return Report{}, err
+		}
+	} else {
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return Report{}, fmt.Errorf("inspect UPLC corpus layout: %w", err)
+		}
+		cases, err = discoverMainCases(root)
+		if err != nil {
+			return Report{}, err
+		}
+		regressions, costs, err := discoverRegressionCases(corpusFS)
+		if err != nil {
+			return Report{}, err
+		}
+		cases = append(cases, regressions...)
+		protocol10Costs = costs
 	}
-	regressions, protocol10Costs, err := discoverRegressionCases(corpusFS)
-	if err != nil {
-		return Report{}, err
-	}
-	cases = append(cases, regressions...)
 	if len(cases) == 0 {
 		return Report{}, errors.New("corpus contains no UPLC programs")
 	}
-	sort.Slice(cases, func(i, j int) bool { return cases[i].id < cases[j].id })
+	sort.Slice(cases, func(i, j int) bool {
+		if cases[i].id != cases[j].id {
+			return cases[i].id < cases[j].id
+		}
+		if cases[i].language != cases[j].language {
+			return versionName(cases[i].language) < versionName(cases[j].language)
+		}
+		return cases[i].protocol < cases[j].protocol
+	})
 	for i := 1; i < len(cases); i++ {
-		if cases[i].id == cases[i-1].id {
-			return Report{}, fmt.Errorf("duplicate scenario id %q", cases[i].id)
+		if sameScenarioIdentity(cases[i], cases[i-1]) {
+			return Report{}, fmt.Errorf(
+				"duplicate scenario identity %q for %s protocol %d",
+				cases[i].id,
+				versionName(cases[i].language),
+				cases[i].protocol,
+			)
 		}
 	}
 
-	contexts := newEvalContexts(protocol10Costs)
+	contexts := newEvalContexts(protocol10Costs, corpusCostModels)
 	report := Report{
 		SchemaVersion:   schemaVersion,
 		Scenario:        "uplc-conformance",
 		GeneratedAt:     generatedAt.UTC().Format(time.RFC3339),
+		Implementation:  map[string]string{"name": "dingo"},
 		ProtocolVersion: "mixed",
 		Scenarios:       make([]CaseResult, 0, len(cases)),
 	}
@@ -245,6 +284,11 @@ func GenerateReport(root string, generatedAt time.Time) (Report, error) {
 	}
 	report.CostModels = costModels(used)
 	return report, nil
+}
+
+func sameScenarioIdentity(left, right testCase) bool {
+	return left.id == right.id && left.language == right.language &&
+		left.protocol == right.protocol
 }
 
 func costModels(used map[costModelKey]struct{}) []CostModel {
@@ -335,6 +379,96 @@ func discoverMainCases(root string) ([]testCase, error) {
 		return nil, fmt.Errorf("no UPLC programs under %s", mainCorpusDir)
 	}
 	return cases, nil
+}
+
+// discoverNDCCases reads the versioned UPLC corpus and cost models published
+// for node-diversity-conformance.
+//
+// Each vector is evaluated from its textual program. The corpus also carries a
+// Flat encoding for most vectors, but the two can disagree and the expected
+// results follow the text: term/constr/constr-07 is the text
+// "(constr -5 ...)", a parse error, while its Flat file decodes to a valid
+// constr with tag 2^64-5, which the reference decoder accepts.
+func discoverNDCCases(
+	root string,
+	corpusFS *os.Root,
+) ([]testCase, map[costModelKey][]int64, error) {
+	var cases []testCase
+	costModels := map[costModelKey][]int64{}
+	err := filepath.WalkDir(
+		root,
+		func(filePath string, entry os.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return fmt.Errorf("walk %q: %w", filePath, walkErr)
+			}
+			if entry.IsDir() || filepath.Ext(filePath) != ".uplc" {
+				return nil
+			}
+			rel, err := filepath.Rel(root, filePath)
+			if err != nil {
+				return fmt.Errorf("make corpus path for %q: %w", filePath, err)
+			}
+			rel = filepath.ToSlash(rel)
+			match := ndcCorpusPathPattern.FindStringSubmatch(rel)
+			if match == nil {
+				return fmt.Errorf("unexpected NDC Flat corpus path %q", rel)
+			}
+			protocol, err := strconv.ParseUint(match[1], 10, 32)
+			if err != nil || protocol == 0 {
+				return fmt.Errorf("invalid protocol version in corpus path %q", rel)
+			}
+			language, err := languageFromDigit(match[2])
+			if err != nil {
+				return err
+			}
+			protocolVersion := uint(protocol)
+			casePath := match[3]
+			group := path.Dir(casePath)
+			if group == "." {
+				return fmt.Errorf("NDC Flat vector has no group directory: %q", rel)
+			}
+			caseName := path.Base(casePath)
+			id := slug(casePath+"_"+versionName(language), "_")
+			key := costModelKey{language: language, protocol: protocolVersion}
+			if _, ok := costModels[key]; !ok {
+				modelPath := fmt.Sprintf(
+					"cost-models/protocol-version-%d/v%s.json",
+					protocolVersion,
+					match[2],
+				)
+				modelContents, err := corpusFS.ReadFile(modelPath)
+				if err != nil {
+					return fmt.Errorf("read cost model %q: %w", modelPath, err)
+				}
+				var params []int64
+				if err := json.Unmarshal(modelContents, &params); err != nil {
+					return fmt.Errorf("decode cost model %q: %w", modelPath, err)
+				}
+				if len(params) == 0 {
+					return fmt.Errorf("cost model %q is empty", modelPath)
+				}
+				costModels[key] = params
+			}
+			cases = append(cases, testCase{
+				program:  rel,
+				id:       id,
+				group:    group,
+				title:    strings.ReplaceAll(caseName, "-", " "),
+				language: language,
+				protocol: protocolVersion,
+				costs:    key,
+				ndc:      true,
+			})
+			return nil
+		},
+	)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(cases) == 0 {
+		return nil, nil, errors.New("NDC corpus contains no UPLC programs")
+	}
+	return cases, costModels, nil
 }
 
 // discoverRegressionCases reads the regression manifest. Each manifest entry
@@ -445,12 +579,17 @@ func languageFromDigit(digit string) (lang.LanguageVersion, error) {
 
 type evalContexts struct {
 	protocol10Costs []int64
+	costModels      map[costModelKey][]int64
 	cache           map[costModelKey]*cek.EvalContext
 }
 
-func newEvalContexts(protocol10Costs []int64) *evalContexts {
+func newEvalContexts(
+	protocol10Costs []int64,
+	costModels map[costModelKey][]int64,
+) *evalContexts {
 	return &evalContexts{
 		protocol10Costs: protocol10Costs,
+		costModels:      costModels,
 		cache:           map[costModelKey]*cek.EvalContext{},
 	}
 }
@@ -461,7 +600,13 @@ func (c *evalContexts) get(key costModelKey) (*cek.EvalContext, error) {
 	}
 	protocol := cek.ProtoVersion{Major: key.protocol}
 	var ctx *cek.EvalContext
-	if key.protocol10 {
+	if params, ok := c.costModels[key]; ok {
+		var err error
+		ctx, err = cek.NewEvalContext(key.language, protocol, params)
+		if err != nil {
+			return nil, fmt.Errorf("build %s evaluation context: %w", key.id(), err)
+		}
+	} else if key.protocol10 {
 		var err error
 		ctx, err = cek.NewEvalContext(key.language, protocol, c.protocol10Costs)
 		if err != nil {
@@ -487,12 +632,20 @@ func readCorpusFile(corpusFS *os.Root, rel string) ([]byte, error) {
 func readExpectations(
 	corpusFS *os.Root,
 	program string,
+	ndcCorpus bool,
 ) (expected, budget string, budgetFound bool, err error) {
-	expectedBytes, err := readCorpusFile(corpusFS, program+".expected")
+	basePath := strings.TrimSuffix(program, filepath.Ext(program))
+	expectedPath := program + ".expected"
+	budgetPath := program + ".budget.expected"
+	if ndcCorpus {
+		expectedPath = basePath + ".uplc.expected"
+		budgetPath = basePath + ".budget"
+	}
+	expectedBytes, err := readCorpusFile(corpusFS, expectedPath)
 	if err != nil {
 		return "", "", false, fmt.Errorf("read expected result: %w", err)
 	}
-	budgetBytes, err := readCorpusFile(corpusFS, program+".budget.expected")
+	budgetBytes, err := readCorpusFile(corpusFS, budgetPath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return strings.TrimSpace(string(expectedBytes)), "", false, nil
@@ -518,6 +671,7 @@ func runCase(
 	expectedText, expectedBudget, budgetFound, err := readExpectations(
 		corpusFS,
 		testCase.program,
+		testCase.ndc,
 	)
 	if err != nil {
 		return CaseResult{}, err
@@ -550,20 +704,35 @@ func runCase(
 		evalExpected = syn.PrettyTerm[syn.DeBruijn](expectedDeBruijn.Term)
 	}
 
-	result, consumed, stage, runErr := evaluate(
+	var result syn.Term[syn.DeBruijn]
+	var programVersion lang.LanguageVersion
+	var consumed cek.ExBudget
+	var stage failureStage
+	var runErr error
+	result, programVersion, consumed, stage, runErr = evaluate(
 		string(contents),
 		testCase.language,
 		testCase.protocol,
 		evalCtx,
+		testCase.ndc,
 	)
-	var evalActual string
+	var evalActual, evaluationObservation string
 	switch stage {
 	case parseFailure:
 		evalActual = "parse error"
+		evaluationObservation = "parse/decode error"
 	case evaluationFailure:
 		evalActual = "evaluation failure"
+		evaluationObservation = evalActual
+		if cek.IsBudgetError(runErr) {
+			evaluationObservation = "out of budget"
+		}
 	case noFailure:
 		evalActual = syn.PrettyTerm[syn.DeBruijn](result)
+		evaluationObservation, err = observedProgram(programVersion, result)
+		if err != nil {
+			return CaseResult{}, err
+		}
 	}
 	evalPassed := compareEvaluation(
 		expectedStage,
@@ -579,11 +748,11 @@ func runCase(
 		Title:           testCase.title,
 		Group:           testCase.group,
 		PlutusVersion:   versionName(testCase.language),
-		ProtocolVersion: testCase.protocol,
+		ProtocolVersion: fmt.Sprintf("%d.0", testCase.protocol),
 		CostModelID:     testCase.costs.id(),
 		Evaluation: Outcome{
 			Expected: evalExpected,
-			Actual:   evalActual,
+			Actual:   evaluationObservation,
 			Passed:   new(evalPassed),
 		},
 		Passed: evalPassed,
@@ -605,12 +774,13 @@ func runCase(
 			return CaseResult{}, fmt.Errorf("parse budget expectation %q", expectedBudget)
 		}
 		wantCPU, wantMem := budgetMatch[1], budgetMatch[2]
-		actual := map[string]string{"cpu": "", "mem": ""}
+		actual := map[string]int64{"cpu": 0, "mem": 0}
 		budgetPassed := false
 		if stage == noFailure {
-			actual["cpu"] = strconv.FormatInt(consumed.Cpu, 10)
-			actual["mem"] = strconv.FormatInt(consumed.Mem, 10)
-			budgetPassed = actual["cpu"] == wantCPU && actual["mem"] == wantMem
+			actual["cpu"] = consumed.Cpu
+			actual["mem"] = consumed.Mem
+			budgetPassed = strconv.FormatInt(actual["cpu"], 10) == wantCPU &&
+				strconv.FormatInt(actual["mem"], 10) == wantMem
 		}
 		caseResult.Budget = Outcome{
 			Expected: map[string]string{"cpu": wantCPU, "mem": wantMem},
@@ -626,7 +796,7 @@ func runCase(
 // The reference vectors record an exhausted budget as an evaluation failure.
 func expectedFailure(expected string) failureStage {
 	switch expected {
-	case "parse error":
+	case "parse error", "parse/decode error":
 		return parseFailure
 	case "evaluation failure", "out of budget":
 		return evaluationFailure
@@ -654,14 +824,18 @@ func compareBudgetExhaustion(stage failureStage, err error) bool {
 // and protocol version. A program rejected by the syntax parser fails at the
 // parse stage; one rejected by protocol-version validation, de Bruijn
 // conversion or the machine fails at the evaluation stage.
+// evaluate parses and runs a textual program. The scenario's expected results
+// treat the execution-time version gate as a decode error, which gateIsDecode
+// selects; the earlier corpus layout treats it as an evaluation failure.
 func evaluate(
 	text string,
 	language lang.LanguageVersion,
 	protocol uint,
 	evalCtx *cek.EvalContext,
-) (syn.Term[syn.DeBruijn], cek.ExBudget, failureStage, error) {
+	gateIsDecode bool,
+) (syn.Term[syn.DeBruijn], lang.LanguageVersion, cek.ExBudget, failureStage, error) {
 	if _, err := syn.Parse(text); err != nil {
-		return nil, cek.ExBudget{}, parseFailure, err
+		return nil, lang.LanguageVersion{}, cek.ExBudget{}, parseFailure, err
 	}
 	programContext := syn.ProgramContext{
 		LedgerLanguage: language,
@@ -669,23 +843,196 @@ func evaluate(
 	}
 	program, err := syn.ParseWithContext(text, programContext)
 	if err != nil {
-		return nil, cek.ExBudget{}, evaluationFailure, err
+		return nil, lang.LanguageVersion{}, cek.ExBudget{}, evaluationFailure, err
 	}
 	if err := syn.ValidateTermVersionForExecution(program.Version, programContext); err != nil {
-		return nil, cek.ExBudget{}, evaluationFailure, err
+		stage := evaluationFailure
+		if gateIsDecode {
+			stage = parseFailure
+		}
+		return nil, program.Version, cek.ExBudget{}, stage, err
 	}
 	deBruijn, err := syn.NameToDeBruijn(program)
 	if err != nil {
-		return nil, cek.ExBudget{}, evaluationFailure, err
+		return nil, program.Version, cek.ExBudget{}, evaluationFailure, err
 	}
+	result, consumed, stage, err := runTerm(deBruijn, language, evalCtx)
+	return result, program.Version, consumed, stage, err
+}
+
+func runTerm(
+	program *syn.Program[syn.DeBruijn],
+	language lang.LanguageVersion,
+	evalCtx *cek.EvalContext,
+) (syn.Term[syn.DeBruijn], cek.ExBudget, failureStage, error) {
 	machine := cek.NewMachine[syn.DeBruijn](language, machineSlippage, evalCtx)
 	initial := cek.ExBudget{Cpu: machineCPU, Mem: machineMem}
 	machine.ExBudget = initial
-	term, err := machine.Run(deBruijn.Term)
+	term, err := machine.Run(program.Term)
 	if err != nil {
 		return nil, cek.ExBudget{}, evaluationFailure, err
 	}
 	return term, initial.Sub(&machine.ExBudget), noFailure, nil
+}
+
+func observedProgram(
+	version lang.LanguageVersion,
+	term syn.Term[syn.DeBruijn],
+) (string, error) {
+	namedTerm, err := nameNDCResult(term)
+	if err != nil {
+		return "", err
+	}
+	prettyTerm := formatNDCPrettyTerm(syn.PrettyTerm[syn.NamedDeBruijn](namedTerm))
+	if prettyTerm == "" {
+		return "", errors.New("format NDC evaluation result")
+	}
+	return fmt.Sprintf(
+		"(program %d.%d.%d %s)",
+		version[0],
+		version[1],
+		version[2],
+		prettyTerm,
+	), nil
+}
+
+func nameNDCResult(
+	term syn.Term[syn.DeBruijn],
+) (syn.Term[syn.NamedDeBruijn], error) {
+	var binders []syn.NamedDeBruijn
+	nextName := 0
+	var convert func(syn.Term[syn.DeBruijn]) (syn.Term[syn.NamedDeBruijn], error)
+	convert = func(term syn.Term[syn.DeBruijn]) (syn.Term[syn.NamedDeBruijn], error) {
+		switch node := term.(type) {
+		case *syn.Var[syn.DeBruijn]:
+			index := int(node.Name)
+			if index < 1 || index > len(binders) {
+				return nil, fmt.Errorf("NDC result has unbound variable index %d", index)
+			}
+			return &syn.Var[syn.NamedDeBruijn]{
+				Name: binders[len(binders)-index],
+			}, nil
+		case *syn.Delay[syn.DeBruijn]:
+			inner, err := convert(node.Term)
+			if err != nil {
+				return nil, err
+			}
+			return &syn.Delay[syn.NamedDeBruijn]{Term: inner}, nil
+		case *syn.Force[syn.DeBruijn]:
+			inner, err := convert(node.Term)
+			if err != nil {
+				return nil, err
+			}
+			return &syn.Force[syn.NamedDeBruijn]{Term: inner}, nil
+		case *syn.Lambda[syn.DeBruijn]:
+			binder := syn.NamedDeBruijn{Text: "i", Index: syn.DeBruijn(nextName)}
+			nextName++
+			binders = append(binders, binder)
+			body, err := convert(node.Body)
+			binders = binders[:len(binders)-1]
+			if err != nil {
+				return nil, err
+			}
+			return &syn.Lambda[syn.NamedDeBruijn]{ParameterName: binder, Body: body}, nil
+		case *syn.Apply[syn.DeBruijn]:
+			function, err := convert(node.Function)
+			if err != nil {
+				return nil, err
+			}
+			argument, err := convert(node.Argument)
+			if err != nil {
+				return nil, err
+			}
+			return &syn.Apply[syn.NamedDeBruijn]{Function: function, Argument: argument}, nil
+		case syn.Builtin:
+			return &node, nil
+		case *syn.Builtin:
+			return node, nil
+		case *syn.Constr[syn.DeBruijn]:
+			fields := make([]syn.Term[syn.NamedDeBruijn], len(node.Fields))
+			for i, field := range node.Fields {
+				converted, err := convert(field)
+				if err != nil {
+					return nil, err
+				}
+				fields[i] = converted
+			}
+			return &syn.Constr[syn.NamedDeBruijn]{Tag: node.Tag, Fields: fields}, nil
+		case *syn.Case[syn.DeBruijn]:
+			constr, err := convert(node.Constr)
+			if err != nil {
+				return nil, err
+			}
+			branches := make([]syn.Term[syn.NamedDeBruijn], len(node.Branches))
+			for i, branch := range node.Branches {
+				converted, err := convert(branch)
+				if err != nil {
+					return nil, err
+				}
+				branches[i] = converted
+			}
+			return &syn.Case[syn.NamedDeBruijn]{Constr: constr, Branches: branches}, nil
+		case syn.Constant:
+			return &node, nil
+		case *syn.Constant:
+			return node, nil
+		case syn.Error:
+			return &node, nil
+		case *syn.Error:
+			return node, nil
+		default:
+			return nil, fmt.Errorf("format unsupported NDC result term %T", term)
+		}
+	}
+	return convert(term)
+}
+
+func formatNDCPrettyTerm(term string) string {
+	var out strings.Builder
+	out.Grow(len(term))
+	inString := false
+	escaped := false
+	for i := 0; i < len(term); {
+		if inString && term[i] == '\\' {
+			if escaped {
+				out.WriteByte(term[i])
+				escaped = false
+				i++
+				continue
+			}
+			if strings.HasPrefix(term[i:], `\o177`) {
+				out.WriteString(`\DEL`)
+				i += len(`\o177`)
+				continue
+			}
+			out.WriteByte(term[i])
+			escaped = true
+			i++
+			continue
+		}
+		if !inString && strings.HasPrefix(term[i:], "i_") {
+			end := i + 2
+			for end < len(term) && term[end] >= '0' && term[end] <= '9' {
+				end++
+			}
+			if end > i+2 {
+				out.WriteString("i-")
+				out.WriteString(term[i+2 : end])
+				i = end
+				continue
+			}
+		}
+		char := term[i]
+		out.WriteByte(char)
+		if char == '"' && !escaped {
+			inString = !inString
+		}
+		if char != '\\' {
+			escaped = false
+		}
+		i++
+	}
+	return out.String()
 }
 
 func versionName(version lang.LanguageVersion) string {

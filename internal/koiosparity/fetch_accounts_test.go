@@ -480,7 +480,7 @@ func TestFetchAccountRewardsForEpochRequiresEveryChunkCurrentBeforeComplete(
 	// progress, gate trust via the separate coverage flag" design) — what
 	// matters is that cov.Complete above stays false, so a future check
 	// never mistakes this for a fully verified reference set.
-	rewards, err := cache.GetAccountRewardsForEpoch("preview", 800)
+	rewards, err := getAccountRewardsForEpoch(cache.db, "preview", 800)
 	require.NoError(t, err)
 	require.Len(t, rewards, 1)
 	require.Equal(t, hasDataAddr, rewards[0].StakeAddress)
@@ -1125,7 +1125,7 @@ func TestFetchAccountRewardsForEpochMegaScenario(t *testing.T) {
 	require.True(t, cov.Complete)
 	require.Equal(t, numAccounts, cov.RequestedCount)
 
-	rewards, err := cache.GetAccountRewardsForEpoch("preview", 300)
+	rewards, err := getAccountRewardsForEpoch(cache.db, "preview", 300)
 	require.NoError(t, err)
 
 	counts := make(map[string]int, len(rewards))

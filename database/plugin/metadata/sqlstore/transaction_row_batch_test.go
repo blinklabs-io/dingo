@@ -20,6 +20,7 @@ import (
 	"database/sql"
 	"database/sql/driver"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -1198,7 +1199,25 @@ func TestRowBatchFlushTranslatesForProviders(t *testing.T) {
 			newDialectQueryer(recorder, dialect),
 			1000,
 		))
-		require.Equal(t, statements, recorder.statements, dialect)
+		// Each flushed statement leads with its shape's fixed
+		// "-- name:" comment; the translated text below it is unchanged.
+		wantNames := []string{
+			vkeyWitnessShape.name, bootstrapWitnessShape.name,
+			witnessScriptShape.name, plutusDataShape.name,
+			redeemerShape.name, addressTransactionShape.name,
+			metadataLabelShape.name, datumShape.name,
+		}
+		require.Len(t, recorder.statements, len(wantNames), dialect)
+		bodies := make([]string, len(recorder.statements))
+		for i, statement := range recorder.statements {
+			header, body, ok := strings.Cut(statement, "\n")
+			require.True(t, ok, dialect)
+			require.Equal(
+				t, "-- name: "+wantNames[i]+" :exec", header, dialect,
+			)
+			bodies[i] = body
+		}
+		require.Equal(t, statements, bodies, dialect)
 	}
 }
 

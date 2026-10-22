@@ -137,7 +137,7 @@ var AcceptedChainsyncStrategies = []string{
 // empty string (which selects the default v2), matching cmd/dingo's
 // resolveMithrilBackend. Kept in sync by the same parity test in
 // cmd/dingo as AcceptedChainsyncStrategies.
-var AcceptedMithrilBackends = []string{"", "v1", "v2"}
+var AcceptedMithrilBackends = []string{"", "v2"}
 
 // FullPotRewardsStandardNetwork reports whether network/networkMagic identifies
 // a predefined non-devnet network where CIP-0163 full-pot rewards must not be
@@ -389,10 +389,35 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		(effectiveMode == RunModeDev || c.RunMode.IsDevMode() ||
 			c.StorageMode == storageModeAPI)
 	midnightServer := apiListeners && c.Midnight.ServerEnabled
+	dmqN2N := serving && c.DMQ.Enabled
+	// The peer listener binds one port on each configured address family,
+	// so each address contends with the other listeners. With neither set a
+	// single wildcard row still range-checks the port.
+	var dmqN2NHosts []string
+	for _, host := range []string{
+		c.DMQ.ListenAddress, c.DMQ.ListenIPv6Address,
+	} {
+		if host != "" {
+			dmqN2NHosts = append(dmqN2NHosts, host)
+		}
+	}
+	if len(dmqN2NHosts) == 0 {
+		dmqN2NHosts = []string{""}
+	}
 	utxorpcPort := APIPluginPort(c.Plugins.API.Utxorpc)
 	blockfrostPort := APIPluginPort(c.Plugins.API.Blockfrost)
 	kupoPort := APIPluginPort(c.Plugins.API.Kupo)
 	meshPort := APIPluginPort(c.Plugins.API.Mesh)
+	blockfrostHost := c.BindAddr
+	if c.Plugins.API.Blockfrost.Provider == "builtin" {
+		blockfrostHost = "127.0.0.1"
+		if host, ok := c.Plugins.API.Blockfrost.Config["host"].(string); ok {
+			blockfrostHost = host
+			if host == "" {
+				blockfrostHost = c.BindAddr
+			}
+		}
+	}
 	mcpHost := "127.0.0.1"
 	if host, ok := c.Plugins.API.Mcp.Config["host"].(string); ok {
 		mcpHost = host
@@ -404,13 +429,21 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 	// at runtime: bindAddr for public listeners, privateBindAddr for the
 	// private listener, debugBindAddr for pprof, metricsBindAddr for
 	// Prometheus, midnight.host for Midnight, and BarkHost for bark.
-	ports := []struct {
+	type portSpec struct {
 		setting  string
 		host     string
 		port     uint
 		active   bool
 		required bool
-	}{
+	}
+	dmqPorts := make([]portSpec, 0, len(dmqN2NHosts))
+	for _, host := range dmqN2NHosts {
+		dmqPorts = append(
+			dmqPorts,
+			portSpec{"dmq.n2nPort", host, c.DMQ.N2NPort, dmqN2N, false},
+		)
+	}
+	ports := slices.Concat([]portSpec{
 		{"port (relay/NtN)", c.BindAddr, c.RelayPort, serving, serving},
 		{"privatePort", c.PrivateBindAddr, c.PrivatePort, serving, serving},
 		{
@@ -439,7 +472,7 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		},
 		{
 			"plugins.api.blockfrost.config.port",
-			c.BindAddr,
+			blockfrostHost,
 			blockfrostPort,
 			apiListeners,
 			false,
@@ -465,7 +498,7 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 			midnightServer,
 			midnightServer,
 		},
-	}
+	}, dmqPorts)
 	// Two active listeners contending for a port only fails at bind
 	// time; catch it here. Zero ports are disabled or OS-assigned, so
 	// they don't clash, and a port is only a conflict when the bind
@@ -476,18 +509,25 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		host    string
 	}
 	seenPorts := make(map[uint][]boundListener, len(ports))
+	validated := make(map[string]bool, len(ports))
 	for _, p := range ports {
 		if !p.active {
 			continue
 		}
-		if err := validatePort(p.setting, p.port, p.required, minBindable); err != nil {
-			errs = append(errs, err)
+		// A setting listed once per bind address is range-checked once.
+		if !validated[p.setting] {
+			validated[p.setting] = true
+			if err := validatePort(p.setting, p.port, p.required, minBindable); err != nil {
+				errs = append(errs, err)
+			}
 		}
 		if p.port == 0 {
 			continue
 		}
 		for _, other := range seenPorts[p.port] {
-			if !bindAddrsOverlap(other.host, p.host) {
+			// One setting's own addresses (0.0.0.0 and ::) are one listener.
+			if other.setting == p.setting ||
+				!bindAddrsOverlap(other.host, p.host) {
 				continue
 			}
 			errs = append(errs, fmt.Errorf(
@@ -540,6 +580,18 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		errs = append(errs, fmt.Errorf(
 			"invalid barkArchiveMaxConcurrentFetches %d: must not be negative",
 			c.BarkArchiveMaxConcurrentFetches,
+		))
+	}
+	if c.BarkArchiveLookupsPerSecond < 0 {
+		errs = append(errs, fmt.Errorf(
+			"invalid barkArchiveLookupsPerSecond %d: must not be negative",
+			c.BarkArchiveLookupsPerSecond,
+		))
+	}
+	if c.BarkArchiveCallerLookupsPerSecond < 0 {
+		errs = append(errs, fmt.Errorf(
+			"invalid barkArchiveCallerLookupsPerSecond %d: must not be negative",
+			c.BarkArchiveCallerLookupsPerSecond,
 		))
 	}
 
@@ -910,9 +962,14 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 	// AcceptedMithrilBackends, kept in sync with cmd/dingo's
 	// resolveMithrilBackend by a parity test in cmd/dingo (empty
 	// selects v2).
-	if !slices.Contains(AcceptedMithrilBackends, c.Mithril.Backend) {
+	if c.Mithril.Backend == "v1" {
+		errs = append(errs, errors.New(
+			"mithril.backend \"v1\" is no longer supported; "+
+				"remove the setting or use \"v2\"",
+		))
+	} else if !slices.Contains(AcceptedMithrilBackends, c.Mithril.Backend) {
 		errs = append(errs, fmt.Errorf(
-			"invalid mithril.backend %q: must be \"v1\" or \"v2\"",
+			"invalid mithril.backend %q: must be empty or \"v2\"",
 			c.Mithril.Backend,
 		))
 	}
@@ -980,6 +1037,47 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 			}
 		}
 	}
+	// Node-managed Mithril sync runs only inside a serving node, so the
+	// one-shot `dingo mithril sync` and `dingo sync --mithril` paths are
+	// not gated by these settings.
+	if c.Mithril.Enabled && effectiveMode.RequiresListeners() {
+		if c.StorageMode == storageModeAPI {
+			errs = append(errs, errors.New(
+				"mithril.enabled requires core storage mode",
+			))
+		}
+		if c.Mithril.BatchChunks < 1 {
+			errs = append(errs, fmt.Errorf(
+				"invalid mithril.batchChunks %d: must be at least 1",
+				c.Mithril.BatchChunks,
+			))
+		}
+		if c.Mithril.WindowChunks < c.Mithril.BatchChunks {
+			errs = append(errs, fmt.Errorf(
+				"invalid mithril.windowChunks %d: must be at least "+
+					"mithril.batchChunks (%d)",
+				c.Mithril.WindowChunks, c.Mithril.BatchChunks,
+			))
+		}
+		if c.Mithril.DownloadWorkers < 1 {
+			errs = append(errs, fmt.Errorf(
+				"invalid mithril.downloadWorkers %d: must be at least 1",
+				c.Mithril.DownloadWorkers,
+			))
+		}
+		if c.Mithril.CheckInterval <= 0 {
+			errs = append(errs, fmt.Errorf(
+				"invalid mithril.checkInterval %s: must be positive",
+				c.Mithril.CheckInterval,
+			))
+		}
+		if c.Mithril.RetryBackoff <= 0 {
+			errs = append(errs, fmt.Errorf(
+				"invalid mithril.retryBackoff %s: must be positive",
+				c.Mithril.RetryBackoff,
+			))
+		}
+	}
 	if c.Mithril.DownloadMaxBytes < 0 {
 		errs = append(errs, fmt.Errorf(
 			"invalid mithril.downloadMaxBytes %d: must not be negative",
@@ -1043,6 +1141,7 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 				"dmq.socketPath must differ from socketPath",
 			))
 		}
+		errs = append(errs, validateDMQPeers(c.DMQ)...)
 		// Both are scaled into int64 quantities: seconds to a Duration and
 		// megabytes to bytes.
 		const maxMessageTTL = uint64(math.MaxInt64) / uint64(time.Second)
@@ -1340,4 +1439,70 @@ func sameSocketPath(a, b string) bool {
 		return filepath.Clean(a) == filepath.Clean(b)
 	}
 	return absA == absB
+}
+
+// validateDMQTopologyFile checks that a configured DMQ topology file is a
+// regular file, so a typo fails at startup instead of when the peer dialer
+// first reads it.
+func validateDMQTopologyFile(path string) error {
+	if path == "" {
+		return nil
+	}
+	if err := validatePathNoTraversal("dmq.topologyFile", path); err != nil {
+		return err
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("invalid dmq.topologyFile %q: %w", path, err)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf(
+			"invalid dmq.topologyFile %q: not a regular file", path,
+		)
+	}
+	return nil
+}
+
+// validateDMQPeers checks the DMQ peer listener and peer-count settings. The
+// listener fields are only meaningful when N2NPort is set, so they are left
+// unchecked for a local-only stack; the peer counts and topology file bound
+// outbound peers too, so they are always checked.
+func validateDMQPeers(c DMQConfig) []error {
+	var errs []error
+	if c.MinPeers > c.MaxPeers {
+		errs = append(errs, errors.New(
+			"dmq.minPeers must not exceed dmq.maxPeers",
+		))
+	}
+	if err := validateDMQTopologyFile(c.TopologyFile); err != nil {
+		errs = append(errs, err)
+	}
+	if c.N2NPort == 0 {
+		return errs
+	}
+	if c.ListenAddress == "" && c.ListenIPv6Address == "" {
+		errs = append(errs, errors.New(
+			"dmq.listenAddress or dmq.listenIpv6Address must be set "+
+				"when dmq.n2nPort is set",
+		))
+	}
+	if c.ListenAddress != "" {
+		if addr, err := netip.ParseAddr(c.ListenAddress); err != nil ||
+			!addr.Is4() {
+			errs = append(errs, fmt.Errorf(
+				"dmq.listenAddress %q must be an IPv4 address",
+				c.ListenAddress,
+			))
+		}
+	}
+	if c.ListenIPv6Address != "" {
+		if addr, err := netip.ParseAddr(c.ListenIPv6Address); err != nil ||
+			!addr.Is6() || addr.Is4In6() {
+			errs = append(errs, fmt.Errorf(
+				"dmq.listenIpv6Address %q must be an IPv6 address",
+				c.ListenIPv6Address,
+			))
+		}
+	}
+	return errs
 }

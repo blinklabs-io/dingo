@@ -33,14 +33,46 @@ func (d *Database) UtxosByAddressPage(
 	q *models.UtxoWithOrderingQuery,
 	maxCandidates int,
 ) (models.UtxoAddressPage, error) {
+	if q != nil && (q.MatchAllAddresses ||
+		!models.RequiresExactAddressFilter(q.AddressPatterns)) {
+		return models.UtxoAddressPage{}, errors.New(
+			"address page requires exact address patterns",
+		)
+	}
+	return d.utxosByAddressPage(ctx, q, maxCandidates, 0)
+}
+
+// UtxosByAddressBoundedPage scans an ordered page while bounding both the
+// number of candidate rows examined and the CBOR retained for matches. A zero
+// byte limit is invalid; callers that do not need a byte bound use
+// UtxosByAddressPage.
+func (d *Database) UtxosByAddressBoundedPage(
+	ctx context.Context,
+	q *models.UtxoWithOrderingQuery,
+	maxCandidates int,
+	maxBytes int64,
+) (models.UtxoAddressPage, error) {
+	if maxBytes <= 0 {
+		return models.UtxoAddressPage{}, errors.New(
+			"address page requires a positive byte limit",
+		)
+	}
+	return d.utxosByAddressPage(ctx, q, maxCandidates, maxBytes)
+}
+
+func (d *Database) utxosByAddressPage(
+	ctx context.Context,
+	q *models.UtxoWithOrderingQuery,
+	maxCandidates int,
+	maxBytes int64,
+) (models.UtxoAddressPage, error) {
 	page := models.UtxoAddressPage{}
 	if q == nil {
 		return page, models.ErrNilUtxoWithOrderingQuery
 	}
-	if q.Limit <= 0 || maxCandidates <= 0 || q.Offset != 0 || q.Descending ||
-		q.MatchAllAddresses || !models.RequiresExactAddressFilter(q.AddressPatterns) {
+	if q.Limit <= 0 || maxCandidates <= 0 || q.Offset != 0 || q.Descending {
 		return page, errors.New(
-			"address page requires exact patterns, positive limits, and ascending cursor pagination",
+			"address page requires positive limits and ascending cursor pagination",
 		)
 	}
 	page.Next = q.After
@@ -51,6 +83,7 @@ func (d *Database) UtxosByAddressPage(
 	defer txn.Release()
 	scan := *q
 	scan.SkipAssets = true
+	var retainedBytes int64
 	for page.Scanned < maxCandidates && len(page.Utxos) < q.Limit {
 		if err := ctx.Err(); err != nil {
 			return page, err
@@ -76,25 +109,35 @@ func (d *Database) UtxosByAddressPage(
 			if err := ctx.Err(); err != nil {
 				return page, err
 			}
-			output, err := u.Decode()
-			if err != nil {
-				return page, fmt.Errorf("decode address candidate: %w", err)
+			match := q.MatchAllAddresses
+			if !match && len(q.AddressPatterns) > 0 {
+				output, err := u.Decode()
+				if err != nil {
+					return page, fmt.Errorf("decode address candidate: %w", err)
+				}
+				match, err = models.MatchesUtxoAddressPatterns(
+					output.Address(),
+					q.AddressPatterns,
+				)
+				if err != nil {
+					return page, err
+				}
 			}
-			match, err := models.MatchesUtxoAddressPatterns(
-				output.Address(),
-				q.AddressPatterns,
-			)
-			if err != nil {
-				return page, err
-			}
-			page.Scanned++
-			page.Next = &models.UtxoOrderingCursor{
+			cursor := &models.UtxoOrderingCursor{
 				Slot: u.TxSlot, BlockIndex: u.TxBlockIndex,
 				OutputIdx: u.OutputIdx, TxId: u.TxId,
 			}
 			if match {
+				cborBytes := int64(len(u.Cbor))
+				if maxBytes > 0 && len(page.Utxos) > 0 &&
+					retainedBytes+cborBytes > maxBytes {
+					return page, nil
+				}
+				retainedBytes += cborBytes
 				page.Utxos = append(page.Utxos, *u)
 			}
+			page.Scanned++
+			page.Next = cursor
 			if len(page.Utxos) == q.Limit {
 				// Only a short, fully processed batch proves exhaustion.
 				if i == len(batch)-1 && len(batch) < scan.Limit {

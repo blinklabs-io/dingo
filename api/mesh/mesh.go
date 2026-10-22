@@ -51,12 +51,38 @@ const (
 	// connection open.
 	defaultRequestBodyTimeout = 30 * time.Second
 
+	// defaultMaxMempoolListing caps the identifiers one /mempool response
+	// names. The Mesh response has no cursor and must list every pending
+	// transaction, so a pool larger than this is refused as retriable.
+	defaultMaxMempoolListing = 10000
+
+	// defaultMaxConcurrentMempoolListings caps /mempool requests in flight.
+	// A request over the cap is refused rather than queued, so unauthenticated
+	// callers cannot pile up pool walks behind one another.
+	defaultMaxConcurrentMempoolListings = 8
+
 	// listenerReadTimeout bounds the whole request read at the
 	// connection, covering the requests whose body no handler reads --
 	// such as an unknown route -- which the per-request deadline above
 	// never sees.
 	// api/utxorpc's listener carries the same bound.
 	listenerReadTimeout = 60 * time.Second
+
+	// defaultAccountCoinsPageSize caps the UTxOs one /account/coins response
+	// carries; a larger account is read by following the cursor.
+	defaultAccountCoinsPageSize = 500
+	// defaultAccountCoinsMaxCandidates caps the output rows one page scans,
+	// which bounds the work for an address whose payment credential is shared
+	// by many other addresses.
+	defaultAccountCoinsMaxCandidates = 5000
+	// defaultAccountCoinsMaxBytes caps the output CBOR one page retains. Each
+	// output expands into one coin per native asset, so the encoded response
+	// is bounded by a small multiple of this.
+	defaultAccountCoinsMaxBytes = 1 << 20
+	// defaultMaxConcurrentBulkReads caps how many /account/coins reads run
+	// at once; further requests are refused rather than queued, because a
+	// queue of blocked handlers would hold the memory the budgets bound.
+	defaultMaxConcurrentBulkReads = 8
 
 	// mainnetMagic is the network magic for Cardano
 	// mainnet, used to determine the address network.
@@ -86,6 +112,18 @@ type ServerConfig struct {
 	// enough for a test". NewServer substitutes
 	// defaultRequestBodyTimeout when it is not positive.
 	requestBodyTimeout time.Duration
+	// accountCoinsPageSize, accountCoinsMaxCandidates,
+	// accountCoinsMaxBytes and maxConcurrentBulkReads are unexported for the
+	// same reason; NewServer substitutes the defaults above when they are
+	// not positive.
+	accountCoinsPageSize      int
+	accountCoinsMaxCandidates int
+	accountCoinsMaxBytes      int64
+	maxConcurrentBulkReads    int
+	// maxMempoolListing and maxConcurrentMempoolListings are unexported and
+	// defaulted the same way.
+	maxMempoolListing            int
+	maxConcurrentMempoolListings int
 }
 
 // Server is the Mesh-compatible REST API server.
@@ -99,6 +137,11 @@ type Server struct {
 	// listening socket as part of what Stop waits for -- see
 	// internal/apilistener.
 	listener *apilistener.Listener
+	// bulkSlots admits at most maxConcurrentBulkReads concurrent
+	// result-size-scaled reads.
+	bulkSlots chan struct{}
+	// mempoolSlots holds one token per /mempool request in flight.
+	mempoolSlots chan struct{}
 }
 
 // NewServer creates a new Mesh API server instance.
@@ -155,6 +198,25 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		cfg.requestBodyTimeout = defaultRequestBodyTimeout
 	}
 
+	if cfg.maxMempoolListing <= 0 {
+		cfg.maxMempoolListing = defaultMaxMempoolListing
+	}
+	if cfg.maxConcurrentMempoolListings <= 0 {
+		cfg.maxConcurrentMempoolListings = defaultMaxConcurrentMempoolListings
+	}
+	if cfg.accountCoinsPageSize <= 0 {
+		cfg.accountCoinsPageSize = defaultAccountCoinsPageSize
+	}
+	if cfg.accountCoinsMaxCandidates <= 0 {
+		cfg.accountCoinsMaxCandidates = defaultAccountCoinsMaxCandidates
+	}
+	if cfg.accountCoinsMaxBytes <= 0 {
+		cfg.accountCoinsMaxBytes = defaultAccountCoinsMaxBytes
+	}
+	if cfg.maxConcurrentBulkReads <= 0 {
+		cfg.maxConcurrentBulkReads = defaultMaxConcurrentBulkReads
+	}
+
 	var addrNetID uint8 = lcommon.AddressNetworkTestnet
 	if cfg.NetworkMagic == mainnetMagic {
 		addrNetID = lcommon.AddressNetworkMainnet
@@ -173,10 +235,12 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	return &Server{
 		config:        cfg,
 		logger:        logger,
+		mempoolSlots:  make(chan struct{}, cfg.maxConcurrentMempoolListings),
 		networkID:     networkID,
 		genesisID:     genesisID,
 		addrNetworkID: addrNetID,
 		listener:      apilistener.New("Mesh API", logger),
+		bulkSlots:     make(chan struct{}, cfg.maxConcurrentBulkReads),
 	}, nil
 }
 

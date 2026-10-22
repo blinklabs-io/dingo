@@ -21,6 +21,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
 )
 
 // databaseAdapter adapts *database.Database to MidnightDatabase.
@@ -39,43 +40,108 @@ func NewDatabase(db *database.Database) MidnightDatabase {
 }
 
 func (a *databaseAdapter) GetLatestMidnightGovernanceDatum(
+	ctx context.Context,
 	datumType string,
 	blockNumber uint64,
 ) (*models.MidnightGovernanceDatum, error) {
-	return a.db.GetLatestMidnightGovernanceDatum(datumType, blockNumber)
+	txn, err := a.readTransaction(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer txn.Release()
+	return a.db.Metadata().GetLatestMidnightGovernanceDatum(
+		datumType, blockNumber, txn.Metadata(),
+	)
 }
 
 func (a *databaseAdapter) GetMidnightAriadneParamsAtOrBeforeEpoch(
+	ctx context.Context,
 	epoch uint64,
 ) (*models.MidnightAriadneParams, error) {
-	return a.db.GetMidnightAriadneParamsAtOrBeforeEpoch(epoch)
+	txn, err := a.readTransaction(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer txn.Release()
+	return a.db.Metadata().GetMidnightAriadneParamsAtOrBeforeEpoch(
+		epoch, txn.Metadata(),
+	)
 }
 
 func (a *databaseAdapter) GetMidnightEpochCandidatesByEpoch(
+	ctx context.Context,
 	epoch uint64,
 ) (*models.MidnightEpochCandidates, error) {
-	return a.db.GetMidnightEpochCandidatesByEpoch(epoch)
+	txn, err := a.readTransaction(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer txn.Release()
+	return a.db.Metadata().GetMidnightEpochCandidatesByEpoch(
+		epoch, txn.Metadata(),
+	)
 }
 
 func (a *databaseAdapter) GetMidnightCommitteeCandidateRegistrationsByTxHashes(
+	ctx context.Context,
 	txHashes [][]byte,
 ) ([]models.MidnightCommitteeCandidateRegistration, error) {
-	return a.db.GetMidnightCommitteeCandidateRegistrationsByTxHashes(txHashes)
+	txn, err := a.readTransaction(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer txn.Release()
+	return a.db.Metadata().GetMidnightCommitteeCandidateRegistrationsByTxHashes(
+		txHashes, txn.Metadata(),
+	)
 }
 
 func (a *databaseAdapter) GetPoolStakeSnapshotsByEpoch(
+	ctx context.Context,
 	epoch uint64,
 	snapshotType string,
 ) ([]*models.PoolStakeSnapshot, error) {
-	return a.db.GetPoolStakeSnapshotsByEpoch(epoch, snapshotType, nil)
+	txn, err := a.readTransaction(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer txn.Release()
+	return a.db.GetPoolStakeSnapshotsByEpoch(epoch, snapshotType, txn)
 }
 
-func (a *databaseAdapter) GetEpoch(epochId uint64) (*models.Epoch, error) {
-	return a.db.GetEpoch(epochId, nil)
+func (a *databaseAdapter) GetEpoch(
+	ctx context.Context,
+	epochId uint64,
+) (*models.Epoch, error) {
+	txn, err := a.readTransaction(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer txn.Release()
+	return a.db.GetEpoch(epochId, txn)
 }
 
-func (a *databaseAdapter) GetEpochBySlot(slot uint64) (*models.Epoch, error) {
-	return a.db.GetEpochBySlot(slot, nil)
+func (a *databaseAdapter) GetEpochBySlot(
+	ctx context.Context,
+	slot uint64,
+) (*models.Epoch, error) {
+	txn, err := a.readTransaction(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer txn.Release()
+	return a.db.GetEpochBySlot(slot, txn)
+}
+
+func (a *databaseAdapter) readTransaction(
+	ctx context.Context,
+) (*database.Txn, error) {
+	txn := a.db.TransactionContext(ctx, false)
+	if txn.Metadata() == nil {
+		txn.Release()
+		return nil, types.ErrNilTxn
+	}
+	return txn, nil
 }
 
 func (a *databaseAdapter) BlockByHash(ctx context.Context, hash []byte) (models.Block, error) {

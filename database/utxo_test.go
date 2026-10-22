@@ -2952,3 +2952,80 @@ UPDATE utxo SET deleted_slot = 10, spent_at_tx_id = ?`, consumerHash)
 		})
 	}
 }
+
+// TestUtxosDeleteSpentInBatchFloor pins that removing a batch's spent rows
+// raises the consumed-UTxO prune floor to the batch's slot and never lowers
+// it, and that the delete refuses to run outside the caller's transaction.
+func TestUtxosDeleteSpentInBatchFloor(t *testing.T) {
+	t.Parallel()
+
+	db := openTestDB(t)
+	ids := []models.UtxoId{{Hash: bytes.Repeat([]byte{0x01}, 32), Idx: 0}}
+	require.ErrorIs(t,
+		db.UtxosDeleteSpentInBatch(ids, 10, nil), types.ErrNilTxn)
+	require.NoError(t, db.UtxosDeleteSpentInBatch(nil, 10, nil),
+		"an empty batch needs no transaction")
+
+	apply := func(slot uint64) {
+		txn := db.Transaction(context.Background(), true)
+		require.NoError(t, txn.Do(func(txn *Txn) error {
+			return db.UtxosDeleteSpentInBatch(ids, slot, txn)
+		}))
+	}
+	floor := func() uint64 {
+		value, err := db.ConsumedUtxoPruneFloor(nil)
+		require.NoError(t, err)
+		return value
+	}
+	apply(50)
+	require.Equal(t, uint64(50), floor())
+	apply(20)
+	require.Equal(t, uint64(50), floor(), "the floor must not move down")
+}
+
+// TestFilterUtxosByAddressPatternsExactSetMatchesLinear pins the keyed
+// exact-address lookup to the pattern contract, including a mixed filter
+// that must still use the linear matcher.
+func TestFilterUtxosByAddressPatternsExactSetMatchesLinear(t *testing.T) {
+	t.Parallel()
+	mk := func(b byte) lcommon.Address {
+		a, err := lcommon.NewAddressFromParts(
+			lcommon.AddressTypeKeyNone,
+			lcommon.AddressNetworkTestnet,
+			bytes.Repeat([]byte{b}, lcommon.AddressHashSize),
+			nil,
+		)
+		require.NoError(t, err)
+		return a
+	}
+	addrs := []lcommon.Address{mk(1), mk(2), mk(3)}
+	utxos := make([]models.Utxo, len(addrs))
+	for i, a := range addrs {
+		out, err := cbor.Encode(&shelley.ShelleyTransactionOutput{
+			OutputAddress: a,
+			OutputAmount:  1,
+		})
+		require.NoError(t, err)
+		utxos[i] = models.Utxo{TxId: bytes.Repeat([]byte{byte(i)}, 32), Cbor: out}
+	}
+	exact := func(a lcommon.Address) models.UtxoAddressPattern {
+		p, err := models.ExactUtxoAddressPattern(a)
+		require.NoError(t, err)
+		return p
+	}
+	got, err := filterUtxosByAddressPatterns(
+		utxos, []models.UtxoAddressPattern{exact(addrs[0]), exact(addrs[2])},
+	)
+	require.NoError(t, err)
+	require.Len(t, got, 2)
+	require.Equal(t, utxos[0].TxId, got[0].TxId)
+	require.Equal(t, utxos[2].TxId, got[1].TxId)
+
+	mixed := exact(addrs[1])
+	mixed.PaymentPart = addrs[2].PaymentKeyHash().Bytes()
+	got, err = filterUtxosByAddressPatterns(
+		utxos, []models.UtxoAddressPattern{mixed},
+	)
+	require.NoError(t, err)
+	require.Empty(t, got)
+}

@@ -571,7 +571,22 @@ func PaymentScriptFromAddress(addr ledger.Address) bool {
 	return addr.Type()&lcommon.AddressTypeScriptBit == lcommon.AddressTypeScriptBit
 }
 
-// AddressBalance holds SQL-aggregated UTxO balances for an address.
+// AddressBalanceLimits bounds the work of one address balance read. A zero
+// field leaves that dimension unbounded.
+type AddressBalanceLimits struct {
+	// MaxUtxos is the most live outputs the read may visit.
+	MaxUtxos int
+	// MaxAssets is the most distinct assets the read may accumulate.
+	MaxAssets int
+}
+
+// ErrAddressBalanceLimit reports an address balance read stopped by its
+// AddressBalanceLimits before the whole balance was read.
+var ErrAddressBalanceLimit = errors.New(
+	"address balance read exceeds its limit",
+)
+
+// AddressBalance holds UTxO balances for an address.
 type AddressBalance struct {
 	Lovelace  uint64
 	UtxoCount int64

@@ -30,6 +30,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/mempool"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	"github.com/stretchr/testify/require"
 	"github.com/utxorpc/go-codegen/utxorpc/v1alpha/query"
 	"github.com/utxorpc/go-codegen/utxorpc/v1alpha/submit"
@@ -47,6 +48,33 @@ type boundsRecordingMempool struct {
 	gotBytes int64
 	entered  chan struct{}
 	release  chan struct{}
+}
+
+type boundedSearchLedgerStub struct {
+	UtxorpcLedgerState
+	page          models.UtxoAddressPage
+	gotCandidates int
+	gotBytes      int64
+	gotContextErr error
+}
+
+func (s *boundedSearchLedgerStub) UtxosByAddressBoundedPage(
+	ctx context.Context,
+	_ *models.UtxoWithOrderingQuery,
+	maxCandidates int,
+	maxBytes int64,
+) (models.UtxoAddressPage, error) {
+	s.gotCandidates = maxCandidates
+	s.gotBytes = maxBytes
+	s.gotContextErr = ctx.Err()
+	if s.gotContextErr != nil {
+		return models.UtxoAddressPage{}, s.gotContextErr
+	}
+	return s.page, nil
+}
+
+func (s *boundedSearchLedgerStub) Tip() ochainsync.Tip {
+	return ochainsync.Tip{}
 }
 
 func newBoundsRecordingMempool(n int) *boundsRecordingMempool {
@@ -322,6 +350,80 @@ func TestReadUtxos_ResponseByteBudget(t *testing.T) {
 	_, err = srvWith(total-1).ReadUtxos(ctx, req())
 	require.Error(t, err, "one byte over the budget is refused")
 	require.Equal(t, connect.CodeResourceExhausted, connect.CodeOf(err))
+}
+
+func TestSearchUtxos_PassesStorageWorkAndByteBounds(t *testing.T) {
+	t.Parallel()
+	stub := &boundedSearchLedgerStub{}
+	u := NewUtxorpc(UtxorpcConfig{
+		Logger:           discardLogger(),
+		LedgerState:      stub,
+		MaxHistoryItems:  7,
+		MaxResponseBytes: 1234,
+	})
+	srv := &queryServiceServer{utxorpc: u}
+
+	_, err := srv.SearchUtxos(
+		t.Context(),
+		connect.NewRequest(&query.SearchUtxosRequest{MaxItems: 3}),
+	)
+	require.NoError(t, err)
+	require.Equal(t, 8, stub.gotCandidates)
+	require.Equal(t, int64(1234), stub.gotBytes)
+
+	canceled, cancel := context.WithCancel(t.Context())
+	cancel()
+	_, err = srv.SearchUtxos(
+		canceled,
+		connect.NewRequest(&query.SearchUtxosRequest{MaxItems: 3}),
+	)
+	require.ErrorIs(t, err, context.Canceled)
+	require.ErrorIs(t, stub.gotContextErr, context.Canceled)
+}
+
+func TestTrimSearchUtxoPagePreservesContinuation(t *testing.T) {
+	t.Parallel()
+
+	first := models.UtxoWithOrdering{
+		Utxo:   models.Utxo{TxId: []byte{0x01}, OutputIdx: 1},
+		TxSlot: 10,
+	}
+	second := models.UtxoWithOrdering{
+		Utxo:   models.Utxo{TxId: []byte{0x02}, OutputIdx: 2},
+		TxSlot: 20,
+	}
+	scanCursor := &models.UtxoOrderingCursor{
+		Slot: 30, OutputIdx: 3, TxId: []byte{0x03},
+	}
+
+	t.Run("extra result", func(t *testing.T) {
+		t.Parallel()
+		items, cursor := trimSearchUtxoPage(models.UtxoAddressPage{
+			Utxos: []models.UtxoWithOrdering{first, second},
+		}, 1)
+		require.Equal(t, []models.UtxoWithOrdering{first}, items)
+		require.Equal(t, first.TxSlot, cursor.Slot)
+		require.Equal(t, first.TxId, cursor.TxId)
+	})
+
+	t.Run("candidate scan", func(t *testing.T) {
+		t.Parallel()
+		items, cursor := trimSearchUtxoPage(models.UtxoAddressPage{
+			Utxos: []models.UtxoWithOrdering{first},
+			Next:  scanCursor,
+		}, 2)
+		require.Equal(t, []models.UtxoWithOrdering{first}, items)
+		require.Equal(t, scanCursor, cursor)
+	})
+
+	t.Run("exhausted", func(t *testing.T) {
+		t.Parallel()
+		items, cursor := trimSearchUtxoPage(models.UtxoAddressPage{
+			Utxos: []models.UtxoWithOrdering{first},
+		}, 2)
+		require.Equal(t, []models.UtxoWithOrdering{first}, items)
+		require.Nil(t, cursor)
+	})
 }
 
 func TestSearchUtxos_PageByteBudget(t *testing.T) {

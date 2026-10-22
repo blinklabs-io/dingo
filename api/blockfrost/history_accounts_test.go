@@ -421,3 +421,69 @@ func TestNodeAdapterStakeHistoryIgnoresIncompleteSnapshotBeforeAccount(t *testin
 	assert.Equal(t, 0, total)
 	assert.Empty(t, rows)
 }
+
+func TestNodeAdapterAccountAggregateReadBudget(t *testing.T) {
+	t.Parallel()
+	fx := newEpochFixture(t)
+	ctx := context.Background()
+	address := fx.addAccount(t, 0x01)
+	policy := bytes32of(28, 0xaa)
+	// Four outputs, one spent, each holding its own asset.
+	for i := range 4 {
+		var deleted uint64
+		if i == 0 {
+			deleted = 60
+		}
+		fx.addAccountOutput(
+			t, byte(0xc1+i), 0x01, 1_000_000, deleted,
+			models.Asset{PolicyId: policy, Name: []byte{byte(i)}, Amount: 1},
+		)
+	}
+	page := PaginationParams{Count: 100, Page: 1, Order: PaginationOrderAsc}
+
+	fx.adapter.summaryLimits = addressSummaryLimits{maxTotalOutputs: 3}
+	_, err := fx.adapter.AccountAddressTotal(ctx, address)
+	require.ErrorIs(t, err, ErrAddressSummaryTooLarge)
+	fx.adapter.summaryLimits = addressSummaryLimits{maxTotalOutputs: 4}
+	info, err := fx.adapter.AccountAddressTotal(ctx, address)
+	require.NoError(t, err)
+	assert.Equal(t, "4000000", info.ReceivedSum[0].Quantity)
+
+	// Three live holdings, three distinct assets; the spent one is not read
+	// by the balances.
+	fx.adapter.summaryLimits = addressSummaryLimits{maxAssetRows: 2}
+	_, _, err = fx.adapter.AccountAddressAssets(ctx, address, page)
+	require.ErrorIs(t, err, ErrAddressSummaryTooLarge)
+	_, err = fx.adapter.AccountAddressTotal(ctx, address)
+	require.ErrorIs(t, err, ErrAddressSummaryTooLarge)
+	fx.adapter.summaryLimits = addressSummaryLimits{maxAssetRows: 3}
+	assets, total, err := fx.adapter.AccountAddressAssets(ctx, address, page)
+	require.NoError(t, err)
+	assert.Equal(t, 3, total)
+	assert.Len(t, assets, 3)
+
+	fx.adapter.summaryLimits = addressSummaryLimits{maxAssets: 2}
+	_, _, err = fx.adapter.AccountAddressAssets(ctx, address, page)
+	require.ErrorIs(t, err, ErrAddressSummaryTooLarge)
+	_, err = fx.adapter.AccountAddressTotal(ctx, address)
+	require.ErrorIs(t, err, ErrAddressSummaryTooLarge)
+	fx.adapter.summaryLimits = addressSummaryLimits{maxAssets: 4}
+	_, err = fx.adapter.AccountAddressTotal(ctx, address)
+	require.NoError(t, err)
+}
+
+func TestNodeAdapterAccountAggregateStopsOnCancelledContext(t *testing.T) {
+	t.Parallel()
+	fx := newEpochFixture(t)
+	address := fx.addAccount(t, 0x01)
+	fx.addAccountOutput(t, 0xc1, 0x01, 1_000_000, 0)
+
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := fx.adapter.AccountAddressTotal(cancelled, address)
+	require.Error(t, err)
+	_, _, err = fx.adapter.AccountAddressAssets(
+		cancelled, address, PaginationParams{Count: 10, Page: 1},
+	)
+	require.Error(t, err)
+}

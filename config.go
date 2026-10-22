@@ -244,11 +244,14 @@ type Config struct {
 	barkHost                                                                            string
 	barkClientCAFilePath                                                                string
 	barkArchiveMaxConcurrentFetches                                                     int
+	barkArchiveLookupsPerSecond                                                         int
+	barkArchiveCallerLookupsPerSecond                                                   int
 	barkOperatorCertificateFingerprints                                                 []string
 	barkLifecycleEnabled                                                                bool
 	barkLifecycleOperatorCertificateFingerprints                                        []string
 	databaseLifecycle                                                                   internalconfig.DatabaseLifecycleConfig
 	historyExpiry                                                                       HistoryExpiryConfig
+	mithrilCatchUp                                                                      MithrilCatchUpFactory
 	koiosParity                                                                         KoiosParityConfig
 	corsAllowedOrigins                                                                  []string
 	networkMagic                                                                        uint32
@@ -287,6 +290,7 @@ type Config struct {
 	blockPipelineEnabled                                                                bool
 	blockPipelineValidateEnabled                                                        bool
 	ledgerPrefetchAheadEnabled                                                          bool
+	ledgerValidateAheadEnabled                                                          bool
 	ledgerApplyRowBatchingEnabled                                                       bool
 	blockfetchLowWatermarkEnabled                                                       bool
 	minPoolMargin                                                                       uint
@@ -397,22 +401,34 @@ func (n *Node) registerRTSMetrics(r *promutil.Registration) {
 		return
 	}
 	n.rtsMetrics = &rtsMetrics{
-		gcLiveBytes: promutil.Register(r, prometheus.NewGauge(prometheus.GaugeOpts{
-			Name: "cardano_node_metrics_RTS_gcLiveBytes_int",
-			Help: "live heap bytes currently in use (Go runtime.MemStats.HeapAlloc)",
-		})),
-		gcHeapBytes: promutil.Register(r, prometheus.NewGauge(prometheus.GaugeOpts{
-			Name: "cardano_node_metrics_RTS_gcHeapBytes_int",
-			Help: "heap memory bytes obtained from the OS (Go runtime.MemStats.HeapSys)",
-		})),
-		gcMajorNum: promutil.Register(r, prometheus.NewGauge(prometheus.GaugeOpts{
-			Name: "cardano_node_metrics_RTS_gcMajorNum_int",
-			Help: "count of forced GCs (Go runtime.MemStats.NumForcedGC)",
-		})),
-		gcMinorNum: promutil.Register(r, prometheus.NewGauge(prometheus.GaugeOpts{
-			Name: "cardano_node_metrics_RTS_gcMinorNum_int",
-			Help: "count of automatic GCs (Go runtime.MemStats.NumGC - NumForcedGC)",
-		})),
+		gcLiveBytes: promutil.Register(
+			r,
+			prometheus.NewGauge(prometheus.GaugeOpts{
+				Name: "cardano_node_metrics_RTS_gcLiveBytes_int",
+				Help: "live heap bytes currently in use (Go runtime.MemStats.HeapAlloc)",
+			}),
+		),
+		gcHeapBytes: promutil.Register(
+			r,
+			prometheus.NewGauge(prometheus.GaugeOpts{
+				Name: "cardano_node_metrics_RTS_gcHeapBytes_int",
+				Help: "heap memory bytes obtained from the OS (Go runtime.MemStats.HeapSys)",
+			}),
+		),
+		gcMajorNum: promutil.Register(
+			r,
+			prometheus.NewGauge(prometheus.GaugeOpts{
+				Name: "cardano_node_metrics_RTS_gcMajorNum_int",
+				Help: "count of forced GCs (Go runtime.MemStats.NumForcedGC)",
+			}),
+		),
+		gcMinorNum: promutil.Register(
+			r,
+			prometheus.NewGauge(prometheus.GaugeOpts{
+				Name: "cardano_node_metrics_RTS_gcMinorNum_int",
+				Help: "count of automatic GCs (Go runtime.MemStats.NumGC - NumForcedGC)",
+			}),
+		),
 	}
 }
 
@@ -742,7 +758,15 @@ func NewConfig(opts ...ConfigOptionFunc) Config {
 			// SQLite planner statistics stay current unless an operator
 			// opts out; see internalconfig.Config.PlannerStatsRefreshEnabled.
 			PlannerStatsRefreshEnabled: true,
+			// Mirrors internalconfig's default: block apply overlaps input
+			// reads and signature checks with earlier blocks of its chunk.
+			LedgerPrefetchAheadEnabled: true,
+			LedgerValidateAheadEnabled: true,
 			Plugins: internalconfig.PluginsConfig{
+				Consensus: hostplugin.Selection{
+					Provider: "praos",
+					Config:   map[string]any{},
+				},
 				Storage: internalconfig.StoragePluginsConfig{
 					Blob: hostplugin.Selection{
 						Provider: "badger",
@@ -822,6 +846,8 @@ func (c *Config) syncCompatFields() {
 	c.barkHost = c.cfg.BarkHost
 	c.barkClientCAFilePath = c.cfg.BarkClientCAFilePath
 	c.barkArchiveMaxConcurrentFetches = c.cfg.BarkArchiveMaxConcurrentFetches
+	c.barkArchiveLookupsPerSecond = c.cfg.BarkArchiveLookupsPerSecond
+	c.barkArchiveCallerLookupsPerSecond = c.cfg.BarkArchiveCallerLookupsPerSecond
 	c.barkOperatorCertificateFingerprints = slices.Clone(
 		c.cfg.BarkOperatorCertificateFingerprints,
 	)
@@ -944,6 +970,7 @@ func (c *Config) syncCompatFields() {
 	c.blockPipelineEnabled = c.cfg.BlockPipelineEnabled
 	c.blockPipelineValidateEnabled = c.cfg.BlockPipelineValidateEnabled
 	c.ledgerPrefetchAheadEnabled = c.cfg.LedgerPrefetchAheadEnabled
+	c.ledgerValidateAheadEnabled = c.cfg.LedgerValidateAheadEnabled
 	c.ledgerApplyRowBatchingEnabled = c.cfg.LedgerApplyRowBatchingEnabled
 	c.blockfetchLowWatermarkEnabled = c.cfg.BlockfetchLowWatermarkEnabled
 	c.minPoolMargin, c.pledgeLeverageEnabled, c.pledgeLeverage = c.cfg.MinPoolMargin, c.cfg.PledgeLeverageEnabled, c.cfg.PledgeLeverage
@@ -954,7 +981,8 @@ func (c *Config) syncCompatFields() {
 	c.cacheBlockLRUEntries, c.cacheHotUtxoEntries, c.cacheHotTxEntries, c.cacheHotTxMaxBytes = c.cfg.Cache.BlockLRUEntries, c.cfg.Cache.HotUtxoEntries, c.cfg.Cache.HotTxEntries, c.cfg.Cache.HotTxMaxBytes
 	c.pluginSelections = map[hostplugin.Capability]hostplugin.Selection{
 		hostplugin.CapabilityStorageBlob: c.cfg.Plugins.Storage.Blob, hostplugin.CapabilityStorageMetadata: c.cfg.Plugins.Storage.Metadata,
-		hostplugin.CapabilityMempool: c.cfg.Plugins.Mempool, hostplugin.CapabilityAPIBlockfrost: c.cfg.Plugins.API.Blockfrost,
+		hostplugin.CapabilityConsensus: c.cfg.Plugins.Consensus,
+		hostplugin.CapabilityMempool:   c.cfg.Plugins.Mempool, hostplugin.CapabilityAPIBlockfrost: c.cfg.Plugins.API.Blockfrost,
 		hostplugin.CapabilityAPIKupo: c.cfg.Plugins.API.Kupo,
 		hostplugin.CapabilityAPIMesh: c.cfg.Plugins.API.Mesh, hostplugin.CapabilityAPIUtxorpc: c.cfg.Plugins.API.Utxorpc,
 		hostplugin.CapabilityAPIMcp: c.cfg.Plugins.API.Mcp,
@@ -985,6 +1013,8 @@ func WithPluginSelection(
 			c.cfg.Plugins.Storage.Blob = selection
 		case hostplugin.CapabilityStorageMetadata:
 			c.cfg.Plugins.Storage.Metadata = selection
+		case hostplugin.CapabilityConsensus:
+			c.cfg.Plugins.Consensus = selection
 		case hostplugin.CapabilityMempool:
 			c.cfg.Plugins.Mempool = selection
 		case hostplugin.CapabilityAPIBlockfrost:
@@ -1820,11 +1850,21 @@ func WithBlockPipelineValidateEnabled(enabled bool) ConfigOptionFunc {
 
 // WithLedgerPrefetchAheadEnabled prefetches the next block's input UTxOs from a
 // read-only transaction while the current block applies, for blocks under
-// normal validation only. Not consensus-affecting; off by default. See
+// normal validation only. Not consensus-affecting; on by default. See
 // LedgerStateConfig.LedgerPrefetchAheadEnabled.
 func WithLedgerPrefetchAheadEnabled(enabled bool) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.LedgerPrefetchAheadEnabled = enabled
+	}
+}
+
+// WithLedgerValidateAheadEnabled verifies the witness signatures of the
+// validated blocks of a block-apply chunk on worker goroutines while earlier
+// blocks of the chunk validate and write. Not consensus-affecting; on by
+// default. See LedgerStateConfig.LedgerValidateAheadEnabled.
+func WithLedgerValidateAheadEnabled(enabled bool) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.LedgerValidateAheadEnabled = enabled
 	}
 }
 
@@ -1852,9 +1892,9 @@ func WithBlockfetchLowWatermarkEnabled(enabled bool) ConfigOptionFunc {
 }
 
 // WithBlockfrostPort specifies the port for the
-// Blockfrost-compatible REST API server. The server binds
-// to the node's bindAddr on this port. 0 disables the
-// server (default).
+// Blockfrost-compatible REST API server. The built-in
+// provider binds to loopback unless its plugin host is
+// configured explicitly. 0 disables the server.
 func WithBlockfrostPort(port uint) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.Plugins.API.Blockfrost.Config["port"] = port
@@ -1920,6 +1960,26 @@ func WithBarkArchiveMaxConcurrentFetches(limit int) ConfigOptionFunc {
 	}
 }
 
+// WithBarkArchiveLookupsPerSecond sets the sustained rate of Bark
+// ArchiveService block lookups across all callers. Zero selects Bark's
+// default.
+func WithBarkArchiveLookupsPerSecond(rate int) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.BarkArchiveLookupsPerSecond = rate
+		c.barkArchiveLookupsPerSecond = rate
+	}
+}
+
+// WithBarkArchiveCallerLookupsPerSecond sets the sustained rate of Bark
+// ArchiveService block lookups for one caller address. Zero selects Bark's
+// default.
+func WithBarkArchiveCallerLookupsPerSecond(rate int) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.BarkArchiveCallerLookupsPerSecond = rate
+		c.barkArchiveCallerLookupsPerSecond = rate
+	}
+}
+
 // WithBarkOperatorCertificateFingerprints sets the SHA-256 client certificate
 // fingerprints authorized to invoke destructive DatabaseService RPCs.
 func WithBarkOperatorCertificateFingerprints(
@@ -1946,8 +2006,30 @@ func WithBarkLifecycleOperatorCertificateFingerprints(
 	fingerprints []string,
 ) ConfigOptionFunc {
 	return func(c *Config) {
-		c.cfg.BarkLifecycleOperatorCertificateFingerprints = slices.Clone(fingerprints)
-		c.barkLifecycleOperatorCertificateFingerprints = slices.Clone(fingerprints)
+		c.cfg.BarkLifecycleOperatorCertificateFingerprints = slices.Clone(
+			fingerprints,
+		)
+		c.barkLifecycleOperatorCertificateFingerprints = slices.Clone(
+			fingerprints,
+		)
+	}
+}
+
+// WithMithrilConfig sets the Mithril configuration, including the
+// node-managed catch-up settings under mithril.enabled.
+func WithMithrilConfig(cfg internalconfig.MithrilConfig) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.Mithril = cfg
+	}
+}
+
+// WithMithrilCatchUp supplies the Mithril half of node-managed Mithril
+// catch-up. Run calls factory once; a nil MithrilCatchUp from it leaves the
+// node syncing from Ouroboros alone. Without this option the node never
+// contacts an aggregator, whatever mithril.enabled says.
+func WithMithrilCatchUp(factory MithrilCatchUpFactory) ConfigOptionFunc {
+	return func(c *Config) {
+		c.mithrilCatchUp = factory
 	}
 }
 
@@ -2221,6 +2303,11 @@ func (c *Config) MetadataPlugin() string {
 	return c.cfg.Plugins.Storage.Metadata.Provider
 }
 
+// ConsensusPlugin returns the configured consensus plugin name.
+func (c *Config) ConsensusPlugin() string {
+	return c.cfg.Plugins.Consensus.Provider
+}
+
 // BindAddr returns the IP address for relay and public API listeners.
 func (c *Config) BindAddr() string {
 	return c.cfg.BindAddr
@@ -2295,6 +2382,18 @@ func (c *Config) BarkOperatorCertificateFingerprints() []string {
 
 // BarkLifecycleEnabled reports whether Bark's remote node lifecycle service
 // is explicitly enabled.
+// BarkArchiveLookupsPerSecond returns the configured global ArchiveService
+// lookup rate; zero means Bark's default.
+func (c *Config) BarkArchiveLookupsPerSecond() int {
+	return c.barkArchiveLookupsPerSecond
+}
+
+// BarkArchiveCallerLookupsPerSecond returns the configured per-caller
+// ArchiveService lookup rate; zero means Bark's default.
+func (c *Config) BarkArchiveCallerLookupsPerSecond() int {
+	return c.barkArchiveCallerLookupsPerSecond
+}
+
 func (c *Config) BarkLifecycleEnabled() bool {
 	return c.cfg.BarkLifecycleEnabled
 }
@@ -2761,6 +2860,12 @@ func (c *Config) LedgerPrefetchAheadEnabled() bool {
 	return c.cfg.LedgerPrefetchAheadEnabled
 }
 
+// LedgerValidateAheadEnabled returns whether state-independent validation
+// work runs ahead of the serial apply loop.
+func (c *Config) LedgerValidateAheadEnabled() bool {
+	return c.cfg.LedgerValidateAheadEnabled
+}
+
 // LedgerApplyRowBatchingEnabled returns whether blocks that are not validated
 // are applied through the batched metadata write path.
 func (c *Config) LedgerApplyRowBatchingEnabled() bool {
@@ -2802,6 +2907,16 @@ func (c *Config) Logger() *slog.Logger {
 // CardanoNodeConfig returns the loaded Cardano node configuration.
 func (c *Config) CardanoNodeConfig() *cardano.CardanoNodeConfig {
 	return c.cardanoNodeConfig
+}
+
+// genesisSelectionMode reports whether the chain selector starts in Genesis
+// mode: Genesis bootstrap is enabled, the sync starts from origin, and the
+// Cardano node configuration does not name PraosMode.
+func (c *Config) genesisSelectionMode() bool {
+	return c.genesisBootstrap &&
+		!c.intersectTip &&
+		len(c.intersectPoints) == 0 &&
+		!c.cardanoNodeConfig.PraosConsensusMode()
 }
 
 // TopologyConfig returns the loaded topology configuration.

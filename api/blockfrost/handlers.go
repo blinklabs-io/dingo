@@ -125,9 +125,9 @@ func (b *Blockfrost) handleHealth(
 // returns the latest block.
 func (b *Blockfrost) handleLatestBlock(
 	w http.ResponseWriter,
-	_ *http.Request,
+	r *http.Request,
 ) {
-	info, err := b.node.LatestBlock()
+	info, err := b.node.LatestBlock(r.Context())
 	if err != nil {
 		b.logger.Error(
 			"failed to get latest block",
@@ -150,6 +150,7 @@ func (b *Blockfrost) handleBlock(
 	r *http.Request,
 ) {
 	info, err := b.node.BlockByHashOrNumber(
+		r.Context(),
 		r.PathValue("hash_or_number"),
 	)
 	if err != nil {
@@ -198,7 +199,7 @@ func (b *Blockfrost) handleLatestBlockTxs(
 	if !ok {
 		return
 	}
-	hashes, err := b.node.LatestBlockTxHashes()
+	hashes, err := b.node.LatestBlockTxHashes(r.Context())
 	if err != nil {
 		b.logger.Error(
 			"failed to get latest block txs",
@@ -781,8 +782,35 @@ func (b *Blockfrost) handleDRep(
 		return
 	}
 
-	drep, err := b.node.DRep(credential)
+	release, ok := b.drepAdmission.acquire(r.Context(), requestClient(r))
+	if !ok {
+		w.Header().Set("Retry-After", "1")
+		writeError(
+			w,
+			http.StatusTooManyRequests,
+			"Too Many Requests",
+			"DRep detail capacity reached, try again later",
+		)
+		return
+	}
+	defer release()
+	ctx, cancel := context.WithTimeout(r.Context(), drepRatificationWait)
+	defer cancel()
+	drep, err := b.node.DRep(ctx, credential)
 	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			return
+		}
+		if errors.Is(err, context.DeadlineExceeded) {
+			w.Header().Set("Retry-After", "1")
+			writeError(
+				w,
+				http.StatusServiceUnavailable,
+				"Service Unavailable",
+				"DRep detail deadline exceeded, try again later",
+			)
+			return
+		}
 		if errors.Is(err, ErrDRepNotFound) {
 			writeError(
 				w,
@@ -909,27 +937,14 @@ func (b *Blockfrost) handleAddress(
 	r *http.Request,
 ) {
 	address := r.PathValue("address")
-	info, err := b.node.Address(address)
+	release, ok := b.admitAddressSummary(w, r)
+	if !ok {
+		return
+	}
+	defer release()
+	info, err := b.node.Address(r.Context(), address)
 	if err != nil {
-		if errors.Is(err, ErrAddressNotFound) {
-			writeError(
-				w,
-				http.StatusNotFound,
-				"Not Found",
-				"The requested component has not been found.",
-			)
-			return
-		}
-		b.logger.Error(
-			"failed to get address",
-			"address", address,
-			"error", err,
-		)
-		writeNodeQueryError(
-			w,
-			err,
-			"failed to retrieve address",
-		)
+		b.writeAddressQueryError(w, err, address, "address")
 		return
 	}
 
@@ -1127,7 +1142,7 @@ func (b *Blockfrost) handleTransaction(
 		return
 	}
 
-	tx, err := b.node.Transaction(hash)
+	tx, err := b.node.Transaction(r.Context(), hash)
 	if err != nil {
 		if errors.Is(err, ErrTransactionNotFound) {
 			writeError(
@@ -1351,7 +1366,7 @@ func (b *Blockfrost) handleTransactionCBOR(
 		return
 	}
 
-	txCbor, err := b.node.TransactionCBOR(hash)
+	txCbor, err := b.node.TransactionCBOR(r.Context(), hash)
 	if err != nil {
 		if errors.Is(err, ErrTransactionNotFound) {
 			writeError(
@@ -1392,7 +1407,7 @@ func (b *Blockfrost) handleTransactionMetadata(
 		return
 	}
 
-	rows, err := b.node.TransactionMetadata(hash)
+	rows, err := b.node.TransactionMetadata(r.Context(), hash)
 	if err != nil {
 		if errors.Is(err, ErrTransactionNotFound) {
 			writeError(
@@ -1435,7 +1450,7 @@ func (b *Blockfrost) handleTransactionMetadataCBOR(
 		return
 	}
 
-	rows, err := b.node.TransactionMetadataCBOR(hash)
+	rows, err := b.node.TransactionMetadataCBOR(r.Context(), hash)
 	if err != nil {
 		if errors.Is(err, ErrTransactionNotFound) {
 			writeError(
@@ -1483,7 +1498,7 @@ func (b *Blockfrost) handleTransactionUTXOs(
 		return
 	}
 
-	utxos, err := b.node.TransactionUTXOs(hash)
+	utxos, err := b.node.TransactionUTXOs(r.Context(), hash)
 	if err != nil {
 		if errors.Is(err, ErrTransactionNotFound) {
 			writeError(
@@ -1552,7 +1567,7 @@ func (b *Blockfrost) handleTransactionDelegations(
 		return
 	}
 
-	rows, err := b.node.TransactionDelegations(hash)
+	rows, err := b.node.TransactionDelegations(r.Context(), hash)
 	if err != nil {
 		b.writeTransactionEndpointError(
 			w,
@@ -1582,7 +1597,7 @@ func (b *Blockfrost) handleTransactionStakeAddresses(
 		return
 	}
 
-	rows, err := b.node.TransactionStakeAddresses(hash)
+	rows, err := b.node.TransactionStakeAddresses(r.Context(), hash)
 	if err != nil {
 		b.writeTransactionEndpointError(
 			w,
@@ -1612,7 +1627,7 @@ func (b *Blockfrost) handleTransactionWithdrawals(
 		return
 	}
 
-	rows, err := b.node.TransactionWithdrawals(hash)
+	rows, err := b.node.TransactionWithdrawals(r.Context(), hash)
 	if err != nil {
 		b.writeTransactionEndpointError(
 			w,
@@ -1642,7 +1657,7 @@ func (b *Blockfrost) handleTransactionMIRs(
 		return
 	}
 
-	rows, err := b.node.TransactionMIRs(hash)
+	rows, err := b.node.TransactionMIRs(r.Context(), hash)
 	if err != nil {
 		b.writeTransactionEndpointError(
 			w,
@@ -1672,7 +1687,7 @@ func (b *Blockfrost) handleTransactionPoolUpdates(
 		return
 	}
 
-	rows, err := b.node.TransactionPoolUpdates(hash)
+	rows, err := b.node.TransactionPoolUpdates(r.Context(), hash)
 	if err != nil {
 		b.writeTransactionEndpointError(
 			w,
@@ -1714,7 +1729,7 @@ func (b *Blockfrost) handleTransactionPoolRetires(
 		return
 	}
 
-	rows, err := b.node.TransactionPoolRetires(hash)
+	rows, err := b.node.TransactionPoolRetires(r.Context(), hash)
 	if err != nil {
 		b.writeTransactionEndpointError(
 			w,
@@ -1744,7 +1759,7 @@ func (b *Blockfrost) handleTransactionRedeemers(
 		return
 	}
 
-	rows, err := b.node.TransactionRedeemers(hash)
+	rows, err := b.node.TransactionRedeemers(r.Context(), hash)
 	if err != nil {
 		b.writeTransactionEndpointError(
 			w,
@@ -1774,7 +1789,7 @@ func (b *Blockfrost) handleTransactionRequiredSigners(
 		return
 	}
 
-	rows, err := b.node.TransactionRequiredSigners(hash)
+	rows, err := b.node.TransactionRequiredSigners(r.Context(), hash)
 	if err != nil {
 		b.writeTransactionEndpointError(
 			w,
@@ -2021,6 +2036,17 @@ func writeNodeQueryError(
 		)
 		return
 	}
+	// Blockfrost documents 400 for requests past a service limit; 422 is
+	// outside the status set its clients expect from these routes.
+	if errors.Is(err, ErrAddressSummaryTooLarge) {
+		writeError(
+			w,
+			http.StatusBadRequest,
+			"Bad Request",
+			"The address holds too many outputs or assets to summarize.",
+		)
+		return
+	}
 	writeError(
 		w,
 		http.StatusInternalServerError,
@@ -2187,7 +2213,12 @@ func (b *Blockfrost) handleAccount(
 	w http.ResponseWriter,
 	r *http.Request,
 ) {
-	account, err := b.node.Account(r.PathValue("stake_address"))
+	release, ok := b.admitAddressSummary(w, r)
+	if !ok {
+		return
+	}
+	defer release()
+	account, err := b.node.Account(r.Context(), r.PathValue("stake_address"))
 	if err != nil {
 		b.writeAccountError(w, err, "failed to retrieve account")
 		return
@@ -2278,6 +2309,8 @@ func (b *Blockfrost) writeAccountError(
 	internalMessage string,
 ) {
 	switch {
+	case errors.Is(err, context.Canceled):
+		// The client is gone, so there is nobody to answer.
 	case errors.Is(err, ErrInvalidStakeAddress):
 		writeError(
 			w,
