@@ -2287,9 +2287,19 @@ func (k *KoiosClient) GetTxInfos(
 				resp.Body,
 			)
 		}
+		// Script and datum values can nest past encoding/json's limit; see
+		// elideDeepJSON.
+		body, err := elideDeepJSON(resp.Body, koiosMaxDecodeDepth)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"koios /tx_info decode: %w: %s",
+				err,
+				koiosBodyExcerpt(resp.Body),
+			)
+		}
 		var items []KoiosTxInfoItem
-		if err := json.Unmarshal(resp.Body, &items); err != nil {
-			return nil, describeTxInfoDecodeFailure(resp.Body, err)
+		if err := json.Unmarshal(body, &items); err != nil {
+			return nil, describeTxInfoDecodeFailure(body, err)
 		}
 		for _, item := range items {
 			if _, dup := byHash[item.TxHash]; dup {
