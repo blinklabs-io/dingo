@@ -2599,6 +2599,64 @@ func TestChainRollbackPreservesQueuedHeadersOnOverKRejection(t *testing.T) {
 	}
 }
 
+// TestChainBlockByHashFindsRolledBackBlock covers the lookup a rollback
+// consumer needs: a primary-chain rollback deletes the block from the database
+// and keeps it only in the manager's cache, so a database lookup misses it
+// while Chain.BlockByHash still finds it.
+func TestChainBlockByHashFindsRolledBackBlock(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	cm, err := chain.NewManager(context.Background(), db, nil)
+	if err != nil {
+		t.Fatalf("unexpected error creating chain manager: %s", err)
+	}
+	mustSetLedger(t, cm, 3)
+	c := cm.PrimaryChain()
+	for _, testBlock := range testBlocks {
+		if err := c.AddBlock(context.Background(), testBlock, nil); err != nil {
+			t.Fatalf("unexpected error adding block to chain: %s", err)
+		}
+	}
+	rollbackBlock := testBlocks[2]
+	removedHash := testBlocks[len(testBlocks)-1].Hash().Bytes()
+	if err := c.Rollback(context.Background(), ocommon.Point{
+		Slot: rollbackBlock.SlotNumber(),
+		Hash: rollbackBlock.Hash().Bytes(),
+	}); err != nil {
+		t.Fatalf("unexpected error rolling back chain: %s", err)
+	}
+
+	// The rollback removed the block from the database.
+	if _, err := database.BlockByHash(
+		context.Background(),
+		db,
+		removedHash,
+	); !errors.Is(err, models.ErrBlockNotFound) {
+		t.Fatalf("expected the database to miss the removed block, got: %v", err)
+	}
+	// The chain still resolves it, and still resolves a surviving block.
+	for name, hash := range map[string][]byte{
+		"rolled-back": removedHash,
+		"surviving":   rollbackBlock.Hash().Bytes(),
+	} {
+		block, err := c.BlockByHash(context.Background(), hash)
+		if err != nil {
+			t.Fatalf("%s block not found by hash: %s", name, err)
+		}
+		if !bytes.Equal(block.Hash, hash) {
+			t.Fatalf("%s lookup returned the wrong block", name)
+		}
+	}
+	// A hash that was never on the chain is still not found.
+	if _, err := c.BlockByHash(
+		context.Background(),
+		bytes.Repeat([]byte{0xee}, 32),
+	); !errors.Is(err, models.ErrBlockNotFound) {
+		t.Fatalf("expected ErrBlockNotFound for an unknown hash, got: %v", err)
+	}
+}
+
 func TestChainRollbackWithinSecurityParam(t *testing.T) {
 	t.Parallel()
 

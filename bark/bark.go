@@ -86,6 +86,8 @@ type Bark struct {
 	dbGate sync.RWMutex
 	// archiveSlots holds one token per in-flight ArchiveService.FetchBlock.
 	archiveSlots chan struct{}
+	// archiveBudget rations the storage lookups FetchBlock performs.
+	archiveBudget *archiveBudget
 	// beforePreflight is a test hook, nil in production, called at the start
 	// of startServer so a test can hold Start inside its TLS/listen
 	// preflight while another goroutine races it.
@@ -214,6 +216,20 @@ type BarkConfig struct {
 	// reach the listener can cause. Zero selects
 	// DefaultMaxArchiveConcurrentFetches; a negative value is invalid.
 	ArchiveMaxConcurrentFetches int
+	// ArchiveLookupsPerSecond is the sustained rate of block lookups, each
+	// of which can cost cloud storage requests, that ArchiveService serves
+	// across all callers combined. A FetchBlock whose references do not fit
+	// the remaining budget is refused whole, so the bucket is never smaller
+	// than one maximum-size batch. Zero selects
+	// DefaultArchiveLookupsPerSecond; a negative value is invalid.
+	ArchiveLookupsPerSecond int
+	// ArchiveCallerLookupsPerSecond is the same rate for one caller, keyed
+	// by IPv4 address or IPv6 /64, so a single client cannot spend the whole
+	// global budget. Callers behind one proxy share an address and therefore
+	// an allowance. Zero
+	// selects DefaultArchiveCallerLookupsPerSecond; a negative value is
+	// invalid.
+	ArchiveCallerLookupsPerSecond int
 }
 
 // ErrDBUnavailable is returned by Acquire when there is currently no
@@ -334,6 +350,22 @@ func NewBark(cfg BarkConfig) (*Bark, error) {
 	if cfg.ArchiveMaxConcurrentFetches == 0 {
 		cfg.ArchiveMaxConcurrentFetches = DefaultMaxArchiveConcurrentFetches
 	}
+	if cfg.ArchiveLookupsPerSecond < 0 {
+		return nil, errors.New(
+			"bark: ArchiveLookupsPerSecond must not be negative",
+		)
+	}
+	if cfg.ArchiveLookupsPerSecond == 0 {
+		cfg.ArchiveLookupsPerSecond = DefaultArchiveLookupsPerSecond
+	}
+	if cfg.ArchiveCallerLookupsPerSecond < 0 {
+		return nil, errors.New(
+			"bark: ArchiveCallerLookupsPerSecond must not be negative",
+		)
+	}
+	if cfg.ArchiveCallerLookupsPerSecond == 0 {
+		cfg.ArchiveCallerLookupsPerSecond = DefaultArchiveCallerLookupsPerSecond
+	}
 	lifecycleOperatorFingerprints, err := normalizeOperatorCertificateFingerprints(
 		cfg.LifecycleOperatorCertificateFingerprints,
 	)
@@ -353,6 +385,10 @@ func NewBark(cfg BarkConfig) (*Bark, error) {
 		archiveSlots: make(
 			chan struct{},
 			cfg.ArchiveMaxConcurrentFetches,
+		),
+		archiveBudget: newArchiveBudget(
+			cfg.ArchiveLookupsPerSecond,
+			cfg.ArchiveCallerLookupsPerSecond,
 		),
 	}, nil
 }

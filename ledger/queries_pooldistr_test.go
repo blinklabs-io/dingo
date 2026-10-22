@@ -104,8 +104,8 @@ func TestQueryShelleyPoolDistrMatchesLegacyClientResult(t *testing.T) {
 
 // TestQueryShelleyPoolDistr_ViaGetCBOR covers the legacy GetPoolDistr wrapped
 // in the GetCBOR combinator (queryShelleyCbor), a path distinct from the
-// direct query above. The tag-24 content must decode as the same
-// PoolDistrResult a direct reply does, with and without a pool filter.
+// direct query above. The tag-24 content must be the bare pool map the
+// direct reply's PoolDistrResult wraps, with and without a pool filter.
 func TestQueryShelleyPoolDistr_ViaGetCBOR(t *testing.T) {
 	t.Parallel()
 	db := newTestDB(t)
@@ -133,6 +133,7 @@ func TestQueryShelleyPoolDistr_ViaGetCBOR(t *testing.T) {
 		}}
 	}
 	decode := func(q *localstatequery.BlockQuery) localstatequery.PoolDistrResult {
+		t.Helper()
 		result, err := ls.Query(t.Context(), q, QueryPoint{})
 		require.NoError(t, err, "GetCBOR-wrapped GetPoolDistr must not error")
 		arr, ok := result.([]any)
@@ -143,9 +144,16 @@ func TestQueryShelleyPoolDistr_ViaGetCBOR(t *testing.T) {
 		require.EqualValues(t, cbor.CborTagCbor, tag.Number)
 		content, ok := tag.Content.([]byte)
 		require.True(t, ok, "tag content must be raw CBOR bytes, got %T", tag.Content)
+		// The node encodes the legacy PoolDistr as a newtype over the map,
+		// so the content is a bare CBOR map (major type 5). The one-element
+		// array PoolDistrResult decodes belongs to the direct reply's era
+		// result wrapper, which GetCBOR does not carry.
+		require.NotEmpty(t, content)
+		require.Equal(t, byte(5), content[0]>>5,
+			"tag-24 content must be a bare CBOR map, got leading byte %#x", content[0])
 		var decoded localstatequery.PoolDistrResult
-		_, err = cbor.Decode(content, &decoded)
-		require.NoError(t, err, "tag-24 content must decode as a PoolDistrResult")
+		_, err = cbor.Decode(content, &decoded.Results)
+		require.NoError(t, err, "tag-24 content must decode as the pool map")
 		return decoded
 	}
 

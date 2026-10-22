@@ -326,6 +326,22 @@ func requireCommitBarrierFree(t *testing.T, db *Database) {
 		"PauseCommits must acquire the barrier after a terminal path",
 	)
 	resume()
+	db.commitPhase.mu.Lock()
+	commitPhaseReaders := db.commitPhase.readers
+	db.commitPhase.mu.Unlock()
+	require.Zero(t, commitPhaseReaders, "terminal path leaked its commit phase hold")
+	phasePaused := make(chan func(), 1)
+	go func() {
+		resume, _ := db.pauseCommitPhaseContext(context.Background())
+		phasePaused <- resume
+	}()
+	resumePhase := testutil.RequireReceive(
+		t,
+		phasePaused,
+		5*time.Second,
+		"the commit phase must be acquirable after a terminal path",
+	)
+	resumePhase()
 }
 
 // TestFailedBlobSyncDoesNotBlockTheNextWriter is the regression this

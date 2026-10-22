@@ -85,6 +85,7 @@ func registerExtendedCardanoTools(
 	mp mempool.Service,
 	network string,
 	queryTimeout time.Duration,
+	limits *readLimits,
 ) {
 	// 1. Tool: get_protocol_parameters
 	mcp.AddTool(server, &mcp.Tool{
@@ -173,19 +174,6 @@ func registerExtendedCardanoTools(
 			}, nil, nil
 		}
 
-		// Summary listing
-		txs := mp.Transactions()
-		capacityBytes := mp.CapacityBytes()
-		var totalBytes int64
-		for _, tx := range txs {
-			totalBytes += int64(len(tx.Cbor))
-		}
-
-		saturation := 0.0
-		if capacityBytes > 0 {
-			saturation = (float64(totalBytes) / float64(capacityBytes)) * 100
-		}
-
 		limit := input.Limit
 		if limit <= 0 {
 			limit = 10
@@ -193,9 +181,21 @@ func registerExtendedCardanoTools(
 			limit = 50
 		}
 
+		// Enumerate only the displayed prefix: the item bound limits cloning
+		// to the rows shown, while the total count and byte volume come from
+		// counters the pool maintains.
+		txs, txCount := mp.TransactionsBounded(limit, 0)
+		capacityBytes := mp.CapacityBytes()
+		totalBytes := mp.SizeBytes()
+
+		saturation := 0.0
+		if capacityBytes > 0 {
+			saturation = (float64(totalBytes) / float64(capacityBytes)) * 100
+		}
+
 		var sb strings.Builder
 		sb.WriteString("### Dingo In-Memory Mempool Status\n\n")
-		fmt.Fprintf(&sb, "- **Pending Transactions**: %d\n", len(txs))
+		fmt.Fprintf(&sb, "- **Pending Transactions**: %d\n", txCount)
 		fmt.Fprintf(
 			&sb,
 			"- **Buffered Volume**: %d bytes (%s)\n",
@@ -210,20 +210,17 @@ func registerExtendedCardanoTools(
 		)
 		fmt.Fprintf(&sb, "- **Saturation**: %.2f%%\n\n", saturation)
 
-		if len(txs) == 0 {
+		if txCount == 0 {
 			sb.WriteString(
 				"*Mempool is currently empty. No pending in-flight transactions.*\n",
 			)
 		} else {
-			fmt.Fprintf(&sb, "#### Recent Pending Transactions (showing up to %d of %d)\n\n", limit, len(txs))
+			fmt.Fprintf(&sb, "#### Pending Transactions in queue order (showing up to %d of %d)\n\n", limit, txCount)
 			sb.WriteString("| Transaction Hash | Size (bytes) | Type | Age |\n")
 			sb.WriteString("| :--- | :--- | :--- | :--- |\n")
-			count := 0
-			for i := len(txs) - 1; i >= 0 && count < limit; i-- {
-				tx := txs[i]
+			for _, tx := range txs {
 				age := time.Since(tx.LastSeen).Truncate(time.Second)
 				fmt.Fprintf(&sb, "| `%s` | %d | %d | %s |\n", tx.Hash, len(tx.Cbor), tx.Type, age)
-				count++
 			}
 		}
 
@@ -684,7 +681,7 @@ func registerExtendedCardanoTools(
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "calculate_min_utxo",
 		Description: "Calculate the Babbage/Conway minimum lovelace from complete output CBOR, or construct an ADA-only output from an address.",
-	}, func(_ context.Context, _ *mcp.CallToolRequest, input CalculateMinUtxoParams) (*mcp.CallToolResult, any, error) {
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, input CalculateMinUtxoParams) (*mcp.CallToolResult, any, error) {
 		var coinsPerByte uint64
 		if input.CoinsPerByte != nil && *input.CoinsPerByte > 0 {
 			coinsPerByte = *input.CoinsPerByte
@@ -716,7 +713,11 @@ func registerExtendedCardanoTools(
 			coinsPerByte = 4310 // Default Cardano Mainnet/Preview parameter
 		}
 
+		params := &babbage.BabbageProtocolParameters{
+			AdaPerUtxoByte: coinsPerByte,
+		}
 		var output babbage.BabbageTransactionOutput
+		var minLovelace uint64
 		if input.OutputCBORHex != "" {
 			if input.Address != "" || input.HasDatum ||
 				input.InlineDatumHex != "" ||
@@ -727,25 +728,53 @@ func registerExtendedCardanoTools(
 					"output_cbor_hex cannot be combined with output detail fields",
 				)
 			}
-			raw, err := hex.DecodeString(
-				strings.TrimPrefix(
-					strings.TrimSpace(input.OutputCBORHex),
-					"0x",
-				),
+			outputHex := strings.TrimPrefix(
+				strings.TrimSpace(input.OutputCBORHex),
+				"0x",
 			)
+			if err := checkEncodedPayloadSize("output_cbor_hex", outputHex); err != nil {
+				return nil, nil, err
+			}
+			raw, err := hex.DecodeString(outputHex)
 			if err != nil {
 				return nil, nil, fmt.Errorf("invalid output CBOR hex: %w", err)
 			}
-			decoded, n, err := safedecode.Cbor[babbage.BabbageTransactionOutput](
-				raw,
+			if err := checkDecodedPayloadSize("output_cbor_hex", len(raw)); err != nil {
+				return nil, nil, err
+			}
+			// Decoding and sizing the output run in a bounded slot and under
+			// the request deadline, so concurrent callers cannot spend
+			// parsing CPU and memory outside either limit.
+			parseCtx, cancel := context.WithTimeout(ctx, queryTimeout)
+			defer cancel()
+			sized, err := runAdmitted(
+				parseCtx,
+				limits.parseSlots,
+				errParseBusy,
+				"output decode",
+				func(context.Context) (sizedOutput, error) {
+					decoded, n, err := safedecode.Cbor[babbage.BabbageTransactionOutput](
+						raw,
+					)
+					if err != nil {
+						return sizedOutput{}, fmt.Errorf("decode output CBOR: %w", err)
+					}
+					if n != len(raw) {
+						return sizedOutput{}, errors.New(
+							"trailing data after output CBOR",
+						)
+					}
+					minLovelace, err := babbage.MinCoinTxOut(&decoded, params)
+					if err != nil {
+						return sizedOutput{}, err
+					}
+					return sizedOutput{decoded, minLovelace}, nil
+				},
 			)
 			if err != nil {
-				return nil, nil, fmt.Errorf("decode output CBOR: %w", err)
+				return nil, nil, err
 			}
-			if n != len(raw) {
-				return nil, nil, errors.New("trailing data after output CBOR")
-			}
-			output = decoded
+			output, minLovelace = sized.output, sized.minLovelace
 		} else {
 			if input.HasDatum || input.InlineDatumHex != "" || input.RefScriptHex != "" || input.AssetsCount != 0 || input.PoliciesCount != 0 {
 				return nil, nil, errors.New("provide output_cbor_hex for assets, datums or reference scripts; counts alone cannot determine serialized size")
@@ -760,16 +789,15 @@ func registerExtendedCardanoTools(
 				return nil, nil, fmt.Errorf("invalid address: %w", err)
 			}
 		}
-		params := &babbage.BabbageProtocolParameters{
-			AdaPerUtxoByte: coinsPerByte,
-		}
-		minLovelace, err := babbage.MinCoinTxOut(&output, params)
-		if err != nil {
-			return nil, nil, err
-		}
 		if input.OutputCBORHex == "" {
-			// The coin's CBOR width contributes to the output size. Iterate
-			// until the constructed output contains its own minimum deposit.
+			// The output is built here from an address, so its size is small
+			// and fixed. Its coin's CBOR width contributes to the size, so
+			// iterate until the output contains its own minimum deposit.
+			var err error
+			minLovelace, err = babbage.MinCoinTxOut(&output, params)
+			if err != nil {
+				return nil, nil, err
+			}
 			for output.OutputAmount.Amount != minLovelace {
 				output.OutputAmount.Amount = minLovelace
 				minLovelace, err = babbage.MinCoinTxOut(&output, params)
@@ -790,6 +818,13 @@ func registerExtendedCardanoTools(
 			},
 		}, nil, nil
 	})
+}
+
+// sizedOutput is a decoded output with its minimum lovelace, computed together
+// inside one admitted parse.
+type sizedOutput struct {
+	output      babbage.BabbageTransactionOutput
+	minLovelace uint64
 }
 
 // formatProtocolParameters formats protocol parameters into a structured markdown report.

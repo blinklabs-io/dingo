@@ -15,14 +15,18 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
+const dns = require('node:dns');
 const fs = require('node:fs/promises');
+const net = require('node:net');
 const os = require('node:os');
 const path = require('node:path');
 const { execFile } = require('node:child_process');
 const { promisify } = require('node:util');
 const { EventEmitter } = require('node:events');
 const { Readable } = require('node:stream');
-const { binaryPath, download, install, releaseURL } = require('../install');
+const {
+  binaryPath, download, install, publicLookup, releaseURL,
+} = require('../install');
 const exec = promisify(execFile);
 
 test('release targets match the shipped archive names and reject absent targets', () => {
@@ -221,4 +225,39 @@ test('installation bounds archives and extracted binaries before atomic replacem
   await assert.rejects(install(root, { ...options, maxBinaryBytes: 31 }), /binary exceeds 31 bytes/);
   assert.equal(await fs.readFile(target, 'utf8'), 'installed');
   assert.deepEqual(await fs.readdir(path.dirname(target)), ['dingo']);
+});
+
+function resolveWith(t, answers) {
+  t.mock.method(dns, 'lookup', (hostname, options, callback) => {
+    queueMicrotask(() => callback(null, answers.map((address) => ({
+      address, family: net.isIPv4(address) ? 4 : 6,
+    }))));
+  });
+  return new Promise((resolve) => {
+    publicLookup('github.com', { all: true }, (error, addresses) => resolve({ error, addresses }));
+  });
+}
+
+test('release host lookup accepts public answers and rejects non-public ones', async (t) => {
+  for (const address of [
+    '140.82.112.3', '185.199.108.133', '2606:50c0:8000::154',
+    '::ffff:140.82.112.3', '::ffff:8c52:7003', '0:0:0:0:0:ffff:b9c7:6c85',
+  ]) {
+    const { error, addresses } = await resolveWith(t, [address]);
+    assert.ifError(error);
+    assert.deepEqual(addresses.map((answer) => answer.address), [address]);
+  }
+  for (const address of [
+    '0.0.0.0', '10.0.0.1', '127.0.0.1', '169.254.169.254', '100.64.0.1',
+    '192.168.1.1', '172.16.0.1', '::', '::1', 'fc00::', 'fe80::', 'fe80::1%lo',
+    '::ffff:10.1.2.3', '::ffff:0a01:0203', '::FFFF:127.0.0.1', '::ffff:0:0',
+    '::ffff:a9fe:a9fe', '64:ff9b::a01:203', '64:ff9b::8c52:7003', '64:ff9b:1::1',
+  ]) {
+    const { error } = await resolveWith(t, [address]);
+    assert.match(error?.message ?? '', /disallowed address/, address);
+  }
+  for (const answers of [[], ['140.82.112.3', '10.0.0.1'], ['2606:50c0:8000::154', '::1']]) {
+    const { error } = await resolveWith(t, answers);
+    assert.match(error?.message ?? '', /disallowed address/, answers.join(','));
+  }
 });

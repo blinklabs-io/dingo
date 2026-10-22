@@ -130,6 +130,14 @@ func HardForkDijkstra(
 				conwayPParams,
 				&dijkstraGenesis.ConwayGenesis,
 			)
+			models, err := applyAlonzoExtraConfigCostModels(
+				nodeConfig,
+				ret.CostModels,
+			)
+			if err != nil {
+				return nil, err
+			}
+			ret.CostModels = models
 		}
 	}
 	applyDijkstraRefScriptDefaults(&ret)
