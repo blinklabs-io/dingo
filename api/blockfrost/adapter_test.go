@@ -764,7 +764,7 @@ func TestNodeAdapterBlockOutputAndFees(t *testing.T) {
 	}
 	insertAdapterTransaction(t, store, invalidTx)
 
-	output, fees, err := adapter.blockOutputAndFees(blockHash)
+	output, fees, err := adapter.blockOutputAndFees(context.Background(), blockHash)
 	require.NoError(t, err)
 	// output = 1000 + 2000 (valid) + 500 (collateral return, NOT 9999) = 3500
 	assert.Equal(t, "3500", output)
@@ -779,7 +779,7 @@ func TestNodeAdapterBlockOutputAndFeesEmpty(t *testing.T) {
 
 	adapter, _, _ := newDBBackedAdapter(t)
 
-	output, fees, err := adapter.blockOutputAndFees(fill32(0xcd))
+	output, fees, err := adapter.blockOutputAndFees(context.Background(), fill32(0xcd))
 	require.NoError(t, err)
 	assert.Equal(t, "0", output)
 	assert.Equal(t, "0", fees)
@@ -819,7 +819,7 @@ func TestNodeAdapterBlockOutputAndFeesNoOverflow(t *testing.T) {
 		big.NewInt(2),
 	).String()
 
-	output, fees, err := adapter.blockOutputAndFees(blockHash)
+	output, fees, err := adapter.blockOutputAndFees(context.Background(), blockHash)
 	require.NoError(t, err)
 	assert.Equal(t, want, output)
 	assert.Equal(t, want, fees)

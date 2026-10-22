@@ -21,6 +21,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -191,6 +192,56 @@ func TestOTLPTracesURL(t *testing.T) {
 		_, err := otlpTracesURL(endpoint)
 		require.Error(t, err, endpoint)
 	}
+}
+
+func TestOTLPTracesURLErrorOmitsCredentials(t *testing.T) {
+	t.Parallel()
+
+	secrets := []string{"hunter2", "s3cr3tuser", "tok3n"}
+	for _, endpoint := range []string{
+		"http://s3cr3tuser:hunter2@bad host:4318",
+		"http://s3cr3tuser:hunter2@bad host:4318/?api_key=tok3n",
+		"s3cr3tuser:hunter2@collector.example:4318/?token=tok3n",
+		"grpc://s3cr3tuser:hunter2@collector.example:4317/?token=tok3n",
+	} {
+		_, err := otlpTracesURL(endpoint)
+		require.Error(t, err, endpoint)
+		for _, secret := range secrets {
+			require.False(
+				t,
+				strings.Contains(err.Error(), secret),
+				"error %q discloses %q for endpoint %q",
+				err.Error(), secret, endpoint,
+			)
+		}
+	}
+}
+
+func TestOTLPTracesURLErrorOmitsPasswordBeforeDelimiter(t *testing.T) {
+	t.Parallel()
+
+	// A '/', '?' or '#' in the password ends the authority early, so
+	// url.Parse reads the password as a port and quotes it in its error.
+	for _, endpoint := range []string{
+		"http://s3cr3tuser:hunter2/x@collector.example:4318",
+		"http://s3cr3tuser:hunter2?x@collector.example:4318",
+		"http://s3cr3tuser:hunter2#x@collector.example:4318",
+	} {
+		_, err := otlpTracesURL(endpoint)
+		require.Error(t, err, endpoint)
+		require.NotContains(t, err.Error(), "hunter2", endpoint)
+		require.NotContains(t, err.Error(), "s3cr3tuser", endpoint)
+	}
+}
+
+func TestOTLPTracesURLDropsCredentials(t *testing.T) {
+	t.Parallel()
+
+	got, err := otlpTracesURL(
+		"https://s3cr3tuser:hunter2@collector.example:4318/otlp?token=tok3n#tok3n",
+	)
+	require.NoError(t, err)
+	require.Equal(t, "https://collector.example:4318/otlp", got)
 }
 
 func TestTracingEndpointEnablesTracing(t *testing.T) {

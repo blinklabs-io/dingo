@@ -20,9 +20,11 @@ import (
 	"net"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/chainsync"
 	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/event"
+	testfixtures "github.com/blinklabs-io/dingo/internal/test/fixtures"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/mempool"
 	"github.com/blinklabs-io/dingo/peergov"
@@ -289,4 +291,29 @@ func TestRejectsTypedNilDependencies(t *testing.T) {
 		var typedNil *leiosPipelineHandlerStub
 		require.ErrorIs(t, o.SetLeiosPipeline(typedNil), ErrMissingDependency)
 	})
+}
+
+func TestNewOuroborosWiresPeerRelativeHeaderVerification(t *testing.T) {
+	t.Parallel()
+	_, db := newTestLedgerStateWithChain(t, 1)
+	cm, err := chain.NewManager(t.Context(), db, nil)
+	require.NoError(t, err)
+	queried := false
+	conn := wiringTestConnId(t)
+	ls, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
+		Database: db, ChainManager: cm, Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		PeerHeaderLookupFunc: func(got ouroboros.ConnectionId, _ []byte) (ledger.ChainsyncEvent, []byte, bool) {
+			require.Equal(t, conn, got)
+			queried = true
+			return ledger.ChainsyncEvent{}, nil, false
+		},
+	})
+	require.NoError(t, err)
+	o := newOuroboros(OuroborosConfig{LedgerState: ls})
+	t.Cleanup(func() { require.NoError(t, o.Close()) })
+	blocks, err := testfixtures.GenerateConwayChain(2)
+	require.NoError(t, err)
+	_, err = o.chainSelectionVerifyHeaderCrypto(conn, blocks[1].Header())
+	require.True(t, queried, "the composed verifier must query this peer's ancestry")
+	require.True(t, ledger.IsHeaderVerificationWithheld(err))
 }

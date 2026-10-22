@@ -992,9 +992,7 @@ func (n *Node) reinitializeNetworkingCore(ctx context.Context) error {
 	// disabled. This matches Run's own long-lived subscription.
 	n.ouroboros().SubscribeChainsyncResync(n.ctx) //nolint:contextcheck
 
-	genesisSelectionMode := n.config.genesisBootstrap &&
-		!n.config.intersectTip &&
-		len(n.config.intersectPoints) == 0
+	genesisSelectionMode := n.config.genesisSelectionMode()
 	if n.config.topologyConfig != nil {
 		topologyConfig := n.config.topologyConfig
 		usePeerSnapshot := genesisSelectionMode &&
@@ -1934,6 +1932,10 @@ func (n *Node) restoreStorageConfig() lifecycle.RestoreStorageConfig {
 		Blob:          n.config.pluginSelections[plugin.CapabilityStorageBlob].Config,
 		Metadata:      n.config.pluginSelections[plugin.CapabilityStorageMetadata].Config,
 		ActiveDataDir: n.config.dataDir,
+		RecoveryMarkerDirs: []string{
+			n.config.dataDir,
+			n.config.dataDir + preRestoreBackupSuffix,
+		},
 		AlonzoLovelacePerUtxoWord: cardano.AlonzoLovelacePerUtxoWord(
 			n.config.cardanoNodeConfig, "", n.config.network,
 		),

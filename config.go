@@ -244,6 +244,8 @@ type Config struct {
 	barkHost                                                                            string
 	barkClientCAFilePath                                                                string
 	barkArchiveMaxConcurrentFetches                                                     int
+	barkArchiveLookupsPerSecond                                                         int
+	barkArchiveCallerLookupsPerSecond                                                   int
 	barkOperatorCertificateFingerprints                                                 []string
 	barkLifecycleEnabled                                                                bool
 	barkLifecycleOperatorCertificateFingerprints                                        []string
@@ -288,6 +290,7 @@ type Config struct {
 	blockPipelineEnabled                                                                bool
 	blockPipelineValidateEnabled                                                        bool
 	ledgerPrefetchAheadEnabled                                                          bool
+	ledgerValidateAheadEnabled                                                          bool
 	ledgerApplyRowBatchingEnabled                                                       bool
 	blockfetchLowWatermarkEnabled                                                       bool
 	minPoolMargin                                                                       uint
@@ -755,6 +758,10 @@ func NewConfig(opts ...ConfigOptionFunc) Config {
 			// SQLite planner statistics stay current unless an operator
 			// opts out; see internalconfig.Config.PlannerStatsRefreshEnabled.
 			PlannerStatsRefreshEnabled: true,
+			// Mirrors internalconfig's default: block apply overlaps input
+			// reads and signature checks with earlier blocks of its chunk.
+			LedgerPrefetchAheadEnabled: true,
+			LedgerValidateAheadEnabled: true,
 			Plugins: internalconfig.PluginsConfig{
 				Consensus: hostplugin.Selection{
 					Provider: "praos",
@@ -839,6 +846,8 @@ func (c *Config) syncCompatFields() {
 	c.barkHost = c.cfg.BarkHost
 	c.barkClientCAFilePath = c.cfg.BarkClientCAFilePath
 	c.barkArchiveMaxConcurrentFetches = c.cfg.BarkArchiveMaxConcurrentFetches
+	c.barkArchiveLookupsPerSecond = c.cfg.BarkArchiveLookupsPerSecond
+	c.barkArchiveCallerLookupsPerSecond = c.cfg.BarkArchiveCallerLookupsPerSecond
 	c.barkOperatorCertificateFingerprints = slices.Clone(
 		c.cfg.BarkOperatorCertificateFingerprints,
 	)
@@ -961,6 +970,7 @@ func (c *Config) syncCompatFields() {
 	c.blockPipelineEnabled = c.cfg.BlockPipelineEnabled
 	c.blockPipelineValidateEnabled = c.cfg.BlockPipelineValidateEnabled
 	c.ledgerPrefetchAheadEnabled = c.cfg.LedgerPrefetchAheadEnabled
+	c.ledgerValidateAheadEnabled = c.cfg.LedgerValidateAheadEnabled
 	c.ledgerApplyRowBatchingEnabled = c.cfg.LedgerApplyRowBatchingEnabled
 	c.blockfetchLowWatermarkEnabled = c.cfg.BlockfetchLowWatermarkEnabled
 	c.minPoolMargin, c.pledgeLeverageEnabled, c.pledgeLeverage = c.cfg.MinPoolMargin, c.cfg.PledgeLeverageEnabled, c.cfg.PledgeLeverage
@@ -1840,11 +1850,21 @@ func WithBlockPipelineValidateEnabled(enabled bool) ConfigOptionFunc {
 
 // WithLedgerPrefetchAheadEnabled prefetches the next block's input UTxOs from a
 // read-only transaction while the current block applies, for blocks under
-// normal validation only. Not consensus-affecting; off by default. See
+// normal validation only. Not consensus-affecting; on by default. See
 // LedgerStateConfig.LedgerPrefetchAheadEnabled.
 func WithLedgerPrefetchAheadEnabled(enabled bool) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.LedgerPrefetchAheadEnabled = enabled
+	}
+}
+
+// WithLedgerValidateAheadEnabled verifies the witness signatures of the
+// validated blocks of a block-apply chunk on worker goroutines while earlier
+// blocks of the chunk validate and write. Not consensus-affecting; on by
+// default. See LedgerStateConfig.LedgerValidateAheadEnabled.
+func WithLedgerValidateAheadEnabled(enabled bool) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.LedgerValidateAheadEnabled = enabled
 	}
 }
 
@@ -1937,6 +1957,26 @@ func WithBarkArchiveMaxConcurrentFetches(limit int) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.BarkArchiveMaxConcurrentFetches = limit
 		c.barkArchiveMaxConcurrentFetches = limit
+	}
+}
+
+// WithBarkArchiveLookupsPerSecond sets the sustained rate of Bark
+// ArchiveService block lookups across all callers. Zero selects Bark's
+// default.
+func WithBarkArchiveLookupsPerSecond(rate int) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.BarkArchiveLookupsPerSecond = rate
+		c.barkArchiveLookupsPerSecond = rate
+	}
+}
+
+// WithBarkArchiveCallerLookupsPerSecond sets the sustained rate of Bark
+// ArchiveService block lookups for one caller address. Zero selects Bark's
+// default.
+func WithBarkArchiveCallerLookupsPerSecond(rate int) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.BarkArchiveCallerLookupsPerSecond = rate
+		c.barkArchiveCallerLookupsPerSecond = rate
 	}
 }
 
@@ -2342,6 +2382,18 @@ func (c *Config) BarkOperatorCertificateFingerprints() []string {
 
 // BarkLifecycleEnabled reports whether Bark's remote node lifecycle service
 // is explicitly enabled.
+// BarkArchiveLookupsPerSecond returns the configured global ArchiveService
+// lookup rate; zero means Bark's default.
+func (c *Config) BarkArchiveLookupsPerSecond() int {
+	return c.barkArchiveLookupsPerSecond
+}
+
+// BarkArchiveCallerLookupsPerSecond returns the configured per-caller
+// ArchiveService lookup rate; zero means Bark's default.
+func (c *Config) BarkArchiveCallerLookupsPerSecond() int {
+	return c.barkArchiveCallerLookupsPerSecond
+}
+
 func (c *Config) BarkLifecycleEnabled() bool {
 	return c.cfg.BarkLifecycleEnabled
 }
@@ -2808,6 +2860,12 @@ func (c *Config) LedgerPrefetchAheadEnabled() bool {
 	return c.cfg.LedgerPrefetchAheadEnabled
 }
 
+// LedgerValidateAheadEnabled returns whether state-independent validation
+// work runs ahead of the serial apply loop.
+func (c *Config) LedgerValidateAheadEnabled() bool {
+	return c.cfg.LedgerValidateAheadEnabled
+}
+
 // LedgerApplyRowBatchingEnabled returns whether blocks that are not validated
 // are applied through the batched metadata write path.
 func (c *Config) LedgerApplyRowBatchingEnabled() bool {
@@ -2849,6 +2907,16 @@ func (c *Config) Logger() *slog.Logger {
 // CardanoNodeConfig returns the loaded Cardano node configuration.
 func (c *Config) CardanoNodeConfig() *cardano.CardanoNodeConfig {
 	return c.cardanoNodeConfig
+}
+
+// genesisSelectionMode reports whether the chain selector starts in Genesis
+// mode: Genesis bootstrap is enabled, the sync starts from origin, and the
+// Cardano node configuration does not name PraosMode.
+func (c *Config) genesisSelectionMode() bool {
+	return c.genesisBootstrap &&
+		!c.intersectTip &&
+		len(c.intersectPoints) == 0 &&
+		!c.cardanoNodeConfig.PraosConsensusMode()
 }
 
 // TopologyConfig returns the loaded topology configuration.

@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -593,6 +594,7 @@ func TestLeiosNotifyBlockAnnouncementIsConsumedAndDeduplicated(t *testing.T) {
 		}
 		return o.recordLeiosAnnouncement(
 			raw,
+			header.Cbor(),
 			ebHash,
 			ebSize,
 			header,
@@ -2735,6 +2737,7 @@ func TestValidateLeiosEndorserBlockForHeaderRejectsSizeBeforePublication(
 
 	err = o.recordLeiosAnnouncement(
 		headerRaw,
+		header.Cbor(),
 		testEbHash(point),
 		uint64(len(blockRaw)+1),
 		header,
@@ -2761,6 +2764,7 @@ func TestValidateLeiosEndorserBlockForHeaderRejectsSizeBeforePublication(
 	async.leiosPipeline = asyncPipeline
 	require.NoError(t, async.recordLeiosAnnouncement(
 		headerRaw,
+		header.Cbor(),
 		testEbHash(point),
 		uint64(len(blockRaw)+1),
 		header,
@@ -2780,6 +2784,85 @@ func TestValidateLeiosEndorserBlockForHeaderRejectsSizeBeforePublication(
 	require.Empty(t, asyncVotes.ebs)
 	require.Zero(t, asyncPipeline.observed)
 	require.Zero(t, asyncLedger.txValidated)
+}
+
+func TestWrappedLeiosAnnouncementUsesBareHeaderForSemanticValidation(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	txRaw := testDijkstraTx(t, 0)
+	blockRaw, err := cbor.Encode(&lcommon.LeiosEndorserBlock{
+		TransactionReferences: []lcommon.LeiosTransactionReference{{
+			TransactionHash: lcommon.Blake2b256Hash(txRaw),
+			TransactionSize: uint32(len(txRaw)),
+		}},
+	})
+	require.NoError(t, err)
+	point := ocommon.NewPoint(42, lcommon.Blake2b256Hash(blockRaw).Bytes())
+	headerRaw := testDijkstraAnnouncementHeaderRawFor(
+		t,
+		point.Slot,
+		testEbHash(point),
+		uint64(len(blockRaw)),
+	)
+	wrappedRaw, err := cbor.Encode([]any{
+		uint8(gledger.EraIdDijkstra), cbor.RawMessage(headerRaw),
+	})
+	require.NoError(t, err)
+	validatedHeader := make(chan []byte, 1)
+	announcementLedger := &fakeLeiosAnnouncementLedger{
+		currentSlot: 100,
+		slotTime:    time.Now().Add(-time.Minute),
+		staleness:   ledger.LeiosAnnouncementFreshOCIN,
+		txValidationFunc: func(_ context.Context, header gledger.BlockHeader) error {
+			validatedHeader <- slices.Clone(header.Cbor())
+			return nil
+		},
+	}
+	o := newOuroboros(OuroborosConfig{
+		EnableLeios:             true,
+		LeiosAnnouncementLedger: announcementLedger,
+	})
+	defer func() { require.NoError(t, o.Close()) }()
+	o.leiosEBLog.registerConn("peer", nil, nil)
+	require.NoError(t, o.storeLeiosEndorserBlock(
+		point,
+		blockRaw,
+		[]cbor.RawMessage{txRaw},
+		leiosStoreAuthoritative,
+	))
+
+	require.NoError(t, o.acceptLeiosAnnouncement(wrappedRaw, "peer"))
+	// Bare local diffusion and era-wrapped peer announcements are the same
+	// ranking header for duplicate detection, despite having different wire
+	// envelopes.
+	require.NoError(t, o.acceptLeiosAnnouncement(headerRaw, "peer-2"))
+	decodedHeader, err := gdijkstra.NewDijkstraBlockHeaderFromCbor(headerRaw)
+	require.NoError(t, err)
+	key := string(decodedHeader.Hash().Bytes())
+	o.leiosAnnouncementsMu.Lock()
+	announcement, ok := o.leiosAnnouncements[key]
+	o.leiosAnnouncementsMu.Unlock()
+	require.True(t, ok)
+	require.Equal(t, wrappedRaw, announcement.raw)
+	require.Equal(t, headerRaw, announcement.headerRaw)
+	data, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
+	require.True(t, ok)
+	require.Equal(t, headerRaw, data.announcementHeaderRaw)
+	relayEntry, _ := o.leiosEBLog.next("peer")
+	require.NotNil(t, relayEntry)
+	require.Equal(t, wrappedRaw, relayEntry.announcement)
+	require.Equal(
+		t,
+		headerRaw,
+		testutil.RequireReceive(
+			t,
+			validatedHeader,
+			time.Second,
+			"semantic validation of the accepted wrapped announcement",
+		),
+	)
 }
 
 func TestValidateLeiosEndorserBlockForHeaderRetriesStorageFault(t *testing.T) {
@@ -3259,6 +3342,16 @@ func TestStoreLeiosEndorserBlockManifestDoesNotClobberCachedTxs(t *testing.T) {
 	)
 	gotTxs, ok := o.EndorserBlockTxsByHash(point.Hash, point.Slot)
 	require.True(t, ok)
+	require.Equal(t, txsRaw, gotTxs)
+	gotManifest, gotTxs, ok := o.EndorserBlockDataByHash(point.Hash, point.Slot)
+	require.True(t, ok)
+	require.Equal(t, []byte(blockRaw), gotManifest)
+	require.Equal(t, txsRaw, gotTxs)
+	gotManifest[0] ^= 0xff
+	gotTxs[0][0] ^= 0xff
+	gotManifest, gotTxs, ok = o.EndorserBlockDataByHash(point.Hash, point.Slot)
+	require.True(t, ok)
+	require.Equal(t, []byte(blockRaw), gotManifest)
 	require.Equal(t, txsRaw, gotTxs)
 
 	// Every remaining connection's redundant manifest fetch must leave the

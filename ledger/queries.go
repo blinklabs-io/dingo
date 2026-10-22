@@ -1340,7 +1340,7 @@ func (ls *LedgerState) queryShelleyLeaf(ctx context.Context, query any,
 	case *olocalstatequery.ShelleyStakeDelegDepositsQuery:
 		return ls.queryShelleyStakeDelegDeposits(ctx, q.Creds.Items(), at, txn)
 	case *olocalstatequery.ShelleyGetLedgerPeerSnapshotQuery:
-		return ls.queryLedgerPeerSnapshot(ctx, q.PeerKind, txn)
+		return ls.queryLedgerPeerSnapshot(ctx, q, txn)
 	case *olocalstatequery.ShelleyStakePoolsQuery:
 		return ls.queryShelleyStakePools(ctx, at, txn)
 	case *olocalstatequery.ShelleyDRepStateQuery:
@@ -1449,23 +1449,24 @@ func (ls *LedgerState) queryShelleyCbor(ctx context.Context, q *olocalstatequery
 	// TestQueryStakeSnapshotSpecificPool, which fails if this case is
 	// changed to keep the outer slice.
 	//
-	// queryShelleyPoolDistr2 and queryShelleyStakeDistribution instead
-	// destructure their result struct's own fields directly into values
-	// (so that struct's StructAsArray encoding doesn't nest inside an
-	// extra wrapping array on their direct, non-GetCBOR reply, whose
-	// client-side type decodes the bare struct with no slice-of-one
-	// wrapping, unlike GetStakeSnapshots). For those, GetCBOR's content
-	// must be cbor.Encode(values) (the whole slice, reconstructing that
-	// struct's array-of-fields encoding exactly) regardless of field
-	// count -- proven for the 2-field case (queryShelleyPoolDistr2) by
-	// TestQueryShelleyPoolDistr2_ViaGetCBOR and for the 1-field case
-	// (queryShelleyStakeDistribution) by
+	// queryShelleyStakeDistribution (legacy GetStakeDistribution) instead
+	// destructures its result struct's own fields directly into values (so
+	// that struct's StructAsArray encoding doesn't nest inside an extra
+	// wrapping array on its direct, non-GetCBOR reply). For it, GetCBOR's
+	// content must be cbor.Encode(values) (the whole slice), proven by
 	// TestQueryShelleyStakeDistribution_ViaGetCBOR, which fails if this
 	// case is unwrapped like the general one above instead.
 	//
+	// queryShelleyPoolDistr2 and queryShelleyStakeDistribution2 return the
+	// one-element era result wrapper around the PoolDistr's own two fields,
+	// so they follow the general rule: the content is the PoolDistr,
+	// [pool map, total active stake], as the node encodes it. This is pinned
+	// to literal node-layout bytes by TestQueryShelleyPoolDistr2_ViaGetCBOR
+	// and TestQueryShelleyStakeDistribution2_ViaGetCBORBytes.
+	//
 	// Slice length alone cannot tell the two conventions apart when there
-	// is exactly one field/value, so the destructured-fields query types
-	// are named explicitly here rather than guessed from shape.
+	// is exactly one field/value, so the destructured-fields query type
+	// is named explicitly here rather than guessed from shape.
 	values, ok := inner.([]any)
 	if !ok || len(values) == 0 {
 		return nil, fmt.Errorf(
@@ -1475,9 +1476,7 @@ func (ls *LedgerState) queryShelleyCbor(ctx context.Context, q *olocalstatequery
 	}
 	var content any = values
 	switch q.Query.(type) {
-	case *olocalstatequery.ShelleyPoolDistr2Query,
-		*olocalstatequery.ShelleyStakeDistributionQuery,
-		*olocalstatequery.ShelleyStakeDistribution2Query:
+	case *olocalstatequery.ShelleyStakeDistributionQuery:
 		// content stays the whole slice; see comment above.
 	default:
 		if len(values) == 1 {
