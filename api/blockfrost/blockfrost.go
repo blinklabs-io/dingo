@@ -53,9 +53,10 @@ type Blockfrost struct {
 	mutationAuth       mutationAuth
 	mutationAdmission  *requestAdmission
 	drepAdmission      *requestAdmission
-	// addressSummaryAdmission is shared by the base and extended address
-	// summaries and the account summary, each of which scans every live
-	// output of an address or stake credential.
+	// addressSummaryAdmission is shared by every route that scans a whole
+	// address or account history: the base and extended summaries, the
+	// account summary, the address and account totals, and the account asset
+	// balances.
 	addressSummaryAdmission *requestAdmission
 	// listener owns the start/stop protocol, including releasing the
 	// listening socket as part of what Stop waits for -- see
