@@ -282,7 +282,8 @@ func (s *Server) Stop(ctx context.Context) error {
 // registerRoutes registers all Mesh API endpoints.
 func (s *Server) registerRoutes(mux interface {
 	HandleFunc(string, func(http.ResponseWriter, *http.Request))
-}) {
+},
+) {
 	// Network API
 	mux.HandleFunc(
 		"POST /network/list",

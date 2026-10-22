@@ -188,7 +188,8 @@ func (w *progressResponseWriter) Write(p []byte) (int, error) {
 
 func registerRoutes(mux interface {
 	HandleFunc(string, func(http.ResponseWriter, *http.Request))
-}, prefix string, s *Server) {
+}, prefix string, s *Server,
+) {
 	mux.HandleFunc("GET "+prefix+"/matches", s.handleMatches)
 	mux.HandleFunc("GET "+prefix+"/matches/{pattern}", s.handleMatches)
 	mux.HandleFunc(

@@ -546,7 +546,8 @@ func (d Document) compareGoType(
 		if want != "number" {
 			return fmt.Errorf("%s: Go float represents OpenAPI %s", path, want)
 		}
-	default:
+	case reflect.Invalid, reflect.Uintptr, reflect.Complex64, reflect.Complex128,
+		reflect.Chan, reflect.Func, reflect.Pointer, reflect.UnsafePointer:
 		return fmt.Errorf("%s: unsupported Go JSON type %s", path, typ)
 	}
 	return nil

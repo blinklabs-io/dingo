@@ -1156,7 +1156,7 @@ func (d *Database) UtxosByAddressWithOrdering(
 		if err != nil {
 			return nil, err
 		}
-		return d.loadAndFilterOrderedUtxos(utxos, q.AddressPatterns, txn)
+		return d.loadAndFilterOrderedUtxos(ctx, utxos, q.AddressPatterns, txn)
 	}
 
 	// Exact address identity is only available in output CBOR. Scan coarse SQL
@@ -1182,6 +1182,7 @@ func (d *Database) UtxosByAddressWithOrdering(
 		}
 		candidatesProcessed += len(batch)
 		filtered, err := d.loadAndFilterOrderedUtxos(
+			ctx,
 			batch,
 			q.AddressPatterns,
 			txn,
@@ -1596,16 +1597,20 @@ func onlyExactPatterns(patterns []models.UtxoAddressPattern) bool {
 }
 
 func (d *Database) loadAndFilterOrderedUtxos(
+	ctx context.Context,
 	utxos []models.UtxoWithOrdering,
 	patterns []models.UtxoAddressPattern,
 	txn *Txn,
 ) ([]models.UtxoWithOrdering, error) {
 	for i := range utxos {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if err := loadCbor(&utxos[i].Utxo, txn); err != nil {
 			return nil, err
 		}
 	}
-	return filterUtxoViews(context.Background(), utxos, patterns, "UTxO",
+	return filterUtxoViews(ctx, utxos, patterns, "UTxO",
 		func(item *models.UtxoWithOrdering) *models.Utxo { return &item.Utxo })
 }
 
