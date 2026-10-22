@@ -241,3 +241,21 @@ func TestPoolLeiosKeyEpochSnapshotStagedKeyIsAdoptedAtNextEpoch(t *testing.T) {
 	rotated := leiosKeyEpochsInOrder(t, store, rotatedAgain)
 	require.Equal(t, int64(7), rotated[len(rotated)-1])
 }
+
+// A pool reaped before the epoch and registered afresh in it holds the fresh
+// registration's key for the rest of the epoch, not the key of its earlier
+// lifetime: a later re-registration in the same epoch is compared with it.
+func TestPoolLeiosKeyEpochReRegistrationAfterFreshLifetimeInSameEpoch(t *testing.T) {
+	t.Parallel()
+	store := newDepositHeldStore(t)
+	depositHeldEpochs(t, store, 12)
+	pool := depositHeldPoolKey(0xda)
+
+	writeDepositHeldCert(t, store, 2_100, 0, leiosKeyEpochCert(pool, 0x11, 0x21), 500)
+	writeDepositHeldCert(t, store, 3_100, 0, depositHeldRetirement(pool, 5), 0)
+	writeDepositHeldCert(t, store, 5_100, 0, leiosKeyEpochCert(pool, 0x11, 0x21), 500)
+	writeDepositHeldCert(t, store, 5_200, 0, leiosKeyEpochCert(pool, 0x12, 0x22), 0)
+	writeDepositHeldCert(t, store, 5_300, 0, leiosKeyEpochCert(pool, 0x11, 0x21), 0)
+
+	require.Equal(t, []int64{2, 5, 6, 5}, leiosKeyEpochsInOrder(t, store, pool))
+}

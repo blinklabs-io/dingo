@@ -13,7 +13,7 @@
 // limitations under the License.
 
 // Package leioskeyepoch derives the epoch a pool's BLS key was registered in
-// from the pool's earlier registrations and retirements.
+// from the registration and retirement rows already persisted for the pool.
 package leioskeyepoch
 
 import (
@@ -22,10 +22,9 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"sort"
 )
 
-// Querier is the subset of database/sql the replay reads through. The
+// Querier is the subset of database/sql the derivation reads through. The
 // statements use ? placeholders and the dialect-neutral SQL the sqlstore
 // queryer translates.
 type Querier interface {
@@ -67,33 +66,45 @@ func unsigned(value int64) (uint64, error) {
 // the staking injection using nesELL at lines 543 and 561).
 const GenesisEpoch uint64 = 0
 
-// leiosKeyState is the BLS key a pool holds and the epoch it was registered
-// in, which is the ledger's BlsKeyState. A nil epoch is an epoch the database
-// cannot establish: the key came from a snapshot that did not carry it.
-type leiosKeyState struct {
-	public []byte
-	proof  []byte
-	epoch  *uint64
+// keyState is the BLS key a pool holds and the epoch it was registered in,
+// which is the ledger's BlsKeyState. A nil public key is a pool without a key.
+// A keyed state with a nil epoch has an epoch the database cannot establish:
+// ageUnknown marks a key imported without its age, and its absence a slot the
+// epoch table could not place.
+type keyState struct {
+	public     []byte
+	proof      []byte
+	epoch      *uint64
+	ageUnknown bool
 }
 
-func (k *leiosKeyState) sameKey(public, proof []byte) bool {
-	return k != nil &&
+func (k keyState) sameKey(public, proof []byte) bool {
+	return len(k.public) > 0 &&
 		bytes.Equal(k.public, public) &&
 		bytes.Equal(k.proof, proof)
 }
 
-// poolLeiosEvent is one earlier registration or retirement of a pool.
-type poolLeiosEvent struct {
-	position      Position
-	executionSlot uint64
-	retirement    bool
-	// retireEpoch is the epoch a retirement names.
-	retireEpoch uint64
-	// snapshot marks a registration synthesized by a snapshot import, which
-	// has no certificate and carries the key state it was imported with.
+// registrationRow is one persisted pool_registration row.
+type registrationRow struct {
+	position          Position
+	executionSlot     uint64
 	snapshot          bool
-	registrationIndex uint
-	state             *leiosKeyState
+	registrationIndex uint64
+	stored            keyState
+}
+
+// retirementRow is one persisted pool_retirement row.
+type retirementRow struct {
+	position Position
+	epoch    uint64
+}
+
+// after reports whether the retirement follows the registration on the chain.
+// A registration and a retirement at the same position, which only a snapshot
+// import's registration and its tombstone share, resolve to the retirement
+// last, as the deposit bookkeeping does.
+func (r retirementRow) after(registration registrationRow) bool {
+	return !r.position.before(registration.position)
 }
 
 // Registration derives the leios_key_registration_epoch and
@@ -107,22 +118,36 @@ type poolLeiosEvent struct {
 // cEpoch SNothing, so a key registered by a first registration is registered
 // in the epoch of the transaction. POOL's re-registration branch only stages
 // the parameters in psFutureStakePoolParams, replacing any earlier staged
-// ones. POOLREAP (Rules/PoolReap.hs:130) adopts them at the next epoch
-// boundary through mkStakePoolState e (current BLS state)
-// (libs/cardano-ledger-core/src/Cardano/Ledger/State/StakePool.hs:288): a key
-// equal to the active one keeps its registration epoch, and any other key,
-// including one added to a pool that had none, is registered in e, the epoch
-// after the transaction's. BlsKey equality covers the public key and the
-// possession proof. Dijkstra has no NEWEPOCH rule of its own: Era.hs:202 sets
-// EraRule "NEWEPOCH" to Conway's, which on an epoch change runs EPOCH
+// ones, and cancels a pending retirement. POOLREAP (Rules/PoolReap.hs:130)
+// adopts them at the next epoch boundary through mkStakePoolState e (current
+// BLS state) (libs/cardano-ledger-core/src/Cardano/Ledger/State/
+// StakePool.hs:288): a key equal to the active one keeps its registration
+// epoch, and any other key, including one added to a pool that had none, is
+// registered in e, the epoch after the transaction's. BlsKey equality covers
+// the public key and the possession proof. A retirement naming epoch e reaps
+// the pool at the boundary into e, after the staged parameters are adopted.
+// Dijkstra has no NEWEPOCH rule of its own: Era.hs:202 sets EraRule
+// "NEWEPOCH" to Conway's, which on an epoch change runs EPOCH
 // (eras/conway/impl/src/Cardano/Ledger/Conway/Rules/NewEpoch.hs:153-165), and
 // Dijkstra's EPOCH calls POOLREAP (Rules/Epoch.hs:171).
 //
-// The pool's earlier registrations and retirements, strictly before `at`, are
-// replayed through those rules, so the result is a function of the chain up to
-// this certificate and survives rollback and replay. A snapshot-imported
-// registration is the state the snapshot carried, with its epoch, or without
-// one when the snapshot had none; a key kept from it keeps the absence.
+// Every keyed row already stores the epoch its key holds once the row is in
+// effect, so the result only needs the key state active in the transaction's
+// epoch, which is a stored row: the pool's latest registration before that
+// epoch, unless a retirement reaped the pool before it or the pool was
+// registered afresh within it, when it is the epoch's first registration. A
+// constant number of indexed reads finds these rows, whatever the length of
+// the pool's history, and nothing is kept outside the rows, so a rollback that
+// deletes rows leaves nothing to undo. A snapshot-imported registration is the
+// state the snapshot carried, with its epoch, or without one when the snapshot
+// had none; a key kept from it keeps the absence. A snapshot's staged
+// parameters (registration index above zero) carry no epoch and are adopted
+// against the snapshot's current parameters at the boundary after the import.
+//
+// Chain validity bounds what the rows can hold: POOL accepts a retirement only
+// for a registered pool and only naming a later epoch, so the latest retirement
+// after a registration is the one pending, and a pool is not registered afresh
+// twice within one epoch.
 //
 // The returned epoch is nil with ageUnknown set when the registration keeps a
 // key whose epoch is unknown, and nil with ageUnknown clear when an epoch
@@ -137,139 +162,129 @@ func Registration(
 	public []byte,
 	proof []byte,
 ) (epoch *uint64, ageUnknown bool, err error) {
-	events, err := eventsBefore(ctx, db, poolID, at)
-	if err != nil {
-		return nil, false, err
-	}
-	epochs := map[uint64]uint64{}
-	resolve := func(slot uint64) (uint64, bool, error) {
-		if known, ok := epochs[slot]; ok {
-			return known, true, nil
-		}
-		resolved, ok, err := epochAtSlot(ctx, db, slot)
-		if err != nil || !ok {
-			return 0, false, err
-		}
-		epochs[slot] = resolved
-		return resolved, true, nil
-	}
-	current, ok, err := resolve(executionSlot)
+	current, start, ok, err := epochAtSlot(ctx, db, executionSlot)
 	if err != nil || !ok {
 		return nil, false, err
 	}
+	fresh := func() (*uint64, bool, error) {
+		value := current
+		return &value, false, nil
+	}
+	latest, ok, err := latestRegistration(ctx, db, poolID, at, nil)
+	if err != nil {
+		return nil, false, err
+	}
+	if !ok {
+		return fresh()
+	}
+	retirement, ok, err := latestRetirement(ctx, db, poolID, at, nil)
+	if err != nil {
+		return nil, false, err
+	}
+	if ok && retirement.after(latest) && retirement.epoch <= current {
+		return fresh()
+	}
 
-	var (
-		registered bool
-		active     *leiosKeyState
-		staged     *leiosKeyState // nil unless a re-registration is staged
-		hasStaged  bool
-		retiring   *uint64
-		lastEpoch  uint64
-	)
-	// adopt is POOLREAP's mkStakePoolState at the boundary into epoch e.
-	adopt := func(e uint64, next *leiosKeyState) *leiosKeyState {
-		if next == nil {
-			return nil
-		}
-		if active.sameKey(next.public, next.proof) {
-			return active
-		}
-		return &leiosKeyState{
-			public: next.public,
-			proof:  next.proof,
-			epoch:  &e,
-		}
-	}
-	advance := func(to uint64) {
-		if to > lastEpoch && hasStaged {
-			active = adopt(lastEpoch+1, staged)
-			staged, hasStaged = nil, false
-		}
-		if to > lastEpoch {
-			lastEpoch = to
-		}
-		if retiring != nil && *retiring <= to {
-			registered, active = false, nil
-			staged, hasStaged, retiring = nil, false, nil
-		}
-	}
-	for _, event := range events {
-		eventEpoch, ok, err := resolve(event.executionSlot)
-		if err != nil || !ok {
-			return nil, false, err
-		}
-		advance(eventEpoch)
-		switch {
-		case event.retirement:
-			if registered {
-				value := event.retireEpoch
-				retiring = &value
-			}
-		case event.snapshot && (!registered || event.registrationIndex == 0):
-			registered, active = true, event.state
-			staged, hasStaged, retiring = nil, false, nil
-		case !registered:
-			registered, active = true, nil
-			if event.state != nil {
-				value := eventEpoch
-				active = &leiosKeyState{
-					public: event.state.public,
-					proof:  event.state.proof,
-					epoch:  &value,
-				}
-			}
-			retiring = nil
-		default:
-			staged, hasStaged = event.state, true
-			retiring = nil
-		}
-	}
-	advance(current)
-
-	incoming := &leiosKeyState{public: public, proof: proof}
-	var result *leiosKeyState
-	if registered {
-		result = adopt(current+1, incoming)
+	var active keyState
+	var placed bool
+	if latest.executionSlot < start {
+		active, placed, err = effectiveState(ctx, db, poolID, latest)
 	} else {
-		result = &leiosKeyState{public: public, proof: proof, epoch: &current}
+		active, placed, err = activeWithinEpoch(
+			ctx, db, poolID, at, start, current, latest,
+		)
 	}
-	if result.epoch == nil {
-		return nil, true, nil
+	if err != nil || !placed {
+		return nil, false, err
 	}
-	value := *result.epoch
+	if !active.sameKey(public, proof) {
+		value := current + 1
+		return &value, false, nil
+	}
+	if active.epoch == nil {
+		return nil, active.ageUnknown, nil
+	}
+	value := *active.epoch
 	return &value, false, nil
 }
 
-// eventsBefore loads the pool's registrations and retirements strictly before
-// `at`, in chain order. A registration and a retirement at the same position
-// resolve to the retirement last, which is what the deposit bookkeeping does
-// for a snapshot import's registration and its tombstone.
-func eventsBefore(
+// activeWithinEpoch resolves the key state active in epoch current when the
+// pool already registered in it before `at`: the latest registration before
+// the epoch, unless there is none or a retirement reaped the pool before the
+// epoch, when the epoch's first registration registered the pool afresh. A
+// snapshot's current parameters set the active state wherever they occur.
+func activeWithinEpoch(
 	ctx context.Context,
 	db Querier,
 	poolID int64,
 	at Position,
-) ([]poolLeiosEvent, error) {
-	registrations, err := registrationEvents(ctx, db, poolID, at)
+	start uint64,
+	current uint64,
+	latest registrationRow,
+) (keyState, bool, error) {
+	first, ok, err := firstRegistrationFrom(ctx, db, poolID, at, start)
 	if err != nil {
-		return nil, err
+		return keyState{}, false, err
 	}
-	retirements, err := retirementEvents(ctx, db, poolID, at)
+	if !ok {
+		// latest executed in the epoch, so it is the epoch's first
+		// registration when no earlier row qualifies.
+		first = latest
+	}
+	if first.snapshot && first.registrationIndex == 0 {
+		return effectiveState(ctx, db, poolID, first)
+	}
+	prior, ok, err := latestRegistration(ctx, db, poolID, at, &start)
 	if err != nil {
-		return nil, err
+		return keyState{}, false, err
 	}
-	events := append(registrations, retirements...)
-	sort.SliceStable(events, func(i, j int) bool {
-		a, b := events[i], events[j]
-		if a.position != b.position {
-			return a.position.before(b.position)
-		}
-		if a.retirement != b.retirement {
-			return !a.retirement
-		}
-		return a.registrationIndex < b.registrationIndex
-	})
-	return events, nil
+	if !ok {
+		return effectiveState(ctx, db, poolID, first)
+	}
+	retirement, ok, err := latestRetirement(ctx, db, poolID, at, &start)
+	if err != nil {
+		return keyState{}, false, err
+	}
+	if ok && retirement.after(prior) && retirement.epoch <= current {
+		return effectiveState(ctx, db, poolID, first)
+	}
+	return effectiveState(ctx, db, poolID, prior)
+}
+
+// effectiveState is the key state a registration row leaves the pool in once
+// it is in effect. A live row stores it. A snapshot's staged parameters are
+// adopted at the boundary after the import against the snapshot's current
+// parameters at the same slot, and are the active state themselves when the
+// snapshot carried no current parameters.
+func effectiveState(
+	ctx context.Context,
+	db Querier,
+	poolID int64,
+	row registrationRow,
+) (keyState, bool, error) {
+	if !row.snapshot || row.registrationIndex == 0 {
+		return row.stored, true, nil
+	}
+	base, ok, err := snapshotCurrent(ctx, db, poolID, row.position.Slot)
+	if err != nil || !ok {
+		return row.stored, err == nil, err
+	}
+	if base.sameKey(row.stored.public, row.stored.proof) {
+		return base, true, nil
+	}
+	if len(row.stored.public) == 0 {
+		return keyState{}, true, nil
+	}
+	imported, _, ok, err := epochAtSlot(ctx, db, row.executionSlot)
+	if err != nil || !ok {
+		return keyState{}, false, err
+	}
+	adopted := imported + 1
+	return keyState{
+		public: row.stored.public,
+		proof:  row.stored.proof,
+		epoch:  &adopted,
+	}, true, nil
 }
 
 // executionSlotSQL resolves the slot a certificate's transaction executed in:
@@ -277,132 +292,227 @@ func eventsBefore(
 const executionSlotSQL = `COALESCE((
     SELECT lc.slot FROM leios_transaction_context lc
     JOIN certs lc_cert ON lc_cert.transaction_id = lc.transaction_id
-    WHERE lc_cert.id = %s.certificate_id), %s.added_slot)`
+    WHERE lc_cert.id = pr.certificate_id), pr.added_slot)`
 
-func registrationEvents(
-	ctx context.Context,
-	db Querier,
-	poolID int64,
-	at Position,
-) ([]poolLeiosEvent, error) {
-	predicate, args := positionPredicate("pr", at, registrationBlockIndex)
-	rows, err := db.QueryContext(ctx, `
-SELECT pr.added_slot, `+fmt.Sprintf(executionSlotSQL, "pr", "pr")+`,
-       `+registrationBlockIndex+`, COALESCE(c.cert_index, 0),
-       pr.certificate_id, pr.registration_index,
+// registrationBlockIndex is the block index of a registration's transaction,
+// zero for a synthesized row with no certificate.
+const registrationBlockIndex = `COALESCE((
+    SELECT tx.block_index FROM "transaction" tx WHERE tx.id = c.transaction_id
+), 0)`
+
+const registrationColumns = `
+SELECT pr.added_slot, ` + executionSlotSQL + `,
+       ` + registrationBlockIndex + `, COALESCE(c.cert_index, 0),
+       COALESCE(pr.certificate_id, 0), pr.registration_index,
        pr.leios_key_public, pr.leios_key_possession_proof,
        pr.leios_key_registration_epoch, pr.leios_key_registration_age_unknown
 FROM pool_registration pr
 LEFT JOIN certs c ON c.id = pr.certificate_id
 WHERE pr.pool_id = ?
-  AND `+predicate,
-		append([]any{poolID}, args...)...,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("pool leios key epoch: read registrations: %w", err)
-	}
-	defer rows.Close()
-	var events []poolLeiosEvent
-	for rows.Next() {
-		var (
-			addedSlot, exec, blockIdx, certIdx int64
-			certificateID                      int64
-			registrationIndex                  uint
-			public, proof                      []byte
-			epoch                              sql.NullInt64
-			ageUnknown                         bool
-		)
-		if err := rows.Scan(
-			&addedSlot, &exec, &blockIdx, &certIdx, &certificateID,
-			&registrationIndex, &public, &proof, &epoch, &ageUnknown,
-		); err != nil {
-			return nil, err
-		}
-		position, err := newPosition(addedSlot, blockIdx, certIdx)
-		if err != nil {
-			return nil, err
-		}
-		executionSlot, err := unsigned(exec)
-		if err != nil {
-			return nil, err
-		}
-		event := poolLeiosEvent{
-			position:          position,
-			executionSlot:     executionSlot,
-			snapshot:          certificateID == 0,
-			registrationIndex: registrationIndex,
-		}
-		if len(public) > 0 && len(proof) > 0 {
-			event.state = &leiosKeyState{public: public, proof: proof}
-			switch {
-			case event.snapshot && epoch.Valid:
-				value, err := unsigned(epoch.Int64)
-				if err != nil {
-					return nil, err
-				}
-				event.state.epoch = &value
-			}
-		}
-		events = append(events, event)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return events, nil
-}
+  AND pr.added_slot <= ?
+  AND `
 
-func retirementEvents(
+// latestRegistration reads the pool's latest registration strictly before
+// `at`, restricted to those executed before slot executedBefore when it is
+// set. The scan walks the (pool_id, added_slot) index backwards from `at` and
+// stops at the first row that qualifies.
+func latestRegistration(
 	ctx context.Context,
 	db Querier,
 	poolID int64,
 	at Position,
-) ([]poolLeiosEvent, error) {
+	executedBefore *uint64,
+) (registrationRow, bool, error) {
+	predicate, args := positionPredicate("pr", at, registrationBlockIndex)
+	query := registrationColumns + predicate
+	args = append([]any{poolID, at.Slot}, args...)
+	if executedBefore != nil {
+		query += "\n  AND " + executionSlotSQL + " < ?"
+		args = append(args, *executedBefore)
+	}
+	query += `
+ORDER BY pr.added_slot DESC, ` + registrationBlockIndex + ` DESC,
+         COALESCE(c.cert_index, 0) DESC, pr.registration_index DESC,
+         pr.id DESC
+LIMIT 1`
+	return scanRegistration(db.QueryRowContext(ctx, query, args...))
+}
+
+// firstRegistrationFrom reads the pool's first registration executed at or
+// after slot start and strictly before `at`. A transaction executes no later
+// than the slot it was added at, so only rows added from start on qualify.
+func firstRegistrationFrom(
+	ctx context.Context,
+	db Querier,
+	poolID int64,
+	at Position,
+	start uint64,
+) (registrationRow, bool, error) {
+	predicate, args := positionPredicate("pr", at, registrationBlockIndex)
+	query := registrationColumns + predicate + `
+  AND pr.added_slot >= ?
+  AND ` + executionSlotSQL + ` >= ?
+ORDER BY pr.added_slot ASC, ` + registrationBlockIndex + ` ASC,
+         COALESCE(c.cert_index, 0) ASC, pr.registration_index ASC,
+         pr.id ASC
+LIMIT 1`
+	args = append([]any{poolID, at.Slot}, args...)
+	args = append(args, start, start)
+	return scanRegistration(db.QueryRowContext(ctx, query, args...))
+}
+
+func scanRegistration(row *sql.Row) (registrationRow, bool, error) {
+	var (
+		addedSlot, exec, blockIdx, certIdx int64
+		certificateID, registrationIndex   int64
+		public, proof                      []byte
+		epoch                              sql.NullInt64
+		ageUnknown                         bool
+	)
+	err := row.Scan(
+		&addedSlot, &exec, &blockIdx, &certIdx, &certificateID,
+		&registrationIndex, &public, &proof, &epoch, &ageUnknown,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return registrationRow{}, false, nil
+	}
+	if err != nil {
+		return registrationRow{}, false, fmt.Errorf(
+			"pool leios key epoch: read registration: %w", err,
+		)
+	}
+	position, err := newPosition(addedSlot, blockIdx, certIdx)
+	if err != nil {
+		return registrationRow{}, false, err
+	}
+	executionSlot, err := unsigned(exec)
+	if err != nil {
+		return registrationRow{}, false, err
+	}
+	index, err := unsigned(registrationIndex)
+	if err != nil {
+		return registrationRow{}, false, err
+	}
+	stored, err := storedKeyState(public, proof, epoch, ageUnknown)
+	if err != nil {
+		return registrationRow{}, false, err
+	}
+	return registrationRow{
+		position:          position,
+		executionSlot:     executionSlot,
+		snapshot:          certificateID == 0,
+		registrationIndex: index,
+		stored:            stored,
+	}, true, nil
+}
+
+func storedKeyState(
+	public, proof []byte,
+	epoch sql.NullInt64,
+	ageUnknown bool,
+) (keyState, error) {
+	if len(public) == 0 || len(proof) == 0 {
+		return keyState{}, nil
+	}
+	state := keyState{public: public, proof: proof, ageUnknown: ageUnknown}
+	if epoch.Valid {
+		value, err := unsigned(epoch.Int64)
+		if err != nil {
+			return keyState{}, err
+		}
+		state.epoch = &value
+	}
+	return state, nil
+}
+
+// snapshotCurrent reads the current parameters a snapshot import wrote for the
+// pool at addedSlot: its registration without a certificate at index zero.
+func snapshotCurrent(
+	ctx context.Context,
+	db Querier,
+	poolID int64,
+	addedSlot uint64,
+) (keyState, bool, error) {
+	var (
+		public, proof []byte
+		epoch         sql.NullInt64
+		ageUnknown    bool
+	)
+	err := db.QueryRowContext(ctx, `
+SELECT leios_key_public, leios_key_possession_proof,
+       leios_key_registration_epoch, leios_key_registration_age_unknown
+FROM pool_registration
+WHERE pool_id = ?
+  AND added_slot = ?
+  AND COALESCE(certificate_id, 0) = 0
+  AND registration_index = 0
+LIMIT 1`,
+		poolID, addedSlot,
+	).Scan(&public, &proof, &epoch, &ageUnknown)
+	if errors.Is(err, sql.ErrNoRows) {
+		return keyState{}, false, nil
+	}
+	if err != nil {
+		return keyState{}, false, fmt.Errorf(
+			"pool leios key epoch: read snapshot registration: %w", err,
+		)
+	}
+	state, err := storedKeyState(public, proof, epoch, ageUnknown)
+	return state, err == nil, err
+}
+
+// latestRetirement reads the pool's latest retirement strictly before `at`,
+// restricted to those executed before slot executedBefore when it is set.
+func latestRetirement(
+	ctx context.Context,
+	db Querier,
+	poolID int64,
+	at Position,
+	executedBefore *uint64,
+) (retirementRow, bool, error) {
 	predicate, args := positionPredicate("rt", at, "COALESCE(t.block_index, 0)")
-	rows, err := db.QueryContext(ctx, `
-SELECT rt.epoch, rt.added_slot, `+fmt.Sprintf(executionSlotSQL, "rt", "rt")+`,
-       COALESCE(t.block_index, 0), COALESCE(c.cert_index, 0)
+	query := `
+SELECT rt.epoch, rt.added_slot, COALESCE(t.block_index, 0),
+       COALESCE(c.cert_index, 0)
 FROM pool_retirement rt
 LEFT JOIN certs c ON c.id = rt.certificate_id
 LEFT JOIN "transaction" t ON t.id = c.transaction_id
 WHERE rt.pool_id = ?
-  AND `+predicate,
-		append([]any{poolID}, args...)...,
+  AND rt.added_slot <= ?
+  AND ` + predicate
+	args = append([]any{poolID, at.Slot}, args...)
+	if executedBefore != nil {
+		query += `
+  AND COALESCE((
+      SELECT lc.slot FROM leios_transaction_context lc
+      WHERE lc.transaction_id = c.transaction_id), rt.added_slot) < ?`
+		args = append(args, *executedBefore)
+	}
+	query += `
+ORDER BY rt.added_slot DESC, COALESCE(t.block_index, 0) DESC,
+         COALESCE(c.cert_index, 0) DESC, rt.id DESC
+LIMIT 1`
+	var epoch, addedSlot, blockIdx, certIdx int64
+	err := db.QueryRowContext(ctx, query, args...).Scan(
+		&epoch, &addedSlot, &blockIdx, &certIdx,
 	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return retirementRow{}, false, nil
+	}
 	if err != nil {
-		return nil, fmt.Errorf("pool leios key epoch: read retirements: %w", err)
+		return retirementRow{}, false, fmt.Errorf(
+			"pool leios key epoch: read retirement: %w", err,
+		)
 	}
-	defer rows.Close()
-	var events []poolLeiosEvent
-	for rows.Next() {
-		var epoch, addedSlot, exec, blockIdx, certIdx int64
-		if err := rows.Scan(
-			&epoch, &addedSlot, &exec, &blockIdx, &certIdx,
-		); err != nil {
-			return nil, err
-		}
-		position, err := newPosition(addedSlot, blockIdx, certIdx)
-		if err != nil {
-			return nil, err
-		}
-		executionSlot, err := unsigned(exec)
-		if err != nil {
-			return nil, err
-		}
-		retireEpoch, err := unsigned(epoch)
-		if err != nil {
-			return nil, err
-		}
-		events = append(events, poolLeiosEvent{
-			position:      position,
-			executionSlot: executionSlot,
-			retirement:    true,
-			retireEpoch:   retireEpoch,
-		})
+	position, err := newPosition(addedSlot, blockIdx, certIdx)
+	if err != nil {
+		return retirementRow{}, false, err
 	}
-	if err := rows.Err(); err != nil {
-		return nil, err
+	retireEpoch, err := unsigned(epoch)
+	if err != nil {
+		return retirementRow{}, false, err
 	}
-	return events, nil
+	return retirementRow{position: position, epoch: retireEpoch}, true, nil
 }
 
 func newPosition(slot, blockIndex, certIndex int64) (Position, error) {
@@ -421,12 +531,6 @@ func newPosition(slot, blockIndex, certIndex int64) (Position, error) {
 	}
 	return position, nil
 }
-
-// registrationBlockIndex is the block index of a registration's transaction,
-// zero for a synthesized row with no certificate.
-const registrationBlockIndex = `COALESCE((
-    SELECT tx.block_index FROM "transaction" tx WHERE tx.id = c.transaction_id
-), 0)`
 
 // positionPredicate matches the pool certificate rows strictly before a
 // position, and returns the bind arguments for it. The joined block and
@@ -452,43 +556,45 @@ func positionPredicate(
   )`, args
 }
 
-// epochAtSlot resolves the persisted epoch containing slot. It reports
-// resolved=false rather than an error when the epoch table cannot place the
-// slot, because a pool registration write must not fail on missing epoch
-// bookkeeping.
+// epochAtSlot resolves the persisted epoch containing slot and the slot it
+// starts at. It reports resolved=false rather than an error when the epoch
+// table cannot place the slot, because a pool registration write must not fail
+// on missing epoch bookkeeping.
 func epochAtSlot(
 	ctx context.Context,
 	db Querier,
 	slot uint64,
-) (uint64, bool, error) {
-	var epoch, startSlot, length sql.NullInt64
-	err := db.QueryRowContext(ctx, `
+) (epoch uint64, start uint64, resolved bool, err error) {
+	var epochID, startSlot, length sql.NullInt64
+	err = db.QueryRowContext(ctx, `
 SELECT epoch_id, start_slot, length_in_slots
 FROM epoch
 WHERE start_slot <= ?
 ORDER BY start_slot DESC
 LIMIT 1`,
 		slot,
-	).Scan(&epoch, &startSlot, &length)
+	).Scan(&epochID, &startSlot, &length)
 	if errors.Is(err, sql.ErrNoRows) {
-		return 0, false, nil
+		return 0, 0, false, nil
 	}
 	if err != nil {
-		return 0, false, fmt.Errorf("epoch at slot %d: %w", slot, err)
+		return 0, 0, false, fmt.Errorf("epoch at slot %d: %w", slot, err)
 	}
-	if !epoch.Valid || !startSlot.Valid || !length.Valid {
-		return 0, false, nil
+	if !epochID.Valid || !startSlot.Valid || !length.Valid {
+		return 0, 0, false, nil
 	}
 	end, err := unsigned(startSlot.Int64 + length.Int64)
 	if err != nil {
-		return 0, false, fmt.Errorf("epoch at slot %d: %w", slot, err)
+		return 0, 0, false, fmt.Errorf("epoch at slot %d: %w", slot, err)
 	}
 	if slot >= end {
-		return 0, false, nil
+		return 0, 0, false, nil
 	}
-	resolved, err := unsigned(epoch.Int64)
-	if err != nil {
-		return 0, false, err
+	if epoch, err = unsigned(epochID.Int64); err != nil {
+		return 0, 0, false, err
 	}
-	return resolved, true, nil
+	if start, err = unsigned(startSlot.Int64); err != nil {
+		return 0, 0, false, err
+	}
+	return epoch, start, true, nil
 }
