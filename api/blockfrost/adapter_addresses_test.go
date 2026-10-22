@@ -738,3 +738,57 @@ func TestNodeAdapterAddressPaymentCredUtxoBudget(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "6000000", info.Amount[0].Quantity)
 }
+
+func TestNodeAdapterAddressTotalReadBudget(t *testing.T) {
+	t.Parallel()
+	adapter, raw, db := newDBBackedAdapter(t)
+	addr, _, _ := testKeyAddress(t, 0xd1, 0xd2)
+	policy := bytes.Repeat([]byte{0xd3}, lcommon.AddressHashSize)
+	insertAdapterTransaction(
+		t, raw, &models.Transaction{Hash: fill32(0x7e), Slot: 9, Valid: true},
+	)
+	// Four outputs, two of them spent, each holding its own asset.
+	for i := range 4 {
+		var spentBy []byte
+		if i < 2 {
+			spentBy = fill32(0x7e)
+		}
+		seedAddressOutput(
+			t, raw, db, addr, fill32(byte(0x60+i)), uint64(10+i), 2_000_000,
+			[]models.Asset{{
+				PolicyId: policy, Name: []byte{byte(i)}, Amount: 1,
+			}},
+			spentBy,
+		)
+	}
+	ctx := context.Background()
+
+	adapter.summaryLimits = addressSummaryLimits{batch: 2, maxTotalOutputs: 3}
+	_, err := adapter.AddressTotal(ctx, addr.String())
+	require.ErrorIs(t, err, ErrAddressSummaryTooLarge)
+
+	adapter.summaryLimits = addressSummaryLimits{batch: 2, maxTotalOutputs: 4}
+	got, err := adapter.AddressTotal(ctx, addr.String())
+	require.NoError(t, err)
+	require.Equal(t, "8000000", got.ReceivedSum[0].Quantity)
+	require.Equal(t, "4000000", got.SentSum[0].Quantity)
+
+	adapter.summaryLimits = addressSummaryLimits{maxAssets: 3}
+	_, err = adapter.AddressTotal(ctx, addr.String())
+	require.ErrorIs(t, err, ErrAddressSummaryTooLarge)
+	adapter.summaryLimits = addressSummaryLimits{maxAssets: 4}
+	_, err = adapter.AddressTotal(ctx, addr.String())
+	require.NoError(t, err)
+}
+
+func TestNodeAdapterAddressTotalStopsOnCancelledContext(t *testing.T) {
+	t.Parallel()
+	adapter, raw, db := newDBBackedAdapter(t)
+	addr, _, _ := testKeyAddress(t, 0xd4, 0xd5)
+	seedSummaryOutputs(t, adapter, raw, db, addr, 2, nil)
+
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := adapter.AddressTotal(cancelled, addr.String())
+	require.ErrorIs(t, err, context.Canceled)
+}

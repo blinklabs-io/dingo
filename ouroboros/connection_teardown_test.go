@@ -198,6 +198,8 @@ func TestConnectionTeardownReleasesChainsyncAndMempoolWaiters(t *testing.T) {
 				doneRead:     chainDoneRead,
 			},
 			chainState,
+			nil,
+			false,
 		)
 		close(chainWaiterDone)
 	}()

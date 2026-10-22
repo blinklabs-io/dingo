@@ -301,6 +301,7 @@ func withOneShotDownloadClient(
 	bcfg.httpClient = httpClient
 	bcfg.downloadBudget = budget
 	bcfg.extractionBudget = extraction
+	bcfg.decoderBudget = newDecoderMemoryBudget()
 	return bcfg, transport.CloseIdleConnections, nil
 }
 
@@ -463,6 +464,7 @@ func bootstrapV2(
 	if err != nil {
 		return nil, err
 	}
+	cfg.decoderBudget = newDecoderMemoryBudget()
 
 	// The ancillary download and the immutable archive
 	// pool report progress concurrently. Downstream OnProgress
@@ -1055,6 +1057,7 @@ func downloadDigestsArchive(
 			"artifact", "immutable_digest_list",
 		),
 		WithReplaceDestination(),
+		withDecoderBudget(cfg.decoderBudget),
 		withArchiveLimits(withBootstrapExtractionBudget(
 			digestListLimits(), cfg.extractionBudget,
 		)),
@@ -1511,7 +1514,10 @@ func fetchImmutableArchive(
 	// Merge: every immutable archive extracts into one shared directory,
 	// concurrently, so this destination accumulates across calls and must
 	// not be staged-and-swapped.
-	extractOpts := []ExtractOption{WithMergeIntoDestination()}
+	extractOpts := []ExtractOption{
+		WithMergeIntoDestination(),
+		withDecoderBudget(cfg.decoderBudget),
+	}
 	if cfg.immutableDigests != nil {
 		extractOpts = append(
 			extractOpts,
@@ -1806,6 +1812,7 @@ func downloadAncillaryV2(
 	if cfg.VerifyCertificateChain {
 		manifest, manifestData, preflightErr := readVerifiedAncillaryManifest(
 			ctx, archiveFile, cfg.AncillaryVerificationKey,
+			cfg.decoderBudget,
 		)
 		if preflightErr != nil {
 			return nil, nil, ancillaryPath, fmt.Errorf(
@@ -1834,6 +1841,7 @@ func downloadAncillaryV2(
 			"artifact", "ancillary_ledger_state",
 		),
 		WithReplaceDestination(),
+		withDecoderBudget(cfg.decoderBudget),
 		withArchiveLimits(limits),
 	); extractErr != nil {
 		return nil, nil, ancillaryPath, fmt.Errorf(
