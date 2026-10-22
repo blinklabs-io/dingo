@@ -599,8 +599,9 @@ var ErrNilValidator = errors.New("mempool: validator is nil")
 var ErrMempoolStopped = errors.New("mempool: stopped")
 
 // ErrSubmissionBusy reports that every transaction-submission validation
-// slot is in use. Admission is fail-fast so callers cannot occupy request or
-// protocol goroutines while waiting for a metadata read transaction.
+// slot is in use. AdmitSubmission returns it instead of waiting, so an API
+// request does not hold a handler goroutine while it waits for a metadata
+// read transaction.
 var ErrSubmissionBusy = errors.New("transaction submission capacity exhausted")
 
 type submissionAdmissionKey struct{}
@@ -1861,14 +1862,6 @@ func (m *Mempool) AddTransaction(
 	txType uint,
 	txBytes []byte,
 ) (err error) {
-	if admission, _ := ctx.Value(submissionAdmissionKey{}).(submissionAdmission); admission.mempool != m {
-		var release func()
-		ctx, release, err = m.AdmitSubmission(ctx)
-		if err != nil {
-			return err
-		}
-		defer release()
-	}
 	_, span := tracing.Start(ctx, "mempool.add_transaction")
 	defer func() {
 		result := "accepted"
@@ -1892,6 +1885,13 @@ func (m *Mempool) AddTransaction(
 		// rebuildOverlay). It is an infrastructure fault, not a rejected
 		// transaction, and an API surface has to be able to tell them apart.
 		return fmt.Errorf("%w in AddTransaction", ErrNilValidator)
+	}
+	if admission, _ := ctx.Value(submissionAdmissionKey{}).(submissionAdmission); admission.mempool != m {
+		release, err := m.waitSubmissionSlot(ctx)
+		if err != nil {
+			return err
+		}
+		defer release()
 	}
 	// Decode transaction outside the lock (CPU-bound, no shared state)
 	tmpTx, err := safedecode.Transaction(txType, txBytes)
@@ -1957,9 +1957,10 @@ func (m *Mempool) AddTransaction(
 	return nil
 }
 
-// AdmitSubmission reserves a validation slot and marks the returned context
-// so AddTransaction can reuse the reservation. API handlers call this before
-// decoding request data; direct callers are admitted inside AddTransaction.
+// AdmitSubmission reserves a validation slot without waiting and marks the
+// returned context so AddTransaction can reuse the reservation. API handlers
+// call this before decoding request data so a busy node can answer the client
+// at once; it returns ErrSubmissionBusy when every slot is held.
 func (m *Mempool) AdmitSubmission(
 	ctx context.Context,
 ) (context.Context, func(), error) {
@@ -1968,17 +1969,39 @@ func (m *Mempool) AdmitSubmission(
 	}
 	select {
 	case m.submissionSlots <- struct{}{}:
-		var once sync.Once
-		release := func() {
-			once.Do(func() { <-m.submissionSlots })
-		}
 		return context.WithValue(
 			ctx,
 			submissionAdmissionKey{},
 			submissionAdmission{mempool: m},
-		), release, nil
+		), m.submissionSlotRelease(), nil
 	default:
 		return ctx, nil, ErrSubmissionBusy
+	}
+}
+
+// waitSubmissionSlot reserves a validation slot for a caller that did not
+// call AdmitSubmission. Node-to-node and node-to-client submission and
+// rolled-back transaction restoration have no client to answer with a busy
+// status, so they wait for a slot rather than drop the transaction. The wait
+// ends when ctx is done or the mempool stops.
+func (m *Mempool) waitSubmissionSlot(ctx context.Context) (func(), error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	select {
+	case m.submissionSlots <- struct{}{}:
+		return m.submissionSlotRelease(), nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-m.done:
+		return nil, ErrMempoolStopped
+	}
+}
+
+func (m *Mempool) submissionSlotRelease() func() {
+	var once sync.Once
+	return func() {
+		once.Do(func() { <-m.submissionSlots })
 	}
 }
 

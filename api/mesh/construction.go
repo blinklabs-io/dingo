@@ -923,6 +923,16 @@ func (s *Server) handleConstructionSubmit(
 	w http.ResponseWriter,
 	r *http.Request,
 ) {
+	var req ConstructionSubmitRequest
+	if meshErr := s.decodeAndValidate(
+		w, r, &req,
+	); meshErr != nil {
+		writeError(w, meshErr)
+		return
+	}
+	// Reserve after the bounded body read, so a slow client cannot hold a
+	// validation slot while it trickles the request in, and before any
+	// transaction decoding.
 	ctx := r.Context()
 	if admitter, ok := s.config.Mempool.(mempool.SubmissionAdmitter); ok {
 		var release func()
@@ -933,13 +943,6 @@ func (s *Server) handleConstructionSubmit(
 			return
 		}
 		defer release()
-	}
-	var req ConstructionSubmitRequest
-	if meshErr := s.decodeAndValidate(
-		w, r, &req,
-	); meshErr != nil {
-		writeError(w, meshErr)
-		return
 	}
 
 	txBytes, err := hex.DecodeString(
