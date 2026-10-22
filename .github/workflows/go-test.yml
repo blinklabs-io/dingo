@@ -79,6 +79,8 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      - name: runner-probe-start
+        run: python3 .github/scripts/runner-probe.py start
       # The documentation-only classifier comes from the base revision, so a
       # pull request cannot edit it to skip its own CI. It is checked out into
       # a dot-directory, which the Go tooling ignores, and removed as soon as
@@ -190,6 +192,9 @@ jobs:
         # commit.
         if: steps.detect.outputs.run-ci == 'true'
         run: go test -tags dingo_extra_plugins -ldflags="-s -w" -timeout 30m ./...
+      - name: runner-probe-end
+        if: always()
+        run: python3 .github/scripts/runner-probe.py end
 
   # Tier 1, beside check. Deliberately not a dependency of anything: a new
   # advisory landing upstream must not block every merge in the repository
@@ -270,6 +275,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
         with:
           persist-credentials: false
+      - name: runner-probe-start
+        run: python3 .github/scripts/runner-probe.py start
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
         with:
           go-version: 1.26.10
@@ -290,6 +297,9 @@ jobs:
         # -timeout stays at 60m so a hang is still named by the per-package
         # panic before the job backstop above fires.
         run: go test -v -tags dingo_extra_plugins -ldflags="-s -w" -race -timeout 60m ./...
+      - name: runner-probe-end
+        if: always()
+        run: python3 .github/scripts/runner-probe.py end
 
   # Tier 2. Linux with Postgres, MySQL and MinIO (fake s3) services, running
   # only what the services add: the dingo_db_integration suites, the live
@@ -340,6 +350,11 @@ jobs:
       AWS_REGION: us-east-1
       DINGO_TEST_S3_BUCKET: dingo-test
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
+        with:
+          persist-credentials: false
+      - name: runner-probe-start
+        run: python3 .github/scripts/runner-probe.py start
       - name: start-test-databases
         run: |
           set -euo pipefail
@@ -397,9 +412,6 @@ jobs:
           } >> "$GITHUB_ENV"
       - name: setup-s3-bucket
         run: aws --endpoint-url "$AWS_ENDPOINT" s3api create-bucket --bucket "$DINGO_TEST_S3_BUCKET"
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
-        with:
-          persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
         with:
           go-version: 1.26.10
@@ -480,6 +492,9 @@ jobs:
           fi
           printf '%s\n' "${pkgs[@]}"
           go test -v -tags dingo_extra_plugins -ldflags="-s -w" -timeout 60m "${pkgs[@]}"
+      - name: runner-probe-end
+        if: always()
+        run: python3 .github/scripts/runner-probe.py end
       - name: stop-test-databases
         if: always()
         run: |
@@ -514,6 +529,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
         with:
           persist-credentials: false
+      - name: runner-probe-start
+        run: python3 .github/scripts/runner-probe.py start
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
         with:
           go-version: 1.26.10
@@ -532,6 +549,9 @@ jobs:
             ${{ runner.os }}-go-1.26.10-
       - name: go-test
         run: go test -v -ldflags="-s -w" -timeout 30m ./...
+      - name: runner-probe-end
+        if: always()
+        run: python3 .github/scripts/runner-probe.py end
 
   # Tier 2. Every release binary target and the Docker image, on one runner.
   # Every binary builds CGO_ENABLED=0 (see the $(BINARIES) rule in the
