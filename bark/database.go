@@ -1600,6 +1600,13 @@ func (h *databaseServiceHandler) StreamOperationProgress(
 	if err != nil {
 		return err
 	}
+	setWriteDeadline, ok := responseWriteDeadlineSetterFromContext(ctx)
+	if !ok {
+		return connect.NewError(
+			connect.CodeInternal,
+			errors.New("operation progress stream write deadline is unavailable"),
+		)
+	}
 	release, err := h.admitProgressStream(ctx)
 	if err != nil {
 		return err
@@ -1609,7 +1616,23 @@ func (h *databaseServiceHandler) StreamOperationProgress(
 	if lifetime <= 0 {
 		lifetime = streamProgressMaxLifetime
 	}
-	lifetimeTimer := time.NewTimer(lifetime)
+	deadline := time.Now().Add(lifetime)
+	if err := setWriteDeadline(deadline); err != nil {
+		return connect.NewError(
+			connect.CodeInternal,
+			fmt.Errorf("set operation progress stream write deadline: %w", err),
+		)
+	}
+	defer func() {
+		if err := setWriteDeadline(time.Time{}); err != nil {
+			h.bark.config.Logger.Warn(
+				"failed to clear bark operation progress stream write deadline",
+				"component", "bark",
+				"error", err,
+			)
+		}
+	}()
+	lifetimeTimer := time.NewTimer(time.Until(deadline))
 	defer lifetimeTimer.Stop()
 	ticker := time.NewTicker(streamProgressPollInterval)
 	defer ticker.Stop()

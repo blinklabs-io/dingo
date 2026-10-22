@@ -20,6 +20,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -30,6 +31,46 @@ import (
 )
 
 const progressStreamTestFingerprintHeader = "X-Test-Client-Fingerprint"
+
+type progressStreamDeadlineRecorder struct {
+	mu        sync.Mutex
+	deadlines []time.Time
+}
+
+type progressStreamDeadlineResponseWriter struct {
+	header   http.Header
+	deadline time.Time
+}
+
+func (w *progressStreamDeadlineResponseWriter) Header() http.Header {
+	return w.header
+}
+
+func (*progressStreamDeadlineResponseWriter) Write(body []byte) (int, error) {
+	return len(body), nil
+}
+
+func (*progressStreamDeadlineResponseWriter) WriteHeader(int) {}
+
+func (w *progressStreamDeadlineResponseWriter) SetWriteDeadline(
+	deadline time.Time,
+) error {
+	w.deadline = deadline
+	return nil
+}
+
+func (r *progressStreamDeadlineRecorder) set(deadline time.Time) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.deadlines = append(r.deadlines, deadline)
+	return nil
+}
+
+func (r *progressStreamDeadlineRecorder) snapshot() []time.Time {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]time.Time(nil), r.deadlines...)
+}
 
 func newProgressStreamTestHandler(
 	lifetime time.Duration,
@@ -57,9 +98,11 @@ func newProgressStreamTestClient(
 ) (
 	databaseconnect.DatabaseServiceClient,
 	*databaseServiceHandler,
+	*progressStreamDeadlineRecorder,
 ) {
 	t.Helper()
 	h := newProgressStreamTestHandler(lifetime)
+	deadlines := &progressStreamDeadlineRecorder{}
 	path, handler := databaseconnect.NewDatabaseServiceHandler(h)
 	mux := http.NewServeMux()
 	mux.Handle(
@@ -70,6 +113,7 @@ func newProgressStreamTestClient(
 				Verified:    true,
 				Fingerprint: fingerprint,
 			})
+			ctx = withResponseWriteDeadlineSetter(ctx, deadlines.set)
 			handler.ServeHTTP(w, r.WithContext(ctx))
 		}),
 	)
@@ -78,7 +122,7 @@ func newProgressStreamTestClient(
 	return databaseconnect.NewDatabaseServiceClient(
 		server.Client(),
 		server.URL,
-	), h
+	), h, deadlines
 }
 
 func progressStreamTestCounts(
@@ -90,9 +134,74 @@ func progressStreamTestCounts(
 	return h.activeProgressStreams, h.progressStreamsByFingerprint[fingerprint]
 }
 
+func TestResponseControllerContextMiddlewareInstallsSetter(t *testing.T) {
+	t.Parallel()
+	want := time.Now().Add(time.Minute)
+	called := false
+	handler := responseControllerContextMiddleware(http.HandlerFunc(
+		func(_ http.ResponseWriter, r *http.Request) {
+			setter, ok := responseWriteDeadlineSetterFromContext(r.Context())
+			require.True(t, ok)
+			require.NoError(t, setter(want))
+			called = true
+		},
+	))
+	w := &progressStreamDeadlineResponseWriter{header: make(http.Header)}
+	handler.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/", nil))
+	require.True(t, called)
+	require.Equal(t, want, w.deadline)
+}
+
+func TestProgressStreamRequiresWriteDeadlineSetter(t *testing.T) {
+	t.Parallel()
+	handler := newProgressStreamTestHandler(streamProgressMaxLifetime)
+	ctx := withPeerIdentity(t.Context(), peerIdentity{
+		Verified:    true,
+		Fingerprint: "client-a",
+	})
+	err := handler.StreamOperationProgress(
+		ctx,
+		connect.NewRequest(
+			&databasev1alpha1.StreamOperationProgressRequest{
+				OperationId: "running",
+			},
+		),
+		nil,
+	)
+	require.Equal(t, connect.CodeInternal, connect.CodeOf(err))
+	global, clientActive := progressStreamTestCounts(handler, "client-a")
+	require.Zero(t, global)
+	require.Zero(t, clientActive)
+}
+
+func TestProgressStreamRejectsUnsupportedWriteDeadline(t *testing.T) {
+	t.Parallel()
+	handler := newProgressStreamTestHandler(streamProgressMaxLifetime)
+	ctx := withPeerIdentity(t.Context(), peerIdentity{
+		Verified:    true,
+		Fingerprint: "client-a",
+	})
+	ctx = withResponseWriteDeadlineSetter(ctx, func(time.Time) error {
+		return http.ErrNotSupported
+	})
+	err := handler.StreamOperationProgress(
+		ctx,
+		connect.NewRequest(
+			&databasev1alpha1.StreamOperationProgressRequest{
+				OperationId: "running",
+			},
+		),
+		nil,
+	)
+	require.Equal(t, connect.CodeInternal, connect.CodeOf(err))
+	global, clientActive := progressStreamTestCounts(handler, "client-a")
+	require.Zero(t, global)
+	require.Zero(t, clientActive)
+}
+
 func TestProgressStreamAdmissionCapsEachClient(t *testing.T) {
 	t.Parallel()
-	client, handler := newProgressStreamTestClient(
+	client, handler, _ := newProgressStreamTestClient(
 		t,
 		streamProgressMaxLifetime,
 	)
@@ -167,8 +276,12 @@ func TestProgressStreamAdmissionCapsGlobalStreams(t *testing.T) {
 
 func TestProgressStreamLifetimeIsBounded(t *testing.T) {
 	t.Parallel()
-	client, handler := newProgressStreamTestClient(t, 25*time.Millisecond)
-	ctx, cancel := context.WithTimeout(t.Context(), 500*time.Millisecond)
+	const lifetime = 2 * time.Second
+	client, handler, deadlines := newProgressStreamTestClient(
+		t,
+		lifetime,
+	)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 	req := connect.NewRequest(
 		&databasev1alpha1.StreamOperationProgressRequest{
@@ -179,7 +292,14 @@ func TestProgressStreamLifetimeIsBounded(t *testing.T) {
 	stream, err := client.StreamOperationProgress(ctx, req)
 	require.NoError(t, err)
 	require.True(t, stream.Receive())
-	require.False(t, stream.Receive())
+	installed := deadlines.snapshot()
+	require.NotEmpty(t, installed)
+	require.False(t, installed[0].IsZero())
+	remaining := time.Until(installed[0])
+	require.Positive(t, remaining)
+	require.LessOrEqual(t, remaining, lifetime)
+	for stream.Receive() {
+	}
 	require.Equal(
 		t,
 		connect.CodeDeadlineExceeded,
@@ -188,5 +308,9 @@ func TestProgressStreamLifetimeIsBounded(t *testing.T) {
 	require.Eventually(t, func() bool {
 		global, clientActive := progressStreamTestCounts(handler, "client-a")
 		return global == 0 && clientActive == 0
+	}, time.Second, 10*time.Millisecond)
+	require.Eventually(t, func() bool {
+		installed := deadlines.snapshot()
+		return len(installed) >= 2 && installed[len(installed)-1].IsZero()
 	}, time.Second, 10*time.Millisecond)
 }
