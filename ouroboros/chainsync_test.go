@@ -1791,7 +1791,10 @@ func TestChainsyncClientRollForwardWithholdsUnauthenticatedCandidate(
 	_, resyncCh := bus.Subscribe(event.ChainsyncResyncEventType)
 	state := dchainsync.NewState(bus, nil)
 	conn := newTestConnId("127.0.0.1:6013", "1.1.1.4:3001")
+	otherConn := newTestConnId("127.0.0.1:6014", "2.2.2.4:3001")
 	require.True(t, state.AddClientConnId(conn))
+	require.True(t, state.AddClientConnId(otherConn))
+	corroborationWaitCalls := 0
 
 	o := newOuroboros(OuroborosConfig{
 		EventBus: bus,
@@ -1800,6 +1803,13 @@ func TestChainsyncClientRollForwardWithholdsUnauthenticatedCandidate(
 		},
 		ChainsyncApplyEligible: func(ouroboros.ConnectionId) bool {
 			return true
+		},
+		ChainsyncAwaitCorroboration: func(
+			context.Context,
+			ouroboros.ConnectionId,
+		) (bool, error) {
+			corroborationWaitCalls++
+			return true, nil
 		},
 	})
 	o.chainsyncState = state
@@ -1825,6 +1835,15 @@ func TestChainsyncClientRollForwardWithholdsUnauthenticatedCandidate(
 			BlockNumber: header.BlockNumber(),
 		},
 	))
+	require.Zero(t, corroborationWaitCalls)
+	require.True(
+		t,
+		state.RecordHeaderForDedup(
+			otherConn,
+			ocommon.NewPoint(header.SlotNumber(), header.Hash().Bytes()),
+		),
+		"a withheld header must remain available from another peer",
+	)
 
 	select {
 	case <-tipCh:

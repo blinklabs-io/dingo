@@ -1914,9 +1914,9 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 		applyEligible := selectionEligible &&
 			o.shouldApplyChainsyncToLedger(ctx.ConnectionId)
 		// A header withheld here is lost to the ledger: the peer's cursor moves
-		// past it. Hold an uncorroborated peer's header until a witness has
-		// delivered it instead.
-		if ingressEligible && !applyEligible &&
+		// past it. Hold only a selection-eligible header denied by Genesis
+		// corroboration; corroboration cannot override failed authentication.
+		if selectionEligible && ingressEligible && !applyEligible &&
 			o.config.ChainsyncAwaitCorroboration != nil {
 			admissionCtx, cancelAdmission := chainsyncAdmissionContext(ctx)
 			holdCtx, cancelHold := context.WithTimeout(
