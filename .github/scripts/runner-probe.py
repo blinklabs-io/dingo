@@ -171,6 +171,13 @@ def stop_sampler():
 def probe(phase):
     directory = state_dir()
     total, available = memory_mib()
+    fsync_ms = None
+    try:
+        fsync_ms = fsync_latency_ms(directory)
+    except OSError as err:
+        fsync_error = repr(err)
+    else:
+        fsync_error = None
     report = {
         "phase": phase,
         "runner": os.environ.get("RUNNER_NAME", "unknown"),
@@ -184,8 +191,10 @@ def probe(phase):
         "mem_total_mib": total,
         "mem_available_mib": available,
         "disk_free_gib": round(shutil.disk_usage(directory).free / 2**30, 1),
-        "fsync_ms": fsync_latency_ms(directory),
+        "fsync_ms": fsync_ms,
     }
+    if fsync_error is not None:
+        report["fsync_error"] = fsync_error
     if phase == "start":
         start_sampler()
     else:
