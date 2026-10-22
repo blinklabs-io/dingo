@@ -104,6 +104,7 @@ package nodeparity
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/big"
 	"sort"
@@ -224,9 +225,14 @@ func CheckProtocolParams(
 	network string,
 	epoch uint64,
 ) ([]koiosparity.CheckMismatch, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("dingo protocol params query: %w", err)
+	}
 	pp, err := client.GetCurrentProtocolParams()
 	if err != nil {
-		return nil, fmt.Errorf("dingo protocol params query: %w", err)
+		return nil, fmt.Errorf(
+			"dingo protocol params query: %w", withContextErr(ctx, err),
+		)
 	}
 	dingoParams, err := koiosparity.ProtocolParamsFromNative(pp)
 	if err != nil {
@@ -543,9 +549,14 @@ func CheckStakeDistribution(
 	network string,
 	epoch uint64,
 ) ([]StakeMismatch, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("dingo stake distribution query: %w", err)
+	}
 	pd, err := client.GetPoolDistr2(nil)
 	if err != nil {
-		return nil, fmt.Errorf("dingo stake distribution query: %w", err)
+		return nil, fmt.Errorf(
+			"dingo stake distribution query: %w", withContextErr(ctx, err),
+		)
 	}
 
 	pools := make([]poolStake, 0, len(pd.Pools))
@@ -654,6 +665,16 @@ func CheckStakeDistribution(
 		return mismatches[i].PoolIDBech32 < mismatches[j].PoolIDBech32
 	})
 	return mismatches, nil
+}
+
+// withContextErr joins ctx's error onto a failed dingo query. Dial closes the
+// connection when its context ends, so the query then fails with only a
+// generic closed-protocol error that hides the deadline or cancellation.
+func withContextErr(ctx context.Context, err error) error {
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return errors.Join(err, ctxErr)
+	}
+	return err
 }
 
 // ReasonTotalActiveStakeMismatch marks the one StakeMismatch that is not

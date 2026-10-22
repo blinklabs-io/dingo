@@ -2264,6 +2264,7 @@ func (a *NodeAdapter) PoolsExtended(
 // Account returns stake-account information for the
 // requested stake address.
 func (a *NodeAdapter) Account(
+	ctx context.Context,
 	stakeAddress string,
 ) (AccountInfo, error) {
 	_, credentialTag, stakeKey, err := parseStakeAddress(
@@ -2276,11 +2277,13 @@ func (a *NodeAdapter) Account(
 	db := a.ledgerState.Database()
 	var account *models.Account
 	var pendingReward uint64
-	readTxn := db.Transaction(context.Background(), false)
+	readTxn := db.Transaction(ctx, false)
+	var controlledAmount uint64
+	var sums models.AccountSums
 	if err := readTxn.Do(func(txn *database.Txn) error {
 		var err error
 		account, err = db.GetAccountByCredential(
-			context.Background(),
+			ctx,
 			credentialTag,
 			stakeKey,
 			true,
@@ -2292,7 +2295,22 @@ func (a *NodeAdapter) Account(
 		pendingReward, err = a.ledgerState.PendingRewardCredit(
 			txn, credentialTag, stakeKey,
 		)
-		return err
+		if err != nil {
+			return err
+		}
+		controlledAmount, err = db.GetControlledAmountByCredential(
+			ctx, credentialTag, stakeKey, txn,
+		)
+		if err != nil {
+			return fmt.Errorf("get controlled amount: %w", err)
+		}
+		sums, err = db.GetAccountSumsByCredential(
+			ctx, credentialTag, stakeKey, txn,
+		)
+		if err != nil {
+			return fmt.Errorf("get account sums: %w", err)
+		}
+		return nil
 	}); err != nil {
 		return AccountInfo{}, err
 	}
@@ -2315,15 +2333,6 @@ func (a *NodeAdapter) Account(
 		pool := lcommon.PoolId(poolKeyHash).String()
 		poolID = &pool
 	}
-	controlledAmount, err := a.ledgerState.Database().
-		GetControlledAmountByCredential(context.Background(), credentialTag, stakeKey, nil)
-	if err != nil {
-		return AccountInfo{}, fmt.Errorf(
-			"get controlled amount: %w",
-			err,
-		)
-	}
-
 	var activeEpoch *int64
 	if account.Active {
 		epoch, err := a.ledgerState.SlotToEpoch(account.AddedSlot)
@@ -2342,19 +2351,6 @@ func (a *NodeAdapter) Account(
 			return AccountInfo{}, err
 		}
 		activeEpoch = &epochID
-	}
-
-	sums, err := db.GetAccountSumsByCredential(
-		context.Background(),
-		credentialTag,
-		stakeKey,
-		nil,
-	)
-	if err != nil {
-		return AccountInfo{}, fmt.Errorf(
-			"get account sums: %w",
-			err,
-		)
 	}
 
 	reward := strconv.FormatUint(uint64(account.Reward)+pendingReward, 10)

@@ -26,10 +26,10 @@ const runnerProbe = ".github/scripts/runner-probe.py"
 
 // testStages are the pipeline stages that run go test.
 var testStages = []string{
-	"go-test-linux-quick",
-	"go-test-linux",
-	"go-test-linux-race",
-	"go-test-macos",
+	"check",
+	"race",
+	"services",
+	"macos",
 }
 
 // TestEveryTestJobProbesTheRunner checks that each test job probes the runner
@@ -37,49 +37,48 @@ var testStages = []string{
 // so the second probe also runs when a test fails or times out.
 func TestEveryTestJobProbesTheRunner(t *testing.T) {
 	root := repoRoot(t)
-	for _, workflow := range []string{prPipeline, publishPipeline} {
-		jobs := pipelineJobs(t, root, workflow)
-		for _, name := range testStages {
-			job, ok := jobs[name].(map[string]any)
-			if !ok {
-				t.Errorf("%s has no %s job", workflow, name)
-				continue
-			}
-			steps, _ := job["steps"].([]any)
-			start, end, firstTest, lastTest := -1, -1, -1, -1
-			endAlways := false
-			for i, raw := range steps {
-				step, _ := raw.(map[string]any)
-				run, _ := step["run"].(string)
-				switch {
-				case strings.Contains(run, runnerProbe+" start"):
-					start = i
-				case strings.Contains(run, runnerProbe+" end"):
-					end = i
-					endAlways = step["if"] == "always()"
-				case strings.Contains(run, "go test") ||
-					strings.Contains(run, "make test"):
-					if firstTest < 0 {
-						firstTest = i
-					}
-					lastTest = i
-				}
-			}
+	workflow := prPipeline
+	jobs := pipelineJobs(t, root, workflow)
+	for _, name := range testStages {
+		job, ok := jobs[name].(map[string]any)
+		if !ok {
+			t.Errorf("%s has no %s job", workflow, name)
+			continue
+		}
+		steps, _ := job["steps"].([]any)
+		start, end, firstTest, lastTest := -1, -1, -1, -1
+		endAlways := false
+		for i, raw := range steps {
+			step, _ := raw.(map[string]any)
+			run, _ := step["run"].(string)
 			switch {
-			case firstTest < 0:
-				t.Errorf("%s job %s runs no tests", workflow, name)
-			case start < 0 || start > firstTest:
-				t.Errorf(
-					"%s job %s must run %s start before its first test step",
-					workflow, name, runnerProbe,
-				)
-			case end < 0 || end < lastTest || !endAlways:
-				t.Errorf(
-					"%s job %s must run %s end with if: always() after its "+
-						"last test step",
-					workflow, name, runnerProbe,
-				)
+			case strings.Contains(run, runnerProbe+" start"):
+				start = i
+			case strings.Contains(run, runnerProbe+" end"):
+				end = i
+				endAlways = step["if"] == "always()"
+			case strings.Contains(run, "go test") ||
+				strings.Contains(run, "make test"):
+				if firstTest < 0 {
+					firstTest = i
+				}
+				lastTest = i
 			}
+		}
+		switch {
+		case firstTest < 0:
+			t.Errorf("%s job %s runs no tests", workflow, name)
+		case start < 0 || start > firstTest:
+			t.Errorf(
+				"%s job %s must run %s start before its first test step",
+				workflow, name, runnerProbe,
+			)
+		case end < 0 || end < lastTest || !endAlways:
+			t.Errorf(
+				"%s job %s must run %s end with if: always() after its "+
+					"last test step",
+				workflow, name, runnerProbe,
+			)
 		}
 	}
 }

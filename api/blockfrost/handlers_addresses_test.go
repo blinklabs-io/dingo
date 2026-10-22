@@ -372,3 +372,95 @@ func TestHandleAddressSummaryTooLarge(t *testing.T) {
 		require.Contains(t, w.Body.String(), "too many outputs or assets")
 	}
 }
+
+// blockingAggregateNode parks the address and account aggregate routes until
+// released or until the request context ends.
+type blockingAggregateNode struct {
+	*blockingAddressNode
+}
+
+func (n *blockingAggregateNode) AddressTotal(
+	ctx context.Context,
+	_ string,
+) (AddressTotalInfo, error) {
+	return AddressTotalInfo{Address: "addr1"}, n.wait(ctx)
+}
+
+func (n *blockingAggregateNode) AccountAddressTotal(
+	ctx context.Context,
+	_ string,
+) (AccountAddressTotalInfo, error) {
+	return AccountAddressTotalInfo{StakeAddress: "stake1abc"}, n.wait(ctx)
+}
+
+func (n *blockingAggregateNode) AccountAddressAssets(
+	ctx context.Context,
+	_ string,
+	_ PaginationParams,
+) ([]AddressAmountInfo, int, error) {
+	return nil, 0, n.wait(ctx)
+}
+
+func TestHandleAggregateRoutesShareAdmission(t *testing.T) {
+	t.Parallel()
+	routes := []string{
+		"/api/v0/addresses/addr1/total",
+		"/api/v0/accounts/stake1abc/addresses/total",
+		"/api/v0/accounts/stake1abc/addresses/assets",
+	}
+	node := &blockingAggregateNode{newBlockingAddressNode()}
+	b := newTestBlockfrost(node)
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(node.release) }) }
+	defer release()
+
+	var wg sync.WaitGroup
+	// Two different aggregate routes fill the per-client cap.
+	for _, path := range routes[:2] {
+		wg.Go(func() {
+			b.handler().ServeHTTP(
+				httptest.NewRecorder(),
+				addressSummaryRequest(context.Background(), path),
+			)
+		})
+	}
+	for range 2 {
+		testutil.RequireReceive(
+			t, node.entered, 5*time.Second, "request admitted",
+		)
+	}
+	for _, path := range append(routes, "/api/v0/addresses/addr1") {
+		// A rejected request returns at once; the deadline only keeps a
+		// wrongly admitted one from parking the test.
+		ctx, cancel := context.WithTimeout(
+			context.Background(), 2*time.Second,
+		)
+		w := httptest.NewRecorder()
+		b.handler().ServeHTTP(w, addressSummaryRequest(ctx, path))
+		cancel()
+		require.Equal(t, http.StatusTooManyRequests, w.Code, path)
+		require.Equal(t, "1", w.Header().Get("Retry-After"), path)
+	}
+	release()
+	wg.Wait()
+}
+
+func TestHandleAggregateRoutesAnswer400WhenOverBudget(t *testing.T) {
+	t.Parallel()
+	for _, path := range []string{
+		"/api/v0/addresses/addr1/total",
+		"/api/v0/accounts/stake1abc/addresses/total",
+		"/api/v0/accounts/stake1abc/addresses/assets",
+	} {
+		t.Run(path, func(t *testing.T) {
+			t.Parallel()
+			node := &mockNode{}
+			node.addressErr = ErrAddressSummaryTooLarge
+			node.accountTotal.err = ErrAddressSummaryTooLarge
+			node.accountAssets.err = ErrAddressSummaryTooLarge
+			w := serve(t, node, path)
+			require.Equal(t, http.StatusBadRequest, w.Code)
+			require.Contains(t, w.Body.String(), "too many")
+		})
+	}
+}

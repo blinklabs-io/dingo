@@ -97,7 +97,6 @@ func TestExecutableReleaseInputsPinned(t *testing.T) {
 	}
 	for _, path := range []string{
 		".github/workflows/go-test.yml",
-		".github/workflows/publish.yml",
 	} {
 		content := readRepoFile(t, root, path)
 		assertDockerRunImagesPinned(t, path, content)

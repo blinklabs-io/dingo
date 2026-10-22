@@ -24,7 +24,8 @@ import (
 	gscript "github.com/blinklabs-io/gouroboros/ledger/common/script"
 )
 
-const deleteRedeemerScriptsSQL = `DELETE FROM redeemer_script WHERE transaction_id = ?`
+const deleteRedeemerScriptsSQL = `-- name: DeleteRedeemerScriptsByTransaction :exec
+DELETE FROM redeemer_script WHERE transaction_id = ?`
 
 // redeemerScriptHashes resolves the script each redeemer of a transaction
 // executes, keyed by redeemer pointer. A redeemer is attributed only when its
@@ -88,7 +89,7 @@ func (s *Store) redeemerScriptHashes(
 	return ret, nil
 }
 
-const spendScriptHashQuery = `
+const spendScriptHashQuery = `-- name: GetSpendScriptHashByOutput :one
 SELECT payment_key, payment_script FROM utxo
 WHERE tx_id = ? AND output_idx = ?`
 

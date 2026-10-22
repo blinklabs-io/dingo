@@ -147,7 +147,17 @@ func TestAwaitChainsyncHeaderCapacityBoundsAdmittedWork(t *testing.T) {
 			block.Header(),
 		))
 	}
-	atLimit := &LedgerState{chain: atLimitChain, activeBlockfetchRequestDone: make(chan struct{})}
+	waiting := make(chan struct{}, 1)
+	atLimit := &LedgerState{
+		chain:                       atLimitChain,
+		activeBlockfetchRequestDone: make(chan struct{}),
+		chainsyncCapacityWaitHook: func() {
+			select {
+			case waiting <- struct{}{}:
+			default:
+			}
+		},
+	}
 	done := make(chan error, 1)
 	go func() {
 		done <- atLimit.AwaitChainsyncHeaderCapacity(
@@ -155,6 +165,15 @@ func TestAwaitChainsyncHeaderCapacityBoundsAdmittedWork(t *testing.T) {
 			admittedHeadroom,
 		)
 	}()
+	// Drain only once the gate has paused. A gate that first checks after
+	// the drain below sees the queue under its pause threshold and returns,
+	// which is the threshold check, not the hysteresis this test is about.
+	testutil.RequireReceive(
+		t,
+		waiting,
+		testutil.AsyncWait,
+		"capacity gate never paused at the bounded threshold",
+	)
 	testutil.RequireNoReceive(
 		t,
 		done,

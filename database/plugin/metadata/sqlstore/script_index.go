@@ -236,6 +236,6 @@ func (s *Store) persistUtxoReferenceScript(
 	return nil
 }
 
-const upsertUtxoReferenceScriptQuery = `
+const upsertUtxoReferenceScriptQuery = `-- name: UpsertUtxoReferenceScript :exec
 INSERT INTO utxo_reference_script (utxo_id, script_hash) VALUES (?, ?)
 ON CONFLICT (utxo_id) DO UPDATE SET script_hash = excluded.script_hash`

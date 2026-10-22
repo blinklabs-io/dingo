@@ -399,7 +399,7 @@ type BlockfrostNode interface {
 
 	// Account returns stake-account information for the
 	// requested stake address.
-	Account(string) (AccountInfo, error)
+	Account(context.Context, string) (AccountInfo, error)
 
 	// AccountAssociatedAddresses returns payment addresses
 	// associated with the requested stake address.
