@@ -119,10 +119,17 @@ type Ouroboros struct {
 	leiosValidationCtx      context.Context
 	leiosValidationCancel   context.CancelFunc
 	leiosValidationSlots    chan struct{}
-	leiosValidationWG       sync.WaitGroup
-	leiosValidationMu       sync.Mutex
-	leiosValidationClosed   bool
-	config                  OuroborosConfig
+	// localTxSubmissionSlots is the in-flight LocalTxSubmission validation
+	// budget, shared by all connections.
+	localTxSubmissionSlots chan struct{}
+	// localTxSubmissionConnDoneFunc replaces the connection manager lookup of
+	// a connection's teardown signal. Test-only seam: the manager can only
+	// register a live connection.
+	localTxSubmissionConnDoneFunc func(ouroboros.ConnectionId) <-chan struct{}
+	leiosValidationWG             sync.WaitGroup
+	leiosValidationMu             sync.Mutex
+	leiosValidationClosed         bool
+	config                        OuroborosConfig
 	// registerer wraps config.PromRegistry and tracks every collector this
 	// instance registers, so Close can hand them all back. See lifecycle.go.
 	registerer *trackingRegisterer
@@ -729,11 +736,15 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 		leiosValidationCtx:      leiosValidationCtx,
 		leiosValidationCancel:   leiosValidationCancel,
 		leiosValidationSlots:    make(chan struct{}, 2),
-		mempool:                 cfg.Mempool,
-		chainsyncState:          cfg.ChainsyncState,
-		peerGov:                 cfg.PeerGov,
-		blockFetchStarts:        make(map[blockFetchKey]time.Time),
-		blockFetchDoneEarly:     make(map[blockFetchKey]error),
+		localTxSubmissionSlots: make(
+			chan struct{},
+			localTxSubmissionMaxInFlight,
+		),
+		mempool:             cfg.Mempool,
+		chainsyncState:      cfg.ChainsyncState,
+		peerGov:             cfg.PeerGov,
+		blockFetchStarts:    make(map[blockFetchKey]time.Time),
+		blockFetchDoneEarly: make(map[blockFetchKey]error),
 		localstatequeryAcquiredPoints: make(
 			map[ouroboros.ConnectionId]ledger.QueryPoint,
 		),

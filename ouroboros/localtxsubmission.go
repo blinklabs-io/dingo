@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/mempool"
+	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
@@ -33,6 +34,19 @@ import (
 var errLocalTxSubmissionMempoolUnavailable = errors.New(
 	"local-tx-submission: mempool unavailable",
 )
+
+// errLocalTxSubmissionBusy is returned when every in-flight validation slot is
+// held. It is a node condition, not a verdict on the transaction.
+var errLocalTxSubmissionBusy = errors.New(
+	"local-tx-submission: validation capacity exhausted",
+)
+
+// localTxSubmissionMaxInFlight bounds validations that are queued behind or
+// running under the mempool mutation gate across all NtC connections. The gate
+// serializes validation, so extra slots only add waiters; the bound exists to
+// cap what a client that reconnects can park, not to add throughput. A slot is
+// held until the callback returns, never until the socket closes.
+const localTxSubmissionMaxInFlight = 8
 
 func (o *Ouroboros) localtxsubmissionServerConnOpts() []olocaltxsubmission.LocalTxSubmissionOptionFunc {
 	return []olocaltxsubmission.LocalTxSubmissionOptionFunc{
@@ -81,12 +95,30 @@ func (o *Ouroboros) localtxsubmissionServerSubmitTx(
 	if o.mempool == nil {
 		return errLocalTxSubmissionMempoolUnavailable
 	}
-	// Add transaction to mempool
-	err := o.mempool.AddTransaction(
-		context.Background(),
-		uint(tx.EraId),
-		rawTx,
-	)
+	// The slot is released only when AddTransaction returns, so a closed
+	// connection cannot free capacity that its still-queued validation uses.
+	select {
+	case o.localTxSubmissionSlots <- struct{}{}:
+		defer func() { <-o.localTxSubmissionSlots }()
+	default:
+		return localTxSubmissionRejectReason(
+			tx.EraId,
+			errLocalTxSubmissionBusy,
+		)
+	}
+	connDone := o.localTxSubmissionConnDone(ctx.ConnectionId)
+	valCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if connDone != nil {
+		go func() {
+			select {
+			case <-connDone:
+				cancel()
+			case <-valCtx.Done():
+			}
+		}()
+	}
+	err := o.mempool.AddTransaction(valCtx, uint(tx.EraId), rawTx)
 	if err != nil {
 		o.config.Logger.Error(
 			fmt.Sprintf(
@@ -162,9 +194,32 @@ func newLocalTxSubmissionRejectReason(
 	return &unrepresentableTxSubmissionError{err: err}
 }
 
+// localTxSubmissionConnDone returns a channel closed when the connection is
+// torn down, or nil when the connection is not registered (or no manager is
+// wired) and its lifetime cannot be observed. The callback runs on the
+// connection's own protocol goroutine, so a registered connection is the norm;
+// the in-flight budget still bounds the unobservable case.
+func (o *Ouroboros) localTxSubmissionConnDone(
+	connId ouroboros.ConnectionId,
+) <-chan struct{} {
+	if o.localTxSubmissionConnDoneFunc != nil {
+		return o.localTxSubmissionConnDoneFunc(connId)
+	}
+	if o.connManager == nil {
+		return nil
+	}
+	conn, done := o.connManager.GetConnectionWithDone(connId)
+	if conn == nil {
+		return nil
+	}
+	return done
+}
+
 func isLocalTxSubmissionInfrastructureError(err error) bool {
 	var fullErr *mempool.MempoolFullError
-	return errors.Is(err, mempool.ErrNilValidator) ||
+	return errors.Is(err, errLocalTxSubmissionBusy) ||
+		errors.Is(err, context.Canceled) ||
+		errors.Is(err, mempool.ErrNilValidator) ||
 		errors.Is(err, mempool.ErrMempoolStopped) ||
 		errors.Is(err, mempool.ErrPendingStateMoved) ||
 		errors.As(err, &fullErr)
