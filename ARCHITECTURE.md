@@ -6393,7 +6393,11 @@ it. Dingo implements this as a **corroboration gate**
   and admission path, allowing ledger progress to move the forecast horizon.
   The temporary witness is removed when the wait ends and is never promoted.
   This avoids an empty-queue bootstrap deadlock without making an unverified
-  header selectable or applicable. Missing or unsafe fork ancestry
+  header selectable or applicable. Before re-intersecting a header whose
+  predecessor is not yet connected, admission starts queued blockfetch and
+  waits for in-flight fetch or ledger-application work that may make the parent
+  reachable; it re-intersects only when no such local work remains. Missing or
+  unsafe fork ancestry
   (`ledger.IsHeaderVerificationWithheld`) excludes a header from selector
   observation and ledger ingress without recycling the peer or scheduling
   re-intersection; the connection retains its header for later ancestry

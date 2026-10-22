@@ -1003,6 +1003,67 @@ func TestAwaitChainsyncHeaderAdmissionFlushFetchesFromPipelineOwner(
 	require.True(t, sameConnectionId(owner, ls.selectedBlockfetchConnId))
 }
 
+func TestAwaitChainsyncHeaderAdmissionDrainsQueuedWorkBeforeDisconnect(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	ls, requests := newHorizonFlushTestLedger(t, nil)
+	owner := testRecycleConnId()
+	ls.headerPipelineConnId = owner
+	ls.config.BlockfetchRequestRangeFunc = func(
+		connId ouroboros.ConnectionId,
+		start ocommon.Point,
+		_ ocommon.Point,
+	) (uint64, error) {
+		requests <- horizonFlushRequest{connId: connId, start: start}
+		return 1, nil
+	}
+	arrival := time.Date(2026, time.August, 22, 12, 1, 40, 0, time.UTC)
+	header := mockHeader{
+		hash:        lcommon.Blake2b256Hash([]byte("disconnected")),
+		prevHash:    lcommon.Blake2b256Hash([]byte("missing parent")),
+		blockNumber: 3,
+		slot:        90,
+	}
+	e := ChainsyncEvent{
+		ConnectionId: owner,
+		BlockHeader:  header,
+		ArrivalTime:  arrival,
+		Point: ocommon.NewPoint(
+			header.SlotNumber(),
+			header.Hash().Bytes(),
+		),
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	results := awaitAdmissionAsync(ctx, ls, e)
+
+	req := testutil.RequireReceive(
+		t,
+		requests,
+		testutil.AsyncWait,
+		"a disconnected future header must first flush queued local work",
+	)
+	require.EqualValues(t, 10, req.start.Slot)
+	testutil.RequireNoReceive(
+		t,
+		results,
+		100*time.Millisecond,
+		"admission must wait while the queued range can advance local ancestry",
+	)
+
+	cancel()
+	got := testutil.RequireReceive(
+		t,
+		results,
+		testutil.AsyncWait,
+		"admission did not return after cancellation",
+	)
+	require.ErrorIs(t, got.err, context.Canceled)
+	require.False(t, got.accepted)
+}
+
 // A connection whose close was already processed must not be made the
 // blockfetch origin or selected connection by a horizon wait it left behind.
 func TestAwaitChainsyncHeaderAdmissionFlushSkipsClosedConnection(
