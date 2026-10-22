@@ -31,6 +31,8 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
+	// Registers the aggregate sqlstore's account totals call on SQLite.
+	_ "github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite/bigintsum"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/migrations"
 	driversqlite "modernc.org/sqlite"

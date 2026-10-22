@@ -102,6 +102,8 @@ type Utxorpc struct {
 	streams      *streamLimiter
 	replays      *replayLimiter
 	evalRequests *streamLimiter
+	// watchHistory is the process-wide budget for WatchTx undo histories.
+	watchHistory *watchTxHistoryBudget
 }
 
 type UtxorpcConfig struct {
@@ -141,6 +143,13 @@ type UtxorpcConfig struct {
 	// MaxReplayBlocks caps how far behind the tip a WatchTx intersect may
 	// start, in blocks (0 = use default).
 	MaxReplayBlocks int
+	// MaxWatchHistoryBytes caps the bytes one WatchTx stream retains for
+	// rollback; older blocks are evicted and rebuilt from persisted blocks if
+	// a rollback needs them (0 = use default).
+	MaxWatchHistoryBytes int64
+	// MaxWatchHistoryBytesTotal caps the bytes all WatchTx streams retain
+	// for rollback together (0 = use default).
+	MaxWatchHistoryBytesTotal int64
 	// MaxConcurrentReplays caps FollowTip streams that are serving blocks
 	// behind the tip at once, across all clients; a further replay is refused
 	// with ResourceExhausted (0 = use default).
@@ -235,6 +244,12 @@ func NewUtxorpc(cfg UtxorpcConfig) *Utxorpc {
 	if cfg.MaxReplayBlocks <= 0 {
 		cfg.MaxReplayBlocks = DefaultMaxReplayBlocks
 	}
+	if cfg.MaxWatchHistoryBytes <= 0 {
+		cfg.MaxWatchHistoryBytes = DefaultMaxWatchHistoryBytes
+	}
+	if cfg.MaxWatchHistoryBytesTotal <= 0 {
+		cfg.MaxWatchHistoryBytesTotal = DefaultMaxWatchHistoryBytesTotal
+	}
 	if cfg.MaxConcurrentReplays <= 0 {
 		cfg.MaxConcurrentReplays = DefaultMaxConcurrentReplays
 	}
@@ -285,6 +300,9 @@ func NewUtxorpc(cfg UtxorpcConfig) *Utxorpc {
 			cfg.MaxConcurrentEvalRequests,
 			cfg.MaxEvalRequestsPerClient,
 			"EvalTx request",
+		),
+		watchHistory: newWatchTxHistoryBudget(
+			cfg.MaxWatchHistoryBytesTotal,
 		),
 		replays: newReplayLimiter(
 			cfg.MaxConcurrentReplays,

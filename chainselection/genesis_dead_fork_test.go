@@ -473,3 +473,54 @@ func TestGenesisEagernessLimitIgnoresWallClockStalePeer(t *testing.T) {
 	assert.Equal(t, limit, cs.EagernessLimit(),
 		"the limit must not depend on whether the stale peer is connected")
 }
+
+// From genesis the local tip is block zero, so a newcomer's advertised tip is
+// bounded by the tips other peers advertise. A peer serving a dead fork, whose
+// advertised tip is older than the wall clock, is never selectable and must
+// not supply that bound: otherwise every honest peer advertising the real
+// tip is rejected as implausible and the sync never starts.
+func TestGenesisPlausibilityIgnoresWallClockStaleReference(t *testing.T) {
+	t.Parallel()
+	honestTip := genesisTip(deadForkHonestTipSlot, "honest-tip", 5000)
+	newcomerFirstHeader := genesisTip(10, "h10", 1)
+
+	cs := newGenesisWallClockSelector(deadForkHonestTipSlot)
+	feedAdvertising(t, cs, corrConn(1), genesisTip(2000, "dead-tip", 200),
+		"d", 10, 100, 10)
+	require.True(t,
+		cs.updatePeerTipObserved(corrConn(2), honestTip, newcomerFirstHeader, nil),
+		"an honest peer was bounded by a dead fork's advertised tip")
+
+	// The same holds for a dead fork whose headers are staged but not yet
+	// admitted.
+	cs = newGenesisWallClockSelector(deadForkHonestTipSlot)
+	staged := corrConn(1)
+	for i := uint64(1); i <= 10; i++ {
+		require.NotEqual(t, PeerTipUpdateRejected,
+			cs.PreparePeerTipAdmissionDisposition(PeerTipUpdateEvent{
+				ConnectionId: staged,
+				AdmissionID:  i,
+				Tip:          genesisTip(2000, "dead-tip", 200),
+				ObservedTip: genesisTip(
+					i*10, fmt.Sprintf("d%d", i*10), i,
+				),
+			}))
+	}
+	require.Equal(t, PeerTipUpdateAccepted,
+		cs.PreparePeerTipAdmissionDisposition(PeerTipUpdateEvent{
+			ConnectionId: corrConn(2),
+			AdmissionID:  11,
+			Tip:          honestTip,
+			ObservedTip:  newcomerFirstHeader,
+		}),
+		"an honest peer was bounded by a staged dead fork's advertised tip")
+
+	// Control: a peer whose advertised tip is current still bounds a
+	// newcomer's advertisement before any block is applied.
+	cs = newGenesisWallClockSelector(deadForkHonestTipSlot)
+	feedAdvertising(t, cs, corrConn(1),
+		genesisTip(deadForkHonestTipSlot-10, "short-tip", 200),
+		"d", 10, 100, 10)
+	require.False(t,
+		cs.updatePeerTipObserved(corrConn(2), honestTip, newcomerFirstHeader, nil))
+}

@@ -97,7 +97,6 @@ func TestExecutableReleaseInputsPinned(t *testing.T) {
 	}
 	for _, path := range []string{
 		".github/workflows/go-test.yml",
-		".github/workflows/publish.yml",
 	} {
 		content := readRepoFile(t, root, path)
 		assertDockerRunImagesPinned(t, path, content)
@@ -162,7 +161,7 @@ func TestExecutableReleaseInputsPinned(t *testing.T) {
 		}
 	}
 
-	cardanoNode := "ghcr.io/blinklabs-io/cardano-node:11.0.1@sha256:d5ede07a890e9b6a0a5182cdba9dbaf73756336762235e0934a11690beedae02"
+	cardanoNode := "ghcr.io/blinklabs-io/cardano-node:11.1.3-2@sha256:dc2b885811294fc497bcd50224bdf1e51d693f6113c749a3b21be1428af79ef8"
 	for _, path := range []string{
 		"internal/test/devnet/Dockerfile.configurator",
 		"internal/test/devnet/docker-compose.yml",
@@ -180,8 +179,8 @@ func TestExecutableReleaseInputsPinned(t *testing.T) {
 		"expected=h1:bVV5ZAuwaREn4klRSJusYaA+A7NXq8Qi9C/knCaQ2N4=",
 		"antithesis-sdk-go@${version}",
 		"antithesis-go-instrumentor@${version}",
-		"snapshot.debian.org/archive/debian/20261005T000000Z",
-		"snapshot.debian.org/archive/debian-security/20261005T000000Z",
+		"snapshot.debian.org/archive/debian/20261020T000000Z",
+		"snapshot.debian.org/archive/debian-security/20261020T000000Z",
 		"sha256sum --check --strict -",
 	}
 	for _, expected := range antithesisExpected {

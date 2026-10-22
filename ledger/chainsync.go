@@ -401,6 +401,7 @@ func (ls *LedgerState) handleEventChainsync(evt event.Event) {
 		ls.discardBufferedPeerHeaders(e.ConnectionId, &pending)
 		queuePeerTipAdmission(&pending, e, false)
 		ls.removePeerHeaderHistory(connIdKey(e.ConnectionId))
+		ls.forgetChainsyncSession(connIdKey(e.ConnectionId))
 		return
 	}
 	// Also drops an event published before the hold was taken.
@@ -409,43 +410,12 @@ func (ls *LedgerState) handleEventChainsync(evt event.Event) {
 		return
 	}
 	if e.Rollback {
-		if err := ls.handleEventChainsyncRollback(e, &pending); err != nil {
-			if errors.Is(err, ErrRollbackLoopDetected) {
-				// The rollback was skipped to break a pathological
-				// loop. Trigger a chainsync re-sync so the peer
-				// can negotiate a fresh intersection rather than
-				// continuing to send the same rollback point.
-				ls.resetChainsyncResyncState(&pending)
-				ls.setChainsyncState(SyncingChainsyncState)
-				// Queued rather than published here: this runs with
-				// ls.chainsyncMutex held, and this event's subscriber
-				// takes that same mutex via RecoverAfterLocalRollback.
-				pending.add(
-					ls.config.EventBus,
-					event.ChainsyncResyncEventType,
-					event.NewEvent(
-						event.ChainsyncResyncEventType,
-						event.ChainsyncResyncEvent{
-							ConnectionId: e.ConnectionId,
-							Reason:       event.ChainsyncResyncReasonRollbackLoop,
-						},
-					),
-				)
-				return
-			}
-			ls.config.Logger.Error(
-				"failed to handle rollback",
-				"component", "ledger",
-				"error", err,
-				"slot", e.Point.Slot,
-				"hash", hex.EncodeToString(e.Point.Hash),
-			)
-			if ls.config.FatalErrorFunc != nil {
-				ls.config.FatalErrorFunc(err)
-			}
+		if ls.deferOpeningChainsyncRollback(e) {
 			return
 		}
+		ls.processChainsyncRollback(e, &pending)
 	} else if e.BlockHeader != nil {
+		ls.resolveOpeningChainsyncRollback(e, &pending)
 		if err := ls.handleEventChainsyncBlockHeaderWithPending(e, &pending); err != nil {
 			// Header queue full is expected during bulk sync when
 			// pipelined headers arrive faster than blockfetch can
@@ -1656,6 +1626,7 @@ func (ls *LedgerState) handleConnectionClosedEvent(evt event.Event) {
 	}
 	ls.removePeerHeaderHistory(connIdKey(e.ConnectionId))
 	ls.resetHeaderMismatches(connIdKey(e.ConnectionId))
+	ls.forgetChainsyncSession(connIdKey(e.ConnectionId))
 	// Cancel in-flight blockfetch if the dead connection owns it.
 	// Without this, chainsyncBlockfetchReadyChan stays non-nil and
 	// new headers from reconnected peers are queued behind a batch
@@ -1901,6 +1872,9 @@ func (ls *LedgerState) AwaitChainsyncHeaderCapacity(
 			return nil
 		}
 		resumeAt := max(pauseAt-BlockfetchBatchSize, 0)
+		if hook := ls.chainsyncCapacityWaitHook; hook != nil {
+			hook()
+		}
 		if err := ls.chain.WaitForHeaderCountBelowOrSignal(ctx, resumeAt+1, changed); err != nil {
 			return err
 		}
@@ -2533,6 +2507,7 @@ func (ls *LedgerState) evictOldestPeerHeaderRecord(historyKey string) bool {
 }
 
 func (ls *LedgerState) removePeerHeaderHistory(historyKey string) {
+	ls.removePeerForkNoncePrefix(historyKey)
 	history := ls.peerHeaderHistory[historyKey]
 	if history == nil {
 		return
@@ -2670,6 +2645,9 @@ func (ls *LedgerState) genesisSelectionState() (bool, uint64) {
 
 func (ls *LedgerState) peerHeaderHistoryLimit() int {
 	limit := maxPeerHeaderHistoryPerConn
+	if ls.chain != nil {
+		limit = max(limit, ls.allowedQueuedHeaders())
+	}
 	active, window := ls.genesisSelectionState()
 	if !active || window <= uint64(limit) {
 		return limit
@@ -3596,6 +3574,9 @@ func (ls *LedgerState) handleEventChainsyncRollback(
 	e ChainsyncEvent,
 	pending *pendingPublishes,
 ) error {
+	connKey := connIdKey(e.ConnectionId)
+	ls.removePeerForkNoncePrefix(connKey)
+
 	// Filter events from non-active connections when chain selection is enabled
 	if activeConnId, configured := ls.detectConnectionSwitch(pending); configured {
 		if activeConnId == nil {
@@ -3658,7 +3639,6 @@ func (ls *LedgerState) handleEventChainsyncRollback(
 	// Rollback loop detection: track recent rollbacks and skip if
 	// the same peer repeats the same rollback point too frequently
 	// within the detection window.
-	connKey := connIdKey(e.ConnectionId)
 	slotCount := ls.recordRollback(connKey, e.Point, time.Now())
 	if slotCount >= rollbackLoopThreshold {
 		// Exempt rollbacks to slots where we forged a block — fork
@@ -5464,6 +5444,10 @@ func (ls *LedgerState) flushQueuedHeadersForHorizonWait(
 // and no blockfetch is running, as while a block waits on data fetched by
 // another protocol. Re-intersecting instead closes the connections that work
 // may need, without advancing the horizon.
+//
+// A chain tip in the applied tip's slot under another hash is such a block. A
+// chain tip in an earlier slot is a rollback the ledger has yet to follow, and
+// nothing at or below the applied slot can move the horizon past where it is.
 func (ls *LedgerState) chainAheadOfAppliedTip() bool {
 	if ls.chain == nil {
 		return false
@@ -5472,7 +5456,12 @@ func (ls *LedgerState) chainAheadOfAppliedTip() bool {
 	if tip == nil {
 		return false
 	}
-	return ls.chain.Tip().Point.Slot > tip.currentTip.Point.Slot
+	chainTip := ls.chain.Tip().Point
+	applied := tip.currentTip.Point
+	if chainTip.Slot != applied.Slot {
+		return chainTip.Slot > applied.Slot
+	}
+	return !pointMatches(chainTip, applied)
 }
 
 // awaitForecastHorizon blocks until the published ledger state can forecast
@@ -5875,6 +5864,30 @@ func (ls *LedgerState) CurrentHeaderCryptoVerificationGeneration() uint64 {
 		return 0
 	}
 	return consensus.generation
+}
+
+// currentHeaderVerificationContext returns the current generation and the
+// generation at which its consensus context began, or zeros while the
+// consensus and tip snapshots are not jointly stable.
+func (ls *LedgerState) currentHeaderVerificationContext() (uint64, uint64) {
+	if ls.txValidationTransitions.Load() != 0 {
+		return 0, 0
+	}
+	consensus := ls.loadConsensusSnapshot()
+	tip := ls.loadTipSnapshot()
+	if consensus == nil || tip == nil || consensus.generation != tip.generation ||
+		ls.txValidationTransitions.Load() != 0 {
+		return 0, 0
+	}
+	return consensus.generation, consensus.contextGeneration
+}
+
+// headerVerdictInContext reports whether a verdict stamped with generation
+// was made within the consensus context that began at contextGeneration and
+// is current at generation current.
+func headerVerdictInContext(stamp, contextGeneration, current uint64) bool {
+	return stamp != 0 && contextGeneration != 0 &&
+		stamp >= contextGeneration && stamp <= current
 }
 
 // PinHeaderCryptoVerificationGeneration keeps a current producer-

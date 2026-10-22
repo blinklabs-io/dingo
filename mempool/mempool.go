@@ -139,6 +139,10 @@ type Service interface {
 	RemoveConsumer(ouroboros.ConnectionId)
 	FindConsumer(ouroboros.ConnectionId) Consumer
 	CapacityBytes() int64
+	// SizeBytes returns the bytes currently retained by pending
+	// transactions, the figure capacity and admission limits are measured
+	// against. It reads a maintained counter and does not walk the pool.
+	SizeBytes() int64
 }
 
 // TxValidator defines the interface for transaction validation needed by mempool.
@@ -2005,6 +2009,11 @@ func (m *Mempool) addTransactionAttempt(
 		// remains current until the transaction is committed.
 		m.mutationMutex.Lock()
 		defer m.mutationMutex.Unlock()
+		// The gate cannot be waited on with a context, so a caller cancelled
+		// while queued discovers it here, before any validation work.
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 
 		m.Lock()
 		if m.stopped {
@@ -2436,6 +2445,13 @@ func cloneMempoolTransaction(tx *MempoolTransaction) *MempoolTransaction {
 // CapacityBytes returns the configured maximum mempool size in bytes.
 func (m *Mempool) CapacityBytes() int64 {
 	return m.config.MempoolCapacity
+}
+
+// SizeBytes returns the bytes currently retained by pending transactions.
+func (m *Mempool) SizeBytes() int64 {
+	m.RLock()
+	defer m.RUnlock()
+	return m.currentSizeBytes
 }
 
 func (m *Mempool) admissionLimitBytes() int64 {
