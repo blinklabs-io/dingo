@@ -1218,9 +1218,7 @@ func fetchTxInfosCached(
 			// errors on a hash it got no result for; kept so a future
 			// change to either side cannot silently drop a transaction
 			// from the reconstruction.
-			return nil, fmt.Errorf(
-				"koios /tx_info: no result for requested tx hash %s", hash,
-			)
+			return nil, fmt.Errorf("%w %s", koiosparity.ErrTxInfoMissing, hash)
 		}
 		all[i] = item
 	}

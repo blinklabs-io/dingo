@@ -31,6 +31,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"slices"
 	"time"
 
 	"github.com/blinklabs-io/dingo/internal/koiosparity"
@@ -61,6 +62,82 @@ const txInfoConcurrency = 8
 // koiosparity.KoiosTxInfoBatchSize-sized batch at a time with nothing to
 // parallelize.
 const txInfoOpportunisticFlushThreshold = txInfoConcurrency * koiosparity.KoiosTxInfoBatchSize
+
+// txInfoIndexWaits is the wait before each round that fetches again the
+// /tx_info chunks Koios had no result for. Following the tip, Dingo serves a
+// block before Koios has indexed it: on preprod a flush at the tip failed on
+// a just-served hash that Koios answered for when asked later, and the
+// failure re-baselined the reconstruction and left that epoch's UTxO check
+// not run. Koios's /tip was observed about 30s behind the chain, so the
+// rounds, 70s in all, cover a lag of several 20s preprod blocks; a hash
+// still missing after them is treated as any other failed chunk.
+// RunFromGenesis reads it once, and only a test changes it.
+var txInfoIndexWaits = []time.Duration{
+	10 * time.Second,
+	20 * time.Second,
+	40 * time.Second,
+}
+
+// fetchTxInfoChunks fetches every chunk with at most txInfoConcurrency
+// requests in flight, then, after each wait in waits, fetches again each
+// chunk that failed with koiosparity.ErrTxInfoMissing. A chunk is fetched
+// whole every time, so a result is only ever a complete chunk. Other
+// failures are not fetched again: the shared Koios client has already
+// retried them. It returns ctx's error when ctx ends during a fetch or a
+// wait, and the caller must then discard results and errs.
+func fetchTxInfoChunks(
+	ctx context.Context,
+	chunks [][]string,
+	fetch func(context.Context, []string) ([]koiosparity.KoiosTxInfoItem, error),
+	waits []time.Duration,
+	wait func(context.Context, time.Duration) error,
+	logf func(format string, args ...any),
+) ([][]koiosparity.KoiosTxInfoItem, []error, error) {
+	results := make([][]koiosparity.KoiosTxInfoItem, len(chunks))
+	errs := make([]error, len(chunks))
+	fetchAll := func(indexes []int) error {
+		var g errgroup.Group
+		g.SetLimit(txInfoConcurrency)
+		for _, i := range indexes {
+			g.Go(func() error {
+				results[i], errs[i] = fetch(ctx, chunks[i])
+				return nil
+			})
+		}
+		_ = g.Wait() // failures are per chunk in errs
+		return ctx.Err()
+	}
+	pending := make([]int, 0, len(chunks))
+	for i := range chunks {
+		pending = append(pending, i)
+	}
+	if err := fetchAll(pending); err != nil {
+		return nil, nil, err
+	}
+	for _, d := range waits {
+		pending = pending[:0]
+		for i, err := range errs {
+			if errors.Is(err, koiosparity.ErrTxInfoMissing) {
+				pending = append(pending, i)
+			}
+		}
+		if len(pending) == 0 {
+			break
+		}
+		logf(
+			"nodeparity: koios has not indexed every pending tx yet; "+
+				"fetching %d chunk(s) again in %s: %v",
+			len(pending), d, errs[pending[0]],
+		)
+		if err := wait(ctx, d); err != nil {
+			return nil, nil, err
+		}
+		if err := fetchAll(pending); err != nil {
+			return nil, nil, err
+		}
+	}
+	return results, errs, nil
+}
 
 var errAcquireWithoutLocalStateQuery = errors.New(
 	"acquire succeeded without a local state query client",
@@ -807,6 +884,7 @@ func RunFromGenesis(
 	})
 	// Read once: a callback can outlive the return on ctx cancellation.
 	lookupTimeout := epochLookupTimeout
+	indexWaits := slices.Clone(txInfoIndexWaits)
 	// epochAt resolves point's epoch from Dingo's era history, or from Dingo
 	// directly for a point the history does not cover. skip is true when
 	// Dingo refused point as too old before ever answering: the caller
@@ -911,8 +989,11 @@ func RunFromGenesis(
 	// Dingo's own live truth, rather than silently comparing a
 	// known-incomplete set.
 	//
+	// A chunk Koios had no result for is fetched again after each wait in
+	// txInfoIndexWaits (see fetchTxInfoChunks) before it counts as failed.
+	//
 	// It returns sessionCtx's error, and changes nothing, when the session
-	// ended during the fetches: they failed because of the cancellation, not
+	// ended during the fetches or the waits between them: they failed because of the cancellation, not
 	// because of Koios, so applying the chunks that did succeed and
 	// re-baselining would discard an exact reconstruction. The hashes stay
 	// buffered and the next session fetches each one once. A session that
@@ -929,24 +1010,17 @@ func RunFromGenesis(
 			end := min(start+koiosparity.KoiosTxInfoBatchSize, len(pendingTxHashes))
 			chunks = append(chunks, pendingTxHashes[start:end])
 		}
-		results := make([][]koiosparity.KoiosTxInfoItem, len(chunks))
-		errs := make([]error, len(chunks))
-
 		flushStart := time.Now()
-		g, gctx := errgroup.WithContext(sessionCtx)
-		g.SetLimit(txInfoConcurrency)
-		for i, chunk := range chunks {
-			g.Go(func() error {
-				txInfos, err := fetchTxInfosCached(
-					gctx, koios, cache, network, chunk,
-				)
-				results[i] = txInfos
-				errs[i] = err
-				return nil
-			})
-		}
-		_ = g.Wait() // errors are per-chunk in errs; nothing here to fail on
-		if err := sessionCtx.Err(); err != nil {
+		results, errs, err := fetchTxInfoChunks(
+			sessionCtx, chunks,
+			func(
+				ctx context.Context, chunk []string,
+			) ([]koiosparity.KoiosTxInfoItem, error) {
+				return fetchTxInfosCached(ctx, koios, cache, network, chunk)
+			},
+			indexWaits, waitStakeRetry, logf,
+		)
+		if err != nil {
 			return err
 		}
 		txInfoFlushCount++
