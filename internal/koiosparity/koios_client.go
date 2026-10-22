@@ -207,7 +207,7 @@ var koiosBaseURLs = map[string]string{
 // KoiosEpochInfoResp is the Koios /epoch_info response shape, covering every
 // field in the documented schema (components/schemas/epoch_info in
 // https://api.koios.rest/koiosapi.yaml).
-// Note: pool_cnt and delegator_cnt are not returned by preview/preprod and are omitted.
+// Note: pool_cnt and delegator_cnt are not returned by Koios and are omitted.
 // active_stake, fees, and total_rewards are documented nullable on early
 // epochs (pre-staking, pre-rewards). out_sum and avg_blk_reward are not
 // documented nullable but are defensively typed as pointers because Koios has

@@ -28,13 +28,11 @@ package nodeparity
 // indefinitely, so it can answer for epoch 1 exactly as readily as epoch
 // 100 regardless of when Dingo asks.
 //
-// Restricted to preview/preprod, matching koios-parity's own restriction
-// (koios_client.go's validateKoiosNetwork) and this tool's own existing
-// --network validation: Koios only ever serves these two networks, and a
-// from-genesis UTxO-set reconstruction (CheckUTxO below) walks every
-// transaction one at a time, which is only tractable at these networks'
-// scale. It is not a substitute for the existing cardano-node-based Check
-// at mainnet scale -- see this package's doc comment for when to use which.
+// Restricted to preview/preprod, matching this tool's own existing
+// --network validation: a from-genesis UTxO-set reconstruction (CheckUTxO
+// below) walks every transaction one at a time, which is only tractable at
+// these networks' scale. It is not a substitute for the existing
+// cardano-node-based Check at mainnet scale -- see this package's doc comment for when to use which.
 //
 // This is intentionally narrower than DiffSnapshots/Diff (check.go,
 // diff.go), which assume a full-fidelity Snapshot from a real
@@ -121,8 +119,8 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-// KoiosNetworks are the only networks Koios's own client, and this
-// comparison, ever supports -- see this file's doc comment.
+// KoiosNetworks are the only networks this comparison supports -- see this
+// file's doc comment.
 var KoiosNetworks = map[string]bool{"preview": true, "preprod": true}
 
 // NewKoiosClient constructs a Koios client for network, validating it is

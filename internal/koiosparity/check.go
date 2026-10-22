@@ -108,7 +108,7 @@ func Check(
 ) (*CheckResult, error) {
 	// Check works entirely from the cache and never constructs a
 	// KoiosClient (unlike Fetch), so nothing else validates cfg.Network —
-	// without this, an unsupported network (e.g. "mainnet") would reach
+	// without this, an unsupported network (e.g. "sanchonet") would reach
 	// compareEpochAccounts/StakeAddressFromCredential unrejected. See
 	// validateKoiosNetwork's doc comment.
 	if err := validateKoiosNetwork(cfg.Network); err != nil {

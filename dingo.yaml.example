@@ -521,12 +521,12 @@
   # CLI: --token-registry-allow-rollback
   # allowRollback: false
 
-# Optional in-process Koios reward-parity observer (dingo #3098). When
+# Optional in-process Koios reward-parity observer. When
 # enabled, Dingo subscribes an observer to its own epoch.transition EventBus
 # event and validates each newly closed epoch's committed reward state
 # directly against Koios reference data as the node advances -- no separate
 # koios-parity CLI process or second synced copy of the database required.
-# This is a one-off validation aid for preview/preprod, not a permanent
+# This is a one-off validation aid, not a permanent
 # subsystem; leave disabled for normal node operation. See
 # internal/koiosparity and ARCHITECTURE.md's "Koios Parity Tracker" section.
 # koiosParity:
