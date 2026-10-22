@@ -104,8 +104,11 @@ package nodeparity
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
 	"math/big"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -320,13 +323,17 @@ type StakeMismatch struct {
 	//   - ReasonTotalActiveStakeMismatch (numeric; see DiffLovelace)
 	//   - ReasonNoKoiosActiveStake (KoiosFault)
 	//   - ReasonKoiosEpochInfoUnavailable, followed by ": " and the fetch
-	//     error (KoiosFault) -- the only Reason that is not a fixed
-	//     string, so match it by prefix rather than equality
+	//     error (KoiosFault)
+	//   - ReasonKoiosPoolHistoryUnavailable, followed by ": " and the
+	//     unfetched pools (KoiosFault)
+	// The last two are not fixed strings, so match them by prefix rather
+	// than equality.
 	Reason string
 	// KoiosFault is true for the cases Koios's own data or availability
 	// made the comparison untrustworthy rather than a real Dingo/Koios
 	// disagreement: an unparseable active_stake value,
-	// ReasonNoKoiosActiveStake, and ReasonKoiosEpochInfoUnavailable. It matches
+	// ReasonNoKoiosActiveStake, ReasonKoiosEpochInfoUnavailable, and
+	// ReasonKoiosPoolHistoryUnavailable. It matches
 	// koiosparity.StatusError's treatment of a Koios-side fetch failure,
 	// and is deliberately false for "no koios pool_history row for nonzero
 	// dingo stake" and for the overflow case, both of which are genuine
@@ -535,6 +542,13 @@ type poolStake struct {
 // KoiosFault, rather than returned as an error: an error would discard the
 // per-pool mismatches already found, letting an outage of that endpoint
 // hide a real divergence.
+//
+// A pool whose /pool_history fetch fails does not stop the others. The failed
+// pools are fetched again after each wait in stakeRetryWaits, and any still
+// unfetched after the last round are reported as one KoiosFault mismatch,
+// ReasonKoiosPoolHistoryUnavailable, beside every mismatch the fetched pools
+// produced: a divergence found is reported, and an epoch with unfetched pools
+// is never a match. Only ctx ending turns into an error return.
 func CheckStakeDistribution(
 	ctx context.Context,
 	client *localstatequery.Client,
@@ -542,6 +556,25 @@ func CheckStakeDistribution(
 	cache *koiosparity.Cache,
 	network string,
 	epoch uint64,
+) ([]StakeMismatch, error) {
+	return checkStakeDistribution(
+		ctx, client, koios, cache, network, epoch,
+		stakeRetryWaits[:], waitStakeRetry,
+	)
+}
+
+// checkStakeDistribution is CheckStakeDistribution with the retry schedule
+// and the wait between rounds supplied by the caller, so tests need not
+// sleep through the production schedule.
+func checkStakeDistribution(
+	ctx context.Context,
+	client *localstatequery.Client,
+	koios *koiosparity.KoiosClient,
+	cache *koiosparity.Cache,
+	network string,
+	epoch uint64,
+	retryWaits []time.Duration,
+	wait func(context.Context, time.Duration) error,
 ) ([]StakeMismatch, error) {
 	pd, err := client.GetPoolDistr2(nil)
 	if err != nil {
@@ -589,49 +622,96 @@ func CheckStakeDistribution(
 	}
 
 	results := make([]*StakeMismatch, len(pools))
-	g, gctx := errgroup.WithContext(ctx)
-	g.SetLimit(stakeCheckConcurrency)
+	fetchErrs := make([]error, len(pools))
+	var unfetched []int
 	for i, p := range pools {
-		g.Go(func() error {
-			if row, ok := cached[p.bech32]; ok {
-				hist := &koiosparity.KoiosPoolHistoryItem{
-					EpochNo:        row.Epoch,
-					ActiveStake:    row.ActiveStake,
-					BlockCnt:       row.BlockCnt,
-					DelegatorCnt:   row.Delegators,
-					FixedCost:      row.FixedCost,
-					PoolFees:       row.PoolFees,
-					DelegRewards:   row.DelegRewards,
-					EpochRos:       parseFloatOrZero(row.EpochRos),
-					SaturationPct:  parseFloatOrZero(row.SaturationPct),
-					Margin:         parseFloatPtrOrNil(row.Margin),
-					ActiveStakePct: parseFloatPtrOrNil(row.ActiveStakePct),
-					MemberRewards:  strPtrOrNil(row.MemberRewards),
-				}
-				results[i] = evaluatePoolStake(p.bech32, p.stake, hist)
-				return nil
-			}
-			hist, err := koios.GetPoolEpochHistory(gctx, p.bech32, epoch)
-			if err != nil {
-				return fmt.Errorf(
-					"koios pool_history for %s epoch %d: %w",
-					p.bech32, epoch, err,
-				)
-			}
-			results[i] = evaluatePoolStake(p.bech32, p.stake, hist)
-			if cache != nil && hist != nil {
-				// Best-effort, same rationale as CheckProtocolParams's cache
-				// write: a hiccup here must not fail a check that already has
-				// a trustworthy live answer.
-				_ = cache.UpsertPoolEpoch(koiosparity.PoolEpochFromKoiosHistoryItem(
-					network, epoch, p.bech32, hist, time.Now().UTC(),
-				))
-			}
-			return nil
-		})
+		if row, ok := cached[p.bech32]; ok {
+			results[i] = evaluatePoolStake(
+				p.bech32, p.stake, poolHistoryFromCache(row),
+			)
+			continue
+		}
+		unfetched = append(unfetched, i)
 	}
-	if err := g.Wait(); err != nil {
-		return nil, err
+
+	// Each failure is kept per pool rather than returned from g.Go: an
+	// errgroup error would cancel every other in-flight fetch, turning one
+	// stalled request into a stake check that did not run for the epoch.
+	fetchOne := func(p poolStake) (*StakeMismatch, error) {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		hist, err := koios.GetPoolEpochHistory(ctx, p.bech32, epoch)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"koios pool_history for %s epoch %d: %w",
+				p.bech32, epoch, err,
+			)
+		}
+		if cache != nil && hist != nil {
+			// Best-effort, same rationale as CheckProtocolParams's cache
+			// write: a hiccup here must not fail a check that already has a
+			// trustworthy live answer.
+			_ = cache.UpsertPoolEpoch(koiosparity.PoolEpochFromKoiosHistoryItem(
+				network, epoch, p.bech32, hist, time.Now().UTC(),
+			))
+		}
+		return evaluatePoolStake(p.bech32, p.stake, hist), nil
+	}
+	fetch := func(indexes []int) {
+		var g errgroup.Group
+		g.SetLimit(stakeCheckConcurrency)
+		for _, i := range indexes {
+			g.Go(func() error {
+				results[i], fetchErrs[i] = fetchOne(pools[i])
+				return nil
+			})
+		}
+		_ = g.Wait() // every goroutine returns nil; failures are in fetchErrs
+	}
+	stillFailing := func(indexes []int) []int {
+		var failed []int
+		for _, i := range indexes {
+			if fetchErrs[i] != nil {
+				failed = append(failed, i)
+			}
+		}
+		return failed
+	}
+
+	fetch(unfetched)
+	unfetched = stillFailing(unfetched)
+	rounds := 0
+	for _, d := range retryWaits {
+		if ctx.Err() != nil {
+			break
+		}
+		// A permanent rejection (auth, bad request) cannot succeed on a
+		// later round, so only the transient failures are fetched again.
+		var retry []int
+		for _, i := range unfetched {
+			if !errors.Is(fetchErrs[i], koiosparity.ErrKoiosPermanent) {
+				retry = append(retry, i)
+			}
+		}
+		if len(retry) == 0 {
+			break
+		}
+		slog.Warn(
+			"nodeparity: retrying koios pool_history after transient failures",
+			"epoch", epoch, "pools", len(retry), "wait", d,
+		)
+		if err := wait(ctx, d); err != nil {
+			break
+		}
+		rounds++
+		fetch(retry)
+		unfetched = stillFailing(unfetched)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf(
+			"koios pool_history for epoch %d: %w", epoch, err,
+		)
 	}
 
 	var mismatches []StakeMismatch
@@ -639,6 +719,11 @@ func CheckStakeDistribution(
 		if m != nil {
 			mismatches = append(mismatches, *m)
 		}
+	}
+	if len(unfetched) > 0 {
+		mismatches = append(mismatches, unfetchedPoolsFault(
+			pools, unfetched, fetchErrs, rounds,
+		))
 	}
 	// Appended, never returned as an error: an error here would discard
 	// every per-pool mismatch collected above, so an /epoch_info outage
@@ -650,10 +735,98 @@ func CheckStakeDistribution(
 	); t != nil {
 		mismatches = append(mismatches, *t)
 	}
-	sort.Slice(mismatches, func(i, j int) bool {
+	sort.SliceStable(mismatches, func(i, j int) bool {
 		return mismatches[i].PoolIDBech32 < mismatches[j].PoolIDBech32
 	})
 	return mismatches, nil
+}
+
+// stakeRetryWaits is the wait before each round that fetches the pools whose
+// /pool_history request failed again. Preprod's Koios mirror was observed
+// stalling for about a minute, longer than the shared client's own retries
+// (three attempts with 15s header timeouts and 2s/4s backoff, about 50s), and
+// the same requests answered in under 3s afterwards. The first round clears a
+// stall of that length; the doubling rounds cover one several times longer,
+// and the schedule stays bounded so a sustained outage reports the epoch
+// incomplete within about six minutes rather than holding the run.
+var stakeRetryWaits = [...]time.Duration{
+	30 * time.Second,
+	60 * time.Second,
+	120 * time.Second,
+}
+
+// stakeUnfetchedPoolsListed caps how many pool IDs the
+// ReasonKoiosPoolHistoryUnavailable reason names; the count covers the rest.
+const stakeUnfetchedPoolsListed = 10
+
+// waitStakeRetry waits d, returning early with ctx's error if ctx ends first.
+func waitStakeRetry(ctx context.Context, d time.Duration) error {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+// poolHistoryFromCache rebuilds the /pool_history answer a cached
+// koios_pool_epoch row was written from.
+func poolHistoryFromCache(
+	row koiosparity.KoiosPoolEpoch,
+) *koiosparity.KoiosPoolHistoryItem {
+	return &koiosparity.KoiosPoolHistoryItem{
+		EpochNo:        row.Epoch,
+		ActiveStake:    row.ActiveStake,
+		BlockCnt:       row.BlockCnt,
+		DelegatorCnt:   row.Delegators,
+		FixedCost:      row.FixedCost,
+		PoolFees:       row.PoolFees,
+		DelegRewards:   row.DelegRewards,
+		EpochRos:       parseFloatOrZero(row.EpochRos),
+		SaturationPct:  parseFloatOrZero(row.SaturationPct),
+		Margin:         parseFloatPtrOrNil(row.Margin),
+		ActiveStakePct: parseFloatPtrOrNil(row.ActiveStakePct),
+		MemberRewards:  strPtrOrNil(row.MemberRewards),
+	}
+}
+
+// unfetchedPoolsFault builds the ReasonKoiosPoolHistoryUnavailable mismatch
+// for the pools in unfetched, naming the first stakeUnfetchedPoolsListed of
+// them in bech32 order and the error of the first one named.
+func unfetchedPoolsFault(
+	pools []poolStake,
+	unfetched []int,
+	fetchErrs []error,
+	rounds int,
+) StakeMismatch {
+	sorted := slices.Clone(unfetched)
+	slices.SortFunc(sorted, func(a, b int) int {
+		return strings.Compare(pools[a].bech32, pools[b].bech32)
+	})
+	var stake uint64
+	for _, i := range sorted {
+		stake += pools[i].stake
+	}
+	listed := sorted[:min(len(sorted), stakeUnfetchedPoolsListed)]
+	names := make([]string, 0, len(listed))
+	for _, i := range listed {
+		names = append(names, pools[i].bech32)
+	}
+	list := strings.Join(names, ", ")
+	if more := len(sorted) - len(listed); more > 0 {
+		list += fmt.Sprintf(" and %d more", more)
+	}
+	return StakeMismatch{
+		DingoStake: stake,
+		Reason: fmt.Sprintf(
+			"%s: %d of %d pools after %d retry rounds (%s); first error: %v",
+			ReasonKoiosPoolHistoryUnavailable, len(sorted), len(pools),
+			rounds, list, fetchErrs[sorted[0]],
+		),
+		KoiosFault: true,
+	}
 }
 
 // ReasonTotalActiveStakeMismatch marks the one StakeMismatch that is not
@@ -679,6 +852,13 @@ const ReasonNoKoiosActiveStake = "koios reported no active_stake for the epoch"
 // mismatches found alongside it -- returning an error instead would throw
 // those away and let an outage of this endpoint hide a real divergence.
 const ReasonKoiosEpochInfoUnavailable = "koios epoch_info fetch failed"
+
+// ReasonKoiosPoolHistoryUnavailable marks pools whose /pool_history could not
+// be fetched after every retry round, so their stake was never compared. It
+// carries KoiosFault and an empty PoolIDBech32; DingoStake is the stake Dingo
+// reports for those pools together, and the Reason continues with ": ", the
+// pool count and the first pools' IDs, so match it by prefix.
+const ReasonKoiosPoolHistoryUnavailable = "koios pool_history fetch failed"
 
 // ReasonKoiosEpochNotPublished marks an epoch Koios has not computed
 // pool_history for yet. Every pool then looks absent, so without this the

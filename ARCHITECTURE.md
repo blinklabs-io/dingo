@@ -13724,7 +13724,13 @@ last block processed after a backoff; only interruption ends the run. The
 rollback that opens a resumed session lands on the block already processed, so it changes nothing
 and keeps the comparison. A "not run" verdict names its cause: a failed
 `/tx_info` fetch, a rollback and its slot, or a baseline captured at that
-boundary.
+boundary. The stake comparison fetches each pool's `/pool_history`
+independently, so one failed request no longer abandons the epoch: the
+failed pools are fetched again after waits of 30s, 60s and 120s (permanent
+rejections are not), and pools still unfetched after the last round make the
+stake verdict incomplete, naming them, while a divergence found on any pool
+that did fetch is still reported. The shared Koios client's own timeouts and
+retries are unchanged; the session ending stops the rounds.
 
 Every session opens with a rollback to the origin, which Dingo refuses to
 acquire; the origin is epoch 0, so the tool does not ask. Each block's epoch
