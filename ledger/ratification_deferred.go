@@ -349,14 +349,60 @@ func (ls *LedgerState) WaitEpochBoundaryJob(ctx context.Context) error {
 			)
 		}
 	case <-ctx.Done():
-		return ctx.Err()
+		return epochBoundaryJobWaitError(ctx, job.record.Epoch)
 	}
 	select {
 	case <-job.settled:
 		return nil
 	case <-ctx.Done():
-		return ctx.Err()
+		return epochBoundaryJobWaitError(ctx, job.record.Epoch)
 	}
+}
+
+// ErrEpochBoundaryJobPending is wrapped, with the context's own error, by a
+// wait for an epoch boundary's deferred job that ended before the job settled.
+var ErrEpochBoundaryJobPending = errors.New("epoch boundary job still running")
+
+func epochBoundaryJobWaitError(ctx context.Context, epoch uint64) error {
+	return fmt.Errorf(
+		"wait for epoch %d boundary job: %w: %w",
+		epoch, ErrEpochBoundaryJobPending, ctx.Err(),
+	)
+}
+
+// EpochBoundaryJobPending reports whether the most recent boundary's deferred
+// work is still running, so WaitEpochBoundaryJob would block. A boundary that
+// has committed but not yet published its job is not reported.
+func (ls *LedgerState) EpochBoundaryJobPending() bool {
+	ls.ratificationMu.Lock()
+	job := ls.ratificationJob
+	ls.ratificationMu.Unlock()
+	if job == nil {
+		return false
+	}
+	select {
+	case <-job.settled:
+		return false
+	default:
+		return true
+	}
+}
+
+// HoldEpochBoundaryJobForTesting publishes an epoch boundary job for epoch
+// that stays pending until release runs, for tests of readers that wait on
+// one. The job has no pending-ratification record in the database.
+func (ls *LedgerState) HoldEpochBoundaryJobForTesting(
+	epoch uint64,
+) (release func()) {
+	job := &ratificationJob{
+		record:  pendingRatificationRecord{Epoch: epoch},
+		decided: make(chan struct{}),
+		settled: make(chan struct{}),
+	}
+	ls.ratificationMu.Lock()
+	ls.ratificationJob = job
+	ls.ratificationMu.Unlock()
+	return job.settle
 }
 
 // discardPendingRatificationAfterSlot deletes, in the rollback transaction, a

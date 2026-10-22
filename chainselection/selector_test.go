@@ -7233,3 +7233,128 @@ func TestRollbackRegisteredPeerBehindLocalTipEvaluation(t *testing.T) {
 		assert.Equal(t, peer, none.PreviousConnectionId)
 	})
 }
+
+func newHostConnectionId(host, port int) ouroboros.ConnectionId {
+	localAddr, _ := net.ResolveTCPAddr("tcp", "127.0.0.1:3001")
+	remoteAddr, _ := net.ResolveTCPAddr(
+		"tcp",
+		fmt.Sprintf("127.0.1.%d:%d", host, port),
+	)
+	return ouroboros.ConnectionId{
+		LocalAddr:  localAddr,
+		RemoteAddr: remoteAddr,
+	}
+}
+
+// A lagging peer that delivers the first headers of a from-genesis sync must
+// not cap every honest peer through the bootstrap advertised bound: once a
+// second remote host advertises a tip within K of a refused one, the honest
+// tip is accepted and selection can follow it.
+func TestBootstrapAdvertisedBoundStaleReferenceDoesNotWedge(t *testing.T) {
+	t.Parallel()
+	const (
+		securityParam = 2160
+		staleBlock    = 4805012
+		networkBlock  = 5311431
+	)
+	blockTip := func(block uint64, hash string) ochainsync.Tip {
+		return ochainsync.Tip{
+			Point: ocommon.Point{
+				Slot: block * 20,
+				Hash: fmt.Appendf(nil, "%s-%d", hash, block),
+			},
+			BlockNumber: block,
+		}
+	}
+	var reasons []PeerTipRejection
+	cs := NewChainSelector(ChainSelectorConfig{
+		SecurityParam:             securityParam,
+		DisableEventSubscriptions: true,
+		OnPeerTipRejected: func(r PeerTipRejection) {
+			reasons = append(reasons, r)
+		},
+	})
+	stale := newHostConnectionId(1, 6000)
+	require.True(t, cs.updatePeerTipObserved(
+		stale, blockTip(staleBlock, "stale"), blockTip(10, "chain"), nil,
+	))
+
+	honest := blockTip(networkBlock, "honest")
+	first := newHostConnectionId(2, 6000)
+	assert.False(t, cs.updatePeerTipObserved(
+		first, honest, blockTip(1, "chain"), nil,
+	), "a lone claim beyond the stale reference is refused")
+	assert.Equal(t, []PeerTipRejection{PeerTipRejectedAdvertisedTip}, reasons)
+
+	second := newHostConnectionId(3, 6000)
+	require.True(t, cs.updatePeerTipObserved(
+		second, blockTip(networkBlock+2, "honest"), blockTip(1, "chain"), nil,
+	), "a second host agreeing with the refused claim is accepted")
+
+	reconnected := newHostConnectionId(2, 6001)
+	require.True(t, cs.updatePeerTipObserved(
+		reconnected, honest, blockTip(1, "chain"), nil,
+	), "the refused host is accepted once an honest reference exists")
+	require.True(t, cs.updatePeerTipObserved(
+		newHostConnectionId(4, 6000), honest, blockTip(1, "chain"), nil,
+	))
+	assert.Len(t, reasons, 1)
+
+	require.True(t, cs.updatePeerTipObserved(
+		second, honest, blockTip(50, "chain"), nil,
+	))
+	cs.EvaluateAndSwitch()
+	best := cs.GetBestPeer()
+	require.NotNil(t, best)
+	assert.Equal(t, second, *best)
+}
+
+// The bootstrap advertised bound still refuses a far claim no other remote
+// host supports, including the same host reconnecting to vouch for itself.
+func TestBootstrapAdvertisedBoundRejectsLoneFarClaim(t *testing.T) {
+	t.Parallel()
+	const (
+		securityParam = 2160
+		networkBlock  = 5311431
+		inflated      = 9_000_000
+	)
+	blockTip := func(block uint64, hash string) ochainsync.Tip {
+		return ochainsync.Tip{
+			Point: ocommon.Point{
+				Slot: block * 20,
+				Hash: fmt.Appendf(nil, "%s-%d", hash, block),
+			},
+			BlockNumber: block,
+		}
+	}
+	var reasons []PeerTipRejection
+	cs := NewChainSelector(ChainSelectorConfig{
+		SecurityParam:             securityParam,
+		DisableEventSubscriptions: true,
+		OnPeerTipRejected: func(r PeerTipRejection) {
+			reasons = append(reasons, r)
+		},
+	})
+	for host := 1; host <= 3; host++ {
+		require.True(t, cs.updatePeerTipObserved(
+			newHostConnectionId(host, 6000),
+			blockTip(networkBlock, "honest"),
+			blockTip(1, "chain"),
+			nil,
+		))
+	}
+	for port := 6000; port < 6003; port++ {
+		assert.False(t, cs.updatePeerTipObserved(
+			newHostConnectionId(9, port),
+			blockTip(inflated, "inflated"),
+			blockTip(1, "chain"),
+			nil,
+		))
+	}
+	assert.Equal(t, []PeerTipRejection{
+		PeerTipRejectedAdvertisedTip,
+		PeerTipRejectedAdvertisedTip,
+		PeerTipRejectedAdvertisedTip,
+	}, reasons)
+	assert.Equal(t, 3, cs.PeerCount())
+}

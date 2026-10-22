@@ -25,8 +25,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger"
@@ -1353,6 +1355,42 @@ func TestLocalstatequeryProtocol_QueryAfterRollbackKeepsConnection(
 	require.NoError(t, client.Release())
 }
 
+// TestLocalstatequeryAcquireBeforeConnectionRegistered covers a client whose
+// Acquire is handled before the connection manager has registered its
+// connection. The manager registers an inbound connection only after the
+// connection's protocols are running, so a client that dials and acquires at
+// once can reach the callback in that gap. The request must not be cancelled
+// for it: the manager's lookup by ID is not evidence the connection is gone.
+func TestLocalstatequeryAcquireBeforeConnectionRegistered(t *testing.T) {
+	t.Parallel()
+
+	o, _, _ := newSnapshotTestOuroboros(t, OuroborosConfig{})
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	bus := event.NewEventBus(nil, logger)
+	t.Cleanup(bus.Close)
+	o.connManager = connmanager.NewConnectionManager(
+		connmanager.ConnectionManagerConfig{EventBus: bus, Logger: logger},
+	)
+	t.Cleanup(func() {
+		// Not t.Context(): it is cancelled before cleanups run.
+		stopCtx, cancel := context.WithTimeout(
+			context.Background(), 5*time.Second,
+		)
+		defer cancel()
+		require.NoError(t, o.connManager.Stop(stopCtx))
+	})
+	ctx := olocalstatequery.CallbackContext{
+		ConnectionId: ouroboros.ConnectionId{},
+		Server:       olocalstatequery.NewServer(protocol.ProtocolOptions{}, nil),
+	}
+	require.Nil(t, o.connManager.GetConnectionById(ctx.ConnectionId),
+		"the connection must not be registered yet")
+
+	require.NoError(t, o.localstatequeryServerAcquire(
+		ctx, olocalstatequery.AcquireVolatileTip{}, false,
+	), "an Acquire from a connection that is not registered yet must succeed")
+}
+
 // TestLocalstatequeryReopen_PinsReopenedView proves a reopened view holds a
 // pruning pin, as a specific-point Acquire's does, and that Release drops it.
 // A tip session holds no pin before it expires, so its reopen is where the pin
@@ -1472,4 +1510,117 @@ func TestLocalstatequeryReopen_CloseDuringReopenLeavesNoView(t *testing.T) {
 	o.localstatequeryAcquireMutex.Unlock()
 	require.False(t, hasSession, "nor a session for the dead connection")
 	require.False(t, hasAcquisition, "nor its in-flight acquisition")
+}
+
+// TestLocalStateQueryAcquireWaitBelowClientTimeout pins the server's Acquire
+// wait below the gouroboros client's default Acquire timeout. With the two
+// equal, a client always timed out in Acquiring before the AcquireFailure
+// reached it, and closed the connection.
+func TestLocalStateQueryAcquireWaitBelowClientTimeout(t *testing.T) {
+	t.Parallel()
+
+	clientTimeout := olocalstatequery.NewConfig().AcquireTimeout
+	require.Positive(t, clientTimeout)
+	require.Less(
+		t,
+		localStateQueryAcquireWait,
+		clientTimeout,
+		"an AcquireFailure must reach a default client before it gives up",
+	)
+	require.GreaterOrEqual(
+		t,
+		clientTimeout-localStateQueryAcquireWait,
+		time.Second,
+		"the margin must cover the request's transit and the reply's",
+	)
+}
+
+// A tip Acquire during an epoch boundary's job must not wait for it: the job
+// can outlast the Acquire budget, and a failed tip Acquire closes the
+// connection. The session's first Query opens the snapshot once the job
+// settles, at the tip current then, and later queries keep answering from it.
+func TestLocalstatequeryTipAcquireDuringBoundaryJobDefersSnapshot(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	o, db, _ := newSnapshotTestOuroboros(t, OuroborosConfig{})
+	release := o.ledgerState.HoldEpochBoundaryJobForTesting(163)
+	ctx := olocalstatequery.CallbackContext{
+		ConnectionId: ouroboros.ConnectionId{},
+	}
+
+	session := acquireSnapshotTestSession(t, o, ctx)
+	o.localstatequeryAcquireMutex.Lock()
+	require.Nil(t, session.view, "the snapshot must wait for the first Query")
+	o.localstatequeryAcquireMutex.Unlock()
+
+	settledTip := moveTestTip(t, db, 2)
+	type queryResult struct {
+		point any
+		err   error
+	}
+	done := make(chan queryResult, 1)
+	go func() {
+		point, err := queryChainPoint(t, o, ctx)
+		done <- queryResult{point: point, err: err}
+	}()
+	testutil.RequireNoReceive(
+		t, done, 100*time.Millisecond,
+		"the first Query must wait for the boundary job",
+	)
+	release()
+	got := testutil.RequireReceive(
+		t, done, testutil.AsyncWait, "the first Query did not finish",
+	)
+	require.NoError(t, got.err)
+	require.Equal(t, settledTip, got.point)
+
+	moveTestTip(t, db, 3)
+	point, err := queryChainPoint(t, o, ctx)
+	require.NoError(t, err)
+	require.Equal(t, settledTip, point, "the opened snapshot must stay fixed")
+}
+
+// A deferred session the client releases before querying holds no snapshot.
+func TestLocalstatequeryReleaseDeferredSession(t *testing.T) {
+	t.Parallel()
+
+	o, _, _ := newSnapshotTestOuroboros(t, OuroborosConfig{})
+	t.Cleanup(o.ledgerState.HoldEpochBoundaryJobForTesting(163))
+	ctx := olocalstatequery.CallbackContext{
+		ConnectionId: ouroboros.ConnectionId{},
+	}
+	acquireSnapshotTestSession(t, o, ctx)
+	require.NoError(t, o.localstatequeryServerRelease(ctx))
+	o.localstatequeryAcquireMutex.Lock()
+	_, held := o.localstatequerySessions[ctx.ConnectionId]
+	o.localstatequeryAcquireMutex.Unlock()
+	require.False(t, held)
+}
+
+// Over the wire, a default gouroboros client's tip Acquire during a boundary
+// job is acquired within its own 5s timeout and its connection stays usable.
+func TestLocalstatequeryProtocol_TipAcquireDuringBoundaryJob(t *testing.T) {
+	t.Parallel()
+
+	o, db, _ := newSnapshotTestOuroboros(t, OuroborosConfig{})
+	release := o.ledgerState.HoldEpochBoundaryJobForTesting(163)
+	client := newLocalStateQueryTestClient(t, o)
+
+	require.NoError(t, client.AcquireVolatileTip())
+	settledTip := moveTestTip(t, db, 2)
+	release()
+	point, err := client.GetChainPoint()
+	require.NoError(t, err)
+	require.Equal(t, settledTip.Slot, point.Slot)
+	require.NoError(t, client.Release())
+}
+
+func TestLocalStateQueryDeferredOpenWaitBelowClientTimeout(t *testing.T) {
+	t.Parallel()
+
+	clientTimeout := olocalstatequery.NewConfig().QueryTimeout
+	require.Positive(t, clientTimeout)
+	require.Less(t, localStateQueryDeferredOpenWait, clientTimeout)
 }

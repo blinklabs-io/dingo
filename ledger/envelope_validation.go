@@ -107,7 +107,7 @@ func (p envelopeParent) withStoredByronPosition(
 }
 
 func envelopeParentFromBlock(block gledger.Block) envelopeParent {
-	_, isEbb := block.(*byron.ByronEpochBoundaryBlock)
+	isEbb := isByronEpochBoundaryBlock(block)
 	parent := envelopeParent{
 		slot:        block.SlotNumber(),
 		blockNumber: block.BlockNumber(),
@@ -120,6 +120,17 @@ func envelopeParentFromBlock(block gledger.Block) envelopeParent {
 	parent.byronSlot = slot
 	parent.byronPositioned = positioned
 	return parent
+}
+
+func isByronEpochBoundaryBlock(block gledger.Block) bool {
+	if _, ok := block.(*byron.ByronEpochBoundaryBlock); ok {
+		return true
+	}
+	if block == nil || isNilBlockHeader(block.Header()) {
+		return false
+	}
+	_, ok := block.Header().(*byron.ByronEpochBoundaryBlockHeader)
+	return ok
 }
 
 // byronBlockPosition returns a Byron block's epoch and its slot within that
@@ -368,7 +379,7 @@ func validateBlockOrder(
 			)
 		}
 	}
-	_, isEbb := block.(*byron.ByronEpochBoundaryBlock)
+	isEbb := isByronEpochBoundaryBlock(block)
 	expectedBlockNumber := parent.blockNumber + 1
 	if isEbb && !parent.byronEbb {
 		expectedBlockNumber = parent.blockNumber

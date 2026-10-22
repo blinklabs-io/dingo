@@ -380,11 +380,16 @@ func (ls *LedgerState) validateAndApplyEndorserBlockTransactions(
 				epochStartSlot:    snapshot.currentEpochStartSlot,
 			}).pinCommitteeState(snapshot.currentEpoch, pp).
 				pinSyntheticV2CostModel(synthetic)
+			validateStart := time.Now()
 			err = validationEra.ValidateTxFunc(
 				tx,
 				referenceSlot,
 				lv,
 				pp,
+			)
+			ls.metrics.observeBlockStage(
+				blockStageValidate,
+				time.Since(validateStart),
 			)
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return 0, 0, ctxErr
@@ -425,7 +430,9 @@ func (ls *LedgerState) validateAndApplyEndorserBlockTransactions(
 			applyEvents = append(applyEvents, events...)
 		}
 		delta.addTransaction(tx, idx)
+		applyStart := time.Now()
 		err = delta.applyWithoutRecordingDonations(ctx, ls, txn)
+		ls.metrics.observeBlockStage(blockStageApply, time.Since(applyStart))
 		if err == nil {
 			donation, err = addUint64(donation, delta.donation)
 		}
