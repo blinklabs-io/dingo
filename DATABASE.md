@@ -1250,6 +1250,7 @@ both errors and the database requires recovery before another load.
 - Table and column names are the snake_case names declared by versioned SQL DDL.
 - Byte columns store raw bytes, not hex strings. In Postgres use `encode(col, 'hex')` and `decode($1, 'hex')`. In MySQL use `HEX(col)` and `UNHEX(?)`.
 - `types.Uint64` values such as `amount`, `reward`, `pledge`, `cost`, treasury/reserves, and stake totals are persisted as unsigned decimal values through the Go SQL driver. Use numeric casts if your SQL client reports them as text in a specific backend.
+- Every statement, sqlc-generated or hand-written, must carry a leading `-- name: <PascalCaseName> :<verb>` comment in the constant text that is prepared and executed. `classifySQLStatement` reads it as the `query` label of `dingo_database_sql_query_duration_seconds`, so a statement without one is recorded as `unknown`. Statements on the block-apply path carry one; hand-written rollback, maintenance and API read statements that predate this rule do not yet, and are recorded as `unknown`. Hand-written names follow sqlc's PascalCase style (`InsertUtxoBatch`, `UpsertAccount`) and must not reuse a sqlc query name. A statement assembled at runtime (multi-row inserts, `IN` lists sized to the batch, per-table cleanups) uses one fixed name per builder and shape, never a name derived from data, table names from user input, or SQL text.
 - Quote the `transaction` table in SQL examples because it is a keyword-adjacent identifier: `"transaction"` in Postgres, `` `transaction` `` in MySQL.
 - `id` is the normal auto-increment primary key. Tables with ledger identifiers also have unique indexes such as `hash`, `(credential_tag, staking_key)`, `(tx_id, output_idx)`, or `(epoch, snapshot_type, pool_key_hash)`.
 - Relationships declared by the versioned schema are enforced as SQLite
@@ -2970,11 +2971,13 @@ each query's sqlc-generated `-- name: X :verb` comment; it is a no-op unless
 `Config.PromRegistry` is set. `dingo_database_sql_query_duration_seconds{op,
 query}` (histogram, same file and chokepoint, added alongside this section)
 observes each statement's wall-clock duration at the same point, labeled by
-that op classification plus, when known, the sqlc-generated query name itself
-(`classifySQLStatement`; `"unknown"` for a hand-written query with no `--
-name:` annotation, such as the cached `sumCredentialUtxoStake` query). The
-query name is safe as a label because it is one of a small, fixed, code-
-controlled set of sqlc annotations, not user input or raw SQL text. Both the
+that op classification plus the statement's query name itself
+(`classifySQLStatement`, read from the leading `-- name: X :verb` comment;
+`"unknown"` for a statement with no such comment, such as a PRAGMA or an unnamed
+rollback, maintenance or API read statement). The
+query name is safe as a label because it is a literal in the source, not user
+input or raw SQL text; a runtime-built statement carries one fixed name per
+builder and shape. Both the
 counter and the histogram cover every call site through `instrumentedQueryer`
 — domain queries, committee pruning, deferred-index maintenance — including
 the hot-statement cache's cached calls and
