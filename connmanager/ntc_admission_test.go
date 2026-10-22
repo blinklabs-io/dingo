@@ -213,6 +213,26 @@ func TestTrustedLocalNtCIdleAfterProtocolActivityReleasesAdmissionSlot(
 	requireTrustedNtCAdmissionCount(t, manager, 1)
 }
 
+func TestTrustedNtCLateActivityDoesNotRecreateClosedEntry(t *testing.T) {
+	t.Parallel()
+
+	manager := NewConnectionManager(ConnectionManagerConfig{})
+	conn := newUnstartedConnection(t)
+	connID := conn.Id()
+	endPreRegisterActivity := manager.BeginTrustedNtCOneWayActivity(connID, 7)
+	endPreRegisterActivity()
+	require.Contains(t, manager.trustedNtCActivities, connID)
+	manager.trustedNtCActivityOwners[connID] = conn
+
+	manager.unregisterTrustedNtCActivity(connID, conn)
+	endActivity := manager.BeginTrustedNtCActivity(connID, 7)
+	endActivity()
+
+	require.NotContains(t, manager.trustedNtCActivities, connID)
+	manager.forgetClosedTrustedNtCActivity(connID, conn)
+	require.NotContains(t, manager.trustedNtCClosedActivities, connID)
+}
+
 func requireNtCAdmissionRejected(t *testing.T, listener net.Listener) {
 	t.Helper()
 	conn := dialNtCAdmissionClient(t, listener)

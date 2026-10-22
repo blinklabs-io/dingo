@@ -109,6 +109,7 @@ type ConnectionManager struct {
 	trustedNtCActivityMutex      sync.Mutex
 	trustedNtCActivities         map[ouroboros.ConnectionId]*trustedNtCActivity
 	trustedNtCActivityOwners     map[ouroboros.ConnectionId]*ouroboros.Connection
+	trustedNtCClosedActivities   map[ouroboros.ConnectionId]*ouroboros.Connection
 	ntcTrustedLocalBufferedBytes atomic.Int64
 	ntcRemoteBufferedBytes       atomic.Int64
 }
@@ -236,6 +237,9 @@ func NewConnectionManager(cfg ConnectionManagerConfig) *ConnectionManager {
 			map[ouroboros.ConnectionId]*trustedNtCActivity,
 		),
 		trustedNtCActivityOwners: make(
+			map[ouroboros.ConnectionId]*ouroboros.Connection,
+		),
+		trustedNtCClosedActivities: make(
 			map[ouroboros.ConnectionId]*ouroboros.Connection,
 		),
 	}
@@ -961,7 +965,15 @@ func (c *ConnectionManager) addConnectionImplWithTrust(
 	go func() {
 		defer c.goroutineWg.Done()
 		if isNtC && trustedLocal {
-			defer c.unregisterTrustedNtCActivity(connId, conn)
+			defer func() {
+				c.unregisterTrustedNtCActivity(connId, conn)
+				closeConnAndLog(
+					c.config.Logger,
+					conn,
+					"trusted NtC close failed",
+				)
+				c.forgetClosedTrustedNtCActivity(connId, conn)
+			}()
 		}
 		if onClose != nil {
 			defer onClose()

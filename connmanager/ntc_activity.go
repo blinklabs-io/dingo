@@ -160,6 +160,10 @@ func (c *ConnectionManager) beginTrustedNtCActivity(
 	expectResponse bool,
 ) func() {
 	c.trustedNtCActivityMutex.Lock()
+	if _, closed := c.trustedNtCClosedActivities[connID]; closed {
+		c.trustedNtCActivityMutex.Unlock()
+		return func() {}
+	}
 	activity := c.trustedNtCActivities[connID]
 	if activity == nil {
 		activity = &trustedNtCActivity{
@@ -181,6 +185,7 @@ func (c *ConnectionManager) registerTrustedNtCActivity(
 	logger *slog.Logger,
 ) error {
 	c.trustedNtCActivityMutex.Lock()
+	delete(c.trustedNtCClosedActivities, connID)
 	activity := c.trustedNtCActivities[connID]
 	if activity == nil {
 		activity = &trustedNtCActivity{
@@ -205,4 +210,16 @@ func (c *ConnectionManager) unregisterTrustedNtCActivity(
 	}
 	delete(c.trustedNtCActivityOwners, connID)
 	delete(c.trustedNtCActivities, connID)
+	c.trustedNtCClosedActivities[connID] = owner
+}
+
+func (c *ConnectionManager) forgetClosedTrustedNtCActivity(
+	connID ouroboros.ConnectionId,
+	owner *ouroboros.Connection,
+) {
+	c.trustedNtCActivityMutex.Lock()
+	defer c.trustedNtCActivityMutex.Unlock()
+	if c.trustedNtCClosedActivities[connID] == owner {
+		delete(c.trustedNtCClosedActivities, connID)
+	}
 }

@@ -494,6 +494,7 @@ func (c *ConnectionManager) setupAcceptedConnection(
 			)
 			c.unregisterTrustedNtCActivity(oConn.Id(), oConn)
 			closeConnAndLog(c.config.Logger, oConn, "listener: close failed")
+			c.forgetClosedTrustedNtCActivity(oConn.Id(), oConn)
 			if ipKey != "" {
 				c.releaseIPSlot(ipKey)
 			}
@@ -525,6 +526,7 @@ func (c *ConnectionManager) setupAcceptedConnection(
 		) {
 			if l.TrustedLocal {
 				c.unregisterTrustedNtCActivity(oConn.Id(), oConn)
+				c.forgetClosedTrustedNtCActivity(oConn.Id(), oConn)
 			}
 			return
 		}
