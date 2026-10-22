@@ -483,6 +483,15 @@ func (s *snapshotServer) serveObject(
 		r = r.Clone(r.Context())
 		r.Header.Del("Range")
 	}
+	// Without a Content-Type, ServeContent sniffs the type by reading the
+	// head of the object and seeking back, which costs a remote store an
+	// extra ranged read, and the extension lookup depends on the host's MIME
+	// tables. Every served key is a .json certificate or a .tar.zst archive.
+	contentType := "application/zstd"
+	if strings.HasSuffix(key, ".json") {
+		contentType = "application/json"
+	}
+	w.Header().Set("Content-Type", contentType)
 	http.ServeContent(w, r, path.Base(key), time.Time{}, obj)
 }
 

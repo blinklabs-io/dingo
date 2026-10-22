@@ -870,6 +870,7 @@ func TestServerLimitsMultipartRangesOnRemoteStores(t *testing.T) {
 		before := counting.opens.Load()
 		resp := get(t, srv.URL+name, "Range", h)
 		require.Equal(t, http.StatusPartialContent, resp.StatusCode, h)
+		assert.Equal(t, "application/zstd", resp.Header.Get("Content-Type"), h)
 		assert.Equal(t, full[10:20], getBody(t, resp), h)
 		assert.Equal(t, int64(1), counting.opens.Load()-before, h)
 	}
@@ -899,6 +900,7 @@ func TestServerLimitsMultipartRangesOnRemoteStores(t *testing.T) {
 	))
 	resp := get(t, srv.URL+"/certificate/"+certHash, "Range", "bytes=0-0,2-2")
 	require.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, "application/json", resp.Header.Get("Content-Type"))
 	assert.Equal(t, body, string(getBody(t, resp)))
 }
 
