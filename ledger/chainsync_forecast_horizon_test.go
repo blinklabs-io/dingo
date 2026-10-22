@@ -1050,7 +1050,7 @@ func TestAwaitChainsyncHeaderAdmissionDrainsQueuedWorkBeforeDisconnect(
 		t,
 		results,
 		100*time.Millisecond,
-		"admission must wait while the queued range can advance local ancestry",
+		"admission must wait while queued work can advance the forecast",
 	)
 
 	cancel()
