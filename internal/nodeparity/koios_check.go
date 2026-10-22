@@ -317,7 +317,7 @@ type StakeMismatch struct {
 	DiffLovelace int64
 	// Reason is empty for an ordinary per-pool numeric mismatch, and
 	// otherwise one of:
-	//   - "no koios pool_history row for nonzero dingo stake"
+	//   - ReasonNoKoiosPoolHistoryRow
 	//   - "unparseable koios active_stake value" (KoiosFault)
 	//   - "stake difference too large to represent ..."
 	//   - ReasonTotalActiveStakeMismatch (numeric; see DiffLovelace)
@@ -326,18 +326,20 @@ type StakeMismatch struct {
 	//     error (KoiosFault)
 	//   - ReasonKoiosPoolHistoryUnavailable, followed by ": " and the
 	//     unfetched pools (KoiosFault)
-	// The last two are not fixed strings, so match them by prefix rather
+	//   - ReasonKoiosPoolHistoryNotPublished, followed by ": " and the
+	//     probe's evidence (KoiosFault)
+	// The last three are not fixed strings, so match them by prefix rather
 	// than equality.
 	Reason string
 	// KoiosFault is true for the cases Koios's own data or availability
 	// made the comparison untrustworthy rather than a real Dingo/Koios
 	// disagreement: an unparseable active_stake value,
-	// ReasonNoKoiosActiveStake, ReasonKoiosEpochInfoUnavailable, and
-	// ReasonKoiosPoolHistoryUnavailable. It matches
+	// ReasonNoKoiosActiveStake, ReasonKoiosEpochInfoUnavailable,
+	// ReasonKoiosPoolHistoryUnavailable and
+	// ReasonKoiosPoolHistoryNotPublished. It matches
 	// koiosparity.StatusError's treatment of a Koios-side fetch failure,
-	// and is deliberately false for "no koios pool_history row for nonzero
-	// dingo stake" and for the overflow case, both of which are genuine
-	// divergences. A caller counting real mismatches must exclude
+	// and is deliberately false for ReasonNoKoiosPoolHistoryRow and for the
+	// overflow case, both of which are genuine divergences. A caller counting real mismatches must exclude
 	// KoiosFault the same way it already excludes a StakeErr; a caller
 	// comparing on Reason's literal string instead would silently miscount
 	// if any wording above ever changed.
@@ -468,7 +470,7 @@ func evaluatePoolStake(
 		return &StakeMismatch{
 			PoolIDBech32: poolBech32,
 			DingoStake:   dingoStake,
-			Reason:       "no koios pool_history row for nonzero dingo stake",
+			Reason:       ReasonNoKoiosPoolHistoryRow,
 		}
 	}
 	diff, kind := stakeDiffLovelace(dingoStake, hist.ActiveStake)
@@ -623,9 +625,11 @@ func checkStakeDistribution(
 
 	results := make([]*StakeMismatch, len(pools))
 	fetchErrs := make([]error, len(pools))
+	hasRow := make([]bool, len(pools))
 	var unfetched []int
 	for i, p := range pools {
 		if row, ok := cached[p.bech32]; ok {
+			hasRow[i] = true
 			results[i] = evaluatePoolStake(
 				p.bech32, p.stake, poolHistoryFromCache(row),
 			)
@@ -637,13 +641,13 @@ func checkStakeDistribution(
 	// Each failure is kept per pool rather than returned from g.Go: an
 	// errgroup error would cancel every other in-flight fetch, turning one
 	// stalled request into a stake check that did not run for the epoch.
-	fetchOne := func(p poolStake) (*StakeMismatch, error) {
+	fetchOne := func(p poolStake) (*StakeMismatch, bool, error) {
 		if err := ctx.Err(); err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		hist, err := koios.GetPoolEpochHistory(ctx, p.bech32, epoch)
 		if err != nil {
-			return nil, fmt.Errorf(
+			return nil, false, fmt.Errorf(
 				"koios pool_history for %s epoch %d: %w",
 				p.bech32, epoch, err,
 			)
@@ -656,14 +660,14 @@ func checkStakeDistribution(
 				network, epoch, p.bech32, hist, time.Now().UTC(),
 			))
 		}
-		return evaluatePoolStake(p.bech32, p.stake, hist), nil
+		return evaluatePoolStake(p.bech32, p.stake, hist), hist != nil, nil
 	}
 	fetch := func(indexes []int) {
 		var g errgroup.Group
 		g.SetLimit(stakeCheckConcurrency)
 		for _, i := range indexes {
 			g.Go(func() error {
-				results[i], fetchErrs[i] = fetchOne(pools[i])
+				results[i], hasRow[i], fetchErrs[i] = fetchOne(pools[i])
 				return nil
 			})
 		}
@@ -714,11 +718,21 @@ func checkStakeDistribution(
 		)
 	}
 
+	unpublished, err := poolHistoryUnpublished(
+		ctx, koios, epoch, pools, results, hasRow,
+	)
+	if err != nil {
+		return nil, err
+	}
 	var mismatches []StakeMismatch
 	for _, m := range results {
-		if m != nil {
+		if m != nil && (unpublished == nil ||
+			m.Reason != ReasonNoKoiosPoolHistoryRow) {
 			mismatches = append(mismatches, *m)
 		}
+	}
+	if unpublished != nil {
+		mismatches = append(mismatches, *unpublished)
 	}
 	if len(unfetched) > 0 {
 		mismatches = append(mismatches, unfetchedPoolsFault(
@@ -739,6 +753,88 @@ func checkStakeDistribution(
 		return mismatches[i].PoolIDBech32 < mismatches[j].PoolIDBech32
 	})
 	return mismatches, nil
+}
+
+// poolHistoryUnpublished returns the ReasonKoiosPoolHistoryNotPublished fault
+// that replaces the per-pool ReasonNoKoiosPoolHistoryRow mismatches when
+// Koios has not published /pool_history for epoch yet, and nil when the
+// missing rows must stand as mismatches.
+//
+// Koios publishes /epoch_info for an epoch days before /pool_history: on
+// preprod at epoch 320, /epoch_info answered for 319 while every pool's
+// newest /pool_history row was 318, so the end-time guard above passed and
+// each pool was reported as a divergence. The rows are taken as unpublished
+// only when both hold:
+//
+//   - No pool Dingo reports has a row for epoch, and at least one with
+//     nonzero stake was looked up and has none. A single pool with a row
+//     proves the epoch is published, so any pool missing beside it is a
+//     real mismatch.
+//   - Koios's newest row for the missing pool with the most Dingo stake is
+//     for an earlier epoch. A pool Koios has no row for at any epoch, or one
+//     with rows past epoch, is a real absence, which keeps a Dingo pool ID
+//     Koios has never heard of from reading as reference lag.
+//
+// The epoch-total comparison still runs either way, so a pool Koios does not
+// count still moves the sum even when its own row is excused here.
+//
+// A failed probe leaves the mismatches as they are rather than excusing them
+// on no evidence; only ctx ending is returned as an error.
+func poolHistoryUnpublished(
+	ctx context.Context,
+	koios *koiosparity.KoiosClient,
+	epoch uint64,
+	pools []poolStake,
+	results []*StakeMismatch,
+	hasRow []bool,
+) (*StakeMismatch, error) {
+	probe := -1
+	var missingStake uint64
+	missing := 0
+	for i, p := range pools {
+		if hasRow[i] {
+			return nil, nil
+		}
+		m := results[i]
+		if m == nil || m.Reason != ReasonNoKoiosPoolHistoryRow {
+			continue
+		}
+		missing++
+		missingStake += p.stake
+		if probe < 0 || p.stake > pools[probe].stake ||
+			(p.stake == pools[probe].stake && p.bech32 < pools[probe].bech32) {
+			probe = i
+		}
+	}
+	if probe < 0 {
+		return nil, nil
+	}
+	latest, ok, err := koios.GetPoolLatestHistoryEpoch(ctx, pools[probe].bech32)
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, fmt.Errorf(
+				"koios pool_history for epoch %d: %w", epoch, ctxErr,
+			)
+		}
+		slog.Warn(
+			"nodeparity: koios pool_history publication probe failed; "+
+				"reporting the missing rows as mismatches",
+			"epoch", epoch, "pool", pools[probe].bech32, "error", err,
+		)
+		return nil, nil
+	}
+	if !ok || latest >= epoch {
+		return nil, nil
+	}
+	return &StakeMismatch{
+		DingoStake: missingStake,
+		Reason: fmt.Sprintf(
+			"%s: none of %d pools has a row, newest for %s is epoch %d",
+			ReasonKoiosPoolHistoryNotPublished, missing,
+			pools[probe].bech32, latest,
+		),
+		KoiosFault: true,
+	}, nil
 }
 
 // stakeRetryWaits is the wait before each round that fetches the pools whose
@@ -859,6 +955,18 @@ const ReasonKoiosEpochInfoUnavailable = "koios epoch_info fetch failed"
 // reports for those pools together, and the Reason continues with ": ", the
 // pool count and the first pools' IDs, so match it by prefix.
 const ReasonKoiosPoolHistoryUnavailable = "koios pool_history fetch failed"
+
+// ReasonNoKoiosPoolHistoryRow marks a pool Dingo reports nonzero stake for
+// and Koios has no /pool_history row for, in an epoch Koios has published.
+// It is a real mismatch, not a KoiosFault.
+const ReasonNoKoiosPoolHistoryRow = "no koios pool_history row for nonzero dingo stake"
+
+// ReasonKoiosPoolHistoryNotPublished marks an epoch Koios has answered
+// /epoch_info for but not yet computed /pool_history for, so no pool could
+// be compared; see poolHistoryUnpublished. It carries KoiosFault and an empty
+// PoolIDBech32, DingoStake is the stake of the pools left uncompared, and the
+// Reason continues with ": " and the probe's evidence, so match it by prefix.
+const ReasonKoiosPoolHistoryNotPublished = "koios has not published pool_history for this epoch yet"
 
 // ReasonKoiosEpochNotPublished marks an epoch Koios has not computed
 // pool_history for yet. Every pool then looks absent, so without this the

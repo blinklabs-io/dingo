@@ -1776,6 +1776,10 @@ type stakeRetryFixture struct {
 	pools  []string // bech32, in the order the pool IDs were built
 	mu     sync.Mutex
 	calls  map[string]int
+	// latest answers the undated /pool_history probe for a pool; nil
+	// answers 404. probes counts those requests.
+	latest func(pool int) string
+	probes int
 }
 
 // newStakeRetryFixture serves one pool per entry of stakes, all with the
@@ -1825,6 +1829,17 @@ func newStakeRetryFixture(
 			case "/pool_history":
 				pool := r.URL.Query().Get("_pool_bech32")
 				f.mu.Lock()
+				if r.URL.Query().Get("_epoch_no") == "" {
+					f.probes++
+					latest := f.latest
+					f.mu.Unlock()
+					if latest == nil {
+						w.WriteHeader(http.StatusNotFound)
+						return
+					}
+					_, _ = w.Write([]byte(latest(byBech32[pool])))
+					return
+				}
 				f.calls[pool]++
 				attempt := f.calls[pool]
 				f.mu.Unlock()
@@ -2026,4 +2041,120 @@ func TestCheckStakeDistributionStopsWaitingWhenCancelled(t *testing.T) {
 	require.ErrorIs(t, got.err, context.Canceled)
 	assert.Nil(t, got.mismatches)
 	assert.Equal(t, 1, f.callsFor(0), "no round runs after cancellation")
+}
+
+func (f *stakeRetryFixture) setLatest(latest func(pool int) string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.latest = latest
+}
+
+func (f *stakeRetryFixture) probeCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.probes
+}
+
+// TestCheckStakeDistributionReportsUnpublishedPoolHistoryAsIncomplete pins
+// the live preprod case at epoch 320: /epoch_info already answered for epoch
+// 319 while /pool_history had no row for any pool, and each pool was reported
+// as a divergence. When no pool has a row and Koios's newest row for them is
+// older, the epoch is one incomplete fault; anything else stays a mismatch.
+func TestCheckStakeDistributionReportsUnpublishedPoolHistoryAsIncomplete(
+	t *testing.T,
+) {
+	t.Parallel()
+	const epoch = uint64(319)
+	const stake = uint64(1_000_000)
+	latestRow := func(e uint64) func(int) string {
+		return func(int) string { return fmt.Sprintf(`[{"epoch_no":%d}]`, e) }
+	}
+	noRows := func(int) string { return "[]" }
+	tests := []struct {
+		name        string
+		pools       int
+		latest      func(int) string
+		unpublished bool
+	}{
+		{"every pool behind the epoch", 3, latestRow(epoch - 1), true},
+		{"single pool behind the epoch", 1, latestRow(epoch - 1), true},
+		{"pool unknown to koios at any epoch", 3, noRows, false},
+		{"koios has rows past the epoch", 3, latestRow(epoch + 1), false},
+		{"publication probe fails", 3, nil, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctx, cancel := context.WithTimeout(
+				context.Background(), 30*time.Second,
+			)
+			defer cancel()
+			f := newStakeRetryFixture(t, ctx, epoch, stake, tc.pools,
+				func(w http.ResponseWriter, _, _ int) {
+					_, _ = w.Write([]byte("[]"))
+				},
+			)
+			f.setLatest(tc.latest)
+
+			mismatches, err := checkStakeDistribution(
+				ctx, f.client, f.koios, nil, "preview", epoch,
+				nil, (&recordingWait{}).wait,
+			)
+			require.NoError(t, err)
+			assert.Equal(t, 1, f.probeCount(),
+				"one probe decides the epoch, not one per pool")
+			if !tc.unpublished {
+				require.Len(t, mismatches, tc.pools)
+				for _, m := range mismatches {
+					assert.False(t, m.KoiosFault)
+					assert.Equal(t, ReasonNoKoiosPoolHistoryRow, m.Reason)
+				}
+				return
+			}
+			require.Len(t, mismatches, 1,
+				"an unpublished epoch is one fault, not one per pool")
+			m := mismatches[0]
+			assert.True(t, m.KoiosFault, "reference lag must not page")
+			assert.Empty(t, m.PoolIDBech32)
+			assert.Equal(t, uint64(tc.pools)*stake, m.DingoStake)
+			assert.True(t, strings.HasPrefix(
+				m.Reason, ReasonKoiosPoolHistoryNotPublished+": ",
+			), m.Reason)
+		})
+	}
+}
+
+// TestCheckStakeDistributionStillReportsOnePoolMissingARow is the other side
+// of the publication rule: rows for the other pools prove Koios published the
+// epoch, so the one pool without a row is a real mismatch and no probe runs.
+func TestCheckStakeDistributionStillReportsOnePoolMissingARow(t *testing.T) {
+	t.Parallel()
+	const epoch = uint64(319)
+	const stake = uint64(1_000_000)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	f := newStakeRetryFixture(t, ctx, epoch, stake, 3,
+		func(w http.ResponseWriter, pool, _ int) {
+			if pool == 0 {
+				_, _ = w.Write([]byte("[]"))
+				return
+			}
+			writePoolHistory(w, epoch, stake)
+		},
+	)
+	f.setLatest(func(int) string {
+		return fmt.Sprintf(`[{"epoch_no":%d}]`, epoch-1)
+	})
+
+	mismatches, err := checkStakeDistribution(
+		ctx, f.client, f.koios, nil, "preview", epoch,
+		nil, (&recordingWait{}).wait,
+	)
+	require.NoError(t, err)
+	require.Len(t, mismatches, 1)
+	assert.Equal(t, f.pools[0], mismatches[0].PoolIDBech32)
+	assert.Equal(t, ReasonNoKoiosPoolHistoryRow, mismatches[0].Reason)
+	assert.False(t, mismatches[0].KoiosFault)
+	assert.Equal(t, 0, f.probeCount())
 }

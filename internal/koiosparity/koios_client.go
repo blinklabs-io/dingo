@@ -1558,6 +1558,40 @@ func (k *KoiosClient) GetPoolEpochHistory(
 	return &items[0], nil
 }
 
+// GetPoolLatestHistoryEpoch returns the newest epoch Koios has a
+// /pool_history row for, for one pool. ok is false when Koios has no row
+// for the pool at any epoch.
+func (k *KoiosClient) GetPoolLatestHistoryEpoch(
+	ctx context.Context,
+	poolBech32 string,
+) (epoch uint64, ok bool, err error) {
+	path := fmt.Sprintf(
+		"/pool_history?_pool_bech32=%s&select=epoch_no&order=epoch_no.desc&limit=1",
+		poolBech32,
+	)
+	resp, err := k.get(ctx, path, -1, -1)
+	if err != nil {
+		return 0, false, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return 0, false, fmt.Errorf(
+			"koios /pool_history: status %d body: %s",
+			resp.StatusCode,
+			resp.Body,
+		)
+	}
+	var items []struct {
+		EpochNo uint64 `json:"epoch_no"`
+	}
+	if err := json.Unmarshal(resp.Body, &items); err != nil {
+		return 0, false, fmt.Errorf("koios /pool_history decode: %w", err)
+	}
+	if len(items) == 0 {
+		return 0, false, nil
+	}
+	return items[0].EpochNo, true, nil
+}
+
 // GetAllAccountAddresses returns the bech32 stake address of every account
 // Koios knows about, including accounts with zero current stake or that have
 // since deregistered — the Koios-side "master list" for the per-account

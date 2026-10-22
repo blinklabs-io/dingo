@@ -13730,7 +13730,14 @@ failed pools are fetched again after waits of 30s, 60s and 120s (permanent
 rejections are not), and pools still unfetched after the last round make the
 stake verdict incomplete, naming them, while a divergence found on any pool
 that did fetch is still reported. The shared Koios client's own timeouts and
-retries are unchanged; the session ending stops the rounds.
+retries are unchanged; the session ending stops the rounds. Koios answers
+`/epoch_info` for an epoch days before it publishes that epoch's
+`/pool_history`, so when no pool Dingo reports has a row for the epoch and
+Koios's newest row for the missing pool with the most stake is for an earlier
+epoch, the stake verdict is one incomplete fault rather than one mismatch per
+pool. A pool missing a row while any other pool has one, or one Koios has no
+row for at any epoch, is still a mismatch, and the epoch-total comparison runs
+either way.
 
 Every session opens with a rollback to the origin, which Dingo refuses to
 acquire; the origin is epoch 0, so the tool does not ask. Each block's epoch
