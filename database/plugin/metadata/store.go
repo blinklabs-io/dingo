@@ -2100,6 +2100,15 @@ type MetadataStore interface {
 		types.Txn,
 	) (uint64, bool, error)
 
+	// LatestPoolOpCertSequenceInRange returns the highest op-cert sequence
+	// recorded for a pool between the inclusive slot bounds.
+	LatestPoolOpCertSequenceInRange(
+		lcommon.PoolKeyHash,
+		uint64, // startSlot
+		uint64, // endSlot
+		types.Txn,
+	) (uint64, bool, error)
+
 	// PoolOpCertSequencesExistAtSlot reports whether any pool has an op-cert
 	// sequence row recorded at exactly slot. A Mithril restore writes the
 	// certified HeaderState counter map at its anchor slot and applies no

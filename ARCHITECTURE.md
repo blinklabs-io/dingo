@@ -6314,9 +6314,13 @@ it. Dingo implements this as a **corroboration gate**
   keyed by the last folded hash, source epoch and nonce, cutoff, and both
   initial nonce states; entries for epochs outside the currently retained
   candidate path are discarded. This retains the same pool-key, leader-eligibility,
-  size, KES, and operational-certificate checks for every folded header. Hash
-  links, slots, block numbers, and era order are validated across the
-  reconstructed path before it can affect selection. The verifier receives the
+  size, KES, and operational-certificate checks for every folded header.
+  Candidate opcert counters are advanced along that validated path from the
+  common ancestor, with the Mithril trust boundary honored when it is later.
+  The per-connection counter prefix commits only after the target header passes
+  crypto and state checks; a fork that diverges discards counters beyond its
+  last shared header. Hash links, slots, block numbers, and era order are
+  validated across the reconstructed path before it can affect selection. The verifier receives the
   ChainSync connection identity so ancestry from one peer cannot be used for
   another peer's header. A per-connection path cache reuses a resolved ancestor
   while that intersection remains on the applied chain, the next header
