@@ -2491,6 +2491,13 @@ paths, where the point is to report before the goroutine unwinds.
   every connection, so separate clients cannot share budget state or recreate
   a removed bucket after close. The budget remains after point-list
   deduplication and before the database intersection lookup.
+- `LedgerState.GetIntersectPoint` resolves each peer-supplied point by
+  reading only its `bp..._metadata` key
+  (`database.BlockIDByPointMetadataTxn`), then confirms the ID against the
+  `bi` index. It never loads a block body and never reaches the Bark archive
+  fallback, so each budgeted point costs at most two small key reads. On the
+  `s3` and `gcs` blob plugins those keys are objects, so a point still costs
+  one object read, or two when held.
 - Prometheus metrics for event delivery tracking and latency, including
   `event_delivery_blocked_total{type,kind}` and
   `event_async_enqueue_blocked_total{type}` for backpressure, and
@@ -9449,7 +9456,17 @@ next run fetches it again instead of re-accepting the same bad bytes. A failed
 download keeps its partial file for resumption, and a cancelled run keeps its
 archive, since neither says anything about the bytes already on disk.
 The zstd decoder separately defaults to a 512 MiB window and 256 MiB decoder
-memory limit, configurable through `WithZstdLimits`.
+memory limit, configurable through `WithZstdLimits`. For a streaming decode
+the smaller of the two bounds the history buffer the decoder allocates from the
+frame's declared window, before tar framing or digests are checked, so a
+hostile frame can claim the full 256 MiB per decoder. The download semaphore
+charges compressed bytes only, so every extraction and the ancillary manifest
+preflight first reserve that worst case plus fixed overhead from one 2 GiB
+`decoderMemoryBudget` shared by the bootstrap, its kept chunk feed and the
+ancillary archive. Decoder concurrency therefore follows memory, not the
+download worker count; the reservation is held only while an archive decodes,
+so downloads still overlap. A feed started without a bootstrap's budget creates
+its own.
 
 Extraction also bounds the archive's shape while it is read: an entry-count
 cap (directories and empty files count), per-member and aggregate expanded-byte
@@ -11154,6 +11171,23 @@ request at once; the ledger call stops at its next cancellation check, including
 during CEK execution. The admission slot is held until the ledger call returns,
 so further evaluations receive a busy error and
 canceled requests cannot accumulate workers.
+
+`evaluate_tx` and `calculate_min_utxo` bound the caller-supplied CBOR before
+and while parsing it (`api/mcp/admission.go`). Text longer than the hex
+encoding of 128 KiB is refused before it is decoded, and a payload that decodes
+to more than 128 KiB is refused before it is parsed. The cap is a transaction
+or single-output ceiling about eight times the mainnet `MaxTxSize`, as an
+output sits inside a transaction. The parse itself runs in an admitted worker
+under the request deadline: `evaluate_tx` parses inside its one evaluation slot
+(after the size checks, so a request that finds the slot held gets the busy
+error without being parsed), and `calculate_min_utxo` decodes and sizes its
+output through a four-slot parse pool, refusing with a busy error when it is
+full.
+As with evaluation, a slot is held until its parse returns, so a request that
+times out cannot let parses accumulate. `NewMCPServer` shares the parse pool
+across tools through `readLimits`; the exported `RegisterCardanoTools` creates
+its own.
+
 SQLite tools share four fail-fast execution slots. Arbitrary queries borrow one
 connection, enable `query_only`, and apply 64 KiB value, 64 KiB SQL, and
 32-column limits before execution. Query results are also capped at 1 MiB of
@@ -11412,9 +11446,9 @@ the UTxO bound. Exceeding any of them is rejected with HTTP 400. The asset
 page count needs the distinct total, so that route reads every live holding up
 to the budget instead of a single page.
 
-The base and extended summaries, the address total, and the two account
-aggregate routes share one admission pool (4 active, 2 per client address) that
-answers 429 with `Retry-After` when full.
+The base and extended summaries, the account summary, the address total, and
+the two account aggregate routes share one admission pool (4 active, 2 per
+client address) that answers 429 with `Retry-After` when full.
 
 Blockfrost submission and both evaluation endpoints bound request body reads
 by their existing byte limits and a 15-second read deadline. The deadline is
@@ -11470,7 +11504,10 @@ transaction content/CBOR/metadata/UTxOs/certificates/redeemers/required
 signers, and account/delegation/registration/reward/UTxOs/withdrawals/
 transactions endpoints. It uses an adapter pattern to translate between
 Dingo's internal state and Blockfrost response types and supports
-Blockfrost-style pagination headers. Pool and account list routes reject
+Blockfrost-style pagination headers. `GET /accounts/{stake_address}` passes
+the request context to the adapter and its database reads, and takes a slot
+in the address summary admission pool because it aggregates every live UTxO
+of the credential. Pool and account list routes reject
 out-of-range count and page values before calling the adapter, using the
 shared strict pagination parser (count 1–100, page 1–21474836). The epoch
 next, previous and stakes lists, whose Blockfrost schema defines only count and

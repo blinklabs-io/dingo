@@ -13545,7 +13545,6 @@ func (ls *LedgerState) GetIntersectPoint(
 		return &ret, nil
 	}
 	var ret ocommon.Point
-	var tmpBlock models.Block
 	var err error
 	foundOrigin := false
 	txn := ls.db.Transaction(ctx, false)
@@ -13564,8 +13563,18 @@ func (ls *LedgerState) GetIntersectPoint(
 				foundOrigin = true
 				continue
 			}
-			// Lookup block in metadata DB
-			tmpBlock, err = ls.chain.BlockByPoint(ctx, point, txn)
+			// The point comes from an untrusted peer, so membership is
+			// resolved from the block's metadata key alone. A block read by
+			// point loads the whole body and can fall through to a Bark
+			// archive, which a peer could trigger once per point.
+			if _, err = database.BlockBlobKeyToPoint(
+				types.BlockBlobKey(point.Slot, point.Hash),
+			); err != nil {
+				return fmt.Errorf(
+					"failed to get block: parsing block key: %w", err,
+				)
+			}
+			blockID, err := database.BlockIDByPointMetadataTxn(txn, point)
 			if err != nil {
 				if errors.Is(err, models.ErrBlockNotFound) {
 					continue
@@ -13573,7 +13582,7 @@ func (ls *LedgerState) GetIntersectPoint(
 				return fmt.Errorf("failed to get block: %w", err)
 			}
 			onPrimary, err := ls.primaryChainContainsBlockIDTxn(
-				tmpBlock.ID,
+				blockID,
 				point,
 				txn,
 			)
@@ -13584,8 +13593,8 @@ func (ls *LedgerState) GetIntersectPoint(
 				continue
 			}
 			// Update return value
-			ret.Slot = tmpBlock.Slot
-			ret.Hash = tmpBlock.Hash
+			ret.Slot = point.Slot
+			ret.Hash = point.Hash
 		}
 		return nil
 	})
