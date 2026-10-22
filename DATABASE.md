@@ -2809,6 +2809,10 @@ records and both placements remain readable. Badger fixes the threshold when
 the store opens, so node-managed Mithril restores and stream catch-up, which run
 inside `serve` on the store `serve` opened, keep the serve default.
 
+Core sync mode uses a 512 MiB Badger memtable by default to improve bulk-import
+throughput. Other storage modes and run modes retain the 128 MiB default. The
+blob provider's `memTableSize` setting overrides the selected default.
+
 ### Badger Close and the Directory Lock
 
 Badger holds an exclusive `flock` on its `blob` directory and releases it only
