@@ -637,6 +637,7 @@ func (n *Node) newOuroborosConfig(
 		ChainsyncHasBestPeer:            n.chainsyncHasBestPeer,
 		ChainsyncApplyEligible:          n.chainsyncApplyEligible,
 		ChainsyncAwaitEagerness:         n.chainsyncAwaitEagerness,
+		ChainsyncAwaitCorroboration:     n.chainsyncAwaitCorroboration,
 		ChainsyncObservePeerTip:         n.chainsyncObservePeerTip,
 		ChainsyncPrepareForecastWitness: n.chainsyncPrepareForecastWitness,
 		ChainsyncRemoveForecastWitness:  n.chainsyncRemoveForecastWitness,
@@ -2188,6 +2189,13 @@ func (n *Node) buildChainSelectorConfig(
 			}
 			slot, err := ls.CurrentSlot()
 			return slot, err == nil
+		},
+		AppliedTip: func() (ochainsync.Tip, bool) {
+			ls := n.wallClockLedger.Load()
+			if ls == nil {
+				return ochainsync.Tip{}, false
+			}
+			return ls.Tip(), true
 		},
 	}
 	// The running node publishes its started ledger before constructing the

@@ -20,6 +20,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"slices"
 	"sync/atomic"
 	"time"
 
@@ -35,6 +36,12 @@ import (
 // exist (or was filtered out, e.g. by deleted_slot != 0 in the live
 // view). Callers may use errors.Is to detect a genuinely-absent row.
 var ErrUtxoNotFound = types.ErrUtxoNotFound
+
+// ErrUtxoHistoryCandidateLimit reports that exact-address history matching
+// exhausted its coarse-candidate budget before completing the query.
+var ErrUtxoHistoryCandidateLimit = errors.New(
+	"utxo history candidate limit exceeded",
+)
 
 // MaxUtxosByAddressResults is the default bound passed to UtxosByAddress
 // for callers with no more specific limit of their own. It caps how many
@@ -912,8 +919,31 @@ func (d *Database) UtxosWithHistory(
 	q *models.UtxoHistoryQuery,
 	txn *Txn,
 ) ([]models.UtxoWithHistory, error) {
+	utxos, _, err := d.utxosWithHistory(q, -1, txn)
+	return utxos, err
+}
+
+// UtxosWithHistoryBounded is UtxosWithHistory with a limit on the coarse
+// candidates examined while completing exact-address matching. It returns the
+// number of candidates read so callers can enforce one budget across pages.
+func (d *Database) UtxosWithHistoryBounded(
+	q *models.UtxoHistoryQuery,
+	maxCandidates int,
+	txn *Txn,
+) ([]models.UtxoWithHistory, int, error) {
+	if maxCandidates < 0 {
+		return nil, 0, errors.New("maxCandidates must not be negative")
+	}
+	return d.utxosWithHistory(q, maxCandidates, txn)
+}
+
+func (d *Database) utxosWithHistory(
+	q *models.UtxoHistoryQuery,
+	maxCandidates int,
+	txn *Txn,
+) ([]models.UtxoWithHistory, int, error) {
 	if q == nil {
-		return nil, models.ErrNilUtxoHistoryQuery
+		return nil, 0, models.ErrNilUtxoHistoryQuery
 	}
 	if txn == nil {
 		txn = d.TransactionContext(context.Background(), false)
@@ -922,18 +952,29 @@ func (d *Database) UtxosWithHistory(
 	requiresExact := !q.MatchAllAddresses &&
 		models.RequiresExactAddressFilter(q.AddressPatterns)
 	if !requiresExact || q.Limit <= 0 {
+		readQuery := q
+		if maxCandidates >= 0 &&
+			(q.Limit <= 0 || q.Limit > maxCandidates+1) {
+			boundedQuery := *q
+			boundedQuery.Limit = maxCandidates + 1
+			readQuery = &boundedQuery
+		}
 		utxos, err := d.utxoStore().GetUtxosWithHistory(
-			q,
+			readQuery,
 			txn.Metadata(),
 		)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
+		}
+		if maxCandidates >= 0 && len(utxos) > maxCandidates {
+			return nil, len(utxos), ErrUtxoHistoryCandidateLimit
 		}
 		patterns := q.AddressPatterns
 		if !requiresExact {
 			patterns = nil
 		}
-		return d.loadAndFilterHistoricalUtxos(utxos, patterns, txn)
+		ret, err := d.loadAndFilterHistoricalUtxos(utxos, patterns, txn)
+		return ret, len(utxos), err
 	}
 
 	// Exact address identity is only available in output CBOR. Scan coarse SQL
@@ -947,13 +988,23 @@ func (d *Database) UtxosWithHistory(
 	// exact match is not a correctness boundary.
 	scanQuery.Limit = min(max(q.Limit, 128), 1024)
 	ret := make([]models.UtxoWithHistory, 0, q.Limit)
+	candidates := 0
 	for len(ret) < q.Limit {
+		batchLimit := scanQuery.Limit
+		if maxCandidates >= 0 {
+			batchLimit = min(batchLimit, maxCandidates-candidates+1)
+		}
+		scanQuery.Limit = batchLimit
 		batch, err := d.utxoStore().GetUtxosWithHistory(
 			&scanQuery,
 			txn.Metadata(),
 		)
 		if err != nil {
-			return nil, err
+			return nil, candidates, err
+		}
+		candidates += len(batch)
+		if maxCandidates >= 0 && candidates > maxCandidates {
+			return nil, candidates, ErrUtxoHistoryCandidateLimit
 		}
 		filtered, err := d.loadAndFilterHistoricalUtxos(
 			batch,
@@ -961,11 +1012,22 @@ func (d *Database) UtxosWithHistory(
 			txn,
 		)
 		if err != nil {
-			return nil, err
+			return nil, candidates, err
 		}
 		remaining := q.Limit - len(ret)
 		if len(filtered) > remaining {
 			filtered = filtered[:remaining]
+			// A paging caller resumes after the last returned match and reads
+			// the rest of this batch again, so charging those rows here would
+			// count them twice against a budget shared across pages.
+			keep := filtered[len(filtered)-1]
+			for i, u := range slices.Backward(batch) {
+				if u.OutputIdx == keep.OutputIdx &&
+					bytes.Equal(u.TxId, keep.TxId) {
+					candidates -= len(batch) - 1 - i
+					break
+				}
+			}
 		}
 		ret = append(ret, filtered...)
 		if len(batch) < scanQuery.Limit || len(batch) == 0 {
@@ -979,7 +1041,7 @@ func (d *Database) UtxosWithHistory(
 			TxId:       last.TxId,
 		}
 	}
-	return ret, nil
+	return ret, candidates, nil
 }
 
 func (d *Database) loadAndFilterHistoricalUtxos(
@@ -1457,6 +1519,15 @@ func filterUtxoViews[T any](
 		return utxos, nil
 	}
 	result := make([]T, 0, len(utxos))
+	// A filter of only exact addresses is matched by keyed lookup; a linear
+	// scan would cost candidates x patterns.
+	var exactSet map[string]struct{}
+	if exactOnly := onlyExactPatterns(patterns); exactOnly {
+		exactSet = make(map[string]struct{}, len(patterns))
+		for i := range patterns {
+			exactSet[string(patterns[i].ExactAddress)] = struct{}{}
+		}
+	}
 	for i := range utxos {
 		item := utxo(&utxos[i])
 		output, err := item.Decode()
@@ -1465,6 +1536,16 @@ func filterUtxoViews[T any](
 				"decode %s %x#%d for exact address match: %w",
 				description, item.TxId, item.OutputIdx, err,
 			)
+		}
+		if exactSet != nil {
+			addrBytes, err := output.Address().Bytes()
+			if err != nil {
+				return nil, fmt.Errorf("encode output address: %w", err)
+			}
+			if _, ok := exactSet[string(addrBytes)]; ok {
+				result = append(result, utxos[i])
+			}
+			continue
 		}
 		match, err := models.MatchesUtxoAddressPatterns(output.Address(), patterns)
 		if err != nil {
@@ -1475,6 +1556,20 @@ func filterUtxoViews[T any](
 		}
 	}
 	return result, nil
+}
+
+// onlyExactPatterns reports whether every pattern is a bare exact address,
+// the only shape a set lookup answers identically to the pattern contract.
+func onlyExactPatterns(patterns []models.UtxoAddressPattern) bool {
+	for i := range patterns {
+		p := patterns[i]
+		if len(p.ExactAddress) == 0 ||
+			len(p.PaymentPart) > 0 ||
+			len(p.DelegationPart) > 0 {
+			return false
+		}
+	}
+	return len(patterns) > 0
 }
 
 func (d *Database) loadAndFilterOrderedUtxos(

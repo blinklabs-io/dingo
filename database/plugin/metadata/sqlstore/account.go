@@ -185,7 +185,7 @@ func writeAccountImportBaseline(
 	if account.ImportDeposit != nil {
 		deposit = decimalUint64(*account.ImportDeposit)
 	}
-	if _, err := db.ExecContext(ctx, `
+	if _, err := db.ExecContext(ctx, `-- name: UpsertAccountImportBaseline :exec
 INSERT INTO account_import_baseline (
     credential_tag, staking_key, pool, drep, drep_type, active, added_slot,
     deposit_amount
@@ -232,7 +232,7 @@ func (s *Store) GetAccountImportRegistrationByCredential(
 		addedSlot int64
 		raw       sql.NullString
 	)
-	err = db.QueryRowContext(ctx, `
+	err = db.QueryRowContext(ctx, `-- name: GetAccountImportBaselineState :one
 SELECT active, added_slot, deposit_amount
 FROM account_import_baseline
 WHERE credential_tag = ? AND staking_key = ?`,
@@ -274,7 +274,7 @@ func readAccountImportBaseline(
 		drepType  sql.NullInt64
 		addedSlot int64
 	)
-	err := db.QueryRowContext(ctx, `
+	err := db.QueryRowContext(ctx, `-- name: GetAccountImportBaseline :one
 SELECT pool, drep, drep_type, active, added_slot
 FROM account_import_baseline
 WHERE credential_tag = ? AND staking_key = ?`,
@@ -317,7 +317,7 @@ func deleteAccountImportBaseline(
 	if err := requireAccountBaselineTransaction(db); err != nil {
 		return err
 	}
-	if _, err := db.ExecContext(ctx, `
+	if _, err := db.ExecContext(ctx, `-- name: DeleteAccountImportBaseline :exec
 DELETE FROM account_import_baseline
 WHERE credential_tag = ? AND staking_key = ?`,
 		credentialTag,
@@ -892,16 +892,15 @@ func (s *Store) GetAccountSumsByCredential(
 	if err != nil {
 		return ret, fmt.Errorf("resolve read DB for account sums: %w", err)
 	}
-	sum := func(query string, args ...any) (uint64, error) {
-		return sumUint64Rows(ctx, db, s.dialect.Rebind(query), args...)
-	}
 	// MIR amounts are delta_coin, so the two pot totals are summed as signed
 	// values. A withdrawal is coin and stays unsigned.
 	sumSigned := func(query string, args ...any) (*big.Int, error) {
-		return sumSignedRows(ctx, db, s.dialect.Rebind(query), args...)
+		return s.sumWide(ctx, db, query, args...)
 	}
-	ret.WithdrawalsSum, err = sum(`
-SELECT amount
+	// The totals are exact database-side aggregates, so no row stream
+	// crosses to the caller and a cancelled ctx stops the statement.
+	ret.WithdrawalsSum, err = s.sumWideUint64(ctx, db, `
+SELECT `+s.wideSumExpr("amount")+`
 FROM account_reward_delta
 WHERE withdrawal = TRUE AND credential_tag = ? AND staking_key = ?`,
 		credentialTag,
@@ -914,7 +913,7 @@ WHERE withdrawal = TRUE AND credential_tag = ? AND staking_key = ?`,
 		)
 	}
 	ret.ReservesSum, err = sumSigned(`
-SELECT reward.amount
+SELECT `+s.wideSumExpr("reward.amount")+`
 FROM move_instantaneous_rewards_reward reward
 JOIN move_instantaneous_rewards mir ON mir.id = reward.mir_id
 WHERE mir.pot = 0 AND reward.credential_tag = ?
@@ -929,7 +928,7 @@ WHERE mir.pot = 0 AND reward.credential_tag = ?
 		)
 	}
 	ret.TreasurySum, err = sumSigned(`
-SELECT reward.amount
+SELECT `+s.wideSumExpr("reward.amount")+`
 FROM move_instantaneous_rewards_reward reward
 JOIN move_instantaneous_rewards mir ON mir.id = reward.mir_id
 WHERE mir.pot = 1 AND reward.credential_tag = ?

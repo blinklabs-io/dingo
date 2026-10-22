@@ -74,6 +74,11 @@ func (b *Blockfrost) handleAccountAddressAssets(
 	w http.ResponseWriter,
 	r *http.Request,
 ) {
+	release, ok := b.admitAddressSummary(w, r)
+	if !ok {
+		return
+	}
+	defer release()
 	stakeAddressPage(b, w, r, b.node.AccountAddressAssets,
 		func(item AddressAmountInfo) AddressAmountResponse {
 			return AddressAmountResponse(item)
@@ -88,6 +93,11 @@ func (b *Blockfrost) handleAccountAddressTotal(
 	w http.ResponseWriter,
 	r *http.Request,
 ) {
+	release, ok := b.admitAddressSummary(w, r)
+	if !ok {
+		return
+	}
+	defer release()
 	info, err := b.node.AccountAddressTotal(
 		r.Context(), r.PathValue("stake_address"),
 	)

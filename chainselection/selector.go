@@ -166,6 +166,14 @@ type ChainSelectorConfig struct {
 	// Other peers' tips play no part in the decision. Optional; the rule is
 	// inactive while nil or while it reports false.
 	WallClockSlot func() (uint64, bool)
+	// AppliedTip reads the live applied ledger tip. When set, peer-tip
+	// admission bounds delivered frontiers against it rather than against the
+	// tip last passed to SetLocalTip, which the node refreshes only on the
+	// stall recycler's tick while the ledger may apply hundreds of blocks in
+	// between. It reports false while no ledger is available, which keeps
+	// the last SetLocalTip value. It must not block or take locks shared with
+	// the selector.
+	AppliedTip func() (ochainsync.Tip, bool)
 	// HeaderCryptoVerificationGenerationCurrent reports whether a nonzero
 	// producer-authorization generation still matches the live ledger state.
 	// It is optional for callers that do not stage cryptographically verified
@@ -379,6 +387,12 @@ type ChainSelector struct {
 	// computed under the read lock.
 	eagernessAnchorMu sync.Mutex
 	eagernessAnchor   *eagernessAnchor
+
+	// ingressWake is closed when staged or committed peer frontiers change,
+	// waking headers held by AwaitIngressCorroboration. It has its own mutex
+	// so that frontier writers can signal while holding cs.mutex.
+	ingressWakeMu sync.Mutex
+	ingressWake   chan struct{}
 }
 
 type eagernessAnchor struct {
@@ -1076,6 +1090,7 @@ func (cs *ChainSelector) PreparePeerTipAdmissionDisposition(
 	func() {
 		cs.mutex.Lock()
 		defer cs.mutex.Unlock()
+		cs.refreshAppliedLocalTipLocked()
 		if cs.truncateStalePendingPeerTipsLocked() {
 			cs.rebuildPendingAdmissionStateLocked()
 		}
@@ -1168,6 +1183,7 @@ func (cs *ChainSelector) PreparePeerTipAdmissionDisposition(
 	if !accepted {
 		return PeerTipUpdateRejected
 	}
+	cs.signalIngressChange()
 	return disposition
 }
 
@@ -1463,6 +1479,7 @@ func (cs *ChainSelector) RejectPeerTipAdmission(
 		}
 		if pruned {
 			cs.rebuildPendingAdmissionStateLocked()
+			cs.signalIngressChange()
 			shouldEvaluate = cs.genesisCorroborationActiveLocked()
 		}
 	}()
@@ -1764,6 +1781,9 @@ func (cs *ChainSelector) commitPeerTipAdmission(
 			return
 		}
 	}()
+	if accepted {
+		cs.signalIngressChange()
+	}
 	if accepted && shouldEvaluate {
 		// pinPeerTipAdmissionGeneration takes no pin for a zero generation.
 		cs.evaluateAndSwitch(
@@ -2013,6 +2033,10 @@ func (cs *ChainSelector) checkPeerTipPlausibleWithClaimsTrackedLocked(
 			// Case 2: new peer — check against the best observed and
 			// advertised frontiers separately. Lone far frontiers do not count
 			// as independent references for a new peer.
+			// Nor does a peer whose advertised tip is wall-clock stale: it
+			// serves an abandoned chain and is never selectable, so before a
+			// block is applied its short advertisement would bound every
+			// honest peer advertising the real tip.
 			excludedLone := false
 			for peerConn, committedTip := range cs.peerTips {
 				pt := committedTip
@@ -2021,7 +2045,8 @@ func (cs *ChainSelector) checkPeerTipPlausibleWithClaimsTrackedLocked(
 						pt = pendingTip
 					}
 				}
-				if pt == nil || pt.awaitingFirstHeader {
+				if pt == nil || pt.awaitingFirstHeader ||
+					cs.advertisedTipStaleLocked(pt) {
 					continue
 				}
 				if claim, ok := claims[peerConn]; ok && claim.lone {
@@ -2043,7 +2068,8 @@ func (cs *ChainSelector) checkPeerTipPlausibleWithClaimsTrackedLocked(
 						continue
 					}
 					pt := cs.latestPeerTipCandidateLocked(peerConn)
-					if pt == nil || pt.awaitingFirstHeader {
+					if pt == nil || pt.awaitingFirstHeader ||
+						cs.advertisedTipStaleLocked(pt) {
 						continue
 					}
 					if claim, ok := claims[peerConn]; ok && claim.lone {
@@ -2754,6 +2780,7 @@ func (cs *ChainSelector) deletePeerLocked(connId ouroboros.ConnectionId) {
 	delete(cs.farTipClaims, connId)
 	delete(cs.genesisDensityDisconnected, connId)
 	cs.rebuildPendingAdmissionStateLocked()
+	cs.signalIngressChange()
 }
 
 // RemovePeer removes a peer from tracking.
@@ -2867,6 +2894,19 @@ func (cs *ChainSelector) SetLocalTip(tip ochainsync.Tip) {
 	}()
 	if shouldEvaluate {
 		cs.EvaluateAndSwitch()
+	}
+}
+
+// refreshAppliedLocalTipLocked replaces the local tip with the live applied
+// tip when an AppliedTip source is configured. It leaves the progress clock
+// that SetLocalTip maintains to SetLocalTip. Must be called with cs.mutex held
+// for writing.
+func (cs *ChainSelector) refreshAppliedLocalTipLocked() {
+	if cs.config.AppliedTip == nil {
+		return
+	}
+	if tip, ok := cs.config.AppliedTip(); ok {
+		cs.localTip = tip
 	}
 }
 

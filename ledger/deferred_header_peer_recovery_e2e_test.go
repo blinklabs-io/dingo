@@ -154,7 +154,14 @@ func TestDeferredHeaderFailureDeniesOnlySupplyingPeerAndKeepsHonestPeerEligible(
 			5*time.Second,
 			"the supplying connection must be closed",
 		)
-		assert.Nil(t, connManager.GetConnectionById(bad))
+		// The manager closes done before it drops the connection from its
+		// map, so wait for the removal rather than read the map once.
+		testutil.WaitForCondition(
+			t,
+			func() bool { return connManager.GetConnectionById(bad) == nil },
+			testutil.AsyncWait,
+			"the supplying connection must be removed",
+		)
 		require.True(
 			t,
 			peerGov.IsDenied(remote),

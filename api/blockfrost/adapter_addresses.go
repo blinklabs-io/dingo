@@ -17,11 +17,13 @@ package blockfrost
 import (
 	"context"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"math/big"
 	"slices"
 	"strings"
 
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
@@ -41,6 +43,12 @@ const (
 	// addressSummaryMaxAssets bounds the distinct assets one address
 	// summary accumulates and returns.
 	addressSummaryMaxAssets = 5_000
+	// addressTotalMaxOutputs bounds the output rows one address total
+	// reads, spent history included.
+	addressTotalMaxOutputs = 100_000
+	// accountMaxAssetRows bounds the asset holdings one account aggregate
+	// reads, spent history included for the totals.
+	accountMaxAssetRows = 200_000
 	// addressExtendedMaxAssets bounds the assets the extended summary
 	// enriches; each costs three point reads and the route is unpaginated.
 	addressExtendedMaxAssets = 1_000
@@ -53,6 +61,8 @@ type addressSummaryLimits struct {
 	maxUtxos          int
 	maxAssets         int
 	maxEnrichedAssets int
+	maxTotalOutputs   int
+	maxAssetRows      int
 }
 
 func (l addressSummaryLimits) withDefaults() addressSummaryLimits {
@@ -68,7 +78,23 @@ func (l addressSummaryLimits) withDefaults() addressSummaryLimits {
 	if l.maxEnrichedAssets <= 0 {
 		l.maxEnrichedAssets = addressExtendedMaxAssets
 	}
+	if l.maxTotalOutputs <= 0 {
+		l.maxTotalOutputs = addressTotalMaxOutputs
+	}
+	if l.maxAssetRows <= 0 {
+		l.maxAssetRows = accountMaxAssetRows
+	}
 	return l
+}
+
+// accountLimits is the database budget of one account aggregate read.
+func (l addressSummaryLimits) accountLimits() models.AccountAggregateLimits {
+	l = l.withDefaults()
+	return models.AccountAggregateLimits{
+		MaxUtxos:     l.maxTotalOutputs,
+		MaxAssetRows: l.maxAssetRows,
+		MaxAssets:    l.maxAssets,
+	}
 }
 
 // AddressAssetUTXOs returns the paginated current UTxOs of an address that
@@ -294,22 +320,44 @@ func (a *NodeAdapter) AddressTotal(
 	txn := db.Transaction(ctx, false)
 	defer txn.Release()
 
+	limits := a.summaryLimits.withDefaults()
 	received := newUnitSums()
 	sent := newUnitSums()
 	outputs := 0
+	candidates := 0
 	query := &models.UtxoHistoryQuery{
 		AddressPatterns: []models.UtxoAddressPattern{pattern},
 		Status:          models.UtxoHistoryStatusAll,
-		Limit:           addressTotalBatch,
 	}
 	for {
+		// One row past the budget is enough to know it was exceeded.
+		query.Limit = min(limits.batch, limits.maxTotalOutputs+1-outputs)
 		if err := ctx.Err(); err != nil {
 			return AddressTotalInfo{}, err
 		}
 		// The read runs in txn, which carries ctx.
-		//nolint:contextcheck // UtxosWithHistory takes its context from txn
-		batch, err := db.UtxosWithHistory(query, txn)
+		var batch []models.UtxoWithHistory
+		if isPaymentCred {
+			//nolint:contextcheck // UtxosWithHistory takes its context from txn
+			batch, err = db.UtxosWithHistory(query, txn)
+		} else {
+			var read int
+			//nolint:contextcheck // UtxosWithHistoryBounded takes its context from txn
+			batch, read, err = db.UtxosWithHistoryBounded(
+				query,
+				limits.maxTotalOutputs-candidates,
+				txn,
+			)
+			candidates += read
+		}
 		if err != nil {
+			if errors.Is(err, database.ErrUtxoHistoryCandidateLimit) {
+				return AddressTotalInfo{}, fmt.Errorf(
+					"more than %d output candidates: %w",
+					limits.maxTotalOutputs,
+					ErrAddressSummaryTooLarge,
+				)
+			}
 			return AddressTotalInfo{}, fmt.Errorf(
 				"get output history for %q: %w",
 				address,
@@ -318,12 +366,26 @@ func (a *NodeAdapter) AddressTotal(
 		}
 		for i := range batch {
 			outputs++
+			if outputs > limits.maxTotalOutputs {
+				return AddressTotalInfo{}, fmt.Errorf(
+					"more than %d outputs: %w",
+					limits.maxTotalOutputs,
+					ErrAddressSummaryTooLarge,
+				)
+			}
 			received.add(batch[i].Utxo)
 			if batch[i].DeletedSlot != 0 {
 				sent.add(batch[i].Utxo)
 			}
+			if len(received.assets) > limits.maxAssets {
+				return AddressTotalInfo{}, fmt.Errorf(
+					"more than %d distinct assets: %w",
+					limits.maxAssets,
+					ErrAddressSummaryTooLarge,
+				)
+			}
 		}
-		if len(batch) < addressTotalBatch {
+		if len(batch) < query.Limit {
 			break
 		}
 		last := batch[len(batch)-1]

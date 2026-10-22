@@ -1346,6 +1346,7 @@ func (m *mockNode) TransactionRequiredSigners(
 }
 
 func (m *mockNode) Account(
+	_ context.Context,
 	_ string,
 ) (AccountInfo, error) {
 	return m.account, m.accountErr

@@ -40,7 +40,7 @@ import (
 // "RETURNING id"), which this query never has, so translate() plus a direct
 // QueryRowContext call is exactly what a cached *sql.Stmt (already
 // dialect-translated at prepare time, see prepareHotStatements) reproduces.
-const rewardLiveStakeAccountQuery = `
+const rewardLiveStakeAccountQuery = `-- name: GetRewardLiveStakeAccount :one
 SELECT reward, pool, active, added_slot
 FROM account
 WHERE credential_tag = ? AND staking_key = ?`
@@ -53,7 +53,7 @@ WHERE credential_tag = ? AND staking_key = ?`
 // dialect-specific branch to bypass. dialectQueryer.translate's ON CONFLICT
 // rewrite for MySQL happens once, at PrepareContext time, exactly as it does
 // for a one-shot ExecContext call today.
-const rewardLiveStakeUpsertQuery = `
+const rewardLiveStakeUpsertQuery = `-- name: UpsertRewardLiveStake :exec
 INSERT INTO reward_live_stake (
     credential_tag, staking_key, pool_key_hash, utxo_stake, reward_stake,
     total_stake, registered, pool_delegation_slot,
@@ -151,7 +151,7 @@ func pendingUtxoStakeDelta(
 // staking_key) point lookup the upsert's conflict target already indexes
 // (idx_reward_live_stake_cred), so this is an indexed single-row read, not a
 // scan.
-const rewardLiveStakeUtxoStakeQuery = `
+const rewardLiveStakeUtxoStakeQuery = `-- name: GetRewardLiveStakeUtxoStake :one
 SELECT utxo_stake FROM reward_live_stake
 WHERE credential_tag = ? AND staking_key = ?`
 
@@ -337,7 +337,7 @@ func (s *Store) applyRewardLiveStakeAggregate(
 	}
 	total := utxoValue + rewardStake
 	if errors.Is(accountErr, sql.ErrNoRows) && total == 0 {
-		_, err := db.ExecContext(ctx, `
+		_, err := db.ExecContext(ctx, `-- name: DeleteRewardLiveStake :exec
 DELETE FROM reward_live_stake
 WHERE credential_tag = ? AND staking_key = ?`,
 			ref.Tag,
@@ -425,7 +425,7 @@ WHERE credential_tag = ? AND staking_key = ?`,
 // recompiling the statement on every invocation; see prepared_stmt.go for
 // why caching and reusing one *sql.Stmt here is safe and
 // BenchmarkSumCredentialUtxoStake for the measured effect.
-const sumCredentialUtxoStakeQuery = `
+const sumCredentialUtxoStakeQuery = `-- name: SumCredentialUtxoStake :one
 SELECT SUM(CAST(amount AS BIGINT))
 FROM utxo
 WHERE credential_tag = ? AND staking_key = ? AND deleted_slot = 0`
