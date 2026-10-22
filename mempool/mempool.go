@@ -36,6 +36,7 @@ import (
 	"github.com/blinklabs-io/dingo/plugin"
 	"github.com/blinklabs-io/dingo/utxoref"
 	ouroboros "github.com/blinklabs-io/gouroboros"
+	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
@@ -1928,11 +1929,9 @@ func (m *Mempool) AddTransaction(
 }
 
 // rejectOversizedTx applies the ledger's MaxTxSize rule to the raw submission
-// before any decode, lock, or rule work. The ledger measures a transaction
-// from Alonzo onward without its leading array byte (common.TxSize), so the
-// early measure is the same and an early rejection implies the ledger rule
-// would reject it too. The ledger rule stays authoritative for everything
-// this lets through.
+// before any decode, lock, or rule work. The size is common.TxSize's measure,
+// so an early rejection implies the ledger rule would reject it too; the
+// ledger rule stays authoritative for everything this lets through.
 func (m *Mempool) rejectOversizedTx(txType uint, txBytes []byte) error {
 	provider, ok := m.validator.(TxSizeLimitProvider)
 	if !ok {
@@ -1942,10 +1941,7 @@ func (m *Mempool) rejectOversizedTx(txType uint, txBytes []byte) error {
 	if !known {
 		return nil
 	}
-	size := uint(len(txBytes))
-	if txType >= uint(gledger.TxTypeAlonzo) && size > 0 {
-		size--
-	}
+	size := rawTxSize(txType, txBytes)
 	if size <= maxSize {
 		return nil
 	}
@@ -1953,6 +1949,27 @@ func (m *Mempool) rejectOversizedTx(txType uint, txBytes []byte) error {
 		"validate transaction: %w",
 		shelley.MaxTxSizeUtxoError{TxSize: size, MaxTxSize: maxSize},
 	)
+}
+
+// rawTxSize is common.TxSize computed from the submitted bytes: from Alonzo
+// on, a transaction whose array has four elements is measured one byte short,
+// and any other shape, including the three-element Dijkstra mempool form, at
+// its full length. Discounting by era alone would admit a transaction one
+// byte over the limit into the ledger rules.
+func rawTxSize(txType uint, txBytes []byte) uint {
+	size := uint(len(txBytes))
+	if txType < uint(gledger.TxTypeAlonzo) || size == 0 {
+		return size
+	}
+	dec, err := cbor.NewStreamDecoder(txBytes)
+	if err != nil {
+		return size
+	}
+	arrayLen, _, _, err := dec.DecodeArrayHeader()
+	if err == nil && arrayLen == 4 {
+		size--
+	}
+	return size
 }
 
 // addTransactionAttempt validates and admits one transaction. On

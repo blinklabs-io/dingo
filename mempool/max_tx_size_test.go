@@ -136,3 +136,30 @@ func TestAddTransactionSkipsSizeCheckWhenLimitUnknown(t *testing.T) {
 	))
 	require.Equal(t, int64(1), v.validated.Load())
 }
+
+// A Dijkstra mempool transaction is a three-element array, which common.TxSize
+// measures at its full length; the early check must not discount it.
+func TestAddTransactionRejectsOversizedThreeElementDijkstraTx(t *testing.T) {
+	t.Parallel()
+	txBytes := testutil.DijkstraShapeMempoolTxBytes(
+		t, testutil.ShapeTxBody(nil),
+	)
+	tx, err := safedecode.Transaction(uint(gledger.TxTypeDijkstra), txBytes)
+	require.NoError(t, err)
+	ledgerSize, err := lcommon.TxSize(tx)
+	require.NoError(t, err)
+	require.Equal(t, len(txBytes), ledgerSize)
+
+	v := &sizeLimitValidator{maxSize: uint(ledgerSize - 1), known: true}
+	m := newTestMempoolWithValidator(t, v)
+	defer m.Stop(context.Background())
+
+	err = m.AddTransaction(
+		context.Background(), uint(gledger.TxTypeDijkstra), txBytes,
+	)
+	var sizeErr shelley.MaxTxSizeUtxoError
+	require.ErrorAs(t, err, &sizeErr)
+	require.Equal(t, uint(ledgerSize), sizeErr.TxSize)
+	require.Zero(t, v.validated.Load(), "ledger rules ran for oversized tx")
+	require.Empty(t, m.Transactions())
+}
