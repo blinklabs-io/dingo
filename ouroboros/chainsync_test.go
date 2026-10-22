@@ -1835,15 +1835,18 @@ func TestChainsyncClientRollForwardWithholdsUnauthenticatedCandidate(
 			BlockNumber: header.BlockNumber(),
 		},
 	))
-	require.Zero(t, corroborationWaitCalls)
-	require.True(
-		t,
-		state.RecordHeaderForDedup(
-			otherConn,
-			ocommon.NewPoint(header.SlotNumber(), header.Hash().Bytes()),
-		),
-		"a withheld header must remain available from another peer",
-	)
+	if corroborationWaitCalls != 0 {
+		t.Errorf(
+			"withheld authentication reached Genesis corroboration wait %d times",
+			corroborationWaitCalls,
+		)
+	}
+	if !state.RecordHeaderForDedup(
+		otherConn,
+		ocommon.NewPoint(header.SlotNumber(), header.Hash().Bytes()),
+	) {
+		t.Error("withheld header was recorded in cross-peer dedup")
+	}
 
 	select {
 	case <-tipCh:
