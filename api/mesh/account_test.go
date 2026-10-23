@@ -377,7 +377,7 @@ func TestAccountBalanceHistoricalBlockNotFound(t *testing.T) {
 
 			requireMeshError(
 				t, rec, ErrBlockNotFound,
-				http.StatusNotFound,
+				http.StatusInternalServerError,
 			)
 		})
 	}
@@ -440,7 +440,7 @@ func TestAccountBalanceInvalidAccount(t *testing.T) {
 
 			requireMeshError(
 				t, rec, ErrInvalidRequest,
-				http.StatusBadRequest,
+				http.StatusInternalServerError,
 			)
 		})
 	}
@@ -543,7 +543,7 @@ func TestAccountCoinsInvalidAccount(t *testing.T) {
 	)
 
 	requireMeshError(
-		t, rec, ErrInvalidRequest, http.StatusBadRequest,
+		t, rec, ErrInvalidRequest, http.StatusInternalServerError,
 	)
 }
 
@@ -606,7 +606,7 @@ func TestAccountBalanceHonorsAdvertisedCapability(t *testing.T) {
 		return
 	}
 	requireMeshError(
-		t, rec, ErrNotImplemented, http.StatusNotImplemented,
+		t, rec, ErrNotImplemented, http.StatusInternalServerError,
 	)
 }
 
@@ -694,7 +694,7 @@ func TestAccountCoinsConcurrencyBudget(t *testing.T) {
 		t,
 		postJSON(t, h, "/account/coins", coinsRequest(addr)),
 		ErrUnavailable,
-		http.StatusServiceUnavailable,
+		http.StatusInternalServerError,
 	)
 	require.True(t, got.Retriable)
 

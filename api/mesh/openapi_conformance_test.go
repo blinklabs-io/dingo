@@ -23,6 +23,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/internal/test/openapiconformance"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/stretchr/testify/require"
 )
 
@@ -93,6 +94,7 @@ func TestOpenAPIConformance(t *testing.T) {
 		})
 	}
 	assertMeshResponses(t, document)
+	assertMeshErrorResponses(t, document)
 }
 
 func assertMeshResponses(
@@ -122,6 +124,93 @@ func assertMeshResponses(
 		require.NoError(t, err)
 		require.NoError(t, document.ValidateJSON(schema, payload))
 	}
+}
+
+// assertMeshErrorResponses checks that every error a handler writes uses a
+// status the operation declares and an Error body that validates against it.
+// The spec declares only 200 and 500, so any other status fails the lookup.
+func assertMeshErrorResponses(
+	t *testing.T,
+	document openapiconformance.Document,
+) {
+	t.Helper()
+	addr := testAddress(
+		t, lcommon.AddressTypeKeyNone, testKeyHash(0x36), nil,
+	)
+	wrongNetwork := &NetworkIdentifier{
+		Blockchain: blockchain,
+		Network:    "not-" + testNetwork,
+	}
+	wrongNetworkCoins := coinsRequest(addr)
+	wrongNetworkCoins.NetworkIdentifier = wrongNetwork
+
+	deps := newTestDeps()
+	handler := newTestHandler(t, deps)
+
+	busy := newTestServer(t, newTestDeps())
+	for range cap(busy.bulkSlots) {
+		busy.bulkSlots <- struct{}{}
+	}
+	busyMux := http.NewServeMux()
+	busy.registerRoutes(busyMux)
+
+	cases := []struct {
+		name      string
+		handler   http.Handler
+		operation openapiconformance.Operation
+		body      string
+		want      *Error
+	}{
+		{
+			name:      "wrong network",
+			handler:   handler,
+			operation: operation(http.MethodPost, "/account/coins"),
+			body:      mustJSON(t, wrongNetworkCoins),
+			want:      ErrNetworkNotSupported,
+		},
+		{
+			name:      "malformed body",
+			handler:   handler,
+			operation: operation(http.MethodPost, "/network/status"),
+			body:      "{",
+			want:      ErrInvalidRequest,
+		},
+		{
+			name:      "missing account",
+			handler:   handler,
+			operation: operation(http.MethodPost, "/account/coins"),
+			body:      mustJSON(t, coinsRequest("")),
+			want:      ErrInvalidRequest,
+		},
+		{
+			name:      "busy account coins",
+			handler:   busyMux,
+			operation: operation(http.MethodPost, "/account/coins"),
+			body:      mustJSON(t, coinsRequest(addr)),
+			want:      ErrUnavailable,
+		},
+	}
+	for _, tc := range cases {
+		t.Run("error "+tc.name, func(t *testing.T) {
+			response := postRaw(t, tc.handler, tc.operation.Path, tc.body)
+			schema, err := document.ResponseSchema(
+				tc.operation, response.Code, "application/json",
+			)
+			require.NoError(t, err, response.Body.String())
+			var payload any
+			require.NoError(t, json.Unmarshal(response.Body.Bytes(), &payload))
+			require.NoError(t, document.ValidateJSON(schema, payload))
+			got := requireMeshError(t, response, tc.want, response.Code)
+			require.Equal(t, tc.want.Retriable, got.Retriable)
+		})
+	}
+}
+
+func mustJSON(t *testing.T, value any) string {
+	t.Helper()
+	raw, err := json.Marshal(value)
+	require.NoError(t, err)
+	return string(raw)
 }
 
 func TestAccountCoinsOpenAPIHasNoPagination(t *testing.T) {

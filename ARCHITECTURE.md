@@ -11910,6 +11910,9 @@ the protocol version advertised by `/network/options` follows the immutable
 v1.4.15 release tag. API changes must keep the pinned route, parameter, schema,
 nullability and numeric format checks passing. Unsupported upstream operations
 must remain explicitly listed as `Not implemented`.
+Every Mesh error is written as HTTP 500 with the spec's `Error` body, because
+the spec declares only 200 and 500 for each operation; the error class is the
+body's `code` and the retry hint is its `retriable` field, not the status.
 
 Mesh `network/status` reports `synced` only when the optional ledger sync
 progress capability reports 1: the applied ledger has caught up with its known

@@ -485,7 +485,7 @@ func TestRequestBodyLimit(t *testing.T) {
 	rec := postRaw(t, h, "/network/status", oversized)
 
 	requireMeshError(
-		t, rec, ErrInvalidRequest, http.StatusBadRequest,
+		t, rec, ErrInvalidRequest, http.StatusInternalServerError,
 	)
 }
 
@@ -710,7 +710,7 @@ func requireInvalidRequest(
 ) {
 	t.Helper()
 	require.Equal(
-		t, http.StatusBadRequest, resp.StatusCode,
+		t, http.StatusInternalServerError, resp.StatusCode,
 		"unexpected status, body: %s", body,
 	)
 	var got Error

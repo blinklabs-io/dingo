@@ -424,26 +424,11 @@ func writeJSON(
 	}
 }
 
-// writeError writes a Mesh error response.
+// writeError writes a Mesh error response. The Mesh specification declares
+// only 200 and 500 for every operation and carries the error class in the
+// Error body, so every error is a 500; clients retry on Error.retriable.
 func writeError(w http.ResponseWriter, meshErr *Error) {
-	status := http.StatusInternalServerError
-	switch meshErr.Code {
-	case ErrNetworkNotSupported.Code,
-		ErrBlockNotFound.Code,
-		ErrTransactionNotFound.Code,
-		ErrAccountNotFound.Code:
-		status = http.StatusNotFound
-	case ErrInvalidRequest.Code,
-		ErrInvalidPublicKey.Code,
-		ErrInvalidTransaction.Code,
-		ErrSubmitFailed.Code:
-		status = http.StatusBadRequest
-	case ErrNotImplemented.Code:
-		status = http.StatusNotImplemented
-	case ErrUnavailable.Code:
-		status = http.StatusServiceUnavailable
-	}
-	writeJSON(w, status, meshErr)
+	writeJSON(w, http.StatusInternalServerError, meshErr)
 }
 
 // decodeRequest decodes a JSON request body into dst under both
