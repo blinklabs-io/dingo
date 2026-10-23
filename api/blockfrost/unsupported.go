@@ -21,12 +21,13 @@ import (
 )
 
 // These are the operations defined by Blockfrost OpenAPI 0.1.93 (openapi.yaml
-// in blockfrost/openapi) that have no handler; the list is maintained by hand
-// against that file. Implemented operations are registered separately and
-// take precedence over this list. A final {name...} parameter matches the
-// remaining path, as an IPFS path may name an object inside a directory.
-// Specification paths sit under the /api/v0 server prefix; /health/clock is
-// also listed unprefixed beside the unprefixed GET /health handler.
+// in blockfrost/openapi) that have no handler. The pinned contract test checks
+// that every upstream operation is either registered or listed here.
+// Implemented operations take precedence over this list. A final {name...}
+// parameter matches the remaining path, as an IPFS path may name an object
+// inside a directory. Specification paths sit under the /api/v0 server prefix;
+// /health/clock is also listed unprefixed beside the unprefixed GET /health
+// handler.
 var unsupportedOperations = []string{
 	"GET /api/v0/",
 	"GET /api/v0/health",
@@ -62,16 +63,25 @@ func (b *Blockfrost) registerUnsupportedLiterals(mux *http.ServeMux) {
 }
 
 func (b *Blockfrost) handleUnsupported(w http.ResponseWriter, _ *http.Request) {
-	writeError(w, http.StatusNotImplemented, "Not Implemented", "The requested endpoint is not implemented.")
+	writeError(
+		w,
+		http.StatusNotImplemented,
+		"Not Implemented",
+		"The requested endpoint is not implemented.",
+	)
 }
 
-func (b *Blockfrost) writeUnsupportedOperation(w http.ResponseWriter, r *http.Request) bool {
+func (b *Blockfrost) writeUnsupportedOperation(
+	w http.ResponseWriter,
+	r *http.Request,
+) bool {
 	for _, operation := range unsupportedOperations {
 		method, path, _ := strings.Cut(operation, " ")
 		if !matchesOperationPath(path, r.URL.EscapedPath()) {
 			continue
 		}
-		if r.Method == method || (method == http.MethodGet && r.Method == http.MethodHead) {
+		if r.Method == method ||
+			(method == http.MethodGet && r.Method == http.MethodHead) {
 			b.handleUnsupported(w, r)
 		} else {
 			allow := method
@@ -86,7 +96,10 @@ func (b *Blockfrost) writeUnsupportedOperation(w http.ResponseWriter, r *http.Re
 	return false
 }
 
-func (b *Blockfrost) writeUnsupportedMethod(w http.ResponseWriter, r *http.Request) bool {
+func (b *Blockfrost) writeUnsupportedMethod(
+	w http.ResponseWriter,
+	r *http.Request,
+) bool {
 	for _, operation := range unsupportedOperations {
 		method, path, _ := strings.Cut(operation, " ")
 		if !matchesOperationPath(path, r.URL.EscapedPath()) ||
@@ -98,7 +111,12 @@ func (b *Blockfrost) writeUnsupportedMethod(w http.ResponseWriter, r *http.Reque
 			allow += ", HEAD"
 		}
 		w.Header().Set("Allow", allow)
-		writeError(w, http.StatusMethodNotAllowed, "Method Not Allowed", "The requested method is not allowed for this endpoint.")
+		writeError(
+			w,
+			http.StatusMethodNotAllowed,
+			"Method Not Allowed",
+			"The requested method is not allowed for this endpoint.",
+		)
 		return true
 	}
 	return false
@@ -108,13 +126,15 @@ func matchesOperationPath(pattern, path string) bool {
 	for {
 		expected, nextPattern, morePattern := strings.Cut(pattern, "/")
 		actual, nextPath, morePath := strings.Cut(path, "/")
-		if strings.HasPrefix(expected, "{") && strings.HasSuffix(expected, "...}") {
+		if strings.HasPrefix(expected, "{") &&
+			strings.HasSuffix(expected, "...}") {
 			return !morePattern && actual != ""
 		}
 		if morePattern != morePath {
 			return false
 		}
-		if strings.HasPrefix(expected, "{") && strings.HasSuffix(expected, "}") {
+		if strings.HasPrefix(expected, "{") &&
+			strings.HasSuffix(expected, "}") {
 			if actual == "" {
 				return false
 			}
