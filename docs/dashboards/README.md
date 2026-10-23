@@ -175,7 +175,7 @@ Some metrics only emit when their feature is active. Panels display "No data" un
 | `dingo_database_size_bytes` | Database stores are initialized |
 | `database_blob_*` | Badger blob store is active |
 | `dingo_metrics_leios_*` other than `dingo_metrics_leios_eb_wait_*` | Leios is active: the network is Musashi, `runMode` is `leios`, or the node starts in the Dijkstra era. The `eb_wait` series exist on every node and stay at zero without Leios |
-| `dingo_metrics_leios_forge_eb_*`, `dingo_forge_eb_*` | Leios is active and the node forges endorser blocks |
+| `dingo_metrics_leios_forge_eb_*`, `dingo_forge_eb_*` | The node runs as a block producer. They exist at zero on every block producer, with or without Leios, and are absent on relays |
 
 ## File listing
 

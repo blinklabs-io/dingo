@@ -1456,7 +1456,7 @@
         }
       ],
       "transparent": true,
-      "description": "Endorser blocks this node forged and broadcast since it started. Stays at 0 on a relay."
+      "description": "Endorser blocks this node forged and broadcast since it started. No data on a relay, which has no block forger."
     },
     {
       "type": "timeseries",
@@ -2151,7 +2151,7 @@
         }
       ],
       "transparent": true,
-      "description": "Endorser blocks forged and failed per minute, the 95th percentile time spent selecting their transactions, and selections cut short by the slot deadline. Empty on a relay."
+      "description": "Endorser blocks forged and failed per minute, the 95th percentile time spent selecting their transactions, and selections cut short by the slot deadline. No data on a relay, which has no block forger."
     },
     {
       "type": "timeseries",
