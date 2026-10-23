@@ -249,7 +249,9 @@ func parsePointSelector(value string) (*PointSelector, error) {
 		return nil, fmt.Errorf("%w: invalid point", ErrInvalidRequest)
 	}
 	slot, err := strconv.ParseUint(parts[0], 10, 64)
-	if err != nil || slot == 0 {
+	// The spec sets minimum 1 on the By Slot form only; the By Point form
+	// (slot.header_hash) admits slot 0.
+	if err != nil || (slot == 0 && len(parts) == 1) {
 		return nil, fmt.Errorf("%w: invalid point slot", ErrInvalidRequest)
 	}
 	ret := &PointSelector{SlotNo: slot}

@@ -359,6 +359,51 @@ func TestMatchQueryValidation(t *testing.T) {
 	}
 }
 
+// The spec bounds only the By Slot form of a point selector to slot 1 or
+// later; the By Point form's pattern admits slot 0.
+func TestMatchQueryAcceptsPointAtSlotZero(t *testing.T) {
+	t.Parallel()
+
+	hash := strings.Repeat("ab", 32)
+	for _, param := range []string{
+		"created_after",
+		"created_before",
+		"spent_after",
+		"spent_before",
+	} {
+		t.Run(param, func(t *testing.T) {
+			t.Parallel()
+
+			node := &mockNode{tip: Point{HeaderHash: strings.Repeat("aa", 32)}}
+			server := newTestServer(node)
+			response := serve(
+				t,
+				server,
+				http.MethodGet,
+				"/matches?"+param+"=0."+hash,
+				nil,
+			)
+			if response.Code != http.StatusOK {
+				t.Fatalf(
+					"status = %d: %s",
+					response.Code,
+					response.Body.String(),
+				)
+			}
+			selectors := map[string]*PointSelector{
+				"created_after":  node.lastQuery.CreatedAfter,
+				"created_before": node.lastQuery.CreatedBefore,
+				"spent_after":    node.lastQuery.SpentAfter,
+				"spent_before":   node.lastQuery.SpentBefore,
+			}
+			got := selectors[param]
+			if got == nil || got.SlotNo != 0 || got.HeaderHash != hash {
+				t.Fatalf("%s selector = %#v", param, got)
+			}
+		})
+	}
+}
+
 func TestConditionalRequestAndMethodMismatch(t *testing.T) {
 	t.Parallel()
 
