@@ -16,7 +16,7 @@ package dingo
 
 import (
 	"context"
-	"fmt"
+	"errors"
 	"log/slog"
 	"net/url"
 
@@ -121,19 +121,29 @@ func newTracerProvider(
 // uses the path verbatim, so a bare collector address such as
 // http://localhost:4318 gets the standard /v1/traces path, as the
 // OTEL_EXPORTER_OTLP_ENDPOINT variable would.
+//
+// Errors never quote endpoint, and the result carries no userinfo, query or
+// fragment: the exporter sends only scheme, host and path, so dropping them
+// changes nothing on the wire and keeps credentials out of every later
+// exporter error.
 func otlpTracesURL(endpoint string) (string, error) {
 	u, err := url.Parse(endpoint)
 	if err != nil {
-		return "", fmt.Errorf("invalid tracing endpoint: %w", err)
+		// Even the cause of a *url.Error quotes input: a '/', '?' or '#'
+		// in a password ends the authority early, and the password is then
+		// reported as an invalid port.
+		return "", errors.New("invalid tracing endpoint: malformed URL")
 	}
 	// url.Parse reads a bare host:port as a scheme and an opaque part, which
 	// the exporter would accept and then send nowhere.
 	if (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-		return "", fmt.Errorf(
-			"invalid tracing endpoint %q: want an http or https URL",
-			endpoint,
+		return "", errors.New(
+			"invalid tracing endpoint: want an http or https URL",
 		)
 	}
+	u.User = nil
+	u.RawQuery, u.ForceQuery = "", false
+	u.Fragment, u.RawFragment = "", ""
 	if u.Path == "" || u.Path == "/" {
 		u.Path = "/v1/traces"
 	}

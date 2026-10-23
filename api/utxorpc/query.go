@@ -815,15 +815,13 @@ func (s *queryServiceServer) ReadTx(
 		return nil, fmt.Errorf("lookup block: %w", err)
 	}
 
-	// Decode the block CBOR into a ledger block.
-	ledgerBlock, err := models.DecodeBlockCbor(block.Type, block.Cbor)
+	transactions, err := s.utxorpc.config.LedgerState.BlockTransactions(ctx, block)
 	if err != nil {
-		return nil, fmt.Errorf("decode block: %w", err)
+		return nil, fmt.Errorf("get block transactions: %w", err)
 	}
 
 	// Find the transaction by index first, then fall back to a hash scan.
 	var tx lcommon.Transaction
-	transactions := ledgerBlock.Transactions()
 	if int(txRecord.BlockIndex) < len(transactions) {
 		value := transactions[txRecord.BlockIndex]
 		if bytes.Equal(value.Hash().Bytes(), hash) {
@@ -1158,7 +1156,7 @@ func rationalToUtxorpc(
 }
 
 func uint32FromInt(value int, label string) (uint32, error) {
-	if value < 0 || value > math.MaxUint32 {
+	if value < 0 || int64(value) > math.MaxUint32 {
 		return 0, fmt.Errorf("%s out of range: %d", label, value)
 	}
 	return uint32(value), nil // #nosec G115 -- bounds checked above

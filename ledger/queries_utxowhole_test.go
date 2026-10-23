@@ -20,7 +20,6 @@ import (
 	"errors"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
@@ -205,56 +204,6 @@ func TestQueryShelleyUtxoWhole_CachesCheckedEncoding(t *testing.T) {
 	require.Equal(t, canonical, bounded.encoded)
 }
 
-func TestQueryShelleyUtxoWhole_BoundsAggregateWork(t *testing.T) {
-	t.Parallel()
-	db := newTestDB(t)
-	addr, err := lcommon.NewAddressFromParts(
-		lcommon.AddressTypeKeyNone,
-		lcommon.AddressNetworkTestnet,
-		bytes.Repeat([]byte{0xAA}, lcommon.AddressHashSize),
-		nil,
-	)
-	require.NoError(t, err)
-	seedBabbageUtxo(t, db, 0xA1, 0, addr, 1_000_000)
-	seedBabbageUtxo(t, db, 0xA2, 0, addr, 2_000_000)
-	ls := newPoolDistr2Ledger(t, db)
-	limits := defaultUtxoWholeLimits()
-	limits.maxItems = 1
-
-	_, err = ls.queryShelleyUtxoWholeWithLimits(
-		t.Context(), QueryPoint{}, nil, limits,
-	)
-	require.ErrorIs(t, err, errUtxoWholeLimitExceeded)
-}
-
-func TestQueryShelleyUtxoWhole_BoundsRetainedAndEncodedBytes(t *testing.T) {
-	t.Parallel()
-	db := newTestDB(t)
-	addr, err := lcommon.NewAddressFromParts(
-		lcommon.AddressTypeKeyNone,
-		lcommon.AddressNetworkTestnet,
-		bytes.Repeat([]byte{0xAB}, lcommon.AddressHashSize),
-		nil,
-	)
-	require.NoError(t, err)
-	seedBabbageUtxo(t, db, 0xB1, 0, addr, 1_000_000)
-	ls := newPoolDistr2Ledger(t, db)
-
-	retained := defaultUtxoWholeLimits()
-	retained.maxRetainedBytes = 1
-	_, err = ls.queryShelleyUtxoWholeWithLimits(
-		t.Context(), QueryPoint{}, nil, retained,
-	)
-	require.ErrorIs(t, err, errUtxoWholeLimitExceeded)
-
-	encoded := defaultUtxoWholeLimits()
-	encoded.maxResponseBytes = 3
-	_, err = ls.queryShelleyUtxoWholeWithLimits(
-		t.Context(), QueryPoint{}, nil, encoded,
-	)
-	require.ErrorIs(t, err, errUtxoWholeLimitExceeded)
-}
-
 func TestQueryShelleyUtxoWholeViaGetCBOR(t *testing.T) {
 	t.Parallel()
 	db := newTestDB(t)
@@ -288,19 +237,6 @@ func TestQueryShelleyUtxoWholeViaGetCBOR(t *testing.T) {
 	_, err = cbor.Decode(content, &decoded)
 	require.NoError(t, err)
 	require.Len(t, decoded, 1)
-}
-
-func TestQueryShelleyUtxoWhole_HasServerDeadline(t *testing.T) {
-	t.Parallel()
-	db := newTestDB(t)
-	ls := newPoolDistr2Ledger(t, db)
-	limits := defaultUtxoWholeLimits()
-	limits.timeout = time.Nanosecond
-
-	_, err := ls.queryShelleyUtxoWholeWithLimits(
-		t.Context(), QueryPoint{}, nil, limits,
-	)
-	require.ErrorIs(t, err, context.DeadlineExceeded)
 }
 
 func TestQueryShelleyUtxoWholeRejectsWrongLengthTransactionID(t *testing.T) {

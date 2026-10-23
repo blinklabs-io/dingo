@@ -521,6 +521,16 @@ var flagSpecs = []flagSpec{
 		"bark-archive-max-concurrent-fetches",
 		"maximum concurrent Bark ArchiveService FetchBlock requests; requests over the limit are refused (0 = default of 16)",
 	),
+	intFlag(
+		"BarkArchiveLookupsPerSecond",
+		"bark-archive-lookups-per-second",
+		"sustained Bark ArchiveService block lookups per second across all callers; a FetchBlock over budget is refused (0 = default of 200)",
+	),
+	intFlag(
+		"BarkArchiveCallerLookupsPerSecond",
+		"bark-archive-caller-lookups-per-second",
+		"sustained Bark ArchiveService block lookups per second for one caller address or IPv6 /64 (0 = default of 50)",
+	),
 	stringSliceFlag(
 		"BarkOperatorCertificateFingerprints",
 		"bark-operator-certificate-fingerprints",

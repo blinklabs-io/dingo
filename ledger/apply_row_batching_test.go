@@ -335,6 +335,7 @@ func rowBatchingScenario(t *testing.T) (
 }
 
 type rowBatchingRun struct {
+	ls         *LedgerState
 	db         *database.Database
 	batchedTxs int
 }
@@ -347,6 +348,7 @@ func runRowBatchingScenario(
 	storageMode string,
 	batching bool,
 	batchSize int,
+	configure ...func(*LedgerState),
 ) *rowBatchingRun {
 	t.Helper()
 	db, err := dbtest.NewDatabase(t, &database.Config{
@@ -372,7 +374,10 @@ func runRowBatchingScenario(
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, ls.Close()) })
-	run := &rowBatchingRun{db: db}
+	run := &rowBatchingRun{db: db, ls: ls}
+	for _, fn := range configure {
+		fn(ls)
+	}
 	var txs atomic.Int64
 	ls.afterBatchedTransactionWrite = func() { txs.Add(1) }
 	nonce := bytes.Repeat([]byte{0x42}, 32)
