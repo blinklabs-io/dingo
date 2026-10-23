@@ -1312,9 +1312,8 @@ const maxRevalidationCatchupRounds = 16
 const maxAdmissionReconciles = 2
 
 // ErrPendingStateMoved is returned by AddTransaction when the ledger kept
-// publishing new state, or the pool parents of the transaction's inputs kept
-// leaving the pool, while the transaction was being admitted, so no verdict
-// was reached. It is not a rejection: the same transaction may be admitted
+// publishing new state while the transaction was being admitted, so no
+// verdict was reached. It is not a rejection: the same transaction may be admitted
 // once the ledger settles.
 var ErrPendingStateMoved = errors.New(
 	"mempool: ledger moved since pending transactions were validated",
@@ -1728,6 +1727,56 @@ func (m *Mempool) withTxValidationSession(ctx context.Context,
 	)
 }
 
+// withResolvingTxValidationSession runs an admission's validation session,
+// with a resolver for confirmed outputs when the validator offers one that
+// is safe there. A session that resolves through its own snapshot is used
+// as is. A plain session gets no resolver: a separate lookup inside it would
+// need a second storage connection while the session holds one, and
+// sessions open before the mutation gate, so as many admissions as the read
+// pool has connections would wait on each other. Without sessions, a
+// UtxoResolver is used directly.
+func (m *Mempool) withResolvingTxValidationSession(ctx context.Context,
+	fn func(
+		validate func(
+			gledger.Transaction,
+			map[utxoref.Key]struct{},
+			map[utxoref.Key]lcommon.Utxo,
+			*utxoref.StateOverlay,
+		) error,
+		stillCurrent func() bool,
+		commitIfCurrent func(func() error) (bool, error),
+		resolve func([]models.UtxoId) ([]models.Utxo, error),
+	) error,
+) error {
+	if provider, ok := m.validator.(ResolvingTxValidationSessionProvider); ok {
+		return provider.WithResolvingTxValidationSession(ctx, fn)
+	}
+	if provider, ok := m.validator.(TxValidationSessionProvider); ok {
+		return provider.WithTxValidationSession(ctx, func(
+			validate func(
+				gledger.Transaction,
+				map[utxoref.Key]struct{},
+				map[utxoref.Key]lcommon.Utxo,
+				*utxoref.StateOverlay,
+			) error,
+			stillCurrent func() bool,
+			commitIfCurrent func(func() error) (bool, error),
+		) error {
+			return fn(validate, stillCurrent, commitIfCurrent, nil)
+		})
+	}
+	var resolve func([]models.UtxoId) ([]models.Utxo, error)
+	if resolver, ok := m.validator.(UtxoResolver); ok {
+		resolve = resolver.UtxosByRefs
+	}
+	return fn(
+		m.validator.ValidateTxWithOverlay,
+		func() bool { return true },
+		func(commit func() error) (bool, error) { return true, commit() },
+		resolve,
+	)
+}
+
 // expireTransactions periodically removes transactions that have
 // exceeded the configured TTL. It runs every cleanupInterval and
 // stops when the done channel is closed.
@@ -1896,20 +1945,6 @@ func (m *Mempool) AddTransaction(
 		addEvent, evictedEvents, seen, err = m.addTransactionAttempt(
 			ctx, txType, txBytes, tmpTx, txHash,
 		)
-		if errors.Is(err, errAddressInputsMoved) {
-			// An input changed state after the confirmed-input batch: the
-			// next attempt's batch reads it as confirmed.
-			// Running out of attempts reaches no verdict either, so it
-			// carries the sentinel every caller already treats as retryable.
-			if attempt == maxAdmissionReconciles {
-				return fmt.Errorf(
-					"index transaction: %w: %w",
-					ErrPendingStateMoved,
-					err,
-				)
-			}
-			continue
-		}
 		if !errors.Is(err, ErrPendingStateMoved) {
 			break
 		}
@@ -1954,11 +1989,7 @@ func (m *Mempool) addTransactionAttempt(
 	var evictedEvents []event.Event
 	var seen *utxoOverlay
 	outputAddrs := outputAddresses(tmpTx)
-	resolved, pooled, err := m.confirmedInputAddresses(tmpTx)
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	err = m.withTxValidationSession(ctx, func(
+	err := m.withResolvingTxValidationSession(ctx, func(
 		validate func(
 			gledger.Transaction,
 			map[utxoref.Key]struct{},
@@ -1967,6 +1998,7 @@ func (m *Mempool) addTransactionAttempt(
 		) error,
 		stillCurrent func() bool,
 		commitIfCurrent func(func() error) (bool, error),
+		resolve func([]models.UtxoId) ([]models.Utxo, error),
 	) error {
 		// Serialize mutations without blocking snapshot readers during ledger
 		// validation. This gate also guarantees the overlay used for validation
@@ -2052,10 +2084,10 @@ func (m *Mempool) addTransactionAttempt(
 			return fmt.Errorf("validate transaction: %w", validateErr)
 		}
 
-		inputAddrs, err := inputAddresses(
-			tmpTx, validCreated, resolved, pooled,
-			m.txInputsChecked(tmpTx),
-		)
+		// Resolved after validation, under the gate and in the same
+		// session, so the lookup reads the snapshot the verdict was reached
+		// on and the overlay that verdict used.
+		inputAddrs, err := inputAddresses(tmpTx, validCreated, resolve)
 		if err != nil {
 			return err
 		}

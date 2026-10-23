@@ -9958,13 +9958,6 @@ func (ls *LedgerState) skipDijkstraTxValidation(eraId uint) bool {
 		ls.config.SkipDijkstraTxValidation
 }
 
-// TxInputsChecked reports whether mempool validation of tx confirms that
-// every input it consumes exists. The Dijkstra prototype bypass skips the
-// whole rule set, inputs included; every other era validates them.
-func (ls *LedgerState) TxInputsChecked(tx lcommon.Transaction) bool {
-	return !ls.skipDijkstraTxValidation(uint(tx.Type())) // #nosec G115 -- era IDs are non-negative
-}
-
 // trustDijkstraTxValidationError reports whether a per-transaction validation
 // failure under era eraId is logged and trusted instead of rejecting the block.
 //
@@ -15269,6 +15262,11 @@ type txValidationApplyFunc func(
 	blockNumber uint64,
 ) error
 
+// txValidationResolveFunc reads confirmed outputs through the session's own
+// database transaction, so it sees the snapshot validation reads and needs
+// no second connection.
+type txValidationResolveFunc func(refs []models.UtxoId) ([]models.Utxo, error)
+
 // beginTxValidationTransition excludes validation commits from a durable
 // state transition until its matching snapshots have been published.
 func (ls *LedgerState) beginTxValidationTransition() func() {
@@ -15308,6 +15306,33 @@ func (ls *LedgerState) WithTxValidationSession(ctx context.Context,
 	})
 }
 
+// WithResolvingTxValidationSession is WithTxValidationSession for mempool
+// admission. resolve returns the live confirmed outputs among refs from the
+// session's database transaction, the snapshot its validations read.
+func (ls *LedgerState) WithResolvingTxValidationSession(ctx context.Context,
+	fn func(
+		validate func(
+			tx ledger.Transaction,
+			consumedUtxos map[utxoref.Key]struct{},
+			createdUtxos map[utxoref.Key]lcommon.Utxo,
+			accounts *utxoref.StateOverlay,
+		) error,
+		stillCurrent func() bool,
+		commitIfCurrent func(func() error) (bool, error),
+		resolve func(refs []models.UtxoId) ([]models.Utxo, error),
+	) error,
+) error {
+	return ls.withResolvingTxValidationSession(ctx, nil, nil, false, false, func(
+		validate func(ledger.Transaction, map[utxoref.Key]struct{}, map[utxoref.Key]lcommon.Utxo, *utxoref.StateOverlay) error,
+		stillCurrent func() bool,
+		commitIfCurrent func(func() error) (bool, error),
+		_ txValidationApplyFunc,
+		resolve txValidationResolveFunc,
+	) error {
+		return fn(validate, stillCurrent, commitIfCurrent, resolve)
+	})
+}
+
 func (ls *LedgerState) withTxValidationSession(ctx context.Context,
 	expectedParentHash []byte,
 	referenceSlot *uint64,
@@ -15323,6 +15348,41 @@ func (ls *LedgerState) withTxValidationSession(ctx context.Context,
 		stillCurrent func() bool,
 		commitIfCurrent func(func() error) (bool, error),
 		applyTx txValidationApplyFunc,
+	) error,
+) error {
+	return ls.withResolvingTxValidationSession(ctx,
+		expectedParentHash,
+		referenceSlot,
+		readWrite,
+		leiosClosureSemantics,
+		func(
+			validate func(ledger.Transaction, map[utxoref.Key]struct{}, map[utxoref.Key]lcommon.Utxo, *utxoref.StateOverlay) error,
+			stillCurrent func() bool,
+			commitIfCurrent func(func() error) (bool, error),
+			applyTx txValidationApplyFunc,
+			_ txValidationResolveFunc,
+		) error {
+			return fn(validate, stillCurrent, commitIfCurrent, applyTx)
+		},
+	)
+}
+
+func (ls *LedgerState) withResolvingTxValidationSession(ctx context.Context,
+	expectedParentHash []byte,
+	referenceSlot *uint64,
+	readWrite bool,
+	leiosClosureSemantics bool,
+	fn func(
+		validate func(
+			tx ledger.Transaction,
+			consumedUtxos map[utxoref.Key]struct{},
+			createdUtxos map[utxoref.Key]lcommon.Utxo,
+			accounts *utxoref.StateOverlay,
+		) error,
+		stillCurrent func() bool,
+		commitIfCurrent func(func() error) (bool, error),
+		applyTx txValidationApplyFunc,
+		resolve txValidationResolveFunc,
 	) error,
 ) error {
 	if err := ctx.Err(); err != nil {
@@ -15467,7 +15527,12 @@ func (ls *LedgerState) withTxValidationSession(ctx context.Context,
 				txn,
 			)
 		}
-		if err := fn(validate, stillCurrent, commitIfCurrent, applyTx); err != nil {
+		resolve := func(refs []models.UtxoId) ([]models.Utxo, error) {
+			return ls.db.UtxosByRefs(ctx, refs, txn)
+		}
+		if err := fn(
+			validate, stillCurrent, commitIfCurrent, applyTx, resolve,
+		); err != nil {
 			return err
 		}
 		return rollbackValidationSession

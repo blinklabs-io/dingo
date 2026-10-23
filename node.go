@@ -673,10 +673,10 @@ func (n *Node) ouroboros() *ouroborosPkg.Ouroboros {
 // ledger snapshot.
 var _ mempool.TxValidationSessionProvider = (*ledger.LedgerState)(nil)
 
-// The mempool finds the address of a confirmed input through the same
-// validator, again by interface assertion; losing either UtxoResolver method
-// would leave those inputs out of its address index with no error.
-var _ mempool.UtxoResolver = (*ledger.LedgerState)(nil)
+// The mempool resolves confirmed input addresses for its address index
+// through the same validator's session, again by interface assertion; losing
+// the method would leave those inputs out of the index with no error.
+var _ mempool.ResolvingTxValidationSessionProvider = (*ledger.LedgerState)(nil)
 
 //nolint:contextcheck // Run is the lifecycle boundary and derives n.ctx from the caller context.
 func (n *Node) Run(ctx context.Context) (runErr error) {

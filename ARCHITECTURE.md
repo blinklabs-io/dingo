@@ -11606,28 +11606,25 @@ pool transactions that pay it or spend one of its outputs) and the adapter
 asks it through the package-local `mempoolAddressReader`. A transaction's
 addresses are fixed once, when it enters the pool: its output addresses, the
 addresses of inputs that are outputs of other pool transactions, and the
-addresses of confirmed inputs, which one `UtxosByRefs` batch on the validator
-(`mempool.UtxoResolver`) resolves during admission. A lookup failure ends
-the admission with `mempool.ErrInputResolution`, which reaches no verdict:
+addresses of confirmed inputs. Confirmed inputs are resolved after validation,
+under the mutation gate, through the resolver the validation session provides
+(`mempool.ResolvingTxValidationSessionProvider`): `LedgerState` reads them with
+the session's own database transaction, so the lookup sees the snapshot the
+verdict was reached on and needs no second metadata connection. A separate
+lookup inside a session could wait on connections that admissions queued
+behind the gate hold, since sessions open before the gate. Pool parents are
+read from the overlay the transaction was validated against. An input found in
+neither had no live output when the transaction was validated, which only a
+validation that does not check inputs (the Dijkstra prototype bypass, or a
+partial rule set) admits, and is left out. A validator with sessions but no
+session resolver indexes no confirmed inputs; one without sessions may offer a
+plain `mempool.UtxoResolver`. A lookup failure, or a stored output that does
+not decode (a storage fault, as it is to ledger validation), ends the
+admission with `mempool.ErrInputResolution`, which reaches no verdict:
 Blockfrost submission answers it as a ledger-unavailable error, local
 transaction submission as a generic unavailable reason rather than a ledger
 rejection, and a transaction restored from a rolled-back block stays pending
-for the next rebuild. The batch runs before the ledger validation session opens:
-the session holds a metadata read connection and sessions are opened before
-the mutation gate, so a second read inside one could wait on connections that
-admissions queued behind the gate never release. Validation then finds
-every consumed input in the pool or the ledger, so an input that neither the
-validated pool outputs nor the batch resolved changed state in between: a
-skipped pool parent that left the pool, or an input confirmed or rolled back
-around the batch. Either restarts the admission attempt; when the attempts run
-out the admission ends with `mempool.ErrPendingStateMoved`, the same
-no-verdict result as a ledger that kept moving. The one exception is a
-validator that reports, through `UtxoResolver.TxInputsChecked`, that its
-validation of the transaction did not check inputs: `LedgerState` reports that
-for Dijkstra transactions under `SkipDijkstraTxValidation`, and such an input
-is left out of the index rather than retried. A stored output that does not decode is a
-storage fault, as it is to ledger validation, and ends the admission with
-`mempool.ErrInputResolution`. A phase-2-invalid transaction is indexed by its
+for the next rebuild. A phase-2-invalid transaction is indexed by its
 collateral return and collateral inputs only. Every removal path (explicit
 removal, block inclusion, eviction, expiry, revalidation and stop) updates the
 index under the pool lock, and a revalidation swap rebuilds it from the

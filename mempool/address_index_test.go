@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -127,7 +128,7 @@ func buildIndexTx(t *testing.T, spec indexTxSpec) ([]byte, gledger.Transaction) 
 }
 
 // resolvingValidator accepts every transaction and resolves confirmed
-// outputs from a fixed table, counting the lookups the pool makes.
+// outputs from a table, counting the lookups the pool makes.
 type resolvingValidator struct {
 	*mockValidator
 	mu        sync.Mutex
@@ -139,11 +140,21 @@ type resolvingValidator struct {
 	corrupt bool
 	// checksInputs makes validation reject a transaction whose consumed
 	// inputs are neither pool outputs nor confirmed, as ledger validation
-	// does. Without it the validator accepts any input and says so.
+	// does.
 	checksInputs bool
 }
 
 func (v *resolvingValidator) ValidateTxWithOverlay(
+	tx gledger.Transaction,
+	consumed map[utxoref.Key]struct{},
+	created map[utxoref.Key]lcommon.Utxo,
+	accounts *utxoref.StateOverlay,
+) error {
+	return v.validateAgainst(v.snapshot(), tx, consumed, created, accounts)
+}
+
+func (v *resolvingValidator) validateAgainst(
+	confirmed map[utxoref.Key]lcommon.Address,
 	tx gledger.Transaction,
 	consumed map[utxoref.Key]struct{},
 	created map[utxoref.Key]lcommon.Utxo,
@@ -155,10 +166,7 @@ func (v *resolvingValidator) ValidateTxWithOverlay(
 			if _, ok := created[key]; ok {
 				continue
 			}
-			v.mu.Lock()
-			_, ok := v.confirmed[key]
-			v.mu.Unlock()
-			if !ok {
+			if _, ok := confirmed[key]; !ok {
 				return fmt.Errorf("bad input %s", key.String())
 			}
 		}
@@ -166,10 +174,6 @@ func (v *resolvingValidator) ValidateTxWithOverlay(
 	return v.mockValidator.ValidateTxWithOverlay(
 		tx, consumed, created, accounts,
 	)
-}
-
-func (v *resolvingValidator) TxInputsChecked(gledger.Transaction) bool {
-	return v.checksInputs
 }
 
 func newResolvingValidator() *resolvingValidator {
@@ -197,19 +201,36 @@ func (v *resolvingValidator) unconfirm(in indexTxInput) {
 	})
 }
 
+// snapshot copies the confirmed table, as a storage read snapshot sees it.
+func (v *resolvingValidator) snapshot() map[utxoref.Key]lcommon.Address {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	ret := make(map[utxoref.Key]lcommon.Address, len(v.confirmed))
+	maps.Copy(ret, v.confirmed)
+	return ret
+}
+
 func (v *resolvingValidator) UtxosByRefs(
+	refs []models.UtxoId,
+) ([]models.Utxo, error) {
+	return v.resolveFrom(v.snapshot(), refs)
+}
+
+func (v *resolvingValidator) resolveFrom(
+	confirmed map[utxoref.Key]lcommon.Address,
 	refs []models.UtxoId,
 ) ([]models.Utxo, error) {
 	v.calls.Add(1)
 	v.refs.Add(int64(len(refs)))
 	v.mu.Lock()
-	defer v.mu.Unlock()
-	if v.err != nil {
-		return nil, v.err
+	err, corrupt := v.err, v.corrupt
+	v.mu.Unlock()
+	if err != nil {
+		return nil, err
 	}
 	var ret []models.Utxo
 	for _, ref := range refs {
-		owner, ok := v.confirmed[utxoref.Key{
+		owner, ok := confirmed[utxoref.Key{
 			TxId:  lcommon.NewBlake2b256(ref.Hash),
 			Index: ref.Idx,
 		}]
@@ -220,7 +241,7 @@ func (v *resolvingValidator) UtxosByRefs(
 		if err != nil {
 			return nil, err
 		}
-		if v.corrupt {
+		if corrupt {
 			raw = []byte{0xff}
 		}
 		ret = append(ret, models.Utxo{
@@ -739,10 +760,10 @@ func TestAddressIndexConcurrentMutationAndQueries(t *testing.T) {
 	})
 }
 
-// sessionConnValidator models a ledger whose validation session holds one of
-// a fixed number of storage read connections for its whole duration, as
-// LedgerState's metadata read transaction does, and whose UtxosByRefs needs
-// a connection of its own.
+// sessionConnValidator models LedgerState's validation session: it holds one
+// of a fixed number of storage read connections for its whole duration and
+// reads one snapshot of the confirmed table, which its validations and its
+// resolver share. Its standalone UtxosByRefs needs a connection of its own.
 type sessionConnValidator struct {
 	*resolvingValidator
 	conns chan struct{}
@@ -753,23 +774,24 @@ type sessionConnValidator struct {
 	// eachSession, when set, runs before every session takes its
 	// connection.
 	eachSession func()
-	// beforeResolve, when set, runs before every confirmed-input batch.
-	beforeResolve func()
+	// duringSession, when set, runs inside every session after its
+	// snapshot is taken.
+	duringSession func()
+	standalone    atomic.Int64
 }
 
-func (v *sessionConnValidator) WithTxValidationSession(
-	_ context.Context,
-	fn func(
-		func(
-			gledger.Transaction,
-			map[utxoref.Key]struct{},
-			map[utxoref.Key]lcommon.Utxo,
-			*utxoref.StateOverlay,
-		) error,
-		func() bool,
-		func(func() error) (bool, error),
-	) error,
-) error {
+type sessionValidateFunc = func(
+	gledger.Transaction,
+	map[utxoref.Key]struct{},
+	map[utxoref.Key]lcommon.Utxo,
+	*utxoref.StateOverlay,
+) error
+
+func (v *sessionConnValidator) open() (
+	sessionValidateFunc,
+	func([]models.UtxoId) ([]models.Utxo, error),
+	func(),
+) {
 	if v.beforeSession != nil {
 		v.once.Do(v.beforeSession)
 	}
@@ -777,20 +799,64 @@ func (v *sessionConnValidator) WithTxValidationSession(
 		v.eachSession()
 	}
 	v.conns <- struct{}{}
-	defer func() { <-v.conns }()
+	snap := v.snapshot()
+	if v.duringSession != nil {
+		v.duringSession()
+	}
+	validate := func(
+		tx gledger.Transaction,
+		consumed map[utxoref.Key]struct{},
+		created map[utxoref.Key]lcommon.Utxo,
+		accounts *utxoref.StateOverlay,
+	) error {
+		return v.validateAgainst(snap, tx, consumed, created, accounts)
+	}
+	resolve := func(refs []models.UtxoId) ([]models.Utxo, error) {
+		return v.resolveFrom(snap, refs)
+	}
+	return validate, resolve, func() { <-v.conns }
+}
+
+func (v *sessionConnValidator) WithTxValidationSession(
+	_ context.Context,
+	fn func(
+		sessionValidateFunc,
+		func() bool,
+		func(func() error) (bool, error),
+	) error,
+) error {
+	validate, _, done := v.open()
+	defer done()
 	return fn(
-		v.ValidateTxWithOverlay,
+		validate,
 		func() bool { return true },
 		func(commit func() error) (bool, error) { return true, commit() },
+	)
+}
+
+func (v *sessionConnValidator) WithResolvingTxValidationSession(
+	_ context.Context,
+	fn func(
+		sessionValidateFunc,
+		func() bool,
+		func(func() error) (bool, error),
+		func([]models.UtxoId) ([]models.Utxo, error),
+	) error,
+) error {
+	validate, resolve, done := v.open()
+	defer done()
+	return fn(
+		validate,
+		func() bool { return true },
+		func(commit func() error) (bool, error) { return true, commit() },
+		resolve,
 	)
 }
 
 func (v *sessionConnValidator) UtxosByRefs(
 	refs []models.UtxoId,
 ) ([]models.Utxo, error) {
-	if v.beforeResolve != nil {
-		v.beforeResolve()
-	}
+	v.standalone.Add(1)
 	select {
 	case v.conns <- struct{}{}:
 	case <-time.After(2 * time.Second):
@@ -800,17 +866,24 @@ func (v *sessionConnValidator) UtxosByRefs(
 	return v.resolvingValidator.UtxosByRefs(refs)
 }
 
-// TestAddressIndexResolvesInputsOutsideValidationSession pins that admission
-// never needs a second storage connection while its validation session holds
-// one. Sessions are opened before the mutation gate, so as many concurrent
-// admissions as the read pool has connections would otherwise leave the gate
-// holder waiting on a connection the waiters behind the gate never release.
-func TestAddressIndexResolvesInputsOutsideValidationSession(t *testing.T) {
-	t.Parallel()
+func newSessionConnValidator() *sessionConnValidator {
 	v := &sessionConnValidator{
 		resolvingValidator: newResolvingValidator(),
 		conns:              make(chan struct{}, 1),
 	}
+	v.checksInputs = true
+	return v
+}
+
+// TestAddressIndexResolvesInputsInsideValidationSession pins that admission
+// resolves confirmed inputs through its validation session and never needs a
+// second storage connection while that session holds one. Sessions are opened
+// before the mutation gate, so as many concurrent admissions as the read pool
+// has connections would otherwise leave the gate holder waiting on a
+// connection the waiters behind the gate never release.
+func TestAddressIndexResolvesInputsInsideValidationSession(t *testing.T) {
+	t.Parallel()
+	v := newSessionConnValidator()
 	m := newIndexTestPool(t, v, false, nil)
 	spender := indexTestAddress(t, 2)
 	in := indexTxInput{hash: [32]byte{0x51}}
@@ -822,43 +895,156 @@ func TestAddressIndexResolvesInputsOutsideValidationSession(t *testing.T) {
 	})
 	require.Equal(t, []string{hash},
 		m.TransactionHashesByAddress(spender.String()))
+	require.Zero(t, v.standalone.Load(),
+		"no lookup outside the session's own connection")
 	requireIndexMatchesPool(t, m)
 }
 
-// TestAddressIndexRetriesWhenPoolParentLeaves covers a parent that leaves the
-// pool between the child's confirmed-input lookup, which skipped its output as
-// a pool output, and the child's validation. The child's input is then a
-// confirmed output, and is still indexed under its address.
-func TestAddressIndexRetriesWhenPoolParentLeaves(t *testing.T) {
+// TestAddressIndexResolvesFromValidationSnapshot covers an input confirmed
+// in the snapshot a validation reads and rolled back or confirmed around it:
+// the index reads the same snapshot, so the address is found whatever the
+// live table holds before or after.
+func TestAddressIndexResolvesFromValidationSnapshot(t *testing.T) {
 	t.Parallel()
-	v := &sessionConnValidator{
-		resolvingValidator: newResolvingValidator(),
-		conns:              make(chan struct{}, 1),
+	for _, tc := range []struct {
+		name   string
+		before func(v *sessionConnValidator, in indexTxInput, a lcommon.Address)
+		during func(v *sessionConnValidator, in indexTxInput, a lcommon.Address)
+	}{
+		{
+			name: "confirmed as the session opens",
+			before: func(v *sessionConnValidator, in indexTxInput, a lcommon.Address) {
+				v.confirm(in, a)
+			},
+		},
+		{
+			name: "rolled back while the session runs",
+			before: func(v *sessionConnValidator, in indexTxInput, a lcommon.Address) {
+				v.confirm(in, a)
+			},
+			during: func(v *sessionConnValidator, in indexTxInput, _ lcommon.Address) {
+				v.unconfirm(in)
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			v := newSessionConnValidator()
+			m := newIndexTestPool(t, v, false, nil)
+			owner := indexTestAddress(t, 0x81)
+			in := indexTxInput{hash: [32]byte{0x82}}
+			v.eachSession = func() { tc.before(v, in, owner) }
+			if tc.during != nil {
+				v.duringSession = func() { tc.during(v, in, owner) }
+			}
+			hash := addIndexTx(t, m, indexTxSpec{
+				inputs:  []indexTxInput{in},
+				outputs: []lcommon.Address{indexTestAddress(t, 0x83)},
+			})
+			require.Equal(t, []string{hash},
+				m.TransactionHashesByAddress(owner.String()))
+			requireIndexMatchesPool(t, m)
+		})
 	}
-	m := newIndexTestPool(t, v, false, nil)
-	parentPayee, childPayee := indexTestAddress(t, 1), indexTestAddress(t, 2)
-	parentRaw, parentTx := buildIndexTx(t, indexTxSpec{
-		inputs:  []indexTxInput{{hash: [32]byte{0x52}}},
-		outputs: []lcommon.Address{parentPayee},
-	})
-	require.NoError(t, m.AddTransaction(
-		context.Background(), uint(conway.EraIdConway), parentRaw,
-	))
-	parentOut := indexTxInput{hash: [32]byte(parentTx.Hash().Bytes())}
+}
 
-	// The next session is the child's: the parent is confirmed just before.
-	v.once = sync.Once{}
-	v.beforeSession = func() {
-		v.confirm(parentOut, parentPayee)
-		m.RemoveTxsByHash([]string{parentTx.Hash().String()})
+// parentsLeavingFixture admits three parents and builds a child spending one
+// output of each. Once armed, every admission session outside a pool rebuild
+// first confirms one remaining parent and removes it from the pool.
+type parentsLeavingFixture struct {
+	m        *Mempool
+	v        *sessionConnValidator
+	payees   []lcommon.Address
+	parents  []string
+	childRaw []byte
+	child    string
+	armed    atomic.Bool
+}
+
+func newParentsLeavingFixture(t *testing.T) *parentsLeavingFixture {
+	t.Helper()
+	f := &parentsLeavingFixture{v: newSessionConnValidator()}
+	f.m = newIndexTestPool(t, f.v, false, nil)
+	var childInputs []indexTxInput
+	var outs []indexTxInput
+	for i := range 3 {
+		payee := indexTestAddress(t, byte(0x70+i))
+		fund := indexTxInput{hash: [32]byte{0x71, byte(i)}}
+		f.v.confirm(fund, indexTestAddress(t, 0x6f))
+		raw, tx := buildIndexTx(t, indexTxSpec{
+			inputs:  []indexTxInput{fund},
+			outputs: []lcommon.Address{payee},
+		})
+		require.NoError(t, f.m.AddTransaction(
+			context.Background(), uint(conway.EraIdConway), raw,
+		))
+		out := indexTxInput{hash: [32]byte(tx.Hash().Bytes())}
+		f.payees = append(f.payees, payee)
+		f.parents = append(f.parents, tx.Hash().String())
+		outs = append(outs, out)
+		childInputs = append(childInputs, out)
 	}
-	child := addIndexTx(t, m, indexTxSpec{
-		inputs:  []indexTxInput{parentOut},
-		outputs: []lcommon.Address{childPayee},
+	raw, tx := buildIndexTx(t, indexTxSpec{
+		inputs:  childInputs,
+		outputs: []lcommon.Address{indexTestAddress(t, 0x7f)},
 	})
-	require.Equal(t, []string{child},
-		m.TransactionHashesByAddress(parentPayee.String()))
-	requireIndexMatchesPool(t, m)
+	f.childRaw, f.child = raw, tx.Hash().String()
+	next := 0
+	f.v.eachSession = func() {
+		if !f.armed.Load() || next == len(outs) {
+			return
+		}
+		// A pool rebuild holds rebuildMutex; only admission sessions run
+		// without it.
+		if !f.m.rebuildMutex.TryLock() {
+			return
+		}
+		f.m.rebuildMutex.Unlock()
+		f.v.confirm(outs[next], f.payees[next])
+		f.m.RemoveTxsByHash([]string{f.parents[next]})
+		next++
+	}
+	return f
+}
+
+// TestAddressIndexParentConfirmedDuringAdmissionIsIndexed covers a pool
+// parent confirmed and removed from the pool just before the child's
+// validation session: the child spends one confirmed output and two pool
+// outputs, and is indexed under every parent's address on the first attempt.
+func TestAddressIndexParentConfirmedDuringAdmissionIsIndexed(t *testing.T) {
+	t.Parallel()
+	f := newParentsLeavingFixture(t)
+	f.armed.Store(true)
+	require.NoError(t, f.m.AddTransaction(
+		context.Background(), uint(conway.EraIdConway), f.childRaw,
+	))
+	for _, payee := range f.payees {
+		require.Contains(t,
+			f.m.TransactionHashesByAddress(payee.String()), f.child)
+	}
+	requireIndexMatchesPool(t, f.m)
+}
+
+// TestAddressIndexParentConfirmedDuringReadmissionIsIndexed is the rollback
+// readmission side: the restored child is admitted and fully indexed.
+func TestAddressIndexParentConfirmedDuringReadmissionIsIndexed(
+	t *testing.T,
+) {
+	t.Parallel()
+	f := newParentsLeavingFixture(t)
+	block := blockCarryingTx(t, f.childRaw)
+	f.m.noteChainUpdate(chainUpdate(chain.ChainRollbackEvent{
+		RolledBackBlocks: []models.Block{block},
+	}))
+	f.armed.Store(true)
+	require.NoError(t, f.m.rebuildAfterChainUpdate(context.Background()))
+	_, ok := f.m.GetTransaction(f.child)
+	require.True(t, ok)
+	for _, payee := range f.payees {
+		require.Contains(t,
+			f.m.TransactionHashesByAddress(payee.String()), f.child)
+	}
+	requireIndexMatchesPool(t, f.m)
 }
 
 // TestAddressIndexResolverFailureKeepsRolledBackTransaction pins that a
@@ -907,143 +1093,6 @@ func TestAddressIndexResolverFailureKeepsRolledBackTransaction(t *testing.T) {
 	requireIndexMatchesPool(t, m)
 }
 
-// parentsLeavingFixture admits three parents and builds a child spending one
-// output of each. Once armed, every admission session outside a pool rebuild
-// confirms one remaining parent and removes it from the pool, so each
-// admission attempt for the child finds a skipped pool parent gone.
-type parentsLeavingFixture struct {
-	m        *Mempool
-	v        *sessionConnValidator
-	payees   []lcommon.Address
-	parents  []string
-	childRaw []byte
-	child    string
-	armed    atomic.Bool
-}
-
-func newParentsLeavingFixture(t *testing.T) *parentsLeavingFixture {
-	t.Helper()
-	f := &parentsLeavingFixture{
-		v: &sessionConnValidator{
-			resolvingValidator: newResolvingValidator(),
-			conns:              make(chan struct{}, 1),
-		},
-	}
-	f.m = newIndexTestPool(t, f.v, false, nil)
-	var childInputs []indexTxInput
-	var outs []indexTxInput
-	for i := range 3 {
-		payee := indexTestAddress(t, byte(0x70+i))
-		raw, tx := buildIndexTx(t, indexTxSpec{
-			inputs:  []indexTxInput{{hash: [32]byte{0x71, byte(i)}}},
-			outputs: []lcommon.Address{payee},
-		})
-		require.NoError(t, f.m.AddTransaction(
-			context.Background(), uint(conway.EraIdConway), raw,
-		))
-		out := indexTxInput{hash: [32]byte(tx.Hash().Bytes())}
-		f.payees = append(f.payees, payee)
-		f.parents = append(f.parents, tx.Hash().String())
-		outs = append(outs, out)
-		childInputs = append(childInputs, out)
-	}
-	raw, tx := buildIndexTx(t, indexTxSpec{
-		inputs:  childInputs,
-		outputs: []lcommon.Address{indexTestAddress(t, 0x7f)},
-	})
-	f.childRaw, f.child = raw, tx.Hash().String()
-	next := 0
-	f.v.eachSession = func() {
-		if !f.armed.Load() || next == len(outs) {
-			return
-		}
-		// A pool rebuild holds rebuildMutex; only admission sessions run
-		// without it.
-		if !f.m.rebuildMutex.TryLock() {
-			return
-		}
-		f.m.rebuildMutex.Unlock()
-		f.v.confirm(outs[next], f.payees[next])
-		f.m.RemoveTxsByHash([]string{f.parents[next]})
-		next++
-	}
-	return f
-}
-
-// TestAddressIndexExhaustedParentRetriesAreNotAVerdict pins that running
-// out of admission attempts while pool parents keep confirming reports the
-// public retryable ErrPendingStateMoved, which every submission surface
-// classifies as no verdict, rather than a rejection.
-func TestAddressIndexExhaustedParentRetriesAreNotAVerdict(t *testing.T) {
-	t.Parallel()
-	f := newParentsLeavingFixture(t)
-	f.armed.Store(true)
-	err := f.m.AddTransaction(
-		context.Background(), uint(conway.EraIdConway), f.childRaw,
-	)
-	require.ErrorIs(t, err, ErrPendingStateMoved)
-	_, ok := f.m.GetTransaction(f.child)
-	require.False(t, ok)
-	requireIndexMatchesPool(t, f.m)
-
-	// With every parent confirmed the same child is admitted and indexed
-	// under each parent's address.
-	require.NoError(t, f.m.AddTransaction(
-		context.Background(), uint(conway.EraIdConway), f.childRaw,
-	))
-	for _, payee := range f.payees {
-		require.Equal(t, []string{f.child},
-			f.m.TransactionHashesByAddress(payee.String()))
-	}
-}
-
-// TestAddressIndexExhaustedParentRetriesKeepRolledBackTransaction is the
-// rollback readmission side: the restored transaction stays pending.
-func TestAddressIndexExhaustedParentRetriesKeepRolledBackTransaction(
-	t *testing.T,
-) {
-	t.Parallel()
-	f := newParentsLeavingFixture(t)
-	block := blockCarryingTx(t, f.childRaw)
-	f.m.noteChainUpdate(chainUpdate(chain.ChainRollbackEvent{
-		RolledBackBlocks: []models.Block{block},
-	}))
-	f.armed.Store(true)
-	require.ErrorIs(t, f.m.rebuildAfterChainUpdate(context.Background()),
-		ErrPendingStateMoved)
-	require.Equal(t, []string{f.child}, f.m.pendingRolledBackOrder)
-
-	require.NoError(t, f.m.rebuildAfterChainUpdate(context.Background()))
-	_, ok := f.m.GetTransaction(f.child)
-	require.True(t, ok)
-	requireIndexMatchesPool(t, f.m)
-}
-
-// TestAddressIndexRetriesInputConfirmedBeforeValidation covers an input that
-// is neither a pool output nor confirmed when the batch resolves it, but is
-// confirmed by the time the ledger validates the transaction (a block applied
-// in between). The transaction is still indexed under the spent address.
-func TestAddressIndexRetriesInputConfirmedBeforeValidation(t *testing.T) {
-	t.Parallel()
-	v := &sessionConnValidator{
-		resolvingValidator: newResolvingValidator(),
-		conns:              make(chan struct{}, 1),
-	}
-	v.checksInputs = true
-	m := newIndexTestPool(t, v, false, nil)
-	owner := indexTestAddress(t, 0x81)
-	in := indexTxInput{hash: [32]byte{0x82}}
-	v.beforeSession = func() { v.confirm(in, owner) }
-
-	hash := addIndexTx(t, m, indexTxSpec{
-		inputs:  []indexTxInput{in},
-		outputs: []lcommon.Address{indexTestAddress(t, 0x83)},
-	})
-	require.Equal(t, []string{hash},
-		m.TransactionHashesByAddress(owner.String()))
-	requireIndexMatchesPool(t, m)
-}
-
 // TestAddressIndexUndecodableConfirmedInputIsNotAVerdict: a stored output
 // that does not decode is a storage fault, as ledger validation treats it,
 // so admission reaches no verdict instead of indexing the transaction
@@ -1065,12 +1114,12 @@ func TestAddressIndexUndecodableConfirmedInputIsNotAVerdict(t *testing.T) {
 	requireIndexMatchesPool(t, m)
 }
 
-// TestAddressIndexBypassedInputCheckAdmitsUnresolvableInput pins the
-// Dijkstra prototype bypass: its validation does not check inputs, so an
-// input no lookup resolves has no live output to wait for. The transaction
-// is admitted on the first attempt without that address, and restoring it
+// TestAddressIndexInputWithNoLiveOutputIsLeftOut covers a validation that
+// does not check inputs, as the Dijkstra prototype bypass and partial rule
+// sets do: an input the validated snapshot does not hold has no address to
+// index. The transaction is admitted on the first attempt, and restoring it
 // from a rolled-back block does not leave it pending for every rebuild.
-func TestAddressIndexBypassedInputCheckAdmitsUnresolvableInput(t *testing.T) {
+func TestAddressIndexInputWithNoLiveOutputIsLeftOut(t *testing.T) {
 	t.Parallel()
 	v := newResolvingValidator()
 	m := newIndexTestPool(t, v, false, nil)
@@ -1097,34 +1146,5 @@ func TestAddressIndexBypassedInputCheckAdmitsUnresolvableInput(t *testing.T) {
 	require.Empty(t, m.pendingRolledBackOrder)
 	_, ok := m.GetTransaction(hash)
 	require.True(t, ok)
-	requireIndexMatchesPool(t, m)
-}
-
-// TestAddressIndexInputMissingFromEveryBatchIsNotAVerdict covers an input
-// rolled back before each confirmed-input batch and confirmed again before
-// each validation. Every validation passes, but no batch resolves the
-// input, so admission reaches no verdict rather than indexing the
-// transaction without the address it spends from.
-func TestAddressIndexInputMissingFromEveryBatchIsNotAVerdict(t *testing.T) {
-	t.Parallel()
-	v := &sessionConnValidator{
-		resolvingValidator: newResolvingValidator(),
-		conns:              make(chan struct{}, 1),
-	}
-	v.checksInputs = true
-	m := newIndexTestPool(t, v, false, nil)
-	owner := indexTestAddress(t, 0x91)
-	in := indexTxInput{hash: [32]byte{0x92}}
-	v.beforeResolve = func() { v.unconfirm(in) }
-	v.eachSession = func() { v.confirm(in, owner) }
-	raw, _ := buildIndexTx(t, indexTxSpec{
-		inputs:  []indexTxInput{in},
-		outputs: []lcommon.Address{indexTestAddress(t, 0x93)},
-	})
-
-	err := m.AddTransaction(context.Background(), uint(conway.EraIdConway), raw)
-	require.ErrorIs(t, err, ErrPendingStateMoved)
-	require.Empty(t, m.Transactions())
-	require.Empty(t, m.TransactionHashesByAddress(owner.String()))
 	requireIndexMatchesPool(t, m)
 }

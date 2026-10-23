@@ -15,6 +15,7 @@
 package mempool
 
 import (
+	"context"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -26,18 +27,33 @@ import (
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
-// UtxoResolver is the optional capability of a TxValidator that lets the
-// pool find the address a confirmed input belongs to. Without it only
+// UtxoResolver is the optional capability of a TxValidator without
+// validation sessions that lets the pool find the address a confirmed input
+// belongs to. Without it, or a ResolvingTxValidationSessionProvider, only
 // output addresses and the addresses of other pool transactions' outputs are
 // indexed.
 type UtxoResolver interface {
 	UtxosByRefs(refs []models.UtxoId) ([]models.Utxo, error)
-	// TxInputsChecked reports whether validating tx confirms that every
-	// input it consumes is a pool output or a confirmed output. It is false
-	// only where validation is bypassed, as the Dijkstra prototype profile
-	// bypasses it; the pool then indexes an input no lookup resolves as
-	// having no live output instead of waiting for it to be confirmed.
-	TxInputsChecked(tx gledger.Transaction) bool
+}
+
+// ResolvingTxValidationSessionProvider is a validation session that also
+// resolves confirmed outputs, through the same storage snapshot and
+// connection its validations read. The pool resolves a transaction's
+// confirmed inputs there, after validating it, so an input the validation
+// found is found again and one it could not have found does not exist.
+// LedgerState implements it.
+type ResolvingTxValidationSessionProvider interface {
+	WithResolvingTxValidationSession(context.Context, func(
+		validate func(
+			tx gledger.Transaction,
+			consumedUtxos map[utxoref.Key]struct{},
+			createdUtxos map[utxoref.Key]lcommon.Utxo,
+			accounts *utxoref.StateOverlay,
+		) error,
+		stillCurrent func() bool,
+		commitIfCurrent func(func() error) (bool, error),
+		resolve func(refs []models.UtxoId) ([]models.Utxo, error),
+	) error) error
 }
 
 // addressIndex maps an address to the pool transactions that pay it or spend
@@ -105,46 +121,25 @@ var ErrInputResolution = errors.New(
 	"mempool: confirmed input address resolution failed",
 )
 
-// errAddressInputsMoved reports that an input changed state between the
-// confirmed-input lookup and validation, so neither resolved its address.
-var errAddressInputsMoved = errors.New(
-	"mempool: transaction inputs changed state during admission",
-)
-
 var errNilConfirmedOutput = errors.New("decoded output is nil")
 
-// confirmedInputAddresses resolves the address of every input the
-// transaction consumes that does not name an output of another pool
-// transaction, in a single batch. It runs before the validation session:
-// LedgerState holds a storage read connection for a whole session, and
-// sessions are opened before the mutation gate, so a lookup needing a second
-// connection inside one would wait on connections that the admissions queued
-// behind the gate never release. It also returns the inputs it skipped as
-// pool outputs, which admission later reads from the validated overlay.
-// Without a resolver the returned address map is nil and confirmed inputs
-// are not indexed. A stored output that does not decode is a storage fault,
-// as ledger validation treats it, and fails with ErrInputResolution.
-func (m *Mempool) confirmedInputAddresses(
+// inputAddresses lists the addresses of the inputs the transaction consumes:
+// other pool transactions' outputs from created, the overlay the transaction
+// was validated against, and confirmed outputs through resolve, which reads
+// the snapshot the validation read. An input in neither had no live output
+// when the transaction was validated and is left out. A nil resolve leaves
+// confirmed inputs out. A lookup failure, or a stored output that does not
+// decode, is a storage fault, as ledger validation treats it, and fails with
+// ErrInputResolution.
+func inputAddresses(
 	tx gledger.Transaction,
-) (map[utxoref.Key]string, map[utxoref.Key]struct{}, error) {
+	created map[utxoref.Key]lcommon.Utxo,
+	resolve func(refs []models.UtxoId) ([]models.Utxo, error),
+) ([]string, error) {
 	consumed := tx.Consumed()
-	pooled := make(map[utxoref.Key]struct{})
-	m.RLock()
-	for _, input := range consumed {
-		key := utxoref.ForInput(input)
-		if _, ok := m.overlay.created[key]; ok {
-			pooled[key] = struct{}{}
-		}
-	}
-	m.RUnlock()
-	resolver, ok := m.validator.(UtxoResolver)
-	if !ok {
-		return nil, pooled, nil
-	}
-	resolved := make(map[utxoref.Key]string)
 	refs := make([]models.UtxoId, 0, len(consumed))
 	for _, input := range consumed {
-		if _, ok := pooled[utxoref.ForInput(input)]; ok {
+		if _, ok := created[utxoref.ForInput(input)]; ok {
 			continue
 		}
 		refs = append(refs, models.UtxoId{
@@ -152,61 +147,39 @@ func (m *Mempool) confirmedInputAddresses(
 			Idx:  input.Index(),
 		})
 	}
-	if len(refs) == 0 {
-		return resolved, pooled, nil
-	}
-	utxos, err := resolver.UtxosByRefs(refs)
-	if err != nil {
-		return nil, nil, fmt.Errorf(
-			"resolve confirmed input addresses: %w: %w",
-			ErrInputResolution,
-			err,
-		)
-	}
-	for _, utxo := range utxos {
-		output, err := utxo.Decode()
-		if err == nil && output == nil {
-			err = errNilConfirmedOutput
-		}
-		if err != nil || output == nil {
-			return nil, nil, fmt.Errorf(
-				"decode confirmed input %s#%d: %w: %w",
-				hex.EncodeToString(utxo.TxId),
-				utxo.OutputIdx,
+	resolved := make(map[utxoref.Key]string, len(refs))
+	if resolve != nil && len(refs) > 0 {
+		utxos, err := resolve(refs)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"resolve confirmed input addresses: %w: %w",
 				ErrInputResolution,
 				err,
 			)
 		}
-		key := utxoref.Key{
-			TxId:  lcommon.NewBlake2b256(utxo.TxId),
-			Index: utxo.OutputIdx,
+		for _, utxo := range utxos {
+			output, err := utxo.Decode()
+			if err == nil && output == nil {
+				err = errNilConfirmedOutput
+			}
+			if err != nil || output == nil {
+				return nil, fmt.Errorf(
+					"decode confirmed input %s#%d: %w: %w",
+					hex.EncodeToString(utxo.TxId),
+					utxo.OutputIdx,
+					ErrInputResolution,
+					err,
+				)
+			}
+			key := utxoref.Key{
+				TxId:  lcommon.NewBlake2b256(utxo.TxId),
+				Index: utxo.OutputIdx,
+			}
+			resolved[key] = output.Address().String()
 		}
-		resolved[key] = output.Address().String()
 	}
-	return resolved, pooled, nil
-}
-
-// inputAddresses lists the addresses of the inputs the transaction consumes,
-// reading other pool transactions' outputs from created and confirmed
-// outputs from resolved. A nil resolved map means no resolver, and confirmed
-// inputs are then left out.
-//
-// When validation checks inputs it has just found every consumed input in
-// created or the ledger, so an input in neither map changed state after the
-// batch ran: a skipped pool parent that left the pool, or an input confirmed
-// or rolled back around the batch. That fails with errAddressInputsMoved and
-// the attempt repeats; nothing about two snapshots proves the input has no
-// live output. Only when the validator reports that it did not check inputs
-// is such an input left out.
-func inputAddresses(
-	tx gledger.Transaction,
-	created map[utxoref.Key]lcommon.Utxo,
-	resolved map[utxoref.Key]string,
-	pooled map[utxoref.Key]struct{},
-	inputsChecked bool,
-) ([]string, error) {
 	var ret []string
-	for _, input := range tx.Consumed() {
+	for _, input := range consumed {
 		key := utxoref.ForInput(input)
 		if utxo, ok := created[key]; ok {
 			if utxo.Output != nil {
@@ -216,26 +189,9 @@ func inputAddresses(
 		}
 		if address, ok := resolved[key]; ok {
 			ret = append(ret, address)
-			continue
-		}
-		if _, ok := pooled[key]; ok {
-			return nil, errAddressInputsMoved
-		}
-		if resolved != nil && inputsChecked {
-			return nil, errAddressInputsMoved
 		}
 	}
 	return ret, nil
-}
-
-// txInputsChecked reports whether the validator's verdict on tx confirms
-// its inputs. A validator that does not say is taken to check them, so an
-// unresolved input is retried rather than silently left out.
-func (m *Mempool) txInputsChecked(tx gledger.Transaction) bool {
-	if resolver, ok := m.validator.(UtxoResolver); ok {
-		return resolver.TxInputsChecked(tx)
-	}
-	return true
 }
 
 // TransactionHashesByAddress returns the hashes of the pool transactions
