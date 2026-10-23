@@ -131,6 +131,21 @@ func Dial(
 		rawConn.Close() //nolint:errcheck
 		return nil, fmt.Errorf("ouroboros.New: %w", err)
 	}
+	// The 2GiB reassembly cap above is not the only bound on a reply: the
+	// muxer also queues received segments the protocol has not yet taken
+	// against a connection-wide ingress budget (muxer.DefaultIngressBudget,
+	// 64MiB), and fails the whole connection with ErrIngressOverflow when
+	// the queue would exceed it. A whole-UTxO-set reply arrives faster over
+	// a local socket than the LocalStateQuery client reassembles it, so the
+	// queue fills: confirmed live at preprod epoch 157 (~1.4M UTxOs).
+	// Backpressure makes the muxer stop reading the socket until the client
+	// catches up instead, which keeps the queue inside the budget at any
+	// reply size. It stalls every protocol on the connection, which is safe
+	// here: these connections carry nothing time-sensitive alongside the
+	// query, and a reply is only ever received in answer to one.
+	if lsq := conn.LocalStateQuery(); lsq != nil && lsq.Client != nil {
+		lsq.Client.SetIngressBackpressure(true)
+	}
 
 	// Keep closing conn for the rest of its life if ctx is cancelled, so a
 	// caller blocked in a later synchronous call (ReadTip, QuerySnapshot)

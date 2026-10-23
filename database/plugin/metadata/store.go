@@ -875,13 +875,17 @@ type UtxoStore interface {
 
 	// GetUtxoBalanceByAddress returns the live-UTxO lovelace balance,
 	// per-asset balances (ordered by policy id then name), and live UTxO
-	// count for the given address, aggregated in SQL. Payment-credential
-	// mode aggregates across address forms. Exact mode returns
+	// count for the given address. Payment-credential mode aggregates
+	// across address forms. Exact mode returns
 	// models.ErrExactAddressRequiresCbor; exact summaries use the coordinated
-	// Database query path instead.
+	// Database query path instead. The read stops with
+	// models.ErrAddressBalanceLimit as soon as it visits more outputs or
+	// accumulates more distinct assets than limits allow, and stops when the
+	// transaction's context ends.
 	GetUtxoBalanceByAddress(
 		lcommon.Address,
 		models.UtxoAddressMatchMode,
+		models.AddressBalanceLimits,
 		types.Txn,
 	) (models.AddressBalance, error)
 
@@ -992,9 +996,9 @@ type UtxoStore interface {
 	// schema: for atSlot near the live tip (the common caller, a pinned
 	// LocalStateQuery point), "added_slot <= atSlot" matches nearly every
 	// row ever created, live or already spent, so this is effectively a
-	// full-table scan. Callers pin this cost to genuinely pinned queries
-	// only, never the live (unpinned) path, which keeps using
-	// IterateLiveUtxos' indexed deleted_slot = 0 filter unchanged.
+	// full-table scan. A whole-UTxO walk on an acquired view pays it for a
+	// tip acquire too, through UtxoRefsAsOfAfterID, so it can read in short
+	// transactions as of the snapshot's tip.
 	IterateUtxosAsOf(
 		atSlot uint64,
 		txn types.Txn,
@@ -1019,6 +1023,20 @@ type UtxoStore interface {
 		txn types.Txn,
 		fn func(*models.Utxo) error,
 	) error
+
+	// UtxoRefsAsOfAfterID returns up to limit UTxO rows live as of atSlot
+	// (IterateUtxosAsOf's predicate) whose row id is greater than afterID,
+	// in ascending id order, populating only ID, TxId and OutputIdx. Paging
+	// on the row id lets a caller walk the whole set in short transactions:
+	// a row keeps its id for its whole life, so a later page cannot return
+	// a row an earlier page already did.
+	UtxoRefsAsOfAfterID(
+		ctx context.Context,
+		atSlot uint64,
+		afterID uint,
+		limit int,
+		txn types.Txn,
+	) ([]models.Utxo, error)
 
 	// MarkUtxosDeletedAtSlot marks every live UTxO row matching one
 	// of refs as deleted at atSlot. Refs that don't match any live

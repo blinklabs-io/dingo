@@ -396,6 +396,13 @@ func TestTokenRegistrySyncFetchErrorStaysIdentifiable(t *testing.T) {
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			cancel()
 			<-r.Context().Done()
+			// Abort rather than return. The server sees the client's
+			// close_notify before the client closes its socket, and a
+			// handler that returns answers an empty 200 in that window.
+			// The transport may hand back a response that races its own
+			// cancellation, so the sync would then fail decoding an empty
+			// manifest instead of reporting the cancellation.
+			panic(http.ErrAbortHandler)
 		}),
 	)
 	t.Cleanup(server.Close)

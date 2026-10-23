@@ -714,6 +714,25 @@ type entryPointRouting struct {
 
 	// StateReads is the total number of observed ledger-state reads.
 	StateReads int
+
+	// PreverifiedErr is what the same entry point returned when the ledger
+	// state also carried the transaction's signature result computed ahead
+	// by lcommon.PreverifySignatures, as block apply supplies it. It must
+	// match Err for every transaction.
+	PreverifiedErr error
+	// PreverifiedRan reports that the second validation ran.
+	PreverifiedRan bool
+}
+
+// preverifiedLedgerState is an observed ledger state that also offers a
+// preverified signature result, the capability the era signature rule reuses.
+type preverifiedLedgerState struct {
+	*observedLedgerState
+	signatures *common.PreverifiedSignatures
+}
+
+func (p preverifiedLedgerState) PreverifiedSignatures() *common.PreverifiedSignatures {
+	return p.signatures
 }
 
 // routeTransaction runs one transaction through a production era validation
@@ -746,7 +765,7 @@ func routeTransaction(
 		}
 	}
 
-	return entryPointRouting{
+	routing := entryPointRouting{
 		Err:            err,
 		EraName:        entry.Name,
 		EntryPoint:     entryPointName,
@@ -755,6 +774,22 @@ func routeTransaction(
 		LookedUpInputs: lookedUp,
 		StateReads:     ls.reads,
 	}
+	// The signature result is computed on another goroutine, as the apply
+	// loop's ahead workers compute it.
+	signatures := make(chan *common.PreverifiedSignatures, 1)
+	go func() { signatures <- common.PreverifySignatures(tx) }()
+	ls.reset()
+	routing.PreverifiedErr = entry.Validate(
+		tx,
+		slot,
+		preverifiedLedgerState{
+			observedLedgerState: ls,
+			signatures:          <-signatures,
+		},
+		pp,
+	)
+	routing.PreverifiedRan = true
+	return routing
 }
 
 // entryPointExecutionFault reports why a routing fails to prove that the
