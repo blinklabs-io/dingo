@@ -637,7 +637,7 @@ func TestCommitAccountRewardsForEpoch(t *testing.T) {
 		cache.CommitAccountRewardsForEpoch("preview", 100, rows, 5, true, now),
 	)
 
-	got, err := cache.GetAccountRewardsForEpoch("preview", 100)
+	got, err := getAccountRewardsForEpoch(cache.db, "preview", 100)
 	require.NoError(t, err)
 	require.Len(t, got, 2)
 	types := map[string]string{
@@ -673,7 +673,7 @@ func TestCommitAccountRewardsForEpoch(t *testing.T) {
 			now,
 		),
 	)
-	got, err = cache.GetAccountRewardsForEpoch("preview", 100)
+	got, err = getAccountRewardsForEpoch(cache.db, "preview", 100)
 	require.NoError(t, err)
 	require.Len(t, got, 1)
 	cov, err = cache.GetAccountCoverage("preview", 100)
@@ -733,7 +733,7 @@ func TestPruneAccountCoverageBoundsCheckpointRows(t *testing.T) {
 	cov, err := cache.GetAccountCoverage("preview", oldEpoch)
 	require.NoError(t, err)
 	require.True(t, cov.Complete)
-	oldRows, err := cache.GetAccountRewardsForEpoch("preview", oldEpoch)
+	oldRows, err := getAccountRewardsForEpoch(cache.db, "preview", oldEpoch)
 	require.NoError(t, err)
 	require.Len(t, oldRows, 1)
 	require.Empty(t, CompareAccountEpoch(
@@ -866,7 +866,7 @@ func TestCommitAccountRewardsForEpochAllowsLiteralDuplicateKey(t *testing.T) {
 		"a literal duplicate (network, epoch, stake_address, reward_type) key must not error",
 	)
 
-	got, err := cache.GetAccountRewardsForEpoch("preview", 100)
+	got, err := getAccountRewardsForEpoch(cache.db, "preview", 100)
 	require.NoError(t, err)
 	require.Len(
 		t,
@@ -920,7 +920,7 @@ func TestAccountRewardsAdditiveColumnMigration(t *testing.T) {
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 
-	got, err := cache.GetAccountRewardsForEpoch("preview", 50)
+	got, err := getAccountRewardsForEpoch(cache.db, "preview", 50)
 	require.NoError(t, err)
 	require.Len(t, got, 1)
 	require.Equal(t, "stake_test1existingrow", got[0].StakeAddress)
@@ -947,7 +947,7 @@ func TestAccountRewardsAdditiveColumnMigration(t *testing.T) {
 			},
 		}, 1, true, now),
 	)
-	got, err = cache.GetAccountRewardsForEpoch("preview", 50)
+	got, err = getAccountRewardsForEpoch(cache.db, "preview", 50)
 	require.NoError(t, err)
 	require.Len(t, got, 2)
 }

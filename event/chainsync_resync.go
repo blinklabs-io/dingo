@@ -68,6 +68,11 @@ const (
 	// restarts from fresh intersect points. It is not a peer-fault signal and
 	// does not impose a peer cooldown.
 	ChainsyncResyncReasonDisconnectedHeaderAdmission = "disconnected header admission"
+	// ChainsyncResyncReasonGenesisCorroborationHoldExpired re-intersects a
+	// connection whose header was held for Genesis corroboration longer than
+	// the hold allows. The header was withheld, so the fresh intersection
+	// delivers it again. It is not a peer-fault signal.
+	ChainsyncResyncReasonGenesisCorroborationHoldExpired = "genesis corroboration hold expired"
 	// ChainsyncResyncReasonForecastHorizonNoWork re-intersects a connected
 	// ChainSync peer when no local queued or in-flight blockfetch can advance
 	// the forecast horizon. It is not a peer-fault signal and does not impose

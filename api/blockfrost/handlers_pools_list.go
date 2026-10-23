@@ -46,5 +46,8 @@ func (b *Blockfrost) handlePoolsList(
 	}
 
 	SetPaginationHeaders(w, total, params)
+	if pools == nil {
+		pools = []string{}
+	}
 	writeJSON(w, http.StatusOK, pools)
 }

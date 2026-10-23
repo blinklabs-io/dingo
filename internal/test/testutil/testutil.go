@@ -128,3 +128,32 @@ func RequireNoReceive[T any](
 		// Expected: nothing received
 	}
 }
+
+// RequireNever fails t if condition returns true at any check made during
+// waitFor, checking every tick. Unlike require.Never it runs condition on the
+// calling goroutine, so no check is still running when it returns: testify
+// starts each check on a goroutine of its own and returns at the deadline
+// without waiting for the last one, which then races whatever the test does
+// next. Use it for a condition that does more than read, such as one that
+// takes a lock or a database transaction or receives from a channel.
+func RequireNever(
+	t testing.TB,
+	condition func() bool,
+	waitFor time.Duration,
+	tick time.Duration,
+	msgAndArgs ...any,
+) {
+	t.Helper()
+	deadline := time.Now().Add(waitFor)
+	ticker := time.NewTicker(tick)
+	defer ticker.Stop()
+	for {
+		if condition() {
+			require.Fail(t, "Condition satisfied", msgAndArgs...)
+		}
+		if !time.Now().Before(deadline) {
+			return
+		}
+		<-ticker.C
+	}
+}
