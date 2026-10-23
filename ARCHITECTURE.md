@@ -11074,7 +11074,8 @@ archive transfers cannot consume their capacity. Either bound returns `503
 Service Unavailable` with `Retry-After: 1` when it is full. A
 15-second request-body read deadline is armed before decoding a signature
 submission. Archive transfers also admit at most one bootstrap's download
-concurrency from a remote host; excess downloads return `429 Too Many Requests`.
+concurrency from a remote host, keying IPv6 clients by their /64 prefix and
+IPv4-mapped addresses as IPv4; excess downloads return `429 Too Many Requests`.
 Each response write retains the 15-second idle deadline, while archive writes
 also carry a 30-second startup allowance and must average at least 64 KiB/s.
 Large archives therefore receive time proportional to their bytes while a

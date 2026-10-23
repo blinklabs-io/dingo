@@ -162,11 +162,32 @@ func newClientAdmission(perClient int) *clientAdmission {
 	}
 }
 
-func (a *clientAdmission) acquire(remoteAddr string) (func(), bool) {
-	client := remoteAddr
-	if host, _, err := net.SplitHostPort(remoteAddr); err == nil {
-		client = host
+// downloadClientKey identifies the client a download counts against. IPv6
+// clients are keyed by their /64, since a single host usually controls one
+// and can rotate addresses within it; an IPv4-mapped address counts as its
+// IPv4 address.
+func downloadClientKey(remoteAddr string) string {
+	host := remoteAddr
+	if h, _, err := net.SplitHostPort(remoteAddr); err == nil {
+		host = h
 	}
+	addr, err := netip.ParseAddr(host)
+	if err != nil {
+		return host
+	}
+	addr = addr.Unmap().WithZone("")
+	if addr.Is4() {
+		return addr.String()
+	}
+	prefix, err := addr.Prefix(64)
+	if err != nil {
+		return addr.String()
+	}
+	return prefix.String()
+}
+
+func (a *clientAdmission) acquire(remoteAddr string) (func(), bool) {
+	client := downloadClientKey(remoteAddr)
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.active[client] >= a.perClient {

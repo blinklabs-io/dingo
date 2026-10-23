@@ -788,6 +788,7 @@ func TestServerCoalescesConcurrentCatalogRequests(t *testing.T) {
 		)
 		assert.Equal(t, http.StatusOK, code)
 	}
+	assert.Equal(t, int32(1), store.calls.Load())
 }
 
 // rangeCountingStore reports itself as remote and counts the backend range

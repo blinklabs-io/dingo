@@ -15,7 +15,11 @@
 package mithril
 
 import (
+	"bytes"
+	"context"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -50,4 +54,37 @@ func TestArtifactTransferRateDeadline(t *testing.T) {
 	// The idle deadline alone would have been 15s from now, later than the
 	// transfer deadline, so the rate bound is the binding one.
 	require.True(t, rec.deadlines[0].Before(time.Now().Add(15*time.Second)))
+}
+
+// The download route must arm the rate deadline itself: with a one-minute
+// idle timeout, a download's write deadline is bounded by the transfer start
+// plus the grace plus its bytes at the minimum rate.
+func TestDownloadRouteArmsTransferRateDeadline(t *testing.T) {
+	t.Parallel()
+
+	store, _ := newLocalStore(t)
+	hash := strings.Repeat("a", 64)
+	const size = 2 * artifactMinimumBytesPerSecond
+	require.NoError(t, store.Put(
+		context.Background(),
+		hash+"/00000.tar.zst",
+		bytes.NewReader(make([]byte, size)),
+	))
+	handler := newServerHandler(
+		ServerConfig{Store: store, PublicBaseURL: "http://127.0.0.1"},
+		publicRequestLimit,
+		time.Minute,
+	)
+	rec := &deadlineResponseWriter{header: make(http.Header)}
+	started := time.Now()
+	handler.ServeHTTP(rec, httptest.NewRequest(
+		http.MethodGet, "/download/"+hash+"/00000.tar.zst", nil,
+	))
+	require.Equal(t, size, rec.written)
+	require.NotEmpty(t, rec.deadlines)
+	// The idle deadline alone would be a minute after the last write.
+	want := started.Add(artifactTransferGrace + 2*time.Second)
+	require.WithinDuration(
+		t, want, rec.deadlines[len(rec.deadlines)-1], 5*time.Second,
+	)
 }
