@@ -5285,10 +5285,11 @@ func (ls *LedgerState) startQueuedBlockfetchWithFallbackLocked(
 }
 
 // ErrChainsyncHeaderDisconnected is returned by AwaitChainsyncHeaderAdmission
-// for a header past the forecast horizon whose predecessor is neither the
-// chain tip, the header tip, nor any header or block the local chain holds.
-// Applying blocks the node already has cannot bring such a header into range,
-// so the connection must re-intersect from the local chain instead of waiting.
+// for a header past the forecast horizon whose predecessor remains neither the
+// chain tip, the header tip, nor any header or block the local chain holds
+// after queued and in-flight local work has had a chance to advance the chain.
+// The connection must then re-intersect from the local chain instead of
+// waiting.
 var ErrChainsyncHeaderDisconnected = errors.New(
 	"chainsync header does not connect to the local chain",
 )
@@ -5315,9 +5316,10 @@ var ErrChainsyncHeaderNeedsResync = errors.New(
 // validated, so it waits until the applied ledger advances far enough to
 // forecast its slot before the onset check runs, as the reference ChainSync
 // client does for OutsideForecastRange; until then it must not influence chain
-// selection or reach blockfetch. Such a header whose predecessor does not
-// connect to the local chain is not held: it returns an error wrapping
-// ErrChainsyncHeaderDisconnected. A connected header also returns
+// selection or reach blockfetch. A header whose predecessor does not connect
+// to the local chain waits while queued or in-flight local work may connect it;
+// otherwise it returns an error wrapping ErrChainsyncHeaderDisconnected. A
+// connected header also returns
 // ErrChainsyncHeaderNeedsResync when no queued or in-flight blockfetch, and no
 // stored block the ledger has yet to apply, can publish state to advance the
 // forecast. Other conversion failures fail
@@ -5494,7 +5496,17 @@ func (ls *LedgerState) awaitForecastHorizon(
 			return nil
 		}
 		if ls.chainsyncHeaderDisconnected(ctx, e) {
-			return ErrChainsyncHeaderDisconnected
+			if !ls.flushQueuedHeadersForHorizonWait(e.ConnectionId) &&
+				!ls.chainAheadOfAppliedTip() {
+				return ErrChainsyncHeaderDisconnected
+			}
+			select {
+			case <-published:
+			case <-capacityChanged:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+			continue
 		}
 		if !witnessPublished && e.ForecastHorizonWait != nil {
 			e.ForecastHorizonWait()
