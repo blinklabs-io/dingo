@@ -122,14 +122,18 @@ func (o openAPIOperation) validSamplePath(t *testing.T) string {
 		"asset":          policy + "6e7574",
 		"cc_id":          committeeID,
 		"cert_index":     "0",
+		"datum_hash":     strings.Repeat("ab", 32),
 		"drep_id":        "drep1y2zpa7e9f23g7snuhfqss73ufeshsqhdt4qqfu74p9y4kfqcpsxym",
+		"epoch_number":   "1",
 		"gov_action_id":  string(govAction),
+		"hash":           strings.Repeat("ab", 32),
 		"hash_or_number": "1",
 		"label":          "1",
 		"number":         "1",
 		"policy_id":      policy,
 		"pool_id":        "pool1vzqtn3mtfvvuy8ghksy34gs9g97tszj5f8mr3sn7asy5vk577ec",
 		"script_hash":    policy,
+		"slot_number":    "1",
 		"stake_address":  "stake1u98nnlkvkk23vtvf9273uq7cph5ww6u2yq2389psuqet90sv4xv9v",
 		"tx_hash":        strings.Repeat("ab", 32),
 	}
@@ -344,7 +348,7 @@ func TestPinnedOpenAPIResponseContracts(t *testing.T) {
 			recorder := httptest.NewRecorder()
 			request := httptest.NewRequest(
 				operation.method,
-				operation.samplePath(),
+				operation.validSamplePath(t),
 				strings.NewReader(""),
 			)
 			request.Header.Set("Authorization", "Bearer "+testMutationAuthToken)
@@ -353,6 +357,20 @@ func TestPinnedOpenAPIResponseContracts(t *testing.T) {
 				operationRequestContentType(operation),
 			)
 			handler.ServeHTTP(recorder, request)
+			// Every operation without a request body must reach its documented
+			// success schema. One with a body is sent empty, which is invalid
+			// input, so its error schema is what can be checked here.
+			if _, hasBody := operation.value["requestBody"]; hasBody {
+				require.Equal(t, http.StatusBadRequest, recorder.Code)
+			} else {
+				require.True(
+					t,
+					recorder.Code >= 200 && recorder.Code < 300,
+					"status %d, want success: %s",
+					recorder.Code,
+					recorder.Body.String(),
+				)
+			}
 
 			response := operationResponse(t, doc, operation, recorder.Code)
 			content, _ := response["content"].(map[string]any)
@@ -387,7 +405,7 @@ func TestPinnedOpenAPIResponseContracts(t *testing.T) {
 }
 
 func openAPIContractMockNode() *mockNode {
-	return &mockNode{
+	node := &mockNode{
 		queryMock: queryMock{
 			addressExtended: AddressExtendedInfo{
 				Amount: []AddressExtendedAmountInfo{},
@@ -399,6 +417,21 @@ func openAPIContractMockNode() *mockNode {
 			Type:   "shelley",
 		},
 	}
+	// A zero-valued enum or datum is not a documented value and an asset with
+	// no holders reads as not found, so these carry schema-valid values.
+	node.assetHolders = []AssetHolderInfo{{
+		Address:  "addr1vx2fxv2umyhttkxyxp8x0dlpdt3k6cwng5pxj3jhsydzers66hrl8",
+		Quantity: "1",
+	}}
+	node.assetHoldersTotal = 1
+	node.scriptInfo = ScriptInfo{Type: "timelock"}
+	node.datumJSON = json.RawMessage(`{"int":42}`)
+	node.proposal.value = GovernanceProposalDetailInfo{
+		GovernanceProposalInfo: GovernanceProposalInfo{
+			GovernanceType: "info_action",
+		},
+	}
+	return node
 }
 
 func operationRequestContentType(operation openAPIOperation) string {
@@ -488,11 +521,18 @@ func validateOpenAPIValue(
 		return err
 	}
 	schema = resolved
+	typeName, _ := schema["type"].(string)
 	if value == nil {
-		if nullable, _ := schema["nullable"].(bool); nullable {
+		if nullable, _ := schema["nullable"].(bool); nullable ||
+			typeName == "null" {
 			return nil
 		}
-		return fmt.Errorf("%s is null but the schema is not nullable", path)
+		// A null can still satisfy a composition through a member such as
+		// `anyOf: [{type: string}, {type: 'null'}]`, so only a schema with no
+		// composition rejects it outright.
+		if !hasOpenAPIComposition(schema) {
+			return fmt.Errorf("%s is null but the schema is not nullable", path)
+		}
 	}
 
 	for _, keyword := range []string{"allOf", "anyOf", "oneOf"} {
@@ -546,10 +586,17 @@ func validateOpenAPIValue(
 		}
 	}
 
-	typeName, _ := schema["type"].(string)
-	switch typeName {
-	case "", "null":
+	if value == nil {
+		if typeName != "" {
+			return fmt.Errorf("%s is null, want %s", path, typeName)
+		}
 		return nil
+	}
+	switch typeName {
+	case "":
+		return nil
+	case "null":
+		return fmt.Errorf("%s is %T, want null", path, value)
 	case "boolean":
 		if _, ok := value.(bool); !ok {
 			return fmt.Errorf("%s is %T, want boolean", path, value)
@@ -624,6 +671,15 @@ func validateOpenAPIValue(
 	return nil
 }
 
+func hasOpenAPIComposition(schema map[string]any) bool {
+	for _, keyword := range []string{"allOf", "anyOf", "oneOf"} {
+		if alternatives, _ := schema[keyword].([]any); len(alternatives) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 func invalidQueryValue(schema map[string]any) (string, bool) {
 	if enum, ok := schema["enum"].([]any); ok && len(enum) > 0 {
 		return "invalid-openapi-enum-value", true
@@ -652,5 +708,62 @@ func numberValue(value any) (float64, bool) {
 		return value, true
 	default:
 		return 0, false
+	}
+}
+
+func TestValidateOpenAPIValueNull(t *testing.T) {
+	t.Parallel()
+	stringOrNull := map[string]any{"anyOf": []any{
+		map[string]any{"type": "string"},
+		map[string]any{"type": "null"},
+	}}
+	stringOrNumber := map[string]any{"anyOf": []any{
+		map[string]any{"type": "string"},
+		map[string]any{"type": "number"},
+	}}
+	tests := []struct {
+		name   string
+		schema map[string]any
+		value  any
+		valid  bool
+	}{
+		{"anyOf null member accepts null", stringOrNull, nil, true},
+		{"anyOf null member accepts string", stringOrNull, "x", true},
+		{"anyOf without null member rejects null", stringOrNumber, nil, false},
+		{
+			"type null rejects string",
+			map[string]any{"type": "null"},
+			"x",
+			false,
+		},
+		{"type null accepts null", map[string]any{"type": "null"}, nil, true},
+		{
+			"non-nullable string rejects null",
+			map[string]any{"type": "string"},
+			nil,
+			false,
+		},
+		{
+			"nullable string accepts null",
+			map[string]any{"type": "string", "nullable": true},
+			nil,
+			true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			err := validateOpenAPIValue(
+				map[string]any{},
+				test.schema,
+				test.value,
+				"$",
+			)
+			if test.valid {
+				require.NoError(t, err)
+			} else {
+				require.Error(t, err)
+			}
+		})
 	}
 }
