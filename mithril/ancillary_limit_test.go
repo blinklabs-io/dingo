@@ -27,6 +27,7 @@ import (
 	"testing"
 
 	cardanocfg "github.com/blinklabs-io/dingo/config/cardano"
+	"github.com/blinklabs-io/dingo/ledgerstate"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/assert"
@@ -50,10 +51,18 @@ func shelleyNodeConfig(t *testing.T, securityParam int) *cardanocfg.CardanoNodeC
 
 func verifiedAncillaryAt(t *testing.T, slot string) *BootstrapResult {
 	t.Helper()
+	return verifiedAncillaryStateAt(t, slot, []byte("newer than certified"))
+}
+
+func verifiedAncillaryStateAt(
+	t *testing.T,
+	slot string,
+	stateBytes []byte,
+) *BootstrapResult {
+	t.Helper()
 	anc := t.TempDir()
 	slotDir := filepath.Join(anc, "ledger", slot)
 	require.NoError(t, os.MkdirAll(slotDir, 0o750))
-	stateBytes := []byte("newer than certified")
 	require.NoError(t, os.WriteFile(
 		filepath.Join(slotDir, "state"), stateBytes, 0o640,
 	))
@@ -120,6 +129,63 @@ func TestPrepareLedgerStateImportRefusesStateBeyondSlotLimit(t *testing.T) {
 	require.Error(t, err)
 	assert.Nil(t, prepared)
 	assert.ErrorContains(t, err, "exceeds artifact-relative limit 299")
+}
+
+// TestPrepareLedgerStateImportBoundsParsedTip covers a state whose parsed tip
+// is past the slot its directory name selected it at: the directory slot is
+// what discovery bounded, so the parsed tip has to be bounded again.
+func TestPrepareLedgerStateImportBoundsParsedTip(t *testing.T) {
+	t.Parallel()
+	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
+	stateBytes, err := os.ReadFile(
+		"../ledgerstate/testdata/devnet-ledger-snapshot-epoch4.cbor",
+	)
+	require.NoError(t, err)
+	parsed, err := ledgerstate.ParseSnapshotBytes(stateBytes)
+	require.NoError(t, err)
+	require.NotNil(t, parsed.Tip)
+	tipSlot := parsed.Tip.Slot
+	require.Greater(t, tipSlot, uint64(20))
+
+	t.Run("within certified tip by directory", func(t *testing.T) {
+		t.Parallel()
+		boundary := tipSlot - 1
+		prepared, err := prepareLedgerStateImport(
+			discard,
+			verifiedAncillaryStateAt(
+				t, strconv.FormatUint(boundary, 10), stateBytes,
+			),
+			boundary,
+			unboundedSlotLimit,
+		)
+		require.Error(t, err)
+		assert.Nil(t, prepared)
+		assert.ErrorContains(t, err, "exceeds its selected slot boundary")
+	})
+	t.Run("beyond certified tip and past limit", func(t *testing.T) {
+		t.Parallel()
+		prepared, err := prepareLedgerStateImport(
+			discard,
+			verifiedAncillaryStateAt(t, "11", stateBytes),
+			10,
+			fixedSlotLimit(tipSlot-1),
+		)
+		require.Error(t, err)
+		assert.Nil(t, prepared)
+		assert.ErrorContains(t, err, "exceeds artifact-relative limit")
+	})
+	t.Run("beyond certified tip and at limit", func(t *testing.T) {
+		t.Parallel()
+		prepared, err := prepareLedgerStateImport(
+			discard,
+			verifiedAncillaryStateAt(t, "11", stateBytes),
+			10,
+			fixedSlotLimit(tipSlot),
+		)
+		require.NoError(t, err)
+		require.NotNil(t, prepared)
+		prepared.Close()
+	})
 }
 
 func TestAncillarySlotLimit(t *testing.T) {
@@ -195,5 +261,10 @@ func TestGapBlockCollectorStopsAtLimit(t *testing.T) {
 	require.Error(t, err)
 	assert.ErrorContains(t, err, "volatile gap exceeds 2 blocks")
 	assert.Len(t, c.blocks, 2)
-
+	// The client reports a failed range through the same batch-done
+	// callback a completed one uses, so the cap must outlive that signal.
+	blocks, err := c.result()
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "volatile gap exceeds 2 blocks")
+	assert.Nil(t, blocks)
 }

@@ -275,14 +275,17 @@ func fetchGapBlocksFromPeer(
 		)
 	}
 
+	blocks, err := collector.result()
+	if err != nil {
+		return nil, err
+	}
 	logger.Info(
 		"fetched volatile blocks from relay",
 		"component", "mithril",
-		"count", len(collector.blocks),
+		"count", len(blocks),
 		"peer", peerAddr,
 	)
-
-	return collector.blocks, nil
+	return blocks, nil
 }
 
 // gapBlockCollector accumulates blocks after start and refuses to retain
@@ -293,6 +296,7 @@ type gapBlockCollector struct {
 	maxBlocks int
 	mu        sync.Mutex
 	blocks    []models.Block
+	err       error
 }
 
 func (c *gapBlockCollector) add(blockType uint, block gledger.Block) error {
@@ -309,11 +313,28 @@ func (c *gapBlockCollector) add(blockType uint, block gledger.Block) error {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.err != nil {
+		return c.err
+	}
 	if len(c.blocks) >= c.maxBlocks {
-		return fmt.Errorf("volatile gap exceeds %d blocks", c.maxBlocks)
+		c.err = fmt.Errorf("volatile gap exceeds %d blocks", c.maxBlocks)
+		return c.err
 	}
 	c.blocks = append(c.blocks, b)
 	return nil
+}
+
+// result returns the collected blocks, or the error that stopped
+// collection. The block-fetch client reports a range it failed through the
+// batch-done callback that also reports success, so completion alone does
+// not mean the range was collected.
+func (c *gapBlockCollector) result() ([]models.Block, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.err != nil {
+		return nil, c.err
+	}
+	return c.blocks, nil
 }
 
 // deleteBlobBlocksAboveSlotExcept removes blocks above slot unless their
