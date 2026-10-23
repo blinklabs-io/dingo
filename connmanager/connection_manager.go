@@ -272,15 +272,6 @@ func (c *ConnectionManager) releaseInboundSlot() {
 	c.inboundReserved--
 }
 
-// consumeInboundSlot releases a reservation without registering a connection.
-// Successful listener admission uses addReservedInboundConnection so the
-// reservation-to-connection handoff remains atomic.
-func (c *ConnectionManager) consumeInboundSlot() {
-	c.connectionsMutex.Lock()
-	defer c.connectionsMutex.Unlock()
-	c.inboundReserved--
-}
-
 func (c *ConnectionManager) initMetrics() {
 	promautoFactory := promauto.With(c.config.PromRegistry)
 	c.metrics = &connectionManagerMetrics{}
@@ -728,15 +719,6 @@ func (c *ConnectionManager) AddConnection(
 	peerAddr string,
 ) bool {
 	return c.addConnectionImpl(conn, isInbound, false, peerAddr, "", nil)
-}
-
-func (c *ConnectionManager) addConnectionWithIPKey(
-	conn *ouroboros.Connection,
-	isInbound bool,
-	peerAddr string,
-	ipKey string,
-) bool {
-	return c.addConnectionImpl(conn, isInbound, false, peerAddr, ipKey, nil)
 }
 
 func (c *ConnectionManager) addReservedInboundConnection(
