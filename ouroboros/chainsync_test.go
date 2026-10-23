@@ -1575,8 +1575,9 @@ func TestChainsyncClientRollForwardWithholdsHeaderWithDeferredCryptoVerification
 		200*time.Millisecond,
 		"a deferred header must not enter the ledger queue",
 	)
-	_, _, retained := state.LookupObservedHeader(conn, header.Hash().Bytes())
-	require.False(t, retained, "deferred header must not enter trusted history")
+	observed, _, retained := state.LookupObservedHeader(conn, header.Hash().Bytes())
+	require.True(t, retained, "deferred header must remain available as raw ancestry")
+	require.Zero(t, observed.HeaderCryptoVerificationGeneration)
 	require.Contains(t, o.deferredHeaderRecovery, conn)
 
 	baseline := ls.Tip().Point
