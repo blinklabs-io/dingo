@@ -8060,6 +8060,11 @@ them import backend state. Cardano-compatible metrics and `mempool.add_tx` /
 `dingo_metrics_mempool_info{implementation="fifo|dag"}` identifies the
 selected backend.
 
+Both backends maintain an address index beside the transaction list, guarded by
+the pool's state lock and consulted through `TransactionHashesByAddress`. The
+index is filled at admission and must be updated by every path that removes a
+transaction from the list; the revalidation swap rebuilds it with the list.
+
 Each transaction-submission consumer retains a bounded cache of transaction
 bodies. Retained CBOR is limited per consumer to one quarter of the configured
 mempool capacity by default, and in aggregate to the full capacity.
@@ -11697,6 +11702,43 @@ remote address. Its two-minute deadline and client cancellation flow through
 the epoch-boundary wait and the single read transaction used for the detail,
 voting-power, proposal-deposit, and registration lookups. Excess requests
 receive HTTP 429.
+
+`GET /mempool/addresses/{address}` admits four requests globally and one per
+remote address, with excess requests receiving HTTP 429. It reads no storage
+and decodes no transaction: the mempool keeps an address index (address to the
+pool transactions that pay it or spend one of its outputs) and the adapter
+asks it through the package-local `mempoolAddressReader`. A transaction's
+addresses are fixed once, when it enters the pool: its output addresses, the
+addresses of inputs that are outputs of other pool transactions, and the
+addresses of confirmed inputs. Confirmed inputs are resolved after validation,
+under the mutation gate, through the resolver the validation session provides
+(`mempool.ResolvingTxValidationSessionProvider`): `LedgerState` reads them with
+the session's own database transaction, so the lookup sees the snapshot the
+verdict was reached on and needs no second metadata connection. A separate
+lookup inside a session could wait on connections that admissions queued
+behind the gate hold, since sessions open before the gate. Pool parents are
+read from the overlay the transaction was validated against. An input found in
+neither had no live output when the transaction was validated, which only a
+validation that does not check inputs (the Dijkstra prototype bypass, or a
+partial rule set) admits, and is left out. A validator with sessions but no
+session resolver indexes no confirmed inputs; one without sessions may offer a
+plain `mempool.UtxoResolver`. A lookup failure, or a stored output that does
+not decode (a storage fault, as it is to ledger validation), ends the
+admission with `mempool.ErrInputResolution`, which reaches no verdict:
+Blockfrost submission answers it as a ledger-unavailable error, local
+transaction submission as a generic unavailable reason rather than a ledger
+rejection, and a transaction restored from a rolled-back block stays pending
+for the next rebuild. A phase-2-invalid transaction is indexed by its
+collateral return and collateral inputs only. Every removal path (explicit
+removal, block inclusion, eviction, expiry, revalidation and stop) updates the
+index under the pool lock, and a revalidation swap rebuilds it from the
+surviving transactions. Matches are returned in the pool's order and paginated
+by the adapter, so `X-Pagination-Count-Total` stays exact. The index is not
+charged against mempool capacity, which stays measured in transaction and
+output CBOR. It costs roughly 400 bytes of heap per distinct address per
+transaction, so a pool of minimal transactions paying or spending many
+distinct addresses holds an index of up to about ten times its charged bytes,
+in addition to the decoded transactions it already keeps uncharged.
 
 A Blockfrost-compatible REST API that provides read access to chain data,
 transaction evaluation, and transaction submission. Transaction evaluation is
