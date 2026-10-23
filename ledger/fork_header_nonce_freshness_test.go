@@ -252,6 +252,76 @@ func TestPeerHeaderForkPathCacheSurvivesTipOnlyPublication(t *testing.T) {
 	require.ErrorIs(t, err, errHeaderVerificationDeferred)
 }
 
+func TestValidatePeerForkOpCertCountersKeepsCacheAcrossTipOnlyPublication(
+	t *testing.T,
+) {
+	t.Parallel()
+	f := newForkPathFreshnessFixture(t, 0)
+	ctx := context.Background()
+	connID := ouroboros.ConnectionId{}
+	anchor := f.ls.currentTip.Point
+	blockNumber := f.ls.currentTip.BlockNumber + 1
+	nonce := bytes.Repeat([]byte{0x31}, lcommon.Blake2b256Size)
+	localBlock := createTestBlockWithNonceAtSlotsAndBlockNumber(
+		t,
+		[32]byte{72},
+		nonce,
+		anchor.Slot+1,
+		anchor.Slot+100,
+		anchor.Hash,
+		&blockNumber,
+		tamperNone,
+		0,
+	)
+	targetBlock := createTestBlockWithNonceAtSlotsAndBlockNumber(
+		t,
+		[32]byte{71},
+		nonce,
+		localBlock.block.SlotNumber()+1,
+		anchor.Slot+200,
+		anchor.Hash,
+		&blockNumber,
+		tamperNone,
+		0,
+	)
+	target := targetBlock.block.Header()
+
+	_, path, found, err := f.ls.peerHeaderForkPathContext(
+		ctx,
+		connID,
+		target,
+	)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Len(t, path, 1)
+	initialGeneration, contextGeneration :=
+		f.ls.currentHeaderVerificationContext()
+
+	require.NoError(t, f.ls.chain.AddLocalBlock(ctx, localBlock.block))
+	f.ls.currentTip = ochainsync.Tip{
+		Point: ocommon.NewPoint(
+			localBlock.block.SlotNumber(),
+			localBlock.block.Hash().Bytes(),
+		),
+		BlockNumber: localBlock.block.BlockNumber(),
+	}
+	f.ls.publishSnapshotsLocked()
+	currentGeneration, currentContext := f.ls.currentHeaderVerificationContext()
+	require.Greater(t, currentGeneration, initialGeneration)
+	require.Equal(t, contextGeneration, currentContext)
+	require.True(t, headerVerdictInContext(
+		initialGeneration,
+		currentContext,
+		currentGeneration,
+	))
+
+	require.NoError(t, f.ls.validatePeerForkOpCertCounters(
+		ctx,
+		connID,
+		target,
+	))
+}
+
 // TestPeerChainSelectionEpochNonceTreatsQueuedParentAsLocalChain covers the
 // first headers of an epoch whose nonce the ledger has not computed yet. Such
 // a header is deferred, and when it extends the local chain it is queued for

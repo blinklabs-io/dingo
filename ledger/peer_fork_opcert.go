@@ -71,7 +71,9 @@ func (ls *LedgerState) validatePeerForkOpCertCounters(
 	ls.forkHeaderNonceCacheMutex.Lock()
 	prefix, ok := ls.forkHeaderPathCache[key]
 	ls.forkHeaderNonceCacheMutex.Unlock()
-	if !ok || prefix.generation != generation ||
+	// A tip-only publication advances generation without changing the
+	// consensus context; headerVerdictInContext is the freshness check.
+	if !ok ||
 		prefix.ancestor.Slot != ancestor.Slot ||
 		!bytes.Equal(prefix.ancestor.Hash, ancestor.Hash) ||
 		!headerVerdictInContext(
@@ -163,7 +165,7 @@ func (ls *LedgerState) validatePeerForkOpCertCounters(
 	ls.forkHeaderNonceCacheMutex.Lock()
 	defer ls.forkHeaderNonceCacheMutex.Unlock()
 	current, ok := ls.forkHeaderPathCache[key]
-	if !ok || current.generation != generation ||
+	if !ok || current.generation != prefix.generation ||
 		current.ancestor.Slot != ancestor.Slot ||
 		!bytes.Equal(current.ancestor.Hash, ancestor.Hash) ||
 		len(current.headers) == 0 ||
