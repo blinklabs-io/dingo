@@ -4220,3 +4220,72 @@ LIMIT 1`).Scan(&epoch)
 	}
 	return uint64(epoch.Int64), true, nil
 }
+
+func (s *Store) GetPoolDepositsHeld(
+	poolKeyHashes []lcommon.PoolKeyHash,
+	txn types.Txn,
+) (map[string]uint64, error) {
+	ret := make(map[string]uint64, len(poolKeyHashes))
+	if len(poolKeyHashes) == 0 {
+		return ret, nil
+	}
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, err
+	}
+	for start := 0; start < len(poolKeyHashes); start += activeDelegatorChunkSize {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		end := min(start+activeDelegatorChunkSize, len(poolKeyHashes))
+		args := make([]any, 0, end-start)
+		for _, poolKeyHash := range poolKeyHashes[start:end] {
+			args = append(args, poolKeyHash.Bytes())
+		}
+		rows, err := db.QueryContext(ctx, `
+SELECT pool_key_hash, held FROM (
+    SELECT pr.pool_key_hash pool_key_hash,
+           COALESCE(pr.deposit_held, pr.deposit_amount) held,
+           ROW_NUMBER() OVER (
+               PARTITION BY pr.pool_id
+               ORDER BY pr.added_slot DESC,
+                        COALESCE(t.block_index, 0) DESC,
+                        COALESCE(c.cert_index, 0) DESC,
+                        pr.registration_index DESC
+           ) rn
+    FROM pool_registration pr
+    LEFT JOIN certs c ON c.id = pr.certificate_id
+    LEFT JOIN "transaction" t ON t.id = c.transaction_id
+    WHERE pr.pool_key_hash IN (`+bindPlaceholders(len(args))+`)
+) latest WHERE rn = 1`,
+			args...,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("get pool deposits held: %w", err)
+		}
+		for rows.Next() {
+			var hash []byte
+			var held sql.NullString
+			if err := rows.Scan(&hash, &held); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			if !held.Valid || held.String == "" {
+				continue
+			}
+			value, err := parseUint64("pool deposit held", held.String)
+			if err != nil {
+				rows.Close()
+				return nil, err
+			}
+			ret[string(hash)] = value
+		}
+		if err := rows.Close(); err != nil {
+			return nil, err
+		}
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+	}
+	return ret, nil
+}
