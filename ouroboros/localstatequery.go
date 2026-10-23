@@ -27,8 +27,10 @@ import (
 )
 
 const (
-	// localStateQueryRequestMaxBytes comfortably covers every supported query.
-	// Caller-controlled lists are separately capped at 1000 items by the ledger.
+	// localStateQueryRequestMaxBytes covers ordinary queries:
+	// gouroboros rejects a decoded query filter above 10000 items, and 10000
+	// of the largest filter element (a Shelley address) stay well under it.
+	// The cap refuses an oversized request before it is reassembled.
 	localStateQueryRequestMaxBytes = 1 << 20
 	// trustedNtCReadIdleTimeout lets multi-minute replies finish while bounding
 	// incomplete requests and otherwise silent local clients.

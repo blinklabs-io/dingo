@@ -14216,9 +14216,10 @@ now depends on directly; no local `replace` directive is needed for either.
 Node-parity raises its client-side reassembly cap to 2GiB and disables its
 per-query reply timer at its dial sites because a whole-UTxO-set response from
 a Preview-scale (or larger) node can legitimately take minutes. Dingo's NtC
-server uses a separate 1MiB request cap. Supported caller-controlled query
-lists are limited to 1000 items in the ledger, so the larger reply allowance
-does not belong on the request receiver.
+server uses a separate 1MiB request cap. gouroboros rejects a decoded query
+filter above 10000 items, which keeps ordinary address and input filters under
+that cap, so the larger reply allowance does not belong on the request
+receiver.
 
 The muxer accounts incomplete-message reassembly across the whole connection,
 not once per registered mini-protocol: the connection allowance is the largest
