@@ -573,6 +573,7 @@ func TestHistoricalBackfillMaintainsRunningTotalsForNewStakeKey(t *testing.T) {
 		0,
 	))
 	require.NoError(t, store.FlushBatch(acc, nil))
+	require.Equal(t, uint64(0), readUtxoStake(t, store, fx.ref))
 	require.NoError(t, store.RebuildRewardLiveStakeFromRunningTotals(100, nil))
 
 	newRef := models.NewStakeCredentialRef(0, newStakeHash.Bytes())
