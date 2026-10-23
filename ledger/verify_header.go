@@ -284,9 +284,10 @@ func (ls *LedgerState) ValidateChainSelectionHeaderCrypto(
 }
 
 // ValidatePeerChainSelectionHeaderCrypto verifies a peer header against the
-// nonce of the candidate chain that delivered it. A fork that diverges before
-// the candidate nonce freezes can have a different nonce in the next epoch,
-// even while it remains within the rollback window.
+// nonce and operational-certificate state of the candidate chain that
+// delivered it. A fork that diverges before the candidate nonce freezes can
+// have a different nonce in the next epoch, even while it remains within the
+// rollback window.
 func (ls *LedgerState) ValidatePeerChainSelectionHeaderCrypto(
 	connId ouroboros.ConnectionId,
 	header ledger.BlockHeader,
@@ -336,16 +337,29 @@ func (ls *LedgerState) validateChainSelectionHeaderCrypto(
 			); err != nil {
 				return err
 			}
-			return chainSelectionHeaderStateError(
-				ls.verifyBlockHeaderStateWithCache(
-					context.Background(),
-					block,
-					epoch.EpochId,
-					snapshot.epochCache,
-					true,
-				),
+			err = ls.verifyBlockHeaderStateWithCache(
+				context.Background(),
+				block,
+				epoch.EpochId,
+				snapshot.epochCache,
+				true,
+			)
+		} else {
+			err = ls.verifyBlockHeaderCryptoWithEpochAdvance(
+				context.Background(),
+				headerOnlyBlock{header: header, peerRelative: true},
+				false,
+				true,
 			)
 		}
+		if err = chainSelectionHeaderStateError(err); err != nil {
+			return err
+		}
+		return ls.validatePeerForkOpCertCounters(
+			context.Background(),
+			connId,
+			header,
+		)
 	}
 	err := ls.verifyBlockHeaderCryptoWithEpochAdvance(
 		context.Background(),

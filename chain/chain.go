@@ -224,12 +224,24 @@ func (c *Chain) Tip() ochainsync.Tip {
 func (c *Chain) TipRelation(
 	point ocommon.Point,
 ) (tip ochainsync.Tip, depth uint64, ancestor bool, err error) {
+	return c.TipRelationContext(context.Background(), point)
+}
+
+// TipRelationContext returns the tip, depth, and ancestry relation using ctx
+// for chain reconciliation and block lookups.
+func (c *Chain) TipRelationContext(
+	ctx context.Context,
+	point ocommon.Point,
+) (tip ochainsync.Tip, depth uint64, ancestor bool, err error) {
 	if c == nil {
 		return ochainsync.Tip{}, 0, false, errors.New("chain is nil")
 	}
+	if err := ctx.Err(); err != nil {
+		return ochainsync.Tip{}, 0, false, err
+	}
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
-	if err := c.reconcile(context.Background()); err != nil {
+	if err := c.reconcile(ctx); err != nil {
 		return ochainsync.Tip{}, 0, false, err
 	}
 	unlockBlockIndexReadLocks := c.lockBlockIndexReadLocks()
@@ -241,7 +253,7 @@ func (c *Chain) TipRelation(
 		}
 		return tip, 0, true, nil
 	}
-	block, err := c.manager.blockByPoint(context.Background(), point, nil)
+	block, err := c.manager.blockByPoint(ctx, point, nil)
 	if err != nil {
 		if errors.Is(err, models.ErrBlockNotFound) {
 			return tip, 0, false, nil
@@ -251,7 +263,7 @@ func (c *Chain) TipRelation(
 	if block.ID < initialBlockIndex || block.ID > c.tipBlockIndex {
 		return tip, 0, false, nil
 	}
-	activeBlock, err := c.blockByIndexLocked(context.Background(), block.ID)
+	activeBlock, err := c.blockByIndexLocked(ctx, block.ID)
 	if err != nil {
 		if errors.Is(err, models.ErrBlockNotFound) {
 			return tip, 0, false, nil

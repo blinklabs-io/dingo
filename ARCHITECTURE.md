@@ -703,6 +703,18 @@ moved the peer's cursor and is dropped. A rollback from a session that has
 delivered a header is applied immediately. The deferred state is per
 connection, held under `chainsyncMutex`, and cleared on `ledger.conn_closed`.
 
+Peer-fork header verification follows the candidate's retained ancestry from its
+intersection instead of reusing the applied tip's epoch nonce. The ledger folds
+the candidate evolving and frozen nonces across epoch boundaries, carries the
+last epoch-block nonce, and checks operational-certificate counters along that
+same path. This bounded history is scoped to the peer and consensus context:
+tip-only snapshot publications preserve cached verdicts, while a consensus
+input change requires revalidation. It is discarded when the retained path is
+reset or the connection closes. Deferred headers may remain as raw ancestry,
+but selection waits until the candidate path and required header checks are
+available. A header beyond the forecast horizon or with unavailable ancestry
+or context is deferred.
+
 `ledger.tx` is published with `PublishOrdered`, not `PublishAsync`, so a
 subscriber deriving state from it sees a block's transactions in index order
 and sees a rollback's undo events (`Rollback: true`) before any transaction
@@ -6360,9 +6372,13 @@ it. Dingo implements this as a **corroboration gate**
   keyed by the last folded hash, source epoch and nonce, cutoff, and both
   initial nonce states; entries for epochs outside the currently retained
   candidate path are discarded. This retains the same pool-key, leader-eligibility,
-  size, KES, and operational-certificate checks for every folded header. Hash
-  links, slots, block numbers, and era order are validated across the
-  reconstructed path before it can affect selection. The verifier receives the
+  size, KES, and operational-certificate checks for every folded header.
+  Candidate opcert counters are advanced along that validated path from the
+  common ancestor, with the Mithril trust boundary honored when it is later.
+  The per-connection counter prefix commits only after the target header passes
+  crypto and state checks; a fork that diverges discards counters beyond its
+  last shared header. Hash links, slots, block numbers, and era order are
+  validated across the reconstructed path before it can affect selection. The verifier receives the
   ChainSync connection identity so ancestry from one peer cannot be used for
   another peer's header. A per-connection path cache reuses a resolved ancestor
   while that intersection remains on the applied chain, the next header
@@ -6994,6 +7010,8 @@ active or while corroboration is incomplete.
 #### Header Verification Handoff
 
 When full-block header verification needs an epoch nonce that is not cached yet, blockfetch first flushes already-received predecessor blocks from the pending batch into the primary chain, then `ensureEpochForSlot` may forecast the nonce only within the cache tail's era. A confirmed transition or configured epoch trigger stops that forecast at the hard-fork boundary and defers verification without penalizing the peer, except for a direct child of the applied tip: that header is verified against an immutable successor-era forecast (successor-era epoch parameters and nonce built without publishing them or mutating the shared epoch cache), and a predecessor-era header cannot use it. The full ledger rollover remains the only path that publishes successor-era parameters and rotates snapshots. Chainsync-header VRF/KES/opcert crypto verification runs only when the header's epoch nonce is already present in the in-memory epoch cache, so headers beyond that window are queued as unverified until blockfetch. The chain header queue records, per queued header, whether its stateless crypto was verified; blockfetch skips that duplicate stateless work when the fetched block's own queued header, matched by slot and hash, is marked verified. Fetched blocks wait in the pending batch before insertion, so that header is usually queued behind the head, and matching only the head would re-run the crypto for every later block in the batch. The skip is sound because the block hash is the hash of the header bytes, and chain insertion still requires the block to match the queue head. The stateful header checks (registered VRF key binding and Praos leader-stake eligibility) still run on the fetched full block. If those stateful facts are ahead of the ledger apply cursor — for example a pool registration or epoch mark snapshot is in predecessor/endorser data that blockfetch has seen but `ledgerProcessBlock` has not applied yet — blockfetch records that block point for deferred validation rather than recycling the peer. The marker is both in memory and durable as a `dh` blob key before the block is inserted, so a restart cannot replay the persisted block without the pending stateful check. It is a blob write rather than a `sync_state` row because the blockfetch handler writes it, and a `sync_state` write waits for the single SQLite write connection that a block-apply transaction holds for its whole length. `ledgerProcessBlock` consults that marker, and any legacy `sync_state` marker, even if normal replay validation is disabled, replays the deferred stateful check strictly after referenced Leios endorser-block metadata is processed and before the ranking block's own transactions are applied, then deletes the blob marker once the apply transaction commits, so a rolled-back apply leaves the check pending.
+
+When candidate-chain header verification cannot resolve a peer fork's OpCert ancestry, Ouroboros retains the bounded per-connection headers with verification generation zero. Zero marks raw ancestry, not a successful crypto verdict. A deferred fork that does not extend the local chain stays out of peer cursors, deduplication, chain selection, and ledger ingress. A descendant may use those raw entries only as candidate-path input: the ledger must link the full path to a local anchor and revalidate every header against the current candidate state before caching a verdict. If the path cannot reach an anchor, verification remains deferred.
 
 #### Deferred Header Validation Bounds and Attribution
 
