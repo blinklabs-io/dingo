@@ -1618,7 +1618,7 @@ func newDefaultConfig() *Config {
 		LedgerCatchupTimeout:                         DefaultLedgerCatchupTimeout,
 		LocalStateQueryViewMaxLifetime:               DefaultLocalStateQueryViewMaxLifetime,
 		// Defaults for database worker pool and API backfill tuning
-		DatabaseWorkers:   5,
+		DatabaseWorkers:   8,
 		DatabaseQueueSize: 50,
 		BackfillBatchSize: 100,
 		// CIP-50 default L (feature disabled by default via PledgeLeverageEnabled)
