@@ -222,7 +222,13 @@ func Snapshot(
 	// "capture a version now" from "stream that version" — a larger
 	// rework of both, not attempted here.
 	metadataPath := filepath.Join(dir, MetadataBackupFileName)
-	metadataStageDir, err := os.MkdirTemp("", "dingo-snapshot-metadata-*")
+	// BackupTo writes by path, so it cannot write through snapshotRoot.
+	// Stage the backup in a private directory beside the snapshot, under
+	// the parent validated above, and move it into the opened snapshot
+	// directory afterwards. The system temp directory is not used: it may be
+	// small, memory-backed, or on another volume, and the metadata backup is
+	// as large as the metadata store.
+	metadataStageDir, err := os.MkdirTemp(parentDir, ".dingo-snapshot-metadata-*")
 	if err != nil {
 		return Manifest{}, fmt.Errorf("create private metadata staging directory: %w", err)
 	}
@@ -443,32 +449,18 @@ func Snapshot(
 	if err := blobFile.Close(); err != nil {
 		return Manifest{}, fmt.Errorf("close %q: %w", blobPath, err)
 	}
-	metadataStageFile, err := os.Open(metadataStagePath)
-	if err != nil {
-		return Manifest{}, fmt.Errorf("open staged metadata backup: %w", err)
+	if err := installStagedSnapshotFile(
+		ctx, snapshotRoot, metadataStageDir, MetadataBackupFileName,
+	); err != nil {
+		return Manifest{}, fmt.Errorf("install %q: %w", metadataPath, err)
 	}
-	metadataFile, err := snapshotRoot.OpenFile(
-		MetadataBackupFileName,
-		os.O_WRONLY|os.O_CREATE|os.O_EXCL,
-		0o644,
-	)
+	metadataFile, err := snapshotRoot.OpenFile(MetadataBackupFileName, os.O_WRONLY, 0)
 	if err != nil {
-		_ = metadataStageFile.Close()
 		return Manifest{}, fmt.Errorf("open %q for sync: %w", metadataPath, err)
 	}
-	_, metadataCopyErr := io.Copy(
-		metadataFile,
-		&payloadContextReader{ctx: ctx, reader: metadataStageFile},
-	)
-	metadataStageCloseErr := metadataStageFile.Close()
 	metadataSyncErr := syncSnapshotFile(metadataFile)
 	metadataCloseErr := metadataFile.Close()
-	if err := errors.Join(
-		metadataCopyErr,
-		metadataStageCloseErr,
-		metadataSyncErr,
-		metadataCloseErr,
-	); err != nil {
+	if err := errors.Join(metadataSyncErr, metadataCloseErr); err != nil {
 		return Manifest{}, fmt.Errorf(
 			"sync and close %q: %w",
 			metadataPath,
@@ -476,7 +468,7 @@ func Snapshot(
 		)
 	}
 	// Persist the backup names before a manifest can make them discoverable.
-	if err := syncSnapshotRoot(snapshotRoot); err != nil {
+	if err := syncDir(dir); err != nil {
 		return Manifest{}, fmt.Errorf("sync snapshot directory: %w", err)
 	}
 	if err := syncDir(filepath.Dir(dir)); err != nil {
@@ -501,11 +493,11 @@ func Snapshot(
 		return Manifest{}, fmt.Errorf("stat %q: %w", metadataPath, err)
 	}
 
-	blobDigest, _, err := hashSnapshotRootFile(ctx, snapshotRoot, BlobBackupFileName)
+	blobDigest, err := hashSnapshotRootFile(ctx, snapshotRoot, BlobBackupFileName)
 	if err != nil {
 		return Manifest{}, fmt.Errorf("hash %q: %w", blobPath, err)
 	}
-	metadataDigest, _, err := hashSnapshotRootFile(ctx, snapshotRoot, MetadataBackupFileName)
+	metadataDigest, err := hashSnapshotRootFile(ctx, snapshotRoot, MetadataBackupFileName)
 	if err != nil {
 		return Manifest{}, fmt.Errorf("hash %q: %w", metadataPath, err)
 	}
@@ -566,28 +558,41 @@ func removeSnapshotRootContents(root *os.Root) {
 	}
 }
 
-func syncSnapshotRoot(root *os.Root) error {
-	dir, err := root.Open(".")
+// copyStagedSnapshotFile copies a staged file into the opened snapshot
+// directory. It is the fallback when the staged file cannot be renamed into
+// that directory by handle.
+func copyStagedSnapshotFile(
+	ctx context.Context,
+	root *os.Root,
+	stageDir string,
+	name string,
+) error {
+	src, err := os.Open(filepath.Join(stageDir, name))
+	if err != nil {
+		return fmt.Errorf("open staged %q: %w", name, err)
+	}
+	defer src.Close() //nolint:errcheck // read errors are reported by io.Copy
+	dst, err := root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
 	if err != nil {
 		return err
 	}
-	return errors.Join(dir.Sync(), dir.Close())
+	_, copyErr := io.Copy(dst, &payloadContextReader{ctx: ctx, reader: src})
+	return errors.Join(copyErr, dst.Close())
 }
 
 func hashSnapshotRootFile(
 	ctx context.Context,
 	root *os.Root,
 	name string,
-) (string, int64, error) {
+) (string, error) {
 	file, err := root.Open(name)
 	if err != nil {
-		return "", 0, err
+		return "", err
 	}
 	defer file.Close() //nolint:errcheck // read error is reported by io.Copy
 	hash := sha256.New()
-	n, err := io.Copy(hash, &payloadContextReader{ctx: ctx, reader: file})
-	if err != nil {
-		return "", n, err
+	if _, err := io.Copy(hash, &payloadContextReader{ctx: ctx, reader: file}); err != nil {
+		return "", err
 	}
-	return hex.EncodeToString(hash.Sum(nil)), n, nil
+	return hex.EncodeToString(hash.Sum(nil)), nil
 }

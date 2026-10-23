@@ -22,6 +22,11 @@ var ErrSnapshotTrustRequired = errors.New(
 	"snapshot trust key is required for this local snapshot location",
 )
 
+// ErrSnapshotDirectoryReplaced is returned by Snapshot when the snapshot
+// directory path no longer names the directory Snapshot created and is
+// writing through. Snapshot then removes only the contents of the directory
+// it opened and leaves the path, and whatever now occupies it, untouched; no
+// manifest is published for either directory.
 var ErrSnapshotDirectoryReplaced = errors.New(
 	"snapshot directory was replaced while it was being written",
 )

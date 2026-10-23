@@ -131,10 +131,15 @@ func validateSnapshotAncestorChain(path string) error {
 		if err != nil {
 			return fmt.Errorf("inspect snapshot path %q: %w", current, err)
 		}
-		if info.IsDir() {
+		// The owner of a symlink can replace it inside a sticky directory, so
+		// a link owned by another user could be retargeted after this check.
+		// Its mode bits carry no meaning, so only the owner is checked.
+		if info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 			if err := requireTrustedSnapshotOwner(current, info); err != nil {
 				return fmt.Errorf("snapshot path ancestor: %w", err)
 			}
+		}
+		if info.IsDir() {
 			if info.Mode().Perm()&0o022 != 0 && info.Mode()&os.ModeSticky == 0 {
 				return fmt.Errorf(
 					"snapshot path ancestor %q is writable by group or other without the sticky bit",
@@ -154,8 +159,7 @@ func requireTrustedSnapshotOwner(path string, info fs.FileInfo) error {
 	if !ok {
 		return fmt.Errorf("inspect owner of %q", path)
 	}
-	euid := uint32(os.Geteuid())
-	if stat.Uid != euid && stat.Uid != 0 {
+	if uid := int64(stat.Uid); uid != int64(os.Geteuid()) && uid != 0 {
 		return fmt.Errorf("%q is owned by UID %d", path, stat.Uid)
 	}
 	return nil
