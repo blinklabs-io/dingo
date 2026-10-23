@@ -470,13 +470,19 @@ func effectiveChainsyncBlockTimeout(timeout time.Duration) time.Duration {
 func (o *Ouroboros) chainsyncConnectionConfigOption(
 	ctx context.Context,
 	includeClient bool,
+	trackActivity ...bool,
 ) ouroboros.ConnectionOptionFunc {
 	return func(c *ouroboros.Connection) {
 		limiter := newChainsyncFindIntersectRateLimiter(
 			chainsyncFindIntersectBudgetRate,
 			chainsyncFindIntersectBudgetBurst,
 		)
-		opts := o.chainsyncServerConnOpts(ctx, limiter, !includeClient)
+		opts := o.chainsyncServerConnOpts(
+			ctx,
+			limiter,
+			!includeClient,
+			activityTrackingEnabled(trackActivity),
+		)
 		if includeClient {
 			opts = slices.Concat(o.chainsyncClientConnOpts(), opts)
 		}
@@ -492,10 +498,15 @@ func (o *Ouroboros) chainsyncServerConnOpts(
 	ctx context.Context,
 	limiter *chainsyncFindIntersectRateLimiter,
 	waitForLedger bool,
+	trackActivity ...bool,
 ) []ochainsync.ChainSyncOptionFunc {
+	activityEnabled := activityTrackingEnabled(trackActivity)
 	requestNext := o.chainsyncServerRequestNextPeer
 	if waitForLedger {
 		requestNext = o.chainsyncServerRequestNextLocal
+	}
+	if activityEnabled {
+		requestNext = o.chainsyncServerRequestNextTrustedLocal
 	}
 	return []ochainsync.ChainSyncOptionFunc{
 		ochainsync.WithFindIntersectFunc(
@@ -511,6 +522,7 @@ func (o *Ouroboros) chainsyncServerConnOpts(
 						points,
 					)
 				},
+				activityEnabled,
 			),
 		),
 		ochainsync.WithRequestNextFunc(
@@ -1022,13 +1034,19 @@ func (o *Ouroboros) chainsyncServerAheadOfLedger(
 func (o *Ouroboros) chainsyncServerRequestNextPeer(
 	ctx ochainsync.CallbackContext,
 ) error {
-	return o.chainsyncServerRequestNext(ctx, false)
+	return o.chainsyncServerRequestNext(ctx, false, false)
 }
 
 func (o *Ouroboros) chainsyncServerRequestNextLocal(
 	ctx ochainsync.CallbackContext,
 ) error {
-	return o.chainsyncServerRequestNext(ctx, true)
+	return o.chainsyncServerRequestNext(ctx, true, false)
+}
+
+func (o *Ouroboros) chainsyncServerRequestNextTrustedLocal(
+	ctx ochainsync.CallbackContext,
+) error {
+	return o.chainsyncServerRequestNext(ctx, true, true)
 }
 
 // chainsyncServerRequestNext serves the next chain event to a downstream
@@ -1045,7 +1063,19 @@ func (o *Ouroboros) chainsyncServerRequestNextLocal(
 func (o *Ouroboros) chainsyncServerRequestNext(
 	ctx ochainsync.CallbackContext,
 	waitForLedger bool,
+	trackActivity ...bool,
 ) error {
+	endActivity := o.beginTrustedNtCActivity(
+		activityTrackingEnabled(trackActivity),
+		ctx.ConnectionId,
+		ochainsync.ProtocolIdNtC,
+	)
+	activityContinues := false
+	defer func() {
+		if !activityContinues {
+			endActivity()
+		}
+	}()
 	o.recordServedActivity(ctx.ConnectionId)
 	// Create/retrieve chainsync state for connection
 	tip := o.ledgerState.Tip()
@@ -1144,13 +1174,17 @@ func (o *Ouroboros) chainsyncServerRequestNext(
 	if rawConn == nil {
 		return fmt.Errorf("connection %s not found", ctx.ConnectionId.String())
 	}
-	go o.chainsyncServerAwaitNext(
-		ctx,
-		connWithDone{conn: rawConn, done: connDone, closeErr: closeErr},
-		clientState,
-		pending,
-		waitForLedger,
-	)
+	activityContinues = true
+	go func() {
+		defer endActivity()
+		o.chainsyncServerAwaitNext(
+			ctx,
+			connWithDone{conn: rawConn, done: connDone, closeErr: closeErr},
+			clientState,
+			pending,
+			waitForLedger,
+		)
+	}()
 	return nil
 }
 
@@ -2695,11 +2729,18 @@ func (o *Ouroboros) SubscribeChainsyncResync(ctx context.Context) {
 
 func (o *Ouroboros) instrumentChainsyncFindIntersect(
 	fn func(ochainsync.CallbackContext, []ocommon.Point) (ocommon.Point, ochainsync.Tip, error),
+	trackActivity bool,
 ) func(ochainsync.CallbackContext, []ocommon.Point) (ocommon.Point, ochainsync.Tip, error) {
 	return func(
 		ctx ochainsync.CallbackContext,
 		points []ocommon.Point,
 	) (ocommon.Point, ochainsync.Tip, error) {
+		endActivity := o.beginTrustedNtCActivity(
+			trackActivity,
+			ctx.ConnectionId,
+			ochainsync.ProtocolIdNtC,
+		)
+		defer endActivity()
 		start := time.Now()
 		p, t, err := fn(ctx, points)
 		o.recordProtocolMessage("chainsync", err, time.Since(start))
