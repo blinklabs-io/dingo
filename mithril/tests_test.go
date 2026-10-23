@@ -567,6 +567,7 @@ func TestSelectLedgerStateSnapshotAcceptsVerifiedAncillaryStateNewerThanCertifie
 				},
 			},
 			maxTrustedSlot,
+			unboundedSlotLimit,
 		)
 	require.NoError(t, err)
 	require.NotNil(t, snapshot)
@@ -614,6 +615,7 @@ func TestSelectLedgerStateSnapshotStillRefusesAGenuinelyEmptyVerifiedTree(
 			AncillaryDigests:  map[string]string{"ledger/100/state": "00"},
 		},
 		100,
+		unboundedSlotLimit,
 	)
 	require.Error(t, err)
 	assert.ErrorContains(t, err, "refusing to import one from elsewhere")
@@ -646,7 +648,7 @@ func TestImportLedgerStateAcceptsAVerifiedAncillaryStateNewerThanCertifiedTip(
 	sum := sha256.Sum256(stateBytes)
 
 	_, _, _, err = importLedgerState(
-		t.Context(), nil, discard, nil,
+		t.Context(), nil, discard, shelleyNodeConfig(t, 2160),
 		&BootstrapResult{
 			AncillaryDir:      anc,
 			AncillaryRoot:     ancRoot,
