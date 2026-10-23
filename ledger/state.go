@@ -10057,7 +10057,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 			ls.config.CardanoNodeConfig,
 			parent,
 		); err != nil {
-			return nil, err
+			return nil, ls.rejectInboundEnvelopeFailure(point, err)
 		}
 		if err := ls.validateBlockHeaderProtocolVersion(
 			block.Header(), pparams,
@@ -10071,7 +10071,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 		// rest of validation. Mithril-certified and TrustedReplay blocks are
 		// trusted input and keep skipping it.
 		if err := validateBlockExUnits(block, pparams); err != nil {
-			return nil, err
+			return nil, ls.rejectInboundEnvelopeFailure(point, err)
 		}
 	}
 	// Validate the operational certificate counter before processing the

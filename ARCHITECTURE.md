@@ -4350,6 +4350,16 @@ per-transaction validation never checks the block-wide sum. `TrustedReplay`
 input and blocks inside an imported Mithril snapshot's certified range are
 exempt.
 
+An envelope or aggregate-budget failure is a deterministic verdict on a block
+already persisted on the primary chain, so `ledgerProcessBlock` returns it
+through `rejectInboundEnvelopeFailure` as a `headerValidationError`. The
+pipeline then takes the same reject-and-rewind recovery as a deferred header
+failure, and chain selection can offer another candidate instead of the
+pipeline restarting onto the same block until the no-progress halt. A block
+this node forged (`ForgedBlockChecker`) is not wrapped and keeps its plain
+error. The rewind penalises the supplying peer only when a deferred-header
+marker names its connection for the block.
+
 A header or block may not belong to an earlier era than the block it extends
 (`chain.ErrEraRegression`). The hard-fork combinator only moves a chain's
 ledger state forward (ouroboros-consensus `State.extendToSlot`) and rejects a
