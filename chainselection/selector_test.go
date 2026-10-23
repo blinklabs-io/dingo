@@ -6096,7 +6096,8 @@ func TestStagedFarFrontierCatchUpWithReferenceAheadOfLocalTip(t *testing.T) {
 	}{
 		{name: "below catch-up ceiling", referenceOffset: 3, accepted: true},
 		{name: "at catch-up ceiling", referenceOffset: 4, accepted: true},
-		{name: "above catch-up ceiling", referenceOffset: 5},
+		{name: "above catch-up ceiling", referenceOffset: 5, accepted: true},
+		{name: "far above catch-up ceiling", referenceOffset: 30, accepted: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -7357,4 +7358,112 @@ func TestBootstrapAdvertisedBoundRejectsLoneFarClaim(t *testing.T) {
 		PeerTipRejectedAdvertisedTip,
 	}, reasons)
 	assert.Equal(t, 3, cs.PeerCount())
+}
+
+// TestPeerAheadOfLaggingAppliedTipFollowedDuringCatchUp covers a reference
+// beyond localTip+2*K, where the observed frontier exceeds reference+K. The
+// frontier is accepted when corroborated or when it extends a connected header
+// chain, and rejected when it is a single uncorroborated or unreachable claim.
+func TestPeerAheadOfLaggingAppliedTipFollowedDuringCatchUp(t *testing.T) {
+	t.Parallel()
+
+	const (
+		k         = 108
+		local     = 10_000
+		reference = local + 277
+		claim     = reference + k + 41
+	)
+	chain := loneFarChain{localBlock: local, k: k}
+	advertised := chain.tip(4_687_076)
+	newSelector := func(t *testing.T) *ChainSelector {
+		t.Helper()
+		cs := NewChainSelector(ChainSelectorConfig{
+			SecurityParam:             k,
+			DisableEventSubscriptions: true,
+		})
+		cs.SetLocalTip(chain.tip(local))
+		require.True(t, cs.UpdatePeerTip(
+			newTestConnectionId(1), chain.tip(reference), nil,
+		))
+		return cs
+	}
+
+	t.Run("reference plus K is accepted alone", func(t *testing.T) {
+		t.Parallel()
+		cs := newSelector(t)
+		assert.True(t, cs.updatePeerTipObserved(
+			newTestConnectionId(2), advertised, chain.tip(reference+k), nil,
+		))
+	})
+
+	t.Run("reference plus K plus one is rejected alone", func(t *testing.T) {
+		t.Parallel()
+		cs := newSelector(t)
+		assert.False(t, cs.updatePeerTipObserved(
+			newTestConnectionId(2), advertised, chain.tip(reference+k+1), nil,
+		))
+	})
+
+	t.Run("corroborated by another connection", func(t *testing.T) {
+		t.Parallel()
+		cs := newSelector(t)
+		first := newTestConnectionId(2)
+		second := newTestConnectionId(3)
+		assert.False(t, cs.updatePeerTipObserved(
+			first, advertised, chain.tip(claim), nil,
+		))
+		assert.True(t, cs.updatePeerTipObserved(
+			second, advertised, chain.tip(claim+50), nil,
+		), "a frontier within K of another connection's claim must be accepted")
+		assert.True(t, cs.updatePeerTipObserved(
+			first, advertised, chain.tip(claim+1), nil,
+		))
+	})
+
+	t.Run("not corroborated more than K apart", func(t *testing.T) {
+		t.Parallel()
+		cs := newSelector(t)
+		assert.False(t, cs.updatePeerTipObserved(
+			newTestConnectionId(2), advertised, chain.tip(claim), nil,
+		))
+		assert.False(t, cs.updatePeerTipObserved(
+			newTestConnectionId(3), advertised, chain.tip(claim+k+1), nil,
+		))
+	})
+
+	t.Run("connected header chain", func(t *testing.T) {
+		t.Parallel()
+		cs := newSelector(t)
+		conn := newTestConnectionId(2)
+		for i := uint64(0); i <= k; i++ {
+			block := claim + i
+			accepted := chain.deliver(cs, conn, block, chain.prevHash(block))
+			if i < k {
+				require.False(t, accepted, "header %d must wait for the run", i)
+			} else {
+				require.True(t, accepted, "header %d completes the run", i)
+			}
+		}
+	})
+
+	t.Run("unreachable height is never corroborated", func(t *testing.T) {
+		t.Parallel()
+		cs := newSelector(t)
+		localSlot := chain.tip(local).Point.Slot
+		impossible := func(block uint64) ochainsync.Tip {
+			return ochainsync.Tip{
+				Point: ocommon.Point{
+					Slot: localSlot,
+					Hash: fmt.Appendf(nil, "fake-%d", block),
+				},
+				BlockNumber: block,
+			}
+		}
+		assert.False(t, cs.updatePeerTipObserved(
+			newTestConnectionId(2), advertised, impossible(claim+10_000), nil,
+		))
+		assert.False(t, cs.updatePeerTipObserved(
+			newTestConnectionId(3), advertised, impossible(claim+10_001), nil,
+		))
+	})
 }
