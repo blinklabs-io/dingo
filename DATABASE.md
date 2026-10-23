@@ -1250,6 +1250,7 @@ both errors and the database requires recovery before another load.
 - Table and column names are the snake_case names declared by versioned SQL DDL.
 - Byte columns store raw bytes, not hex strings. In Postgres use `encode(col, 'hex')` and `decode($1, 'hex')`. In MySQL use `HEX(col)` and `UNHEX(?)`.
 - `types.Uint64` values such as `amount`, `reward`, `pledge`, `cost`, treasury/reserves, and stake totals are persisted as unsigned decimal values through the Go SQL driver. Use numeric casts if your SQL client reports them as text in a specific backend.
+- Every statement, sqlc-generated or hand-written, must carry a leading `-- name: <PascalCaseName> :<verb>` comment in the constant text that is prepared and executed. `classifySQLStatement` reads it as the `query` label of `dingo_database_sql_query_duration_seconds`, so a statement without one is recorded as `unknown`. Statements on the block-apply path carry one; hand-written rollback, maintenance and API read statements that predate this rule do not yet, and are recorded as `unknown`. Hand-written names follow sqlc's PascalCase style (`InsertUtxoBatch`, `UpsertAccount`) and must not reuse a sqlc query name. A statement assembled at runtime (multi-row inserts, `IN` lists sized to the batch, per-table cleanups) uses one fixed name per builder and shape, never a name derived from data, table names from user input, or SQL text.
 - Quote the `transaction` table in SQL examples because it is a keyword-adjacent identifier: `"transaction"` in Postgres, `` `transaction` `` in MySQL.
 - `id` is the normal auto-increment primary key. Tables with ledger identifiers also have unique indexes such as `hash`, `(credential_tag, staking_key)`, `(tx_id, output_idx)`, or `(epoch, snapshot_type, pool_key_hash)`.
 - Relationships declared by the versioned schema are enforced as SQLite
@@ -2970,11 +2971,13 @@ each query's sqlc-generated `-- name: X :verb` comment; it is a no-op unless
 `Config.PromRegistry` is set. `dingo_database_sql_query_duration_seconds{op,
 query}` (histogram, same file and chokepoint, added alongside this section)
 observes each statement's wall-clock duration at the same point, labeled by
-that op classification plus, when known, the sqlc-generated query name itself
-(`classifySQLStatement`; `"unknown"` for a hand-written query with no `--
-name:` annotation, such as the cached `sumCredentialUtxoStake` query). The
-query name is safe as a label because it is one of a small, fixed, code-
-controlled set of sqlc annotations, not user input or raw SQL text. Both the
+that op classification plus the statement's query name itself
+(`classifySQLStatement`, read from the leading `-- name: X :verb` comment;
+`"unknown"` for a statement with no such comment, such as a PRAGMA or an unnamed
+rollback, maintenance or API read statement). The
+query name is safe as a label because it is a literal in the source, not user
+input or raw SQL text; a runtime-built statement carries one fixed name per
+builder and shape. Both the
 counter and the histogram cover every call site through `instrumentedQueryer`
 — domain queries, committee pruning, deferred-index maintenance — including
 the hot-statement cache's cached calls and
@@ -4139,6 +4142,26 @@ ORDER BY payment_key ASC
 LIMIT 100;
 ```
 
+### `GetAccountAssetBalances` and `GetAccountAddressTotals`
+
+Read the live asset balances and the lifetime received and sent totals of a
+stake credential (Blockfrost `/accounts/{stake_address}/addresses/assets` and
+`/accounts/{stake_address}/addresses/total`). Both take
+`models.AccountAggregateLimits` and return
+`models.ErrAccountAggregateLimit` once a bound is passed; a zero field leaves
+that dimension unbounded.
+
+- `MaxUtxos` adds a `LIMIT` of one row past the bound to each lovelace sum.
+  The transaction count counts distinct `address_transaction` transaction ids
+  under a `LIMIT` of twice that bound plus one.
+- `MaxAssetRows` caps the asset holdings read. The holdings are selected under
+  a `LIMIT` of one row past the bound in a subquery and ordered outside it, so
+  the ordering sorts at most that many rows.
+- `MaxAssets` fails the read at the first distinct asset past the bound.
+
+The Blockfrost adapter passes 100,000 UTxO rows, 200,000 asset holdings and
+5,000 distinct assets, and reports the sentinel as `ErrAddressSummaryTooLarge`.
+
 ### `GetUtxoBalanceByAddress`
 
 Reads live-UTxO balances for an address (used by the Blockfrost
@@ -4684,6 +4707,28 @@ vote power. The snapshot manager supplies the snapshot slot, epoch, and period;
 the public `Calculator.CalculateStakeDistribution` path passes zero values (gate
 off).
 
+`historicalExpirationSQL` emits `historical_expiration` over a single reference
+to `active_delegation`. `historical_witness` reads each credential's witness
+history with correlated per-credential lookups on the witness tables'
+`(credential_tag, staking_key)` indexes: the greatest witness slot at or before
+`slot` (resolved to its containing epoch) and the greatest witness slot overall.
+It is `SELECT DISTINCT`, which changes no rows because `active_delegation` holds
+one row per credential, so that no backend flattens it and copies the lookups
+into each `CASE` arm that reads them. The stake CTE then selects from
+`historical_expiration` in place of `active_delegation` rather than joining the
+two. The shape is a correctness constraint on SQLite, not only a cost: SQLite
+expands every reference to a CTE into its own copy of the CTEs beneath it, and
+from SQLite 3.54 a statement whose copies reach `SQLITE_LIMIT_EXPR_DEPTH`
+cursors (1000 as compiled into `modernc.org/sqlite`, and not raisable at run
+time) fails to prepare with "VIEWs and/or subqueries nested too deep". Joining
+each witness source to `active_delegation` copies that CTE once per source and
+per reference to the summary, which takes the gated statement past 3000 cursors
+(over 6000 with pointer stake). The bounded shape opens under 300 cursors, or
+about 550 with pointer stake, a figure set by the two `active_delegation`
+copies the pointer branch already needs.
+`TestHistoricalStakeQueryCursorsStayBounded` pins it under 600 for every
+combination of pointer stake, the gate, and the activation floor.
+
 ```sql
 -- Predicate used by sqlite/postgres/mysql implementations after resolving
 -- active_delegation(pool_key_hash, credential_tag, staking_key)
@@ -4692,20 +4737,20 @@ WITH active_delegator_stake AS (
          active_delegation.credential_tag,
          active_delegation.staking_key,
          COALESCE(SUM(CAST(utxo.amount AS BIGINT)), 0) AS utxo_stake
+  -- With the CIP-0163 gate on (expiryEpoch > 0) this reads
+  -- "FROM historical_expiration active_delegation" instead: the preceding
+  -- historical_expiration CTE holds every active_delegation row plus its
+  -- expiration at the requested slot.
   FROM active_delegation
   LEFT JOIN utxo
     ON utxo.credential_tag = active_delegation.credential_tag
    AND utxo.staking_key = active_delegation.staking_key
    AND utxo.added_slot <= $1
    AND (utxo.deleted_slot = 0 OR utxo.deleted_slot > $1)
-  -- CIP-0163 gate (emitted only when expiryEpoch > 0). The preceding
-  -- historical_expiration CTE derives expiration at the requested slot.
-  LEFT JOIN historical_expiration expiry_acct
-    ON expiry_acct.credential_tag = active_delegation.credential_tag
-   AND expiry_acct.staking_key = active_delegation.staking_key
-  WHERE (expiry_acct.expiration_epoch = 0
-         OR expiry_acct.expiration_epoch >= $expiryEpoch
-         OR expiry_acct.expiration_epoch IS NULL) AND
+  -- Gate predicate, emitted only when expiryEpoch > 0.
+  WHERE (active_delegation.expiration_epoch = 0
+         OR active_delegation.expiration_epoch >= $expiryEpoch
+         OR active_delegation.expiration_epoch IS NULL) AND
         active_delegation.pool_key_hash IN (...)
   GROUP BY active_delegation.pool_key_hash,
            active_delegation.credential_tag,

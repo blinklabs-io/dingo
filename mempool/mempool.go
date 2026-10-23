@@ -1941,6 +1941,11 @@ func (m *Mempool) addTransactionAttempt(
 		// remains current until the transaction is committed.
 		m.mutationMutex.Lock()
 		defer m.mutationMutex.Unlock()
+		// The gate cannot be waited on with a context, so a caller cancelled
+		// while queued discovers it here, before any validation work.
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 
 		m.Lock()
 		if m.stopped {
