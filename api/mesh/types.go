@@ -263,6 +263,11 @@ type AccountCoinsRequest struct {
 	AccountIdentifier *AccountIdentifier `json:"account_identifier"`
 	IncludeMempool    bool               `json:"include_mempool"`
 	Currencies        []*Currency        `json:"currencies,omitempty"`
+	// Metadata may carry "paginate": true to opt into paged responses, and
+	// "cursor", the opaque "next_cursor" of a previous paged response, to
+	// continue after the last UTxO that response covered. Without either,
+	// the response is complete or the request fails with a limit error.
+	Metadata map[string]any `json:"metadata,omitempty"`
 }
 
 // MempoolTransactionRequest identifies a mempool tx.

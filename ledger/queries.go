@@ -1305,9 +1305,8 @@ func (ls *LedgerState) queryShelley(ctx context.Context, query *olocalstatequery
 //
 // Not answered, so the call fails with "unsupported query type":
 // ShelleyPoolStateQuery, ShelleyPoolDistrQuery and
-// ShelleyNonMyopicMemberRewardsQuery, whose request filters the pinned
-// gouroboros version cannot decode (the request is rejected before it reaches
-// this switch); ShelleyRewardInfoPoolsQuery, ShelleyRewardProvenanceQuery,
+// ShelleyNonMyopicMemberRewardsQuery, which decode but have no handler here;
+// ShelleyRewardInfoPoolsQuery, ShelleyRewardProvenanceQuery,
 // ShelleyDebugEpochStateQuery and ShelleyDebugNewEpochStateQuery, which need
 // reward-calculation and full epoch state that is not tracked.
 //
@@ -1341,7 +1340,7 @@ func (ls *LedgerState) queryShelleyLeaf(ctx context.Context, query any,
 	case *olocalstatequery.ShelleyStakeDelegDepositsQuery:
 		return ls.queryShelleyStakeDelegDeposits(ctx, q.Creds.Items(), at, txn)
 	case *olocalstatequery.ShelleyGetLedgerPeerSnapshotQuery:
-		return ls.queryLedgerPeerSnapshot(ctx, q.PeerKind, txn)
+		return ls.queryLedgerPeerSnapshot(ctx, q, txn)
 	case *olocalstatequery.ShelleyStakePoolsQuery:
 		return ls.queryShelleyStakePools(ctx, at, txn)
 	case *olocalstatequery.ShelleyDRepStateQuery:
@@ -1432,6 +1431,12 @@ func (ls *LedgerState) queryShelleyCbor(ctx context.Context, q *olocalstatequery
 	if err != nil {
 		return nil, err
 	}
+	if bounded, ok := inner.(*utxoWholeResult); ok {
+		return []any{cbor.Tag{
+			Number:  cbor.CborTagCbor,
+			Content: bounded.bareResult(),
+		}}, nil
+	}
 	// Two different, shape-indistinguishable conventions collide at
 	// exactly one element. Most handlers return []any{value} where value
 	// IS the complete result the client decodes directly (e.g.
@@ -1444,23 +1449,24 @@ func (ls *LedgerState) queryShelleyCbor(ctx context.Context, q *olocalstatequery
 	// TestQueryStakeSnapshotSpecificPool, which fails if this case is
 	// changed to keep the outer slice.
 	//
-	// queryShelleyPoolDistr2 and queryShelleyStakeDistribution instead
-	// destructure their result struct's own fields directly into values
-	// (so that struct's StructAsArray encoding doesn't nest inside an
-	// extra wrapping array on their direct, non-GetCBOR reply, whose
-	// client-side type decodes the bare struct with no slice-of-one
-	// wrapping, unlike GetStakeSnapshots). For those, GetCBOR's content
-	// must be cbor.Encode(values) (the whole slice, reconstructing that
-	// struct's array-of-fields encoding exactly) regardless of field
-	// count -- proven for the 2-field case (queryShelleyPoolDistr2) by
-	// TestQueryShelleyPoolDistr2_ViaGetCBOR and for the 1-field case
-	// (queryShelleyStakeDistribution) by
+	// queryShelleyStakeDistribution (legacy GetStakeDistribution) instead
+	// destructures its result struct's own fields directly into values (so
+	// that struct's StructAsArray encoding doesn't nest inside an extra
+	// wrapping array on its direct, non-GetCBOR reply). For it, GetCBOR's
+	// content must be cbor.Encode(values) (the whole slice), proven by
 	// TestQueryShelleyStakeDistribution_ViaGetCBOR, which fails if this
 	// case is unwrapped like the general one above instead.
 	//
+	// queryShelleyPoolDistr2 and queryShelleyStakeDistribution2 return the
+	// one-element era result wrapper around the PoolDistr's own two fields,
+	// so they follow the general rule: the content is the PoolDistr,
+	// [pool map, total active stake], as the node encodes it. This is pinned
+	// to literal node-layout bytes by TestQueryShelleyPoolDistr2_ViaGetCBOR
+	// and TestQueryShelleyStakeDistribution2_ViaGetCBORBytes.
+	//
 	// Slice length alone cannot tell the two conventions apart when there
-	// is exactly one field/value, so the destructured-fields query types
-	// are named explicitly here rather than guessed from shape.
+	// is exactly one field/value, so the destructured-fields query type
+	// is named explicitly here rather than guessed from shape.
 	values, ok := inner.([]any)
 	if !ok || len(values) == 0 {
 		return nil, fmt.Errorf(
@@ -1470,9 +1476,7 @@ func (ls *LedgerState) queryShelleyCbor(ctx context.Context, q *olocalstatequery
 	}
 	var content any = values
 	switch q.Query.(type) {
-	case *olocalstatequery.ShelleyPoolDistr2Query,
-		*olocalstatequery.ShelleyStakeDistributionQuery,
-		*olocalstatequery.ShelleyStakeDistribution2Query:
+	case *olocalstatequery.ShelleyStakeDistributionQuery:
 		// content stays the whole slice; see comment above.
 	default:
 		if len(values) == 1 {
@@ -1760,11 +1764,34 @@ func (ls *LedgerState) markStakeByPool(
 	if err != nil {
 		return nil, err
 	}
+	return stakeByPoolSnapshots(snapshots), nil
+}
+
+func (ls *LedgerState) markStakeByPoolBounded(
+	epoch uint64,
+	maxRows int,
+	txn types.Txn,
+) (map[string]uint64, error) {
+	snapshots, err := ls.db.Metadata().GetPoolStakeSnapshotsByEpochBounded(
+		epoch,
+		snapshotTypeMark,
+		maxRows,
+		txn,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return stakeByPoolSnapshots(snapshots), nil
+}
+
+func stakeByPoolSnapshots(
+	snapshots []*models.PoolStakeSnapshot,
+) map[string]uint64 {
 	byPool := make(map[string]uint64, len(snapshots))
 	for _, snapshot := range snapshots {
 		byPool[string(snapshot.PoolKeyHash)] = uint64(snapshot.TotalStake)
 	}
-	return byPool, nil
+	return byPool
 }
 
 // markStakeForPools reads the mark snapshot for just the pools named, keyed by
@@ -2579,8 +2606,11 @@ func (ls *LedgerState) queryShelleyUtxoByAddress(
 	if len(addrs) == 0 {
 		return []any{ret}, nil
 	}
+	addrs, err := dedupeAddresses(addrs)
+	if err != nil {
+		return nil, err
+	}
 	var utxos []models.Utxo
-	var err error
 	if at.pinned() {
 		var release func()
 		txn, release = ls.readTxn(ctx, txn)
@@ -2622,6 +2652,26 @@ func (ls *LedgerState) queryShelleyUtxoByAddress(
 		ret[utxoId] = txOut
 	}
 	return []any{ret}, nil
+}
+
+// dedupeAddresses drops repeated addresses, keyed by serialized bytes, so a
+// repeated entry cannot multiply SQL branches or postfilter comparisons. The
+// reply is a map keyed by UTxO id, so it is unchanged.
+func dedupeAddresses(addrs []ledger.Address) ([]ledger.Address, error) {
+	seen := make(map[string]struct{}, len(addrs))
+	ret := make([]ledger.Address, 0, len(addrs))
+	for _, addr := range addrs {
+		b, err := addr.Bytes()
+		if err != nil {
+			return nil, fmt.Errorf("encode exact address: %w", err)
+		}
+		if _, dup := seen[string(b)]; dup {
+			continue
+		}
+		seen[string(b)] = struct{}{}
+		ret = append(ret, addr)
+	}
+	return ret, nil
 }
 
 // queryShelleyFilteredDelegationAndRewardAccounts answers

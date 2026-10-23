@@ -34,6 +34,10 @@ import (
 // model-specific error when the public method contract requires one.
 var ErrNotFound = errors.New("metadata not found")
 
+// ErrSyncStateTooLarge reports a sync_state value above the caller's byte
+// limit. The value is not read.
+var ErrSyncStateTooLarge = errors.New("sync state value exceeds size limit")
+
 // The interfaces below are the compiled-in metadata provider contract
 // (database/plugin/PLUGIN_DEVELOPMENT.md). A provider maintained outside this
 // repository builds against a pinned module version, so adding a method or a
@@ -871,13 +875,17 @@ type UtxoStore interface {
 
 	// GetUtxoBalanceByAddress returns the live-UTxO lovelace balance,
 	// per-asset balances (ordered by policy id then name), and live UTxO
-	// count for the given address, aggregated in SQL. Payment-credential
-	// mode aggregates across address forms. Exact mode returns
+	// count for the given address. Payment-credential mode aggregates
+	// across address forms. Exact mode returns
 	// models.ErrExactAddressRequiresCbor; exact summaries use the coordinated
-	// Database query path instead.
+	// Database query path instead. The read stops with
+	// models.ErrAddressBalanceLimit as soon as it visits more outputs or
+	// accumulates more distinct assets than limits allow, and stops when the
+	// transaction's context ends.
 	GetUtxoBalanceByAddress(
 		lcommon.Address,
 		models.UtxoAddressMatchMode,
+		models.AddressBalanceLimits,
 		types.Txn,
 	) (models.AddressBalance, error)
 
@@ -988,14 +996,47 @@ type UtxoStore interface {
 	// schema: for atSlot near the live tip (the common caller, a pinned
 	// LocalStateQuery point), "added_slot <= atSlot" matches nearly every
 	// row ever created, live or already spent, so this is effectively a
-	// full-table scan. Callers pin this cost to genuinely pinned queries
-	// only, never the live (unpinned) path, which keeps using
-	// IterateLiveUtxos' indexed deleted_slot = 0 filter unchanged.
+	// full-table scan. A whole-UTxO walk on an acquired view pays it for a
+	// tip acquire too, through UtxoRefsAsOfAfterID, so it can read in short
+	// transactions as of the snapshot's tip.
 	IterateUtxosAsOf(
 		atSlot uint64,
 		txn types.Txn,
 		fn func(*models.Utxo) error,
 	) error
+
+	// IterateLiveUtxosContext is IterateLiveUtxos with the scan bound to
+	// ctx, so cancellation stops it between rows while txn still supplies
+	// the snapshot.
+	IterateLiveUtxosContext(
+		ctx context.Context,
+		txn types.Txn,
+		fn func(*models.Utxo) error,
+	) error
+
+	// IterateUtxosAsOfContext is IterateUtxosAsOf with the scan bound to
+	// ctx, so cancellation stops it between rows while txn still supplies
+	// the snapshot.
+	IterateUtxosAsOfContext(
+		ctx context.Context,
+		atSlot uint64,
+		txn types.Txn,
+		fn func(*models.Utxo) error,
+	) error
+
+	// UtxoRefsAsOfAfterID returns up to limit UTxO rows live as of atSlot
+	// (IterateUtxosAsOf's predicate) whose row id is greater than afterID,
+	// in ascending id order, populating only ID, TxId and OutputIdx. Paging
+	// on the row id lets a caller walk the whole set in short transactions:
+	// a row keeps its id for its whole life, so a later page cannot return
+	// a row an earlier page already did.
+	UtxoRefsAsOfAfterID(
+		ctx context.Context,
+		atSlot uint64,
+		afterID uint,
+		limit int,
+		txn types.Txn,
+	) ([]models.Utxo, error)
 
 	// MarkUtxosDeletedAtSlot marks every live UTxO row matching one
 	// of refs as deleted at atSlot. Refs that don't match any live
@@ -1464,6 +1505,15 @@ type StakeSnapshotStore interface {
 	GetPoolStakeSnapshotsByEpoch(
 		uint64, // epoch
 		string, // snapshotType
+		types.Txn,
+	) ([]*models.PoolStakeSnapshot, error)
+
+	// GetPoolStakeSnapshotsByEpochBounded retrieves at most maxRows pool
+	// stake snapshots for an epoch.
+	GetPoolStakeSnapshotsByEpochBounded(
+		uint64, // epoch
+		string, // snapshotType
+		int, // maxRows
 		types.Txn,
 	) ([]*models.PoolStakeSnapshot, error)
 
@@ -3240,6 +3290,12 @@ type MetadataStore interface {
 	// Returns empty string if the key does not exist.
 	GetSyncState(string, types.Txn) (string, error)
 
+	// GetSyncStateBounded retrieves a sync state value by key only when its
+	// size is at most maxBytes; a larger value is not read and the call fails
+	// with ErrSyncStateTooLarge. Returns empty string if the key does not
+	// exist.
+	GetSyncStateBounded(string, int, types.Txn) (string, error)
+
 	// SetSyncState stores or updates a sync state value.
 	SetSyncState(string, string, types.Txn) error
 
@@ -3367,6 +3423,16 @@ type AddressTransactionIndexRebuilder interface {
 // The load command checks for this interface and uses it when available.
 type BulkLoadOptimizer interface {
 	SetBulkLoadPragmas() error
+	RestoreNormalPragmas() error
+}
+
+// CatchUpPragmaTuner is an optional interface for metadata stores that can
+// speed up a long write burst on a database that keeps serving, such as a
+// node-managed Mithril stream catch-up. SetCatchUpPragmas changes only
+// settings that cannot lose a committed write on a crash or power loss;
+// RestoreNormalPragmas restores the normal settings.
+type CatchUpPragmaTuner interface {
+	SetCatchUpPragmas() error
 	RestoreNormalPragmas() error
 }
 

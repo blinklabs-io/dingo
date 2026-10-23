@@ -478,23 +478,27 @@ func TestWatchBlocks_ReconnectsQuicklyAfterEstablishedSessionDrops(
 		"precondition: backoff must have grown past the minimum by now",
 	)
 
-	// Now let the server answer, and let the watcher establish.
+	// Now let the server answer, and wait for the watcher to connect before
+	// releasing a reply. The watcher may be part way through a backoff of up
+	// to watcherMaxBackoff when the gate opens, which allowNext's own bound
+	// does not cover.
 	listener.open()
+	var conn *ouroboros.Connection
+	select {
+	case conn = <-server.accepted:
+	case <-time.After(watcherMaxBackoff + dialTimeout):
+		t.Fatal("watcher never reconnected once the server accepted")
+	}
 
 	requireNextEvent(
 		t, w, server, 10*time.Second,
-		"watcher must eventually connect once the server accepts",
+		"watcher must deliver an event once connected",
 	)
 
 	// Force this specific session to end, and capture the log count so we
 	// can identify the *next* one below.
 	before := logCount()
-	select {
-	case conn := <-server.accepted:
-		require.NoError(t, conn.Close())
-	case <-time.After(2 * time.Second):
-		t.Fatal("server never observed the accepted connection")
-	}
+	require.NoError(t, conn.Close())
 
 	testutil.WaitForCondition(t, func() bool {
 		return logCount() > before

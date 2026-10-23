@@ -63,7 +63,7 @@ type WaivedSample struct {
 }
 
 type Report struct {
-	SchemaVersion   string             `json:"schema_version"`
+	SchemaVersion   string             `json:"version"`
 	Scenario        string             `json:"scenario"`
 	GeneratedAt     time.Time          `json:"generated_at"`
 	Corpus          string             `json:"corpus"`

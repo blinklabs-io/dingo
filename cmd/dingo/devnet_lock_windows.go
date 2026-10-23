@@ -20,23 +20,28 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 
 	"golang.org/x/sys/windows"
 )
 
-func acquireDevnetStateLock(runDir string) (func() error, error) {
-	path := filepath.Join(runDir, devnetStateLock)
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+func acquireDevnetStateLock(
+	root *os.Root,
+	runDir string,
+) (func() error, error) {
+	file, err := root.OpenFile(
+		devnetStateLock,
+		os.O_CREATE|os.O_RDWR|windows.O_FILE_FLAG_OPEN_REPARSE_POINT,
+		0o600,
+	)
 	if err != nil {
-		return nil, fmt.Errorf("opening devnet state lock %q: %w", path, err)
+		return nil, fmt.Errorf("opening devnet state lock in %q: %w", runDir, err)
 	}
 	info, err := file.Stat()
 	if err != nil {
-		return nil, errors.Join(fmt.Errorf("checking devnet state lock %q: %w", path, err), file.Close())
+		return nil, errors.Join(fmt.Errorf("checking devnet state lock in %q: %w", runDir, err), file.Close())
 	}
 	if !info.Mode().IsRegular() {
-		return nil, errors.Join(fmt.Errorf("devnet state lock %q is not a regular file", path), file.Close())
+		return nil, errors.Join(fmt.Errorf("devnet state lock in %q is not a regular file", runDir), file.Close())
 	}
 	overlapped := new(windows.Overlapped)
 	err = windows.LockFileEx(

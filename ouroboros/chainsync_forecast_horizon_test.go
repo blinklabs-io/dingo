@@ -120,7 +120,7 @@ func TestChainsyncClientRollForwardWithholdsHeaderPastForecastHorizon(
 	t.Parallel()
 
 	f := newForecastHorizonFixture(t, "10.0.0.20:3001")
-	f.o.chainSelectionVerifyHeaderCrypto = func(gledger.BlockHeader) (uint64, error) {
+	f.o.chainSelectionVerifyHeaderCrypto = func(ouroboros.ConnectionId, gledger.BlockHeader) (uint64, error) {
 		return 0, beyondForecastHorizonErr()
 	}
 
@@ -163,7 +163,7 @@ func TestChainsyncClientRollForwardRewaitsForecastHorizonBeforeObserving(
 		admissions.Add(1)
 		return true, nil
 	}
-	f.o.chainSelectionVerifyHeaderCrypto = func(gledger.BlockHeader) (uint64, error) {
+	f.o.chainSelectionVerifyHeaderCrypto = func(ouroboros.ConnectionId, gledger.BlockHeader) (uint64, error) {
 		if verifications.Add(1) == 1 {
 			return 0, beyondForecastHorizonErr()
 		}
@@ -186,6 +186,70 @@ func TestChainsyncClientRollForwardRewaitsForecastHorizonBeforeObserving(
 		f.ledgerCh,
 		testutil.AsyncWait,
 		"a header verified after the re-wait must reach the ledger",
+	)
+}
+
+func TestForecastHorizonWaitRecoversVerifiedCandidate(t *testing.T) {
+	t.Parallel()
+
+	f := newForecastHorizonFixture(t, "10.0.0.29:3001")
+	t.Cleanup(f.o.stopFutureHeaderResyncs)
+	recoveryConn := newTestConnId("127.0.0.1:6020", "10.0.0.30:3001")
+	prepared := make(chan chainselection.PeerTipUpdateEvent, 1)
+	removed := make(chan chainselection.PeerTipUpdateEvent, 1)
+	f.o.config.ChainsyncPrepareForecastWitness = func(
+		update chainselection.PeerTipUpdateEvent,
+	) []ouroboros.ConnectionId {
+		prepared <- update
+		return []ouroboros.ConnectionId{recoveryConn}
+	}
+	f.o.config.ChainsyncRemoveForecastWitness = func(
+		update chainselection.PeerTipUpdateEvent,
+	) {
+		removed <- update
+	}
+	f.o.chainsyncHeaderAdmission = func(
+		_ context.Context,
+		e ledger.ChainsyncEvent,
+	) (bool, error) {
+		require.NotNil(t, e.ForecastHorizonWait)
+		e.ForecastHorizonWait()
+		return true, nil
+	}
+	_, resyncCh := f.o.eventBus.Subscribe(event.ChainsyncResyncEventType)
+	header := newTestBlockHeader(400, 1, 0xa3)
+	e := ledger.ChainsyncEvent{
+		ConnectionId: f.conn,
+		BlockHeader:  header,
+		Point:        ocommon.NewPoint(header.SlotNumber(), header.Hash().Bytes()),
+		Tip: ochainsync.Tip{
+			Point:       ocommon.NewPoint(header.SlotNumber(), header.Hash().Bytes()),
+			BlockNumber: header.BlockNumber(),
+		},
+	}
+	accepted, err := f.o.admitChainsyncHeader(
+		ochainsync.CallbackContext{ConnectionId: f.conn},
+		e,
+	)
+	require.NoError(t, err)
+	require.True(t, accepted)
+	staged := testutil.RequireReceive(
+		t, prepared, testutil.AsyncWait, "forecast witness was not staged",
+	)
+	require.Equal(t, f.conn, staged.ConnectionId)
+	require.Equal(t, e.Point, staged.ObservedTip.Point)
+	require.Equal(t, staged, testutil.RequireReceive(
+		t, removed, testutil.AsyncWait, "forecast witness was not removed",
+	))
+	resync := testutil.RequireReceive(
+		t, resyncCh, testutil.AsyncWait, "verified candidate was not replayed",
+	)
+	data, ok := resync.Data.(event.ChainsyncResyncEvent)
+	require.True(t, ok)
+	require.Equal(t, recoveryConn, data.ConnectionId)
+	require.Equal(t,
+		event.ChainsyncResyncReasonForecastCorroborationRecovery,
+		data.Reason,
 	)
 }
 
@@ -299,12 +363,54 @@ func TestChainsyncClientRollForwardResyncsDisconnectedHeader(t *testing.T) {
 	)
 }
 
+func TestChainsyncClientRollForwardResyncsHeaderWithNoForecastWork(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	f := newForecastHorizonFixture(t, "10.0.0.24:3001")
+	_, resyncCh := f.o.eventBus.Subscribe(event.ChainsyncResyncEventType)
+	f.o.chainsyncHeaderAdmission = func(
+		context.Context,
+		ledger.ChainsyncEvent,
+	) (bool, error) {
+		return false, fmt.Errorf(
+			"wait for forecast horizon: %w",
+			ledger.ErrChainsyncHeaderNeedsResync,
+		)
+	}
+
+	f.rollForward(t, newTestBlockHeader(400, 1, 0xa5))
+
+	resync := testutil.RequireReceive(
+		t,
+		resyncCh,
+		testutil.AsyncWait,
+		"a forecast wait with no local block work must re-intersect",
+	)
+	data, ok := resync.Data.(event.ChainsyncResyncEvent)
+	require.True(t, ok)
+	require.Equal(t, f.conn, data.ConnectionId)
+	require.Equal(
+		t,
+		event.ChainsyncResyncReasonForecastHorizonNoWork,
+		data.Reason,
+	)
+	require.False(t, chainsyncResyncDeniesPeer(data.Reason))
+	testutil.RequireNoReceive(t, f.tipCh, 200*time.Millisecond,
+		"a held header must not extend the peer candidate")
+	testutil.RequireNoReceive(t, f.ledgerCh, 200*time.Millisecond,
+		"a held header must not reach blockfetch")
+	testutil.RequireNoReceive(t, f.recycle, 200*time.Millisecond,
+		"a missing local block range is not a peer fault")
+}
+
 // setLocalTip stubs the local tip block number and the security parameter k.
 //
 // It also lets header verification pass, so a header that is not resynced
 // proceeds to chain selection instead of reaching an unset seam.
 func (f forecastHorizonFixture) setLocalTip(tipBlock, k uint64) {
-	f.o.chainSelectionVerifyHeaderCrypto = func(gledger.BlockHeader) (uint64, error) {
+	f.o.chainSelectionVerifyHeaderCrypto = func(ouroboros.ConnectionId, gledger.BlockHeader) (uint64, error) {
 		return 42, nil
 	}
 	f.o.chainsyncLocalTipBlock = func() (uint64, uint64) {

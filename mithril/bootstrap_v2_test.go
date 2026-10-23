@@ -28,12 +28,15 @@ import (
 	"io"
 	"log/slog"
 	"maps"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -62,7 +65,13 @@ func testNodeConfigWithMithrilKeys(
 		MithrilGenesisAncillaryVerificationKey: ancillaryVKey,
 	}
 	byronGenesis, err := os.ReadFile(
-		filepath.Join("..", "config", "cardano", "devnet", "byron-genesis.json"),
+		filepath.Join(
+			"..",
+			"config",
+			"cardano",
+			"devnet",
+			"byron-genesis.json",
+		),
 	)
 	require.NoError(t, err)
 	require.NoError(
@@ -116,6 +125,21 @@ func validImmutableFiles(
 	slot uint64,
 ) (map[string][]byte, []byte) {
 	t.Helper()
+	files, hashes := validImmutableChunk(t, slot, 2, common.Blake2b256{})
+	return files, hashes[len(hashes)-1]
+}
+
+// validImmutableChunk builds a decodable chunk-0 trio of count Shelley blocks
+// ending at slot lastSlot, one slot apart, each linked to the one before and
+// the first to prev. It returns the trio and the block hashes in order. A
+// count of zero gives an empty chunk.
+func validImmutableChunk(
+	t *testing.T,
+	lastSlot uint64,
+	count int,
+	prev common.Blake2b256,
+) (map[string][]byte, [][]byte) {
+	t.Helper()
 	makeBlock := func(
 		blockNumber, blockSlot uint64, prevHash common.Blake2b256,
 	) ([]byte, []byte) {
@@ -141,36 +165,31 @@ func validImmutableFiles(
 		require.NoError(t, err)
 		return block, blockHash[:]
 	}
-	first, firstHash := makeBlock(1, slot-1, common.Blake2b256{})
-	var firstPrev common.Blake2b256
-	copy(firstPrev[:], firstHash)
-	second, secondHash := makeBlock(
-		2, slot, firstPrev,
-	)
-	primary := make([]byte, 5)
-	primary[0] = 1
-	binary.BigEndian.PutUint32(primary[1:], 0)
-	primary = append(primary, make([]byte, 4)...)
-	binary.BigEndian.PutUint32(primary[5:], 56)
-	secondary := make([]byte, 112)
-	for i, entry := range []struct {
-		offset uint64
-		slot   uint64
-		hash   []byte
-	}{
-		{hash: firstHash, slot: slot - 1},
-		{hash: secondHash, slot: slot, offset: uint64(len(first))},
-	} {
+	var chunk []byte
+	var hashes [][]byte
+	primary := []byte{1}
+	secondary := make([]byte, 56*count)
+	for i := range count {
+		// #nosec G115 -- count is a small test constant
+		blockSlot := lastSlot - uint64(count-1-i)
+		// #nosec G115 -- count is a small test constant
+		block, hash := makeBlock(uint64(i+1), blockSlot, prev)
 		base := i * 56
-		binary.BigEndian.PutUint64(secondary[base:base+8], entry.offset)
-		copy(secondary[base+16:base+48], entry.hash)
-		binary.BigEndian.PutUint64(secondary[base+48:base+56], entry.slot)
+		// #nosec G115 -- small test offsets
+		primary = binary.BigEndian.AppendUint32(primary, uint32(base))
+		// #nosec G115 -- small test offsets
+		binary.BigEndian.PutUint64(secondary[base:base+8], uint64(len(chunk)))
+		copy(secondary[base+16:base+48], hash)
+		binary.BigEndian.PutUint64(secondary[base+48:base+56], blockSlot)
+		chunk = append(chunk, block...)
+		hashes = append(hashes, hash)
+		copy(prev[:], hash)
 	}
 	return map[string][]byte{
-		"immutable/00000.chunk":     append(first, second...),
+		"immutable/00000.chunk":     chunk,
 		"immutable/00000.primary":   primary,
 		"immutable/00000.secondary": secondary,
-	}, secondHash
+	}, hashes
 }
 
 func minimalLedgerState(t *testing.T, slot uint64, hash []byte) []byte {
@@ -324,14 +343,28 @@ type v2FixtureOptions struct {
 	// immutable location templates, the way cloud-storage locations carry
 	// their credentials. The mux routes on path only, so it changes nothing
 	// but what an error is at risk of quoting.
-	signedImmutableQuery       bool
-	missingAncillary           bool
-	validImmutable             bool
-	fallbackLedgerState        bool
-	fallbackLedgerStateSlot    uint64
-	fallbackLedgerStateUTxOMap cbor.RawMessage
-	ancillaryLedgerState       []byte
-	ancillaryLedgerSlot        uint64
+	signedImmutableQuery bool
+	validImmutable       bool
+	// validAllImmutables gives every immutable file number a decodable trio
+	// of two Shelley blocks, ending at slot 1000+10*num, instead of opaque
+	// placeholder bytes. The blocks form one hash-linked chain across files:
+	// each file's first block names the previous file's last block as its
+	// parent (file 0's first block has a zero parent).
+	validAllImmutables bool
+	// blocksPerChunk, with validAllImmutables, sets how many blocks (at most
+	// nine, so chunks never share a slot) immutable file num holds instead of
+	// two. Zero gives an empty chunk.
+	blocksPerChunk func(num uint64) int
+	// chunkSlots, with validAllImmutables, lays files out the way the
+	// ImmutableDB does, chunkSlots slots each: file num ends at slot
+	// (num+1)*chunkSlots-1, so slot/chunkSlots is the file number. It must
+	// be at least ten.
+	chunkSlots              uint64
+	validLedgerState        bool
+	validLedgerStateSlot    uint64
+	validLedgerStateUTxOMap cbor.RawMessage
+	ancillaryLedgerState    []byte
+	ancillaryLedgerSlot     uint64
 	// ancillaryHonorsRange serves the ancillary archive with Range support,
 	// so resuming a fully cached file yields 416 with the total size, the way
 	// object storage does.
@@ -339,6 +372,9 @@ type v2FixtureOptions struct {
 	// ancillaryFailsMidBody announces the full ancillary length and drops
 	// the connection halfway through the body.
 	ancillaryFailsMidBody bool
+	// realImmutableDir serves the trios of a real ImmutableDB directory
+	// (files 0 through immutableFileNumber) instead of placeholder bytes.
+	realImmutableDir string
 }
 
 type v2Fixture struct {
@@ -363,9 +399,77 @@ type v2Fixture struct {
 	// immutableGate, when set, runs on each immutable archive request before
 	// the response is written. Set it before the first request.
 	immutableGate func()
+	// immutableServe, when set, runs on each immutable archive request with
+	// the requested file number before the response is written, so a test can
+	// delay a chosen chunk. Set it before the first request.
+	immutableServe func(num uint64)
+	// immutableRequests records the file number of every immutable archive
+	// request, in arrival order.
+	immutableMu       sync.Mutex
+	immutableRequests []uint64
 
 	// ancillaryServed, when set, replaces ancillaryArchive on the wire.
 	ancillaryServed atomic.Pointer[[]byte]
+
+	// stmKey signs the leaf certificate, so publishNextLeaf can add one in
+	// the same epoch with the same AVK.
+	stmKey *big.Int
+	// paths records the path of every request, in arrival order.
+	pathsMu sync.Mutex
+	paths   []string
+	// serveHook, when set, runs first on every request; returning true means
+	// it wrote the response. Set it before the first request.
+	serveHook func(w http.ResponseWriter, r *http.Request) bool
+}
+
+// requestedPaths returns the paths requested so far and clears the log.
+func (f *v2Fixture) requestedPaths() []string {
+	f.pathsMu.Lock()
+	defer f.pathsMu.Unlock()
+	paths := f.paths
+	f.paths = nil
+	return paths
+}
+
+// publishNextLeaf certifies the fixture's artifact again with a new leaf in
+// the same epoch, chained to the current leaf, the way an aggregator adds a
+// certificate, and returns the new leaf's hash.
+func (f *v2Fixture) publishNextLeaf(t *testing.T) string {
+	t.Helper()
+	prev := f.certs[f.leafHash]
+	hash := f.publishNextLeafUnchecked(t)
+	require.Equal(t, prev.AggregateVerificationKey,
+		f.certs[hash].AggregateVerificationKey)
+	return hash
+}
+
+// publishNextLeafUnchecked is publishNextLeaf signing with whatever key
+// f.stmKey holds, so a test can publish a leaf that does not chain.
+func (f *v2Fixture) publishNextLeafUnchecked(t *testing.T) string {
+	t.Helper()
+	prev := f.certs[f.leafHash]
+	next := prev
+	next.ProtocolMessage = ProtocolMessage{
+		MessageParts: maps.Clone(prev.ProtocolMessage.MessageParts),
+	}
+	next.Metadata.SealedAt = "2026-06-12T00:02:00Z"
+	next.PreviousHash = prev.Hash
+	next.SignedMessage = next.ProtocolMessage.ComputeHash()
+	next.AggregateVerificationKey, next.MultiSignature =
+		testCreateEncodedSTMProofWithKey(
+			t, []byte(next.SignedMessage), f.stmKey,
+		)
+	finalizeTestCertificate(t, &next)
+	require.NotEqual(t, prev.Hash, next.Hash)
+	f.certs[next.Hash] = next
+	f.leafHash = next.Hash
+	f.artifact.CertificateHash = next.Hash
+	for i := range f.listItems {
+		if f.listItems[i].Hash == f.artifact.Hash {
+			f.listItems[i].CertificateHash = next.Hash
+		}
+	}
+	return next.Hash
 }
 
 // newV2Fixture fabricates a complete, internally-consistent v2 mock
@@ -388,16 +492,54 @@ func newV2Fixture(t *testing.T, opts v2FixtureOptions) *v2Fixture {
 	baseURL := fixture.server.URL
 
 	// Immutable trios and their digest entries
+	var validLedgerStateBytes []byte
+	// Each chunk's first block links to the last block of the chunk before,
+	// so the fixture is one chain across immutable files.
+	var chainPrev common.Blake2b256
 	for num := uint64(0); num <= opts.immutableFileNumber; num++ {
 		files := map[string][]byte{}
+		realTrio := (opts.validImmutable && num == 0) ||
+			opts.validAllImmutables
 		for _, ext := range []string{"chunk", "primary", "secondary"} {
 			name := fmt.Sprintf("%05d.%s", num, ext)
 			content := fmt.Appendf(nil, "immutable-%s-data", name)
-			if opts.validImmutable && num == 0 {
+			if opts.realImmutableDir != "" {
+				var err error
+				content, err = os.ReadFile(
+					filepath.Join(opts.realImmutableDir, name),
+				)
+				require.NoError(t, err)
+			}
+			if realTrio {
 				var blockHash []byte
-				files, blockHash = validImmutableFiles(t, 1000)
-				if opts.fallbackLedgerState {
-					stateSlot := opts.fallbackLedgerStateSlot
+				count := 2
+				if opts.blocksPerChunk != nil {
+					count = opts.blocksPerChunk(num)
+				}
+				lastSlot := 1000 + 10*num
+				if opts.chunkSlots > 0 {
+					lastSlot = (num+1)*opts.chunkSlots - 1
+				}
+				var hashes [][]byte
+				files, hashes = validImmutableChunk(
+					t, lastSlot, count, chainPrev,
+				)
+				if len(hashes) > 0 {
+					blockHash = hashes[len(hashes)-1]
+					copy(chainPrev[:], blockHash)
+				}
+				if num != 0 {
+					renamed := map[string][]byte{}
+					for name, content := range files {
+						renamed[fmt.Sprintf(
+							"immutable/%05d%s", num,
+							filepath.Ext(name),
+						)] = content
+					}
+					files = renamed
+				}
+				if opts.validLedgerState && num == 0 {
+					stateSlot := opts.validLedgerStateSlot
 					if stateSlot == 0 {
 						stateSlot = 1000
 					}
@@ -405,13 +547,13 @@ func newV2Fixture(t *testing.T, opts v2FixtureOptions) *v2Fixture {
 					if stateSlot == 999 {
 						stateHash = files["immutable/00000.secondary"][16:48]
 					}
-					files["ledger/100/state"] = minimalLedgerState(
+					validLedgerStateBytes = minimalLedgerState(
 						t, stateSlot, stateHash,
 					)
-					if opts.fallbackLedgerStateUTxOMap != nil {
-						files["ledger/100/state"] = minimalLedgerStateWithUTxOMap(
+					if opts.validLedgerStateUTxOMap != nil {
+						validLedgerStateBytes = minimalLedgerStateWithUTxOMap(
 							t, stateSlot, stateHash,
-							opts.fallbackLedgerStateUTxOMap,
+							opts.validLedgerStateUTxOMap,
 						)
 					}
 				}
@@ -428,7 +570,7 @@ func newV2Fixture(t *testing.T, opts v2FixtureOptions) *v2Fixture {
 				},
 			)
 		}
-		if opts.validImmutable && num == 0 {
+		if realTrio {
 			for name, content := range files {
 				if !strings.HasPrefix(name, "immutable/") {
 					continue
@@ -492,6 +634,14 @@ func newV2Fixture(t *testing.T, opts v2FixtureOptions) *v2Fixture {
 	ancillaryLedgerState := []byte("ledger state data")
 	if len(opts.ancillaryLedgerState) > 0 {
 		ancillaryLedgerState = opts.ancillaryLedgerState
+	}
+	if validLedgerStateBytes != nil {
+		require.Empty(
+			t,
+			opts.ancillaryLedgerState,
+			"validLedgerState and ancillaryLedgerState are mutually exclusive",
+		)
+		ancillaryLedgerState = validLedgerStateBytes
 	}
 	ancillaryLedgerSlot := opts.ancillaryLedgerSlot
 	if ancillaryLedgerSlot == 0 {
@@ -576,18 +726,13 @@ func newV2Fixture(t *testing.T, opts v2FixtureOptions) *v2Fixture {
 		},
 		Ancillary: CardanoDatabaseAncillary{
 			SizeUncompressed: int64(len(fixture.ancillaryArchive)),
-			Locations: func() []CardanoDatabaseLocation {
-				if opts.missingAncillary {
-					return nil
-				}
-				return []CardanoDatabaseLocation{
-					{
-						Type:                 locationTypeCloudStorage,
-						URI:                  baseURL + "/files/ancillary.tar.zst",
-						CompressionAlgorithm: "zstandard",
-					},
-				}
-			}(),
+			Locations: []CardanoDatabaseLocation{
+				{
+					Type:                 locationTypeCloudStorage,
+					URI:                  baseURL + "/files/ancillary.tar.zst",
+					CompressionAlgorithm: "zstandard",
+				},
+			},
 		},
 		CardanoNodeVersion: "11.0.1",
 		CreatedAt:          "2026-06-12T00:00:00.000000000Z",
@@ -648,8 +793,11 @@ func newV2Fixture(t *testing.T, opts v2FixtureOptions) *v2Fixture {
 		},
 	}
 	leaf.SignedMessage = leaf.ProtocolMessage.ComputeHash()
+	fixture.stmKey = testSTMSigningKey(t)
 	leaf.AggregateVerificationKey, leaf.MultiSignature =
-		testCreateEncodedSTMProof(t, []byte(leaf.SignedMessage))
+		testCreateEncodedSTMProofWithKey(
+			t, []byte(leaf.SignedMessage), fixture.stmKey,
+		)
 	genesis.ProtocolMessage.
 		MessageParts["next_aggregate_verification_key"] =
 		leaf.AggregateVerificationKey
@@ -681,6 +829,12 @@ func newV2Fixture(t *testing.T, opts v2FixtureOptions) *v2Fixture {
 		"/",
 		func(w http.ResponseWriter, r *http.Request) {
 			p := r.URL.Path
+			fixture.pathsMu.Lock()
+			fixture.paths = append(fixture.paths, p)
+			fixture.pathsMu.Unlock()
+			if fixture.serveHook != nil && fixture.serveHook(w, r) {
+				return
+			}
 			switch {
 			case p == "/artifact/cardano-database":
 				writeJSON(w, fixture.listItems)
@@ -740,6 +894,14 @@ func newV2Fixture(t *testing.T, opts v2FixtureOptions) *v2Fixture {
 					return
 				}
 				fixture.immutableHits.Add(1)
+				fixture.immutableMu.Lock()
+				fixture.immutableRequests = append(
+					fixture.immutableRequests, num,
+				)
+				fixture.immutableMu.Unlock()
+				if fixture.immutableServe != nil {
+					fixture.immutableServe(num)
+				}
 				if fixture.immutableGate != nil {
 					fixture.immutableGate()
 				}
@@ -908,43 +1070,65 @@ func TestV2ArchiveByteLimits(t *testing.T) {
 	fixture := newV2Fixture(t, v2FixtureOptions{immutableFileNumber: 0})
 	for _, kind := range []string{"digests", "immutable", "ancillary"} {
 		for _, oversized := range []bool{false, true} {
-			t.Run(fmt.Sprintf("%s/oversized=%t", kind, oversized), func(t *testing.T) {
-				dir := t.TempDir()
-				cfg := fixture.bootstrapConfig(dir)
-				cfg.Logger = slog.New(slog.NewTextHandler(io.Discard, nil))
-				var size int
-				switch kind {
-				case "digests":
-					size = len(fixture.digestArchive)
-				case "immutable":
-					size = len(fixture.immutableArchives[0])
-				case "ancillary":
-					size = len(fixture.ancillaryArchive)
-				}
-				cfg.DownloadMaxBytes = int64(size)
-				if oversized {
-					cfg.DownloadMaxBytes--
-				}
-				var err error
-				switch kind {
-				case "digests":
-					_, err = downloadDigestsArchive(context.Background(), cfg, fixture.server.URL+"/files/digests.tar.zst", fixture.artifact, dir)
-				case "immutable":
-					location := fixture.artifact.Immutables.Locations[0]
-					err = fetchImmutableArchive(context.Background(), cfg, cfg.Logger, &location, 0, filepath.Join(dir, "archives"), filepath.Join(dir, "extracted"))
-				case "ancillary":
-					var verified *vettedDir
-					verified, _, _, err = downloadAncillaryV2(context.Background(), cfg, fixture.artifact, dir)
-					if verified != nil {
-						verified.Close()
+			t.Run(
+				fmt.Sprintf("%s/oversized=%t", kind, oversized),
+				func(t *testing.T) {
+					dir := t.TempDir()
+					cfg := fixture.bootstrapConfig(dir)
+					cfg.Logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+					var size int
+					switch kind {
+					case "digests":
+						size = len(fixture.digestArchive)
+					case "immutable":
+						size = len(fixture.immutableArchives[0])
+					case "ancillary":
+						size = len(fixture.ancillaryArchive)
 					}
-				}
-				if oversized {
-					require.ErrorIs(t, err, ErrDownloadTooLarge)
-				} else {
-					require.NoError(t, err)
-				}
-			})
+					cfg.DownloadMaxBytes = int64(size)
+					if oversized {
+						cfg.DownloadMaxBytes--
+					}
+					var err error
+					switch kind {
+					case "digests":
+						_, err = downloadDigestsArchive(
+							context.Background(),
+							cfg,
+							fixture.server.URL+"/files/digests.tar.zst",
+							fixture.artifact,
+							dir,
+						)
+					case "immutable":
+						location := fixture.artifact.Immutables.Locations[0]
+						err = fetchImmutableArchive(
+							context.Background(),
+							cfg,
+							cfg.Logger,
+							&location,
+							0,
+							filepath.Join(dir, "archives"),
+							filepath.Join(dir, "extracted"),
+						)
+					case "ancillary":
+						var verified *vettedDir
+						verified, _, _, err = downloadAncillaryV2(
+							context.Background(),
+							cfg,
+							fixture.artifact,
+							dir,
+						)
+						if verified != nil {
+							verified.Close()
+						}
+					}
+					if oversized {
+						require.ErrorIs(t, err, ErrDownloadTooLarge)
+					} else {
+						require.NoError(t, err)
+					}
+				},
+			)
 		}
 	}
 }
@@ -961,28 +1145,6 @@ func TestBootstrapV2NoCertVerification(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, hasChunkFiles(result.ImmutableDir))
 	require.NotEmpty(t, result.AncillaryDir)
-}
-
-func TestSyncV2NoCertVerificationUsesExtractDirLedgerState(t *testing.T) {
-	t.Parallel()
-
-	fixture := newV2Fixture(t, v2FixtureOptions{
-		missingAncillary:    true,
-		validImmutable:      true,
-		fallbackLedgerState: true,
-	})
-	result, err := Sync(context.Background(), SyncConfig{
-		Network:           "preprod",
-		DataDir:           t.TempDir(),
-		StorageMode:       "core",
-		Backend:           BackendV2,
-		AggregatorURL:     fixture.server.URL,
-		AllowInsecureHTTP: true,
-		VerifyCertChain:   false,
-		CleanupAfterLoad:  false,
-	})
-	require.NoError(t, err)
-	assert.Equal(t, uint64(1000), result.LedgerSlot)
 }
 
 func TestSyncV2SerializesMetadataWriterPhases(t *testing.T) {
@@ -1030,8 +1192,11 @@ func TestSyncV2SerializesMetadataWriterPhases(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, metadataWritersOverlapped.Load(),
 		"ledger import and immutable copy must not write metadata concurrently")
-	require.Positive(t, immutableBlocksCopied.Load(),
-		"verified bootstrap must copy immutable blocks before importing the tip")
+	require.Positive(
+		t,
+		immutableBlocksCopied.Load(),
+		"verified bootstrap must copy immutable blocks before importing the tip",
+	)
 }
 
 func TestSyncV2CancellationDuringLedgerImportResumes(t *testing.T) {
@@ -1046,10 +1211,14 @@ func TestSyncV2CancellationDuringLedgerImportResumes(t *testing.T) {
 	dataDir := t.TempDir()
 	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
 	baseConfig := SyncConfig{
-		Network:           "preprod",
-		DataDir:           dataDir,
-		StorageMode:       "core",
-		CardanoNodeConfig: testNodeConfigWithMithrilKeys(t, fixture.genesisVKey, fixture.ancillaryVKey),
+		Network:     "preprod",
+		DataDir:     dataDir,
+		StorageMode: "core",
+		CardanoNodeConfig: testNodeConfigWithMithrilKeys(
+			t,
+			fixture.genesisVKey,
+			fixture.ancillaryVKey,
+		),
 		Backend:           BackendV2,
 		AggregatorURL:     fixture.server.URL,
 		AllowInsecureHTTP: true,
@@ -1073,7 +1242,11 @@ func TestSyncV2CancellationDuringLedgerImportResumes(t *testing.T) {
 	}
 	_, err := Sync(ctx, interruptedConfig)
 	require.ErrorIs(t, err, context.Canceled)
-	require.True(t, cancelled, "sync must reach ledger import before cancellation")
+	require.True(
+		t,
+		cancelled,
+		"sync must reach ledger import before cancellation",
+	)
 
 	db, err := dbtest.NewDatabase(t, &database.Config{
 		DataDir: dataDir, StorageMode: "core", Logger: discard,
@@ -1963,7 +2136,7 @@ func TestBootstrapV2RedownloadsAfterCorruptAncillaryArchive(t *testing.T) {
 
 	_, err := Bootstrap(context.Background(), cfg)
 	require.Error(t, err)
-	require.ErrorContains(t, err, "extracting ancillary archive")
+	require.ErrorContains(t, err, "reading ancillary archive")
 
 	fixture.ancillaryServed.Store(nil)
 	result, err := Bootstrap(context.Background(), cfg)
@@ -2192,4 +2365,12 @@ func TestDownloadDigestsArchiveKeepsPartialOnDownloadFailure(t *testing.T) {
 	require.NoError(t, err)
 	half := len(fixture.digestArchive) / 2
 	assert.Equal(t, fixture.digestArchive[:half], data)
+}
+
+// requestedImmutables returns a copy of the immutable file numbers requested
+// so far.
+func (f *v2Fixture) requestedImmutables() []uint64 {
+	f.immutableMu.Lock()
+	defer f.immutableMu.Unlock()
+	return slices.Clone(f.immutableRequests)
 }

@@ -36,6 +36,25 @@ func TestBuildChainSelectorConfigWallClockSlot(t *testing.T) {
 	assert.Zero(t, slot)
 }
 
+func TestBuildChainSelectorConfigWiresHeaderVerificationGeneration(
+	t *testing.T,
+) {
+	t.Parallel()
+	n, _ := newLiveLifecycleTestNode(t, 4)
+	cfg := n.buildChainSelectorConfig(2160, true, 0)
+	require.NotNil(t, cfg.HeaderCryptoVerificationGenerationCurrent)
+	require.NotNil(t, cfg.CurrentHeaderCryptoVerificationGeneration)
+	require.NotNil(t, cfg.PinHeaderCryptoVerificationGeneration)
+
+	generation := cfg.CurrentHeaderCryptoVerificationGeneration()
+	require.NotZero(t, generation)
+	require.True(t, cfg.HeaderCryptoVerificationGenerationCurrent(generation))
+	release, current := cfg.PinHeaderCryptoVerificationGeneration(generation)
+	require.True(t, current)
+	require.NotNil(t, release)
+	release()
+}
+
 func TestBuildChainSelectorConfigWallClockSlotUnavailableInByron(
 	t *testing.T,
 ) {

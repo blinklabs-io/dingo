@@ -96,8 +96,11 @@ type ChainsyncEvent struct {
 	// a roll-forward header. It lets ledger admission judge the peer's clock at
 	// arrival even if event delivery or header processing is delayed.
 	ArrivalTime time.Time
-	Point       ocommon.Point  // Chain point for roll forward/backward
-	Tip         ochainsync.Tip // Upstream chain tip
+	// ForecastHorizonWait is called once after admission establishes that this
+	// connected header must wait for ledger progress.
+	ForecastHorizonWait func()
+	Point               ocommon.Point  // Chain point for roll forward/backward
+	Tip                 ochainsync.Tip // Upstream chain tip
 	// SyncTarget is the event-paired, policy-approved target eligible for
 	// publication only after this header is admitted.
 	SyncTarget        ochainsync.Tip
@@ -109,9 +112,15 @@ type ChainsyncEvent struct {
 	// to the ingress owner. It is not called while the header is buffered for a
 	// connection switch; the callback travels with that buffered event.
 	PeerTipAdmission func(admitted bool)
-	BlockNumber      uint64
-	Type             uint // Block or header type ID
-	Rollback         bool // Set to true for a Rollback event
+	// InvalidatePeerHeaderHistory removes this point and its dependent suffix
+	// from the ingress owner's observed-header ancestry.
+	InvalidatePeerHeaderHistory func()
+	// peerHeaderHistoryReplay identifies a buffered event whose history was
+	// recorded before it was detached from the replay queue.
+	peerHeaderHistoryReplay bool
+	BlockNumber             uint64
+	Type                    uint // Block or header type ID
+	Rollback                bool // Set to true for a Rollback event
 }
 
 // ChainsyncAwaitReplyEvent is emitted when a chainsync peer explicitly reports

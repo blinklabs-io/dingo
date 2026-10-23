@@ -878,6 +878,21 @@ func (i *ImmutableDb) BlocksFromPoint(
 	return ret, nil
 }
 
+// BlocksInChunk returns an iterator over the blocks of the single immutable
+// file numbered num, in order, and nothing from any other chunk.
+//
+// By number, and without listing the directory: a verified database whose
+// directory holds several chunks at once (a bounded window of a streaming
+// download) reads exactly the one it was asked for, and a missing chunk
+// surfaces as an error from the first Next rather than as a silent empty
+// range.
+func (i *ImmutableDb) BlocksInChunk(num uint64) (*BlockIterator, error) {
+	return &BlockIterator{
+		db:         i,
+		chunkNames: []string{ChunkName(num)},
+	}, nil
+}
+
 type BlockIterator struct {
 	db              *ImmutableDb
 	chunk           *chunk

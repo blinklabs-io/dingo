@@ -37,7 +37,7 @@ import (
 )
 
 // errNoValidTxRefs is returned by buildLeiosEB when all mempool transactions
-// are filtered out (invalid hash, zero size, or size > uint16). It is
+// are filtered out (invalid hash, zero size, or size > uint32). It is
 // treated as a skip rather than a hard failure by checkAndForgeLeiosEB.
 var errNoValidTxRefs = errors.New(
 	"no valid transaction references for endorser block",
@@ -267,6 +267,7 @@ type BlockForger struct {
 	leiosAnnouncementValidator func(context.Context, ledger.BlockHeader) error
 	leiosCerts                 LeiosCertificateProvider
 	leiosParent                LeiosParentAnnouncementProvider
+	leiosCertTiming            LeiosCertificationTimingChecker
 
 	// Prometheus metrics
 	metrics *forgingMetrics
@@ -509,6 +510,15 @@ type LeiosParentAnnouncementProvider interface {
 	)
 }
 
+// LeiosCertificationTimingChecker decides whether a ranking block at slot may
+// certify the endorser block announced by the ranking block at announcingSlot:
+// not across an epoch boundary, and not before the announcement, voting and
+// diffusion periods have elapsed. A non-nil error means it may not, or that the
+// answer could not be determined; either way the forger must not certify.
+type LeiosCertificationTimingChecker interface {
+	CheckLeiosCertificationTiming(announcingSlot, slot uint64) error
+}
+
 // EndorserBlockBroadcaster stores a locally-forged endorser block and
 // notifies connected peers via the LeiosNotify protocol. txBodies are the
 // referenced transactions' raw CBOR, in manifest order, so the endorser block
@@ -671,6 +681,10 @@ type ForgerConfig struct {
 	// LeiosParentAnnouncementProvider supplies the EB hash announced by the
 	// parent RB so CertRB selection cannot certify an unrelated EB.
 	LeiosParentAnnouncementProvider LeiosParentAnnouncementProvider
+	// LeiosCertificationTimingChecker applies the ledger's certification
+	// timing rules to CertRB selection. Required with
+	// LeiosCertificateProvider.
+	LeiosCertificationTimingChecker LeiosCertificationTimingChecker
 
 	// ForgeSyncToleranceSlots controls how far the local chain can lag the
 	// upstream tip before forging is skipped. Zero uses the default.
@@ -819,6 +833,7 @@ func NewBlockForger(cfg ForgerConfig) (*BlockForger, error) {
 		leiosAnnouncementValidator: cfg.LeiosAnnouncementValidator,
 		leiosCerts:                 cfg.LeiosCertificateProvider,
 		leiosParent:                cfg.LeiosParentAnnouncementProvider,
+		leiosCertTiming:            cfg.LeiosCertificationTimingChecker,
 		blockValidator:             cfg.BlockValidator,
 		fenceStore:                 cfg.ForgeFence,
 		opCertLedgerView:           cfg.OpCertLedgerView,
@@ -920,6 +935,12 @@ func NewBlockForger(cfg ForgerConfig) (*BlockForger, error) {
 		cfg.LeiosParentAnnouncementProvider == nil {
 		return nil, errors.New(
 			"leios certificate provider requires LeiosParentAnnouncementProvider",
+		)
+	}
+	if cfg.LeiosCertificateProvider != nil &&
+		cfg.LeiosCertificationTimingChecker == nil {
+		return nil, errors.New(
+			"leios certificate provider requires LeiosCertificationTimingChecker",
 		)
 	}
 	if cfg.OpCertLedgerView != nil && cfg.EraParams == nil {
@@ -2260,6 +2281,21 @@ func (f *BlockForger) leiosBlockDataForSlot(
 		if eb.EndorserBlockHash != parentHash ||
 			eb.Certificate.EndorserBlockHash != parentHash ||
 			eb.AnnouncingRbHash != parentRbHash {
+			continue
+		}
+		if err := f.leiosCertTiming.CheckLeiosCertificationTiming(
+			eb.SlotNo,
+			slot,
+		); err != nil {
+			f.logger.Debug(
+				"leios endorser block certificate skipped: not certifiable at this slot",
+				"slot",
+				slot,
+				"eb_slot",
+				eb.SlotNo,
+				"error",
+				err,
+			)
 			continue
 		}
 		hash := eb.EndorserBlockHash
@@ -4392,7 +4428,8 @@ type leiosEBCaps struct {
 
 // buildLeiosEB assembles a LeiosEndorserBlock from mempool transactions.
 // Transactions with invalid hex hashes, non-32-byte hashes, zero sizes,
-// or sizes exceeding uint16 are silently dropped. Returns an error only
+// sizes exceeding uint32, or an encoding that is not a Dijkstra transaction
+// are silently dropped. Returns an error only
 // when no valid references remain after filtering.
 func buildLeiosEB(
 	txs []MempoolTransaction,
@@ -4421,21 +4458,25 @@ func buildLeiosEB(
 		) // #nosec G115 -- bounded by prealloc above
 	}
 	refs := make([]lcommon.LeiosTransactionReference, 0, prealloc)
-	// bodies holds each referenced transaction's raw CBOR, in the same order
-	// as refs, so the endorser block can serve them over leios-fetch. A
-	// transaction dropped from refs (bad hash or size) is dropped here too,
-	// keeping body i aligned with reference i.
+	// bodies holds each referenced transaction's block_transaction CBOR, in
+	// the same order as refs, so the endorser block can serve them over
+	// leios-fetch. A transaction dropped from refs (bad hash or size) is
+	// dropped here too, keeping body i aligned with reference i.
 	bodies = make([][]byte, 0, prealloc)
 	for _, tx := range txs {
 		// The manifest reference is content-addressed by (hash, size) over
-		// the FULL serialized transaction: TransactionSize is len(tx.Cbor),
-		// so TransactionHash must be the hash of that same full CBOR, not the
-		// Cardano tx-id / body hash. This matches the fetch-side validator
+		// the block_transaction bytes the endorser block serves, including
+		// is_valid, so TransactionSize is the length of those bytes and
+		// TransactionHash their hash, not the Cardano tx-id / body hash or
+		// the mempool encoding. This matches the fetch-side validator
 		// (validateLeiosEndorserBlockTxs) and Haskell reference nodes, so a
 		// peer fetching a locally forged EB validates it instead of rejecting
 		// every tx.
-		if !validLeiosTransactionHash(tx.Hash) ||
-			!validLeiosTransactionSize(len(tx.Cbor)) {
+		if !validLeiosTransactionHash(tx.Hash) {
+			continue
+		}
+		blockTx, convErr := leiosBlockTransactionCbor(tx.Cbor)
+		if convErr != nil || !validLeiosTransactionSize(len(blockTx)) {
 			continue
 		}
 		// Apply the manifest caps to references that would otherwise be
@@ -4447,19 +4488,19 @@ func buildLeiosEB(
 		if caps.maxRefs > 0 && uint64(len(refs)) >= caps.maxRefs {
 			break
 		}
-		txBytes := uint64(len(tx.Cbor))
+		txBytes := uint64(len(blockTx))
 		if caps.maxBytes > 0 && totalBytes+txBytes > caps.maxBytes {
 			break
 		}
 		totalBytes += txBytes
-		// Bounded above by the MaxUint32 check on len(tx.Cbor) above. Kept
+		// Bounded above by the MaxUint32 check on len(blockTx) above. Kept
 		// on one line so the directive stays attached to the conversion.
-		size := uint32(len(tx.Cbor)) // #nosec G115
+		size := uint32(len(blockTx)) // #nosec G115
 		refs = append(refs, lcommon.LeiosTransactionReference{
-			TransactionHash: lcommon.Blake2b256Hash(tx.Cbor),
+			TransactionHash: lcommon.Blake2b256Hash(blockTx),
 			TransactionSize: size,
 		})
-		bodies = append(bodies, tx.Cbor)
+		bodies = append(bodies, blockTx)
 	}
 	if len(refs) == 0 {
 		return nil, nil, nil, errNoValidTxRefs

@@ -71,6 +71,7 @@ func (n *Node) chainsyncSyncTarget(
 func (n *Node) ledgerStateConfig() ledger.LedgerStateConfig {
 	healthGeneration := n.health.currentGeneration()
 	return ledger.LedgerStateConfig{
+		Consensus:          n.selectedConsensusProvider(),
 		ChainManager:       n.chainManager,
 		Database:           n.db,
 		EventBus:           n.eventBus,
@@ -88,8 +89,11 @@ func (n *Node) ledgerStateConfig() ledger.LedgerStateConfig {
 		// Off by default; requires BlockPipelineEnabled.
 		BlockPipelineValidateEnabled: n.config.blockPipelineValidateEnabled,
 		// Prefetch the next block's input UTxOs while the current block
-		// applies. Not consensus-affecting; off by default.
+		// applies. Not consensus-affecting; on by default.
 		LedgerPrefetchAheadEnabled: n.config.ledgerPrefetchAheadEnabled,
+		// Verify validated blocks' witness signatures ahead of the apply
+		// loop. Not consensus-affecting; on by default.
+		LedgerValidateAheadEnabled: n.config.ledgerValidateAheadEnabled,
 		// Core-mode batched metadata writes for blocks that are not
 		// validated. Not consensus-affecting; off by default.
 		ApplyRowBatchingEnabled: n.config.ledgerApplyRowBatchingEnabled,
@@ -112,6 +116,16 @@ func (n *Node) ledgerStateConfig() ledger.LedgerStateConfig {
 				return nil, false
 			}
 			return o.EndorserBlockTxsByHash(ebHash, ebSlot)
+		},
+		EndorserBlockDataProvider: func(
+			ebHash []byte,
+			ebSlot uint64,
+		) ([]byte, []cbor.RawMessage, bool) {
+			o := n.ouroboros()
+			if o == nil {
+				return nil, nil, false
+			}
+			return o.EndorserBlockDataByHash(ebHash, ebSlot)
 		},
 		EndorserBlockValidation: func(
 			ebHash []byte,
@@ -322,6 +336,7 @@ func (n *Node) ledgerStateConfig() ledger.LedgerStateConfig {
 			return n.connManager != nil &&
 				n.connManager.GetConnectionById(connId) != nil
 		},
+		NetworkIngestHoldTracker: n.networkIngestHold(),
 		ConnectionSwitchFunc: func() {
 			// Retain older seen-header history so a switched peer
 			// can replay only the post-tip segment from the local
@@ -357,13 +372,15 @@ func (n *Node) ledgerStateConfig() ledger.LedgerStateConfig {
 			}
 			return ledger.ChainsyncEvent{
 				ConnectionId: h.ConnectionId,
-				BlockHeader:  h.BlockHeader,
-				ArrivalTime:  h.ArrivalTime,
-				Point:        h.Point,
-				Tip:          h.Tip,
-				BlockNumber:  h.BlockNumber,
-				Type:         h.Type,
-				Rollback:     h.Rollback,
+				HeaderCryptoVerificationGeneration: h.
+					HeaderCryptoVerificationGeneration,
+				BlockHeader: h.BlockHeader,
+				ArrivalTime: h.ArrivalTime,
+				Point:       h.Point,
+				Tip:         h.Tip,
+				BlockNumber: h.BlockNumber,
+				Type:        h.Type,
+				Rollback:    h.Rollback,
 			}, prevHash, true
 		},
 		GenesisSelectionStateFunc: func() (bool, uint64) {
@@ -391,4 +408,21 @@ func (n *Node) ledgerStateConfig() ledger.LedgerStateConfig {
 			n.cancelForFatal(err)
 		},
 	}
+}
+
+// networkIngestHold returns the node's ingest hold, created on first use. It
+// outlives every ledger and chainsync state a live restore rebuilds.
+func (n *Node) networkIngestHold() *chainsync.IngestHold {
+	n.ingestHoldOnce.Do(func() {
+		n.ingestHold = &chainsync.IngestHold{}
+	})
+	return n.ingestHold
+}
+
+// publishChainsyncState installs state as the node's chainsync state and
+// attaches the ingest hold to it. A nil state is the gap while a live
+// restore rebuilds it.
+func (n *Node) publishChainsyncState(state *chainsync.State) {
+	n.chainsyncState = state
+	n.networkIngestHold().Attach(state)
 }

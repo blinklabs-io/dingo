@@ -4001,6 +4001,7 @@ func TestCheckAndForgeProductionCertifiesLeiosEBAfterAdoption(t *testing.T) {
 					slotsPerKESPeriod: 100,
 				},
 				LeiosCertificateProvider:        leiosCerts,
+				LeiosCertificationTimingChecker: forgerTestCertTiming{},
 				LeiosParentAnnouncementProvider: parent,
 				LeiosProduceChecker:             leiosChecker,
 				LeiosEBBroadcaster:              leiosCaster,
@@ -4037,7 +4038,9 @@ func TestCheckAndForgeProductionCertifiesLeiosEBAfterAdoption(t *testing.T) {
 				require.NotEmpty(t, leiosCaster.hash)
 				require.Equal(
 					t,
-					[][]byte{makeMinimalTxCbor(t, 0x22, 0)},
+					[][]byte{blockTxFromMempool(
+						t, makeMinimalTxCbor(t, 0x22, 0),
+					)},
 					leiosCaster.txBodies,
 				)
 			} else {
@@ -4131,6 +4134,7 @@ func TestCheckAndForgeProductionCertifiesOnlyParentAnnouncedLeiosEB(
 			slotsPerKESPeriod: 100,
 		},
 		LeiosCertificateProvider:        leiosCerts,
+		LeiosCertificationTimingChecker: forgerTestCertTiming{},
 		LeiosParentAnnouncementProvider: parent,
 		PromRegistry:                    prometheus.NewRegistry(),
 	})
@@ -4209,6 +4213,7 @@ func TestCheckAndForgeProductionDropsLeiosDataWhenTheParentMoves(t *testing.T) {
 			slotsPerKESPeriod: 100,
 		},
 		LeiosCertificateProvider:        leiosCerts,
+		LeiosCertificationTimingChecker: forgerTestCertTiming{},
 		LeiosParentAnnouncementProvider: parent,
 		PromRegistry:                    prometheus.NewRegistry(),
 	})
@@ -4478,4 +4483,144 @@ func TestForgeDoesNotAdoptBlockWhenContextCancelledMidForge(t *testing.T) {
 	require.Equal(t, 1, builder.calls, "the forge must have reached the build")
 	require.Zero(t, broadcaster.calls, "a block was adopted after cancellation")
 	require.Zero(t, forged, "a block was announced after cancellation")
+}
+
+// forgerTestCertTiming is a LeiosCertificationTimingChecker with a fixed
+// verdict that records the slots it was asked about.
+type forgerTestCertTiming struct {
+	err error
+}
+
+func (c forgerTestCertTiming) CheckLeiosCertificationTiming(
+	uint64,
+	uint64,
+) error {
+	return c.err
+}
+
+type forgerTestCertTimingRecorder struct {
+	announcingSlot uint64
+	slot           uint64
+	calls          int
+	err            error
+}
+
+func (c *forgerTestCertTimingRecorder) CheckLeiosCertificationTiming(
+	announcingSlot uint64,
+	slot uint64,
+) error {
+	c.announcingSlot = announcingSlot
+	c.slot = slot
+	c.calls++
+	return c.err
+}
+
+// The forger asks the ledger's certification timing rules about the eligible
+// certificate's own announcing slot and the slot being forged, and certifies
+// only when they allow it.
+func TestCheckAndForgeProductionAppliesLeiosCertificationTiming(
+	t *testing.T,
+) {
+	for _, test := range []struct {
+		name     string
+		verdict  error
+		wantCert bool
+	}{
+		{name: "allowed", verdict: nil, wantCert: true},
+		{
+			name:     "too early or across an epoch boundary",
+			verdict:  errors.New("not certifiable at this slot"),
+			wantCert: false,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			creds := setupTestCredentials(t)
+			block := newForgerTestBlock(10, 2)
+			builder := &forgerTestBuilder{block: block, cbor: block.cbor}
+			ebHash := lcommon.NewBlake2b256(bytes.Repeat([]byte{0x33}, 32))
+			rbHash := lcommon.NewBlake2b256(bytes.Repeat([]byte{0x44}, 32))
+			cert := &lcommon.LeiosEbCertificate{
+				SlotNo:            9,
+				EndorserBlockHash: ebHash,
+				Signers:           []byte{0x80},
+				AggregatedSignature: make(
+					[]byte,
+					lcommon.LeiosBlsSignatureSize,
+				),
+			}
+			leiosCerts := &forgerTestLeiosCerts{
+				eligible: []LeiosCertifiedEndorserBlock{{
+					SlotNo:            9,
+					EndorserBlockHash: ebHash,
+					Certificate:       cert,
+					AnnouncingRbHash:  rbHash,
+				}},
+			}
+			timing := &forgerTestCertTimingRecorder{err: test.verdict}
+			forger, err := NewBlockForger(ForgerConfig{
+				Mode: ModeProduction,
+				Logger: slog.New(
+					slog.NewJSONHandler(io.Discard, nil),
+				),
+				Credentials:      creds,
+				LeaderChecker:    forgerTestLeader{},
+				BlockBuilder:     builder,
+				BlockBroadcaster: &forgerTestBroadcaster{},
+				SlotClock: forgerTestSlotClock{
+					currentSlot:       10,
+					chainTipSlot:      9,
+					slotsPerKESPeriod: 100,
+				},
+				LeiosCertificateProvider: leiosCerts,
+				LeiosParentAnnouncementProvider: &forgerTestLeiosParentAnnouncement{
+					rbHash: rbHash,
+					hash:   ebHash,
+					ok:     true,
+				},
+				LeiosCertificationTimingChecker: timing,
+				PromRegistry:                    prometheus.NewRegistry(),
+			})
+			require.NoError(t, err)
+
+			require.NoError(
+				t,
+				forger.checkAndForgeProduction(context.Background()),
+			)
+
+			require.Positive(t, timing.calls)
+			require.Equal(t, uint64(9), timing.announcingSlot)
+			require.Equal(t, uint64(10), timing.slot)
+			require.Equal(
+				t,
+				1,
+				builder.calls+builder.leiosCalls+builder.contextCalls,
+			)
+			if test.wantCert {
+				require.Same(t, cert, builder.leiosData.Certificate)
+			} else {
+				require.Equal(t, 1, builder.calls)
+				require.Nil(t, builder.leiosData.Certificate)
+			}
+		})
+	}
+}
+
+func TestNewBlockForgerRequiresLeiosCertificationTimingChecker(t *testing.T) {
+	_, err := NewBlockForger(ForgerConfig{
+		Mode: ModeProduction,
+		Logger: slog.New(
+			slog.NewJSONHandler(io.Discard, nil),
+		),
+		Credentials:      setupTestCredentials(t),
+		LeaderChecker:    forgerTestLeader{},
+		BlockBuilder:     &forgerTestBuilder{},
+		BlockBroadcaster: &forgerTestBroadcaster{},
+		SlotClock: forgerTestSlotClock{
+			slotsPerKESPeriod: 100,
+		},
+		LeiosCertificateProvider:        &forgerTestLeiosCerts{},
+		LeiosParentAnnouncementProvider: &forgerTestLeiosParentAnnouncement{},
+		PromRegistry:                    prometheus.NewRegistry(),
+	})
+	require.ErrorContains(t, err, "LeiosCertificationTimingChecker")
 }

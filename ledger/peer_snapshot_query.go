@@ -53,14 +53,27 @@ var bigLedgerPeerQuota = big.NewRat(9, 10)
 // which is exactly the data a dmq-node-compatible client needs for ledger
 // peer discovery.
 //
+// The legacy request form ([34], NtC v19 to v22) is answered with the
+// version 1 layout. The NtC v23 form ([34, kind]) is answered with version 2
+// for big ledger peers or version 3 for all ledger peers, both of which also
+// carry the tip's block hash and the network magic.
+//
 // Point-in-time behavior: the snapshot reads through txn, so inside a
 // QueryView it describes the tip the view was acquired at; without one it
 // describes the current tip. The reported slot is that tip's slot.
 func (ls *LedgerState) queryLedgerPeerSnapshot(
 	ctx context.Context,
-	peerKind olocalstatequery.LedgerPeerKind,
+	q *olocalstatequery.ShelleyGetLedgerPeerSnapshotQuery,
 	txn *database.Txn,
 ) (any, error) {
+	var magic uint32
+	if q.WithPeerKind {
+		var err error
+		magic, err = ls.peerSnapshotNetworkMagic()
+		if err != nil {
+			return nil, err
+		}
+	}
 	txn, release := ls.readTxn(ctx, txn)
 	defer release()
 
@@ -71,22 +84,95 @@ func (ls *LedgerState) queryLedgerPeerSnapshot(
 	if err != nil {
 		return nil, fmt.Errorf("GetLedgerPeerSnapshot: get tip: %w", err)
 	}
-	slot := withOriginSlot(tip.Point)
+	result, err := ls.ledgerPeerSnapshotAtTip(ctx, q.PeerKind, tip.Point, txn)
+	if err != nil {
+		return nil, err
+	}
+	if !q.WithPeerKind {
+		return result, nil
+	}
+	return forLedgerPeerSnapshotV23(
+		result,
+		q.PeerKind,
+		tip.Point,
+		magic,
+	)
+}
+
+// peerSnapshotNetworkMagic returns the network magic the version 23 snapshot
+// carries, taken from the Shelley genesis as GetGenesisConfig does.
+func (ls *LedgerState) peerSnapshotNetworkMagic() (uint32, error) {
+	cfg := ls.config.CardanoNodeConfig
+	if cfg == nil || cfg.ShelleyGenesis() == nil {
+		return 0, errors.New(
+			"GetLedgerPeerSnapshot: shelley genesis unavailable for network magic",
+		)
+	}
+	return cfg.ShelleyGenesis().NetworkMagic, nil
+}
+
+// forLedgerPeerSnapshotV23 turns a version-agnostic snapshot into the version
+// 2 (big peers) or version 3 (all peers) result: it stamps the wire version,
+// the tip's block hash and the network magic. Version 3 entries carry no
+// accumulated stake. The block hash is nil at the genesis point, which
+// encodes as [0].
+func forLedgerPeerSnapshotV23(
+	result olocalstatequery.LedgerPeerSnapshotResult,
+	peerKind olocalstatequery.LedgerPeerKind,
+	tip ocommon.Point,
+	magic uint32,
+) (olocalstatequery.LedgerPeerSnapshotResult, error) {
+	result.NetworkMagic = magic
+	result.BlockHash = nil
+	if result.Slot.HasSlot {
+		if len(tip.Hash) != lcommon.Blake2b256Size {
+			return result, fmt.Errorf(
+				"GetLedgerPeerSnapshot: tip hash is %d bytes, expected %d",
+				len(tip.Hash),
+				lcommon.Blake2b256Size,
+			)
+		}
+		result.BlockHash = append([]byte(nil), tip.Hash...)
+	}
+	if peerKind == olocalstatequery.LedgerPeerKindBig {
+		result.Version = 2
+		return result, nil
+	}
+	result.Version = 3
+	pools := make([]olocalstatequery.PoolLedgerPeers, len(result.Pools))
+	for i, pool := range result.Pools {
+		pool.AccumulatedStake = nil
+		pools[i] = pool
+	}
+	result.Pools = pools
+	return result, nil
+}
+
+// ledgerPeerSnapshotAtTip reads the active pools, their stake and relays
+// through txn and assembles the version-agnostic snapshot for the tip.
+func (ls *LedgerState) ledgerPeerSnapshotAtTip(
+	ctx context.Context,
+	peerKind olocalstatequery.LedgerPeerKind,
+	tipPoint ocommon.Point,
+	txn *database.Txn,
+) (olocalstatequery.LedgerPeerSnapshotResult, error) {
+	slot := withOriginSlot(tipPoint)
+	empty := emptyLedgerPeerSnapshot(slot)
 
 	pkhBytes, err := ls.db.Metadata().GetActivePoolKeyHashes(txn.Metadata())
 	if err != nil {
 		// Epoch data may not be synced yet for the current tip (early sync);
 		// there are simply no ledger peers to report at that point.
 		if errors.Is(err, types.ErrNoEpochData) {
-			return emptyLedgerPeerSnapshot(slot), nil
+			return empty, nil
 		}
-		return nil, fmt.Errorf(
+		return empty, fmt.Errorf(
 			"GetLedgerPeerSnapshot: get active pools: %w",
 			err,
 		)
 	}
 	if len(pkhBytes) == 0 {
-		return emptyLedgerPeerSnapshot(slot), nil
+		return empty, nil
 	}
 
 	stakeByPool, _, err := ls.db.Metadata().GetStakeByPools(
@@ -94,7 +180,7 @@ func (ls *LedgerState) queryLedgerPeerSnapshot(
 		txn.Metadata(),
 	)
 	if err != nil {
-		return nil, fmt.Errorf(
+		return empty, fmt.Errorf(
 			"GetLedgerPeerSnapshot: get stake by pools: %w",
 			err,
 		)
@@ -102,11 +188,14 @@ func (ls *LedgerState) queryLedgerPeerSnapshot(
 
 	pkhs, err := poolKeyHashesFromActivePoolBytes(pkhBytes)
 	if err != nil {
-		return nil, err
+		return empty, err
 	}
 	pools, err := ls.db.GetPools(ctx, pkhs, txn)
 	if err != nil {
-		return nil, fmt.Errorf("GetLedgerPeerSnapshot: get pools: %w", err)
+		return empty, fmt.Errorf(
+			"GetLedgerPeerSnapshot: get pools: %w",
+			err,
+		)
 	}
 
 	return assembleLedgerPeerSnapshot(slot, stakeByPool, pools, peerKind), nil
@@ -132,9 +221,10 @@ func poolKeyHashesFromActivePoolBytes(
 // emptyLedgerPeerSnapshot builds a well-formed empty snapshot at the given
 // point. A node with no active pools still returns a valid result.
 //
-// Version 0 is gouroboros's "unset" sentinel (LedgerPeerSnapshotResult docs):
-// MarshalCBOR always emits its own currently-supported wire version regardless
-// of this value, so this does not pin V1 on the wire.
+// Version 0 is gouroboros's "unset" sentinel (LedgerPeerSnapshotResult docs)
+// and encodes as wire version 1, the layout of the legacy request form. The
+// version 23 handler replaces it with version 2 or 3 (forLedgerPeerSnapshotV23)
+// before the result leaves the ledger.
 func emptyLedgerPeerSnapshot(
 	slot olocalstatequery.WithOriginSlot,
 ) olocalstatequery.LedgerPeerSnapshotResult {

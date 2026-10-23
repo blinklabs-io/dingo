@@ -1362,7 +1362,7 @@ func legacyUtxoStakeRefsQuery(
 // skipPlanTestUnderRace skips a test that asserts SQLite query plans over a
 // fixture of tens of thousands of rows inserted by one goroutine. The race
 // detector cannot inform such a test and slows it several times over;
-// go-test (Linux) and go-test (Linux, quick) run it un-instrumented. Correctness
+// CI's check and gate (services) jobs run it un-instrumented. Correctness
 // tests that share the seeders keep running under race.
 func skipPlanTestUnderRace(t testing.TB) {
 	t.Helper()

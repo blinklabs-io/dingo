@@ -21,9 +21,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"strings"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
@@ -37,6 +40,16 @@ const (
 	durableRollbackIntentVersion  = 1
 	maxRollbackIntentBlocks       = 4096
 	maxRollbackIntentPayloadBytes = 64 << 20
+
+	// maxRollbackIntentEncodedBytes bounds a stored record before it is
+	// decoded: the base64 form of a full payload plus per-block field names,
+	// numbers and base64 padding, and the record envelope. A record the
+	// writer produced always fits.
+	maxRollbackIntentBlockOverhead = 512
+	maxRollbackIntentEnvelope      = 4096
+	maxRollbackIntentEncodedBytes  = (maxRollbackIntentPayloadBytes+2)/3*4 +
+		maxRollbackIntentBlocks*maxRollbackIntentBlockOverhead +
+		maxRollbackIntentEnvelope
 )
 
 var (
@@ -256,7 +269,16 @@ func loadRollbackIntent(
 	if db == nil || db.Metadata() == nil {
 		return ocommon.Point{}, nil, false, nil
 	}
-	raw, err := db.GetSyncState(durableRollbackIntentSyncKey, nil)
+	raw, err := db.GetSyncStateBounded(
+		durableRollbackIntentSyncKey,
+		maxRollbackIntentEncodedBytes,
+		nil,
+	)
+	if errors.Is(err, metadata.ErrSyncStateTooLarge) {
+		return ocommon.Point{}, nil, false, fmt.Errorf(
+			"%w: %w", errInvalidRollbackIntent, err,
+		)
+	}
 	if err != nil {
 		return ocommon.Point{}, nil, false, fmt.Errorf(
 			"load rollback intent: %w", err,
@@ -265,12 +287,9 @@ func loadRollbackIntent(
 	if raw == "" {
 		return ocommon.Point{}, nil, false, nil
 	}
-	var intent durableRollbackIntent
-	if err := json.Unmarshal([]byte(raw), &intent); err != nil {
-		detail := err.Error()
-		return ocommon.Point{}, nil, false, fmt.Errorf(
-			"%w: decode: %s", errInvalidRollbackIntent, detail,
-		)
+	intent, err := decodeRollbackIntent(raw)
+	if err != nil {
+		return ocommon.Point{}, nil, false, err
 	}
 	if intent.Version != durableRollbackIntentVersion {
 		return ocommon.Point{}, nil, false, fmt.Errorf(
@@ -306,6 +325,112 @@ func loadRollbackIntent(
 	}
 	return ocommon.Point{Slot: *intent.Slot, Hash: hash},
 		modelBlocks(intent.Blocks), true, nil
+}
+
+// decodeRollbackIntent decodes a stored record under the limits the writer
+// enforces. The block array is read element by element so a record with more
+// than maxRollbackIntentBlocks entries, or more than
+// maxRollbackIntentPayloadBytes of block fields, is refused before the rest of
+// it is allocated; a whole-value json.Unmarshal would size the slice from
+// attacker-controlled input first. Unknown fields are refused for the same
+// reason. Violations wrap errInvalidRollbackIntent so
+// recovery discards the record like any other unreadable one.
+func decodeRollbackIntent(raw string) (durableRollbackIntent, error) {
+	var intent durableRollbackIntent
+	if len(raw) > maxRollbackIntentEncodedBytes {
+		return intent, fmt.Errorf(
+			"%w: encoded size %d exceeds %d",
+			errInvalidRollbackIntent,
+			len(raw),
+			maxRollbackIntentEncodedBytes,
+		)
+	}
+	fail := func(err error) (durableRollbackIntent, error) {
+		return durableRollbackIntent{}, fmt.Errorf(
+			"%w: decode: %s", errInvalidRollbackIntent, err.Error(),
+		)
+	}
+	dec := json.NewDecoder(strings.NewReader(raw))
+	if tok, err := dec.Token(); err != nil {
+		return fail(err)
+	} else if tok != json.Delim('{') {
+		return fail(errors.New("record is not a JSON object"))
+	}
+	for dec.More() {
+		keyTok, err := dec.Token()
+		if err != nil {
+			return fail(err)
+		}
+		key, _ := keyTok.(string)
+		switch key {
+		case "format_version":
+			err = dec.Decode(&intent.Version)
+		case "slot":
+			err = dec.Decode(&intent.Slot)
+		case "hash":
+			err = dec.Decode(&intent.Hash)
+		case "blocks":
+			intent.Blocks, err = decodeRollbackBlocks(dec)
+		default:
+			// The writer emits exactly these fields. Skipping an unknown one
+			// would still materialize it, up to the encoded size limit.
+			return fail(fmt.Errorf("unknown field %q", key))
+		}
+		if err != nil {
+			if errors.Is(err, errInvalidRollbackIntent) {
+				return durableRollbackIntent{}, err
+			}
+			return fail(err)
+		}
+	}
+	if _, err := dec.Token(); err != nil {
+		return fail(err)
+	}
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		return fail(errors.New("unexpected data after record"))
+	}
+	return intent, nil
+}
+
+func decodeRollbackBlocks(dec *json.Decoder) ([]durableRollbackBlock, error) {
+	tok, err := dec.Token()
+	if err != nil {
+		return nil, err
+	}
+	if tok == nil {
+		return nil, nil
+	}
+	if tok != json.Delim('[') {
+		return nil, errors.New("blocks is not an array")
+	}
+	var blocks []durableRollbackBlock
+	total := 0
+	for dec.More() {
+		if len(blocks) >= maxRollbackIntentBlocks {
+			return nil, fmt.Errorf(
+				"%w: more than %d blocks",
+				errInvalidRollbackIntent,
+				maxRollbackIntentBlocks,
+			)
+		}
+		var block durableRollbackBlock
+		if err := dec.Decode(&block); err != nil {
+			return nil, err
+		}
+		total += len(block.Hash) + len(block.PrevHash) + len(block.Cbor)
+		if total > maxRollbackIntentPayloadBytes {
+			return nil, fmt.Errorf(
+				"%w: block bytes exceed %d",
+				errInvalidRollbackIntent,
+				maxRollbackIntentPayloadBytes,
+			)
+		}
+		blocks = append(blocks, block)
+	}
+	if _, err := dec.Token(); err != nil {
+		return nil, err
+	}
+	return blocks, nil
 }
 
 // recoverRollbackIntent finishes a rollback whose durable undo outbox was

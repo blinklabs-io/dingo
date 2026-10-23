@@ -72,11 +72,43 @@ func newPostgresIntegrationSchema(t *testing.T) (string, string) {
 	return postgresDSNWithSearchPath(t, dsn, schema), schema
 }
 
+func TestPostgresHistoricalExpirationUsesClosureExecutionSlot(t *testing.T) {
+	dsn, schema := newPostgresIntegrationSchema(t)
+	testHistoricalExpirationUsesClosureExecutionSlot(
+		t,
+		newIntegrationSQLStore(t, "pgx", dsn, "postgres", schema),
+	)
+}
+
+func TestMySQLHistoricalExpirationUsesClosureExecutionSlot(t *testing.T) {
+	dsn, database := newMySQLIntegrationDatabase(t)
+	testHistoricalExpirationUsesClosureExecutionSlot(
+		t,
+		newIntegrationSQLStore(t, "mysql", dsn, "mysql", database),
+	)
+}
+
 func TestPostgresPParamUpdateOrdering(t *testing.T) {
 	dsn, schema := newPostgresIntegrationSchema(t)
 	testPParamUpdateOrdering(
 		t,
 		newIntegrationSQLStore(t, "pgx", dsn, "postgres", schema),
+	)
+}
+
+func TestPostgresGetSyncStateBounded(t *testing.T) {
+	dsn, schema := newPostgresIntegrationSchema(t)
+	testGetSyncStateBounded(
+		t,
+		newIntegrationSQLStore(t, "pgx", dsn, "postgres", schema),
+	)
+}
+
+func TestMySQLGetSyncStateBounded(t *testing.T) {
+	dsn, database := newMySQLIntegrationDatabase(t)
+	testGetSyncStateBounded(
+		t,
+		newIntegrationSQLStore(t, "mysql", dsn, "mysql", database),
 	)
 }
 
@@ -99,6 +131,22 @@ func TestPostgresUtxoOrderingAssetFilter(t *testing.T) {
 func TestMySQLUtxoOrderingAssetFilter(t *testing.T) {
 	dsn, database := newMySQLIntegrationDatabase(t)
 	testUtxoOrderingAssetFilter(
+		t,
+		newIntegrationSQLStore(t, "mysql", dsn, "mysql", database),
+	)
+}
+
+func TestPostgresAccountAggregateLimits(t *testing.T) {
+	dsn, schema := newPostgresIntegrationSchema(t)
+	testAccountAggregateLimits(
+		t,
+		newIntegrationSQLStore(t, "pgx", dsn, "postgres", schema),
+	)
+}
+
+func TestMySQLAccountAggregateLimits(t *testing.T) {
+	dsn, database := newMySQLIntegrationDatabase(t)
+	testAccountAggregateLimits(
 		t,
 		newIntegrationSQLStore(t, "mysql", dsn, "mysql", database),
 	)
