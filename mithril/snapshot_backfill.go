@@ -442,11 +442,8 @@ func RunSnapshotBackfill(
 	if err != nil {
 		return ocommon.Point{}, err
 	}
-	maxAncillarySlot, maxGapBlocks, err := ancillaryGapBounds(
-		cfg.CardanoNodeConfig, certifiedTip.Slot,
-	)
-	if err != nil {
-		return ocommon.Point{}, err
+	slotLimit := func() (uint64, error) {
+		return ancillarySlotLimit(cfg.CardanoNodeConfig, certifiedTip.Slot)
 	}
 	if cfg.fetchGap == nil {
 		cfg.fetchGap = func(
@@ -456,7 +453,13 @@ func RunSnapshotBackfill(
 			start ocommon.Point,
 			end ocommon.Point,
 		) ([]models.Block, error) {
-			return fetchGapBlocksWithLimit(
+			maxGapBlocks, err := ancillaryBlockLimit(
+				cfg.CardanoNodeConfig,
+			)
+			if err != nil {
+				return nil, err
+			}
+			return fetchGapBlocks(
 				ctx, logger, network, start, end, maxGapBlocks,
 			)
 		}
@@ -484,7 +487,7 @@ func RunSnapshotBackfill(
 		AncillaryDigests:  ancillaryDigests,
 	}
 	prepared, err := prepareLedgerStateImport(
-		logger, result, certifiedTip.Slot, maxAncillarySlot,
+		logger, result, certifiedTip.Slot, slotLimit,
 	)
 	if err != nil {
 		return ocommon.Point{}, fmt.Errorf("preparing ledger state: %w", err)

@@ -41,27 +41,13 @@ import (
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
-const defaultMaxGapBlocks = 4320
-
 // fetchGapBlocks connects to network relay peers and fetches blocks
 // between start and end (inclusive). The start block is skipped since
 // it already exists in the blob store. This closes the gap between
 // the ImmutableDB tip and the ledger state tip after Mithril bootstrap.
 // It tries each bootstrap peer in order, falling back to the next on
-// failure.
+// failure. maxBlocks bounds the blocks retained from one peer.
 func fetchGapBlocks(
-	ctx context.Context,
-	logger *slog.Logger,
-	network string,
-	start ocommon.Point,
-	end ocommon.Point,
-) ([]models.Block, error) {
-	return fetchGapBlocksWithLimit(
-		ctx, logger, network, start, end, defaultMaxGapBlocks,
-	)
-}
-
-func fetchGapBlocksWithLimit(
 	ctx context.Context,
 	logger *slog.Logger,
 	network string,
@@ -105,7 +91,7 @@ func fetchGapBlocksWithLimit(
 			start ocommon.Point,
 			end ocommon.Point,
 		) ([]models.Block, error) {
-			return fetchGapBlocksFromPeerWithLimit(
+			return fetchGapBlocksFromPeer(
 				ctx, logger, networkMagic, peerAddr, start, end, maxBlocks,
 			)
 		},
@@ -166,27 +152,9 @@ func fetchGapBlocksFromPeers(
 	)
 }
 
-// fetchGapBlocksFromPeer fetches gap blocks from a single peer.
+// fetchGapBlocksFromPeer fetches gap blocks from a single peer, failing
+// before retaining more than maxBlocks blocks.
 func fetchGapBlocksFromPeer(
-	ctx context.Context,
-	logger *slog.Logger,
-	networkMagic uint32,
-	peerAddr string,
-	start ocommon.Point,
-	end ocommon.Point,
-) ([]models.Block, error) {
-	return fetchGapBlocksFromPeerWithLimit(
-		ctx,
-		logger,
-		networkMagic,
-		peerAddr,
-		start,
-		end,
-		defaultMaxGapBlocks,
-	)
-}
-
-func fetchGapBlocksFromPeerWithLimit(
 	ctx context.Context,
 	logger *slog.Logger,
 	networkMagic uint32,
@@ -206,8 +174,7 @@ func fetchGapBlocksFromPeerWithLimit(
 
 	// Collect blocks via callbacks. The start block is skipped
 	// because it already exists in the blob store.
-	var mu sync.Mutex
-	var blocks []models.Block
+	collector := &gapBlockCollector{start: start, maxBlocks: maxBlocks}
 	done := make(chan struct{}, 1)
 
 	blockFunc := func(
@@ -215,27 +182,7 @@ func fetchGapBlocksFromPeerWithLimit(
 		blockType uint,
 		block gledger.Block,
 	) error {
-		if block.SlotNumber() <= start.Slot {
-			return nil
-		}
-		b := models.Block{
-			Slot:     block.SlotNumber(),
-			Hash:     block.Hash().Bytes(),
-			Cbor:     block.Cbor(),
-			Number:   block.BlockNumber(),
-			Type:     blockType,
-			PrevHash: block.PrevHash().Bytes(),
-		}
-		mu.Lock()
-		if len(blocks) >= maxBlocks {
-			mu.Unlock()
-			return fmt.Errorf(
-				"volatile gap exceeds %d blocks", maxBlocks,
-			)
-		}
-		blocks = append(blocks, b)
-		mu.Unlock()
-		return nil
+		return collector.add(blockType, block)
 	}
 
 	batchDoneFunc := func(_ blockfetch.CallbackContext) error {
@@ -331,11 +278,42 @@ func fetchGapBlocksFromPeerWithLimit(
 	logger.Info(
 		"fetched volatile blocks from relay",
 		"component", "mithril",
-		"count", len(blocks),
+		"count", len(collector.blocks),
 		"peer", peerAddr,
 	)
 
-	return blocks, nil
+	return collector.blocks, nil
+}
+
+// gapBlockCollector accumulates blocks after start and refuses to retain
+// more than maxBlocks, so a peer streaming an unbounded range cannot grow
+// memory without limit.
+type gapBlockCollector struct {
+	start     ocommon.Point
+	maxBlocks int
+	mu        sync.Mutex
+	blocks    []models.Block
+}
+
+func (c *gapBlockCollector) add(blockType uint, block gledger.Block) error {
+	if block.SlotNumber() <= c.start.Slot {
+		return nil
+	}
+	b := models.Block{
+		Slot:     block.SlotNumber(),
+		Hash:     block.Hash().Bytes(),
+		Cbor:     block.Cbor(),
+		Number:   block.BlockNumber(),
+		Type:     blockType,
+		PrevHash: block.PrevHash().Bytes(),
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.blocks) >= c.maxBlocks {
+		return fmt.Errorf("volatile gap exceeds %d blocks", c.maxBlocks)
+	}
+	c.blocks = append(c.blocks, b)
+	return nil
 }
 
 // deleteBlobBlocksAboveSlotExcept removes blocks above slot unless their
