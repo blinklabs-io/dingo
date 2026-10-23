@@ -36,8 +36,10 @@ import (
 	"github.com/blinklabs-io/dingo/plugin"
 	"github.com/blinklabs-io/dingo/utxoref"
 	ouroboros "github.com/blinklabs-io/gouroboros"
+	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"go.opentelemetry.io/otel/attribute"
@@ -168,6 +170,19 @@ type TxValidationSessionProvider interface {
 		stillCurrent func() bool,
 		commitIfCurrent func(func() error) (bool, error),
 	) error) error
+}
+
+// TxSizeLimitProvider optionally reports the MaxTxSize ledger validation
+// applies to a transaction of a given era, so admission can refuse an
+// oversized submission before decoding it, taking the mutation gate, or
+// running ledger rules. LedgerState implements it; validators that do not
+// simply skip the early check and rely on the ledger's own rule.
+type TxSizeLimitProvider interface {
+	// MaxTxSize returns the MaxTxSize the ledger would apply to a transaction
+	// of era txType, and whether it is known. It must report false rather
+	// than a smaller limit than the ledger would apply, so the early check
+	// never refuses what the ledger rule accepts.
+	MaxTxSize(txType uint) (uint, bool)
 }
 
 type MempoolConfig struct {
@@ -1850,6 +1865,9 @@ func (m *Mempool) AddTransaction(
 		// transaction, and an API surface has to be able to tell them apart.
 		return fmt.Errorf("%w in AddTransaction", ErrNilValidator)
 	}
+	if err := m.rejectOversizedTx(txType, txBytes); err != nil {
+		return err
+	}
 	// Decode transaction outside the lock (CPU-bound, no shared state)
 	tmpTx, err := safedecode.Transaction(txType, txBytes)
 	if err != nil {
@@ -1912,6 +1930,50 @@ func (m *Mempool) AddTransaction(
 		}
 	}
 	return nil
+}
+
+// rejectOversizedTx applies the ledger's MaxTxSize rule to the raw submission
+// before any decode, lock, or rule work. The size is common.TxSize's measure,
+// so an early rejection implies the ledger rule would reject it too; the
+// ledger rule stays authoritative for everything this lets through.
+func (m *Mempool) rejectOversizedTx(txType uint, txBytes []byte) error {
+	provider, ok := m.validator.(TxSizeLimitProvider)
+	if !ok {
+		return nil
+	}
+	maxSize, known := provider.MaxTxSize(txType)
+	if !known {
+		return nil
+	}
+	size := rawTxSize(txType, txBytes)
+	if size <= maxSize {
+		return nil
+	}
+	return fmt.Errorf(
+		"validate transaction: %w",
+		shelley.MaxTxSizeUtxoError{TxSize: size, MaxTxSize: maxSize},
+	)
+}
+
+// rawTxSize is common.TxSize computed from the submitted bytes: from Alonzo
+// on, a transaction whose array has four elements is measured one byte short,
+// and any other shape, including the three-element Dijkstra mempool form, at
+// its full length. Discounting by era alone would admit a transaction one
+// byte over the limit into the ledger rules.
+func rawTxSize(txType uint, txBytes []byte) uint {
+	size := uint(len(txBytes))
+	if txType < uint(gledger.TxTypeAlonzo) || size == 0 {
+		return size
+	}
+	dec, err := cbor.NewStreamDecoder(txBytes)
+	if err != nil {
+		return size
+	}
+	arrayLen, _, _, err := dec.DecodeArrayHeader()
+	if err == nil && arrayLen == 4 {
+		size--
+	}
+	return size
 }
 
 // addTransactionAttempt validates and admits one transaction. On

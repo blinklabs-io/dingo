@@ -15139,13 +15139,19 @@ func (s txValidationSnapshot) validationContext(
 	if err != nil {
 		return eras.EraDesc{}, nil, false, err
 	}
-	pp := s.currentPParams
-	isCurrent := true
-	if validationEra.Id != s.currentEra.Id && s.prevEraPParams != nil {
-		pp = s.prevEraPParams
-		isCurrent = false
-	}
+	pp, isCurrent := s.validationPParams(validationEra.Id)
 	return validationEra, pp, isCurrent, nil
+}
+
+// validationPParams returns the protocol parameters that validate a
+// transaction of a compatible era, and whether they are the current era's.
+func (s txValidationSnapshot) validationPParams(
+	txEraId uint,
+) (lcommon.ProtocolParameters, bool) {
+	if txEraId != s.currentEra.Id && s.prevEraPParams != nil {
+		return s.prevEraPParams, false
+	}
+	return s.currentPParams, true
 }
 
 func (s txValidationSnapshot) protocolParameters(
