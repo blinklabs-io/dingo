@@ -275,12 +275,7 @@ func (ls *LedgerState) peerChainSelectionEpochNonceAcrossEpochs(
 	labNonce := cloneNonce(sourceEpoch.LastEpochBlockNonce)
 	var initialEvolvingNonce, initialCandidateNonce []byte
 	if originAncestor {
-		_, initialEvolvingNonce, initialCandidateNonce, _, err =
-			ls.computeEpochNonceForSlot(
-				context.Background(),
-				0,
-				models.Epoch{},
-			)
+		_, initialEvolvingNonce, initialCandidateNonce, _, err = ls.computeEpochNonceForSlot(context.Background(), 0, models.Epoch{})
 	} else {
 		initialEvolvingNonce, err = ls.db.GetBlockNonce(ancestor, nil)
 		initialCandidateNonce = cloneNonce(initialEvolvingNonce)
@@ -725,6 +720,14 @@ func (ls *LedgerState) peerHeaderForkPath(
 	connId ouroboros.ConnectionId,
 	header gledger.BlockHeader,
 ) (ocommon.Point, []gledger.BlockHeader, bool, error) {
+	return ls.peerHeaderForkPathContext(context.Background(), connId, header)
+}
+
+func (ls *LedgerState) peerHeaderForkPathContext(
+	ctx context.Context,
+	connId ouroboros.ConnectionId,
+	header gledger.BlockHeader,
+) (ocommon.Point, []gledger.BlockHeader, bool, error) {
 	if ls.chain == nil || ls.config.PeerHeaderLookupFunc == nil {
 		return ocommon.Point{}, nil, false, nil
 	}
@@ -751,7 +754,7 @@ func (ls *LedgerState) peerHeaderForkPath(
 		contextGeneration,
 		verificationGeneration,
 	) &&
-		ls.peerForkAncestorOnChain(cachedAncestor) &&
+		ls.peerForkAncestorOnChain(ctx, cachedAncestor) &&
 		len(cached.headers) > 0 {
 		lastHeader := cached.headers[len(cached.headers)-1]
 		if bytes.Equal(lastHeader.Hash().Bytes(), header.Hash().Bytes()) {
@@ -809,7 +812,7 @@ func (ls *LedgerState) peerHeaderForkPath(
 					return ocommon.Point{}, nil, false, nil
 				}
 				if (!ok || event.HeaderCryptoVerificationGeneration != 0) &&
-					!ls.chain.HoldsPoint(context.Background(), parentPoint) {
+					!ls.chain.HoldsPoint(ctx, parentPoint) {
 					return ocommon.Point{}, nil, false, fmt.Errorf(
 						"%w: candidate parent at slot %d has no current crypto verdict",
 						errHeaderVerificationDeferred,
@@ -844,7 +847,7 @@ func (ls *LedgerState) peerHeaderForkPath(
 		}
 		if isOrigin {
 			origin := ocommon.Point{}
-			if !ls.peerForkAncestorOnChain(origin) {
+			if !ls.peerForkAncestorOnChain(ctx, origin) {
 				return ocommon.Point{}, nil, false, nil
 			}
 			slices.Reverse(pathReversed)
@@ -866,10 +869,10 @@ func (ls *LedgerState) peerHeaderForkPath(
 			)
 			return origin, pathReversed, true, nil
 		}
-		block, err := ls.blockByHash(context.Background(), prevHash)
+		block, err := ls.blockByHash(ctx, prevHash)
 		if err == nil {
 			point := ocommon.NewPoint(block.Slot, block.Hash)
-			if ls.chain.HoldsPoint(context.Background(), point) {
+			if ls.chain.HoldsPoint(ctx, point) {
 				slices.Reverse(pathReversed)
 				if contextChanged() {
 					return ocommon.Point{}, nil, false,
@@ -929,7 +932,7 @@ func (ls *LedgerState) peerHeaderForkPath(
 				return ocommon.Point{}, nil, false, nil
 			}
 			if event.HeaderCryptoVerificationGeneration != 0 &&
-				!ls.chain.HoldsPoint(context.Background(), event.Point) {
+				!ls.chain.HoldsPoint(ctx, event.Point) {
 				return ocommon.Point{}, nil, false, fmt.Errorf(
 					"%w: candidate ancestor at slot %d has no current crypto verdict",
 					errHeaderVerificationDeferred,
@@ -942,15 +945,18 @@ func (ls *LedgerState) peerHeaderForkPath(
 	}
 }
 
-func (ls *LedgerState) peerForkAncestorOnChain(point ocommon.Point) bool {
+func (ls *LedgerState) peerForkAncestorOnChain(
+	ctx context.Context,
+	point ocommon.Point,
+) bool {
 	if ls.chain == nil {
 		return false
 	}
 	if point.Slot == 0 && len(point.Hash) == 0 {
-		_, _, ancestor, err := ls.chain.TipRelation(point)
+		_, _, ancestor, err := ls.chain.TipRelationContext(ctx, point)
 		return err == nil && ancestor
 	}
-	return ls.chain.HoldsPoint(context.Background(), point)
+	return ls.chain.HoldsPoint(ctx, point)
 }
 
 func (ls *LedgerState) storePeerForkPathPrefix(

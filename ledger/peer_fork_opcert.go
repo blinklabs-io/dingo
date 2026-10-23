@@ -32,7 +32,11 @@ func (ls *LedgerState) validatePeerForkOpCertCounters(
 	if _, hasOpCert := opCertFromHeader(target); !hasOpCert {
 		return nil
 	}
-	ancestor, headers, found, err := ls.peerHeaderForkPath(connID, target)
+	ancestor, headers, found, err := ls.peerHeaderForkPathContext(
+		ctx,
+		connID,
+		target,
+	)
 	if err != nil {
 		return err
 	}
