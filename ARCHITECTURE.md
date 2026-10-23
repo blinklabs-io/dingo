@@ -1207,6 +1207,10 @@ long-lived session. Helpers needing the concrete socket type (SO_LINGER, Unix
 peer credentials) unwrap through the wrapper, so wrapping an accepted connection
 never silently disables them. Cancellation closes an in-flight bearer, and failed
 setup releases its reserved inbound and per-IP slots.
+Successful N2N setup converts the pending reservation into a registered
+connection while holding the connection-map lock. Admission therefore always
+counts a connection in exactly one of those states, including while other
+handshakes complete concurrently.
 
 Node-to-client listeners share a separate admission budget across all their
 remotely reachable transports: `ConnectionManagerConfig.MaxNtCConns` defaults

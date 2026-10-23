@@ -533,8 +533,7 @@ func (c *ConnectionManager) setupAcceptedConnection(
 		releaseNtCSlot = nil
 	} else {
 		c.config.Logger.Info("listener: inbound connection", "remote_addr", peerAddr)
-		c.consumeInboundSlot()
-		if !c.addConnectionWithIPKey(oConn, true, peerAddr, ipKey) {
+		if !c.addReservedInboundConnection(oConn, peerAddr, ipKey) {
 			return
 		}
 	}
