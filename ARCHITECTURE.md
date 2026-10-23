@@ -11079,8 +11079,13 @@ republishes its stored metadata with the certificate.
 credentials from the SDK default chain (`AWS_ENDPOINT` selects an
 S3-compatible endpoint) and serve ranged reads by lazy ranged GETs.
 Archive confirmation and snapshot listing keep up to 16 store requests in
-flight rather than one per archive or snapshot in turn, since the aggregator
-runs both while holding its mutex; a cancelled confirmation fails rather than
+flight rather than one per archive or snapshot in turn. Public listing and the
+aggregator each retain a 30-second catalog index and coalesce concurrent cache
+misses into one store scan. Certifying a snapshot invalidates both indexes,
+so it lists at once, and the aggregator confirms the open snapshot is still in
+the store before it spends a certificate on it. The aggregator completes that catalog I/O before
+locking signer state; malformed signature submissions and unknown signers are
+rejected before any catalog access. A cancelled confirmation fails rather than
 reporting the archives present.
 When `mithril.server.keepSnapshots` is a positive N, `snapshot create` prunes
 all but the newest N complete snapshots, removing each one's metadata object
@@ -11104,15 +11109,19 @@ verifying client bootstraps from the newest listed one.
 
 All public artifact reads, including pending-certificate and stake-distribution
 reads, share an admission bound of
-`2 * (immutableDownloadWorkers + 1)` (66) requests, enough for two v2
-bootstraps each running its 32 immutable downloads beside the ancillary one.
+`2 * (immutableDownloadWorkers + 1)` requests, enough for two v2
+bootstraps each running its immutable downloads beside the ancillary one.
 Public signature submissions use a separate four-request bound, so progressing
 archive transfers cannot consume their capacity. Either bound returns `503
 Service Unavailable` with `Retry-After: 1` when it is full. A
 15-second request-body read deadline is armed before decoding a signature
-submission. Each response write refreshes a separate 15-second progress
-deadline, so an active large snapshot transfer has no absolute duration limit
-while a stalled reader cannot retain its request slot indefinitely.
+submission. Archive transfers also admit at most one bootstrap's download
+concurrency from a remote host, keying IPv6 clients by their /64 prefix and
+IPv4-mapped addresses as IPv4; excess downloads return `429 Too Many Requests`.
+Each response write retains the 15-second idle deadline, while archive writes
+also carry a 30-second startup allowance and must average at least 64 KiB/s.
+Large archives therefore receive time proportional to their bytes while a
+slow reader cannot retain a request slot indefinitely.
 
 **Aggregator** (`mithril.Aggregator`, enabled by `mithril.server.aggregator`)
 is mounted on the same handler and certifies the stored snapshots of the
