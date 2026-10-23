@@ -687,6 +687,22 @@ observes it and before the ledger apply gate runs. This bookkeeping does not
 count a rollback as a delivered header or record it in the header deduplication
 cache. A callback for a removed client does not recreate its tracked state.
 
+The ledger defers the rollback that opens a ChainSync session when the
+connection has not yet delivered a header and the point is a queued header or a
+primary-chain block behind the header tip (`deferOpeningChainsyncRollback`).
+That point is only the session's intersection: a reconnecting peer intersects
+at the tip as of its FindIntersect, and the tip often advances before the reply
+is handled. The peer's first header settles it
+(`resolveOpeningChainsyncRollback`). The rollback is applied as before only
+when that header builds on the point and is not already on the local chain,
+meaning the peer's chain leaves ours there. A header the local chain holds is a
+replay, and a header that does not build on the point (the ingress apply gate
+can withhold a session's headers until the peer is selected) is left to the
+ordinary header path and its fork resolution; either way the rollback only
+moved the peer's cursor and is dropped. A rollback from a session that has
+delivered a header is applied immediately. The deferred state is per
+connection, held under `chainsyncMutex`, and cleared on `ledger.conn_closed`.
+
 `ledger.tx` is published with `PublishOrdered`, not `PublishAsync`, so a
 subscriber deriving state from it sees a block's transactions in index order
 and sees a rollback's undo events (`Rollback: true`) before any transaction
@@ -1062,6 +1078,37 @@ these series carries a connection or peer label.
   before that window's request is issued and so also for a request that then
   fails to start, and the second is observed only for events received through
   blockfetch.
+- `dingo_ledger_block_stage_duration_seconds` attributes the wall-clock time of
+  each applied chunk of blocks. Within the window timed by
+  `dingo_ledger_block_apply_batch_latency_seconds`, `prepare` is the work
+  before the database transaction (Leios endorser-block wait, block-apply
+  snapshot, replay header preparation); `deferred_header_verify`, `validate`
+  and `apply` run inside the transaction body on every path, batched or not;
+  and `commit` is the transaction's time outside its body (tip and candidate
+  checks, worker-pool wait, begin, commit). `deferred_header_verify` takes one
+  sample per applied block: the check whether admission deferred the block's
+  header verification and, if it did, that verification. `validate` takes one
+  sample per validated transaction and one per validated block, covering the
+  block's input resolution and its block-level reference-script check.
+  `apply` takes one sample per delta-batch flush (which includes the
+  replay-row flush) and, on a validating block, one sample per validated
+  transaction, because that write happens as soon as the transaction
+  validates and leaves the chunk's batch flush nearly empty. A certified Leios
+  endorser block's transactions take the same per-transaction `validate` and
+  `apply` samples; when its closure is applied at an epoch boundary those
+  samples fall inside `epoch_rollover`. `prepare` and `commit` are recorded
+  only for a chunk that commits at least one block, the same chunks the batch
+  latency records; the in-body stages are also recorded for a chunk that
+  fails or applies no block. For a recorded chunk the five stages sum to no
+  more than its batch latency; the remainder is per-block bookkeeping in the
+  transaction body (CBOR offsets, delta assembly, the evolving nonce), the
+  nonce and tip writes, the trusted-replay input prefetch, and the
+  post-commit tip update. On a validating Preview sync from a Mithril
+  snapshot the remainder measured 6.5% of batch latency over 1,778 blocks of
+  catch-up in 57 chunks, and 14.5% over 136 single-block chunks at the tip,
+  where the per-chunk tip and nonce writes are a larger share of a short
+  batch. `header_verify` is observed on blockfetch arrival and
+  `epoch_rollover` is its own transaction, both outside that window.
 - `dingo_ledger_blockfetch_batch_in_flight`,
   `dingo_ledger_blockfetch_continuation_pending` and
   `dingo_ledger_blockfetch_connection_selected` mirror
@@ -1202,6 +1249,19 @@ reasons; admission faults use a sanitized message rather than exposing mempool
 occupancy. An error without a supported era-specific representation terminates
 the connection through the protocol error path instead of fabricating a ledger
 failure. Clients must reconnect after that termination.
+
+LocalTxSubmission validation runs under a context that is cancelled when the
+bearer closes. The listener starts an NtC connection's protocols before it
+registers the connection, so the handler watches the mini-protocol's stop
+signal, which closes on teardown whether or not the connection is registered,
+as well as the connection manager's teardown signal. The mempool checks that
+context once it acquires the mutation gate, which cannot itself be waited on
+with a context, so a cancelled caller never validates or admits. A fixed
+in-flight budget (eight validations across all NtC connections) is held until
+the callback returns, not until the socket closes, so disconnecting does not
+free capacity for a validation that is still queued or running. A submission
+arriving with the budget exhausted is rejected immediately with the same
+generic, non-ledger reject reason used for other node-side admission faults.
 
 ```mermaid
 graph TB
@@ -1399,9 +1459,9 @@ sequenceDiagram
     end
 
     Note over SC,EB: Slot Battle Detection
-    EB->>BF: ChainUpdateEvent(externalBlock at same slot)
-    BF->>BF: SlotTracker detects competing block
-    BF->>EB: publish SlotBattleEvent
+    LS->>LS: blockfetch delivers a peer block at a forged slot, counted and held pending
+    LS->>PC: on each chain.update, fetched or forged, once the tip is a security parameter of blocks past it: is the forged block on the chain?
+    LS->>EB: publish SlotBattleEvent(Won)
 ```
 
 ## Directory Structure
@@ -2190,7 +2250,7 @@ All event types follow the `subsystem.snake_case_name` convention.
 | `epoch.transition` | LedgerState | Epoch boundary crossed |
 | `hardfork.transition` | LedgerState | Hard fork transition |
 | `block.forged` | BlockForger | Block forged and adopted onto the chain |
-| `forging.slot_battle` | SlotTracker | Competing blocks at same slot |
+| `forging.slot_battle` | LedgerState | Slot battle settled: a peer block competed with a forged block, and the chain has advanced a security parameter of blocks so the winner (`Won`) is final |
 | `leios.eb_quorum` | Leios VoteManager | Endorser block reached stake quorum; certificate built (consumed by the Leios PipelineManager for inclusion eligibility) |
 | `leios.vote_emitted` | Leios VoteManager | Locally signed prototype vote ready for node wiring to enqueue on each peer's LeiosNotify stream |
 | `leios.vote_received` | Leios VoteManager | Newly accepted prototype vote plus its origin connection key, re-queued for node wiring to enqueue on every other peer's LeiosNotify stream while excluding the connection that delivered it |
@@ -2475,6 +2535,13 @@ paths, where the point is to report before the goroutine unwinds.
   every connection, so separate clients cannot share budget state or recreate
   a removed bucket after close. The budget remains after point-list
   deduplication and before the database intersection lookup.
+- `LedgerState.GetIntersectPoint` resolves each peer-supplied point by
+  reading only its `bp..._metadata` key
+  (`database.BlockIDByPointMetadataTxn`), then confirms the ID against the
+  `bi` index. It never loads a block body and never reaches the Bark archive
+  fallback, so each budgeted point costs at most two small key reads. On the
+  `s3` and `gcs` blob plugins those keys are objects, so a point still costs
+  one object read, or two when held.
 - Prometheus metrics for event delivery tracking and latency, including
   `event_delivery_blocked_total{type,kind}` and
   `event_async_enqueue_blocked_total{type}` for backpressure, and
@@ -3814,7 +3881,7 @@ anything the result lacks is read in the write transaction as with the flag off.
 The goroutine runs at most one block ahead (block 1 overlaps block 0) and the
 apply worker never waits for it to acquire its read-pool connection: until the
 read transaction is open every block reads its own inputs, because snapshot
-opens parked on the chunk's commit barrier can hold the pool. It is cancelled
+opens parked on the chunk's commit can hold the pool. It is cancelled
 and joined, and its read transaction released, on every exit from the chunk
 callback. Dijkstra chunks do not use it, because endorser-block application
 consumes inputs that no ranking-block transaction names.
@@ -5144,7 +5211,15 @@ snapshot
 one commit boundary), and validates the point against it with
 `VerifyPointQueryable`. A boundary can commit before its job is published, so
 a snapshot that still contains the boundary's pending-ratification record is
-dropped and the open retried once the job settles. The
+dropped and the open retried once the job settles. A wait that outlasts the
+caller's deadline fails with `ledger.ErrEpochBoundaryJobPending`, naming the
+boundary's epoch. A volatile-tip Acquire does not wait for the job: the job
+can outlast the Acquire budget (seconds on preprod, tens of seconds beside a
+whole-UTxO query) and a failed tip Acquire has no failure reply, so while
+`LedgerState.EpochBoundaryJobPending` reports one, or the open fails with that
+error, the session is recorded without a view and its first `Query` opens it
+once the job settles (bounded by `localStateQueryDeferredOpenWait`, below the
+client's default query timeout), at the tip current then. The
 returned `ledger.QueryView` is held in `Ouroboros.localstatequerySessions`
 beside the acquired point and owner maps, and every `Query` on the connection
 is answered by `QueryView.Query`, which runs the ordinary query handlers
@@ -5171,8 +5246,15 @@ A snapshot pins a database read transaction (holding back WAL checkpoints and
 one read connection), so both its number and its lifetime are bounded. It
 counts against the database's read-snapshot admission cap, which always leaves
 one metadata read connection free for the rest of the node; once the cap is
-reached an `Acquire` waits up to five seconds for a snapshot to close and then
-fails. It is closed on `Release`,
+reached an `Acquire` waits up to four seconds for a snapshot to close and then
+fails. The wait stays below the gouroboros client's default five-second
+`Acquire` timeout, whose timer starts before the request arrives, so a client
+receives the `AcquireFailure` instead of timing out in `Acquiring` and closing
+the connection. Opening the snapshot waits for a commit in progress, not for
+every open read-write transaction to finish, so a long block-apply chunk or
+epoch-boundary write does not hold an `Acquire` past that bound. A timed-out
+open names the stage it was waiting in: admission, a read connection, or the
+commit barriers. It is closed on `Release`,
 on re-`Acquire` (before the replacement opens, so a connection never needs a
 second admission slot; a failed `Acquire` returns the protocol to idle with no
 session), on the connection closing, and on
@@ -5387,6 +5469,14 @@ retention-floor pruning committed afterwards does not reach the session. Only a
 snapshot closed by the lifetime bound above reproduces this connection-teardown
 behavior.
 
+"Ahead of the tip" means ahead of the applied ledger tip, and the chain
+iterator runs ahead of it during sync. So the node-to-client ChainSync server
+(`chainsyncServerRequestNext` with `waitForLedger`) holds a roll-forward
+behind `MsgAwaitReply` until `LedgerState.AwaitAppliedSlot` sees the ledger
+reach the block, as cardano-node serves local clients only blocks it has
+already validated. A local client can therefore Acquire every point ChainSync
+delivers to it. Node-to-node peers are still served ahead of the ledger.
+
 A specific acquired point is also pinned against pruning
 (`ledger/acquired_point_pins.go`). Acquire calls `LedgerState.PinAcquiredPoint`
 *before* `AcquireQueryView` verifies the point, and the consumed-UTxO cleanup
@@ -5446,11 +5536,32 @@ against a real Preview cardano-node: 36 real pools reported by cardano-node
 were completely absent from dingo's reply for no reason other than that
 snapshot lag. `GetUTxOWhole` enumerates live references, resolves their stored
 CBOR through a fixed worker pool, and decodes them into the node-to-client
-reply shape. The query admits at most 50,000 references, retains at most 32 MiB
-of resolved CBOR in its assembled result, encodes at most a 32 MiB response,
-and has a 30-second server deadline. Workers may hold one additional resolved
-output apiece while delivering results. The checked encoding is cached so the
-protocol server does not serialize the full map again outside that deadline.
+reply shape. A successful response always contains the complete UTxO set at
+the acquired point. Pagination, offsets, item limits, byte limits, time limits,
+truncation, and partial success are forbidden for this protocol result. If the
+complete set cannot be produced, the query fails without returning a successful
+partial result. Internal database pages only shorten read transactions; they
+are assembled into one complete protocol response. This contract must remain
+explicit in implementation and protocol documentation.
+
+`GetUTxOWhole` on an acquired view does not read through the view's snapshot.
+Its walk takes minutes on a large chain, and SQLite cannot restart its WAL
+while any reader holds a read transaction, so whole-UTxO queries one after
+another -- a node-parity replay asks for one at every epoch boundary -- kept
+the WAL growing without bound under every checkpoint strategy (42 GB live).
+Instead the view releases its read transaction
+(`QueryView.detachForUtxoWhole`) and the query reads the references as of the
+view's block -- the acquired point, or the snapshot's tip for a tip acquire --
+in pages of 10,000 rows, each in its own short read transaction
+(`database.IterateUtxoRefsAsOfPaged`, paging on the UTxO row id). The as-of
+predicate makes the pages agree: blocks applied meanwhile add rows after the
+slot, which it excludes, and spend rows after it, which it still includes. An
+acquired-point pin holds spent-row pruning at or below the slot for the walk,
+and the announced prune floor is checked once it ends. A rollback below the
+slot (`UtxosDeleteRolledback`, `UtxosUnspend`) marks the walk disturbed; the
+query re-verifies the point and restarts, up to three times. A later query on
+the same session reopens a snapshot pinned to that block, as an expired view
+does, keeping the forecast frozen at `Acquire`.
 Both queries exist to
 support cross-node ledger-state comparison in the devnet conformance
 harness (`internal/test/devnet`, see its README's "LocalStateQuery in
@@ -5613,7 +5724,13 @@ carries the highest point the previous and new peers' candidate fragments
 share. It is not intersected with the local chain and can lie above the local
 tip; it is nil when the fragments share no retained point. Before the
 node has applied any local block, new peers' advertisements remain bounded
-against the first bootstrap peer; after a local tip exists, the delivered
+against the highest advertisement of the peers that delivered a header, unless
+a connection from another remote host advertises a tip within `securityParam`
+of the claim. Refused advertisements are kept as witnesses
+(`ChainSelector.rejectedAdvertisedClaims`, bounded to `maxTrackedPeers` and
+outliving their connection), so a lagging first peer cannot refuse every
+honest peer in turn, while a lone far claim, or one host reconnecting to vouch
+for itself, is still refused. After a local tip exists, the delivered
 frontier is the authority. This lets a node resume when the honest advertised
 tip is arbitrarily far ahead: the next delivered header is still checked
 incrementally against the previous delivered frontier (with the local-tip
@@ -5644,6 +5761,16 @@ The stale-reference recovery also applies when the tracked reference is ahead
 of the local tip but still within the same `localTip + 2*securityParam`
 catch-up ceiling; a snapshot-backed local tip can lag its delivered peer
 references without making those references current enough to rule out catch-up.
+Staging a peer tip reads the local tip from `ChainSelectorConfig.AppliedTip`
+(the live applied ledger tip) rather than from the last `SetLocalTip`, which
+the node calls only at startup and on the stall recycler's tick. A node
+replaying blocks it already stored, as after a Mithril import, applies
+hundreds of blocks in that interval, and a ceiling measured from the tip it
+started at rejects headers the ledger has already passed.
+A peer whose advertised tip is wall-clock stale is never a new peer's
+reference. It serves an abandoned chain and is never selectable; from
+genesis, where the advertised bound applies, its short advertisement would
+otherwise reject every honest peer that advertises the real tip.
 A delivered frontier beyond the catch-up allowance is not rejected outright.
 `checkPeerTipPlausibleLocked` holds bounded far-tip evidence per connection. A
 far frontier is supported by another distinct connection within
@@ -6080,8 +6207,34 @@ it. Dingo implements this as a **corroboration gate**
   (`ouroboros/chainsync.go`): while Genesis corroboration is active, only
   corroborated peers are *apply-eligible*. An uncorroborated peer is still
   **observed** — its `PeerTipUpdateEvent` tips feed corroboration — but its
-  `ledger.ChainsyncEvent` (and therefore blockfetch) is withheld, so it cannot
-  steer the ledger. When no peer is corroborated, nothing is applied and the
+  `ledger.ChainsyncEvent` (and therefore blockfetch) is held, so it cannot
+  steer the ledger. The roll-forward callback blocks in
+  `ChainSelector.AwaitIngressCorroboration` (wired to
+  `OuroborosConfig.ChainsyncAwaitCorroboration`) until another connection
+  stages the same header, and then hands the header to the ledger; the peer's
+  cursor stays on the held header meanwhile. A header that is withheld while
+  the cursor moves on is lost to the ledger, and the peer that ran ahead keeps
+  only its most recent staged headers as evidence, so once it is further ahead
+  of every other peer than that window no peer can corroborate another and the
+  first header that becomes eligible no longer connects to the ledger's header
+  queue. This is the same rule upstream follows: candidate fragments are
+  anchored at the immutable tip (`sharedCandidatePrefix` in
+  `Ouroboros/Consensus/Genesis/Governor.hs`), and a block past the Limit on
+  Eagerness is stored and reprocessed later rather than discarded
+  (`ChainSelReprocessLoEBlocks` in
+  `Ouroboros/Consensus/Storage/ChainDB/Impl/ChainSel.hs`). Only the
+  corroboration denial is held: a wall-clock-stale advertised tip, an untracked
+  peer, or corroboration being off withholds at once. A hold is bounded
+  (`defaultCorroborationHoldTimeout`, 5s): the held callback stops the
+  protocol's receive loop, gouroboros fails a pipelined client that consumes no
+  reply within its 10s CanAwait timeout, and a hold no witness can end (the
+  witnesses were recycled, or every tracked client slot is held) would
+  otherwise last forever. When it expires the header is withheld and the
+  connection re-intersects
+  (`ChainsyncResyncReasonGenesisCorroborationHoldExpired`), which delivers the
+  header again and frees the client slot meanwhile. A chain's first block may
+  sit at slot 0, as Preview's does; it carries a hash and is a delivered point
+  like any other, and only the hashless origin clears a peer's frontier. When no peer is corroborated, nothing is applied and the
   ledger genuinely stalls. Observation happening before the apply gate is what
   avoids a deadlock (a peer must be observed to become corroborated). While the
   gate is active the observation is made **synchronously** with the gate
@@ -6191,8 +6344,19 @@ it. Dingo implements this as a **corroboration gate**
   header-queue tip, or the last header the same connection passed through this
   gate — still updates the selector and reaches the ledger queue with no
   verification generation; block-fetch verifies its body before application.
-  A header withheld because its fork ancestry cannot be authenticated never
-  becomes that connection's last passed header. Withholding a linear extension
+  The accepted header tip names only a header that extended the local chain
+  and passed the selection and publication gates. Any other outcome for that
+  connection's header — withheld, past the forecast horizon, failed
+  verification, pending or rejected by the selector, refused by admission or
+  by the ledger — clears it, so a deferred child cannot extend a header that
+  never reached the ledger queue. Missing ancestry does not
+  withhold a header whose parent is queued on the local header chain: such a
+  queued parent is often itself a deferred linear extension, kept out of
+  observed ancestry, so its child is verified against the local chain like
+  its parent was. Withholding it instead drops it, defers every later header
+  from the peer behind it, and leaves the queue too short to start
+  block-fetch, which stalled catch-up just before an epoch boundary whose
+  nonce was not yet computed. Withholding a linear extension
   deadlocks sync whenever only applying that block can make its authorization
   verifiable: at the Byron->Shelley boundary the first Shelley epoch's state
   does not exist until a Shelley block is applied. Any other deferred header
@@ -9384,7 +9548,17 @@ next run fetches it again instead of re-accepting the same bad bytes. A failed
 download keeps its partial file for resumption, and a cancelled run keeps its
 archive, since neither says anything about the bytes already on disk.
 The zstd decoder separately defaults to a 512 MiB window and 256 MiB decoder
-memory limit, configurable through `WithZstdLimits`.
+memory limit, configurable through `WithZstdLimits`. For a streaming decode
+the smaller of the two bounds the history buffer the decoder allocates from the
+frame's declared window, before tar framing or digests are checked, so a
+hostile frame can claim the full 256 MiB per decoder. The download semaphore
+charges compressed bytes only, so every extraction and the ancillary manifest
+preflight first reserve that worst case plus fixed overhead from one 2 GiB
+`decoderMemoryBudget` shared by the bootstrap, its kept chunk feed and the
+ancillary archive. Decoder concurrency therefore follows memory, not the
+download worker count; the reservation is held only while an archive decodes,
+so downloads still overlap. A feed started without a bootstrap's budget creates
+its own.
 
 Extraction also bounds the archive's shape while it is read: an entry-count
 cap (directories and empty files count), per-member and aggregate expanded-byte
@@ -10454,6 +10628,14 @@ ledger-state import, ImmutableDB loading, and API-mode metadata backfill are
 orchestrated by `cmd/dingo` and `internal/node`. This is exposed via the
 `dingo mithril` CLI subcommand and the `dingo load` command.
 
+`dingo mithril sync` imports the ledger state at the snapshot's ledger slot
+but copies the immutable files past it as blobs only, so its database holds
+primary-chain blocks the ledger has not applied. `dingo load` copies from the
+chain tip, not the ledger tip, so before copying it replays those chain blocks
+(`replayChainBlocksAheadOfLedger`, from the ledger tip to the chain tip) into
+the same trusted batch stream. Without that, the first copied block does not
+extend the ledger tip and the blocks in between are never applied.
+
 `dingo load` also reads an ImmutableDB served over HTTPS. Loopback HTTP is
 accepted for local development. A source that parses as an `http://` or
 `https://` URL with a host, whether from the
@@ -10871,7 +11053,9 @@ than the newest N fails, since retention has removed it.
 `mithril.server.publicBaseUrl` is the absolute origin used in artifact download
 locations; it must use HTTPS except for a loopback HTTP origin. Request Host and
 forwarded headers do not affect generated links. Archive downloads use
-`http.ServeContent`, giving range and HEAD support; with
+`http.ServeContent`, giving range and HEAD support. From a remote store, a
+request naming more than one range is answered with the whole object instead:
+each range would cost a separate ranged backend read. With
 `mithril.server.redirectBaseUrl` set they instead redirect to that base URL plus
 the object key. Path segments reaching the store are matched against a
 64-hex-digit hash and a fixed archive-name pattern first. With the aggregator
@@ -11090,6 +11274,23 @@ request at once; the ledger call stops at its next cancellation check, including
 during CEK execution. The admission slot is held until the ledger call returns,
 so further evaluations receive a busy error and
 canceled requests cannot accumulate workers.
+
+`evaluate_tx` and `calculate_min_utxo` bound the caller-supplied CBOR before
+and while parsing it (`api/mcp/admission.go`). Text longer than the hex
+encoding of 128 KiB is refused before it is decoded, and a payload that decodes
+to more than 128 KiB is refused before it is parsed. The cap is a transaction
+or single-output ceiling about eight times the mainnet `MaxTxSize`, as an
+output sits inside a transaction. The parse itself runs in an admitted worker
+under the request deadline: `evaluate_tx` parses inside its one evaluation slot
+(after the size checks, so a request that finds the slot held gets the busy
+error without being parsed), and `calculate_min_utxo` decodes and sizes its
+output through a four-slot parse pool, refusing with a busy error when it is
+full.
+As with evaluation, a slot is held until its parse returns, so a request that
+times out cannot let parses accumulate. `NewMCPServer` shares the parse pool
+across tools through `readLimits`; the exported `RegisterCardanoTools` creates
+its own.
+
 SQLite tools share four fail-fast execution slots. Arbitrary queries borrow one
 connection, enable `query_only`, and apply 64 KiB value, 64 KiB SQL, and
 32-column limits before execution. Query results are also capped at 1 MiB of
@@ -11100,6 +11301,13 @@ asset rows. A policy or asset with more matching rows returns an explicit
 incomplete error, never a partial supply or holder count. `NewMCPServer` shares
 one slot budget across both tool sets; the exported `RegisterSQLiteTools` and
 `RegisterCardanoTools` each create their own.
+`get_mempool_info` without `tx_hash` lists at most `limit` pending transactions
+(default 10, at most 50) in the pool's own order, read through
+`Mempool.TransactionsBounded`, so only the rows shown are copied. The pending
+count is that call's total, and the buffered volume and saturation come from
+`mempool.Service.SizeBytes`, the maintained retained-byte counter that capacity
+and admission are measured against. A summary therefore costs in proportion to
+the rows shown, not the pool, and takes no execution slot.
 When the metadata store is file-backed SQLite, `NewMCPServer` also installs a
 receiving middleware that refuses every tool call and resource read while the
 store's `-wal` file exceeds 128 MiB, so MCP readers drain and the periodic
@@ -11294,19 +11502,36 @@ Every data route opens a coordinated snapshot through
 reserves a metadata read connection before briefly taking the commit barriers,
 keeping an exhausted-pool wait outside them. Admission remains held for the
 snapshot's lifetime and is capped at one below the provider's read-pool size,
-so client-paced `/matches` streams cannot consume the connection destructive
-rollback needs for operational reads. Kupo admits at most two match streams
-globally and one per remote address, and each stream has a five-minute
-lifetime. Excess streams receive HTTP 429. A 30-second write deadline is also
-re-armed before every response write, so a client that stops reading releases
-its snapshot before the stream lifetime expires.
+so client-paced responses cannot consume the connection destructive rollback
+needs for operational reads. Kupo admits at most three match streams globally
+and one per remote address, so any two clients leave a slot for a third, and
+each stream has a five-minute lifetime. Excess streams receive HTTP 429. A
+30-second write deadline is also re-armed before every response write, so a
+client that stops reading ends its stream before the lifetime expires. For an
+origin allowed by `corsAllowedOrigins`, `Access-Control-Expose-Headers` also
+names `ETag`, `Retry-After`, `X-Block-Header-Hash` and
+`X-Most-Recent-Checkpoint`, the non-safelisted headers Kupo sets, which
+browsers otherwise hide from scripts; other API servers expose only the gRPC
+status headers.
 
-Match results stream in 512-row pages through an ordering cursor, hydrate
-spending details only for the current page, check request cancellation between
-rows, and flush every 128 results. Slot lookups avoid reverse blob iteration:
-metadata uses a forward seek, while non-strict checkpoints binary-search the
-ordered block index bounded by the snapshot tip. This matters for S3 and GCS,
-whose reverse iterators list the complete key prefix before seeking.
+`/matches` follows the upstream Kupo contract: an ordinary request streams the
+complete filtered array, with no Dingo pagination parameters, headers or
+size-based error. Resource use is bounded internally instead. Match results
+are read in 512-row pages through an ordering cursor; each page is fully
+hydrated, spending details included, under its own read snapshot, and that
+snapshot is released before the page is streamed. A slow reader therefore
+holds one Kupo stream slot and at most one hydrated page, never a snapshot or
+a read connection, and database work for match streams is bounded by the
+three stream slots. The first page shares the snapshot that produced the
+`X-Most-Recent-Checkpoint`/`ETag` headers; later pages read later snapshots
+that still exclude outputs created after that tip, so spend status and
+rollbacks are consistent per page rather than across the stream, unlike
+upstream's single transaction. Request cancellation is checked
+between rows and results are flushed every 128. Slot lookups avoid reverse
+blob iteration: metadata uses a forward seek, while non-strict checkpoints
+binary-search the ordered block index bounded by the snapshot tip. This
+matters for S3 and GCS, whose reverse iterators list the complete key prefix
+before seeking.
 
 ### Blockfrost API (`api/blockfrost/`)
 
@@ -11327,9 +11552,23 @@ outputs or returns more than 5,000 distinct assets; a bare payment credential
 passes the same budget into `GetUtxoBalanceByAddress`, which stops its scan at
 the first output or distinct asset past it. The extended route likewise
 rejects more than 1,000 assets to enrich, since each costs three point reads
-and the route has no pagination. Both routes share one
-admission pool (4 active, 2 per client address) that answers 429 with
-`Retry-After` when full.
+and the route has no pagination.
+
+The address total reads the output history, spent outputs included, in keyset
+batches sized so no read passes the budget. A full-address query counts every
+coarse credential candidate examined while completing exact CBOR matching;
+more than 100,000 candidates or returned outputs, or more than 5,000 distinct
+received assets, is rejected with HTTP 400. The account
+address total and account address assets routes pass
+`models.AccountAggregateLimits` to the store: 100,000 UTxO rows, 200,000 asset
+holdings and 5,000 distinct assets, with the transaction count capped at twice
+the UTxO bound. Exceeding any of them is rejected with HTTP 400. The asset
+page count needs the distinct total, so that route reads every live holding up
+to the budget instead of a single page.
+
+The base and extended summaries, the account summary, the address total, and
+the two account aggregate routes share one admission pool (4 active, 2 per
+client address) that answers 429 with `Retry-After` when full.
 
 Blockfrost submission and both evaluation endpoints bound request body reads
 by their existing byte limits and a 15-second read deadline. The deadline is
@@ -11385,7 +11624,10 @@ transaction content/CBOR/metadata/UTxOs/certificates/redeemers/required
 signers, and account/delegation/registration/reward/UTxOs/withdrawals/
 transactions endpoints. It uses an adapter pattern to translate between
 Dingo's internal state and Blockfrost response types and supports
-Blockfrost-style pagination headers. Pool and account list routes reject
+Blockfrost-style pagination headers. `GET /accounts/{stake_address}` passes
+the request context to the adapter and its database reads, and takes a slot
+in the address summary admission pool because it aggregates every live UTxO
+of the credential. Pool and account list routes reject
 out-of-range count and page values before calling the adapter, using the
 shared strict pagination parser (count 1–100, page 1–21474836). The epoch
 next, previous and stakes lists, whose Blockfrost schema defines only count and
@@ -11794,6 +12036,13 @@ it reads, are still charged against the rate and budget, but a full slot cap
 cannot disconnect it. Rollbacks are not charged. A full-chain replay therefore
 still completes within those rates and budget.
 
+`WatchTx` replay is charged to the same `replayLimiter`, per forward block and
+before the block is decoded: a block behind the primary chain tip takes a
+replay slot (until the stream reaches the tip) and spends the client's rate
+and window budget, which `FollowTip` streams from the same host share.
+Rollback and tip blocks are not charged. The `MaxReplayBlocks` start-distance
+check still applies first.
+
 `FollowTip` populates `Timestamp` on a `Reset` block reference and on every
 response's `Tip` from `LedgerState.SlotToTime`. `Timestamp` is a plain proto3
 `uint64` with the same "unknown" ambiguity `height` has (see the UTxO RPC
@@ -11803,13 +12052,27 @@ was produced at the Unix epoch, which a client cannot tell apart from a
 rather than reporting `Timestamp: 0`. A `Reset` to the origin point names no
 block and keeps `Timestamp: 0`.
 
-`WatchTx` retains up to 256 forward blocks in a per-stream undo history. A
-rollback within that history builds its `Undo` responses without reading
-persisted blocks. A deeper rollback walks persisted predecessors synchronously
+`WatchTx` retains up to 256 forward blocks in a per-stream undo history, also
+bounded in bytes: `MaxWatchHistoryBytes` (default 16 MiB) per stream and
+`MaxWatchHistoryBytesTotal` (default 256 MiB) across all streams
+(`api/utxorpc/watch_history.go`). Sizes are protobuf wire sizes, a lower bound
+on heap use. When a limit is reached a stream evicts its own oldest entries,
+and an entry that cannot fit is not retained; entries leave the budget on
+eviction, rollback and stream end. A rollback within the retained history
+builds its `Undo` responses without reading stored blocks. A deeper
+rollback, including one past evicted entries, walks predecessors synchronously
 inside the stream handler, keeping cancellation and conversion errors in the
-request lifecycle; an unexpected persisted-block conversion failure is
-returned as a stream error. That walk reads at most the ledger's security
-parameter plus one blocks, the deepest rollback a follower can need.
+request lifecycle; an unexpected block conversion failure is returned as a
+stream error. The blocks it walks were just rolled back, so a primary-chain
+rollback has already deleted them from the database and left them only in the
+chain manager's block cache. The walk therefore resolves them with
+`LedgerState.BlockByHashIncludingRolledBack` (`Chain.BlockByHash`), which
+checks that cache before the database; `LedgerState.BlockByHash` stays
+database-only for blocks on the current chain. A block that is in neither fails
+the stream rather than ending the walk early, since fewer `Undo` messages than
+the rollback needs would leave the client on the abandoned chain without any
+sign of it. That walk reads at most the ledger's security parameter plus one
+blocks, the deepest rollback a follower can need.
 
 Transaction evaluation (`LedgerState.EvaluateTx`, shared by the Blockfrost and
 UTxO RPC front ends) admits at most `LedgerStateConfig.MaxConcurrentEvaluations`
@@ -12011,12 +12274,12 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
   | `/pool_history` | derived-match | `block_cnt` | Exact value against `reward_pool_input` at parameter epoch K+1. |
   | `/pool_history` | derived-match | `fixed_cost` | Exact value against `reward_pool_input` at stake epoch K-1: a mark snapshot records the pool parameters in force for the epoch it is the basis for. |
   | `/pool_history` | derived-match | `margin` | K-1 values compared as equivalent rational numbers. |
-  | `/pool_history` | derived-match | `member_rewards` | Exact lovelace equality with the sum of K-1 `reward_account_output` member rows the ledger credits (`spendable`, not `guarded`), falling back to `reward_pool_output.member_reward_total` only when that row's `unspendable` is zero. |
+  | `/pool_history` | intentionally-incomparable | `member_rewards` | A cached per-pool total that can include rewards the ledger forfeited and differs between Koios instances; it never decides a verdict. A disagreement with Koios's own per-account sum for the pool and epoch is recorded as `koios_pool_history_inconsistent`. |
   | `/pool_history` | intentionally-incomparable | `pool_fees`, `deleg_rewards` | Koios derives these from an approximation that omits the pledge/owner-stake bonus and rounds components. |
   | `/pool_history` | unsupported | `active_stake_pct`, `saturation_pct`, `epoch_ros` | Dingo has no matching persisted pool aggregate. |
   | `/account_reward_history` | exact-match | `stake_address`, `earned_epoch` | Identifies the `(stake_address, type)` aggregate `CompareAccountEpoch` matches on; response identity must equal the requested epoch. |
   | `/account_reward_history` | exact-match | `amount`, `type` | Exact integer lovelace equality against `reward_account_output.amount`/`reward_type` (and, for `proposal_refund`, against the proposal-deposit credit in `account_reward_delta.amount`) for member/leader/proposal_refund rows, compared as per-`(stake_address, type)` totals summed across pool contributions, and then per pool contribution, so a disagreement that preserves the total (equal and opposite per-pool errors, or a total attributed to one of the pools the other side splits it between) is reported as `account_reward_pool_amount` rather than passing; repeated `proposal_refund` rows sum as separate deposits; a type that is neither modeled nor filtered by `koiosAccountRewardTypesOutOfScope` is `reward_type_unmodeled`, an ERROR rather than a parity failure, so the account check cannot pass. |
-  | `/account_reward_history` | derived-match | `pool_id_bech32` | Decoded to `reward_account_output.pool_key_hash`'s pool ID to identify each contribution to a shared reward account; distinct pools aggregate and are then compared per pool, a repeated same-pool row is `acct_duplicate`. A side that names no pool for a key makes no per-pool statement to disagree with, so the totals are the whole verdict there. |
+  | `/account_reward_history` | derived-match | `pool_id_bech32` | Decoded to `reward_account_output.pool_key_hash`'s pool ID to identify each contribution to a shared reward account; distinct pools aggregate and are then compared per pool, a repeated same-pool row is `acct_duplicate`. A side that names no pool for a key makes no per-pool statement to disagree with, so the totals are the whole verdict there. Member rows are also summed per pool and compared exactly with Dingo's spendable member sum (`reward_account_output` member rows that are `spendable` and not `guarded`, at K-1), in both directions, once the epoch's account coverage is complete. |
   | `/account_reward_history` | unsupported | `spendable_epoch` | Stored for reference only; not currently compared against Dingo's schema. |
   | `/epoch_params` | exact-match | `epoch_no` | The filtered response must contain exactly the requested reporting epoch K. |
   | `/epoch_params` | exact-match | `era` | Dingo's `epoch.era_id` name; the era decides which validation rules run at all. |
@@ -12217,14 +12480,39 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
   `pool_fees` from `fixed_cost`+`margin` alone, omitting the pledge/owner-stake
   bonus the Shelley ledger spec folds into the true leader reward, so it
   systematically diverges from Dingo's exact value for any pool with owner
-  stake. `member_rewards` has no such approximation — it is a direct sum of
-  per-delegator reward amounts — but the Dingo side of it is deliberately not
-  `reward_pool_output.member_reward_total`. `Result.addReward`
-  (`ledger/rewards/rewards.go`) accumulates that column from every member
-  reward the calculation produced, spendable or not, while Koios reports what
-  members actually received, so the two differ by exactly the pool's
-  unspendable member rewards and any pool holding one failed against a node
-  that was right. The row's own `unspendable` column is not a
+  stake. `member_rewards` is not compared against `pool_history` at all.
+  `pool_history.member_rewards` is a cached per-pool total: it can include
+  member rewards the ledger forfeited at application (the stake address was
+  deregistered before the application boundary), and two Koios instances can
+  disagree on it for the same pool and epoch. Koios's per-account
+  `account_reward_history` rows agree across instances and with the ledger's
+  ADA pots, so the reference is the sum of the per-account `member` rows for
+  the pool at reporting epoch K, and `CompareMemberRewards` requires exact
+  lovelace equality with Dingo's spendable member sum in both directions. A
+  reward Dingo forfeits that Koios pays, or pays that Koios does not, is a
+  `value_mismatch`. Widening the check to tolerate the cached value would
+  accept a wrong Dingo forfeiture, so it is not done.
+
+  Because the reference is the per-account rows, the comparison runs in the
+  account phase and only once the epoch's account coverage is complete; the
+  fast aggregate phase produces no `member_rewards` row and cannot strict-halt
+  on the cached value. It compares against the same rows the per-account
+  comparison read: `Cache.GetAccountReference` reads the coverage record and
+  the rows in one read transaction, once per epoch check, so an account fetch
+  committing or downgrading coverage mid-check cannot leave `member_rewards`
+  unexamined while the account scope passes. A failed read of Dingo's pool
+  data, which leaves `member_rewards` unexamined, is a `dingo_db_error` in the
+  account scope as well as the aggregate one. With account checking off (the standalone CLI without
+  `--accounts`), member rewards are therefore not checked at all. Where `pool_history.member_rewards` disagrees with
+  Koios's own per-account sum, the pool is recorded under the informational
+  category `koios_pool_history_inconsistent`, carrying both Koios values. It
+  never fails Dingo and is never used to excuse a Dingo difference.
+
+  The Dingo side is deliberately not `reward_pool_output.member_reward_total`.
+  `Result.addReward` (`ledger/rewards/rewards.go`) accumulates that column
+  from every member reward the calculation produced, spendable or not, while
+  the ledger credits only the rest, so the two differ by exactly the pool's
+  unspendable member rewards. The row's own `unspendable` column is not a
   usable correction, since it accumulates unspendable *leader* rewards too.
 
   The comparable quantity is the sum over the stake epoch's
@@ -12253,7 +12541,7 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
   Before that point Dingo's reward figures are still provisional — the
   spendable flags are not final, so Dingo reads high by forfeitures that have
   not happened yet — and a row it has not written yet is absent for a reason
-  that is not a divergence. Both `ComparePoolEpoch` and `CompareAccountEpoch`
+  that is not a divergence. Both `CompareMemberRewards` and `CompareAccountEpoch`
   fold that into `reference_lag`, for presence and for amount alike.
 
   The wall-clock window alone is not enough because it compares against the
@@ -12418,7 +12706,9 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
 `dingo_db_missing` (epoch/pool row not yet computed by Dingo), `dingo_db_error`
 (DB query failed), `reference_lag` (absence may be transient — either the epoch
 closed within --grace-hours, or the chain tip has not yet reached the boundary
-that applies this stake epoch's rewards; see "Reward timing" below),
+that applies this stake epoch's rewards; see "Reward timing" below; or Koios
+has `/epoch_info` for the epoch but an empty `/pool_history`, recorded as one
+`pool_history` row instead of a `pool_only_dingo` per Dingo pool, at any age),
 `pool_departed` (informational: the pool left the pool set
 at K+1, so its epoch-K block count has no row to live on), `pool_zero_stake`
 (informational: the pool is still registered but its delegated stake reached
@@ -12429,7 +12719,10 @@ per-account categories: `acct_only_dingo`,
 reward_type, pool) row within one side — a data-integrity problem, not a
 value disagreement; the same (stake_address, reward_type) from two
 different pools is a shared reward account, which aggregates instead),
-`reward_type_unmodeled` (ERROR: a Koios reward type with no model here, so
+`koios_pool_history_inconsistent` (informational: Koios's own
+`pool_history.member_rewards` disagrees with the sum of its per-account member
+rows for the pool and epoch; Dingo is judged against the per-account sum
+alone), `reward_type_unmodeled` (ERROR: a Koios reward type with no model here, so
 the account's rewards were not fully validated and the epoch cannot pass),
 `acct_zero_reward_row` (informational: a reward row worth zero
 lovelace present on one side only — nothing was credited either way, so the
@@ -12667,6 +12960,16 @@ second sync:
     transient failure retries only the unfinished pools instead of restarting
     a several-hundred-pool epoch from zero. Every retry is logged with the
     epoch, failed attempt, next attempt, and error.
+  - **Unpublished pool history refetch.** A `koios_epoch_info` row makes
+    `GetUncachedEpochs` treat an epoch as cached even when Koios returned no
+    `/pool_history` rows for it. `fetchPoolsIfNeeded` therefore fetches such an
+    epoch again when `Cache.EpochAwaitingPoolHistory` finds a post-staking
+    epoch with no `koios_pool_epoch` rows and a stored `pool_history`
+    `reference_lag` mismatch. Each refetch costs one `/pool_history` request
+    per pool, so it is spaced per epoch by
+    `ObserverConfig.PoolHistoryRefetchDelay` (one hour by default). The spacing
+    is held in memory, so a restart allows one immediate refetch. A refetch
+    failure goes through `reportError` like any other fetch failure.
   - **Decoupled aggregate/account queues.** Two independent
     background goroutines, each with their own pending set and wake channel,
     drain `Observer.pending`/`wake` (`run`, always started) and
@@ -13123,9 +13426,10 @@ never the reverse.
   skips the per-account comparison for that epoch entirely — mirroring how a
   missing `koios_totals` row already gates `CompareEpochTotals`. This is the
   invariant the chunked fetch must never violate: no code path may ever
-  set `complete = true` after a partial fetch. `Cache.GetAccountCoverage`
-  propagates `sql.ErrNoRows` unwrapped for "no fetch attempted yet" — every
-  caller (`compareEpochAccounts`, `Observer.fetchAccountsIfNeeded`) treats
+  set `complete = true` after a partial fetch. `Cache.GetAccountCoverage` and
+  `Cache.GetAccountReference` propagate `sql.ErrNoRows` unwrapped for "no
+  fetch attempted yet" — every caller (`compareEpochAccounts`,
+  `Observer.fetchAccountsIfNeeded`) treats
   that specific error as incomplete coverage, but any other error from the
   query is a genuine cache/DB failure and is surfaced as `dingo_db_error`
   (or a propagated error, for the observer) rather than being conflated with
@@ -13562,8 +13866,69 @@ Koios. The UTxO side is a running reconstruction seeded from Dingo at the
 start point and advanced by Koios's own `/tx_info` answers for every
 transaction on the chain, so it stays independent of Dingo after its seed; a
 rollback re-baselines it and marks that epoch's UTxO verdict "not run" rather
-than reporting a comparison that would trivially match. `--koios-cache-path`
-makes those lookups cache-first against a `koios-parity` `cache.db`, which
+than reporting a comparison that would trivially match. A `/tx_info` chunk
+that fails only because Koios has no result yet for a hash, as happens at the
+tip before Koios has indexed a block Dingo already served, is fetched again,
+whole, after waits of 10s, 20s and 40s; a hash still missing after the last
+wait fails its chunk, which re-baselines the reconstruction and marks the
+epoch "not run" as any other `/tx_info` failure does. Each epoch's
+comparisons run on their own LocalStateQuery connections; one that dies
+during Acquire or a query is redialed and the check repeated, a bounded number
+of times, and the UTxO comparison only reads the reconstruction, so a retry
+cannot apply it twice. An epoch check's Acquire that Dingo refuses as too old
+is retried within the same bound: Dingo also gives that answer when it cannot
+open a read snapshot within its wait, as under commit contention at an epoch
+boundary, and a point still refused after the bound is reported as not run
+with the exhausted retries named. Every connection `Dial` opens enables
+ingress backpressure for LocalStateQuery, so a whole-UTxO reply larger than
+the muxer's 64MiB connection ingress budget is read at the client's pace
+instead of overflowing it and closing the connection. A session that ends
+for any reason, including Dingo closing the connection, is resumed from the
+last block processed after a backoff; only interruption ends the run. The
+rollback that opens a resumed session lands on the block already processed, so it changes nothing
+and keeps the comparison. A "not run" verdict names its cause: a failed
+`/tx_info` fetch, a rollback and its slot, or a baseline captured at that
+boundary. The stake comparison fetches each pool's `/pool_history`
+independently, so one failed request no longer abandons the epoch: the
+failed pools are fetched again after waits of 30s, 60s and 120s (permanent
+rejections are not), and pools still unfetched after the last round make the
+stake verdict incomplete, naming them, while a divergence found on any pool
+that did fetch is still reported. The shared Koios client's own timeouts and
+retries are unchanged; the session ending stops the rounds. Koios answers
+`/epoch_info` for an epoch days before it publishes that epoch's
+`/pool_history`, so when no pool Dingo reports has a row for the epoch and
+Koios's newest row for the missing pool with the most stake is for an earlier
+epoch, the stake verdict is one incomplete fault rather than one mismatch per
+pool. A pool missing a row while any other pool has one, or one Koios has no
+row for at any epoch, is still a mismatch, and the epoch-total comparison runs
+either way.
+
+Every session opens with a rollback to the origin, which Dingo refuses to
+acquire; the origin is epoch 0, so the tool does not ask. Each block's epoch
+is resolved locally from Dingo's era history (`HardForkEraHistoryQuery`, read
+on a connection acquired at the volatile tip and cached, refetched only when a
+slot falls outside it), so no block's point is acquired just to learn its
+epoch. When the history is unavailable or does not cover a slot, the tool
+falls back to acquiring the point and asking `GetEpochNo`, logging the
+fallback once. Byron blocks (preprod, epochs 0-3) are never checked -- there
+are no protocol parameters or stake there, and Koios holds none either -- so
+they are skipped by era, still feed the UTxO reconstruction, and validation
+starts, with a log line, at the first Shelley-era epoch. In the fallback path
+the tool also skips blocks Dingo refuses as too old until validation starts:
+the first post-Byron block whose epoch resolves, by the era history or by
+Dingo. Any later refusal is a real failure that ends the session. Every
+query the ChainSync callbacks make -- the epoch lookup, the UTxO baseline
+captures, the `/tx_info` flushes, and the protocol-parameter, stake and UTxO
+checks -- runs under a per-session context, so its connections close when the
+session ends and the run resumes instead of waiting on a query Dingo never
+answers. The epoch lookup is also bounded at five minutes, since an idle
+session reports no error to end it; the whole-UTxO queries carry no deadline.
+An epoch whose checks a session end cuts off is not reported: buffered
+`/tx_info` hashes stay unapplied, the comparison neither taints nor
+re-baselines the reconstruction, and the checks run again at that epoch's next
+block on the resumed session.
+
+`--koios-cache-path` makes those lookups cache-first against a `koios-parity` `cache.db`, which
 may be the one a dingo instance's own embedded observer is writing, provided
 its recorded Koios API root matches `--koios-base-url`.
 
@@ -13579,6 +13944,7 @@ internal/nodeparity/       # shared library, untagged and importable
   watch.go                  # Watcher, WatchBlocks: persistent per-node ChainSync subscription with reconnect (full mode)
   incremental.go            # IncrementalCursor, RunIncremental: sequential per-block UTxO-delta orchestration (incremental mode)
   from_genesis.go           # RunFromGenesis: reconnecting from-genesis ChainSync walk, per-epoch checks (Koios mode)
+  epoch_oracle.go           # epochOracle: slot-to-epoch resolution from Dingo's cached era history
   koios_check.go            # CheckProtocolParams/CheckStakeDistribution/UTxOChanges: the Koios-backed comparisons
 
 cmd/node-parity/           # thin Cobra CLI wrapper: 'check', 'watch' and 'from-genesis' are the subcommands
@@ -14571,7 +14937,24 @@ signing/storage work and response growth, and takes one of
 `BarkConfig.ArchiveMaxConcurrentFetches` slots (`barkArchiveMaxConcurrentFetches`,
 default 16, negative rejected) before touching storage. A request that finds no
 free slot is refused with `RESOURCE_EXHAUSTED` rather than queued, so the work an
-unauthenticated caller can have in flight is bounded by configuration, and every
+unauthenticated caller can have in flight is bounded by configuration. The
+sustained rate is bounded separately (`bark/archive_budget.go`): a hash+slot
+reference is served without reading any local index, so each reference, present
+or not, costs a cloud lookup, and the concurrency cap alone does not limit
+repetition. `FetchBlock` therefore charges its whole batch against a
+per-caller token bucket (`BarkConfig.ArchiveCallerLookupsPerSecond`,
+`barkArchiveCallerLookupsPerSecond`, default 50) and a global bucket
+(`BarkConfig.ArchiveLookupsPerSecond`, `barkArchiveLookupsPerSecond`, default
+200) before acquiring the database, and refuses the batch with
+`RESOURCE_EXHAUSTED` when either is short; negative values are rejected. A
+caller is the connection's TCP peer address with the port dropped, an IPv6 peer
+reduced to its /64 so one subscriber prefix cannot mint an allowance per
+address. Bark reads no forwarding headers, so callers behind one proxy share an
+allowance, and a Dingo node reading expired history through `barkBaseUrl` is a
+single caller whose archive reads beyond its allowance fail rather than wait.
+Each bucket holds at least one maximum-size batch, a global refusal does not
+charge the caller, and the per-caller table is capped at 4096 entries with an
+overflow bucket beyond that. Every
 height lookup is a bounded probe rather than a scan of the index; there is no
 setting that leaves an unbounded cloud scan reachable from ArchiveService. The HTTP server applies a 60-second
 request read timeout but no write timeout, so slow request bodies are bounded
@@ -14702,7 +15085,19 @@ terminal status is published only after the next operation can start.
 `StreamOperationProgress` is a plain poll loop over the
 operation's in-memory state (no push notification from the goroutine to a
 concurrently open stream) — adequate given operations run for seconds to
-hours, far coarser than the poll interval.
+hours, far coarser than the poll interval. The handler admits at most 32
+progress streams globally and four for one verified client-certificate
+fingerprint. It rejects an excess stream before allocating its ticker. An
+admitted stream ends when the operation becomes terminal, its request context
+is cancelled, or its 15-minute lifetime expires; a client following a longer
+operation reconnects to renew the stream. The Bark HTTP middleware supplies a
+request-local `http.ResponseController.SetWriteDeadline` setter, and the
+handler installs the same absolute deadline before its first send. A client
+that stops reading therefore cannot keep `stream.Send` blocked beyond the
+lifetime. A missing or unsupported setter fails the stream before its first
+send, and the deadline is cleared as the handler exits. Admission, release,
+and rejection logs include the fingerprint plus the active global and
+per-client counts.
 
 Because `GetRestoreStatus`/`GetTruncateStatus` need to stay pollable for the
 whole duration of a live Restore/Truncate — which quiesces everything else on
@@ -15155,6 +15550,16 @@ Finishing a transition, like publishing a snapshot, wakes callers that wait to
 retry a non-current session; forged-block self-validation is one. Starting a
 transition also waits for any commit callback already holding the mutex, so a
 writer cannot make database state durable midway through that callback.
+
+A header-crypto generation pin (`PinHeaderCryptoVerificationGeneration`) is a
+read lock on the same mutex, and no path may take it while already holding
+one: Go's `RWMutex` admits no new reader once a writer waits, so a second pin
+blocks behind a queued transition that is itself waiting for the first. The
+ChainSync admission callback runs under the ledger's pin, so
+`ChainSelector.CommitPeerTipAdmissionPinned`, and a selector commit that took
+its own admission pin, pass that pin to every peer-tip update, peer removal,
+and chain-selection evaluation they trigger instead of re-pinning the current
+generation.
 
 ## Configuration
 
@@ -17541,11 +17946,19 @@ write amplification was that the second condition alone used to flush
 immediately, even with only one or two blocks gathered: during bulk replay a
 momentary `ErrIteratorChainTip` commonly means the goroutine appending blocks
 to `ls.chain` is a beat behind this reader, not that the chain stopped
-growing. `ledgerReadChainIterator` now gives that case a short bounded chance
-to catch up — up to `gatherCoalesceMaxAttempts` retries (default 10) spaced
-`gatherCoalesceRetryInterval` apart (default 2ms) — but only while `rawBatch`
-already holds at least one real block, the node has not reached tip since boot
-(`ls.reachedTip`), and the last gathered slot is not near the upstream tip.
+growing: blockfetch exposes received blocks to the chain in groups of
+`blockfetchCommitBatchSize` (8), so the reader meets one gap per group, and a
+pass that flushed at each gap committed one group per SQLite transaction. Each
+transaction rewrites the hot pages of every index it touches into the WAL, so
+the number of transactions, not the data, set the write volume.
+`ledgerReadChainIterator` now gives that case a bounded chance to catch up —
+up to `gatherCoalesceMaxAttempts` retries (default 500) spaced
+`gatherCoalesceRetryInterval` apart (default 10ms), a budget for the whole
+gather pass rather than for each gap, so about five seconds per pass, with
+any single gap capped at `gatherCoalesceMaxGapAttempts` retries (default 200,
+about two seconds) so blocks the chain is not following up are applied
+promptly — but only while `rawBatch` already holds at least one real block,
+the node has not reached tip since boot (`ls.reachedTip`), and the last gathered slot is not near the upstream tip.
 Once at or near the live upstream tip, the wait is skipped entirely: a
 solitary new block still commits immediately, matching the pre-existing
 latency behavior.
@@ -17554,7 +17967,7 @@ latency behavior.
 `UpstreamTipSlot` returns 0 whenever no live upstream connection is selected,
 and the near-tip test folds an unknown upstream into "not near".
 Without the `reachedTip` term, a caught-up node that merely lost its upstream
-would resume paying this wait per gap, gather lock held, including for its own
+would resume paying this wait on every pass, gather lock held, including for its own
 forged blocks. `reachedTip` latches the first time the node reaches the
 stability window and never clears, so the two terms together confine the wait
 to initial catch-up.
@@ -17568,12 +17981,14 @@ comment) — releasing it here would let a rollback's write lock be granted,
 see an empty `blockPipeline` via `drainBlockPipelineBeforeRollback`, and
 proceed before this pass's already-gathered blocks are submitted, reopening
 the exact race `blockPipelineGatherMutex` exists to close. The bound on that
-wait is per gap rather than per gather pass — the attempt counter is reset
-each time a block is appended — so a rollback blocked on the write lock sleeps
-up to `batchSize*gatherCoalesceMaxAttempts*gatherCoalesceRetryInterval` (about
-1s at the defaults) in the worst case, and about
-`batchSize*gatherCoalesceRetryInterval` (100ms) when each gap resolves on its
-first retry.
+wait is per gather pass — the attempt counter accumulates across every gap the
+pass meets — so a rollback blocked on the write lock sleeps up to
+`gatherCoalesceMaxAttempts*gatherCoalesceRetryInterval` (about 5s at the
+defaults) in the worst case. A per-gap budget would either flush each
+blockfetch group on its own or, raised far enough to bridge the groups, let
+one pass wait `batchSize` times as long.
+`TestLedgerReadChainIteratorBoundsCoalesceWaitPerPass` pins the per-pass
+accounting.
 
 Those figures cover the sleeping only, not the whole hold. Every retry returns
 to the top of the inner loop and re-probes with `iter.Next(false)`, and that
@@ -17583,14 +17998,14 @@ is the lock the block-append path holds to advance the tip —
 `addBlockInternal` across one `addBlockLocked`, `addRawBlocks` across a whole
 `blockImportBatchSize` batch inside its transaction — so the contending writer
 is the very goroutine this wait exists to wait for. The full worst case adds up
-to `batchSize*gatherCoalesceMaxAttempts` such acquisitions, each bounded by the
+to `gatherCoalesceMaxAttempts` such acquisitions per pass, each bounded by the
 longest append critical section rather than by any coalescing setting.
 
 That probe cannot be hoisted out of the span the way the near-tip terms below
 were. It is not a term the span incidentally evaluates: re-probing the iterator
 is the operation the retry performs, and the gather lock cannot be released
 around it without reopening the rollback race this wait is written to avoid.
-`TestLedgerReadChainIteratorBoundsChainProbesPerCoalesceGap` pins the
+`TestLedgerReadChainIteratorBoundsChainProbesPerCoalescePass` pins the
 multiplier instead: a gap that never resolves costs exactly
 `gatherCoalesceMaxAttempts+1` probes, and every one of them runs with the
 gather read lock held.
@@ -17765,8 +18180,10 @@ and a re-sync requested, since the wait cannot end while nothing fetches the
 queued blocks. The discarded headers' invalidation is published after the ledger
 locks are released, so their Leios announcements and derived votes are removed
 without waiting for another chain event. Stored blocks the ledger has not
-applied yet (`chainAheadOfAppliedTip`) also count as local work, so admission
-keeps waiting for the snapshot publication their application brings rather
+applied yet (`chainAheadOfAppliedTip`: a primary chain tip in a later slot
+than the applied tip, or in the same slot under another hash; a chain tip in an
+earlier slot is a rollback the ledger has yet to follow and does not count)
+also count as local work, so admission keeps waiting for the snapshot publication their application brings rather
 than closing a connection that work may need, such as one serving endorser
 block backfill. If no fetch is active, no queued headers can be fetched and
 nothing stored is left to apply, admission rechecks the forecast and pending

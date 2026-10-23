@@ -230,3 +230,49 @@ func TestPeerHeaderForkPathCacheSurvivesTipOnlyPublication(t *testing.T) {
 	require.False(t, found)
 	require.ErrorIs(t, err, errHeaderVerificationDeferred)
 }
+
+// TestPeerChainSelectionEpochNonceTreatsQueuedParentAsLocalChain covers the
+// first headers of an epoch whose nonce the ledger has not computed yet. Such
+// a header is deferred, and when it extends the local chain it is queued for
+// block-fetch but kept out of the peer's observed history. Its child therefore
+// has no recorded ancestry; because the parent is queued on the local chain
+// the child is a linear extension, not a fork, and must fall through to local
+// verification (which defers it the same way) rather than be withheld. A
+// withheld child is dropped silently, every later header from the peer is
+// deferred behind it, and the queue never fills enough to start block-fetch.
+func TestPeerChainSelectionEpochNonceTreatsQueuedParentAsLocalChain(
+	t *testing.T,
+) {
+	t.Parallel()
+	f := newForkPathFreshnessFixture(t, 2)
+	require.NoError(
+		t,
+		f.ls.chain.AddBlockHeader(context.Background(), f.headers[0]),
+	)
+	snapshot, _ := f.ls.loadConsensusAndTipSnapshots()
+
+	_, _, fork, err := f.ls.peerChainSelectionEpochNonce(
+		ouroboros.ConnectionId{},
+		f.headers[1],
+		snapshot,
+	)
+	require.NoError(t, err)
+	require.False(t, fork)
+}
+
+// TestPeerChainSelectionEpochNonceWithholdsUnknownParent keeps the other half:
+// a header whose parent is neither queued nor in the peer's history still
+// cannot be authenticated for chain selection.
+func TestPeerChainSelectionEpochNonceWithholdsUnknownParent(t *testing.T) {
+	t.Parallel()
+	f := newForkPathFreshnessFixture(t, 2)
+	snapshot, _ := f.ls.loadConsensusAndTipSnapshots()
+
+	_, _, fork, err := f.ls.peerChainSelectionEpochNonce(
+		ouroboros.ConnectionId{},
+		f.headers[1],
+		snapshot,
+	)
+	require.ErrorIs(t, err, ErrHeaderVerificationWithheld)
+	require.False(t, fork)
+}

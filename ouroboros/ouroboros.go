@@ -57,6 +57,12 @@ import (
 // to keep defaults consistent.
 const defaultMaxChainsyncClients = chainsync.DefaultMaxClients
 
+// defaultCorroborationHoldTimeout bounds a Genesis corroboration hold. A held
+// roll-forward callback stops its protocol's receive loop, and gouroboros
+// fails a pipelined client that consumes no reply within its CanAwait timeout
+// (10s), so the bound stays well under it.
+const defaultCorroborationHoldTimeout = 5 * time.Second
+
 // Mempool is the protocol-facing subset of the backend-neutral mempool. Keeping
 // this interface local prevents networking from depending on FIFO internals.
 type Mempool interface {
@@ -119,10 +125,17 @@ type Ouroboros struct {
 	leiosValidationCtx      context.Context
 	leiosValidationCancel   context.CancelFunc
 	leiosValidationSlots    chan struct{}
-	leiosValidationWG       sync.WaitGroup
-	leiosValidationMu       sync.Mutex
-	leiosValidationClosed   bool
-	config                  OuroborosConfig
+	// localTxSubmissionSlots is the in-flight LocalTxSubmission validation
+	// budget, shared by all connections.
+	localTxSubmissionSlots chan struct{}
+	// localTxSubmissionConnDoneFunc replaces the connection manager lookup of
+	// a connection's teardown signal. Test-only seam: the manager can only
+	// register a live connection.
+	localTxSubmissionConnDoneFunc func(ouroboros.ConnectionId) <-chan struct{}
+	leiosValidationWG             sync.WaitGroup
+	leiosValidationMu             sync.Mutex
+	leiosValidationClosed         bool
+	config                        OuroborosConfig
 	// registerer wraps config.PromRegistry and tracks every collector this
 	// instance registers, so Close can hand them all back. See lifecycle.go.
 	registerer *trackingRegisterer
@@ -244,6 +257,9 @@ type Ouroboros struct {
 		gledger.BlockHeader,
 	) (uint64, error)
 	chainsyncScheduleAt chainsyncScheduleAtFunc
+	// corroborationHoldTimeout bounds how long a roll-forward callback holds
+	// a header for Genesis corroboration.
+	corroborationHoldTimeout time.Duration
 	// chainsyncArrivalNow is an instance-local clock seam for deterministic
 	// arrival-order tests. Production instances use time.Now.
 	chainsyncArrivalNow      func() time.Time
@@ -261,7 +277,8 @@ type Ouroboros struct {
 	// which a deferred header last forced an immediate re-intersection.
 	deferredHeaderIdleRetry map[ouroboros.ConnectionId][]byte
 	// acceptedHeaderMu guards acceptedHeaderTips, the hash of the last header
-	// from each connection that passed producer-authorization gating. Ledger
+	// from each connection that extended the local chain and that chain
+	// selection accepted; any other outcome clears the entry. Ledger
 	// admission is asynchronous, so a pipelined child can arrive before its
 	// parent reaches the queue.
 	acceptedHeaderMu   sync.Mutex
@@ -521,6 +538,18 @@ type OuroborosConfig struct {
 		blockNumber uint64,
 		appliedTip func() ochainsync.Tip,
 	) error
+	// ChainsyncAwaitCorroboration holds a roll-forward that ChainsyncApplyEligible
+	// denied, while the denial is only a lack of Genesis corroboration, and
+	// reports whether the header may then be applied. The peer's cursor stays
+	// on the header instead of moving past one the ledger never receives. It
+	// returns false without waiting for any other denial, and an error if ctx
+	// is cancelled first. The roll-forward bounds the hold; when it expires
+	// the header is withheld and the connection re-intersects, which delivers
+	// it again. When nil, a denied header is withheld at once.
+	ChainsyncAwaitCorroboration func(
+		ctx context.Context,
+		connId ouroboros.ConnectionId,
+	) (bool, error)
 	// ChainsyncObserveAwaitReply records the peer's explicit protocol-idle
 	// frontier. It runs after gouroboros fences preceding pipelined updates.
 	ChainsyncObserveAwaitReply func(ouroboros.ConnectionId, ocommon.Point)
@@ -729,11 +758,15 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 		leiosValidationCtx:      leiosValidationCtx,
 		leiosValidationCancel:   leiosValidationCancel,
 		leiosValidationSlots:    make(chan struct{}, 2),
-		mempool:                 cfg.Mempool,
-		chainsyncState:          cfg.ChainsyncState,
-		peerGov:                 cfg.PeerGov,
-		blockFetchStarts:        make(map[blockFetchKey]time.Time),
-		blockFetchDoneEarly:     make(map[blockFetchKey]error),
+		localTxSubmissionSlots: make(
+			chan struct{},
+			localTxSubmissionMaxInFlight,
+		),
+		mempool:             cfg.Mempool,
+		chainsyncState:      cfg.ChainsyncState,
+		peerGov:             cfg.PeerGov,
+		blockFetchStarts:    make(map[blockFetchKey]time.Time),
+		blockFetchDoneEarly: make(map[blockFetchKey]error),
 		localstatequeryAcquiredPoints: make(
 			map[ouroboros.ConnectionId]ledger.QueryPoint,
 		),
@@ -749,8 +782,9 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 		chainsyncStats: make(
 			map[ouroboros.ConnectionId]*chainsyncPeerStats,
 		),
-		chainsyncScheduleAt: defaultChainsyncScheduleAt,
-		chainsyncArrivalNow: time.Now,
+		chainsyncScheduleAt:      defaultChainsyncScheduleAt,
+		corroborationHoldTimeout: defaultCorroborationHoldTimeout,
+		chainsyncArrivalNow:      time.Now,
 		futureHeaderResyncs: make(
 			map[ouroboros.ConnectionId]*scheduledChainsyncResync,
 		),

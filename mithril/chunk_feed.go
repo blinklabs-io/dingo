@@ -508,6 +508,9 @@ func (f *ChunkFeed) start(
 	workers := f.workerCount(cfg)
 	f.cfg.immutableDigests = f.digests
 	f.inflight, f.weight = immutableDownloadBudget(f.cfg)
+	if f.cfg.decoderBudget == nil {
+		f.cfg.decoderBudget = newDecoderMemoryBudget()
+	}
 
 	feedCtx, cancel := context.WithCancelCause(ctx)
 	f.ctx, f.cancel = feedCtx, cancel
