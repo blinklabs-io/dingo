@@ -139,14 +139,18 @@ type databaseServiceHandler struct {
 	databaseconnect.UnimplementedDatabaseServiceHandler
 	bark *Bark
 
-	mu                           sync.Mutex
-	operations                   map[string]*operation
-	busy                         bool
-	diagnostic                   chan struct{}
-	activeProgressStreams        int
-	progressStreamsByFingerprint map[string]int
-	progressStreamLifetime       time.Duration
-	catalogErr                   error
+	mu sync.Mutex
+	// Serializes cloud scans and protects their retry state without holding the
+	// lifecycle catalog gate during provider I/O.
+	catalogReconciliationGate     chan struct{}
+	catalogReconciliationGateOnce sync.Once
+	operations                    map[string]*operation
+	busy                          bool
+	diagnostic                    chan struct{}
+	activeProgressStreams         int
+	progressStreamsByFingerprint  map[string]int
+	progressStreamLifetime        time.Duration
+	catalogErr                    error
 	// catalogCloudDestination is set only after this handler reconciles the
 	// configured provider into the catalog. An empty value restricts available
 	// pages to the local index even if an older cloud source remains on disk.
@@ -272,6 +276,55 @@ func (h *databaseServiceHandler) initializeSnapshotCatalog(ctx context.Context) 
 }
 
 func (h *databaseServiceHandler) reconcileCloudSnapshotCatalog(
+	ctx context.Context,
+) error {
+	if err := h.lockCatalogReconciliation(ctx); err != nil {
+		return err
+	}
+	defer h.unlockCatalogReconciliation()
+	return h.reconcileCloudSnapshotCatalogLocked(ctx)
+}
+
+func (h *databaseServiceHandler) reconcileCloudSnapshotCatalogIfNeeded(
+	ctx context.Context,
+) (string, error) {
+	if err := h.lockCatalogReconciliation(ctx); err != nil {
+		return "", err
+	}
+	defer h.unlockCatalogReconciliation()
+
+	destination := h.bark.config.SnapshotCloudDestination
+	if h.catalogCloudDestination != destination &&
+		h.catalogRetry.allow(destination, time.Now()) {
+		if err := h.reconcileCloudSnapshotCatalogLocked(ctx); err != nil {
+			return h.catalogCloudDestination, err
+		}
+	}
+	return h.catalogCloudDestination, nil
+}
+
+func (h *databaseServiceHandler) lockCatalogReconciliation(
+	ctx context.Context,
+) error {
+	h.catalogReconciliationGateOnce.Do(func() {
+		h.catalogReconciliationGate = make(chan struct{}, 1)
+	})
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	select {
+	case h.catalogReconciliationGate <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (h *databaseServiceHandler) unlockCatalogReconciliation() {
+	<-h.catalogReconciliationGate
+}
+
+func (h *databaseServiceHandler) reconcileCloudSnapshotCatalogLocked(
 	ctx context.Context,
 ) error {
 	b := h.bark
@@ -952,15 +1005,12 @@ func (h *databaseServiceHandler) mergedSnapshotCatalogPage(
 			fmt.Errorf("initialize snapshot catalog: %w", h.catalogErr),
 		)
 	}
-	destination := h.bark.config.SnapshotCloudDestination
-	if h.catalogCloudDestination != destination &&
-		h.catalogRetry.allow(destination, time.Now()) {
-		if err := h.reconcileCloudSnapshotCatalog(ctx); err != nil {
-			h.bark.config.Logger.Warn(
-				"cloud snapshot catalog reconciliation failed",
-				"component", "bark", "error", err,
-			)
-		}
+	destination, err := h.reconcileCloudSnapshotCatalogIfNeeded(ctx)
+	if err != nil {
+		h.bark.config.Logger.Warn(
+			"cloud snapshot catalog reconciliation failed",
+			"component", "bark", "error", err,
+		)
 	}
 	cursor, err := decodeSnapshotPageToken(pageToken)
 	if err != nil {
@@ -973,7 +1023,7 @@ func (h *databaseServiceHandler) mergedSnapshotCatalogPage(
 
 	items, nextCursor, err := lifecycle.ListAvailableSnapshotPageContext(
 		ctx, h.bark.config.SnapshotDir,
-		h.catalogCloudDestination, size, cursor,
+		destination, size, cursor,
 	)
 	if err != nil {
 		if ctxErr := connectContextError(err); ctxErr != nil {

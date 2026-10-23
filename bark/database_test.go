@@ -570,9 +570,11 @@ var (
 )
 
 type barkRecoveringCatalogDestination struct {
-	dir       string
-	failList  *atomic.Bool
-	listCalls *atomic.Int64
+	dir         string
+	failList    *atomic.Bool
+	listCalls   *atomic.Int64
+	listEntered chan struct{}
+	listRelease <-chan struct{}
 }
 
 func (d *barkRecoveringCatalogDestination) UploadDir(
@@ -606,6 +608,16 @@ func (d *barkRecoveringCatalogDestination) ListSnapshotCatalog(
 ) ([]lifecycle.SnapshotEntry, error) {
 	if d.listCalls != nil {
 		d.listCalls.Add(1)
+	}
+	if d.listEntered != nil {
+		d.listEntered <- struct{}{}
+	}
+	if d.listRelease != nil {
+		select {
+		case <-d.listRelease:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
 	}
 	if d.failList.Load() {
 		return nil, errors.New("provider unavailable")
@@ -934,6 +946,88 @@ func TestListAvailableSnapshotsRetriesIncompleteStartupListing(t *testing.T) {
 	require.Len(t, resp.Msg.GetSnapshots(), 1)
 	require.Equal(t, "after-recovery", resp.Msg.GetSnapshots()[0].GetSnapshotId())
 	require.EqualValues(t, 2, listCalls.Load())
+}
+
+func TestListAvailableSnapshotsSerializesCloudReconciliation(t *testing.T) {
+	snapshotDir := t.TempDir()
+	cloudRoot := t.TempDir()
+	var failList atomic.Bool
+	failList.Store(true)
+	var listCalls atomic.Int64
+	var provider *barkRecoveringCatalogDestination
+	registry := lifecycle.NewDestinationRegistry()
+	registry.Register("serialcatalog", func(uri *url.URL) (lifecycle.CloudDestination, error) {
+		provider = &barkRecoveringCatalogDestination{
+			dir:       filepath.Join(cloudRoot, strings.TrimPrefix(uri.Path, "/")),
+			failList:  &failList,
+			listCalls: &listCalls,
+		}
+		return provider, nil
+	})
+	const cloudDest = "serialcatalog://bucket/snapshots"
+	trustKeyFile := testSnapshotTrustKeyFile(t)
+	b, err := NewBark(BarkConfig{
+		DB: newTestDB(t), Lifecycle: dblifecycle.NewService(&config.Config{
+			DatabaseLifecycle: config.DatabaseLifecycleConfig{SnapshotTrustKeyFile: trustKeyFile},
+		}, registry, nil),
+		SnapshotDir: snapshotDir, SnapshotCloudDestination: cloudDest,
+		DestinationRegistry: registry, Port: 1,
+	})
+	require.NoError(t, err)
+	h := newDatabaseServiceHandler(t.Context(), b)
+	require.EqualValues(t, 1, listCalls.Load(), "startup scan should have failed once")
+
+	listEntered := make(chan struct{}, 2)
+	listRelease := make(chan struct{})
+	provider.listEntered = listEntered
+	provider.listRelease = listRelease
+	h.catalogRetry.nextAttempt = time.Time{}
+	closed := false
+	defer func() {
+		if !closed {
+			close(listRelease)
+		}
+	}()
+	list := func() error {
+		_, err := h.ListAvailableSnapshots(
+			t.Context(),
+			connect.NewRequest(&databasev1alpha1.ListAvailableSnapshotsRequest{}),
+		)
+		return err
+	}
+	firstDone := make(chan error, 1)
+	go func() { firstDone <- list() }()
+	select {
+	case <-listEntered:
+	case <-time.After(time.Second):
+		t.Fatal("first reconciliation did not reach the provider")
+	}
+
+	secondStarted := make(chan struct{})
+	secondDone := make(chan error, 1)
+	go func() {
+		close(secondStarted)
+		secondDone <- list()
+	}()
+	select {
+	case <-secondStarted:
+	case <-time.After(time.Second):
+		t.Fatal("second listing did not start")
+	}
+	var concurrentProviderCall bool
+	select {
+	case <-listEntered:
+		concurrentProviderCall = true
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(listRelease)
+	closed = true
+	require.NoError(t, <-firstDone)
+	require.NoError(t, <-secondDone)
+	require.False(t, concurrentProviderCall,
+		"concurrent listings must not start duplicate provider scans")
+	require.EqualValues(t, 2, listCalls.Load(),
+		"the second listing must observe retry backoff after the first scan fails")
 }
 
 func TestListAvailableSnapshotsRetriesStartupConstructorFailure(t *testing.T) {
