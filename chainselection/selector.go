@@ -2111,8 +2111,8 @@ func (cs *ChainSelector) checkPeerTipPlausibleWithClaimsTrackedLocked(
 		// delta from the stale reference exceeds K looks
 		// implausible, but the network legitimately moved on.
 		// Keep the peer-relative K bound while the reference is within
-		// K of the local tip. A farther reference can be stale during
-		// snapshot catch-up, but only within the local 2*K ceiling.
+		// K of the local tip. A farther reference can be stale while the
+		// local tip catches up, however far ahead of the local tip it is.
 		// A corroborated far claim is this connection's own reference, as a
 		// known peer's previous frontier is in Case 1. The frontier that
 		// corroborated it may sit up to K below it, so the Case 2 ceiling

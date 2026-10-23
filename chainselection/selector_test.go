@@ -6097,7 +6097,11 @@ func TestStagedFarFrontierCatchUpWithReferenceAheadOfLocalTip(t *testing.T) {
 		{name: "below catch-up ceiling", referenceOffset: 3, accepted: true},
 		{name: "at catch-up ceiling", referenceOffset: 4, accepted: true},
 		{name: "above catch-up ceiling", referenceOffset: 5, accepted: true},
-		{name: "far above catch-up ceiling", referenceOffset: 30, accepted: true},
+		{
+			name:            "far above catch-up ceiling",
+			referenceOffset: 30,
+			accepted:        true,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
