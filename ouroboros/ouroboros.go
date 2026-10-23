@@ -277,7 +277,8 @@ type Ouroboros struct {
 	// which a deferred header last forced an immediate re-intersection.
 	deferredHeaderIdleRetry map[ouroboros.ConnectionId][]byte
 	// acceptedHeaderMu guards acceptedHeaderTips, the hash of the last header
-	// from each connection that passed producer-authorization gating. Ledger
+	// from each connection that extended the local chain and that chain
+	// selection accepted; any other outcome clears the entry. Ledger
 	// admission is asynchronous, so a pipelined child can arrive before its
 	// parent reaches the queue.
 	acceptedHeaderMu   sync.Mutex
@@ -1066,7 +1067,7 @@ func (o *Ouroboros) ConfigureListeners(
 			l.TrustedLocal = trusted
 			ntcOpts := []ouroboros.ConnectionOptionFunc{
 				ouroboros.WithNetworkMagic(o.config.NetworkMagic),
-				o.chainsyncConnectionConfigOption(ctx, false),
+				o.chainsyncConnectionConfigOption(ctx, false, trusted),
 				ouroboros.WithLocalStateQueryConfig(
 					olocalstatequery.NewConfig(
 						o.localstatequeryServerConnOpts(trusted)...,
@@ -1074,12 +1075,12 @@ func (o *Ouroboros) ConfigureListeners(
 				),
 				ouroboros.WithLocalTxMonitorConfig(
 					olocaltxmonitor.NewConfig(
-						o.localtxmonitorServerConnOpts()...,
+						o.localtxmonitorServerConnOpts(trusted)...,
 					),
 				),
 				ouroboros.WithLocalTxSubmissionConfig(
 					olocaltxsubmission.NewConfig(
-						o.localtxsubmissionServerConnOpts()...,
+						o.localtxsubmissionServerConnOpts(trusted)...,
 					),
 				),
 			}

@@ -1483,6 +1483,7 @@ type LedgerState struct {
 	slotsPerKESPeriod           atomic.Uint64
 	forgedBlockChecker          atomic.Pointer[forgedBlockCheckerHolder]
 	slotBattleRecorder          atomic.Pointer[slotBattleRecorderHolder]
+	slotBattles                 slotBattleBook
 	cachedShape                 atomic.Pointer[hardfork.Shape]                  // lazy-built from CardanoNodeConfig; immutable for the LedgerState's lifetime
 	hardForkSummaryCache        atomic.Pointer[hardForkSummaryCacheEntry]       // last hardForkSummaryAnchoredAt result, keyed by publication generation and horizon anchor (see hardfork_summary.go)
 	epochSnapshotHook           atomic.Pointer[epochBoundarySnapshotHookHolder] // optional authoritative epoch-boundary snapshot capture (nil = event-driven fallback only)
@@ -14790,7 +14791,7 @@ func (ls *LedgerState) ByronProtocolMagic() (uint32, error) {
 	if protocolMagic < 0 {
 		return 0, errors.New("byron protocol magic is negative")
 	}
-	if protocolMagic > math.MaxUint32 {
+	if int64(protocolMagic) > math.MaxUint32 {
 		return 0, fmt.Errorf(
 			"byron protocol magic exceeds uint32: %d",
 			protocolMagic,
@@ -15147,13 +15148,19 @@ func (s txValidationSnapshot) validationContext(
 	if err != nil {
 		return eras.EraDesc{}, nil, false, err
 	}
-	pp := s.currentPParams
-	isCurrent := true
-	if validationEra.Id != s.currentEra.Id && s.prevEraPParams != nil {
-		pp = s.prevEraPParams
-		isCurrent = false
-	}
+	pp, isCurrent := s.validationPParams(validationEra.Id)
 	return validationEra, pp, isCurrent, nil
+}
+
+// validationPParams returns the protocol parameters that validate a
+// transaction of a compatible era, and whether they are the current era's.
+func (s txValidationSnapshot) validationPParams(
+	txEraId uint,
+) (lcommon.ProtocolParameters, bool) {
+	if txEraId != s.currentEra.Id && s.prevEraPParams != nil {
+		return s.prevEraPParams, false
+	}
+	return s.currentPParams, true
 }
 
 func (s txValidationSnapshot) protocolParameters(

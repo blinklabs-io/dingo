@@ -17,6 +17,7 @@ package ledgerstate
 import (
 	"math"
 	"math/big"
+	"strconv"
 	"testing"
 
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -32,8 +33,12 @@ import (
 func TestValidatePParamsDataEnforcesCddlDomains(t *testing.T) {
 	t.Parallel()
 
+	// aboveWord32 does not fit a 32-bit uint, so cases using it are skipped
+	// there rather than truncated into a valid value.
+	aboveWord32 := uint64(math.MaxUint32) + 1
 	tests := []struct {
 		name    string
+		wide    bool
 		mutate  func(*lconway.ConwayProtocolParameters)
 		wantErr string
 	}{
@@ -46,15 +51,17 @@ func TestValidatePParamsDataEnforcesCddlDomains(t *testing.T) {
 		},
 		{
 			name: "maxTxSize above Word32",
+			wide: true,
 			mutate: func(p *lconway.ConwayProtocolParameters) {
-				p.MaxTxSize = math.MaxUint32 + 1
+				p.MaxTxSize = uint(aboveWord32)
 			},
 			wantErr: "maxTxSize",
 		},
 		{
 			name: "maxBlockBodySize above Word32",
+			wide: true,
 			mutate: func(p *lconway.ConwayProtocolParameters) {
-				p.MaxBlockBodySize = math.MaxUint32 + 1
+				p.MaxBlockBodySize = uint(aboveWord32)
 			},
 			wantErr: "maxBlockBodySize",
 		},
@@ -118,6 +125,9 @@ func TestValidatePParamsDataEnforcesCddlDomains(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
+			if test.wide && strconv.IntSize < 64 {
+				t.Skip("uint is too narrow for this value on this target")
+			}
 			pparams := testConwayPParams()
 			test.mutate(pparams)
 			data, err := cbor.Encode(pparams)

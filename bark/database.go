@@ -44,9 +44,11 @@ var _ databaseconnect.DatabaseServiceHandler = &databaseServiceHandler{}
 // leaves page_size unset (0), matching the proto's documented "0 means
 // server default".
 const (
-	defaultCatalogPageSize = 50
-	defaultHistoryPageSize = 50
-	maxCatalogPageSize     = lifecycle.SnapshotCatalogPageLimit
+	defaultCatalogPageSize   = 50
+	defaultHistoryPageSize   = 50
+	maxCatalogPageSize       = lifecycle.SnapshotCatalogPageLimit
+	maxProgressStreams       = 32
+	maxClientProgressStreams = 4
 )
 
 // streamProgressPollInterval is how often StreamOperationProgress polls
@@ -55,7 +57,10 @@ const (
 // open stream, so this is a plain poll loop — operations are expected to
 // run for seconds to hours, not sub-second, so this interval is far
 // finer-grained than actually needed for a useful progress stream.
-const streamProgressPollInterval = 250 * time.Millisecond
+const (
+	streamProgressPollInterval = 250 * time.Millisecond
+	streamProgressMaxLifetime  = 15 * time.Minute
+)
 
 // databaseServiceHandler implements bark's full DatabaseService: async
 // CreateSnapshot/Restore/Truncate/VerifySnapshot (each with a pollable
@@ -102,11 +107,14 @@ type databaseServiceHandler struct {
 	databaseconnect.UnimplementedDatabaseServiceHandler
 	bark *Bark
 
-	mu         sync.Mutex
-	operations map[string]*operation
-	busy       bool
-	diagnostic chan struct{}
-	catalogErr error
+	mu                           sync.Mutex
+	operations                   map[string]*operation
+	busy                         bool
+	diagnostic                   chan struct{}
+	activeProgressStreams        int
+	progressStreamsByFingerprint map[string]int
+	progressStreamLifetime       time.Duration
+	catalogErr                   error
 	// catalogCloudDestination is set only after this handler reconciles the
 	// configured provider into the catalog. An empty value restricts available
 	// pages to the local index even if an older cloud source remains on disk.
@@ -118,12 +126,84 @@ func newDatabaseServiceHandler(
 	b *Bark,
 ) *databaseServiceHandler {
 	h := &databaseServiceHandler{
-		bark:       b,
-		operations: make(map[string]*operation),
-		diagnostic: make(chan struct{}, 1),
+		bark:                   b,
+		operations:             make(map[string]*operation),
+		diagnostic:             make(chan struct{}, 1),
+		progressStreamLifetime: streamProgressMaxLifetime,
 	}
 	h.initializeSnapshotCatalog(ctx)
 	return h
+}
+
+func (h *databaseServiceHandler) admitProgressStream(
+	ctx context.Context,
+) (func(), error) {
+	id := peerIdentityFromContext(ctx)
+	if !id.Verified || id.Fingerprint == "" {
+		return nil, connect.NewError(
+			connect.CodeUnauthenticated,
+			errAnonymousDatabaseCall,
+		)
+	}
+	h.mu.Lock()
+	global := h.activeProgressStreams
+	client := h.progressStreamsByFingerprint[id.Fingerprint]
+	var admissionErr error
+	switch {
+	case global >= maxProgressStreams:
+		admissionErr = errors.New("too many active operation progress streams")
+	case client >= maxClientProgressStreams:
+		admissionErr = errors.New(
+			"too many active operation progress streams for client",
+		)
+	default:
+		if h.progressStreamsByFingerprint == nil {
+			h.progressStreamsByFingerprint = make(map[string]int)
+		}
+		h.activeProgressStreams++
+		h.progressStreamsByFingerprint[id.Fingerprint]++
+		global++
+		client++
+	}
+	h.mu.Unlock()
+	if admissionErr != nil {
+		h.bark.config.Logger.Warn(
+			"rejected bark operation progress stream",
+			"component", "bark",
+			"client_cert_fingerprint", id.Fingerprint,
+			"active_streams", global,
+			"client_active_streams", client,
+		)
+		return nil, connect.NewError(
+			connect.CodeResourceExhausted,
+			admissionErr,
+		)
+	}
+	h.bark.config.Logger.Debug(
+		"admitted bark operation progress stream",
+		"component", "bark",
+		"client_cert_fingerprint", id.Fingerprint,
+		"active_streams", global,
+		"client_active_streams", client,
+	)
+	return func() {
+		h.mu.Lock()
+		h.activeProgressStreams--
+		h.progressStreamsByFingerprint[id.Fingerprint]--
+		if h.progressStreamsByFingerprint[id.Fingerprint] == 0 {
+			delete(h.progressStreamsByFingerprint, id.Fingerprint)
+		}
+		global := h.activeProgressStreams
+		client := h.progressStreamsByFingerprint[id.Fingerprint]
+		h.mu.Unlock()
+		h.bark.config.Logger.Debug(
+			"released bark operation progress stream",
+			"component", "bark",
+			"client_cert_fingerprint", id.Fingerprint,
+			"active_streams", global,
+			"client_active_streams", client,
+		)
+	}, nil
 }
 
 func (h *databaseServiceHandler) initializeSnapshotCatalog(ctx context.Context) {
@@ -1505,11 +1585,12 @@ func (h *databaseServiceHandler) GetTruncateStatus(
 // StreamOperationProgress polls the operation's in-memory progress every
 // streamProgressPollInterval and sends it to the client, returning once
 // the operation reaches a terminal state or the stream's context is
-// cancelled (e.g. the client disconnects). There is no push-based
-// notification from an operation's background goroutine, so this is a
-// plain poll loop rather than a true event stream — adequate given
-// operations run for seconds to hours, far coarser than the poll
-// interval.
+// cancelled (e.g. the client disconnects), or its renewal lifetime expires.
+// Admission is claimed before either timer is allocated and released on every
+// exit path. There is no push-based notification from an operation's
+// background goroutine, so this is a plain poll loop rather than a true event
+// stream — adequate given operations run for seconds to hours, far coarser
+// than the poll interval.
 func (h *databaseServiceHandler) StreamOperationProgress(
 	ctx context.Context,
 	req *connect.Request[databasev1alpha1.StreamOperationProgressRequest],
@@ -1519,6 +1600,40 @@ func (h *databaseServiceHandler) StreamOperationProgress(
 	if err != nil {
 		return err
 	}
+	setWriteDeadline, ok := responseWriteDeadlineSetterFromContext(ctx)
+	if !ok {
+		return connect.NewError(
+			connect.CodeInternal,
+			errors.New("operation progress stream write deadline is unavailable"),
+		)
+	}
+	release, err := h.admitProgressStream(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
+	lifetime := h.progressStreamLifetime
+	if lifetime <= 0 {
+		lifetime = streamProgressMaxLifetime
+	}
+	deadline := time.Now().Add(lifetime)
+	if err := setWriteDeadline(deadline); err != nil {
+		return connect.NewError(
+			connect.CodeInternal,
+			fmt.Errorf("set operation progress stream write deadline: %w", err),
+		)
+	}
+	defer func() {
+		if err := setWriteDeadline(time.Time{}); err != nil {
+			h.bark.config.Logger.Warn(
+				"failed to clear bark operation progress stream write deadline",
+				"component", "bark",
+				"error", err,
+			)
+		}
+	}()
+	lifetimeTimer := time.NewTimer(time.Until(deadline))
+	defer lifetimeTimer.Stop()
 	ticker := time.NewTicker(streamProgressPollInterval)
 	defer ticker.Stop()
 	for {
@@ -1537,6 +1652,11 @@ func (h *databaseServiceHandler) StreamOperationProgress(
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
+		case <-lifetimeTimer.C:
+			return connect.NewError(
+				connect.CodeDeadlineExceeded,
+				errors.New("operation progress stream lifetime exceeded"),
+			)
 		case <-ticker.C:
 		}
 	}

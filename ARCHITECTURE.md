@@ -1459,9 +1459,9 @@ sequenceDiagram
     end
 
     Note over SC,EB: Slot Battle Detection
-    EB->>BF: ChainUpdateEvent(externalBlock at same slot)
-    BF->>BF: SlotTracker detects competing block
-    BF->>EB: publish SlotBattleEvent
+    LS->>LS: blockfetch delivers a peer block at a forged slot, counted and held pending
+    LS->>PC: on each chain.update, fetched or forged, once the tip is a security parameter of blocks past it: is the forged block on the chain?
+    LS->>EB: publish SlotBattleEvent(Won)
 ```
 
 ## Directory Structure
@@ -1926,6 +1926,21 @@ arrive before the rebuild, their older transactions are placed ahead of the
 already queued restores. Revalidation therefore sees transactions in ledger
 order.
 
+`Mempool.AddTransaction` refuses a submission larger than the `MaxTxSize`
+ledger validation would apply to it before decoding it, taking
+`mutationMutex`, or running ledger rules. That limit follows the submitted era
+as transaction validation does: the current era's parameters, or the previous
+era's for a previous-era transaction. No limit is reported, and the ledger
+decides alone, for an era it refuses, an era whose validation is skipped, or
+parameters that are not the type that era's validation requires. The size is
+measured as `common.TxSize` does (the raw CBOR length, one byte less for a
+four-element transaction from Alonzo on), so the early rejection never refuses
+a transaction the ledger rule would accept; the rule still decides everything
+that passes. The limit comes from the optional `mempool.TxSizeLimitProvider`
+implemented by `LedgerState`, and the rejection is the ledger's own
+`shelley.MaxTxSizeUtxoError`, so every submit path reports it as an ordinary
+transaction rejection.
+
 Mempool admission, revalidation, block-candidate selection and forged-block
 validation each validate a transaction against the UTxO overlay and a state
 overlay (`utxoref.StateOverlay`) holding the earlier pending or selected
@@ -2250,7 +2265,7 @@ All event types follow the `subsystem.snake_case_name` convention.
 | `epoch.transition` | LedgerState | Epoch boundary crossed |
 | `hardfork.transition` | LedgerState | Hard fork transition |
 | `block.forged` | BlockForger | Block forged and adopted onto the chain |
-| `forging.slot_battle` | SlotTracker | Competing blocks at same slot |
+| `forging.slot_battle` | LedgerState | Slot battle settled: a peer block competed with a forged block, and the chain has advanced a security parameter of blocks so the winner (`Won`) is final |
 | `leios.eb_quorum` | Leios VoteManager | Endorser block reached stake quorum; certificate built (consumed by the Leios PipelineManager for inclusion eligibility) |
 | `leios.vote_emitted` | Leios VoteManager | Locally signed prototype vote ready for node wiring to enqueue on each peer's LeiosNotify stream |
 | `leios.vote_received` | Leios VoteManager | Newly accepted prototype vote plus its origin connection key, re-queued for node wiring to enqueue on every other peer's LeiosNotify stream while excluding the connection that delivered it |
@@ -6343,8 +6358,12 @@ it. Dingo implements this as a **corroboration gate**
   header-queue tip, or the last header the same connection passed through this
   gate — still updates the selector and reaches the ledger queue with no
   verification generation; block-fetch verifies its body before application.
-  A header withheld because its fork ancestry cannot be authenticated never
-  becomes that connection's last passed header. Missing ancestry does not
+  The accepted header tip names only a header that extended the local chain
+  and passed the selection and publication gates. Any other outcome for that
+  connection's header — withheld, past the forecast horizon, failed
+  verification, pending or rejected by the selector, refused by admission or
+  by the ledger — clears it, so a deferred child cannot extend a header that
+  never reached the ledger queue. Missing ancestry does not
   withhold a header whose parent is queued on the local header chain: such a
   queued parent is often itself a deferred linear extension, kept out of
   observed ancestry, so its child is verified against the local chain like
@@ -13874,7 +13893,12 @@ Koios. The UTxO side is a running reconstruction seeded from Dingo at the
 start point and advanced by Koios's own `/tx_info` answers for every
 transaction on the chain, so it stays independent of Dingo after its seed; a
 rollback re-baselines it and marks that epoch's UTxO verdict "not run" rather
-than reporting a comparison that would trivially match. Each epoch's
+than reporting a comparison that would trivially match. A `/tx_info` chunk
+that fails only because Koios has no result yet for a hash, as happens at the
+tip before Koios has indexed a block Dingo already served, is fetched again,
+whole, after waits of 10s, 20s and 40s; a hash still missing after the last
+wait fails its chunk, which re-baselines the reconstruction and marks the
+epoch "not run" as any other `/tx_info` failure does. Each epoch's
 comparisons run on their own LocalStateQuery connections; one that dies
 during Acquire or a query is redialed and the check repeated, a bounded number
 of times, and the UTxO comparison only reads the reconstruction, so a retry
@@ -13891,7 +13915,20 @@ last block processed after a backoff; only interruption ends the run. The
 rollback that opens a resumed session lands on the block already processed, so it changes nothing
 and keeps the comparison. A "not run" verdict names its cause: a failed
 `/tx_info` fetch, a rollback and its slot, or a baseline captured at that
-boundary.
+boundary. The stake comparison fetches each pool's `/pool_history`
+independently, so one failed request no longer abandons the epoch: the
+failed pools are fetched again after waits of 30s, 60s and 120s (permanent
+rejections are not), and pools still unfetched after the last round make the
+stake verdict incomplete, naming them, while a divergence found on any pool
+that did fetch is still reported. The shared Koios client's own timeouts and
+retries are unchanged; the session ending stops the rounds. Koios answers
+`/epoch_info` for an epoch days before it publishes that epoch's
+`/pool_history`, so when no pool Dingo reports has a row for the epoch and
+Koios's newest row for the missing pool with the most stake is for an earlier
+epoch, the stake verdict is one incomplete fault rather than one mismatch per
+pool. A pool missing a row while any other pool has one, or one Koios has no
+row for at any epoch, is still a mismatch, and the epoch-total comparison runs
+either way.
 
 Every session opens with a rollback to the origin, which Dingo refuses to
 acquire; the origin is epoch 0, so the tool does not ask. Each block's epoch
@@ -14246,6 +14283,17 @@ qualify (including a wildcard bind like `0.0.0.0`, which resolves to the
 unspecified address, not a loopback one) gets gouroboros' own defaults
 instead, the same as it would for any other NtC server reachable beyond
 this machine.
+
+Trusted-local admission still has a bounded idle state. After negotiation,
+`connmanager` gives an idle client two minutes to complete the next mux
+segment; only a complete segment refreshes that deadline, so partial header or
+payload traffic cannot extend it. The deadline is suspended while a decoded
+NtC request is executing and while its first response segment is being
+prepared, then every complete response segment refreshes it. ChainSync keeps
+the request active across `AwaitReply` until the deferred reply finishes.
+This preserves the protocol's unbounded LocalStateQuery work and ChainSync
+waits, including one complete whole-UTxO result, while reclaiming the admission
+slot after a client becomes idle before or after protocol activity.
 
 It always starts with one full `Check` pinned at the live tip
 (`establishBaseline`) before validating anything incrementally -- the
@@ -15075,7 +15123,19 @@ terminal status is published only after the next operation can start.
 `StreamOperationProgress` is a plain poll loop over the
 operation's in-memory state (no push notification from the goroutine to a
 concurrently open stream) — adequate given operations run for seconds to
-hours, far coarser than the poll interval.
+hours, far coarser than the poll interval. The handler admits at most 32
+progress streams globally and four for one verified client-certificate
+fingerprint. It rejects an excess stream before allocating its ticker. An
+admitted stream ends when the operation becomes terminal, its request context
+is cancelled, or its 15-minute lifetime expires; a client following a longer
+operation reconnects to renew the stream. The Bark HTTP middleware supplies a
+request-local `http.ResponseController.SetWriteDeadline` setter, and the
+handler installs the same absolute deadline before its first send. A client
+that stops reading therefore cannot keep `stream.Send` blocked beyond the
+lifetime. A missing or unsupported setter fails the stream before its first
+send, and the deadline is cleared as the handler exits. Admission, release,
+and rejection logs include the fingerprint plus the active global and
+per-client counts.
 
 Because `GetRestoreStatus`/`GetTruncateStatus` need to stay pollable for the
 whole duration of a live Restore/Truncate — which quiesces everything else on
@@ -18178,8 +18238,10 @@ and a re-sync requested, since the wait cannot end while nothing fetches the
 queued blocks. The discarded headers' invalidation is published after the ledger
 locks are released, so their Leios announcements and derived votes are removed
 without waiting for another chain event. Stored blocks the ledger has not
-applied yet (`chainAheadOfAppliedTip`) also count as local work, so admission
-keeps waiting for the snapshot publication their application brings rather
+applied yet (`chainAheadOfAppliedTip`: a primary chain tip in a later slot
+than the applied tip, or in the same slot under another hash; a chain tip in an
+earlier slot is a rollback the ledger has yet to follow and does not count)
+also count as local work, so admission keeps waiting for the snapshot publication their application brings rather
 than closing a connection that work may need, such as one serving endorser
 block backfill. If no fetch is active, no queued headers can be fetched and
 nothing stored is left to apply, admission rechecks the forecast and pending

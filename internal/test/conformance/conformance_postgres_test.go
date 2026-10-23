@@ -238,6 +238,8 @@ func mysqlCorpusResults(t *testing.T) []conformance.VectorResult {
 // conformance_postgres_test.go for why a per-dialect replay earns its cost while a repeated
 // one does not.
 func TestRulesConformanceVectorsMysql(t *testing.T) {
+	// Parallel with the other replays; see TestRulesConformanceVectors.
+	t.Parallel()
 	skipIfMysqlConformanceNotConfigured(t)
 
 	results := mysqlCorpusResults(t)
@@ -655,6 +657,8 @@ func postgresCorpusResults(t *testing.T) []conformance.VectorResult {
 // two real bugs that found and for why one pass per dialect is the right
 // amount.
 func TestRulesConformanceVectorsPostgres(t *testing.T) {
+	// Parallel with the other replays; see TestRulesConformanceVectors.
+	t.Parallel()
 	skipIfPostgresConformanceNotConfigured(t)
 
 	results := postgresCorpusResults(t)
