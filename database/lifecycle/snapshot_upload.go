@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -168,4 +169,87 @@ func closeSnapshotUploadFiles(files []snapshotUploadFile) error {
 		err = errors.Join(err, file.file.Close())
 	}
 	return err
+}
+
+// uploadStagedSnapshot serves a destination that implements only UploadDir,
+// which reads pathnames rather than the verified handles. It copies the
+// declared files from those handles into a private directory beside dir,
+// authenticates the copy, and uploads the copy, so replacing an entry of dir
+// after verification cannot change the uploaded bytes. The copy keeps dir's
+// snapshot ID as its base name, so the signed manifest ID still matches.
+func uploadStagedSnapshot(
+	ctx context.Context,
+	dest CloudDestination,
+	dir string,
+	opts ...ManifestOption,
+) (_ Manifest, retErr error) {
+	limit, err := manifestByteLimit(opts)
+	if err != nil {
+		return Manifest{}, err
+	}
+	files, _, err := openSnapshotUploadFiles(ctx, dir, limit, opts...)
+	if err != nil {
+		return Manifest{}, err
+	}
+	defer func() {
+		retErr = errors.Join(retErr, closeSnapshotUploadFiles(files))
+	}()
+	tempDir, err := os.MkdirTemp(filepath.Dir(dir), ".dingo-cloud-upload-*")
+	if err != nil {
+		return Manifest{}, fmt.Errorf(
+			"create staging directory for snapshot upload: %w", err,
+		)
+	}
+	defer func() {
+		retErr = errors.Join(retErr, os.RemoveAll(tempDir))
+	}()
+	stagedDir := filepath.Join(tempDir, snapshotIDForDir(dir))
+	if err := os.Mkdir(stagedDir, 0o700); err != nil {
+		return Manifest{}, fmt.Errorf(
+			"create staged snapshot directory: %w", err,
+		)
+	}
+	for _, file := range files {
+		if err := copySnapshotUploadFile(
+			ctx, filepath.Join(stagedDir, file.name), file.file,
+		); err != nil {
+			return Manifest{}, err
+		}
+	}
+	manifest, err := ReadManifest(stagedDir, opts...)
+	if err != nil {
+		return Manifest{}, err
+	}
+	if err := manifest.verifyPayloads(ctx, stagedDir, true); err != nil {
+		return Manifest{}, err
+	}
+	if err := dest.UploadDir(ctx, stagedDir); err != nil {
+		return Manifest{}, err
+	}
+	return manifest, nil
+}
+
+func copySnapshotUploadFile(
+	ctx context.Context,
+	path string,
+	src *os.File,
+) (retErr error) {
+	dst, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return fmt.Errorf("create staged snapshot file %q: %w", path, err)
+	}
+	defer func() {
+		if err := dst.Close(); err != nil {
+			retErr = errors.Join(
+				retErr,
+				fmt.Errorf("close staged snapshot file %q: %w", path, err),
+			)
+		}
+	}()
+	if _, err := io.Copy(
+		dst, payloadContextReader{ctx: ctx, reader: src},
+	); err != nil {
+		return fmt.Errorf("stage snapshot file %q: %w", path, err)
+	}
+	return nil
 }

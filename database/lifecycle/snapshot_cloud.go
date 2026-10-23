@@ -150,13 +150,7 @@ func mirrorToCloud(
 	}); ok {
 		manifest, err = uploader.uploadAuthenticatedSnapshot(ctx, dir, opts...)
 	} else {
-		manifest, err = ReadManifest(dir, opts...)
-		if err == nil {
-			err = manifest.verifyPayloads(ctx, dir, true)
-		}
-		if err == nil {
-			err = dest.UploadDir(ctx, dir)
-		}
+		manifest, err = uploadStagedSnapshot(ctx, dest, dir, opts...)
 	}
 	if err != nil {
 		return fmt.Errorf(

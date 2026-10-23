@@ -257,7 +257,10 @@ func EffectiveCloudDestination(base string, prefix string) string {
 type CloudDestination interface {
 	// UploadDir uploads every regular file directly inside localDir
 	// (Snapshot's manifest.json/blob.bak/metadata.sqlite — it is not
-	// recursive) to the destination.
+	// recursive) to the destination. MirrorToCloud passes a private copy
+	// of the snapshot, already authenticated and named for the snapshot ID,
+	// not the snapshot directory itself, so the bytes read here are the
+	// ones that were verified.
 	UploadDir(ctx context.Context, localDir string) error
 	// DownloadFiles downloads exactly the named objects into localDir, which
 	// must already exist. A snapshot's prefix is writable by anyone with

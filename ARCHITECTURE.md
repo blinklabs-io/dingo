@@ -19305,8 +19305,10 @@ S3 and GCS open the snapshot directory through one held `os.Root`, authenticate
 the manifest and verify both payloads through the same stable regular-file
 handles they upload, and upload the manifest last. They do not enumerate or
 upload other directory entries, and reject symlinks instead of reopening a
-classified path. Both
-providers remove any legacy remote marker after every successful upload.
+classified path. A destination that implements only `UploadDir` is handed a
+private, authenticated copy made from those handles, never the snapshot
+directory itself. Both providers remove any legacy remote marker after every
+successful upload.
 `lifecycle.IsCloudMirroredTo(dir, cloudDest)` checks both that the marker
 is present *and* that its digest matches the currently configured `cloudDest`, not
 just `lifecycle.IsCloudMirrored`'s bare presence check — a marker left over

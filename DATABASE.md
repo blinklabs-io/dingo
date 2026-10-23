@@ -1015,6 +1015,22 @@ new ancestor entry is synchronized before publishing the manifest as well.
 - `destination_s3.go` (`dingo_extra_plugins`) — scheme `s3://bucket/prefix`, using `s3.NewFromConfig` + `manager.Uploader`/`manager.Downloader` for streaming transfer, and `ListObjectsV2`'s delimiter-based listing (`CommonPrefixes`) for `SnapshotLister`. Auth is entirely the AWS SDK default credential chain (`config.LoadDefaultConfig`) — no explicit access-key/secret config, matching `database/plugin/blob/aws`'s convention. An `AWS_ENDPOINT` env var (checked directly, since it isn't a standard AWS SDK variable `LoadDefaultConfig` would pick up on its own) redirects to a self-hosted S3-compatible store — typically MinIO — via `BaseEndpoint` + `UsePathStyle`, mirroring `database/plugin/blob/aws`'s `WithEndpoint` option; without this, a `snapshotCloudDestination` pointed at anything other than genuine AWS S3 would silently try to authenticate against real AWS regardless of intent.
 - `destination_gcs.go` (`dingo_extra_plugins`) — scheme `gcs://bucket/prefix` (matching `database/plugin/blob/gcs`'s own dataDir scheme, not `gs://`, for consistency), using GCS's own `Query.Delimiter`-based listing (`ObjectAttrs.Prefix` entries) for `SnapshotLister`. Auth is Application Default Credentials via `storage.NewGRPCClient`, matching `database/plugin/blob/gcs`'s convention — no explicit service-account config.
 
+**Authenticated snapshot upload.** `MirrorToCloud` requires the trust key and
+refuses a local manifest that does not authenticate, including a format 1 or
+digest-less one (`ErrManifestUnauthenticated`); such a snapshot must be
+re-created rather than gaining the cloud trust root through automatic retry.
+S3 and GCS open the snapshot directory through one `os.Root`, open
+`manifest.json` and the two declared payloads as stable regular files (a
+symlink or a swapped entry is refused), authenticate the manifest and check
+each payload's size and digest through those handles, and upload from the same
+handles, payloads first and the manifest last, so a remote manifest marks a
+complete upload. No other directory entry is read or uploaded. A destination
+that implements only `UploadDir` reads pathnames, so `MirrorToCloud` copies the
+declared files from the verified handles into a private `.dingo-cloud-upload-*`
+directory beside the snapshot, authenticates that copy, uploads it, and removes
+it; replacing a file in the snapshot directory after verification cannot change
+the uploaded bytes.
+
 `RegisterBuiltinDestinations(*DestinationRegistry)` registers every scheme compiled into this build (both under `dingo_extra_plugins`, none otherwise — a `!dingo_extra_plugins`-tagged file provides a no-op version so callers don't need their own build tag) — composition code (`node.go`'s `New`, and `cmd/dingo/database.go`'s CLI commands) calls `NewDestinationRegistry` followed by `RegisterBuiltinDestinations` once at startup and threads the resulting registry down through `internal/dblifecycle.Manager`/`Service`, `bark.BarkConfig.DestinationRegistry`, and `dingo.Node`'s own `destinationRegistry` field — nothing in this call chain re-resolves schemes against a package-level registry.
 
 Configuration validation is build-aware: a non-empty `databaseLifecycle.snapshotCloudDestination` requires `snapshotTrustKeyFile`, must be a well-formed `s3://` or `gcs://` URI, and those schemes are accepted only in a binary built with `dingo_extra_plugins`. A missing trust root, typoed URI, or unavailable scheme therefore fails startup rather than waiting until an epoch-boundary upload to surface as a logged background error.

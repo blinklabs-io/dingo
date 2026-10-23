@@ -1252,9 +1252,13 @@ func TestManagerRetriesCloudMirrorAfterTransientFailureOnRedeliveredEvent(
 	require.NoError(t, m.Start(context.Background()))
 	defer m.Stop()
 
-	require.Equal(t, startupProbeDir, testutil.RequireReceive(
-		t, uploaded, snapshotWait,
-		"startup cloud-mirror retry scan did not reach its probe",
+	// MirrorToCloud hands an UploadDir-only destination a staged copy named
+	// for the snapshot ID, so the probe is identified by its base name.
+	require.Equal(t, filepath.Base(startupProbeDir), filepath.Base(
+		testutil.RequireReceive(
+			t, uploaded, snapshotWait,
+			"startup cloud-mirror retry scan did not reach its probe",
+		),
 	))
 	// The channel receive above only proves the scan's UploadDir call for
 	// the probe was reached, not that MirrorToCloud has returned and
@@ -1408,9 +1412,13 @@ func TestManagerRetriesUnmirroredSnapshotOnLaterEpochWithoutRedelivery(
 	require.NoError(t, m.Start(context.Background()))
 	defer m.Stop()
 
-	require.Equal(t, startupProbeDir, testutil.RequireReceive(
-		t, uploaded, snapshotWait,
-		"startup cloud-mirror retry scan did not reach its probe",
+	// MirrorToCloud hands an UploadDir-only destination a staged copy named
+	// for the snapshot ID, so the probe is identified by its base name.
+	require.Equal(t, filepath.Base(startupProbeDir), filepath.Base(
+		testutil.RequireReceive(
+			t, uploaded, snapshotWait,
+			"startup cloud-mirror retry scan did not reach its probe",
+		),
 	))
 	// Wait for the marker to actually exist AND record this destination,
 	// not just the mid-upload channel receive above -- see the detailed
