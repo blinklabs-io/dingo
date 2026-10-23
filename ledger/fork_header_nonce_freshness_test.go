@@ -158,7 +158,7 @@ func TestPeerHeaderForkPathRevalidatesUnstampedAncestryAndItsCachedChild(
 	t.Parallel()
 	f := newForkPathFreshnessFixture(t, 4)
 	connID := ouroboros.ConnectionId{}
-	for index := 0; index < 3; index++ {
+	for index := range 3 {
 		f.stamps[string(f.headers[index].hash[:])] = 0
 	}
 

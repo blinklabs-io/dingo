@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"maps"
 
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
@@ -256,8 +257,6 @@ func clonePeerOpCertCounters(
 		return make(map[lcommon.PoolKeyHash]opCertCounterSnapshot)
 	}
 	clone := make(map[lcommon.PoolKeyHash]opCertCounterSnapshot, len(counters))
-	for poolKeyHash, counter := range counters {
-		clone[poolKeyHash] = counter
-	}
+	maps.Copy(clone, counters)
 	return clone
 }
