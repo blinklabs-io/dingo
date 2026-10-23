@@ -141,3 +141,14 @@ func (ci *ChainIterator) Cancel() {
 		}
 	})
 }
+
+// HasPendingRollback reports whether the chain has invalidated the iterator's
+// current forward position. It does not consume the rollback event.
+func (ci *ChainIterator) HasPendingRollback() bool {
+	if ci.chain == nil {
+		return false
+	}
+	ci.chain.mutex.Lock()
+	defer ci.chain.mutex.Unlock()
+	return ci.needsRollback
+}

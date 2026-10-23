@@ -37,7 +37,7 @@ import (
 // only needs a DSN string, no live server), this suite needs privileges to
 // create its own database (see mysqlConformanceRootDSN), so it specifically
 // requires MYSQL_ROOT_PASSWORD or a full MYSQL_DSN override -- CI's
-// go-test-linux job always sets MYSQL_ROOT_PASSWORD, so this runs
+// gate (services) job always sets MYSQL_ROOT_PASSWORD, so this runs
 // automatically in CI.
 func isMysqlConformanceConfigured() bool {
 	return os.Getenv("MYSQL_ROOT_PASSWORD") != "" ||

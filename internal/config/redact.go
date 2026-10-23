@@ -126,6 +126,8 @@ var logPlainConfigFields = []string{
 	"ActivePeersLedgerQuota",
 	"ActivePeersTopologyQuota",
 	"BackfillBatchSize",
+	"BarkArchiveCallerLookupsPerSecond",
+	"BarkArchiveLookupsPerSecond",
 	"BarkArchiveMaxConcurrentFetches",
 	"BarkBlockDownloadAllowPrivateAddresses",
 	"BarkClientCAFilePath",
