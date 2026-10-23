@@ -32,6 +32,12 @@ import (
 // indexed.
 type UtxoResolver interface {
 	UtxosByRefs(refs []models.UtxoId) ([]models.Utxo, error)
+	// TxInputsChecked reports whether validating tx confirms that every
+	// input it consumes is a pool output or a confirmed output. It is false
+	// only where validation is bypassed, as the Dijkstra prototype profile
+	// bypasses it; the pool then indexes an input no lookup resolves as
+	// having no live output instead of waiting for it to be confirmed.
+	TxInputsChecked(tx gledger.Transaction) bool
 }
 
 // addressIndex maps an address to the pool transactions that pay it or spend
@@ -185,24 +191,21 @@ func (m *Mempool) confirmedInputAddresses(
 // outputs from resolved. A nil resolved map means no resolver, and confirmed
 // inputs are then left out.
 //
-// An input in neither map changed state after the batch ran, or has no live
-// output at all. A skipped pool parent that left the pool fails with
-// errAddressInputsMoved and the attempt repeats. Any other such input is
-// recorded in absent and also repeats the attempt: validation has just found
-// it, so it was confirmed after the batch and the next batch resolves it. An
-// input already in absent missed two batches with a passing validation
-// between them, which only a validation that does not check inputs allows;
-// it has no live output and is left out rather than retried until the
-// attempts run out.
+// When validation checks inputs it has just found every consumed input in
+// created or the ledger, so an input in neither map changed state after the
+// batch ran: a skipped pool parent that left the pool, or an input confirmed
+// or rolled back around the batch. That fails with errAddressInputsMoved and
+// the attempt repeats; nothing about two snapshots proves the input has no
+// live output. Only when the validator reports that it did not check inputs
+// is such an input left out.
 func inputAddresses(
 	tx gledger.Transaction,
 	created map[utxoref.Key]lcommon.Utxo,
 	resolved map[utxoref.Key]string,
 	pooled map[utxoref.Key]struct{},
-	absent map[utxoref.Key]struct{},
+	inputsChecked bool,
 ) ([]string, error) {
 	var ret []string
-	moved := false
 	for _, input := range tx.Consumed() {
 		key := utxoref.ForInput(input)
 		if utxo, ok := created[key]; ok {
@@ -216,22 +219,23 @@ func inputAddresses(
 			continue
 		}
 		if _, ok := pooled[key]; ok {
-			moved = true
-			continue
+			return nil, errAddressInputsMoved
 		}
-		if resolved == nil {
-			continue
+		if resolved != nil && inputsChecked {
+			return nil, errAddressInputsMoved
 		}
-		if _, ok := absent[key]; ok {
-			continue
-		}
-		absent[key] = struct{}{}
-		moved = true
-	}
-	if moved {
-		return nil, errAddressInputsMoved
 	}
 	return ret, nil
+}
+
+// txInputsChecked reports whether the validator's verdict on tx confirms
+// its inputs. A validator that does not say is taken to check them, so an
+// unresolved input is retried rather than silently left out.
+func (m *Mempool) txInputsChecked(tx gledger.Transaction) bool {
+	if resolver, ok := m.validator.(UtxoResolver); ok {
+		return resolver.TxInputsChecked(tx)
+	}
+	return true
 }
 
 // TransactionHashesByAddress returns the hashes of the pool transactions

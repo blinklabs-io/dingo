@@ -144,3 +144,22 @@ func TestDijkstraEraGateUsesCurrentEra(t *testing.T) {
 	assert.False(t, dijkstraEraGate(eras.ConwayEraDesc))
 	assert.True(t, dijkstraEraGate(eras.DijkstraEraDesc))
 }
+
+// TestTxInputsCheckedFollowsDijkstraBypass pins what LedgerState reports to
+// the mempool address index: inputs go unchecked exactly where the Dijkstra
+// prototype bypass skips validation.
+func TestTxInputsCheckedFollowsDijkstraBypass(t *testing.T) {
+	t.Parallel()
+	conwayTx := &conway.ConwayTransaction{}
+	dijkstraTx := &dijkstra.DijkstraTransaction{}
+
+	bypass := &LedgerState{
+		config: LedgerStateConfig{SkipDijkstraTxValidation: true},
+	}
+	assert.False(t, bypass.TxInputsChecked(dijkstraTx))
+	assert.True(t, bypass.TxInputsChecked(conwayTx))
+
+	standard := &LedgerState{}
+	assert.True(t, standard.TxInputsChecked(dijkstraTx))
+	assert.True(t, standard.TxInputsChecked(conwayTx))
+}

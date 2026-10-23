@@ -137,6 +137,39 @@ type resolvingValidator struct {
 	err       error
 	// corrupt makes every resolved output undecodable.
 	corrupt bool
+	// checksInputs makes validation reject a transaction whose consumed
+	// inputs are neither pool outputs nor confirmed, as ledger validation
+	// does. Without it the validator accepts any input and says so.
+	checksInputs bool
+}
+
+func (v *resolvingValidator) ValidateTxWithOverlay(
+	tx gledger.Transaction,
+	consumed map[utxoref.Key]struct{},
+	created map[utxoref.Key]lcommon.Utxo,
+	accounts *utxoref.StateOverlay,
+) error {
+	if v.checksInputs {
+		for _, input := range tx.Consumed() {
+			key := utxoref.ForInput(input)
+			if _, ok := created[key]; ok {
+				continue
+			}
+			v.mu.Lock()
+			_, ok := v.confirmed[key]
+			v.mu.Unlock()
+			if !ok {
+				return fmt.Errorf("bad input %s", key.String())
+			}
+		}
+	}
+	return v.mockValidator.ValidateTxWithOverlay(
+		tx, consumed, created, accounts,
+	)
+}
+
+func (v *resolvingValidator) TxInputsChecked(gledger.Transaction) bool {
+	return v.checksInputs
 }
 
 func newResolvingValidator() *resolvingValidator {
@@ -153,6 +186,15 @@ func (v *resolvingValidator) confirm(in indexTxInput, owner lcommon.Address) {
 		TxId:  lcommon.NewBlake2b256(in.hash[:]),
 		Index: in.index,
 	}] = owner
+}
+
+func (v *resolvingValidator) unconfirm(in indexTxInput) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	delete(v.confirmed, utxoref.Key{
+		TxId:  lcommon.NewBlake2b256(in.hash[:]),
+		Index: in.index,
+	})
 }
 
 func (v *resolvingValidator) UtxosByRefs(
@@ -711,6 +753,8 @@ type sessionConnValidator struct {
 	// eachSession, when set, runs before every session takes its
 	// connection.
 	eachSession func()
+	// beforeResolve, when set, runs before every confirmed-input batch.
+	beforeResolve func()
 }
 
 func (v *sessionConnValidator) WithTxValidationSession(
@@ -744,6 +788,9 @@ func (v *sessionConnValidator) WithTxValidationSession(
 func (v *sessionConnValidator) UtxosByRefs(
 	refs []models.UtxoId,
 ) ([]models.Utxo, error) {
+	if v.beforeResolve != nil {
+		v.beforeResolve()
+	}
 	select {
 	case v.conns <- struct{}{}:
 	case <-time.After(2 * time.Second):
@@ -982,6 +1029,7 @@ func TestAddressIndexRetriesInputConfirmedBeforeValidation(t *testing.T) {
 		resolvingValidator: newResolvingValidator(),
 		conns:              make(chan struct{}, 1),
 	}
+	v.checksInputs = true
 	m := newIndexTestPool(t, v, false, nil)
 	owner := indexTestAddress(t, 0x81)
 	in := indexTxInput{hash: [32]byte{0x82}}
@@ -1017,23 +1065,66 @@ func TestAddressIndexUndecodableConfirmedInputIsNotAVerdict(t *testing.T) {
 	requireIndexMatchesPool(t, m)
 }
 
-// TestAddressIndexUnresolvableInputDoesNotExhaustRetries covers a validator
-// that does not check inputs, as the Dijkstra validation bypass does: an
-// input with no live output misses every batch. One repeat tells it from an
-// input confirmed after the batch; it is then left out, and admission does
-// not run out of attempts into a no-verdict error.
-func TestAddressIndexUnresolvableInputDoesNotExhaustRetries(t *testing.T) {
+// TestAddressIndexBypassedInputCheckAdmitsUnresolvableInput pins the
+// Dijkstra prototype bypass: its validation does not check inputs, so an
+// input no lookup resolves has no live output to wait for. The transaction
+// is admitted on the first attempt without that address, and restoring it
+// from a rolled-back block does not leave it pending for every rebuild.
+func TestAddressIndexBypassedInputCheckAdmitsUnresolvableInput(t *testing.T) {
 	t.Parallel()
 	v := newResolvingValidator()
 	m := newIndexTestPool(t, v, false, nil)
 	payee := indexTestAddress(t, 0x87)
-	hash := addIndexTx(t, m, indexTxSpec{
+	raw, tx := buildIndexTx(t, indexTxSpec{
 		inputs:  []indexTxInput{{hash: [32]byte{0x88}}},
 		outputs: []lcommon.Address{payee},
 	})
-	require.Equal(t, int64(2), v.calls.Load(),
-		"one batch, then one repeat that finds it still missing")
+	hash := tx.Hash().String()
+	require.NoError(t, m.AddTransaction(
+		context.Background(), uint(conway.EraIdConway), raw,
+	))
+	require.Equal(t, int64(1), v.calls.Load(), "admitted on the first attempt")
 	require.Equal(t, []string{hash},
 		m.TransactionHashesByAddress(payee.String()))
+
+	block := blockCarryingTx(t, raw)
+	m.noteChainUpdate(chainUpdate(chain.ChainBlockEvent{Block: block}))
+	require.NoError(t, m.rebuildAfterChainUpdate(context.Background()))
+	m.noteChainUpdate(chainUpdate(chain.ChainRollbackEvent{
+		RolledBackBlocks: []models.Block{block},
+	}))
+	require.NoError(t, m.rebuildAfterChainUpdate(context.Background()))
+	require.Empty(t, m.pendingRolledBackOrder)
+	_, ok := m.GetTransaction(hash)
+	require.True(t, ok)
+	requireIndexMatchesPool(t, m)
+}
+
+// TestAddressIndexInputMissingFromEveryBatchIsNotAVerdict covers an input
+// rolled back before each confirmed-input batch and confirmed again before
+// each validation. Every validation passes, but no batch resolves the
+// input, so admission reaches no verdict rather than indexing the
+// transaction without the address it spends from.
+func TestAddressIndexInputMissingFromEveryBatchIsNotAVerdict(t *testing.T) {
+	t.Parallel()
+	v := &sessionConnValidator{
+		resolvingValidator: newResolvingValidator(),
+		conns:              make(chan struct{}, 1),
+	}
+	v.checksInputs = true
+	m := newIndexTestPool(t, v, false, nil)
+	owner := indexTestAddress(t, 0x91)
+	in := indexTxInput{hash: [32]byte{0x92}}
+	v.beforeResolve = func() { v.unconfirm(in) }
+	v.eachSession = func() { v.confirm(in, owner) }
+	raw, _ := buildIndexTx(t, indexTxSpec{
+		inputs:  []indexTxInput{in},
+		outputs: []lcommon.Address{indexTestAddress(t, 0x93)},
+	})
+
+	err := m.AddTransaction(context.Background(), uint(conway.EraIdConway), raw)
+	require.ErrorIs(t, err, ErrPendingStateMoved)
+	require.Empty(t, m.Transactions())
+	require.Empty(t, m.TransactionHashesByAddress(owner.String()))
 	requireIndexMatchesPool(t, m)
 }

@@ -1891,11 +1891,10 @@ func (m *Mempool) AddTransaction(
 	// Each attempt validates against the pool's state overlay. When the ledger
 	// has moved since that overlay's transactions were validated, some may
 	// already be in the ledger, so the pool is rebuilt and the attempt repeats.
-	absent := make(map[utxoref.Key]struct{})
 	for attempt := 0; ; attempt++ {
 		var seen *utxoOverlay
 		addEvent, evictedEvents, seen, err = m.addTransactionAttempt(
-			ctx, txType, txBytes, tmpTx, txHash, absent,
+			ctx, txType, txBytes, tmpTx, txHash,
 		)
 		if errors.Is(err, errAddressInputsMoved) {
 			// An input changed state after the confirmed-input batch: the
@@ -1950,7 +1949,6 @@ func (m *Mempool) addTransactionAttempt(
 	txBytes []byte,
 	tmpTx gledger.Transaction,
 	txHash string,
-	absent map[utxoref.Key]struct{},
 ) (*event.Event, []event.Event, *utxoOverlay, error) {
 	var addEvent *event.Event
 	var evictedEvents []event.Event
@@ -2055,7 +2053,8 @@ func (m *Mempool) addTransactionAttempt(
 		}
 
 		inputAddrs, err := inputAddresses(
-			tmpTx, validCreated, resolved, pooled, absent,
+			tmpTx, validCreated, resolved, pooled,
+			m.txInputsChecked(tmpTx),
 		)
 		if err != nil {
 			return err

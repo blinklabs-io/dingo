@@ -9958,6 +9958,13 @@ func (ls *LedgerState) skipDijkstraTxValidation(eraId uint) bool {
 		ls.config.SkipDijkstraTxValidation
 }
 
+// TxInputsChecked reports whether mempool validation of tx confirms that
+// every input it consumes exists. The Dijkstra prototype bypass skips the
+// whole rule set, inputs included; every other era validates them.
+func (ls *LedgerState) TxInputsChecked(tx lcommon.Transaction) bool {
+	return !ls.skipDijkstraTxValidation(uint(tx.Type())) // #nosec G115 -- era IDs are non-negative
+}
+
 // trustDijkstraTxValidationError reports whether a per-transaction validation
 // failure under era eraId is logged and trusted instead of rejecting the block.
 //

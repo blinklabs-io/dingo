@@ -11618,13 +11618,14 @@ the mutation gate, so a second read inside one could wait on connections that
 admissions queued behind the gate never release. Validation then finds
 every consumed input in the pool or the ledger, so an input that neither the
 validated pool outputs nor the batch resolved changed state in between: a
-skipped pool parent that left the pool, or an input confirmed by a block
-applied before validation. Either restarts the admission attempt, whose new
-batch resolves it; when the attempts run out the admission ends with
-`mempool.ErrPendingStateMoved`, the same no-verdict result as a ledger that
-kept moving. An input that misses two batches with a passing validation
-between them, which only a validation that skips input checks allows, has no
-live output and is left out. A stored output that does not decode is a
+skipped pool parent that left the pool, or an input confirmed or rolled back
+around the batch. Either restarts the admission attempt; when the attempts run
+out the admission ends with `mempool.ErrPendingStateMoved`, the same
+no-verdict result as a ledger that kept moving. The one exception is a
+validator that reports, through `UtxoResolver.TxInputsChecked`, that its
+validation of the transaction did not check inputs: `LedgerState` reports that
+for Dijkstra transactions under `SkipDijkstraTxValidation`, and such an input
+is left out of the index rather than retried. A stored output that does not decode is a
 storage fault, as it is to ledger validation, and ends the admission with
 `mempool.ErrInputResolution`. A phase-2-invalid transaction is indexed by its
 collateral return and collateral inputs only. Every removal path (explicit
