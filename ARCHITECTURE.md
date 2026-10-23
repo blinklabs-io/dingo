@@ -14267,48 +14267,47 @@ the segment-read-timeout fix below are both
 merged and released as of gouroboros v0.204.3, which this module's `go.mod`
 now depends on directly; no local `replace` directive is needed for either.
 
-**The segment-read-timeout fix isn't only a node-parity client-side change
--- it also relaxes Dingo's own NtC server**, and that relaxation is
-trust-scoped, not universal. `ouroboros/ouroboros.go`'s `ConfigureListeners`
-disables gouroboros' 120s mux segment-read timeout and (via
-`localstatequeryServerConnOpts`) LocalStateQuery's own 180s query timeout
-and 16MB reassembly cap, raising the latter to 2GiB, for exactly the same
-reason node-parity's own client connections need it: a whole-UTxO-set query
-against a Preview-scale (or larger) node can legitimately take minutes, and
-gouroboros' defaults exist as anti-DoS guards against an untrusted remote
-peer, not a description of every real caller.
+**Large LocalStateQuery replies are configured at the receiving client.**
+Node-parity raises its client-side reassembly cap to 2GiB and disables its
+per-query reply timer at its dial sites because a whole-UTxO-set response from
+a Preview-scale (or larger) node can legitimately take minutes. Dingo's NtC
+server uses a separate 1MiB request cap. gouroboros rejects a decoded query
+filter above 10000 items, which keeps ordinary address and input filters under
+that cap, so the larger reply allowance does not belong on the request
+receiver.
 
 The muxer accounts incomplete-message reassembly across the whole connection,
 not once per registered mini-protocol: the connection allowance is the largest
 registered protocol cap, and a protocol that cannot reserve its next segment
-fails instead of waiting behind a peer-controlled partial message. Raising the
-trusted LocalStateQuery cap to 2GiB therefore deliberately raises that trusted
-connection's aggregate allowance to 2GiB; ordinary NtN and untrusted NtC
-connections retain the default aggregate cap.
+fails instead of waiting behind a peer-controlled partial message. The
+LocalStateQuery server independently refuses a request above 1MiB. Combined
+with the connection manager's bounded NtC admission slots, incomplete
+LocalStateQuery requests have a bounded process-wide footprint.
 
-That relaxation is unsafe to grant unconditionally, though: `internal/node/node.go`
-builds two separate `UseNtC` listeners from ordinary operator config -- a
+Disabling the mux segment-read timeout is unsafe to grant unconditionally,
+though: `internal/node/node.go` builds two separate `UseNtC` listeners from ordinary operator config -- a
 Unix socket (`cfg.SocketPath`) and a TCP listener
 (`cfg.PrivateBindAddr:cfg.PrivatePort`, defaulting to `127.0.0.1:3002` but
 not code-enforced to stay there) -- and there is no authentication or
 identity check between `accept()` and these options being applied;
 `connmanager` only enforces a connection-count limit
-(`MaxNtCConns`/`MaxNtCConnectionsPerIP`), not who is connecting. Granting an
-unbounded mux/query timeout and a 2GiB-per-connection reassembly buffer to
-*any* client that completes an NtC handshake -- not just a trusted local
-tool -- would widen the DoS surface for the whole NtC server the moment an
-operator points `PrivatePort` at a non-loopback address.
+(`MaxNtCConns`/`MaxNtCConnectionsPerIP`), not who is connecting. Disabling
+the mux segment-read timeout for *any* client that completes an NtC handshake
+-- not just a trusted local tool -- would widen the DoS surface for the whole
+NtC server the moment an operator points `PrivatePort` at a non-loopback
+address.
 `isTrustedNtCListener` (`ouroboros/ouroboros.go`) makes the actual
 trust decision explicit instead of assuming every `UseNtC` listener
 qualifies: a Unix-domain listener is trusted unconditionally (reaching it at
 all already requires filesystem access to this machine), and a TCP listener
 is trusted only when `net.ResolveTCPAddr` resolves every address it could
 be reached at to a loopback IP -- covering `127.0.0.1`, `::1`, and
-`localhost` alike, not just a literal string match. A listener that doesn't
-qualify (including a wildcard bind like `0.0.0.0`, which resolves to the
-unspecified address, not a loopback one) gets gouroboros' own defaults
-instead, the same as it would for any other NtC server reachable beyond
-this machine.
+`localhost` alike, not just a literal string match. A trusted listener has
+gouroboros' 120-second mux segment-read timeout disabled and relies on the
+activity-aware idle deadline described below. A listener that doesn't qualify
+(including a wildcard bind like `0.0.0.0`, which resolves to the unspecified
+address, not a loopback one) keeps gouroboros' default. Both use the same 1MiB
+LocalStateQuery request cap.
 
 Trusted-local admission still has a bounded idle state. After negotiation,
 `connmanager` gives an idle client two minutes to complete the next mux
