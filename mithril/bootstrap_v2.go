@@ -42,7 +42,7 @@ import (
 // Paired with a shared keep-alive client (see ChunkFeed.start) so each
 // worker holds a warm pooled connection; the connection pool in
 // newPooledDownloadTransport is sized to this value.
-const immutableDownloadWorkers = 48
+const immutableDownloadWorkers = 64
 
 // Compressed-size limits for one v2 object, used when no operator limit is
 // set. They are constants rather than values read from the artifact because

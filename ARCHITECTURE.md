@@ -9583,9 +9583,9 @@ further reduced to the filesystem's available space minus the larger of 1 GiB
 or ten percent. Free space is checked after each 64 MiB of aggregate output so
 concurrent downloads and other writers cannot silently consume the reserve.
 The immutable pool separately charges each compressed in-flight download at
-its size limit against a 32 GiB budget. Raising the limit lowers concurrency;
-an override above 32 GiB allows only one download, with capacity equal to that
-override.
+its size limit against a 64 GiB budget. Raising the limit lowers concurrency;
+an override above 32 GiB allows only one download. An override above 64 GiB
+increases the capacity beyond 64 GiB to fit that single download.
 
 `Bootstrap()` returns a `BootstrapResult` (immutable directory,
 ancillary ledger-state directory, synthesized snapshot metadata).
@@ -11062,8 +11062,8 @@ verifying client bootstraps from the newest listed one.
 
 All public artifact reads, including pending-certificate and stake-distribution
 reads, share an admission bound of
-`2 * (immutableDownloadWorkers + 1)` (66) requests, enough for two v2
-bootstraps each running its 32 immutable downloads beside the ancillary one.
+`2 * (immutableDownloadWorkers + 1)` (130) requests, enough for two v2
+bootstraps each running its 64 immutable downloads beside the ancillary one.
 Public signature submissions use a separate four-request bound, so progressing
 archive transfers cannot consume their capacity. Either bound returns `503
 Service Unavailable` with `Retry-After: 1` when it is full. A
