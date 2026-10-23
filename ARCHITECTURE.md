@@ -14229,29 +14229,41 @@ LocalStateQuery server independently refuses a request above 1MiB. Combined
 with the connection manager's bounded NtC admission slots, incomplete
 LocalStateQuery requests have a bounded process-wide footprint.
 
-That relaxation is unsafe to grant unconditionally, though: `internal/node/node.go`
-builds two separate `UseNtC` listeners from ordinary operator config -- a
+Disabling the mux segment-read timeout is unsafe to grant unconditionally,
+though: `internal/node/node.go` builds two separate `UseNtC` listeners from ordinary operator config -- a
 Unix socket (`cfg.SocketPath`) and a TCP listener
 (`cfg.PrivateBindAddr:cfg.PrivatePort`, defaulting to `127.0.0.1:3002` but
 not code-enforced to stay there) -- and there is no authentication or
 identity check between `accept()` and these options being applied;
 `connmanager` only enforces a connection-count limit
-(`MaxNtCConns`/`MaxNtCConnectionsPerIP`), not who is connecting. Granting a
-larger read-idle allowance to *any* client that completes an NtC handshake --
-not just a trusted local tool -- would widen the DoS surface for the whole NtC
-server the moment an operator points `PrivatePort` at a non-loopback address.
+(`MaxNtCConns`/`MaxNtCConnectionsPerIP`), not who is connecting. Disabling
+the mux segment-read timeout for *any* client that completes an NtC handshake
+-- not just a trusted local tool -- would widen the DoS surface for the whole
+NtC server the moment an operator points `PrivatePort` at a non-loopback
+address.
 `isTrustedNtCListener` (`ouroboros/ouroboros.go`) makes the actual
 trust decision explicit instead of assuming every `UseNtC` listener
 qualifies: a Unix-domain listener is trusted unconditionally (reaching it at
 all already requires filesystem access to this machine), and a TCP listener
 is trusted only when `net.ResolveTCPAddr` resolves every address it could
 be reached at to a loopback IP -- covering `127.0.0.1`, `::1`, and
-`localhost` alike, not just a literal string match. A trusted listener gets a
-15-minute mux read-idle deadline so multi-minute replies can finish without
-letting an incomplete request wait forever. A listener that doesn't qualify
+`localhost` alike, not just a literal string match. A trusted listener has
+gouroboros' 120-second mux segment-read timeout disabled and relies on the
+activity-aware idle deadline described below. A listener that doesn't qualify
 (including a wildcard bind like `0.0.0.0`, which resolves to the unspecified
-address, not a loopback one) keeps gouroboros' 120-second default. Both use the
-same 1MiB LocalStateQuery request cap.
+address, not a loopback one) keeps gouroboros' default. Both use the same 1MiB
+LocalStateQuery request cap.
+
+Trusted-local admission still has a bounded idle state. After negotiation,
+`connmanager` gives an idle client two minutes to complete the next mux
+segment; only a complete segment refreshes that deadline, so partial header or
+payload traffic cannot extend it. The deadline is suspended while a decoded
+NtC request is executing and while its first response segment is being
+prepared, then every complete response segment refreshes it. ChainSync keeps
+the request active across `AwaitReply` until the deferred reply finishes.
+This preserves the protocol's unbounded LocalStateQuery work and ChainSync
+waits, including one complete whole-UTxO result, while reclaiming the admission
+slot after a client becomes idle before or after protocol activity.
 
 It always starts with one full `Check` pinned at the live tip
 (`establishBaseline`) before validating anything incrementally -- the

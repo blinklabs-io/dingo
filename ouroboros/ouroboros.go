@@ -982,8 +982,8 @@ func (o *Ouroboros) initBlockfetchMetrics() {
 }
 
 // isTrustedNtCListener reports whether l is verified reachable only from
-// this machine, the actual property ConfigureListeners' longer mux read-idle
-// deadline depends on for safety -- "NtC" alone does
+// this machine, the actual property ConfigureListeners' disabled mux
+// segment-read timeout depends on for safety -- "NtC" alone does
 // not imply this: internal/node/node.go builds a UseNtC listener for both
 // cfg.SocketPath (a Unix socket, always local-only by construction) and
 // cfg.PrivateBindAddr:cfg.PrivatePort (an operator-configurable TCP
@@ -1032,12 +1032,13 @@ func (o *Ouroboros) ConfigureListeners(
 	tmpListeners := make([]connmanager.ListenerConfig, len(listeners))
 	for idx, l := range listeners {
 		if l.UseNtC {
-			// Node-to-client. trusted gates the longer mux read-idle
-			// deadline to a listener verified local-only (a Unix socket, or
+			// Node-to-client. trusted gates the disabled mux segment-read
+			// timeout to a listener verified local-only (a Unix socket, or
 			// TCP actually bound to loopback) -- see isTrustedNtCListener's
 			// doc comment. It lets a large, legitimate query (a
-			// whole-UTxO-set walk) run past gouroboros' default, which is
-			// only safe to grant to a listener no non-local caller can reach:
+			// whole-UTxO-set walk) run past gouroboros' anti-DoS default,
+			// which is only safe to grant to a listener no non-local caller
+			// can reach:
 			// a PrivateBindAddr an
 			// operator has pointed at a non-loopback address gets
 			// gouroboros' own defaults instead, same as any other NtC
@@ -1052,7 +1053,7 @@ func (o *Ouroboros) ConfigureListeners(
 			// lookups disagree -- a listener classified trusted from one
 			// answer could then bind to a different, non-loopback address
 			// DNS gives on the second lookup, handing that non-loopback
-			// listener the longer read-idle deadline meant only for a
+			// listener the disabled segment-read timeout meant only for a
 			// verified-local one. A resolution failure here is
 			// left for startListener's own bind to report --
 			// isTrustedNtCListener treats it as untrusted either way.
@@ -1065,7 +1066,7 @@ func (o *Ouroboros) ConfigureListeners(
 			l.TrustedLocal = trusted
 			ntcOpts := []ouroboros.ConnectionOptionFunc{
 				ouroboros.WithNetworkMagic(o.config.NetworkMagic),
-				o.chainsyncConnectionConfigOption(ctx, false),
+				o.chainsyncConnectionConfigOption(ctx, false, trusted),
 				ouroboros.WithLocalStateQueryConfig(
 					olocalstatequery.NewConfig(
 						o.localstatequeryServerConnOpts(trusted)...,
@@ -1073,25 +1074,31 @@ func (o *Ouroboros) ConfigureListeners(
 				),
 				ouroboros.WithLocalTxMonitorConfig(
 					olocaltxmonitor.NewConfig(
-						o.localtxmonitorServerConnOpts()...,
+						o.localtxmonitorServerConnOpts(trusted)...,
 					),
 				),
 				ouroboros.WithLocalTxSubmissionConfig(
 					olocaltxsubmission.NewConfig(
-						o.localtxsubmissionServerConnOpts()...,
+						o.localtxsubmissionServerConnOpts(trusted)...,
 					),
 				),
 			}
 			if trusted {
-				// Whole-state replies can take longer than gouroboros' 120s
-				// default. Keep a larger bound so those replies finish while
-				// incomplete requests and silent clients cannot retain a
-				// connection indefinitely.
+				// LocalStateQuery has no protocol-level timeout at all
+				// (Ouroboros Network Specification section 3.13.4: "No
+				// timeouts") -- a large query, like a whole-UTxO-set walk
+				// against this node's disk-backed store, can legitimately
+				// take minutes. gouroboros' mux applies a fixed 120s
+				// segment-read timeout by default as an anti-DoS guard
+				// against an untrusted remote peer, which does not describe
+				// a verified-local-only NtC client; disabling it here is
+				// what stops a slow-but-legitimate reply from getting the
+				// connection killed mid-flight.
+				// Real cardano-node's own mux applies no equivalent timeout
+				// on local NtC connections either.
 				ntcOpts = append(
 					ntcOpts,
-					ouroboros.WithMuxerSegmentReadTimeout(
-						trustedNtCReadIdleTimeout,
-					),
+					ouroboros.WithMuxerSegmentReadTimeout(0),
 				)
 			}
 			l.ConnectionOpts = append(l.ConnectionOpts, ntcOpts...)

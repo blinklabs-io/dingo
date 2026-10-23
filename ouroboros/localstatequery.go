@@ -26,33 +26,39 @@ import (
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
 )
 
-const (
-	// localStateQueryRequestMaxBytes covers ordinary queries:
-	// gouroboros rejects a decoded query filter above 10000 items, and 10000
-	// of the largest filter element (a Shelley address) stay well under it.
-	// The cap refuses an oversized request before it is reassembled.
-	localStateQueryRequestMaxBytes = 1 << 20
-	// trustedNtCReadIdleTimeout lets multi-minute replies finish while bounding
-	// incomplete requests and otherwise silent local clients.
-	trustedNtCReadIdleTimeout = 15 * time.Minute
-)
+// localStateQueryRequestMaxBytes caps reassembly of an incoming query
+// request. gouroboros rejects a decoded query filter above 10000 items, and
+// 10000 of the largest filter element (a Shelley address) stay well under it.
+// The cap refuses an oversized request before it is reassembled.
+const localStateQueryRequestMaxBytes = 1 << 20
 
 // localstatequeryServerConnOpts returns this listener's LocalStateQuery
-// server options. The node-to-client connection is a responder, so this cap
-// applies to incoming query requests. Tools that receive whole-state replies
-// configure their larger client-side cap at their dial sites.
+// server options. The node-to-client connection is a responder, so the read
+// buffer cap applies to incoming query requests on every listener; tools that
+// receive whole-state replies configure their larger client-side cap at their
+// dial sites. trusted only enables connmanager's activity tracking, which
+// suspends the trusted idle deadline while a request executes.
 func (o *Ouroboros) localstatequeryServerConnOpts(
-	_ bool,
+	trusted bool,
 ) []olocalstatequery.LocalStateQueryOptionFunc {
 	opts := make([]olocalstatequery.LocalStateQueryOptionFunc, 4)
 	opts[0] = olocalstatequery.WithAcquireFunc(
-		o.instrumentLocalstatequeryAcquire(o.localstatequeryServerAcquire),
+		o.instrumentLocalstatequeryAcquire(
+			o.localstatequeryServerAcquire,
+			trusted,
+		),
 	)
 	opts[1] = olocalstatequery.WithQueryFunc(
-		o.instrumentLocalstatequeryQuery(o.localstatequeryServerQuery),
+		o.instrumentLocalstatequeryQuery(
+			o.localstatequeryServerQuery,
+			trusted,
+		),
 	)
 	opts[2] = olocalstatequery.WithReleaseFunc(
-		o.instrumentLocalstatequeryRelease(o.localstatequeryServerRelease),
+		o.instrumentLocalstatequeryRelease(
+			o.localstatequeryServerRelease,
+			trusted,
+		),
 	)
 	opts[3] = olocalstatequery.WithMaxReadBufferSize(
 		localStateQueryRequestMaxBytes,
@@ -62,12 +68,19 @@ func (o *Ouroboros) localstatequeryServerConnOpts(
 
 func (o *Ouroboros) instrumentLocalstatequeryAcquire(
 	fn func(olocalstatequery.CallbackContext, olocalstatequery.AcquireTarget, bool) error,
+	trackActivity bool,
 ) func(olocalstatequery.CallbackContext, olocalstatequery.AcquireTarget, bool) error {
 	return func(
 		ctx olocalstatequery.CallbackContext,
 		acquireTarget olocalstatequery.AcquireTarget,
 		reAcquire bool,
 	) error {
+		endActivity := o.beginTrustedNtCActivity(
+			trackActivity,
+			ctx.ConnectionId,
+			olocalstatequery.ProtocolId,
+		)
+		defer endActivity()
 		start := time.Now()
 		err := fn(ctx, acquireTarget, reAcquire)
 		o.recordProtocolMessage("localstatequery", err, time.Since(start))
@@ -77,11 +90,18 @@ func (o *Ouroboros) instrumentLocalstatequeryAcquire(
 
 func (o *Ouroboros) instrumentLocalstatequeryQuery(
 	fn func(olocalstatequery.CallbackContext, olocalstatequery.QueryWrapper) (any, error),
+	trackActivity bool,
 ) func(olocalstatequery.CallbackContext, olocalstatequery.QueryWrapper) (any, error) {
 	return func(
 		ctx olocalstatequery.CallbackContext,
 		query olocalstatequery.QueryWrapper,
 	) (any, error) {
+		endActivity := o.beginTrustedNtCActivity(
+			trackActivity,
+			ctx.ConnectionId,
+			olocalstatequery.ProtocolId,
+		)
+		defer endActivity()
 		start := time.Now()
 		result, err := fn(ctx, query)
 		o.recordProtocolMessage("localstatequery", err, time.Since(start))
@@ -91,8 +111,15 @@ func (o *Ouroboros) instrumentLocalstatequeryQuery(
 
 func (o *Ouroboros) instrumentLocalstatequeryRelease(
 	fn func(olocalstatequery.CallbackContext) error,
+	trackActivity bool,
 ) func(olocalstatequery.CallbackContext) error {
 	return func(ctx olocalstatequery.CallbackContext) error {
+		endActivity := o.beginTrustedNtCOneWayActivity(
+			trackActivity,
+			ctx.ConnectionId,
+			olocalstatequery.ProtocolId,
+		)
+		defer endActivity()
 		start := time.Now()
 		err := fn(ctx)
 		o.recordProtocolMessage("localstatequery", err, time.Since(start))
