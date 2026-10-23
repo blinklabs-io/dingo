@@ -22,6 +22,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"math"
 	"reflect"
 	"regexp"
@@ -400,9 +401,7 @@ func (d Document) resolveObject(raw any) (map[string]any, error) {
 		return nil, err
 	}
 	ret := make(map[string]any, len(resolved)+len(obj)-1)
-	for key, value := range resolved {
-		ret[key] = value
-	}
+	maps.Copy(ret, resolved)
 	for key, value := range obj {
 		if key != "$ref" {
 			ret[key] = value
@@ -416,7 +415,7 @@ func (d Document) resolveRef(ref string) (map[string]any, error) {
 		return nil, fmt.Errorf("external OpenAPI reference is not pinned: %q", ref)
 	}
 	var current any = d.root
-	for _, token := range strings.Split(strings.TrimPrefix(ref, "#/"), "/") {
+	for token := range strings.SplitSeq(strings.TrimPrefix(ref, "#/"), "/") {
 		token = strings.ReplaceAll(strings.ReplaceAll(token, "~1", "/"), "~0", "~")
 		obj, ok := current.(map[string]any)
 		if !ok {
@@ -594,8 +593,7 @@ func (d Document) compareStruct(
 }
 
 func collectJSONFields(typ reflect.Type, dst map[string]reflect.StructField) {
-	for i := range typ.NumField() {
-		field := typ.Field(i)
+	for field := range typ.Fields() {
 		if field.PkgPath != "" && !field.Anonymous {
 			continue
 		}

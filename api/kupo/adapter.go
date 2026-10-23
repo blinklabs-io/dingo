@@ -125,11 +125,12 @@ func (a *NodeAdapter) Matches(
 	var outputIndex *uint32
 	outputIndexOutsideStorage := false
 	if query.OutputIndex != nil {
-		if *query.OutputIndex > math.MaxUint32 {
-			outputIndexOutsideStorage = true
-		} else {
-			idx := uint32(*query.OutputIndex)
+		requested := *query.OutputIndex
+		if requested <= math.MaxUint32 {
+			idx := uint32(requested)
 			outputIndex = &idx
+		} else {
+			outputIndexOutsideStorage = true
 		}
 	}
 	storageQuery := &models.UtxoHistoryQuery{
