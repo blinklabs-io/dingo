@@ -634,19 +634,18 @@ func (b *BlobStoreBark) fetchBlockFromArchive(
 	slot uint64,
 	hash []byte,
 ) ([]byte, types.BlockMetadata, error) {
-	resp, err := b.archiveClient.FetchBlock(
-		ctx,
-		connect.NewRequest(
-			&archivev1alpha1.FetchBlockRequest{
-				Blocks: []*archivev1alpha1.BlockRef{
-					{
-						Slot: new(slot),
-						Hash: new(hex.EncodeToString(hash)),
-					},
+	fetchReq := connect.NewRequest(
+		&archivev1alpha1.FetchBlockRequest{
+			Blocks: []*archivev1alpha1.BlockRef{
+				{
+					Slot: new(slot),
+					Hash: new(hex.EncodeToString(hash)),
 				},
 			},
-		),
+		},
 	)
+	fetchReq.Header().Set("User-Agent", httpuseragent.Default())
+	resp, err := b.archiveClient.FetchBlock(ctx, fetchReq)
 	if err != nil {
 		return nil, types.BlockMetadata{},
 			fmt.Errorf(
@@ -654,7 +653,6 @@ func (b *BlobStoreBark) fetchBlockFromArchive(
 				err,
 			)
 	}
-	resp.Header().Set("User-Agent", httpuseragent.Default())
 
 	blocks := resp.Msg.GetBlocks()
 	if len(blocks) != 1 {

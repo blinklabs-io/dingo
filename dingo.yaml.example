@@ -2,8 +2,8 @@
 # No settings are required. Uncomment a setting only to override its in-code
 # default.
 # DINGO_HTTP_USER_AGENT overrides the default user-agent sent on outbound HTTP
-# requests. Off-chain metadata and token registry userAgent settings take
-# precedence over this shared value.
+# requests; a value that is not a valid header is ignored. Off-chain metadata
+# and token registry userAgent settings take precedence over this shared value.
 #
 # Keep a local copy that holds credentials (token registry headers, API keys)
 # outside the repository, or name it dingo.yaml, which git ignores. Key files

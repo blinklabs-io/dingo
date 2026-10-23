@@ -73,3 +73,30 @@ func TestSetUsesDefaultForEmptyRequestUserAgent(t *testing.T) {
 		t.Fatalf("User-Agent = %q, want shared-agent/1", got)
 	}
 }
+
+func TestDefaultIgnoresInvalidEnvironmentValue(t *testing.T) {
+	t.Setenv("DINGO_HTTP_USER_AGENT", "bad\r\nX-Injected: 1")
+	got := Default()
+	want := "dingo/" + version.GetVersionString() +
+		" (" + runtime.GOOS + "/" + runtime.GOARCH + ")"
+	if got != want {
+		t.Fatalf("Default() = %q, want %q", got, want)
+	}
+}
+
+func TestSetPreservesExplicitlyEmptyUserAgent(t *testing.T) {
+	t.Setenv("DINGO_HTTP_USER_AGENT", "shared-agent/1")
+	req, err := http.NewRequest(http.MethodGet, "https://example.test", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// net/http sends no User-Agent at all for a present, empty value.
+	req.Header["User-Agent"] = []string{""}
+
+	Set(req)
+
+	got, ok := req.Header["User-Agent"]
+	if !ok || len(got) != 1 || got[0] != "" {
+		t.Fatalf("User-Agent = %q (present %v), want present and empty", got, ok)
+	}
+}

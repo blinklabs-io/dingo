@@ -21,12 +21,17 @@ import (
 	"runtime"
 
 	"github.com/blinklabs-io/dingo/internal/version"
+	"golang.org/x/net/http/httpguts"
 )
 
-// Default returns Dingo's default HTTP user-agent, including its version and
-// the platform on which it was built.
+// Default returns the user-agent for Dingo's outbound HTTP requests. A
+// non-empty DINGO_HTTP_USER_AGENT that is a valid header value overrides it;
+// otherwise it names Dingo's version and the platform on which it was built.
 func Default() string {
-	if userAgent := os.Getenv("DINGO_HTTP_USER_AGENT"); userAgent != "" {
+	// An override net/http would refuse to send is ignored rather than
+	// returned, since it would fail every request that carries it.
+	if userAgent := os.Getenv("DINGO_HTTP_USER_AGENT"); userAgent != "" &&
+		httpguts.ValidHeaderFieldValue(userAgent) {
 		return userAgent
 	}
 	return fmt.Sprintf(
@@ -37,9 +42,14 @@ func Default() string {
 	)
 }
 
-// Set sets Dingo's default user-agent unless the caller already supplied one.
+// Set sets Default as the request's user-agent unless the request already
+// carries a User-Agent header. A present but empty header is kept, because
+// net/http then sends no User-Agent at all.
 func Set(req *http.Request) {
-	if req != nil && req.Header.Get("User-Agent") == "" {
+	if req == nil {
+		return
+	}
+	if _, ok := req.Header["User-Agent"]; !ok {
 		req.Header.Set("User-Agent", Default())
 	}
 }
