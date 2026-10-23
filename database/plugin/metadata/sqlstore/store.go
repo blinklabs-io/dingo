@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"math/rand/v2"
 	"regexp"
 	"slices"
@@ -1418,6 +1419,15 @@ func (t *sqlTxn) bindBatch(accumulator *transactionBatchAccumulator) error {
 		checkpoint[accumulator] = accumulator.checkpoint()
 	}
 	return nil
+}
+
+func (t *sqlTxn) boundBatches() []*transactionBatchAccumulator {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if len(t.batchBefore) == 0 {
+		return nil
+	}
+	return slices.Collect(maps.Keys(t.batchBefore))
 }
 
 func (t *sqlTxn) restoreBatches(

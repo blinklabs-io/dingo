@@ -1304,7 +1304,15 @@ func extractArchiveFile(
 
 	// Bound decoder allocations explicitly. The library default is a protocol
 	// maximum rather than an application resource policy, and may change when
-	// the dependency is upgraded.
+	// the dependency is upgraded. The reservation outlives the reader's Close
+	// so the memory is accounted until the decoder has been released.
+	release, err := extractCfg.decoders.reserve(
+		ctx, extractCfg.maxZstdWindowSize, extractCfg.maxZstdMemory,
+	)
+	if err != nil {
+		return "", err
+	}
+	defer release()
 	zr, err := zstd.NewReader(
 		countingFile,
 		zstd.WithDecoderMaxWindow(extractCfg.maxZstdWindowSize),

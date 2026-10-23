@@ -693,7 +693,8 @@ func (s *Store) SetBlockNonces(
 			values[i] = "(?, ?, ?, ?)"
 			args = append(args, nonce.Hash, slot, nonce.Nonce, nonce.IsCheckpoint)
 		}
-		query := `INSERT INTO block_nonce (hash, slot, nonce, is_checkpoint)
+		query := `-- name: UpsertBlockNonceBatch :exec
+INSERT INTO block_nonce (hash, slot, nonce, is_checkpoint)
 VALUES ` + strings.Join(values, ",") + `
 ON CONFLICT (hash, slot) DO UPDATE SET
     nonce = excluded.nonce,

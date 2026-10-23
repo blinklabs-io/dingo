@@ -182,7 +182,9 @@ WHERE reward.credential_tag = ? AND reward.credential = ?`
 
 // accountAssetRows streams the native-asset holdings of a credential's UTxOs,
 // ordered by asset, and reports whether each UTxO has been spent. Only live
-// UTxOs are read when liveOnly is set.
+// UTxOs are read when liveOnly is set. More than maxRows holdings, when
+// positive, fail with models.ErrAccountAggregateLimit. The cap applies to an
+// inner query so the ordering sorts at most maxRows+1 rows.
 func accountAssetRows(
 	ctx context.Context,
 	db queryer,
@@ -190,23 +192,42 @@ func accountAssetRows(
 	stakingKey []byte,
 	liveOnly bool,
 	order string,
+	maxRows int,
 	visit func(policyID, name []byte, quantity *big.Int, spent bool) error,
 ) error {
-	query := `SELECT a.policy_id, a.name, a.amount, u.deleted_slot
+	query := `SELECT a.policy_id AS policy_id, a.name AS name,
+a.amount AS amount, u.deleted_slot AS deleted_slot
 FROM asset a
 JOIN utxo u ON u.id = a.utxo_id
 WHERE u.credential_tag = ? AND u.staking_key = ?`
 	if liveOnly {
 		query += " AND u.deleted_slot = 0"
 	}
+	args := []any{credentialTag, stakingKey}
+	if maxRows > 0 {
+		// OFFSET prevents SQLite from flattening the capped subquery and
+		// sorting every matching holding before applying the limit.
+		query += " LIMIT ? OFFSET 0"
+		args = append(args, maxRows+1)
+	}
 	dir := orderDirectionFromString(order)
-	query += " ORDER BY a.policy_id " + dir + ", a.name " + dir
-	rows, err := db.QueryContext(ctx, query, credentialTag, stakingKey)
+	query = "SELECT policy_id, name, amount, deleted_slot FROM (" + query +
+		") capped ORDER BY policy_id " + dir + ", name " + dir
+	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return err
 	}
 	defer rows.Close()
+	read := 0
 	for rows.Next() {
+		read++
+		if maxRows > 0 && read > maxRows {
+			return fmt.Errorf(
+				"more than %d asset holdings: %w",
+				maxRows,
+				models.ErrAccountAggregateLimit,
+			)
+		}
 		var policyID, name []byte
 		var amount string
 		var deletedSlot int64
@@ -230,6 +251,7 @@ func (s *Store) GetAccountAssetBalances(
 	limit int,
 	offset int,
 	order string,
+	limits models.AccountAggregateLimits,
 	txn types.Txn,
 ) ([]models.AssetQuantity, int, error) {
 	ret := []models.AssetQuantity{}
@@ -258,7 +280,7 @@ func (s *Store) GetAccountAssetBalances(
 		current = nil
 	}
 	err = accountAssetRows(
-		ctx, db, credentialTag, stakingKey, true, order,
+		ctx, db, credentialTag, stakingKey, true, order, limits.MaxAssetRows,
 		func(policyID, name []byte, quantity *big.Int, _ bool) error {
 			if current != nil &&
 				bytes.Equal(current.PolicyID, policyID) &&
@@ -267,6 +289,13 @@ func (s *Store) GetAccountAssetBalances(
 				return nil
 			}
 			flush()
+			if limits.MaxAssets > 0 && total >= limits.MaxAssets {
+				return fmt.Errorf(
+					"more than %d distinct assets: %w",
+					limits.MaxAssets,
+					models.ErrAccountAggregateLimit,
+				)
+			}
 			current = &models.AssetQuantity{
 				PolicyID: policyID,
 				Name:     name,
@@ -285,6 +314,7 @@ func (s *Store) GetAccountAssetBalances(
 func (s *Store) GetAccountAddressTotals(
 	credentialTag uint8,
 	stakingKey []byte,
+	limits models.AccountAggregateLimits,
 	txn types.Txn,
 ) (models.AccountAddressTotals, error) {
 	var ret models.AccountAddressTotals
@@ -302,10 +332,12 @@ func (s *Store) GetAccountAddressTotals(
 		{&ret.ReceivedLovelace, `SELECT amount FROM utxo WHERE credential_tag = ? AND staking_key = ?`},
 		{&ret.SentLovelace, `SELECT amount FROM utxo WHERE credential_tag = ? AND staking_key = ? AND deleted_slot <> 0`},
 	} {
-		value, err := sumSignedRows(
+		value, err := sumSignedRowsBounded(
 			ctx,
 			db,
 			total.query,
+			limits.MaxUtxos,
+			models.ErrAccountAggregateLimit,
 			credentialTag,
 			stakingKey,
 		)
@@ -316,24 +348,34 @@ func (s *Store) GetAccountAddressTotals(
 	}
 	received := map[string]*models.AssetQuantity{}
 	sent := map[string]*models.AssetQuantity{}
-	add := func(into map[string]*models.AssetQuantity, policyID, name []byte, quantity *big.Int) {
+	add := func(into map[string]*models.AssetQuantity, policyID, name []byte, quantity *big.Int) error {
 		key := string(policyID) + "\x00" + string(name)
 		if held, ok := into[key]; ok {
 			held.Quantity.Add(held.Quantity, quantity)
-			return
+			return nil
+		}
+		if limits.MaxAssets > 0 && len(into) >= limits.MaxAssets {
+			return fmt.Errorf(
+				"more than %d distinct assets: %w",
+				limits.MaxAssets,
+				models.ErrAccountAggregateLimit,
+			)
 		}
 		into[key] = &models.AssetQuantity{
 			PolicyID: policyID,
 			Name:     name,
 			Quantity: new(big.Int).Set(quantity),
 		}
+		return nil
 	}
 	err = accountAssetRows(
-		ctx, db, credentialTag, stakingKey, false, "asc",
+		ctx, db, credentialTag, stakingKey, false, "asc", limits.MaxAssetRows,
 		func(policyID, name []byte, quantity *big.Int, spent bool) error {
-			add(received, policyID, name, quantity)
+			if err := add(received, policyID, name, quantity); err != nil {
+				return err
+			}
 			if spent {
-				add(sent, policyID, name, quantity)
+				return add(sent, policyID, name, quantity)
 			}
 			return nil
 		},
@@ -343,15 +385,57 @@ func (s *Store) GetAccountAddressTotals(
 	}
 	ret.ReceivedAssets = sortedAssetQuantities(received)
 	ret.SentAssets = sortedAssetQuantities(sent)
-	if err := db.QueryRowContext(
-		ctx,
-		`SELECT COUNT(DISTINCT transaction_id) FROM address_transaction
-WHERE credential_tag = ? AND staking_key = ?`,
-		credentialTag, stakingKey,
-	).Scan(&ret.TxCount); err != nil {
+	// Each output the lovelace sums admitted is created by one transaction
+	// and spent by at most one, so twice MaxUtxos covers those. A transaction
+	// that only names an output as a reference or unspent collateral input is
+	// recorded too and can push the count past it; that is refused, not
+	// counted.
+	maxTxs := 2 * limits.MaxUtxos
+	countLimit := 0
+	if maxTxs > 0 {
+		countLimit = maxTxs + 1
+	}
+	txCount, err := countAccountTransactions(
+		ctx, db, credentialTag, stakingKey, countLimit,
+	)
+	if err != nil {
 		return ret, fmt.Errorf("count account transactions: %w", err)
 	}
+	if maxTxs > 0 && txCount > maxTxs {
+		return ret, fmt.Errorf(
+			"more than %d transactions: %w",
+			maxTxs,
+			models.ErrAccountAggregateLimit,
+		)
+	}
+	ret.TxCount = txCount
 	return ret, nil
+}
+
+// countAccountTransactions counts the distinct transactions recorded against
+// a credential. A positive limit caps the distinct ids the database reads,
+// so the result is then at most limit.
+func countAccountTransactions(
+	ctx context.Context,
+	db queryer,
+	credentialTag uint8,
+	stakingKey []byte,
+	limit int,
+) (int, error) {
+	query := `SELECT COUNT(*) FROM (SELECT DISTINCT transaction_id
+FROM address_transaction
+WHERE credential_tag = ? AND staking_key = ?`
+	args := []any{credentialTag, stakingKey}
+	if limit > 0 {
+		query += " LIMIT ?"
+		args = append(args, limit)
+	}
+	query += ") distinct_transactions"
+	var count int
+	if err := db.QueryRowContext(ctx, query, args...).Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
 }
 
 func sortedAssetQuantities(

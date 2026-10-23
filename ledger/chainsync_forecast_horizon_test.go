@@ -1249,6 +1249,165 @@ func TestAwaitChainsyncHeaderAdmissionResyncsWhenNoWorkCanAdvanceForecast(
 	require.False(t, got.accepted)
 }
 
+// Stored blocks the ledger has not applied yet are local work: applying them
+// publishes the snapshots that move the horizon, so a held header waits for
+// that rather than closing a connection the work may need. Once the ledger
+// catches up with nothing left to apply, the header asks for a resync.
+func TestAwaitChainsyncHeaderAdmissionWaitsForUnappliedChainBlocks(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	cm, err := chain.NewManager(context.Background(), db, nil)
+	require.NoError(t, err)
+	primary := cm.PrimaryChain()
+	blocks, err := fixtures.GenerateConwayChain(
+		1,
+		lcommon.Blake2b256{},
+		300_000,
+		1_000,
+		2,
+	)
+	require.NoError(t, err)
+	for _, block := range blocks {
+		require.NoError(t, primary.AddBlock(context.Background(), block, nil))
+	}
+	applied := blocks[0]
+
+	cfg := minimalShelleyGenesisCfg(t)
+	ls := &LedgerState{
+		db:    db,
+		chain: primary,
+		epochCache: []models.Epoch{{
+			EpochId:       0,
+			StartSlot:     0,
+			SlotLength:    1_000,
+			LengthInSlots: 432_000,
+			EraId:         eras.ConwayEraDesc.Id,
+		}},
+		currentEra: eras.ConwayEraDesc,
+		currentTip: ochainsync.Tip{
+			Point: ocommon.NewPoint(
+				applied.SlotNumber(),
+				applied.Hash().Bytes(),
+			),
+			BlockNumber: applied.BlockNumber(),
+		},
+		config: LedgerStateConfig{
+			CardanoNodeConfig: cfg,
+			Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+	}
+	systemStart := cfg.ShelleyGenesis().SystemStart
+	const headerSlot = 500_000
+	arrival := systemStart.Add(600_000 * time.Second)
+	clock := NewSlotClock(
+		pastHorizonSlotTimeProvider{
+			SlotTimeProvider: newMockSlotTimeProvider(
+				systemStart,
+				time.Second,
+				1_000_000,
+			),
+			rejectedSlot: headerSlot,
+		},
+		DefaultSlotClockConfig(),
+	)
+	clock.nowFunc = func() time.Time { return arrival }
+	ls.slotClock = clock
+	ls.publishSnapshotsLocked()
+
+	header := mockHeader{
+		hash:        lcommon.Blake2b256Hash([]byte("past horizon")),
+		prevHash:    lcommon.NewBlake2b256(primary.Tip().Point.Hash),
+		blockNumber: 3,
+		slot:        headerSlot,
+	}
+	results := awaitAdmissionAsync(t.Context(), ls, ChainsyncEvent{
+		BlockHeader: header,
+		ArrivalTime: arrival,
+		Point:       ocommon.NewPoint(headerSlot, header.Hash().Bytes()),
+	})
+	testutil.RequireNoReceive(
+		t,
+		results,
+		100*time.Millisecond,
+		"a header must wait while stored blocks remain to be applied",
+	)
+	require.Zero(t, ls.chain.HeaderCount())
+
+	ls.Lock()
+	ls.currentTip = primary.Tip()
+	ls.publishSnapshotsLocked()
+	ls.Unlock()
+	got := testutil.RequireReceive(
+		t,
+		results,
+		testutil.AsyncWait,
+		"admission did not ask for a resync once nothing was left to apply",
+	)
+	require.ErrorIs(t, got.err, ErrChainsyncHeaderNeedsResync)
+	require.False(t, got.accepted)
+}
+
+// chainAheadOfAppliedTip compares the chain tip with the applied tip as points.
+// A chain tip in the applied tip's slot under another hash is a block the
+// ledger has not applied, so it counts as ahead like a later slot does; a
+// chain tip in an earlier slot cannot carry a block that extends the forecast.
+func TestChainAheadOfAppliedTip(t *testing.T) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	cm, err := chain.NewManager(context.Background(), db, nil)
+	require.NoError(t, err)
+	primary := cm.PrimaryChain()
+	blocks, err := fixtures.GenerateConwayChain(
+		1,
+		lcommon.Blake2b256{},
+		300_000,
+		1_000,
+		2,
+	)
+	require.NoError(t, err)
+	for _, block := range blocks {
+		require.NoError(t, primary.AddBlock(context.Background(), block, nil))
+	}
+	chainTip := primary.Tip().Point
+
+	cases := map[string]struct {
+		applied ocommon.Point
+		want    bool
+	}{
+		"applied tip is the chain tip": {
+			applied: chainTip,
+		},
+		"chain tip in a later slot": {
+			applied: ocommon.NewPoint(chainTip.Slot-1, []byte("earlier")),
+			want:    true,
+		},
+		"chain tip in the same slot under another hash": {
+			applied: ocommon.NewPoint(chainTip.Slot, []byte("other fork")),
+			want:    true,
+		},
+		"chain tip in an earlier slot": {
+			applied: ocommon.NewPoint(chainTip.Slot+1, []byte("later")),
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			ls := &LedgerState{chain: primary}
+			ls.tip.Store(&tipSnapshot{
+				currentTip: ochainsync.Tip{Point: tc.applied},
+			})
+			require.Equal(t, tc.want, ls.chainAheadOfAppliedTip())
+		})
+	}
+}
+
 // connectsToLocalChain decides whether a held header can still be released by
 // blocks the node already has. Every way the walk reaches the local chain must
 // count as connected, and only an ancestry that leaves it, or that the

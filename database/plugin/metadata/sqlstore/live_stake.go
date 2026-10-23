@@ -21,6 +21,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"math"
+	"slices"
 	"strings"
 	"time"
 
@@ -38,7 +40,7 @@ import (
 // "RETURNING id"), which this query never has, so translate() plus a direct
 // QueryRowContext call is exactly what a cached *sql.Stmt (already
 // dialect-translated at prepare time, see prepareHotStatements) reproduces.
-const rewardLiveStakeAccountQuery = `
+const rewardLiveStakeAccountQuery = `-- name: GetRewardLiveStakeAccount :one
 SELECT reward, pool, active, added_slot
 FROM account
 WHERE credential_tag = ? AND staking_key = ?`
@@ -51,7 +53,7 @@ WHERE credential_tag = ? AND staking_key = ?`
 // dialect-specific branch to bypass. dialectQueryer.translate's ON CONFLICT
 // rewrite for MySQL happens once, at PrepareContext time, exactly as it does
 // for a one-shot ExecContext call today.
-const rewardLiveStakeUpsertQuery = `
+const rewardLiveStakeUpsertQuery = `-- name: UpsertRewardLiveStake :exec
 INSERT INTO reward_live_stake (
     credential_tag, staking_key, pool_key_hash, utxo_stake, reward_stake,
     total_stake, registered, pool_delegation_slot,
@@ -76,6 +78,21 @@ func (s *Store) refreshRewardLiveStakeAggregate(
 	ref models.StakeCredentialRef,
 	slot uint64,
 ) error {
+	return s.refreshRewardLiveStakeAggregateNetOfPending(ctx, db, ref, slot, 0)
+}
+
+// refreshRewardLiveStakeAggregateNetOfPending recomputes ref's live UTxO
+// total from the utxo table and stores it less pending, the delta of rows a
+// batch accumulator has written but not yet folded into the running total.
+// Storing the full sum would count those rows twice: once here and again
+// when the accumulator flushes its delta onto the stored total.
+func (s *Store) refreshRewardLiveStakeAggregateNetOfPending(
+	ctx context.Context,
+	db queryer,
+	ref models.StakeCredentialRef,
+	slot uint64,
+	pending int64,
+) error {
 	if len(ref.Key) == 0 {
 		return nil
 	}
@@ -83,7 +100,49 @@ func (s *Store) refreshRewardLiveStakeAggregate(
 	if err != nil {
 		return fmt.Errorf("sum reward live stake UTxOs: %w", err)
 	}
+	if pending != 0 {
+		if pending == math.MinInt64 {
+			return fmt.Errorf(
+				"pending live stake delta out of range for %d:%x",
+				ref.Tag,
+				ref.Key,
+			)
+		}
+		utxoStake, err = applyUtxoStakeDelta(utxoStake, -pending, ref)
+		if err != nil {
+			return err
+		}
+	}
 	return s.applyRewardLiveStakeAggregate(ctx, db, ref, slot, utxoStake)
+}
+
+// pendingUtxoStakeDelta returns ref's stake delta queued in extra and in
+// every batch accumulator bound to txn. Those accumulators' utxo rows are
+// already visible to txn, but their deltas reach reward_live_stake only when
+// the accumulator flushes.
+func pendingUtxoStakeDelta(
+	txn types.Txn,
+	extra *transactionBatchAccumulator,
+	ref models.StakeCredentialRef,
+) (int64, error) {
+	var accumulators []*transactionBatchAccumulator
+	if transaction, ok := txn.(*sqlTxn); ok {
+		accumulators = transaction.boundBatches()
+	}
+	if extra != nil && !slices.Contains(accumulators, extra) {
+		accumulators = append(accumulators, extra)
+	}
+	key := ref.MapKey()
+	var total int64
+	for _, accumulator := range accumulators {
+		delta := accumulator.stakeDeltas[key].delta
+		if (delta > 0 && total > math.MaxInt64-delta) ||
+			(delta < 0 && total < math.MinInt64-delta) {
+			return 0, errors.New("reward live stake delta overflow")
+		}
+		total += delta
+	}
+	return total, nil
 }
 
 // rewardLiveStakeUtxoStakeQuery reads the running live-UTxO total
@@ -92,7 +151,7 @@ func (s *Store) refreshRewardLiveStakeAggregate(
 // staking_key) point lookup the upsert's conflict target already indexes
 // (idx_reward_live_stake_cred), so this is an indexed single-row read, not a
 // scan.
-const rewardLiveStakeUtxoStakeQuery = `
+const rewardLiveStakeUtxoStakeQuery = `-- name: GetRewardLiveStakeUtxoStake :one
 SELECT utxo_stake FROM reward_live_stake
 WHERE credential_tag = ? AND staking_key = ?`
 
@@ -278,7 +337,7 @@ func (s *Store) applyRewardLiveStakeAggregate(
 	}
 	total := utxoValue + rewardStake
 	if errors.Is(accountErr, sql.ErrNoRows) && total == 0 {
-		_, err := db.ExecContext(ctx, `
+		_, err := db.ExecContext(ctx, `-- name: DeleteRewardLiveStake :exec
 DELETE FROM reward_live_stake
 WHERE credential_tag = ? AND staking_key = ?`,
 			ref.Tag,
@@ -366,7 +425,7 @@ WHERE credential_tag = ? AND staking_key = ?`,
 // recompiling the statement on every invocation; see prepared_stmt.go for
 // why caching and reusing one *sql.Stmt here is safe and
 // BenchmarkSumCredentialUtxoStake for the measured effect.
-const sumCredentialUtxoStakeQuery = `
+const sumCredentialUtxoStakeQuery = `-- name: SumCredentialUtxoStake :one
 SELECT SUM(CAST(amount AS BIGINT))
 FROM utxo
 WHERE credential_tag = ? AND staking_key = ? AND deleted_slot = 0`

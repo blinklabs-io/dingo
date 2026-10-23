@@ -764,7 +764,8 @@ func TestGetTxInfosErrorsOnIncompleteResponse(t *testing.T) {
 
 	k := newTestKoiosClient(srv.URL)
 	_, err := k.GetTxInfos(context.Background(), []string{"aaa", "bbb"})
-	require.Error(t, err)
+	require.ErrorIs(t, err, ErrTxInfoMissing,
+		"the caller fetches a missing hash again, so it must be identifiable")
 	require.ErrorContains(t, err, "bbb")
 }
 
@@ -789,6 +790,7 @@ func TestGetTxInfosErrorsOnDuplicateResult(t *testing.T) {
 	_, err := k.GetTxInfos(context.Background(), []string{"aaa"})
 	require.Error(t, err)
 	require.ErrorContains(t, err, "duplicate")
+	require.NotErrorIs(t, err, ErrTxInfoMissing)
 }
 
 // TestNewKoiosTransportResponseHeaderTimeout proves newKoiosTransport's

@@ -93,6 +93,9 @@ func resetGlobalConfig() {
 		// ValidateForgedBlock's production default is an unconditional
 		// literal with no separate fill-in step to test around.
 		ValidateForgedBlock: true,
+		// Mirrors newDefaultConfig: the apply-ahead work is on by default.
+		LedgerPrefetchAheadEnabled: true,
+		LedgerValidateAheadEnabled: true,
 	}
 	globalTopologyConfig = &topology.TopologyConfig{}
 }
@@ -298,6 +301,8 @@ mithril:
 		ForgeAppliedTipStalenessSlots:    DefaultForgeAppliedTipStalenessSlots,
 		ForgeEndorserBlockStalenessSlots: DefaultForgeEndorserBlockStalenessSlots,
 		ValidateForgedBlock:              true,
+		LedgerPrefetchAheadEnabled:       true,
+		LedgerValidateAheadEnabled:       true,
 		ForgeEBMaxTxRefs:                 forgeEBCapDefault(777),
 		ForgeEBMaxBytes:                  forgeEBCapDefault(888888),
 		ForgeEBSelectionReserve:          750 * time.Millisecond,
@@ -336,6 +341,12 @@ mithril:
 func TestDefaultMempoolProviderIsFIFO(t *testing.T) {
 	if got := defaultPluginsConfig().Mempool.Provider; got != "fifo" {
 		t.Fatalf("default mempool provider = %q, want fifo", got)
+	}
+}
+
+func TestDefaultConsensusProviderIsPraos(t *testing.T) {
+	if got := defaultPluginsConfig().Consensus.Provider; got != "praos" {
+		t.Fatalf("default consensus provider = %q, want praos", got)
 	}
 }
 
@@ -423,6 +434,8 @@ func TestLoad_WithoutConfigFile_UsesDefaults(t *testing.T) {
 		ForgeAppliedTipStalenessSlots:    DefaultForgeAppliedTipStalenessSlots,
 		ForgeEndorserBlockStalenessSlots: DefaultForgeEndorserBlockStalenessSlots,
 		ValidateForgedBlock:              true,
+		LedgerPrefetchAheadEnabled:       true,
+		LedgerValidateAheadEnabled:       true,
 		ForgeEBMaxTxRefs:                 forgeEBCapDefault(DefaultForgeEBMaxTxRefs),
 		ForgeEBMaxBytes:                  forgeEBCapDefault(DefaultForgeEBMaxBytes),
 		ForgeEBSelectionReserve:          DefaultForgeEBSelectionReserve,
