@@ -242,7 +242,8 @@ docker compose -f docker-compose.yml build dingo-producer
 `up`) when you want fresh code in the running containers.
 
 The configurator image (`Dockerfile.configurator`) is built from this
-directory and pinned to upstream `testnet-generation-tool@v0.1.0`; it rarely
+directory and pinned to upstream `testnet-generation-tool@v0.2.0`, which
+generates configuration for cardano-node's current tracing system; it rarely
 needs rebuilding once cached.
 
 ## Where to run from
@@ -790,7 +791,7 @@ harness and the compose port mappings always agree.
 | File                         | Purpose |
 |------------------------------|---------|
 | `docker-compose.yml`         | Service, volume, and network definitions for the `dingo`, `conformance`, and `koios-parity` profiles |
-| `Dockerfile.configurator`    | Builds the genesis/key generator image (cardano-foundation/testnet-generation-tool v0.1.0) |
+| `Dockerfile.configurator`    | Builds the genesis/key generator image (cardano-foundation/testnet-generation-tool v0.2.0) |
 | `configurator.sh`            | Runs inside the configurator: drives `genesis-cli.py`, builds ring topology (mode-aware pool count via `DINGO_POOL_IDS`), sets `systemStart`, relaxes key permissions for non-root node containers and chowns each Dingo pool's keys to `DINGO_UID`/`DINGO_GID` (passed in by compose, defaulting to the `1000:1000` pinned in the repo root `Dockerfile`) |
 | `testnet-dingo.yaml`         | Canonical network spec for dingo mode: 3 pools, `poolPledge: 0` |
 | `testnet.yaml`               | Canonical network spec for conformance mode: 2 pools |
