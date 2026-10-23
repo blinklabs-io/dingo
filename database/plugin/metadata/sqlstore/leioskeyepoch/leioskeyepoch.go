@@ -22,6 +22,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"math"
 )
 
 // Querier is the subset of database/sql the derivation reads through. The
@@ -138,9 +139,14 @@ func (r retirementRow) after(registration registrationRow) bool {
 // replaces the pool state where it lands, and otherwise the pool's latest
 // registration before that epoch, unless a retirement reaped the pool before
 // it or the pool was registered afresh within it, when it is the epoch's
-// first registration. A constant number of indexed reads finds these rows,
-// whatever the length of the pool's history, and nothing is kept outside the
-// rows, so a rollback that deletes rows leaves nothing to undo. A
+// first registration. A constant number of statements finds these rows.
+// Reading the latest registration before the epoch is an index seek bounded
+// by the closure rows of one block (latestRegistrationExecutedBefore). The
+// lookup of the latest snapshot import in the epoch walks the pool's live
+// rows added since the epoch started, and the retirement lookups read all of
+// the pool's retirements, since no index orders either by position. Nothing is
+// kept outside the rows, so a rollback that deletes rows leaves nothing to
+// undo. A
 // snapshot-imported registration is the state the snapshot carried, with its
 // epoch, or without one when the snapshot had none; a key kept from it keeps
 // the absence. A snapshot's staged parameters (registration index above
@@ -309,22 +315,30 @@ const registrationBlockIndex = `COALESCE((
     SELECT tx.block_index FROM "transaction" tx WHERE tx.id = c.transaction_id
 ), 0)`
 
-const registrationColumns = `
-SELECT pr.added_slot, ` + executionSlotSQL + `,
-       ` + registrationBlockIndex + `, COALESCE(c.cert_index, 0),
-       COALESCE(pr.certificate_id, 0), pr.registration_index,
-       pr.leios_key_public, pr.leios_key_possession_proof,
-       pr.leios_key_registration_epoch, pr.leios_key_registration_age_unknown
+// registrationSelect lists the columns scanRegistration reads, aliased so a
+// statement can wrap the select in a derived table.
+const registrationSelect = `
+SELECT pr.added_slot AS added_slot, ` + executionSlotSQL + ` AS execution_slot,
+       ` + registrationBlockIndex + ` AS block_index,
+       COALESCE(c.cert_index, 0) AS cert_index,
+       COALESCE(pr.certificate_id, 0) AS certificate_id,
+       pr.registration_index AS registration_index,
+       pr.leios_key_public AS leios_key_public,
+       pr.leios_key_possession_proof AS leios_key_possession_proof,
+       pr.leios_key_registration_epoch AS leios_key_registration_epoch,
+       pr.leios_key_registration_age_unknown AS leios_key_registration_age_unknown
 FROM pool_registration pr
 LEFT JOIN certs c ON c.id = pr.certificate_id
 WHERE pr.pool_id = ?
-  AND pr.added_slot <= ?
+`
+
+const registrationColumns = registrationSelect + `  AND pr.added_slot <= ?
   AND `
 
 // latestRegistration reads the pool's latest registration strictly before
 // `at`, restricted to those executed before slot executedBefore when it is
-// set. The scan walks the (pool_id, added_slot) index backwards from `at` and
-// stops at the first row that qualifies.
+// set. Unrestricted, the scan walks the (pool_id, added_slot) index backwards
+// from `at` and stops at the first row, which qualifies.
 func latestRegistration(
 	ctx context.Context,
 	db Querier,
@@ -332,18 +346,82 @@ func latestRegistration(
 	at Position,
 	executedBefore *uint64,
 ) (registrationRow, bool, error) {
-	predicate, args := positionPredicate("pr", at, registrationBlockIndex)
-	query := registrationColumns + predicate
-	args = append([]any{poolID, at.Slot}, args...)
 	if executedBefore != nil {
-		query += "\n  AND " + executionSlotSQL + " < ?"
-		args = append(args, *executedBefore)
+		return latestRegistrationExecutedBefore(
+			ctx, db, poolID, at, *executedBefore,
+		)
 	}
-	query += `
+	predicate, args := positionPredicate("pr", at, registrationBlockIndex)
+	query := "-- name: LeiosKeyLatestRegistration" +
+		registrationColumns + predicate + registrationOrder
+	args = append([]any{poolID, at.Slot}, args...)
+	return scanRegistration(db.QueryRowContext(ctx, query, args...))
+}
+
+// registrationOrder sorts registrations by chain position, latest first.
+const registrationOrder = `
 ORDER BY pr.added_slot DESC, ` + registrationBlockIndex + ` DESC,
          COALESCE(c.cert_index, 0) DESC, pr.registration_index DESC,
          pr.id DESC
 LIMIT 1`
+
+// latestRegistrationExecutedBefore reads the pool's latest registration
+// strictly before `at` that executed before slot start, in work independent of
+// how many registrations the pool made in the epoch that starts there.
+//
+// A transaction executes no later than the slot it was added at, so every row
+// added before start qualifies and the latest of them is one seek on the
+// (pool_id, added_slot) index. A row added at or after start qualifies only
+// when its transaction carries a Leios execution slot before start. Only
+// applyUntickedBoundaryClosure writes one (leios_transaction_context is written
+// by recordTransactionLedgerContext alone, reached through
+// SetTransactionLeiosClosureInContext), for the block that opens an epoch, and
+// it executes the block's closure at the slot of the block's parent. Such a
+// block is the first on the chain at or after start, so every row of the kind
+// is added at one slot, the pool's earliest added at or after start. Those
+// rows are read at that slot, so the work is bounded by one block's
+// certificates for the pool. The two reads share one statement; the later
+// qualifying row wins.
+func latestRegistrationExecutedBefore(
+	ctx context.Context,
+	db Querier,
+	poolID int64,
+	at Position,
+	start uint64,
+) (registrationRow, bool, error) {
+	// The seek's upper bound is its only range term on added_slot, so the
+	// scan starts at the bound rather than at `at`.
+	seekBefore := start
+	if at.Slot < math.MaxUint64 && at.Slot+1 < seekBefore {
+		seekBefore = at.Slot + 1
+	}
+	predicate, positionArgs := positionPredicate(
+		"pr", at, registrationBlockIndex,
+	)
+	query := `-- name: LeiosKeyLatestRegistrationExecutedBefore
+SELECT u.added_slot, u.execution_slot, u.block_index, u.cert_index,
+       u.certificate_id, u.registration_index, u.leios_key_public,
+       u.leios_key_possession_proof, u.leios_key_registration_epoch,
+       u.leios_key_registration_age_unknown
+FROM (
+    SELECT 0 AS source, s.* FROM (` + registrationSelect + `
+      AND pr.added_slot < ?
+      AND ` + predicate + registrationOrder + `) s
+    UNION ALL
+    SELECT 1 AS source, b.* FROM (` + registrationSelect + `
+      AND pr.added_slot = (
+          SELECT MIN(p0.added_slot) FROM pool_registration p0
+          WHERE p0.pool_id = ? AND p0.added_slot >= ?)
+      AND ` + executionSlotSQL + ` < ?
+      AND ` + predicate + registrationOrder + `) b
+) u
+ORDER BY u.source DESC
+LIMIT 1`
+	args := make([]any, 0, 2*len(positionArgs)+6)
+	args = append(args, poolID, seekBefore)
+	args = append(args, positionArgs...)
+	args = append(args, poolID, poolID, start, start)
+	args = append(args, positionArgs...)
 	return scanRegistration(db.QueryRowContext(ctx, query, args...))
 }
 
@@ -358,7 +436,8 @@ func firstRegistrationFrom(
 	start uint64,
 ) (registrationRow, bool, error) {
 	predicate, args := positionPredicate("pr", at, registrationBlockIndex)
-	query := registrationColumns + predicate + `
+	query := "-- name: LeiosKeyFirstRegistrationFrom" +
+		registrationColumns + predicate + `
   AND pr.added_slot >= ?
   AND ` + executionSlotSQL + ` >= ?
 ORDER BY pr.added_slot ASC, ` + registrationBlockIndex + ` ASC,
@@ -383,7 +462,8 @@ func latestSnapshotCurrent(
 	start uint64,
 ) (registrationRow, bool, error) {
 	predicate, args := positionPredicate("pr", at, registrationBlockIndex)
-	query := registrationColumns + predicate + `
+	query := "-- name: LeiosKeyLatestSnapshotCurrent" +
+		registrationColumns + predicate + `
   AND pr.added_slot >= ?
   AND COALESCE(pr.certificate_id, 0) = 0
   AND pr.registration_index = 0
@@ -471,7 +551,7 @@ func snapshotCurrent(
 		epoch         sql.NullInt64
 		ageUnknown    bool
 	)
-	err := db.QueryRowContext(ctx, `
+	err := db.QueryRowContext(ctx, `-- name: LeiosKeySnapshotCurrent
 SELECT leios_key_public, leios_key_possession_proof,
        leios_key_registration_epoch, leios_key_registration_age_unknown
 FROM pool_registration
@@ -504,7 +584,11 @@ func latestRetirement(
 	executedBefore *uint64,
 ) (retirementRow, bool, error) {
 	predicate, args := positionPredicate("rt", at, "COALESCE(t.block_index, 0)")
-	query := `
+	label := "LeiosKeyLatestRetirement"
+	if executedBefore != nil {
+		label += "ExecutedBefore"
+	}
+	query := "-- name: " + label + `
 SELECT rt.epoch, rt.added_slot, COALESCE(t.block_index, 0),
        COALESCE(c.cert_index, 0)
 FROM pool_retirement rt
@@ -599,7 +683,7 @@ func epochAtSlot(
 	slot uint64,
 ) (epoch uint64, start uint64, resolved bool, err error) {
 	var epochID, startSlot, length sql.NullInt64
-	err = db.QueryRowContext(ctx, `
+	err = db.QueryRowContext(ctx, `-- name: LeiosKeyEpochAtSlot
 SELECT epoch_id, start_slot, length_in_slots
 FROM epoch
 WHERE start_slot <= ?
