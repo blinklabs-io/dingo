@@ -31,6 +31,8 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"slices"
+	"sync"
 	"time"
 
 	"github.com/blinklabs-io/dingo/internal/koiosparity"
@@ -62,9 +64,90 @@ const txInfoConcurrency = 8
 // parallelize.
 const txInfoOpportunisticFlushThreshold = txInfoConcurrency * koiosparity.KoiosTxInfoBatchSize
 
+// txInfoIndexWaits is the wait before each round that fetches again the
+// /tx_info chunks Koios had no result for. Following the tip, Dingo serves a
+// block before Koios has indexed it: on preprod a flush at the tip failed on
+// a just-served hash that Koios answered for when asked later, and the
+// failure re-baselined the reconstruction and left that epoch's UTxO check
+// not run. Koios's /tip was observed about 30s behind the chain, so the
+// rounds, 70s in all, cover a lag of several 20s preprod blocks; a hash
+// still missing after them is treated as any other failed chunk.
+// RunFromGenesis reads it once, and only a test changes it.
+var txInfoIndexWaits = []time.Duration{
+	10 * time.Second,
+	20 * time.Second,
+	40 * time.Second,
+}
+
+// fetchTxInfoChunks fetches every chunk with at most txInfoConcurrency
+// requests in flight, then, after each wait in waits, fetches again each
+// chunk that failed with koiosparity.ErrTxInfoMissing. A chunk is fetched
+// whole every time, so a result is only ever a complete chunk. Other
+// failures are not fetched again: the shared Koios client has already
+// retried them. It returns ctx's error when ctx ends during a fetch or a
+// wait, and the caller must then discard results and errs.
+func fetchTxInfoChunks(
+	ctx context.Context,
+	chunks [][]string,
+	fetch func(context.Context, []string) ([]koiosparity.KoiosTxInfoItem, error),
+	waits []time.Duration,
+	wait func(context.Context, time.Duration) error,
+	logf func(format string, args ...any),
+) ([][]koiosparity.KoiosTxInfoItem, []error, error) {
+	results := make([][]koiosparity.KoiosTxInfoItem, len(chunks))
+	errs := make([]error, len(chunks))
+	fetchAll := func(indexes []int) error {
+		var g errgroup.Group
+		g.SetLimit(txInfoConcurrency)
+		for _, i := range indexes {
+			g.Go(func() error {
+				results[i], errs[i] = fetch(ctx, chunks[i])
+				return nil
+			})
+		}
+		_ = g.Wait() // failures are per chunk in errs
+		return ctx.Err()
+	}
+	pending := make([]int, 0, len(chunks))
+	for i := range chunks {
+		pending = append(pending, i)
+	}
+	if err := fetchAll(pending); err != nil {
+		return nil, nil, err
+	}
+	for _, d := range waits {
+		pending = pending[:0]
+		for i, err := range errs {
+			if errors.Is(err, koiosparity.ErrTxInfoMissing) {
+				pending = append(pending, i)
+			}
+		}
+		if len(pending) == 0 {
+			break
+		}
+		logf(
+			"nodeparity: koios has not indexed every pending tx yet; "+
+				"fetching %d chunk(s) again in %s: %v",
+			len(pending), d, errs[pending[0]],
+		)
+		if err := wait(ctx, d); err != nil {
+			return nil, nil, err
+		}
+		if err := fetchAll(pending); err != nil {
+			return nil, nil, err
+		}
+	}
+	return results, errs, nil
+}
+
 var errAcquireWithoutLocalStateQuery = errors.New(
 	"acquire succeeded without a local state query client",
 )
+
+// errSessionEnded is what a chainsync callback returns when gouroboros
+// delivers it after RunFromGenesis has already ended that callback's
+// session; the state it would have written belongs to the next session.
+var errSessionEnded = errors.New("chainsync session already ended")
 
 // currentEpochNo Acquires point and asks Dingo directly which epoch it
 // falls in (queryShelleyEpochNo, an unbounded query with no retention
@@ -807,6 +890,7 @@ func RunFromGenesis(
 	})
 	// Read once: a callback can outlive the return on ctx cancellation.
 	lookupTimeout := epochLookupTimeout
+	indexWaits := slices.Clone(txInfoIndexWaits)
 	// epochAt resolves point's epoch from Dingo's era history, or from Dingo
 	// directly for a point the history does not cover. skip is true when
 	// Dingo refused point as too old before ever answering: the caller
@@ -911,8 +995,11 @@ func RunFromGenesis(
 	// Dingo's own live truth, rather than silently comparing a
 	// known-incomplete set.
 	//
+	// A chunk Koios had no result for is fetched again after each wait in
+	// txInfoIndexWaits (see fetchTxInfoChunks) before it counts as failed.
+	//
 	// It returns sessionCtx's error, and changes nothing, when the session
-	// ended during the fetches: they failed because of the cancellation, not
+	// ended during the fetches or the waits between them: they failed because of the cancellation, not
 	// because of Koios, so applying the chunks that did succeed and
 	// re-baselining would discard an exact reconstruction. The hashes stay
 	// buffered and the next session fetches each one once. A session that
@@ -929,24 +1016,17 @@ func RunFromGenesis(
 			end := min(start+koiosparity.KoiosTxInfoBatchSize, len(pendingTxHashes))
 			chunks = append(chunks, pendingTxHashes[start:end])
 		}
-		results := make([][]koiosparity.KoiosTxInfoItem, len(chunks))
-		errs := make([]error, len(chunks))
-
 		flushStart := time.Now()
-		g, gctx := errgroup.WithContext(sessionCtx)
-		g.SetLimit(txInfoConcurrency)
-		for i, chunk := range chunks {
-			g.Go(func() error {
-				txInfos, err := fetchTxInfosCached(
-					gctx, koios, cache, network, chunk,
-				)
-				results[i] = txInfos
-				errs[i] = err
-				return nil
-			})
-		}
-		_ = g.Wait() // errors are per-chunk in errs; nothing here to fail on
-		if err := sessionCtx.Err(); err != nil {
+		results, errs, err := fetchTxInfoChunks(
+			sessionCtx, chunks,
+			func(
+				ctx context.Context, chunk []string,
+			) ([]koiosparity.KoiosTxInfoItem, error) {
+				return fetchTxInfosCached(ctx, koios, cache, network, chunk)
+			},
+			indexWaits, waitStakeRetry, logf,
+		)
+		if err != nil {
 			return err
 		}
 		txInfoFlushCount++
@@ -1030,8 +1110,35 @@ func RunFromGenesis(
 		return true, nil
 	}
 
+	// sessionMu orders each chainsync session's callbacks against this loop.
+	// gouroboros runs the callbacks on its own goroutines and its Close does
+	// not wait for one that is still running, so without it the loop below
+	// reads lastPoint and progressed, and the next session's callbacks write
+	// the shared state, while the previous session's last callback may still
+	// be writing them.
+	var sessionMu sync.Mutex
 	for {
 		progressed = false
+		// ended is per session. retireSession sets it under sessionMu, which
+		// waits out a callback already running and turns away any that
+		// gouroboros delivers afterwards. Call it only after endSession has
+		// cancelled sessionCtx and the connection is closed: a callback holds
+		// sessionMu while it waits on a query, and only that cancellation
+		// ends the wait.
+		ended := false
+		retireSession := func() {
+			sessionMu.Lock()
+			ended = true
+			sessionMu.Unlock()
+		}
+		enterCallback := func() error {
+			sessionMu.Lock()
+			if ended {
+				sessionMu.Unlock()
+				return errSessionEnded
+			}
+			return nil
+		}
 
 		rawConn, dialErr := dialRaw(ctx, protoFromAddr(dingoAddr), dingoAddr)
 		if dialErr != nil {
@@ -1060,6 +1167,10 @@ func RunFromGenesis(
 						blockData any,
 						_ chainsync.Tip,
 					) error {
+						if err := enterCallback(); err != nil {
+							return err
+						}
+						defer sessionMu.Unlock()
 						block, ok := blockData.(lcommon.Block)
 						if !ok {
 							return fmt.Errorf(
@@ -1330,6 +1441,10 @@ func RunFromGenesis(
 				),
 				chainsync.WithRollBackwardFunc(
 					func(_ chainsync.CallbackContext, point pcommon.Point, _ chainsync.Tip) error {
+						if err := enterCallback(); err != nil {
+							return err
+						}
+						defer sessionMu.Unlock()
 						// A rollback to lastPoint itself invalidates nothing.
 						// Every reconnect opens with exactly this rollback,
 						// since the session resumes from lastPoint, the block
@@ -1488,12 +1603,14 @@ func RunFromGenesis(
 			endSession()
 			stopOnCancel()
 			csConn.Close() //nolint:errcheck
+			retireSession()
 			return errors.New("ChainSync client unavailable")
 		}
 		if err := cs.Client.Sync([]pcommon.Point{lastPoint}); err != nil {
 			endSession()
 			stopOnCancel()
 			csConn.Close() //nolint:errcheck
+			retireSession()
 			ok, retryErr := retryOrStop(
 				fmt.Sprintf(
 					"nodeparity: start chainsync from slot %d failed",
@@ -1514,11 +1631,13 @@ func RunFromGenesis(
 			endSession()
 			stopOnCancel()
 			csConn.Close() //nolint:errcheck
+			retireSession()
 			return ctx.Err()
 		case err, ok := <-csConn.ErrorChan():
 			endSession()
 			stopOnCancel()
 			csConn.Close() //nolint:errcheck
+			retireSession()
 			// gouroboros closes ErrorChan without sending anything when the
 			// peer closes the connection while every protocol is idle,
 			// which includes chainsync with no RequestNext outstanding --
@@ -1530,12 +1649,10 @@ func RunFromGenesis(
 			}
 			sessionErr = err
 		}
-		// The callbacks write this run's state without a lock, relying on
-		// the session being over before the next one starts. A peer close
-		// can end the session while a callback is still running, so wait
-		// for the protocol's receive loop, which runs them, to exit. That
-		// wait ends only once the callback returns; endSession above has
-		// already closed any query it is blocked in.
+		// retireSession above has already waited out a running callback
+		// and turned away later ones. Waiting for the protocol's receive
+		// loop, which runs them, to exit as well keeps the next session from
+		// starting while this one's connection is still delivering.
 		select {
 		case <-csDone:
 		case <-ctx.Done():

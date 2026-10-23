@@ -357,8 +357,9 @@ func (o *Ouroboros) forgetAcceptedHeaderTip(connId ouroboros.ConnectionId) {
 
 // deferredHeaderExtendsLocalChain reports whether a header whose producer
 // authorization is deferred builds directly on the local chain: on the block
-// tip, the header-queue tip, or this connection's last header that passed
-// this gate. Such a header cannot be a competing fork, so it may reach the
+// tip, the header-queue tip, or this connection's accepted header tip, the
+// last header that itself extended the local chain and that chain selection
+// accepted. Such a header cannot be a competing fork, so it may reach the
 // block-fetch queue, where the body path verifies it before application.
 // Withholding it instead deadlocks whenever the deferral clears only by
 // applying the header's own block, as at the Byron->Shelley boundary, where
@@ -469,13 +470,19 @@ func effectiveChainsyncBlockTimeout(timeout time.Duration) time.Duration {
 func (o *Ouroboros) chainsyncConnectionConfigOption(
 	ctx context.Context,
 	includeClient bool,
+	trackActivity ...bool,
 ) ouroboros.ConnectionOptionFunc {
 	return func(c *ouroboros.Connection) {
 		limiter := newChainsyncFindIntersectRateLimiter(
 			chainsyncFindIntersectBudgetRate,
 			chainsyncFindIntersectBudgetBurst,
 		)
-		opts := o.chainsyncServerConnOpts(ctx, limiter, !includeClient)
+		opts := o.chainsyncServerConnOpts(
+			ctx,
+			limiter,
+			!includeClient,
+			activityTrackingEnabled(trackActivity),
+		)
 		if includeClient {
 			opts = slices.Concat(o.chainsyncClientConnOpts(), opts)
 		}
@@ -491,10 +498,15 @@ func (o *Ouroboros) chainsyncServerConnOpts(
 	ctx context.Context,
 	limiter *chainsyncFindIntersectRateLimiter,
 	waitForLedger bool,
+	trackActivity ...bool,
 ) []ochainsync.ChainSyncOptionFunc {
+	activityEnabled := activityTrackingEnabled(trackActivity)
 	requestNext := o.chainsyncServerRequestNextPeer
 	if waitForLedger {
 		requestNext = o.chainsyncServerRequestNextLocal
+	}
+	if activityEnabled {
+		requestNext = o.chainsyncServerRequestNextTrustedLocal
 	}
 	return []ochainsync.ChainSyncOptionFunc{
 		ochainsync.WithFindIntersectFunc(
@@ -510,6 +522,7 @@ func (o *Ouroboros) chainsyncServerConnOpts(
 						points,
 					)
 				},
+				activityEnabled,
 			),
 		),
 		ochainsync.WithRequestNextFunc(
@@ -1021,13 +1034,19 @@ func (o *Ouroboros) chainsyncServerAheadOfLedger(
 func (o *Ouroboros) chainsyncServerRequestNextPeer(
 	ctx ochainsync.CallbackContext,
 ) error {
-	return o.chainsyncServerRequestNext(ctx, false)
+	return o.chainsyncServerRequestNext(ctx, false, false)
 }
 
 func (o *Ouroboros) chainsyncServerRequestNextLocal(
 	ctx ochainsync.CallbackContext,
 ) error {
-	return o.chainsyncServerRequestNext(ctx, true)
+	return o.chainsyncServerRequestNext(ctx, true, false)
+}
+
+func (o *Ouroboros) chainsyncServerRequestNextTrustedLocal(
+	ctx ochainsync.CallbackContext,
+) error {
+	return o.chainsyncServerRequestNext(ctx, true, true)
 }
 
 // chainsyncServerRequestNext serves the next chain event to a downstream
@@ -1044,7 +1063,19 @@ func (o *Ouroboros) chainsyncServerRequestNextLocal(
 func (o *Ouroboros) chainsyncServerRequestNext(
 	ctx ochainsync.CallbackContext,
 	waitForLedger bool,
+	trackActivity ...bool,
 ) error {
+	endActivity := o.beginTrustedNtCActivity(
+		activityTrackingEnabled(trackActivity),
+		ctx.ConnectionId,
+		ochainsync.ProtocolIdNtC,
+	)
+	activityContinues := false
+	defer func() {
+		if !activityContinues {
+			endActivity()
+		}
+	}()
 	o.recordServedActivity(ctx.ConnectionId)
 	// Create/retrieve chainsync state for connection
 	tip := o.ledgerState.Tip()
@@ -1143,13 +1174,17 @@ func (o *Ouroboros) chainsyncServerRequestNext(
 	if rawConn == nil {
 		return fmt.Errorf("connection %s not found", ctx.ConnectionId.String())
 	}
-	go o.chainsyncServerAwaitNext(
-		ctx,
-		connWithDone{conn: rawConn, done: connDone, closeErr: closeErr},
-		clientState,
-		pending,
-		waitForLedger,
-	)
+	activityContinues = true
+	go func() {
+		defer endActivity()
+		o.chainsyncServerAwaitNext(
+			ctx,
+			connWithDone{conn: rawConn, done: connDone, closeErr: closeErr},
+			clientState,
+			pending,
+			waitForLedger,
+		)
+	}()
 	return nil
 }
 
@@ -1579,6 +1614,15 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 ) (err error) {
 	switch v := blockData.(type) {
 	case gledger.BlockHeader:
+		// Every path that does not accept this header clears the
+		// connection's accepted tip, so a later deferred header cannot count
+		// as a linear extension of one that never reached the ledger queue.
+		tipAccepted := false
+		defer func() {
+			if !tipAccepted {
+				o.forgetAcceptedHeaderTip(ctx.ConnectionId)
+			}
+		}()
 		if o.recordHeldChainsyncTip(ctx.ConnectionId, tip) {
 			return ochainsync.ErrStopSyncProcess
 		}
@@ -1832,8 +1876,10 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 				}
 			}
 		}
+		extendsLocalChain := ingressEligible &&
+			o.deferredHeaderExtendsLocalChain(ctx.ConnectionId, v)
 		if deferredVerification {
-			if !o.deferredHeaderExtendsLocalChain(ctx.ConnectionId, v) {
+			if !extendsLocalChain {
 				// Do not advance peer cursors, history, dedup state, or publish
 				// to selector/ledger until this header passes strict
 				// verification. Observed history is trusted by fork-density and
@@ -1851,12 +1897,6 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 			// feeding the queue or apply eligibility stalls for as long as
 			// the ledger is behind the header's epoch.
 			selectionEligible = true
-		}
-		// A header withheld for unauthenticated fork ancestry is not an
-		// accepted tip: a deferred child of it must not pass as a linear
-		// extension of the local chain.
-		if ingressEligible && selectionEligible {
-			o.recordAcceptedHeaderTip(ctx.ConnectionId, blockHash)
 		}
 		// Observe the tip for chain selection FIRST, so the apply-eligibility
 		// decision below reflects this header. Only ingress-eligible peers are
@@ -1913,6 +1953,43 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 		// blocks are withheld from the ledger.
 		applyEligible := selectionEligible &&
 			o.shouldApplyChainsyncToLedger(ctx.ConnectionId)
+		// A header withheld here is lost to the ledger: the peer's cursor moves
+		// past it. Hold only a selection-eligible header denied by Genesis
+		// corroboration; corroboration cannot override failed authentication.
+		if selectionEligible && ingressEligible && !applyEligible &&
+			o.config.ChainsyncAwaitCorroboration != nil {
+			admissionCtx, cancelAdmission := chainsyncAdmissionContext(ctx)
+			holdCtx, cancelHold := context.WithTimeout(
+				admissionCtx,
+				o.corroborationHoldTimeout,
+			)
+			eligible, err := o.config.ChainsyncAwaitCorroboration(
+				holdCtx,
+				ctx.ConnectionId,
+			)
+			holdExpired := errors.Is(err, context.DeadlineExceeded) &&
+				admissionCtx.Err() == nil
+			cancelHold()
+			cancelAdmission()
+			switch {
+			case holdExpired:
+				// No witness arrived; the witnesses may have been recycled,
+				// or every tracked client slot may be held. Withhold the
+				// header and re-intersect, which delivers it again and frees
+				// the slot meanwhile.
+				o.scheduleHeaderResync(
+					ctx.ConnectionId,
+					time.Now(),
+					event.ChainsyncResyncReasonGenesisCorroborationHoldExpired,
+				)
+			case err != nil:
+				return fmt.Errorf("wait for genesis corroboration: %w", err)
+			}
+			if o.recordHeldChainsyncTip(ctx.ConnectionId, tip) {
+				return ochainsync.ErrStopSyncProcess
+			}
+			applyEligible = eligible
+		}
 		// Limit on Eagerness: the tip was observed above, so the limit already
 		// accounts for this header. Wait before recording cross-peer dedup state:
 		// if the connection closes while held, another peer must still be able
@@ -1931,9 +2008,13 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 			)
 			cancelAdmission()
 			if err != nil {
+				// The header never reaches the ledger queue.
+				tipAccepted = false
 				return fmt.Errorf("wait for eagerness limit: %w", err)
 			}
 			if o.recordHeldChainsyncTip(ctx.ConnectionId, tip) {
+				// Dropped by the held-ingress check, so never queued.
+				tipAccepted = false
 				return ochainsync.ErrStopSyncProcess
 			}
 		}
@@ -2005,6 +2086,7 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 				"slot", blockSlot,
 				"connection_id", ctx.ConnectionId.String(),
 			)
+			o.forgetAcceptedHeaderTip(ctx.ConnectionId)
 			o.updateChainsyncMetrics(ctx.ConnectionId, tip)
 			return nil
 		}
@@ -2022,6 +2104,7 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 				"slot", blockSlot,
 				"connection_id", ctx.ConnectionId.String(),
 			)
+			o.forgetAcceptedHeaderTip(ctx.ConnectionId)
 			o.updateChainsyncMetrics(ctx.ConnectionId, tip)
 			return nil
 		}
@@ -2082,6 +2165,11 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 					resolvePeerTip(true)
 					return
 				}
+				o.acceptedHeaderMu.Lock()
+				if bytes.Equal(o.acceptedHeaderTips[ctx.ConnectionId], blockHash) {
+					delete(o.acceptedHeaderTips, ctx.ConnectionId)
+				}
+				o.acceptedHeaderMu.Unlock()
 				if o.ledgerState != nil {
 					o.markDeferredHeaderRecovery(
 						ctx.ConnectionId,
@@ -2090,6 +2178,10 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 				}
 				resolvePeerTip(false)
 			}
+		}
+		if ingressEligible && extendsLocalChain {
+			o.recordAcceptedHeaderTip(ctx.ConnectionId, blockHash)
+			tipAccepted = true
 		}
 		if err := o.eventBus.PublishBlocking(
 			ledger.ChainsyncEventType,
@@ -2637,11 +2729,18 @@ func (o *Ouroboros) SubscribeChainsyncResync(ctx context.Context) {
 
 func (o *Ouroboros) instrumentChainsyncFindIntersect(
 	fn func(ochainsync.CallbackContext, []ocommon.Point) (ocommon.Point, ochainsync.Tip, error),
+	trackActivity bool,
 ) func(ochainsync.CallbackContext, []ocommon.Point) (ocommon.Point, ochainsync.Tip, error) {
 	return func(
 		ctx ochainsync.CallbackContext,
 		points []ocommon.Point,
 	) (ocommon.Point, ochainsync.Tip, error) {
+		endActivity := o.beginTrustedNtCActivity(
+			trackActivity,
+			ctx.ConnectionId,
+			ochainsync.ProtocolIdNtC,
+		)
+		defer endActivity()
 		start := time.Now()
 		p, t, err := fn(ctx, points)
 		o.recordProtocolMessage("chainsync", err, time.Since(start))

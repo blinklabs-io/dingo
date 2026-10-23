@@ -123,6 +123,7 @@ type extractConfig struct {
 	replace           bool
 	maxZstdWindowSize uint64
 	maxZstdMemory     uint64
+	decoders          *decoderMemoryBudget
 	limits            archiveLimits
 }
 
@@ -165,6 +166,12 @@ func WithZstdLimits(maxWindow, maxMemory uint64) ExtractOption {
 			c.maxZstdMemory = maxMemory
 		}
 	}
+}
+
+// withDecoderBudget makes the extraction reserve its decoder's worst-case
+// memory from a budget shared with every other extraction using it.
+func withDecoderBudget(b *decoderMemoryBudget) ExtractOption {
+	return func(c *extractConfig) { c.decoders = b }
 }
 
 func newExtractConfig(opts []ExtractOption) extractConfig {

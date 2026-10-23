@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"time"
 
 	"github.com/blinklabs-io/dingo/ledger"
@@ -25,6 +26,14 @@ import (
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
 )
+
+// maxLocalStateQueryReadBufferSize caps the reassembly of a multi-segment
+// LocalStateQuery reply, overriding gouroboros' 16MB anti-DoS default, which
+// a whole-UTxO-set reply exceeds on a real chain. 2GiB is one byte wider than
+// a 32-bit int can hold, so the value is clamped to math.MaxInt there; the
+// clamp is not a weaker bound, because a bytes.Buffer on such a target cannot
+// reach either size before the process exhausts its address space.
+const maxLocalStateQueryReadBufferSize = min(2*1024*1024*1024, math.MaxInt)
 
 // localstatequeryServerConnOpts returns this listener's LocalStateQuery
 // server options. trusted gates the relaxed timeout/buffer options below it
@@ -42,13 +51,22 @@ func (o *Ouroboros) localstatequeryServerConnOpts(
 ) []olocalstatequery.LocalStateQueryOptionFunc {
 	opts := make([]olocalstatequery.LocalStateQueryOptionFunc, 3, 5)
 	opts[0] = olocalstatequery.WithAcquireFunc(
-		o.instrumentLocalstatequeryAcquire(o.localstatequeryServerAcquire),
+		o.instrumentLocalstatequeryAcquire(
+			o.localstatequeryServerAcquire,
+			trusted,
+		),
 	)
 	opts[1] = olocalstatequery.WithQueryFunc(
-		o.instrumentLocalstatequeryQuery(o.localstatequeryServerQuery),
+		o.instrumentLocalstatequeryQuery(
+			o.localstatequeryServerQuery,
+			trusted,
+		),
 	)
 	opts[2] = olocalstatequery.WithReleaseFunc(
-		o.instrumentLocalstatequeryRelease(o.localstatequeryServerRelease),
+		o.instrumentLocalstatequeryRelease(
+			o.localstatequeryServerRelease,
+			trusted,
+		),
 	)
 	if !trusted {
 		return opts
@@ -74,18 +92,25 @@ func (o *Ouroboros) localstatequeryServerConnOpts(
 		// buffer here is a real unbounded memory-growth risk, not just an
 		// unnecessary wait.
 		olocalstatequery.WithQueryTimeout(0),
-		olocalstatequery.WithMaxReadBufferSize(2<<30),
+		olocalstatequery.WithMaxReadBufferSize(maxLocalStateQueryReadBufferSize),
 	)
 }
 
 func (o *Ouroboros) instrumentLocalstatequeryAcquire(
 	fn func(olocalstatequery.CallbackContext, olocalstatequery.AcquireTarget, bool) error,
+	trackActivity bool,
 ) func(olocalstatequery.CallbackContext, olocalstatequery.AcquireTarget, bool) error {
 	return func(
 		ctx olocalstatequery.CallbackContext,
 		acquireTarget olocalstatequery.AcquireTarget,
 		reAcquire bool,
 	) error {
+		endActivity := o.beginTrustedNtCActivity(
+			trackActivity,
+			ctx.ConnectionId,
+			olocalstatequery.ProtocolId,
+		)
+		defer endActivity()
 		start := time.Now()
 		err := fn(ctx, acquireTarget, reAcquire)
 		o.recordProtocolMessage("localstatequery", err, time.Since(start))
@@ -95,11 +120,18 @@ func (o *Ouroboros) instrumentLocalstatequeryAcquire(
 
 func (o *Ouroboros) instrumentLocalstatequeryQuery(
 	fn func(olocalstatequery.CallbackContext, olocalstatequery.QueryWrapper) (any, error),
+	trackActivity bool,
 ) func(olocalstatequery.CallbackContext, olocalstatequery.QueryWrapper) (any, error) {
 	return func(
 		ctx olocalstatequery.CallbackContext,
 		query olocalstatequery.QueryWrapper,
 	) (any, error) {
+		endActivity := o.beginTrustedNtCActivity(
+			trackActivity,
+			ctx.ConnectionId,
+			olocalstatequery.ProtocolId,
+		)
+		defer endActivity()
 		start := time.Now()
 		result, err := fn(ctx, query)
 		o.recordProtocolMessage("localstatequery", err, time.Since(start))
@@ -109,8 +141,15 @@ func (o *Ouroboros) instrumentLocalstatequeryQuery(
 
 func (o *Ouroboros) instrumentLocalstatequeryRelease(
 	fn func(olocalstatequery.CallbackContext) error,
+	trackActivity bool,
 ) func(olocalstatequery.CallbackContext) error {
 	return func(ctx olocalstatequery.CallbackContext) error {
+		endActivity := o.beginTrustedNtCOneWayActivity(
+			trackActivity,
+			ctx.ConnectionId,
+			olocalstatequery.ProtocolId,
+		)
+		defer endActivity()
 		start := time.Now()
 		err := fn(ctx)
 		o.recordProtocolMessage("localstatequery", err, time.Since(start))

@@ -88,20 +88,35 @@ var snapshotGenerationCounter atomic.Uint64
 // iter.Next(false) reports chain.ErrIteratorChainTip, for more blocks to
 // become available before flushing an under-full batch -- but only while the
 // node has not yet reached tip since boot (see reachedTip) and this slot is
-// not near the upstream tip (see isNearTip). During bulk
-// historical replay a momentary gap here does not mean the chain has stopped
-// growing; it commonly means the goroutine that appends blocks to ls.chain
-// (blockfetch/pipeline apply) is a beat behind this reader, and vice versa.
-// Without this bounded wait, that race flushed batches at ~6-9 of the
-// intended batchSize (50) blocks instead of coalescing them, multiplying
+// not near the upstream tip (see isNearTip). During bulk historical replay a
+// momentary gap here does not mean the chain has stopped growing: blockfetch
+// exposes received blocks to the chain in groups of blockfetchCommitBatchSize,
+// so the reader meets one gap per group. Every flush is one SQLite
+// transaction, and each one rewrites the same hot B-tree pages of every index
+// it touches into the WAL, so flushing each group as its own batch multiplies
 // SQLite's physical write volume well beyond logical growth.
+//
+// The attempts are a budget for the whole gather pass, not for each gap: a
+// pass that bridges several groups spends one budget, so at the defaults it
+// waits at most about five seconds in total however many gaps it meets. That
+// gathers a full batchSize batch from a peer delivering about ten blocks a
+// second; a one-second budget still flushed most passes at one or two groups
+// there. The ledger trails the chain by at most that long, which only applies
+// while catching up from outside the stability window.
+//
+// gatherCoalesceMaxGapAttempts caps a single gap inside that budget, at about
+// two seconds. A gap that long means the chain has stopped growing for now --
+// a few blocks added with nothing behind them, or an upstream that went quiet
+// -- so the pass applies what it has rather than holding it for the rest of
+// the budget.
 // Once the node is at or near the tip, this wait is skipped entirely: a
 // solitary new block at live tip must still commit promptly rather than wait
 // for a batch that will never fill. Vars, not consts, so tests can shrink the
 // interval instead of waiting on real sleeps.
 var (
-	gatherCoalesceRetryInterval = 2 * time.Millisecond
-	gatherCoalesceMaxAttempts   = 10
+	gatherCoalesceRetryInterval  = 10 * time.Millisecond
+	gatherCoalesceMaxAttempts    = 500
+	gatherCoalesceMaxGapAttempts = 200
 )
 
 const (
@@ -1468,6 +1483,7 @@ type LedgerState struct {
 	slotsPerKESPeriod           atomic.Uint64
 	forgedBlockChecker          atomic.Pointer[forgedBlockCheckerHolder]
 	slotBattleRecorder          atomic.Pointer[slotBattleRecorderHolder]
+	slotBattles                 slotBattleBook
 	cachedShape                 atomic.Pointer[hardfork.Shape]                  // lazy-built from CardanoNodeConfig; immutable for the LedgerState's lifetime
 	hardForkSummaryCache        atomic.Pointer[hardForkSummaryCacheEntry]       // last hardForkSummaryAnchoredAt result, keyed by publication generation and horizon anchor (see hardfork_summary.go)
 	epochSnapshotHook           atomic.Pointer[epochBoundarySnapshotHookHolder] // optional authoritative epoch-boundary snapshot capture (nil = event-driven fallback only)
@@ -1581,6 +1597,11 @@ type LedgerState struct {
 	blockfetchInFlightTimeoutGeneration uint64
 	blockfetchInFlightTimeoutCount      uint8
 	selectedBlockfetchConnId            ouroboros.ConnectionId // latest selected chainsync connection for the next batch
+	// chainsyncCapacityWaitHook is a test seam, nil in production. It runs
+	// each time AwaitChainsyncHeaderCapacity has found the queue at its pause
+	// threshold and is about to wait, the point after which a test may drain
+	// headers and observe the hysteresis rather than the first check.
+	chainsyncCapacityWaitHook func()
 	// blockfetchContinuationPending prevents a chainsync handler from starting
 	// a competing batch in the short interval after the blockfetch subscriber
 	// schedules its next request on a worker. The worker must run outside the
@@ -1933,6 +1954,10 @@ type LedgerState struct {
 	// they write through the batched metadata path, so a test can tell that
 	// path from the per-row one, which stores the same state.
 	afterBatchedTransactionWrite func()
+	// beforeReplayRowFlush is a test-only observation hook, nil in
+	// production. It runs immediately before a chunk's replay-row flush, so a
+	// test can place a known delay inside that flush's apply sample.
+	beforeReplayRowFlush func()
 	// externalIngest pauses the chain-iterator loop so ApplyTrustedBatch can
 	// be the only block-apply writer. See external_ingest.go.
 	externalIngest externalIngestState
@@ -7022,10 +7047,12 @@ func (ls *LedgerState) ledgerReadChainIterator(
 				gatherLockHeld = false
 			}
 		}
-		// coalesceAttempts counts consecutive chain-tip probes since the
-		// last block was actually appended to rawBatch in this pass; see
-		// gatherCoalesceMaxAttempts.
+		// coalesceAttempts counts the coalescing retries this pass has
+		// spent, across every gap; see gatherCoalesceMaxAttempts.
 		coalesceAttempts := 0
+		// gapAttempts counts the retries spent on the current gap; see
+		// gatherCoalesceMaxGapAttempts.
+		gapAttempts := 0
 		// Read both terms of the near-tip test once here, before any
 		// blockPipelineGatherMutex read lock is taken, rather than through
 		// ls.isNearTip inside the gather span. Neither is lock-free:
@@ -7116,15 +7143,12 @@ func (ls *LedgerState) ledgerReadChainIterator(
 					// drainBlockPipelineBeforeRollback, and proceed before
 					// this pass's already-gathered blocks are submitted --
 					// exactly the race blockPipelineGatherMutex exists to
-					// close. The wait is bounded, but the bound is per
-					// gap, not per gather pass: coalesceAttempts is reset
-					// every time a block is appended below, so one pass
-					// can wait once per block it gathers. A rollback
-					// blocked on the write lock therefore waits up to
-					// batchSize*gatherCoalesceMaxAttempts*gatherCoalesceRetryInterval
-					// (about 1s at the defaults) in the worst case, and
-					// about batchSize*gatherCoalesceRetryInterval (100ms)
-					// when each gap resolves on its first retry.
+					// close. The wait is bounded per gather pass:
+					// coalesceAttempts accumulates across every gap the
+					// pass meets, so a rollback blocked on the write lock
+					// waits up to
+					// gatherCoalesceMaxAttempts*gatherCoalesceRetryInterval
+					// (about 5s at the defaults) in the worst case.
 					//
 					// Those figures cover the sleeping only. Every retry
 					// returns to the top of this loop and re-probes, and
@@ -7137,9 +7161,10 @@ func (ls *LedgerState) ledgerReadChainIterator(
 					// batch inside its transaction. The contending writer
 					// is therefore the goroutine this wait exists to wait
 					// for, and the full worst case adds one such
-					// acquisition per retry, each bounded by the longest
-					// append critical section rather than by any
-					// coalescing setting.
+					// acquisition per retry, at most
+					// gatherCoalesceMaxAttempts per pass, each bounded by
+					// the longest append critical section rather than by
+					// any coalescing setting.
 					//
 					// That probe cannot be hoisted the way the near-tip
 					// terms were. It is not a term the span incidentally
@@ -7147,7 +7172,7 @@ func (ls *LedgerState) ledgerReadChainIterator(
 					// releasing the gather lock around it reopens the race
 					// described just above. The multiplier is pinned
 					// instead, by
-					// TestLedgerReadChainIteratorBoundsChainProbesPerCoalesceGap.
+					// TestLedgerReadChainIteratorBoundsChainProbesPerCoalescePass.
 					//
 					// The near-tip terms are the hoistable case, and are
 					// hoisted: stabilityWindow and upstreamTipSlot are
@@ -7170,6 +7195,7 @@ func (ls *LedgerState) ledgerReadChainIterator(
 					// depends on them.
 					if len(rawBatch) > 0 && len(rawBatch) < cap(rawBatch) &&
 						coalesceAttempts < gatherCoalesceMaxAttempts &&
+						gapAttempts < gatherCoalesceMaxGapAttempts &&
 						!ls.reachedTip.Load() &&
 						!nearKnownUpstreamTip(
 							rawBatch[len(rawBatch)-1].Slot,
@@ -7177,6 +7203,7 @@ func (ls *LedgerState) ledgerReadChainIterator(
 							stabilityWindow,
 						) {
 						coalesceAttempts++
+						gapAttempts++
 						select {
 						case <-ctx.Done():
 							releaseGatherLock()
@@ -7213,9 +7240,7 @@ func (ls *LedgerState) ledgerReadChainIterator(
 			// gathering for this pass finishes (see decodeReadChainBatch),
 			// potentially in parallel across the whole batch.
 			rawBatch = append(rawBatch, next.Block)
-			// Real progress was made -- give the next gap its own full
-			// coalesce budget rather than accumulating across the batch.
-			coalesceAttempts = 0
+			gapAttempts = 0
 			// Don't exceed our pre-allocated capacity
 			if len(rawBatch) == cap(rawBatch) {
 				break
@@ -9248,11 +9273,21 @@ func (ls *LedgerState) processBlocksFromSource(
 			preverifiedSignatures := preverifyTransactionSignatures(
 				trustedReplayTransactions,
 			)
+			// prepare and commit are observed only beside the batch latency
+			// below, so a chunk that applies no block or fails records
+			// neither.
+			prepareElapsed := time.Since(batchApplyStart)
+			submitStart := time.Now()
+			// The body's wall time, subtracted from the submit's to leave
+			// the commit stage.
+			var bodyElapsed time.Duration
 			err = ls.submitBlockApplyDBTxn(
 				ctx,
 				snapshotTip,
 				candidateTip,
 				func(txn *database.Txn) error { //nolint:contextcheck
+					bodyStart := time.Now()
+					defer func() { bodyElapsed = time.Since(bodyStart) }()
 					replayWorkers := startReplayHeaderJobs(
 						ctx, nextBatch[i:end], verifiedReplayHeaders,
 						replayHeaderJobs, verifyReplayHeader,
@@ -9642,19 +9677,29 @@ func (ls *LedgerState) processBlocksFromSource(
 					// Apply delta batch
 					applyStart := time.Now()
 					err := deltaBatch.apply(ctx, ls, txn)
-					ls.metrics.observeBlockStage(
-						blockStageApply,
-						time.Since(applyStart),
-					)
 					if err != nil {
+						ls.metrics.observeBlockStage(
+							blockStageApply,
+							time.Since(applyStart),
+						)
 						deltaBatch.Release()
 						return err
 					}
 					deltaBatch.Release()
-					if err := ls.db.FlushBatch(trustedReplayRows, txn); err != nil {
+					// The replay-row flush is part of the same sample: it is
+					// the metadata write for this delta batch's rows.
+					if ls.beforeReplayRowFlush != nil {
+						ls.beforeReplayRowFlush()
+					}
+					flushErr := ls.db.FlushBatch(trustedReplayRows, txn)
+					ls.metrics.observeBlockStage(
+						blockStageApply,
+						time.Since(applyStart),
+					)
+					if flushErr != nil {
 						return fmt.Errorf(
 							"flush trusted replay metadata batch: %w",
-							err,
+							flushErr,
 						)
 					}
 					// Update tip in database only if blocks were processed
@@ -9674,6 +9719,7 @@ func (ls *LedgerState) processBlocksFromSource(
 					return nil
 				},
 			)
+			commitElapsed := max(time.Since(submitStart)-bodyElapsed, 0)
 			if err != nil {
 				clear(trustedReplayUtxos)
 				trustedReplayUtxos = nil
@@ -9787,6 +9833,8 @@ func (ls *LedgerState) processBlocksFromSource(
 					blocksProcessed,
 					time.Since(batchApplyStart),
 				)
+				ls.metrics.observeBlockStage(blockStagePrepare, prepareElapsed)
+				ls.metrics.observeBlockStage(blockStageCommit, commitElapsed)
 				// After advancing the tip, first honor any TestXHardForkAtEpoch
 				// override so queries surface the pinned epoch ahead of time;
 				// then classify an indefinite final era as
@@ -10181,13 +10229,21 @@ func (ls *LedgerState) ledgerProcessBlock(
 		}
 	}
 
-	if err := ls.verifyDeferredBlockHeaderState(ctx, txn, point, block); err != nil {
-		return nil, err
+	deferredHeaderStart := time.Now()
+	headerErr := ls.verifyDeferredBlockHeaderState(ctx, txn, point, block)
+	ls.metrics.observeBlockStage(
+		blockStageDeferredHeaderVerify,
+		time.Since(deferredHeaderStart),
+	)
+	if headerErr != nil {
+		return nil, headerErr
 	}
 	// The aggregate reference-script check and the per-transaction validators
 	// resolve the same inputs, so one prefetch serves both. It runs after any
 	// endorser transactions have applied and before this block's own mutations.
+	// Both are the block-level part of validating it: one validate sample.
 	var prefetchedUtxos map[utxoref.Key]lcommon.Utxo
+	blockValidateStart := time.Now()
 	if shouldValidate {
 		prefetchedUtxos = ls.prefetchBlockUtxos(
 			ctx, txn, block.Transactions(), aheadUtxosFrom(ctx), nil,
@@ -10210,9 +10266,20 @@ func (ls *LedgerState) ledgerProcessBlock(
 			referenceParams,
 			refScriptsLV,
 		)
-		if err := storageFaultOrErr(refScriptsLV, err); err != nil {
+		err = storageFaultOrErr(refScriptsLV, err)
+		if err != nil {
+			ls.metrics.observeBlockStage(
+				blockStageValidate,
+				time.Since(blockValidateStart),
+			)
 			return nil, err
 		}
+	}
+	if shouldValidate {
+		ls.metrics.observeBlockStage(
+			blockStageValidate,
+			time.Since(blockValidateStart),
+		)
 	}
 	// Process transactions
 	// Steady-state, at-tip, validated application refuses to recover an absent
@@ -10453,6 +10520,10 @@ func (ls *LedgerState) ledgerProcessBlock(
 
 		// Apply delta immediately if we may need the data to validate the next TX
 		if shouldValidate {
+			// The write is a separate apply sample per transaction: a
+			// validating block leaves its chunk's delta batch empty, so
+			// the batch flush alone would hide this time.
+			applyStart := time.Now()
 			validatedReplayRows := validatedReplayAccumulatorFrom(ctx)
 			var applyErr error
 			if validatedReplayRows != nil {
@@ -10471,6 +10542,10 @@ func (ls *LedgerState) ledgerProcessBlock(
 			} else {
 				applyErr = delta.applyWithoutRecordingDonations(ctx, ls, txn)
 			}
+			ls.metrics.observeBlockStage(
+				blockStageApply,
+				time.Since(applyStart),
+			)
 			if applyErr != nil {
 				delta.Release()
 				if errors.Is(applyErr, models.ErrRewardWithdrawalExceedsBalance) {
@@ -13545,7 +13620,6 @@ func (ls *LedgerState) GetIntersectPoint(
 		return &ret, nil
 	}
 	var ret ocommon.Point
-	var tmpBlock models.Block
 	var err error
 	foundOrigin := false
 	txn := ls.db.Transaction(ctx, false)
@@ -13564,8 +13638,18 @@ func (ls *LedgerState) GetIntersectPoint(
 				foundOrigin = true
 				continue
 			}
-			// Lookup block in metadata DB
-			tmpBlock, err = ls.chain.BlockByPoint(ctx, point, txn)
+			// The point comes from an untrusted peer, so membership is
+			// resolved from the block's metadata key alone. A block read by
+			// point loads the whole body and can fall through to a Bark
+			// archive, which a peer could trigger once per point.
+			if _, err = database.BlockBlobKeyToPoint(
+				types.BlockBlobKey(point.Slot, point.Hash),
+			); err != nil {
+				return fmt.Errorf(
+					"failed to get block: parsing block key: %w", err,
+				)
+			}
+			blockID, err := database.BlockIDByPointMetadataTxn(txn, point)
 			if err != nil {
 				if errors.Is(err, models.ErrBlockNotFound) {
 					continue
@@ -13573,7 +13657,7 @@ func (ls *LedgerState) GetIntersectPoint(
 				return fmt.Errorf("failed to get block: %w", err)
 			}
 			onPrimary, err := ls.primaryChainContainsBlockIDTxn(
-				tmpBlock.ID,
+				blockID,
 				point,
 				txn,
 			)
@@ -13584,8 +13668,8 @@ func (ls *LedgerState) GetIntersectPoint(
 				continue
 			}
 			// Update return value
-			ret.Slot = tmpBlock.Slot
-			ret.Hash = tmpBlock.Hash
+			ret.Slot = point.Slot
+			ret.Hash = point.Hash
 		}
 		return nil
 	})
@@ -14707,7 +14791,7 @@ func (ls *LedgerState) ByronProtocolMagic() (uint32, error) {
 	if protocolMagic < 0 {
 		return 0, errors.New("byron protocol magic is negative")
 	}
-	if protocolMagic > math.MaxUint32 {
+	if int64(protocolMagic) > math.MaxUint32 {
 		return 0, fmt.Errorf(
 			"byron protocol magic exceeds uint32: %d",
 			protocolMagic,

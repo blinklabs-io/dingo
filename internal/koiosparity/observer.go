@@ -125,6 +125,11 @@ type ObserverConfig struct {
 	// ErrorRetryDelay is the minimum interval before rechecking ERROR epochs.
 	// Zero uses five minutes; timer polling can add one further interval.
 	ErrorRetryDelay time.Duration
+	// PoolHistoryRefetchDelay is the minimum interval between Koios refetches
+	// of one epoch cached with an empty pool set (Koios had epoch_info but
+	// not pool_history). Each refetch costs one /pool_history request per
+	// pool. Zero uses one hour.
+	PoolHistoryRefetchDelay time.Duration
 	// OnResult, if set, is called after every epoch this observer validates
 	// (pass, fail, or error), for tests/observability. Never called
 	// concurrently with itself.
@@ -184,6 +189,9 @@ type Observer struct {
 	resultMu      sync.Mutex
 	retry         map[uint64]time.Time
 	retryAccounts map[uint64]time.Time
+	// poolHistoryRefetchAt holds the earliest time each epoch cached with an
+	// unpublished pool_history may be fetched again. Guarded by mu.
+	poolHistoryRefetchAt map[uint64]time.Time
 
 	// pendingAccounts is pending's twin for the slow per-account queue (see
 	// the Observer doc comment). Guarded by the same mu as pending: both are
@@ -256,6 +264,9 @@ func NewObserver(cfg ObserverConfig) (*Observer, error) {
 	if cfg.ErrorRetryDelay <= 0 {
 		cfg.ErrorRetryDelay = 5 * time.Minute
 	}
+	if cfg.PoolHistoryRefetchDelay <= 0 {
+		cfg.PoolHistoryRefetchDelay = time.Hour
+	}
 
 	cache, err := OpenCache(cfg.CachePath, cfg.Logger)
 	if err != nil {
@@ -274,16 +285,17 @@ func NewObserver(cfg ObserverConfig) (*Observer, error) {
 	}
 
 	return &Observer{
-		cfg:             cfg,
-		cache:           cache,
-		koios:           koios,
-		metrics:         newMetrics(cfg.PromRegistry),
-		pending:         make(map[uint64]struct{}),
-		pendingAccounts: make(map[uint64]struct{}),
-		retry:           make(map[uint64]time.Time),
-		retryAccounts:   make(map[uint64]time.Time),
-		wake:            make(chan struct{}, defaultQueueBuffer),
-		wakeAccounts:    make(chan struct{}, defaultQueueBuffer),
+		cfg:                  cfg,
+		cache:                cache,
+		koios:                koios,
+		metrics:              newMetrics(cfg.PromRegistry),
+		pending:              make(map[uint64]struct{}),
+		pendingAccounts:      make(map[uint64]struct{}),
+		retry:                make(map[uint64]time.Time),
+		retryAccounts:        make(map[uint64]time.Time),
+		poolHistoryRefetchAt: make(map[uint64]time.Time),
+		wake:                 make(chan struct{}, defaultQueueBuffer),
+		wakeAccounts:         make(chan struct{}, defaultQueueBuffer),
 	}, nil
 }
 
@@ -1064,6 +1076,31 @@ func (o *Observer) fetchParamsWithRetry(
 	return fmt.Errorf("fetch epoch params %d: %w", epoch, lastErr)
 }
 
+// poolHistoryRefetchDue reports whether a cached epoch must be fetched again
+// because Koios had not published its pool_history when it was cached. The
+// epoch_info row makes GetUncachedEpochs treat it as complete, so without this
+// the empty pool set would be compared forever. Refetches are spaced by
+// PoolHistoryRefetchDelay because each costs one request per pool.
+func (o *Observer) poolHistoryRefetchDue(epoch uint64) (bool, error) {
+	waiting, err := o.cache.EpochAwaitingPoolHistory(o.cfg.Network, epoch)
+	if err != nil {
+		return false, fmt.Errorf(
+			"check pool history for epoch %d: %w", epoch, err,
+		)
+	}
+	if !waiting {
+		return false, nil
+	}
+	now := time.Now()
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if now.Before(o.poolHistoryRefetchAt[epoch]) {
+		return false, nil
+	}
+	o.poolHistoryRefetchAt[epoch] = now.Add(o.cfg.PoolHistoryRefetchDelay)
+	return true, nil
+}
+
 // fetchPoolsIfNeeded fetches Koios pool/epoch-info/totals reference data for
 // epoch only if it is not already cached.
 //
@@ -1084,7 +1121,13 @@ func (o *Observer) fetchPoolsIfNeeded(ctx context.Context, epoch uint64) error {
 		return fmt.Errorf("check cache for epoch %d: %w", epoch, err)
 	}
 	if len(uncached) == 0 {
-		return nil
+		refetch, err := o.poolHistoryRefetchDue(epoch)
+		if err != nil {
+			return err
+		}
+		if !refetch {
+			return nil
+		}
 	}
 	var poolIDs []string
 	var firstActiveEpochs map[string]uint64

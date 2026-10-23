@@ -42,7 +42,6 @@ import (
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/tracing"
 	"github.com/blinklabs-io/dingo/ledger/eras"
-	"github.com/blinklabs-io/dingo/ledger/forging"
 	"github.com/blinklabs-io/dingo/ledger/governance"
 	"github.com/blinklabs-io/dingo/ledger/hardfork"
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -1872,6 +1871,9 @@ func (ls *LedgerState) AwaitChainsyncHeaderCapacity(
 			return nil
 		}
 		resumeAt := max(pauseAt-BlockfetchBatchSize, 0)
+		if hook := ls.chainsyncCapacityWaitHook; hook != nil {
+			hook()
+		}
 		if err := ls.chain.WaitForHeaderCountBelowOrSignal(ctx, resumeAt+1, changed); err != nil {
 			return err
 		}
@@ -4037,8 +4039,11 @@ func (ls *LedgerState) resetChainsyncResyncState(
 ) {
 	ls.clearRollbackHistory()
 	ls.clearHeaderMismatches()
-	ls.setSelectedBlockfetchConnId(ouroboros.ConnectionId{})
 	ls.chainsyncBlockfetchMutex.Lock()
+	// The selection is guarded by chainsyncBlockfetchMutex like every other
+	// field cleared here: startQueuedBlockfetchOnLocked compares it across
+	// the request it sends outside the lock.
+	ls.setSelectedBlockfetchConnId(ouroboros.ConnectionId{})
 	// clearQueuedHeaders mutates headerPipelineConnId, which every other
 	// mutator guards with chainsyncBlockfetchMutex -- moved inside this
 	// lock (rather than called before it, as this used to) to close that
@@ -4459,8 +4464,8 @@ func (ls *LedgerState) recoverPeerHeaderHistoryFromPointLocked(
 		}
 		ls.chainsyncBlockfetchMutex.Lock()
 		ls.headerPipelineConnId = connId
-		ls.chainsyncBlockfetchMutex.Unlock()
 		ls.setSelectedBlockfetchConnId(connId)
+		ls.chainsyncBlockfetchMutex.Unlock()
 		return ls.chain.HeaderCount(), nil
 	}
 	return 0, nil
@@ -4618,8 +4623,11 @@ func (ls *LedgerState) RecoverAfterLocalRollback(
 	// successful replay reassigns this field before its blockfetch attempt, so
 	// nothing downstream currently reads a stale value -- but that makes the
 	// invariant depend on every future writer reassigning first, which is not a
-	// property worth relying on.
+	// property worth relying on. The loop above has released
+	// chainsyncBlockfetchMutex, which guards the selection.
+	ls.chainsyncBlockfetchMutex.Lock()
 	ls.setSelectedBlockfetchConnId(ouroboros.ConnectionId{})
+	ls.chainsyncBlockfetchMutex.Unlock()
 	return LocalRollbackRecoveryResult{}
 }
 
@@ -5441,6 +5449,10 @@ func (ls *LedgerState) flushQueuedHeadersForHorizonWait(
 // and no blockfetch is running, as while a block waits on data fetched by
 // another protocol. Re-intersecting instead closes the connections that work
 // may need, without advancing the horizon.
+//
+// A chain tip in the applied tip's slot under another hash is such a block. A
+// chain tip in an earlier slot is a rollback the ledger has yet to follow, and
+// nothing at or below the applied slot can move the horizon past where it is.
 func (ls *LedgerState) chainAheadOfAppliedTip() bool {
 	if ls.chain == nil {
 		return false
@@ -5449,7 +5461,12 @@ func (ls *LedgerState) chainAheadOfAppliedTip() bool {
 	if tip == nil {
 		return false
 	}
-	return ls.chain.Tip().Point.Slot > tip.currentTip.Point.Slot
+	chainTip := ls.chain.Tip().Point
+	applied := tip.currentTip.Point
+	if chainTip.Slot != applied.Slot {
+		return chainTip.Slot > applied.Slot
+	}
+	return !pointMatches(chainTip, applied)
 }
 
 // awaitForecastHorizon blocks until the published ledger state can forecast
@@ -7713,7 +7730,7 @@ func (ls *LedgerState) flushPendingBlockfetchBlocksDeferred(
 			// fork transactions.
 			validationEnabled, _ := ls.validationStateSnapshot()
 			ls.auditContinuationBlock(pendingEvent, validationEnabled)
-			ls.checkSlotBattle(pendingEvent, nil)
+			ls.checkSlotBattle(pendingEvent)
 			// The block extended the chain, so the range it belongs to
 			// is fetchable after all and any failure record for it is
 			// stale. Noting it here rather than on arrival is what keeps
@@ -7783,7 +7800,7 @@ func (ls *LedgerState) flushPendingBlockfetchBlocksDeferred(
 				pubs,
 			)
 		}
-		ls.checkSlotBattle(pendingEvent, addBlockErr)
+		ls.checkSlotBattle(pendingEvent)
 	}
 	ls.chain.NotifyIterators()
 	return nil
@@ -8537,13 +8554,13 @@ func buildGenesisBlockCbor(
 			outputLen := len(outputCbor)
 
 			// Validate sizes fit in uint32 (fail fast instead of silent truncation)
-			if offset > math.MaxUint32 {
+			if !fitsUint32(offset) {
 				return nil, fmt.Errorf(
 					"genesis CBOR offset %d exceeds uint32 max",
 					offset,
 				)
 			}
-			if outputLen > math.MaxUint32 {
+			if !fitsUint32(outputLen) {
 				return nil, fmt.Errorf(
 					"genesis output CBOR length %d exceeds uint32 max",
 					outputLen,
@@ -8605,7 +8622,7 @@ func writeCborMajorType(buf *bytes.Buffer, majorType, n int) {
 		buf.WriteByte(header | 25)
 		buf.WriteByte(byte(n >> 8))
 		buf.WriteByte(byte(n))
-	case n < 4294967296:
+	case int64(n) < 4294967296:
 		buf.WriteByte(header | 26)
 		buf.WriteByte(byte(n >> 24))
 		buf.WriteByte(byte(n >> 16))
@@ -10080,20 +10097,18 @@ func (ls *LedgerState) cleanupBlockNoncesBefore(
 
 // checkSlotBattle checks whether an incoming block from a peer
 // occupies a slot for which the local node has already forged a
-// block. If so, it emits a SlotBattleEvent and logs a warning.
+// block. If so, it counts and logs the battle and registers it so the winner
+// is reported once the slot is settled.
 //
-// The addBlockErr parameter is the error (if any) returned by
-// chain.AddBlock for the incoming block. A nil error means the
-// remote block was accepted onto the chain (remote won); a
-// non-nil error means it was rejected (local won).
+// The winner cannot be read when the rival arrives. chain.AddBlock only
+// accepts a block that extends the tip, so an accepted rival means the forged
+// block is off the chain at that moment, and a refused one leaves ours at the
+// tip; either can still reverse when chain selection switches branches (see
+// AdoptLocalForgedSibling). resolveSlotBattles reports the winner from the
+// chain once the tip is a security parameter of blocks past the arrival.
 //
-// The caller must hold ls.Lock() (write lock). This method must not
-// acquire ls.RLock(), because sync.RWMutex is not reentrant and
-// attempting a read lock while holding the write lock deadlocks.
-func (ls *LedgerState) checkSlotBattle(
-	e BlockfetchEvent,
-	addBlockErr error,
-) {
+// It takes no ledger lock, so it is safe whichever one the caller holds.
+func (ls *LedgerState) checkSlotBattle(e BlockfetchEvent) {
 	checker := ls.loadForgedBlockChecker()
 	if checker == nil {
 		return
@@ -10112,17 +10127,12 @@ func (ls *LedgerState) checkSlotBattle(
 		return
 	}
 
-	// Determine winner: if the remote block was rejected (addBlockErr
-	// != nil), our local block remains on chain, so we won.
-	localWon := addBlockErr != nil
-
 	ls.config.Logger.Warn(
 		"slot battle detected",
 		"component", "ledger",
 		"slot", incomingSlot,
 		"local_block_hash", hex.EncodeToString(localHash),
 		"remote_block_hash", hex.EncodeToString(remoteHash),
-		"local_won", localWon,
 	)
 
 	// Increment slot battle metric
@@ -10130,20 +10140,12 @@ func (ls *LedgerState) checkSlotBattle(
 		recorder.RecordSlotBattle()
 	}
 
-	if ls.config.EventBus != nil {
-		ls.config.EventBus.PublishAsync(
-			forging.SlotBattleEventType,
-			event.NewEvent(
-				forging.SlotBattleEventType,
-				forging.SlotBattleEvent{
-					Slot:            incomingSlot,
-					LocalBlockHash:  localHash,
-					RemoteBlockHash: remoteHash,
-					Won:             localWon,
-				},
-			),
-		)
-	}
+	ls.slotBattles.add(slotBattle{
+		slot:       incomingSlot,
+		localHash:  localHash,
+		remoteHash: remoteHash,
+		settleAt:   ls.chain.Tip().BlockNumber + ls.slotBattleSettleDepth(),
+	})
 }
 
 // selectInitialBlockfetchConn picks the connection to fetch the queued range
