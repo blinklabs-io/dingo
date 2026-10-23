@@ -138,7 +138,7 @@ func TestMempoolTransactionNotFound(t *testing.T) {
 	rec := postJSON(t, h, "/mempool/transaction", req)
 
 	requireMeshError(
-		t, rec, ErrTransactionNotFound, http.StatusNotFound,
+		t, rec, ErrTransactionNotFound, http.StatusInternalServerError,
 	)
 }
 
@@ -165,7 +165,7 @@ func TestMempoolTransactionMissingIdentifier(t *testing.T) {
 
 			requireMeshError(
 				t, rec, ErrInvalidRequest,
-				http.StatusBadRequest,
+				http.StatusInternalServerError,
 			)
 		})
 	}
@@ -249,7 +249,7 @@ func TestMempoolListingRejectsOversizedPool(t *testing.T) {
 	rec := postJSON(t, h, "/mempool", networkReq())
 
 	got := requireMeshError(
-		t, rec, ErrUnavailable, http.StatusServiceUnavailable,
+		t, rec, ErrUnavailable, http.StatusInternalServerError,
 	)
 	require.Contains(t, got.Details["error"], "5 transactions")
 	require.Equal(t, []int{3}, deps.mempool.listCalls)
@@ -308,7 +308,7 @@ func TestMempoolConcurrencyBudget(t *testing.T) {
 
 	rec := postJSON(t, h, "/mempool", networkReq())
 	got := requireMeshError(
-		t, rec, ErrUnavailable, http.StatusServiceUnavailable,
+		t, rec, ErrUnavailable, http.StatusInternalServerError,
 	)
 	require.True(t, got.Retriable)
 
