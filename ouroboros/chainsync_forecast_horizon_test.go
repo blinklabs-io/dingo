@@ -120,7 +120,7 @@ func TestChainsyncClientRollForwardWithholdsHeaderPastForecastHorizon(
 	t.Parallel()
 
 	f := newForecastHorizonFixture(t, "10.0.0.20:3001")
-	f.o.chainSelectionVerifyHeaderCrypto = func(gledger.BlockHeader) (uint64, error) {
+	f.o.chainSelectionVerifyHeaderCrypto = func(ouroboros.ConnectionId, gledger.BlockHeader) (uint64, error) {
 		return 0, beyondForecastHorizonErr()
 	}
 
@@ -163,7 +163,7 @@ func TestChainsyncClientRollForwardRewaitsForecastHorizonBeforeObserving(
 		admissions.Add(1)
 		return true, nil
 	}
-	f.o.chainSelectionVerifyHeaderCrypto = func(gledger.BlockHeader) (uint64, error) {
+	f.o.chainSelectionVerifyHeaderCrypto = func(ouroboros.ConnectionId, gledger.BlockHeader) (uint64, error) {
 		if verifications.Add(1) == 1 {
 			return 0, beyondForecastHorizonErr()
 		}
@@ -363,12 +363,54 @@ func TestChainsyncClientRollForwardResyncsDisconnectedHeader(t *testing.T) {
 	)
 }
 
+func TestChainsyncClientRollForwardResyncsHeaderWithNoForecastWork(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	f := newForecastHorizonFixture(t, "10.0.0.24:3001")
+	_, resyncCh := f.o.eventBus.Subscribe(event.ChainsyncResyncEventType)
+	f.o.chainsyncHeaderAdmission = func(
+		context.Context,
+		ledger.ChainsyncEvent,
+	) (bool, error) {
+		return false, fmt.Errorf(
+			"wait for forecast horizon: %w",
+			ledger.ErrChainsyncHeaderNeedsResync,
+		)
+	}
+
+	f.rollForward(t, newTestBlockHeader(400, 1, 0xa5))
+
+	resync := testutil.RequireReceive(
+		t,
+		resyncCh,
+		testutil.AsyncWait,
+		"a forecast wait with no local block work must re-intersect",
+	)
+	data, ok := resync.Data.(event.ChainsyncResyncEvent)
+	require.True(t, ok)
+	require.Equal(t, f.conn, data.ConnectionId)
+	require.Equal(
+		t,
+		event.ChainsyncResyncReasonForecastHorizonNoWork,
+		data.Reason,
+	)
+	require.False(t, chainsyncResyncDeniesPeer(data.Reason))
+	testutil.RequireNoReceive(t, f.tipCh, 200*time.Millisecond,
+		"a held header must not extend the peer candidate")
+	testutil.RequireNoReceive(t, f.ledgerCh, 200*time.Millisecond,
+		"a held header must not reach blockfetch")
+	testutil.RequireNoReceive(t, f.recycle, 200*time.Millisecond,
+		"a missing local block range is not a peer fault")
+}
+
 // setLocalTip stubs the local tip block number and the security parameter k.
 //
 // It also lets header verification pass, so a header that is not resynced
 // proceeds to chain selection instead of reaching an unset seam.
 func (f forecastHorizonFixture) setLocalTip(tipBlock, k uint64) {
-	f.o.chainSelectionVerifyHeaderCrypto = func(gledger.BlockHeader) (uint64, error) {
+	f.o.chainSelectionVerifyHeaderCrypto = func(ouroboros.ConnectionId, gledger.BlockHeader) (uint64, error) {
 		return 42, nil
 	}
 	f.o.chainsyncLocalTipBlock = func() (uint64, uint64) {

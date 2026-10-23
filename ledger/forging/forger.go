@@ -37,7 +37,7 @@ import (
 )
 
 // errNoValidTxRefs is returned by buildLeiosEB when all mempool transactions
-// are filtered out (invalid hash, zero size, or size > uint16). It is
+// are filtered out (invalid hash, zero size, or size > uint32). It is
 // treated as a skip rather than a hard failure by checkAndForgeLeiosEB.
 var errNoValidTxRefs = errors.New(
 	"no valid transaction references for endorser block",
@@ -4428,7 +4428,8 @@ type leiosEBCaps struct {
 
 // buildLeiosEB assembles a LeiosEndorserBlock from mempool transactions.
 // Transactions with invalid hex hashes, non-32-byte hashes, zero sizes,
-// or sizes exceeding uint16 are silently dropped. Returns an error only
+// sizes exceeding uint32, or an encoding that is not a Dijkstra transaction
+// are silently dropped. Returns an error only
 // when no valid references remain after filtering.
 func buildLeiosEB(
 	txs []MempoolTransaction,
@@ -4457,21 +4458,25 @@ func buildLeiosEB(
 		) // #nosec G115 -- bounded by prealloc above
 	}
 	refs := make([]lcommon.LeiosTransactionReference, 0, prealloc)
-	// bodies holds each referenced transaction's raw CBOR, in the same order
-	// as refs, so the endorser block can serve them over leios-fetch. A
-	// transaction dropped from refs (bad hash or size) is dropped here too,
-	// keeping body i aligned with reference i.
+	// bodies holds each referenced transaction's block_transaction CBOR, in
+	// the same order as refs, so the endorser block can serve them over
+	// leios-fetch. A transaction dropped from refs (bad hash or size) is
+	// dropped here too, keeping body i aligned with reference i.
 	bodies = make([][]byte, 0, prealloc)
 	for _, tx := range txs {
 		// The manifest reference is content-addressed by (hash, size) over
-		// the FULL serialized transaction: TransactionSize is len(tx.Cbor),
-		// so TransactionHash must be the hash of that same full CBOR, not the
-		// Cardano tx-id / body hash. This matches the fetch-side validator
+		// the block_transaction bytes the endorser block serves, including
+		// is_valid, so TransactionSize is the length of those bytes and
+		// TransactionHash their hash, not the Cardano tx-id / body hash or
+		// the mempool encoding. This matches the fetch-side validator
 		// (validateLeiosEndorserBlockTxs) and Haskell reference nodes, so a
 		// peer fetching a locally forged EB validates it instead of rejecting
 		// every tx.
-		if !validLeiosTransactionHash(tx.Hash) ||
-			!validLeiosTransactionSize(len(tx.Cbor)) {
+		if !validLeiosTransactionHash(tx.Hash) {
+			continue
+		}
+		blockTx, convErr := leiosBlockTransactionCbor(tx.Cbor)
+		if convErr != nil || !validLeiosTransactionSize(len(blockTx)) {
 			continue
 		}
 		// Apply the manifest caps to references that would otherwise be
@@ -4483,19 +4488,19 @@ func buildLeiosEB(
 		if caps.maxRefs > 0 && uint64(len(refs)) >= caps.maxRefs {
 			break
 		}
-		txBytes := uint64(len(tx.Cbor))
+		txBytes := uint64(len(blockTx))
 		if caps.maxBytes > 0 && totalBytes+txBytes > caps.maxBytes {
 			break
 		}
 		totalBytes += txBytes
-		// Bounded above by the MaxUint32 check on len(tx.Cbor) above. Kept
+		// Bounded above by the MaxUint32 check on len(blockTx) above. Kept
 		// on one line so the directive stays attached to the conversion.
-		size := uint32(len(tx.Cbor)) // #nosec G115
+		size := uint32(len(blockTx)) // #nosec G115
 		refs = append(refs, lcommon.LeiosTransactionReference{
-			TransactionHash: lcommon.Blake2b256Hash(tx.Cbor),
+			TransactionHash: lcommon.Blake2b256Hash(blockTx),
 			TransactionSize: size,
 		})
-		bodies = append(bodies, tx.Cbor)
+		bodies = append(bodies, blockTx)
 	}
 	if len(refs) == 0 {
 		return nil, nil, nil, errNoValidTxRefs

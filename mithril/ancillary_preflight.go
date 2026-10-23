@@ -35,11 +35,17 @@ func readVerifiedAncillaryManifest(
 	ctx context.Context,
 	file *os.File,
 	verificationKey string,
+	decoders *decoderMemoryBudget,
 ) (*ancillaryManifest, []byte, error) {
 	if _, err := file.Seek(0, io.SeekStart); err != nil {
 		return nil, nil, fmt.Errorf("seeking ancillary archive: %w", err)
 	}
 	countingFile := &countingReader{reader: file}
+	release, err := decoders.reserve(ctx, maxZstdWindowSize, maxZstdDecoderMemory)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer release()
 	zr, err := zstd.NewReader(
 		countingFile,
 		zstd.WithDecoderMaxWindow(maxZstdWindowSize),
@@ -49,11 +55,15 @@ func readVerifiedAncillaryManifest(
 		return nil, nil, fmt.Errorf("creating ancillary preflight reader: %w", err)
 	}
 	defer zr.Close()
-	tr := tar.NewReader(&expansionReader{
-		reader: zr,
-		read:   &countingFile.read,
-		ratio:  maxExpansionRatio,
-		floor:  expansionFloor,
+	tr := tar.NewReader(&archiveStreamReader{
+		ctx: ctx,
+		reader: &expansionReader{
+			reader: zr,
+			read:   &countingFile.read,
+			ratio:  maxExpansionRatio,
+			floor:  expansionFloor,
+		},
+		maxBytes: archiveStreamLimit(ancillaryExpandedMaxBytes, maxAncillaryEntries),
 	})
 	var entries int
 	var expanded int64

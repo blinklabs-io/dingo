@@ -16,7 +16,10 @@ package mcp
 
 import (
 	"context"
+	"fmt"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -30,6 +33,44 @@ type testMempoolMock struct {
 	mempool.Service
 	txs      []mempool.MempoolTransaction
 	capacity int64
+	// sizeBytes overrides the aggregate size when non-zero; otherwise it is
+	// the sum of the transaction CBOR lengths.
+	sizeBytes int64
+
+	mu               sync.Mutex
+	fullEnumerations int
+	boundedItems     []int
+}
+
+func (m *testMempoolMock) SizeBytes() int64 {
+	if m.sizeBytes != 0 {
+		return m.sizeBytes
+	}
+	var total int64
+	for _, tx := range m.txs {
+		total += int64(len(tx.Cbor))
+	}
+	return total
+}
+
+func (m *testMempoolMock) TransactionsBounded(
+	maxItems int,
+	_ int64,
+) ([]mempool.MempoolTransaction, int) {
+	m.mu.Lock()
+	m.boundedItems = append(m.boundedItems, maxItems)
+	m.mu.Unlock()
+	out := m.txs
+	if maxItems > 0 && len(out) > maxItems {
+		out = out[:maxItems]
+	}
+	return out, len(m.txs)
+}
+
+func (m *testMempoolMock) enumerations() (int, []int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.fullEnumerations, slices.Clone(m.boundedItems)
 }
 
 func (m *testMempoolMock) GetTransaction(
@@ -44,6 +85,9 @@ func (m *testMempoolMock) GetTransaction(
 }
 
 func (m *testMempoolMock) Transactions() []mempool.MempoolTransaction {
+	m.mu.Lock()
+	m.fullEnumerations++
+	m.mu.Unlock()
 	return m.txs
 }
 
@@ -169,4 +213,90 @@ func TestGetMempoolInfo(t *testing.T) {
 		resNotFound.Content[0].(*mcp.TextContent).Text,
 		"not currently present",
 	)
+}
+
+func TestGetMempoolInfoSummaryIsBounded(t *testing.T) {
+	t.Parallel()
+
+	const poolSize = 120
+	// A size distinct from the sum of the displayed CBOR proves the totals
+	// come from the aggregate counter, not from the enumerated prefix.
+	const aggregateBytes = int64(7_654_321)
+	txs := make([]mempool.MempoolTransaction, poolSize)
+	for i := range txs {
+		txs[i] = mempool.MempoolTransaction{
+			Hash:     fmt.Sprintf("%064x", i+1),
+			Type:     6,
+			Cbor:     make([]byte, 100),
+			LastSeen: time.Now().Add(-time.Duration(i) * time.Second),
+		}
+	}
+
+	tests := []struct {
+		name      string
+		args      map[string]any
+		wantLimit int
+	}{
+		{"default", map[string]any{}, 10},
+		{"explicit", map[string]any{"limit": 7}, 7},
+		{"clamped to max", map[string]any{"limit": 500}, 50},
+		{"negative uses default", map[string]any{"limit": -3}, 10},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			mp := &testMempoolMock{
+				capacity:  25 * 1024 * 1024,
+				txs:       txs,
+				sizeBytes: aggregateBytes,
+			}
+			ctx, cancel := context.WithTimeout(
+				context.Background(), 5*time.Second,
+			)
+			defer cancel()
+			server := mcp.NewServer(
+				&mcp.Implementation{Name: "test-mp", Version: "1.0"}, nil,
+			)
+			RegisterCardanoTools(server, nil, nil, mp, "preview", 5*time.Second)
+			clTr, srvTr := mcp.NewInMemoryTransports()
+			_, err := server.Connect(ctx, srvTr, nil)
+			require.NoError(t, err)
+			cs, err := mcp.NewClient(
+				&mcp.Implementation{Name: "client", Version: "1.0"}, nil,
+			).Connect(ctx, clTr, nil)
+			require.NoError(t, err)
+			defer cs.Close()
+
+			res, err := cs.CallTool(ctx, &mcp.CallToolParams{
+				Name:      "get_mempool_info",
+				Arguments: tc.args,
+			})
+			require.NoError(t, err)
+			require.False(t, res.IsError)
+			text := res.Content[0].(*mcp.TextContent).Text
+
+			full, bounded := mp.enumerations()
+			assert.Zero(t, full, "summary must not enumerate the whole pool")
+			assert.Equal(t, []int{tc.wantLimit}, bounded)
+			assert.Contains(t, text, "Pending Transactions**: 120")
+			assert.Contains(
+				t, text, fmt.Sprintf("Buffered Volume**: %d bytes", aggregateBytes),
+			)
+			assert.Equal(
+				t, tc.wantLimit, strings.Count(text, "| `"),
+				"table rows must equal the display limit",
+			)
+			prev := -1
+			for i := range tc.wantLimit {
+				pos := strings.Index(text, fmt.Sprintf("| `%064x` |", i+1))
+				require.GreaterOrEqual(t, pos, 0, "row %d missing", i)
+				require.Greater(t, pos, prev, "row %d out of queue order", i)
+				prev = pos
+			}
+			assert.Contains(
+				t, text,
+				fmt.Sprintf("showing up to %d of %d", tc.wantLimit, poolSize),
+			)
+		})
+	}
 }

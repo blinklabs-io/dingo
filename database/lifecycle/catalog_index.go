@@ -778,7 +778,7 @@ func updateCloudSnapshotCatalogIfPresent(
 	if err := validateSnapshotCatalogID(entry.ID); err != nil {
 		return err
 	}
-	if err := entry.Manifest.Authenticate(opts...); err != nil {
+	if err := authenticateEntry(entry, opts); err != nil {
 		return fmt.Errorf("authenticate cloud snapshot %q: %w", entry.ID, err)
 	}
 	data, err := json.Marshal(entry.Manifest)
@@ -1197,7 +1197,10 @@ func ListAvailableSnapshotPageContext(
 			manifest, err = ReadManifest(location, opts...)
 		} else {
 			location = JoinCloudURI(CloudDestinationDisplay(cloudDest), row.id)
-			manifest, err = ParseManifest(row.manifest, opts...)
+			manifest, err = ParseManifest(
+				row.manifest,
+				append(append([]ManifestOption(nil), opts...), WithManifestID(row.id))...,
+			)
 		}
 		if err != nil {
 			problems = append(problems, fmt.Errorf("snapshot %q: %w", row.id, err))

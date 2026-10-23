@@ -86,7 +86,7 @@ func withProgressContext(
 const (
 	// DefaultMaxDownloadBytes bounds each compressed archive, including any
 	// resumed prefix, when the caller sets no limit. v2 objects have tighter
-	// built-in limits; this one covers the v1 full-database snapshot.
+	// built-in limits.
 	DefaultMaxDownloadBytes int64 = 512 << 30
 
 	defaultDownloadIdleTimeout = 2 * time.Minute
@@ -1304,7 +1304,15 @@ func extractArchiveFile(
 
 	// Bound decoder allocations explicitly. The library default is a protocol
 	// maximum rather than an application resource policy, and may change when
-	// the dependency is upgraded.
+	// the dependency is upgraded. The reservation outlives the reader's Close
+	// so the memory is accounted until the decoder has been released.
+	release, err := extractCfg.decoders.reserve(
+		ctx, extractCfg.maxZstdWindowSize, extractCfg.maxZstdMemory,
+	)
+	if err != nil {
+		return "", err
+	}
+	defer release()
 	zr, err := zstd.NewReader(
 		countingFile,
 		zstd.WithDecoderMaxWindow(extractCfg.maxZstdWindowSize),
@@ -1319,11 +1327,16 @@ func extractArchiveFile(
 	defer zr.Close()
 
 	limits := extractCfg.limits
-	tr := tar.NewReader(&expansionReader{
-		reader: zr,
-		read:   &countingFile.read,
-		ratio:  limits.maxExpansion,
-		floor:  limits.expansionFloor,
+	tr := tar.NewReader(&archiveStreamReader{
+		ctx: ctx,
+		reader: &expansionReader{
+			reader: zr,
+			read:   &countingFile.read,
+			ratio:  limits.maxExpansion,
+			floor:  limits.expansionFloor,
+		},
+		budget:   limits.budget,
+		maxBytes: archiveStreamLimit(limits.maxTotalBytes, limits.maxEntries),
 	})
 
 	var entries, filesExtracted int
@@ -1361,6 +1374,12 @@ func extractArchiveFile(
 		// filepath.Clean converts them to backslashes on Windows.
 		name := path.Clean(header.Name)
 		if name == "." {
+			if header.Typeflag != tar.TypeDir || header.Size != 0 {
+				return "", fmt.Errorf(
+					"%w: root archive member %q must be an empty directory",
+					ErrExtractUnexpectedMember, header.Name,
+				)
+			}
 			continue
 		}
 		if !validRelPath(name) {

@@ -989,16 +989,28 @@ func LoadWithDB(
 		blocksCopied     int
 		immutableTipSlot uint64
 	)
-	if remoteImmutable {
-		blocksCopied, immutableTipSlot, err = copyBlocksRemote(
-			replayCtx, logger, immutableDir,
-			filepath.Join(cfg.DatabasePath, remoteImmutableCacheDir),
-			remoteLimits, c, replayBatches,
-		)
-	} else {
-		blocksCopied, immutableTipSlot, err = copyBlocksDirect(
-			replayCtx, logger, immutableDir, c, replayBatches, false,
-		)
+	gapBlocks, err := replayChainBlocksAheadOfLedger(
+		replayCtx, c, ls.Tip().Point, replayBatches,
+	)
+	if err == nil {
+		if gapBlocks > 0 {
+			logger.Info(
+				"replayed chain blocks the ledger had not applied",
+				"blocks", gapBlocks,
+				"chain_tip_slot", c.Tip().Point.Slot,
+			)
+		}
+		if remoteImmutable {
+			blocksCopied, immutableTipSlot, err = copyBlocksRemote(
+				replayCtx, logger, immutableDir,
+				filepath.Join(cfg.DatabasePath, remoteImmutableCacheDir),
+				remoteLimits, c, replayBatches,
+			)
+		} else {
+			blocksCopied, immutableTipSlot, err = copyBlocksDirect(
+				replayCtx, logger, immutableDir, c, replayBatches,
+			)
+		}
 	}
 	close(replayBatches)
 	if err != nil {
@@ -1051,6 +1063,74 @@ func LoadWithDB(
 		)
 	}
 	return nil
+}
+
+// replayChainBlocksAheadOfLedger sends the primary chain's blocks after
+// ledgerTip to the replay. The immutable copy starts at the chain tip, so a
+// chain that already holds blocks the ledger has not applied -- the blob-only
+// copy `dingo mithril sync` makes past its ledger-state snapshot -- would
+// otherwise hand the ledger a first block that does not extend its tip.
+func replayChainBlocksAheadOfLedger(
+	ctx context.Context,
+	c *chain.Chain,
+	ledgerTip ocommon.Point,
+	replayBatches chan<- []gledger.Block,
+) (int, error) {
+	chainTip := c.Tip().Point
+	if chainTip.Slot == ledgerTip.Slot &&
+		bytes.Equal(chainTip.Hash, ledgerTip.Hash) {
+		return 0, nil
+	}
+	iter, err := c.FromPointContext(ctx, ledgerTip, false)
+	if err != nil {
+		return 0, fmt.Errorf(
+			"ledger tip (slot %d) is not on the primary chain: %w",
+			ledgerTip.Slot, err,
+		)
+	}
+	defer iter.Cancel()
+	// The blob-only copy never decoded these blocks, so verify their body
+	// hashes here as the immutable copy does.
+	verifyCfg := lcommon.VerifyConfig{}
+	var replayed int
+	for done := false; !done; {
+		batch := make([]gledger.Block, 0, loadBlockBatchSize)
+		for len(batch) < cap(batch) {
+			next, err := iter.Next(false)
+			if errors.Is(err, chain.ErrIteratorChainTip) {
+				done = true
+				break
+			}
+			if err != nil {
+				return replayed, fmt.Errorf(
+					"reading chain block after ledger tip: %w", err,
+				)
+			}
+			if next.Rollback {
+				return replayed, errors.New(
+					"primary chain rolled back during load",
+				)
+			}
+			blk, err := next.Block.Decode(verifyCfg)
+			if err != nil {
+				return replayed, fmt.Errorf(
+					"decoding chain block at slot %d: %w",
+					next.Block.Slot, err,
+				)
+			}
+			batch = append(batch, blk)
+		}
+		if len(batch) == 0 {
+			break
+		}
+		select {
+		case replayBatches <- batch:
+		case <-ctx.Done():
+			return replayed, fmt.Errorf("loading blocks: %w", ctx.Err())
+		}
+		replayed += len(batch)
+	}
+	return replayed, nil
 }
 
 func loadReplayFailure(
@@ -1241,7 +1321,6 @@ func copyBlocksDirect(
 	immutableDir string,
 	c *chain.Chain,
 	replayBatches chan<- []gledger.Block,
-	validateBodyHash bool,
 ) (int, uint64, error) {
 	immDB, err := immutable.New(immutableDir)
 	if err != nil {
@@ -1278,9 +1357,9 @@ func copyBlocksDirect(
 	startTime := time.Now()
 	lastProgressLog := time.Time{}
 	var lastProgressSlot uint64
-	verifyCfg := lcommon.VerifyConfig{
-		SkipBodyHashValidation: !validateBodyHash,
-	}
+	// The chunk files may come from another party, so every block's body must
+	// match the body hash its signed header commits to.
+	verifyCfg := lcommon.VerifyConfig{}
 	for {
 		rawBatch := make([]immutable.Block, 0, loadBlockBatchSize)
 		for {
@@ -1640,6 +1719,51 @@ func copyImmutableBlobsBounded(
 		}
 	}
 	return blocksCopied, lastSlot, nil
+}
+
+// CopyImmutableBlocks appends blocks, in ascending order, to c and, outside
+// Core storage mode, stores each block's produced-UTxO offsets in the same
+// transaction, as the bulk ImmutableDB copy does. Core resolution never reads
+// those offsets, so a Core copy skips them; it does not record the immutable
+// offset completion marker in either mode. The blocks must come from a
+// verified immutable trio: only the header is decoded, and only for the
+// chain's continuity fields. It returns the number of blocks added.
+func CopyImmutableBlocks(
+	ctx context.Context,
+	c *chain.Chain,
+	blocks []immutable.Block,
+) (int, error) {
+	callback := func(rb chain.RawBlock, txn *database.Txn) error {
+		if db := txn.DB(); db != nil &&
+			db.StorageMode() == datatypes.StorageModeCore {
+			return nil
+		}
+		_, err := storeRawBlockUtxoOffsets(txn, rb)
+		return err
+	}
+	copied := 0
+	batch := make([]chain.RawBlock, 0, min(len(blocks), loadBlockBatchSize))
+	for i := range blocks {
+		rawBlock, err := rawBlockFromImmutableBlock(&blocks[i])
+		if err != nil {
+			return copied, fmt.Errorf(
+				"building raw block at slot %d: %w", blocks[i].Slot, err,
+			)
+		}
+		batch = append(batch, rawBlock)
+		if len(batch) < loadBlockBatchSize && i < len(blocks)-1 {
+			continue
+		}
+		if err := c.AddRawBlocksWithCallback(ctx, batch, callback); err != nil {
+			return copied, fmt.Errorf("failed to import block: %w", err)
+		}
+		copied += len(batch)
+		batch = batch[:0]
+		if err := ctx.Err(); err != nil {
+			return copied, err
+		}
+	}
+	return copied, nil
 }
 
 // copyBlocksRawWithCallback is a lightweight variant of copyBlocks that

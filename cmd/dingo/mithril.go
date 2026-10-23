@@ -86,6 +86,12 @@ func resolveMithrilBackend(backend string) (string, error) {
 	if backend == "" {
 		return mithril.BackendV2, nil
 	}
+	if backend == "v1" {
+		return "", errors.New(
+			"mithril.backend \"v1\" is no longer supported; " +
+				"remove the setting or use \"v2\"",
+		)
+	}
 	if slices.Contains(mithril.AcceptedBackends(), backend) {
 		return backend, nil
 	}
@@ -118,59 +124,16 @@ func mithrilListCommand() *cobra.Command {
 				return err
 			}
 
-			backend, err := resolveMithrilBackend(
+			if _, err := resolveMithrilBackend(
 				cfg.Mithril.Backend,
-			)
-			if err != nil {
+			); err != nil {
 				return err
 			}
 
 			client := mithril.NewClient(
 				aggregatorURL, mithrilClientOptions(cfg)...,
 			)
-			if backend == mithril.BackendV2 {
-				return runMithrilListV2(cmd.Context(), client)
-			}
-			snapshots, err := client.ListSnapshots(
-				cmd.Context(),
-			)
-			if err != nil {
-				return fmt.Errorf("listing snapshots: %w", err)
-			}
-
-			if len(snapshots) == 0 {
-				fmt.Println("No snapshots available.")
-				return nil
-			}
-
-			fmt.Printf(
-				"%-16s  %-8s  %-8s  %12s  %s\n",
-				"DIGEST",
-				"EPOCH",
-				"IMMUT#",
-				"SIZE",
-				"CREATED",
-			)
-			for _, s := range snapshots {
-				digest := s.Digest
-				if len(digest) > 16 {
-					digest = digest[:16]
-				}
-				created := s.CreatedAt
-				if len(created) > 19 {
-					created = created[:19]
-				}
-				fmt.Printf(
-					"%-16s  %-8d  %-8d  %12s  %s\n",
-					mithril.EscapeText(digest),
-					s.Beacon.Epoch,
-					s.Beacon.ImmutableFileNumber,
-					mithril.HumanBytes(s.Size),
-					mithril.EscapeText(created),
-				)
-			}
-
-			return nil
+			return runMithrilListV2(cmd.Context(), client)
 		},
 	}
 	return cmd
@@ -220,8 +183,7 @@ func mithrilShowCommand() *cobra.Command {
 		Use:   "show <hash>",
 		Short: "Show details of a specific Mithril snapshot",
 		Long: "Show details of a specific Mithril snapshot.\n\n" +
-			"With the default v2 backend, pass the Cardano database artifact hash. " +
-			"With the legacy v1 backend, pass the snapshot digest.",
+			"Pass the Cardano database artifact hash.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg := config.FromContext(cmd.Context())
@@ -241,62 +203,18 @@ func mithrilShowCommand() *cobra.Command {
 				return err
 			}
 
-			backend, err := resolveMithrilBackend(
+			if _, err := resolveMithrilBackend(
 				cfg.Mithril.Backend,
-			)
-			if err != nil {
+			); err != nil {
 				return err
 			}
 
 			client := mithril.NewClient(
 				aggregatorURL, mithrilClientOptions(cfg)...,
 			)
-			if backend == mithril.BackendV2 {
-				return runMithrilShowV2(
-					cmd.Context(), client, args[0],
-				)
-			}
-			snapshot, err := client.GetSnapshot(
-				cmd.Context(),
-				args[0],
+			return runMithrilShowV2(
+				cmd.Context(), client, args[0],
 			)
-			if err != nil {
-				return fmt.Errorf("getting snapshot: %w", err)
-			}
-
-			fmt.Printf("Digest:                %s\n", mithril.EscapeText(snapshot.Digest))
-			fmt.Printf("Network:               %s\n", mithril.EscapeText(snapshot.Network))
-			fmt.Printf(
-				"Epoch:                 %d\n",
-				snapshot.Beacon.Epoch,
-			)
-			fmt.Printf(
-				"Immutable File Number: %d\n",
-				snapshot.Beacon.ImmutableFileNumber,
-			)
-			fmt.Printf(
-				"Size:                  %s\n",
-				mithril.HumanBytes(snapshot.Size),
-			)
-			fmt.Printf(
-				"Certificate Hash:      %s\n",
-				mithril.EscapeText(snapshot.CertificateHash),
-			)
-			fmt.Printf(
-				"Compression:           %s\n",
-				mithril.EscapeText(snapshot.CompressionAlgorithm),
-			)
-			fmt.Printf(
-				"Cardano Node Version:  %s\n",
-				mithril.EscapeText(snapshot.CardanoNodeVersion),
-			)
-			fmt.Printf("Created:               %s\n", mithril.EscapeText(snapshot.CreatedAt))
-			fmt.Println("Locations:")
-			for _, loc := range snapshot.Locations {
-				fmt.Printf("  - %s\n", mithril.EscapeText(loc))
-			}
-
-			return nil
 		},
 	}
 	return cmd
@@ -668,6 +586,7 @@ func runMithrilSyncWithRepair(
 		Tracing:           cfg.Tracing,
 		Logger:            logger,
 		OnProgress:        onProgress,
+		Metrics:           metrics.pipeline,
 	})
 	if err != nil {
 		return err
