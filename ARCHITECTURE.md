@@ -18192,12 +18192,14 @@ held block through the peer's recorded headers. Queued-header membership is
 checked by hash independently of that peer's recorded history, so a header
 queued by another peer remains a valid parent. The terminal ancestor at the
 history limit is checked for local membership without another ancestry hop.
-A header whose predecessor
-matches none of these, such as the far-ahead header a promoted observer
-connection already holds, cannot be released by applying blocks the node
-already has, so admission returns `ledger.ErrChainsyncHeaderDisconnected`
-without waiting (`chainsyncHeaderDisconnected`). The callback returns and the
-connection re-intersects from the local chain with
+A header whose predecessor matches none of these, such as the far-ahead
+header a promoted observer connection already holds, is not immediately
+classified as disconnected while local work may still advance the applied
+tip. Admission starts queued block-fetch work and waits for in-flight fetch or
+ledger-application work that may connect the predecessor. It returns
+`ledger.ErrChainsyncHeaderDisconnected` only when no such work remains
+(`chainsyncHeaderDisconnected`). The callback then returns and the connection
+re-intersects from the local chain with
 `ChainsyncResyncReasonDisconnectedHeaderAdmission`, which does not penalize
 the peer.
 An ingress-eligible connection whose roll-forward header trails the applied
