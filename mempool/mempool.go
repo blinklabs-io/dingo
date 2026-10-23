@@ -129,12 +129,17 @@ type Service interface {
 		maxItems int,
 		maxBytes int64,
 	) ([]MempoolTransaction, int)
+	TransactionHashes(maxItems int) ([]string, int)
 	RemoveTransaction(string)
 	RemoveTxsByHash([]string)
 	NewConsumer(ouroboros.ConnectionId) Consumer
 	RemoveConsumer(ouroboros.ConnectionId)
 	FindConsumer(ouroboros.ConnectionId) Consumer
 	CapacityBytes() int64
+	// SizeBytes returns the bytes currently retained by pending
+	// transactions, the figure capacity and admission limits are measured
+	// against. It reads a maintained counter and does not walk the pool.
+	SizeBytes() int64
 }
 
 // TxValidator defines the interface for transaction validation needed by mempool.
@@ -1936,6 +1941,11 @@ func (m *Mempool) addTransactionAttempt(
 		// remains current until the transaction is committed.
 		m.mutationMutex.Lock()
 		defer m.mutationMutex.Unlock()
+		// The gate cannot be waited on with a context, so a caller cancelled
+		// while queued discovers it here, before any validation work.
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 
 		m.Lock()
 		if m.stopped {
@@ -2134,24 +2144,69 @@ func (m *Mempool) TransactionsBounded(
 	return ret, total
 }
 
+// TransactionHashes returns the hashes of at most maxItems transactions, in
+// the same order as Transactions, together with the total number of
+// transactions in the pool. A bound of zero or less is not applied.
+//
+// It reads only the identifiers, so it never clones transaction CBOR and its
+// cost follows the size of the result rather than the size of the pool.
+func (m *Mempool) TransactionHashes(maxItems int) ([]string, int) {
+	m.RLock()
+	total := len(m.transactions)
+	var ret []string
+	var dagErr error
+	if m.dag != nil {
+		ret, dagErr = m.dagHashesLocked(maxItems)
+	}
+	if m.dag == nil || dagErr != nil {
+		n := total
+		if maxItems > 0 && maxItems < n {
+			n = maxItems
+		}
+		ret = make([]string, n)
+		for i := range ret {
+			ret[i] = m.transactions[i].Hash
+		}
+	}
+	m.RUnlock()
+	if dagErr != nil {
+		m.logger.Error(
+			"falling back to admission order for mempool hash listing",
+			"component", "mempool",
+			"error", dagErr,
+		)
+	}
+	return ret, total
+}
+
+// dagHashesLocked is dagSnapshotLocked for identifiers only. It walks the
+// same prefix as dagSnapshotLocked with an item bound alone, so the two agree
+// on every transaction and on when to fall back. The caller must hold the
+// state lock.
+func (m *Mempool) dagHashesLocked(maxItems int) ([]string, error) {
+	order, err := m.dagPrefixLocked(maxItems)
+	if err != nil {
+		return nil, err
+	}
+	for _, hash := range order {
+		if m.txByHash[hash] == nil {
+			return nil, dagUnresolvableError(hash)
+		}
+	}
+	return slices.Clone(order), nil
+}
+
 // dagSnapshotLocked returns the bounded snapshot in the DAG's topological
 // order. It reads the cached order in place, so the caller must hold the
-// state lock. The DAG and the transaction index must agree on the pool size, and every hash the walk reaches must resolve; a bounded walk
-// stops at its prefix, so an unresolvable hash past it does not fail the read.
+// state lock. Every hash the walk reaches must resolve; a bounded walk stops
+// at its prefix, so an unresolvable hash past it does not fail the read.
 func (m *Mempool) dagSnapshotLocked(
 	maxItems int,
 	maxBytes int64,
 ) ([]MempoolTransaction, error) {
-	order, err := m.dag.topologicalOrder()
+	order, err := m.dagPrefixLocked(maxItems)
 	if err != nil {
 		return nil, err
-	}
-	if len(order) != len(m.transactions) {
-		return nil, fmt.Errorf(
-			"DAG transaction index inconsistent: %d of %d transactions ordered",
-			len(order),
-			len(m.transactions),
-		)
 	}
 	var missing string
 	inOrder := func(yield func(*MempoolTransaction) bool) {
@@ -2168,12 +2223,41 @@ func (m *Mempool) dagSnapshotLocked(
 	}
 	ret := boundedSnapshot(inOrder, len(order), maxItems, maxBytes)
 	if missing != "" {
-		return nil, fmt.Errorf(
-			"DAG transaction index inconsistent: ordered transaction %s is not in the pool",
-			missing,
-		)
+		return nil, dagUnresolvableError(missing)
 	}
 	return ret, nil
+}
+
+// dagPrefixLocked returns the DAG's topological order cut to its first
+// maxItems hashes when maxItems is positive, after checking that the DAG and
+// the transaction index agree on the pool size. Cutting before the walk
+// matters: an iterator resolves a hash before its consumer can stop on the
+// item bound, so walking the whole order would reach one hash past the
+// prefix. The result aliases the DAG's cached order; the caller must hold the
+// state lock and must not retain or modify it.
+func (m *Mempool) dagPrefixLocked(maxItems int) ([]string, error) {
+	order, err := m.dag.topologicalOrder()
+	if err != nil {
+		return nil, err
+	}
+	if len(order) != len(m.transactions) {
+		return nil, fmt.Errorf(
+			"DAG transaction index inconsistent: %d of %d transactions ordered",
+			len(order),
+			len(m.transactions),
+		)
+	}
+	if maxItems > 0 && maxItems < len(order) {
+		order = order[:maxItems]
+	}
+	return order, nil
+}
+
+func dagUnresolvableError(hash string) error {
+	return fmt.Errorf(
+		"DAG transaction index inconsistent: ordered transaction %s is not in the pool",
+		hash,
+	)
 }
 
 // boundedSnapshot copies the longest prefix of txs within both bounds into a
@@ -2293,6 +2377,13 @@ func cloneMempoolTransaction(tx *MempoolTransaction) *MempoolTransaction {
 // CapacityBytes returns the configured maximum mempool size in bytes.
 func (m *Mempool) CapacityBytes() int64 {
 	return m.config.MempoolCapacity
+}
+
+// SizeBytes returns the bytes currently retained by pending transactions.
+func (m *Mempool) SizeBytes() int64 {
+	m.RLock()
+	defer m.RUnlock()
+	return m.currentSizeBytes
 }
 
 func (m *Mempool) admissionLimitBytes() int64 {

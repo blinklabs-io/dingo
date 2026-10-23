@@ -108,11 +108,20 @@ var errLocalStateQueryConnectionClosed = errors.New(
 	"local-state-query: connection closed during acquire",
 )
 
-// localStateQueryAcquireWait bounds how long an Acquire waits for a ledger
-// snapshot when every snapshot the database admits is already held. It
-// matches the Acquire timeout gouroboros clients use by default, past which
-// the client has given up on the reply anyway.
-const localStateQueryAcquireWait = 5 * time.Second
+// localStateQueryAcquireWait bounds how long an Acquire waits to open its
+// ledger snapshot. It sits below the 5s Acquire timeout gouroboros clients use
+// by default: the client's timer starts before the request reaches this node,
+// so a wait equal to it always loses the race, and the client tears the
+// connection down in Acquiring instead of receiving the AcquireFailure this
+// node answers with.
+const localStateQueryAcquireWait = 4 * time.Second
+
+// localStateQueryDeferredOpenWait bounds how long the first Query of a
+// deferred tip Acquire waits to open its ledger snapshot. A Query has no
+// failure reply, so the bound only decides when the connection is closed
+// instead; it sits below the 180s Query timeout gouroboros clients use by
+// default, so the node's error is what ends the connection.
+const localStateQueryDeferredOpenWait = 2 * time.Minute
 
 // defaultLocalStateQueryViewMaxLifetime bounds how long a connection may hold
 // one acquired ledger snapshot when OuroborosConfig does not say otherwise.
@@ -121,6 +130,8 @@ const defaultLocalStateQueryViewMaxLifetime = 5 * time.Minute
 // localstatequerySession is the ledger snapshot one connection holds between
 // Acquire and Release. All fields are guarded by localstatequeryAcquireMutex.
 type localstatequerySession struct {
+	// view is nil while a tip Acquire's open is deferred until its first
+	// Query (openDeferredLocalStateQuerySession).
 	view       *ledger.QueryView
 	acquiredAt time.Time
 	lastQuery  time.Time
@@ -178,6 +189,15 @@ func (o *Ouroboros) localstatequeryViewMaxLifetime() time.Duration {
 // own is held; with the cap full it could otherwise never re-Acquire. A failed
 // Acquire forgets the previous session after closing its snapshot: the
 // protocol returns the connection to Idle on failure, with no acquired state.
+//
+// A tip Acquire made while an epoch boundary's deferred job is running does not
+// wait for it: the job can outlast any Acquire budget (seconds on preprod, far
+// longer beside a whole-UTxO query or on mainnet), and a failed tip Acquire
+// has no failure reply, so gouroboros closes the connection. The session is
+// recorded without a view, and its first Query opens one at the then-current
+// tip once the job settles. The snapshot is still taken after the Acquire, as
+// a volatile tip requires. A specific point is still verified here, so it
+// waits for the job and fails as too old if the job outlasts the wait.
 //
 // Every query type that reads ledger or consensus state answers at the
 // acquired point -- see queryShelleyLeaf's doc comment in ledger/queries.go.
@@ -245,8 +265,17 @@ func (o *Ouroboros) localstatequeryServerAcquire(
 	if o.localstatequeryVerifyHook != nil {
 		o.localstatequeryVerifyHook()
 	}
-	view, err := o.ledgerState.AcquireQueryView(acquireCtx, point)
-	if err != nil {
+	var view *ledger.QueryView
+	deferOpen := !isSpecific && o.ledgerState.EpochBoundaryJobPending()
+	if !deferOpen {
+		view, err = o.ledgerState.AcquireQueryView(acquireCtx, point)
+		// The job was published after the check above, or the boundary
+		// committed while the snapshot was opening.
+		deferOpen = !isSpecific &&
+			errors.Is(err, ledger.ErrEpochBoundaryJobPending) &&
+			requestCtx.Err() == nil
+	}
+	if err != nil && !deferOpen {
 		if releasePin != nil {
 			releasePin()
 		}
@@ -262,7 +291,8 @@ func (o *Ouroboros) localstatequeryServerAcquire(
 		o.localstatequeryVerifiedHook()
 	}
 	sessionPoint := point
-	if !isSpecific {
+	// view is nil exactly when the open was deferred.
+	if !isSpecific && view != nil {
 		sessionPoint = localStateQueryViewTip(requestCtx, view)
 	}
 	now := time.Now()
@@ -297,13 +327,23 @@ func (o *Ouroboros) localstatequeryServerAcquire(
 		)
 	}
 	o.localstatequerySessions[ctx.ConnectionId] = session
-	session.expiry = time.AfterFunc(
-		o.localstatequeryViewMaxLifetime(),
-		func() { o.expireLocalStateQuerySession(ctx.ConnectionId, session) },
-	)
+	if !deferOpen {
+		session.expiry = time.AfterFunc(
+			o.localstatequeryViewMaxLifetime(),
+			func() { o.expireLocalStateQuerySession(ctx.ConnectionId, session) },
+		)
+	}
 	o.localstatequeryAcquireMutex.Unlock()
 	previous.close()
 	cancel()
+	if deferOpen {
+		o.config.Logger.Debug(
+			"local-state-query deferred a tip Acquire's ledger snapshot "+
+				"until an epoch boundary job settles",
+			"component", "network",
+			"connection_id", ctx.ConnectionId.String(),
+		)
+	}
 	return nil
 }
 
@@ -330,7 +370,9 @@ func (o *Ouroboros) resolveLocalStateQueryAcquirePoint(
 	case olocalstatequery.AcquireImmutableTip:
 		immutable, found, err := o.ledgerState.ImmutablePoint(ctx)
 		if err != nil {
-			return ledger.QueryPoint{}, true, err
+			return ledger.QueryPoint{}, true, fmt.Errorf(
+				"resolve immutable tip: %w", err,
+			)
 		}
 		if !found {
 			return ledger.QueryPoint{}, true, fmt.Errorf(
@@ -423,16 +465,17 @@ func (o *Ouroboros) localstatequeryServerQuery(
 			protocolVersion, _ = conn.ProtocolVersion()
 		}
 	}
-	if session != nil && view != nil {
-		result, err := view.Query(requestCtx, query.Query, protocolVersion)
-		if !errors.Is(err, ledger.ErrQueryViewClosed) {
-			return result, err
-		}
-		// The protocol has no reply for a failed query, so an error here
-		// ends the connection. A view the lifetime timer closed is reopened
-		// at the same block instead, which answers exactly as the closed one
-		// would have.
-		view, err = o.reopenExpiredLocalStateQuerySession(
+	if session == nil {
+		return o.ledgerState.QueryWithProtocolVersion(
+			requestCtx,
+			query.Query,
+			at,
+			protocolVersion,
+		)
+	}
+	if view == nil {
+		var err error
+		view, err = o.openDeferredLocalStateQuerySession(
 			requestCtx,
 			ctx.ConnectionId,
 			session,
@@ -440,14 +483,24 @@ func (o *Ouroboros) localstatequeryServerQuery(
 		if err != nil {
 			return nil, err
 		}
-		return view.Query(requestCtx, query.Query, protocolVersion)
 	}
-	return o.ledgerState.QueryWithProtocolVersion(
+	result, err := view.Query(requestCtx, query.Query, protocolVersion)
+	if !errors.Is(err, ledger.ErrQueryViewClosed) {
+		return result, err
+	}
+	// The protocol has no reply for a failed query, so an error here
+	// ends the connection. A view the lifetime timer closed is reopened
+	// at the same block instead, which answers exactly as the closed one
+	// would have.
+	view, err = o.reopenExpiredLocalStateQuerySession(
 		requestCtx,
-		query.Query,
-		at,
-		protocolVersion,
+		ctx.ConnectionId,
+		session,
 	)
+	if err != nil {
+		return nil, err
+	}
+	return view.Query(requestCtx, query.Query, protocolVersion)
 }
 
 func (o *Ouroboros) localstatequeryServerRelease(
@@ -480,7 +533,9 @@ func (s *localstatequerySession) close() {
 	if s.expiry != nil {
 		s.expiry.Stop()
 	}
-	s.view.Close()
+	if s.view != nil {
+		s.view.Close()
+	}
 	if s.releasePin != nil {
 		s.releasePin()
 	}
@@ -596,6 +651,52 @@ func (o *Ouroboros) reopenExpiredLocalStateQuerySession(
 		"connection_id", connId.String(),
 		"slot", point.Slot,
 	)
+	return view, nil
+}
+
+// openDeferredLocalStateQuerySession opens the view a tip Acquire deferred
+// while an epoch boundary job ran (see localstatequeryServerAcquire), waiting
+// for the job inside localStateQueryDeferredOpenWait, and records the tip it
+// snapshotted as the session's point. The view's lifetime starts here.
+func (o *Ouroboros) openDeferredLocalStateQuerySession(
+	requestCtx context.Context,
+	connId ouroboros.ConnectionId,
+	session *localstatequerySession,
+) (*ledger.QueryView, error) {
+	ctx, cancel := context.WithTimeout(
+		requestCtx,
+		localStateQueryDeferredOpenWait,
+	)
+	defer cancel()
+	view, err := o.ledgerState.AcquireQueryView(ctx, ledger.QueryPoint{})
+	if err != nil {
+		o.config.Logger.Error(
+			"local-state-query could not open a deferred ledger snapshot",
+			"component", "network",
+			"connection_id", connId.String(),
+			"error", err,
+		)
+		return nil, fmt.Errorf("open deferred ledger snapshot: %w", err)
+	}
+	point := localStateQueryViewTip(requestCtx, view)
+	o.localstatequeryAcquireMutex.Lock()
+	if o.localstatequerySessions[connId] != session || session.view != nil ||
+		requestCtx.Err() != nil {
+		o.localstatequeryAcquireMutex.Unlock()
+		view.Close()
+		if err := requestCtx.Err(); err != nil {
+			return nil, err
+		}
+		return nil, errLocalStateQueryConnectionClosed
+	}
+	session.view = view
+	session.point = point
+	session.acquiredAt = time.Now()
+	session.expiry = time.AfterFunc(
+		o.localstatequeryViewMaxLifetime(),
+		func() { o.expireLocalStateQuerySession(connId, session) },
+	)
+	o.localstatequeryAcquireMutex.Unlock()
 	return view, nil
 }
 
@@ -767,12 +868,28 @@ func (o *Ouroboros) localstatequeryRequestContext(callback olocalstatequery.Call
 			o.localstatequeryRequests[callback.ConnectionId] = requests
 		}
 	}
-	// Register before checking liveness so a simultaneous connection close
+	// Register before observing shutdown so a simultaneous connection close
 	// cannot fall between the check and registration and strand the read.
-	if o.connManager != nil {
-		conn := o.connManager.GetConnectionById(callback.ConnectionId)
-		if conn == nil || conn.LocalStateQuery() == nil || conn.LocalStateQuery().Server != callback.Server {
+	//
+	// The server's own stop signal is the liveness test, not a lookup by
+	// connection ID: the connection manager registers an inbound connection
+	// only after its protocols are running, so a client that acquires as soon
+	// as it connects reaches this callback while the manager does not know it
+	// yet, and that lookup would cancel a live request. StopChan, unlike
+	// DoneChan, can be observed from a callback on the protocol loop.
+	if callback.Server != nil {
+		stopped := callback.Server.StopChan()
+		select {
+		case <-stopped:
 			cleanup()
+		default:
+			go func() {
+				select {
+				case <-stopped:
+					cleanup()
+				case <-ctx.Done():
+				}
+			}()
 		}
 	}
 	return ctx, cleanup

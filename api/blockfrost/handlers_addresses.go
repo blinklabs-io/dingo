@@ -136,6 +136,11 @@ func (b *Blockfrost) handleAddressTotal(
 	r *http.Request,
 ) {
 	address := r.PathValue("address")
+	release, ok := b.admitAddressSummary(w, r)
+	if !ok {
+		return
+	}
+	defer release()
 	info, err := b.node.AddressTotal(r.Context(), address)
 	if err != nil {
 		b.writeAddressQueryError(w, err, address, "address total")

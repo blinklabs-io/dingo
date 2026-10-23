@@ -174,11 +174,11 @@ func (a *transactionBatchAccumulator) restore(
 
 // getUtxoSpendStateQuery reads back a consumed input that the spend UPDATE
 // did not mark, to tell an already-spent input from a missing one.
-const getUtxoSpendStateQuery = `
+const getUtxoSpendStateQuery = `-- name: GetUtxoSpendState :one
 SELECT deleted_slot, spent_at_tx_id
 FROM utxo WHERE tx_id = ? AND output_idx = ?`
 
-const transactionInsertSQL = `
+const transactionInsertSQL = `-- name: InsertTransaction :one
 INSERT INTO "transaction" (
     hash, block_hash, metadata, slot, type, fee, collateral_fee, ttl,
     block_index, valid
@@ -192,7 +192,7 @@ RETURNING id`
 
 // The batched path needs to distinguish a fresh ID from a replay so it can
 // skip child-table cleanup only when those rows cannot already exist.
-const transactionBatchInsertSQL = `
+const transactionBatchInsertSQL = `-- name: InsertTransactionIfAbsent :one
 INSERT INTO "transaction" (
     hash, block_hash, metadata, slot, type, fee, collateral_fee, ttl,
     block_index, valid
@@ -200,21 +200,21 @@ INSERT INTO "transaction" (
 ON CONFLICT (hash) DO NOTHING
 RETURNING id`
 
-const transactionBatchConflictUpdateSQL = `
+const transactionBatchConflictUpdateSQL = `-- name: UpdateTransactionOnConflict :exec
 UPDATE "transaction"
 SET block_hash = ?, block_index = ?, slot = ?, collateral_fee = ?
 WHERE hash = ?`
 
-const transactionBatchConflictIDSQL = `
+const transactionBatchConflictIDSQL = `-- name: GetTransactionIDOnConflict :one
 SELECT id FROM "transaction" WHERE hash = ?`
 
-const consumeUtxoSQL = `
+const consumeUtxoSQL = `-- name: ConsumeUtxo :execrows
 UPDATE utxo
 SET deleted_slot = ?, spent_at_tx_id = ?
 WHERE tx_id = ? AND output_idx = ?
   AND deleted_slot = 0 AND spent_at_tx_id IS NULL`
 
-const consumeUtxoSQLiteReturningSQL = `
+const consumeUtxoSQLiteReturningSQL = `-- name: ConsumeUtxoReturningStake :one
 UPDATE utxo
 SET deleted_slot = ?, spent_at_tx_id = ?
 WHERE tx_id = ? AND output_idx = ?
@@ -224,7 +224,8 @@ RETURNING tx_id, output_idx, credential_tag, staking_key, amount`
 func insertUtxoBatchQuery(rowCount int) string {
 	row := "(" + strings.TrimSuffix(strings.Repeat("?,", 15), ",") + ")"
 	values := strings.TrimSuffix(strings.Repeat(row+",", rowCount), ",")
-	return `INSERT INTO utxo (
+	return `-- name: InsertUtxoBatch :many
+INSERT INTO utxo (
     transaction_id, collateral_return_for_tx_id, tx_id, payment_key,
     staking_key, credential_tag, datum_hash, spent_at_tx_id,
     referenced_by_tx_id, collateral_by_tx_id, added_slot, deleted_slot,
@@ -234,7 +235,7 @@ ON CONFLICT (tx_id, output_idx) DO NOTHING
 RETURNING id, tx_id, output_idx`
 }
 
-const repairConflictedUtxoQuery = `
+const repairConflictedUtxoQuery = `-- name: RepairConflictedUtxo :one
 UPDATE utxo
 SET transaction_id = COALESCE(transaction_id, ?),
     collateral_return_for_tx_id = COALESCE(collateral_return_for_tx_id, ?)
@@ -265,10 +266,13 @@ func consumeUtxosBatchQuery(rowCount int, returnStake bool) string {
 		" UNION ALL ",
 	)
 	returning := "tx_id, output_idx"
+	name := "ConsumeUtxosBatch"
 	if returnStake {
 		returning += ", credential_tag, staking_key, amount"
+		name = "ConsumeUtxosBatchReturningStake"
 	}
-	return `UPDATE utxo
+	return `-- name: ` + name + ` :many
+UPDATE utxo
 SET deleted_slot = ?, spent_at_tx_id = ?
 WHERE id IN (` + arms + `)
 RETURNING ` + returning
@@ -919,6 +923,8 @@ func (s *Store) setTransactionWithAccumulator(
 					hash,
 					skipWithdrawalWitness,
 					historicalBackfill,
+					txn,
+					batchedAccumulator,
 				); err != nil {
 					return err
 				}
@@ -1268,7 +1274,7 @@ func (s *Store) SetGapBlockTransaction(
 			if err != nil {
 				return err
 			}
-			transactionID, err := queryReturnedID(ctx, db, `
+			transactionID, err := queryReturnedID(ctx, db, `-- name: UpsertTransactionWithoutMetadata :one
 INSERT INTO "transaction" (
     hash, block_hash, metadata, slot, type, fee, collateral_fee, ttl,
     block_index, valid
@@ -1372,7 +1378,7 @@ func (s *Store) RecomputeGapCollateralFee(
 			if err != nil {
 				return err
 			}
-			_, err = db.ExecContext(ctx, `
+			_, err = db.ExecContext(ctx, `-- name: UpdateTransactionCollateralFee :exec
 UPDATE "transaction" SET collateral_fee = ? WHERE hash = ?`,
 				decimalUint64(types.Uint64(fee)),
 				transaction.Hash().Bytes(),
@@ -1391,7 +1397,7 @@ func (s *Store) SetGenesisTransaction(
 	return s.withWriteTransaction(
 		txn,
 		func(db queryer, ctx context.Context) error {
-			id, err := queryReturnedID(ctx, db, `
+			id, err := queryReturnedID(ctx, db, `-- name: UpsertGenesisTransaction :one
 INSERT INTO "transaction" (
     hash, block_hash, slot, type, fee, collateral_fee, ttl,
     block_index, valid
@@ -1568,7 +1574,7 @@ DELETE FROM asset_mint_burn WHERE slot > ?`,
 // uncached fallback instead. SQLite and PostgreSQL both support RETURNING
 // natively, so this participates in the hot-statement cache normally on
 // those dialects.
-const insertUtxoQuery = `
+const insertUtxoQuery = `-- name: InsertUtxo :one
 INSERT INTO utxo (
     transaction_id, collateral_return_for_tx_id, tx_id, payment_key,
     staking_key, credential_tag, datum_hash, spent_at_tx_id,
@@ -1589,8 +1595,7 @@ RETURNING id`
 // this one QueryRowContext call, almost entirely modernc.org/sqlite
 // re-parsing and re-planning the identical statement text on every UTxO
 // output insert.
-const insertUtxoQueryIgnoreConflict = `
--- name: CreateUtxoIfAbsent :one
+const insertUtxoQueryIgnoreConflict = `-- name: InsertUtxoIfAbsent :one
 INSERT INTO utxo (
     transaction_id, collateral_return_for_tx_id, tx_id, payment_key,
     staking_key, credential_tag, datum_hash, spent_at_tx_id,
@@ -1604,7 +1609,7 @@ RETURNING id`
 // snapshot importer and insertUtxoModel. It is a fixed query shape on every
 // imported asset, so keep one prepared statement for the Store lifetime just
 // like the surrounding UTxO importer statements.
-const importAssetQuery = `
+const importAssetQuery = `-- name: InsertAssetIfAbsent :exec
 INSERT INTO asset (
     name, policy_id, fingerprint, utxo_id, amount
 ) VALUES (?, ?, ?, ?, ?)
@@ -1613,7 +1618,7 @@ ON CONFLICT (name, policy_id, utxo_id) DO NOTHING
 
 // getAssetIDQuery resolves the caller-visible asset row ID after an
 // insert that may have been skipped by its conflict clause.
-const getAssetIDQuery = `
+const getAssetIDQuery = `-- name: GetAssetIDByOutput :one
 SELECT id FROM asset
 WHERE utxo_id = ? AND policy_id = ? AND name = ?
 ORDER BY id DESC LIMIT 1`
@@ -1686,7 +1691,7 @@ func (s *Store) insertUtxoModelCheckedWithRows(
 	).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) && ignoreConflict {
 		inserted = false
-		err = db.QueryRowContext(ctx, `
+		err = db.QueryRowContext(ctx, `-- name: GetUtxoIDByOutput :one
 SELECT id FROM utxo WHERE tx_id = ? AND output_idx = ?`,
 			params.TxID,
 			params.OutputIdx,
@@ -1700,7 +1705,7 @@ SELECT id FROM utxo WHERE tx_id = ? AND output_idx = ?`,
 			// pointer address's credential is not stored on the row at all
 			// (see pointer_stake.go); every other address form carries its
 			// credential in the address, so an imported row already has it.
-			_, err = db.ExecContext(ctx, `
+			_, err = db.ExecContext(ctx, `-- name: RepairConflictedUtxoByID :exec
 UPDATE utxo
 SET transaction_id = COALESCE(transaction_id, ?),
     collateral_return_for_tx_id = COALESCE(collateral_return_for_tx_id, ?)
@@ -1847,7 +1852,7 @@ func collateralFeeForTransaction(
 		}
 		seen[key] = struct{}{}
 		var amount string
-		err := db.QueryRowContext(ctx, `
+		err := db.QueryRowContext(ctx, `-- name: GetUtxoAmountByOutput :one
 SELECT amount FROM utxo WHERE tx_id = ? AND output_idx = ?`,
 			input.Id().Bytes(),
 			input.Index(),
@@ -1894,6 +1899,8 @@ func (s *Store) applyTransactionWithdrawals(
 	txHash []byte,
 	skipWithdrawalWitness bool,
 	historicalBackfill bool,
+	txn types.Txn,
+	batchedAccumulator *transactionBatchAccumulator,
 ) error {
 	for address, amount := range transaction.Withdrawals() {
 		if address == nil || amount == nil {
@@ -1919,11 +1926,7 @@ func (s *Store) applyTransactionWithdrawals(
 			// SkipWithdrawalWitnessWrite), so gate-off callers elide the
 			// insert rather than growing an unbounded, never-pruned table
 			// nothing reads.
-			if _, err := db.ExecContext(ctx, `
-INSERT INTO account_withdrawal_witness (
-    staking_key, credential_tag, tx_hash, added_slot
-) VALUES (?, ?, ?, ?)
-ON CONFLICT (tx_hash, credential_tag, staking_key) DO NOTHING`,
+			if _, err := s.execCached(ctx, db, insertAccountWithdrawalWitnessSQL,
 				stakeKey.Bytes(),
 				tag,
 				txHash,
@@ -1934,9 +1937,7 @@ ON CONFLICT (tx_hash, credential_tag, staking_key) DO NOTHING`,
 		}
 		var accountID uint
 		var reward sql.NullString
-		err := db.QueryRowContext(ctx, `
-SELECT id, reward FROM account
-WHERE credential_tag = ? AND staking_key = ? AND active = TRUE`,
+		err := s.queryRowCached(ctx, db, getActiveAccountRewardSQL,
 			tag,
 			stakeKey.Bytes(),
 		).Scan(&accountID, &reward)
@@ -1951,9 +1952,7 @@ WHERE credential_tag = ? AND staking_key = ? AND active = TRUE`,
 			// must be present; silently journaling a withdrawal with no account
 			// would hide a broken certificate replay or skipped block.
 			var fallbackActive sql.NullBool
-			err = db.QueryRowContext(ctx, `
-SELECT id, reward, active FROM account
-WHERE credential_tag = ? AND staking_key = ?`,
+			err = s.queryRowCached(ctx, db, getAccountRewardStateSQL,
 				tag,
 				stakeKey.Bytes(),
 			).Scan(&accountID, &reward, &fallbackActive)
@@ -1966,12 +1965,7 @@ WHERE credential_tag = ? AND staking_key = ?`,
 			return err
 		}
 		var exists bool
-		if err := db.QueryRowContext(ctx, `
-SELECT EXISTS (
-    SELECT 1 FROM account_reward_delta
-    WHERE withdrawal = TRUE AND tx_hash = ?
-      AND credential_tag = ? AND staking_key = ?
-)`,
+		if err := s.queryRowCached(ctx, db, withdrawalRewardDeltaExistsSQL,
 			txHash,
 			tag,
 			stakeKey.Bytes(),
@@ -2005,22 +1999,14 @@ SELECT EXISTS (
 		// current stake-registration account.
 		if !historicalBackfill && accountFound {
 			rewardAfter := previous - amount.Uint64()
-			if _, err := db.ExecContext(ctx, `
-UPDATE account SET reward = ? WHERE id = ?`,
+			if _, err := s.execCached(ctx, db, updateAccountRewardSQL,
 				strconv.FormatUint(rewardAfter, 10),
 				accountID,
 			); err != nil {
 				return err
 			}
 		}
-		if _, err := db.ExecContext(ctx, `
-INSERT INTO account_reward_delta (
-    staking_key, credential_tag, tx_hash, amount, previous_reward,
-    added_slot, withdrawal
-) VALUES (?, ?, ?, ?, ?, ?, TRUE)
-ON CONFLICT (
-    withdrawal, tx_hash, credential_tag, staking_key, added_slot
-) DO NOTHING`,
+		if _, err := s.execCached(ctx, db, insertWithdrawalRewardDeltaSQL,
 			stakeKey.Bytes(),
 			tag,
 			txHash,
@@ -2031,10 +2017,13 @@ ON CONFLICT (
 			return err
 		}
 		if !historicalBackfill {
-			if err := s.refreshRewardLiveStakeAggregate(
-				ctx, db,
-				models.NewStakeCredentialRef(tag, stakeKey.Bytes()),
-				slot,
+			ref := models.NewStakeCredentialRef(tag, stakeKey.Bytes())
+			pending, err := pendingUtxoStakeDelta(txn, batchedAccumulator, ref)
+			if err != nil {
+				return err
+			}
+			if err := s.refreshRewardLiveStakeAggregateNetOfPending(
+				ctx, db, ref, slot, pending,
 			); err != nil {
 				return err
 			}
@@ -2048,7 +2037,8 @@ func recordTransactionLedgerContext(ctx context.Context, db queryer, transaction
 	if err != nil {
 		return err
 	}
-	_, err = db.ExecContext(ctx, `INSERT INTO leios_transaction_context (transaction_id, slot) VALUES (?, ?) ON CONFLICT (transaction_id) DO UPDATE SET slot = excluded.slot`, transactionID, value)
+	_, err = db.ExecContext(ctx, `-- name: UpsertLeiosTransactionContext :exec
+INSERT INTO leios_transaction_context (transaction_id, slot) VALUES (?, ?) ON CONFLICT (transaction_id) DO UPDATE SET slot = excluded.slot`, transactionID, value)
 	return err
 }
 
@@ -2098,3 +2088,36 @@ func (s *Store) rollbackSpentStakeRefsQuery(
 		"SELECT credential_tag, staking_key " + from + "\n" +
 		"WHERE spent_at_tx_id IN (" + bindPlaceholders(n) + ")", nil
 }
+
+const insertAccountWithdrawalWitnessSQL = `-- name: InsertAccountWithdrawalWitness :exec
+INSERT INTO account_withdrawal_witness (
+    staking_key, credential_tag, tx_hash, added_slot
+) VALUES (?, ?, ?, ?)
+ON CONFLICT (tx_hash, credential_tag, staking_key) DO NOTHING`
+
+const getActiveAccountRewardSQL = `-- name: GetActiveAccountReward :one
+SELECT id, reward FROM account
+WHERE credential_tag = ? AND staking_key = ? AND active = TRUE`
+
+const getAccountRewardStateSQL = `-- name: GetAccountRewardState :one
+SELECT id, reward, active FROM account
+WHERE credential_tag = ? AND staking_key = ?`
+
+const withdrawalRewardDeltaExistsSQL = `-- name: WithdrawalRewardDeltaExists :one
+SELECT EXISTS (
+    SELECT 1 FROM account_reward_delta
+    WHERE withdrawal = TRUE AND tx_hash = ?
+      AND credential_tag = ? AND staking_key = ?
+)`
+
+const updateAccountRewardSQL = `-- name: UpdateAccountReward :exec
+UPDATE account SET reward = ? WHERE id = ?`
+
+const insertWithdrawalRewardDeltaSQL = `-- name: InsertWithdrawalRewardDelta :exec
+INSERT INTO account_reward_delta (
+    staking_key, credential_tag, tx_hash, amount, previous_reward,
+    added_slot, withdrawal
+) VALUES (?, ?, ?, ?, ?, ?, TRUE)
+ON CONFLICT (
+    withdrawal, tx_hash, credential_tag, staking_key, added_slot
+) DO NOTHING`
