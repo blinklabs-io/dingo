@@ -7265,8 +7265,8 @@ for the next reconcile, and redial ranking puts a peer that stalled within
 
 Arbitrary inbound peers are identified by their transport tuple. A source host
 alone is insufficient because unrelated peers can arrive through the same NAT
-gateway. Configured topology peers retain their unambiguous host match so an
-operator-declared peer can connect from an ephemeral source port. A session
+gateway or proxy. Configured topology peers receive inbound topology privileges
+only when the transport tuple exactly matches their configured address. A session
 counts toward its transport identity's short-session history whenever it is
 short, whatever the close error: the connection layer reports a remote close as
 clean when every protocol is still idle, so a peer that handshakes and
