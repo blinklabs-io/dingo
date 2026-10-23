@@ -114,6 +114,9 @@ type BootstrapConfig struct {
 	// extractionBudget bounds expanded bytes and entries across all archives in
 	// one v2 bootstrap and preserves free space on their destination filesystem.
 	extractionBudget *bootstrapExtractionBudget
+	// decoderBudget bounds the zstd history memory of the archive decoders
+	// running at once in one v2 bootstrap. Nil reserves nothing.
+	decoderBudget *decoderMemoryBudget
 	// immutableDigests is the verified digest list, set by the chunk feed
 	// so each archive's members are checked as they are extracted. When nil,
 	// an immutable archive is extracted without a member allowlist.

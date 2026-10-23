@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -761,7 +762,7 @@ func TestPParamVotingCountStartSlot(t *testing.T) {
 
 	for _, tc := range []struct {
 		name             string
-		securityParam    int
+		securityParam    int64
 		activeSlotsCoeff string
 		want             uint64
 	}{
@@ -786,26 +787,32 @@ func TestPParamVotingCountStartSlot(t *testing.T) {
 			want:             100,
 		},
 	} {
-		ls := &LedgerState{
-			currentEra: eras.BabbageEraDesc,
-			currentEpoch: models.Epoch{
-				EpochId:       1,
-				StartSlot:     100,
-				LengthInSlots: 100,
-				EraId:         eras.BabbageEraDesc.Id,
-			},
-			config: LedgerStateConfig{
-				CardanoNodeConfig: newBabbageQuorumCfg(
-					t,
-					tc.securityParam,
-					tc.activeSlotsCoeff,
-				),
-				Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
-			},
-		}
-		got, ok := ls.pparamVotingCountStartSlot()
-		require.True(t, ok, tc.name)
-		assert.Equal(t, tc.want, got, tc.name)
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if tc.securityParam > int64(math.MaxInt) {
+				t.Skip("security parameter requires a 64-bit int")
+			}
+			ls := &LedgerState{
+				currentEra: eras.BabbageEraDesc,
+				currentEpoch: models.Epoch{
+					EpochId:       1,
+					StartSlot:     100,
+					LengthInSlots: 100,
+					EraId:         eras.BabbageEraDesc.Id,
+				},
+				config: LedgerStateConfig{
+					CardanoNodeConfig: newBabbageQuorumCfg(
+						t,
+						int(tc.securityParam),
+						tc.activeSlotsCoeff,
+					),
+					Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+				},
+			}
+			got, ok := ls.pparamVotingCountStartSlot()
+			require.True(t, ok, tc.name)
+			assert.Equal(t, tc.want, got, tc.name)
+		})
 	}
 }
 

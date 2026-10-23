@@ -34,19 +34,50 @@ const RELEASE_HOSTS = new Set([
   'release-assets.githubusercontent.com',
 ]);
 
-const blockedAddresses = new net.BlockList();
+// The two families are kept in separate lists because a Node BlockList matches
+// every IPv4 address against an IPv6 rule covering ::ffff:0:0/96, which would
+// reject all IPv4 answers. IPv4-mapped IPv6 answers are unmapped instead and
+// checked against the IPv4 rules.
+const blockedIPv4 = new net.BlockList();
 for (const [network, prefix] of [
   ['0.0.0.0', 8], ['10.0.0.0', 8], ['100.64.0.0', 10], ['127.0.0.0', 8],
   ['169.254.0.0', 16], ['172.16.0.0', 12], ['192.0.0.0', 24], ['192.0.2.0', 24],
   ['192.88.99.0', 24], ['192.168.0.0', 16], ['198.18.0.0', 15],
   ['198.51.100.0', 24], ['203.0.113.0', 24], ['224.0.0.0', 4], ['240.0.0.0', 4],
-]) blockedAddresses.addSubnet(network, prefix, 'ipv4');
+]) blockedIPv4.addSubnet(network, prefix, 'ipv4');
+const blockedIPv6 = new net.BlockList();
 for (const [network, prefix] of [
-  ['::', 128], ['::1', 128], ['::ffff:0:0', 96], ['64:ff9b::', 96],
-  ['64:ff9b:1::', 48],
+  ['::', 128], ['::1', 128], ['64:ff9b::', 96], ['64:ff9b:1::', 48],
   ['100::', 64], ['2001:2::', 48], ['2001:db8::', 32], ['2001:10::', 28],
   ['fc00::', 7], ['fe80::', 10], ['ff00::', 8],
-]) blockedAddresses.addSubnet(network, prefix, 'ipv6');
+]) blockedIPv6.addSubnet(network, prefix, 'ipv6');
+
+function mappedIPv4(address) {
+  let host;
+  try {
+    // URL serialization canonicalizes every IPv6 spelling to compressed hex.
+    host = new URL(`http://[${address}]`).hostname;
+  } catch {
+    return null;
+  }
+  const match = /^\[::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})\]$/.exec(host);
+  if (!match) return null;
+  const high = parseInt(match[1], 16);
+  const low = parseInt(match[2], 16);
+  return `${high >> 8}.${high & 255}.${low >> 8}.${low & 255}`;
+}
+
+function disallowedAddress(address) {
+  try {
+    if (net.isIPv4(address)) return blockedIPv4.check(address, 'ipv4');
+    if (!net.isIPv6(address)) return true;
+    const ipv4 = mappedIPv4(address);
+    if (ipv4) return blockedIPv4.check(ipv4, 'ipv4');
+    return blockedIPv6.check(address, 'ipv6');
+  } catch {
+    return true;
+  }
+}
 
 function validateReleaseURL(parsed) {
   if (parsed.protocol !== 'https:') {
@@ -72,8 +103,7 @@ function publicLookup(hostname, options, callback) {
       callback(error);
       return;
     }
-    if (addresses.length === 0 || addresses.some(({ address, family }) =>
-      blockedAddresses.check(address, family === 6 ? 'ipv6' : 'ipv4'))) {
+    if (addresses.length === 0 || addresses.some(({ address }) => disallowedAddress(address))) {
       callback(new Error('Dingo release host resolved to a disallowed address'));
       return;
     }
@@ -274,4 +304,4 @@ async function install(packageRoot, options = {}) {
   }
 }
 
-module.exports = { binaryPath, download, install, releaseURL };
+module.exports = { binaryPath, download, install, publicLookup, releaseURL };

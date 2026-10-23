@@ -15,6 +15,7 @@
 package ouroboros
 
 import (
+	"bytes"
 	"cmp"
 	"context"
 	"encoding/hex"
@@ -2236,6 +2237,22 @@ func (o *Ouroboros) EndorserBlockTxsByHash(
 		return nil, false
 	}
 	return cloneRawMessages(data.txsRaw), true
+}
+
+// EndorserBlockDataByHash returns the verified manifest and complete
+// transaction bodies for one cached endorser-block occurrence. It satisfies
+// ledger.EndorserBlockDataProviderFunc for read paths that race persistence.
+func (o *Ouroboros) EndorserBlockDataByHash(
+	ebHash []byte,
+	ebSlot uint64,
+) ([]byte, []cbor.RawMessage, bool) {
+	data, ok := o.lookupLeiosEndorserBlock(ebSlot, ebHash)
+	if !ok || !data.completeTxCache() || !data.slotVerified ||
+		data.semanticValidationStatus == leiosEBValidationPending ||
+		data.semanticValidationStatus == leiosEBValidationInvalid {
+		return nil, nil, false
+	}
+	return bytes.Clone(data.blockRaw), cloneRawMessages(data.txsRaw), true
 }
 
 // EndorserBlockValidation reports the cached semantic verdict for an endorser
