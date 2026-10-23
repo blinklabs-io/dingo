@@ -99,12 +99,13 @@ var ErrInputResolution = errors.New(
 	"mempool: confirmed input address resolution failed",
 )
 
-// errAddressInputsMoved reports that an input the confirmed-input lookup
-// skipped as another pool transaction's output was no longer one when the
-// transaction was validated, so its address was resolved by neither.
+// errAddressInputsMoved reports that an input changed state between the
+// confirmed-input lookup and validation, so neither resolved its address.
 var errAddressInputsMoved = errors.New(
-	"mempool: pool parent left the pool during admission",
+	"mempool: transaction inputs changed state during admission",
 )
+
+var errNilConfirmedOutput = errors.New("decoded output is nil")
 
 // confirmedInputAddresses resolves the address of every input the
 // transaction consumes that does not name an output of another pool
@@ -113,8 +114,10 @@ var errAddressInputsMoved = errors.New(
 // sessions are opened before the mutation gate, so a lookup needing a second
 // connection inside one would wait on connections that the admissions queued
 // behind the gate never release. It also returns the inputs it skipped as
-// pool outputs, which admission later reads from the validated overlay. An
-// input with no live output resolves to nothing.
+// pool outputs, which admission later reads from the validated overlay.
+// Without a resolver the returned address map is nil and confirmed inputs
+// are not indexed. A stored output that does not decode is a storage fault,
+// as ledger validation treats it, and fails with ErrInputResolution.
 func (m *Mempool) confirmedInputAddresses(
 	tx gledger.Transaction,
 ) (map[utxoref.Key]string, map[utxoref.Key]struct{}, error) {
@@ -128,11 +131,11 @@ func (m *Mempool) confirmedInputAddresses(
 		}
 	}
 	m.RUnlock()
-	resolved := make(map[utxoref.Key]string)
 	resolver, ok := m.validator.(UtxoResolver)
 	if !ok {
-		return resolved, pooled, nil
+		return nil, pooled, nil
 	}
+	resolved := make(map[utxoref.Key]string)
 	refs := make([]models.UtxoId, 0, len(consumed))
 	for _, input := range consumed {
 		if _, ok := pooled[utxoref.ForInput(input)]; ok {
@@ -156,15 +159,17 @@ func (m *Mempool) confirmedInputAddresses(
 	}
 	for _, utxo := range utxos {
 		output, err := utxo.Decode()
-		if err != nil {
-			m.logger.Warn(
-				"confirmed input has no decodable output; not indexed",
-				"component", "mempool",
-				"tx_id", hex.EncodeToString(utxo.TxId),
-				"output_index", utxo.OutputIdx,
-				"error", err,
+		if err == nil && output == nil {
+			err = errNilConfirmedOutput
+		}
+		if err != nil || output == nil {
+			return nil, nil, fmt.Errorf(
+				"decode confirmed input %s#%d: %w: %w",
+				hex.EncodeToString(utxo.TxId),
+				utxo.OutputIdx,
+				ErrInputResolution,
+				err,
 			)
-			continue
 		}
 		key := utxoref.Key{
 			TxId:  lcommon.NewBlake2b256(utxo.TxId),
@@ -177,15 +182,27 @@ func (m *Mempool) confirmedInputAddresses(
 
 // inputAddresses lists the addresses of the inputs the transaction consumes,
 // reading other pool transactions' outputs from created and confirmed
-// outputs from resolved. It fails with errAddressInputsMoved when an input
-// skipped as a pool output is no longer in created.
+// outputs from resolved. A nil resolved map means no resolver, and confirmed
+// inputs are then left out.
+//
+// An input in neither map changed state after the batch ran, or has no live
+// output at all. A skipped pool parent that left the pool fails with
+// errAddressInputsMoved and the attempt repeats. Any other such input is
+// recorded in absent and also repeats the attempt: validation has just found
+// it, so it was confirmed after the batch and the next batch resolves it. An
+// input already in absent missed two batches with a passing validation
+// between them, which only a validation that does not check inputs allows;
+// it has no live output and is left out rather than retried until the
+// attempts run out.
 func inputAddresses(
 	tx gledger.Transaction,
 	created map[utxoref.Key]lcommon.Utxo,
 	resolved map[utxoref.Key]string,
 	pooled map[utxoref.Key]struct{},
+	absent map[utxoref.Key]struct{},
 ) ([]string, error) {
 	var ret []string
+	moved := false
 	for _, input := range tx.Consumed() {
 		key := utxoref.ForInput(input)
 		if utxo, ok := created[key]; ok {
@@ -199,8 +216,20 @@ func inputAddresses(
 			continue
 		}
 		if _, ok := pooled[key]; ok {
-			return nil, errAddressInputsMoved
+			moved = true
+			continue
 		}
+		if resolved == nil {
+			continue
+		}
+		if _, ok := absent[key]; ok {
+			continue
+		}
+		absent[key] = struct{}{}
+		moved = true
+	}
+	if moved {
+		return nil, errAddressInputsMoved
 	}
 	return ret, nil
 }

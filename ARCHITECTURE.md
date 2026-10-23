@@ -11615,11 +11615,18 @@ rejection, and a transaction restored from a rolled-back block stays pending
 for the next rebuild. The batch runs before the ledger validation session opens:
 the session holds a metadata read connection and sessions are opened before
 the mutation gate, so a second read inside one could wait on connections that
-admissions queued behind the gate never release. An input the batch skipped
-as a pool output whose parent has left the pool by validation time restarts
-the admission attempt; when the attempts run out the admission ends with
+admissions queued behind the gate never release. Validation then finds
+every consumed input in the pool or the ledger, so an input that neither the
+validated pool outputs nor the batch resolved changed state in between: a
+skipped pool parent that left the pool, or an input confirmed by a block
+applied before validation. Either restarts the admission attempt, whose new
+batch resolves it; when the attempts run out the admission ends with
 `mempool.ErrPendingStateMoved`, the same no-verdict result as a ledger that
-kept moving. A phase-2-invalid transaction is indexed by its
+kept moving. An input that misses two batches with a passing validation
+between them, which only a validation that skips input checks allows, has no
+live output and is left out. A stored output that does not decode is a
+storage fault, as it is to ledger validation, and ends the admission with
+`mempool.ErrInputResolution`. A phase-2-invalid transaction is indexed by its
 collateral return and collateral inputs only. Every removal path (explicit
 removal, block inclusion, eviction, expiry, revalidation and stop) updates the
 index under the pool lock, and a revalidation swap rebuilds it from the

@@ -135,6 +135,8 @@ type resolvingValidator struct {
 	calls     atomic.Int64
 	refs      atomic.Int64
 	err       error
+	// corrupt makes every resolved output undecodable.
+	corrupt bool
 }
 
 func newResolvingValidator() *resolvingValidator {
@@ -175,6 +177,9 @@ func (v *resolvingValidator) UtxosByRefs(
 		raw, err := cbor.Encode(indexTxOutput(owner, 5_000_000))
 		if err != nil {
 			return nil, err
+		}
+		if v.corrupt {
+			raw = []byte{0xff}
 		}
 		ret = append(ret, models.Utxo{
 			TxId: ref.Hash, OutputIdx: ref.Idx, Cbor: raw,
@@ -489,9 +494,13 @@ func newRemovalFixture(
 		inputs:  []indexTxInput{{hash: [32]byte(parentTx.Hash().Bytes())}},
 		outputs: []lcommon.Address{f.addrB},
 	})
+	// Ledger validation only passes a transaction whose inputs exist, so
+	// the loner's input is a confirmed output too.
+	lonerIn := indexTxInput{hash: [32]byte{0x12}}
+	f.v.confirm(lonerIn, indexTestAddress(t, 5))
 	var lonerTx gledger.Transaction
 	f.lonerRaw, lonerTx = buildIndexTx(t, indexTxSpec{
-		inputs:  []indexTxInput{{hash: [32]byte{0x12}}},
+		inputs:  []indexTxInput{lonerIn},
 		outputs: []lcommon.Address{f.addrC},
 	})
 	require.NoError(t, f.m.AddTransaction(
@@ -961,4 +970,70 @@ func TestAddressIndexExhaustedParentRetriesKeepRolledBackTransaction(
 	_, ok := f.m.GetTransaction(f.child)
 	require.True(t, ok)
 	requireIndexMatchesPool(t, f.m)
+}
+
+// TestAddressIndexRetriesInputConfirmedBeforeValidation covers an input that
+// is neither a pool output nor confirmed when the batch resolves it, but is
+// confirmed by the time the ledger validates the transaction (a block applied
+// in between). The transaction is still indexed under the spent address.
+func TestAddressIndexRetriesInputConfirmedBeforeValidation(t *testing.T) {
+	t.Parallel()
+	v := &sessionConnValidator{
+		resolvingValidator: newResolvingValidator(),
+		conns:              make(chan struct{}, 1),
+	}
+	m := newIndexTestPool(t, v, false, nil)
+	owner := indexTestAddress(t, 0x81)
+	in := indexTxInput{hash: [32]byte{0x82}}
+	v.beforeSession = func() { v.confirm(in, owner) }
+
+	hash := addIndexTx(t, m, indexTxSpec{
+		inputs:  []indexTxInput{in},
+		outputs: []lcommon.Address{indexTestAddress(t, 0x83)},
+	})
+	require.Equal(t, []string{hash},
+		m.TransactionHashesByAddress(owner.String()))
+	requireIndexMatchesPool(t, m)
+}
+
+// TestAddressIndexUndecodableConfirmedInputIsNotAVerdict: a stored output
+// that does not decode is a storage fault, as ledger validation treats it,
+// so admission reaches no verdict instead of indexing the transaction
+// without that address.
+func TestAddressIndexUndecodableConfirmedInputIsNotAVerdict(t *testing.T) {
+	t.Parallel()
+	v := newResolvingValidator()
+	v.corrupt = true
+	m := newIndexTestPool(t, v, false, nil)
+	in := indexTxInput{hash: [32]byte{0x84}}
+	v.confirm(in, indexTestAddress(t, 0x85))
+	raw, _ := buildIndexTx(t, indexTxSpec{
+		inputs:  []indexTxInput{in},
+		outputs: []lcommon.Address{indexTestAddress(t, 0x86)},
+	})
+	err := m.AddTransaction(context.Background(), uint(conway.EraIdConway), raw)
+	require.ErrorIs(t, err, ErrInputResolution)
+	require.Empty(t, m.Transactions())
+	requireIndexMatchesPool(t, m)
+}
+
+// TestAddressIndexUnresolvableInputDoesNotExhaustRetries covers a validator
+// that does not check inputs, as the Dijkstra validation bypass does: an
+// input with no live output misses every batch. One repeat tells it from an
+// input confirmed after the batch; it is then left out, and admission does
+// not run out of attempts into a no-verdict error.
+func TestAddressIndexUnresolvableInputDoesNotExhaustRetries(t *testing.T) {
+	t.Parallel()
+	v := newResolvingValidator()
+	m := newIndexTestPool(t, v, false, nil)
+	payee := indexTestAddress(t, 0x87)
+	hash := addIndexTx(t, m, indexTxSpec{
+		inputs:  []indexTxInput{{hash: [32]byte{0x88}}},
+		outputs: []lcommon.Address{payee},
+	})
+	require.Equal(t, int64(2), v.calls.Load(),
+		"one batch, then one repeat that finds it still missing")
+	require.Equal(t, []string{hash},
+		m.TransactionHashesByAddress(payee.String()))
+	requireIndexMatchesPool(t, m)
 }
