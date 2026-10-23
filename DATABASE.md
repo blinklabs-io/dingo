@@ -2439,8 +2439,16 @@ a credential has, by construction, few live UTxOs at that point.
 
 #### Mithril API reward-live-stake finalization
 
-After historical metadata backfill, API startup rebuilds reward stake from the
-running UTxO totals imported with the Mithril snapshot. The SQL store commits
+After historical metadata backfill, API startup rebuilds reward stake from
+running UTxO totals initialized by the Mithril snapshot and kept current during
+replay. `SetTransactionBatchedHistorical` applies net deltas for outputs it
+actually inserts and inputs it actually spends; a first touch without an
+existing running-total row establishes its total from the live UTxOs. This is
+required because replay writes UTxO rows before the finalizer reuses those
+totals. The finalizer rejects a live UTxO stake key without a populated total
+rather than treating the missing row as zero.
+
+The SQL store commits
 the validation/cleanup and each ordered 20,000-key range in separate metadata
 transactions when the caller does not supply a transaction. The `serve` path
 runs this backfill before `node.Run` starts serving. A failed range leaves

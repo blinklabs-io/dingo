@@ -1030,16 +1030,13 @@ func (s *Store) setTransactionWithAccumulator(
 			// are still refreshed at zero delta so the set of credentials this
 			// write touches is unchanged from the full-scan path.
 			var spentRefs []models.UtxoId
-			if s.dialect.Name() != "sqlite" && !historicalBackfill {
+			if s.dialect.Name() != "sqlite" {
 				spentRefs = make([]models.UtxoId, 0, len(transaction.Consumed()))
 			}
 			var skippedRefs []models.UtxoId
-			var consumedStakeDeltas []stakeCredentialDelta
-			if !historicalBackfill {
-				consumedStakeDeltas = make(
-					[]stakeCredentialDelta, 0, len(transaction.Consumed()),
-				)
-			}
+			consumedStakeDeltas := make(
+				[]stakeCredentialDelta, 0, len(transaction.Consumed()),
+			)
 			seenConsumed := make(
 				map[string]struct{},
 				len(transaction.Consumed()),
@@ -1065,9 +1062,7 @@ func (s *Store) setTransactionWithAccumulator(
 				batch := uniqueConsumed[start:end]
 				updated := make(map[string]struct{}, len(batch))
 				if s.dialect.Name() == "sqlite" && len(batch) > 1 {
-					query := consumeUtxosBatchQuery(
-						len(batch), !historicalBackfill,
-					)
+					query := consumeUtxosBatchQuery(len(batch), true)
 					args := make([]any, 0, 2+len(batch)*2)
 					args = append(args, point.Slot, hash)
 					for _, ref := range batch {
@@ -1077,15 +1072,13 @@ func (s *Store) setTransactionWithAccumulator(
 					if err != nil {
 						return err
 					}
-					updatedRows, deltas, scanErr := scanConsumedUtxoRows(
-						rows, !historicalBackfill,
-					)
+					updatedRows, deltas, scanErr := scanConsumedUtxoRows(rows, true)
 					if scanErr != nil {
 						return scanErr
 					}
 					updated = updatedRows
 					consumedStakeDeltas = append(consumedStakeDeltas, deltas...)
-				} else if s.dialect.Name() == "sqlite" && !historicalBackfill {
+				} else if s.dialect.Name() == "sqlite" {
 					rows, err := s.queryRowsCached(
 						ctx, db, consumeUtxoSQLiteReturningSQL,
 						point.Slot, hash, batch[0].Hash, batch[0].Idx,
@@ -1169,7 +1162,30 @@ func (s *Store) setTransactionWithAccumulator(
 				}
 			}
 			if historicalBackfill {
-				return nil
+				if s.dialect.Name() != "sqlite" {
+					consumedStakeDeltas, err = s.queryUtxoStakeConsumedDeltas(
+						ctx,
+						db,
+						spentRefs,
+					)
+					if err != nil {
+						return err
+					}
+				}
+				// Historical replay defers account-derived fields to the final
+				// rebuild, but it still changes the live UTxO set. Keep its
+				// running stake totals aligned with the outputs it inserts and
+				// inputs it spends.
+				batchedStakeDeltas = mergeStakeCredentialDeltas(
+					consumedStakeDeltas,
+					producedStakeDeltas,
+				)
+				if batchedAccumulator != nil {
+					return nil
+				}
+				return s.refreshRewardLiveStakeDeltas(
+					ctx, db, batchedStakeDeltas, point.Slot,
+				)
 			}
 			if s.dialect.Name() != "sqlite" {
 				consumedStakeDeltas, err = s.queryUtxoStakeConsumedDeltas(
