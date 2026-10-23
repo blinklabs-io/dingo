@@ -17,10 +17,12 @@
 package dingo
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"log/slog"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
@@ -309,7 +311,7 @@ func startTwoNodeDevnet(
 	forgerAddr, ok := ln.Addr().(*net.TCPAddr)
 	require.True(t, ok)
 
-	forgerLogger, forgerDBReady := newDBReadyLogger(io.Discard)
+	forgerLogger, forgerDBReady := newDBReadyLogger(nodeLogTail(t, "forger"))
 	forger = newDevnetForgerNode(t, cardanoCfg, forgerLogger, ln)
 	runNodeInBackground(t, forger)
 
@@ -319,7 +321,7 @@ func startTwoNodeDevnet(
 		t.Fatal("timed out waiting for forger node's database to initialize")
 	}
 
-	syncerLogger, syncerDBReady := newDBReadyLogger(io.Discard)
+	syncerLogger, syncerDBReady := newDBReadyLogger(nodeLogTail(t, "syncer"))
 	syncerLn = newLoopbackListener(t)
 	syncer = newDevnetSyncNode(
 		t,
@@ -475,4 +477,76 @@ func TestLiveRestoreUnderRealForgingAndNetworking(t *testing.T) {
 	requireInboundListenerAcceptsConnections(t, syncerLn)
 
 	waitForTipSlotAtLeast(t, syncer, tipBeforeRestore.Point.Slot+5)
+}
+
+// nodeLogTailLines bounds how much of each node's log a failing test prints.
+// The stalls these tests have hit run for minutes, so the tail has to reach
+// back past the last progress the node made, not only its final seconds.
+const nodeLogTailLines = 10000
+
+// lineTail keeps the last limit lines written to it.
+type lineTail struct {
+	mu      sync.Mutex
+	limit   int
+	lines   []string
+	partial []byte
+}
+
+func (l *lineTail) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	data := append(l.partial, p...)
+	for {
+		i := bytes.IndexByte(data, '\n')
+		if i < 0 {
+			break
+		}
+		l.lines = append(l.lines, string(data[:i]))
+		data = data[i+1:]
+	}
+	l.partial = append([]byte(nil), data...)
+	if over := len(l.lines) - l.limit; over > 0 {
+		l.lines = append([]string(nil), l.lines[over:]...)
+	}
+	return len(p), nil
+}
+
+func (l *lineTail) snapshot() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]string(nil), l.lines...)
+}
+
+// nodeLogTail returns a writer for a node's log that keeps its last
+// nodeLogTailLines lines and prints them if the test fails. A stalled sync
+// otherwise fails with nothing but "Condition never satisfied": the node logs
+// are the only record of which peer, protocol or gate stopped it.
+func nodeLogTail(t *testing.T, name string) io.Writer {
+	t.Helper()
+	tail := &lineTail{limit: nodeLogTailLines}
+	t.Cleanup(func() {
+		if !t.Failed() {
+			return
+		}
+		lines := tail.snapshot()
+		t.Logf("last %d lines of the %s log:", len(lines), name)
+		for _, line := range lines {
+			t.Logf("%s: %s", name, line)
+		}
+	})
+	return tail
+}
+
+func TestLineTailKeepsTheLastLines(t *testing.T) {
+	t.Parallel()
+	tail := &lineTail{limit: 2}
+	for _, chunk := range []string{"one\ntw", "o\nthree\n", "four"} {
+		n, err := tail.Write([]byte(chunk))
+		require.NoError(t, err)
+		require.Equal(t, len(chunk), n)
+	}
+	require.Equal(t, []string{"two", "three"}, tail.snapshot())
+	_, err := tail.Write([]byte("\n"))
+	require.NoError(t, err)
+	require.Equal(t, []string{"three", "four"}, tail.snapshot())
 }

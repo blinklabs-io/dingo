@@ -475,5 +475,49 @@ func (s *snapshotServer) serveObject(
 		return
 	}
 	defer obj.Close()
+	if isRemoteStore(s.cfg.Store) && rangeCount(r.Header.Get("Range")) > 1 {
+		// ServeContent seeks once per range, and a remote reader opens a new
+		// ranged object read after every seek, so one request could fan out
+		// into an unbounded number of backend requests. RFC 9110 lets a
+		// server ignore Range, which serves the object from a single read.
+		r = r.Clone(r.Context())
+		r.Header.Del("Range")
+	}
+	// Without a Content-Type, ServeContent sniffs the type by reading the
+	// head of the object and seeking back, which costs a remote store an
+	// extra ranged read, and the extension lookup depends on the host's MIME
+	// tables. Every served key is a .json certificate or a .tar.zst archive.
+	contentType := "application/zstd"
+	if strings.HasSuffix(key, ".json") {
+		contentType = "application/json"
+	}
+	w.Header().Set("Content-Type", contentType)
 	http.ServeContent(w, r, path.Base(key), time.Time{}, obj)
+}
+
+// remoteObjectStore is implemented by stores whose readers issue one backend
+// request each time a read resumes after a seek.
+type remoteObjectStore interface {
+	streamsRemoteObjects() bool
+}
+
+func isRemoteStore(store ArtifactStore) bool {
+	remote, ok := store.(remoteObjectStore)
+	return ok && remote.streamsRemoteObjects()
+}
+
+// rangeCount is the number of ranges a bytes Range header names, skipping
+// the empty and whitespace-only elements net/http also skips.
+func rangeCount(header string) int {
+	spec, ok := strings.CutPrefix(header, "bytes=")
+	if !ok {
+		return 0
+	}
+	n := 0
+	for elem := range strings.SplitSeq(spec, ",") {
+		if strings.TrimSpace(elem) != "" {
+			n++
+		}
+	}
+	return n
 }

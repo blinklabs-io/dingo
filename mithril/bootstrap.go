@@ -105,7 +105,8 @@ type BootstrapConfig struct {
 	// default. Negative disables transient retries.
 	DownloadMaxTransientRetries int
 	// httpClient is the shared keep-alive client the v2 bootstrap reuses across
-	// artifact fetches. Callers do not populate it.
+	// artifact fetches, including the immutable downloads of its kept chunk
+	// feed. Callers do not populate it.
 	httpClient *http.Client
 	// downloadBudget bounds all artifact transfer requests and bytes in one v2
 	// bootstrap. It is initialized after the certified artifact is selected.
@@ -113,10 +114,18 @@ type BootstrapConfig struct {
 	// extractionBudget bounds expanded bytes and entries across all archives in
 	// one v2 bootstrap and preserves free space on their destination filesystem.
 	extractionBudget *bootstrapExtractionBudget
-	// immutableDigests is the verified digest list, set by downloadImmutables
+	// decoderBudget bounds the zstd history memory of the archive decoders
+	// running at once in one v2 bootstrap. Nil reserves nothing.
+	decoderBudget *decoderMemoryBudget
+	// immutableDigests is the verified digest list, set by the chunk feed
 	// so each archive's members are checked as they are extracted. When nil,
 	// an immutable archive is extracted without a member allowlist.
 	immutableDigests map[string]string
+	// CertificateCache, when set, lets certificate verification stop at
+	// certificates an earlier verification in this process accepted, and
+	// skip the walk for a leaf it already accepted. Nil walks every chain to
+	// genesis.
+	CertificateCache *CertificateCache
 	// OnArtifactSelected, when set, is invoked once this run's aggregator
 	// artifact has been resolved, identity-checked and (when enabled)
 	// certificate-verified, and before anything is downloaded. A non-nil
@@ -142,8 +151,9 @@ type BootstrapConfig struct {
 	// 0..N range, the normal bootstrap behaviour.
 	StartImmutable uint64
 	// OnChunkContiguous, when set, enables download<->processing
-	// pipelining: chunks are fetched in parallel (out of order) but this
-	// callback is invoked for each immutable file number in strict
+	// pipelining: chunks are fetched in parallel (out of order) by the
+	// shared chunk feed, and this callback is invoked from the feed's
+	// in-order consumer for each immutable file number in strict
 	// contiguous order as soon as that prefix is fully downloaded. The order
 	// runs from StartImmutable upwards, not from zero — a catch-up leaves
 	// everything below the marker to the blob store this run is adding to, so
@@ -154,6 +164,9 @@ type BootstrapConfig struct {
 	// The callback runs on a single consumer goroutine and serializes
 	// processing, so it needs no internal locking.
 	OnChunkContiguous func(chunk ContiguousChunk) error
+	// Metrics, when not nil, records the chunk downloads of this bootstrap
+	// and of any chunk feed or stream catch-up configured with it.
+	Metrics *PipelineMetrics
 }
 
 // SelectedArtifact is the identity of the aggregator artifact a bootstrap run
@@ -500,6 +513,24 @@ func verifyCertificateChain(
 	mode VerificationMode,
 	budget *certificateChainBudget,
 ) (*CertificateChainVerificationResult, error) {
+	return verifyCertificateChainAnchored(
+		ctx, client, certificateHash, mode, budget, nil,
+	)
+}
+
+// verifyCertificateChainAnchored is verifyCertificateChain stopping at the
+// first certificate below the leaf that anchors already verified. The link
+// from the last fetched certificate to it is checked like any other, and the
+// result carries the anchor's verified chain down to genesis, so callers see
+// the same chain a full walk returns.
+func verifyCertificateChainAnchored(
+	ctx context.Context,
+	client *Client,
+	certificateHash string,
+	mode VerificationMode,
+	budget *certificateChainBudget,
+	anchors *certificateAnchors,
+) (*CertificateChainVerificationResult, error) {
 	if mode == 0 {
 		mode = VerificationModeStructural
 	}
@@ -520,6 +551,19 @@ func verifyCertificateChain(
 	result := &CertificateChainVerificationResult{}
 
 	for {
+		var anchored []*Certificate
+		if !isLeaf {
+			anchored, _ = anchors.chainFrom(currentHash)
+		}
+		if len(anchored) > 0 {
+			cert := anchored[0]
+			if err := checkCertificateLink(childCert, cert); err != nil {
+				return nil, err
+			}
+			result.Certificates = append(result.Certificates, anchored...)
+			result.GenesisCertificate = anchored[len(anchored)-1]
+			return result, nil
+		}
 		if err := budget.chargeCertificate(); err != nil {
 			return nil, err
 		}
@@ -606,48 +650,8 @@ func verifyCertificateChain(
 				)
 			}
 		}
-		if childCert != nil {
-			if childCert.PreviousHash != cert.Hash {
-				return nil, fmt.Errorf(
-					"certificate chain previous hash mismatch: child=%s previous=%s parent=%s",
-					childCert.Hash,
-					childCert.PreviousHash,
-					cert.Hash,
-				)
-			}
-			if childCert.Epoch != cert.Epoch &&
-				childCert.Epoch != cert.Epoch+1 {
-				return nil, fmt.Errorf(
-					"certificate chain missing epoch between child=%d and parent=%d",
-					childCert.Epoch,
-					cert.Epoch,
-				)
-			}
-			if childCert.Epoch == cert.Epoch {
-				if childCert.AggregateVerificationKey != cert.AggregateVerificationKey {
-					return nil, errors.New(
-						"certificate chain aggregate verification key mismatch within epoch",
-					)
-				}
-				if childCert.Metadata.Parameters != cert.Metadata.Parameters {
-					return nil, errors.New(
-						"certificate chain protocol parameters mismatch within epoch",
-					)
-				}
-			} else {
-				nextAVK, ok := cert.ProtocolMessage.MessageParts["next_aggregate_verification_key"]
-				if !ok || nextAVK != childCert.AggregateVerificationKey {
-					return nil, errors.New(
-						"certificate chain aggregate verification key mismatch across epoch",
-					)
-				}
-				nextProtocolParameters, ok := cert.ProtocolMessage.MessageParts["next_protocol_parameters"]
-				if !ok || nextProtocolParameters != childCert.Metadata.Parameters.ComputeHash() {
-					return nil, errors.New(
-						"certificate chain protocol parameters mismatch across epoch",
-					)
-				}
-			}
+		if err := checkCertificateLink(childCert, cert); err != nil {
+			return nil, err
 		}
 		result.Certificates = append(result.Certificates, cert)
 
@@ -684,6 +688,57 @@ func verifyCertificateChain(
 
 		currentHash = cert.PreviousHash
 	}
+}
+
+// checkCertificateLink checks that parent may precede child in a chain: the
+// hashes link, the epochs are equal or adjacent, and the child's AVK and
+// protocol parameters are the parent's within an epoch, or the ones the parent
+// announced as next across one. A nil child (parent is the leaf) passes.
+func checkCertificateLink(child, parent *Certificate) error {
+	if child == nil {
+		return nil
+	}
+	if child.PreviousHash != parent.Hash {
+		return fmt.Errorf(
+			"certificate chain previous hash mismatch: child=%s previous=%s parent=%s",
+			child.Hash,
+			child.PreviousHash,
+			parent.Hash,
+		)
+	}
+	if child.Epoch != parent.Epoch && child.Epoch != parent.Epoch+1 {
+		return fmt.Errorf(
+			"certificate chain missing epoch between child=%d and parent=%d",
+			child.Epoch,
+			parent.Epoch,
+		)
+	}
+	if child.Epoch == parent.Epoch {
+		if child.AggregateVerificationKey != parent.AggregateVerificationKey {
+			return errors.New(
+				"certificate chain aggregate verification key mismatch within epoch",
+			)
+		}
+		if child.Metadata.Parameters != parent.Metadata.Parameters {
+			return errors.New(
+				"certificate chain protocol parameters mismatch within epoch",
+			)
+		}
+		return nil
+	}
+	nextAVK, ok := parent.ProtocolMessage.MessageParts["next_aggregate_verification_key"]
+	if !ok || nextAVK != child.AggregateVerificationKey {
+		return errors.New(
+			"certificate chain aggregate verification key mismatch across epoch",
+		)
+	}
+	nextProtocolParameters, ok := parent.ProtocolMessage.MessageParts["next_protocol_parameters"]
+	if !ok || nextProtocolParameters != child.Metadata.Parameters.ComputeHash() {
+		return errors.New(
+			"certificate chain protocol parameters mismatch across epoch",
+		)
+	}
+	return nil
 }
 
 // chunkDirIn returns rel beneath an already-open, already-vetted base when rel

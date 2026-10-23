@@ -96,9 +96,9 @@ func TestNodeHealthChecksSplitLivenessFromReadiness(t *testing.T) {
 			ready++
 		}
 	}
-	if live != 1 || ready != 2 {
+	if live != 1 || ready != 3 {
 		t.Fatalf(
-			"got %d liveness and %d readiness checks, want 1 and 2",
+			"got %d liveness and %d readiness checks, want 1 and 3",
 			live,
 			ready,
 		)

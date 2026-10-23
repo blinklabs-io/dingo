@@ -25,6 +25,7 @@ import (
 	"testing"
 	"time"
 
+	nodeconsensus "github.com/blinklabs-io/dingo/consensus"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
@@ -163,6 +164,42 @@ func TestUpdateMithrilReadyStateKeepsForgeFence(t *testing.T) {
 		require.Equal(t, tc.want, slot)
 	}
 
+	status, err := db.GetSyncState("sync_status", nil)
+	require.NoError(t, err)
+	require.Empty(t, status, "sync_status must still be cleared")
+}
+
+// TestUpdateMithrilReadyStateKeepsConsensusIdentity pins that the sync-state
+// clear ending a Mithril import leaves the consensus database identity in
+// place. Without it the next start reads the database as unmarked Praos and
+// refuses it under any other selected provider.
+func TestUpdateMithrilReadyStateKeepsConsensusIdentity(t *testing.T) {
+	t.Parallel()
+	db := newMithrilTestDB(t)
+	const identity = "example/v1"
+	require.NoError(t, db.SetSyncState(
+		nodeconsensus.DatabaseIdentitySyncKey, identity, nil,
+	))
+	ledgerStateHash := bytes.Repeat([]byte{0x66}, 32)
+	require.NoError(t, db.SetTip(ochainsync.Tip{
+		Point: ocommon.NewPoint(30, ledgerStateHash),
+	}, nil))
+	require.NoError(t, db.SetSyncState("sync_status", "bootstrap", nil))
+
+	require.NoError(t, updateMithrilReadyState(
+		context.Background(),
+		db,
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+		nil,
+		30,
+		ledgerStateHash,
+		"",
+		true,
+	))
+
+	got, err := db.GetSyncState(nodeconsensus.DatabaseIdentitySyncKey, nil)
+	require.NoError(t, err)
+	require.Equal(t, identity, got)
 	status, err := db.GetSyncState("sync_status", nil)
 	require.NoError(t, err)
 	require.Empty(t, status, "sync_status must still be cleared")

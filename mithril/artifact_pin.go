@@ -64,6 +64,16 @@ type pinnedArtifact struct {
 
 // setPinnedArtifact records pin as the artifact this sync run is importing.
 func setPinnedArtifact(db *database.Database, pin pinnedArtifact) error {
+	return setPinnedArtifactTxn(db, pin, nil)
+}
+
+// setPinnedArtifactTxn is setPinnedArtifact inside txn, or on its own when
+// txn is nil.
+func setPinnedArtifactTxn(
+	db *database.Database,
+	pin pinnedArtifact,
+	txn *database.Txn,
+) error {
 	if pin.Digest == "" {
 		return errors.New(
 			"pinning mithril artifact: artifact has no digest",
@@ -74,7 +84,7 @@ func setPinnedArtifact(db *database.Database, pin pinnedArtifact) error {
 		return fmt.Errorf("encoding mithril artifact pin: %w", err)
 	}
 	if err := db.SetSyncState(
-		syncKeyPinnedArtifact, string(encoded), nil,
+		syncKeyPinnedArtifact, string(encoded), txn,
 	); err != nil {
 		return fmt.Errorf("pinning mithril artifact: %w", err)
 	}

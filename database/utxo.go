@@ -20,6 +20,8 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"slices"
+	"sync/atomic"
 	"time"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -34,6 +36,12 @@ import (
 // exist (or was filtered out, e.g. by deleted_slot != 0 in the live
 // view). Callers may use errors.Is to detect a genuinely-absent row.
 var ErrUtxoNotFound = types.ErrUtxoNotFound
+
+// ErrUtxoHistoryCandidateLimit reports that exact-address history matching
+// exhausted its coarse-candidate budget before completing the query.
+var ErrUtxoHistoryCandidateLimit = errors.New(
+	"utxo history candidate limit exceeded",
+)
 
 // MaxUtxosByAddressResults is the default bound passed to UtxosByAddress
 // for callers with no more specific limit of their own. It caps how many
@@ -911,8 +919,31 @@ func (d *Database) UtxosWithHistory(
 	q *models.UtxoHistoryQuery,
 	txn *Txn,
 ) ([]models.UtxoWithHistory, error) {
+	utxos, _, err := d.utxosWithHistory(q, -1, txn)
+	return utxos, err
+}
+
+// UtxosWithHistoryBounded is UtxosWithHistory with a limit on the coarse
+// candidates examined while completing exact-address matching. It returns the
+// number of candidates read so callers can enforce one budget across pages.
+func (d *Database) UtxosWithHistoryBounded(
+	q *models.UtxoHistoryQuery,
+	maxCandidates int,
+	txn *Txn,
+) ([]models.UtxoWithHistory, int, error) {
+	if maxCandidates < 0 {
+		return nil, 0, errors.New("maxCandidates must not be negative")
+	}
+	return d.utxosWithHistory(q, maxCandidates, txn)
+}
+
+func (d *Database) utxosWithHistory(
+	q *models.UtxoHistoryQuery,
+	maxCandidates int,
+	txn *Txn,
+) ([]models.UtxoWithHistory, int, error) {
 	if q == nil {
-		return nil, models.ErrNilUtxoHistoryQuery
+		return nil, 0, models.ErrNilUtxoHistoryQuery
 	}
 	if txn == nil {
 		txn = d.TransactionContext(context.Background(), false)
@@ -921,18 +952,29 @@ func (d *Database) UtxosWithHistory(
 	requiresExact := !q.MatchAllAddresses &&
 		models.RequiresExactAddressFilter(q.AddressPatterns)
 	if !requiresExact || q.Limit <= 0 {
+		readQuery := q
+		if maxCandidates >= 0 &&
+			(q.Limit <= 0 || q.Limit > maxCandidates+1) {
+			boundedQuery := *q
+			boundedQuery.Limit = maxCandidates + 1
+			readQuery = &boundedQuery
+		}
 		utxos, err := d.utxoStore().GetUtxosWithHistory(
-			q,
+			readQuery,
 			txn.Metadata(),
 		)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
+		}
+		if maxCandidates >= 0 && len(utxos) > maxCandidates {
+			return nil, len(utxos), ErrUtxoHistoryCandidateLimit
 		}
 		patterns := q.AddressPatterns
 		if !requiresExact {
 			patterns = nil
 		}
-		return d.loadAndFilterHistoricalUtxos(utxos, patterns, txn)
+		ret, err := d.loadAndFilterHistoricalUtxos(utxos, patterns, txn)
+		return ret, len(utxos), err
 	}
 
 	// Exact address identity is only available in output CBOR. Scan coarse SQL
@@ -946,13 +988,23 @@ func (d *Database) UtxosWithHistory(
 	// exact match is not a correctness boundary.
 	scanQuery.Limit = min(max(q.Limit, 128), 1024)
 	ret := make([]models.UtxoWithHistory, 0, q.Limit)
+	candidates := 0
 	for len(ret) < q.Limit {
+		batchLimit := scanQuery.Limit
+		if maxCandidates >= 0 {
+			batchLimit = min(batchLimit, maxCandidates-candidates+1)
+		}
+		scanQuery.Limit = batchLimit
 		batch, err := d.utxoStore().GetUtxosWithHistory(
 			&scanQuery,
 			txn.Metadata(),
 		)
 		if err != nil {
-			return nil, err
+			return nil, candidates, err
+		}
+		candidates += len(batch)
+		if maxCandidates >= 0 && candidates > maxCandidates {
+			return nil, candidates, ErrUtxoHistoryCandidateLimit
 		}
 		filtered, err := d.loadAndFilterHistoricalUtxos(
 			batch,
@@ -960,11 +1012,22 @@ func (d *Database) UtxosWithHistory(
 			txn,
 		)
 		if err != nil {
-			return nil, err
+			return nil, candidates, err
 		}
 		remaining := q.Limit - len(ret)
 		if len(filtered) > remaining {
 			filtered = filtered[:remaining]
+			// A paging caller resumes after the last returned match and reads
+			// the rest of this batch again, so charging those rows here would
+			// count them twice against a budget shared across pages.
+			keep := filtered[len(filtered)-1]
+			for i, u := range slices.Backward(batch) {
+				if u.OutputIdx == keep.OutputIdx &&
+					bytes.Equal(u.TxId, keep.TxId) {
+					candidates -= len(batch) - 1 - i
+					break
+				}
+			}
 		}
 		ret = append(ret, filtered...)
 		if len(batch) < scanQuery.Limit || len(batch) == 0 {
@@ -978,7 +1041,7 @@ func (d *Database) UtxosWithHistory(
 			TxId:       last.TxId,
 		}
 	}
-	return ret, nil
+	return ret, candidates, nil
 }
 
 func (d *Database) loadAndFilterHistoricalUtxos(
@@ -1456,6 +1519,15 @@ func filterUtxoViews[T any](
 		return utxos, nil
 	}
 	result := make([]T, 0, len(utxos))
+	// A filter of only exact addresses is matched by keyed lookup; a linear
+	// scan would cost candidates x patterns.
+	var exactSet map[string]struct{}
+	if exactOnly := onlyExactPatterns(patterns); exactOnly {
+		exactSet = make(map[string]struct{}, len(patterns))
+		for i := range patterns {
+			exactSet[string(patterns[i].ExactAddress)] = struct{}{}
+		}
+	}
 	for i := range utxos {
 		item := utxo(&utxos[i])
 		output, err := item.Decode()
@@ -1464,6 +1536,16 @@ func filterUtxoViews[T any](
 				"decode %s %x#%d for exact address match: %w",
 				description, item.TxId, item.OutputIdx, err,
 			)
+		}
+		if exactSet != nil {
+			addrBytes, err := output.Address().Bytes()
+			if err != nil {
+				return nil, fmt.Errorf("encode output address: %w", err)
+			}
+			if _, ok := exactSet[string(addrBytes)]; ok {
+				result = append(result, utxos[i])
+			}
+			continue
 		}
 		match, err := models.MatchesUtxoAddressPatterns(output.Address(), patterns)
 		if err != nil {
@@ -1474,6 +1556,20 @@ func filterUtxoViews[T any](
 		}
 	}
 	return result, nil
+}
+
+// onlyExactPatterns reports whether every pattern is a bare exact address,
+// the only shape a set lookup answers identically to the pattern contract.
+func onlyExactPatterns(patterns []models.UtxoAddressPattern) bool {
+	for i := range patterns {
+		p := patterns[i]
+		if len(p.ExactAddress) == 0 ||
+			len(p.PaymentPart) > 0 ||
+			len(p.DelegationPart) > 0 {
+			return false
+		}
+	}
+	return len(patterns) > 0
 }
 
 func (d *Database) loadAndFilterOrderedUtxos(
@@ -1532,6 +1628,27 @@ func (d *Database) UtxosByAssets(
 // TruncateAfterSlot can only restore rows that still exist; a rollback below
 // this marker would therefore leave the live UTxO set incomplete.
 const ConsumedUtxoPruneFloorSyncKey = "consumed_utxo_prune_floor"
+
+// CountUtxosConsumedUpTo counts, up to limit, the spent UTxO rows that
+// UtxosDeleteConsumed with the same slot would remove. It reads at most limit
+// rows, so a result equal to limit means at least that many.
+func (d *Database) CountUtxosConsumedUpTo(
+	ctx context.Context,
+	slot uint64,
+	limit int,
+) (int, error) {
+	txn := d.Transaction(ctx, false)
+	defer txn.Rollback() //nolint:errcheck
+	utxos, err := d.utxoStore().GetUtxosDeletedBeforeSlot(
+		slot,
+		limit,
+		txn.Metadata(),
+	)
+	if err != nil {
+		return 0, fmt.Errorf("count consumed UTxOs: %w", err)
+	}
+	return len(utxos), nil
+}
 
 func (d *Database) UtxosDeleteConsumed(
 	ctx context.Context,
@@ -1619,6 +1736,47 @@ func (d *Database) UtxosDeleteConsumed(
 	return utxoCount, nil
 }
 
+// UtxosDeleteSpentInBatch removes the rows of outputs that one trusted batch
+// both created and spent, inside the transaction that applied it, so they are
+// never committed. Every id must name a row the same transaction has already
+// marked spent. slot is the last slot the transaction applied; the
+// consumed-UTxO prune floor is raised to it, as UtxosDeleteConsumed does,
+// because a rollback below it could not restore the removed rows.
+func (d *Database) UtxosDeleteSpentInBatch(
+	ids []models.UtxoId,
+	slot uint64,
+	txn *Txn,
+) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	if txn == nil {
+		return types.ErrNilTxn
+	}
+	pruneFloor, err := d.ConsumedUtxoPruneFloor(txn)
+	if err != nil {
+		return err
+	}
+	utxos := make([]models.Utxo, len(ids))
+	for i, id := range ids {
+		utxos[i] = models.Utxo{TxId: id.Hash, OutputIdx: id.Idx}
+	}
+	if blobErr := deleteUtxoBlobs(d, utxos, txn); blobErr != nil {
+		d.logger.Error(
+			"trusted batch UTxO blob delete left unreachable objects",
+			"error", blobErr,
+			"utxos", len(utxos),
+		)
+	}
+	if err := d.utxoStore().DeleteUtxos(ids, txn.Metadata()); err != nil {
+		return err
+	}
+	if slot > pruneFloor {
+		return d.writeConsumedUtxoPruneFloor(slot, txn)
+	}
+	return nil
+}
+
 func (d *Database) UtxosDeleteRolledback(
 	ctx context.Context,
 	slot uint64,
@@ -1634,6 +1792,7 @@ func (d *Database) UtxosDeleteRolledback(
 			}
 		}()
 	}
+	d.noteUtxoRollback(slot, txn)
 	utxos, err := d.utxoStore().GetUtxosAddedAfterSlot(slot, txn.Metadata())
 	if err != nil {
 		return err
@@ -1736,6 +1895,7 @@ func (d *Database) UtxosUnspend(
 			}
 		}()
 	}
+	d.noteUtxoRollback(slot, txn)
 	if err := d.utxoStore().SetUtxosNotDeletedAfterSlot(
 		slot,
 		txn.Metadata(),
@@ -1837,6 +1997,118 @@ func (d *Database) IterateUtxoRefsAsOf(
 	return d.Transaction(ctx, false).Do(func(t *Txn) error {
 		return iterator.IterateUtxosAsOfContext(ctx, atSlot, t.Metadata(), fn)
 	})
+}
+
+// ErrUtxoHistoryRolledBack reports that a paged as-of UTxO read overlapped a
+// rollback below its slot. Rows the rollback removed or unspent may already
+// have been read or skipped, so the pages no longer describe one state; the
+// caller retries or fails the read.
+var ErrUtxoHistoryRolledBack = errors.New(
+	"UTxO history rolled back below the slot of a paged read",
+)
+
+// utxoAsOfRead is one paged as-of read in progress. disturbed is set when a
+// rollback below atSlot may have changed the rows it walks.
+type utxoAsOfRead struct {
+	atSlot    uint64
+	disturbed atomic.Bool
+}
+
+// noteUtxoRollback marks every paged read below whose slot a rollback to slot
+// rewrites UTxO history. A rollback to slot deletes rows added after it and
+// unspends rows spent after it, which leaves the set live as of any slot at or
+// below it unchanged. It marks before the rollback writes and again when txn
+// finishes, so a read that starts while the rollback is in flight is caught by
+// the second mark.
+func (d *Database) noteUtxoRollback(slot uint64, txn *Txn) {
+	mark := func() {
+		d.utxoAsOfReadsMu.Lock()
+		defer d.utxoAsOfReadsMu.Unlock()
+		for r := range d.utxoAsOfReads {
+			if slot < r.atSlot {
+				r.disturbed.Store(true)
+			}
+		}
+	}
+	mark()
+	if txn != nil {
+		txn.OnFinish(mark)
+	}
+}
+
+// IterateUtxoRefsAsOfPaged invokes fn once for each UTxO live as of atSlot,
+// like IterateUtxoRefsAsOf, but reads pageSize rows per short read
+// transaction instead of holding one for the whole walk. Over SQLite a
+// transaction held for a whole-UTxO walk -- minutes on a large chain -- keeps
+// the WAL from restarting, and one walk after another keeps it growing.
+//
+// The pages agree with one another without sharing a snapshot because of
+// how UTxO rows change. Blocks applied after atSlot add rows with a later
+// added_slot and spend rows at a later slot, and the as-of predicate already
+// excludes the first and includes the second. Spent-row pruning removes only
+// rows spent before the prune floor, which an acquired-point pin holds at or
+// below atSlot. Rows keep their id, so paging on it neither repeats nor skips
+// a row. The one change that alters the as-of set is a rollback below atSlot,
+// which noteUtxoRollback reports: this returns ErrUtxoHistoryRolledBack and
+// the caller decides whether to retry. Callers must hold pruning at or below
+// atSlot themselves.
+func (d *Database) IterateUtxoRefsAsOfPaged(
+	ctx context.Context,
+	atSlot uint64,
+	pageSize int,
+	fn func(UtxoRef) error,
+) error {
+	if pageSize <= 0 {
+		return errors.New("iterate UTxO refs as of slot: page size must be positive")
+	}
+	read := &utxoAsOfRead{atSlot: atSlot}
+	d.utxoAsOfReadsMu.Lock()
+	if d.utxoAsOfReads == nil {
+		d.utxoAsOfReads = make(map[*utxoAsOfRead]struct{})
+	}
+	d.utxoAsOfReads[read] = struct{}{}
+	d.utxoAsOfReadsMu.Unlock()
+	defer func() {
+		d.utxoAsOfReadsMu.Lock()
+		delete(d.utxoAsOfReads, read)
+		d.utxoAsOfReadsMu.Unlock()
+	}()
+
+	var afterID uint
+	for {
+		var page []models.Utxo
+		err := d.MetadataTxn(ctx, false).Do(func(t *Txn) error {
+			var err error
+			page, err = d.utxoStore().UtxoRefsAsOfAfterID(
+				ctx, atSlot, afterID, pageSize, t.Metadata(),
+			)
+			return err
+		})
+		if err != nil {
+			return err
+		}
+		if read.disturbed.Load() {
+			return ErrUtxoHistoryRolledBack
+		}
+		for i := range page {
+			if len(page[i].TxId) != len(UtxoRef{}.TxId) {
+				return fmt.Errorf(
+					"iterate UTxO refs as of slot: row %d has a %d-byte tx id",
+					page[i].ID, len(page[i].TxId),
+				)
+			}
+			var ref UtxoRef
+			copy(ref.TxId[:], page[i].TxId)
+			ref.OutputIdx = page[i].OutputIdx
+			if err := fn(ref); err != nil {
+				return err
+			}
+			afterID = page[i].ID
+		}
+		if len(page) < pageSize {
+			return nil
+		}
+	}
 }
 
 // MarkUtxosDeletedAtSlot marks every live UTxO row matching one of

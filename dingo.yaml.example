@@ -35,6 +35,12 @@
 
 # Compiled-in plugin selection and provider configuration.
 # plugins:
+  # consensus:
+    # Praos is the default when this section is omitted.
+    # CLI: --consensus
+    # Env: DINGO_PLUGINS_CONSENSUS_PROVIDER
+    # provider: "praos"
+    # config: {}
   # storage:
     # blob:
       # provider: "badger"
@@ -360,6 +366,22 @@
 # Can be overridden with DINGO_BARK_ARCHIVE_MAX_CONCURRENT_FETCHES
 # CLI: --bark-archive-max-concurrent-fetches
 # barkArchiveMaxConcurrentFetches: 0
+
+# Sustained ArchiveService block lookups per second across all callers. A
+# reference that names no block still costs a storage lookup, so a FetchBlock
+# whose references do not fit the remaining budget is refused whole with
+# RESOURCE_EXHAUSTED. 0 selects the default of 200.
+# Can be overridden with DINGO_BARK_ARCHIVE_LOOKUPS_PER_SECOND
+# CLI: --bark-archive-lookups-per-second
+# barkArchiveLookupsPerSecond: 0
+
+# Sustained ArchiveService block lookups per second for one caller, keyed by
+# IPv4 address or IPv6 /64. Callers behind one proxy share an allowance, and
+# a Dingo node reading expired history through barkBaseUrl is one caller. 0
+# selects the default of 50.
+# Can be overridden with DINGO_BARK_ARCHIVE_CALLER_LOOKUPS_PER_SECOND
+# CLI: --bark-archive-caller-lookups-per-second
+# barkArchiveCallerLookupsPerSecond: 0
 
 # SHA-256 fingerprints of client certificate DER bytes authorized to invoke
 # destructive DatabaseService RPCs (CreateSnapshot, DeleteSnapshot,
@@ -747,7 +769,7 @@
 # blockPipelineValidateEnabled: false
 
 # Prefetch the next block's input UTxOs on a separate goroutine from a
-# read-only transaction while the current block applies (default: false).
+# read-only transaction while the current block applies (default: true).
 # Not consensus-affecting. Inputs spent by earlier blocks of the same
 # block-apply chunk are never served from the prefetch, and any input it
 # misses is read as without the flag.
@@ -755,7 +777,17 @@
 # Can be overridden with the DINGO_LEDGER_PREFETCH_AHEAD_ENABLED
 # environment variable
 # CLI: --ledger-prefetch-ahead-enabled
-# ledgerPrefetchAheadEnabled: false
+# ledgerPrefetchAheadEnabled: true
+
+# Verify the witness signatures of every validated block of a block-apply
+# chunk on worker goroutines while earlier blocks of the chunk validate and
+# write (default: true). Not consensus-affecting: each result is bound to
+# its transaction, and every other rule still runs in order.
+#
+# Can be overridden with the DINGO_LEDGER_VALIDATE_AHEAD_ENABLED
+# environment variable
+# CLI: --ledger-validate-ahead-enabled
+# ledgerValidateAheadEnabled: true
 
 # In core storage mode, write the accumulated deltas of blocks that are not
 # validated with multi-row batched inserts instead of one statement group per
@@ -871,7 +903,9 @@
 
 # Genesis bootstrap configuration
 # Used only for from-origin sync. Default behavior keeps this enabled and
-# exits Genesis mode automatically near the best known peer tip.
+# exits Genesis mode automatically near the best known peer tip. A Cardano node
+# configuration with ConsensusMode set to PraosMode (for example Musashi) turns
+# Genesis mode off whatever this section says, as for the reference node.
 # genesisBootstrap:
   # Enable/disable Genesis bootstrap mode (default: true).
   # enabled: true
@@ -1038,8 +1072,34 @@
 # Use 'dingo mithril sync' or 'dingo sync --mithril' to bootstrap from a snapshot
 # CLI: --mithril-enabled, --mithril-verify-certs
 # mithril:
-  # Enable Mithril integration (default: true)
-  # enabled: true
+  # Make `dingo serve` sync from Mithril while it is behind the aggregator's
+  # certified immutable tip, falling back to Ouroboros on any failure.
+  # Requires core storage mode. With historyExpiry.enabled false the node
+  # replays certified blocks; with it true it restores a snapshot and
+  # backfills. `dingo mithril sync` works regardless of this setting.
+  # Default: false
+  # enabled: false
+  # Immutable chunks held on disk at once during node-managed sync (default: 64).
+  # They wait undecoded; decoded blocks in memory are bounded by batchChunks.
+  # CLI: --mithril-window-chunks  Env: DINGO_MITHRIL_WINDOW_CHUNKS
+  # windowChunks: 64
+  # Chunks applied per ledger batch; at least 1 and at most windowChunks
+  # (default: 8)
+  # CLI: --mithril-batch-chunks  Env: DINGO_MITHRIL_BATCH_CHUNKS
+  # batchChunks: 8
+  # Concurrent chunk downloads (default: 16)
+  # CLI: --mithril-download-workers  Env: DINGO_MITHRIL_DOWNLOAD_WORKERS
+  # downloadWorkers: 16
+  # Smallest certified gap, in chunks, that starts a node-managed sync
+  # (default: 4)
+  # CLI: --mithril-min-gap-chunks  Env: DINGO_MITHRIL_MIN_GAP_CHUNKS
+  # minGapChunks: 4
+  # How often a live node re-checks the aggregator (default: 10m)
+  # CLI: --mithril-check-interval  Env: DINGO_MITHRIL_CHECK_INTERVAL
+  # checkInterval: 10m
+  # Wait after a Mithril failure before retrying (default: 30m)
+  # CLI: --mithril-retry-backoff  Env: DINGO_MITHRIL_RETRY_BACKOFF
+  # retryBackoff: 30m
   # Override aggregator URL (auto-detected from network if empty)
   # Supported networks: mainnet, preprod, preview
   # aggregatorUrl: ""
