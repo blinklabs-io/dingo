@@ -24,11 +24,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestOffchainDiscoveryRereadsInPlaceDrepAnchor reproduces the pointer-discovery
-// regression introduced by the keyset-cursor change: the drep table stores one
-// row per DRep and updates that row in place when the DRep publishes a new
-// anchor, so the row id never changes. A keyset cursor that only ever moves
-// forward therefore never re-reads the updated anchor.
+// TestOffchainDiscoveryRereadsInPlaceDrepAnchor pins that discovery re-reads
+// rows below its forward cursor: the drep table keeps one row per DRep and
+// updates its anchor in place, so a new anchor arrives without a new row id.
 func TestOffchainDiscoveryRereadsInPlaceDrepAnchor(t *testing.T) {
 	t.Parallel()
 	store, _ := newSharedSQLStore(t)
@@ -106,4 +104,95 @@ func TestOffchainDiscoveryPageBoundAndCursor(t *testing.T) {
 	cursor, err = store.GetSyncState(cursorKey, nil)
 	require.NoError(t, err)
 	require.Equal(t, "0", cursor)
+}
+
+// TestOffchainDiscoveryFindsAppendAfterWrap pins that a row appended after the
+// in-place rescan wrapped is discovered on the next pass, not after the rescan
+// walks the whole table again.
+func TestOffchainDiscoveryFindsAppendAfterWrap(t *testing.T) {
+	t.Parallel()
+	store, _ := newSharedSQLStore(t)
+
+	now := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
+	const total = 130
+	const cursorKey = "offchain-metadata-discovery:" +
+		models.OffchainMetadataSourceDrep
+	setDrep := func(i int) (string, []byte) {
+		credential := bytes.Repeat([]byte{byte(i + 1)}, 32)
+		hash := bytes.Repeat([]byte{byte(i + 1)}, 32)
+		url := fmt.Sprintf("https://metadata.example.test/drep-%d.json", i)
+		require.NoError(
+			t,
+			store.SetDrep(0, credential, 10, url, hash, true, nil),
+		)
+		return url, hash
+	}
+	for i := range total {
+		setDrep(i)
+	}
+	for pass := 0; ; pass++ {
+		require.Less(t, pass, 10, "rescan cursor never wrapped")
+		_, err := store.EnsureOffchainMetadataPointers(t.Context(), now, nil)
+		require.NoError(t, err)
+		cursor, err := store.GetSyncState(cursorKey, nil)
+		require.NoError(t, err)
+		if cursor == "0" {
+			break
+		}
+	}
+
+	url, hash := setDrep(total)
+	created, err := store.EnsureOffchainMetadataPointers(t.Context(), now, nil)
+	require.NoError(t, err)
+	require.Equal(t, 1, created)
+	doc, err := store.GetOffchainMetadata(
+		models.OffchainMetadataSourceDrep,
+		url,
+		hash,
+		nil,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, doc, "appended drep anchor was not discovered")
+}
+
+// TestOffchainDiscoverySkipsNullAnchorRow pins that a source row with a NULL
+// anchor neither fails the pass nor stalls the scan on the page holding it.
+func TestOffchainDiscoverySkipsNullAnchorRow(t *testing.T) {
+	t.Parallel()
+	store, writeDB := newSharedSQLStore(t)
+
+	now := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
+	hashA := bytes.Repeat([]byte{0x41}, 32)
+	hashC := bytes.Repeat([]byte{0x43}, 32)
+	urlA := "https://metadata.example.test/drep-a.json"
+	urlC := "https://metadata.example.test/drep-c.json"
+	require.NoError(t, store.SetDrep(
+		0, bytes.Repeat([]byte{0x01}, 32), 10, urlA, hashA, true, nil,
+	))
+	_, err := writeDB.ExecContext(
+		t.Context(),
+		"INSERT INTO drep (credential, credential_tag, anchor_url,"+
+			" anchor_hash, added_slot) VALUES (?, 0, NULL, NULL, 10)",
+		bytes.Repeat([]byte{0x02}, 32),
+	)
+	require.NoError(t, err)
+	require.NoError(t, store.SetDrep(
+		0, bytes.Repeat([]byte{0x03}, 32), 10, urlC, hashC, true, nil,
+	))
+
+	created, err := store.EnsureOffchainMetadataPointers(t.Context(), now, nil)
+	require.NoError(t, err)
+	require.Equal(t, 2, created)
+	doc, err := store.GetOffchainMetadata(
+		models.OffchainMetadataSourceDrep,
+		urlC,
+		hashC,
+		nil,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, doc, "row after the NULL anchor was not discovered")
+
+	created, err = store.EnsureOffchainMetadataPointers(t.Context(), now, nil)
+	require.NoError(t, err)
+	require.Equal(t, 0, created)
 }
