@@ -39,6 +39,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/blinklabs-io/dingo/internal/httpuseragent"
 	"github.com/klauspost/compress/zstd"
 )
 
@@ -809,6 +810,7 @@ func downloadSnapshotOnce(
 	if err != nil {
 		return "", fmt.Errorf("creating download request: %w", err)
 	}
+	httpuseragent.Set(req)
 
 	// Request resume if we have a partial download
 	if existingSize > 0 {
@@ -925,6 +927,7 @@ func downloadSnapshotOnce(
 					err,
 				)
 			}
+			httpuseragent.Set(req)
 			headerTimer = cfg.newIdleWatchdog(func() {
 				cancelDownload(downloadIdleTimeoutCause(idleTimeout))
 			})
