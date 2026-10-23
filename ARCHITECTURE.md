@@ -703,6 +703,16 @@ moved the peer's cursor and is dropped. A rollback from a session that has
 delivered a header is applied immediately. The deferred state is per
 connection, held under `chainsyncMutex`, and cleared on `ledger.conn_closed`.
 
+Peer-fork header verification follows the candidate's retained ancestry from its
+intersection instead of reusing the applied tip's epoch nonce. The ledger folds
+the candidate evolving and frozen nonces across epoch boundaries, carries the
+last epoch-block nonce, and checks operational-certificate counters along that
+same path. This bounded history is scoped to the peer and verification
+generation; it is discarded when the retained path is reset or the connection
+closes. Deferred headers may remain as raw ancestry, but selection waits until
+the candidate path and required header checks are available. A header beyond
+the forecast horizon or with unavailable ancestry or context is deferred.
+
 `ledger.tx` is published with `PublishOrdered`, not `PublishAsync`, so a
 subscriber deriving state from it sees a block's transactions in index order
 and sees a rollback's undo events (`Rollback: true`) before any transaction
