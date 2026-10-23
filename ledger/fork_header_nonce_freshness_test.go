@@ -152,6 +152,27 @@ func TestPeerHeaderForkPathKeepsVerdictAcrossTipOnlyPublication(t *testing.T) {
 	require.Equal(t, f.headers[0].slot-1, ancestor.Slot)
 }
 
+func TestPeerHeaderForkPathRevalidatesUnstampedAncestryAndItsCachedChild(
+	t *testing.T,
+) {
+	t.Parallel()
+	f := newForkPathFreshnessFixture(t, 4)
+	connID := ouroboros.ConnectionId{}
+	for index := 0; index < 3; index++ {
+		f.stamps[string(f.headers[index].hash[:])] = 0
+	}
+
+	_, path, found, err := f.ls.peerHeaderForkPath(connID, f.headers[2])
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Len(t, path, 3)
+
+	_, path, found, err = f.ls.peerHeaderForkPath(connID, f.headers[3])
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Len(t, path, 4)
+}
+
 // TestPeerHeaderForkPathDefersVerdictAfterConsensusChange keeps the security
 // half of the freshness rule: a verdict made before the epoch nonce, era or
 // stake-bearing epoch state changed is not reused.

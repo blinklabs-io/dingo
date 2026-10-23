@@ -1845,12 +1845,24 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 		extendsLocalChain := ingressEligible &&
 			o.deferredHeaderExtendsLocalChain(ctx.ConnectionId, v)
 		if deferredVerification {
+			if ingressEligible && o.chainsyncState != nil {
+				// Keep bounded raw ancestry only; ledger validation checks the
+				// complete linked path before it can affect candidate selection.
+				o.chainsyncState.RecordObservedHeader(
+					chainsync.ObservedHeader{
+						ConnectionId: ctx.ConnectionId,
+						Point:        point,
+						BlockHeader:  v,
+						ArrivalTime:  arrivalTime,
+						Tip:          tip,
+						BlockNumber:  v.BlockNumber(),
+						Type:         blockType,
+					},
+				)
+			}
 			if !extendsLocalChain {
-				// Do not advance peer cursors, history, dedup state, or publish
-				// to selector/ledger until this header passes strict
-				// verification. Observed history is trusted by fork-density and
-				// rollback-replay paths, so it must contain only independently
-				// verified headers.
+				// Do not advance peer cursors, dedup state, or publish to
+				// selector/ledger until this header passes strict verification.
 				o.markDeferredHeaderRecovery(
 					ctx.ConnectionId,
 					verificationTipBaseline,

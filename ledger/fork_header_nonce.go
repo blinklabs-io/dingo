@@ -69,11 +69,9 @@ func (ls *LedgerState) peerChainSelectionEpochNonce(
 		if len(ls.chain.Tip().Point.Hash) == 0 {
 			return nil, models.Epoch{}, false, nil
 		}
-		// A deferred header queued as a linear extension of the local chain
-		// stays out of the peer's observed history, so its child has no
-		// recorded ancestry. The child still extends the local chain and is
-		// verified against it, as its queued parent was; withholding it would
-		// drop it and strand every later header from the peer behind it.
+		// A deferred header remains in per-connection history with generation
+		// zero. Its child extends a local queued parent, so the local verifier
+		// checks it instead of withholding it as a competing candidate.
 		if ls.chain.HoldsQueuedHeaderHash(header.PrevHash().Bytes()) {
 			return nil, models.Epoch{}, false, nil
 		}
@@ -718,11 +716,12 @@ func (ls *LedgerState) peerHeaderForkPath(
 				connId,
 				parentPoint.Hash,
 			)
-			if (!ok || !headerVerdictInContext(
-				event.HeaderCryptoVerificationGeneration,
-				contextGeneration,
-				verificationGeneration,
-			)) && !ls.chain.HoldsPoint(context.Background(), parentPoint) {
+			if (!ok || (event.HeaderCryptoVerificationGeneration != 0 &&
+				!headerVerdictInContext(
+					event.HeaderCryptoVerificationGeneration,
+					contextGeneration,
+					verificationGeneration,
+				))) && !ls.chain.HoldsPoint(context.Background(), parentPoint) {
 				if ls.chain.HoldsQueuedHeaderHash(parentPoint.Hash) {
 					return ocommon.Point{}, nil, false, nil
 				}
@@ -831,11 +830,14 @@ func (ls *LedgerState) peerHeaderForkPath(
 			) {
 			return ocommon.Point{}, nil, false, nil
 		}
-		if !headerVerdictInContext(
-			event.HeaderCryptoVerificationGeneration,
-			contextGeneration,
-			verificationGeneration,
-		) &&
+		// Generation zero is raw candidate ancestry. It is checked with the
+		// entire linked path once a local anchor is found.
+		if event.HeaderCryptoVerificationGeneration != 0 &&
+			!headerVerdictInContext(
+				event.HeaderCryptoVerificationGeneration,
+				contextGeneration,
+				verificationGeneration,
+			) &&
 			!ls.chain.HoldsPoint(context.Background(), event.Point) {
 			if ls.chain.HoldsQueuedHeaderHash(prevHash) {
 				return ocommon.Point{}, nil, false, nil
