@@ -34,12 +34,16 @@ permissions:
   contents: read
 
 concurrency:
-  # Give each main run its own group so a newer push cannot cancel the image
-  # publication for an earlier merged commit. Keep every other ref serialized,
-  # so re-pushing a tag cannot run two publications at once.
-  group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.run_id || github.ref }}
+  # One group per ref. On main a newer push cancels the run it supersedes:
+  # main runs only publish the branch-tagged images, which the next run
+  # overwrites anyway, so a burst of merges builds them once instead of once
+  # per commit. Every main commit is tested in the merge queue before it lands,
+  # so skipping an intermediate commit's images loses no coverage. A burst of
+  # 13 direct merges once started 13 runs that held 15 of the organization's
+  # 20 runners at the same time.
+  group: ${{ github.workflow }}-${{ github.ref }}
   # Never interrupt a tag release after publication has started.
-  cancel-in-progress: false
+  cancel-in-progress: ${{ github.ref == 'refs/heads/main' }}
 
 env:
   APPLICATION_NAME: 'dingo'
