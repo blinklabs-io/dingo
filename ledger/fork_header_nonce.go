@@ -835,7 +835,9 @@ func (ls *LedgerState) peerHeaderForkPath(
 	prevHash := append([]byte(nil), header.PrevHash().Bytes()...)
 	visited := map[string]struct{}{string(header.Hash().Bytes()): {}}
 	for remaining := ls.peerHeaderHistoryLimit(); ; remaining-- {
-		isOrigin := len(prevHash) == 0
+		var nullPrevHash lcommon.Blake2b256
+		// Shelley header decoders represent CBOR null prev_hash as a zero hash.
+		isOrigin := len(prevHash) == 0 || bytes.Equal(prevHash, nullPrevHash[:])
 		if !isOrigin {
 			genesisHash, err := GenesisBlockHash(ls.config.CardanoNodeConfig)
 			isOrigin = err == nil && bytes.Equal(prevHash, genesisHash[:])
