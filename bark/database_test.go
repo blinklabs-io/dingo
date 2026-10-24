@@ -948,7 +948,7 @@ func TestListAvailableSnapshotsRetriesIncompleteStartupListing(t *testing.T) {
 	require.EqualValues(t, 2, listCalls.Load())
 }
 
-func TestListAvailableSnapshotsSerializesCloudReconciliation(t *testing.T) {
+func TestReconcileCloudSnapshotCatalogSerializesRetries(t *testing.T) {
 	snapshotDir := t.TempDir()
 	cloudRoot := t.TempDir()
 	var failList atomic.Bool
@@ -990,15 +990,12 @@ func TestListAvailableSnapshotsSerializesCloudReconciliation(t *testing.T) {
 			close(listRelease)
 		}
 	}()
-	list := func() error {
-		_, err := h.ListAvailableSnapshots(
-			t.Context(),
-			connect.NewRequest(&databasev1alpha1.ListAvailableSnapshotsRequest{}),
-		)
+	reconcile := func() error {
+		_, err := h.reconcileCloudSnapshotCatalogIfNeeded(t.Context())
 		return err
 	}
 	firstDone := make(chan error, 1)
-	go func() { firstDone <- list() }()
+	go func() { firstDone <- reconcile() }()
 	select {
 	case <-listEntered:
 	case <-time.After(time.Second):
@@ -1009,7 +1006,7 @@ func TestListAvailableSnapshotsSerializesCloudReconciliation(t *testing.T) {
 	secondDone := make(chan error, 1)
 	go func() {
 		close(secondStarted)
-		secondDone <- list()
+		secondDone <- reconcile()
 	}()
 	select {
 	case <-secondStarted:
@@ -1024,7 +1021,7 @@ func TestListAvailableSnapshotsSerializesCloudReconciliation(t *testing.T) {
 	}
 	close(listRelease)
 	closed = true
-	require.NoError(t, <-firstDone)
+	require.ErrorContains(t, <-firstDone, "provider unavailable")
 	require.NoError(t, <-secondDone)
 	require.False(t, concurrentProviderCall,
 		"concurrent listings must not start duplicate provider scans")
