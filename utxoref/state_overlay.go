@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/blinklabs-io/dingo/internal/blsstate"
 	"github.com/blinklabs-io/dingo/internal/safedecode"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
@@ -60,7 +61,7 @@ type StateOverlay struct {
 	entries []stateEntry
 	// folded counts the entries applied to state.
 	folded int
-	state  *lcommon.BlockLedgerState
+	state  *overlayLedgerState
 	base   *swappableState
 	// gen is the base generation the entries were recorded under, once a View
 	// has observed one.
@@ -206,7 +207,12 @@ func (o *StateOverlay) View(
 	}
 	if o.state == nil {
 		o.base = &swappableState{}
-		o.state = lcommon.NewBlockLedgerState(o.base)
+		blockState := lcommon.NewBlockLedgerState(o.base)
+		provider, _ := blsstate.ProviderFor(blockState)
+		o.state = &overlayLedgerState{
+			BlockLedgerState: blockState,
+			bls:              blsstate.NewOverlay(blockState, provider),
+		}
 		o.folded = 0
 	}
 	o.base.LedgerState = base
@@ -247,6 +253,31 @@ func (o *StateOverlay) View(
 	return o.state, nil
 }
 
+type overlayLedgerState struct {
+	*lcommon.BlockLedgerState
+	bls *blsstate.Overlay
+}
+
+func (s *overlayLedgerState) UnwrapLedgerState() lcommon.LedgerState {
+	return s.BlockLedgerState
+}
+
+func (s *overlayLedgerState) ApplyTransaction(
+	tx lcommon.Transaction,
+	pp lcommon.ProtocolParameters,
+) error {
+	if err := s.bls.ApplyTransaction(tx); err != nil {
+		return err
+	}
+	return s.BlockLedgerState.ApplyTransaction(tx, pp)
+}
+
+func (s *overlayLedgerState) IsBlsKeyInUse(
+	key []byte,
+) (bool, lcommon.PoolKeyHash, error) {
+	return s.bls.IsBlsKeyInUse(key)
+}
+
 // swappableState is the base of the folded state. The overlay outlives the
 // LedgerState it validates against, so each View points it at the current
 // one. UnwrapLedgerState lets capability lookups reach that state.
@@ -256,6 +287,16 @@ type swappableState struct {
 
 func (s *swappableState) UnwrapLedgerState() lcommon.LedgerState {
 	return s.LedgerState
+}
+
+func (s *swappableState) IsBlsKeyInUse(
+	key []byte,
+) (bool, lcommon.PoolKeyHash, error) {
+	provider, ok := blsstate.ProviderFor(s.LedgerState)
+	if !ok {
+		return false, lcommon.PoolKeyHash{}, blsstate.ErrProviderUnavailable
+	}
+	return provider.IsBlsKeyInUse(key)
 }
 
 // effectsOnlyTx hides a transaction's UTxO effects from BlockLedgerState, so

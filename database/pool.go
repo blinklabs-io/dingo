@@ -322,6 +322,44 @@ func (d *Database) GetFuturePoolByVrfKeyHash(
 	)
 }
 
+// GetPoolByLeiosKey retrieves the pool whose active parameters claim the
+// given BLS public key as of the current epoch's start slot.
+func (d *Database) GetPoolByLeiosKey(
+	ctx context.Context,
+	publicKey []byte,
+	epochStartSlot uint64,
+	txn *Txn,
+) (*models.Pool, error) {
+	if txn == nil {
+		txn = d.Transaction(ctx, false)
+		defer txn.Release()
+	}
+	return d.metadata.GetPoolByLeiosKey(
+		publicKey,
+		epochStartSlot,
+		txn.Metadata(),
+	)
+}
+
+// GetFuturePoolByLeiosKey retrieves the pool whose pending parameters claim
+// the given BLS public key in the current epoch.
+func (d *Database) GetFuturePoolByLeiosKey(
+	ctx context.Context,
+	publicKey []byte,
+	epochStartSlot uint64,
+	txn *Txn,
+) (*models.Pool, error) {
+	if txn == nil {
+		txn = d.Transaction(ctx, false)
+		defer txn.Release()
+	}
+	return d.metadata.GetFuturePoolByLeiosKey(
+		publicKey,
+		epochStartSlot,
+		txn.Metadata(),
+	)
+}
+
 // GetActivePoolRelays returns all relays from currently active pools.
 // This is used for ledger peer discovery.
 func (d *Database) GetActivePoolRelays(
