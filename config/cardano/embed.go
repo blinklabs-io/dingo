@@ -17,12 +17,12 @@ package cardano
 import "embed"
 
 // EmbeddedConfigFS contains the embedded Cardano configuration files
-// for all supported networks (preview, preprod, mainnet, devnet, musashi,
+// for all supported networks (preview, preprod, mainnet, devnet, musashi, dijkstra,
 // prime-testnet). This includes the network configuration and all genesis
 // files required for network operation when no external config files are
 // available.
 //
-//go:embed preview mainnet preprod devnet musashi prime-testnet
+//go:embed preview mainnet preprod devnet musashi prime-testnet dijkstra
 var EmbeddedConfigFS embed.FS
 
 // embeddedConfigNames are the file names a network directory may use for its

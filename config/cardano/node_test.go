@@ -787,6 +787,7 @@ func TestCardanoNodeConfigConsensusMode(t *testing.T) {
 		wantMode string
 		praos    bool
 	}{
+		{network: "dijkstra", wantMode: "GenesisMode", praos: false},
 		{network: "musashi", wantMode: "PraosMode", praos: true},
 		{network: "preview", wantMode: "GenesisMode"},
 		{network: "preprod", wantMode: "GenesisMode"},
