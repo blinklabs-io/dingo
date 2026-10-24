@@ -131,7 +131,7 @@ func TestGenerateReportAcceptsByteExactRules(t *testing.T) {
 	}
 }
 
-func TestGenerateReportNormalizesByteExactReference(t *testing.T) {
+func TestGenerateReportComparesByteExactReferenceWithoutNormalization(t *testing.T) {
 	t.Parallel()
 	corpus := filepath.Join(t.TempDir(), "conway")
 	validDir := filepath.Join(corpus, "native_script", "valid")
@@ -160,15 +160,24 @@ func TestGenerateReportNormalizesByteExactReference(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !report.Successful {
-		t.Fatalf("report has failures: %+v", report.Failures)
+	if report.Successful {
+		t.Fatal("report succeeded after normalizing a byte-exact reference")
 	}
-	if report.Totals.GeneratedDecodedReencodedActual != 1 {
-		t.Fatalf("normalized reference count = %d, want 1", report.Totals.GeneratedDecodedReencodedActual)
+	if report.Totals.GeneratedDecodedReencodedActual != 0 {
+		t.Fatalf("byte-exact reference count = %d, want 0", report.Totals.GeneratedDecodedReencodedActual)
+	}
+	if len(report.Failures) != 1 {
+		t.Fatalf("failure count = %d, want 1: %+v", len(report.Failures), report.Failures)
+	}
+	if got := report.Failures[0].Class; got != referenceMismatch {
+		t.Fatalf("failure class = %q, want %q", got, referenceMismatch)
+	}
+	if got := report.Failures[0].Reason; got != "byte-exact reserialization differs from the expected output" {
+		t.Fatalf("failure reason = %q", got)
 	}
 }
 
-func TestGenerateReportNormalizesRawByteExactReference(t *testing.T) {
+func TestGenerateReportAcceptsMatchingRawByteExactReference(t *testing.T) {
 	t.Parallel()
 	corpus := filepath.Join(t.TempDir(), "conway")
 	validDir := filepath.Join(corpus, "native_script", "valid")
@@ -195,7 +204,44 @@ func TestGenerateReportNormalizesRawByteExactReference(t *testing.T) {
 		t.Fatalf("report has failures: %+v", report.Failures)
 	}
 	if report.Totals.GeneratedDecodedReencodedActual != 1 {
-		t.Fatalf("normalized raw reference count = %d, want 1", report.Totals.GeneratedDecodedReencodedActual)
+		t.Fatalf("raw byte-exact reference count = %d, want 1", report.Totals.GeneratedDecodedReencodedActual)
+	}
+}
+
+func TestGenerateReportNormalizesNonByteExactReference(t *testing.T) {
+	t.Parallel()
+	corpus := filepath.Join(t.TempDir(), "conway")
+	validDir := filepath.Join(corpus, "credential", "valid")
+	if err := os.MkdirAll(validDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	canonical := append([]byte{0x82, 0x00, 0x58, 0x1c}, make([]byte, 28)...)
+	indefinite := append([]byte{0x9f, 0x00, 0x58, 0x1c}, make([]byte, 28)...)
+	indefinite = append(indefinite, 0xff)
+	if err := os.WriteFile(
+		filepath.Join(validDir, "valid.input.cbor"),
+		canonical,
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(validDir, "valid.expected.cbor"),
+		indefinite,
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	report, err := generateReport(corpus, testCorpusRevision, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !report.Successful {
+		t.Fatalf("report has failures: %+v", report.Failures)
+	}
+	if report.Totals.GeneratedDecodedReencodedActual != 1 {
+		t.Fatalf("normalized reference count = %d, want 1", report.Totals.GeneratedDecodedReencodedActual)
 	}
 }
 
