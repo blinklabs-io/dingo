@@ -33,10 +33,10 @@ import (
 )
 
 // TestLeiosEndorserBlockProducerToPeer verifies the producer-to-peer path on
-// a private Dijkstra network: a producer offers an EB over LeiosNotify and
-// diffuses a validated vote after on-chain voting registration becomes usable;
-// the relay observes the exact announcing and certifying ranking blocks,
-// serves the EB over LeiosFetch, and applies at least one EB transaction output.
+// a private Conway-to-Dijkstra network: a producer offers an EB over
+// LeiosNotify and diffuses a validated vote after on-chain voting registration
+// becomes usable; the relay observes the announcing and certifying ranking
+// blocks, serves the EB over LeiosFetch, and applies an EB transaction output.
 func TestLeiosEndorserBlockProducerToPeer(t *testing.T) {
 	if os.Getenv("DEVNET_LEIOS_ENABLED") != "1" {
 		t.Skip("requires run-tests.sh --leios")
@@ -47,8 +47,8 @@ func TestLeiosEndorserBlockProducerToPeer(t *testing.T) {
 	require.NoError(t, cfg.Validate())
 	require.NotNil(t, cfg.DijkstraHardForkAtEpoch,
 		"Leios spec must activate Dijkstra")
-	require.Zero(t, *cfg.DijkstraHardForkAtEpoch,
-		"Leios spec must start in Dijkstra")
+	require.Equal(t, uint64(1), *cfg.DijkstraHardForkAtEpoch,
+		"Leios spec must cross from Conway to Dijkstra at epoch 1")
 
 	endpoints := devnet.LoadEndpoints()
 	require.Len(t, endpoints, 4)
@@ -145,6 +145,31 @@ func TestLeiosEndorserBlockProducerToPeer(t *testing.T) {
 		}), "Leios devnet did not become ready")
 	cancelReady()
 
+	forkSlot := cfg.EpochLength * *cfg.DijkstraHardForkAtEpoch
+	forkCtx, cancelFork := context.WithTimeout(ctx, 3*time.Minute)
+	err = group.Await(forkCtx,
+		"every node observes Conway before and Dijkstra after the scheduled hard fork",
+		func(snapshots []devnet.ChainSnapshot) bool {
+			for _, snapshot := range snapshots {
+				var conwayBeforeFork, dijkstraAfterFork bool
+				for _, header := range snapshot.Headers {
+					if header.Era == "Conway" && header.Slot < forkSlot {
+						conwayBeforeFork = true
+					}
+					if header.Era == "Dijkstra" && header.Slot >= forkSlot {
+						dijkstraAfterFork = true
+					}
+				}
+				if !conwayBeforeFork || !dijkstraAfterFork {
+					return false
+				}
+			}
+			return true
+		})
+	cancelFork()
+	require.NoError(t, err,
+		"devnet did not cross the configured Conway-to-Dijkstra boundary")
+
 	var announcingHeader devnet.ObservedHeader
 	var certifyingHeader devnet.ObservedHeader
 	var offeringProducer string
@@ -210,7 +235,8 @@ func TestLeiosEndorserBlockProducerToPeer(t *testing.T) {
 	require.NoError(t, err,
 		"relay did not apply any certified EB transaction output")
 	t.Logf(
-		"producer %s offered EB %x at slot %d; relay %s certified it in ranking block %x at slot %d, served %d bodies, and applied their outputs",
+		"all nodes crossed Conway-to-Dijkstra at slot %d; producer %s offered EB %x at slot %d; relay %s certified it in ranking block %x at slot %d, served %d bodies, and applied their outputs",
+		forkSlot,
 		offeringProducer,
 		point.Hash,
 		point.Slot,

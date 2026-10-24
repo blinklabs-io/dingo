@@ -1,0 +1,46 @@
+name: devnet-block-pipeline
+
+# The accelerated all-Dingo DevNet with the block pipeline and its parallel
+# validate stage on, the only end-to-end run of that stage. Both flags default
+# off in production and in the other DevNet runs, so this runs nightly and on
+# demand rather than holding a runner on every pull request push.
+on:
+  schedule:
+    - cron: '5 7 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: devnet-block-pipeline
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  devnet:
+    name: devnet (block pipeline)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      DEVNET_ARTIFACT_DIR: ${{ github.workspace }}/devnet-artifacts
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
+        with:
+          go-version: 1.26.10
+      - name: DevNet (accelerated)
+        env:
+          DEVNET_BLOCK_PIPELINE_ENABLED: "true"
+          DEVNET_BLOCK_PIPELINE_VALIDATE_ENABLED: "true"
+        run: ./internal/test/devnet/run-tests.sh --accelerated
+      # run-tests.sh keeps DEVNET_ARTIFACT_DIR only when the run fails.
+      - name: Upload failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2 https://github.com/actions/upload-artifact/releases/tag/v7.0.2
+        with:
+          name: devnet-block-pipeline-artifacts
+          path: ${{ env.DEVNET_ARTIFACT_DIR }}
+          if-no-files-found: ignore
+          retention-days: 14

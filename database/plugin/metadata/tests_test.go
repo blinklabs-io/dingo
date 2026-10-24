@@ -128,6 +128,7 @@ var utxoStoreMethods = []string{
 	"DeleteUtxosAfterSlot",
 	"SetUtxoDeletedAtSlot",
 	"SetUtxosNotDeletedAfterSlot",
+	"UtxoRefsAsOfAfterID",
 	"GetSpentAssetUtxosMissingAddressAfterSlot",
 	"MarkUtxosDeletedAtSlot",
 	"AddUtxos",

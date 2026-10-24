@@ -89,8 +89,11 @@ func (n *Node) ledgerStateConfig() ledger.LedgerStateConfig {
 		// Off by default; requires BlockPipelineEnabled.
 		BlockPipelineValidateEnabled: n.config.blockPipelineValidateEnabled,
 		// Prefetch the next block's input UTxOs while the current block
-		// applies. Not consensus-affecting; off by default.
+		// applies. Not consensus-affecting; on by default.
 		LedgerPrefetchAheadEnabled: n.config.ledgerPrefetchAheadEnabled,
+		// Verify validated blocks' witness signatures ahead of the apply
+		// loop. Not consensus-affecting; on by default.
+		LedgerValidateAheadEnabled: n.config.ledgerValidateAheadEnabled,
 		// Core-mode batched metadata writes for blocks that are not
 		// validated. Not consensus-affecting; off by default.
 		ApplyRowBatchingEnabled: n.config.ledgerApplyRowBatchingEnabled,
@@ -113,6 +116,16 @@ func (n *Node) ledgerStateConfig() ledger.LedgerStateConfig {
 				return nil, false
 			}
 			return o.EndorserBlockTxsByHash(ebHash, ebSlot)
+		},
+		EndorserBlockDataProvider: func(
+			ebHash []byte,
+			ebSlot uint64,
+		) ([]byte, []cbor.RawMessage, bool) {
+			o := n.ouroboros()
+			if o == nil {
+				return nil, nil, false
+			}
+			return o.EndorserBlockDataByHash(ebHash, ebSlot)
 		},
 		EndorserBlockValidation: func(
 			ebHash []byte,
@@ -207,10 +220,19 @@ func (n *Node) ledgerStateConfig() ledger.LedgerStateConfig {
 		// bootstrap pool-threshold checks are waived separately inside
 		// header validation after genesis overlay slots are handled.
 		SkipLeaderStakeThresholdCheck: n.config.prototypeTrustBypassesEnabled(),
+		// GetStakePoolState is not part of released nodes' query set, so it
+		// is answered only on the Leios prototype network, under the same
+		// strict identity as the trust bypasses.
+		StakePoolStateQuery: n.config.prototypeTrustBypassesEnabled(),
 		// On Musashi, certified endorser txs and Dijkstra ranking-block txs are
 		// trusted by the prototype; skip dingo's per-tx validation to match it
 		// and keep block application at the production rate.
 		SkipDijkstraTxValidation: n.config.prototypeTrustBypassesEnabled(),
+		// The Leios prototype's Dijkstra era runs Praos2, whose chain-dependent
+		// state has a ninth field. Gated on the same strict prototype identity
+		// as the trust bypasses above, never on the era or a run mode alone: a
+		// released node runs Dijkstra on plain Praos.
+		Praos2ChainDepState: n.config.prototypeTrustBypassesEnabled(),
 		// CIP-23 minimum pool margin (minimum variable fee). Operator-set,
 		// off by default (0), effective only in Dijkstra and later.
 		MinPoolMargin: n.config.minPoolMargin,

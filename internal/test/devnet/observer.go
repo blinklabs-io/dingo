@@ -184,6 +184,7 @@ func (o *ChainObservers) session(
 		observed := ObservedHeader{
 			Slot:        header.SlotNumber(),
 			BlockNumber: header.BlockNumber(),
+			Era:         header.Era().Name,
 			Hash:        hash.Bytes(),
 			PrevHash:    header.PrevHash().Bytes(),
 			BodySize:    header.BlockBodySize(),
@@ -215,6 +216,14 @@ func (o *ChainObservers) session(
 		)
 		return nil
 	}
+	intersectFound := func(
+		_ chainsync.CallbackContext,
+		_ pcommon.Point,
+		tip chainsync.Tip,
+	) error {
+		chain.ObserveServerTip(tipFrom(tip))
+		return nil
+	}
 
 	conn, err := ouroboros.NewConnection(
 		ouroboros.WithConnection(rawConn),
@@ -227,6 +236,7 @@ func (o *ChainObservers) session(
 		ouroboros.WithChainSyncConfig(chainsync.NewConfig(
 			chainsync.WithRollForwardFunc(rollForward),
 			chainsync.WithRollBackwardFunc(rollBackward),
+			chainsync.WithIntersectFoundFunc(intersectFound),
 		)),
 	)
 	if err != nil {

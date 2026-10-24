@@ -153,6 +153,11 @@ func (h *externalIngestHarness) shutdown(t *testing.T) {
 // without Start's reload of epoch and tip state from the empty store.
 func (h *externalIngestHarness) startLiveLoop(t *testing.T) {
 	t.Helper()
+	// A node that has not latched reachedTip holds each under-full batch for
+	// up to two seconds waiting for more blocks (gatherCoalesceMaxGapAttempts),
+	// which would leave these tests nothing under their five second waits on
+	// a slow runner. These tests drive a live node, so latch it.
+	h.ls.reachedTip.Store(true)
 	ctx, cancel := context.WithCancel(t.Context())
 	h.ls.processBlocksCancel = cancel
 	h.ls.processBlocksWG.Go(func() {

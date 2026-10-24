@@ -178,9 +178,9 @@ func TestNewReadSnapshotContextReservesBeforeTakingCommitBarrier(
 		blobRef:  newBlobStoreRef(&reservingSnapshotBlob{owner: store}),
 	}
 
-	// An open read-write Txn holds the barrier's shared side, so the
+	// A commit in progress holds the commit phase's shared side, so the
 	// snapshot's exclusive acquire cannot complete until it finishes.
-	writer := NewTxnContext(t.Context(), db, true)
+	db.commitPhase.RLock()
 
 	resultCh := make(chan error, 1)
 	go func() {
@@ -198,7 +198,7 @@ func TestNewReadSnapshotContextReservesBeforeTakingCommitBarrier(
 			return len(recorded) > 0 && recorded[0] == "reserve read"
 		},
 		5*time.Second,
-		"the read connection must be reserved while the commit barrier is still held by a writer",
+		"the read connection must be reserved while a commit is still in progress",
 	)
 	require.Equal(
 		t,
@@ -207,14 +207,14 @@ func TestNewReadSnapshotContextReservesBeforeTakingCommitBarrier(
 		"nothing past the reservation may run until the commit barrier is acquired",
 	)
 
-	require.NoError(t, writer.Commit())
+	db.commitPhase.RUnlock()
 	require.NoError(
 		t,
 		testutil.RequireReceive(
 			t,
 			resultCh,
 			5*time.Second,
-			"read snapshot must finish once the writer releases the barrier",
+			"read snapshot must finish once the commit releases the barrier",
 		),
 	)
 	require.Equal(
@@ -342,82 +342,20 @@ func TestNewReadSnapshotContextReservedPathDoesNotStraddleDestructiveCommit(
 	t *testing.T,
 ) {
 	t.Parallel()
-
-	destructiveCommitDone := make(chan struct{})
-	var finishCommit sync.Once
-	finishDestructiveCommit := func() {
-		finishCommit.Do(func() { close(destructiveCommitDone) })
-	}
-	defer finishDestructiveCommit()
-	state := &destructiveReadSnapshotState{
-		metadataReferencesCBOR: true,
-		blobCBORPresent:        true,
-		metadataSnapshotOpened: make(chan struct{}),
-	}
-	blobStore := &destructiveReadSnapshotBlob{
-		state:                 state,
-		destructiveCommitDone: destructiveCommitDone,
-	}
-	db := &Database{
-		metadata: &reservingDestructiveMetadata{
-			destructiveReadSnapshotMetadata: &destructiveReadSnapshotMetadata{
-				state: state,
-			},
-		},
-		blobRef: newBlobStoreRef(blobStore),
-	}
-
-	writer := NewTxnContext(t.Context(), db, true)
-	t.Cleanup(writer.Release)
-
-	resultCh := make(chan destructiveReadSnapshotResult, 1)
-	go func() {
-		txn, tip, err := NewReadSnapshotContext(t.Context(), db)
-		resultCh <- destructiveReadSnapshotResult{txn: txn, tip: tip, err: err}
-	}()
-
-	testutil.WaitForCondition(
+	testReadSnapshotDoesNotStraddleDestructiveCommit(
 		t,
-		func() bool {
-			select {
-			case <-state.metadataSnapshotOpened:
-				return true
-			default:
+		func(
+			state *destructiveReadSnapshotState,
+			blobStore *destructiveReadSnapshotBlob,
+		) *Database {
+			return &Database{
+				metadata: &reservingDestructiveMetadata{
+					destructiveReadSnapshotMetadata: &destructiveReadSnapshotMetadata{
+						state: state,
+					},
+				},
+				blobRef: newBlobStoreRef(blobStore),
 			}
-			db.commitBarrier.mu.Lock()
-			defer db.commitBarrier.mu.Unlock()
-			return db.commitBarrier.writerWaiting
 		},
-		5*time.Second,
-		"read snapshot must either wait at the commit barrier or open metadata",
 	)
-
-	commitErr := writer.Commit()
-	finishDestructiveCommit()
-	require.NoError(t, commitErr)
-
-	result := testutil.RequireReceive(
-		t,
-		resultCh,
-		5*time.Second,
-		"read snapshot must finish after the destructive commit",
-	)
-	require.NoError(t, result.err)
-	require.NotNil(t, result.txn)
-	t.Cleanup(result.txn.Release)
-
-	_, blobErr := blobStore.Get(result.txn.Blob(), []byte("referenced-cbor"))
-	require.ErrorIs(
-		t,
-		blobErr,
-		types.ErrBlobKeyNotFound,
-		"the destructive commit must be visible in the blob snapshot",
-	)
-	require.Zero(
-		t,
-		result.tip.BlockNumber,
-		"metadata snapshot retained a reference to CBOR deleted before the blob snapshot opened",
-	)
-	requireCommitBarrierFree(t, db)
-	requireDestructiveTransitionBarrierFree(t, db)
 }

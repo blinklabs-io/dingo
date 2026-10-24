@@ -42,6 +42,8 @@ const (
 	defaultMaxDRepDetailsPerClient              = 1
 	defaultMaxAddressSummaries             uint = 4
 	defaultMaxAddressSummariesPerClient         = 2
+	defaultMaxMempoolAddresses             uint = 4
+	defaultMaxMempoolAddressesPerClient         = 1
 )
 
 // Blockfrost is the Blockfrost-compatible REST API server.
@@ -53,9 +55,12 @@ type Blockfrost struct {
 	mutationAuth       mutationAuth
 	mutationAdmission  *requestAdmission
 	drepAdmission      *requestAdmission
-	// addressSummaryAdmission is shared by the base and extended address
-	// summaries, which scan every live output of an address.
+	// addressSummaryAdmission is shared by every route that scans a whole
+	// address or account history: the base and extended summaries, the
+	// account summary, the address and account totals, and the account asset
+	// balances.
 	addressSummaryAdmission *requestAdmission
+	mempoolAddressAdmission *requestAdmission
 	// listener owns the start/stop protocol, including releasing the
 	// listening socket as part of what Stop waits for -- see
 	// internal/apilistener.
@@ -102,6 +107,10 @@ func New(
 		addressSummaryAdmission: newRequestAdmission(
 			defaultMaxAddressSummaries,
 			defaultMaxAddressSummariesPerClient,
+		),
+		mempoolAddressAdmission: newRequestAdmission(
+			defaultMaxMempoolAddresses,
+			defaultMaxMempoolAddressesPerClient,
 		),
 		listener: apilistener.New("Blockfrost API", logger),
 	}

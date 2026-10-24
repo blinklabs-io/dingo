@@ -56,3 +56,78 @@ func TestSQLitePoolOpCertSequencesExistAtSlot(t *testing.T) {
 	t.Parallel()
 	testPoolOpCertSequencesExistAtSlot(t, newMigratedTestStore(t))
 }
+
+func testLatestPoolOpCertSequenceInRange(t *testing.T, store *Store) {
+	t.Helper()
+	poolA := lcommon.PoolKeyHash(lcommon.NewBlake2b224([]byte("range-pool-a")))
+	poolB := lcommon.PoolKeyHash(lcommon.NewBlake2b224([]byte("range-pool-b")))
+	require.NoError(t, store.UpdatePoolOpCertSequence(poolA, 1, 10, nil))
+	require.NoError(t, store.UpdatePoolOpCertSequence(poolA, 9, 20, nil))
+	require.NoError(t, store.UpdatePoolOpCertSequence(poolA, 10, 30, nil))
+	require.NoError(t, store.UpdatePoolOpCertSequence(poolB, 99, 20, nil))
+
+	sequence, found, err := store.LatestPoolOpCertSequenceInRange(
+		poolA,
+		15,
+		25,
+		nil,
+	)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, uint64(9), sequence)
+
+	sequence, found, err = store.LatestPoolOpCertSequenceInRange(
+		poolA,
+		10,
+		10,
+		nil,
+	)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, uint64(1), sequence)
+
+	sequence, found, err = store.LatestPoolOpCertSequenceInRange(
+		poolA,
+		20,
+		20,
+		nil,
+	)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, uint64(9), sequence)
+
+	_, found, err = store.LatestPoolOpCertSequenceInRange(
+		poolA,
+		25,
+		29,
+		nil,
+	)
+	require.NoError(t, err)
+	require.False(t, found)
+
+	_, found, err = store.LatestPoolOpCertSequenceInRange(
+		poolA,
+		30,
+		20,
+		nil,
+	)
+	require.NoError(t, err)
+	require.False(t, found)
+
+	txn := store.Transaction(t.Context())
+	defer func() { _ = txn.Rollback() }()
+	sequence, found, err = store.LatestPoolOpCertSequenceInRange(
+		poolA,
+		10,
+		20,
+		txn,
+	)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, uint64(9), sequence)
+}
+
+func TestSQLiteLatestPoolOpCertSequenceInRange(t *testing.T) {
+	t.Parallel()
+	testLatestPoolOpCertSequenceInRange(t, newMigratedTestStore(t))
+}

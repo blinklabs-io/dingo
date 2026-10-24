@@ -346,10 +346,9 @@ func TestServerSignatureAdmissionIsIndependentFromArtifactDownloads(
 ) {
 	t.Parallel()
 
-	const requestLimit = publicRequestLimit
 	aggregator := newAggregatorFixture(t, lotteryParams).aggregator
 	store := &blockingListStore{
-		entered:  make(chan struct{}, requestLimit),
+		entered:  make(chan struct{}, 1),
 		release:  make(chan struct{}),
 		blockAll: true,
 	}
@@ -365,23 +364,19 @@ func TestServerSignatureAdmissionIsIndependentFromArtifactDownloads(
 		Aggregator:    aggregator,
 		PublicBaseURL: "http://127.0.0.1",
 	})
-	done := make(chan struct{}, requestLimit)
-	for range requestLimit {
-		go func() {
-			handler.ServeHTTP(
-				httptest.NewRecorder(),
-				httptest.NewRequest(
-					http.MethodGet, "/artifact/cardano-database", nil,
-				),
-			)
-			done <- struct{}{}
-		}()
-	}
-	for range requestLimit {
-		testutil.RequireReceive(
-			t, store.entered, testutil.AsyncWait, "admitted artifact request",
+	done := make(chan struct{}, 1)
+	go func() {
+		handler.ServeHTTP(
+			httptest.NewRecorder(),
+			httptest.NewRequest(
+				http.MethodGet, "/artifact/cardano-database", nil,
+			),
 		)
-	}
+		done <- struct{}{}
+	}()
+	testutil.RequireReceive(
+		t, store.entered, testutil.AsyncWait, "admitted artifact request",
+	)
 
 	rec := &deadlineResponseWriter{header: make(http.Header)}
 	handler.ServeHTTP(
@@ -390,16 +385,14 @@ func TestServerSignatureAdmissionIsIndependentFromArtifactDownloads(
 			http.MethodPost, "/register-signatures", strings.NewReader(`{}`),
 		),
 	)
-	assert.Equal(t, http.StatusConflict, rec.status)
+	assert.Equal(t, http.StatusBadRequest, rec.status)
 	assert.Empty(t, rec.Header().Get("Retry-After"))
 	assert.NotEmpty(t, rec.readDeadlines)
 
 	close(store.release)
-	for range requestLimit {
-		testutil.RequireReceive(
-			t, done, testutil.AsyncWait, "admitted artifact response",
-		)
-	}
+	testutil.RequireReceive(
+		t, done, testutil.AsyncWait, "admitted artifact response",
+	)
 }
 
 func TestServerRejectsArtifactWorkBeyondAdmissionLimit(t *testing.T) {
@@ -580,7 +573,7 @@ func TestServerArmsSignatureBodyDeadlineBeforeDecode(t *testing.T) {
 	// the handler starts decoding an untrusted signature request body.
 	handler.ServeHTTP(w, req)
 	assert.NotEmpty(t, w.readDeadlines)
-	assert.Equal(t, http.StatusConflict, w.status)
+	assert.Equal(t, http.StatusBadRequest, w.status)
 }
 
 func TestServerArmsWriteDeadlineOnlyWhenWriting(t *testing.T) {
@@ -750,14 +743,14 @@ func TestServerSnapshotSyncsEndToEnd(t *testing.T) {
 	assert.Equal(t, uint64(1000), result.LedgerSlot)
 }
 
-// A v2 bootstrap downloads immutableDownloadWorkers archives and the
-// ancillary archive at once; none of those requests may be shed.
-func TestServerAdmitsOneBootstrapAtFullConcurrency(t *testing.T) {
+// Concurrent listing requests share one catalog scan and all receive its
+// result after it completes.
+func TestServerCoalescesConcurrentCatalogRequests(t *testing.T) {
 	t.Parallel()
 
 	const requests = immutableDownloadWorkers + 1
 	store := &blockingListStore{
-		entered:  make(chan struct{}, requests),
+		entered:  make(chan struct{}, 1),
 		release:  make(chan struct{}),
 		blockAll: true,
 	}
@@ -785,15 +778,9 @@ func TestServerAdmitsOneBootstrapAtFullConcurrency(t *testing.T) {
 			codes <- rec.Code
 		}()
 	}
-	for range requests {
-		select {
-		case <-store.entered:
-		case code := <-codes:
-			t.Fatalf("request answered %d while the others were held", code)
-		case <-time.After(testutil.AsyncWait):
-			t.Fatal("timed out waiting for admitted requests")
-		}
-	}
+	testutil.RequireReceive(
+		t, store.entered, testutil.AsyncWait, "single catalog scan",
+	)
 	close(store.release)
 	for range requests {
 		code := testutil.RequireReceive(
@@ -801,4 +788,119 @@ func TestServerAdmitsOneBootstrapAtFullConcurrency(t *testing.T) {
 		)
 		assert.Equal(t, http.StatusOK, code)
 	}
+	assert.Equal(t, int32(1), store.calls.Load())
+}
+
+// rangeCountingStore reports itself as remote and counts the backend range
+// requests an objectReader-style reader would issue: one each time a read
+// starts after the position moved.
+type rangeCountingStore struct {
+	ArtifactStore
+	opens atomic.Int64
+}
+
+func (s *rangeCountingStore) streamsRemoteObjects() bool { return true }
+
+func (s *rangeCountingStore) Open(
+	ctx context.Context,
+	key string,
+) (io.ReadSeekCloser, error) {
+	inner, err := s.ArtifactStore.Open(ctx, key)
+	if err != nil {
+		return nil, err
+	}
+	return &rangeCountingReader{ReadSeekCloser: inner, store: s}, nil
+}
+
+type rangeCountingReader struct {
+	io.ReadSeekCloser
+	store   *rangeCountingStore
+	started bool
+}
+
+func (r *rangeCountingReader) Read(p []byte) (int, error) {
+	if !r.started {
+		r.started = true
+		r.store.opens.Add(1)
+	}
+	return r.ReadSeekCloser.Read(p)
+}
+
+func (r *rangeCountingReader) Seek(off int64, whence int) (int64, error) {
+	cur, err := r.ReadSeekCloser.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return 0, err
+	}
+	next, err := r.ReadSeekCloser.Seek(off, whence)
+	if err == nil && next != cur {
+		r.started = false
+	}
+	return next, err
+}
+
+func TestServerLimitsMultipartRangesOnRemoteStores(t *testing.T) {
+	t.Parallel()
+
+	f := newServerFixture(t, ServerConfig{})
+	counting := &rangeCountingStore{ArtifactStore: f.store}
+	srv := newMithrilTestServer(t, ServerConfig{
+		Store: counting, Logger: slog.New(slog.DiscardHandler),
+	})
+	name := "/download/" + f.artifact.Hash + "/00001.tar.zst"
+	full, err := os.ReadFile( //nolint:gosec // test temp dir
+		filepath.Join(f.dir, f.artifact.Hash, "00001.tar.zst"),
+	)
+	require.NoError(t, err)
+	require.Greater(t, len(full), 20)
+
+	// A single range, including padded and empty list elements, is served.
+	for _, h := range []string{"bytes=10-19", "bytes= 10-19 ,", "bytes=,10-19"} {
+		before := counting.opens.Load()
+		resp := get(t, srv.URL+name, "Range", h)
+		require.Equal(t, http.StatusPartialContent, resp.StatusCode, h)
+		assert.Equal(t, "application/zstd", resp.Header.Get("Content-Type"), h)
+		assert.Equal(t, full[10:20], getBody(t, resp), h)
+		assert.Equal(t, int64(1), counting.opens.Load()-before, h)
+	}
+
+	// More than one range is answered as the whole object from one backend
+	// read, never as a multipart body.
+	for _, h := range []string{
+		"bytes=0-0,2-2",
+		"bytes=0-0, 2-2",
+		"bytes=0-9,5-14,10-19",
+		"bytes=0-0" + strings.Repeat(",0-0", 50),
+	} {
+		before := counting.opens.Load()
+		resp := get(t, srv.URL+name, "Range", h)
+		require.Equal(t, http.StatusOK, resp.StatusCode, h)
+		assert.Empty(t, resp.Header.Get("Content-Range"), h)
+		assert.NotContains(t, resp.Header.Get("Content-Type"), "multipart", h)
+		assert.Equal(t, full, getBody(t, resp), h)
+		assert.Equal(t, int64(1), counting.opens.Load()-before, h)
+	}
+
+	// The metadata of a stored certificate is limited the same way.
+	certHash := strings.Repeat("c", 64)
+	body := `{"hash":"` + certHash + `"}`
+	require.NoError(t, counting.Put(
+		t.Context(), "certificates/"+certHash+".json", strings.NewReader(body),
+	))
+	resp := get(t, srv.URL+"/certificate/"+certHash, "Range", "bytes=0-0,2-2")
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, "application/json", resp.Header.Get("Content-Type"))
+	assert.Equal(t, body, string(getBody(t, resp)))
+}
+
+func TestServerKeepsMultipartRangesOnLocalStores(t *testing.T) {
+	t.Parallel()
+
+	f := newServerFixture(t, ServerConfig{})
+	resp := get(
+		t, f.srv.URL+"/download/"+f.artifact.Hash+"/00001.tar.zst",
+		"Range", "bytes=0-0,2-2",
+	)
+	require.Equal(t, http.StatusPartialContent, resp.StatusCode)
+	assert.Contains(t, resp.Header.Get("Content-Type"), "multipart/byteranges")
+	_ = getBody(t, resp)
 }

@@ -29,6 +29,7 @@ import (
 	"math/big"
 	"math/bits"
 	"net"
+	"reflect"
 	"runtime"
 	"runtime/debug"
 	"slices"
@@ -87,20 +88,35 @@ var snapshotGenerationCounter atomic.Uint64
 // iter.Next(false) reports chain.ErrIteratorChainTip, for more blocks to
 // become available before flushing an under-full batch -- but only while the
 // node has not yet reached tip since boot (see reachedTip) and this slot is
-// not near the upstream tip (see isNearTip). During bulk
-// historical replay a momentary gap here does not mean the chain has stopped
-// growing; it commonly means the goroutine that appends blocks to ls.chain
-// (blockfetch/pipeline apply) is a beat behind this reader, and vice versa.
-// Without this bounded wait, that race flushed batches at ~6-9 of the
-// intended batchSize (50) blocks instead of coalescing them, multiplying
+// not near the upstream tip (see isNearTip). During bulk historical replay a
+// momentary gap here does not mean the chain has stopped growing: blockfetch
+// exposes received blocks to the chain in groups of blockfetchCommitBatchSize,
+// so the reader meets one gap per group. Every flush is one SQLite
+// transaction, and each one rewrites the same hot B-tree pages of every index
+// it touches into the WAL, so flushing each group as its own batch multiplies
 // SQLite's physical write volume well beyond logical growth.
+//
+// The attempts are a budget for the whole gather pass, not for each gap: a
+// pass that bridges several groups spends one budget, so at the defaults it
+// waits at most about five seconds in total however many gaps it meets. That
+// gathers a full batchSize batch from a peer delivering about ten blocks a
+// second; a one-second budget still flushed most passes at one or two groups
+// there. The ledger trails the chain by at most that long, which only applies
+// while catching up from outside the stability window.
+//
+// gatherCoalesceMaxGapAttempts caps a single gap inside that budget, at about
+// two seconds. A gap that long means the chain has stopped growing for now --
+// a few blocks added with nothing behind them, or an upstream that went quiet
+// -- so the pass applies what it has rather than holding it for the rest of
+// the budget.
 // Once the node is at or near the tip, this wait is skipped entirely: a
 // solitary new block at live tip must still commit promptly rather than wait
 // for a batch that will never fill. Vars, not consts, so tests can shrink the
 // interval instead of waiting on real sleeps.
 var (
-	gatherCoalesceRetryInterval = 2 * time.Millisecond
-	gatherCoalesceMaxAttempts   = 10
+	gatherCoalesceRetryInterval  = 10 * time.Millisecond
+	gatherCoalesceMaxAttempts    = 500
+	gatherCoalesceMaxGapAttempts = 200
 )
 
 const (
@@ -909,6 +925,7 @@ type LedgerStateConfig struct {
 	ForgedBlockChecker            ForgedBlockChecker
 	SlotBattleRecorder            SlotBattleRecorder
 	EndorserBlockProvider         EndorserBlockProviderFunc
+	EndorserBlockDataProvider     EndorserBlockDataProviderFunc
 	EndorserBlockValidation       EndorserBlockValidationFunc
 	// RecordBlockfetchThroughputFunc receives each completed batch's
 	// delivery rate: the bytes that followed the first block and the time
@@ -988,6 +1005,14 @@ type LedgerStateConfig struct {
 	// reject rather than trust an unevaluated producer, and this flag is the
 	// only way to bypass that.
 	SkipLeaderStakeThresholdCheck bool
+	// StakePoolStateQuery answers the GetStakePoolState local state query
+	// (Shelley sub-query 40). Released Haskell nodes do not support that
+	// query, so it is a Leios prototype extension: node_ledger_config.go sets
+	// it only from Config.prototypeTrustBypassesEnabled, whose strict identity
+	// check cannot be met by a mainnet, preprod, preview or sancho
+	// configuration. The zero value leaves the query unsupported, exactly as
+	// for any other query dingo does not answer.
+	StakePoolStateQuery bool
 	// SkipDijkstraTxValidation, when true, skips the Dijkstra per-transaction
 	// validation rule set entirely. On Musashi, ranking-block transactions are
 	// trusted because the prototype does not validate them. Running dingo's
@@ -999,6 +1024,17 @@ type LedgerStateConfig struct {
 	// transactions only — see LedgerState.skipDijkstraTxValidation. Interim
 	// until the Leios certificate / endorser-availability surface is complete.
 	SkipDijkstraTxValidation bool
+	// Praos2ChainDepState selects the Praos2 serialisation of the
+	// chain-dependent state in a GetChainDepState reply for the Dijkstra
+	// era: version 1 with nine fields, the ninth being the Leios
+	// announcement of the last applied header. Only the Leios prototype
+	// network (Musashi) runs the Dijkstra era on Praos2; released Haskell
+	// consensus runs Dijkstra on plain Praos, so the era alone must never
+	// select it. The zero value keeps the Praos layout, and node_ledger_config.go
+	// sets it only from Config.prototypeTrustBypassesEnabled, whose strict
+	// identity check cannot be met by a mainnet, preprod, preview or sancho
+	// configuration.
+	Praos2ChainDepState bool
 	// MinPoolMargin is the CIP-23 minimum pool margin (minimum variable fee) in
 	// basis points, [0, 10000] (150 = 1.5%); 0 disables it. It is a consensus-
 	// affecting operator setting (not derived from the network) that takes
@@ -1103,8 +1139,8 @@ type LedgerStateConfig struct {
 	// chunk are never served from it, and any input it does not resolve is
 	// read inside the write transaction as without the flag. Only blocks
 	// under normal validation are prefetched; historical, TrustedReplay and
-	// Mithril-covered blocks read no inputs. Not consensus-affecting; off by
-	// default.
+	// Mithril-covered blocks read no inputs. Not consensus-affecting. The
+	// zero value is off; node configuration turns it on by default.
 	LedgerPrefetchAheadEnabled bool
 	// ApplyRowBatchingEnabled writes the accumulated deltas of blocks that
 	// are not validated through the metadata store's batched path in core
@@ -1114,6 +1150,17 @@ type LedgerStateConfig struct {
 	// state is identical either way. See ARCHITECTURE.md ("Block Processing
 	// Pipeline").
 	ApplyRowBatchingEnabled bool
+	// LedgerValidateAheadEnabled runs the validation work that reads no ledger
+	// state ahead of the serial apply loop: the vkey and bootstrap witness
+	// signatures of every validated block of a block-apply chunk are verified
+	// on worker goroutines while earlier blocks of the chunk validate and
+	// write. Each result is bound to its transaction body and witness set, and
+	// every rule still runs against the write transaction, so verdicts and
+	// stored state are identical either way. Byron blocks, Dijkstra chunks
+	// and TrustedReplay (which preverifies the whole chunk itself) are not
+	// covered. Not consensus-affecting. The zero value is off; node
+	// configuration turns it on by default.
+	LedgerValidateAheadEnabled bool
 	// BlockfetchLowWatermarkEnabled starts blockfetch once one blockfetch
 	// range of headers is queued while the node is far from the peer tip,
 	// instead of waiting for allowedQueuedHeaders. The header queue capacity
@@ -1135,6 +1182,15 @@ type EndorserBlockProviderFunc func(
 	ebHash []byte,
 	ebSlot uint64,
 ) (txs []cbor.RawMessage, ok bool)
+
+// EndorserBlockDataProviderFunc returns the verified manifest and complete
+// transaction bodies for the exact endorser-block occurrence. It lets ledger
+// read paths serve a just-applied certified block before asynchronous
+// historical persistence finishes.
+type EndorserBlockDataProviderFunc func(
+	ebHash []byte,
+	ebSlot uint64,
+) (manifest []byte, txs []cbor.RawMessage, ok bool)
 
 // EndorserBlockValidationStatus reports the semantic-validation state of one
 // cached endorser-block occurrence.
@@ -1292,13 +1348,20 @@ type slotBattleRecorderHolder struct {
 // snapshot containers and their owned slices are immutable. Protocol parameter
 // values are shared with writer state and must be treated as read-only.
 type consensusSnapshot struct {
-	generation     uint64
-	currentEpoch   models.Epoch
-	currentEra     eras.EraDesc
-	currentPParams lcommon.ProtocolParameters
-	prevEraPParams lcommon.ProtocolParameters
-	epochCache     []models.Epoch
-	transitionInfo hardfork.TransitionInfo
+	generation uint64
+	// contextGeneration is the generation of the earliest publication whose
+	// header-verification inputs (epoch cache with its nonces, current epoch,
+	// era, protocol parameters, hard-fork transition) equal this one's. A
+	// header verdict stamped with a generation at or after it was made against
+	// the same consensus context, so a publication that only moves the applied
+	// tip does not invalidate it.
+	contextGeneration uint64
+	currentEpoch      models.Epoch
+	currentEra        eras.EraDesc
+	currentPParams    lcommon.ProtocolParameters
+	prevEraPParams    lcommon.ProtocolParameters
+	epochCache        []models.Epoch
+	transitionInfo    hardfork.TransitionInfo
 	// syntheticV2CostModelInEffect mirrors LedgerState.syntheticV2CostModel;
 	// see that field's doc comment.
 	syntheticV2CostModelInEffect bool
@@ -1418,6 +1481,10 @@ type LedgerState struct {
 	// goroutine's read transaction instead of serving nothing, so tests can
 	// count served UTxOs deterministically. Tests only.
 	utxoPrefetchAheadAwaitReady bool
+	// signaturePreverifyAheadServed counts transactions whose validation was
+	// given a signaturePreverifyAhead result. Tests read it to tell a run that
+	// used the results from one that verified inline.
+	signaturePreverifyAheadServed atomic.Uint64
 	// mempool is installed by SetMempool but read by the forger on its own
 	// goroutine, so it is an atomic pointer: a late or repeated SetMempool
 	// is race-free and the latest provider wins.
@@ -1435,6 +1502,7 @@ type LedgerState struct {
 	slotsPerKESPeriod           atomic.Uint64
 	forgedBlockChecker          atomic.Pointer[forgedBlockCheckerHolder]
 	slotBattleRecorder          atomic.Pointer[slotBattleRecorderHolder]
+	slotBattles                 slotBattleBook
 	cachedShape                 atomic.Pointer[hardfork.Shape]                  // lazy-built from CardanoNodeConfig; immutable for the LedgerState's lifetime
 	hardForkSummaryCache        atomic.Pointer[hardForkSummaryCacheEntry]       // last hardForkSummaryAnchoredAt result, keyed by publication generation and horizon anchor (see hardfork_summary.go)
 	epochSnapshotHook           atomic.Pointer[epochBoundarySnapshotHookHolder] // optional authoritative epoch-boundary snapshot capture (nil = event-driven fallback only)
@@ -1548,6 +1616,11 @@ type LedgerState struct {
 	blockfetchInFlightTimeoutGeneration uint64
 	blockfetchInFlightTimeoutCount      uint8
 	selectedBlockfetchConnId            ouroboros.ConnectionId // latest selected chainsync connection for the next batch
+	// chainsyncCapacityWaitHook is a test seam, nil in production. It runs
+	// each time AwaitChainsyncHeaderCapacity has found the queue at its pause
+	// threshold and is about to wait, the point after which a test may drain
+	// headers and observe the hysteresis rather than the first check.
+	chainsyncCapacityWaitHook func()
 	// blockfetchContinuationPending prevents a chainsync handler from starting
 	// a competing batch in the short interval after the blockfetch subscriber
 	// schedules its next request on a worker. The worker must run outside the
@@ -1900,6 +1973,10 @@ type LedgerState struct {
 	// they write through the batched metadata path, so a test can tell that
 	// path from the per-row one, which stores the same state.
 	afterBatchedTransactionWrite func()
+	// beforeReplayRowFlush is a test-only observation hook, nil in
+	// production. It runs immediately before a chunk's replay-row flush, so a
+	// test can place a known delay inside that flush's apply sample.
+	beforeReplayRowFlush func()
 	// externalIngest pauses the chain-iterator loop so ApplyTrustedBatch can
 	// be the only block-apply writer. See external_ingest.go.
 	externalIngest externalIngestState
@@ -2086,6 +2163,14 @@ type LedgerState struct {
 
 	lastActiveConnId *ouroboros.ConnectionId // tracks active connection for switch detection
 
+	// chainsyncOpeningRollbacks holds a session's opening rollback while
+	// deferOpeningChainsyncRollback waits for the peer's first header, and
+	// chainsyncHeaderSessions marks the connections that have delivered one.
+	// Both are keyed by connIdKey, guarded by chainsyncMutex, and cleared
+	// when the connection closes.
+	chainsyncOpeningRollbacks map[string]ChainsyncEvent
+	chainsyncHeaderSessions   map[string]struct{}
+
 	// Header mismatch tracking for fork detection and re-sync
 	// headerMismatchMu guards headerMismatchCounts. The header handler
 	// counts under chainsyncMutex, but blockfetch paths reset a count through
@@ -2096,6 +2181,9 @@ type LedgerState struct {
 	peerHeaderHistory         map[string]*peerHeaderChain
 	peerHeaderHistoryBytes    int
 	peerHeaderHistorySequence uint64
+	forkHeaderNonceCacheMutex sync.Mutex
+	forkHeaderNonceCache      map[string]map[uint64]peerForkNoncePrefix
+	forkHeaderPathCache       map[string]peerForkPathPrefix
 	// Test hook for fork ancestor lookups.
 	lookupBlockByHash func([]byte) (models.Block, error)
 	// Test hook called after Close releases the blockfetch continuation mutex
@@ -2325,7 +2413,7 @@ func (ls *LedgerState) publishSnapshotsLocked() {
 	// visible to an already-published snapshot. Element updates still require
 	// replacing the cache and its slice-backed Epoch fields.
 	ls.epochCache = slices.Clip(ls.epochCache)
-	ls.consensus.Store(&consensusSnapshot{
+	next := &consensusSnapshot{
 		generation:     generation,
 		currentEpoch:   cloneEpoch(ls.currentEpoch),
 		currentEra:     ls.currentEra,
@@ -2338,13 +2426,57 @@ func (ls *LedgerState) publishSnapshotsLocked() {
 		epochCache:                   ls.epochCache,
 		transitionInfo:               ls.transitionInfo,
 		syntheticV2CostModelInEffect: ls.syntheticV2CostModel,
-	})
+	}
+	next.contextGeneration = generation
+	if prev := ls.consensus.Load(); prev != nil &&
+		sameHeaderVerificationContext(prev, next) {
+		next.contextGeneration = prev.contextGeneration
+	}
+	ls.consensus.Store(next)
 	ls.tip.Store(&tipSnapshot{
 		generation:           generation,
 		currentTip:           cloneTip(ls.currentTip),
 		currentTipBlockNonce: cloneSnapshotBytes(ls.currentTipBlockNonce),
 	})
 	ls.notifySnapshotPublished()
+}
+
+// sameHeaderVerificationContext reports whether two consensus snapshots give
+// header verification the same inputs. The current epoch's evolving nonce is
+// excluded: it advances with every applied block, and verification reads only
+// the epoch nonces, frozen candidate nonces and labs held in the epoch cache.
+// Stake snapshots and registered VRF keys are keyed by epoch, so they can only
+// change together with the epoch cache.
+func sameHeaderVerificationContext(a, b *consensusSnapshot) bool {
+	if a.currentEra.Id != b.currentEra.Id ||
+		a.transitionInfo != b.transitionInfo ||
+		a.syntheticV2CostModelInEffect != b.syntheticV2CostModelInEffect ||
+		!sameProtocolParameters(a.currentPParams, b.currentPParams) ||
+		!sameProtocolParameters(a.prevEraPParams, b.prevEraPParams) {
+		return false
+	}
+	aEpoch, bEpoch := a.currentEpoch, b.currentEpoch
+	aEpoch.EvolvingNonce, bEpoch.EvolvingNonce = nil, nil
+	if !reflect.DeepEqual(aEpoch, bEpoch) {
+		return false
+	}
+	if len(a.epochCache) == len(b.epochCache) &&
+		(len(a.epochCache) == 0 || &a.epochCache[0] == &b.epochCache[0]) {
+		return true
+	}
+	return reflect.DeepEqual(a.epochCache, b.epochCache)
+}
+
+// sameProtocolParameters compares parameter sets by identity. Writers install
+// a new value when parameters change; a replacement with equal content is
+// treated as a change, which only costs a re-verification.
+func sameProtocolParameters(a, b lcommon.ProtocolParameters) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	av, bv := reflect.ValueOf(a), reflect.ValueOf(b)
+	return av.Type() == bv.Type() && av.Kind() == reflect.Pointer &&
+		av.Pointer() == bv.Pointer()
 }
 
 // snapshotPublishedChan returns a channel closed by the next snapshot
@@ -6934,10 +7066,12 @@ func (ls *LedgerState) ledgerReadChainIterator(
 				gatherLockHeld = false
 			}
 		}
-		// coalesceAttempts counts consecutive chain-tip probes since the
-		// last block was actually appended to rawBatch in this pass; see
-		// gatherCoalesceMaxAttempts.
+		// coalesceAttempts counts the coalescing retries this pass has
+		// spent, across every gap; see gatherCoalesceMaxAttempts.
 		coalesceAttempts := 0
+		// gapAttempts counts the retries spent on the current gap; see
+		// gatherCoalesceMaxGapAttempts.
+		gapAttempts := 0
 		// Read both terms of the near-tip test once here, before any
 		// blockPipelineGatherMutex read lock is taken, rather than through
 		// ls.isNearTip inside the gather span. Neither is lock-free:
@@ -7028,15 +7162,12 @@ func (ls *LedgerState) ledgerReadChainIterator(
 					// drainBlockPipelineBeforeRollback, and proceed before
 					// this pass's already-gathered blocks are submitted --
 					// exactly the race blockPipelineGatherMutex exists to
-					// close. The wait is bounded, but the bound is per
-					// gap, not per gather pass: coalesceAttempts is reset
-					// every time a block is appended below, so one pass
-					// can wait once per block it gathers. A rollback
-					// blocked on the write lock therefore waits up to
-					// batchSize*gatherCoalesceMaxAttempts*gatherCoalesceRetryInterval
-					// (about 1s at the defaults) in the worst case, and
-					// about batchSize*gatherCoalesceRetryInterval (100ms)
-					// when each gap resolves on its first retry.
+					// close. The wait is bounded per gather pass:
+					// coalesceAttempts accumulates across every gap the
+					// pass meets, so a rollback blocked on the write lock
+					// waits up to
+					// gatherCoalesceMaxAttempts*gatherCoalesceRetryInterval
+					// (about 5s at the defaults) in the worst case.
 					//
 					// Those figures cover the sleeping only. Every retry
 					// returns to the top of this loop and re-probes, and
@@ -7049,9 +7180,10 @@ func (ls *LedgerState) ledgerReadChainIterator(
 					// batch inside its transaction. The contending writer
 					// is therefore the goroutine this wait exists to wait
 					// for, and the full worst case adds one such
-					// acquisition per retry, each bounded by the longest
-					// append critical section rather than by any
-					// coalescing setting.
+					// acquisition per retry, at most
+					// gatherCoalesceMaxAttempts per pass, each bounded by
+					// the longest append critical section rather than by
+					// any coalescing setting.
 					//
 					// That probe cannot be hoisted the way the near-tip
 					// terms were. It is not a term the span incidentally
@@ -7059,7 +7191,7 @@ func (ls *LedgerState) ledgerReadChainIterator(
 					// releasing the gather lock around it reopens the race
 					// described just above. The multiplier is pinned
 					// instead, by
-					// TestLedgerReadChainIteratorBoundsChainProbesPerCoalesceGap.
+					// TestLedgerReadChainIteratorBoundsChainProbesPerCoalescePass.
 					//
 					// The near-tip terms are the hoistable case, and are
 					// hoisted: stabilityWindow and upstreamTipSlot are
@@ -7082,6 +7214,7 @@ func (ls *LedgerState) ledgerReadChainIterator(
 					// depends on them.
 					if len(rawBatch) > 0 && len(rawBatch) < cap(rawBatch) &&
 						coalesceAttempts < gatherCoalesceMaxAttempts &&
+						gapAttempts < gatherCoalesceMaxGapAttempts &&
 						!ls.reachedTip.Load() &&
 						!nearKnownUpstreamTip(
 							rawBatch[len(rawBatch)-1].Slot,
@@ -7089,6 +7222,7 @@ func (ls *LedgerState) ledgerReadChainIterator(
 							stabilityWindow,
 						) {
 						coalesceAttempts++
+						gapAttempts++
 						select {
 						case <-ctx.Done():
 							releaseGatherLock()
@@ -7125,9 +7259,7 @@ func (ls *LedgerState) ledgerReadChainIterator(
 			// gathering for this pass finishes (see decodeReadChainBatch),
 			// potentially in parallel across the whole batch.
 			rawBatch = append(rawBatch, next.Block)
-			// Real progress was made -- give the next gap its own full
-			// coalesce budget rather than accumulating across the batch.
-			coalesceAttempts = 0
+			gapAttempts = 0
 			// Don't exceed our pre-allocated capacity
 			if len(rawBatch) == cap(rawBatch) {
 				break
@@ -9160,11 +9292,21 @@ func (ls *LedgerState) processBlocksFromSource(
 			preverifiedSignatures := preverifyTransactionSignatures(
 				trustedReplayTransactions,
 			)
+			// prepare and commit are observed only beside the batch latency
+			// below, so a chunk that applies no block or fails records
+			// neither.
+			prepareElapsed := time.Since(batchApplyStart)
+			submitStart := time.Now()
+			// The body's wall time, subtracted from the submit's to leave
+			// the commit stage.
+			var bodyElapsed time.Duration
 			err = ls.submitBlockApplyDBTxn(
 				ctx,
 				snapshotTip,
 				candidateTip,
 				func(txn *database.Txn) error { //nolint:contextcheck
+					bodyStart := time.Now()
+					defer func() { bodyElapsed = time.Since(bodyStart) }()
 					replayWorkers := startReplayHeaderJobs(
 						ctx, nextBatch[i:end], verifiedReplayHeaders,
 						replayHeaderJobs, verifyReplayHeader,
@@ -9202,29 +9344,45 @@ func (ls *LedgerState) processBlocksFromSource(
 					// ledgerProcessBlock, consuming UTxOs no ranking-block
 					// transaction names, so the read-only snapshot cannot be
 					// filtered from the blocks alone.
-					if ls.config.LedgerPrefetchAheadEnabled &&
-						!dijkstraEraGate(snapshotEra) &&
-						end-i > 1 {
-						epochEndSlot := snapshotEpoch.StartSlot +
-							uint64(snapshotEpoch.LengthInSlots)
+					var aheadSignatures *signaturePreverifyAhead
+					prefetchAhead := ls.config.LedgerPrefetchAheadEnabled &&
+						end-i > 1
+					// Trusted replay preverifies the whole chunk's signatures
+					// before the transaction instead.
+					signaturesAhead := ls.config.LedgerValidateAheadEnabled &&
+						!trustedReplay
+					if (prefetchAhead || signaturesAhead) &&
+						!dijkstraEraGate(snapshotEra) {
 						chunk := nextBatch[i:end]
-						wanted := make([]bool, len(chunk))
-						for k, blk := range chunk {
-							shouldValidateBlock, _ := historicalBlockValidationDecision(
-								snapshotValidationEnabled,
-								trustedReplay,
-								snapshotChainsyncState,
-								blk.SlotNumber(),
-								cutoffSlot,
-								snapshotMithrilSlot,
-							)
-							wanted[k] = shouldValidateBlock &&
-								blk.SlotNumber() < epochEndSlot
-						}
-						aheadPrefetch = ls.startUtxoPrefetchAhead(
-							ctx, chunk, wanted,
+						validated := chunkValidatedBlocks(
+							chunk,
+							snapshotEpoch,
+							func(slot uint64) bool {
+								shouldValidateBlock, _ := historicalBlockValidationDecision(
+									snapshotValidationEnabled,
+									trustedReplay,
+									snapshotChainsyncState,
+									slot,
+									cutoffSlot,
+									snapshotMithrilSlot,
+								)
+								return shouldValidateBlock
+							},
 						)
-						defer aheadPrefetch.stop()
+						if prefetchAhead {
+							aheadPrefetch = ls.startUtxoPrefetchAhead(
+								ctx, chunk, validated,
+							)
+							defer aheadPrefetch.stop()
+						}
+						if signaturesAhead {
+							aheadSignatures = startSignaturePreverifyAhead(
+								ctx,
+								chunk,
+								signatureCheckedBlocks(chunk, validated),
+							)
+							defer aheadSignatures.stop()
+						}
 					}
 					for offset, next := range nextBatch[i:end] {
 						tmpPoint := ocommon.Point{
@@ -9405,6 +9563,10 @@ func (ls *LedgerState) processBlocksFromSource(
 							blockCtx,
 							preverifiedSignatures,
 						)
+						blockCtx = withBlockPreverifiedSignatures(
+							blockCtx,
+							aheadSignatures.forBlock(offset),
+						)
 						if trustedReplayRows != nil {
 							blockCtx = withValidatedReplayAccumulator(
 								blockCtx,
@@ -9534,19 +9696,29 @@ func (ls *LedgerState) processBlocksFromSource(
 					// Apply delta batch
 					applyStart := time.Now()
 					err := deltaBatch.apply(ctx, ls, txn)
-					ls.metrics.observeBlockStage(
-						blockStageApply,
-						time.Since(applyStart),
-					)
 					if err != nil {
+						ls.metrics.observeBlockStage(
+							blockStageApply,
+							time.Since(applyStart),
+						)
 						deltaBatch.Release()
 						return err
 					}
 					deltaBatch.Release()
-					if err := ls.db.FlushBatch(trustedReplayRows, txn); err != nil {
+					// The replay-row flush is part of the same sample: it is
+					// the metadata write for this delta batch's rows.
+					if ls.beforeReplayRowFlush != nil {
+						ls.beforeReplayRowFlush()
+					}
+					flushErr := ls.db.FlushBatch(trustedReplayRows, txn)
+					ls.metrics.observeBlockStage(
+						blockStageApply,
+						time.Since(applyStart),
+					)
+					if flushErr != nil {
 						return fmt.Errorf(
 							"flush trusted replay metadata batch: %w",
-							err,
+							flushErr,
 						)
 					}
 					// Update tip in database only if blocks were processed
@@ -9566,6 +9738,7 @@ func (ls *LedgerState) processBlocksFromSource(
 					return nil
 				},
 			)
+			commitElapsed := max(time.Since(submitStart)-bodyElapsed, 0)
 			if err != nil {
 				clear(trustedReplayUtxos)
 				trustedReplayUtxos = nil
@@ -9679,6 +9852,8 @@ func (ls *LedgerState) processBlocksFromSource(
 					blocksProcessed,
 					time.Since(batchApplyStart),
 				)
+				ls.metrics.observeBlockStage(blockStagePrepare, prepareElapsed)
+				ls.metrics.observeBlockStage(blockStageCommit, commitElapsed)
 				// After advancing the tip, first honor any TestXHardForkAtEpoch
 				// override so queries surface the pinned epoch ahead of time;
 				// then classify an indefinite final era as
@@ -9882,7 +10057,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 			ls.config.CardanoNodeConfig,
 			parent,
 		); err != nil {
-			return nil, err
+			return nil, ls.rejectInboundEnvelopeFailure(point, err)
 		}
 		if err := ls.validateBlockHeaderProtocolVersion(
 			block.Header(), pparams,
@@ -9896,7 +10071,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 		// rest of validation. Mithril-certified and TrustedReplay blocks are
 		// trusted input and keep skipping it.
 		if err := validateBlockExUnits(block, pparams); err != nil {
-			return nil, err
+			return nil, ls.rejectInboundEnvelopeFailure(point, err)
 		}
 	}
 	// Validate the operational certificate counter before processing the
@@ -10073,13 +10248,21 @@ func (ls *LedgerState) ledgerProcessBlock(
 		}
 	}
 
-	if err := ls.verifyDeferredBlockHeaderState(ctx, txn, point, block); err != nil {
-		return nil, err
+	deferredHeaderStart := time.Now()
+	headerErr := ls.verifyDeferredBlockHeaderState(ctx, txn, point, block)
+	ls.metrics.observeBlockStage(
+		blockStageDeferredHeaderVerify,
+		time.Since(deferredHeaderStart),
+	)
+	if headerErr != nil {
+		return nil, headerErr
 	}
 	// The aggregate reference-script check and the per-transaction validators
 	// resolve the same inputs, so one prefetch serves both. It runs after any
 	// endorser transactions have applied and before this block's own mutations.
+	// Both are the block-level part of validating it: one validate sample.
 	var prefetchedUtxos map[utxoref.Key]lcommon.Utxo
+	blockValidateStart := time.Now()
 	if shouldValidate {
 		prefetchedUtxos = ls.prefetchBlockUtxos(
 			ctx, txn, block.Transactions(), aheadUtxosFrom(ctx), nil,
@@ -10102,9 +10285,20 @@ func (ls *LedgerState) ledgerProcessBlock(
 			referenceParams,
 			refScriptsLV,
 		)
-		if err := storageFaultOrErr(refScriptsLV, err); err != nil {
+		err = storageFaultOrErr(refScriptsLV, err)
+		if err != nil {
+			ls.metrics.observeBlockStage(
+				blockStageValidate,
+				time.Since(blockValidateStart),
+			)
 			return nil, err
 		}
+	}
+	if shouldValidate {
+		ls.metrics.observeBlockStage(
+			blockStageValidate,
+			time.Since(blockValidateStart),
+		)
 	}
 	// Process transactions
 	// Steady-state, at-tip, validated application refuses to recover an absent
@@ -10188,6 +10382,12 @@ func (ls *LedgerState) ledgerProcessBlock(
 					isCurrentEraPParams,
 					syntheticV2CostModel,
 				)
+				txSignatures, aheadSignature := preverifiedSignaturesForTx(
+					ctx, i, tx,
+				)
+				if aheadSignature {
+					ls.signaturePreverifyAheadServed.Add(1)
+				}
 				lv := (&LedgerView{
 					txn:                  txn,
 					ls:                   ls,
@@ -10204,7 +10404,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 					horizonAnchorSlot:     parent.slot,
 					epochStartSlot:        epochStartSlot,
 					byronParamsFromBlock:  true,
-					preverifiedSignatures: preverifiedSignaturesFrom(ctx, tx),
+					preverifiedSignatures: txSignatures,
 				}).pinCommitteeState(committeeEpoch, pp).
 					pinSyntheticV2CostModel(synthetic)
 				validateStart := time.Now()
@@ -10339,6 +10539,10 @@ func (ls *LedgerState) ledgerProcessBlock(
 
 		// Apply delta immediately if we may need the data to validate the next TX
 		if shouldValidate {
+			// The write is a separate apply sample per transaction: a
+			// validating block leaves its chunk's delta batch empty, so
+			// the batch flush alone would hide this time.
+			applyStart := time.Now()
 			validatedReplayRows := validatedReplayAccumulatorFrom(ctx)
 			var applyErr error
 			if validatedReplayRows != nil {
@@ -10357,6 +10561,10 @@ func (ls *LedgerState) ledgerProcessBlock(
 			} else {
 				applyErr = delta.applyWithoutRecordingDonations(ctx, ls, txn)
 			}
+			ls.metrics.observeBlockStage(
+				blockStageApply,
+				time.Since(applyStart),
+			)
 			if applyErr != nil {
 				delta.Release()
 				if errors.Is(applyErr, models.ErrRewardWithdrawalExceedsBalance) {
@@ -13431,7 +13639,6 @@ func (ls *LedgerState) GetIntersectPoint(
 		return &ret, nil
 	}
 	var ret ocommon.Point
-	var tmpBlock models.Block
 	var err error
 	foundOrigin := false
 	txn := ls.db.Transaction(ctx, false)
@@ -13450,8 +13657,18 @@ func (ls *LedgerState) GetIntersectPoint(
 				foundOrigin = true
 				continue
 			}
-			// Lookup block in metadata DB
-			tmpBlock, err = ls.chain.BlockByPoint(ctx, point, txn)
+			// The point comes from an untrusted peer, so membership is
+			// resolved from the block's metadata key alone. A block read by
+			// point loads the whole body and can fall through to a Bark
+			// archive, which a peer could trigger once per point.
+			if _, err = database.BlockBlobKeyToPoint(
+				types.BlockBlobKey(point.Slot, point.Hash),
+			); err != nil {
+				return fmt.Errorf(
+					"failed to get block: parsing block key: %w", err,
+				)
+			}
+			blockID, err := database.BlockIDByPointMetadataTxn(txn, point)
 			if err != nil {
 				if errors.Is(err, models.ErrBlockNotFound) {
 					continue
@@ -13459,7 +13676,7 @@ func (ls *LedgerState) GetIntersectPoint(
 				return fmt.Errorf("failed to get block: %w", err)
 			}
 			onPrimary, err := ls.primaryChainContainsBlockIDTxn(
-				tmpBlock.ID,
+				blockID,
 				point,
 				txn,
 			)
@@ -13470,8 +13687,8 @@ func (ls *LedgerState) GetIntersectPoint(
 				continue
 			}
 			// Update return value
-			ret.Slot = tmpBlock.Slot
-			ret.Hash = tmpBlock.Hash
+			ret.Slot = point.Slot
+			ret.Hash = point.Hash
 		}
 		return nil
 	})
@@ -13526,6 +13743,27 @@ func (ls *LedgerState) GetChainFromPointReverseContext(
 // Tip returns the current chain tip
 func (ls *LedgerState) Tip() ochainsync.Tip {
 	return cloneTip(ls.loadTipSnapshot().currentTip)
+}
+
+// AwaitAppliedSlot blocks until the applied ledger tip has reached slot, or
+// ctx ends, in which case it returns ctx's error. The applied tip is
+// published only after the block's transaction commits, so once this returns
+// a fresh read snapshot sees a tip at or beyond slot.
+func (ls *LedgerState) AwaitAppliedSlot(
+	ctx context.Context,
+	slot uint64,
+) error {
+	for {
+		published := ls.snapshotPublishedChan()
+		if ls.loadTipSnapshot().currentTip.Point.Slot >= slot {
+			return nil
+		}
+		select {
+		case <-published:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 }
 
 // ImmutablePoint returns the primary-chain point k blocks behind the applied
@@ -14540,6 +14778,20 @@ func (ls *LedgerState) BlockByHash(
 	return database.BlockByHash(ctx, ls.db, hash)
 }
 
+// BlockByHashIncludingRolledBack returns a block by its hash, also finding a
+// block that a primary-chain rollback removed from the database but the chain
+// manager still caches. Use it only to reconstruct what a rollback undid;
+// BlockByHash is the lookup for blocks on the current chain.
+func (ls *LedgerState) BlockByHashIncludingRolledBack(
+	ctx context.Context,
+	hash []byte,
+) (models.Block, error) {
+	if ls.chain != nil {
+		return ls.chain.BlockByHash(ctx, hash)
+	}
+	return database.BlockByHash(ctx, ls.db, hash)
+}
+
 // CardanoNodeConfig returns the Cardano node configuration used for this ledger state.
 func (ls *LedgerState) CardanoNodeConfig() *cardano.CardanoNodeConfig {
 	return ls.config.CardanoNodeConfig
@@ -14558,7 +14810,7 @@ func (ls *LedgerState) ByronProtocolMagic() (uint32, error) {
 	if protocolMagic < 0 {
 		return 0, errors.New("byron protocol magic is negative")
 	}
-	if protocolMagic > math.MaxUint32 {
+	if int64(protocolMagic) > math.MaxUint32 {
 		return 0, fmt.Errorf(
 			"byron protocol magic exceeds uint32: %d",
 			protocolMagic,
@@ -14629,6 +14881,15 @@ func (ls *LedgerState) UtxosByAddress(
 	ret := make([]models.Utxo, 0, len(utxos))
 	ret = append(ret, utxos...)
 	return ret, nil
+}
+
+// UtxosByAddressComplete returns every UTxO for the requested addresses and
+// stops the read when ctx is canceled.
+func (ls *LedgerState) UtxosByAddressComplete(
+	ctx context.Context,
+	addrs []ledger.Address,
+) ([]models.Utxo, error) {
+	return ls.db.UtxosByAddressComplete(ctx, addrs, nil)
 }
 
 // UtxosByAddressBoundedPage returns an ordered, resumable UTxO page while
@@ -14906,13 +15167,19 @@ func (s txValidationSnapshot) validationContext(
 	if err != nil {
 		return eras.EraDesc{}, nil, false, err
 	}
-	pp := s.currentPParams
-	isCurrent := true
-	if validationEra.Id != s.currentEra.Id && s.prevEraPParams != nil {
-		pp = s.prevEraPParams
-		isCurrent = false
-	}
+	pp, isCurrent := s.validationPParams(validationEra.Id)
 	return validationEra, pp, isCurrent, nil
+}
+
+// validationPParams returns the protocol parameters that validate a
+// transaction of a compatible era, and whether they are the current era's.
+func (s txValidationSnapshot) validationPParams(
+	txEraId uint,
+) (lcommon.ProtocolParameters, bool) {
+	if txEraId != s.currentEra.Id && s.prevEraPParams != nil {
+		return s.prevEraPParams, false
+	}
+	return s.currentPParams, true
 }
 
 func (s txValidationSnapshot) protocolParameters(
@@ -15030,6 +15297,11 @@ type txValidationApplyFunc func(
 	blockNumber uint64,
 ) error
 
+// txValidationResolveFunc reads confirmed outputs through the session's own
+// database transaction, so it sees the snapshot validation reads and needs
+// no second connection.
+type txValidationResolveFunc func(refs []models.UtxoId) ([]models.Utxo, error)
+
 // beginTxValidationTransition excludes validation commits from a durable
 // state transition until its matching snapshots have been published.
 func (ls *LedgerState) beginTxValidationTransition() func() {
@@ -15069,6 +15341,33 @@ func (ls *LedgerState) WithTxValidationSession(ctx context.Context,
 	})
 }
 
+// WithResolvingTxValidationSession is WithTxValidationSession for mempool
+// admission. resolve returns the live confirmed outputs among refs from the
+// session's database transaction, the snapshot its validations read.
+func (ls *LedgerState) WithResolvingTxValidationSession(ctx context.Context,
+	fn func(
+		validate func(
+			tx ledger.Transaction,
+			consumedUtxos map[utxoref.Key]struct{},
+			createdUtxos map[utxoref.Key]lcommon.Utxo,
+			accounts *utxoref.StateOverlay,
+		) error,
+		stillCurrent func() bool,
+		commitIfCurrent func(func() error) (bool, error),
+		resolve func(refs []models.UtxoId) ([]models.Utxo, error),
+	) error,
+) error {
+	return ls.withResolvingTxValidationSession(ctx, nil, nil, false, false, func(
+		validate func(ledger.Transaction, map[utxoref.Key]struct{}, map[utxoref.Key]lcommon.Utxo, *utxoref.StateOverlay) error,
+		stillCurrent func() bool,
+		commitIfCurrent func(func() error) (bool, error),
+		_ txValidationApplyFunc,
+		resolve txValidationResolveFunc,
+	) error {
+		return fn(validate, stillCurrent, commitIfCurrent, resolve)
+	})
+}
+
 func (ls *LedgerState) withTxValidationSession(ctx context.Context,
 	expectedParentHash []byte,
 	referenceSlot *uint64,
@@ -15084,6 +15383,41 @@ func (ls *LedgerState) withTxValidationSession(ctx context.Context,
 		stillCurrent func() bool,
 		commitIfCurrent func(func() error) (bool, error),
 		applyTx txValidationApplyFunc,
+	) error,
+) error {
+	return ls.withResolvingTxValidationSession(ctx,
+		expectedParentHash,
+		referenceSlot,
+		readWrite,
+		leiosClosureSemantics,
+		func(
+			validate func(ledger.Transaction, map[utxoref.Key]struct{}, map[utxoref.Key]lcommon.Utxo, *utxoref.StateOverlay) error,
+			stillCurrent func() bool,
+			commitIfCurrent func(func() error) (bool, error),
+			applyTx txValidationApplyFunc,
+			_ txValidationResolveFunc,
+		) error {
+			return fn(validate, stillCurrent, commitIfCurrent, applyTx)
+		},
+	)
+}
+
+func (ls *LedgerState) withResolvingTxValidationSession(ctx context.Context,
+	expectedParentHash []byte,
+	referenceSlot *uint64,
+	readWrite bool,
+	leiosClosureSemantics bool,
+	fn func(
+		validate func(
+			tx ledger.Transaction,
+			consumedUtxos map[utxoref.Key]struct{},
+			createdUtxos map[utxoref.Key]lcommon.Utxo,
+			accounts *utxoref.StateOverlay,
+		) error,
+		stillCurrent func() bool,
+		commitIfCurrent func(func() error) (bool, error),
+		applyTx txValidationApplyFunc,
+		resolve txValidationResolveFunc,
 	) error,
 ) error {
 	if err := ctx.Err(); err != nil {
@@ -15228,7 +15562,12 @@ func (ls *LedgerState) withTxValidationSession(ctx context.Context,
 				txn,
 			)
 		}
-		if err := fn(validate, stillCurrent, commitIfCurrent, applyTx); err != nil {
+		resolve := func(refs []models.UtxoId) ([]models.Utxo, error) {
+			return ls.db.UtxosByRefs(ctx, refs, txn)
+		}
+		if err := fn(
+			validate, stillCurrent, commitIfCurrent, applyTx, resolve,
+		); err != nil {
 			return err
 		}
 		return rollbackValidationSession

@@ -582,6 +582,18 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 			c.BarkArchiveMaxConcurrentFetches,
 		))
 	}
+	if c.BarkArchiveLookupsPerSecond < 0 {
+		errs = append(errs, fmt.Errorf(
+			"invalid barkArchiveLookupsPerSecond %d: must not be negative",
+			c.BarkArchiveLookupsPerSecond,
+		))
+	}
+	if c.BarkArchiveCallerLookupsPerSecond < 0 {
+		errs = append(errs, fmt.Errorf(
+			"invalid barkArchiveCallerLookupsPerSecond %d: must not be negative",
+			c.BarkArchiveCallerLookupsPerSecond,
+		))
+	}
 
 	// Bark's DatabaseService is mounted whenever bark is enabled with a snapshot
 	// directory configured. Every method must authenticate its caller, and its
@@ -1133,7 +1145,7 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		// Both are scaled into int64 quantities: seconds to a Duration and
 		// megabytes to bytes.
 		const maxMessageTTL = uint64(math.MaxInt64) / uint64(time.Second)
-		const maxMempoolSize = math.MaxInt64 >> 20
+		const maxMempoolSize = uint64(math.MaxInt64 >> 20)
 		switch {
 		case c.DMQ.MessageTTL == 0:
 			errs = append(errs, errors.New(

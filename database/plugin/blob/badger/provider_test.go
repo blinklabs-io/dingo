@@ -63,6 +63,55 @@ func TestProviderDataDirPrecedence(t *testing.T) {
 	}
 }
 
+func TestResolvedMemTableSize(t *testing.T) {
+	t.Parallel()
+
+	require.Zero(t, defaultConfig().MemTableSize)
+	tests := []struct {
+		name        string
+		configured  uint64
+		storageMode string
+		runMode     string
+		want        uint64
+	}{
+		{
+			name:        "core sync",
+			storageMode: "core",
+			runMode:     "sync",
+			want:        DefaultCoreSyncMemTableSize,
+		},
+		{
+			name:        "core serve",
+			storageMode: "core",
+			runMode:     "serve",
+			want:        DefaultMemTableSize,
+		},
+		{
+			name:        "api sync",
+			storageMode: "api",
+			runMode:     "sync",
+			want:        DefaultMemTableSize,
+		},
+		{
+			name:        "explicit core sync override",
+			configured:  DefaultMemTableSize,
+			storageMode: "core",
+			runMode:     "sync",
+			want:        DefaultMemTableSize,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := resolvedMemTableSize(tt.configured, blob.ProviderDependencies{
+				StorageMode: tt.storageMode,
+				RunMode:     tt.runMode,
+			})
+			require.Equal(t, tt.want, got)
+		})
+	}
+}
+
 // resolveBadgerProvider registers and resolves the badger blob provider through
 // a plugin host, returning the started store. Resolution runs the provider
 // factory, so the returned store's fields reflect the storage-mode/run-mode

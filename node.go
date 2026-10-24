@@ -637,6 +637,7 @@ func (n *Node) newOuroborosConfig(
 		ChainsyncHasBestPeer:            n.chainsyncHasBestPeer,
 		ChainsyncApplyEligible:          n.chainsyncApplyEligible,
 		ChainsyncAwaitEagerness:         n.chainsyncAwaitEagerness,
+		ChainsyncAwaitCorroboration:     n.chainsyncAwaitCorroboration,
 		ChainsyncObservePeerTip:         n.chainsyncObservePeerTip,
 		ChainsyncPrepareForecastWitness: n.chainsyncPrepareForecastWitness,
 		ChainsyncRemoveForecastWitness:  n.chainsyncRemoveForecastWitness,
@@ -670,7 +671,15 @@ func (n *Node) ouroboros() *ouroborosPkg.Ouroboros {
 // validation when that fails. Guard the pairing here, in the package that
 // makes it, so drift cannot quietly unpin mempool revalidation from its
 // ledger snapshot.
-var _ mempool.TxValidationSessionProvider = (*ledger.LedgerState)(nil)
+var (
+	_ mempool.TxValidationSessionProvider = (*ledger.LedgerState)(nil)
+	_ mempool.TxSizeLimitProvider         = (*ledger.LedgerState)(nil)
+)
+
+// The mempool resolves confirmed input addresses for its address index
+// through the same validator's session, again by interface assertion; losing
+// the method would leave those inputs out of the index with no error.
+var _ mempool.ResolvingTxValidationSessionProvider = (*ledger.LedgerState)(nil)
 
 //nolint:contextcheck // Run is the lifecycle boundary and derives n.ctx from the caller context.
 func (n *Node) Run(ctx context.Context) (runErr error) {
@@ -1530,6 +1539,8 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 			CORSAllowedOrigins:                       n.config.corsAllowedOrigins,
 			DestinationRegistry:                      n.destinationRegistry,
 			ArchiveMaxConcurrentFetches:              n.config.barkArchiveMaxConcurrentFetches,
+			ArchiveLookupsPerSecond:                  n.config.barkArchiveLookupsPerSecond,
+			ArchiveCallerLookupsPerSecond:            n.config.barkArchiveCallerLookupsPerSecond,
 		}
 		if remoteLifecycleEnabled {
 			barkConfig.Node = n
@@ -2186,6 +2197,13 @@ func (n *Node) buildChainSelectorConfig(
 			}
 			slot, err := ls.CurrentSlot()
 			return slot, err == nil
+		},
+		AppliedTip: func() (ochainsync.Tip, bool) {
+			ls := n.wallClockLedger.Load()
+			if ls == nil {
+				return ochainsync.Tip{}, false
+			}
+			return ls.Tip(), true
 		},
 	}
 	// The running node publishes its started ledger before constructing the

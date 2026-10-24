@@ -221,9 +221,9 @@ WHERE table_schema = ? AND table_name = 'asset' AND column_name = ?`,
 // per-dialect "already dropped" guards. TestRunnerReplaysEveryShippedVersion-
 // FromExpand covers that replay on SQLite only. These tests cover the
 // PostgreSQL and MySQL guards against the real servers, whose error text and
-// catalog lookups are what those guards actually key on -- go-test.yml already
-// runs the dingo_extra_plugins suite with both services up, so this is real
-// CI coverage rather than a locally-only check.
+// catalog lookups are what those guards actually key on -- go-test.yml's
+// gate (services) job runs this package with both services up, so this is
+// real CI coverage rather than a locally-only check.
 
 func requirePostgresColumnAbsent(t *testing.T, db *sql.DB, schema string) {
 	t.Helper()

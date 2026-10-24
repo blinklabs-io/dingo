@@ -63,6 +63,7 @@ func (p ChainPoint) IsOrigin() bool {
 type ObservedHeader struct {
 	Slot        uint64 `json:"slot"`
 	BlockNumber uint64 `json:"block"`
+	Era         string `json:"era"`
 	Hash        []byte `json:"hash"`
 	PrevHash    []byte `json:"prevHash"`
 	// BodySize is the header's declared block body size. It is what
@@ -254,6 +255,14 @@ func (c *ObservedChain) Connected() {
 	c.connects++
 	c.connected = true
 	c.lastErr = ""
+	c.mu.Unlock()
+	c.notify.signal()
+}
+
+// ObserveServerTip records the tip reported with a ChainSync intersection.
+func (c *ObservedChain) ObserveServerTip(tip ChainTip) {
+	c.mu.Lock()
+	c.serverTip = tip
 	c.mu.Unlock()
 	c.notify.signal()
 }

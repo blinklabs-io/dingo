@@ -420,8 +420,8 @@ func TestDingoEraEntryPointsReportsMissingValidator(t *testing.T) {
 func TestConformanceVectorsExerciseDingoEraEntryPoints(t *testing.T) {
 	testutil.SkipUnderRace(
 		t,
-		"a single-goroutine corpus replay; go-test (Linux) and go-test "+
-			"(Linux, quick) run the same entry-point assertions un-instrumented",
+		"a single-goroutine corpus replay; CI's check and gate (services) "+
+			"jobs run the same entry-point assertions un-instrumented",
 	)
 	run := entryPointCorpusEvidence(t)
 	require.NotEmpty(
@@ -468,6 +468,50 @@ func TestConformanceVectorsExerciseDingoEraEntryPoints(t *testing.T) {
 		routedVectors,
 		"no vector routed a transaction through a production validation "+
 			"entry point",
+	)
+}
+
+// TestConformanceVectorsPreverifiedSignaturesMatchInline replays every corpus
+// transaction through its era entry point twice: verifying witness signatures
+// inline, and reusing a signature result computed ahead on another goroutine,
+// the way block apply supplies it when LedgerValidateAheadEnabled is set. The
+// verdicts must be identical for every transaction, valid or not.
+func TestConformanceVectorsPreverifiedSignaturesMatchInline(t *testing.T) {
+	testutil.SkipUnderRace(
+		t,
+		"a single-goroutine corpus replay; CI's check and gate (services) "+
+			"jobs run the same assertions un-instrumented",
+	)
+	run := entryPointCorpusEvidence(t)
+	var compared, rejected int
+	for _, ev := range run.evidence {
+		for _, routing := range ev.Routings {
+			require.True(t, routing.PreverifiedRan)
+			require.Equalf(
+				t,
+				fmt.Sprint(routing.Err),
+				fmt.Sprint(routing.PreverifiedErr),
+				"vector %s (%s) event %d: verdict changed with a preverified signature result",
+				ev.Path,
+				ev.Title,
+				routing.EventIndex,
+			)
+			compared++
+			if routing.Err != nil {
+				rejected++
+			}
+		}
+	}
+	t.Logf(
+		"compared %d transactions, %d of them rejected",
+		compared,
+		rejected,
+	)
+	require.Positive(t, compared)
+	require.Positive(
+		t,
+		rejected,
+		"the corpus must include rejected transactions for the comparison to cover failures",
 	)
 }
 

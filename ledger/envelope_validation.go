@@ -26,6 +26,7 @@ import (
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
+	"github.com/blinklabs-io/gouroboros/ledger/allegra"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
@@ -107,7 +108,7 @@ func (p envelopeParent) withStoredByronPosition(
 }
 
 func envelopeParentFromBlock(block gledger.Block) envelopeParent {
-	_, isEbb := block.(*byron.ByronEpochBoundaryBlock)
+	isEbb := isByronEpochBoundaryBlock(block)
 	parent := envelopeParent{
 		slot:        block.SlotNumber(),
 		blockNumber: block.BlockNumber(),
@@ -120,6 +121,17 @@ func envelopeParentFromBlock(block gledger.Block) envelopeParent {
 	parent.byronSlot = slot
 	parent.byronPositioned = positioned
 	return parent
+}
+
+func isByronEpochBoundaryBlock(block gledger.Block) bool {
+	if _, ok := block.(*byron.ByronEpochBoundaryBlock); ok {
+		return true
+	}
+	if block == nil || isNilBlockHeader(block.Header()) {
+		return false
+	}
+	_, ok := block.Header().(*byron.ByronEpochBoundaryBlockHeader)
+	return ok
 }
 
 // byronBlockPosition returns a Byron block's epoch and its slot within that
@@ -368,7 +380,7 @@ func validateBlockOrder(
 			)
 		}
 	}
-	_, isEbb := block.(*byron.ByronEpochBoundaryBlock)
+	isEbb := isByronEpochBoundaryBlock(block)
 	expectedBlockNumber := parent.blockNumber + 1
 	if isEbb && !parent.byronEbb {
 		expectedBlockNumber = parent.blockNumber
@@ -703,4 +715,76 @@ func protocolBlockLimits(
 	default:
 		return blockProtocolLimits{}, false
 	}
+}
+
+// MaxTxSize returns the MaxTxSize that ledger validation applies to a
+// transaction of the given era, resolved from one snapshot as
+// validateTxCore resolves it: the era must be one the ledger validates
+// against its current era, and the parameters are the current era's or, for a
+// previous-era transaction, the previous era's. It reports false whenever the
+// ledger would not reach a MaxTxSize rule with those parameters: an era it
+// refuses, an era without a ValidateTxFunc, Dijkstra validation skipped by
+// configuration, or parameters that are unknown or not the type the era's
+// validation requires. Callers then leave the decision to the ledger, so an
+// early rejection based on this limit is never stricter than the ledger.
+func (ls *LedgerState) MaxTxSize(txEraId uint) (uint, bool) {
+	consensusState := ls.loadConsensusSnapshot()
+	snapshot := txValidationSnapshot{
+		currentEra:     consensusState.currentEra,
+		currentPParams: consensusState.currentPParams,
+		prevEraPParams: consensusState.prevEraPParams,
+		eraList:        ls.eraList(),
+	}
+	if !eras.IsCompatibleEraIn(
+		snapshot.eraList,
+		txEraId,
+		snapshot.currentEra.Id,
+	) {
+		return 0, false
+	}
+	validationEra := eras.GetEraByIdIn(snapshot.eraList, txEraId)
+	if validationEra == nil || validationEra.ValidateTxFunc == nil ||
+		ls.skipDijkstraTxValidation(validationEra.Id) {
+		return 0, false
+	}
+	pp, _ := snapshot.validationPParams(validationEra.Id)
+	return eraMaxTxSize(validationEra.Id, pp)
+}
+
+// eraMaxTxSize returns MaxTxSize from pparams only when they are the type the
+// era's transaction validation accepts. Any other type fails that validation
+// before a size rule could accept the transaction, so no limit is reported.
+func eraMaxTxSize(
+	eraId uint,
+	pparams lcommon.ProtocolParameters,
+) (uint, bool) {
+	switch pp := pparams.(type) {
+	case *shelley.ShelleyProtocolParameters:
+		// Allegra's parameters are an alias of Shelley's.
+		if pp != nil && (eraId == shelley.EraIdShelley ||
+			eraId == allegra.EraIdAllegra) {
+			return pp.MaxTxSize, true
+		}
+	case *mary.MaryProtocolParameters:
+		if pp != nil && eraId == mary.EraIdMary {
+			return pp.MaxTxSize, true
+		}
+	case *alonzo.AlonzoProtocolParameters:
+		if pp != nil && eraId == alonzo.EraIdAlonzo {
+			return pp.MaxTxSize, true
+		}
+	case *babbage.BabbageProtocolParameters:
+		if pp != nil && eraId == babbage.EraIdBabbage {
+			return pp.MaxTxSize, true
+		}
+	case *conway.ConwayProtocolParameters:
+		if pp != nil && eraId == conway.EraIdConway {
+			return pp.MaxTxSize, true
+		}
+	case *dijkstra.DijkstraProtocolParameters:
+		if pp != nil && eraId == dijkstra.EraIdDijkstra {
+			return pp.MaxTxSize, true
+		}
+	}
+	return 0, false
 }

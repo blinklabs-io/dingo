@@ -18,6 +18,7 @@ package sqlstore
 import (
 	"context"
 	"database/sql"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -47,9 +48,9 @@ const qualifiedSQLiteUtxoColumns = "utxo.transaction_id, " +
 	"utxo.payment_script"
 
 const (
-	getLiveUtxoByRefQuery = "SELECT " + sqliteUtxoColumns +
+	getLiveUtxoByRefQuery = "-- name: GetLiveUtxoByRef :one\nSELECT " + sqliteUtxoColumns +
 		" FROM utxo WHERE tx_id = ? AND output_idx = ? AND deleted_slot = 0"
-	getUtxoIncludingSpentByRefQuery = "SELECT " + sqliteUtxoColumns +
+	getUtxoIncludingSpentByRefQuery = "-- name: GetUtxoIncludingSpentByRef :one\nSELECT " + sqliteUtxoColumns +
 		" FROM utxo WHERE tx_id = ? AND output_idx = ?"
 )
 
@@ -507,7 +508,10 @@ WHERE deleted_slot = 0 AND ` + addressPredicate
 LIMIT ?`
 		amountArgs = append(slices.Clip(args), limits.MaxUtxos+1)
 	}
-	rows, err := db.QueryContext(ctx, s.dialect.Rebind(amountQuery), amountArgs...)
+	rows, err := db.QueryContext(
+		ctx,
+		s.dialect.Rebind(amountQuery),
+		amountArgs...)
 	if err != nil {
 		return ret, fmt.Errorf("sum utxo balance by address: %w", err)
 	}
@@ -1005,7 +1009,8 @@ func producedStakeCredentialDelta(
 // to a full idx_utxo_staking_deleted_amount scan once the batch has more than
 // a handful of terms.
 func utxoStakeConsumedDeltaQuery(n int) string {
-	return "SELECT tx_id, output_idx, credential_tag, staking_key, amount " +
+	return "-- name: GetUtxoStakeConsumedDeltaBatch :many\n" +
+		"SELECT tx_id, output_idx, credential_tag, staking_key, amount " +
 		"FROM utxo WHERE tx_id IN (" +
 		strings.TrimSuffix(strings.Repeat("?,", n), ",") + ")"
 }
@@ -1198,7 +1203,8 @@ func distinctUtxoTxIDs(
 // already-deleted ones) down to the exact requested (tx_id, output_idx)
 // pairs in Go.
 func utxoStakeRefsByTxIDQuery(n int) string {
-	return "SELECT tx_id, output_idx, deleted_slot, credential_tag, " +
+	return "-- name: GetUtxoStakeRefsByTxIDs :many\n" +
+		"SELECT tx_id, output_idx, deleted_slot, credential_tag, " +
 		"staking_key FROM utxo WHERE tx_id IN (" +
 		strings.TrimSuffix(strings.Repeat("?,", n), ",") + ")"
 }
@@ -1406,7 +1412,12 @@ func utxoDeletionRowsByTxIDQuery(
 		args[i] = txID
 	}
 	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(txIDs)), ",")
-	query := "SELECT id, tx_id, output_idx, deleted_slot, credential_tag, " +
+	name := "GetUtxoRowsByTxIDs"
+	if lockRows {
+		name = "LockUtxoRowsByTxIDs"
+	}
+	query := "-- name: " + name + " :many\n" +
+		"SELECT id, tx_id, output_idx, deleted_slot, credential_tag, " +
 		"staking_key FROM utxo " +
 		"WHERE tx_id IN (" + placeholders + ")"
 	if lockRows {
@@ -1744,12 +1755,15 @@ func (s *Store) GetUtxosByRefsAsOf(
 func dedupeUtxoIDs(ids []models.UtxoId) []models.UtxoId {
 	seen := make(map[string]struct{}, len(ids))
 	ret := make([]models.UtxoId, 0, len(ids))
+	key := make([]byte, 0, 36)
 	for _, id := range ids {
-		key := fmt.Sprintf("%s:%d", id.Hash, id.Idx)
-		if _, ok := seen[key]; ok {
+		// The fixed-width index suffix keeps the key unambiguous for any
+		// hash length.
+		key = binary.BigEndian.AppendUint32(append(key[:0], id.Hash...), id.Idx)
+		if _, ok := seen[string(key)]; ok {
 			continue
 		}
-		seen[key] = struct{}{}
+		seen[string(key)] = struct{}{}
 		ret = append(ret, id)
 	}
 	return ret
@@ -2589,9 +2603,13 @@ func (s *Store) GetControlledAmountByCredential(
 	if err != nil {
 		return 0, err
 	}
-	return sumUint64Rows(ctx, db, s.dialect.Rebind(`
-SELECT amount FROM utxo
-WHERE credential_tag = ? AND staking_key = ? AND deleted_slot = 0`), credentialTag, stakingKey)
+	return s.sumWideUint64(ctx, db, `
+SELECT `+s.wideSumExpr("amount")+`
+FROM utxo
+WHERE credential_tag = ? AND staking_key = ? AND deleted_slot = 0`,
+		credentialTag,
+		stakingKey,
+	)
 }
 
 func (s *Store) GetUtxoPaymentScriptByCredential(
@@ -2721,7 +2739,8 @@ func persistUtxoAddress(
 		return nil
 	}
 	_, err = db.ExecContext(ctx,
-		"INSERT INTO utxo_address (utxo_id, address) VALUES (?, ?) "+
+		"-- name: UpsertUtxoAddress :exec\n"+
+			"INSERT INTO utxo_address (utxo_id, address) VALUES (?, ?) "+
 			"ON CONFLICT (utxo_id) DO UPDATE SET address = excluded.address",
 		utxoID,
 		address,
@@ -2745,7 +2764,9 @@ func assetUtxoAddress(utxo *models.Utxo) ([]byte, error) {
 		address = []byte(output.Address().String())
 	}
 	if len(address) == 0 {
-		return nil, errors.New("persist asset UTxO address: address is unavailable")
+		return nil, errors.New(
+			"persist asset UTxO address: address is unavailable",
+		)
 	}
 	return address, nil
 }
@@ -2797,12 +2818,15 @@ func (s *Store) SetUtxoAddress(
 	if len(address) == 0 {
 		return errors.New("UTxO address must not be empty")
 	}
-	return s.withWriteTransaction(txn, func(db queryer, ctx context.Context) error {
-		_, err := db.ExecContext(ctx, `
+	return s.withWriteTransaction(
+		txn,
+		func(db queryer, ctx context.Context) error {
+			_, err := db.ExecContext(ctx, `
 INSERT INTO utxo_address (utxo_id, address) VALUES (?, ?)
 ON CONFLICT (utxo_id) DO UPDATE SET address = excluded.address`, utxoID, address)
-		return err
-	})
+			return err
+		},
+	)
 }
 
 func (s *Store) IterateLiveUtxos(
@@ -2931,6 +2955,68 @@ WHERE added_slot <= ? AND (deleted_slot = 0 OR deleted_slot > ?)`,
 		}
 	}
 	return rows.Err()
+}
+
+// UtxoRefsAsOfAfterID implements metadata.UtxoStore.
+func (s *Store) UtxoRefsAsOfAfterID(
+	ctx context.Context,
+	atSlot uint64,
+	afterID uint,
+	limit int,
+	txn types.Txn,
+) ([]models.Utxo, error) {
+	if limit <= 0 {
+		return nil, errors.New("utxo refs as of slot: limit must be positive")
+	}
+	db, _, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, err
+	}
+	sqlSlot, err := checkedInt64(atSlot)
+	if err != nil {
+		return nil, err
+	}
+	sqlAfterID, err := checkedInt64(uint64(afterID))
+	if err != nil {
+		return nil, err
+	}
+	rows, err := db.QueryContext(
+		ctx,
+		s.dialect.Rebind(`SELECT id, tx_id, output_idx FROM utxo
+WHERE id > ? AND added_slot <= ? AND (deleted_slot = 0 OR deleted_slot > ?)
+ORDER BY id LIMIT ?`),
+		sqlAfterID,
+		sqlSlot,
+		sqlSlot,
+		limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ret := make([]models.Utxo, 0, limit)
+	for rows.Next() {
+		var (
+			id        int64
+			txID      []byte
+			outputIdx int64
+		)
+		if err := rows.Scan(&id, &txID, &outputIdx); err != nil {
+			return nil, err
+		}
+		if id <= 0 || outputIdx < 0 || outputIdx > math.MaxUint32 {
+			return nil, fmt.Errorf(
+				"utxo refs as of slot: row id %d output index %d out of range",
+				id, outputIdx,
+			)
+		}
+		ret = append(ret, models.Utxo{
+			ID:        uint(id),
+			TxId:      txID,
+			OutputIdx: uint32(outputIdx),
+		})
+	}
+	return ret, rows.Err()
 }
 
 // queryUtxos runs predicate/args against the utxo table and returns the
@@ -3068,7 +3154,8 @@ func (s *Store) loadUtxoAssetsPointers(
 			args[i] = id
 		}
 		rows, err := db.QueryContext(ctx, s.dialect.Rebind(
-			"SELECT name, policy_id, fingerprint, id, utxo_id, amount FROM asset WHERE utxo_id IN ("+bindPlaceholders(
+			"-- name: GetAssetsByUtxoIDs :many\n"+
+				"SELECT name, policy_id, fingerprint, id, utxo_id, amount FROM asset WHERE utxo_id IN ("+bindPlaceholders(
 				end-start,
 			)+") ORDER BY id",
 		), args...)

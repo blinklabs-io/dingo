@@ -926,6 +926,9 @@ func (s *State) SetClientObservabilityOnly(
 		if !exists {
 			return false
 		}
+		if !observabilityOnly && tc.Status == ClientStatusFailed {
+			return false
+		}
 		if tc.ObservabilityOnly == observabilityOnly {
 			return true
 		}
@@ -1199,7 +1202,9 @@ func (s *State) UpdateClientRollback(
 	setDeliveryWatermark(tc, point)
 	if !noOp {
 		tc.LastActivity = s.now()
-		tc.Status = ClientStatusSyncing
+		if tc.Status != ClientStatusFailed {
+			tc.Status = ClientStatusSyncing
+		}
 	}
 	s.resumePatienceAfterRollbackLocked(tc, point, tip, active)
 	return true
@@ -1252,17 +1257,20 @@ func (s *State) RewindTrackedClientsTo(
 			Slot: point.Slot,
 			Hash: cloneBytes(point.Hash),
 		}
-		tc.Status = ClientStatusSyncing
+		if tc.Status != ClientStatusFailed {
+			tc.Status = ClientStatusSyncing
+		}
 		tc.LastActivity = s.now()
 		ret = append(ret, connId)
 	}
 	return ret
 }
 
-// RecordObservedHeader stores the raw per-connection header ancestry before
-// cross-peer dedup can suppress delivery into the ledger queue. This lets
-// fork resolution reconstruct the selected peer's candidate fragment even
-// when earlier headers were first seen from another peer.
+// RecordObservedHeader stores raw per-connection header ancestry before
+// cross-peer dedup can suppress delivery into the ledger queue. A zero
+// verification generation marks a deferred or withheld header; ledger fork
+// resolution can use it only as candidate-path input and must validate the
+// complete linked path before caching a verdict.
 func (s *State) RecordObservedHeader(h ObservedHeader) {
 	if h.BlockHeader == nil || len(h.Point.Hash) == 0 {
 		return
@@ -1366,7 +1374,8 @@ func (s *State) ClearObservedHeaderHistory(
 }
 
 // ClearObservedHeaderHistoryFrom removes a rejected header and every header
-// observed after it while retaining the independently verified prefix. When
+// observed after it while retaining the earlier candidate prefix. Entries
+// with no current verdict remain untrusted and are revalidated when used. When
 // the rejected hash is not retained, removal starts at the first retained
 // header at or beyond the point's slot; if none exists, the history is kept.
 func (s *State) ClearObservedHeaderHistoryFrom(
@@ -1528,6 +1537,20 @@ func sameTrackedNetAddr(a, b net.Addr) bool {
 	return a.String() == b.String()
 }
 
+// MarkClientFailed excludes a tracked client until its connection is removed.
+func (s *State) MarkClientFailed(connId ouroboros.ConnectionId) bool {
+	s.clientConnIdMutex.Lock()
+	tc, exists := s.trackedClients[connId]
+	if exists {
+		tc.Status = ClientStatusFailed
+	}
+	s.clientConnIdMutex.Unlock()
+	if !exists {
+		return false
+	}
+	return s.SetClientObservabilityOnly(connId, true)
+}
+
 // MarkClientSynced marks a tracked client as synced (at chain
 // tip).
 func (s *State) MarkClientSynced(
@@ -1536,7 +1559,8 @@ func (s *State) MarkClientSynced(
 	s.clientConnIdMutex.Lock()
 	tc, exists := s.trackedClients[connId]
 	var changed bool
-	if exists && tc.Status != ClientStatusSynced {
+	if exists && tc.Status != ClientStatusSynced &&
+		tc.Status != ClientStatusFailed {
 		tc.Status = ClientStatusSynced
 		tc.LastActivity = s.now()
 		changed = true

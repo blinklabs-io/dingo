@@ -23,12 +23,13 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/internal/certutil"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/leioskeyepoch"
 	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
-const transactionCertificateInsertSQL = `
+const transactionCertificateInsertSQL = `-- name: UpsertTransactionCertificate :one
 INSERT INTO certs (
     block_hash, transaction_id, certificate_id, slot, cert_index, cert_type
 ) VALUES (?, ?, 0, ?, ?, ?)
@@ -61,13 +62,13 @@ var certificateTables = []string{
 	"genesis_delegation",
 }
 
-const hasSpecializedCertificatesSQL = `
+const hasSpecializedCertificatesSQL = `-- name: HasTransactionCertificates :one
 SELECT EXISTS (
     SELECT 1 FROM certs WHERE transaction_id = ?
 )`
 
 const (
-	deletePoolRegistrationOwnersSQL = `
+	deletePoolRegistrationOwnersSQL = `-- name: DeletePoolRegistrationOwnersByTransaction :exec
 DELETE FROM pool_registration_owner
 WHERE pool_registration_id IN (
     SELECT pool_registration.id
@@ -75,7 +76,7 @@ WHERE pool_registration_id IN (
     JOIN certs ON certs.id = pool_registration.certificate_id
     WHERE certs.transaction_id = ?
 )`
-	deletePoolRegistrationRelaysSQL = `
+	deletePoolRegistrationRelaysSQL = `-- name: DeletePoolRegistrationRelaysByTransaction :exec
 DELETE FROM pool_registration_relay
 WHERE pool_registration_id IN (
     SELECT pool_registration.id
@@ -83,7 +84,7 @@ WHERE pool_registration_id IN (
     JOIN certs ON certs.id = pool_registration.certificate_id
     WHERE certs.transaction_id = ?
 )`
-	deleteMIRRewardsSQL = `
+	deleteMIRRewardsSQL = `-- name: DeleteMirRewardsByTransaction :exec
 DELETE FROM move_instantaneous_rewards_reward
 WHERE mir_id IN (
     SELECT move_instantaneous_rewards.id
@@ -94,7 +95,8 @@ WHERE mir_id IN (
 )
 
 func certificateTableCleanupSQL(table string) string {
-	return "DELETE FROM " + table + " WHERE certificate_id IN (" +
+	return "-- name: DeleteCertificateRowsByTransaction :exec\n" +
+		"DELETE FROM " + table + " WHERE certificate_id IN (" +
 		"SELECT id FROM certs WHERE transaction_id = ?)"
 }
 
@@ -229,8 +231,7 @@ func (s *Store) applyTransactionCertificates(
 				err,
 			)
 		}
-		if _, err := db.ExecContext(ctx, `
-UPDATE certs SET certificate_id = ? WHERE id = ?`,
+		if _, err := s.execCached(ctx, db, updateCertificateSpecializedIDSQL,
 			specializedID,
 			unifiedID,
 		); err != nil {
@@ -390,7 +391,7 @@ func (s *Store) applySpecializedCertificate(
 		)
 		return id, nil, err
 	case *lcommon.GenesisKeyDelegationCertificate:
-		id, err := insertCertificateRow(ctx, db, `
+		id, err := insertCertificateRow(ctx, db, `-- name: InsertGenesisDelegation :one
 INSERT INTO genesis_delegation (
     genesis_hash, genesis_delegate_hash, vrf_key_hash, added_slot,
     block_index, cert_index, certificate_id
@@ -455,7 +456,7 @@ RETURNING id`,
 		if err != nil {
 			return 0, nil, err
 		}
-		id, err := insertCertificateRow(ctx, db, `
+		id, err := insertCertificateRow(ctx, db, `-- name: InsertAuthCommitteeHot :one
 INSERT INTO auth_committee_hot (
     cold_credential_tag, cold_credential, hot_credential_tag,
     host_credential, certificate_id, added_slot
@@ -498,7 +499,7 @@ RETURNING id`,
 		if err != nil {
 			return 0, nil, err
 		}
-		id, err := insertCertificateRow(ctx, db, `
+		id, err := insertCertificateRow(ctx, db, `-- name: InsertResignCommitteeCold :one
 INSERT INTO resign_committee_cold (
     anchor_url, cold_credential_tag, cold_credential, anchor_hash,
     certificate_id, added_slot
@@ -522,7 +523,7 @@ RETURNING id`,
 		)
 		return id, nil, err
 	}
-	return applyAccountCertificate(
+	return s.applyAccountCertificate(
 		ctx,
 		db,
 		certificate,
@@ -546,7 +547,7 @@ func nullableDecimalUint64(value *uint64) any {
 	return decimalUint64(types.Uint64(*value))
 }
 
-func applyAccountCertificate(
+func (s *Store) applyAccountCertificate(
 	ctx context.Context,
 	db queryer,
 	certificate lcommon.Certificate,
@@ -671,9 +672,7 @@ func applyAccountCertificate(
 	var oldDrepCredential []byte
 	var oldDrepType uint64
 	if changesDrepDelegation {
-		err := db.QueryRowContext(ctx, `
-SELECT drep, drep_type FROM account
-WHERE credential_tag = ? AND staking_key = ?`, tag, key).Scan(
+		err := s.queryRowCached(ctx, db, getAccountDrepDelegationSQL, tag, key).Scan(
 			&oldDrepCredential,
 			&oldDrepType,
 		)
@@ -681,7 +680,7 @@ WHERE credential_tag = ? AND staking_key = ?`, tag, key).Scan(
 			return 0, nil, fmt.Errorf("read prior account DRep delegation: %w", err)
 		}
 	}
-	if err := updateCertificateAccount(ctx, db, tag, key, slot, state); err != nil {
+	if err := s.updateCertificateAccount(ctx, db, tag, key, slot, state); err != nil {
 		return 0, nil, err
 	}
 	if changesDrepDelegation {
@@ -708,7 +707,7 @@ WHERE credential_tag = ? AND staking_key = ?`, tag, key).Scan(
 		if len(newDrepCredential) > 0 &&
 			newDrepType <= models.DrepTypeScriptHash {
 			var registered bool
-			if err := db.QueryRowContext(ctx, `
+			if err := db.QueryRowContext(ctx, `-- name: ActiveDrepExists :one
 SELECT EXISTS (
     SELECT 1 FROM drep
     WHERE credential_tag = ? AND credential = ? AND active = TRUE
@@ -754,7 +753,8 @@ SELECT EXISTS (
 	id, err := insertCertificateRow(
 		ctx,
 		db,
-		"INSERT INTO "+table+" ("+columns+") VALUES ("+values+") RETURNING id",
+		"-- name: InsertStakeCertificate :one\n"+
+			"INSERT INTO "+table+" ("+columns+") VALUES ("+values+") RETURNING id",
 		args...,
 	)
 	ref := models.NewStakeCredentialRef(tag, key)
@@ -777,7 +777,7 @@ func shouldRemovePriorDrepDelegation(
 	return newDrepType > models.DrepTypeScriptHash || !hasNewCredential
 }
 
-func updateCertificateAccount(
+func (s *Store) updateCertificateAccount(
 	ctx context.Context,
 	db queryer,
 	tag uint8,
@@ -791,10 +791,7 @@ func updateCertificateAccount(
 		drep     []byte
 		drepType uint64
 	)
-	err := db.QueryRowContext(ctx, `
-SELECT active, pool, drep, drep_type
-FROM account
-WHERE credential_tag = ? AND staking_key = ?`,
+	err := s.queryRowCached(ctx, db, getAccountCertificateStateSQL,
 		tag,
 		key,
 	).Scan(&active, &pool, &drep, &drepType)
@@ -824,21 +821,7 @@ WHERE credential_tag = ? AND staking_key = ?`,
 		drep = next.drep
 		drepType = next.drepType
 	}
-	_, err = db.ExecContext(ctx, `
-INSERT INTO account (
-    staking_key, credential_tag, pool, drep, added_slot, created_slot,
-    reward, drep_type, active, expiration_epoch
-) VALUES (?, ?, ?, ?, ?, ?, '0', ?, ?, 0)
-ON CONFLICT (credential_tag, staking_key) DO UPDATE SET
-    pool = excluded.pool,
-    drep = excluded.drep,
-    added_slot = excluded.added_slot,
-    created_slot = CASE
-        WHEN account.created_slot <= excluded.created_slot THEN account.created_slot
-        ELSE excluded.created_slot
-    END,
-    drep_type = excluded.drep_type,
-    active = excluded.active`,
+	_, err = s.execCached(ctx, db, upsertAccountSQL,
 		key,
 		tag,
 		pool,
@@ -893,7 +876,7 @@ func applyPoolRegistrationCertificate(
 		leiosKeyPublic = cert.LeiosKey.PublicKey
 		leiosKeyPoP = cert.LeiosKey.PossessionProof
 	}
-	poolID, err := queryReturnedID(ctx, db, `
+	poolID, err := queryReturnedID(ctx, db, `-- name: UpsertPoolRegistration :one
 INSERT INTO pool (
     margin, pool_key_hash, vrf_key_hash, reward_account,
     latest_op_cert_sequence, reward_account_credential_tag, pledge, cost,
@@ -935,7 +918,8 @@ RETURNING id`,
 	// from live pool state.
 	executionSlot := at.slot
 	var closureSlot sql.NullInt64
-	if err := db.QueryRowContext(ctx, `SELECT lc.slot FROM leios_transaction_context lc JOIN certs ON certs.transaction_id = lc.transaction_id WHERE certs.id = ?`, certificateID).Scan(&closureSlot); err != nil && !errors.Is(err, sql.ErrNoRows) {
+	if err := db.QueryRowContext(ctx, `-- name: GetLeiosClosureSlotByCertificate :one
+SELECT lc.slot FROM leios_transaction_context lc JOIN certs ON certs.transaction_id = lc.transaction_id WHERE certs.id = ?`, certificateID).Scan(&closureSlot); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return 0, err
 	}
 	if closureSlot.Valid {
@@ -944,6 +928,24 @@ RETURNING id`,
 	held, err := poolRegistrationDepositHeld(ctx, db, poolID, at, deposit, executionSlot)
 	if err != nil {
 		return 0, err
+	}
+	// Only a registration carrying a BLS key records a registration epoch;
+	// every other registration keeps the column NULL.
+	var leiosKeyEpoch *uint64
+	var leiosKeyAgeUnknown bool
+	if len(leiosKeyPublic) > 0 {
+		leiosKeyEpoch, leiosKeyAgeUnknown, err = leioskeyepoch.Registration(
+			ctx, db, poolID,
+			leioskeyepoch.Position{
+				Slot:       at.slot,
+				BlockIndex: at.blockIndex,
+				CertIndex:  at.certIndex,
+			},
+			executionSlot, leiosKeyPublic, leiosKeyPoP,
+		)
+		if err != nil {
+			return 0, err
+		}
 	}
 	registrationID, err := insertPoolRegistration(ctx, db, []any{
 		margin,
@@ -963,26 +965,26 @@ RETURNING id`,
 		nullableDecimalUint64(held),
 		nullBytes(leiosKeyPublic),
 		nullBytes(leiosKeyPoP),
-		false,
-		nil,
+		leiosKeyAgeUnknown,
+		leiosKeyEpoch,
 	}, poolID, slot, certificateID, 0)
 	if err != nil {
 		return 0, err
 	}
-	if _, err := db.ExecContext(ctx, `
+	if _, err := db.ExecContext(ctx, `-- name: DeletePoolRegistrationOwnersByID :exec
 DELETE FROM pool_registration_owner WHERE pool_registration_id = ?`,
 		registrationID,
 	); err != nil {
 		return 0, err
 	}
-	if _, err := db.ExecContext(ctx, `
+	if _, err := db.ExecContext(ctx, `-- name: DeletePoolRegistrationRelaysByID :exec
 DELETE FROM pool_registration_relay WHERE pool_registration_id = ?`,
 		registrationID,
 	); err != nil {
 		return 0, err
 	}
 	for _, owner := range cert.PoolOwners {
-		if _, err := db.ExecContext(ctx, `
+		if _, err := db.ExecContext(ctx, `-- name: InsertPoolRegistrationOwner :exec
 INSERT INTO pool_registration_owner (
     key_hash, pool_registration_id, pool_id
 ) VALUES (?, ?, ?)`,
@@ -1003,7 +1005,7 @@ INSERT INTO pool_registration_owner (
 		if relay.Hostname != nil {
 			hostname = *relay.Hostname
 		}
-		if _, err := db.ExecContext(ctx, `
+		if _, err := db.ExecContext(ctx, `-- name: InsertPoolRegistrationRelay :exec
 INSERT INTO pool_registration_relay (
     ipv4, ipv6, relay_type, hostname, pool_registration_id, pool_id, port
 ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
@@ -1028,7 +1030,7 @@ func applyPoolRetirementCertificate(
 	certificateID uint,
 	slot uint64,
 ) (uint, error) {
-	poolID, err := queryReturnedID(ctx, db, `
+	poolID, err := queryReturnedID(ctx, db, `-- name: InsertPoolStub :one
 INSERT INTO pool (
     pool_key_hash, latest_op_cert_sequence, pledge, cost,
     reward_account_credential_tag
@@ -1042,7 +1044,7 @@ RETURNING id`,
 	if err != nil {
 		return 0, err
 	}
-	return insertCertificateRow(ctx, db, `
+	return insertCertificateRow(ctx, db, `-- name: InsertPoolRetirement :one
 INSERT INTO pool_retirement (
     pool_key_hash, certificate_id, pool_id, epoch, added_slot
 ) VALUES (?, ?, ?, ?, ?)
@@ -1088,7 +1090,7 @@ func applyDrepRegistrationCertificate(
 	); err != nil {
 		return 0, err
 	}
-	return insertCertificateRow(ctx, db, `
+	return insertCertificateRow(ctx, db, `-- name: InsertRegistrationDrep :one
 INSERT INTO registration_drep (
     anchor_url, drep_credential, anchor_hash, certificate_id,
     credential_tag, added_slot, deposit_amount
@@ -1145,7 +1147,7 @@ func applyDrepDeregistrationCertificate(
 	); err != nil {
 		return 0, fmt.Errorf("clear delegations for DRep deregistration: %w", err)
 	}
-	return insertCertificateRow(ctx, db, `
+	return insertCertificateRow(ctx, db, `-- name: InsertDeregistrationDrep :one
 INSERT INTO deregistration_drep (
     drep_credential, certificate_id, credential_tag, added_slot,
     deposit_amount
@@ -1191,7 +1193,7 @@ func applyDrepUpdateCertificate(
 	); err != nil {
 		return 0, err
 	}
-	return insertCertificateRow(ctx, db, `
+	return insertCertificateRow(ctx, db, `-- name: InsertUpdateDrep :one
 INSERT INTO update_drep (
     anchor_url, credential, anchor_hash, certificate_id,
     credential_tag, added_slot
@@ -1217,12 +1219,12 @@ func setDrepCertificateState(
 	active bool,
 	requireExisting bool,
 ) error {
-	query := `
+	query := `-- name: DrepExists :one
 SELECT EXISTS (
     SELECT 1 FROM drep WHERE credential_tag = ? AND credential = ?
 )`
 	if requireExisting {
-		query = `
+		query = `-- name: ActiveDrepExistsByCredential :one
 SELECT EXISTS (
     SELECT 1 FROM drep
     WHERE credential_tag = ? AND credential = ? AND active = TRUE
@@ -1236,7 +1238,7 @@ SELECT EXISTS (
 		return models.ErrDrepNotFound
 	}
 	if exists {
-		_, err := db.ExecContext(ctx, `
+		_, err := db.ExecContext(ctx, `-- name: UpdateDrepAnchor :exec
 UPDATE drep
 SET anchor_url = ?, anchor_hash = ?, added_slot = ?, active = ?
 WHERE credential_tag = ? AND credential = ?`,
@@ -1249,7 +1251,7 @@ WHERE credential_tag = ? AND credential = ?`,
 		)
 		return err
 	}
-	_, err := db.ExecContext(ctx, `
+	_, err := db.ExecContext(ctx, `-- name: InsertDrep :exec
 INSERT INTO drep (
     anchor_url, credential, anchor_hash, added_slot, credential_tag,
     last_activity_epoch, expiry_epoch, active
@@ -1271,7 +1273,7 @@ func applyMIRCertificate(
 	certificateID uint,
 	slot uint64,
 ) (uint, error) {
-	id, err := insertCertificateRow(ctx, db, `
+	id, err := insertCertificateRow(ctx, db, `-- name: InsertMoveInstantaneousRewards :one
 INSERT INTO move_instantaneous_rewards (
     pot, certificate_id, added_slot, other_pot
 ) VALUES (?, ?, ?, ?)
@@ -1304,7 +1306,7 @@ RETURNING id`,
 				credential.Credential[:],
 			)
 		}
-		if _, err := db.ExecContext(ctx, `
+		if _, err := db.ExecContext(ctx, `-- name: InsertMoveInstantaneousRewardsReward :exec
 INSERT INTO move_instantaneous_rewards_reward (
     credential, credential_tag, amount, mir_id
 ) VALUES (?, ?, ?, ?)`,
@@ -1328,3 +1330,31 @@ func insertCertificateRow(
 	id, err := queryReturnedID(ctx, db, query, args...)
 	return uint(id), err
 }
+
+const updateCertificateSpecializedIDSQL = `-- name: UpdateCertificateSpecializedID :exec
+UPDATE certs SET certificate_id = ? WHERE id = ?`
+
+const getAccountDrepDelegationSQL = `-- name: GetAccountDrepDelegation :one
+SELECT drep, drep_type FROM account
+WHERE credential_tag = ? AND staking_key = ?`
+
+const getAccountCertificateStateSQL = `-- name: GetAccountCertificateState :one
+SELECT active, pool, drep, drep_type
+FROM account
+WHERE credential_tag = ? AND staking_key = ?`
+
+const upsertAccountSQL = `-- name: UpsertAccount :exec
+INSERT INTO account (
+    staking_key, credential_tag, pool, drep, added_slot, created_slot,
+    reward, drep_type, active, expiration_epoch
+) VALUES (?, ?, ?, ?, ?, ?, '0', ?, ?, 0)
+ON CONFLICT (credential_tag, staking_key) DO UPDATE SET
+    pool = excluded.pool,
+    drep = excluded.drep,
+    added_slot = excluded.added_slot,
+    created_slot = CASE
+        WHEN account.created_slot <= excluded.created_slot THEN account.created_slot
+        ELSE excluded.created_slot
+    END,
+    drep_type = excluded.drep_type,
+    active = excluded.active`

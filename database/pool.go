@@ -194,6 +194,30 @@ func (d *Database) LatestPoolOpCertSequenceAtOrBefore(
 	)
 }
 
+// LatestPoolOpCertSequenceInRange returns the highest observed op-cert
+// sequence for a pool between the inclusive slot bounds.
+func (d *Database) LatestPoolOpCertSequenceInRange(
+	ctx context.Context,
+	pkh lcommon.PoolKeyHash,
+	startSlot uint64,
+	endSlot uint64,
+	txn *Txn,
+) (uint64, bool, error) {
+	if startSlot > endSlot {
+		return 0, false, nil
+	}
+	if txn == nil {
+		txn = d.Transaction(ctx, false)
+		defer txn.Release()
+	}
+	return d.metadata.LatestPoolOpCertSequenceInRange(
+		pkh,
+		startSlot,
+		endSlot,
+		txn.Metadata(),
+	)
+}
+
 // PoolOpCertSequencesExistAtSlot reports whether any pool has an op-cert
 // sequence row at exactly slot. Ledger validation reads it at the Mithril
 // trust boundary to tell an imported certified counter map from one that was

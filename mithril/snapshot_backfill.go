@@ -275,9 +275,6 @@ func RunSnapshotBackfill(
 	if cfg.Feed.Bootstrap.Logger == nil {
 		cfg.Feed.Bootstrap.Logger = cfg.Logger
 	}
-	if cfg.fetchGap == nil {
-		cfg.fetchGap = fetchGapBlocks
-	}
 	logger := cfg.Logger
 	db := cfg.DB
 
@@ -445,6 +442,28 @@ func RunSnapshotBackfill(
 	if err != nil {
 		return ocommon.Point{}, err
 	}
+	slotLimit := func() (uint64, error) {
+		return ancillarySlotLimit(cfg.CardanoNodeConfig, certifiedTip.Slot)
+	}
+	if cfg.fetchGap == nil {
+		cfg.fetchGap = func(
+			ctx context.Context,
+			logger *slog.Logger,
+			network string,
+			start ocommon.Point,
+			end ocommon.Point,
+		) ([]models.Block, error) {
+			maxGapBlocks, err := ancillaryBlockLimit(
+				cfg.CardanoNodeConfig,
+			)
+			if err != nil {
+				return nil, err
+			}
+			return fetchGapBlocks(
+				ctx, logger, network, start, end, maxGapBlocks,
+			)
+		}
+	}
 	if resume && !repinned {
 		if err := pin.verifyCertifiedTip(certifiedTip.Slot); err != nil {
 			return ocommon.Point{}, err
@@ -467,7 +486,9 @@ func RunSnapshotBackfill(
 		AncillaryVerified: true,
 		AncillaryDigests:  ancillaryDigests,
 	}
-	prepared, err := prepareLedgerStateImport(logger, result, certifiedTip.Slot)
+	prepared, err := prepareLedgerStateImport(
+		logger, result, certifiedTip.Slot, slotLimit,
+	)
 	if err != nil {
 		return ocommon.Point{}, fmt.Errorf("preparing ledger state: %w", err)
 	}

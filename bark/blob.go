@@ -35,6 +35,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/internal/httpuseragent"
 	"github.com/blinklabs-io/dingo/internal/netguard"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -633,19 +634,18 @@ func (b *BlobStoreBark) fetchBlockFromArchive(
 	slot uint64,
 	hash []byte,
 ) ([]byte, types.BlockMetadata, error) {
-	resp, err := b.archiveClient.FetchBlock(
-		ctx,
-		connect.NewRequest(
-			&archivev1alpha1.FetchBlockRequest{
-				Blocks: []*archivev1alpha1.BlockRef{
-					{
-						Slot: new(slot),
-						Hash: new(hex.EncodeToString(hash)),
-					},
+	fetchReq := connect.NewRequest(
+		&archivev1alpha1.FetchBlockRequest{
+			Blocks: []*archivev1alpha1.BlockRef{
+				{
+					Slot: new(slot),
+					Hash: new(hex.EncodeToString(hash)),
 				},
 			},
-		),
+		},
 	)
+	fetchReq.Header().Set("User-Agent", httpuseragent.Default())
+	resp, err := b.archiveClient.FetchBlock(ctx, fetchReq)
 	if err != nil {
 		return nil, types.BlockMetadata{},
 			fmt.Errorf(
@@ -698,6 +698,7 @@ func (b *BlobStoreBark) fetchBlockFromArchive(
 		return nil, types.BlockMetadata{},
 			fmt.Errorf("failed creating request for bark supplied url: %w", err)
 	}
+	httpuseragent.Set(blockReq)
 	blockResp, err := b.httpClient.Do(blockReq) //nolint:gosec
 	if err != nil {
 		return nil, types.BlockMetadata{},

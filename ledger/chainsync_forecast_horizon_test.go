@@ -909,7 +909,7 @@ func TestHorizonFlushPublishesHeaderInvalidation(t *testing.T) {
 func newHorizonFlushTestLedger(
 	t *testing.T,
 	live func(ouroboros.ConnectionId) bool,
-) (*LedgerState, <-chan horizonFlushRequest) {
+) (*LedgerState, chan horizonFlushRequest) {
 	t.Helper()
 	cm, err := chain.NewManager(context.Background(), nil, nil)
 	require.NoError(t, err)
@@ -1001,6 +1001,67 @@ func TestAwaitChainsyncHeaderAdmissionFlushFetchesFromPipelineOwner(
 		owner.String(),
 	)
 	require.True(t, sameConnectionId(owner, ls.selectedBlockfetchConnId))
+}
+
+func TestAwaitChainsyncHeaderAdmissionDrainsQueuedWorkBeforeDisconnect(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	ls, requests := newHorizonFlushTestLedger(t, nil)
+	owner := testRecycleConnId()
+	ls.headerPipelineConnId = owner
+	ls.config.BlockfetchRequestRangeFunc = func(
+		connId ouroboros.ConnectionId,
+		start ocommon.Point,
+		_ ocommon.Point,
+	) (uint64, error) {
+		requests <- horizonFlushRequest{connId: connId, start: start}
+		return 1, nil
+	}
+	arrival := time.Date(2026, time.August, 22, 12, 1, 40, 0, time.UTC)
+	header := mockHeader{
+		hash:        lcommon.Blake2b256Hash([]byte("disconnected")),
+		prevHash:    lcommon.Blake2b256Hash([]byte("missing parent")),
+		blockNumber: 3,
+		slot:        90,
+	}
+	e := ChainsyncEvent{
+		ConnectionId: owner,
+		BlockHeader:  header,
+		ArrivalTime:  arrival,
+		Point: ocommon.NewPoint(
+			header.SlotNumber(),
+			header.Hash().Bytes(),
+		),
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	results := awaitAdmissionAsync(ctx, ls, e)
+
+	req := testutil.RequireReceive(
+		t,
+		requests,
+		testutil.AsyncWait,
+		"a disconnected future header must first flush queued local work",
+	)
+	require.EqualValues(t, 10, req.start.Slot)
+	testutil.RequireNoReceive(
+		t,
+		results,
+		100*time.Millisecond,
+		"admission must wait while queued work can advance the forecast",
+	)
+
+	cancel()
+	got := testutil.RequireReceive(
+		t,
+		results,
+		testutil.AsyncWait,
+		"admission did not return after cancellation",
+	)
+	require.ErrorIs(t, got.err, context.Canceled)
+	require.False(t, got.accepted)
 }
 
 // A connection whose close was already processed must not be made the
@@ -1349,6 +1410,63 @@ func TestAwaitChainsyncHeaderAdmissionWaitsForUnappliedChainBlocks(
 	)
 	require.ErrorIs(t, got.err, ErrChainsyncHeaderNeedsResync)
 	require.False(t, got.accepted)
+}
+
+// chainAheadOfAppliedTip compares the chain tip with the applied tip as points.
+// A chain tip in the applied tip's slot under another hash is a block the
+// ledger has not applied, so it counts as ahead like a later slot does; a
+// chain tip in an earlier slot cannot carry a block that extends the forecast.
+func TestChainAheadOfAppliedTip(t *testing.T) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	cm, err := chain.NewManager(context.Background(), db, nil)
+	require.NoError(t, err)
+	primary := cm.PrimaryChain()
+	blocks, err := fixtures.GenerateConwayChain(
+		1,
+		lcommon.Blake2b256{},
+		300_000,
+		1_000,
+		2,
+	)
+	require.NoError(t, err)
+	for _, block := range blocks {
+		require.NoError(t, primary.AddBlock(context.Background(), block, nil))
+	}
+	chainTip := primary.Tip().Point
+
+	cases := map[string]struct {
+		applied ocommon.Point
+		want    bool
+	}{
+		"applied tip is the chain tip": {
+			applied: chainTip,
+		},
+		"chain tip in a later slot": {
+			applied: ocommon.NewPoint(chainTip.Slot-1, []byte("earlier")),
+			want:    true,
+		},
+		"chain tip in the same slot under another hash": {
+			applied: ocommon.NewPoint(chainTip.Slot, []byte("other fork")),
+			want:    true,
+		},
+		"chain tip in an earlier slot": {
+			applied: ocommon.NewPoint(chainTip.Slot+1, []byte("later")),
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			ls := &LedgerState{chain: primary}
+			ls.tip.Store(&tipSnapshot{
+				currentTip: ochainsync.Tip{Point: tc.applied},
+			})
+			require.Equal(t, tc.want, ls.chainAheadOfAppliedTip())
+		})
+	}
 }
 
 // connectsToLocalChain decides whether a held header can still be released by

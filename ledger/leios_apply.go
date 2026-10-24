@@ -20,7 +20,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"math"
 	"sync"
 	"time"
 
@@ -380,11 +379,16 @@ func (ls *LedgerState) validateAndApplyEndorserBlockTransactions(
 				epochStartSlot:    snapshot.currentEpochStartSlot,
 			}).pinCommitteeState(snapshot.currentEpoch, pp).
 				pinSyntheticV2CostModel(synthetic)
+			validateStart := time.Now()
 			err = validationEra.ValidateTxFunc(
 				tx,
 				referenceSlot,
 				lv,
 				pp,
+			)
+			ls.metrics.observeBlockStage(
+				blockStageValidate,
+				time.Since(validateStart),
 			)
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return 0, 0, ctxErr
@@ -425,7 +429,9 @@ func (ls *LedgerState) validateAndApplyEndorserBlockTransactions(
 			applyEvents = append(applyEvents, events...)
 		}
 		delta.addTransaction(tx, idx)
+		applyStart := time.Now()
 		err = delta.applyWithoutRecordingDonations(ctx, ls, txn)
+		ls.metrics.observeBlockStage(blockStageApply, time.Since(applyStart))
 		if err == nil {
 			donation, err = addUint64(donation, delta.donation)
 		}
@@ -586,7 +592,7 @@ func buildEndorserBlockBlob(
 	}
 	writeRange := func(b []byte) (uint32, uint32, error) {
 		off := buf.Len()
-		if off > math.MaxUint32 || len(b) > math.MaxUint32 {
+		if !fitsUint32(off) || !fitsUint32(len(b)) {
 			return 0, 0, errors.New(
 				"endorser block blob offset out of uint32 range",
 			)
