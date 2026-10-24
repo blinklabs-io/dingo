@@ -957,10 +957,12 @@ func TestListAvailableSnapshotsSerializesCloudReconciliation(t *testing.T) {
 	var provider *barkRecoveringCatalogDestination
 	registry := lifecycle.NewDestinationRegistry()
 	registry.Register("serialcatalog", func(uri *url.URL) (lifecycle.CloudDestination, error) {
-		provider = &barkRecoveringCatalogDestination{
-			dir:       filepath.Join(cloudRoot, strings.TrimPrefix(uri.Path, "/")),
-			failList:  &failList,
-			listCalls: &listCalls,
+		if provider == nil {
+			provider = &barkRecoveringCatalogDestination{
+				dir:       filepath.Join(cloudRoot, strings.TrimPrefix(uri.Path, "/")),
+				failList:  &failList,
+				listCalls: &listCalls,
+			}
 		}
 		return provider, nil
 	})
