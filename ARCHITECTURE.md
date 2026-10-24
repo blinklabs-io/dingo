@@ -15941,7 +15941,9 @@ off even for an embedder that constructs a `Config` directly and never calls
 `Validate`.
 
 Key configuration areas:
-- Network selection (preview, preprod, mainnet)
+- Network selection (preview, preprod, mainnet, dijkstra, musashi, devnet,
+  prime-testnet). DijkstraNet uses magic 6 and the canonical `dijkstra`
+  configuration bundle; it does not enable Musashi prototype trust bypasses.
 - Storage mode (`core` or `api`)
 - Database path and `plugins.storage` provider selections
 - Listen addresses and ports
