@@ -100,6 +100,7 @@ measurements, not as current performance guarantees.
 - [Ledger and database results](benchmarks/benchmark_results.md)
 - [Targeted comparison](benchmarks/benchmark_results_targeted.md)
 - [Block producer sizing](benchmarks/benchmark_results_bp_pi.md)
+- [Mithril Core sync](benchmarks/benchmark_results_mithril_core.md)
 - [Mithril API backfill](benchmarks/benchmark_results_api_backfill.md)
 
 `./generate_benchmarks.sh --write` updates the ledger and database report.
