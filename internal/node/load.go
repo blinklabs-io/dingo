@@ -1585,7 +1585,9 @@ func decodeRawImmutableBlockBatch(
 	if workerCount > len(rawBlocks) {
 		workerCount = len(rawBlocks)
 	}
-	if cap(rawBatch) < len(rawBlocks) {
+	if rawBatch == nil {
+		rawBatch = make([]chain.RawBlock, len(rawBlocks))
+	} else if cap(rawBatch) < len(rawBlocks) {
 		rawBatch = make([]chain.RawBlock, len(rawBlocks))
 	} else {
 		rawBatch = rawBatch[:len(rawBlocks)]
