@@ -36,10 +36,10 @@ const (
 
 // socketPathLimit returns the longest socket path this platform accepts.
 //
-// A non-abstract path is NUL-terminated inside sun_path, costing one byte; a
-// Linux abstract address (leading "@") is not, so it may use the full
-// field. Getting that distinction right matters because an abstract address
-// is a legitimate way to name a KES agent socket on Linux, and rejecting one
+// A non-abstract path is NUL-terminated inside sun_path, costing one byte; an
+// abstract address (leading "@" where Go rewrites it) is not, so it may use
+// the full field. Getting that distinction right matters because an abstract
+// address is a legitimate way to name a KES agent socket, and rejecting one
 // byte of it would be a bug in this check rather than in the operator's
 // configuration.
 func socketPathLimit(path string) int {
@@ -53,8 +53,29 @@ func socketPathLimit(path string) int {
 	return sunPath - 1
 }
 
+// isAbstractSocketPath reports whether path is an abstract address on this
+// platform.
 func isAbstractSocketPath(path string) bool {
-	return runtime.GOOS == "linux" && strings.HasPrefix(path, "@")
+	return isAbstractSocketPathFor(runtime.GOOS, path)
+}
+
+// isAbstractSocketPathFor reports whether path is an abstract address on goos.
+func isAbstractSocketPathFor(goos, path string) bool {
+	return hasAbstractSocketNamespace(goos) && strings.HasPrefix(path, "@")
+}
+
+// hasAbstractSocketNamespace reports whether Go's syscall package reads a
+// leading "@" on goos as an abstract address. It rewrites "@" on Linux (Android
+// builds the same file), on Solaris (illumos builds the same file), and on
+// Windows. Elsewhere "@name" is an ordinary filename relative to the working
+// directory.
+func hasAbstractSocketNamespace(goos string) bool {
+	switch goos {
+	case "linux", "android", "illumos", "solaris", "windows":
+		return true
+	default:
+		return false
+	}
 }
 
 // resolveSocketPath fixes a named socket to one filesystem location before
