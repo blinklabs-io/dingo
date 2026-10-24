@@ -6296,10 +6296,12 @@ it. Dingo implements this as a **corroboration gate**
   protocol's receive loop, gouroboros fails a pipelined client that consumes no
   reply within its 10s CanAwait timeout, and a hold no witness can end (the
   witnesses were recycled, or every tracked client slot is held) would
-  otherwise last forever. When it expires the header is withheld and the
-  connection re-intersects
-  (`ChainsyncResyncReasonGenesisCorroborationHoldExpired`), which delivers the
-  header again and frees the client slot meanwhile. A chain's first block may
+  otherwise last forever. When the hold expires, the header is withheld and
+  the callback returns without re-intersecting. The connection's staged
+  candidate frontier remains available to corroborate peers that catch up, and
+  their streams can deliver the withheld chain prefix to the ledger. Staged
+  candidates are bounded per peer, so they cannot vouch for an arbitrarily old
+  prefix. A chain's first block may
   sit at slot 0, as Preview's does; it carries a hash and is a delivered point
   like any other, and only the hashless origin clears a peer's frontier. When no peer is corroborated, nothing is applied and the
   ledger genuinely stalls. Observation happening before the apply gate is what
