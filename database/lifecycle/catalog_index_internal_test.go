@@ -1025,7 +1025,47 @@ func TestCloudCatalogRecoversAfterStartupConstructorFailure(t *testing.T) {
 	require.Equal(t, cloudDest+"/mirrored", entries[0].Location)
 }
 
-func TestCloudReconciliationSerializesConcurrentIncrementalMirror(t *testing.T) {
+func TestCloudReconciliationRepairsCorruptCatalogGeneration(t *testing.T) {
+	t.Parallel()
+	base := t.TempDir()
+	require.NoError(t, EnsureSnapshotCatalog(base, WithManifestKey(catalogTestTrustKey)))
+	db, err := openSnapshotCatalog(t.Context(), snapshotCatalogPath(base), false)
+	require.NoError(t, err)
+	_, err = db.ExecContext(t.Context(), `
+UPDATE catalog_meta SET generation = 'invalid' WHERE singleton = 1`)
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+
+	manifestDir := filepath.Join(t.TempDir(), "from-cloud")
+	require.NoError(t, os.Mkdir(manifestDir, 0o755))
+	require.NoError(t, WriteManifest(manifestDir, Manifest{
+		CreatedAt: time.Unix(10, 0).UTC(), Trigger: TriggerManual,
+	}, WithManifestKey(catalogTestTrustKey)))
+	manifest, err := ReadManifest(manifestDir, WithManifestKey(catalogTestTrustKey))
+	require.NoError(t, err)
+	registry := NewDestinationRegistry()
+	registry.Register("repaircorruptcatalog", func(*url.URL) (CloudDestination, error) {
+		return &catalogScriptedLister{entries: []SnapshotEntry{{
+			ID: "from-cloud", Manifest: manifest,
+		}}}, nil
+	})
+	const cloudDest = "repaircorruptcatalog://bucket/snapshots"
+
+	current, err := ReconcileCloudSnapshotCatalogContext(
+		t.Context(), base, registry, cloudDest,
+		WithManifestKey(catalogTestTrustKey),
+	)
+	require.NoError(t, err)
+	require.True(t, current)
+	entries, _, err := ListAvailableSnapshotPageContext(
+		t.Context(), base, cloudDest, 10, nil,
+	)
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	require.Equal(t, "from-cloud", entries[0].Entry.ID)
+}
+
+func TestCloudReconciliationDoesNotBlockIncrementalMirror(t *testing.T) {
 	base := t.TempDir()
 	require.NoError(t, EnsureSnapshotCatalog(base, WithManifestKey(catalogTestTrustKey)))
 	manifestAt := func(id string, second int64) Manifest {
@@ -1057,26 +1097,18 @@ func TestCloudReconciliationSerializesConcurrentIncrementalMirror(t *testing.T) 
 		reconcileDone <- err
 	}()
 	<-provider.captured
-	lockCtx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+	lockCtx, cancel := context.WithTimeout(t.Context(), time.Second)
 	defer cancel()
-	lockErr := lockSnapshotCatalog(lockCtx)
-	if lockErr == nil {
-		unlockSnapshotCatalog()
-	}
-	require.ErrorIs(t, lockErr, context.DeadlineExceeded,
-		"provider listing and replacement must hold the reconciliation gate")
-
-	updateDone := make(chan error, 1)
-	go func() {
-		updateDone <- updateCloudSnapshotCatalogIfPresent(
-			t.Context(), base,
-			SnapshotEntry{ID: "mirrored", Manifest: mirroredManifest}, cloudDest,
-			WithManifestKey(catalogTestTrustKey),
-		)
-	}()
+	require.NoError(t, lockSnapshotCatalog(lockCtx),
+		"provider listing must not hold the catalog gate")
+	unlockSnapshotCatalog()
+	require.NoError(t, updateCloudSnapshotCatalogIfPresent(
+		t.Context(), base,
+		SnapshotEntry{ID: "mirrored", Manifest: mirroredManifest}, cloudDest,
+		WithManifestKey(catalogTestTrustKey),
+	))
 	close(provider.release)
-	require.NoError(t, <-reconcileDone)
-	require.NoError(t, <-updateDone)
+	require.ErrorIs(t, <-reconcileDone, ErrSnapshotCatalogChanged)
 
 	entries, _, err := ListAvailableSnapshotPageContext(
 		t.Context(), base, cloudDest, 10, nil,
@@ -1086,7 +1118,7 @@ func TestCloudReconciliationSerializesConcurrentIncrementalMirror(t *testing.T) 
 	for _, entry := range entries {
 		ids = append(ids, entry.Entry.ID)
 	}
-	require.ElementsMatch(t, []string{"scanned", "mirrored"}, ids)
+	require.Equal(t, []string{"mirrored"}, ids)
 }
 
 func TestCloudReconciliationConstructsProviderBeforeGate(t *testing.T) {

@@ -720,9 +720,8 @@ func RepairSnapshotCatalogContext(
 	return errors.Join(localErr, cloudErr)
 }
 
-// ReconcileCloudSnapshotCatalogContext holds the catalog reconciliation gate
-// across the provider snapshot and its replacement. Incremental mirror and
-// delete mutations therefore run either before the scan or after its rebuild.
+// ReconcileCloudSnapshotCatalogContext scans the provider outside the catalog
+// gate, then publishes only if no catalog mutation occurred during the scan.
 // current is true only when the catalog was completely reconciled with
 // cloudDest. An incomplete scan leaves the previous cloud set unchanged.
 func ReconcileCloudSnapshotCatalogContext(
@@ -749,15 +748,34 @@ func ReconcileCloudSnapshotCatalogContext(
 	}
 	defer closeCloudDestination(dest)
 	lister, ok := dest.(SnapshotCatalogLister)
-	if err := lockSnapshotCatalog(ctx); err != nil {
-		return false, err
-	}
-	defer unlockSnapshotCatalog()
 	if !ok {
 		return false, fmt.Errorf(
 			"%w: cloud destination does not support snapshot listing",
 			ErrSnapshotCatalogIncomplete,
 		)
+	}
+	if err := lockSnapshotCatalog(ctx); err != nil {
+		return false, err
+	}
+	startGeneration, generationErr := readSnapshotCatalogGenerationLocked(
+		ctx, baseDir,
+	)
+	unlockSnapshotCatalog()
+	if errors.Is(generationErr, ErrSnapshotCatalogCorrupt) {
+		repairErr := EnsureSnapshotCatalogContext(ctx, baseDir, opts...)
+		if repairErr != nil && !errors.Is(repairErr, ErrSnapshotCatalogIncomplete) {
+			return false, repairErr
+		}
+		if err := lockSnapshotCatalog(ctx); err != nil {
+			return false, err
+		}
+		startGeneration, generationErr = readSnapshotCatalogGenerationLocked(
+			ctx, baseDir,
+		)
+		unlockSnapshotCatalog()
+	}
+	if generationErr != nil {
+		return false, generationErr
 	}
 	entries, listErr := lister.ListSnapshotCatalog(
 		ctx, defaultSnapshotCatalogScanBudget(),
@@ -773,6 +791,20 @@ func ReconcileCloudSnapshotCatalogContext(
 				ErrSnapshotCatalogIncomplete, entry.ID, err,
 			)
 		}
+	}
+	if err := lockSnapshotCatalog(ctx); err != nil {
+		return false, err
+	}
+	defer unlockSnapshotCatalog()
+	currentGeneration, err := readSnapshotCatalogGenerationLocked(ctx, baseDir)
+	if err != nil {
+		return false, err
+	}
+	if currentGeneration != startGeneration {
+		return false, fmt.Errorf(
+			"%w: catalog generation advanced from %d to %d during cloud scan",
+			ErrSnapshotCatalogChanged, startGeneration, currentGeneration,
+		)
 	}
 	rebuildErr := rebuildCloudSnapshotCatalogLocked(
 		ctx, baseDir, cloudDest, entries,

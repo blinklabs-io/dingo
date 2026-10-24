@@ -15025,9 +15025,10 @@ disposable catalog, not during page requests. Cloud rows are exposed only when
 their stored source digest matches the exact parsed destination passed to the
 provider factory. The versioned digest covers every URL component without
 persisting credentials in the catalog. Provider construction finishes before
-the catalog gate is acquired; the provider scan and catalog replacement then
-share the same gate as incremental mirror and delete updates, so a concurrent
-completed mirror cannot be erased by an older startup scan. Reconciliation caps
+the catalog gate is acquired, and provider scans run outside that gate.
+Reconciliation publishes the scan only if the catalog generation is unchanged,
+so a concurrent mirror or delete can proceed during cloud I/O without an older
+scan replacing its update. Reconciliation caps
 provider page requests, listed prefixes and objects, manifest fetches, retained
 entries, and reported problems. GCS catalog discovery uses one explicit JSON
 list request per charged page while snapshot data operations retain the gRPC
