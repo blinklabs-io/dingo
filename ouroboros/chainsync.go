@@ -96,8 +96,15 @@ type scheduledChainsyncResync struct {
 
 type deferredHeaderRecoveryState struct {
 	baseline ochainsync.Tip
-	point    ocommon.Point
-	tip      ochainsync.Tip
+	// point and tip are the newest withheld header and the tip the peer sent
+	// with it, which is where the peer's protocol cursor sits. delivered
+	// records whether RecordClientDelivery already counted that header.
+	point     ocommon.Point
+	tip       ochainsync.Tip
+	delivered bool
+	// resolvable is cleared when the peer rolls back: its protocol cursor no
+	// longer sits at point, so applying point must not become its cursor.
+	resolvable bool
 }
 
 // chainsyncAdmissionContext ends when the peer's chainsync client is asked to
@@ -274,6 +281,7 @@ func (o *Ouroboros) markDeferredHeaderRecovery(
 	baseline ochainsync.Tip,
 	point ocommon.Point,
 	tip ochainsync.Tip,
+	delivered bool,
 ) {
 	if o.ledgerState == nil {
 		return
@@ -298,14 +306,25 @@ func (o *Ouroboros) markDeferredHeaderRecovery(
 		)
 	}
 	recovery := deferredHeaderRecoveryState{
-		baseline: baseline,
-		point:    point,
-		tip:      tip,
+		baseline:   baseline,
+		point:      point,
+		tip:        tip,
+		delivered:  delivered,
+		resolvable: true,
 	}
 	if existing, alreadyDeferred := o.deferredHeaderRecovery[connId]; !alreadyDeferred {
 		o.deferredHeaderRecovery[connId] = recovery
 	} else {
+		// Keep the first baseline, which still triggers recovery, but follow
+		// the peer's cursor to its newest withheld header: applying it covers
+		// every earlier one. A ledger rejection callback can report an older
+		// header after a newer one was withheld, so never move point back
+		// unless a rollback already moved the peer's cursor.
 		baseline = existing.baseline
+		if !existing.resolvable || point.Slot > existing.point.Slot {
+			recovery.baseline = existing.baseline
+			o.deferredHeaderRecovery[connId] = recovery
+		}
 	}
 	o.deferredHeaderRecoveryMu.Unlock()
 	current := o.ledgerState.Tip().Point
@@ -341,6 +360,21 @@ func (o *Ouroboros) markDeferredHeaderRecovery(
 			event.ChainsyncResyncReasonHeaderValidationRecovery,
 		)
 	}
+}
+
+// invalidateDeferredHeaderResolution keeps a connection's deferred-header
+// recovery but stops a later application of its withheld header from becoming
+// the connection's cursor, since a rollback moved the peer's protocol cursor
+// off it. Ledger advance then re-intersects the peer as before.
+func (o *Ouroboros) invalidateDeferredHeaderResolution(
+	connId ouroboros.ConnectionId,
+) {
+	o.deferredHeaderRecoveryMu.Lock()
+	if state, ok := o.deferredHeaderRecovery[connId]; ok {
+		state.resolvable = false
+		o.deferredHeaderRecovery[connId] = state
+	}
+	o.deferredHeaderRecoveryMu.Unlock()
 }
 
 func (o *Ouroboros) clearDeferredHeaderRecovery(
@@ -433,7 +467,8 @@ func (o *Ouroboros) retryDeferredHeadersAfterLedgerAdvance(evt event.Event) {
 			continue
 		}
 		candidate := recovery{conn: conn, state: state}
-		if applied.Point.Slot == state.point.Slot &&
+		if state.resolvable &&
+			applied.Point.Slot == state.point.Slot &&
 			bytes.Equal(applied.Point.Hash, state.point.Hash) {
 			resolved = append(resolved, candidate)
 			delete(o.deferredHeaderRecovery, conn)
@@ -449,13 +484,15 @@ func (o *Ouroboros) retryDeferredHeadersAfterLedgerAdvance(evt event.Event) {
 	// producer authorization is waiting on ledger state. Application is the
 	// authoritative validation result, so align the local cursor with the
 	// peer's already-advanced protocol cursor instead of reconnecting it to
-	// replay a block the node has just accepted.
+	// replay a block the node has just accepted. A header withheld before
+	// verification never reached delivery accounting, so count it now.
 	for _, candidate := range resolved {
 		if o.chainsyncState != nil {
-			o.chainsyncState.AdmitClientTip(
+			o.chainsyncState.AdmitDeferredClientTip(
 				candidate.conn,
 				candidate.state.point,
 				candidate.state.tip,
+				!candidate.state.delivered,
 			)
 		}
 	}
@@ -1517,6 +1554,9 @@ func (o *Ouroboros) chainsyncClientRollBackward(
 		attribute.String("block.hash", hex.EncodeToString(point.Hash)),
 	)
 	defer func() { tracing.End(span, err) }()
+	// The peer's protocol cursor moves whether or not the rollback is tracked
+	// below, so a withheld header can no longer stand in for it.
+	o.invalidateDeferredHeaderResolution(ctx.ConnectionId)
 	if o.recordHeldChainsyncTip(ctx.ConnectionId, tip) {
 		return ochainsync.ErrStopSyncProcess
 	}
@@ -1941,6 +1981,7 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 					verificationTipBaseline,
 					point,
 					tip,
+					false,
 				)
 				o.updateChainsyncMetrics(ctx.ConnectionId, tip)
 				return nil
@@ -2229,6 +2270,7 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 						o.ledgerState.Tip(),
 						point,
 						tip,
+						true,
 					)
 				}
 				resolvePeerTip(false)

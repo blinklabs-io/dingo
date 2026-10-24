@@ -1852,6 +1852,186 @@ func TestDeferredHeaderRecoveryKeepsPeerWhenDeferredHeaderIsApplied(
 	require.Equal(t, tip.Point, tracked.Cursor)
 }
 
+type deferredHeaderRecoveryFixture struct {
+	o        *Ouroboros
+	state    *dchainsync.State
+	conn     ouroboros.ConnectionId
+	resyncCh <-chan event.Event
+}
+
+// newDeferredHeaderRecoveryFixture builds a node whose producer authorization
+// check defers every header, with one tracked chainsync client.
+func newDeferredHeaderRecoveryFixture(
+	t *testing.T,
+	addr string,
+) deferredHeaderRecoveryFixture {
+	t.Helper()
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Close)
+	_, resyncCh := bus.Subscribe(event.ChainsyncResyncEventType)
+	ls := newTestLedgerState(t)
+	state := dchainsync.NewState(bus, nil)
+	conn := newTestConnId(addr, "1.1.1.6:3001")
+	require.True(t, state.AddClientConnId(conn))
+	o := newOuroboros(OuroborosConfig{
+		EventBus:       bus,
+		LedgerState:    ls,
+		ChainsyncState: state,
+		ChainsyncIngressEligible: func(ouroboros.ConnectionId) bool {
+			return true
+		},
+	})
+	o.chainSelectionShouldVerifyHeaderCrypto = func(uint64) bool { return true }
+	deferredErr := ls.ValidateChainSelectionHeaderCrypto(nonByronTestHeader{
+		&testBlockHeader{hash: gledger.Blake2b256{0xee}, slotNumber: 200},
+	})
+	require.True(t, ledger.IsHeaderVerificationDeferred(deferredErr))
+	o.chainSelectionVerifyHeaderCrypto = func(
+		ouroboros.ConnectionId,
+		gledger.BlockHeader,
+	) (uint64, error) {
+		return 0, deferredErr
+	}
+	o.chainsyncScheduleAt = func(_ time.Time, fn func()) func() {
+		fn()
+		return func() {}
+	}
+	return deferredHeaderRecoveryFixture{
+		o:        o,
+		state:    state,
+		conn:     conn,
+		resyncCh: resyncCh,
+	}
+}
+
+// deferHeader delivers a header that the fixture defers and returns its tip.
+func (f deferredHeaderRecoveryFixture) deferHeader(
+	t *testing.T,
+	hash byte,
+	prevHash byte,
+	slot uint64,
+	blockNumber uint64,
+) ochainsync.Tip {
+	t.Helper()
+	header := nonByronTestHeader{&testBlockHeader{
+		hash:        gledger.Blake2b256{hash},
+		prevHash:    gledger.Blake2b256{prevHash},
+		slotNumber:  slot,
+		blockNumber: blockNumber,
+	}}
+	tip := ochainsync.Tip{
+		Point:       ocommon.NewPoint(slot, header.Hash().Bytes()),
+		BlockNumber: blockNumber,
+	}
+	require.NoError(t, f.o.chainsyncClientRollForward(
+		ochainsync.CallbackContext{ConnectionId: f.conn},
+		0,
+		header,
+		tip,
+	))
+	require.Contains(t, f.o.deferredHeaderRecovery, f.conn)
+	return tip
+}
+
+func (f deferredHeaderRecoveryFixture) applyElsewhere(point ocommon.Point) {
+	f.o.retryDeferredHeadersAfterLedgerAdvance(event.NewEvent(
+		chain.ChainUpdateEventType,
+		chain.ChainBlockEvent{Point: point},
+	))
+}
+
+func TestDeferredHeaderRecoveryRecordsDeliveryWhenApplied(t *testing.T) {
+	t.Parallel()
+	f := newDeferredHeaderRecoveryFixture(t, "127.0.0.1:6016")
+	tip := f.deferHeader(t, 0xef, 0x01, 200, 1)
+	before := f.state.GetTrackedClient(f.conn)
+	require.NotNil(t, before)
+	require.Zero(t, before.HeadersRecv)
+
+	f.applyElsewhere(tip.Point)
+
+	tracked := f.state.GetTrackedClient(f.conn)
+	require.NotNil(t, tracked)
+	require.Equal(t, tip.Point, tracked.Cursor)
+	require.Equal(
+		t,
+		uint64(1),
+		tracked.HeadersRecv,
+		"a deferred header admitted after another peer applied it was delivered",
+	)
+}
+
+func TestDeferredHeaderRecoveryFollowsNewestWithheldHeader(t *testing.T) {
+	t.Parallel()
+	f := newDeferredHeaderRecoveryFixture(t, "127.0.0.1:6017")
+	f.deferHeader(t, 0xef, 0x01, 200, 1)
+	newest := f.deferHeader(t, 0xf0, 0xef, 201, 2)
+
+	f.applyElsewhere(newest.Point)
+
+	testutil.RequireNoReceive(
+		t,
+		f.resyncCh,
+		200*time.Millisecond,
+		"applying the newest withheld header must not reconnect its peer",
+	)
+	require.NotContains(t, f.o.deferredHeaderRecovery, f.conn)
+	tracked := f.state.GetTrackedClient(f.conn)
+	require.NotNil(t, tracked)
+	require.Equal(t, newest.Point, tracked.Cursor)
+	require.Equal(t, newest, tracked.Tip)
+}
+
+func TestDeferredHeaderRecoveryDoesNotAdmitAfterPeerRollback(t *testing.T) {
+	t.Parallel()
+	f := newDeferredHeaderRecoveryFixture(t, "127.0.0.1:6018")
+	deferred := f.deferHeader(t, 0xef, 0x01, 200, 1)
+	rollbackPoint := ocommon.NewPoint(100, []byte("rollback"))
+	require.NoError(t, f.o.chainsyncClientRollBackward(
+		ochainsync.CallbackContext{ConnectionId: f.conn},
+		rollbackPoint,
+		deferred,
+	))
+
+	f.applyElsewhere(deferred.Point)
+
+	tracked := f.state.GetTrackedClient(f.conn)
+	require.NotNil(t, tracked)
+	require.Equal(
+		t,
+		rollbackPoint,
+		tracked.Cursor,
+		"a header withheld before the peer rolled back is not its cursor",
+	)
+	testutil.RequireReceive(
+		t,
+		f.resyncCh,
+		2*time.Second,
+		"the rolled-back peer must still re-intersect",
+	)
+}
+
+func TestDeferredHeaderRecoveryDoesNotRegressAdvancedCursor(t *testing.T) {
+	t.Parallel()
+	f := newDeferredHeaderRecoveryFixture(t, "127.0.0.1:6019")
+	deferred := f.deferHeader(t, 0xef, 0x01, 200, 1)
+	advanced := ochainsync.Tip{
+		Point:       ocommon.NewPoint(201, []byte("advanced")),
+		BlockNumber: 2,
+	}
+	require.True(t, f.state.RecordClientDelivery(f.conn, advanced.Point))
+	require.True(t, f.state.AdmitClientTip(f.conn, advanced.Point, advanced))
+
+	f.applyElsewhere(deferred.Point)
+
+	require.NotContains(t, f.o.deferredHeaderRecovery, f.conn)
+	tracked := f.state.GetTrackedClient(f.conn)
+	require.NotNil(t, tracked)
+	require.Equal(t, advanced.Point, tracked.Cursor)
+	require.Equal(t, advanced, tracked.Tip)
+	require.Equal(t, uint64(1), tracked.HeadersRecv)
+}
+
 func TestChainsyncClientRollForwardWithholdsUnauthenticatedCandidate(
 	t *testing.T,
 ) {
