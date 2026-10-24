@@ -67,6 +67,7 @@ func TestResolvedMemTableSize(t *testing.T) {
 	t.Parallel()
 
 	require.Zero(t, defaultConfig().MemTableSize)
+	require.EqualValues(t, 1<<30, DefaultCoreSyncMemTableSize)
 	tests := []struct {
 		name        string
 		configured  uint64
