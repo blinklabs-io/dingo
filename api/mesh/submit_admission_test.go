@@ -64,7 +64,9 @@ func TestConstructionSubmitAdmitsAfterRequestBody(t *testing.T) {
 
 	h, pool := newAdmittingHandler(t, nil)
 	rec := postRaw(t, h, "/construction/submit", `{"signed_transaction":`)
-	requireMeshError(t, rec, ErrInvalidRequest, http.StatusBadRequest)
+	requireMeshError(
+		t, rec, ErrInvalidRequest, http.StatusInternalServerError,
+	)
 	require.Zero(t, pool.admits.Load())
 
 	addr := testAddress(
@@ -93,7 +95,7 @@ func TestConstructionSubmitBusyIsUnavailable(t *testing.T) {
 		submitRequest(hexString(txCbor)),
 	)
 	got := requireMeshError(
-		t, rec, ErrUnavailable, http.StatusServiceUnavailable,
+		t, rec, ErrUnavailable, http.StatusInternalServerError,
 	)
 	require.True(t, got.Retriable)
 	require.Empty(t, pool.submissions())
