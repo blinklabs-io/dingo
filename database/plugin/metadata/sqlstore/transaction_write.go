@@ -1810,14 +1810,12 @@ func (s *Store) persistUtxoRelationsWithDeferredAssets(
 	rows *rowBatch,
 ) error {
 	utxo.ID = id
-	if s.storageMode == types.StorageModeAPI || len(utxo.Assets) > 0 {
+	if s.storageMode == types.StorageModeAPI {
 		address, err := utxoAddress(utxo)
 		if err != nil {
 			return err
 		}
-		if s.storageMode == types.StorageModeAPI {
-			rows.add(utxoAddressShape, int64(id), address)
-		}
+		rows.add(utxoAddressShape, int64(id), address)
 	}
 	if err := persistUtxoPointer(ctx, db, int64(id), utxo.Pointer); err != nil {
 		return err

@@ -658,6 +658,32 @@ func TestSetTransactionSkipsAssetUtxoAddressInCoreMode(t *testing.T) {
 	require.Zero(t, count, "core mode must not persist API-only UTxO addresses")
 }
 
+// TestDeferredAssetRelationsSkipAddressInCoreMode pins that core mode never
+// resolves the API-only address, so an asset-bearing UTxO without Address or
+// CBOR still persists its relations.
+func TestDeferredAssetRelationsSkipAddressInCoreMode(t *testing.T) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+	require.Equal(t, types.StorageModeCore, store.storageMode)
+	utxo := models.Utxo{
+		Assets: []models.Asset{{
+			PolicyId: bytes.Repeat([]byte{0x54}, 28),
+			Name:     []byte("tok"),
+			Amount:   1,
+		}},
+	}
+	var rows rowBatch
+	require.NoError(t, store.persistUtxoRelationsWithDeferredAssets(
+		context.Background(), store.writeDB, &utxo, 1, &rows,
+	))
+	for _, entry := range rows.entries {
+		require.NotEqual(
+			t, utxoAddressShape.table, entry.shape.table,
+			"core mode must not queue API-only UTxO addresses",
+		)
+	}
+}
+
 func tableCounts(
 	t *testing.T,
 	store *Store,
