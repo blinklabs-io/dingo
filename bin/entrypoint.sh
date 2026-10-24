@@ -267,7 +267,7 @@ forward_signal() {
 }
 
 run_managed_dingo() {
-  local output_fd="$1"
+  local log_file="$1"
   shift
 
   # A shutdown request received before a child exists must not start new work.
@@ -275,8 +275,10 @@ run_managed_dingo() {
     exit "${PENDING_SIGNAL_EXIT_CODE}"
   fi
 
-  if [[ -n "${output_fd}" ]]; then
-    dingo "$@" >&"${output_fd}" 2>&1 &
+  # DINGO_LOG_FILE persists structured output for test harnesses; stdout
+  # stays the default for normal deployments.
+  if [[ -n "${log_file}" ]]; then
+    perl -e "${DINGO_LOG_OPENER}" -- "${log_file}" dingo "$@" &
   else
     dingo "$@" &
   fi
@@ -297,48 +299,65 @@ run_managed_dingo() {
   return "${child_exit_code}"
 }
 
-open_dingo_log() {
-  local path="$1"
-  local previous_umask
-  local enabled_noclobber="false"
-  local dir component
+# Bash redirections cannot open with O_EXCL|O_NOFOLLOW or relative to a
+# directory descriptor, so any check before them leaves a window in which a
+# FIFO or a symlinked parent can appear. This perl-base helper walks the
+# parents with O_NOFOLLOW descriptors, creates the log with one exclusive
+# no-follow open, sets the mode on the descriptor (a default ACL would
+# otherwise override the umask), and execs dingo with stdout and stderr on it.
+# Running it as the managed child keeps the descriptor out of the entrypoint.
+# shellcheck disable=SC2016
+DINGO_LOG_OPENER='
+use strict;
+use warnings;
+use Errno qw(EEXIST ENOENT);
+use Fcntl qw(O_CREAT O_DIRECTORY O_EXCL O_NOFOLLOW O_RDONLY O_WRONLY);
 
-  # Refuse any existing target, including FIFOs and devices that noclobber
-  # would open, and any symlinked component that could redirect the log.
-  if [[ -e "${path}" || -L "${path}" ]]; then
-    die "DINGO_LOG_FILE must name a new file: ${path}"
-  fi
-  dir="$(dirname "${path}")"
-  component="${dir}"
-  while [[ "${component}" != "/" && "${component}" != "." ]]; do
-    if [[ -L "${component}" ]]; then
-      die "DINGO_LOG_FILE must not traverse a symlink: ${component}"
-    fi
-    component="$(dirname "${component}")"
-  done
-  mkdir -p "${dir}"
-  previous_umask="$(umask)"
-  umask 0133
-  if [[ ! -o noclobber ]]; then
-    set -o noclobber
-    enabled_noclobber="true"
-  fi
-  if ! exec {DINGO_LOG_FD}>"${path}"; then
-    if [[ "${enabled_noclobber}" == "true" ]]; then
-      set +o noclobber
-    fi
-    umask "${previous_umask}"
-    die "DINGO_LOG_FILE must name a new file: ${path}"
-  fi
-  if [[ "${enabled_noclobber}" == "true" ]]; then
-    set +o noclobber
-  fi
-  umask "${previous_umask}"
-  if [[ ! -f "/dev/fd/${DINGO_LOG_FD}" ]]; then
-    exec {DINGO_LOG_FD}>&-
-    die "DINGO_LOG_FILE must name a regular file: ${path}"
-  fi
+my $path = shift @ARGV;
+sub fail {
+  print STDERR "[entrypoint] ERROR: DINGO_LOG_FILE $_[0]\n";
+  exit 1;
 }
+my @parts = split m{/}, $path, -1;
+my $name = pop @parts;
+if ($name eq q() || $name eq q(.) || $name eq q(..)) {
+  fail("must name a new file: $path");
+}
+sysopen(my $cwd, q(.), O_RDONLY | O_DIRECTORY)
+  or fail("cannot open the working directory: $!");
+if ($path =~ m{^/}) {
+  sysopen(my $root, q(/), O_RDONLY | O_DIRECTORY)
+    or fail("cannot open /: $!");
+  chdir($root) or fail("cannot enter /: $!");
+}
+my $walked = $path =~ m{^/} ? q() : q(.);
+for my $part (@parts) {
+  next if $part eq q() || $part eq q(.);
+  $walked .= "/$part";
+  my $dir;
+  my $opened = sysopen($dir, $part, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+  if (!$opened && $! == ENOENT) {
+    mkdir($part) or $! == EEXIST
+      or fail("parent cannot be created: $walked: $!");
+    $opened = sysopen($dir, $part, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+  }
+  if (!$opened) {
+    fail("must not traverse a symlink: $walked") if -l $part;
+    fail("parent is not a directory: $walked: $!");
+  }
+  chdir($dir) or fail("cannot enter $walked: $!");
+}
+sysopen(my $log, $name, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0644)
+  or fail("must name a new file: $path");
+chmod(0644, $log) or fail("cannot set mode on $path: $!");
+chdir($cwd) or fail("cannot restore the working directory: $!");
+open(STDOUT, q(>&), $log) or fail("cannot redirect stdout: $!");
+open(STDERR, q(>&), $log) or fail("cannot redirect stderr: $!");
+exec { $ARGV[0] } @ARGV or do {
+  print STDERR "[entrypoint] ERROR: cannot run $ARGV[0]: $!\n";
+  exit 127;
+};
+'
 
 # --------------------------------------------------------------------------- #
 # Configuration validation
@@ -520,15 +539,8 @@ fi
 
 log "Starting dingo $(redact_args "${DINGO_ARGS[@]}")"
 
-# Persist structured output for test harnesses when requested, while keeping
-# stdout as the default for normal deployments.
-DINGO_LOG_FD=""
-if [[ -n "${DINGO_LOG_FILE:-}" ]]; then
-  open_dingo_log "${DINGO_LOG_FILE}"
-fi
-
 # Start dingo and preserve its exit status, including after a forwarded signal.
-if run_managed_dingo "${DINGO_LOG_FD}" "${DINGO_ARGS[@]}"; then
+if run_managed_dingo "${DINGO_LOG_FILE:-}" "${DINGO_ARGS[@]}"; then
   exit_code=0
 else
   exit_code=$?
