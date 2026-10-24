@@ -65,6 +65,17 @@
 // other (with the error) when the current KES period cannot be resolved or the
 // pool is full.
 //
+// # Node-to-node exchange
+//
+// Stack.AttachPeer runs CIP-0137's node-to-node message submission, version 2
+// as dmq-node encodes it, over a connection the caller supplies. Both sides can
+// serve and pull: the serving side announces pooled message IDs and sizes from a
+// per-peer cursor and returns bodies on request, and the pulling side, which is
+// the connection's initiator, fetches the IDs it lacks and admits them through
+// the same checks a local submission gets, including the size limits CIP-0137
+// fixes. The connection also runs keep-alive on dmq-node's mini-protocol number
+// 12. internal/test/dmqinterop runs it against a real dmq-node.
+//
 // Local message notification gives each connection its own cursor over the
 // pool, so every consumer receives each unexpired message once. A feeder
 // goroutine moves messages from the cursor into the connection's notification
