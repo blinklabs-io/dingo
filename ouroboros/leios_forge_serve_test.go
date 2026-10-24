@@ -213,10 +213,12 @@ func TestLeiosForgedEBLogCommitsOnlyAfterDelivery(t *testing.T) {
 	entry, _ := log.next(connKey)
 	require.NotNil(t, entry)
 	require.Equal(t, first, *entry.point)
-	// Merely selecting a response must not advance the cursor.
+	// Merely selecting a response must not advance the cursor, and a request
+	// arriving before that send is reported must not offer it again.
+	require.Equal(t, 0, log.cursors[connKey])
 	entry, _ = log.next(connKey)
-	require.NotNil(t, entry)
-	require.Equal(t, first, *entry.point)
+	require.Nil(t, entry)
+	require.Equal(t, 0, log.cursors[connKey])
 
 	log.complete(connKey, nil, true)
 	entry, _ = log.next(connKey)

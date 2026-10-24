@@ -1236,8 +1236,8 @@ func (ls *LedgerState) queryShelley(ctx context.Context, query *olocalstatequery
 //
 // Point-pinning coverage audit (every case below, classified):
 //
-// Honors at today: ShelleyStakeDistributionQuery, ShelleyStakeDistribution2Query
-// and ShelleyPoolDistr2Query (the last two via PoolStakeDistribution, resolving at to its epoch and reading
+// Honors at today: ShelleyStakeDistributionQuery, ShelleyStakeDistribution2Query,
+// ShelleyPoolDistrQuery and ShelleyPoolDistr2Query (the last three via PoolStakeDistribution, resolving at to its epoch and reading
 // that epoch's persisted mark snapshot; StakeDistribution's circulating-
 // supply denominator additionally resolves historically via
 // GetNetworkStateAsOfSlot), ShelleyCurrentProtocolParamsQuery
@@ -1305,7 +1305,7 @@ func (ls *LedgerState) queryShelley(ctx context.Context, query *olocalstatequery
 // which carry no per-point history.
 //
 // Not answered, so the call fails with "unsupported query type":
-// ShelleyPoolStateQuery, ShelleyPoolDistrQuery and
+// ShelleyPoolStateQuery and
 // ShelleyNonMyopicMemberRewardsQuery, which decode but have no handler here;
 // ShelleyStakePoolStateQuery on every network but the Leios prototype's
 // (LedgerStateConfig.StakePoolStateQuery), because released nodes do not
@@ -1366,6 +1366,8 @@ func (ls *LedgerState) queryShelleyLeaf(ctx context.Context, query any,
 		return ls.queryShelleyDebugChainDepState(ctx, at, txn)
 	case *olocalstatequery.ShelleyPoolDistr2Query:
 		return ls.queryShelleyPoolDistr2(ctx, q, at, txn)
+	case *olocalstatequery.ShelleyPoolDistrQuery:
+		return ls.queryShelleyPoolDistr(ctx, q, at, txn)
 	case *olocalstatequery.ShelleyStakeDistributionQuery:
 		return ls.queryShelleyStakeDistribution(ctx, at, txn)
 	case *olocalstatequery.ShelleyStakeDistribution2Query:
@@ -1394,7 +1396,6 @@ func (ls *LedgerState) queryShelleyLeaf(ctx context.Context, query any,
 		case *olocalstatequery.ShelleyRewardProvenanceQuery:
 		case *olocalstatequery.ShelleyRewardInfoPoolsQuery:
 		case *olocalstatequery.ShelleyPoolStateQuery:
-		case *olocalstatequery.ShelleyPoolDistrQuery:
 	*/
 	default:
 		return nil, fmt.Errorf("unsupported query type: %T", q)
@@ -1449,36 +1450,17 @@ func (ls *LedgerState) queryShelleyCbor(ctx context.Context, q *olocalstatequery
 			Content: bounded.bareResult(),
 		}}, nil
 	}
-	// Two different, shape-indistinguishable conventions collide at
-	// exactly one element. Most handlers return []any{value} where value
-	// IS the complete result the client decodes directly (e.g.
-	// GetStakeSnapshots' []any{result}, where the direct reply's own
-	// client-side type is a one-element slice of the result struct) --
-	// GetCBOR's tag-24 content there must be cbor.Encode(value) (unwrapping
-	// the outer slice), which strips exactly the slice-of-one wrapping
-	// that direct reply needed but GetCBOR does not. This is pinned
-	// against real cardano-node wire bytes by
-	// TestQueryStakeSnapshotSpecificPool, which fails if this case is
-	// changed to keep the outer slice.
-	//
-	// queryShelleyStakeDistribution (legacy GetStakeDistribution) instead
-	// destructures its result struct's own fields directly into values (so
-	// that struct's StructAsArray encoding doesn't nest inside an extra
-	// wrapping array on its direct, non-GetCBOR reply). For it, GetCBOR's
-	// content must be cbor.Encode(values) (the whole slice), proven by
-	// TestQueryShelleyStakeDistribution_ViaGetCBOR, which fails if this
-	// case is unwrapped like the general one above instead.
-	//
-	// queryShelleyPoolDistr2 and queryShelleyStakeDistribution2 return the
-	// one-element era result wrapper around the PoolDistr's own two fields,
-	// so they follow the general rule: the content is the PoolDistr,
-	// [pool map, total active stake], as the node encodes it. This is pinned
-	// to literal node-layout bytes by TestQueryShelleyPoolDistr2_ViaGetCBOR
-	// and TestQueryShelleyStakeDistribution2_ViaGetCBORBytes.
-	//
-	// Slice length alone cannot tell the two conventions apart when there
-	// is exactly one field/value, so the destructured-fields query type
-	// is named explicitly here rather than guessed from shape.
+	// A handler's []any{value} is the one-element era result wrapper of the
+	// direct reply; GetCBOR's tag-24 content is the bare result inside it,
+	// so a single value is unwrapped. GetStakeSnapshots is pinned to
+	// cardano-node wire bytes by TestQueryStakeSnapshotSpecificPool, and
+	// GetPoolDistr2/GetStakeDistribution2 to the ledger PoolDistr layout,
+	// [pool map, total active stake], by TestQueryShelleyPoolDistr2_ViaGetCBOR
+	// and TestQueryShelleyStakeDistribution2_ViaGetCBORBytes. The legacy
+	// GetStakeDistribution and GetPoolDistr both answer with the consensus
+	// PoolDistr newtype, whose CBOR is the bare pool map, pinned by
+	// TestQueryShelleyStakeDistribution_ViaGetCBOR and
+	// TestQueryShelleyPoolDistr_ViaGetCBOR.
 	values, ok := inner.([]any)
 	if !ok || len(values) == 0 {
 		return nil, fmt.Errorf(
@@ -1487,13 +1469,8 @@ func (ls *LedgerState) queryShelleyCbor(ctx context.Context, q *olocalstatequery
 		)
 	}
 	var content any = values
-	switch q.Query.(type) {
-	case *olocalstatequery.ShelleyStakeDistributionQuery:
-		// content stays the whole slice; see comment above.
-	default:
-		if len(values) == 1 {
-			content = values[0]
-		}
+	if len(values) == 1 {
+		content = values[0]
 	}
 	encoded, err := cbor.Encode(content)
 	if err != nil {

@@ -18,6 +18,7 @@ import (
 	"context"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
@@ -84,6 +85,48 @@ func (ls *LedgerState) queryShelleyPoolDistr2(ctx context.Context, q *olocalstat
 	// StructAsArray encoding nest inside this slice's, producing a spurious
 	// extra array layer that no real NtC client can decode.
 	return []any{[]any{result.Pools, result.TotalActiveStake}}, nil
+}
+
+// queryShelleyPoolDistr answers the legacy GetPoolDistr query. Its distribution
+// is the same point-aware stake snapshot as GetPoolDistr2; the older reply
+// carries only each pool's fraction and VRF hash.
+func (ls *LedgerState) queryShelleyPoolDistr(
+	ctx context.Context,
+	q *olocalstatequery.ShelleyPoolDistrQuery,
+	at QueryPoint,
+	txn *database.Txn,
+) (any, error) {
+	var requested []ledger.PoolId
+	all := len(q.Pools) == 0
+	if !all {
+		requested = q.Pools[0].Items()
+	}
+	var poolFilter []lcommon.PoolKeyHash
+	if !all {
+		poolFilter = make([]lcommon.PoolKeyHash, 0, len(requested))
+		for _, poolID := range requested {
+			poolFilter = append(poolFilter, lcommon.PoolKeyHash(poolID))
+		}
+	}
+	dist, err := ls.PoolStakeDistribution(ctx, poolFilter, at, txn)
+	if err != nil {
+		return nil, err
+	}
+	result := make(map[ledger.PoolId]struct {
+		cbor.StructAsArray
+		StakeFraction *cbor.Rat
+		VrfHash       ledger.Blake2b256
+	}, len(dist.Pools))
+	for _, pool := range dist.Pools {
+		result[ledger.PoolId(pool.PoolKeyHash)] = struct {
+			cbor.StructAsArray
+			StakeFraction *cbor.Rat
+			VrfHash       ledger.Blake2b256
+		}{StakeFraction: pool.StakeFraction, VrfHash: pool.VrfKeyHash}
+	}
+	// PoolDistrResult is a one-field StructAsArray in gOuroboros, matching the
+	// result wrapper consumed by the legacy client method.
+	return []any{result}, nil
 }
 
 // queryShelleyStakeDistribution2 answers GetStakeDistribution2, which replaces

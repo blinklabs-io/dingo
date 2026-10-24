@@ -3662,31 +3662,29 @@ func TestLedgerStateConfigCallbacksDelegateOnceOuroborosExists(t *testing.T) {
 	assert.NotErrorIs(t, err, errOuroborosNotStarted)
 }
 
-func TestLedgerStateConfigUsesMusashiCertificateTrust(t *testing.T) {
+func TestLedgerStateConfigValidatesMusashiBlocks(t *testing.T) {
 	t.Parallel()
 
-	t.Run("Musashi prototype trusts certificate without vote manager", func(t *testing.T) {
-		n := &Node{config: Config{cfg: &internalconfig.Config{
-			Network:      ouroboros.NetworkCardanoMusashi.Name,
-			NetworkMagic: ouroboros.NetworkCardanoMusashi.NetworkMagic,
-		}}}
-		validate := n.ledgerStateConfig().ValidateLeiosCertificate
-		require.NotNil(t, validate)
-		require.NoError(t, validate(0, nil, nil, nil))
-	})
-
-	t.Run("standard network still requires certificate verifier", func(t *testing.T) {
-		n := &Node{config: Config{cfg: &internalconfig.Config{
-			Network:      ouroboros.NetworkCardanoPreview.Name,
-			NetworkMagic: ouroboros.NetworkCardanoPreview.NetworkMagic,
-		}}}
-		validate := n.ledgerStateConfig().ValidateLeiosCertificate
-		require.NotNil(t, validate)
-		err := validate(0, nil, nil, nil)
-		require.ErrorContains(t, err, "vote manager is unavailable")
-		require.NotErrorIs(t, err, ledger.ErrLeiosInvalidCertificate,
-			"an unavailable verifier is not a verdict on the certificate")
-	})
+	for _, network := range []ouroboros.Network{
+		ouroboros.NetworkCardanoMusashi,
+		ouroboros.NetworkCardanoPreview,
+	} {
+		t.Run(network.Name, func(t *testing.T) {
+			n := &Node{config: Config{cfg: &internalconfig.Config{
+				Network:      network.Name,
+				NetworkMagic: network.NetworkMagic,
+			}}}
+			cfg := n.ledgerStateConfig()
+			assert.False(t, cfg.SkipLeaderStakeThresholdCheck)
+			assert.False(t, cfg.SkipDijkstraTxValidation)
+			validate := cfg.ValidateLeiosCertificate
+			require.NotNil(t, validate)
+			err := validate(0, nil, nil, nil)
+			require.ErrorContains(t, err, "vote manager is unavailable")
+			require.NotErrorIs(t, err, ledger.ErrLeiosInvalidCertificate,
+				"an unavailable verifier is not a verdict on the certificate")
+		})
+	}
 }
 
 type certificateLeiosStakeProvider struct{}
@@ -3714,13 +3712,15 @@ func TestLedgerStateConfigMapsCertificateVerdicts(t *testing.T) {
 			KeyProvider:    startupLeiosKeyProvider{},
 		})
 		require.NoError(t, err)
-		return &Node{
+		n := &Node{
 			config: Config{cfg: &internalconfig.Config{
 				Network:      ouroboros.NetworkCardanoPreview.Name,
 				NetworkMagic: ouroboros.NetworkCardanoPreview.NetworkMagic,
 			}},
 			leiosVoteManager: voteManager,
 		}
+		n.leiosCertificateVerifier.Store(voteManager)
+		return n
 	}
 	signers := []byte{0x80}
 	aggregate := make([]byte, lcommon.LeiosBlsSignatureSize)

@@ -213,15 +213,11 @@ func stakeDistributionCborQuery() *olocalstatequery.BlockQuery {
 }
 
 // TestQueryShelleyStakeDistribution_ViaGetCBOR covers GetStakeDistribution
-// wrapped in the GetCBOR combinator (queryShelleyCbor), mirroring
-// TestQueryShelleyPoolDistr2_ViaGetCBOR. StakeDistributionResult is a
-// one-field cbor.StructAsArray struct (unlike PoolDistr2Result's two
-// fields), which is exactly the shape queryShelleyCbor's own doc comment
-// says it treats differently (unwrapping a single-element inner result
-// rather than keeping it as a one-element array) -- this proves whether
-// that special case is actually correct for a genuine one-field
-// StructAsArray result, or whether it strips a wrapping layer the real
-// client-side type still expects.
+// wrapped in the GetCBOR combinator (queryShelleyCbor). The node answers
+// GetStakeDistribution and GetPoolDistr with the same consensus PoolDistr
+// newtype, whose CBOR is the bare pool map. The one-element array that
+// StakeDistributionResult decodes is the era result wrapper of the direct
+// reply, which GetCBOR's tag-24 content does not carry.
 func TestQueryShelleyStakeDistribution_ViaGetCBOR(t *testing.T) {
 	t.Parallel()
 
@@ -267,15 +263,15 @@ func TestQueryShelleyStakeDistribution_ViaGetCBOR(t *testing.T) {
 		tag.Content,
 	)
 
-	// The tag-24 content must decode via the same real client-side type a
-	// direct (non-GetCBOR) GetStakeDistribution reply does: proof that
-	// GetCBOR carries the identical value, just CBOR-in-CBOR encoded.
+	require.NotEmpty(t, content)
+	require.Equal(t, byte(5), content[0]>>5,
+		"tag-24 content must be a bare CBOR map, got leading byte %#x", content[0])
 	var dist olocalstatequery.StakeDistributionResult
-	_, err = cbor.Decode(content, &dist)
+	_, err = cbor.Decode(content, &dist.Results)
 	require.NoError(
 		t,
 		err,
-		"tag-24 content must decode as a StakeDistributionResult",
+		"tag-24 content must decode as the pool map",
 	)
 
 	entryA, ok := dist.Results[lcommon.PoolId(pkhA)]
