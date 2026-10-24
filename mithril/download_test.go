@@ -1932,3 +1932,66 @@ func TestValidRelPath(t *testing.T) {
 		})
 	}
 }
+
+// TestDownloadSnapshotRangeNotSatisfiableMismatchDiscardsPartial pins that a
+// 416 whose total disagrees with the partial removes the partial. Keeping it
+// would make every later attempt, mirror, and restart resume the same prefix
+// and fail on the same 416.
+func TestDownloadSnapshotRangeNotSatisfiableMismatchDiscardsPartial(t *testing.T) {
+	dir := t.TempDir()
+	dest := filepath.Join(dir, "archive")
+	require.NoError(t, os.WriteFile(dest, []byte("ab"), 0o600))
+	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusRequestedRangeNotSatisfiable,
+			Body:       io.NopCloser(bytes.NewReader(nil)),
+			Header:     http.Header{"Content-Range": {"bytes */3"}},
+		}, nil
+	})}
+	path, err := DownloadSnapshot(context.Background(), DownloadConfig{
+		URL: "https://example.test/archive", AllowInsecureHTTP: true,
+		DestDir: dir, Filename: "archive", HTTPClient: client,
+		MaxTransientRetries: -1,
+	})
+	require.ErrorContains(t, err, "existing file size mismatch")
+	require.Empty(t, path)
+	require.NoFileExists(t, dest)
+	entries, err := os.ReadDir(dir)
+	require.NoError(t, err)
+	require.Empty(t, entries, "staging files must not be left behind")
+}
+
+// TestDownloadSnapshotFreeSpaceFailureDiscardsPartials pins that a download
+// stopped by the free-space reserve leaves neither its staging file nor the
+// owned partial it resumed from, so disk pressure does not persist.
+func TestDownloadSnapshotFreeSpaceFailureDiscardsPartials(t *testing.T) {
+	for _, prefix := range []string{"", "a"} {
+		t.Run(fmt.Sprintf("prefix=%q", prefix), func(t *testing.T) {
+			dir := t.TempDir()
+			if prefix != "" {
+				require.NoError(t, os.WriteFile(filepath.Join(dir, "archive"), []byte(prefix), 0o600))
+			}
+			client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode:    http.StatusOK,
+					Body:          io.NopCloser(bytes.NewReader([]byte("abc"))),
+					ContentLength: -1,
+					Header:        make(http.Header),
+				}, nil
+			})}
+			_, err := DownloadSnapshot(context.Background(), DownloadConfig{
+				URL: "https://example.test/archive", AllowInsecureHTTP: true,
+				DestDir: dir, Filename: "archive", HTTPClient: client,
+				MaxTransientRetries: -1,
+				spaceBudget: &downloadSpaceBudget{
+					freeSpaceReserve: math.MaxUint64 / 2,
+					filesystemPath:   dir,
+				},
+			})
+			require.ErrorIs(t, err, errDownloadFreeSpace)
+			entries, err := os.ReadDir(dir)
+			require.NoError(t, err)
+			require.Empty(t, entries)
+		})
+	}
+}
