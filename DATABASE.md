@@ -325,6 +325,13 @@ UTxOs in cancellable batches before APIs become available, records completion
 in sync_state, and logs progress. Startup fails if an output CBOR cannot be
 resolved. A failed backfill leaves completion unset, so the next startup
 resumes from rows still missing an address. Core-mode nodes skip the backfill.
+The completion key `dingo:utxo-addresses:backfilled` replaces the earlier
+`dingo:asset-utxo-addresses:backfilled`, which covered only live asset-bearing
+outputs, so an existing API-mode database runs the backfill once on its first
+start after upgrade. The backfill runs inside database open: the node starts
+no API, sync, or block processing until it has resolved and decoded the output
+CBOR of every retained UTxO without an address row, so the pause grows with the
+retained UTxO set. Rows the earlier backfill already addressed are skipped.
 API-mode UTxO writes persist the address in the same metadata transaction;
 core-mode writes omit this API-only relation.
 SQLite uses an exact unsigned 64-bit aggregate that returns a fixed-width
