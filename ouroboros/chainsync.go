@@ -94,6 +94,12 @@ type scheduledChainsyncResync struct {
 	fired  bool
 }
 
+type deferredHeaderRecoveryState struct {
+	baseline ochainsync.Tip
+	point    ocommon.Point
+	tip      ochainsync.Tip
+}
+
 // chainsyncAdmissionContext ends when the peer's chainsync client is asked to
 // stop or its connection begins shutdown. It must not use the client's
 // DoneChan: that closes only after the protocol loop running this callback
@@ -266,11 +272,15 @@ func (o *Ouroboros) cancelFutureHeaderResync(
 func (o *Ouroboros) markDeferredHeaderRecovery(
 	connId ouroboros.ConnectionId,
 	baseline ochainsync.Tip,
+	point ocommon.Point,
+	tip ochainsync.Tip,
 ) {
 	if o.ledgerState == nil {
 		return
 	}
 	baseline.Point.Hash = append([]byte(nil), baseline.Point.Hash...)
+	point.Hash = append([]byte(nil), point.Hash...)
+	tip.Point.Hash = append([]byte(nil), tip.Point.Hash...)
 	// Recovery normally waits for the next applied block. With no queued
 	// header there is none to apply, so that wait never ends (for example
 	// once the queue owner disconnects and its headers are cleared). Re-intersect
@@ -284,13 +294,18 @@ func (o *Ouroboros) markDeferredHeaderRecovery(
 	o.deferredHeaderRecoveryMu.Lock()
 	if o.deferredHeaderRecovery == nil {
 		o.deferredHeaderRecovery = make(
-			map[ouroboros.ConnectionId]ochainsync.Tip,
+			map[ouroboros.ConnectionId]deferredHeaderRecoveryState,
 		)
 	}
-	if _, alreadyDeferred := o.deferredHeaderRecovery[connId]; !alreadyDeferred {
-		o.deferredHeaderRecovery[connId] = baseline
+	recovery := deferredHeaderRecoveryState{
+		baseline: baseline,
+		point:    point,
+		tip:      tip,
+	}
+	if existing, alreadyDeferred := o.deferredHeaderRecovery[connId]; !alreadyDeferred {
+		o.deferredHeaderRecovery[connId] = recovery
 	} else {
-		baseline = o.deferredHeaderRecovery[connId]
+		baseline = existing.baseline
 	}
 	o.deferredHeaderRecoveryMu.Unlock()
 	current := o.ledgerState.Tip().Point
@@ -407,19 +422,43 @@ func (o *Ouroboros) retryDeferredHeadersAfterLedgerAdvance(evt event.Event) {
 	}
 	o.deferredHeaderRecoveryMu.Lock()
 	type recovery struct {
-		conn     ouroboros.ConnectionId
-		baseline ochainsync.Tip
+		conn  ouroboros.ConnectionId
+		state deferredHeaderRecoveryState
 	}
 	pending := make([]recovery, 0, len(o.deferredHeaderRecovery))
-	for conn, baseline := range o.deferredHeaderRecovery {
-		if applied.Point.Slot == baseline.Point.Slot &&
-			bytes.Equal(applied.Point.Hash, baseline.Point.Hash) {
+	resolved := make([]recovery, 0, len(o.deferredHeaderRecovery))
+	for conn, state := range o.deferredHeaderRecovery {
+		if applied.Point.Slot == state.baseline.Point.Slot &&
+			bytes.Equal(applied.Point.Hash, state.baseline.Point.Hash) {
 			continue
 		}
-		pending = append(pending, recovery{conn: conn, baseline: baseline})
+		candidate := recovery{conn: conn, state: state}
+		if applied.Point.Slot == state.point.Slot &&
+			bytes.Equal(applied.Point.Hash, state.point.Hash) {
+			resolved = append(resolved, candidate)
+			delete(o.deferredHeaderRecovery, conn)
+			delete(o.deferredHeaderIdleRetry, conn)
+			continue
+		}
+		pending = append(pending, candidate)
 		delete(o.deferredHeaderRecovery, conn)
 	}
 	o.deferredHeaderRecoveryMu.Unlock()
+
+	// Another peer can deliver and apply the same header while this peer's
+	// producer authorization is waiting on ledger state. Application is the
+	// authoritative validation result, so align the local cursor with the
+	// peer's already-advanced protocol cursor instead of reconnecting it to
+	// replay a block the node has just accepted.
+	for _, candidate := range resolved {
+		if o.chainsyncState != nil {
+			o.chainsyncState.AdmitClientTip(
+				candidate.conn,
+				candidate.state.point,
+				candidate.state.tip,
+			)
+		}
+	}
 
 	for _, candidate := range pending {
 		if o.scheduleHeaderResync(
@@ -437,7 +476,7 @@ func (o *Ouroboros) retryDeferredHeadersAfterLedgerAdvance(evt event.Event) {
 			o.connManager.GetConnectionById(candidate.conn) == nil
 		if !connectionClosed {
 			if _, alreadyDeferred := o.deferredHeaderRecovery[candidate.conn]; !alreadyDeferred {
-				o.deferredHeaderRecovery[candidate.conn] = candidate.baseline
+				o.deferredHeaderRecovery[candidate.conn] = candidate.state
 			}
 		}
 		o.deferredHeaderRecoveryMu.Unlock()
@@ -1900,6 +1939,8 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 				o.markDeferredHeaderRecovery(
 					ctx.ConnectionId,
 					verificationTipBaseline,
+					point,
+					tip,
 				)
 				o.updateChainsyncMetrics(ctx.ConnectionId, tip)
 				return nil
@@ -2186,6 +2227,8 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 					o.markDeferredHeaderRecovery(
 						ctx.ConnectionId,
 						o.ledgerState.Tip(),
+						point,
+						tip,
 					)
 				}
 				resolvePeerTip(false)

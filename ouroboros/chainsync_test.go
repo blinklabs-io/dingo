@@ -1761,9 +1761,14 @@ func TestDeferredHeaderRecoveryDoesNotRestoreClosedConnection(t *testing.T) {
 		EventBus:    bus,
 		ConnManager: manager,
 	})
-	o.deferredHeaderRecovery = make(map[ouroboros.ConnectionId]ochainsync.Tip)
+	o.deferredHeaderRecovery = make(
+		map[ouroboros.ConnectionId]deferredHeaderRecoveryState,
+	)
 	baseline := ochainsync.Tip{Point: ocommon.NewPoint(10, []byte("baseline"))}
-	o.deferredHeaderRecovery[conn] = baseline
+	o.deferredHeaderRecovery[conn] = deferredHeaderRecoveryState{
+		baseline: baseline,
+		point:    ocommon.NewPoint(12, []byte("deferred")),
+	}
 	o.chainsyncScheduleAt = func(_ time.Time, _ func()) func() {
 		// Reproduce close handling after retry removes the deferred marker but
 		// before a failed resync restores it.
@@ -1778,6 +1783,73 @@ func TestDeferredHeaderRecoveryDoesNotRestoreClosedConnection(t *testing.T) {
 	))
 
 	require.NotContains(t, o.deferredHeaderRecovery, conn)
+}
+
+func TestDeferredHeaderRecoveryKeepsPeerWhenDeferredHeaderIsApplied(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	bus := event.NewEventBus(nil, nil)
+	defer bus.Close()
+	_, resyncCh := bus.Subscribe(event.ChainsyncResyncEventType)
+	ls := newTestLedgerState(t)
+	state := dchainsync.NewState(bus, nil)
+	conn := newTestConnId("127.0.0.1:6015", "1.1.1.6:3001")
+	require.True(t, state.AddClientConnId(conn))
+	o := newOuroboros(OuroborosConfig{
+		EventBus:       bus,
+		LedgerState:    ls,
+		ChainsyncState: state,
+		ChainsyncIngressEligible: func(ouroboros.ConnectionId) bool {
+			return true
+		},
+	})
+	o.chainSelectionShouldVerifyHeaderCrypto = func(uint64) bool { return true }
+	header := nonByronTestHeader{&testBlockHeader{
+		hash:       gledger.Blake2b256{0xef},
+		slotNumber: 200,
+	}}
+	deferredErr := ls.ValidateChainSelectionHeaderCrypto(header)
+	require.True(t, ledger.IsHeaderVerificationDeferred(deferredErr))
+	o.chainSelectionVerifyHeaderCrypto = func(
+		ouroboros.ConnectionId,
+		gledger.BlockHeader,
+	) (uint64, error) {
+		return 0, deferredErr
+	}
+	o.chainsyncScheduleAt = func(_ time.Time, fn func()) func() {
+		fn()
+		return func() {}
+	}
+	tip := ochainsync.Tip{
+		Point:       ocommon.NewPoint(200, header.Hash().Bytes()),
+		BlockNumber: 1,
+	}
+
+	require.NoError(t, o.chainsyncClientRollForward(
+		ochainsync.CallbackContext{ConnectionId: conn},
+		0,
+		header,
+		tip,
+	))
+	require.Contains(t, o.deferredHeaderRecovery, conn)
+
+	o.retryDeferredHeadersAfterLedgerAdvance(event.NewEvent(
+		chain.ChainUpdateEventType,
+		chain.ChainBlockEvent{Point: tip.Point},
+	))
+
+	testutil.RequireNoReceive(
+		t,
+		resyncCh,
+		200*time.Millisecond,
+		"an independently applied deferred header must not reconnect its peer",
+	)
+	require.NotContains(t, o.deferredHeaderRecovery, conn)
+	tracked := state.GetTrackedClient(conn)
+	require.NotNil(t, tracked)
+	require.Equal(t, tip.Point, tracked.Cursor)
 }
 
 func TestChainsyncClientRollForwardWithholdsUnauthenticatedCandidate(
