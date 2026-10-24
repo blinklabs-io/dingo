@@ -1201,3 +1201,65 @@ func TestDiscoverLedgerPeers_RecoveryBelowSlotResetsEmergencyBackoff(
 	assert.Zero(t, pg.emergencyRefreshRounds.Load(),
 		"recovery below the slot must reset the emergency backoff")
 }
+
+// Not t.Parallel: replaces the package-level DNS resolver.
+func TestLoadPeerSnapshotExpandsHostnameRecords(t *testing.T) {
+	calls := countingResolver(t, []net.IP{
+		net.ParseIP("44.0.0.1"),
+		net.ParseIP("127.0.0.1"),
+		net.ParseIP("44.0.0.2"),
+		net.ParseIP("44.0.0.2"),
+		net.ParseIP("44.0.0.3"),
+	}, nil)
+	pg := discardGovernor()
+	pg.config.LedgerPeerTarget = 4
+	require.NoError(t, pg.AddPeer(
+		"relay.example.com:3001", PeerSourceTopologyBootstrapPeer,
+	))
+	snapshot := &topology.PeerSnapshotConfig{
+		BigLedgerPools: []topology.PeerSnapshotLedgerPool{
+			{Relays: []topology.TopologyConfigP2PAccessPoint{
+				{Address: "relay.example.com", Port: 3001},
+			}},
+			{Relays: []topology.TopologyConfigP2PAccessPoint{
+				{Address: "relay.example.com", Port: 3001},
+			}},
+		},
+	}
+	require.Equal(t, 2, pg.LoadPeerSnapshot(context.Background(), snapshot))
+	require.Len(t, pg.peers, 3)
+	require.Equal(t, int64(2), calls.Load())
+	var addresses []string
+	for _, peer := range pg.peers {
+		addresses = append(addresses, peer.NormalizedAddress)
+	}
+	require.ElementsMatch(t, []string{
+		"44.0.0.1:3001", "44.0.0.2:3001", "44.0.0.3:3001",
+	}, addresses)
+
+	pg.DenyPeer("relay.example.com:3001", time.Minute)
+	pg.mu.Lock()
+	defer pg.mu.Unlock()
+	for _, peer := range pg.peers {
+		require.True(t, pg.isPeerDeniedLocked(peer),
+			"denying a relay hostname must cover every expanded endpoint")
+	}
+}
+
+// Not t.Parallel: replaces the package-level DNS resolver.
+func TestLoadPeerSnapshotDeniedHostnameSkipsResolution(t *testing.T) {
+	calls := countingResolver(t, []net.IP{net.ParseIP("44.0.0.1")}, nil)
+	pg := discardGovernor()
+	pg.config.LedgerPeerTarget = 2
+	pg.denyList["relay.example.com:3001"] = time.Now().Add(time.Minute)
+	snapshot := &topology.PeerSnapshotConfig{
+		BigLedgerPools: []topology.PeerSnapshotLedgerPool{
+			{Relays: []topology.TopologyConfigP2PAccessPoint{
+				{Address: "relay.example.com", Port: 3001},
+			}},
+		},
+	}
+	require.Zero(t, pg.LoadPeerSnapshot(context.Background(), snapshot))
+	require.Empty(t, pg.peers)
+	require.Zero(t, calls.Load())
+}

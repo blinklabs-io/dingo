@@ -7903,6 +7903,10 @@ seeds the snapshot relays as `PeerSourceP2PLedger` peers before outbound
 connection startup. This avoids relying on bootstrap peers for Ouroboros
 Genesis initial sync while preserving the existing `UseLedgerAfterSlot` path:
 later ledger peer refreshes still query the live ledger/database provider.
+Relay hostnames expand into distinct, routable DNS endpoints. Each relay gets
+one admission opportunity before another endpoint of the same relay, bounded
+by the ledger-peer target. The original hostname remains the source of each
+endpoint for refresh reconciliation and deny-list checks.
 If the snapshot produces no usable peers, startup falls back to topology
 bootstrap peers.
 
@@ -16050,7 +16054,9 @@ unregistered magic, remains valid; devnet is excluded for the same reason it is
 excluded from `FullPotRewardsStandardNetwork`.
 
 Key configuration areas:
-- Network selection (preview, preprod, mainnet)
+- Network selection (preview, preprod, mainnet, dijkstra, musashi, devnet,
+  prime-testnet). DijkstraNet uses magic 6 and the canonical `dijkstra`
+  configuration bundle; it does not enable Musashi prototype trust bypasses.
 - Storage mode (`core` or `api`)
 - Database path and `plugins.storage` provider selections
 - Listen addresses and ports

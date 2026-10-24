@@ -315,6 +315,13 @@ var pinnedEmbeddedGenesisHashes = map[string]embeddedGenesisHashes{
 		conway:      "9cc5084f02e27210eacba47af0872e3dba8946ad9460b6072d793e1d2f3987ef",
 		checkpoints: "bb5056ff1ced9d68dd99720695789664f6bf6f0cb02a4010df09b813e225ac51",
 	},
+	"dijkstra": {
+		byron:    "245e5b28a31c6bc3e8b78f1223294ae09e57b6d2543b51aba7cf9dadff161238",
+		shelley:  "b47eb627b52bf9cfe5ffd865658b47b5747a088d150a9c27216de374e836c385",
+		alonzo:   "387a7c4880477ce7b128566fa7f9f9ed99ee04476084e9f6332b6d42d907faab",
+		conway:   "e18ab8efc363ad170142706723568f1520a57f0dc05354e1d458041da18a3704",
+		dijkstra: "ad58e282eff1f48c241faf6319f88ed54843821627a6be69470f05d7904e4601",
+	},
 	"musashi": {
 		byron:    "3cbc289e3855d93a54877d5106743e1a77cdee3aaed675e62f19c2a373d698a2",
 		shelley:  "d1b19e006c1198fb7ac9d53073c1a9f77acb1a9474c92310006ae4418290cda3",
