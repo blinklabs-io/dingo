@@ -316,11 +316,11 @@ var pinnedEmbeddedGenesisHashes = map[string]embeddedGenesisHashes{
 		checkpoints: "bb5056ff1ced9d68dd99720695789664f6bf6f0cb02a4010df09b813e225ac51",
 	},
 	"musashi": {
-		byron:    "5809f031d8dc8ae8091f66a80ebe8f7d173e475436110c462a0533ed65954639",
-		shelley:  "1944510a4fd91415444285231058f6f6ff0f6f3ff3d0356c76c00c5a77f29567",
-		alonzo:   "387a7c4880477ce7b128566fa7f9f9ed99ee04476084e9f6332b6d42d907faab",
-		conway:   "e2951aa7f08dcd89bb6ca7fcf9acae5c46bdefb5a9affbac769bbe1902e982eb",
-		dijkstra: "aa1238f505479a9b104d2cc001b4bf951062cd527200bea9a1857bdd0dc41085",
+		byron:    "3cbc289e3855d93a54877d5106743e1a77cdee3aaed675e62f19c2a373d698a2",
+		shelley:  "d1b19e006c1198fb7ac9d53073c1a9f77acb1a9474c92310006ae4418290cda3",
+		alonzo:   "a0f11e3609a551b5f6cb8feeeea30cb5b70839ec9dffcd726a5323a1e3f3b12a",
+		conway:   "7e237f0c935539f5571297e3171946dd83929719496cbf51d0dab814a47ae0de",
+		dijkstra: "868a465b7115ae653ec532f46eca1a31a89211a96e810d78f82d6e60e3cdca87",
 	},
 	"prime-testnet": {
 		byron:   "acd3e7c4cc071ae176fa253e654f0dd4e759892b16e958d8bd3c393f5c6c66d2",

@@ -110,11 +110,24 @@ func (s *Server) handleAccountCoins(
 		writeError(w, meshErr)
 		return
 	}
+	release, ok := s.acquireBulk()
+	if !ok {
+		writeError(w, ErrUnavailable)
+		return
+	}
+	defer release()
 
-	utxos, err := s.config.LedgerState.UtxosByAddress(
+	// Mesh defines this as one complete response. A partial UTxO set means a
+	// client treats present coins as the account's whole spendable state.
+	utxos, err := s.config.LedgerState.UtxosByAddressComplete(
+		r.Context(),
 		[]ledger.Address{addr},
 	)
 	if err != nil {
+		if r.Context().Err() != nil {
+			s.logger.Debug("account coins read canceled", "error", err)
+			return
+		}
 		s.logger.Error(
 			"failed to query UTxOs for account",
 			"address",
@@ -125,13 +138,20 @@ func (s *Server) handleAccountCoins(
 		return
 	}
 
-	coins := utxosToCoins(utxos)
-	tip := s.config.Chain.Tip()
-
 	writeJSON(w, http.StatusOK, &AccountCoinsResponse{
-		BlockIdentifier: s.tipBlockID(tip),
-		Coins:           coins,
+		BlockIdentifier: s.tipBlockID(s.config.Chain.Tip()),
+		Coins:           utxosToCoins(utxos),
 	})
+}
+
+// acquireBulk reserves a complete-result read slot without waiting.
+func (s *Server) acquireBulk() (func(), bool) {
+	select {
+	case s.bulkSlots <- struct{}{}:
+		return func() { <-s.bulkSlots }, true
+	default:
+		return nil, false
+	}
 }
 
 // parseAccountAddress validates the account identifier

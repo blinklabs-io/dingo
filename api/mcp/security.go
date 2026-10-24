@@ -15,6 +15,7 @@
 package mcp
 
 import (
+	"container/list"
 	"crypto/subtle"
 	"encoding/json"
 	"net"
@@ -27,50 +28,146 @@ import (
 	"golang.org/x/time/rate"
 )
 
-// clientLimiter tracks rate limiters for client IP addresses.
+const (
+	clientLimiterMaxEntries = 4096
+	clientLimiterIdleTTL    = 30 * time.Minute
+)
+
+type clientLimiterEntry struct {
+	key      string
+	limiter  *rate.Limiter
+	lastSeen time.Time
+	element  *list.Element
+}
+
+// clientLimiter tracks a bounded set of rate limiters for client IP addresses.
 type clientLimiter struct {
-	mu          sync.Mutex
-	limiters    map[string]*rate.Limiter
-	lastSeen    map[string]time.Time
-	rate        rate.Limit
-	burst       int
-	nextCleanup time.Time
+	mu         sync.Mutex
+	entries    map[string]*clientLimiterEntry
+	order      list.List
+	rate       rate.Limit
+	burst      int
+	maxEntries int
+	idleTTL    time.Duration
+	timer      *time.Timer
+	closed     bool
 }
 
 func newClientLimiter(r rate.Limit, burst int) *clientLimiter {
-	cl := &clientLimiter{
-		limiters: make(map[string]*rate.Limiter),
-		lastSeen: make(map[string]time.Time),
-		rate:     r,
-		burst:    burst,
-	}
+	return newClientLimiterWithBounds(
+		r,
+		burst,
+		clientLimiterMaxEntries,
+		clientLimiterIdleTTL,
+	)
+}
 
-	return cl
+func newClientLimiterWithBounds(
+	r rate.Limit,
+	burst int,
+	maxEntries int,
+	idleTTL time.Duration,
+) *clientLimiter {
+	return &clientLimiter{
+		entries:    make(map[string]*clientLimiterEntry),
+		rate:       r,
+		burst:      burst,
+		maxEntries: maxEntries,
+		idleTTL:    idleTTL,
+	}
 }
 
 func (cl *clientLimiter) getLimiter(ip string) *rate.Limiter {
 	cl.mu.Lock()
 	defer cl.mu.Unlock()
+	if cl.closed {
+		return rate.NewLimiter(0, 0)
+	}
 
 	now := time.Now()
-	// Reclaim idle clients on requests so retired handlers own no goroutines.
-	if !now.Before(cl.nextCleanup) {
-		for ip, last := range cl.lastSeen {
-			if last.Before(now.Add(-30 * time.Minute)) {
-				delete(cl.limiters, ip)
-				delete(cl.lastSeen, ip)
-			}
-		}
-		cl.nextCleanup = now.Add(10 * time.Minute)
+	cl.evictExpiredLocked(now)
+	if entry, ok := cl.entries[ip]; ok {
+		entry.lastSeen = now
+		cl.order.MoveToBack(entry.element)
+		cl.scheduleExpiryLocked(now)
+		return entry.limiter
 	}
 
-	limiter, exists := cl.limiters[ip]
-	if !exists {
-		limiter = rate.NewLimiter(cl.rate, cl.burst)
-		cl.limiters[ip] = limiter
+	if len(cl.entries) >= cl.maxEntries {
+		cl.removeOldestLocked()
 	}
-	cl.lastSeen[ip] = time.Now()
-	return limiter
+	entry := &clientLimiterEntry{
+		key:      ip,
+		limiter:  rate.NewLimiter(cl.rate, cl.burst),
+		lastSeen: now,
+	}
+	entry.element = cl.order.PushBack(entry)
+	cl.entries[ip] = entry
+	cl.scheduleExpiryLocked(now)
+	return entry.limiter
+}
+
+func (cl *clientLimiter) removeOldestLocked() {
+	oldest := cl.order.Front()
+	if oldest == nil {
+		return
+	}
+	entry, ok := oldest.Value.(*clientLimiterEntry)
+	if ok && entry != nil {
+		delete(cl.entries, entry.key)
+	}
+	cl.order.Remove(oldest)
+}
+
+func (cl *clientLimiter) evictExpiredLocked(now time.Time) {
+	for {
+		oldest := cl.order.Front()
+		if oldest == nil {
+			return
+		}
+		entry, ok := oldest.Value.(*clientLimiterEntry)
+		if !ok || entry == nil {
+			cl.removeOldestLocked()
+			continue
+		}
+		if now.Before(entry.lastSeen.Add(cl.idleTTL)) {
+			return
+		}
+		cl.removeOldestLocked()
+	}
+}
+
+func (cl *clientLimiter) scheduleExpiryLocked(now time.Time) {
+	if cl.timer != nil {
+		return
+	}
+	for cl.order.Len() > 0 {
+		front := cl.order.Front()
+		if front == nil {
+			return
+		}
+		oldest, ok := front.Value.(*clientLimiterEntry)
+		if !ok || oldest == nil {
+			cl.removeOldestLocked()
+			continue
+		}
+		delay := oldest.lastSeen.Add(cl.idleTTL).Sub(now)
+		delay = max(delay, 0)
+		cl.timer = time.AfterFunc(delay, cl.expireIdle)
+		return
+	}
+}
+
+func (cl *clientLimiter) expireIdle() {
+	cl.mu.Lock()
+	defer cl.mu.Unlock()
+	if cl.closed {
+		return
+	}
+	cl.timer = nil
+	now := time.Now()
+	cl.evictExpiredLocked(now)
+	cl.scheduleExpiryLocked(now)
 }
 
 // SecurityMiddleware wraps an HTTP handler with optional authentication, rate limiting, and CORS.
@@ -81,6 +178,16 @@ func SecurityMiddleware(
 	allowedOrigins []string,
 	next http.Handler,
 ) http.Handler {
+	return newSecurityMiddleware(authToken, reqPerSec, burst, allowedOrigins, next)
+}
+
+func newSecurityMiddleware(
+	authToken string,
+	reqPerSec float64,
+	burst int,
+	allowedOrigins []string,
+	next http.Handler,
+) *managedSecurityHandler {
 	var limiter *clientLimiter
 	if reqPerSec > 0 {
 		if burst <= 0 {
@@ -89,7 +196,7 @@ func SecurityMiddleware(
 		limiter = newClientLimiter(rate.Limit(reqPerSec), burst)
 	}
 
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Add("Vary", "Origin")
 		origins, present := r.Header["Origin"]
 		if present {
@@ -119,18 +226,15 @@ func SecurityMiddleware(
 
 		// Rate limiting check
 		if limiter != nil {
-			clientIP, _, err := net.SplitHostPort(r.RemoteAddr)
-			if err != nil {
-				clientIP = r.RemoteAddr
-			}
-
-			if !limiter.getLimiter(clientIP).Allow() {
+			if !limiter.getLimiter(requestClientKey(r)).Allow() {
 				w.Header().Set("Content-Type", "application/json")
 				w.Header().Set("Retry-After", "1")
 				w.WriteHeader(http.StatusTooManyRequests)
-				_ = json.NewEncoder(w).Encode(map[string]string{
+				if err := json.NewEncoder(w).Encode(map[string]string{
 					"error": "too many requests: rate limit exceeded",
-				})
+				}); err != nil {
+					return
+				}
 				return
 			}
 		}
@@ -152,15 +256,18 @@ func SecurityMiddleware(
 			) != 1 {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusUnauthorized)
-				_ = json.NewEncoder(w).Encode(map[string]string{
+				if err := json.NewEncoder(w).Encode(map[string]string{
 					"error": "unauthorized: missing or invalid authentication token",
-				})
+				}); err != nil {
+					return
+				}
 				return
 			}
 		}
 
 		next.ServeHTTP(w, r)
 	})
+	return &managedSecurityHandler{handler: handler, limiter: limiter}
 }
 
 func trustedOrigin(origin string, r *http.Request, allowed []string) bool {

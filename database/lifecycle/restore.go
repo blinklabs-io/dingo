@@ -17,6 +17,8 @@ package lifecycle
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -137,6 +139,9 @@ type RestoreStorageConfig struct {
 	// live restore. Cloud blob restores use its marker to retain the namespace
 	// that Commit may reclaim or Rollback must preserve.
 	ActiveDataDir string
+	// RecoveryMarkerDirs are trusted local directories where a live restore's
+	// operation marker may reside after an interrupted directory swap.
+	RecoveryMarkerDirs []string
 	// Logger, when set, receives the restore's deferred-index repair
 	// progress. A full manifest rebuild on a multi-million-row table takes
 	// minutes and is otherwise silent. Nil disables that reporting; nothing
@@ -160,12 +165,113 @@ var restoreWorkDirPrefixes = []string{
 	".dingo-verify-snapshot-",
 }
 
-const restoreRecoveryFileName = "recovery.json"
+const (
+	restoreRecoveryFileName   = "recovery.json"
+	restoreRecoveryMarkerName = ".dingo-restore-operation"
+	restoreRecoveryIDBytes    = 32
+)
 
 // RestoreRecoveryDir returns the durable recovery directory associated with
 // a live restore target.
 func RestoreRecoveryDir(targetDataDir string) string {
 	return targetDataDir + ".remote-rollback"
+}
+
+func restoreRecoveryMarkerDirs(
+	cfg RestoreStorageConfig,
+	additional ...string,
+) []string {
+	dirs := make([]string, 0, 1+len(cfg.RecoveryMarkerDirs)+len(additional))
+	seen := make(map[string]struct{}, cap(dirs))
+	candidates := append([]string{cfg.ActiveDataDir}, cfg.RecoveryMarkerDirs...)
+	// The caller's target directory (the restore staging sibling on startup
+	// recovery) is not a trusted marker location. It only stands in when no
+	// active data directory is configured.
+	if cfg.ActiveDataDir == "" {
+		candidates = append(candidates, additional...)
+	}
+	for _, dir := range candidates {
+		if dir == "" {
+			continue
+		}
+		dir = filepath.Clean(dir)
+		if _, ok := seen[dir]; ok {
+			continue
+		}
+		seen[dir] = struct{}{}
+		dirs = append(dirs, dir)
+	}
+	return dirs
+}
+
+func newRestoreRecoveryID() (string, error) {
+	raw := make([]byte, restoreRecoveryIDBytes)
+	if _, err := rand.Read(raw); err != nil {
+		return "", fmt.Errorf("generate restore recovery operation ID: %w", err)
+	}
+	return hex.EncodeToString(raw), nil
+}
+
+func writeRestoreRecoveryMarker(dir, operationID string) error {
+	path := filepath.Join(dir, restoreRecoveryMarkerName)
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return fmt.Errorf("create restore recovery marker: %w", err)
+	}
+	if _, err := file.WriteString(operationID + "\n"); err != nil {
+		_ = file.Close()
+		_ = os.Remove(path)
+		return fmt.Errorf("write restore recovery marker: %w", err)
+	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		_ = os.Remove(path)
+		return fmt.Errorf("sync restore recovery marker: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		_ = os.Remove(path)
+		return fmt.Errorf("close restore recovery marker: %w", err)
+	}
+	if err := syncDir(dir); err != nil {
+		return fmt.Errorf("sync restore recovery marker directory: %w", err)
+	}
+	return nil
+}
+
+func removeRestoreRecoveryMarkers(dirs []string, operationID string) error {
+	var errs []error
+	for _, dir := range dirs {
+		path := filepath.Join(dir, restoreRecoveryMarkerName)
+		info, err := os.Lstat(path)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		if !info.Mode().IsRegular() {
+			continue
+		}
+		if operationID != "" {
+			data, err := os.ReadFile(path)
+			if err != nil {
+				errs = append(errs, err)
+				continue
+			}
+			if strings.TrimSpace(string(data)) != operationID {
+				continue
+			}
+		}
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			errs = append(errs, err)
+			continue
+		}
+		if err := syncDir(dir); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // CleanStaleRestoreWorkDirs removes restore work directories older than a
@@ -691,9 +797,20 @@ func resolveManifest(
 		return Manifest{}, err
 	}
 	if !recognizedCloudScheme(registry, snapshotDir) {
+		if len(manifestKey(opts)) == 0 {
+			if err := requirePrivateLocalSnapshot(snapshotDir); err != nil {
+				return Manifest{}, err
+			}
+		}
 		return ReadManifest(snapshotDir, opts...)
 	}
 	if err := requireManifestKey(opts); err != nil {
+		return Manifest{}, err
+	}
+	// The download directory is temporary; the signed ID must match the
+	// object prefix the snapshot was requested by.
+	opts, err = withCloudManifestID(snapshotDir, opts)
+	if err != nil {
 		return Manifest{}, err
 	}
 	// One byte over the limit lets ReadManifest, not the transfer, report an
@@ -788,6 +905,8 @@ type restoreRollback struct {
 	metadataMutated     bool
 	blobMutated         bool
 	dispositionComplete bool
+	operationID         string
+	markerDirs          []string
 }
 
 // RestoreRecovery retains the original external stores after a successful
@@ -944,9 +1063,13 @@ func prepareRestore(
 			"create restore rollback directory: %w", err,
 		)
 	}
-	rollback := restoreRollback{dir: rollbackDir, durable: durable}
+	rollback := restoreRollback{
+		dir:        rollbackDir,
+		durable:    durable,
+		markerDirs: restoreRecoveryMarkerDirs(storageConfig, targetDataDir),
+	}
 	cleanupOnError := func(err error) (restoreRollback, error) {
-		_ = os.RemoveAll(rollbackDir)
+		_ = rollback.removeDir()
 		return restoreRollback{}, err
 	}
 
@@ -1124,6 +1247,21 @@ func prepareRestore(
 			"stop blob plugin after restore preflight: %w", err,
 		))
 	}
+	if durable && (rollback.metadataPath != "" || rollback.cloudBlob) {
+		markerDir := storageConfig.ActiveDataDir
+		if markerDir == "" {
+			markerDir = targetDataDir
+		}
+		rollback.operationID, err = newRestoreRecoveryID()
+		if err != nil {
+			return cleanupOnError(err)
+		}
+		if err := writeRestoreRecoveryMarker(
+			markerDir, rollback.operationID,
+		); err != nil {
+			return cleanupOnError(err)
+		}
+	}
 	return rollback, nil
 }
 
@@ -1227,6 +1365,7 @@ func resetBlobStore(
 }
 
 type restoreRecoveryRecord struct {
+	OperationID      string `json:"operationId"`
 	BlobPlugin       string `json:"blobPlugin"`
 	MetadataPlugin   string `json:"metadataPlugin"`
 	StorageMode      string `json:"storageMode"`
@@ -1241,6 +1380,7 @@ func (r *restoreRollback) persist(manifest Manifest) error {
 		return fmt.Errorf("sync restore recovery directory: %w", err)
 	}
 	record := restoreRecoveryRecord{
+		OperationID:      r.operationID,
 		BlobPlugin:       manifest.BlobPlugin,
 		MetadataPlugin:   manifest.MetadataPlugin,
 		StorageMode:      manifest.StorageMode,
@@ -1290,10 +1430,51 @@ func (r *restoreRollback) removeDir() error {
 	if err := os.RemoveAll(r.dir); err != nil {
 		return err
 	}
+	var errs []error
 	if r.durable {
-		return syncDir(filepath.Dir(r.dir))
+		if err := syncDir(filepath.Dir(r.dir)); err != nil {
+			errs = append(errs, err)
+		}
+		if r.operationID != "" {
+			if err := removeRestoreRecoveryMarkers(
+				r.markerDirs, r.operationID,
+			); err != nil {
+				errs = append(errs, err)
+			}
+		}
 	}
-	return nil
+	return errors.Join(errs...)
+}
+
+func (r *restoreRollback) authenticate() error {
+	if !r.metadataMutated && !r.blobMutated {
+		return nil
+	}
+	for _, dir := range r.markerDirs {
+		path := filepath.Join(dir, restoreRecoveryMarkerName)
+		info, err := os.Lstat(path)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil || !info.Mode().IsRegular() {
+			continue
+		}
+		file, err := os.Open(path)
+		if err != nil {
+			continue
+		}
+		data, readErr := io.ReadAll(io.LimitReader(file, 129))
+		closeErr := file.Close()
+		if readErr != nil || closeErr != nil || len(data) > 128 {
+			continue
+		}
+		if strings.TrimSpace(string(data)) == r.operationID {
+			return nil
+		}
+	}
+	return errors.New(
+		"restore recovery record is not bound to the active restore operation",
+	)
 }
 
 func readRestoreRecovery(dir string) (restoreRollback, Manifest, error) {
@@ -1324,6 +1505,14 @@ func readRestoreRecovery(dir string) (restoreRollback, Manifest, error) {
 			"restore recovery record is missing provider names",
 		)
 	}
+	if record.MetadataMutated || record.CloudBlob {
+		operationID, err := hex.DecodeString(record.OperationID)
+		if err != nil || len(operationID) != restoreRecoveryIDBytes {
+			return restoreRollback{}, Manifest{}, errors.New(
+				"restore recovery record has an invalid operation ID",
+			)
+		}
+	}
 	rollback := restoreRollback{
 		dir:              dir,
 		metadataPath:     filepath.Join(dir, MetadataBackupFileName),
@@ -1333,6 +1522,7 @@ func readRestoreRecovery(dir string) (restoreRollback, Manifest, error) {
 		metadataMutated:  record.MetadataMutated,
 		blobMutated:      record.CloudBlob,
 		durable:          true,
+		operationID:      record.OperationID,
 	}
 	manifest := Manifest{
 		BlobPlugin:     record.BlobPlugin,
@@ -1362,9 +1552,28 @@ func RecoverInterruptedRestore(
 					removeErr,
 				)
 			}
+			// A marker left without a record, or without its recovery
+			// directory, belongs to no restore and would block the next
+			// marker write.
+			if markerErr := removeRestoreRecoveryMarkers(
+				restoreRecoveryMarkerDirs(storageConfig, targetDataDir), "",
+			); markerErr != nil {
+				return fmt.Errorf(
+					"remove incomplete restore recovery marker: %w",
+					markerErr,
+				)
+			}
 			return nil
 		}
 		return err
+	}
+	rollback.markerDirs = restoreRecoveryMarkerDirs(storageConfig, targetDataDir)
+	// Only an external-store reset needs the marker binding; accepting a
+	// completed restore just disposes of the record.
+	if !accept {
+		if err := rollback.authenticate(); err != nil {
+			return err
+		}
 	}
 	if accept {
 		err = rollback.removeOriginalBlobNamespace(

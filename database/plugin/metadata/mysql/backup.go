@@ -154,17 +154,12 @@ func connArgs(dsn string) (env, args []string, database string, err error) {
 // MariaDB's older, coarser --ssl/--skip-ssl/--ssl-verify-server-cert flags
 // instead of the newer --ssl-mode=X form.
 //
-// That older flag set can only really express two things: whether TLS is
-// attempted at all, and whether the server's certificate is verified once
-// it is. There is no client-side flag to make an unverified TLS attempt a
-// hard requirement the way MySQL's own REQUIRED mode does, so
-// "skip-verify" (required, unverified) and "preferred" (opportunistic)
-// necessarily collapse to the same "--ssl" here -- an accepted, documented
-// fidelity gap forced by the shipped client, not a design choice. "true"
-// (verify CA and hostname, the driver's strictest mode) still maps to its
-// own distinct, fully verified flags, since that's the one case a silent
-// weakening would be a real regression from what the app's own connection
-// pool is configured to require.
+// That older flag set can only express two things: whether TLS is attempted
+// and whether the server certificate is verified. It cannot express the
+// driver's "skip-verify" mode, which requires encryption without verifying
+// the certificate, so that mode is rejected rather than weakened to an
+// opportunistic connection. "preferred" remains opportunistic in both the
+// driver and client, while "true" verifies the CA and hostname in both.
 //
 // A custom registered TLS config name (via mysql.RegisterTLSConfig,
 // referencing an arbitrary *tls.Config) can't be mapped at all -- there is
@@ -180,14 +175,19 @@ func mysqlSSLArgs(tlsConfig string) ([]string, error) {
 		return []string{"--skip-ssl"}, nil
 	case "true":
 		return []string{"--ssl", "--ssl-verify-server-cert"}, nil
-	case "skip-verify", "preferred":
+	case "preferred":
 		return []string{"--ssl"}, nil
+	case "skip-verify":
+		return nil, errors.New(
+			"mysql backup/restore: tls=skip-verify requires encryption, but " +
+				"the MariaDB client cannot require unverified TLS",
+		)
 	default:
 		return nil, fmt.Errorf(
 			"mysql backup/restore: unsupported tls config %q -- mysqldump/"+
 				"mysql cannot be given a custom named TLS config "+
 				"(mysql.RegisterTLSConfig); only \"\", \"false\", \"true\", "+
-				"\"skip-verify\", or \"preferred\" are supported",
+				"or \"preferred\" are supported",
 			tlsConfig,
 		)
 	}

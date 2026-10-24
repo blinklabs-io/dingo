@@ -57,6 +57,12 @@ import (
 // to keep defaults consistent.
 const defaultMaxChainsyncClients = chainsync.DefaultMaxClients
 
+// defaultCorroborationHoldTimeout bounds a Genesis corroboration hold. A held
+// roll-forward callback stops its protocol's receive loop, and gouroboros
+// fails a pipelined client that consumes no reply within its CanAwait timeout
+// (10s), so the bound stays well under it.
+const defaultCorroborationHoldTimeout = 5 * time.Second
+
 // Mempool is the protocol-facing subset of the backend-neutral mempool. Keeping
 // this interface local prevents networking from depending on FIFO internals.
 type Mempool interface {
@@ -119,10 +125,17 @@ type Ouroboros struct {
 	leiosValidationCtx      context.Context
 	leiosValidationCancel   context.CancelFunc
 	leiosValidationSlots    chan struct{}
-	leiosValidationWG       sync.WaitGroup
-	leiosValidationMu       sync.Mutex
-	leiosValidationClosed   bool
-	config                  OuroborosConfig
+	// localTxSubmissionSlots is the in-flight LocalTxSubmission validation
+	// budget, shared by all connections.
+	localTxSubmissionSlots chan struct{}
+	// localTxSubmissionConnDoneFunc replaces the connection manager lookup of
+	// a connection's teardown signal. Test-only seam: the manager can only
+	// register a live connection.
+	localTxSubmissionConnDoneFunc func(ouroboros.ConnectionId) <-chan struct{}
+	leiosValidationWG             sync.WaitGroup
+	leiosValidationMu             sync.Mutex
+	leiosValidationClosed         bool
+	config                        OuroborosConfig
 	// registerer wraps config.PromRegistry and tracks every collector this
 	// instance registers, so Close can hand them all back. See lifecycle.go.
 	registerer *trackingRegisterer
@@ -205,6 +218,7 @@ type Ouroboros struct {
 	localstatequeryAcquireMutex sync.Mutex
 	blockfetchNoBlocksCounts    map[ouroboros.ConnectionId]blockfetchNoBlocksState
 	blockfetchRangeAdmission    *blockfetchRangeAdmission
+	blockfetchLookupSlots       chan struct{}
 	// blockfetchRangeBytes returns the expected wire size of a block range
 	// for RangeRequest.ExpectedBytes, or 0 for no estimate. Defaults to the
 	// ledger's queued-header estimate; tests override it.
@@ -229,6 +243,8 @@ type Ouroboros struct {
 	// requested on any connection; see claimBehindTipRecycle.
 	behindTipRecycleMu sync.Mutex
 	behindTipRecycleAt time.Time
+	// heldTips refreshes held clients' tips. See chainsync_hold.go.
+	heldTips heldTipRefresher
 	// chainSelectionShouldVerifyHeaderCrypto and chainSelectionVerifyHeaderCrypto
 	// gate whether a peer-reported header may influence Genesis chain-selection
 	// density or corroboration before its VRF/KES cryptography (and, once local
@@ -237,8 +253,14 @@ type Ouroboros struct {
 	// tests exercising a single protocol handler can override either seam
 	// directly instead of standing up a full LedgerState.
 	chainSelectionShouldVerifyHeaderCrypto func(slot uint64) bool
-	chainSelectionVerifyHeaderCrypto       func(header gledger.BlockHeader) (uint64, error)
-	chainsyncScheduleAt                    chainsyncScheduleAtFunc
+	chainSelectionVerifyHeaderCrypto       func(
+		ouroboros.ConnectionId,
+		gledger.BlockHeader,
+	) (uint64, error)
+	chainsyncScheduleAt chainsyncScheduleAtFunc
+	// corroborationHoldTimeout bounds how long a roll-forward callback holds
+	// a header for Genesis corroboration.
+	corroborationHoldTimeout time.Duration
 	// chainsyncArrivalNow is an instance-local clock seam for deterministic
 	// arrival-order tests. Production instances use time.Now.
 	chainsyncArrivalNow      func() time.Time
@@ -247,6 +269,21 @@ type Ouroboros struct {
 	futureHeaderResyncCtx    context.Context
 	futureHeaderResyncCancel context.CancelFunc
 	futureHeaderResyncClosed bool
+	deferredHeaderRecoveryMu sync.Mutex
+	deferredHeaderRecovery   map[ouroboros.ConnectionId]ochainsync.Tip
+	// chainsyncLocalChainTips returns the hashes of the local block tip and
+	// header-queue tip. Tests override it without a LedgerState.
+	chainsyncLocalChainTips func() (tipHash, headerTipHash []byte)
+	// deferredHeaderIdleRetry records, per connection, the applied tip at
+	// which a deferred header last forced an immediate re-intersection.
+	deferredHeaderIdleRetry map[ouroboros.ConnectionId][]byte
+	// acceptedHeaderMu guards acceptedHeaderTips, the hash of the last header
+	// from each connection that extended the local chain and that chain
+	// selection accepted; any other outcome clears the entry. Ledger
+	// admission is asynchronous, so a pipelined child can arrive before its
+	// parent reaches the queue.
+	acceptedHeaderMu   sync.Mutex
+	acceptedHeaderTips map[ouroboros.ConnectionId][]byte
 	// Per-peer rate limiter for TxSubmission server
 	txSubmissionRateLimiter *txSubmissionRateLimiter
 	// Cached Leios EB material fetched from peers. This lets NtC
@@ -476,6 +513,15 @@ type OuroborosConfig struct {
 	// Candidates may inform Genesis corroboration and eagerness but must not
 	// affect selection until the ledger admits the accompanying header.
 	ChainsyncObservePeerTip func(chainselection.PeerTipUpdateEvent) chainselection.PeerTipUpdateDisposition
+	// ChainsyncPrepareForecastWitness temporarily records a connected header
+	// that is waiting for the ledger forecast horizon. It may corroborate
+	// verified staged candidates but cannot enter selection or admission. The
+	// returned peers should be re-intersected to replay their now-corroborated
+	// headers.
+	ChainsyncPrepareForecastWitness func(chainselection.PeerTipUpdateEvent) []ouroboros.ConnectionId
+	// ChainsyncRemoveForecastWitness removes the temporary witness after the
+	// forecast wait ends.
+	ChainsyncRemoveForecastWitness func(chainselection.PeerTipUpdateEvent)
 	// ChainsyncResolvePeerTip synchronously resolves a staged candidate after
 	// definite header admission or rejection. Deferred buffered headers are not
 	// resolved until replay.
@@ -493,6 +539,18 @@ type OuroborosConfig struct {
 		blockNumber uint64,
 		appliedTip func() ochainsync.Tip,
 	) error
+	// ChainsyncAwaitCorroboration holds a roll-forward that ChainsyncApplyEligible
+	// denied, while the denial is only a lack of Genesis corroboration, and
+	// reports whether the header may then be applied. The peer's cursor stays
+	// on the header instead of moving past one the ledger never receives. It
+	// returns false without waiting for any other denial, and an error if ctx
+	// is cancelled first. The roll-forward bounds the hold; when it expires
+	// the header is withheld and the connection re-intersects, which delivers
+	// it again. When nil, a denied header is withheld at once.
+	ChainsyncAwaitCorroboration func(
+		ctx context.Context,
+		connId ouroboros.ConnectionId,
+	) (bool, error)
 	// ChainsyncObserveAwaitReply records the peer's explicit protocol-idle
 	// frontier. It runs after gouroboros fences preceding pipelined updates.
 	ChainsyncObserveAwaitReply func(ouroboros.ConnectionId, ocommon.Point)
@@ -701,11 +759,15 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 		leiosValidationCtx:      leiosValidationCtx,
 		leiosValidationCancel:   leiosValidationCancel,
 		leiosValidationSlots:    make(chan struct{}, 2),
-		mempool:                 cfg.Mempool,
-		chainsyncState:          cfg.ChainsyncState,
-		peerGov:                 cfg.PeerGov,
-		blockFetchStarts:        make(map[blockFetchKey]time.Time),
-		blockFetchDoneEarly:     make(map[blockFetchKey]error),
+		localTxSubmissionSlots: make(
+			chan struct{},
+			localTxSubmissionMaxInFlight,
+		),
+		mempool:             cfg.Mempool,
+		chainsyncState:      cfg.ChainsyncState,
+		peerGov:             cfg.PeerGov,
+		blockFetchStarts:    make(map[blockFetchKey]time.Time),
+		blockFetchDoneEarly: make(map[blockFetchKey]error),
 		localstatequeryAcquiredPoints: make(
 			map[ouroboros.ConnectionId]ledger.QueryPoint,
 		),
@@ -718,13 +780,21 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 		blockfetchNoBlocksCounts: make(
 			map[ouroboros.ConnectionId]blockfetchNoBlocksState,
 		),
+		blockfetchLookupSlots: make(
+			chan struct{},
+			blockfetchMaxConcurrentPointLookups,
+		),
 		chainsyncStats: make(
 			map[ouroboros.ConnectionId]*chainsyncPeerStats,
 		),
-		chainsyncScheduleAt: defaultChainsyncScheduleAt,
-		chainsyncArrivalNow: time.Now,
+		chainsyncScheduleAt:      defaultChainsyncScheduleAt,
+		corroborationHoldTimeout: defaultCorroborationHoldTimeout,
+		chainsyncArrivalNow:      time.Now,
 		futureHeaderResyncs: make(
 			map[ouroboros.ConnectionId]*scheduledChainsyncResync,
+		),
+		deferredHeaderRecovery: make(
+			map[ouroboros.ConnectionId]ochainsync.Tip,
 		),
 		futureHeaderResyncCtx:    futureHeaderResyncCtx,
 		futureHeaderResyncCancel: futureHeaderResyncCancel,
@@ -774,7 +844,14 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 			return o.ledgerState.Tip().BlockNumber, uint64(k)
 		}
 		o.chainSelectionShouldVerifyHeaderCrypto = o.ledgerState.ShouldVerifyChainSelectionHeaderCrypto
-		o.chainSelectionVerifyHeaderCrypto = o.ledgerState.ValidateChainSelectionHeaderCryptoWithGeneration
+		o.chainSelectionVerifyHeaderCrypto = o.ledgerState.ValidatePeerChainSelectionHeaderCryptoWithGeneration
+		o.chainsyncLocalChainTips = func() ([]byte, []byte) {
+			c := o.ledgerState.Chain()
+			if c == nil {
+				return nil, nil
+			}
+			return c.Tip().Point.Hash, c.HeaderTip().Point.Hash
+		}
 	}
 	// Initialize per-peer TxSubmission rate limiter
 	txRate := cfg.MaxTxSubmissionsPerSecond
@@ -793,6 +870,7 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 		o.initDecodeCacheMetrics()
 	}
 	o.subscribeLeiosAnnouncementRetries()
+	o.subscribeDeferredHeaderRecovery()
 	o.restoreLeiosVerifiedEbSlot()
 	return o
 }
@@ -909,9 +987,8 @@ func (o *Ouroboros) initBlockfetchMetrics() {
 }
 
 // isTrustedNtCListener reports whether l is verified reachable only from
-// this machine, the actual property the relaxed mux/query timeouts and
-// reassembly buffer in ConfigureListeners/localstatequeryServerConnOpts
-// depend on for safety -- "NtC" alone does
+// this machine, the actual property ConfigureListeners' disabled mux
+// segment-read timeout depends on for safety -- "NtC" alone does
 // not imply this: internal/node/node.go builds a UseNtC listener for both
 // cfg.SocketPath (a Unix socket, always local-only by construction) and
 // cfg.PrivateBindAddr:cfg.PrivatePort (an operator-configurable TCP
@@ -960,13 +1037,13 @@ func (o *Ouroboros) ConfigureListeners(
 	tmpListeners := make([]connmanager.ListenerConfig, len(listeners))
 	for idx, l := range listeners {
 		if l.UseNtC {
-			// Node-to-client. trusted gates the relaxed mux/query timeouts
-			// and reassembly buffer to a listener verified local-only (a
-			// Unix socket, or TCP actually bound to loopback) -- see
-			// isTrustedNtCListener's doc comment. Those exist to let a
-			// large, legitimate query (a whole-UTxO-set walk) run past
-			// gouroboros' anti-DoS defaults, which is only safe to grant
-			// unconditionally to a listener no non-local caller can reach:
+			// Node-to-client. trusted gates the disabled mux segment-read
+			// timeout to a listener verified local-only (a Unix socket, or
+			// TCP actually bound to loopback) -- see isTrustedNtCListener's
+			// doc comment. It lets a large, legitimate query (a
+			// whole-UTxO-set walk) run past gouroboros' anti-DoS default,
+			// which is only safe to grant to a listener no non-local caller
+			// can reach:
 			// a PrivateBindAddr an
 			// operator has pointed at a non-loopback address gets
 			// gouroboros' own defaults instead, same as any other NtC
@@ -981,8 +1058,8 @@ func (o *Ouroboros) ConfigureListeners(
 			// lookups disagree -- a listener classified trusted from one
 			// answer could then bind to a different, non-loopback address
 			// DNS gives on the second lookup, handing that non-loopback
-			// listener the relaxed timeouts and 2GiB reassembly buffer
-			// meant only for a verified-local one. A resolution failure here is
+			// listener the disabled segment-read timeout meant only for a
+			// verified-local one. A resolution failure here is
 			// left for startListener's own bind to report --
 			// isTrustedNtCListener treats it as untrusted either way.
 			if l.Listener == nil && l.ListenNetwork == "tcp" {
@@ -994,7 +1071,7 @@ func (o *Ouroboros) ConfigureListeners(
 			l.TrustedLocal = trusted
 			ntcOpts := []ouroboros.ConnectionOptionFunc{
 				ouroboros.WithNetworkMagic(o.config.NetworkMagic),
-				o.chainsyncConnectionConfigOption(ctx, false),
+				o.chainsyncConnectionConfigOption(ctx, false, trusted),
 				ouroboros.WithLocalStateQueryConfig(
 					olocalstatequery.NewConfig(
 						o.localstatequeryServerConnOpts(trusted)...,
@@ -1002,12 +1079,12 @@ func (o *Ouroboros) ConfigureListeners(
 				),
 				ouroboros.WithLocalTxMonitorConfig(
 					olocaltxmonitor.NewConfig(
-						o.localtxmonitorServerConnOpts()...,
+						o.localtxmonitorServerConnOpts(trusted)...,
 					),
 				),
 				ouroboros.WithLocalTxSubmissionConfig(
 					olocaltxsubmission.NewConfig(
-						o.localtxsubmissionServerConnOpts()...,
+						o.localtxsubmissionServerConnOpts(trusted)...,
 					),
 				),
 			}
@@ -1177,6 +1254,8 @@ func (o *Ouroboros) HandleConnClosedEvent(evt event.Event) {
 	}
 	connId := e.ConnectionId
 	o.cancelFutureHeaderResync(connId)
+	o.clearDeferredHeaderRecovery(connId)
+	o.forgetAcceptedHeaderTip(connId)
 	o.forgetServedActivity(connId)
 
 	// Counts keep-alive pong timeouts.

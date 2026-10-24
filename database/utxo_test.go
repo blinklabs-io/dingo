@@ -300,9 +300,11 @@ INSERT INTO utxo (
 	require.NoError(t, err)
 	_, err = raw.Exec(`
 INSERT INTO address_transaction (
-    payment_key, staking_key, credential_tag, transaction_id, slot, tx_index
-) VALUES (?, ?, ?, ?, ?, 0)`,
+    payment_key, payment_script, staking_key, credential_tag,
+    transaction_id, slot, tx_index
+) VALUES (?, ?, ?, ?, ?, ?, 0)`,
 		row.PaymentKey,
+		row.PaymentScript,
 		row.StakingKey,
 		row.CredentialTag,
 		txID,
@@ -1491,6 +1493,52 @@ func TestUtxosByAddressLoadsAssets(t *testing.T) {
 	assert.Equal(t, types.Uint64(5), got[0].Assets[0].Amount)
 }
 
+func TestUtxosByAddressCompleteExceedsBoundedLimit(t *testing.T) {
+	t.Parallel()
+
+	db := openTestDB(t)
+	payment := bytes.Repeat([]byte{0x56}, lcommon.AddressHashSize)
+	addr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyNone,
+		lcommon.AddressNetworkTestnet,
+		payment,
+		nil,
+	)
+	require.NoError(t, err)
+	encoded, err := cbor.Encode(&shelley.ShelleyTransactionOutput{
+		OutputAddress: addr,
+		OutputAmount:  1_000_000,
+	})
+	require.NoError(t, err)
+
+	const total = 3
+	for i := range total {
+		txHash := bytes.Repeat([]byte{byte(i + 1)}, 32)
+		require.NoError(t, db.CreateUtxo(t.Context(), nil, &models.Utxo{
+			TxId:       txHash,
+			OutputIdx:  0,
+			PaymentKey: addr.PaymentKeyHash().Bytes(),
+			Address:    []byte(addr.String()),
+			AddedSlot:  uint64(i + 1),
+			Amount:     types.Uint64(1_000_000),
+			Cbor:       encoded,
+		}))
+		require.NoError(t, db.BlobTxn(true).Do(func(txn *Txn) error {
+			return db.Blob().SetUtxo(txn.Blob(), txHash, 0, encoded)
+		}))
+	}
+
+	_, err = db.UtxosByAddress(
+		t.Context(), []lcommon.Address{addr}, total-1, nil,
+	)
+	require.ErrorIs(t, err, models.ErrTooManyUtxoResults)
+	got, err := db.UtxosByAddressComplete(
+		t.Context(), []lcommon.Address{addr}, nil,
+	)
+	require.NoError(t, err)
+	require.Len(t, got, total)
+}
+
 // seedManyUtxoAddressesAndAssertRoundTrip builds numAddrs addresses via
 // newAddr, seeds a distinct transaction, UTxO row, and blob CBOR for each,
 // then queries GetUtxosByAddress with the full address set in one call and
@@ -2456,4 +2504,82 @@ UPDATE utxo SET deleted_slot = 10, spent_at_tx_id = ?`, consumerHash)
 			require.Zero(t, deletedSlot)
 		})
 	}
+}
+
+// TestUtxosDeleteSpentInBatchFloor pins that removing a batch's spent rows
+// raises the consumed-UTxO prune floor to the batch's slot and never lowers
+// it, and that the delete refuses to run outside the caller's transaction.
+func TestUtxosDeleteSpentInBatchFloor(t *testing.T) {
+	t.Parallel()
+
+	db := openTestDB(t)
+	ids := []models.UtxoId{{Hash: bytes.Repeat([]byte{0x01}, 32), Idx: 0}}
+	require.ErrorIs(t,
+		db.UtxosDeleteSpentInBatch(ids, 10, nil), types.ErrNilTxn)
+	require.NoError(t, db.UtxosDeleteSpentInBatch(nil, 10, nil),
+		"an empty batch needs no transaction")
+
+	apply := func(slot uint64) {
+		txn := db.Transaction(context.Background(), true)
+		require.NoError(t, txn.Do(func(txn *Txn) error {
+			return db.UtxosDeleteSpentInBatch(ids, slot, txn)
+		}))
+	}
+	floor := func() uint64 {
+		value, err := db.ConsumedUtxoPruneFloor(nil)
+		require.NoError(t, err)
+		return value
+	}
+	apply(50)
+	require.Equal(t, uint64(50), floor())
+	apply(20)
+	require.Equal(t, uint64(50), floor(), "the floor must not move down")
+}
+
+// TestFilterUtxosByAddressPatternsExactSetMatchesLinear pins the keyed
+// exact-address lookup to the pattern contract, including a mixed filter
+// that must still use the linear matcher.
+func TestFilterUtxosByAddressPatternsExactSetMatchesLinear(t *testing.T) {
+	t.Parallel()
+	mk := func(b byte) lcommon.Address {
+		a, err := lcommon.NewAddressFromParts(
+			lcommon.AddressTypeKeyNone,
+			lcommon.AddressNetworkTestnet,
+			bytes.Repeat([]byte{b}, lcommon.AddressHashSize),
+			nil,
+		)
+		require.NoError(t, err)
+		return a
+	}
+	addrs := []lcommon.Address{mk(1), mk(2), mk(3)}
+	utxos := make([]models.Utxo, len(addrs))
+	for i, a := range addrs {
+		out, err := cbor.Encode(&shelley.ShelleyTransactionOutput{
+			OutputAddress: a,
+			OutputAmount:  1,
+		})
+		require.NoError(t, err)
+		utxos[i] = models.Utxo{TxId: bytes.Repeat([]byte{byte(i)}, 32), Cbor: out}
+	}
+	exact := func(a lcommon.Address) models.UtxoAddressPattern {
+		p, err := models.ExactUtxoAddressPattern(a)
+		require.NoError(t, err)
+		return p
+	}
+	got, err := filterUtxosByAddressPatterns(
+		t.Context(), utxos,
+		[]models.UtxoAddressPattern{exact(addrs[0]), exact(addrs[2])},
+	)
+	require.NoError(t, err)
+	require.Len(t, got, 2)
+	require.Equal(t, utxos[0].TxId, got[0].TxId)
+	require.Equal(t, utxos[2].TxId, got[1].TxId)
+
+	mixed := exact(addrs[1])
+	mixed.PaymentPart = addrs[2].PaymentKeyHash().Bytes()
+	got, err = filterUtxosByAddressPatterns(
+		t.Context(), utxos, []models.UtxoAddressPattern{mixed},
+	)
+	require.NoError(t, err)
+	require.Empty(t, got)
 }

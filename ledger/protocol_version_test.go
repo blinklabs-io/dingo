@@ -18,8 +18,10 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/config/cardano"
@@ -165,6 +167,32 @@ func TestEvaluateProtocolVersionBump_DetectsQuorumMetUpdate(t *testing.T) {
 	require.Equal(t, eras.BabbageEraDesc.Id, ls.currentEra.Id)
 	require.Equal(t, uint(8), pparams.ProtocolMajor,
 		"the peek must not mutate the live currentPParams pointer")
+}
+
+func TestQueueProtocolVersionBumpEvaluation_PublishesDetectedTransition(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	cfg := newBabbageQuorum1Cfg(t)
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	ls := newQuorumMetVersionBumpLedger(t, cfg, db)
+	testChain, tips := newVersionBumpChain(t, db, 30, 15, 2)
+	ls.chain = testChain
+	ls.currentTip = tips[1]
+	ls.publishSnapshotsLocked()
+
+	ls.Lock()
+	ls.queueProtocolVersionBumpEvaluation(t.Context())
+	ls.Unlock()
+
+	require.Eventually(t, func() bool {
+		ls.RLock()
+		defer ls.RUnlock()
+		return ls.transitionInfo.State == hardfork.TransitionKnown &&
+			ls.transitionInfo.KnownEpoch == 1
+	}, 5*time.Second, 10*time.Millisecond)
 }
 
 // TestEvaluateProtocolVersionBump_NoUpdateStaysUnknown is the negative half:
@@ -734,7 +762,7 @@ func TestPParamVotingCountStartSlot(t *testing.T) {
 
 	for _, tc := range []struct {
 		name             string
-		securityParam    int
+		securityParam    int64
 		activeSlotsCoeff string
 		want             uint64
 	}{
@@ -759,26 +787,32 @@ func TestPParamVotingCountStartSlot(t *testing.T) {
 			want:             100,
 		},
 	} {
-		ls := &LedgerState{
-			currentEra: eras.BabbageEraDesc,
-			currentEpoch: models.Epoch{
-				EpochId:       1,
-				StartSlot:     100,
-				LengthInSlots: 100,
-				EraId:         eras.BabbageEraDesc.Id,
-			},
-			config: LedgerStateConfig{
-				CardanoNodeConfig: newBabbageQuorumCfg(
-					t,
-					tc.securityParam,
-					tc.activeSlotsCoeff,
-				),
-				Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
-			},
-		}
-		got, ok := ls.pparamVotingCountStartSlot()
-		require.True(t, ok, tc.name)
-		assert.Equal(t, tc.want, got, tc.name)
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if tc.securityParam > int64(math.MaxInt) {
+				t.Skip("security parameter requires a 64-bit int")
+			}
+			ls := &LedgerState{
+				currentEra: eras.BabbageEraDesc,
+				currentEpoch: models.Epoch{
+					EpochId:       1,
+					StartSlot:     100,
+					LengthInSlots: 100,
+					EraId:         eras.BabbageEraDesc.Id,
+				},
+				config: LedgerStateConfig{
+					CardanoNodeConfig: newBabbageQuorumCfg(
+						t,
+						int(tc.securityParam),
+						tc.activeSlotsCoeff,
+					),
+					Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+				},
+			}
+			got, ok := ls.pparamVotingCountStartSlot()
+			require.True(t, ok, tc.name)
+			assert.Equal(t, tc.want, got, tc.name)
+		})
 	}
 }
 
@@ -1129,4 +1163,75 @@ func TestIsHardForkTransition(t *testing.T) {
 			assert.Equal(t, tt.expected, result)
 		})
 	}
+}
+
+// A request that arrives while an evaluation is running must not be lost: the
+// running one reads the older tip, finds too few blocks, and has to re-queue
+// so the newer tip is evaluated.
+func TestQueueProtocolVersionBumpEvaluation_RerunsForTipMovedDuringEvaluation(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	cfg := newBabbageQuorumCfg(t, 2, "0.2")
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	ls := newQuorumMetVersionBumpLedger(t, cfg, db)
+	// Blocks 1-4 at slots 30, 40, 50 and 60; two blocks lie at or past the
+	// voting deadline once the tip reaches block 3.
+	testChain, tips := newVersionBumpChain(t, db, 30, 10, 4)
+	ls.chain = testChain
+
+	ls.Lock()
+	ls.currentTip = tips[1]
+	ls.queueProtocolVersionBumpEvaluation(t.Context())
+	// The first evaluation cannot finish while this goroutine holds the
+	// write lock, so this request meets it in flight.
+	ls.currentTip = tips[2]
+	ls.queueProtocolVersionBumpEvaluation(t.Context())
+	ls.Unlock()
+	ls.protocolVersionEvalWG.Wait()
+
+	ls.RLock()
+	defer ls.RUnlock()
+	require.Equal(t, hardfork.TransitionKnown, ls.transitionInfo.State)
+	require.Equal(t, uint64(1), ls.transitionInfo.KnownEpoch)
+}
+
+// Close drains evaluations through protocolVersionEvalWG before storage is
+// closed, and refuses to start one afterwards.
+func TestQueueProtocolVersionBumpEvaluation_RegistersWithCloseDrain(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	cfg := newBabbageQuorum1Cfg(t)
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	ls := newQuorumMetVersionBumpLedger(t, cfg, db)
+	testChain, tips := newVersionBumpChain(t, db, 30, 15, 2)
+	ls.chain = testChain
+	ls.currentTip = tips[1]
+
+	ls.Lock()
+	ls.queueProtocolVersionBumpEvaluation(t.Context())
+	ls.Unlock()
+	ls.protocolVersionEvalWG.Wait()
+	ls.RLock()
+	require.Equal(t, hardfork.TransitionKnown, ls.transitionInfo.State)
+	ls.RUnlock()
+
+	ls.protocolVersionEvalMu.Lock()
+	ls.protocolVersionEvalClosed = true
+	ls.protocolVersionEvalMu.Unlock()
+	ls.Lock()
+	ls.transitionInfo = hardfork.NewTransitionUnknown()
+	ls.queueProtocolVersionBumpEvaluation(t.Context())
+	ls.Unlock()
+	ls.protocolVersionEvalWG.Wait()
+	ls.RLock()
+	defer ls.RUnlock()
+	require.Equal(t, hardfork.TransitionUnknown, ls.transitionInfo.State,
+		"no evaluation may start after Close began draining")
+	require.False(t, ls.protocolVersionEvalInFlight.Load())
 }

@@ -200,7 +200,7 @@ func (e LovelaceBoundByronError) Error() string {
 		"%s %s exceeds the maximum Lovelace value %d",
 		e.Balance,
 		e.Value.String(),
-		byronMaxLovelace,
+		uint64(byronMaxLovelace),
 	)
 }
 
@@ -217,6 +217,21 @@ func (e WitnessWrongKeyByronError) Error() string {
 		"witness %d does not authorize input %s",
 		e.InputIndex,
 		e.Input,
+	)
+}
+
+// WitnessCountByronError is returned when a Byron transaction does not have
+// exactly one positional witness for each input.
+type WitnessCountByronError struct {
+	Inputs    int
+	Witnesses int
+}
+
+func (e WitnessCountByronError) Error() string {
+	return fmt.Sprintf(
+		"byron transaction has %d inputs and %d witnesses",
+		e.Inputs,
+		e.Witnesses,
 	)
 }
 
@@ -761,8 +776,12 @@ func byronValidateWitnesses(
 			err,
 		)
 	}
-	if len(witnesses) == 0 {
-		return nil
+	inputs := tx.Inputs()
+	if len(witnesses) != len(inputs) {
+		return WitnessCountByronError{
+			Inputs:    len(inputs),
+			Witnesses: len(witnesses),
+		}
 	}
 	protocolMagicProvider, ok := stateCapability[ByronProtocolMagicProvider](ls)
 	if !ok {
@@ -909,20 +928,15 @@ func byronDecodeWitnesses(
 	return ret, nil
 }
 
-// validateByronInputWitnesses pairs witness i with input i, as the reference
-// does with zip addresses witnesses, and requires each witness to authorize
-// its own input's address. zip stops at the shorter list, so inputs beyond the
-// last witness are not checked and witnesses beyond the last input are
-// ignored.
+// validateByronInputWitnesses pairs witness i with input i and requires each
+// witness to authorize its own input's address. The caller has already
+// required one witness for every input.
 func validateByronInputWitnesses(
 	tx lcommon.Transaction,
 	ls lcommon.LedgerState,
 	witnesses []byronTxInWitness,
 ) error {
 	for idx, input := range tx.Inputs() {
-		if idx >= len(witnesses) {
-			break
-		}
 		utxo, err := ls.UtxoById(input)
 		if err != nil || utxo.Output == nil {
 			// Bad inputs are caught by byronValidateBadInputs

@@ -51,6 +51,21 @@ const (
 	// connection open.
 	defaultRequestBodyTimeout = 30 * time.Second
 
+	// defaultMaxMempoolListing caps the identifiers one /mempool response
+	// names. The Mesh response has no cursor and must list every pending
+	// transaction, so a pool larger than this is refused as retriable.
+	defaultMaxMempoolListing = 10000
+
+	// defaultMaxConcurrentMempoolListings caps /mempool requests in flight.
+	// A request over the cap is refused rather than queued, so unauthenticated
+	// callers cannot pile up pool walks behind one another.
+	defaultMaxConcurrentMempoolListings = 8
+
+	// defaultMaxConcurrentBulkReads caps simultaneous complete /account/coins
+	// reads. It refuses excess work before starting a ledger query without
+	// changing the contents of a successful response.
+	defaultMaxConcurrentBulkReads = 8
+
 	// listenerReadTimeout bounds the whole request read at the
 	// connection, covering the requests whose body no handler reads --
 	// such as an unknown route -- which the per-request deadline above
@@ -86,6 +101,13 @@ type ServerConfig struct {
 	// enough for a test". NewServer substitutes
 	// defaultRequestBodyTimeout when it is not positive.
 	requestBodyTimeout time.Duration
+	// maxConcurrentBulkReads is unexported so the concurrency bound remains a
+	// server invariant rather than part of the Mesh wire contract.
+	maxConcurrentBulkReads int
+	// maxMempoolListing and maxConcurrentMempoolListings are unexported and
+	// defaulted the same way.
+	maxMempoolListing            int
+	maxConcurrentMempoolListings int
 }
 
 // Server is the Mesh-compatible REST API server.
@@ -99,6 +121,11 @@ type Server struct {
 	// listening socket as part of what Stop waits for -- see
 	// internal/apilistener.
 	listener *apilistener.Listener
+	// bulkSlots admits complete /account/coins reads without changing their
+	// whole-result contract.
+	bulkSlots chan struct{}
+	// mempoolSlots holds one token per /mempool request in flight.
+	mempoolSlots chan struct{}
 }
 
 // NewServer creates a new Mesh API server instance.
@@ -155,6 +182,16 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		cfg.requestBodyTimeout = defaultRequestBodyTimeout
 	}
 
+	if cfg.maxMempoolListing <= 0 {
+		cfg.maxMempoolListing = defaultMaxMempoolListing
+	}
+	if cfg.maxConcurrentMempoolListings <= 0 {
+		cfg.maxConcurrentMempoolListings = defaultMaxConcurrentMempoolListings
+	}
+	if cfg.maxConcurrentBulkReads <= 0 {
+		cfg.maxConcurrentBulkReads = defaultMaxConcurrentBulkReads
+	}
+
 	var addrNetID uint8 = lcommon.AddressNetworkTestnet
 	if cfg.NetworkMagic == mainnetMagic {
 		addrNetID = lcommon.AddressNetworkMainnet
@@ -173,10 +210,12 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	return &Server{
 		config:        cfg,
 		logger:        logger,
+		mempoolSlots:  make(chan struct{}, cfg.maxConcurrentMempoolListings),
 		networkID:     networkID,
 		genesisID:     genesisID,
 		addrNetworkID: addrNetID,
 		listener:      apilistener.New("Mesh API", logger),
+		bulkSlots:     make(chan struct{}, cfg.maxConcurrentBulkReads),
 	}, nil
 }
 
@@ -241,7 +280,10 @@ func (s *Server) Stop(ctx context.Context) error {
 }
 
 // registerRoutes registers all Mesh API endpoints.
-func (s *Server) registerRoutes(mux *http.ServeMux) {
+func (s *Server) registerRoutes(mux interface {
+	HandleFunc(string, func(http.ResponseWriter, *http.Request))
+},
+) {
 	// Network API
 	mux.HandleFunc(
 		"POST /network/list",
@@ -382,26 +424,11 @@ func writeJSON(
 	}
 }
 
-// writeError writes a Mesh error response.
+// writeError writes a Mesh error response. The Mesh specification declares
+// only 200 and 500 for every operation and carries the error class in the
+// Error body, so every error is a 500; clients retry on Error.retriable.
 func writeError(w http.ResponseWriter, meshErr *Error) {
-	status := http.StatusInternalServerError
-	switch meshErr.Code {
-	case ErrNetworkNotSupported.Code,
-		ErrBlockNotFound.Code,
-		ErrTransactionNotFound.Code,
-		ErrAccountNotFound.Code:
-		status = http.StatusNotFound
-	case ErrInvalidRequest.Code,
-		ErrInvalidPublicKey.Code,
-		ErrInvalidTransaction.Code,
-		ErrSubmitFailed.Code:
-		status = http.StatusBadRequest
-	case ErrNotImplemented.Code:
-		status = http.StatusNotImplemented
-	case ErrUnavailable.Code:
-		status = http.StatusServiceUnavailable
-	}
-	writeJSON(w, status, meshErr)
+	writeJSON(w, http.StatusInternalServerError, meshErr)
 }
 
 // decodeRequest decodes a JSON request body into dst under both

@@ -278,9 +278,12 @@ func TestStackSubmissionRejectReasons(t *testing.T) {
 		name  string
 		cfg   StackConfig
 		first *ocommon.DmqMessage // submitted and accepted beforehand
-		msg   ocommon.DmqMessage
-		want  ocommon.RejectReason
-		label string
+		// pooled is admitted to the pool directly, so the submission reaches
+		// submit and the pool rather than the server's replay cache refuses it.
+		pooled *ocommon.DmqMessage
+		msg    ocommon.DmqMessage
+		want   ocommon.RejectReason
+		label  string
 	}{
 		{
 			name:  "expired",
@@ -295,6 +298,16 @@ func TestStackSubmissionRejectReasons(t *testing.T) {
 				return &m
 			}(),
 			msg:   newTestMessage([]byte("dup"), soon),
+			want:  ocommon.AlreadyReceivedReason{},
+			label: reasonAlreadyReceived,
+		},
+		{
+			name: "duplicate in pool",
+			pooled: func() *ocommon.DmqMessage {
+				m := newTestMessage([]byte("pooled"), soon)
+				return &m
+			}(),
+			msg:   newTestMessage([]byte("pooled"), soon),
 			want:  ocommon.AlreadyReceivedReason{},
 			label: reasonAlreadyReceived,
 		},
@@ -345,6 +358,11 @@ func TestStackSubmissionRejectReasons(t *testing.T) {
 			if tc.first != nil {
 				require.Nil(t, submit(*tc.first))
 			}
+			if tc.pooled != nil {
+				added, err := s.pool.Add(*tc.pooled)
+				require.NoError(t, err)
+				require.True(t, added)
+			}
 			reason := submit(tc.msg)
 			require.IsType(t, tc.want, reason)
 			if _, ok := reason.(ocommon.InvalidReason); ok {
@@ -394,11 +412,9 @@ func TestStackNotificationNonBlocking(t *testing.T) {
 	}, 10*time.Second, 10*time.Millisecond)
 	require.Equal(t, []string{"a", "b"}, other)
 	// Two messages queued for each of the three open connections.
-	require.Equal(
-		t,
-		6.0,
-		metricValue(t, reg, "dingo_dmq_messages_sent_total", ""),
-	)
+	require.Eventually(t, func() bool {
+		return metricValue(t, reg, "dingo_dmq_messages_sent_total", "") == 6
+	}, 10*time.Second, 10*time.Millisecond)
 	require.Eventually(t, func() bool {
 		return metricValue(t, reg, "dingo_dmq_connections", "") == 3
 	}, 10*time.Second, 10*time.Millisecond)

@@ -22,6 +22,7 @@ package indexer
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -38,12 +39,18 @@ import (
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/ledger"
+	ouroborosledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	fxcbor "github.com/fxamacker/cbor/v2"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
-const midnightCheckpointPhase = "midnight"
+const (
+	midnightCheckpointPhase             = "midnight"
+	midnightRegistrationCheckpointPhase = "midnight-registration-rebuild"
+	midnightRegistrationFingerprintKey  = "midnight_registration_policy_fingerprint"
+	midnightRegistrationPendingKey      = "midnight_registration_rebuild_pending"
+)
 
 // candidateRollbackDepth is the Cardano security parameter k: the maximum
 // number of blocks that Ouroboros can roll back. Rollback journal rows older
@@ -68,8 +75,8 @@ type Config struct {
 	CNightPolicyID          string
 	CNightAssetName         string
 	MappingValidatorAddress string
-	// AuthTokenPolicyID scopes auth-token matching to a specific policy.
-	// When empty, any policy carrying AuthTokenAssetName is accepted.
+	// AuthTokenPolicyID and AuthTokenAssetName identify the auth token and
+	// must be set together; New rejects one without the other.
 	AuthTokenPolicyID  string
 	AuthTokenAssetName string
 	// BlockIterator iterates stored blocks in [startSlot, endSlot).
@@ -77,6 +84,9 @@ type Config struct {
 	// events, processing any blocks whose slot is >= the last checkpoint slot.
 	// Node.go provides this via database.ForEachBlockInRangeDB.
 	BlockIterator func(startSlot, endSlot uint64, fn func(models.Block) error) error
+	// CanonicalBlockIterator iterates the primary-chain index over
+	// [startIndex, endIndex), skipping sparse imported IDs.
+	CanonicalBlockIterator func(startIndex, endIndex uint64, fn func(models.Block) error) error
 	// LedgerTipSlot reports the slot of the last block the ledger has applied
 	// and committed, which is where backfill stops.
 	//
@@ -95,7 +105,10 @@ type Config struct {
 	// Nil means "scan every stored block", which is what an embedder wiring
 	// only BlockIterator gets.
 	LedgerTipSlot func() (uint64, error)
-	blockDecoder  func(models.Block) ([]lcommon.Transaction, error)
+	// LedgerTipBlock returns the applied tip block, or nil when the ledger is
+	// at origin. It is required to validate a complete registration rebuild.
+	LedgerTipBlock func() (*models.Block, error)
+	blockDecoder   func(models.Block) ([]lcommon.Transaction, error)
 	// FatalErrorFunc is called when the indexer encounters an error that
 	// cannot be recovered without risking a checkpoint gap. Node wiring
 	// should cancel the node context so the process exits cleanly.
@@ -220,10 +233,7 @@ type Indexer struct {
 	cnightAssetName []byte
 	cnightEnabled   bool
 	// Parsed auth token parameters; valid only when authEnabled is true.
-	// authPolicyID is the zero value (all-zeros) when not configured, in
-	// which case hasAuthToken matches any policy.
 	authPolicyID  lcommon.Blake2b224
-	authPolicySet bool
 	authAssetName []byte
 	authEnabled   bool
 	// checkpointSlot is the slot of the last block fully processed by
@@ -283,27 +293,30 @@ func New(cfg Config) (*Indexer, error) {
 		idx.cnightEnabled = true
 	}
 
+	if (cfg.AuthTokenPolicyID == "") != (cfg.AuthTokenAssetName == "") {
+		return nil, errors.New(
+			"auth_token_policy_id and auth_token_asset_name must be set " +
+				"together: an asset name alone matches any minting policy",
+		)
+	}
 	if cfg.AuthTokenAssetName != "" {
 		assetNameBytes, err := hex.DecodeString(cfg.AuthTokenAssetName)
 		if err != nil {
 			return nil, fmt.Errorf("invalid auth_token_asset_name: %w", err)
 		}
-		idx.authAssetName = assetNameBytes
-		idx.authEnabled = true
-		if cfg.AuthTokenPolicyID != "" {
-			policyBytes, err := hex.DecodeString(cfg.AuthTokenPolicyID)
-			if err != nil {
-				return nil, fmt.Errorf("invalid auth_token_policy_id: %w", err)
-			}
-			if len(policyBytes) != 28 {
-				return nil, fmt.Errorf(
-					"invalid auth_token_policy_id: must be 56 hex characters (28 bytes), got %d bytes",
-					len(policyBytes),
-				)
-			}
-			idx.authPolicyID = lcommon.NewBlake2b224(policyBytes)
-			idx.authPolicySet = true
+		policyBytes, err := hex.DecodeString(cfg.AuthTokenPolicyID)
+		if err != nil {
+			return nil, fmt.Errorf("invalid auth_token_policy_id: %w", err)
 		}
+		if len(policyBytes) != 28 {
+			return nil, fmt.Errorf(
+				"invalid auth_token_policy_id: must be 56 hex characters (28 bytes), got %d bytes",
+				len(policyBytes),
+			)
+		}
+		idx.authAssetName = assetNameBytes
+		idx.authPolicyID = lcommon.NewBlake2b224(policyBytes)
+		idx.authEnabled = true
 	}
 
 	// Initialise governance state; parseGovernanceConfig populates the
@@ -508,8 +521,8 @@ func (idx *Indexer) Subscribe() {
 }
 
 // Backfill replays all stored blocks from the last checkpoint through the
-// database. The configured SlotToEpoch resolver must already be usable before
-// this method is called.
+// database. The configured slot resolvers must already be usable before this
+// method is called.
 func (idx *Indexer) Backfill() error {
 	if idx.config.BlockIterator == nil {
 		return nil
@@ -518,14 +531,362 @@ func (idx *Indexer) Backfill() error {
 }
 
 // Start runs catch-up backfill and then subscribes to live events. Callers must
-// ensure SlotToEpoch is ready and that ledger block processing has not started
-// yet, so there is no overlap between backfill and live events.
+// ensure slot-to-epoch and slot-to-time conversion are ready and that ledger
+// block processing has not started yet, so there is no overlap between
+// backfill and live events.
 func (idx *Indexer) Start() error {
+	if err := idx.preflightRegistrationRebuildIfNeeded(); err != nil {
+		return err
+	}
 	if err := idx.Backfill(); err != nil {
 		return err
 	}
+	if err := idx.rebuildRegistrationStateIfNeeded(); err != nil {
+		return err
+	}
+	if err := idx.loadTrackedUTxOs(); err != nil {
+		return fmt.Errorf("midnight indexer: loading tracked utxos after backfill: %w", err)
+	}
 	idx.Subscribe()
 	return nil
+}
+
+func (idx *Indexer) registrationFingerprint() string {
+	data := []byte("v1\x00" + idx.config.AuthTokenPolicyID + "\x00" + idx.config.AuthTokenAssetName + "\x00" + idx.config.MappingValidatorAddress)
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+
+func (idx *Indexer) rebuildRegistrationStateIfNeeded() error {
+	fingerprint := idx.registrationFingerprint()
+	completed, err := idx.config.Metadata.GetSyncState(
+		midnightRegistrationFingerprintKey, nil,
+	)
+	if err != nil {
+		return fmt.Errorf("midnight indexer: reading registration policy fingerprint: %w", err)
+	}
+	pending, err := idx.config.Metadata.GetSyncState(
+		midnightRegistrationPendingKey, nil,
+	)
+	if err != nil {
+		return fmt.Errorf("midnight indexer: reading registration rebuild marker: %w", err)
+	}
+	if completed == fingerprint && pending == "" {
+		return nil
+	}
+
+	rowsExist, err := idx.config.Metadata.MidnightRegistrationStateExists(nil)
+	if err != nil {
+		return fmt.Errorf("midnight indexer: checking registration state: %w", err)
+	}
+	if idx.config.CanonicalBlockIterator == nil || idx.config.LedgerTipBlock == nil {
+		if rowsExist || pending != "" {
+			return errors.New("midnight indexer: cannot rebuild registration history without retained-block iterator and applied-tip resolver")
+		}
+		return idx.completeRegistrationRebuild(fingerprint, 0)
+	}
+
+	tip, last, err := idx.preflightRegistrationHistory()
+	if err != nil {
+		return fmt.Errorf("midnight indexer: registration rebuild preflight: %w", err)
+	}
+	if tip == nil && (rowsExist || pending != "") {
+		return errors.New("midnight indexer: cannot rebuild existing registration state when the applied tip is at origin")
+	}
+	if tip != nil && (last == nil || last.Slot != tip.Slot || last.Number != tip.Number || !bytes.Equal(last.Hash, tip.Hash)) {
+		return fmt.Errorf("midnight indexer: registration rebuild history ends at %v, applied tip is slot=%d number=%d hash=%x", last, tip.Slot, tip.Number, tip.Hash)
+	}
+
+	txn := idx.config.Metadata.Transaction(context.Background())
+	if txn == nil {
+		return errors.New("midnight indexer: starting registration rebuild transaction returned nil")
+	}
+	if err := idx.config.Metadata.ResetMidnightRegistrationState(txn); err != nil {
+		_ = txn.Rollback()
+		return fmt.Errorf("midnight indexer: clearing registration state: %w", err)
+	}
+	if err := idx.config.Metadata.SetSyncState(
+		midnightRegistrationPendingKey, fingerprint, txn,
+	); err != nil {
+		_ = txn.Rollback()
+		return fmt.Errorf("midnight indexer: marking registration rebuild pending: %w", err)
+	}
+	if err := idx.config.Metadata.SetBackfillCheckpoint(&models.BackfillCheckpoint{
+		Phase: midnightRegistrationCheckpointPhase,
+	}, txn); err != nil {
+		_ = txn.Rollback()
+		return fmt.Errorf("midnight indexer: resetting registration checkpoint: %w", err)
+	}
+	if err := txn.Commit(); err != nil {
+		return fmt.Errorf("midnight indexer: committing registration rebuild start: %w", err)
+	}
+
+	idx.mu.Lock()
+	clear(idx.regUTxOs)
+	idx.mu.Unlock()
+	lastSlot, err := idx.replayCanonicalRegistrationHistory(tip)
+	if err != nil {
+		return err
+	}
+	if last != nil && lastSlot != last.Slot {
+		return fmt.Errorf("midnight indexer: registration rebuild replay stopped at slot %d, expected %d", lastSlot, last.Slot)
+	}
+	return idx.completeRegistrationRebuild(fingerprint, lastSlot)
+}
+
+// preflightRegistrationRebuildIfNeeded verifies retained canonical coverage
+// before ordinary backfill can write any Midnight state. The migration repeats
+// this check immediately before its destructive transaction.
+func (idx *Indexer) preflightRegistrationRebuildIfNeeded() error {
+	fingerprint, err := idx.config.Metadata.GetSyncState(midnightRegistrationFingerprintKey, nil)
+	if err != nil {
+		return fmt.Errorf("midnight indexer: reading registration policy fingerprint: %w", err)
+	}
+	pending, err := idx.config.Metadata.GetSyncState(midnightRegistrationPendingKey, nil)
+	if err != nil {
+		return fmt.Errorf("midnight indexer: reading registration rebuild marker: %w", err)
+	}
+	if fingerprint == idx.registrationFingerprint() && pending == "" {
+		return nil
+	}
+	rowsExist, err := idx.config.Metadata.MidnightRegistrationStateExists(nil)
+	if err != nil {
+		return fmt.Errorf("midnight indexer: checking registration state: %w", err)
+	}
+	if idx.config.CanonicalBlockIterator == nil || idx.config.LedgerTipBlock == nil {
+		if rowsExist || pending != "" {
+			return errors.New("midnight indexer: cannot rebuild registration history without retained-block iterator and applied-tip resolver")
+		}
+		return nil
+	}
+	tip, last, err := idx.preflightRegistrationHistory()
+	if err != nil {
+		return fmt.Errorf("midnight indexer: registration rebuild preflight: %w", err)
+	}
+	if tip == nil && (rowsExist || pending != "") {
+		return errors.New("midnight indexer: cannot rebuild existing registration state when the applied tip is at origin")
+	}
+	if tip != nil && (last == nil || last.Slot != tip.Slot || last.Number != tip.Number || !bytes.Equal(last.Hash, tip.Hash)) {
+		return fmt.Errorf("midnight indexer: registration rebuild history ends at %v, applied tip is slot=%d number=%d hash=%x", last, tip.Slot, tip.Number, tip.Hash)
+	}
+	return nil
+}
+
+func (idx *Indexer) replayCanonicalRegistrationHistory(tip *models.Block) (uint64, error) {
+	if tip == nil {
+		return 0, nil
+	}
+	if tip.ID == math.MaxUint64 {
+		return 0, errors.New("midnight indexer: applied tip index cannot be represented as an exclusive range end")
+	}
+	var last models.Block
+	idx.metrics.beginBackfill()
+	defer idx.metrics.endBackfill()
+	err := idx.config.CanonicalBlockIterator(1, tip.ID+1, func(block models.Block) error {
+		var txs []lcommon.Transaction
+		if idx.config.blockDecoder != nil {
+			decodedTxs, err := idx.config.blockDecoder(block)
+			if err != nil {
+				return fmt.Errorf("midnight indexer: registration rebuild: decode block slot=%d number=%d: %w", block.Slot, block.Number, err)
+			}
+			txs = decodedTxs
+		} else {
+			decoded, err := block.Decode()
+			if err != nil {
+				return fmt.Errorf("midnight indexer: registration rebuild: decode block slot=%d: %w", block.Slot, err)
+			}
+			txs = decoded.Transactions()
+		}
+		timestamp, err := idx.blockTimestamp(block.Slot)
+		if err != nil {
+			return err
+		}
+		if err := idx.processRegistrationBlock(block, txs, timestamp); err != nil {
+			return fmt.Errorf("midnight indexer: registration rebuild: process block slot=%d number=%d: %w", block.Slot, block.Number, err)
+		}
+		if err := idx.config.Metadata.SetBackfillCheckpoint(&models.BackfillCheckpoint{
+			Phase: midnightRegistrationCheckpointPhase, LastSlot: block.Slot,
+		}, nil); err != nil {
+			return fmt.Errorf("midnight indexer: registration rebuild: checkpoint slot=%d number=%d: %w", block.Slot, block.Number, err)
+		}
+		last = block
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	if last.ID != tip.ID || last.Slot != tip.Slot || last.Number != tip.Number || !bytes.Equal(last.Hash, tip.Hash) {
+		return 0, fmt.Errorf("midnight indexer: registration replay ended at index=%d slot=%d number=%d hash=%x, want index=%d slot=%d number=%d hash=%x", last.ID, last.Slot, last.Number, last.Hash, tip.ID, tip.Slot, tip.Number, tip.Hash)
+	}
+	return last.Slot, nil
+}
+
+// processRegistrationBlock replays only the registration UTxO lifecycle.
+// Historical rebuilds must not touch other Midnight tables or their in-memory
+// state while replacing registration policy-derived rows.
+func (idx *Indexer) processRegistrationBlock(
+	block models.Block,
+	txs []lcommon.Transaction,
+	timestampMs uint64,
+) error {
+	txn := idx.config.Metadata.Transaction(context.Background())
+	if txn == nil {
+		return errors.New("midnight indexer: registration rebuild transaction returned nil")
+	}
+	defer txn.Rollback() //nolint:errcheck
+	journal := newMapJournal[utxoKey, registrationUTxO]()
+	committed := false
+	defer func() {
+		if committed {
+			return
+		}
+		idx.mu.Lock()
+		journal.undo(idx.regUTxOs)
+		idx.mu.Unlock()
+	}()
+
+	for txIndex, tx := range txs {
+		txHash := tx.Id().Bytes()
+		for _, input := range tx.Consumed() {
+			inputHash := input.Id().Bytes()
+			key := utxoKey{TxHash: hex.EncodeToString(inputHash), Index: input.Index()}
+			idx.mu.RLock()
+			registration, found := idx.regUTxOs[key]
+			idx.mu.RUnlock()
+			if !found {
+				continue
+			}
+			row := &models.MidnightDeregistration{
+				FullDatum: registration.FullDatum,
+				TxHash:    txHash, UtxoTxHash: inputHash, UtxoIndex: input.Index(),
+				BlockNumber: block.Number, BlockHash: block.Hash,
+				TxIndex: uint32(txIndex), BlockTimestampMs: timestampMs,
+			}
+			if err := idx.config.Metadata.CreateMidnightDeregistration(txn, row); err != nil {
+				return fmt.Errorf("write deregistration tx=%s input=%s#%d: %w", hex.EncodeToString(txHash), key.TxHash, key.Index, err)
+			}
+			idx.mu.Lock()
+			journal.record(idx.regUTxOs, key)
+			delete(idx.regUTxOs, key)
+			idx.mu.Unlock()
+		}
+
+		if idx.config.MappingValidatorAddress == "" {
+			continue
+		}
+		for _, produced := range tx.Produced() {
+			outputIndex := produced.Id.Index()
+			output := produced.Output
+			if output.Address().String() != idx.config.MappingValidatorAddress || !idx.hasAuthToken(output) {
+				continue
+			}
+			datum := output.Datum()
+			if datum == nil || len(datum.Cbor()) == 0 {
+				continue
+			}
+			outIndex := uint32(outputIndex)
+			datumCBOR := datum.Cbor()
+			row := &models.MidnightRegistration{
+				FullDatum: datumCBOR, TxHash: txHash, OutputIndex: outIndex,
+				BlockNumber: block.Number, BlockHash: block.Hash,
+				TxIndex: uint32(txIndex), BlockTimestampMs: timestampMs,
+			}
+			if err := idx.config.Metadata.CreateMidnightRegistration(txn, row); err != nil {
+				return fmt.Errorf("write registration tx=%s output=%d: %w", hex.EncodeToString(txHash), outIndex, err)
+			}
+			key := utxoKey{TxHash: hex.EncodeToString(txHash), Index: outIndex}
+			idx.mu.Lock()
+			journal.record(idx.regUTxOs, key)
+			idx.regUTxOs[key] = registrationUTxO{FullDatum: datumCBOR}
+			idx.mu.Unlock()
+		}
+	}
+	if err := txn.Commit(); err != nil {
+		return fmt.Errorf("commit registration rebuild block %d: %w", block.Number, err)
+	}
+	committed = true
+	return nil
+}
+
+func (idx *Indexer) completeRegistrationRebuild(fingerprint string, lastSlot uint64) error {
+	txn := idx.config.Metadata.Transaction(context.Background())
+	if txn == nil {
+		return errors.New("midnight indexer: starting registration rebuild completion transaction returned nil")
+	}
+	if err := idx.config.Metadata.SetSyncState(
+		midnightRegistrationFingerprintKey, fingerprint, txn,
+	); err != nil {
+		_ = txn.Rollback()
+		return fmt.Errorf("midnight indexer: saving registration policy fingerprint: %w", err)
+	}
+	if err := idx.config.Metadata.DeleteSyncState(midnightRegistrationPendingKey, txn); err != nil {
+		_ = txn.Rollback()
+		return fmt.Errorf("midnight indexer: clearing registration rebuild marker: %w", err)
+	}
+	if err := idx.config.Metadata.SetBackfillCheckpoint(&models.BackfillCheckpoint{
+		Phase: midnightRegistrationCheckpointPhase, LastSlot: lastSlot, Completed: true,
+	}, txn); err != nil {
+		_ = txn.Rollback()
+		return fmt.Errorf("midnight indexer: completing registration checkpoint: %w", err)
+	}
+	if err := txn.Commit(); err != nil {
+		return fmt.Errorf("midnight indexer: committing registration rebuild completion: %w", err)
+	}
+	return nil
+}
+
+func (idx *Indexer) preflightRegistrationHistory() (*models.Block, *models.Block, error) {
+	tip, err := idx.config.LedgerTipBlock()
+	if err != nil {
+		return nil, nil, fmt.Errorf("resolve applied tip: %w", err)
+	}
+	endIndex := uint64(1)
+	if tip != nil {
+		if tip.ID == math.MaxUint64 {
+			return nil, nil, errors.New("applied tip index cannot be represented as an exclusive range end")
+		}
+		endIndex = tip.ID + 1
+	}
+	var previous, last *models.Block
+	err = idx.config.CanonicalBlockIterator(1, endIndex, func(stored models.Block) error {
+		if stored.ID == 0 {
+			return errors.New("synthetic block encountered in canonical history")
+		}
+		decoded, err := stored.Decode()
+		if err != nil {
+			return fmt.Errorf("decode slot=%d: %w", stored.Slot, err)
+		}
+		if uint(decoded.Type()) != stored.Type || decoded.BlockNumber() != stored.Number || !bytes.Equal(decoded.Hash().Bytes(), stored.Hash) || !bytes.Equal(decoded.PrevHash().Bytes(), stored.PrevHash) {
+			return fmt.Errorf("stored metadata disagrees with decoded block at slot=%d", stored.Slot)
+		}
+		if previous == nil {
+			if decoded.BlockNumber() != 0 {
+				return fmt.Errorf("retained history begins at block number %d, want 0", decoded.BlockNumber())
+			}
+		} else {
+			if previous.Number == math.MaxUint64 {
+				return errors.New("retained block number overflows uint64")
+			}
+			wantNumber := previous.Number + 1
+			isEBB := decoded.Type() == ouroborosledger.BlockTypeByronEbb
+			validNumber := decoded.BlockNumber() == wantNumber ||
+				(isEBB && decoded.BlockNumber() == previous.Number)
+			if stored.Slot <= previous.Slot || !validNumber || !bytes.Equal(decoded.PrevHash().Bytes(), previous.Hash) {
+				return fmt.Errorf("retained history is discontinuous at slot=%d number=%d", stored.Slot, decoded.BlockNumber())
+			}
+		}
+		copyOfBlock := stored
+		previous = &copyOfBlock
+		last = &copyOfBlock
+		return nil
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	if tip == nil && last != nil {
+		return nil, nil, errors.New("retained blocks exist but applied tip is at origin")
+	}
+	return tip, last, nil
 }
 
 // backfillEndSlot resolves the exclusive upper bound of the catch-up sweep.
@@ -1348,7 +1709,7 @@ func (idx *Indexer) processTx(
 	// We peek with a read-lock, write the DB row, then remove from memory
 	// only on success so that a transient write failure leaves the in-memory
 	// state intact and the UTxO reloadable from the DB on restart.
-	for _, inp := range tx.Inputs() {
+	for _, inp := range tx.Consumed() {
 		inpHashBytes := inp.Id().Bytes()
 		inpHashHex := hex.EncodeToString(inpHashBytes)
 		inpIdx := inp.Index()
@@ -1453,7 +1814,7 @@ func (idx *Indexer) processTx(
 			return txInputsCbor, nil
 		}
 		var err error
-		txInputsCbor, err = EncodeCandidateInputsCbor(tx.Inputs())
+		txInputsCbor, err = EncodeCandidateInputsCbor(tx.Consumed())
 		if err != nil {
 			return nil, fmt.Errorf(
 				"encode candidate tx inputs tx=%s: %w",
@@ -1465,15 +1826,15 @@ func (idx *Indexer) processTx(
 	}
 
 	// Scan outputs for cNIGHT creates, registration outputs, and governance.
-	for outIdx, out := range tx.Outputs() {
+	for _, produced := range tx.Produced() {
 		if err := idx.processOutput(
 			block,
 			txHashBytes,
-			uint32(outIdx), //nolint:gosec
+			produced.Id.Index(),
 			txIdx,
 			timestampMs,
 			govEpoch,
-			out,
+			produced.Output,
 			txn,
 			journal,
 			txInputsCborOnce,
@@ -1787,8 +2148,7 @@ func (idx *Indexer) recordAriadneRollback(
 }
 
 // hasAuthToken returns true if the output assets contain at least one unit of
-// the configured auth token. When AuthTokenPolicyID is set the check is
-// policy-scoped; otherwise any policy carrying the asset name is accepted.
+// the configured auth token, matched by both policy ID and asset name.
 func (idx *Indexer) hasAuthToken(out lcommon.TransactionOutput) bool {
 	if !idx.authEnabled {
 		return false
@@ -1797,21 +2157,8 @@ func (idx *Indexer) hasAuthToken(out lcommon.TransactionOutput) bool {
 	if assets == nil {
 		return false
 	}
-	if idx.authPolicySet {
-		qty := assets.Asset(idx.authPolicyID, idx.authAssetName)
-		return qty != nil && qty.Cmp(new(big.Int)) > 0
-	}
-	for _, policyID := range assets.Policies() {
-		for _, name := range assets.Assets(policyID) {
-			if string(name) == string(idx.authAssetName) {
-				qty := assets.Asset(policyID, name)
-				if qty != nil && qty.Cmp(new(big.Int)) > 0 {
-					return true
-				}
-			}
-		}
-	}
-	return false
+	qty := assets.Asset(idx.authPolicyID, idx.authAssetName)
+	return qty != nil && qty.Cmp(new(big.Int)) > 0
 }
 
 // advanceEpochLocked snapshots all intermediate epochs between the current

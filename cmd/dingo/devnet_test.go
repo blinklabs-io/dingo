@@ -32,6 +32,22 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+func prepareDevnetStateAtPath(
+	runDir string,
+	persistent, reset bool,
+	startTime time.Time,
+) error {
+	if err := os.MkdirAll(runDir, 0o700); err != nil {
+		return fmt.Errorf("creating devnet data directory: %w", err)
+	}
+	root, err := openDevnetStateRoot(runDir)
+	if err != nil {
+		return err
+	}
+	defer root.Close() //nolint:errcheck // operation errors are reported below
+	return prepareDevnetState(root, runDir, persistent, reset, startTime)
+}
+
 func TestDevnetValidatesRootFlagsAndStateBeforeCreatingLock(t *testing.T) {
 	// Not t.Parallel: this exercises run(), which reads and replaces process globals.
 	originalArgs := os.Args
@@ -126,7 +142,7 @@ func TestPrepareDevnetStateRejectsIncompleteState(t *testing.T) {
 	markerPath := filepath.Join(runDir, devnetStateMarker)
 	require.NoError(t, os.WriteFile(markerPath, []byte(devnetStateVersion), 0o600))
 
-	err := prepareDevnetState(runDir, true, false, time.Now())
+	err := prepareDevnetStateAtPath(runDir, true, false, time.Now())
 	require.ErrorContains(t, err, "devnet state at")
 	require.ErrorContains(t, err, "is incomplete")
 }
@@ -136,11 +152,11 @@ func TestPrepareDevnetStateResetKeepsUnmanagedFiles(t *testing.T) {
 
 	runDir := t.TempDir()
 	startTime := time.Date(2026, time.October, 8, 22, 0, 0, 0, time.UTC)
-	require.NoError(t, prepareDevnetState(runDir, true, false, startTime))
+	require.NoError(t, prepareDevnetStateAtPath(runDir, true, false, startTime))
 	userFile := filepath.Join(runDir, "keep.txt")
 	require.NoError(t, os.WriteFile(userFile, []byte("user data"), 0o600))
 
-	require.NoError(t, prepareDevnetState(runDir, true, true, startTime.Add(time.Minute)))
+	require.NoError(t, prepareDevnetStateAtPath(runDir, true, true, startTime.Add(time.Minute)))
 	require.FileExists(t, userFile)
 	data, err := os.ReadFile(userFile)
 	require.NoError(t, err)
@@ -155,7 +171,7 @@ func TestPrepareDevnetStateRewritesPathsForCopiedDirectory(t *testing.T) {
 	sourceDir := t.TempDir()
 	destinationDir := t.TempDir()
 	startTime := time.Date(2026, time.October, 8, 22, 0, 0, 0, time.UTC)
-	require.NoError(t, prepareDevnetState(sourceDir, true, false, startTime))
+	require.NoError(t, prepareDevnetStateAtPath(sourceDir, true, false, startTime))
 	for _, name := range []string{"vrf.skey", "kes.skey", "opcert.cert"} {
 		require.FileExists(
 			t,
@@ -163,7 +179,7 @@ func TestPrepareDevnetStateRewritesPathsForCopiedDirectory(t *testing.T) {
 		)
 	}
 	require.NoError(t, os.CopyFS(destinationDir, os.DirFS(sourceDir)))
-	require.NoError(t, prepareDevnetState(destinationDir, true, false, startTime))
+	require.NoError(t, prepareDevnetStateAtPath(destinationDir, true, false, startTime))
 
 	configData, err := os.ReadFile(filepath.Join(destinationDir, "dingo.yaml"))
 	require.NoError(t, err)
@@ -171,6 +187,7 @@ func TestPrepareDevnetStateRewritesPathsForCopiedDirectory(t *testing.T) {
 	require.NoError(t, yaml.Unmarshal(configData, &config))
 	require.Equal(t, "dev", config.RunMode)
 	require.True(t, config.BlockProducer, "the devnet uses the standard keyed block producer")
+	require.Equal(t, "127.0.0.1", config.BindAddr)
 	require.Equal(t, filepath.Join(destinationDir, "data"), config.DatabasePath)
 	require.Equal(t, filepath.Join(destinationDir, "cardano", "config.json"), config.CardanoConfig)
 	require.Equal(t, filepath.Join(destinationDir, "cardano", "keys", "vrf.skey"), config.ShelleyVRFKey)
@@ -186,11 +203,14 @@ func TestAcquireDevnetStateLockRejectsSecondLock(t *testing.T) {
 	t.Parallel()
 
 	runDir := t.TempDir()
-	release, err := acquireDevnetStateLock(runDir)
+	root, err := openDevnetStateRoot(runDir)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, root.Close()) })
+	release, err := acquireDevnetStateLock(root, runDir)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, release()) })
 
-	_, err = acquireDevnetStateLock(runDir)
+	_, err = acquireDevnetStateLock(root, runDir)
 	require.ErrorIs(t, err, errDevnetStateInUse)
 }
 
@@ -235,7 +255,7 @@ func TestPrepareDevnetStateExportsFundedFaucet(t *testing.T) {
 			t.Parallel()
 			runDir := t.TempDir()
 			start := time.Now().UTC().Truncate(time.Second)
-			require.NoError(t, prepareDevnetState(runDir, persistent, false, start))
+			require.NoError(t, prepareDevnetStateAtPath(runDir, persistent, false, start))
 			assertDevnetFaucet(t, runDir)
 			if !persistent {
 				return
@@ -255,7 +275,7 @@ func TestPrepareDevnetStateExportsFundedFaucet(t *testing.T) {
 					[]byte("custom producer "+name), 0o600,
 				))
 			}
-			require.NoError(t, prepareDevnetState(runDir, true, false, start.Add(time.Hour)))
+			require.NoError(t, prepareDevnetStateAtPath(runDir, true, false, start.Add(time.Hour)))
 			for _, name := range producerFiles {
 				data, err := os.ReadFile(filepath.Join(runDir, "cardano", "keys", name))
 				require.NoError(t, err)

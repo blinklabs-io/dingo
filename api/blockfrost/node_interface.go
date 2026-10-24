@@ -24,24 +24,83 @@ import (
 // decouples the HTTP server from the concrete Node struct
 // and enables testing with mock implementations.
 type BlockfrostNode interface {
+	BlockQueryNode
+	AddressQueryNode
+	AssetQueryNode
+	ScriptQueryNode
+	MempoolQueryNode
+
 	// ChainTip returns the current chain tip info.
 	ChainTip() (ChainTipInfo, error)
 
 	// LatestBlock returns information about the latest
 	// block on the chain.
-	LatestBlock() (BlockInfo, error)
+	LatestBlock(ctx context.Context) (BlockInfo, error)
 
 	// BlockByHashOrNumber returns information about a block
 	// identified by a 64-character hex hash or decimal height.
-	BlockByHashOrNumber(id string) (BlockInfo, error)
+	BlockByHashOrNumber(ctx context.Context, id string) (BlockInfo, error)
 
 	// LatestBlockTxHashes returns the transaction hashes
 	// for the latest block.
-	LatestBlockTxHashes() ([]string, error)
+	LatestBlockTxHashes(ctx context.Context) ([]string, error)
 
 	// CurrentEpoch returns information about the current
 	// epoch.
 	CurrentEpoch() (EpochInfo, error)
+
+	// Epoch returns the requested epoch. It returns ErrEpochNotFound for an
+	// epoch the node has not reached.
+	Epoch(ctx context.Context, epoch uint64) (EpochInfo, error)
+
+	// EpochsAfter returns the epochs following epoch in ascending order,
+	// along with the total number of following epochs.
+	EpochsAfter(
+		ctx context.Context,
+		epoch uint64,
+		params PaginationParams,
+	) ([]EpochInfo, int, error)
+
+	// EpochsBefore returns the epochs preceding epoch, nearest first, along
+	// with the total number of preceding epochs.
+	EpochsBefore(
+		ctx context.Context,
+		epoch uint64,
+		params PaginationParams,
+	) ([]EpochInfo, int, error)
+
+	// EpochStakes returns the stake distribution active in an epoch, ordered
+	// by pool then credential.
+	EpochStakes(
+		ctx context.Context,
+		epoch uint64,
+		params PaginationParams,
+	) ([]EpochStakeInfo, int, error)
+
+	// EpochPoolStakes returns the stake distribution of one pool active in an
+	// epoch.
+	EpochPoolStakes(
+		ctx context.Context,
+		epoch uint64,
+		poolID string,
+		params PaginationParams,
+	) ([]EpochPoolStakeInfo, int, error)
+
+	// EpochBlocks returns the hashes of the blocks minted in an epoch.
+	EpochBlocks(
+		ctx context.Context,
+		epoch uint64,
+		params PaginationParams,
+	) ([]string, int, error)
+
+	// EpochPoolBlocks returns the hashes of the blocks one pool minted in an
+	// epoch.
+	EpochPoolBlocks(
+		ctx context.Context,
+		epoch uint64,
+		poolID string,
+		params PaginationParams,
+	) ([]string, int, error)
 
 	// CurrentProtocolParams returns the current protocol
 	// parameters.
@@ -72,13 +131,154 @@ type BlockfrostNode interface {
 	PoolsList(ctx context.Context, params PaginationParams) ([]string, int, error)
 
 	// Address returns summary information for an address,
-	// including balances aggregated across its live UTxOs.
-	Address(address string) (AddressInfo, error)
+	// including balances aggregated across its live UTxOs. The read stops
+	// when ctx is cancelled.
+	Address(ctx context.Context, address string) (AddressInfo, error)
 
 	// PoolsRetiring returns the paginated list of pools with a
 	// pending retirement announcement, along with the total number
 	// of matching results before pagination.
 	PoolsRetiring(context.Context, PaginationParams) ([]PoolRetiringInfo, int, error)
+
+	// GovernanceProposals returns the paginated proposal list along with the
+	// total before pagination.
+	GovernanceProposals(
+		ctx context.Context,
+		params PaginationParams,
+	) ([]GovernanceProposalInfo, int, error)
+
+	// GovernanceProposal returns a proposal, or
+	// models.ErrGovernanceProposalNotFound.
+	GovernanceProposal(
+		ctx context.Context,
+		ref GovActionRef,
+	) (GovernanceProposalDetailInfo, error)
+
+	// GovernanceProposalParameters returns the parameter update of a
+	// parameter change proposal. Any other proposal reports
+	// models.ErrGovernanceProposalNotFound.
+	GovernanceProposalParameters(
+		ctx context.Context,
+		ref GovActionRef,
+	) (GovernanceProposalParametersInfo, error)
+
+	// GovernanceProposalWithdrawals returns the treasury withdrawals of a
+	// proposal.
+	GovernanceProposalWithdrawals(
+		ctx context.Context,
+		ref GovActionRef,
+		params PaginationParams,
+	) ([]GovernanceWithdrawalInfo, int, error)
+
+	// GovernanceProposalVotes returns the votes cast on a proposal. It
+	// returns ErrHistoryNotRetained when a vote's casting transaction can no
+	// longer be located.
+	GovernanceProposalVotes(
+		ctx context.Context,
+		ref GovActionRef,
+		params PaginationParams,
+	) ([]GovernanceProposalVoteInfo, int, error)
+
+	// GovernanceProposalMetadata returns the off-chain document behind a
+	// proposal's anchor, or models.ErrGovernanceProposalNotFound when it has
+	// not been fetched.
+	GovernanceProposalMetadata(
+		ctx context.Context,
+		ref GovActionRef,
+	) (GovernanceProposalMetadataInfo, error)
+
+	// DRepDelegators returns the registered delegators of a DRep.
+	DRepDelegators(
+		ctx context.Context,
+		credential DRepCredential,
+		params PaginationParams,
+	) ([]DRepDelegatorInfo, int, error)
+
+	// DRepMetadata returns the off-chain document behind a DRep's anchor.
+	DRepMetadata(
+		ctx context.Context,
+		credential DRepCredential,
+	) (DRepAnchorInfo, error)
+
+	// DRepUpdates returns a DRep's registration, update and deregistration
+	// certificates.
+	DRepUpdates(
+		ctx context.Context,
+		credential DRepCredential,
+		params PaginationParams,
+	) ([]DRepUpdateInfo, int, error)
+
+	// DRepVotes returns the votes a DRep cast. It returns
+	// ErrHistoryNotRetained when a vote's casting transaction can no longer
+	// be located.
+	DRepVotes(
+		ctx context.Context,
+		credential DRepCredential,
+		params PaginationParams,
+	) ([]DRepVoteInfo, int, error)
+
+	// PoolVotes returns the votes a pool cast. It returns
+	// ErrHistoryNotRetained when a vote's casting transaction can no longer
+	// be located.
+	PoolVotes(
+		ctx context.Context,
+		poolID string,
+		params PaginationParams,
+	) ([]PoolVoteInfo, int, error)
+
+	// GovernanceCommittee returns the constitutional committee.
+	GovernanceCommittee(ctx context.Context) (CommitteeInfo, error)
+
+	// CommitteeVotes returns the votes cast by committee members: all of
+	// them for a nil credential, those of one hot credential, or, when cold
+	// is set, those of every hot credential the cold one authorized. It
+	// returns ErrHistoryNotRetained when a vote's casting transaction can no
+	// longer be located.
+	CommitteeVotes(
+		ctx context.Context,
+		credential *CommitteeCredentialRef,
+		cold bool,
+		params PaginationParams,
+	) ([]CommitteeVoteInfo, int, error)
+
+	// PoolsRetired returns the paginated list of pools whose retirement has
+	// taken effect, along with the total before pagination.
+	PoolsRetired(
+		ctx context.Context,
+		params PaginationParams,
+	) ([]PoolRetiringInfo, int, error)
+
+	// PoolHistory returns the per-epoch history of a pool.
+	PoolHistory(
+		ctx context.Context,
+		poolID string,
+		params PaginationParams,
+	) ([]PoolHistoryInfo, int, error)
+
+	// PoolRelays returns the relays of a pool's latest registration.
+	PoolRelays(ctx context.Context, poolID string) ([]PoolRelayInfo, error)
+
+	// PoolDelegators returns the registered delegators of a pool with their
+	// live stake.
+	PoolDelegators(
+		ctx context.Context,
+		poolID string,
+		params PaginationParams,
+	) ([]PoolDelegatorInfo, int, error)
+
+	// PoolBlocks returns the hashes of the blocks a pool minted.
+	PoolBlocks(
+		ctx context.Context,
+		poolID string,
+		params PaginationParams,
+	) ([]string, int, error)
+
+	// PoolUpdates returns a pool's registration and retirement certificates.
+	PoolUpdates(
+		ctx context.Context,
+		poolID string,
+		params PaginationParams,
+	) ([]PoolUpdateInfo, int, error)
 
 	// PoolMetadata returns the registered metadata for a pool.
 	PoolMetadata(poolID string) (PoolMetadataInfo, error)
@@ -122,7 +322,7 @@ type BlockfrostNode interface {
 	) ([]MetadataTransactionCBORInfo, int, error)
 
 	// Transaction returns summary details for a transaction hash.
-	Transaction(hash []byte) (TransactionInfo, error)
+	Transaction(ctx context.Context, hash []byte) (TransactionInfo, error)
 
 	// TransactionSubmit submits raw signed transaction CBOR to the mempool.
 	TransactionSubmit(ctx context.Context, txCbor []byte) (string, error)
@@ -132,42 +332,44 @@ type BlockfrostNode interface {
 	TransactionEvaluate(context.Context, []byte) (TransactionEvaluationResponse, error)
 
 	// TransactionCBOR returns raw signed transaction CBOR bytes.
-	TransactionCBOR(hash []byte) ([]byte, error)
+	TransactionCBOR(ctx context.Context, hash []byte) ([]byte, error)
 
 	// TransactionMetadata returns transaction metadata labels as JSON values.
-	TransactionMetadata(hash []byte) ([]TransactionMetadataInfo, error)
+	TransactionMetadata(ctx context.Context, hash []byte) ([]TransactionMetadataInfo, error)
 
 	// TransactionMetadataCBOR returns transaction metadata labels as CBOR values.
-	TransactionMetadataCBOR(hash []byte) ([]TransactionMetadataCBORInfo, error)
+	TransactionMetadataCBOR(ctx context.Context, hash []byte) ([]TransactionMetadataCBORInfo, error)
 
 	// TransactionUTXOs returns transaction inputs and outputs.
-	TransactionUTXOs(hash []byte) (TransactionUTXOsInfo, error)
+	TransactionUTXOs(ctx context.Context, hash []byte) (TransactionUTXOsInfo, error)
 
 	// TransactionDelegations returns delegation certificates in a transaction.
-	TransactionDelegations(hash []byte) ([]TransactionDelegationInfo, error)
+	TransactionDelegations(ctx context.Context, hash []byte) ([]TransactionDelegationInfo, error)
 
 	// TransactionStakeAddresses returns stake address certificates in a transaction.
 	TransactionStakeAddresses(
+		ctx context.Context,
 		hash []byte,
 	) ([]TransactionStakeAddressInfo, error)
 
 	// TransactionWithdrawals returns reward withdrawals in a transaction.
-	TransactionWithdrawals(hash []byte) ([]TransactionWithdrawalInfo, error)
+	TransactionWithdrawals(ctx context.Context, hash []byte) ([]TransactionWithdrawalInfo, error)
 
 	// TransactionMIRs returns MIR certificates in a transaction.
-	TransactionMIRs(hash []byte) ([]TransactionMIRInfo, error)
+	TransactionMIRs(ctx context.Context, hash []byte) ([]TransactionMIRInfo, error)
 
 	// TransactionPoolUpdates returns pool registration certificates in a transaction.
-	TransactionPoolUpdates(hash []byte) ([]TransactionPoolUpdateInfo, error)
+	TransactionPoolUpdates(ctx context.Context, hash []byte) ([]TransactionPoolUpdateInfo, error)
 
 	// TransactionPoolRetires returns pool retirement certificates in a transaction.
-	TransactionPoolRetires(hash []byte) ([]TransactionPoolRetireInfo, error)
+	TransactionPoolRetires(ctx context.Context, hash []byte) ([]TransactionPoolRetireInfo, error)
 
 	// TransactionRedeemers returns Plutus redeemers in a transaction.
-	TransactionRedeemers(hash []byte) ([]TransactionRedeemerInfo, error)
+	TransactionRedeemers(ctx context.Context, hash []byte) ([]TransactionRedeemerInfo, error)
 
 	// TransactionRequiredSigners returns required signing key hashes in a transaction.
 	TransactionRequiredSigners(
+		ctx context.Context,
 		hash []byte,
 	) ([]TransactionRequiredSignerInfo, error)
 
@@ -189,7 +391,7 @@ type BlockfrostNode interface {
 
 	// DRep returns governance DRep information for a parsed
 	// DRep credential.
-	DRep(DRepCredential) (DRepInfo, error)
+	DRep(context.Context, DRepCredential) (DRepInfo, error)
 
 	// DReps returns the paginated DRep list along with the total
 	// number of matching results before pagination.
@@ -197,7 +399,7 @@ type BlockfrostNode interface {
 
 	// Account returns stake-account information for the
 	// requested stake address.
-	Account(string) (AccountInfo, error)
+	Account(context.Context, string) (AccountInfo, error)
 
 	// AccountAssociatedAddresses returns payment addresses
 	// associated with the requested stake address.
@@ -205,6 +407,35 @@ type BlockfrostNode interface {
 		string,
 		PaginationParams,
 	) ([]AccountAssociatedAddressInfo, int, error)
+
+	// AccountStakeHistory returns the stake an account held in each retained
+	// epoch distribution. It returns ErrHistoryNotRetained when the account's
+	// history predates the oldest retained distribution and none remains.
+	AccountStakeHistory(context.Context,
+		string,
+		PaginationParams,
+	) ([]AccountStakeHistoryInfo, int, error)
+
+	// AccountMIRs returns the Move Instantaneous Rewards paid to the
+	// requested stake address.
+	AccountMIRs(context.Context,
+		string,
+		PaginationParams,
+	) ([]AccountMIRInfo, int, error)
+
+	// AccountAddressAssets returns the native assets held across the
+	// addresses of the requested stake address.
+	AccountAddressAssets(context.Context,
+		string,
+		PaginationParams,
+	) ([]AddressAmountInfo, int, error)
+
+	// AccountAddressTotal returns the received and sent totals across the
+	// addresses of the requested stake address.
+	AccountAddressTotal(
+		context.Context,
+		string,
+	) (AccountAddressTotalInfo, error)
 
 	// AccountDelegationHistory returns delegation history
 	// rows for the requested stake address.
@@ -298,6 +529,67 @@ type EpochInfo struct {
 	LastBlockTime  int64
 	BlockCount     int
 	TxCount        int
+	// Output is the total lovelace of the outputs created in the epoch.
+	Output string
+	// Fees is the total lovelace of the fees paid in the epoch.
+	Fees string
+	// ActiveStake is the lovelace of stake active in the epoch, or nil when
+	// the epoch has no captured stake distribution.
+	ActiveStake *string
+}
+
+// PoolHistoryInfo is one epoch of a pool's history.
+type PoolHistoryInfo struct {
+	Epoch uint64
+	// Blocks is the number of blocks the pool minted in the epoch.
+	Blocks int
+	// ActiveStake is the pool's active stake in lovelace.
+	ActiveStake string
+	// ActiveSize is the pool's share of the network's active stake.
+	ActiveSize      float64
+	DelegatorsCount uint64
+	// Rewards is the lovelace distributed to the pool's delegators.
+	Rewards string
+	// Fees is the lovelace the pool operator earned.
+	Fees string
+}
+
+// PoolRelayInfo is one relay of a pool registration. Empty strings are
+// absent values.
+type PoolRelayInfo struct {
+	IPv4   string
+	IPv6   string
+	DNS    string
+	DNSSrv string
+	Port   int
+}
+
+// PoolDelegatorInfo is one delegator of a pool.
+type PoolDelegatorInfo struct {
+	Address   string
+	LiveStake string
+}
+
+// PoolUpdateInfo is one registration or retirement certificate of a pool.
+type PoolUpdateInfo struct {
+	TxHash    string
+	CertIndex int
+	// Action is "registered" or "deregistered".
+	Action string
+}
+
+// EpochStakeInfo is one delegator's stake in an epoch's distribution.
+type EpochStakeInfo struct {
+	StakeAddress string
+	PoolID       string
+	Amount       string
+}
+
+// EpochPoolStakeInfo is one delegator's stake to a pool in an epoch's
+// distribution.
+type EpochPoolStakeInfo struct {
+	StakeAddress string
+	Amount       string
 }
 
 // ProtocolParamsInfo holds protocol parameter data needed
@@ -523,6 +815,28 @@ type PoolCalidusKeyInfo struct {
 	BlockHeight uint64
 	BlockTime   int64
 	Epoch       uint64
+}
+
+// AccountStakeHistoryInfo is the stake an account held in one epoch.
+type AccountStakeHistoryInfo struct {
+	ActiveEpoch uint64
+	Amount      string
+	PoolID      string
+}
+
+// AccountMIRInfo is one Move Instantaneous Rewards payment to an account.
+type AccountMIRInfo struct {
+	TxHash string
+	Amount string
+}
+
+// AccountAddressTotalInfo is the lifetime received and sent totals across
+// the addresses of an account. Each sum lists lovelace first.
+type AccountAddressTotalInfo struct {
+	StakeAddress string
+	ReceivedSum  []AddressAmountInfo
+	SentSum      []AddressAmountInfo
+	TxCount      int
 }
 
 // AddressAmountInfo holds amount data needed by address

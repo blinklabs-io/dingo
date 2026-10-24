@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"net"
 	"sort"
+	"sync"
 	"testing"
 	"time"
 
@@ -44,9 +45,17 @@ const ChainStartTimeout = 90 * time.Second
 // TestHarness manages connections to DevNet nodes and provides
 // helper methods for querying chain state and verifying consensus.
 type TestHarness struct {
-	t            *testing.T
-	endpoints    []NodeEndpoint
-	networkMagic uint32
+	t                *testing.T
+	endpoints        []NodeEndpoint
+	networkMagic     uint32
+	observers        *ChainObservers
+	tipConnectionsMu sync.Mutex
+	tipConnections   map[string]*chainTipConnection
+}
+
+type chainTipConnection struct {
+	mu   sync.Mutex
+	conn *ouroboros.Connection
 }
 
 // NewTestHarness creates a new test harness for the given endpoints.
@@ -59,13 +68,15 @@ func NewTestHarness(
 ) *TestHarness {
 	t.Helper()
 	h := &TestHarness{
-		t:            t,
-		endpoints:    endpoints,
-		networkMagic: DefaultNetworkMagic,
+		t:              t,
+		endpoints:      endpoints,
+		networkMagic:   DefaultNetworkMagic,
+		tipConnections: make(map[string]*chainTipConnection),
 	}
 	for _, opt := range opts {
 		opt(h)
 	}
+	t.Cleanup(h.closeTipConnections)
 	h.startFailureCapture()
 	return h
 }
@@ -96,6 +107,7 @@ func (h *TestHarness) startFailureCapture() {
 	observers := StartObservers(
 		obsCtx, h.endpoints, h.networkMagic, h.t.Logf,
 	)
+	h.observers = observers
 	h.t.Cleanup(func() {
 		// Stop before reading, so no observer goroutine is still
 		// logging once this cleanup returns.
@@ -178,22 +190,16 @@ func (h *TestHarness) ReferenceNode() (NodeEndpoint, bool) {
 	return NodeEndpoint{}, false
 }
 
-// GetChainTip connects to the specified node using the Ouroboros N2N
-// protocol and retrieves the current chain tip via ChainSync.
-// Each call establishes a fresh connection to ensure the returned tip
-// reflects the node's current state (cardano-node does not update
-// the tip on persistent connections).
-func (h *TestHarness) GetChainTip(
+func (h *TestHarness) dialTipConnection(
 	endpoint NodeEndpoint,
-) (ChainTip, error) {
+) (*ouroboros.Connection, error) {
 	conn, err := net.DialTimeout("tcp", endpoint.Address, 10*time.Second)
 	if err != nil {
-		return ChainTip{}, fmt.Errorf(
+		return nil, fmt.Errorf(
 			"failed to connect to %s (%s): %w",
 			endpoint.Name, endpoint.Address, err,
 		)
 	}
-	defer conn.Close()
 
 	oConn, err := ouroboros.NewConnection(
 		ouroboros.WithConnection(conn),
@@ -202,12 +208,65 @@ func (h *TestHarness) GetChainTip(
 		ouroboros.WithKeepAlive(true),
 	)
 	if err != nil {
-		return ChainTip{}, fmt.Errorf(
+		_ = conn.Close()
+		return nil, fmt.Errorf(
 			"failed to establish ouroboros connection to %s: %w",
 			endpoint.Name, err,
 		)
 	}
-	defer oConn.Close()
+	return oConn, nil
+}
+
+func (h *TestHarness) persistentTipConnection(
+	endpoint NodeEndpoint,
+) (*chainTipConnection, error) {
+	h.tipConnectionsMu.Lock()
+	defer h.tipConnectionsMu.Unlock()
+	if conn := h.tipConnections[endpoint.Address]; conn != nil {
+		return conn, nil
+	}
+	oConn, err := h.dialTipConnection(endpoint)
+	if err != nil {
+		return nil, err
+	}
+	conn := &chainTipConnection{conn: oConn}
+	h.tipConnections[endpoint.Address] = conn
+	return conn, nil
+}
+
+func (h *TestHarness) dropTipConnection(
+	endpoint NodeEndpoint,
+	conn *chainTipConnection,
+) {
+	h.tipConnectionsMu.Lock()
+	if h.tipConnections[endpoint.Address] == conn {
+		delete(h.tipConnections, endpoint.Address)
+	}
+	h.tipConnectionsMu.Unlock()
+	conn.mu.Lock()
+	_ = conn.conn.Close()
+	conn.mu.Unlock()
+}
+
+func (h *TestHarness) closeTipConnections() {
+	h.tipConnectionsMu.Lock()
+	connections := make([]*chainTipConnection, 0, len(h.tipConnections))
+	for _, conn := range h.tipConnections {
+		connections = append(connections, conn)
+	}
+	clear(h.tipConnections)
+	h.tipConnectionsMu.Unlock()
+	for _, conn := range connections {
+		conn.mu.Lock()
+		_ = conn.conn.Close()
+		conn.mu.Unlock()
+	}
+}
+
+func chainTipFromConnection(
+	endpoint NodeEndpoint,
+	oConn *ouroboros.Connection,
+) (ChainTip, error) {
 
 	tip, err := oConn.ChainSync().Client.GetCurrentTip()
 	if err != nil {
@@ -222,6 +281,49 @@ func (h *TestHarness) GetChainTip(
 		BlockNumber: tip.BlockNumber,
 		Hash:        tip.Point.Hash,
 	}, nil
+}
+
+// GetChainTip uses persistent observers when failure capture started. Otherwise,
+// Dingo queries reuse one connection per endpoint and reference nodes use a
+// fresh connection because their tip view is bound to the ChainSync connection.
+func (h *TestHarness) GetChainTip(
+	endpoint NodeEndpoint,
+) (ChainTip, error) {
+	if h.observers != nil {
+		chain := h.observers.Chain(endpoint.Name)
+		if chain == nil {
+			return ChainTip{}, fmt.Errorf(
+				"no observer configured for %s", endpoint.Name,
+			)
+		}
+		snapshot := chain.Snapshot()
+		if !snapshot.Connected {
+			return ChainTip{}, fmt.Errorf(
+				"observer for %s is not connected", endpoint.Name,
+			)
+		}
+		return snapshot.ServerTip, nil
+	}
+	if !endpoint.IsDingo {
+		conn, err := h.dialTipConnection(endpoint)
+		if err != nil {
+			return ChainTip{}, err
+		}
+		defer conn.Close() //nolint:errcheck
+		return chainTipFromConnection(endpoint, conn)
+	}
+
+	conn, err := h.persistentTipConnection(endpoint)
+	if err != nil {
+		return ChainTip{}, err
+	}
+	conn.mu.Lock()
+	tip, err := chainTipFromConnection(endpoint, conn.conn)
+	conn.mu.Unlock()
+	if err != nil {
+		h.dropTipConnection(endpoint, conn)
+	}
+	return tip, err
 }
 
 // WaitForSlot polls all endpoints until at least one reports a chain

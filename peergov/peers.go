@@ -940,9 +940,7 @@ func (p *PeerGovernor) peerIndexByAddress(address string) int {
 }
 
 // addressHost returns the host portion of a host:port string with IPv6
-// addresses normalized to canonical form. Empty on parse failure. Used
-// by the inbound topology-host match, which deliberately ignores the
-// port because inbound source ports are ephemeral.
+// addresses normalized to canonical form. Empty on parse failure.
 func addressHost(address string) string {
 	host, _, err := net.SplitHostPort(address)
 	if err != nil {
@@ -957,87 +955,29 @@ func addressHost(address string) string {
 // resolveInboundIdentity selects an existing peer entry to attribute an
 // inbound arrival to. It must be called with p.mu held.
 //
-// Match rules, applied in order (first win):
+// Only an exact address or normalized-address match reuses an identity.
+// A source host alone cannot identify a configured peer because unrelated
+// nodes can share a NAT gateway or proxy. An unmatched arrival therefore
+// receives a fresh PeerSourceInboundConn entry from the caller.
 //
-//  1. Exact address match: peer.Address == remoteAddr OR
-//     peer.NormalizedAddress == normalizedRemoteAddr. Covers peers that
-//     connect from their listener port and prior inbound peers on the
-//     same 4-tuple. Preserves phase-1 behavior.
-//
-//  2. Topology host match, unambiguous only: exactly one topology-sourced
-//     peer has a NormalizedAddress whose host portion equals the
-//     inbound's host portion. Supports the operator pattern where a
-//     configured topology peer dials us from an ephemeral source port.
-//     When two or more topology peers share the host we decline topology
-//     attribution and continue to rule 3 rather than guessing.
-//
-//  3. No match: caller creates a fresh PeerSourceInboundConn entry. Arbitrary
-//     inbound peers cannot be matched by host because unrelated peers can
-//     arrive through the same source NAT.
-//
-// Rule 2 only consults topology peers; gossip/ledger/other inbound
-// entries never widen their identity to a topology peer, because the
-// affordance granted by a topology match (trust, valency) is specific to
-// operator-declared peers.
-//
-// The second return value is the GroupID of the matched peer when that
-// peer is topology-sourced — regardless of whether the match came from
-// rule 1 or rule 2. A topology peer connecting from its configured port
-// is just as much a "topology match" as one connecting from an
-// ephemeral port; the rule that found it does not change that
-// classification. Empty when the matched peer is not a topology peer.
+// The second return value is the GroupID when the exact match is a topology
+// peer. Empty when the matched peer is not topology-sourced.
 func (p *PeerGovernor) resolveInboundIdentity(
 	remoteAddr, normalizedRemoteAddr string,
 ) (idx int, topologyGroupID string) {
-	// Rule 1: exact address or normalized match.
 	for i, peer := range p.peers {
 		if peer == nil {
 			continue
 		}
 		if peer.Address == remoteAddr ||
 			peer.NormalizedAddress == normalizedRemoteAddr {
-			return i, topologyGroupIDForPeer(
-				peer,
-				p.isTopologyPeer(peer.Source),
-			)
+			if p.isTopologyPeer(peer.Source) {
+				return i, peer.GroupID
+			}
+			return i, ""
 		}
-	}
-	// Rule 2: unambiguous topology-host match.
-	inboundHost := addressHost(normalizedRemoteAddr)
-	if inboundHost == "" {
-		return -1, ""
-	}
-	candidateIdx := -1
-	for i, peer := range p.peers {
-		if peer == nil || !p.isTopologyPeer(peer.Source) {
-			continue
-		}
-		if addressHost(peer.NormalizedAddress) != inboundHost {
-			continue
-		}
-		if candidateIdx != -1 {
-			// More than one topology peer shares this host. Refuse to
-			// guess which configured identity the inbound is; the
-			// caller will not attribute the arrival to a topology peer.
-			candidateIdx = -1
-			break
-		}
-		candidateIdx = i
-	}
-	if candidateIdx != -1 {
-		return candidateIdx, p.peers[candidateIdx].GroupID
 	}
 	return -1, ""
-}
-
-// topologyGroupIDForPeer returns the matched peer's GroupID when the
-// peer is topology-sourced. Factored out so the rule-1 and rule-2
-// branches of resolveInboundIdentity agree on classification.
-func topologyGroupIDForPeer(peer *Peer, isTopology bool) string {
-	if peer == nil || !isTopology {
-		return ""
-	}
-	return peer.GroupID
 }
 
 func (p *PeerGovernor) peerIndexByConnId(connId ouroboros.ConnectionId) int {

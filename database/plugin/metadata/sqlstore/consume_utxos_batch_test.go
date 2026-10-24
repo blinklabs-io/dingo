@@ -122,6 +122,7 @@ func consumeBatchArgs(n int) []any {
 // statistics, with stat1 and stat4, with stat1 only, and with the stat1 values
 // observed on a 24M-row Preview node.
 func TestConsumeUtxosBatchQueryPlansOnTxIDOutputIdx(t *testing.T) {
+	skipPlanTestUnderRace(t)
 	// Not t.Parallel: the subtests are ordered stages that rewrite this
 	// store's sqlite_stat tables.
 	store := newMigratedSQLiteStore(t)

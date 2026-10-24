@@ -16,6 +16,7 @@ package badger
 
 import (
 	"context"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -58,6 +59,55 @@ func TestProviderDataDirPrecedence(t *testing.T) {
 			)
 			require.NoError(t, err)
 			require.Equal(t, want, store.dataDir)
+		})
+	}
+}
+
+func TestResolvedMemTableSize(t *testing.T) {
+	t.Parallel()
+
+	require.Zero(t, defaultConfig().MemTableSize)
+	tests := []struct {
+		name        string
+		configured  uint64
+		storageMode string
+		runMode     string
+		want        uint64
+	}{
+		{
+			name:        "core sync",
+			storageMode: "core",
+			runMode:     "sync",
+			want:        DefaultCoreSyncMemTableSize,
+		},
+		{
+			name:        "core serve",
+			storageMode: "core",
+			runMode:     "serve",
+			want:        DefaultMemTableSize,
+		},
+		{
+			name:        "api sync",
+			storageMode: "api",
+			runMode:     "sync",
+			want:        DefaultMemTableSize,
+		},
+		{
+			name:        "explicit core sync override",
+			configured:  DefaultMemTableSize,
+			storageMode: "core",
+			runMode:     "sync",
+			want:        DefaultMemTableSize,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := resolvedMemTableSize(tt.configured, blob.ProviderDependencies{
+				StorageMode: tt.storageMode,
+				RunMode:     tt.runMode,
+			})
+			require.Equal(t, tt.want, got)
 		})
 	}
 }
@@ -135,6 +185,16 @@ func TestProviderStorageModeRunModeDefaults(t *testing.T) {
 			wantCompactBlock: false,
 		},
 		{
+			name:             "core sync disables gc",
+			storageMode:      "core",
+			runMode:          "sync",
+			wantBlockCache:   DefaultCoreBlockCacheSize,
+			wantIndexCache:   DefaultCoreIndexCacheSize,
+			wantCompression:  DefaultCoreCompressionEnabled,
+			wantGC:           false,
+			wantCompactBlock: false,
+		},
+		{
 			name:             "core leios keeps compact metadata",
 			storageMode:      "core",
 			runMode:          "leios",
@@ -175,6 +235,68 @@ func TestProviderStorageModeRunModeDefaults(t *testing.T) {
 	}
 }
 
+func TestProviderValueThresholdDefaults(t *testing.T) {
+	tests := []struct {
+		name        string
+		storageMode string
+		runMode     string
+		want        uint64
+	}{
+		{
+			name:        "core sync",
+			storageMode: "core",
+			runMode:     "sync",
+			want:        DefaultCoreSyncValueThreshold,
+		},
+		{
+			name:        "api sync",
+			storageMode: "api",
+			runMode:     "sync",
+			want:        DefaultValueThreshold,
+		},
+		{
+			name:        "core leios",
+			storageMode: "core",
+			runMode:     "leios",
+			want:        DefaultCoreLeiosValueThreshold,
+		},
+		{
+			name:        "api leios",
+			storageMode: "api",
+			runMode:     "leios",
+			want:        DefaultValueThreshold,
+		},
+		{
+			name:        "core load",
+			storageMode: "core",
+			runMode:     "load",
+			want:        DefaultValueThreshold,
+		},
+		{
+			name:        "core serve",
+			storageMode: "core",
+			runMode:     "serve",
+			want:        DefaultValueThreshold,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := resolveBadgerProvider(
+				t,
+				testutil.BadgerBlobConfig(),
+				blob.ProviderDependencies{
+					StorageMode: tt.storageMode,
+					RunMode:     tt.runMode,
+				},
+			)
+			if store.valueThreshold != int64(tt.want) {
+				t.Fatalf("value threshold = %d, want %d",
+					store.valueThreshold, tt.want)
+			}
+		})
+	}
+}
+
 // TestProviderExplicitConfigOverridesDefaults verifies that explicit provider
 // config values win over the storage-mode/run-mode-derived defaults. API mode
 // with the load run mode would otherwise force large caches and compression
@@ -188,6 +310,7 @@ func TestProviderExplicitConfigOverridesDefaults(t *testing.T) {
 		"compression":      false,
 		"gc":               true,
 		"compressionLevel": 7,
+		"valueThreshold":   uint64(2048),
 	}, blob.ProviderDependencies{
 		StorageMode: "api",
 		RunMode:     "load",
@@ -197,6 +320,37 @@ func TestProviderExplicitConfigOverridesDefaults(t *testing.T) {
 	require.False(t, store.compressionEnabled)
 	require.False(t, store.gcEnabled)
 	require.Equal(t, 7, store.compressionLevel)
+	require.Equal(t, int64(2048), store.valueThreshold)
+}
+
+// TestProviderExplicitZeroValueThresholdOverridesSyncDefault proves an
+// explicit 0 is honoured rather than read as unset and replaced by the Core
+// sync default.
+func TestProviderExplicitZeroValueThresholdOverridesSyncDefault(t *testing.T) {
+	store := resolveBadgerProvider(t, map[string]any{
+		"valueThreshold": uint64(0),
+	}, blob.ProviderDependencies{
+		StorageMode: "core",
+		RunMode:     "sync",
+	})
+	require.Zero(t, store.valueThreshold)
+}
+
+func TestProviderExplicitValueThresholdOverridesLeiosDefault(t *testing.T) {
+	for _, threshold := range []uint64{0, 2048, DefaultValueThreshold} {
+		t.Run(strconv.FormatUint(threshold, 10), func(t *testing.T) {
+			store := resolveBadgerProvider(t, map[string]any{
+				"valueThreshold": threshold,
+			}, blob.ProviderDependencies{
+				StorageMode: "core",
+				RunMode:     "leios",
+			})
+			if store.valueThreshold != int64(threshold) {
+				t.Fatalf("explicit value threshold = %d, want %d",
+					store.valueThreshold, threshold)
+			}
+		})
+	}
 }
 
 func TestProviderStopDeadlineDuringValueLogGC(t *testing.T) {

@@ -23,6 +23,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"math"
 	"net"
 	"strings"
 	"time"
@@ -30,6 +31,14 @@ import (
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
 )
+
+// maxLocalStateQueryReadBufferSize caps the reassembly of a multi-segment
+// LocalStateQuery reply, overriding gouroboros' 16MB anti-DoS default, which
+// a whole-UTxO-set reply exceeds on a real chain. 2GiB is one byte wider than
+// a 32-bit int can hold, so the value is clamped to math.MaxInt there; the
+// clamp is not a weaker bound, because a bytes.Buffer on such a target cannot
+// reach either size before the process exhausts its address space.
+const maxLocalStateQueryReadBufferSize = min(2*1024*1024*1024, math.MaxInt)
 
 // dialTimeout bounds how long Dial waits for the initial connection and
 // handshake.
@@ -113,7 +122,9 @@ func Dial(
 		ouroboros.WithLocalStateQueryConfig(
 			olocalstatequery.NewConfig(
 				olocalstatequery.WithQueryTimeout(0),
-				olocalstatequery.WithMaxReadBufferSize(2*1024*1024*1024),
+				olocalstatequery.WithMaxReadBufferSize(
+					maxLocalStateQueryReadBufferSize,
+				),
 			),
 		),
 		// Without an explicit logger, gouroboros' Protocol.Logger() falls
@@ -130,6 +141,21 @@ func Dial(
 	if err != nil {
 		rawConn.Close() //nolint:errcheck
 		return nil, fmt.Errorf("ouroboros.New: %w", err)
+	}
+	// The 2GiB reassembly cap above is not the only bound on a reply: the
+	// muxer also queues received segments the protocol has not yet taken
+	// against a connection-wide ingress budget (muxer.DefaultIngressBudget,
+	// 64MiB), and fails the whole connection with ErrIngressOverflow when
+	// the queue would exceed it. A whole-UTxO-set reply arrives faster over
+	// a local socket than the LocalStateQuery client reassembles it, so the
+	// queue fills: confirmed live at preprod epoch 157 (~1.4M UTxOs).
+	// Backpressure makes the muxer stop reading the socket until the client
+	// catches up instead, which keeps the queue inside the budget at any
+	// reply size. It stalls every protocol on the connection, which is safe
+	// here: these connections carry nothing time-sensitive alongside the
+	// query, and a reply is only ever received in answer to one.
+	if lsq := conn.LocalStateQuery(); lsq != nil && lsq.Client != nil {
+		lsq.Client.SetIngressBackpressure(true)
 	}
 
 	// Keep closing conn for the rest of its life if ctx is cancelled, so a

@@ -29,6 +29,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/nodesettings"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/deferred"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
@@ -77,12 +78,18 @@ const (
 	drepDelegatorStateSchemaRelease                     = "drep-delegator-state"
 	poolRegistrationIdentitySchemaRelease               = "pool-registration-identity"
 	utxoAddressIdentitySchemaRelease                    = "utxo-address-identity"
+	rewardStakeInputCredentialIndexSchemaRelease        = "reward-stake-input-credential-index"
+	governanceVoteCastSchemaRelease                     = "governance-vote-cast"
 	governanceProposalOrderSchemaRelease                = "governance-proposal-order"
 	accountDRepClearSchemaRelease                       = "account-drep-clear-history"
 	committeeHotAuthorizationPruneOrderSchemaRelease    = "committee-hot-authorization-prune-order"
 	poolRelayTypeSchemaRelease                          = "pool-relay-type"
+	scriptIndexSchemaRelease                            = "script-redeemer-reference-index"
 	midnightRollbackJournalSchemaRelease                = "midnight-rollback-journal"
 	committeeRenewalTermStartSchemaRelease              = "committee-renewal-term-start-repair"
+	addressTransactionCredentialKindSchemaRelease       = "address-transaction-credential-kind"
+	opCertCounterEncodingSchemaRelease                  = "opcert-counter-unsigned-order"
+	utxoSpenderPartialIndexSchemaRelease                = "utxo-spender-partial-indexes"
 )
 
 const mithrilRewardRepairPendingKey = "mithril_reward_repair_pending"
@@ -235,6 +242,16 @@ var schemaVersions = []struct {
 		Name:    committeeRenewalTermStartSchemaRelease,
 		Dir:     "v44",
 	},
+	{Version: 45, Name: scriptIndexSchemaRelease, Dir: "v45"},
+	{Version: 46, Name: addressTransactionCredentialKindSchemaRelease, Dir: "v46"},
+	{
+		Version: 47,
+		Name:    rewardStakeInputCredentialIndexSchemaRelease,
+		Dir:     "v47",
+	},
+	{Version: 48, Name: governanceVoteCastSchemaRelease, Dir: "v48"},
+	{Version: 49, Name: opCertCounterEncodingSchemaRelease, Dir: "v49"},
+	{Version: 50, Name: utxoSpenderPartialIndexSchemaRelease, Dir: "v50"},
 }
 
 // SQLiteRegistry returns the checked-in SQLite migration registry.
@@ -330,6 +347,17 @@ func registryForDialect(dialect string) ([]Migration, error) {
 		if version.Name == committeeTermStartPresenceSchemaRelease {
 			migration.BackfillRevision = "1"
 			migration.Backfill = committeeTermStartBackfill
+		}
+		if version.Name == addressTransactionCredentialKindSchemaRelease {
+			migration.BackfillRevision = "1"
+			migration.Backfill = addressTransactionCredentialKindBackfill
+		}
+		// MySQL has no partial indexes and keeps the full indexes its
+		// foreign keys require.
+		if version.Name == utxoSpenderPartialIndexSchemaRelease &&
+			dialect != "mysql" {
+			migration.BackfillRevision = "1"
+			migration.Backfill = utxoSpenderPartialIndexBackfill
 		}
 		if version.Name == poolDepositHeldSchemaRelease {
 			migration.BackfillRevision = "1"
@@ -1611,6 +1639,60 @@ func rewardStakeVersionRestampBackfill(
 	}, nil
 }
 
+func addressTransactionCredentialKindBackfill(
+	ctx context.Context,
+	batch Batch,
+) (BatchResult, error) {
+	lastID := int64(0)
+	if batch.Cursor != "" {
+		parsed, err := strconv.ParseInt(batch.Cursor, 10, 64)
+		if err != nil {
+			return BatchResult{}, fmt.Errorf(
+				"parse address transaction rebuild cursor: %w",
+				err,
+			)
+		}
+		lastID = parsed
+	}
+	rows, err := batch.Tx.QueryContext(ctx, batch.Rebind(`
+SELECT DISTINCT transaction_id
+FROM address_transaction
+WHERE transaction_id > ?
+  AND transaction_id IS NOT NULL
+ORDER BY transaction_id
+LIMIT ?`), lastID, batch.Limit)
+	if err != nil {
+		return BatchResult{}, fmt.Errorf("read address transaction rebuild source: %w", err)
+	}
+	defer rows.Close()
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return BatchResult{}, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return BatchResult{}, err
+	}
+	if len(ids) == 0 {
+		return BatchResult{Cursor: batch.Cursor, Done: true}, nil
+	}
+	for _, id := range ids {
+		if _, err := batch.Tx.ExecContext(ctx, batch.Rebind(
+			"INSERT INTO address_transaction_rebuild_source (transaction_id) VALUES (?)",
+		), id); err != nil {
+			return BatchResult{}, fmt.Errorf("save address transaction rebuild source: %w", err)
+		}
+	}
+	return BatchResult{
+		Cursor: strconv.FormatInt(ids[len(ids)-1], 10),
+		Rows:   int64(len(ids)),
+		Done:   len(ids) < batch.Limit,
+	}, nil
+}
+
 func parseRestampCursor(cursor string) (string, int64, error) {
 	if cursor == "" {
 		return restampCursorPoolPhase, 0, nil
@@ -2060,4 +2142,63 @@ func appendCommentSpace(current *[]byte) {
 	if last != ' ' && last != '\n' && last != '\r' && last != '\t' {
 		*current = append(*current, ' ')
 	}
+}
+
+// utxoSpenderColumns are the utxo columns naming the transaction that spent,
+// collateralised or referenced an output. Each is NULL on every live row.
+var utxoSpenderColumns = []string{
+	"spent_at_tx_id",
+	"collateral_by_tx_id",
+	"referenced_by_tx_id",
+}
+
+// utxoSpenderPartialIndexBackfill replaces each spender column's full index
+// with one over non-NULL rows only.
+//
+// Statistics gathered over the full indexes right after a ledger-state import,
+// when no output had been spent, recorded each column as a single value
+// covering the whole table. The incremental refresh re-analyzes utxo only
+// after it grows many times over, so those statistics persisted and steered
+// one-hash rollback lookups into full-table scans. A partial index's
+// statistics count only rows that carry a value, so they stay selective
+// whatever state the table was analyzed in.
+//
+// While a deferred-index rebuild is pending the indexes are only dropped:
+// the rebuild recreates them from the manifest, already partial, and building
+// them here would defeat the bulk-load deferral.
+func utxoSpenderPartialIndexBackfill(
+	ctx context.Context,
+	batch Batch,
+) (BatchResult, error) {
+	var pending int
+	err := batch.Tx.QueryRowContext(ctx, batch.Rebind(`
+SELECT 1 FROM sync_state WHERE sync_key = ?`),
+		deferred.SyncStateKey,
+	).Scan(&pending)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return BatchResult{}, fmt.Errorf(
+			"read deferred index marker: %w",
+			err,
+		)
+	}
+	for _, column := range utxoSpenderColumns {
+		name := "idx_utxo_" + column
+		if _, err := batch.Tx.ExecContext(
+			ctx,
+			"DROP INDEX IF EXISTS "+name,
+		); err != nil {
+			return BatchResult{}, fmt.Errorf("drop %s: %w", name, err)
+		}
+		if pending != 0 {
+			continue
+		}
+		if _, err := batch.Tx.ExecContext(
+			ctx,
+			"CREATE INDEX "+name+" ON utxo ("+column+") WHERE "+
+				column+" IS NOT NULL",
+		); err != nil {
+			return BatchResult{}, fmt.Errorf("create %s: %w", name, err)
+		}
+	}
+	return BatchResult{Cursor: batch.Cursor, Done: true}, nil
 }

@@ -225,11 +225,12 @@ func (d *LedgerDelta) applyWithDonationRecording(
 	storageIndexOffset := d.expandedIndexOffset
 	for i, tr := range d.Transactions {
 		var proposalsValidated bool
-		if tr.Index < 0 || tr.Index > math.MaxUint32 {
+		if !fitsUint32(tr.Index) {
 			return fmt.Errorf("transaction index out of range: %d", tr.Index)
 		}
 		levels := TransactionLevelsForApply(tr.Tx)
 		childCount := uint64(len(levels)) - 1
+		// #nosec G115 -- the transaction index is checked against uint32 above.
 		storageBaseIndex := uint64(tr.Index) + storageIndexOffset
 		storageParentIndex := storageBaseIndex + childCount
 		if storageParentIndex > math.MaxUint32 {
@@ -299,7 +300,7 @@ func (d *LedgerDelta) applyWithDonationRecording(
 			}
 			opts := database.BatchedTxIngestOpts{
 				SkipConsumedInputRecovery:      d.skipConsumedInputRecovery,
-				TrustedImmutableReplay:         ls.config.TrustedReplay,
+				TrustedImmutableReplay:         ls.trustedReplayActive(),
 				LedgerContextSlot:              d.closureContextSlot,
 				StrictAppliedInputConservation: d.strictConsumedInputs,
 				SkipWithdrawalWitnessWrite:     !ls.config.DelegatorInactivityEnabled,
@@ -718,10 +719,12 @@ func (b *LedgerDeltaBatch) apply(
 	ls *LedgerState,
 	txn *database.Txn,
 ) error {
-	// API mode batches without the flag. Other storage modes batch only when
-	// ApplyRowBatchingEnabled is set; the stored state is the same either way.
+	// API mode and ApplyTrustedBatch batch without the flag. Other storage
+	// modes batch only when ApplyRowBatchingEnabled is set; the stored state
+	// is the same either way.
 	if ls.db.StorageMode() != types.StorageModeAPI &&
-		!ls.config.ApplyRowBatchingEnabled {
+		!ls.config.ApplyRowBatchingEnabled &&
+		!ls.externalIngest.trusted.Load() {
 		return b.applyUnbatched(ctx, ls, txn)
 	}
 	// The accumulator path does not implement Leios closure context or its

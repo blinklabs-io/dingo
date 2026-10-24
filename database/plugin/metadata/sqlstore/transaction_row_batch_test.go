@@ -15,10 +15,12 @@
 package sqlstore
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"database/sql/driver"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -405,6 +407,161 @@ WHERE t.hash = ?`,
 	require.NoError(t, rows.Err())
 	require.Contains(t, got, requestedPaymentKey)
 	require.NotContains(t, got, unrequestedPaymentKey)
+}
+
+func TestAddressTransactionIndexPreservesCredentialKindForInvalidInputs(t *testing.T) {
+	t.Parallel()
+	store := newAPIModeSQLiteStore(t, nil)
+	ctx := context.Background()
+	payment := bytes.Repeat([]byte{0x71}, 28)
+	staking := bytes.Repeat([]byte{0x72}, 28)
+	keyProducer := bytes.Repeat([]byte{0x11}, 32)
+	scriptProducer := bytes.Repeat([]byte{0x22}, 32)
+	for _, output := range []struct {
+		txHash []byte
+		script bool
+	}{
+		{txHash: keyProducer},
+		{txHash: scriptProducer, script: true},
+	} {
+		_, err := store.writeDB.ExecContext(ctx, `
+INSERT INTO utxo (
+    tx_id, output_idx, payment_key, payment_script, staking_key,
+    credential_tag, added_slot, deleted_slot, amount
+) VALUES (?, 0, ?, ?, ?, 0, 1, 0, '1000000')`,
+			output.txHash, payment, output.script, staking,
+		)
+		require.NoError(t, err)
+	}
+	insertTransaction := func(hash []byte, slot int64) int64 {
+		result, err := store.writeDB.ExecContext(ctx, `
+INSERT INTO "transaction" (hash, block_hash, slot, type, block_index, valid)
+VALUES (?, ?, ?, 0, 0, TRUE)`, hash, bytes.Repeat([]byte{0xaa}, 32), slot)
+		require.NoError(t, err)
+		id, err := result.LastInsertId()
+		require.NoError(t, err)
+		return id
+	}
+	index := func(transactionID int64, tx lcommon.Transaction, slot uint64) {
+		rows := &rowBatch{}
+		require.NoError(t, store.indexTransactionAddresses(
+			ctx, store.writeDB, rows, transactionID, tx, slot, 0,
+			nil, store.dialect.ParameterLimit(), true,
+		))
+		require.NoError(t, rows.flush(
+			ctx, newDialectQueryer(store.writeDB, store.dialect.Name()),
+			store.dialect.ParameterLimit(),
+		))
+	}
+	keyInput, err := mockledger.NewSimpleTransactionInput(keyProducer, 0)
+	require.NoError(t, err)
+	scriptInput, err := mockledger.NewSimpleTransactionInput(scriptProducer, 0)
+	require.NoError(t, err)
+	output, err := mockledger.NewTransactionOutputBuilder().
+		WithAddress("addr_test1qz2fxv2umyhttkxyxp8x0dlpdt3k6cwng5pxj3jhsydzer3jcu5d8ps7zex2k2xt3uqxgjqnnj83ws8lhrn648jjxtwq2ytjqp").
+		WithLovelace(1_000_000).
+		Build()
+	require.NoError(t, err)
+	invalidHash := bytes.Repeat([]byte{0x31}, 32)
+	invalid, err := mockledger.NewTransactionBuilder().
+		WithId(invalidHash).
+		WithInputs(keyInput).
+		WithOutputs(output).
+		WithValid(false).
+		Build()
+	require.NoError(t, err)
+	invalidID := insertTransaction(invalidHash, 2)
+	index(invalidID, invalid, 2)
+
+	producerHash := bytes.Repeat([]byte{0x32}, 32)
+	producerID := insertTransaction(producerHash, 1)
+	_, err = store.writeDB.ExecContext(ctx, `
+INSERT INTO address_transaction (
+    payment_key, payment_script, staking_key, credential_tag,
+    transaction_id, slot, tx_index
+) VALUES (?, TRUE, ?, 0, ?, 1, 0)`, payment, staking, producerID)
+	require.NoError(t, err)
+
+	sharedHash := bytes.Repeat([]byte{0x33}, 32)
+	shared, err := mockledger.NewTransactionBuilder().
+		WithId(sharedHash).
+		WithInputs(keyInput, scriptInput).
+		WithOutputs(output).
+		WithValid(true).
+		Build()
+	require.NoError(t, err)
+	sharedID := insertTransaction(sharedHash, 3)
+	index(sharedID, shared, 3)
+	var sharedRows int
+	require.NoError(t, store.readDB.QueryRowContext(ctx, `
+SELECT COUNT(*) FROM address_transaction
+WHERE transaction_id = ? AND payment_key = ?`, sharedID, payment).Scan(&sharedRows))
+	require.Equal(t, 2, sharedRows)
+
+	keyCount, err := store.CountTransactionsByPaymentCred(payment, false, nil)
+	require.NoError(t, err)
+	scriptCount, err := store.CountTransactionsByPaymentCred(payment, true, nil)
+	require.NoError(t, err)
+	require.Equal(t, 2, keyCount)
+	require.Equal(t, 2, scriptCount)
+}
+
+func TestAddressTransactionRebuildRetriesAfterMissingHistory(t *testing.T) {
+	t.Parallel()
+	store := newAPIModeSQLiteStore(t, nil)
+	ctx := context.Background()
+	hash := bytes.Repeat([]byte{0x41}, 32)
+	blockHash := bytes.Repeat([]byte{0x42}, 32)
+	result, err := store.writeDB.ExecContext(ctx, `
+INSERT INTO "transaction" (hash, block_hash, slot, type, block_index, valid)
+VALUES (?, ?, 10, 0, 0, TRUE)`, hash, blockHash)
+	require.NoError(t, err)
+	id, err := result.LastInsertId()
+	require.NoError(t, err)
+	_, err = store.writeDB.ExecContext(ctx, `
+INSERT INTO address_transaction (
+    payment_key, transaction_id, slot, tx_index
+) VALUES (?, ?, 10, 0)`, []byte("legacy"), id)
+	require.NoError(t, err)
+	_, err = store.writeDB.ExecContext(ctx, `
+INSERT INTO address_transaction_rebuild_source (transaction_id) VALUES (?)`, id)
+	require.NoError(t, err)
+
+	err = store.RebuildAddressTransactionIndex(ctx,
+		func(context.Context, models.Transaction) ([]models.AddressTransaction, error) {
+			return nil, fmt.Errorf("retained block is missing")
+		},
+	)
+	require.ErrorContains(t, err, "retained block is missing")
+	var sourceCount, indexCount int
+	require.NoError(t, store.readDB.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM address_transaction_rebuild_source",
+	).Scan(&sourceCount))
+	require.NoError(t, store.readDB.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM address_transaction",
+	).Scan(&indexCount))
+	require.Equal(t, 1, sourceCount)
+	require.Zero(t, indexCount)
+
+	payment := []byte("recovered")
+	require.NoError(t, store.RebuildAddressTransactionIndex(ctx,
+		func(_ context.Context, transaction models.Transaction) ([]models.AddressTransaction, error) {
+			return []models.AddressTransaction{{
+				PaymentKey: payment, PaymentScript: true,
+			}}, nil
+		},
+	))
+	var gotPayment []byte
+	var gotScript bool
+	require.NoError(t, store.readDB.QueryRowContext(ctx, `
+SELECT payment_key, payment_script FROM address_transaction WHERE transaction_id = ?`, id).
+		Scan(&gotPayment, &gotScript))
+	require.Equal(t, payment, gotPayment)
+	require.True(t, gotScript)
+	require.NoError(t, store.readDB.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM address_transaction_rebuild_source",
+	).Scan(&sourceCount))
+	require.Zero(t, sourceCount)
 }
 
 func assetOutputTx(
@@ -928,7 +1085,7 @@ func TestRowBatchFlushTranslatesForProviders(t *testing.T) {
 		rows.add(redeemerShape, []byte{seed, 0x01}, int64(seed), 1, 2, int64(i), 0)
 		rows.add(
 			addressTransactionShape,
-			[]byte{seed, 0x09}, []byte{seed, 0x0a}, 1,
+			[]byte{seed, 0x09}, false, []byte{seed, 0x0a}, 1,
 			int64(seed), 300, int64(i),
 		)
 		rows.add(metadataLabelShape, int64(7), i+1, 300, []byte{seed, 0x02}, nil)
@@ -948,9 +1105,10 @@ func TestRowBatchFlushTranslatesForProviders(t *testing.T) {
 			"INSERT INTO redeemer (data, transaction_id, ex_units_memory, " +
 				"ex_units_cpu, \"index\", tag) " +
 				"VALUES ($1, $2, $3, $4, $5, $6), ($7, $8, $9, $10, $11, $12)",
-			"INSERT INTO address_transaction (payment_key, staking_key, " +
-				"credential_tag, transaction_id, slot, tx_index) " +
-				"VALUES ($1, $2, $3, $4, $5, $6), ($7, $8, $9, $10, $11, $12)",
+			"INSERT INTO address_transaction (payment_key, payment_script, " +
+				"staking_key, credential_tag, transaction_id, slot, tx_index) " +
+				"VALUES ($1, $2, $3, $4, $5, $6, $7), " +
+				"($8, $9, $10, $11, $12, $13, $14)",
 			"INSERT INTO transaction_metadata_label (transaction_id, label, " +
 				"slot, cbor_value, json_value) " +
 				"VALUES ($1, $2, $3, $4, $5), ($6, $7, $8, $9, $10)\n" +
@@ -972,9 +1130,9 @@ func TestRowBatchFlushTranslatesForProviders(t *testing.T) {
 			"INSERT INTO redeemer (data, transaction_id, ex_units_memory, " +
 				"ex_units_cpu, `index`, tag) " +
 				"VALUES (?, ?, ?, ?, ?, ?), (?, ?, ?, ?, ?, ?)",
-			"INSERT INTO address_transaction (payment_key, staking_key, " +
-				"credential_tag, transaction_id, slot, tx_index) " +
-				"VALUES (?, ?, ?, ?, ?, ?), (?, ?, ?, ?, ?, ?)",
+			"INSERT INTO address_transaction (payment_key, payment_script, " +
+				"staking_key, credential_tag, transaction_id, slot, tx_index) " +
+				"VALUES (?, ?, ?, ?, ?, ?, ?), (?, ?, ?, ?, ?, ?, ?)",
 			"INSERT INTO transaction_metadata_label (transaction_id, label, " +
 				"slot, cbor_value, json_value) " +
 				"VALUES (?, ?, ?, ?, ?), (?, ?, ?, ?, ?)\n" +
@@ -994,7 +1152,25 @@ func TestRowBatchFlushTranslatesForProviders(t *testing.T) {
 			newDialectQueryer(recorder, dialect),
 			1000,
 		))
-		require.Equal(t, statements, recorder.statements, dialect)
+		// Each flushed statement leads with its shape's fixed
+		// "-- name:" comment; the translated text below it is unchanged.
+		wantNames := []string{
+			vkeyWitnessShape.name, bootstrapWitnessShape.name,
+			witnessScriptShape.name, plutusDataShape.name,
+			redeemerShape.name, addressTransactionShape.name,
+			metadataLabelShape.name, datumShape.name,
+		}
+		require.Len(t, recorder.statements, len(wantNames), dialect)
+		bodies := make([]string, len(recorder.statements))
+		for i, statement := range recorder.statements {
+			header, body, ok := strings.Cut(statement, "\n")
+			require.True(t, ok, dialect)
+			require.Equal(
+				t, "-- name: "+wantNames[i]+" :exec", header, dialect,
+			)
+			bodies[i] = body
+		}
+		require.Equal(t, statements, bodies, dialect)
 	}
 }
 

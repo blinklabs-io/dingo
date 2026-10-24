@@ -25,7 +25,6 @@ import (
 	"testing/synctest"
 	"time"
 
-	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -58,13 +57,7 @@ func TestValidateDijkstraLeiosCertificateResolvesBatchParent(t *testing.T) {
 			},
 		},
 	}
-	ls.consensus.Store(&consensusSnapshot{
-		epochCache: []models.Epoch{{
-			EpochId:       5,
-			StartSlot:     0,
-			LengthInSlots: 200,
-		}},
-	})
+	ls.consensus.Store(leiosTestCertificationSnapshot())
 	err := ls.validateDijkstraLeiosCertificate(
 		context.Background(),
 		certifier,
@@ -87,13 +80,7 @@ func TestEnsureReferencedEndorserBlocksRejectsCertificateBeforeFetch(t *testing.
 	}
 	probe := &leiosRecoveryProbe{err: errors.New("fetch must not run")}
 	ls := newLeiosRecoveryLedgerState(probe)
-	ls.consensus.Store(&consensusSnapshot{
-		epochCache: []models.Epoch{{
-			EpochId:       5,
-			StartSlot:     0,
-			LengthInSlots: 200,
-		}},
-	})
+	ls.consensus.Store(leiosTestCertificationSnapshot())
 	ls.config.ValidateLeiosCertificate = func(
 		uint64,
 		[]byte,

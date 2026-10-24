@@ -687,6 +687,24 @@ func RebuildCloudSnapshotCatalogContext(
 	)
 }
 
+func readSnapshotCatalogGenerationLocked(
+	ctx context.Context,
+	baseDir string,
+) (uint64, error) {
+	catalogPath := snapshotCatalogPath(baseDir)
+	if _, err := os.Stat(catalogPath); errors.Is(err, os.ErrNotExist) {
+		return 0, nil
+	} else if err != nil {
+		return 0, err
+	}
+	db, err := openSnapshotCatalog(ctx, catalogPath, false)
+	if err != nil {
+		return 0, err
+	}
+	defer db.Close() //nolint:errcheck
+	return readCatalogGeneration(ctx, db)
+}
+
 func rebuildCloudSnapshotCatalogLocked(
 	ctx context.Context,
 	baseDir string,
@@ -778,7 +796,7 @@ func updateCloudSnapshotCatalogIfPresent(
 	if err := validateSnapshotCatalogID(entry.ID); err != nil {
 		return err
 	}
-	if err := entry.Manifest.Authenticate(opts...); err != nil {
+	if err := authenticateEntry(entry, opts); err != nil {
 		return fmt.Errorf("authenticate cloud snapshot %q: %w", entry.ID, err)
 	}
 	data, err := json.Marshal(entry.Manifest)
@@ -1197,7 +1215,10 @@ func ListAvailableSnapshotPageContext(
 			manifest, err = ReadManifest(location, opts...)
 		} else {
 			location = JoinCloudURI(CloudDestinationDisplay(cloudDest), row.id)
-			manifest, err = ParseManifest(row.manifest, opts...)
+			manifest, err = ParseManifest(
+				row.manifest,
+				append(append([]ManifestOption(nil), opts...), WithManifestID(row.id))...,
+			)
 		}
 		if err != nil {
 			problems = append(problems, fmt.Errorf("snapshot %q: %w", row.id, err))

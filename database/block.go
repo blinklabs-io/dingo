@@ -405,6 +405,30 @@ func BlockIDByPointLocalTxn(
 	return metadata.ID, nil
 }
 
+// BlockIDByPointMetadataTxn returns the metadata ID stored for point by
+// reading only the block's metadata key, never its body. A block read pays a
+// whole-object GET and a hash check on the s3 and gcs plugins, which a
+// membership question does not need. The metadata key survives local history
+// expiry and is written and deleted with the block, so its presence answers
+// whether the store holds point. Synthetic entries sharing the key layout
+// carry ID 0 and are reported as ErrBlockNotFound.
+func BlockIDByPointMetadataTxn(
+	txn *Txn,
+	point ocommon.Point,
+) (uint64, error) {
+	metadata, err := blockMetadataByKey(
+		txn,
+		types.BlockBlobKey(point.Slot, point.Hash),
+	)
+	if err != nil {
+		return 0, err
+	}
+	if metadata.ID == 0 {
+		return 0, models.ErrBlockNotFound
+	}
+	return metadata.ID, nil
+}
+
 // BlockMetadataByPointLocalTxn returns retained local metadata for point
 // without requiring the block body to remain available.
 func BlockMetadataByPointLocalTxn(

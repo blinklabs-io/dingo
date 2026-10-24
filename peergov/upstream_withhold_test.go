@@ -111,14 +111,8 @@ func newWithholdFixture(
 		MinHotPeers:               1,
 		TargetNumberOfActivePeers: 1,
 	})
-	host, _, err := net.SplitHostPort(
-		server.conn.Id().RemoteAddr.String(),
-	)
-	require.NoError(t, err)
-	seedTopologyPeer(
-		pg, net.JoinHostPort(host, "3001"), net.JoinHostPort(host, "3001"),
-		"group-0", source,
-	)
+	remote := server.conn.Id().RemoteAddr.String()
+	seedTopologyPeer(pg, remote, remote, "group-0", source)
 	id := server.conn.Id()
 	return &withholdFixture{
 		pg:      pg,
@@ -168,20 +162,18 @@ func (f *withholdFixture) nextEligibility(
 	return PeerEligibilityChangedEvent{}
 }
 
-// A denied topology peer that arrives full-duplex keeps its connection but is
-// not a chain selection source. The handler is driven end to end so removing
-// the withhold at the arrival call site fails this test.
-func TestInboundArrivalOfDeniedTopologyPeerIsWithheld(t *testing.T) {
+// A topology peer denied on its exact transport identity is refused on
+// arrival: the denial is not widened to other source ports, so it never
+// reaches the withhold path with an open connection.
+func TestInboundArrivalOfDeniedTopologyPeerIsRefused(t *testing.T) {
 	t.Parallel()
 	f := newWithholdFixture(t, PeerSourceTopologyLocalRoot)
 	f.pg.DenyPeer(f.peerAddr(), time.Minute)
 
 	f.pg.handleInboundConnectionEvent(f.arrival)
 
-	require.NotNil(t, f.pg.GetPeers()[0].Connection, "connection stays open")
+	assert.Nil(t, f.pg.GetPeers()[0].Connection)
 	assert.False(t, f.pg.IsChainSelectionEligible(f.connId))
-	evt := f.nextEligibility(t)
-	assert.False(t, evt.Eligible)
 }
 
 // Control: the same arrival without a denial is eligible.
@@ -201,8 +193,9 @@ func TestInboundArrivalOfUndeniedTopologyPeerIsEligible(t *testing.T) {
 func TestWithheldUpstreamRecoversWhenDenialExpires(t *testing.T) {
 	t.Parallel()
 	f := newWithholdFixture(t, PeerSourceTopologyLocalRoot)
-	f.pg.DenyPeer(f.peerAddr(), time.Minute)
 	f.pg.handleInboundConnectionEvent(f.arrival)
+	require.True(t, f.nextEligibility(t).Eligible)
+	f.pg.DenyPeer(f.peerAddr(), time.Minute)
 	require.False(t, f.nextEligibility(t).Eligible)
 	require.False(t, f.pg.IsChainSelectionEligible(f.connId))
 
@@ -241,8 +234,8 @@ func TestDenialOnOpenConnectionEmitsIneligible(t *testing.T) {
 func TestWithheldConnectionIsNotReusableInboundTopology(t *testing.T) {
 	t.Parallel()
 	f := newWithholdFixture(t, PeerSourceTopologyLocalRoot)
-	f.pg.DenyPeer(f.peerAddr(), time.Minute)
 	f.pg.handleInboundConnectionEvent(f.arrival)
+	f.pg.DenyPeer(f.peerAddr(), time.Minute)
 
 	f.pg.mu.Lock()
 	withheld := f.pg.isReusableInboundTopologyConnectionLocked(f.pg.peers[0])

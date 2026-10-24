@@ -57,10 +57,16 @@ var (
 // query API. Fields within one pattern are ANDed; multiple patterns are ORed.
 // ExactAddress is the complete serialized address, while PaymentPart and
 // DelegationPart deliberately match credentials across address forms.
+//
+// PaymentScript, when set alongside PaymentPart, restricts the match to
+// script (true) or key (false) payment credentials. Key and script hashes
+// share one 28-byte namespace, so a bare credential lookup needs it to keep
+// the two apart.
 type UtxoAddressPattern struct {
 	ExactAddress   []byte
 	PaymentPart    []byte
 	DelegationPart []byte
+	PaymentScript  *bool
 }
 
 // ExactUtxoAddressPattern builds an exact pattern from a decoded address.
@@ -167,6 +173,10 @@ func AppendUtxoAddressPatternOrBranch(
 		}
 		ands = append(ands, "utxo.payment_key = ?")
 		branchArgs = append(branchArgs, pattern.PaymentPart)
+		if pattern.PaymentScript != nil {
+			ands = append(ands, "utxo.payment_script = ?")
+			branchArgs = append(branchArgs, *pattern.PaymentScript)
+		}
 	}
 	if len(pattern.DelegationPart) > 0 {
 		if len(pattern.DelegationPart) != lcommon.AddressHashSize {
@@ -286,6 +296,10 @@ type Utxo struct {
 	DatumHash     []byte // Optional datum hash (32 bytes)
 	Datum         []byte // Inline datum CBOR, not stored in metadata DB
 	ScriptRef     []byte // Reference script bytes, not stored in metadata DB
+	// ReferenceScriptHash is the hash of the script the output carries as a
+	// reference script. It is not a utxo column; API storage mode indexes it
+	// in utxo_reference_script.
+	ReferenceScriptHash []byte
 	// SpentAtTxId, ReferencedByTxId, and CollateralByTxId are nullable FKs to
 	// transaction(hash); they are unset until a UTxO is spent/referenced.
 	// They use types.NullableHash so an empty value serializes to SQL NULL
@@ -384,7 +398,8 @@ type UtxoHistoryQuery struct {
 //
 // Text form (non-empty): slot:block_index:output_idx:tx_id.
 // GetUtxosByAddressWithOrdering uses the producing transaction position for
-// ordering. Snapshot-imported UTxOs without a producing transaction use
+// ordering; a collateral return takes the position of the transaction it
+// belongs to. Snapshot-imported UTxOs without a producing transaction use
 // AddedSlot and block index zero. TxId makes the cursor unique when those
 // fallback fields collide.
 type UtxoOrderingCursor struct {
@@ -440,6 +455,11 @@ type UtxoAddressPage struct {
 //
 // FilterByAsset: when true, AssetPolicyID is required; AssetName nil matches any name under
 // the policy (same semantics as GetUtxosByAssets).
+//
+// CreatedFrom / CreatedTo: inclusive bounds on the producing transaction
+// position (slot, block index), the same position the ordering uses. Nil
+// leaves that side open. Both GetUtxosByAddressWithOrdering and
+// CountUtxosByAddressWithOrdering apply them, so a ranged listing pages in SQL.
 type UtxoWithOrderingQuery struct {
 	MatchAllAddresses bool
 	AddressPatterns   []UtxoAddressPattern
@@ -451,6 +471,8 @@ type UtxoWithOrderingQuery struct {
 	FilterByAsset     bool
 	AssetPolicyID     []byte
 	AssetName         []byte
+	CreatedFrom       *AddressTransactionPosition
+	CreatedTo         *AddressTransactionPosition
 }
 
 func (u *Utxo) Decode() (ledger.TransactionOutput, error) {
@@ -509,6 +531,10 @@ func UtxoLedgerToModel(
 	if dh := utxo.Output.DatumHash(); dh != nil {
 		ret.DatumHash = append([]byte(nil), dh[:]...)
 	}
+	if scriptRef := utxo.Output.ScriptRef(); scriptRef != nil {
+		hash := scriptRef.Hash()
+		ret.ReferenceScriptHash = hash.Bytes()
+	}
 	if multiAsset := utxo.Output.Assets(); multiAsset != nil {
 		assets, err := ConvertMultiAssetToModels(multiAsset)
 		if err != nil {
@@ -539,7 +565,22 @@ func PaymentScriptFromAddress(addr ledger.Address) bool {
 	return addr.Type()&lcommon.AddressTypeScriptBit == lcommon.AddressTypeScriptBit
 }
 
-// AddressBalance holds SQL-aggregated live-UTxO balances for an address.
+// AddressBalanceLimits bounds the work of one address balance read. A zero
+// field leaves that dimension unbounded.
+type AddressBalanceLimits struct {
+	// MaxUtxos is the most live outputs the read may visit.
+	MaxUtxos int
+	// MaxAssets is the most distinct assets the read may accumulate.
+	MaxAssets int
+}
+
+// ErrAddressBalanceLimit reports an address balance read stopped by its
+// AddressBalanceLimits before the whole balance was read.
+var ErrAddressBalanceLimit = errors.New(
+	"address balance read exceeds its limit",
+)
+
+// AddressBalance holds live-UTxO balances for an address.
 type AddressBalance struct {
 	Lovelace  uint64
 	UtxoCount int64

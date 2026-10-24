@@ -44,7 +44,7 @@ func poolRegistrationID(
 	registrationIndex uint,
 ) (int64, error) {
 	var id int64
-	err := db.QueryRowContext(ctx, `
+	err := db.QueryRowContext(ctx, `-- name: GetPoolRegistrationIDByKey :one
 SELECT id FROM pool_registration
 WHERE pool_id = ? AND added_slot = ? AND certificate_id = ?
   AND registration_index = ?`,
@@ -56,7 +56,7 @@ WHERE pool_id = ? AND added_slot = ? AND certificate_id = ?
 	return id, err
 }
 
-const poolRegistrationInsertSQL = `
+const poolRegistrationInsertSQL = `-- name: InsertPoolRegistration :one
 INSERT INTO pool_registration (
     margin, metadata_url, vrf_key_hash, pool_key_hash, reward_account,
     reward_account_credential_tag, metadata_hash, pledge, cost,
@@ -247,7 +247,7 @@ func latestPoolRegistrationBefore(
 		certIdx   int64
 		addedSlot int64
 	)
-	err := db.QueryRowContext(ctx, `
+	err := db.QueryRowContext(ctx, `-- name: GetLatestPoolRegistrationBefore :one
 SELECT pr.deposit_held, pr.deposit_amount, pr.added_slot,
        `+poolRegistrationBlockIndex+`, COALESCE(c.cert_index, 0)
 FROM pool_registration pr
@@ -315,7 +315,7 @@ func latestPoolRetirementBefore(
 	// GetActivePoolKeyHashesAtSlot: they carry no certs join, so their
 	// COALESCE'd indexes would otherwise lose the tie and leave a
 	// snapshot-retired pool looking still-registered.
-	err := db.QueryRowContext(ctx, `
+	err := db.QueryRowContext(ctx, `-- name: GetLatestPoolRetirementBefore :one
 SELECT rt.epoch, rt.added_slot,
        COALESCE(t.block_index, 0), COALESCE(c.cert_index, 0)
 FROM pool_retirement rt
@@ -358,7 +358,7 @@ func epochAtSlot(
 	slot uint64,
 ) (uint64, bool, error) {
 	var epoch, startSlot, length sql.NullInt64
-	err := db.QueryRowContext(ctx, `
+	err := db.QueryRowContext(ctx, `-- name: GetEpochAtSlot :one
 SELECT epoch_id, start_slot, length_in_slots
 FROM epoch
 WHERE start_slot <= ?
@@ -417,7 +417,7 @@ RETURNING id`,
 				pool.PoolKeyHash,
 				pool.VrfKeyHash,
 				pool.RewardAccount,
-				pool.LatestOpCertSequence,
+				encodeOpCertSequence(pool.LatestOpCertSequence),
 				pool.RewardAccountCredentialTag,
 				decimalUint64(pool.Pledge),
 				decimalUint64(pool.Cost),
@@ -532,7 +532,7 @@ func (s *Store) GetPool(
 			ctx, db, poolByKeyHashQuery, poolKeyHash.Bytes(),
 		)))
 	} else {
-		pool, err = queryPool(ctx, db, "pool_key_hash = ?", poolKeyHash.Bytes())
+		pool, err = queryPool(ctx, db, poolByKeyHashQuery, poolKeyHash.Bytes())
 	}
 	if err != nil || pool == nil {
 		return pool, err
@@ -614,7 +614,7 @@ func (s *Store) getPoolByVrfKeyHash(
 	// the query already confirms is active (via the retirement precedence
 	// below) is what makes retirement correctly fall through to the next
 	// candidate instead of resolving the whole lookup to nil.
-	rows, err := db.QueryContext(ctx, `
+	rows, err := db.QueryContext(ctx, `-- name: GetPoolByVrfKeyHashCandidates :many
 WITH candidates AS (
     SELECT DISTINCT pool_id FROM pool_registration WHERE vrf_key_hash = ?
 ),
@@ -818,7 +818,7 @@ ORDER BY tier, pool_id`,
 		// second, live-tense check (activePoolOrNil) is applied, since
 		// that would reintroduce exactly the inconsistency this method
 		// exists to avoid.
-		pool, err := queryPool(ctx, db, "id = ?", poolID)
+		pool, err := queryPool(ctx, db, poolByIDQuery, poolID)
 		if err != nil {
 			return nil, err
 		}
@@ -947,10 +947,7 @@ func (s *Store) UpdatePoolOpCertSequence(
 	slot uint64,
 	txn types.Txn,
 ) error {
-	sequenceValue, err := checkedInt64(sequence)
-	if err != nil {
-		return err
-	}
+	sequenceValue := encodeOpCertSequence(sequence)
 	slotValue, err := checkedInt64(slot)
 	if err != nil {
 		return err
@@ -982,7 +979,8 @@ func (s *Store) UpdatePoolOpCertSequence(
 				if storedSequence != sequenceValue {
 					return fmt.Errorf(
 						"opcert counter conflict for pool %x at slot %d: existing %d, candidate %d",
-						poolKeyHash.Bytes(), slot, storedSequence, sequence,
+						poolKeyHash.Bytes(), slot,
+						decodeOpCertSequence(storedSequence), sequence,
 					)
 				}
 			} else if inserted != 1 {
@@ -1015,10 +1013,7 @@ func (s *Store) UpdatePoolOpCertSequenceBatched(
 			accumulator,
 		)
 	}
-	sequenceValue, err := checkedInt64(sequence)
-	if err != nil {
-		return err
-	}
+	sequenceValue := encodeOpCertSequence(sequence)
 	slotValue, err := checkedInt64(slot)
 	if err != nil {
 		return err
@@ -1075,7 +1070,8 @@ func (s *Store) flushPoolOpCertSequences(
 				queued.sequenceValue,
 			)
 		}
-		query := `INSERT INTO pool_opcert_sequence
+		query := `-- name: InsertPoolOpCertSequenceBatch :exec
+INSERT INTO pool_opcert_sequence
 (pool_key_hash, slot, sequence) VALUES ` + strings.TrimSuffix(
 			strings.Repeat(placeholder+", ", end-start),
 			", ",
@@ -1106,7 +1102,7 @@ ON CONFLICT (pool_key_hash, slot) DO NOTHING`
 						"opcert counter conflict for pool %x at slot %d: existing %d, candidate %d",
 						queued.key.poolKeyHash.Bytes(),
 						queued.key.slot,
-						storedSequence,
+						decodeOpCertSequence(storedSequence),
 						queued.sequence,
 					)
 				}
@@ -1142,16 +1138,16 @@ ON CONFLICT (pool_key_hash, slot) DO NOTHING`
 	return nil
 }
 
-const poolOpCertSequenceBySlotSQL = `
+const poolOpCertSequenceBySlotSQL = `-- name: GetPoolOpCertSequenceBySlot :one
 SELECT sequence FROM pool_opcert_sequence
 WHERE pool_key_hash = ? AND slot = ?`
 
-const poolOpCertSequenceInsertSQL = `
+const poolOpCertSequenceInsertSQL = `-- name: InsertPoolOpCertSequence :exec
 INSERT INTO pool_opcert_sequence (pool_key_hash, slot, sequence)
 VALUES (?, ?, ?)
 ON CONFLICT (pool_key_hash, slot) DO NOTHING`
 
-const poolUpdateLatestOpCertSequenceSQL = `
+const poolUpdateLatestOpCertSequenceSQL = `-- name: UpdatePoolLatestOpCertSequence :execrows
 UPDATE pool SET latest_op_cert_sequence = ?
 WHERE pool_key_hash = ?
   AND latest_op_cert_sequence < ?`
@@ -1175,13 +1171,16 @@ func (s *Store) LatestPoolOpCertSequence(
 	// result unambiguously means "no row for this pool" -- the same case
 	// the old COUNT(*) == 0 check reported.
 	var sequence sql.NullInt64
-	err = db.QueryRowContext(ctx, `
+	err = db.QueryRowContext(ctx, `-- name: GetLatestPoolOpCertSequence :one
 SELECT MAX(sequence)
 FROM pool_opcert_sequence
 WHERE pool_key_hash = ?`,
 		poolKeyHash.Bytes(),
 	).Scan(&sequence)
-	return uint64(sequence.Int64), sequence.Valid, err
+	if err != nil || !sequence.Valid {
+		return 0, false, err
+	}
+	return decodeOpCertSequence(sequence.Int64), true, nil
 }
 
 // LatestPoolOpCertSequenceAfter returns the highest sequence recorded for a
@@ -1198,14 +1197,17 @@ func (s *Store) LatestPoolOpCertSequenceAfter(
 	}
 	var sequence int64
 	var count int64
-	err = db.QueryRowContext(ctx, `
+	err = db.QueryRowContext(ctx, `-- name: GetLatestPoolOpCertSequenceAfter :one
 SELECT COALESCE(MAX(sequence), 0), COUNT(*)
 FROM pool_opcert_sequence
 WHERE pool_key_hash = ? AND slot > ?`,
 		poolKeyHash.Bytes(),
 		afterSlot,
 	).Scan(&sequence, &count)
-	return uint64(sequence), count > 0, err
+	if err != nil || count == 0 {
+		return 0, false, err
+	}
+	return decodeOpCertSequence(sequence), true, nil
 }
 
 // PoolOpCertSequencesExistAtSlot reports whether any pool_opcert_sequence row
@@ -1223,7 +1225,7 @@ func (s *Store) PoolOpCertSequencesExistAtSlot(
 		return false, err
 	}
 	var one int64
-	err = db.QueryRowContext(ctx, `
+	err = db.QueryRowContext(ctx, `-- name: PoolOpCertSequencesExistAtSlot :one
 SELECT 1
 FROM pool_opcert_sequence
 WHERE slot = ?
@@ -1254,14 +1256,54 @@ func (s *Store) LatestPoolOpCertSequenceAtOrBefore(
 	}
 	var sequence int64
 	var count int64
-	err = db.QueryRowContext(ctx, `
+	err = db.QueryRowContext(ctx, `-- name: GetLatestPoolOpCertSequenceAtOrBefore :one
 SELECT COALESCE(MAX(sequence), 0), COUNT(*)
 FROM pool_opcert_sequence
 WHERE pool_key_hash = ? AND slot <= ?`,
 		poolKeyHash.Bytes(),
 		slotValue,
 	).Scan(&sequence, &count)
-	return uint64(sequence), count > 0, err
+	if err != nil || count == 0 {
+		return 0, false, err
+	}
+	return decodeOpCertSequence(sequence), true, nil
+}
+
+func (s *Store) LatestPoolOpCertSequenceInRange(
+	poolKeyHash lcommon.PoolKeyHash,
+	startSlot uint64,
+	endSlot uint64,
+	txn types.Txn,
+) (uint64, bool, error) {
+	if startSlot > endSlot {
+		return 0, false, nil
+	}
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return 0, false, err
+	}
+	startValue, err := checkedInt64(startSlot)
+	if err != nil {
+		return 0, false, err
+	}
+	endValue, err := checkedInt64(endSlot)
+	if err != nil {
+		return 0, false, err
+	}
+	var sequence int64
+	var count int64
+	err = db.QueryRowContext(ctx, `-- name: GetLatestPoolOpCertSequenceInRange :one
+SELECT COALESCE(MAX(sequence), 0), COUNT(*)
+FROM pool_opcert_sequence
+WHERE pool_key_hash = ? AND slot >= ? AND slot <= ?`,
+		poolKeyHash.Bytes(),
+		startValue,
+		endValue,
+	).Scan(&sequence, &count)
+	if err != nil || count == 0 {
+		return 0, false, err
+	}
+	return decodeOpCertSequence(sequence), true, nil
 }
 
 // LatestPoolOpCertSequencesSQL is the statement LatestPoolOpCertSequences
@@ -1305,11 +1347,7 @@ func (s *Store) LatestPoolOpCertSequences(
 		if err := rows.Scan(&poolKeyHash, &sequence); err != nil {
 			return nil, err
 		}
-		value, err := opCertSequenceValue(sequence)
-		if err != nil {
-			return nil, err
-		}
-		ret[string(poolKeyHash)] = value
+		ret[string(poolKeyHash)] = decodeOpCertSequence(sequence)
 	}
 	return ret, rows.Err()
 }
@@ -1394,22 +1432,19 @@ func (s *Store) LatestPoolOpCertSequencesAtOrBefore(
 			delete(ret, string(poolKeyHash))
 			continue
 		}
-		value, err := opCertSequenceValue(sequence.Int64)
-		if err != nil {
-			return nil, err
-		}
-		ret[string(poolKeyHash)] = value
+		ret[string(poolKeyHash)] = decodeOpCertSequence(sequence.Int64)
 	}
 	return ret, nil
 }
 
-// opCertSequenceValue converts a stored op-cert sequence, failing on a
-// negative one rather than wrapping it into a huge counter.
-func opCertSequenceValue(sequence int64) (uint64, error) {
-	if sequence < 0 {
-		return 0, fmt.Errorf("negative op-cert sequence %d", sequence)
-	}
-	return uint64(sequence), nil
+// encodeOpCertSequence flips the sign bit so signed SQL ordering matches the
+// complete uint64 ordering used by the ledger.
+func encodeOpCertSequence(sequence uint64) int64 {
+	return int64(sequence ^ (uint64(1) << 63))
+}
+
+func decodeOpCertSequence(sequence int64) uint64 {
+	return uint64(sequence) ^ (uint64(1) << 63)
 }
 
 // mithrilTrustBoundarySyncKey mirrors database.mithrilLedgerSlotSyncKey and
@@ -1524,14 +1559,16 @@ ORDER BY slot ASC, pool_key_hash ASC`,
 	ret := []models.PoolOpCertSequence{}
 	for rows.Next() {
 		var row models.PoolOpCertSequence
+		var sequence int64
 		if err := rows.Scan(
 			&row.PoolKeyHash,
 			&row.ID,
 			&row.Slot,
-			&row.Sequence,
+			&sequence,
 		); err != nil {
 			return nil, err
 		}
+		row.Sequence = decodeOpCertSequence(sequence)
 		ret = append(ret, row)
 	}
 	return ret, rows.Err()
@@ -1713,11 +1750,12 @@ latest_ret AS (
 )
 `
 
-const retiringPoolsFrom = `
+func retiringPoolsFrom(epochOp string) string {
+	return `
 FROM latest_ret r
 LEFT JOIN latest_reg g
   ON g.pool_key_hash = r.pool_key_hash AND g.rn = 1
-WHERE r.rn = 1 AND r.epoch > ?
+WHERE r.rn = 1 AND r.epoch ` + epochOp + ` ?
   AND (
       g.pool_key_hash IS NULL
       OR (r.added_slot, r.synth, r.block_index, r.cert_index)
@@ -1728,9 +1766,13 @@ WHERE r.rn = 1 AND r.epoch > ?
           AND r.synth = 1
       )
   )`
+}
 
+// Synthetic retirements a bootstrap import writes share a slot and carry no
+// certificate position, so the pool key hash is the final tie-breaker that
+// keeps pages disjoint and the two directions mirror images.
 const retiringPoolsOrder = `
-ORDER BY r.epoch, r.added_slot, r.block_index, r.cert_index`
+ORDER BY r.epoch, r.added_slot, r.block_index, r.cert_index, r.pool_key_hash`
 
 func scanRetiringPools(rows *sql.Rows, capacity int) ([]models.PoolRetiringRow, error) {
 	defer rows.Close()
@@ -1756,7 +1798,7 @@ func (s *Store) GetRetiringPools(
 	rows, err := db.QueryContext(
 		ctx,
 		s.dialect.Rebind(retiringPoolsCTE+"SELECT r.pool_key_hash, r.epoch"+
-			retiringPoolsFrom+retiringPoolsOrder),
+			retiringPoolsFrom(">")+retiringPoolsOrder),
 		currentEpoch,
 	)
 	if err != nil {
@@ -1771,6 +1813,34 @@ func (s *Store) GetRetiringPoolsPage(
 	descending bool,
 	txn types.Txn,
 ) ([]models.PoolRetiringRow, int, error) {
+	return s.poolsByRetirementPage(
+		currentEpoch, ">", limit, offset, descending, txn,
+	)
+}
+
+// GetRetiredPoolsPage pages the pools whose latest certificate is an
+// uncancelled retirement that took effect at or before currentEpoch.
+func (s *Store) GetRetiredPoolsPage(
+	currentEpoch uint64,
+	limit, offset int,
+	descending bool,
+	txn types.Txn,
+) ([]models.PoolRetiringRow, int, error) {
+	return s.poolsByRetirementPage(
+		currentEpoch, "<=", limit, offset, descending, txn,
+	)
+}
+
+// poolsByRetirementPage keeps pools whose retirement epoch satisfies
+// "epoch <epochOp> currentEpoch". epochOp is a fixed operator chosen by the
+// two callers above, never caller text.
+func (s *Store) poolsByRetirementPage(
+	currentEpoch uint64,
+	epochOp string,
+	limit, offset int,
+	descending bool,
+	txn types.Txn,
+) ([]models.PoolRetiringRow, int, error) {
 	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, 0, err
@@ -1778,7 +1848,7 @@ func (s *Store) GetRetiringPoolsPage(
 	var total int
 	if err := db.QueryRowContext(
 		ctx,
-		s.dialect.Rebind(retiringPoolsCTE+"SELECT COUNT(*)"+retiringPoolsFrom),
+		s.dialect.Rebind(retiringPoolsCTE+"SELECT COUNT(*)"+retiringPoolsFrom(epochOp)),
 		currentEpoch,
 	).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("count retiring pools: %w", err)
@@ -1790,12 +1860,12 @@ func (s *Store) GetRetiringPoolsPage(
 	if descending {
 		order = `
 ORDER BY r.epoch DESC, r.added_slot DESC,
-         r.block_index DESC, r.cert_index DESC`
+         r.block_index DESC, r.cert_index DESC, r.pool_key_hash DESC`
 	}
 	rows, err := db.QueryContext(
 		ctx,
 		s.dialect.Rebind(retiringPoolsCTE+
-			"SELECT r.pool_key_hash, r.epoch"+retiringPoolsFrom+order+
+			"SELECT r.pool_key_hash, r.epoch"+retiringPoolsFrom(epochOp)+order+
 			" LIMIT ? OFFSET ?"),
 		currentEpoch, limit, offset,
 	)
@@ -2091,7 +2161,7 @@ func (s *Store) GetPoolVrfKeyHashAtSlot(
 		return nil, false, fmt.Errorf("GetPoolVrfKeyHashAtSlot: %w", err)
 	}
 	var vrfKeyHash []byte
-	err = db.QueryRowContext(ctx, `
+	err = db.QueryRowContext(ctx, `-- name: GetPoolVrfKeyHashAtSlot :one
 SELECT pr.vrf_key_hash
 FROM pool_registration pr
 JOIN pool p ON p.id = pr.pool_id
@@ -3459,28 +3529,38 @@ latest AS (
 // recomputing it for every pool in the table. It returns the total number of
 // pool rows updated across all chunks.
 //
-// Chunked over dialect.ParameterLimit(): an unbounded disaster-recovery
-// truncate (database/lifecycle) can affect far more pools in one call than a
-// live, security-parameter-bounded rollback ever would.
+// Chunked to stay within dialect.ParameterLimit(), reserving one parameter
+// for the zero fallback: an unbounded disaster-recovery truncate
+// (database/lifecycle) can affect far more pools in one call than a live,
+// security-parameter-bounded rollback ever would.
 func (s *Store) restorePoolLatestOpCertSequence(
 	ctx context.Context,
 	db queryer,
 	poolKeyHashes [][]byte,
 ) (int64, error) {
 	var total int64
-	for start := 0; start < len(poolKeyHashes); start += s.dialect.ParameterLimit() {
-		end := min(start+s.dialect.ParameterLimit(), len(poolKeyHashes))
+	parameterLimit := s.dialect.ParameterLimit()
+	if len(poolKeyHashes) > 0 && parameterLimit < 2 {
+		return total, fmt.Errorf(
+			"SQL parameter limit %d cannot restore pool op-cert sequences",
+			parameterLimit,
+		)
+	}
+	batchSize := parameterLimit - 1
+	for start := 0; start < len(poolKeyHashes); start += batchSize {
+		end := min(start+batchSize, len(poolKeyHashes))
 		batch := poolKeyHashes[start:end]
-		args := make([]any, len(batch))
-		for i, hash := range batch {
-			args[i] = hash
+		args := make([]any, 1, len(batch)+1)
+		args[0] = encodeOpCertSequence(0)
+		for _, hash := range batch {
+			args = append(args, hash)
 		}
 		result, err := db.ExecContext(ctx, `
 UPDATE pool
 SET latest_op_cert_sequence = COALESCE((
     SELECT MAX(sequence) FROM pool_opcert_sequence sequence
     WHERE sequence.pool_key_hash = pool.pool_key_hash
-), 0)
+), ?)
 WHERE pool_key_hash IN (`+bindPlaceholders(len(batch))+`)`,
 			args...,
 		)
@@ -3532,25 +3612,26 @@ func ledgerPoolRelay(
 	return ret, nil
 }
 
-const poolSelectPrefix = `
+const poolSelectColumns = `
 SELECT margin, pool_key_hash, vrf_key_hash, reward_account,
        latest_op_cert_sequence, reward_account_credential_tag, id,
        pledge, cost, leios_key_public, leios_key_possession_proof
 FROM pool WHERE `
 
-// poolByKeyHashQuery is the pool lookup GetPool issues, and the text queryPool
-// builds for the "pool_key_hash = ?" predicate.
-const poolByKeyHashQuery = poolSelectPrefix + "pool_key_hash = ? LIMIT 1"
+// poolByKeyHashQuery is the pool lookup GetPool issues.
+const poolByKeyHashQuery = "-- name: GetPoolByKeyHash :one" +
+	poolSelectColumns + "pool_key_hash = ? LIMIT 1"
+
+const poolByIDQuery = "-- name: GetPoolByID :one" +
+	poolSelectColumns + "id = ? LIMIT 1"
 
 func queryPool(
 	ctx context.Context,
 	db queryer,
-	predicate string,
+	query string,
 	args ...any,
 ) (*models.Pool, error) {
-	return scanPoolOrNil(scanPool(db.QueryRowContext(
-		ctx, poolSelectPrefix+predicate+" LIMIT 1", args...,
-	)))
+	return scanPoolOrNil(scanPool(db.QueryRowContext(ctx, query, args...)))
 }
 
 // scanPoolOrNil maps sql.ErrNoRows from scanPool to a nil pool.
@@ -3600,7 +3681,9 @@ func scanPool(row rowScanner) (*models.Pool, error) {
 	if err != nil {
 		return nil, err
 	}
-	pool.LatestOpCertSequence = uint64(latest.Int64)
+	if latest.Valid {
+		pool.LatestOpCertSequence = decodeOpCertSequence(latest.Int64)
+	}
 	pool.RewardAccountCredentialTag = uint8(credentialTag)
 	pool.Pledge = types.Uint64(pledgeValue)
 	pool.Cost = types.Uint64(costValue)
@@ -3615,7 +3698,12 @@ func (s *Store) loadPoolAssociations(
 ) error {
 	pool.Registration = []models.PoolRegistration{}
 	pool.Retirement = []models.PoolRetirement{}
-	query := `
+	// One fixed name per shape: the LIMIT 1 form is a different statement.
+	name, limit := "GetPoolRegistrationsByPoolID :many", ""
+	if latestOnly {
+		name, limit = "GetLatestPoolRegistrationByPoolID :one", " LIMIT 1"
+	}
+	query := "-- name: " + name + `
 SELECT p.margin, p.metadata_url, p.vrf_key_hash, p.pool_key_hash, p.reward_account,
        p.reward_account_credential_tag, p.metadata_hash, p.pledge, p.cost,
        p.certificate_id, p.id, p.pool_id, p.added_slot, p.deposit_amount,
@@ -3629,10 +3717,7 @@ LEFT JOIN ` + s.dialect.QuoteIdentifier("transaction") + ` tx ON tx.id = c.trans
 WHERE p.pool_id = ?
 ORDER BY p.added_slot DESC, COALESCE(tx.block_index, 0) DESC,
          COALESCE(c.cert_index, 0) DESC, p.registration_index DESC,
-         p.id DESC`
-	if latestOnly {
-		query += " LIMIT 1"
-	}
+         p.id DESC` + limit
 	rows, err := db.QueryContext(ctx, query, pool.ID)
 	if err != nil {
 		return fmt.Errorf("load pool registrations query: %w", err)
@@ -3669,7 +3754,7 @@ ORDER BY p.added_slot DESC, COALESCE(tx.block_index, 0) DESC,
 		}
 		pool.Registration = append(pool.Registration, *registration)
 	}
-	rows, err = db.QueryContext(ctx, `
+	rows, err = db.QueryContext(ctx, `-- name: GetPoolRetirementsByPoolID :many
 SELECT r.pool_key_hash, r.certificate_id, r.id, r.pool_id, r.epoch, r.added_slot
 FROM pool_retirement r
 LEFT JOIN certs c ON c.id = r.certificate_id
@@ -3943,7 +4028,7 @@ func loadPoolRegistrationChildren(
 	db queryer,
 	registration *models.PoolRegistration,
 ) error {
-	rows, err := db.QueryContext(ctx, `
+	rows, err := db.QueryContext(ctx, `-- name: GetPoolRegistrationOwners :many
 SELECT key_hash, id, pool_registration_id, pool_id
 FROM pool_registration_owner
 WHERE pool_registration_id = ?`,
@@ -3971,7 +4056,7 @@ WHERE pool_registration_id = ?`,
 	if err := rows.Err(); err != nil {
 		return err
 	}
-	rows, err = db.QueryContext(ctx, `
+	rows, err = db.QueryContext(ctx, `-- name: GetPoolRegistrationRelays :many
 SELECT ipv4, ipv6, relay_type, hostname, id, pool_registration_id, pool_id, port
 FROM pool_registration_relay
 WHERE pool_registration_id = ?`,
@@ -4171,4 +4256,73 @@ LIMIT 1`).Scan(&epoch)
 		return 0, false, err
 	}
 	return uint64(epoch.Int64), true, nil
+}
+
+func (s *Store) GetPoolDepositsHeld(
+	poolKeyHashes []lcommon.PoolKeyHash,
+	txn types.Txn,
+) (map[string]uint64, error) {
+	ret := make(map[string]uint64, len(poolKeyHashes))
+	if len(poolKeyHashes) == 0 {
+		return ret, nil
+	}
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, err
+	}
+	for start := 0; start < len(poolKeyHashes); start += activeDelegatorChunkSize {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		end := min(start+activeDelegatorChunkSize, len(poolKeyHashes))
+		args := make([]any, 0, end-start)
+		for _, poolKeyHash := range poolKeyHashes[start:end] {
+			args = append(args, poolKeyHash.Bytes())
+		}
+		rows, err := db.QueryContext(ctx, `
+SELECT pool_key_hash, held FROM (
+    SELECT pr.pool_key_hash pool_key_hash,
+           COALESCE(pr.deposit_held, pr.deposit_amount) held,
+           ROW_NUMBER() OVER (
+               PARTITION BY pr.pool_id
+               ORDER BY pr.added_slot DESC,
+                        COALESCE(t.block_index, 0) DESC,
+                        COALESCE(c.cert_index, 0) DESC,
+                        pr.registration_index DESC
+           ) rn
+    FROM pool_registration pr
+    LEFT JOIN certs c ON c.id = pr.certificate_id
+    LEFT JOIN "transaction" t ON t.id = c.transaction_id
+    WHERE pr.pool_key_hash IN (`+bindPlaceholders(len(args))+`)
+) latest WHERE rn = 1`,
+			args...,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("get pool deposits held: %w", err)
+		}
+		for rows.Next() {
+			var hash []byte
+			var held sql.NullString
+			if err := rows.Scan(&hash, &held); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			if !held.Valid || held.String == "" {
+				continue
+			}
+			value, err := parseUint64("pool deposit held", held.String)
+			if err != nil {
+				rows.Close()
+				return nil, err
+			}
+			ret[string(hash)] = value
+		}
+		if err := rows.Close(); err != nil {
+			return nil, err
+		}
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+	}
+	return ret, nil
 }

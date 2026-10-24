@@ -177,6 +177,37 @@ func TestGenerateReportComparesByteExactReferenceWithoutNormalization(t *testing
 	}
 }
 
+func TestGenerateReportNormalizesRawByteExactReference(t *testing.T) {
+	t.Parallel()
+	corpus := filepath.Join(t.TempDir(), "conway")
+	validDir := filepath.Join(corpus, "native_script", "valid")
+	if err := os.MkdirAll(validDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	input := append([]byte{0x9f, 0x00, 0x58, 0x1c}, make([]byte, 28)...)
+	input = append(input, 0xff)
+	for _, suffix := range []string{"input", "expected"} {
+		if err := os.WriteFile(
+			filepath.Join(validDir, "valid."+suffix+".cbor"),
+			input,
+			0o644,
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	report, err := generateReport(corpus, testCorpusRevision, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !report.Successful {
+		t.Fatalf("report has failures: %+v", report.Failures)
+	}
+	if report.Totals.GeneratedDecodedReencodedActual != 1 {
+		t.Fatalf("normalized raw reference count = %d, want 1", report.Totals.GeneratedDecodedReencodedActual)
+	}
+}
+
 func TestGenerateReportRejectsIncompleteCorpusInventory(t *testing.T) {
 	t.Parallel()
 	for _, mutation := range []string{"missing sample", "altered sample"} {
@@ -455,7 +486,7 @@ func TestGenerateReportAcceptsManualSamplesAndEmitsScenarioSchema(t *testing.T) 
 	if err := json.Unmarshal(data, &fields); err != nil {
 		t.Fatal(err)
 	}
-	for _, field := range []string{"schema_version", "scenario", "generated_at", "corpus", "protocol_version", "totals", "rules"} {
+	for _, field := range []string{"version", "scenario", "generated_at", "corpus", "protocol_version", "totals", "rules"} {
 		if _, ok := fields[field]; !ok {
 			t.Errorf("serialized report has no required field %q", field)
 		}

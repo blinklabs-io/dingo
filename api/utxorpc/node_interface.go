@@ -35,7 +35,14 @@ import (
 // RPC server. Using this interface keeps the server and service handlers free
 // of a direct *ledger.LedgerState dependency.
 type UtxorpcLedgerState interface {
+	BlockTransactions(ctx context.Context, block models.Block) ([]lcommon.Transaction, error)
 	BlockByHash(ctx context.Context, hash []byte) (models.Block, error)
+	// BlockByHashIncludingRolledBack also finds blocks a primary-chain
+	// rollback has already removed from the database.
+	BlockByHashIncludingRolledBack(
+		ctx context.Context,
+		hash []byte,
+	) (models.Block, error)
 	CardanoNodeConfig() *cardano.CardanoNodeConfig
 	Datum(hash []byte) (*models.Datum, error)
 	EvaluateTxContext(
@@ -59,17 +66,21 @@ type UtxorpcLedgerState interface {
 		epoch uint64,
 		era eras.EraDesc,
 	) (lcommon.ProtocolParameters, error)
-	// PoolStakeDistribution reports the active stake distribution across
-	// block-producing pools. A nil filter asks for every pool; see the method
-	// on ledger.LedgerState for why an empty non-nil filter differs. at is
-	// the zero value and txn is nil here -- this RPC handler always answers
-	// live, never pinned.
-	PoolStakeDistribution(
+	// PoolStakeDistributionBounded reports the active stake distribution
+	// across at most maxPools block-producing pools. A nil filter asks for
+	// every pool; see the method on ledger.LedgerState for why an empty non-nil
+	// filter differs. at is the zero value and txn is nil here -- this RPC
+	// handler always answers live, never pinned.
+	PoolStakeDistributionBounded(
 		ctx context.Context,
 		poolFilter []lcommon.PoolKeyHash,
 		at ledger.QueryPoint,
 		txn *database.Txn,
+		maxPools int,
 	) (*ledger.PoolStakeDistribution, error)
+	// PrimaryChainTip is the tip of the chain FollowTip's iterator reads. It
+	// can be ahead of Tip while the ledger is still applying blocks.
+	PrimaryChainTip() ochainsync.Tip
 	// SecurityParam is the configured security parameter k, the deepest
 	// rollback a chain follower can be asked to undo.
 	SecurityParam() int
@@ -79,9 +90,12 @@ type UtxorpcLedgerState interface {
 	TransactionByHash(ctx context.Context, hash []byte) (*models.Transaction, error)
 	UtxoByRef(txId []byte, outputIdx uint32) (*models.Utxo, error)
 	UtxosByRefs(refs []models.UtxoId) ([]models.Utxo, error)
-	UtxosByAddressWithOrdering(
+	UtxosByAddressBoundedPage(
+		ctx context.Context,
 		q *models.UtxoWithOrderingQuery,
-	) ([]models.UtxoWithOrdering, error)
+		maxCandidates int,
+		maxBytes int64,
+	) (models.UtxoAddressPage, error)
 }
 
 // UtxorpcMempool is the subset of mempool.Mempool needed by the UTxO RPC

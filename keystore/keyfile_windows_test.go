@@ -47,6 +47,20 @@ func currentUserSIDString(t *testing.T) string {
 	return tokenUser.User.Sid.String()
 }
 
+func TestKeyFileOwnerRequiresCurrentUserOrAdministratorsWindows(t *testing.T) {
+	user, err := windows.StringToSid("S-1-5-21-111111111-222222222-333333333-1001")
+	require.NoError(t, err)
+	users, err := windows.CreateWellKnownSid(windows.WinBuiltinUsersSid)
+	require.NoError(t, err)
+	admins, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
+	require.NoError(t, err)
+
+	assert.True(t, keyFileOwnerAllowed(user, user, admins, false))
+	assert.False(t, keyFileOwnerAllowed(admins, user, admins, false))
+	assert.True(t, keyFileOwnerAllowed(admins, user, admins, true))
+	assert.False(t, keyFileOwnerAllowed(users, user, admins, true))
+}
+
 func TestOpenRegularFileRejectsNamedPipe(t *testing.T) {
 	pipeName := fmt.Sprintf(`\\.\pipe\dingo-keyfile-%d`, os.Getpid())
 	name, err := windows.UTF16PtrFromString(pipeName)

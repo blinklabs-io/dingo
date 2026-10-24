@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
+	nodeconsensus "github.com/blinklabs-io/dingo/consensus"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/internal/leiosheader"
@@ -933,24 +934,37 @@ func (n *Node) initBlockForger(
 	stakeProvider := &stakeDistributionAdapter{ledgerState: n.ledgerState}
 	epochProvider := &epochInfoAdapter{ledgerState: n.ledgerState}
 
-	// Create leader election with real stake distribution. It takes the VRF
-	// seed from the credentials per schedule computation instead of holding
-	// a second copy.
-	election := leader.NewElection(
-		poolKeyHash,
-		creds.GetVRFSKey,
-		stakeProvider,
-		epochProvider,
-		n.eventBus,
-		n.config.logger,
-	)
-	election.SetPromRegistry(n.config.promRegistry)
+	var scheduleStore leader.ScheduleStore
 	if n.db != nil {
-		if scheduleStore := leader.NewSyncStateScheduleStore(
+		if store := leader.NewSyncStateScheduleStore(
 			n.db.Metadata(),
-		); scheduleStore != nil {
-			election.SetScheduleStore(scheduleStore)
+		); store != nil {
+			scheduleStore = store
 		}
+	}
+	// The selected provider owns production scheduling. It receives the same
+	// ledger views used by header validation, while credentials remain owned by
+	// the existing block producer.
+	election, err := n.selectedConsensusProvider().NewLeaderScheduler(
+		func(scheduleIdentity string) (nodeconsensus.LeaderScheduler, error) {
+			election := leader.NewElection(
+				poolKeyHash,
+				creds.GetVRFSKey,
+				stakeProvider,
+				epochProvider,
+				n.eventBus,
+				n.config.logger,
+			)
+			election.SetConsensusIdentity(scheduleIdentity)
+			election.SetPromRegistry(n.config.promRegistry)
+			if scheduleStore != nil {
+				election.SetScheduleStore(scheduleStore)
+			}
+			return election, nil
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("create consensus leader scheduler: %w", err)
 	}
 
 	// Start leader election (subscribes to epoch transitions)
@@ -1068,6 +1082,7 @@ func (n *Node) initBlockForger(
 		},
 		LeiosCertificateProvider:        leiosCerts,
 		LeiosParentAnnouncementProvider: leiosParent,
+		LeiosCertificationTimingChecker: n.ledgerState,
 		OpCertLedgerView: blockProducerLedgerView{
 			ls: n.ledgerState,
 		},

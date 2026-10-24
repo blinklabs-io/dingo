@@ -332,7 +332,7 @@ func TestLeiosTxsOfferRetriesAfterAdmissionReleases(t *testing.T) {
 			ProtocolId: leiosfetch.ProtocolId,
 			IsResponse: true,
 			Messages: []protocol.Message{
-				leiosfetch.NewMsgBlockTxs(point, bitmap, []cbor.RawMessage{tx}),
+				leiosfetch.NewMsgBlockTxs([]cbor.RawMessage{tx}),
 			},
 		},
 	))
@@ -501,7 +501,6 @@ func TestLeiosTxsOfferHealthyPeerIsNotSuppressedByFailingPeer(t *testing.T) {
 		460,
 		lcommon.Blake2b256Hash(manifestRaw).Bytes(),
 	)
-	bitmap := map[uint16]uint64{0: 1 << 63}
 	first, firstDone := newLeiosFetchConversation(t, append(
 		leiosFetchHandshake(),
 		ouroboros_mock.ConversationEntryInput{
@@ -512,9 +511,7 @@ func TestLeiosTxsOfferHealthyPeerIsNotSuppressedByFailingPeer(t *testing.T) {
 			ProtocolId: leiosfetch.ProtocolId,
 			IsResponse: true,
 			Messages: []protocol.Message{
-				leiosfetch.NewMsgBlockTxs(
-					point, bitmap, nil,
-				),
+				leiosfetch.NewMsgBlockTxs(nil),
 			},
 		},
 	))
@@ -528,9 +525,7 @@ func TestLeiosTxsOfferHealthyPeerIsNotSuppressedByFailingPeer(t *testing.T) {
 			ProtocolId: leiosfetch.ProtocolId,
 			IsResponse: true,
 			Messages: []protocol.Message{
-				leiosfetch.NewMsgBlockTxs(
-					point, bitmap, []cbor.RawMessage{tx},
-				),
+				leiosfetch.NewMsgBlockTxs([]cbor.RawMessage{tx}),
 			},
 		},
 	))
@@ -608,7 +603,6 @@ type leiosTxOfferTestRequester struct {
 	txs            []cbor.RawMessage
 	perRound       time.Duration
 	immediateFirst bool
-	limit          int
 	requests       int
 	lastNeed       int
 }
@@ -638,16 +632,11 @@ func (r *leiosTxOfferTestRequester) BlockTxsRequest(
 	slices.Sort(requested)
 	r.requests++
 	r.lastNeed = len(requested)
-	if r.limit > 0 && len(requested) > r.limit {
-		requested = requested[:r.limit]
-	}
-	served := make(map[uint16]uint64)
 	txs := make([]cbor.RawMessage, 0, len(requested))
 	for _, idx := range requested {
-		served[uint16(idx/64)] |= 1 << uint(63-(idx%64))
 		txs = append(txs, r.txs[idx])
 	}
-	return leiosfetch.NewMsgBlockTxs(point, served, txs), nil
+	return leiosfetch.NewMsgBlockTxs(txs), nil
 }
 
 func testLeiosTxOfferDeadlineFixture(
@@ -655,11 +644,13 @@ func testLeiosTxOfferDeadlineFixture(
 	slot uint64,
 ) (*Ouroboros, ocommon.Point, []cbor.RawMessage) {
 	t.Helper()
-	const txCount = 12
+	// One request batch plus a short tail, so a relay that answers the first
+	// batch and then stalls leaves a resumable partial cache.
+	const txCount = leiosTxFetchWindowsPerRequest*leiosTxFetchWindowSize + 12
 	txs := make([]cbor.RawMessage, 0, txCount)
 	refs := make([]lcommon.LeiosTransactionReference, 0, txCount)
 	for idx := range txCount {
-		tx, ref := testLeiosManifestTx(t, byte(0x50+idx))
+		tx, ref := testLeiosManifestTxIndex(t, 0x50+idx)
 		txs = append(txs, tx)
 		refs = append(refs, ref)
 	}
@@ -686,7 +677,7 @@ func TestLeiosTxsOfferDeadlineHandsDribblingOwnerToHealthyWaiter(t *testing.T) {
 	o, point, txs := testLeiosTxOfferDeadlineFixture(t, 465)
 	o.leiosTxFetchAttemptTimeoutOverride = 100 * time.Millisecond
 	owner := &leiosTxOfferTestRequester{
-		txs: txs, perRound: 20 * time.Millisecond, limit: 1,
+		txs: txs, perRound: time.Second, immediateFirst: true,
 	}
 	healthy := &leiosTxOfferTestRequester{txs: txs}
 	ownerGuard := &leiosFetchGuard{}
@@ -705,7 +696,7 @@ func TestLeiosTxsOfferDeadlineHandsDribblingOwnerToHealthyWaiter(t *testing.T) {
 		data, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
 		return ok && data.completeTxCache() &&
 			ownerGuard.inflight.Load() == 0 && waiterGuard.inflight.Load() == 0
-	}, 5*time.Second, "deadline did not hand off to the healthy waiter")
+	}, testutil.AsyncWait, "deadline did not hand off to the healthy waiter")
 	require.Positive(t, owner.requests)
 	require.Less(t, owner.requests, len(txs))
 	require.Equal(t, 1, healthy.requests)
@@ -718,8 +709,7 @@ func TestLeiosTxsOfferDeadlineWithoutWaiterReleasesClaim(t *testing.T) {
 	o, point, txs := testLeiosTxOfferDeadlineFixture(t, 466)
 	o.leiosTxFetchAttemptTimeoutOverride = 40 * time.Millisecond
 	owner := &leiosTxOfferTestRequester{
-		txs: txs, perRound: 10 * time.Millisecond, immediateFirst: true,
-		limit: 1,
+		txs: txs, perRound: time.Second, immediateFirst: true,
 	}
 	guard := &leiosFetchGuard{}
 	guard.inflight.Store(1)
@@ -751,7 +741,6 @@ func TestLeiosTxsOfferHandsOffAcrossMultipleFailingPeers(t *testing.T) {
 		461,
 		lcommon.Blake2b256Hash(manifestRaw).Bytes(),
 	)
-	bitmap := map[uint16]uint64{0: 1 << 63}
 	newPeer := func(txs []cbor.RawMessage) (*gouroboros.Connection, <-chan error) {
 		return newLeiosFetchConversation(t, append(
 			leiosFetchHandshake(),
@@ -763,7 +752,7 @@ func TestLeiosTxsOfferHandsOffAcrossMultipleFailingPeers(t *testing.T) {
 				ProtocolId: leiosfetch.ProtocolId,
 				IsResponse: true,
 				Messages: []protocol.Message{
-					leiosfetch.NewMsgBlockTxs(point, bitmap, txs),
+					leiosfetch.NewMsgBlockTxs(txs),
 				},
 			},
 		))
@@ -916,7 +905,6 @@ func TestLeiosTxsOfferOwnerDisconnectHandsOffToWaiter(t *testing.T) {
 		464,
 		lcommon.Blake2b256Hash(manifestRaw).Bytes(),
 	)
-	bitmap := map[uint16]uint64{0: 1 << 63}
 	owner, _ := newLeiosFetchConversation(t, leiosFetchHandshake())
 	healthy, healthyDone := newLeiosFetchConversation(t, append(
 		leiosFetchHandshake(),
@@ -928,9 +916,7 @@ func TestLeiosTxsOfferOwnerDisconnectHandsOffToWaiter(t *testing.T) {
 			ProtocolId: leiosfetch.ProtocolId,
 			IsResponse: true,
 			Messages: []protocol.Message{
-				leiosfetch.NewMsgBlockTxs(
-					point, bitmap, []cbor.RawMessage{tx},
-				),
+				leiosfetch.NewMsgBlockTxs([]cbor.RawMessage{tx}),
 			},
 		},
 	))
@@ -1079,7 +1065,7 @@ func TestLeiosTxsOfferTransferredOwnerCannotFetchWhenDequeued(t *testing.T) {
 	}, 2*time.Second, 10*time.Millisecond)
 	require.Zero(t, stale.requests,
 		"a callback dequeued after ownership transfer must not fetch")
-	require.Equal(t, 1, healthy.requests)
+	require.Equal(t, 2, healthy.requests, "one request per batch")
 }
 
 func TestLeiosTxsOfferOtherPathCompletionRelaysTransactionsOnce(t *testing.T) {

@@ -28,8 +28,7 @@ import (
 
 func addRunFlags(cmd *cobra.Command) {
 	addDingoDBFlags(cmd)
-	cmd.Flags().String("api-key", "",
-		"Koios Bearer token (or KOIOS_API_KEY)")
+	addAPIKeyFlags(cmd)
 	addKoiosURLFlag(cmd)
 	cmd.Flags().String("report-dir", "",
 		"directory for JSON report (default: {dingo-data}/.koios/)")
@@ -51,7 +50,10 @@ func runCommand(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 
-	cachePath := resolveCachePath()
+	cachePath, err := resolveCachePath()
+	if err != nil {
+		return err
+	}
 	skipFetch, _ := cmd.Flags().GetBool("skip-fetch")
 	skipCheck, _ := cmd.Flags().GetBool("skip-check")
 	all, _ := cmd.Flags().GetBool("all")
@@ -72,7 +74,20 @@ func runCommand(cmd *cobra.Command, _ []string) error {
 
 	accounts := accountsEnabled(cmd)
 
+	// Resolved once, and only when a phase opens the database, so both
+	// phases see the same DSN and a report-only run reads no secret.
+	var dingoDB koiosparity.DingoDBConfig
+	if (!skipFetch && accounts) || !skipCheck {
+		if dingoDB, err = resolveDingoDB(cmd); err != nil {
+			return err
+		}
+	}
+
 	if !skipFetch {
+		apiKey, err := koiosAPIKey(cmd)
+		if err != nil {
+			return err
+		}
 		var accountsSource koiosparity.RewardParitySource
 		if accounts {
 			// See fetchRun's identical comment: only opened when --accounts
@@ -80,7 +95,7 @@ func runCommand(cmd *cobra.Command, _ []string) error {
 			// call to Dingo's own API. Scoped to the fetch phase itself (not
 			// opened at all for a report-only run with both phases skipped)
 			// — the check phase below opens its own DingoDB when it runs.
-			dingo, dingoErr := koiosparity.OpenDingoDB(resolveDingoDB(cmd))
+			dingo, dingoErr := koiosparity.OpenDingoDB(dingoDB)
 			if dingoErr != nil {
 				return fmt.Errorf(
 					"open dingo db (required for --accounts): %w",
@@ -94,7 +109,7 @@ func runCommand(cmd *cobra.Command, _ []string) error {
 		slog.Info("koios-parity: fetch phase starting", "network", network)
 		fetchResult, fetchErr := koiosparity.Fetch(ctx, koiosparity.FetchConfig{
 			Network:               network,
-			APIKey:                koiosAPIKey(cmd),
+			APIKey:                apiKey,
 			BaseURL:               koiosBaseURL(cmd),
 			AllowInsecureHTTP:     koiosAllowInsecureHTTP(cmd),
 			AllowPrivateAddresses: koiosAllowPrivateAddresses(cmd),
@@ -127,7 +142,7 @@ func runCommand(cmd *cobra.Command, _ []string) error {
 		slog.Info("koios-parity: check phase starting", "network", network)
 		if _, err := koiosparity.Check(ctx, koiosparity.CheckConfig{
 			Network:         network,
-			DingoDB:         resolveDingoDB(cmd),
+			DingoDB:         dingoDB,
 			CachePath:       cachePath,
 			Workers:         workers,
 			All:             all,
@@ -163,7 +178,10 @@ func runCommand(cmd *cobra.Command, _ []string) error {
 	// incomplete — an unwritable --report-dir, a report-creation failure, or
 	// a BuildJSONReport/WriteJSONReport failure must never let this function
 	// return nil merely because the check phase itself reported PASS.
-	dir := resolveReportDir(reportDir)
+	dir, err := resolveReportDir(reportDir)
+	if err != nil {
+		return err
+	}
 	reportPath := fmt.Sprintf("%s/report-%s-%s.json",
 		dir, network, time.Now().Format("2006-01-02"))
 	reportErr := writeParityReport(

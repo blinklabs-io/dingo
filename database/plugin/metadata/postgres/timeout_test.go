@@ -32,7 +32,7 @@ import (
 
 // isPostgresConfigured mirrors internal/test/conformance's check of the same
 // name so this suite skips/runs under the same conditions in CI and locally:
-// CI's go-test-linux job always sets POSTGRES_PASSWORD, so this runs
+// CI's gate (services) job always sets POSTGRES_PASSWORD, so this runs
 // automatically in CI; a bare local `go test -tags dingo_extra_plugins ./...`
 // with no Postgres running skips cleanly instead of failing.
 func isPostgresConfigured() bool {

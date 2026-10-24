@@ -630,7 +630,7 @@ func TestNodeAdapterAddressPointerIncludesSnapshotUtxos(t *testing.T) {
 		t, db, rows[2].TxId, rows[2].OutputIdx, otherAddr, 4_000_000,
 	)
 
-	info, err := adapter.Address(wantAddr.String())
+	info, err := adapter.Address(context.Background(), wantAddr.String())
 	require.NoError(t, err)
 	require.Len(t, info.Amount, 2)
 	assert.Equal(t, "lovelace", info.Amount[0].Unit)
@@ -658,7 +658,7 @@ func TestNodeAdapterAddressPointerRejectsMissingCandidateCbor(t *testing.T) {
 		Amount:     types.Uint64(2_000_000),
 	})
 
-	_, err := adapter.Address(addr.String())
+	_, err := adapter.Address(context.Background(), addr.String())
 	require.ErrorContains(t, err, "utxo cbor unavailable")
 }
 
@@ -706,7 +706,7 @@ func TestNodeAdapterEnterpriseAddressExcludesPointerUtxos(t *testing.T) {
 		}))
 	}
 
-	info, err := adapter.Address(enterprise.String())
+	info, err := adapter.Address(context.Background(), enterprise.String())
 	require.NoError(t, err)
 	require.Len(t, info.Amount, 1)
 	assert.Equal(t, "1000000", info.Amount[0].Quantity)
@@ -764,7 +764,7 @@ func TestNodeAdapterBlockOutputAndFees(t *testing.T) {
 	}
 	insertAdapterTransaction(t, store, invalidTx)
 
-	output, fees, err := adapter.blockOutputAndFees(blockHash)
+	output, fees, err := adapter.blockOutputAndFees(context.Background(), blockHash)
 	require.NoError(t, err)
 	// output = 1000 + 2000 (valid) + 500 (collateral return, NOT 9999) = 3500
 	assert.Equal(t, "3500", output)
@@ -779,7 +779,7 @@ func TestNodeAdapterBlockOutputAndFeesEmpty(t *testing.T) {
 
 	adapter, _, _ := newDBBackedAdapter(t)
 
-	output, fees, err := adapter.blockOutputAndFees(fill32(0xcd))
+	output, fees, err := adapter.blockOutputAndFees(context.Background(), fill32(0xcd))
 	require.NoError(t, err)
 	assert.Equal(t, "0", output)
 	assert.Equal(t, "0", fees)
@@ -819,7 +819,7 @@ func TestNodeAdapterBlockOutputAndFeesNoOverflow(t *testing.T) {
 		big.NewInt(2),
 	).String()
 
-	output, fees, err := adapter.blockOutputAndFees(blockHash)
+	output, fees, err := adapter.blockOutputAndFees(context.Background(), blockHash)
 	require.NoError(t, err)
 	assert.Equal(t, want, output)
 	assert.Equal(t, want, fees)
@@ -955,8 +955,9 @@ func TestAddressTransactionsApplyResolvedBoundsToCountAndPage(t *testing.T) {
 		storePointerOutputCbor(t, db, block.txHash, 0, addr, 1_000_000)
 		_, err := raw.Exec(`
 INSERT INTO address_transaction (
-    payment_key, staking_key, credential_tag, transaction_id, slot, tx_index
-) VALUES (?, NULL, 0, ?, ?, 0)`, payment, tx.ID, block.slot)
+    payment_key, payment_script, staking_key, credential_tag,
+    transaction_id, slot, tx_index
+) VALUES (?, FALSE, NULL, 0, ?, ?, 0)`, payment, tx.ID, block.slot)
 		require.NoError(t, err)
 		if i == len(blocks)-1 {
 			require.NoError(t, db.SetTip(

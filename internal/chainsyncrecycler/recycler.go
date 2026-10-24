@@ -57,6 +57,9 @@ type LedgerSource interface {
 		reason string,
 		connId ouroboros.ConnectionId,
 	) (bool, error)
+	// NetworkIngestHeld reports whether the ledger is dropping chainsync
+	// and blockfetch ingest while an external source catches it up.
+	NetworkIngestHeld() bool
 }
 
 // ChainsyncState is the chainsync client tracking the recycler drives.
@@ -454,6 +457,16 @@ func (r *Recycler) tick(
 	if primaryChainTipSlot != st.lastPrimaryChainTipSlot {
 		st.lastPrimaryChainTipSlot = primaryChainTipSlot
 		st.lastProgressAt = now
+	}
+	// While held the local tip moves only with external batches and every
+	// peer's headers are dropped on purpose, so stalls, impatience and a
+	// plateau say nothing about a connection. The plateau clock restarts so
+	// the release does not inherit the held time; the release re-intersects
+	// every client itself.
+	if live.Ledger.NetworkIngestHeld() {
+		st.lastProgressAt = now
+		clear(st.recycleAt)
+		return
 	}
 	// During catch-up, extend stalled-client grace and recycle cooldowns to
 	// avoid churning connections while the node is making progress. The

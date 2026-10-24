@@ -28,6 +28,12 @@ import (
 	sqlite3 "modernc.org/sqlite/lib"
 )
 
+const (
+	maxSQLiteValueBytes    = 64 << 10
+	maxSQLiteResultColumns = 32
+	maxSQLiteDecodedBytes  = 1 << 20
+)
+
 // SQLiteQueryParams defines the input schema for sqlite_query.
 type SQLiteQueryParams struct {
 	Query  string `json:"query"            jsonschema:"The SQL SELECT query to execute against Dingo's SQLite database"`
@@ -46,11 +52,24 @@ type SQLiteTableSchemaParams struct {
 }
 
 // RegisterSQLiteTools registers the SQLite inspection and querying tools with the MCP server.
+// Each call creates its own concurrency budget, separate from the one
+// RegisterCardanoTools creates; NewMCPServer shares one budget across both
+// tool sets.
 func RegisterSQLiteTools(
 	server *mcp.Server,
 	db *sql.DB,
 	queryTimeout time.Duration,
 	maxRows int,
+) {
+	registerSQLiteTools(server, db, queryTimeout, maxRows, newReadLimits())
+}
+
+func registerSQLiteTools(
+	server *mcp.Server,
+	db *sql.DB,
+	queryTimeout time.Duration,
+	maxRows int,
+	limits *readLimits,
 ) {
 	if queryTimeout <= 0 {
 		queryTimeout = defaultQueryTimeout
@@ -58,6 +77,7 @@ func RegisterSQLiteTools(
 	if maxRows <= 0 {
 		maxRows = 100
 	}
+	releaseQuery := limits.release
 
 	// Tool: sqlite_query
 	mcp.AddTool(server, &mcp.Tool{
@@ -85,6 +105,10 @@ func RegisterSQLiteTools(
 				},
 			}, nil, nil
 		}
+		if err := limits.admit(); err != nil {
+			return nil, nil, err
+		}
+		defer releaseQuery()
 
 		effectiveLimit := input.Limit
 		if effectiveLimit <= 0 {
@@ -143,6 +167,7 @@ func RegisterSQLiteTools(
 		}
 
 		count := 0
+		decodedBytes := 0
 		for rows.Next() {
 			if offset > 0 {
 				offset--
@@ -163,11 +188,15 @@ func RegisterSQLiteTools(
 				}, nil, nil
 			}
 
-			rowFormatted := make([]string, len(cols))
-			for i, val := range rowValues {
-				rowFormatted[i] = FormatCell(val)
+			rowBytes, err := sqliteDecodedBytes(
+				rowValues,
+				maxSQLiteDecodedBytes-decodedBytes,
+			)
+			if err != nil {
+				return nil, nil, err
 			}
-			resultRows = append(resultRows, rowFormatted)
+			decodedBytes += rowBytes
+			resultRows = append(resultRows, boundedSQLiteRow(rowValues))
 			count++
 			if count >= effectiveLimit {
 				break
@@ -228,6 +257,10 @@ func RegisterSQLiteTools(
 				},
 			}, nil, nil
 		}
+		if err := limits.admit(); err != nil {
+			return nil, nil, err
+		}
+		defer releaseQuery()
 
 		// #nosec G202 //nolint:gosec // cleanQ is validated by ValidateReadOnlyQuery
 		explainQuery := "EXPLAIN QUERY PLAN " + cleanQ
@@ -261,11 +294,7 @@ func RegisterSQLiteTools(
 
 		for rows.Next() {
 			if err := rows.Scan(valuePtrs...); err == nil {
-				rowFormatted := make([]string, len(cols))
-				for i, val := range rowValues {
-					rowFormatted[i] = FormatCell(val)
-				}
-				planRows = append(planRows, rowFormatted)
+				planRows = append(planRows, boundedSQLiteRow(rowValues))
 			}
 		}
 
@@ -307,6 +336,10 @@ func RegisterSQLiteTools(
 				},
 			}, nil, nil
 		}
+		if err := limits.admit(); err != nil {
+			return nil, nil, err
+		}
+		defer releaseQuery()
 
 		tableName := strings.TrimSpace(input.TableName)
 		// Table name must be alphanumeric or underscore
@@ -379,11 +412,7 @@ func RegisterSQLiteTools(
 			if err := rows.Scan(valuePtrs...); err != nil {
 				return nil, nil, err
 			} else {
-				rowFormatted := make([]string, len(cols))
-				for i, val := range rowValues {
-					rowFormatted[i] = FormatCell(val)
-				}
-				colRows = append(colRows, rowFormatted)
+				colRows = append(colRows, boundedSQLiteRow(rowValues))
 			}
 		}
 
@@ -422,11 +451,7 @@ func RegisterSQLiteTools(
 				if err := idxRows.Scan(idxPtr...); err != nil {
 					return nil, nil, err
 				} else {
-					rowFormatted := make([]string, len(idxCols))
-					for i, val := range idxVal {
-						rowFormatted[i] = FormatCell(val)
-					}
-					idxData = append(idxData, rowFormatted)
+					idxData = append(idxData, boundedSQLiteRow(idxVal))
 				}
 			}
 			if err := idxRows.Err(); err != nil {
@@ -456,6 +481,45 @@ func RegisterSQLiteTools(
 	})
 }
 
+func boundedSQLiteRow(values []any) []string {
+	row := make([]string, len(values))
+	for i, value := range values {
+		text := cellText(value)
+		if len(text) > maxCellLength {
+			// Detach the prefix so the retained row cannot keep the full
+			// database value's backing storage alive.
+			prefix := strings.Clone(truncateUTF8(text, maxCellLength))
+			text = prefix + "..."
+		}
+		row[i] = text
+	}
+	return row
+}
+
+func sqliteDecodedBytes(values []any, remaining int) (int, error) {
+	total := 0
+	for _, value := range values {
+		var size int
+		switch value := value.(type) {
+		case nil:
+		case string:
+			size = len(value)
+		case []byte:
+			size = len(value)
+		default:
+			size = len(fmt.Sprint(value))
+		}
+		if remaining < total || size > remaining-total {
+			return 0, fmt.Errorf(
+				"SQLite query results exceed %d decoded bytes",
+				maxSQLiteDecodedBytes,
+			)
+		}
+		total += size
+	}
+	return total, nil
+}
+
 // boundedSQLiteConn applies limits before SQLite materializes arbitrary values.
 // Settings are restored before an injected pool's connection can be reused.
 func boundedSQLiteConn(
@@ -472,9 +536,9 @@ func boundedSQLiteConn(
 		return nil, nil, err
 	}
 	limits := []struct{ id, value, previous int }{
-		{sqlite3.SQLITE_LIMIT_LENGTH, 1 << 20, 0},
+		{sqlite3.SQLITE_LIMIT_LENGTH, maxSQLiteValueBytes, 0},
 		{sqlite3.SQLITE_LIMIT_SQL_LENGTH, maxSQLiteQueryLength, 0},
-		{sqlite3.SQLITE_LIMIT_COLUMN, 128, 0},
+		{sqlite3.SQLITE_LIMIT_COLUMN, maxSQLiteResultColumns, 0},
 	}
 	applied := 0
 	release := func() { //nolint:contextcheck // Cleanup must restore connection state after qCtx cancellation.

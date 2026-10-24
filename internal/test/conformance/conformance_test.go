@@ -19,6 +19,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/ouroboros-mock/conformance"
 	"github.com/stretchr/testify/require"
 )
@@ -41,6 +42,19 @@ const expectedBlueprintVectorCount = 2575
 // tests_cc29688c_test.go for why the replay is memoized per backend and what the
 // previous separate statistics pass cost.
 func TestRulesConformanceVectors(t *testing.T) {
+	// The three backend replays run in parallel so the package takes the
+	// longest replay rather than their sum. Each owns its store: SQLite a
+	// temporary directory, Postgres its process schema and MySQL its process
+	// database, each with its own blob directory. Every other test that opens
+	// the Postgres or MySQL process store is sequential, so it has finished
+	// before these resume.
+	t.Parallel()
+	testutil.SkipUnderRace(
+		t,
+		"a single-goroutine replay of the corpus through the SQLite state "+
+			"manager; CI's check and gate (services) jobs replay it "+
+			"un-instrumented",
+	)
 	results := sqliteCorpusResults(t)
 	reportCorpus(t, "sqlite", results)
 	require.Equal(t, expectedBlueprintVectorCount, len(results))

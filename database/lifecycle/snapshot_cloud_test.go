@@ -16,6 +16,8 @@ package lifecycle_test
 
 import (
 	"context"
+	"errors"
+	"net/url"
 	"os"
 	"path/filepath"
 	"testing"
@@ -93,7 +95,7 @@ func TestMirrorToCloudRejectsIncompleteLegacySnapshot(t *testing.T) {
 	require.NoDirExists(t, filepath.Join(backingDir, "prefix", "unsigned"))
 }
 
-func TestMirrorToCloudAuthenticatesLegacySnapshot(t *testing.T) {
+func TestMirrorToCloudRejectsLegacySnapshot(t *testing.T) {
 	t.Parallel()
 
 	backingDir := t.TempDir()
@@ -118,21 +120,8 @@ func TestMirrorToCloudAuthenticatesLegacySnapshot(t *testing.T) {
 		"faketest://bucket/prefix",
 		lifecycle.WithManifestKey(testTrustKey),
 	)
-	require.NoError(t, err)
-
-	local, err := lifecycle.ReadManifest(
-		dir, lifecycle.WithManifestKey(testTrustKey),
-	)
-	require.NoError(t, err)
-	require.NotEmpty(t, local.BlobSHA256)
-	require.NotEmpty(t, local.MetadataSHA256)
-	require.NoError(t, local.Authenticate(lifecycle.WithManifestKey(testTrustKey)))
-	cloud, err := lifecycle.ReadManifest(
-		filepath.Join(backingDir, "prefix", "epoch-legacy"),
-		lifecycle.WithManifestKey(testTrustKey),
-	)
-	require.NoError(t, err)
-	require.Equal(t, local.Authentication, cloud.Authentication)
+	require.ErrorIs(t, err, lifecycle.ErrManifestUnauthenticated)
+	require.NoDirExists(t, filepath.Join(backingDir, "prefix", "epoch-legacy"))
 }
 
 // TestIsCloudMirroredToDetectsChangedDestination guards the gap a bare
@@ -150,13 +139,20 @@ func TestIsCloudMirroredToDetectsChangedDestination(t *testing.T) {
 	backingDir := t.TempDir()
 	setFakeCloudBackingDir(t, backingDir)
 	const cloudDest = "faketest://user:secret@bucket/prefix?token=private#fragment"
-	for _, name := range []string{
-		lifecycle.BlobBackupFileName,
-		lifecycle.MetadataBackupFileName,
-	} {
-		require.NoError(t, os.WriteFile(filepath.Join(dir, name), nil, 0o600))
-	}
-	require.NoError(t, lifecycle.WriteManifest(dir, lifecycle.Manifest{}))
+	blob := []byte("blob")
+	metadata := []byte("metadata")
+	require.NoError(t, os.WriteFile(
+		filepath.Join(dir, lifecycle.BlobBackupFileName), blob, 0o600,
+	))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(dir, lifecycle.MetadataBackupFileName), metadata, 0o600,
+	))
+	require.NoError(t, lifecycle.WriteManifest(dir, lifecycle.Manifest{
+		BlobBytes:      int64(len(blob)),
+		MetadataBytes:  int64(len(metadata)),
+		BlobSHA256:     sha256Hex(blob),
+		MetadataSHA256: sha256Hex(metadata),
+	}, lifecycle.WithManifestKey(testTrustKey)))
 
 	require.False(
 		t, lifecycle.IsCloudMirroredTo(dir, cloudDest),
@@ -198,4 +194,97 @@ func TestIsCloudMirroredToDetectsChangedDestination(t *testing.T) {
 	))
 	require.False(t, lifecycle.IsCloudMirroredTo(dir, cloudDest),
 		"legacy raw URI markers force a safe retry")
+}
+
+// swappingUploadDirDestination implements only CloudDestination.UploadDir.
+// Before reading localDir it replaces the source snapshot's blob payload,
+// standing in for a writer that races the upload after verification.
+type swappingUploadDirDestination struct {
+	sourceDir string
+	uploaded  map[string][]byte
+}
+
+func (d *swappingUploadDirDestination) UploadDir(
+	_ context.Context,
+	localDir string,
+) error {
+	if err := os.WriteFile(
+		filepath.Join(d.sourceDir, lifecycle.BlobBackupFileName),
+		[]byte("replaced after verification"),
+		0o600,
+	); err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(localDir)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		data, err := os.ReadFile(filepath.Join(localDir, entry.Name()))
+		if err != nil {
+			return err
+		}
+		d.uploaded[entry.Name()] = data
+	}
+	return nil
+}
+
+func (*swappingUploadDirDestination) DownloadFiles(
+	context.Context,
+	string,
+	[]lifecycle.DownloadFile,
+) error {
+	return errors.New("not implemented")
+}
+
+// TestMirrorToCloudUploadDirReceivesVerifiedBytes covers a destination that
+// only implements UploadDir: replacing a payload in the snapshot directory
+// after verification must not change what that destination uploads.
+func TestMirrorToCloudUploadDirReceivesVerifiedBytes(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
+	dir := filepath.Join(t.TempDir(), "epoch-swap")
+	_, err := lifecycle.Snapshot(
+		context.Background(), db, dir,
+		lifecycle.TriggerEpochBoundary, "test", "badger", "sqlite",
+		lifecycle.WithManifestKey(testTrustKey),
+	)
+	require.NoError(t, err)
+	wantBlob, err := os.ReadFile(
+		filepath.Join(dir, lifecycle.BlobBackupFileName),
+	)
+	require.NoError(t, err)
+	wantMetadata, err := os.ReadFile(
+		filepath.Join(dir, lifecycle.MetadataBackupFileName),
+	)
+	require.NoError(t, err)
+	wantManifest, err := os.ReadFile(
+		filepath.Join(dir, lifecycle.ManifestFileName),
+	)
+	require.NoError(t, err)
+
+	dest := &swappingUploadDirDestination{
+		sourceDir: dir,
+		uploaded:  map[string][]byte{},
+	}
+	registry := lifecycle.NewDestinationRegistry()
+	registry.Register(
+		"swaptest",
+		func(*url.URL) (lifecycle.CloudDestination, error) { return dest, nil },
+	)
+	require.NoError(t, lifecycle.MirrorToCloud(
+		context.Background(), registry, dir, "swaptest://bucket/prefix",
+		lifecycle.WithManifestKey(testTrustKey),
+	))
+
+	require.Equal(t, map[string][]byte{
+		lifecycle.ManifestFileName:       wantManifest,
+		lifecycle.BlobBackupFileName:     wantBlob,
+		lifecycle.MetadataBackupFileName: wantMetadata,
+	}, dest.uploaded)
+	siblings, err := os.ReadDir(filepath.Dir(dir))
+	require.NoError(t, err)
+	require.Len(t, siblings, 1, "staging directory must be removed")
 }

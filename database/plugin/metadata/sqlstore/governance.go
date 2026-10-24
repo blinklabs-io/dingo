@@ -309,7 +309,7 @@ func (s *Store) SetGovernanceProposal(
 		txn,
 		func(db queryer, ctx context.Context) error {
 			var previousEpoch, previousSlot sql.NullInt64
-			previousErr := db.QueryRowContext(ctx, `
+			previousErr := db.QueryRowContext(ctx, `-- name: GetGovernanceProposalRatification :one
 SELECT ratified_epoch, ratified_slot
 FROM governance_proposal
 WHERE tx_hash = ? AND action_index = ?`,
@@ -321,7 +321,7 @@ WHERE tx_hash = ? AND action_index = ?`,
 			}
 
 			var id uint
-			err := db.QueryRowContext(ctx, `
+			err := db.QueryRowContext(ctx, `-- name: UpsertGovernanceProposal :one
 INSERT INTO governance_proposal (
     tx_hash, action_index, action_type, proposed_epoch, expires_epoch,
     parent_tx_hash, parent_action_idx, enacted_epoch, enacted_slot,
@@ -392,7 +392,7 @@ RETURNING id`,
 			// governance_proposal_drop's migration comment for why), rather
 			// than as columns on governance_proposal itself.
 			if proposal.DroppedEpoch != nil {
-				if _, err := db.ExecContext(ctx, `
+				if _, err := db.ExecContext(ctx, `-- name: InsertGovernanceProposalDrop :exec
 INSERT INTO governance_proposal_drop (
     proposal_id, dropped_epoch, dropped_slot
 ) VALUES (?, ?, ?)
@@ -412,7 +412,7 @@ ON CONFLICT (proposal_id) DO UPDATE SET
 			// A nil TxIndex means the caller did not supply the position, so
 			// an existing row is left in place rather than cleared.
 			if proposal.TxIndex != nil {
-				if _, err := db.ExecContext(ctx, `
+				if _, err := db.ExecContext(ctx, `-- name: InsertGovernanceProposalOrder :exec
 INSERT INTO governance_proposal_order (proposal_id, tx_index)
 VALUES (?, ?)
 ON CONFLICT (proposal_id) DO UPDATE SET
@@ -435,7 +435,7 @@ ON CONFLICT (proposal_id) DO UPDATE SET
 				uint64(previousSlot.Int64) == *proposal.RatifiedSlot {
 				return nil
 			}
-			_, err = db.ExecContext(ctx, `
+			_, err = db.ExecContext(ctx, `-- name: InsertGovernanceProposalRatificationHistory :exec
 INSERT INTO governance_proposal_ratification_history (
     proposal_id, transition_slot, ratified_epoch, ratified_slot
 ) VALUES (?, ?, ?, ?)`,
@@ -604,13 +604,13 @@ WHERE v.proposal_id = ? AND v.added_slot <= ?
 	return ret, rows.Err()
 }
 
-const governanceVotePreviousQuery = `
+const governanceVotePreviousQuery = `-- name: GetGovernanceVotePrevious :one
 SELECT vote, anchor_url, anchor_hash
 FROM governance_vote
 WHERE proposal_id = ? AND voter_type = ? AND voter_credential_tag = ?
     AND voter_credential = ?`
 
-const governanceVoteUpsertQuery = `
+const governanceVoteUpsertQuery = `-- name: UpsertGovernanceVote :one
 INSERT INTO governance_vote (
     proposal_id, voter_type, voter_credential_tag, voter_credential, vote,
     anchor_url, anchor_hash, added_slot, vote_updated_slot, deleted_slot
@@ -625,10 +625,15 @@ ON CONFLICT (
     deleted_slot = excluded.deleted_slot
 RETURNING id`
 
-const governanceVoteHistoryInsertQuery = `
+const governanceVoteHistoryInsertQuery = `-- name: InsertGovernanceVoteHistory :exec
 INSERT INTO governance_vote_history (
-    vote_id, transition_slot, vote, anchor_url, anchor_hash
-) VALUES (?, ?, ?, ?, ?)`
+    vote_id, transition_slot, vote, anchor_url, anchor_hash, tx_hash,
+    cert_index
+) VALUES (?, ?, ?, ?, ?, ?, ?)`
+
+const governanceVoteCastExistsQuery = `-- name: GovernanceVoteCastExists :one
+SELECT COUNT(*) FROM governance_vote_history
+WHERE vote_id = ? AND tx_hash = ? AND cert_index = ?`
 
 func (s *Store) SetGovernanceVote(
 	vote *models.GovernanceVote,
@@ -677,18 +682,40 @@ func (s *Store) SetGovernanceVote(
 			}
 			vote.ID = id
 
-			// Record a history entry whenever this call changes the
-			// effective vote (including the first cast, where no previous
-			// row exists), so a later rollback that lands between two
-			// replacements can restore the value that was actually current
-			// at the target slot instead of losing it.
-			unchanged := previousErr == nil &&
-				previousVote.Valid &&
-				previousVote.Byte == vote.Vote &&
-				previousAnchorURL.String == vote.AnchorURL &&
-				bytes.Equal(previousAnchorHash, vote.AnchorHash)
-			if unchanged {
-				return nil
+			// History keeps the value current at every slot, so a rollback
+			// landing between two replacements restores the right one. A
+			// located cast is recorded even when it repeats the value,
+			// because the API lists every cast; its position makes a replay
+			// of the same block a no-op. A write with no position records
+			// only a change of value.
+			var castTxHash []byte
+			var castCertIndex any
+			if len(vote.CastTxHash) > 0 {
+				var existing int
+				if err := s.queryRowCached(
+					ctx,
+					db,
+					governanceVoteCastExistsQuery,
+					id,
+					vote.CastTxHash,
+					vote.CastCertIndex,
+				).Scan(&existing); err != nil {
+					return err
+				}
+				if existing > 0 {
+					return nil
+				}
+				castTxHash = vote.CastTxHash
+				castCertIndex = vote.CastCertIndex
+			} else {
+				unchanged := previousErr == nil &&
+					previousVote.Valid &&
+					previousVote.Byte == vote.Vote &&
+					previousAnchorURL.String == vote.AnchorURL &&
+					bytes.Equal(previousAnchorHash, vote.AnchorHash)
+				if unchanged {
+					return nil
+				}
 			}
 			transitionSlot := vote.AddedSlot
 			if vote.VoteUpdatedSlot != nil {
@@ -703,6 +730,8 @@ func (s *Store) SetGovernanceVote(
 				vote.Vote,
 				vote.AnchorURL,
 				vote.AnchorHash,
+				castTxHash,
+				castCertIndex,
 			)
 			return err
 		},
@@ -728,7 +757,7 @@ func (s *Store) DeleteGovernanceVotesForDrep(
 			if err != nil {
 				return err
 			}
-			result, err := db.ExecContext(ctx, `
+			result, err := db.ExecContext(ctx, `-- name: DeleteGovernanceVotesForDrep :execrows
 UPDATE governance_vote
 SET deleted_slot = ?
 WHERE voter_type = ? AND voter_credential_tag = ?

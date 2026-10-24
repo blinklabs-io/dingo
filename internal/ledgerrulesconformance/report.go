@@ -23,10 +23,12 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/blinklabs-io/dingo/internal/test/conformance"
@@ -40,15 +42,19 @@ import (
 	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
 )
 
-const schemaVersion = "1"
+const (
+	schemaVersion                     = "1"
+	maxConcurrentLedgerFixtureWorkers = 4
+)
 
 type Report struct {
-	SchemaVersion string        `json:"schema_version"`
-	Scenario      string        `json:"scenario"`
-	GeneratedAt   string        `json:"generated_at"`
-	Corpus        string        `json:"corpus"`
-	Totals        Totals        `json:"totals"`
-	Scenarios     []CaseOutcome `json:"scenarios"`
+	SchemaVersion  string            `json:"version"`
+	Scenario       string            `json:"scenario"`
+	GeneratedAt    string            `json:"generated_at"`
+	Implementation map[string]string `json:"implementation"`
+	Corpus         string            `json:"corpus"`
+	Totals         Totals            `json:"totals"`
+	Scenarios      []CaseOutcome     `json:"scenarios"`
 }
 
 type Totals struct {
@@ -197,10 +203,12 @@ type protocolParametersDoc struct {
 	MaxExecutionUnitsPerTransaction exUnitsDoc `json:"max_execution_units_per_transaction"`
 	MaxExecutionUnitsPerBlock       exUnitsDoc `json:"max_execution_units_per_block"`
 	MaxValueSize                    uint       `json:"max_value_size"`
-	MaxReferenceScriptsSize         *uint64    `json:"max_reference_scripts_size"`
-	CollateralPercentage            uint       `json:"collateral_percentage"`
-	MaxCollateralInputs             uint       `json:"max_collateral_inputs"`
-	StakePoolVotingThresholds       struct {
+	// Conway fixes the per-transaction reference-script limit, so Dingo parses
+	// but does not apply this value.
+	MaxReferenceScriptsSize   *uint64 `json:"max_reference_scripts_size"`
+	CollateralPercentage      uint    `json:"collateral_percentage"`
+	MaxCollateralInputs       uint    `json:"max_collateral_inputs"`
+	StakePoolVotingThresholds struct {
 		MotionNoConfidence      ratioDoc `json:"motion_no_confidence"`
 		CommitteeNormal         ratioDoc `json:"committee_normal"`
 		CommitteeNoConfidence   ratioDoc `json:"committee_no_confidence"`
@@ -255,47 +263,95 @@ func GenerateReport(
 	sort.Strings(files)
 
 	report := Report{
-		SchemaVersion: schemaVersion,
-		Scenario:      "ledger-rules",
-		GeneratedAt:   generatedAt.UTC().Format(time.RFC3339),
-		Corpus:        "pragma-org/node-diversity-conformance/ledger-rules-v2",
-		Scenarios:     make([]CaseOutcome, 0, len(files)),
+		SchemaVersion:  schemaVersion,
+		Scenario:       "ledger-rules",
+		GeneratedAt:    generatedAt.UTC().Format(time.RFC3339),
+		Implementation: map[string]string{"name": "dingo"},
+		Corpus:         "pragma-org/node-diversity-conformance/ledger-rules-v2",
+		Scenarios:      make([]CaseOutcome, 0, len(files)),
 	}
 	failures := make([]Failure, 0)
-	for _, path := range files {
-		manager, err := conformance.NewDingoStateManager()
-		if err != nil {
-			return Report{}, failures, fmt.Errorf(
-				"create Dingo ledger state manager: %w",
-				err,
-			)
+	type indexedResult struct {
+		index   int
+		outcome CaseOutcome
+		failure *Failure
+		err     error
+	}
+	workerCount := min(
+		maxConcurrentLedgerFixtureWorkers,
+		runtime.GOMAXPROCS(0),
+		len(files),
+	)
+	jobs := make(chan int, len(files))
+	results := make(chan indexedResult, len(files))
+	for index := range files {
+		jobs <- index
+	}
+	close(jobs)
+
+	var workers sync.WaitGroup
+	workers.Add(workerCount)
+	for range workerCount {
+		go func() {
+			defer workers.Done()
+			for index := range jobs {
+				path := files[index]
+				outcome, failure, err := evaluateFixture(root, path)
+				results <- indexedResult{
+					index:   index,
+					outcome: outcome,
+					failure: failure,
+					err:     err,
+				}
+			}
+		}()
+	}
+	workers.Wait()
+	close(results)
+
+	orderedResults := make([]indexedResult, len(files))
+	for result := range results {
+		orderedResults[result.index] = result
+	}
+	for _, result := range orderedResults {
+		if result.err != nil {
+			return Report{}, failures, result.err
 		}
-		outcome, failure, err := runFixture(root, path, manager)
-		closeErr := manager.Close()
-		if err != nil {
-			return Report{}, failures, fmt.Errorf(
-				"run fixture %s: %w",
-				path,
-				err,
-			)
-		}
-		if closeErr != nil {
-			return Report{}, failures, fmt.Errorf(
-				"close ledger state manager after %s: %w",
-				path,
-				closeErr,
-			)
-		}
-		report.Scenarios = append(report.Scenarios, outcome)
+		report.Scenarios = append(report.Scenarios, result.outcome)
 		report.Totals.Total++
-		if failure == nil {
+		if result.failure == nil {
 			report.Totals.Passed++
 		} else {
 			report.Totals.Failed++
-			failures = append(failures, *failure)
+			failures = append(failures, *result.failure)
 		}
 	}
 	return report, failures, nil
+}
+
+func evaluateFixture(
+	root, path string,
+) (CaseOutcome, *Failure, error) {
+	manager, err := conformance.NewDingoStateManager()
+	if err != nil {
+		return CaseOutcome{}, nil, fmt.Errorf(
+			"create Dingo ledger state manager: %w",
+			err,
+		)
+	}
+	outcome, failure, err := runFixture(root, path, manager)
+	closeErr := manager.Close()
+	if err != nil {
+		return CaseOutcome{}, nil, fmt.Errorf("run fixture %s: %w", path, err)
+	}
+	if closeErr != nil {
+		return CaseOutcome{}, nil, fmt.Errorf(
+			"close ledger state manager after %s: %w",
+			path,
+			closeErr,
+		)
+	}
+	return outcome, failure, nil
 }
 
 // WriteReport writes the ledger-rules report as indented JSON.
@@ -355,7 +411,7 @@ func runFixture(
 			)
 		}
 		if transactionFailsToDecode(transactionCBOR) {
-			return CaseOutcome{ID: id, Result: "pass"}, nil, nil
+			return CaseOutcome{ID: id, Result: "DecodingFailure"}, nil, nil
 		}
 		return mismatch(id, expected, "transaction decoded successfully")
 	}
@@ -423,7 +479,7 @@ func runFixture(
 		return mismatch(id, expected, "transaction accepted")
 	}
 	if predicateMatches(validationErr, expected) {
-		return CaseOutcome{ID: id, Result: "pass"}, nil, nil
+		return CaseOutcome{ID: id, Result: expected.Predicate}, nil, nil
 	}
 	return mismatch(id, expected, "rejected: "+validationErr.Error())
 }
@@ -433,11 +489,21 @@ func transactionFailsToDecode(transactionCBOR []byte) bool {
 	return err != nil
 }
 
+// unmappedLedgerResult is reported for observations that map to no NDC
+// predicate, so the scenario fails without discarding the rest of the report.
+const unmappedLedgerResult = "Unknown"
+
 func mismatch(
 	id string,
 	expected expectedDoc,
 	observed string,
 ) (CaseOutcome, *Failure, error) {
+	result, ok := observedLedgerResult(observed)
+	if !ok {
+		// An unrecognised rejection must not abort the whole report; emit a
+		// result that no NDC expectation can equal and keep the Failure.
+		result = unmappedLedgerResult
+	}
 	expectedText := "Pass"
 	if expected.DecodingFailure {
 		expectedText = "decoding_failure"
@@ -447,11 +513,55 @@ func mismatch(
 			expectedText += ":" + expected.Description
 		}
 	}
-	return CaseOutcome{ID: id, Result: "fail"}, &Failure{
+	return CaseOutcome{ID: id, Result: result}, &Failure{
 		ID:       id,
 		Expected: expectedText,
 		Observed: observed,
 	}, nil
+}
+
+// observedLedgerResult emits the ledger outcome that NDC compares with its
+// fixture expectation.
+func observedLedgerResult(observed string) (string, bool) {
+	switch {
+	case observed == "transaction accepted" || observed == "transaction decoded successfully":
+		return "pass", true
+	case strings.HasPrefix(observed, "transaction decoding failure:"):
+		return "DecodingFailure", true
+	case strings.HasPrefix(observed, "rejected: "):
+		return ledgerPredicateFromError(strings.TrimPrefix(observed, "rejected: "))
+	default:
+		return "", false
+	}
+}
+
+func ledgerPredicateFromError(errText string) (string, bool) {
+	text := strings.ToLower(errText)
+	predicates := make([]string, 0, len(ledgerPredicateErrorPatterns))
+	for predicate := range ledgerPredicateErrorPatterns {
+		predicates = append(predicates, predicate)
+	}
+	sort.Strings(predicates)
+
+	var result string
+	bestPatternLength := 0
+	for _, predicate := range predicates {
+		reportResult := predicate
+		if separator := strings.IndexByte(reportResult, ':'); separator >= 0 {
+			reportResult = reportResult[:separator]
+		}
+		if listed, ok := ndcPredicateAliases[reportResult]; ok {
+			reportResult = listed
+		}
+		for _, pattern := range ledgerPredicateErrorPatterns[predicate] {
+			pattern = strings.ToLower(pattern)
+			if len(pattern) > bestPatternLength && strings.Contains(text, pattern) {
+				result = reportResult
+				bestPatternLength = len(pattern)
+			}
+		}
+	}
+	return result, result != ""
 }
 
 func parseExpected(raw json.RawMessage) (expectedDoc, error) {
@@ -487,12 +597,29 @@ func predicateMatches(err error, expected expectedDoc) bool {
 	if !ok {
 		patterns = []string{predicate}
 	}
+	for alias, listed := range ndcPredicateAliases {
+		if listed == predicate {
+			patterns = append(slices.Clone(patterns), ledgerPredicateErrorPatterns[alias]...)
+		}
+	}
 	for _, pattern := range patterns {
 		if strings.Contains(text, strings.ToLower(pattern)) {
 			return true
 		}
 	}
 	return false
+}
+
+// ndcPredicateAliases names the listed predicate that reports a Dingo rule
+// which the scenario's closed predicate list lacks. The scenario asks each
+// implementation to map its own failures onto that list. Only the report is
+// affected: the validator still raises the distinct rule.
+//
+// UnelectedCommitteeVoters, raised for a committee hot credential whose cold
+// credential holds no seat, is reported as VotersDoNotExist, the listed
+// predicate for a vote cast by a voter that cannot vote.
+var ndcPredicateAliases = map[string]string{
+	"UnelectedCommitteeVoters": "VotersDoNotExist",
 }
 
 var ledgerPredicateErrorPatterns = map[string][]string{
@@ -627,7 +754,6 @@ var ledgerPredicateErrorPatterns = map[string][]string{
 	"ValueNotConservedUTxO": {"value not conserved"},
 	"VotersDoNotExist": {
 		"vote cast by unknown voter",
-		"committee voter is not elected",
 	},
 	"UnelectedCommitteeVoters": {
 		"committee voter is not elected",

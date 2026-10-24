@@ -336,14 +336,24 @@ func newPprofDebugServer(cfg *config.Config) *http.Server {
 }
 
 // nodeHealthChecks is the node's contribution to the probes beyond the tip
-// gap: a stopped slot clock fails liveness, and an unavailable database or a
-// block producer that cannot forge holds readiness.
+// gap: a stopped slot clock fails liveness, and a startup Mithril snapshot
+// restore, an unavailable database or a block producer that cannot forge
+// holds readiness. The restore check is a startup check, reported even while
+// the tip gap is unknown, so a node held off-live by a restore says so
+// rather than that it is starting.
 func nodeHealthChecks(d *dingo.Node) []health.Check {
 	return []health.Check{
 		{
 			Liveness: true,
 			Reason:   "event_loop_unresponsive",
 			Fn:       d.EventLoopResponsive,
+		},
+		{
+			// Before the tip gap: the restore runs before the ledger
+			// that reports the gap exists.
+			Startup: true,
+			Reason:  "mithril_snapshot_restore",
+			Fn:      d.MithrilSnapshotRestoreReady,
 		},
 		{Reason: "database_unavailable", Fn: d.DatabaseReady},
 		{Reason: "block_producer_unavailable", Fn: d.BlockProducerReady},
@@ -392,7 +402,11 @@ func NewHealthServer(
 			cfg.BindAddr,
 			strconv.FormatUint(uint64(cfg.HealthPort), 10),
 		),
-		Handler:           health.NewMux(logger, tipGap, readyTipGapSlots, checks...),
+		Handler: health.NewMux(
+			logger,
+			tipGap,
+			readyTipGapSlots,
+			checks...),
 		ReadHeaderTimeout: 10 * time.Second,
 		WriteTimeout:      10 * time.Second,
 		IdleTimeout:       60 * time.Second,
@@ -407,7 +421,15 @@ func logStartupConfig(logger *slog.Logger, cfg *config.Config) {
 	logger.Debug("config", "component", "node", "config", cfg)
 }
 
-func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger) error {
+// Run builds and runs a node from cfg until ctx ends. opts are applied after
+// the configuration cfg maps to, so the caller can supply the dependencies
+// this package cannot import, such as dingo.WithMithrilCatchUp.
+func Run(
+	ctx context.Context,
+	cfg *config.Config,
+	logger *slog.Logger,
+	opts ...dingo.ConfigOptionFunc,
+) error {
 	cfg.ApplyRunModeOverrides(cfg.RunMode)
 	if cfg.RunMode.IsDevMode() {
 		logger.Info("dev mode: forcing API storage and block production")
@@ -574,19 +596,21 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger) error {
 
 	// Construction is synchronous and its callees have no context contract;
 	// ctx governs the long-running node lifecycle below.
-	d, err := dingo.New( //nolint:contextcheck
-		buildDingoConfig(
-			cfg,
-			logger,
-			nodeCfg,
-			listeners,
-			peerSharing,
-			storageMode,
-			shutdownTimeout,
-			chainsyncStallTimeout,
-			chainsyncStrategy,
-		),
+	dingoCfg := buildDingoConfig(
+		cfg,
+		logger,
+		nodeCfg,
+		listeners,
+		peerSharing,
+		storageMode,
+		shutdownTimeout,
+		chainsyncStallTimeout,
+		chainsyncStrategy,
 	)
+	for _, opt := range opts {
+		opt(&dingoCfg)
+	}
+	d, err := dingo.New(dingoCfg) //nolint:contextcheck
 	if err != nil {
 		return err
 	}
@@ -661,7 +685,12 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger) error {
 		if listener := bindAuxiliaryListener(
 			"health", healthServer, logger,
 		); listener != nil {
-			go serveAuxiliaryListenerOn("health", healthServer, listener, logger)
+			go serveAuxiliaryListenerOn(
+				"health",
+				healthServer,
+				listener,
+				logger,
+			)
 		}
 	}
 	// A remote stop or restart ends the run exactly like a signal does;
@@ -794,6 +823,10 @@ func buildDingoConfig(
 			cfg.Plugins.Storage.Metadata,
 		),
 		dingo.WithPluginSelection(
+			plugin.CapabilityConsensus,
+			cfg.Plugins.Consensus,
+		),
+		dingo.WithPluginSelection(
 			plugin.CapabilityMempool,
 			cfg.Plugins.Mempool,
 		),
@@ -837,6 +870,12 @@ func buildDingoConfig(
 		dingo.WithBarkArchiveMaxConcurrentFetches(
 			cfg.BarkArchiveMaxConcurrentFetches,
 		),
+		dingo.WithBarkArchiveLookupsPerSecond(
+			cfg.BarkArchiveLookupsPerSecond,
+		),
+		dingo.WithBarkArchiveCallerLookupsPerSecond(
+			cfg.BarkArchiveCallerLookupsPerSecond,
+		),
 		dingo.WithBarkOperatorCertificateFingerprints(
 			cfg.BarkOperatorCertificateFingerprints,
 		),
@@ -844,6 +883,7 @@ func buildDingoConfig(
 		dingo.WithBarkLifecycleOperatorCertificateFingerprints(
 			cfg.BarkLifecycleOperatorCertificateFingerprints,
 		),
+		dingo.WithMithrilConfig(cfg.Mithril),
 		dingo.WithHistoryExpiry(dingo.HistoryExpiryConfig{
 			Enabled:   cfg.HistoryExpiry.Enabled,
 			Frequency: cfg.HistoryExpiry.Frequency,
@@ -934,7 +974,9 @@ func buildDingoConfig(
 		dingo.WithRunMode(string(cfg.RunMode)),
 		dingo.WithStartEra(string(cfg.StartEra)),
 		dingo.WithShutdownTimeout(shutdownTimeout),
-		dingo.WithLocalStateQueryViewMaxLifetime(localStateQueryViewMaxLifetime),
+		dingo.WithLocalStateQueryViewMaxLifetime(
+			localStateQueryViewMaxLifetime,
+		),
 		// Enable metrics with default prometheus registry
 		dingo.WithPrometheusRegistry(prometheus.DefaultRegisterer),
 		dingo.WithTracing(cfg.Tracing),
@@ -989,7 +1031,9 @@ func buildDingoConfig(
 		dingo.WithMaxNtCConns(cfg.MaxNtCConns),
 		dingo.WithMaxNtCConnectionsPerIP(cfg.MaxNtCConnectionsPerIP),
 		dingo.WithMaxTrustedLocalNtCConns(cfg.MaxTrustedLocalNtCConns),
-		dingo.WithSkipRewardLiveStakeBackfillCheck(cfg.SkipRewardLiveStakeBackfillCheck),
+		dingo.WithSkipRewardLiveStakeBackfillCheck(
+			cfg.SkipRewardLiveStakeBackfillCheck,
+		),
 		dingo.WithCacheConfig(
 			cfg.Cache.BlockLRUEntries,
 			cfg.Cache.HotUtxoEntries,
@@ -1065,6 +1109,7 @@ func buildDingoConfig(
 			cfg.BlockPipelineValidateEnabled,
 		),
 		dingo.WithLedgerPrefetchAheadEnabled(cfg.LedgerPrefetchAheadEnabled),
+		dingo.WithLedgerValidateAheadEnabled(cfg.LedgerValidateAheadEnabled),
 		dingo.WithLedgerApplyRowBatchingEnabled(
 			cfg.LedgerApplyRowBatchingEnabled,
 		),

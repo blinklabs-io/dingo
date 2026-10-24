@@ -39,6 +39,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/blinklabs-io/dingo/internal/httpuseragent"
 	"github.com/klauspost/compress/zstd"
 )
 
@@ -86,7 +87,7 @@ func withProgressContext(
 const (
 	// DefaultMaxDownloadBytes bounds each compressed archive, including any
 	// resumed prefix, when the caller sets no limit. v2 objects have tighter
-	// built-in limits; this one covers the v1 full-database snapshot.
+	// built-in limits.
 	DefaultMaxDownloadBytes int64 = 512 << 30
 
 	defaultDownloadIdleTimeout = 2 * time.Minute
@@ -809,6 +810,7 @@ func downloadSnapshotOnce(
 	if err != nil {
 		return "", fmt.Errorf("creating download request: %w", err)
 	}
+	httpuseragent.Set(req)
 
 	// Request resume if we have a partial download
 	if existingSize > 0 {
@@ -925,6 +927,7 @@ func downloadSnapshotOnce(
 					err,
 				)
 			}
+			httpuseragent.Set(req)
 			headerTimer = cfg.newIdleWatchdog(func() {
 				cancelDownload(downloadIdleTimeoutCause(idleTimeout))
 			})
@@ -1197,12 +1200,12 @@ const (
 	// maxExtractFileSize is the maximum allowed size for a single
 	// extracted file (8 GiB). Must be large enough for mainnet
 	// ancillary ledger state files (UTxO tables can be multi-GB).
-	maxExtractFileSize = 8 << 30
+	maxExtractFileSize int64 = 8 << 30
 
 	// maxTotalExtractSize is the maximum cumulative bytes that may
 	// be extracted from a single archive (1 TiB). Prevents
 	// runaway decompression from filling the disk.
-	maxTotalExtractSize = 1 << 40
+	maxTotalExtractSize int64 = 1 << 40
 )
 
 // expansionReader fails once the stream has produced more bytes than the
@@ -1304,7 +1307,15 @@ func extractArchiveFile(
 
 	// Bound decoder allocations explicitly. The library default is a protocol
 	// maximum rather than an application resource policy, and may change when
-	// the dependency is upgraded.
+	// the dependency is upgraded. The reservation outlives the reader's Close
+	// so the memory is accounted until the decoder has been released.
+	release, err := extractCfg.decoders.reserve(
+		ctx, extractCfg.maxZstdWindowSize, extractCfg.maxZstdMemory,
+	)
+	if err != nil {
+		return "", err
+	}
+	defer release()
 	zr, err := zstd.NewReader(
 		countingFile,
 		zstd.WithDecoderMaxWindow(extractCfg.maxZstdWindowSize),
@@ -1319,11 +1330,16 @@ func extractArchiveFile(
 	defer zr.Close()
 
 	limits := extractCfg.limits
-	tr := tar.NewReader(&expansionReader{
-		reader: zr,
-		read:   &countingFile.read,
-		ratio:  limits.maxExpansion,
-		floor:  limits.expansionFloor,
+	tr := tar.NewReader(&archiveStreamReader{
+		ctx: ctx,
+		reader: &expansionReader{
+			reader: zr,
+			read:   &countingFile.read,
+			ratio:  limits.maxExpansion,
+			floor:  limits.expansionFloor,
+		},
+		budget:   limits.budget,
+		maxBytes: archiveStreamLimit(limits.maxTotalBytes, limits.maxEntries),
 	})
 
 	var entries, filesExtracted int
@@ -1361,6 +1377,12 @@ func extractArchiveFile(
 		// filepath.Clean converts them to backslashes on Windows.
 		name := path.Clean(header.Name)
 		if name == "." {
+			if header.Typeflag != tar.TypeDir || header.Size != 0 {
+				return "", fmt.Errorf(
+					"%w: root archive member %q must be an empty directory",
+					ErrExtractUnexpectedMember, header.Name,
+				)
+			}
 			continue
 		}
 		if !validRelPath(name) {
@@ -1387,6 +1409,9 @@ func extractArchiveFile(
 
 		switch header.Typeflag {
 		case tar.TypeDir:
+			if err := limits.budget.reserveEntry(); err != nil {
+				return "", err
+			}
 			if err := mkdirExtracted(workDir, target); err != nil {
 				return "", fmt.Errorf(
 					"creating directory %s: %w",
@@ -1396,6 +1421,9 @@ func extractArchiveFile(
 			}
 		case tar.TypeReg,
 			'\x00': // '\x00' is the legacy regular-file flag (tar.TypeRegA)
+			if err := limits.budget.reserveEntry(); err != nil {
+				return "", err
+			}
 			// Enforce per-file size limit (header.Size is
 			// attacker-controlled, so we check it as a fast
 			// reject but also enforce actual bytes below).
@@ -1434,6 +1462,12 @@ func extractArchiveFile(
 			if verifyDigest {
 				hasher = sha256.New()
 				dst = io.MultiWriter(outFile, hasher)
+			}
+			if limits.budget != nil {
+				dst = &extractionBudgetWriter{
+					writer: dst,
+					budget: limits.budget,
+				}
 			}
 			written, err := io.Copy(
 				dst,

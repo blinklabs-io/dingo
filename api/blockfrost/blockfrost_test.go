@@ -39,6 +39,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+const testMutationAuthToken = "test-blockfrost-auth-token"
+
 // TestCompatBlockResponse verifies that our BlockResponse
 // round-trips through blockfrost-go's Block type.
 func TestCompatBlockResponse(t *testing.T) {
@@ -823,11 +825,11 @@ func TestMetadataTransactionsCollisionKeepsLabelAndRawCBOR(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, cborRows, 2)
 	require.Equal(t, "a20163696e7461316474657874", cborRows[1].Metadata)
-	transactionJSON, err := adapter.TransactionMetadata(ambiguousHash)
+	transactionJSON, err := adapter.TransactionMetadata(context.Background(), ambiguousHash)
 	require.NoError(t, err)
 	require.Len(t, transactionJSON, 1)
 	require.Equal(t, "", string(transactionJSON[0].JSONMetadata))
-	transactionCBOR, err := adapter.TransactionMetadataCBOR(ambiguousHash)
+	transactionCBOR, err := adapter.TransactionMetadataCBOR(context.Background(), ambiguousHash)
 	require.NoError(t, err)
 	require.Len(t, transactionCBOR, 1)
 	require.Equal(t, "a20163696e7461316474657874", transactionCBOR[0].CBORMetadata)
@@ -878,7 +880,7 @@ func TestMetadataEndpointsDeterministicAcrossRepeatsAndKeyOrders(t *testing.T) {
 		for i, mt := range txs {
 			hash := bytes.Repeat([]byte{mt.hashByte}, 32)
 
-			jsonLabels, err := adapter.TransactionMetadata(hash)
+			jsonLabels, err := adapter.TransactionMetadata(context.Background(), hash)
 			require.NoError(t, err, "pass %d tx %d", pass, i)
 			require.Len(t, jsonLabels, 2)
 			require.Equal(t, "1", jsonLabels[0].Label)
@@ -886,7 +888,7 @@ func TestMetadataEndpointsDeterministicAcrossRepeatsAndKeyOrders(t *testing.T) {
 			require.Equal(t, "721", jsonLabels[1].Label)
 			require.Empty(t, jsonLabels[1].JSONMetadata, "pass %d tx %d", pass, i)
 
-			cborLabels, err := adapter.TransactionMetadataCBOR(hash)
+			cborLabels, err := adapter.TransactionMetadataCBOR(context.Background(), hash)
 			require.NoError(t, err)
 			require.Len(t, cborLabels, 2)
 			require.Equal(t, "1", cborLabels[0].Label)
@@ -939,6 +941,8 @@ func TestMetadataEndpointsDeterministicAcrossRepeatsAndKeyOrders(t *testing.T) {
 
 // mockNode implements BlockfrostNode for testing.
 type mockNode struct {
+	historyMock
+	queryMock
 	chainTip                      ChainTipInfo
 	block                         BlockInfo
 	blockByID                     BlockInfo
@@ -975,6 +979,7 @@ type mockNode struct {
 	metadataJSON                  []MetadataTransactionJSONInfo
 	metadataCBOR                  []MetadataTransactionCBORInfo
 	transaction                   TransactionInfo
+	transactionCtx                context.Context
 	transactionSubmitHash         string
 	transactionEvaluation         TransactionEvaluationResponse
 	transactionEvaluationCtx      context.Context
@@ -1059,19 +1064,20 @@ func (m *mockNode) ChainTip() (
 	return m.chainTip, m.chainTipErr
 }
 
-func (m *mockNode) LatestBlock() (
+func (m *mockNode) LatestBlock(_ context.Context) (
 	BlockInfo, error,
 ) {
 	return m.block, m.blockErr
 }
 
 func (m *mockNode) BlockByHashOrNumber(
+	_ context.Context,
 	_ string,
 ) (BlockInfo, error) {
 	return m.blockByID, m.blockByIDErr
 }
 
-func (m *mockNode) LatestBlockTxHashes() (
+func (m *mockNode) LatestBlockTxHashes(_ context.Context) (
 	[]string, error,
 ) {
 	return m.txHashes, m.txHashesErr
@@ -1179,6 +1185,7 @@ func (m *mockNode) AssetAddresses(
 }
 
 func (m *mockNode) DRep(
+	_ context.Context,
 	credential DRepCredential,
 ) (DRepInfo, error) {
 	m.drepCredential = credential
@@ -1194,6 +1201,7 @@ func (m *mockNode) DReps(
 }
 
 func (m *mockNode) Address(
+	_ context.Context,
 	_ string,
 ) (AddressInfo, error) {
 	return m.addressInfo, m.addressInfoErr
@@ -1230,8 +1238,10 @@ func (m *mockNode) MetadataTransactionsCBOR(
 }
 
 func (m *mockNode) Transaction(
+	ctx context.Context,
 	_ []byte,
 ) (TransactionInfo, error) {
+	m.transactionCtx = ctx
 	return m.transaction, m.transactionErr
 }
 
@@ -1252,78 +1262,91 @@ func (m *mockNode) TransactionEvaluate(
 }
 
 func (m *mockNode) TransactionCBOR(
+	_ context.Context,
 	_ []byte,
 ) ([]byte, error) {
 	return m.transactionCBOR, m.transactionCBORErr
 }
 
 func (m *mockNode) TransactionMetadata(
+	_ context.Context,
 	_ []byte,
 ) ([]TransactionMetadataInfo, error) {
 	return m.transactionMetadata, m.transactionMetadataErr
 }
 
 func (m *mockNode) TransactionMetadataCBOR(
+	_ context.Context,
 	_ []byte,
 ) ([]TransactionMetadataCBORInfo, error) {
 	return m.transactionMetadataCBOR, m.transactionMetadataCBORErr
 }
 
 func (m *mockNode) TransactionUTXOs(
+	_ context.Context,
 	_ []byte,
 ) (TransactionUTXOsInfo, error) {
 	return m.transactionUTXOs, m.transactionUTXOsErr
 }
 
 func (m *mockNode) TransactionDelegations(
+	_ context.Context,
 	_ []byte,
 ) ([]TransactionDelegationInfo, error) {
 	return m.transactionDelegations, m.transactionDelegationsErr
 }
 
 func (m *mockNode) TransactionStakeAddresses(
+	_ context.Context,
 	_ []byte,
 ) ([]TransactionStakeAddressInfo, error) {
 	return m.transactionStakes, m.transactionStakesErr
 }
 
 func (m *mockNode) TransactionWithdrawals(
+	_ context.Context,
 	_ []byte,
 ) ([]TransactionWithdrawalInfo, error) {
 	return m.transactionWithdrawals, m.transactionWithdrawalsErr
 }
 
 func (m *mockNode) TransactionMIRs(
+	_ context.Context,
 	_ []byte,
 ) ([]TransactionMIRInfo, error) {
 	return m.transactionMIRs, m.transactionMIRsErr
 }
 
 func (m *mockNode) TransactionPoolUpdates(
+	_ context.Context,
 	_ []byte,
 ) ([]TransactionPoolUpdateInfo, error) {
 	return m.transactionPoolUpdates, m.transactionPoolUpdatesErr
 }
 
 func (m *mockNode) TransactionPoolRetires(
+	_ context.Context,
 	_ []byte,
 ) ([]TransactionPoolRetireInfo, error) {
 	return m.transactionPoolRetires, m.transactionPoolRetiresErr
 }
 
 func (m *mockNode) TransactionRedeemers(
+	_ context.Context,
 	_ []byte,
 ) ([]TransactionRedeemerInfo, error) {
 	return m.transactionRedeemers, m.transactionRedeemersErr
 }
 
 func (m *mockNode) TransactionRequiredSigners(
+	_ context.Context,
 	_ []byte,
 ) ([]TransactionRequiredSignerInfo, error) {
 	return m.transactionRequiredSigners, m.transactionRequiredSignersErr
 }
 
 func (m *mockNode) Account(
+	_ context.Context,
 	_ string,
 ) (AccountInfo, error) {
 	return m.account, m.accountErr
@@ -1465,7 +1488,8 @@ func newTestBlockfrost(
 ) *Blockfrost {
 	return New(
 		BlockfrostConfig{
-			ListenAddress: ":0",
+			ListenAddress: "127.0.0.1:0",
+			AuthToken:     testMutationAuthToken,
 		},
 		node,
 		slog.Default(),
@@ -2904,10 +2928,14 @@ func TestHandleTransaction(t *testing.T) {
 		"hash",
 		"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
 	)
+	requestCtx, cancel := context.WithCancel(req.Context())
+	cancel()
+	req = req.WithContext(requestCtx)
 	w := httptest.NewRecorder()
 	b.handleTransaction(w, req)
 
 	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Same(t, requestCtx, mock.transactionCtx)
 
 	var resp TransactionResponse
 	err := json.NewDecoder(w.Body).Decode(&resp)
@@ -4164,7 +4192,7 @@ func TestDefaultListenAddress(t *testing.T) {
 		&mockNode{},
 		slog.Default(),
 	)
-	assert.Equal(t, ":3000", b.config.ListenAddress)
+	assert.Equal(t, "127.0.0.1:3000", b.config.ListenAddress)
 }
 
 func TestParseAddressOrPaymentCred(t *testing.T) {
@@ -4267,13 +4295,13 @@ func TestNodeAdapterAddressRejectsInvalidInput(t *testing.T) {
 		)
 		require.NoError(t, err)
 
-		_, err = adapter.Address(mainnetAddr.String())
+		_, err = adapter.Address(context.Background(), mainnetAddr.String())
 		require.ErrorIs(t, err, ErrInvalidAddress)
 		assert.ErrorContains(t, err, "network mismatch")
 	})
 
 	t.Run("parse failure keeps diagnostics", func(t *testing.T) {
-		_, err := adapter.Address("addr1stonks")
+		_, err := adapter.Address(context.Background(), "addr1stonks")
 		require.ErrorIs(t, err, ErrInvalidAddress,
 			"the HTTP layer maps this sentinel to 400")
 		// Which diagnostic comes back depends on the first check in the
@@ -4310,7 +4338,7 @@ func TestNodeAdapterAddressRejectsInvalidInput(t *testing.T) {
 			nil,
 		)
 		require.NoError(t, err)
-		_, err = adapter.Address(testnetAddr.String())
+		_, err = adapter.Address(context.Background(), testnetAddr.String())
 		require.ErrorIs(t, err, ErrAddressNotFound)
 	})
 }
@@ -4329,7 +4357,7 @@ func TestNodeAdapterAddressPaymentCredTransactionFallback(t *testing.T) {
 	require.NoError(t, err)
 
 	// No UTxOs and no transaction history: the credential is unknown.
-	_, err = adapter.Address(credID)
+	_, err = adapter.Address(context.Background(), credID)
 	require.ErrorIs(t, err, ErrAddressNotFound)
 
 	// Spent history recorded against the payment credential (via a base
@@ -4337,8 +4365,8 @@ func TestNodeAdapterAddressPaymentCredTransactionFallback(t *testing.T) {
 	// with a zero lovelace balance.
 	_, err = store.Exec(`
 INSERT INTO address_transaction (
-    payment_key, staking_key, transaction_id, slot
-) VALUES (?, ?, ?, ?)`,
+    payment_key, payment_script, staking_key, transaction_id, slot
+) VALUES (?, FALSE, ?, ?, ?)`,
 		paymentKey,
 		bytes.Repeat([]byte{0x33}, lcommon.AddressHashSize),
 		1,
@@ -4346,7 +4374,7 @@ INSERT INTO address_transaction (
 	)
 	require.NoError(t, err)
 
-	info, err := adapter.Address(credID)
+	info, err := adapter.Address(context.Background(), credID)
 	require.NoError(t, err)
 	assert.Equal(t, credID, info.Address)
 	require.Len(t, info.Amount, 1)
@@ -4381,7 +4409,7 @@ func TestNodeAdapterKeyScriptStakeAddress(t *testing.T) {
 	insertAdapterUtxo(t, store, &utxo)
 	storePointerOutputCbor(t, db, utxo.TxId, 0, addr, 1_000_000)
 
-	info, err := adapter.Address(addr.String())
+	info, err := adapter.Address(context.Background(), addr.String())
 	require.NoError(t, err)
 	require.NotNil(t, info.StakeAddress)
 	assert.True(t, strings.HasPrefix(*info.StakeAddress, "stake_test17"))
@@ -4409,7 +4437,9 @@ func TestNodeAdapterKeyScriptStakeAddress(t *testing.T) {
 	insertAdapterUtxo(t, mainnetStore, &mainnetUtxo)
 	storePointerOutputCbor(t, mainnetDB, mainnetUtxo.TxId, 0, mainnetAddr, 1_000_000)
 
-	mainnetInfo, err := mainnetAdapter.Address(mainnetAddr.String())
+	mainnetInfo, err := mainnetAdapter.Address(
+		context.Background(), mainnetAddr.String(),
+	)
 	require.NoError(t, err)
 	require.NotNil(t, mainnetInfo.StakeAddress)
 	assert.True(t, strings.HasPrefix(*mainnetInfo.StakeAddress, "stake17"))
@@ -4438,7 +4468,7 @@ func TestNodeAdapterKeyScriptStakeAddress(t *testing.T) {
 	insertAdapterUtxo(t, store, &keyUtxo)
 	storePointerOutputCbor(t, db, keyUtxo.TxId, 0, keyAddr, 1_000_000)
 
-	keyInfo, err := adapter.Address(keyAddr.String())
+	keyInfo, err := adapter.Address(context.Background(), keyAddr.String())
 	require.NoError(t, err)
 	require.NotNil(t, keyInfo.StakeAddress)
 	assert.True(t, strings.HasPrefix(*keyInfo.StakeAddress, "stake_test1u"))

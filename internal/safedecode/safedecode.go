@@ -28,6 +28,8 @@ import (
 
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 )
 
 // ErrDecodePanic wraps every panic recovered by this package. A caller that
@@ -99,5 +101,42 @@ func Transaction(txType uint, txCbor []byte) (ledger.Transaction, error) {
 			return nil, ErrTrailingData
 		}
 		return ledger.NewTransactionFromCbor(txType, txCbor)
+	})
+}
+
+// DijkstraBlockTransaction decodes one Dijkstra block_transaction,
+// [body, witnesses, auxiliary_data / null, is_valid], as carried by an
+// endorser block. Unlike the standalone transaction form, the validity flag
+// is mandatory, last, and may be false: the returned transaction reports it
+// through IsValid so a failed-script transaction applies its collateral only.
+//
+// gouroboros exposes block_transaction decoding only through the block body,
+// so the transaction is decoded as the sole entry of a body with no
+// certificate. The input must be exactly one item; the returned
+// transaction's CBOR is that input.
+func DijkstraBlockTransaction(txCbor []byte) (lcommon.Transaction, error) {
+	return Guard(func() (lcommon.Transaction, error) {
+		var item cbor.RawMessage
+		consumed, err := cbor.Decode(txCbor, &item)
+		if err != nil {
+			return nil, err
+		}
+		if consumed != len(txCbor) {
+			return nil, ErrTrailingData
+		}
+		body := make([]byte, 0, len(txCbor)+4)
+		body = append(body, 0x83, 0x81)
+		body = append(body, txCbor...)
+		body = append(body, 0xf6, 0xf6)
+		var decoded gdijkstra.DijkstraBlockBody
+		if err := decoded.UnmarshalCBOR(body); err != nil {
+			return nil, err
+		}
+		if len(decoded.Transactions) != 1 {
+			return nil, errors.New(
+				"block transaction decode yielded no transaction",
+			)
+		}
+		return &decoded.Transactions[0], nil
 	})
 }

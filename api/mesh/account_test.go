@@ -15,11 +15,18 @@
 package mesh
 
 import (
+	"bytes"
+	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
+	"net/http/httptest"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -370,7 +377,7 @@ func TestAccountBalanceHistoricalBlockNotFound(t *testing.T) {
 
 			requireMeshError(
 				t, rec, ErrBlockNotFound,
-				http.StatusNotFound,
+				http.StatusInternalServerError,
 			)
 		})
 	}
@@ -433,7 +440,7 @@ func TestAccountBalanceInvalidAccount(t *testing.T) {
 
 			requireMeshError(
 				t, rec, ErrInvalidRequest,
-				http.StatusBadRequest,
+				http.StatusInternalServerError,
 			)
 		})
 	}
@@ -536,7 +543,7 @@ func TestAccountCoinsInvalidAccount(t *testing.T) {
 	)
 
 	requireMeshError(
-		t, rec, ErrInvalidRequest, http.StatusBadRequest,
+		t, rec, ErrInvalidRequest, http.StatusInternalServerError,
 	)
 }
 
@@ -599,6 +606,157 @@ func TestAccountBalanceHonorsAdvertisedCapability(t *testing.T) {
 		return
 	}
 	requireMeshError(
-		t, rec, ErrNotImplemented, http.StatusNotImplemented,
+		t, rec, ErrNotImplemented, http.StatusInternalServerError,
 	)
+}
+
+// TestAccountCoinsReturnsTheCompleteResult pins the Mesh UTxO contract: the
+// response contains every coin in one result and exposes no pagination state.
+func TestAccountCoinsReturnsTheCompleteResult(t *testing.T) {
+	t.Parallel()
+
+	const total = 1001
+	deps := newTestDeps()
+	key := testKeyHash(0x34)
+	addr := testAddress(t, lcommon.AddressTypeKeyNone, key, nil)
+	deps.ledger.utxos = func(
+		[]lcommon.Address,
+	) ([]models.Utxo, error) {
+		t.Fatal("account coins must not use the bounded balance lookup")
+		return nil, nil
+	}
+	deps.ledger.utxosComplete = func(
+		ctx context.Context,
+		_ []lcommon.Address,
+	) ([]models.Utxo, error) {
+		require.NoError(t, ctx.Err())
+		utxos := make([]models.Utxo, 0, total)
+		for i := range total {
+			utxos = append(
+				utxos,
+				testUtxo(
+					testHash(byte(i)),
+					uint32(i), // #nosec G115 -- bounded test fixture
+					1_000_000,
+					key,
+					nil,
+				),
+			)
+		}
+		return utxos, nil
+	}
+
+	resp := decodeResponse[AccountCoinsResponse](
+		t,
+		postJSON(t, newTestHandler(t, deps), "/account/coins", coinsRequest(addr)),
+	)
+
+	require.Len(t, resp.Coins, total)
+	require.Nil(t, resp.Metadata)
+}
+
+func TestAccountCoinsConcurrencyBudget(t *testing.T) {
+	t.Parallel()
+
+	deps := newTestDeps()
+	addr := testAddress(
+		t, lcommon.AddressTypeKeyNone, testKeyHash(0x35), nil,
+	)
+	readEntered := make(chan struct{}, 1)
+	readRelease := make(chan struct{})
+	deps.ledger.utxosComplete = func(
+		context.Context,
+		[]lcommon.Address,
+	) ([]models.Utxo, error) {
+		readEntered <- struct{}{}
+		<-readRelease
+		return nil, nil
+	}
+	h := newTestHandler(t, deps, func(c *ServerConfig) {
+		c.maxConcurrentBulkReads = 1
+	})
+	body, err := json.Marshal(coinsRequest(addr))
+	require.NoError(t, err)
+	first := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		req := httptest.NewRequest(
+			http.MethodPost, "/account/coins", bytes.NewReader(body),
+		)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		first <- rec
+	}()
+	testutil.RequireReceive(
+		t, readEntered, 10*time.Second, "first account read starts",
+	)
+
+	got := requireMeshError(
+		t,
+		postJSON(t, h, "/account/coins", coinsRequest(addr)),
+		ErrUnavailable,
+		http.StatusInternalServerError,
+	)
+	require.True(t, got.Retriable)
+
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(readRelease) }) }
+	defer release()
+	release()
+	firstRec := testutil.RequireReceive(
+		t, first, 10*time.Second, "first account read completes",
+	)
+	require.Equal(t, http.StatusOK, firstRec.Code)
+
+	third := postJSON(t, h, "/account/coins", coinsRequest(addr))
+	testutil.RequireReceive(
+		t, readEntered, 10*time.Second, "next account read starts",
+	)
+	// The returned slot admits another complete read.
+	require.Equal(t, http.StatusOK, third.Code)
+}
+
+func TestAccountCoinsCancellationReleasesAdmission(t *testing.T) {
+	t.Parallel()
+
+	deps := newTestDeps()
+	addr := testAddress(
+		t, lcommon.AddressTypeKeyNone, testKeyHash(0x36), nil,
+	)
+	started := make(chan struct{})
+	var first sync.Once
+	deps.ledger.utxosComplete = func(
+		ctx context.Context,
+		_ []lcommon.Address,
+	) ([]models.Utxo, error) {
+		block := false
+		first.Do(func() {
+			block = true
+			close(started)
+		})
+		if block {
+			<-ctx.Done()
+			return nil, ctx.Err()
+		}
+		return nil, nil
+	}
+	h := newTestHandler(t, deps, func(c *ServerConfig) {
+		c.maxConcurrentBulkReads = 1
+	})
+	body, err := json.Marshal(coinsRequest(addr))
+	require.NoError(t, err)
+	requestCtx, cancel := context.WithCancel(context.Background())
+	request := httptest.NewRequest(
+		http.MethodPost, "/account/coins", bytes.NewReader(body),
+	).WithContext(requestCtx)
+	done := make(chan struct{})
+	go func() {
+		h.ServeHTTP(httptest.NewRecorder(), request)
+		close(done)
+	}()
+	testutil.RequireReceive(t, started, 10*time.Second, "account read starts")
+	cancel()
+	testutil.RequireReceive(t, done, 10*time.Second, "canceled read stops")
+
+	response := postJSON(t, h, "/account/coins", coinsRequest(addr))
+	require.Equal(t, http.StatusOK, response.Code, response.Body.String())
 }

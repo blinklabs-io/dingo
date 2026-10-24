@@ -20,6 +20,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"math"
+	"strconv"
 	"strings"
 	"time"
 
@@ -28,7 +30,12 @@ import (
 	"github.com/blinklabs-io/dingo/database/types"
 )
 
-const offchainFetchClaimLease = 30 * time.Minute
+const (
+	offchainFetchClaimLease              = 30 * time.Minute
+	offchainPointerDiscoveryBatchSize    = 64
+	offchainPointerDiscoveryCursorKey    = "offchain-metadata-discovery:"
+	offchainPointerDiscoveryHighWaterKey = "offchain-metadata-discovery-high-water:"
+)
 
 type offchainPointerSource struct {
 	sourceType string
@@ -100,85 +107,207 @@ func (s *Store) EnsureOffchainMetadataPointers(
 	}
 	q := s.operationalQueries(db)
 	created := 0
-	seen := make(map[string]struct{})
 	for _, source := range offchainPointerSources {
-		query := "SELECT " + source.urlColumn + ", " + source.hashColumn +
-			" FROM " + source.table +
-			" WHERE " + source.urlColumn + " <> ''" +
-			" GROUP BY " + source.urlColumn + ", " + source.hashColumn
-		rows, err := db.QueryContext(ctx, query)
+		// Two cursors per source. The high-water cursor never wraps, so an
+		// appended row waits only for rows appended before it. The rescan
+		// cursor walks rows at or below the high-water id and wraps at the
+		// end: drep and governance_vote rows update their anchor in place
+		// and keep their id, so only a re-read discovers the new anchor.
+		highWaterKey := offchainPointerDiscoveryHighWaterKey + source.sourceType
+		highWater, rawHighWater, err := readOffchainDiscoveryCursor(
+			ctx, q, highWaterKey, source,
+		)
 		if err != nil {
-			return created, fmt.Errorf(
-				"query off-chain metadata pointers from %s: %w",
+			return created, err
+		}
+		n, lastID, read, err := s.discoverOffchainPointerPage(
+			ctx, db, q, source, highWater, math.MaxInt64, now,
+		)
+		created += n
+		if err != nil {
+			return created, err
+		}
+		if read > 0 {
+			highWater = lastID
+		}
+		if err := saveOffchainDiscoveryCursor(
+			ctx, q, highWaterKey, rawHighWater, highWater, source,
+		); err != nil {
+			return created, err
+		}
+
+		rescanKey := offchainPointerDiscoveryCursorKey + source.sourceType
+		rescan, rawRescan, err := readOffchainDiscoveryCursor(
+			ctx, q, rescanKey, source,
+		)
+		if err != nil {
+			return created, err
+		}
+		n, lastID, read, err = s.discoverOffchainPointerPage(
+			ctx, db, q, source, rescan, highWater, now,
+		)
+		created += n
+		if err != nil {
+			return created, err
+		}
+		if read < offchainPointerDiscoveryBatchSize {
+			rescan = 0
+		} else {
+			rescan = lastID
+		}
+		if err := saveOffchainDiscoveryCursor(
+			ctx, q, rescanKey, rawRescan, rescan, source,
+		); err != nil {
+			return created, err
+		}
+	}
+	return created, nil
+}
+
+func readOffchainDiscoveryCursor(
+	ctx context.Context,
+	q *sqlitequery.Queries,
+	key string,
+	source offchainPointerSource,
+) (int64, string, error) {
+	raw, err := q.GetSyncState(ctx, key)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, "", nil
+	}
+	if err != nil {
+		return 0, "", fmt.Errorf(
+			"read off-chain metadata discovery cursor for %s: %w",
+			source.table,
+			err,
+		)
+	}
+	if raw == "" {
+		return 0, raw, nil
+	}
+	cursor, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || cursor < 0 {
+		return 0, raw, fmt.Errorf(
+			"invalid off-chain metadata discovery cursor for %s: %q",
+			source.table,
+			raw,
+		)
+	}
+	return cursor, raw, nil
+}
+
+func saveOffchainDiscoveryCursor(
+	ctx context.Context,
+	q *sqlitequery.Queries,
+	key string,
+	raw string,
+	cursor int64,
+	source offchainPointerSource,
+) error {
+	value := strconv.FormatInt(cursor, 10)
+	if raw == value {
+		return nil
+	}
+	if err := q.SetSyncState(
+		ctx,
+		sqlitequery.SetSyncStateParams{SyncKey: key, Value: value},
+	); err != nil {
+		return fmt.Errorf(
+			"save off-chain metadata discovery cursor for %s: %w",
+			source.table,
+			err,
+		)
+	}
+	return nil
+}
+
+// discoverOffchainPointerPage reads at most one batch of source rows with
+// after < id <= upTo and inserts their pointers. It returns the pointers
+// created, the last id read, and the number of rows read.
+func (s *Store) discoverOffchainPointerPage(
+	ctx context.Context,
+	db queryer,
+	q *sqlitequery.Queries,
+	source offchainPointerSource,
+	after int64,
+	upTo int64,
+	now time.Time,
+) (int, int64, int, error) {
+	query := "SELECT id, " + source.urlColumn + ", " + source.hashColumn +
+		" FROM " + source.table +
+		" WHERE id > ? AND id <= ? ORDER BY id LIMIT ?"
+	rows, err := db.QueryContext(
+		ctx,
+		s.dialect.Rebind(query),
+		after,
+		upTo,
+		offchainPointerDiscoveryBatchSize,
+	)
+	if err != nil {
+		return 0, after, 0, fmt.Errorf(
+			"query off-chain metadata pointers from %s: %w",
+			source.table,
+			err,
+		)
+	}
+	type pointer struct {
+		id   int64
+		url  string
+		hash []byte
+	}
+	pointers := make([]pointer, 0, offchainPointerDiscoveryBatchSize)
+	for rows.Next() {
+		var id int64
+		// Anchor columns are nullable on several source tables.
+		var url sql.NullString
+		var hash []byte
+		if err := rows.Scan(&id, &url, &hash); err != nil {
+			rows.Close()
+			return 0, after, 0, err
+		}
+		pointers = append(
+			pointers,
+			pointer{id: id, url: url.String, hash: hash},
+		)
+	}
+	if err := rows.Close(); err != nil {
+		return 0, after, 0, err
+	}
+	if err := rows.Err(); err != nil {
+		return 0, after, 0, err
+	}
+	created := 0
+	lastID := after
+	for _, row := range pointers {
+		lastID = row.id
+		url := strings.TrimSpace(row.url)
+		if url == "" || len(row.hash) != 32 {
+			continue
+		}
+		affected, err := q.InsertOffchainMetadataPointer(
+			ctx,
+			sqlitequery.InsertOffchainMetadataPointerParams{
+				CreatedAt:  sql.NullTime{Time: now, Valid: true},
+				UpdatedAt:  sql.NullTime{Time: now, Valid: true},
+				Url:        url,
+				SourceType: source.sourceType,
+				Status:     models.OffchainMetadataStatusPending,
+				Hash:       row.hash,
+				NextFetchAfter: sql.NullTime{
+					Time:  now,
+					Valid: true,
+				},
+			},
+		)
+		if err != nil {
+			return created, lastID, len(pointers), fmt.Errorf(
+				"insert off-chain metadata pointer from %s: %w",
 				source.table,
 				err,
 			)
 		}
-		type pointer struct {
-			url  string
-			hash []byte
-		}
-		pointers := make([]pointer, 0)
-		for rows.Next() {
-			var url string
-			var hash []byte
-			if err := rows.Scan(&url, &hash); err != nil {
-				rows.Close()
-				return created, err
-			}
-			pointers = append(pointers, pointer{url: url, hash: hash})
-		}
-		if err := rows.Close(); err != nil {
-			return created, err
-		}
-		if err := rows.Err(); err != nil {
-			return created, err
-		}
-		for _, row := range pointers {
-			url := row.url
-			hash := row.hash
-			url = strings.TrimSpace(url)
-			if url == "" || len(hash) != 32 {
-				continue
-			}
-			key := source.sourceType + "\x00" + url + "\x00" + string(hash)
-			if _, ok := seen[key]; ok {
-				continue
-			}
-			seen[key] = struct{}{}
-			createdAt := time.Now()
-			affected, err := q.InsertOffchainMetadataPointer(
-				ctx,
-				sqlitequery.InsertOffchainMetadataPointerParams{
-					CreatedAt: sql.NullTime{
-						Time:  createdAt,
-						Valid: true,
-					},
-					UpdatedAt: sql.NullTime{
-						Time:  createdAt,
-						Valid: true,
-					},
-					Url:        url,
-					SourceType: source.sourceType,
-					Status:     models.OffchainMetadataStatusPending,
-					Hash:       hash,
-					NextFetchAfter: sql.NullTime{
-						Time:  now,
-						Valid: true,
-					},
-				},
-			)
-			if err != nil {
-				return created, fmt.Errorf(
-					"insert off-chain metadata pointer from %s: %w",
-					source.table,
-					err,
-				)
-			}
-			created += int(affected)
-		}
+		created += int(affected)
 	}
-	return created, nil
+	return created, lastID, len(pointers), nil
 }
 
 func (s *Store) GetOffchainMetadataFetchBatch(

@@ -89,6 +89,7 @@ func TestAwaitChainsyncHeaderAdmissionHoldsHeaderPastForecastHorizon(
 	systemStart := time.Date(2026, time.August, 22, 12, 0, 0, 0, time.UTC)
 	arrival := systemStart.Add(100 * time.Second)
 	ls, waits := newFutureHeaderTestLedger(t, systemStart, arrival)
+	ls.chainsyncBlockfetchReadyChan = make(chan struct{})
 	covered := &atomic.Bool{}
 	ls.slotClock.provider = gatedHorizonSlotTimeProvider{
 		SlotTimeProvider: ls.slotClock.provider,
@@ -96,10 +97,13 @@ func TestAwaitChainsyncHeaderAdmissionHoldsHeaderPastForecastHorizon(
 		covered:          covered,
 	}
 
+	var witnessCalls atomic.Int32
+	e := futureHeaderEvent(90, arrival)
+	e.ForecastHorizonWait = func() { witnessCalls.Add(1) }
 	results := awaitAdmissionAsync(
 		t.Context(),
 		ls,
-		futureHeaderEvent(90, arrival),
+		e,
 	)
 	testutil.RequireNoReceive(
 		t,
@@ -126,6 +130,7 @@ func TestAwaitChainsyncHeaderAdmissionHoldsHeaderPastForecastHorizon(
 	)
 	require.NoError(t, got.err)
 	require.True(t, got.accepted)
+	require.EqualValues(t, 1, witnessCalls.Load())
 	require.Empty(
 		t,
 		*waits,
@@ -141,6 +146,7 @@ func TestAwaitChainsyncHeaderAdmissionPastForecastHorizonHonorsCancellation(
 	systemStart := time.Date(2026, time.August, 22, 12, 0, 0, 0, time.UTC)
 	arrival := systemStart.Add(100 * time.Second)
 	ls, _ := newFutureHeaderTestLedger(t, systemStart, arrival)
+	ls.chainsyncBlockfetchReadyChan = make(chan struct{})
 	ls.slotClock.provider = pastHorizonSlotTimeProvider{
 		SlotTimeProvider: ls.slotClock.provider,
 		rejectedSlot:     90,
@@ -164,6 +170,100 @@ func TestAwaitChainsyncHeaderAdmissionPastForecastHorizonHonorsCancellation(
 	)
 	require.ErrorIs(t, got.err, context.Canceled)
 	require.False(t, got.accepted)
+}
+
+// A blockfetch request that ends without publishing a snapshot must still wake
+// a held header, which then finds no local work and asks for a resync.
+func TestAwaitChainsyncHeaderAdmissionWakesOnBlockfetchCapacityChange(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	systemStart := time.Date(2026, time.August, 22, 12, 0, 0, 0, time.UTC)
+	arrival := systemStart.Add(100 * time.Second)
+	ls, _ := newFutureHeaderTestLedger(t, systemStart, arrival)
+	ls.chainsyncBlockfetchReadyChan = make(chan struct{})
+	ls.slotClock.provider = pastHorizonSlotTimeProvider{
+		SlotTimeProvider: ls.slotClock.provider,
+		rejectedSlot:     90,
+	}
+
+	results := awaitAdmissionAsync(
+		t.Context(),
+		ls,
+		futureHeaderEvent(90, arrival),
+	)
+	testutil.RequireNoReceive(
+		t,
+		results,
+		100*time.Millisecond,
+		"a header past the forecast horizon must wait while fetch work exists",
+	)
+
+	ls.chainsyncBlockfetchMutex.Lock()
+	ls.chainsyncBlockfetchReadyChan = nil
+	ls.signalChainsyncCapacityChangedLocked()
+	ls.chainsyncBlockfetchMutex.Unlock()
+	got := testutil.RequireReceive(
+		t,
+		results,
+		testutil.AsyncWait,
+		"admission did not wake when blockfetch capacity changed",
+	)
+	require.ErrorIs(t, got.err, ErrChainsyncHeaderNeedsResync)
+	require.False(t, got.accepted)
+}
+
+// With no local work left to advance the forecast, the header rechecks
+// cancellation and the horizon before asking for a resync.
+func TestAwaitChainsyncHeaderAdmissionRechecksBeforeResync(t *testing.T) {
+	t.Parallel()
+
+	systemStart := time.Date(2026, time.August, 22, 12, 0, 0, 0, time.UTC)
+	arrival := systemStart.Add(100 * time.Second)
+
+	t.Run("cancelled", func(t *testing.T) {
+		t.Parallel()
+		ls, _ := newFutureHeaderTestLedger(t, systemStart, arrival)
+		ls.slotClock.provider = pastHorizonSlotTimeProvider{
+			SlotTimeProvider: ls.slotClock.provider,
+			rejectedSlot:     90,
+		}
+		ctx, cancel := context.WithCancel(t.Context())
+		e := futureHeaderEvent(90, arrival)
+		e.ForecastHorizonWait = cancel
+		results := awaitAdmissionAsync(ctx, ls, e)
+		got := testutil.RequireReceive(
+			t,
+			results,
+			testutil.AsyncWait,
+			"admission did not return after cancellation",
+		)
+		require.ErrorIs(t, got.err, context.Canceled)
+		require.False(t, got.accepted)
+	})
+
+	t.Run("horizon moved", func(t *testing.T) {
+		t.Parallel()
+		ls, _ := newFutureHeaderTestLedger(t, systemStart, arrival)
+		covered := &atomic.Bool{}
+		ls.slotClock.provider = gatedHorizonSlotTimeProvider{
+			SlotTimeProvider: ls.slotClock.provider,
+			slot:             90,
+			covered:          covered,
+		}
+		e := futureHeaderEvent(90, arrival)
+		e.ForecastHorizonWait = func() { covered.Store(true) }
+		results := awaitAdmissionAsync(t.Context(), ls, e)
+		got := testutil.RequireReceive(
+			t,
+			results,
+			testutil.AsyncWait,
+			"admission did not resume once the slot was forecastable",
+		)
+		require.NoError(t, got.err)
+		require.True(t, got.accepted)
+	})
 }
 
 func TestSnapshotPublishedChanClosesOnPublish(t *testing.T) {
@@ -601,6 +701,7 @@ func TestAwaitChainsyncHeaderAdmissionForecastsForkFromIntersection(
 		}},
 	}
 	ls.cachedShape.Store(&shape)
+	ls.chainsyncBlockfetchReadyChan = make(chan struct{})
 	ls.slotClock = NewSlotClock(
 		newSlotTimeConverterProvider(ls.timeConv()),
 		DefaultSlotClockConfig(),
@@ -808,7 +909,7 @@ func TestHorizonFlushPublishesHeaderInvalidation(t *testing.T) {
 func newHorizonFlushTestLedger(
 	t *testing.T,
 	live func(ouroboros.ConnectionId) bool,
-) (*LedgerState, <-chan horizonFlushRequest) {
+) (*LedgerState, chan horizonFlushRequest) {
 	t.Helper()
 	cm, err := chain.NewManager(context.Background(), nil, nil)
 	require.NoError(t, err)
@@ -900,6 +1001,67 @@ func TestAwaitChainsyncHeaderAdmissionFlushFetchesFromPipelineOwner(
 		owner.String(),
 	)
 	require.True(t, sameConnectionId(owner, ls.selectedBlockfetchConnId))
+}
+
+func TestAwaitChainsyncHeaderAdmissionDrainsQueuedWorkBeforeDisconnect(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	ls, requests := newHorizonFlushTestLedger(t, nil)
+	owner := testRecycleConnId()
+	ls.headerPipelineConnId = owner
+	ls.config.BlockfetchRequestRangeFunc = func(
+		connId ouroboros.ConnectionId,
+		start ocommon.Point,
+		_ ocommon.Point,
+	) (uint64, error) {
+		requests <- horizonFlushRequest{connId: connId, start: start}
+		return 1, nil
+	}
+	arrival := time.Date(2026, time.August, 22, 12, 1, 40, 0, time.UTC)
+	header := mockHeader{
+		hash:        lcommon.Blake2b256Hash([]byte("disconnected")),
+		prevHash:    lcommon.Blake2b256Hash([]byte("missing parent")),
+		blockNumber: 3,
+		slot:        90,
+	}
+	e := ChainsyncEvent{
+		ConnectionId: owner,
+		BlockHeader:  header,
+		ArrivalTime:  arrival,
+		Point: ocommon.NewPoint(
+			header.SlotNumber(),
+			header.Hash().Bytes(),
+		),
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	results := awaitAdmissionAsync(ctx, ls, e)
+
+	req := testutil.RequireReceive(
+		t,
+		requests,
+		testutil.AsyncWait,
+		"a disconnected future header must first flush queued local work",
+	)
+	require.EqualValues(t, 10, req.start.Slot)
+	testutil.RequireNoReceive(
+		t,
+		results,
+		100*time.Millisecond,
+		"admission must wait while queued work can advance the forecast",
+	)
+
+	cancel()
+	got := testutil.RequireReceive(
+		t,
+		results,
+		testutil.AsyncWait,
+		"admission did not return after cancellation",
+	)
+	require.ErrorIs(t, got.err, context.Canceled)
+	require.False(t, got.accepted)
 }
 
 // A connection whose close was already processed must not be made the
@@ -1042,12 +1204,9 @@ func TestAwaitChainsyncHeaderAdmissionFlushFailureRequestsResync(
 	require.Zero(t, ls.chain.HeaderCount())
 }
 
-// A header past the forecast horizon whose predecessor is not the chain tip,
-// the header tip, or any header or block the local chain holds cannot be
-// released by applying blocks the node already has. Admission reports that
-// instead of waiting for a publication that cannot come; a header that does
-// build on the local chain still waits.
-func TestAwaitChainsyncHeaderAdmissionRejectsDisconnectedHeaderPastHorizon(
+// A connected header past the forecast horizon cannot wait when no queued or
+// in-flight blockfetch can publish the ledger state that releases it.
+func TestAwaitChainsyncHeaderAdmissionResyncsWhenNoWorkCanAdvanceForecast(
 	t *testing.T,
 ) {
 	t.Parallel()
@@ -1125,28 +1284,22 @@ func TestAwaitChainsyncHeaderAdmissionRejectsDisconnectedHeaderPastHorizon(
 		lcommon.NewBlake2b256(primary.Tip().Point.Hash),
 		"building",
 	)
-	ctx, cancel := context.WithCancel(t.Context())
-	results := awaitAdmissionAsync(ctx, ls, building)
-	testutil.RequireNoReceive(
-		t,
-		results,
-		100*time.Millisecond,
-		"a header building on the chain tip must keep waiting",
-	)
-	cancel()
+	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	defer cancel()
 	got := testutil.RequireReceive(
 		t,
-		results,
+		awaitAdmissionAsync(ctx, ls, building),
 		testutil.AsyncWait,
-		"admission did not return after its context ended",
+		"admission held a connected header with no queued block work",
 	)
-	require.ErrorIs(t, got.err, context.Canceled)
+	require.ErrorIs(t, got.err, ErrChainsyncHeaderNeedsResync)
+	require.False(t, got.accepted)
 
 	orphan := headerOn(
 		lcommon.Blake2b256Hash([]byte("unknown parent")),
 		"orphan",
 	)
-	results = awaitAdmissionAsync(t.Context(), ls, orphan)
+	results := awaitAdmissionAsync(t.Context(), ls, orphan)
 	got = testutil.RequireReceive(
 		t,
 		results,
@@ -1155,6 +1308,165 @@ func TestAwaitChainsyncHeaderAdmissionRejectsDisconnectedHeaderPastHorizon(
 	)
 	require.ErrorIs(t, got.err, ErrChainsyncHeaderDisconnected)
 	require.False(t, got.accepted)
+}
+
+// Stored blocks the ledger has not applied yet are local work: applying them
+// publishes the snapshots that move the horizon, so a held header waits for
+// that rather than closing a connection the work may need. Once the ledger
+// catches up with nothing left to apply, the header asks for a resync.
+func TestAwaitChainsyncHeaderAdmissionWaitsForUnappliedChainBlocks(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	cm, err := chain.NewManager(context.Background(), db, nil)
+	require.NoError(t, err)
+	primary := cm.PrimaryChain()
+	blocks, err := fixtures.GenerateConwayChain(
+		1,
+		lcommon.Blake2b256{},
+		300_000,
+		1_000,
+		2,
+	)
+	require.NoError(t, err)
+	for _, block := range blocks {
+		require.NoError(t, primary.AddBlock(context.Background(), block, nil))
+	}
+	applied := blocks[0]
+
+	cfg := minimalShelleyGenesisCfg(t)
+	ls := &LedgerState{
+		db:    db,
+		chain: primary,
+		epochCache: []models.Epoch{{
+			EpochId:       0,
+			StartSlot:     0,
+			SlotLength:    1_000,
+			LengthInSlots: 432_000,
+			EraId:         eras.ConwayEraDesc.Id,
+		}},
+		currentEra: eras.ConwayEraDesc,
+		currentTip: ochainsync.Tip{
+			Point: ocommon.NewPoint(
+				applied.SlotNumber(),
+				applied.Hash().Bytes(),
+			),
+			BlockNumber: applied.BlockNumber(),
+		},
+		config: LedgerStateConfig{
+			CardanoNodeConfig: cfg,
+			Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+	}
+	systemStart := cfg.ShelleyGenesis().SystemStart
+	const headerSlot = 500_000
+	arrival := systemStart.Add(600_000 * time.Second)
+	clock := NewSlotClock(
+		pastHorizonSlotTimeProvider{
+			SlotTimeProvider: newMockSlotTimeProvider(
+				systemStart,
+				time.Second,
+				1_000_000,
+			),
+			rejectedSlot: headerSlot,
+		},
+		DefaultSlotClockConfig(),
+	)
+	clock.nowFunc = func() time.Time { return arrival }
+	ls.slotClock = clock
+	ls.publishSnapshotsLocked()
+
+	header := mockHeader{
+		hash:        lcommon.Blake2b256Hash([]byte("past horizon")),
+		prevHash:    lcommon.NewBlake2b256(primary.Tip().Point.Hash),
+		blockNumber: 3,
+		slot:        headerSlot,
+	}
+	results := awaitAdmissionAsync(t.Context(), ls, ChainsyncEvent{
+		BlockHeader: header,
+		ArrivalTime: arrival,
+		Point:       ocommon.NewPoint(headerSlot, header.Hash().Bytes()),
+	})
+	testutil.RequireNoReceive(
+		t,
+		results,
+		100*time.Millisecond,
+		"a header must wait while stored blocks remain to be applied",
+	)
+	require.Zero(t, ls.chain.HeaderCount())
+
+	ls.Lock()
+	ls.currentTip = primary.Tip()
+	ls.publishSnapshotsLocked()
+	ls.Unlock()
+	got := testutil.RequireReceive(
+		t,
+		results,
+		testutil.AsyncWait,
+		"admission did not ask for a resync once nothing was left to apply",
+	)
+	require.ErrorIs(t, got.err, ErrChainsyncHeaderNeedsResync)
+	require.False(t, got.accepted)
+}
+
+// chainAheadOfAppliedTip compares the chain tip with the applied tip as points.
+// A chain tip in the applied tip's slot under another hash is a block the
+// ledger has not applied, so it counts as ahead like a later slot does; a
+// chain tip in an earlier slot cannot carry a block that extends the forecast.
+func TestChainAheadOfAppliedTip(t *testing.T) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	cm, err := chain.NewManager(context.Background(), db, nil)
+	require.NoError(t, err)
+	primary := cm.PrimaryChain()
+	blocks, err := fixtures.GenerateConwayChain(
+		1,
+		lcommon.Blake2b256{},
+		300_000,
+		1_000,
+		2,
+	)
+	require.NoError(t, err)
+	for _, block := range blocks {
+		require.NoError(t, primary.AddBlock(context.Background(), block, nil))
+	}
+	chainTip := primary.Tip().Point
+
+	cases := map[string]struct {
+		applied ocommon.Point
+		want    bool
+	}{
+		"applied tip is the chain tip": {
+			applied: chainTip,
+		},
+		"chain tip in a later slot": {
+			applied: ocommon.NewPoint(chainTip.Slot-1, []byte("earlier")),
+			want:    true,
+		},
+		"chain tip in the same slot under another hash": {
+			applied: ocommon.NewPoint(chainTip.Slot, []byte("other fork")),
+			want:    true,
+		},
+		"chain tip in an earlier slot": {
+			applied: ocommon.NewPoint(chainTip.Slot+1, []byte("later")),
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			ls := &LedgerState{chain: primary}
+			ls.tip.Store(&tipSnapshot{
+				currentTip: ochainsync.Tip{Point: tc.applied},
+			})
+			require.Equal(t, tc.want, ls.chainAheadOfAppliedTip())
+		})
+	}
 }
 
 // connectsToLocalChain decides whether a held header can still be released by

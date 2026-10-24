@@ -34,6 +34,10 @@ import (
 // model-specific error when the public method contract requires one.
 var ErrNotFound = errors.New("metadata not found")
 
+// ErrSyncStateTooLarge reports a sync_state value above the caller's byte
+// limit. The value is not read.
+var ErrSyncStateTooLarge = errors.New("sync state value exceeds size limit")
+
 // The interfaces below are the compiled-in metadata provider contract
 // (database/plugin/PLUGIN_DEVELOPMENT.md). A provider maintained outside this
 // repository builds against a pinned module version, so adding a method or a
@@ -871,13 +875,17 @@ type UtxoStore interface {
 
 	// GetUtxoBalanceByAddress returns the live-UTxO lovelace balance,
 	// per-asset balances (ordered by policy id then name), and live UTxO
-	// count for the given address, aggregated in SQL. Payment-credential
-	// mode aggregates across address forms. Exact mode returns
+	// count for the given address. Payment-credential mode aggregates
+	// across address forms. Exact mode returns
 	// models.ErrExactAddressRequiresCbor; exact summaries use the coordinated
-	// Database query path instead.
+	// Database query path instead. The read stops with
+	// models.ErrAddressBalanceLimit as soon as it visits more outputs or
+	// accumulates more distinct assets than limits allow, and stops when the
+	// transaction's context ends.
 	GetUtxoBalanceByAddress(
 		lcommon.Address,
 		models.UtxoAddressMatchMode,
+		models.AddressBalanceLimits,
 		types.Txn,
 	) (models.AddressBalance, error)
 
@@ -988,14 +996,47 @@ type UtxoStore interface {
 	// schema: for atSlot near the live tip (the common caller, a pinned
 	// LocalStateQuery point), "added_slot <= atSlot" matches nearly every
 	// row ever created, live or already spent, so this is effectively a
-	// full-table scan. Callers pin this cost to genuinely pinned queries
-	// only, never the live (unpinned) path, which keeps using
-	// IterateLiveUtxos' indexed deleted_slot = 0 filter unchanged.
+	// full-table scan. A whole-UTxO walk on an acquired view pays it for a
+	// tip acquire too, through UtxoRefsAsOfAfterID, so it can read in short
+	// transactions as of the snapshot's tip.
 	IterateUtxosAsOf(
 		atSlot uint64,
 		txn types.Txn,
 		fn func(*models.Utxo) error,
 	) error
+
+	// IterateLiveUtxosContext is IterateLiveUtxos with the scan bound to
+	// ctx, so cancellation stops it between rows while txn still supplies
+	// the snapshot.
+	IterateLiveUtxosContext(
+		ctx context.Context,
+		txn types.Txn,
+		fn func(*models.Utxo) error,
+	) error
+
+	// IterateUtxosAsOfContext is IterateUtxosAsOf with the scan bound to
+	// ctx, so cancellation stops it between rows while txn still supplies
+	// the snapshot.
+	IterateUtxosAsOfContext(
+		ctx context.Context,
+		atSlot uint64,
+		txn types.Txn,
+		fn func(*models.Utxo) error,
+	) error
+
+	// UtxoRefsAsOfAfterID returns up to limit UTxO rows live as of atSlot
+	// (IterateUtxosAsOf's predicate) whose row id is greater than afterID,
+	// in ascending id order, populating only ID, TxId and OutputIdx. Paging
+	// on the row id lets a caller walk the whole set in short transactions:
+	// a row keeps its id for its whole life, so a later page cannot return
+	// a row an earlier page already did.
+	UtxoRefsAsOfAfterID(
+		ctx context.Context,
+		atSlot uint64,
+		afterID uint,
+		limit int,
+		txn types.Txn,
+	) ([]models.Utxo, error)
 
 	// MarkUtxosDeletedAtSlot marks every live UTxO row matching one
 	// of refs as deleted at atSlot. Refs that don't match any live
@@ -1106,10 +1147,13 @@ type TransactionStore interface {
 
 	// CountTransactionsByPaymentCred returns the total number of
 	// transactions involving the provided payment credential across every
-	// address that carries it, regardless of staking part. Used by the
-	// Blockfrost payment-credential (addr_vkh/script) address lookups.
+	// address that carries it, regardless of staking part. paymentScript
+	// selects a script credential rather than a key credential sharing the
+	// hash. Used by the Blockfrost payment-credential (addr_vkh/script)
+	// address lookups.
 	CountTransactionsByPaymentCred(
 		[]byte, // paymentKey
+		bool, // paymentScript
 		types.Txn,
 	) (int, error)
 
@@ -1464,6 +1508,15 @@ type StakeSnapshotStore interface {
 		types.Txn,
 	) ([]*models.PoolStakeSnapshot, error)
 
+	// GetPoolStakeSnapshotsByEpochBounded retrieves at most maxRows pool
+	// stake snapshots for an epoch.
+	GetPoolStakeSnapshotsByEpochBounded(
+		uint64, // epoch
+		string, // snapshotType
+		int, // maxRows
+		types.Txn,
+	) ([]*models.PoolStakeSnapshot, error)
+
 	// GetPoolStakeSnapshotsForPools retrieves the snapshot rows for just the
 	// pools named, for a caller wanting a bounded subset rather than a whole
 	// epoch. A pool the snapshot has no row for is absent from the result.
@@ -1654,6 +1707,7 @@ type MetadataStore interface {
 	StakeSnapshotStore
 	TransactionStore
 	UtxoStore
+	HistoryStore
 
 	// Bulk import methods (ledger state restore from snapshot)
 
@@ -1777,6 +1831,14 @@ type MetadataStore interface {
 	// matching deregistration row. Used to restore the in-memory tracked-UTxO
 	// set on startup.
 	FindUnspentMidnightRegistrations() ([]models.MidnightRegistration, error)
+
+	// ResetMidnightRegistrationState clears registration and deregistration
+	// history. The caller supplies a transaction so the clear can be committed
+	// atomically with a pending rebuild marker.
+	ResetMidnightRegistrationState(types.Txn) error
+	// MidnightRegistrationStateExists reports whether either registration table
+	// contains rows.
+	MidnightRegistrationStateExists(types.Txn) (bool, error)
 
 	// DeleteMidnightAssetCreatesByBlock removes all cNIGHT create rows for
 	// the given block number and returns them so the caller can update the
@@ -2038,6 +2100,15 @@ type MetadataStore interface {
 		types.Txn,
 	) (uint64, bool, error)
 
+	// LatestPoolOpCertSequenceInRange returns the highest op-cert sequence
+	// recorded for a pool between the inclusive slot bounds.
+	LatestPoolOpCertSequenceInRange(
+		lcommon.PoolKeyHash,
+		uint64, // startSlot
+		uint64, // endSlot
+		types.Txn,
+	) (uint64, bool, error)
+
 	// PoolOpCertSequencesExistAtSlot reports whether any pool has an op-cert
 	// sequence row recorded at exactly slot. A Mithril restore writes the
 	// certified HeaderState counter map at its anchor slot and applies no
@@ -2116,6 +2187,18 @@ type MetadataStore interface {
 		uint64, // snapshotSlot
 		types.Txn,
 	) ([]models.PoolRegistration, error)
+
+	// GetPoolDepositsHeld returns, for each requested pool with a
+	// registration, the deposit its latest registration retains: the
+	// deposit_held column, or deposit_amount for a row written before that
+	// column existed. A re-registration of a still-registered pool carries
+	// the earlier deposit forward, so this is not the latest certificate's
+	// own charge. Pools without a registration, or whose deposit is unknown
+	// (both columns NULL), are absent from the map.
+	GetPoolDepositsHeld(
+		[]lcommon.PoolKeyHash,
+		types.Txn,
+	) (map[string]uint64, error)
 
 	// GetPoolByVrfKeyHash retrieves the pool that currently claims the
 	// given VRF key hash, as of the given epoch's start slot. Returns nil
@@ -2503,6 +2586,23 @@ type MetadataStore interface {
 		types.Txn,
 	) ([]models.StakeCredentialRef, error)
 
+	// GetActiveDelegatorCountsByPool counts the active accounts delegated to
+	// each requested pool with one grouped query. Pools without a delegator
+	// are absent from the map.
+	GetActiveDelegatorCountsByPool(
+		[]lcommon.PoolKeyHash,
+		types.Txn,
+	) (map[string]uint64, error)
+
+	// GetActiveDelegatorCredentialsByPool returns the stake credentials of the
+	// active accounts delegated to each requested pool, in the ledger's
+	// credential order (script credentials first, then by hash). Pools
+	// without a delegator are absent from the map.
+	GetActiveDelegatorCredentialsByPool(
+		[]lcommon.PoolKeyHash,
+		types.Txn,
+	) (map[string][]models.StakeCredentialRef, error)
+
 	// ClearDelegationsToRetiredPool removes every account delegation pointing
 	// at the given reaped pool, stamping added_slot with the epoch-boundary
 	// slot so the clear is rollback-safe. The delegation half of POOLREAP; see
@@ -2622,6 +2722,123 @@ type MetadataStore interface {
 		[]byte, // assetName
 		types.Txn,
 	) (initialMintTxHash []byte, mintOrBurnCount int, err error)
+
+	// ListMintedAssets returns the distinct assets with a recorded mint or
+	// burn event, ordered by their first event (oldest first, or newest first
+	// when descending) and restricted to one policy when policyID is not nil.
+	// A limit of zero or less applies no limit. API storage mode only: the
+	// mint/burn history is not recorded in core mode.
+	ListMintedAssets(
+		policyID []byte,
+		limit int,
+		offset int,
+		descending bool,
+		txn types.Txn,
+	) ([]models.MintedAsset, error)
+
+	// CountMintedAssets returns the number of distinct assets
+	// ListMintedAssets would list for the same policy filter. API storage
+	// mode only: core mode records no mint/burn history and returns zero.
+	CountMintedAssets(policyID []byte, txn types.Txn) (int, error)
+
+	// GetAssetMintBurnHistory returns the mint and burn events of one asset
+	// in chain order (oldest first, or newest first when descending). A limit
+	// of zero or less applies no limit. API storage mode only: the mint/burn
+	// history is not recorded in core mode, which returns no events.
+	GetAssetMintBurnHistory(
+		policyID lcommon.Blake2b224,
+		assetName []byte,
+		limit int,
+		offset int,
+		descending bool,
+		txn types.Txn,
+	) ([]models.AssetMintBurn, error)
+
+	// CountAssetMintBurnHistory returns the number of mint and burn events
+	// of one asset. API storage mode only: core mode records none and
+	// returns zero.
+	CountAssetMintBurnHistory(
+		policyID lcommon.Blake2b224,
+		assetName []byte,
+		txn types.Txn,
+	) (int, error)
+
+	// GetAssetTransactions returns the transactions that mint or burn an
+	// asset, create an output holding it, or spend such an output, in chain
+	// order (oldest first, or newest first when descending), optionally
+	// restricted to an inclusive (slot, block index) range. Only the hash,
+	// block hash, slot and block index of each transaction are populated. A
+	// limit of zero or less applies no limit.
+	GetAssetTransactions(
+		policyID lcommon.Blake2b224,
+		assetName []byte,
+		from *models.AddressTransactionPosition,
+		to *models.AddressTransactionPosition,
+		limit int,
+		offset int,
+		descending bool,
+		txn types.Txn,
+	) ([]models.Transaction, error)
+
+	// CountAssetTransactions returns the number of transactions
+	// GetAssetTransactions would list for the same range.
+	CountAssetTransactions(
+		policyID lcommon.Blake2b224,
+		assetName []byte,
+		from *models.AddressTransactionPosition,
+		to *models.AddressTransactionPosition,
+		txn types.Txn,
+	) (int, error)
+
+	// ListScriptHashes returns the hashes of the stored scripts in the order
+	// they were first recorded (oldest first, or newest first when
+	// descending). A limit of zero or less applies no limit.
+	ListScriptHashes(
+		limit int,
+		offset int,
+		descending bool,
+		txn types.Txn,
+	) ([][]byte, error)
+
+	// CountScripts returns the number of stored scripts.
+	CountScripts(txn types.Txn) (int, error)
+
+	// GetScriptRedeemers returns the redeemers that executed a script in
+	// chain order (oldest first, or newest first when descending). API
+	// storage mode only, and only for transactions applied after the
+	// redeemer_script index existed. A limit of zero or less applies no
+	// limit.
+	GetScriptRedeemers(
+		hash lcommon.ScriptHash,
+		limit int,
+		offset int,
+		descending bool,
+		txn types.Txn,
+	) ([]models.ScriptRedeemerRef, error)
+
+	// CountScriptRedeemers returns the number of redeemers that executed a
+	// script.
+	CountScriptRedeemers(hash lcommon.ScriptHash, txn types.Txn) (int, error)
+
+	// GetScriptReferenceUtxos returns the live UTxOs carrying the script as a
+	// reference script, in the order the outputs were recorded (oldest
+	// first, or newest first when descending). API storage mode only, and
+	// only for outputs recorded after the utxo_reference_script index
+	// existed. A limit of zero or less applies no limit.
+	GetScriptReferenceUtxos(
+		hash lcommon.ScriptHash,
+		limit int,
+		offset int,
+		descending bool,
+		txn types.Txn,
+	) ([]models.Utxo, error)
+
+	// CountScriptReferenceUtxos returns the number of live UTxOs carrying the
+	// script as a reference script.
+	CountScriptReferenceUtxos(
+		hash lcommon.ScriptHash,
+		txn types.Txn,
+	) (int, error)
 
 	// GetScript retrieves a script by its hash.
 	GetScript(
@@ -3026,9 +3243,9 @@ type MetadataStore interface {
 
 	// DeleteRewardStakeInputBeforeEpoch deletes only reward_stake_input rows
 	// older than the retained snapshot window, leaving reward_account_output
-	// intact. This is the API storage-mode pruning path, used so the
-	// Blockfrost account reward-history endpoint can serve an account's full
-	// reward history. See rewardstate.DeleteStakeInputBeforeEpoch.
+	// intact. This is the Koios-parity pruning path, used so the observer
+	// can read reward_account_output behind the tip. API storage mode prunes
+	// neither table. See rewardstate.DeleteStakeInputBeforeEpoch.
 	DeleteRewardStakeInputBeforeEpoch(uint64, types.Txn) error
 
 	// Network state methods
@@ -3110,6 +3327,12 @@ type MetadataStore interface {
 	// GetSyncState retrieves a sync state value by key.
 	// Returns empty string if the key does not exist.
 	GetSyncState(string, types.Txn) (string, error)
+
+	// GetSyncStateBounded retrieves a sync state value by key only when its
+	// size is at most maxBytes; a larger value is not read and the call fails
+	// with ErrSyncStateTooLarge. Returns empty string if the key does not
+	// exist.
+	GetSyncStateBounded(string, int, types.Txn) (string, error)
 
 	// SetSyncState stores or updates a sync state value.
 	SetSyncState(string, string, types.Txn) error
@@ -3222,11 +3445,32 @@ type MetadataStore interface {
 	) ([]models.MidnightCommitteeCandidateRegistration, error)
 }
 
+// AddressTransactionIndexRebuilder upgrades the API-mode address index when
+// persisted rows predate payment-credential kind tracking. The callback must
+// reconstruct one transaction's complete address associations from retained
+// ledger data; an error leaves the index unavailable for retry on next start.
+type AddressTransactionIndexRebuilder interface {
+	RebuildAddressTransactionIndex(
+		context.Context,
+		func(context.Context, models.Transaction) ([]models.AddressTransaction, error),
+	) error
+}
+
 // BulkLoadOptimizer is an optional interface that metadata stores can
 // implement to provide optimized settings for bulk loading operations.
 // The load command checks for this interface and uses it when available.
 type BulkLoadOptimizer interface {
 	SetBulkLoadPragmas() error
+	RestoreNormalPragmas() error
+}
+
+// CatchUpPragmaTuner is an optional interface for metadata stores that can
+// speed up a long write burst on a database that keeps serving, such as a
+// node-managed Mithril stream catch-up. SetCatchUpPragmas changes only
+// settings that cannot lose a committed write on a crash or power loss;
+// RestoreNormalPragmas restores the normal settings.
+type CatchUpPragmaTuner interface {
+	SetCatchUpPragmas() error
 	RestoreNormalPragmas() error
 }
 

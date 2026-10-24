@@ -18,6 +18,8 @@ import (
 	"context"
 	"fmt"
 	"time"
+
+	"github.com/blinklabs-io/dingo/database/types"
 )
 
 // auth_committee_hot records one row per AuthCommitteeHot certificate and
@@ -143,7 +145,7 @@ WHERE added_slot <= ?
 ORDER BY cold_credential_tag, cold_credential
 LIMIT ?`
 
-const committeeHotAuthSupersededIDsQuery = `
+const committeeHotAuthSupersededIDsQuery = `-- name: GetSupersededCommitteeHotAuthorizationIDs :many
 SELECT id
 FROM auth_committee_hot
 WHERE cold_credential_tag = ?
@@ -152,7 +154,7 @@ WHERE cold_credential_tag = ?
 ORDER BY added_slot DESC, certificate_id DESC
 LIMIT ? OFFSET 1`
 
-const committeeHotAuthorizationDeleteIDQuery = "DELETE FROM auth_committee_hot WHERE id = ?"
+const committeeHotAuthorizationDeleteIDQuery = "-- name: DeleteCommitteeHotAuthorizationByID :exec\nDELETE FROM auth_committee_hot WHERE id = ?"
 
 type committeeAuthIdentity struct {
 	tag        uint8
@@ -256,6 +258,12 @@ func (s *Store) pruneCommitteeHotAuthorizations(
 	coldCredential []byte,
 	tipSlot uint64,
 ) (int64, error) {
+	// API storage mode keeps every authorization: the Blockfrost committee
+	// vote endpoints map a cold credential to all the hot credentials it has
+	// authorized, superseded ones included.
+	if s.storageMode == types.StorageModeAPI {
+		return 0, nil
+	}
 	s.committeeAuthImmutableSlotMu.RLock()
 	defer s.committeeAuthImmutableSlotMu.RUnlock()
 	horizon, ok := s.committeeAuthHorizonLocked(tipSlot)
@@ -352,6 +360,9 @@ func (s *Store) pruneCommitteeHotAuthorizations(
 func (s *Store) pruneCommitteeHotAuthorizationsMaintenance(
 	ctx context.Context,
 ) error {
+	if s.storageMode == types.StorageModeAPI {
+		return nil
+	}
 	tipTxn := s.ReadTransaction(ctx)
 	tip, err := s.GetTip(tipTxn) //nolint:contextcheck // tipTxn carries ctx
 	_ = tipTxn.Rollback()
