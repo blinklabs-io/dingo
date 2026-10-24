@@ -611,6 +611,79 @@ func TestSetTransactionPersistsAssetUtxoAddress(t *testing.T) {
 	require.Equal(t, tx.Outputs()[0].Address().String(), address)
 }
 
+func TestSetTransactionPersistsAdaOnlyUtxoAddress(t *testing.T) {
+	t.Parallel()
+	store := newAPIModeSQLiteStore(t, nil)
+	fx := buildSharedCredentialTx(t, 0x53)
+	output, err := mockledger.NewTransactionOutputBuilder().
+		WithAddress(fx.tx.Outputs()[0].Address().String()).
+		WithLovelace(3_000_000).
+		Build()
+	require.NoError(t, err)
+	txID := bytes.Repeat([]byte{0x53}, 32)
+	tx := mockledger.NewTransactionBuilder()
+	tx.WithId(txID)
+	tx.WithOutputs(output)
+	tx.WithValid(true)
+	require.NoError(t, store.SetTransaction(
+		tx, ocommon.Point{Slot: 453, Hash: txID}, 0, nil, true, nil, 0,
+	))
+
+	var address string
+	require.NoError(t, store.writeDB.QueryRow(
+		"SELECT ua.address FROM utxo_address ua "+
+			"JOIN utxo u ON u.id = ua.utxo_id "+
+			"WHERE u.tx_id = ? AND u.output_idx = 0",
+		txID,
+	).Scan(&address))
+	require.Equal(t, output.Address().String(), address)
+}
+
+func TestSetTransactionSkipsAssetUtxoAddressInCoreMode(t *testing.T) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+	require.Equal(t, types.StorageModeCore, store.storageMode)
+	tx, point, _, _ := assetOutputTx(t, 0x52)
+	require.NoError(t, store.SetTransaction(
+		tx, point, 0, nil, true, nil, 0,
+	))
+
+	var count int
+	require.NoError(t, store.writeDB.QueryRow(
+		"SELECT COUNT(*) FROM utxo_address ua "+
+			"JOIN utxo u ON u.id = ua.utxo_id "+
+			"WHERE u.tx_id = ? AND u.output_idx = 0",
+		tx.Hash().Bytes(),
+	).Scan(&count))
+	require.Zero(t, count, "core mode must not persist API-only UTxO addresses")
+}
+
+// TestDeferredAssetRelationsSkipAddressInCoreMode pins that core mode never
+// resolves the API-only address, so an asset-bearing UTxO without Address or
+// CBOR still persists its relations.
+func TestDeferredAssetRelationsSkipAddressInCoreMode(t *testing.T) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+	require.Equal(t, types.StorageModeCore, store.storageMode)
+	utxo := models.Utxo{
+		Assets: []models.Asset{{
+			PolicyId: bytes.Repeat([]byte{0x54}, 28),
+			Name:     []byte("tok"),
+			Amount:   1,
+		}},
+	}
+	var rows rowBatch
+	require.NoError(t, store.persistUtxoRelationsWithDeferredAssets(
+		context.Background(), store.writeDB, &utxo, 1, &rows,
+	))
+	for _, entry := range rows.entries {
+		require.NotEqual(
+			t, utxoAddressShape.table, entry.shape.table,
+			"core mode must not queue API-only UTxO addresses",
+		)
+	}
+}
+
 func tableCounts(
 	t *testing.T,
 	store *Store,

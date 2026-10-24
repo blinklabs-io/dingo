@@ -292,7 +292,8 @@ type BlockfrostNode interface {
 	// AddressUTXOs returns the paginated current UTxOs for
 	// an address along with the total number of matching
 	// results before pagination.
-	AddressUTXOs(ctx context.Context,
+	AddressUTXOs(
+		ctx context.Context,
 		address string,
 		params PaginationParams,
 	) ([]AddressUTXOInfo, int, error)

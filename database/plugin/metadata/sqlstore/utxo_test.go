@@ -2127,10 +2127,12 @@ func TestImportUtxosDeferredRewardLiveStakeRefreshRebuildsCorrectly(
 
 func TestImportUtxosDeferredSQLiteBatchesLiveRows(t *testing.T) {
 	t.Parallel()
-	store := newMigratedSQLiteStore(t)
+	// API mode, where every UTxO write carries its utxo_address row.
+	store := newAPIModeSQLiteStore(t, nil)
 
 	existing := *utxoForInsertCacheTest(90, 0, 5_000_000)
 	existing.AddedSlot = 100
+	existing.Address = []byte("existing-address")
 	require.NoError(t, store.ImportUtxos([]models.Utxo{existing}, nil))
 	markUtxoSpentDirect(t, store, existing.TxId, 0, importConflictHash32(0xaa), 150)
 
@@ -2139,8 +2141,8 @@ func TestImportUtxosDeferredSQLiteBatchesLiveRows(t *testing.T) {
 	utxos[0] = existing
 	for i := 1; i < len(utxos); i++ {
 		utxos[i] = *utxoForInsertCacheTest(byte(100+i), 0, 1_000_000)
+		utxos[i].Address = fmt.Appendf(nil, "test-address-%d", i)
 	}
-	utxos[1].Address = []byte("test-address")
 	utxos[1].Assets = []models.Asset{{
 		Name:        []byte("token"),
 		PolicyId:    bytes.Repeat([]byte{0xab}, 28),
@@ -2166,7 +2168,40 @@ func TestImportUtxosDeferredSQLiteBatchesLiveRows(t *testing.T) {
 		"SELECT COUNT(*) FROM utxo_address",
 	).Scan(&addressCount))
 	require.Equal(t, 1, assetCount)
-	require.Equal(t, 1, addressCount)
+	require.Equal(t, outputCount, addressCount)
+}
+
+// TestImportUtxosDeferredSQLiteSkipsAddressInCoreMode proves the batched
+// import omits the API-only utxo_address relation in core mode, even for an
+// asset-bearing output.
+func TestImportUtxosDeferredSQLiteSkipsAddressInCoreMode(t *testing.T) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+	require.Equal(t, types.StorageModeCore, store.storageMode)
+
+	utxo := *utxoForInsertCacheTest(0x91, 0, 1_000_000)
+	utxo.Address = []byte("test-address")
+	utxo.Assets = []models.Asset{{
+		Name:        []byte("token"),
+		PolicyId:    bytes.Repeat([]byte{0xab}, 28),
+		Fingerprint: []byte("asset1"),
+		Amount:      types.Uint64(9),
+	}}
+	require.NoError(t, store.ImportUtxosDeferredRewardLiveStakeRefresh(
+		[]models.Utxo{utxo},
+		nil,
+	))
+
+	var assetCount, addressCount int
+	require.NoError(t, store.writeDB.QueryRow(
+		"SELECT COUNT(*) FROM asset",
+	).Scan(&assetCount))
+	require.NoError(t, store.writeDB.QueryRow(
+		"SELECT COUNT(*) FROM utxo_address",
+	).Scan(&addressCount))
+	require.Equal(t, 1, assetCount)
+	require.Zero(t, addressCount,
+		"core mode must not persist API-only UTxO addresses")
 }
 
 // TestImportUtxosDeferredSQLiteDoesNotMutateInput proves the batched path

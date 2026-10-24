@@ -514,8 +514,8 @@ func (d *Database) init(ctx context.Context) error {
 			return fmt.Errorf("rebuild typed address transaction history: %w", err)
 		}
 	}
-	if err := d.backfillLiveAssetUtxoAddresses(ctx); err != nil {
-		return fmt.Errorf("backfill live asset UTxO addresses: %w", err)
+	if err := d.backfillUtxoAddresses(ctx); err != nil {
+		return fmt.Errorf("backfill UTxO addresses: %w", err)
 	}
 	return nil
 }
