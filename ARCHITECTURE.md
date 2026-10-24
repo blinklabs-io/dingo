@@ -996,10 +996,17 @@ connection shutdown. Per-connection buckets also carry the protocol
 generation: after an old generation closes, a replacement connection that
 reuses its `ConnectionId` starts with an empty bucket while the old senders
 remain charged against the process-wide limit until they exit.
+Point validation has a separate 32-request process-wide ceiling. Saturation
+answers `NoBlocks` before another database transaction is opened.
 
 When a peer requests a range, `ouroboros/blockfetch.go` opens chain iterators
 at the requested start and end points to validate both endpoints against the
-serving chain, then sends `StartBatch`. Checking only
+serving chain, then sends `StartBatch`. A persistent-chain iterator first
+checks local point metadata, so a missing point cannot fall through to a remote
+archive. It resolves the block index before taking the chain lock and verifies
+the chain mutation generation after acquiring it, keeping remote reads outside
+the lock without accepting an index invalidated by a concurrent rollback.
+Checking only
 the end slot let a peer name an end point the server does not hold and receive
 a slot-bounded prefix of the server's own chain in its place. An end point
 that does not resolve takes the same
@@ -1186,10 +1193,10 @@ start-point-not-found branch: the server answers `NoBlocks` (which the client
 receives asynchronously through `RequestRange`'s `RangeDoneFunc`, published as
 a `BlockfetchEvent` with `RangeErr` wrapping `blockfetch.ErrNoBlocks`, and fed
 into the same `noteBlockfetchRangeUnavailable` streak a batch that never
-extends the chain feeds, driving peer failover once it repeats) and repeated
-NoBlocks for the same point closes the stuck peer. This condition is normal
-during a tip slot battle, where two nodes each roll back their own block in
-favor of the other's and are then asked for a body neither still has.
+extends the chain feeds, driving peer failover once it repeats). Five failed
+lookups without a successful range close the connection regardless of whether
+the peer rotates the requested point. The allowance covers the small number of
+different missing points a tip slot battle can produce.
 For an in-memory ephemeral fork, the common-prefix portion of that index
 check and iterator lookup is resolved against the primary chain's active
 in-memory points and cache; the fork's divergent tail is resolved from its own

@@ -218,6 +218,7 @@ type Ouroboros struct {
 	localstatequeryAcquireMutex sync.Mutex
 	blockfetchNoBlocksCounts    map[ouroboros.ConnectionId]blockfetchNoBlocksState
 	blockfetchRangeAdmission    *blockfetchRangeAdmission
+	blockfetchLookupSlots       chan struct{}
 	// blockfetchRangeBytes returns the expected wire size of a block range
 	// for RangeRequest.ExpectedBytes, or 0 for no estimate. Defaults to the
 	// ledger's queued-header estimate; tests override it.
@@ -778,6 +779,10 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 		),
 		blockfetchNoBlocksCounts: make(
 			map[ouroboros.ConnectionId]blockfetchNoBlocksState,
+		),
+		blockfetchLookupSlots: make(
+			chan struct{},
+			blockfetchMaxConcurrentPointLookups,
 		),
 		chainsyncStats: make(
 			map[ouroboros.ConnectionId]*chainsyncPeerStats,
