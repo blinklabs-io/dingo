@@ -230,11 +230,27 @@ func metricValue(
 	return 0
 }
 
+// unavailableStake answers like a node whose ledger cannot read the electing
+// stake distribution.
+type unavailableStake struct{}
+
+func (unavailableStake) PoolActiveStake(ocommon.PoolKeyHash) (uint64, error) {
+	return 0, fmt.Errorf("%w: snapshot not captured", ErrChainStateUnavailable)
+}
+
 func newNoStakeAuthenticator(t *testing.T) *ocommon.MessageAuthenticator {
+	t.Helper()
+	return newStakeAuthenticator(t, noStake{})
+}
+
+func newStakeAuthenticator(
+	t *testing.T,
+	stake ocommon.StakeAuthority,
+) *ocommon.MessageAuthenticator {
 	t.Helper()
 	auth, err := ocommon.NewMessageAuthenticator(
 		ocommon.MessageAuthenticatorConfig{
-			StakeAuthority: noStake{},
+			StakeAuthority: stake,
 			CurrentSlot: func() (uint64, error) {
 				return 0, nil
 			},
@@ -317,6 +333,15 @@ func TestStackSubmissionRejectReasons(t *testing.T) {
 			msg:   newTestMessage([]byte("anon"), soon),
 			want:  ocommon.InvalidReason{},
 			label: reasonInvalid,
+		},
+		{
+			name: "stake distribution unavailable",
+			cfg: StackConfig{
+				Authenticator: newStakeAuthenticator(t, unavailableStake{}),
+			},
+			msg:   newTestMessage([]byte("unknown"), soon),
+			want:  ocommon.OtherReason{},
+			label: reasonOther,
 		},
 		{
 			name:  "expiry beyond message ttl",
