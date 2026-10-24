@@ -360,6 +360,21 @@ func (p *MessageMempool) Get(id []byte) (ocommon.DmqMessage, bool) {
 	return cloneDmqMessage(e.msg), true
 }
 
+// Has reports whether the pool holds a message with the given ID. Unlike Get
+// it copies nothing, so it suits a check made for every announced ID.
+func (p *MessageMempool) Has(id []byte) bool {
+	if len(id) != 32 {
+		return false
+	}
+	var key [32]byte
+	copy(key[:], id)
+
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	_, ok := p.byID[key]
+	return ok
+}
+
 // NextForPeer returns the next message peerID has not yet seen, in arrival
 // order, and advances that peer's cursor past it. It returns the zero
 // message and false once the peer has caught up to the current log. An
