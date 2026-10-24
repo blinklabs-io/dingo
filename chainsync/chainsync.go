@@ -1266,10 +1266,11 @@ func (s *State) RewindTrackedClientsTo(
 	return ret
 }
 
-// RecordObservedHeader stores the raw per-connection header ancestry before
-// cross-peer dedup can suppress delivery into the ledger queue. This lets
-// fork resolution reconstruct the selected peer's candidate fragment even
-// when earlier headers were first seen from another peer.
+// RecordObservedHeader stores raw per-connection header ancestry before
+// cross-peer dedup can suppress delivery into the ledger queue. A zero
+// verification generation marks a deferred or withheld header; ledger fork
+// resolution can use it only as candidate-path input and must validate the
+// complete linked path before caching a verdict.
 func (s *State) RecordObservedHeader(h ObservedHeader) {
 	if h.BlockHeader == nil || len(h.Point.Hash) == 0 {
 		return
@@ -1373,7 +1374,8 @@ func (s *State) ClearObservedHeaderHistory(
 }
 
 // ClearObservedHeaderHistoryFrom removes a rejected header and every header
-// observed after it while retaining the independently verified prefix. When
+// observed after it while retaining the earlier candidate prefix. Entries
+// with no current verdict remain untrusted and are revalidated when used. When
 // the rejected hash is not retained, removal starts at the first retained
 // header at or beyond the point's slot; if none exists, the history is kept.
 func (s *State) ClearObservedHeaderHistoryFrom(

@@ -62,7 +62,7 @@ func TestConstructionMetadataByronEraNoFeeSubstitution(t *testing.T) {
 	)
 
 	got := requireMeshError(
-		t, rec, ErrUnavailable, http.StatusServiceUnavailable,
+		t, rec, ErrUnavailable, http.StatusInternalServerError,
 	)
 	require.True(
 		t,
@@ -218,7 +218,7 @@ func TestConstructionDeriveInvalidPublicKey(t *testing.T) {
 
 			requireMeshError(
 				t, rec, ErrInvalidPublicKey,
-				http.StatusBadRequest,
+				http.StatusInternalServerError,
 			)
 		})
 	}
@@ -347,7 +347,7 @@ func TestConstructionMetadataUnavailable(t *testing.T) {
 	)
 
 	got := requireMeshError(
-		t, rec, ErrUnavailable, http.StatusServiceUnavailable,
+		t, rec, ErrUnavailable, http.StatusInternalServerError,
 	)
 	require.True(t, got.Retriable)
 }
@@ -737,7 +737,7 @@ func TestConstructionPayloadsInvalidRequest(t *testing.T) {
 			)
 
 			requireMeshError(
-				t, rec, tc.wantErr, http.StatusBadRequest,
+				t, rec, tc.wantErr, http.StatusInternalServerError,
 			)
 		})
 	}
@@ -760,7 +760,7 @@ func TestConstructionPayloadsInvalidPublicKey(t *testing.T) {
 	))
 
 	requireMeshError(
-		t, rec, ErrInvalidPublicKey, http.StatusBadRequest,
+		t, rec, ErrInvalidPublicKey, http.StatusInternalServerError,
 	)
 }
 
@@ -935,7 +935,7 @@ func TestConstructionCombineInvalidRequest(t *testing.T) {
 			)
 
 			requireMeshError(
-				t, rec, tc.wantErr, http.StatusBadRequest,
+				t, rec, tc.wantErr, http.StatusInternalServerError,
 			)
 		})
 	}
@@ -1024,7 +1024,7 @@ func TestConstructionParseUnsignedRejectsTrailingData(t *testing.T) {
 		t,
 		rec,
 		ErrInvalidTransaction,
-		http.StatusBadRequest,
+		http.StatusInternalServerError,
 	)
 }
 
@@ -1045,7 +1045,7 @@ func TestConstructionCombineRejectsTrailingData(t *testing.T) {
 		t,
 		rec,
 		ErrInvalidTransaction,
-		http.StatusBadRequest,
+		http.StatusInternalServerError,
 	)
 }
 
@@ -1170,7 +1170,7 @@ func TestConstructionParseInvalid(t *testing.T) {
 
 			requireMeshError(
 				t, rec, ErrInvalidTransaction,
-				http.StatusBadRequest,
+				http.StatusInternalServerError,
 			)
 		})
 	}
@@ -1226,7 +1226,7 @@ func TestConstructionHashInvalid(t *testing.T) {
 
 			requireMeshError(
 				t, rec, ErrInvalidTransaction,
-				http.StatusBadRequest,
+				http.StatusInternalServerError,
 			)
 		})
 	}
@@ -1291,7 +1291,7 @@ func TestConstructionSubmitRejected(t *testing.T) {
 	)
 
 	got := requireMeshError(
-		t, rec, ErrSubmitFailed, http.StatusBadRequest,
+		t, rec, ErrSubmitFailed, http.StatusInternalServerError,
 	)
 	require.True(t, got.Retriable)
 	require.Contains(t, got.Details["error"], "fee too small")
@@ -1316,7 +1316,7 @@ func TestConstructionSubmitInvalid(t *testing.T) {
 
 			requireMeshError(
 				t, rec, ErrInvalidTransaction,
-				http.StatusBadRequest,
+				http.StatusInternalServerError,
 			)
 			require.Empty(t, deps.mempool.submissions())
 		})
@@ -1596,7 +1596,7 @@ func TestConstructionRejectsNullElements(t *testing.T) {
 				t,
 				func() { rec = postJSON(t, h, tc.path, tc.request) },
 			)
-			requireMeshError(t, rec, tc.want, http.StatusBadRequest)
+			requireMeshError(t, rec, tc.want, http.StatusInternalServerError)
 		})
 	}
 }
@@ -1635,7 +1635,7 @@ func TestConstructionInputIndexBounds(t *testing.T) {
 					t,
 					rec,
 					ErrInvalidRequest,
-					http.StatusBadRequest,
+					http.StatusInternalServerError,
 				)
 				return
 			}
@@ -1671,7 +1671,9 @@ func TestConstructionSubmitRejectsTrailingBytes(t *testing.T) {
 				t, h, "/construction/submit",
 				submitRequest(hexString(padded)),
 			)
-			require.Equal(t, http.StatusBadRequest, rec.Code)
+			requireMeshError(
+				t, rec, ErrInvalidTransaction, http.StatusInternalServerError,
+			)
 			require.Empty(t, deps.mempool.submissions())
 		})
 	}

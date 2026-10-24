@@ -671,7 +671,15 @@ func (n *Node) ouroboros() *ouroborosPkg.Ouroboros {
 // validation when that fails. Guard the pairing here, in the package that
 // makes it, so drift cannot quietly unpin mempool revalidation from its
 // ledger snapshot.
-var _ mempool.TxValidationSessionProvider = (*ledger.LedgerState)(nil)
+var (
+	_ mempool.TxValidationSessionProvider = (*ledger.LedgerState)(nil)
+	_ mempool.TxSizeLimitProvider         = (*ledger.LedgerState)(nil)
+)
+
+// The mempool resolves confirmed input addresses for its address index
+// through the same validator's session, again by interface assertion; losing
+// the method would leave those inputs out of the index with no error.
+var _ mempool.ResolvingTxValidationSessionProvider = (*ledger.LedgerState)(nil)
 
 //nolint:contextcheck // Run is the lifecycle boundary and derives n.ctx from the caller context.
 func (n *Node) Run(ctx context.Context) (runErr error) {
