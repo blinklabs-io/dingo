@@ -2567,6 +2567,15 @@ func (ls *LedgerState) SetTipForTesting(tip ochainsync.Tip) {
 	ls.publishSnapshotsLocked()
 }
 
+// MarkReachedTipForTesting latches the flag a node sets the first time it
+// reaches the stability window, as a live node at its tip has. It exists for
+// black-box tests that drive a started ledger as a live node without an
+// upstream connection: until the flag latches, the chain-iterator loop holds
+// each under-full batch while it waits for more blocks.
+func (ls *LedgerState) MarkReachedTipForTesting() {
+	ls.reachedTip.Store(true)
+}
+
 func (ls *LedgerState) eraList() []eras.EraDesc {
 	if len(ls.activeEras) > 0 {
 		return ls.activeEras
