@@ -177,7 +177,7 @@ func TestGenerateReportComparesByteExactReferenceWithoutNormalization(t *testing
 	}
 }
 
-func TestGenerateReportNormalizesRawByteExactReference(t *testing.T) {
+func TestGenerateReportAcceptsMatchingRawByteExactReference(t *testing.T) {
 	t.Parallel()
 	corpus := filepath.Join(t.TempDir(), "conway")
 	validDir := filepath.Join(corpus, "native_script", "valid")
@@ -204,7 +204,44 @@ func TestGenerateReportNormalizesRawByteExactReference(t *testing.T) {
 		t.Fatalf("report has failures: %+v", report.Failures)
 	}
 	if report.Totals.GeneratedDecodedReencodedActual != 1 {
-		t.Fatalf("normalized raw reference count = %d, want 1", report.Totals.GeneratedDecodedReencodedActual)
+		t.Fatalf("raw byte-exact reference count = %d, want 1", report.Totals.GeneratedDecodedReencodedActual)
+	}
+}
+
+func TestGenerateReportNormalizesNonByteExactReference(t *testing.T) {
+	t.Parallel()
+	corpus := filepath.Join(t.TempDir(), "conway")
+	validDir := filepath.Join(corpus, "credential", "valid")
+	if err := os.MkdirAll(validDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	canonical := append([]byte{0x82, 0x00, 0x58, 0x1c}, make([]byte, 28)...)
+	indefinite := append([]byte{0x9f, 0x00, 0x58, 0x1c}, make([]byte, 28)...)
+	indefinite = append(indefinite, 0xff)
+	if err := os.WriteFile(
+		filepath.Join(validDir, "valid.input.cbor"),
+		canonical,
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(validDir, "valid.expected.cbor"),
+		indefinite,
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	report, err := generateReport(corpus, testCorpusRevision, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !report.Successful {
+		t.Fatalf("report has failures: %+v", report.Failures)
+	}
+	if report.Totals.GeneratedDecodedReencodedActual != 1 {
+		t.Fatalf("normalized reference count = %d, want 1", report.Totals.GeneratedDecodedReencodedActual)
 	}
 }
 
