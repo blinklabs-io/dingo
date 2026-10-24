@@ -1577,7 +1577,7 @@ func decodeRawImmutableBlockBatch(
 	workerCount int,
 ) ([]chain.RawBlock, error) {
 	if len(rawBlocks) == 0 {
-		return rawBatch[:0], nil
+		return []chain.RawBlock{}, nil
 	}
 	if workerCount < 1 {
 		workerCount = 1
@@ -1593,11 +1593,11 @@ func decodeRawImmutableBlockBatch(
 	if workerCount == 1 {
 		for index := range rawBlocks {
 			if err := ctx.Err(); err != nil {
-				return nil, err
+				return rawBatch[:0], err
 			}
 			rawBlock, err := rawBlockFromImmutableBlock(&rawBlocks[index])
 			if err != nil {
-				return nil, fmt.Errorf(
+				return rawBatch[:0], fmt.Errorf(
 					"building raw block at slot %d: %w",
 					rawBlocks[index].Slot,
 					err,
@@ -1650,18 +1650,18 @@ func decodeRawImmutableBlockBatch(
 			close(jobs)
 			workers.Wait()
 			if firstErr != nil {
-				return nil, firstErr
+				return rawBatch[:0], firstErr
 			}
-			return nil, ctx.Err()
+			return rawBatch[:0], ctx.Err()
 		}
 	}
 	close(jobs)
 	workers.Wait()
 	if firstErr != nil {
-		return nil, firstErr
+		return rawBatch[:0], firstErr
 	}
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return rawBatch[:0], err
 	}
 	return rawBatch, nil
 }
