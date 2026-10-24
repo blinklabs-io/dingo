@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	nodeconsensus "github.com/blinklabs-io/dingo/consensus"
 	"github.com/blinklabs-io/dingo/internal/test/devnet"
 	"github.com/stretchr/testify/require"
 )
@@ -90,8 +91,16 @@ func TestAcceleratedScenarioTimeline(t *testing.T) {
 	)
 	defer cancelScenario()
 
+	networkMagic := cfg.NetworkMagic
+	if os.Getenv("DEVNET_CONSENSUS_PROVIDER") ==
+		nodeconsensus.TachysProviderName {
+		networkMagic = nodeconsensus.NetworkMagic(
+			networkMagic,
+			nodeconsensus.TachysIdentity,
+		)
+	}
 	observers := devnet.StartObservers(
-		scenarioCtx, endpoints, cfg.NetworkMagic, t.Logf,
+		scenarioCtx, endpoints, networkMagic, t.Logf,
 	)
 	defer observers.Stop()
 	group := observers.Group()

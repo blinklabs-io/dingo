@@ -27,6 +27,7 @@
 #   ./run-tests.sh                    # Run all devnet tests (default: all-dingo network)
 #   ./run-tests.sh --conformance      # Run against the dingo + cardano-node reference network
 #   ./run-tests.sh --accelerated      # Run accelerated timeline and governance scenarios
+#   ./run-tests.sh --tachys           # Run the Tachys multi-node timeline
 #   ./run-tests.sh -run TestBasic     # Run specific test pattern
 #   ./run-tests.sh --keep-up          # Don't tear down on success (for debugging)
 #
@@ -77,6 +78,7 @@ devnet_ports
 KEEP_UP=false
 ACCELERATED=false
 LEIOS=false
+TACHYS=false
 # Mode selection: default dingo (all-dingo network), --conformance for the
 # dingo + cardano-node reference network.
 MODE="${MODE:-dingo}"
@@ -88,11 +90,21 @@ for arg in "$@"; do
     --conformance) MODE="conformance" ;;
     --accelerated) ACCELERATED=true ;;
     --leios)       LEIOS=true ;;
+    --tachys)      TACHYS=true ;;
     -run|-run=*|-test.run|-test.run=*)
                    USER_RUN_FILTER=true; TEST_ARGS+=("${arg}") ;;
     *)             TEST_ARGS+=("${arg}") ;;
   esac
 done
+
+if [[ "${TACHYS}" == "true" && "${MODE}" != "dingo" ]]; then
+  echo "[run-tests] ERROR: --tachys requires the all-Dingo profile" >&2
+  exit 1
+fi
+if [[ "${TACHYS}" == "true" && "${LEIOS}" == "true" ]]; then
+  echo "[run-tests] ERROR: --tachys selects its own network spec" >&2
+  exit 1
+fi
 
 if [[ "${LEIOS}" == "true" && "${MODE}" != "dingo" ]]; then
   echo "[run-tests] ERROR: --leios requires the all-Dingo profile" >&2
@@ -112,6 +124,9 @@ if [[ "${LEIOS}" != "true" ]]; then
   unset DEVNET_DINGO_START_ERA
   unset DEVNET_TXPUMP_TRANSACTION_ERA
   unset DEVNET_TXPUMP_START_DELAY_SECONDS
+fi
+if [[ "${TACHYS}" != "true" ]]; then
+  unset DEVNET_CONSENSUS_PROVIDER DEVNET_GENESIS_BOOTSTRAP_ENABLED
 fi
 
 # Derive mode-specific variables. COMPOSE_PROFILES is exported unconditionally
@@ -138,7 +153,15 @@ fi
 # Select the network spec the configurator generates genesis from, and
 # point the Go harness at the same file so its derived timings match the
 # network that is actually running.
-if [[ "${LEIOS}" == "true" ]]; then
+if [[ "${TACHYS}" == "true" ]]; then
+  ACTIVE_SPEC="./testnet-dingo-tachys.yaml"
+	export DEVNET_CONSENSUS_PROVIDER=tachys
+	export DEVNET_GENESIS_BOOTSTRAP_ENABLED=false
+	export DEVNET_TXPUMP_TRANSACTION_ERA=conway
+	export DEVNET_TXPUMP_CONFIRMATION_SLOTS=100
+	export DEVNET_ACCELERATED=1
+	unset DEVNET_TXPUMP_START_DELAY_SECONDS
+elif [[ "${LEIOS}" == "true" ]]; then
   ACTIVE_SPEC="./testnet-dingo-leios.yaml"
   export DEVNET_LEIOS_ENABLED=1
   export DEVNET_LEIOS_VOTE_SIGNING_KEY_FILE="/configs/keys/leios-vote.skey"
@@ -272,7 +295,7 @@ fi
 # Start DevNet
 # --------------------------------------------------------------------------- #
 
-log "Mode: ${MODE}$([[ "${ACCELERATED}" == "true" ]] && echo ' (accelerated)')"
+log "Mode: ${MODE}$([[ "${ACCELERATED}" == "true" || "${TACHYS}" == "true" ]] && echo ' (accelerated)')$([[ "${TACHYS}" == "true" ]] && echo ' (tachys)')"
 log "Compose project: ${COMPOSE_PROJECT_NAME}"
 log "Compose network: ${DEVNET_NET_BASE}.0/24"
 log "Network spec: ${ACTIVE_SPEC}"
@@ -438,7 +461,12 @@ fi
 #
 # The accelerated governance scenario crosses four epoch boundaries after
 # the timeline, so the outer timeout covers both tests.
-if [[ "${ACCELERATED}" == "true" ]]; then
+if [[ "${TACHYS}" == "true" ]]; then
+	TEST_TIMEOUT="${TEST_TIMEOUT:-12m}"
+	if [[ "${USER_RUN_FILTER}" == "false" ]]; then
+		TEST_ARGS+=(-run 'TestAcceleratedScenarioTimeline')
+	fi
+elif [[ "${ACCELERATED}" == "true" ]]; then
   TEST_TIMEOUT="${TEST_TIMEOUT:-12m}"
   if [[ "${USER_RUN_FILTER}" == "false" ]]; then
     if [[ "${MODE}" == "dingo" ]]; then

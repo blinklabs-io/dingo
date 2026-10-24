@@ -70,6 +70,10 @@ func TestSyncStateScheduleStoreRoundTrip(t *testing.T) {
 	schedule := NewSchedule(42, poolId, 1000, 10000, electionTestNonce)
 	schedule.AddLeaderSlot(420)
 	schedule.AddLeaderSlot(424)
+	schedule.EpochStartSlot = 420
+	schedule.EpochSlotCount = 10
+	schedule.EraID = 6
+	schedule.DistributionCommitment = []byte("full-distribution")
 
 	err := store.SaveSchedule(schedule)
 	require.NoError(t, err)
@@ -84,6 +88,10 @@ func TestSyncStateScheduleStoreRoundTrip(t *testing.T) {
 	assert.Equal(t, schedule.PoolStake, loaded.PoolStake)
 	assert.Equal(t, schedule.TotalStake, loaded.TotalStake)
 	assert.Equal(t, schedule.EpochNonce, loaded.EpochNonce)
+	assert.Equal(t, schedule.EpochStartSlot, loaded.EpochStartSlot)
+	assert.Equal(t, schedule.EpochSlotCount, loaded.EpochSlotCount)
+	assert.Equal(t, schedule.EraID, loaded.EraID)
+	assert.Equal(t, schedule.DistributionCommitment, loaded.DistributionCommitment)
 	assert.Equal(
 		t,
 		schedule.LeaderSlotsSnapshot(),

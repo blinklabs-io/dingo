@@ -40,7 +40,7 @@ const (
 	ConnectionClosedEventType           event.EventType = "ledger.conn_closed"
 	ConnectionRecycleRequestedEventType event.EventType = "ledger.connection_recycle_requested"
 	LedgerErrorEventType                event.EventType = "ledger.error"
-	PoolStateRestoredEventType          event.EventType = "ledger.pool_restored"
+	PoolStateRestoredEventType          event.EventType = event.PoolStateRestoredEventType
 	TransactionEventType                event.EventType = "ledger.tx"
 )
 

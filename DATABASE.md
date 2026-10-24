@@ -68,13 +68,16 @@ itself distinguish which of the two classes above produced it.
 ## Storage provider ownership
 
 The `consensus_provider_identity` sync-state key binds a database to the
-versioned consensus semantics that created it. Databases without the key are
-existing Praos databases and are treated as `praos/v1`; opening one with Praos
-writes the marker. The sync-state cleanup that ends a Mithril import keeps the
-key. Startup rejects a different selected identity before ledger
+versioned consensus semantics that created it. A database with no stored tip
+and no key adopts the selected provider and writes its marker. A nonempty
+database without the key predates provider selection, is treated as
+`praos/v1`, and may only be opened with Praos. The sync-state cleanup that ends
+a Mithril import keeps the key. Startup rejects a different selected identity before ledger
 processing. Leader schedule records separately carry the same identity and a
 format version, so cached production schedules are reused only by the provider
-that computed them.
+that computed them. Tachys uses the `tachys/cip177/<revision>` namespace;
+selecting it against an unmarked nonempty or Praos database fails rather than
+reinterpreting stored chain state.
 
 Blob and metadata stores are constructed by the application plugin host and
 injected with `database.New(config, database.Stores{Blob: ..., Metadata: ...})`.
@@ -1039,11 +1042,14 @@ Configuration validation is build-aware: a non-empty `databaseLifecycle.snapshot
 
 **Leader schedules.** Keys `leader_schedule:<pool-id-hex>:<epoch>` in
 `sync_state` hold JSON fields `format_version`, `epoch`, `pool_id`,
-`pool_stake`, `total_stake`, `epoch_nonce`, and `leader_slots`. Version 5
-identifies finite E34 eligibility. Election reload rejects version-4 and
-unversioned records rather than reusing their ideal-cutoff slot lists;
-freshly computed schedules are saved as version 5. A valid version-5 record
-can be reused after checking its epoch, nonce, stake inputs, and slot range.
+`pool_stake`, `total_stake`, `epoch_nonce`, `epoch_start_slot`,
+`epoch_slot_count`, `era_id`, `consensus_identity`,
+`distribution_commitment`, and `leader_slots`. Version 7 includes the Tachys
+public-distribution commitment and exact epoch context. Election reload rejects
+older and unversioned records rather than reusing schedules computed under
+different eligibility or persistence rules. Praos records recheck their nonce
+and stake inputs. Tachys records additionally require an exact range, era, and
+full-distribution commitment match.
 The evaluator is not serialized, and the version change needs no SQL schema
 migration.
 

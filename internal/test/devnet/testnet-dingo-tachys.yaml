@@ -1,0 +1,55 @@
+# DevNet configurator spec: all-Dingo Tachys network (3 pools and relay).
+#
+# Uses compressed timing so the controlled recovery, restart, and Conway
+# transition scenario completes inside the integration runner budget.
+#
+# Format: 6 YAML documents (see testnet.yaml for the document map).
+
+--- # Required Testnet Parameters
+poolCount: 3
+poolCost: 0
+poolMargin: 0.0
+poolPledge: 0
+# delegatedSupply must be divisible by poolCount (generator constraint).
+# 2.1T / 3 = 700G per pool. The generator makes a staked and an unstaked
+# genesis address per pool, so ~4.2T circulates and ~1.8T stays in reserves
+# (maxLovelaceSupply 6T) to feed the epoch reward pot.
+delegatedSupply: 2100000000000
+systemStart: 'now'
+systemStartDelay: 5
+networkMagic: 42
+testnetDomain: devnet
+
+--- # Byron Genesis Override
+protocolConsts:
+  k: 10
+
+--- # Shelley Genesis Override
+epochLength: 120
+slotLength: 0.5
+activeSlotsCoeff: 1.0
+securityParam: 10
+maxLovelaceSupply: 6000000000000
+protocolParams:
+  decentralisationParam: 0
+  protocolVersion:
+    major: 10
+    minor: 0
+
+--- # Alonzo Genesis Override
+
+--- # Conway Genesis Override
+
+--- # Node Config Override
+TestShelleyHardForkAtEpoch: 0
+TestAllegraHardForkAtEpoch: 0
+TestMaryHardForkAtEpoch: 0
+TestAlonzoHardForkAtEpoch: 0
+TestBabbageHardForkAtEpoch: 0
+TestConwayHardForkAtEpoch: 1
+ExperimentalHardForksEnabled: false
+ExperimentalProtocolsEnabled: true
+TraceForge: true
+TraceChainDb: true
+TraceMempool: true
+TurnOnLogging: true

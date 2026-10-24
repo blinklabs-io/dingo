@@ -225,12 +225,12 @@ func (ls *LedgerState) verifyPeerForkTargetEpochAncestors(
 			return err
 		}
 		if err := chainSelectionHeaderStateError(
-			ls.verifyBlockHeaderStateWithCache(
+			ls.verifySelectedBlockHeaderStateWithCache(
 				context.Background(),
 				block,
 				epoch.EpochId,
 				snapshot.epochCache,
-				true,
+				epochNonce,
 			),
 		); err != nil {
 			return err
@@ -387,12 +387,12 @@ func (ls *LedgerState) peerChainSelectionEpochNonceAcrossEpochs(
 				return nil, models.Epoch{}, false, err
 			}
 			if err := chainSelectionHeaderStateError(
-				ls.verifyBlockHeaderStateWithCache(
+				ls.verifySelectedBlockHeaderStateWithCache(
 					context.Background(),
 					block,
 					currentEpoch.EpochId,
 					snapshot.epochCache,
-					true,
+					epochNonce,
 				),
 			); err != nil {
 				return nil, models.Epoch{}, false, err
@@ -702,12 +702,12 @@ func (ls *LedgerState) verifyByronTransitionAncestry(
 			return err
 		}
 		if err := chainSelectionHeaderStateError(
-			ls.verifyBlockHeaderStateWithCache(
+			ls.verifySelectedBlockHeaderStateWithCache(
 				context.Background(),
 				block,
 				targetEpoch.EpochId,
 				epochCache,
-				true,
+				targetEpoch.Nonce,
 			),
 		); err != nil {
 			return err

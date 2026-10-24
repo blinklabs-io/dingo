@@ -26,6 +26,7 @@ import (
 	"strings"
 
 	"github.com/blinklabs-io/dingo/chain"
+	nodeconsensus "github.com/blinklabs-io/dingo/consensus"
 	"github.com/blinklabs-io/dingo/consensus/praos"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
@@ -337,12 +338,12 @@ func (ls *LedgerState) validateChainSelectionHeaderCrypto(
 			); err != nil {
 				return err
 			}
-			err = ls.verifyBlockHeaderStateWithCache(
+			err = ls.verifySelectedBlockHeaderStateWithCache(
 				context.Background(),
 				block,
 				epoch.EpochId,
 				snapshot.epochCache,
-				true,
+				epochNonce,
 			)
 		} else {
 			err = ls.verifyBlockHeaderCryptoWithEpochAdvance(
@@ -1141,6 +1142,75 @@ func (ls *LedgerState) verifyBlockHeaderStateWithCache(
 	epochCache []models.Epoch,
 	allowStateDefer bool,
 ) error {
+	return ls.verifyBlockHeaderStateWithAuthorization(
+		ctx,
+		block,
+		epochId,
+		epochCache,
+		allowStateDefer,
+		func(
+			_ context.Context,
+			block ledger.Block,
+			epochID uint64,
+			_ []models.Epoch,
+			snap electingSnapshot,
+		) error {
+			return ls.verifyBlockLeaderEligibilityFromSnapshot(
+				block,
+				epochID,
+				snap,
+			)
+		},
+	)
+}
+
+// verifySelectedBlockHeaderStateWithCache applies the selected provider's
+// authorization to a candidate header whose fork-relative nonce was already
+// derived. Calling the ordinary provider entry point here would derive the
+// nonce again from the local chain and authorize the wrong fork context.
+func (ls *LedgerState) verifySelectedBlockHeaderStateWithCache(
+	ctx context.Context,
+	block ledger.Block,
+	epochID uint64,
+	epochCache []models.Epoch,
+	epochNonce []byte,
+) error {
+	if ls.config.Consensus != nil &&
+		ls.config.Consensus.Name() == nodeconsensus.TachysProviderName {
+		return ls.verifyTachysHeaderStateWithCache(
+			ctx,
+			block,
+			epochID,
+			epochCache,
+			true,
+			epochNonce,
+		)
+	}
+	return ls.verifyBlockHeaderStateWithCache(
+		ctx,
+		block,
+		epochID,
+		epochCache,
+		true,
+	)
+}
+
+type leaderAuthorizationFunc func(
+	context.Context,
+	ledger.Block,
+	uint64,
+	[]models.Epoch,
+	electingSnapshot,
+) error
+
+func (ls *LedgerState) verifyBlockHeaderStateWithAuthorization(
+	ctx context.Context,
+	block ledger.Block,
+	epochId uint64,
+	epochCache []models.Epoch,
+	allowStateDefer bool,
+	authorize leaderAuthorizationFunc,
+) error {
 	if err := ls.verifyHeaderSizeLimits(
 		block, epochId, epochCache, allowStateDefer,
 	); err != nil {
@@ -1180,9 +1250,7 @@ func (ls *LedgerState) verifyBlockHeaderStateWithCache(
 		return err
 	}
 
-	if err := ls.verifyBlockLeaderEligibilityFromSnapshot(
-		block, epochId, snap,
-	); err != nil {
+	if err := authorize(ctx, block, epochId, epochCache, snap); err != nil {
 		// Scope the deferral to the RECOVERABLE case only
 		// (consensus-sensitive). A leader-stake snapshot reported
 		// unavailable (errLeaderStakeSnapshotUnavailable) means the epoch's

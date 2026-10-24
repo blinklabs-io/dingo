@@ -15,17 +15,83 @@
 package dingo
 
 import (
+	"math/big"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/config/cardano"
 	nodeconsensus "github.com/blinklabs-io/dingo/consensus"
 	"github.com/blinklabs-io/dingo/database"
 	internalconfig "github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/plugin"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
 )
 
+func tachysTestConfig(t *testing.T) Config {
+	t.Helper()
+	nodeCfg, err := cardano.NewCardanoNodeConfigFromFile(
+		"config/cardano/devnet/config.json",
+	)
+	require.NoError(t, err)
+	nodeCfg.ShelleyGenesis().ActiveSlotsCoeff.Rat = big.NewRat(1, 1)
+	cfg := NewConfig(WithCardanoNodeConfig(nodeCfg))
+	cfg.genesisBootstrap = false
+	cfg.cfg.Mithril.Enabled = false
+	return cfg
+}
+
+func TestTachysConfigurationRequiresSupportedNetworkShape(t *testing.T) {
+	t.Parallel()
+
+	provider := nodeconsensus.NewTachysProvider()
+	t.Run("supported", func(t *testing.T) {
+		cfg := tachysTestConfig(t)
+		require.NoError(t, validateConsensusConfiguration(&cfg, provider))
+	})
+	t.Run("sparse slots", func(t *testing.T) {
+		cfg := tachysTestConfig(t)
+		cfg.CardanoNodeConfig().ShelleyGenesis().ActiveSlotsCoeff.Rat =
+			big.NewRat(1, 2)
+		require.ErrorContains(
+			t,
+			validateConsensusConfiguration(&cfg, provider),
+			"activeSlotsCoeff 1/1",
+		)
+	})
+	t.Run("pre-Babbage history", func(t *testing.T) {
+		cfg := tachysTestConfig(t)
+		epoch := uint64(1)
+		cfg.CardanoNodeConfig().TestBabbageHardForkAtEpoch = &epoch
+		require.ErrorContains(
+			t,
+			validateConsensusConfiguration(&cfg, provider),
+			"babbage at genesis",
+		)
+	})
+	t.Run("Dijkstra transition", func(t *testing.T) {
+		cfg := tachysTestConfig(t)
+		epoch := uint64(2)
+		enabled := true
+		cfg.CardanoNodeConfig().TestDijkstraHardForkAtEpoch = &epoch
+		cfg.CardanoNodeConfig().ExperimentalHardForksEnabled = &enabled
+		require.ErrorContains(
+			t,
+			validateConsensusConfiguration(&cfg, provider),
+			"Dijkstra transition",
+		)
+	})
+}
+
 type consensusIdentityMemoryStore struct {
 	value string
+	tip   ochainsync.Tip
+}
+
+func (s *consensusIdentityMemoryStore) GetTip(
+	*database.Txn,
+) (ochainsync.Tip, error) {
+	return s.tip, nil
 }
 
 func (s *consensusIdentityMemoryStore) GetSyncState(
@@ -67,10 +133,50 @@ func TestUnmarkedDatabaseIsPraos(t *testing.T) {
 	t.Parallel()
 
 	err := enforceConsensusIdentity(
-		&consensusIdentityMemoryStore{},
+		&consensusIdentityMemoryStore{tip: ochainsync.Tip{
+			Point:       ocommon.Point{Slot: 1, Hash: []byte{1}},
+			BlockNumber: 1,
+		}},
 		"tachys/v1",
 	)
 	require.ErrorContains(t, err, "unmarked database uses consensus")
+}
+
+func TestFreshDatabaseAdoptsSelectedConsensus(t *testing.T) {
+	t.Parallel()
+
+	store := &consensusIdentityMemoryStore{}
+	require.NoError(t, enforceConsensusIdentity(store, "tachys/v1"))
+	require.Equal(t, "tachys/v1", store.value)
+}
+
+func TestConsensusNetworkMagicSeparatesProviders(t *testing.T) {
+	t.Parallel()
+
+	const base = uint32(42)
+	require.Equal(
+		t,
+		base,
+		consensusNetworkMagic(base, nodeconsensus.NewPraosProvider()),
+	)
+	tachysMagic := consensusNetworkMagic(
+		base,
+		nodeconsensus.NewTachysProvider(),
+	)
+	require.NotZero(t, tachysMagic)
+	require.NotEqual(t, base, tachysMagic)
+	require.Equal(
+		t,
+		tachysMagic,
+		consensusNetworkMagic(base, nodeconsensus.NewTachysProvider()),
+	)
+	n := &Node{
+		config:            NewConfig(WithNetworkMagic(base)),
+		consensusProvider: nodeconsensus.NewTachysProvider(),
+	}
+	wireConfig := n.newOuroborosConfig(false, 0, 0)
+	require.Equal(t, base, wireConfig.NetworkMagic)
+	require.Equal(t, tachysMagic, wireConfig.NodeToNodeNetworkMagic)
 }
 
 func TestConsensusPluginSelectionDefaultsEmptyProviderToPraos(t *testing.T) {
