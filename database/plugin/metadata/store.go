@@ -2225,6 +2225,22 @@ type MetadataStore interface {
 		txn types.Txn,
 	) (*models.Pool, error)
 
+	// GetPoolByLeiosKey retrieves the pool whose active parameters claim the
+	// given BLS public key as of the current epoch's start slot.
+	GetPoolByLeiosKey(
+		publicKey []byte,
+		epochStartSlot uint64,
+		txn types.Txn,
+	) (*models.Pool, error)
+
+	// GetFuturePoolByLeiosKey retrieves the pool whose latest deferred
+	// parameters claim the given BLS public key.
+	GetFuturePoolByLeiosKey(
+		publicKey []byte,
+		epochStartSlot uint64,
+		txn types.Txn,
+	) (*models.Pool, error)
+
 	// GetActivePoolRelays retrieves all relays from currently active pools.
 	// This is used for ledger peer discovery.
 	GetActivePoolRelays(types.Txn) ([]models.PoolRegistrationRelay, error)

@@ -111,6 +111,74 @@ func TestStateOverlayViewWithoutTransactionsReturnsBase(t *testing.T) {
 	}
 }
 
+type blsOwnerBase struct {
+	lcommon.LedgerState
+	owners map[string]lcommon.PoolKeyHash
+	active map[lcommon.PoolKeyHash]*lcommon.PoolRegistrationCertificate
+}
+
+func (b *blsOwnerBase) IsBlsKeyInUse(
+	key []byte,
+) (bool, lcommon.PoolKeyHash, error) {
+	owner, ok := b.owners[string(key)]
+	return ok, owner, nil
+}
+
+func (b *blsOwnerBase) PoolCurrentState(
+	pool lcommon.PoolKeyHash,
+) (*lcommon.PoolRegistrationCertificate, *uint64, error) {
+	return b.active[pool], nil, nil
+}
+
+func TestStateOverlayTracksPendingBlsKeyRotation(t *testing.T) {
+	t.Parallel()
+
+	pool := lcommon.PoolKeyHash{0x61}
+	keyA := bytes.Repeat([]byte{0xa1}, 96)
+	keyB := bytes.Repeat([]byte{0xb1}, 96)
+	keyC := bytes.Repeat([]byte{0xc1}, 96)
+	registration := func(key []byte) *lcommon.PoolRegistrationCertificate {
+		return &lcommon.PoolRegistrationCertificate{
+			Operator: pool,
+			LeiosKey: &lcommon.LeiosKey{PublicKey: key},
+		}
+	}
+	base := &blsOwnerBase{
+		LedgerState: mockledger.NewLedgerStateBuilder().Build(),
+		owners: map[string]lcommon.PoolKeyHash{
+			string(keyA): pool,
+			string(keyC): pool,
+		},
+		active: map[lcommon.PoolKeyHash]*lcommon.PoolRegistrationCertificate{
+			pool: registration(keyA),
+		},
+	}
+	overlay := utxoref.NewStateOverlay()
+	overlay.Apply(overlayTx(0x71).WithCertificates(registration(keyB)))
+	view, err := overlay.View(base, nil, 1)
+	require.NoError(t, err)
+	provider, ok := view.(interface {
+		IsBlsKeyInUse([]byte) (bool, lcommon.PoolKeyHash, error)
+	})
+	require.True(t, ok)
+
+	for _, test := range []struct {
+		key  []byte
+		want bool
+	}{
+		{key: keyA, want: true},
+		{key: keyB, want: true},
+		{key: keyC, want: false},
+	} {
+		inUse, owner, err := provider.IsBlsKeyInUse(test.key)
+		require.NoError(t, err)
+		require.Equal(t, test.want, inUse)
+		if test.want {
+			require.Equal(t, pool, owner)
+		}
+	}
+}
+
 func TestStateOverlayViewRecordsRegistrationDeposit(t *testing.T) {
 	t.Parallel()
 	const deposit = 2_000_000

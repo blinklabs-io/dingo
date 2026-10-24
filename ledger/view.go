@@ -1073,6 +1073,47 @@ func (lv *LedgerView) IsFutureVrfKeyInUse(
 	return true, lcommon.PoolKeyHash(poolKeyHash), nil
 }
 
+// IsBlsKeyInUse reports whether an active or deferred pool registration
+// claims the given BLS voting public key.
+func (lv *LedgerView) IsBlsKeyInUse(
+	publicKey []byte,
+) (bool, lcommon.PoolKeyHash, error) {
+	pool, err := lv.ls.db.GetPoolByLeiosKey(
+		lv.EvaluationContext(),
+		publicKey,
+		lv.epochStartSlot,
+		lv.txn,
+	)
+	if err != nil {
+		return false, lcommon.PoolKeyHash{}, lv.storageFault(
+			"get pool by BLS key: %w", err,
+		)
+	}
+	if pool == nil {
+		pool, err = lv.ls.db.GetFuturePoolByLeiosKey(
+			lv.EvaluationContext(),
+			publicKey,
+			lv.epochStartSlot,
+			lv.txn,
+		)
+		if err != nil {
+			return false, lcommon.PoolKeyHash{}, lv.storageFault(
+				"get future pool by BLS key: %w", err,
+			)
+		}
+	}
+	if pool == nil {
+		return false, lcommon.PoolKeyHash{}, nil
+	}
+	poolKeyHash, err := lcommon.NewBlake2b224Checked(pool.PoolKeyHash)
+	if err != nil {
+		return false, lcommon.PoolKeyHash{}, lv.storageFault(
+			"decode stored BLS key owner pool key hash: %w", err,
+		)
+	}
+	return true, lcommon.PoolKeyHash(poolKeyHash), nil
+}
+
 // SlotToTime returns the current time for a given slot based on known epochs.
 //
 // This is the converter transaction validation sees, and a Plutus script
