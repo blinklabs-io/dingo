@@ -123,7 +123,7 @@ type praos2ChainDepState struct {
 // with it would hand every client a state it cannot decode. It takes the
 // Dijkstra era AND LedgerStateConfig.Praos2ChainDepState, which the node sets
 // only for the Leios prototype network (Musashi) under its strict identity
-// check (Config.prototypeTrustBypassesEnabled): the name "musashi" or the
+// check (Config.musashiPrototypeIdentity): the name "musashi" or the
 // magic 164, with no conflicting standard network. A devnet is not a conflict,
 // so the name "musashi" with the devnet magic 42, or the devnet name with magic
 // 164, selects Praos2 as well. A network named "devnet" with magic 42 carries

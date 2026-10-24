@@ -2054,8 +2054,8 @@ func (ls *LedgerState) ledgerTipBehindSlot(slot uint64) bool {
 // Byron blocks are skipped (PBFT). A state that leaves the threshold
 // unevaluable -- a zero total active stake, a missing or non-positive active
 // slot coefficient, or a post-Mithril mark row reconstructed after its target
-// boundary -- is rejected rather than skipped; only the explicitly selected
-// prototype profile logs it and trusts the block. The snapshot cases carry
+// boundary -- is rejected rather than skipped; only an explicit override logs
+// it and trusts the block. The snapshot cases carry
 // errLeaderStakeSnapshotUnavailable, so header verification running ahead of
 // the ledger apply cursor defers instead of rejecting.
 //
@@ -2119,11 +2119,11 @@ func (ls *LedgerState) verifyBlockLeaderEligibilityFromSnapshot(
 		// network-wide denominator reads zero: a dingo-side storage or
 		// computation gap rather than an empty network, and a threshold
 		// with no denominator to divide by. Accepting the block would
-		// admit a producer nothing verified, so only the explicitly
-		// selected prototype profile may bypass it.
+		// admit a producer nothing verified, so only an explicit override may
+		// bypass it.
 		if ls.config.SkipLeaderStakeThresholdCheck {
 			ls.config.Logger.Warn(
-				"leader eligibility unevaluable: total active stake is zero; trusting block (prototype profile)",
+				"leader eligibility unevaluable: total active stake is zero; trusting block (explicit override)",
 				"slot",
 				block.SlotNumber(),
 				"epoch",
@@ -2163,7 +2163,7 @@ func (ls *LedgerState) verifyBlockLeaderEligibilityFromSnapshot(
 		// resolves, so it is rejected outright rather than deferred.
 		if ls.config.SkipLeaderStakeThresholdCheck {
 			ls.config.Logger.Warn(
-				"leader eligibility unevaluable: active slot coefficient unavailable or non-positive; trusting block (prototype profile)",
+				"leader eligibility unevaluable: active slot coefficient unavailable or non-positive; trusting block (explicit override)",
 				"slot",
 				block.SlotNumber(),
 				"component",
@@ -2247,14 +2247,12 @@ func (ls *LedgerState) verifyBlockLeaderEligibilityFromSnapshot(
 		// That was stale, and a wedge diagnosis was built on it rather
 		// than on the code.
 		//
-		// On the concentrated prototype topology this check still rejected
-		// the dominant pool's eligible blocks and wedged the chain, so it is
-		// downgraded to a warning there; all cryptographic header checks
-		// above still passed. See
-		// LedgerStateConfig.SkipLeaderStakeThresholdCheck.
+		// An explicit SkipLeaderStakeThresholdCheck override downgrades this
+		// rejection to a warning; all cryptographic header checks above
+		// still passed. No network profile sets it.
 		if ls.config.SkipLeaderStakeThresholdCheck {
 			ls.config.Logger.Warn(
-				"producer pool does not satisfy leader eligibility; trusting block (prototype trust bypass)",
+				"producer pool does not satisfy leader eligibility; trusting block (explicit override)",
 				"slot",
 				block.SlotNumber(),
 				"pool",
@@ -2562,14 +2560,14 @@ func (ls *LedgerState) leaderEligibilityStakeFromSnapshot(
 		// The reconstructed row makes a hard threshold *comparison* unsafe,
 		// but that means eligibility is unevaluable, not automatically
 		// satisfied. Mirror the zero-active-stake and missing-coefficient
-		// guards above: only the explicitly selected prototype profile may
-		// trust the block anyway; a standard profile must reject (wrapped so
+		// guards above: only an explicit override may trust the block anyway;
+		// the default must reject (wrapped so
 		// header verification running ahead of the ledger apply cursor
 		// defers instead).
 		if ls.config.SkipLeaderStakeThresholdCheck {
 			if ls.config.Logger != nil {
 				ls.config.Logger.Warn(
-					"skipping leader eligibility check: post-Mithril mark snapshot was reconstructed after the target boundary (prototype profile)",
+					"skipping leader eligibility check: post-Mithril mark snapshot was reconstructed after the target boundary (explicit override)",
 					"slot",
 					block.SlotNumber(),
 					"epoch",

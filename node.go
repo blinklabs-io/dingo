@@ -127,6 +127,11 @@ type Node struct {
 	// accessor; the only writer is the replacement in
 	// reinitializeNetworkingCore and the initial construction in Run.
 	ouroborosRef atomic.Pointer[ouroborosPkg.Ouroboros]
+	// leiosCertificateVerifier is leiosVoteManager as seen by the ledger's
+	// certificate callback. The ledger's block-processing goroutine starts
+	// before initLeiosVoteManager runs, at startup and after a live
+	// restore/truncate, so the callback cannot read the plain field.
+	leiosCertificateVerifier atomic.Pointer[leios.VoteManager]
 	// ouroborosConfig retains the settings half of the config Run built, so a
 	// live restore can reconstruct ouroboros against rebuilt dependencies
 	// without recomputing them and drifting from Run.

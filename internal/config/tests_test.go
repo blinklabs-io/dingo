@@ -781,12 +781,8 @@ mithril:
 	assert.Equal(t, "cli-digest", cfg.Mithril.PinnedDigest)
 }
 
-// TestMusashiNetworkIdentityConflict pins the rule that decides whether a
-// configuration may enable the Musashi prototype's consensus/ledger trust
-// bypasses. The prototype network is identified by name ("musashi") or by
-// magic (164); a configuration that mixes one of those with a *different*
-// predefined network is a conflict and must be rejected, because otherwise a
-// node an operator believes is on preview/preprod runs with validation off.
+// TestMusashiNetworkIdentityConflict pins rejection of a network name and
+// magic that identify different predefined networks.
 func TestMusashiNetworkIdentityConflict(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -808,7 +804,7 @@ func TestMusashiNetworkIdentityConflict(t *testing.T) {
 			networkMagic: 164,
 		},
 
-		// Unambiguous non-prototype identities: allowed (bypasses stay off).
+		// Unambiguous non-prototype identities are allowed.
 		{name: "preview by name", network: "preview"},
 		{
 			name:         "preview by name and magic",
@@ -866,8 +862,8 @@ func TestMusashiNetworkIdentityConflict(t *testing.T) {
 		},
 
 		// Conflicts: the prototype name wearing a standard network's magic.
-		// This is the sharper direction — the handshake uses the magic, so
-		// the node actually joins preview while trusting prototype rules.
+		// The handshake uses the magic, so the node would join the standard
+		// network while loading Musashi's built-in configuration.
 		{
 			name:         "prototype name with preview magic",
 			network:      "musashi",
@@ -948,9 +944,8 @@ func TestMusashiPrototypeNetwork(t *testing.T) {
 			want:         true,
 		},
 		// Consequence of the devnet exclusion: because neither pairing is a
-		// conflict, both still resolve to the prototype network and would run
-		// with the bypasses. That is acceptable precisely because devnet is a
-		// local test network.
+		// conflict, both still resolve to the prototype network. That is
+		// acceptable precisely because devnet is a local test network.
 		{
 			name:         "devnet name with prototype magic",
 			network:      "devnet",
@@ -963,8 +958,8 @@ func TestMusashiPrototypeNetwork(t *testing.T) {
 			networkMagic: 42,
 			want:         true,
 		},
-		// A conflicting identity is not the prototype network: the bypasses
-		// must stay off even if startup validation was never run.
+		// A conflicting identity is not the prototype network, even if
+		// startup validation was never run.
 		{
 			name:         "preview with prototype magic",
 			network:      "preview",

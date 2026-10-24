@@ -31,16 +31,15 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestSkipDijkstraTxValidationScope documents the accepted non-validating
-// behaviour of the Musashi prototype profile and, more importantly, its
-// boundary.
+// TestSkipDijkstraTxValidationScope documents the boundary of the explicit
+// Dijkstra validation override.
 //
-// The prototype's trust argument — endorser transactions are stored but never
+// The override's historical scope — endorser transactions are stored but never
 // applied, so ranking-block transactions spending endorser-resident outputs are
 // unresolvable and disagree on essentially every transaction — only exists in
 // Dijkstra/Leios. Every earlier era therefore keeps its full per-transaction
 // rule set even on a Musashi node. If this test starts failing because a
-// pre-Dijkstra era began skipping validation, the prototype bypass has widened
+// pre-Dijkstra era began skipping validation, the explicit override has widened
 // beyond its justification.
 func TestSkipDijkstraTxValidationScope(t *testing.T) {
 	t.Parallel()
@@ -58,20 +57,20 @@ func TestSkipDijkstraTxValidationScope(t *testing.T) {
 		{"conway", conway.EraIdConway},
 	}
 
-	t.Run("prototype profile skips only Dijkstra", func(t *testing.T) {
+	t.Run("explicit override skips only Dijkstra", func(t *testing.T) {
 		ls := &LedgerState{
 			config: LedgerStateConfig{SkipDijkstraTxValidation: true},
 		}
 		assert.True(
 			t,
 			ls.skipDijkstraTxValidation(dijkstra.EraIdDijkstra),
-			"Dijkstra transactions are the accepted non-validating scope",
+			"Dijkstra transactions are the override's only scope",
 		)
 		for _, era := range preDijkstraEras {
 			assert.False(
 				t,
 				ls.skipDijkstraTxValidation(era.id),
-				"%s transactions must still be validated on the prototype profile",
+				"%s transactions must still be validated with the override",
 				era.name,
 			)
 		}
@@ -84,7 +83,7 @@ func TestSkipDijkstraTxValidationScope(t *testing.T) {
 		assert.False(
 			t,
 			ls.skipDijkstraTxValidation(dijkstra.EraIdDijkstra),
-			"Dijkstra validation must be enforced off the prototype profile",
+			"Dijkstra validation must be enforced without the override",
 		)
 		for _, era := range preDijkstraEras {
 			assert.False(t, ls.skipDijkstraTxValidation(era.id), era.name)
@@ -92,10 +91,9 @@ func TestSkipDijkstraTxValidationScope(t *testing.T) {
 	})
 }
 
-// TestDijkstraTxValidationErrorsArePrototypeOnly pins the trust boundary: the
-// Musashi prototype may skip and trust Dijkstra transaction validation, while
-// a standard Leios profile must reject the same failure.
-func TestDijkstraTxValidationErrorsArePrototypeOnly(t *testing.T) {
+// TestDijkstraTxValidationErrorsRequireOverride pins the trust boundary: only
+// an explicit override may trust a Dijkstra transaction validation failure.
+func TestDijkstraTxValidationErrorsRequireOverride(t *testing.T) {
 	t.Parallel()
 
 	for _, profile := range []struct {
@@ -103,7 +101,7 @@ func TestDijkstraTxValidationErrorsArePrototypeOnly(t *testing.T) {
 		skip      bool
 		wantTrust bool
 	}{
-		{"musashi prototype profile", true, true},
+		{"explicit override", true, true},
 		{"standard profile", false, false},
 	} {
 		t.Run(profile.name, func(t *testing.T) {
@@ -116,7 +114,7 @@ func TestDijkstraTxValidationErrorsArePrototypeOnly(t *testing.T) {
 				t,
 				profile.wantTrust,
 				ls.trustDijkstraTxValidationError(dijkstra.EraIdDijkstra),
-				"Dijkstra validation trust must match the prototype bypass",
+				"Dijkstra validation trust must match the explicit override",
 			)
 			assert.False(
 				t,
