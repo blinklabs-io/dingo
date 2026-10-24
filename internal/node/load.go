@@ -1570,6 +1570,102 @@ func decodeImmutableBlockBatchWithDecoder(
 	return decoded, nil
 }
 
+func decodeRawImmutableBlockBatch(
+	ctx context.Context,
+	rawBlocks []immutable.Block,
+	rawBatch []chain.RawBlock,
+	workerCount int,
+) ([]chain.RawBlock, error) {
+	if len(rawBlocks) == 0 {
+		return rawBatch[:0], nil
+	}
+	if workerCount < 1 {
+		workerCount = 1
+	}
+	if workerCount > len(rawBlocks) {
+		workerCount = len(rawBlocks)
+	}
+	if cap(rawBatch) < len(rawBlocks) {
+		rawBatch = make([]chain.RawBlock, len(rawBlocks))
+	} else {
+		rawBatch = rawBatch[:len(rawBlocks)]
+	}
+	if workerCount == 1 {
+		for index := range rawBlocks {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			rawBlock, err := rawBlockFromImmutableBlock(&rawBlocks[index])
+			if err != nil {
+				return nil, fmt.Errorf(
+					"building raw block at slot %d: %w",
+					rawBlocks[index].Slot,
+					err,
+				)
+			}
+			rawBatch[index] = rawBlock
+		}
+		return rawBatch, nil
+	}
+	decodeCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	jobs := make(chan immutableDecodeJob, min(workerCount*2, len(rawBlocks)))
+	var workers sync.WaitGroup
+	var firstErr error
+	var errorOnce sync.Once
+	workers.Add(workerCount)
+	for range workerCount {
+		go func() {
+			defer workers.Done()
+			for {
+				select {
+				case <-decodeCtx.Done():
+					return
+				case job, ok := <-jobs:
+					if !ok {
+						return
+					}
+					rawBlock, err := rawBlockFromImmutableBlock(&job.block)
+					if err != nil {
+						errorOnce.Do(func() {
+							firstErr = fmt.Errorf(
+								"building raw block at slot %d: %w",
+								rawBlocks[job.index].Slot,
+								err,
+							)
+							cancel()
+						})
+						return
+					}
+					// Distinct result indices keep chain insertion in immutable order.
+					rawBatch[job.index] = rawBlock
+				}
+			}
+		}()
+	}
+	for index, block := range rawBlocks {
+		select {
+		case jobs <- immutableDecodeJob{index: index, block: block}:
+		case <-decodeCtx.Done():
+			close(jobs)
+			workers.Wait()
+			if firstErr != nil {
+				return nil, firstErr
+			}
+			return nil, ctx.Err()
+		}
+	}
+	close(jobs)
+	workers.Wait()
+	if firstErr != nil {
+		return nil, firstErr
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return rawBatch, nil
+}
+
 // CopyImmutableBlobsBounded copies immutable blocks into the blob store from
 // the current chain tip up to and including maxSlot, storing produced-UTxO
 // offsets per block. maxSlot of 0 copies to the immutable tip. It reuses a
@@ -1855,8 +1951,10 @@ func copyBlocksRawWithCallback(
 	startTime := time.Now()
 	lastProgressLog := time.Time{}
 	lastProgressSlot := chainTip.Point.Slot
+	rawBlockBatch := make([]immutable.Block, 0, loadBlockBatchSize)
 	blockBatch := make([]chain.RawBlock, 0, loadBlockBatchSize)
 	for {
+		rawBlockBatch = rawBlockBatch[:0]
 		for {
 			next, err := iter.Next()
 			if err != nil {
@@ -1876,20 +1974,23 @@ func copyBlocksRawWithCallback(
 				bytes.Equal(next.Hash, chainTip.Point.Hash) {
 				continue
 			}
-			rawBlock, err := rawBlockFromImmutableBlock(next)
-			if err != nil {
-				return blocksCopied, immutableTip.Slot, fmt.Errorf(
-					"building raw block: %w",
-					err,
-				)
-			}
-			blockBatch = append(blockBatch, rawBlock)
-			if len(blockBatch) == cap(blockBatch) {
+			rawBlockBatch = append(rawBlockBatch, *next)
+			if len(rawBlockBatch) == cap(rawBlockBatch) {
 				break
 			}
 		}
-		if len(blockBatch) == 0 {
+		if len(rawBlockBatch) == 0 {
 			break
+		}
+		var err error
+		blockBatch, err = decodeRawImmutableBlockBatch(
+			ctx,
+			rawBlockBatch,
+			blockBatch,
+			loadDecodeWorkerCount(),
+		)
+		if err != nil {
+			return blocksCopied, immutableTip.Slot, err
 		}
 		if err := c.AddRawBlocksWithCallback(ctx, blockBatch, callback); err != nil {
 			return blocksCopied, immutableTip.Slot, fmt.Errorf(

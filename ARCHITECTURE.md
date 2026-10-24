@@ -9430,6 +9430,8 @@ count toward these limits.
 The post-download ImmutableDB copy completes before ledger-state import starts.
 The copy persists block and transaction metadata as well as block blobs, so it
 is a metadata writer even though its bulk payload belongs to the blob store.
+It decodes each bounded header batch with up to eight workers, then persists
+the results in immutable order.
 Ordering the two resumable phases keeps their SQLite write transactions from
 contending during bootstrap. A later import failure resumes against the already
 copied immutable data.

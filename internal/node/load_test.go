@@ -290,27 +290,54 @@ func TestExtractHeaderCbor(t *testing.T) {
 	}
 }
 
-func immutableDecodeBenchmarkBlocks(t *testing.T) []immutable.Block {
-	t.Helper()
+func immutableDecodeBenchmarkBlocks(tb testing.TB) []immutable.Block {
+	tb.Helper()
 	immutableDir := filepath.Join(
 		"..", "..", "database", "immutable", "testdata",
 	)
 	imm, err := immutable.New(immutableDir)
-	require.NoError(t, err)
+	require.NoError(tb, err)
 	iter, err := imm.BlocksFromPoint(ocommon.Point{})
-	require.NoError(t, err)
+	require.NoError(tb, err)
 	defer iter.Close()
 	blocks := make([]immutable.Block, 0, loadBlockBatchSize)
 	for len(blocks) < cap(blocks) {
 		block, err := iter.Next()
-		require.NoError(t, err)
+		require.NoError(tb, err)
 		if block == nil {
 			break
 		}
 		blocks = append(blocks, *block)
 	}
-	require.Len(t, blocks, loadBlockBatchSize)
+	require.Len(tb, blocks, loadBlockBatchSize)
 	return blocks
+}
+
+func BenchmarkDecodeRawImmutableBlockBatch(b *testing.B) {
+	blocks := immutableDecodeBenchmarkBlocks(b)
+	for _, workerCount := range []int{1, 2, 4, 8} {
+		b.Run(fmt.Sprintf("workers=%d", workerCount), func(b *testing.B) {
+			rawBatch := make([]chain.RawBlock, 0, len(blocks))
+			b.ReportAllocs()
+			b.ResetTimer()
+			for range b.N {
+				var err error
+				rawBatch, err = decodeRawImmutableBlockBatch(
+					context.Background(),
+					blocks,
+					rawBatch,
+					workerCount,
+				)
+				if err != nil {
+					b.Fatal(err)
+				}
+			}
+			b.ReportMetric(
+				float64(b.N*len(blocks))/b.Elapsed().Seconds(),
+				"blocks/s",
+			)
+		})
+	}
 }
 
 func TestDecodeImmutableBlockBatchPreservesOrder(t *testing.T) {
