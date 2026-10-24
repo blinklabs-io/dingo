@@ -79,6 +79,15 @@
       "keepTime": true,
       "targetBlank": false,
       "includeVars": true
+    },
+    {
+      "title": "Leios",
+      "url": "/d/dingo-leios",
+      "type": "link",
+      "icon": "external link",
+      "keepTime": true,
+      "targetBlank": false,
+      "includeVars": true
     }
   ],
   "liveNow": false,

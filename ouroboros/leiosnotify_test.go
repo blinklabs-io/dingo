@@ -597,3 +597,79 @@ func (l *leiosForgedEBLog) next(
 ) (*leiosForgedEBEntry, chan struct{}) {
 	return l.nextWhileConnected(connKey, nil, nil)
 }
+
+// A peer issues its next RequestNext as soon as it has received a response,
+// which can be before the server goroutine that sent that response has
+// reported the send. That request must wait for the in-flight entry to be
+// committed and then serve the following entry, not offer the in-flight entry
+// a second time.
+func TestLeiosNotifyRequestDuringInFlightSendServesNextEntry(t *testing.T) {
+	t.Parallel()
+	o := newOuroboros(OuroborosConfig{})
+	server := leiosnotify.NewServer(protocol.ProtocolOptions{}, nil)
+	t.Cleanup(server.Stop)
+	connectionDone := make(chan any)
+	t.Cleanup(func() { close(connectionDone) })
+	ctx := leiosnotify.CallbackContext{
+		Server: server,
+		ConnectionId: gouroboros.ConnectionId{
+			LocalAddr:  &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 3001},
+			RemoteAddr: &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 3002},
+		},
+		ConnectionDoneChan: connectionDone,
+	}
+	o.leiosEBLog.registerConn(
+		leiosConnectionIdString(ctx.ConnectionId),
+		server,
+		nil,
+	)
+	first := lcommon.LeiosPrototypeVote{
+		AnnouncingRbHash: lcommon.NewBlake2b256([]byte("first")),
+		VoterId:          1,
+		VoteSignature:    make([]byte, lcommon.LeiosBlsSignatureSize),
+	}
+	second := lcommon.LeiosPrototypeVote{
+		AnnouncingRbHash: lcommon.NewBlake2b256([]byte("second")),
+		VoterId:          2,
+		VoteSignature:    make([]byte, lcommon.LeiosBlsSignatureSize),
+	}
+	o.EnqueueLeiosPrototypeVote(first)
+	o.EnqueueLeiosPrototypeVote(second)
+
+	sent, err := o.leiosnotifyServerRequestNext(ctx)
+	require.NoError(t, err)
+	require.Equal(
+		t,
+		[]lcommon.LeiosPrototypeVote{first},
+		sent.(*leiosnotify.MsgVotesOffer).PrototypeVotes,
+	)
+
+	type result struct {
+		msg protocol.Message
+		err error
+	}
+	next := make(chan result, 1)
+	go func() {
+		msg, err := o.leiosnotifyServerRequestNext(ctx)
+		next <- result{msg, err}
+	}()
+	testutil.RequireNoReceive(
+		t,
+		next,
+		50*time.Millisecond,
+		"a request must not be answered while the previous response is unreported",
+	)
+	o.leiosnotifyServerResponseSent(ctx, sent, nil)
+	got := testutil.RequireReceive(
+		t,
+		next,
+		2*time.Second,
+		"reporting the send must release the waiting request",
+	)
+	require.NoError(t, got.err)
+	require.Equal(
+		t,
+		[]lcommon.LeiosPrototypeVote{second},
+		got.msg.(*leiosnotify.MsgVotesOffer).PrototypeVotes,
+	)
+}
