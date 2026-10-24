@@ -8393,9 +8393,23 @@ rather than a boolean registered-pool set, so this codebase no longer needs
 its own copy.
 
 `node_dmq.go` constructs the `MessageAuthenticator` for `dmq.Stack`, with a
-`StakeAuthority` that reads the pool's stake from the snapshot Praos leader
-election uses (`praos.StakeSnapshotEpoch` of the current epoch), so a message is
-accepted only from a pool that may currently forge blocks. The DMQ stack is not
+`StakeAuthority` that reads the pool's stake through
+`LedgerState.ElectingPoolStake` at the wall-clock slot derived from confirmed
+era history: the same distribution, and the same choice between the mark
+snapshot of `praos.StakeSnapshotEpoch` and a Mithril-imported active
+distribution, that header verification checks a block at that slot against. A
+message is therefore accepted only from a pool that may forge now. The stake
+lookup, the current KES period and the authenticator's current slot all read
+that one slot rather than the ledger tip, which can trail it into the previous
+epoch.
+
+Every lookup the `StakeAuthority` cannot answer wraps
+`dmq.ErrChainStateUnavailable`, and admission reports it as `other` rather than
+`invalid`, which CIP-0137 treats as a protocol violation. That covers detached
+ledger state, storage errors, and a distribution that is missing, empty, pruned
+or has no denominator, or that elects an epoch the ledger has not reached
+(`ledger.ErrLeaderStakeSnapshotUnavailable`). Only a pool absent from a
+populated distribution is `invalid`. The DMQ stack is not
 stopped by a live restore or truncate, so the `StakeAuthority` holds its own
 ledger reference under a lock: quiesce clears it before storage closes, and
 reinitialization sets the rebuilt ledger state. Clearing waits for a lookup in
