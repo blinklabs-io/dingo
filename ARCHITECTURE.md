@@ -11455,9 +11455,11 @@ preflight handling.
 The legacy root `tlsCertFilePath`/`tlsKeyFilePath` fields remain a UTxO
 RPC-only TLS compatibility input among these providers; Midnight also
 uses the pair directly. They are not promoted to Blockfrost, Kupo, Mesh, or MCP.
-Kupo, Mesh, and UTxO RPC use the root `bindAddr`, whose default is `0.0.0.0`.
-Blockfrost and MCP override it with their provider `host`, defaulting to
-`127.0.0.1`; an explicitly empty provider host falls back to `bindAddr`.
+Kupo and Mesh use the root `bindAddr`, whose default is `0.0.0.0`.
+Blockfrost, UTxO RPC, and MCP override it with their provider `host`,
+defaulting to `127.0.0.1`; an explicitly empty provider host falls back to
+`bindAddr`. A non-loopback UTxO RPC listener has no built-in access policy
+and must be placed behind a protective gateway.
 `metricsBindAddr` and `debugBindAddr` separately configure Prometheus and pprof;
 both default to loopback. `metricsAuthToken` protects both the ordinary and
 Mithril-sync Prometheus listeners when configured. The listener remains plain
@@ -12245,6 +12247,9 @@ may occupy at most half of the evaluation slots, rounded up; source ports are
 discarded, and clients behind one proxy share a budget. Admission returns
 `ErrEvaluationBusy` instead of queuing; Blockfrost reports it as `429` and UTxO
 RPC as `ResourceExhausted`.
+UTxO RPC additionally admits EvalTx requests before transaction type detection
+or CBOR decoding, with four slots process-wide and two per remote host. The
+ledger limiter remains responsible for script work after parsing.
 Each redeemer is evaluated against the part of `MaxTxExUnits` the earlier
 redeemers have not used, so a transaction's total work stays within the
 protocol limit. `safedecode.Transaction` rejects bytes after the single
@@ -12254,6 +12259,20 @@ submit and evaluate paths, mempool admission and re-validation (and so
 node-to-node and node-to-client submissions), and endorser-block transaction
 decoding. Mesh
 `details.error` is omitted for internal errors; the cause goes to the log.
+
+Mempool transaction admission has at most four process-wide validation
+slots and is reduced to the metadata store's coordinated read snapshot limit
+when it exposes one. This leaves operational read capacity for chain and query
+work even when SQLite's pool is configured below its default of five
+connections. Mesh and UTxO RPC reserve a slot through `AdmitSubmission` after
+reading the request body and before decoding the transaction; it fails fast
+with `ErrSubmissionBusy`, which Mesh reports as retriable unavailable and UTxO
+RPC as `ResourceExhausted`. Node-to-node and node-to-client submission and
+rolled-back transaction restoration reserve inside `AddTransaction`, which
+waits for a slot until its context ends or the mempool stops, so contention
+delays those transactions instead of dropping them. Node-to-node and
+node-to-client validation inherit connection cancellation, so a disconnected
+peer cannot retain a slot, a wait, or a ledger snapshot.
 
 ### Blockfrost unsupported operations
 

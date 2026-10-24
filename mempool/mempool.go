@@ -55,7 +55,10 @@ const (
 	DefaultCleanupInterval      = 1 * time.Minute
 	DefaultRevalidationDeltaCap = 64
 	DefaultConsumerCacheSize    = 1024
-	defaultConsumerCacheShare   = 4
+	// DefaultMaxConcurrentSubmissions leaves one connection in SQLite's
+	// default five-connection read pool available to chain and query work.
+	DefaultMaxConcurrentSubmissions = 4
+	defaultConsumerCacheShare       = 4
 	// minConsumerCacheBytes floors the per-consumer relay cache budget derived
 	// from MempoolCapacity when ConsumerCacheBytes is left at zero. NextTx
 	// permanently skips any body whose size exceeds this budget, so an
@@ -273,6 +276,7 @@ type Mempool struct {
 	overlay           *utxoOverlay
 	dag               *transactionDAG
 	headroomChanged   chan struct{}
+	submissionSlots   chan struct{}
 
 	// rebuildMutex permits one double-buffer rebuild at a time. mutationSeq and
 	// mutationJournal are protected by mutationMutex and let that rebuild catch
@@ -617,6 +621,28 @@ var ErrNilValidator = errors.New("mempool: validator is nil")
 // ErrMempoolStopped is returned when admission is attempted after shutdown.
 var ErrMempoolStopped = errors.New("mempool: stopped")
 
+// ErrSubmissionBusy reports that every transaction-submission validation
+// slot is in use. AdmitSubmission returns it instead of waiting, so an API
+// request does not hold a handler goroutine while it waits for a metadata
+// read transaction.
+var ErrSubmissionBusy = errors.New("transaction submission capacity exhausted")
+
+type submissionAdmissionKey struct{}
+
+type submissionAdmission struct {
+	mempool *Mempool
+}
+
+// SubmissionAdmitter is implemented by a mempool that can reserve validation
+// capacity before an API decodes an untrusted transaction body.
+type SubmissionAdmitter interface {
+	AdmitSubmission(context.Context) (context.Context, func(), error)
+}
+
+type submissionCapacityProvider interface {
+	MempoolSubmissionCapacity() int
+}
+
 // MempoolFullError reports an admission refused for capacity. CurrentSize and
 // TxSize are in the units capacity is charged in: a transaction's CBOR plus
 // the CBOR of the decoded outputs the pool keeps for it.
@@ -645,6 +671,12 @@ func newMempool(
 ) (*Mempool, error) {
 	if config.Validator == nil {
 		return nil, ErrNilValidator
+	}
+	submissionCapacity := DefaultMaxConcurrentSubmissions
+	if provider, ok := config.Validator.(submissionCapacityProvider); ok {
+		if limit := provider.MempoolSubmissionCapacity(); limit > 0 {
+			submissionCapacity = min(submissionCapacity, limit)
+		}
 	}
 	if !implementation.Valid() {
 		return nil, fmt.Errorf(
@@ -710,6 +742,10 @@ func newMempool(
 		rejectionWatermark:     rejectionWatermark,
 		revalidationDeltaCap:   revalidationDeltaCap,
 		revalidationJournalCap: defaultRevalidationJournalCap,
+		submissionSlots: make(
+			chan struct{},
+			submissionCapacity,
+		),
 	}
 	if implementation == ImplementationDAG {
 		m.dag = newTransactionDAG()
@@ -1930,6 +1966,13 @@ func (m *Mempool) AddTransaction(
 	if err := m.rejectOversizedTx(txType, txBytes); err != nil {
 		return err
 	}
+	if admission, _ := ctx.Value(submissionAdmissionKey{}).(submissionAdmission); admission.mempool != m {
+		release, err := m.waitSubmissionSlot(ctx)
+		if err != nil {
+			return err
+		}
+		defer release()
+	}
 	// Decode transaction outside the lock (CPU-bound, no shared state)
 	tmpTx, err := safedecode.Transaction(txType, txBytes)
 	if err != nil {
@@ -1992,6 +2035,54 @@ func (m *Mempool) AddTransaction(
 		}
 	}
 	return nil
+}
+
+// AdmitSubmission reserves a validation slot without waiting and marks the
+// returned context so AddTransaction can reuse the reservation. API handlers
+// call this before decoding request data so a busy node can answer the client
+// at once; it returns ErrSubmissionBusy when every slot is held.
+func (m *Mempool) AdmitSubmission(
+	ctx context.Context,
+) (context.Context, func(), error) {
+	if err := ctx.Err(); err != nil {
+		return ctx, nil, err
+	}
+	select {
+	case m.submissionSlots <- struct{}{}:
+		return context.WithValue(
+			ctx,
+			submissionAdmissionKey{},
+			submissionAdmission{mempool: m},
+		), m.submissionSlotRelease(), nil
+	default:
+		return ctx, nil, ErrSubmissionBusy
+	}
+}
+
+// waitSubmissionSlot reserves a validation slot for a caller that did not
+// call AdmitSubmission. Node-to-node and node-to-client submission and
+// rolled-back transaction restoration have no client to answer with a busy
+// status, so they wait for a slot rather than drop the transaction. The wait
+// ends when ctx is done or the mempool stops.
+func (m *Mempool) waitSubmissionSlot(ctx context.Context) (func(), error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	select {
+	case m.submissionSlots <- struct{}{}:
+		return m.submissionSlotRelease(), nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-m.done:
+		return nil, ErrMempoolStopped
+	}
+}
+
+func (m *Mempool) submissionSlotRelease() func() {
+	var once sync.Once
+	return func() {
+		once.Do(func() { <-m.submissionSlots })
+	}
 }
 
 // rejectOversizedTx applies the ledger's MaxTxSize rule to the raw submission

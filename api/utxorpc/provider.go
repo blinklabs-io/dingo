@@ -25,6 +25,7 @@ import (
 
 type ProviderConfig struct {
 	Port uint                `yaml:"port"`
+	Host string              `yaml:"host"`
 	TLS  apiconfig.TLSPolicy `yaml:"tls"`
 }
 
@@ -45,16 +46,22 @@ func RegisterProvider(host *plugin.Host) error {
 			Name:        "builtin",
 			Description: "built-in UTxO RPC Connect server",
 		},
-		func() ProviderConfig { return ProviderConfig{Port: 9090} },
+		func() ProviderConfig {
+			return ProviderConfig{Port: 9090, Host: defaultListenHost}
+		},
 		func(_ context.Context, cfg ProviderConfig, deps ProviderDependencies) (*Utxorpc, plugin.Instance, error) {
 			tls, err := cfg.TLS.Resolve("plugins.api.utxorpc.config.tls")
 			if err != nil {
 				return nil, nil, fmt.Errorf("utxorpc: %w", err)
 			}
+			listenHost := cfg.Host
+			if listenHost == "" {
+				listenHost = deps.Host
+			}
 			server := NewUtxorpc(UtxorpcConfig{
 				Logger: deps.Logger, EventBus: deps.EventBus,
 				LedgerState: deps.LedgerState, Mempool: deps.Mempool,
-				Host: deps.Host, Port: cfg.Port,
+				Host: listenHost, Port: cfg.Port,
 				TLS:                tls,
 				CORSAllowedOrigins: deps.CORSAllowedOrigins,
 			})
