@@ -1331,9 +1331,9 @@ ORDER BY credential_tag, staking_key, id`, d.dialect),
 // 0 (key hash) or 1 (script hash); see that function's doc comment for the
 // 0/1 meaning.
 //
-// koios-parity only ever targets preview/preprod, both testnet networks, so
-// the address network ID is always lcommon.AddressNetworkTestnet — this
-// never needs a network parameter. This mirrors
+// network selects the address network ID: mainnet encodes
+// lcommon.AddressNetworkMainnet and preview/preprod encode
+// lcommon.AddressNetworkTestnet; any other network is an error. This mirrors
 // api/blockfrost/adapter.go's stakeAddressFromCredential exactly (same
 // lcommon.NewAddressFromParts call with paymentAddr=nil), reimplemented here
 // rather than imported: the api package is a much larger dependency edge
@@ -1343,9 +1343,22 @@ ORDER BY credential_tag, staking_key, id`, d.dialect),
 // address logic being identical — see this file's/ARCHITECTURE.md's "never
 // add an HTTP client for the Dingo side" invariant.
 func StakeAddressFromCredential(
+	network string,
 	stakingKey []byte,
 	credentialTag uint8,
 ) (string, error) {
+	var networkID uint8
+	switch network {
+	case "mainnet":
+		networkID = lcommon.AddressNetworkMainnet
+	case "preview", "preprod":
+		networkID = lcommon.AddressNetworkTestnet
+	default:
+		return "", fmt.Errorf(
+			"unsupported network %q for stake address",
+			network,
+		)
+	}
 	addrType := uint8(lcommon.AddressTypeNoneKey)
 	switch credentialTag {
 	case 0:
@@ -1360,7 +1373,7 @@ func StakeAddressFromCredential(
 	}
 	addr, err := lcommon.NewAddressFromParts(
 		addrType,
-		lcommon.AddressNetworkTestnet,
+		networkID,
 		nil,
 		stakingKey,
 	)

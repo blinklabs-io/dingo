@@ -386,7 +386,8 @@ func memberAccount(
 ) (models.RewardAccountOutput, KoiosAccountRewards) {
 	t.Helper()
 	key := testPoolKeyHash(t, b)
-	addr, err := StakeAddressFromCredential(key, 0)
+	addr, err := StakeAddressFromCredential(
+		"preview", key, 0)
 	require.NoError(t, err)
 	return models.RewardAccountOutput{
 			StakingKey: key,

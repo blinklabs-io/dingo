@@ -306,9 +306,9 @@ ahead of a freshly-started Dingo fast enough that there is never a matching
 historical block left to compare against by the time Dingo reaches it. Koios
 has no such problem -- it retains full per-epoch history indefinitely.
 
-Restricted to --network preview or preprod: Koios only ever serves these two
-networks, and this command's UTxO-set check walks every transaction one at a
-time from genesis, which is only tractable at their scale. For mainnet-scale
+Restricted to --network preview or preprod: this command's UTxO-set check
+walks every transaction one at a time from genesis, which is only tractable
+at their scale. For mainnet-scale
 validation of an already-synced node, use 'check'/'watch' against a real
 reference cardano-node instead -- both nodes bootstrapped near their live tip
 (e.g. via a Mithril snapshot) avoids the from-genesis race this command

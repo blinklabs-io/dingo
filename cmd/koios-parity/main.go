@@ -13,7 +13,7 @@
 // limitations under the License.
 
 // koios-parity validates Dingo's closed-epoch reward state against Koios
-// reference data on preview and preprod networks.
+// reference data on preview, preprod and mainnet networks.
 //
 // It fetches Koios reference data (epoch info, per-pool history) into a local
 // SQLite cache and then compares it directly against Dingo's metadata database
@@ -64,7 +64,7 @@ func main() {
 		Use:   programName,
 		Short: "Validate Dingo reward state against Koios reference data",
 		Long: `koios-parity compares Dingo's closed-epoch reward inputs against Koios
-on preview and preprod networks.
+on preview, preprod and mainnet networks.
 
 Default action (no subcommand): fetch Koios data, compare against Dingo, print status.
 
@@ -84,7 +84,7 @@ Environment:
   DINGO_PLUGINS_STORAGE_METADATA_PROVIDER  metadata backend: sqlite (default), postgres, mysql
   DINGO_PLUGINS_STORAGE_METADATA_CONFIG_*  metadata provider config (e.g. _DSN, _HOST, _DATA_DIR)
   DINGO_DATA_DIR                           koios-parity-only override for the data directory
-  CARDANO_NETWORK                          cardano network name (preview or preprod)
+  CARDANO_NETWORK                          cardano network name (preview, preprod or mainnet)
   KOIOS_API_KEY                            Koios Bearer token for rate-limited access
   KOIOS_API_KEY_FILE                       file holding the Koios Bearer token`,
 		RunE: runCommand,
@@ -97,7 +97,7 @@ Environment:
 	)
 	rootCmd.PersistentFlags().StringVar(
 		&globalFlags.network, "network", "",
-		"cardano network: preview or preprod",
+		"cardano network: preview, preprod or mainnet",
 	)
 	rootCmd.PersistentFlags().StringVar(
 		&globalFlags.dingoData, "dingo-data", "",
@@ -362,13 +362,10 @@ func requireNetwork() (string, error) {
 		}
 	}
 	if net == "" {
-		return "", errors.New("--network is required (preview or preprod)")
+		return "", errors.New("--network is required (preview, preprod or mainnet)")
 	}
-	if net != "preview" && net != "preprod" {
-		return "", fmt.Errorf(
-			"--network must be 'preview' or 'preprod', got %q",
-			net,
-		)
+	if err := koiosparity.ValidateNetwork(net); err != nil {
+		return "", fmt.Errorf("--network: %w", err)
 	}
 	return net, nil
 }

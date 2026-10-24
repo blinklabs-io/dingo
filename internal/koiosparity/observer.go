@@ -49,8 +49,8 @@ const (
 
 // ObserverConfig configures an Observer.
 type ObserverConfig struct {
-	// Network is the Koios network to validate against ("preview" or
-	// "preprod").
+	// Network is the Koios network to validate against ("preview",
+	// "preprod" or "mainnet").
 	Network string
 	// CachePath is the Koios reference cache.db path.
 	CachePath string
@@ -245,11 +245,8 @@ func NewObserver(cfg ObserverConfig) (*Observer, error) {
 			"koiosparity: Observer requires a non-nil RewardParitySource",
 		)
 	}
-	if cfg.Network != "preview" && cfg.Network != "preprod" {
-		return nil, fmt.Errorf(
-			"koiosparity: Observer network must be preview or preprod, got %q",
-			cfg.Network,
-		)
+	if err := validateKoiosNetwork(cfg.Network); err != nil {
+		return nil, fmt.Errorf("koiosparity: Observer network: %w", err)
 	}
 	if cfg.Logger == nil {
 		cfg.Logger = slog.New(slog.DiscardHandler)

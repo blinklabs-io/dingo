@@ -66,11 +66,11 @@ func (n *Node) startKoiosParityObserver() error {
 	if network == "" {
 		network = n.config.network
 	}
-	if network != "preview" && network != "preprod" {
+	if err := koiosparity.ValidateNetwork(network); err != nil {
 		return fmt.Errorf(
-			"koios parity observer requires network preview or preprod, got %q "+
+			"koios parity observer: %w "+
 				"(set koiosParity.network explicitly if it differs from the node's own network)",
-			network,
+			err,
 		)
 	}
 

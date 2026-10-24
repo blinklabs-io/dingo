@@ -136,8 +136,8 @@ at a time.`,
 	}
 }
 
-// requireNetwork validates --network the same way cmd/koios-parity does:
-// this tool is scoped to preview/preprod only.
+// requireNetwork validates --network: this tool is scoped to preview/preprod
+// only.
 func requireNetwork() (string, error) {
 	switch globalFlags.network {
 	case "preview", "preprod":
