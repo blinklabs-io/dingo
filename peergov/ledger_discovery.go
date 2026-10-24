@@ -425,6 +425,17 @@ func (p *PeerGovernor) addLedgerPeerContext(
 	// whatever ends up here unchanged for the peer's whole lifetime, so this
 	// (unlike resolveAddress) filters to a locally-dialable address family.
 	normalized := p.resolveLedgerDiscoveryAddress(ctx, address)
+	return p.addResolvedLedgerPeerContext(
+		ctx, address, normalized, address, stake, stakeKnown,
+	)
+}
+
+func (p *PeerGovernor) addResolvedLedgerPeerContext(
+	ctx context.Context,
+	address, normalized, relayAddress string,
+	stake uint64,
+	stakeKnown bool,
+) bool {
 	// Rechecked after resolution, not just before it: a canceled DNS lookup
 	// falls back to the bare hostname, which isRoutableAddr accepts, so
 	// without this a shutdown that lands during resolution would still add
@@ -453,10 +464,12 @@ func (p *PeerGovernor) addLedgerPeerContext(
 	}
 
 	hostnameNormalized := p.normalizeAddress(address)
+	relayNormalized := p.normalizeAddress(relayAddress)
 
 	// Check deny list
 	if p.isDeniedLocked(normalized) ||
-		p.isDeniedLocked(hostnameNormalized) {
+		p.isDeniedLocked(hostnameNormalized) ||
+		p.isDeniedLocked(relayNormalized) {
 		p.mu.Unlock()
 		return false
 	}
@@ -487,13 +500,13 @@ func (p *PeerGovernor) addLedgerPeerContext(
 		// (e.g. the peer was added under its resolved IP while the ledger
 		// lists a hostname for the same relay), and keying on the candidate
 		// would silently break both the counting lookup and peer-retention
-		// pruning for that peer. The value is hostnameNormalized — the
+		// pruning for that peer. The value is relayNormalized — the
 		// normalized, pre-DNS form of the candidate, not the verbatim
-		// candidate string — so a later discovery round's
-		// reconcileLedgerKnownAddrs can compare it against the ledger's
+		// candidate string, even when address is a DNS-expanded IP. This lets
+		// reconcileLedgerKnownAddrs compare it against the ledger's
 		// fresh relay list (normalized the same way), without re-resolving
 		// every candidate.
-		p.ledgerKnownAddrs[p.normalizeAddress(existingPeer.Address)] = hostnameNormalized
+		p.ledgerKnownAddrs[p.normalizeAddress(existingPeer.Address)] = relayNormalized
 		if stakeKnown || stake > 0 {
 			existingPeer.StakeLovelace = stake
 			existingPeer.StakeKnown = true
@@ -519,8 +532,8 @@ func (p *PeerGovernor) addLedgerPeerContext(
 	// target even though the governor does not retain them as peers. Keyed
 	// on normalizeAddress(newPeer.Address), matching the existingPeer branch
 	// above; for a brand-new peer Address is exactly address, so this key is
-	// always identical to hostnameNormalized here.
-	p.ledgerKnownAddrs[p.normalizeAddress(address)] = hostnameNormalized
+	// the resolved address; the value retains the original relay hostname.
+	p.ledgerKnownAddrs[p.normalizeAddress(address)] = relayNormalized
 
 	// Add as new peer
 	newPeer := &Peer{

@@ -121,7 +121,7 @@ func TestEmbedFS_ListFiles(t *testing.T) {
 func TestEmbedFS_AllNetworks(t *testing.T) {
 	t.Parallel()
 
-	networks := []string{"preview", "preprod", "mainnet", "devnet"}
+	networks := []string{"preview", "preprod", "mainnet", "devnet", "dijkstra"}
 	expectedFiles := []string{
 		"config.json",
 		"byron-genesis.json",

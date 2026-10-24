@@ -2067,15 +2067,10 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 			cancelAdmission()
 			switch {
 			case holdExpired:
-				// No witness arrived; the witnesses may have been recycled,
-				// or every tracked client slot may be held. Withhold the
-				// header and re-intersect, which delivers it again and frees
-				// the slot meanwhile.
-				o.scheduleHeaderResync(
-					ctx.ConnectionId,
-					time.Now(),
-					event.ChainsyncResyncReasonGenesisCorroborationHoldExpired,
-				)
+				// Keep the chainsync cursor. Re-intersecting immediately from
+				// the applied tip discards this peer's candidate history and
+				// repeats the same hold; another peer needs that history to
+				// corroborate the withheld header when it catches up.
 			case err != nil:
 				return fmt.Errorf("wait for genesis corroboration: %w", err)
 			}

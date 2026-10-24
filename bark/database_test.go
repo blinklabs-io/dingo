@@ -570,8 +570,11 @@ var (
 )
 
 type barkRecoveringCatalogDestination struct {
-	dir      string
-	failList *atomic.Bool
+	dir         string
+	failList    *atomic.Bool
+	listCalls   *atomic.Int64
+	listEntered chan struct{}
+	listRelease <-chan struct{}
 }
 
 func (d *barkRecoveringCatalogDestination) UploadDir(
@@ -603,6 +606,19 @@ func (d *barkRecoveringCatalogDestination) ListSnapshotCatalog(
 	ctx context.Context,
 	_ lifecycle.SnapshotCatalogScanBudget,
 ) ([]lifecycle.SnapshotEntry, error) {
+	if d.listCalls != nil {
+		d.listCalls.Add(1)
+	}
+	if d.listEntered != nil {
+		d.listEntered <- struct{}{}
+	}
+	if d.listRelease != nil {
+		select {
+		case <-d.listRelease:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
 	if d.failList.Load() {
 		return nil, errors.New("provider unavailable")
 	}
@@ -881,12 +897,14 @@ func TestListAvailableSnapshotsRetriesIncompleteStartupListing(t *testing.T) {
 	snapshotDir := t.TempDir()
 	cloudRoot := t.TempDir()
 	var failList atomic.Bool
+	var listCalls atomic.Int64
 	failList.Store(true)
 	registry := lifecycle.NewDestinationRegistry()
 	registry.Register("recoveringcatalog", func(uri *url.URL) (lifecycle.CloudDestination, error) {
 		return &barkRecoveringCatalogDestination{
-			dir:      filepath.Join(cloudRoot, strings.TrimPrefix(uri.Path, "/")),
-			failList: &failList,
+			dir:       filepath.Join(cloudRoot, strings.TrimPrefix(uri.Path, "/")),
+			failList:  &failList,
+			listCalls: &listCalls,
 		}, nil
 	})
 	const cloudDest = "recoveringcatalog://bucket/snapshots"
@@ -916,8 +934,99 @@ func TestListAvailableSnapshotsRetriesIncompleteStartupListing(t *testing.T) {
 		connect.NewRequest(&databasev1alpha1.ListAvailableSnapshotsRequest{}),
 	)
 	require.NoError(t, err)
+	require.Empty(t, resp.Msg.GetSnapshots())
+	require.EqualValues(t, 1, listCalls.Load(),
+		"a failed startup scan must suppress provider retries during backoff")
+	h.catalogRetry.nextAttempt = time.Time{}
+	resp, err = h.ListAvailableSnapshots(
+		t.Context(),
+		connect.NewRequest(&databasev1alpha1.ListAvailableSnapshotsRequest{}),
+	)
+	require.NoError(t, err)
 	require.Len(t, resp.Msg.GetSnapshots(), 1)
 	require.Equal(t, "after-recovery", resp.Msg.GetSnapshots()[0].GetSnapshotId())
+	require.EqualValues(t, 2, listCalls.Load())
+}
+
+func TestReconcileCloudSnapshotCatalogSerializesRetries(t *testing.T) {
+	snapshotDir := t.TempDir()
+	cloudRoot := t.TempDir()
+	var failList atomic.Bool
+	failList.Store(true)
+	var listCalls atomic.Int64
+	var provider *barkRecoveringCatalogDestination
+	registry := lifecycle.NewDestinationRegistry()
+	registry.Register("serialcatalog", func(uri *url.URL) (lifecycle.CloudDestination, error) {
+		if provider == nil {
+			provider = &barkRecoveringCatalogDestination{
+				dir:       filepath.Join(cloudRoot, strings.TrimPrefix(uri.Path, "/")),
+				failList:  &failList,
+				listCalls: &listCalls,
+			}
+		}
+		return provider, nil
+	})
+	const cloudDest = "serialcatalog://bucket/snapshots"
+	trustKeyFile := testSnapshotTrustKeyFile(t)
+	b, err := NewBark(BarkConfig{
+		DB: newTestDB(t), Lifecycle: dblifecycle.NewService(&config.Config{
+			DatabaseLifecycle: config.DatabaseLifecycleConfig{SnapshotTrustKeyFile: trustKeyFile},
+		}, registry, nil),
+		SnapshotDir: snapshotDir, SnapshotCloudDestination: cloudDest,
+		DestinationRegistry: registry, Port: 1,
+	})
+	require.NoError(t, err)
+	h := newDatabaseServiceHandler(t.Context(), b)
+	require.EqualValues(t, 1, listCalls.Load(), "startup scan should have failed once")
+
+	listEntered := make(chan struct{}, 2)
+	listRelease := make(chan struct{})
+	provider.listEntered = listEntered
+	provider.listRelease = listRelease
+	h.catalogRetry.nextAttempt = time.Time{}
+	closed := false
+	defer func() {
+		if !closed {
+			close(listRelease)
+		}
+	}()
+	reconcile := func() error {
+		_, err := h.reconcileCloudSnapshotCatalogIfNeeded(t.Context())
+		return err
+	}
+	firstDone := make(chan error, 1)
+	go func() { firstDone <- reconcile() }()
+	select {
+	case <-listEntered:
+	case <-time.After(time.Second):
+		t.Fatal("first reconciliation did not reach the provider")
+	}
+
+	secondStarted := make(chan struct{})
+	secondDone := make(chan error, 1)
+	go func() {
+		close(secondStarted)
+		secondDone <- reconcile()
+	}()
+	select {
+	case <-secondStarted:
+	case <-time.After(time.Second):
+		t.Fatal("second listing did not start")
+	}
+	var concurrentProviderCall bool
+	select {
+	case <-listEntered:
+		concurrentProviderCall = true
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(listRelease)
+	closed = true
+	require.ErrorContains(t, <-firstDone, "provider unavailable")
+	require.NoError(t, <-secondDone)
+	require.False(t, concurrentProviderCall,
+		"concurrent listings must not start duplicate provider scans")
+	require.EqualValues(t, 2, listCalls.Load(),
+		"the second listing must observe retry backoff after the first scan fails")
 }
 
 func TestListAvailableSnapshotsRetriesStartupConstructorFailure(t *testing.T) {
@@ -954,13 +1063,53 @@ func TestListAvailableSnapshotsRetriesStartupConstructorFailure(t *testing.T) {
 		lifecycle.WithManifestKey(testSnapshotTrustKey),
 	))
 	require.NoError(t, lifecycle.RemoveSnapshotContext(t.Context(), dir))
+	constructorCallsBeforeListing := attempts.Load()
 	resp, err := h.ListAvailableSnapshots(
+		t.Context(),
+		connect.NewRequest(&databasev1alpha1.ListAvailableSnapshotsRequest{}),
+	)
+	require.NoError(t, err)
+	require.Empty(t, resp.Msg.GetSnapshots())
+	require.Equal(t, constructorCallsBeforeListing, attempts.Load(),
+		"a failed startup constructor must not be retried during backoff")
+	h.catalogRetry.nextAttempt = time.Time{}
+	resp, err = h.ListAvailableSnapshots(
 		t.Context(),
 		connect.NewRequest(&databasev1alpha1.ListAvailableSnapshotsRequest{}),
 	)
 	require.NoError(t, err)
 	require.Len(t, resp.Msg.GetSnapshots(), 1)
 	require.Equal(t, "after-constructor-recovery", resp.Msg.GetSnapshots()[0].GetSnapshotId())
+	require.Equal(t, constructorCallsBeforeListing+1, attempts.Load())
+}
+
+func TestReconcileCloudSnapshotCatalogCancellationDoesNotBackoff(t *testing.T) {
+	for _, destination := range []string{"", "cancelcatalog://bucket/snapshots"} {
+		t.Run(destination, func(t *testing.T) {
+			h := newTestDatabaseServiceHandlerWithTrustKey(t, nil, t.TempDir())
+			h.bark.config.SnapshotCloudDestination = destination
+			if destination != "" {
+				registry := lifecycle.NewDestinationRegistry()
+				registry.Register("cancelcatalog", func(*url.URL) (lifecycle.CloudDestination, error) {
+					return &countingSnapshotListerDestination{}, nil
+				})
+				h.bark.config.DestinationRegistry = registry
+			}
+			before := catalogReconciliationRetry{
+				destination: "previous",
+				nextAttempt: time.Now().Add(time.Minute),
+				delay:       time.Minute,
+			}
+			h.catalogRetry = before
+			ctx, cancel := context.WithCancel(t.Context())
+			cancel()
+
+			err := h.reconcileCloudSnapshotCatalog(ctx)
+
+			require.ErrorIs(t, err, context.Canceled)
+			require.Equal(t, before, h.catalogRetry)
+		})
+	}
 }
 
 // ── Restore/VerifySnapshot/DeleteSnapshot cloud-fallback ──────────────────

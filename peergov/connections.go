@@ -1375,6 +1375,9 @@ func (p *PeerGovernor) isPeerDeniedLocked(peer *Peer) bool {
 		p.isDeniedLocked(p.normalizeAddress(peer.Address)) {
 		return true
 	}
+	if relayAddress := p.ledgerKnownAddrs[p.normalizeAddress(peer.Address)]; relayAddress != "" && p.isDeniedLocked(relayAddress) {
+		return true
+	}
 	if peer.Connection != nil && peer.Connection.Id.RemoteAddr != nil {
 		remoteAddress := peer.Connection.Id.RemoteAddr.String()
 		return p.isDeniedLocked(connmanager.NormalizePeerAddr(remoteAddress)) ||

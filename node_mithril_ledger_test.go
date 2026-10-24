@@ -82,6 +82,12 @@ func newMithrilTestLedger(t *testing.T) mithrilTestLedger {
 		PromRegistry:      prometheus.NewRegistry(),
 	})
 	require.NoError(t, err)
+	// With no upstream connection and reachedTip unlatched, the ledger loop
+	// holds a lone new block for seconds waiting for more, and a read taken
+	// across the catch-up is discarded and held again on resume. That leaves
+	// requireIngestFree nothing under its five second wait on a slow runner.
+	// These tests hand the ledger back to a live node, so latch it.
+	ls.MarkReachedTipForTesting()
 	ctx, cancel := context.WithCancel(context.Background())
 	require.NoError(t, ls.Start(ctx))
 	t.Cleanup(func() {
