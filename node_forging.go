@@ -946,15 +946,36 @@ func (n *Node) initBlockForger(
 	// ledger views used by header validation, while credentials remain owned by
 	// the existing block producer.
 	election, err := n.selectedConsensusProvider().NewLeaderScheduler(
-		func(scheduleIdentity string) (nodeconsensus.LeaderScheduler, error) {
-			election := leader.NewElection(
-				poolKeyHash,
-				creds.GetVRFSKey,
-				stakeProvider,
-				epochProvider,
-				n.eventBus,
-				n.config.logger,
-			)
+		func(
+			scheduleIdentity string,
+			kind nodeconsensus.LeaderScheduleKind,
+		) (nodeconsensus.LeaderScheduler, error) {
+			var election *leader.Election
+			switch kind {
+			case nodeconsensus.LeaderSchedulePraos:
+				election = leader.NewElection(
+					poolKeyHash,
+					creds.GetVRFSKey,
+					stakeProvider,
+					epochProvider,
+					n.eventBus,
+					n.config.logger,
+				)
+			case nodeconsensus.LeaderScheduleTachys:
+				election = leader.NewTachysElection(
+					poolKeyHash,
+					stakeProvider,
+					stakeProvider,
+					epochProvider,
+					n.eventBus,
+					n.config.logger,
+				)
+			default:
+				return nil, fmt.Errorf(
+					"unsupported leader schedule kind %d",
+					kind,
+				)
+			}
 			election.SetConsensusIdentity(scheduleIdentity)
 			election.SetPromRegistry(n.config.promRegistry)
 			if scheduleStore != nil {
@@ -1365,6 +1386,20 @@ func (a *stakeDistributionAdapter) GetPoolAndTotalActiveStake(
 // a compile error rather than a silent consensus divergence.
 var _ leader.StakeDistributionProvider = (*stakeDistributionAdapter)(nil)
 
+// GetTachysDistribution exposes the ledger-owned immutable election snapshot
+// to the production scheduler.
+func (a *stakeDistributionAdapter) GetTachysDistribution(
+	ctx context.Context,
+	epoch uint64,
+) (*nodeconsensus.TachysDistribution, error) {
+	if a.ledgerState == nil {
+		return nil, errors.New("ledger state unavailable")
+	}
+	return a.ledgerState.TachysDistribution(ctx, epoch)
+}
+
+var _ leader.TachysDistributionProvider = (*stakeDistributionAdapter)(nil)
+
 // epochInfoAdapter adapts ledger.LedgerState to leader.EpochInfoProvider.
 type epochInfoAdapter struct {
 	ledgerState *ledger.LedgerState
@@ -1462,6 +1497,10 @@ func (a *epochInfoAdapter) ConsensusModeForEpoch(
 	epoch uint64,
 ) (consensus.ConsensusMode, error) {
 	return a.ledgerState.ConsensusModeForEpoch(epoch)
+}
+
+func (a *epochInfoAdapter) EraIDForEpoch(epoch uint64) (uint, error) {
+	return a.ledgerState.EraIDForEpoch(epoch)
 }
 
 // slotClockAdapter adapts ledger.LedgerState to forging.SlotClockProvider.

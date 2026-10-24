@@ -982,6 +982,14 @@ func TestRunTestsLeiosSelectsItsFullDijkstraScenario(t *testing.T) {
 	require.Contains(t, result.dockerLog, "./internal/test/devnet/...")
 }
 
+func TestRunTestsTachysSelectsSupportedTxPumpEra(t *testing.T) {
+	result := runFakeDevnetWithEnv(t, 0, false, map[string]string{
+		"DEVNET_TXPUMP_TRANSACTION_ERA": "dijkstra",
+	}, "--tachys")
+	require.Zero(t, result.exitCode, result.output)
+	require.Contains(t, result.dockerLog, "TXPUMP_TRANSACTION_ERA=conway\n")
+}
+
 func TestRunTestsDefaultClearsDijkstraOverrides(t *testing.T) {
 	result := runFakeDevnetWithEnv(t, 0, false, map[string]string{
 		"DEVNET_DINGO_RUN_MODE":         "leios",

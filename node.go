@@ -614,6 +614,7 @@ func (n *Node) newOuroborosConfig(
 		ChainsyncState:                 n.chainsyncState,
 		PeerGov:                        n.peerGov,
 		NetworkMagic:                   n.config.networkMagic,
+		NodeToNodeNetworkMagic:         n.consensusNetworkMagic(),
 		PeerSharing:                    n.config.peerSharing,
 		IntersectTip:                   n.config.intersectTip,
 		IntersectPoints:                n.config.intersectPoints,
@@ -790,6 +791,9 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		return fmt.Errorf("failed to resolve consensus plugin: %w", err)
 	}
 	n.consensusProvider = provider
+	if err := validateConsensusConfiguration(&n.config, provider); err != nil {
+		return fmt.Errorf("invalid consensus configuration: %w", err)
+	}
 
 	// Reconcile a live Restore's directory swap (node_lifecycle.go's
 	// swapInRestoredDataDir) that was interrupted by a crash, process

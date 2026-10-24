@@ -26,6 +26,15 @@ constructs the database and ledger, resolves mempool, and resolves the enabled
 API capabilities. Praos is the default `consensus` provider. The same
 instance chooses header authorization, production scheduling, peer and ledger
 chain comparison, and local sibling adoption for both relays and producers.
+The built-in `tachys` provider replaces Praos's private threshold with the
+CIP-0177 public schedule while retaining Babbage/Conway VRF, KES, operational
+certificate, registered VRF-key, nonce, and chain-ordering checks. It accepts
+only networks whose Shelley-family eras through Babbage start at epoch zero,
+whose active-slots coefficient is one, and which do not enable Genesis or
+Mithril bootstrap, Leios, or Dijkstra. Unsupported shapes fail before storage
+or networking starts. Its node-to-node handshake magic is derived from the
+base network magic and versioned provider identity, so a Tachys node refuses a
+Praos peer before exchanging chain data even when both use the same genesis.
 The ledger supplies state to the provider and retains ownership of epochs,
 nonces, transactions, rollback, and stake snapshots; producer credentials stay
 with the block producer. Each API provider (Blockfrost,
@@ -8455,6 +8464,20 @@ the unsigned big-endian 512-bit raw output. Only the bounded comparator's
 prepares once per stake/coefficient/mode tuple and checks each signed slot
 with `CheckVRFOutput`. Zero-pool schedules remain empty as pool policy even
 at `f=1`; inbound zero-pool headers remain rejected.
+
+Tachys scheduling instead prepares gOuroboros's exact-integer public selector
+from every positive-stake pool in one Mark snapshot. The immutable distribution
+is canonically ordered and carries a commitment over all pool IDs and stake,
+so equal local and total stake cannot make a different distribution reusable.
+The same selector authorizes normal headers and peer-relative fork candidates;
+fork candidates use their derived candidate nonce rather than the local-chain
+nonce. The ledger caches at most three distributions by snapshot epoch and
+consensus-context generation. Rollback or state replacement changes that
+generation, while the leader manager clears its in-memory Tachys schedules on
+every rollback synchronously after the replacement consensus snapshot is
+published, and refuses an in-flight result from the older schedule generation.
+Persisted Tachys schedules pin the nonce, absolute epoch range,
+era, provider identity, and full-distribution commitment.
 
 The stake distribution is the reference node's active `set`/`nesPd`
 distribution, as of the end of E-2. Dingo captures `mark[K]` at the boundary

@@ -39,11 +39,13 @@ devnet_ports
 MODE=""
 ACCELERATED=false
 LEIOS=false
+TACHYS=false
 for arg in "$@"; do
   case "${arg}" in
     --conformance) MODE="conformance" ;;
     --accelerated) ACCELERATED=true ;;
     --leios)       LEIOS=true ;;
+    --tachys)      TACHYS=true ;;
     *)
       echo "Unknown argument: ${arg}" >&2
       exit 1
@@ -51,6 +53,14 @@ for arg in "$@"; do
   esac
 done
 MODE="${MODE:-${COMPOSE_PROFILES:-dingo}}"
+if [[ "${TACHYS}" == "true" && "${MODE}" != "dingo" ]]; then
+  echo "--tachys requires the all-Dingo profile" >&2
+  exit 1
+fi
+if [[ "${TACHYS}" == "true" && "${LEIOS}" == "true" ]]; then
+  echo "--tachys selects its own network spec" >&2
+  exit 1
+fi
 if [[ "${LEIOS}" == "true" && "${MODE}" != "dingo" ]]; then
   echo "--leios requires the all-Dingo profile" >&2
   exit 1
@@ -58,6 +68,9 @@ fi
 if [[ "${LEIOS}" == "true" && "${ACCELERATED}" == "true" ]]; then
   echo "--leios selects its own accelerated Dijkstra spec; do not combine it with --accelerated" >&2
   exit 1
+fi
+if [[ "${TACHYS}" != "true" ]]; then
+  unset DEVNET_CONSENSUS_PROVIDER DEVNET_GENESIS_BOOTSTRAP_ENABLED
 fi
 case "${MODE}" in
   conformance) export COMPOSE_PROFILES="conformance" ;;
@@ -86,7 +99,17 @@ fi
 # accelerated spec compresses slot, epoch and security-parameter timing so
 # a full scenario fits the reference-runner budget; the canonical spec is
 # what soak and canary runs use.
-if [[ "${LEIOS}" == "true" ]]; then
+if [[ "${TACHYS}" == "true" ]]; then
+  export DEVNET_DINGO_SPEC="./testnet-dingo-tachys.yaml"
+	export DEVNET_CONSENSUS_PROVIDER=tachys
+	export DEVNET_GENESIS_BOOTSTRAP_ENABLED=false
+	export DEVNET_TXPUMP_TRANSACTION_ERA=conway
+	export DEVNET_TXPUMP_CONFIRMATION_SLOTS=100
+	export DEVNET_ACCELERATED=1
+	unset DEVNET_TXPUMP_START_DELAY_SECONDS
+  ACTIVE_SPEC="${DEVNET_DINGO_SPEC}"
+  echo "Using Tachys network spec: ${ACTIVE_SPEC}"
+elif [[ "${LEIOS}" == "true" ]]; then
   export DEVNET_DINGO_SPEC="./testnet-dingo-leios.yaml"
   export DEVNET_LEIOS_ENABLED=1
   export DEVNET_LEIOS_VOTE_SIGNING_KEY_FILE="/configs/keys/leios-vote.skey"
