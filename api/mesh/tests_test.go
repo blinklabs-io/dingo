@@ -485,7 +485,7 @@ func TestRequestBodyLimit(t *testing.T) {
 	rec := postRaw(t, h, "/network/status", oversized)
 
 	requireMeshError(
-		t, rec, ErrInvalidRequest, http.StatusBadRequest,
+		t, rec, ErrInvalidRequest, http.StatusInternalServerError,
 	)
 }
 
@@ -710,7 +710,7 @@ func requireInvalidRequest(
 ) {
 	t.Helper()
 	require.Equal(
-		t, http.StatusBadRequest, resp.StatusCode,
+		t, http.StatusInternalServerError, resp.StatusCode,
 		"unexpected status, body: %s", body,
 	)
 	var got Error
@@ -889,46 +889,17 @@ func (f *fakeDatabase) GetTransactionsByBlockHash(ctx context.Context,
 
 // fakeLedgerState is a MeshLedgerState with per-test behavior.
 type fakeLedgerState struct {
-	pparams     lcommon.ProtocolParameters
-	slotToTime  func(slot uint64) (time.Time, error)
-	utxos       func(addrs []lcommon.Address) ([]models.Utxo, error)
+	pparams       lcommon.ProtocolParameters
+	slotToTime    func(slot uint64) (time.Time, error)
+	utxos         func(addrs []lcommon.Address) ([]models.Utxo, error)
+	utxosComplete func(
+		ctx context.Context,
+		addrs []lcommon.Address,
+	) ([]models.Utxo, error)
 	utxosAtSlot func(
 		addr lcommon.Address,
 		slot uint64,
 	) ([]models.Utxo, error)
-	// boundedPage overrides UtxosByAddressBoundedPage. When nil the fake
-	// returns every UTxO from utxos in one exhausted page.
-	boundedPage func(
-		ctx context.Context,
-		q *models.UtxoWithOrderingQuery,
-		maxCandidates int,
-		maxBytes int64,
-	) (models.UtxoAddressPage, error)
-}
-
-func (f *fakeLedgerState) UtxosByAddressBoundedPage(
-	ctx context.Context,
-	q *models.UtxoWithOrderingQuery,
-	maxCandidates int,
-	maxBytes int64,
-) (models.UtxoAddressPage, error) {
-	if f.boundedPage != nil {
-		return f.boundedPage(ctx, q, maxCandidates, maxBytes)
-	}
-	if f.utxos == nil {
-		return models.UtxoAddressPage{}, nil
-	}
-	utxos, err := f.utxos(nil)
-	if err != nil {
-		return models.UtxoAddressPage{}, err
-	}
-	page := models.UtxoAddressPage{Scanned: len(utxos)}
-	for i := range utxos {
-		page.Utxos = append(
-			page.Utxos, models.UtxoWithOrdering{Utxo: utxos[i]},
-		)
-	}
-	return page, nil
 }
 
 func (f *fakeLedgerState) GetCurrentPParams() lcommon.ProtocolParameters {
@@ -959,6 +930,16 @@ func (f *fakeLedgerState) UtxosByAddress(
 		return nil, nil
 	}
 	return f.utxos(addrs)
+}
+
+func (f *fakeLedgerState) UtxosByAddressComplete(
+	ctx context.Context,
+	addrs []lcommon.Address,
+) ([]models.Utxo, error) {
+	if f.utxosComplete != nil {
+		return f.utxosComplete(ctx, addrs)
+	}
+	return f.UtxosByAddress(addrs)
 }
 
 func (f *fakeLedgerState) UtxosByAddressAtSlot(

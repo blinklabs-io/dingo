@@ -1493,6 +1493,52 @@ func TestUtxosByAddressLoadsAssets(t *testing.T) {
 	assert.Equal(t, types.Uint64(5), got[0].Assets[0].Amount)
 }
 
+func TestUtxosByAddressCompleteExceedsBoundedLimit(t *testing.T) {
+	t.Parallel()
+
+	db := openTestDB(t)
+	payment := bytes.Repeat([]byte{0x56}, lcommon.AddressHashSize)
+	addr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyNone,
+		lcommon.AddressNetworkTestnet,
+		payment,
+		nil,
+	)
+	require.NoError(t, err)
+	encoded, err := cbor.Encode(&shelley.ShelleyTransactionOutput{
+		OutputAddress: addr,
+		OutputAmount:  1_000_000,
+	})
+	require.NoError(t, err)
+
+	const total = 3
+	for i := range total {
+		txHash := bytes.Repeat([]byte{byte(i + 1)}, 32)
+		require.NoError(t, db.CreateUtxo(t.Context(), nil, &models.Utxo{
+			TxId:       txHash,
+			OutputIdx:  0,
+			PaymentKey: addr.PaymentKeyHash().Bytes(),
+			Address:    []byte(addr.String()),
+			AddedSlot:  uint64(i + 1),
+			Amount:     types.Uint64(1_000_000),
+			Cbor:       encoded,
+		}))
+		require.NoError(t, db.BlobTxn(true).Do(func(txn *Txn) error {
+			return db.Blob().SetUtxo(txn.Blob(), txHash, 0, encoded)
+		}))
+	}
+
+	_, err = db.UtxosByAddress(
+		t.Context(), []lcommon.Address{addr}, total-1, nil,
+	)
+	require.ErrorIs(t, err, models.ErrTooManyUtxoResults)
+	got, err := db.UtxosByAddressComplete(
+		t.Context(), []lcommon.Address{addr}, nil,
+	)
+	require.NoError(t, err)
+	require.Len(t, got, total)
+}
+
 // seedManyUtxoAddressesAndAssertRoundTrip builds numAddrs addresses via
 // newAddr, seeds a distinct transaction, UTxO row, and blob CBOR for each,
 // then queries GetUtxosByAddress with the full address set in one call and
@@ -2521,7 +2567,8 @@ func TestFilterUtxosByAddressPatternsExactSetMatchesLinear(t *testing.T) {
 		return p
 	}
 	got, err := filterUtxosByAddressPatterns(
-		utxos, []models.UtxoAddressPattern{exact(addrs[0]), exact(addrs[2])},
+		t.Context(), utxos,
+		[]models.UtxoAddressPattern{exact(addrs[0]), exact(addrs[2])},
 	)
 	require.NoError(t, err)
 	require.Len(t, got, 2)
@@ -2531,7 +2578,7 @@ func TestFilterUtxosByAddressPatternsExactSetMatchesLinear(t *testing.T) {
 	mixed := exact(addrs[1])
 	mixed.PaymentPart = addrs[2].PaymentKeyHash().Bytes()
 	got, err = filterUtxosByAddressPatterns(
-		utxos, []models.UtxoAddressPattern{mixed},
+		t.Context(), utxos, []models.UtxoAddressPattern{mixed},
 	)
 	require.NoError(t, err)
 	require.Empty(t, got)

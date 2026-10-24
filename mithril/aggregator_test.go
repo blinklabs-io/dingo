@@ -537,7 +537,11 @@ func TestAggregatorPendingReadDoesNotCloseRegistration(t *testing.T) {
 	resp := get(t, f.url+"/certificate-pending")
 	// The former behavior returned an opened certificate (200); the assertion
 	// below pins that reading it must not freeze the signer set.
-	require.Contains(t, []int{http.StatusNoContent, http.StatusOK}, resp.StatusCode)
+	require.Contains(
+		t,
+		[]int{http.StatusNoContent, http.StatusOK},
+		resp.StatusCode,
+	)
 	require.NoError(t, resp.Body.Close())
 
 	code, body = f.register(newTestSTMSigner(2, 100))
@@ -554,7 +558,7 @@ func TestAggregatorInvalidSignatureDoesNotCloseRegistration(t *testing.T) {
 	code, body = f.postUnauthenticated(
 		"/register-signatures", registerSignatureRequest{},
 	)
-	require.Equal(t, http.StatusConflict, code, body)
+	require.Equal(t, http.StatusBadRequest, code, body)
 
 	code, body = f.register(newTestSTMSigner(2, 100))
 	require.Equal(t, http.StatusCreated, code, body,
@@ -609,7 +613,7 @@ func TestAggregatorSignatureValidation(t *testing.T) {
 	code, body := f.post(
 		"/register-signatures", registerSignatureRequest{PartyID: "x"},
 	)
-	require.Equal(t, http.StatusConflict, code, "nothing open yet: %s", body)
+	require.Equal(t, http.StatusBadRequest, code, "invalid request: %s", body)
 
 	f.registerAll(signers)
 	_, pc := f.pending()
@@ -625,7 +629,10 @@ func TestAggregatorSignatureValidation(t *testing.T) {
 		r.SignedMessage = "00"
 	})
 	require.Equal(
-		t, http.StatusConflict, postCode(f, staleMessage), "stale message",
+		t,
+		http.StatusBadRequest,
+		postCode(f, staleMessage),
+		"malformed message",
 	)
 
 	unknown := mutate(func(r *registerSignatureRequest) {

@@ -1879,12 +1879,24 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 		extendsLocalChain := ingressEligible &&
 			o.deferredHeaderExtendsLocalChain(ctx.ConnectionId, v)
 		if deferredVerification {
+			if ingressEligible && o.chainsyncState != nil {
+				// Keep bounded raw ancestry only; ledger validation checks the
+				// complete linked path before it can affect candidate selection.
+				o.chainsyncState.RecordObservedHeader(
+					chainsync.ObservedHeader{
+						ConnectionId: ctx.ConnectionId,
+						Point:        point,
+						BlockHeader:  v,
+						ArrivalTime:  arrivalTime,
+						Tip:          tip,
+						BlockNumber:  v.BlockNumber(),
+						Type:         blockType,
+					},
+				)
+			}
 			if !extendsLocalChain {
-				// Do not advance peer cursors, history, dedup state, or publish
-				// to selector/ledger until this header passes strict
-				// verification. Observed history is trusted by fork-density and
-				// rollback-replay paths, so it must contain only independently
-				// verified headers.
+				// Do not advance peer cursors, dedup state, or publish to
+				// selector/ledger until this header passes strict verification.
 				o.markDeferredHeaderRecovery(
 					ctx.ConnectionId,
 					verificationTipBaseline,
@@ -1973,15 +1985,10 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 			cancelAdmission()
 			switch {
 			case holdExpired:
-				// No witness arrived; the witnesses may have been recycled,
-				// or every tracked client slot may be held. Withhold the
-				// header and re-intersect, which delivers it again and frees
-				// the slot meanwhile.
-				o.scheduleHeaderResync(
-					ctx.ConnectionId,
-					time.Now(),
-					event.ChainsyncResyncReasonGenesisCorroborationHoldExpired,
-				)
+				// Keep the chainsync cursor. Re-intersecting immediately from
+				// the applied tip discards this peer's candidate history and
+				// repeats the same hold; another peer needs that history to
+				// corroborate the withheld header when it catches up.
 			case err != nil:
 				return fmt.Errorf("wait for genesis corroboration: %w", err)
 			}

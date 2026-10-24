@@ -150,57 +150,86 @@ func TestCloudDestinationIdentityDistinguishesProviderVisibleComponents(t *testi
 	}
 }
 
-// TestOrderEntriesManifestLastSortsManifestToEnd guards against a real
-// invariant: a snapshot's manifest.json must never upload before every
-// other backup payload has succeeded, since a concurrent lister/fetcher
-// treats a cloud-visible manifest as "this snapshot is fully there" (see
-// FetchCloudManifest/ListCloudSnapshots) and could otherwise download or
-// restore an incomplete snapshot. os.ReadDir's alphabetical order would
-// place "manifest.json" before "metadata.sqlite", so relying on
-// directory order alone is not enough.
-func TestOrderEntriesManifestLastSortsManifestToEnd(t *testing.T) {
+func writeTestUploadSnapshot(t *testing.T, dir string) {
+	t.Helper()
+	require.NoError(t, os.WriteFile(
+		filepath.Join(dir, BlobBackupFileName), []byte("blob"), 0o600,
+	))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(dir, MetadataBackupFileName), []byte("metadata"), 0o600,
+	))
+	require.NoError(t, WriteManifest(dir, Manifest{
+		BlobBytes:     4,
+		MetadataBytes: 8,
+		BlobSHA256: "fa2c8cc4f28176bbeed4b736df569a34" +
+			"c79cd3723e9ec42f9674b4d46ac6b8b8",
+		MetadataSHA256: "45447b7afbd5e544f7d0f1df0fccd260" +
+			"14d9850130abd3f020b89ff96b82079f",
+	}))
+}
+
+func TestOpenSnapshotUploadFilesUsesDeclaredFilesInPublicationOrder(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
-	for _, name := range []string{ManifestFileName, BlobBackupFileName, MetadataBackupFileName} {
-		require.NoError(
-			t,
-			os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o644),
-		)
-	}
-	entries, err := os.ReadDir(dir)
-	require.NoError(t, err)
+	writeTestUploadSnapshot(t, dir)
+	require.NoError(t, os.WriteFile(
+		filepath.Join(dir, "unrelated"), []byte("secret"), 0o600,
+	))
 
-	ordered := orderEntriesManifestLast(entries)
-	require.Len(t, ordered, 3)
-	require.Equal(
-		t, ManifestFileName, ordered[len(ordered)-1].Name(),
-		"manifest.json must sort last regardless of directory order",
+	files, _, err := openSnapshotUploadFiles(
+		t.Context(), dir, MaxManifestBytes,
 	)
-	var nonManifest []string
-	for _, e := range ordered[:len(ordered)-1] {
-		nonManifest = append(nonManifest, e.Name())
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, closeSnapshotUploadFiles(files)) })
+
+	names := make([]string, 0, len(files))
+	for _, file := range files {
+		names = append(names, file.name)
 	}
-	require.ElementsMatch(
-		t, []string{BlobBackupFileName, MetadataBackupFileName}, nonManifest,
+	require.Equal(
+		t,
+		[]string{BlobBackupFileName, MetadataBackupFileName, ManifestFileName},
+		names,
 	)
 }
 
-// TestOrderEntriesManifestLastNoManifestPresent verifies the function is
-// a safe no-op reordering when no manifest.json entry exists at all.
-func TestOrderEntriesManifestLastNoManifestPresent(t *testing.T) {
+func TestOpenSnapshotUploadFilesRejectsSymlink(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
-	require.NoError(t, os.WriteFile(
-		filepath.Join(dir, BlobBackupFileName), []byte("x"), 0o644,
-	))
-	entries, err := os.ReadDir(dir)
-	require.NoError(t, err)
+	writeTestUploadSnapshot(t, dir)
+	outside := filepath.Join(t.TempDir(), "outside")
+	require.NoError(t, os.WriteFile(outside, []byte("secret"), 0o600))
+	require.NoError(t, os.Remove(filepath.Join(dir, BlobBackupFileName)))
+	require.NoError(t, os.Symlink(outside, filepath.Join(dir, BlobBackupFileName)))
 
-	ordered := orderEntriesManifestLast(entries)
-	require.Len(t, ordered, 1)
-	require.Equal(t, BlobBackupFileName, ordered[0].Name())
+	files, _, err := openSnapshotUploadFiles(
+		t.Context(), dir, MaxManifestBytes,
+	)
+	require.ErrorContains(t, err, "open snapshot upload file")
+	require.Empty(t, files)
+}
+
+func TestOpenSnapshotUploadFilesKeepsOpenedFileAfterPathSwap(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	writeTestUploadSnapshot(t, dir)
+	files, _, err := openSnapshotUploadFiles(
+		t.Context(), dir, MaxManifestBytes,
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, closeSnapshotUploadFiles(files)) })
+
+	outside := filepath.Join(t.TempDir(), "outside")
+	require.NoError(t, os.WriteFile(outside, []byte("secret"), 0o600))
+	require.NoError(t, os.Remove(filepath.Join(dir, BlobBackupFileName)))
+	require.NoError(t, os.Symlink(outside, filepath.Join(dir, BlobBackupFileName)))
+
+	data, err := io.ReadAll(files[0].file)
+	require.NoError(t, err)
+	require.Equal(t, "blob", string(data))
 }
 
 // TestJoinCloudURIPreservesQueryAndFragment guards against a real bug: a

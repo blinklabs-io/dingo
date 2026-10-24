@@ -527,6 +527,65 @@ func TestSetTransactionIncrementalDeltaMatchesFullScan(t *testing.T) {
 	require.Equal(t, fx.producedAmount, got)
 }
 
+func TestHistoricalBackfillMaintainsRunningTotalsForNewStakeKey(t *testing.T) {
+	t.Parallel()
+	store := newAPIModeSQLiteStore(t, nil)
+	ctx := context.Background()
+	fx := buildSharedCredentialTx(t, 0x19)
+	seedConsumedUtxo(t, store, fx)
+	establishRunningTotal(t, store, fx.ref, 1)
+	acc := store.NewBatchAccumulator()
+	defer acc.Reset()
+
+	newStakeHash := lcommon.NewBlake2b224([]byte("backfill-new-stake-key"))
+	newPaymentHash := lcommon.NewBlake2b224([]byte("backfill-new-payment-key"))
+	address, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyKey,
+		lcommon.AddressNetworkTestnet,
+		newPaymentHash.Bytes(),
+		newStakeHash.Bytes(),
+	)
+	require.NoError(t, err)
+	output, err := mockledger.NewTransactionOutputBuilder().
+		WithAddress(address.String()).
+		WithLovelace(3_000_000).
+		Build()
+	require.NoError(t, err)
+	txID := bytes.Repeat([]byte{0x19, 0x7a}, 16)
+	tx, err := mockledger.NewTransactionBuilder().
+		WithId(txID).
+		WithInputs(fx.tx.Consumed()[0]).
+		WithOutputs(output).
+		WithValid(true).
+		Build()
+	require.NoError(t, err)
+	point := ocommon.Point{Slot: fx.point.Slot + 1, Hash: txID}
+
+	require.NoError(t, store.SetTransactionBatchedHistorical(
+		tx,
+		point,
+		0,
+		nil,
+		false,
+		true,
+		acc,
+		nil,
+		0,
+	))
+	require.NoError(t, store.FlushBatch(acc, nil))
+	require.Equal(t, uint64(0), readUtxoStake(t, store, fx.ref))
+	require.NoError(t, store.RebuildRewardLiveStakeFromRunningTotals(100, nil))
+
+	newRef := models.NewStakeCredentialRef(0, newStakeHash.Bytes())
+	require.Equal(t, uint64(3_000_000), readUtxoStake(t, store, newRef))
+	var oldRows int
+	require.NoError(t, store.writeDB.QueryRowContext(ctx, `
+SELECT COUNT(*) FROM reward_live_stake
+WHERE credential_tag = ? AND staking_key = ?`, fx.ref.Tag, fx.ref.Key,
+	).Scan(&oldRows))
+	require.Zero(t, oldRows)
+}
+
 func TestSetTransactionBatchedInputsReturnConsumedStake(t *testing.T) {
 	t.Parallel()
 	store := newMigratedSQLiteStore(t)

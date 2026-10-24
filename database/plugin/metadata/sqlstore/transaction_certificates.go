@@ -23,6 +23,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/internal/certutil"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/leioskeyepoch"
 	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -928,6 +929,24 @@ SELECT lc.slot FROM leios_transaction_context lc JOIN certs ON certs.transaction
 	if err != nil {
 		return 0, err
 	}
+	// Only a registration carrying a BLS key records a registration epoch;
+	// every other registration keeps the column NULL.
+	var leiosKeyEpoch *uint64
+	var leiosKeyAgeUnknown bool
+	if len(leiosKeyPublic) > 0 {
+		leiosKeyEpoch, leiosKeyAgeUnknown, err = leioskeyepoch.Registration(
+			ctx, db, poolID,
+			leioskeyepoch.Position{
+				Slot:       at.slot,
+				BlockIndex: at.blockIndex,
+				CertIndex:  at.certIndex,
+			},
+			executionSlot, leiosKeyPublic, leiosKeyPoP,
+		)
+		if err != nil {
+			return 0, err
+		}
+	}
 	registrationID, err := insertPoolRegistration(ctx, db, []any{
 		margin,
 		metadataURL,
@@ -946,8 +965,8 @@ SELECT lc.slot FROM leios_transaction_context lc JOIN certs ON certs.transaction
 		nullableDecimalUint64(held),
 		nullBytes(leiosKeyPublic),
 		nullBytes(leiosKeyPoP),
-		false,
-		nil,
+		leiosKeyAgeUnknown,
+		leiosKeyEpoch,
 	}, poolID, slot, certificateID, 0)
 	if err != nil {
 		return 0, err

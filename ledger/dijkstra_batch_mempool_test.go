@@ -17,6 +17,9 @@ package ledger
 import (
 	"bytes"
 	"context"
+	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/gouroboros/cbor"
+	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"io"
 	"log/slog"
 	"testing"
@@ -159,4 +162,116 @@ func TestDijkstraBatchPendingBalanceAgreesWithAppliedBalance(t *testing.T) {
 	}
 	require.NoError(t, pool.AddTransaction(context.Background(), txType, later(0xf4, 15)))
 	require.Len(t, pool.Transactions(), 2)
+}
+
+// TestMempoolIndexesConfirmedInputsThroughLedgerSession admits a Dijkstra
+// batch into a mempool validating through a real LedgerState. The batch
+// spends a stored output at its top level and another from a sub-transaction,
+// and the pool indexes it under both owners through the session's resolver.
+// An input with no stored output, which this era's partial rule set accepts,
+// is left out instead of stalling admission.
+func TestMempoolIndexesConfirmedInputsThroughLedgerSession(t *testing.T) {
+	t.Parallel()
+	db := newTestDB(t)
+	owner := func(seed byte) lcommon.Address {
+		addr, err := lcommon.NewAddressFromParts(
+			lcommon.AddressTypeKeyNone,
+			lcommon.AddressNetworkTestnet,
+			bytes.Repeat([]byte{seed}, lcommon.AddressHashSize),
+			nil,
+		)
+		require.NoError(t, err)
+		return addr
+	}
+	store := func(ref batchRef, addr lcommon.Address) {
+		require.NoError(t, db.CreateUtxo(context.Background(), nil, &models.Utxo{
+			TxId:       ref.txID(),
+			OutputIdx:  uint32(ref.index), // #nosec G115 -- test index
+			PaymentKey: addr.PaymentKeyHash().Bytes(),
+			Amount:     5_000_000,
+			AddedSlot:  1,
+		}))
+		raw, err := cbor.Encode(&shelley.ShelleyTransactionOutput{
+			OutputAddress: addr,
+			OutputAmount:  5_000_000,
+		})
+		require.NoError(t, err)
+		require.NoError(t, db.BlobTxn(true).Do(func(txn *database.Txn) error {
+			return db.Blob().SetUtxo(
+				txn.Blob(), ref.txID(), uint32(ref.index), raw, // #nosec G115 -- test index
+			)
+		}))
+	}
+	topIn, childIn, missing := batchRef{seed: 0xa1}, batchRef{seed: 0xa2},
+		batchRef{seed: 0xa3}
+	topOwner, childOwner := owner(0xb1), owner(0xb2)
+	store(topIn, topOwner)
+	store(childIn, childOwner)
+	batch := buildStateBatch(t,
+		[]batchLevel{{inputs: []batchRef{childIn}, outputs: []uint64{1_000_000}}},
+		batchLevel{
+			inputs:  []batchRef{topIn, missing},
+			outputs: []uint64{1_000_000},
+			fee:     7,
+		},
+		false,
+	)
+
+	era := eras.EraDesc{
+		Id:   eras.DijkstraEraDesc.Id,
+		Name: "no-input-rules",
+		ValidateTxFunc: func(
+			lcommon.Transaction,
+			uint64,
+			lcommon.LedgerState,
+			lcommon.ProtocolParameters,
+		) error {
+			return nil
+		},
+	}
+	tip := ochainsync.Tip{
+		Point: ocommon.Point{Slot: 1, Hash: bytes.Repeat([]byte{0xf2}, 32)},
+	}
+	require.NoError(t, db.SetTip(tip, nil))
+	ls := &LedgerState{
+		db:         db,
+		activeEras: []eras.EraDesc{era},
+		currentEra: era,
+		currentEpoch: models.Epoch{
+			SlotLength:    1,
+			LengthInSlots: 1_000,
+			EraId:         era.Id,
+		},
+		currentPParams:    dijkstraTestProtocolParameters(),
+		currentTip:        tip,
+		validationEnabled: true,
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+	}
+	ls.metrics.init(prometheus.NewRegistry())
+	ls.publishSnapshotsLocked()
+
+	pool, err := dingomempool.NewMempool(dingomempool.MempoolConfig{
+		Validator:       ls,
+		Logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
+		PromRegistry:    prometheus.NewRegistry(),
+		MempoolCapacity: 1 << 20,
+	})
+	require.NoError(t, err)
+	require.NoError(t, pool.Start(context.Background()))
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		require.NoError(t, pool.Stop(ctx))
+	})
+
+	require.NoError(t, pool.AddTransaction(
+		context.Background(), uint(gledger.TxTypeDijkstra), batch.Cbor(),
+	))
+	hash := batch.Hash().String()
+	require.Equal(t, []string{hash},
+		pool.TransactionHashesByAddress(topOwner.String()))
+	require.Equal(t, []string{hash},
+		pool.TransactionHashesByAddress(childOwner.String()))
 }
