@@ -2704,41 +2704,6 @@ func (s *Store) CountUtxosByAddressWithOrdering(
 	return count, nil
 }
 
-func (s *Store) GetUtxosByAddressAtSlot(
-	pattern models.UtxoAddressPattern,
-	slot uint64,
-	txn types.Txn,
-) ([]models.Utxo, error) {
-	var predicates []string
-	var args []any
-	if err := models.AppendUtxoAddressPatternOrBranch(
-		&predicates,
-		&args,
-		pattern,
-	); err != nil {
-		return nil, err
-	}
-	if len(predicates) == 0 {
-		return nil, models.ErrEmptyUtxoAddressPattern
-	}
-	sqlSlot, err := checkedInt64(slot)
-	if err != nil {
-		return nil, err
-	}
-	args = append(
-		[]any{sqlSlot, sqlSlot},
-		args...,
-	)
-	return s.queryUtxosWithAssets(
-		txn,
-		"utxo.added_slot <= ? AND "+
-			"(utxo.deleted_slot = 0 OR utxo.deleted_slot > ?) AND "+
-			predicates[0],
-		args,
-		"",
-	)
-}
-
 func (s *Store) GetControlledAmountByCredential(
 	credentialTag uint8,
 	stakingKey []byte,

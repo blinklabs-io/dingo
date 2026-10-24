@@ -859,10 +859,6 @@ func TestUtxoAddressQueriesPreserveExactIdentityAndPagination(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, andMismatch)
 
-	atSlot, err := db.UtxosByAddressAtSlot(context.Background(), enterprise, 6, nil)
-	require.NoError(t, err)
-	require.Len(t, atSlot, 3)
-
 	enterpriseTxs, err := db.GetTransactionsByAddressWithOrder(
 		context.Background(),
 		enterprise,

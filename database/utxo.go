@@ -1412,38 +1412,6 @@ func (d *Database) CountUtxosByAddressWithOrdering(
 	return count, nil
 }
 
-func (d *Database) UtxosByAddressAtSlot(
-	ctx context.Context,
-	addr lcommon.Address,
-	slot uint64,
-	txn *Txn,
-) ([]models.Utxo, error) {
-	if txn == nil {
-		txn = d.Transaction(ctx, false)
-		defer txn.Release()
-	}
-	pattern, err := models.ExactUtxoAddressPattern(addr)
-	if err != nil {
-		return nil, err
-	}
-	utxos, err := d.utxoStore().GetUtxosByAddressAtSlot(
-		pattern,
-		slot,
-		txn.Metadata(),
-	)
-	if err != nil {
-		return nil, err
-	}
-	for i := range utxos {
-		if err := loadCbor(&utxos[i], txn); err != nil {
-			return nil, err
-		}
-	}
-	return filterUtxosByAddressPatterns(ctx, utxos, []models.UtxoAddressPattern{
-		pattern,
-	})
-}
-
 // AssetHolders returns one exact metadata-aggregated holder page.
 func (d *Database) AssetHolders(
 	ctx context.Context,

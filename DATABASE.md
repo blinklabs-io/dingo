@@ -4250,7 +4250,7 @@ Historical Mesh balance uses the exact rendered address stored in
 assets in metadata storage. This avoids materializing a potentially large
 historical UTxO set in the API process.
 
-### `GetUtxosByAddress`, `GetUtxosByAddressAsOf`, `GetUtxosByAddressAtSlot`, and `GetControlledAmountByCredential`
+### `GetUtxosByAddress`, `GetUtxosByAddressAsOf`, and `GetControlledAmountByCredential`
 
 `GetControlledAmountByCredential` sums live `utxo.amount` for the credential
 with the same overflow-free engine-side aggregate as

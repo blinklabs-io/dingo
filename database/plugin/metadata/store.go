@@ -930,13 +930,6 @@ type UtxoStore interface {
 		types.Txn,
 	) (int, error)
 
-	// GetUtxosByAddressAtSlot retrieves all UTxOs for a given address at a specific slot.
-	GetUtxosByAddressAtSlot(
-		models.UtxoAddressPattern,
-		uint64,
-		types.Txn,
-	) ([]models.Utxo, error)
-
 	// GetUtxosByAssets retrieves all UTxOs that contain the specified assets.
 	// Pass nil for assetName to match all assets under the policy, or empty []byte{} to match assets with empty names.
 	GetUtxosByAssets(
