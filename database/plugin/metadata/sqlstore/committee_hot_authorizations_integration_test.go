@@ -51,3 +51,19 @@ func TestMySQLPoolOpCertSequencesExistAtSlot(t *testing.T) {
 		newIntegrationSQLStore(t, "mysql", dsn, "mysql", database),
 	)
 }
+
+func TestPostgresLatestPoolOpCertSequenceInRange(t *testing.T) {
+	dsn, schema := newPostgresIntegrationSchema(t)
+	testLatestPoolOpCertSequenceInRange(
+		t,
+		newIntegrationSQLStore(t, "pgx", dsn, "postgres", schema),
+	)
+}
+
+func TestMySQLLatestPoolOpCertSequenceInRange(t *testing.T) {
+	dsn, database := newMySQLIntegrationDatabase(t)
+	testLatestPoolOpCertSequenceInRange(
+		t,
+		newIntegrationSQLStore(t, "mysql", dsn, "mysql", database),
+	)
+}

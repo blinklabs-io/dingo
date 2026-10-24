@@ -197,6 +197,26 @@ func MusashiNetworkIdentityConflict(
 	return "", false
 }
 
+// MusashiPrototypeNetwork reports whether network/networkMagic unambiguously
+// identifies the Musashi prototype network: the name "musashi" or the magic
+// 164, with no conflicting standard network (see
+// MusashiNetworkIdentityConflict). It gates prototype-only protocol behavior
+// that a client of a standard network could not decode.
+//
+// A conflicting identity is deliberately not the prototype network. Startup
+// validation rejects those configurations outright, but returning false here
+// keeps the behavior off for an embedder that never calls Validate.
+func MusashiPrototypeNetwork(network string, networkMagic uint32) bool {
+	if _, conflict := MusashiNetworkIdentityConflict(
+		network,
+		networkMagic,
+	); conflict {
+		return false
+	}
+	return network == ouroboros.NetworkCardanoMusashi.Name ||
+		networkMagic == ouroboros.NetworkCardanoMusashi.NetworkMagic
+}
+
 // Validate checks the fully merged configuration (defaults, YAML,
 // environment, CLI flags) for invalid values and nonsensical
 // combinations. Every problem found is returned, joined into a single
@@ -1114,7 +1134,7 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		// Both are scaled into int64 quantities: seconds to a Duration and
 		// megabytes to bytes.
 		const maxMessageTTL = uint64(math.MaxInt64) / uint64(time.Second)
-		const maxMempoolSize = math.MaxInt64 >> 20
+		const maxMempoolSize = uint64(math.MaxInt64 >> 20)
 		switch {
 		case c.DMQ.MessageTTL == 0:
 			errs = append(errs, errors.New(

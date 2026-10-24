@@ -210,6 +210,15 @@ func (n *Node) ledgerStateConfig() ledger.LedgerStateConfig {
 			}
 			return err
 		},
+		// GetStakePoolState is not part of released nodes' query set, so it
+		// is answered only on the Leios prototype network, identified
+		// strictly.
+		StakePoolStateQuery: n.config.musashiPrototypeIdentity(),
+		// The Leios prototype's Dijkstra era runs Praos2, whose chain-dependent
+		// state has a ninth field. Gated on the strict prototype identity,
+		// never on the era or a run mode alone: a released node runs Dijkstra
+		// on plain Praos.
+		Praos2ChainDepState: n.config.musashiPrototypeIdentity(),
 		// CIP-23 minimum pool margin (minimum variable fee). Operator-set,
 		// off by default (0), effective only in Dijkstra and later.
 		MinPoolMargin: n.config.minPoolMargin,

@@ -247,32 +247,6 @@ func EffectiveCloudDestination(base string, prefix string) string {
 	return JoinCloudURI(base, prefix)
 }
 
-// orderEntriesManifestLast returns entries reordered so that any entry
-// named ManifestFileName sorts last, with every other entry keeping its
-// original relative order. Both destination_s3.go's and
-// destination_gcs.go's UploadDir use this: a concurrent lister/fetcher
-// treats a cloud-visible manifest.json as "this snapshot is fully there"
-// (see FetchCloudManifest/ListCloudSnapshots), so uploading it before
-// blob.bak/metadata.sqlite finish would let that caller download or
-// restore an incomplete snapshot. Uploading the manifest last, after
-// every other file has actually succeeded, makes it a true completion
-// marker instead of just another file in directory order.
-func orderEntriesManifestLast(entries []os.DirEntry) []os.DirEntry {
-	ordered := make([]os.DirEntry, 0, len(entries))
-	var manifest os.DirEntry
-	for _, e := range entries {
-		if e.Name() == ManifestFileName {
-			manifest = e
-			continue
-		}
-		ordered = append(ordered, e)
-	}
-	if manifest != nil {
-		ordered = append(ordered, manifest)
-	}
-	return ordered
-}
-
 // CloudDestination mirrors a snapshot directory to/from object storage, in
 // addition to (not instead of) the local copy Snapshot/Restore already
 // produce/consume — see SnapshotToCloud and Restore's cloud-source
@@ -283,7 +257,10 @@ func orderEntriesManifestLast(entries []os.DirEntry) []os.DirEntry {
 type CloudDestination interface {
 	// UploadDir uploads every regular file directly inside localDir
 	// (Snapshot's manifest.json/blob.bak/metadata.sqlite — it is not
-	// recursive) to the destination.
+	// recursive) to the destination. MirrorToCloud passes a private copy
+	// of the snapshot, already authenticated and named for the snapshot ID,
+	// not the snapshot directory itself, so the bytes read here are the
+	// ones that were verified.
 	UploadDir(ctx context.Context, localDir string) error
 	// DownloadFiles downloads exactly the named objects into localDir, which
 	// must already exist. A snapshot's prefix is writable by anyone with
@@ -743,9 +720,8 @@ func RepairSnapshotCatalogContext(
 	return errors.Join(localErr, cloudErr)
 }
 
-// ReconcileCloudSnapshotCatalogContext holds the catalog reconciliation gate
-// across the provider snapshot and its replacement. Incremental mirror and
-// delete mutations therefore run either before the scan or after its rebuild.
+// ReconcileCloudSnapshotCatalogContext scans the provider outside the catalog
+// gate, then publishes only if no catalog mutation occurred during the scan.
 // current is true only when the catalog was completely reconciled with
 // cloudDest. An incomplete scan leaves the previous cloud set unchanged.
 func ReconcileCloudSnapshotCatalogContext(
@@ -772,15 +748,34 @@ func ReconcileCloudSnapshotCatalogContext(
 	}
 	defer closeCloudDestination(dest)
 	lister, ok := dest.(SnapshotCatalogLister)
-	if err := lockSnapshotCatalog(ctx); err != nil {
-		return false, err
-	}
-	defer unlockSnapshotCatalog()
 	if !ok {
 		return false, fmt.Errorf(
 			"%w: cloud destination does not support snapshot listing",
 			ErrSnapshotCatalogIncomplete,
 		)
+	}
+	if err := lockSnapshotCatalog(ctx); err != nil {
+		return false, err
+	}
+	startGeneration, generationErr := readSnapshotCatalogGenerationLocked(
+		ctx, baseDir,
+	)
+	unlockSnapshotCatalog()
+	if errors.Is(generationErr, ErrSnapshotCatalogCorrupt) {
+		repairErr := EnsureSnapshotCatalogContext(ctx, baseDir, opts...)
+		if repairErr != nil && !errors.Is(repairErr, ErrSnapshotCatalogIncomplete) {
+			return false, repairErr
+		}
+		if err := lockSnapshotCatalog(ctx); err != nil {
+			return false, err
+		}
+		startGeneration, generationErr = readSnapshotCatalogGenerationLocked(
+			ctx, baseDir,
+		)
+		unlockSnapshotCatalog()
+	}
+	if generationErr != nil {
+		return false, generationErr
 	}
 	entries, listErr := lister.ListSnapshotCatalog(
 		ctx, defaultSnapshotCatalogScanBudget(),
@@ -796,6 +791,20 @@ func ReconcileCloudSnapshotCatalogContext(
 				ErrSnapshotCatalogIncomplete, entry.ID, err,
 			)
 		}
+	}
+	if err := lockSnapshotCatalog(ctx); err != nil {
+		return false, err
+	}
+	defer unlockSnapshotCatalog()
+	currentGeneration, err := readSnapshotCatalogGenerationLocked(ctx, baseDir)
+	if err != nil {
+		return false, err
+	}
+	if currentGeneration != startGeneration {
+		return false, fmt.Errorf(
+			"%w: catalog generation advanced from %d to %d during cloud scan",
+			ErrSnapshotCatalogChanged, startGeneration, currentGeneration,
+		)
 	}
 	rebuildErr := rebuildCloudSnapshotCatalogLocked(
 		ctx, baseDir, cloudDest, entries,

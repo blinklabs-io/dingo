@@ -2100,6 +2100,15 @@ type MetadataStore interface {
 		types.Txn,
 	) (uint64, bool, error)
 
+	// LatestPoolOpCertSequenceInRange returns the highest op-cert sequence
+	// recorded for a pool between the inclusive slot bounds.
+	LatestPoolOpCertSequenceInRange(
+		lcommon.PoolKeyHash,
+		uint64, // startSlot
+		uint64, // endSlot
+		types.Txn,
+	) (uint64, bool, error)
+
 	// PoolOpCertSequencesExistAtSlot reports whether any pool has an op-cert
 	// sequence row recorded at exactly slot. A Mithril restore writes the
 	// certified HeaderState counter map at its anchor slot and applies no
@@ -2178,6 +2187,18 @@ type MetadataStore interface {
 		uint64, // snapshotSlot
 		types.Txn,
 	) ([]models.PoolRegistration, error)
+
+	// GetPoolDepositsHeld returns, for each requested pool with a
+	// registration, the deposit its latest registration retains: the
+	// deposit_held column, or deposit_amount for a row written before that
+	// column existed. A re-registration of a still-registered pool carries
+	// the earlier deposit forward, so this is not the latest certificate's
+	// own charge. Pools without a registration, or whose deposit is unknown
+	// (both columns NULL), are absent from the map.
+	GetPoolDepositsHeld(
+		[]lcommon.PoolKeyHash,
+		types.Txn,
+	) (map[string]uint64, error)
 
 	// GetPoolByVrfKeyHash retrieves the pool that currently claims the
 	// given VRF key hash, as of the given epoch's start slot. Returns nil
@@ -2564,6 +2585,23 @@ type MetadataStore interface {
 	GetActiveAccountCredentials(
 		types.Txn,
 	) ([]models.StakeCredentialRef, error)
+
+	// GetActiveDelegatorCountsByPool counts the active accounts delegated to
+	// each requested pool with one grouped query. Pools without a delegator
+	// are absent from the map.
+	GetActiveDelegatorCountsByPool(
+		[]lcommon.PoolKeyHash,
+		types.Txn,
+	) (map[string]uint64, error)
+
+	// GetActiveDelegatorCredentialsByPool returns the stake credentials of the
+	// active accounts delegated to each requested pool, in the ledger's
+	// credential order (script credentials first, then by hash). Pools
+	// without a delegator are absent from the map.
+	GetActiveDelegatorCredentialsByPool(
+		[]lcommon.PoolKeyHash,
+		types.Txn,
+	) (map[string][]models.StakeCredentialRef, error)
 
 	// ClearDelegationsToRetiredPool removes every account delegation pointing
 	// at the given reaped pool, stamping added_slot with the epoch-boundary

@@ -31,6 +31,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/internal/httpuseragent"
 	"github.com/blinklabs-io/dingo/internal/netguard"
 	cidlib "github.com/ipfs/go-cid"
 	"golang.org/x/crypto/blake2b"
@@ -41,7 +42,6 @@ const (
 	defaultRequestTimeout = 15 * time.Second
 	defaultBatchSize      = 25
 	defaultMaxBytes       = 1 << 20
-	defaultUserAgent      = "dingo-offchain-metadata/1"
 	defaultIPFSGatewayURL = "https://gateway.pinata.cloud/ipfs/"
 	maxRedirects          = 5
 )
@@ -126,7 +126,7 @@ func New(cfg Config) (*Fetcher, error) {
 	}
 	userAgent := cfg.UserAgent
 	if userAgent == "" {
-		userAgent = defaultUserAgent
+		userAgent = httpuseragent.Default()
 	}
 	ipfsGatewayURL := cfg.IPFSGatewayURL
 	if ipfsGatewayURL == "" {

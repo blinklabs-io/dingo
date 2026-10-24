@@ -96,7 +96,7 @@ func newForgeRevalidationFixture(t *testing.T) *forgeRevalidationFixture {
 		EpochId:       0,
 		StartSlot:     0,
 		SlotLength:    1_000,
-		LengthInSlots: 1 << 40,
+		LengthInSlots: 1 << 31,
 		EraId:         eras.ConwayEraDesc.Id,
 	}
 	config := newTestShelleyGenesisCfg(t)

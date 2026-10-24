@@ -1575,8 +1575,9 @@ func TestChainsyncClientRollForwardWithholdsHeaderWithDeferredCryptoVerification
 		200*time.Millisecond,
 		"a deferred header must not enter the ledger queue",
 	)
-	_, _, retained := state.LookupObservedHeader(conn, header.Hash().Bytes())
-	require.False(t, retained, "deferred header must not enter trusted history")
+	observed, _, retained := state.LookupObservedHeader(conn, header.Hash().Bytes())
+	require.True(t, retained, "deferred header must remain available as raw ancestry")
+	require.Zero(t, observed.HeaderCryptoVerificationGeneration)
 	require.Contains(t, o.deferredHeaderRecovery, conn)
 
 	baseline := ls.Tip().Point
@@ -2008,8 +2009,9 @@ func (f deferredHeaderFixture) rollForward(
 // not entered defers producer authorization, and only applying its own block
 // can clear that. Withholding it from block-fetch stalled sync for good, so a
 // deferred header that extends the local chain, and its pipelined child, must
-// reach the ledger queue and keep the selector following the peer, while
-// staying out of trusted history.
+// reach the ledger queue and keep the selector following the peer. They remain
+// in bounded ancestry history with generation zero until the ledger verifies
+// their complete candidate path.
 func TestChainsyncClientRollForwardQueuesDeferredHeaderExtendingLocalChain(
 	t *testing.T,
 ) {
@@ -2054,11 +2056,12 @@ func TestChainsyncClientRollForwardQueuesDeferredHeaderExtendingLocalChain(
 		require.True(t, ok)
 		require.Equal(t, header.Hash().Bytes(), data.Point.Hash)
 		require.Zero(t, data.HeaderCryptoVerificationGeneration)
-		_, _, observed := f.state.LookupObservedHeader(
+		observed, _, retained := f.state.LookupObservedHeader(
 			f.conn,
 			header.Hash().Bytes(),
 		)
-		require.False(t, observed, "a deferred header must not enter trusted history")
+		require.True(t, retained, "deferred ancestry must be retained")
+		require.Zero(t, observed.HeaderCryptoVerificationGeneration)
 	}
 	f.o.deferredHeaderRecoveryMu.Lock()
 	_, marked := f.o.deferredHeaderRecovery[f.conn]
@@ -2142,6 +2145,12 @@ func TestChainsyncClientRollForwardWithholdsDeferredForkHeader(t *testing.T) {
 	}}
 
 	f.rollForward(t, fork)
+	observed, _, retained := f.state.LookupObservedHeader(
+		f.conn,
+		forkHash.Bytes(),
+	)
+	require.True(t, retained, "deferred fork ancestry must be retained")
+	require.Zero(t, observed.HeaderCryptoVerificationGeneration)
 	testutil.RequireNoReceive(
 		t,
 		f.ledgerCh,
@@ -4420,6 +4429,174 @@ func TestChainsyncServerRequestNextEmitsRollBackwardOnChainRollback(
 // goes away. The fixture registers the harness connection for exactly that
 // reason.
 // =============================================================================
+
+type deadlineRecordingListener struct {
+	net.Listener
+	accepted chan *deadlineRecordingConn
+}
+
+func (l *deadlineRecordingListener) Accept() (net.Conn, error) {
+	conn, err := l.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	wrapped := &deadlineRecordingConn{Conn: conn}
+	select {
+	case l.accepted <- wrapped:
+	default:
+	}
+	return wrapped, nil
+}
+
+type deadlineRecordingConn struct {
+	net.Conn
+	mu           sync.Mutex
+	readDeadline time.Time
+}
+
+func (c *deadlineRecordingConn) SetDeadline(deadline time.Time) error {
+	c.mu.Lock()
+	c.readDeadline = deadline
+	c.mu.Unlock()
+	return c.Conn.SetDeadline(deadline)
+}
+
+func (c *deadlineRecordingConn) SetReadDeadline(deadline time.Time) error {
+	c.mu.Lock()
+	c.readDeadline = deadline
+	c.mu.Unlock()
+	return c.Conn.SetReadDeadline(deadline)
+}
+
+func (c *deadlineRecordingConn) currentReadDeadline() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.readDeadline
+}
+
+func TestTrustedNtCChainSyncAwaitKeepsIdleDeadlineSuspended(t *testing.T) {
+	baseListener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	listener := &deadlineRecordingListener{
+		Listener: baseListener,
+		accepted: make(chan *deadlineRecordingConn, 1),
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	bus := event.NewEventBus(nil, logger)
+	t.Cleanup(bus.Close)
+	ledgerState := newTestLedgerState(t)
+	o := newOuroboros(OuroborosConfig{
+		NetworkMagic: 1,
+		EventBus:     bus,
+		Logger:       logger,
+	})
+	o.ledgerState = ledgerState
+	o.chainsyncState = dchainsync.NewState(bus, ledgerState)
+	listeners := o.ConfigureListeners(t.Context(), []connmanager.ListenerConfig{{
+		Listener: listener,
+		UseNtC:   true,
+	}})
+	manager := connmanager.NewConnectionManager(connmanager.ConnectionManagerConfig{
+		EventBus:  bus,
+		Listeners: listeners,
+		Logger:    logger,
+	})
+	o.connManager = manager
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		require.NoError(t, manager.Stop(ctx))
+	})
+	require.NoError(t, manager.Start(t.Context()))
+
+	awaited := make(chan struct{}, 1)
+	rollForward := make(chan struct{}, 1)
+	clientConfig := ochainsync.NewConfig(
+		ochainsync.WithPipelineLimit(1),
+		ochainsync.WithAwaitReplyFunc(func(ochainsync.CallbackContext) error {
+			awaited <- struct{}{}
+			return nil
+		}),
+		ochainsync.WithRollBackwardFunc(func(
+			ochainsync.CallbackContext,
+			ocommon.Point,
+			ochainsync.Tip,
+		) error {
+			return nil
+		}),
+		ochainsync.WithRollForwardRawFunc(func(
+			ochainsync.CallbackContext,
+			uint,
+			[]byte,
+			ochainsync.Tip,
+		) error {
+			rollForward <- struct{}{}
+			return ochainsync.ErrStopSyncProcess
+		}),
+	)
+	clientConn, err := net.Dial("tcp", listener.Addr().String())
+	require.NoError(t, err)
+	client, err := ouroboros.NewConnection(
+		ouroboros.WithConnection(clientConn),
+		ouroboros.WithNetworkMagic(1),
+		ouroboros.WithNodeToNode(false),
+		ouroboros.WithChainSyncConfig(clientConfig),
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = client.Close() })
+
+	serverConn := testutil.RequireReceive(
+		t,
+		listener.accepted,
+		5*time.Second,
+		"server did not accept the NtC connection",
+	)
+	require.Eventually(t, func() bool {
+		return !serverConn.currentReadDeadline().IsZero()
+	}, 5*time.Second, time.Millisecond, "trusted NtC idle deadline was not armed")
+
+	require.NoError(t, client.ChainSync().Client.Sync(
+		[]ocommon.Point{ocommon.NewPointOrigin()},
+	))
+	testutil.RequireReceive(
+		t,
+		awaited,
+		5*time.Second,
+		"ChainSync did not enter AwaitReply",
+	)
+	require.True(
+		t,
+		serverConn.currentReadDeadline().IsZero(),
+		"idle deadline remained armed while ChainSync awaited a block",
+	)
+
+	header, ok := newTestBlockHeader(1, 1, 0x01).(*testBlockHeader)
+	require.True(t, ok)
+	block := &testBlock{
+		BlockHeader: header,
+		blockType:   1,
+		cbor:        []byte{0x80},
+	}
+	require.NoError(t, ledgerState.Chain().AddBlock(t.Context(), block, nil))
+	ledgerState.SetTipForTesting(ochainsync.Tip{
+		Point: ocommon.NewPoint(
+			block.SlotNumber(),
+			block.Hash().Bytes(),
+		),
+		BlockNumber: block.BlockNumber(),
+	})
+	testutil.RequireReceive(
+		t,
+		rollForward,
+		5*time.Second,
+		"ChainSync did not deliver the deferred RollForward",
+	)
+	require.Eventually(t, func() bool {
+		return !serverConn.currentReadDeadline().IsZero()
+	}, 5*time.Second, time.Millisecond, "idle deadline was not re-armed")
+}
 
 // TestChainsyncServerRequestNextEmitsAwaitReplyThenAsyncRollForward verifies
 // that an iterator sitting at the chain tip parks the peer with AwaitReply,

@@ -633,3 +633,75 @@ func TestQuiesceReportsAStopFailureWithoutEscalating(t *testing.T) {
 	assert.ErrorIs(t, err, sentinel)
 	assert.NotErrorIs(t, err, errStorageDrainUnconfirmed)
 }
+
+// TestLedgerStateConfigPraos2OnlyForMusashi pins the gate that selects the
+// Praos2 chain-dependent state layout. Released consensus runs the Dijkstra
+// era on plain Praos, so no standard network, and no Dijkstra start era or
+// Leios run mode on one, may select Praos2: a client of such a node could not
+// decode the reply.
+func TestLedgerStateConfigPraos2OnlyForMusashi(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		network      string
+		networkMagic uint32
+		runMode      internalconfig.RunMode
+		startEra     internalconfig.StartEra
+		want         bool
+	}{
+		{name: "musashi by name", network: "musashi", want: true},
+		{name: "musashi by magic", networkMagic: 164, want: true},
+		{name: "mainnet", network: "mainnet", networkMagic: 764824073},
+		{name: "preprod", network: "preprod", networkMagic: 1},
+		{name: "preview", network: "preview", networkMagic: 2},
+		{name: "sancho", network: "sancho", networkMagic: 4},
+		{name: "devnet", network: "devnet", networkMagic: 42},
+		// A devnet half-match is not an identity conflict, so either half of
+		// the Musashi identity beside it still selects Praos2.
+		{name: "musashi name with devnet magic", network: "musashi", networkMagic: 42, want: true},
+		{name: "devnet name with musashi magic", network: "devnet", networkMagic: 164, want: true},
+		{
+			name:         "preview in the Dijkstra era",
+			network:      "preview",
+			networkMagic: 2,
+			startEra:     internalconfig.StartEraDijkstra,
+		},
+		{
+			name:         "preprod in leios run mode",
+			network:      "preprod",
+			networkMagic: 1,
+			runMode:      internalconfig.RunModeLeios,
+		},
+		{
+			name:         "preview with prototype magic",
+			network:      "preview",
+			networkMagic: 164,
+		},
+		{
+			name:         "musashi name with mainnet magic",
+			network:      "musashi",
+			networkMagic: 764824073,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			n := &Node{config: Config{cfg: &internalconfig.Config{
+				Network:      tt.network,
+				NetworkMagic: tt.networkMagic,
+				RunMode:      tt.runMode,
+				StartEra:     tt.startEra,
+			}}}
+			assert.Equal(
+				t,
+				tt.want,
+				n.ledgerStateConfig().Praos2ChainDepState,
+			)
+		})
+	}
+	assert.False(
+		t,
+		(&Node{config: Config{}}).ledgerStateConfig().Praos2ChainDepState,
+		"a zero config keeps Praos",
+	)
+}

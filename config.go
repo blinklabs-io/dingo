@@ -497,6 +497,27 @@ func (c *Config) isMusashiNetwork() bool {
 		c.cfg.NetworkMagic == ouroboros.NetworkCardanoMusashi.NetworkMagic
 }
 
+// musashiPrototypeIdentity reports whether the configuration unambiguously
+// identifies the Musashi prototype network. It gates prototype-only protocol
+// behavior: the GetStakePoolState query and the Praos2 chain-dependent state.
+//
+// This is deliberately stricter than isMusashiNetwork, which treats either
+// half of the identity (name or magic) as Musashi. Here a half-match that
+// also names or addresses a standard network yields false, so a mainnet,
+// preprod, preview or sancho node never answers in a layout its clients
+// cannot decode. configValidate rejects such a configuration outright; the
+// extra check covers an embedder that builds a Config directly and never
+// validates it.
+func (c *Config) musashiPrototypeIdentity() bool {
+	if c.cfg == nil {
+		return false
+	}
+	return internalconfig.MusashiPrototypeNetwork(
+		c.cfg.Network,
+		c.cfg.NetworkMagic,
+	)
+}
+
 // experimentalLeiosNetworkingEnabled reports whether the Leios node-to-node
 // mini-protocols (leios-fetch / leios-notify) should be offered on outbound
 // and inbound connections.
@@ -669,7 +690,8 @@ func (n *Node) configValidate() error {
 		}
 		if byronGenesis := n.config.CardanoNodeConfig().ByronGenesis(); byronGenesis != nil {
 			byronProtocolMagic := byronGenesis.ProtocolConsts.ProtocolMagic
-			if byronProtocolMagic < 0 || byronProtocolMagic > math.MaxUint32 {
+			if byronProtocolMagic < 0 ||
+				int64(byronProtocolMagic) > math.MaxUint32 {
 				return fmt.Errorf(
 					"byron genesis protocol magic %d is out of uint32 range",
 					byronProtocolMagic,
@@ -2449,7 +2471,7 @@ func pluginInt64(value any) int64 {
 	case int:
 		return int64(v)
 	case uint:
-		if v > math.MaxInt64 {
+		if uint64(v) > math.MaxInt64 {
 			return math.MaxInt64
 		}
 		return int64(v)
