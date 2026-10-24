@@ -2111,8 +2111,8 @@ func (cs *ChainSelector) checkPeerTipPlausibleWithClaimsTrackedLocked(
 		// delta from the stale reference exceeds K looks
 		// implausible, but the network legitimately moved on.
 		// Keep the peer-relative K bound while the reference is within
-		// K of the local tip. A farther reference can be stale during
-		// snapshot catch-up, but only within the local 2*K ceiling.
+		// K of the local tip. A farther reference can be stale while the
+		// local tip catches up, however far ahead of the local tip it is.
 		// A corroborated far claim is this connection's own reference, as a
 		// known peer's previous frontier is in Case 1. The frontier that
 		// corroborated it may sit up to K below it, so the Case 2 ceiling
@@ -2135,11 +2135,13 @@ func (cs *ChainSelector) checkPeerTipPlausibleWithClaimsTrackedLocked(
 			cs.securityParam,
 		)
 		referenceStale := referenceBlock <= cs.localTip.BlockNumber
-		referenceAheadWithinCatchUpWindow := referenceBlock > catchUpFloor &&
-			referenceBlock <= catchUpCeiling
+		// A reference beyond the ceiling is as stale as one inside it: the
+		// network tip has no upper bound over a node that is far behind, and
+		// recorded references only lag the peers delivering the chain.
+		referenceAheadOfCatchUpFloor := referenceBlock > catchUpFloor
 		if observedReject && cs.localTip.BlockNumber > 0 &&
-			(referenceStale || referenceAheadWithinCatchUpWindow) {
-			maxPlausibleBlock = catchUpCeiling
+			(referenceStale || referenceAheadOfCatchUpFloor) {
+			maxPlausibleBlock = max(maxPlausibleBlock, catchUpCeiling)
 			observedReject = observedBlock > maxPlausibleBlock
 			// The 2*K catch-up ceiling still assumes the honest network tip
 			// is at most a bounded stall away from the local tip. That
@@ -2150,8 +2152,8 @@ func (cs *ChainSelector) checkPeerTipPlausibleWithClaimsTrackedLocked(
 			// unreachable. A rejected frontier is never recorded, so it can
 			// never itself become a fresher reference -- a one-way ratchet.
 			//
-			// References within this local catch-up ceiling can be stale
-			// while a snapshot-backed local tip lags behind the network.
+			// References can be stale while a snapshot-backed or
+			// from-genesis local tip lags behind the network.
 			// Nothing about this frontier can be verified yet: its epoch is
 			// beyond the ledger's forecast horizon, so header verification
 			// is deferred before any signature is checked. Require
