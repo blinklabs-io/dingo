@@ -102,3 +102,35 @@ func TestElectingPoolStakeImportedZeroDenominatorIsUnavailable(t *testing.T) {
 	_, err := ls.ElectingPoolStake(tb.block.slot, pool)
 	require.ErrorIs(t, err, ErrLeaderStakeSnapshotUnavailable)
 }
+
+// A mark row reconstructed after the boundary it stands for cannot say which
+// pools that boundary elected, so header verification treats it as
+// unevaluable unless SkipLeaderStakeThresholdCheck overrides it.
+func TestElectingPoolStakeReconstructedMarkFollowsHeaderVerification(
+	t *testing.T,
+) {
+	t.Parallel()
+	for _, override := range []bool{false, true} {
+		ls, db := newEligibilityTestLedger(t, nil)
+		ls.config.SkipLeaderStakeThresholdCheck = override
+		ls.epochCache = []models.Epoch{
+			{EpochId: 3, StartSlot: 300, LengthInSlots: 100},
+			{EpochId: 4, StartSlot: 400, LengthInSlots: 100},
+			{EpochId: 5, StartSlot: 500, LengthInSlots: 100},
+		}
+		ls.mithrilLedgerSlot = 450
+		ls.publishSnapshotsLocked()
+		pool := electingTestPool(1)
+		seedPoolStakeSnapshotOfTypeAtSlot(
+			t, db, 4, models.PoolStakeSnapshotTypeMark, pool[:], 700, 0, 400,
+		)
+
+		stake, err := ls.ElectingPoolStake(550, pool)
+		if override {
+			require.NoError(t, err)
+			require.Equal(t, uint64(700), stake)
+			continue
+		}
+		require.ErrorIs(t, err, ErrLeaderStakeSnapshotUnavailable)
+	}
+}

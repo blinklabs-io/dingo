@@ -8406,8 +8406,10 @@ epoch.
 Every lookup the `StakeAuthority` cannot answer wraps
 `dmq.ErrChainStateUnavailable`, and admission reports it as `other` rather than
 `invalid`, which CIP-0137 treats as a protocol violation. That covers detached
-ledger state, storage errors, and a distribution that is missing, empty, pruned
-or has no denominator, or that elects an epoch the ledger has not reached
+ledger state, storage errors, and a distribution that is missing, empty,
+pruned, reconstructed after its boundary (absent the explicit
+`SkipLeaderStakeThresholdCheck` override), or has no
+denominator, or that elects an epoch the ledger has not reached
 (`ledger.ErrLeaderStakeSnapshotUnavailable`). Only a pool absent from a
 populated distribution is `invalid`. The DMQ stack is not
 stopped by a live restore or truncate, so the `StakeAuthority` holds its own

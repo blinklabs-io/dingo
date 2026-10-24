@@ -23,8 +23,9 @@ import (
 
 // ErrLeaderStakeSnapshotUnavailable reports that the stake distribution
 // electing leaders at a slot cannot be read: the slot lies in an epoch the
-// ledger has not reached, or the distribution is missing, empty, pruned, or
-// has no usable denominator. It never means the pool is ineligible.
+// ledger has not reached, or the distribution is missing, empty, pruned,
+// reconstructed after its boundary, or has no usable denominator. It never
+// means the pool is ineligible.
 var ErrLeaderStakeSnapshotUnavailable = errLeaderStakeSnapshotUnavailable
 
 // ElectingPoolStake returns the pool's stake in the distribution that elects
@@ -62,6 +63,21 @@ func (ls *LedgerState) ElectingPoolStake(
 				"%w: epoch %d active distribution has no denominator",
 				ErrLeaderStakeSnapshotUnavailable,
 				snap.epoch,
+			)
+		}
+		// A mark row reconstructed after its boundary cannot say which pools
+		// that boundary elected; header verification trusts it only under the
+		// explicit SkipLeaderStakeThresholdCheck override.
+		if !ls.config.SkipLeaderStakeThresholdCheck &&
+			ls.shouldSkipPostMithrilMarkEligibilityWithCache(
+				snap.row, snap.epoch, snap.epochCache,
+			) {
+			return 0, fmt.Errorf(
+				"%w: epoch %d mark snapshot was reconstructed after its "+
+					"boundary (captured slot %d)",
+				ErrLeaderStakeSnapshotUnavailable,
+				snap.epoch,
+				snap.row.CapturedSlot,
 			)
 		}
 		return uint64(snap.row.TotalStake), nil
