@@ -162,6 +162,10 @@ type NodeAdapter struct {
 	// submitter does not expose the pool, which those endpoints report as
 	// ErrMempoolUnavailable.
 	mempool mempoolReader
+	// mempoolAddresses is nil when the submitter does not expose the pool's
+	// address index, which the address endpoint reports as
+	// ErrMempoolUnavailable.
+	mempoolAddresses mempoolAddressReader
 	// summaryLimits overrides the address summary read budget. The zero
 	// value selects the defaults.
 	summaryLimits addressSummaryLimits
@@ -185,11 +189,13 @@ func NewNodeAdapter(
 		)
 	}
 	reader, _ := submitter.(mempoolReader)
+	addresses, _ := submitter.(mempoolAddressReader)
 	return &NodeAdapter{
-		ledgerState: ls,
-		submitter:   submitter,
-		evaluator:   ls,
-		mempool:     reader,
+		ledgerState:      ls,
+		submitter:        submitter,
+		evaluator:        ls,
+		mempool:          reader,
+		mempoolAddresses: addresses,
 	}, nil
 }
 
@@ -4030,13 +4036,15 @@ func (e *TransactionRejectedError) Unwrap() []error {
 // on the same path as a rule violation and would otherwise be reported to the
 // caller as a transaction it must fix.
 //
-// Only the sentinels the database layer raises for its own faults are listed.
+// Only the sentinels the database layer raises for its own faults, and the
+// mempool's for its confirmed-input lookup, are listed.
 // The rule violations are an open, per-era set of gouroboros types with no
 // shared marker, so the complement cannot be enumerated instead, and an
 // unrecognized error stays a rejection.
 func isLedgerStorageFailure(err error) bool {
 	return errors.Is(err, dbtypes.ErrBlobStoreUnavailable) ||
-		errors.Is(err, database.ErrUtxoCborUnavailable)
+		errors.Is(err, database.ErrUtxoCborUnavailable) ||
+		errors.Is(err, mempool.ErrInputResolution)
 }
 
 // TransactionSubmit submits raw signed transaction CBOR to the mempool.

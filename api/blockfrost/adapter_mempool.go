@@ -45,6 +45,13 @@ type mempoolReader interface {
 // method must break the build rather than silently disable the endpoints.
 var _ mempoolReader = (*mempool.Mempool)(nil)
 
+// mempoolAddressReader is the address index of the node's mempool.
+type mempoolAddressReader interface {
+	TransactionHashesByAddress(address string) []string
+}
+
+var _ mempoolAddressReader = (*mempool.Mempool)(nil)
+
 // MempoolTransactions returns the hashes of the mempool transactions in
 // admission order. An ascending page reads only the prefix of the pool it
 // needs; a descending page starts at the newest transaction, so it reads the
@@ -379,9 +386,11 @@ func (a *NodeAdapter) MempoolTransaction(
 }
 
 // MempoolAddressTransactions returns the hashes of the mempool transactions
-// that pay to an address or spend one of its confirmed outputs, in admission
-// order. A transaction marked as failing phase 2 pays only its collateral
-// return and spends only its collateral, as when it is applied.
+// that pay to an address or spend one of its outputs, in the pool's order. A
+// transaction marked as failing phase 2 pays only its collateral return and
+// spends only its collateral, as when it is applied. The pool answers from
+// its address index, so the request reads no storage and decodes no
+// transaction.
 func (a *NodeAdapter) MempoolAddressTransactions(
 	ctx context.Context,
 	address string,
@@ -400,61 +409,14 @@ func (a *NodeAdapter) MempoolAddressTransactions(
 			ErrInvalidAddress,
 		)
 	}
-	if a.mempool == nil {
+	if a.mempoolAddresses == nil {
 		return nil, 0, ErrMempoolUnavailable
 	}
-	entries, _ := a.mempool.TransactionsBounded(0, 0)
-	decoded := make([]lcommon.Transaction, 0, len(entries))
-	inputs := make([]lcommon.TransactionInput, 0)
-	for _, entry := range entries {
-		if err := ctx.Err(); err != nil {
-			return nil, 0, err
-		}
-		tx, err := a.decodeMempoolTransaction(entry)
-		if err != nil {
-			return nil, 0, err
-		}
-		decoded = append(decoded, tx)
-		inputs = append(inputs, mempoolSpentInputs(tx)...)
-	}
-	addresses, err := a.confirmedInputAddresses(ctx, inputs)
-	if err != nil {
+	if err := ctx.Err(); err != nil {
 		return nil, 0, err
 	}
-	want := addr.String()
-	matched := make([]string, 0)
-	for i, tx := range decoded {
-		touches := false
-		produced, _ := mempoolProducedOutputs(tx)
-		for _, out := range produced {
-			if out.output.Address().String() == want {
-				touches = true
-				break
-			}
-		}
-		if !touches {
-			for _, input := range mempoolSpentInputs(tx) {
-				if addresses[transactionInputRef(input)] == want {
-					touches = true
-					break
-				}
-			}
-		}
-		if touches {
-			matched = append(matched, entries[i].Hash)
-		}
-	}
-	return orderedPage(matched, params), len(matched), nil
-}
-
-// mempoolSpentInputs returns the inputs a transaction consumes if it is
-// applied as submitted: its collateral when it is marked as failing phase 2,
-// else its regular inputs.
-func mempoolSpentInputs(tx lcommon.Transaction) []lcommon.TransactionInput {
-	if !tx.IsValid() {
-		return tx.Collateral()
-	}
-	return tx.Inputs()
+	hashes := a.mempoolAddresses.TransactionHashesByAddress(addr.String())
+	return orderedPage(hashes, params), len(hashes), nil
 }
 
 // redeemerPurposeOrder ranks purposes by redeemer tag, the order a

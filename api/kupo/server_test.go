@@ -166,7 +166,7 @@ func TestImmutablePatterns(t *testing.T) {
 			`{"patterns":["*/*","`+strings.Repeat(
 				"ab",
 				28,
-			)+`.*"],"rollback_to":"origin"}`,
+			)+`.*"],"rollback_to":{"slot_no":0}}`,
 		),
 	)
 	if response.Code != http.StatusOK || response.Body.String() != "[\"*\"]\n" {
@@ -184,6 +184,70 @@ func TestImmutablePatterns(t *testing.T) {
 	response = serve(t, server, http.MethodGet, "/patterns/not-a-pattern", nil)
 	if response.Code != http.StatusBadRequest {
 		t.Fatalf("invalid pattern status = %d", response.Code)
+	}
+}
+
+func TestPatternMutationRequestBodies(t *testing.T) {
+	t.Parallel()
+
+	server := newTestServer(&mockNode{})
+	for name, test := range map[string]struct {
+		target string
+		body   string
+	}{
+		"bulk missing patterns": {
+			target: "/patterns",
+			body:   `{"rollback_to":{"slot_no":0}}`,
+		},
+		"bulk missing rollback": {
+			target: "/patterns",
+			body:   `{"patterns":["*"]}`,
+		},
+		"single missing rollback": {target: "/patterns/*", body: `{}`},
+		"missing slot": {
+			target: "/patterns/*",
+			body:   `{"rollback_to":{}}`,
+		},
+		"invalid header hash": {
+			target: "/patterns/*",
+			body:   `{"rollback_to":{"slot_no":0,"header_hash":"00"}}`,
+		},
+		"invalid limit": {
+			target: "/patterns/*",
+			body:   `{"rollback_to":{"slot_no":0},"limit":"anywhere"}`,
+		},
+		"null header hash": {
+			target: "/patterns/*",
+			body:   `{"rollback_to":{"slot_no":0,"header_hash":null}}`,
+		},
+		"null limit": {
+			target: "/patterns/*",
+			body:   `{"rollback_to":{"slot_no":0},"limit":null}`,
+		},
+		"bulk null header hash": {
+			target: "/patterns",
+			body:   `{"patterns":["*"],"rollback_to":{"slot_no":0,"header_hash":null}}`,
+		},
+		"bulk null limit": {
+			target: "/patterns",
+			body:   `{"patterns":["*"],"rollback_to":{"slot_no":0},"limit":null}`,
+		},
+		"unknown property": {
+			target: "/patterns/*",
+			body:   `{"rollback_to":{"slot_no":0},"cursor":"x"}`,
+		},
+		"trailing value": {
+			target: "/patterns/*",
+			body:   `{"rollback_to":{"slot_no":0}} {}`,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			response := serve(
+				t, server, http.MethodPut, test.target,
+				strings.NewReader(test.body),
+			)
+			require.Equal(t, http.StatusBadRequest, response.Code)
+		})
 	}
 }
 
@@ -268,7 +332,10 @@ func TestMatchQueryValidation(t *testing.T) {
 		"/matches?order=oldest_first&order=most_recent_first",
 		"/matches?created_after=1&spent_after=2",
 		"/matches?created_before=1&spent_before=2",
+		"/matches?created_after=0",
+		"/matches?spent_before=0",
 		"/matches?asset_name=01",
+		"/matches?policy_id=" + strings.Repeat("11", 28) + "&asset_name=",
 		"/matches?transaction_id=" + strings.Repeat(
 			"11",
 			32,
@@ -287,6 +354,51 @@ func TestMatchQueryValidation(t *testing.T) {
 					response.Code,
 					response.Body.String(),
 				)
+			}
+		})
+	}
+}
+
+// The spec bounds only the By Slot form of a point selector to slot 1 or
+// later; the By Point form's pattern admits slot 0.
+func TestMatchQueryAcceptsPointAtSlotZero(t *testing.T) {
+	t.Parallel()
+
+	hash := strings.Repeat("ab", 32)
+	for _, param := range []string{
+		"created_after",
+		"created_before",
+		"spent_after",
+		"spent_before",
+	} {
+		t.Run(param, func(t *testing.T) {
+			t.Parallel()
+
+			node := &mockNode{tip: Point{HeaderHash: strings.Repeat("aa", 32)}}
+			server := newTestServer(node)
+			response := serve(
+				t,
+				server,
+				http.MethodGet,
+				"/matches?"+param+"=0."+hash,
+				nil,
+			)
+			if response.Code != http.StatusOK {
+				t.Fatalf(
+					"status = %d: %s",
+					response.Code,
+					response.Body.String(),
+				)
+			}
+			selectors := map[string]*PointSelector{
+				"created_after":  node.lastQuery.CreatedAfter,
+				"created_before": node.lastQuery.CreatedBefore,
+				"spent_after":    node.lastQuery.SpentAfter,
+				"spent_before":   node.lastQuery.SpentBefore,
+			}
+			got := selectors[param]
+			if got == nil || got.SlotNo != 0 || got.HeaderHash != hash {
+				t.Fatalf("%s selector = %#v", param, got)
 			}
 		})
 	}
@@ -437,11 +549,11 @@ func TestV1RouteAliases(t *testing.T) {
 			http.StatusOK,
 		},
 		{http.MethodGet, "/v1/patterns", "", http.StatusOK},
-		{http.MethodPut, "/v1/patterns", `{"patterns":["*"]}`, http.StatusOK},
+		{http.MethodPut, "/v1/patterns", `{"patterns":["*"],"rollback_to":{"slot_no":0}}`, http.StatusOK},
 		{http.MethodGet, "/v1/patterns/*", "", http.StatusOK},
 		{http.MethodGet, "/v1/patterns/*/*", "", http.StatusOK},
-		{http.MethodPut, "/v1/patterns/*", "", http.StatusOK},
-		{http.MethodPut, "/v1/patterns/*/*", "", http.StatusOK},
+		{http.MethodPut, "/v1/patterns/*", `{"rollback_to":{"slot_no":0}}`, http.StatusOK},
+		{http.MethodPut, "/v1/patterns/*/*", `{"rollback_to":{"slot_no":0}}`, http.StatusOK},
 		{http.MethodDelete, "/v1/patterns/*", "", http.StatusBadRequest},
 		{http.MethodDelete, "/v1/patterns/*/*", "", http.StatusBadRequest},
 		{http.MethodGet, "/v1/checkpoints", "", http.StatusOK},
@@ -488,34 +600,33 @@ func TestDatumAndScriptNotFound(t *testing.T) {
 	} {
 		t.Run(target, func(t *testing.T) {
 			response := serve(t, server, http.MethodGet, target, nil)
-			if response.Code != http.StatusNotFound {
-				t.Fatalf("status = %d, want 404", response.Code)
-			}
+			require.Equal(t, http.StatusOK, response.Code)
+			require.Equal(t, "null\n", response.Body.String())
 			req := httptest.NewRequest(http.MethodGet, target, nil)
 			req.Header.Set("If-None-Match", tipHash)
 			recorder := httptest.NewRecorder()
 			server.handler().ServeHTTP(recorder, req)
-			if recorder.Code != http.StatusNotFound {
-				t.Fatalf("conditional status = %d, want 404", recorder.Code)
-			}
+			require.Equal(t, http.StatusNotModified, recorder.Code)
 		})
 	}
 }
 
-func TestCheckpointNotFound(t *testing.T) {
+func TestCheckpointMissingSlotReturnsNull(t *testing.T) {
 	t.Parallel()
 
 	tipHash := strings.Repeat("aa", 32)
 	server := newTestServer(&mockNode{
 		snapshotTip: Point{SlotNo: 42, HeaderHash: tipHash},
 	})
+	response := serve(t, server, http.MethodGet, "/checkpoints/42", nil)
+	require.Equal(t, http.StatusOK, response.Code)
+	require.Equal(t, "null\n", response.Body.String())
+
 	req := httptest.NewRequest(http.MethodGet, "/checkpoints/42", nil)
 	req.Header.Set("If-None-Match", tipHash)
 	recorder := httptest.NewRecorder()
 	server.handler().ServeHTTP(recorder, req)
-	if recorder.Code != http.StatusNotFound {
-		t.Fatalf("status = %d, want 404", recorder.Code)
-	}
+	require.Equal(t, http.StatusNotModified, recorder.Code)
 }
 
 func TestInternalErrorsDoNotLeakDetails(t *testing.T) {
@@ -652,14 +763,18 @@ func TestHealthAndMetricsNegotiation(t *testing.T) {
 	}
 }
 
-func TestScriptFromLedgerPlutusV4(t *testing.T) {
+func TestPlutusV4IsUnavailableOnKupoV212(t *testing.T) {
 	t.Parallel()
 
 	script := scriptFromLedger(lcommon.PlutusV4Script{0x4d, 0x01})
-	if script == nil || script.Language != "plutus:v4" ||
-		script.Script != "4d01" {
-		t.Fatalf("Plutus V4 script = %#v", script)
-	}
+	require.Nil(t, script)
+	language, err := scriptLanguage(lcommon.ScriptRefTypePlutusV4)
+	require.NoError(t, err)
+	require.Empty(t, language)
+
+	resolved := matchJSON(Match{Script: script}, true, false)
+	require.Contains(t, resolved, "script")
+	require.Nil(t, resolved["script"])
 }
 
 func TestStartStop(t *testing.T) {

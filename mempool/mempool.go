@@ -36,8 +36,10 @@ import (
 	"github.com/blinklabs-io/dingo/plugin"
 	"github.com/blinklabs-io/dingo/utxoref"
 	ouroboros "github.com/blinklabs-io/gouroboros"
+	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"go.opentelemetry.io/otel/attribute"
@@ -92,10 +94,16 @@ type MempoolTransaction struct {
 	// outputBytes is the CBOR the UTxO overlay retains with the decoded
 	// outputs of this transaction, which decoding copies out of Cbor.
 	outputBytes int64
+	// addresses are the addresses the pool indexes this transaction under,
+	// and seq orders transactions by admission.
+	addresses []string
+	seq       uint64
 }
 
 // retainedBytes is what the pool charges this transaction against its
-// capacity: its own CBOR and the decoded outputs the UTxO overlay keeps.
+// capacity: its own CBOR and the decoded outputs the UTxO overlay keeps. The
+// address index is not charged, so capacity stays measured in CBOR; its
+// heap cost is bounded by the inputs and outputs that CBOR carries.
 func (tx *MempoolTransaction) retainedBytes() int64 {
 	return int64(len(tx.Cbor)) + tx.outputBytes
 }
@@ -173,6 +181,19 @@ type TxValidationSessionProvider interface {
 	) error) error
 }
 
+// TxSizeLimitProvider optionally reports the MaxTxSize ledger validation
+// applies to a transaction of a given era, so admission can refuse an
+// oversized submission before decoding it, taking the mutation gate, or
+// running ledger rules. LedgerState implements it; validators that do not
+// simply skip the early check and rely on the ledger's own rule.
+type TxSizeLimitProvider interface {
+	// MaxTxSize returns the MaxTxSize the ledger would apply to a transaction
+	// of era txType, and whether it is known. It must report false rather
+	// than a smaller limit than the ledger would apply, so the early check
+	// never refuses what the ledger rule accepts.
+	MaxTxSize(txType uint) (uint, bool)
+}
+
 type MempoolConfig struct {
 	PromRegistry         prometheus.Registerer
 	Validator            TxValidator
@@ -222,6 +243,8 @@ type Mempool struct {
 	transactions           []*MempoolTransaction
 	txByHash               map[string]*MempoolTransaction // O(1) lookup by hash
 	currentSizeBytes       int64                          // Cached total size of all transactions in bytes
+	addresses              addressIndex
+	nextSeq                uint64
 	transactionTTL         time.Duration
 	cleanupInterval        time.Duration
 	evictionWatermark      float64
@@ -706,6 +729,7 @@ func newMempool(
 			map[ouroboros.ConnectionId]*MempoolConsumer,
 		),
 		txByHash:               make(map[string]*MempoolTransaction),
+		addresses:              newAddressIndex(),
 		overlay:                newUtxoOverlay(),
 		validator:              config.Validator,
 		implementation:         implementation,
@@ -967,6 +991,7 @@ func (m *Mempool) Stop(ctx context.Context) error {
 
 		m.transactions = []*MempoolTransaction{}
 		m.txByHash = make(map[string]*MempoolTransaction)
+		m.addresses = newAddressIndex()
 		m.currentSizeBytes = 0
 		m.overlay.reset()
 		if m.dag != nil {
@@ -1270,6 +1295,7 @@ func (m *Mempool) rebuildAfterChainUpdate(ctx context.Context) error {
 
 func isRetryableRolledBackAdmissionError(err error) bool {
 	return errors.Is(err, ErrPendingStateMoved) ||
+		errors.Is(err, ErrInputResolution) ||
 		errors.Is(err, ErrNilValidator) ||
 		errors.Is(err, ErrMempoolStopped) ||
 		errors.Is(err, context.Canceled) ||
@@ -1338,8 +1364,8 @@ const maxAdmissionReconciles = 2
 
 // ErrPendingStateMoved is returned by AddTransaction when the ledger kept
 // publishing new state while the transaction was being admitted, so no
-// verdict was reached. It is not a rejection: the same transaction may be
-// admitted once the ledger settles.
+// verdict was reached. It is not a rejection: the same transaction may be admitted
+// once the ledger settles.
 var ErrPendingStateMoved = errors.New(
 	"mempool: ledger moved since pending transactions were validated",
 )
@@ -1546,6 +1572,7 @@ func (m *Mempool) rebuildOverlayAttempt(ctx context.Context) ([]event.Event, err
 					m.overlay = candidate.overlay
 					m.transactions = candidate.transactions
 					m.txByHash = candidate.txByHash
+					m.addresses.rebuild(candidate.transactions)
 					m.currentSizeBytes = candidate.sizeBytes
 					if m.dag != nil {
 						m.dag.rebuild(candidate.overlay.applied)
@@ -1751,6 +1778,56 @@ func (m *Mempool) withTxValidationSession(ctx context.Context,
 	)
 }
 
+// withResolvingTxValidationSession runs an admission's validation session,
+// with a resolver for confirmed outputs when the validator offers one that
+// is safe there. A session that resolves through its own snapshot is used
+// as is. A plain session gets no resolver: a separate lookup inside it would
+// need a second storage connection while the session holds one, and
+// sessions open before the mutation gate, so as many admissions as the read
+// pool has connections would wait on each other. Without sessions, a
+// UtxoResolver is used directly.
+func (m *Mempool) withResolvingTxValidationSession(ctx context.Context,
+	fn func(
+		validate func(
+			gledger.Transaction,
+			map[utxoref.Key]struct{},
+			map[utxoref.Key]lcommon.Utxo,
+			*utxoref.StateOverlay,
+		) error,
+		stillCurrent func() bool,
+		commitIfCurrent func(func() error) (bool, error),
+		resolve func([]models.UtxoId) ([]models.Utxo, error),
+	) error,
+) error {
+	if provider, ok := m.validator.(ResolvingTxValidationSessionProvider); ok {
+		return provider.WithResolvingTxValidationSession(ctx, fn)
+	}
+	if provider, ok := m.validator.(TxValidationSessionProvider); ok {
+		return provider.WithTxValidationSession(ctx, func(
+			validate func(
+				gledger.Transaction,
+				map[utxoref.Key]struct{},
+				map[utxoref.Key]lcommon.Utxo,
+				*utxoref.StateOverlay,
+			) error,
+			stillCurrent func() bool,
+			commitIfCurrent func(func() error) (bool, error),
+		) error {
+			return fn(validate, stillCurrent, commitIfCurrent, nil)
+		})
+	}
+	var resolve func([]models.UtxoId) ([]models.Utxo, error)
+	if resolver, ok := m.validator.(UtxoResolver); ok {
+		resolve = resolver.UtxosByRefs
+	}
+	return fn(
+		m.validator.ValidateTxWithOverlay,
+		func() bool { return true },
+		func(commit func() error) (bool, error) { return true, commit() },
+		resolve,
+	)
+}
+
 // expireTransactions periodically removes transactions that have
 // exceeded the configured TTL. It runs every cleanupInterval and
 // stops when the done channel is closed.
@@ -1886,6 +1963,9 @@ func (m *Mempool) AddTransaction(
 		// transaction, and an API surface has to be able to tell them apart.
 		return fmt.Errorf("%w in AddTransaction", ErrNilValidator)
 	}
+	if err := m.rejectOversizedTx(txType, txBytes); err != nil {
+		return err
+	}
 	if admission, _ := ctx.Value(submissionAdmissionKey{}).(submissionAdmission); admission.mempool != m {
 		release, err := m.waitSubmissionSlot(ctx)
 		if err != nil {
@@ -2005,6 +2085,50 @@ func (m *Mempool) submissionSlotRelease() func() {
 	}
 }
 
+// rejectOversizedTx applies the ledger's MaxTxSize rule to the raw submission
+// before any decode, lock, or rule work. The size is common.TxSize's measure,
+// so an early rejection implies the ledger rule would reject it too; the
+// ledger rule stays authoritative for everything this lets through.
+func (m *Mempool) rejectOversizedTx(txType uint, txBytes []byte) error {
+	provider, ok := m.validator.(TxSizeLimitProvider)
+	if !ok {
+		return nil
+	}
+	maxSize, known := provider.MaxTxSize(txType)
+	if !known {
+		return nil
+	}
+	size := rawTxSize(txType, txBytes)
+	if size <= maxSize {
+		return nil
+	}
+	return fmt.Errorf(
+		"validate transaction: %w",
+		shelley.MaxTxSizeUtxoError{TxSize: size, MaxTxSize: maxSize},
+	)
+}
+
+// rawTxSize is common.TxSize computed from the submitted bytes: from Alonzo
+// on, a transaction whose array has four elements is measured one byte short,
+// and any other shape, including the three-element Dijkstra mempool form, at
+// its full length. Discounting by era alone would admit a transaction one
+// byte over the limit into the ledger rules.
+func rawTxSize(txType uint, txBytes []byte) uint {
+	size := uint(len(txBytes))
+	if txType < uint(gledger.TxTypeAlonzo) || size == 0 {
+		return size
+	}
+	dec, err := cbor.NewStreamDecoder(txBytes)
+	if err != nil {
+		return size
+	}
+	arrayLen, _, _, err := dec.DecodeArrayHeader()
+	if err == nil && arrayLen == 4 {
+		size--
+	}
+	return size
+}
+
 // addTransactionAttempt validates and admits one transaction. On
 // ErrPendingStateMoved it also returns the overlay it validated against.
 func (m *Mempool) addTransactionAttempt(
@@ -2017,7 +2141,8 @@ func (m *Mempool) addTransactionAttempt(
 	var addEvent *event.Event
 	var evictedEvents []event.Event
 	var seen *utxoOverlay
-	err := m.withTxValidationSession(ctx, func(
+	outputAddrs := outputAddresses(tmpTx)
+	err := m.withResolvingTxValidationSession(ctx, func(
 		validate func(
 			gledger.Transaction,
 			map[utxoref.Key]struct{},
@@ -2026,6 +2151,7 @@ func (m *Mempool) addTransactionAttempt(
 		) error,
 		stillCurrent func() bool,
 		commitIfCurrent func(func() error) (bool, error),
+		resolve func([]models.UtxoId) ([]models.Utxo, error),
 	) error {
 		// Serialize mutations without blocking snapshot readers during ledger
 		// validation. This gate also guarantees the overlay used for validation
@@ -2111,6 +2237,15 @@ func (m *Mempool) addTransactionAttempt(
 			return fmt.Errorf("validate transaction: %w", validateErr)
 		}
 
+		// Resolved after validation, under the gate and in the same
+		// session, so the lookup reads the snapshot the verdict was reached
+		// on and the overlay that verdict used.
+		inputAddrs, err := inputAddresses(tmpTx, validCreated, resolve)
+		if err != nil {
+			return err
+		}
+		addresses := mergeAddresses(outputAddrs, inputAddrs)
+
 		committed, err := commitIfCurrent(func() error {
 			m.Lock()
 			m.consumersMutex.Lock()
@@ -2134,9 +2269,13 @@ func (m *Mempool) addTransactionAttempt(
 				Cbor:        txCbor,
 				LastSeen:    time.Now(),
 				outputBytes: outputBytes,
+				addresses:   addresses,
+				seq:         m.nextSeq,
 			}
+			m.nextSeq++
 			m.transactions = append(m.transactions, tx)
 			m.txByHash[txHash] = tx
+			m.addresses.add(tx)
 			m.currentSizeBytes += txSize
 			m.notifyHeadroomChangedLocked()
 			m.logger.Debug(
@@ -2626,6 +2765,7 @@ func (m *Mempool) removeTransactionByIndexLocked(
 		txIdx+1,
 	)
 	delete(m.txByHash, tx.Hash)
+	m.addresses.remove(tx)
 	m.currentSizeBytes -= txSize
 	m.notifyHeadroomChangedLocked()
 	m.metrics.txsInMempool.Dec()
@@ -2688,6 +2828,7 @@ func (m *Mempool) evictOldestLocked(targetBytes int64) []event.Event {
 		tx := m.transactions[i]
 		txSize := tx.retainedBytes()
 		delete(m.txByHash, tx.Hash)
+		m.addresses.remove(tx)
 		m.metrics.txsInMempool.Dec()
 		m.metrics.mempoolBytes.Sub(float64(txSize))
 		if m.eventBus != nil {

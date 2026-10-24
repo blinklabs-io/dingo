@@ -79,12 +79,18 @@ type Aggregator struct {
 	operatorTokenKey  [sha256.Size]byte
 	operatorTokenHash [sha256.Size]byte
 
-	mu     sync.Mutex
-	regs   map[string]stmRegistration
-	sealed *sealedRegistration
-	state  aggregatorState
-	open   *openMessage
-	now    func() time.Time
+	mu      sync.Mutex
+	regs    map[string]stmRegistration
+	sealed  *sealedRegistration
+	state   aggregatorState
+	open    *openMessage
+	now     func() time.Time
+	catalog *snapshotCatalog
+
+	// publicCatalogs are the listing caches of the handlers serving this
+	// aggregator's store; certification invalidates them with its own.
+	publicCatalogsMu sync.Mutex
+	publicCatalogs   []*snapshotCatalog
 }
 
 type persistedSigner struct {
@@ -165,6 +171,7 @@ func NewAggregator(
 		operatorTokenHash: tokenHash,
 		regs:              make(map[string]stmRegistration),
 		now:               time.Now,
+		catalog:           newSnapshotCatalog(cfg.Store),
 	}
 	found, err := getJSON(ctx, cfg.Store, aggregatorStateKey, &a.state)
 	if err != nil {
@@ -354,8 +361,26 @@ func (a *Aggregator) handleCloseRegistrations(
 		return
 	}
 	a.mu.Lock()
-	defer a.mu.Unlock()
-	if err := a.closeRegistrations(r.Context()); err != nil {
+	if a.sealed != nil {
+		a.mu.Unlock()
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if len(a.regs) == 0 {
+		a.mu.Unlock()
+		writeAPIError(w, conflict("no signers are registered"))
+		return
+	}
+	a.mu.Unlock()
+	snapshots, err := a.catalog.list(r.Context())
+	if err != nil {
+		writeAPIError(w, err)
+		return
+	}
+	a.mu.Lock()
+	err = a.closeRegistrations(r.Context(), snapshots)
+	a.mu.Unlock()
+	if err != nil {
 		writeAPIError(w, err)
 		return
 	}
@@ -459,80 +484,95 @@ type pendingCertificate struct {
 
 func (a *Aggregator) handlePending(w http.ResponseWriter, r *http.Request) {
 	a.mu.Lock()
-	defer a.mu.Unlock()
-	open, err := a.ensureOpen(r.Context())
-	if err != nil {
-		writeAPIError(w, err)
-		return
-	}
-	if open == nil {
+	sealed := a.sealed != nil
+	a.mu.Unlock()
+	if !sealed {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	entity, err := newSignedEntityType(
-		signedEntityTypeCardanoDatabase, open.snapshot.Beacon,
-	)
-	if err != nil {
-		writeAPIError(w, err)
+	for {
+		snapshots, generation, err := a.catalog.listVersioned(r.Context())
+		if err != nil {
+			writeAPIError(w, err)
+			return
+		}
+		a.mu.Lock()
+		if !a.catalog.isCurrent(generation) {
+			a.mu.Unlock()
+			continue
+		}
+		open := a.ensureOpenLocked(snapshots)
+		if open == nil {
+			a.mu.Unlock()
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		entity, err := newSignedEntityType(
+			signedEntityTypeCardanoDatabase, open.snapshot.Beacon,
+		)
+		if err != nil {
+			a.mu.Unlock()
+			writeAPIError(w, err)
+			return
+		}
+		signers := make([]pendingSigner, len(a.sealed.ordered))
+		for i, s := range a.sealed.ordered {
+			signers[i] = pendingSigner{
+				PartyID:         s.PartyID,
+				VerificationKey: hex.EncodeToString(s.VerificationKey),
+				Stake:           s.Stake,
+			}
+		}
+		pending := pendingCertificate{
+			Epoch:                    a.cfg.Epoch,
+			SignedEntityType:         entity.Raw(),
+			ProtocolParameters:       a.cfg.Parameters,
+			SignedMessage:            open.signedMessage,
+			AggregateVerificationKey: a.sealed.avkEncoded,
+			Signers:                  signers,
+		}
+		a.mu.Unlock()
+		writeJSON(w, pending)
 		return
 	}
-	signers := make([]pendingSigner, len(a.sealed.ordered))
-	for i, s := range a.sealed.ordered {
-		signers[i] = pendingSigner{
-			PartyID:         s.PartyID,
-			VerificationKey: hex.EncodeToString(s.VerificationKey),
-			Stake:           s.Stake,
-		}
-	}
-	writeJSON(w, pendingCertificate{
-		Epoch:                    a.cfg.Epoch,
-		SignedEntityType:         entity.Raw(),
-		ProtocolParameters:       a.cfg.Parameters,
-		SignedMessage:            open.signedMessage,
-		AggregateVerificationKey: a.sealed.avkEncoded,
-		Signers:                  signers,
-	})
 }
 
-// ensureOpen returns the message to sign after registration has been closed.
-// It returns nil when registration remains open or no snapshot awaits a
-// certificate. The caller holds a.mu.
-func (a *Aggregator) ensureOpen(ctx context.Context) (*openMessage, error) {
+// ensureOpenLocked returns the message to sign after registration has been
+// closed. The caller fetched snapshots without a.mu and holds a.mu here.
+func (a *Aggregator) ensureOpenLocked(
+	snapshots []CardanoDatabaseSnapshot,
+) *openMessage {
 	if a.open != nil {
-		// Retention may have pruned the open snapshot. Certifying it would
-		// spend a certificate on a snapshot publishing then unlists, so
-		// signing moves on to the next snapshot instead.
-		_, err := readSnapshot(ctx, a.cfg.Store, a.open.snapshot.Hash)
-		switch {
-		case err == nil:
-			return a.open, nil
-		case !errors.Is(err, ErrArtifactNotFound):
-			return nil, err
+		for i := range snapshots {
+			if snapshots[i].Hash == a.open.snapshot.Hash &&
+				snapshots[i].CertificateHash == "" {
+				return a.open
+			}
 		}
 		a.open = nil
 	}
-	snapshot, err := a.oldestUncertified(ctx)
-	if err != nil || snapshot == nil {
-		return nil, err
+	snapshot := a.oldestUncertified(snapshots)
+	if snapshot == nil {
+		return nil
 	}
 	if a.sealed == nil {
-		return nil, nil
+		return nil
 	}
 	a.open = a.newOpenMessage(*snapshot)
-	return a.open, nil
+	return a.open
 }
 
-func (a *Aggregator) closeRegistrations(ctx context.Context) error {
+func (a *Aggregator) closeRegistrations(
+	ctx context.Context,
+	snapshots []CardanoDatabaseSnapshot,
+) error {
 	if a.sealed != nil {
 		return nil
 	}
 	if len(a.regs) == 0 {
 		return conflict("no signers are registered")
 	}
-	snapshot, err := a.oldestUncertified(ctx)
-	if err != nil {
-		return err
-	}
+	snapshot := a.oldestUncertified(snapshots)
 	if snapshot == nil {
 		return conflict("no snapshot is awaiting a certificate")
 	}
@@ -557,18 +597,14 @@ func (a *Aggregator) newOpenMessage(
 }
 
 func (a *Aggregator) oldestUncertified(
-	ctx context.Context,
-) (*CardanoDatabaseSnapshot, error) {
-	list, err := ListSnapshots(ctx, a.cfg.Store)
-	if err != nil {
-		return nil, err
-	}
-	for _, item := range slices.Backward(list) {
+	snapshots []CardanoDatabaseSnapshot,
+) *CardanoDatabaseSnapshot {
+	for _, item := range slices.Backward(snapshots) {
 		if item.CertificateHash == "" && item.Network == a.cfg.Network {
-			return &item, nil
+			return &item
 		}
 	}
-	return nil, nil
+	return nil
 }
 
 // protocolMessage builds the message a certificate at epoch signs. The
@@ -721,22 +757,30 @@ func (a *Aggregator) registerSignature(
 	ctx context.Context,
 	req registerSignatureRequest,
 ) error {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	open, err := a.ensureOpen(ctx)
-	if err != nil {
-		return err
+	if !partyIDPattern.MatchString(req.PartyID) {
+		return badRequest("invalid party_id")
 	}
-	if open == nil {
+	if !hashPattern.MatchString(req.SignedMessage) {
+		return badRequest(
+			"signed_message must be a 64-character lowercase hex digest",
+		)
+	}
+	a.mu.Lock()
+	if a.sealed == nil {
+		a.mu.Unlock()
 		return conflict("no message is open for signing")
 	}
-	if req.SignedMessage != open.signedMessage {
-		return conflict("signed_message is not the open message")
-	}
-	index, ok := a.sealed.partyIndex[req.PartyID]
+	_, ok := a.sealed.partyIndex[req.PartyID]
 	if !ok {
+		a.mu.Unlock()
 		return badRequest("party %q is not a registered signer", req.PartyID)
 	}
+	if a.open != nil && req.SignedMessage != a.open.signedMessage {
+		a.mu.Unlock()
+		return conflict("signed_message is not the open message")
+	}
+	a.mu.Unlock()
+
 	raw, err := hex.DecodeString(req.Signature)
 	if err != nil {
 		return badRequest("signature is not hex")
@@ -748,20 +792,49 @@ func (a *Aggregator) registerSignature(
 	if err != nil || len(encodeSTMSingleSignature(*sig)) != len(raw) {
 		return badRequest("malformed signature")
 	}
-	position := uint64(index) //nolint:gosec // index is a slice position
-	if sig.SignerIndex != position {
-		return badRequest(
-			"signature is for signer index %d, not %d", sig.SignerIndex, index,
-		)
+
+	for {
+		snapshots, generation, err := a.catalog.listVersioned(ctx)
+		if err != nil {
+			return err
+		}
+		a.mu.Lock()
+		if !a.catalog.isCurrent(generation) {
+			a.mu.Unlock()
+			continue
+		}
+		defer a.mu.Unlock()
+		open := a.ensureOpenLocked(snapshots)
+		if open == nil {
+			return conflict("no message is open for signing")
+		}
+		if req.SignedMessage != open.signedMessage {
+			return conflict("signed_message is not the open message")
+		}
+		index, ok := a.sealed.partyIndex[req.PartyID]
+		if !ok {
+			return badRequest(
+				"party %q is not a registered signer",
+				req.PartyID,
+			)
+		}
+		position := uint64(index) //nolint:gosec // index is a slice position
+		if sig.SignerIndex != position {
+			return badRequest(
+				"signature is for signer index %d, not %d",
+				sig.SignerIndex,
+				index,
+			)
+		}
+		if err := verifySTMSingleSignature(
+			[]byte(open.signedMessage), a.sealed.avk, a.cfg.Parameters,
+			a.sealed.entries[index], sig,
+		); err != nil {
+			return badRequest("invalid signature: %v", err)
+		}
+		open.sigs[req.PartyID] = *sig
+		return a.tryCertify(ctx, open)
 	}
-	if err := verifySTMSingleSignature(
-		[]byte(open.signedMessage), a.sealed.avk, a.cfg.Parameters,
-		a.sealed.entries[index], sig,
-	); err != nil {
-		return badRequest("invalid signature: %v", err)
-	}
-	open.sigs[req.PartyID] = *sig
-	return a.tryCertify(ctx, open)
 }
 
 // tryCertify publishes a certificate if the collected signatures cover the
@@ -804,6 +877,18 @@ func (a *Aggregator) tryCertify(
 	); err != nil {
 		return fmt.Errorf("aggregated signature does not verify: %w", err)
 	}
+	// The cached listing may still show a snapshot that retention has
+	// pruned, so confirm the store holds it before a certificate is spent.
+	if _, err := readSnapshot(
+		ctx, a.cfg.Store, open.snapshot.Hash,
+	); err != nil {
+		if !errors.Is(err, ErrArtifactNotFound) {
+			return err
+		}
+		a.open = nil
+		a.invalidateCatalogs()
+		return conflict("the open snapshot was removed before certification")
+	}
 	entity, err := newSignedEntityType(
 		signedEntityTypeCardanoDatabase, open.snapshot.Beacon,
 	)
@@ -839,6 +924,7 @@ func (a *Aggregator) tryCertify(
 	snapshot := open.snapshot
 	snapshot.CertificateHash = cert.Hash
 	err = publishSnapshot(ctx, a.cfg.Store, &snapshot)
+	a.invalidateCatalogs()
 	if errors.Is(err, ErrSnapshotArchivesMissing) {
 		// Retention removed the snapshot after ensureOpen read it. The
 		// certificate stays in the chain and signing moves on.
@@ -903,4 +989,21 @@ func (a *Aggregator) handleDistribution(
 		return
 	}
 	writeJSON(w, dist)
+}
+
+// watchCatalog registers a listing cache to be invalidated whenever the
+// aggregator publishes a certified snapshot.
+func (a *Aggregator) watchCatalog(c *snapshotCatalog) {
+	a.publicCatalogsMu.Lock()
+	a.publicCatalogs = append(a.publicCatalogs, c)
+	a.publicCatalogsMu.Unlock()
+}
+
+func (a *Aggregator) invalidateCatalogs() {
+	a.catalog.invalidate()
+	a.publicCatalogsMu.Lock()
+	defer a.publicCatalogsMu.Unlock()
+	for _, c := range a.publicCatalogs {
+		c.invalidate()
+	}
 }

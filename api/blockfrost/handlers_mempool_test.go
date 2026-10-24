@@ -15,12 +15,17 @@
 package blockfrost
 
 import (
+	"context"
 	"encoding/hex"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -164,4 +169,64 @@ func TestHandleMempoolErrors(t *testing.T) {
 		w.Code,
 		"addresses is not a transaction hash",
 	)
+}
+
+type blockingMempoolAddressNode struct {
+	*mockNode
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (n *blockingMempoolAddressNode) MempoolAddressTransactions(
+	ctx context.Context,
+	_ string,
+	_ PaginationParams,
+) ([]string, int, error) {
+	n.entered <- struct{}{}
+	select {
+	case <-n.release:
+		return []string{}, 0, nil
+	case <-ctx.Done():
+		return nil, 0, ctx.Err()
+	}
+}
+
+func TestHandleMempoolAddressAdmissionCap(t *testing.T) {
+	t.Parallel()
+	node := &blockingMempoolAddressNode{
+		mockNode: &mockNode{},
+		entered:  make(chan struct{}, 8),
+		release:  make(chan struct{}),
+	}
+	b := newTestBlockfrost(node)
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(node.release) }) }
+	defer release()
+	const path = "/api/v0/mempool/addresses/addr1"
+
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		b.handler().ServeHTTP(
+			httptest.NewRecorder(),
+			addressSummaryRequest(context.Background(), path),
+		)
+	})
+	testutil.RequireReceive(t, node.entered, 5*time.Second, "admitted")
+
+	// The deadline only keeps a wrongly admitted request from parking the
+	// test; a rejected one returns at once.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	w := httptest.NewRecorder()
+	b.handler().ServeHTTP(w, addressSummaryRequest(ctx, path))
+	require.Equal(t, http.StatusTooManyRequests, w.Code)
+	require.Equal(t, "1", w.Header().Get("Retry-After"))
+
+	release()
+	wg.Wait()
+	w = httptest.NewRecorder()
+	b.handler().ServeHTTP(
+		w, addressSummaryRequest(context.Background(), path),
+	)
+	require.Equal(t, http.StatusOK, w.Code)
 }

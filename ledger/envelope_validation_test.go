@@ -228,6 +228,78 @@ func (b *envelopeTestBlock) Utxorpc() (*utxorpc.Block, error) {
 	return nil, nil
 }
 
+// TestValidateInboundBlockExUnitsDijkstraRankingBody pins the reference
+// Dijkstra block body rule: the aggregate maxBlockExUnits bound sums the
+// ranking block's own body transactions only. A certifying ranking block
+// carries a Leios certificate and, per CIP-0164, no transactions of its own,
+// so it always meets the bound -- the certified endorser block's transactions
+// are not summed into it.
+func TestValidateInboundBlockExUnitsDijkstraRankingBody(t *testing.T) {
+	t.Parallel()
+
+	pparams := &dijkstra.DijkstraProtocolParameters{
+		ConwayProtocolParameters: conway.ConwayProtocolParameters{
+			MaxBlockExUnits: lcommon.ExUnits{Memory: 10, Steps: 10},
+		},
+	}
+	newTx := func(memory, steps int64) dijkstra.DijkstraTransaction {
+		return dijkstra.DijkstraTransaction{
+			WitnessSet: dijkstra.DijkstraTransactionWitnessSet{
+				WsRedeemers: dijkstra.DijkstraRedeemers{
+					Redeemers: map[lcommon.RedeemerKey]lcommon.RedeemerValue{
+						{}: {ExUnits: lcommon.ExUnits{
+							Memory: memory,
+							Steps:  steps,
+						}},
+					},
+				},
+			},
+			TxIsValid: false,
+		}
+	}
+
+	t.Run("over-budget ranking block body fails", func(t *testing.T) {
+		block := &dijkstra.DijkstraBlock{
+			BlockHeader: &dijkstra.DijkstraBlockHeader{},
+			BlockBody: dijkstra.DijkstraBlockBody{
+				Transactions: []dijkstra.DijkstraTransaction{
+					newTx(6, 6), newTx(5, 5),
+				},
+			},
+		}
+		require.ErrorContains(
+			t,
+			validateBlockExUnits(block, pparams),
+			"exceed maxBlockExUnits",
+		)
+	})
+
+	t.Run("empty-body certifying block passes", func(t *testing.T) {
+		certified, err := cbor.Encode(true)
+		require.NoError(t, err)
+		noAnnouncement, err := cbor.Encode(nil)
+		require.NoError(t, err)
+		block := &dijkstra.DijkstraBlock{
+			BlockHeader: &dijkstra.DijkstraBlockHeader{
+				LeiosHeaderExtension: []cbor.RawMessage{
+					certified,
+					noAnnouncement,
+				},
+			},
+			BlockBody: dijkstra.DijkstraBlockBody{
+				LeiosCertificate: &dijkstra.DijkstraLeiosCertificate{
+					Signers:             []byte{0x01},
+					AggregatedSignature: make([]byte, 48),
+				},
+			},
+		}
+		certifies, present := block.BlockHeader.LeiosCertified()
+		require.True(t, present)
+		require.True(t, certifies)
+		require.NoError(t, validateBlockExUnits(block, pparams))
+	})
+}
+
 // TestValidateInboundBlockEnvelopeSizes covers header/body size limits and
 // the requirement that the declared body size matches serialized block CBOR.
 func TestValidateInboundBlockEnvelopeSizes(t *testing.T) {

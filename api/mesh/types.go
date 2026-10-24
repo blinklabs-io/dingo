@@ -21,8 +21,15 @@ package mesh
 
 // NetworkIdentifier identifies a blockchain network.
 type NetworkIdentifier struct {
-	Blockchain string `json:"blockchain"`
-	Network    string `json:"network"`
+	Blockchain           string                `json:"blockchain"`
+	Network              string                `json:"network"`
+	SubNetworkIdentifier *SubNetworkIdentifier `json:"sub_network_identifier,omitempty"`
+}
+
+// SubNetworkIdentifier identifies a sub-network within a network.
+type SubNetworkIdentifier struct {
+	Network  string         `json:"network"`
+	Metadata map[string]any `json:"metadata,omitempty"`
 }
 
 // BlockIdentifier uniquely identifies a block.
@@ -47,11 +54,13 @@ type TransactionIdentifier struct {
 type AccountIdentifier struct {
 	Address    string                `json:"address"`
 	SubAccount *SubAccountIdentifier `json:"sub_account,omitempty"`
+	Metadata   map[string]any        `json:"metadata,omitempty"`
 }
 
 // SubAccountIdentifier identifies a sub-account.
 type SubAccountIdentifier struct {
-	Address string `json:"address"`
+	Address  string         `json:"address"`
+	Metadata map[string]any `json:"metadata,omitempty"`
 }
 
 // CoinIdentifier uniquely identifies a UTXO coin.
@@ -68,8 +77,9 @@ type Currency struct {
 
 // Amount represents a value in a specific currency.
 type Amount struct {
-	Value    string    `json:"value"`
-	Currency *Currency `json:"currency"`
+	Value    string         `json:"value"`
+	Currency *Currency      `json:"currency"`
+	Metadata map[string]any `json:"metadata,omitempty"`
 }
 
 // Operation describes a single mutation to state.
@@ -154,11 +164,12 @@ type Allow struct {
 	OperationTypes          []string            `json:"operation_types"`
 	Errors                  []*Error            `json:"errors"`
 	HistoricalBalanceLookup bool                `json:"historical_balance_lookup"`
-	CallMethods             []string            `json:"call_methods,omitempty"`
-	BalanceExemptions       []*BalanceExemption `json:"balance_exemptions,omitempty"`
+	CallMethods             []string            `json:"call_methods"`
+	BalanceExemptions       []*BalanceExemption `json:"balance_exemptions"`
 	MempoolCoins            bool                `json:"mempool_coins"`
 	BlockHashCase           *string             `json:"block_hash_case,omitempty"`
 	TransactionHashCase     *string             `json:"transaction_hash_case,omitempty"`
+	TimestampStartIndex     *int64              `json:"timestamp_start_index,omitempty"`
 }
 
 // OperationStatus describes the status of an operation.
@@ -178,6 +189,7 @@ type BalanceExemption struct {
 // SigningPayload is the payload to be signed.
 type SigningPayload struct {
 	AccountIdentifier *AccountIdentifier `json:"account_identifier,omitempty"`
+	Address           *string            `json:"address,omitempty"`
 	HexBytes          string             `json:"hex_bytes"`
 	SignatureType     string             `json:"signature_type,omitempty"`
 }
@@ -263,11 +275,6 @@ type AccountCoinsRequest struct {
 	AccountIdentifier *AccountIdentifier `json:"account_identifier"`
 	IncludeMempool    bool               `json:"include_mempool"`
 	Currencies        []*Currency        `json:"currencies,omitempty"`
-	// Metadata may carry "paginate": true to opt into paged responses, and
-	// "cursor", the opaque "next_cursor" of a previous paged response, to
-	// continue after the last UTxO that response covered. Without either,
-	// the response is complete or the request fails with a limit error.
-	Metadata map[string]any `json:"metadata,omitempty"`
 }
 
 // MempoolTransactionRequest identifies a mempool tx.
@@ -393,6 +400,7 @@ type MempoolTransactionResponse struct {
 // ConstructionDeriveResponse returns a derived address.
 type ConstructionDeriveResponse struct {
 	AccountIdentifier *AccountIdentifier `json:"account_identifier,omitempty"`
+	Address           *string            `json:"address,omitempty"`
 	Metadata          map[string]any     `json:"metadata,omitempty"`
 }
 
@@ -422,6 +430,7 @@ type ConstructionCombineResponse struct {
 // ConstructionParseResponse returns parsed operations.
 type ConstructionParseResponse struct {
 	Operations               []*Operation         `json:"operations"`
+	Signers                  []*string            `json:"signers,omitempty"`
 	AccountIdentifierSigners []*AccountIdentifier `json:"account_identifier_signers,omitempty"`
 	Metadata                 map[string]any       `json:"metadata,omitempty"`
 }

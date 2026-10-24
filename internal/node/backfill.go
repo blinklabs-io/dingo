@@ -1256,11 +1256,9 @@ func (b *Backfill) Run(ctx context.Context) error {
 	}
 	var rebuildErr error
 	if b.useRunningTotalsFinalization {
-		// Historical replay intentionally leaves the imported snapshot live UTxO
-		// set untouched and skips per-transaction live-stake refreshes. The
-		// ledger-state importer already maintained one running total per live
-		// credential, so merge the final account/delegation state into those
-		// totals instead of scanning every live UTxO again.
+		// Historical replay keeps the imported running UTxO totals aligned as
+		// it inserts and spends outputs. Merge the final account/delegation
+		// state into those totals instead of scanning every live UTxO again.
 		rebuildErr = b.db.RebuildRewardLiveStakeFromRunningTotals(
 			ctx,
 			tipSlot,
