@@ -17,8 +17,10 @@ package ouroboros
 import (
 	"bytes"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -26,11 +28,39 @@ import (
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
+	"github.com/blinklabs-io/gouroboros/muxer"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
 	"github.com/stretchr/testify/require"
 )
+
+type localQueryIngressPacedConn struct {
+	net.Conn
+	mux     *muxer.Muxer
+	enabled atomic.Bool
+}
+
+func (c *localQueryIngressPacedConn) Write(buf []byte) (int, error) {
+	n, err := c.Conn.Write(buf)
+	if err != nil || !c.enabled.Load() {
+		return n, err
+	}
+	// Each write is one mux segment. Drain its queue before sending another
+	// so the test reaches reassembly's cap rather than racing the mux cap.
+	timeout := time.NewTimer(5 * time.Second)
+	defer timeout.Stop()
+	tick := time.NewTicker(time.Millisecond)
+	defer tick.Stop()
+	for c.mux.IngressInUse() > 0 {
+		select {
+		case <-tick.C:
+		case <-timeout.C:
+			return n, errors.New("local query ingress did not drain")
+		}
+	}
+	return n, nil
+}
 
 // testTxIns returns n distinct inputs. Each encodes to roughly 38 bytes, so
 // the request size scales with n independently of the ledger contents.
@@ -73,6 +103,7 @@ func TestLocalstatequeryProtocol_RequestAboveIngressCapIsRefused(
 			}, nil))
 
 			rawServer, rawClient := net.Pipe()
+			pacedClient := &localQueryIngressPacedConn{Conn: rawClient}
 			serverDone := make(chan error, 1)
 			var srvConn *ouroboros.Connection
 			go func() {
@@ -91,7 +122,7 @@ func TestLocalstatequeryProtocol_RequestAboveIngressCapIsRefused(
 				serverDone <- err
 			}()
 			cliConn, err := ouroboros.New(
-				ouroboros.WithConnection(rawClient),
+				ouroboros.WithConnection(pacedClient),
 				ouroboros.WithNetworkMagic(42),
 				ouroboros.WithNodeToNode(false),
 			)
@@ -110,6 +141,8 @@ func TestLocalstatequeryProtocol_RequestAboveIngressCapIsRefused(
 
 			_, err = client.GetUTxOByTxIn(testTxIns(t, 10))
 			require.NoError(t, err, "a request under the cap must be answered")
+			pacedClient.mux = srvConn.Muxer()
+			pacedClient.enabled.Store(true)
 
 			// 1.5x the cap in ~38-byte inputs. The item count is above
 			// gouroboros' decode-time filter limit too, so only the read
