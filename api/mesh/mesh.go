@@ -61,28 +61,17 @@ const (
 	// callers cannot pile up pool walks behind one another.
 	defaultMaxConcurrentMempoolListings = 8
 
+	// defaultMaxConcurrentBulkReads caps simultaneous complete /account/coins
+	// reads. It refuses excess work before starting a ledger query without
+	// changing the contents of a successful response.
+	defaultMaxConcurrentBulkReads = 8
+
 	// listenerReadTimeout bounds the whole request read at the
 	// connection, covering the requests whose body no handler reads --
 	// such as an unknown route -- which the per-request deadline above
 	// never sees.
 	// api/utxorpc's listener carries the same bound.
 	listenerReadTimeout = 60 * time.Second
-
-	// defaultAccountCoinsPageSize caps the UTxOs one /account/coins response
-	// carries; a larger account is read by following the cursor.
-	defaultAccountCoinsPageSize = 500
-	// defaultAccountCoinsMaxCandidates caps the output rows one page scans,
-	// which bounds the work for an address whose payment credential is shared
-	// by many other addresses.
-	defaultAccountCoinsMaxCandidates = 5000
-	// defaultAccountCoinsMaxBytes caps the output CBOR one page retains. Each
-	// output expands into one coin per native asset, so the encoded response
-	// is bounded by a small multiple of this.
-	defaultAccountCoinsMaxBytes = 1 << 20
-	// defaultMaxConcurrentBulkReads caps how many /account/coins reads run
-	// at once; further requests are refused rather than queued, because a
-	// queue of blocked handlers would hold the memory the budgets bound.
-	defaultMaxConcurrentBulkReads = 8
 
 	// mainnetMagic is the network magic for Cardano
 	// mainnet, used to determine the address network.
@@ -112,14 +101,9 @@ type ServerConfig struct {
 	// enough for a test". NewServer substitutes
 	// defaultRequestBodyTimeout when it is not positive.
 	requestBodyTimeout time.Duration
-	// accountCoinsPageSize, accountCoinsMaxCandidates,
-	// accountCoinsMaxBytes and maxConcurrentBulkReads are unexported for the
-	// same reason; NewServer substitutes the defaults above when they are
-	// not positive.
-	accountCoinsPageSize      int
-	accountCoinsMaxCandidates int
-	accountCoinsMaxBytes      int64
-	maxConcurrentBulkReads    int
+	// maxConcurrentBulkReads is unexported so the concurrency bound remains a
+	// server invariant rather than part of the Mesh wire contract.
+	maxConcurrentBulkReads int
 	// maxMempoolListing and maxConcurrentMempoolListings are unexported and
 	// defaulted the same way.
 	maxMempoolListing            int
@@ -137,8 +121,8 @@ type Server struct {
 	// listening socket as part of what Stop waits for -- see
 	// internal/apilistener.
 	listener *apilistener.Listener
-	// bulkSlots admits at most maxConcurrentBulkReads concurrent
-	// result-size-scaled reads.
+	// bulkSlots admits complete /account/coins reads without changing their
+	// whole-result contract.
 	bulkSlots chan struct{}
 	// mempoolSlots holds one token per /mempool request in flight.
 	mempoolSlots chan struct{}
@@ -203,15 +187,6 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	}
 	if cfg.maxConcurrentMempoolListings <= 0 {
 		cfg.maxConcurrentMempoolListings = defaultMaxConcurrentMempoolListings
-	}
-	if cfg.accountCoinsPageSize <= 0 {
-		cfg.accountCoinsPageSize = defaultAccountCoinsPageSize
-	}
-	if cfg.accountCoinsMaxCandidates <= 0 {
-		cfg.accountCoinsMaxCandidates = defaultAccountCoinsMaxCandidates
-	}
-	if cfg.accountCoinsMaxBytes <= 0 {
-		cfg.accountCoinsMaxBytes = defaultAccountCoinsMaxBytes
 	}
 	if cfg.maxConcurrentBulkReads <= 0 {
 		cfg.maxConcurrentBulkReads = defaultMaxConcurrentBulkReads
@@ -305,7 +280,10 @@ func (s *Server) Stop(ctx context.Context) error {
 }
 
 // registerRoutes registers all Mesh API endpoints.
-func (s *Server) registerRoutes(mux *http.ServeMux) {
+func (s *Server) registerRoutes(mux interface {
+	HandleFunc(string, func(http.ResponseWriter, *http.Request))
+},
+) {
 	// Network API
 	mux.HandleFunc(
 		"POST /network/list",
@@ -446,26 +424,11 @@ func writeJSON(
 	}
 }
 
-// writeError writes a Mesh error response.
+// writeError writes a Mesh error response. The Mesh specification declares
+// only 200 and 500 for every operation and carries the error class in the
+// Error body, so every error is a 500; clients retry on Error.retriable.
 func writeError(w http.ResponseWriter, meshErr *Error) {
-	status := http.StatusInternalServerError
-	switch meshErr.Code {
-	case ErrNetworkNotSupported.Code,
-		ErrBlockNotFound.Code,
-		ErrTransactionNotFound.Code,
-		ErrAccountNotFound.Code:
-		status = http.StatusNotFound
-	case ErrInvalidRequest.Code,
-		ErrInvalidPublicKey.Code,
-		ErrInvalidTransaction.Code,
-		ErrSubmitFailed.Code:
-		status = http.StatusBadRequest
-	case ErrNotImplemented.Code:
-		status = http.StatusNotImplemented
-	case ErrUnavailable.Code:
-		status = http.StatusServiceUnavailable
-	}
-	writeJSON(w, status, meshErr)
+	writeJSON(w, http.StatusInternalServerError, meshErr)
 }
 
 // decodeRequest decodes a JSON request body into dst under both

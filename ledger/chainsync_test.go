@@ -8327,6 +8327,37 @@ func TestHandleEventChainsyncRollbackAppliesRepeatedCrossableRollback(
 	assert.Equal(t, fixture.ancestorTip, fixture.ls.chain.Tip())
 }
 
+func TestHandleEventChainsyncRollbackClearsCandidateHeaderState(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	fixture := newChainsyncRollbackFixture(t)
+	key := connIdKey(fixture.connId)
+	fixture.ls.forkHeaderNonceCacheMutex.Lock()
+	fixture.ls.forkHeaderPathCache = map[string]peerForkPathPrefix{
+		key: {},
+	}
+	fixture.ls.forkHeaderNonceCache = make(map[string]map[uint64]peerForkNoncePrefix)
+	fixture.ls.forkHeaderNonceCache[key] = map[uint64]peerForkNoncePrefix{
+		5: {sourceEpoch: 5},
+	}
+	fixture.ls.forkHeaderNonceCacheMutex.Unlock()
+
+	err := fixture.ls.handleEventChainsyncRollback(ChainsyncEvent{
+		ConnectionId: fixture.connId,
+		Point:        fixture.ancestorTip.Point,
+	}, nil)
+	require.NoError(t, err)
+
+	fixture.ls.forkHeaderNonceCacheMutex.Lock()
+	_, pathCached := fixture.ls.forkHeaderPathCache[key]
+	_, nonceCached := fixture.ls.forkHeaderNonceCache[key]
+	fixture.ls.forkHeaderNonceCacheMutex.Unlock()
+	require.False(t, pathCached, "rollback must drop the peer's cached fork path")
+	require.False(t, nonceCached, "rollback must drop the peer's cached nonce state")
+}
+
 // When the loop detector breaks a loop for a genuinely un-crossable rollback,
 // the skip path must surface the stuck condition through the point-keyed
 // unrecoverable-rollback tracker so the escalation and metric can fire,

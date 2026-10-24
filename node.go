@@ -676,6 +676,11 @@ var (
 	_ mempool.TxSizeLimitProvider         = (*ledger.LedgerState)(nil)
 )
 
+// The mempool resolves confirmed input addresses for its address index
+// through the same validator's session, again by interface assertion; losing
+// the method would leave those inputs out of the index with no error.
+var _ mempool.ResolvingTxValidationSessionProvider = (*ledger.LedgerState)(nil)
+
 //nolint:contextcheck // Run is the lifecycle boundary and derives n.ctx from the caller context.
 func (n *Node) Run(ctx context.Context) (runErr error) {
 	// A signal can cancel ctx while this function is still constructing

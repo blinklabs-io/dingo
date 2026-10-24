@@ -1575,8 +1575,9 @@ func TestChainsyncClientRollForwardWithholdsHeaderWithDeferredCryptoVerification
 		200*time.Millisecond,
 		"a deferred header must not enter the ledger queue",
 	)
-	_, _, retained := state.LookupObservedHeader(conn, header.Hash().Bytes())
-	require.False(t, retained, "deferred header must not enter trusted history")
+	observed, _, retained := state.LookupObservedHeader(conn, header.Hash().Bytes())
+	require.True(t, retained, "deferred header must remain available as raw ancestry")
+	require.Zero(t, observed.HeaderCryptoVerificationGeneration)
 	require.Contains(t, o.deferredHeaderRecovery, conn)
 
 	baseline := ls.Tip().Point
@@ -2008,8 +2009,9 @@ func (f deferredHeaderFixture) rollForward(
 // not entered defers producer authorization, and only applying its own block
 // can clear that. Withholding it from block-fetch stalled sync for good, so a
 // deferred header that extends the local chain, and its pipelined child, must
-// reach the ledger queue and keep the selector following the peer, while
-// staying out of trusted history.
+// reach the ledger queue and keep the selector following the peer. They remain
+// in bounded ancestry history with generation zero until the ledger verifies
+// their complete candidate path.
 func TestChainsyncClientRollForwardQueuesDeferredHeaderExtendingLocalChain(
 	t *testing.T,
 ) {
@@ -2054,11 +2056,12 @@ func TestChainsyncClientRollForwardQueuesDeferredHeaderExtendingLocalChain(
 		require.True(t, ok)
 		require.Equal(t, header.Hash().Bytes(), data.Point.Hash)
 		require.Zero(t, data.HeaderCryptoVerificationGeneration)
-		_, _, observed := f.state.LookupObservedHeader(
+		observed, _, retained := f.state.LookupObservedHeader(
 			f.conn,
 			header.Hash().Bytes(),
 		)
-		require.False(t, observed, "a deferred header must not enter trusted history")
+		require.True(t, retained, "deferred ancestry must be retained")
+		require.Zero(t, observed.HeaderCryptoVerificationGeneration)
 	}
 	f.o.deferredHeaderRecoveryMu.Lock()
 	_, marked := f.o.deferredHeaderRecovery[f.conn]
@@ -2142,6 +2145,12 @@ func TestChainsyncClientRollForwardWithholdsDeferredForkHeader(t *testing.T) {
 	}}
 
 	f.rollForward(t, fork)
+	observed, _, retained := f.state.LookupObservedHeader(
+		f.conn,
+		forkHash.Bytes(),
+	)
+	require.True(t, retained, "deferred fork ancestry must be retained")
+	require.Zero(t, observed.HeaderCryptoVerificationGeneration)
 	testutil.RequireNoReceive(
 		t,
 		f.ledgerCh,

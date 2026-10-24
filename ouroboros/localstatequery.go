@@ -18,7 +18,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math"
 	"time"
 
 	"github.com/blinklabs-io/dingo/ledger"
@@ -27,29 +26,22 @@ import (
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
 )
 
-// maxLocalStateQueryReadBufferSize caps the reassembly of a multi-segment
-// LocalStateQuery reply, overriding gouroboros' 16MB anti-DoS default, which
-// a whole-UTxO-set reply exceeds on a real chain. 2GiB is one byte wider than
-// a 32-bit int can hold, so the value is clamped to math.MaxInt there; the
-// clamp is not a weaker bound, because a bytes.Buffer on such a target cannot
-// reach either size before the process exhausts its address space.
-const maxLocalStateQueryReadBufferSize = min(2*1024*1024*1024, math.MaxInt)
+// localStateQueryRequestMaxBytes caps reassembly of an incoming query
+// request. gouroboros rejects a decoded query filter above 10000 items, and
+// 10000 of the largest filter element (a Shelley address) stay well under it.
+// The cap refuses an oversized request before it is reassembled.
+const localStateQueryRequestMaxBytes = 1 << 20
 
 // localstatequeryServerConnOpts returns this listener's LocalStateQuery
-// server options. trusted gates the relaxed timeout/buffer options below it
-// to a listener ConfigureListeners has actually verified is local-only (a
-// Unix socket, or TCP bound to loopback) -- see isTrustedNtCListener. A
-// listener an operator has bound to a non-loopback address gets gouroboros'
-// own defaults (120s mux segment-read timeout, 180s query timeout, 16MB
-// reassembly cap) instead: those exist specifically as anti-DoS guards
-// against an untrusted remote peer, and relaxing them for every NtC
-// connection regardless of reachability would let any client that can reach
-// that address hold a connection open indefinitely and grow its reassembly
-// buffer to MaxReadBufferSize.
+// server options. The node-to-client connection is a responder, so the read
+// buffer cap applies to incoming query requests on every listener; tools that
+// receive whole-state replies configure their larger client-side cap at their
+// dial sites. trusted only enables connmanager's activity tracking, which
+// suspends the trusted idle deadline while a request executes.
 func (o *Ouroboros) localstatequeryServerConnOpts(
 	trusted bool,
 ) []olocalstatequery.LocalStateQueryOptionFunc {
-	opts := make([]olocalstatequery.LocalStateQueryOptionFunc, 3, 5)
+	opts := make([]olocalstatequery.LocalStateQueryOptionFunc, 4)
 	opts[0] = olocalstatequery.WithAcquireFunc(
 		o.instrumentLocalstatequeryAcquire(
 			o.localstatequeryServerAcquire,
@@ -68,32 +60,10 @@ func (o *Ouroboros) localstatequeryServerConnOpts(
 			trusted,
 		),
 	)
-	if !trusted {
-		return opts
-	}
-	return append(opts,
-		// WithMuxerSegmentReadTimeout(0) (ConfigureListeners) only removes
-		// the transport-level cap; LocalStateQuery's client-side protocol
-		// also carries its own, separate 180s per-query state-transition
-		// timer (QueryTimeout) that fires the same way once a query
-		// outlives it -- confirmed live against a real Preview node's
-		// whole-UTxO query, which the mux fix alone still let get torn
-		// down (ErrProtocolShuttingDown) at almost exactly 180s. Disabled
-		// for the same reason as the mux timeout: LocalStateQuery has no
-		// protocol-level timeout at all (Ouroboros Network Specification
-		// section 3.13.4), and a verified-local-only NtC channel is one
-		// where a slow-but-legitimate reply must not be killed either.
-		//
-		// MaxReadBufferSize likewise overrides gouroboros' default 16MB
-		// cap on a reassembled multi-segment reply: confirmed live that a
-		// real Preview-scale whole-UTxO-set reply exceeds 512MiB. 2GiB
-		// gives headroom for further chain growth without removing the
-		// cap outright -- unlike the two timeouts above, an unbounded
-		// buffer here is a real unbounded memory-growth risk, not just an
-		// unnecessary wait.
-		olocalstatequery.WithQueryTimeout(0),
-		olocalstatequery.WithMaxReadBufferSize(maxLocalStateQueryReadBufferSize),
+	opts[3] = olocalstatequery.WithMaxReadBufferSize(
+		localStateQueryRequestMaxBytes,
 	)
+	return opts
 }
 
 func (o *Ouroboros) instrumentLocalstatequeryAcquire(

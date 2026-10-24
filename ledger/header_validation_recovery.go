@@ -64,6 +64,34 @@ func (e *headerValidationError) Error() string {
 
 func (e *headerValidationError) Unwrap() error { return e.Cause }
 
+// rejectInboundEnvelopeFailure marks a failed inbound block envelope check as a
+// rejected block. The envelope checks (ordering, size limits, the aggregate
+// maxBlockExUnits bound, the Byron body proof) are pure functions of the block
+// and its parent, and the block is already on the primary chain, so a plain
+// error restarts the pipeline onto the identical block until the no-progress
+// limit halts it. Wrapping it in a headerValidationError routes it through the
+// reject-and-rewind recovery so chain selection can offer another candidate.
+//
+// A block this node forged is returned unwrapped: a local forging defect must
+// surface rather than be silently rewound past.
+func (ls *LedgerState) rejectInboundEnvelopeFailure(
+	point ocommon.Point,
+	cause error,
+) error {
+	if checker := ls.loadForgedBlockChecker(); checker != nil {
+		if forgedHash, forged := checker.WasForgedByUs(
+			point.Slot,
+		); forged && bytes.Equal(forgedHash, point.Hash) {
+			return cause
+		}
+	}
+	return &headerValidationError{
+		BlockPoint: point,
+		Cause:      cause,
+		Source:     ls.deferredHeaderSource(point),
+	}
+}
+
 // tryRecoverFromHeaderValidationError rewinds past a block whose header
 // checks failed after persistence, so the pipeline stops re-reading it.
 //

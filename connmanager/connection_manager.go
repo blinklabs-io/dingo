@@ -288,15 +288,6 @@ func (c *ConnectionManager) releaseInboundSlot() {
 	c.inboundReserved--
 }
 
-// consumeInboundSlot converts a reserved inbound slot into an actual
-// connection entry via AddConnection. The reservation is consumed
-// (decremented) since the connection itself now occupies the slot.
-func (c *ConnectionManager) consumeInboundSlot() {
-	c.connectionsMutex.Lock()
-	defer c.connectionsMutex.Unlock()
-	c.inboundReserved--
-}
-
 func (c *ConnectionManager) initMetrics() {
 	promautoFactory := promauto.With(c.config.PromRegistry)
 	c.metrics = &connectionManagerMetrics{}
@@ -746,13 +737,21 @@ func (c *ConnectionManager) AddConnection(
 	return c.addConnectionImpl(conn, isInbound, false, peerAddr, "", nil)
 }
 
-func (c *ConnectionManager) addConnectionWithIPKey(
+func (c *ConnectionManager) addReservedInboundConnection(
 	conn *ouroboros.Connection,
-	isInbound bool,
 	peerAddr string,
 	ipKey string,
 ) bool {
-	return c.addConnectionImpl(conn, isInbound, false, peerAddr, ipKey, nil)
+	return c.addConnectionImplWithAdmission(
+		conn,
+		true,
+		false,
+		peerAddr,
+		ipKey,
+		nil,
+		false,
+		true,
+	)
 }
 
 func (c *ConnectionManager) addConnectionImpl(
@@ -783,11 +782,36 @@ func (c *ConnectionManager) addConnectionImplWithTrust(
 	onClose func(),
 	trustedLocal bool,
 ) bool {
+	return c.addConnectionImplWithAdmission(
+		conn,
+		isInbound,
+		isNtC,
+		peerAddr,
+		ipKey,
+		onClose,
+		trustedLocal,
+		false,
+	)
+}
+
+func (c *ConnectionManager) addConnectionImplWithAdmission(
+	conn *ouroboros.Connection,
+	isInbound bool,
+	isNtC bool,
+	peerAddr string,
+	ipKey string,
+	onClose func(),
+	trustedLocal bool,
+	inboundSlotReserved bool,
+) bool {
 	// Check if shutting down before adding to WaitGroup to prevent panic
 	// during Stop()'s Wait() call. Must hold the same lock used to set closing.
 	c.listenersMutex.Lock()
 	if c.closing {
 		c.listenersMutex.Unlock()
+		if inboundSlotReserved {
+			c.releaseInboundSlot()
+		}
 		// Shutting down - release IP slot and close connection
 		c.releaseIPSlot(ipKey)
 		if conn != nil {
@@ -820,6 +844,9 @@ func (c *ConnectionManager) addConnectionImplWithTrust(
 			// Existing outbound + new inbound: keep outbound.
 			// Outbound connections carry the chainsync client (chain
 			// truth source). Matches cardano-node dedup behavior.
+			if inboundSlotReserved {
+				c.inboundReserved--
+			}
 			c.connectionsMutex.Unlock()
 			c.config.Logger.Warn(
 				"closing inbound connection that collides with existing outbound",
@@ -935,6 +962,9 @@ func (c *ConnectionManager) addConnectionImplWithTrust(
 			c.notifyEvictedConnectionClosedOwner(existingConn, existingIsNtC)
 			c.connectionsMutex.Lock()
 		}
+	}
+	if inboundSlotReserved {
+		c.inboundReserved--
 	}
 
 	info := &connectionInfo{

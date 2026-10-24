@@ -15,16 +15,13 @@
 package mesh
 
 import (
-	"bytes"
 	"cmp"
 	"context"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"net/http"
 	"slices"
 	"strconv"
-	"strings"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/gouroboros/ledger"
@@ -113,18 +110,6 @@ func (s *Server) handleAccountCoins(
 		writeError(w, meshErr)
 		return
 	}
-
-	after, paged, meshErr := parseCoinsPaging(req.Metadata)
-	if meshErr != nil {
-		writeError(w, meshErr)
-		return
-	}
-	pattern, err := models.ExactUtxoAddressPattern(addr)
-	if err != nil {
-		writeError(w, wrapErr(ErrInvalidRequest, err))
-		return
-	}
-
 	release, ok := s.acquireBulk()
 	if !ok {
 		writeError(w, ErrUnavailable)
@@ -132,23 +117,15 @@ func (s *Server) handleAccountCoins(
 	}
 	defer release()
 
-	page, err := s.config.LedgerState.UtxosByAddressBoundedPage(
+	// Mesh defines this as one complete response. A partial UTxO set means a
+	// client treats present coins as the account's whole spendable state.
+	utxos, err := s.config.LedgerState.UtxosByAddressComplete(
 		r.Context(),
-		&models.UtxoWithOrderingQuery{
-			AddressPatterns: []models.UtxoAddressPattern{pattern},
-			After:           after,
-			Limit:           s.config.accountCoinsPageSize,
-		},
-		s.config.accountCoinsMaxCandidates,
-		s.config.accountCoinsMaxBytes,
+		[]ledger.Address{addr},
 	)
 	if err != nil {
 		if r.Context().Err() != nil {
-			// The client is gone; nothing is left to answer.
-			s.logger.Debug(
-				"account coins read abandoned",
-				"error", err,
-			)
+			s.logger.Debug("account coins read canceled", "error", err)
 			return
 		}
 		s.logger.Error(
@@ -161,50 +138,13 @@ func (s *Server) handleAccountCoins(
 		return
 	}
 
-	if page.Next != nil && !paged {
-		// Standard Mesh clients treat an omitted coin as absent, so an
-		// address one bounded read cannot exhaust is refused rather than
-		// answered with part of its coins.
-		writeError(w, wrapErr(ErrInvalidRequest, errAccountCoinsTooLarge))
-		return
-	}
-
-	utxos := make([]models.Utxo, 0, len(page.Utxos))
-	for i := range page.Utxos {
-		utxo := page.Utxos[i].Utxo
-		// The bounded page skips the asset tables; the output CBOR it
-		// retains carries the same holdings.
-		if len(utxo.Assets) == 0 && len(utxo.Cbor) > 0 {
-			assets, err := outputAssets(&utxo)
-			if err != nil {
-				s.logger.Error(
-					"failed to decode UTxO assets",
-					"address",
-					req.AccountIdentifier.Address,
-					"error", err,
-				)
-				writeError(w, ErrInternal)
-				return
-			}
-			utxo.Assets = assets
-		}
-		utxos = append(utxos, utxo)
-	}
-
-	resp := &AccountCoinsResponse{
+	writeJSON(w, http.StatusOK, &AccountCoinsResponse{
 		BlockIdentifier: s.tipBlockID(s.config.Chain.Tip()),
 		Coins:           utxosToCoins(utxos),
-	}
-	if page.Next != nil {
-		resp.Metadata = map[string]any{
-			"next_cursor": formatCoinsCursor(page.Next),
-		}
-	}
-	writeJSON(w, http.StatusOK, resp)
+	})
 }
 
-// acquireBulk reserves one of the concurrent bulk-read slots without
-// waiting. The returned function frees it.
+// acquireBulk reserves a complete-result read slot without waiting.
 func (s *Server) acquireBulk() (func(), bool) {
 	select {
 	case s.bulkSlots <- struct{}{}:
@@ -212,106 +152,6 @@ func (s *Server) acquireBulk() (func(), bool) {
 	default:
 		return nil, false
 	}
-}
-
-// formatCoinsCursor encodes the last UTxO a page covered as an opaque
-// slot:block_index:output_idx:tx_id token.
-func formatCoinsCursor(c *models.UtxoOrderingCursor) string {
-	return fmt.Sprintf(
-		"%d:%d:%d:%x", c.Slot, c.BlockIndex, c.OutputIdx, c.TxId,
-	)
-}
-
-// errAccountCoinsTooLarge is the limit error a complete /account/coins
-// response returns when the address does not fit one bounded read.
-var errAccountCoinsTooLarge = errors.New(
-	"account coins exceed the complete response limit; " +
-		"set metadata.paginate to true and follow metadata.next_cursor",
-)
-
-// parseCoinsPaging reads the optional paging request metadata. A request
-// opts into paging with "paginate": true or by sending "cursor", the
-// "next_cursor" of a previous paged response.
-func parseCoinsPaging(
-	metadata map[string]any,
-) (*models.UtxoOrderingCursor, bool, *Error) {
-	paged := false
-	if raw, ok := metadata["paginate"]; ok && raw != nil {
-		v, ok := raw.(bool)
-		if !ok {
-			return nil, false, wrapErr(
-				ErrInvalidRequest, errors.New("paginate must be a boolean"),
-			)
-		}
-		paged = v
-	}
-	raw, ok := metadata["cursor"]
-	if !ok || raw == nil {
-		return nil, paged, nil
-	}
-	after, meshErr := parseCoinsCursor(raw)
-	if meshErr != nil {
-		return nil, false, meshErr
-	}
-	return after, true, nil
-}
-
-// parseCoinsCursor decodes a "cursor" token.
-func parseCoinsCursor(raw any) (*models.UtxoOrderingCursor, *Error) {
-	token, ok := raw.(string)
-	if !ok {
-		return nil, wrapErr(
-			ErrInvalidRequest, errors.New("cursor must be a string"),
-		)
-	}
-	parts := strings.Split(token, ":")
-	if len(parts) != 4 {
-		return nil, wrapErr(
-			ErrInvalidRequest, errors.New("malformed cursor"),
-		)
-	}
-	slot, err := strconv.ParseUint(parts[0], 10, 64)
-	if err != nil {
-		return nil, wrapErr(ErrInvalidRequest, errors.New("malformed cursor"))
-	}
-	blockIndex, err := strconv.ParseUint(parts[1], 10, 32)
-	if err != nil {
-		return nil, wrapErr(ErrInvalidRequest, errors.New("malformed cursor"))
-	}
-	outputIdx, err := strconv.ParseUint(parts[2], 10, 32)
-	if err != nil {
-		return nil, wrapErr(ErrInvalidRequest, errors.New("malformed cursor"))
-	}
-	txID, err := hex.DecodeString(parts[3])
-	if err != nil || len(txID) != 32 {
-		return nil, wrapErr(ErrInvalidRequest, errors.New("malformed cursor"))
-	}
-	return &models.UtxoOrderingCursor{
-		Slot:       slot,
-		BlockIndex: uint32(blockIndex), // #nosec G115 -- ParseUint bitSize 32
-		OutputIdx:  uint32(outputIdx),  // #nosec G115 -- ParseUint bitSize 32
-		TxId:       txID,
-	}, nil
-}
-
-// outputAssets decodes a UTxO's native assets from its output CBOR, ordered
-// by policy then name so responses are deterministic.
-func outputAssets(utxo *models.Utxo) ([]models.Asset, error) {
-	output, err := utxo.Decode()
-	if err != nil {
-		return nil, fmt.Errorf("decode output: %w", err)
-	}
-	assets, err := models.ConvertMultiAssetToModels(output.Assets())
-	if err != nil {
-		return nil, err
-	}
-	slices.SortFunc(assets, func(a, b models.Asset) int {
-		if c := bytes.Compare(a.PolicyId, b.PolicyId); c != 0 {
-			return c
-		}
-		return bytes.Compare(a.Name, b.Name)
-	})
-	return assets, nil
 }
 
 // parseAccountAddress validates the account identifier

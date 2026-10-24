@@ -94,6 +94,7 @@ func TestRestoreInterruptedByProcessKillLeavesTargetUntouched(t *testing.T) {
 	_, err := lifecycle.Snapshot(
 		context.Background(), db, snapshotDir,
 		lifecycle.TriggerManual, "test", "badger", "sqlite",
+		lifecycle.WithManifestKey(testTrustKey),
 	)
 	require.NoError(t, err)
 
@@ -163,6 +164,9 @@ func runRestoreInterruptHelper() {
 		snapshotDir,
 		targetDir,
 		lifecycle.RestoreStorageConfig{Blob: testutil.BadgerBlobConfig()},
+		// An unkeyed restore refuses a non-regular payload file before any
+		// copy starts; the trust key keeps this child on the copy path.
+		lifecycle.WithManifestKey(testTrustKey),
 	)
 	// Only reached if the parent's kill lands after Restore already
 	// finished (not expected: the FIFO blocks it first); exit quietly
