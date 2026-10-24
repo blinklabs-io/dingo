@@ -380,7 +380,7 @@ func rewardBatchCredits(n int) []models.AccountRewardCredit {
 		credits = append(credits, models.AccountRewardCredit{
 			CredentialTag: 0,
 			StakingKey:    rewardBatchKey(0x31, i),
-			Amount:        uint64(7_000_000_007 + i),
+			Amount:        uint64(7_000_000_007) + uint64(i),
 			Slot:          5_000,
 			SourceHash:    rewardBatchKey(0x51, i),
 		})

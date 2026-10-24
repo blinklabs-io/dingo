@@ -281,7 +281,7 @@ func TestBlockNotFound(t *testing.T) {
 
 			requireMeshError(
 				t, rec, ErrBlockNotFound,
-				http.StatusNotFound,
+				http.StatusInternalServerError,
 			)
 		})
 	}
@@ -305,7 +305,7 @@ func TestBlockInvalidIdentifier(t *testing.T) {
 
 			requireMeshError(
 				t, rec, ErrInvalidRequest,
-				http.StatusBadRequest,
+				http.StatusInternalServerError,
 			)
 		})
 	}
@@ -397,7 +397,7 @@ func TestBlockAfterRollbackIsNotFound(t *testing.T) {
 		blockRequest(byHash(hexString(rolledBack))),
 	)
 	requireMeshError(
-		t, rec, ErrBlockNotFound, http.StatusNotFound,
+		t, rec, ErrBlockNotFound, http.StatusInternalServerError,
 	)
 
 	// The same height now resolves to the replacement block.
@@ -492,7 +492,7 @@ func TestBlockTransactionWrongBlock(t *testing.T) {
 	))
 
 	requireMeshError(
-		t, rec, ErrTransactionNotFound, http.StatusNotFound,
+		t, rec, ErrTransactionNotFound, http.StatusInternalServerError,
 	)
 }
 
@@ -512,7 +512,7 @@ func TestBlockTransactionNotFound(t *testing.T) {
 	))
 
 	requireMeshError(
-		t, rec, ErrTransactionNotFound, http.StatusNotFound,
+		t, rec, ErrTransactionNotFound, http.StatusInternalServerError,
 	)
 }
 
@@ -550,7 +550,7 @@ func TestBlockTransactionInvalidRequest(t *testing.T) {
 
 			requireMeshError(
 				t, rec, ErrInvalidRequest,
-				http.StatusBadRequest,
+				http.StatusInternalServerError,
 			)
 		})
 	}

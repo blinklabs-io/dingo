@@ -112,7 +112,7 @@ configure_leios_dijkstra() {
     done
     jq '.DijkstraGenesisFile = "dijkstra-genesis.json"
         | .DijkstraGenesisHash = ""
-        | .TestDijkstraHardForkAtEpoch = 0
+        | .TestDijkstraHardForkAtEpoch = 1
         | .ExperimentalHardForksEnabled = true
         | .ExperimentalProtocolsEnabled = true' \
         "${configs_dir}/config.json" \

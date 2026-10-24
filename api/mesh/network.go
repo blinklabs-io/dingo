@@ -63,6 +63,8 @@ func (s *Server) handleNetworkOptions(
 			OperationTypes:          OperationTypes(),
 			Errors:                  AllErrors(),
 			HistoricalBalanceLookup: true,
+			CallMethods:             []string{},
+			BalanceExemptions:       []*BalanceExemption{},
 			MempoolCoins:            false,
 		},
 	}

@@ -982,9 +982,8 @@ func (o *Ouroboros) initBlockfetchMetrics() {
 }
 
 // isTrustedNtCListener reports whether l is verified reachable only from
-// this machine, the actual property the relaxed mux/query timeouts and
-// reassembly buffer in ConfigureListeners/localstatequeryServerConnOpts
-// depend on for safety -- "NtC" alone does
+// this machine, the actual property ConfigureListeners' disabled mux
+// segment-read timeout depends on for safety -- "NtC" alone does
 // not imply this: internal/node/node.go builds a UseNtC listener for both
 // cfg.SocketPath (a Unix socket, always local-only by construction) and
 // cfg.PrivateBindAddr:cfg.PrivatePort (an operator-configurable TCP
@@ -1033,13 +1032,13 @@ func (o *Ouroboros) ConfigureListeners(
 	tmpListeners := make([]connmanager.ListenerConfig, len(listeners))
 	for idx, l := range listeners {
 		if l.UseNtC {
-			// Node-to-client. trusted gates the relaxed mux/query timeouts
-			// and reassembly buffer to a listener verified local-only (a
-			// Unix socket, or TCP actually bound to loopback) -- see
-			// isTrustedNtCListener's doc comment. Those exist to let a
-			// large, legitimate query (a whole-UTxO-set walk) run past
-			// gouroboros' anti-DoS defaults, which is only safe to grant
-			// unconditionally to a listener no non-local caller can reach:
+			// Node-to-client. trusted gates the disabled mux segment-read
+			// timeout to a listener verified local-only (a Unix socket, or
+			// TCP actually bound to loopback) -- see isTrustedNtCListener's
+			// doc comment. It lets a large, legitimate query (a
+			// whole-UTxO-set walk) run past gouroboros' anti-DoS default,
+			// which is only safe to grant to a listener no non-local caller
+			// can reach:
 			// a PrivateBindAddr an
 			// operator has pointed at a non-loopback address gets
 			// gouroboros' own defaults instead, same as any other NtC
@@ -1054,8 +1053,8 @@ func (o *Ouroboros) ConfigureListeners(
 			// lookups disagree -- a listener classified trusted from one
 			// answer could then bind to a different, non-loopback address
 			// DNS gives on the second lookup, handing that non-loopback
-			// listener the relaxed timeouts and 2GiB reassembly buffer
-			// meant only for a verified-local one. A resolution failure here is
+			// listener the disabled segment-read timeout meant only for a
+			// verified-local one. A resolution failure here is
 			// left for startListener's own bind to report --
 			// isTrustedNtCListener treats it as untrusted either way.
 			if l.Listener == nil && l.ListenNetwork == "tcp" {
@@ -1067,7 +1066,7 @@ func (o *Ouroboros) ConfigureListeners(
 			l.TrustedLocal = trusted
 			ntcOpts := []ouroboros.ConnectionOptionFunc{
 				ouroboros.WithNetworkMagic(o.config.NetworkMagic),
-				o.chainsyncConnectionConfigOption(ctx, false),
+				o.chainsyncConnectionConfigOption(ctx, false, trusted),
 				ouroboros.WithLocalStateQueryConfig(
 					olocalstatequery.NewConfig(
 						o.localstatequeryServerConnOpts(trusted)...,
@@ -1075,12 +1074,12 @@ func (o *Ouroboros) ConfigureListeners(
 				),
 				ouroboros.WithLocalTxMonitorConfig(
 					olocaltxmonitor.NewConfig(
-						o.localtxmonitorServerConnOpts()...,
+						o.localtxmonitorServerConnOpts(trusted)...,
 					),
 				),
 				ouroboros.WithLocalTxSubmissionConfig(
 					olocaltxsubmission.NewConfig(
-						o.localtxsubmissionServerConnOpts()...,
+						o.localtxsubmissionServerConnOpts(trusted)...,
 					),
 				),
 			}

@@ -320,8 +320,8 @@ func TestRefreshRewardLiveStakeAggregateReusesCachedStatementsAcrossTransactions
 	require.Equal(t, uint64(9_000_000), utxoStake)
 }
 
-// readUtxoStake reads a credential's stored reward_live_stake.utxo_stake
-// column, the running total refreshRewardLiveStakeAggregateDelta maintains.
+// readUtxoStake returns a credential's running reward_live_stake UTxO total;
+// a missing row represents a zero total.
 func readUtxoStake(
 	tb testing.TB,
 	store *Store,
@@ -330,8 +330,10 @@ func readUtxoStake(
 	tb.Helper()
 	var raw string
 	err := store.writeDB.QueryRow(`
-SELECT utxo_stake FROM reward_live_stake
-WHERE credential_tag = ? AND staking_key = ?`,
+SELECT COALESCE((
+    SELECT utxo_stake FROM reward_live_stake
+    WHERE credential_tag = ? AND staking_key = ?
+), '0')`,
 		int64(ref.Tag), ref.Key,
 	).Scan(&raw)
 	require.NoError(tb, err)

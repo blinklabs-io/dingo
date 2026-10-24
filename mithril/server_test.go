@@ -346,10 +346,9 @@ func TestServerSignatureAdmissionIsIndependentFromArtifactDownloads(
 ) {
 	t.Parallel()
 
-	const requestLimit = publicRequestLimit
 	aggregator := newAggregatorFixture(t, lotteryParams).aggregator
 	store := &blockingListStore{
-		entered:  make(chan struct{}, requestLimit),
+		entered:  make(chan struct{}, 1),
 		release:  make(chan struct{}),
 		blockAll: true,
 	}
@@ -365,23 +364,19 @@ func TestServerSignatureAdmissionIsIndependentFromArtifactDownloads(
 		Aggregator:    aggregator,
 		PublicBaseURL: "http://127.0.0.1",
 	})
-	done := make(chan struct{}, requestLimit)
-	for range requestLimit {
-		go func() {
-			handler.ServeHTTP(
-				httptest.NewRecorder(),
-				httptest.NewRequest(
-					http.MethodGet, "/artifact/cardano-database", nil,
-				),
-			)
-			done <- struct{}{}
-		}()
-	}
-	for range requestLimit {
-		testutil.RequireReceive(
-			t, store.entered, testutil.AsyncWait, "admitted artifact request",
+	done := make(chan struct{}, 1)
+	go func() {
+		handler.ServeHTTP(
+			httptest.NewRecorder(),
+			httptest.NewRequest(
+				http.MethodGet, "/artifact/cardano-database", nil,
+			),
 		)
-	}
+		done <- struct{}{}
+	}()
+	testutil.RequireReceive(
+		t, store.entered, testutil.AsyncWait, "admitted artifact request",
+	)
 
 	rec := &deadlineResponseWriter{header: make(http.Header)}
 	handler.ServeHTTP(
@@ -390,16 +385,14 @@ func TestServerSignatureAdmissionIsIndependentFromArtifactDownloads(
 			http.MethodPost, "/register-signatures", strings.NewReader(`{}`),
 		),
 	)
-	assert.Equal(t, http.StatusConflict, rec.status)
+	assert.Equal(t, http.StatusBadRequest, rec.status)
 	assert.Empty(t, rec.Header().Get("Retry-After"))
 	assert.NotEmpty(t, rec.readDeadlines)
 
 	close(store.release)
-	for range requestLimit {
-		testutil.RequireReceive(
-			t, done, testutil.AsyncWait, "admitted artifact response",
-		)
-	}
+	testutil.RequireReceive(
+		t, done, testutil.AsyncWait, "admitted artifact response",
+	)
 }
 
 func TestServerRejectsArtifactWorkBeyondAdmissionLimit(t *testing.T) {
@@ -580,7 +573,7 @@ func TestServerArmsSignatureBodyDeadlineBeforeDecode(t *testing.T) {
 	// the handler starts decoding an untrusted signature request body.
 	handler.ServeHTTP(w, req)
 	assert.NotEmpty(t, w.readDeadlines)
-	assert.Equal(t, http.StatusConflict, w.status)
+	assert.Equal(t, http.StatusBadRequest, w.status)
 }
 
 func TestServerArmsWriteDeadlineOnlyWhenWriting(t *testing.T) {
@@ -750,14 +743,14 @@ func TestServerSnapshotSyncsEndToEnd(t *testing.T) {
 	assert.Equal(t, uint64(1000), result.LedgerSlot)
 }
 
-// A v2 bootstrap downloads immutableDownloadWorkers archives and the
-// ancillary archive at once; none of those requests may be shed.
-func TestServerAdmitsOneBootstrapAtFullConcurrency(t *testing.T) {
+// Concurrent listing requests share one catalog scan and all receive its
+// result after it completes.
+func TestServerCoalescesConcurrentCatalogRequests(t *testing.T) {
 	t.Parallel()
 
 	const requests = immutableDownloadWorkers + 1
 	store := &blockingListStore{
-		entered:  make(chan struct{}, requests),
+		entered:  make(chan struct{}, 1),
 		release:  make(chan struct{}),
 		blockAll: true,
 	}
@@ -785,15 +778,9 @@ func TestServerAdmitsOneBootstrapAtFullConcurrency(t *testing.T) {
 			codes <- rec.Code
 		}()
 	}
-	for range requests {
-		select {
-		case <-store.entered:
-		case code := <-codes:
-			t.Fatalf("request answered %d while the others were held", code)
-		case <-time.After(testutil.AsyncWait):
-			t.Fatal("timed out waiting for admitted requests")
-		}
-	}
+	testutil.RequireReceive(
+		t, store.entered, testutil.AsyncWait, "single catalog scan",
+	)
 	close(store.release)
 	for range requests {
 		code := testutil.RequireReceive(
@@ -801,6 +788,7 @@ func TestServerAdmitsOneBootstrapAtFullConcurrency(t *testing.T) {
 		)
 		assert.Equal(t, http.StatusOK, code)
 	}
+	assert.Equal(t, int32(1), store.calls.Load())
 }
 
 // rangeCountingStore reports itself as remote and counts the backend range

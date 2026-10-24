@@ -34,6 +34,19 @@ type fakeMempool struct {
 	mu           sync.Mutex
 	txs          []mempool.MempoolTransaction
 	lastMaxItems int
+	// byAddress is the address index the pool would answer from.
+	byAddress map[string][]string
+	// boundedReads and addressReads count full-pool snapshots and index
+	// lookups.
+	boundedReads int
+	addressReads int
+}
+
+func (f *fakeMempool) TransactionHashesByAddress(address string) []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.addressReads++
+	return append([]string{}, f.byAddress[address]...)
 }
 
 func (f *fakeMempool) GetTransaction(
@@ -53,6 +66,7 @@ func (f *fakeMempool) TransactionsBounded(
 ) ([]mempool.MempoolTransaction, int) {
 	f.mu.Lock()
 	f.lastMaxItems = maxItems
+	f.boundedReads++
 	f.mu.Unlock()
 	if maxItems > 0 && maxItems < len(f.txs) {
 		return f.txs[:maxItems], len(f.txs)
@@ -217,60 +231,85 @@ func TestNodeAdapterMempoolTransaction(t *testing.T) {
 
 func TestNodeAdapterMempoolAddressTransactions(t *testing.T) {
 	t.Parallel()
-	adapter, raw, db := newDBBackedAdapter(t)
-	txs, addresses, inputIDs := mempoolFixture(t, 3)
-	adapter.mempool = &fakeMempool{txs: txs}
+	adapter, _, _ := newDBBackedAdapter(t)
+	txs, addresses, _ := mempoolFixture(t, 3)
+	hot, _, _ := testKeyAddress(t, 0xf2, 0)
+	pool := &fakeMempool{
+		txs: txs,
+		byAddress: map[string][]string{
+			addresses[1]: {txs[1].Hash},
+			hot.String(): {txs[0].Hash, txs[2].Hash},
+		},
+	}
+	adapter.mempool = pool
+	adapter.mempoolAddresses = pool
 	ctx := context.Background()
 	asc := PaginationParams{Count: 10, Page: 1, Order: PaginationOrderAsc}
 
-	// Paying to an address lists the transactions that pay it.
 	got, total, err := adapter.MempoolAddressTransactions(
-		ctx,
-		addresses[1],
-		asc,
+		ctx, addresses[1], asc,
 	)
 	require.NoError(t, err)
 	require.Equal(t, 1, total)
 	require.Equal(t, []string{txs[1].Hash}, got)
 
-	// Spending from an address lists every transaction that spends one of its
-	// outputs: the first and third spend outputs of the spender, the second
-	// spends nothing the index knows.
-	spender, _, _ := testKeyAddress(t, 0xf2, 0)
-	seedMempoolInput(t, raw, db, inputIDs[0], spender)
-	seedMempoolInput(t, raw, db, inputIDs[2], spender)
 	got, total, err = adapter.MempoolAddressTransactions(
-		ctx,
-		spender.String(),
-		asc,
+		ctx, hot.String(), asc,
 	)
 	require.NoError(t, err)
 	require.Equal(t, 2, total)
 	require.Equal(t, []string{txs[0].Hash, txs[2].Hash}, got)
 
 	got, total, err = adapter.MempoolAddressTransactions(
-		ctx, spender.String(),
+		ctx, hot.String(),
 		PaginationParams{Count: 1, Page: 1, Order: PaginationOrderDesc},
+	)
+	require.NoError(t, err)
+	require.Equal(t, 2, total, "the total counts every match, not the page")
+	require.Equal(t, []string{txs[2].Hash}, got)
+
+	got, total, err = adapter.MempoolAddressTransactions(
+		ctx, hot.String(),
+		PaginationParams{Count: 1, Page: 2, Order: PaginationOrderAsc},
 	)
 	require.NoError(t, err)
 	require.Equal(t, 2, total)
 	require.Equal(t, []string{txs[2].Hash}, got)
 
+	_, _, err = adapter.MempoolAddressTransactions(ctx, "nonsense", asc)
+	require.ErrorIs(t, err, ErrInvalidAddress)
 	other, _, _ := testKeyAddress(t, 0xf3, 0)
-	got, total, err = adapter.MempoolAddressTransactions(
-		ctx,
+	adapter.mempoolAddresses = nil
+	_, _, err = adapter.MempoolAddressTransactions(ctx, other.String(), asc)
+	require.ErrorIs(t, err, ErrMempoolUnavailable)
+}
+
+// TestNodeAdapterMempoolAddressTransactionsReadsOnlyTheIndex proves an
+// address nothing matches costs one index lookup: no snapshot of the pool,
+// so no decoding of its transactions, and no confirmed-output read.
+func TestNodeAdapterMempoolAddressTransactionsReadsOnlyTheIndex(
+	t *testing.T,
+) {
+	t.Parallel()
+	adapter, _, _ := newDBBackedAdapter(t)
+	txs, _, _ := mempoolFixture(t, 3)
+	pool := &fakeMempool{txs: txs}
+	adapter.mempool = pool
+	adapter.mempoolAddresses = pool
+	other, _, _ := testKeyAddress(t, 0xf3, 0)
+
+	got, total, err := adapter.MempoolAddressTransactions(
+		context.Background(),
 		other.String(),
-		asc,
+		PaginationParams{Count: 10, Page: 1, Order: PaginationOrderAsc},
 	)
 	require.NoError(t, err)
 	require.Zero(t, total)
 	require.Empty(t, got)
-
-	_, _, err = adapter.MempoolAddressTransactions(ctx, "nonsense", asc)
-	require.ErrorIs(t, err, ErrInvalidAddress)
-	adapter.mempool = nil
-	_, _, err = adapter.MempoolAddressTransactions(ctx, other.String(), asc)
-	require.ErrorIs(t, err, ErrMempoolUnavailable)
+	pool.mu.Lock()
+	defer pool.mu.Unlock()
+	require.Equal(t, 1, pool.addressReads)
+	require.Zero(t, pool.boundedReads, "the pool must not be snapshotted")
 }
 
 // seedMempoolInput stores the confirmed output a mempool transaction spends.

@@ -797,6 +797,11 @@ func resolveManifest(
 		return Manifest{}, err
 	}
 	if !recognizedCloudScheme(registry, snapshotDir) {
+		if len(manifestKey(opts)) == 0 {
+			if err := requirePrivateLocalSnapshot(snapshotDir); err != nil {
+				return Manifest{}, err
+			}
+		}
 		return ReadManifest(snapshotDir, opts...)
 	}
 	if err := requireManifestKey(opts); err != nil {

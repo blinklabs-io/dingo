@@ -217,6 +217,15 @@ func TestPoolAndCommitteeApplyStatementsAreNamed(t *testing.T) {
 			_, _, err := store.LatestPoolOpCertSequenceAtOrBefore(pool, 100, nil)
 			return err
 		}},
+		{"LatestPoolOpCertSequenceInRange", func() error {
+			_, _, err := store.LatestPoolOpCertSequenceInRange(
+				pool,
+				50,
+				100,
+				nil,
+			)
+			return err
+		}},
 		{"PoolOpCertSequencesExistAtSlot", func() error {
 			_, err := store.PoolOpCertSequencesExistAtSlot(100, nil)
 			return err

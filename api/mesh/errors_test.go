@@ -62,35 +62,19 @@ func TestErrorCodesAreStable(t *testing.T) {
 	}
 }
 
-// TestWriteErrorStatusMapping pins the HTTP status each Mesh error maps
-// to. Rosetta clients and proxies key retry behavior off the status as
-// well as the code.
+// TestWriteErrorStatusMapping pins every Mesh error to HTTP 500. The Mesh
+// specification declares only 200 and 500 for each operation and carries
+// the error class and retry hint in the Error body, not in the status.
 func TestWriteErrorStatusMapping(t *testing.T) {
 	t.Parallel()
 
-	want := map[*Error]int{
-		ErrNetworkNotSupported: http.StatusNotFound,
-		ErrBlockNotFound:       http.StatusNotFound,
-		ErrTransactionNotFound: http.StatusNotFound,
-		ErrAccountNotFound:     http.StatusNotFound,
-		ErrInvalidRequest:      http.StatusBadRequest,
-		ErrInvalidPublicKey:    http.StatusBadRequest,
-		ErrInvalidTransaction:  http.StatusBadRequest,
-		ErrSubmitFailed:        http.StatusBadRequest,
-		ErrNotImplemented:      http.StatusNotImplemented,
-		ErrUnavailable:         http.StatusServiceUnavailable,
-		ErrInternal:            http.StatusInternalServerError,
-	}
-	// Every defined error must have a pinned status.
-	require.Len(t, want, len(AllErrors()))
-
-	for meshErr, status := range want {
+	for _, meshErr := range AllErrors() {
 		rec := httptest.NewRecorder()
 
 		writeError(rec, meshErr)
 
 		require.Equal(
-			t, status, rec.Code,
+			t, http.StatusInternalServerError, rec.Code,
 			"error code %d", meshErr.Code,
 		)
 		require.Equal(
@@ -103,6 +87,7 @@ func TestWriteErrorStatusMapping(t *testing.T) {
 			t, json.Unmarshal(rec.Body.Bytes(), &got),
 		)
 		require.Equal(t, meshErr.Code, got.Code)
+		require.Equal(t, meshErr.Retriable, got.Retriable)
 	}
 }
 

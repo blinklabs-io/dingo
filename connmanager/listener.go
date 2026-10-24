@@ -475,6 +475,35 @@ func (c *ConnectionManager) setupAcceptedConnection(
 		}
 		return
 	}
+	if l.UseNtC && l.TrustedLocal {
+		timeout := c.config.trustedNtCPostHandshakeTimeout
+		if timeout <= 0 {
+			timeout = trustedNtCIdleTimeout
+		}
+		if err := c.registerTrustedNtCActivity(
+			oConn.Id(),
+			oConn,
+			deadlineConn,
+			timeout,
+			c.config.Logger,
+		); err != nil {
+			c.config.Logger.Warn(
+				"listener: failed to set trusted NtC idle deadline",
+				"error",
+				err,
+			)
+			c.unregisterTrustedNtCActivity(oConn.Id(), oConn)
+			closeConnAndLog(c.config.Logger, oConn, "listener: close failed")
+			c.forgetClosedTrustedNtCActivity(oConn.Id(), oConn)
+			if ipKey != "" {
+				c.releaseIPSlot(ipKey)
+			}
+			if inboundSlotReserved {
+				c.releaseInboundSlot()
+			}
+			return
+		}
+	}
 
 	peerAddr := "unknown"
 	if conn.RemoteAddr() != nil {
@@ -495,13 +524,16 @@ func (c *ConnectionManager) setupAcceptedConnection(
 			releaseNtCSlot,
 			l.TrustedLocal,
 		) {
+			if l.TrustedLocal {
+				c.unregisterTrustedNtCActivity(oConn.Id(), oConn)
+				c.forgetClosedTrustedNtCActivity(oConn.Id(), oConn)
+			}
 			return
 		}
 		releaseNtCSlot = nil
 	} else {
 		c.config.Logger.Info("listener: inbound connection", "remote_addr", peerAddr)
-		c.consumeInboundSlot()
-		if !c.addConnectionWithIPKey(oConn, true, peerAddr, ipKey) {
+		if !c.addReservedInboundConnection(oConn, peerAddr, ipKey) {
 			return
 		}
 	}
