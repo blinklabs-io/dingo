@@ -7015,6 +7015,12 @@ and still has the same file identity when rechecked. Regular files, symlinks,
 directories, live sockets, ambiguous probe failures, and removal errors all
 fail startup without removing the path.
 
+Accepted TCP connections and local Unix node-to-client connections bound each
+socket write to two minutes. Unix sockets receive that wrapper after their
+per-connection remote address is established. The ten-second handshake
+deadline is cleared after negotiation; subsequent writes refresh their own
+deadline, while the muxer continues to own read deadlines.
+
 ### Multi-Client Chainsync
 
 The `chainsync.State` tracks multiple concurrent chainsync clients:
