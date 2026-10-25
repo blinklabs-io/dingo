@@ -694,7 +694,7 @@ func TestDownloadAncillaryV2ReportsArchiveWhenManifestUnverified(t *testing.T) {
 	defer srv.Close()
 
 	downloadDir := t.TempDir()
-	tree, _, archPath, err := downloadAncillaryV2(
+	tree, _, archiveToken, err := downloadAncillaryV2(
 		t.Context(),
 		BootstrapConfig{
 			AllowInsecureHTTP: true,
@@ -716,9 +716,10 @@ func TestDownloadAncillaryV2ReportsArchiveWhenManifestUnverified(t *testing.T) {
 	require.Error(t, err)
 	assert.ErrorContains(t, err, "ancillary manifest")
 	assert.Nil(t, tree, "an unverified tree must not be returned")
-	require.NotEmpty(t, archPath,
+	require.NotNil(t, archiveToken,
 		"the downloaded archive must still be reported so it gets cleaned up")
-	_, statErr := os.Stat(archPath)
+	t.Cleanup(func() { _ = archiveToken.cleanup() })
+	_, statErr := os.Stat(archiveToken.path)
 	assert.NoError(t, statErr,
 		"the reported path must be the archive that is actually there")
 }
@@ -760,11 +761,11 @@ func TestDownloadAncillaryRemovesAnUnusableExtraction(t *testing.T) {
 	const digest = "abc123"
 	for name, download := range map[string]func(
 		t *testing.T, downloadDir string,
-	) (*vettedDir, string, error){
+	) (*vettedDir, *bootstrapFile, error){
 		"v2": func(t *testing.T, downloadDir string) (
-			*vettedDir, string, error,
+			*vettedDir, *bootstrapFile, error,
 		) {
-			tree, _, archPath, err := downloadAncillaryV2(
+			tree, _, archiveToken, err := downloadAncillaryV2(
 				t.Context(),
 				BootstrapConfig{
 					Logger:            discard,
@@ -781,18 +782,21 @@ func TestDownloadAncillaryRemovesAnUnusableExtraction(t *testing.T) {
 				},
 				downloadDir,
 			)
-			return tree, archPath, err
+			return tree, archiveToken, err
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			downloadDir := t.TempDir()
-			tree, archPath, err := download(t, downloadDir)
+			tree, archiveToken, err := download(t, downloadDir)
 			require.Error(t, err)
+			if archiveToken != nil {
+				t.Cleanup(func() { _ = archiveToken.cleanup() })
+			}
 			require.Nil(t, tree, "an unusable tree must not be returned")
 			// The archive is the other half of the contract and still has to
 			// come back, since removing the extraction is not removing it.
-			require.NotEmpty(t, archPath)
-			_, statErr := os.Stat(archPath)
+			require.NotNil(t, archiveToken)
+			_, statErr := os.Stat(archiveToken.path)
 			assert.NoError(t, statErr,
 				"the archive stays, and stays reported")
 

@@ -565,13 +565,14 @@ func downloadCloudFiles(
 		return "", nil, err
 	}
 	defer closeCloudDestination(dest)
-	tempDir, err := os.MkdirTemp(parentDir, ".dingo-cloud-snapshot-*")
+	owned, err := createOwnedRestoreDir(parentDir, ".dingo-cloud-snapshot-")
 	if err != nil {
 		return "", nil, fmt.Errorf(
 			"create temp directory for cloud snapshot download: %w", err,
 		)
 	}
-	cleanup = func() { _ = os.RemoveAll(tempDir) }
+	tempDir := owned.dir.path
+	cleanup = func() { _ = owned.cleanup() }
 	if err := dest.DownloadFiles(ctx, tempDir, files); err != nil {
 		cleanup()
 		return "", nil, fmt.Errorf(

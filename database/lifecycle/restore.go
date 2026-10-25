@@ -161,6 +161,9 @@ const staleRestoreWorkDirAge = 7 * 24 * time.Hour
 
 var restoreWorkDirPrefixes = []string{
 	".dingo-restore-payloads-",
+	".dingo-restore-staging-",
+	".dingo-restore-target-",
+	".dingo-restore-move-",
 	".dingo-cloud-snapshot-",
 	".dingo-verify-snapshot-",
 }
@@ -278,11 +281,16 @@ func removeRestoreRecoveryMarkers(dirs []string, operationID string) error {
 // week from parentDir. Recent directories may belong to another active
 // restore and are left alone.
 func CleanStaleRestoreWorkDirs(parentDir string) error {
-	entries, err := os.ReadDir(parentDir)
+	parent, err := os.OpenRoot(parentDir)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil
 		}
+		return fmt.Errorf("open restore work directory parent %q: %w", parentDir, err)
+	}
+	defer parent.Close() //nolint:errcheck // cleanup errors are returned below
+	entries, err := fs.ReadDir(parent.FS(), ".")
+	if err != nil {
 		return fmt.Errorf("read restore work directory parent %q: %w", parentDir, err)
 	}
 	cutoff := time.Now().Add(-staleRestoreWorkDirAge)
@@ -292,17 +300,40 @@ func CleanStaleRestoreWorkDirs(parentDir string) error {
 		}
 		info, err := entry.Info()
 		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				continue
+			}
 			return fmt.Errorf("inspect restore work directory %q: %w", entry.Name(), err)
 		}
-		if info.ModTime().After(cutoff) {
-			continue
-		}
-		path := filepath.Join(parentDir, entry.Name())
-		if err := os.RemoveAll(path); err != nil {
-			return fmt.Errorf("remove stale restore work directory %q: %w", path, err)
+		if err := cleanStaleRestoreEntry(parent, parentDir, entry.Name(), info, cutoff); err != nil {
+			return err
 		}
 	}
 	return nil
+}
+
+func cleanStaleRestoreEntry(
+	parent *os.Root,
+	parentDir, name string,
+	expected os.FileInfo,
+	cutoff time.Time,
+) error {
+	path := filepath.Join(parentDir, name)
+	dir, err := openRestoreDir(parent, name, path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("open stale restore work directory %q: %w", path, err)
+	}
+	if !os.SameFile(expected, dir.info) {
+		_ = dir.closeRoot()
+		return fmt.Errorf("%w: %q changed after enumeration", errRestoreDirReplaced, path)
+	}
+	if dir.info.ModTime().After(cutoff) {
+		return dir.closeRoot()
+	}
+	return cleanupStaleRestoreDir(dir, path)
 }
 
 func hasRestoreWorkDirPrefix(name string) bool {
@@ -387,7 +418,7 @@ func Restore(
 //
 // Interruption safety: every actual restore step (metadata restore, blob
 // restore, validateRestoredDatabase) runs against a sibling staging
-// directory (targetDataDir + ".restore-staging"), never targetDataDir
+// directory with a unique .dingo-restore-staging- name, never targetDataDir
 // itself. Only once all of them succeed is the staging directory
 // atomically renamed into targetDataDir's place. A caller whose context
 // is cancelled mid-restore, or whose process is killed outright (a plain
@@ -396,9 +427,9 @@ func Restore(
 // termination does not install a signal-aware context, so an operator's
 // Ctrl+C takes this path, not graceful cancellation), is left with
 // targetDataDir exactly as it was before the call: absent, or the same
-// empty directory requireEmptyOrAbsent confirmed. The half-restored
-// staging directory (if any) is simply an orphaned sibling that a retry's
-// own os.RemoveAll(stagingDir) clears on its next attempt.
+// empty directory opened and confirmed. The half-restored
+// staging directory (if any) is an orphaned sibling that stale-work cleanup
+// removes through a retained directory handle after its grace period.
 //
 // Crash durability (power loss, not just an interrupted process that
 // leaves the OS itself running): atomic rename alone only guarantees
@@ -493,6 +524,16 @@ func restoreValidated(
 			"create parent directory for %q: %w", targetDataDir, err,
 		)
 	}
+	if err := validateRestoreWorkParent(workParent); err != nil {
+		return Manifest{}, err
+	}
+	workRoot, err := os.OpenRoot(workParent)
+	if err != nil {
+		return Manifest{}, fmt.Errorf(
+			"open parent directory for %q: %w", targetDataDir, err,
+		)
+	}
+	defer workRoot.Close() //nolint:errcheck // restore result is reported below
 	if err := CleanStaleRestoreWorkDirs(workParent); err != nil {
 		return Manifest{}, err
 	}
@@ -523,9 +564,34 @@ func restoreValidated(
 		return Manifest{}, err
 	}
 
-	if err := requireEmptyOrAbsent(targetDataDir); err != nil {
-		return Manifest{}, err
+	targetName := filepath.Base(filepath.Clean(targetDataDir))
+	var originalTarget *restoreDir
+	if _, statErr := workRoot.Lstat(targetName); statErr == nil {
+		originalTarget, err = openRestoreDir(workRoot, targetName, targetDataDir)
+		if err != nil {
+			return Manifest{}, err
+		}
+		entries, readErr := fs.ReadDir(originalTarget.root.FS(), ".")
+		if readErr != nil {
+			_ = originalTarget.closeRoot()
+			return Manifest{}, readErr
+		}
+		if len(entries) != 0 {
+			_ = originalTarget.closeRoot()
+			return Manifest{}, fmt.Errorf(
+				"target data directory %q is not empty", targetDataDir,
+			)
+		}
+	} else if !errors.Is(statErr, os.ErrNotExist) {
+		return Manifest{}, fmt.Errorf(
+			"inspect target data directory %q: %w", targetDataDir, statErr,
+		)
 	}
+	defer func() {
+		if originalTarget != nil {
+			_ = originalTarget.closeRoot()
+		}
+	}()
 
 	// Restore into a sibling staging directory rather than targetDataDir
 	// directly, and only atomically rename it into place once every step
@@ -533,29 +599,31 @@ func restoreValidated(
 	// partway through -- a process kill via SIGINT/SIGTERM, which the
 	// default Go runtime does not run deferred cleanup for -- leave
 	// targetDataDir completely untouched (absent, or still the empty
-	// directory requireEmptyOrAbsent just confirmed) instead of half-
+	// directory opened and confirmed above) instead of half-
 	// restored: the rename below is a single atomic filesystem operation
 	// on the same volume, so there is no window where targetDataDir could
 	// ever observe a partial write. Mirrors node_lifecycle.go's identical
 	// staging-then-swap pattern for the live restore path.
-	stagingDir := targetDataDir + ".restore-staging"
-	if err := os.RemoveAll(stagingDir); err != nil {
+	stagingOwned, err := createOwnedRestoreDir(
+		workParent, ".dingo-restore-staging-",
+	)
+	if err != nil {
 		return Manifest{}, fmt.Errorf(
-			"clear restore staging directory %q: %w", stagingDir, err,
+			"create restore staging directory: %w", err,
 		)
 	}
-	if err := os.MkdirAll(stagingDir, 0o755); err != nil {
-		return Manifest{}, fmt.Errorf(
-			"create restore staging directory %q: %w", stagingDir, err,
-		)
-	}
+	staging := stagingOwned.dir
+	stagingDir := staging.path
+	activated := false
 	// Best-effort cleanup on any failure below so a retry doesn't hit a
 	// half-restored staging directory that looks superficially non-empty
 	// -- targetDataDir itself is never touched until the rename below
 	// succeeds, so it needs no equivalent cleanup.
 	defer func() {
-		if err != nil {
-			_ = os.RemoveAll(stagingDir)
+		if err != nil && !activated {
+			_ = stagingOwned.cleanup()
+		} else {
+			_ = stagingOwned.close()
 		}
 	}()
 
@@ -601,7 +669,6 @@ func restoreValidated(
 			}
 		}
 	}
-	activated := false
 	defer func() {
 		if err == nil {
 			if retainRecovery != nil {
@@ -660,7 +727,11 @@ func restoreValidated(
 		filepath.Join(snapshotDir, MetadataBackupFileName),
 		stagingDir,
 		storageConfig.Metadata,
+		staging,
 	); err != nil {
+		return Manifest{}, err
+	}
+	if err := staging.checkNamed(); err != nil {
 		return Manifest{}, err
 	}
 	// File-backed metadata restore recreates stagingDir. Restore the marker
@@ -683,9 +754,15 @@ func restoreValidated(
 	); err != nil {
 		return Manifest{}, err
 	}
+	if err := staging.checkNamed(); err != nil {
+		return Manifest{}, err
+	}
 	if err := validateRestoredDatabase(
 		ctx, host, manifest, stagingDir, storageConfig,
 	); err != nil {
+		return Manifest{}, err
+	}
+	if err := staging.checkNamed(); err != nil {
 		return Manifest{}, err
 	}
 
@@ -701,25 +778,25 @@ func restoreValidated(
 			stagingDir, err,
 		)
 	}
+	if err := staging.checkNamed(); err != nil {
+		return Manifest{}, err
+	}
 
-	// Every step above is validated against the staging copy; activate it
-	// with one atomic rename. targetDataDir was already confirmed empty
-	// or absent above and has not been touched since, so clearing it
-	// first (a no-op if absent, and safe since it's empty if present --
-	// some platforms' rename cannot replace an existing directory at
-	// all) cannot lose anything.
-	if err := os.RemoveAll(targetDataDir); err != nil {
-		return Manifest{}, fmt.Errorf(
-			"clear target data directory %q before activating restore: %w",
-			targetDataDir, err,
-		)
+	// Every step above is validated against the staging copy. Dispose an
+	// accepted empty target before publishing, matching the prior activation
+	// contract. The staged tree moves through a random quarantine name and is
+	// published with a no-replace rename, so a concurrent destination creator
+	// is preserved and makes activation fail.
+	activated, err = activateRestoreDirs(
+		staging,
+		originalTarget,
+		workParent,
+		targetName,
+		targetDataDir,
+	)
+	if err != nil {
+		return Manifest{}, err
 	}
-	if err := os.Rename(stagingDir, targetDataDir); err != nil {
-		return Manifest{}, fmt.Errorf(
-			"activate restored data directory: %w", err,
-		)
-	}
-	activated = true
 
 	// The rename above changed the parent directory's own entries
 	// (removing stagingDir's name, adding targetDataDir's); fsync it so
@@ -845,11 +922,12 @@ func fetchPayloads(
 	if !recognizedCloudScheme(registry, snapshotDir) {
 		// Consume private copies: reopening the operator's path after digest
 		// verification permits a replacement file to bypass authentication.
-		dir, err := os.MkdirTemp(workParent, ".dingo-restore-payloads-")
+		owned, err := createOwnedRestoreDir(workParent, ".dingo-restore-payloads-")
 		if err != nil {
 			return "", nil, err
 		}
-		cleanup := func() { _ = os.RemoveAll(dir) }
+		dir := owned.dir.path
+		cleanup := func() { _ = owned.cleanup() }
 		for _, file := range manifest.payloadDownloads() {
 			src, err := os.Open(filepath.Join(snapshotDir, file.Name))
 			if err != nil {
@@ -875,27 +953,14 @@ func fetchPayloads(
 	)
 }
 
-// requireEmptyOrAbsent returns an error if dir exists and already contains
-// entries; a non-existent or empty directory is fine.
-func requireEmptyOrAbsent(dir string) error {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return nil
-		}
-		return fmt.Errorf("read target data directory %q: %w", dir, err)
-	}
-	if len(entries) > 0 {
-		return fmt.Errorf("target data directory %q is not empty", dir)
-	}
-	return nil
-}
-
 // restoreRollback records pre-mutation backups for remote stores. Local
 // Badger/SQLite restores need no entry here because their entire replacement
 // remains inside the disposable staging directory until the final rename.
 type restoreRollback struct {
 	dir                 string
+	dirHandle           *ownedRestoreDir
+	dirCleanupAttempted bool
+	dirCleanupErr       error
 	metadataPath        string
 	blobPath            string
 	newBlobNamespace    string
@@ -1036,10 +1101,10 @@ func prepareRestore(
 	storageConfig RestoreStorageConfig,
 	durable bool,
 ) (restoreRollback, error) {
-	var rollbackDir string
+	var rollbackOwned *ownedRestoreDir
 	var err error
 	if durable {
-		rollbackDir = RestoreRecoveryDir(targetDataDir)
+		rollbackDir := RestoreRecoveryDir(targetDataDir)
 		if err := RecoverInterruptedRestore(
 			ctx,
 			host,
@@ -1052,9 +1117,9 @@ func prepareRestore(
 				"dispose completed restore recovery: %w", err,
 			)
 		}
-		err = os.Mkdir(rollbackDir, 0o700)
+		rollbackOwned, err = createOwnedRestoreDirAt(rollbackDir)
 	} else {
-		rollbackDir, err = os.MkdirTemp(
+		rollbackOwned, err = createOwnedRestoreDir(
 			filepath.Dir(targetDataDir), ".dingo-restore-rollback-",
 		)
 	}
@@ -1064,7 +1129,8 @@ func prepareRestore(
 		)
 	}
 	rollback := restoreRollback{
-		dir:        rollbackDir,
+		dir:        rollbackOwned.dir.path,
+		dirHandle:  rollbackOwned,
 		durable:    durable,
 		markerDirs: restoreRecoveryMarkerDirs(storageConfig, targetDataDir),
 	}
@@ -1128,7 +1194,7 @@ func prepareRestore(
 			))
 		}
 		rollback.metadataPath = filepath.Join(
-			rollbackDir, MetadataBackupFileName,
+			rollback.dir, MetadataBackupFileName,
 		)
 		if err := backuper.BackupTo(ctx, rollback.metadataPath); err != nil {
 			_ = host.StopCapability(ctx, plugin.CapabilityStorageMetadata)
@@ -1214,7 +1280,7 @@ func prepareRestore(
 				manifest.BlobPlugin,
 			))
 		}
-		rollback.blobPath = filepath.Join(rollbackDir, BlobBackupFileName)
+		rollback.blobPath = filepath.Join(rollback.dir, BlobBackupFileName)
 		rollbackFile, openErr := os.OpenFile(
 			rollback.blobPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600,
 		)
@@ -1316,6 +1382,7 @@ func (r *restoreRollback) restore(
 			r.metadataPath,
 			targetDataDir,
 			storageConfig.Metadata,
+			nil,
 		); err != nil {
 			errs = append(
 				errs, fmt.Errorf("restore original metadata store: %w", err),
@@ -1427,8 +1494,20 @@ func (r *restoreRollback) persist(manifest Manifest) error {
 }
 
 func (r *restoreRollback) removeDir() error {
-	if err := os.RemoveAll(r.dir); err != nil {
-		return err
+	if !r.dirCleanupAttempted {
+		r.dirCleanupAttempted = true
+		if r.dirHandle == nil {
+			r.dirCleanupErr = fmt.Errorf(
+				"%w: restore rollback directory has no retained owner",
+				errRestoreDirReplaced,
+			)
+		} else {
+			r.dirCleanupErr = r.dirHandle.cleanup()
+		}
+		r.dirHandle = nil
+	}
+	if r.dirCleanupErr != nil {
+		return r.dirCleanupErr
 	}
 	var errs []error
 	if r.durable {
@@ -1478,52 +1557,54 @@ func (r *restoreRollback) authenticate() error {
 }
 
 func readRestoreRecovery(dir string) (restoreRollback, Manifest, error) {
-	file, err := os.Open(filepath.Join(dir, restoreRecoveryFileName))
+	owned, err := openOwnedRestoreDir(dir)
 	if err != nil {
 		return restoreRollback{}, Manifest{}, err
+	}
+	rollback := restoreRollback{dir: dir, dirHandle: owned}
+	file, err := owned.dir.root.Open(restoreRecoveryFileName)
+	if err != nil {
+		return rollback, Manifest{}, err
 	}
 	defer file.Close() //nolint:errcheck
 	data, err := io.ReadAll(io.LimitReader(file, 4097))
 	if err != nil {
-		return restoreRollback{}, Manifest{}, fmt.Errorf(
+		return rollback, Manifest{}, fmt.Errorf(
 			"read restore recovery record: %w", err,
 		)
 	}
 	if len(data) > 4096 {
-		return restoreRollback{}, Manifest{}, errors.New(
+		return rollback, Manifest{}, errors.New(
 			"restore recovery record exceeds 4096 bytes",
 		)
 	}
 	var record restoreRecoveryRecord
 	if err := json.Unmarshal(data, &record); err != nil {
-		return restoreRollback{}, Manifest{}, fmt.Errorf(
+		return rollback, Manifest{}, fmt.Errorf(
 			"decode restore recovery record: %w", err,
 		)
 	}
 	if record.BlobPlugin == "" || record.MetadataPlugin == "" {
-		return restoreRollback{}, Manifest{}, errors.New(
+		return rollback, Manifest{}, errors.New(
 			"restore recovery record is missing provider names",
 		)
 	}
 	if record.MetadataMutated || record.CloudBlob {
 		operationID, err := hex.DecodeString(record.OperationID)
 		if err != nil || len(operationID) != restoreRecoveryIDBytes {
-			return restoreRollback{}, Manifest{}, errors.New(
+			return rollback, Manifest{}, errors.New(
 				"restore recovery record has an invalid operation ID",
 			)
 		}
 	}
-	rollback := restoreRollback{
-		dir:              dir,
-		metadataPath:     filepath.Join(dir, MetadataBackupFileName),
-		newBlobNamespace: record.NewBlobNamespace,
-		oldBlobNamespace: record.OldBlobNamespace,
-		cloudBlob:        record.CloudBlob,
-		metadataMutated:  record.MetadataMutated,
-		blobMutated:      record.CloudBlob,
-		durable:          true,
-		operationID:      record.OperationID,
-	}
+	rollback.metadataPath = filepath.Join(dir, MetadataBackupFileName)
+	rollback.newBlobNamespace = record.NewBlobNamespace
+	rollback.oldBlobNamespace = record.OldBlobNamespace
+	rollback.cloudBlob = record.CloudBlob
+	rollback.metadataMutated = record.MetadataMutated
+	rollback.blobMutated = record.CloudBlob
+	rollback.durable = true
+	rollback.operationID = record.OperationID
 	manifest := Manifest{
 		BlobPlugin:     record.BlobPlugin,
 		MetadataPlugin: record.MetadataPlugin,
@@ -1544,13 +1625,20 @@ func RecoverInterruptedRestore(
 	accept bool,
 ) error {
 	rollback, manifest, err := readRestoreRecovery(recoveryDir)
+	defer func() {
+		if rollback.dirHandle != nil {
+			_ = rollback.dirHandle.close()
+		}
+	}()
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			if removeErr := os.RemoveAll(recoveryDir); removeErr != nil {
-				return fmt.Errorf(
-					"remove incomplete restore recovery directory: %w",
-					removeErr,
-				)
+			if rollback.dirHandle != nil {
+				if removeErr := rollback.removeDir(); removeErr != nil {
+					return fmt.Errorf(
+						"remove incomplete restore recovery directory: %w",
+						removeErr,
+					)
+				}
 			}
 			// A marker left without a record, or without its recovery
 			// directory, belongs to no restore and would block the next
@@ -1661,6 +1749,7 @@ func restoreMetadataStore(
 	backupPath string,
 	targetDataDir string,
 	providerConfig map[string]any,
+	target *restoreDir,
 ) error {
 	store, err := plugin.Resolve[metadata.MetadataStore](
 		ctx,
@@ -1701,19 +1790,47 @@ func restoreMetadataStore(
 	if err := host.StopCapability(ctx, plugin.CapabilityStorageMetadata); err != nil {
 		return fmt.Errorf("stop metadata plugin before restore: %w", err)
 	}
+	var ownedParent *os.Root
+	if target == nil {
+		parentPath := filepath.Dir(targetDataDir)
+		if err := os.MkdirAll(parentPath, 0o755); err != nil {
+			return fmt.Errorf("create metadata restore parent: %w", err)
+		}
+		ownedParent, err = os.OpenRoot(parentPath)
+		if err != nil {
+			return fmt.Errorf("open metadata restore parent: %w", err)
+		}
+		defer ownedParent.Close() //nolint:errcheck // cleanup errors are returned below
+		name := filepath.Base(filepath.Clean(targetDataDir))
+		if _, statErr := ownedParent.Lstat(name); errors.Is(statErr, os.ErrNotExist) {
+			ownedTarget, createErr := createOwnedRestoreDirAt(targetDataDir)
+			if createErr != nil {
+				return fmt.Errorf("create metadata restore directory: %w", createErr)
+			}
+			target = ownedTarget.dir
+			defer ownedTarget.close() //nolint:errcheck // restore error is returned below
+		} else if statErr != nil {
+			return fmt.Errorf("inspect metadata restore directory: %w", statErr)
+		} else {
+			target, err = openRestoreDir(
+				ownedParent,
+				name,
+				targetDataDir,
+			)
+			if err != nil {
+				return fmt.Errorf("open metadata restore directory: %w", err)
+			}
+			defer target.closeRoot() //nolint:errcheck // cleanup errors are returned below
+		}
+	}
 	// RestoreFrom refuses to overwrite an existing destination -- undo
 	// whatever the brief resolve-and-start above wrote to targetDataDir so
 	// it looks exactly as empty as before that call. Harmless no-op for a
 	// live client/server store, which never wrote real data under
 	// targetDataDir in the first place.
-	if err := os.RemoveAll(targetDataDir); err != nil {
+	if err := target.removeContents(); err != nil {
 		return fmt.Errorf(
 			"reset target data directory %q: %w", targetDataDir, err,
-		)
-	}
-	if err := os.MkdirAll(targetDataDir, 0o755); err != nil {
-		return fmt.Errorf(
-			"recreate target data directory %q: %w", targetDataDir, err,
 		)
 	}
 	if err := restorer.RestoreFrom(ctx, backupPath); err != nil {

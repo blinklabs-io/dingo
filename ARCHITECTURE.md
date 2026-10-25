@@ -9762,6 +9762,24 @@ Inspecting components and then opening by absolute path cannot offer that, and
 `O_NOFOLLOW` would not close it either — it constrains only the final
 component, not traversal through a replaced parent.
 
+The same handle lifetime extends through `BootstrapResult.Cleanup`. Cleanup
+closes nested readers, recursively removes entries through the retained
+extraction and ancillary roots, and only then removes an empty directory name
+if it still identifies the opened object. A writer can rename the opened tree
+or replace its saved name, but the replacement is never traversed. The
+auto-created temporary root is retained on the same terms. Cleanup also
+retains the archive's parent handle and file identity, so a file or directory
+substituted at the archive name is preserved.
+
+Temporary feed, extraction, and probe directories are created privately before
+their names are exposed. On Unix, each real directory in the absolute ancestor
+chain must be owned by the current user or root and may be group- or
+other-writable only when a trusted owner also set the sticky bit. On Windows,
+creation installs a protected inheritable ACL and retains no-delete handles on
+the created directory and every ancestor until cleanup or publication. The
+identity returned by native creation must match the directory opened for later
+work.
+
 Entries are additionally rejected if a symlink already sits anywhere along the
 path they are written to, not only at its last component. `os.Root` refuses an
 absolute symlink outright and refuses a relative one whose target leaves the

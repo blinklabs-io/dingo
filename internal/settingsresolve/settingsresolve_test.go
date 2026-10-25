@@ -208,7 +208,7 @@ func TestApplyOnMissingDatabaseIsNoOp(t *testing.T) {
 // is not empty", because Apply gated only on os.Stat succeeding and
 // readPersistedGateValues resolving a metadata provider runs its migration
 // registry as a side effect of merely starting it -- creating a database in
-// the directory lifecycle.RestoreValidated's requireEmptyOrAbsent check then
+// the directory lifecycle.RestoreValidated's empty-target check then
 // rejected. This asserts both halves of the fix: Apply must still succeed
 // as a no-op, AND the directory must still be empty afterward -- the bug was
 // entirely in the side effect, not the return value, so a test that only

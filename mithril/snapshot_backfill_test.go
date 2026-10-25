@@ -18,9 +18,11 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -43,6 +45,41 @@ import (
 // snapshotChunkSlots lays the fixture's files out 100 slots apart, two blocks
 // at the end of each: file n holds slots 100n+98 and 100n+99.
 const snapshotChunkSlots = 100
+
+func TestSnapshotProbesCloseKeepsSubstitutedDirectory(t *testing.T) {
+	t.Parallel()
+
+	parent := t.TempDir()
+	path := filepath.Join(parent, "probe")
+	require.NoError(t, os.MkdirAll(filepath.Join(path, "extract"), 0o700))
+	root, err := openVerifiedDir(path)
+	require.NoError(t, err)
+	parentRoot, err := os.OpenRoot(parent)
+	require.NoError(t, err)
+	info, err := root.Stat(".")
+	require.NoError(t, err)
+	extractRoot, err := os.OpenRoot(filepath.Join(path, "extract"))
+	require.NoError(t, err)
+	probes := &snapshotProbes{
+		logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+		storeDir: path,
+		store: &bootstrapDir{
+			parent: parentRoot, root: root, info: info,
+			name: "probe", path: path,
+		},
+		storeRoot: extractRoot,
+	}
+	moved := path + ".moved"
+	require.NoError(t, os.Rename(path, moved))
+	require.NoError(t, os.Mkdir(path, 0o700))
+	canary := filepath.Join(path, "keep")
+	require.NoError(t, os.WriteFile(canary, []byte("keep"), 0o600))
+
+	probes.close()
+	data, err := os.ReadFile(canary)
+	require.NoError(t, err)
+	require.Equal(t, []byte("keep"), data)
+}
 
 // snapshotFixture is a ten-file certified chain whose ancillary ledger state
 // sits on the last block of the last file.

@@ -51,6 +51,7 @@ func TestAuthenticateRejectsMarkerInStagingSibling(t *testing.T) {
 
 	rollback, _, err := readRestoreRecovery(recoveryDir)
 	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, rollback.dirHandle.close()) })
 	cfg := RestoreStorageConfig{
 		ActiveDataDir:      dataDir,
 		RecoveryMarkerDirs: []string{dataDir, dataDir + ".pre-restore"},
