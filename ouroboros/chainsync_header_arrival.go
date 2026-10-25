@@ -34,14 +34,14 @@ const (
 	recentHeaderBlockNumberMetricName  = "dingo_chainsync_recent_header_block_number"
 	recentHeaderBlockSlotMetricName    = "dingo_chainsync_recent_header_block_slot"
 	headerArrivalMaxBackfillSeconds    = 300
-	headerArrivalHistogramDescription  = "network arrival time minus slot time of the first at-tip chainsync header for each block, from any peer; Leios voters only vote for an endorser block whose announcing header arrived within L_hdr of its slot; headers more than 5 minutes after their slot (backfill) are not recorded"
+	headerArrivalHistogramDescription  = "network arrival time minus slot time of the earliest at-tip chainsync header for each block, across peers, observed once the block leaves the recent-header ring so a copy that arrived earlier but finished admission later still counts; Leios voters only vote for an endorser block whose announcing header arrived within L_hdr of its slot; headers more than 5 minutes after their slot (backfill) are not recorded"
 	recentHeaderDelayDescriptionSuffix = "; pair with " + recentHeaderBlockNumberMetricName + " by idx"
 )
 
 var (
 	recentHeaderDelayDesc = prometheus.NewDesc(
 		recentHeaderDelayMetricName,
-		"network arrival time minus slot time of the first at-tip chainsync header for the block held in each slot of a ring of recent blocks"+recentHeaderDelayDescriptionSuffix,
+		"network arrival time minus slot time of the earliest at-tip chainsync header, across peers, for the block held in each slot of a ring of recent blocks"+recentHeaderDelayDescriptionSuffix,
 		[]string{"idx"},
 		nil,
 	)
@@ -77,26 +77,31 @@ type recentHeaderArrivals struct {
 	slots [recentHeaderArrivalSlots]recentHeaderArrival
 }
 
-// record stores a header arrival and reports whether it was the first for
-// this block. The same header from another peer keeps the first arrival,
-// which is the one that bounds when the node could have acted on it; a
-// different block at the same height (a fork) replaces it; a block lower than
-// the one its slot already holds is stale and dropped.
+// record stores a header arrival. Peers run admission independently, so
+// copies of one header can finish out of network-arrival order: the same
+// header from another peer keeps the earliest arrival, the one that bounds when
+// the node could have acted on it. A different block at the same height (a
+// fork) or a higher block replaces the entry, and the replaced entry is
+// returned as final so the histogram observes each block once, with its
+// earliest arrival. A block lower than the one its slot already holds is stale
+// and dropped.
 func (r *recentHeaderArrivals) record(
 	blockNumber uint64,
 	slot uint64,
 	hash lcommon.Blake2b256,
 	delay float64,
-) bool {
+) (recentHeaderArrival, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	s := &r.slots[blockNumber%recentHeaderArrivalSlots]
 	if s.set && blockNumber < s.blockNumber {
-		return false
+		return recentHeaderArrival{}, false
 	}
 	if s.set && s.blockNumber == blockNumber && s.hash == hash {
-		return false
+		s.delay = min(s.delay, delay)
+		return recentHeaderArrival{}, false
 	}
+	final := *s
 	*s = recentHeaderArrival{
 		blockNumber: blockNumber,
 		slot:        slot,
@@ -104,7 +109,7 @@ func (r *recentHeaderArrivals) record(
 		delay:       delay,
 		set:         true,
 	}
-	return true
+	return final, final.set
 }
 
 func (r *recentHeaderArrivals) Describe(ch chan<- *prometheus.Desc) {
@@ -190,7 +195,8 @@ func (o *Ouroboros) initHeaderArrivalMetrics() {
 // observeHeaderArrival records a chainsync header's network arrival against
 // its slot time. Callers pass atTip and slotTime so catch-up (where every
 // header is naturally late) is excluded, matching the blockfetch delay
-// metrics. Only the first arrival of each block is observed.
+// metrics. The ring keeps each block's earliest arrival; the histogram
+// observes it once the block leaves the ring.
 func (m *headerArrivalMetrics) observeHeaderArrival(
 	atTip bool,
 	blockNumber uint64,
@@ -206,7 +212,7 @@ func (m *headerArrivalMetrics) observeHeaderArrival(
 	if delay > headerArrivalMaxBackfillSeconds {
 		return
 	}
-	if m.recent.record(blockNumber, slot, hash, delay) {
-		m.delay.Observe(delay)
+	if final, ok := m.recent.record(blockNumber, slot, hash, delay); ok {
+		m.delay.Observe(final.delay)
 	}
 }

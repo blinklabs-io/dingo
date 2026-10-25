@@ -18483,8 +18483,10 @@ tip, `chainsyncClientRollForwardAt` observes arrival minus slot onset in
 block number (`dingo_chainsync_recent_header_delay_seconds`,
 `dingo_chainsync_recent_header_block_number`,
 `dingo_chainsync_recent_header_block_slot`, all labelled `idx`), matching the
-blockfetch recent-delay ring. Only the first arrival of each block from any
-peer is kept, and headers more than five minutes past their slot are skipped.
+blockfetch recent-delay ring. Peers finish admission independently, so the
+ring keeps each block's earliest arrival across peers, and the histogram
+observes that value once the block leaves the ring. Headers more than five
+minutes past their slot are skipped.
 This is the quantity CIP-164 bounds by L_hdr when a Leios voter decides whether
 to vote for the endorser block the header announces.
 

@@ -63,17 +63,22 @@ func headerArrivalRing(
 	return out
 }
 
-func headerArrivalCount(t *testing.T, reg *prometheus.Registry) uint64 {
+// headerArrivalHistogram returns the histogram's sample count and sum.
+func headerArrivalHistogram(
+	t *testing.T,
+	reg *prometheus.Registry,
+) (uint64, float64) {
 	t.Helper()
 	families, err := reg.Gather()
 	require.NoError(t, err)
 	for _, mf := range families {
 		if mf.GetName() == headerArrivalDelayMetricName {
-			return mf.GetMetric()[0].GetHistogram().GetSampleCount()
+			h := mf.GetMetric()[0].GetHistogram()
+			return h.GetSampleCount(), h.GetSampleSum()
 		}
 	}
 	t.Fatalf("%s not registered", headerArrivalDelayMetricName)
-	return 0
+	return 0, 0
 }
 
 func newTestHeaderArrivals(
@@ -86,33 +91,46 @@ func newTestHeaderArrivals(
 	return o.headerArrivalMetrics, reg
 }
 
-// The first header for a block is recorded against its slot time; the same
-// header from another peer later keeps the first arrival and is not counted
-// again.
-func TestHeaderArrivalKeepsFirstArrivalPerBlock(t *testing.T) {
+// Peers finish admission independently, so a copy that arrived earlier can
+// be processed later. The ring keeps the earliest arrival, and the histogram
+// observes that value once, when the block leaves the ring.
+func TestHeaderArrivalKeepsEarliestArrivalPerBlock(t *testing.T) {
 	t.Parallel()
 	m, reg := newTestHeaderArrivals(t)
 	slotTime := time.Unix(1_700_000_000, 0)
 
 	m.observeHeaderArrival(
 		true, 500, 9000, testBlockHash(1), slotTime,
+		slotTime.Add(2*time.Second),
+	)
+	m.observeHeaderArrival(
+		true, 500, 9000, testBlockHash(1), slotTime,
 		slotTime.Add(800*time.Millisecond),
 	)
 	m.observeHeaderArrival(
 		true, 500, 9000, testBlockHash(1), slotTime,
-		slotTime.Add(2*time.Second),
+		slotTime.Add(3*time.Second),
 	)
 
 	got := headerArrivalRing(t, reg)
 	require.Contains(t, got, uint64(500))
 	assert.InDelta(t, 0.8, got[500][0], 1e-9)
 	assert.InDelta(t, 9000, got[500][1], 1e-9)
-	assert.Equal(t, uint64(1), headerArrivalCount(t, reg))
+	count, _ := headerArrivalHistogram(t, reg)
+	assert.Zero(t, count, "the block is still in the ring")
+
+	m.observeHeaderArrival(
+		true, 500+recentHeaderArrivalSlots, 9100, testBlockHash(2), slotTime,
+		slotTime.Add(time.Second),
+	)
+	count, sum := headerArrivalHistogram(t, reg)
+	assert.Equal(t, uint64(1), count)
+	assert.InDelta(t, 0.8, sum, 1e-9)
 }
 
-// A different block at the same height (a fork) replaces the entry and is
-// counted; a lower block landing in a slot that already holds a newer one is
-// stale and dropped.
+// A different block at the same height (a fork) replaces the entry, and the
+// replaced header is observed; a lower block landing in a slot that already
+// holds a newer one is stale and dropped.
 func TestHeaderArrivalForkReplacesAndStaleIsDropped(t *testing.T) {
 	t.Parallel()
 	m, reg := newTestHeaderArrivals(t)
@@ -135,7 +153,9 @@ func TestHeaderArrivalForkReplacesAndStaleIsDropped(t *testing.T) {
 	require.Len(t, got, 1)
 	assert.InDelta(t, 1.5, got[600][0], 1e-9)
 	assert.InDelta(t, 9101, got[600][1], 1e-9)
-	assert.Equal(t, uint64(2), headerArrivalCount(t, reg))
+	count, sum := headerArrivalHistogram(t, reg)
+	assert.Equal(t, uint64(1), count)
+	assert.InDelta(t, 1.0, sum, 1e-9)
 }
 
 // Catch-up headers are naturally late, so nothing is recorded before the node
@@ -155,7 +175,8 @@ func TestHeaderArrivalSkipsCatchUpAndBackfill(t *testing.T) {
 	)
 
 	assert.Empty(t, headerArrivalRing(t, reg))
-	assert.Equal(t, uint64(0), headerArrivalCount(t, reg))
+	count, _ := headerArrivalHistogram(t, reg)
+	assert.Zero(t, count)
 }
 
 // A node built without a registry has no header arrival metrics, and the
