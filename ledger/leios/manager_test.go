@@ -6970,7 +6970,10 @@ func TestVoteManagerLateVotesAreNotPeerMisbehavior(t *testing.T) {
 		require.NoError(t, fixture.mgr.HandleVote(
 			"skewed",
 			fixture.makeVote(
-				t, uint64(i%4), 1000+slotWindowFutureTolerance+1+uint64(i), ebHash,
+				t,
+				uint64(i%4),
+				1000+slotWindowFutureTolerance+1+uint64(i),
+				ebHash,
 			),
 		))
 	}
@@ -6980,6 +6983,74 @@ func TestVoteManagerLateVotesAreNotPeerMisbehavior(t *testing.T) {
 			"skewed",
 			fixture.makeVote(t, 0, 1000+slotWindowFutureTolerance+100, ebHash),
 		),
+		ErrPeerMisbehavior,
+	)
+}
+
+func TestVoteManagerLatePrototypeVotesAreNotPeerMisbehavior(t *testing.T) {
+	t.Parallel()
+
+	const voteWindow = 10
+	fixture := newManagerFixture(
+		t,
+		func(f *managerFixture, cfg *VoteManagerConfig) {
+			cfg.PromRegistry = prometheus.NewRegistry()
+			cfg.SlotProvider = &fakeSlotProvider{slot: 1000}
+			cfg.VoteWindowSlots = voteWindow
+		},
+	)
+	rejected := fixture.mgr.metrics.votesRejectedTotal.WithLabelValues(
+		voteNotEmittedSlotWindow,
+	)
+	before := promtestutil.ToFloat64(rejected)
+
+	// Votes for an announcement already behind the window, delivered
+	// directly and after waiting in the pending queue.
+	lateSlot := uint64(1000 - voteWindow)
+	ebHash := lcommon.NewBlake2b256([]byte("late-prototype-eb"))
+	rbHash := lcommon.NewBlake2b256([]byte("late-prototype-rb"))
+	queuedRbHash := lcommon.NewBlake2b256([]byte("late-queued-rb"))
+	const queuedCount = 4
+	for voterId := range uint64(queuedCount) {
+		require.NoError(t, fixture.mgr.HandlePrototypeVote(
+			"relay",
+			fixture.makePrototypeVote(t, voterId, queuedRbHash),
+		))
+	}
+	lateCount := 2 * voteInvalidPeerLimit
+	fixture.mgr.ObserveAnnouncement(lateSlot, queuedRbHash, ebHash)
+	fixture.mgr.ObserveAnnouncement(lateSlot, rbHash, ebHash)
+	for i := range lateCount {
+		require.NoError(
+			t,
+			fixture.mgr.HandlePrototypeVote(
+				"relay",
+				fixture.makePrototypeVote(t, uint64(i%4), rbHash),
+			),
+			"late prototype vote %d must not be peer misbehavior",
+			i,
+		)
+	}
+	assert.EqualValues(
+		t,
+		queuedCount+lateCount,
+		promtestutil.ToFloat64(rejected)-before,
+		"slot_window rejection metric must count every late vote",
+	)
+	for voterId := range uint64(4) {
+		assert.Empty(t, fixture.mgr.VotesByIds([]lcommon.LeiosVoteId{
+			{SlotNo: lateSlot, VoterId: voterId},
+		}))
+	}
+
+	// The connection's invalid-vote budget is untouched by the late votes.
+	invalid := lcommon.LeiosVote{}
+	for range voteInvalidPeerLimit - 1 {
+		require.NoError(t, fixture.mgr.HandleVote("relay", invalid))
+	}
+	require.ErrorIs(
+		t,
+		fixture.mgr.HandleVote("relay", invalid),
 		ErrPeerMisbehavior,
 	)
 }
