@@ -154,8 +154,9 @@ func newMsgDone() *msgDone {
 // newSigMsgFromCbor decodes one message and checks each item's shape. The CIP
 // says only indefinite-length lists of IDs, sizes and messages are supported,
 // so a list in any other form is refused, as is a message in the older shape
-// that kept its ID inside the payload. How many items a message may carry, and
-// whether it fits the state, is checked by the protocol that receives it.
+// that kept its ID inside the payload. A list is bounded at 65535 items; how
+// many a message may carry within that, and whether it fits the state, is
+// checked by the protocol that receives it.
 func newSigMsgFromCbor(
 	msgType uint,
 	data []byte,
@@ -166,8 +167,8 @@ func newSigMsgFromCbor(
 			sigProtocolName, msgType, len(data), limit,
 		)
 	}
-	parts := make([]cbor.RawMessage, 0, 4)
-	if _, err := cbor.Decode(data, &parts); err != nil {
+	parts, err := decodeEnvelope(data)
+	if err != nil {
 		return nil, fmt.Errorf("%s: decode error: %w", sigProtocolName, err)
 	}
 	msg, err := decodeSigMsgParts(msgType, parts)
@@ -176,6 +177,35 @@ func newSigMsgFromCbor(
 	}
 	msg.SetCbor(data)
 	return msg, nil
+}
+
+// maxEnvelopeElements is the most elements a message has: a request for IDs is
+// [1, blocking, ack, req].
+const maxEnvelopeElements = 4
+
+// cborArrayMajor is the CBOR major type of an array, the top three bits of
+// an item's first byte.
+const cborArrayMajor = 4
+
+// decodeEnvelope splits a message into its elements. The header of a
+// definite-length array of at most maxEnvelopeElements says so before any
+// element is read, so a peer cannot make the decoder build a long array only
+// to find that the message has the wrong number of elements.
+func decodeEnvelope(data []byte) ([]cbor.RawMessage, error) {
+	if len(data) == 0 || data[0]>>5 != cborArrayMajor {
+		return nil, errors.New("message is not an array")
+	}
+	if data[0]&0x1f > maxEnvelopeElements {
+		return nil, fmt.Errorf(
+			"message is not a definite-length array of at most %d elements",
+			maxEnvelopeElements,
+		)
+	}
+	parts := make([]cbor.RawMessage, 0, maxEnvelopeElements)
+	if _, err := cbor.Decode(data, &parts); err != nil {
+		return nil, err
+	}
+	return parts, nil
 }
 
 func decodeSigMsgParts(

@@ -473,6 +473,40 @@ func TestSigMessagesBoundWhatAPeerSends(t *testing.T) {
 		)
 		require.ErrorContains(t, err, "more than 65535 items")
 	})
+	t.Run(
+		"an envelope that is not a bounded definite array is refused",
+		func(t *testing.T) {
+			t.Parallel()
+			tests := []struct {
+				name    string
+				encoded []byte
+				want    string
+			}{
+				{
+					"indefinite",
+					[]byte{0x9f, 0x02, 0x9f, 0xff, 0xff},
+					"definite-length",
+				},
+				{
+					"five elements",
+					[]byte{0x85, 0x02, 0x40, 0x40, 0x40, 0x40},
+					"at most 4",
+				},
+				{
+					"a four-byte count",
+					[]byte{0x9a, 0x00, 0x1e, 0x84, 0x80, 0x02},
+					"at most 4",
+				},
+				{"a map", []byte{0xa1, 0x01, 0x02}, "not an array"},
+				{"an integer", []byte{0x02}, "not an array"},
+				{"nothing", nil, "not an array"},
+			}
+			for _, tt := range tests {
+				_, err := newSigMsgFromCbor(uint(sigMsgReplyIDs), tt.encoded)
+				require.ErrorContains(t, err, tt.want, tt.name)
+			}
+		},
+	)
 	t.Run("an unterminated list is refused", func(t *testing.T) {
 		t.Parallel()
 		_, err := newSigMsgFromCbor(
@@ -504,4 +538,39 @@ func TestSigMessagesDoNotBuildAListBeforeCheckingIt(t *testing.T) {
 	require.ErrorContains(t, err, "message ID is 0 bytes")
 	// Building the list of 200,000 entries takes about ten megabytes.
 	require.Less(t, after.TotalAlloc-before.TotalAlloc, uint64(2<<20))
+}
+
+// A reply whose envelope is an indefinite array of empty strings fits the
+// reply limit, and is refused from its header without the array being built.
+//
+// Not t.Parallel: it reads the process-wide allocation counter.
+func TestSigMessagesDoNotBuildAnEnvelopeBeforeCheckingIt(t *testing.T) {
+	const entries = 2_000_000
+	for _, tt := range []struct {
+		name    string
+		encoded []byte
+	}{
+		{"indefinite", concat(
+			[]byte{0x9f, 0x02},
+			bytes.Repeat([]byte{0x40}, entries),
+			[]byte{0xff},
+		)},
+		{"definite", concat(
+			[]byte{0x9a, 0x00, 0x1e, 0x84, 0x80, 0x02},
+			bytes.Repeat([]byte{0x40}, entries),
+		)},
+	} {
+		require.LessOrEqual(t, len(tt.encoded), sigReplyByteLimit)
+
+		var before, after runtime.MemStats
+		runtime.ReadMemStats(&before)
+		_, err := newSigMsgFromCbor(uint(sigMsgReplyIDs), tt.encoded)
+		runtime.ReadMemStats(&after)
+
+		require.Error(t, err, tt.name)
+		// Reading the array takes about sixty megabytes.
+		require.Less(
+			t, after.TotalAlloc-before.TotalAlloc, uint64(1<<20), tt.name,
+		)
+	}
 }
