@@ -959,10 +959,10 @@ func (o *Ouroboros) scheduleLeiosEndorserBlockValidation(
 		o.leiosValidationMu.Unlock()
 		return
 	}
-	parentHash := ledger.LeiosValidationParentHash(header)
+	basis := ledger.LeiosEndorserBlockBasisHash(header)
 	pending := *current
 	pending.semanticValidationStatus = leiosEBValidationPending
-	pending.semanticValidationParent = slices.Clone(parentHash)
+	pending.semanticValidationParent = slices.Clone(basis)
 	pending.semanticValidationDone = make(chan struct{})
 	for _, cacheKey := range current.cacheKeys {
 		if o.leiosEndorserBlocks[cacheKey] == current {
@@ -978,14 +978,17 @@ func (o *Ouroboros) scheduleLeiosEndorserBlockValidation(
 
 // ValidateLeiosEndorserBlockForHeader waits through the configured diffusion
 // window for the exact endorser block announced by header, then validates it
-// synchronously while header's parent is still the applied ledger tip. Callers
-// use this at the selected block's apply boundary, or before adopting a locally
-// forged block, so validation cannot race the ranking block past the parent
-// state it names. Endorser-block bodies arrive independently on asynchronous
-// Leios fetch workers.
+// synchronously while basis is still the applied ledger tip. The ledger's
+// apply boundary passes ledger.LeiosEndorserBlockBasisHash, once the
+// announcing block is the tip and before the block that may certify it
+// applies. A forger checking its own announcement before adoption passes
+// ledger.LeiosValidationParentHash (see
+// ledger.LedgerState.ValidateLeiosEndorserBlockTransactions). Endorser-block
+// bodies arrive independently on asynchronous Leios fetch workers.
 func (o *Ouroboros) ValidateLeiosEndorserBlockForHeader(
 	ctx context.Context,
 	header lcommon.BlockHeader,
+	basis []byte,
 ) error {
 	if header == nil {
 		return errors.New("nil Leios announcing header")
@@ -1005,7 +1008,7 @@ func (o *Ouroboros) ValidateLeiosEndorserBlockForHeader(
 	}
 	if o.ledgerState != nil && !slices.Equal(
 		o.ledgerState.Tip().Point.Hash,
-		ledger.LeiosValidationParentHash(header),
+		basis,
 	) {
 		return ledger.ErrLeiosValidationParentUnavailable
 	}
@@ -1067,7 +1070,7 @@ func (o *Ouroboros) ValidateLeiosEndorserBlockForHeader(
 	if err := validateLeiosEndorserBlockBinding(header, data); err != nil {
 		return err
 	}
-	validationParent := ledger.LeiosValidationParentHash(header)
+	validationParent := basis
 	var pending leiosEndorserBlockData
 	for {
 		o.leiosMu.Lock()
@@ -1137,6 +1140,7 @@ func (o *Ouroboros) ValidateLeiosEndorserBlockForHeader(
 		err = o.leiosAnnouncementLedger.ValidateLeiosEndorserBlockTransactions(
 			ctx,
 			header,
+			validationParent,
 			txCbors,
 		)
 	}
@@ -1279,6 +1283,7 @@ func (o *Ouroboros) validateLeiosEndorserBlock(
 		err = o.leiosAnnouncementLedger.ValidateLeiosEndorserBlockTransactions(
 			o.leiosValidationCtx,
 			header,
+			data.semanticValidationParent,
 			txCbors,
 		)
 	}
