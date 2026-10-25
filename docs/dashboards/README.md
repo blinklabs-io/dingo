@@ -11,7 +11,7 @@ Monitoring dashboards for [Dingo](https://github.com/blinklabs-io/dingo), the Go
 | **Peer Health** | `peer-health.json` | Hot/warm/cold peers, connection types, peer state timeseries, promotions/demotions, network I/O |
 | **Mempool** | `mempool.json` | Pending TXs, mempool size, TX lifecycle, CBOR cache, event bus |
 | **Resource Usage** | `resources.json` | CPU, memory, GC heatmap, disk I/O, IOPS, PSI pressure, Badger, file descriptors |
-| **Leios** | `leios.json` | Voting committee, block lanes (each RB's header wait, fetch and adoption beside each EB's arrival), endorser block lifecycle against the CIP-164 header, vote and diffusion periods, own votes not cast by reason, votes received and rejected, endorser block pipeline and stages, diffusion waits, endorser block forging, RB/EB timing, chainsync deferred headers and resyncs, ledger stage time, RB and EB detail tables |
+| **Leios** | `leios.json` | Voting committee, block lanes (each RB's header arrival, time before the request, fetch and adoption beside each EB's arrival), endorser block lifecycle against the CIP-164 header, vote and diffusion periods, own votes not cast by reason, votes received and rejected, endorser block pipeline and stages, diffusion waits, endorser block forging, RB/EB timing, chainsync deferred headers and resyncs, ledger stage time, RB and EB detail tables |
 
 ## Prerequisites
 
