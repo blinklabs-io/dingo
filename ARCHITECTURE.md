@@ -1099,6 +1099,17 @@ these series carries a connection or peer label.
   before that window's request is issued and so also for a request that then
   fails to start, and the second is observed only for events received through
   blockfetch.
+- `dingo_ledger_block_adoption_delay_seconds` observes wall clock minus slot
+  time for each block applied while `IsAtTip()` holds, taken right after the
+  chunk's new tip is published (the point of the "chain extended, new tip"
+  log), so it includes validation, commit and any queueing behind the apply
+  pipeline. Catch-up and trusted replay are not recorded.
+  `dingo_ledger_recent_adoption_delay_seconds{idx}` and
+  `dingo_ledger_recent_adoption_block_number{idx}` are the matching 16-slot
+  ring (slot = block number % 16, same collector pattern as the blockfetch
+  recent-delay ring), read together under one lock. Compare with the
+  blockfetch ring, which measures body arrival, to see time spent between
+  arrival and adoption.
 - `dingo_ledger_block_stage_duration_seconds` attributes the wall-clock time of
   each applied chunk of blocks. Within the window timed by
   `dingo_ledger_block_apply_batch_latency_seconds`, `prepare` is the work

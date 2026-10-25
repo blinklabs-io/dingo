@@ -9178,6 +9178,9 @@ func (ls *LedgerState) processBlocksFromSource(
 				len(nextBatch[i:end]),
 			)
 			var blocksProcessed int
+			// Blocks this chunk applies through ledgerProcessBlock, kept
+			// for the post-commit adoption-delay observation.
+			var chunkAdopted []adoptedBlock
 			runningNonce := snapshotNonce
 			trackByronPBFT := batchContainsByronBlocks(nextBatch[i:end])
 			var runningByronPBFTState byronPBFTState
@@ -9620,6 +9623,11 @@ func (ls *LedgerState) processBlocksFromSource(
 							BlockNumber: next.BlockNumber(),
 						}
 						blocksProcessed++
+						chunkAdopted = append(chunkAdopted, adoptedBlock{
+							number: next.BlockNumber(),
+							slot:   next.SlotNumber(),
+							hash:   tmpPoint.Hash,
+						})
 						// Per-block composition metrics: era,
 						// transaction count, script/redeemer presence, UTxO
 						// churn, certificate count. Recorded here, not for
@@ -9868,6 +9876,9 @@ func (ls *LedgerState) processBlocksFromSource(
 				checker = ls.config.ForgedBlockChecker
 				ls.publishSnapshotsLocked()
 				ls.Unlock()
+				if !trustedReplay {
+					ls.observeBlockAdoptions(chunkAdopted)
+				}
 				ls.maybeQueueStakeRewardPrecomputeRetry(pendingTip.Point.Slot)
 				// Restore normal DB options outside the lock after validation is enabled
 				if wantEnableValidation && bulkLoadActive &&

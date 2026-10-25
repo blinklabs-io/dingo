@@ -93,7 +93,12 @@ type stateMetrics struct {
 	// epochRolloverDuration is the whole processEpochRollover transaction
 	// body, and epochRolloverPhaseDuration each of its named phases; see
 	// timeRolloverPhase.
-	epochRolloverDuration      prometheus.Histogram
+	epochRolloverDuration prometheus.Histogram
+	// blockAdoptionDelay and recentAdoptions record wall clock minus slot
+	// time at the moment an at-tip block becomes the ledger tip; see
+	// observeBlockAdoption.
+	blockAdoptionDelay         prometheus.Histogram
+	recentAdoptions            *recentAdoptions
 	epochRolloverPhaseDuration *prometheus.HistogramVec
 	// Pre-materialized observers for the stage label values, so the hot
 	// path does not resolve a label on every block or transaction.
@@ -1021,6 +1026,21 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 			Help: "ledger apply-path waits for a referenced Leios endorser block that ran the full diffusion window without it arriving",
 		},
 	)
+	m.blockAdoptionDelay = promautoFactory.NewHistogram(
+		prometheus.HistogramOpts{
+			Name: "dingo_ledger_block_adoption_delay_seconds",
+			Help: "wall clock minus slot time when an at-tip block became the ledger tip, i.e. after validation and commit; catch-up and trusted replay are not recorded",
+			// 100ms to 120s: a healthy relay adopts within seconds of slot
+			// time, a stalled one has been seen at 44s.
+			Buckets: []float64{
+				0.1, 0.25, 0.5, 1, 2, 3, 5, 7.5, 10, 15, 20, 30, 45, 60, 90, 120,
+			},
+		},
+	)
+	m.recentAdoptions = newRecentAdoptions()
+	if promRegistry != nil {
+		promRegistry.MustRegister(m.recentAdoptions)
+	}
 	m.epochRolloverDuration = promautoFactory.NewHistogram(
 		prometheus.HistogramOpts{
 			Name: "dingo_ledger_epoch_rollover_duration_seconds",
