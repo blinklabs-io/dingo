@@ -603,8 +603,9 @@ sequenceDiagram
     DB-->>LS: durable commit succeeds
     LS->>EB: publish TransactionEvent per tx (AfterCommit)
     ChM->>EB: publish ChainUpdateEvent
-    EB->>OB: retry deferred peers after ledger tip advances
-    OB->>Peer: re-intersect at last accepted cursor
+    EB->>OB: reconcile deferred peers after ledger tip advances
+    Note over OB: If the peer's newest deferred header was applied through another peer and the peer has not rolled back since, count its delivery and advance its local cursor without reconnecting
+    OB->>Peer: otherwise re-intersect at last accepted cursor
     Peer->>OB: replay parent-linked headers in order
     OB->>OB: strictly verify and promote each replayed header
     LS->>EB: publish BlockEvent

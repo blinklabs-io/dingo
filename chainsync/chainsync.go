@@ -1163,15 +1163,51 @@ func (s *State) RecordClientDelivery(
 	if !exists {
 		return false
 	}
+	s.recordClientDeliveryLocked(tc, point)
+	return true
+}
+
+func (s *State) recordClientDeliveryLocked(
+	tc *TrackedClient,
+	point ocommon.Point,
+) {
 	tc.HeadersRecv++
 	if tc.deliverySeen && point.Slot <= tc.deliveryWatermark.Slot {
-		return true
+		return
 	}
 	setDeliveryWatermark(tc, point)
 	tc.LastActivity = s.now()
 	if tc.Status == ClientStatusStalled {
 		tc.Status = ClientStatusSyncing
 	}
+}
+
+// AdmitDeferredClientTip admits a header whose admission was deferred and
+// that the node has since applied, as the client's cursor and tip. When
+// recordDelivery is set it first accounts for the delivery as
+// RecordClientDelivery does; callers clear it when RecordClientDelivery
+// already counted the header. It changes nothing when the client's cursor is
+// already at or past point's slot, so a stale deferral cannot move back a
+// cursor that a later header advanced. It reports whether the cursor moved.
+func (s *State) AdmitDeferredClientTip(
+	connId ouroboros.ConnectionId,
+	point ocommon.Point,
+	tip ochainsync.Tip,
+	recordDelivery bool,
+) bool {
+	s.clientConnIdMutex.Lock()
+	defer s.clientConnIdMutex.Unlock()
+	tc, exists := s.trackedClients[connId]
+	if !exists || tc.Cursor.Slot >= point.Slot {
+		return false
+	}
+	if recordDelivery {
+		s.recordClientDeliveryLocked(tc, point)
+	}
+	point.Hash = cloneBytes(point.Hash)
+	tip.Point.Hash = cloneBytes(tip.Point.Hash)
+	tc.Cursor = point
+	tc.Tip = tip
 	return true
 }
 
