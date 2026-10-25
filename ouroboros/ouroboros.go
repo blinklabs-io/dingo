@@ -148,6 +148,10 @@ type Ouroboros struct {
 	subscriptions     []subscription
 	blockfetchMetrics *blockfetchMetrics
 	protocolMetrics   *protocolMetrics
+
+	// headerArrivalMetrics records chainsync header arrival against slot time.
+	headerArrivalMetrics *headerArrivalMetrics
+
 	// Shared cache of decoded blocks/headers keyed by content hash, so
 	// multiple connections delivering byte-identical data (the common case
 	// when several peers relay the same block) decode once instead of once
@@ -868,6 +872,7 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 	}
 	if cfg.PromRegistry != nil {
 		o.initBlockfetchMetrics()
+		o.initHeaderArrivalMetrics()
 		o.initProtocolMetrics()
 		o.initLeiosMetrics()
 		o.initDecodeCacheMetrics()

@@ -18508,6 +18508,22 @@ re-intersection. Judging the recorded arrival rather than the later handler time
 local decode, EventBus, or scheduler delay cannot make an invalid early header
 appear timely.
 
+The same `ArrivalTime` feeds the header arrival metrics
+(`ouroboros/chainsync_header_arrival.go`). Once a header has passed (or only
+deferred) admission crypto from an ingress-eligible peer, and the ledger is at
+tip, `chainsyncClientRollForwardAt` observes arrival minus slot onset in
+`dingo_chainsync_header_arrival_delay_seconds` and in a 16-slot ring keyed by
+block number (`dingo_chainsync_recent_header_delay_seconds`,
+`dingo_chainsync_recent_header_block_number`,
+`dingo_chainsync_recent_header_block_slot`, all labelled `idx`), matching the
+blockfetch recent-delay ring. Peers finish admission independently, so each
+ring slot keeps the earliest arrival of every header at its height across
+peers, competing fork headers included, and the histogram observes each of
+those headers once, when a higher block takes the slot. Headers more than five
+minutes past their slot are skipped.
+This is the quantity CIP-164 bounds by L_hdr when a Leios voter decides whether
+to vote for the endorser block the header announces.
+
 This admission rule includes Byron main headers and epoch-boundary headers;
 its two-second allowance is measured in wall-clock time even for Byron's
 20-second slots. The subsequent PBFT guard compares slot onset directly with
