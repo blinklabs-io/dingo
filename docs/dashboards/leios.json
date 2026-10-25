@@ -2716,578 +2716,153 @@
       "description": "Per-block view of the most recent ranking and endorser blocks. RB lane (up): delay after the block's slot; grey is waiting for the header, colour is the body fetch, the white tick is ledger adoption, a purple cap marks an RB that certifies an EB and a cyan base one that announces an EB. EB lane (down): arrival of the full EB (manifest and every tx) after its slot, dot size by tx count. Purple links join an EB to the RB that certifies it. Hover for numbers. Built from the dingo_blockfetch_recent_*, dingo_ledger_recent_adoption_* and dingo_leios_recent_eb_* rings, so it covers the time range up to their history."
     },
     {
-      "type": "table",
-      "title": "Recent Ranking Blocks",
-      "description": "The last blocks fetched at tip, one row per RB. delay: body arrived after the slot. fetch: request to body. header wait: delay minus fetch, time spent before the block was even requested (chainsync). adopted: the ledger made it the tip. The Block Lanes panel links each certifying RB to its EB.",
-      "id": 118,
-      "transparent": true,
-      "datasource": {
-        "type": "prometheus",
-        "uid": "default"
-      },
+      "id": 122,
+      "type": "marcusolsson-dynamictext-panel",
+      "title": "Endorser Block Lifecycle",
       "gridPos": {
-        "h": 9,
+        "h": 12,
         "w": 24,
         "x": 0,
         "y": 63
       },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "transparent": true,
+      "pluginVersion": "6.2.0",
       "targets": [
         {
           "datasource": {
             "type": "prometheus",
             "uid": "default"
           },
-          "expr": "max by (instance, idx) (dingo_blockfetch_recent_block_number{network=\"$network\",instance=~\"$instance\"})",
+          "expr": "dingo_blockfetch_recent_block_number{network=\"$network\",instance=~\"$instance\"}[$__range]",
           "instant": true,
           "range": false,
-          "format": "table",
           "legendFormat": "",
-          "refId": "A"
+          "refId": "RBN"
         },
         {
           "datasource": {
             "type": "prometheus",
             "uid": "default"
           },
-          "expr": "max by (instance, idx) (dingo_blockfetch_recent_block_slot{network=\"$network\",instance=~\"$instance\"})",
+          "expr": "dingo_blockfetch_recent_delay_seconds{network=\"$network\",instance=~\"$instance\"}[$__range]",
           "instant": true,
           "range": false,
-          "format": "table",
           "legendFormat": "",
-          "refId": "B"
+          "refId": "RDR"
         },
         {
           "datasource": {
             "type": "prometheus",
             "uid": "default"
           },
-          "expr": "max by (instance, idx) (dingo_blockfetch_recent_block_kind{network=\"$network\",instance=~\"$instance\"})",
+          "expr": "dingo_blockfetch_recent_block_kind{network=\"$network\",instance=~\"$instance\"}[$__range]",
           "instant": true,
           "range": false,
-          "format": "table",
           "legendFormat": "",
-          "refId": "C"
+          "refId": "RKD"
         },
         {
           "datasource": {
             "type": "prometheus",
             "uid": "default"
           },
-          "expr": "max by (instance, idx) (dingo_blockfetch_recent_delay_seconds{network=\"$network\",instance=~\"$instance\"})",
+          "expr": "dingo_blockfetch_recent_block_slot{network=\"$network\",instance=~\"$instance\"}[$__range]",
           "instant": true,
           "range": false,
-          "format": "table",
           "legendFormat": "",
-          "refId": "D"
+          "refId": "RSL"
         },
         {
           "datasource": {
             "type": "prometheus",
             "uid": "default"
           },
-          "expr": "max by (instance, idx) (dingo_blockfetch_recent_fetch_duration_seconds{network=\"$network\",instance=~\"$instance\"})",
+          "expr": "dingo_ledger_recent_adoption_block_number{network=\"$network\",instance=~\"$instance\"}[$__range]",
           "instant": true,
           "range": false,
-          "format": "table",
           "legendFormat": "",
-          "refId": "E"
+          "refId": "RAB"
         },
         {
           "datasource": {
             "type": "prometheus",
             "uid": "default"
           },
-          "expr": "max by (instance, idx) (dingo_blockfetch_recent_delay_seconds{network=\"$network\",instance=~\"$instance\"}) - max by (instance, idx) (dingo_blockfetch_recent_fetch_duration_seconds{network=\"$network\",instance=~\"$instance\"})",
+          "expr": "dingo_ledger_recent_adoption_delay_seconds{network=\"$network\",instance=~\"$instance\"}[$__range]",
           "instant": true,
           "range": false,
-          "format": "table",
           "legendFormat": "",
-          "refId": "F"
+          "refId": "RAD"
         },
         {
           "datasource": {
             "type": "prometheus",
             "uid": "default"
           },
-          "expr": "max by (instance, idx) (dingo_ledger_recent_adoption_delay_seconds{network=\"$network\",instance=~\"$instance\"} and on (instance, idx) (dingo_ledger_recent_adoption_block_number{network=\"$network\",instance=~\"$instance\"} == on (instance, idx) dingo_blockfetch_recent_block_number{network=\"$network\",instance=~\"$instance\"}))",
+          "expr": "dingo_leios_recent_eb_slot{network=\"$network\",instance=~\"$instance\"}[$__range]",
           "instant": true,
           "range": false,
-          "format": "table",
           "legendFormat": "",
-          "refId": "G"
+          "refId": "ESL"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "default"
+          },
+          "expr": "dingo_leios_recent_eb_arrival_delay_seconds{network=\"$network\",instance=~\"$instance\"}[$__range]",
+          "instant": true,
+          "range": false,
+          "legendFormat": "",
+          "refId": "EAD"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "default"
+          },
+          "expr": "dingo_leios_recent_eb_tx_count{network=\"$network\",instance=~\"$instance\"}[$__range]",
+          "instant": true,
+          "range": false,
+          "legendFormat": "",
+          "refId": "ETX"
         }
       ],
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "align": "auto",
-            "cellOptions": {
-              "type": "auto"
-            }
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "text",
-                "value": null
-              }
-            ]
-          }
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "kind"
-            },
-            "properties": [
-              {
-                "id": "mappings",
-                "value": [
-                  {
-                    "type": "value",
-                    "options": {
-                      "0": {
-                        "text": "plain",
-                        "color": "text"
-                      },
-                      "1": {
-                        "text": "announces EB",
-                        "color": "#33CCE8"
-                      },
-                      "2": {
-                        "text": "certifies EB",
-                        "color": "#B877D9"
-                      },
-                      "3": {
-                        "text": "announces + certifies",
-                        "color": "#B877D9"
-                      }
-                    }
-                  }
-                ]
-              },
-              {
-                "id": "custom.cellOptions",
-                "value": {
-                  "type": "color-text"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "delay"
-            },
-            "properties": [
-              {
-                "id": "unit",
-                "value": "s"
-              },
-              {
-                "id": "decimals",
-                "value": 3
-              },
-              {
-                "id": "thresholds",
-                "value": {
-                  "mode": "absolute",
-                  "steps": [
-                    {
-                      "color": "#1a7a42",
-                      "value": null
-                    },
-                    {
-                      "color": "#73BF69",
-                      "value": 0.25
-                    },
-                    {
-                      "color": "#E88C30",
-                      "value": 1
-                    },
-                    {
-                      "color": "#D4413A",
-                      "value": 2
-                    },
-                    {
-                      "color": "#B7307A",
-                      "value": 5
-                    }
-                  ]
-                }
-              },
-              {
-                "id": "custom.cellOptions",
-                "value": {
-                  "type": "color-background",
-                  "mode": "basic"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "adopted"
-            },
-            "properties": [
-              {
-                "id": "unit",
-                "value": "s"
-              },
-              {
-                "id": "decimals",
-                "value": 3
-              },
-              {
-                "id": "thresholds",
-                "value": {
-                  "mode": "absolute",
-                  "steps": [
-                    {
-                      "color": "#1a7a42",
-                      "value": null
-                    },
-                    {
-                      "color": "#73BF69",
-                      "value": 0.25
-                    },
-                    {
-                      "color": "#E88C30",
-                      "value": 1
-                    },
-                    {
-                      "color": "#D4413A",
-                      "value": 2
-                    },
-                    {
-                      "color": "#B7307A",
-                      "value": 5
-                    }
-                  ]
-                }
-              },
-              {
-                "id": "custom.cellOptions",
-                "value": {
-                  "type": "color-background",
-                  "mode": "basic"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "fetch"
-            },
-            "properties": [
-              {
-                "id": "unit",
-                "value": "s"
-              },
-              {
-                "id": "decimals",
-                "value": 3
-              },
-              {
-                "id": "thresholds",
-                "value": {
-                  "mode": "absolute",
-                  "steps": [
-                    {
-                      "color": "#1a7a42",
-                      "value": null
-                    },
-                    {
-                      "color": "#73BF69",
-                      "value": 0.25
-                    },
-                    {
-                      "color": "#E88C30",
-                      "value": 1
-                    },
-                    {
-                      "color": "#D4413A",
-                      "value": 2
-                    },
-                    {
-                      "color": "#B7307A",
-                      "value": 5
-                    }
-                  ]
-                }
-              },
-              {
-                "id": "custom.cellOptions",
-                "value": {
-                  "type": "color-background",
-                  "mode": "basic"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "header wait"
-            },
-            "properties": [
-              {
-                "id": "unit",
-                "value": "s"
-              },
-              {
-                "id": "decimals",
-                "value": 3
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "block"
-            },
-            "properties": [
-              {
-                "id": "decimals",
-                "value": 0
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "slot"
-            },
-            "properties": [
-              {
-                "id": "decimals",
-                "value": 0
-              }
-            ]
-          }
-        ]
-      },
-      "options": {
-        "showHeader": true,
-        "cellHeight": "sm",
-        "footer": {
-          "show": false
-        },
-        "sortBy": [
-          {
-            "displayName": "block",
-            "desc": true
-          }
-        ]
-      },
-      "transformations": [
-        {
-          "id": "merge",
-          "options": {}
-        },
-        {
-          "id": "organize",
-          "options": {
-            "excludeByName": {
-              "Time": true,
-              "instance": true,
-              "idx": true
-            },
-            "renameByName": {
-              "Value #A": "block",
-              "Value #B": "slot",
-              "Value #C": "kind",
-              "Value #D": "delay",
-              "Value #E": "fetch",
-              "Value #F": "header wait",
-              "Value #G": "adopted"
-            }
-          }
-        }
-      ]
-    },
-    {
-      "type": "table",
-      "title": "Recent Endorser Blocks",
-      "description": "The last endorser blocks whose manifest and every transaction arrived locally, one row per EB. arrival: after the EB's slot. The dashed 5s on the timing panel is the provisional diffusion window.",
-      "id": 119,
-      "transparent": true,
       "datasource": {
         "type": "prometheus",
         "uid": "default"
       },
-      "gridPos": {
-        "h": 9,
-        "w": 24,
-        "x": 0,
-        "y": 72
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "default"
-          },
-          "expr": "max by (instance, idx) (dingo_leios_recent_eb_slot{network=\"$network\",instance=~\"$instance\"})",
-          "instant": true,
-          "range": false,
-          "format": "table",
-          "legendFormat": "",
-          "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "default"
-          },
-          "expr": "max by (instance, idx) (dingo_leios_recent_eb_arrival_delay_seconds{network=\"$network\",instance=~\"$instance\"})",
-          "instant": true,
-          "range": false,
-          "format": "table",
-          "legendFormat": "",
-          "refId": "B"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "default"
-          },
-          "expr": "max by (instance, idx) (dingo_leios_recent_eb_tx_count{network=\"$network\",instance=~\"$instance\"})",
-          "instant": true,
-          "range": false,
-          "format": "table",
-          "legendFormat": "",
-          "refId": "C"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "align": "auto",
-            "cellOptions": {
-              "type": "auto"
-            }
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "text",
-                "value": null
-              }
-            ]
-          }
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "arrival"
-            },
-            "properties": [
-              {
-                "id": "unit",
-                "value": "s"
-              },
-              {
-                "id": "decimals",
-                "value": 3
-              },
-              {
-                "id": "thresholds",
-                "value": {
-                  "mode": "absolute",
-                  "steps": [
-                    {
-                      "color": "#73BF69",
-                      "value": null
-                    },
-                    {
-                      "color": "#E88C30",
-                      "value": 3
-                    },
-                    {
-                      "color": "#D4413A",
-                      "value": 5
-                    }
-                  ]
-                }
-              },
-              {
-                "id": "custom.cellOptions",
-                "value": {
-                  "type": "color-background",
-                  "mode": "basic"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "EB slot"
-            },
-            "properties": [
-              {
-                "id": "decimals",
-                "value": 0
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "txs"
-            },
-            "properties": [
-              {
-                "id": "decimals",
-                "value": 0
-              }
-            ]
-          }
-        ]
-      },
       "options": {
-        "showHeader": true,
-        "cellHeight": "sm",
-        "footer": {
-          "show": false
+        "renderMode": "data",
+        "editors": [],
+        "editor": {
+          "language": "html",
+          "format": "auto"
         },
-        "sortBy": [
-          {
-            "displayName": "EB slot",
-            "desc": true
-          }
-        ]
+        "wrap": false,
+        "contentPartials": [],
+        "content": "<div class=\"ebl\"><div class=\"lg\"><span><i class=\"tk\"></i>announcing RB</span><span><i class=\"dt\"></i>EB arrived (size = txs)</span><span><i class=\"dm\"></i>certified by next RB</span><span style=\"color:#E8746D\">× not certified</span><span><i class=\"ad\"></i>RB adopted</span><span id=\"eblc-note\" class=\"nt\"></span></div><div id=\"eblc-sum\" class=\"sm\"></div><div class=\"cw\"><canvas id=\"eblc\"></canvas><div id=\"eblc-tip\" class=\"tp\"></div></div></div>",
+        "defaultContent": "",
+        "helpers": "",
+        "afterRender": "// Dingo Leios — Endorser Block Lifecycle afterRender JS\n// One row per endorser block, newest on top. x = seconds after the EB's slot (its announcing\n// RB's slot). Marks: grey tick = announcing RB arrived, dot = EB body arrived (size = txs),\n// purple diamond = the child RB that certifies it arrived, white tick = that RB adopted.\n// Background bands are dingo's pipeline windows: diffuse 5, vote 10, certify-by 20 slots.\n(function () {\n  var s = (context.panelData && context.panelData.series) ? context.panelData.series : [];\n  var tFrom = 0; try { tFrom = context.grafana.timeRange.from.valueOf() } catch (e) { }\n  /* ring reader: series per idx slot, values paired with the key series by idx and scrape\n     timestamp; returns {key: {ref: latest value}} for keys first seen in the time range */\n  function ring(keyRef, refs) {\n    var byIdx = {}, inst = null, out = {};\n    for (var si = 0; si < s.length; si++) {\n      var ref = s[si].refId; if (ref !== keyRef && refs.indexOf(ref) < 0) continue;\n      var f = s[si].fields, tf = null, nf = null;\n      for (var i = 0; i < f.length; i++) { if (f[i].type === 'time' && !tf) tf = f[i]; else if (f[i].type === 'number' && !nf) nf = f[i] }\n      if (!tf || !nf) continue;\n      var lb = nf.labels || {}; if (lb.idx === undefined) continue;\n      if (inst === null) inst = lb.instance || ''; if ((lb.instance || '') !== inst) continue;\n      (byIdx[lb.idx] = byIdx[lb.idx] || {})[ref] = { t: tf.values, v: nf.values };\n    }\n    for (var k in byIdx) {\n      var kS = byIdx[k][keyRef]; if (!kS) continue; var at = {};\n      for (var r = 0; r < refs.length; r++) {\n        var vs = byIdx[k][refs[r]]; if (!vs) continue; var m = {};\n        for (var i = 0; i < vs.t.length; i++) m[Math.round(vs.t[i] / 1000)] = vs.v[i];\n        at[refs[r]] = m;\n      }\n      for (var i = 0; i < kS.t.length; i++) {\n        var ts = Math.round(kS.t[i] / 1000), key = kS.v[i]; if (key === null || key === undefined) continue;\n        var e = out[key]; if (!e) { e = out[key] = { first: kS.t[i] } } else if (kS.t[i] < e.first) e.first = kS.t[i];\n        for (var r2 in at) { var v = at[r2][ts]; if (v !== undefined && v !== null) e[r2] = v }\n      }\n    }\n    for (var key in out) if (out[key].first < tFrom) delete out[key];\n    return out;\n  }\n  var rb = ring('RBN', ['RDR', 'RKD', 'RSL']);\n  var ad = ring('RAB', ['RAD']);\n  var eb = ring('ESL', ['EAD', 'ETX']);\n  var cv = document.getElementById('eblc'), note = document.getElementById('eblc-note'), sum = document.getElementById('eblc-sum'), tip = document.getElementById('eblc-tip');\n  if (!cv) return;\n  try { var el = cv.parentElement; while (el && el !== document.body) { var cls = typeof el.className === 'string' ? el.className : ''; if (cls.indexOf('react-grid-item') >= 0) break; el.style.height = '100%'; el = el.parentElement } } catch (e) { }\n  /* RBs by slot; the RB after an EB's announcing RB is the one that can certify it */\n  var bySlot = {}, rbList = [];\n  for (var bn in rb) { var r = rb[bn]; if (r.RSL === undefined) continue; var o = { bn: Number(bn), slot: r.RSL, d: r.RDR, k: r.RKD || 0, a: ad[bn] ? ad[bn].RAD : undefined }; bySlot[o.slot] = o; rbList.push(o) }\n  var byBn = {}; rbList.forEach(function (b) { byBn[b.bn] = b });\n  var rows = [];\n  for (var sl in eb) {\n    var e = { slot: Number(sl), d: eb[sl].EAD, tx: eb[sl].ETX || 0 }, ann = bySlot[e.slot], ch = ann ? byBn[ann.bn + 1] : null;\n    e.ann = ann; e.child = ch;\n    e.state = !ann ? 'unmatched' : !ch ? 'pending' : (ch.k & 2) ? 'certified' : 'skipped';\n    rows.push(e);\n  }\n  rows.sort(function (a, b) { return b.slot - a.slot });\n  if (note) note.textContent = !rows.length ? 'no endorser blocks in the time range yet (needs dingo_leios_recent_eb_* metrics)' :\n    !rbList.length ? 'this node exports no RB slot, so certification cannot be matched' : '';\n  var dpr = window.devicePixelRatio || 1;\n  cv.width = cv.offsetWidth * dpr; cv.height = cv.offsetHeight * dpr;\n  var ctx = cv.getContext('2d'); ctx.scale(dpr, dpr);\n  var w = cv.offsetWidth, h = cv.offsetHeight; ctx.clearRect(0, 0, w, h);\n  if (!rows.length) { if (sum) sum.textContent = ''; return }\n  /* summary sentence */\n  var arr = rows.filter(function (e) { return e.d !== undefined }).map(function (e) { return e.d }).sort(function (a, b) { return a - b });\n  var med = arr.length ? arr[Math.floor(arr.length / 2)] : null, late = arr.filter(function (v) { return v > 5 }).length;\n  var cert = rows.filter(function (e) { return e.state === 'certified' }), skip = rows.filter(function (e) { return e.state === 'skipped' }).length;\n  var big = rows.filter(function (e) { return e.tx >= 1000 }).length;\n  var cd = cert.filter(function (e) { return e.child.d !== undefined }).map(function (e) { return e.child.d }), cdAvg = cd.length ? cd.reduce(function (a, b) { return a + b }, 0) / cd.length : null;\n  var pl = rbList.filter(function (b) { return !(b.k & 2) && b.d !== undefined }).map(function (b) { return b.d }), plAvg = pl.length ? pl.reduce(function (a, b) { return a + b }, 0) / pl.length : null;\n  if (sum) sum.textContent = rows.length + ' EBs · median arrival ' + (med !== null ? med.toFixed(1) + 's' : '?') + (late ? ' · ' + late + ' over 5s' : '') +\n    ' · ' + cert.length + ' certified' + (skip ? ', ' + skip + ' not certified by the next RB' : '') + (big ? ' · ' + big + ' with ≥1k txs' : '') +\n    (cdAvg !== null && plAvg !== null ? ' · certifying RBs arrive ' + cdAvg.toFixed(2) + 's vs ' + plAvg.toFixed(2) + 's for others' : '');\n  var LAB = 118, RT = 150, PADT = 16;\n  var xmax = 25; rows.forEach(function (e) { if (e.child) xmax = Math.max(xmax, e.child.slot - e.slot + (e.child.a || e.child.d || 0) + 1) }); xmax = Math.min(xmax, 90);\n  function xOf(t) { return LAB + Math.max(0, Math.min(1, t / xmax)) * (w - LAB - RT) }\n  var rh = Math.max(10, Math.min(22, (h - PADT - 4) / rows.length));\n  /* pipeline window bands */\n  [[0, 5, 'rgba(115,191,105,.07)', 'diffuse'], [5, 10, 'rgba(87,148,242,.06)', 'vote'], [10, 20, 'rgba(184,119,217,.05)', 'certify']].forEach(function (b) {\n    ctx.fillStyle = b[2]; ctx.fillRect(xOf(b[0]), PADT, xOf(b[1]) - xOf(b[0]), h - PADT);\n    ctx.fillStyle = 'rgba(180,200,230,.45)'; ctx.font = '9px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';\n    ctx.fillText(b[3], (xOf(b[0]) + xOf(b[1])) / 2, 6);\n  });\n  ctx.textAlign = 'left'; ctx.fillStyle = 'rgba(180,200,230,.55)';\n  [0, 5, 10, 20, 30, 60].forEach(function (t) {\n    if (t > xmax) return; var x = xOf(t);\n    ctx.strokeStyle = 'rgba(255,255,255,.08)'; ctx.beginPath(); ctx.moveTo(x, PADT); ctx.lineTo(x, h); ctx.stroke();\n    if (t) ctx.fillText(t + 's', x + 2, PADT - 2);\n  });\n  function ebCol(v) { return v > 5 ? '#D4413A' : v > 3 ? '#E88C30' : '#73BF69' }\n  var hits = [];\n  rows.forEach(function (e, i) {\n    var y = PADT + i * rh + rh / 2;\n    if (i % 2) { ctx.fillStyle = 'rgba(255,255,255,.025)'; ctx.fillRect(0, y - rh / 2, w, rh) }\n    ctx.fillStyle = 'rgba(220,230,245,.8)'; ctx.font = '10px sans-serif'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';\n    ctx.fillText('slot ' + e.slot.toLocaleString(), 6, y);\n    ctx.fillStyle = 'rgba(180,200,230,.6)'; ctx.textAlign = 'right'; ctx.fillText(Math.round(e.tx).toLocaleString() + ' tx', LAB - 8, y);\n    var ea = e.d !== undefined ? xOf(e.d) : null;\n    /* lifeline from slot to certifying RB adoption */\n    var endT = e.child ? (e.child.slot - e.slot) + (e.child.a !== undefined ? e.child.a : (e.child.d || 0)) : (e.d || 0);\n    ctx.strokeStyle = e.state === 'skipped' ? 'rgba(212,65,58,.5)' : 'rgba(184,119,217,.45)'; ctx.lineWidth = 2;\n    ctx.beginPath(); ctx.moveTo(xOf(0), y); ctx.lineTo(xOf(endT), y); ctx.stroke();\n    if (e.ann && e.ann.d !== undefined) { ctx.fillStyle = 'rgba(170,180,195,.8)'; ctx.fillRect(xOf(e.ann.d) - 1, y - rh * 0.3, 2, rh * 0.6) }\n    if (e.child) {\n      var cx = xOf(e.child.slot - e.slot + (e.child.d || 0));\n      if (e.state === 'certified') {\n        ctx.fillStyle = '#B877D9'; ctx.beginPath(); ctx.moveTo(cx, y - 5); ctx.lineTo(cx + 5, y); ctx.lineTo(cx, y + 5); ctx.lineTo(cx - 5, y); ctx.closePath(); ctx.fill();\n      } else { ctx.strokeStyle = '#D4413A'; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(cx - 4, y - 4); ctx.lineTo(cx + 4, y + 4); ctx.moveTo(cx + 4, y - 4); ctx.lineTo(cx - 4, y + 4); ctx.stroke() }\n      if (e.child.a !== undefined) { ctx.fillStyle = 'rgba(255,255,255,.9)'; ctx.fillRect(xOf(e.child.slot - e.slot + e.child.a) - 1, y - rh * 0.35, 2, rh * 0.7) }\n    }\n    if (ea !== null) {\n      var r = Math.max(2.5, Math.min(rh / 2 - 1, 2.5 + Math.sqrt(e.tx) / 9));\n      ctx.beginPath(); ctx.arc(ea, y, r, 0, Math.PI * 2); ctx.fillStyle = 'rgba(184,119,217,.35)'; ctx.fill(); ctx.strokeStyle = ebCol(e.d); ctx.lineWidth = 1.5; ctx.stroke();\n    }\n    ctx.textAlign = 'left'; ctx.font = '10px sans-serif';\n    var rt = (e.d !== undefined ? 'arr ' + e.d.toFixed(1) + 's' : 'arr ?') + ' · ' +\n      (e.state === 'certified' ? 'cert +' + (e.child.slot - e.slot) + 's' : e.state === 'skipped' ? 'not certified' : e.state === 'unmatched' ? 'RB not in ring' : 'waiting');\n    ctx.fillStyle = e.state === 'skipped' ? '#E8746D' : e.d > 5 ? '#E8746D' : 'rgba(200,215,235,.75)'; ctx.fillText(rt, w - RT + 8, y);\n    var lines = ['EB @ slot ' + e.slot.toLocaleString() + ' · ' + Math.round(e.tx).toLocaleString() + ' txs'];\n    if (e.ann) lines.push('announced by RB ' + e.ann.bn.toLocaleString() + (e.ann.d !== undefined ? ', which arrived ' + e.ann.d.toFixed(2) + 's after the slot' : ''));\n    lines.push('EB body arrived ' + (e.d !== undefined ? e.d.toFixed(2) + 's after the slot' : '?'));\n    if (e.child) {\n      lines.push((e.state === 'certified' ? 'certified by' : 'NOT certified by') + ' the next RB ' + e.child.bn.toLocaleString() + ' at slot ' + e.child.slot.toLocaleString() + ' (+' + (e.child.slot - e.slot) + ' slots)');\n      if (e.child.d !== undefined) lines.push('  that RB arrived ' + e.child.d.toFixed(2) + 's after its slot' + (e.child.a !== undefined ? ', adopted at ' + e.child.a.toFixed(2) + 's' : ''));\n    } else lines.push(e.ann ? 'next RB not seen yet' : 'announcing RB is no longer in the 16-block ring');\n    hits.push({ x0: 0, x1: w, y0: y - rh / 2, y1: y + rh / 2, t: lines.join('\\n') });\n  });\n  cv._hits = hits;\n  if (!cv._bound) {\n    cv._bound = true;\n    cv.addEventListener('mousemove', function (ev) {\n      var hs = cv._hits || [], mx = ev.offsetX, my = ev.offsetY, hit = null;\n      for (var i = 0; i < hs.length; i++) { var q = hs[i]; if (my >= q.y0 && my < q.y1) { hit = q; break } }\n      if (!tip) return;\n      if (!hit) { tip.style.display = 'none'; return }\n      tip.textContent = hit.t; tip.style.display = 'block';\n      tip.style.left = Math.min(mx + 12, cv.offsetWidth - 320) + 'px'; tip.style.top = Math.max(0, my + 12) + 'px';\n    });\n    cv.addEventListener('mouseleave', function () { if (tip) tip.style.display = 'none' });\n  }\n})();\n",
+        "externalStyles": [],
+        "styles": ".ebl{position:relative;width:100%;height:100%;padding:4px 6px;box-sizing:border-box;display:flex;flex-direction:column;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;color:#e6edf3}.ebl .lg{display:flex;gap:14px;font-size:10px;color:rgba(200,220,255,.7);align-items:center;flex-wrap:wrap}.ebl .lg i{display:inline-block;margin-right:4px;vertical-align:middle}.ebl .tk{width:2px;height:10px;background:rgba(170,180,195,.8)}.ebl .ad{width:2px;height:10px;background:#fff}.ebl .dt{width:9px;height:9px;border-radius:50%;background:rgba(184,119,217,.35);border:1.5px solid #73BF69}.ebl .dm{width:7px;height:7px;background:#B877D9;transform:rotate(45deg)}.ebl .nt{color:#E88C30}.ebl .sm{font-size:12px;margin:4px 0 2px;color:#e6edf3}.ebl .cw{position:relative;flex:1;min-height:0}.ebl canvas{width:100%;height:100%;display:block}.ebl .tp{display:none;position:absolute;pointer-events:none;background:rgba(17,20,26,.95);border:1px solid rgba(255,255,255,.15);border-radius:4px;padding:6px 8px;font-size:11px;white-space:pre-line;max-width:320px;z-index:5}"
       },
-      "transformations": [
-        {
-          "id": "merge",
-          "options": {}
-        },
-        {
-          "id": "organize",
-          "options": {
-            "excludeByName": {
-              "Time": true,
-              "instance": true,
-              "idx": true
-            },
-            "renameByName": {
-              "Value #A": "EB slot",
-              "Value #B": "arrival",
-              "Value #C": "txs"
-            }
-          }
-        }
-      ]
+      "description": "One row per endorser block, newest on top; x is seconds after the EB slot (its announcing RB's slot). Grey tick: announcing RB arrived. Dot: EB body arrived (size = txs; outline green ≤3s, orange ≤5s, red >5s). Purple diamond: the next RB, which certified it, arrived; red ×: the next RB did not certify it. White tick: that RB adopted. Bands are dingo's pipeline windows (diffuse 5, vote 10, certify-by 20 slots)."
     },
     {
       "type": "timeseries",
@@ -3297,7 +2872,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 81
+        "y": 75
       },
       "fieldConfig": {
         "defaults": {
@@ -3393,7 +2968,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 81
+        "y": 75
       },
       "fieldConfig": {
         "defaults": {
@@ -3497,6 +3072,594 @@
       ],
       "transparent": true,
       "description": "Largest endorser block (tx count) held in the recent-EB ring over each 5m, against RB adoption delay p95. When large EBs line up with adoption spikes, applying certified EB transactions is what holds the tip back."
+    },
+    {
+      "type": "row",
+      "id": 123,
+      "title": "Block Detail Tables",
+      "collapsed": true,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 83
+      },
+      "panels": [
+        {
+          "type": "table",
+          "title": "Recent Ranking Blocks",
+          "description": "The last blocks fetched at tip, one row per RB. delay: body arrived after the slot. fetch: request to body. header wait: delay minus fetch, time spent before the block was even requested (chainsync). adopted: the ledger made it the tip. The Block Lanes panel links each certifying RB to its EB.",
+          "id": 118,
+          "transparent": true,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "default"
+          },
+          "gridPos": {
+            "h": 9,
+            "w": 24,
+            "x": 0,
+            "y": 84
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "default"
+              },
+              "expr": "max by (instance, idx) (dingo_blockfetch_recent_block_number{network=\"$network\",instance=~\"$instance\"})",
+              "instant": true,
+              "range": false,
+              "format": "table",
+              "legendFormat": "",
+              "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "default"
+              },
+              "expr": "max by (instance, idx) (dingo_blockfetch_recent_block_slot{network=\"$network\",instance=~\"$instance\"})",
+              "instant": true,
+              "range": false,
+              "format": "table",
+              "legendFormat": "",
+              "refId": "B"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "default"
+              },
+              "expr": "max by (instance, idx) (dingo_blockfetch_recent_block_kind{network=\"$network\",instance=~\"$instance\"})",
+              "instant": true,
+              "range": false,
+              "format": "table",
+              "legendFormat": "",
+              "refId": "C"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "default"
+              },
+              "expr": "max by (instance, idx) (dingo_blockfetch_recent_delay_seconds{network=\"$network\",instance=~\"$instance\"})",
+              "instant": true,
+              "range": false,
+              "format": "table",
+              "legendFormat": "",
+              "refId": "D"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "default"
+              },
+              "expr": "max by (instance, idx) (dingo_blockfetch_recent_fetch_duration_seconds{network=\"$network\",instance=~\"$instance\"})",
+              "instant": true,
+              "range": false,
+              "format": "table",
+              "legendFormat": "",
+              "refId": "E"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "default"
+              },
+              "expr": "max by (instance, idx) (dingo_blockfetch_recent_delay_seconds{network=\"$network\",instance=~\"$instance\"}) - max by (instance, idx) (dingo_blockfetch_recent_fetch_duration_seconds{network=\"$network\",instance=~\"$instance\"})",
+              "instant": true,
+              "range": false,
+              "format": "table",
+              "legendFormat": "",
+              "refId": "F"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "default"
+              },
+              "expr": "max by (instance, idx) (dingo_ledger_recent_adoption_delay_seconds{network=\"$network\",instance=~\"$instance\"} and on (instance, idx) (dingo_ledger_recent_adoption_block_number{network=\"$network\",instance=~\"$instance\"} == on (instance, idx) dingo_blockfetch_recent_block_number{network=\"$network\",instance=~\"$instance\"}))",
+              "instant": true,
+              "range": false,
+              "format": "table",
+              "legendFormat": "",
+              "refId": "G"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "align": "auto",
+                "cellOptions": {
+                  "type": "auto"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "text",
+                    "value": null
+                  }
+                ]
+              }
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "kind"
+                },
+                "properties": [
+                  {
+                    "id": "mappings",
+                    "value": [
+                      {
+                        "type": "value",
+                        "options": {
+                          "0": {
+                            "text": "plain",
+                            "color": "text"
+                          },
+                          "1": {
+                            "text": "announces EB",
+                            "color": "#33CCE8"
+                          },
+                          "2": {
+                            "text": "certifies EB",
+                            "color": "#B877D9"
+                          },
+                          "3": {
+                            "text": "announces + certifies",
+                            "color": "#B877D9"
+                          }
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "id": "custom.cellOptions",
+                    "value": {
+                      "type": "color-text"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "delay"
+                },
+                "properties": [
+                  {
+                    "id": "unit",
+                    "value": "s"
+                  },
+                  {
+                    "id": "decimals",
+                    "value": 3
+                  },
+                  {
+                    "id": "thresholds",
+                    "value": {
+                      "mode": "absolute",
+                      "steps": [
+                        {
+                          "color": "#1a7a42",
+                          "value": null
+                        },
+                        {
+                          "color": "#73BF69",
+                          "value": 0.25
+                        },
+                        {
+                          "color": "#E88C30",
+                          "value": 1
+                        },
+                        {
+                          "color": "#D4413A",
+                          "value": 2
+                        },
+                        {
+                          "color": "#B7307A",
+                          "value": 5
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "id": "custom.cellOptions",
+                    "value": {
+                      "type": "color-background",
+                      "mode": "basic"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "adopted"
+                },
+                "properties": [
+                  {
+                    "id": "unit",
+                    "value": "s"
+                  },
+                  {
+                    "id": "decimals",
+                    "value": 3
+                  },
+                  {
+                    "id": "thresholds",
+                    "value": {
+                      "mode": "absolute",
+                      "steps": [
+                        {
+                          "color": "#1a7a42",
+                          "value": null
+                        },
+                        {
+                          "color": "#73BF69",
+                          "value": 0.25
+                        },
+                        {
+                          "color": "#E88C30",
+                          "value": 1
+                        },
+                        {
+                          "color": "#D4413A",
+                          "value": 2
+                        },
+                        {
+                          "color": "#B7307A",
+                          "value": 5
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "id": "custom.cellOptions",
+                    "value": {
+                      "type": "color-background",
+                      "mode": "basic"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "fetch"
+                },
+                "properties": [
+                  {
+                    "id": "unit",
+                    "value": "s"
+                  },
+                  {
+                    "id": "decimals",
+                    "value": 3
+                  },
+                  {
+                    "id": "thresholds",
+                    "value": {
+                      "mode": "absolute",
+                      "steps": [
+                        {
+                          "color": "#1a7a42",
+                          "value": null
+                        },
+                        {
+                          "color": "#73BF69",
+                          "value": 0.25
+                        },
+                        {
+                          "color": "#E88C30",
+                          "value": 1
+                        },
+                        {
+                          "color": "#D4413A",
+                          "value": 2
+                        },
+                        {
+                          "color": "#B7307A",
+                          "value": 5
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "id": "custom.cellOptions",
+                    "value": {
+                      "type": "color-background",
+                      "mode": "basic"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "header wait"
+                },
+                "properties": [
+                  {
+                    "id": "unit",
+                    "value": "s"
+                  },
+                  {
+                    "id": "decimals",
+                    "value": 3
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "block"
+                },
+                "properties": [
+                  {
+                    "id": "decimals",
+                    "value": 0
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "slot"
+                },
+                "properties": [
+                  {
+                    "id": "decimals",
+                    "value": 0
+                  }
+                ]
+              }
+            ]
+          },
+          "options": {
+            "showHeader": true,
+            "cellHeight": "sm",
+            "footer": {
+              "show": false
+            },
+            "sortBy": [
+              {
+                "displayName": "block",
+                "desc": true
+              }
+            ]
+          },
+          "transformations": [
+            {
+              "id": "merge",
+              "options": {}
+            },
+            {
+              "id": "organize",
+              "options": {
+                "excludeByName": {
+                  "Time": true,
+                  "instance": true,
+                  "idx": true
+                },
+                "renameByName": {
+                  "Value #A": "block",
+                  "Value #B": "slot",
+                  "Value #C": "kind",
+                  "Value #D": "delay",
+                  "Value #E": "fetch",
+                  "Value #F": "header wait",
+                  "Value #G": "adopted"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "type": "table",
+          "title": "Recent Endorser Blocks",
+          "description": "The last endorser blocks whose manifest and every transaction arrived locally, one row per EB. arrival: after the EB's slot. The dashed 5s on the timing panel is the provisional diffusion window.",
+          "id": 119,
+          "transparent": true,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "default"
+          },
+          "gridPos": {
+            "h": 9,
+            "w": 24,
+            "x": 0,
+            "y": 93
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "default"
+              },
+              "expr": "max by (instance, idx) (dingo_leios_recent_eb_slot{network=\"$network\",instance=~\"$instance\"})",
+              "instant": true,
+              "range": false,
+              "format": "table",
+              "legendFormat": "",
+              "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "default"
+              },
+              "expr": "max by (instance, idx) (dingo_leios_recent_eb_arrival_delay_seconds{network=\"$network\",instance=~\"$instance\"})",
+              "instant": true,
+              "range": false,
+              "format": "table",
+              "legendFormat": "",
+              "refId": "B"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "default"
+              },
+              "expr": "max by (instance, idx) (dingo_leios_recent_eb_tx_count{network=\"$network\",instance=~\"$instance\"})",
+              "instant": true,
+              "range": false,
+              "format": "table",
+              "legendFormat": "",
+              "refId": "C"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "align": "auto",
+                "cellOptions": {
+                  "type": "auto"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "text",
+                    "value": null
+                  }
+                ]
+              }
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "arrival"
+                },
+                "properties": [
+                  {
+                    "id": "unit",
+                    "value": "s"
+                  },
+                  {
+                    "id": "decimals",
+                    "value": 3
+                  },
+                  {
+                    "id": "thresholds",
+                    "value": {
+                      "mode": "absolute",
+                      "steps": [
+                        {
+                          "color": "#73BF69",
+                          "value": null
+                        },
+                        {
+                          "color": "#E88C30",
+                          "value": 3
+                        },
+                        {
+                          "color": "#D4413A",
+                          "value": 5
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "id": "custom.cellOptions",
+                    "value": {
+                      "type": "color-background",
+                      "mode": "basic"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "EB slot"
+                },
+                "properties": [
+                  {
+                    "id": "decimals",
+                    "value": 0
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "txs"
+                },
+                "properties": [
+                  {
+                    "id": "decimals",
+                    "value": 0
+                  }
+                ]
+              }
+            ]
+          },
+          "options": {
+            "showHeader": true,
+            "cellHeight": "sm",
+            "footer": {
+              "show": false
+            },
+            "sortBy": [
+              {
+                "displayName": "EB slot",
+                "desc": true
+              }
+            ]
+          },
+          "transformations": [
+            {
+              "id": "merge",
+              "options": {}
+            },
+            {
+              "id": "organize",
+              "options": {
+                "excludeByName": {
+                  "Time": true,
+                  "instance": true,
+                  "idx": true
+                },
+                "renameByName": {
+                  "Value #A": "EB slot",
+                  "Value #B": "arrival",
+                  "Value #C": "txs"
+                }
+              }
+            }
+          ]
+        }
+      ]
     }
   ]
 }
