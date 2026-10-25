@@ -17,6 +17,7 @@ package dmq
 import (
 	"bytes"
 	"encoding/hex"
+	"runtime"
 	"testing"
 
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -410,4 +411,97 @@ func TestCheckMessageShape(t *testing.T) {
 			assert.Contains(t, err.Error(), tt.wantErr)
 		})
 	}
+}
+
+// replyIDsOf is a message 2 naming n IDs, every one of them valid.
+func replyIDsOf(n int) []byte {
+	entry := concat([]byte{0x82, 0x58, 0x20}, fill(0x11, 32), []byte{0x01})
+	return concat(
+		[]byte{0x82, 0x02, 0x9f},
+		bytes.Repeat(entry, n),
+		[]byte{0xff},
+	)
+}
+
+func TestSigMessagesBoundWhatAPeerSends(t *testing.T) {
+	t.Parallel()
+
+	t.Run(
+		"a request over its limit is refused before it is decoded",
+		func(t *testing.T) {
+			t.Parallel()
+			// Not valid CBOR: only a size check run first reports the limit.
+			_, err := newSigMsgFromCbor(
+				uint(sigMsgRequestSigs), make([]byte, sigRequestByteLimit+1),
+			)
+			require.ErrorContains(t, err, "byte limit")
+		},
+	)
+	t.Run(
+		"a reply over its limit is refused before it is decoded",
+		func(t *testing.T) {
+			t.Parallel()
+			_, err := newSigMsgFromCbor(
+				uint(sigMsgReplySigs), make([]byte, sigReplyByteLimit+1),
+			)
+			require.ErrorContains(t, err, "byte limit")
+		},
+	)
+	t.Run(
+		"a reply may be larger than a request is allowed to be",
+		func(t *testing.T) {
+			t.Parallel()
+			encoded := replyIDsOf(8000)
+			require.Greater(t, len(encoded), sigRequestByteLimit)
+			got, err := newSigMsgFromCbor(uint(sigMsgReplyIDs), encoded)
+			require.NoError(t, err)
+			require.Len(t, got.(*msgReplyIDs).IDs, 8000)
+		},
+	)
+	t.Run("a list of the most items is accepted", func(t *testing.T) {
+		t.Parallel()
+		got, err := newSigMsgFromCbor(
+			uint(sigMsgReplyIDs), replyIDsOf(maxListItems),
+		)
+		require.NoError(t, err)
+		require.Len(t, got.(*msgReplyIDs).IDs, maxListItems)
+	})
+	t.Run("a list of one more is refused", func(t *testing.T) {
+		t.Parallel()
+		_, err := newSigMsgFromCbor(
+			uint(sigMsgReplyIDs), replyIDsOf(maxListItems+1),
+		)
+		require.ErrorContains(t, err, "more than 65535 items")
+	})
+	t.Run("an unterminated list is refused", func(t *testing.T) {
+		t.Parallel()
+		_, err := newSigMsgFromCbor(
+			uint(sigMsgRequestSigs),
+			concat([]byte{0x82, 0x04, 0x9f, 0x58, 0x20}, fill(0x11, 32)),
+		)
+		require.Error(t, err)
+	})
+}
+
+// A request padded with empty entries is refused at the first one, and the
+// list is never built.
+//
+// Not t.Parallel: it reads the process-wide allocation counter.
+func TestSigMessagesDoNotBuildAListBeforeCheckingIt(t *testing.T) {
+	const entries = 200_000
+	encoded := concat(
+		[]byte{0x82, 0x04, 0x9f},
+		bytes.Repeat([]byte{0x40}, entries),
+		[]byte{0xff},
+	)
+	require.LessOrEqual(t, len(encoded), sigRequestByteLimit)
+
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	_, err := newSigMsgFromCbor(uint(sigMsgRequestSigs), encoded)
+	runtime.ReadMemStats(&after)
+
+	require.ErrorContains(t, err, "message ID is 0 bytes")
+	// Building the list of 200,000 entries takes about ten megabytes.
+	require.Less(t, after.TotalAlloc-before.TotalAlloc, uint64(2<<20))
 }

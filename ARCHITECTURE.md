@@ -8389,6 +8389,15 @@ to a non-blocking request is `[2, []]`, and an empty reply to a blocking one is
 not allowed. `sigsub_messages_test.go` checks the encodings byte for byte
 against ones written out by hand from dmq-node's CDDL and codec.
 
+Input from a peer is bounded before it is decoded. A request is refused above
+256 KiB and a reply above 4 MiB, by message type in every state, so a request
+pipelined while a reply is owed is held to the same limit as one received in
+`StIdle`; the serving side holds at most 1 MiB of a message still arriving and
+the pulling side 8 MiB. A list is read one item at a time and refused beyond
+65535 items, the most a 16-bit count can name, and each ID or message is
+checked as it is read, so a list of empty entries is refused at its first entry
+without the list ever being built.
+
 The two sides are reversed from TxSubmission2. The side that pulls holds agency
 in `StIdle` and is the connection's initiator, which is gouroboros's client
 role; the side that serves is the responder, the server role. That reversal is

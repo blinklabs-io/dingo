@@ -160,6 +160,12 @@ func newSigMsgFromCbor(
 	msgType uint,
 	data []byte,
 ) (protocol.Message, error) {
+	if limit := inboundByteLimit(msgType); len(data) > limit {
+		return nil, fmt.Errorf(
+			"%s: message %d is %d bytes, over the %d byte limit",
+			sigProtocolName, msgType, len(data), limit,
+		)
+	}
 	parts := make([]cbor.RawMessage, 0, 4)
 	if _, err := cbor.Decode(data, &parts); err != nil {
 		return nil, fmt.Errorf("%s: decode error: %w", sigProtocolName, err)
@@ -211,20 +217,19 @@ func decodeSigMsgParts(
 		if err := wantIndefiniteList(parts[1]); err != nil {
 			return nil, err
 		}
-		var items []cbor.RawMessage
-		if _, err := cbor.Decode(parts[1], &items); err != nil {
-			return nil, fmt.Errorf("reply IDs list: %w", err)
-		}
-		ids := make([]ocommon.MessageIDAndSize, 0, len(items))
-		for _, item := range items {
+		var ids []ocommon.MessageIDAndSize
+		if err := eachListItem(parts[1], func(item cbor.RawMessage) error {
 			var id ocommon.MessageIDAndSize
 			if _, err := cbor.Decode(item, &id); err != nil {
-				return nil, fmt.Errorf("reply IDs entry: %w", err)
+				return fmt.Errorf("reply IDs entry: %w", err)
 			}
 			if err := checkMessageID(id.MessageID); err != nil {
-				return nil, err
+				return err
 			}
 			ids = append(ids, id)
+			return nil
+		}); err != nil {
+			return nil, fmt.Errorf("reply IDs list: %w", err)
 		}
 		return newMsgReplyIDs(ids), nil
 	case sigMsgReplyNoIDs:
@@ -240,13 +245,18 @@ func decodeSigMsgParts(
 			return nil, err
 		}
 		var ids [][]byte
-		if _, err := cbor.Decode(parts[1], &ids); err != nil {
-			return nil, fmt.Errorf("request messages list: %w", err)
-		}
-		for _, id := range ids {
-			if err := checkMessageID(id); err != nil {
-				return nil, err
+		if err := eachListItem(parts[1], func(item cbor.RawMessage) error {
+			var id []byte
+			if _, err := cbor.Decode(item, &id); err != nil {
+				return fmt.Errorf("request messages entry: %w", err)
 			}
+			if err := checkMessageID(id); err != nil {
+				return err
+			}
+			ids = append(ids, id)
+			return nil
+		}); err != nil {
+			return nil, fmt.Errorf("request messages list: %w", err)
 		}
 		return newMsgRequestSigs(ids), nil
 	case sigMsgReplySigs:
@@ -256,17 +266,16 @@ func decodeSigMsgParts(
 		if err := wantIndefiniteList(parts[1]); err != nil {
 			return nil, err
 		}
-		var items []cbor.RawMessage
-		if _, err := cbor.Decode(parts[1], &items); err != nil {
-			return nil, fmt.Errorf("reply messages list: %w", err)
-		}
-		msgs := make([]ocommon.DmqMessage, 0, len(items))
-		for _, item := range items {
+		var msgs []ocommon.DmqMessage
+		if err := eachListItem(parts[1], func(item cbor.RawMessage) error {
 			msg, err := decodeWireMessage(item)
 			if err != nil {
-				return nil, fmt.Errorf("reply messages entry: %w", err)
+				return fmt.Errorf("reply messages entry: %w", err)
 			}
 			msgs = append(msgs, msg)
+			return nil
+		}); err != nil {
+			return nil, fmt.Errorf("reply messages list: %w", err)
 		}
 		return newMsgReplySigs(msgs), nil
 	case sigMsgDone:
@@ -289,6 +298,59 @@ func wantIndefiniteList(raw cbor.RawMessage) error {
 		return errors.New("list is not an indefinite-length array")
 	}
 	return nil
+}
+
+const cborBreak = 0xff
+
+// maxListItems is the most items a message may carry. The counts in a request
+// are 16 bits wide, so no valid list is longer.
+const maxListItems = math.MaxUint16
+
+// inboundByteLimit is the most bytes a received message of this type may
+// take, checked before any of it is decoded. A request names at most a window
+// of IDs and a reply at most a few thousand items, and a peer's message never
+// needs more.
+func inboundByteLimit(msgType uint) int {
+	switch msgType {
+	case uint(sigMsgReplyIDs), uint(sigMsgReplyNoIDs), uint(sigMsgReplySigs):
+		return sigReplyByteLimit
+	default:
+		return sigRequestByteLimit
+	}
+}
+
+// eachListItem calls fn on each item of an indefinite-length list in turn. It
+// refuses a list of more than maxListItems items as soon as the next one
+// starts, and never holds more than the item in hand, so a list of empty
+// entries costs nothing beyond what fn keeps.
+func eachListItem(
+	raw cbor.RawMessage,
+	fn func(item cbor.RawMessage) error,
+) error {
+	if err := wantIndefiniteList(raw); err != nil {
+		return err
+	}
+	pos := 1
+	for count := 0; ; count++ {
+		if pos >= len(raw) {
+			return errors.New("list is not terminated")
+		}
+		if raw[pos] == cborBreak {
+			return nil
+		}
+		if count >= maxListItems {
+			return fmt.Errorf("list has more than %d items", maxListItems)
+		}
+		var item cbor.RawMessage
+		used, err := cbor.Decode(raw[pos:], &item)
+		if err != nil {
+			return err
+		}
+		if err := fn(item); err != nil {
+			return err
+		}
+		pos += used
+	}
 }
 
 // wireMessage is a message in the only shape CIP-0137 defines for version 2:

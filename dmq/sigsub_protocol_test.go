@@ -688,3 +688,58 @@ func TestSigProtocolPullerEnforcesItsTimeouts(t *testing.T) {
 		})
 	}
 }
+
+func TestSigStateMapBoundsWhatIsReceivedInEveryState(t *testing.T) {
+	t.Parallel()
+	for _, pipelined := range []bool{false, true} {
+		sm := sigStateMap(sigTimeouts{}, pipelined)
+		assert.Equal(
+			t, sigRequestByteLimit,
+			sm[sigStateIdle].PendingMessageByteLimit,
+			"Idle, pipelined=%v", pipelined,
+		)
+		for _, st := range []protocol.State{
+			sigStateIDsBlocking, sigStateIDsNonBlocking, sigStateSigs,
+		} {
+			assert.Equal(
+				t, sigReplyByteLimit, sm[st].PendingMessageByteLimit,
+				"state %v, pipelined=%v", st, pipelined,
+			)
+		}
+	}
+}
+
+// A request over the limit ends the connection at the serving side, whatever
+// the pulling side's own limit, before the request is decoded or checked
+// against the window.
+func TestSigProtocolServerRefusesAnOversizedRequest(t *testing.T) {
+	t.Parallel()
+	rec := newRecorder()
+	lifted := sigStateMap(sigTimeouts{}, false)
+	idle := lifted[sigStateIdle]
+	idle.PendingMessageByteLimit = 0
+	lifted[sigStateIdle] = idle
+	pair := newSigPair(t,
+		sigPullerConfig{stateMap: lifted},
+		sigServerConfig{
+			onRequestIDs:  func(bool, uint16, uint16) {},
+			onRequestSigs: func(i [][]byte) { rec.sigRequests <- i },
+		},
+	)
+
+	// More IDs than 256 KiB holds, none of them announced.
+	big := make([][]byte, sigRequestByteLimit/34+1)
+	for i := range big {
+		big[i] = sigID(byte(i))
+	}
+	_ = pair.puller.SendMessage(newMsgRequestSigs(big))
+
+	err := recv(t, pair.serverErr, "the refusal")
+	require.ErrorContains(t, err, "limit")
+	assert.NotErrorIs(t, err, protocol.ErrProtocolViolationInvalidMessage)
+	select {
+	case <-rec.sigRequests:
+		require.FailNow(t, "the request reached the callback")
+	default:
+	}
+}

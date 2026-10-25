@@ -44,6 +44,15 @@ const (
 	// names at most 65535 items, each a few dozen bytes for an ID and at most a
 	// couple of thousand for a message.
 	sigReplyByteLimit = 4 << 20
+	// sigRequestByteLimit bounds a request that is received or sent. A request
+	// for message bodies names at most the IDs a peer holds outstanding, a
+	// thousand of them at 34 bytes each at the most.
+	sigRequestByteLimit = 256 << 10
+	// sigServerReadLimit bounds the bytes the serving side holds for a message
+	// still arriving, which is only ever a run of requests. The pulling side
+	// holds a reply and the start of the next, so twice a reply.
+	sigServerReadLimit = 4 * sigRequestByteLimit
+	sigPullerReadLimit = 2 * sigReplyByteLimit
 )
 
 var (
@@ -96,7 +105,8 @@ func sigStateMap(
 	}
 	return protocol.StateMap{
 		sigStateIdle: protocol.StateMapEntry{
-			Agency: protocol.AgencyClient,
+			Agency:                  protocol.AgencyClient,
+			PendingMessageByteLimit: sigRequestByteLimit,
 			Transitions: []protocol.StateTransition{
 				{
 					MsgType:   sigMsgRequestIDs,
@@ -394,6 +404,7 @@ func newSigPuller(
 		MessageFromCborFunc: newSigMsgFromCbor,
 		StateMap:            stateMap,
 		InitialState:        sigStateIdle,
+		MaxReadBufferSize:   sigPullerReadLimit,
 	})
 	return p
 }
@@ -565,6 +576,8 @@ func newSigServer(
 		MessageFromCborFunc: newSigMsgFromCbor,
 		StateMap:            sigStateMap(cfg.timeouts, true),
 		InitialState:        sigStateIdle,
+		MaxReadBufferSize:   sigServerReadLimit,
+		IngressLimit:        sigServerReadLimit,
 	})
 	return s
 }
