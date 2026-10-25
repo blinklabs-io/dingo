@@ -28,6 +28,15 @@ import (
 	"github.com/blinklabs-io/dingo/keystore"
 )
 
+type ownerFileInfo struct {
+	os.FileInfo
+	uid uint32
+}
+
+func (i ownerFileInfo) Sys() any {
+	return &syscall.Stat_t{Uid: i.uid}
+}
+
 func TestReadRejectsInsecurePermissions(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "secret")
@@ -69,6 +78,64 @@ func TestReadRejectsDevice(t *testing.T) {
 	}
 }
 
+func TestReadRejectsWritableParentDirectory(t *testing.T) {
+	t.Parallel()
+	parent := t.TempDir()
+	path := filepath.Join(parent, "secret")
+	if err := os.WriteFile(path, []byte("s3cret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(parent, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Read(path)
+	if !errors.Is(err, keystore.ErrInsecureFileMode) {
+		t.Fatalf("Read(file in writable directory) error = %v", err)
+	}
+}
+
+func TestReadAcceptsStickyWritableParentDirectory(t *testing.T) {
+	t.Parallel()
+	parent := t.TempDir()
+	path := filepath.Join(parent, "secret")
+	if err := os.WriteFile(path, []byte("s3cret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(parent, 0o777|os.ModeSticky); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Read(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "s3cret" {
+		t.Fatalf("Read = %q, want %q", got, "s3cret")
+	}
+}
+
+func TestRequireTrustedOwner(t *testing.T) {
+	t.Parallel()
+	info, err := os.Stat(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := requireTrustedOwner(
+		"secret",
+		ownerFileInfo{FileInfo: info, uid: 0},
+	); err != nil {
+		t.Fatalf("root owner: %v", err)
+	}
+	// #nosec G115 -- test UID is bounded.
+	foreignUID := uint32(os.Geteuid() + 1)
+	err = requireTrustedOwner(
+		"secret",
+		ownerFileInfo{FileInfo: info, uid: foreignUID},
+	)
+	if !errors.Is(err, keystore.ErrInsecureFileOwner) {
+		t.Fatalf("foreign owner error = %v", err)
+	}
+}
+
 // A value file may be shared with its group, as an orchestrator delivers it
 // (a Kubernetes secret volume with mode 0440 and an fsGroup), but never with
 // other users. The mode is set after writing so the umask cannot change it.
@@ -91,7 +158,11 @@ func TestReadPermissionModes(t *testing.T) {
 	} {
 		t.Run(tc.mode.String(), func(t *testing.T) {
 			t.Parallel()
-			path := filepath.Join(t.TempDir(), "secret")
+			dir := t.TempDir()
+			if err := os.Chmod(dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(dir, "secret")
 			if err := os.WriteFile(path, []byte("s3cret\n"), 0o600); err != nil {
 				t.Fatal(err)
 			}

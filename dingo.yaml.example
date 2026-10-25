@@ -551,9 +551,10 @@
   # CLI: --koios-parity-api-key
   # apiKey: ""
   # File holding the API key, read at startup with trailing line endings
-  # removed. Must be a regular file that other users cannot access (on Unix
-  # owner and group access is allowed; on Windows only the owner,
-  # Administrators and SYSTEM), at most 64 KiB, and not blank. Set
+  # removed. Must be a regular file that other users cannot access. On Unix,
+  # the file and its non-sticky path entries must be owned by this user or root;
+  # owner and group file access is allowed. On Windows only the owner,
+  # Administrators and SYSTEM may have access. At most 64 KiB and not blank. Set
   # apiKey or apiKeyFile, not both.
   # Can be overridden with DINGO_KOIOS_PARITY_API_KEY_FILE
   # CLI: --koios-parity-api-key-file
