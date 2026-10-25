@@ -162,6 +162,10 @@ type DownloadConfig struct {
 	// across concurrent artifact downloads. Standalone downloads create one
 	// after opening DestDir.
 	spaceBudget *downloadSpaceBudget
+	// wrapStagingFile, when non-nil, wraps every write to the staging file
+	// beneath the free-space budget. Tests use it to inject filesystem
+	// write errors such as ENOSPC.
+	wrapStagingFile func(io.Writer) io.Writer
 	// HTTPClient, when non-nil, is reused for the download instead of
 	// constructing a fresh client per call. Callers that fetch many
 	// files (the v2 immutable pool) pass one shared keep-alive client so
@@ -794,7 +798,7 @@ func prepareDownloadFile(
 	filename string,
 	limit int64,
 	limitErr error,
-	spaceBudget *downloadSpaceBudget,
+	stagingWriter func(*os.File) io.Writer,
 ) (file *os.File, tmpName string, existingSize int64, ownedPartial bool, err error) {
 	createStaging := func() (*os.File, string, error) {
 		name := filename + ".partial-" + cryptorand.Text()
@@ -842,7 +846,7 @@ func prepareDownloadFile(
 		return file, tmpName, 0, false, nil
 	}
 	if _, err := io.Copy(
-		&downloadSpaceWriter{writer: file, budget: spaceBudget},
+		stagingWriter(file),
 		io.LimitReader(source, limit),
 	); err != nil {
 		_ = file.Close()
@@ -860,6 +864,16 @@ func prepareDownloadFile(
 // not outlive the failed attempt.
 func isDownloadSpaceError(err error) bool {
 	return errors.Is(err, errDownloadFreeSpace) || errors.Is(err, syscall.ENOSPC)
+}
+
+// stagingWriter returns the writer for the staging file, charged against
+// the shared free-space budget.
+func (cfg DownloadConfig) stagingWriter(file *os.File) io.Writer {
+	var w io.Writer = file
+	if cfg.wrapStagingFile != nil {
+		w = cfg.wrapStagingFile(w)
+	}
+	return &downloadSpaceWriter{writer: w, budget: cfg.spaceBudget}
 }
 
 func resetDownloadFile(file *os.File) error {
@@ -896,7 +910,7 @@ func downloadSnapshotOnce(
 	destPath := downloadDestinationPath(cfg)
 
 	file, tmpName, existingSize, ownedPartial, err := prepareDownloadFile(
-		root, filename, cfg.sizeLimit(), cfg.sizeLimitError(), cfg.spaceBudget,
+		root, filename, cfg.sizeLimit(), cfg.sizeLimitError(), cfg.stagingWriter,
 	)
 	if err != nil {
 		return "", err
@@ -1171,10 +1185,7 @@ func downloadSnapshotOnce(
 	)
 
 	pw := &progressWriter{
-		writer: &downloadSpaceWriter{
-			writer: file,
-			budget: cfg.spaceBudget,
-		},
+		writer:      cfg.stagingWriter(file),
 		total:       totalSize,
 		written:     existingSize,
 		startOffset: existingSize,

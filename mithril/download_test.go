@@ -1995,3 +1995,110 @@ func TestDownloadSnapshotFreeSpaceFailureDiscardsPartials(t *testing.T) {
 		})
 	}
 }
+
+// rangeServingClient serves body, honoring an open-ended Range request with a
+// 206, and records every Range header it receives.
+func rangeServingClient(body []byte, ranges *[]string) *http.Client {
+	return &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		rng := req.Header.Get("Range")
+		*ranges = append(*ranges, rng)
+		var start int
+		if _, err := fmt.Sscanf(rng, "bytes=%d-", &start); err == nil &&
+			start > 0 && start < len(body) {
+			return &http.Response{
+				StatusCode:    http.StatusPartialContent,
+				Body:          io.NopCloser(bytes.NewReader(body[start:])),
+				ContentLength: int64(len(body) - start),
+				Header: http.Header{"Content-Range": {fmt.Sprintf(
+					"bytes %d-%d/%d", start, len(body)-1, len(body),
+				)}},
+			}, nil
+		}
+		return &http.Response{
+			StatusCode:    http.StatusOK,
+			Body:          io.NopCloser(bytes.NewReader(body)),
+			ContentLength: int64(len(body)),
+			Header:        make(http.Header),
+		}, nil
+	})}
+}
+
+// TestDownloadSnapshotDoesNotResumeFromHardLink pins that a destination with
+// more than one link is never used as a resume prefix: a hard link would let
+// another file's contents become the head of the published artifact. The
+// download restarts from zero, and publishing replaces only the link.
+func TestDownloadSnapshotDoesNotResumeFromHardLink(t *testing.T) {
+	dir := t.TempDir()
+	other := filepath.Join(dir, "other")
+	require.NoError(t, os.WriteFile(other, []byte("xy"), 0o600))
+	if err := os.Link(other, filepath.Join(dir, "archive")); err != nil {
+		t.Skipf("hard links unavailable: %v", err)
+	}
+	var ranges []string
+	path, err := DownloadSnapshot(context.Background(), DownloadConfig{
+		URL: "https://example.test/archive", AllowInsecureHTTP: true,
+		DestDir: dir, Filename: "archive",
+		HTTPClient:          rangeServingClient([]byte("abc"), &ranges),
+		MaxTransientRetries: -1,
+	})
+	require.NoError(t, err)
+	require.Equal(t, []string{""}, ranges, "a hard-linked partial must not be resumed")
+	got, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.Equal(t, "abc", string(got))
+	got, err = os.ReadFile(other)
+	require.NoError(t, err)
+	require.Equal(t, "xy", string(got), "the other link must be left untouched")
+}
+
+// enospcWriter fails the failOn-th write (1-based) counted across every
+// writer sharing writes, with the error os.File returns on a full filesystem.
+type enospcWriter struct {
+	w      io.Writer
+	writes *int
+	failOn int
+}
+
+func (e *enospcWriter) Write(p []byte) (int, error) {
+	*e.writes++
+	if *e.writes == e.failOn {
+		return 0, &os.PathError{Op: "write", Path: "staging", Err: syscall.ENOSPC}
+	}
+	return e.w.Write(p)
+}
+
+// TestDownloadSnapshotENOSPCDiscardsPartials pins that a filesystem ENOSPC,
+// while copying the resume prefix or while writing the response body, leaves
+// neither the staging file nor the owned partial behind.
+func TestDownloadSnapshotENOSPCDiscardsPartials(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		failOn int
+		ranges []string
+	}{
+		{name: "copying resume prefix", failOn: 1},
+		{name: "writing response body", failOn: 2, ranges: []string{"bytes=1-"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			require.NoError(t, os.WriteFile(filepath.Join(dir, "archive"), []byte("a"), 0o600))
+			var ranges []string
+			writes := 0
+			_, err := DownloadSnapshot(context.Background(), DownloadConfig{
+				URL: "https://example.test/archive", AllowInsecureHTTP: true,
+				DestDir: dir, Filename: "archive",
+				HTTPClient:          rangeServingClient([]byte("abc"), &ranges),
+				MaxTransientRetries: -1,
+				wrapStagingFile: func(w io.Writer) io.Writer {
+					return &enospcWriter{w: w, writes: &writes, failOn: tc.failOn}
+				},
+			})
+			require.ErrorIs(t, err, syscall.ENOSPC)
+			require.Equal(t, tc.failOn, writes)
+			require.Equal(t, tc.ranges, ranges)
+			entries, err := os.ReadDir(dir)
+			require.NoError(t, err)
+			require.Empty(t, entries)
+		})
+	}
+}
