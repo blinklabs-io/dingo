@@ -20,6 +20,7 @@ import (
 	"net"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/peergov"
 	"github.com/blinklabs-io/dingo/topology"
@@ -108,31 +109,23 @@ func TestPeerSharingShareRequestBoundsValidPeers(t *testing.T) {
 	o := newOuroboros(OuroborosConfig{Logger: logger})
 	o.peerGov = peerGov
 
+	// Replies are ordered by a salted hash, so only the count and the
+	// membership of the valid sharable set are stable across salts.
+	valid := map[string]bool{
+		"44.0.0.1:3001":               true,
+		"[2001:4860:4860::8888]:3002": true,
+		"44.0.0.2:3003":               true,
+	}
 	tests := []struct {
 		name     string
 		amount   int
-		expected []string
+		expected int
 	}{
 		{name: "negative", amount: -1},
 		{name: "zero", amount: 0},
-		{name: "one", amount: 1, expected: []string{"44.0.0.1:3001"}},
-		{
-			name:   "exact available subset",
-			amount: 2,
-			expected: []string{
-				"44.0.0.1:3001",
-				"[2001:4860:4860::8888]:3002",
-			},
-		},
-		{
-			name:   "more than available",
-			amount: 10,
-			expected: []string{
-				"44.0.0.1:3001",
-				"[2001:4860:4860::8888]:3002",
-				"44.0.0.2:3003",
-			},
-		},
+		{name: "one", amount: 1, expected: 1},
+		{name: "two", amount: 2, expected: 2},
+		{name: "more than available", amount: 10, expected: 3},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -141,13 +134,17 @@ func TestPeerSharingShareRequestBoundsValidPeers(t *testing.T) {
 				tt.amount,
 			)
 			require.NoError(t, err)
-			require.Len(t, peers, len(tt.expected))
-			for i, expected := range tt.expected {
-				host, port, err := net.SplitHostPort(expected)
-				require.NoError(t, err)
-				require.True(t, peers[i].IP.Equal(net.ParseIP(host)))
-				require.Equal(t, port, strconv.Itoa(int(peers[i].Port)))
-				_, err = peers[i].MarshalCBOR()
+			require.Len(t, peers, tt.expected)
+			seen := make(map[string]bool, len(peers))
+			for _, p := range peers {
+				addr := net.JoinHostPort(
+					p.IP.String(),
+					strconv.Itoa(int(p.Port)),
+				)
+				require.True(t, valid[addr], "unexpected peer %s", addr)
+				require.False(t, seen[addr], "duplicate peer %s", addr)
+				seen[addr] = true
+				_, err = p.MarshalCBOR()
 				require.NoError(t, err, "every returned peer must serialize")
 			}
 		})
@@ -434,4 +431,152 @@ func TestPeerSharingReplyCollectsRequestedValidAddresses(t *testing.T) {
 		"44.0.0.1:3001",
 		"[2001:4860:4860::8888]:3002",
 	}, addrs)
+}
+
+// newSaltedShareRequestFixture returns an Ouroboros whose peer governor holds
+// the given sharable gossip peers plus one unsharable local root, with an
+// injected clock and salt source so rotation is deterministic.
+func newSaltedShareRequestFixture(
+	t *testing.T,
+	sharable []string,
+	clock *time.Time,
+	salts *[][16]byte,
+) *Ouroboros {
+	t.Helper()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	peerGov := peergov.NewPeerGovernor(peergov.PeerGovernorConfig{
+		Logger:          logger,
+		DisableOutbound: true,
+	})
+	require.NoError(
+		t,
+		peerGov.AddPeer("10.0.0.1:3001", peergov.PeerSourceTopologyLocalRoot),
+	)
+	for _, addr := range sharable {
+		require.NoError(
+			t,
+			peerGov.AddPeer(addr, peergov.PeerSourceP2PGossip),
+		)
+	}
+	o := newOuroboros(OuroborosConfig{Logger: logger})
+	o.peerGov = peerGov
+	o.peerShareSalt.now = func() time.Time { return *clock }
+	next := 0
+	o.peerShareSalt.newSalt = func() [16]byte {
+		salt := (*salts)[next%len(*salts)]
+		next++
+		return salt
+	}
+	return o
+}
+
+func shareRequestAddrs(
+	t *testing.T,
+	o *Ouroboros,
+	amount int,
+) []string {
+	t.Helper()
+	peers, err := o.peersharingShareRequest(
+		opeersharing.CallbackContext{},
+		amount,
+	)
+	require.NoError(t, err)
+	out := make([]string, 0, len(peers))
+	for _, p := range peers {
+		out = append(
+			out,
+			net.JoinHostPort(p.IP.String(), strconv.Itoa(int(p.Port))),
+		)
+	}
+	return out
+}
+
+func manyPeerAddrs(n int) []string {
+	addrs := make([]string, 0, n)
+	for i := range n {
+		addrs = append(addrs, "44.1.0."+strconv.Itoa(i+1)+":3001")
+	}
+	return addrs
+}
+
+func TestPeerSharingShareRequestCapsReply(t *testing.T) {
+	t.Parallel()
+	clock := time.Unix(1_000_000, 0)
+	salts := [][16]byte{{1}}
+	o := newSaltedShareRequestFixture(t, manyPeerAddrs(25), &clock, &salts)
+	for _, amount := range []int{10, 11, 25, 1000} {
+		require.Len(
+			t,
+			shareRequestAddrs(t, o, amount),
+			10,
+			"amount %d must be capped at 10",
+			amount,
+		)
+	}
+	require.Len(t, shareRequestAddrs(t, o, 3), 3, "requested amount caps too")
+}
+
+func TestPeerSharingShareRequestRotatesWithSalt(t *testing.T) {
+	t.Parallel()
+	clock := time.Unix(1_000_000, 0)
+	salts := [][16]byte{{1}, {2}}
+	o := newSaltedShareRequestFixture(t, manyPeerAddrs(40), &clock, &salts)
+	first := shareRequestAddrs(t, o, 10)
+	require.Len(t, first, 10)
+
+	// Just inside the window the salt must not change.
+	clock = clock.Add(peerShareStickyTime - time.Second)
+	require.Equal(t, first, shareRequestAddrs(t, o, 10))
+
+	// At the window boundary the salt rotates and so does the subset.
+	clock = clock.Add(time.Second)
+	rotated := shareRequestAddrs(t, o, 10)
+	require.Len(t, rotated, 10)
+	require.NotEqual(
+		t,
+		first,
+		rotated,
+		"selection must change after the salt window ends",
+	)
+}
+
+func TestPeerSharingShareRequestStableWithinWindow(t *testing.T) {
+	t.Parallel()
+	clock := time.Unix(1_000_000, 0)
+	salts := [][16]byte{{7}, {8}}
+	o := newSaltedShareRequestFixture(t, manyPeerAddrs(40), &clock, &salts)
+	first := shareRequestAddrs(t, o, 10)
+	for i := range 5 {
+		clock = clock.Add(100 * time.Second)
+		require.Equal(
+			t,
+			first,
+			shareRequestAddrs(t, o, 10),
+			"request %d inside one window",
+			i,
+		)
+	}
+}
+
+func TestPeerSharingShareRequestOnlySharablePeers(t *testing.T) {
+	t.Parallel()
+	clock := time.Unix(1_000_000, 0)
+	salts := [][16]byte{{3}, {4}, {5}}
+	sharable := manyPeerAddrs(12)
+	o := newSaltedShareRequestFixture(t, sharable, &clock, &salts)
+	allowed := make(map[string]bool, len(sharable))
+	for _, a := range sharable {
+		allowed[a] = true
+	}
+	for range 3 {
+		got := shareRequestAddrs(t, o, 10)
+		require.Len(t, got, 10)
+		seen := make(map[string]bool, len(got))
+		for _, a := range got {
+			require.True(t, allowed[a], "unsharable or unknown peer %s", a)
+			require.False(t, seen[a], "duplicate peer %s", a)
+			seen[a] = true
+		}
+		clock = clock.Add(peerShareStickyTime)
+	}
 }

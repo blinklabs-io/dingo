@@ -15,8 +15,13 @@
 package ouroboros
 
 import (
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/binary"
 	"net"
+	"sort"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/blinklabs-io/dingo/peergov"
@@ -24,6 +29,62 @@ import (
 )
 
 const defaultPeersToRequest = 5
+
+const (
+	// peerShareStickyTime is how long one salt orders the peers offered to
+	// ShareRequests before it is regenerated. It matches the reference
+	// node's ps_POLICY_PEER_SHARE_STICKY_TIME.
+	peerShareStickyTime = 823 * time.Second
+	// peerShareMaxPeers caps a reply regardless of the requested amount. It
+	// matches the reference node's ps_POLICY_PEER_SHARE_MAX_PEERS.
+	peerShareMaxPeers = 10
+)
+
+// peerShareSalter holds the salt that orders sharable peers for
+// ShareRequest replies. The same salt is used until peerShareStickyTime has
+// elapsed, so repeated requests inside a window see a stable answer, and a
+// fresh salt then rotates which peers are offered. The zero value is ready
+// for use; now and newSalt are test seams that default to time.Now and
+// crypto/rand.
+type peerShareSalter struct {
+	mu       sync.Mutex
+	salt     [16]byte
+	resaltAt time.Time
+	now      func() time.Time
+	newSalt  func() [16]byte
+}
+
+// current returns the salt for the window containing the present time,
+// regenerating it when the previous window has ended.
+func (s *peerShareSalter) current() [16]byte {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now
+	if s.now != nil {
+		now = s.now
+	}
+	t := now()
+	if s.resaltAt.IsZero() || !t.Before(s.resaltAt) {
+		if s.newSalt != nil {
+			s.salt = s.newSalt()
+		} else {
+			// crypto/rand.Read never returns an error and always fills
+			// the buffer.
+			_, _ = rand.Read(s.salt[:])
+		}
+		s.resaltAt = t.Add(peerShareStickyTime)
+	}
+	return s.salt
+}
+
+// saltedRank orders an address under a salt.
+func saltedRank(salt [16]byte, address string) uint64 {
+	h := sha256.New()
+	_, _ = h.Write(salt[:])
+	_, _ = h.Write([]byte(address))
+	var sum [sha256.Size]byte
+	return binary.BigEndian.Uint64(h.Sum(sum[:0]))
+}
 
 func (o *Ouroboros) peerSharingConfig() opeersharing.Config {
 	return opeersharing.NewConfig(o.peersharingConnOpts()...)
@@ -73,13 +134,21 @@ func (o *Ouroboros) peersharingShareRequest(
 		return []opeersharing.PeerAddress{}, nil
 	}
 
-	peers := make([]opeersharing.PeerAddress, 0, amount)
-	for _, peer := range o.peerGov.GetPeers() {
+	// Collect every valid sharable candidate, order by a salted hash, and
+	// then cap. Taking the first peers in list order would answer every
+	// request identically and let a requester whose only source is this
+	// node never learn the rest.
+	type candidate struct {
+		key  string
+		rank uint64
+		addr opeersharing.PeerAddress
+	}
+	salt := o.peerShareSalt.current()
+	knownPeers := o.peerGov.GetPeers()
+	candidates := make([]candidate, 0, len(knownPeers))
+	for _, peer := range knownPeers {
 		if !peer.Sharable {
 			continue
-		}
-		if len(peers) >= amount {
-			break
 		}
 		address := peer.NormalizedAddress
 		if address == "" {
@@ -125,14 +194,26 @@ func (o *Ouroboros) peersharingShareRequest(
 			)
 			continue
 		}
-		o.config.Logger.Debug(
-			"adding peer for sharing: " + peer.Address,
-		)
-		peers = append(peers, opeersharing.PeerAddress{
-			IP:   ip,
-			Port: uint16(portNum),
-		},
-		)
+		candidates = append(candidates, candidate{
+			key:  address,
+			rank: saltedRank(salt, address),
+			addr: opeersharing.PeerAddress{
+				IP:   ip,
+				Port: uint16(portNum),
+			},
+		})
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		if candidates[i].rank != candidates[j].rank {
+			return candidates[i].rank < candidates[j].rank
+		}
+		return candidates[i].key < candidates[j].key
+	})
+	limit := min(amount, peerShareMaxPeers, len(candidates))
+	peers := make([]opeersharing.PeerAddress, 0, limit)
+	for _, c := range candidates[:limit] {
+		o.config.Logger.Debug("adding peer for sharing: " + c.key)
+		peers = append(peers, c.addr)
 	}
 	return peers, nil
 }
