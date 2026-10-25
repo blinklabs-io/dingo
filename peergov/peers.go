@@ -524,14 +524,21 @@ func (p *PeerGovernor) resolveLedgerDiscoveryAddress(
 	ctx context.Context,
 	address string,
 ) string {
+	return p.resolveLedgerDiscoveryAddresses(ctx, address)[0]
+}
+
+func (p *PeerGovernor) resolveLedgerDiscoveryAddresses(
+	ctx context.Context,
+	address string,
+) []string {
 	host, port, err := net.SplitHostPort(address)
 	if err != nil {
-		return strings.ToLower(address)
+		return []string{strings.ToLower(address)}
 	}
 
 	ip := net.ParseIP(host)
 	if ip != nil {
-		return net.JoinHostPort(ip.String(), port)
+		return []string{net.JoinHostPort(ip.String(), port)}
 	}
 
 	lowerHost := strings.ToLower(host)
@@ -547,7 +554,7 @@ func (p *PeerGovernor) resolveLedgerDiscoveryAddress(
 	// a timing-out resolver, dialDNSResolveTimeout of the discovery loop) on
 	// every round for as long as the pool keeps publishing it.
 	if p.negativeDNSCached(lowerHost) {
-		return net.JoinHostPort(lowerHost, port)
+		return []string{net.JoinHostPort(lowerHost, port)}
 	}
 
 	lookupCtx, cancel := context.WithTimeout(ctx, dialDNSResolveTimeout)
@@ -562,7 +569,7 @@ func (p *PeerGovernor) resolveLedgerDiscoveryAddress(
 		if !ok && ctx.Err() == nil {
 			p.recordNegativeDNS(lowerHost)
 		}
-		return resolved
+		return []string{resolved}
 	}
 	ips, err := lookupIPAddr(lookupCtx, host)
 	if err != nil || len(ips) == 0 {
@@ -582,12 +589,16 @@ func (p *PeerGovernor) resolveLedgerDiscoveryAddress(
 		if ctx.Err() == nil {
 			p.recordNegativeDNS(lowerHost)
 		}
-		return net.JoinHostPort(lowerHost, port)
+		return []string{net.JoinHostPort(lowerHost, port)}
 	}
 
 	hasV4, hasV6 := p.supportedDialFamilies()
 	ips = filterDialFamilies(ips, hasV4, hasV6)
-	return net.JoinHostPort(ips[0].String(), port)
+	addresses := make([]string, 0, len(ips))
+	for _, ip := range ips {
+		addresses = append(addresses, net.JoinHostPort(ip.String(), port))
+	}
+	return addresses
 }
 
 // negativeDNSCached reports whether host has an unexpired negative-cache

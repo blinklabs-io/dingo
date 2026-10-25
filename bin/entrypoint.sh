@@ -23,7 +23,7 @@
 #   - Debug mode with verbose logging
 #
 # Environment variables:
-#   CARDANO_NETWORK       - Named network: mainnet, preprod, preview, devnet (default: preview)
+#   CARDANO_NETWORK       - Named network: mainnet, preprod, preview, dijkstra, devnet (default: preview)
 #   CARDANO_CONFIG        - Path to cardano node config.json (auto-set from network)
 #   CARDANO_DATABASE_PATH - Database storage location (default: /data/db)
 #   DINGO_SOCKET_PATH     - Unix socket path for NtC (default: /ipc/dingo.socket)
@@ -369,6 +369,7 @@ config_path_for_network() {
     mainnet) echo "/opt/cardano/config/mainnet/config.json" ;;
     preprod) echo "/opt/cardano/config/preprod/config.json" ;;
     preview) echo "/opt/cardano/config/preview/config.json" ;;
+    dijkstra) echo "/opt/cardano/config/dijkstra/config.json" ;;
     devnet)  echo "" ;; # devnet uses embedded config, no external file needed
     *)       echo "" ;;
   esac
@@ -403,7 +404,7 @@ validate_config_network_match() {
   expected_config="$(config_path_for_network "${network}")"
   if [[ -n "${expected_config}" ]] && [[ "${config}" != "${expected_config}" ]]; then
     # Only warn if the config path references a different known network
-    for known_net in mainnet preprod preview; do
+    for known_net in mainnet preprod preview dijkstra; do
       if [[ "${known_net}" != "${network}" ]] && [[ "${config}" == *"/${known_net}/"* ]]; then
         warn "CARDANO_CONFIG '${config}' appears to be for '${known_net}' but CARDANO_NETWORK is '${network}'"
         warn "This mismatch may cause unexpected behavior"

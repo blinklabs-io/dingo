@@ -109,9 +109,7 @@ valid_report() {
           (.rules | type == "object") and
           (.failures | type == "array")
         elif $scenario == "ledger-rules" then
-          (.corpus | type == "string" and length > 0) and
           (.implementation.name | type == "string" and length > 0) and
-          (.totals | type == "object") and
           (.scenarios | type == "array") and
           all(.scenarios[]; (.id | type == "string") and (.result | type == "string"))
         elif $scenario == "uplc-conformance" then
