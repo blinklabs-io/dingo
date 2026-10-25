@@ -316,6 +316,9 @@ func (o *Ouroboros) markDeferredHeaderRecovery(
 		}
 		idle = len(tipHash) > 0 && bytes.Equal(tipHash, headerTipHash)
 	}
+	// Reaching here means the header is parked, not resolved as an applied
+	// deferral above.
+	o.recordDeferredHeaderParked()
 	o.deferredHeaderRecoveryMu.Lock()
 	if o.deferredHeaderRecovery == nil {
 		o.deferredHeaderRecovery = make(
@@ -2723,6 +2726,7 @@ func (o *Ouroboros) SubscribeChainsyncResync(ctx context.Context) {
 				return
 			default:
 			}
+			o.recordChainsyncResync(e.Reason)
 			released := e.Reason == event.ChainsyncResyncReasonNetworkIngestReleased
 			// The release re-intersects every client, so a resync requested
 			// while held -- by a timer armed before the hold, say -- would

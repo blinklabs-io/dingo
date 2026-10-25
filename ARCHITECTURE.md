@@ -717,6 +717,20 @@ but selection waits until the candidate path and required header checks are
 available. A header beyond the forecast horizon or with unavailable ancestry
 or context is deferred.
 
+Header parking and resyncs are exported as metrics.
+`dingo_chainsync_deferred_headers_total` counts each header
+`Ouroboros.markDeferredHeaderRecovery` parks for deferred producer
+authorization (a header whose block the chain already holds is resolved
+instead and not counted), and
+`dingo_chainsync_deferred_header_connections` is a scrape-time read of how many
+connections currently hold parked recovery state.
+`dingo_chainsync_resyncs_total{reason}` counts every `chainsync.resync` event
+the `SubscribeChainsyncResync` subscriber handles, labelled with the event's
+`Reason`; every publisher passes a `ChainsyncResyncReason*` constant or a fixed
+literal, so the label set is bounded. Resyncs coalesced by the ledger before
+publication are not counted, and neither are events dropped because the
+subscriber's context is done.
+
 `ledger.tx` is published with `PublishOrdered`, not `PublishAsync`, so a
 subscriber deriving state from it sees a block's transactions in index order
 and sees a rollback's undo events (`Rollback: true`) before any transaction
