@@ -200,8 +200,9 @@ type Config struct {
 	// This is the single source of truth for all configuration fields.
 	cfg *internalconfig.Config
 
-	// mempoolCapacitySet records an explicit capacity (WithMempoolCapacity or
-	// a loaded internal config), so the Leios default never replaces it.
+	// mempoolCapacitySet records an explicit capacity (WithMempoolCapacity, a
+	// WithPluginSelection mempool config carrying one, or a loaded internal
+	// config), so the Leios default never replaces it.
 	mempoolCapacitySet bool
 
 	// Runtime-only fields that are not loaded from YAML/env:
@@ -995,6 +996,9 @@ func WithPluginSelection(
 			*c = NewConfig()
 		}
 		if capability == hostplugin.CapabilityMempool {
+			// The selection replaces the whole mempool config, so its
+			// capacity is explicit exactly when the caller supplied one.
+			_, c.mempoolCapacitySet = selection.Config["capacity"]
 			if selection.Config == nil &&
 				(selection.Provider == "default" || selection.Provider == "fifo" || selection.Provider == "dag") {
 				selection.Config = map[string]any{

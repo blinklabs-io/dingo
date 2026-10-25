@@ -29,6 +29,7 @@ import (
 	"github.com/blinklabs-io/dingo/internal/promutil"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/plugin"
+	hostplugin "github.com/blinklabs-io/dingo/plugin"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/prometheus/client_golang/prometheus"
@@ -411,6 +412,32 @@ func TestNewConfigMempoolCapacityDefaultsOnMusashi(t *testing.T) {
 				WithMempoolCapacity(praos),
 			},
 			expected: praos,
+		},
+		{
+			name: "musashi plugin selection capacity is kept",
+			opts: []ConfigOptionFunc{
+				WithNetwork(ouroboros.NetworkCardanoMusashi.Name),
+				WithPluginSelection(
+					hostplugin.CapabilityMempool,
+					hostplugin.Selection{
+						Provider: "fifo",
+						Config:   map[string]any{"capacity": praos},
+					},
+				),
+			},
+			expected: praos,
+		},
+		{
+			name: "musashi plugin selection without capacity takes leios default",
+			opts: []ConfigOptionFunc{
+				WithNetwork(ouroboros.NetworkCardanoMusashi.Name),
+				WithMempoolCapacity(praos),
+				WithPluginSelection(
+					hostplugin.CapabilityMempool,
+					hostplugin.Selection{Provider: "fifo"},
+				),
+			},
+			expected: int64(internalconfig.DefaultMempoolCapacityLeios),
 		},
 		{
 			name: "non-musashi network keeps praos default",
