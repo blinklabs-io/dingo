@@ -1938,6 +1938,7 @@ func TestValidRelPath(t *testing.T) {
 // would make every later attempt, mirror, and restart resume the same prefix
 // and fail on the same 416.
 func TestDownloadSnapshotRangeNotSatisfiableMismatchDiscardsPartial(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	dest := filepath.Join(dir, "archive")
 	require.NoError(t, os.WriteFile(dest, []byte("ab"), 0o600))
@@ -1965,8 +1966,10 @@ func TestDownloadSnapshotRangeNotSatisfiableMismatchDiscardsPartial(t *testing.T
 // stopped by the free-space reserve leaves neither its staging file nor the
 // owned partial it resumed from, so disk pressure does not persist.
 func TestDownloadSnapshotFreeSpaceFailureDiscardsPartials(t *testing.T) {
+	t.Parallel()
 	for _, prefix := range []string{"", "a"} {
 		t.Run(fmt.Sprintf("prefix=%q", prefix), func(t *testing.T) {
+			t.Parallel()
 			dir := t.TempDir()
 			if prefix != "" {
 				require.NoError(t, os.WriteFile(filepath.Join(dir, "archive"), []byte(prefix), 0o600))
@@ -2028,6 +2031,7 @@ func rangeServingClient(body []byte, ranges *[]string) *http.Client {
 // another file's contents become the head of the published artifact. The
 // download restarts from zero, and publishing replaces only the link.
 func TestDownloadSnapshotDoesNotResumeFromHardLink(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	other := filepath.Join(dir, "other")
 	require.NoError(t, os.WriteFile(other, []byte("xy"), 0o600))
@@ -2071,6 +2075,7 @@ func (e *enospcWriter) Write(p []byte) (int, error) {
 // while copying the resume prefix or while writing the response body, leaves
 // neither the staging file nor the owned partial behind.
 func TestDownloadSnapshotENOSPCDiscardsPartials(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name   string
 		failOn int
@@ -2080,6 +2085,7 @@ func TestDownloadSnapshotENOSPCDiscardsPartials(t *testing.T) {
 		{name: "writing response body", failOn: 2, ranges: []string{"bytes=1-"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			dir := t.TempDir()
 			require.NoError(t, os.WriteFile(filepath.Join(dir, "archive"), []byte("a"), 0o600))
 			var ranges []string
@@ -2109,6 +2115,7 @@ func TestDownloadSnapshotENOSPCDiscardsPartials(t *testing.T) {
 // resumed, because the opened file is no longer the singly linked prefix the
 // inspection approved.
 func TestDownloadSnapshotRechecksOpenedPartial(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name   string
 		change func(t *testing.T, dir string)
@@ -2131,6 +2138,7 @@ func TestDownloadSnapshotRechecksOpenedPartial(t *testing.T) {
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			dir := t.TempDir()
 			require.NoError(t, os.WriteFile(filepath.Join(dir, "archive"), []byte("x"), 0o600))
 			var ranges []string
@@ -2148,4 +2156,38 @@ func TestDownloadSnapshotRechecksOpenedPartial(t *testing.T) {
 			require.Equal(t, "abc", string(got))
 		})
 	}
+}
+
+// TestDownloadSnapshotRemovesStaleStagingFiles pins that staging files left
+// by a crashed process are swept before the download starts, while a recent
+// one (which may belong to a live transfer) and unrelated entries stay.
+func TestDownloadSnapshotRemovesStaleStagingFiles(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("staging ownership cannot be established on windows")
+	}
+	dir := t.TempDir()
+	old := time.Now().Add(-time.Hour)
+	for name, aged := range map[string]bool{
+		"archive.partial-old":   true,
+		"archive.partial-fresh": false,
+		"other.partial-old":     true,
+	} {
+		p := filepath.Join(dir, name)
+		require.NoError(t, os.WriteFile(p, []byte("x"), 0o600))
+		if aged {
+			require.NoError(t, os.Chtimes(p, old, old))
+		}
+	}
+	var ranges []string
+	_, err := DownloadSnapshot(context.Background(), DownloadConfig{
+		URL: "https://example.test/archive", AllowInsecureHTTP: true,
+		DestDir: dir, Filename: "archive",
+		HTTPClient:          rangeServingClient([]byte("abc"), &ranges),
+		MaxTransientRetries: -1,
+	})
+	require.NoError(t, err)
+	require.NoFileExists(t, filepath.Join(dir, "archive.partial-old"))
+	require.FileExists(t, filepath.Join(dir, "archive.partial-fresh"))
+	require.FileExists(t, filepath.Join(dir, "other.partial-old"))
 }

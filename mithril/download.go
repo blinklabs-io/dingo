@@ -722,6 +722,7 @@ func downloadSnapshot(
 	}
 
 	filename := downloadFilename(cfg)
+	removeStaleStaging(root, filename, cfg.stagingOrphanAge())
 	lastObservedSize := rootFileSize(root, filename)
 	consecutiveIdleRetries := 0
 	transientRetries := 0
@@ -790,6 +791,45 @@ func downloadSnapshot(
 		} else {
 			return "", root, err
 		}
+	}
+}
+
+// stagingOrphanAge is how long a staging file must have gone unwritten before
+// it is treated as abandoned. A live transfer writes at least once per idle
+// timeout or it is aborted, so twice that cannot belong to a running download
+// of the same entry.
+func (cfg DownloadConfig) stagingOrphanAge() time.Duration {
+	return 2 * max(cfg.idleTimeout(), defaultDownloadIdleTimeout)
+}
+
+// removeStaleStaging deletes staging files a crashed process left beside the
+// cache entry. Their random names are never reused, so they would otherwise
+// hold disk space against the free-space reserve indefinitely. Only regular,
+// singly linked files owned by this process and older than minAge are
+// removed. It runs once per download, not per attempt, so it cannot race the
+// staging file of the attempt in progress.
+func removeStaleStaging(root *os.Root, filename string, minAge time.Duration) {
+	dir, err := root.Open(".")
+	if err != nil {
+		return
+	}
+	names, err := dir.Readdirnames(-1)
+	_ = dir.Close()
+	if err != nil {
+		return
+	}
+	prefix := filename + ".partial-"
+	for _, name := range names {
+		if !strings.HasPrefix(name, prefix) {
+			continue
+		}
+		info, err := root.Lstat(name)
+		if err != nil || !info.Mode().IsRegular() ||
+			!downloadFileOwnedByProcess(info) ||
+			time.Since(info.ModTime()) < minAge {
+			continue
+		}
+		_ = root.Remove(name)
 	}
 }
 
