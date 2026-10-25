@@ -6910,3 +6910,76 @@ func TestVoteManagerRollbackRejectsInFlightResolvedPrototypeVote(t *testing.T) {
 	assert.Empty(t, fixture.mgr.tallies)
 	assert.Empty(t, fixture.mgr.voteRecords)
 }
+
+func TestVoteManagerLateVotesAreNotPeerMisbehavior(t *testing.T) {
+	t.Parallel()
+
+	const voteWindow = 10
+	fixture := newManagerFixture(
+		t,
+		func(f *managerFixture, cfg *VoteManagerConfig) {
+			cfg.PromRegistry = prometheus.NewRegistry()
+			cfg.SlotProvider = &fakeSlotProvider{slot: 1000}
+			cfg.VoteWindowSlots = voteWindow
+		},
+	)
+	ebHash := lcommon.NewBlake2b256([]byte("late-eb"))
+	rejected := fixture.mgr.metrics.votesRejectedTotal.WithLabelValues(
+		voteNotEmittedSlotWindow,
+	)
+	before := promtestutil.ToFloat64(rejected)
+
+	// Late votes relayed honestly are dropped, never counted as strikes.
+	lateCount := 3 * voteInvalidPeerLimit
+	for i := range lateCount {
+		slot := uint64(1000 - voteWindow - i)
+		require.NoError(
+			t,
+			fixture.mgr.HandleVote(
+				"relay",
+				fixture.makeVote(t, uint64(i%4), slot, ebHash),
+			),
+			"late vote %d must not be peer misbehavior",
+			i,
+		)
+		assert.Empty(t, fixture.mgr.VotesByIds([]lcommon.LeiosVoteId{
+			{SlotNo: slot, VoterId: uint64(i % 4)},
+		}), "late vote %d must not be stored", i)
+	}
+	assert.EqualValues(
+		t,
+		lateCount,
+		promtestutil.ToFloat64(rejected)-before,
+		"slot_window rejection metric must still count late votes",
+	)
+
+	// Late votes must not consume the budget for genuinely invalid ones
+	// from the same connection: the limit still trips at exactly the limit.
+	invalid := lcommon.LeiosVote{}
+	for range voteInvalidPeerLimit - 1 {
+		require.NoError(t, fixture.mgr.HandleVote("relay", invalid))
+	}
+	require.ErrorIs(
+		t,
+		fixture.mgr.HandleVote("relay", invalid),
+		ErrPeerMisbehavior,
+	)
+
+	// Votes too far in the future are not exempt.
+	for i := range voteInvalidPeerLimit - 1 {
+		require.NoError(t, fixture.mgr.HandleVote(
+			"skewed",
+			fixture.makeVote(
+				t, uint64(i%4), 1000+slotWindowFutureTolerance+1+uint64(i), ebHash,
+			),
+		))
+	}
+	require.ErrorIs(
+		t,
+		fixture.mgr.HandleVote(
+			"skewed",
+			fixture.makeVote(t, 0, 1000+slotWindowFutureTolerance+100, ebHash),
+		),
+		ErrPeerMisbehavior,
+	)
+}
