@@ -60,6 +60,9 @@ func (u *UnixConn) RemoteAddr() net.Addr {
 	return u.remoteAddr
 }
 
+// Unwrap exposes the underlying connection to connection helpers.
+func (u *UnixConn) Unwrap() net.Conn { return u.Conn }
+
 // createPipeListener creates a named pipe listener on Windows
 func createPipeListener(_, address string) (net.Listener, error) {
 	// Adjust address to named pipe format if not already

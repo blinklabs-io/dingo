@@ -7016,6 +7016,12 @@ and still has the same file identity when rechecked. Regular files, symlinks,
 directories, live sockets, ambiguous probe failures, and removal errors all
 fail startup without removing the path.
 
+Accepted TCP connections and local Unix node-to-client connections bound each
+socket write to two minutes. Unix sockets receive that wrapper after their
+per-connection remote address is established. The ten-second handshake
+deadline is cleared after negotiation; subsequent writes refresh their own
+deadline, while the muxer continues to own read deadlines.
+
 ### Multi-Client Chainsync
 
 The `chainsync.State` tracks multiple concurrent chainsync clients:
@@ -7245,7 +7251,11 @@ eligible upstream so its last leads back onto the network are never discarded.
 Peer sharing is an address-validation boundary in both directions. The server
 callback exports only sharable, nonzero-port IP literals accepted by the shared
 peer-governor routability policy; operator-configured private peers remain
-usable locally but are not advertised. A received reply is capped to the
+usable locally but are not advertised. Valid candidates are ordered by a salted
+hash of the address and the reply is capped at 10 addresses and at the
+requested count, as in the reference node. The salt is regenerated every 823
+seconds, so a requester sees a stable answer within a window and a different
+subset after it. A received reply is capped to the
 requested count and is rechecked for valid, routable, non-reserved IP and port
 values before it reaches peer admission, so malformed or internal targets do
 not trigger DNS or outbound dialing.

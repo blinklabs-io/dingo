@@ -1466,6 +1466,27 @@ func TestValidateDatabaseLifecycleSnapshotMaxCommitPause(t *testing.T) {
 // non-root user doesn't own (see dingo.yaml.example's snapshotDir entry).
 func TestValidateDatabaseLifecycleSnapshotDirWritability(t *testing.T) {
 	t.Run(
+		"existing snapshot directory is restricted to the current user",
+		func(t *testing.T) {
+			if runtime.GOOS == "windows" {
+				t.Skip("Windows does not expose Unix permission bits")
+			}
+			dir := filepath.Join(t.TempDir(), "snapshots")
+			require.NoError(t, os.Mkdir(dir, 0o755))
+			require.NoError(t, os.Chmod(dir, 0o755))
+
+			cfg := validTestConfig()
+			cfg.DatabaseLifecycle.SnapshotEnabled = true
+			cfg.DatabaseLifecycle.SnapshotDir = dir
+			require.NoError(t, cfg.validate(cfg.RunMode, minUnprivilegedPort))
+
+			info, err := os.Stat(dir)
+			require.NoError(t, err)
+			require.Equal(t, os.FileMode(0o700), info.Mode().Perm())
+		},
+	)
+
+	t.Run(
 		"writable directory passes and is created if missing",
 		func(t *testing.T) {
 			dir := filepath.Join(t.TempDir(), "nested", "snapshots")
