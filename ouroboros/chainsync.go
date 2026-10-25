@@ -304,7 +304,13 @@ func (o *Ouroboros) markDeferredHeaderRecovery(
 		// resolve it, and re-intersecting would replay a block the node holds.
 		// The ledger validates the block on the body path and re-syncs every
 		// peer itself if that fails, so resolve it now as an applied deferral.
-		if len(tipHash) > 0 && bytes.Equal(tipHash, point.Hash) {
+		// Only an undelivered header is resolved here: it is withheld as the
+		// peer rolls forward to it, so the peer's cursor is at point. A late
+		// ledger rejection of a delivered header can arrive after the peer
+		// rolled back or withheld a newer or same-slot fork header, so it
+		// keeps the ordinary recovery below.
+		if !delivered && len(tipHash) > 0 &&
+			bytes.Equal(tipHash, point.Hash) {
 			o.resolveDeferredHeaderRecovery(connId, point, tip, delivered)
 			return
 		}
@@ -379,10 +385,9 @@ func (o *Ouroboros) markDeferredHeaderRecovery(
 // off it. Ledger advance then re-intersects the peer as before.
 // resolveDeferredHeaderRecovery keeps a peer whose withheld header the chain
 // already holds and aligns the tracked cursor with the peer's, as when the
-// deferred header is applied. Pending recovery for the connection is dropped
-// only when it is no newer than the held header: a ledger rejection can report
-// an older header after a newer one was withheld, and the chain holding the
-// older block says nothing about the newer one.
+// deferred header is applied. The peer has just rolled forward to the held
+// header, so any recovery pending for headers it delivered earlier no longer
+// describes its chain and is dropped.
 func (o *Ouroboros) resolveDeferredHeaderRecovery(
 	connId ouroboros.ConnectionId,
 	point ocommon.Point,
@@ -390,11 +395,6 @@ func (o *Ouroboros) resolveDeferredHeaderRecovery(
 	delivered bool,
 ) {
 	o.deferredHeaderRecoveryMu.Lock()
-	if existing, ok := o.deferredHeaderRecovery[connId]; ok &&
-		existing.point.Slot > point.Slot {
-		o.deferredHeaderRecoveryMu.Unlock()
-		return
-	}
 	delete(o.deferredHeaderRecovery, connId)
 	delete(o.deferredHeaderIdleRetry, connId)
 	o.deferredHeaderRecoveryMu.Unlock()

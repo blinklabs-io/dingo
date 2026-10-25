@@ -7,6 +7,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
+	ouroboros "github.com/blinklabs-io/gouroboros"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -129,4 +130,89 @@ func TestDeferredHeaderRecoveryHeldTipKeepsNewerWithheldHeader(t *testing.T) {
 		"resolving an older held header must keep recovery for a newer withheld one",
 	)
 	require.Equal(t, uint64(86420), state.point.Slot)
+}
+
+// TestDeferredHeaderRecoveryHeldTipKeepsSameSlotForkHeader covers a slot
+// battle: a peer's withheld fork header shares its slot with the block the
+// chain holds. A late rejection of the held header must not discard recovery
+// for the fork, which has a different hash.
+func TestDeferredHeaderRecoveryHeldTipKeepsSameSlotForkHeader(t *testing.T) {
+	t.Parallel()
+
+	var heldHash, forkHash gledger.Blake2b256
+	heldHash[0], forkHash[0] = 0x02, 0x06
+	f := newDeferredHeaderFixture(t, heldHash)
+
+	forkPoint := ocommon.NewPoint(86400, forkHash.Bytes())
+	f.o.deferredHeaderRecoveryMu.Lock()
+	f.o.deferredHeaderRecovery = map[ouroboros.ConnectionId]deferredHeaderRecoveryState{
+		f.conn: {
+			baseline:   f.o.ledgerState.Tip(),
+			point:      forkPoint,
+			tip:        ochainsync.Tip{Point: forkPoint, BlockNumber: 10},
+			resolvable: true,
+		},
+	}
+	f.o.deferredHeaderRecoveryMu.Unlock()
+
+	heldPoint := ocommon.NewPoint(86400, heldHash.Bytes())
+	f.o.markDeferredHeaderRecovery(
+		f.conn,
+		f.o.ledgerState.Tip(),
+		heldPoint,
+		ochainsync.Tip{Point: heldPoint, BlockNumber: 10},
+		true,
+	)
+
+	f.o.deferredHeaderRecoveryMu.Lock()
+	state, flagged := f.o.deferredHeaderRecovery[f.conn]
+	f.o.deferredHeaderRecoveryMu.Unlock()
+	require.True(t, flagged)
+	require.Equal(t, forkPoint, state.point)
+}
+
+// TestDeferredHeaderRecoveryHeldTipLateRejectionDoesNotAdmitAfterRollback
+// covers a late rejection after the peer rolled back: the peer's cursor no
+// longer sits at the held header, so it must not be admitted.
+func TestDeferredHeaderRecoveryHeldTipLateRejectionDoesNotAdmitAfterRollback(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	var heldHash, olderHash gledger.Blake2b256
+	heldHash[0], olderHash[0] = 0x02, 0x07
+	f := newDeferredHeaderFixture(t, heldHash)
+
+	olderPoint := ocommon.NewPoint(86380, olderHash.Bytes())
+	f.o.deferredHeaderRecoveryMu.Lock()
+	f.o.deferredHeaderRecovery = map[ouroboros.ConnectionId]deferredHeaderRecoveryState{
+		f.conn: {
+			baseline:   f.o.ledgerState.Tip(),
+			point:      olderPoint,
+			tip:        ochainsync.Tip{Point: olderPoint, BlockNumber: 9},
+			resolvable: false,
+		},
+	}
+	f.o.deferredHeaderRecoveryMu.Unlock()
+	before := f.state.GetTrackedClient(f.conn)
+	require.NotNil(t, before)
+	beforeCursor := before.Cursor
+
+	heldPoint := ocommon.NewPoint(86400, heldHash.Bytes())
+	f.o.markDeferredHeaderRecovery(
+		f.conn,
+		f.o.ledgerState.Tip(),
+		heldPoint,
+		ochainsync.Tip{Point: heldPoint, BlockNumber: 10},
+		true,
+	)
+
+	after := f.state.GetTrackedClient(f.conn)
+	require.NotNil(t, after)
+	require.Equal(
+		t,
+		beforeCursor,
+		after.Cursor,
+		"a late rejection must not advance a rolled-back peer's cursor",
+	)
 }
