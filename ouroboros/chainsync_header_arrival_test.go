@@ -128,10 +128,11 @@ func TestHeaderArrivalKeepsEarliestArrivalPerBlock(t *testing.T) {
 	assert.InDelta(t, 0.8, sum, 1e-9)
 }
 
-// A different block at the same height (a fork) replaces the entry, and the
-// replaced header is observed; a lower block landing in a slot that already
-// holds a newer one is stale and dropped.
-func TestHeaderArrivalForkReplacesAndStaleIsDropped(t *testing.T) {
+// A different block at the same height (a fork) becomes the exported entry,
+// and both headers are observed once, each with its own arrival, when the
+// height leaves the ring; a lower block landing in a slot that already holds
+// a newer one is stale and dropped.
+func TestHeaderArrivalForkObservesEachHeaderOnce(t *testing.T) {
 	t.Parallel()
 	m, reg := newTestHeaderArrivals(t)
 	slotTime := time.Unix(1_700_000_000, 0)
@@ -153,9 +154,45 @@ func TestHeaderArrivalForkReplacesAndStaleIsDropped(t *testing.T) {
 	require.Len(t, got, 1)
 	assert.InDelta(t, 1.5, got[600][0], 1e-9)
 	assert.InDelta(t, 9101, got[600][1], 1e-9)
+	count, _ := headerArrivalHistogram(t, reg)
+	assert.Zero(t, count, "both headers are still in the ring")
+
+	m.observeHeaderArrival(
+		true, 600+recentHeaderArrivalSlots, 9300, testBlockHash(4), slotTime,
+		slotTime.Add(time.Second),
+	)
 	count, sum := headerArrivalHistogram(t, reg)
-	assert.Equal(t, uint64(1), count)
-	assert.InDelta(t, 1.0, sum, 1e-9)
+	assert.Equal(t, uint64(2), count)
+	assert.InDelta(t, 2.5, sum, 1e-9)
+}
+
+// Copies of competing headers at one height can interleave: A at 2s, B at
+// 1s, then an earlier copy of A at 0.8s. Each header keeps its own minimum
+// and is observed once.
+func TestHeaderArrivalForkInterleavingKeepsPerHeaderMinimum(t *testing.T) {
+	t.Parallel()
+	m, reg := newTestHeaderArrivals(t)
+	slotTime := time.Unix(1_700_000_000, 0)
+	a, b := testBlockHash(1), testBlockHash(2)
+
+	m.observeHeaderArrival(true, 700, 9500, a, slotTime,
+		slotTime.Add(2*time.Second))
+	m.observeHeaderArrival(true, 700, 9501, b, slotTime,
+		slotTime.Add(time.Second))
+	m.observeHeaderArrival(true, 700, 9500, a, slotTime,
+		slotTime.Add(800*time.Millisecond))
+
+	got := headerArrivalRing(t, reg)
+	assert.InDelta(t, 0.8, got[700][0], 1e-9)
+	assert.InDelta(t, 9500, got[700][1], 1e-9)
+
+	m.observeHeaderArrival(
+		true, 700+recentHeaderArrivalSlots, 9700, testBlockHash(3), slotTime,
+		slotTime.Add(time.Second),
+	)
+	count, sum := headerArrivalHistogram(t, reg)
+	assert.Equal(t, uint64(2), count)
+	assert.InDelta(t, 1.8, sum, 1e-9)
 }
 
 // Catch-up headers are naturally late, so nothing is recorded before the node

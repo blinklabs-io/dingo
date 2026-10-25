@@ -59,11 +59,24 @@ var (
 	)
 )
 
+// recentHeaderForkLimit bounds the competing headers one ring slot tracks at
+// a single height; a further fork at that height is not recorded.
+const recentHeaderForkLimit = 4
+
+type recentHeaderCandidate struct {
+	slot  uint64
+	hash  lcommon.Blake2b256
+	delay float64
+}
+
+// recentHeaderArrival holds every header seen at one height, each with its
+// earliest arrival, and exports the most recently seen one. Fixed-size
+// storage keeps a scrape's copy of the ring independent of later writes.
 type recentHeaderArrival struct {
 	blockNumber uint64
-	slot        uint64
-	hash        lcommon.Blake2b256
-	delay       float64
+	cands       [recentHeaderForkLimit]recentHeaderCandidate
+	n           int
+	cur         int
 	set         bool
 }
 
@@ -78,38 +91,49 @@ type recentHeaderArrivals struct {
 }
 
 // record stores a header arrival. Peers run admission independently, so
-// copies of one header can finish out of network-arrival order: the same
-// header from another peer keeps the earliest arrival, the one that bounds when
-// the node could have acted on it. A different block at the same height (a
-// fork) or a higher block replaces the entry, and the replaced entry is
-// returned as final so the histogram observes each block once, with its
-// earliest arrival. A block lower than the one its slot already holds is stale
-// and dropped.
+// copies of one header can finish out of network-arrival order, and copies of
+// competing headers at the same height (a fork) can interleave. Each header
+// keeps its earliest arrival, the one that bounds when the node could have
+// acted on it. When a higher block takes the slot, every header the slot held
+// is returned once, with its earliest arrival, so the histogram observes each
+// header exactly once. A block lower than the one the slot holds is stale and
+// dropped.
 func (r *recentHeaderArrivals) record(
 	blockNumber uint64,
 	slot uint64,
 	hash lcommon.Blake2b256,
 	delay float64,
-) (recentHeaderArrival, bool) {
+) []float64 {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	s := &r.slots[blockNumber%recentHeaderArrivalSlots]
 	if s.set && blockNumber < s.blockNumber {
-		return recentHeaderArrival{}, false
+		return nil
 	}
-	if s.set && s.blockNumber == blockNumber && s.hash == hash {
-		s.delay = min(s.delay, delay)
-		return recentHeaderArrival{}, false
+	if s.set && s.blockNumber == blockNumber {
+		for i := 0; i < s.n; i++ {
+			if s.cands[i].hash == hash {
+				s.cands[i].delay = min(s.cands[i].delay, delay)
+				s.cur = i
+				return nil
+			}
+		}
+		if s.n < recentHeaderForkLimit {
+			s.cands[s.n] = recentHeaderCandidate{
+				slot: slot, hash: hash, delay: delay,
+			}
+			s.cur = s.n
+			s.n++
+		}
+		return nil
 	}
-	final := *s
-	*s = recentHeaderArrival{
-		blockNumber: blockNumber,
-		slot:        slot,
-		hash:        hash,
-		delay:       delay,
-		set:         true,
+	var final []float64
+	for i := 0; i < s.n; i++ {
+		final = append(final, s.cands[i].delay)
 	}
-	return final, final.set
+	*s = recentHeaderArrival{blockNumber: blockNumber, n: 1, set: true}
+	s.cands[0] = recentHeaderCandidate{slot: slot, hash: hash, delay: delay}
+	return final
 }
 
 func (r *recentHeaderArrivals) Describe(ch chan<- *prometheus.Desc) {
@@ -127,10 +151,11 @@ func (r *recentHeaderArrivals) Collect(ch chan<- prometheus.Metric) {
 			continue
 		}
 		idx := strconv.Itoa(i)
+		c := s.cands[s.cur]
 		ch <- prometheus.MustNewConstMetric(
 			recentHeaderDelayDesc,
 			prometheus.GaugeValue,
-			s.delay,
+			c.delay,
 			idx,
 		)
 		ch <- prometheus.MustNewConstMetric(
@@ -142,7 +167,7 @@ func (r *recentHeaderArrivals) Collect(ch chan<- prometheus.Metric) {
 		ch <- prometheus.MustNewConstMetric(
 			recentHeaderBlockSlotDesc,
 			prometheus.GaugeValue,
-			float64(s.slot),
+			float64(c.slot),
 			idx,
 		)
 	}
@@ -195,8 +220,8 @@ func (o *Ouroboros) initHeaderArrivalMetrics() {
 // observeHeaderArrival records a chainsync header's network arrival against
 // its slot time. Callers pass atTip and slotTime so catch-up (where every
 // header is naturally late) is excluded, matching the blockfetch delay
-// metrics. The ring keeps each block's earliest arrival; the histogram
-// observes it once the block leaves the ring.
+// metrics. The ring keeps each header's earliest arrival; the histogram
+// observes every header once, when its height leaves the ring.
 func (m *headerArrivalMetrics) observeHeaderArrival(
 	atTip bool,
 	blockNumber uint64,
@@ -212,7 +237,7 @@ func (m *headerArrivalMetrics) observeHeaderArrival(
 	if delay > headerArrivalMaxBackfillSeconds {
 		return
 	}
-	if final, ok := m.recent.record(blockNumber, slot, hash, delay); ok {
-		m.delay.Observe(final.delay)
+	for _, final := range m.recent.record(blockNumber, slot, hash, delay) {
+		m.delay.Observe(final)
 	}
 }
