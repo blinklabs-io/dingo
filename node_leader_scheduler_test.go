@@ -48,13 +48,11 @@ func TestConsensusStateRestoredReadsPublishedScheduler(t *testing.T) {
 	scheduler := &restoreCountingScheduler{}
 
 	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		for range 200 {
 			n.setLeaderElection(scheduler)
 		}
-	}()
+	})
 	for range 200 {
 		restored()
 	}
