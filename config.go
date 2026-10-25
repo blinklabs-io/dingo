@@ -200,6 +200,10 @@ type Config struct {
 	// This is the single source of truth for all configuration fields.
 	cfg *internalconfig.Config
 
+	// mempoolCapacitySet records an explicit capacity (WithMempoolCapacity or
+	// a loaded internal config), so the Leios default never replaces it.
+	mempoolCapacitySet bool
+
 	// Runtime-only fields that are not loaded from YAML/env:
 	promRegistry      prometheus.Registerer
 	topologyConfig    *topology.TopologyConfig
@@ -856,8 +860,9 @@ func (c *Config) syncCompatFields() {
 	)
 	// Leios run mode and the Musashi testnet (which enables Leios networking
 	// without changing the run mode) both default to the larger mempool.
-	if (c.runMode == string(internalconfig.RunModeLeios) ||
-		c.isMusashiNetwork()) &&
+	if !c.mempoolCapacitySet &&
+		(c.runMode == string(internalconfig.RunModeLeios) ||
+			c.isMusashiNetwork()) &&
 		pluginInt64(
 			c.cfg.Plugins.Mempool.Config["capacity"],
 		) == internalconfig.DefaultMempoolCapacityPraos {
@@ -1147,6 +1152,9 @@ func NewConfigFromInternal(
 		tracingEndpoint:       cfg.TracingEndpoint,
 		tracingServiceName:    cfg.TracingServiceName,
 		tracingSampleRatio:    cfg.TracingSampleRatio,
+		// The loaded config already resolved the capacity default from its
+		// run mode and network.
+		mempoolCapacitySet: true,
 	}
 	c.syncCompatFields()
 	return c, nil
@@ -1343,6 +1351,7 @@ func WithShutdownTimeout(timeout time.Duration) ConfigOptionFunc {
 func WithMempoolCapacity(capacity int64) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.Plugins.Mempool.Config["capacity"] = capacity
+		c.mempoolCapacitySet = true
 	}
 }
 

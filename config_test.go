@@ -405,6 +405,14 @@ func TestNewConfigMempoolCapacityDefaultsOnMusashi(t *testing.T) {
 			expected: 5242880,
 		},
 		{
+			name: "musashi explicit praos-sized capacity is kept",
+			opts: []ConfigOptionFunc{
+				WithNetwork(ouroboros.NetworkCardanoMusashi.Name),
+				WithMempoolCapacity(praos),
+			},
+			expected: praos,
+		},
+		{
 			name: "non-musashi network keeps praos default",
 			opts: []ConfigOptionFunc{
 				WithNetwork("preprod"),

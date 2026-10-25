@@ -1900,6 +1900,16 @@ func TestLoad_MempoolCapacityMode(t *testing.T) {
 			expected: 5242880,
 		},
 		{
+			name:     "musashi default raises to 25 MiB",
+			yaml:     "runMode: \"serve\"\nnetwork: \"musashi\"\n",
+			expected: DefaultMempoolCapacityLeios,
+		},
+		{
+			name:     "explicit praos-sized value wins on musashi",
+			yaml:     "network: \"musashi\"\nplugins:\n  mempool:\n    provider: default\n    config:\n      capacity: 1048576\n      evictionWatermark: 0.90\n      rejectionWatermark: 0.95\n",
+			expected: DefaultMempoolCapacityPraos,
+		},
+		{
 			name:     "explicit value wins under serve",
 			yaml:     "runMode: \"serve\"\nplugins:\n  mempool:\n    provider: default\n    config:\n      capacity: 5242880\n      evictionWatermark: 0.90\n      rejectionWatermark: 0.95\n",
 			expected: 5242880,
