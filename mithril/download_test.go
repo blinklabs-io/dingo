@@ -2102,3 +2102,50 @@ func TestDownloadSnapshotENOSPCDiscardsPartials(t *testing.T) {
 		})
 	}
 }
+
+// TestDownloadSnapshotRechecksOpenedPartial pins that the resume policy is
+// applied to the file actually opened, not only to what Lstat saw: a hard
+// link or a size change landing between the two must not let the partial be
+// resumed, because the opened file is no longer the singly linked prefix the
+// inspection approved.
+func TestDownloadSnapshotRechecksOpenedPartial(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		change func(t *testing.T, dir string)
+	}{
+		{name: "hard link added", change: func(t *testing.T, dir string) {
+			if err := os.Link(
+				filepath.Join(dir, "archive"), filepath.Join(dir, "other"),
+			); err != nil {
+				t.Skipf("hard links unavailable: %v", err)
+			}
+		}},
+		{name: "partial grew", change: func(t *testing.T, dir string) {
+			f, err := os.OpenFile(
+				filepath.Join(dir, "archive"), os.O_APPEND|os.O_WRONLY, 0,
+			)
+			require.NoError(t, err)
+			_, err = f.Write([]byte("z"))
+			require.NoError(t, err)
+			require.NoError(t, f.Close())
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			require.NoError(t, os.WriteFile(filepath.Join(dir, "archive"), []byte("x"), 0o600))
+			var ranges []string
+			path, err := DownloadSnapshot(context.Background(), DownloadConfig{
+				URL: "https://example.test/archive", AllowInsecureHTTP: true,
+				DestDir: dir, Filename: "archive",
+				HTTPClient:          rangeServingClient([]byte("abc"), &ranges),
+				MaxTransientRetries: -1,
+				afterPartialInspect: func() { tc.change(t, dir) },
+			})
+			require.NoError(t, err)
+			require.Equal(t, []string{""}, ranges, "the changed partial must not be resumed")
+			got, err := os.ReadFile(path)
+			require.NoError(t, err)
+			require.Equal(t, "abc", string(got))
+		})
+	}
+}

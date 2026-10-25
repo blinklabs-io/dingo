@@ -9513,8 +9513,9 @@ are bounded while streaming. An extra byte is read only as an overflow
 probe and is never written. Size-limit errors are terminal for the downloader.
 Every transfer writes to an exclusively created staging file through the
 verified destination-directory handle, then atomically replaces the cache entry.
-A resume copies only a regular, singly linked partial file owned by the node
-into that staging file before requesting the remaining range; other regular
+A resume copies only a regular, singly linked partial file owned by the node,
+re-checked on the opened file with its size unchanged, into that staging file
+and requests the range after the bytes actually copied; other regular
 files are replaced only after a complete download, and a non-regular entry such
 as a symlink is refused. An owned partial already over the size limit is removed
 before any request. A malformed-range restart truncates the private staging file

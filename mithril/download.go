@@ -166,6 +166,10 @@ type DownloadConfig struct {
 	// beneath the free-space budget. Tests use it to inject filesystem
 	// write errors such as ENOSPC.
 	wrapStagingFile func(io.Writer) io.Writer
+	// afterPartialInspect, when non-nil, runs between inspecting the
+	// destination and opening it as the resume prefix. Tests use it to
+	// change the destination inside that window.
+	afterPartialInspect func()
 	// HTTPClient, when non-nil, is reused for the download instead of
 	// constructing a fresh client per call. Callers that fetch many
 	// files (the v2 immutable pool) pass one shared keep-alive client so
@@ -799,6 +803,7 @@ func prepareDownloadFile(
 	limit int64,
 	limitErr error,
 	stagingWriter func(*os.File) io.Writer,
+	afterInspect func(),
 ) (file *os.File, tmpName string, existingSize int64, ownedPartial bool, err error) {
 	createStaging := func() (*os.File, string, error) {
 		name := filename + ".partial-" + cryptorand.Text()
@@ -834,21 +839,30 @@ func prepareDownloadFile(
 	if err != nil || !ownedPartial {
 		return file, tmpName, 0, false, err
 	}
+	if afterInspect != nil {
+		afterInspect()
+	}
 
 	source, err := root.OpenFile(filename, os.O_RDONLY|openNoFollowFlag, 0)
 	if err != nil {
 		return file, tmpName, 0, false, nil
 	}
 	defer source.Close()
+	// The opened file is the one copied, so the resume policy is re-applied
+	// to its own stat: a hard link or size change after Lstat leaves the
+	// inode SameFile accepts but no longer the prefix the Lstat approved.
 	openedInfo, err := source.Stat()
 	if err != nil || !openedInfo.Mode().IsRegular() ||
-		!os.SameFile(info, openedInfo) {
+		!os.SameFile(info, openedInfo) ||
+		!downloadFileOwnedByProcess(openedInfo) ||
+		openedInfo.Size() != info.Size() {
 		return file, tmpName, 0, false, nil
 	}
-	if _, err := io.Copy(
+	copied, err := io.Copy(
 		stagingWriter(file),
 		io.LimitReader(source, limit),
-	); err != nil {
+	)
+	if err != nil {
 		_ = file.Close()
 		_ = root.Remove(tmpName)
 		if isDownloadSpaceError(err) {
@@ -856,7 +870,8 @@ func prepareDownloadFile(
 		}
 		return nil, "", 0, false, fmt.Errorf("copying partial download: %w", err)
 	}
-	return file, tmpName, info.Size(), true, nil
+	// The Range offset is what was staged, not the size observed earlier.
+	return file, tmpName, copied, true, nil
 }
 
 // isDownloadSpaceError reports a write stopped by the free-space reserve or
@@ -911,6 +926,7 @@ func downloadSnapshotOnce(
 
 	file, tmpName, existingSize, ownedPartial, err := prepareDownloadFile(
 		root, filename, cfg.sizeLimit(), cfg.sizeLimitError(), cfg.stagingWriter,
+		cfg.afterPartialInspect,
 	)
 	if err != nil {
 		return "", err
