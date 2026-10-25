@@ -318,3 +318,51 @@ func TestLeiosForgedEBOfferAnnouncement(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, raw, []byte(announcement.BlockHeaderRaw))
 }
+
+// A peer's offer can arrive before the manifest, and the announcement can
+// verify the slot while the entry is still intent-only. No manifest offer may
+// be relayed then: its size would be zero, which receivers reject by tearing
+// down the connection. The offer goes out once, with the real size, when the
+// manifest is stored.
+func TestLeiosRelayDefersManifestOfferUntilManifestStored(t *testing.T) {
+	t.Parallel()
+
+	txRaw := testDijkstraTx(t, 0)
+	ebRaw, err := cbor.Encode(&lcommon.LeiosEndorserBlock{
+		TransactionReferences: []lcommon.LeiosTransactionReference{{
+			TransactionHash: lcommon.Blake2b256Hash(txRaw),
+			TransactionSize: uint32(len(txRaw)), //nolint:gosec // short test transaction
+		}},
+	})
+	require.NoError(t, err)
+	ebHash := lcommon.Blake2b256Hash(ebRaw)
+	point := ocommon.NewPoint(42, ebHash.Bytes())
+
+	o := newOuroboros(OuroborosConfig{EnableLeios: true})
+	t.Cleanup(func() { require.NoError(t, o.Close()) })
+	o.leiosEBLog.registerConn("downstream", nil, nil)
+
+	o.markLeiosEndorserBlockRelayOfferFrom(point, "peer-a")
+	announceTestEndorserBlock(t, o, point.Slot, ebHash, len(ebRaw))
+	o.markLeiosEndorserBlockRelayOfferFrom(point, "peer-b")
+
+	entry, _ := o.leiosEBLog.next("downstream")
+	require.Nil(t, entry, "no offer may be relayed before the manifest is known")
+
+	require.NoError(t, o.storeLeiosEndorserBlock(
+		point, ebRaw, nil, leiosStorePeerOffered,
+	))
+	manifest, _ := o.leiosEBLog.next("downstream")
+	require.NotNil(t, manifest)
+	manifestMessage, ok := leiosForgedEBOffer(
+		manifest,
+	).(*oleiosnotify.MsgBlockOffer)
+	require.True(t, ok)
+	require.Equal(t, point, manifestMessage.Point)
+	require.Equal(t, uint64(len(ebRaw)), manifestMessage.Size)
+	o.leiosEBLog.complete("downstream", nil, true)
+
+	o.markLeiosEndorserBlockRelayOfferFrom(point, "peer-b")
+	entry, _ = o.leiosEBLog.next("downstream")
+	require.Nil(t, entry, "the manifest must be offered exactly once")
+}

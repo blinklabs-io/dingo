@@ -101,6 +101,11 @@ var (
 		"peer vote verification budget exhausted",
 	)
 	errVoteEquivocation = errors.New("vote equivocation")
+	// errVoteWindowClosed marks a vote whose slot is behind the voting
+	// window. Honest relays forward such votes without an age check, so
+	// the drop is not counted toward the per-connection invalid-vote
+	// limit.
+	errVoteWindowClosed = errors.New("vote window closed")
 )
 
 // Reasons recorded by dingo_metrics_leios_votes_not_emitted_total. They
@@ -1688,7 +1693,8 @@ func (m *VoteManager) slotWindowCheck(slot uint64) error {
 	cur := m.slotProvider.CurrentOrTipSlot()
 	if slot < cur && cur-slot >= m.voteWindowSlots {
 		return fmt.Errorf(
-			"vote slot %d is %d or more slots behind current slot %d (vote window closed)",
+			"%w: vote slot %d is %d or more slots behind current slot %d",
+			errVoteWindowClosed,
 			slot,
 			m.voteWindowSlots,
 			cur,
@@ -1780,7 +1786,8 @@ func (m *VoteManager) rejectIncomingVote(
 	if errors.Is(err, errVoteVerificationProcessBudget) ||
 		errors.Is(err, errVoteVerificationPeerTrackingBudget) ||
 		errors.Is(err, errVoteVerificationPeerBudget) ||
-		errors.Is(err, errVoteEquivocation) {
+		errors.Is(err, errVoteEquivocation) ||
+		errors.Is(err, errVoteWindowClosed) {
 		return nil
 	}
 	now := m.now()

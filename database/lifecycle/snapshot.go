@@ -151,7 +151,7 @@ func Snapshot(
 	if err := requirePrivateSnapshotParent(parentDir); err != nil {
 		return Manifest{}, err
 	}
-	if err := os.Mkdir(dir, 0o755); err != nil {
+	if err := os.Mkdir(dir, 0o700); err != nil {
 		if errors.Is(err, fs.ErrExist) {
 			return Manifest{}, fmt.Errorf(
 				"snapshot directory %q already exists", dir,
@@ -185,12 +185,17 @@ func Snapshot(
 			}
 		}
 	}()
+	if err := restrictPrivateSnapshotDirectory(snapshotRoot); err != nil {
+		return Manifest{}, fmt.Errorf(
+			"restrict snapshot directory %q: %w", dir, err,
+		)
+	}
 
 	blobPath := filepath.Join(dir, BlobBackupFileName)
 	blobFile, err := snapshotRoot.OpenFile(
 		BlobBackupFileName,
 		os.O_WRONLY|os.O_CREATE|os.O_EXCL,
-		0o644,
+		0o600,
 	)
 	if err != nil {
 		return Manifest{}, fmt.Errorf("create %q: %w", blobPath, err)
@@ -233,6 +238,19 @@ func Snapshot(
 		return Manifest{}, fmt.Errorf("create private metadata staging directory: %w", err)
 	}
 	defer os.RemoveAll(metadataStageDir) //nolint:errcheck // best-effort removal of private temporary data
+	metadataStageRoot, err := os.OpenRoot(metadataStageDir)
+	if err != nil {
+		return Manifest{}, fmt.Errorf("open private metadata staging directory: %w", err)
+	}
+	if err := restrictPrivateSnapshotDirectory(metadataStageRoot); err != nil {
+		_ = metadataStageRoot.Close()
+		return Manifest{}, fmt.Errorf(
+			"restrict private metadata staging directory: %w", err,
+		)
+	}
+	if err := metadataStageRoot.Close(); err != nil {
+		return Manifest{}, fmt.Errorf("close private metadata staging directory: %w", err)
+	}
 	metadataStagePath := filepath.Join(metadataStageDir, MetadataBackupFileName)
 	if err := snapshotRootMatchesPath(snapshotRoot, dir); err != nil {
 		return Manifest{}, err
@@ -433,6 +451,9 @@ func Snapshot(
 	if metadataErr != nil {
 		return Manifest{}, fmt.Errorf("backup metadata store: %w", metadataErr)
 	}
+	if err := os.Chmod(metadataStagePath, 0o600); err != nil {
+		return Manifest{}, fmt.Errorf("restrict %q: %w", metadataStagePath, err)
+	}
 	if err := snapshotRootMatchesPath(snapshotRoot, dir); err != nil {
 		return Manifest{}, err
 	}
@@ -572,7 +593,7 @@ func copyStagedSnapshotFile(
 		return fmt.Errorf("open staged %q: %w", name, err)
 	}
 	defer src.Close() //nolint:errcheck // read errors are reported by io.Copy
-	dst, err := root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	dst, err := root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return err
 	}

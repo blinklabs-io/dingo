@@ -19,6 +19,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"runtime"
 	"testing"
 	"time"
 
@@ -29,7 +30,7 @@ func testDeadlineLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
-func TestWithSocketDeadlinesOnlyWrapsTCP(t *testing.T) {
+func TestWithSocketDeadlinesLeavesUnsupportedConnUnwrapped(t *testing.T) {
 	t.Parallel()
 
 	left, right := net.Pipe()
@@ -39,6 +40,34 @@ func TestWithSocketDeadlinesOnlyWrapsTCP(t *testing.T) {
 	if got := withSocketDeadlines(left); got != left {
 		t.Fatal("non-TCP connection should not be wrapped")
 	}
+}
+
+func TestWithSocketDeadlinesWrapsUnix(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows NtC uses named pipes rather than Unix-domain sockets")
+	}
+
+	socketPath := unixTestSocketPath(t, unixTestTempDir(t), "deadline.sock")
+	listener, err := net.Listen("unix", socketPath)
+	require.NoError(t, err)
+	defer listener.Close()
+
+	client, err := net.Dial("unix", socketPath)
+	require.NoError(t, err)
+	defer client.Close()
+
+	accepted, err := listener.Accept()
+	require.NoError(t, err)
+	defer accepted.Close()
+	unixConn, err := NewUnixConn(accepted)
+	require.NoError(t, err)
+
+	wrapped, ok := withSocketDeadlines(unixConn).(*deadlineConn)
+	require.True(t, ok, "Unix NtC connections must retain a write deadline")
+	require.Equal(t, socketIdleTimeout, wrapped.timeout)
+	require.Same(t, accepted, unwrapConn(wrapped))
+	require.Equal(t, unixConn.RemoteAddr(), wrapped.RemoteAddr())
 }
 
 func TestDeadlineConnRefreshesWriteDeadline(t *testing.T) {

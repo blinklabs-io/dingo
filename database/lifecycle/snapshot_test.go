@@ -18,6 +18,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"testing"
 
@@ -60,6 +61,51 @@ func TestSnapshotWritesManifestAndBackupFiles(t *testing.T) {
 
 	require.FileExists(t, filepath.Join(dir, lifecycle.BlobBackupFileName))
 	require.FileExists(t, filepath.Join(dir, lifecycle.MetadataBackupFileName))
+}
+
+// TestSnapshotCreatesPrivateDirectory verifies that local backup contents are
+// not accessible to group or other users through the snapshot directory.
+func TestSnapshotCreatesPrivateDirectory(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows does not expose Unix permission bits")
+	}
+
+	db := newTestDB(t)
+	parentDir := t.TempDir()
+	require.NoError(t, os.Chmod(parentDir, 0o700))
+	dir := filepath.Join(parentDir, "snap-private")
+	_, err := lifecycle.Snapshot(
+		context.Background(),
+		db,
+		dir,
+		lifecycle.TriggerManual,
+		"test-version",
+		"badger",
+		"sqlite",
+	)
+	require.NoError(t, err)
+
+	info, err := os.Stat(dir)
+	require.NoError(t, err)
+	require.Zero(
+		t,
+		info.Mode().Perm()&0o077,
+		"snapshot directory must not be accessible by group or other users",
+	)
+	for _, name := range []string{
+		lifecycle.BlobBackupFileName,
+		lifecycle.MetadataBackupFileName,
+		lifecycle.ManifestFileName,
+	} {
+		info, err := os.Stat(filepath.Join(dir, name))
+		require.NoError(t, err)
+		require.Zero(
+			t,
+			info.Mode().Perm()&0o077,
+			"snapshot file %q must not be accessible by group or other users",
+			name,
+		)
+	}
 }
 
 // TestSnapshotRefusesExistingDirectory verifies that Snapshot errors when
