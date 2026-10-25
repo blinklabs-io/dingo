@@ -8476,6 +8476,10 @@ consensus-context generation. Rollback or state replacement changes that
 generation, while the leader manager clears its in-memory Tachys schedules on
 every rollback synchronously after the replacement consensus snapshot is
 published, and refuses an in-flight result from the older schedule generation.
+A distribution read that observes a consensus-context change defers header
+verification instead of reporting the stake snapshot unavailable. Next-epoch
+nonce readiness drops only the ready epoch's schedule; the current epoch's
+schedule keeps serving block production.
 Persisted Tachys schedules pin the nonce, absolute epoch range,
 era, provider identity, and full-distribution commitment.
 
@@ -8517,14 +8521,17 @@ numerator/denominator; nondecimal rationals such as `1/3` are valid. Existing
 float-only callers retain their rational conversion and are subject to the
 same domain rejection, without automatic rounding or a new fallback.
 
-`ScheduleFormatVersion=5` invalidates the pre-E34 version-4 slot lists.
-Records with version 4 or no version (decoded as zero) are discarded by the
-real election reload path, recomputed under E34 and saved as version 5.
-A valid version-5 record is reused on restart. Nonce, pool/total stake,
-epoch and slot-range checks remain in force. Persisted JSON is unchanged:
-`format_version`, `epoch`, `pool_id`, `pool_stake`, `total_stake`,
-`epoch_nonce`, `leader_slots`. No cutoff or evaluator is serialized, and no
-database schema migration is needed.
+`ScheduleFormatVersion=7` adds the exact epoch context and the Tachys
+distribution commitment to every persisted schedule. Records with an older
+version or no version (decoded as zero) are discarded by the real election
+reload path and recomputed. A valid version-7 record is reused on restart.
+Praos records recheck their nonce, pool/total stake, epoch and slot range;
+Tachys records additionally require an exact epoch range, era, and
+full-distribution commitment match. Persisted JSON carries `format_version`,
+`epoch`, `pool_id`, `pool_stake`, `total_stake`, `epoch_nonce`,
+`epoch_start_slot`, `epoch_slot_count`, `era_id`, `consensus_identity`,
+`distribution_commitment`, and `leader_slots`. No cutoff or evaluator is
+serialized, and no database schema migration is needed.
 
 The `leader schedule calculated` record retains snapshot epoch/type, epoch
 slot interval, nonce, pool/total stake, exact `f`, consensus mode and elected

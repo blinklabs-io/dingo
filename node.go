@@ -148,10 +148,13 @@ type Node struct {
 	// dialing/closing it (closing the prior one before replacing it, so a
 	// live-lifecycle rebuild via reinitializeBlockProducer cannot leak a
 	// connection); node_shutdown.go closes it during graceful shutdown.
-	kesAgentClient               *kesagent.Client
-	kesAgentCancel               context.CancelFunc
-	kesAgentMetrics              *kesagent.Metrics
-	leaderElection               nodeconsensus.LeaderScheduler
+	kesAgentClient  *kesagent.Client
+	kesAgentCancel  context.CancelFunc
+	kesAgentMetrics *kesagent.Metrics
+	leaderElection  nodeconsensus.LeaderScheduler
+	// leaderSchedulerRef mirrors leaderElection for readers outside the
+	// node lifecycle goroutine, such as the ledger rollback callback.
+	leaderSchedulerRef           atomic.Pointer[leaderSchedulerRef]
 	rtsMetrics                   *rtsMetrics
 	shutdownFuncs                []func(context.Context) error
 	deferredIndexMaintenanceDone chan struct{}

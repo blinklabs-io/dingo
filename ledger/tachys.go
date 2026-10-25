@@ -109,10 +109,19 @@ func (ls *LedgerState) TachysDistribution(
 		)
 	}
 	released = true
+	if ls.tachysDistributionLoadedHook != nil {
+		ls.tachysDistributionLoadedHook()
+	}
 	current := ls.loadConsensusSnapshot()
 	if current == nil ||
 		current.contextGeneration != snapshot.contextGeneration {
-		return nil, errors.New("tachys consensus context changed while loading distribution")
+		// The read may still describe the new context, but the cache key and
+		// the caller's epoch inputs no longer do. Retrying against the new
+		// context is the only sound answer.
+		return nil, fmt.Errorf(
+			"%w: tachys consensus context changed while loading distribution",
+			errHeaderVerificationDeferred,
+		)
 	}
 	ls.tachysDistributions = append(
 		ls.tachysDistributions,
@@ -264,6 +273,9 @@ func (ls *LedgerState) verifyTachysLeaderEligibility(
 		ctx,
 		praos.StakeSnapshotEpoch(epochID),
 	)
+	if IsHeaderVerificationDeferred(err) {
+		return err
+	}
 	if err != nil {
 		return fmt.Errorf(
 			"%w: tachys election distribution for epoch %d: %w",

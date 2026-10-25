@@ -69,6 +69,13 @@ if [[ "${LEIOS}" == "true" && "${ACCELERATED}" == "true" ]]; then
   echo "--leios selects its own accelerated Dijkstra spec; do not combine it with --accelerated" >&2
   exit 1
 fi
+if [[ "${LEIOS}" != "true" ]]; then
+  unset DEVNET_LEIOS_ENABLED DEVNET_LEIOS_VOTE_SIGNING_KEY_FILE
+  unset DEVNET_DINGO_RUN_MODE
+  unset DEVNET_DINGO_START_ERA
+  unset DEVNET_TXPUMP_TRANSACTION_ERA
+  unset DEVNET_TXPUMP_START_DELAY_SECONDS
+fi
 if [[ "${TACHYS}" != "true" ]]; then
   unset DEVNET_CONSENSUS_PROVIDER DEVNET_GENESIS_BOOTSTRAP_ENABLED
 fi
@@ -170,11 +177,6 @@ elif [[ "${ACCELERATED}" == "true" ]]; then
   echo "  go test -tags devnet -run TestAcceleratedScenarioTimeline \\"
   echo "    -timeout 8m ./internal/test/devnet/scenarios/"
 else
-  unset DEVNET_LEIOS_ENABLED DEVNET_LEIOS_VOTE_SIGNING_KEY_FILE
-  unset DEVNET_DINGO_RUN_MODE
-  unset DEVNET_DINGO_START_ERA
-  unset DEVNET_TXPUMP_TRANSACTION_ERA
-  unset DEVNET_TXPUMP_START_DELAY_SECONDS
   export DEVNET_TXPUMP_CONFIRMATION_SLOTS=600
 fi
 

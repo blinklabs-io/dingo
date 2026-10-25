@@ -502,6 +502,19 @@ func (e *Election) invalidateTachysSchedules() {
 	e.mu.Unlock()
 }
 
+// invalidateTachysSchedule drops one epoch's schedule. The generation bump
+// refuses any in-flight result, so callers re-queue every epoch that might
+// have been computing.
+func (e *Election) invalidateTachysSchedule(epoch uint64) {
+	if e.tachysProvider == nil {
+		return
+	}
+	e.mu.Lock()
+	delete(e.schedules, epoch)
+	e.scheduleGeneration++
+	e.mu.Unlock()
+}
+
 // ConsensusStateRestored invalidates provider-owned schedules before a
 // rollback becomes observable to block production.
 func (e *Election) ConsensusStateRestored() {
@@ -611,7 +624,7 @@ func (e *Election) epochNonceReadyLoop(
 			"cutoff_slot", readyEvent.CutoffSlot,
 		)
 		if e.tachysProvider != nil {
-			e.invalidateTachysSchedules()
+			e.invalidateTachysSchedule(readyEvent.ReadyEpoch)
 			e.queueScheduleCompute(readyEvent.CurrentEpoch)
 		}
 		e.queueScheduleCompute(readyEvent.ReadyEpoch)

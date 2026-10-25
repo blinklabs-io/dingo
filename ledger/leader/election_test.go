@@ -211,6 +211,53 @@ func TestTachysRollbackInvalidatesSchedule(t *testing.T) {
 	}, testutil.AsyncWait, 10*time.Millisecond)
 }
 
+// The next-epoch nonce stabilizes mid-epoch and changes nothing the current
+// epoch's public schedule depends on, so the schedule serving the current
+// epoch must survive that event; dropping it leaves block production with no
+// schedule until the recompute finishes.
+func TestTachysNonceReadyKeepsCurrentEpochSchedule(t *testing.T) {
+	t.Parallel()
+
+	var poolID lcommon.PoolKeyHash
+	poolID[0] = 1
+	provider := &staticTachysDistributionProvider{distribution: testTachysDistribution(
+		t,
+		[]consensus.TachysPool{{ID: poolID, Stake: 1}},
+		1,
+	)}
+	epochProvider := newMockEpochProvider()
+	epochProvider.currentEpoch.Store(10)
+	epochProvider.SetEpochNonceForEpoch(10, electionTestNonce)
+	eventBus := event.NewEventBus(nil, nil)
+	defer eventBus.Stop()
+	election := NewTachysElection(
+		poolID,
+		newMockStakeProvider(),
+		provider,
+		epochProvider,
+		eventBus,
+		slog.Default(),
+	)
+	election.SetConsensusIdentity(nodeconsensus.TachysIdentity)
+	require.NoError(t, election.Start(context.Background()))
+	defer func() { require.NoError(t, election.Stop()) }()
+	current := waitForSchedule(t, election, testutil.AsyncWait)
+	require.NotNil(t, current)
+
+	epochProvider.SetEpochNonceForEpoch(11, electionTestNonce)
+	eventBus.Publish(
+		event.EpochNonceReadyEventType,
+		event.NewEvent(event.EpochNonceReadyEventType, event.EpochNonceReadyEvent{
+			CurrentEpoch: 10,
+			ReadyEpoch:   11,
+		}),
+	)
+	require.Eventually(t, func() bool {
+		return election.ScheduleForEpoch(11) != nil
+	}, testutil.AsyncWait, 10*time.Millisecond)
+	require.Same(t, current, election.ScheduleForEpoch(10))
+}
+
 const (
 	sigmaAuditEpoch      = uint64(11)
 	sigmaAuditStartSlot  = uint64(950400)

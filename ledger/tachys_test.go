@@ -18,6 +18,9 @@ import (
 	"encoding/hex"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/consensus/praos"
+	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	"github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/stretchr/testify/require"
 )
@@ -47,4 +50,55 @@ func TestTachysPoolsRejectMismatchedSnapshotTotal(t *testing.T) {
 		hex.EncodeToString(poolID[:]): 9,
 	}, 10)
 	require.ErrorContains(t, err, "total mismatch")
+}
+
+// A consensus publication that lands while the distribution is being read
+// says nothing about the header, so verification must defer rather than
+// report an unavailable stake snapshot, which hard-rejects once the ledger
+// apply cursor has reached the header's slot.
+func TestTachysEligibilityDefersWhenContextChangesDuringLoad(t *testing.T) {
+	t.Parallel()
+
+	const epochID = uint64(3)
+	db := newTestDB(t)
+	meta := db.Metadata()
+	snapshotEpoch := praos.StakeSnapshotEpoch(epochID)
+	require.NoError(t, meta.SavePoolStakeSnapshots(
+		[]*models.PoolStakeSnapshot{
+			markSnapshot(t, snapshotEpoch, ssPool1Hex, oneTrillion),
+		},
+		nil,
+	))
+	require.NoError(t, meta.SaveEpochSummary(
+		epochSummary(snapshotEpoch, oneTrillion),
+		nil,
+	))
+	ls := &LedgerState{db: db}
+	ls.consensus.Store(&consensusSnapshot{
+		generation:        1,
+		contextGeneration: 1,
+		currentEpoch:      models.Epoch{EpochId: epochID},
+	})
+	ls.tachysDistributionLoadedHook = func() {
+		ls.consensus.Store(&consensusSnapshot{
+			generation:        2,
+			contextGeneration: 2,
+			currentEpoch:      models.Epoch{EpochId: epochID},
+		})
+	}
+	block := &envelopeTestBlock{header: &envelopeTestHeader{
+		era:  babbage.EraBabbage,
+		slot: 300,
+	}}
+
+	err := ls.verifyTachysLeaderEligibility(
+		t.Context(),
+		block,
+		epochID,
+		electingSnapshot{},
+		make([]byte, common.Blake2b256Size),
+	)
+	require.Error(t, err)
+	require.True(t, IsHeaderVerificationDeferred(err), err)
+	require.NotErrorIs(t, err, errLeaderStakeSnapshotUnavailable)
 }

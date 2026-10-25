@@ -1126,7 +1126,7 @@ func (n *Node) initBlockForger(
 
 	// Store election for cleanup during shutdown only after the forger is
 	// fully created and running.
-	n.leaderElection = election
+	n.setLeaderElection(election)
 	n.blockForger = forger
 	n.config.logger.Info(
 		"block forger started in production mode with leader election",
@@ -1729,4 +1729,18 @@ func (a *epochNonceAdapter) EpochNonce(
 	epoch uint64,
 ) []byte {
 	return a.ledgerState.EpochNonce(ctx, epoch)
+}
+
+// leaderSchedulerRef boxes an interface value so it can be published
+// atomically.
+type leaderSchedulerRef struct {
+	scheduler nodeconsensus.LeaderScheduler
+}
+
+// setLeaderElection publishes the scheduler both to the node lifecycle,
+// which owns n.leaderElection, and to the ledger rollback callback, which
+// runs on the ledger goroutine and must read it through leaderSchedulerRef.
+func (n *Node) setLeaderElection(s nodeconsensus.LeaderScheduler) {
+	n.leaderElection = s
+	n.leaderSchedulerRef.Store(&leaderSchedulerRef{scheduler: s})
 }

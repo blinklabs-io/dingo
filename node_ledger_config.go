@@ -73,8 +73,9 @@ func (n *Node) ledgerStateConfig() ledger.LedgerStateConfig {
 	return ledger.LedgerStateConfig{
 		Consensus: n.selectedConsensusProvider(),
 		ConsensusStateRestoredFunc: func() {
-			if n.leaderElection != nil {
-				n.leaderElection.ConsensusStateRestored()
+			if ref := n.leaderSchedulerRef.Load(); ref != nil &&
+				ref.scheduler != nil {
+				ref.scheduler.ConsensusStateRestored()
 			}
 		},
 		ChainManager:       n.chainManager,

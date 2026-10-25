@@ -1375,6 +1375,9 @@ type LedgerState struct {
 	// replacement cannot reuse a selector built from abandoned state.
 	tachysMu            sync.Mutex
 	tachysDistributions []tachysDistributionCacheEntry
+	// Test hook called after a Tachys distribution read releases its
+	// transaction and before the consensus context is rechecked.
+	tachysDistributionLoadedHook func()
 	// snapshotPublished is closed and replaced after every snapshot
 	// publication, so a reader waiting for the ledger to advance can block
 	// until the published state changes instead of polling it.
