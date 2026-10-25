@@ -2321,6 +2321,239 @@
       ],
       "transparent": true,
       "description": "Leios pipeline instances being tracked, and the size of the vote deduplication record."
+    },
+    {
+      "type": "timeseries",
+      "title": "Block Timing: RB Fetch, RB Adoption, EB Arrival",
+      "id": 115,
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 44
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "showPoints": "auto",
+            "thresholdsStyle": {
+              "mode": "dashed"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "transparent",
+                "value": null
+              },
+              {
+                "color": "#ef4444",
+                "value": 5
+              }
+            ]
+          },
+          "unit": "s"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".*RB fetch.*"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#E88C30",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".*RB adoption.*"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#F2F2F2",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".*EB arrival.*"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#B877D9",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "default"
+          },
+          "expr": "quantile_over_time(0.95, cardano_node_metrics_blockfetchclient_blockdelay_s{network=\"$network\",instance=~\"$instance\"}[15m])",
+          "legendFormat": "{{instance}} RB fetch p95",
+          "refId": "A",
+          "range": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "default"
+          },
+          "expr": "histogram_quantile(0.5, sum by (le, instance) (rate(dingo_ledger_block_adoption_delay_seconds_bucket{network=\"$network\",instance=~\"$instance\"}[5m])))",
+          "legendFormat": "{{instance}} RB adoption p50",
+          "refId": "B",
+          "range": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "default"
+          },
+          "expr": "histogram_quantile(0.95, sum by (le, instance) (rate(dingo_ledger_block_adoption_delay_seconds_bucket{network=\"$network\",instance=~\"$instance\"}[5m])))",
+          "legendFormat": "{{instance}} RB adoption p95",
+          "refId": "C",
+          "range": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "default"
+          },
+          "expr": "histogram_quantile(0.5, sum by (le, instance) (rate(dingo_leios_eb_arrival_delay_seconds_bucket{network=\"$network\",instance=~\"$instance\"}[5m])))",
+          "legendFormat": "{{instance}} EB arrival p50",
+          "refId": "D",
+          "range": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "default"
+          },
+          "expr": "histogram_quantile(0.95, sum by (le, instance) (rate(dingo_leios_eb_arrival_delay_seconds_bucket{network=\"$network\",instance=~\"$instance\"}[5m])))",
+          "legendFormat": "{{instance}} EB arrival p95",
+          "refId": "E",
+          "range": true
+        }
+      ],
+      "transparent": true,
+      "description": "Seconds after the block's slot. RB fetch: the ranking block body arrived (blockfetch). RB adoption: the ledger made it the tip, including validation and any wait for a certified EB. EB arrival: the endorser block's manifest and every transaction were held locally. The dashed line is the provisional 5-slot EB diffusion window (DiffuseWindowSlots on 1s Musashi slots)."
+    },
+    {
+      "type": "timeseries",
+      "title": "Chainsync Deferred Headers and Resyncs",
+      "id": 116,
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 44
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "showPoints": "auto"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              }
+            ]
+          },
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "default"
+          },
+          "expr": "increase(dingo_chainsync_deferred_headers_total{network=\"$network\",instance=~\"$instance\"}[5m])",
+          "legendFormat": "{{instance}} headers deferred / 5m",
+          "refId": "A",
+          "range": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "default"
+          },
+          "expr": "dingo_chainsync_deferred_header_connections{network=\"$network\",instance=~\"$instance\"}",
+          "legendFormat": "{{instance}} connections parked",
+          "refId": "B",
+          "range": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "default"
+          },
+          "expr": "sum by (instance, reason) (increase(dingo_chainsync_resyncs_total{network=\"$network\",instance=~\"$instance\"}[5m]))",
+          "legendFormat": "{{instance}} resync: {{reason}}",
+          "refId": "C",
+          "range": true
+        }
+      ],
+      "transparent": true,
+      "description": "Headers parked because their producer authorization could not be checked against the current ledger yet, connections currently parked, and chainsync resyncs per 5m by reason. A deferred-header recovery resync after a long park is a chain-following stall: blocks behind it arrive late by the length of the park."
     }
   ]
 }
