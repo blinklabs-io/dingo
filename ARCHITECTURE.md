@@ -726,8 +726,9 @@ instead and not counted), and
 connections currently hold parked recovery state.
 `dingo_chainsync_resyncs_total{reason}` counts every `chainsync.resync` event
 the `SubscribeChainsyncResync` subscriber handles, labelled with the event's
-`Reason`; every publisher passes a `ChainsyncResyncReason*` constant or a fixed
-literal, so the label set is bounded. Resyncs coalesced by the ledger before
+`Reason` when it is one of the `ChainsyncResyncReason*` constants and `other`
+otherwise. Some publishers format errors or connection IDs into the reason,
+so this keeps the label set bounded; the full reason stays in the logs. Resyncs coalesced by the ledger before
 publication are not counted, and neither are events dropped because the
 subscriber's context is done.
 

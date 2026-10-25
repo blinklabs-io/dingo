@@ -134,7 +134,9 @@ func TestDeferredHeaderHeldByChainIsNotCountedAsParked(t *testing.T) {
 	))
 }
 
-// Every resync event the subscriber handles is counted under its reason.
+// Every resync event the subscriber handles is counted under its reason when
+// that is a fixed one, and under "other" when the publisher formatted an
+// error or connection ID into it.
 func TestChainsyncResyncsCountedByReason(t *testing.T) {
 	t.Parallel()
 
@@ -158,6 +160,8 @@ func TestChainsyncResyncsCountedByReason(t *testing.T) {
 	publish(event.ChainsyncResyncReasonHeaderValidationRecovery)
 	publish(event.ChainsyncResyncReasonHeaderValidationRecovery)
 	publish(event.ChainsyncResyncReasonRollbackLoop)
+	publish("blockfetch start failed: connection 10.0.0.1:3001 closed")
+	publish("blockfetch start failed: connection 10.0.0.2:3001 closed")
 
 	require.Eventually(t, func() bool {
 		return chainsyncMetricValue(
@@ -166,6 +170,17 @@ func TestChainsyncResyncsCountedByReason(t *testing.T) {
 		) == 2 &&
 			chainsyncMetricValue(
 				t, reg, resyncs, event.ChainsyncResyncReasonRollbackLoop,
-			) == 1
+			) == 1 &&
+			chainsyncMetricValue(
+				t, reg, resyncs, chainsyncResyncOtherReason,
+			) == 2
 	}, 5*time.Second, 10*time.Millisecond)
+	families, err := reg.Gather()
+	require.NoError(t, err)
+	for _, mf := range families {
+		if mf.GetName() == resyncs {
+			require.Len(t, mf.GetMetric(), 3,
+				"formatted reasons must not add series")
+		}
+	}
 }

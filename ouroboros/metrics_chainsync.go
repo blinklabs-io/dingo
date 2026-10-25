@@ -15,6 +15,7 @@
 package ouroboros
 
 import (
+	"github.com/blinklabs-io/dingo/event"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
@@ -27,9 +28,7 @@ type chainsyncMetrics struct {
 	// chain does not already hold their block.
 	deferredHeaders prometheus.Counter
 	// resyncs counts chainsync resync events handled by
-	// SubscribeChainsyncResync, by the event's reason string. Every publisher
-	// passes a ChainsyncResyncReason* constant or a fixed literal, so label
-	// cardinality is bounded.
+	// SubscribeChainsyncResync, labelled by chainsyncResyncReasonLabel.
 	resyncs *prometheus.CounterVec
 }
 
@@ -72,11 +71,62 @@ func (o *Ouroboros) recordDeferredHeaderParked() {
 	o.chainsyncMetrics.deferredHeaders.Inc()
 }
 
+// chainsyncResyncOtherReason labels a resync whose reason is not one of the
+// event package's fixed reasons.
+const chainsyncResyncOtherReason = "other"
+
+// chainsyncResyncReasons are the fixed reasons a resync is labelled with.
+var chainsyncResyncReasons = map[string]struct{}{
+	event.ChainsyncResyncReasonBehindLocalTip:                    {},
+	event.ChainsyncResyncReasonBlockfetchRangeUnavailable:        {},
+	event.ChainsyncResyncReasonBlockfetchTimeoutRetryFailed:      {},
+	event.ChainsyncResyncReasonChainSwitchCursorAhead:            {},
+	event.ChainsyncResyncReasonDeferredHeaderValidationFailure:   {},
+	event.ChainsyncResyncReasonDeterministicTxValidationRecovery: {},
+	event.ChainsyncResyncReasonDisconnectedHeaderAdmission:       {},
+	event.ChainsyncResyncReasonForecastCorroborationRecovery:     {},
+	event.ChainsyncResyncReasonForecastHorizonNoWork:             {},
+	event.ChainsyncResyncReasonForkExtensionRestartFailed:        {},
+	event.ChainsyncResyncReasonForkQueueOverflowRestartFailed:    {},
+	event.ChainsyncResyncReasonForkResolutionExceedsK:            {},
+	event.ChainsyncResyncReasonFutureHeaderAdmissionRecovery:     {},
+	event.ChainsyncResyncReasonGenesisCorroborationHoldExpired:   {},
+	event.ChainsyncResyncReasonHeaderQueueFullRestartFailed:      {},
+	event.ChainsyncResyncReasonHeaderValidationRecovery:          {},
+	event.ChainsyncResyncReasonLiveTxValidationRecovery:          {},
+	event.ChainsyncResyncReasonLocalLedgerRollback:               {},
+	event.ChainsyncResyncReasonLocalTipPlateau:                   {},
+	event.ChainsyncResyncReasonNetworkIngestReleased:             {},
+	event.ChainsyncResyncReasonPeerTipBehindMithril:              {},
+	event.ChainsyncResyncReasonPersistentFork:                    {},
+	event.ChainsyncResyncReasonPostPlateauRealign:                {},
+	event.ChainsyncResyncReasonReplayRecoveryNonConverging:       {},
+	event.ChainsyncResyncReasonRollbackAhead:                     {},
+	event.ChainsyncResyncReasonRollbackBelowUtxoPruneFloor:       {},
+	event.ChainsyncResyncReasonRollbackExceedsK:                  {},
+	event.ChainsyncResyncReasonRollbackExceedsMithril:            {},
+	event.ChainsyncResyncReasonRollbackLoop:                      {},
+	event.ChainsyncResyncReasonRollbackNotFound:                  {},
+}
+
+// chainsyncResyncReasonLabel bounds the reason label. Some publishers format
+// errors or connection IDs into the reason, which would add a retained series
+// per connection, so any reason that is not a fixed one is counted as
+// chainsyncResyncOtherReason; publishers log the full reason.
+func chainsyncResyncReasonLabel(reason string) string {
+	if _, ok := chainsyncResyncReasons[reason]; ok {
+		return reason
+	}
+	return chainsyncResyncOtherReason
+}
+
 // recordChainsyncResync counts one chainsync resync event. Safe to call when
 // metrics are not initialized.
 func (o *Ouroboros) recordChainsyncResync(reason string) {
 	if o.chainsyncMetrics == nil {
 		return
 	}
-	o.chainsyncMetrics.resyncs.WithLabelValues(reason).Inc()
+	o.chainsyncMetrics.resyncs.WithLabelValues(
+		chainsyncResyncReasonLabel(reason),
+	).Inc()
 }
