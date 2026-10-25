@@ -53,6 +53,9 @@ func newDialectQueryer(db queryer, dialect string) queryer {
 // (prepared_stmt.go) already perform for the same reason, one layer
 // further in for *sql.Tx.
 func unwrapDialectQueryer(db queryer) (dialectQueryer, bool) {
+	if wrapped, ok := db.(barrierQueryer); ok {
+		db = wrapped.queryer
+	}
 	if wrapped, ok := db.(countingQueryer); ok {
 		db = wrapped.queryer
 	}

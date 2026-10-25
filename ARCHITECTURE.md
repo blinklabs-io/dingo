@@ -3822,7 +3822,24 @@ source take that role at runtime, without the construction-time
   An epoch boundary inside the batch splits it into the pre-boundary
   transaction, the rollover transaction and the post-boundary transaction,
   as on every apply path. The batch writes through the row-batching
-  accumulator whatever `ApplyRowBatchingEnabled` says. After the batch
+  accumulator whatever `ApplyRowBatchingEnabled` says. On SQLite outside API
+  storage mode, and outside Dijkstra blocks, each block-apply transaction
+  also attaches a batch UTxO overlay (`LedgerDeltaBatch.enableTrustedUtxoOverlay`
+  calling `Database.EnableBatchUtxoOverlay`): the ledger hands the store the
+  batch's pre-batch inputs, the store resolves every spend in memory and
+  writes the net UTxO change at `FlushBatch`, and live stake is written once
+  per transaction, by replaying each block's deltas with the per-block
+  row lifecycle in memory. A read barrier on the transaction's handle writes
+  the pending rows and the ended blocks' stake before any statement reads
+  `utxo`, `utxo_pointer` or `reward_live_stake`. Dijkstra and later eras
+  keep the per-row path. Stored state, row ids included, is
+  the per-row path's; see `DATABASE.md`, "Trusted batch UTxO overlay". When
+  the overlay's write hits a `UNIQUE` conflict
+  (`types.ErrBatchUtxoOverlayConflict`), the call logs a Warn line, counts
+  `dingo_ledger_trusted_batch_overlay_fallbacks_total`, and applies the
+  blocks that did not commit again on the per-row path. Regression tests are
+  in `ledger/trusted_batch_overlay_test.go` and
+  `database/plugin/metadata/sqlstore/utxo_overlay_test.go`. After the batch
   commits, and before the call returns, the consumed-UTxO cleanup runs
   without its catch-up deferral, up to the new tip rather than the stability
   window behind it, deleting 1,000 rows at a time until nothing prunable is
