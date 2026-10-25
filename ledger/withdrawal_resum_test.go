@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"errors"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
@@ -224,11 +225,19 @@ func runWithdrawalResumTrusted(
 	t.Helper()
 	h := newExternalIngestHarness(t, false)
 	batched := h.countBatchedWrites()
+	overlays := h.countOverlays()
 	expected := ocommon.Point{}
 	for i, block := range blocks {
+		before := overlays.Load()
 		tip, err := h.applyPaused(t, expected, []gledger.Block{block})
 		if err != nil {
 			return h.db, batched.Load(), err
+		}
+		// Not require: p.run is called from a subtest with the parent's t.
+		if overlays.Load() == before {
+			return h.db, batched.Load(), errors.New(
+				"the block did not apply through the batch UTxO overlay",
+			)
 		}
 		expected = tip
 		if i == 0 {

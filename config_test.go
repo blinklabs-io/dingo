@@ -240,6 +240,7 @@ func TestConfigPopulateNetworkMagicSyncsCompatField(t *testing.T) {
 	}{
 		{"devnet", 42},
 		{"preview", 2},
+		{"dijkstra", 6},
 	}
 	for _, tc := range cases {
 		t.Run(tc.network, func(t *testing.T) {

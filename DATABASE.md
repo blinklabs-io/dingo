@@ -2150,7 +2150,7 @@ proposals it depends on were stored, and is derived again.
 | Table | Columns | Keys / indexes | Relationships and notes |
 |---|---|---|---|
 | `pool` | `id`, `pool_key_hash`, `vrf_key_hash`, `reward_account`, `reward_account_credential_tag`, `latest_op_cert_sequence`, `pledge`, `cost`, `margin`, `leios_key_public`, `leios_key_possession_proof` | PK `id`; unique `pool_key_hash` | Current pool state. Historical registrations and retirements are separate rows. `reward_account_credential_tag`: 0 key hash, 1 script hash for the pool reward account. `leios_key_public` (96-byte BLS12-381 G2 public key) and `leios_key_possession_proof` (48-byte G1 signature) are the pool's registered Dijkstra/Leios voting key from an on-chain `leios_key` pool-cert field (migration `v2`); both are NULL only when the pool has no `leios_key`. Storage here never checks the proof -- a key with an invalid proof is still written as-is, so a value here means "seen on-chain," not "trusted." Committee verification does not read these mutable columns directly: SNAP copies the effective registration into the epoch's `pool_stake_snapshot`, and `ledger.LedgerView.GetLeiosKeys` reads that historical row. The actual proof-of-possession check happens one layer up, in `ledger/leios`'s `resolveOnChainKeys` (`VerifyLeiosKeyProofOfPossession`), which is allowed to depend on `ledger/leios`'s BLS primitives while this package is not (`internal/architecture/tests_test.go` forbids `database` importing `ledger`). |
-| `pool_registration` | `id`, `pool_id`, `pool_key_hash`, `vrf_key_hash`, `reward_account`, `reward_account_credential_tag`, `pledge`, `cost`, `margin`, `metadata_url`, `metadata_hash`, `certificate_id`, `registration_index`, `added_slot`, `deposit_amount`, `deposit_held`, `leios_key_public`, `leios_key_possession_proof`, `leios_key_registration_age_unknown`, `leios_key_registration_epoch` | PK `id`; unique `(pool_id, added_slot, certificate_id, registration_index)`; indexes `pool_key_hash`, `certificate_id` | Pool registration certificate. Join `pool_id -> pool.id` and `certificate_id -> certs.id`. The identity keeps multiple registration certificates from one pool in one block while making replay of the same certificate idempotent. Live certificates use registration index zero because their certificate IDs identify them. Synthetic snapshot registrations use certificate ID zero and stable indexes zero for current parameters and one for staged parameters. Genesis pools with a BLS key are certificate ID zero at slot 0 with `leios_key_registration_epoch` 0. `reward_account_credential_tag`: 0 key hash, 1 script hash. `deposit_amount` is the protocol parameter in force for that certificate; nullable `deposit_held` is the amount actually retained for the registration cycle and refunded by POOLREAP. Migration `v12` reconstructs legacy rows from registration, retirement, and epoch history, carries deposits across re-registrations, starts a new cycle after a completed reap, preserves populated values on replay, and fails closed with a resync-required error when a reap cannot be placed safely. Live certificate ingestion cannot fail block application for missing epoch history, so it preserves the pre-migration charged-amount fallback in that case. An unknown retained amount remains NULL; refund queries then use `deposit_amount` as the legacy fallback. `MetadataStore.GetPoolDepositsHeld` reads the same amount for the latest registration of each requested pool (GetStakePoolState). `leios_key_public`/`leios_key_possession_proof` mirror `pool`'s columns of the same names for this specific registration (see above). `leios_key_registration_age_unknown` marks Leios key material imported without its on-chain registration slot; the import slot must not restart the protocol TTL. `leios_key_registration_epoch` is the ledger's `BlsKeyState` registered-in epoch. A live registration carrying a `leios_key` writes it from cardano-ledger's POOL and POOLREAP rules, reading only the key state active in the transaction's epoch from rows already stored (the current parameters of the pool's latest snapshot import in that epoch when there is one, because an import replaces the pool state where it lands, and otherwise the pool's latest registration before the epoch, or the epoch's first registration when the pool was reaped before the epoch or is new in it) and the latest retirement. The read of the latest registration before the epoch is an index seek plus the rows one epoch-opening block's closure added, so it does not grow with the pool's registrations in the epoch; the lookups of the latest snapshot import in the epoch and of the latest retirement still read the pool's registrations since the epoch started and its retirements, because no index orders those by position. Nothing is kept outside the rows, so rollback has nothing to undo beyond the deleted rows: the transaction's epoch for a pool that is not registered, the original epoch for a re-registration with an identical key (public key and proof) as the active one, and the epoch after the transaction's for a different key or a key added to a keyless pool. It stays NULL for registrations without a `leios_key`, and for a registration whose epoch cannot be placed in the epoch table; one that keeps an imported key of unknown age is written with NULL and `leios_key_registration_age_unknown` set. Migration `v27` marks existing imported registrations that have no source certificate (NULL or zero ID) and a nonzero synthetic slot. Genesis staking replay reuses the existing slot-0 row and replaces its owner/relay children from the immutable genesis configuration, making startup repair a partially-written genesis registration instead of inserting children against a missing parent. This behavior is covered by the SQLite metadata contract suite. |
+| `pool_registration` | `id`, `pool_id`, `pool_key_hash`, `vrf_key_hash`, `reward_account`, `reward_account_credential_tag`, `pledge`, `cost`, `margin`, `metadata_url`, `metadata_hash`, `certificate_id`, `registration_index`, `added_slot`, `deposit_amount`, `deposit_held`, `leios_key_public`, `leios_key_possession_proof`, `leios_key_registration_age_unknown`, `leios_key_registration_epoch` | PK `id`; unique `(pool_id, added_slot, certificate_id, registration_index)`; indexes `pool_key_hash`, `certificate_id` | Pool registration certificate. Join `pool_id -> pool.id` and `certificate_id -> certs.id`. The identity keeps multiple registration certificates from one pool in one block while making replay of the same certificate idempotent. Live certificates use registration index zero because their certificate IDs identify them. Synthetic snapshot registrations use certificate ID zero and stable indexes zero for current parameters and one for staged parameters. Genesis pools with a BLS key are certificate ID zero at slot 0 with `leios_key_registration_epoch` 0. `reward_account_credential_tag`: 0 key hash, 1 script hash. `deposit_amount` is the protocol parameter in force for that certificate; nullable `deposit_held` is the amount actually retained for the registration cycle and refunded by POOLREAP. Migration `v12` reconstructs legacy rows from registration, retirement, and epoch history, carries deposits across re-registrations, starts a new cycle after a completed reap, preserves populated values on replay, and fails closed with a resync-required error when a reap cannot be placed safely. Live certificate ingestion cannot fail block application for missing epoch history, so it preserves the pre-migration charged-amount fallback in that case. An unknown retained amount remains NULL; refund queries then use `deposit_amount` as the legacy fallback. `MetadataStore.GetPoolDepositsHeld` reads the same amount for the latest registration of each requested pool (GetStakePoolState). `leios_key_public`/`leios_key_possession_proof` mirror `pool`'s columns of the same names for this specific registration (see above). Validation resolves active and deferred ownership by `leios_key_public`; a different proof for the same public key does not create a distinct claim. `leios_key_registration_age_unknown` marks Leios key material imported without its on-chain registration slot; the import slot must not restart the protocol TTL. `leios_key_registration_epoch` is the ledger's `BlsKeyState` registered-in epoch. A live registration carrying a `leios_key` writes it from cardano-ledger's POOL and POOLREAP rules, reading only the key state active in the transaction's epoch from rows already stored (the current parameters of the pool's latest snapshot import in that epoch when there is one, because an import replaces the pool state where it lands, and otherwise the pool's latest registration before the epoch, or the epoch's first registration when the pool was reaped before the epoch or is new in it) and the latest retirement. The read of the latest registration before the epoch is an index seek plus the rows one epoch-opening block's closure added, so it does not grow with the pool's registrations in the epoch; the lookups of the latest snapshot import in the epoch and of the latest retirement still read the pool's registrations since the epoch started and its retirements, because no index orders those by position. Nothing is kept outside the rows, so rollback has nothing to undo beyond the deleted rows: the transaction's epoch for a pool that is not registered, the original epoch for a re-registration with an identical key (public key and proof) as the active one, and the epoch after the transaction's for a different key or a key added to a keyless pool. It stays NULL for registrations without a `leios_key`, and for a registration whose epoch cannot be placed in the epoch table; one that keeps an imported key of unknown age is written with NULL and `leios_key_registration_age_unknown` set. Migration `v27` marks existing imported registrations that have no source certificate (NULL or zero ID) and a nonzero synthetic slot. Genesis staking replay reuses the existing slot-0 row and replaces its owner/relay children from the immutable genesis configuration, making startup repair a partially-written genesis registration instead of inserting children against a missing parent. This behavior is covered by the SQLite metadata contract suite. |
 | `pool_registration_owner` | `id`, `pool_registration_id`, `pool_id`, `key_hash` | PK `id`; indexes `pool_registration_id`, `pool_id` | Owners for a pool registration. Join `pool_registration_id -> pool_registration.id`; `pool_id -> pool.id`. |
 | `pool_registration_relay` | `id`, `pool_registration_id`, `pool_id`, `relay_type`, `ipv4`, `ipv6`, `hostname`, `port` | PK `id`; indexes `pool_registration_id`, `pool_id` | Relay addresses and their on-chain constructor for a pool registration. `relay_type` is nullable for pre-v38 rows, which retain legacy field-based inference. `GetActivePoolRelays` joins `pool` and returns each row with its pool's key hash in the transient `PoolRegistrationRelay.PoolKeyHash` field, which is not a stored column. |
 | `pool_retirement` | `id`, `pool_id`, `pool_key_hash`, `certificate_id`, `epoch`, `added_slot` | PK `id`; indexes `pool_id`, `pool_key_hash`, `certificate_id`, `added_slot` | Pool retirement certificate. Synthetic retirements written by a Mithril v2 catch-up (reconcile) or by the initial Mithril bootstrap import have `certificate_id = 0` and no `certs` row (`added_slot` is the catch-up or snapshot point; `epoch` is that same point except for the pending-retirement case below, where it is a future epoch); joins on `certificate_id` must be LEFT JOINs to keep them visible, and active-pool queries rank them ahead of certificate-backed rows at the same slot. The bootstrap case covers a pool that appears in the imported active pool distribution (`pool_stake_snapshot` `"actv"`) but is absent from the certified live pool params: it retired at the snapshot's epoch boundary yet still leads the current epoch's already-fixed schedule, so the import synthesizes a `pool`/`pool_registration` pair carrying only its pool key hash and pool-distr `vrf_key_hash` (pledge/cost/margin/reward-account left zero) plus this retirement tombstone. That keeps the producer resolvable via `GetPool(includeInactive=true)` for the header VRF-key binding check while the tombstone excludes it from active-pool and stake queries. Imported reward seeding separately intersects its shared registration fallback with each target snapshot's positive-stake delegated pool keys before the target snapshot's complete parameters overlay it. A synthesized pool that belongs only to another snapshot therefore cannot leak into this epoch's reward inputs, while an actually referenced pool remains subject to the all-or-nothing reconciliation gate if neither source supplies complete economics. This matches how a genesis-synced node retains a retired pool without treating it as active. The bootstrap import writes a second, distinct kind of `certificate_id = 0` row for a pool the snapshot shows as *pending* retirement: the PState `retiring` map schedules a live pool to retire at a later epoch, so the row carries that future `epoch` while the pool keeps its `pool_registration` economics and its `deposit_held`, and continues to earn rewards and lead slots until the boundary refunds it. Dropping these rows leaves the node holding a deposit the network has already refunded to the pool's reward account, so the two ledgers disagree about that account's balance. |
@@ -2379,6 +2379,11 @@ accumulator of the write itself. The flush then adds the delta once, and the
 result equals the per-transaction path for any order of stake changes and
 reward writes within a block. Queued deltas live in the accumulator, which
 savepoint and transaction rollback restore together with the `utxo` rows.
+With a batch UTxO overlay (see "Trusted batch UTxO overlay") the accumulator
+does not write `utxo` rows immediately either; its read barrier writes the
+overlay's rows and the deltas of every block that has ended before any of
+these scans, so the queued delta they subtract is the current block's, as on
+the per-row path.
 
 This trades away the full-scan path's self-healing property for the
 credentials it accelerates, so the design leans on three layers instead of
@@ -6118,6 +6123,90 @@ A failure between the two steps leaves blocks in the blob store above the
 metadata tip. They are tolerated: a retry from the unchanged metadata tip
 reuses the blocks the chain already holds, and startup orphan cleanup treats
 them like any other blob-ahead state.
+
+## Trusted batch UTxO overlay
+
+On SQLite in a non-API storage mode, each block-apply transaction of
+`ApplyTrustedBatch` whose blocks predate Dijkstra stages its UTxO
+writes in memory (`metadata.BatchUtxoOverlay`, implemented by
+`sqlstore.Store.EnableBatchUtxoOverlay`) and writes their net effect at
+`FlushBatch`, inside the same transaction. Every other path, API mode,
+PostgreSQL and MySQL keep the per-row writes described above.
+
+- **Inputs.** The ledger names the consumed inputs the batch does not itself
+  produce. One `BatchOverlayPrefetchInputs` statement per 499 keys reads
+  their rows, joining the key list to `utxo` with `CROSS JOIN` and
+  `INDEXED BY tx_id_output_idx` so the plan cannot drift to a `deleted_slot`
+  index. An input produced earlier in the batch is resolved from the overlay
+  with no SQL, as are collateral amounts of phase-2-invalid transactions. A
+  double spend fails with `types.ErrUtxoConflict` and a missing input is a
+  no-op, as on the per-row path.
+- **Outputs.** An output gets its `utxo.id` when it is created, from
+  `sqlite_sequence`, in the order the per-row path inserts rows; its asset
+  rows reserve their `asset.id` values the same way. An output the batch
+  spends again is never written, but its ids stay reserved, so surviving rows,
+  the foreign keys that point at them and both `sqlite_sequence` entries end
+  as the per-row path leaves them. `FlushBatch` raises a sequence that ends on
+  an unwritten id.
+- **Writes.** `FlushBatch` inserts surviving outputs with explicit ids in
+  multi-row `BatchOverlayInsertUtxos` statements (62 rows each) and their
+  pointer rows, marks pre-batch spends with `UPDATE ... FROM (VALUES ...)`
+  keyed by `utxo.id` (333 rows each), deletes by id the rows the per-row path
+  deletes before commit, and queues asset and `utxo_address` rows for the
+  surviving outputs into the accumulator's row batch. None of these statements
+  carries a conflict clause; a `UNIQUE` failure is returned as
+  `types.ErrBatchUtxoOverlayConflict`, and `ApplyTrustedBatch` applies the
+  uncommitted blocks once more on the per-row path, which repairs rows a
+  snapshot import created ahead of their producer.
+- **Deletes.** An output created and spent in the same block-apply
+  transaction is not written. An output an earlier transaction of the same
+  call committed (before an epoch boundary) is deleted by id when spent, as
+  `UtxosDeleteSpentInBatch` would. `beforeCommit` then calls
+  `UtxosDropSpentInBatchBlobs`, which deletes the outputs' blob offset keys
+  and raises `consumed_utxo_prune_floor` exactly as before, without the
+  per-pair metadata delete. Rows spent from earlier calls are still only
+  marked; the post-commit cleanup deletes them as before.
+- **Live stake.** `FlushBatchStakeDeltas`, which the per-row path calls at
+  the end of every block to write that block's live-stake deltas, only closes
+  the block's segment. At `FlushBatch`, after the overlay's rows, the segments
+  are replayed in order in memory with the per-row path's row lifecycle: a
+  credential with no account whose UTxO stake reaches zero loses its row and
+  a later touch inserts a new one. Whether the account existed at the end of
+  a block comes from its `created_slot`, since account rows are only created
+  inside a batch; a credential with no running total is re-summed from the
+  `utxo` table less the deltas queued after that block. The replay reserves
+  one `reward_live_stake` id per upsert the per-row path would run (SQLite
+  advances an AUTOINCREMENT sequence on an upsert that updates, too), and
+  each credential's row is then written once -- updated in place, or
+  inserted under its reserved id -- with the sequence raised to the last
+  reserved id. Row values, ids and the sequence therefore match the per-row
+  path, while the per-credential statements run once per transaction instead
+  of once per block.
+- **Read barrier.** While the overlay holds unwritten rows, spend marks or
+  closed stake segments, the transaction's handle is a `barrierQueryer`:
+  before any statement that names `utxo`, `utxo_pointer` or
+  `reward_live_stake` -- including statements on the prepared-statement
+  cache -- it writes the pending outputs and spend marks, raises the `utxo`
+  sequence to the last id handed out, and replays the closed segments. The
+  current block's deltas stay queued. Readers of live rows inside the batch,
+  such as a withdrawal's re-sum, therefore see what the per-row path would
+  hold at that point. An output created and spent before the barrier is not
+  in `utxo` at all, where the per-row path holds it marked spent; nothing
+  inside a trusted batch reads spent rows from the table. Asset and
+  `utxo_address` rows stay queued until `FlushBatch`, as on the per-row path.
+  A barrier writes every pending output, so outputs a later transaction
+  spends go back to being inserted, marked and deleted; on withdrawal-heavy
+  ranges the `barrier_flushes` count in the Debug line shows how often.
+
+Ids are exact only while the overlay is the only writer of `utxo` and
+`asset` rows inside the batch, which holds for every trusted block apply. The
+overlay keeps no undo log: a savepoint rollback across any overlay change,
+including a barrier write, fails the batch, and none occurs inside a trusted
+block-apply transaction. A UNIQUE failure counts as an overlay conflict only
+on the tables the overlay writes under its own ids (`utxo`, `asset`,
+`utxo_pointer`, `reward_live_stake`); any other would fail the per-row path
+too. A `FlushBatch` Debug line reports the outputs created and elided, the
+pre-batch spends, the prefetched keys and the barrier writes.
 
 # At-tip recovery repair
 

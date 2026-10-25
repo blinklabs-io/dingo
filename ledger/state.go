@@ -1990,6 +1990,14 @@ type LedgerState struct {
 	// trustedBatchSplit is a test-only hook, nil in production, called with
 	// the number of blocks left whenever a trusted batch is split.
 	trustedBatchSplit func(remaining int)
+	// trustedBatchOverlayOff is a test-only switch, false in production. It
+	// keeps ApplyTrustedBatch on the per-row UTxO path, the reference the
+	// overlay path is compared against.
+	trustedBatchOverlayOff bool
+	// afterTrustedBatchOverlay is a test-only observation hook, nil in
+	// production, called each time a block-apply transaction enables the
+	// batch UTxO overlay.
+	afterTrustedBatchOverlay func()
 	// afterTrustedBatchGuard is a test-only sequencing hook, nil in
 	// production. ApplyTrustedBatch calls it after its tip guard passes and
 	// before it stores or applies anything.
@@ -15821,6 +15829,20 @@ func (ls *LedgerState) ValidateTxWithOverlay(
 			pendingState:    accounts,
 		}
 	})
+}
+
+// MempoolSubmissionCapacity returns the coordinated metadata snapshot limit.
+// The mempool uses it to keep validation below the backing read pool's
+// operational reserve.
+func (ls *LedgerState) MempoolSubmissionCapacity() int {
+	if ls == nil || ls.db == nil {
+		return 0
+	}
+	reserver, ok := ls.db.Metadata().(types.ReadReserver)
+	if !ok {
+		return 0
+	}
+	return reserver.ReadSnapshotLimit()
 }
 
 // ErrEvaluationBusy reports that every transaction-evaluation slot is in use.
