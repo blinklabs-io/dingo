@@ -613,9 +613,18 @@ func (ls *LedgerState) prepareBlockApplySnapshot(
 			snapshot = ls.captureBlockApplyStateSnapshot()
 		}
 	}
+	// Only a live announcing block is validated at the next chunk; a
+	// historical one would only hold that chunk for its closure.
 	ls.leiosApplyAnnouncer = leiosBatchAnnouncer(
 		blocksBeforeEpochEnd(blocks, selectionEpoch),
 	)
+	if ls.leiosApplyAnnouncer != nil &&
+		!ls.blockApplySnapshotInLiveValidationRegion(
+			snapshot,
+			ls.leiosApplyAnnouncer.SlotNumber(),
+		) {
+		ls.leiosApplyAnnouncer = nil
+	}
 	return snapshot, nil
 }
 
