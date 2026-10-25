@@ -1373,8 +1373,19 @@ func isWildcardAddr(addr string) bool {
 // container's non-root user doesn't own (see the Docker image's pinned
 // UID:GID note in dingo.yaml.example).
 func checkDirWritable(dir string) (err error) {
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("create directory: %w", err)
+	}
+	dirFile, err := os.Open(dir)
+	if err != nil {
+		return fmt.Errorf("open directory for permission check: %w", err)
+	}
+	if err := restrictSnapshotDirectory(dirFile); err != nil {
+		_ = dirFile.Close()
+		return fmt.Errorf("restrict directory permissions: %w", err)
+	}
+	if err := dirFile.Close(); err != nil {
+		return fmt.Errorf("close directory after permission check: %w", err)
 	}
 	probe, err := os.CreateTemp(dir, ".dingo-writable-check-*")
 	if err != nil {
