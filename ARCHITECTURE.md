@@ -605,6 +605,7 @@ sequenceDiagram
     ChM->>EB: publish ChainUpdateEvent
     EB->>OB: reconcile deferred peers after ledger tip advances
     Note over OB: If the peer's newest deferred header was applied through another peer and the peer has not rolled back since, count its delivery and advance its local cursor without reconnecting
+    Note over OB: A header deferred while the chain already stores its block (a faster peer delivered it and the ledger is still applying it) arrives after that block's ChainUpdateEvent, so it is resolved the same way when it is withheld rather than waiting for an update that has already passed
     OB->>Peer: otherwise re-intersect at last accepted cursor
     Peer->>OB: replay parent-linked headers in order
     OB->>OB: strictly verify and promote each replayed header
