@@ -551,6 +551,12 @@ type OuroborosConfig struct {
 		ctx context.Context,
 		connId ouroboros.ConnectionId,
 	) (bool, error)
+	// ChainsyncIntersectAtLedgerTip reports whether new chainsync sessions
+	// must intersect at the applied ledger tip rather than at the primary
+	// chain's header-ahead points. Genesis corroboration needs each peer's
+	// candidate frontier to begin at the ledger tip, or held peers that start
+	// above it never overlap. When nil, the primary chain's points are used.
+	ChainsyncIntersectAtLedgerTip func() bool
 	// ChainsyncObserveAwaitReply records the peer's explicit protocol-idle
 	// frontier. It runs after gouroboros fences preceding pipelined updates.
 	ChainsyncObserveAwaitReply func(ouroboros.ConnectionId, ocommon.Point)

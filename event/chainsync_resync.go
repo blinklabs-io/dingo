@@ -86,6 +86,14 @@ const (
 	// from fresh intersect points. It is not a peer-fault signal and does not
 	// impose a peer cooldown.
 	ChainsyncResyncReasonBehindLocalTip = "behind local tip"
+	// ChainsyncResyncReasonPromotedObserverAhead re-intersects a connection
+	// promoted from observability-only to ingress-eligible whose delivered
+	// header is more than one block above the local tip. Its candidate
+	// frontier would start above the ledger and could neither be corroborated
+	// nor corroborate the header after the tip, so the connection restarts
+	// from the local tip. It is not a peer-fault signal and does not impose a
+	// peer cooldown.
+	ChainsyncResyncReasonPromotedObserverAhead = "promoted observer ahead of local tip"
 	// ChainsyncResyncReasonNetworkIngestReleased re-intersects every tracked
 	// ChainSync client from the current chain tip when a network ingest hold
 	// is released: while held, each client's cursor ran ahead of the chain
