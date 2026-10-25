@@ -21,6 +21,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -52,6 +54,32 @@ func (d *Database) FlushBatch(
 		}
 	}
 	return d.transactionStore().FlushBatch(acc, metadataTxn)
+}
+
+// EnableBatchUtxoOverlay attaches a batch UTxO overlay to acc for the rest
+// of txn when the metadata plugin supports one (see
+// metadata.BatchUtxoOverlay). It reports false, and changes nothing, when it
+// does not.
+func (d *Database) EnableBatchUtxoOverlay(
+	acc BatchAccumulator,
+	txn *Txn,
+	inputs []models.UtxoId,
+	deleteOnSpend []models.UtxoId,
+) (bool, error) {
+	if acc == nil || txn == nil {
+		return false, nil
+	}
+	overlay, ok := d.transactionStore().(metadata.BatchUtxoOverlay)
+	if !ok {
+		return false, nil
+	}
+	metadataTxn := txn.Metadata()
+	if metadataTxn == nil {
+		return false, types.ErrNilTxn
+	}
+	return overlay.EnableBatchUtxoOverlay(
+		acc, metadataTxn, inputs, deleteOnSpend,
+	)
 }
 
 // BatchedTxIngestOpts toggles optional behaviors of SetTransactionBatched.

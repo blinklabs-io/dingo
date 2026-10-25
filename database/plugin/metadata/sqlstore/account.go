@@ -147,6 +147,10 @@ func requireAccountBaselineTransaction(db queryer) error {
 			db = wrapped.queryer
 			continue
 		}
+		if wrapped, ok := db.(barrierQueryer); ok {
+			db = wrapped.queryer
+			continue
+		}
 		wrapped, ok := db.(dialectQueryer)
 		if !ok {
 			return errors.New(
@@ -1727,7 +1731,7 @@ UPDATE account SET reward = ? WHERE id = ?`,
 				return models.ErrAccountNotFound
 			}
 			ref := models.NewStakeCredentialRef(credentialTag, stakeKey)
-			pending, err := pendingUtxoStakeDelta(txn, nil, ref)
+			pending, err := pendingUtxoStakeDelta(ctx, db, txn, nil, ref)
 			if err != nil {
 				return err
 			}
@@ -2001,7 +2005,7 @@ ON CONFLICT (
 		); err != nil {
 			return fmt.Errorf("credit account reward: %w", err)
 		}
-		pendingStake, err := pendingUtxoStakeDelta(txn, nil, entry.ref)
+		pendingStake, err := pendingUtxoStakeDelta(ctx, db, txn, nil, entry.ref)
 		if err != nil {
 			return err
 		}
