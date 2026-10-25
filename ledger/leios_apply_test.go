@@ -466,6 +466,7 @@ func TestLeiosAnnouncementValidationAcceptsPriorClosureConsume(t *testing.T) {
 	require.NoError(t, ls.ValidateLeiosEndorserBlockTransactions(
 		t.Context(),
 		header,
+		LeiosValidationParentHash(header),
 		[][]byte{rawSecond},
 	))
 }

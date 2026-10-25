@@ -1076,8 +1076,17 @@ func (n *Node) initBlockForger(
 			if o == nil {
 				return errOuroborosNotStarted
 			}
+			// Before adoption the forged block is not the tip, so its
+			// endorser block is checked on the parent state. A locally
+			// built announcing block carries no transactions and its
+			// endorser block excludes the certified one's, so that state is
+			// equivalent to the block's own.
 			return classifyLeiosAnnouncementValidationError(
-				o.ValidateLeiosEndorserBlockForHeader(ctx, header),
+				o.ValidateLeiosEndorserBlockForHeader(
+					ctx,
+					header,
+					ledger.LeiosValidationParentHash(header),
+				),
 			)
 		},
 		LeiosCertificateProvider:        leiosCerts,

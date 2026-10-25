@@ -4322,15 +4322,28 @@ remains specific to each connection mode.
 For the current respun prototype, the notify vote dialect is specifically the three-field `(announcing_rb_hash, voter_id, signature)` form. Announcements are armed from the ordered `chain.header` stream rather than from `chain.update`: a ranking-block header whose VRF/KES this node verified, admitted to the primary chain's header queue and inside the vote window, arms a local vote before its block has been fetched, validated or applied. A header admitted *without* verification -- the deferred-epoch-nonce, validation-disabled and Mithril-covered paths, which reach `Chain.AddBlockHeader` rather than `AddVerifiedBlockHeader` -- arms nothing, so a chainsync peer cannot make this node sign a vote for a ranking block it never authenticated and so occupy the `(slot, voter_id)` the honest block's vote needs; an unverified header is announced only once its block is applied, through the idempotent `chain.update` backstop. `ChainHeaderInvalidationEvent`, on the same stream and therefore never reordered against announcements, retracts announcements whose ranking blocks left the chain, and a rollback prunes by comparing its `Seq` against each announcement record's, so an announcement sequenced after the rollback is not dropped by it. A bounded TTL queue holds votes that race ahead of adoption and retains a bounded set of alternate signatures per voter, so an invalid first candidate cannot suppress a later valid vote. Local votes use that same LeiosNotify stream; each outbound response reserves its log entry and commits the per-peer cursor only after gouroboros reports a successful send. The peer can issue its next request before that report arrives, so a request that finds the connection's reservation still outstanding waits for it to be committed or released instead of offering the same entry again. A successfully sent entry is therefore never offered to that connection twice. Failed or aborted sends release the reservation into a counted retry set retained across reconnects; a reconnect advances through every pending retry on its stream rather than clearing only the first failed entry. The transitional offered-ID and four-field forms remain decode-compatible only.
 
 Apply-boundary validation checks the exact endorser block
-announced by that ranking-block header while the header's parent is still the
-applied ledger tip. A remote block waits for its `(slot, hash)` closure only
-after selection, full block fetch and admission to the ledger apply stream;
-announcing blocks form one-block apply chunks so the exact parent remains the
-published ledger tip during validation. Competing or queued headers therefore
-cannot each consume a diffusion-window wait. A locally forged header takes the
-same path after block self-validation and before adoption. A confirmed semantic
-failure rejects the locally forged ranking block before adoption; unavailable
-parent or storage state leaves adoption eligible for later validation. Every
+announced by that ranking-block header while the announcing block itself is
+the applied ledger tip (`ledger.LeiosEndorserBlockBasisHash`). CIP-164 makes
+the endorser block's transactions a valid extension of the state the
+announcing block leaves, which includes the transactions of the endorser block
+it certifies and its own body transactions, and the next block, the only one
+that can certify the endorser block, applies those transactions on that same
+state. A remote block waits for its `(slot, hash)` closure only after
+selection, full block fetch and admission to the ledger apply stream; an apply
+chunk ends with its first live announcing block, and the next chunk's
+preparation validates that block's endorser block while it is the published
+tip and before any later block applies. The background validator in
+`ouroboros` uses the same state, and the ledger's `ledger.block` apply event
+retries it, since `chain.update` can precede the apply. Competing or queued
+headers therefore cannot each consume a diffusion-window wait. A locally
+forged header is checked after block self-validation and before adoption,
+when the forged block is not yet the tip, so it validates on the block's
+parent state (`ledger.LeiosValidationParentHash`). That is equivalent because
+a locally built announcing block carries no transactions and its endorser
+block excludes the transactions of the endorser block it certifies. A
+confirmed semantic failure rejects the locally forged ranking block before
+adoption; unavailable parent or storage state leaves adoption eligible for
+later validation. Every
 other validation error rejects the local forge, so an unclassified failure
 cannot publish an unchecked announcement. The composition adapter marks
 confirmed transaction failures for the forger without introducing a dependency
