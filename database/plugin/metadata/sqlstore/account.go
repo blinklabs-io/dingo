@@ -16,17 +16,20 @@
 package sqlstore
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
 	"fmt"
 	"math/big"
+	"slices"
 	"strconv"
 	"strings"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	sqlitequery "github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/internal/query/sqlite"
 	"github.com/blinklabs-io/dingo/database/types"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
 const sqliteAccountColumns = "staking_key, credential_tag, pool, drep, id, " +
@@ -141,6 +144,10 @@ func requireAccountBaselineTransaction(db queryer) error {
 		// sqlite case), and this would reject every account-baseline write
 		// as "outside a write transaction" on a metrics-enabled Store.
 		if wrapped, ok := db.(countingQueryer); ok {
+			db = wrapped.queryer
+			continue
+		}
+		if wrapped, ok := db.(barrierQueryer); ok {
 			db = wrapped.queryer
 			continue
 		}
@@ -676,6 +683,146 @@ SELECT credential_tag, staking_key FROM account WHERE active = TRUE`)
 		ret = append(ret, models.NewStakeCredentialRef(uint8(tag), key))
 	}
 	return ret, rows.Err()
+}
+
+// activeDelegatorChunkSize bounds the pool key hashes bound to one statement
+// of the active-delegator queries and of GetPoolDepositsHeld, which serve the
+// same stake pool state reply for the same pool set.
+const activeDelegatorChunkSize = 200
+
+// GetActiveDelegatorCountsByPool counts the active accounts delegated to each
+// requested pool. A pool with no delegator is absent from the result. The
+// count is an aggregate over the (active, pool, credential_tag, staking_key)
+// index, so its cost follows the delegators of the requested pools, not the
+// account table.
+func (s *Store) GetActiveDelegatorCountsByPool(
+	poolKeyHashes []lcommon.PoolKeyHash,
+	txn types.Txn,
+) (map[string]uint64, error) {
+	ret := make(map[string]uint64, len(poolKeyHashes))
+	if len(poolKeyHashes) == 0 {
+		return ret, nil
+	}
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, fmt.Errorf("GetActiveDelegatorCountsByPool: resolve db: %w", err)
+	}
+	for start := 0; start < len(poolKeyHashes); start += activeDelegatorChunkSize {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		end := min(start+activeDelegatorChunkSize, len(poolKeyHashes))
+		args := make([]any, 0, end-start)
+		for _, poolKeyHash := range poolKeyHashes[start:end] {
+			args = append(args, poolKeyHash.Bytes())
+		}
+		rows, err := db.QueryContext(ctx, `
+SELECT pool, COUNT(*) FROM account
+WHERE active = TRUE AND pool IN (`+bindPlaceholders(len(args))+`)
+GROUP BY pool`,
+			args...,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("GetActiveDelegatorCountsByPool: %w", err)
+		}
+		for rows.Next() {
+			var pool []byte
+			var count int64
+			if err := rows.Scan(&pool, &count); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			if count < 0 {
+				rows.Close()
+				return nil, fmt.Errorf(
+					"GetActiveDelegatorCountsByPool: negative count %d",
+					count,
+				)
+			}
+			ret[string(pool)] = uint64(count)
+		}
+		if err := rows.Close(); err != nil {
+			return nil, err
+		}
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+	}
+	return ret, nil
+}
+
+// GetActiveDelegatorCredentialsByPool returns the stake credentials of the
+// active accounts delegated to each requested pool, keyed by pool key hash. A
+// pool with no delegator is absent. Each list is in the ledger's credential
+// order: script credentials before key credentials, then by hash ascending.
+func (s *Store) GetActiveDelegatorCredentialsByPool(
+	poolKeyHashes []lcommon.PoolKeyHash,
+	txn types.Txn,
+) (map[string][]models.StakeCredentialRef, error) {
+	ret := make(map[string][]models.StakeCredentialRef, len(poolKeyHashes))
+	if len(poolKeyHashes) == 0 {
+		return ret, nil
+	}
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"GetActiveDelegatorCredentialsByPool: resolve db: %w",
+			err,
+		)
+	}
+	for start := 0; start < len(poolKeyHashes); start += activeDelegatorChunkSize {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		end := min(start+activeDelegatorChunkSize, len(poolKeyHashes))
+		args := make([]any, 0, end-start)
+		for _, poolKeyHash := range poolKeyHashes[start:end] {
+			args = append(args, poolKeyHash.Bytes())
+		}
+		rows, err := db.QueryContext(ctx, `
+SELECT pool, credential_tag, staking_key FROM account
+WHERE active = TRUE AND pool IN (`+bindPlaceholders(len(args))+`)`,
+			args...,
+		)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"GetActiveDelegatorCredentialsByPool: %w",
+				err,
+			)
+		}
+		for rows.Next() {
+			var pool, key []byte
+			var tag int64
+			if err := rows.Scan(&pool, &tag, &key); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			ret[string(pool)] = append(
+				ret[string(pool)],
+				models.NewStakeCredentialRef(uint8(tag), key), // #nosec G115 -- 0 or 1
+			)
+		}
+		if err := rows.Close(); err != nil {
+			return nil, err
+		}
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+	}
+	for _, refs := range ret {
+		slices.SortFunc(refs, func(a, b models.StakeCredentialRef) int {
+			if a.Tag != b.Tag {
+				// The ledger's Credential orders ScriptHashObj (tag 1)
+				// before KeyHashObj (tag 0).
+				if a.Tag > b.Tag {
+					return -1
+				}
+				return 1
+			}
+			return bytes.Compare(a.Key, b.Key)
+		})
+	}
+	return ret, nil
 }
 
 // ClearDelegationsToRetiredPool removes every account delegation pointing at a
@@ -1584,7 +1731,7 @@ UPDATE account SET reward = ? WHERE id = ?`,
 				return models.ErrAccountNotFound
 			}
 			ref := models.NewStakeCredentialRef(credentialTag, stakeKey)
-			pending, err := pendingUtxoStakeDelta(txn, nil, ref)
+			pending, err := pendingUtxoStakeDelta(ctx, db, txn, nil, ref)
 			if err != nil {
 				return err
 			}
@@ -1858,7 +2005,7 @@ ON CONFLICT (
 		); err != nil {
 			return fmt.Errorf("credit account reward: %w", err)
 		}
-		pendingStake, err := pendingUtxoStakeDelta(txn, nil, entry.ref)
+		pendingStake, err := pendingUtxoStakeDelta(ctx, db, txn, nil, entry.ref)
 		if err != nil {
 			return err
 		}

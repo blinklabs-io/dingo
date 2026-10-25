@@ -299,15 +299,17 @@ func generateReport(datasetDir, corpusRevision, expectedInventory string) (Repor
 			report.Rules[file.rule] = outcome
 			continue
 		}
-		reencoded, err = NormalizeCBOR(reencoded)
-		if err != nil {
-			report.addFailure(
-				file,
-				decodeFailed,
-				"normalize re-encoding failed: "+err.Error(),
-			)
-			report.Rules[file.rule] = outcome
-			continue
+		if !byteExact {
+			reencoded, err = NormalizeCBOR(reencoded)
+			if err != nil {
+				report.addFailure(
+					file,
+					decodeFailed,
+					"normalize re-encoding failed: "+err.Error(),
+				)
+				report.Rules[file.rule] = outcome
+				continue
+			}
 		}
 		if file.expectPath == "" {
 			report.addFailure(
@@ -328,21 +330,27 @@ func generateReport(datasetDir, corpusRevision, expectedInventory string) (Repor
 			report.Rules[file.rule] = outcome
 			continue
 		}
-		reference, err = NormalizeCBOR(reference)
-		if err != nil {
-			report.addFailure(
-				file,
-				referenceUnreadable,
-				"cannot normalize expected output: "+err.Error(),
-			)
-			report.Rules[file.rule] = outcome
-			continue
+		if !byteExact {
+			reference, err = NormalizeCBOR(reference)
+			if err != nil {
+				report.addFailure(
+					file,
+					referenceUnreadable,
+					"cannot normalize expected output: "+err.Error(),
+				)
+				report.Rules[file.rule] = outcome
+				continue
+			}
 		}
 		if !bytes.Equal(reencoded, reference) {
+			reason := "normalized reserialization differs from the expected output"
+			if byteExact {
+				reason = "byte-exact reserialization differs from the expected output"
+			}
 			report.addFailure(
 				file,
 				referenceMismatch,
-				"normalized reserialization differs from the expected output",
+				reason,
 			)
 		} else {
 			outcome.GeneratedDecodedReencodedActual++

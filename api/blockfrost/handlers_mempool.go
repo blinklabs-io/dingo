@@ -97,6 +97,21 @@ func (b *Blockfrost) handleMempoolAddress(
 	if !ok {
 		return
 	}
+	release, ok := b.mempoolAddressAdmission.acquire(
+		r.Context(),
+		requestClient(r),
+	)
+	if !ok {
+		w.Header().Set("Retry-After", "1")
+		writeError(
+			w,
+			http.StatusTooManyRequests,
+			"Too Many Requests",
+			"mempool address capacity reached, try again later",
+		)
+		return
+	}
+	defer release()
 	hashes, total, err := b.node.MempoolAddressTransactions(
 		r.Context(), r.PathValue("address"), params,
 	)

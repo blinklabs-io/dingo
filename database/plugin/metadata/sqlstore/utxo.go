@@ -18,6 +18,7 @@ package sqlstore
 import (
 	"context"
 	"database/sql"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -1754,12 +1755,15 @@ func (s *Store) GetUtxosByRefsAsOf(
 func dedupeUtxoIDs(ids []models.UtxoId) []models.UtxoId {
 	seen := make(map[string]struct{}, len(ids))
 	ret := make([]models.UtxoId, 0, len(ids))
+	key := make([]byte, 0, 36)
 	for _, id := range ids {
-		key := fmt.Sprintf("%s:%d", id.Hash, id.Idx)
-		if _, ok := seen[key]; ok {
+		// The fixed-width index suffix keeps the key unambiguous for any
+		// hash length.
+		key = binary.BigEndian.AppendUint32(append(key[:0], id.Hash...), id.Idx)
+		if _, ok := seen[string(key)]; ok {
 			continue
 		}
-		seen[key] = struct{}{}
+		seen[string(key)] = struct{}{}
 		ret = append(ret, id)
 	}
 	return ret

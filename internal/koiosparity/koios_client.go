@@ -31,6 +31,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/blinklabs-io/dingo/internal/httpuseragent"
 	"github.com/blinklabs-io/dingo/internal/netguard"
 )
 
@@ -936,6 +937,7 @@ func (k *KoiosClient) get(
 	if err != nil {
 		return nil, fmt.Errorf("build request: %w", err)
 	}
+	httpuseragent.Set(req)
 	if k.apiKey != "" {
 		req.Header.Set("Authorization", "Bearer "+k.apiKey)
 	}
@@ -1178,6 +1180,7 @@ func (k *KoiosClient) post(
 				err,
 			)
 		}
+		httpuseragent.Set(req)
 		if k.apiKey != "" {
 			req.Header.Set("Authorization", "Bearer "+k.apiKey)
 		}

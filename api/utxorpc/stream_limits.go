@@ -43,6 +43,7 @@ type streamLimiter struct {
 	perClient    map[string]int
 	maxTotal     int
 	maxPerClient int
+	resource     string
 }
 
 func newStreamLimiter(maxTotal, maxPerClient int) *streamLimiter {
@@ -50,6 +51,19 @@ func newStreamLimiter(maxTotal, maxPerClient int) *streamLimiter {
 		perClient:    make(map[string]int),
 		maxTotal:     maxTotal,
 		maxPerClient: maxPerClient,
+		resource:     "stream",
+	}
+}
+
+func newRequestLimiter(
+	maxTotal, maxPerClient int,
+	resource string,
+) *streamLimiter {
+	return &streamLimiter{
+		perClient:    make(map[string]int),
+		maxTotal:     maxTotal,
+		maxPerClient: maxPerClient,
+		resource:     resource,
 	}
 }
 
@@ -65,14 +79,19 @@ func (l *streamLimiter) acquire(peerAddr string) (func(), error) {
 	if l.total >= l.maxTotal {
 		return nil, connect.NewError(
 			connect.CodeResourceExhausted,
-			fmt.Errorf("server stream limit of %d reached", l.maxTotal),
+			fmt.Errorf(
+				"server %s limit of %d reached",
+				l.resource,
+				l.maxTotal,
+			),
 		)
 	}
 	if l.perClient[client] >= l.maxPerClient {
 		return nil, connect.NewError(
 			connect.CodeResourceExhausted,
 			fmt.Errorf(
-				"per-client stream limit of %d reached",
+				"per-client %s limit of %d reached",
+				l.resource,
 				l.maxPerClient,
 			),
 		)
@@ -122,6 +141,10 @@ func (q *mempoolStreamQueue) offer(resp *submit.WatchMempoolResponse) error {
 // function releases it when the stream ends.
 func (u *Utxorpc) admitStream(peer connect.Peer) (func(), error) {
 	return u.streams.acquire(peer.Addr)
+}
+
+func (u *Utxorpc) admitEvalRequest(peer connect.Peer) (func(), error) {
+	return u.evalRequests.acquire(peer.Addr)
 }
 
 func predicateBudgetError(limit int) error {

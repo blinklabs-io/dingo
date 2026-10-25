@@ -15,14 +15,22 @@
 package connmanager
 
 import (
+	"encoding/binary"
+	"io"
+	"log/slog"
 	"net"
+	"runtime"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 )
 
-func TestWithSocketDeadlinesOnlyWrapsTCP(t *testing.T) {
+func testDeadlineLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+func TestWithSocketDeadlinesLeavesUnsupportedConnUnwrapped(t *testing.T) {
 	t.Parallel()
 
 	left, right := net.Pipe()
@@ -32,6 +40,34 @@ func TestWithSocketDeadlinesOnlyWrapsTCP(t *testing.T) {
 	if got := withSocketDeadlines(left); got != left {
 		t.Fatal("non-TCP connection should not be wrapped")
 	}
+}
+
+func TestWithSocketDeadlinesWrapsUnix(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows NtC uses named pipes rather than Unix-domain sockets")
+	}
+
+	socketPath := unixTestSocketPath(t, unixTestTempDir(t), "deadline.sock")
+	listener, err := net.Listen("unix", socketPath)
+	require.NoError(t, err)
+	defer listener.Close()
+
+	client, err := net.Dial("unix", socketPath)
+	require.NoError(t, err)
+	defer client.Close()
+
+	accepted, err := listener.Accept()
+	require.NoError(t, err)
+	defer accepted.Close()
+	unixConn, err := NewUnixConn(accepted)
+	require.NoError(t, err)
+
+	wrapped, ok := withSocketDeadlines(unixConn).(*deadlineConn)
+	require.True(t, ok, "Unix NtC connections must retain a write deadline")
+	require.Equal(t, socketIdleTimeout, wrapped.timeout)
+	require.Same(t, accepted, unwrapConn(wrapped))
+	require.Equal(t, unixConn.RemoteAddr(), wrapped.RemoteAddr())
 }
 
 func TestDeadlineConnRefreshesWriteDeadline(t *testing.T) {
@@ -121,6 +157,70 @@ func TestHandshakeDeadlineConnCapsMuxerReadDeadline(t *testing.T) {
 	}
 }
 
+func TestTrustedNtCActivityClearsDeadlineUntilResponse(t *testing.T) {
+	t.Parallel()
+
+	base := &recordingConn{}
+	wrapped := withHandshakeDeadline(base)
+	activity := &trustedNtCActivity{
+		writes:           make(map[uint16]uint64),
+		pendingResponses: make(map[uint16]uint64),
+	}
+	require.NoError(t, activity.attach(wrapped, time.Minute, testDeadlineLogger()))
+	require.False(t, base.readDeadline.IsZero())
+
+	token := activity.begin(7)
+	require.True(t, base.readDeadline.IsZero())
+	require.NoError(t, wrapped.SetReadDeadline(time.Time{}))
+	require.True(t, base.readDeadline.IsZero())
+
+	token.end(true)
+	require.True(t, base.readDeadline.IsZero())
+	_, err := wrapped.Write(testMuxSegment(7, true, []byte{0x81, 0x03}))
+	require.NoError(t, err)
+	require.False(t, base.readDeadline.IsZero())
+}
+
+func TestTrustedNtCDeadlineRefreshesOnlyAfterCompleteSegment(t *testing.T) {
+	t.Parallel()
+
+	base := &recordingConn{}
+	wrapped := withHandshakeDeadline(base)
+	activity := &trustedNtCActivity{
+		writes:           make(map[uint16]uint64),
+		pendingResponses: make(map[uint16]uint64),
+	}
+	require.NoError(t, activity.attach(wrapped, time.Minute, testDeadlineLogger()))
+	initialDeadline := base.readDeadline
+	segment := testMuxSegment(7, false, []byte{0x81, 0x00})
+
+	base.readData = segment[:4]
+	_, err := wrapped.Read(make([]byte, 4))
+	require.NoError(t, err)
+	require.Equal(t, initialDeadline, base.readDeadline)
+
+	base.readData = segment[4 : len(segment)-1]
+	_, err = wrapped.Read(make([]byte, len(base.readData)))
+	require.NoError(t, err)
+	require.Equal(t, initialDeadline, base.readDeadline)
+
+	base.readData = segment[len(segment)-1:]
+	_, err = wrapped.Read(make([]byte, 1))
+	require.NoError(t, err)
+	require.False(t, base.readDeadline.Before(initialDeadline))
+}
+
+func testMuxSegment(protocolID uint16, response bool, payload []byte) []byte {
+	if response {
+		protocolID |= 0x8000
+	}
+	segment := make([]byte, muxSegmentHeaderSize+len(payload))
+	binary.BigEndian.PutUint16(segment[4:6], protocolID)
+	binary.BigEndian.PutUint16(segment[6:8], uint16(len(payload)))
+	copy(segment[muxSegmentHeaderSize:], payload)
+	return segment
+}
+
 // enableTCPLingerZero must reach the real socket through the deadline wrapper.
 // Matching on the wrapper instead would make SO_LINGER 0 a silent no-op for
 // accepted connections and reintroduce TIME_WAIT saturation of the reused
@@ -184,9 +284,15 @@ type recordingConn struct {
 	readDeadline      time.Time
 	writeDeadline     time.Time
 	readDeadlineCalls int
+	readData          []byte
 }
 
 func (c *recordingConn) Read(p []byte) (int, error) {
+	if c.readData != nil {
+		n := copy(p, c.readData)
+		c.readData = c.readData[n:]
+		return n, nil
+	}
 	return len(p), nil
 }
 

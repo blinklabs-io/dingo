@@ -19,12 +19,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/consensus"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
@@ -91,6 +94,42 @@ type praosChainDepState struct {
 	PreviousEpochNonce  lcommon.Nonce
 	LabNonce            lcommon.Nonce
 	LastEpochBlockNonce lcommon.Nonce
+}
+
+// praos2ChainDepState mirrors the Leios overlay's Praos2 chain-dependent
+// state: the eight PraosState fields, then the announcement of the endorser
+// block the last applied header carried. The announcement is a StrictMaybe, a
+// list of zero or one element, so an absent one is the empty list (0x80) and
+// never a CBOR null. Praos2 writes serialisation version 1, the number TPraos
+// uses, because each protocol numbers its versions separately; the field
+// count tells the layouts apart.
+type praos2ChainDepState struct {
+	cbor.StructAsArray
+	LastSlot            olocalstatequery.WithOriginSlot
+	OpCertCounters      map[lcommon.Blake2b224]uint64
+	EvolvingNonce       lcommon.Nonce
+	CandidateNonce      lcommon.Nonce
+	EpochNonce          lcommon.Nonce
+	PreviousEpochNonce  lcommon.Nonce
+	LabNonce            lcommon.Nonce
+	LastEpochBlockNonce lcommon.Nonce
+	Announcement        []olocalstatequery.ChainDepStateAnnouncement
+}
+
+// chainDepStateUsesPraos2 reports whether the reply uses the Praos2 layout.
+//
+// Released consensus runs the Dijkstra era on plain Praos, so the era alone
+// must not select Praos2: a mainnet, preprod, preview or sancho node answering
+// with it would hand every client a state it cannot decode. It takes the
+// Dijkstra era AND LedgerStateConfig.Praos2ChainDepState, which the node sets
+// only for the Leios prototype network (Musashi) under its strict identity
+// check (Config.musashiPrototypeIdentity): the name "musashi" or the
+// magic 164, with no conflicting standard network. A devnet is not a conflict,
+// so the name "musashi" with the devnet magic 42, or the devnet name with magic
+// 164, selects Praos2 as well. A network named "devnet" with magic 42 carries
+// neither half of the identity and keeps the Praos layout.
+func (ls *LedgerState) chainDepStateUsesPraos2(eraId uint) bool {
+	return ls.config.Praos2ChainDepState && eraId == eras.DijkstraEraDesc.Id
 }
 
 // versionedChainDepState is the `encodeVersion N` envelope both protocol
@@ -315,11 +354,121 @@ func (ls *LedgerState) queryShelleyDebugChainDepState(
 		return nil, err
 	}
 
+	if ls.chainDepStateUsesPraos2(eraId) {
+		announcement, err := ls.chainDepStateAnnouncement(txn, tip)
+		if err != nil {
+			return nil, err
+		}
+		return []any{
+			versionedChainDepState{
+				Version: chainDepStateVersionTPraos,
+				Inner:   newPraos2ChainDepState(state, announcement),
+			},
+		}, nil
+	}
+
 	return []any{
 		versionedChainDepState{
 			Version: chainDepStateVersionPraos,
 			Inner:   state,
 		},
+	}, nil
+}
+
+// newPraos2ChainDepState extends a Praos state with the announcement of the
+// last applied header. A nil announcement is written as the empty list.
+func newPraos2ChainDepState(
+	state praosChainDepState,
+	announcement *olocalstatequery.ChainDepStateAnnouncement,
+) praos2ChainDepState {
+	// Non-nil even when empty: a nil slice would encode as a CBOR null.
+	list := make([]olocalstatequery.ChainDepStateAnnouncement, 0, 1)
+	if announcement != nil {
+		list = append(list, *announcement)
+	}
+	return praos2ChainDepState{
+		LastSlot:            state.LastSlot,
+		OpCertCounters:      state.OpCertCounters,
+		EvolvingNonce:       state.EvolvingNonce,
+		CandidateNonce:      state.CandidateNonce,
+		EpochNonce:          state.EpochNonce,
+		PreviousEpochNonce:  state.PreviousEpochNonce,
+		LabNonce:            state.LabNonce,
+		LastEpochBlockNonce: state.LastEpochBlockNonce,
+		Announcement:        list,
+	}
+}
+
+// chainDepStateAnnouncement reads the Leios announcement the tip block's
+// header carried, with the key hash of its issuer, or nil when the header
+// announced nothing.
+//
+// Praos2 replaces the announcement with each applied header's own, so the
+// state at a block is that block's announcement alone: nothing is carried over
+// from earlier blocks, and none has to be reconstructed. Reading it from the
+// acquired block gives the pinned and rollback semantics for free. The query
+// reports the state after the last applied header, before any tick, so the
+// clearing the ledger does when it ticks into a new epoch is not visible
+// here; a tip in a later epoch than the block that announced simply has a
+// later block that replaced it.
+//
+// A tip with no stored block, such as a Mithril-bootstrapped node whose tip
+// body was never stored, reports no announcement, the same fallback the lab
+// nonce takes. A header of an era without the Leios extension reports none.
+func (ls *LedgerState) chainDepStateAnnouncement(
+	txn *database.Txn,
+	tip ochainsync.Tip,
+) (*olocalstatequery.ChainDepStateAnnouncement, error) {
+	if len(tip.Point.Hash) != lcommon.Blake2b256Size {
+		return nil, nil
+	}
+	block, err := database.BlockByPointTxn(txn, tip.Point)
+	if err != nil {
+		if errors.Is(err, models.ErrBlockNotFound) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if block.Type != dijkstra.BlockTypeDijkstra {
+		return nil, nil
+	}
+	// A block is [header, ...]: read the header alone rather than decoding
+	// and validating every transaction for a query that needs one field.
+	var parts []cbor.RawMessage
+	if _, err := cbor.Decode(block.Cbor, &parts); err != nil {
+		return nil, fmt.Errorf(
+			"decode Dijkstra block at slot %d: %w",
+			block.Slot,
+			err,
+		)
+	}
+	if len(parts) == 0 {
+		return nil, fmt.Errorf("dijkstra block at slot %d has no header", block.Slot)
+	}
+	var header dijkstra.DijkstraBlockHeader
+	if _, err := cbor.Decode(parts[0], &header); err != nil {
+		return nil, fmt.Errorf(
+			"decode Dijkstra header at slot %d: %w",
+			block.Slot,
+			err,
+		)
+	}
+	ebHash, ebSize, ok := header.LeiosAnnouncement()
+	if !ok {
+		return nil, nil
+	}
+	if ebSize > math.MaxUint32 {
+		return nil, fmt.Errorf(
+			"announced endorser block size %d at slot %d exceeds Word32",
+			ebSize,
+			block.Slot,
+		)
+	}
+	vkey := header.IssuerVkey()
+	return &olocalstatequery.ChainDepStateAnnouncement{
+		Issuer: lcommon.Blake2b224Hash(vkey[:]),
+		EbHash: ebHash,
+		EbSize: uint32(ebSize), // #nosec G115 -- bounded above
 	}, nil
 }
 

@@ -38,6 +38,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database/immutable"
+	"github.com/blinklabs-io/dingo/internal/httpuseragent"
 	"github.com/blinklabs-io/dingo/internal/netguard"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/protocol/blockfetch"
@@ -891,6 +892,7 @@ func fetchRemoteImmutableTipWithClient(
 			redactRemoteImmutableURL(rootURL+"/tip.json"),
 		)
 	}
+	httpuseragent.Set(req)
 	resp, err := client.Do(req)
 	if err != nil {
 		return tip, remoteImmutableRequestError(
@@ -984,6 +986,7 @@ func remoteImmutableFilePublishedWithClient(
 			redactRemoteImmutableURL(fileURL),
 		)
 	}
+	httpuseragent.Set(req)
 	req.Header.Set("Range", "bytes=0-0")
 	resp, err := client.Do(req)
 	if err != nil {
@@ -1121,6 +1124,7 @@ func fetchRemoteFileOnceWithClient(
 			redactRemoteImmutableURL(fileURL),
 		)
 	}
+	httpuseragent.Set(req)
 	if offset > 0 {
 		req.Header.Set("Range", "bytes="+strconv.FormatInt(offset, 10)+"-")
 	}

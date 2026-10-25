@@ -1,6 +1,9 @@
 # Example config file for dingo
 # No settings are required. Uncomment a setting only to override its in-code
 # default.
+# DINGO_HTTP_USER_AGENT overrides the default user-agent sent on outbound HTTP
+# requests; a value that is not a valid header is ignored. Off-chain metadata
+# and token registry userAgent settings take precedence over this shared value.
 #
 # Keep a local copy that holds credentials (token registry headers, API keys)
 # outside the repository, or name it dingo.yaml, which git ignores. Key files
@@ -47,6 +50,9 @@
       # config:
         # Optional Badger data directory. When unset, databasePath applies.
         # dataDir: ".dingo"
+        # Optional memtable size override in bytes. Core sync defaults to
+        # 1073741824 (1 GiB); other modes default to 134217728 (128 MiB).
+        # memTableSize: 1073741824
     # metadata:
       # provider: "sqlite"
       # config:
@@ -712,6 +718,10 @@
 # registration. A pool without a usable on-chain key is keyless and cannot emit
 # a vote or contribute verified stake to a certificate. Static voter-key
 # overrides are intentionally unsupported in reference-compatible mode.
+# A rotated key becomes usable only when the stake snapshot containing the new
+# pool registration becomes the committee snapshot. Keep the old signing key
+# configured until that boundary, then replace this file and restart dingo;
+# signing-key files are loaded only during block-producer startup.
 #
 # Can be overridden with DINGO_LEIOS_VOTE_SIGNING_KEY_FILE.
 # leiosVoteSigningKeyFile: "/keys/leios-vote.skey"

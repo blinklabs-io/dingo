@@ -57,7 +57,7 @@ type externalIngestHarness struct {
 // external-ingest path must match; otherwise the ledger is configured as a
 // live node, with neither flag set.
 func newExternalIngestHarness(
-	t *testing.T,
+	t testing.TB,
 	manual bool,
 ) *externalIngestHarness {
 	t.Helper()
@@ -68,7 +68,7 @@ func newExternalIngestHarness(
 // may already hold a store an earlier harness shut down. The ledger tip is
 // then the store's committed tip.
 func newExternalIngestHarnessAt(
-	t *testing.T,
+	t testing.TB,
 	manual bool,
 	dataDir string,
 ) *externalIngestHarness {
@@ -82,7 +82,7 @@ func newExternalIngestHarnessAt(
 // with the Shelley security parameter set to securityParam when it is not
 // zero. A small one shrinks the stability window to a few dozen slots.
 func newExternalIngestHarnessWith(
-	t *testing.T,
+	t testing.TB,
 	manual bool,
 	dataDir string,
 	storageMode string,
@@ -141,7 +141,7 @@ func newExternalIngestHarnessWith(
 }
 
 // shutdown closes the ledger and its store, as a process exit would.
-func (h *externalIngestHarness) shutdown(t *testing.T) {
+func (h *externalIngestHarness) shutdown(t testing.TB) {
 	t.Helper()
 	h.shutOnce.Do(func() {
 		require.NoError(t, h.ls.Close())
@@ -153,6 +153,11 @@ func (h *externalIngestHarness) shutdown(t *testing.T) {
 // without Start's reload of epoch and tip state from the empty store.
 func (h *externalIngestHarness) startLiveLoop(t *testing.T) {
 	t.Helper()
+	// A node that has not latched reachedTip holds each under-full batch for
+	// up to two seconds waiting for more blocks (gatherCoalesceMaxGapAttempts),
+	// which would leave these tests nothing under their five second waits on
+	// a slow runner. These tests drive a live node, so latch it.
+	h.ls.reachedTip.Store(true)
 	ctx, cancel := context.WithCancel(t.Context())
 	h.ls.processBlocksCancel = cancel
 	h.ls.processBlocksWG.Go(func() {
@@ -202,7 +207,7 @@ func externalIngestBlocks(
 
 // extendExternalIngestBlocks appends count empty blocks, step slots apart.
 func extendExternalIngestBlocks(
-	t *testing.T,
+	t testing.TB,
 	blocks []gledger.Block,
 	count int,
 	step uint64,
@@ -225,7 +230,7 @@ func blockPoint(block gledger.Block) ocommon.Point {
 }
 
 func (h *externalIngestHarness) applyPaused(
-	t *testing.T,
+	t testing.TB,
 	expected ocommon.Point,
 	blocks []gledger.Block,
 ) (ocommon.Point, error) {
@@ -389,10 +394,13 @@ func TestApplyTrustedBatchSplitsTxnTooBig(t *testing.T) {
 		h.ls.trustedBatchSplit = func(int) { splits.Add(1) }
 		var commits atomic.Int64
 		h.ls.afterLedgerWriteCommit = func() { commits.Add(1) }
+		overlays := h.countOverlays()
 		tip, err := h.applyPaused(t, ocommon.Point{}, blocks)
 		require.NoError(t, err)
 		require.Equal(t, blockPoint(blocks[len(blocks)-1]), tip)
 		assert.Positive(t, splits.Load())
+		assert.Positive(t, overlays.Load(),
+			"the split halves must apply through the overlay")
 		total := 0
 		for _, n := range committed {
 			assert.LessOrEqual(t, n, limit)
@@ -462,14 +470,25 @@ func TestApplyTrustedBatchCrashBetweenStores(t *testing.T) {
 
 	// Replay from the unchanged committed tip over the stored blobs.
 	fail.Store(false)
+	overlays := h.countOverlays()
 	tip, err := h.applyPaused(t, ocommon.Point{}, blocks)
 	require.NoError(t, err)
+	require.Positive(t, overlays.Load(),
+		"the replay must apply through the overlay")
 	require.Equal(t, blockPoint(blocks[len(blocks)-1]), tip)
 	require.Equal(t,
 		rowBatchingDigest(t, clean.db),
 		rowBatchingDigest(t, h.db),
 		"re-replay after the crash diverged from a clean run",
 	)
+}
+
+// countOverlays counts the block-apply transactions h's ledger applies
+// through the batch UTxO overlay.
+func (h *externalIngestHarness) countOverlays() *atomic.Int64 {
+	var n atomic.Int64
+	h.ls.afterTrustedBatchOverlay = func() { n.Add(1) }
+	return &n
 }
 
 // countBatchedWrites counts the transactions h's ledger writes through the
@@ -540,6 +559,7 @@ func testApplyTrustedBatchMatchesReplay(t *testing.T, dropped bool) {
 		dropCatchUpIndexes(t, h.db)
 	}
 	batched := h.countBatchedWrites()
+	overlays := h.countOverlays()
 	tip, err := h.applyPaused(t, ocommon.Point{}, blocks)
 	require.NoError(t, err)
 	require.Equal(t, blockPoint(blocks[len(blocks)-1]), tip)
@@ -547,6 +567,8 @@ func testApplyTrustedBatchMatchesReplay(t *testing.T, dropped bool) {
 		"the reference must take the unbatched path")
 	require.Positive(t, batched.Load(),
 		"a trusted batch must write through the row-batching accumulator")
+	require.Positive(t, overlays.Load(),
+		"a trusted batch must apply through the batch UTxO overlay")
 
 	if dropped {
 		// The run ends its cycle with the full rebuild; the digest
@@ -840,9 +862,12 @@ func testApplyTrustedBatchCrossesEpochMatchesReplay(
 	var commits atomic.Int64
 	h.ls.afterLedgerWriteCommit = func() { commits.Add(1) }
 	batched := h.countBatchedWrites()
+	overlays := h.countOverlays()
 	tip, err := h.applyPaused(t, ocommon.Point{}, blocks)
 	require.NoError(t, err)
 	require.Equal(t, blockPoint(blocks[len(blocks)-1]), tip)
+	require.GreaterOrEqual(t, overlays.Load(), int64(2),
+		"each side of the boundary must apply through the overlay")
 	require.Zero(t, referenceBatched.Load())
 	require.Positive(t, batched.Load(),
 		"a trusted batch must write through the row-batching accumulator")
@@ -918,14 +943,20 @@ func TestApplyTrustedBatchCrashRestart(t *testing.T) {
 		t.Helper()
 		dir := t.TempDir()
 		h := newExternalIngestHarnessAt(t, false, dir)
+		overlays := h.countOverlays()
 		_, err := h.applyPaused(t, ocommon.Point{}, first)
 		require.NoError(t, err)
+		require.Positive(t, overlays.Load(),
+			"the first batch must apply through the overlay")
 		injected := errors.New("injected crash before metadata commit")
 		h.ls.trustedBatchBeforeCommit = func([]gledger.Block) error {
 			return injected
 		}
+		before := overlays.Load()
 		_, err = h.applyPaused(t, firstTip, second)
 		require.ErrorIs(t, err, injected)
+		require.Greater(t, overlays.Load(), before,
+			"the crashed batch must apply through the overlay")
 		require.Equal(t, lastTip.Hash, h.cm.PrimaryChain().Tip().Point.Hash,
 			"the blob write precedes the metadata commit")
 		h.shutdown(t)
@@ -943,8 +974,11 @@ func TestApplyTrustedBatchCrashRestart(t *testing.T) {
 		h := newExternalIngestHarnessAt(t, false, crashed(t))
 		require.Equal(t, firstTip, h.ls.Tip().Point,
 			"the restart did not resume from the committed tip")
+		overlays := h.countOverlays()
 		tip, err := h.applyPaused(t, h.ls.Tip().Point, second)
 		require.NoError(t, err)
+		require.Positive(t, overlays.Load(),
+			"the replay after a restart must apply through the overlay")
 		require.Equal(t, lastTip, tip)
 		require.Equal(t, liveUtxoKeys(t, clean.db), liveUtxoKeys(t, h.db),
 			"duplicate or missing UTxOs after restart")

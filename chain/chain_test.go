@@ -2225,12 +2225,23 @@ func TestTipRelationUsesTheActivePrimaryChain(t *testing.T) {
 		}
 	}
 
-	tip, depth, ancestor, err := primary.TipRelation(blockPoint(testBlocks[1]))
+	tip, depth, ancestor, err := primary.TipRelationContext(
+		context.Background(),
+		blockPoint(testBlocks[1]),
+	)
 	if err != nil {
 		t.Fatalf("unexpected tip relation error: %s", err)
 	}
 	if !ancestor || depth != 2 || !reflect.DeepEqual(tip.Point, blockPoint(testBlocks[3])) {
 		t.Fatalf("unexpected ancestor relation: tip=%v depth=%d ancestor=%t", tip, depth, ancestor)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, _, _, err := primary.TipRelationContext(
+		ctx,
+		blockPoint(testBlocks[1]),
+	); !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected canceled context error, got %v", err)
 	}
 
 	fork, err := cm.NewChain(context.Background(), blockPoint(testBlocks[1]))

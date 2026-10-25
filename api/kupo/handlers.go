@@ -15,6 +15,7 @@
 package kupo
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"encoding/json"
@@ -28,6 +29,25 @@ import (
 )
 
 const jsonContentType = "application/json;charset=utf-8"
+
+var (
+	matchQueryParameters = map[string]bool{
+		"resolve_hashes": true,
+		"spent":          true,
+		"unspent":        true,
+		"order":          true,
+		"created_after":  true,
+		"created_before": true,
+		"spent_after":    true,
+		"spent_before":   true,
+		"policy_id":      true,
+		"asset_name":     true,
+		"transaction_id": true,
+		"output_index":   true,
+	}
+	checkpointQueryParameters = map[string]bool{"strict": true}
+	metadataQueryParameters   = map[string]bool{"transaction_id": true}
+)
 
 func (s *Server) handleMatches(w http.ResponseWriter, r *http.Request) {
 	query, err := parseMatchQuery(r)
@@ -114,21 +134,7 @@ func (s *Server) handleMatches(w http.ResponseWriter, r *http.Request) {
 
 func parseMatchQuery(r *http.Request) (MatchQuery, error) {
 	values := r.URL.Query()
-	allowed := map[string]bool{
-		"resolve_hashes": true,
-		"spent":          true,
-		"unspent":        true,
-		"order":          true,
-		"created_after":  true,
-		"created_before": true,
-		"spent_after":    true,
-		"spent_before":   true,
-		"policy_id":      true,
-		"asset_name":     true,
-		"transaction_id": true,
-		"output_index":   true,
-	}
-	if err := rejectUnknownQuery(values, allowed); err != nil {
+	if err := rejectUnknownQuery(values, matchQueryParameters); err != nil {
 		return MatchQuery{}, err
 	}
 	if err := validateQueryValues(
@@ -138,7 +144,7 @@ func parseMatchQuery(r *http.Request) (MatchQuery, error) {
 			"spent":          true,
 			"unspent":        true,
 		},
-		map[string]bool{"asset_name": true},
+		nil,
 	); err != nil {
 		return MatchQuery{}, err
 	}
@@ -216,15 +222,14 @@ func parseMatchQuery(r *http.Request) (MatchQuery, error) {
 				ErrInvalidRequest,
 			)
 		}
-		parsed, parseErr := strconv.ParseUint(value, 10, 32)
+		parsed, parseErr := strconv.ParseUint(value, 10, 64)
 		if parseErr != nil {
 			return ret, fmt.Errorf(
 				"%w: invalid output_index",
 				ErrInvalidRequest,
 			)
 		}
-		idx := uint32(parsed)
-		ret.OutputIndex = &idx
+		ret.OutputIndex = &parsed
 	}
 	if len(ret.PolicyID) > 0 && len(ret.TransactionID) > 0 {
 		return ret, fmt.Errorf(
@@ -244,7 +249,9 @@ func parsePointSelector(value string) (*PointSelector, error) {
 		return nil, fmt.Errorf("%w: invalid point", ErrInvalidRequest)
 	}
 	slot, err := strconv.ParseUint(parts[0], 10, 64)
-	if err != nil {
+	// The spec sets minimum 1 on the By Slot form only; the By Point form
+	// (slot.header_hash) admits slot 0.
+	if err != nil || (slot == 0 && len(parts) == 1) {
 		return nil, fmt.Errorf("%w: invalid point slot", ErrInvalidRequest)
 	}
 	ret := &PointSelector{SlotNo: slot}
@@ -305,10 +312,6 @@ func (s *Server) handleDatum(w http.ResponseWriter, r *http.Request) {
 		s.writeNodeError(w, err)
 		return
 	}
-	if datum == nil {
-		writeError(w, http.StatusNotFound, ErrNotFound)
-		return
-	}
 	if notModifiedAt(w, r, tip) {
 		return
 	}
@@ -324,10 +327,6 @@ func (s *Server) handleScript(w http.ResponseWriter, r *http.Request) {
 	script, tip, err := s.node.Script(r.Context(), hash)
 	if err != nil {
 		s.writeNodeError(w, err)
-		return
-	}
-	if script == nil {
-		writeError(w, http.StatusNotFound, ErrNotFound)
 		return
 	}
 	if notModifiedAt(w, r, tip) {
@@ -353,9 +352,12 @@ func (s *Server) handlePattern(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handlePutPatterns(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Patterns []string `json:"patterns"`
+		Patterns   *[]string      `json:"patterns"`
+		RollbackTo *rollbackPoint `json:"rollback_to"`
+		Limit      optionalString `json:"limit"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := decodeRequestBody(r, &body); err != nil ||
+		body.Patterns == nil || validateRollback(body.RollbackTo, body.Limit) != nil {
 		writeError(
 			w,
 			http.StatusBadRequest,
@@ -363,7 +365,7 @@ func (s *Server) handlePutPatterns(w http.ResponseWriter, r *http.Request) {
 		)
 		return
 	}
-	for _, pattern := range body.Patterns {
+	for _, pattern := range *body.Patterns {
 		if err := validatePatternText(pattern); err != nil {
 			writeError(w, http.StatusBadRequest, err)
 			return
@@ -377,7 +379,69 @@ func (s *Server) handlePutPattern(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	var body struct {
+		RollbackTo *rollbackPoint `json:"rollback_to"`
+		Limit      optionalString `json:"limit"`
+	}
+	if err := decodeRequestBody(r, &body); err != nil ||
+		validateRollback(body.RollbackTo, body.Limit) != nil {
+		writeError(
+			w,
+			http.StatusBadRequest,
+			fmt.Errorf("%w: invalid JSON body", ErrInvalidRequest),
+		)
+		return
+	}
 	writeJSON(w, http.StatusOK, []string{"*"})
+}
+
+type rollbackPoint struct {
+	SlotNo     *uint64        `json:"slot_no"`
+	HeaderHash optionalString `json:"header_hash"`
+}
+
+type optionalString struct {
+	value   string
+	present bool
+}
+
+func (o *optionalString) UnmarshalJSON(data []byte) error {
+	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
+		return ErrInvalidRequest
+	}
+	if err := json.Unmarshal(data, &o.value); err != nil {
+		return err
+	}
+	o.present = true
+	return nil
+}
+
+func validateRollback(point *rollbackPoint, limit optionalString) error {
+	if point == nil || point.SlotNo == nil {
+		return ErrInvalidRequest
+	}
+	if point.HeaderHash.present {
+		if _, err := decodeHexSize(point.HeaderHash.value, 32, "header hash"); err != nil {
+			return err
+		}
+	}
+	if limit.present && limit.value != "within_safe_zone" &&
+		limit.value != "unsafe_allow_beyond_safe_zone" {
+		return ErrInvalidRequest
+	}
+	return nil
+}
+
+func decodeRequestBody(r *http.Request, dst any) error {
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(dst); err != nil {
+		return err
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return ErrInvalidRequest
+	}
+	return nil
 }
 
 func (s *Server) handleDeletePattern(w http.ResponseWriter, _ *http.Request) {
@@ -417,7 +481,7 @@ func (s *Server) handleCheckpoints(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleCheckpoint(w http.ResponseWriter, r *http.Request) {
 	if err := rejectUnknownQuery(
 		r.URL.Query(),
-		map[string]bool{"strict": true},
+		checkpointQueryParameters,
 	); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
@@ -448,10 +512,6 @@ func (s *Server) handleCheckpoint(w http.ResponseWriter, r *http.Request) {
 		s.writeNodeError(w, err)
 		return
 	}
-	if point == nil {
-		writeError(w, http.StatusNotFound, ErrNotFound)
-		return
-	}
 	if notModifiedAt(w, r, tip) {
 		return
 	}
@@ -461,7 +521,7 @@ func (s *Server) handleCheckpoint(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 	if err := rejectUnknownQuery(
 		r.URL.Query(),
-		map[string]bool{"transaction_id": true},
+		metadataQueryParameters,
 	); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return

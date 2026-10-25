@@ -38,6 +38,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/internal/httpuseragent"
 	"golang.org/x/crypto/blake2b"
 	"golang.org/x/net/http/httpguts"
 )
@@ -109,11 +110,8 @@ const (
 	// roughly 8,000 mappings in the mainnet registry.
 	tokenRegistryBatchSize = 500
 
-	// nolint:gosec // G101 matches on "Token" in the name; this is a
-	// user agent for the CIP-26 token registry, not a credential.
-	defaultTokenRegistryUserAgent = "dingo-token-registry/1" //nolint:gosec
-	tokenRegistryMappingsDir      = "mappings"
-	tokenRegistryMappingExt       = ".json"
+	tokenRegistryMappingsDir = "mappings"
+	tokenRegistryMappingExt  = ".json"
 )
 
 // TokenRegistryStore is the persistence surface the registry sync needs.
@@ -312,7 +310,7 @@ func NewTokenRegistrySync(
 	}
 	userAgent := cfg.UserAgent
 	if userAgent == "" {
-		userAgent = defaultTokenRegistryUserAgent
+		userAgent = httpuseragent.Default()
 	}
 	maxBytes := cfg.MaxBytes
 	if maxBytes <= 0 {

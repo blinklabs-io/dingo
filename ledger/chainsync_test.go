@@ -8327,6 +8327,37 @@ func TestHandleEventChainsyncRollbackAppliesRepeatedCrossableRollback(
 	assert.Equal(t, fixture.ancestorTip, fixture.ls.chain.Tip())
 }
 
+func TestHandleEventChainsyncRollbackClearsCandidateHeaderState(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	fixture := newChainsyncRollbackFixture(t)
+	key := connIdKey(fixture.connId)
+	fixture.ls.forkHeaderNonceCacheMutex.Lock()
+	fixture.ls.forkHeaderPathCache = map[string]peerForkPathPrefix{
+		key: {},
+	}
+	fixture.ls.forkHeaderNonceCache = make(map[string]map[uint64]peerForkNoncePrefix)
+	fixture.ls.forkHeaderNonceCache[key] = map[uint64]peerForkNoncePrefix{
+		5: {sourceEpoch: 5},
+	}
+	fixture.ls.forkHeaderNonceCacheMutex.Unlock()
+
+	err := fixture.ls.handleEventChainsyncRollback(ChainsyncEvent{
+		ConnectionId: fixture.connId,
+		Point:        fixture.ancestorTip.Point,
+	}, nil)
+	require.NoError(t, err)
+
+	fixture.ls.forkHeaderNonceCacheMutex.Lock()
+	_, pathCached := fixture.ls.forkHeaderPathCache[key]
+	_, nonceCached := fixture.ls.forkHeaderNonceCache[key]
+	fixture.ls.forkHeaderNonceCacheMutex.Unlock()
+	require.False(t, pathCached, "rollback must drop the peer's cached fork path")
+	require.False(t, nonceCached, "rollback must drop the peer's cached nonce state")
+}
+
 // When the loop detector breaks a loop for a genuinely un-crossable rollback,
 // the skip path must surface the stuck condition through the point-keyed
 // unrecoverable-rollback tracker so the escalation and metric can fire,
@@ -16967,90 +16998,99 @@ type mockForgedBlockChecker struct {
 func TestCheckSlotBattle_DetectsConflict(t *testing.T) {
 	t.Parallel()
 
+	f := newSiblingFixture(t)
+	ls := f.ls
 	eventBus := newTestEventBus(t, nil)
 	defer eventBus.Stop()
+	ls.config.EventBus = eventBus
+	recorder := &countingSlotBattleRecorder{}
+	ls.SetSlotBattleRecorder(recorder)
 
-	localHash := []byte{0x01, 0x02, 0x03, 0x04}
+	localHash := f.rival.Hash().Bytes()
 	remoteHash := []byte{0x0A, 0x0B, 0x0C, 0x0D}
 
 	checker := &mockForgedBlockChecker{
 		forgedSlots: map[uint64][]byte{
-			1000: localHash,
+			siblingSlot: localHash,
 		},
 	}
 
-	ls := &LedgerState{
-		config: LedgerStateConfig{
-			EventBus:           eventBus,
-			ForgedBlockChecker: checker,
-			Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		},
-	}
+	ls.config.ForgedBlockChecker = checker
 
-	// Subscribe to slot battle events
 	_, evtCh := eventBus.Subscribe(forging.SlotBattleEventType)
 
-	// Simulate an incoming block at slot 1000 with a different hash.
-	// Pass a non-nil error to indicate the remote block was rejected
-	// (local block stays on chain, so local won).
 	e := BlockfetchEvent{
 		Point: ocommon.Point{
-			Slot: 1000,
+			Slot: siblingSlot,
 			Hash: remoteHash,
 		},
 	}
-	ls.checkSlotBattle(e, errors.New("block rejected"))
+	ls.checkSlotBattle(e)
 
-	// Verify the event was emitted
-	evt := testutil.RequireReceive(
+	assert.Equal(t, int64(1), recorder.n.Load())
+	require.Len(t, ls.slotBattles.pending, 1)
+	pending := ls.slotBattles.pending[0]
+	assert.Equal(t, siblingSlot, pending.slot)
+	assert.Equal(t, localHash, pending.localHash)
+	assert.Equal(t, remoteHash, pending.remoteHash)
+	testutil.RequireNoReceive(
 		t,
 		evtCh,
-		testutil.AsyncWait,
-		"timeout waiting for SlotBattleEvent",
+		50*time.Millisecond,
+		"the winner is not known when the rival arrives",
 	)
-	battle, ok := evt.Data.(forging.SlotBattleEvent)
-	require.True(t, ok, "event data should be SlotBattleEvent")
-	assert.Equal(t, uint64(1000), battle.Slot)
-	assert.Equal(t, localHash, battle.LocalBlockHash)
-	assert.Equal(t, remoteHash, battle.RemoteBlockHash)
-	assert.True(t, battle.Won,
-		"local should win when remote block is rejected")
 }
 
+// A battle whose forged block never reaches the chain settles as lost once
+// the chain has advanced a security parameter of blocks.
 func TestCheckSlotBattle_RemoteWinsWhenAccepted(t *testing.T) {
 	t.Parallel()
 
+	f := newSiblingFixture(t)
+	ls := f.ls
+	ls.config.CardanoNodeConfig = newTestShelleyGenesisCfgWithK(t, 2)
+	ls.currentEra = eras.ConwayEraDesc
+	ls.publishSnapshotsLocked()
 	eventBus := newTestEventBus(t, nil)
 	defer eventBus.Stop()
+	ls.config.EventBus = eventBus
 
-	localHash := []byte{0x01, 0x02, 0x03, 0x04}
+	localHash := bytes.Repeat([]byte{0x01}, 32)
 	remoteHash := []byte{0x0A, 0x0B, 0x0C, 0x0D}
 
 	checker := &mockForgedBlockChecker{
 		forgedSlots: map[uint64][]byte{
-			1000: localHash,
+			siblingSlot: localHash,
 		},
 	}
 
-	ls := &LedgerState{
-		config: LedgerStateConfig{
-			EventBus:           eventBus,
-			ForgedBlockChecker: checker,
-			Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		},
-	}
+	ls.config.ForgedBlockChecker = checker
 
 	_, evtCh := eventBus.Subscribe(forging.SlotBattleEventType)
 
-	// Pass nil error to indicate the remote block was accepted
-	// (remote won, our block is replaced).
-	e := BlockfetchEvent{
-		Point: ocommon.Point{
-			Slot: 1000,
-			Hash: remoteHash,
-		},
+	ls.checkSlotBattle(BlockfetchEvent{
+		Point: ocommon.Point{Slot: siblingSlot, Hash: remoteHash},
+	})
+	ls.resolveSlotBattles()
+	testutil.RequireNoReceive(
+		t,
+		evtCh,
+		50*time.Millisecond,
+		"the battle is not settled yet",
+	)
+
+	block := gledger.Block(f.rival)
+	for range 2 {
+		block = newSiblingTestBlock(
+			t, block.BlockNumber()+1, block.SlotNumber()+10,
+			block.Hash(), 0x44, 0x90, 1,
+		)
+		require.NoError(
+			t,
+			ls.chain.AddBlock(context.Background(), block, nil),
+		)
 	}
-	ls.checkSlotBattle(e, nil)
+	ls.resolveSlotBattles()
 
 	evt := testutil.RequireReceive(
 		t,
@@ -17060,9 +17100,9 @@ func TestCheckSlotBattle_RemoteWinsWhenAccepted(t *testing.T) {
 	)
 	battle, ok := evt.Data.(forging.SlotBattleEvent)
 	require.True(t, ok)
-	assert.Equal(t, uint64(1000), battle.Slot)
+	assert.Equal(t, siblingSlot, battle.Slot)
 	assert.False(t, battle.Won,
-		"local should lose when remote block is accepted")
+		"local should lose when its block is not on the chain")
 }
 
 func TestCheckSlotBattle_NoConflictDifferentSlot(t *testing.T) {
@@ -17094,7 +17134,7 @@ func TestCheckSlotBattle_NoConflictDifferentSlot(t *testing.T) {
 			Hash: []byte{0x0A, 0x0B, 0x0C, 0x0D},
 		},
 	}
-	ls.checkSlotBattle(e, nil)
+	ls.checkSlotBattle(e)
 
 	// Verify no event was emitted
 	testutil.RequireNoReceive(
@@ -17136,7 +17176,7 @@ func TestCheckSlotBattle_SameHashIsNotBattle(t *testing.T) {
 			Hash: blockHash,
 		},
 	}
-	ls.checkSlotBattle(e, nil)
+	ls.checkSlotBattle(e)
 
 	testutil.RequireNoReceive(
 		t,
@@ -17168,7 +17208,7 @@ func TestCheckSlotBattle_NilCheckerSkips(t *testing.T) {
 			Hash: []byte{0x0A, 0x0B, 0x0C, 0x0D},
 		},
 	}
-	ls.checkSlotBattle(e, nil)
+	ls.checkSlotBattle(e)
 
 	testutil.RequireNoReceive(
 		t,
@@ -17205,7 +17245,7 @@ func TestCheckSlotBattle_NilEventBus(t *testing.T) {
 			Hash: remoteHash,
 		},
 	}
-	ls.checkSlotBattle(e, errors.New("rejected"))
+	ls.checkSlotBattle(e)
 }
 
 // TestCheckSlotBattle_UnderWriteLock is a regression test for the
@@ -17215,31 +17255,29 @@ func TestCheckSlotBattle_NilEventBus(t *testing.T) {
 func TestCheckSlotBattle_UnderWriteLock(t *testing.T) {
 	t.Parallel()
 
+	f := newSiblingFixture(t)
+	ls := f.ls
 	eventBus := newTestEventBus(t, nil)
 	defer eventBus.Stop()
+	ls.config.EventBus = eventBus
 
-	localHash := []byte{0x01, 0x02, 0x03, 0x04}
+	localHash := f.rival.Hash().Bytes()
 	remoteHash := []byte{0x0A, 0x0B, 0x0C, 0x0D}
 
 	checker := &mockForgedBlockChecker{
 		forgedSlots: map[uint64][]byte{
-			1000: localHash,
+			siblingSlot: localHash,
 		},
 	}
 
-	ls := &LedgerState{
-		config: LedgerStateConfig{
-			EventBus:           eventBus,
-			ForgedBlockChecker: checker,
-			Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		},
-	}
+	ls.config.ForgedBlockChecker = checker
 
-	_, evtCh := eventBus.Subscribe(forging.SlotBattleEventType)
+	recorder := &countingSlotBattleRecorder{}
+	ls.SetSlotBattleRecorder(recorder)
 
 	e := BlockfetchEvent{
 		Point: ocommon.Point{
-			Slot: 1000,
+			Slot: siblingSlot,
 			Hash: remoteHash,
 		},
 	}
@@ -17250,7 +17288,7 @@ func TestCheckSlotBattle_UnderWriteLock(t *testing.T) {
 	go func() {
 		defer close(done)
 		ls.Lock()
-		ls.checkSlotBattle(e, errors.New("block rejected"))
+		ls.checkSlotBattle(e)
 		ls.Unlock()
 	}()
 
@@ -17261,16 +17299,7 @@ func TestCheckSlotBattle_UnderWriteLock(t *testing.T) {
 		"checkSlotBattle deadlocked under write lock",
 	)
 
-	evt := testutil.RequireReceive(
-		t,
-		evtCh,
-		testutil.AsyncWait,
-		"timeout waiting for SlotBattleEvent",
-	)
-	battle, ok := evt.Data.(forging.SlotBattleEvent)
-	require.True(t, ok)
-	assert.Equal(t, uint64(1000), battle.Slot)
-	assert.True(t, battle.Won)
+	assert.Equal(t, int64(1), recorder.n.Load())
 }
 
 // newChainUpdateEvent builds a throwaway chain.update event for saturating the
@@ -21263,4 +21292,152 @@ func (ls *LedgerState) hasAdmissionVerifiedRecord(slot uint64) bool {
 	record, ok := ls.admissionVerified[slot]
 	ls.admissionVerifiedMu.Unlock()
 	return ok && ls.headerCryptoVerificationGenerationCurrent(record.generation)
+}
+
+// readSelectionUnderBlockfetchLock keeps reading selectedBlockfetchConnId the
+// way every guarded reader does, holding chainsyncBlockfetchMutex, while the
+// caller runs write. A write that skips that lock is ordered against none of
+// those reads, so the race detector reports it whichever comes first; a write
+// under the lock is ordered by the lock.
+func readSelectionUnderBlockfetchLock(
+	t *testing.T,
+	ls *LedgerState,
+	write func(),
+) {
+	t.Helper()
+	started := make(chan struct{})
+	stop := make(chan struct{})
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		for i := 0; ; i++ {
+			ls.chainsyncBlockfetchMutex.Lock()
+			_ = connIdKey(ls.selectedBlockfetchConnId)
+			ls.chainsyncBlockfetchMutex.Unlock()
+			if i == 0 {
+				close(started)
+			}
+			select {
+			case <-stop:
+				return
+			default:
+			}
+		}
+	}()
+	<-started
+	write()
+	close(stop)
+	testutil.RequireReceive(t, stopped, testutil.AsyncWait, "guarded reader")
+}
+
+// The resync reset clears the blockfetch selection. Every other writer holds
+// chainsyncBlockfetchMutex for it, and startQueuedBlockfetchOnLocked compares
+// the selection across the request it sends outside that lock, so the reset
+// must take the lock too. Meaningful under -race, as CI runs this package.
+func TestResetChainsyncResyncStateClearsSelectionUnderBlockfetchLock(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	fixture := newChainsyncRollbackFixture(t)
+	ls := fixture.ls
+	ls.selectedBlockfetchConnId = fixture.connId
+	var pending pendingPublishes
+	readSelectionUnderBlockfetchLock(t, ls, func() {
+		ls.chainsyncMutex.Lock()
+		ls.resetChainsyncResyncState(&pending)
+		ls.chainsyncMutex.Unlock()
+	})
+	pending.flush()
+	assert.Empty(t, connIdKey(ls.selectedBlockfetchConnId))
+}
+
+// A local rollback recovery with no connection left to replay on clears the
+// selection after its loop has released chainsyncBlockfetchMutex, so it must
+// take the lock again for that write. Meaningful under -race.
+func TestRecoverAfterLocalRollbackClearsSelectionUnderBlockfetchLock(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	fixture := newChainsyncRollbackFixture(t)
+	ls := fixture.ls
+	ls.selectedBlockfetchConnId = fixture.connId
+	readSelectionUnderBlockfetchLock(t, ls, func() {
+		result := ls.RecoverAfterLocalRollback(
+			context.Background(),
+			nil,
+			fixture.ancestorTip.Point,
+		)
+		assert.False(t, result.Recovered)
+	})
+	assert.Empty(t, connIdKey(ls.selectedBlockfetchConnId))
+}
+
+// A local rollback recovery that replays retained headers assigns the
+// selection to the replaying connection. That write must hold
+// chainsyncBlockfetchMutex like every other selection writer. Meaningful
+// under -race.
+func TestRecoverAfterLocalRollbackReplaySelectsUnderBlockfetchLock(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	fixture := newChainsyncRollbackFixture(t)
+	ls := fixture.ls
+	require.NoError(
+		t,
+		ls.chain.Rollback(context.Background(), fixture.ancestorTip.Point),
+	)
+	require.NoError(t, ls.db.SetTip(fixture.ancestorTip, nil))
+	ls.currentTip = fixture.ancestorTip
+	ls.currentTipBlockNonce = append([]byte(nil), fixture.ancestorNonce...)
+
+	connId := fixture.connId
+	ls.config.GetActiveConnectionFunc = func() *ouroboros.ConnectionId {
+		return &connId
+	}
+	ls.config.BlockfetchRequestRangeFunc = func(
+		ouroboros.ConnectionId,
+		ocommon.Point,
+		ocommon.Point,
+	) (uint64, error) {
+		return 0, nil
+	}
+	header1 := mockHeader{
+		hash:        lcommon.NewBlake2b256(testHashBytes("replay-lock-1")),
+		prevHash:    lcommon.NewBlake2b256(fixture.ancestorTip.Point.Hash),
+		blockNumber: fixture.ancestorTip.BlockNumber + 1,
+		slot:        fixture.ancestorTip.Point.Slot + 1,
+	}
+	header2 := mockHeader{
+		hash:        lcommon.NewBlake2b256(testHashBytes("replay-lock-2")),
+		prevHash:    header1.hash,
+		blockNumber: fixture.ancestorTip.BlockNumber + 2,
+		slot:        fixture.ancestorTip.Point.Slot + 2,
+	}
+	tip := ochainsync.Tip{
+		Point:       ocommon.NewPoint(header2.slot, header2.hash.Bytes()),
+		BlockNumber: header2.blockNumber,
+	}
+	for _, header := range []mockHeader{header1, header2} {
+		ls.recordPeerHeaderHistory(ChainsyncEvent{
+			ConnectionId: connId,
+			HeaderCryptoVerificationGeneration: ls.
+				loadConsensusSnapshot().generation,
+			Point:       ocommon.NewPoint(header.slot, header.hash.Bytes()),
+			Tip:         tip,
+			BlockHeader: header,
+		})
+	}
+
+	readSelectionUnderBlockfetchLock(t, ls, func() {
+		result := ls.RecoverAfterLocalRollback(
+			context.Background(),
+			[]ouroboros.ConnectionId{connId},
+			fixture.ancestorTip.Point,
+		)
+		assert.True(t, result.Recovered)
+	})
+	assert.True(t, sameConnectionId(ls.selectedBlockfetchConnId, connId))
 }

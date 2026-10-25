@@ -971,7 +971,7 @@ func TestRunTestsLeiosSelectsItsFullDijkstraScenario(t *testing.T) {
 	require.Contains(t, result.dockerLog,
 		"LEIOS_KEY_FILE=/configs/keys/leios-vote.skey\n")
 	require.Contains(t, result.dockerLog, "DINGO_RUN_MODE=leios\n")
-	require.Contains(t, result.dockerLog, "DINGO_START_ERA=dijkstra\n")
+	require.Contains(t, result.dockerLog, "DINGO_START_ERA=\n")
 	require.Contains(t, result.dockerLog, "TXPUMP_TRANSACTION_ERA=dijkstra\n")
 	require.Contains(t, result.dockerLog, "TXPUMP_WINDOW=1000\n")
 	require.Contains(t, result.dockerLog, "TXPUMP_START_DELAY=330\n")

@@ -32,15 +32,15 @@ import (
 	"github.com/blinklabs-io/dingo/ledger/leios"
 	"github.com/blinklabs-io/dingo/ledger/snapshot"
 	"github.com/blinklabs-io/dingo/topology"
+	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-// TestPrototypeTrustBypassesRejectedOnStandardNetworks proves a node cannot be
-// constructed with a configuration that would hand the Musashi prototype's
-// consensus/ledger trust bypasses to preview, preprod, or mainnet.
-func TestPrototypeTrustBypassesRejectedOnStandardNetworks(t *testing.T) {
+// TestConflictingMusashiNetworkIdentityRejected proves a node cannot be
+// constructed with a network name and magic that identify different networks.
+func TestConflictingMusashiNetworkIdentityRejected(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -73,8 +73,8 @@ func TestPrototypeTrustBypassesRejectedOnStandardNetworks(t *testing.T) {
 			wantErr: `network identity conflict: network "mainnet" with networkMagic 164`,
 		},
 		{
-			// The handshake uses the magic, so this configuration actually
-			// joins preview while claiming the prototype's trust rules.
+			// The handshake uses the magic, so this configuration would join
+			// preview while selecting Musashi's built-in configuration.
 			name: "prototype name cannot borrow preview's magic",
 			opts: []ConfigOptionFunc{
 				WithNetwork("musashi"),
@@ -128,85 +128,11 @@ func TestPrototypeTrustBypassesRejectedOnStandardNetworks(t *testing.T) {
 	}
 }
 
-// TestPrototypeTrustBypassesEnabledOnlyForMusashi asserts the predicate that
-// gates SkipLeaderStakeThresholdCheck and SkipDijkstraTxValidation. This is
-// the last line of defence: an embedder that constructs a Config directly and
-// never runs startup validation still must not get the bypasses on a standard
-// network.
-func TestPrototypeTrustBypassesEnabledOnlyForMusashi(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name         string
-		network      string
-		networkMagic uint32
-		want         bool
-	}{
-		{name: "musashi by name", network: "musashi", want: true},
-		{
-			name:         "musashi by name and magic",
-			network:      "musashi",
-			networkMagic: 164,
-			want:         true,
-		},
-		{name: "musashi by magic only", networkMagic: 164, want: true},
-		{name: "preview", network: "preview", networkMagic: 2},
-		{name: "preprod", network: "preprod", networkMagic: 1},
-		{name: "mainnet", network: "mainnet", networkMagic: 764824073},
-		{name: "devnet", network: "devnet", networkMagic: 42},
-		// Conflicting identities never enable the bypasses, even unvalidated.
-		{
-			name:         "preview with prototype magic",
-			network:      "preview",
-			networkMagic: 164,
-		},
-		{
-			name:         "preprod with prototype magic",
-			network:      "preprod",
-			networkMagic: 164,
-		},
-		{
-			name:         "musashi name with preview magic",
-			network:      "musashi",
-			networkMagic: 2,
-		},
-		{
-			name:         "musashi name with preprod magic",
-			network:      "musashi",
-			networkMagic: 1,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			c := &Config{cfg: &internalconfig.Config{
-				Network:      tt.network,
-				NetworkMagic: tt.networkMagic,
-			}}
-			assert.Equal(
-				t,
-				tt.want,
-				c.prototypeTrustBypassesEnabled(),
-				"prototypeTrustBypassesEnabled",
-			)
-		})
-	}
-}
-
-// TestPrototypeTrustBypassesOffWithoutConfig guards the nil-config path used by
-// zero-value Config values in tests and embedders.
-func TestPrototypeTrustBypassesOffWithoutConfig(t *testing.T) {
-	t.Parallel()
-
-	c := &Config{}
-	assert.False(t, c.prototypeTrustBypassesEnabled())
-}
-
-// TestMusashiProfileTrustBypassScope is the change-bar guard for the Musashi
-// prototype profile: it documents exactly which LedgerStateConfig settings
-// relax validation, and which of those the network profile is allowed to
-// switch on by itself.
+// TestNetworkProfilesDoNotRelaxLedgerValidation is the change-bar guard for
+// LedgerStateConfig settings that relax validation. No network profile may
+// switch one on by itself.
 //
-// The accepted non-validating behaviour on Musashi is limited to two settings:
+// The explicit non-validating behavior is limited to two settings:
 //
 //   - SkipLeaderStakeThresholdCheck downgrades a failed stake-derived leader
 //     eligibility check to a warning. Every cryptographic header check (KES,
@@ -222,17 +148,15 @@ func TestPrototypeTrustBypassesOffWithoutConfig(t *testing.T) {
 //
 // A new Skip*/Trust*/Unsafe* field on LedgerStateConfig fails this test on
 // purpose. Adding one is a deliberate widening of where dingo stops validating,
-// and it should be classified here — prototype-only or not — rather than
+// and it should be classified here as an explicit override rather than
 // picking up a network default silently.
-func TestMusashiProfileTrustBypassScope(t *testing.T) {
+func TestNetworkProfilesDoNotRelaxLedgerValidation(t *testing.T) {
 	t.Parallel()
 
-	// Settings that relax validation, and whether the Musashi network profile
-	// is permitted to enable them on its own.
-	knownTrustSettings := map[string]bool{
-		"SkipLeaderStakeThresholdCheck": true,
-		"SkipDijkstraTxValidation":      true,
-		"TrustedReplay":                 false,
+	knownTrustSettings := map[string]struct{}{
+		"SkipLeaderStakeThresholdCheck": {},
+		"SkipDijkstraTxValidation":      {},
+		"TrustedReplay":                 {},
 	}
 
 	cfgType := reflect.TypeFor[ledger.LedgerStateConfig]()
@@ -250,8 +174,8 @@ func TestMusashiProfileTrustBypassScope(t *testing.T) {
 			t,
 			knownTrustSettings,
 			name,
-			"new validation-relaxing setting %q must be classified as "+
-				"prototype-only or not; see this test's doc comment",
+			"LedgerStateConfig.%s relaxes validation and must be "+
+				"classified in knownTrustSettings; see this test's doc comment",
 			name,
 		)
 	}
@@ -263,6 +187,30 @@ func TestMusashiProfileTrustBypassScope(t *testing.T) {
 			"%q no longer exists; drop it from the known set",
 			name,
 		)
+	}
+	for _, network := range []ouroboros.Network{
+		ouroboros.NetworkCardanoMainnet,
+		ouroboros.NetworkCardanoPreprod,
+		ouroboros.NetworkCardanoPreview,
+		ouroboros.NetworkCardanoSancho,
+		ouroboros.NetworkCardanoMusashi,
+		ouroboros.NetworkPrimeMainnet,
+		ouroboros.NetworkPrimeTestnet,
+		ouroboros.NetworkDevnet,
+	} {
+		n := &Node{config: Config{
+			network: network.Name,
+			cfg: &internalconfig.Config{
+				Network:      network.Name,
+				NetworkMagic: network.NetworkMagic,
+			},
+		}}
+		cfg := reflect.ValueOf(n.ledgerStateConfig())
+		for name := range knownTrustSettings {
+			assert.False(t, cfg.FieldByName(name).Bool(),
+				"network profile %q enabled validation-relaxing setting %q",
+				network.Name, name)
+		}
 	}
 }
 
@@ -684,4 +632,76 @@ func TestQuiesceReportsAStopFailureWithoutEscalating(t *testing.T) {
 	require.Error(t, err)
 	assert.ErrorIs(t, err, sentinel)
 	assert.NotErrorIs(t, err, errStorageDrainUnconfirmed)
+}
+
+// TestLedgerStateConfigPraos2OnlyForMusashi pins the gate that selects the
+// Praos2 chain-dependent state layout. Released consensus runs the Dijkstra
+// era on plain Praos, so no standard network, and no Dijkstra start era or
+// Leios run mode on one, may select Praos2: a client of such a node could not
+// decode the reply.
+func TestLedgerStateConfigPraos2OnlyForMusashi(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		network      string
+		networkMagic uint32
+		runMode      internalconfig.RunMode
+		startEra     internalconfig.StartEra
+		want         bool
+	}{
+		{name: "musashi by name", network: "musashi", want: true},
+		{name: "musashi by magic", networkMagic: 164, want: true},
+		{name: "mainnet", network: "mainnet", networkMagic: 764824073},
+		{name: "preprod", network: "preprod", networkMagic: 1},
+		{name: "preview", network: "preview", networkMagic: 2},
+		{name: "sancho", network: "sancho", networkMagic: 4},
+		{name: "devnet", network: "devnet", networkMagic: 42},
+		// A devnet half-match is not an identity conflict, so either half of
+		// the Musashi identity beside it still selects Praos2.
+		{name: "musashi name with devnet magic", network: "musashi", networkMagic: 42, want: true},
+		{name: "devnet name with musashi magic", network: "devnet", networkMagic: 164, want: true},
+		{
+			name:         "preview in the Dijkstra era",
+			network:      "preview",
+			networkMagic: 2,
+			startEra:     internalconfig.StartEraDijkstra,
+		},
+		{
+			name:         "preprod in leios run mode",
+			network:      "preprod",
+			networkMagic: 1,
+			runMode:      internalconfig.RunModeLeios,
+		},
+		{
+			name:         "preview with prototype magic",
+			network:      "preview",
+			networkMagic: 164,
+		},
+		{
+			name:         "musashi name with mainnet magic",
+			network:      "musashi",
+			networkMagic: 764824073,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			n := &Node{config: Config{cfg: &internalconfig.Config{
+				Network:      tt.network,
+				NetworkMagic: tt.networkMagic,
+				RunMode:      tt.runMode,
+				StartEra:     tt.startEra,
+			}}}
+			assert.Equal(
+				t,
+				tt.want,
+				n.ledgerStateConfig().Praos2ChainDepState,
+			)
+		})
+	}
+	assert.False(
+		t,
+		(&Node{config: Config{}}).ledgerStateConfig().Praos2ChainDepState,
+		"a zero config keeps Praos",
+	)
 }

@@ -19,6 +19,7 @@ import (
 	"context"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"log/slog"
 	"math/big"
 	"os"
@@ -652,4 +653,46 @@ func TestLeiosPersistenceRetentionRequiresStabilityWindow(t *testing.T) {
 			}
 		})
 	}
+}
+
+// The ledger starts its block-processing goroutine before initLeiosVoteManager
+// runs, both at startup and after a live restore/truncate, so a certifying
+// block already in the local chain reaches the certificate callback while the
+// vote manager is being installed. Run under -race.
+func TestLedgerCertificateCallbackReadsVoteManagerSafely(t *testing.T) {
+	t.Parallel()
+
+	n, _ := newLiveLifecycleTestNode(t, 1)
+	validate := n.ledgerStateConfig().ValidateLeiosCertificate
+	require.NotNil(t, validate)
+
+	done := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		for {
+			select {
+			case <-done:
+				return
+			default:
+				_ = validate(0, make([]byte, 32), nil, nil)
+			}
+		}
+	})
+	var stopOnce sync.Once
+	stopWorker := func() {
+		stopOnce.Do(func() { close(done) })
+		wg.Wait()
+	}
+	t.Cleanup(func() {
+		stopWorker()
+		if n.leiosVoteManager != nil {
+			_ = n.leiosVoteManager.Stop()
+		}
+	})
+	require.NoError(t, n.initLeiosVoteManager(t.Context()))
+	stopWorker()
+
+	err := validate(0, make([]byte, 32), nil, nil)
+	assert.NotContains(t, fmt.Sprint(err), "vote manager is unavailable",
+		"the callback must see the installed vote manager")
 }

@@ -194,6 +194,30 @@ func (d *Database) LatestPoolOpCertSequenceAtOrBefore(
 	)
 }
 
+// LatestPoolOpCertSequenceInRange returns the highest observed op-cert
+// sequence for a pool between the inclusive slot bounds.
+func (d *Database) LatestPoolOpCertSequenceInRange(
+	ctx context.Context,
+	pkh lcommon.PoolKeyHash,
+	startSlot uint64,
+	endSlot uint64,
+	txn *Txn,
+) (uint64, bool, error) {
+	if startSlot > endSlot {
+		return 0, false, nil
+	}
+	if txn == nil {
+		txn = d.Transaction(ctx, false)
+		defer txn.Release()
+	}
+	return d.metadata.LatestPoolOpCertSequenceInRange(
+		pkh,
+		startSlot,
+		endSlot,
+		txn.Metadata(),
+	)
+}
+
 // PoolOpCertSequencesExistAtSlot reports whether any pool has an op-cert
 // sequence row at exactly slot. Ledger validation reads it at the Mithril
 // trust boundary to tell an imported certified counter map from one that was
@@ -293,6 +317,44 @@ func (d *Database) GetFuturePoolByVrfKeyHash(
 	}
 	return d.metadata.GetFuturePoolByVrfKeyHash(
 		vrfKeyHash,
+		epochStartSlot,
+		txn.Metadata(),
+	)
+}
+
+// GetPoolByLeiosKey retrieves the pool whose active parameters claim the
+// given BLS public key as of the current epoch's start slot.
+func (d *Database) GetPoolByLeiosKey(
+	ctx context.Context,
+	publicKey []byte,
+	epochStartSlot uint64,
+	txn *Txn,
+) (*models.Pool, error) {
+	if txn == nil {
+		txn = d.Transaction(ctx, false)
+		defer txn.Release()
+	}
+	return d.metadata.GetPoolByLeiosKey(
+		publicKey,
+		epochStartSlot,
+		txn.Metadata(),
+	)
+}
+
+// GetFuturePoolByLeiosKey retrieves the pool whose pending parameters claim
+// the given BLS public key in the current epoch.
+func (d *Database) GetFuturePoolByLeiosKey(
+	ctx context.Context,
+	publicKey []byte,
+	epochStartSlot uint64,
+	txn *Txn,
+) (*models.Pool, error) {
+	if txn == nil {
+		txn = d.Transaction(ctx, false)
+		defer txn.Release()
+	}
+	return d.metadata.GetFuturePoolByLeiosKey(
+		publicKey,
 		epochStartSlot,
 		txn.Metadata(),
 	)

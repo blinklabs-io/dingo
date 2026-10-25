@@ -49,15 +49,9 @@ func newLinkedTestHeaders(count int) []gledger.BlockHeader {
 	return headers
 }
 
-// Two honest peers serve the same chain while Genesis corroboration is
-// active, and the first runs ahead of the second by more than a staged
-// admission window before the second delivers anything. Every header the
-// first peer delivers is uncorroborated when it arrives. If such a header is
-// withheld and the peer's cursor moves on, the first peer's evidence of the
-// early headers is gone by the time the second peer delivers them, so the
-// second peer cannot be corroborated either, and the first header that
-// reaches the ledger is far past its header tip. The ledger must instead
-// receive the chain from its first header, in order.
+// A peer that times out waiting for corroboration keeps its candidate
+// frontier. Another peer can use that history to deliver the withheld chain
+// prefix to the ledger in order.
 func TestChainsyncUncorroboratedPeerAheadDoesNotStrandChainPrefix(
 	t *testing.T,
 ) {
@@ -69,7 +63,7 @@ func TestChainsyncUncorroboratedPeerAheadDoesNotStrandChainPrefix(
 
 	cs := chainselection.NewChainSelector(chainselection.ChainSelectorConfig{
 		GenesisMode:           true,
-		SecurityParam:         3,
+		SecurityParam:         400,
 		GenesisWindowSlots:    1_000_000,
 		MinCorroboratingPeers: 1,
 	})
@@ -94,8 +88,10 @@ func TestChainsyncUncorroboratedPeerAheadDoesNotStrandChainPrefix(
 	})
 	o.chainsyncState = state
 	o.eventBus = bus
+	o.corroborationHoldTimeout = 10 * time.Millisecond
+	o.chainsyncScheduleAt = func(time.Time, func()) func() { return func() {} }
 
-	// More than the staged admission window of any one peer.
+	// Keep the first peer on the same session through repeated hold timeouts.
 	headers := newLinkedTestHeaders(300)
 	tipHeader := headers[len(headers)-1]
 	// The advertised tip is far past what the peers deliver here, so the
@@ -124,13 +120,17 @@ func TestChainsyncUncorroboratedPeerAheadDoesNotStrandChainPrefix(
 	}
 
 	doneA := deliver(connA)
-	// Let the first peer run as far ahead as it is allowed before the second
-	// peer delivers its first header.
 	select {
 	case err := <-doneA:
 		require.NoError(t, err)
-	case <-time.After(200 * time.Millisecond):
+	case <-time.After(10 * time.Second):
+		t.Fatal("first peer did not advance through bounded corroboration holds")
 	}
+	o.futureHeaderResyncMu.Lock()
+	firstPeerResync := o.futureHeaderResyncs[connA]
+	o.futureHeaderResyncMu.Unlock()
+	require.Nil(t, firstPeerResync,
+		"hold timeouts must preserve the candidate stream")
 	doneB := deliver(connB)
 
 	var next uint64 = 1
@@ -161,13 +161,11 @@ func TestChainsyncUncorroboratedPeerAheadDoesNotStrandChainPrefix(
 			t.Fatalf("ledger stopped at block %d", next-1)
 		}
 	}
-	for _, done := range []<-chan error{doneA, doneB} {
-		select {
-		case err := <-done:
-			require.NoError(t, err)
-		case <-time.After(10 * time.Second):
-			t.Fatal("peer callback did not finish after the chain was applied")
-		}
+	select {
+	case err := <-doneB:
+		require.NoError(t, err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("second peer callback did not finish after the chain was applied")
 	}
 }
 
@@ -183,13 +181,10 @@ func resolvePeerTipLikeNode(
 	}
 }
 
-// A held callback stops the peer's protocol receive loop, and gouroboros fails
-// a pipelined client that does not consume a reply within CanAwaitTimeout. A
-// hold that no witness ends, because the witnesses were recycled or every
-// tracked client slot is held, must therefore end on its own: the header is
-// withheld and the connection re-intersects from the local chain, which
-// re-delivers the header and frees the client slot meanwhile.
-func TestChainsyncCorroborationHoldIsBounded(t *testing.T) {
+// A held callback must return before the chainsync client's reply timeout.
+// The header stays withheld, while the session remains available for later
+// observations and corroboration.
+func TestChainsyncCorroborationHoldExpiresWithoutResync(t *testing.T) {
 	t.Parallel()
 
 	bus := event.NewEventBus(nil, nil)
@@ -242,11 +237,7 @@ func TestChainsyncCorroborationHoldIsBounded(t *testing.T) {
 	o.futureHeaderResyncMu.Lock()
 	scheduled := o.futureHeaderResyncs[conn]
 	o.futureHeaderResyncMu.Unlock()
-	require.NotNil(t, scheduled, "an expired hold must re-intersect the connection")
-	require.Equal(t,
-		event.ChainsyncResyncReasonGenesisCorroborationHoldExpired,
-		scheduled.reason,
-	)
+	require.Nil(t, scheduled, "an expired hold must preserve the candidate frontier")
 	testutil.RequireNoReceive(t, ledgerCh, 100*time.Millisecond,
 		"an uncorroborated header reached the ledger")
 }

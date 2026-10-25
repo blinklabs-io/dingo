@@ -1163,15 +1163,51 @@ func (s *State) RecordClientDelivery(
 	if !exists {
 		return false
 	}
+	s.recordClientDeliveryLocked(tc, point)
+	return true
+}
+
+func (s *State) recordClientDeliveryLocked(
+	tc *TrackedClient,
+	point ocommon.Point,
+) {
 	tc.HeadersRecv++
 	if tc.deliverySeen && point.Slot <= tc.deliveryWatermark.Slot {
-		return true
+		return
 	}
 	setDeliveryWatermark(tc, point)
 	tc.LastActivity = s.now()
 	if tc.Status == ClientStatusStalled {
 		tc.Status = ClientStatusSyncing
 	}
+}
+
+// AdmitDeferredClientTip admits a header whose admission was deferred and
+// that the node has since applied, as the client's cursor and tip. When
+// recordDelivery is set it first accounts for the delivery as
+// RecordClientDelivery does; callers clear it when RecordClientDelivery
+// already counted the header. It changes nothing when the client's cursor is
+// already at or past point's slot, so a stale deferral cannot move back a
+// cursor that a later header advanced. It reports whether the cursor moved.
+func (s *State) AdmitDeferredClientTip(
+	connId ouroboros.ConnectionId,
+	point ocommon.Point,
+	tip ochainsync.Tip,
+	recordDelivery bool,
+) bool {
+	s.clientConnIdMutex.Lock()
+	defer s.clientConnIdMutex.Unlock()
+	tc, exists := s.trackedClients[connId]
+	if !exists || tc.Cursor.Slot >= point.Slot {
+		return false
+	}
+	if recordDelivery {
+		s.recordClientDeliveryLocked(tc, point)
+	}
+	point.Hash = cloneBytes(point.Hash)
+	tip.Point.Hash = cloneBytes(tip.Point.Hash)
+	tc.Cursor = point
+	tc.Tip = tip
 	return true
 }
 
@@ -1266,10 +1302,11 @@ func (s *State) RewindTrackedClientsTo(
 	return ret
 }
 
-// RecordObservedHeader stores the raw per-connection header ancestry before
-// cross-peer dedup can suppress delivery into the ledger queue. This lets
-// fork resolution reconstruct the selected peer's candidate fragment even
-// when earlier headers were first seen from another peer.
+// RecordObservedHeader stores raw per-connection header ancestry before
+// cross-peer dedup can suppress delivery into the ledger queue. A zero
+// verification generation marks a deferred or withheld header; ledger fork
+// resolution can use it only as candidate-path input and must validate the
+// complete linked path before caching a verdict.
 func (s *State) RecordObservedHeader(h ObservedHeader) {
 	if h.BlockHeader == nil || len(h.Point.Hash) == 0 {
 		return
@@ -1373,7 +1410,8 @@ func (s *State) ClearObservedHeaderHistory(
 }
 
 // ClearObservedHeaderHistoryFrom removes a rejected header and every header
-// observed after it while retaining the independently verified prefix. When
+// observed after it while retaining the earlier candidate prefix. Entries
+// with no current verdict remain untrusted and are revalidated when used. When
 // the rejected hash is not retained, removal starts at the first retained
 // header at or beyond the point's slot; if none exists, the history is kept.
 func (s *State) ClearObservedHeaderHistoryFrom(

@@ -34,12 +34,16 @@ permissions:
   contents: read
 
 concurrency:
-  # Give each main run its own group so a newer push cannot cancel the image
-  # publication for an earlier merged commit. Keep every other ref serialized,
-  # so re-pushing a tag cannot run two publications at once.
-  group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.run_id || github.ref }}
+  # One group per ref. On main a newer push cancels the run it supersedes:
+  # main runs only publish the branch-tagged images, which the next run
+  # overwrites anyway, so a burst of merges builds them once instead of once
+  # per commit. Every main commit is tested in the merge queue before it lands,
+  # so skipping an intermediate commit's images loses no coverage. A burst of
+  # 13 direct merges once started 13 runs that held 15 of the organization's
+  # 20 runners at the same time.
+  group: ${{ github.workflow }}-${{ github.ref }}
   # Never interrupt a tag release after publication has started.
-  cancel-in-progress: false
+  cancel-in-progress: ${{ github.ref == 'refs/heads/main' }}
 
 env:
   APPLICATION_NAME: 'dingo'
@@ -211,7 +215,7 @@ jobs:
     timeout-minutes: 90
     env:
       CBOR_DATASET_REVISION: '6cd8c928665bbafe90e02066ebb4620e38f051de'
-      NDC_LEDGER_REVISION: '8974561cb6b48807e2a578028d4f5d85430007a6'
+      NDC_LEDGER_REVISION: '9d14fd8cc05562055c3dc2288661bb6e2b7e7ad7'
       UPLC_CORPUS_SHA256: '8bd4ad4f9f4c8c6b8ffa1f06ed1db0b43043afbba77ef6a14bcfb5a52345ed3f'
       TURBO_CORPUS_SHA256: '821af55e3323c826b5598c964d634b46dd468014834d0e97ebdc5edb0a158576'
     permissions:

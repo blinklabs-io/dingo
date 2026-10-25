@@ -351,6 +351,48 @@ func TestRecordClientDeliveryRefreshesOnlyOnForwardProgress(
 		"suppressed forward progress must not move the admitted cursor")
 }
 
+func TestAdmitDeferredClientTip(t *testing.T) {
+	t.Parallel()
+
+	now := time.Unix(1, 0)
+	bus := newTestEventBus(t)
+	s := newTestState(t, bus, chainsync.Config{
+		MaxClients:   5,
+		StallTimeout: time.Minute,
+		Now:          func() time.Time { return now },
+	})
+	counted := newTestConnId(1)
+	uncounted := newTestConnId(2)
+	require.True(t, s.AddClientConnId(counted))
+	require.True(t, s.AddClientConnId(uncounted))
+	point := ocommon.NewPoint(100, []byte("ha"))
+	tip := ochainsync.Tip{Point: ocommon.NewPoint(105, []byte("hb"))}
+	require.False(t, s.AdmitDeferredClientTip(newTestConnId(99), point, tip, true))
+
+	now = now.Add(time.Second)
+	require.True(t, s.AdmitDeferredClientTip(uncounted, point, tip, true))
+	admitted := s.GetTrackedClient(uncounted)
+	require.NotNil(t, admitted)
+	require.Equal(t, point, admitted.Cursor)
+	require.Equal(t, tip, admitted.Tip)
+	require.Equal(t, uint64(1), admitted.HeadersRecv)
+	require.Equal(t, now, admitted.LastActivity)
+
+	require.True(t, s.RecordClientDelivery(counted, point))
+	require.True(t, s.AdmitDeferredClientTip(counted, point, tip, false))
+	require.Equal(t, uint64(1), s.GetTrackedClient(counted).HeadersRecv,
+		"a header already counted must not be counted again")
+
+	older := ocommon.NewPoint(99, []byte("h0"))
+	require.False(t, s.AdmitDeferredClientTip(uncounted, older, tip, true))
+	require.False(t, s.AdmitDeferredClientTip(uncounted, point, tip, true))
+	unchanged := s.GetTrackedClient(uncounted)
+	require.NotNil(t, unchanged)
+	require.Equal(t, point, unchanged.Cursor,
+		"a deferred header must not move a cursor back")
+	require.Equal(t, uint64(1), unchanged.HeadersRecv)
+}
+
 func TestDeliveryWatermarkRewindsAndResets(t *testing.T) {
 	t.Parallel()
 

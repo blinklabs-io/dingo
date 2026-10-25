@@ -127,6 +127,11 @@ type Node struct {
 	// accessor; the only writer is the replacement in
 	// reinitializeNetworkingCore and the initial construction in Run.
 	ouroborosRef atomic.Pointer[ouroborosPkg.Ouroboros]
+	// leiosCertificateVerifier is leiosVoteManager as seen by the ledger's
+	// certificate callback. The ledger's block-processing goroutine starts
+	// before initLeiosVoteManager runs, at startup and after a live
+	// restore/truncate, so the callback cannot read the plain field.
+	leiosCertificateVerifier atomic.Pointer[leios.VoteManager]
 	// ouroborosConfig retains the settings half of the config Run built, so a
 	// live restore can reconstruct ouroboros against rebuilt dependencies
 	// without recomputing them and drifting from Run.
@@ -671,7 +676,15 @@ func (n *Node) ouroboros() *ouroborosPkg.Ouroboros {
 // validation when that fails. Guard the pairing here, in the package that
 // makes it, so drift cannot quietly unpin mempool revalidation from its
 // ledger snapshot.
-var _ mempool.TxValidationSessionProvider = (*ledger.LedgerState)(nil)
+var (
+	_ mempool.TxValidationSessionProvider = (*ledger.LedgerState)(nil)
+	_ mempool.TxSizeLimitProvider         = (*ledger.LedgerState)(nil)
+)
+
+// The mempool resolves confirmed input addresses for its address index
+// through the same validator's session, again by interface assertion; losing
+// the method would leave those inputs out of the index with no error.
+var _ mempool.ResolvingTxValidationSessionProvider = (*ledger.LedgerState)(nil)
 
 //nolint:contextcheck // Run is the lifecycle boundary and derives n.ctx from the caller context.
 func (n *Node) Run(ctx context.Context) (runErr error) {

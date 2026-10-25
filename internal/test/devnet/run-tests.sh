@@ -143,13 +143,13 @@ if [[ "${LEIOS}" == "true" ]]; then
   export DEVNET_LEIOS_ENABLED=1
   export DEVNET_LEIOS_VOTE_SIGNING_KEY_FILE="/configs/keys/leios-vote.skey"
   export DEVNET_DINGO_RUN_MODE=leios
-  export DEVNET_DINGO_START_ERA=dijkstra
+  unset DEVNET_DINGO_START_ERA
   export DEVNET_TXPUMP_TRANSACTION_ERA=dijkstra
   # Keep EB outputs in the tx pump's wallet quarantine until the scenario
   # queries the relay ledger; this delay is not proof of on-chain confirmation.
   export DEVNET_TXPUMP_CONFIRMATION_SLOTS=1000
   # Voting registration becomes usable at epoch 2. Delay fresh EB work until
-  # after two 150-second epochs and the genesis-start offset.
+  # after the Conway-to-Dijkstra transition and the genesis-start offset.
   export DEVNET_TXPUMP_START_DELAY_SECONDS=330
   export DEVNET_DINGO_SPEC="${ACTIVE_SPEC}"
   unset DEVNET_ACCELERATED

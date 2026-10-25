@@ -40,6 +40,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/blinklabs-io/dingo/internal/httpuseragent"
 	"github.com/klauspost/compress/zstd"
 )
 
@@ -957,6 +958,7 @@ func downloadSnapshotOnce(
 	if err != nil {
 		return "", fmt.Errorf("creating download request: %w", err)
 	}
+	httpuseragent.Set(req)
 
 	// Request resume if we have a partial download
 	if existingSize > 0 {
@@ -1061,6 +1063,7 @@ func downloadSnapshotOnce(
 					err,
 				)
 			}
+			httpuseragent.Set(req)
 			headerTimer = cfg.newIdleWatchdog(func() {
 				cancelDownload(downloadIdleTimeoutCause(idleTimeout))
 			})
@@ -1334,12 +1337,12 @@ const (
 	// maxExtractFileSize is the maximum allowed size for a single
 	// extracted file (8 GiB). Must be large enough for mainnet
 	// ancillary ledger state files (UTxO tables can be multi-GB).
-	maxExtractFileSize = 8 << 30
+	maxExtractFileSize int64 = 8 << 30
 
 	// maxTotalExtractSize is the maximum cumulative bytes that may
 	// be extracted from a single archive (1 TiB). Prevents
 	// runaway decompression from filling the disk.
-	maxTotalExtractSize = 1 << 40
+	maxTotalExtractSize int64 = 1 << 40
 )
 
 // expansionReader fails once the stream has produced more bytes than the

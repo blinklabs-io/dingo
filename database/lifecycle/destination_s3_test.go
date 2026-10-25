@@ -255,20 +255,54 @@ func TestS3UploadExcludesAndRemovesCloudMirrorMarker(t *testing.T) {
 		})},
 	})
 	dir := t.TempDir()
+	writeTestUploadSnapshot(t, dir)
 	require.NoError(t, os.WriteFile(
 		filepath.Join(dir, cloudMirrorMarkerName), []byte("legacy secret"), 0o600,
 	))
 	d := s3Destination{client: client, bucket: "bucket", prefix: "prefix/snapshot"}
 	require.NoError(t, d.UploadDir(t.Context(), dir))
-	require.Equal(t, []string{
-		"DELETE /prefix/snapshot/.cloud-mirrored",
-	}, methods)
+	require.Len(t, methods, 4)
+	require.Contains(t, methods[0], "/prefix/snapshot/"+BlobBackupFileName)
+	require.Contains(t, methods[1], "/prefix/snapshot/"+MetadataBackupFileName)
+	require.Contains(t, methods[2], "/prefix/snapshot/"+ManifestFileName)
+	require.Equal(t, "DELETE /prefix/snapshot/.cloud-mirrored", methods[3])
 	require.NoError(t, os.Remove(filepath.Join(dir, cloudMirrorMarkerName)))
 	methods = nil
 	require.NoError(t, d.UploadDir(t.Context(), dir))
-	require.Equal(t, []string{
-		"DELETE /prefix/snapshot/.cloud-mirrored",
-	}, methods, "every successful upload removes a remote legacy marker")
+	require.Len(t, methods, 4)
+	require.Equal(
+		t, "DELETE /prefix/snapshot/.cloud-mirrored", methods[3],
+		"every successful upload removes a remote legacy marker",
+	)
+}
+
+func TestS3UploadRejectsSymlinkBeforeRequest(t *testing.T) {
+	t.Parallel()
+	var requests atomic.Int32
+	client := s3.NewFromConfig(aws.Config{
+		Region: "test", Credentials: aws.AnonymousCredentials{},
+		BaseEndpoint: aws.String("https://example.test"),
+		HTTPClient: &http.Client{Transport: manifestRoundTripper(func(req *http.Request) (*http.Response, error) {
+			requests.Add(1)
+			return &http.Response{
+				StatusCode: http.StatusNoContent,
+				Body:       io.NopCloser(strings.NewReader("")),
+				Header:     make(http.Header), Request: req,
+			}, nil
+		})},
+	})
+	dir := t.TempDir()
+	writeTestUploadSnapshot(t, dir)
+	outside := filepath.Join(t.TempDir(), "outside")
+	require.NoError(t, os.WriteFile(outside, []byte("secret"), 0o600))
+	require.NoError(t, os.Remove(filepath.Join(dir, BlobBackupFileName)))
+	require.NoError(t, os.Symlink(outside, filepath.Join(dir, BlobBackupFileName)))
+	d := s3Destination{client: client, bucket: "bucket", prefix: "prefix/snapshot"}
+
+	err := d.UploadDir(t.Context(), dir)
+
+	require.ErrorContains(t, err, "open snapshot upload file")
+	require.Zero(t, requests.Load())
 }
 
 func TestS3DownloadSkipsCloudMirrorMarker(t *testing.T) {

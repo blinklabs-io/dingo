@@ -94,6 +94,19 @@ type scheduledChainsyncResync struct {
 	fired  bool
 }
 
+type deferredHeaderRecoveryState struct {
+	baseline ochainsync.Tip
+	// point and tip are the newest withheld header and the tip the peer sent
+	// with it, which is where the peer's protocol cursor sits. delivered
+	// records whether RecordClientDelivery already counted that header.
+	point     ocommon.Point
+	tip       ochainsync.Tip
+	delivered bool
+	// resolvable is cleared when the peer rolls back: its protocol cursor no
+	// longer sits at point, so applying point must not become its cursor.
+	resolvable bool
+}
+
 // chainsyncAdmissionContext ends when the peer's chainsync client is asked to
 // stop or its connection begins shutdown. It must not use the client's
 // DoneChan: that closes only after the protocol loop running this callback
@@ -266,11 +279,16 @@ func (o *Ouroboros) cancelFutureHeaderResync(
 func (o *Ouroboros) markDeferredHeaderRecovery(
 	connId ouroboros.ConnectionId,
 	baseline ochainsync.Tip,
+	point ocommon.Point,
+	tip ochainsync.Tip,
+	delivered bool,
 ) {
 	if o.ledgerState == nil {
 		return
 	}
 	baseline.Point.Hash = append([]byte(nil), baseline.Point.Hash...)
+	point.Hash = append([]byte(nil), point.Hash...)
+	tip.Point.Hash = append([]byte(nil), tip.Point.Hash...)
 	// Recovery normally waits for the next applied block. With no queued
 	// header there is none to apply, so that wait never ends (for example
 	// once the queue owner disconnects and its headers are cleared). Re-intersect
@@ -279,18 +297,51 @@ func (o *Ouroboros) markDeferredHeaderRecovery(
 	idle := false
 	if o.chainsyncLocalChainTips != nil {
 		tipHash, headerTipHash := o.chainsyncLocalChainTips()
+		// The chain already stores this header's block, delivered by a faster
+		// peer, while the ledger is still applying it; that transition is what
+		// deferred verification. Its chain update was published when the block
+		// was stored, before this header arrived, so waiting for one cannot
+		// resolve it, and re-intersecting would replay a block the node holds.
+		// The ledger validates the block on the body path and re-syncs every
+		// peer itself if that fails, so resolve it now as an applied deferral.
+		// Only an undelivered header is resolved here: it is withheld as the
+		// peer rolls forward to it, so the peer's cursor is at point. A late
+		// ledger rejection of a delivered header can arrive after the peer
+		// rolled back or withheld a newer or same-slot fork header, so it
+		// keeps the ordinary recovery below.
+		if !delivered && len(tipHash) > 0 &&
+			bytes.Equal(tipHash, point.Hash) {
+			o.resolveDeferredHeaderRecovery(connId, point, tip, delivered)
+			return
+		}
 		idle = len(tipHash) > 0 && bytes.Equal(tipHash, headerTipHash)
 	}
 	o.deferredHeaderRecoveryMu.Lock()
 	if o.deferredHeaderRecovery == nil {
 		o.deferredHeaderRecovery = make(
-			map[ouroboros.ConnectionId]ochainsync.Tip,
+			map[ouroboros.ConnectionId]deferredHeaderRecoveryState,
 		)
 	}
-	if _, alreadyDeferred := o.deferredHeaderRecovery[connId]; !alreadyDeferred {
-		o.deferredHeaderRecovery[connId] = baseline
+	recovery := deferredHeaderRecoveryState{
+		baseline:   baseline,
+		point:      point,
+		tip:        tip,
+		delivered:  delivered,
+		resolvable: true,
+	}
+	if existing, alreadyDeferred := o.deferredHeaderRecovery[connId]; !alreadyDeferred {
+		o.deferredHeaderRecovery[connId] = recovery
 	} else {
-		baseline = o.deferredHeaderRecovery[connId]
+		// Keep the first baseline, which still triggers recovery, but follow
+		// the peer's cursor to its newest withheld header: applying it covers
+		// every earlier one. A ledger rejection callback can report an older
+		// header after a newer one was withheld, so never move point back
+		// unless a rollback already moved the peer's cursor.
+		baseline = existing.baseline
+		if !existing.resolvable || point.Slot > existing.point.Slot {
+			recovery.baseline = existing.baseline
+			o.deferredHeaderRecovery[connId] = recovery
+		}
 	}
 	o.deferredHeaderRecoveryMu.Unlock()
 	current := o.ledgerState.Tip().Point
@@ -326,6 +377,41 @@ func (o *Ouroboros) markDeferredHeaderRecovery(
 			event.ChainsyncResyncReasonHeaderValidationRecovery,
 		)
 	}
+}
+
+// invalidateDeferredHeaderResolution keeps a connection's deferred-header
+// recovery but stops a later application of its withheld header from becoming
+// the connection's cursor, since a rollback moved the peer's protocol cursor
+// off it. Ledger advance then re-intersects the peer as before.
+// resolveDeferredHeaderRecovery keeps a peer whose withheld header the chain
+// already holds and aligns the tracked cursor with the peer's, as when the
+// deferred header is applied. The peer has just rolled forward to the held
+// header, so any recovery pending for headers it delivered earlier no longer
+// describes its chain and is dropped.
+func (o *Ouroboros) resolveDeferredHeaderRecovery(
+	connId ouroboros.ConnectionId,
+	point ocommon.Point,
+	tip ochainsync.Tip,
+	delivered bool,
+) {
+	o.deferredHeaderRecoveryMu.Lock()
+	delete(o.deferredHeaderRecovery, connId)
+	delete(o.deferredHeaderIdleRetry, connId)
+	o.deferredHeaderRecoveryMu.Unlock()
+	if o.chainsyncState != nil {
+		o.chainsyncState.AdmitDeferredClientTip(connId, point, tip, !delivered)
+	}
+}
+
+func (o *Ouroboros) invalidateDeferredHeaderResolution(
+	connId ouroboros.ConnectionId,
+) {
+	o.deferredHeaderRecoveryMu.Lock()
+	if state, ok := o.deferredHeaderRecovery[connId]; ok {
+		state.resolvable = false
+		o.deferredHeaderRecovery[connId] = state
+	}
+	o.deferredHeaderRecoveryMu.Unlock()
 }
 
 func (o *Ouroboros) clearDeferredHeaderRecovery(
@@ -407,19 +493,46 @@ func (o *Ouroboros) retryDeferredHeadersAfterLedgerAdvance(evt event.Event) {
 	}
 	o.deferredHeaderRecoveryMu.Lock()
 	type recovery struct {
-		conn     ouroboros.ConnectionId
-		baseline ochainsync.Tip
+		conn  ouroboros.ConnectionId
+		state deferredHeaderRecoveryState
 	}
 	pending := make([]recovery, 0, len(o.deferredHeaderRecovery))
-	for conn, baseline := range o.deferredHeaderRecovery {
-		if applied.Point.Slot == baseline.Point.Slot &&
-			bytes.Equal(applied.Point.Hash, baseline.Point.Hash) {
+	resolved := make([]recovery, 0, len(o.deferredHeaderRecovery))
+	for conn, state := range o.deferredHeaderRecovery {
+		if applied.Point.Slot == state.baseline.Point.Slot &&
+			bytes.Equal(applied.Point.Hash, state.baseline.Point.Hash) {
 			continue
 		}
-		pending = append(pending, recovery{conn: conn, baseline: baseline})
+		candidate := recovery{conn: conn, state: state}
+		if state.resolvable &&
+			applied.Point.Slot == state.point.Slot &&
+			bytes.Equal(applied.Point.Hash, state.point.Hash) {
+			resolved = append(resolved, candidate)
+			delete(o.deferredHeaderRecovery, conn)
+			delete(o.deferredHeaderIdleRetry, conn)
+			continue
+		}
+		pending = append(pending, candidate)
 		delete(o.deferredHeaderRecovery, conn)
 	}
 	o.deferredHeaderRecoveryMu.Unlock()
+
+	// Another peer can deliver and apply the same header while this peer's
+	// producer authorization is waiting on ledger state. Application is the
+	// authoritative validation result, so align the local cursor with the
+	// peer's already-advanced protocol cursor instead of reconnecting it to
+	// replay a block the node has just accepted. A header withheld before
+	// verification never reached delivery accounting, so count it now.
+	for _, candidate := range resolved {
+		if o.chainsyncState != nil {
+			o.chainsyncState.AdmitDeferredClientTip(
+				candidate.conn,
+				candidate.state.point,
+				candidate.state.tip,
+				!candidate.state.delivered,
+			)
+		}
+	}
 
 	for _, candidate := range pending {
 		if o.scheduleHeaderResync(
@@ -437,7 +550,7 @@ func (o *Ouroboros) retryDeferredHeadersAfterLedgerAdvance(evt event.Event) {
 			o.connManager.GetConnectionById(candidate.conn) == nil
 		if !connectionClosed {
 			if _, alreadyDeferred := o.deferredHeaderRecovery[candidate.conn]; !alreadyDeferred {
-				o.deferredHeaderRecovery[candidate.conn] = candidate.baseline
+				o.deferredHeaderRecovery[candidate.conn] = candidate.state
 			}
 		}
 		o.deferredHeaderRecoveryMu.Unlock()
@@ -470,13 +583,19 @@ func effectiveChainsyncBlockTimeout(timeout time.Duration) time.Duration {
 func (o *Ouroboros) chainsyncConnectionConfigOption(
 	ctx context.Context,
 	includeClient bool,
+	trackActivity ...bool,
 ) ouroboros.ConnectionOptionFunc {
 	return func(c *ouroboros.Connection) {
 		limiter := newChainsyncFindIntersectRateLimiter(
 			chainsyncFindIntersectBudgetRate,
 			chainsyncFindIntersectBudgetBurst,
 		)
-		opts := o.chainsyncServerConnOpts(ctx, limiter, !includeClient)
+		opts := o.chainsyncServerConnOpts(
+			ctx,
+			limiter,
+			!includeClient,
+			activityTrackingEnabled(trackActivity),
+		)
 		if includeClient {
 			opts = slices.Concat(o.chainsyncClientConnOpts(), opts)
 		}
@@ -492,10 +611,15 @@ func (o *Ouroboros) chainsyncServerConnOpts(
 	ctx context.Context,
 	limiter *chainsyncFindIntersectRateLimiter,
 	waitForLedger bool,
+	trackActivity ...bool,
 ) []ochainsync.ChainSyncOptionFunc {
+	activityEnabled := activityTrackingEnabled(trackActivity)
 	requestNext := o.chainsyncServerRequestNextPeer
 	if waitForLedger {
 		requestNext = o.chainsyncServerRequestNextLocal
+	}
+	if activityEnabled {
+		requestNext = o.chainsyncServerRequestNextTrustedLocal
 	}
 	return []ochainsync.ChainSyncOptionFunc{
 		ochainsync.WithFindIntersectFunc(
@@ -511,6 +635,7 @@ func (o *Ouroboros) chainsyncServerConnOpts(
 						points,
 					)
 				},
+				activityEnabled,
 			),
 		),
 		ochainsync.WithRequestNextFunc(
@@ -1022,13 +1147,19 @@ func (o *Ouroboros) chainsyncServerAheadOfLedger(
 func (o *Ouroboros) chainsyncServerRequestNextPeer(
 	ctx ochainsync.CallbackContext,
 ) error {
-	return o.chainsyncServerRequestNext(ctx, false)
+	return o.chainsyncServerRequestNext(ctx, false, false)
 }
 
 func (o *Ouroboros) chainsyncServerRequestNextLocal(
 	ctx ochainsync.CallbackContext,
 ) error {
-	return o.chainsyncServerRequestNext(ctx, true)
+	return o.chainsyncServerRequestNext(ctx, true, false)
+}
+
+func (o *Ouroboros) chainsyncServerRequestNextTrustedLocal(
+	ctx ochainsync.CallbackContext,
+) error {
+	return o.chainsyncServerRequestNext(ctx, true, true)
 }
 
 // chainsyncServerRequestNext serves the next chain event to a downstream
@@ -1045,7 +1176,19 @@ func (o *Ouroboros) chainsyncServerRequestNextLocal(
 func (o *Ouroboros) chainsyncServerRequestNext(
 	ctx ochainsync.CallbackContext,
 	waitForLedger bool,
+	trackActivity ...bool,
 ) error {
+	endActivity := o.beginTrustedNtCActivity(
+		activityTrackingEnabled(trackActivity),
+		ctx.ConnectionId,
+		ochainsync.ProtocolIdNtC,
+	)
+	activityContinues := false
+	defer func() {
+		if !activityContinues {
+			endActivity()
+		}
+	}()
 	o.recordServedActivity(ctx.ConnectionId)
 	// Create/retrieve chainsync state for connection
 	tip := o.ledgerState.Tip()
@@ -1144,13 +1287,17 @@ func (o *Ouroboros) chainsyncServerRequestNext(
 	if rawConn == nil {
 		return fmt.Errorf("connection %s not found", ctx.ConnectionId.String())
 	}
-	go o.chainsyncServerAwaitNext(
-		ctx,
-		connWithDone{conn: rawConn, done: connDone, closeErr: closeErr},
-		clientState,
-		pending,
-		waitForLedger,
-	)
+	activityContinues = true
+	go func() {
+		defer endActivity()
+		o.chainsyncServerAwaitNext(
+			ctx,
+			connWithDone{conn: rawConn, done: connDone, closeErr: closeErr},
+			clientState,
+			pending,
+			waitForLedger,
+		)
+	}()
 	return nil
 }
 
@@ -1444,6 +1591,9 @@ func (o *Ouroboros) chainsyncClientRollBackward(
 		attribute.String("block.hash", hex.EncodeToString(point.Hash)),
 	)
 	defer func() { tracing.End(span, err) }()
+	// The peer's protocol cursor moves whether or not the rollback is tracked
+	// below, so a withheld header can no longer stand in for it.
+	o.invalidateDeferredHeaderResolution(ctx.ConnectionId)
 	if o.recordHeldChainsyncTip(ctx.ConnectionId, tip) {
 		return ochainsync.ErrStopSyncProcess
 	}
@@ -1845,15 +1995,30 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 		extendsLocalChain := ingressEligible &&
 			o.deferredHeaderExtendsLocalChain(ctx.ConnectionId, v)
 		if deferredVerification {
+			if ingressEligible && o.chainsyncState != nil {
+				// Keep bounded raw ancestry only; ledger validation checks the
+				// complete linked path before it can affect candidate selection.
+				o.chainsyncState.RecordObservedHeader(
+					chainsync.ObservedHeader{
+						ConnectionId: ctx.ConnectionId,
+						Point:        point,
+						BlockHeader:  v,
+						ArrivalTime:  arrivalTime,
+						Tip:          tip,
+						BlockNumber:  v.BlockNumber(),
+						Type:         blockType,
+					},
+				)
+			}
 			if !extendsLocalChain {
-				// Do not advance peer cursors, history, dedup state, or publish
-				// to selector/ledger until this header passes strict
-				// verification. Observed history is trusted by fork-density and
-				// rollback-replay paths, so it must contain only independently
-				// verified headers.
+				// Do not advance peer cursors, dedup state, or publish to
+				// selector/ledger until this header passes strict verification.
 				o.markDeferredHeaderRecovery(
 					ctx.ConnectionId,
 					verificationTipBaseline,
+					point,
+					tip,
+					false,
 				)
 				o.updateChainsyncMetrics(ctx.ConnectionId, tip)
 				return nil
@@ -1939,15 +2104,10 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 			cancelAdmission()
 			switch {
 			case holdExpired:
-				// No witness arrived; the witnesses may have been recycled,
-				// or every tracked client slot may be held. Withhold the
-				// header and re-intersect, which delivers it again and frees
-				// the slot meanwhile.
-				o.scheduleHeaderResync(
-					ctx.ConnectionId,
-					time.Now(),
-					event.ChainsyncResyncReasonGenesisCorroborationHoldExpired,
-				)
+				// Keep the chainsync cursor. Re-intersecting immediately from
+				// the applied tip discards this peer's candidate history and
+				// repeats the same hold; another peer needs that history to
+				// corroborate the withheld header when it catches up.
 			case err != nil:
 				return fmt.Errorf("wait for genesis corroboration: %w", err)
 			}
@@ -2140,6 +2300,9 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 					o.markDeferredHeaderRecovery(
 						ctx.ConnectionId,
 						o.ledgerState.Tip(),
+						point,
+						tip,
+						true,
 					)
 				}
 				resolvePeerTip(false)
@@ -2695,11 +2858,18 @@ func (o *Ouroboros) SubscribeChainsyncResync(ctx context.Context) {
 
 func (o *Ouroboros) instrumentChainsyncFindIntersect(
 	fn func(ochainsync.CallbackContext, []ocommon.Point) (ocommon.Point, ochainsync.Tip, error),
+	trackActivity bool,
 ) func(ochainsync.CallbackContext, []ocommon.Point) (ocommon.Point, ochainsync.Tip, error) {
 	return func(
 		ctx ochainsync.CallbackContext,
 		points []ocommon.Point,
 	) (ocommon.Point, ochainsync.Tip, error) {
+		endActivity := o.beginTrustedNtCActivity(
+			trackActivity,
+			ctx.ConnectionId,
+			ochainsync.ProtocolIdNtC,
+		)
+		defer endActivity()
 		start := time.Now()
 		p, t, err := fn(ctx, points)
 		o.recordProtocolMessage("chainsync", err, time.Since(start))

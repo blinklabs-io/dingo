@@ -29,11 +29,14 @@ var errLocalTxMonitorUnavailable = errors.New(
 	"local-tx-monitor: ledger state or mempool unavailable",
 )
 
-func (o *Ouroboros) localtxmonitorServerConnOpts() []olocaltxmonitor.LocalTxMonitorOptionFunc {
+func (o *Ouroboros) localtxmonitorServerConnOpts(
+	trackActivity ...bool,
+) []olocaltxmonitor.LocalTxMonitorOptionFunc {
 	return []olocaltxmonitor.LocalTxMonitorOptionFunc{
 		olocaltxmonitor.WithGetMempoolFunc(
 			o.instrumentLocaltxmonitorGetMempool(
 				o.localtxmonitorServerGetMempool,
+				activityTrackingEnabled(trackActivity),
 			),
 		),
 	}
@@ -41,8 +44,15 @@ func (o *Ouroboros) localtxmonitorServerConnOpts() []olocaltxmonitor.LocalTxMoni
 
 func (o *Ouroboros) instrumentLocaltxmonitorGetMempool(
 	fn func(olocaltxmonitor.CallbackContext) (uint64, uint32, []olocaltxmonitor.TxAndEraId, error),
+	trackActivity bool,
 ) func(olocaltxmonitor.CallbackContext) (uint64, uint32, []olocaltxmonitor.TxAndEraId, error) {
 	return func(ctx olocaltxmonitor.CallbackContext) (uint64, uint32, []olocaltxmonitor.TxAndEraId, error) {
+		endActivity := o.beginTrustedNtCActivity(
+			trackActivity,
+			ctx.ConnectionId,
+			olocaltxmonitor.ProtocolId,
+		)
+		defer endActivity()
 		start := time.Now()
 		slot, capacity, txs, err := fn(ctx)
 		o.recordProtocolMessage("localtxmonitor", err, time.Since(start))

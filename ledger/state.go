@@ -986,36 +986,39 @@ type LedgerStateConfig struct {
 	// 17-20 mark totals equal cardano-node's active stake for epochs 18-21
 	// exactly.
 	//
-	// The check stays enforced on real networks. On the concentrated
-	// prototype-2026w29 musashi topology it rejected the dominant pool's
-	// legitimately-eligible blocks and wedged the chain, so it is skipped
-	// there. All other header checks (KES, VRF proof,
-	// registered-VRF-key binding, opcert) still apply regardless.
 	// Separately, TPraos bootstrap epochs with decentralization still active
 	// validate genesis overlay assignment in verify_header.go, then skip only
 	// the local pool stake-threshold check while d remains active.
-	// Set from the network in node.go (true on musashi, false otherwise) via
-	// Config.prototypeTrustBypassesEnabled, which requires an unambiguous
-	// Musashi identity so this can never be reached from a
-	// preview/preprod/mainnet configuration.
 	// The same flag also gates every other path where the stake-derived
 	// threshold cannot be evaluated at all (zero total active stake, a
 	// missing/nonpositive active-slot coefficient, a post-Mithril mark
-	// snapshot reconstructed after its target boundary): standard profiles
-	// reject rather than trust an unevaluated producer, and this flag is the
-	// only way to bypass that.
+	// snapshot reconstructed after its target boundary). Network profiles never
+	// enable this flag; it exists for explicit test and embedder configuration.
 	SkipLeaderStakeThresholdCheck bool
+	// StakePoolStateQuery answers the GetStakePoolState local state query
+	// (Shelley sub-query 40). Released Haskell nodes do not support that
+	// query, so it is a Leios prototype extension: node_ledger_config.go sets
+	// it only from Config.musashiPrototypeIdentity, whose strict identity
+	// check cannot be met by a mainnet, preprod, preview or sancho
+	// configuration. The zero value leaves the query unsupported, exactly as
+	// for any other query dingo does not answer.
+	StakePoolStateQuery bool
 	// SkipDijkstraTxValidation, when true, skips the Dijkstra per-transaction
-	// validation rule set entirely. On Musashi, ranking-block transactions are
-	// trusted because the prototype does not validate them. Running dingo's
-	// rule set only to discard any disagreement is
-	// wasted work that prevents the node from reaching tip under load. Set true
-	// on Musashi in node.go via Config.prototypeTrustBypassesEnabled, which
-	// requires an unambiguous Musashi identity so this can never be reached
-	// from a preview/preprod/mainnet configuration. Applies to Dijkstra-era
-	// transactions only — see LedgerState.skipDijkstraTxValidation. Interim
-	// until the Leios certificate / endorser-availability surface is complete.
+	// validation rule set entirely. It applies to Dijkstra-era transactions
+	// only. Network profiles never enable this flag; it exists for explicit test
+	// and embedder configuration.
 	SkipDijkstraTxValidation bool
+	// Praos2ChainDepState selects the Praos2 serialisation of the
+	// chain-dependent state in a GetChainDepState reply for the Dijkstra
+	// era: version 1 with nine fields, the ninth being the Leios
+	// announcement of the last applied header. Only the Leios prototype
+	// network (Musashi) runs the Dijkstra era on Praos2; released Haskell
+	// consensus runs Dijkstra on plain Praos, so the era alone must never
+	// select it. The zero value keeps the Praos layout, and node_ledger_config.go
+	// sets it only from Config.musashiPrototypeIdentity, whose strict
+	// identity check cannot be met by a mainnet, preprod, preview or sancho
+	// configuration.
+	Praos2ChainDepState bool
 	// MinPoolMargin is the CIP-23 minimum pool margin (minimum variable fee) in
 	// basis points, [0, 10000] (150 = 1.5%); 0 disables it. It is a consensus-
 	// affecting operator setting (not derived from the network) that takes
@@ -1483,6 +1486,7 @@ type LedgerState struct {
 	slotsPerKESPeriod           atomic.Uint64
 	forgedBlockChecker          atomic.Pointer[forgedBlockCheckerHolder]
 	slotBattleRecorder          atomic.Pointer[slotBattleRecorderHolder]
+	slotBattles                 slotBattleBook
 	cachedShape                 atomic.Pointer[hardfork.Shape]                  // lazy-built from CardanoNodeConfig; immutable for the LedgerState's lifetime
 	hardForkSummaryCache        atomic.Pointer[hardForkSummaryCacheEntry]       // last hardForkSummaryAnchoredAt result, keyed by publication generation and horizon anchor (see hardfork_summary.go)
 	epochSnapshotHook           atomic.Pointer[epochBoundarySnapshotHookHolder] // optional authoritative epoch-boundary snapshot capture (nil = event-driven fallback only)
@@ -1974,6 +1978,14 @@ type LedgerState struct {
 	// trustedBatchSplit is a test-only hook, nil in production, called with
 	// the number of blocks left whenever a trusted batch is split.
 	trustedBatchSplit func(remaining int)
+	// trustedBatchOverlayOff is a test-only switch, false in production. It
+	// keeps ApplyTrustedBatch on the per-row UTxO path, the reference the
+	// overlay path is compared against.
+	trustedBatchOverlayOff bool
+	// afterTrustedBatchOverlay is a test-only observation hook, nil in
+	// production, called each time a block-apply transaction enables the
+	// batch UTxO overlay.
+	afterTrustedBatchOverlay func()
 	// afterTrustedBatchGuard is a test-only sequencing hook, nil in
 	// production. ApplyTrustedBatch calls it after its tip guard passes and
 	// before it stores or applies anything.
@@ -2561,6 +2573,15 @@ func (ls *LedgerState) SetTipForTesting(tip ochainsync.Tip) {
 	defer ls.Unlock()
 	ls.currentTip = cloneTip(tip)
 	ls.publishSnapshotsLocked()
+}
+
+// MarkReachedTipForTesting latches the flag a node sets the first time it
+// reaches the stability window, as a live node at its tip has. It exists for
+// black-box tests that drive a started ledger as a live node without an
+// upstream connection: until the flag latches, the chain-iterator loop holds
+// each under-full batch while it waits for more blocks.
+func (ls *LedgerState) MarkReachedTipForTesting() {
+	ls.reachedTip.Store(true)
 }
 
 func (ls *LedgerState) eraList() []eras.EraDesc {
@@ -9939,20 +9960,14 @@ func (ls *LedgerState) strictConsumedInputsEnabled(
 // *skipped* for a transaction being validated under era eraId — true means
 // ValidateTxFunc is not called for it.
 //
-// This is the ledger half of the Musashi prototype's accepted non-validating
-// behaviour (see LedgerStateConfig.SkipDijkstraTxValidation), and its scope is
-// deliberately narrow: the bypass applies to Dijkstra-era transactions only.
+// The bypass applies to Dijkstra-era transactions only.
 // Transactions validated under any earlier era — Conway and before — still run
-// their full rule set even when the prototype flag is set, because the
-// prototype's trust argument (endorser transactions are stored but never
-// applied, so ranking-block transactions that spend endorser-resident outputs
-// are unresolvable) exists only in Dijkstra/Leios. Header validation is
+// their full rule set even when the flag is set. Header validation is
 // likewise unaffected: KES, VRF proof, registered-VRF-key binding and opcert
 // checks all still apply, and only the stake-derived leader threshold is
 // downgraded, by the separate SkipLeaderStakeThresholdCheck flag.
 //
-// The same prototype flag also scopes trustDijkstraTxValidationError. Standard
-// Dijkstra/Leios profiles run the rules and reject any disagreement.
+// The same flag also scopes trustDijkstraTxValidationError.
 func (ls *LedgerState) skipDijkstraTxValidation(eraId uint) bool {
 	return eraId == dijkstra.EraIdDijkstra &&
 		ls.config.SkipDijkstraTxValidation
@@ -9961,9 +9976,8 @@ func (ls *LedgerState) skipDijkstraTxValidation(eraId uint) bool {
 // trustDijkstraTxValidationError reports whether a per-transaction validation
 // failure under era eraId is logged and trusted instead of rejecting the block.
 //
-// Trust is limited to the explicit Musashi prototype bypass. Standard
-// Dijkstra/Leios profiles have complete endorser-block fetch/apply support and
-// must reject invalid ranking-block transactions just like every other era.
+// Network profiles leave the flag disabled and reject invalid ranking-block
+// transactions like every other era.
 func (ls *LedgerState) trustDijkstraTxValidationError(eraId uint) bool {
 	return eraId == dijkstra.EraIdDijkstra &&
 		ls.config.SkipDijkstraTxValidation
@@ -10037,7 +10051,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 			ls.config.CardanoNodeConfig,
 			parent,
 		); err != nil {
-			return nil, err
+			return nil, ls.rejectInboundEnvelopeFailure(point, err)
 		}
 		if err := ls.validateBlockHeaderProtocolVersion(
 			block.Header(), pparams,
@@ -10051,7 +10065,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 		// rest of validation. Mithril-certified and TrustedReplay blocks are
 		// trusted input and keep skipping it.
 		if err := validateBlockExUnits(block, pparams); err != nil {
-			return nil, err
+			return nil, ls.rejectInboundEnvelopeFailure(point, err)
 		}
 	}
 	// Validate the operational certificate counter before processing the
@@ -10250,7 +10264,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 	}
 	// Check the ranking block after any applicable endorser transactions,
 	// using their resulting state but before its own transaction mutations.
-	// The explicitly non-validating Musashi prototype keeps its trust policy.
+	// Explicit test or embedder configurations may skip Dijkstra validation.
 	if shouldValidate && !ls.skipDijkstraTxValidation(currentEra.Id) {
 		referenceParams := referenceScriptParams(
 			block, currentEra, ls.eraList(), pparams, prevEraPParams,
@@ -10332,9 +10346,8 @@ func (ls *LedgerState) ledgerProcessBlock(
 			// Standard Dijkstra/CIP profiles validate ranking-block transactions
 			// even when the referenced endorser block is unavailable; missing
 			// endorser-resident inputs then produce a validation error. Skip
-			// Dijkstra validation only on the Musashi prototype
-			// (SkipDijkstraTxValidation), which trusts its ranking-block
-			// transactions.
+			// Dijkstra validation only under an explicit
+			// SkipDijkstraTxValidation override; no network profile sets it.
 			skipDijkstraValidation := ls.skipDijkstraTxValidation(
 				validationEra.Id,
 			)
@@ -10410,9 +10423,8 @@ func (ls *LedgerState) ledgerProcessBlock(
 						faultErr,
 					)
 				}
-				// The Musashi prototype trusts remaining Dijkstra validation
-				// disagreements because its certificate-driven closure is still
-				// evolving. Standard profiles leave the error intact and reject
+				// An explicit override may trust remaining Dijkstra validation
+				// disagreements. Network profiles leave the error intact and reject
 				// the block below.
 				if err != nil &&
 					ls.trustDijkstraTxValidationError(validationEra.Id) {
@@ -14790,7 +14802,7 @@ func (ls *LedgerState) ByronProtocolMagic() (uint32, error) {
 	if protocolMagic < 0 {
 		return 0, errors.New("byron protocol magic is negative")
 	}
-	if protocolMagic > math.MaxUint32 {
+	if int64(protocolMagic) > math.MaxUint32 {
 		return 0, fmt.Errorf(
 			"byron protocol magic exceeds uint32: %d",
 			protocolMagic,
@@ -14861,6 +14873,15 @@ func (ls *LedgerState) UtxosByAddress(
 	ret := make([]models.Utxo, 0, len(utxos))
 	ret = append(ret, utxos...)
 	return ret, nil
+}
+
+// UtxosByAddressComplete returns every UTxO for the requested addresses and
+// stops the read when ctx is canceled.
+func (ls *LedgerState) UtxosByAddressComplete(
+	ctx context.Context,
+	addrs []ledger.Address,
+) ([]models.Utxo, error) {
+	return ls.db.UtxosByAddressComplete(ctx, addrs, nil)
 }
 
 // UtxosByAddressBoundedPage returns an ordered, resumable UTxO page while
@@ -15138,13 +15159,19 @@ func (s txValidationSnapshot) validationContext(
 	if err != nil {
 		return eras.EraDesc{}, nil, false, err
 	}
-	pp := s.currentPParams
-	isCurrent := true
-	if validationEra.Id != s.currentEra.Id && s.prevEraPParams != nil {
-		pp = s.prevEraPParams
-		isCurrent = false
-	}
+	pp, isCurrent := s.validationPParams(validationEra.Id)
 	return validationEra, pp, isCurrent, nil
+}
+
+// validationPParams returns the protocol parameters that validate a
+// transaction of a compatible era, and whether they are the current era's.
+func (s txValidationSnapshot) validationPParams(
+	txEraId uint,
+) (lcommon.ProtocolParameters, bool) {
+	if txEraId != s.currentEra.Id && s.prevEraPParams != nil {
+		return s.prevEraPParams, false
+	}
+	return s.currentPParams, true
 }
 
 func (s txValidationSnapshot) protocolParameters(
@@ -15262,6 +15289,11 @@ type txValidationApplyFunc func(
 	blockNumber uint64,
 ) error
 
+// txValidationResolveFunc reads confirmed outputs through the session's own
+// database transaction, so it sees the snapshot validation reads and needs
+// no second connection.
+type txValidationResolveFunc func(refs []models.UtxoId) ([]models.Utxo, error)
+
 // beginTxValidationTransition excludes validation commits from a durable
 // state transition until its matching snapshots have been published.
 func (ls *LedgerState) beginTxValidationTransition() func() {
@@ -15301,6 +15333,33 @@ func (ls *LedgerState) WithTxValidationSession(ctx context.Context,
 	})
 }
 
+// WithResolvingTxValidationSession is WithTxValidationSession for mempool
+// admission. resolve returns the live confirmed outputs among refs from the
+// session's database transaction, the snapshot its validations read.
+func (ls *LedgerState) WithResolvingTxValidationSession(ctx context.Context,
+	fn func(
+		validate func(
+			tx ledger.Transaction,
+			consumedUtxos map[utxoref.Key]struct{},
+			createdUtxos map[utxoref.Key]lcommon.Utxo,
+			accounts *utxoref.StateOverlay,
+		) error,
+		stillCurrent func() bool,
+		commitIfCurrent func(func() error) (bool, error),
+		resolve func(refs []models.UtxoId) ([]models.Utxo, error),
+	) error,
+) error {
+	return ls.withResolvingTxValidationSession(ctx, nil, nil, false, false, func(
+		validate func(ledger.Transaction, map[utxoref.Key]struct{}, map[utxoref.Key]lcommon.Utxo, *utxoref.StateOverlay) error,
+		stillCurrent func() bool,
+		commitIfCurrent func(func() error) (bool, error),
+		_ txValidationApplyFunc,
+		resolve txValidationResolveFunc,
+	) error {
+		return fn(validate, stillCurrent, commitIfCurrent, resolve)
+	})
+}
+
 func (ls *LedgerState) withTxValidationSession(ctx context.Context,
 	expectedParentHash []byte,
 	referenceSlot *uint64,
@@ -15316,6 +15375,41 @@ func (ls *LedgerState) withTxValidationSession(ctx context.Context,
 		stillCurrent func() bool,
 		commitIfCurrent func(func() error) (bool, error),
 		applyTx txValidationApplyFunc,
+	) error,
+) error {
+	return ls.withResolvingTxValidationSession(ctx,
+		expectedParentHash,
+		referenceSlot,
+		readWrite,
+		leiosClosureSemantics,
+		func(
+			validate func(ledger.Transaction, map[utxoref.Key]struct{}, map[utxoref.Key]lcommon.Utxo, *utxoref.StateOverlay) error,
+			stillCurrent func() bool,
+			commitIfCurrent func(func() error) (bool, error),
+			applyTx txValidationApplyFunc,
+			_ txValidationResolveFunc,
+		) error {
+			return fn(validate, stillCurrent, commitIfCurrent, applyTx)
+		},
+	)
+}
+
+func (ls *LedgerState) withResolvingTxValidationSession(ctx context.Context,
+	expectedParentHash []byte,
+	referenceSlot *uint64,
+	readWrite bool,
+	leiosClosureSemantics bool,
+	fn func(
+		validate func(
+			tx ledger.Transaction,
+			consumedUtxos map[utxoref.Key]struct{},
+			createdUtxos map[utxoref.Key]lcommon.Utxo,
+			accounts *utxoref.StateOverlay,
+		) error,
+		stillCurrent func() bool,
+		commitIfCurrent func(func() error) (bool, error),
+		applyTx txValidationApplyFunc,
+		resolve txValidationResolveFunc,
 	) error,
 ) error {
 	if err := ctx.Err(); err != nil {
@@ -15460,7 +15554,12 @@ func (ls *LedgerState) withTxValidationSession(ctx context.Context,
 				txn,
 			)
 		}
-		if err := fn(validate, stillCurrent, commitIfCurrent, applyTx); err != nil {
+		resolve := func(refs []models.UtxoId) ([]models.Utxo, error) {
+			return ls.db.UtxosByRefs(ctx, refs, txn)
+		}
+		if err := fn(
+			validate, stillCurrent, commitIfCurrent, applyTx, resolve,
+		); err != nil {
 			return err
 		}
 		return rollbackValidationSession
@@ -15704,6 +15803,20 @@ func (ls *LedgerState) ValidateTxWithOverlay(
 			pendingState:    accounts,
 		}
 	})
+}
+
+// MempoolSubmissionCapacity returns the coordinated metadata snapshot limit.
+// The mempool uses it to keep validation below the backing read pool's
+// operational reserve.
+func (ls *LedgerState) MempoolSubmissionCapacity() int {
+	if ls == nil || ls.db == nil {
+		return 0
+	}
+	reserver, ok := ls.db.Metadata().(types.ReadReserver)
+	if !ok {
+		return 0
+	}
+	return reserver.ReadSnapshotLimit()
 }
 
 // ErrEvaluationBusy reports that every transaction-evaluation slot is in use.

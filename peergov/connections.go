@@ -872,9 +872,9 @@ func (p *PeerGovernor) handleInboundConnectionEvent(evt event.Event) {
 			tmpPeer.Address = address
 			tmpPeer.NormalizedAddress = normalized
 		}
-		// Record the topology identity once on first rule-2 match and
-		// keep it across subsequent reconnects. Rule-1 matches yield
-		// topologyGroupID == "" and must not clear a prior match.
+		// Record an exact topology identity once and keep it across
+		// subsequent reconnects. A non-topology exact match must not
+		// clear a prior match.
 		if topologyGroupID != "" && tmpPeer.InboundTopologyMatch == "" {
 			tmpPeer.InboundTopologyMatch = topologyGroupID
 		}
@@ -1157,11 +1157,9 @@ func (p *PeerGovernor) DenyPeer(address string, duration time.Duration) {
 	); idx != -1 && p.peers[idx] != nil {
 		p.addPeerDenyKeysLocked(p.peers[idx], expiry, normalized, hostnameNormalized)
 	} else {
-		// A deferred verdict can arrive after a topology peer reconnects
-		// inbound from a new source port. Reuse the same unambiguous host
-		// identity as inbound admission so the stale transport address still
-		// denies that configured peer without broadening the denial to the
-		// whole host.
+		// A deferred verdict may still match an existing exact transport
+		// identity. Never widen a stale transport address to another peer on
+		// the same host.
 		idx, _ := p.resolveInboundIdentity(address, hostnameNormalized)
 		if idx != -1 && p.peers[idx] != nil &&
 			p.isTopologyPeer(p.peers[idx].Source) {
@@ -1375,6 +1373,9 @@ func (p *PeerGovernor) isPeerDeniedLocked(peer *Peer) bool {
 	}
 	if p.isDeniedLocked(peer.NormalizedAddress) ||
 		p.isDeniedLocked(p.normalizeAddress(peer.Address)) {
+		return true
+	}
+	if relayAddress := p.ledgerKnownAddrs[p.normalizeAddress(peer.Address)]; relayAddress != "" && p.isDeniedLocked(relayAddress) {
 		return true
 	}
 	if peer.Connection != nil && peer.Connection.Id.RemoteAddr != nil {

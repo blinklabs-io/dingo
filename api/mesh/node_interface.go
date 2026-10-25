@@ -48,16 +48,10 @@ type MeshLedgerState interface {
 	GetCurrentPParamsForReporting() lcommon.ProtocolParameters
 	SlotToTime(slot uint64) (time.Time, error)
 	UtxosByAddress(addrs []lcommon.Address) ([]models.Utxo, error)
-	// UtxosByAddressBoundedPage returns one ordered, resumable page of UTxOs
-	// while bounding the candidate rows examined and the CBOR retained. The
-	// page carries each output's CBOR but not its native assets. It backs
-	// /account/coins.
-	UtxosByAddressBoundedPage(
+	UtxosByAddressComplete(
 		ctx context.Context,
-		q *models.UtxoWithOrderingQuery,
-		maxCandidates int,
-		maxBytes int64,
-	) (models.UtxoAddressPage, error)
+		addrs []lcommon.Address,
+	) ([]models.Utxo, error)
 	// UtxosByAddressAtSlot returns the UTxOs the address held at the
 	// given slot -- those added at or before it and not spent until
 	// after it. It backs historical /account/balance queries.
