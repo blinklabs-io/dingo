@@ -297,6 +297,17 @@ func (o *Ouroboros) markDeferredHeaderRecovery(
 	idle := false
 	if o.chainsyncLocalChainTips != nil {
 		tipHash, headerTipHash := o.chainsyncLocalChainTips()
+		// The chain already stores this header's block, delivered by a faster
+		// peer, while the ledger is still applying it; that transition is what
+		// deferred verification. Its chain update was published when the block
+		// was stored, before this header arrived, so waiting for one cannot
+		// resolve it, and re-intersecting would replay a block the node holds.
+		// The ledger validates the block on the body path and re-syncs every
+		// peer itself if that fails, so resolve it now as an applied deferral.
+		if len(tipHash) > 0 && bytes.Equal(tipHash, point.Hash) {
+			o.resolveDeferredHeaderRecovery(connId, point, tip, delivered)
+			return
+		}
 		idle = len(tipHash) > 0 && bytes.Equal(tipHash, headerTipHash)
 	}
 	o.deferredHeaderRecoveryMu.Lock()
@@ -366,6 +377,32 @@ func (o *Ouroboros) markDeferredHeaderRecovery(
 // recovery but stops a later application of its withheld header from becoming
 // the connection's cursor, since a rollback moved the peer's protocol cursor
 // off it. Ledger advance then re-intersects the peer as before.
+// resolveDeferredHeaderRecovery keeps a peer whose withheld header the chain
+// already holds and aligns the tracked cursor with the peer's, as when the
+// deferred header is applied. Pending recovery for the connection is dropped
+// only when it is no newer than the held header: a ledger rejection can report
+// an older header after a newer one was withheld, and the chain holding the
+// older block says nothing about the newer one.
+func (o *Ouroboros) resolveDeferredHeaderRecovery(
+	connId ouroboros.ConnectionId,
+	point ocommon.Point,
+	tip ochainsync.Tip,
+	delivered bool,
+) {
+	o.deferredHeaderRecoveryMu.Lock()
+	if existing, ok := o.deferredHeaderRecovery[connId]; ok &&
+		existing.point.Slot > point.Slot {
+		o.deferredHeaderRecoveryMu.Unlock()
+		return
+	}
+	delete(o.deferredHeaderRecovery, connId)
+	delete(o.deferredHeaderIdleRetry, connId)
+	o.deferredHeaderRecoveryMu.Unlock()
+	if o.chainsyncState != nil {
+		o.chainsyncState.AdmitDeferredClientTip(connId, point, tip, !delivered)
+	}
+}
+
 func (o *Ouroboros) invalidateDeferredHeaderResolution(
 	connId ouroboros.ConnectionId,
 ) {
