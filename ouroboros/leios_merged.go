@@ -662,7 +662,12 @@ func (o *Ouroboros) storeLeiosEndorserBlock(
 	// distinct key instead of colliding with (or needing to evict) this one.
 	// Every remaining branch below is about the same
 	// occurrence's own transaction/verification state, not a slot conflict.
-	if existing := o.leiosEndorserBlocks[cacheKeys[0]]; existing != nil {
+	existing := o.leiosEndorserBlocks[cacheKeys[0]]
+	// Whether the closure was already complete and slot-verified before this
+	// store, so the arrival is recorded once, at the transition.
+	wasClosureReady := existing != nil && existing.completeTxCache() &&
+		existing.slotVerified
+	if existing != nil {
 		// Never regress a cached transaction set. The relay offers each
 		// endorser block on every connection, so a manifest-only store
 		// (txsRaw nil) routinely arrives after another connection has already
@@ -761,6 +766,11 @@ func (o *Ouroboros) storeLeiosEndorserBlock(
 	// track pipeline timing, or persist a blob under a slot of its choosing.
 	if data.slotVerified {
 		o.publishLeiosEndorserBlock(point, blockRaw, data)
+	}
+	// A block this node forged itself did not arrive from anywhere.
+	if origin != leiosStoreAuthoritative && !wasClosureReady &&
+		data.completeTxCache() && data.slotVerified {
+		o.recordLeiosEbArrival(point, data.txCount)
 	}
 	return nil
 }
@@ -1558,6 +1568,8 @@ func (o *Ouroboros) bindLeiosEndorserBlockSlot(
 	now := time.Now()
 	o.pruneLeiosEndorserBlockCacheLocked(now)
 	data := o.leiosEndorserBlocks[key]
+	wasClosureReady := data != nil && data.completeTxCache() &&
+		data.slotVerified
 	contentChanged := false
 	if data == nil || !data.completeTxCache() {
 		// The manifest is content-addressed, so a complete cached occurrence
@@ -1647,6 +1659,13 @@ func (o *Ouroboros) bindLeiosEndorserBlockSlot(
 			verified.blockRaw,
 			&verified,
 		)
+		// Recorded here, not above: the caller may hold
+		// leiosAnnouncementsMu until it runs this closure, and recording
+		// resolves the slot through the ledger.
+		if !wasClosureReady && verified.completeTxCache() &&
+			verified.slotVerified {
+			o.recordLeiosEbArrival(verified.point, verified.txCount)
+		}
 	}
 }
 

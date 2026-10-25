@@ -32,6 +32,7 @@ const (
 	recentBlockDelayMetricName    = "dingo_blockfetch_recent_delay_seconds"
 	recentBlockNumberMetricName   = "dingo_blockfetch_recent_block_number"
 	recentFetchDurationMetricName = "dingo_blockfetch_recent_fetch_duration_seconds"
+	recentBlockKindMetricName     = "dingo_blockfetch_recent_block_kind"
 )
 
 var (
@@ -55,11 +56,19 @@ var (
 	)
 )
 
+var recentBlockKindDesc = prometheus.NewDesc(
+	recentBlockKindMetricName,
+	"Leios kind bitmask of the ranking block held in each slot of the ring behind "+recentBlockDelayMetricName+": 1 = the block announces an endorser block, 2 = the block carries an endorser block certificate, 0 = plain ranking block (every pre-Leios block)",
+	[]string{"idx"},
+	nil,
+)
+
 type recentBlockDelay struct {
 	blockNumber  uint64
 	hash         lcommon.Blake2b256
 	delay        float64
 	fetchSeconds float64
+	kind         uint8
 	set          bool
 }
 
@@ -69,8 +78,8 @@ type recentBlockDelay struct {
 // compatible cardano_node_metrics_blockfetchclient_blockdelay_s gauge.
 //
 // Slot position is blockNumber % recentBlockDelaySlots and the block number
-// is exported as a value, so the collector always exposes at most 3N series
-// with no label churn. It is a custom collector rather than three GaugeVecs so
+// is exported as a value, so the collector always exposes at most 4N series
+// with no label churn. It is a custom collector rather than four GaugeVecs so
 // each scrape reads a slot's block number, delay, and fetch duration together
 // under one lock; a scrape can never pair one block's number with another
 // block's delay or fetch duration. Slots that have never been written are not
@@ -103,12 +112,22 @@ func newRecentBlockDelays() *recentBlockDelays {
 // measure a genuine fetch duration (e.g. no matching in-flight request) pass
 // the same value as delay, matching the pre-existing fallback in
 // blockfetchClientBlock.
+//
+// kind is the optional Leios ranking-block kind bitmask
+// (leiosheader.KindAnnouncesEB | KindCertifiesEB), stored and exported
+// under the same lock as the delay so a scrape never pairs one block's kind
+// with another block's delay. Omitting it records 0, a plain ranking block.
 func (r *recentBlockDelays) record(
 	blockNumber uint64,
 	hash lcommon.Blake2b256,
 	delay float64,
 	fetchSeconds float64,
+	kind ...uint8,
 ) {
+	var blockKind uint8
+	if len(kind) > 0 {
+		blockKind = kind[0]
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	s := &r.slots[blockNumber%recentBlockDelaySlots]
@@ -123,6 +142,7 @@ func (r *recentBlockDelays) record(
 		hash:         hash,
 		delay:        delay,
 		fetchSeconds: fetchSeconds,
+		kind:         blockKind,
 		set:          true,
 	}
 }
@@ -131,6 +151,7 @@ func (r *recentBlockDelays) Describe(ch chan<- *prometheus.Desc) {
 	ch <- recentBlockDelayDesc
 	ch <- recentBlockNumberDesc
 	ch <- recentFetchDurationDesc
+	ch <- recentBlockKindDesc
 }
 
 func (r *recentBlockDelays) Collect(ch chan<- prometheus.Metric) {
@@ -158,6 +179,12 @@ func (r *recentBlockDelays) Collect(ch chan<- prometheus.Metric) {
 			recentFetchDurationDesc,
 			prometheus.GaugeValue,
 			s.fetchSeconds,
+			idx,
+		)
+		ch <- prometheus.MustNewConstMetric(
+			recentBlockKindDesc,
+			prometheus.GaugeValue,
+			float64(s.kind),
 			idx,
 		)
 	}

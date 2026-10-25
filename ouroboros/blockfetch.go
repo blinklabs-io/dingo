@@ -26,6 +26,7 @@ import (
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/leiosheader"
 	"github.com/blinklabs-io/dingo/internal/tracing"
 	"github.com/blinklabs-io/dingo/ledger"
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -987,6 +988,7 @@ func (o *Ouroboros) blockfetchClientBlock(
 				block.Hash(),
 				delaySeconds,
 				fetchDuration.Seconds(),
+				leiosheader.RankingBlockKind(block.Header()),
 			)
 			o.blockfetchMetrics.recentForks.recordParticipant(
 				block.BlockNumber(),
