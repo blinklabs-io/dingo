@@ -29,6 +29,7 @@ import (
 	"github.com/blinklabs-io/dingo/internal/promutil"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/plugin"
+	ouroboros "github.com/blinklabs-io/gouroboros"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
@@ -365,6 +366,56 @@ func TestNewConfigMempoolCapacityDefaultsFromRunMode(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := NewConfig(WithRunMode(tt.runMode))
+			selection := cfg.pluginSelections[plugin.CapabilityMempool]
+			assert.Equal(t, tt.expected, selection.Config["capacity"])
+		})
+	}
+}
+
+func TestNewConfigMempoolCapacityDefaultsOnMusashi(t *testing.T) {
+	t.Parallel()
+
+	leios := int64(internalconfig.DefaultMempoolCapacityLeios)
+	praos := int64(internalconfig.DefaultMempoolCapacityPraos)
+	tests := []struct {
+		name     string
+		opts     []ConfigOptionFunc
+		expected int64
+	}{
+		{
+			name: "musashi by name gets leios default",
+			opts: []ConfigOptionFunc{
+				WithNetwork(ouroboros.NetworkCardanoMusashi.Name),
+			},
+			expected: leios,
+		},
+		{
+			name: "musashi by magic gets leios default",
+			opts: []ConfigOptionFunc{
+				WithNetworkMagic(ouroboros.NetworkCardanoMusashi.NetworkMagic),
+			},
+			expected: leios,
+		},
+		{
+			name: "musashi explicit capacity wins",
+			opts: []ConfigOptionFunc{
+				WithNetwork(ouroboros.NetworkCardanoMusashi.Name),
+				WithMempoolCapacity(5242880),
+			},
+			expected: 5242880,
+		},
+		{
+			name: "non-musashi network keeps praos default",
+			opts: []ConfigOptionFunc{
+				WithNetwork("preprod"),
+			},
+			expected: praos,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := NewConfig(tt.opts...)
 			selection := cfg.pluginSelections[plugin.CapabilityMempool]
 			assert.Equal(t, tt.expected, selection.Config["capacity"])
 		})

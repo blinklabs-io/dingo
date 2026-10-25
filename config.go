@@ -854,7 +854,10 @@ func (c *Config) syncCompatFields() {
 	), c.cfg.StartEra, StorageMode(
 		c.cfg.StorageMode,
 	)
-	if c.runMode == string(internalconfig.RunModeLeios) &&
+	// Leios run mode and the Musashi testnet (which enables Leios networking
+	// without changing the run mode) both default to the larger mempool.
+	if (c.runMode == string(internalconfig.RunModeLeios) ||
+		c.isMusashiNetwork()) &&
 		pluginInt64(
 			c.cfg.Plugins.Mempool.Config["capacity"],
 		) == internalconfig.DefaultMempoolCapacityPraos {
