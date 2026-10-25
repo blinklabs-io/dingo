@@ -8113,7 +8113,8 @@ interface, forging and APIs retain their existing narrow adapters, and none of
 them import backend state. Cardano-compatible metrics and `mempool.add_tx` /
 `mempool.remove_tx` events remain backend-neutral;
 `dingo_metrics_mempool_info{implementation="fifo|dag"}` identifies the
-selected backend.
+selected backend. `dingo_mempool_capacity_bytes` exports the configured
+capacity, set once at construction because capacity never changes at runtime.
 
 Both backends maintain an address index beside the transaction list, guarded by
 the pool's state lock and consulted through `TransactionHashesByAddress`. The
