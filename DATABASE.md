@@ -6170,8 +6170,9 @@ PostgreSQL and MySQL keep the per-row writes described above.
   multi-row `BatchOverlayInsertUtxos` statements (62 rows each) and their
   pointer rows, marks pre-batch spends with `UPDATE ... FROM (VALUES ...)`
   keyed by `utxo.id` (333 rows each), deletes by id the rows the per-row path
-  deletes before commit, and queues asset and `utxo_address` rows for the
-  surviving outputs into the accumulator's row batch. None of these statements
+  deletes before commit, and queues asset rows for the surviving outputs into
+  the accumulator's row batch. It writes no `utxo_address` rows, since the
+  overlay runs only in core storage mode. None of these statements
   carries a conflict clause; a `UNIQUE` failure is returned as
   `types.ErrBatchUtxoOverlayConflict`, and `ApplyTrustedBatch` applies the
   uncommitted blocks once more on the per-row path, which repairs rows a
@@ -6210,8 +6211,8 @@ PostgreSQL and MySQL keep the per-row writes described above.
   such as a withdrawal's re-sum, therefore see what the per-row path would
   hold at that point. An output created and spent before the barrier is not
   in `utxo` at all, where the per-row path holds it marked spent; nothing
-  inside a trusted batch reads spent rows from the table. Asset and
-  `utxo_address` rows stay queued until `FlushBatch`, as on the per-row path.
+  inside a trusted batch reads spent rows from the table. Asset rows stay
+  queued until `FlushBatch`, as on the per-row path.
   A barrier writes every pending output, so outputs a later transaction
   spends go back to being inserted, marked and deleted; on withdrawal-heavy
   ranges the `barrier_flushes` count in the Debug line shows how often.

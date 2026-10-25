@@ -623,11 +623,7 @@ func (s *Store) writeOverlay(
 		if out.spentBy != nil {
 			continue
 		}
-		if err := queueOverlayRelations(
-			&accumulator.rows, out, &o.assetWritten,
-		); err != nil {
-			return err
-		}
+		queueOverlayRelations(&accumulator.rows, out, &o.assetWritten)
 	}
 	return nil
 }
@@ -799,21 +795,16 @@ DELETE FROM utxo WHERE id IN (` +
 	return nil
 }
 
-// queueOverlayRelations queues out's asset and utxo_address rows. Asset ids
-// are the ones reserved at creation, so an elided output's assets leave the
-// same gap in the id sequence that inserting and deleting them would.
+// queueOverlayRelations queues out's asset rows. Asset ids are the ones
+// reserved at creation, so an elided output's assets leave the same gap in
+// the id sequence that inserting and deleting them would. It queues no
+// utxo_address row: the overlay runs only in core storage mode, which does
+// not index UTxO addresses.
 func queueOverlayRelations(
 	rows *rowBatch,
 	out *overlayOutput,
 	assetWritten *int64,
-) error {
-	address, err := assetUtxoAddress(&out.model)
-	if err != nil {
-		return err
-	}
-	if len(address) > 0 {
-		rows.add(assetUtxoAddressShape, out.id, address)
-	}
+) {
 	for i := range out.model.Assets {
 		asset := &out.model.Assets[i]
 		id := out.assetBase + int64(i)
@@ -828,7 +819,6 @@ func queueOverlayRelations(
 		)
 		*assetWritten = max(*assetWritten, id)
 	}
-	return nil
 }
 
 // restoreOverlaySequences raises sqlite_sequence to the last id the batch
