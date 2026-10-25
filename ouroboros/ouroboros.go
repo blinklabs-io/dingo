@@ -218,6 +218,7 @@ type Ouroboros struct {
 	localstatequeryAcquireMutex sync.Mutex
 	blockfetchNoBlocksCounts    map[ouroboros.ConnectionId]blockfetchNoBlocksState
 	blockfetchRangeAdmission    *blockfetchRangeAdmission
+	blockfetchLookupSlots       chan struct{}
 	// blockfetchRangeBytes returns the expected wire size of a block range
 	// for RangeRequest.ExpectedBytes, or 0 for no estimate. Defaults to the
 	// ledger's queued-header estimate; tests override it.
@@ -269,7 +270,7 @@ type Ouroboros struct {
 	futureHeaderResyncCancel context.CancelFunc
 	futureHeaderResyncClosed bool
 	deferredHeaderRecoveryMu sync.Mutex
-	deferredHeaderRecovery   map[ouroboros.ConnectionId]ochainsync.Tip
+	deferredHeaderRecovery   map[ouroboros.ConnectionId]deferredHeaderRecoveryState
 	// chainsyncLocalChainTips returns the hashes of the local block tip and
 	// header-queue tip. Tests override it without a LedgerState.
 	chainsyncLocalChainTips func() (tipHash, headerTipHash []byte)
@@ -779,6 +780,10 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 		blockfetchNoBlocksCounts: make(
 			map[ouroboros.ConnectionId]blockfetchNoBlocksState,
 		),
+		blockfetchLookupSlots: make(
+			chan struct{},
+			blockfetchMaxConcurrentPointLookups,
+		),
 		chainsyncStats: make(
 			map[ouroboros.ConnectionId]*chainsyncPeerStats,
 		),
@@ -789,7 +794,7 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 			map[ouroboros.ConnectionId]*scheduledChainsyncResync,
 		),
 		deferredHeaderRecovery: make(
-			map[ouroboros.ConnectionId]ochainsync.Tip,
+			map[ouroboros.ConnectionId]deferredHeaderRecoveryState,
 		),
 		futureHeaderResyncCtx:    futureHeaderResyncCtx,
 		futureHeaderResyncCancel: futureHeaderResyncCancel,

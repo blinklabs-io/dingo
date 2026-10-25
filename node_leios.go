@@ -304,6 +304,7 @@ func (n *Node) initLeiosVoteManager(ctx context.Context) error {
 		return fmt.Errorf("start leios vote manager: %w", err)
 	}
 	n.leiosVoteManager = mgr
+	n.leiosCertificateVerifier.Store(mgr)
 	// Deliberately not wired into ouroboros here. Run initializes the Leios
 	// managers before it constructs Ouroboros, so reaching for the instance
 	// at this point dereferences a nil pointer. attachLeiosHandlers installs

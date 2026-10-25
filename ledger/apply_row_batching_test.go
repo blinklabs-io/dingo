@@ -46,7 +46,7 @@ func rowBatchingKey(tag byte) []byte {
 	return bytes.Repeat([]byte{tag}, 28)
 }
 
-func rowBatchingBaseAddress(t *testing.T, payment, stake byte) []byte {
+func rowBatchingBaseAddress(t testing.TB, payment, stake byte) []byte {
 	t.Helper()
 	addr, err := lcommon.NewAddressFromParts(
 		lcommon.AddressTypeKeyKey,
@@ -78,7 +78,7 @@ type rowBatchingTx struct {
 }
 
 func newRowBatchingTx(
-	t *testing.T,
+	t testing.TB,
 	body map[uint]any,
 ) rowBatchingTx {
 	t.Helper()
@@ -89,7 +89,7 @@ func newRowBatchingTx(
 // auxiliary data, which in API mode produce the queued detail rows. Nothing
 // is validated, so the witnesses need not verify.
 func newRowBatchingTxWith(
-	t *testing.T,
+	t testing.TB,
 	body map[uint]any,
 	witnesses map[uint]any,
 	aux any,
@@ -110,7 +110,7 @@ func newRowBatchingTxWith(
 }
 
 func rowBatchingBlock(
-	t *testing.T,
+	t testing.TB,
 	slot, number uint64,
 	prev lcommon.Blake2b256,
 	txs ...rowBatchingTx,
@@ -123,7 +123,7 @@ func rowBatchingBlock(
 // the invalid indexes marked phase-2 invalid, so they consume their
 // collateral and produce only their collateral return.
 func rowBatchingBlockWithInvalid(
-	t *testing.T,
+	t testing.TB,
 	slot, number uint64,
 	prev lcommon.Blake2b256,
 	invalid []uint,

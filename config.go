@@ -497,23 +497,18 @@ func (c *Config) isMusashiNetwork() bool {
 		c.cfg.NetworkMagic == ouroboros.NetworkCardanoMusashi.NetworkMagic
 }
 
-// prototypeTrustBypassesEnabled reports whether this node may run with the
-// Musashi prototype's consensus/ledger trust bypasses —
-// LedgerStateConfig.SkipLeaderStakeThresholdCheck and
-// SkipDijkstraTxValidation. Those two make the node accept blocks and Dijkstra
-// transactions a validating ledger would reject, so they are prototype-only
-// behaviour and must never be reachable from a preview, preprod, or mainnet
-// configuration.
+// musashiPrototypeIdentity reports whether the configuration unambiguously
+// identifies the Musashi prototype network. It gates prototype-only protocol
+// behavior: the GetStakePoolState query and the Praos2 chain-dependent state.
 //
 // This is deliberately stricter than isMusashiNetwork, which treats either
-// half of the identity (name or magic) as Musashi and is used for era and
-// mini-protocol selection where a half-match is merely wrong, not unsafe. Here
-// a half-match that also names or addresses a standard network yields false.
-// configValidate rejects such a configuration outright, so in the normal
-// startup path this can only be reached with an unambiguous identity; the
-// extra check keeps the bypasses off for an embedder that builds a Config
-// directly and never validates it.
-func (c *Config) prototypeTrustBypassesEnabled() bool {
+// half of the identity (name or magic) as Musashi. Here a half-match that
+// also names or addresses a standard network yields false, so a mainnet,
+// preprod, preview or sancho node never answers in a layout its clients
+// cannot decode. configValidate rejects such a configuration outright; the
+// extra check covers an embedder that builds a Config directly and never
+// validates it.
+func (c *Config) musashiPrototypeIdentity() bool {
 	if c.cfg == nil {
 		return false
 	}
@@ -587,14 +582,9 @@ func (n *Node) configValidate() error {
 			n.config.cfg.PledgeLeverage,
 		)
 	}
-	// The Musashi prototype network disables consensus and ledger validation
-	// (see Config.prototypeTrustBypassesEnabled). Its identity is matched on
-	// either the network name or the network magic, so refuse any configuration
-	// that pairs one half of it with a different standard network — otherwise a
-	// node an operator configured as preview/preprod/mainnet would silently run
-	// with those bypasses, or (with `--network musashi --network-magic 2`)
-	// actually join preview while trusting the prototype's rules, since the
-	// handshake uses the magic. There is deliberately no opt-in override.
+	// The network name selects the built-in configuration while network magic
+	// selects peers during the handshake. Refuse a configuration that identifies
+	// both Musashi and a different predefined network.
 	if network, ok := internalconfig.MusashiNetworkIdentityConflict(
 		n.config.cfg.Network,
 		n.config.cfg.NetworkMagic,
@@ -602,9 +592,7 @@ func (n *Node) configValidate() error {
 		return fmt.Errorf(
 			"network identity conflict: network %q with networkMagic %d "+
 				"identifies both the %q network and the Musashi prototype "+
-				"network (name %q, magic %d); the Musashi prototype disables "+
-				"consensus and ledger validation and must not be reachable "+
-				"from a standard network configuration",
+				"network (name %q, magic %d)",
 			n.config.cfg.Network,
 			n.config.cfg.NetworkMagic,
 			network,

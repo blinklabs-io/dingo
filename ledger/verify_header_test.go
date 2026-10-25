@@ -3896,7 +3896,7 @@ func TestVerifyBlockHeaderCrypto_SkipLeaderStakeThresholdCheckWarnsAndAccepts(
 	)
 	require.NoError(t, err)
 	logs := logBuf.String()
-	assert.Contains(t, logs, "prototype trust bypass")
+	assert.Contains(t, logs, "explicit override")
 }
 
 func TestVerifyBlockHeaderCrypto_EmptyMarkSnapshotDiagnostic(t *testing.T) {
@@ -3985,7 +3985,7 @@ func TestVerifyBlockLeaderEligibility_MithrilImportedHistoricalMarkChecks(
 // unlike a certified imported row, this capture is neither the target
 // boundary nor the Mithril anchor, so a hard threshold *comparison* against it
 // is unsafe. That makes eligibility unevaluable, not automatically satisfied:
-// only the explicitly selected prototype profile (SkipLeaderStakeThresholdCheck)
+// only an explicit override (SkipLeaderStakeThresholdCheck)
 // may trust the block anyway (see the Prototype sibling below); a standard
 // profile must reject, deferring while the ledger apply cursor is still
 // catching up.
@@ -4053,9 +4053,9 @@ func TestVerifyBlockLeaderEligibility_ReconstructedHistoricalMarkRejectsStandard
 }
 
 // TestVerifyBlockLeaderEligibility_ReconstructedHistoricalMarkPrototypeAccepts
-// pins the one profile that may still bypass an unevaluable reconstructed
-// mark row: the explicitly selected Musashi prototype
-// (SkipLeaderStakeThresholdCheck), mirroring the other eligibility guards'
+// pins the one configuration that may still bypass an unevaluable
+// reconstructed mark row: an explicit SkipLeaderStakeThresholdCheck override,
+// mirroring the other eligibility guards'
 // Rejects/PrototypeAccepts pairs in this file.
 func TestVerifyBlockLeaderEligibility_ReconstructedHistoricalMarkPrototypeAccepts(
 	t *testing.T,
@@ -4100,7 +4100,7 @@ func TestVerifyBlockLeaderEligibility_ReconstructedHistoricalMarkPrototypeAccept
 	)
 
 	err := ls.verifyBlockLeaderEligibility(tb.block, 5)
-	assert.NoError(t, err, "prototype profile keeps its documented bypass")
+	assert.NoError(t, err, "explicit override keeps its documented bypass")
 	assert.Contains(t, logBuf.String(), "skipping leader eligibility check")
 }
 
@@ -4283,7 +4283,7 @@ func TestVerifyBlockLeaderEligibility_LiveComputedHistoricalMarkStillChecks(
 // newCoeffGuardLedger builds a ledger whose pool stake is already seeded, so
 // verifyBlockLeaderEligibility reaches the active-slot-coefficient guard. cfg
 // is the Shelley genesis under test (nil for "genesis never loaded"), and
-// prototypeProfile selects the Musashi prototype bypass.
+// prototypeProfile sets the explicit SkipLeaderStakeThresholdCheck override.
 func newCoeffGuardLedger(
 	t *testing.T,
 	tb *testBlockResult,
@@ -4377,10 +4377,10 @@ func TestVerifyBlockLeaderEligibility_ZeroActiveSlotsCoeffRejects(
 }
 
 // TestVerifyBlockLeaderEligibility_MissingActiveSlotsCoeffPrototypeAccepts
-// pins the one profile that may still bypass the check. The Musashi prototype
-// already trusts stake-derived threshold failures
-// (SkipLeaderStakeThresholdCheck); an unevaluable threshold is bypassed under
-// the same explicitly selected profile and nowhere else.
+// pins the one configuration that may still bypass the check. An explicit
+// SkipLeaderStakeThresholdCheck override already trusts stake-derived
+// threshold failures; an unevaluable threshold is bypassed under the same
+// override and nowhere else.
 func TestVerifyBlockLeaderEligibility_MissingActiveSlotsCoeffPrototypeAccepts(
 	t *testing.T,
 ) {
@@ -4390,11 +4390,11 @@ func TestVerifyBlockLeaderEligibility_MissingActiveSlotsCoeffPrototypeAccepts(
 	ls := newCoeffGuardLedger(t, tb, nil, true)
 
 	err := ls.verifyBlockLeaderEligibility(tb.block, 5)
-	assert.NoError(t, err, "prototype profile keeps its documented bypass")
+	assert.NoError(t, err, "explicit override keeps its documented bypass")
 }
 
 // TestVerifyBlockLeaderEligibility_ZeroActiveSlotsCoeffPrototypeAccepts is the
-// zero-coefficient half of the prototype bypass.
+// zero-coefficient half of the explicit override.
 func TestVerifyBlockLeaderEligibility_ZeroActiveSlotsCoeffPrototypeAccepts(
 	t *testing.T,
 ) {
@@ -4404,7 +4404,7 @@ func TestVerifyBlockLeaderEligibility_ZeroActiveSlotsCoeffPrototypeAccepts(
 	ls := newCoeffGuardLedger(t, tb, newZeroCoeffGenesisCfg(t), true)
 
 	err := ls.verifyBlockLeaderEligibility(tb.block, 5)
-	assert.NoError(t, err, "prototype profile keeps its documented bypass")
+	assert.NoError(t, err, "explicit override keeps its documented bypass")
 }
 
 // seedZeroTotalActiveStakeSummary marks the epoch's mark aggregate ready at
@@ -4448,7 +4448,7 @@ func TestVerifyBlockLeaderEligibility_ZeroTotalActiveStakeRejects(
 }
 
 // TestVerifyBlockLeaderEligibility_ZeroTotalActiveStakePrototypeAccepts pins
-// the prototype bypass for the stake half of the guard.
+// the explicit override for the stake half of the guard.
 func TestVerifyBlockLeaderEligibility_ZeroTotalActiveStakePrototypeAccepts(
 	t *testing.T,
 ) {
@@ -4462,7 +4462,7 @@ func TestVerifyBlockLeaderEligibility_ZeroTotalActiveStakePrototypeAccepts(
 	seedZeroTotalActiveStakeSummary(t, db, 4)
 
 	err := ls.verifyBlockLeaderEligibility(tb.block, 5)
-	assert.NoError(t, err, "prototype profile keeps its documented bypass")
+	assert.NoError(t, err, "explicit override keeps its documented bypass")
 }
 
 // TestVerifyBlockHeaderCryptoBeforeApplyDefersZeroTotalActiveStake verifies

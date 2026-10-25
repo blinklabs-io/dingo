@@ -2227,6 +2227,22 @@ type MetadataStore interface {
 		txn types.Txn,
 	) (*models.Pool, error)
 
+	// GetPoolByLeiosKey retrieves the pool whose active parameters claim the
+	// given BLS public key as of the current epoch's start slot.
+	GetPoolByLeiosKey(
+		publicKey []byte,
+		epochStartSlot uint64,
+		txn types.Txn,
+	) (*models.Pool, error)
+
+	// GetFuturePoolByLeiosKey retrieves the pool whose latest deferred
+	// parameters claim the given BLS public key.
+	GetFuturePoolByLeiosKey(
+		publicKey []byte,
+		epochStartSlot uint64,
+		txn types.Txn,
+	) (*models.Pool, error)
+
 	// GetActivePoolRelays retrieves all relays from currently active pools.
 	// This is used for ledger peer discovery.
 	GetActivePoolRelays(types.Txn) ([]models.PoolRegistrationRelay, error)
@@ -3464,6 +3480,25 @@ type AddressTransactionIndexRebuilder interface {
 type BulkLoadOptimizer interface {
 	SetBulkLoadPragmas() error
 	RestoreNormalPragmas() error
+}
+
+// BatchUtxoOverlay is an optional interface for metadata stores that can
+// stage a trusted block-apply batch's UTxO writes in memory. After
+// EnableBatchUtxoOverlay reports true, the accumulator's batched transaction
+// writes resolve their inputs from the overlay and FlushBatch writes the net
+// UTxO change; a store returns false, changing nothing, where it does not
+// support the overlay. inputs are the batch's consumed inputs that it does
+// not itself produce, and deleteOnSpend the subset of them an earlier
+// transaction of the same trusted batch committed, whose rows are deleted
+// when spent. A write the overlay cannot apply without a conflict fails with
+// types.ErrBatchUtxoOverlayConflict.
+type BatchUtxoOverlay interface {
+	EnableBatchUtxoOverlay(
+		accumulator types.MetadataBatchAccumulator,
+		txn types.Txn,
+		inputs []models.UtxoId,
+		deleteOnSpend []models.UtxoId,
+	) (bool, error)
 }
 
 // CatchUpPragmaTuner is an optional interface for metadata stores that can

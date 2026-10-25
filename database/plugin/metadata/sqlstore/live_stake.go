@@ -119,12 +119,20 @@ func (s *Store) refreshRewardLiveStakeAggregateNetOfPending(
 // pendingUtxoStakeDelta returns ref's stake delta queued in extra and in
 // every batch accumulator bound to txn. Those accumulators' utxo rows are
 // already visible to txn, but their deltas reach reward_live_stake only when
-// the accumulator flushes.
+// the accumulator flushes. A batch UTxO overlay's read barrier runs first:
+// it writes the overlay's utxo rows and the deltas of every ended block, so
+// what is left pending is the current block's, exactly as on the per-row
+// path.
 func pendingUtxoStakeDelta(
+	ctx context.Context,
+	db queryer,
 	txn types.Txn,
 	extra *transactionBatchAccumulator,
 	ref models.StakeCredentialRef,
 ) (int64, error) {
+	if err := overlayReadBarrierAll(ctx, db); err != nil {
+		return 0, err
+	}
 	var accumulators []*transactionBatchAccumulator
 	if transaction, ok := txn.(*sqlTxn); ok {
 		accumulators = transaction.boundBatches()
@@ -305,6 +313,46 @@ func (s *Store) applyRewardLiveStakeAggregate(
 	slot uint64,
 	utxoStake uint64,
 ) error {
+	return s.applyRewardLiveStakeAggregateWithID(
+		ctx, db, ref, slot, utxoStake, 0, false,
+	)
+}
+
+const rewardLiveStakeUpdateQuery = `-- name: BatchOverlayUpdateRewardLiveStake :exec
+UPDATE reward_live_stake SET
+    pool_key_hash = ?, utxo_stake = ?, reward_stake = ?, total_stake = ?,
+    registered = ?, pool_delegation_slot = ?, pool_delegation_block_index = 0,
+    pool_delegation_cert_index = 0, updated_slot = ?, calculation_version = ?
+WHERE credential_tag = ? AND staking_key = ?`
+
+// rewardLiveStakeInsertWithIDQuery is rewardLiveStakeUpsertQuery for a row
+// the batch UTxO overlay inserts under an id it reserved; the caller deletes
+// any earlier row of the credential first.
+const rewardLiveStakeInsertWithIDQuery = `
+-- name: BatchOverlayInsertRewardLiveStake :exec
+INSERT INTO reward_live_stake (
+    id, credential_tag, staking_key, pool_key_hash, utxo_stake, reward_stake,
+    total_stake, registered, pool_delegation_slot,
+    pool_delegation_block_index, pool_delegation_cert_index, updated_slot,
+    calculation_version
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?)`
+
+// applyRewardLiveStakeAggregateWithID is applyRewardLiveStakeAggregate that,
+// when id is not zero, inserts the row under that id, and when update is
+// set, updates the existing row, instead of upserting it. SQLite advances an
+// AUTOINCREMENT sequence on every upsert, including one that resolves to an
+// update. An update leaves it alone and an explicit-id insert raises it no
+// further than that id, so the batch UTxO overlay can set the sequence
+// itself.
+func (s *Store) applyRewardLiveStakeAggregateWithID(
+	ctx context.Context,
+	db queryer,
+	ref models.StakeCredentialRef,
+	slot uint64,
+	utxoStake uint64,
+	id int64,
+	update bool,
+) error {
 	var reward sql.NullString
 	var pool []byte
 	var active sql.NullBool
@@ -355,6 +403,45 @@ WHERE credential_tag = ? AND staking_key = ?`,
 	slotValue, err := checkedInt64(slot)
 	if err != nil {
 		return err
+	}
+	if update {
+		_, err = db.ExecContext(
+			ctx, rewardLiveStakeUpdateQuery,
+			pool,
+			decimalUint64(types.Uint64(utxoValue)),
+			decimalUint64(types.Uint64(rewardStake)),
+			decimalUint64(types.Uint64(total)),
+			registered,
+			delegationSlot,
+			slotValue,
+			models.RewardStakeCalculationVersion,
+			ref.Tag,
+			ref.Key,
+		)
+		if err != nil {
+			return fmt.Errorf("update reward live stake: %w", err)
+		}
+		return nil
+	}
+	if id != 0 {
+		_, err = db.ExecContext(
+			ctx, rewardLiveStakeInsertWithIDQuery,
+			id,
+			ref.Tag,
+			ref.Key,
+			pool,
+			decimalUint64(types.Uint64(utxoValue)),
+			decimalUint64(types.Uint64(rewardStake)),
+			decimalUint64(types.Uint64(total)),
+			registered,
+			delegationSlot,
+			slotValue,
+			models.RewardStakeCalculationVersion,
+		)
+		if err != nil {
+			return overlayWriteError("insert reward live stake", err)
+		}
+		return nil
 	}
 	_, err = s.execCached(
 		ctx, db, rewardLiveStakeUpsertQuery,
