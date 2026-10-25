@@ -27,8 +27,8 @@ import (
 // The messages of the node-to-node message submission protocol, version 2,
 // as dmq-node encodes them. They differ from the gouroboros messagesubmission
 // package, which dmq-node cannot read: the numbers after the first reply are
-// shifted by one to make room for MsgReplyNoIDs, and every list is an
-// indefinite-length CBOR array.
+// shifted by one to make room for MsgReplyNoIDs, and the item list in
+// messages 2, 4 and 5 is an indefinite-length CBOR array.
 //
 //	msgRequestIDs  = [1, blocking, ack, req]
 //	msgReplyIDs    = [2, [*[messageId, messageSize]]]

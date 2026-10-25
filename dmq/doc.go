@@ -39,9 +39,8 @@
 // A peer new to the pool starts at the beginning of the retained log; each
 // call advances that peer's cursor past the message it returns. This mirrors
 // CIP-0137's per-peer outstanding-message-ids queue for the node-to-node
-// message-submission mini-protocol (protocol 18), without implementing the
-// protocol's blocking/non-blocking request state machine itself -- that is
-// phase 3's job.
+// message-submission mini-protocol (protocol 11). The pool does not run that
+// protocol's blocking/non-blocking request state machine; PeerConn does.
 //
 // # Size limits and backpressure
 //

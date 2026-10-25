@@ -80,7 +80,8 @@ Things the tests learned the hard way, for anyone writing a DMQ client:
   message, not a byte-string wrapped copy.
 - dmq-node will not start without a Cardano node socket and a Shelley genesis
   file, and it exits if the socket refuses a connection.
-- Every list in the node-to-node messages is an indefinite-length array.
+- The item list in messages 2, 4 and 5 is an indefinite-length array; a
+  definite-length one is refused.
 - A blocking request must be answered within 20 seconds, with
   `MsgReplyNoSigIds` if there is nothing to announce; a non-blocking request
   and a request for bodies within 10. dmq-node ends the connection otherwise.

@@ -8268,8 +8268,8 @@ insert.
 sequence number, not a slice index, so TTL compaction never invalidates it)
 over the arrival-ordered log, mirroring CIP-0137's per-peer outstanding
 message-ids queue for the node-to-node message-submission mini-protocol
-(protocol 18) without implementing that protocol's blocking/non-blocking
-request state machine itself, which a node-to-node transport must provide. A peer new to
+(protocol 11) without running that protocol's blocking/non-blocking
+request state machine itself, which `PeerConn` runs. A peer new to
 the pool sees the full retained backlog before anything arriving after it
 connects; `RemovePeer` releases a disconnected peer's cursor.
 
@@ -8380,9 +8380,11 @@ That protocol is version 2 as dmq-node's codec defines it, and only version 2 is
 offered. dmq-node's version 1 is the TxSubmission2 codec under another name and
 this stack does not speak it. The messages are `[1, blocking, ack, req]`,
 `[2, [*[messageId, size]]]`, `[3]` (`MsgReplyNoIDs`, a blocking request's answer
-when nothing is held), `[4, [*messageId]]`, `[5, [*message]]` and `[6]`. Every
-list is an indefinite-length array, which dmq-node requires and the gouroboros
-package does not produce; a definite one is accepted on receipt. An empty reply
+when nothing is held), `[4, [*messageId]]`, `[5, [*message]]` and `[6]`. The item
+list in messages 2, 4 and 5 is an indefinite-length array, which dmq-node
+requires and the gouroboros package does not produce; a definite-length item
+list is a decode error. The message frames, each message and its payload are
+definite-length arrays. An empty reply
 to a non-blocking request is `[2, []]`, and an empty reply to a blocking one is
 not allowed. `sigsub_messages_test.go` checks the encodings byte for byte
 against ones written out by hand from dmq-node's CDDL and codec.
