@@ -70,7 +70,7 @@ func (u UnixConn) RemoteAddr() net.Addr {
 }
 
 // Unwrap exposes the underlying socket to connection helpers.
-func (u *UnixConn) Unwrap() net.Conn { return u.UnixConn }
+func (u UnixConn) Unwrap() net.Conn { return u.UnixConn }
 
 type UnixConnAddr struct {
 	addr string
