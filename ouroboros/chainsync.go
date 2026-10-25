@@ -34,6 +34,7 @@ import (
 	"github.com/blinklabs-io/dingo/ledger"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
+	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -920,7 +921,7 @@ func (o *Ouroboros) buildDefaultChainsyncIntersectPoints(
 	var err error
 	if o.config.ChainsyncIntersectAtLedgerTip != nil &&
 		o.config.ChainsyncIntersectAtLedgerTip() {
-		intersectPoints, err = o.ledgerState.RecentChainPoints(
+		intersectPoints, err = o.ledgerState.LedgerTipIntersectPoints(
 			ctx,
 			chainsyncIntersectPointCount,
 		)
@@ -1707,13 +1708,18 @@ func (o *Ouroboros) chainsyncCursorFarBehindLocalTip(
 }
 
 // headerAtOrBelowLocalTip reports whether a header with the given block number
-// is not above the applied local tip. Without a ledger the answer is false.
-func (o *Ouroboros) headerAtOrBelowLocalTip(headerBlockNumber uint64) bool {
+// is not above the applied local tip. A Byron epoch boundary block carries its
+// predecessor's block number, so one numbered as the tip follows it and is
+// above it. Without a ledger the answer is false.
+func (o *Ouroboros) headerAtOrBelowLocalTip(header gledger.BlockHeader) bool {
 	if o.chainsyncLocalTipBlock == nil {
 		return false
 	}
 	tipBlock, _ := o.chainsyncLocalTipBlock()
-	return headerBlockNumber <= tipBlock
+	if _, boundary := header.(*byron.ByronEpochBoundaryBlockHeader); boundary {
+		return header.BlockNumber() < tipBlock
+	}
+	return header.BlockNumber() <= tipBlock
 }
 
 // promotedObserverAboveLocalTip reports whether a header delivered to a
@@ -2146,7 +2152,7 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 		// waiting for witnesses only stalls the peer.
 		if selectionEligible && ingressEligible && !applyEligible &&
 			o.config.ChainsyncAwaitCorroboration != nil &&
-			!o.headerAtOrBelowLocalTip(v.BlockNumber()) {
+			!o.headerAtOrBelowLocalTip(v) {
 			admissionCtx, cancelAdmission := chainsyncAdmissionContext(ctx)
 			holdCtx, cancelHold := context.WithTimeout(
 				admissionCtx,

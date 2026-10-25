@@ -28,6 +28,8 @@ import (
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	ouroboros "github.com/blinklabs-io/gouroboros"
+	gledger "github.com/blinklabs-io/gouroboros/ledger"
+	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
@@ -99,6 +101,77 @@ func TestChainsyncHeaderAtOrBelowLedgerTipIsNotHeld(t *testing.T) {
 		"the header after the ledger tip is still held for corroboration")
 }
 
+// A Byron epoch boundary block shares its predecessor's block number, so one
+// numbered as the ledger tip is the block after the tip and is still held.
+func TestChainsyncByronEbbNumberedAsLedgerTipIsHeld(t *testing.T) {
+	t.Parallel()
+
+	bus := event.NewEventBus(nil, nil)
+	defer bus.Close()
+	cs := chainselection.NewChainSelector(chainselection.ChainSelectorConfig{
+		GenesisMode:           true,
+		SecurityParam:         400,
+		MinCorroboratingPeers: 1,
+	})
+	state := dchainsync.NewState(bus, nil)
+	conn := newTestConnId("127.0.0.1:6000", "10.0.0.1:3001")
+	require.True(t, state.AddClientConnId(conn))
+	var holds atomic.Int32
+	o := newOuroboros(OuroborosConfig{
+		EventBus: bus,
+		ChainsyncIngressEligible: func(ouroboros.ConnectionId) bool {
+			return true
+		},
+		ChainsyncObservePeerTip: cs.PreparePeerTipAdmissionDisposition,
+		ChainsyncResolvePeerTip: resolvePeerTipLikeNode(cs),
+		ChainsyncApplyEligible:  cs.ShouldApplyIngress,
+		ChainsyncAwaitCorroboration: func(
+			ctx context.Context,
+			connId ouroboros.ConnectionId,
+		) (bool, error) {
+			holds.Add(1)
+			return cs.AwaitIngressCorroboration(ctx, connId)
+		},
+	})
+	o.chainsyncState = state
+	o.eventBus = bus
+	o.corroborationHoldTimeout = 10 * time.Millisecond
+	o.chainsyncScheduleAt = func(time.Time, func()) func() { return func() {} }
+	const ledgerTipBlock = uint64(5)
+	o.chainsyncLocalTipBlock = func() (uint64, uint64) {
+		return ledgerTipBlock, 400
+	}
+	tip := ochainsync.Tip{
+		Point:       ocommon.NewPoint(10_000_000, []byte("advertised-tip")),
+		BlockNumber: 500_000,
+	}
+	headers := newLinkedTestHeaders(int(ledgerTipBlock))
+	for _, header := range headers {
+		require.NoError(t, o.chainsyncClientRollForward(
+			ochainsync.CallbackContext{ConnectionId: conn},
+			0,
+			header,
+			tip,
+		))
+	}
+	require.Zero(t, holds.Load())
+
+	ebb := &byron.ByronEpochBoundaryBlockHeader{
+		PrevBlock: headers[ledgerTipBlock-1].Hash(),
+	}
+	ebb.ConsensusData.Epoch = 1
+	ebb.ConsensusData.Difficulty.Value = ledgerTipBlock
+	require.Equal(t, ledgerTipBlock, ebb.BlockNumber())
+	require.NoError(t, o.chainsyncClientRollForward(
+		ochainsync.CallbackContext{ConnectionId: conn},
+		gledger.BlockTypeByronEbb,
+		ebb,
+		tip,
+	))
+	require.Equal(t, int32(1), holds.Load(),
+		"a boundary block numbered as the ledger tip must be held")
+}
+
 type promotedObserverFixture struct {
 	forecastHorizonFixture
 	resyncCh <-chan event.Event
@@ -112,10 +185,13 @@ func newPromotedObserverFixture(
 	f := newForecastHorizonFixture(t, "10.0.0.30:3001")
 	if observer {
 		f.o.chainsyncState.RemoveClientConnId(f.conn)
-		require.True(t, f.o.chainsyncState.TryAddObservedClientConnIdWithDirection(
-			f.conn,
-			false,
-		))
+		require.True(
+			t,
+			f.o.chainsyncState.TryAddObservedClientConnIdWithDirection(
+				f.conn,
+				false,
+			),
+		)
 	}
 	f.o.chainSelectionShouldVerifyHeaderCrypto = nil
 	f.setLocalTip(10, 432)
@@ -144,7 +220,11 @@ func TestChainsyncPromotedObserverAboveLedgerIsResynced(t *testing.T) {
 	)
 	data, ok := resync.Data.(event.ChainsyncResyncEvent)
 	require.True(t, ok)
-	require.Equal(t, event.ChainsyncResyncReasonPromotedObserverAhead, data.Reason)
+	require.Equal(
+		t,
+		event.ChainsyncResyncReasonPromotedObserverAhead,
+		data.Reason,
+	)
 	require.Equal(t, f.conn, data.ConnectionId)
 	testutil.RequireNoReceive(
 		t,

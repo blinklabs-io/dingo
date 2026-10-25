@@ -160,7 +160,8 @@ func (n *Node) chainsyncAwaitCorroboration(
 // intersect at the applied ledger tip. It holds while Genesis corroboration is
 // active, which needs every peer's frontier to begin at that tip.
 func (n *Node) chainsyncIntersectAtLedgerTip() bool {
-	return n.chainSelector != nil && n.chainSelector.GenesisCorroborationActive()
+	return n.chainSelector != nil &&
+		n.chainSelector.GenesisCorroborationActive()
 }
 
 // chainsyncAwaitEagerness pauses a peer's header stream while its next header
