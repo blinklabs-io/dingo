@@ -1775,6 +1775,27 @@ func (d *Database) UtxosDeleteSpentInBatch(
 	slot uint64,
 	txn *Txn,
 ) error {
+	return d.utxosDropSpentInBatch(ids, slot, txn, true)
+}
+
+// UtxosDropSpentInBatchBlobs is UtxosDeleteSpentInBatch for a batch whose
+// metadata rows a batch UTxO overlay already handled: it deletes the blob
+// offset keys of ids and raises the consumed-UTxO prune floor to slot the
+// same way, but deletes no metadata row.
+func (d *Database) UtxosDropSpentInBatchBlobs(
+	ids []models.UtxoId,
+	slot uint64,
+	txn *Txn,
+) error {
+	return d.utxosDropSpentInBatch(ids, slot, txn, false)
+}
+
+func (d *Database) utxosDropSpentInBatch(
+	ids []models.UtxoId,
+	slot uint64,
+	txn *Txn,
+	deleteRows bool,
+) error {
 	if len(ids) == 0 {
 		return nil
 	}
@@ -1796,8 +1817,10 @@ func (d *Database) UtxosDeleteSpentInBatch(
 			"utxos", len(utxos),
 		)
 	}
-	if err := d.utxoStore().DeleteUtxos(ids, txn.Metadata()); err != nil {
-		return err
+	if deleteRows {
+		if err := d.utxoStore().DeleteUtxos(ids, txn.Metadata()); err != nil {
+			return err
+		}
 	}
 	if slot > pruneFloor {
 		return d.writeConsumedUtxoPruneFloor(slot, txn)

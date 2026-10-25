@@ -2373,6 +2373,11 @@ accumulator of the write itself. The flush then adds the delta once, and the
 result equals the per-transaction path for any order of stake changes and
 reward writes within a block. Queued deltas live in the accumulator, which
 savepoint and transaction rollback restore together with the `utxo` rows.
+With a batch UTxO overlay (see "Trusted batch UTxO overlay") the accumulator
+does not write `utxo` rows immediately either; its read barrier writes the
+overlay's rows and the deltas of every block that has ended before any of
+these scans, so the queued delta they subtract is the current block's, as on
+the per-row path.
 
 This trades away the full-scan path's self-healing property for the
 credentials it accelerates, so the design leans on three layers instead of
@@ -6112,6 +6117,90 @@ A failure between the two steps leaves blocks in the blob store above the
 metadata tip. They are tolerated: a retry from the unchanged metadata tip
 reuses the blocks the chain already holds, and startup orphan cleanup treats
 them like any other blob-ahead state.
+
+## Trusted batch UTxO overlay
+
+On SQLite in a non-API storage mode, each block-apply transaction of
+`ApplyTrustedBatch` whose blocks predate Dijkstra stages its UTxO
+writes in memory (`metadata.BatchUtxoOverlay`, implemented by
+`sqlstore.Store.EnableBatchUtxoOverlay`) and writes their net effect at
+`FlushBatch`, inside the same transaction. Every other path, API mode,
+PostgreSQL and MySQL keep the per-row writes described above.
+
+- **Inputs.** The ledger names the consumed inputs the batch does not itself
+  produce. One `BatchOverlayPrefetchInputs` statement per 499 keys reads
+  their rows, joining the key list to `utxo` with `CROSS JOIN` and
+  `INDEXED BY tx_id_output_idx` so the plan cannot drift to a `deleted_slot`
+  index. An input produced earlier in the batch is resolved from the overlay
+  with no SQL, as are collateral amounts of phase-2-invalid transactions. A
+  double spend fails with `types.ErrUtxoConflict` and a missing input is a
+  no-op, as on the per-row path.
+- **Outputs.** An output gets its `utxo.id` when it is created, from
+  `sqlite_sequence`, in the order the per-row path inserts rows; its asset
+  rows reserve their `asset.id` values the same way. An output the batch
+  spends again is never written, but its ids stay reserved, so surviving rows,
+  the foreign keys that point at them and both `sqlite_sequence` entries end
+  as the per-row path leaves them. `FlushBatch` raises a sequence that ends on
+  an unwritten id.
+- **Writes.** `FlushBatch` inserts surviving outputs with explicit ids in
+  multi-row `BatchOverlayInsertUtxos` statements (62 rows each) and their
+  pointer rows, marks pre-batch spends with `UPDATE ... FROM (VALUES ...)`
+  keyed by `utxo.id` (333 rows each), deletes by id the rows the per-row path
+  deletes before commit, and queues asset and `utxo_address` rows for the
+  surviving outputs into the accumulator's row batch. None of these statements
+  carries a conflict clause; a `UNIQUE` failure is returned as
+  `types.ErrBatchUtxoOverlayConflict`, and `ApplyTrustedBatch` applies the
+  uncommitted blocks once more on the per-row path, which repairs rows a
+  snapshot import created ahead of their producer.
+- **Deletes.** An output created and spent in the same block-apply
+  transaction is not written. An output an earlier transaction of the same
+  call committed (before an epoch boundary) is deleted by id when spent, as
+  `UtxosDeleteSpentInBatch` would. `beforeCommit` then calls
+  `UtxosDropSpentInBatchBlobs`, which deletes the outputs' blob offset keys
+  and raises `consumed_utxo_prune_floor` exactly as before, without the
+  per-pair metadata delete. Rows spent from earlier calls are still only
+  marked; the post-commit cleanup deletes them as before.
+- **Live stake.** `FlushBatchStakeDeltas`, which the per-row path calls at
+  the end of every block to write that block's live-stake deltas, only closes
+  the block's segment. At `FlushBatch`, after the overlay's rows, the segments
+  are replayed in order in memory with the per-row path's row lifecycle: a
+  credential with no account whose UTxO stake reaches zero loses its row and
+  a later touch inserts a new one. Whether the account existed at the end of
+  a block comes from its `created_slot`, since account rows are only created
+  inside a batch; a credential with no running total is re-summed from the
+  `utxo` table less the deltas queued after that block. The replay reserves
+  one `reward_live_stake` id per upsert the per-row path would run (SQLite
+  advances an AUTOINCREMENT sequence on an upsert that updates, too), and
+  each credential's row is then written once -- updated in place, or
+  inserted under its reserved id -- with the sequence raised to the last
+  reserved id. Row values, ids and the sequence therefore match the per-row
+  path, while the per-credential statements run once per transaction instead
+  of once per block.
+- **Read barrier.** While the overlay holds unwritten rows, spend marks or
+  closed stake segments, the transaction's handle is a `barrierQueryer`:
+  before any statement that names `utxo`, `utxo_pointer` or
+  `reward_live_stake` -- including statements on the prepared-statement
+  cache -- it writes the pending outputs and spend marks, raises the `utxo`
+  sequence to the last id handed out, and replays the closed segments. The
+  current block's deltas stay queued. Readers of live rows inside the batch,
+  such as a withdrawal's re-sum, therefore see what the per-row path would
+  hold at that point. An output created and spent before the barrier is not
+  in `utxo` at all, where the per-row path holds it marked spent; nothing
+  inside a trusted batch reads spent rows from the table. Asset and
+  `utxo_address` rows stay queued until `FlushBatch`, as on the per-row path.
+  A barrier writes every pending output, so outputs a later transaction
+  spends go back to being inserted, marked and deleted; on withdrawal-heavy
+  ranges the `barrier_flushes` count in the Debug line shows how often.
+
+Ids are exact only while the overlay is the only writer of `utxo` and
+`asset` rows inside the batch, which holds for every trusted block apply. The
+overlay keeps no undo log: a savepoint rollback across any overlay change,
+including a barrier write, fails the batch, and none occurs inside a trusted
+block-apply transaction. A UNIQUE failure counts as an overlay conflict only
+on the tables the overlay writes under its own ids (`utxo`, `asset`,
+`utxo_pointer`, `reward_live_stake`); any other would fail the per-row path
+too. A `FlushBatch` Debug line reports the outputs created and elided, the
+pre-batch spends, the prefetched keys and the barrier writes.
 
 # At-tip recovery repair
 

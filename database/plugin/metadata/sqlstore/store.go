@@ -940,9 +940,12 @@ func (s *Store) dbFromTxn(
 	if sqlTransaction.finished || sqlTransaction.tx == nil {
 		return nil, nil, types.ErrNilTxn
 	}
-	return s.instrumentedQueryer(
-		sqlTransaction.tx,
-	), sqlTransaction.ctx, nil
+	db := s.instrumentedQueryer(sqlTransaction.tx)
+	if acc := sqlTransaction.overlayAccumulator; acc != nil &&
+		acc.overlay != nil {
+		db = barrierQueryer{queryer: db, store: s, accumulator: acc}
+	}
+	return db, sqlTransaction.ctx, nil
 }
 
 func (s *Store) readDBFromTxn(
@@ -1167,6 +1170,9 @@ type sqlTxn struct {
 	batchBefore     map[*transactionBatchAccumulator]transactionBatchCheckpoint
 	batchSavepoints map[string]map[*transactionBatchAccumulator]transactionBatchCheckpoint
 	savepointOrder  []string
+	// overlayAccumulator holds the accumulator whose batch UTxO overlay is
+	// active on this transaction; dbFromTxn then hands out a barrierQueryer.
+	overlayAccumulator *transactionBatchAccumulator
 }
 
 func (t *sqlTxn) Commit() error {
@@ -1192,6 +1198,7 @@ func (t *sqlTxn) Commit() error {
 	}
 	t.batchBefore = nil
 	t.batchSavepoints = nil
+	t.overlayAccumulator = nil
 	return err
 }
 
@@ -1209,6 +1216,7 @@ func (t *sqlTxn) Rollback() error {
 	t.restoreBatches(t.batchBefore)
 	t.batchBefore = nil
 	t.batchSavepoints = nil
+	t.overlayAccumulator = nil
 	if t.tx == nil {
 		return nil
 	}
@@ -1419,6 +1427,14 @@ func (t *sqlTxn) bindBatch(accumulator *transactionBatchAccumulator) error {
 		checkpoint[accumulator] = accumulator.checkpoint()
 	}
 	return nil
+}
+
+func (t *sqlTxn) setOverlayAccumulator(
+	accumulator *transactionBatchAccumulator,
+) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.overlayAccumulator = accumulator
 }
 
 func (t *sqlTxn) boundBatches() []*transactionBatchAccumulator {

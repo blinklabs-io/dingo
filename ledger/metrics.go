@@ -307,6 +307,11 @@ type stateMetrics struct {
 	// value on a Mithril-bootstrapped node explains a stake shortfall; a
 	// rising value on any node is a live divergence from the network.
 	skippedStakeRewardRounds prometheus.Counter
+	// Incremented each time a trusted batch's UTxO overlay hit a write
+	// conflict and the batch was applied again on the per-row path. Each
+	// increment is a batch that ran at the slower per-row speed; a rising
+	// value means the store holds rows the overlay does not expect.
+	trustedBatchOverlayFallbacks prometheus.Counter
 	// Incremented each time GetStakeDistribution or GetPoolDistr2 omits a
 	// pool that holds stake at the queried snapshot but has no resolvable
 	// registration/VRF key hash on record. This is a deliberate fallback
@@ -769,6 +774,13 @@ func (m *stateMetrics) incLeaderThresholdRejections() {
 	m.leaderThresholdRejections.Inc()
 }
 
+func (m *stateMetrics) incTrustedBatchOverlayFallbacks() {
+	if m == nil || m.trustedBatchOverlayFallbacks == nil {
+		return
+	}
+	m.trustedBatchOverlayFallbacks.Inc()
+}
+
 func (m *stateMetrics) incSkippedStakeRewardRounds() {
 	if m == nil || m.skippedStakeRewardRounds == nil {
 		return
@@ -1226,6 +1238,12 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 		prometheus.CounterOpts{
 			Name: "dingo_ledger_skipped_stake_reward_rounds_total",
 			Help: "epoch-boundary reward rounds skipped for want of their inputs; each one leaves reward balances and the leadership stake distribution permanently short by that epoch's rewards, which makes the node reject canonical blocks near the leader-eligibility threshold",
+		},
+	)
+	m.trustedBatchOverlayFallbacks = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_ledger_trusted_batch_overlay_fallbacks_total",
+			Help: "trusted batches whose batch UTxO overlay hit a write conflict and were applied again on the per-row path",
 		},
 	)
 	m.poolStakeDistributionOmittedPools = promautoFactory.NewCounter(
