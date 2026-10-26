@@ -12414,7 +12414,7 @@ covers the durable lookups as well as the wait. The health service supports
 only unary `Check`; `Health/Watch` returns `Unimplemented` instead of creating
 a stream outside this listener's admission limits. `FollowTip`, `WatchTx`,
 `WatchMempool`, and `WaitForTx` take a slot from a shared limiter
-(`MaxStreams` process-wide, `MaxStreamsPerClient` per remote host) and answer
+(`MaxStreams` process-wide, `MaxStreamsPerClient` per client) and answer
 `ResourceExhausted` when
 none is free. `WatchTx` and `WatchMempool` reject a predicate with more than
 `MaxPredicateNodes` nodes, and `WatchTx` rejects an intersect more than
@@ -12441,8 +12441,9 @@ client across all its streams by making each wait for its token, so a replay
 slows down but is not refused; and `MaxReplayBlocksPerClient` (default
 20,000,000) blocks per `ReplayBudgetWindow` (default 24h) caps the history one
 client may pull, after which its replay ends with `ResourceExhausted` until the
-window renews. A client is the remote host, as for the stream caps, so the
-per-client slot cap is what stops one host holding every slot. A stream that
+window renews. A client is the remote IPv4 address or IPv6 /64 prefix, as for
+the stream caps, so addresses rotated within one prefix share a budget, and the
+per-client slot cap is what stops one client holding every slot. A stream that
 reaches the tip returns its replay slot and never needs one again: blocks it
 later falls behind on, after a fork switch or while blocks arrive faster than
 it reads, are still charged against the rate and budget, but a full slot cap
@@ -12496,7 +12497,7 @@ discarded, and clients behind one proxy share a budget. Admission returns
 `ErrEvaluationBusy` instead of queuing; Blockfrost reports it as `429` and UTxO
 RPC as `ResourceExhausted`.
 UTxO RPC additionally admits EvalTx requests before transaction type detection
-or CBOR decoding, with four slots process-wide and two per remote host. The
+or CBOR decoding, with four slots process-wide and two per client. The
 ledger limiter remains responsible for script work after parsing.
 Each redeemer is evaluated against the part of `MaxTxExUnits` the earlier
 redeemers have not used, so a transaction's total work stays within the
