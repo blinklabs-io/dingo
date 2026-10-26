@@ -174,6 +174,7 @@ type mithrilLedger interface {
 	Tip() ochainsync.Tip
 	HoldNetworkIngest() (release func())
 	PauseChainIngest() (resume func())
+	DrainTrustedPrune(ctx context.Context) error
 	ApplyTrustedBatch(
 		ctx context.Context,
 		expected ocommon.Point,
@@ -433,6 +434,13 @@ func (c *mithrilCoordinator) catchUp(
 // run a live Restore or Truncate aborted (errMithrilLifecycleAbort) skips
 // it, or stops it if the abort arrives mid-rebuild, and the operation's
 // reinitialization repairs them before chain ingest.
+//
+// Then, on the same context, it drains the consumed-UTxO cleanup the trusted
+// batches still owe (DrainTrustedPrune), which batches run only every few
+// batches, so Ouroboros resumes without that backlog. A lifecycle abort skips
+// or stops the drain as it does the rebuild: the operation replaces or
+// rewrites the database the drain would prune.
+//
 // The run's end is stamped before the rebuild, so the Mithril rate is the
 // rate of applying, not of rebuilding. The rest of the tuning is undone
 // after the release, so the lazy rebuild holds neither Ouroboros nor the
@@ -460,31 +468,45 @@ func (c *mithrilCoordinator) stream(
 			defer releaseIngest()
 			defer resume()
 			run.end = c.now()
-			if tuned.restore == nil {
-				return
-			}
 			if errors.Is(context.Cause(ctx), errMithrilLifecycleAbort) {
-				c.logger.Info(
-					"mithril: skipping the catch-up index rebuild for a "+
-						"database lifecycle operation; it repairs them "+
-						"before chain ingest",
-					"component", "mithril",
-				)
+				if tuned.restore != nil {
+					c.logger.Info(
+						"mithril: skipping the catch-up index rebuild for a "+
+							"database lifecycle operation; it repairs them "+
+							"before chain ingest",
+						"component", "mithril",
+					)
+				}
 				return
 			}
-			// A lifecycle abort that arrives during the rebuild stops it
-			// too, so abortRun never waits one out.
-			rebuildCtx, stopRebuild := context.WithCancelCause(nodeCtx)
-			defer stopRebuild(nil)
+			// A lifecycle abort that arrives during the rebuild or the
+			// drain stops it too, so abortRun never waits one out.
+			releaseCtx, stopRelease := context.WithCancelCause(nodeCtx)
+			defer stopRelease(nil)
 			stopWatch := context.AfterFunc(ctx, func() {
 				if cause := context.Cause(ctx); errors.Is(
 					cause, errMithrilLifecycleAbort,
 				) {
-					stopRebuild(cause)
+					stopRelease(cause)
 				}
 			})
 			defer stopWatch()
-			tuned.restore(rebuildCtx)
+			if tuned.restore != nil {
+				tuned.restore(releaseCtx)
+			}
+			// Ouroboros resumes on a ledger with no consumed-UTxO cleanup
+			// still owed by the trusted batches, as when every batch ran
+			// it.
+			if err := live.ledger.DrainTrustedPrune(
+				releaseCtx,
+			); err != nil && releaseCtx.Err() == nil {
+				c.logger.Warn(
+					"mithril: consumed UTxO cleanup after catch-up failed; "+
+						"the periodic cleanup reclaims the rows",
+					"component", "mithril",
+					"error", err,
+				)
+			}
 		})
 		if live.tuning != nil {
 			tuned = live.tuning.begin(ctx, scope)

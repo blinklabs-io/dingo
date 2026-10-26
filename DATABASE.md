@@ -6113,17 +6113,37 @@ that range. API storage mode keeps spent rows for history queries, so it skips
 this delete.
 
 Rows a batch spends that an earlier batch committed are left marked spent by
-the block-apply transaction. After the commit, `ApplyTrustedBatch` runs the
-consumed-UTxO cleanup (`UtxosDeleteConsumed`, persisting the floor first) up
-to the committed tip, which lies at or below the certified immutable tip, in
-deletes of 1,000 rows until none is left or 30 seconds have passed; the
-periodic cleanup defers while the node is catching up, so without this they
-would stay for the whole catch-up. `Database.CountUtxosConsumedUpTo` reports
-the rows a sweep to a slot would remove, reading at most a given limit; the
-cleanup logs it as the remaining backlog when the time budget stops it. API
-storage mode skips it too. The block-apply transaction writes through the
-row-batching accumulator in every storage mode; the stored state is the same
-as on the unbatched path.
+the block-apply transaction. `ApplyTrustedBatch` runs the consumed-UTxO
+cleanup (`UtxosDeleteConsumed`, persisting the floor first) up to the
+committed tip, which lies at or below the certified immutable tip, after the
+first batch it commits in a process and then once every
+`trustedBatchPruneEvery` (16) committed batches, in deletes of
+`trustedBatchPruneRows` (20,000) rows until none is left or 30 seconds have
+passed. A spent row costs less to delete the more rows its transaction
+deletes with it, so draining several batches' spends in a few large
+transactions costs less than draining each batch's in one or two small ones.
+A cleanup that skips for a run already in flight, fails or runs out of
+budget is retried after the next batch. `LedgerState.DrainTrustedPrune` runs
+the cleanup still owed with no time budget, waiting out another run, until
+nothing prunable is left; the Mithril coordinator calls it before it resumes
+chain ingest, so a completed catch-up leaves the backlog an every-batch
+cleanup leaves. A catch-up that a lifecycle operation aborts or a node
+shutdown interrupts, or whose drain fails, leaves the rest marked spent for
+the periodic cleanup. The
+cleanup never reaches past the tip the last trusted batch committed, even
+once the live loop has moved the ledger tip on, so a cleanup still owed
+after the pause cannot raise the floor into the rollback window. The timer
+and epoch-boundary cleanup can also run during a catch-up, but only up to
+the tip minus the stability window and at most 1,000 rows per run, so on its
+own it would leave most of these rows for the whole catch-up. Until a
+cleanup reaches them they are ordinary spent rows (`deleted_slot` set), as
+rows inside the stability window are in live operation: live-UTxO reads
+skip them, and a rollback above the prune floor restores them.
+`Database.CountUtxosConsumedUpTo` reports the rows a sweep to a slot would
+remove, reading at most a given limit; the cleanup logs it as the remaining
+backlog when the time budget stops it. API storage mode skips it too. The
+block-apply transaction writes through the row-batching accumulator in every
+storage mode; the stored state is the same as on the unbatched path.
 
 A failure between the two steps leaves blocks in the blob store above the
 metadata tip. They are tolerated: a retry from the unchanged metadata tip

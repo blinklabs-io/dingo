@@ -3875,15 +3875,26 @@ source take that role at runtime, without the construction-time
   `dingo_ledger_trusted_batch_overlay_fallbacks_total`, and applies the
   blocks that did not commit again on the per-row path. Regression tests are
   in `ledger/trusted_batch_overlay_test.go` and
-  `database/plugin/metadata/sqlstore/utxo_overlay_test.go`. After the batch
-  commits, and before the call returns, the consumed-UTxO cleanup runs
-  without its catch-up deferral, up to the new tip rather than the stability
-  window behind it, deleting 1,000 rows at a time until nothing prunable is
-  left or `trustedBatchPruneBudget` (30 s) has passed, so it keeps pace with
-  however many outputs a batch spends; what the budget leaves drains after
-  the next batch, and a Debug line per batch reports the rows pruned and the
-  remaining prunable backlog (counted up to 10,000). A cleanup run already
-  in flight makes it skip that batch. API storage mode keeps spent rows.
+  `database/plugin/metadata/sqlstore/utxo_overlay_test.go`. Before the call
+  returns, the consumed-UTxO cleanup runs without its catch-up deferral, up to
+  the tip the last trusted batch committed (never further, even once the live
+  loop has moved the ledger tip) rather than the stability window behind it,
+  after the first batch a process commits and then once every
+  `trustedBatchPruneEvery` (16) committed batches. It deletes
+  `trustedBatchPruneRows` (20,000) rows at a time until nothing prunable is
+  left or `trustedBatchPruneBudget` (30 s) has passed: a spent row costs less
+  to delete the more rows its transaction deletes with it, so a few large
+  deletes every sixteen batches cost less than one or two small ones after
+  each. A cleanup that skips because a run is already in flight, fails or
+  runs out of budget is retried after the next batch, and a Debug line per
+  run reports the rows pruned and the remaining prunable backlog (counted up
+  to 10,000). `DrainTrustedPrune` runs the cleanup still owed until nothing
+  is left up to that tip, with no time budget and waiting out another
+  cleanup run instead of skipping; it stops only when its context ends or
+  the cleanup fails. When cleanup is owed it logs its start and its end, with
+  the rows deleted and the duration, at Info. The Mithril coordinator calls it before it resumes
+  chain ingest (see "Mithril catch-up"), so a completed catch-up leaves the
+  backlog an every-batch cleanup leaves. API storage mode keeps spent rows.
 - Chainsync rollbacks still run while paused. They serialize with block apply
   through `submitBlockApplyDBTxn`, so a rollback that moves the tip under an
   in-flight batch fails it with `ErrStaleBatch` rather than letting it commit
@@ -10635,8 +10646,11 @@ exactly as before: no coordinator starts and no aggregator is contacted.
   (`PauseChainIngest`). Held, it re-reads the tip, locates it again (usually
   in a file already probed) and applies. A slow, failing or degraded
   aggregator therefore costs Ouroboros nothing until the run is ready to
-  apply. The release resumes chain ingest and then releases network ingest on
-  every exit, a panic included, and the coordinator releases it as well if
+  apply. The release drains the consumed-UTxO cleanup the trusted batches
+  still owe (`DrainTrustedPrune`, after the catch-up index rebuild and on the
+  same context, so a live Restore or Truncate skips or stops it), resumes
+  chain ingest and then releases network ingest on every exit, a panic
+  included, and the coordinator releases it as well if
   the source returns without doing so; the release's resync makes every peer
   re-intersect from the new tip. Only one run exists at a time: runs come
   from the coordinator's single goroutine.
