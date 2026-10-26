@@ -116,9 +116,10 @@ func TestDeliveredHistoryCorroboratesAfterAdmissionFrontierPruning(t *testing.T)
 func TestDeliveredPeerHistoryIsBoundedAndRemoved(t *testing.T) {
 	t.Parallel()
 	cs := NewChainSelector(ChainSelectorConfig{
-		GenesisMode:     true,
-		SecurityParam:   20,
-		MaxTrackedPeers: 1,
+		GenesisMode:           true,
+		SecurityParam:         20,
+		MinCorroboratingPeers: 1,
+		MaxTrackedPeers:       1,
 	})
 	first := corrConn(6)
 	for block := uint64(1); block <= 100; block++ {
