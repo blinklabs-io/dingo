@@ -6096,12 +6096,10 @@ func TestStagedFarFrontierCatchUpWithReferenceAheadOfLocalTip(t *testing.T) {
 	}{
 		{name: "below catch-up ceiling", referenceOffset: 3, accepted: true},
 		{name: "at catch-up ceiling", referenceOffset: 4, accepted: true},
-		{name: "above catch-up ceiling", referenceOffset: 5, accepted: true},
-		{
-			name:            "far above catch-up ceiling",
-			referenceOffset: 30,
-			accepted:        true,
-		},
+		// Beyond the ceiling one connection's own header chain is never
+		// enough: the claim waits for another identity group.
+		{name: "above catch-up ceiling", referenceOffset: 5},
+		{name: "far above catch-up ceiling", referenceOffset: 30},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -6134,7 +6132,7 @@ func TestStagedFarFrontierCatchUpWithReferenceAheadOfLocalTip(t *testing.T) {
 				updates = append(updates, update)
 				disposition := cs.PreparePeerTipAdmissionDisposition(update)
 				if !tc.accepted {
-					require.Equal(t, PeerTipUpdateRejected, disposition)
+					require.Equal(t, PeerTipUpdatePending, disposition)
 					continue
 				}
 				if i < c.k {
@@ -6145,7 +6143,10 @@ func TestStagedFarFrontierCatchUpWithReferenceAheadOfLocalTip(t *testing.T) {
 			}
 
 			if !tc.accepted {
-				assert.NotContains(t, cs.pendingFarTipClaims, conn)
+				claim, ok := cs.pendingFarTipClaims[conn]
+				require.True(t, ok)
+				assert.False(t, claim.lone)
+				assert.False(t, claim.corroborated)
 				assert.Nil(t, cs.GetPeerTip(conn))
 				return
 			}
@@ -7366,8 +7367,9 @@ func TestBootstrapAdvertisedBoundRejectsLoneFarClaim(t *testing.T) {
 
 // TestPeerAheadOfLaggingAppliedTipFollowedDuringCatchUp covers a reference
 // beyond localTip+2*K, where the observed frontier exceeds reference+K. The
-// frontier is accepted when corroborated or when it extends a connected header
-// chain, and rejected when it is a single uncorroborated or unreachable claim.
+// frontier is accepted only when a connection from another identity group
+// corroborates it. A connected header chain from one connection, a second
+// connection from the same group, and an unreachable claim are rejected.
 func TestPeerAheadOfLaggingAppliedTipFollowedDuringCatchUp(t *testing.T) {
 	t.Parallel()
 
@@ -7379,17 +7381,23 @@ func TestPeerAheadOfLaggingAppliedTipFollowedDuringCatchUp(t *testing.T) {
 	)
 	chain := loneFarChain{localBlock: local, k: k}
 	advertised := chain.tip(4_687_076)
-	newSelector := func(t *testing.T) *ChainSelector {
+	newSelectorWithConfig := func(
+		t *testing.T,
+		cfg ChainSelectorConfig,
+	) *ChainSelector {
 		t.Helper()
-		cs := NewChainSelector(ChainSelectorConfig{
-			SecurityParam:             k,
-			DisableEventSubscriptions: true,
-		})
+		cfg.SecurityParam = k
+		cfg.DisableEventSubscriptions = true
+		cs := NewChainSelector(cfg)
 		cs.SetLocalTip(chain.tip(local))
 		require.True(t, cs.UpdatePeerTip(
 			newTestConnectionId(1), chain.tip(reference), nil,
 		))
 		return cs
+	}
+	newSelector := func(t *testing.T) *ChainSelector {
+		t.Helper()
+		return newSelectorWithConfig(t, ChainSelectorConfig{})
 	}
 
 	t.Run("reference plus K is accepted alone", func(t *testing.T) {
@@ -7408,20 +7416,53 @@ func TestPeerAheadOfLaggingAppliedTipFollowedDuringCatchUp(t *testing.T) {
 		))
 	})
 
-	t.Run("corroborated by another connection", func(t *testing.T) {
+	t.Run("corroborated by another identity group", func(t *testing.T) {
 		t.Parallel()
 		cs := newSelector(t)
-		first := newTestConnectionId(2)
-		second := newTestConnectionId(3)
+		first := corrConnAddr("10.0.0.2", 3001)
+		second := corrConnAddr("10.0.0.3", 3001)
 		assert.False(t, cs.updatePeerTipObserved(
 			first, advertised, chain.tip(claim), nil,
 		))
 		assert.True(t, cs.updatePeerTipObserved(
 			second, advertised, chain.tip(claim+50), nil,
-		), "a frontier within K of another connection's claim must be accepted")
+		), "a frontier within K of another group's claim must be accepted")
 		assert.True(t, cs.updatePeerTipObserved(
 			first, advertised, chain.tip(claim+1), nil,
 		))
+	})
+
+	t.Run("same host does not corroborate", func(t *testing.T) {
+		t.Parallel()
+		cs := newSelector(t)
+		first := corrConnAddr("10.0.0.2", 3001)
+		second := corrConnAddr("10.0.0.2", 3002)
+		assert.False(t, cs.updatePeerTipObserved(
+			first, advertised, chain.tip(claim), nil,
+		))
+		assert.False(t, cs.updatePeerTipObserved(
+			second, advertised, chain.tip(claim+50), nil,
+		), "a second connection from one host is not independent")
+		assert.False(t, cs.updatePeerTipObserved(
+			first, advertised, chain.tip(claim+1), nil,
+		))
+	})
+
+	t.Run("same identity group does not corroborate", func(t *testing.T) {
+		t.Parallel()
+		cs := newSelectorWithConfig(t, ChainSelectorConfig{
+			PeerIdentity: func(ouroboros.ConnectionId) string {
+				return "one-operator"
+			},
+		})
+		first := corrConnAddr("10.0.0.2", 3001)
+		second := corrConnAddr("10.0.0.3", 3001)
+		assert.False(t, cs.updatePeerTipObserved(
+			first, advertised, chain.tip(claim), nil,
+		))
+		assert.False(t, cs.updatePeerTipObserved(
+			second, advertised, chain.tip(claim+50), nil,
+		), "distinct hosts in one identity group are not independent")
 	})
 
 	t.Run("not corroborated more than K apart", func(t *testing.T) {
@@ -7435,18 +7476,16 @@ func TestPeerAheadOfLaggingAppliedTipFollowedDuringCatchUp(t *testing.T) {
 		))
 	})
 
-	t.Run("connected header chain", func(t *testing.T) {
+	t.Run("connected header chain alone is rejected", func(t *testing.T) {
 		t.Parallel()
 		cs := newSelector(t)
 		conn := newTestConnectionId(2)
-		for i := uint64(0); i <= k; i++ {
+		for i := uint64(0); i <= 2*k; i++ {
 			block := claim + i
-			accepted := chain.deliver(cs, conn, block, chain.prevHash(block))
-			if i < k {
-				require.False(t, accepted, "header %d must wait for the run", i)
-			} else {
-				require.True(t, accepted, "header %d completes the run", i)
-			}
+			require.False(t,
+				chain.deliver(cs, conn, block, chain.prevHash(block)),
+				"self-linked header %d must not lift the ceiling", i,
+			)
 		}
 	})
 
@@ -7470,4 +7509,76 @@ func TestPeerAheadOfLaggingAppliedTipFollowedDuringCatchUp(t *testing.T) {
 			newTestConnectionId(3), advertised, impossible(claim+10_001), nil,
 		))
 	})
+}
+
+// TestFarFrontierCorroborationAtReferenceBoundaries covers unconnected claims
+// past reference+K with the reference at the local+K and local+2*K
+// boundaries. A reference within K of the local tip keeps the strict bound. Up
+// to local+2*K any second connection corroborates; beyond it only a
+// connection from another identity group does.
+func TestFarFrontierCorroborationAtReferenceBoundaries(t *testing.T) {
+	t.Parallel()
+
+	const (
+		k     = 108
+		local = 10_000
+	)
+	chain := loneFarChain{localBlock: local, k: k}
+	advertised := chain.tip(4_687_076)
+	for _, tc := range []struct {
+		name            string
+		reference       uint64
+		sameHostAccepts bool
+		otherHostAccept bool
+	}{
+		{name: "local plus K", reference: local + k},
+		{
+			name:            "local plus K plus one",
+			reference:       local + k + 1,
+			sameHostAccepts: true,
+			otherHostAccept: true,
+		},
+		{
+			name:            "local plus 2K",
+			reference:       local + 2*k,
+			sameHostAccepts: true,
+			otherHostAccept: true,
+		},
+		{
+			name:            "local plus 2K plus one",
+			reference:       local + 2*k + 1,
+			otherHostAccept: true,
+		},
+	} {
+		for _, sameHost := range []bool{true, false} {
+			name := tc.name + "/other host"
+			want := tc.otherHostAccept
+			secondHost := "10.0.0.3"
+			if sameHost {
+				name = tc.name + "/same host"
+				want = tc.sameHostAccepts
+				secondHost = "10.0.0.2"
+			}
+			t.Run(name, func(t *testing.T) {
+				t.Parallel()
+				cs := NewChainSelector(ChainSelectorConfig{
+					SecurityParam:             k,
+					DisableEventSubscriptions: true,
+				})
+				cs.SetLocalTip(chain.tip(local))
+				require.True(t, cs.UpdatePeerTip(
+					newTestConnectionId(1), chain.tip(tc.reference), nil,
+				))
+				claim := tc.reference + k + 41
+				assert.False(t, cs.updatePeerTipObserved(
+					corrConnAddr("10.0.0.2", 3001),
+					advertised, chain.tip(claim), nil,
+				), "a lone unconnected claim past reference plus K is rejected")
+				assert.Equal(t, want, cs.updatePeerTipObserved(
+					corrConnAddr(secondHost, 3002),
+					advertised, chain.tip(claim+10), nil,
+				))
+			})
+		}
+	}
 }

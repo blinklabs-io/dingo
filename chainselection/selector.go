@@ -2162,8 +2162,18 @@ func (cs *ChainSelector) checkPeerTipPlausibleWithClaimsTrackedLocked(
 			// delivered a connected header chain
 			// (see corroborateFarTipClaimLocked). A single claim, honest or
 			// fabricated, cannot break the ratchet by itself.
+			//
+			// With the reference itself beyond the catch-up ceiling nothing
+			// anchors the frontier near the local chain, and one peer can
+			// fabricate any number of self-linked headers. There only a
+			// connection from another identity group corroborates
+			// (corroborateIndependentFarTipClaimLocked).
 			if observedReject {
-				corroborated, changed := cs.corroborateFarTipClaimTrackedLocked(
+				corroborate := cs.corroborateFarTipClaimTrackedLocked
+				if referenceBlock > catchUpCeiling {
+					corroborate = cs.corroborateIndependentFarTipClaimLocked
+				}
+				corroborated, changed := corroborate(
 					connId, observedTip, link, claims,
 				)
 				claimsChanged = claimsChanged || changed
@@ -2358,8 +2368,9 @@ func (cs *ChainSelector) recordRejectedAdvertisedClaimLocked(
 // What it cannot do is claim an arbitrary height, skip or reorder headers, or
 // keep standing once a header fails: see loneFrontierBrokenLocked, RemovePeer
 // on the failed connection, and the ledger, which verifies every applied
-// header. Nothing here tells two connections to one operator from two
-// independent peers, so corroboration is not a Sybil defence either.
+// header. Below the catch-up ceiling nothing here tells two connections to
+// one operator from two independent peers, so corroboration there is not a
+// Sybil defence either; beyond it see corroborateIndependentFarTipClaimLocked.
 //
 // Pending entries recorded here are provisional: they never enter cs.peerTips
 // and so never influence chain selection, corroboration, or the Genesis exit
@@ -2372,6 +2383,36 @@ func (cs *ChainSelector) corroborateFarTipClaimTrackedLocked(
 	observedTip ochainsync.Tip,
 	link deliveredLink,
 	claims map[ouroboros.ConnectionId]farTipClaim,
+) (bool, bool) {
+	return cs.corroborateFarTipClaimWithLocked(
+		connId, observedTip, link, claims, false,
+	)
+}
+
+// corroborateIndependentFarTipClaimLocked is corroborateFarTipClaimLocked
+// for a frontier whose reference is beyond the catch-up ceiling. Only a claim
+// from a connection in another identity group (corroboratorIdentity)
+// corroborates it, and a connected header chain from connId alone does not:
+// its run is still counted but never accepts the claim. A connection without
+// an identity fails closed. Must be called with cs.mutex held and
+// cs.securityParam > 0.
+func (cs *ChainSelector) corroborateIndependentFarTipClaimLocked(
+	connId ouroboros.ConnectionId,
+	observedTip ochainsync.Tip,
+	link deliveredLink,
+	claims map[ouroboros.ConnectionId]farTipClaim,
+) (bool, bool) {
+	return cs.corroborateFarTipClaimWithLocked(
+		connId, observedTip, link, claims, true,
+	)
+}
+
+func (cs *ChainSelector) corroborateFarTipClaimWithLocked(
+	connId ouroboros.ConnectionId,
+	observedTip ochainsync.Tip,
+	link deliveredLink,
+	claims map[ouroboros.ConnectionId]farTipClaim,
+	independentOnly bool,
 ) (bool, bool) {
 	if !cs.blockWithinSlotDistanceLocked(observedTip) {
 		_, existed := claims[connId]
@@ -2416,6 +2457,7 @@ func (cs *ChainSelector) corroborateFarTipClaimTrackedLocked(
 		changed = !exists || !farTipClaimEqual(prev, updated)
 		claims[connId] = updated
 	}
+	identity, hasIdentity := cs.corroboratorIdentity(connId)
 	corroborated := false
 	for otherConn, other := range claims {
 		if otherConn == connId || other.lone {
@@ -2425,19 +2467,26 @@ func (cs *ChainSelector) corroborateFarTipClaimTrackedLocked(
 		if lo > hi {
 			lo, hi = hi, lo
 		}
-		if safeAddUint64(lo, cs.securityParam) >= hi {
-			if !other.corroborated {
-				other.corroborated = true
-				claims[otherConn] = other
-				changed = true
-			}
-			corroborated = true
+		if safeAddUint64(lo, cs.securityParam) < hi {
+			continue
 		}
+		otherIdentity, otherHasIdentity := cs.corroboratorIdentity(otherConn)
+		independent := hasIdentity && otherHasIdentity &&
+			otherIdentity != identity
+		if independentOnly && !independent {
+			continue
+		}
+		if !other.corroborated {
+			other.corroborated = true
+			claims[otherConn] = other
+			changed = true
+		}
+		corroborated = true
 	}
 	if corroborated {
 		return true, changed
 	}
-	if updated.run > cs.securityParam {
+	if !independentOnly && updated.run > cs.securityParam {
 		if !updated.lone {
 			updated.lone = true
 			claims[connId] = updated

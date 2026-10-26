@@ -5760,9 +5760,14 @@ The stale-reference recovery also applies when the tracked reference is ahead
 of the local tip by more than `securityParam`, including beyond the
 `localTip + 2*securityParam` catch-up ceiling; a snapshot-backed or
 from-genesis local tip can lag its delivered peer references without making
-those references current enough to rule out catch-up. A frontier past that
-reference plus `securityParam` is accepted only with the same corroboration or
-connected-chain evidence.
+those references current enough to rule out catch-up. Up to that ceiling a
+frontier past the reference plus `securityParam` is accepted with the same
+corroboration or connected-chain evidence. Beyond it nothing anchors the
+frontier near the local chain and one peer can fabricate any number of
+self-linked headers, so only a connection in another identity group
+(`ChainSelectorConfig.PeerIdentity`, or the remote host when unset)
+corroborates it, and a connected header chain from one connection is not
+accepted (`corroborateIndependentFarTipClaimLocked`).
 Staging a peer tip reads the local tip from `ChainSelectorConfig.AppliedTip`
 (the live applied ledger tip) rather than from the last `SetLocalTip`, which
 the node calls only at startup and on the stall recycler's tick. A node
