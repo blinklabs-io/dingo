@@ -37,6 +37,15 @@ func (i ownerFileInfo) Sys() any {
 	return &syscall.Stat_t{Uid: i.uid}
 }
 
+type modeFileInfo struct {
+	os.FileInfo
+	mode os.FileMode
+}
+
+func (i modeFileInfo) Mode() os.FileMode { return i.mode }
+
+func (i modeFileInfo) IsDir() bool { return i.mode.IsDir() }
+
 func TestReadRejectsInsecurePermissions(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "secret")
@@ -110,6 +119,66 @@ func TestReadAcceptsStickyWritableParentDirectory(t *testing.T) {
 	}
 	if got != "s3cret" {
 		t.Fatalf("Read = %q, want %q", got, "s3cret")
+	}
+}
+
+func TestReadRejectsWritableAncestorAboveStickyDirectory(t *testing.T) {
+	t.Parallel()
+	outer := t.TempDir()
+	sticky := filepath.Join(outer, "sticky")
+	if err := os.Mkdir(sticky, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(sticky, "secret")
+	if err := os.WriteFile(path, []byte("s3cret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(sticky, 0o777|os.ModeSticky); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(outer, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Read(path)
+	if !errors.Is(err, keystore.ErrInsecureFileMode) {
+		t.Fatalf("Read error = %v, want ErrInsecureFileMode", err)
+	}
+}
+
+func TestCheckTrustedPathEntry(t *testing.T) {
+	t.Parallel()
+	real, err := os.Stat(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// #nosec G115 -- test UID is bounded.
+	foreignUID := uint32(os.Geteuid() + 1)
+	own := uint32(os.Geteuid()) // #nosec G115 -- Effective UIDs are nonnegative.
+	tests := []struct {
+		name string
+		uid  uint32
+		mode os.FileMode
+		want error
+	}{
+		{"sticky writable foreign owner", foreignUID,
+			os.ModeDir | os.ModeSticky | 0o777, keystore.ErrInsecureFileOwner},
+		{"sticky writable own owner", own,
+			os.ModeDir | os.ModeSticky | 0o777, nil},
+		{"non-sticky writable own owner", own,
+			os.ModeDir | 0o777, keystore.ErrInsecureFileMode},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			info := ownerFileInfo{
+				FileInfo: modeFileInfo{FileInfo: real, mode: tc.mode},
+				uid:      tc.uid,
+			}
+			err := checkTrustedPathEntry("dir", info)
+			if !errors.Is(err, tc.want) || (tc.want == nil && err != nil) {
+				t.Fatalf("error = %v, want %v", err, tc.want)
+			}
+		})
 	}
 }
 

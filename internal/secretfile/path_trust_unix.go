@@ -67,19 +67,7 @@ func checkTrustedPathChain(path string) error {
 		if err != nil {
 			return fmt.Errorf("inspect value file path %q: %w", current, err)
 		}
-		if info.IsDir() && info.Mode().Perm()&0o022 != 0 {
-			if info.Mode()&os.ModeSticky != 0 {
-				return nil
-			}
-			return fmt.Errorf(
-				"value file directory %q has mode %04o; group or other "+
-					"write access requires the sticky bit: %w",
-				current,
-				info.Mode().Perm(),
-				keystore.ErrInsecureFileMode,
-			)
-		}
-		if err := requireTrustedOwner(current, info); err != nil {
+		if err := checkTrustedPathEntry(current, info); err != nil {
 			return err
 		}
 		parent := filepath.Dir(current)
@@ -87,6 +75,28 @@ func checkTrustedPathChain(path string) error {
 			return nil
 		}
 	}
+}
+
+// checkTrustedPathEntry applies the per-entry rules: every entry must be owned
+// by the current user or root, and a directory writable by group or other must
+// carry the sticky bit. A sticky directory is still subject to the ownership
+// check and the walk continues to its ancestors.
+func checkTrustedPathEntry(path string, info fs.FileInfo) error {
+	if err := requireTrustedOwner(path, info); err != nil {
+		return err
+	}
+	if info.IsDir() &&
+		info.Mode().Perm()&0o022 != 0 &&
+		info.Mode()&os.ModeSticky == 0 {
+		return fmt.Errorf(
+			"value file directory %q has mode %04o; group or other "+
+				"write access requires the sticky bit: %w",
+			path,
+			info.Mode().Perm(),
+			keystore.ErrInsecureFileMode,
+		)
+	}
+	return nil
 }
 
 func requireTrustedOwner(path string, info fs.FileInfo) error {
