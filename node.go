@@ -641,21 +641,22 @@ func (n *Node) newOuroborosConfig(
 		// connection, so the fetch is gated on the txs offer, not the block
 		// offer. Best-effort: a fetch failure never tears down the shared
 		// connection.
-		EnableLeiosTxFetch:              enableLeiosNetworking,
-		LeiosTxFetchTailBudget:          leiosTxFetchTailBudget,
-		ChainsyncIngressEligible:        n.isChainsyncIngressEligible,
-		ChainsyncHasBestPeer:            n.chainsyncHasBestPeer,
-		ChainsyncApplyEligible:          n.chainsyncApplyEligible,
-		ChainsyncAwaitEagerness:         n.chainsyncAwaitEagerness,
-		ChainsyncAwaitCorroboration:     n.chainsyncAwaitCorroboration,
-		ChainsyncObservePeerTip:         n.chainsyncObservePeerTip,
-		ChainsyncRecordDeliveredPeerTip: n.chainsyncRecordDeliveredPeerTip,
-		ChainsyncPrepareForecastWitness: n.chainsyncPrepareForecastWitness,
-		ChainsyncRemoveForecastWitness:  n.chainsyncRemoveForecastWitness,
-		ChainsyncResolvePeerTip:         n.chainsyncResolvePeerTip,
-		ChainsyncObserveAwaitReply:      n.chainsyncObserveAwaitReply,
-		ChainsyncSyncTarget:             n.chainsyncSyncTarget,
-		ChainsyncObservePeerRollback:    n.chainsyncObservePeerRollback,
+		EnableLeiosTxFetch:                   enableLeiosNetworking,
+		LeiosTxFetchTailBudget:               leiosTxFetchTailBudget,
+		ChainsyncIngressEligible:             n.isChainsyncIngressEligible,
+		ChainsyncHasBestPeer:                 n.chainsyncHasBestPeer,
+		ChainsyncApplyEligible:               n.chainsyncApplyEligible,
+		ChainsyncAwaitEagerness:              n.chainsyncAwaitEagerness,
+		ChainsyncAwaitCorroboration:          n.chainsyncAwaitCorroboration,
+		ChainsyncObservePeerTip:              n.chainsyncObservePeerTip,
+		ChainsyncRecordDeliveredPeerTip:      n.chainsyncRecordDeliveredPeerTip,
+		ChainsyncRecordDeliveredPeerRollback: n.chainsyncRecordDeliveredPeerRollback,
+		ChainsyncPrepareForecastWitness:      n.chainsyncPrepareForecastWitness,
+		ChainsyncRemoveForecastWitness:       n.chainsyncRemoveForecastWitness,
+		ChainsyncResolvePeerTip:              n.chainsyncResolvePeerTip,
+		ChainsyncObserveAwaitReply:           n.chainsyncObserveAwaitReply,
+		ChainsyncSyncTarget:                  n.chainsyncSyncTarget,
+		ChainsyncObservePeerRollback:         n.chainsyncObservePeerRollback,
 		// On the Musashi prototype network every mini-protocol shares one muxer
 		// to a single relay; block/EB traffic can delay the relay's keep-alive
 		// pong past the tight 10s gouroboros default, making dingo drop the

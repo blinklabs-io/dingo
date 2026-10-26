@@ -8481,3 +8481,27 @@ func TestChainsyncClientRollForwardWithholdsWallClockStalePeer(t *testing.T) {
 		"no further header should be published",
 	)
 }
+
+func TestChainsyncRollBackwardTrimsIneligibleObserverDeliveredHistory(
+	t *testing.T,
+) {
+	t.Parallel()
+	f := newPatienceRollForwardFixture(t, false)
+	rolled := make(chan chainselection.PeerRollbackEvent, 1)
+	f.o.config.ChainsyncRecordDeliveredPeerRollback = func(
+		e chainselection.PeerRollbackEvent,
+	) {
+		rolled <- e
+	}
+	point := ocommon.NewPoint(50, []byte("rb"))
+	tip := ochainsync.Tip{Point: point, BlockNumber: 5}
+
+	require.NoError(t, f.o.chainsyncClientRollBackward(
+		ochainsync.CallbackContext{ConnectionId: f.conn}, point, tip,
+	))
+
+	e := testutil.RequireReceive(t, rolled, time.Second,
+		"an ineligible observer's rollback must reach the delivered history")
+	require.Equal(t, f.conn, e.ConnectionId)
+	require.Equal(t, point, e.Point)
+}

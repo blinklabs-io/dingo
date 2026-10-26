@@ -1600,6 +1600,18 @@ func (o *Ouroboros) chainsyncClientRollBackward(
 	if o.recordHeldChainsyncTip(ctx.ConnectionId, tip) {
 		return ochainsync.ErrStopSyncProcess
 	}
+	// The delivered history outlives admission, so an observer that is not
+	// ingress-eligible must still lose the frontier the rollback abandoned
+	// before promotion can let it corroborate a candidate.
+	if o.config.ChainsyncRecordDeliveredPeerRollback != nil {
+		o.config.ChainsyncRecordDeliveredPeerRollback(
+			chainselection.PeerRollbackEvent{
+				ConnectionId: ctx.ConnectionId,
+				Point:        point,
+				Tip:          tip,
+			},
+		)
+	}
 	if !o.reconcileChainsyncIngressAdmission(
 		ctx.ConnectionId,
 		o.shouldPublishChainsyncToLedger(ctx.ConnectionId),

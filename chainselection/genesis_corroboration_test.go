@@ -1948,3 +1948,41 @@ func TestStaleSweepDropsDeliveredHistoryOfClosedConnections(t *testing.T) {
 	assert.Contains(t, cs.deliveredPeerTips, live,
 		"a live connection must be recorded once the sweep freed the slots")
 }
+
+func TestRecordDeliveredPeerRollbackTrimsWithoutRegistering(t *testing.T) {
+	t.Parallel()
+
+	cs := NewChainSelector(ChainSelectorConfig{
+		GenesisMode:           true,
+		SecurityParam:         20,
+		MinCorroboratingPeers: 1,
+	})
+	conn := corrConn(1)
+	high := genesisTip(100, "h100", 100)
+	cs.RecordDeliveredPeerTip(PeerTipUpdateEvent{
+		ConnectionId: conn, AdmissionID: 1, Tip: high, ObservedTip: high,
+	})
+	cs.mutex.RLock()
+	require.Contains(t, cs.deliveredPeerTips, conn)
+	require.EqualValues(t, 100,
+		cs.deliveredPeerTips[conn].ObservedTip.Point.Slot)
+	cs.mutex.RUnlock()
+
+	low := genesisTip(40, "h40", 40)
+	cs.RecordDeliveredPeerRollback(PeerRollbackEvent{
+		ConnectionId: conn, Point: low.Point, Tip: high,
+	})
+	other := corrConn(2)
+	cs.RecordDeliveredPeerRollback(PeerRollbackEvent{
+		ConnectionId: other, Point: low.Point, Tip: high,
+	})
+
+	cs.mutex.RLock()
+	defer cs.mutex.RUnlock()
+	assert.LessOrEqual(t,
+		cs.deliveredPeerTips[conn].ObservedTip.Point.Slot, uint64(40),
+		"the abandoned frontier must be trimmed")
+	assert.NotContains(t, cs.deliveredPeerTips, other)
+	assert.NotContains(t, cs.peerTips, other,
+		"a delivered-history rollback must not register a peer")
+}
