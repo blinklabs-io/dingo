@@ -2638,7 +2638,15 @@ func (o *Ouroboros) reconcileChainsyncIngressAdmission(
 		observabilityOnly, exists = o.chainsyncState.ClientObservabilityOnly(
 			connId,
 		)
-		return exists && !observabilityOnly
+		promoted := exists && !observabilityOnly
+		if promoted {
+			o.scheduleHeaderResync(
+				connId,
+				time.Now(),
+				event.ChainsyncResyncReasonIngressPromotion,
+			)
+		}
+		return promoted
 	}
 	if !observabilityOnly {
 		_ = o.chainsyncState.SetClientObservabilityOnly(connId, true)

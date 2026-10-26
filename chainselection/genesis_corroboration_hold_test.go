@@ -16,6 +16,7 @@ package chainselection
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -109,6 +110,48 @@ func TestDeliveredHistoryCorroboratesAfterAdmissionFrontierPruning(t *testing.T)
 
 	require.True(t, cs.ShouldApplyIngress(applicant),
 		"pruning the admission frontier must not erase the witness's delivered history")
+}
+
+func TestDeliveredPeerHistoryIsBoundedAndRemoved(t *testing.T) {
+	t.Parallel()
+	cs := NewChainSelector(ChainSelectorConfig{
+		GenesisMode:     true,
+		SecurityParam:   20,
+		MaxTrackedPeers: 1,
+	})
+	first := corrConn(6)
+	for block := uint64(1); block <= 100; block++ {
+		tip := genesisTip(block, fmt.Sprintf("h%d", block), block)
+		cs.RecordDeliveredPeerTip(PeerTipUpdateEvent{
+			ConnectionId: first,
+			Tip:          tip,
+			ObservedTip:  tip,
+		})
+	}
+	history := cs.deliveredPeerTips[first]
+	require.NotNil(t, history)
+	assert.LessOrEqual(t, uint64(len(history.observedPoints)),
+		cs.candidatePointCapacityLocked(true))
+	assert.LessOrEqual(t, len(history.observedTipHistory), 21)
+	assert.Len(t, cs.deliveredPeerTips, 1)
+
+	second := corrConn(7)
+	tip := genesisTip(100, "h100", 100)
+	cs.RecordDeliveredPeerTip(PeerTipUpdateEvent{
+		ConnectionId: second,
+		Tip:          tip,
+		ObservedTip:  tip,
+	})
+	assert.NotContains(t, cs.deliveredPeerTips, second)
+
+	cs.RemovePeer(first)
+	cs.RecordDeliveredPeerTip(PeerTipUpdateEvent{
+		ConnectionId: second,
+		Tip:          tip,
+		ObservedTip:  tip,
+	})
+	assert.NotContains(t, cs.deliveredPeerTips, first)
+	assert.Contains(t, cs.deliveredPeerTips, second)
 }
 
 func TestGenesisIngressAllowsPointsAlreadyOnAppliedChain(t *testing.T) {

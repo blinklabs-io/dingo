@@ -66,6 +66,13 @@ func (cs *ChainSelector) RecordDeliveredPeerTip(update PeerTipUpdateEvent) {
 		len(update.ObservedTip.Point.Hash) == 0 {
 		return
 	}
+	if !cs.peerTipAdmissionGenerationCurrent(update) {
+		return
+	}
+	if cs.config.ConnectionLive != nil &&
+		!cs.config.ConnectionLive(update.ConnectionId) {
+		return
+	}
 	cs.mutex.Lock()
 	defer cs.mutex.Unlock()
 	if !cs.genesisCorroborationActiveLocked() {

@@ -46,20 +46,13 @@ func (n *Node) chainsyncObservePeerTip(
 		if !active {
 			return chainselection.PeerTipUpdateUnhandled
 		}
-		disposition := n.chainSelector.ObservePeerTipUpdate(e)
-		if disposition == chainselection.PeerTipUpdateAccepted ||
-			disposition == chainselection.PeerTipUpdatePending {
-			n.chainSelector.RecordDeliveredPeerTip(e)
-		}
-		return disposition
+		n.chainSelector.RecordDeliveredPeerTip(e)
+		return n.chainSelector.ObservePeerTipUpdate(e)
 	}
+	n.chainSelector.RecordDeliveredPeerTip(e)
 	disposition := n.chainSelector.PreparePeerTipAdmissionDisposition(e)
 	if disposition == chainselection.PeerTipUpdateAccepted {
 		n.touchPeerByConnId(e.ConnectionId)
-	}
-	if disposition == chainselection.PeerTipUpdateAccepted ||
-		disposition == chainselection.PeerTipUpdatePending {
-		n.chainSelector.RecordDeliveredPeerTip(e)
 	}
 	return disposition
 }

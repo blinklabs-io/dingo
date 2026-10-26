@@ -73,6 +73,10 @@ const (
 	// the hold allows. The header was withheld, so the fresh intersection
 	// delivers it again. It is not a peer-fault signal.
 	ChainsyncResyncReasonGenesisCorroborationHoldExpired = "genesis corroboration hold expired"
+	// ChainsyncResyncReasonIngressPromotion re-intersects a ChainSync observer
+	// when it becomes ingress-eligible, so its headers pass through normal
+	// verification before contributing to Genesis corroboration.
+	ChainsyncResyncReasonIngressPromotion = "ingress promotion"
 	// ChainsyncResyncReasonForecastHorizonNoWork re-intersects a connected
 	// ChainSync peer when no local queued or in-flight blockfetch can advance
 	// the forecast horizon. It is not a peer-fault signal and does not impose
