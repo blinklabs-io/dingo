@@ -4243,6 +4243,26 @@ func TestIntersectPointsIncludesPersistedMithrilBoundaryWhenRecentPointsEmpty(
 	assert.Equal(t, boundaryHash, points[0].Hash)
 }
 
+// Sessions that must start at the applied ledger tip still offer the Mithril
+// trust boundary; after a Mithril bootstrap it can be the only point.
+func TestLedgerTipIntersectPointsIncludesMithrilTrustBoundary(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	boundaryHash := bytes.Repeat([]byte{0x24}, 32)
+	ls := &LedgerState{
+		db:                db,
+		mithrilLedgerSlot: 42,
+		mithrilLedgerHash: boundaryHash,
+	}
+
+	points, err := ls.LedgerTipIntersectPoints(context.Background(), 4)
+	require.NoError(t, err)
+	require.Len(t, points, 1)
+	assert.Equal(t, uint64(42), points[0].Slot)
+	assert.Equal(t, boundaryHash, points[0].Hash)
+}
+
 func TestIntersectPointsUsesPrimaryChainWhenPrimaryChainIsAhead(t *testing.T) {
 	t.Parallel()
 

@@ -13530,6 +13530,20 @@ func (ls *LedgerState) IntersectPoints(
 			), nil
 		}
 	}
+	return ls.LedgerTipIntersectPoints(ctx, count)
+}
+
+// LedgerTipIntersectPoints returns chainsync FindIntersect candidates ordered
+// from newest to oldest, starting at the applied ledger tip rather than at any
+// primary-chain header ahead of it. Like IntersectPoints, it includes the
+// Mithril trust boundary.
+func (ls *LedgerState) LedgerTipIntersectPoints(
+	ctx context.Context,
+	count int,
+) ([]ocommon.Point, error) {
+	if count <= 0 {
+		return nil, nil
+	}
 	points, err := ls.RecentChainPoints(ctx, count)
 	if err != nil {
 		return nil, err

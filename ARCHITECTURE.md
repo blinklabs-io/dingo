@@ -6386,7 +6386,17 @@ it. Dingo implements this as a **corroboration gate**
   candidate frontier remains available to corroborate peers that catch up, and
   their streams can deliver the withheld chain prefix to the ledger. Staged
   candidates are bounded per peer, so they cannot vouch for an arbitrarily old
-  prefix. A chain's first block may
+  prefix. A header numbered at or below the applied tip is never held, since
+  it cannot reach the ledger; a Byron epoch boundary block shares its
+  predecessor's number, so one numbered as the tip is still held. An
+  observer streams headers without recording them, so a connection promoted to
+  ingress-eligible whose header is more than one block above the applied tip
+  is re-synced with `ChainsyncResyncReasonPromotedObserverAhead` instead of
+  recording a frontier that starts above the ledger. While corroboration is
+  active (`OuroborosConfig.ChainsyncIntersectAtLedgerTip`) new sessions
+  intersect at `LedgerState.LedgerTipIntersectPoints`, the applied ledger tip
+  plus the Mithril trust boundary, rather than the primary chain's
+  header-ahead points, so every frontier begins at the tip. A chain's first block may
   sit at slot 0, as Preview's does; it carries a hash and is a delivered point
   like any other, and only the hashless origin clears a peer's frontier. When no peer is corroborated, nothing is applied and the
   ledger genuinely stalls. Observation happening before the apply gate is what
