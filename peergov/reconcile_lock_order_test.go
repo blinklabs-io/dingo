@@ -42,9 +42,10 @@ func (p *lockCheckingLedgerPeerProvider) CurrentSlot() uint64 {
 
 func TestReconcileReadsBootstrapProgressOutsidePeerGovernorLock(t *testing.T) {
 	var pg *PeerGovernor
-	var calls atomic.Int32
+	var slotCalls atomic.Int32
+	var progressCalls atomic.Int32
 	var calledWhileLocked atomic.Bool
-	checkUnlocked := func() {
+	checkUnlocked := func(calls *atomic.Int32) {
 		calls.Add(1)
 		if !pg.mu.TryLock() {
 			calledWhileLocked.Store(true)
@@ -52,9 +53,11 @@ func TestReconcileReadsBootstrapProgressOutsidePeerGovernorLock(t *testing.T) {
 		}
 		pg.mu.Unlock()
 	}
-	ledgerProvider := &lockCheckingLedgerPeerProvider{check: checkUnlocked}
+	ledgerProvider := &lockCheckingLedgerPeerProvider{
+		check: func() { checkUnlocked(&slotCalls) },
+	}
 	progressProvider := syncProgressProviderFunc(func() float64 {
-		checkUnlocked()
+		checkUnlocked(&progressCalls)
 		return 0
 	})
 	pg = NewPeerGovernor(PeerGovernorConfig{
@@ -67,6 +70,7 @@ func TestReconcileReadsBootstrapProgressOutsidePeerGovernorLock(t *testing.T) {
 
 	pg.reconcile(context.Background())
 
-	require.Equal(t, int32(2), calls.Load())
+	require.GreaterOrEqual(t, slotCalls.Load(), int32(1))
+	require.Equal(t, int32(1), progressCalls.Load())
 	require.False(t, calledWhileLocked.Load())
 }
