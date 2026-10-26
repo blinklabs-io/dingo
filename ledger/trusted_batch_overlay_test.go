@@ -174,6 +174,9 @@ func requireOverlayMatchesPerRow(
 		"the reference must take the per-row path")
 	require.Positive(t, overlay.overlays.Load(),
 		"the batch must apply through the overlay")
+	require.Zero(t, promtestutil.ToFloat64(
+		overlay.h.ls.metrics.trustedBatchOverlayFallbacks,
+	), "the overlay fell back to the per-row path")
 	require.Equal(t,
 		captureExternalIngestLedgerState(perRow.h.ls),
 		captureExternalIngestLedgerState(overlay.h.ls),
@@ -585,6 +588,119 @@ func TestTrustedBatchOverlayFallsBackOnConflict(t *testing.T) {
 	require.Equal(t,
 		captureExternalIngestLedgerState(perRow.h.ls),
 		captureExternalIngestLedgerState(overlay.h.ls),
+	)
+}
+
+// A transaction row that already exists for a batch transaction's hash
+// makes the overlay's explicit-id transaction insert hit UNIQUE. The batch
+// then applies once more on the per-row path, whose conflict branch reuses
+// the row, with one Warn line and one fallback counted.
+func TestTrustedBatchOverlayFallsBackOnTransactionConflict(t *testing.T) {
+	t.Parallel()
+	blocks, names := externalIngestBlocks(t, 2)
+	precreate := func(h *externalIngestHarness) {
+		raw, err := dbtest.RawSQLiteMetadata(t, h.db)
+		require.NoError(t, err)
+		_, err = raw.Exec(
+			`INSERT INTO "transaction" (hash, slot, valid) VALUES (?, 5, 1)`,
+			names["pool"].hash,
+		)
+		require.NoError(t, err)
+	}
+
+	perRow := newOverlayRun(t, false)
+	precreate(perRow.h)
+	require.NoError(t, perRow.applyBatches(
+		t, [][]gledger.Block{blocks}, nil,
+	))
+
+	overlay := newOverlayRun(t, true)
+	precreate(overlay.h)
+	var logs bytes.Buffer
+	overlay.h.ls.config.Logger = slog.New(slog.NewTextHandler(&logs, nil))
+	require.NoError(t, overlay.applyBatches(
+		t, [][]gledger.Block{blocks}, nil,
+	))
+	require.Equal(t, 1, strings.Count(logs.String(), "level=WARN"),
+		logs.String())
+	require.InDelta(t, 1, promtestutil.ToFloat64(
+		overlay.h.ls.metrics.trustedBatchOverlayFallbacks,
+	), 0)
+	require.Equal(t,
+		overlayStrictDigest(t, perRow.h.db),
+		overlayStrictDigest(t, overlay.h.db),
+		"the fallback diverged from the per-row path",
+	)
+}
+
+// A read inside the batch can be the first statement that needs the staged
+// transaction rows. When writing them fails, QueryRowContext cannot return
+// that error, so the read sees tables without the batch's rows and its
+// caller fails on what it read. The batch must still take the one-shot
+// per-row fallback. A's hash already has a row, so the transaction write
+// that reading A's output triggers fails, and GetUtxo -- one QueryRow, no
+// later statement -- reports the output missing.
+func TestTrustedBatchOverlayFallsBackOnReadBarrierConflict(t *testing.T) {
+	t.Parallel()
+	seed := bytes.Repeat([]byte{0xB3}, 32)
+	payOther := rowBatchingBaseAddress(t, 0x44, 0x55)
+	txA := newRowBatchingTx(t, map[uint]any{
+		0: []any{[]any{seed, uint64(0)}},
+		1: []any{map[uint]any{0: payOther, 1: uint64(2_000_000)}},
+		2: uint64(100_000),
+	})
+	txB := newRowBatchingTx(t, map[uint]any{
+		0: []any{[]any{txA.hash, uint64(0)}},
+		1: []any{map[uint]any{0: payOther, 1: uint64(1_900_000)}},
+		2: uint64(100_000),
+	})
+	b1 := rowBatchingBlock(t, 10, 1, lcommon.Blake2b256{}, txA)
+	b2 := rowBatchingBlock(t, 20, 2, b1.Hash(), txB)
+	prepare := func(h *externalIngestHarness) {
+		raw, err := dbtest.RawSQLiteMetadata(t, h.db)
+		require.NoError(t, err)
+		_, err = raw.Exec(
+			`INSERT INTO "transaction" (hash, slot, valid) VALUES (?, 5, 1)`,
+			txA.hash,
+		)
+		require.NoError(t, err)
+		h.ls.afterBatchedTransactionStored = func(
+			txn *database.Txn,
+			tx lcommon.Transaction,
+		) error {
+			stored, err := h.db.Metadata().GetUtxo(
+				tx.Hash().Bytes(), 0, txn.Metadata(),
+			)
+			if err != nil {
+				return err
+			}
+			if stored == nil {
+				return fmt.Errorf("output %s#0 missing inside its batch",
+					tx.Hash())
+			}
+			return nil
+		}
+	}
+
+	perRow := newOverlayRun(t, false)
+	prepare(perRow.h)
+	require.NoError(t, perRow.applyBatches(
+		t, [][]gledger.Block{{b1, b2}}, nil,
+	))
+
+	overlay := newOverlayRun(t, true)
+	prepare(overlay.h)
+	require.NoError(t, overlay.applyBatches(
+		t, [][]gledger.Block{{b1, b2}}, nil,
+	), "a swallowed overlay conflict stopped the batch")
+	require.Positive(t, overlay.overlays.Load())
+	require.InDelta(t, 1, promtestutil.ToFloat64(
+		overlay.h.ls.metrics.trustedBatchOverlayFallbacks,
+	), 0)
+	require.Equal(t,
+		overlayStrictDigest(t, perRow.h.db),
+		overlayStrictDigest(t, overlay.h.db),
+		"the fallback diverged from the per-row path",
 	)
 }
 

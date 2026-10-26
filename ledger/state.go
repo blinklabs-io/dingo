@@ -2012,6 +2012,11 @@ type LedgerState struct {
 	// they write through the batched metadata path, so a test can tell that
 	// path from the per-row one, which stores the same state.
 	afterBatchedTransactionWrite func()
+	// afterBatchedTransactionStored is a test-only hook, nil in production.
+	// It runs where afterBatchedTransactionWrite does, inside the block-apply
+	// transaction, so a test can read the store mid-batch; its error fails
+	// the transaction write.
+	afterBatchedTransactionStored func(*database.Txn, lcommon.Transaction) error
 	// beforeReplayRowFlush is a test-only observation hook, nil in
 	// production. It runs immediately before a chunk's replay-row flush, so a
 	// test can place a known delay inside that flush's apply sample.

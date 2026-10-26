@@ -82,6 +82,25 @@ func (d *Database) EnableBatchUtxoOverlay(
 	)
 }
 
+// WithBatchUtxoOverlayError joins err with the error acc's batch UTxO overlay
+// recorded. A read barrier inside QueryRowContext cannot return its error, so
+// the statement and those after it run against tables the barrier failed to
+// write, and the failure a caller then reports does not name the overlay. A
+// caller that answers an overlay conflict with a per-row retry passes the
+// errors of everything it ran under the overlay through this. err is
+// returned unchanged when it is nil or acc records nothing.
+func WithBatchUtxoOverlayError(acc BatchAccumulator, err error) error {
+	recorder, ok := acc.(interface{ BatchUtxoOverlayError() error })
+	if err == nil || !ok {
+		return err
+	}
+	overlayErr := recorder.BatchUtxoOverlayError()
+	if overlayErr == nil || errors.Is(err, overlayErr) {
+		return err
+	}
+	return errors.Join(overlayErr, err)
+}
+
 // BatchedTxIngestOpts toggles optional behaviors of SetTransactionBatched.
 //
 // Defaults preserve the original full-write behavior; setters opt callers
