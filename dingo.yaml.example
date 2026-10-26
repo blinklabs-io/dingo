@@ -551,7 +551,8 @@
   # CLI: --koios-parity-cache-path
   # cachePath: ""
   # Can be overridden with DINGO_KOIOS_PARITY_API_KEY
-  # CLI: --koios-parity-api-key
+  # Literal API keys cannot be supplied by CLI because process arguments are
+  # visible to other local accounts. Use the file option for CLI configuration.
   # apiKey: ""
   # File holding the API key, read at startup with trailing line endings
   # removed. Must be a regular file that other users cannot access. On Unix,
