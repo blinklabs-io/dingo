@@ -6386,7 +6386,17 @@ it. Dingo implements this as a **corroboration gate**
   candidate frontier remains available to corroborate peers that catch up, and
   their streams can deliver the withheld chain prefix to the ledger. Staged
   candidates are bounded per peer, so they cannot vouch for an arbitrarily old
-  prefix. A chain's first block may
+  prefix. A header numbered at or below the applied tip is never held, since
+  it cannot reach the ledger; a Byron epoch boundary block shares its
+  predecessor's number, so one numbered as the tip is still held. An
+  observer streams headers without recording them, so a connection promoted to
+  ingress-eligible whose header is more than one block above the applied tip
+  is re-synced with `ChainsyncResyncReasonPromotedObserverAhead` instead of
+  recording a frontier that starts above the ledger. While corroboration is
+  active (`OuroborosConfig.ChainsyncIntersectAtLedgerTip`) new sessions
+  intersect at `LedgerState.LedgerTipIntersectPoints`, the applied ledger tip
+  plus the Mithril trust boundary, rather than the primary chain's
+  header-ahead points, so every frontier begins at the tip. A chain's first block may
   sit at slot 0, as Preview's does; it carries a hash and is a delivered point
   like any other, and only the hashless origin clears a peer's frontier. When no peer is corroborated, nothing is applied and the
   ledger genuinely stalls. Observation happening before the apply gate is what
@@ -7165,7 +7175,7 @@ Once a block's header is identified as certified, it is **never** downgraded to 
 
 Two Prometheus metrics capture the outcome: `dingo_leios_ntc_certrb_total{outcome}` counts handled CertRBs, with `outcome` one of `merged` (closure cached, spliced without waiting), `merged_after_wait` (closure arrived during the wait), or `unresolved` (closure did not resolve — wait timed out, was cancelled by the connection ending, or the endorser reference was unresolvable — so the connection was closed and the block not served); `dingo_leios_ntc_certrb_closure_wait_seconds{outcome}` records how long the server waited, with `outcome` `resolved`, `timeout` (the wait window elapsed), or `cancelled` (the serving connection ended before the closure arrived).
 
-Endorser-block arrival is measured separately from NtC serving. When an endorser block's manifest and every transaction become available locally with a verified slot binding (`storeLeiosEndorserBlock`, or `bindLeiosEndorserBlockSlot` once the announcement corroborates the slot), `recordLeiosEbArrival` observes wall clock minus slot time once, at the not-ready to ready transition, into `dingo_leios_eb_arrival_delay_seconds` and a 16-slot ring keyed by EB slot (slot = EB slot % 16, same collector pattern as the blockfetch recent-delay ring): `dingo_leios_recent_eb_arrival_delay_seconds{idx}`, `dingo_leios_recent_eb_slot{idx}` and `dingo_leios_recent_eb_tx_count{idx}`, read together under one lock. An arrival whose ring position already holds a newer EB slot is still observed in the histogram; the ring keeps the newer slot. Blocks this node forged (`leiosStoreAuthoritative`) are not arrivals, and arrivals more than 5 minutes after the slot (backfill) are not recorded. The blockfetch recent-delay ring additionally exports `dingo_blockfetch_recent_block_kind{idx}`, a bitmask per ranking block (1 = announces an endorser block, 2 = carries an endorser-block certificate, 0 = plain or pre-Leios), taken from the header by `leiosheader.RankingBlockKind` and stored under the same lock as the delay it pairs with.
+Endorser-block arrival is measured separately from NtC serving. When an endorser block's manifest and every transaction become available locally with a verified slot binding (`storeLeiosEndorserBlock`, or `bindLeiosEndorserBlockSlot` once the announcement corroborates the slot), `recordLeiosEbArrival` observes wall clock minus slot time once, at the not-ready to ready transition, into `dingo_leios_eb_arrival_delay_seconds` and a 16-slot ring keyed by EB slot (slot = EB slot % 16, same collector pattern as the blockfetch recent-delay ring): `dingo_leios_recent_eb_arrival_delay_seconds{idx}`, `dingo_leios_recent_eb_slot{idx}` and `dingo_leios_recent_eb_tx_count{idx}`, read together under one lock. An arrival whose ring position already holds a newer EB slot is still observed in the histogram; the ring keeps the newer slot. Blocks this node forged (`leiosStoreAuthoritative`) are not arrivals, and arrivals more than 5 minutes after the slot (backfill) are not recorded. The blockfetch recent-delay ring additionally exports `dingo_blockfetch_recent_block_kind{idx}`, a bitmask per ranking block (1 = announces an endorser block, 2 = carries an endorser-block certificate, 0 = plain or pre-Leios), taken from the header by `leiosheader.RankingBlockKind` and stored under the same lock as the delay it pairs with. The same ring also exports `dingo_blockfetch_recent_block_slot{idx}` (the ranking block's slot) under that lock, and `dingo_blockfetch_recent_fetch_duration_seconds{idx}` (blockfetch request dispatch to body; the request key is per range, so the k-th block of a multi-block range includes the earlier blocks' transfer, and a block with no recorded request start is not recorded in the ring at all). The slot of the endorser block a certifying ranking block certifies is not exported: the header carries only a certified flag and the certificate holds signers and a signature, so that endorser block is the one the parent block announced and its slot is the parent's slot, which needs a parent lookup; an announced endorser block shares its ranking block's slot, so no separate announced-slot series exists. Each at-tip block's delay is also observed into `dingo_blockfetch_block_delay_seconds{kind}`, a histogram with `kind` one of `plain`, `announce`, `certify`, `announce_certify` and exact bucket edges at 0.25, 0.5, 1, 2, 3 and 5 seconds, recorded together with the ring entry by `recordAtTipBlock`.
 
 ## Peer Governance
 
@@ -8532,15 +8542,18 @@ some for the next round. It fetches only IDs the pool lacks, and sends its
 acknowledgement with the next ID request. A blocking request that gets nothing
 back, whether `[3]` or after a wait, is followed by a pause that starts at 100ms
 and doubles to 2s, so a peer that answers at once cannot keep the loop spinning.
-Each fetched message goes through `Stack.admit`, the check a local submission
-gets. An expired or duplicate message, or one refused because the pool is full,
+Each fetched reply goes through `Stack.acceptFromPeer`, which applies the
+checks a local submission gets to every message in it and authenticates the
+reply as one batch, described under DMQ Message Authentication. An expired or
+duplicate message, or one refused because the pool is full,
 is counted under `validation_failures_total` and dropped. An `invalid` one is a
 protocol violation and ends the connection. Two peers may fetch the same
 announced message at the same moment; the second is `alreadyReceived`, which
 costs a few hundred bytes and does not need cross-peer bookkeeping.
 
-`Stack.admit` first checks the sizes CIP-0137's CDDL fixes, because dmq-node
-refuses to decode a message that breaks them: a body of 90 to 2000 bytes
+`Stack.precheck`, which runs before authentication on both paths, first
+checks the sizes CIP-0137's CDDL fixes, because dmq-node refuses to decode a
+message that breaks them: a body of 90 to 2000 bytes
 (`StackConfig.MessageBodyMin` and `MessageBodyMax` override the limits), a
 448-byte KES signature, and 32, 64 and 32 bytes for the operational certificate's
 KES key, its cold signature, and the cold key. A message outside them is
@@ -8664,6 +8677,22 @@ ledger. `NewMessageAuthenticator` rejects construction if any required lookup
 is missing. The authenticator's opcert issue-number cache has no automatic
 eviction; `RemoveKESOpCertCacheEntry` lets a caller drop a pool's baseline when
 it is no longer registered or active, mirroring `MessageMempool.RemovePeer`.
+
+A peer's reply to a message request is authenticated as one batch through
+`MessageAuthenticator.PrepareMessages`: signature verification dominates the
+cost of admitting a message, and a reply carries up to `fetchMessages` of
+them. The batch reads the current slot once, so every message in a reply is
+judged at the same slot, and it commits the operational-certificate issue
+numbers it observed only after the whole batch verifies. The current KES
+period the admission checks compare against is likewise resolved once per
+reply. Before authentication, admission drops a message the pool already
+holds, so a message that arrived from another peer in the meantime costs no
+KES verification. A message failing authentication is a protocol violation:
+none of the reply is admitted, and the connection ends. A failure for want of
+chain state, whether resolving the KES period or during authentication, is
+not retried for the rest of the reply, and counts each message as `other`. A
+local submission carries one message and is verified on its own through
+`VerifyMessage`.
 
 ## Block Production
 
@@ -12427,7 +12456,7 @@ covers the durable lookups as well as the wait. The health service supports
 only unary `Check`; `Health/Watch` returns `Unimplemented` instead of creating
 a stream outside this listener's admission limits. `FollowTip`, `WatchTx`,
 `WatchMempool`, and `WaitForTx` take a slot from a shared limiter
-(`MaxStreams` process-wide, `MaxStreamsPerClient` per remote host) and answer
+(`MaxStreams` process-wide, `MaxStreamsPerClient` per client) and answer
 `ResourceExhausted` when
 none is free. `WatchTx` and `WatchMempool` reject a predicate with more than
 `MaxPredicateNodes` nodes, and `WatchTx` rejects an intersect more than
@@ -12454,8 +12483,9 @@ client across all its streams by making each wait for its token, so a replay
 slows down but is not refused; and `MaxReplayBlocksPerClient` (default
 20,000,000) blocks per `ReplayBudgetWindow` (default 24h) caps the history one
 client may pull, after which its replay ends with `ResourceExhausted` until the
-window renews. A client is the remote host, as for the stream caps, so the
-per-client slot cap is what stops one host holding every slot. A stream that
+window renews. A client is the remote IPv4 address or IPv6 /64 prefix, as for
+the stream caps, so addresses rotated within one prefix share a budget, and the
+per-client slot cap is what stops one client holding every slot. A stream that
 reaches the tip returns its replay slot and never needs one again: blocks it
 later falls behind on, after a fork switch or while blocks arrive faster than
 it reads, are still charged against the rate and budget, but a full slot cap
@@ -12509,7 +12539,7 @@ discarded, and clients behind one proxy share a budget. Admission returns
 `ErrEvaluationBusy` instead of queuing; Blockfrost reports it as `429` and UTxO
 RPC as `ResourceExhausted`.
 UTxO RPC additionally admits EvalTx requests before transaction type detection
-or CBOR decoding, with four slots process-wide and two per remote host. The
+or CBOR decoding, with four slots process-wide and two per client. The
 ledger limiter remains responsible for script work after parsing.
 Each redeemer is evaluated against the part of `MaxTxExUnits` the earlier
 redeemers have not used, so a transaction's total work stays within the

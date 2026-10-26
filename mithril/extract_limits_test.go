@@ -20,6 +20,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"math"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -110,6 +111,21 @@ func TestExtractArchiveLimits(t *testing.T) {
 			wantErr: ErrExtractLimitExceeded,
 		},
 		{
+			name: "materialized path at entry limit",
+			entries: []limitsTestEntry{
+				{name: "ledger/100/state"},
+			},
+			limits: archiveLimits{maxEntries: 3},
+		},
+		{
+			name: "materialized path exceeds entry limit",
+			entries: []limitsTestEntry{
+				{name: "ledger/100/tables/state"},
+			},
+			limits:  archiveLimits{maxEntries: 3},
+			wantErr: ErrExtractLimitExceeded,
+		},
+		{
 			name:    "member at limit",
 			entries: []limitsTestEntry{{name: "a", content: make([]byte, 100)}},
 			limits:  archiveLimits{maxMemberBytes: 100},
@@ -174,6 +190,33 @@ func TestExtractArchiveLimits(t *testing.T) {
 			require.NoError(t, err)
 		})
 	}
+}
+
+func TestUnverifiedAncillaryPathComponentsConsumeBootstrapBudget(t *testing.T) {
+	t.Parallel()
+
+	limits := ancillaryLimits()
+	budget := &bootstrapExtractionBudget{
+		maxEntries:     3,
+		maxStreamBytes: math.MaxInt64,
+	}
+	limits.budget = budget
+	dest, err := extractWithLimits(
+		t,
+		[]limitsTestEntry{{name: "ledger/100/state"}},
+		limits,
+	)
+	require.NoError(t, err)
+	_, err = os.Stat(filepath.Join(dest, "ledger", "100", "state"))
+	require.NoError(t, err)
+	require.Equal(t, 3, budget.entries)
+
+	_, err = extractWithLimits(
+		t,
+		[]limitsTestEntry{{name: "ledger/101/state"}},
+		limits,
+	)
+	require.ErrorIs(t, err, ErrExtractLimitExceeded)
 }
 
 func TestExtractArchiveRefusesUnexpectedMemberBeforeWriting(t *testing.T) {

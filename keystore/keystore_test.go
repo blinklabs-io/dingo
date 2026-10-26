@@ -132,6 +132,27 @@ func TestKeyStoreLoadFromFiles(t *testing.T) {
 	assert.Equal(t, 28, len(*poolID))
 }
 
+func TestParseKeyEnvelopeZeroizesTransientKESCopies(t *testing.T) {
+	t.Parallel()
+	envelope := []byte(testKESSKeyJSON)
+
+	key, err := parseKeyEnvelope(envelope)
+	require.NoError(t, err)
+	require.NotEmpty(t, key.SKey)
+	require.NotEqual(t, make([]byte, len(key.SKey)), key.SKey)
+	require.Equal(t, make([]byte, len(envelope)), envelope)
+	require.Equal(t, make([]byte, len(key.RawCBOR)), key.RawCBOR)
+}
+
+func TestParseKeyEnvelopeZeroizesInputOnFailure(t *testing.T) {
+	t.Parallel()
+	envelope := []byte(`{"type":`)
+
+	_, err := parseKeyEnvelope(envelope)
+	require.Error(t, err)
+	require.Equal(t, make([]byte, len(envelope)), envelope)
+}
+
 func TestVRFSigner(t *testing.T) {
 	vrfPath, kesPath, opCertPath := setupTestKeys(t)
 

@@ -34,6 +34,7 @@ import (
 	"github.com/blinklabs-io/dingo/ledger"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
+	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -919,10 +920,20 @@ func (o *Ouroboros) buildDefaultChainsyncIntersectPoints(
 			connId.String(),
 		)
 	}
-	intersectPoints, err := o.ledgerState.IntersectPoints(
-		ctx,
-		chainsyncIntersectPointCount,
-	)
+	var intersectPoints []ocommon.Point
+	var err error
+	if o.config.ChainsyncIntersectAtLedgerTip != nil &&
+		o.config.ChainsyncIntersectAtLedgerTip() {
+		intersectPoints, err = o.ledgerState.LedgerTipIntersectPoints(
+			ctx,
+			chainsyncIntersectPointCount,
+		)
+	} else {
+		intersectPoints, err = o.ledgerState.IntersectPoints(
+			ctx,
+			chainsyncIntersectPointCount,
+		)
+	}
 	if err != nil {
 		return nil, fmt.Errorf(
 			"LedgerState.IntersectPoints failed: %w",
@@ -1711,6 +1722,35 @@ func (o *Ouroboros) chainsyncCursorFarBehindLocalTip(
 	return farBehind(headerBlockNumber) && !farBehind(peerTipBlockNumber)
 }
 
+// headerAtOrBelowLocalTip reports whether a header with the given block number
+// is not above the applied local tip. A Byron epoch boundary block carries its
+// predecessor's block number, so one numbered as the tip follows it and is
+// above it. Without a ledger the answer is false.
+func (o *Ouroboros) headerAtOrBelowLocalTip(header gledger.BlockHeader) bool {
+	if o.chainsyncLocalTipBlock == nil {
+		return false
+	}
+	tipBlock, _ := o.chainsyncLocalTipBlock()
+	if _, boundary := header.(*byron.ByronEpochBoundaryBlockHeader); boundary {
+		return header.BlockNumber() < tipBlock
+	}
+	return header.BlockNumber() <= tipBlock
+}
+
+// promotedObserverAboveLocalTip reports whether a header delivered to a
+// just-promoted observer is more than one block above the applied local tip,
+// so the connection's frontier would start above the block after the tip.
+func (o *Ouroboros) promotedObserverAboveLocalTip(
+	headerBlockNumber uint64,
+) bool {
+	if o.chainsyncLocalTipBlock == nil {
+		return false
+	}
+	tipBlock, _ := o.chainsyncLocalTipBlock()
+	return headerBlockNumber > tipBlock &&
+		headerBlockNumber-tipBlock > 1
+}
+
 // claimBehindTipRecycle reports whether a behind-local-tip recycle may be
 // requested at now, and records it when so. It admits one recycle per
 // chainsyncBehindTipRecycleCooldown across all connections.
@@ -1804,6 +1844,12 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 		// A full-duplex inbound from a configured upstream remains
 		// eligible here, so the node doesn't stall when the relay
 		// dials us first after a crash.
+		wasObserver := false
+		if o.chainsyncState != nil {
+			wasObserver, _ = o.chainsyncState.ClientObservabilityOnly(
+				ctx.ConnectionId,
+			)
+		}
 		ingressEligible := o.reconcileChainsyncIngressAdmission(
 			ctx.ConnectionId,
 			o.shouldPublishChainsyncToLedger(ctx.ConnectionId),
@@ -1878,6 +1924,21 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 				"connection_id", ctx.ConnectionId.String(),
 			)
 			return nil
+		}
+		// An observer streams headers without recording them, so promoting it
+		// at a cursor above the ledger starts its candidate frontier there. Such
+		// a peer cannot be corroborated and cannot corroborate the header after
+		// the tip, so restart it from the local tip. The header is dropped
+		// unrecorded; the fresh session redelivers it.
+		if ingressEligible && wasObserver &&
+			o.promotedObserverAboveLocalTip(v.BlockNumber()) {
+			if o.scheduleHeaderResync(
+				ctx.ConnectionId,
+				time.Now(),
+				event.ChainsyncResyncReasonPromotedObserverAhead,
+			) {
+				return nil
+			}
 		}
 		// Enforce the future-header boundary on this peer's protocol callback,
 		// before any observed-tip, cursor, dedup, or ledger mutation. A
@@ -2121,8 +2182,11 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 		// A header withheld here is lost to the ledger: the peer's cursor moves
 		// past it. Hold only a selection-eligible header denied by Genesis
 		// corroboration; corroboration cannot override failed authentication.
+		// A header at or below the applied tip cannot reach the ledger, so
+		// waiting for witnesses only stalls the peer.
 		if selectionEligible && ingressEligible && !applyEligible &&
-			o.config.ChainsyncAwaitCorroboration != nil {
+			o.config.ChainsyncAwaitCorroboration != nil &&
+			!o.headerAtOrBelowLocalTip(v) {
 			admissionCtx, cancelAdmission := chainsyncAdmissionContext(ctx)
 			holdCtx, cancelHold := context.WithTimeout(
 				admissionCtx,
