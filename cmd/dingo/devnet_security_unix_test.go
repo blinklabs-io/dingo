@@ -168,11 +168,41 @@ func TestDevnetRunDirectoryTemporaryUnderSymlinkedTempDir(t *testing.T) {
 	require.NoError(t, release())
 }
 
+// resolvedTempDir returns a test directory whose own path has no symlinked
+// component, as on platforms whose temporary root is itself a symlink.
+func resolvedTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+	return dir
+}
+
+func TestPrepareLockedDevnetStateRejectsComponentSwappedAfterResolution(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	base := resolvedTempDir(t)
+	victim := resolvedTempDir(t)
+	require.NoError(t, os.Mkdir(filepath.Join(base, "a"), 0o700))
+	got, err := devnetRunDirectory(filepath.Join(base, "a", "b", "state"))
+	require.NoError(t, err)
+	require.NoError(t, os.Remove(filepath.Join(base, "a")))
+	require.NoError(t, os.Symlink(victim, filepath.Join(base, "a")))
+
+	release, err := prepareLockedDevnetState(got, true, false, time.Now())
+	if release != nil {
+		require.NoError(t, release())
+	}
+	require.Error(t, err)
+	require.NoDirExists(t, filepath.Join(victim, "b"))
+}
+
 func TestPrepareLockedDevnetStateRejectsSymlinkedAncestor(t *testing.T) {
 	t.Parallel()
 
-	parent := t.TempDir()
-	victim := t.TempDir()
+	parent := resolvedTempDir(t)
+	victim := resolvedTempDir(t)
 	require.NoError(t, os.Mkdir(filepath.Join(victim, "existing"), 0o700))
 	redirect := filepath.Join(parent, "redirect")
 	require.NoError(t, os.Symlink(victim, redirect))
@@ -194,7 +224,7 @@ func TestPrepareLockedDevnetStateRejectsSymlinkedAncestor(t *testing.T) {
 func TestPrepareLockedDevnetStateRestrictsExistingDirectory(t *testing.T) {
 	t.Parallel()
 
-	runDir := t.TempDir()
+	runDir := resolvedTempDir(t)
 	require.NoError(t, os.Chmod(runDir, 0o777))
 
 	release, err := prepareLockedDevnetState(
@@ -216,7 +246,7 @@ func TestPrepareLockedDevnetStateDoesNotRestrictUnrecognizedDirectory(
 ) {
 	t.Parallel()
 
-	runDir := t.TempDir()
+	runDir := resolvedTempDir(t)
 	require.NoError(t, os.Chmod(runDir, 0o777))
 	require.NoError(t, os.WriteFile(
 		filepath.Join(runDir, "keep"),
