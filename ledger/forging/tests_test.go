@@ -1065,7 +1065,7 @@ func TestEqualSlotAlternativeCarriesNoLeiosData(t *testing.T) {
 				AnnouncingRbHash: rbHash,
 			},
 		},
-		txHashesOK: true,
+		closureTxsOK: true,
 	}
 	builder := &forgerTestBuilder{
 		block: newForgerTestBlock(10, altTestRivalBlockNumber),
@@ -2956,8 +2956,8 @@ func TestForgeKeepsLeiosDataWhenParentIsUnchanged(t *testing.T) {
 				Certificate:       leiosTestCertificate(eb, 9),
 			},
 		},
-		txHashes:   []string{},
-		txHashesOK: true,
+		closureTxs:   [][]byte{},
+		closureTxsOK: true,
 	}
 	block := newForgerTestBlock(10, 2)
 	builder := &parentSwapBuilder{
@@ -3187,7 +3187,7 @@ func TestForgeReResolvesLeiosDataWhenParentChangesBeforeTheFirstBuild(
 		},
 		// The certified closure resolves, so endorser-block production is
 		// reached rather than skipped -- that is the window this test needs.
-		txHashesOK: true,
+		closureTxsOK: true,
 	}
 	block := newForgerTestBlock(10, 2)
 	// Succeeds on the first attempt: there is no retry in this scenario,
@@ -4922,6 +4922,7 @@ func TestSelectValidLeiosTransactionsPreservesDependentChain(t *testing.T) {
 			reject: map[string]struct{}{},
 		},
 		leiosSelectionLimits{},
+		leiosSelectionBasis{},
 	)
 	require.NoError(t, err)
 	require.Equal(t, txs, selected)
@@ -4958,6 +4959,7 @@ func TestSelectValidLeiosTransactionsRejectsInvalidChain(t *testing.T) {
 			},
 		},
 		leiosSelectionLimits{},
+		leiosSelectionBasis{},
 	)
 	require.NoError(t, err)
 	require.Empty(t, selected, "a rejected parent must not expose its output")
@@ -4986,6 +4988,7 @@ func TestSelectValidLeiosTransactionsRejectsUnrepresentableParent(
 		},
 		&leiosOverlayValidator{base: map[utxoref.Key]struct{}{baseKey: {}}},
 		leiosSelectionLimits{},
+		leiosSelectionBasis{},
 	)
 	require.NoError(t, err)
 	require.Empty(t, selected)
@@ -5500,6 +5503,7 @@ func TestLeiosEBSelectionStopsAtTheDeadline(t *testing.T) {
 			now:      func() time.Time { return fakeNow },
 			deadline: start.Add(selectionTime),
 		},
+		leiosSelectionBasis{},
 	)
 	require.NoError(t, err)
 	require.True(t, truncated)
@@ -5521,6 +5525,7 @@ func TestLeiosEBSelectionCompletesWithinBudget(t *testing.T) {
 			now:      time.Now,
 			deadline: time.Now().Add(time.Hour),
 		},
+		leiosSelectionBasis{},
 	)
 	require.NoError(t, err)
 	require.False(t, truncated)
@@ -5536,6 +5541,7 @@ func TestLeiosEBSelectionAbortsWhenSnapshotChanges(t *testing.T) {
 		leiosCandidateTxs(t, 10),
 		validator,
 		leiosSelectionLimits{now: time.Now},
+		leiosSelectionBasis{},
 	)
 	require.ErrorIs(t, err, errTxValidationSnapshotChanged)
 	require.Equal(
@@ -5554,6 +5560,7 @@ func TestLeiosEBSelectionWithoutDeadlineIsUnbounded(t *testing.T) {
 		leiosCandidateTxs(t, 8),
 		validator,
 		leiosSelectionLimits{},
+		leiosSelectionBasis{},
 	)
 	require.NoError(t, err)
 	require.False(t, truncated)

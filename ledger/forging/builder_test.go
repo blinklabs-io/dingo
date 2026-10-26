@@ -4767,6 +4767,7 @@ func TestLeiosSelectionHonorsCancellationAfterLastCandidate(t *testing.T) {
 				leiosCandidateTxs(t, count),
 				validator,
 				leiosSelectionLimits{},
+				leiosSelectionBasis{},
 			)
 			require.ErrorIs(t, err, context.Canceled)
 			require.Equal(t, 1, validator.validateCalls)

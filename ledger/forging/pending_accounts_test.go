@@ -139,6 +139,7 @@ func TestSelectValidLeiosTransactionsAccountsForSelectedWithdrawals(
 		txs,
 		validator,
 		leiosSelectionLimits{},
+		leiosSelectionBasis{},
 	)
 	require.NoError(t, err)
 	require.Equal(t, txs[:1], selected)
