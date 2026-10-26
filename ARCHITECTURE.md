@@ -11197,10 +11197,18 @@ bootstraps each running its immutable downloads beside the ancillary one.
 Public signature submissions use a separate four-request bound, so progressing
 archive transfers cannot consume their capacity. Either bound returns `503
 Service Unavailable` with `Retry-After: 1` when it is full. A
-15-second request-body read deadline is armed before decoding a signature
-submission. Archive transfers also admit at most one bootstrap's download
-concurrency from a remote host, keying IPv6 clients by their /64 prefix and
-IPv4-mapped addresses as IPv4; excess downloads return `429 Too Many Requests`.
+separate eight-request bound protects signature-body decoding, with at most
+four reads admitted from one remote host. A 15-second request-body read deadline
+and 1 MiB size limit apply through the end of the body within that tier.
+Rejected reads close their HTTP connection without draining the remaining
+body. Successfully decoded submissions then retain one of the four verification
+slots through signer validation, catalog access, cryptographic verification and
+certification, so incomplete bodies cannot consume verification capacity or
+leave decoding unbounded.
+Client bounds key IPv6 addresses by their /64 prefix and IPv4-mapped addresses
+as IPv4. Archive transfers also admit at most one bootstrap's download
+concurrency from a remote host. Excess per-client requests return `429 Too Many
+Requests`.
 Each response write retains the 15-second idle deadline, while archive writes
 also carry a 30-second startup allowance and must average at least 64 KiB/s.
 Large archives therefore receive time proportional to their bytes while a
