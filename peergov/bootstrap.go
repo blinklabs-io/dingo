@@ -33,8 +33,9 @@ type bootstrapExitProgress struct {
 	syncProgress float64
 }
 
-// bootstrapExitProgress reads node state without holding p.mu. The providers
-// may acquire chainsync locks, whose admission path calls back into PeerGovernor.
+// bootstrapExitProgress reads node state. It must be called without p.mu
+// held: the providers may take chainsync locks, and the chainsync root
+// admission callback takes p.mu while holding the chainsync client lock.
 func (p *PeerGovernor) bootstrapExitProgress() bootstrapExitProgress {
 	var progress bootstrapExitProgress
 	if p.config.UseLedgerAfterSlot > 0 && p.config.LedgerPeerProvider != nil {
@@ -45,6 +46,30 @@ func (p *PeerGovernor) bootstrapExitProgress() bootstrapExitProgress {
 		progress.syncProgress = p.config.SyncProgressProvider.SyncProgress()
 	}
 	return progress
+}
+
+// bootstrapExitProgressWantedLocked reports whether a bootstrap exit is still
+// possible and a progress provider is configured, so the caller knows whether
+// reading progress is worthwhile. Must be called with p.mu held.
+func (p *PeerGovernor) bootstrapExitProgressWantedLocked() bool {
+	if p.bootstrapExited || !p.hasBootstrapPeersLocked() {
+		return false
+	}
+	return (p.config.UseLedgerAfterSlot > 0 &&
+		p.config.LedgerPeerProvider != nil) ||
+		(p.config.SyncProgressForExit > 0 &&
+			p.config.SyncProgressProvider != nil)
+}
+
+// hasBootstrapPeersLocked reports whether any topology bootstrap peer is
+// tracked. Must be called with p.mu held.
+func (p *PeerGovernor) hasBootstrapPeersLocked() bool {
+	for _, peer := range p.peers {
+		if peer != nil && peer.Source == PeerSourceTopologyBootstrapPeer {
+			return true
+		}
+	}
+	return false
 }
 
 // shouldExitBootstrapLocked checks if conditions are met to exit bootstrap mode.
@@ -62,14 +87,7 @@ func (p *PeerGovernor) shouldExitBootstrapLocked(
 	}
 
 	// Check if we have any bootstrap peers to exit
-	hasBootstrapPeers := false
-	for _, peer := range p.peers {
-		if peer != nil && peer.Source == PeerSourceTopologyBootstrapPeer {
-			hasBootstrapPeers = true
-			break
-		}
-	}
-	if !hasBootstrapPeers {
+	if !p.hasBootstrapPeersLocked() {
 		return false, ""
 	}
 
