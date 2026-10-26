@@ -679,6 +679,9 @@ type blockfetchMetrics struct {
 	// per-block chart sees every block; blockDelay above keeps only the most
 	// recent one, which a scrape interval longer than the block gap misses.
 	recentDelays *recentBlockDelays
+	// Histogram of the same at-tip delays by Leios ranking-block kind, so
+	// the share of blocks under 1s/3s/5s can be computed from le buckets.
+	blockDelayByKind *prometheus.HistogramVec
 	// Ring of the distinct blocks observed competing for each of the same
 	// heights tracked by recentDelays, so a dashboard can tell a fork-battle
 	// delay from a genuinely slow fetch. See RecordForkBattleParticipants.
@@ -913,6 +916,8 @@ func (o *Ouroboros) initBlockfetchMetrics() {
 	)
 	o.blockfetchMetrics.recentDelays = newRecentBlockDelays()
 	o.registerer.MustRegister(o.blockfetchMetrics.recentDelays)
+	o.blockfetchMetrics.blockDelayByKind = newBlockDelayByKindHistogram()
+	o.registerer.MustRegister(o.blockfetchMetrics.blockDelayByKind)
 	o.blockfetchMetrics.recentForks = newRecentForkBattles()
 	o.registerer.MustRegister(o.blockfetchMetrics.recentForks)
 	o.blockfetchMetrics.lateBlocks = promautoFactory.NewCounter(
