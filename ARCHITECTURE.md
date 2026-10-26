@@ -26,6 +26,15 @@ constructs the database and ledger, resolves mempool, and resolves the enabled
 API capabilities. Praos is the default `consensus` provider. The same
 instance chooses header authorization, production scheduling, peer and ledger
 chain comparison, and local sibling adoption for both relays and producers.
+The built-in `tachys` provider replaces Praos's private threshold with the
+CIP-0177 public schedule while retaining Babbage/Conway VRF, KES, operational
+certificate, registered VRF-key, nonce, and chain-ordering checks. It accepts
+only networks whose Shelley-family eras through Babbage start at epoch zero,
+whose active-slots coefficient is one, and which do not enable Genesis or
+Mithril bootstrap, Leios, or Dijkstra. Unsupported shapes fail before storage
+or networking starts. Its node-to-node handshake magic is derived from the
+base network magic and versioned provider identity, so a Tachys node refuses a
+Praos peer before exchanging chain data even when both use the same genesis.
 The ledger supplies state to the provider and retains ownership of epochs,
 nonces, transactions, rollback, and stake snapshots; producer credentials stay
 with the block producer. Each API provider (Blockfrost,
@@ -716,6 +725,21 @@ reset or the connection closes. Deferred headers may remain as raw ancestry,
 but selection waits until the candidate path and required header checks are
 available. A header beyond the forecast horizon or with unavailable ancestry
 or context is deferred.
+
+Header parking and resyncs are exported as metrics.
+`dingo_chainsync_deferred_headers_total` counts each header
+`Ouroboros.markDeferredHeaderRecovery` parks for deferred producer
+authorization (a header whose block the chain already holds is resolved
+instead and not counted), and
+`dingo_chainsync_deferred_header_connections` is a scrape-time read of how many
+connections currently hold parked recovery state.
+`dingo_chainsync_resyncs_total{reason}` counts every `chainsync.resync` event
+the `SubscribeChainsyncResync` subscriber handles, labelled with the event's
+`Reason` when it is one of the `ChainsyncResyncReason*` constants and `other`
+otherwise. Some publishers format errors or connection IDs into the reason,
+so this keeps the label set bounded; the full reason stays in the logs. Resyncs coalesced by the ledger before
+publication are not counted, and neither are events dropped because the
+subscriber's context is done.
 
 `ledger.tx` is published with `PublishOrdered`, not `PublishAsync`, so a
 subscriber deriving state from it sees a block's transactions in index order
@@ -4333,15 +4357,28 @@ remains specific to each connection mode.
 For the current respun prototype, the notify vote dialect is specifically the three-field `(announcing_rb_hash, voter_id, signature)` form. Announcements are armed from the ordered `chain.header` stream rather than from `chain.update`: a ranking-block header whose VRF/KES this node verified, admitted to the primary chain's header queue and inside the vote window, arms a local vote before its block has been fetched, validated or applied. A header admitted *without* verification -- the deferred-epoch-nonce, validation-disabled and Mithril-covered paths, which reach `Chain.AddBlockHeader` rather than `AddVerifiedBlockHeader` -- arms nothing, so a chainsync peer cannot make this node sign a vote for a ranking block it never authenticated and so occupy the `(slot, voter_id)` the honest block's vote needs; an unverified header is announced only once its block is applied, through the idempotent `chain.update` backstop. `ChainHeaderInvalidationEvent`, on the same stream and therefore never reordered against announcements, retracts announcements whose ranking blocks left the chain, and a rollback prunes by comparing its `Seq` against each announcement record's, so an announcement sequenced after the rollback is not dropped by it. A bounded TTL queue holds votes that race ahead of adoption and retains a bounded set of alternate signatures per voter, so an invalid first candidate cannot suppress a later valid vote. Local votes use that same LeiosNotify stream; each outbound response reserves its log entry and commits the per-peer cursor only after gouroboros reports a successful send. The peer can issue its next request before that report arrives, so a request that finds the connection's reservation still outstanding waits for it to be committed or released instead of offering the same entry again. A successfully sent entry is therefore never offered to that connection twice. Failed or aborted sends release the reservation into a counted retry set retained across reconnects; a reconnect advances through every pending retry on its stream rather than clearing only the first failed entry. The transitional offered-ID and four-field forms remain decode-compatible only.
 
 Apply-boundary validation checks the exact endorser block
-announced by that ranking-block header while the header's parent is still the
-applied ledger tip. A remote block waits for its `(slot, hash)` closure only
-after selection, full block fetch and admission to the ledger apply stream;
-announcing blocks form one-block apply chunks so the exact parent remains the
-published ledger tip during validation. Competing or queued headers therefore
-cannot each consume a diffusion-window wait. A locally forged header takes the
-same path after block self-validation and before adoption. A confirmed semantic
-failure rejects the locally forged ranking block before adoption; unavailable
-parent or storage state leaves adoption eligible for later validation. Every
+announced by that ranking-block header while the announcing block itself is
+the applied ledger tip (`ledger.LeiosEndorserBlockBasisHash`). CIP-164 makes
+the endorser block's transactions a valid extension of the state the
+announcing block leaves, which includes the transactions of the endorser block
+it certifies and its own body transactions, and the next block, the only one
+that can certify the endorser block, applies those transactions on that same
+state. A remote block waits for its `(slot, hash)` closure only after
+selection, full block fetch and admission to the ledger apply stream; an apply
+chunk ends with its first live announcing block, and the next chunk's
+preparation validates that block's endorser block while it is the published
+tip and before any later block applies. The background validator in
+`ouroboros` uses the same state, and the ledger's `ledger.block` apply event
+retries it, since `chain.update` can precede the apply. Competing or queued
+headers therefore cannot each consume a diffusion-window wait. A locally
+forged header is checked after block self-validation and before adoption,
+when the forged block is not yet the tip, so it validates on the block's
+parent state (`ledger.LeiosValidationParentHash`). That is equivalent because
+a locally built announcing block carries no transactions and its endorser
+block excludes the transactions of the endorser block it certifies. A
+confirmed semantic failure rejects the locally forged ranking block before
+adoption; unavailable parent or storage state leaves adoption eligible for
+later validation. Every
 other validation error rejects the local forge, so an unclassified failure
 cannot publish an unchecked announcement. The composition adapter marks
 confirmed transaction failures for the forger without introducing a dependency
@@ -7115,7 +7152,7 @@ Once a block's header is identified as certified, it is **never** downgraded to 
 
 Two Prometheus metrics capture the outcome: `dingo_leios_ntc_certrb_total{outcome}` counts handled CertRBs, with `outcome` one of `merged` (closure cached, spliced without waiting), `merged_after_wait` (closure arrived during the wait), or `unresolved` (closure did not resolve — wait timed out, was cancelled by the connection ending, or the endorser reference was unresolvable — so the connection was closed and the block not served); `dingo_leios_ntc_certrb_closure_wait_seconds{outcome}` records how long the server waited, with `outcome` `resolved`, `timeout` (the wait window elapsed), or `cancelled` (the serving connection ended before the closure arrived).
 
-Endorser-block arrival is measured separately from NtC serving. When an endorser block's manifest and every transaction become available locally with a verified slot binding (`storeLeiosEndorserBlock`, or `bindLeiosEndorserBlockSlot` once the announcement corroborates the slot), `recordLeiosEbArrival` observes wall clock minus slot time once, at the not-ready to ready transition, into `dingo_leios_eb_arrival_delay_seconds` and a 16-slot ring keyed by EB slot (slot = EB slot % 16, same collector pattern as the blockfetch recent-delay ring): `dingo_leios_recent_eb_arrival_delay_seconds{idx}`, `dingo_leios_recent_eb_slot{idx}` and `dingo_leios_recent_eb_tx_count{idx}`, read together under one lock. Blocks this node forged (`leiosStoreAuthoritative`) are not arrivals, and arrivals more than 5 minutes after the slot (backfill) are not recorded. The blockfetch recent-delay ring additionally exports `dingo_blockfetch_recent_block_kind{idx}`, a bitmask per ranking block (1 = announces an endorser block, 2 = carries an endorser-block certificate, 0 = plain or pre-Leios), taken from the header by `leiosheader.RankingBlockKind` and stored under the same lock as the delay it pairs with. The same ring also exports `dingo_blockfetch_recent_block_slot{idx}` (the ranking block's slot) under that lock, and `dingo_blockfetch_recent_fetch_duration_seconds{idx}` (blockfetch request dispatch to body; the request key is per range, so the k-th block of a multi-block range includes the earlier blocks' transfer, and a block with no recorded request start is not recorded in the ring at all). The slot of the endorser block a certifying ranking block certifies is not exported: the header carries only a certified flag and the certificate holds signers and a signature, so that endorser block is the one the parent block announced and its slot is the parent's slot, which needs a parent lookup; an announced endorser block shares its ranking block's slot, so no separate announced-slot series exists. Each at-tip block's delay is also observed into `dingo_blockfetch_block_delay_seconds{kind}`, a histogram with `kind` one of `plain`, `announce`, `certify`, `announce_certify` and exact bucket edges at 0.25, 0.5, 1, 2, 3 and 5 seconds, recorded together with the ring entry by `recordAtTipBlock`.
+Endorser-block arrival is measured separately from NtC serving. When an endorser block's manifest and every transaction become available locally with a verified slot binding (`storeLeiosEndorserBlock`, or `bindLeiosEndorserBlockSlot` once the announcement corroborates the slot), `recordLeiosEbArrival` observes wall clock minus slot time once, at the not-ready to ready transition, into `dingo_leios_eb_arrival_delay_seconds` and a 16-slot ring keyed by EB slot (slot = EB slot % 16, same collector pattern as the blockfetch recent-delay ring): `dingo_leios_recent_eb_arrival_delay_seconds{idx}`, `dingo_leios_recent_eb_slot{idx}` and `dingo_leios_recent_eb_tx_count{idx}`, read together under one lock. An arrival whose ring position already holds a newer EB slot is still observed in the histogram; the ring keeps the newer slot. Blocks this node forged (`leiosStoreAuthoritative`) are not arrivals, and arrivals more than 5 minutes after the slot (backfill) are not recorded. The blockfetch recent-delay ring additionally exports `dingo_blockfetch_recent_block_kind{idx}`, a bitmask per ranking block (1 = announces an endorser block, 2 = carries an endorser-block certificate, 0 = plain or pre-Leios), taken from the header by `leiosheader.RankingBlockKind` and stored under the same lock as the delay it pairs with. The same ring also exports `dingo_blockfetch_recent_block_slot{idx}` (the ranking block's slot) under that lock, and `dingo_blockfetch_recent_fetch_duration_seconds{idx}` (blockfetch request dispatch to body; the request key is per range, so the k-th block of a multi-block range includes the earlier blocks' transfer, and a block with no recorded request start is not recorded in the ring at all). The slot of the endorser block a certifying ranking block certifies is not exported: the header carries only a certified flag and the certificate holds signers and a signature, so that endorser block is the one the parent block announced and its slot is the parent's slot, which needs a parent lookup; an announced endorser block shares its ranking block's slot, so no separate announced-slot series exists. Each at-tip block's delay is also observed into `dingo_blockfetch_block_delay_seconds{kind}`, a histogram with `kind` one of `plain`, `announce`, `certify`, `announce_certify` and exact bucket edges at 0.25, 0.5, 1, 2, 3 and 5 seconds, recorded together with the ring entry by `recordAtTipBlock`.
 
 ## Peer Governance
 
@@ -8310,8 +8347,8 @@ insert.
 sequence number, not a slice index, so TTL compaction never invalidates it)
 over the arrival-ordered log, mirroring CIP-0137's per-peer outstanding
 message-ids queue for the node-to-node message-submission mini-protocol
-(protocol 18) without implementing that protocol's blocking/non-blocking
-request state machine itself, which a node-to-node transport must provide. A peer new to
+(protocol 11) without running that protocol's blocking/non-blocking
+request state machine itself, which `PeerConn` runs. A peer new to
 the pool sees the full retained backlog before anything arriving after it
 connects; `RemovePeer` releases a disconnected peer's cursor.
 
@@ -8378,10 +8415,11 @@ connection without a feeder.
 Metrics are registered against the retained registry (not the rebuildable one,
 which a live restore unregisters) and are all prefixed `dingo_dmq_`:
 `messages_received_total`, `messages_expired_total`, `messages_sent_total`
-(messages queued for a notification consumer),
-`validation_failures_total{reason}`, `mempool_messages`, `mempool_bytes`, and
-`connections`. Every `reason` series exists from startup, so a `rate()` alert
-sees a reason before its first rejection.
+(messages queued for a notification consumer, or bodies sent to a peer),
+`validation_failures_total{reason}`, `mempool_messages`, `mempool_bytes`,
+`connections` (local clients) and `peers` (open node-to-node connections).
+Every `reason` series exists from startup, so a `rate()` alert sees a reason
+before its first rejection.
 
 `dmq.topologyFile` names a dmq-node topology file, which uses cardano-node's
 P2P topology syntax and is separate from the Cardano topology. `dmq.LoadTopology`
@@ -8407,12 +8445,130 @@ authoritative read, before the DMQ stack opens its socket. A bad file stops
 startup through the node's normal failure path, after services that started
 earlier in `Run`, and a successful load logs the distinct peer count.
 
-Not yet provided: the node-to-node message submission transport, its listener,
-the peer manager that dials the topology peers within `dmq.minPeers` and
-`dmq.maxPeers`, and ledger peer discovery, which the DMQ stack needs before it
-can exchange messages with other nodes. `dmq.n2nPort`, `dmq.listenAddress`,
-`dmq.listenIpv6Address`, `dmq.minPeers` and `dmq.maxPeers` are validated
-configuration keys that nothing reads yet.
+### DMQ Node-to-Node Message Exchange
+
+`Stack.AttachPeer(ctx, conn, dialed)` runs one node-to-node connection over a
+`net.Conn` and returns a `PeerConn`. It does not listen or dial: whoever owns
+the socket hands the connection over. gouroboros has the DMQ node-to-node
+version maps, but its `Connection` cannot open a DMQ node-to-node connection and
+its `messagesubmission` package is not wire-compatible with dmq-node, so
+`PeerConn` builds the connection from the exported muxer, handshake and
+protocol packages and runs a message submission protocol of its own.
+
+That protocol is version 2 as dmq-node's codec defines it, and only version 2 is
+offered. dmq-node's version 1 is the TxSubmission2 codec under another name and
+this stack does not speak it. The messages are `[1, blocking, ack, req]`,
+`[2, [*[messageId, size]]]`, `[3]` (`MsgReplyNoIDs`, a blocking request's answer
+when nothing is held), `[4, [*messageId]]`, `[5, [*message]]` and `[6]`. The item
+list in messages 2, 4 and 5 is an indefinite-length array, which dmq-node
+requires and the gouroboros package does not produce; a definite-length item
+list is a decode error. The message frames, each message and its payload are
+definite-length arrays. An empty reply
+to a non-blocking request is `[2, []]`, and an empty reply to a blocking one is
+not allowed. `sigsub_messages_test.go` checks the encodings byte for byte
+against ones written out by hand from dmq-node's CDDL and codec.
+
+Input from a peer is bounded before it is decoded. A request is refused above
+256 KiB and a reply above 4 MiB, by message type in every state, so a request
+pipelined while a reply is owed is held to the same limit as one received in
+`StIdle`; the serving side holds at most 1 MiB of a message still arriving and
+the pulling side 8 MiB. A message's envelope must be a definite-length array
+of at most four elements, which its first byte says before any element is read.
+A list is read one item at a time and refused beyond 65535 items, the most a
+16-bit count can name, and each ID or message is checked as it is read, so a
+list of empty entries is refused at its first entry without the list ever being
+built.
+
+The two sides are reversed from TxSubmission2. The side that pulls holds agency
+in `StIdle` and is the connection's initiator, which is gouroboros's client
+role; the side that serves is the responder, the server role. That reversal is
+what removes version 1's `Init`. The handshake offers both roles, and a peer
+that offers both gets both on the one connection. Otherwise the side that dialed
+runs the initiator instances, the pulling side and the keep-alive client, and
+the side that listened runs the responder instances, the serving side and the
+keep-alive server. gouroboros carries the diffusion mode on the wire as
+"initiator only", so offering both roles is `false`. The mini-protocols are
+message submission (11) and keep-alive (12), dmq-node's number: Cardano's is 8,
+which the gouroboros keep-alive package is fixed to, so `keepAliveClient` and
+`keepAliveServer` run its states and messages on 12. Peer sharing (13) is not
+offered.
+
+The serving side answers from the pool through the peer's own `NextForPeer`
+cursor. A blocking request needs at least one ID, so it waits on `AddedSignal`
+on its own goroutine; but dmq-node ends the connection when a blocking request
+goes unanswered for 20 seconds, so after `blockingReplyWait` (10 seconds) the
+answer is `MsgReplyNoIDs` and the peer asks again. A run against dmq-node showed
+the connection being dropped every 20 seconds until it did. Messages that expired, and
+messages the peer itself announced (kept in a bounded `idSet`), are passed over,
+so a message is not announced back to where it came from. A body request returns
+the messages the pool still holds, which may be fewer than asked. The window of
+announced IDs, and the rules for it, are `sigsub_protocol.go`'s: a blocking
+request only with nothing left unacknowledged, no zero request, acknowledgements
+within what is outstanding, replies naming only what was asked, and requests for
+bodies only for what was announced. A peer that breaks one ends the connection
+with a gouroboros protocol violation. dmq-node's pulling side pipelines, sending
+its next request before the reply to the last, so the serving side's state map
+lists `RequestIDs`, `RequestSigs` and `Done` as pipelined message types, which
+the protocol holds until it has sent its reply.
+
+The pulling side keeps the announced IDs in a window until the next request
+acknowledges them, in announcement order. A request is blocking exactly when the
+window is empty after the acknowledgement, and non-blocking while IDs remain,
+which happens when a fetch is cut by `fetchMessages` or `fetchBytes` and leaves
+some for the next round. It fetches only IDs the pool lacks, and sends its
+acknowledgement with the next ID request. A blocking request that gets nothing
+back, whether `[3]` or after a wait, is followed by a pause that starts at 100ms
+and doubles to 2s, so a peer that answers at once cannot keep the loop spinning.
+Each fetched message goes through `Stack.admit`, the check a local submission
+gets. An expired or duplicate message, or one refused because the pool is full,
+is counted under `validation_failures_total` and dropped. An `invalid` one is a
+protocol violation and ends the connection. Two peers may fetch the same
+announced message at the same moment; the second is `alreadyReceived`, which
+costs a few hundred bytes and does not need cross-peer bookkeeping.
+
+`Stack.admit` first checks the sizes CIP-0137's CDDL fixes, because dmq-node
+refuses to decode a message that breaks them: a body of 90 to 2000 bytes
+(`StackConfig.MessageBodyMin` and `MessageBodyMax` override the limits), a
+448-byte KES signature, and 32, 64 and 32 bytes for the operational certificate's
+KES key, its cold signature, and the cold key. A message outside them is
+`invalid`, whether it came from a local client or a peer.
+
+A `Done` ends one direction, not the connection. The pulling side sends it from
+`StIdle`; the serving side that receives it releases that peer's cursor, and a
+pulling loop whose protocol has finished stops. A finished protocol signals
+nothing a waiter can select on, so a loop waiting for a reply polls `IsDone`
+every 250ms.
+
+The serving side tolerates 1000 outstanding IDs and the pulling side leaves at
+most 100, so a peer whose own limit is higher is not taken for a violator. The
+pulling side waits for a reply for the limits dmq-node uses for the same states
+(`timeLimitsSigSubmissionV2`): 20 seconds for a blocking request, 10 for a
+non-blocking one and for a request for bodies; `StIdle`, where the serving side
+waits for the next request, has none. `PeerConn` records the first error as the reason
+the connection ended; a remote hang-up or a local close is a clean end.
+`Stack.Stop` refuses new peers, closes the open ones, and only then stops the
+pool. A closed `PeerConn` releases its pool cursor.
+
+`internal/test/dmqinterop` runs this against a real dmq-node. `run.sh` downloads
+a release and checks its SHA-256, builds Linux builds of Dingo and a submit
+helper, and runs Dingo's single-node devnet and dmq-node together in one
+container, dmq-node using the devnet as its Cardano node. The tests, built only
+with the `dingo_dmq_interop` tag, cover Dingo dialing dmq-node, dmq-node serving
+a message signed by the devnet pool's real KES key to Dingo, which checks the
+signatures itself, and dmq-node dialing in and pulling a message from Dingo,
+shown by a second Dingo stack then fetching it from dmq-node. dmq-node accepts a
+pool's messages only once the pool's set stake snapshot is nonzero, which is
+after the devnet's second epoch change, so a run takes about twenty minutes.
+The last two tests need gouroboros v0.214.0 or later, whose authenticator
+verifies the KES signature over the payload's raw CBOR, as dmq-node does;
+earlier releases verified a byte-string wrapped copy and so rejected what
+dmq-node signs.
+
+Not yet provided: the listener on `dmq.n2nPort`, the peer manager that dials the
+topology peers within `dmq.minPeers` and `dmq.maxPeers`, and ledger peer
+discovery, so nothing outside tests calls `AttachPeer`. `dmq.n2nPort`,
+`dmq.listenAddress`, `dmq.listenIpv6Address`, `dmq.minPeers` and `dmq.maxPeers`
+are validated configuration keys that nothing reads yet.
 
 ### DMQ Message Authentication
 
@@ -8436,9 +8592,25 @@ rather than a boolean registered-pool set, so this codebase no longer needs
 its own copy.
 
 `node_dmq.go` constructs the `MessageAuthenticator` for `dmq.Stack`, with a
-`StakeAuthority` that reads the pool's stake from the snapshot Praos leader
-election uses (`praos.StakeSnapshotEpoch` of the current epoch), so a message is
-accepted only from a pool that may currently forge blocks. The DMQ stack is not
+`StakeAuthority` that reads the pool's stake through
+`LedgerState.ElectingPoolStake` at the wall-clock slot derived from confirmed
+era history: the same distribution, and the same choice between the mark
+snapshot of `praos.StakeSnapshotEpoch` and a Mithril-imported active
+distribution, that header verification checks a block at that slot against. A
+message is therefore accepted only from a pool that may forge now. The stake
+lookup, the current KES period and the authenticator's current slot all read
+that one slot rather than the ledger tip, which can trail it into the previous
+epoch.
+
+Every lookup the `StakeAuthority` cannot answer wraps
+`dmq.ErrChainStateUnavailable`, and admission reports it as `other` rather than
+`invalid`, which CIP-0137 treats as a protocol violation. That covers detached
+ledger state, storage errors, and a distribution that is missing, empty,
+pruned, reconstructed after its boundary (absent the explicit
+`SkipLeaderStakeThresholdCheck` override), or has no
+denominator, or that elects an epoch the ledger has not reached
+(`ledger.ErrLeaderStakeSnapshotUnavailable`). Only a pool absent from a
+populated distribution is `invalid`. The DMQ stack is not
 stopped by a live restore or truncate, so the `StakeAuthority` holds its own
 ledger reference under a lock: quiesce clears it before storage closes, and
 reinitialization sets the rebuilt ledger state. Clearing waits for a lookup in
@@ -8503,6 +8675,24 @@ prepares once per stake/coefficient/mode tuple and checks each signed slot
 with `CheckVRFOutput`. Zero-pool schedules remain empty as pool policy even
 at `f=1`; inbound zero-pool headers remain rejected.
 
+Tachys scheduling instead prepares gOuroboros's exact-integer public selector
+from every positive-stake pool in one Mark snapshot. The immutable distribution
+is canonically ordered and carries a commitment over all pool IDs and stake,
+so equal local and total stake cannot make a different distribution reusable.
+The same selector authorizes normal headers and peer-relative fork candidates;
+fork candidates use their derived candidate nonce rather than the local-chain
+nonce. The ledger caches at most three distributions by snapshot epoch and
+consensus-context generation. Rollback or state replacement changes that
+generation, while the leader manager clears its in-memory Tachys schedules on
+every rollback synchronously after the replacement consensus snapshot is
+published, and refuses an in-flight result from the older schedule generation.
+A distribution read that observes a consensus-context change defers header
+verification instead of reporting the stake snapshot unavailable. Next-epoch
+nonce readiness drops only the ready epoch's schedule; the current epoch's
+schedule keeps serving block production.
+Persisted Tachys schedules pin the nonce, absolute epoch range,
+era, provider identity, and full-distribution commitment.
+
 The stake distribution is the reference node's active `set`/`nesPd`
 distribution, as of the end of E-2. Dingo captures `mark[K]` at the boundary
 into K, holding stake as of the end of K-1; the electing row is therefore
@@ -8541,14 +8731,17 @@ numerator/denominator; nondecimal rationals such as `1/3` are valid. Existing
 float-only callers retain their rational conversion and are subject to the
 same domain rejection, without automatic rounding or a new fallback.
 
-`ScheduleFormatVersion=5` invalidates the pre-E34 version-4 slot lists.
-Records with version 4 or no version (decoded as zero) are discarded by the
-real election reload path, recomputed under E34 and saved as version 5.
-A valid version-5 record is reused on restart. Nonce, pool/total stake,
-epoch and slot-range checks remain in force. Persisted JSON is unchanged:
-`format_version`, `epoch`, `pool_id`, `pool_stake`, `total_stake`,
-`epoch_nonce`, `leader_slots`. No cutoff or evaluator is serialized, and no
-database schema migration is needed.
+`ScheduleFormatVersion=7` adds the exact epoch context and the Tachys
+distribution commitment to every persisted schedule. Records with an older
+version or no version (decoded as zero) are discarded by the real election
+reload path and recomputed. A valid version-7 record is reused on restart.
+Praos records recheck their nonce, pool/total stake, epoch and slot range;
+Tachys records additionally require an exact epoch range, era, and
+full-distribution commitment match. Persisted JSON carries `format_version`,
+`epoch`, `pool_id`, `pool_stake`, `total_stake`, `epoch_nonce`,
+`epoch_start_slot`, `epoch_slot_count`, `era_id`, `consensus_identity`,
+`distribution_commitment`, and `leader_slots`. No cutoff or evaluator is
+serialized, and no database schema migration is needed.
 
 The `leader schedule calculated` record retains snapshot epoch/type, epoch
 slot interval, nonce, pool/total stake, exact `f`, consensus mode and elected
@@ -9496,7 +9689,7 @@ Experimental Dijkstra top-N committee voting, active only under the Dijkstra/Lei
 - **Vote validation**: current prototype votes identify the announcing ranking block. The selected-chain block event maps that hash to the announcement slot and EB after adoption, before window, committee, membership, deduplication, and BLS checks run; early votes wait in a bounded TTL queue instead of being rejected with a synthetic slot zero. The queue retains bounded alternate candidates per voter and verifies them on resolution, preventing a forged first signature from occupying that voter's deduplication slot. Exact per-connection accounting makes its global capacity fair: when full, an underrepresented connection replaces the oldest candidate from the most represented connection, while a lone healthy relay may still use the entire queue. A committee member's voting key resolves from the same historical Mark snapshot that supplied its stake: `LeiosKeyProvider` calls `ledger.LedgerView.GetLeiosKeys(snapshotEpoch, ...)`, then excludes any captured key whose proof fails `VerifyLeiosKeyProofOfPossession`. A post-SNAP registration or rotation therefore cannot change an already-selected committee. A member without a captured usable key is a keyless committee seat: membership and stake still count, but its vote can never be verified or aggregated into a certificate. There is no more derivation fallback — that insecure shortcut (deriving a key from the pool's cold-key hash) was removed upstream in `prototype-2026w32` and here in the same change.
 - Full votes and resolved prototype votes use the shared bounded one-minute fixed-window counters for admission and invalid-message strikes, with at most 128 vote checks per connection and 4,096 process-wide. A vote dropped because the shared process, per-peer or peer-tracking budget is exhausted, because its vote id equivocates, or because its slot is behind the voting window (honest relays forward late votes without an age check) does not count as peer misbehavior; a late drop is still counted by the `slot_window` rejection metric. Structural, signature, membership and too-far-future rejections count toward the per-connection limit. Repeated vote ids coalesce while their first check is in flight, before committee lookup and signature verification can be repeated.
 - **Stake quorum and certificates**: per endorser block and signing context, the manager tracks observed stake (all membership-valid votes) and verified stake (signature-verified votes). When verified stake reaches `LeiosQuorumStakeThreshold` (tau) of *total active stake* (exact rational arithmetic, never a head count), it builds a `LeiosEbCertificate` — signers bitfield over the committee plus one aggregated BLS12-381 MinSig signature — from verified votes only, and publishes `leios.eb_quorum` with the announcing ranking-block hash that every prototype vote signed. Certificate validation reports `sigChecked bool`; false means quorum passed but one or more signer keys were unavailable, so production callers must reject that result. The pipeline preserves signing context, and the forge loop only adapts the certificate to the prototype's in-body `DijkstraLeiosCertificate` shape when its announcing RB is the actual parent CertRB.
-- **Vote emission**: after an acquired EB is announced by a selected ranking block and its endorser-block transactions have a `Valid` semantic result, a block producer signs that announcing ranking-block hash once with the prototype BLS POP domain and publishes `leios.vote_emitted`. `ouroboros` calls `LeiosAnnouncementLedger.ValidateLeiosEndorserBlockTransactions` before `HandleEndorserBlock` and `ObserveEndorserBlock`; validation uses the announcing header's parent snapshot, with at most two concurrent validations. `Unknown` results are retried on chain updates and epoch transitions. The signed preimage is the hash's CBOR byte-string encoding (34 bytes: `0x58 0x20` then the 32 hash bytes), matching the reference's `SignableRepresentation` for `RbHash`; signing the bare 32 bytes hashes a different preimage to the curve and every pairing check fails. Before committing either a local or resolved peer vote, the manager revalidates the exact announcement under its state lock; local commit and publication are additionally serialized with rollback, so an in-flight signature cannot resurrect a rolled-back announcement. Local signing also snapshots the active configuration's generation, pool, and key, then revalidates all three under the state lock before inserting or publishing the result; a signature completed after reconfiguration is discarded without changing vote state or emitting an event. Node composition enqueues the three-field vote on LeiosNotify. When `leiosVoteSigningKeyFile` is configured, Dingo loads the Cardano text-envelope BLS12-381 signing key and uses it for vote signatures; legacy raw hex scalar files remain accepted. A node whose local historical snapshot has not reached the key's on-chain registration starts with voting disabled and retries the deferred configuration after epoch transitions. The initial provider lookup distinguishes absence from failure: an absent usable registration creates deferred configuration, while a provider error is fatal to startup and clears that configuration; an already-visible mismatch is likewise a hard configuration error. Every initial or retry lookup takes a monotonically increasing configuration generation before reading the provider; only the newest generation may activate voting, clear deferred state, or report a fatal startup result. Every completion also revalidates that generation together with the requested pool and key before interpreting Enabled, AwaitingKey, or RetryPending as its own result; a stale request returns Superseded, which node startup reports as a distinct nonfatal diagnostic. Starting a newer retry also disables an older activation that has not finalized, so a blocked lookup cannot replace the enabled, deferred, or diagnostic outcome established by a newer attempt. Once configuration has been deferred, a provider error during an epoch-transition retry is nonfatal: voting stays disabled and the pool and signing key remain retained for the next retry. Invalid proofs and mismatches during deferred retries have the same disabled-and-retained behavior. A PoP-verified matching snapshot key enters a single serialized activation flow: if ready current-epoch announcements exist, committee, parameter, and provider resolution must succeed before the signing key is exposed; the flow then replays them in deterministic slot and ranking-block-hash order and clears deferred state only after replay processing. A transient replay-preparation failure therefore leaves voting disabled and the configuration retryable. **A pool started without a signing key runs as a non-voting relay**: the insecure pool cold-key-hash derivation that previously stood in for a real key (matching the reference's `rawDeserialiseSignKeyDSIGN`) was removed upstream in `prototype-2026w32`, and dingo removed its own copy in the same change — there is no fallback that lets a pool vote without a real registered key. The strict `ParseVoteSigningKey` path used for operator-supplied key files rejects out-of-range scalars.
+- **Vote emission**: after an acquired EB is announced by a selected ranking block and its endorser-block transactions have a `Valid` semantic result, a block producer signs that announcing ranking-block hash once with the prototype BLS POP domain and publishes `leios.vote_emitted`. `ouroboros` calls `LeiosAnnouncementLedger.ValidateLeiosEndorserBlockTransactions` before `HandleEndorserBlock` and `ObserveEndorserBlock`; validation uses the snapshot the announcing block leaves (`ledger.LeiosEndorserBlockBasisHash`), so it runs once that block is the applied ledger tip, with at most two concurrent validations. `Unknown` results are retried on chain updates and epoch transitions. The signed preimage is the hash's CBOR byte-string encoding (34 bytes: `0x58 0x20` then the 32 hash bytes), matching the reference's `SignableRepresentation` for `RbHash`; signing the bare 32 bytes hashes a different preimage to the curve and every pairing check fails. Before committing either a local or resolved peer vote, the manager revalidates the exact announcement under its state lock; local commit and publication are additionally serialized with rollback, so an in-flight signature cannot resurrect a rolled-back announcement. Local signing also snapshots the active configuration's generation, pool, and key, then revalidates all three under the state lock before inserting or publishing the result; a signature completed after reconfiguration is discarded without changing vote state or emitting an event. Node composition enqueues the three-field vote on LeiosNotify. When `leiosVoteSigningKeyFile` is configured, Dingo loads the Cardano text-envelope BLS12-381 signing key and uses it for vote signatures; legacy raw hex scalar files remain accepted. A node whose local historical snapshot has not reached the key's on-chain registration starts with voting disabled and retries the deferred configuration after epoch transitions. The initial provider lookup distinguishes absence from failure: an absent usable registration creates deferred configuration, while a provider error is fatal to startup and clears that configuration; an already-visible mismatch is likewise a hard configuration error. Every initial or retry lookup takes a monotonically increasing configuration generation before reading the provider; only the newest generation may activate voting, clear deferred state, or report a fatal startup result. Every completion also revalidates that generation together with the requested pool and key before interpreting Enabled, AwaitingKey, or RetryPending as its own result; a stale request returns Superseded, which node startup reports as a distinct nonfatal diagnostic. Starting a newer retry also disables an older activation that has not finalized, so a blocked lookup cannot replace the enabled, deferred, or diagnostic outcome established by a newer attempt. Once configuration has been deferred, a provider error during an epoch-transition retry is nonfatal: voting stays disabled and the pool and signing key remain retained for the next retry. Invalid proofs and mismatches during deferred retries have the same disabled-and-retained behavior. A PoP-verified matching snapshot key enters a single serialized activation flow: if ready current-epoch announcements exist, committee, parameter, and provider resolution must succeed before the signing key is exposed; the flow then replays them in deterministic slot and ranking-block-hash order and clears deferred state only after replay processing. A transient replay-preparation failure therefore leaves voting disabled and the configuration retryable. **A pool started without a signing key runs as a non-voting relay**: the insecure pool cold-key-hash derivation that previously stood in for a real key (matching the reference's `rawDeserialiseSignKeyDSIGN`) was removed upstream in `prototype-2026w32`, and dingo removed its own copy in the same change — there is no fallback that lets a pool vote without a real registered key. The strict `ParseVoteSigningKey` path used for operator-supplied key files rejects out-of-range scalars.
 - **Vote relay**: Prototype-domain vote records are excluded from the standalone LeiosVotes pull stream because protocol 20 verifies the legacy slot-plus-endorser-block preimage; genuine legacy votes remain available there. A prototype vote accepted from a peer (via `HandlePrototypeVote`, either immediately or once its queued announcement resolves) publishes `leios.vote_received` exactly once with the connection key that delivered it, gated by the same `insertVote` dedup/equivocation check that gates `leios.vote_emitted` for a local vote — a resubmission or an equivocating vote is not re-published. Node composition enqueues it on LeiosNotify for every peer except that origin connection; locally emitted votes still go to every peer. The shared append log advances the excluded origin cursor without creating a delivery reservation or retry, including while the origin is caught up and idle, so exclusion does not pin pruning. Without peer re-diffusion, a relay tallied a vote for its own view but never forwarded it, so a block producer whose only path to the network is that relay never observed quorum and built no certificates.
 - **On-chain key registration and persistence**: a pool's optional `leios_key` pool-cert field (96-byte BLS public key + 48-byte proof of possession) is persisted verbatim in the `pool`/`pool_registration` tables' `leios_key_public`/`leios_key_possession_proof` columns (`database/plugin/metadata/sqlstore/transaction_certificates.go`'s `applyPoolRegistrationCertificate`, mirroring how `vrf_key_hash` is stored), with no proof check at write time, and the registration's `leios_key_registration_epoch` follows cardano-ledger's POOL and POOLREAP rules (`database/plugin/metadata/sqlstore/leioskeyepoch`; genesis pools register in epoch 0) — `database` may not depend on `ledger/leios`'s BLS code (`internal/architecture/tests_test.go`). Dijkstra transaction validation rejects a BLS public key claimed by another pool's active or deferred parameters; the public key alone identifies the claim, so changing only its proof of possession does not bypass the rule. The pending-state overlay applies the same ownership rule across transactions selected for one block. At SNAP, the registration effective during the ended epoch is copied into the Mark `pool_stake_snapshot` row (`leios_key_public`/`leios_key_possession_proof`, migration `v5`) with its registration-effective epoch (`leios_key_registration_epoch`, migration `v26`) when retained epoch history establishes the age. If the registration is authoritative for the snapshot but its age cannot be established, SNAP preserves the key bytes with a NULL age; it never reconstructs age or key material from mutable pool state. `ledger.LedgerView.GetLeiosKeys` reads the requested epoch's Mark rows for `node_leios.go`'s `leiosKeyProviderAdapter`, which `VoteManager` calls once per epoch and caches in `epochEntry.onChainKeys`. It excludes keys with unknown age or at or beyond `ceil(MaxKESEvolutions * SlotsPerKESPeriod / SlotsPerEpoch) + 2` epochs old, then verifies proof of possession; an invalid, missing, unknown-age, or expired key leaves the seat and its stake intact but cannot sign or validate a certificate.
 - **Certificate admission**: before asynchronous certified endorser-block fetches or apply-time fetch and transaction application, ledger admission checks that the Dijkstra header certification flag agrees with body certificate presence, resolves the certified announcement from the CertRB's parent, loads the same historical committee and threshold used for voting, then rejects malformed signers, a keyless signer, insufficient signer stake, or an invalid aggregate signature. Replay and backfill use this same gate, so an unverified certificate cannot authorize endorser-block effects.
@@ -11221,10 +11414,18 @@ bootstraps each running its immutable downloads beside the ancillary one.
 Public signature submissions use a separate four-request bound, so progressing
 archive transfers cannot consume their capacity. Either bound returns `503
 Service Unavailable` with `Retry-After: 1` when it is full. A
-15-second request-body read deadline is armed before decoding a signature
-submission. Archive transfers also admit at most one bootstrap's download
-concurrency from a remote host, keying IPv6 clients by their /64 prefix and
-IPv4-mapped addresses as IPv4; excess downloads return `429 Too Many Requests`.
+separate eight-request bound protects signature-body decoding, with at most
+four reads admitted from one remote host. A 15-second request-body read deadline
+and 1 MiB size limit apply through the end of the body within that tier.
+Rejected reads close their HTTP connection without draining the remaining
+body. Successfully decoded submissions then retain one of the four verification
+slots through signer validation, catalog access, cryptographic verification and
+certification, so incomplete bodies cannot consume verification capacity or
+leave decoding unbounded.
+Client bounds key IPv6 addresses by their /64 prefix and IPv4-mapped addresses
+as IPv4. Archive transfers also admit at most one bootstrap's download
+concurrency from a remote host. Excess per-client requests return `429 Too Many
+Requests`.
 Each response write retains the 15-second idle deadline, while archive writes
 also carry a 30-second startup allowance and must average at least 64 KiB/s.
 Large archives therefore receive time proportional to their bytes while a
@@ -18494,6 +18695,22 @@ refuses to queue an unverified header past the horizon and requests a
 re-intersection. Judging the recorded arrival rather than the later handler time means
 local decode, EventBus, or scheduler delay cannot make an invalid early header
 appear timely.
+
+The same `ArrivalTime` feeds the header arrival metrics
+(`ouroboros/chainsync_header_arrival.go`). Once a header has passed (or only
+deferred) admission crypto from an ingress-eligible peer, and the ledger is at
+tip, `chainsyncClientRollForwardAt` observes arrival minus slot onset in
+`dingo_chainsync_header_arrival_delay_seconds` and in a 16-slot ring keyed by
+block number (`dingo_chainsync_recent_header_delay_seconds`,
+`dingo_chainsync_recent_header_block_number`,
+`dingo_chainsync_recent_header_block_slot`, all labelled `idx`), matching the
+blockfetch recent-delay ring. Peers finish admission independently, so each
+ring slot keeps the earliest arrival of every header at its height across
+peers, competing fork headers included, and the histogram observes each of
+those headers once, when a higher block takes the slot. Headers more than five
+minutes past their slot are skipped.
+This is the quantity CIP-164 bounds by L_hdr when a Leios voter decides whether
+to vote for the endorser block the header announces.
 
 This admission rule includes Byron main headers and epoch-boundary headers;
 its two-second allowance is measured in wall-clock time even for Byron's

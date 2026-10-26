@@ -148,10 +148,13 @@ type Node struct {
 	// dialing/closing it (closing the prior one before replacing it, so a
 	// live-lifecycle rebuild via reinitializeBlockProducer cannot leak a
 	// connection); node_shutdown.go closes it during graceful shutdown.
-	kesAgentClient               *kesagent.Client
-	kesAgentCancel               context.CancelFunc
-	kesAgentMetrics              *kesagent.Metrics
-	leaderElection               nodeconsensus.LeaderScheduler
+	kesAgentClient  *kesagent.Client
+	kesAgentCancel  context.CancelFunc
+	kesAgentMetrics *kesagent.Metrics
+	leaderElection  nodeconsensus.LeaderScheduler
+	// leaderSchedulerRef mirrors leaderElection for readers outside the
+	// node lifecycle goroutine, such as the ledger rollback callback.
+	leaderSchedulerRef           atomic.Pointer[leaderSchedulerRef]
 	rtsMetrics                   *rtsMetrics
 	shutdownFuncs                []func(context.Context) error
 	deferredIndexMaintenanceDone chan struct{}
@@ -614,6 +617,7 @@ func (n *Node) newOuroborosConfig(
 		ChainsyncState:                 n.chainsyncState,
 		PeerGov:                        n.peerGov,
 		NetworkMagic:                   n.config.networkMagic,
+		NodeToNodeNetworkMagic:         n.consensusNetworkMagic(),
 		PeerSharing:                    n.config.peerSharing,
 		IntersectTip:                   n.config.intersectTip,
 		IntersectPoints:                n.config.intersectPoints,
@@ -790,6 +794,9 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		return fmt.Errorf("failed to resolve consensus plugin: %w", err)
 	}
 	n.consensusProvider = provider
+	if err := validateConsensusConfiguration(&n.config, provider); err != nil {
+		return fmt.Errorf("invalid consensus configuration: %w", err)
+	}
 
 	// Reconcile a live Restore's directory swap (node_lifecycle.go's
 	// swapInRestoredDataDir) that was interrupted by a crash, process

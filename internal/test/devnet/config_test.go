@@ -41,6 +41,7 @@ func TestCheckedInSpecsAreValid(t *testing.T) {
 	}{
 		{"testnet.yaml", 2},
 		{"testnet-dingo.yaml", 3},
+		{"testnet-dingo-tachys.yaml", 3},
 		{"testnet-accelerated.yaml", 2},
 		{"testnet-dingo-accelerated.yaml", 3},
 		{"testnet-dingo-leios.yaml", 3},

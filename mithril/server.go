@@ -54,6 +54,14 @@ const publicRequestLimit = 2 * (immutableDownloadWorkers + 1)
 // artifact reads so downloads cannot starve certificate production.
 const signatureRequestLimit = 4
 
+// Signature body reads have their own wider bound. A client may occupy at
+// most half of it, leaving capacity for another client while incomplete
+// bodies wait for the read deadline.
+const (
+	signatureRequestReadLimit      = 2 * signatureRequestLimit
+	signatureRequestReadsPerClient = signatureRequestLimit
+)
+
 const (
 	certificatesPrefix            = "certificates"
 	publicRequestReadTimeout      = 15 * time.Second
@@ -162,11 +170,11 @@ func newClientAdmission(perClient int) *clientAdmission {
 	}
 }
 
-// downloadClientKey identifies the client a download counts against. IPv6
+// requestClientKey identifies the client a request counts against. IPv6
 // clients are keyed by their /64, since a single host usually controls one
 // and can rotate addresses within it; an IPv4-mapped address counts as its
 // IPv4 address.
-func downloadClientKey(remoteAddr string) string {
+func requestClientKey(remoteAddr string) string {
 	host := remoteAddr
 	if h, _, err := net.SplitHostPort(remoteAddr); err == nil {
 		host = h
@@ -187,7 +195,7 @@ func downloadClientKey(remoteAddr string) string {
 }
 
 func (a *clientAdmission) acquire(remoteAddr string) (func(), bool) {
-	client := downloadClientKey(remoteAddr)
+	client := requestClientKey(remoteAddr)
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.active[client] >= a.perClient {
@@ -335,6 +343,8 @@ type snapshotServer struct {
 	publicBaseURL        *url.URL
 	publicBaseURLErr     error
 	publicRequests       chan struct{}
+	signatureReads       chan struct{}
+	signatureReadClients *clientAdmission
 	signatureRequests    chan struct{}
 	artifactDownloads    *clientAdmission
 	requestReadTimeout   time.Duration
@@ -371,6 +381,8 @@ func newServerHandler(
 		publicBaseURL:        publicBaseURL,
 		publicBaseURLErr:     publicBaseURLErr,
 		publicRequests:       make(chan struct{}, requestLimit),
+		signatureReads:       make(chan struct{}, signatureRequestReadLimit),
+		signatureReadClients: newClientAdmission(signatureRequestReadsPerClient),
 		signatureRequests:    make(chan struct{}, signatureRequestLimit),
 		artifactDownloads:    newClientAdmission(artifactDownloadsPerClient),
 		requestReadTimeout:   publicRequestReadTimeout,
@@ -433,10 +445,59 @@ func (s *snapshotServer) withPublicRequest(
 	return s.withRequestAdmission(s.publicRequests, next)
 }
 
+type signatureRequestHandler func(
+	http.ResponseWriter,
+	*http.Request,
+	registerSignatureRequest,
+)
+
 func (s *snapshotServer) withSignatureRequest(
-	next http.HandlerFunc,
+	next signatureRequestHandler,
 ) http.HandlerFunc {
-	return s.withRequestAdmission(s.signatureRequests, next)
+	return func(w http.ResponseWriter, r *http.Request) {
+		controller := s.armRequestReadDeadline(w, r)
+		bounded := s.boundedResponseWriter(w, controller)
+		clientRelease, ok := s.signatureReadClients.acquire(r.RemoteAddr)
+		if !ok {
+			s.rejectUnreadRequest(
+				bounded, controller,
+				"client signature read limit reached",
+				http.StatusTooManyRequests,
+			)
+			return
+		}
+		readRelease, ok := tryAdmitRequest(s.signatureReads)
+		if !ok {
+			clientRelease()
+			s.rejectUnreadRequest(
+				bounded, controller,
+				"server busy",
+				http.StatusServiceUnavailable,
+			)
+			return
+		}
+		var req registerSignatureRequest
+		decodeErr := func() error {
+			defer readRelease()
+			defer clientRelease()
+			err := decodeJSONBody(bounded, r, &req)
+			if err != nil {
+				s.disposeUnreadRequest(bounded, controller)
+			}
+			return err
+		}()
+		if decodeErr != nil {
+			writeAPIError(bounded, decodeErr)
+			return
+		}
+
+		release, ok := admitRequest(bounded, s.signatureRequests)
+		if !ok {
+			return
+		}
+		defer release()
+		next(bounded, r, req)
+	}
 }
 
 func (s *snapshotServer) withRequestAdmission(
@@ -444,34 +505,90 @@ func (s *snapshotServer) withRequestAdmission(
 	next http.HandlerFunc,
 ) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		controller := http.NewResponseController(w)
-		if r.Method == http.MethodPost {
-			if err := controller.SetReadDeadline(
-				time.Now().Add(s.requestReadTimeout),
-			); err != nil && !errors.Is(err, http.ErrNotSupported) {
-				s.cfg.Logger.Debug(
-					"could not bound public request body read",
-					"error", err,
-				)
-			}
-		}
-
-		select {
-		case slots <- struct{}{}:
-			defer func() { <-slots }()
-		default:
-			w.Header().Set("Retry-After", "1")
-			http.Error(w, "server busy", http.StatusServiceUnavailable)
+		controller := s.armRequestReadDeadline(w, r)
+		release, ok := admitRequest(w, slots)
+		if !ok {
 			return
 		}
-
-		bounded := &progressResponseWriter{
-			ResponseWriter: w,
-			controller:     controller,
-			timeout:        s.responseWriteTimeout,
-			logger:         s.cfg.Logger,
-		}
+		defer release()
+		bounded := s.boundedResponseWriter(w, controller)
 		next(bounded, r)
+	}
+}
+
+func (s *snapshotServer) armRequestReadDeadline(
+	w http.ResponseWriter,
+	r *http.Request,
+) *http.ResponseController {
+	controller := http.NewResponseController(w)
+	if r.Method == http.MethodPost {
+		if err := controller.SetReadDeadline(
+			time.Now().Add(s.requestReadTimeout),
+		); err != nil && !errors.Is(err, http.ErrNotSupported) {
+			s.cfg.Logger.Debug(
+				"could not bound public request body read",
+				"error", err,
+			)
+		}
+	}
+	return controller
+}
+
+func (s *snapshotServer) boundedResponseWriter(
+	w http.ResponseWriter,
+	controller *http.ResponseController,
+) *progressResponseWriter {
+	return &progressResponseWriter{
+		ResponseWriter: w,
+		controller:     controller,
+		timeout:        s.responseWriteTimeout,
+		logger:         s.cfg.Logger,
+	}
+}
+
+func (s *snapshotServer) rejectUnreadRequest(
+	w http.ResponseWriter,
+	controller *http.ResponseController,
+	message string,
+	status int,
+) {
+	s.disposeUnreadRequest(w, controller)
+	w.Header().Set("Retry-After", "1")
+	http.Error(w, message, status)
+}
+
+func (s *snapshotServer) disposeUnreadRequest(
+	w http.ResponseWriter,
+	controller *http.ResponseController,
+) {
+	w.Header().Set("Connection", "close")
+	if err := controller.SetReadDeadline(time.Now()); err != nil &&
+		!errors.Is(err, http.ErrNotSupported) {
+		s.cfg.Logger.Debug(
+			"could not stop rejected request body read",
+			"error", err,
+		)
+	}
+}
+
+func admitRequest(
+	w http.ResponseWriter,
+	slots chan struct{},
+) (func(), bool) {
+	release, ok := tryAdmitRequest(slots)
+	if !ok {
+		w.Header().Set("Retry-After", "1")
+		http.Error(w, "server busy", http.StatusServiceUnavailable)
+	}
+	return release, ok
+}
+
+func tryAdmitRequest(slots chan struct{}) (func(), bool) {
+	select {
+	case slots <- struct{}{}:
+		return func() { <-slots }, true
+	default:
+		return nil, false
 	}
 }
 

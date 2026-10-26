@@ -30,15 +30,233 @@ import (
 	"testing"
 	"time"
 
+	nodeconsensus "github.com/blinklabs-io/dingo/consensus"
 	"github.com/blinklabs-io/dingo/consensus/praos"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	ledgerpkg "github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/gouroboros/consensus"
+	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+type staticTachysDistributionProvider struct {
+	mu           sync.RWMutex
+	distribution *nodeconsensus.TachysDistribution
+	calls        atomic.Int64
+}
+
+func (p *staticTachysDistributionProvider) GetTachysDistribution(
+	_ context.Context,
+	_ uint64,
+) (*nodeconsensus.TachysDistribution, error) {
+	p.calls.Add(1)
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.distribution, nil
+}
+
+func (p *staticTachysDistributionProvider) set(
+	distribution *nodeconsensus.TachysDistribution,
+) {
+	p.mu.Lock()
+	p.distribution = distribution
+	p.mu.Unlock()
+}
+
+func testTachysDistribution(
+	t *testing.T,
+	pools []consensus.TachysPool,
+	total uint64,
+) *nodeconsensus.TachysDistribution {
+	t.Helper()
+	distribution, err := nodeconsensus.NewTachysDistribution(pools, total)
+	require.NoError(t, err)
+	return distribution
+}
+
+func TestTachysElectionMatchesSharedSelector(t *testing.T) {
+	t.Parallel()
+
+	var poolID, otherPoolID lcommon.PoolKeyHash
+	poolID[0] = 1
+	otherPoolID[0] = 2
+	distribution := testTachysDistribution(t, []consensus.TachysPool{
+		{ID: poolID, Stake: 3},
+		{ID: otherPoolID, Stake: 7},
+	}, 10)
+	provider := &staticTachysDistributionProvider{distribution: distribution}
+	epochProvider := newMockEpochProvider()
+	epochProvider.currentEpoch.Store(10)
+	epochProvider.SetEpochNonceForEpoch(10, electionTestNonce)
+	epochProvider.epochSlotRange = func(uint64) (EpochSlotRange, error) {
+		return EpochSlotRange{StartSlot: 100, SlotCount: 20}, nil
+	}
+	eventBus := event.NewEventBus(nil, nil)
+	defer eventBus.Stop()
+	election := NewTachysElection(
+		poolID,
+		newMockStakeProvider(),
+		provider,
+		epochProvider,
+		eventBus,
+		slog.Default(),
+	)
+	election.SetConsensusIdentity(nodeconsensus.TachysIdentity)
+
+	schedule, err := election.computeSchedule(context.Background(), 10)
+	require.NoError(t, err)
+	require.NotNil(t, schedule)
+	selector, err := distribution.Selector()
+	require.NoError(t, err)
+	for slot := uint64(100); slot < 120; slot++ {
+		want, err := selector.IsLeader(electionTestNonce, slot, poolID)
+		require.NoError(t, err)
+		require.Equal(t, want, schedule.IsLeaderForSlot(slot), "slot %d", slot)
+	}
+	require.Equal(t, uint64(100), schedule.EpochStartSlot)
+	require.Equal(t, uint64(20), schedule.EpochSlotCount)
+	require.Equal(t, uint(babbage.EraIdBabbage), schedule.EraID)
+	require.Equal(t, nodeconsensus.TachysIdentity, schedule.ConsensusIdentity)
+}
+
+func TestTachysPersistedSchedulePinsRangeAndEra(t *testing.T) {
+	t.Parallel()
+
+	var poolID lcommon.PoolKeyHash
+	poolID[0] = 1
+	distribution := testTachysDistribution(t, []consensus.TachysPool{
+		{ID: poolID, Stake: 1},
+	}, 1)
+	epochProvider := newMockEpochProvider()
+	epochProvider.currentEpoch.Store(10)
+	epochProvider.SetEpochNonceForEpoch(10, electionTestNonce)
+	epochProvider.epochSlotRange = func(uint64) (EpochSlotRange, error) {
+		return EpochSlotRange{StartSlot: 100, SlotCount: 20}, nil
+	}
+	eventBus := event.NewEventBus(nil, nil)
+	defer eventBus.Stop()
+	election := NewTachysElection(
+		poolID,
+		newMockStakeProvider(),
+		&staticTachysDistributionProvider{distribution: distribution},
+		epochProvider,
+		eventBus,
+		slog.Default(),
+	)
+	election.SetConsensusIdentity(nodeconsensus.TachysIdentity)
+	schedule := NewSchedule(10, poolID, 1, 1, electionTestNonce)
+	schedule.ConsensusIdentity = nodeconsensus.TachysIdentity
+	schedule.EpochStartSlot = 100
+	schedule.EpochSlotCount = 20
+	schedule.EraID = babbage.EraIdBabbage
+	commitment := distribution.Commitment()
+	schedule.DistributionCommitment = commitment[:]
+
+	valid, _, err := election.validatePersistedSchedule(
+		context.Background(), 10, schedule,
+	)
+	require.NoError(t, err)
+	require.True(t, valid)
+
+	schedule.EpochStartSlot++
+	valid, reason, err := election.validatePersistedSchedule(
+		context.Background(), 10, schedule,
+	)
+	require.NoError(t, err)
+	require.False(t, valid)
+	require.Equal(t, "epoch slot range changed", reason)
+}
+
+func TestTachysRollbackInvalidatesSchedule(t *testing.T) {
+	t.Parallel()
+
+	var poolID, otherPoolID lcommon.PoolKeyHash
+	poolID[0] = 1
+	otherPoolID[0] = 2
+	provider := &staticTachysDistributionProvider{distribution: testTachysDistribution(
+		t,
+		[]consensus.TachysPool{{ID: poolID, Stake: 1}},
+		1,
+	)}
+	epochProvider := newMockEpochProvider()
+	epochProvider.currentEpoch.Store(10)
+	epochProvider.SetEpochNonceForEpoch(10, electionTestNonce)
+	eventBus := event.NewEventBus(nil, nil)
+	defer eventBus.Stop()
+	election := NewTachysElection(
+		poolID,
+		newMockStakeProvider(),
+		provider,
+		epochProvider,
+		eventBus,
+		slog.Default(),
+	)
+	election.SetConsensusIdentity(nodeconsensus.TachysIdentity)
+	require.NoError(t, election.Start(context.Background()))
+	defer func() { require.NoError(t, election.Stop()) }()
+	require.NotNil(t, waitForSchedule(t, election, testutil.AsyncWait))
+	initialCalls := provider.calls.Load()
+	provider.set(testTachysDistribution(
+		t,
+		[]consensus.TachysPool{{ID: otherPoolID, Stake: 1}},
+		1,
+	))
+	election.ConsensusStateRestored()
+	require.Eventually(t, func() bool {
+		return provider.calls.Load() > initialCalls &&
+			election.ScheduleForEpoch(10) == nil
+	}, testutil.AsyncWait, 10*time.Millisecond)
+}
+
+// The next-epoch nonce stabilizes mid-epoch and changes nothing the current
+// epoch's public schedule depends on, so the schedule serving the current
+// epoch must survive that event; dropping it leaves block production with no
+// schedule until the recompute finishes.
+func TestTachysNonceReadyKeepsCurrentEpochSchedule(t *testing.T) {
+	t.Parallel()
+
+	var poolID lcommon.PoolKeyHash
+	poolID[0] = 1
+	provider := &staticTachysDistributionProvider{distribution: testTachysDistribution(
+		t,
+		[]consensus.TachysPool{{ID: poolID, Stake: 1}},
+		1,
+	)}
+	epochProvider := newMockEpochProvider()
+	epochProvider.currentEpoch.Store(10)
+	epochProvider.SetEpochNonceForEpoch(10, electionTestNonce)
+	eventBus := event.NewEventBus(nil, nil)
+	defer eventBus.Stop()
+	election := NewTachysElection(
+		poolID,
+		newMockStakeProvider(),
+		provider,
+		epochProvider,
+		eventBus,
+		slog.Default(),
+	)
+	election.SetConsensusIdentity(nodeconsensus.TachysIdentity)
+	require.NoError(t, election.Start(context.Background()))
+	defer func() { require.NoError(t, election.Stop()) }()
+	current := waitForSchedule(t, election, testutil.AsyncWait)
+	require.NotNil(t, current)
+
+	epochProvider.SetEpochNonceForEpoch(11, electionTestNonce)
+	eventBus.Publish(
+		event.EpochNonceReadyEventType,
+		event.NewEvent(event.EpochNonceReadyEventType, event.EpochNonceReadyEvent{
+			CurrentEpoch: 10,
+			ReadyEpoch:   11,
+		}),
+	)
+	require.Eventually(t, func() bool {
+		return election.ScheduleForEpoch(11) != nil
+	}, testutil.AsyncWait, 10*time.Millisecond)
+	require.Same(t, current, election.ScheduleForEpoch(10))
+}
 
 const (
 	sigmaAuditEpoch      = uint64(11)
@@ -549,6 +767,10 @@ func (m *mockEpochProvider) ConsensusModeForEpoch(
 		return 0, m.consensusModeErr
 	}
 	return consensus.ConsensusModeTPraos, nil
+}
+
+func (m *mockEpochProvider) EraIDForEpoch(uint64) (uint, error) {
+	return babbage.EraIdBabbage, nil
 }
 
 func (m *mockEpochProvider) SetEpochNonce(nonce []byte) {
