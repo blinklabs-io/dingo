@@ -39,10 +39,12 @@
 # Compiled-in plugin selection and provider configuration.
 # plugins:
   # consensus:
-    # Praos is the default when this section is omitted.
+    # Praos is the default when this section is omitted. Tachys is available
+    # for networks that start in Babbage or Conway with activeSlotsCoeff 1/1;
+    # Genesis/Mithril bootstrap, Leios, and Dijkstra are rejected.
     # CLI: --consensus
     # Env: DINGO_PLUGINS_CONSENSUS_PROVIDER
-    # provider: "praos"
+    # provider: "praos" # or "tachys"
     # config: {}
   # storage:
     # blob:

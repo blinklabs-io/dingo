@@ -26,6 +26,15 @@ constructs the database and ledger, resolves mempool, and resolves the enabled
 API capabilities. Praos is the default `consensus` provider. The same
 instance chooses header authorization, production scheduling, peer and ledger
 chain comparison, and local sibling adoption for both relays and producers.
+The built-in `tachys` provider replaces Praos's private threshold with the
+CIP-0177 public schedule while retaining Babbage/Conway VRF, KES, operational
+certificate, registered VRF-key, nonce, and chain-ordering checks. It accepts
+only networks whose Shelley-family eras through Babbage start at epoch zero,
+whose active-slots coefficient is one, and which do not enable Genesis or
+Mithril bootstrap, Leios, or Dijkstra. Unsupported shapes fail before storage
+or networking starts. Its node-to-node handshake magic is derived from the
+base network magic and versioned provider identity, so a Tachys node refuses a
+Praos peer before exchanging chain data even when both use the same genesis.
 The ledger supplies state to the provider and retains ownership of epochs,
 nonces, transactions, rollback, and stake snapshots; producer credentials stay
 with the block producer. Each API provider (Blockfrost,
@@ -8666,6 +8675,24 @@ prepares once per stake/coefficient/mode tuple and checks each signed slot
 with `CheckVRFOutput`. Zero-pool schedules remain empty as pool policy even
 at `f=1`; inbound zero-pool headers remain rejected.
 
+Tachys scheduling instead prepares gOuroboros's exact-integer public selector
+from every positive-stake pool in one Mark snapshot. The immutable distribution
+is canonically ordered and carries a commitment over all pool IDs and stake,
+so equal local and total stake cannot make a different distribution reusable.
+The same selector authorizes normal headers and peer-relative fork candidates;
+fork candidates use their derived candidate nonce rather than the local-chain
+nonce. The ledger caches at most three distributions by snapshot epoch and
+consensus-context generation. Rollback or state replacement changes that
+generation, while the leader manager clears its in-memory Tachys schedules on
+every rollback synchronously after the replacement consensus snapshot is
+published, and refuses an in-flight result from the older schedule generation.
+A distribution read that observes a consensus-context change defers header
+verification instead of reporting the stake snapshot unavailable. Next-epoch
+nonce readiness drops only the ready epoch's schedule; the current epoch's
+schedule keeps serving block production.
+Persisted Tachys schedules pin the nonce, absolute epoch range,
+era, provider identity, and full-distribution commitment.
+
 The stake distribution is the reference node's active `set`/`nesPd`
 distribution, as of the end of E-2. Dingo captures `mark[K]` at the boundary
 into K, holding stake as of the end of K-1; the electing row is therefore
@@ -8704,14 +8731,17 @@ numerator/denominator; nondecimal rationals such as `1/3` are valid. Existing
 float-only callers retain their rational conversion and are subject to the
 same domain rejection, without automatic rounding or a new fallback.
 
-`ScheduleFormatVersion=5` invalidates the pre-E34 version-4 slot lists.
-Records with version 4 or no version (decoded as zero) are discarded by the
-real election reload path, recomputed under E34 and saved as version 5.
-A valid version-5 record is reused on restart. Nonce, pool/total stake,
-epoch and slot-range checks remain in force. Persisted JSON is unchanged:
-`format_version`, `epoch`, `pool_id`, `pool_stake`, `total_stake`,
-`epoch_nonce`, `leader_slots`. No cutoff or evaluator is serialized, and no
-database schema migration is needed.
+`ScheduleFormatVersion=7` adds the exact epoch context and the Tachys
+distribution commitment to every persisted schedule. Records with an older
+version or no version (decoded as zero) are discarded by the real election
+reload path and recomputed. A valid version-7 record is reused on restart.
+Praos records recheck their nonce, pool/total stake, epoch and slot range;
+Tachys records additionally require an exact epoch range, era, and
+full-distribution commitment match. Persisted JSON carries `format_version`,
+`epoch`, `pool_id`, `pool_stake`, `total_stake`, `epoch_nonce`,
+`epoch_start_slot`, `epoch_slot_count`, `era_id`, `consensus_identity`,
+`distribution_commitment`, and `leader_slots`. No cutoff or evaluator is
+serialized, and no database schema migration is needed.
 
 The `leader schedule calculated` record retains snapshot epoch/type, epoch
 slot interval, nonce, pool/total stake, exact `f`, consensus mode and elected
