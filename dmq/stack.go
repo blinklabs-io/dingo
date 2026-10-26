@@ -73,6 +73,11 @@ const (
 	reasonOther           = "other"
 )
 
+// ErrChainStateUnavailable marks a lookup the authenticator's chain-state
+// callbacks could not answer. Admission reports such a failure as other, not
+// invalid: the message may be valid, and invalid is a protocol violation.
+var ErrChainStateUnavailable = errors.New("dmq: chain state unavailable")
+
 // StackConfig configures a Stack.
 type StackConfig struct {
 	// Now supplies the clock shared by admission, feeding, and pool expiry.
@@ -92,7 +97,8 @@ type StackConfig struct {
 	// means unlimited.
 	MaxMempoolBytes int64
 	// Authenticator verifies every submitted message before it is admitted.
-	// Required.
+	// Required. Its chain-state callbacks wrap ErrChainStateUnavailable when
+	// they cannot answer, so the failure is not reported as invalid.
 	Authenticator *ocommon.MessageAuthenticator
 	// CurrentKESPeriod returns the KES period for the confirmed wall-clock
 	// slot. When set, a message is rejected if it claims a future period or
@@ -394,6 +400,9 @@ func (s *Stack) admit(msg *ocommon.DmqMessage) ocommon.RejectReason {
 		return ocommon.InvalidReason{Message: err.Error()}
 	}
 	if err := s.cfg.Authenticator.VerifyMessage(msg); err != nil {
+		if errors.Is(err, ErrChainStateUnavailable) {
+			return ocommon.OtherReason{Message: err.Error()}
+		}
 		return ocommon.InvalidReason{Message: err.Error()}
 	}
 	added, err := s.pool.Add(*msg)

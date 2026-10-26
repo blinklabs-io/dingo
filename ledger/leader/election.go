@@ -29,7 +29,9 @@ import (
 	"github.com/blinklabs-io/dingo/consensus/praos"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/gouroboros/consensus"
+	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -57,6 +59,16 @@ type StakeDistributionProvider interface {
 		epoch uint64,
 		poolKeyHash []byte,
 	) (poolStake uint64, totalActiveStake uint64, err error)
+}
+
+// TachysDistributionProvider returns the full immutable distribution used by
+// CIP-0177. A single-pool numerator and network denominator cannot reproduce
+// the public schedule.
+type TachysDistributionProvider interface {
+	GetTachysDistribution(
+		context.Context,
+		uint64,
+	) (*nodeconsensus.TachysDistribution, error)
 }
 
 // The sigma denominator, per the cardano-ledger reference implementation
@@ -190,6 +202,11 @@ type ActiveSlotCoeffRatProvider interface {
 	ActiveSlotCoeffRat() *big.Rat
 }
 
+// EraInfoProvider resolves the ledger era governing a schedule epoch.
+type EraInfoProvider interface {
+	EraIDForEpoch(epoch uint64) (uint, error)
+}
+
 // ScheduleStore persists computed schedules for later reuse.
 type ScheduleStore interface {
 	LoadSchedule(epoch uint64, poolId lcommon.PoolKeyHash) (*Schedule, error)
@@ -242,22 +259,46 @@ type Election struct {
 	logger        *slog.Logger
 	scheduleStore ScheduleStore
 
-	mu                sync.RWMutex
-	schedules         map[uint64]*Schedule // epoch -> schedule
-	running           bool
-	cancel            context.CancelFunc
-	lifecycleCtx      context.Context
-	lifecycleDone     chan struct{} // closes after the generation has drained
-	computeCh         chan uint64   // requests background schedule computation
-	subscriptionId    event.EventSubscriberId
-	nonceReadySub     event.EventSubscriberId
-	metrics           *electionMetrics
-	consensusIdentity string
+	mu                 sync.RWMutex
+	schedules          map[uint64]*Schedule // epoch -> schedule
+	running            bool
+	cancel             context.CancelFunc
+	lifecycleCtx       context.Context
+	lifecycleDone      chan struct{} // closes after the generation has drained
+	computeCh          chan uint64   // requests background schedule computation
+	subscriptionId     event.EventSubscriberId
+	nonceReadySub      event.EventSubscriberId
+	scheduleGeneration uint64
+	metrics            *electionMetrics
+	consensusIdentity  string
+	tachysProvider     TachysDistributionProvider
 
-	// wg owns only the three worker loops. The cancellation coordinator joins
+	// wg owns only the worker loops. The cancellation coordinator joins
 	// them before closing lifecycleDone; it must never join itself. Start
 	// cannot reuse this group until the previous generation has drained.
 	wg sync.WaitGroup
+}
+
+// NewTachysElection creates a public-schedule election manager. Lifecycle,
+// epoch refresh, persistence, and lookup behavior are shared with Praos.
+func NewTachysElection(
+	poolId lcommon.PoolKeyHash,
+	stakeProvider StakeDistributionProvider,
+	tachysProvider TachysDistributionProvider,
+	epochProvider EpochInfoProvider,
+	eventBus *event.EventBus,
+	logger *slog.Logger,
+) *Election {
+	e := NewElection(
+		poolId,
+		nil,
+		stakeProvider,
+		epochProvider,
+		eventBus,
+		logger,
+	)
+	e.tachysProvider = tachysProvider
+	return e
 }
 
 // NewElection creates a new leader election manager for a stake pool. vrfSeed
@@ -362,6 +403,7 @@ func (e *Election) start(ctx context.Context, afterWait func()) error {
 	e.lifecycleCtx = ctx
 	e.lifecycleDone = make(chan struct{})
 	e.schedules = make(map[uint64]*Schedule)
+	e.scheduleGeneration++
 	e.computeCh = make(chan uint64, 4)
 
 	// Subscribe to epoch transitions using a channel so we can drain
@@ -450,6 +492,42 @@ func (e *Election) start(ctx context.Context, afterWait func()) error {
 	return nil
 }
 
+func (e *Election) invalidateTachysSchedules() {
+	if e.tachysProvider == nil {
+		return
+	}
+	e.mu.Lock()
+	e.schedules = make(map[uint64]*Schedule)
+	e.scheduleGeneration++
+	e.mu.Unlock()
+}
+
+// invalidateTachysSchedule drops one epoch's schedule. The generation bump
+// refuses any in-flight result, so callers re-queue every epoch that might
+// have been computing.
+func (e *Election) invalidateTachysSchedule(epoch uint64) {
+	if e.tachysProvider == nil {
+		return
+	}
+	e.mu.Lock()
+	delete(e.schedules, epoch)
+	e.scheduleGeneration++
+	e.mu.Unlock()
+}
+
+// ConsensusStateRestored invalidates provider-owned schedules before a
+// rollback becomes observable to block production.
+func (e *Election) ConsensusStateRestored() {
+	if e.tachysProvider == nil {
+		return
+	}
+	e.invalidateTachysSchedules()
+	e.queueScheduleCompute(e.epochProvider.CurrentEpoch())
+	if nextEpoch, ok := e.epochProvider.NextEpochNonceReadyEpoch(); ok {
+		e.queueScheduleCompute(nextEpoch)
+	}
+}
+
 // epochTransitionLoop reads epoch transition events from the channel,
 // draining any queued stale events so only the latest is processed.
 // This prevents wasted schedule recalculations during rapid sync.
@@ -491,6 +569,7 @@ func (e *Election) epochTransitionLoop(
 			"component", "leader",
 			"new_epoch", epochEvent.NewEpoch,
 		)
+		e.invalidateTachysSchedules()
 		if err := e.RefreshScheduleForEpoch(
 			ctx,
 			epochEvent.NewEpoch,
@@ -544,6 +623,10 @@ func (e *Election) epochNonceReadyLoop(
 			"ready_epoch", readyEvent.ReadyEpoch,
 			"cutoff_slot", readyEvent.CutoffSlot,
 		)
+		if e.tachysProvider != nil {
+			e.invalidateTachysSchedule(readyEvent.ReadyEpoch)
+			e.queueScheduleCompute(readyEvent.CurrentEpoch)
+		}
 		e.queueScheduleCompute(readyEvent.ReadyEpoch)
 	}
 }
@@ -659,6 +742,7 @@ func (e *Election) RefreshScheduleForEpoch(
 ) error {
 	e.mu.RLock()
 	running := e.running
+	generation := e.scheduleGeneration
 	e.mu.RUnlock()
 	if !running {
 		return nil
@@ -681,7 +765,9 @@ func (e *Election) RefreshScheduleForEpoch(
 				"error", err,
 			)
 		} else if valid {
-			e.storeSchedule(epoch, schedule)
+			if !e.storeSchedule(epoch, schedule, generation) {
+				return nil
+			}
 			return nil
 		} else {
 			e.logger.Info(
@@ -700,7 +786,9 @@ func (e *Election) RefreshScheduleForEpoch(
 	if schedule == nil {
 		return nil // no stake or nonce not available
 	}
-	e.storeSchedule(epoch, schedule)
+	if !e.storeSchedule(epoch, schedule, generation) {
+		return nil
+	}
 	e.persistSchedule(schedule)
 	return nil
 }
@@ -792,6 +880,36 @@ func (e *Election) validatePersistedSchedule(
 	}
 
 	snapshotEpoch := praos.StakeSnapshotEpoch(epoch)
+	if e.tachysProvider != nil {
+		eraProvider, ok := e.epochProvider.(EraInfoProvider)
+		if !ok {
+			return false, "", errors.New("tachys era provider is unavailable")
+		}
+		eraID, err := eraProvider.EraIDForEpoch(epoch)
+		if err != nil {
+			return false, "", fmt.Errorf("resolve Tachys era: %w", err)
+		}
+		if schedule.EpochStartSlot != epochRange.StartSlot ||
+			schedule.EpochSlotCount != epochRange.SlotCount {
+			return false, "epoch slot range changed", nil
+		}
+		if schedule.EraID != eraID {
+			return false, "ledger era changed", nil
+		}
+		distribution, err := e.tachysProvider.GetTachysDistribution(ctx, snapshotEpoch)
+		if err != nil {
+			return false, "", fmt.Errorf(
+				"get Tachys distribution for epoch %d: %w",
+				snapshotEpoch,
+				err,
+			)
+		}
+		commitment := distribution.Commitment()
+		if !bytes.Equal(commitment[:], schedule.DistributionCommitment) {
+			return false, "distribution commitment changed", nil
+		}
+		return true, "", nil
+	}
 	// One atomic read: revalidating a persisted schedule against a torn
 	// (numerator, denominator) pair could accept a schedule that matches
 	// neither snapshot, or discard a still-valid one.
@@ -854,6 +972,9 @@ func (e *Election) computeSchedule(
 
 	// Leader election uses the mark snapshot that is active for the epoch.
 	snapshotEpoch := praos.StakeSnapshotEpoch(currentEpoch)
+	if e.tachysProvider != nil {
+		return e.computeTachysSchedule(ctx, currentEpoch, snapshotEpoch)
+	}
 
 	// Read the sigma numerator and denominator together. Two separate
 	// reads let a snapshot re-capture land between them, producing a
@@ -977,6 +1098,14 @@ func (e *Election) computeSchedule(
 	e.mu.RLock()
 	schedule.ConsensusIdentity = e.consensusIdentity
 	e.mu.RUnlock()
+	schedule.EpochStartSlot = epochRange.StartSlot
+	schedule.EpochSlotCount = epochRange.SlotCount
+	if eraProvider, ok := e.epochProvider.(EraInfoProvider); ok {
+		schedule.EraID, err = eraProvider.EraIDForEpoch(currentEpoch)
+		if err != nil {
+			return nil, fmt.Errorf("resolve schedule era: %w", err)
+		}
+	}
 
 	// One O(1)-per-epoch record carrying every input to the leader check, so a
 	// schedule that disagrees with `cardano-cli query leadership-schedule` can
@@ -1016,14 +1145,102 @@ func (e *Election) computeSchedule(
 	return schedule, nil
 }
 
+func (e *Election) computeTachysSchedule(
+	ctx context.Context,
+	epoch uint64,
+	snapshotEpoch uint64,
+) (*Schedule, error) {
+	distribution, err := e.tachysProvider.GetTachysDistribution(ctx, snapshotEpoch)
+	if err != nil {
+		return nil, fmt.Errorf("get Tachys distribution: %w", err)
+	}
+	selector, err := distribution.Selector()
+	if err != nil {
+		return nil, fmt.Errorf("prepare Tachys selector: %w", err)
+	}
+	var poolStake uint64
+	for _, pool := range distribution.Pools() {
+		if pool.ID == e.poolId {
+			poolStake = pool.Stake
+			break
+		}
+	}
+	if poolStake == 0 {
+		return nil, nil
+	}
+	epochNonce := e.epochProvider.EpochNonce(ctx, epoch)
+	if len(epochNonce) == 0 {
+		return nil, nil
+	}
+	epochRange, err := e.epochProvider.EpochSlotRange(epoch)
+	if err != nil {
+		return nil, fmt.Errorf("get epoch slot range: %w", err)
+	}
+	if epochRange.SlotCount == 0 ||
+		epochRange.StartSlot > ^uint64(0)-epochRange.SlotCount {
+		return nil, fmt.Errorf(
+			"invalid epoch slot range: start=%d count=%d",
+			epochRange.StartSlot,
+			epochRange.SlotCount,
+		)
+	}
+	eraProvider, ok := e.epochProvider.(EraInfoProvider)
+	if !ok {
+		return nil, errors.New("tachys era provider is unavailable")
+	}
+	eraID, err := eraProvider.EraIDForEpoch(epoch)
+	if err != nil {
+		return nil, fmt.Errorf("resolve Tachys era: %w", err)
+	}
+	if eraID != babbage.EraIdBabbage && eraID != conway.EraIdConway {
+		return nil, fmt.Errorf("tachys does not support ledger era %d", eraID)
+	}
+	schedule := NewSchedule(
+		epoch,
+		e.poolId,
+		poolStake,
+		distribution.TotalStake(),
+		append([]byte(nil), epochNonce...),
+	)
+	e.mu.RLock()
+	schedule.ConsensusIdentity = e.consensusIdentity
+	e.mu.RUnlock()
+	commitment := distribution.Commitment()
+	schedule.DistributionCommitment = append(
+		[]byte(nil),
+		commitment[:]...,
+	)
+	schedule.EpochStartSlot = epochRange.StartSlot
+	schedule.EpochSlotCount = epochRange.SlotCount
+	schedule.EraID = eraID
+	end := epochRange.StartSlot + epochRange.SlotCount
+	for slot := epochRange.StartSlot; slot < end; slot++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		isLeader, err := selector.IsLeader(epochNonce, slot, e.poolId)
+		if err != nil {
+			return nil, fmt.Errorf("select Tachys leader at slot %d: %w", slot, err)
+		}
+		if isLeader {
+			schedule.AddLeaderSlot(slot)
+		}
+	}
+	return schedule, nil
+}
+
 // storeSchedule saves a computed schedule under a brief write lock and
 // prunes old epochs from the cache.
-func (e *Election) storeSchedule(epoch uint64, schedule *Schedule) {
+func (e *Election) storeSchedule(
+	epoch uint64,
+	schedule *Schedule,
+	generation uint64,
+) bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	if !e.running {
-		return
+	if !e.running || generation != e.scheduleGeneration {
+		return false
 	}
 	e.schedules[epoch] = schedule
 
@@ -1034,6 +1251,7 @@ func (e *Election) storeSchedule(epoch uint64, schedule *Schedule) {
 			delete(e.schedules, ep)
 		}
 	}
+	return true
 }
 
 func (e *Election) queueScheduleCompute(epoch uint64) {

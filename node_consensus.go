@@ -17,14 +17,85 @@ package dingo
 import (
 	"errors"
 	"fmt"
+	"math/big"
 
 	nodeconsensus "github.com/blinklabs-io/dingo/consensus"
 	"github.com/blinklabs-io/dingo/database"
+	internalconfig "github.com/blinklabs-io/dingo/internal/config"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 )
 
 type consensusIdentityStore interface {
 	GetSyncState(string, *database.Txn) (string, error)
 	SetSyncState(string, string, *database.Txn) error
+	GetTip(*database.Txn) (ochainsync.Tip, error)
+}
+
+func consensusNetworkMagic(
+	base uint32,
+	provider nodeconsensus.Provider,
+) uint32 {
+	if provider == nil {
+		return base
+	}
+	return nodeconsensus.NetworkMagic(base, provider.NetworkIdentity())
+}
+
+func (n *Node) consensusNetworkMagic() uint32 {
+	return consensusNetworkMagic(
+		n.config.networkMagic,
+		n.selectedConsensusProvider(),
+	)
+}
+
+func validateConsensusConfiguration(
+	cfg *Config,
+	provider nodeconsensus.Provider,
+) error {
+	if provider == nil || provider.Name() != nodeconsensus.TachysProviderName {
+		return nil
+	}
+	if cfg == nil {
+		return errors.New("tachys configuration is unavailable")
+	}
+	if cfg.genesisBootstrap {
+		return errors.New("tachys does not support Genesis bootstrap")
+	}
+	if cfg.Mithril().Enabled {
+		return errors.New("tachys does not support Mithril bootstrap")
+	}
+	if cfg.RunMode() == internalconfig.RunModeLeios {
+		return errors.New("tachys does not support Leios mode")
+	}
+	if cfg.StartEra().IsDijkstra() {
+		return errors.New("tachys does not support a Dijkstra start era")
+	}
+	nodeCfg := cfg.CardanoNodeConfig()
+	if nodeCfg == nil || nodeCfg.ShelleyGenesis() == nil {
+		return errors.New("tachys requires Shelley genesis configuration")
+	}
+	for _, era := range []string{
+		"shelley", "allegra", "mary", "alonzo", "babbage",
+	} {
+		epoch, ok := nodeCfg.HardForkEpoch(era)
+		if !ok || epoch != 0 {
+			return fmt.Errorf(
+				"tachys requires %s at genesis (hard-fork epoch 0)",
+				era,
+			)
+		}
+	}
+	if epoch, ok := nodeCfg.HardForkEpoch("dijkstra"); ok {
+		return fmt.Errorf(
+			"tachys does not support the configured Dijkstra transition at epoch %d",
+			epoch,
+		)
+	}
+	activeSlotsCoeff := nodeCfg.ShelleyGenesis().ActiveSlotsCoeff.Rat
+	if activeSlotsCoeff == nil || activeSlotsCoeff.Cmp(big.NewRat(1, 1)) != 0 {
+		return errors.New("tachys requires activeSlotsCoeff 1/1")
+	}
+	return nil
 }
 
 func (n *Node) enforceConsensusDatabaseIdentity() error {
@@ -49,10 +120,16 @@ func enforceConsensusIdentity(
 		return fmt.Errorf("read consensus database identity: %w", err)
 	}
 	if persisted == "" {
-		// Databases created before provider selection are Praos databases.
-		// Treating an unmarked database as a newly selected algorithm would
-		// silently reinterpret its chain and cached state.
-		if identity != nodeconsensus.PraosIdentity {
+		tip, err := store.GetTip(nil)
+		if err != nil {
+			return fmt.Errorf("read consensus database tip: %w", err)
+		}
+		empty := tip.Point.Slot == 0 && len(tip.Point.Hash) == 0 &&
+			tip.BlockNumber == 0
+		// A nonempty database created before provider selection is Praos.
+		// Fresh databases may adopt the configured provider before importing
+		// or validating any chain state.
+		if !empty && identity != nodeconsensus.PraosIdentity {
 			return fmt.Errorf(
 				"unmarked database uses consensus %q, selected provider uses %q",
 				nodeconsensus.PraosIdentity,

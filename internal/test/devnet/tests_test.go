@@ -982,6 +982,35 @@ func TestRunTestsLeiosSelectsItsFullDijkstraScenario(t *testing.T) {
 	require.Contains(t, result.dockerLog, "./internal/test/devnet/...")
 }
 
+func TestRunTestsTachysSelectsSupportedTxPumpEra(t *testing.T) {
+	result := runFakeDevnetWithEnv(t, 0, false, map[string]string{
+		"DEVNET_TXPUMP_TRANSACTION_ERA": "dijkstra",
+	}, "--tachys")
+	require.Zero(t, result.exitCode, result.output)
+	require.Contains(t, result.dockerLog, "TXPUMP_TRANSACTION_ERA=conway\n")
+}
+
+// start.sh must clear inherited Leios and node-mode overrides for every
+// non-Leios spec, as run-tests.sh does, or they reach the configurator and
+// dingo-1 containers.
+func TestStartNonLeiosClearsDijkstraOverrides(t *testing.T) {
+	for _, args := range [][]string{{"--tachys"}, {"--accelerated"}, {}} {
+		t.Run(strings.Join(append([]string{"start"}, args...), "_"), func(t *testing.T) {
+			result := runFakeDevnetScript(t, "start.sh", 0, false, map[string]string{
+				"DEVNET_LEIOS_ENABLED":               "1",
+				"DEVNET_LEIOS_VOTE_SIGNING_KEY_FILE": "/configs/keys/leios-vote.skey",
+				"DEVNET_DINGO_RUN_MODE":              "leios",
+				"DEVNET_DINGO_START_ERA":             "dijkstra",
+			}, args...)
+			require.Zero(t, result.exitCode, result.output)
+			require.Contains(t, result.dockerLog, "LEIOS_ENABLED=\n")
+			require.Contains(t, result.dockerLog, "LEIOS_KEY_FILE=\n")
+			require.Contains(t, result.dockerLog, "DINGO_RUN_MODE=\n")
+			require.Contains(t, result.dockerLog, "DINGO_START_ERA=\n")
+		})
+	}
+}
+
 func TestRunTestsDefaultClearsDijkstraOverrides(t *testing.T) {
 	result := runFakeDevnetWithEnv(t, 0, false, map[string]string{
 		"DEVNET_DINGO_RUN_MODE":         "leios",
