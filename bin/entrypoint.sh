@@ -119,21 +119,24 @@ is_secret_flag() {
 }
 
 # redact_url_query masks credential parameters while retaining endpoint and
-# non-secret query values that are useful in startup diagnostics.
+# non-secret query values that are useful in startup diagnostics. A URL
+# fragment is replaced whole, since it can carry a credential and is never
+# sent to the server, so diagnostics gain nothing from it.
 redact_url_query() {
-  local value="$1" head tail query fragment="" rendered pair separator name
+  local value="$1" head query fragment="" rendered pair separator name
+  if [[ "${value}" == *#* ]] &&
+    [[ "${value}" == *\?* || "${value}" =~ ^[A-Za-z][A-Za-z0-9+.-]*:// ]]; then
+    # Split at the first "#" before the query, so a "?" inside the fragment
+    # is not mistaken for the start of the query.
+    fragment="#<redacted>"
+    value="${value%%#*}"
+  fi
   if [[ "${value}" != *\?* ]]; then
-    printf '%s' "${value}"
+    printf '%s' "${value}${fragment}"
     return
   fi
   head="${value%%\?*}"
-  tail="${value#*\?}"
-  if [[ "${tail}" == *#* ]]; then
-    query="${tail%%#*}"
-    fragment="#${tail#*#}"
-  else
-    query="${tail}"
-  fi
+  query="${value#*\?}"
   rendered="${head}?"
   while true; do
     if [[ "${query}" =~ ^([^\&\;]*)([\&\;])(.*)$ ]]; then
