@@ -84,11 +84,12 @@ func newRecentEbArrivals() *recentEbArrivals {
 	return &recentEbArrivals{}
 }
 
-// record stores an endorser block's arrival and reports whether it was
-// stored. The first arrival of an (slot, hash) wins: a repeat of the same
-// endorser block keeps the first delay (later ones only overstate it) and
-// returns false. A different block at the same slot replaces it; a lower slot
-// than the one already held is stale and is dropped.
+// record stores an endorser block's arrival and reports whether the
+// histogram should observe it. The first arrival of an (slot, hash) wins: a
+// repeat of the same endorser block keeps the first delay (later ones only
+// overstate it) and returns false. A different block at the same slot
+// replaces it. A lower slot than the one already held is not stored, since
+// the ring keeps the newer slot, but it is still an arrival and returns true.
 func (r *recentEbArrivals) record(
 	slot uint64,
 	hash []byte,
@@ -99,7 +100,7 @@ func (r *recentEbArrivals) record(
 	defer r.mu.Unlock()
 	s := &r.slots[slot%recentEbArrivalSlots]
 	if s.set && slot < s.slot {
-		return false
+		return true
 	}
 	if s.set && s.slot == slot && bytes.Equal(s.hash, hash) {
 		return false
