@@ -1296,9 +1296,15 @@ func testSignedTx(
 	witnesses []lcommon.VkeyWitness,
 ) []byte {
 	t.Helper()
+	// The vkey witness field is a non-empty set, so an unsigned transaction
+	// omits it rather than encoding null or an empty array.
+	witnessSet := map[int]any{}
+	if len(witnesses) > 0 {
+		witnessSet[0] = witnesses
+	}
 	signed := []any{
 		cbor.RawMessage(bodyCbor),
-		map[int]any{0: witnesses},
+		witnessSet,
 		true,
 		nil,
 	}

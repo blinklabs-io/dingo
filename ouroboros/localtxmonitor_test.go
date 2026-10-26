@@ -178,10 +178,14 @@ func TestLocaltxmonitorProtocol_SnapshotHasTxNextTx(t *testing.T) {
 	require.NoError(t, client.Acquire())
 	addTxSubmissionTestFixtures(t, o.mempool, fixtures[1])
 
-	has, err := client.HasTx(hashOf(fixtures[0]))
+	has, err := client.HasTxForEra(
+		txsubmissionRelayTestEraId, hashOf(fixtures[0]),
+	)
 	require.NoError(t, err)
 	require.True(t, has, "the snapshot holds the transaction pooled at Acquire")
-	has, err = client.HasTx(hashOf(fixtures[1]))
+	has, err = client.HasTxForEra(
+		txsubmissionRelayTestEraId, hashOf(fixtures[1]),
+	)
 	require.NoError(t, err)
 	require.False(t, has, "the snapshot must not see a later addition")
 
@@ -200,7 +204,9 @@ func TestLocaltxmonitorProtocol_SnapshotHasTxNextTx(t *testing.T) {
 	require.NoError(t, client.Release())
 
 	require.NoError(t, client.Acquire())
-	has, err = client.HasTx(hashOf(fixtures[1]))
+	has, err = client.HasTxForEra(
+		txsubmissionRelayTestEraId, hashOf(fixtures[1]),
+	)
 	require.NoError(t, err)
 	require.True(t, has, "a fresh Acquire must see the added transaction")
 	require.NoError(t, client.Release())
