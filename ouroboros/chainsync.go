@@ -2640,9 +2640,11 @@ func (o *Ouroboros) reconcileChainsyncIngressAdmission(
 		)
 		promoted := exists && !observabilityOnly
 		if promoted {
+			// Let the promoting header's stale-cursor check install its more
+			// specific recovery reason before the fallback timer can fire.
 			o.scheduleHeaderResync(
 				connId,
-				time.Now(),
+				time.Now().Add(100*time.Millisecond),
 				event.ChainsyncResyncReasonIngressPromotion,
 			)
 		}
