@@ -312,17 +312,31 @@ Migration `v48` (`governance-vote-cast`) adds the nullable `tx_hash` and
 `cert_index` columns to `governance_vote_history`; it backfills nothing, so
 entries written before it leave both `NULL`.
 
-Blockfrost asset-holder pages aggregate live quantities in metadata storage.
-`utxo_address` keeps each asset-bearing UTxO's canonical rendered address as
-bytes so every backend groups exact pointer and bootstrap identities and
-orders equal quantities with the same bytewise address order as the API.
-Migration v42 adds
-the table; API-mode startup backfills only live asset-bearing UTxOs in
-cancellable batches before APIs become available, records completion in
-sync_state, and logs progress. Startup fails if an output CBOR cannot be
+Blockfrost asset-holder pages aggregate live quantities in metadata storage,
+and historical Mesh balances aggregate address balances without materializing
+the matching UTxOs. Blockfrost address-list pages use the exact address index
+for SQL ordering, offset, and total count after API-mode startup backfill,
+avoiding CBOR scans of earlier outputs on deep pages. If that index is not
+available, address listing retains the bounded CBOR candidate scan. Historical
+balance queries scan at most
+`ExactAddressCandidateScanLimit + 1` matching rows and return
+`ErrTooManyUtxoResults` when the address exceeds that bound. `utxo_address`
+keeps each UTxO's canonical rendered address as bytes so exact pointer and
+bootstrap identities are available to both queries. Migration v42 adds the
+table; API-mode startup backfills all retained
+UTxOs in cancellable batches before APIs become available, records completion
+in sync_state, and logs progress. Startup fails if an output CBOR cannot be
 resolved. A failed backfill leaves completion unset, so the next startup
 resumes from rows still missing an address. Core-mode nodes skip the backfill.
-New UTxO writes persist the address in the same metadata transaction.
+The completion key `dingo:utxo-addresses:backfilled` replaces the earlier
+`dingo:asset-utxo-addresses:backfilled`, which covered only live asset-bearing
+outputs, so an existing API-mode database runs the backfill once on its first
+start after upgrade. The backfill runs inside database open: the node starts
+no API, sync, or block processing until it has resolved and decoded the output
+CBOR of every retained UTxO without an address row, so the pause grows with the
+retained UTxO set. Rows the earlier backfill already addressed are skipped.
+API-mode UTxO writes persist the address in the same metadata transaction;
+core-mode writes omit this API-only relation.
 SQLite uses an exact unsigned 64-bit aggregate that returns a fixed-width
 decimal key; PostgreSQL and MySQL use decimal aggregation with an explicit
 overflow check. Holder count and LIMIT/OFFSET page reads share the request's
@@ -4254,7 +4268,13 @@ by the API adapter, which compares each candidate output's decoded
 address bytes, because the pointer payload is not represented in the
 `utxo` table.
 
-### `GetUtxosByAddress`, `GetUtxosByAddressAsOf`, `GetUtxosByAddressAtSlot`, and `GetControlledAmountByCredential`
+Historical Mesh balance uses the exact rendered address stored in
+`utxo_address`, together with `added_slot <= requested_slot` and
+`deleted_slot = 0 OR deleted_slot > requested_slot`, and aggregates ADA and
+assets in metadata storage. This avoids materializing a potentially large
+historical UTxO set in the API process.
+
+### `GetUtxosByAddress`, `GetUtxosByAddressAsOf`, and `GetControlledAmountByCredential`
 
 `GetControlledAmountByCredential` sums live `utxo.amount` for the credential
 with the same overflow-free engine-side aggregate as
@@ -4418,11 +4438,12 @@ like CIP-68 (`onchain_metadata_extra`) datum-based metadata, is returned as
 `null` to match the Blockfrost response shape.
 
 The Blockfrost-compatible `GET /api/v0/assets/{asset}/addresses` endpoint
-uses `GetUtxosByAssets` for live candidate UTxOs, decodes each UTxO CBOR value
-to recover the exact original address, then aggregates matching asset
-quantities by that address. Decoding CBOR is required because some valid
-addresses, such as pointer addresses, cannot be reconstructed from the
-metadata credential-hash columns alone.
+groups live asset quantities by canonical address in metadata storage. The
+`utxo_address` index stores each UTxO's rendered address, including pointer
+payloads and bootstrap identities that cannot be reconstructed from credential
+columns alone. API-mode startup backfills missing address rows before exposing
+the API; core-mode nodes do not maintain this API-only index. See the
+historical Mesh balance notes above for its separate bounded row scan.
 
 The asset listing endpoints read the mint/burn history rather than live holdings.
 `ListMintedAssets` lists distinct assets with
@@ -4533,18 +4554,21 @@ live UTxOs can still read more than a live scan would. With an address filter
 the asset filter remains a per-row `EXISTS` over
 the already narrowed set.
 
-`AddressUTXOs` (exact address) cannot use `Offset`/`Count`, since an exact
-total requires CBOR-decoding every coarse candidate either way. Instead
-`MatchingUtxoRefsByAddressWithOrdering` scans coarse candidates in keyset
-batches (mirroring `GetUtxosByAddressWithOrdering`'s own exact-filter loop)
-with `SkipAssets` set, CBOR-decodes each only to confirm the match, and
-returns bare `(TxId, OutputIdx)` references rather than full rows — the
-result's length is the accurate total, and the caller slices it for one
-page's worth of references and fetches full rows (with assets) for just
-that page via `GetUtxosByRefs`. This bounds the expensive part (asset
-loading, full-row retention) to one page instead of the address's entire
-live UTxO history, while the CBOR-decode-only candidate scan remains
-unavoidable for the total.
+`AddressUTXOs` (exact address) pages through the API-mode `utxo_address`
+index once its startup backfill has completed: `UtxoRefsByIndexedAddressPage`
+applies the rendered-address predicate, ordering, `Offset`, and `Count` in SQL
+and counts the total in SQL, so deep and descending pages decode no CBOR.
+Without a completed index, or with an asset filter (the index carries no asset
+predicate), `MatchingUtxoRefsByAddressWithOrderingBounded` scans coarse
+candidates in the requested order in keyset batches with `SkipAssets` set,
+CBOR-decodes each only to confirm the match, and returns bare
+`(TxId, OutputIdx)` references. The scan stops after
+`ExactAddressCandidateScanLimit` candidates, and loading more than
+`DefaultPublicUtxoCborBudget` bytes of output CBOR returns
+`ErrUtxoQueryBudgetExceeded`. A page that ends before the scan is exhausted is
+served without a total, and a page the candidate budget cannot reach returns
+`ErrUtxoQueryBudgetExceeded`. Full rows (with assets) are fetched for just the
+page via `GetUtxosByRefs`.
 
 Both `AccountUTXOs` and `AddressUTXOs` open one read `Txn`
 (`Database.Transaction(ctx, false)`) and pass it to both their count/scan call
@@ -6091,7 +6115,7 @@ floor. `TruncateAfterSlot` restores spent UTxOs with an update. The
 `database/lifecycle.Truncate` refuses a target below the floor before
 `TruncateAfterSlot` begins, because already-deleted rows cannot be restored.
 Before a rollback marks retained spent UTxOs live again, it fills any missing
-`utxo_address` identity for asset-bearing rows from their retained output CBOR.
+`utxo_address` identity from their retained output CBOR.
 The address restoration and unspend update share the rollback transaction.
 
 # Trusted batch commit ordering
@@ -6178,8 +6202,9 @@ PostgreSQL and MySQL keep the per-row writes described above.
   multi-row `BatchOverlayInsertUtxos` statements (62 rows each) and their
   pointer rows, marks pre-batch spends with `UPDATE ... FROM (VALUES ...)`
   keyed by `utxo.id` (333 rows each), deletes by id the rows the per-row path
-  deletes before commit, and queues asset and `utxo_address` rows for the
-  surviving outputs into the accumulator's row batch. None of these statements
+  deletes before commit, and queues asset rows for the surviving outputs into
+  the accumulator's row batch. It writes no `utxo_address` rows, since the
+  overlay runs only in core storage mode. None of these statements
   carries a conflict clause; a `UNIQUE` failure is returned as
   `types.ErrBatchUtxoOverlayConflict`, and `ApplyTrustedBatch` applies the
   uncommitted blocks once more on the per-row path, which repairs rows a
@@ -6243,8 +6268,8 @@ PostgreSQL and MySQL keep the per-row writes described above.
   such as a withdrawal's re-sum, therefore see what the per-row path would
   hold at that point. An output created and spent before the barrier is not
   in `utxo` at all, where the per-row path holds it marked spent; nothing
-  inside a trusted batch reads spent rows from the table. Asset and
-  `utxo_address` rows stay queued until `FlushBatch`, as on the per-row path.
+  inside a trusted batch reads spent rows from the table. Asset rows stay
+  queued until `FlushBatch`, as on the per-row path.
   A barrier writes every pending output, so outputs a later transaction
   spends go back to being inserted, marked and deleted; on withdrawal-heavy
   ranges the `barrier_flushes` count in the Debug line shows how often.

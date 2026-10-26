@@ -44,8 +44,9 @@ none of them. Failures unwind providers in reverse order. Normal shutdown
 orders APIs, mempool, ledger/database, then storage.
 Database receives provider-owned stores through `database.Stores`.
 Before API providers start, API-mode database startup runs the one-time,
-cancellable backfill for rendered addresses of live asset UTxOs; a sync_state
-marker skips the scan after it completes.
+cancellable backfill for rendered addresses of all retained UTxOs; a sync_state
+marker skips the scan after it completes. The exact-address index supports
+historical balance aggregation without materializing each matching output.
 The provider's versioned identity is the network and database consensus
 identity. Existing unmarked databases are treated as `praos/v1` and marked on
 their next successful open. A different identity cannot open that database.
@@ -12279,6 +12280,16 @@ as one ANDed address pattern; exact keyset queries scan through nonmatching
 coarse candidates before forming a limited page, preserving continuation-token
 correctness. Blockfrost address-transaction reads apply the same CBOR-backed
 exact check over credential-index candidates and paginate the exact matches.
+Public exact-address UTxO reads carry request cancellation into their
+coordinated transaction. API-mode Blockfrost address pages use the completed
+canonical-address index for exact SQL ordering, offset, and total count; when
+that index is unavailable, the CBOR candidate fallback remains bounded by
+candidate count and decoded bytes. Asset-holder pages group live asset
+quantities by canonical address in metadata storage and hydrate no output
+CBOR. Historical Mesh balance aggregates from the same exact address index and
+slot membership in metadata storage. API-mode startup
+backfills missing address rows for all retained UTxOs in cancellable batches;
+core-mode nodes skip both the backfill and address writes.
 
 `/pools/extended` resolves the whole page with two batched queries rather than
 one query per pool: `database.CountPoolBlocksLifetime` returns every active pool's
@@ -12420,10 +12431,14 @@ Two contracts follow from that boundary:
 - **Historical balances are pinned to the requested point.**
   `/network/options` advertises `historical_balance_lookup: true`, and
   `/account/balance` honors it. A request carrying a `block_identifier`
-  resolves that block through the same lookup `/block` uses, reads the UTxO set
-  at the block's slot via `MeshLedgerState.UtxosByAddressAtSlot` (UTxOs added
-  at or before the slot and not spent until after it), and echoes the resolved
-  block back as the response's `block_identifier` — never the tip. A point the
+  resolves that block through the same lookup `/block` uses, aggregates the
+  address balance at the block's slot via
+  `MeshLedgerState.UtxoBalanceByAddressAtSlot` (UTxOs added at or before the
+  slot and not spent until after it, summed in metadata storage without
+  materializing them), and echoes the resolved block back as the response's
+  `block_identifier` — never the tip. An address holding more than
+  `database.ExactAddressCandidateScanLimit` outputs at that slot fails with an
+  invalid-request error rather than a partial balance. A point the
   node cannot resolve, including the hash of a rolled-back block, fails with
   `block not found` rather than falling back to another point. An identifier
   carrying neither hash nor index is treated as absent, since clients commonly

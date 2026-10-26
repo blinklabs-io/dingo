@@ -1350,7 +1350,8 @@ func (m *mockNode) Address(
 	return m.addressInfo, m.addressInfoErr
 }
 
-func (m *mockNode) AddressUTXOs(ctx context.Context,
+func (m *mockNode) AddressUTXOs(
+	_ context.Context,
 	_ string,
 	_ PaginationParams,
 ) ([]AddressUTXOInfo, int, error) {
@@ -4775,6 +4776,24 @@ func TestHandleAddressUTXOs(t *testing.T) {
 	assert.Equal(t, "lovelace", resp[0].Amount[0].Unit)
 	assert.Equal(t, "1000", resp[0].Amount[0].Quantity)
 	assert.Equal(t, "blockhash1", resp[0].Block)
+}
+
+func TestHandleAddressUTXOsOmitsUnknownTotals(t *testing.T) {
+	t.Parallel()
+
+	b := newTestBlockfrost(&mockNode{addressUTXOsTotal: -1})
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/v0/addresses/addr_test1vr8nl4/utxos",
+		nil,
+	)
+	req.SetPathValue("address", "addr_test1vr8nl4")
+	w := httptest.NewRecorder()
+	b.handleAddressUTXOs(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Empty(t, w.Header().Get("X-Pagination-Count-Total"))
+	assert.Empty(t, w.Header().Get("X-Pagination-Page-Total"))
 }
 
 func TestHandleAddressUTXOsInvalidPagination(t *testing.T) {

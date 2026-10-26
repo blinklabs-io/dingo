@@ -39,9 +39,6 @@ var (
 	ErrExactAddressRequiresCbor = errors.New(
 		"exact address matching requires output CBOR",
 	)
-	ErrDescendingKeysetUnsupported = errors.New(
-		"keyset pagination (After) does not support Descending",
-	)
 	ErrOffsetKeysetUnsupported = errors.New(
 		"keyset pagination (After) does not support Offset",
 	)
@@ -50,6 +47,9 @@ var (
 	)
 	ErrTooManyUtxoResults = errors.New(
 		"utxo query exceeded the requested maxResults bound",
+	)
+	ErrUtxoQueryBudgetExceeded = errors.New(
+		"utxo query exceeded its work budget",
 	)
 )
 
@@ -431,10 +431,12 @@ type UtxoAddressPage struct {
 //   - MatchAllAddresses false and len(AddressPatterns) > 0: match UTxOs that
 //     satisfy any pattern. Fields within a pattern are ANDed; patterns are ORed.
 //
+// IndexedExactAddress is an alternative exact match using a completed API-mode
+// address index; it cannot be combined with MatchAllAddresses or patterns.
+//
 // After + Limit: keyset pagination; Limit <= 0 means no SQL LIMIT. SearchUtxos sets Limit to
-// effective page size + 1. Mutually exclusive with Offset and Descending (both page-number
-// pagination controls); GetUtxosByAddressWithOrdering errors if After is combined with
-// either one.
+// effective page size + 1. After follows the selected ascending or descending order and is
+// mutually exclusive with Offset; GetUtxosByAddressWithOrdering errors if both are set.
 //
 // Offset: page-number pagination; > 0 means SQL OFFSET. Only valid when the address
 // patterns do not require CBOR-based exact-address filtering (see
@@ -463,16 +465,20 @@ type UtxoAddressPage struct {
 type UtxoWithOrderingQuery struct {
 	MatchAllAddresses bool
 	AddressPatterns   []UtxoAddressPattern
-	After             *UtxoOrderingCursor
-	Limit             int
-	Offset            int
-	Descending        bool
-	SkipAssets        bool
-	FilterByAsset     bool
-	AssetPolicyID     []byte
-	AssetName         []byte
-	CreatedFrom       *AddressTransactionPosition
-	CreatedTo         *AddressTransactionPosition
+	// IndexedExactAddress applies an exact rendered-address predicate through
+	// the API-mode utxo_address index. It is mutually exclusive with
+	// MatchAllAddresses and AddressPatterns.
+	IndexedExactAddress []byte
+	After               *UtxoOrderingCursor
+	Limit               int
+	Offset              int
+	Descending          bool
+	SkipAssets          bool
+	FilterByAsset       bool
+	AssetPolicyID       []byte
+	AssetName           []byte
+	CreatedFrom         *AddressTransactionPosition
+	CreatedTo           *AddressTransactionPosition
 }
 
 func (u *Utxo) Decode() (ledger.TransactionOutput, error) {
@@ -580,7 +586,7 @@ var ErrAddressBalanceLimit = errors.New(
 	"address balance read exceeds its limit",
 )
 
-// AddressBalance holds live-UTxO balances for an address.
+// AddressBalance holds UTxO balances for an address.
 type AddressBalance struct {
 	Lovelace  uint64
 	UtxoCount int64
