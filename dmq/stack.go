@@ -366,6 +366,17 @@ func (s *Stack) submit(msg *ocommon.DmqMessage) ocommon.RejectReason {
 }
 
 func (s *Stack) admit(msg *ocommon.DmqMessage) ocommon.RejectReason {
+	if reason := s.precheck(msg); reason != nil {
+		return reason
+	}
+	if err := s.cfg.Authenticator.VerifyMessage(msg); err != nil {
+		return authReason(err)
+	}
+	return s.addToPool(msg)
+}
+
+// precheck runs every admission check that comes before authentication.
+func (s *Stack) precheck(msg *ocommon.DmqMessage) ocommon.RejectReason {
 	// A message that breaks CIP-0137's sizes is one dmq-node refuses to
 	// decode, so it is neither kept nor passed on.
 	if err := checkMessageShape(
@@ -399,12 +410,20 @@ func (s *Stack) admit(msg *ocommon.DmqMessage) ocommon.RejectReason {
 	if err := s.ttl.ValidateMessageTTLAt(msg, s.cfg.Now()); err != nil {
 		return ocommon.InvalidReason{Message: err.Error()}
 	}
-	if err := s.cfg.Authenticator.VerifyMessage(msg); err != nil {
-		if errors.Is(err, ErrChainStateUnavailable) {
-			return ocommon.OtherReason{Message: err.Error()}
-		}
-		return ocommon.InvalidReason{Message: err.Error()}
+	return nil
+}
+
+// authReason classifies an authentication failure. A node that cannot read
+// the chain state has no grounds to call the message invalid.
+func authReason(err error) ocommon.RejectReason {
+	if errors.Is(err, ErrChainStateUnavailable) {
+		return ocommon.OtherReason{Message: err.Error()}
 	}
+	return ocommon.InvalidReason{Message: err.Error()}
+}
+
+// addToPool admits an authenticated message.
+func (s *Stack) addToPool(msg *ocommon.DmqMessage) ocommon.RejectReason {
 	added, err := s.pool.Add(*msg)
 	switch {
 	case errors.Is(err, ErrExpired):

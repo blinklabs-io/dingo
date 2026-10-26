@@ -255,11 +255,9 @@ func (p *PeerConn) pull() {
 		if !ok {
 			return
 		}
-		for i := range msgs {
-			if err := p.stack.acceptFromPeer(&msgs[i]); err != nil {
-				p.fail(err)
-				return
-			}
+		if err := p.stack.acceptFromPeer(msgs); err != nil {
+			p.fail(err)
+			return
 		}
 		// A requested message the peer did not send has expired or been
 		// evicted there, and will not be asked for again.
@@ -348,16 +346,60 @@ func awaitReply[T any](p *PeerConn, replies <-chan T) (T, bool) {
 	}
 }
 
-// acceptFromPeer admits a message a peer sent through the same checks a local
+// acceptFromPeer admits one reply's messages through the same checks a local
 // submission gets. A message that is expired, already held, or refused for a
 // reason that is not the peer's doing, such as a full pool, is counted and
 // dropped. An invalid one is a protocol violation: the error ends the
-// connection.
-func (s *Stack) acceptFromPeer(msg *ocommon.DmqMessage) error {
-	reason := s.admit(msg)
-	if reason == nil {
+// connection, and none of the reply is admitted.
+//
+// Signature verification dominates admission cost, so the reply is
+// authenticated as one batch at one current slot, a message already held is dropped before
+// it is verified, and a lookup that fails for want of chain state ends the
+// batch rather than being repeated for every message.
+func (s *Stack) acceptFromPeer(msgs []ocommon.DmqMessage) error {
+	batch := msgs[:0]
+	for i := range msgs {
+		msg := &msgs[i]
+		reason := s.precheck(msg)
+		if reason == nil && s.pool.Has(msg.ID()) {
+			reason = ocommon.AlreadyReceivedReason{}
+		}
+		if reason != nil {
+			if err := s.refuseFromPeer(reason); err != nil {
+				return err
+			}
+			continue
+		}
+		batch = append(batch, *msg)
+	}
+	commit, err := s.cfg.Authenticator.PrepareMessages(batch)
+	if err == nil {
+		err = commit()
+	}
+	if err != nil {
+		reason := authReason(err)
+		if _, invalid := reason.(ocommon.InvalidReason); invalid {
+			return s.refuseFromPeer(reason)
+		}
+		s.failures.WithLabelValues(reasonLabel(reason)).Add(float64(len(batch)))
+		s.logger.Debug(
+			"dmq peer messages refused", "count", len(batch), "reason", reason,
+		)
 		return nil
 	}
+	for i := range batch {
+		if reason := s.addToPool(&batch[i]); reason != nil {
+			if err := s.refuseFromPeer(reason); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// refuseFromPeer counts a refused message, returning an error only when the
+// refusal is a protocol violation.
+func (s *Stack) refuseFromPeer(reason ocommon.RejectReason) error {
 	s.failures.WithLabelValues(reasonLabel(reason)).Inc()
 	s.logger.Debug("dmq peer message refused", "reason", reason)
 	if invalid, ok := reason.(ocommon.InvalidReason); ok {
