@@ -6374,9 +6374,10 @@ it. Dingo implements this as a **corroboration gate**
   yet — an async observation could otherwise let a header slip through in the
   window before it revoked corroboration. For processed roll-forward headers,
   a separate bounded delivered history is updated before candidate admission,
-  including for observer connections. A record counts only while its connection
-  is live, eligible, and non-stale; it does not make a candidate selectable or
-  apply-eligible. A staged candidate cannot become a
+  including for observer connections. Headers enter that history only after
+  producer authentication when the ledger requires it. A record counts only
+  while its connection is live, eligible, and non-stale; it does not make a
+  candidate selectable or apply-eligible. A staged candidate cannot become a
   selectable peer frontier until the ledger accepts a header at its point, but
   it does count as corroboration evidence before admission: the gate checks the
   applicant's own staged frontier and counts every other connection's staged

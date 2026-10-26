@@ -1906,9 +1906,13 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 		// excludes the header and recycles the connection.
 		selectionEligible := ingressEligible
 		deferredVerification := false
+		shouldVerifyHeader := o.chainSelectionShouldVerifyHeaderCrypto != nil &&
+			o.chainSelectionShouldVerifyHeaderCrypto(blockSlot)
+		deliveryVerified := !shouldVerifyHeader
+		verificationAttempted := false
 		var verificationTipBaseline ochainsync.Tip
-		if ingressEligible && o.chainSelectionShouldVerifyHeaderCrypto != nil &&
-			o.chainSelectionShouldVerifyHeaderCrypto(blockSlot) {
+		if ingressEligible && shouldVerifyHeader {
+			verificationAttempted = true
 			if o.ledgerState != nil {
 				verificationTipBaseline = o.ledgerState.Tip()
 			}
@@ -1937,6 +1941,7 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 			}
 			if verifyErr == nil {
 				chainsyncEvent.HeaderCryptoVerificationGeneration = verificationGeneration
+				deliveryVerified = true
 			}
 			if errors.Is(verifyErr, ledger.ErrHeaderBeyondForecastHorizon) {
 				// The header cannot be validated yet, so it must not extend
@@ -1990,6 +1995,19 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 					}
 					ingressEligible = false
 				}
+			}
+		}
+		// Observer deliveries may become corroboration evidence after promotion,
+		// so they need the same producer authentication as ingress candidates.
+		if !verificationAttempted && !deliveryVerified &&
+			o.config.ChainsyncRecordDeliveredPeerTip != nil {
+			verificationGeneration, verifyErr := o.chainSelectionVerifyHeaderCrypto(
+				ctx.ConnectionId,
+				v,
+			)
+			if verifyErr == nil {
+				chainsyncEvent.HeaderCryptoVerificationGeneration = verificationGeneration
+				deliveryVerified = true
 			}
 		}
 		extendsLocalChain := ingressEligible &&
@@ -2046,7 +2064,7 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 			ObservedPrevHash: v.PrevHash().Bytes(),
 			ObservedBoundary: blockType == gledger.BlockTypeByronEbb,
 		}
-		if o.config.ChainsyncRecordDeliveredPeerTip != nil {
+		if deliveryVerified && o.config.ChainsyncRecordDeliveredPeerTip != nil {
 			o.config.ChainsyncRecordDeliveredPeerTip(update)
 		}
 		var peerTipUpdate *chainselection.PeerTipUpdateEvent
