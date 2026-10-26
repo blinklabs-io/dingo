@@ -923,6 +923,9 @@ type GenesisSelectionStateFunc func() (active bool, window uint64)
 
 type LedgerStateConfig struct {
 	Consensus nodeconsensus.Provider
+	// ConsensusStateRestoredFunc synchronously invalidates provider-owned
+	// production state after rollback publishes its replacement snapshot.
+	ConsensusStateRestoredFunc func()
 	// MaxConcurrentEvaluations bounds transaction evaluations running at
 	// once across every API front end. Zero leaves one logical processor for
 	// consensus work when possible.
@@ -1404,6 +1407,15 @@ type LedgerState struct {
 	metrics       stateMetrics
 	consensus     atomic.Pointer[consensusSnapshot]
 	tip           atomic.Pointer[tipSnapshot]
+	// tachysMu serializes construction of the full public leader selector.
+	// The cache is bounded to the same three-epoch window as pool snapshots
+	// and keyed by the published consensus context so rollback or state
+	// replacement cannot reuse a selector built from abandoned state.
+	tachysMu            sync.Mutex
+	tachysDistributions []tachysDistributionCacheEntry
+	// Test hook called after a Tachys distribution read releases its
+	// transaction and before the consensus context is rechecked.
+	tachysDistributionLoadedHook func()
 	// snapshotPublished is closed and replaced after every snapshot
 	// publication, so a reader waiting for the ledger to advance can block
 	// until the published state changes instead of polling it.
@@ -5277,16 +5289,6 @@ func (ls *LedgerState) rollbackWithBlocksAndIntent(
 		snapshot.committed = true
 	}
 	ls.rewardPrecomputeMu.Unlock()
-	// Notify subscribers that pool state has been restored (e.g., for cache invalidation)
-	if publishResync && ls.config.EventBus != nil {
-		ls.config.EventBus.PublishAsync(
-			PoolStateRestoredEventType,
-			event.NewEvent(
-				PoolStateRestoredEventType,
-				PoolStateRestoredEvent{Slot: point.Slot},
-			),
-		)
-	}
 	// Reload epoch cache into locals to discard stale nonces from
 	// rolled-back epochs. The deleted epoch entries will be recreated
 	// with correct nonces when the chain replays past those epoch
@@ -5557,6 +5559,22 @@ func (ls *LedgerState) rollbackWithBlocksAndIntent(
 			ls.config.FatalErrorFunc(healErr)
 		}
 		return &rollbackCommittedError{err: healErr}
+	}
+	// Production schedule recomputation must observe the replacement snapshot,
+	// including a block nonce healed after a deep rollback.
+	if ls.config.ConsensusStateRestoredFunc != nil {
+		ls.config.ConsensusStateRestoredFunc()
+	}
+	// Other ledger consumers may process the restoration asynchronously once
+	// consensus production state has been invalidated.
+	if publishResync && ls.config.EventBus != nil {
+		ls.config.EventBus.PublishAsync(
+			PoolStateRestoredEventType,
+			event.NewEvent(
+				PoolStateRestoredEventType,
+				PoolStateRestoredEvent{Slot: point.Slot},
+			),
+		)
 	}
 	if publishResync && !sameTip {
 		ls.publishLocalLedgerRollback(point)
@@ -14371,11 +14389,7 @@ func (ls *LedgerState) IsByronEra() bool {
 	return ls.loadConsensusSnapshot().currentEra.Id == eras.ByronEraDesc.Id
 }
 
-// ConsensusModeForEpoch returns the Praos consensus variant that
-// governs leader eligibility for the given epoch. Shelley/Allegra/
-// Mary/Alonzo run TPraos; Babbage/Conway run CPraos. Anything else
-// (including Byron and unknown eras) defaults to CPraos, matching
-// how block production paths fall back today.
+// EraIDForEpoch returns the ledger era governing an epoch.
 //
 // Resolution order, mirroring how the leader-election caller can be
 // computing the schedule for the current epoch or pre-computing the
@@ -14400,9 +14414,9 @@ func (ls *LedgerState) IsByronEra() bool {
 // both the VRF leader-value derivation and the threshold, so callers must
 // decline to answer instead of producing a mode nothing established.
 // Steps 1, 2 and 4 read state the node already holds and never error.
-func (ls *LedgerState) ConsensusModeForEpoch(
+func (ls *LedgerState) EraIDForEpoch(
 	epoch uint64,
-) (consensus.ConsensusMode, error) {
+) (uint, error) {
 	snapshot := ls.loadConsensusSnapshot()
 	cache := snapshot.epochCache
 	currentEra := snapshot.currentEra
@@ -14411,12 +14425,12 @@ func (ls *LedgerState) ConsensusModeForEpoch(
 
 	for _, e := range cache {
 		if e.EpochId == epoch {
-			return consensusModeForEraID(e.EraId), nil
+			return e.EraId, nil
 		}
 	}
 
 	if epoch <= currentEpoch.EpochId {
-		return consensusModeForEraID(currentEra.Id), nil
+		return currentEra.Id, nil
 	}
 
 	// HardForkInitiation path: if a confirmed transition pins the next
@@ -14429,14 +14443,14 @@ func (ls *LedgerState) ConsensusModeForEpoch(
 		epoch >= transitionInfo.KnownEpoch {
 		nextID := currentEra.Id + 1
 		if _, ok := ls.eraById(nextID); ok {
-			return consensusModeForEraID(nextID), nil
+			return nextID, nil
 		}
 	}
 
 	shape, err := ls.eraShapeWithError()
 	if err != nil {
 		return 0, fmt.Errorf(
-			"consensus mode for epoch %d is unresolvable: %w",
+			"era for epoch %d is unresolvable: %w",
 			epoch,
 			err,
 		)
@@ -14449,7 +14463,7 @@ func (ls *LedgerState) ConsensusModeForEpoch(
 			// rule out a scheduled fork at or before the target epoch, so
 			// the forecast is unresolvable rather than "no fork".
 			return 0, fmt.Errorf(
-				"consensus mode for epoch %d is unresolvable: "+
+				"era for epoch %d is unresolvable: "+
 					"era %d is unavailable in the hard-fork shape",
 				epoch,
 				eraID,
@@ -14464,13 +14478,25 @@ func (ls *LedgerState) ConsensusModeForEpoch(
 		nextID := eraID + 1
 		if _, ok := ls.eraById(nextID); !ok {
 			return 0, fmt.Errorf(
-				"consensus mode for epoch %d is unresolvable: "+
+				"era for epoch %d is unresolvable: "+
 					"successor era %d is unavailable",
 				epoch,
 				nextID,
 			)
 		}
 		eraID = nextID
+	}
+	return eraID, nil
+}
+
+// ConsensusModeForEpoch returns the Praos consensus variant that governs
+// leader eligibility for the given epoch.
+func (ls *LedgerState) ConsensusModeForEpoch(
+	epoch uint64,
+) (consensus.ConsensusMode, error) {
+	eraID, err := ls.EraIDForEpoch(epoch)
+	if err != nil {
+		return 0, err
 	}
 	return consensusModeForEraID(eraID), nil
 }

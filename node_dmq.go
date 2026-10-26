@@ -20,7 +20,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/blinklabs-io/dingo/consensus/praos"
 	"github.com/blinklabs-io/dingo/dmq"
 	"github.com/blinklabs-io/dingo/ledger"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -47,9 +46,14 @@ func (n *Node) configPopulateDMQNetworkMagic() error {
 	return nil
 }
 
-// dmqStakeAuthority reports a pool's stake from the snapshot Praos uses for
-// leader election, so a DMQ message is accepted from exactly the pools that
-// may currently forge blocks.
+// dmqStakeAuthority answers the DMQ authenticator's chain-state lookups.
+// Stake comes from the distribution that elects leaders at the wall-clock
+// slot, so a DMQ message is accepted from exactly the pools that may forge
+// now. The stake, KES and current-slot checks all read that one slot: the
+// ledger tip can lag it, possibly into the previous epoch.
+//
+// Every failure wraps dmq.ErrChainStateUnavailable, because a node that
+// cannot answer has no grounds to call the message invalid.
 //
 // The DMQ stack keeps serving through a live restore or truncate, so it cannot
 // read n.ledgerState, which that operation closes and replaces. The node
@@ -72,39 +76,66 @@ func (a *dmqStakeAuthority) attached() bool {
 	return a.ledgerState != nil
 }
 
+var errDMQLedgerDetached = errors.New("ledger state unavailable")
+
+func dmqUnavailable(err error) error {
+	return fmt.Errorf("%w: %w", dmq.ErrChainStateUnavailable, err)
+}
+
+// wallClockSlot must be called with a.mu held.
+func (a *dmqStakeAuthority) wallClockSlot() (uint64, error) {
+	if a.ledgerState == nil {
+		return 0, dmqUnavailable(errDMQLedgerDetached)
+	}
+	slot, ok, err := a.ledgerState.WallClockSlotFromConfirmedHistory()
+	if err != nil {
+		return 0, dmqUnavailable(err)
+	}
+	if !ok {
+		return 0, dmqUnavailable(
+			errors.New("confirmed era history does not cover wall clock"),
+		)
+	}
+	return slot, nil
+}
+
 func (a *dmqStakeAuthority) PoolActiveStake(
 	pool ocommon.PoolKeyHash,
 ) (uint64, error) {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
-	ls := a.ledgerState
-	if ls == nil {
-		return 0, errors.New("ledger state unavailable")
+	slot, err := a.wallClockSlot()
+	if err != nil {
+		return 0, err
 	}
-	stake, _, err := (&stakeDistributionAdapter{ledgerState: ls}).
-		GetPoolAndTotalActiveStake(
-			praos.StakeSnapshotEpoch(ls.CurrentEpoch()),
-			pool[:],
-		)
-	return stake, err
+	return a.poolStakeAtLocked(slot, pool)
+}
+
+// poolStakeAtLocked is PoolActiveStake at a given slot. a.mu must be held.
+func (a *dmqStakeAuthority) poolStakeAtLocked(
+	slot uint64,
+	pool ocommon.PoolKeyHash,
+) (uint64, error) {
+	if a.ledgerState == nil {
+		return 0, dmqUnavailable(errDMQLedgerDetached)
+	}
+	stake, err := a.ledgerState.ElectingPoolStake(slot, pool)
+	if err != nil {
+		return 0, dmqUnavailable(err)
+	}
+	return stake, nil
 }
 
 func (a *dmqStakeAuthority) CurrentKESPeriod() (uint64, error) {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
-	if a.ledgerState == nil {
-		return 0, errors.New("ledger state unavailable")
-	}
-	slot, ok, err := a.ledgerState.WallClockSlotFromConfirmedHistory()
+	slot, err := a.wallClockSlot()
 	if err != nil {
 		return 0, err
 	}
-	if !ok {
-		return 0, errors.New("confirmed era history does not cover wall clock")
-	}
 	slotsPerKESPeriod := a.ledgerState.SlotsPerKESPeriod()
 	if slotsPerKESPeriod == 0 {
-		return 0, errors.New("slots per KES period is zero")
+		return 0, dmqUnavailable(errors.New("slots per KES period is zero"))
 	}
 	return slot / slotsPerKESPeriod, nil
 }
@@ -112,10 +143,7 @@ func (a *dmqStakeAuthority) CurrentKESPeriod() (uint64, error) {
 func (a *dmqStakeAuthority) CurrentSlot() (uint64, error) {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
-	if a.ledgerState == nil {
-		return 0, errors.New("ledger state unavailable")
-	}
-	return a.ledgerState.CurrentSlot()
+	return a.wallClockSlot()
 }
 
 func (a *dmqStakeAuthority) PoolOpCertIssueNumber(
@@ -124,9 +152,13 @@ func (a *dmqStakeAuthority) PoolOpCertIssueNumber(
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	if a.ledgerState == nil {
-		return 0, false, errors.New("ledger state unavailable")
+		return 0, false, dmqUnavailable(errDMQLedgerDetached)
 	}
-	return a.ledgerState.LatestOpCertSequence(pool)
+	issue, found, err := a.ledgerState.LatestOpCertSequence(pool)
+	if err != nil {
+		return 0, false, dmqUnavailable(err)
+	}
+	return issue, found, nil
 }
 
 // startDMQ starts the DMQ stack when it is enabled. Its collectors register

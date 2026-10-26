@@ -2056,9 +2056,12 @@ func (c *Config) ApplyDefaults() {
 	if c.Plugins.Mempool.Config == nil {
 		c.Plugins.Mempool.Config = make(map[string]any)
 	}
-	// Unset mempool capacity defaults based on RunMode.
+	// Unset mempool capacity defaults based on RunMode. Musashi enables Leios
+	// networking without changing the run mode, so it takes the Leios size too.
 	if _, ok := c.Plugins.Mempool.Config["capacity"]; !ok {
-		if c.RunMode == RunModeLeios {
+		if c.RunMode == RunModeLeios ||
+			c.Network == ouroboros.NetworkCardanoMusashi.Name ||
+			c.NetworkMagic == ouroboros.NetworkCardanoMusashi.NetworkMagic {
 			c.Plugins.Mempool.Config["capacity"] = int64(
 				DefaultMempoolCapacityLeios,
 			)

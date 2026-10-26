@@ -26,6 +26,15 @@ constructs the database and ledger, resolves mempool, and resolves the enabled
 API capabilities. Praos is the default `consensus` provider. The same
 instance chooses header authorization, production scheduling, peer and ledger
 chain comparison, and local sibling adoption for both relays and producers.
+The built-in `tachys` provider replaces Praos's private threshold with the
+CIP-0177 public schedule while retaining Babbage/Conway VRF, KES, operational
+certificate, registered VRF-key, nonce, and chain-ordering checks. It accepts
+only networks whose Shelley-family eras through Babbage start at epoch zero,
+whose active-slots coefficient is one, and which do not enable Genesis or
+Mithril bootstrap, Leios, or Dijkstra. Unsupported shapes fail before storage
+or networking starts. Its node-to-node handshake magic is derived from the
+base network magic and versioned provider identity, so a Tachys node refuses a
+Praos peer before exchanging chain data even when both use the same genesis.
 The ledger supplies state to the provider and retains ownership of epochs,
 nonces, transactions, rollback, and stake snapshots; producer credentials stay
 with the block producer. Each API provider (Blockfrost,
@@ -716,6 +725,21 @@ reset or the connection closes. Deferred headers may remain as raw ancestry,
 but selection waits until the candidate path and required header checks are
 available. A header beyond the forecast horizon or with unavailable ancestry
 or context is deferred.
+
+Header parking and resyncs are exported as metrics.
+`dingo_chainsync_deferred_headers_total` counts each header
+`Ouroboros.markDeferredHeaderRecovery` parks for deferred producer
+authorization (a header whose block the chain already holds is resolved
+instead and not counted), and
+`dingo_chainsync_deferred_header_connections` is a scrape-time read of how many
+connections currently hold parked recovery state.
+`dingo_chainsync_resyncs_total{reason}` counts every `chainsync.resync` event
+the `SubscribeChainsyncResync` subscriber handles, labelled with the event's
+`Reason` when it is one of the `ChainsyncResyncReason*` constants and `other`
+otherwise. Some publishers format errors or connection IDs into the reason,
+so this keeps the label set bounded; the full reason stays in the logs. Resyncs coalesced by the ledger before
+publication are not counted, and neither are events dropped because the
+subscriber's context is done.
 
 `ledger.tx` is published with `PublishOrdered`, not `PublishAsync`, so a
 subscriber deriving state from it sees a block's transactions in index order
@@ -7128,7 +7152,7 @@ Once a block's header is identified as certified, it is **never** downgraded to 
 
 Two Prometheus metrics capture the outcome: `dingo_leios_ntc_certrb_total{outcome}` counts handled CertRBs, with `outcome` one of `merged` (closure cached, spliced without waiting), `merged_after_wait` (closure arrived during the wait), or `unresolved` (closure did not resolve — wait timed out, was cancelled by the connection ending, or the endorser reference was unresolvable — so the connection was closed and the block not served); `dingo_leios_ntc_certrb_closure_wait_seconds{outcome}` records how long the server waited, with `outcome` `resolved`, `timeout` (the wait window elapsed), or `cancelled` (the serving connection ended before the closure arrived).
 
-Endorser-block arrival is measured separately from NtC serving. When an endorser block's manifest and every transaction become available locally with a verified slot binding (`storeLeiosEndorserBlock`, or `bindLeiosEndorserBlockSlot` once the announcement corroborates the slot), `recordLeiosEbArrival` observes wall clock minus slot time once, at the not-ready to ready transition, into `dingo_leios_eb_arrival_delay_seconds` and a 16-slot ring keyed by EB slot (slot = EB slot % 16, same collector pattern as the blockfetch recent-delay ring): `dingo_leios_recent_eb_arrival_delay_seconds{idx}`, `dingo_leios_recent_eb_slot{idx}` and `dingo_leios_recent_eb_tx_count{idx}`, read together under one lock. Blocks this node forged (`leiosStoreAuthoritative`) are not arrivals, and arrivals more than 5 minutes after the slot (backfill) are not recorded. The blockfetch recent-delay ring additionally exports `dingo_blockfetch_recent_block_kind{idx}`, a bitmask per ranking block (1 = announces an endorser block, 2 = carries an endorser-block certificate, 0 = plain or pre-Leios), taken from the header by `leiosheader.RankingBlockKind` and stored under the same lock as the delay it pairs with.
+Endorser-block arrival is measured separately from NtC serving. When an endorser block's manifest and every transaction become available locally with a verified slot binding (`storeLeiosEndorserBlock`, or `bindLeiosEndorserBlockSlot` once the announcement corroborates the slot), `recordLeiosEbArrival` observes wall clock minus slot time once, at the not-ready to ready transition, into `dingo_leios_eb_arrival_delay_seconds` and a 16-slot ring keyed by EB slot (slot = EB slot % 16, same collector pattern as the blockfetch recent-delay ring): `dingo_leios_recent_eb_arrival_delay_seconds{idx}`, `dingo_leios_recent_eb_slot{idx}` and `dingo_leios_recent_eb_tx_count{idx}`, read together under one lock. An arrival whose ring position already holds a newer EB slot is still observed in the histogram; the ring keeps the newer slot. Blocks this node forged (`leiosStoreAuthoritative`) are not arrivals, and arrivals more than 5 minutes after the slot (backfill) are not recorded. The blockfetch recent-delay ring additionally exports `dingo_blockfetch_recent_block_kind{idx}`, a bitmask per ranking block (1 = announces an endorser block, 2 = carries an endorser-block certificate, 0 = plain or pre-Leios), taken from the header by `leiosheader.RankingBlockKind` and stored under the same lock as the delay it pairs with.
 
 ## Peer Governance
 
@@ -8323,8 +8347,8 @@ insert.
 sequence number, not a slice index, so TTL compaction never invalidates it)
 over the arrival-ordered log, mirroring CIP-0137's per-peer outstanding
 message-ids queue for the node-to-node message-submission mini-protocol
-(protocol 18) without implementing that protocol's blocking/non-blocking
-request state machine itself, which a node-to-node transport must provide. A peer new to
+(protocol 11) without running that protocol's blocking/non-blocking
+request state machine itself, which `PeerConn` runs. A peer new to
 the pool sees the full retained backlog before anything arriving after it
 connects; `RemovePeer` releases a disconnected peer's cursor.
 
@@ -8391,10 +8415,11 @@ connection without a feeder.
 Metrics are registered against the retained registry (not the rebuildable one,
 which a live restore unregisters) and are all prefixed `dingo_dmq_`:
 `messages_received_total`, `messages_expired_total`, `messages_sent_total`
-(messages queued for a notification consumer),
-`validation_failures_total{reason}`, `mempool_messages`, `mempool_bytes`, and
-`connections`. Every `reason` series exists from startup, so a `rate()` alert
-sees a reason before its first rejection.
+(messages queued for a notification consumer, or bodies sent to a peer),
+`validation_failures_total{reason}`, `mempool_messages`, `mempool_bytes`,
+`connections` (local clients) and `peers` (open node-to-node connections).
+Every `reason` series exists from startup, so a `rate()` alert sees a reason
+before its first rejection.
 
 `dmq.topologyFile` names a dmq-node topology file, which uses cardano-node's
 P2P topology syntax and is separate from the Cardano topology. `dmq.LoadTopology`
@@ -8420,12 +8445,130 @@ authoritative read, before the DMQ stack opens its socket. A bad file stops
 startup through the node's normal failure path, after services that started
 earlier in `Run`, and a successful load logs the distinct peer count.
 
-Not yet provided: the node-to-node message submission transport, its listener,
-the peer manager that dials the topology peers within `dmq.minPeers` and
-`dmq.maxPeers`, and ledger peer discovery, which the DMQ stack needs before it
-can exchange messages with other nodes. `dmq.n2nPort`, `dmq.listenAddress`,
-`dmq.listenIpv6Address`, `dmq.minPeers` and `dmq.maxPeers` are validated
-configuration keys that nothing reads yet.
+### DMQ Node-to-Node Message Exchange
+
+`Stack.AttachPeer(ctx, conn, dialed)` runs one node-to-node connection over a
+`net.Conn` and returns a `PeerConn`. It does not listen or dial: whoever owns
+the socket hands the connection over. gouroboros has the DMQ node-to-node
+version maps, but its `Connection` cannot open a DMQ node-to-node connection and
+its `messagesubmission` package is not wire-compatible with dmq-node, so
+`PeerConn` builds the connection from the exported muxer, handshake and
+protocol packages and runs a message submission protocol of its own.
+
+That protocol is version 2 as dmq-node's codec defines it, and only version 2 is
+offered. dmq-node's version 1 is the TxSubmission2 codec under another name and
+this stack does not speak it. The messages are `[1, blocking, ack, req]`,
+`[2, [*[messageId, size]]]`, `[3]` (`MsgReplyNoIDs`, a blocking request's answer
+when nothing is held), `[4, [*messageId]]`, `[5, [*message]]` and `[6]`. The item
+list in messages 2, 4 and 5 is an indefinite-length array, which dmq-node
+requires and the gouroboros package does not produce; a definite-length item
+list is a decode error. The message frames, each message and its payload are
+definite-length arrays. An empty reply
+to a non-blocking request is `[2, []]`, and an empty reply to a blocking one is
+not allowed. `sigsub_messages_test.go` checks the encodings byte for byte
+against ones written out by hand from dmq-node's CDDL and codec.
+
+Input from a peer is bounded before it is decoded. A request is refused above
+256 KiB and a reply above 4 MiB, by message type in every state, so a request
+pipelined while a reply is owed is held to the same limit as one received in
+`StIdle`; the serving side holds at most 1 MiB of a message still arriving and
+the pulling side 8 MiB. A message's envelope must be a definite-length array
+of at most four elements, which its first byte says before any element is read.
+A list is read one item at a time and refused beyond 65535 items, the most a
+16-bit count can name, and each ID or message is checked as it is read, so a
+list of empty entries is refused at its first entry without the list ever being
+built.
+
+The two sides are reversed from TxSubmission2. The side that pulls holds agency
+in `StIdle` and is the connection's initiator, which is gouroboros's client
+role; the side that serves is the responder, the server role. That reversal is
+what removes version 1's `Init`. The handshake offers both roles, and a peer
+that offers both gets both on the one connection. Otherwise the side that dialed
+runs the initiator instances, the pulling side and the keep-alive client, and
+the side that listened runs the responder instances, the serving side and the
+keep-alive server. gouroboros carries the diffusion mode on the wire as
+"initiator only", so offering both roles is `false`. The mini-protocols are
+message submission (11) and keep-alive (12), dmq-node's number: Cardano's is 8,
+which the gouroboros keep-alive package is fixed to, so `keepAliveClient` and
+`keepAliveServer` run its states and messages on 12. Peer sharing (13) is not
+offered.
+
+The serving side answers from the pool through the peer's own `NextForPeer`
+cursor. A blocking request needs at least one ID, so it waits on `AddedSignal`
+on its own goroutine; but dmq-node ends the connection when a blocking request
+goes unanswered for 20 seconds, so after `blockingReplyWait` (10 seconds) the
+answer is `MsgReplyNoIDs` and the peer asks again. A run against dmq-node showed
+the connection being dropped every 20 seconds until it did. Messages that expired, and
+messages the peer itself announced (kept in a bounded `idSet`), are passed over,
+so a message is not announced back to where it came from. A body request returns
+the messages the pool still holds, which may be fewer than asked. The window of
+announced IDs, and the rules for it, are `sigsub_protocol.go`'s: a blocking
+request only with nothing left unacknowledged, no zero request, acknowledgements
+within what is outstanding, replies naming only what was asked, and requests for
+bodies only for what was announced. A peer that breaks one ends the connection
+with a gouroboros protocol violation. dmq-node's pulling side pipelines, sending
+its next request before the reply to the last, so the serving side's state map
+lists `RequestIDs`, `RequestSigs` and `Done` as pipelined message types, which
+the protocol holds until it has sent its reply.
+
+The pulling side keeps the announced IDs in a window until the next request
+acknowledges them, in announcement order. A request is blocking exactly when the
+window is empty after the acknowledgement, and non-blocking while IDs remain,
+which happens when a fetch is cut by `fetchMessages` or `fetchBytes` and leaves
+some for the next round. It fetches only IDs the pool lacks, and sends its
+acknowledgement with the next ID request. A blocking request that gets nothing
+back, whether `[3]` or after a wait, is followed by a pause that starts at 100ms
+and doubles to 2s, so a peer that answers at once cannot keep the loop spinning.
+Each fetched message goes through `Stack.admit`, the check a local submission
+gets. An expired or duplicate message, or one refused because the pool is full,
+is counted under `validation_failures_total` and dropped. An `invalid` one is a
+protocol violation and ends the connection. Two peers may fetch the same
+announced message at the same moment; the second is `alreadyReceived`, which
+costs a few hundred bytes and does not need cross-peer bookkeeping.
+
+`Stack.admit` first checks the sizes CIP-0137's CDDL fixes, because dmq-node
+refuses to decode a message that breaks them: a body of 90 to 2000 bytes
+(`StackConfig.MessageBodyMin` and `MessageBodyMax` override the limits), a
+448-byte KES signature, and 32, 64 and 32 bytes for the operational certificate's
+KES key, its cold signature, and the cold key. A message outside them is
+`invalid`, whether it came from a local client or a peer.
+
+A `Done` ends one direction, not the connection. The pulling side sends it from
+`StIdle`; the serving side that receives it releases that peer's cursor, and a
+pulling loop whose protocol has finished stops. A finished protocol signals
+nothing a waiter can select on, so a loop waiting for a reply polls `IsDone`
+every 250ms.
+
+The serving side tolerates 1000 outstanding IDs and the pulling side leaves at
+most 100, so a peer whose own limit is higher is not taken for a violator. The
+pulling side waits for a reply for the limits dmq-node uses for the same states
+(`timeLimitsSigSubmissionV2`): 20 seconds for a blocking request, 10 for a
+non-blocking one and for a request for bodies; `StIdle`, where the serving side
+waits for the next request, has none. `PeerConn` records the first error as the reason
+the connection ended; a remote hang-up or a local close is a clean end.
+`Stack.Stop` refuses new peers, closes the open ones, and only then stops the
+pool. A closed `PeerConn` releases its pool cursor.
+
+`internal/test/dmqinterop` runs this against a real dmq-node. `run.sh` downloads
+a release and checks its SHA-256, builds Linux builds of Dingo and a submit
+helper, and runs Dingo's single-node devnet and dmq-node together in one
+container, dmq-node using the devnet as its Cardano node. The tests, built only
+with the `dingo_dmq_interop` tag, cover Dingo dialing dmq-node, dmq-node serving
+a message signed by the devnet pool's real KES key to Dingo, which checks the
+signatures itself, and dmq-node dialing in and pulling a message from Dingo,
+shown by a second Dingo stack then fetching it from dmq-node. dmq-node accepts a
+pool's messages only once the pool's set stake snapshot is nonzero, which is
+after the devnet's second epoch change, so a run takes about twenty minutes.
+The last two tests need gouroboros v0.214.0 or later, whose authenticator
+verifies the KES signature over the payload's raw CBOR, as dmq-node does;
+earlier releases verified a byte-string wrapped copy and so rejected what
+dmq-node signs.
+
+Not yet provided: the listener on `dmq.n2nPort`, the peer manager that dials the
+topology peers within `dmq.minPeers` and `dmq.maxPeers`, and ledger peer
+discovery, so nothing outside tests calls `AttachPeer`. `dmq.n2nPort`,
+`dmq.listenAddress`, `dmq.listenIpv6Address`, `dmq.minPeers` and `dmq.maxPeers`
+are validated configuration keys that nothing reads yet.
 
 ### DMQ Message Authentication
 
@@ -8449,9 +8592,25 @@ rather than a boolean registered-pool set, so this codebase no longer needs
 its own copy.
 
 `node_dmq.go` constructs the `MessageAuthenticator` for `dmq.Stack`, with a
-`StakeAuthority` that reads the pool's stake from the snapshot Praos leader
-election uses (`praos.StakeSnapshotEpoch` of the current epoch), so a message is
-accepted only from a pool that may currently forge blocks. The DMQ stack is not
+`StakeAuthority` that reads the pool's stake through
+`LedgerState.ElectingPoolStake` at the wall-clock slot derived from confirmed
+era history: the same distribution, and the same choice between the mark
+snapshot of `praos.StakeSnapshotEpoch` and a Mithril-imported active
+distribution, that header verification checks a block at that slot against. A
+message is therefore accepted only from a pool that may forge now. The stake
+lookup, the current KES period and the authenticator's current slot all read
+that one slot rather than the ledger tip, which can trail it into the previous
+epoch.
+
+Every lookup the `StakeAuthority` cannot answer wraps
+`dmq.ErrChainStateUnavailable`, and admission reports it as `other` rather than
+`invalid`, which CIP-0137 treats as a protocol violation. That covers detached
+ledger state, storage errors, and a distribution that is missing, empty,
+pruned, reconstructed after its boundary (absent the explicit
+`SkipLeaderStakeThresholdCheck` override), or has no
+denominator, or that elects an epoch the ledger has not reached
+(`ledger.ErrLeaderStakeSnapshotUnavailable`). Only a pool absent from a
+populated distribution is `invalid`. The DMQ stack is not
 stopped by a live restore or truncate, so the `StakeAuthority` holds its own
 ledger reference under a lock: quiesce clears it before storage closes, and
 reinitialization sets the rebuilt ledger state. Clearing waits for a lookup in
@@ -8516,6 +8675,24 @@ prepares once per stake/coefficient/mode tuple and checks each signed slot
 with `CheckVRFOutput`. Zero-pool schedules remain empty as pool policy even
 at `f=1`; inbound zero-pool headers remain rejected.
 
+Tachys scheduling instead prepares gOuroboros's exact-integer public selector
+from every positive-stake pool in one Mark snapshot. The immutable distribution
+is canonically ordered and carries a commitment over all pool IDs and stake,
+so equal local and total stake cannot make a different distribution reusable.
+The same selector authorizes normal headers and peer-relative fork candidates;
+fork candidates use their derived candidate nonce rather than the local-chain
+nonce. The ledger caches at most three distributions by snapshot epoch and
+consensus-context generation. Rollback or state replacement changes that
+generation, while the leader manager clears its in-memory Tachys schedules on
+every rollback synchronously after the replacement consensus snapshot is
+published, and refuses an in-flight result from the older schedule generation.
+A distribution read that observes a consensus-context change defers header
+verification instead of reporting the stake snapshot unavailable. Next-epoch
+nonce readiness drops only the ready epoch's schedule; the current epoch's
+schedule keeps serving block production.
+Persisted Tachys schedules pin the nonce, absolute epoch range,
+era, provider identity, and full-distribution commitment.
+
 The stake distribution is the reference node's active `set`/`nesPd`
 distribution, as of the end of E-2. Dingo captures `mark[K]` at the boundary
 into K, holding stake as of the end of K-1; the electing row is therefore
@@ -8554,14 +8731,17 @@ numerator/denominator; nondecimal rationals such as `1/3` are valid. Existing
 float-only callers retain their rational conversion and are subject to the
 same domain rejection, without automatic rounding or a new fallback.
 
-`ScheduleFormatVersion=5` invalidates the pre-E34 version-4 slot lists.
-Records with version 4 or no version (decoded as zero) are discarded by the
-real election reload path, recomputed under E34 and saved as version 5.
-A valid version-5 record is reused on restart. Nonce, pool/total stake,
-epoch and slot-range checks remain in force. Persisted JSON is unchanged:
-`format_version`, `epoch`, `pool_id`, `pool_stake`, `total_stake`,
-`epoch_nonce`, `leader_slots`. No cutoff or evaluator is serialized, and no
-database schema migration is needed.
+`ScheduleFormatVersion=7` adds the exact epoch context and the Tachys
+distribution commitment to every persisted schedule. Records with an older
+version or no version (decoded as zero) are discarded by the real election
+reload path and recomputed. A valid version-7 record is reused on restart.
+Praos records recheck their nonce, pool/total stake, epoch and slot range;
+Tachys records additionally require an exact epoch range, era, and
+full-distribution commitment match. Persisted JSON carries `format_version`,
+`epoch`, `pool_id`, `pool_stake`, `total_stake`, `epoch_nonce`,
+`epoch_start_slot`, `epoch_slot_count`, `era_id`, `consensus_identity`,
+`distribution_commitment`, and `leader_slots`. No cutoff or evaluator is
+serialized, and no database schema migration is needed.
 
 The `leader schedule calculated` record retains snapshot epoch/type, epoch
 slot interval, nonce, pool/total stake, exact `f`, consensus mode and elected
@@ -11234,10 +11414,18 @@ bootstraps each running its immutable downloads beside the ancillary one.
 Public signature submissions use a separate four-request bound, so progressing
 archive transfers cannot consume their capacity. Either bound returns `503
 Service Unavailable` with `Retry-After: 1` when it is full. A
-15-second request-body read deadline is armed before decoding a signature
-submission. Archive transfers also admit at most one bootstrap's download
-concurrency from a remote host, keying IPv6 clients by their /64 prefix and
-IPv4-mapped addresses as IPv4; excess downloads return `429 Too Many Requests`.
+separate eight-request bound protects signature-body decoding, with at most
+four reads admitted from one remote host. A 15-second request-body read deadline
+and 1 MiB size limit apply through the end of the body within that tier.
+Rejected reads close their HTTP connection without draining the remaining
+body. Successfully decoded submissions then retain one of the four verification
+slots through signer validation, catalog access, cryptographic verification and
+certification, so incomplete bodies cannot consume verification capacity or
+leave decoding unbounded.
+Client bounds key IPv6 addresses by their /64 prefix and IPv4-mapped addresses
+as IPv4. Archive transfers also admit at most one bootstrap's download
+concurrency from a remote host. Excess per-client requests return `429 Too Many
+Requests`.
 Each response write retains the 15-second idle deadline, while archive writes
 also carry a 30-second startup allowance and must average at least 64 KiB/s.
 Large archives therefore receive time proportional to their bytes while a

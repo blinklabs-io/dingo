@@ -27,6 +27,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/consensus/praos"
+	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/dmq"
 	"github.com/blinklabs-io/dingo/internal/dblifecycle"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/plugin"
@@ -120,12 +124,74 @@ func TestConfigPopulateDMQNetworkMagic(t *testing.T) {
 	}
 }
 
+// A node that cannot answer a lookup has no grounds to call a message
+// invalid, so every failure must carry the sentinel admission reports as other.
 func TestDMQStakeAuthorityWithoutLedger(t *testing.T) {
 	t.Parallel()
-	_, err := (&dmqStakeAuthority{}).PoolActiveStake(
-		ocommon.PoolKeyHash{},
-	)
-	require.ErrorContains(t, err, "ledger state unavailable")
+	auth := &dmqStakeAuthority{}
+	_, err := auth.PoolActiveStake(ocommon.PoolKeyHash{})
+	require.ErrorIs(t, err, dmq.ErrChainStateUnavailable)
+	require.ErrorIs(t, err, errDMQLedgerDetached)
+	_, err = auth.CurrentSlot()
+	require.ErrorIs(t, err, dmq.ErrChainStateUnavailable)
+	_, err = auth.CurrentKESPeriod()
+	require.ErrorIs(t, err, dmq.ErrChainStateUnavailable)
+	_, _, err = auth.PoolOpCertIssueNumber(ocommon.PoolKeyHash{})
+	require.ErrorIs(t, err, dmq.ErrChainStateUnavailable)
+}
+
+func dmqPoolStakeAt(
+	auth *dmqStakeAuthority,
+	slot uint64,
+	pool ocommon.PoolKeyHash,
+) (uint64, error) {
+	auth.mu.RLock()
+	defer auth.mu.RUnlock()
+	return auth.poolStakeAtLocked(slot, pool)
+}
+
+// The authority answers from the snapshot that elects leaders at the slot: a
+// pool in it carries its stake, a pool absent from it carries none, and a
+// distribution the ledger has not captured is unavailable rather than empty.
+func TestDMQStakeAuthorityReadsElectingStake(t *testing.T) {
+	t.Parallel()
+	n, points := newLiveLifecycleTestNode(t, 2)
+	auth := &n.dmqStake
+	auth.setLedgerState(n.ledgerState)
+	slot := points[0].Slot
+
+	unknown := ocommon.PoolKeyHash{0xbb}
+	_, err := dmqPoolStakeAt(auth, slot, unknown)
+	require.ErrorIs(t, err, dmq.ErrChainStateUnavailable)
+	require.ErrorIs(t, err, ledger.ErrLeaderStakeSnapshotUnavailable)
+
+	epoch, err := n.ledgerState.SlotToEpoch(slot)
+	require.NoError(t, err)
+	staked := ocommon.PoolKeyHash{0xaa}
+	for _, row := range []struct {
+		epoch uint64
+		pool  ocommon.PoolKeyHash
+		stake uint64
+	}{
+		{praos.StakeSnapshotEpoch(epoch.EpochId), staked, 700},
+		// The next epoch's distribution elects nobody yet.
+		{praos.StakeSnapshotEpoch(epoch.EpochId) + 1, unknown, 900},
+	} {
+		require.NoError(t, n.ledgerState.Database().Metadata().
+			SavePoolStakeSnapshot(&models.PoolStakeSnapshot{
+				Epoch:        row.epoch,
+				SnapshotType: models.PoolStakeSnapshotTypeMark,
+				PoolKeyHash:  row.pool[:],
+				TotalStake:   types.Uint64(row.stake),
+			}, nil))
+	}
+
+	stake, err := dmqPoolStakeAt(auth, slot, staked)
+	require.NoError(t, err)
+	require.Equal(t, uint64(700), stake)
+	stake, err = dmqPoolStakeAt(auth, slot, unknown)
+	require.NoError(t, err)
+	require.Zero(t, stake)
 }
 
 // A live truncate closes and replaces the ledger state while DMQ submissions
@@ -144,10 +210,22 @@ func TestDMQStakeAuthorityAcrossLiveTruncate(t *testing.T) {
 	// Only the detached state may fail a lookup: any other error means a
 	// lookup reached storage that was closed or not yet reopened.
 	var lookupErr error
+	// A fixed chain slot, so lookups reach storage rather than stopping at a
+	// wall clock the test chain's era history does not cover.
+	slot := points[0].Slot
+	lookup := func() error {
+		_, err := dmqPoolStakeAt(auth, slot, ocommon.PoolKeyHash{})
+		// The test chain holds no stake snapshot, which is an answer read
+		// from storage.
+		if errors.Is(err, ledger.ErrLeaderStakeSnapshotUnavailable) {
+			return nil
+		}
+		return err
+	}
 	wg.Go(func() {
 		for {
-			_, err := auth.PoolActiveStake(ocommon.PoolKeyHash{})
-			if err != nil && err.Error() != "ledger state unavailable" {
+			err := lookup()
+			if err != nil && !errors.Is(err, errDMQLedgerDetached) {
 				lookupErr = err
 				return
 			}
@@ -174,8 +252,7 @@ func TestDMQStakeAuthorityAcrossLiveTruncate(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, lookupErr)
 	require.Positive(t, during, "no stake lookup ran during the truncate")
-	_, err = auth.PoolActiveStake(ocommon.PoolKeyHash{})
-	require.NoError(t, err)
+	require.NoError(t, lookup())
 }
 
 // Quiesce must not wait without bound on a stake lookup stalled inside the
@@ -234,7 +311,8 @@ func TestNodeRunServesDMQSubmission(t *testing.T) {
 	require.Equal(
 		t,
 		ocommon.OtherReason{
-			Message: "confirmed era history does not cover wall clock",
+			Message: "dmq: chain state unavailable: " +
+				"confirmed era history does not cover wall clock",
 		},
 		reason,
 	)
@@ -456,7 +534,7 @@ func submitDMQ(
 	require.NoError(t, conn.LocalMessageSubmission().Client.SubmitMessage(
 		&ocommon.DmqMessage{
 			Payload: ocommon.DmqMessagePayload{
-				MessageBody: []byte("node"),
+				MessageBody: bytes.Repeat([]byte("node"), 100),
 				KESPeriod:   1,
 				ExpiresAt:   expiry,
 			},
