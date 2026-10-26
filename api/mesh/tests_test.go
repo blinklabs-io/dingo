@@ -29,6 +29,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -892,6 +893,8 @@ type fakeLedgerState struct {
 	pparams       lcommon.ProtocolParameters
 	slotToTime    func(slot uint64) (time.Time, error)
 	utxos         func(addrs []lcommon.Address) ([]models.Utxo, error)
+	// completeLimit records the maxResults of the latest complete read.
+	completeLimit atomic.Int64
 	utxosComplete func(
 		ctx context.Context,
 		addrs []lcommon.Address,
@@ -935,11 +938,22 @@ func (f *fakeLedgerState) UtxosByAddress(
 func (f *fakeLedgerState) UtxosByAddressComplete(
 	ctx context.Context,
 	addrs []lcommon.Address,
+	maxResults int,
 ) ([]models.Utxo, error) {
+	f.completeLimit.Store(int64(maxResults))
+	var (
+		utxos []models.Utxo
+		err   error
+	)
 	if f.utxosComplete != nil {
-		return f.utxosComplete(ctx, addrs)
+		utxos, err = f.utxosComplete(ctx, addrs)
+	} else {
+		utxos, err = f.UtxosByAddress(addrs)
 	}
-	return f.UtxosByAddress(addrs)
+	if err == nil && len(utxos) > maxResults {
+		return nil, models.ErrTooManyUtxoResults
+	}
+	return utxos, err
 }
 
 func (f *fakeLedgerState) UtxosByAddressAtSlot(

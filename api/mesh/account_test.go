@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
@@ -759,4 +760,91 @@ func TestAccountCoinsCancellationReleasesAdmission(t *testing.T) {
 
 	response := postJSON(t, h, "/account/coins", coinsRequest(addr))
 	require.Equal(t, http.StatusOK, response.Code, response.Body.String())
+}
+
+func TestAccountCoinsRefusesOversizedAccounts(t *testing.T) {
+	t.Parallel()
+
+	key := testKeyHash(0x36)
+	addr := testAddress(t, lcommon.AddressTypeKeyNone, key, nil)
+	asset := models.Asset{
+		PolicyId: bytes.Repeat([]byte{0x01}, 28),
+		Name:     []byte("t"),
+		Amount:   types.Uint64(1),
+	}
+	cases := []struct {
+		name  string
+		build func() []models.Utxo
+	}{
+		{
+			name: "too many utxos",
+			build: func() []models.Utxo {
+				out := make([]models.Utxo, 0, 3)
+				for i := range 3 {
+					out = append(out, testUtxo(
+						testHash(byte(i)), 0, 1_000_000, key, nil,
+					))
+				}
+				return out
+			},
+		},
+		{
+			name: "asset expansion exceeds coin budget",
+			build: func() []models.Utxo {
+				u := testUtxo(testHash(9), 0, 1_000_000, key, nil)
+				u.Assets = []models.Asset{asset, asset, asset, asset}
+				return []models.Utxo{u}
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			deps := newTestDeps()
+			deps.ledger.utxosComplete = func(
+				context.Context,
+				[]lcommon.Address,
+			) ([]models.Utxo, error) {
+				return tc.build(), nil
+			}
+			h := newTestHandler(t, deps, func(c *ServerConfig) {
+				c.maxAccountCoinUtxos = 2
+				c.maxAccountCoins = 4
+			})
+			got := requireMeshError(
+				t,
+				postJSON(t, h, "/account/coins", coinsRequest(addr)),
+				ErrAccountTooLarge,
+				http.StatusInternalServerError,
+			)
+			require.False(t, got.Retriable)
+			require.EqualValues(t, 2, deps.ledger.completeLimit.Load())
+		})
+	}
+}
+
+func TestAccountCoinsAtLimitSucceeds(t *testing.T) {
+	t.Parallel()
+
+	key := testKeyHash(0x37)
+	addr := testAddress(t, lcommon.AddressTypeKeyNone, key, nil)
+	deps := newTestDeps()
+	deps.ledger.utxosComplete = func(
+		context.Context,
+		[]lcommon.Address,
+	) ([]models.Utxo, error) {
+		return []models.Utxo{
+			testUtxo(testHash(1), 0, 1_000_000, key, nil),
+			testUtxo(testHash(2), 0, 1_000_000, key, nil),
+		}, nil
+	}
+	h := newTestHandler(t, deps, func(c *ServerConfig) {
+		c.maxAccountCoinUtxos = 2
+		c.maxAccountCoins = 2
+	})
+	resp := decodeResponse[AccountCoinsResponse](
+		t, postJSON(t, h, "/account/coins", coinsRequest(addr)),
+	)
+	require.Len(t, resp.Coins, 2)
 }

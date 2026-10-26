@@ -45,6 +45,7 @@ func TestErrorCodesAreStable(t *testing.T) {
 		9:  {"invalid transaction", false},
 		10: {"transaction submit failed", true},
 		11: {"service unavailable", true},
+		12: {"account has too many coins", false},
 	}
 
 	all := AllErrors()

@@ -18,6 +18,7 @@ import (
 	"cmp"
 	"context"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/http"
 	"slices"
@@ -122,8 +123,13 @@ func (s *Server) handleAccountCoins(
 	utxos, err := s.config.LedgerState.UtxosByAddressComplete(
 		r.Context(),
 		[]ledger.Address{addr},
+		s.config.maxAccountCoinUtxos,
 	)
 	if err != nil {
+		if errors.Is(err, models.ErrTooManyUtxoResults) {
+			writeError(w, ErrAccountTooLarge)
+			return
+		}
 		if r.Context().Err() != nil {
 			s.logger.Debug("account coins read canceled", "error", err)
 			return
@@ -136,6 +142,17 @@ func (s *Server) handleAccountCoins(
 		)
 		writeError(w, ErrInternal)
 		return
+	}
+
+	// Native assets expand into extra Coin entries, so the row bound alone
+	// does not bound the encoded response.
+	coinCount := len(utxos)
+	for i := range utxos {
+		coinCount += len(utxos[i].Assets)
+		if coinCount > s.config.maxAccountCoins {
+			writeError(w, ErrAccountTooLarge)
+			return
+		}
 	}
 
 	writeJSON(w, http.StatusOK, &AccountCoinsResponse{

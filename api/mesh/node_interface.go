@@ -51,6 +51,7 @@ type MeshLedgerState interface {
 	UtxosByAddressComplete(
 		ctx context.Context,
 		addrs []lcommon.Address,
+		maxResults int,
 	) ([]models.Utxo, error)
 	// UtxosByAddressAtSlot returns the UTxOs the address held at the
 	// given slot -- those added at or before it and not spent until

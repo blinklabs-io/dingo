@@ -66,6 +66,13 @@ const (
 	// changing the contents of a successful response.
 	defaultMaxConcurrentBulkReads = 8
 
+	// defaultMaxAccountCoinUtxos and defaultMaxAccountCoins bound a complete
+	// /account/coins response. An account past either bound fails with
+	// ErrAccountTooLarge: a truncated coin list would be read as the whole
+	// spendable state.
+	defaultMaxAccountCoinUtxos = 10_000
+	defaultMaxAccountCoins     = 50_000
+
 	// listenerReadTimeout bounds the whole request read at the
 	// connection, covering the requests whose body no handler reads --
 	// such as an unknown route -- which the per-request deadline above
@@ -104,6 +111,11 @@ type ServerConfig struct {
 	// maxConcurrentBulkReads is unexported so the concurrency bound remains a
 	// server invariant rather than part of the Mesh wire contract.
 	maxConcurrentBulkReads int
+	// maxAccountCoinUtxos and maxAccountCoins bound the UTxO rows read and the
+	// expanded Coin entries returned for one /account/coins request. They are
+	// unexported for the same reason as maxConcurrentBulkReads.
+	maxAccountCoinUtxos int
+	maxAccountCoins     int
 	// maxMempoolListing and maxConcurrentMempoolListings are unexported and
 	// defaulted the same way.
 	maxMempoolListing            int
@@ -187,6 +199,12 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	}
 	if cfg.maxConcurrentMempoolListings <= 0 {
 		cfg.maxConcurrentMempoolListings = defaultMaxConcurrentMempoolListings
+	}
+	if cfg.maxAccountCoinUtxos <= 0 {
+		cfg.maxAccountCoinUtxos = defaultMaxAccountCoinUtxos
+	}
+	if cfg.maxAccountCoins <= 0 {
+		cfg.maxAccountCoins = defaultMaxAccountCoins
 	}
 	if cfg.maxConcurrentBulkReads <= 0 {
 		cfg.maxConcurrentBulkReads = defaultMaxConcurrentBulkReads

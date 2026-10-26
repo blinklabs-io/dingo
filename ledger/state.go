@@ -14956,12 +14956,18 @@ func (ls *LedgerState) UtxosByAddress(
 }
 
 // UtxosByAddressComplete returns every UTxO for the requested addresses and
-// stops the read when ctx is canceled.
+// stops the read when ctx is canceled. maxResults must be positive; a set
+// larger than it fails with models.ErrTooManyUtxoResults rather than being
+// truncated or fully materialized.
 func (ls *LedgerState) UtxosByAddressComplete(
 	ctx context.Context,
 	addrs []ledger.Address,
+	maxResults int,
 ) ([]models.Utxo, error) {
-	return ls.db.UtxosByAddressComplete(ctx, addrs, nil)
+	if maxResults <= 0 {
+		return nil, errors.New("maxResults must be positive")
+	}
+	return ls.db.UtxosByAddress(ctx, addrs, maxResults, nil)
 }
 
 // UtxosByAddressBoundedPage returns an ordered, resumable UTxO page while

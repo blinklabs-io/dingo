@@ -12281,7 +12281,10 @@ coin in one response. The request and response expose no pagination, cursor,
 limit, offset or truncation state because a Mesh client treats omitted coins as
 absent. At most 8 complete reads run at once; a request that finds no free slot
 is refused before starting its ledger query with `ErrUnavailable` rather than
-queued. Every successful request still returns the complete result.
+queued. Every successful request still returns the complete result. The read
+is bounded at the database: an address with more than 10,000 live UTxOs, or
+whose native-asset expansion exceeds 50,000 coins, is refused with the
+non-retriable `ErrAccountTooLarge` (code 12) instead of being truncated.
 `/account/balance` is unchanged.
 
 Implements the Mesh (formerly Rosetta) API specification for wallet integration and chain analysis. Provides endpoints for network status, account balances, block queries, transaction construction, and mempool access.
