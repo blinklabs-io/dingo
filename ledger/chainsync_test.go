@@ -14875,6 +14875,103 @@ func TestNonOwnerHeaderOverflowStartsStalledBlockfetch(t *testing.T) {
 	)
 }
 
+func TestNonOwnerHeaderOverflowLeavesInFlightBatchAlone(t *testing.T) {
+	t.Parallel()
+
+	ownerConn := ouroboros.ConnectionId{
+		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
+		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3001},
+	}
+	otherConn := ouroboros.ConnectionId{
+		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
+		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3002},
+	}
+	ownerHash := lcommon.NewBlake2b256([]byte("owner-hdr"))
+	ownerHeader := mockHeader{
+		hash:        ownerHash,
+		prevHash:    lcommon.NewBlake2b256(nil),
+		blockNumber: 1,
+		slot:        1,
+	}
+	var (
+		requestedMu sync.Mutex
+		requested   []ouroboros.ConnectionId
+	)
+	ls := &LedgerState{
+		chain: &chain.Chain{},
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			BlockfetchRequestRangeFunc: func(
+				connId ouroboros.ConnectionId,
+				_ ocommon.Point,
+				_ ocommon.Point,
+			) (uint64, error) {
+				requestedMu.Lock()
+				defer requestedMu.Unlock()
+				requested = append(requested, connId)
+				return 0, nil
+			},
+		},
+	}
+	ls.mithrilLedgerSlot = ownerHeader.slot
+	ls.publishSnapshotsLocked()
+
+	require.NoError(t, ls.handleEventChainsyncBlockHeader(ChainsyncEvent{
+		ConnectionId: ownerConn,
+		BlockHeader:  ownerHeader,
+		Point:        ocommon.NewPoint(ownerHeader.slot, ownerHash.Bytes()),
+		Tip: ochainsync.Tip{
+			Point:       ocommon.NewPoint(60001, []byte("tip-1")),
+			BlockNumber: 60001,
+		},
+	}))
+	require.Equal(t, 1, ls.chain.HeaderCount())
+
+	sendOther := func(i int, prev lcommon.Blake2b256) lcommon.Blake2b256 {
+		hash := lcommon.NewBlake2b256(fmt.Appendf(nil, "other-%d", i))
+		header := mockHeader{
+			hash:        hash,
+			prevHash:    prev,
+			blockNumber: uint64(i + 1),
+			slot:        uint64(i + 2),
+		}
+		require.NoError(t, ls.handleEventChainsyncBlockHeader(ChainsyncEvent{
+			ConnectionId: otherConn,
+			BlockHeader:  header,
+			Point:        ocommon.NewPoint(header.slot, hash.Bytes()),
+			Tip: ochainsync.Tip{
+				Point:       ocommon.NewPoint(60001, []byte("tip-2")),
+				BlockNumber: 60001,
+			},
+		}))
+		return hash
+	}
+
+	// A buffer that reaches the limit without overflowing is not a stall.
+	prev := lcommon.NewBlake2b256([]byte("other-parent"))
+	for i := range maxBufferedHeadersPerConn {
+		prev = sendOther(i, prev)
+	}
+	requestedMu.Lock()
+	require.Empty(t, requested, "a buffer at the limit must not start blockfetch")
+	requestedMu.Unlock()
+
+	// A batch already in flight drains the queue, so an overflow must not
+	// start a second one over it.
+	ls.chainsyncBlockfetchMutex.Lock()
+	ls.chainsyncBlockfetchReadyChan = make(chan struct{})
+	ls.chainsyncBlockfetchMutex.Unlock()
+	sendOther(maxBufferedHeadersPerConn, prev)
+
+	requestedMu.Lock()
+	defer requestedMu.Unlock()
+	require.Empty(
+		t,
+		requested,
+		"an overflow must not start blockfetch while a batch is in flight",
+	)
+}
+
 func TestBufferHeaderOverflowRejectsDependentHistory(t *testing.T) {
 	t.Parallel()
 
