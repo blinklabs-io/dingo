@@ -54,6 +54,11 @@ func TestUtxosByAddressCompleteEnforcesMaxResults(t *testing.T) {
 			AddedSlot:  uint64(i + 1),
 			Amount:     types.Uint64(1_000_000),
 			Cbor:       encoded,
+			Assets: []models.Asset{{
+				PolicyId: bytes.Repeat([]byte{0x01}, 28),
+				Name:     []byte{byte(i)},
+				Amount:   1,
+			}},
 		}))
 		require.NoError(t, db.BlobTxn(true).Do(func(txn *database.Txn) error {
 			return db.Blob().SetUtxo(txn.Blob(), txHash, 0, encoded)
@@ -62,13 +67,21 @@ func TestUtxosByAddressCompleteEnforcesMaxResults(t *testing.T) {
 	ls := &LedgerState{db: db}
 	addrs := []lcommon.Address{addr}
 
-	got, err := ls.UtxosByAddressComplete(t.Context(), addrs, total)
+	got, err := ls.UtxosByAddressComplete(t.Context(), addrs, total, total)
 	require.NoError(t, err)
 	require.Len(t, got, total)
+	for i := range got {
+		require.Len(t, got[i].Assets, 1)
+	}
 
-	_, err = ls.UtxosByAddressComplete(t.Context(), addrs, total-1)
+	_, err = ls.UtxosByAddressComplete(t.Context(), addrs, total-1, total)
 	require.ErrorIs(t, err, models.ErrTooManyUtxoResults)
 
-	_, err = ls.UtxosByAddressComplete(t.Context(), addrs, 0)
+	_, err = ls.UtxosByAddressComplete(t.Context(), addrs, total, total-1)
+	require.ErrorIs(t, err, models.ErrTooManyUtxoResults)
+
+	_, err = ls.UtxosByAddressComplete(t.Context(), addrs, 0, total)
+	require.Error(t, err)
+	_, err = ls.UtxosByAddressComplete(t.Context(), addrs, total, 0)
 	require.Error(t, err)
 }

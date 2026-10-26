@@ -124,6 +124,9 @@ func (s *Server) handleAccountCoins(
 		r.Context(),
 		[]ledger.Address{addr},
 		s.config.maxAccountCoinUtxos,
+		// Every asset is a Coin, so the coin budget also bounds the asset
+		// rows storage may load.
+		s.config.maxAccountCoins,
 	)
 	if err != nil {
 		if errors.Is(err, models.ErrTooManyUtxoResults) {

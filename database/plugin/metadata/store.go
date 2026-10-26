@@ -833,6 +833,18 @@ type UtxoStore interface {
 		types.Txn,
 	) ([]models.Utxo, error)
 
+	// GetUtxosByAddressBounded is GetUtxosByAddress with a second required,
+	// positive bound (the third argument) on the native-asset rows loaded
+	// across all candidates. Exceeding either bound yields
+	// models.ErrTooManyUtxoResults; at most one asset row past the bound is
+	// materialized.
+	GetUtxosByAddressBounded(
+		[]models.UtxoAddressPattern,
+		int,
+		int,
+		types.Txn,
+	) ([]models.Utxo, error)
+
 	// GetUtxosByAddressAsOf is GetUtxosByAddress as the outputs stood at
 	// atSlot, using GetUtxosByRefsAsOf's predicate: a row is included when
 	// its AddedSlot is at-or-before atSlot and it was either never spent or
