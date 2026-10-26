@@ -148,6 +148,7 @@ type Ouroboros struct {
 	subscriptions     []subscription
 	blockfetchMetrics *blockfetchMetrics
 	protocolMetrics   *protocolMetrics
+	chainsyncMetrics  *chainsyncMetrics
 
 	// headerArrivalMetrics records chainsync header arrival against slot time.
 	headerArrivalMetrics *headerArrivalMetrics
@@ -875,6 +876,7 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 		o.initHeaderArrivalMetrics()
 		o.initProtocolMetrics()
 		o.initLeiosMetrics()
+		o.initChainsyncMetrics()
 		o.initDecodeCacheMetrics()
 	}
 	o.subscribeLeiosAnnouncementRetries()
