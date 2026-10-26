@@ -215,11 +215,12 @@ func unwrapConn(conn net.Conn) net.Conn {
 	}
 }
 
-// withSocketDeadlines adds a write-idle deadline to TCP bearers. Unix bearers
-// are left untouched: NtC clients are local, and the concrete *net.UnixConn is
-// still needed for peer credentials.
+// withSocketDeadlines adds a write-idle deadline to TCP bearers and to Unix
+// bearers after their unique remote-address wrapper is applied.
 func withSocketDeadlines(conn net.Conn) net.Conn {
-	if _, ok := conn.(*net.TCPConn); !ok {
+	switch conn.(type) {
+	case *net.TCPConn, *UnixConn:
+	default:
 		return conn
 	}
 	return &deadlineConn{Conn: conn, timeout: socketIdleTimeout}

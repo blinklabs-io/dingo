@@ -56,6 +56,7 @@ type LeiosAnnouncementLedger interface {
 	ValidateLeiosEndorserBlockTransactions(
 		context.Context,
 		gledger.BlockHeader,
+		[]byte,
 		[][]byte,
 	) error
 }
@@ -2542,6 +2543,16 @@ func (o *Ouroboros) subscribeLeiosAnnouncementRetries() {
 	}
 	o.subscribeTracked(chain.ChainUpdateEventType, retry)
 	o.subscribeTracked(event.EpochTransitionEventType, retry)
+	// An endorser block validates once its announcing block is the applied
+	// ledger tip, which the chain update above can precede. The ledger
+	// publishes this event with PublishBlocking, so the handler only
+	// schedules work.
+	o.subscribeTracked(ledger.BlockEventType, func(evt event.Event) {
+		if blockEvt, ok := evt.Data.(ledger.BlockEvent); ok &&
+			blockEvt.Action == ledger.BlockActionApply {
+			o.retryLeiosEndorserBlockValidations()
+		}
+	})
 }
 
 // pruneLeiosAnnouncements bounds announcement deduplication state to the

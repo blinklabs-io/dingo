@@ -816,6 +816,13 @@ func newMempool(
 		},
 	)
 	m.metrics.implementation.Set(1)
+	// Capacity is fixed for the life of the pool, so the gauge is set once.
+	promautoFactory.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "dingo_mempool_capacity_bytes",
+			Help: "configured mempool capacity in bytes",
+		},
+	).Set(float64(config.MempoolCapacity))
 	return m, nil
 }
 

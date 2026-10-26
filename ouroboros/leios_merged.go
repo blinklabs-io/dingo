@@ -662,7 +662,12 @@ func (o *Ouroboros) storeLeiosEndorserBlock(
 	// distinct key instead of colliding with (or needing to evict) this one.
 	// Every remaining branch below is about the same
 	// occurrence's own transaction/verification state, not a slot conflict.
-	if existing := o.leiosEndorserBlocks[cacheKeys[0]]; existing != nil {
+	existing := o.leiosEndorserBlocks[cacheKeys[0]]
+	// Whether the closure was already complete and slot-verified before this
+	// store, so the arrival is recorded once, at the transition.
+	wasClosureReady := existing != nil && existing.completeTxCache() &&
+		existing.slotVerified
+	if existing != nil {
 		// Never regress a cached transaction set. The relay offers each
 		// endorser block on every connection, so a manifest-only store
 		// (txsRaw nil) routinely arrives after another connection has already
@@ -762,6 +767,11 @@ func (o *Ouroboros) storeLeiosEndorserBlock(
 	if data.slotVerified {
 		o.publishLeiosEndorserBlock(point, blockRaw, data)
 	}
+	// A block this node forged itself did not arrive from anywhere.
+	if origin != leiosStoreAuthoritative && !wasClosureReady &&
+		data.completeTxCache() && data.slotVerified {
+		o.recordLeiosEbArrival(point, data.txCount)
+	}
 	return nil
 }
 
@@ -803,7 +813,10 @@ func (o *Ouroboros) enqueueLeiosRelayOffers(
 		return
 	}
 	updated := *current
-	manifestOffer := !updated.relayManifestOffered
+	// An intent-only entry has no manifest to size the offer with. Receivers
+	// reject a zero-size offer by closing the connection, so defer until the
+	// manifest is stored (which re-enters here) and only then mark it offered.
+	manifestOffer := !updated.relayManifestOffered && updated.hasManifest()
 	if manifestOffer {
 		updated.relayManifestOffered = true
 	}
@@ -946,10 +959,10 @@ func (o *Ouroboros) scheduleLeiosEndorserBlockValidation(
 		o.leiosValidationMu.Unlock()
 		return
 	}
-	parentHash := ledger.LeiosValidationParentHash(header)
+	basis := ledger.LeiosEndorserBlockBasisHash(header)
 	pending := *current
 	pending.semanticValidationStatus = leiosEBValidationPending
-	pending.semanticValidationParent = slices.Clone(parentHash)
+	pending.semanticValidationParent = slices.Clone(basis)
 	pending.semanticValidationDone = make(chan struct{})
 	for _, cacheKey := range current.cacheKeys {
 		if o.leiosEndorserBlocks[cacheKey] == current {
@@ -965,14 +978,17 @@ func (o *Ouroboros) scheduleLeiosEndorserBlockValidation(
 
 // ValidateLeiosEndorserBlockForHeader waits through the configured diffusion
 // window for the exact endorser block announced by header, then validates it
-// synchronously while header's parent is still the applied ledger tip. Callers
-// use this at the selected block's apply boundary, or before adopting a locally
-// forged block, so validation cannot race the ranking block past the parent
-// state it names. Endorser-block bodies arrive independently on asynchronous
-// Leios fetch workers.
+// synchronously while basis is still the applied ledger tip. The ledger's
+// apply boundary passes ledger.LeiosEndorserBlockBasisHash, once the
+// announcing block is the tip and before the block that may certify it
+// applies. A forger checking its own announcement before adoption passes
+// ledger.LeiosValidationParentHash (see
+// ledger.LedgerState.ValidateLeiosEndorserBlockTransactions). Endorser-block
+// bodies arrive independently on asynchronous Leios fetch workers.
 func (o *Ouroboros) ValidateLeiosEndorserBlockForHeader(
 	ctx context.Context,
 	header lcommon.BlockHeader,
+	basis []byte,
 ) error {
 	if header == nil {
 		return errors.New("nil Leios announcing header")
@@ -992,7 +1008,7 @@ func (o *Ouroboros) ValidateLeiosEndorserBlockForHeader(
 	}
 	if o.ledgerState != nil && !slices.Equal(
 		o.ledgerState.Tip().Point.Hash,
-		ledger.LeiosValidationParentHash(header),
+		basis,
 	) {
 		return ledger.ErrLeiosValidationParentUnavailable
 	}
@@ -1054,7 +1070,7 @@ func (o *Ouroboros) ValidateLeiosEndorserBlockForHeader(
 	if err := validateLeiosEndorserBlockBinding(header, data); err != nil {
 		return err
 	}
-	validationParent := ledger.LeiosValidationParentHash(header)
+	validationParent := basis
 	var pending leiosEndorserBlockData
 	for {
 		o.leiosMu.Lock()
@@ -1124,6 +1140,7 @@ func (o *Ouroboros) ValidateLeiosEndorserBlockForHeader(
 		err = o.leiosAnnouncementLedger.ValidateLeiosEndorserBlockTransactions(
 			ctx,
 			header,
+			validationParent,
 			txCbors,
 		)
 	}
@@ -1266,6 +1283,7 @@ func (o *Ouroboros) validateLeiosEndorserBlock(
 		err = o.leiosAnnouncementLedger.ValidateLeiosEndorserBlockTransactions(
 			o.leiosValidationCtx,
 			header,
+			data.semanticValidationParent,
 			txCbors,
 		)
 	}
@@ -1555,6 +1573,8 @@ func (o *Ouroboros) bindLeiosEndorserBlockSlot(
 	now := time.Now()
 	o.pruneLeiosEndorserBlockCacheLocked(now)
 	data := o.leiosEndorserBlocks[key]
+	wasClosureReady := data != nil && data.completeTxCache() &&
+		data.slotVerified
 	contentChanged := false
 	if data == nil || !data.completeTxCache() {
 		// The manifest is content-addressed, so a complete cached occurrence
@@ -1644,6 +1664,13 @@ func (o *Ouroboros) bindLeiosEndorserBlockSlot(
 			verified.blockRaw,
 			&verified,
 		)
+		// Recorded here, not above: the caller may hold
+		// leiosAnnouncementsMu until it runs this closure, and recording
+		// resolves the slot through the ledger.
+		if !wasClosureReady && verified.completeTxCache() &&
+			verified.slotVerified {
+			o.recordLeiosEbArrival(verified.point, verified.txCount)
+		}
 	}
 }
 

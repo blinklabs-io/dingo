@@ -548,6 +548,7 @@ func TestLeiosAnnouncementValidationMarksInvalidWitnessDeterministic(
 	err := f.ls.ValidateLeiosEndorserBlockTransactions(
 		t.Context(),
 		announcer.Header(),
+		LeiosValidationParentHash(announcer.Header()),
 		[][]byte{f.ebTx.Cbor()},
 	)
 	require.ErrorIs(t, err, ErrInvalidLeiosEndorserBlockTransactions)
@@ -581,6 +582,7 @@ func TestLeiosAnnouncementValidationKeepsProtocolParamFaultRetryable(
 			err := f.ls.ValidateLeiosEndorserBlockTransactions(
 				t.Context(),
 				announcer.Header(),
+				LeiosValidationParentHash(announcer.Header()),
 				[][]byte{f.ebTx.Cbor()},
 			)
 			require.ErrorIs(t, err, eras.ErrIncompatibleProtocolParams)
@@ -619,6 +621,7 @@ func TestLeiosAnnouncementValidationPropagatesCancellation(t *testing.T) {
 	err := f.ls.ValidateLeiosEndorserBlockTransactions(
 		ctx,
 		announcer.Header(),
+		LeiosValidationParentHash(announcer.Header()),
 		[][]byte{f.ebTx.Cbor()},
 	)
 	require.ErrorIs(t, err, context.Canceled)

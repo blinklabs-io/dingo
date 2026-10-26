@@ -2148,6 +2148,22 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 			}
 		}
 		patienceGrant = selectionEligible && ingressEligible
+		// Header arrival against slot time, for headers that passed (or
+		// only deferred) verification from an eligible peer, so a bad peer
+		// cannot fill the ring.
+		if ingressEligible && (selectionEligible || deferredVerification) &&
+			o.headerArrivalMetrics != nil {
+			if slotTime, atTip, ok := o.headerArrivalClock(blockSlot); ok {
+				o.headerArrivalMetrics.observeHeaderArrival(
+					atTip,
+					v.BlockNumber(),
+					blockSlot,
+					v.Hash(),
+					slotTime,
+					arrivalTime,
+				)
+			}
+		}
 		// Record the cross-peer dedup entry only for headers we will actually
 		// apply. A header withheld from an uncorroborated peer must not suppress
 		// a later delivery from a corroborated, apply-eligible peer.

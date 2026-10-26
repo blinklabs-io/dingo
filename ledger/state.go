@@ -463,10 +463,13 @@ func blockApplyCandidatePoint(
 	)
 }
 
-// leiosAnnouncementBatchEnd keeps an announcing ranking block at the front of
-// a one-block apply chunk. The validator can then inspect it while its exact
-// parent is still the published ledger tip, without delaying ChainSync for
-// headers that may never be selected or fetched.
+// leiosAnnouncementBatchEnd ends an apply chunk with the first live
+// announcing ranking block. Once the chunk commits, that block is the
+// published ledger tip, the state its endorser block validates against (see
+// LeiosEndorserBlockBasisHash), and the next chunk's preparation validates
+// the endorser block before any later block, including the one that may
+// certify it, is applied. Headers that are never selected or fetched delay
+// nothing.
 func leiosAnnouncementBatchEnd(
 	blocks []ledger.Block,
 	start, end int,
@@ -483,30 +486,55 @@ func leiosAnnouncementBatchEnd(
 		if _, _, announced := announcer.LeiosAnnouncement(); !announced {
 			continue
 		}
-		if offset == 0 {
-			return start + 1
-		}
-		return start + offset
+		return start + offset + 1
 	}
 	return end
 }
 
-func (ls *LedgerState) validateLeiosAnnouncementBeforeApply(
-	ctx context.Context,
-	block ledger.Block,
-	inLiveValidationRegion bool,
-) error {
-	if !inLiveValidationRegion || ls.config.ValidateLeiosAnnouncement == nil {
+// leiosBatchAnnouncer returns the header of the last block of an apply chunk
+// when that block announces an endorser block, which is where
+// leiosAnnouncementBatchEnd places a live announcing block.
+func leiosBatchAnnouncer(blocks []ledger.Block) ledger.BlockHeader {
+	if len(blocks) == 0 {
 		return nil
 	}
-	announcer, ok := block.Header().(leiosEndorserBlockReferencer)
+	header := blocks[len(blocks)-1].Header()
+	announcer, ok := header.(leiosEndorserBlockReferencer)
 	if !ok {
 		return nil
 	}
 	if _, _, announced := announcer.LeiosAnnouncement(); !announced {
 		return nil
 	}
-	return ls.config.ValidateLeiosAnnouncement(ctx, block.Header())
+	return header
+}
+
+// validateLeiosAnnouncementBeforeApply validates the endorser block
+// announced by the block that ended the previous apply chunk, while that
+// block is still the published ledger tip and before the next chunk applies.
+// A tip that moved elsewhere, by rollback or recovery, leaves nothing to
+// validate.
+func (ls *LedgerState) validateLeiosAnnouncementBeforeApply(
+	ctx context.Context,
+	inLiveValidationRegion bool,
+) error {
+	if !inLiveValidationRegion || ls.config.ValidateLeiosAnnouncement == nil {
+		return nil
+	}
+	header := ls.leiosApplyAnnouncer
+	if header == nil {
+		return nil
+	}
+	ls.RLock()
+	atTip := bytes.Equal(
+		ls.currentTip.Point.Hash,
+		LeiosEndorserBlockBasisHash(header),
+	)
+	ls.RUnlock()
+	if !atTip {
+		return nil
+	}
+	return ls.config.ValidateLeiosAnnouncement(ctx, header)
 }
 
 func (ls *LedgerState) waitForLeiosBeforeApply(
@@ -521,13 +549,12 @@ func (ls *LedgerState) waitForLeiosBeforeApply(
 	}
 	if err := ls.validateLeiosAnnouncementBeforeApply(
 		ctx,
-		precheck[0],
 		validateAnnouncement,
 	); err != nil {
 		ls.config.Logger.Debug(
 			"Leios announcement not validated before block apply",
 			"component", "ledger",
-			"slot", precheck[0].SlotNumber(),
+			"slot", ls.leiosApplyAnnouncer.SlotNumber(),
 			"error", err,
 		)
 	}
@@ -574,18 +601,29 @@ func (ls *LedgerState) prepareBlockApplySnapshot(
 			) {
 			if err := ls.validateLeiosAnnouncementBeforeApply(
 				ctx,
-				precheck[0],
 				true,
 			); err != nil {
 				ls.config.Logger.Debug(
 					"Leios announcement not validated before block apply",
 					"component", "ledger",
-					"slot", precheck[0].SlotNumber(),
+					"slot", ls.leiosApplyAnnouncer.SlotNumber(),
 					"error", err,
 				)
 			}
 			snapshot = ls.captureBlockApplyStateSnapshot()
 		}
+	}
+	// Only a live announcing block is validated at the next chunk; a
+	// historical one would only hold that chunk for its closure.
+	ls.leiosApplyAnnouncer = leiosBatchAnnouncer(
+		blocksBeforeEpochEnd(blocks, selectionEpoch),
+	)
+	if ls.leiosApplyAnnouncer != nil &&
+		!ls.blockApplySnapshotInLiveValidationRegion(
+			snapshot,
+			ls.leiosApplyAnnouncer.SlotNumber(),
+		) {
+		ls.leiosApplyAnnouncer = nil
 	}
 	return snapshot, nil
 }
@@ -941,7 +979,7 @@ type LedgerStateConfig struct {
 	// the chain and leaving the UTxO set incomplete. Nil disables backfill.
 	EndorserBlockFetcher EndorserBlockFetcherFunc
 	// ValidateLeiosAnnouncement validates a cached endorser block while the
-	// announcing header's parent is still the applied ledger tip. Header
+	// announcing block is the applied ledger tip. Header
 	// admission remains independent: an unavailable or invalid endorser block
 	// receives no vote but does not invalidate its ranking block.
 	ValidateLeiosAnnouncement func(context.Context, ledger.BlockHeader) error
@@ -1933,6 +1971,11 @@ type LedgerState struct {
 	// untickedClosure holds unpublished Apply events until its certifying RB
 	// commits. Guarded by the LedgerState lock.
 	untickedClosure *pendingLeiosClosure
+	// leiosApplyAnnouncer is the announcing header that ended the last
+	// prepared apply chunk, kept so the next chunk validates its endorser
+	// block while it is the ledger tip. Owned by the block-processing
+	// goroutine, the only caller of prepareBlockApplySnapshot.
+	leiosApplyAnnouncer ledger.BlockHeader
 
 	// publishCtx is cancelled at the top of Close so a ledger.tx publish
 	// parked on a full ordered lane cannot outlive shutdown. Only the
@@ -9178,6 +9221,9 @@ func (ls *LedgerState) processBlocksFromSource(
 				len(nextBatch[i:end]),
 			)
 			var blocksProcessed int
+			// Blocks this chunk applies through ledgerProcessBlock, kept
+			// for the post-commit adoption-delay observation.
+			var chunkAdopted []adoptedBlock
 			runningNonce := snapshotNonce
 			trackByronPBFT := batchContainsByronBlocks(nextBatch[i:end])
 			var runningByronPBFTState byronPBFTState
@@ -9620,6 +9666,11 @@ func (ls *LedgerState) processBlocksFromSource(
 							BlockNumber: next.BlockNumber(),
 						}
 						blocksProcessed++
+						chunkAdopted = append(chunkAdopted, adoptedBlock{
+							number: next.BlockNumber(),
+							slot:   next.SlotNumber(),
+							hash:   tmpPoint.Hash,
+						})
 						// Per-block composition metrics: era,
 						// transaction count, script/redeemer presence, UTxO
 						// churn, certificate count. Recorded here, not for
@@ -9868,6 +9919,9 @@ func (ls *LedgerState) processBlocksFromSource(
 				checker = ls.config.ForgedBlockChecker
 				ls.publishSnapshotsLocked()
 				ls.Unlock()
+				if !trustedReplay {
+					ls.observeBlockAdoptions(chunkAdopted)
+				}
 				ls.maybeQueueStakeRewardPrecomputeRetry(pendingTip.Point.Slot)
 				// Restore normal DB options outside the lock after validation is enabled
 				if wantEnableValidation && bulkLoadActive &&
@@ -15229,6 +15283,19 @@ func LeiosValidationParentHash(header ledger.BlockHeader) []byte {
 	return parentHash.Bytes()
 }
 
+// LeiosEndorserBlockBasisHash returns the ledger-point hash an announced
+// endorser block validates against: the announcing ranking block itself.
+// CIP-164 makes the endorser block's transactions a valid extension of the
+// ledger state that block leaves, which includes the transactions of any
+// endorser block it certifies and its own body transactions, so they can
+// spend outputs neither the block's parent state nor its own transactions
+// alone contain. The block that certifies the endorser block is the next
+// one, whose parent is the announcing block, so this is also the state those
+// transactions are applied on.
+func LeiosEndorserBlockBasisHash(header ledger.BlockHeader) []byte {
+	return header.Hash().Bytes()
+}
+
 func (ls *LedgerState) txValidationSnapshot() txValidationSnapshot {
 	consensusState, tipState := ls.loadStateSnapshots()
 	tipSlot := tipState.currentTip.Point.Slot
@@ -15575,12 +15642,18 @@ var errRollbackLedgerValidationSession = errors.New(
 )
 
 // ValidateLeiosEndorserBlockTransactions validates an announced endorser
-// block against the exact ledger snapshot named by the ranking block's
-// parent. It uses one repeatable-read transaction and applies transaction
-// effects in manifest order so later transactions can spend earlier outputs.
+// block against the exact ledger snapshot named by basis, which must be the
+// applied ledger tip. Peers and voters pass LeiosEndorserBlockBasisHash; a
+// forger checking its own announcement before the ranking block is adopted
+// passes LeiosValidationParentHash, which is equivalent only because a
+// locally built announcing block carries no transactions of its own and
+// excludes the transactions of the endorser block it certifies. It uses one
+// repeatable-read transaction and applies transaction effects in manifest
+// order so later transactions can spend earlier outputs.
 func (ls *LedgerState) ValidateLeiosEndorserBlockTransactions(
 	ctx context.Context,
 	header ledger.BlockHeader,
+	basis []byte,
 	txs [][]byte,
 ) error {
 	if header == nil {
@@ -15613,13 +15686,12 @@ func (ls *LedgerState) ValidateLeiosEndorserBlockTransactions(
 		ctx = context.Background() //nolint:contextcheck // literal-nil fallback
 	}
 	slot := header.SlotNumber()
-	parentHash := LeiosValidationParentHash(header)
-	parentIsCurrentTip := func() bool {
+	basisIsCurrentTip := func() bool {
 		_, currentTip := ls.loadStateSnapshots()
-		return bytes.Equal(currentTip.currentTip.Point.Hash, parentHash)
+		return bytes.Equal(currentTip.currentTip.Point.Hash, basis)
 	}
 	return ls.withTxValidationSession(ctx,
-		parentHash,
+		basis,
 		&slot,
 		true,
 		true,
@@ -15641,7 +15713,7 @@ func (ls *LedgerState) ValidateLeiosEndorserBlockTransactions(
 					return err
 				}
 				if !stillCurrent() {
-					if !parentIsCurrentTip() {
+					if !basisIsCurrentTip() {
 						return ErrLeiosValidationParentSuperseded
 					}
 					return ErrLeiosValidationParentUnavailable
@@ -15710,7 +15782,7 @@ func (ls *LedgerState) ValidateLeiosEndorserBlockTransactions(
 				return err
 			}
 			if !stillCurrent() {
-				if !parentIsCurrentTip() {
+				if !basisIsCurrentTip() {
 					return ErrLeiosValidationParentSuperseded
 				}
 				return ErrLeiosValidationParentUnavailable

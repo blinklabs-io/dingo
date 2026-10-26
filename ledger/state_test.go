@@ -14491,7 +14491,7 @@ func (b leiosApplyBatchTestBlock) PrevHash() lcommon.Blake2b256 {
 	return b.header.PrevHash()
 }
 
-func TestLeiosAnnouncementBatchEndWaitsOnlyForSelectedBlock(t *testing.T) {
+func TestLeiosAnnouncementBatchEndEndsWithSelectedBlock(t *testing.T) {
 	plain := func(slot uint64) lcommon.Block {
 		return leiosApplyBatchTestBlock{header: mockHeader{slot: slot}}
 	}
@@ -14513,14 +14513,16 @@ func TestLeiosAnnouncementBatchEndWaitsOnlyForSelectedBlock(t *testing.T) {
 		plain(5),
 	}
 	live := func(uint64) bool { return true }
-	require.Equal(t, 2, leiosAnnouncementBatchEnd(blocks, 0, len(blocks), live))
+	// Each chunk ends with its first announcing block, so that block is the
+	// ledger tip when the next chunk validates its endorser block.
+	require.Equal(t, 3, leiosAnnouncementBatchEnd(blocks, 0, len(blocks), live))
 	require.Equal(t, 4, leiosAnnouncementBatchEnd(blocks, 3, len(blocks), live))
 	require.Equal(t, len(blocks), leiosAnnouncementBatchEnd(blocks, 4, len(blocks), live))
 
 	// A chunk can begin in historical replay and cross the stability cutoff.
-	// The first live announcing block must begin the next one-block chunk.
+	// The first live announcing block ends it.
 	crossing := []lcommon.Block{plain(8), plain(9), announcing(10), plain(11)}
-	require.Equal(t, 2, leiosAnnouncementBatchEnd(
+	require.Equal(t, 3, leiosAnnouncementBatchEnd(
 		crossing,
 		0,
 		len(crossing),
@@ -14544,6 +14546,7 @@ func TestLeiosTransitionBlockReconcilesLiveRegionAfterWait(t *testing.T) {
 		ebHash,
 	)
 	block := leiosApplyBatchTestBlock{header: header}
+	next := leiosApplyBatchTestBlock{header: mockHeader{slot: 101}}
 	validated := 0
 	epoch := models.Epoch{StartSlot: 0, SlotLength: 1, LengthInSlots: 1_000}
 	ls := &LedgerState{
@@ -14561,15 +14564,82 @@ func TestLeiosTransitionBlockReconcilesLiveRegionAfterWait(t *testing.T) {
 			},
 		},
 	}
-	snapshot, err := ls.prepareBlockApplySnapshot(
+	// The chunk that ends with the announcing block only records it.
+	_, err := ls.prepareBlockApplySnapshot(
 		t.Context(),
 		[]lcommon.Block{block},
 		epoch,
 		false,
 	)
 	require.NoError(t, err)
+	require.Zero(t, validated)
+
+	// Once it is the tip, the next chunk validates its endorser block.
+	ls.currentTip = ochainsync.Tip{
+		Point:       ocommon.NewPoint(100, header.Hash().Bytes()),
+		BlockNumber: 10,
+	}
+	snapshot, err := ls.prepareBlockApplySnapshot(
+		t.Context(),
+		[]lcommon.Block{next},
+		epoch,
+		false,
+	)
+	require.NoError(t, err)
 	require.Equal(t, SyncingChainsyncState, snapshot.chainsyncState)
 	require.Equal(t, 1, validated)
+}
+
+// A chunk that ends with a historical announcing block records nothing, so
+// the next chunk, live or not, does not hold for that block's closure.
+func TestLeiosHistoricalAnnouncerIsNotValidatedNextChunk(t *testing.T) {
+	header := announcingHeader(
+		100,
+		"historical-header",
+		lcommon.NewBlake2b256([]byte("parent")),
+		10,
+		lcommon.NewBlake2b256([]byte("historical-endorser")),
+	)
+	validated := 0
+	epoch := models.Epoch{StartSlot: 0, SlotLength: 1, LengthInSlots: 1_000}
+	ls := &LedgerState{
+		chainsyncState: SyncingChainsyncState,
+		currentEpoch:   epoch,
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			ValidateLeiosAnnouncement: func(
+				context.Context,
+				lcommon.BlockHeader,
+			) error {
+				validated++
+				return nil
+			},
+		},
+	}
+	ls.externalIngest.trusted.Store(true)
+	_, err := ls.prepareBlockApplySnapshot(
+		t.Context(),
+		[]lcommon.Block{leiosApplyBatchTestBlock{header: header}},
+		epoch,
+		false,
+	)
+	require.NoError(t, err)
+
+	ls.externalIngest.trusted.Store(false)
+	ls.currentTip = ochainsync.Tip{
+		Point:       ocommon.NewPoint(100, header.Hash().Bytes()),
+		BlockNumber: 10,
+	}
+	_, err = ls.prepareBlockApplySnapshot(
+		t.Context(),
+		[]lcommon.Block{
+			leiosApplyBatchTestBlock{header: mockHeader{slot: 101}},
+		},
+		epoch,
+		true,
+	)
+	require.NoError(t, err)
+	require.Zero(t, validated)
 }
 
 func TestLeiosApplySnapshotIsReadAfterAnnouncementWait(t *testing.T) {
@@ -14580,7 +14650,6 @@ func TestLeiosApplySnapshotIsReadAfterAnnouncementWait(t *testing.T) {
 		10,
 		lcommon.NewBlake2b256([]byte("endorser")),
 	)
-	block := leiosApplyBatchTestBlock{header: header}
 	newTip := ochainsync.Tip{
 		Point:       ocommon.NewPoint(99, []byte("reloaded-parent")),
 		BlockNumber: 9,
@@ -14588,9 +14657,10 @@ func TestLeiosApplySnapshotIsReadAfterAnnouncementWait(t *testing.T) {
 	var ls *LedgerState
 	ls = &LedgerState{
 		currentTip: ochainsync.Tip{
-			Point:       ocommon.NewPoint(98, []byte("old-parent")),
-			BlockNumber: 8,
+			Point:       ocommon.NewPoint(100, header.Hash().Bytes()),
+			BlockNumber: 10,
 		},
+		leiosApplyAnnouncer: header,
 		config: LedgerStateConfig{
 			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 			ValidateLeiosAnnouncement: func(
@@ -14608,7 +14678,9 @@ func TestLeiosApplySnapshotIsReadAfterAnnouncementWait(t *testing.T) {
 	}
 	snapshot, err := ls.prepareBlockApplySnapshot(
 		t.Context(),
-		[]lcommon.Block{block},
+		[]lcommon.Block{
+			leiosApplyBatchTestBlock{header: mockHeader{slot: 101}},
+		},
 		models.Epoch{StartSlot: 0, SlotLength: 1, LengthInSlots: 1_000},
 		true,
 	)

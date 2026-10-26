@@ -50,6 +50,9 @@
       # config:
         # Optional Badger data directory. When unset, databasePath applies.
         # dataDir: ".dingo"
+        # Optional memtable size override in bytes. Core sync defaults to
+        # 1073741824 (1 GiB); other modes default to 134217728 (128 MiB).
+        # memTableSize: 1073741824
     # metadata:
       # provider: "sqlite"
       # config:

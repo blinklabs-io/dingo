@@ -169,7 +169,11 @@ func (n *Node) ledgerStateConfig() ledger.LedgerStateConfig {
 			if o == nil {
 				return errOuroborosNotStarted
 			}
-			return o.ValidateLeiosEndorserBlockForHeader(ctx, header)
+			return o.ValidateLeiosEndorserBlockForHeader(
+				ctx,
+				header,
+				ledger.LeiosEndorserBlockBasisHash(header),
+			)
 		},
 		// Wait, at the tip, for a ranking block's referenced endorser block
 		// to arrive before applying it. Sourced from the pipeline timing

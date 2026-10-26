@@ -22,7 +22,7 @@ const (
 	DefaultIndexCacheSize          = 0
 	DefaultValueLogFileSize        = 1073741824
 	DefaultMemTableSize            = 134217728
-	DefaultCoreSyncMemTableSize    = 512 * 1024 * 1024
+	DefaultCoreSyncMemTableSize    = 1024 * 1024 * 1024
 	DefaultValueThreshold          = 1048576
 	DefaultCoreSyncValueThreshold  = 1024
 	DefaultCoreLeiosValueThreshold = 1024

@@ -987,6 +987,12 @@ Mainnet run: record the live Mainnet UTxO count, block count and blob-store byte
   .cloud-mirrored      # present only once MirrorToCloud's upload succeeds — see below
 ```
 
+The configured snapshot root is restricted to its trusted owner before startup
+probes or snapshot services use it. Each snapshot leaf and metadata staging
+directory is restricted before backup bytes are written; Unix uses `0700`
+directories and `0600` files, while Windows applies a protected owner-only DACL
+to each directory handle so its files inherit the same boundary.
+
 `Snapshot` creates `<snapshot-dir>` itself via a plain, non-recursive `os.Mkdir` (parents created separately via `os.MkdirAll`), not `os.MkdirAll` on the leaf directory — `MkdirAll` doesn't error when the directory already exists, so it can't tell "I just created this" apart from "another concurrent `Snapshot` call to the same path already exists," and a failure-cleanup path that then `os.RemoveAll`s the directory on any later error would delete the other, still-in-flight (or already-succeeded) call's backup files. Only the call whose `Mkdir` actually wins may safely remove the directory on failure; a losing call gets `fs.ErrExist` immediately and never touches the directory at all.
 
 `.cloud-mirrored` (`lifecycle.CloudMirrorMarkerPath`/`lifecycle.IsCloudMirrored`, written/checked by `lifecycle.MirrorToCloud`) exists only when a cloud destination is configured and the upload plus catalog update or repair have succeeded. Its content is a versioned cryptographic digest of the exact destination URI, so credentials and provider parameters are never persisted in the marker. Its presence lets a caller distinguish "this snapshot is fully mirrored and indexed" from "the local copy exists but the cloud operation never completed". `lifecycle.IsCloudMirroredTo(dir, cloudDest)` compares the marker digest with the current destination, so a marker left by an older configuration cannot suppress a required upload. S3 and GCS never upload or download the reserved marker name and remove any legacy remote marker after each successful upload. `internal/dblifecycle.Manager` retries just the cloud upload (via `MirrorToCloud` directly, not a full re-`Snapshot`) for any local snapshot directory `IsCloudMirroredTo` says isn't mirrored to the current destination — both for the specific epoch a redelivered transition event names, and via `Manager.retryUnmirroredSnapshots`, which scans all of `SnapshotDir` for stranded local-only snapshots from `Start` (on restart) and at the top of every subsequent epoch transition (so advancing past a failed epoch, not just redelivering its event, also heals it) — see ARCHITECTURE.md's "Automatic Snapshot Cloud-Mirror Idempotency".
@@ -2839,7 +2845,7 @@ records and both placements remain readable. Badger fixes the threshold when
 the store opens, so node-managed Mithril restores and stream catch-up, which run
 inside `serve` on the store `serve` opened, keep the serve default.
 
-Core sync mode uses a 512 MiB Badger memtable by default to improve bulk-import
+Core sync mode uses a 1 GiB Badger memtable by default to improve bulk-import
 throughput. Other storage modes and run modes retain the 128 MiB default. The
 blob provider's `memTableSize` setting overrides the selected default.
 
