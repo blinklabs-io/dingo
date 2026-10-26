@@ -73,7 +73,9 @@ func resolveKoiosAPIKey(
 
 func writeSecret(t *testing.T, value string) string {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "secret")
+	dir := t.TempDir()
+	require.NoError(t, os.Chmod(dir, 0o700))
+	path := filepath.Join(dir, "secret")
 	require.NoError(t, os.WriteFile(path, []byte(value+"\n"), 0o600))
 	return path
 }
