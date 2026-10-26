@@ -71,6 +71,7 @@ import (
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/muxer"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	okeepalive "github.com/blinklabs-io/gouroboros/protocol/keepalive"
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
 	"github.com/prometheus/client_golang/prometheus"
@@ -2209,6 +2210,16 @@ func (n *Node) buildChainSelectorConfig(
 				return ochainsync.Tip{}, false
 			}
 			return ls.Tip(), true
+		},
+		PointOnLocalChain: func(point ocommon.Point) bool {
+			ls := n.wallClockLedger.Load()
+			if ls == nil {
+				return false
+			}
+			return ls.VerifyPointOnChain(
+				context.Background(),
+				ledger.QueryPoint{Slot: point.Slot, Hash: point.Hash},
+			) == nil
 		},
 	}
 	// The running node publishes its started ledger before constructing the

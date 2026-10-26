@@ -62,6 +62,97 @@ func TestAwaitIngressCorroborationHoldsUntilWitnessDelivers(t *testing.T) {
 	require.True(t, result.eligible)
 }
 
+func TestDeliveredHistoryCorroboratesAfterAdmissionFrontierPruning(t *testing.T) {
+	t.Parallel()
+	cs := NewChainSelector(ChainSelectorConfig{
+		GenesisMode:           true,
+		SecurityParam:         20,
+		MinCorroboratingPeers: 1,
+	})
+	applicant := corrConn(3)
+	witness := corrConn(4)
+	feedFrontier(cs, applicant,
+		genesisTip(100, "h100", 100),
+		genesisTip(105, "h105", 105),
+		genesisTip(110, "h110", 110),
+	)
+
+	updates := []PeerTipUpdateEvent{
+		{
+			ConnectionId: witness,
+			AdmissionID:  1,
+			Tip:          genesisTip(100, "h100", 100),
+			ObservedTip:  genesisTip(100, "h100", 100),
+		},
+		{
+			ConnectionId: witness,
+			AdmissionID:  2,
+			Tip:          genesisTip(105, "h105", 105),
+			ObservedTip:  genesisTip(105, "h105", 105),
+		},
+	}
+	for _, update := range updates {
+		require.Equal(t, PeerTipUpdateAccepted,
+			cs.PreparePeerTipAdmissionDisposition(update))
+		cs.RecordDeliveredPeerTip(update)
+	}
+	cs.RejectPeerTipAdmission(updates[0])
+	require.Empty(t, cs.pendingPeerTips[witness])
+
+	require.True(t, cs.ShouldApplyIngress(applicant),
+		"pruning the admission frontier must not erase the witness's delivered history")
+}
+
+func TestGenesisIngressAllowsPointsAlreadyOnAppliedChain(t *testing.T) {
+	t.Parallel()
+	localTip := genesisTip(200, "local-tip", 200)
+	for _, tc := range []struct {
+		name         string
+		point        ochainsync.Tip
+		pointOnChain bool
+		want         bool
+	}{
+		{
+			name:         "point already applied",
+			point:        genesisTip(190, "local-point", 190),
+			pointOnChain: true,
+			want:         true,
+		},
+		{
+			name:         "same height on another chain",
+			point:        genesisTip(190, "fork-point", 190),
+			pointOnChain: false,
+			want:         false,
+		},
+		{
+			name:         "point above applied tip",
+			point:        genesisTip(210, "future-point", 210),
+			pointOnChain: true,
+			want:         false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cs := NewChainSelector(ChainSelectorConfig{
+				GenesisMode:           true,
+				SecurityParam:         20,
+				MinCorroboratingPeers: 1,
+				AppliedTip: func() (ochainsync.Tip, bool) {
+					return localTip, true
+				},
+				PointOnLocalChain: func(point ocommon.Point) bool {
+					return tc.pointOnChain &&
+						point.Slot == tc.point.Point.Slot &&
+						string(point.Hash) == string(tc.point.Point.Hash)
+				},
+			})
+			peer := corrConn(5)
+			feedFrontier(cs, peer, tc.point)
+			require.Equal(t, tc.want, cs.ShouldApplyIngress(peer))
+		})
+	}
+}
+
 // A denial that corroboration cannot lift is reported at once, so the caller
 // keeps withholding rather than holding a peer that can never be released.
 func TestAwaitIngressCorroborationReturnsAtOnceForOtherDenials(t *testing.T) {
