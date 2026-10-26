@@ -129,8 +129,8 @@ type loadedPoolCredentials struct {
 }
 
 // wipeCredentialBytes performs best-effort zeroization of independently owned
-// VRF secret snapshots. runtime.KeepAlive prevents the compiler from proving
-// the stores dead before the wipe completes.
+// secret credential bytes. runtime.KeepAlive prevents the compiler from
+// proving the stores dead before the wipe completes.
 //
 //go:noinline
 func wipeCredentialBytes(data []byte) {
@@ -201,10 +201,16 @@ func loadSecretKeyFromFile(path string) (*bursa.LoadedKey, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to read key file %q: %w", path, err)
 	}
+	return parseSecretKeyBytes(path, data)
+}
+
+func parseSecretKeyBytes(path string, data []byte) (*bursa.LoadedKey, error) {
+	defer wipeCredentialBytes(data)
 	key, err := bursa.LoadKeyFromBytes(data)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse key file %q: %w", path, err)
 	}
+	defer wipeCredentialBytes(key.RawCBOR)
 	key.File = filepath.Base(path)
 	return key, nil
 }
