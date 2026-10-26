@@ -946,15 +946,36 @@ func (n *Node) initBlockForger(
 	// ledger views used by header validation, while credentials remain owned by
 	// the existing block producer.
 	election, err := n.selectedConsensusProvider().NewLeaderScheduler(
-		func(scheduleIdentity string) (nodeconsensus.LeaderScheduler, error) {
-			election := leader.NewElection(
-				poolKeyHash,
-				creds.GetVRFSKey,
-				stakeProvider,
-				epochProvider,
-				n.eventBus,
-				n.config.logger,
-			)
+		func(
+			scheduleIdentity string,
+			kind nodeconsensus.LeaderScheduleKind,
+		) (nodeconsensus.LeaderScheduler, error) {
+			var election *leader.Election
+			switch kind {
+			case nodeconsensus.LeaderSchedulePraos:
+				election = leader.NewElection(
+					poolKeyHash,
+					creds.GetVRFSKey,
+					stakeProvider,
+					epochProvider,
+					n.eventBus,
+					n.config.logger,
+				)
+			case nodeconsensus.LeaderScheduleTachys:
+				election = leader.NewTachysElection(
+					poolKeyHash,
+					stakeProvider,
+					stakeProvider,
+					epochProvider,
+					n.eventBus,
+					n.config.logger,
+				)
+			default:
+				return nil, fmt.Errorf(
+					"unsupported leader schedule kind %d",
+					kind,
+				)
+			}
 			election.SetConsensusIdentity(scheduleIdentity)
 			election.SetPromRegistry(n.config.promRegistry)
 			if scheduleStore != nil {
@@ -1076,8 +1097,17 @@ func (n *Node) initBlockForger(
 			if o == nil {
 				return errOuroborosNotStarted
 			}
+			// Before adoption the forged block is not the tip, so its
+			// endorser block is checked on the parent state. A locally
+			// built announcing block carries no transactions and its
+			// endorser block excludes the certified one's, so that state is
+			// equivalent to the block's own.
 			return classifyLeiosAnnouncementValidationError(
-				o.ValidateLeiosEndorserBlockForHeader(ctx, header),
+				o.ValidateLeiosEndorserBlockForHeader(
+					ctx,
+					header,
+					ledger.LeiosValidationParentHash(header),
+				),
 			)
 		},
 		LeiosCertificateProvider:        leiosCerts,
@@ -1105,7 +1135,7 @@ func (n *Node) initBlockForger(
 
 	// Store election for cleanup during shutdown only after the forger is
 	// fully created and running.
-	n.leaderElection = election
+	n.setLeaderElection(election)
 	n.blockForger = forger
 	n.config.logger.Info(
 		"block forger started in production mode with leader election",
@@ -1365,6 +1395,20 @@ func (a *stakeDistributionAdapter) GetPoolAndTotalActiveStake(
 // a compile error rather than a silent consensus divergence.
 var _ leader.StakeDistributionProvider = (*stakeDistributionAdapter)(nil)
 
+// GetTachysDistribution exposes the ledger-owned immutable election snapshot
+// to the production scheduler.
+func (a *stakeDistributionAdapter) GetTachysDistribution(
+	ctx context.Context,
+	epoch uint64,
+) (*nodeconsensus.TachysDistribution, error) {
+	if a.ledgerState == nil {
+		return nil, errors.New("ledger state unavailable")
+	}
+	return a.ledgerState.TachysDistribution(ctx, epoch)
+}
+
+var _ leader.TachysDistributionProvider = (*stakeDistributionAdapter)(nil)
+
 // epochInfoAdapter adapts ledger.LedgerState to leader.EpochInfoProvider.
 type epochInfoAdapter struct {
 	ledgerState *ledger.LedgerState
@@ -1462,6 +1506,10 @@ func (a *epochInfoAdapter) ConsensusModeForEpoch(
 	epoch uint64,
 ) (consensus.ConsensusMode, error) {
 	return a.ledgerState.ConsensusModeForEpoch(epoch)
+}
+
+func (a *epochInfoAdapter) EraIDForEpoch(epoch uint64) (uint, error) {
+	return a.ledgerState.EraIDForEpoch(epoch)
 }
 
 // slotClockAdapter adapts ledger.LedgerState to forging.SlotClockProvider.
@@ -1690,4 +1738,18 @@ func (a *epochNonceAdapter) EpochNonce(
 	epoch uint64,
 ) []byte {
 	return a.ledgerState.EpochNonce(ctx, epoch)
+}
+
+// leaderSchedulerRef boxes an interface value so it can be published
+// atomically.
+type leaderSchedulerRef struct {
+	scheduler nodeconsensus.LeaderScheduler
+}
+
+// setLeaderElection publishes the scheduler both to the node lifecycle,
+// which owns n.leaderElection, and to the ledger rollback callback, which
+// runs on the ledger goroutine and must read it through leaderSchedulerRef.
+func (n *Node) setLeaderElection(s nodeconsensus.LeaderScheduler) {
+	n.leaderElection = s
+	n.leaderSchedulerRef.Store(&leaderSchedulerRef{scheduler: s})
 }

@@ -2172,33 +2172,28 @@ func TestBlockfetchRecordNoBlocks_ProgressResetsCounter(t *testing.T) {
 	)
 }
 
-// TestBlockfetchRecordNoBlocks_IndependentPoints verifies changing start
-// points resets the consecutive NoBlocks count on the same connection.
-func TestBlockfetchRecordNoBlocks_IndependentPoints(t *testing.T) {
+// TestBlockfetchRecordNoBlocks_RotatingPointsShareBudget verifies changing
+// start points cannot evade the failed-lookup limit for one connection.
+func TestBlockfetchRecordNoBlocks_RotatingPointsShareBudget(t *testing.T) {
 	t.Parallel()
 
-	// Only consecutive NoBlocks for the same start point should accumulate.
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	o := newOuroboros(OuroborosConfig{
 		Logger:   logger,
 		EventBus: event.NewEventBus(nil, logger),
 	})
 	connId := testConnId()
-	startA := ocommon.NewPoint(100, []byte{0x01})
-	startB := ocommon.NewPoint(200, []byte{0x02})
-
-	for range blockfetchMaxConsecutiveNoBlocks - 1 {
-		assert.False(t, o.blockfetchRecordNoBlocks(connId, startA))
+	for i := range blockfetchMaxConsecutiveNoBlocks - 1 {
+		start := ocommon.NewPoint(uint64(100+i), []byte{byte(i + 1)})
+		assert.False(t, o.blockfetchRecordNoBlocks(connId, start))
 	}
-	assert.False(
+	assert.True(
 		t,
-		o.blockfetchRecordNoBlocks(connId, startB),
-		"different start point should not inherit count",
-	)
-	assert.False(
-		t,
-		o.blockfetchRecordNoBlocks(connId, startA),
-		"interleaved start point should reset consecutive count",
+		o.blockfetchRecordNoBlocks(
+			connId,
+			ocommon.NewPoint(999, []byte{0xff}),
+		),
+		"rotating the point should still reach the connection limit",
 	)
 }
 

@@ -17,6 +17,8 @@ package dblifecycle_test
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"io"
 	"log/slog"
@@ -91,11 +93,29 @@ func testSnapshotTrustKeyFile(t *testing.T) string {
 
 func writeManagerTestManifest(t *testing.T, dir string) {
 	t.Helper()
+	blob := []byte("blob")
+	metadata := []byte("metadata")
+	require.NoError(t, os.WriteFile(
+		filepath.Join(dir, lifecycle.BlobBackupFileName), blob, 0o600,
+	))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(dir, lifecycle.MetadataBackupFileName), metadata, 0o600,
+	))
 	require.NoError(t, lifecycle.WriteManifest(
 		dir,
-		lifecycle.Manifest{},
+		lifecycle.Manifest{
+			BlobBytes:      int64(len(blob)),
+			MetadataBytes:  int64(len(metadata)),
+			BlobSHA256:     sha256Hex(blob),
+			MetadataSHA256: sha256Hex(metadata),
+		},
 		lifecycle.WithManifestKey(testSnapshotTrustKey),
 	))
+}
+
+func sha256Hex(data []byte) string {
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
 }
 
 func newManagerTestDB(t *testing.T) *database.Database {
@@ -1232,9 +1252,13 @@ func TestManagerRetriesCloudMirrorAfterTransientFailureOnRedeliveredEvent(
 	require.NoError(t, m.Start(context.Background()))
 	defer m.Stop()
 
-	require.Equal(t, startupProbeDir, testutil.RequireReceive(
-		t, uploaded, snapshotWait,
-		"startup cloud-mirror retry scan did not reach its probe",
+	// MirrorToCloud hands an UploadDir-only destination a staged copy named
+	// for the snapshot ID, so the probe is identified by its base name.
+	require.Equal(t, filepath.Base(startupProbeDir), filepath.Base(
+		testutil.RequireReceive(
+			t, uploaded, snapshotWait,
+			"startup cloud-mirror retry scan did not reach its probe",
+		),
 	))
 	// The channel receive above only proves the scan's UploadDir call for
 	// the probe was reached, not that MirrorToCloud has returned and
@@ -1388,9 +1412,13 @@ func TestManagerRetriesUnmirroredSnapshotOnLaterEpochWithoutRedelivery(
 	require.NoError(t, m.Start(context.Background()))
 	defer m.Stop()
 
-	require.Equal(t, startupProbeDir, testutil.RequireReceive(
-		t, uploaded, snapshotWait,
-		"startup cloud-mirror retry scan did not reach its probe",
+	// MirrorToCloud hands an UploadDir-only destination a staged copy named
+	// for the snapshot ID, so the probe is identified by its base name.
+	require.Equal(t, filepath.Base(startupProbeDir), filepath.Base(
+		testutil.RequireReceive(
+			t, uploaded, snapshotWait,
+			"startup cloud-mirror retry scan did not reach its probe",
+		),
 	))
 	// Wait for the marker to actually exist AND record this destination,
 	// not just the mid-upload channel receive above -- see the detailed

@@ -17,7 +17,6 @@ package utxorpc
 import (
 	"errors"
 	"fmt"
-	"net"
 	"sync"
 
 	"connectrpc.com/connect"
@@ -35,14 +34,16 @@ const (
 
 // streamLimiter admits long-lived streams (FollowTip, WatchTx, WatchMempool,
 // WaitForTx)
-// under a process-wide and a per-client cap. A client is the remote host, so
-// clients behind one proxy share a budget.
+// under a process-wide and a per-client cap. A client is the remote IPv4
+// address or IPv6 /64 prefix (see clientKey), so clients behind one proxy
+// share a budget.
 type streamLimiter struct {
 	mu           sync.Mutex
 	total        int
 	perClient    map[string]int
 	maxTotal     int
 	maxPerClient int
+	resource     string
 }
 
 func newStreamLimiter(maxTotal, maxPerClient int) *streamLimiter {
@@ -50,29 +51,44 @@ func newStreamLimiter(maxTotal, maxPerClient int) *streamLimiter {
 		perClient:    make(map[string]int),
 		maxTotal:     maxTotal,
 		maxPerClient: maxPerClient,
+		resource:     "stream",
+	}
+}
+
+func newRequestLimiter(
+	maxTotal, maxPerClient int,
+	resource string,
+) *streamLimiter {
+	return &streamLimiter{
+		perClient:    make(map[string]int),
+		maxTotal:     maxTotal,
+		maxPerClient: maxPerClient,
+		resource:     resource,
 	}
 }
 
 // acquire reserves a stream slot for the client at peerAddr and returns the
 // function that releases it. A refused stream gets a ResourceExhausted error.
 func (l *streamLimiter) acquire(peerAddr string) (func(), error) {
-	client := peerAddr
-	if host, _, err := net.SplitHostPort(peerAddr); err == nil {
-		client = host
-	}
+	client := clientKey(peerAddr)
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.total >= l.maxTotal {
 		return nil, connect.NewError(
 			connect.CodeResourceExhausted,
-			fmt.Errorf("server stream limit of %d reached", l.maxTotal),
+			fmt.Errorf(
+				"server %s limit of %d reached",
+				l.resource,
+				l.maxTotal,
+			),
 		)
 	}
 	if l.perClient[client] >= l.maxPerClient {
 		return nil, connect.NewError(
 			connect.CodeResourceExhausted,
 			fmt.Errorf(
-				"per-client stream limit of %d reached",
+				"per-client %s limit of %d reached",
+				l.resource,
 				l.maxPerClient,
 			),
 		)
@@ -122,6 +138,10 @@ func (q *mempoolStreamQueue) offer(resp *submit.WatchMempoolResponse) error {
 // function releases it when the stream ends.
 func (u *Utxorpc) admitStream(peer connect.Peer) (func(), error) {
 	return u.streams.acquire(peer.Addr)
+}
+
+func (u *Utxorpc) admitEvalRequest(peer connect.Peer) (func(), error) {
+	return u.evalRequests.acquire(peer.Addr)
 }
 
 func predicateBudgetError(limit int) error {

@@ -63,6 +63,7 @@ func (p ChainPoint) IsOrigin() bool {
 type ObservedHeader struct {
 	Slot        uint64 `json:"slot"`
 	BlockNumber uint64 `json:"block"`
+	Era         string `json:"era"`
 	Hash        []byte `json:"hash"`
 	PrevHash    []byte `json:"prevHash"`
 	// BodySize is the header's declared block body size. It is what

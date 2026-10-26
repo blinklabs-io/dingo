@@ -94,6 +94,40 @@ type Bark struct {
 	beforePreflight func()
 }
 
+type responseWriteDeadlineSetter func(time.Time) error
+
+type responseWriteDeadlineContextKey struct{}
+
+func withResponseWriteDeadlineSetter(
+	ctx context.Context,
+	setter responseWriteDeadlineSetter,
+) context.Context {
+	return context.WithValue(
+		ctx,
+		responseWriteDeadlineContextKey{},
+		setter,
+	)
+}
+
+func responseWriteDeadlineSetterFromContext(
+	ctx context.Context,
+) (responseWriteDeadlineSetter, bool) {
+	value := ctx.Value(responseWriteDeadlineContextKey{})
+	setter, ok := value.(responseWriteDeadlineSetter)
+	return setter, ok
+}
+
+func responseControllerContextMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		controller := http.NewResponseController(w)
+		ctx := withResponseWriteDeadlineSetter(
+			r.Context(),
+			controller.SetWriteDeadline,
+		)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
 // lifecycleMutex keeps preflight and publication atomic while allowing Stop
 // to abandon its wait when the caller's shutdown budget expires.
 type lifecycleMutex struct {
@@ -513,11 +547,13 @@ func (b *Bark) Start(ctx context.Context) error {
 		),
 	)
 
-	handler := peerCertContextMiddleware(httpcors.Handler(
-		mux,
-		httpcors.Config{
-			AllowedOrigins: b.config.CORSAllowedOrigins,
-		},
+	handler := peerCertContextMiddleware(responseControllerContextMiddleware(
+		httpcors.Handler(
+			mux,
+			httpcors.Config{
+				AllowedOrigins: b.config.CORSAllowedOrigins,
+			},
+		),
 	))
 	listenAddr := barkListenAddr(b.config.Host, b.config.Port)
 	var server *http.Server

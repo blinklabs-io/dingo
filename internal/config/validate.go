@@ -166,17 +166,9 @@ func FullPotRewardsStandardNetwork(
 // experimental Musashi network (the IOG Leios prototype) with a *different*
 // predefined network, returning the name of the network it collides with.
 //
-// This matters because Musashi is identified by either half of its identity —
-// the name "musashi" or network magic 164 — and that identity switches on
-// consensus/ledger trust bypasses (SkipLeaderStakeThresholdCheck,
-// SkipDijkstraTxValidation). Either half alone is enough to enable them, so a
-// half-matching configuration is dangerous in both directions:
-//
-//   - network "preview" with magic 164 runs the prototype's non-validating
-//     rules on a node the operator configured as preview; and
-//   - network "musashi" with magic 2 is worse still, because the handshake
-//     uses the magic: the node actually joins preview while trusting the
-//     prototype's rules.
+// The network name selects built-in configuration while network magic selects
+// peers during the handshake. A half-matching configuration therefore mixes
+// two network identities.
 //
 // A custom name or an unregistered magic is not a conflict — those are private
 // prototype deployments (e.g. a Musashi mirror). Devnet is excluded for the
@@ -206,13 +198,14 @@ func MusashiNetworkIdentityConflict(
 }
 
 // MusashiPrototypeNetwork reports whether network/networkMagic unambiguously
-// identifies the Musashi prototype network, and is therefore permitted to run
-// with the prototype's consensus/ledger trust bypasses.
+// identifies the Musashi prototype network: the name "musashi" or the magic
+// 164, with no conflicting standard network (see
+// MusashiNetworkIdentityConflict). It gates prototype-only protocol behavior
+// that a client of a standard network could not decode.
 //
-// A conflicting identity (see MusashiNetworkIdentityConflict) is deliberately
-// *not* the prototype network. Startup validation rejects those configurations
-// outright, but returning false here keeps the bypasses off even for an
-// embedder that builds a Config directly and never calls Validate.
+// A conflicting identity is deliberately not the prototype network. Startup
+// validation rejects those configurations outright, but returning false here
+// keeps the behavior off for an embedder that never calls Validate.
 func MusashiPrototypeNetwork(network string, networkMagic uint32) bool {
 	if _, conflict := MusashiNetworkIdentityConflict(
 		network,
@@ -855,11 +848,9 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		}
 	}
 
-	// The Musashi prototype network's identity switches on consensus/ledger
-	// trust bypasses, so it must never be half-claimed by a configuration
-	// that also names or addresses a standard network. Rejected outright
-	// rather than defused silently: the operator asked for two mutually
-	// exclusive networks and only one of them can be what they meant.
+	// The network name selects built-in configuration while network magic
+	// selects peers during the handshake. Reject a configuration that identifies
+	// both Musashi and another predefined network.
 	if network, ok := MusashiNetworkIdentityConflict(
 		c.Network,
 		c.NetworkMagic,
@@ -867,9 +858,7 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		errs = append(errs, fmt.Errorf(
 			"network identity conflict: network %q with networkMagic %d "+
 				"identifies both the %q network and the Musashi prototype "+
-				"network (name %q, magic %d); the Musashi prototype disables "+
-				"consensus and ledger validation and must not be reachable "+
-				"from a standard network configuration",
+				"network (name %q, magic %d)",
 			c.Network,
 			c.NetworkMagic,
 			network,
@@ -1145,7 +1134,7 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		// Both are scaled into int64 quantities: seconds to a Duration and
 		// megabytes to bytes.
 		const maxMessageTTL = uint64(math.MaxInt64) / uint64(time.Second)
-		const maxMempoolSize = math.MaxInt64 >> 20
+		const maxMempoolSize = uint64(math.MaxInt64 >> 20)
 		switch {
 		case c.DMQ.MessageTTL == 0:
 			errs = append(errs, errors.New(
@@ -1386,8 +1375,19 @@ func isWildcardAddr(addr string) bool {
 // container's non-root user doesn't own (see the Docker image's pinned
 // UID:GID note in dingo.yaml.example).
 func checkDirWritable(dir string) (err error) {
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("create directory: %w", err)
+	}
+	dirFile, err := os.Open(dir)
+	if err != nil {
+		return fmt.Errorf("open directory for permission check: %w", err)
+	}
+	if err := restrictSnapshotDirectory(dirFile); err != nil {
+		_ = dirFile.Close()
+		return fmt.Errorf("restrict directory permissions: %w", err)
+	}
+	if err := dirFile.Close(); err != nil {
+		return fmt.Errorf("close directory after permission check: %w", err)
 	}
 	probe, err := os.CreateTemp(dir, ".dingo-writable-check-*")
 	if err != nil {

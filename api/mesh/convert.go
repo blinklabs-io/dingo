@@ -450,7 +450,7 @@ func convertBodyToOps(
 	withdrawals map[*lcommon.Address]*big.Int,
 	txHash string,
 ) []*Operation {
-	var ops []*Operation
+	ops := make([]*Operation, 0, len(inputs)+len(outputs)+len(certs)+len(withdrawals))
 	var opIdx int64
 
 	// Inputs — no Account since we don't have UTxO

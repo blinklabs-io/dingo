@@ -30,9 +30,11 @@ import (
 )
 
 type peerForkPathPrefix struct {
-	ancestor   models.Block
-	headers    []gledger.BlockHeader
-	generation uint64
+	ancestor       models.Block
+	headers        []gledger.BlockHeader
+	generation     uint64
+	opCertLastHash []byte
+	opCertCounters map[lcommon.PoolKeyHash]opCertCounterSnapshot
 }
 
 type peerForkNoncePrefix struct {
@@ -67,11 +69,9 @@ func (ls *LedgerState) peerChainSelectionEpochNonce(
 		if len(ls.chain.Tip().Point.Hash) == 0 {
 			return nil, models.Epoch{}, false, nil
 		}
-		// A deferred header queued as a linear extension of the local chain
-		// stays out of the peer's observed history, so its child has no
-		// recorded ancestry. The child still extends the local chain and is
-		// verified against it, as its queued parent was; withholding it would
-		// drop it and strand every later header from the peer behind it.
+		// A deferred header remains in per-connection history with generation
+		// zero. Its child extends a local queued parent, so the local verifier
+		// checks it instead of withholding it as a competing candidate.
 		if ls.chain.HoldsQueuedHeaderHash(header.PrevHash().Bytes()) {
 			return nil, models.Epoch{}, false, nil
 		}
@@ -143,6 +143,15 @@ func (ls *LedgerState) peerChainSelectionEpochNonce(
 		)
 	}
 	if targetEpoch.EpochId == sourceEpoch.EpochId {
+		if err := ls.verifyPeerForkTargetEpochAncestors(
+			connId,
+			forkHeaders,
+			targetEpoch,
+			targetEpoch.Nonce,
+			snapshot,
+		); err != nil {
+			return nil, models.Epoch{}, false, err
+		}
 		return cloneNonce(targetEpoch.Nonce), targetEpoch, true, nil
 	}
 	if sourceEpoch.EraId == uint(byron.EraIdByron) {
@@ -166,6 +175,70 @@ func (ls *LedgerState) peerChainSelectionEpochNonce(
 	)
 }
 
+func (ls *LedgerState) verifyPeerForkTargetEpochAncestors(
+	connID ouroboros.ConnectionId,
+	headers []gledger.BlockHeader,
+	epoch models.Epoch,
+	epochNonce []byte,
+	snapshot *consensusSnapshot,
+) error {
+	if len(headers) < 2 {
+		return nil
+	}
+	epochEnd := epoch.StartSlot + uint64(epoch.LengthInSlots)
+	for _, header := range headers[:len(headers)-1] {
+		if header.SlotNumber() < epoch.StartSlot ||
+			header.SlotNumber() >= epochEnd || ls.headerApplied(header) {
+			continue
+		}
+		hash := header.Hash().Bytes()
+		event, _, ok := ls.config.PeerHeaderLookupFunc(connID, hash)
+		if !ok || event.BlockHeader == nil ||
+			!bytes.Equal(event.Point.Hash, hash) ||
+			!bytes.Equal(event.BlockHeader.Hash().Bytes(), hash) {
+			return fmt.Errorf(
+				"%w: candidate ancestor at slot %d is no longer available",
+				errHeaderVerificationDeferred,
+				header.SlotNumber(),
+			)
+		}
+		if headerVerdictInContext(
+			event.HeaderCryptoVerificationGeneration,
+			snapshot.contextGeneration,
+			snapshot.generation,
+		) {
+			continue
+		}
+		if event.HeaderCryptoVerificationGeneration != 0 {
+			return fmt.Errorf(
+				"%w: candidate ancestor at slot %d was verified in a stale context",
+				errHeaderVerificationDeferred,
+				header.SlotNumber(),
+			)
+		}
+		block := headerOnlyBlock{header: header, peerRelative: true}
+		if err := ls.verifyBlockHeaderStatelessCryptoWithEpochNonce(
+			block,
+			epoch,
+			epochNonce,
+		); err != nil {
+			return err
+		}
+		if err := chainSelectionHeaderStateError(
+			ls.verifySelectedBlockHeaderStateWithCache(
+				context.Background(),
+				block,
+				epoch.EpochId,
+				snapshot.epochCache,
+				epochNonce,
+			),
+		); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (ls *LedgerState) peerChainSelectionEpochNonceAcrossEpochs(
 	connId ouroboros.ConnectionId,
 	ancestor ocommon.Point,
@@ -184,18 +257,29 @@ func (ls *LedgerState) peerChainSelectionEpochNonceAcrossEpochs(
 		}
 	}
 	ls.retainPeerForkNoncePrefixes(connId, retainedEpochs)
-	ancestorBlock, err := ls.blockByHash(context.Background(), ancestor.Hash)
-	if err != nil {
-		return nil, models.Epoch{}, false, fmt.Errorf(
-			"%w: lookup candidate intersection block: %w",
-			errHeaderVerificationDeferred,
-			err,
-		)
+	originAncestor := ancestor.Slot == 0 && len(ancestor.Hash) == 0
+	ancestorBlock := models.Block{}
+	var err error
+	if !originAncestor {
+		ancestorBlock, err = ls.blockByHash(context.Background(), ancestor.Hash)
+		if err != nil {
+			return nil, models.Epoch{}, false, fmt.Errorf(
+				"%w: lookup candidate intersection block: %w",
+				errHeaderVerificationDeferred,
+				err,
+			)
+		}
 	}
 	currentEpoch := sourceEpoch
 	epochNonce := cloneNonce(sourceEpoch.Nonce)
 	labNonce := cloneNonce(sourceEpoch.LastEpochBlockNonce)
-	initialEvolvingNonce, err := ls.db.GetBlockNonce(ancestor, nil)
+	var initialEvolvingNonce, initialCandidateNonce []byte
+	if originAncestor {
+		_, initialEvolvingNonce, initialCandidateNonce, _, err = ls.computeEpochNonceForSlot(context.Background(), 0, models.Epoch{})
+	} else {
+		initialEvolvingNonce, err = ls.db.GetBlockNonce(ancestor, nil)
+		initialCandidateNonce = cloneNonce(initialEvolvingNonce)
+	}
 	if err != nil {
 		return nil, models.Epoch{}, false, fmt.Errorf(
 			"%w: %w: read candidate intersection nonce: %w",
@@ -204,7 +288,6 @@ func (ls *LedgerState) peerChainSelectionEpochNonceAcrossEpochs(
 			err,
 		)
 	}
-	initialCandidateNonce := cloneNonce(initialEvolvingNonce)
 	cutoff, ready := ls.nextEpochNonceReadyCutoffSlot(sourceEpoch)
 	if !ready {
 		return nil, models.Epoch{}, false, fmt.Errorf(
@@ -304,12 +387,12 @@ func (ls *LedgerState) peerChainSelectionEpochNonceAcrossEpochs(
 				return nil, models.Epoch{}, false, err
 			}
 			if err := chainSelectionHeaderStateError(
-				ls.verifyBlockHeaderStateWithCache(
+				ls.verifySelectedBlockHeaderStateWithCache(
 					context.Background(),
 					block,
 					currentEpoch.EpochId,
 					snapshot.epochCache,
-					true,
+					epochNonce,
 				),
 			); err != nil {
 				return nil, models.Epoch{}, false, err
@@ -380,6 +463,15 @@ func (ls *LedgerState) peerChainSelectionEpochNonceAcrossEpochs(
 			)
 		}
 		if nextEpoch.EpochId == targetEpoch.EpochId {
+			if err := ls.verifyPeerForkTargetEpochAncestors(
+				connId,
+				forkHeaders,
+				targetEpoch,
+				epochNonce,
+				snapshot,
+			); err != nil {
+				return nil, models.Epoch{}, false, err
+			}
 			return epochNonce, targetEpoch, true, nil
 		}
 		evolvingNonce = evolving
@@ -460,7 +552,7 @@ func (ls *LedgerState) peerForkEpochLabNonce(
 ) ([]byte, error) {
 	var lastParent []byte
 	var hasLast bool
-	if ancestor.Slot >= epoch.StartSlot &&
+	if len(ancestor.Hash) > 0 && ancestor.Slot >= epoch.StartSlot &&
 		ancestor.Slot < epoch.StartSlot+uint64(epoch.LengthInSlots) {
 		parent, err := blockPrevHash(ancestor)
 		if err != nil {
@@ -610,12 +702,12 @@ func (ls *LedgerState) verifyByronTransitionAncestry(
 			return err
 		}
 		if err := chainSelectionHeaderStateError(
-			ls.verifyBlockHeaderStateWithCache(
+			ls.verifySelectedBlockHeaderStateWithCache(
 				context.Background(),
 				block,
 				targetEpoch.EpochId,
 				epochCache,
-				true,
+				targetEpoch.Nonce,
 			),
 		); err != nil {
 			return err
@@ -625,6 +717,14 @@ func (ls *LedgerState) verifyByronTransitionAncestry(
 }
 
 func (ls *LedgerState) peerHeaderForkPath(
+	connId ouroboros.ConnectionId,
+	header gledger.BlockHeader,
+) (ocommon.Point, []gledger.BlockHeader, bool, error) {
+	return ls.peerHeaderForkPathContext(context.Background(), connId, header)
+}
+
+func (ls *LedgerState) peerHeaderForkPathContext(
+	ctx context.Context,
 	connId ouroboros.ConnectionId,
 	header gledger.BlockHeader,
 ) (ocommon.Point, []gledger.BlockHeader, bool, error) {
@@ -654,68 +754,125 @@ func (ls *LedgerState) peerHeaderForkPath(
 		contextGeneration,
 		verificationGeneration,
 	) &&
-		ls.chain.HoldsPoint(context.Background(), cachedAncestor) &&
-		len(cached.headers) > 0 &&
-		len(cached.headers) < ls.peerHeaderHistoryLimit() &&
-		bytes.Equal(
-			cached.headers[len(cached.headers)-1].Hash().Bytes(),
-			header.PrevHash().Bytes(),
-		) {
-		parent := headerOnlyBlock{
-			header:       cached.headers[len(cached.headers)-1],
-			peerRelative: true,
+		ls.peerForkAncestorOnChain(ctx, cachedAncestor) &&
+		len(cached.headers) > 0 {
+		lastHeader := cached.headers[len(cached.headers)-1]
+		if bytes.Equal(lastHeader.Hash().Bytes(), header.Hash().Bytes()) {
+			tipOnCachedPath := false
+			if tip := ls.loadTipSnapshot(); tip != nil {
+				point := tip.currentTip.Point
+				for _, cachedHeader := range cached.headers {
+					if cachedHeader.SlotNumber() == point.Slot &&
+						bytes.Equal(cachedHeader.Hash().Bytes(), point.Hash) {
+						tipOnCachedPath = true
+						break
+					}
+				}
+			}
+			if !tipOnCachedPath {
+				if contextChanged() {
+					return ocommon.Point{}, nil, false,
+						errHeaderVerificationDeferred
+				}
+				return cachedAncestor, slices.Clone(cached.headers), true, nil
+			}
 		}
-		if err := validateBlockOrder(headerOnlyBlock{header: header, peerRelative: true}, envelopeParentFromBlock(parent), byronEpochSlots(ls.config.CardanoNodeConfig)); err != nil {
-			return ocommon.Point{}, nil, false, err
-		}
-		// The cached path was stored while its last header was still being
-		// verified, so that header's own verdict is checked before a child
-		// extends the path.
-		parentPoint := ocommon.NewPoint(
-			parent.SlotNumber(),
-			parent.Hash().Bytes(),
-		)
-		event, _, ok := ls.config.PeerHeaderLookupFunc(
-			connId,
-			parentPoint.Hash,
-		)
-		if (!ok || !headerVerdictInContext(
-			event.HeaderCryptoVerificationGeneration,
-			contextGeneration,
-			verificationGeneration,
-		)) && !ls.chain.HoldsPoint(context.Background(), parentPoint) {
-			return ocommon.Point{}, nil, false, fmt.Errorf(
-				"%w: candidate parent at slot %d has no current crypto verdict",
-				errHeaderVerificationDeferred,
-				parentPoint.Slot,
+		if len(cached.headers) < ls.peerHeaderHistoryLimit() &&
+			bytes.Equal(
+				lastHeader.Hash().Bytes(),
+				header.PrevHash().Bytes(),
+			) {
+			parent := headerOnlyBlock{
+				header:       lastHeader,
+				peerRelative: true,
+			}
+			if err := validateBlockOrder(
+				headerOnlyBlock{header: header, peerRelative: true},
+				envelopeParentFromBlock(parent),
+				byronEpochSlots(ls.config.CardanoNodeConfig),
+			); err != nil {
+				return ocommon.Point{}, nil, false, err
+			}
+			parentPoint := ocommon.NewPoint(
+				parent.SlotNumber(),
+				parent.Hash().Bytes(),
 			)
+			event, _, ok := ls.config.PeerHeaderLookupFunc(
+				connId,
+				parentPoint.Hash,
+			)
+			parentVerdictCurrent := ok &&
+				headerVerdictInContext(
+					event.HeaderCryptoVerificationGeneration,
+					contextGeneration,
+					verificationGeneration,
+				)
+			if !parentVerdictCurrent {
+				if ls.chain.HoldsQueuedHeaderHash(parentPoint.Hash) {
+					return ocommon.Point{}, nil, false, nil
+				}
+				if (!ok || event.HeaderCryptoVerificationGeneration != 0) &&
+					!ls.chain.HoldsPoint(ctx, parentPoint) {
+					return ocommon.Point{}, nil, false, fmt.Errorf(
+						"%w: candidate parent at slot %d has no current crypto verdict",
+						errHeaderVerificationDeferred,
+						parentPoint.Slot,
+					)
+				}
+			}
+			path := append(slices.Clone(cached.headers), header)
+			if contextChanged() {
+				return ocommon.Point{}, nil, false,
+					errHeaderVerificationDeferred
+			}
+			ls.storePeerForkPathPrefix(
+				key,
+				cached.ancestor,
+				path,
+				verificationGeneration,
+			)
+			return cachedAncestor, path, true, nil
 		}
-		path := append(slices.Clone(cached.headers), header)
-		if contextChanged() {
-			return ocommon.Point{}, nil, false, errHeaderVerificationDeferred
-		}
-		ls.storePeerForkPathPrefix(
-			key,
-			cached.ancestor,
-			path,
-			verificationGeneration,
-		)
-		return ocommon.NewPoint(
-			cached.ancestor.Slot,
-			cached.ancestor.Hash,
-		), path, true, nil
 	}
 	pathReversed := []gledger.BlockHeader{header}
 	prevHash := append([]byte(nil), header.PrevHash().Bytes()...)
 	visited := map[string]struct{}{string(header.Hash().Bytes()): {}}
 	for remaining := ls.peerHeaderHistoryLimit(); ; remaining-- {
-		if len(prevHash) == 0 {
-			return ocommon.Point{}, nil, false, nil
+		var nullPrevHash lcommon.Blake2b256
+		// Shelley header decoders represent CBOR null prev_hash as a zero hash.
+		isOrigin := len(prevHash) == 0 || bytes.Equal(prevHash, nullPrevHash[:])
+		if !isOrigin {
+			genesisHash, err := GenesisBlockHash(ls.config.CardanoNodeConfig)
+			isOrigin = err == nil && bytes.Equal(prevHash, genesisHash[:])
 		}
-		block, err := ls.blockByHash(context.Background(), prevHash)
+		if isOrigin {
+			origin := ocommon.Point{}
+			if !ls.peerForkAncestorOnChain(ctx, origin) {
+				return ocommon.Point{}, nil, false, nil
+			}
+			slices.Reverse(pathReversed)
+			if contextChanged() {
+				return ocommon.Point{}, nil, false,
+					errHeaderVerificationDeferred
+			}
+			if err := ls.validatePeerHeaderPath(
+				models.Block{},
+				pathReversed,
+			); err != nil {
+				return ocommon.Point{}, nil, false, err
+			}
+			ls.storePeerForkPathPrefix(
+				key,
+				models.Block{},
+				pathReversed,
+				verificationGeneration,
+			)
+			return origin, pathReversed, true, nil
+		}
+		block, err := ls.blockByHash(ctx, prevHash)
 		if err == nil {
 			point := ocommon.NewPoint(block.Slot, block.Hash)
-			if ls.chain.HoldsPoint(context.Background(), point) {
+			if ls.chain.HoldsPoint(ctx, point) {
 				slices.Reverse(pathReversed)
 				if contextChanged() {
 					return ocommon.Point{}, nil, false,
@@ -764,21 +921,42 @@ func (ls *LedgerState) peerHeaderForkPath(
 			) {
 			return ocommon.Point{}, nil, false, nil
 		}
+		// Do not use an unverified queued header as fork ancestry; its child
+		// must go through local admission or wait for a current verdict.
 		if !headerVerdictInContext(
 			event.HeaderCryptoVerificationGeneration,
 			contextGeneration,
 			verificationGeneration,
-		) &&
-			!ls.chain.HoldsPoint(context.Background(), event.Point) {
-			return ocommon.Point{}, nil, false, fmt.Errorf(
-				"%w: candidate ancestor at slot %d has no current crypto verdict",
-				errHeaderVerificationDeferred,
-				event.Point.Slot,
-			)
+		) {
+			if ls.chain.HoldsQueuedHeaderHash(prevHash) {
+				return ocommon.Point{}, nil, false, nil
+			}
+			if event.HeaderCryptoVerificationGeneration != 0 &&
+				!ls.chain.HoldsPoint(ctx, event.Point) {
+				return ocommon.Point{}, nil, false, fmt.Errorf(
+					"%w: candidate ancestor at slot %d has no current crypto verdict",
+					errHeaderVerificationDeferred,
+					event.Point.Slot,
+				)
+			}
 		}
 		pathReversed = append(pathReversed, event.BlockHeader)
 		prevHash = append(prevHash[:0], nextPrevHash...)
 	}
+}
+
+func (ls *LedgerState) peerForkAncestorOnChain(
+	ctx context.Context,
+	point ocommon.Point,
+) bool {
+	if ls.chain == nil {
+		return false
+	}
+	if point.Slot == 0 && len(point.Hash) == 0 {
+		_, _, ancestor, err := ls.chain.TipRelationContext(ctx, point)
+		return err == nil && ancestor
+	}
+	return ls.chain.HoldsPoint(ctx, point)
 }
 
 func (ls *LedgerState) storePeerForkPathPrefix(
@@ -792,10 +970,43 @@ func (ls *LedgerState) storePeerForkPathPrefix(
 	if ls.forkHeaderPathCache == nil {
 		ls.forkHeaderPathCache = make(map[string]peerForkPathPrefix)
 	}
+	var opCertLastHash []byte
+	var opCertCounters map[lcommon.PoolKeyHash]opCertCounterSnapshot
+	if cached, ok := ls.forkHeaderPathCache[key]; ok &&
+		cached.generation == generation &&
+		cached.ancestor.Slot == ancestor.Slot &&
+		bytes.Equal(cached.ancestor.Hash, ancestor.Hash) &&
+		len(cached.opCertLastHash) > 0 {
+		cachedIndex := -1
+		for index, header := range cached.headers {
+			if bytes.Equal(header.Hash().Bytes(), cached.opCertLastHash) {
+				cachedIndex = index
+				break
+			}
+		}
+		if cachedIndex >= 0 && len(headers) > cachedIndex {
+			prefixMatches := true
+			for index := 0; index <= cachedIndex; index++ {
+				if !bytes.Equal(
+					cached.headers[index].Hash().Bytes(),
+					headers[index].Hash().Bytes(),
+				) {
+					prefixMatches = false
+					break
+				}
+			}
+			if prefixMatches {
+				opCertLastHash = slices.Clone(cached.opCertLastHash)
+				opCertCounters = cached.opCertCounters
+			}
+		}
+	}
 	ls.forkHeaderPathCache[key] = peerForkPathPrefix{
-		ancestor:   ancestor,
-		headers:    headers,
-		generation: generation,
+		ancestor:       ancestor,
+		headers:        slices.Clone(headers),
+		generation:     generation,
+		opCertLastHash: opCertLastHash,
+		opCertCounters: opCertCounters,
 	}
 }
 

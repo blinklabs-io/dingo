@@ -101,9 +101,11 @@ func (p *PeerGovernor) addLedgerRelaysContext(
 	added := 0
 	ordered := weightedSample(relays, len(relays))
 	addresses := make([][]string, len(ordered))
+	origins := make([][]string, len(ordered))
 	maxAddresses := 0
 	for i, relay := range ordered {
 		addresses[i] = relay.Addresses()
+		origins[i] = append([]string(nil), addresses[i]...)
 		maxAddresses = max(maxAddresses, len(addresses[i]))
 	}
 	seen := make(map[string]struct{})
@@ -125,9 +127,42 @@ func (p *PeerGovernor) addLedgerRelaysContext(
 			if p.ledgerPeerDeficit() <= 0 && added >= extraAdds {
 				return added
 			}
-			if p.addLedgerPeerContext(
+			origin := origins[i][round]
+			host, _, err := net.SplitHostPort(addr)
+			if err == nil && net.ParseIP(host) != nil && addr == origin {
+				if p.addLedgerPeerContext(ctx, addr, relay.Stake, relay.StakeKnown) {
+					added++
+				}
+				continue
+			}
+			if err == nil && net.ParseIP(host) == nil {
+				p.mu.Lock()
+				denied := p.isDeniedLocked(p.normalizeAddress(origin))
+				p.mu.Unlock()
+				if denied {
+					continue
+				}
+				resolved := p.resolveLedgerDiscoveryAddresses(ctx, addr)
+				addr = resolved[0]
+				addresses[i][round] = addr
+				for _, alternate := range resolved[1:] {
+					addresses[i] = append(addresses[i], alternate)
+					origins[i] = append(origins[i], origin)
+				}
+				maxAddresses = max(maxAddresses, len(addresses[i]))
+				resolvedKey := p.normalizeAddress(addr)
+				if resolvedKey != normalized {
+					if _, duplicate := seen[resolvedKey]; duplicate {
+						continue
+					}
+					seen[resolvedKey] = struct{}{}
+				}
+			}
+			if p.addResolvedLedgerPeerContext(
 				ctx,
 				addr,
+				p.normalizeAddress(addr),
+				origin,
 				relay.Stake,
 				relay.StakeKnown,
 			) {

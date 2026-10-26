@@ -687,6 +687,24 @@ func RebuildCloudSnapshotCatalogContext(
 	)
 }
 
+func readSnapshotCatalogGenerationLocked(
+	ctx context.Context,
+	baseDir string,
+) (uint64, error) {
+	catalogPath := snapshotCatalogPath(baseDir)
+	if _, err := os.Stat(catalogPath); errors.Is(err, os.ErrNotExist) {
+		return 0, nil
+	} else if err != nil {
+		return 0, err
+	}
+	db, err := openSnapshotCatalog(ctx, catalogPath, false)
+	if err != nil {
+		return 0, err
+	}
+	defer db.Close() //nolint:errcheck
+	return readCatalogGeneration(ctx, db)
+}
+
 func rebuildCloudSnapshotCatalogLocked(
 	ctx context.Context,
 	baseDir string,

@@ -41,6 +41,7 @@ func TestCheckedInSpecsAreValid(t *testing.T) {
 	}{
 		{"testnet.yaml", 2},
 		{"testnet-dingo.yaml", 3},
+		{"testnet-dingo-tachys.yaml", 3},
 		{"testnet-accelerated.yaml", 2},
 		{"testnet-dingo-accelerated.yaml", 3},
 		{"testnet-dingo-leios.yaml", 3},
@@ -55,11 +56,11 @@ func TestCheckedInSpecsAreValid(t *testing.T) {
 	}
 }
 
-func TestLeiosSpecActivatesDijkstraAtGenesis(t *testing.T) {
+func TestLeiosSpecSchedulesDijkstraAfterConwayEpoch(t *testing.T) {
 	cfg, err := LoadDevNetConfigFrom("testnet-dingo-leios.yaml")
 	require.NoError(t, err)
 	require.NotNil(t, cfg.DijkstraHardForkAtEpoch)
-	require.Zero(t, *cfg.DijkstraHardForkAtEpoch)
+	require.Equal(t, uint64(1), *cfg.DijkstraHardForkAtEpoch)
 	require.Equal(t, uint64(300), cfg.EpochLength)
 	require.Equal(t, 500*time.Millisecond, cfg.SlotDuration())
 	require.Equal(t, uint64(3), cfg.SecurityParam)

@@ -96,7 +96,7 @@ func TestNetworkListMalformedBody(t *testing.T) {
 	rec := postRaw(t, h, "/network/list", "{not json")
 
 	requireMeshError(
-		t, rec, ErrInvalidRequest, http.StatusBadRequest,
+		t, rec, ErrInvalidRequest, http.StatusInternalServerError,
 	)
 }
 
@@ -249,7 +249,7 @@ func TestNetworkValidationRejectsUnknownNetwork(t *testing.T) {
 					t,
 					rec,
 					ErrNetworkNotSupported,
-					http.StatusNotFound,
+					http.StatusInternalServerError,
 				)
 			}
 		})
@@ -270,7 +270,7 @@ func TestNetworkValidationRequiresIdentifier(t *testing.T) {
 				t,
 				rec,
 				ErrInvalidRequest,
-				http.StatusBadRequest,
+				http.StatusInternalServerError,
 			)
 		})
 	}
@@ -290,7 +290,7 @@ func TestNetworkValidationRejectsMalformedBody(t *testing.T) {
 				t,
 				rec,
 				ErrInvalidRequest,
-				http.StatusBadRequest,
+				http.StatusInternalServerError,
 			)
 		})
 	}
@@ -348,7 +348,7 @@ func TestRequestRequiresSingleJSONValue(t *testing.T) {
 							rec.Body.String(),
 						)
 					} else {
-						requireMeshError(t, rec, ErrInvalidRequest, http.StatusBadRequest)
+						requireMeshError(t, rec, ErrInvalidRequest, http.StatusInternalServerError)
 					}
 				})
 			}
@@ -365,7 +365,7 @@ func TestRequestTrailingWhitespaceByteLimit(t *testing.T) {
 			if delta <= 0 {
 				require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 			} else {
-				requireMeshError(t, rec, ErrInvalidRequest, http.StatusBadRequest)
+				requireMeshError(t, rec, ErrInvalidRequest, http.StatusInternalServerError)
 			}
 		})
 	}

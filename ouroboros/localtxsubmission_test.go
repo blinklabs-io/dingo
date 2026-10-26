@@ -869,3 +869,19 @@ func TestLocalTxSubmissionProtocol_UnregisteredConnCloseCancels(
 		t.Fatal("validation context not cancelled when the bearer closed")
 	}
 }
+
+// TestLocalTxSubmissionInputResolutionFailureStaysGeneric: the mempool's
+// input-address lookup failing is a node fault, not a ledger rejection.
+func TestLocalTxSubmissionInputResolutionFailureStaysGeneric(t *testing.T) {
+	t.Parallel()
+	err := fmt.Errorf(
+		"resolve confirmed input addresses: %w: %w",
+		mempool.ErrInputResolution,
+		errors.New("database is locked"),
+	)
+	require.True(t, isLocalTxSubmissionInfrastructureError(err))
+	rejectErr := localTxSubmissionRejectReason(gledger.EraIdConway, err)
+	require.EqualError(t, rejectErr, "local transaction submission unavailable")
+	var reason cborRejectReason
+	require.NotErrorAs(t, rejectErr, &reason)
+}

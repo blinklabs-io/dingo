@@ -96,6 +96,7 @@ func (f *fakeLeiosAnnouncementLedger) ValidateLeiosAnnouncementHeader(
 func (f *fakeLeiosAnnouncementLedger) ValidateLeiosEndorserBlockTransactions(
 	ctx context.Context,
 	header gledger.BlockHeader,
+	_ []byte,
 	_ [][]byte,
 ) error {
 	f.txValidated++
@@ -2293,7 +2294,11 @@ func TestValidateLeiosEndorserBlockForHeaderWaitsForRemoteBody(t *testing.T) {
 
 	result := make(chan error, 1)
 	go func() {
-		result <- o.ValidateLeiosEndorserBlockForHeader(t.Context(), header)
+		result <- o.ValidateLeiosEndorserBlockForHeader(
+			t.Context(),
+			header,
+			ledger.LeiosEndorserBlockBasisHash(header),
+		)
 	}()
 	testutil.WaitForCondition(t, func() bool {
 		o.leiosMu.RLock()
@@ -2372,7 +2377,14 @@ func TestValidateLeiosEndorserBlockForHeaderKeepsCallerValidationBudget(
 		leiosStorePeerOffered,
 	))
 
-	require.NoError(t, o.ValidateLeiosEndorserBlockForHeader(t.Context(), header))
+	require.NoError(
+		t,
+		o.ValidateLeiosEndorserBlockForHeader(
+			t.Context(),
+			header,
+			ledger.LeiosEndorserBlockBasisHash(header),
+		),
+	)
 	require.Equal(t, 1, validationLedger.txValidated)
 }
 
@@ -2431,11 +2443,22 @@ func TestValidateLeiosEndorserBlockForHeaderAcceptsForgedGenesisParent(
 	})
 	require.ErrorIs(
 		t,
-		o.ValidateLeiosEndorserBlockForHeader(t.Context(), header),
+		o.ValidateLeiosEndorserBlockForHeader(
+			t.Context(),
+			header,
+			ledger.LeiosValidationParentHash(header),
+		),
 		ledger.ErrLeiosValidationParentUnavailable,
 	)
 	setTestLedgerTip(t, o, ochainsync.Tip{})
-	require.NoError(t, o.ValidateLeiosEndorserBlockForHeader(t.Context(), header))
+	require.NoError(
+		t,
+		o.ValidateLeiosEndorserBlockForHeader(
+			t.Context(),
+			header,
+			ledger.LeiosValidationParentHash(header),
+		),
+	)
 	require.Equal(t, 1, validationLedger.txValidated)
 }
 
@@ -2472,7 +2495,11 @@ func TestValidateLeiosEndorserBlockForHeaderRejectsNonOriginParentMismatch(
 
 	require.ErrorIs(
 		t,
-		o.ValidateLeiosEndorserBlockForHeader(t.Context(), header),
+		o.ValidateLeiosEndorserBlockForHeader(
+			t.Context(),
+			header,
+			ledger.LeiosEndorserBlockBasisHash(header),
+		),
 		ledger.ErrLeiosValidationParentUnavailable,
 	)
 }
@@ -2511,7 +2538,11 @@ func TestValidateLeiosEndorserBlockForHeaderBindsBodyArrivingAfterWait(
 
 	result := make(chan error, 1)
 	go func() {
-		result <- o.ValidateLeiosEndorserBlockForHeader(t.Context(), header)
+		result <- o.ValidateLeiosEndorserBlockForHeader(
+			t.Context(),
+			header,
+			ledger.LeiosEndorserBlockBasisHash(header),
+		)
 	}()
 	key := leiosBlockKey(point.Slot, point.Hash)
 	testutil.WaitForCondition(t, func() bool {
@@ -2629,7 +2660,11 @@ func TestValidateLeiosEndorserBlockForHeaderMissingBodyFailsClosed(t *testing.T)
 		leiosStorePeerOffered,
 	))
 
-	err = o.ValidateLeiosEndorserBlockForHeader(t.Context(), header)
+	err = o.ValidateLeiosEndorserBlockForHeader(
+		t.Context(),
+		header,
+		ledger.LeiosEndorserBlockBasisHash(header),
+	)
 	require.ErrorIs(t, err, context.DeadlineExceeded)
 	require.Empty(t, votes.ebs)
 	o.leiosMu.RLock()
@@ -2679,7 +2714,11 @@ func TestValidateLeiosEndorserBlockForHeaderZeroBudgetFailsImmediately(
 
 	result := make(chan error, 1)
 	go func() {
-		result <- o.ValidateLeiosEndorserBlockForHeader(t.Context(), header)
+		result <- o.ValidateLeiosEndorserBlockForHeader(
+			t.Context(),
+			header,
+			ledger.LeiosEndorserBlockBasisHash(header),
+		)
 	}()
 	err = testutil.RequireReceive(
 		t,
@@ -2925,7 +2964,11 @@ func TestValidateLeiosEndorserBlockForHeaderRetriesStorageFault(t *testing.T) {
 
 	require.ErrorIs(
 		t,
-		o.ValidateLeiosEndorserBlockForHeader(t.Context(), header),
+		o.ValidateLeiosEndorserBlockForHeader(
+			t.Context(),
+			header,
+			ledger.LeiosEndorserBlockBasisHash(header),
+		),
 		ledger.ErrLedgerViewStorageFault,
 	)
 	o.leiosMu.RLock()
@@ -2935,7 +2978,14 @@ func TestValidateLeiosEndorserBlockForHeaderRetriesStorageFault(t *testing.T) {
 		o.leiosEndorserBlocks[key].semanticValidationStatus,
 	)
 	o.leiosMu.RUnlock()
-	require.NoError(t, o.ValidateLeiosEndorserBlockForHeader(t.Context(), header))
+	require.NoError(
+		t,
+		o.ValidateLeiosEndorserBlockForHeader(
+			t.Context(),
+			header,
+			ledger.LeiosEndorserBlockBasisHash(header),
+		),
+	)
 	require.Equal(t, 2, validationLedger.txValidated)
 	require.Len(t, votes.ebs, 1)
 	require.Equal(t, 1, pipeline.observed)
@@ -2981,12 +3031,20 @@ func TestValidateLeiosEndorserBlockForHeaderPreservesCachedInvalidVerdict(
 
 	require.ErrorIs(
 		t,
-		o.ValidateLeiosEndorserBlockForHeader(t.Context(), header),
+		o.ValidateLeiosEndorserBlockForHeader(
+			t.Context(),
+			header,
+			ledger.LeiosEndorserBlockBasisHash(header),
+		),
 		ledger.ErrInvalidLeiosEndorserBlockTransactions,
 	)
 	require.ErrorIs(
 		t,
-		o.ValidateLeiosEndorserBlockForHeader(t.Context(), header),
+		o.ValidateLeiosEndorserBlockForHeader(
+			t.Context(),
+			header,
+			ledger.LeiosEndorserBlockBasisHash(header),
+		),
 		ledger.ErrInvalidLeiosEndorserBlockTransactions,
 	)
 	require.Equal(t, 1, validationLedger.txValidated)
@@ -3055,7 +3113,14 @@ func TestValidateLeiosEndorserBlockForHeaderRevalidatesDistinctParent(
 		leiosStoreAuthoritative,
 	))
 
-	require.NoError(t, o.ValidateLeiosEndorserBlockForHeader(t.Context(), headerA))
+	require.NoError(
+		t,
+		o.ValidateLeiosEndorserBlockForHeader(
+			t.Context(),
+			headerA,
+			ledger.LeiosEndorserBlockBasisHash(headerA),
+		),
+	)
 	key := leiosBlockKey(point.Slot, point.Hash)
 	otherParentDone := make(chan struct{})
 	o.leiosMu.Lock()
@@ -3074,7 +3139,11 @@ func TestValidateLeiosEndorserBlockForHeaderRevalidatesDistinctParent(
 
 	result := make(chan error, 1)
 	go func() {
-		result <- o.ValidateLeiosEndorserBlockForHeader(t.Context(), headerB)
+		result <- o.ValidateLeiosEndorserBlockForHeader(
+			t.Context(),
+			headerB,
+			ledger.LeiosEndorserBlockBasisHash(headerB),
+		)
 	}()
 	require.ErrorIs(
 		t,
@@ -3102,7 +3171,10 @@ func TestValidateLeiosEndorserBlockForHeaderRevalidatesDistinctParent(
 	require.Len(t, votes.ebs, 1)
 }
 
-func TestScheduleLeiosEndorserBlockValidationUsesCurrentHeaderParent(
+// The background validator pins the verdict to the announcing header it
+// read, the current one rather than a stale copy, and to that header's own
+// point, the state its endorser block validates against.
+func TestScheduleLeiosEndorserBlockValidationUsesCurrentHeaderBasis(
 	t *testing.T,
 ) {
 	t.Parallel()
@@ -3176,15 +3248,19 @@ func TestScheduleLeiosEndorserBlockValidationUsesCurrentHeaderParent(
 		"semantic validation start",
 	)
 	o.leiosMu.RLock()
-	gotParent := append(
+	gotBasis := append(
 		[]byte(nil),
 		o.leiosEndorserBlocks[key].semanticValidationParent...,
 	)
 	o.leiosMu.RUnlock()
+	currentHeader, err := gdijkstra.NewDijkstraBlockHeaderFromCbor(
+		currentHeaderRaw,
+	)
+	require.NoError(t, err)
 	require.Equal(
 		t,
-		currentParent.Bytes(),
-		gotParent,
+		ledger.LeiosEndorserBlockBasisHash(currentHeader),
+		gotBasis,
 	)
 	release()
 	o.leiosValidationWG.Wait()

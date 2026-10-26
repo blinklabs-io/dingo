@@ -26,8 +26,8 @@ RUN python3 -m pip install --break-system-packages uv
 RUN install --directory --owner=root --group=root --mode=0755 /usr/local/src/cardano-node
 
 WORKDIR /usr/local/src
-# Pin to v0.1.0 (abab0b3ce616928cae4ea5c36a41654ec068e2e4)
-RUN git clone --branch v0.1.0 --depth 1 https://github.com/cardano-foundation/testnet-generation-tool.git
+# Pin to v0.2.0 (3b4f562fae3b5147a1ba8eff83623074494833a4)
+RUN git clone --branch v0.2.0 --depth 1 https://github.com/cardano-foundation/testnet-generation-tool.git
 
 WORKDIR /usr/local/src/testnet-generation-tool
 RUN uv sync && mkdir -p cardano-node && ln -sf /usr/local/bin ./cardano-node/bin

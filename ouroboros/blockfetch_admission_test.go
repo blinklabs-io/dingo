@@ -178,6 +178,47 @@ func TestBlockfetchServerRequestRange_SaturationRejectedBeforeIterator(
 	}
 }
 
+// A full point-lookup ceiling must answer NoBlocks before the ledger is
+// touched, release the range reservation, and not charge the stuck-peer valve.
+func TestBlockfetchServerRequestRange_LookupSaturationRejectedBeforeIterator(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	o := newOuroboros(OuroborosConfig{
+		Logger:   logger,
+		EventBus: event.NewEventBus(nil, logger),
+	})
+	o.ledgerState = nil
+	for range cap(o.blockfetchLookupSlots) {
+		o.blockfetchLookupSlots <- struct{}{}
+	}
+	opts, peer := newMuxerServerPeer(t)
+	cfg, err := blockfetch.NewConfig(o.blockfetchServerConnOpts()...)
+	require.NoError(t, err)
+	server := blockfetch.NewServer(opts, &cfg)
+	peer.start(t, server)
+
+	start := ocommon.NewPoint(10, make([]byte, 32))
+	end := ocommon.NewPoint(20, make([]byte, 32))
+	peer.send(t, blockfetch.ProtocolId,
+		blockfetch.NewMsgRequestRange(start, end))
+	protocolID, msg := peer.readMessage(t, testutil.AsyncWait)
+	require.Equal(t, blockfetch.ProtocolId, protocolID)
+	assert.Equal(t, byte(blockfetch.MessageTypeNoBlocks), msg[1])
+
+	o.blockFetchMutex.Lock()
+	_, recorded := o.blockfetchNoBlocksCounts[opts.ConnectionId]
+	o.blockFetchMutex.Unlock()
+	assert.False(t, recorded,
+		"lookup saturation counted as a stuck peer")
+	testutil.WaitForCondition(t, func() bool {
+		total, conn := o.blockfetchRangeAdmission.counts(opts.ConnectionId)
+		return total == 0 && conn == 0
+	}, testutil.AsyncWait, "reservation held after lookup saturation")
+}
+
 func TestBlockfetchServerRequestRange_ReservationLifecycle(t *testing.T) {
 	t.Parallel()
 

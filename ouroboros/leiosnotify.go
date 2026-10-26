@@ -56,6 +56,7 @@ type LeiosAnnouncementLedger interface {
 	ValidateLeiosEndorserBlockTransactions(
 		context.Context,
 		gledger.BlockHeader,
+		[]byte,
 		[][]byte,
 	) error
 }
@@ -383,7 +384,11 @@ func (l *leiosForgedEBLog) nextWhileConnected(
 	if reserved, ok := l.reservations[connKey]; ok {
 		if item, found := l.itemAtOrAfterLocked(reserved.index); found &&
 			item.index == reserved.index {
-			return &item.entry, l.wakeCh
+			// The peer sends its next RequestNext as soon as it has read a
+			// response, which can be before the server reports that send.
+			// Wait for complete to commit or release the reservation, or
+			// this request would offer the same entry again.
+			return nil, l.wakeCh
 		}
 		delete(l.reservations, connKey)
 	}
@@ -428,6 +433,7 @@ func (l *leiosForgedEBLog) complete(
 		return
 	}
 	delete(l.reservations, connKey)
+	defer l.wakeLocked()
 	if delivered {
 		if l.cursors[connKey] == reserved.index {
 			l.cursors[connKey] = reserved.index + 1
@@ -450,6 +456,14 @@ func (l *leiosForgedEBLog) complete(
 		l.retryCursors[connKey] = reserved.index
 	}
 	l.pruneLocked()
+}
+
+// wakeLocked releases every request parked on the current wake channel so it
+// re-checks the log. Callers must hold l.mu.
+func (l *leiosForgedEBLog) wakeLocked() {
+	wake := l.wakeCh
+	l.wakeCh = make(chan struct{})
+	close(wake)
 }
 
 // skipExcludedLocked advances connKey across consecutive entries that it
@@ -2529,6 +2543,16 @@ func (o *Ouroboros) subscribeLeiosAnnouncementRetries() {
 	}
 	o.subscribeTracked(chain.ChainUpdateEventType, retry)
 	o.subscribeTracked(event.EpochTransitionEventType, retry)
+	// An endorser block validates once its announcing block is the applied
+	// ledger tip, which the chain update above can precede. The ledger
+	// publishes this event with PublishBlocking, so the handler only
+	// schedules work.
+	o.subscribeTracked(ledger.BlockEventType, func(evt event.Event) {
+		if blockEvt, ok := evt.Data.(ledger.BlockEvent); ok &&
+			blockEvt.Action == ledger.BlockActionApply {
+			o.retryLeiosEndorserBlockValidations()
+		}
+	})
 }
 
 // pruneLeiosAnnouncements bounds announcement deduplication state to the

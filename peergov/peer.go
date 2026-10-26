@@ -178,11 +178,10 @@ type Peer struct {
 	// LastInboundSessionDuration is the duration of the most recently
 	// closed inbound session.
 	LastInboundSessionDuration time.Duration
-	// InboundTopologyMatch records the GroupID of the configured
-	// topology peer that an inbound arrival was identified as, via the
-	// safe host-match rule in resolveInboundIdentity. Empty when no
-	// topology match was made. Set once on arrival and not cleared on
-	// subsequent reconnects.
+	// InboundTopologyMatch records the GroupID of the configured topology
+	// peer whose exact transport identity matched an inbound arrival. Empty
+	// when no topology match was made. Set once on arrival and not cleared
+	// on subsequent reconnects.
 	InboundTopologyMatch string
 }
 

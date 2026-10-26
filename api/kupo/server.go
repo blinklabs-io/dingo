@@ -186,7 +186,10 @@ func (w *progressResponseWriter) Write(p []byte) (int, error) {
 	return w.ResponseWriter.Write(p)
 }
 
-func registerRoutes(mux *http.ServeMux, prefix string, s *Server) {
+func registerRoutes(mux interface {
+	HandleFunc(string, func(http.ResponseWriter, *http.Request))
+}, prefix string, s *Server,
+) {
 	mux.HandleFunc("GET "+prefix+"/matches", s.handleMatches)
 	mux.HandleFunc("GET "+prefix+"/matches/{pattern}", s.handleMatches)
 	mux.HandleFunc(

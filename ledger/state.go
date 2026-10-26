@@ -463,10 +463,13 @@ func blockApplyCandidatePoint(
 	)
 }
 
-// leiosAnnouncementBatchEnd keeps an announcing ranking block at the front of
-// a one-block apply chunk. The validator can then inspect it while its exact
-// parent is still the published ledger tip, without delaying ChainSync for
-// headers that may never be selected or fetched.
+// leiosAnnouncementBatchEnd ends an apply chunk with the first live
+// announcing ranking block. Once the chunk commits, that block is the
+// published ledger tip, the state its endorser block validates against (see
+// LeiosEndorserBlockBasisHash), and the next chunk's preparation validates
+// the endorser block before any later block, including the one that may
+// certify it, is applied. Headers that are never selected or fetched delay
+// nothing.
 func leiosAnnouncementBatchEnd(
 	blocks []ledger.Block,
 	start, end int,
@@ -483,30 +486,55 @@ func leiosAnnouncementBatchEnd(
 		if _, _, announced := announcer.LeiosAnnouncement(); !announced {
 			continue
 		}
-		if offset == 0 {
-			return start + 1
-		}
-		return start + offset
+		return start + offset + 1
 	}
 	return end
 }
 
-func (ls *LedgerState) validateLeiosAnnouncementBeforeApply(
-	ctx context.Context,
-	block ledger.Block,
-	inLiveValidationRegion bool,
-) error {
-	if !inLiveValidationRegion || ls.config.ValidateLeiosAnnouncement == nil {
+// leiosBatchAnnouncer returns the header of the last block of an apply chunk
+// when that block announces an endorser block, which is where
+// leiosAnnouncementBatchEnd places a live announcing block.
+func leiosBatchAnnouncer(blocks []ledger.Block) ledger.BlockHeader {
+	if len(blocks) == 0 {
 		return nil
 	}
-	announcer, ok := block.Header().(leiosEndorserBlockReferencer)
+	header := blocks[len(blocks)-1].Header()
+	announcer, ok := header.(leiosEndorserBlockReferencer)
 	if !ok {
 		return nil
 	}
 	if _, _, announced := announcer.LeiosAnnouncement(); !announced {
 		return nil
 	}
-	return ls.config.ValidateLeiosAnnouncement(ctx, block.Header())
+	return header
+}
+
+// validateLeiosAnnouncementBeforeApply validates the endorser block
+// announced by the block that ended the previous apply chunk, while that
+// block is still the published ledger tip and before the next chunk applies.
+// A tip that moved elsewhere, by rollback or recovery, leaves nothing to
+// validate.
+func (ls *LedgerState) validateLeiosAnnouncementBeforeApply(
+	ctx context.Context,
+	inLiveValidationRegion bool,
+) error {
+	if !inLiveValidationRegion || ls.config.ValidateLeiosAnnouncement == nil {
+		return nil
+	}
+	header := ls.leiosApplyAnnouncer
+	if header == nil {
+		return nil
+	}
+	ls.RLock()
+	atTip := bytes.Equal(
+		ls.currentTip.Point.Hash,
+		LeiosEndorserBlockBasisHash(header),
+	)
+	ls.RUnlock()
+	if !atTip {
+		return nil
+	}
+	return ls.config.ValidateLeiosAnnouncement(ctx, header)
 }
 
 func (ls *LedgerState) waitForLeiosBeforeApply(
@@ -521,13 +549,12 @@ func (ls *LedgerState) waitForLeiosBeforeApply(
 	}
 	if err := ls.validateLeiosAnnouncementBeforeApply(
 		ctx,
-		precheck[0],
 		validateAnnouncement,
 	); err != nil {
 		ls.config.Logger.Debug(
 			"Leios announcement not validated before block apply",
 			"component", "ledger",
-			"slot", precheck[0].SlotNumber(),
+			"slot", ls.leiosApplyAnnouncer.SlotNumber(),
 			"error", err,
 		)
 	}
@@ -574,18 +601,29 @@ func (ls *LedgerState) prepareBlockApplySnapshot(
 			) {
 			if err := ls.validateLeiosAnnouncementBeforeApply(
 				ctx,
-				precheck[0],
 				true,
 			); err != nil {
 				ls.config.Logger.Debug(
 					"Leios announcement not validated before block apply",
 					"component", "ledger",
-					"slot", precheck[0].SlotNumber(),
+					"slot", ls.leiosApplyAnnouncer.SlotNumber(),
 					"error", err,
 				)
 			}
 			snapshot = ls.captureBlockApplyStateSnapshot()
 		}
+	}
+	// Only a live announcing block is validated at the next chunk; a
+	// historical one would only hold that chunk for its closure.
+	ls.leiosApplyAnnouncer = leiosBatchAnnouncer(
+		blocksBeforeEpochEnd(blocks, selectionEpoch),
+	)
+	if ls.leiosApplyAnnouncer != nil &&
+		!ls.blockApplySnapshotInLiveValidationRegion(
+			snapshot,
+			ls.leiosApplyAnnouncer.SlotNumber(),
+		) {
+		ls.leiosApplyAnnouncer = nil
 	}
 	return snapshot, nil
 }
@@ -885,6 +923,9 @@ type GenesisSelectionStateFunc func() (active bool, window uint64)
 
 type LedgerStateConfig struct {
 	Consensus nodeconsensus.Provider
+	// ConsensusStateRestoredFunc synchronously invalidates provider-owned
+	// production state after rollback publishes its replacement snapshot.
+	ConsensusStateRestoredFunc func()
 	// MaxConcurrentEvaluations bounds transaction evaluations running at
 	// once across every API front end. Zero leaves one logical processor for
 	// consensus work when possible.
@@ -941,7 +982,7 @@ type LedgerStateConfig struct {
 	// the chain and leaving the UTxO set incomplete. Nil disables backfill.
 	EndorserBlockFetcher EndorserBlockFetcherFunc
 	// ValidateLeiosAnnouncement validates a cached endorser block while the
-	// announcing header's parent is still the applied ledger tip. Header
+	// announcing block is the applied ledger tip. Header
 	// admission remains independent: an unavailable or invalid endorser block
 	// receives no vote but does not invalidate its ranking block.
 	ValidateLeiosAnnouncement func(context.Context, ledger.BlockHeader) error
@@ -986,36 +1027,39 @@ type LedgerStateConfig struct {
 	// 17-20 mark totals equal cardano-node's active stake for epochs 18-21
 	// exactly.
 	//
-	// The check stays enforced on real networks. On the concentrated
-	// prototype-2026w29 musashi topology it rejected the dominant pool's
-	// legitimately-eligible blocks and wedged the chain, so it is skipped
-	// there. All other header checks (KES, VRF proof,
-	// registered-VRF-key binding, opcert) still apply regardless.
 	// Separately, TPraos bootstrap epochs with decentralization still active
 	// validate genesis overlay assignment in verify_header.go, then skip only
 	// the local pool stake-threshold check while d remains active.
-	// Set from the network in node.go (true on musashi, false otherwise) via
-	// Config.prototypeTrustBypassesEnabled, which requires an unambiguous
-	// Musashi identity so this can never be reached from a
-	// preview/preprod/mainnet configuration.
 	// The same flag also gates every other path where the stake-derived
 	// threshold cannot be evaluated at all (zero total active stake, a
 	// missing/nonpositive active-slot coefficient, a post-Mithril mark
-	// snapshot reconstructed after its target boundary): standard profiles
-	// reject rather than trust an unevaluated producer, and this flag is the
-	// only way to bypass that.
+	// snapshot reconstructed after its target boundary). Network profiles never
+	// enable this flag; it exists for explicit test and embedder configuration.
 	SkipLeaderStakeThresholdCheck bool
+	// StakePoolStateQuery answers the GetStakePoolState local state query
+	// (Shelley sub-query 40). Released Haskell nodes do not support that
+	// query, so it is a Leios prototype extension: node_ledger_config.go sets
+	// it only from Config.musashiPrototypeIdentity, whose strict identity
+	// check cannot be met by a mainnet, preprod, preview or sancho
+	// configuration. The zero value leaves the query unsupported, exactly as
+	// for any other query dingo does not answer.
+	StakePoolStateQuery bool
 	// SkipDijkstraTxValidation, when true, skips the Dijkstra per-transaction
-	// validation rule set entirely. On Musashi, ranking-block transactions are
-	// trusted because the prototype does not validate them. Running dingo's
-	// rule set only to discard any disagreement is
-	// wasted work that prevents the node from reaching tip under load. Set true
-	// on Musashi in node.go via Config.prototypeTrustBypassesEnabled, which
-	// requires an unambiguous Musashi identity so this can never be reached
-	// from a preview/preprod/mainnet configuration. Applies to Dijkstra-era
-	// transactions only — see LedgerState.skipDijkstraTxValidation. Interim
-	// until the Leios certificate / endorser-availability surface is complete.
+	// validation rule set entirely. It applies to Dijkstra-era transactions
+	// only. Network profiles never enable this flag; it exists for explicit test
+	// and embedder configuration.
 	SkipDijkstraTxValidation bool
+	// Praos2ChainDepState selects the Praos2 serialisation of the
+	// chain-dependent state in a GetChainDepState reply for the Dijkstra
+	// era: version 1 with nine fields, the ninth being the Leios
+	// announcement of the last applied header. Only the Leios prototype
+	// network (Musashi) runs the Dijkstra era on Praos2; released Haskell
+	// consensus runs Dijkstra on plain Praos, so the era alone must never
+	// select it. The zero value keeps the Praos layout, and node_ledger_config.go
+	// sets it only from Config.musashiPrototypeIdentity, whose strict
+	// identity check cannot be met by a mainnet, preprod, preview or sancho
+	// configuration.
+	Praos2ChainDepState bool
 	// MinPoolMargin is the CIP-23 minimum pool margin (minimum variable fee) in
 	// basis points, [0, 10000] (150 = 1.5%); 0 disables it. It is a consensus-
 	// affecting operator setting (not derived from the network) that takes
@@ -1363,6 +1407,15 @@ type LedgerState struct {
 	metrics       stateMetrics
 	consensus     atomic.Pointer[consensusSnapshot]
 	tip           atomic.Pointer[tipSnapshot]
+	// tachysMu serializes construction of the full public leader selector.
+	// The cache is bounded to the same three-epoch window as pool snapshots
+	// and keyed by the published consensus context so rollback or state
+	// replacement cannot reuse a selector built from abandoned state.
+	tachysMu            sync.Mutex
+	tachysDistributions []tachysDistributionCacheEntry
+	// Test hook called after a Tachys distribution read releases its
+	// transaction and before the consensus context is rechecked.
+	tachysDistributionLoadedHook func()
 	// snapshotPublished is closed and replaced after every snapshot
 	// publication, so a reader waiting for the ledger to advance can block
 	// until the published state changes instead of polling it.
@@ -1483,6 +1536,7 @@ type LedgerState struct {
 	slotsPerKESPeriod           atomic.Uint64
 	forgedBlockChecker          atomic.Pointer[forgedBlockCheckerHolder]
 	slotBattleRecorder          atomic.Pointer[slotBattleRecorderHolder]
+	slotBattles                 slotBattleBook
 	cachedShape                 atomic.Pointer[hardfork.Shape]                  // lazy-built from CardanoNodeConfig; immutable for the LedgerState's lifetime
 	hardForkSummaryCache        atomic.Pointer[hardForkSummaryCacheEntry]       // last hardForkSummaryAnchoredAt result, keyed by publication generation and horizon anchor (see hardfork_summary.go)
 	epochSnapshotHook           atomic.Pointer[epochBoundarySnapshotHookHolder] // optional authoritative epoch-boundary snapshot capture (nil = event-driven fallback only)
@@ -1929,6 +1983,11 @@ type LedgerState struct {
 	// untickedClosure holds unpublished Apply events until its certifying RB
 	// commits. Guarded by the LedgerState lock.
 	untickedClosure *pendingLeiosClosure
+	// leiosApplyAnnouncer is the announcing header that ended the last
+	// prepared apply chunk, kept so the next chunk validates its endorser
+	// block while it is the ledger tip. Owned by the block-processing
+	// goroutine, the only caller of prepareBlockApplySnapshot.
+	leiosApplyAnnouncer ledger.BlockHeader
 
 	// publishCtx is cancelled at the top of Close so a ledger.tx publish
 	// parked on a full ordered lane cannot outlive shutdown. Only the
@@ -1974,6 +2033,14 @@ type LedgerState struct {
 	// trustedBatchSplit is a test-only hook, nil in production, called with
 	// the number of blocks left whenever a trusted batch is split.
 	trustedBatchSplit func(remaining int)
+	// trustedBatchOverlayOff is a test-only switch, false in production. It
+	// keeps ApplyTrustedBatch on the per-row UTxO path, the reference the
+	// overlay path is compared against.
+	trustedBatchOverlayOff bool
+	// afterTrustedBatchOverlay is a test-only observation hook, nil in
+	// production, called each time a block-apply transaction enables the
+	// batch UTxO overlay.
+	afterTrustedBatchOverlay func()
 	// afterTrustedBatchGuard is a test-only sequencing hook, nil in
 	// production. ApplyTrustedBatch calls it after its tip guard passes and
 	// before it stores or applies anything.
@@ -2561,6 +2628,15 @@ func (ls *LedgerState) SetTipForTesting(tip ochainsync.Tip) {
 	defer ls.Unlock()
 	ls.currentTip = cloneTip(tip)
 	ls.publishSnapshotsLocked()
+}
+
+// MarkReachedTipForTesting latches the flag a node sets the first time it
+// reaches the stability window, as a live node at its tip has. It exists for
+// black-box tests that drive a started ledger as a live node without an
+// upstream connection: until the flag latches, the chain-iterator loop holds
+// each under-full batch while it waits for more blocks.
+func (ls *LedgerState) MarkReachedTipForTesting() {
+	ls.reachedTip.Store(true)
 }
 
 func (ls *LedgerState) eraList() []eras.EraDesc {
@@ -5213,16 +5289,6 @@ func (ls *LedgerState) rollbackWithBlocksAndIntent(
 		snapshot.committed = true
 	}
 	ls.rewardPrecomputeMu.Unlock()
-	// Notify subscribers that pool state has been restored (e.g., for cache invalidation)
-	if publishResync && ls.config.EventBus != nil {
-		ls.config.EventBus.PublishAsync(
-			PoolStateRestoredEventType,
-			event.NewEvent(
-				PoolStateRestoredEventType,
-				PoolStateRestoredEvent{Slot: point.Slot},
-			),
-		)
-	}
 	// Reload epoch cache into locals to discard stale nonces from
 	// rolled-back epochs. The deleted epoch entries will be recreated
 	// with correct nonces when the chain replays past those epoch
@@ -5493,6 +5559,22 @@ func (ls *LedgerState) rollbackWithBlocksAndIntent(
 			ls.config.FatalErrorFunc(healErr)
 		}
 		return &rollbackCommittedError{err: healErr}
+	}
+	// Production schedule recomputation must observe the replacement snapshot,
+	// including a block nonce healed after a deep rollback.
+	if ls.config.ConsensusStateRestoredFunc != nil {
+		ls.config.ConsensusStateRestoredFunc()
+	}
+	// Other ledger consumers may process the restoration asynchronously once
+	// consensus production state has been invalidated.
+	if publishResync && ls.config.EventBus != nil {
+		ls.config.EventBus.PublishAsync(
+			PoolStateRestoredEventType,
+			event.NewEvent(
+				PoolStateRestoredEventType,
+				PoolStateRestoredEvent{Slot: point.Slot},
+			),
+		)
 	}
 	if publishResync && !sameTip {
 		ls.publishLocalLedgerRollback(point)
@@ -9157,6 +9239,9 @@ func (ls *LedgerState) processBlocksFromSource(
 				len(nextBatch[i:end]),
 			)
 			var blocksProcessed int
+			// Blocks this chunk applies through ledgerProcessBlock, kept
+			// for the post-commit adoption-delay observation.
+			var chunkAdopted []adoptedBlock
 			runningNonce := snapshotNonce
 			trackByronPBFT := batchContainsByronBlocks(nextBatch[i:end])
 			var runningByronPBFTState byronPBFTState
@@ -9599,6 +9684,11 @@ func (ls *LedgerState) processBlocksFromSource(
 							BlockNumber: next.BlockNumber(),
 						}
 						blocksProcessed++
+						chunkAdopted = append(chunkAdopted, adoptedBlock{
+							number: next.BlockNumber(),
+							slot:   next.SlotNumber(),
+							hash:   tmpPoint.Hash,
+						})
 						// Per-block composition metrics: era,
 						// transaction count, script/redeemer presence, UTxO
 						// churn, certificate count. Recorded here, not for
@@ -9847,6 +9937,9 @@ func (ls *LedgerState) processBlocksFromSource(
 				checker = ls.config.ForgedBlockChecker
 				ls.publishSnapshotsLocked()
 				ls.Unlock()
+				if !trustedReplay {
+					ls.observeBlockAdoptions(chunkAdopted)
+				}
 				ls.maybeQueueStakeRewardPrecomputeRetry(pendingTip.Point.Slot)
 				// Restore normal DB options outside the lock after validation is enabled
 				if wantEnableValidation && bulkLoadActive &&
@@ -9939,20 +10032,14 @@ func (ls *LedgerState) strictConsumedInputsEnabled(
 // *skipped* for a transaction being validated under era eraId — true means
 // ValidateTxFunc is not called for it.
 //
-// This is the ledger half of the Musashi prototype's accepted non-validating
-// behaviour (see LedgerStateConfig.SkipDijkstraTxValidation), and its scope is
-// deliberately narrow: the bypass applies to Dijkstra-era transactions only.
+// The bypass applies to Dijkstra-era transactions only.
 // Transactions validated under any earlier era — Conway and before — still run
-// their full rule set even when the prototype flag is set, because the
-// prototype's trust argument (endorser transactions are stored but never
-// applied, so ranking-block transactions that spend endorser-resident outputs
-// are unresolvable) exists only in Dijkstra/Leios. Header validation is
+// their full rule set even when the flag is set. Header validation is
 // likewise unaffected: KES, VRF proof, registered-VRF-key binding and opcert
 // checks all still apply, and only the stake-derived leader threshold is
 // downgraded, by the separate SkipLeaderStakeThresholdCheck flag.
 //
-// The same prototype flag also scopes trustDijkstraTxValidationError. Standard
-// Dijkstra/Leios profiles run the rules and reject any disagreement.
+// The same flag also scopes trustDijkstraTxValidationError.
 func (ls *LedgerState) skipDijkstraTxValidation(eraId uint) bool {
 	return eraId == dijkstra.EraIdDijkstra &&
 		ls.config.SkipDijkstraTxValidation
@@ -9961,9 +10048,8 @@ func (ls *LedgerState) skipDijkstraTxValidation(eraId uint) bool {
 // trustDijkstraTxValidationError reports whether a per-transaction validation
 // failure under era eraId is logged and trusted instead of rejecting the block.
 //
-// Trust is limited to the explicit Musashi prototype bypass. Standard
-// Dijkstra/Leios profiles have complete endorser-block fetch/apply support and
-// must reject invalid ranking-block transactions just like every other era.
+// Network profiles leave the flag disabled and reject invalid ranking-block
+// transactions like every other era.
 func (ls *LedgerState) trustDijkstraTxValidationError(eraId uint) bool {
 	return eraId == dijkstra.EraIdDijkstra &&
 		ls.config.SkipDijkstraTxValidation
@@ -10037,7 +10123,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 			ls.config.CardanoNodeConfig,
 			parent,
 		); err != nil {
-			return nil, err
+			return nil, ls.rejectInboundEnvelopeFailure(point, err)
 		}
 		if err := ls.validateBlockHeaderProtocolVersion(
 			block.Header(), pparams,
@@ -10051,7 +10137,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 		// rest of validation. Mithril-certified and TrustedReplay blocks are
 		// trusted input and keep skipping it.
 		if err := validateBlockExUnits(block, pparams); err != nil {
-			return nil, err
+			return nil, ls.rejectInboundEnvelopeFailure(point, err)
 		}
 	}
 	// Validate the operational certificate counter before processing the
@@ -10250,7 +10336,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 	}
 	// Check the ranking block after any applicable endorser transactions,
 	// using their resulting state but before its own transaction mutations.
-	// The explicitly non-validating Musashi prototype keeps its trust policy.
+	// Explicit test or embedder configurations may skip Dijkstra validation.
 	if shouldValidate && !ls.skipDijkstraTxValidation(currentEra.Id) {
 		referenceParams := referenceScriptParams(
 			block, currentEra, ls.eraList(), pparams, prevEraPParams,
@@ -10332,9 +10418,8 @@ func (ls *LedgerState) ledgerProcessBlock(
 			// Standard Dijkstra/CIP profiles validate ranking-block transactions
 			// even when the referenced endorser block is unavailable; missing
 			// endorser-resident inputs then produce a validation error. Skip
-			// Dijkstra validation only on the Musashi prototype
-			// (SkipDijkstraTxValidation), which trusts its ranking-block
-			// transactions.
+			// Dijkstra validation only under an explicit
+			// SkipDijkstraTxValidation override; no network profile sets it.
 			skipDijkstraValidation := ls.skipDijkstraTxValidation(
 				validationEra.Id,
 			)
@@ -10410,9 +10495,8 @@ func (ls *LedgerState) ledgerProcessBlock(
 						faultErr,
 					)
 				}
-				// The Musashi prototype trusts remaining Dijkstra validation
-				// disagreements because its certificate-driven closure is still
-				// evolving. Standard profiles leave the error intact and reject
+				// An explicit override may trust remaining Dijkstra validation
+				// disagreements. Network profiles leave the error intact and reject
 				// the block below.
 				if err != nil &&
 					ls.trustDijkstraTxValidationError(validationEra.Id) {
@@ -14305,11 +14389,7 @@ func (ls *LedgerState) IsByronEra() bool {
 	return ls.loadConsensusSnapshot().currentEra.Id == eras.ByronEraDesc.Id
 }
 
-// ConsensusModeForEpoch returns the Praos consensus variant that
-// governs leader eligibility for the given epoch. Shelley/Allegra/
-// Mary/Alonzo run TPraos; Babbage/Conway run CPraos. Anything else
-// (including Byron and unknown eras) defaults to CPraos, matching
-// how block production paths fall back today.
+// EraIDForEpoch returns the ledger era governing an epoch.
 //
 // Resolution order, mirroring how the leader-election caller can be
 // computing the schedule for the current epoch or pre-computing the
@@ -14334,9 +14414,9 @@ func (ls *LedgerState) IsByronEra() bool {
 // both the VRF leader-value derivation and the threshold, so callers must
 // decline to answer instead of producing a mode nothing established.
 // Steps 1, 2 and 4 read state the node already holds and never error.
-func (ls *LedgerState) ConsensusModeForEpoch(
+func (ls *LedgerState) EraIDForEpoch(
 	epoch uint64,
-) (consensus.ConsensusMode, error) {
+) (uint, error) {
 	snapshot := ls.loadConsensusSnapshot()
 	cache := snapshot.epochCache
 	currentEra := snapshot.currentEra
@@ -14345,12 +14425,12 @@ func (ls *LedgerState) ConsensusModeForEpoch(
 
 	for _, e := range cache {
 		if e.EpochId == epoch {
-			return consensusModeForEraID(e.EraId), nil
+			return e.EraId, nil
 		}
 	}
 
 	if epoch <= currentEpoch.EpochId {
-		return consensusModeForEraID(currentEra.Id), nil
+		return currentEra.Id, nil
 	}
 
 	// HardForkInitiation path: if a confirmed transition pins the next
@@ -14363,14 +14443,14 @@ func (ls *LedgerState) ConsensusModeForEpoch(
 		epoch >= transitionInfo.KnownEpoch {
 		nextID := currentEra.Id + 1
 		if _, ok := ls.eraById(nextID); ok {
-			return consensusModeForEraID(nextID), nil
+			return nextID, nil
 		}
 	}
 
 	shape, err := ls.eraShapeWithError()
 	if err != nil {
 		return 0, fmt.Errorf(
-			"consensus mode for epoch %d is unresolvable: %w",
+			"era for epoch %d is unresolvable: %w",
 			epoch,
 			err,
 		)
@@ -14383,7 +14463,7 @@ func (ls *LedgerState) ConsensusModeForEpoch(
 			// rule out a scheduled fork at or before the target epoch, so
 			// the forecast is unresolvable rather than "no fork".
 			return 0, fmt.Errorf(
-				"consensus mode for epoch %d is unresolvable: "+
+				"era for epoch %d is unresolvable: "+
 					"era %d is unavailable in the hard-fork shape",
 				epoch,
 				eraID,
@@ -14398,13 +14478,25 @@ func (ls *LedgerState) ConsensusModeForEpoch(
 		nextID := eraID + 1
 		if _, ok := ls.eraById(nextID); !ok {
 			return 0, fmt.Errorf(
-				"consensus mode for epoch %d is unresolvable: "+
+				"era for epoch %d is unresolvable: "+
 					"successor era %d is unavailable",
 				epoch,
 				nextID,
 			)
 		}
 		eraID = nextID
+	}
+	return eraID, nil
+}
+
+// ConsensusModeForEpoch returns the Praos consensus variant that governs
+// leader eligibility for the given epoch.
+func (ls *LedgerState) ConsensusModeForEpoch(
+	epoch uint64,
+) (consensus.ConsensusMode, error) {
+	eraID, err := ls.EraIDForEpoch(epoch)
+	if err != nil {
+		return 0, err
 	}
 	return consensusModeForEraID(eraID), nil
 }
@@ -14790,7 +14882,7 @@ func (ls *LedgerState) ByronProtocolMagic() (uint32, error) {
 	if protocolMagic < 0 {
 		return 0, errors.New("byron protocol magic is negative")
 	}
-	if protocolMagic > math.MaxUint32 {
+	if int64(protocolMagic) > math.MaxUint32 {
 		return 0, fmt.Errorf(
 			"byron protocol magic exceeds uint32: %d",
 			protocolMagic,
@@ -14861,6 +14953,15 @@ func (ls *LedgerState) UtxosByAddress(
 	ret := make([]models.Utxo, 0, len(utxos))
 	ret = append(ret, utxos...)
 	return ret, nil
+}
+
+// UtxosByAddressComplete returns every UTxO for the requested addresses and
+// stops the read when ctx is canceled.
+func (ls *LedgerState) UtxosByAddressComplete(
+	ctx context.Context,
+	addrs []ledger.Address,
+) ([]models.Utxo, error) {
+	return ls.db.UtxosByAddressComplete(ctx, addrs, nil)
 }
 
 // UtxosByAddressBoundedPage returns an ordered, resumable UTxO page while
@@ -15138,13 +15239,19 @@ func (s txValidationSnapshot) validationContext(
 	if err != nil {
 		return eras.EraDesc{}, nil, false, err
 	}
-	pp := s.currentPParams
-	isCurrent := true
-	if validationEra.Id != s.currentEra.Id && s.prevEraPParams != nil {
-		pp = s.prevEraPParams
-		isCurrent = false
-	}
+	pp, isCurrent := s.validationPParams(validationEra.Id)
 	return validationEra, pp, isCurrent, nil
+}
+
+// validationPParams returns the protocol parameters that validate a
+// transaction of a compatible era, and whether they are the current era's.
+func (s txValidationSnapshot) validationPParams(
+	txEraId uint,
+) (lcommon.ProtocolParameters, bool) {
+	if txEraId != s.currentEra.Id && s.prevEraPParams != nil {
+		return s.prevEraPParams, false
+	}
+	return s.currentPParams, true
 }
 
 func (s txValidationSnapshot) protocolParameters(
@@ -15200,6 +15307,19 @@ func LeiosValidationParentHash(header ledger.BlockHeader) []byte {
 		return make([]byte, 0)
 	}
 	return parentHash.Bytes()
+}
+
+// LeiosEndorserBlockBasisHash returns the ledger-point hash an announced
+// endorser block validates against: the announcing ranking block itself.
+// CIP-164 makes the endorser block's transactions a valid extension of the
+// ledger state that block leaves, which includes the transactions of any
+// endorser block it certifies and its own body transactions, so they can
+// spend outputs neither the block's parent state nor its own transactions
+// alone contain. The block that certifies the endorser block is the next
+// one, whose parent is the announcing block, so this is also the state those
+// transactions are applied on.
+func LeiosEndorserBlockBasisHash(header ledger.BlockHeader) []byte {
+	return header.Hash().Bytes()
 }
 
 func (ls *LedgerState) txValidationSnapshot() txValidationSnapshot {
@@ -15262,6 +15382,11 @@ type txValidationApplyFunc func(
 	blockNumber uint64,
 ) error
 
+// txValidationResolveFunc reads confirmed outputs through the session's own
+// database transaction, so it sees the snapshot validation reads and needs
+// no second connection.
+type txValidationResolveFunc func(refs []models.UtxoId) ([]models.Utxo, error)
+
 // beginTxValidationTransition excludes validation commits from a durable
 // state transition until its matching snapshots have been published.
 func (ls *LedgerState) beginTxValidationTransition() func() {
@@ -15301,6 +15426,33 @@ func (ls *LedgerState) WithTxValidationSession(ctx context.Context,
 	})
 }
 
+// WithResolvingTxValidationSession is WithTxValidationSession for mempool
+// admission. resolve returns the live confirmed outputs among refs from the
+// session's database transaction, the snapshot its validations read.
+func (ls *LedgerState) WithResolvingTxValidationSession(ctx context.Context,
+	fn func(
+		validate func(
+			tx ledger.Transaction,
+			consumedUtxos map[utxoref.Key]struct{},
+			createdUtxos map[utxoref.Key]lcommon.Utxo,
+			accounts *utxoref.StateOverlay,
+		) error,
+		stillCurrent func() bool,
+		commitIfCurrent func(func() error) (bool, error),
+		resolve func(refs []models.UtxoId) ([]models.Utxo, error),
+	) error,
+) error {
+	return ls.withResolvingTxValidationSession(ctx, nil, nil, false, false, func(
+		validate func(ledger.Transaction, map[utxoref.Key]struct{}, map[utxoref.Key]lcommon.Utxo, *utxoref.StateOverlay) error,
+		stillCurrent func() bool,
+		commitIfCurrent func(func() error) (bool, error),
+		_ txValidationApplyFunc,
+		resolve txValidationResolveFunc,
+	) error {
+		return fn(validate, stillCurrent, commitIfCurrent, resolve)
+	})
+}
+
 func (ls *LedgerState) withTxValidationSession(ctx context.Context,
 	expectedParentHash []byte,
 	referenceSlot *uint64,
@@ -15316,6 +15468,41 @@ func (ls *LedgerState) withTxValidationSession(ctx context.Context,
 		stillCurrent func() bool,
 		commitIfCurrent func(func() error) (bool, error),
 		applyTx txValidationApplyFunc,
+	) error,
+) error {
+	return ls.withResolvingTxValidationSession(ctx,
+		expectedParentHash,
+		referenceSlot,
+		readWrite,
+		leiosClosureSemantics,
+		func(
+			validate func(ledger.Transaction, map[utxoref.Key]struct{}, map[utxoref.Key]lcommon.Utxo, *utxoref.StateOverlay) error,
+			stillCurrent func() bool,
+			commitIfCurrent func(func() error) (bool, error),
+			applyTx txValidationApplyFunc,
+			_ txValidationResolveFunc,
+		) error {
+			return fn(validate, stillCurrent, commitIfCurrent, applyTx)
+		},
+	)
+}
+
+func (ls *LedgerState) withResolvingTxValidationSession(ctx context.Context,
+	expectedParentHash []byte,
+	referenceSlot *uint64,
+	readWrite bool,
+	leiosClosureSemantics bool,
+	fn func(
+		validate func(
+			tx ledger.Transaction,
+			consumedUtxos map[utxoref.Key]struct{},
+			createdUtxos map[utxoref.Key]lcommon.Utxo,
+			accounts *utxoref.StateOverlay,
+		) error,
+		stillCurrent func() bool,
+		commitIfCurrent func(func() error) (bool, error),
+		applyTx txValidationApplyFunc,
+		resolve txValidationResolveFunc,
 	) error,
 ) error {
 	if err := ctx.Err(); err != nil {
@@ -15460,7 +15647,12 @@ func (ls *LedgerState) withTxValidationSession(ctx context.Context,
 				txn,
 			)
 		}
-		if err := fn(validate, stillCurrent, commitIfCurrent, applyTx); err != nil {
+		resolve := func(refs []models.UtxoId) ([]models.Utxo, error) {
+			return ls.db.UtxosByRefs(ctx, refs, txn)
+		}
+		if err := fn(
+			validate, stillCurrent, commitIfCurrent, applyTx, resolve,
+		); err != nil {
 			return err
 		}
 		return rollbackValidationSession
@@ -15476,12 +15668,18 @@ var errRollbackLedgerValidationSession = errors.New(
 )
 
 // ValidateLeiosEndorserBlockTransactions validates an announced endorser
-// block against the exact ledger snapshot named by the ranking block's
-// parent. It uses one repeatable-read transaction and applies transaction
-// effects in manifest order so later transactions can spend earlier outputs.
+// block against the exact ledger snapshot named by basis, which must be the
+// applied ledger tip. Peers and voters pass LeiosEndorserBlockBasisHash; a
+// forger checking its own announcement before the ranking block is adopted
+// passes LeiosValidationParentHash, which is equivalent only because a
+// locally built announcing block carries no transactions of its own and
+// excludes the transactions of the endorser block it certifies. It uses one
+// repeatable-read transaction and applies transaction effects in manifest
+// order so later transactions can spend earlier outputs.
 func (ls *LedgerState) ValidateLeiosEndorserBlockTransactions(
 	ctx context.Context,
 	header ledger.BlockHeader,
+	basis []byte,
 	txs [][]byte,
 ) error {
 	if header == nil {
@@ -15514,13 +15712,12 @@ func (ls *LedgerState) ValidateLeiosEndorserBlockTransactions(
 		ctx = context.Background() //nolint:contextcheck // literal-nil fallback
 	}
 	slot := header.SlotNumber()
-	parentHash := LeiosValidationParentHash(header)
-	parentIsCurrentTip := func() bool {
+	basisIsCurrentTip := func() bool {
 		_, currentTip := ls.loadStateSnapshots()
-		return bytes.Equal(currentTip.currentTip.Point.Hash, parentHash)
+		return bytes.Equal(currentTip.currentTip.Point.Hash, basis)
 	}
 	return ls.withTxValidationSession(ctx,
-		parentHash,
+		basis,
 		&slot,
 		true,
 		true,
@@ -15542,7 +15739,7 @@ func (ls *LedgerState) ValidateLeiosEndorserBlockTransactions(
 					return err
 				}
 				if !stillCurrent() {
-					if !parentIsCurrentTip() {
+					if !basisIsCurrentTip() {
 						return ErrLeiosValidationParentSuperseded
 					}
 					return ErrLeiosValidationParentUnavailable
@@ -15611,7 +15808,7 @@ func (ls *LedgerState) ValidateLeiosEndorserBlockTransactions(
 				return err
 			}
 			if !stillCurrent() {
-				if !parentIsCurrentTip() {
+				if !basisIsCurrentTip() {
 					return ErrLeiosValidationParentSuperseded
 				}
 				return ErrLeiosValidationParentUnavailable
@@ -15704,6 +15901,20 @@ func (ls *LedgerState) ValidateTxWithOverlay(
 			pendingState:    accounts,
 		}
 	})
+}
+
+// MempoolSubmissionCapacity returns the coordinated metadata snapshot limit.
+// The mempool uses it to keep validation below the backing read pool's
+// operational reserve.
+func (ls *LedgerState) MempoolSubmissionCapacity() int {
+	if ls == nil || ls.db == nil {
+		return 0
+	}
+	reserver, ok := ls.db.Metadata().(types.ReadReserver)
+	if !ok {
+		return 0
+	}
+	return reserver.ReadSnapshotLimit()
 }
 
 // ErrEvaluationBusy reports that every transaction-evaluation slot is in use.

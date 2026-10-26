@@ -87,6 +87,34 @@ type externalIngestState struct {
 	// apply helpers outside processBlocksFromSource treat it as
 	// TrustedReplay.
 	trusted atomic.Bool
+	// spends is the running call's intra-batch spend tracker, which names
+	// the outputs earlier block-apply transactions of the call committed.
+	spends atomic.Pointer[intraBatchSpends]
+	// overlayOff keeps the rest of a call on the per-row UTxO path after
+	// the batch UTxO overlay hit a write conflict.
+	overlayOff atomic.Bool
+	// overlayApplied and perRowApplied record how the current block-apply
+	// transaction's delta batches applied, for its beforeCommit.
+	overlayApplied atomic.Bool
+	perRowApplied  atomic.Bool
+}
+
+func (e *externalIngestState) recordApply(overlay bool) {
+	if overlay {
+		e.overlayApplied.Store(true)
+	} else {
+		e.perRowApplied.Store(true)
+	}
+}
+
+// takeOverlayOnly reports whether every delta batch of the transaction
+// being committed applied through the overlay, and clears the record. A
+// stale record left by a failed transaction errs toward the per-row delete,
+// which is correct after either path.
+func (e *externalIngestState) takeOverlayOnly() bool {
+	overlay := e.overlayApplied.Swap(false)
+	perRow := e.perRowApplied.Swap(false)
+	return overlay && !perRow
 }
 
 func (ls *LedgerState) chainIngestGate() chan struct{} {
@@ -330,23 +358,34 @@ func (ls *LedgerState) applyTrustedBlocks(
 	spends := newIntraBatchSpends(
 		ls.db.StorageMode() != types.StorageModeAPI,
 	)
-	source := make(chan readChainResult, 1)
-	source <- readChainResult{blocks: blocks}
-	close(source)
-	err := ls.processBlocksFromSource(ctx, source, blockSourceOptions{
-		trusted:   true,
-		chunkSize: len(blocks),
-		beforeCommit: func(txn *database.Txn, applied []ledger.Block) error {
-			if err := spends.removeFromTxn(ls.db, txn, applied); err != nil {
-				return fmt.Errorf("drop outputs spent within batch: %w", err)
-			}
-			if ls.trustedBatchBeforeCommit != nil {
-				return ls.trustedBatchBeforeCommit(applied)
-			}
-			return nil
-		},
-	})
+	e.spends.Store(spends)
+	defer e.spends.Store(nil)
+	defer e.overlayOff.Store(false)
+	e.overlayApplied.Store(false)
+	e.perRowApplied.Store(false)
+	err := ls.applyTrustedSource(ctx, blocks, spends)
 	tip := ls.ledgerTipPoint()
+	if err != nil && errors.Is(err, types.ErrBatchUtxoOverlayConflict) {
+		// Nothing of the failed transaction committed; earlier epoch
+		// sides may have. The conflict fires before beforeCommit, so
+		// spends still describes exactly what committed.
+		rest := blocksAfter(blocks, tip, expected)
+		ls.config.Logger.Warn(
+			"trusted batch UTxO overlay hit a write conflict; "+
+				"applying the batch on the per-row path",
+			"error", err,
+			"blocks", len(rest),
+			"tip_slot", tip.Slot,
+			"component", "ledger",
+		)
+		ls.metrics.incTrustedBatchOverlayFallbacks()
+		e.overlayOff.Store(true)
+		err = nil
+		if len(rest) > 0 {
+			err = ls.applyTrustedSource(ctx, rest, spends)
+			tip = ls.ledgerTipPoint()
+		}
+	}
 	if err != nil {
 		if errors.Is(err, errStaleChainIterator) {
 			return tip, fmt.Errorf("%w: %w", ErrStaleBatch, err)
@@ -365,6 +404,52 @@ func (ls *LedgerState) applyTrustedBlocks(
 		)
 	}
 	return tip, nil
+}
+
+// applyTrustedSource commits blocks' effects through processBlocksFromSource.
+func (ls *LedgerState) applyTrustedSource(
+	ctx context.Context,
+	blocks []ledger.Block,
+	spends *intraBatchSpends,
+) error {
+	source := make(chan readChainResult, 1)
+	source <- readChainResult{blocks: blocks}
+	close(source)
+	return ls.processBlocksFromSource(ctx, source, blockSourceOptions{
+		trusted:   true,
+		chunkSize: len(blocks),
+		beforeCommit: func(txn *database.Txn, applied []ledger.Block) error {
+			if err := spends.removeFromTxn(
+				ls.db, txn, applied,
+				ls.externalIngest.takeOverlayOnly(),
+			); err != nil {
+				return fmt.Errorf("drop outputs spent within batch: %w", err)
+			}
+			if ls.trustedBatchBeforeCommit != nil {
+				return ls.trustedBatchBeforeCommit(applied)
+			}
+			return nil
+		},
+	})
+}
+
+// blocksAfter returns the blocks that follow tip, all of them when tip is
+// expected, or nil when tip is none of them.
+func blocksAfter(
+	blocks []ledger.Block,
+	tip, expected ocommon.Point,
+) []ledger.Block {
+	if pointMatches(tip, expected) {
+		return blocks
+	}
+	for i, b := range blocks {
+		if pointMatches(
+			tip, ocommon.NewPoint(b.SlotNumber(), b.Hash().Bytes()),
+		) {
+			return blocks[i+1:]
+		}
+	}
+	return nil
 }
 
 func (ls *LedgerState) ledgerTipPoint() ocommon.Point {
@@ -430,13 +515,36 @@ func newIntraBatchSpends(enabled bool) *intraBatchSpends {
 	}
 }
 
+// committedAmong returns the inputs that name outputs an earlier
+// block-apply transaction of the batch committed and nothing has spent yet.
+func (s *intraBatchSpends) committedAmong(
+	inputs []models.UtxoId,
+) []models.UtxoId {
+	if !s.enabled || len(s.produced) == 0 {
+		return nil
+	}
+	var ret []models.UtxoId
+	for _, input := range inputs {
+		key := utxoref.Key{Index: input.Idx}
+		copy(key.TxId[:], input.Hash)
+		if _, ok := s.produced[key]; ok {
+			ret = append(ret, input)
+		}
+	}
+	return ret
+}
+
 // removeFromTxn removes, inside txn, the rows of outputs produced earlier in
 // the batch and spent by the applied blocks. A transaction's inputs are taken
-// before its outputs, matching the order the ledger applies them.
+// before its outputs, matching the order the ledger applies them. When the
+// transaction applied through a batch UTxO overlay, overlay is set: the
+// overlay already deleted or never wrote those rows, so only their blob keys
+// and the prune floor are left.
 func (s *intraBatchSpends) removeFromTxn(
 	db *database.Database,
 	txn *database.Txn,
 	applied []ledger.Block,
+	overlay bool,
 ) error {
 	if !s.enabled || len(applied) == 0 {
 		return nil
@@ -460,9 +568,9 @@ func (s *intraBatchSpends) removeFromTxn(
 			}
 		}
 	}
-	return db.UtxosDeleteSpentInBatch(
-		spent,
-		applied[len(applied)-1].SlotNumber(),
-		txn,
-	)
+	slot := applied[len(applied)-1].SlotNumber()
+	if overlay {
+		return db.UtxosDropSpentInBatchBlobs(spent, slot, txn)
+	}
+	return db.UtxosDeleteSpentInBatch(spent, slot, txn)
 }

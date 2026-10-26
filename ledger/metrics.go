@@ -93,7 +93,12 @@ type stateMetrics struct {
 	// epochRolloverDuration is the whole processEpochRollover transaction
 	// body, and epochRolloverPhaseDuration each of its named phases; see
 	// timeRolloverPhase.
-	epochRolloverDuration      prometheus.Histogram
+	epochRolloverDuration prometheus.Histogram
+	// blockAdoptionDelay and recentAdoptions record wall clock minus slot
+	// time at the moment an at-tip block becomes the ledger tip; see
+	// observeBlockAdoption.
+	blockAdoptionDelay         prometheus.Histogram
+	recentAdoptions            *recentAdoptions
 	epochRolloverPhaseDuration *prometheus.HistogramVec
 	// Pre-materialized observers for the stage label values, so the hot
 	// path does not resolve a label on every block or transaction.
@@ -307,6 +312,11 @@ type stateMetrics struct {
 	// value on a Mithril-bootstrapped node explains a stake shortfall; a
 	// rising value on any node is a live divergence from the network.
 	skippedStakeRewardRounds prometheus.Counter
+	// Incremented each time a trusted batch's UTxO overlay hit a write
+	// conflict and the batch was applied again on the per-row path. Each
+	// increment is a batch that ran at the slower per-row speed; a rising
+	// value means the store holds rows the overlay does not expect.
+	trustedBatchOverlayFallbacks prometheus.Counter
 	// Incremented each time GetStakeDistribution or GetPoolDistr2 omits a
 	// pool that holds stake at the queried snapshot but has no resolvable
 	// registration/VRF key hash on record. This is a deliberate fallback
@@ -769,6 +779,13 @@ func (m *stateMetrics) incLeaderThresholdRejections() {
 	m.leaderThresholdRejections.Inc()
 }
 
+func (m *stateMetrics) incTrustedBatchOverlayFallbacks() {
+	if m == nil || m.trustedBatchOverlayFallbacks == nil {
+		return
+	}
+	m.trustedBatchOverlayFallbacks.Inc()
+}
+
 func (m *stateMetrics) incSkippedStakeRewardRounds() {
 	if m == nil || m.skippedStakeRewardRounds == nil {
 		return
@@ -1009,6 +1026,21 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 			Help: "ledger apply-path waits for a referenced Leios endorser block that ran the full diffusion window without it arriving",
 		},
 	)
+	m.blockAdoptionDelay = promautoFactory.NewHistogram(
+		prometheus.HistogramOpts{
+			Name: "dingo_ledger_block_adoption_delay_seconds",
+			Help: "wall clock minus slot time when an at-tip block became the ledger tip, i.e. after validation and commit; catch-up and trusted replay are not recorded",
+			// 100ms to 120s: a healthy relay adopts within seconds of slot
+			// time, a stalled one has been seen at 44s.
+			Buckets: []float64{
+				0.1, 0.25, 0.5, 1, 2, 3, 5, 7.5, 10, 15, 20, 30, 45, 60, 90, 120,
+			},
+		},
+	)
+	m.recentAdoptions = newRecentAdoptions()
+	if promRegistry != nil {
+		promRegistry.MustRegister(m.recentAdoptions)
+	}
 	m.epochRolloverDuration = promautoFactory.NewHistogram(
 		prometheus.HistogramOpts{
 			Name: "dingo_ledger_epoch_rollover_duration_seconds",
@@ -1226,6 +1258,12 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 		prometheus.CounterOpts{
 			Name: "dingo_ledger_skipped_stake_reward_rounds_total",
 			Help: "epoch-boundary reward rounds skipped for want of their inputs; each one leaves reward balances and the leadership stake distribution permanently short by that epoch's rewards, which makes the node reject canonical blocks near the leader-eligibility threshold",
+		},
+	)
+	m.trustedBatchOverlayFallbacks = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_ledger_trusted_batch_overlay_fallbacks_total",
+			Help: "trusted batches whose batch UTxO overlay hit a write conflict and were applied again on the per-row path",
 		},
 	)
 	m.poolStakeDistributionOmittedPools = promautoFactory.NewCounter(

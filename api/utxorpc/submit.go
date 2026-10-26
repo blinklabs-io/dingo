@@ -63,6 +63,20 @@ func (s *submitServiceServer) SubmitTx(
 	ctx context.Context,
 	req *connect.Request[submit.SubmitTxRequest],
 ) (*connect.Response[submit.SubmitTxResponse], error) {
+	if admitter, ok := s.utxorpc.config.Mempool.(mempool.SubmissionAdmitter); ok {
+		admittedCtx, release, err := admitter.AdmitSubmission(ctx)
+		if err != nil {
+			if errors.Is(err, mempool.ErrSubmissionBusy) {
+				return nil, connect.NewError(
+					connect.CodeResourceExhausted,
+					err,
+				)
+			}
+			return nil, err
+		}
+		defer release()
+		ctx = admittedCtx
+	}
 	txRaw := req.Msg.GetTx()
 
 	s.utxorpc.config.Logger.Info("Got a SubmitTx request")
@@ -318,6 +332,11 @@ func (s *submitServiceServer) EvalTx(
 	ctx context.Context,
 	req *connect.Request[submit.EvalTxRequest],
 ) (*connect.Response[submit.EvalTxResponse], error) {
+	release, err := s.utxorpc.admitEvalRequest(req.Peer())
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	s.utxorpc.config.Logger.Info("Got an EvalTx request")
 	txRaw := req.Msg.GetTx()
 	resp := &submit.EvalTxResponse{}
