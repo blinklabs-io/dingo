@@ -277,6 +277,23 @@ func (o *Ouroboros) cancelFutureHeaderResync(
 	o.futureHeaderResyncMu.Unlock()
 }
 
+// cancelPendingIngressPromotionResync drops connId's promotion fallback timer
+// when it has not fired. It leaves any other pending recovery untouched, since
+// that one was scheduled for a reason the promoting header did not resolve.
+func (o *Ouroboros) cancelPendingIngressPromotionResync(
+	connId ouroboros.ConnectionId,
+) {
+	o.futureHeaderResyncMu.Lock()
+	defer o.futureHeaderResyncMu.Unlock()
+	scheduled := o.futureHeaderResyncs[connId]
+	if scheduled == nil || scheduled.fired ||
+		scheduled.reason != event.ChainsyncResyncReasonIngressPromotion {
+		return
+	}
+	scheduled.cancel()
+	delete(o.futureHeaderResyncs, connId)
+}
+
 func (o *Ouroboros) markDeferredHeaderRecovery(
 	connId ouroboros.ConnectionId,
 	baseline ochainsync.Tip,
@@ -1939,6 +1956,11 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 			) {
 				return nil
 			}
+		}
+		// A promoting header that continues the local chain needs no fresh
+		// intersection: the observer contributes from the tip.
+		if ingressEligible && wasObserver {
+			o.cancelPendingIngressPromotionResync(ctx.ConnectionId)
 		}
 		// Enforce the future-header boundary on this peer's protocol callback,
 		// before any observed-tip, cursor, dedup, or ledger mutation. A

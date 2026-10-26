@@ -75,7 +75,9 @@ const (
 	ChainsyncResyncReasonGenesisCorroborationHoldExpired = "genesis corroboration hold expired"
 	// ChainsyncResyncReasonIngressPromotion re-intersects a ChainSync observer
 	// when it becomes ingress-eligible, so its headers pass through normal
-	// verification before contributing to Genesis corroboration.
+	// verification before contributing to Genesis corroboration. The request
+	// is a fallback: a promoting header that continues the local chain
+	// cancels it.
 	ChainsyncResyncReasonIngressPromotion = "ingress promotion"
 	// ChainsyncResyncReasonForecastHorizonNoWork re-intersects a connected
 	// ChainSync peer when no local queued or in-flight blockfetch can advance
