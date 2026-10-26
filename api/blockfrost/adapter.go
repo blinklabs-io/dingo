@@ -3807,16 +3807,19 @@ func (a *NodeAdapter) transactionPositionInfos(
 }
 
 // metadataLabelPage returns one page of transactions carrying the label and
-// the label's total. The page query is skipped when the offset is at or past
-// the total, since it can only return no rows.
+// the label's total. Count and page share one read transaction so they agree,
+// and the page query is skipped when the offset is at or past the total, since
+// it can only return no rows.
 func (a *NodeAdapter) metadataLabelPage(
 	ctx context.Context,
 	label uint64,
 	params PaginationParams,
 ) ([]models.Transaction, int, error) {
 	db := a.ledgerState.Database()
+	txn := db.Transaction(ctx, false)
+	defer txn.Release()
 
-	total, err := db.CountTransactionsByMetadataLabel(ctx, label, nil)
+	total, err := db.CountTransactionsByMetadataLabel(ctx, label, txn)
 	if err != nil {
 		return nil, 0, fmt.Errorf(
 			"count transactions by metadata label %d: %w",
@@ -3824,8 +3827,8 @@ func (a *NodeAdapter) metadataLabelPage(
 			err,
 		)
 	}
-	offset := (params.Page - 1) * params.Count
-	if offset >= total {
+	offset, ok := paginationOffset(params)
+	if !ok || offset >= total {
 		return nil, total, nil
 	}
 
@@ -3835,7 +3838,7 @@ func (a *NodeAdapter) metadataLabelPage(
 		params.Count,
 		offset,
 		params.Order == PaginationOrderDesc,
-		nil,
+		txn,
 	)
 	if err != nil {
 		return nil, 0, fmt.Errorf(

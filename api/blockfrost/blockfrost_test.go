@@ -17,10 +17,12 @@ package blockfrost
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"math"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -815,13 +817,21 @@ func TestMetadataTransactionsCollisionKeepsLabelAndRawCBOR(t *testing.T) {
 		validTx.ID, "721", 1, []byte{0x62, 0x6f, 0x6b}, `"ok"`,
 		ambiguousTx.ID, "721", 2, ambiguousLabelCBOR, nil)
 	require.NoError(t, err)
-	jsonRows, total, err := adapter.MetadataTransactions(context.Background(), 721, PaginationParams{Count: 2, Page: 1, Order: PaginationOrderAsc})
+	jsonRows, total, err := adapter.MetadataTransactions(
+		context.Background(),
+		721,
+		PaginationParams{Count: 2, Page: 1, Order: PaginationOrderAsc},
+	)
 	require.NoError(t, err)
 	require.Equal(t, 2, total)
 	require.Len(t, jsonRows, 2)
 	require.Equal(t, `"ok"`, string(jsonRows[0].JSONMetadata))
 	require.Nil(t, jsonRows[1].JSONMetadata)
-	cborRows, _, err := adapter.MetadataTransactionsCBOR(context.Background(), 721, PaginationParams{Count: 2, Page: 1, Order: PaginationOrderAsc})
+	cborRows, _, err := adapter.MetadataTransactionsCBOR(
+		context.Background(),
+		721,
+		PaginationParams{Count: 2, Page: 1, Order: PaginationOrderAsc},
+	)
 	require.NoError(t, err)
 	require.Len(t, cborRows, 2)
 	require.Equal(t, "a20163696e7461316474657874", cborRows[1].Metadata)
@@ -897,12 +907,24 @@ func TestMetadataEndpointsDeterministicAcrossRepeatsAndKeyOrders(t *testing.T) {
 			require.Equal(t, mt.label721, cborLabels[1].CBORMetadata)
 		}
 
-		params := PaginationParams{Count: 10, Page: 1, Order: PaginationOrderAsc}
-		jsonRows, total, err := adapter.MetadataTransactions(context.Background(), 721, params)
+		params := PaginationParams{
+			Count: 10,
+			Page:  1,
+			Order: PaginationOrderAsc,
+		}
+		jsonRows, total, err := adapter.MetadataTransactions(
+			context.Background(),
+			721,
+			params,
+		)
 		require.NoError(t, err)
 		require.Equal(t, len(txs), total)
 		require.Len(t, jsonRows, len(txs))
-		cborRows, cborTotal, err := adapter.MetadataTransactionsCBOR(context.Background(), 721, params)
+		cborRows, cborTotal, err := adapter.MetadataTransactionsCBOR(
+			context.Background(),
+			721,
+			params,
+		)
 		require.NoError(t, err)
 		require.Equal(t, len(txs), cborTotal)
 		require.Len(t, cborRows, len(txs))
@@ -914,7 +936,11 @@ func TestMetadataEndpointsDeterministicAcrossRepeatsAndKeyOrders(t *testing.T) {
 		}
 
 		// Representable label stays available alongside the colliding one.
-		oneRows, oneTotal, err := adapter.MetadataTransactions(context.Background(), 1, params)
+		oneRows, oneTotal, err := adapter.MetadataTransactions(
+			context.Background(),
+			1,
+			params,
+		)
 		require.NoError(t, err)
 		require.Equal(t, len(txs), oneTotal)
 		require.Len(t, oneRows, len(txs))
@@ -925,7 +951,15 @@ func TestMetadataEndpointsDeterministicAcrossRepeatsAndKeyOrders(t *testing.T) {
 		// Pagination does not drop or repeat the unavailable-JSON rows.
 		var seen []string
 		for page := 1; page <= len(txs); page++ {
-			rows, _, err := adapter.MetadataTransactions(context.Background(), 721, PaginationParams{Count: 1, Page: page, Order: PaginationOrderAsc})
+			rows, _, err := adapter.MetadataTransactions(
+				context.Background(),
+				721,
+				PaginationParams{
+					Count: 1,
+					Page:  page,
+					Order: PaginationOrderAsc,
+				},
+			)
 			require.NoError(t, err)
 			require.Len(t, rows, 1)
 			seen = append(seen, rows[0].TxHash)
@@ -939,70 +973,112 @@ func TestMetadataEndpointsDeterministicAcrossRepeatsAndKeyOrders(t *testing.T) {
 	}
 }
 
-func TestMetadataTransactionsPastEndAndCancellation(t *testing.T) {
-	t.Parallel()
+// newMetadataLabelAdapter returns an adapter holding n transactions that all
+// carry label 721.
+func newMetadataLabelAdapter(t *testing.T, n int) (*NodeAdapter, *sql.DB) {
+	t.Helper()
 	adapter, raw, _ := newDBBackedAdapter(t)
-	tx := &models.Transaction{
-		Hash:     bytes.Repeat([]byte{0x41}, 32),
-		Metadata: []byte{0xa1, 0x19, 0x02, 0xd1, 0x62, 0x6f, 0x6b},
+	for i := range n {
+		tx := &models.Transaction{
+			Hash:     bytes.Repeat([]byte{byte(0x41 + i)}, 32),
+			Metadata: []byte{0xa1, 0x19, 0x02, 0xd1, 0x62, 0x6f, 0x6b},
+		}
+		insertAdapterTransaction(t, raw, tx)
+		_, err := raw.Exec(
+			`INSERT INTO transaction_metadata_label (transaction_id, label, slot, cbor_value, json_value) VALUES (?, ?, ?, ?, ?)`,
+			tx.ID,
+			"721",
+			i+1,
+			[]byte{0x62, 0x6f, 0x6b},
+			`"ok"`,
+		)
+		require.NoError(t, err)
 	}
-	insertAdapterTransaction(t, raw, tx)
-	_, err := raw.Exec(`INSERT INTO transaction_metadata_label (transaction_id, label, slot, cbor_value, json_value) VALUES (?, ?, ?, ?, ?)`,
-		tx.ID, "721", 1, []byte{0x62, 0x6f, 0x6b}, `"ok"`)
-	require.NoError(t, err)
-
-	pastEnd := PaginationParams{Count: 10, Page: 1000000, Order: PaginationOrderAsc}
-	jsonRows, total, err := adapter.MetadataTransactions(context.Background(), 721, pastEnd)
-	require.NoError(t, err)
-	require.Equal(t, 1, total)
-	require.Empty(t, jsonRows)
-	cborRows, total, err := adapter.MetadataTransactionsCBOR(context.Background(), 721, pastEnd)
-	require.NoError(t, err)
-	require.Equal(t, 1, total)
-	require.Empty(t, cborRows)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	first := PaginationParams{Count: 10, Page: 1, Order: PaginationOrderAsc}
-	_, _, err = adapter.MetadataTransactions(ctx, 721, first)
-	require.ErrorIs(t, err, context.Canceled)
-	_, _, err = adapter.MetadataTransactionsCBOR(ctx, 721, first)
-	require.ErrorIs(t, err, context.Canceled)
+	return adapter, raw
 }
 
 func TestMetadataTransactionsPastEndSkipsPageQuery(t *testing.T) {
 	t.Parallel()
-	adapter, raw, _ := newDBBackedAdapter(t)
-	tx := &models.Transaction{
-		Hash:     bytes.Repeat([]byte{0x41}, 32),
-		Metadata: []byte{0xa1, 0x19, 0x02, 0xd1, 0x62, 0x6f, 0x6b},
-	}
-	insertAdapterTransaction(t, raw, tx)
-	_, err := raw.Exec(`INSERT INTO transaction_metadata_label (transaction_id, label, slot, cbor_value, json_value) VALUES (?, ?, ?, ?, ?)`,
-		tx.ID, "721", 1, []byte{0x62, 0x6f, 0x6b}, `"ok"`)
-	require.NoError(t, err)
+	const total = 3
+	adapter, raw := newMetadataLabelAdapter(t, total)
 	// The count reads only the label table, while the page query reads
 	// "transaction". Renaming that table makes any page query fail, so only a
 	// skipped query can succeed.
-	_, err = raw.Exec(`ALTER TABLE "transaction" RENAME TO transaction_hidden`)
+	_, err := raw.Exec(`ALTER TABLE "transaction" RENAME TO transaction_hidden`)
 	require.NoError(t, err)
 
-	pastEnd := PaginationParams{Count: 10, Page: 2, Order: PaginationOrderAsc}
-	rows, total, err := adapter.MetadataTransactions(context.Background(), 721, pastEnd)
-	require.NoError(t, err)
-	require.Equal(t, 1, total)
-	require.Empty(t, rows)
-	cborRows, total, err := adapter.MetadataTransactionsCBOR(context.Background(), 721, pastEnd)
-	require.NoError(t, err)
-	require.Equal(t, 1, total)
-	require.Empty(t, cborRows)
+	for _, order := range []string{PaginationOrderAsc, PaginationOrderDesc} {
+		for _, tc := range []struct {
+			name     string
+			params   PaginationParams
+			skipped  bool
+			wantRows int
+		}{
+			{"offset just inside", PaginationParams{Count: 1, Page: total}, false, 0},
+			{"offset equals total", PaginationParams{Count: 1, Page: total + 1}, true, 0},
+			{"far past the end", PaginationParams{Count: 10, Page: 1000000}, true, 0},
+			{"offset overflows int", PaginationParams{Count: 100, Page: math.MaxInt}, true, 0},
+		} {
+			t.Run(order+"/"+tc.name, func(t *testing.T) {
+				tc.params.Order = order
+				jsonRows, jsonTotal, jsonErr := adapter.MetadataTransactions(
+					context.Background(), 721, tc.params,
+				)
+				cborRows, cborTotal, cborErr := adapter.MetadataTransactionsCBOR(
+					context.Background(),
+					721,
+					tc.params,
+				)
+				if !tc.skipped {
+					require.Error(t, jsonErr)
+					require.Error(t, cborErr)
+					return
+				}
+				require.NoError(t, jsonErr)
+				require.NoError(t, cborErr)
+				require.Equal(t, total, jsonTotal)
+				require.Equal(t, total, cborTotal)
+				require.Empty(t, jsonRows)
+				require.Empty(t, cborRows)
+			})
+		}
+	}
+}
 
-	_, _, err = adapter.MetadataTransactions(
+func TestMetadataTransactionsEmptyLabel(t *testing.T) {
+	t.Parallel()
+	adapter, _ := newMetadataLabelAdapter(t, 0)
+	params := PaginationParams{Count: 10, Page: 1, Order: PaginationOrderAsc}
+
+	rows, total, err := adapter.MetadataTransactions(
 		context.Background(),
 		721,
-		PaginationParams{Count: 10, Page: 1, Order: PaginationOrderAsc},
+		params,
 	)
-	require.Error(t, err)
+	require.NoError(t, err)
+	require.Zero(t, total)
+	require.Empty(t, rows)
+	cborRows, total, err := adapter.MetadataTransactionsCBOR(
+		context.Background(),
+		721,
+		params,
+	)
+	require.NoError(t, err)
+	require.Zero(t, total)
+	require.Empty(t, cborRows)
+}
+
+func TestMetadataTransactionsCancelledContext(t *testing.T) {
+	t.Parallel()
+	adapter, _ := newMetadataLabelAdapter(t, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	params := PaginationParams{Count: 10, Page: 1, Order: PaginationOrderAsc}
+
+	_, _, err := adapter.MetadataTransactions(ctx, 721, params)
+	require.ErrorIs(t, err, context.Canceled)
+	_, _, err = adapter.MetadataTransactionsCBOR(ctx, 721, params)
+	require.ErrorIs(t, err, context.Canceled)
 }
 
 // mockNode implements BlockfrostNode for testing.
@@ -4830,7 +4906,9 @@ func TestHandleMetadataTransactionsPassRequestContext(t *testing.T) {
 			mock := &mockNode{}
 			b := newTestBlockfrost(mock)
 			req := httptest.NewRequest(http.MethodGet, tc.path, nil)
-			req = req.WithContext(context.WithValue(req.Context(), ctxKey{}, "request"))
+			req = req.WithContext(
+				context.WithValue(req.Context(), ctxKey{}, "request"),
+			)
 			req.SetPathValue("label", "721")
 			w := httptest.NewRecorder()
 			tc.handler(b, w, req)
@@ -4838,6 +4916,37 @@ func TestHandleMetadataTransactionsPassRequestContext(t *testing.T) {
 			require.Equal(t, http.StatusOK, w.Code)
 			require.NotNil(t, mock.metadataCtx)
 			assert.Equal(t, "request", mock.metadataCtx.Value(ctxKey{}))
+		})
+	}
+}
+
+func TestHandleMetadataTransactionsClientCancelWritesNothing(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name    string
+		path    string
+		handler func(*Blockfrost, http.ResponseWriter, *http.Request)
+	}{
+		{"json", "/api/v0/metadata/txs/labels/721", (*Blockfrost).handleMetadataTransactions},
+		{"cbor", "/api/v0/metadata/txs/labels/721/cbor", (*Blockfrost).handleMetadataTransactionsCBOR},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var logs bytes.Buffer
+			b := newTestBlockfrost(&mockNode{
+				metadataJSONErr: context.Canceled,
+				metadataCBORErr: context.Canceled,
+			})
+			b.logger = slog.New(slog.NewTextHandler(&logs, nil))
+			req := httptest.NewRequest(http.MethodGet, tc.path, nil)
+			req.SetPathValue("label", "721")
+			w := httptest.NewRecorder()
+			tc.handler(b, w, req)
+
+			assert.Empty(t, w.Body.String())
+			assert.Empty(t, logs.String())
+			assert.Empty(t, w.Header().Get("X-Pagination-Count-Total"))
 		})
 	}
 }
