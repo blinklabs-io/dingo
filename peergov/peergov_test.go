@@ -6817,6 +6817,7 @@ func TestPeerGovernor_ShouldExitBootstrap_SlotThreshold(t *testing.T) {
 		LedgerPeerProvider: mockProvider,
 		UseLedgerAfterSlot: 5000, // Threshold
 	})
+	bootstrapProgress := pg.bootstrapExitProgress()
 
 	// Add a bootstrap peer
 	pg.mu.Lock()
@@ -6832,7 +6833,7 @@ func TestPeerGovernor_ShouldExitBootstrap_SlotThreshold(t *testing.T) {
 		Connection: &PeerConnection{IsClient: true},
 	})
 
-	shouldExit, reason := pg.shouldExitBootstrap()
+	shouldExit, reason := pg.shouldExitBootstrapLocked(bootstrapProgress)
 	pg.mu.Unlock()
 
 	assert.True(t, shouldExit, "should exit bootstrap when slot > threshold")
@@ -6851,6 +6852,7 @@ func TestPeerGovernor_ShouldExitBootstrap_SlotThreshold_NoSuccessor(
 		LedgerPeerProvider: mockProvider,
 		UseLedgerAfterSlot: 5000, // Threshold
 	})
+	bootstrapProgress := pg.bootstrapExitProgress()
 
 	pg.mu.Lock()
 	pg.peers = append(pg.peers, &Peer{
@@ -6860,7 +6862,7 @@ func TestPeerGovernor_ShouldExitBootstrap_SlotThreshold_NoSuccessor(
 		Connection: &PeerConnection{IsClient: true},
 	})
 
-	shouldExit, _ := pg.shouldExitBootstrap()
+	shouldExit, _ := pg.shouldExitBootstrapLocked(bootstrapProgress)
 	pg.mu.Unlock()
 
 	assert.False(
@@ -6882,6 +6884,7 @@ func TestPeerGovernor_ShouldExitBootstrap_SlotThreshold_NotReached(
 		LedgerPeerProvider: mockProvider,
 		UseLedgerAfterSlot: 5000, // Threshold
 	})
+	bootstrapProgress := pg.bootstrapExitProgress()
 
 	// Add a bootstrap peer
 	pg.mu.Lock()
@@ -6891,7 +6894,7 @@ func TestPeerGovernor_ShouldExitBootstrap_SlotThreshold_NotReached(
 		State:   PeerStateWarm,
 	})
 
-	shouldExit, _ := pg.shouldExitBootstrap()
+	shouldExit, _ := pg.shouldExitBootstrapLocked(bootstrapProgress)
 	pg.mu.Unlock()
 
 	assert.False(
@@ -6906,6 +6909,7 @@ func TestPeerGovernor_ShouldExitBootstrap_LedgerPeerCount(t *testing.T) {
 		Logger:                slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		MinLedgerPeersForExit: 3,
 	})
+	bootstrapProgress := pg.bootstrapExitProgress()
 
 	// Add a bootstrap peer
 	pg.mu.Lock()
@@ -6925,7 +6929,7 @@ func TestPeerGovernor_ShouldExitBootstrap_LedgerPeerCount(t *testing.T) {
 		})
 	}
 
-	shouldExit, reason := pg.shouldExitBootstrap()
+	shouldExit, reason := pg.shouldExitBootstrapLocked(bootstrapProgress)
 	pg.mu.Unlock()
 
 	assert.True(
@@ -6943,6 +6947,7 @@ func TestPeerGovernor_ShouldExitBootstrap_LedgerPeerCount_ColdNotCounted(
 		Logger:                slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		MinLedgerPeersForExit: 3,
 	})
+	bootstrapProgress := pg.bootstrapExitProgress()
 
 	// Add a bootstrap peer
 	pg.mu.Lock()
@@ -6961,7 +6966,7 @@ func TestPeerGovernor_ShouldExitBootstrap_LedgerPeerCount_ColdNotCounted(
 		})
 	}
 
-	shouldExit, _ := pg.shouldExitBootstrap()
+	shouldExit, _ := pg.shouldExitBootstrapLocked(bootstrapProgress)
 	pg.mu.Unlock()
 
 	assert.False(
@@ -6978,6 +6983,7 @@ func TestPeerGovernor_ShouldExitBootstrap_LedgerPeerCount_ResponderOnlyWarmNotCo
 		Logger:                slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		MinLedgerPeersForExit: 3,
 	})
+	bootstrapProgress := pg.bootstrapExitProgress()
 
 	pg.mu.Lock()
 	pg.peers = append(pg.peers, &Peer{
@@ -6995,7 +7001,7 @@ func TestPeerGovernor_ShouldExitBootstrap_LedgerPeerCount_ResponderOnlyWarmNotCo
 		})
 	}
 
-	shouldExit, _ := pg.shouldExitBootstrap()
+	shouldExit, _ := pg.shouldExitBootstrapLocked(bootstrapProgress)
 	pg.mu.Unlock()
 
 	assert.False(
@@ -7012,6 +7018,7 @@ func TestPeerGovernor_ShouldExitBootstrap_LedgerPeerCount_ResponderOnlyHotNotCou
 		Logger:                slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		MinLedgerPeersForExit: 3,
 	})
+	bootstrapProgress := pg.bootstrapExitProgress()
 
 	pg.mu.Lock()
 	pg.peers = append(pg.peers, &Peer{
@@ -7029,7 +7036,7 @@ func TestPeerGovernor_ShouldExitBootstrap_LedgerPeerCount_ResponderOnlyHotNotCou
 		})
 	}
 
-	shouldExit, _ := pg.shouldExitBootstrap()
+	shouldExit, _ := pg.shouldExitBootstrapLocked(bootstrapProgress)
 	pg.mu.Unlock()
 
 	assert.False(
@@ -7049,6 +7056,7 @@ func TestPeerGovernor_ShouldExitBootstrap_SyncProgress(t *testing.T) {
 		SyncProgressProvider: mockSync,
 		SyncProgressForExit:  0.95, // 95% threshold
 	})
+	bootstrapProgress := pg.bootstrapExitProgress()
 
 	// Add a bootstrap peer
 	pg.mu.Lock()
@@ -7064,7 +7072,7 @@ func TestPeerGovernor_ShouldExitBootstrap_SyncProgress(t *testing.T) {
 		Connection: &PeerConnection{IsClient: true},
 	})
 
-	shouldExit, reason := pg.shouldExitBootstrap()
+	shouldExit, reason := pg.shouldExitBootstrapLocked(bootstrapProgress)
 	pg.mu.Unlock()
 
 	assert.True(
@@ -7087,6 +7095,7 @@ func TestPeerGovernor_ShouldExitBootstrap_SyncProgress_NoSuccessor(
 		SyncProgressProvider: mockSync,
 		SyncProgressForExit:  0.95,
 	})
+	bootstrapProgress := pg.bootstrapExitProgress()
 
 	pg.mu.Lock()
 	pg.peers = append(pg.peers, &Peer{
@@ -7096,7 +7105,7 @@ func TestPeerGovernor_ShouldExitBootstrap_SyncProgress_NoSuccessor(
 		Connection: &PeerConnection{IsClient: true},
 	})
 
-	shouldExit, _ := pg.shouldExitBootstrap()
+	shouldExit, _ := pg.shouldExitBootstrapLocked(bootstrapProgress)
 	pg.mu.Unlock()
 
 	assert.False(
@@ -7118,6 +7127,7 @@ func TestPeerGovernor_ShouldExitBootstrap_SyncProgress_NotReached(
 		SyncProgressProvider: mockSync,
 		SyncProgressForExit:  0.95, // 95% threshold
 	})
+	bootstrapProgress := pg.bootstrapExitProgress()
 
 	// Add a bootstrap peer
 	pg.mu.Lock()
@@ -7127,7 +7137,7 @@ func TestPeerGovernor_ShouldExitBootstrap_SyncProgress_NotReached(
 		State:   PeerStateWarm,
 	})
 
-	shouldExit, _ := pg.shouldExitBootstrap()
+	shouldExit, _ := pg.shouldExitBootstrapLocked(bootstrapProgress)
 	pg.mu.Unlock()
 
 	assert.False(
@@ -7147,6 +7157,7 @@ func TestPeerGovernor_ShouldExitBootstrap_NoBootstrapPeers(t *testing.T) {
 		SyncProgressProvider: mockSync,
 		SyncProgressForExit:  0.95,
 	})
+	bootstrapProgress := pg.bootstrapExitProgress()
 
 	// No bootstrap peers, only gossip peers
 	pg.mu.Lock()
@@ -7156,7 +7167,7 @@ func TestPeerGovernor_ShouldExitBootstrap_NoBootstrapPeers(t *testing.T) {
 		State:   PeerStateWarm,
 	})
 
-	shouldExit, _ := pg.shouldExitBootstrap()
+	shouldExit, _ := pg.shouldExitBootstrapLocked(bootstrapProgress)
 	pg.mu.Unlock()
 
 	assert.False(
@@ -7176,6 +7187,7 @@ func TestPeerGovernor_ShouldExitBootstrap_AlreadyExited(t *testing.T) {
 		SyncProgressProvider: mockSync,
 		SyncProgressForExit:  0.95,
 	})
+	bootstrapProgress := pg.bootstrapExitProgress()
 
 	// Add bootstrap peer and mark as already exited
 	pg.mu.Lock()
@@ -7186,7 +7198,7 @@ func TestPeerGovernor_ShouldExitBootstrap_AlreadyExited(t *testing.T) {
 	})
 	pg.bootstrapExited = true
 
-	shouldExit, _ := pg.shouldExitBootstrap()
+	shouldExit, _ := pg.shouldExitBootstrapLocked(bootstrapProgress)
 	pg.mu.Unlock()
 
 	assert.False(t, shouldExit, "should not exit bootstrap when already exited")
