@@ -221,7 +221,7 @@ func devnetRunDirectory(dataDir string) (string, error) {
 // anything swapped in after this point is still rejected by the walk.
 func resolveExistingPrefix(path string) string {
 	existing := path
-	var suffix []string
+	tail := ""
 	for {
 		if _, err := os.Lstat(existing); err == nil {
 			break
@@ -230,17 +230,14 @@ func resolveExistingPrefix(path string) string {
 		if parent == existing {
 			return path
 		}
-		suffix = append(suffix, filepath.Base(existing))
+		tail = filepath.Join(filepath.Base(existing), tail)
 		existing = parent
 	}
 	resolved, err := filepath.EvalSymlinks(existing)
 	if err != nil {
 		return path
 	}
-	for i := len(suffix) - 1; i >= 0; i-- {
-		resolved = filepath.Join(resolved, suffix[i])
-	}
-	return resolved
+	return filepath.Join(resolved, tail)
 }
 
 func prepareLockedDevnetState(
