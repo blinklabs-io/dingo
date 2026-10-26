@@ -79,10 +79,12 @@ func TestRecentEbArrivalsRing(t *testing.T) {
 		gatherEbArrivalRing(t, reg, recentEbArrivalTxCountMetricName),
 	)
 
-	// Repeat keeps the first; stale lower slot is dropped; a different block
-	// at the same slot and a wrapped newer slot replace.
+	// Repeat keeps the first and is not observed again. A stale lower slot
+	// is not stored, since the ring keeps the newer slot, but it is still a
+	// first arrival and is observed. A different block at the same slot and a
+	// wrapped newer slot replace.
 	require.False(t, r.record(17, []byte{1}, 9, 9))
-	require.False(t, r.record(1, []byte{7}, 9, 9))
+	require.True(t, r.record(1, []byte{7}, 9, 9))
 	require.True(t, r.record(18, []byte{3}, 3.5, 6))
 	require.True(t, r.record(33, []byte{4}, 4.5, 7))
 	require.Equal(t,
