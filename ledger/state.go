@@ -2244,9 +2244,16 @@ type LedgerState struct {
 	// cleanupWG, so a lifecycle test can hold a run in flight and assert
 	// that Close drains it.
 	cleanupConsumedUtxosRunHook func()
-	// trustedPruneRows, when positive, replaces cleanupConsumedUtxoBatchSize
-	// as the per-delete row limit of the trusted-batch cleanup. Test only.
+	// trustedPruneRows, when positive, replaces trustedBatchPruneRows as the
+	// per-delete row limit of the trusted-batch cleanup. Test only.
 	trustedPruneRows int
+	// trustedPruneEvery, when positive, replaces trustedBatchPruneEvery as
+	// the number of trusted batches between trusted-batch cleanups. Test
+	// only.
+	trustedPruneEvery int
+	// trustedPruneBudget, when positive, replaces trustedBatchPruneBudget.
+	// Test only.
+	trustedPruneBudget time.Duration
 	// startupRewardPrecomputeHook is test-only observability for the startup
 	// catch-up boundary; it runs after the real queue call.
 	startupRewardPrecomputeHook func()
@@ -4675,23 +4682,57 @@ func (ls *LedgerState) pruneConsumedUtxosUpTo(
 	return pruned, floor, nil
 }
 
-// trustedBatchPruneBudget bounds how long the consumed-UTxO cleanup after one
-// ApplyTrustedBatch call may run. The cleanup drains every prunable row it
-// can, in cleanupConsumedUtxoBatchSize deletes, so it keeps up with however
-// many outputs a dense batch spends; what the budget leaves behind drains
-// after the next batch. A stream catch-up's no-progress timeout is five
-// minutes per committed batch, and a batch commit itself takes seconds, so
-// thirty seconds keeps the cleanup well inside it.
+// trustedBatchPruneEvery is how many trusted batches commit between runs of
+// the trusted-batch consumed-UTxO cleanup, and trustedBatchPruneRows how many
+// rows each of its deletes removes. A spent row costs less to delete the more
+// rows its transaction deletes with it, so draining the rows sixteen batches
+// spent in one or two large transactions costs less than draining each
+// batch's in a small one.
+const (
+	trustedBatchPruneEvery = 16
+	trustedBatchPruneRows  = 20_000
+)
+
+// trustedBatchPruneBudget bounds how long one run of the trusted-batch
+// consumed-UTxO cleanup may take. The cleanup drains every prunable row it
+// can, in trustedBatchPruneRows deletes, so it keeps up with however many
+// outputs the batches since the last run spent; what the budget leaves behind
+// drains after the next batch, or in DrainTrustedPrune, which has no budget.
+// A stream catch-up's no-progress timeout is five minutes per committed
+// batch, and a batch commit itself takes seconds, so thirty seconds keeps the
+// cleanup well inside it.
 const trustedBatchPruneBudget = 30 * time.Second
+
+// trustedPruneOutcome is how a run of the trusted-batch consumed-UTxO
+// cleanup ended.
+type trustedPruneOutcome int
+
+const (
+	// trustedPruneDrained: nothing prunable is left up to the target.
+	trustedPruneDrained trustedPruneOutcome = iota
+	// trustedPruneSkipped: another cleanup run held the write connection.
+	trustedPruneSkipped
+	// trustedPruneUnfinished: the time budget ran out with rows left.
+	trustedPruneUnfinished
+	// trustedPruneStopped: the cleanup failed, its context ended or the
+	// ledger is closing.
+	trustedPruneStopped
+)
+
+// errTrustedPruneClosing stops a trusted-batch cleanup once Close has begun.
+var errTrustedPruneClosing = errors.New(
+	"consumed UTxO cleanup: ledger is closing",
+)
 
 // trustedPruneBacklogProbeLimit caps the rows read to report the backlog a
 // budget-limited cleanup leaves behind; a larger backlog is logged as capped.
 const trustedPruneBacklogProbeLimit = 10_000
 
 // pruneConsumedUtxosAfterTrustedBatch runs the routine consumed-UTxO cleanup
-// after a trusted batch commits, without the catch-up deferral
-// cleanupConsumedUtxos applies, and up to the committed tip rather than the
-// stability window behind it. A trusted batch lies at or below a certified
+// after trusted batches commit, without the catch-up deferral
+// cleanupConsumedUtxos applies, and up to target, the tip a trusted batch
+// committed, rather than the stability window behind it; a ledger tip below
+// target since a rollback caps it. A trusted batch lies at or below a certified
 // immutable tip, which no rollback can reach, and the batch's own
 // UtxosDeleteSpentInBatch already raises the prune floor to its last slot.
 // While trusted batches arrive the node is far behind the network tip, so the
@@ -4700,30 +4741,39 @@ const trustedPruneBacklogProbeLimit = 10_000
 // index on utxo with them. The floor is capped by acquired LocalStateQuery
 // points and persisted before anything is deleted, exactly as in a routine
 // sweep, so pins and rollbacks below it are refused.
+//
+// It reports whether it drained every prunable row up to target, the rows it
+// deleted, and the error that stopped it when it failed, was cancelled or
+// found the ledger closing.
 func (ls *LedgerState) pruneConsumedUtxosAfterTrustedBatch(
 	ctx context.Context,
-) {
+	target uint64,
+) (trustedPruneOutcome, int, error) {
 	if ls.db.StorageMode() == types.StorageModeAPI {
-		return
+		return trustedPruneDrained, 0, nil
 	}
 	if !ls.beginCleanupConsumedUtxosRun() {
-		return
+		return trustedPruneStopped, 0, errTrustedPruneClosing
 	}
 	defer ls.cleanupWG.Done()
-	// A periodic or epoch run in flight holds the write connection; the next
-	// batch prunes instead.
+	// A periodic or epoch run in flight holds the write connection; the
+	// caller tries again.
 	if !ls.cleanupConsumedUtxosRunning.CompareAndSwap(false, true) {
-		return
+		return trustedPruneSkipped, 0, nil
 	}
 	defer ls.cleanupConsumedUtxosRunning.Store(false)
 	ls.RLock()
-	tipSlot := ls.currentTip.Point.Slot
+	tipSlot := min(ls.currentTip.Point.Slot, target)
 	eraId := ls.currentEra.Id
 	ls.RUnlock()
 	stabilityWindow := ls.calculateStabilityWindowForEra(eraId)
-	rows := cleanupConsumedUtxoBatchSize
+	rows := trustedBatchPruneRows
 	if ls.trustedPruneRows > 0 {
 		rows = ls.trustedPruneRows
+	}
+	budget := trustedBatchPruneBudget
+	if ls.trustedPruneBudget > 0 {
+		budget = ls.trustedPruneBudget
 	}
 	start := time.Now()
 	var (
@@ -4736,7 +4786,7 @@ func (ls *LedgerState) pruneConsumedUtxosAfterTrustedBatch(
 			ctx, tipSlot, stabilityWindow, rows,
 		)
 		if err != nil {
-			return
+			return trustedPruneStopped, total, err
 		}
 		total += pruned
 		floor = prunedTo
@@ -4744,12 +4794,12 @@ func (ls *LedgerState) pruneConsumedUtxosAfterTrustedBatch(
 			drained = true
 			break
 		}
-		if time.Since(start) >= trustedBatchPruneBudget {
+		if time.Since(start) >= budget {
 			break
 		}
 	}
-	if ctx.Err() != nil {
-		return
+	if err := ctx.Err(); err != nil {
+		return trustedPruneStopped, total, err
 	}
 	backlog := 0
 	if !drained {
@@ -4770,6 +4820,10 @@ func (ls *LedgerState) pruneConsumedUtxosAfterTrustedBatch(
 		"prunable_backlog_capped", backlog >= trustedPruneBacklogProbeLimit,
 		"duration", time.Since(start),
 	)
+	if !drained {
+		return trustedPruneUnfinished, total, nil
+	}
+	return trustedPruneDrained, total, nil
 }
 
 // withDestructiveDatabaseTransition keeps coordinated API and lifecycle
