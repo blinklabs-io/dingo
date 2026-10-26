@@ -15438,6 +15438,7 @@ func (ls *LedgerState) txValidationSnapshot() txValidationSnapshot {
 // the root package, which is where *LedgerState is wired in as its validator.
 var (
 	_ forging.TxValidationSessionProvider               = (*LedgerState)(nil)
+	_ forging.ParentPinnedTxValidationSessionProvider   = (*LedgerState)(nil)
 	_ lcommon.GenesisDelegationState                    = (*LedgerState)(nil)
 	_ lcommon.ClassicProtocolParameterUpdateWindowState = (*LedgerState)(nil)
 )
@@ -15524,6 +15525,48 @@ func (ls *LedgerState) WithResolvingTxValidationSession(ctx context.Context,
 	) error {
 		return fn(validate, stillCurrent, commitIfCurrent, resolve)
 	})
+}
+
+// WithTxValidationSessionAtParent is WithTxValidationSession pinned to a
+// ledger tip of parentHash: when the published tip is anything else, fn is not
+// called and the error wraps forging.ErrTxValidationParentMismatch. The block
+// forger selects an announced endorser block's transactions through it, so
+// they are validated against the state of the ranking block's parent rather
+// than a trailing ledger that has not yet applied it.
+func (ls *LedgerState) WithTxValidationSessionAtParent(ctx context.Context,
+	parentHash []byte,
+	fn func(
+		validate func(
+			tx ledger.Transaction,
+			consumedUtxos map[utxoref.Key]struct{},
+			createdUtxos map[utxoref.Key]lcommon.Utxo,
+			accounts *utxoref.StateOverlay,
+		) error,
+		stillCurrent func() bool,
+		commitIfCurrent func(func() error) (bool, error),
+	) error,
+) error {
+	if parentHash == nil {
+		// A nil expected parent disables the check below; the origin
+		// parent is the empty hash.
+		parentHash = []byte{}
+	}
+	err := ls.withTxValidationSession(ctx, parentHash, nil, false, false, func(
+		validate func(ledger.Transaction, map[utxoref.Key]struct{}, map[utxoref.Key]lcommon.Utxo, *utxoref.StateOverlay) error,
+		stillCurrent func() bool,
+		commitIfCurrent func(func() error) (bool, error),
+		_ txValidationApplyFunc,
+	) error {
+		return fn(validate, stillCurrent, commitIfCurrent)
+	})
+	if errors.Is(err, ErrLeiosValidationParentSuperseded) {
+		return fmt.Errorf(
+			"%w: %w",
+			forging.ErrTxValidationParentMismatch,
+			err,
+		)
+	}
+	return err
 }
 
 func (ls *LedgerState) withTxValidationSession(ctx context.Context,

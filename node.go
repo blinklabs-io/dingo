@@ -691,6 +691,12 @@ var (
 // the method would leave those inputs out of the index with no error.
 var _ mempool.ResolvingTxValidationSessionProvider = (*ledger.LedgerState)(nil)
 
+// The mempool evicts a Leios certifying ranking block's certified closure as
+// confirmed (and restores it on rollback) through the same validator, again
+// by interface assertion; losing the method would leave applied closure
+// transactions in the pool until revalidation happened to catch them.
+var _ mempool.CertifiedClosureProvider = (*ledger.LedgerState)(nil)
+
 //nolint:contextcheck // Run is the lifecycle boundary and derives n.ctx from the caller context.
 func (n *Node) Run(ctx context.Context) (runErr error) {
 	// A signal can cancel ctx while this function is still constructing

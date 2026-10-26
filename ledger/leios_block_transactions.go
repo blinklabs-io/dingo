@@ -22,6 +22,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/safedecode"
+	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 )
@@ -48,15 +49,15 @@ func (ls *LedgerState) BlockTransactions(
 		return nil, fmt.Errorf("decode block %x: %w", block.Hash, err)
 	}
 	transactions := decoded.Transactions()
-	header, ok := decoded.Header().(leiosBlockCertifierHeader)
-	if !ok {
-		if block.Type == uint(dijkstra.BlockTypeDijkstra) {
-			return nil, fmt.Errorf("dijkstra block %x has no Leios header", block.Hash)
-		}
-		return transactions, nil
+	if _, ok := decoded.Header().(leiosBlockCertifierHeader); !ok &&
+		block.Type == uint(dijkstra.BlockTypeDijkstra) {
+		return nil, fmt.Errorf("dijkstra block %x has no Leios header", block.Hash)
 	}
-	certified, present := header.LeiosCertified()
-	if !present || !certified {
+	closure, err := ls.CertifiedClosureTransactions(ctx, decoded)
+	if err != nil {
+		return nil, err
+	}
+	if closure == nil {
 		return transactions, nil
 	}
 	if len(transactions) != 0 {
@@ -64,6 +65,31 @@ func (ls *LedgerState) BlockTransactions(
 			"certifying Dijkstra block %x also contains ranking-block transactions",
 			block.Hash,
 		)
+	}
+	return closure, nil
+}
+
+// CertifiedClosureTransactions returns the transactions a certifying ranking
+// block applies from the certified closure: the endorser block its parent
+// announced, in manifest order. It returns nil for a block that certifies
+// nothing. The ledger applies these transactions with the ranking block, so
+// they are as confirmed as the block's own transactions, and a rollback of the
+// block undoes them; the mempool uses this to evict them and, on a rollback,
+// to restore them, exactly as it does for the block's own transactions.
+func (ls *LedgerState) CertifiedClosureTransactions(
+	ctx context.Context,
+	decoded ledger.Block,
+) ([]lcommon.Transaction, error) {
+	if decoded == nil {
+		return nil, nil
+	}
+	header, ok := decoded.Header().(leiosBlockCertifierHeader)
+	if !ok {
+		return nil, nil
+	}
+	certified, present := header.LeiosCertified()
+	if !present || !certified {
+		return nil, nil
 	}
 
 	// The parent may itself have been rolled back, as when WatchTx rebuilds
