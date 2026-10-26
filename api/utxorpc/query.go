@@ -736,15 +736,23 @@ func (s *queryServiceServer) ReadData(
 		seen[string(key)] = struct{}{}
 		unique = append(unique, key)
 	}
-	var datums []*models.Datum
+	datums := []*models.Datum{}
 	if len(unique) > 0 {
-		datums, err = s.utxorpc.config.LedgerState.Datums(ctx, unique)
+		found, err := s.utxorpc.config.LedgerState.Datums(ctx, unique)
 		if err != nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return nil, readStateContextError(ctxErr)
 			}
 			return nil, fmt.Errorf("get datums: %w", err)
 		}
+		if len(found) != len(unique) {
+			return nil, fmt.Errorf(
+				"get datums: got %d results for %d hashes",
+				len(found),
+				len(unique),
+			)
+		}
+		datums = found
 	}
 	for i, key := range unique {
 		datum := datums[i]
