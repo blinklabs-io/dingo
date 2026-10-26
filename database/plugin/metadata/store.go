@@ -834,10 +834,11 @@ type UtxoStore interface {
 	) ([]models.Utxo, error)
 
 	// GetUtxosByAddressBounded is GetUtxosByAddress with a second required,
-	// positive bound (the third argument) on the native-asset rows loaded
-	// across all candidates. Exceeding either bound yields
-	// models.ErrTooManyUtxoResults; at most one asset row past the bound is
-	// materialized.
+	// positive bound (the third argument) on the candidate rows plus their
+	// native-asset rows: one entry per UTxO and one per asset. Rows alone
+	// past it are refused before any asset loads, and asset loading stops at
+	// the first row past the remaining budget. Exceeding either bound yields
+	// models.ErrTooManyUtxoResults.
 	GetUtxosByAddressBounded(
 		[]models.UtxoAddressPattern,
 		int,

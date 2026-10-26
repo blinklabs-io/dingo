@@ -820,7 +820,7 @@ func TestAccountCoinsRefusesOversizedAccounts(t *testing.T) {
 			)
 			require.False(t, got.Retriable)
 			require.EqualValues(t, 2, deps.ledger.completeLimit.Load())
-			require.EqualValues(t, 4, deps.ledger.completeAssetLimit.Load())
+			require.EqualValues(t, 4, deps.ledger.completeCoinLimit.Load())
 		})
 	}
 }

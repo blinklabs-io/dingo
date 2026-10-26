@@ -4292,14 +4292,19 @@ remains the mechanism for a caller that wants a bounded page rather than an
 error on overflow.
 
 `GetUtxosByAddressBounded` (and `Database.UtxosByAddressBounded`) add a
-second required, positive `maxAssets` bound on the native-asset rows loaded
-for the candidates. The row bound alone does not bound the result, since
-every candidate can carry as many assets as the maximum value size allows.
-Asset rows are loaded in parameter-limit chunks of UTxO ids; each chunk's
-query carries `LIMIT` of the remaining budget plus one (the ids are
-deduplicated, so no asset row repeats across chunks), and the first row past
-the budget returns `models.ErrTooManyUtxoResults`. At most `maxAssets+1`
-asset rows are materialized. Mesh `/account/coins` uses this read.
+second required, positive `maxEntries` bound on the candidate rows plus
+their native-asset rows: one entry per UTxO and one per asset, the shape of
+a Mesh coin list. The row bound alone does not bound the result, since every
+candidate can carry as many assets as the maximum value size allows. Once
+the candidate rows are collected, more rows than `maxEntries` are refused
+before any asset loads; otherwise the remaining budget is `maxEntries` minus
+the row count. Asset rows are loaded in parameter-limit chunks of UTxO ids;
+each chunk's query carries `LIMIT` of the remaining budget plus one (the ids
+are deduplicated, so no asset row repeats across chunks), and the first row
+past the budget returns `models.ErrTooManyUtxoResults`. Every refusal happens
+in the metadata read, so `Database.UtxosByAddressBounded` loads no output
+CBOR for a refused set; an accepted set loads CBOR for each of its at most
+`maxResults` rows. Mesh `/account/coins` uses this read.
 
 The `LIMIT` clause's own bind parameter is reserved when `GetUtxosByAddress`
 decides whether a chunk's accumulated WHERE-clause arguments have reached

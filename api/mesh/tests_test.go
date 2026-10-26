@@ -893,10 +893,10 @@ type fakeLedgerState struct {
 	pparams       lcommon.ProtocolParameters
 	slotToTime    func(slot uint64) (time.Time, error)
 	utxos         func(addrs []lcommon.Address) ([]models.Utxo, error)
-	// completeLimit and completeAssetLimit record the maxResults and
-	// maxAssets of the latest complete read.
-	completeLimit      atomic.Int64
-	completeAssetLimit atomic.Int64
+	// completeLimit and completeCoinLimit record the maxResults and
+	// maxCoins of the latest complete read.
+	completeLimit     atomic.Int64
+	completeCoinLimit atomic.Int64
 	utxosComplete func(
 		ctx context.Context,
 		addrs []lcommon.Address,
@@ -941,10 +941,10 @@ func (f *fakeLedgerState) UtxosByAddressComplete(
 	ctx context.Context,
 	addrs []lcommon.Address,
 	maxResults int,
-	maxAssets int,
+	maxCoins int,
 ) ([]models.Utxo, error) {
 	f.completeLimit.Store(int64(maxResults))
-	f.completeAssetLimit.Store(int64(maxAssets))
+	f.completeCoinLimit.Store(int64(maxCoins))
 	var (
 		utxos []models.Utxo
 		err   error
@@ -960,11 +960,11 @@ func (f *fakeLedgerState) UtxosByAddressComplete(
 	if len(utxos) > maxResults {
 		return nil, models.ErrTooManyUtxoResults
 	}
-	assets := 0
+	coins := len(utxos)
 	for i := range utxos {
-		assets += len(utxos[i].Assets)
+		coins += len(utxos[i].Assets)
 	}
-	if assets > maxAssets {
+	if coins > maxCoins {
 		return nil, models.ErrTooManyUtxoResults
 	}
 	return utxos, nil

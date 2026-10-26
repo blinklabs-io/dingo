@@ -124,8 +124,6 @@ func (s *Server) handleAccountCoins(
 		r.Context(),
 		[]ledger.Address{addr},
 		s.config.maxAccountCoinUtxos,
-		// Every asset is a Coin, so the coin budget also bounds the asset
-		// rows storage may load.
 		s.config.maxAccountCoins,
 	)
 	if err != nil {
@@ -147,8 +145,8 @@ func (s *Server) handleAccountCoins(
 		return
 	}
 
-	// Native assets expand into extra Coin entries, so the row bound alone
-	// does not bound the encoded response.
+	// Storage already enforces maxAccountCoins over rows plus assets; this
+	// recount is a backstop on the encoded response.
 	coinCount := len(utxos)
 	for i := range utxos {
 		coinCount += len(utxos[i].Assets)

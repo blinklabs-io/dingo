@@ -1930,22 +1930,24 @@ func (s *Store) GetUtxosByAddress(
 }
 
 // GetUtxosByAddressBounded is GetUtxosByAddress with a second required,
-// positive bound on the native-asset rows loaded across all candidates. The
-// row bound alone does not bound the result: every candidate can carry as
-// many assets as the protocol's maximum value size allows. Loading stops at
-// the first asset row past maxAssets and returns
-// models.ErrTooManyUtxoResults, so no more than maxAssets+1 asset rows are
+// positive bound, maxEntries, on the candidate rows plus the native-asset
+// rows attached to them: one entry per UTxO and one per asset. The row bound
+// alone does not bound the result, since every candidate can carry as many
+// assets as the protocol's maximum value size allows. When the candidate rows
+// alone exceed maxEntries no asset is loaded; otherwise asset loading stops
+// at the first row past the remaining budget. Either case returns
+// models.ErrTooManyUtxoResults, so at most maxEntries+1 entries are
 // materialized.
 func (s *Store) GetUtxosByAddressBounded(
 	patterns []models.UtxoAddressPattern,
 	maxResults int,
-	maxAssets int,
+	maxEntries int,
 	txn types.Txn,
 ) ([]models.Utxo, error) {
-	if maxAssets <= 0 {
+	if maxEntries <= 0 {
 		return nil, fmt.Errorf(
-			"GetUtxosByAddressBounded: maxAssets must be positive, got %d",
-			maxAssets,
+			"GetUtxosByAddressBounded: maxEntries must be positive, got %d",
+			maxEntries,
 		)
 	}
 	return s.utxosByAddressPatterns(
@@ -1954,7 +1956,7 @@ func (s *Store) GetUtxosByAddressBounded(
 		"utxo.deleted_slot = 0",
 		nil,
 		maxResults,
-		maxAssets,
+		maxEntries,
 		txn,
 	)
 }
@@ -1985,15 +1987,15 @@ func (s *Store) GetUtxosByAddressAsOf(
 // GetUtxosByAddress and GetUtxosByAddressAsOf. liveness selects which rows
 // count as unspent and is ANDed ahead of every chunk's address branches;
 // livenessArgs are its bind parameters and count against each chunk's
-// parameter budget. maxAssets bounds the asset rows loaded for the result;
-// 0 leaves asset loading unbounded.
+// parameter budget. maxEntries bounds the result rows plus their asset rows
+// (see GetUtxosByAddressBounded); 0 leaves asset loading unbounded.
 func (s *Store) utxosByAddressPatterns(
 	name string,
 	patterns []models.UtxoAddressPattern,
 	liveness string,
 	livenessArgs []any,
 	maxResults int,
-	maxAssets int,
+	maxEntries int,
 	txn types.Txn,
 ) ([]models.Utxo, error) {
 	if len(patterns) == 0 {
@@ -2106,12 +2108,24 @@ func (s *Store) utxosByAddressPatterns(
 	if err := runQuery(); err != nil {
 		return nil, err
 	}
+	assetBudget := -1
+	if maxEntries > 0 {
+		if len(ret) > maxEntries {
+			return nil, fmt.Errorf(
+				"%s: %w (maxEntries=%d)",
+				name,
+				models.ErrTooManyUtxoResults,
+				maxEntries,
+			)
+		}
+		assetBudget = maxEntries - len(ret)
+	}
 	pointers := make([]*models.Utxo, len(ret))
 	for i := range ret {
 		pointers[i] = &ret[i]
 	}
 	if err := s.loadUtxoAssetsPointersBounded(
-		ctx, db, pointers, maxAssets,
+		ctx, db, pointers, assetBudget,
 	); err != nil {
 		if errors.Is(err, models.ErrTooManyUtxoResults) {
 			return nil, fmt.Errorf("%s: %w", name, err)
@@ -3167,13 +3181,14 @@ func (s *Store) loadUtxoAssetsPointers(
 	db queryer,
 	utxos []*models.Utxo,
 ) error {
-	return s.loadUtxoAssetsPointersBounded(ctx, db, utxos, 0)
+	return s.loadUtxoAssetsPointersBounded(ctx, db, utxos, -1)
 }
 
-// loadUtxoAssetsPointersBounded attaches asset rows to utxos. A positive
+// loadUtxoAssetsPointersBounded attaches asset rows to utxos. A non-negative
 // maxAssets caps the rows loaded across every chunk: each chunk's query is
 // limited to the remaining budget plus one, and the first row past the
-// budget returns models.ErrTooManyUtxoResults. 0 loads every row.
+// budget returns models.ErrTooManyUtxoResults. A budget of 0 admits no asset
+// row; a negative one loads every row.
 func (s *Store) loadUtxoAssetsPointersBounded(
 	ctx context.Context,
 	db queryer,
@@ -3200,7 +3215,7 @@ func (s *Store) loadUtxoAssetsPointersBounded(
 		byID[utxo.ID] = append(byID[utxo.ID], utxo)
 	}
 	chunkSize := s.dialect.ParameterLimit()
-	if maxAssets > 0 {
+	if maxAssets >= 0 {
 		// Reserve the LIMIT clause's bind parameter.
 		chunkSize = max(1, chunkSize-1)
 	}
@@ -3215,7 +3230,7 @@ func (s *Store) loadUtxoAssetsPointersBounded(
 			"SELECT name, policy_id, fingerprint, id, utxo_id, amount FROM asset WHERE utxo_id IN (" + bindPlaceholders(
 			end-start,
 		) + ") ORDER BY id"
-		if maxAssets > 0 {
+		if maxAssets >= 0 {
 			// IDs are deduplicated, so no row repeats across chunks and the
 			// remaining budget is exact.
 			query += " LIMIT ?"
@@ -3239,7 +3254,7 @@ func (s *Store) loadUtxoAssetsPointersBounded(
 					continue
 				}
 				loaded++
-				if maxAssets > 0 && loaded > maxAssets {
+				if maxAssets >= 0 && loaded > maxAssets {
 					return fmt.Errorf(
 						"utxo assets exceeded maxAssets=%d: %w",
 						maxAssets,

@@ -12284,9 +12284,11 @@ is refused before starting its ledger query with `ErrUnavailable` rather than
 queued. Every successful request still returns the complete result. The read
 is bounded at the database: an address with more than 10,000 live UTxOs, or
 whose native-asset expansion exceeds 50,000 coins, is refused with the
-non-retriable `ErrAccountTooLarge` (code 12) instead of being truncated. The
-coin budget also caps the asset rows storage loads, so an oversized asset set
-is refused before it is materialized.
+non-retriable `ErrAccountTooLarge` (code 12) instead of being truncated.
+Storage enforces both bounds in the metadata read, counting the coin budget
+as UTxO rows plus asset rows, so a refused account loads no output CBOR and
+at most one asset row past the budget. An accepted account loads output CBOR
+for each of its at most 10,000 UTxOs.
 `/account/balance` is unchanged.
 
 Implements the Mesh (formerly Rosetta) API specification for wallet integration and chain analysis. Provides endpoints for network status, account balances, block queries, transaction construction, and mempool access.

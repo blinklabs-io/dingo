@@ -14957,19 +14957,20 @@ func (ls *LedgerState) UtxosByAddress(
 
 // UtxosByAddressComplete returns every UTxO for the requested addresses and
 // stops the read when ctx is canceled. maxResults bounds the UTxO rows and
-// maxAssets the native-asset rows across them; both must be positive. A set
-// larger than either fails with models.ErrTooManyUtxoResults rather than
+// maxCoins the UTxO rows plus their native assets (one coin per UTxO and one
+// per asset); both must be positive. A set larger than either fails with
+// models.ErrTooManyUtxoResults before output CBOR is loaded, rather than
 // being truncated or fully materialized.
 func (ls *LedgerState) UtxosByAddressComplete(
 	ctx context.Context,
 	addrs []ledger.Address,
 	maxResults int,
-	maxAssets int,
+	maxCoins int,
 ) ([]models.Utxo, error) {
-	if maxResults <= 0 || maxAssets <= 0 {
-		return nil, errors.New("maxResults and maxAssets must be positive")
+	if maxResults <= 0 || maxCoins <= 0 {
+		return nil, errors.New("maxResults and maxCoins must be positive")
 	}
-	return ls.db.UtxosByAddressBounded(ctx, addrs, maxResults, maxAssets, nil)
+	return ls.db.UtxosByAddressBounded(ctx, addrs, maxResults, maxCoins, nil)
 }
 
 // UtxosByAddressBoundedPage returns an ordered, resumable UTxO page while

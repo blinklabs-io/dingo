@@ -22,10 +22,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestGetUtxosByAddressBoundedEnforcesMaxAssets spreads the asset load over
+// TestGetUtxosByAddressBoundedEnforcesMaxEntries spreads the asset load over
 // several chunks with a small parameter limit, so the per-chunk LIMIT must
-// carry the remaining budget across chunks for the bound to be exact.
-func TestGetUtxosByAddressBoundedEnforcesMaxAssets(t *testing.T) {
+// carry the remaining budget across chunks for the bound to be exact. The
+// budget counts one entry per UTxO plus one per asset.
+func TestGetUtxosByAddressBoundedEnforcesMaxEntries(t *testing.T) {
 	t.Parallel()
 	store := newMigratedSQLiteStore(t)
 	d := store.dialect.(dialect)
@@ -59,9 +60,10 @@ func TestGetUtxosByAddressBoundedEnforcesMaxAssets(t *testing.T) {
 	limitSQLiteVariableNumber(t, store.writeDB, d.ParameterLimit())
 	patterns := []models.UtxoAddressPattern{{PaymentPart: paymentKey}}
 	const totalAssets = utxoCount * assetsPerUtxo
+	const entries = utxoCount + totalAssets
 
 	got, err := store.GetUtxosByAddressBounded(
-		patterns, utxoCount, totalAssets, nil,
+		patterns, utxoCount, entries, nil,
 	)
 	require.NoError(t, err)
 	require.Len(t, got, utxoCount)
@@ -71,19 +73,37 @@ func TestGetUtxosByAddressBoundedEnforcesMaxAssets(t *testing.T) {
 	}
 	require.Equal(t, totalAssets, loaded)
 
+	// Assets alone fit; rows plus assets do not.
 	_, err = store.GetUtxosByAddressBounded(
-		patterns, utxoCount, totalAssets-1, nil,
+		patterns, utxoCount, totalAssets, nil,
 	)
 	require.ErrorIs(t, err, models.ErrTooManyUtxoResults)
 
 	_, err = store.GetUtxosByAddressBounded(
-		patterns, utxoCount-1, totalAssets, nil,
+		patterns, utxoCount, entries-1, nil,
 	)
 	require.ErrorIs(t, err, models.ErrTooManyUtxoResults)
 
-	for _, maxAssets := range []int{0, -1} {
+	// The rows alone exceed the budget, so no asset is loaded.
+	_, err = store.GetUtxosByAddressBounded(
+		patterns, utxoCount, utxoCount-1, nil,
+	)
+	require.ErrorIs(t, err, models.ErrTooManyUtxoResults)
+
+	// Exactly the rows: the remaining asset budget is zero.
+	_, err = store.GetUtxosByAddressBounded(
+		patterns, utxoCount, utxoCount, nil,
+	)
+	require.ErrorIs(t, err, models.ErrTooManyUtxoResults)
+
+	_, err = store.GetUtxosByAddressBounded(
+		patterns, utxoCount-1, entries, nil,
+	)
+	require.ErrorIs(t, err, models.ErrTooManyUtxoResults)
+
+	for _, maxEntries := range []int{0, -1} {
 		_, err = store.GetUtxosByAddressBounded(
-			patterns, utxoCount, maxAssets, nil,
+			patterns, utxoCount, maxEntries, nil,
 		)
 		require.Error(t, err)
 	}

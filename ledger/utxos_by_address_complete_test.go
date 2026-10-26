@@ -67,20 +67,22 @@ func TestUtxosByAddressCompleteEnforcesMaxResults(t *testing.T) {
 	ls := &LedgerState{db: db}
 	addrs := []lcommon.Address{addr}
 
-	got, err := ls.UtxosByAddressComplete(t.Context(), addrs, total, total)
+	// One coin per UTxO plus one per asset.
+	const coins = 2 * total
+	got, err := ls.UtxosByAddressComplete(t.Context(), addrs, total, coins)
 	require.NoError(t, err)
 	require.Len(t, got, total)
 	for i := range got {
 		require.Len(t, got[i].Assets, 1)
 	}
 
-	_, err = ls.UtxosByAddressComplete(t.Context(), addrs, total-1, total)
+	_, err = ls.UtxosByAddressComplete(t.Context(), addrs, total-1, coins)
 	require.ErrorIs(t, err, models.ErrTooManyUtxoResults)
 
-	_, err = ls.UtxosByAddressComplete(t.Context(), addrs, total, total-1)
+	_, err = ls.UtxosByAddressComplete(t.Context(), addrs, total, coins-1)
 	require.ErrorIs(t, err, models.ErrTooManyUtxoResults)
 
-	_, err = ls.UtxosByAddressComplete(t.Context(), addrs, 0, total)
+	_, err = ls.UtxosByAddressComplete(t.Context(), addrs, 0, coins)
 	require.Error(t, err)
 	_, err = ls.UtxosByAddressComplete(t.Context(), addrs, total, 0)
 	require.Error(t, err)

@@ -843,32 +843,33 @@ func (d *Database) UtxosByAddress(
 }
 
 // UtxosByAddressBounded is UtxosByAddress with a second required, positive
-// bound on the native-asset rows loaded across all candidate UTxOs.
-// Exceeding either bound returns models.ErrTooManyUtxoResults before the
-// excess rows are materialized.
+// bound, maxEntries, on the candidate UTxOs plus their native assets: one
+// entry per UTxO and one per asset. Exceeding either bound returns
+// models.ErrTooManyUtxoResults from the metadata read, before any output
+// CBOR is loaded; an accepted result loads CBOR for every row.
 func (d *Database) UtxosByAddressBounded(
 	ctx context.Context,
 	addrs []ledger.Address,
 	maxResults int,
-	maxAssets int,
+	maxEntries int,
 	txn *Txn,
 ) ([]models.Utxo, error) {
-	if maxAssets <= 0 {
+	if maxEntries <= 0 {
 		return nil, fmt.Errorf(
-			"UtxosByAddressBounded: maxAssets must be positive, got %d",
-			maxAssets,
+			"UtxosByAddressBounded: maxEntries must be positive, got %d",
+			maxEntries,
 		)
 	}
-	return d.utxosByAddress(ctx, addrs, maxResults, maxAssets, txn)
+	return d.utxosByAddress(ctx, addrs, maxResults, maxEntries, txn)
 }
 
-// utxosByAddress backs UtxosByAddress and UtxosByAddressBounded; maxAssets
+// utxosByAddress backs UtxosByAddress and UtxosByAddressBounded; maxEntries
 // 0 leaves asset loading unbounded.
 func (d *Database) utxosByAddress(
 	ctx context.Context,
 	addrs []ledger.Address,
 	maxResults int,
-	maxAssets int,
+	maxEntries int,
 	txn *Txn,
 ) ([]models.Utxo, error) {
 	if len(addrs) == 0 {
@@ -888,9 +889,9 @@ func (d *Database) utxosByAddress(
 	}
 	var utxos []models.Utxo
 	var err error
-	if maxAssets > 0 {
+	if maxEntries > 0 {
 		utxos, err = d.utxoStore().GetUtxosByAddressBounded(
-			patterns, maxResults, maxAssets, txn.Metadata(),
+			patterns, maxResults, maxEntries, txn.Metadata(),
 		)
 	} else {
 		utxos, err = d.utxoStore().
