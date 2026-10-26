@@ -73,8 +73,9 @@
 // the connection's initiator, fetches the IDs it lacks and admits them through
 // the same checks a local submission gets, including the size limits CIP-0137
 // fixes. Each reply is authenticated as one batch at one current slot, and
-// none of it is admitted if any message in it is invalid. The connection also runs keep-alive on dmq-node's mini-protocol number
-// 12. internal/test/dmqinterop runs it against a real dmq-node.
+// none of it is admitted if any message in it is invalid. The connection also
+// runs keep-alive on dmq-node's mini-protocol number 12.
+// internal/test/dmqinterop runs it against a real dmq-node.
 //
 // Local message notification gives each connection its own cursor over the
 // pool, so every consumer receives each unexpired message once. A feeder

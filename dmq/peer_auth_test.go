@@ -183,7 +183,12 @@ func TestStackAcceptFromPeerAdmitsNoneOfAReplyWithAForgery(t *testing.T) {
 	require.Equal(
 		t,
 		1.0,
-		metricValue(t, reg, "dingo_dmq_validation_failures_total", reasonInvalid),
+		metricValue(
+			t,
+			reg,
+			"dingo_dmq_validation_failures_total",
+			reasonInvalid,
+		),
 	)
 }
 
@@ -206,7 +211,10 @@ func TestStackAcceptFromPeerSkipsHeldMessagesBeforeAuthenticating(
 		t,
 		1.0,
 		metricValue(
-			t, reg, "dingo_dmq_validation_failures_total", reasonAlreadyReceived,
+			t,
+			reg,
+			"dingo_dmq_validation_failures_total",
+			reasonAlreadyReceived,
 		),
 	)
 }

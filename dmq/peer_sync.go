@@ -353,9 +353,9 @@ func awaitReply[T any](p *PeerConn, replies <-chan T) (T, bool) {
 // connection, and none of the reply is admitted.
 //
 // Signature verification dominates admission cost, so the reply is
-// authenticated as one batch at one current slot, a message already held is dropped before
-// it is verified, and a lookup that fails for want of chain state ends the
-// batch rather than being repeated for every message.
+// authenticated as one batch at one current slot, a message already held is
+// dropped before it is verified, and a lookup that fails for want of chain
+// state ends the batch rather than being repeated for every message.
 func (s *Stack) acceptFromPeer(msgs []ocommon.DmqMessage) error {
 	batch := msgs[:0]
 	for i := range msgs {

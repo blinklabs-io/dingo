@@ -8631,10 +8631,9 @@ it is no longer registered or active, mirroring `MessageMempool.RemovePeer`.
 A peer's reply to a message request is authenticated as one batch through
 `MessageAuthenticator.PrepareMessages`: signature verification dominates the
 cost of admitting a message, and a reply carries up to `fetchMessages` of
-them. The batch
-reads the current slot once, so every message in a reply is judged at the same
-slot, and it commits the operational-certificate issue numbers it observed only
-after the whole batch verifies. Before authentication, admission drops a
+them. The batch reads the current slot once, so every message in a reply is
+judged at the same slot, and it commits the operational-certificate issue
+numbers it observed only after the whole batch verifies. Before authentication, admission drops a
 message the pool already holds, so a message that arrived from another peer
 in the meantime costs no KES verification. A message failing authentication
 is a protocol violation: none of the reply is admitted, and the connection
