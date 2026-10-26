@@ -1636,48 +1636,62 @@ func scanUtxoRow(row *sql.Row) (sqlitequery.Utxo, error) {
 	return ret, err
 }
 
-// utxoRefsByTxID looks up every utxo row for the distinct tx_id hashes in
-// refs -- the same tx_id-driven, index-friendly shape queryUtxoStakeRefs
-// uses (see its doc comment) -- and returns them alongside
-// the (tx_id, output_idx) index refs asked for, so the caller can filter the
-// extra rows (other outputs of the same transaction) down to exactly the
-// requested references in Go.
-func (s *Store) utxoRefsByTxID(
+// utxoRefsMaxPerQuery caps the exact references resolved per statement. Each
+// reference binds two parameters, so 200 stays under SQLite's conservative
+// 999-parameter configuration and its 500-term compound-select limit.
+const utxoRefsMaxPerQuery = 200
+
+// utxoRefsExactQuery builds the predicate that selects exactly the n
+// (tx_id, output_idx) references bound to it. Each term is its own equality
+// lookup, so SQLite stays on the unique tx_id_output_idx index for every
+// reference, which a wide OR of pairs does not guarantee (see
+// utxoIDPredicate). Only the requested outputs, and so only their assets, are
+// read; querying by tx_id alone would load every other output of each
+// transaction as well.
+func utxoRefsExactQuery(n int) string {
+	var query strings.Builder
+	query.WriteString("id IN (")
+	for i := range n {
+		if i > 0 {
+			query.WriteString(" UNION ALL ")
+		}
+		query.WriteString(
+			"SELECT id FROM utxo WHERE tx_id = ? AND output_idx = ?",
+		)
+	}
+	query.WriteString(")")
+	return query.String()
+}
+
+// utxosByExactRefs returns the utxo rows, spent or live, for exactly the
+// distinct (tx_id, output_idx) references in refs. A reference with no row is
+// absent; deleted_slot is left for the caller to filter in Go, so a
+// deleted_slot predicate cannot steer the planner off tx_id_output_idx.
+func (s *Store) utxosByExactRefs(
 	txn types.Txn,
 	refs []models.UtxoId,
-) ([]models.Utxo, map[string]map[uint32]struct{}, error) {
+) ([]models.Utxo, error) {
 	refs = dedupeUtxoIDs(refs)
-	if len(refs) == 0 {
-		return []models.Utxo{}, nil, nil
-	}
-	txIDs, wanted := distinctUtxoTxIDs(refs)
 	ret := []models.Utxo{}
-	// One bind variable per distinct tx_id; 400 keeps this portable to
-	// SQLite's conservative 999-parameter configuration, with headroom to
-	// spare versus the old OR-predicate form's two binds per reference.
-	for start := 0; start < len(txIDs); start += 400 {
-		end := min(start+400, len(txIDs))
-		batch := txIDs[start:end]
-		placeholders := strings.TrimSuffix(
-			strings.Repeat("?,", len(batch)),
-			",",
-		)
-		args := make([]any, len(batch))
-		for i, txID := range batch {
-			args[i] = txID
+	for start := 0; start < len(refs); start += utxoRefsMaxPerQuery {
+		end := min(start+utxoRefsMaxPerQuery, len(refs))
+		batch := refs[start:end]
+		args := make([]any, 0, len(batch)*2)
+		for _, ref := range batch {
+			args = append(args, ref.Hash, ref.Idx)
 		}
 		utxos, err := s.queryUtxosWithAssets(
 			txn,
-			"tx_id IN ("+placeholders+")",
+			utxoRefsExactQuery(len(batch)),
 			args,
 			"",
 		)
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 		ret = append(ret, utxos...)
 	}
-	return ret, wanted, nil
+	return ret, nil
 }
 
 // GetUtxosByRefs retrieves multiple live UTxOs by their (tx_id, output_idx)
@@ -1688,19 +1702,12 @@ func (s *Store) GetUtxosByRefs(
 	refs []models.UtxoId,
 	txn types.Txn,
 ) ([]models.Utxo, error) {
-	utxos, wanted, err := s.utxoRefsByTxID(txn, refs)
+	utxos, err := s.utxosByExactRefs(txn, refs)
 	if err != nil {
 		return nil, err
 	}
 	ret := make([]models.Utxo, 0, len(utxos))
 	for _, u := range utxos {
-		outs, ok := wanted[string(u.TxId)]
-		if !ok {
-			continue
-		}
-		if _, ok := outs[u.OutputIdx]; !ok {
-			continue
-		}
 		if u.DeletedSlot != 0 {
 			continue
 		}
@@ -1726,19 +1733,12 @@ func (s *Store) GetUtxosByRefsAsOf(
 	if _, err := checkedInt64(atSlot); err != nil {
 		return nil, err
 	}
-	utxos, wanted, err := s.utxoRefsByTxID(txn, refs)
+	utxos, err := s.utxosByExactRefs(txn, refs)
 	if err != nil {
 		return nil, err
 	}
 	ret := make([]models.Utxo, 0, len(utxos))
 	for _, u := range utxos {
-		outs, ok := wanted[string(u.TxId)]
-		if !ok {
-			continue
-		}
-		if _, ok := outs[u.OutputIdx]; !ok {
-			continue
-		}
 		if u.AddedSlot > atSlot {
 			continue
 		}
