@@ -16,6 +16,7 @@ package mempool
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"testing"
@@ -42,27 +43,23 @@ func newSubmissionAdmissionPool(t *testing.T) *Mempool {
 	return m
 }
 
-// fillSubmissionSlots reserves every submission slot and returns the
-// releases plus the context carrying the last reservation.
+// fillSubmissionSlots reserves every shared submission slot directly.
 func fillSubmissionSlots(
 	t *testing.T,
 	m *Mempool,
-) ([]func(), context.Context) {
+) []func() {
 	t.Helper()
 	var releases []func()
-	var admitted context.Context
 	for range cap(m.submissionSlots) {
-		ctx, release, err := m.AdmitSubmission(context.Background())
-		require.NoError(t, err)
-		releases = append(releases, release)
-		admitted = ctx
+		m.submissionSlots <- struct{}{}
+		releases = append(releases, m.submissionSlotRelease())
 	}
 	t.Cleanup(func() {
 		for _, release := range releases {
 			release()
 		}
 	})
-	return releases, admitted
+	return releases
 }
 
 func TestAdmitSubmissionFailsFastWhenSlotsAreFull(t *testing.T) {
@@ -71,6 +68,37 @@ func TestAdmitSubmissionFailsFastWhenSlotsAreFull(t *testing.T) {
 	fillSubmissionSlots(t, m)
 	_, _, err := m.AdmitSubmission(context.Background())
 	require.ErrorIs(t, err, ErrSubmissionBusy)
+	require.Empty(t, m.apiSubmissionSlots)
+}
+
+func TestAPISubmissionSaturationPreservesDirectSlot(t *testing.T) {
+	t.Parallel()
+	m := newSubmissionAdmissionPool(t)
+	var releases []func()
+	for {
+		_, release, err := m.AdmitSubmission(context.Background())
+		if errors.Is(err, ErrSubmissionBusy) {
+			break
+		}
+		require.NoError(t, err)
+		releases = append(releases, release)
+		require.LessOrEqual(t, len(releases), cap(m.submissionSlots))
+	}
+	t.Cleanup(func() {
+		for _, release := range releases {
+			release()
+		}
+	})
+	if got, want := len(releases), cap(m.submissionSlots)-1; got != want {
+		t.Errorf("API admission held %d slots, want %d", got, want)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	require.NoError(
+		t,
+		m.AddTransaction(ctx, uint(conway.EraIdConway), getTestTxBytes(t)),
+	)
 }
 
 // Direct callers (node-to-node and node-to-client submission, rolled-back
@@ -79,7 +107,7 @@ func TestAdmitSubmissionFailsFastWhenSlotsAreFull(t *testing.T) {
 func TestAddTransactionWaitsForSubmissionSlot(t *testing.T) {
 	t.Parallel()
 	m := newSubmissionAdmissionPool(t)
-	releases, _ := fillSubmissionSlots(t, m)
+	releases := fillSubmissionSlots(t, m)
 	txBytes := getTestTxBytes(t)
 	result := make(chan error, 1)
 	go func() {
@@ -151,7 +179,13 @@ func TestAddTransactionWaitEndsOnStop(t *testing.T) {
 func TestAddTransactionReusesAdmittedSlot(t *testing.T) {
 	t.Parallel()
 	m := newSubmissionAdmissionPool(t)
-	_, admitted := fillSubmissionSlots(t, m)
+	admitted, release, err := m.AdmitSubmission(context.Background())
+	require.NoError(t, err)
+	t.Cleanup(release)
+	for len(m.submissionSlots) < cap(m.submissionSlots) {
+		m.submissionSlots <- struct{}{}
+		t.Cleanup(m.submissionSlotRelease())
+	}
 	ctx, cancel := context.WithTimeout(admitted, 5*time.Second)
 	defer cancel()
 	require.NoError(
