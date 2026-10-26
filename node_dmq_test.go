@@ -456,7 +456,7 @@ func submitDMQ(
 	require.NoError(t, conn.LocalMessageSubmission().Client.SubmitMessage(
 		&ocommon.DmqMessage{
 			Payload: ocommon.DmqMessagePayload{
-				MessageBody: []byte("node"),
+				MessageBody: bytes.Repeat([]byte("node"), 100),
 				KESPeriod:   1,
 				ExpiresAt:   expiry,
 			},

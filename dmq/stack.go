@@ -21,6 +21,7 @@ import (
 	"io"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/blinklabs-io/dingo/connmanager"
@@ -101,6 +102,12 @@ type StackConfig struct {
 	// MaxKESEvolutions is the number of KES periods an operational
 	// certificate is valid for. Zero uses the Cardano mainnet value.
 	MaxKESEvolutions uint64
+	// MessageBodyMin and MessageBodyMax bound the size of a message body
+	// accepted from a local client or a peer. Zero uses CIP-0137's limits,
+	// DefaultMessageBodyMin and DefaultMessageBodyMax, which dmq-node
+	// enforces when it decodes a message.
+	MessageBodyMin int
+	MessageBodyMax int
 }
 
 // Stack is one DMQ topic instance: its own message pool, connection manager
@@ -116,6 +123,15 @@ type Stack struct {
 	failures *prometheus.CounterVec
 	sent     prometheus.Counter
 	conns    prometheus.Gauge
+	peersCnt prometheus.Gauge
+
+	// peers are the open node-to-node connections. Once peersClosed is set
+	// no more are admitted, so Stop cannot miss one that is still starting.
+	peerMu      sync.Mutex
+	peers       map[*PeerConn]struct{}
+	peersClosed bool
+	peerSeq     atomic.Uint64
+	peerTune    peerTuning
 
 	// ctx scopes the feeder goroutines; Stop cancels it and waits on wg.
 	ctx    context.Context
@@ -150,6 +166,12 @@ func NewStack(cfg StackConfig) (*Stack, error) {
 	if cfg.MaxKESEvolutions == 0 {
 		cfg.MaxKESEvolutions = ocommon.DefaultMaxKESEvolutions
 	}
+	if cfg.MessageBodyMin == 0 {
+		cfg.MessageBodyMin = DefaultMessageBodyMin
+	}
+	if cfg.MessageBodyMax == 0 {
+		cfg.MessageBodyMax = DefaultMessageBodyMax
+	}
 	factory := promauto.With(cfg.PromRegistry)
 	s := &Stack{
 		cfg:    cfg,
@@ -169,12 +191,19 @@ func NewStack(cfg StackConfig) (*Stack, error) {
 		}, []string{"reason"}),
 		sent: factory.NewCounter(prometheus.CounterOpts{
 			Name: "dingo_dmq_messages_sent_total",
-			Help: "DMQ messages queued for local notification consumers",
+			Help: "DMQ messages queued for local notification consumers " +
+				"or sent to peers",
 		}),
 		conns: factory.NewGauge(prometheus.GaugeOpts{
 			Name: "dingo_dmq_connections",
 			Help: "open local DMQ connections",
 		}),
+		peersCnt: factory.NewGauge(prometheus.GaugeOpts{
+			Name: "dingo_dmq_peers",
+			Help: "open node-to-node DMQ peer connections",
+		}),
+		peers:     make(map[*PeerConn]struct{}),
+		peerTune:  defaultPeerTuning(),
 		feeders:   make(map[ouroboros.ConnectionId]context.CancelFunc),
 		feedTimer: newFeedTimer,
 	}
@@ -254,7 +283,9 @@ func subscribeInbound(
 // return the first call's result.
 func (s *Stack) Stop(ctx context.Context) error {
 	s.stopOnce.Do(func() {
-		s.stopErr = s.connMgr.Stop(ctx)
+		// Peers admit into the pool, so they close before it does.
+		s.stopErr = s.closePeers(ctx)
+		s.stopErr = errors.Join(s.stopErr, s.connMgr.Stop(ctx))
 		s.stopErr = errors.Join(s.stopErr, s.shutdownLocal(ctx))
 		if poolErr := s.pool.Stop(ctx); poolErr != nil {
 			s.stopErr = errors.Join(s.stopErr, poolErr)
@@ -329,6 +360,13 @@ func (s *Stack) submit(msg *ocommon.DmqMessage) ocommon.RejectReason {
 }
 
 func (s *Stack) admit(msg *ocommon.DmqMessage) ocommon.RejectReason {
+	// A message that breaks CIP-0137's sizes is one dmq-node refuses to
+	// decode, so it is neither kept nor passed on.
+	if err := checkMessageShape(
+		msg, s.cfg.MessageBodyMin, s.cfg.MessageBodyMax,
+	); err != nil {
+		return ocommon.InvalidReason{Message: err.Error()}
+	}
 	if !msg.IsValidAt(s.cfg.Now()) {
 		return ocommon.ExpiredReason{}
 	}
@@ -338,7 +376,9 @@ func (s *Stack) admit(msg *ocommon.DmqMessage) ocommon.RejectReason {
 			return ocommon.OtherReason{Message: err.Error()}
 		}
 		if msg.Payload.KESPeriod > current {
-			return ocommon.InvalidReason{Message: "message claims a future KES period"}
+			return ocommon.InvalidReason{
+				Message: "message claims a future KES period",
+			}
 		}
 		// The authenticator checks the window against the period the message
 		// claims, which an expired certificate's key can still sign for.
