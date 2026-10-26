@@ -7,7 +7,7 @@ require (
 	connectrpc.com/connect v1.21.1
 	connectrpc.com/grpchealth v1.5.0
 	connectrpc.com/grpcreflect v1.3.1
-	github.com/Microsoft/go-winio v0.6.2
+	github.com/Microsoft/go-winio v0.6.4
 	github.com/XSAM/otelsql v0.44.0
 	github.com/aws/aws-sdk-go-v2 v1.47.3
 	github.com/aws/aws-sdk-go-v2/config v1.33.9
@@ -187,7 +187,7 @@ require (
 	github.com/ryanuber/go-glob v1.0.0 // indirect
 	github.com/segmentio/asm v1.1.3 // indirect
 	github.com/segmentio/encoding v0.5.4 // indirect
-	github.com/sirupsen/logrus v1.9.4 // indirect
+	github.com/sirupsen/logrus v1.10.2 // indirect
 	github.com/spaolacci/murmur3 v1.1.0 // indirect
 	github.com/spiffe/go-spiffe/v2 v2.8.1 // indirect
 	github.com/tjfoc/gmsm v1.4.1 // indirect
