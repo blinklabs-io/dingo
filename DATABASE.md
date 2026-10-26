@@ -6186,8 +6186,33 @@ PostgreSQL and MySQL keep the per-row writes described above.
   each credential's row is then written once -- updated in place, or
   inserted under its reserved id -- with the sequence raised to the last
   reserved id. Row values, ids and the sequence therefore match the per-row
-  path, while the per-credential statements run once per transaction instead
-  of once per block.
+  path. The replay reads the credentials' `reward_live_stake` and `account`
+  rows up front, 499 credentials per statement, through the unique
+  credential indexes (`idx_reward_live_stake_cred`,
+  `idx_account_credential`, neither deferred nor dropped for catch-up), and
+  writes the rows with multi-row statements: deletes by id first, then
+  explicit-id inserts, then `UPDATE ... FROM (VALUES ...)` keyed by id. Only
+  the re-sum of a credential with no running total stays per credential.
+- **Transaction rows.** The `transaction` row of each batch transaction is
+  staged too. `"transaction".id` is `AUTOINCREMENT`, so the per-row insert
+  continues from the larger of `MAX(id)` and the table's `sqlite_sequence`
+  entry, which still counts rows a rollback deleted; the overlay reads that
+  value once and hands out the following ids in apply order, which is the
+  same sequence because nothing else inserts `transaction` rows inside a
+  trusted batch, and the explicit-id inserts leave the sequence at the
+  highest id as the per-row inserts do. Staged rows
+  are written with explicit ids in multi-row `BatchOverlayInsertTransactions`
+  statements (90 rows each), with no conflict clause, and always before a
+  row that references them: before the overlay's own `utxo` writes, and,
+  through the read barrier, before any statement that names `transaction`
+  or a table with a foreign key to it (`certs`, the witness tables, `utxo`,
+  ...; read from `pragma_foreign_key_list` when the overlay is enabled).
+  Foreign keys therefore stay immediate and are checked against a parent
+  that exists; `defer_foreign_keys` is not used, because while deferred
+  violations are outstanding SQLite scans each child table on every parent
+  insert, and the child-side indexes are dropped during catch-up. A hash
+  that already has a row fails the insert with a `UNIQUE` error, which is an
+  overlay conflict: the per-row retry's `ON CONFLICT` branch reuses that row.
 - **Read barrier.** While the overlay holds unwritten rows, spend marks or
   closed stake segments, the transaction's handle is a `barrierQueryer`:
   before any statement that names `utxo`, `utxo_pointer` or
@@ -6210,9 +6235,18 @@ overlay keeps no undo log: a savepoint rollback across any overlay change,
 including a barrier write, fails the batch, and none occurs inside a trusted
 block-apply transaction. A UNIQUE failure counts as an overlay conflict only
 on the tables the overlay writes under its own ids (`utxo`, `asset`,
-`utxo_pointer`, `reward_live_stake`); any other would fail the per-row path
-too. A `FlushBatch` Debug line reports the outputs created and elided, the
-pre-batch spends, the prefetched keys and the barrier writes.
+`utxo_pointer`, `reward_live_stake`, `transaction`); any other would fail the
+per-row path too. A `FOREIGN KEY` failure in an overlay write is an overlay
+conflict as well. A barrier failure inside a statement that cannot return it
+(`QueryRowContext`) is recorded on the overlay. The statement, and any
+read or write after it, then sees tables the barrier did not write, and its
+caller may fail on that alone. `LedgerDeltaBatch.applyBatched`, which every
+statement of the overlay's lifetime returns through, joins the recorded
+error to whatever error it returns (`database.WithBatchUtxoOverlayError`),
+so `ApplyTrustedBatch` still sees the conflict and takes the fallback. A
+`FlushBatch` Debug line reports the outputs created and elided, the pre-batch
+spends, the prefetched keys, the barrier writes, the staged transaction rows
+and how many writes they took.
 
 # At-tip recovery repair
 

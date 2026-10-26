@@ -3863,15 +3863,20 @@ source take that role at runtime, without the construction-time
   also attaches a batch UTxO overlay (`LedgerDeltaBatch.enableTrustedUtxoOverlay`
   calling `Database.EnableBatchUtxoOverlay`): the ledger hands the store the
   batch's pre-batch inputs, the store resolves every spend in memory and
-  writes the net UTxO change at `FlushBatch`, and live stake is written once
-  per transaction, by replaying each block's deltas with the per-block
-  row lifecycle in memory. A read barrier on the transaction's handle writes
-  the pending rows and the ended blocks' stake before any statement reads
-  `utxo`, `utxo_pointer` or `reward_live_stake`. Dijkstra and later eras
+  writes the net UTxO change at `FlushBatch`, the batch's `transaction` rows
+  are staged with the ids the per-row inserts would take and written in
+  bulk, and live stake is written once per transaction, by replaying each
+  block's deltas with the per-block row lifecycle in memory. A read barrier
+  on the transaction's handle writes the pending rows and the ended blocks'
+  stake before any statement reads `utxo`, `utxo_pointer` or
+  `reward_live_stake`, and the staged transaction rows before any statement
+  naming `transaction` or a table with a foreign key to it. Dijkstra and later eras
   keep the per-row path. Stored state, row ids included, is
   the per-row path's; see `DATABASE.md`, "Trusted batch UTxO overlay". When
-  the overlay's write hits a `UNIQUE` conflict
-  (`types.ErrBatchUtxoOverlayConflict`), the call logs a Warn line, counts
+  the overlay's write hits a `UNIQUE` or foreign-key conflict
+  (`types.ErrBatchUtxoOverlayConflict`) -- including one a read barrier
+  recorded but could not return, which `applyBatched` joins to its error
+  through `database.WithBatchUtxoOverlayError` -- the call logs a Warn line, counts
   `dingo_ledger_trusted_batch_overlay_fallbacks_total`, and applies the
   blocks that did not commit again on the per-row path. Regression tests are
   in `ledger/trusted_batch_overlay_test.go` and

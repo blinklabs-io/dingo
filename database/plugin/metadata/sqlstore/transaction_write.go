@@ -883,7 +883,21 @@ func (s *Store) setTransactionWithAccumulator(
 			if err != nil {
 				return err
 			}
-			if batched, ok := accumulator.(*transactionBatchAccumulator); ok {
+			if overlay != nil {
+				transactionID, err = overlay.stageTransaction(
+					hash,
+					point.Hash,
+					metadataValue,
+					point.Slot,
+					transaction.Type(),
+					decimalUint64(transactionFee(transaction)),
+					decimalUint64(types.Uint64(collateralFee)),
+					decimalUint64(types.Uint64(transaction.TTL())),
+					index,
+					transaction.IsValid(),
+				)
+				transactionIsNew = true
+			} else if batched := batchedAccumulator; batched != nil {
 				var id uint
 				id, transactionIsNew, err = batched.insertTransaction(ctx, db,
 					hash,

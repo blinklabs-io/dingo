@@ -45,6 +45,10 @@ import (
 //     overlay holds unwritten state: the read barrier (barrierQueryer) writes
 //     it first. Asset and utxo_address rows stay queued until FlushBatch, as
 //     on the per-row path.
+//   - Transaction rows take the ids the per-row path's inserts would, in
+//     apply order, and are written before any statement that names
+//     "transaction" or a table with a foreign key to it, so every foreign
+//     key is checked immediately and finds its parent.
 //   - Writes have no conflict clause. A UNIQUE failure is reported as
 //     types.ErrBatchUtxoOverlayConflict so the caller can apply the batch
 //     again on the per-row path, which repairs conflicting rows.
@@ -57,6 +61,7 @@ const (
 	overlayUtxoInsertColumns = 16
 	overlayMarkChunk         = 333
 	overlayPointerColumns    = 4
+	overlayTxColumns         = 11
 )
 
 var assetWithIDShape = rowShape{
@@ -120,6 +125,16 @@ type overlayStats struct {
 	PrebatchSpent  int
 	Prefetched     int
 	BarrierFlushes int
+	Transactions   int
+	// TransactionWrites counts the writes of staged transaction rows.
+	TransactionWrites int
+}
+
+// overlayTransaction is a staged "transaction" row: its id and the values
+// of the per-row path's insert, in transactionBatchInsertSQL's order.
+type overlayTransaction struct {
+	id     int64
+	values []any
 }
 
 type utxoOverlay struct {
@@ -139,6 +154,14 @@ type utxoOverlay struct {
 	// writtenUpTo indexes order: every output before it was handled by a
 	// barrier flush.
 	writtenUpTo int
+
+	// txSeq is the last "transaction" id handed out; txPending holds the
+	// staged rows not yet written, in id order.
+	txSeq     int64
+	txPending []overlayTransaction
+	txHashes  map[string]struct{}
+	// txChildren names the tables with a foreign key to "transaction".
+	txChildren []string
 
 	utxoSeq      int64
 	utxoSeqRow   bool
@@ -222,6 +245,7 @@ func (s *Store) EnableBatchUtxoOverlay(
 		inputs:   make(map[overlayKey]*overlayInput, len(inputs)),
 		absent:   make(map[overlayKey]struct{}),
 		deleteOn: make(map[overlayKey]struct{}, len(deleteOnSpend)),
+		txHashes: make(map[string]struct{}),
 	}
 	for _, id := range deleteOnSpend {
 		overlay.deleteOn[newOverlayKey(id.Hash, id.Idx)] = struct{}{}
@@ -244,6 +268,15 @@ func (s *Store) EnableBatchUtxoOverlay(
 				return err
 			}
 			overlay.assetWritten = overlay.assetSeq
+			if err := db.QueryRowContext(
+				ctx, overlayTransactionMaxIDQuery,
+			).Scan(&overlay.txSeq); err != nil {
+				return fmt.Errorf("read transaction id: %w", err)
+			}
+			overlay.txChildren, err = transactionChildTables(ctx, db)
+			if err != nil {
+				return err
+			}
 			return prefetchOverlayInputs(ctx, db, overlay, inputs)
 		},
 	)
@@ -270,6 +303,145 @@ SELECT seq FROM sqlite_sequence WHERE name = ?`, table).Scan(&seq)
 		return 0, false, fmt.Errorf("read %s id sequence: %w", table, err)
 	}
 	return seq, true, nil
+}
+
+// overlayTransactionMaxIDQuery is the id an AUTOINCREMENT insert continues
+// from: the larger of the highest id and the sequence, which still holds the
+// ids of rows a rollback deleted.
+const overlayTransactionMaxIDQuery = `
+-- name: BatchOverlayTransactionMaxID :one
+SELECT MAX(
+    COALESCE((SELECT MAX(id) FROM "transaction"), 0),
+    COALESCE(
+        (SELECT seq FROM sqlite_sequence WHERE name = 'transaction'), 0
+    )
+)`
+
+const overlayTransactionChildrenQuery = `
+-- name: BatchOverlayTransactionChildren :many
+SELECT DISTINCT m.name
+FROM sqlite_master AS m, pragma_foreign_key_list(m.name) AS p
+WHERE m.type = 'table' AND p."table" = 'transaction'`
+
+// transactionChildTables names the tables whose foreign keys reference
+// "transaction", read from the schema so that a new one is covered.
+func transactionChildTables(
+	ctx context.Context,
+	db queryer,
+) ([]string, error) {
+	rows, err := db.QueryContext(ctx, overlayTransactionChildrenQuery)
+	if err != nil {
+		return nil, fmt.Errorf("read transaction foreign keys: %w", err)
+	}
+	defer rows.Close()
+	var tables []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		tables = append(tables, name)
+	}
+	return tables, rows.Err()
+}
+
+// stageTransaction queues a "transaction" row with the id the per-row
+// path's AUTOINCREMENT insert would assign, in apply order: nothing else
+// inserts into the table inside a trusted batch, and the explicit-id insert
+// raises sqlite_sequence to the highest id as that insert would.
+// hash and rest are transactionBatchInsertSQL's arguments.
+func (o *utxoOverlay) stageTransaction(
+	hash []byte,
+	rest ...any,
+) (int64, error) {
+	if _, ok := o.txHashes[string(hash)]; ok {
+		return 0, fmt.Errorf(
+			"%w: transaction %x applied twice in one batch",
+			types.ErrBatchUtxoOverlayConflict, hash,
+		)
+	}
+	o.mutations++
+	o.txHashes[string(hash)] = struct{}{}
+	o.txSeq++
+	o.txPending = append(o.txPending, overlayTransaction{
+		id: o.txSeq, values: append([]any{hash}, rest...),
+	})
+	o.stats.Transactions++
+	return o.txSeq, nil
+}
+
+// needsTransactions reports whether query names "transaction" or a table
+// with a foreign key to it.
+func (o *utxoOverlay) needsTransactions(query string) bool {
+	if containsIdentifier(query, "transaction") {
+		return true
+	}
+	for _, table := range o.txChildren {
+		if containsIdentifier(query, table) {
+			return true
+		}
+	}
+	return false
+}
+
+// writeOverlayTransactions writes the staged transaction rows with their
+// ids. No conflict clause: a hash that already has a row is an overlay
+// conflict, and the per-row path reuses that row.
+func writeOverlayTransactions(
+	ctx context.Context,
+	db queryer,
+	o *utxoOverlay,
+) error {
+	if len(o.txPending) == 0 {
+		return nil
+	}
+	o.mutations++
+	o.stats.TransactionWrites++
+	args := make([]any, 0, len(o.txPending)*overlayTxColumns)
+	for _, row := range o.txPending {
+		args = append(append(args, row.id), row.values...)
+	}
+	err := execChunked(ctx, db, args, overlayTxColumns, func(rows int) string {
+		return `-- name: BatchOverlayInsertTransactions :exec
+INSERT INTO "transaction" (
+    id, hash, block_hash, metadata, slot, type, fee, collateral_fee, ttl,
+    block_index, valid
+) VALUES ` + strings.TrimSuffix(strings.Repeat(
+			"(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?), ", rows), ", ")
+	})
+	if err != nil {
+		return overlayWriteError("insert batch transaction rows", err)
+	}
+	o.txPending = nil
+	return nil
+}
+
+// overlayTransactionBarrier writes the staged transaction rows before a
+// statement that needs them. The overlay's own writes run with flushing set
+// and write them first themselves.
+func (s *Store) overlayTransactionBarrier(
+	ctx context.Context,
+	db queryer,
+	accumulator *transactionBatchAccumulator,
+	query string,
+) error {
+	o := accumulator.overlay
+	if o == nil || o.flushing || len(o.txPending) == 0 {
+		return nil
+	}
+	if o.err != nil {
+		return o.err
+	}
+	if !o.needsTransactions(query) {
+		return nil
+	}
+	o.flushing = true
+	defer func() { o.flushing = false }()
+	if err := writeOverlayTransactions(ctx, db, o); err != nil {
+		o.err = err
+		return err
+	}
+	return nil
 }
 
 // overlayPrefetchQuery reads pre-batch rows by key. CROSS JOIN fixes the
@@ -584,6 +756,10 @@ func (s *Store) writeOverlay(
 		// record of them; restore must see that the overlay changed.
 		o.mutations++
 	}
+	// utxo rows reference their producing and spending transactions.
+	if err := writeOverlayTransactions(ctx, db, o); err != nil {
+		return err
+	}
 	pending := make([]*overlayOutput, 0, o.unwritten)
 	for _, out := range o.order[o.writtenUpTo:] {
 		if out.written || out.spentBy != nil {
@@ -886,8 +1062,14 @@ INSERT INTO sqlite_sequence (name, seq) VALUES (?, ?)`,
 // overlay writes under its own ids. A UNIQUE failure elsewhere -- a queued
 // detail row with no conflict clause -- would fail the per-row path the same
 // way, so retrying there gains nothing.
+//
+// A FOREIGN KEY failure in an overlay write means a row was written before
+// a parent the overlay still held; the per-row path writes parents first,
+// so it is retried there too.
 var overlayConflictPattern = regexp.MustCompile(
-	`UNIQUE constraint failed: (utxo|asset|utxo_pointer|reward_live_stake)\.`,
+	`UNIQUE constraint failed: ` +
+		`(utxo|asset|utxo_pointer|reward_live_stake|transaction)\.` +
+		`|FOREIGN KEY constraint failed`,
 )
 
 func overlayWriteError(action string, err error) error {
@@ -960,6 +1142,15 @@ func (s *Store) flushQueuedStakeDeltas(
 	return nil
 }
 
+// BatchUtxoOverlayError returns the error the accumulator's batch UTxO
+// overlay recorded, nil when there is none or no overlay is attached.
+func (a *transactionBatchAccumulator) BatchUtxoOverlayError() error {
+	if a.overlay == nil {
+		return nil
+	}
+	return a.overlay.err
+}
+
 func (a *transactionBatchAccumulator) clearQueuedStakeDeltas() {
 	a.stakeDeltas = nil
 	a.stakeDeltaOrder = nil
@@ -1003,6 +1194,8 @@ func (s *Store) flushOverlay(
 			"prebatch_spent", o.stats.PrebatchSpent,
 			"prefetched", o.stats.Prefetched,
 			"barrier_flushes", o.stats.BarrierFlushes,
+			"transactions", o.stats.Transactions,
+			"transaction_writes", o.stats.TransactionWrites,
 			"component", "database",
 		)
 	}
@@ -1045,6 +1238,21 @@ type stakeRowState struct {
 	hasTotal bool
 	utxo     uint64
 	slot     uint64
+	account  stakeAccountState
+}
+
+// stakeAccountState is a credential's account row as the replay reads it.
+type stakeAccountState struct {
+	liveStakeAccount
+	createdSlot int64
+}
+
+// existedAt reports whether the account row existed at the end of the block
+// at slot. Account rows are only ever created inside a batch, and
+// created_slot records the slot, so the row existed then when created_slot
+// is at or below it.
+func (a stakeAccountState) existedAt(slot uint64) bool {
+	return a.exists && a.createdSlot >= 0 && uint64(a.createdSlot) <= slot
 }
 
 // replayStakeSegments writes the closed blocks' live-stake deltas. It
@@ -1052,16 +1260,17 @@ type stakeRowState struct {
 // lifecycle -- a credential with no account whose UTxO stake reaches zero
 // loses its row, and a later touch inserts a new one -- and reserves the id
 // each of the per-row path's upserts would take. Each credential's row is
-// then written once,
-// under the id the per-row path would leave it with, and
+// then written once, under the id the per-row path would leave it with, and
 // sqlite_sequence('reward_live_stake') is raised to the last reserved id.
 //
 // The per-row path decides at the end of each block, so the replay needs
-// two things as they were then. Account existence: account rows are only
-// ever created inside a batch, and created_slot records the slot, so a row
-// existed at the end of block k when created_slot is at or below its slot.
-// The UTxO total of a credential with no running total: the utxo table now
-// holds every later change too, so the later deltas are subtracted.
+// two things as they were then. Account existence: see existedAt. The UTxO
+// total of a credential with no running total: the utxo table now holds
+// every later change too, so the later deltas are subtracted.
+//
+// The credentials' reward_live_stake and account rows are read up front, in
+// bulk: nothing the replay does before its writes changes either table, so
+// they read as the per-row path's per-credential reads would.
 func (s *Store) replayStakeSegments(
 	ctx context.Context,
 	db queryer,
@@ -1089,14 +1298,23 @@ func (s *Store) replayStakeSegments(
 			return err
 		}
 	}
+	states := make(map[string]*stakeRowState)
+	var ordered []*stakeRowState
 	for _, segment := range segments {
 		for _, key := range segment.order {
-			if err := addRemaining(
-				key, segment.deltas[key].delta,
-			); err != nil {
+			pending := segment.deltas[key]
+			if err := addRemaining(key, pending.delta); err != nil {
 				return err
 			}
+			if _, ok := states[key]; !ok {
+				st := &stakeRowState{ref: pending.ref}
+				states[key] = st
+				ordered = append(ordered, st)
+			}
 		}
+	}
+	if err := loadStakeRowStates(ctx, db, states, ordered); err != nil {
+		return err
 	}
 	reserved, hadRow, err := readSQLiteSequence(
 		ctx, db, "reward_live_stake",
@@ -1104,20 +1322,15 @@ func (s *Store) replayStakeSegments(
 	if err != nil {
 		return err
 	}
-	sequenceStart := reserved
-	states := make(map[string]*stakeRowState)
-	var ordered []*stakeRowState
 	for _, segment := range segments {
 		for _, key := range segment.order {
 			pending := segment.deltas[key]
 			st, ok := states[key]
 			if !ok {
-				st, err = s.loadStakeRowState(ctx, db, pending.ref)
-				if err != nil {
-					return err
-				}
-				states[key] = st
-				ordered = append(ordered, st)
+				return fmt.Errorf(
+					"reward live stake replay lost credential %d:%x",
+					pending.ref.Tag, pending.ref.Key,
+				)
 			}
 			if err := addRemaining(key, -pending.delta); err != nil {
 				return err
@@ -1135,20 +1348,12 @@ func (s *Store) replayStakeSegments(
 			if err != nil {
 				return err
 			}
-			if utxo == 0 {
-				exists, err := accountExistedAt(
-					ctx, db, pending.ref, pending.slot,
-				)
-				if err != nil {
-					return err
-				}
-				if !exists {
-					st.id = 0
-					st.hasTotal = false
-					st.utxo = 0
-					st.slot = pending.slot
-					continue
-				}
+			if utxo == 0 && !st.account.existedAt(pending.slot) {
+				st.id = 0
+				st.hasTotal = false
+				st.utxo = 0
+				st.slot = pending.slot
+				continue
 			}
 			// Every upsert takes an id, also one that updates.
 			reserved++
@@ -1160,35 +1365,9 @@ func (s *Store) replayStakeSegments(
 			st.slot = pending.slot
 		}
 	}
-	written := sequenceStart
-	for _, st := range ordered {
-		if st.id == 0 || st.id != st.dbID {
-			if st.dbID != 0 {
-				if _, err := db.ExecContext(ctx, `
--- name: BatchOverlayDeleteRewardLiveStake :exec
-DELETE FROM reward_live_stake
-WHERE credential_tag = ? AND staking_key = ?`,
-					st.ref.Tag, st.ref.Key,
-				); err != nil {
-					return err
-				}
-			}
-			if st.id == 0 {
-				continue
-			}
-			if err := s.applyRewardLiveStakeAggregateWithID(
-				ctx, db, st.ref, st.slot, st.utxo, st.id, false,
-			); err != nil {
-				return err
-			}
-			written = max(written, st.id)
-			continue
-		}
-		if err := s.applyRewardLiveStakeAggregateWithID(
-			ctx, db, st.ref, st.slot, st.utxo, 0, true,
-		); err != nil {
-			return err
-		}
+	written, err := writeStakeRowStates(ctx, db, ordered)
+	if err != nil {
+		return err
 	}
 	return restoreSQLiteSequence(
 		ctx, db, "reward_live_stake", reserved, written, hadRow,
@@ -1202,35 +1381,256 @@ func addStakeDelta(a, b int64) (int64, error) {
 	return a + b, nil
 }
 
-func (s *Store) loadStakeRowState(
+// stakeKeyValues is a VALUES list of n (credential_tag, staking_key) rows.
+func stakeKeyValues(n int) string {
+	return strings.TrimSuffix(strings.Repeat("(?, ?), ", n), ", ")
+}
+
+// overlayStakeRowsQuery and overlayStakeAccountsQuery read the replay's
+// credentials by their unique credential index. Neither index is deferred
+// or dropped for catch-up. TestBatchUtxoOverlayStatementPlans pins both.
+func overlayStakeRowsQuery(n int) string {
+	return `-- name: BatchOverlayRewardLiveStakeRows :many
+SELECT r.credential_tag, r.staking_key, r.id, r.utxo_stake
+FROM (VALUES ` + stakeKeyValues(n) + `) AS k
+CROSS JOIN reward_live_stake AS r INDEXED BY idx_reward_live_stake_cred
+  ON r.credential_tag = k.column1 AND r.staking_key = k.column2`
+}
+
+func overlayStakeAccountsQuery(n int) string {
+	return `-- name: BatchOverlayRewardLiveStakeAccounts :many
+SELECT a.credential_tag, a.staking_key, a.reward, a.pool, a.active,
+       a.added_slot, a.created_slot
+FROM (VALUES ` + stakeKeyValues(n) + `) AS k
+CROSS JOIN account AS a INDEXED BY idx_account_credential
+  ON a.credential_tag = k.column1 AND a.staking_key = k.column2`
+}
+
+// loadStakeRowStates fills each state's reward_live_stake row and account.
+func loadStakeRowStates(
 	ctx context.Context,
 	db queryer,
-	ref models.StakeCredentialRef,
-) (*stakeRowState, error) {
-	st := &stakeRowState{ref: ref}
-	var raw sql.NullString
-	err := db.QueryRowContext(ctx, `-- name: BatchOverlayRewardLiveStakeRow :one
-SELECT id, utxo_stake FROM reward_live_stake
-WHERE credential_tag = ? AND staking_key = ?`, ref.Tag, ref.Key).Scan(
-		&st.dbID, &raw,
-	)
-	if errors.Is(err, sql.ErrNoRows) {
-		return st, nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("read reward live stake row: %w", err)
-	}
-	st.id = st.dbID
-	// An empty total is no baseline, as in currentCredentialUtxoStake: the
-	// per-row path re-sums it but keeps the row.
-	if raw.Valid && raw.String != "" {
-		st.utxo, err = parseUint64("reward live stake UTxO total", raw.String)
-		if err != nil {
-			return nil, err
+	states map[string]*stakeRowState,
+	ordered []*stakeRowState,
+) error {
+	for start := 0; start < len(ordered); start += overlayPrefetchChunk {
+		chunk := ordered[start:min(start+overlayPrefetchChunk, len(ordered))]
+		args := make([]any, 0, 2*len(chunk))
+		for _, st := range chunk {
+			args = append(args, st.ref.Tag, st.ref.Key)
 		}
-		st.hasTotal = true
+		if err := scanStakeRows(
+			ctx, db, overlayStakeRowsQuery(len(chunk)), args, states,
+		); err != nil {
+			return fmt.Errorf("read reward live stake rows: %w", err)
+		}
+		if err := scanStakeAccounts(
+			ctx, db, overlayStakeAccountsQuery(len(chunk)), args, states,
+		); err != nil {
+			return fmt.Errorf("read reward live stake accounts: %w", err)
+		}
 	}
-	return st, nil
+	return nil
+}
+
+func scanStakeRows(
+	ctx context.Context,
+	db queryer,
+	query string,
+	args []any,
+	states map[string]*stakeRowState,
+) error {
+	rows, err := db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			tag int64
+			key []byte
+			id  int64
+			raw sql.NullString
+		)
+		if err := rows.Scan(&tag, &key, &id, &raw); err != nil {
+			return err
+		}
+		st, ok := states[models.NewStakeCredentialRef(uint8(tag), key).MapKey()]
+		if !ok {
+			continue
+		}
+		st.dbID = id
+		st.id = id
+		// An empty total is no baseline, as in currentCredentialUtxoStake:
+		// the per-row path re-sums it but keeps the row.
+		if raw.Valid && raw.String != "" {
+			st.utxo, err = parseUint64(
+				"reward live stake UTxO total", raw.String,
+			)
+			if err != nil {
+				return err
+			}
+			st.hasTotal = true
+		}
+	}
+	return rows.Err()
+}
+
+func scanStakeAccounts(
+	ctx context.Context,
+	db queryer,
+	query string,
+	args []any,
+	states map[string]*stakeRowState,
+) error {
+	rows, err := db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			tag     int64
+			key     []byte
+			account stakeAccountState
+		)
+		if err := rows.Scan(
+			&tag, &key, &account.reward, &account.pool, &account.active,
+			&account.addedSlot, &account.createdSlot,
+		); err != nil {
+			return err
+		}
+		st, ok := states[models.NewStakeCredentialRef(uint8(tag), key).MapKey()]
+		if !ok {
+			continue
+		}
+		account.exists = true
+		st.account = account
+	}
+	return rows.Err()
+}
+
+const (
+	// stakeRowInsertColumns is the bind width of one explicit-id
+	// reward_live_stake row; stakeRowUpdateColumns of one in-place update.
+	stakeRowInsertColumns = 11
+	stakeRowUpdateColumns = 9
+)
+
+// writeStakeRowStates writes each credential's replayed row: rows the
+// replay removed or moved to a new id are deleted, rows under a new id are
+// inserted with it, and rows that keep their id are updated in place. It
+// returns the highest id it inserted, or zero when none.
+func writeStakeRowStates(
+	ctx context.Context,
+	db queryer,
+	ordered []*stakeRowState,
+) (int64, error) {
+	var (
+		deletes []any
+		inserts []any
+		updates []any
+		written int64
+	)
+	for _, st := range ordered {
+		replaced := st.id == 0 || st.id != st.dbID
+		if replaced && st.dbID != 0 {
+			deletes = append(deletes, st.dbID)
+		}
+		if st.id == 0 {
+			continue
+		}
+		row, keep, err := rewardLiveStakeRowValues(
+			st.ref, st.account.liveStakeAccount, st.slot, st.utxo,
+		)
+		if err != nil {
+			return 0, err
+		}
+		if !keep {
+			if !replaced {
+				deletes = append(deletes, st.dbID)
+			}
+			continue
+		}
+		values := []any{
+			row.pool,
+			decimalUint64(types.Uint64(row.utxo)),
+			decimalUint64(types.Uint64(row.reward)),
+			decimalUint64(types.Uint64(row.total)),
+			row.registered,
+			row.delegationSlot,
+			row.slot,
+			models.RewardStakeCalculationVersion,
+		}
+		if !replaced {
+			updates = append(append(updates, st.id), values...)
+			continue
+		}
+		inserts = append(
+			append(inserts, st.id, st.ref.Tag, st.ref.Key), values...,
+		)
+		written = max(written, st.id)
+	}
+	// Deletes go first: a credential's new row must not meet its old one in
+	// the unique credential index.
+	if err := execChunked(ctx, db, deletes, 1, func(rows int) string {
+		return `-- name: BatchOverlayDeleteRewardLiveStake :exec
+DELETE FROM reward_live_stake WHERE id IN (` +
+			strings.TrimSuffix(strings.Repeat("?, ", rows), ", ") + `)`
+	}); err != nil {
+		return 0, overlayWriteError("delete reward live stake rows", err)
+	}
+	if err := execChunked(
+		ctx, db, inserts, stakeRowInsertColumns, func(rows int) string {
+			return `-- name: BatchOverlayInsertRewardLiveStake :exec
+INSERT INTO reward_live_stake (
+    id, credential_tag, staking_key, pool_key_hash, utxo_stake, reward_stake,
+    total_stake, registered, pool_delegation_slot, updated_slot,
+    calculation_version
+) VALUES ` + strings.TrimSuffix(strings.Repeat(
+				"(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?), ", rows), ", ")
+		},
+	); err != nil {
+		return 0, overlayWriteError("insert reward live stake rows", err)
+	}
+	if err := execChunked(
+		ctx, db, updates, stakeRowUpdateColumns, func(rows int) string {
+			return `-- name: BatchOverlayUpdateRewardLiveStake :exec
+UPDATE reward_live_stake SET
+    pool_key_hash = v.column2, utxo_stake = v.column3,
+    reward_stake = v.column4, total_stake = v.column5,
+    registered = v.column6, pool_delegation_slot = v.column7,
+    pool_delegation_block_index = 0, pool_delegation_cert_index = 0,
+    updated_slot = v.column8, calculation_version = v.column9
+FROM (VALUES ` + strings.TrimSuffix(strings.Repeat(
+				"(?, ?, ?, ?, ?, ?, ?, ?, ?), ", rows), ", ") + `) AS v
+WHERE reward_live_stake.id = v.column1`
+		},
+	); err != nil {
+		return 0, overlayWriteError("update reward live stake rows", err)
+	}
+	return written, nil
+}
+
+// execChunked runs query over args, width bind parameters per row, in
+// statements that stay under SQLite's 999-parameter limit.
+func execChunked(
+	ctx context.Context,
+	db queryer,
+	args []any,
+	width int,
+	query func(rows int) string,
+) error {
+	perStatement := 999 / width * width
+	for start := 0; start < len(args); start += perStatement {
+		end := min(start+perStatement, len(args))
+		if _, err := db.ExecContext(
+			ctx, query((end-start)/width), args[start:end]...,
+		); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // stakeAtSegmentEnd is the full re-sum the per-row path runs for a
@@ -1250,27 +1650,4 @@ func (s *Store) stakeAtSegmentEnd(
 		return 0, errors.New("reward live stake delta overflow")
 	}
 	return applyUtxoStakeDelta(now, -later, ref)
-}
-
-// accountExistedAt reports whether ref's account row existed at the end of
-// the block at slot.
-func accountExistedAt(
-	ctx context.Context,
-	db queryer,
-	ref models.StakeCredentialRef,
-	slot uint64,
-) (bool, error) {
-	var created int64
-	err := db.QueryRowContext(ctx, `-- name: BatchOverlayAccountCreatedSlot :one
-SELECT created_slot FROM account
-WHERE credential_tag = ? AND staking_key = ?`, ref.Tag, ref.Key).Scan(
-		&created,
-	)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
-	}
-	if err != nil {
-		return false, fmt.Errorf("read account creation slot: %w", err)
-	}
-	return created >= 0 && uint64(created) <= slot, nil
 }
