@@ -44,7 +44,7 @@ type UtxorpcLedgerState interface {
 		hash []byte,
 	) (models.Block, error)
 	CardanoNodeConfig() *cardano.CardanoNodeConfig
-	Datum(hash []byte) (*models.Datum, error)
+	Datums(ctx context.Context, hashes [][]byte) ([]*models.Datum, error)
 	EvaluateTxContext(
 		ctx context.Context,
 		tx lcommon.Transaction,
