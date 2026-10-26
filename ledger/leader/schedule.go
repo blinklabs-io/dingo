@@ -43,7 +43,7 @@ import (
 // the epoch nonce and both sigma inputs but not the active slot coefficient,
 // so the version bump is the only thing that retires a schedule computed with
 // a different f.
-const ScheduleFormatVersion = 6
+const ScheduleFormatVersion = 7
 
 // EpochSlotRange identifies the absolute slot range covered by an epoch.
 // StartSlot is inclusive and SlotCount is the number of slots to evaluate.
@@ -62,7 +62,13 @@ type Schedule struct {
 	PoolStake         uint64              // Pool's stake from active snapshot
 	TotalStake        uint64              // Total active stake from active snapshot
 	EpochNonce        []byte              // Epoch nonce for VRF
-	LeaderSlots       []uint64            // Slots where pool is leader, ascending-sorted
+	EpochStartSlot    uint64              // First absolute slot in the epoch
+	EpochSlotCount    uint64              // Number of slots in the epoch
+	EraID             uint                // Ledger era governing the schedule
+	// DistributionCommitment binds public-schedule algorithms to the whole
+	// election distribution. It is empty for Praos schedules.
+	DistributionCommitment []byte
+	LeaderSlots            []uint64 // Slots where pool is leader, ascending-sorted
 
 	mu sync.RWMutex
 }

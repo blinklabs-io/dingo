@@ -316,6 +316,9 @@ func (o *Ouroboros) markDeferredHeaderRecovery(
 		}
 		idle = len(tipHash) > 0 && bytes.Equal(tipHash, headerTipHash)
 	}
+	// Reaching here means the header is parked, not resolved as an applied
+	// deferral above.
+	o.recordDeferredHeaderParked()
 	o.deferredHeaderRecoveryMu.Lock()
 	if o.deferredHeaderRecovery == nil {
 		o.deferredHeaderRecovery = make(
@@ -2145,6 +2148,22 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 			}
 		}
 		patienceGrant = selectionEligible && ingressEligible
+		// Header arrival against slot time, for headers that passed (or
+		// only deferred) verification from an eligible peer, so a bad peer
+		// cannot fill the ring.
+		if ingressEligible && (selectionEligible || deferredVerification) &&
+			o.headerArrivalMetrics != nil {
+			if slotTime, atTip, ok := o.headerArrivalClock(blockSlot); ok {
+				o.headerArrivalMetrics.observeHeaderArrival(
+					atTip,
+					v.BlockNumber(),
+					blockSlot,
+					v.Hash(),
+					slotTime,
+					arrivalTime,
+				)
+			}
+		}
 		// Record the cross-peer dedup entry only for headers we will actually
 		// apply. A header withheld from an uncorroborated peer must not suppress
 		// a later delivery from a corroborated, apply-eligible peer.
@@ -2723,6 +2742,7 @@ func (o *Ouroboros) SubscribeChainsyncResync(ctx context.Context) {
 				return
 			default:
 			}
+			o.recordChainsyncResync(e.Reason)
 			released := e.Reason == event.ChainsyncResyncReasonNetworkIngestReleased
 			// The release re-intersects every client, so a resync requested
 			// while held -- by a timer armed before the hold, say -- would

@@ -148,6 +148,11 @@ type Ouroboros struct {
 	subscriptions     []subscription
 	blockfetchMetrics *blockfetchMetrics
 	protocolMetrics   *protocolMetrics
+	chainsyncMetrics  *chainsyncMetrics
+
+	// headerArrivalMetrics records chainsync header arrival against slot time.
+	headerArrivalMetrics *headerArrivalMetrics
+
 	// Shared cache of decoded blocks/headers keyed by content hash, so
 	// multiple connections delivering byte-identical data (the common case
 	// when several peers relay the same block) decode once instead of once
@@ -454,6 +459,13 @@ type chainsyncPeerStats struct {
 	headerCount         int64
 }
 
+func (o *Ouroboros) nodeToNodeNetworkMagic() uint32 {
+	if o.config.NodeToNodeNetworkMagic != 0 {
+		return o.config.NodeToNodeNetworkMagic
+	}
+	return o.config.NetworkMagic
+}
+
 // OuroborosConfig carries both the settings NewOuroboros applies at
 // construction and the node dependencies Wire installs afterwards. The two
 // groups are read at different points in the lifecycle and are not
@@ -467,10 +479,14 @@ type OuroborosConfig struct {
 	EventBus        *event.EventBus
 	ConnManager     *connmanager.ConnectionManager
 	IntersectPoints []ocommon.Point
-	NetworkMagic    uint32
-	PeerSharing     bool
-	IntersectTip    bool
-	PromRegistry    prometheus.Registerer
+	// NetworkMagic is the Cardano network identity used by node-to-client
+	// connections. NodeToNodeNetworkMagic may separate a consensus network
+	// while preserving the standard local-client contract.
+	NetworkMagic           uint32
+	NodeToNodeNetworkMagic uint32
+	PeerSharing            bool
+	IntersectTip           bool
+	PromRegistry           prometheus.Registerer
 	// ChainsyncBlockTimeout bounds how long NtN chain-sync can wait for a
 	// block reply after a peer enters a server-agency state. Values below
 	// the protocol maximum are raised to the protocol maximum.
@@ -868,8 +884,10 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 	}
 	if cfg.PromRegistry != nil {
 		o.initBlockfetchMetrics()
+		o.initHeaderArrivalMetrics()
 		o.initProtocolMetrics()
 		o.initLeiosMetrics()
+		o.initChainsyncMetrics()
 		o.initDecodeCacheMetrics()
 	}
 	o.subscribeLeiosAnnouncementRetries()
@@ -1123,7 +1141,7 @@ func (o *Ouroboros) ConfigureListeners(
 					okeepalive.NewConfig(o.keepaliveConnOpts()...),
 				),
 				ouroboros.WithPeerSharing(o.config.PeerSharing),
-				ouroboros.WithNetworkMagic(o.config.NetworkMagic),
+				ouroboros.WithNetworkMagic(o.nodeToNodeNetworkMagic()),
 				ouroboros.WithPeerSharingConfig(
 					o.peerSharingConfig(),
 				),
@@ -1184,7 +1202,7 @@ func (o *Ouroboros) OutboundConnOpts(
 	ctx context.Context,
 ) []ouroboros.ConnectionOptionFunc {
 	opts := []ouroboros.ConnectionOptionFunc{
-		ouroboros.WithNetworkMagic(o.config.NetworkMagic),
+		ouroboros.WithNetworkMagic(o.nodeToNodeNetworkMagic()),
 		ouroboros.WithNodeToNode(true),
 		ouroboros.WithKeepAlive(true),
 		ouroboros.WithKeepAliveConfig(
