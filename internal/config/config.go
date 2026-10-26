@@ -486,10 +486,10 @@ type TokenRegistryConfig struct {
 	// Foundation registry for mainnet, the IOG testnet registry otherwise.
 	SourceURL string `yaml:"sourceUrl"             envconfig:"DINGO_TOKEN_REGISTRY_SOURCE_URL"`
 	// ManifestURL identifies the signed manifest that authenticates each
-	// snapshot. It is required when the sync is enabled.
+	// snapshot for an operator-managed mirror. Empty uses the public registry.
 	ManifestURL string `yaml:"manifestUrl"           envconfig:"DINGO_TOKEN_REGISTRY_MANIFEST_URL"`
 	// TrustedManifestKey is the hex-encoded Ed25519 public key used to verify
-	// signed manifests. It is required when the sync is enabled.
+	// an optional mirror manifest. Required only with ManifestURL.
 	TrustedManifestKey string `yaml:"trustedManifestKey"    envconfig:"DINGO_TOKEN_REGISTRY_TRUSTED_MANIFEST_KEY"`
 	// Interval controls how often the registry is re-checked. Each check
 	// is a conditional request, so an unchanged registry costs no download.
