@@ -1051,8 +1051,15 @@ func (b *Blockfrost) handleMetadataTransactions(
 		return
 	}
 
-	rows, total, err := b.node.MetadataTransactions(label, params)
+	rows, total, err := b.node.MetadataTransactions(
+		r.Context(),
+		label,
+		params,
+	)
 	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			return
+		}
 		b.logger.Error(
 			"failed to get metadata transactions",
 			"label", label,
@@ -1091,8 +1098,15 @@ func (b *Blockfrost) handleMetadataTransactionsCBOR(
 		return
 	}
 
-	rows, total, err := b.node.MetadataTransactionsCBOR(label, params)
+	rows, total, err := b.node.MetadataTransactionsCBOR(
+		r.Context(),
+		label,
+		params,
+	)
 	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			return
+		}
 		b.logger.Error(
 			"failed to get CBOR metadata transactions",
 			"label", label,

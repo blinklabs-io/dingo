@@ -3806,19 +3806,20 @@ func (a *NodeAdapter) transactionPositionInfos(
 	return ret, nil
 }
 
-// MetadataTransactions returns paginated transaction metadata values for the
-// requested label in JSON form.
-func (a *NodeAdapter) MetadataTransactions(
+// metadataLabelPage returns one page of transactions carrying the label and
+// the label's total. Count and page share one read transaction so they agree,
+// and the page query is skipped when the offset is at or past the total, since
+// it can only return no rows.
+func (a *NodeAdapter) metadataLabelPage(
+	ctx context.Context,
 	label uint64,
 	params PaginationParams,
-) ([]MetadataTransactionJSONInfo, int, error) {
+) ([]models.Transaction, int, error) {
 	db := a.ledgerState.Database()
+	txn := db.Transaction(ctx, false)
+	defer txn.Release()
 
-	total, err := db.CountTransactionsByMetadataLabel(
-		context.Background(),
-		label,
-		nil,
-	)
+	total, err := db.CountTransactionsByMetadataLabel(ctx, label, txn)
 	if err != nil {
 		return nil, 0, fmt.Errorf(
 			"count transactions by metadata label %d: %w",
@@ -3826,14 +3827,18 @@ func (a *NodeAdapter) MetadataTransactions(
 			err,
 		)
 	}
+	offset, ok := paginationOffset(params)
+	if !ok || offset >= total {
+		return nil, total, nil
+	}
 
 	txs, err := db.GetTransactionsByMetadataLabel(
-		context.Background(),
+		ctx,
 		label,
 		params.Count,
-		(params.Page-1)*params.Count,
+		offset,
 		params.Order == PaginationOrderDesc,
-		nil,
+		txn,
 	)
 	if err != nil {
 		return nil, 0, fmt.Errorf(
@@ -3841,6 +3846,20 @@ func (a *NodeAdapter) MetadataTransactions(
 			label,
 			err,
 		)
+	}
+	return txs, total, nil
+}
+
+// MetadataTransactions returns paginated transaction metadata values for the
+// requested label in JSON form.
+func (a *NodeAdapter) MetadataTransactions(
+	ctx context.Context,
+	label uint64,
+	params PaginationParams,
+) ([]MetadataTransactionJSONInfo, int, error) {
+	txs, total, err := a.metadataLabelPage(ctx, label, params)
+	if err != nil {
+		return nil, 0, err
 	}
 
 	ret := make([]MetadataTransactionJSONInfo, 0, len(txs))
@@ -3868,38 +3887,13 @@ func (a *NodeAdapter) MetadataTransactions(
 // MetadataTransactionsCBOR returns paginated transaction metadata values for
 // the requested label in CBOR-hex form.
 func (a *NodeAdapter) MetadataTransactionsCBOR(
+	ctx context.Context,
 	label uint64,
 	params PaginationParams,
 ) ([]MetadataTransactionCBORInfo, int, error) {
-	db := a.ledgerState.Database()
-
-	total, err := db.CountTransactionsByMetadataLabel(
-		context.Background(),
-		label,
-		nil,
-	)
+	txs, total, err := a.metadataLabelPage(ctx, label, params)
 	if err != nil {
-		return nil, 0, fmt.Errorf(
-			"count transactions by metadata label %d: %w",
-			label,
-			err,
-		)
-	}
-
-	txs, err := db.GetTransactionsByMetadataLabel(
-		context.Background(),
-		label,
-		params.Count,
-		(params.Page-1)*params.Count,
-		params.Order == PaginationOrderDesc,
-		nil,
-	)
-	if err != nil {
-		return nil, 0, fmt.Errorf(
-			"get transactions by metadata label %d: %w",
-			label,
-			err,
-		)
+		return nil, 0, err
 	}
 
 	ret := make([]MetadataTransactionCBORInfo, 0, len(txs))
