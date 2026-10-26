@@ -25,6 +25,7 @@ import (
 	"strconv"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/blinklabs-io/gouroboros/connection"
@@ -293,10 +294,15 @@ func (p *PeerConn) fail(err error) {
 }
 
 // endedCleanly reports whether err is how a connection normally ends: the
-// remote hanging up, or this side having closed it.
+// remote hanging up, or this side having closed it. A remote that closes with
+// unread data queued makes the kernel reset the connection, so the muxer sees
+// ECONNRESET (or EPIPE on a write) where an orderly close would give EOF.
 func endedCleanly(err error) bool {
 	var closed *muxer.ConnectionClosedError
-	return errors.As(err, &closed) || errors.Is(err, net.ErrClosed)
+	return errors.As(err, &closed) ||
+		errors.Is(err, net.ErrClosed) ||
+		errors.Is(err, syscall.ECONNRESET) ||
+		errors.Is(err, syscall.EPIPE)
 }
 
 func (p *PeerConn) teardown() {
