@@ -18766,6 +18766,14 @@ header pipeline owner. The node sets it from the
 `DINGO_BLOCKFETCH_LOW_WATERMARK_ENABLED` environment variable, or the
 `--blockfetch-low-watermark-enabled` flag.
 
+Only the owner's own headers grow the queue, so an owner whose next header is
+withheld (an uncorroborated Genesis source) leaves it below the gate while every
+other connection's headers are buffered as non-fitting. When a connection's
+buffer is full and no request or continuation is pending,
+`startStalledHeaderQueueBlockfetch` fetches the queued headers from the owner
+below the gate instead of closing the connection with nothing in flight; the
+batch's completion clears the owner and replays the buffered headers.
+
 `decodeReadChainBatch` enforces the header check only when the serial path
 has enough state to make the same decision: validation is enabled, the slot is
 above the Mithril trust boundary, and the published epoch cache has a nonce for
