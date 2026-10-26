@@ -2037,22 +2037,23 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 			Point:       point,
 			BlockNumber: v.BlockNumber(),
 		}
+		update := chainselection.PeerTipUpdateEvent{
+			ConnectionId: ctx.ConnectionId,
+			Tip:          tip,
+			ObservedTip:  observedTip,
+			HeaderCryptoVerificationGeneration: chainsyncEvent.
+				HeaderCryptoVerificationGeneration,
+			ObservedPrevHash: v.PrevHash().Bytes(),
+			ObservedBoundary: blockType == gledger.BlockTypeByronEbb,
+		}
+		if o.config.ChainsyncRecordDeliveredPeerTip != nil {
+			o.config.ChainsyncRecordDeliveredPeerTip(update)
+		}
 		var peerTipUpdate *chainselection.PeerTipUpdateEvent
 		if selectionEligible {
-			update := chainselection.PeerTipUpdateEvent{
-				ConnectionId: ctx.ConnectionId,
-				Tip:          tip,
-				ObservedTip:  observedTip,
-				VRFOutput:    vrfOutput,
-				PraosView:    praosView,
-				AdmissionID:  o.chainsyncAdmissionSequence.Add(1),
-				HeaderCryptoVerificationGeneration: chainsyncEvent.
-					HeaderCryptoVerificationGeneration,
-				// The parent hash is what lets the selector tell a connected
-				// header chain from a sequence of advancing numbers.
-				ObservedPrevHash: v.PrevHash().Bytes(),
-				ObservedBoundary: blockType == gledger.BlockTypeByronEbb,
-			}
+			update.AdmissionID = o.chainsyncAdmissionSequence.Add(1)
+			update.VRFOutput = vrfOutput
+			update.PraosView = praosView
 			disposition := chainselection.PeerTipUpdateUnhandled
 			if o.config.ChainsyncObservePeerTip != nil {
 				disposition = o.config.ChainsyncObservePeerTip(update)

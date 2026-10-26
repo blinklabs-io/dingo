@@ -150,6 +150,36 @@ func TestChainsyncClientRollForwardCarriesHeaderCryptoVerdict(t *testing.T) {
 	require.EqualValues(t, 42, data.HeaderCryptoVerificationGeneration)
 }
 
+func TestChainsyncClientRollForwardRecordsObserverDelivery(t *testing.T) {
+	t.Parallel()
+	f := newPatienceRollForwardFixture(t, false)
+	delivered := make(chan chainselection.PeerTipUpdateEvent, 1)
+	observeCalled := false
+	f.o.config.ChainsyncRecordDeliveredPeerTip = func(
+		update chainselection.PeerTipUpdateEvent,
+	) {
+		delivered <- update
+	}
+	f.o.config.ChainsyncObservePeerTip = func(
+		chainselection.PeerTipUpdateEvent,
+	) chainselection.PeerTipUpdateDisposition {
+		observeCalled = true
+		return chainselection.PeerTipUpdateAccepted
+	}
+	header := newTestBlockHeader(100, 1, 0xaa)
+
+	f.rollForward(t, header)
+
+	update := testutil.RequireReceive(t, delivered, time.Second,
+		"observer header should be recorded for corroboration")
+	require.Equal(t, f.conn, update.ConnectionId)
+	require.Equal(t, header.Hash().Bytes(), update.ObservedTip.Point.Hash)
+	require.Zero(t, update.AdmissionID,
+		"observer history must not create an admission candidate")
+	require.False(t, observeCalled,
+		"an ineligible observer must not enter selector admission")
+}
+
 func TestChainsyncPeerTipAdmissionUsesRevalidatedGeneration(t *testing.T) {
 	t.Parallel()
 

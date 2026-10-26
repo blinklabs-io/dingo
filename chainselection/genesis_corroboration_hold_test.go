@@ -113,6 +113,41 @@ func TestDeliveredHistoryCorroboratesAfterAdmissionFrontierPruning(t *testing.T)
 		"pruning the admission frontier must not erase the witness's delivered history")
 }
 
+func TestDeliveredHistoryFromObserverCorroboratesAfterPromotion(t *testing.T) {
+	t.Parallel()
+	cs := NewChainSelector(ChainSelectorConfig{
+		GenesisMode:           true,
+		SecurityParam:         20,
+		MinCorroboratingPeers: 1,
+	})
+	applicant := corrConn(8)
+	observer := corrConn(9)
+	feedFrontier(cs, applicant,
+		genesisTip(100, "h100", 100),
+		genesisTip(105, "h105", 105),
+		genesisTip(110, "h110", 110),
+	)
+	cs.SetConnectionEligible(observer, false)
+
+	for _, tip := range []ochainsync.Tip{
+		genesisTip(100, "h100", 100),
+		genesisTip(105, "h105", 105),
+		genesisTip(110, "h110", 110),
+	} {
+		cs.RecordDeliveredPeerTip(PeerTipUpdateEvent{
+			ConnectionId: observer,
+			Tip:          tip,
+			ObservedTip:  tip,
+		})
+	}
+
+	require.False(t, cs.ShouldApplyIngress(applicant),
+		"an observer cannot corroborate while it is ineligible")
+	cs.SetConnectionEligible(observer, true)
+	require.True(t, cs.ShouldApplyIngress(applicant),
+		"the promoted observer's delivered history should corroborate the held ingress frontier")
+}
+
 func TestDeliveredPeerHistoryIsBoundedAndRemoved(t *testing.T) {
 	t.Parallel()
 	cs := NewChainSelector(ChainSelectorConfig{

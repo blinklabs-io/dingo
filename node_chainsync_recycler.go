@@ -46,15 +46,22 @@ func (n *Node) chainsyncObservePeerTip(
 		if !active {
 			return chainselection.PeerTipUpdateUnhandled
 		}
-		n.chainSelector.RecordDeliveredPeerTip(e)
 		return n.chainSelector.ObservePeerTipUpdate(e)
 	}
-	n.chainSelector.RecordDeliveredPeerTip(e)
 	disposition := n.chainSelector.PreparePeerTipAdmissionDisposition(e)
 	if disposition == chainselection.PeerTipUpdateAccepted {
 		n.touchPeerByConnId(e.ConnectionId)
 	}
 	return disposition
+}
+
+func (n *Node) chainsyncRecordDeliveredPeerTip(
+	e chainselection.PeerTipUpdateEvent,
+) {
+	if n.chainSelector == nil {
+		return
+	}
+	n.chainSelector.RecordDeliveredPeerTip(e)
 }
 
 // chainsyncResolvePeerTip removes rejected candidates immediately and promotes
