@@ -10518,9 +10518,10 @@ changed on disk after its download is refused there. `Next` returns chunks in
 order, returns a failed chunk's error only after every lower chunk, and keeps
 returning that error. The window is therefore a disk bound only: decoded
 blocks exist only for the chunks the consumer has taken and not yet dropped,
-which for the stream runner is at most one batch (`BatchChunks` files, or
-`MaxBatchBlocks` blocks) plus the file being split, and the tip locator keeps
-only block positions (slot, hash, parent hash) of the files it probes.
+which for the stream runner is the batch being built or applied (at most
+`BatchChunks` files, or `MaxBatchBlocks` blocks, plus the file being split)
+and the files it decoded ahead (see Decode ahead below), and the tip locator
+keeps only block positions (slot, hash, parent hash) of the files it probes.
 The consumer calls `Release(n)` once chunk `n` is applied, which deletes its
 trio. Chunk `n` starts only while `n < lowestUnreleased + WindowChunks`, so a
 slow consumer stalls downloads and the trio count on disk never exceeds the
@@ -10593,6 +10594,23 @@ database Mithril never bootstrapped is flagged stream-only so
   file larger than that spans several batches), or when the outstanding files
   fill the feed window, since `Next` cannot return a file the window holds
   back. Empty files complete immediately and never produce an empty batch.
+- **Decode ahead.** One goroutine per run pass (`decodeAhead`,
+  `stream_decode_ahead.go`) calls the feed's `Next`, which decodes, and
+  queues the results, so the next files decode while `ApplyTrustedBatch`
+  runs on the run's goroutine. The run receives chunks and errors in `Next`'s
+  order, so batches, the blocks in them, and the point at which a decode or
+  download error ends the run are what a serial `Next` loop would produce.
+  The goroutine starts another `Next` only while the queue holds fewer than
+  `BatchChunks` files and, with `MaxBatchBlocks` set, fewer than that many
+  blocks, so at most one batch plus one file is decoded ahead. Files queued
+  ahead hold feed window slots; the window flush above still terminates,
+  because the run drains the queue before it can wait on a file the window
+  holds back, and its outstanding count then reaches the window. `Next` runs
+  under the run's context, so cancellation fails it as before; leaving the
+  pass (an error, a stale tip, the end) stops the goroutine and waits for it
+  before the feed closes, dropping whatever was queued. A decode already in
+  progress finishes its file first on an error or stale exit; cancellation
+  also cancels the feed, which ends that decode at its next block.
 - **Commit, marker, release.** After each commit the marker advances to the
   highest file all of whose blocks are committed, and only then are those
   files released. A file split across batches stays outstanding and out of
