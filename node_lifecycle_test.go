@@ -875,7 +875,7 @@ func generateValidatedConwayForkChain(
 				Output: vrfOutput,
 				Proof:  vrfProof,
 			},
-			BlockBodySize: 0,
+			BlockBodySize: testutil.ConwayEmptyBodySize(t),
 			BlockBodyHash: bodyHash,
 			OpCert: babbage.BabbageOpCert{
 				HotVkey:        keys.kesPk,
