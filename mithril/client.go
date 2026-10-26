@@ -33,6 +33,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/blinklabs-io/dingo/internal/httpuseragent"
 )
 
 // Beacon represents a Cardano chain position at a specific epoch
@@ -1106,6 +1108,7 @@ func (c *Client) doGet(
 	if err != nil {
 		return nil, fmt.Errorf("creating request: %w", err)
 	}
+	httpuseragent.Set(req)
 	req.Header.Set("Accept", "application/json")
 
 	httpClient, err := secureMithrilHTTPClient(

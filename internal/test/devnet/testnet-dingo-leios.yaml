@@ -42,7 +42,8 @@ TestMaryHardForkAtEpoch: 0
 TestAlonzoHardForkAtEpoch: 0
 TestBabbageHardForkAtEpoch: 0
 TestConwayHardForkAtEpoch: 0
-TestDijkstraHardForkAtEpoch: 0
+# Keep one complete Conway epoch before the Dijkstra/Leios transition.
+TestDijkstraHardForkAtEpoch: 1
 ExperimentalHardForksEnabled: true
 ExperimentalProtocolsEnabled: true
 TraceForge: true

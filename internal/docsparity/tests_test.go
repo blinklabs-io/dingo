@@ -3110,7 +3110,7 @@ func TestPipelineTiers(t *testing.T) {
 func TestConformanceReportsRunOnlyForLinuxRelease(t *testing.T) {
 	root := repoRoot(t)
 	const datasetRevision = "6cd8c928665bbafe90e02066ebb4620e38f051de"
-	const ndcLedgerRevision = "8974561cb6b48807e2a578028d4f5d85430007a6"
+	const ndcLedgerRevision = "9d14fd8cc05562055c3dc2288661bb6e2b7e7ad7"
 	const uplcCorpusSHA256 = "8bd4ad4f9f4c8c6b8ffa1f06ed1db0b43043afbba77ef6a14bcfb5a52345ed3f"
 	const turboCorpusSHA256 = "821af55e3323c826b5598c964d634b46dd468014834d0e97ebdc5edb0a158576"
 
@@ -3936,6 +3936,47 @@ func TestGovulncheckRunsThroughPinnedModule(t *testing.T) {
 		if !found {
 			t.Errorf("%s: govulncheck job does not run the pinned Makefile target", workflow)
 		}
+	}
+}
+
+// TestPublishCancelsSupersededMainRuns checks that a newer push to main
+// cancels the publish run it supersedes, while a release tag is never
+// interrupted. Main runs only rebuild the branch-tagged images, so letting
+// every commit in a burst of merges run to completion only fills the runners.
+func TestPublishCancelsSupersededMainRuns(t *testing.T) {
+	t.Parallel()
+	root := repoRoot(t)
+
+	var parsed struct {
+		Concurrency struct {
+			Group            string `yaml:"group"`
+			CancelInProgress string `yaml:"cancel-in-progress"`
+		} `yaml:"concurrency"`
+	}
+	raw := readRepoFile(t, root, publishPipeline)
+	if err := yaml.Unmarshal([]byte(raw), &parsed); err != nil {
+		t.Fatalf("parse %s: %v", publishPipeline, err)
+	}
+	const (
+		wantGroup  = "${{ github.workflow }}-${{ github.ref }}"
+		wantCancel = "${{ github.ref == 'refs/heads/main' }}"
+	)
+	if parsed.Concurrency.Group != wantGroup {
+		t.Errorf(
+			"%s concurrency group %q, want %q",
+			publishPipeline,
+			parsed.Concurrency.Group,
+			wantGroup,
+		)
+	}
+	if parsed.Concurrency.CancelInProgress != wantCancel {
+		t.Errorf(
+			"%s cancel-in-progress %q, want %q: cancel superseded main "+
+				"runs, never a tag",
+			publishPipeline,
+			parsed.Concurrency.CancelInProgress,
+			wantCancel,
+		)
 	}
 }
 

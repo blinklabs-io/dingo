@@ -23,6 +23,7 @@ import (
 	"slices"
 
 	"github.com/blinklabs-io/dingo/config/cardano"
+	"github.com/blinklabs-io/dingo/internal/blsstate"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -468,6 +469,9 @@ func ValidateTxDijkstra(
 		); err != nil {
 			errs = append(errs, semanticRuleValidationErrorFor(err))
 		}
+		if err := validateDijkstraPoolBlsKeyUniqueness(tx, ls); err != nil {
+			errs = append(errs, semanticRuleValidationErrorFor(err))
+		}
 	}
 	if err := validateParameterChangeExcludesProtocolVersion(tx, slot, ls, pp); err != nil {
 		errs = append(
@@ -520,6 +524,67 @@ func ValidateTxDijkstra(
 		tmpPparams,
 	)
 	return semanticRuleValidationErrorFor(validatePlutusOutcome(tx, phase2Err))
+}
+
+func validateDijkstraPoolBlsKeyUniqueness(
+	tx lcommon.Transaction,
+	ls lcommon.LedgerState,
+) error {
+	levels := []lcommon.LedgerEffectLevel{{Body: tx}}
+	if leveled, ok := tx.(lcommon.LeveledTransaction); ok {
+		var err error
+		levels, err = leveled.LedgerEffectLevels()
+		if err != nil {
+			return fmt.Errorf("resolve Dijkstra transaction levels: %w", err)
+		}
+	}
+	var overlay *blsstate.Overlay
+	for _, level := range levels {
+		for _, certificate := range level.Body.Certificates() {
+			registration, ok := certificate.(*lcommon.PoolRegistrationCertificate)
+			if !ok || registration.LeiosKey == nil {
+				continue
+			}
+			if overlay == nil {
+				provider, ok := blsstate.ProviderFor(ls)
+				if !ok {
+					return blsstate.ErrProviderUnavailable
+				}
+				overlay = blsstate.NewOverlay(ls, provider)
+			}
+			inUse, owner, err := overlay.IsBlsKeyInUse(
+				registration.LeiosKey.PublicKey,
+			)
+			if err != nil {
+				return fmt.Errorf("resolve BLS key owner: %w", err)
+			}
+			if inUse && owner != registration.Operator {
+				return BlsKeyAlreadyRegisteredError{
+					PoolId:       registration.Operator,
+					ExistingPool: owner,
+				}
+			}
+			if err := overlay.ApplyRegistration(registration); err != nil {
+				return fmt.Errorf("apply BLS key registration: %w", err)
+			}
+		}
+	}
+	return nil
+}
+
+// BlsKeyAlreadyRegisteredError reports a BLS voting public key claimed by a
+// different stake pool through its active or future parameters.
+type BlsKeyAlreadyRegisteredError struct {
+	PoolId       lcommon.PoolKeyHash
+	ExistingPool lcommon.PoolKeyHash
+}
+
+func (e BlsKeyAlreadyRegisteredError) Error() string {
+	return fmt.Sprintf(
+		"BLS key is already registered by pool %s; pool %s cannot register it",
+		e.ExistingPool.String(),
+		e.PoolId.String(),
+	)
 }
 
 func validateDijkstraEvalContexts(

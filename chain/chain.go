@@ -26,6 +26,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/tracing"
 	"github.com/blinklabs-io/gouroboros/ledger"
@@ -224,12 +225,24 @@ func (c *Chain) Tip() ochainsync.Tip {
 func (c *Chain) TipRelation(
 	point ocommon.Point,
 ) (tip ochainsync.Tip, depth uint64, ancestor bool, err error) {
+	return c.TipRelationContext(context.Background(), point)
+}
+
+// TipRelationContext returns the tip, depth, and ancestry relation using ctx
+// for chain reconciliation and block lookups.
+func (c *Chain) TipRelationContext(
+	ctx context.Context,
+	point ocommon.Point,
+) (tip ochainsync.Tip, depth uint64, ancestor bool, err error) {
 	if c == nil {
 		return ochainsync.Tip{}, 0, false, errors.New("chain is nil")
 	}
+	if err := ctx.Err(); err != nil {
+		return ochainsync.Tip{}, 0, false, err
+	}
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
-	if err := c.reconcile(context.Background()); err != nil {
+	if err := c.reconcile(ctx); err != nil {
 		return ochainsync.Tip{}, 0, false, err
 	}
 	unlockBlockIndexReadLocks := c.lockBlockIndexReadLocks()
@@ -241,7 +254,7 @@ func (c *Chain) TipRelation(
 		}
 		return tip, 0, true, nil
 	}
-	block, err := c.manager.blockByPoint(context.Background(), point, nil)
+	block, err := c.manager.blockByPoint(ctx, point, nil)
 	if err != nil {
 		if errors.Is(err, models.ErrBlockNotFound) {
 			return tip, 0, false, nil
@@ -251,7 +264,7 @@ func (c *Chain) TipRelation(
 	if block.ID < initialBlockIndex || block.ID > c.tipBlockIndex {
 		return tip, 0, false, nil
 	}
-	activeBlock, err := c.blockByIndexLocked(context.Background(), block.ID)
+	activeBlock, err := c.blockByIndexLocked(ctx, block.ID)
 	if err != nil {
 		if errors.Is(err, models.ErrBlockNotFound) {
 			return tip, 0, false, nil
@@ -2769,6 +2782,12 @@ func (c *Chain) FromPointContext(
 	if c == nil {
 		return nil, errors.New("chain is nil")
 	}
+	if ctx == nil {
+		return nil, errors.New("chain iterator context is nil")
+	}
+	if c.persistent && (point.Slot > 0 || len(point.Hash) > 0) {
+		return c.fromPersistentPointContext(ctx, point, inclusive)
+	}
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 	iter, err := newChainIteratorWithContext(
@@ -2785,6 +2804,73 @@ func (c *Chain) FromPointContext(
 	c.iterators = append(c.iterators, iter)
 	iter.startCancelWatcher()
 	return iter, nil
+}
+
+// fromPersistentPointContext resolves the point before taking the chain lock.
+// Cloud-backed blob stores may perform network reads while resolving an index;
+// keeping those reads outside the lock prevents one peer request from stopping
+// chain progress. The local metadata probe rejects absent points without
+// falling through to an archive.
+func (c *Chain) fromPersistentPointContext(
+	ctx context.Context,
+	point ocommon.Point,
+	inclusive bool,
+) (*ChainIterator, error) {
+	// A malformed point is a caller error, not an absent block.
+	if _, err := database.BlockBlobKeyToPoint(
+		types.BlockBlobKey(point.Slot, point.Hash),
+	); err != nil {
+		return nil, fmt.Errorf("parsing block key: %w", err)
+	}
+	for {
+		c.mutex.RLock()
+		generation := c.mutationGeneration
+		manager := c.manager
+		c.mutex.RUnlock()
+		if manager == nil {
+			return nil, errors.New("chain manager is nil")
+		}
+		manager.mutex.RLock()
+		db := manager.db
+		manager.mutex.RUnlock()
+		if db == nil {
+			return nil, models.ErrBlockNotFound
+		}
+		blockIndex, err := database.BlockIDByPointLocal(db, point)
+		if err != nil {
+			return nil, err
+		}
+		indexedPoint, err := db.BlockPointByIndex(blockIndex, nil)
+		if err != nil {
+			return nil, err
+		}
+		if indexedPoint.Slot != point.Slot ||
+			!bytes.Equal(indexedPoint.Hash, point.Hash) {
+			return nil, models.ErrBlockNotFound
+		}
+
+		c.mutex.Lock()
+		if generation != c.mutationGeneration {
+			c.mutex.Unlock()
+			continue
+		}
+		if blockIndex < initialBlockIndex || blockIndex > c.tipBlockIndex {
+			c.mutex.Unlock()
+			return nil, models.ErrBlockNotFound
+		}
+		iter := newChainIteratorAtIndex(
+			ctx,
+			c,
+			point,
+			blockIndex,
+			inclusive,
+			false,
+		)
+		c.iterators = append(c.iterators, iter)
+		c.mutex.Unlock()
+		iter.startCancelWatcher()
+		return iter, nil
+	}
 }
 
 // FromPointReverse returns a ChainIterator that walks backward from the

@@ -72,6 +72,9 @@ type transactionBatchAccumulator struct {
 	stakeDeltaOrder []string
 	opCertSequences map[poolOpCertSequenceKey]queuedPoolOpCertSequence
 	opCertOrder     []poolOpCertSequenceKey
+	// overlay stages UTxO writes in memory when EnableBatchUtxoOverlay
+	// attached one; nil on the per-row path.
+	overlay *utxoOverlay
 }
 
 type poolOpCertSequenceKey struct {
@@ -98,6 +101,8 @@ type transactionBatchCheckpoint struct {
 	stakeDeltaOrder []string
 	opCertSequences map[poolOpCertSequenceKey]queuedPoolOpCertSequence
 	opCertOrder     []poolOpCertSequenceKey
+	overlay         *utxoOverlay
+	overlayVersion  uint64
 }
 
 func (a *transactionBatchAccumulator) addStakeDeltas(
@@ -139,6 +144,10 @@ func (a *transactionBatchAccumulator) checkpoint() transactionBatchCheckpoint {
 		rows:            a.rows.clone(),
 		stakeDeltaOrder: append([]string(nil), a.stakeDeltaOrder...),
 		opCertOrder:     append([]poolOpCertSequenceKey(nil), a.opCertOrder...),
+		overlay:         a.overlay,
+	}
+	if a.overlay != nil {
+		checkpoint.overlayVersion = a.overlay.mutations
 	}
 	if len(a.stakeDeltas) > 0 {
 		checkpoint.stakeDeltas = make(
@@ -169,6 +178,11 @@ func (a *transactionBatchAccumulator) restore(
 	}
 	if len(checkpoint.opCertSequences) > 0 {
 		a.opCertSequences = maps.Clone(checkpoint.opCertSequences)
+	}
+	a.overlay = checkpoint.overlay
+	if a.overlay != nil && a.overlay.mutations != checkpoint.overlayVersion &&
+		a.overlay.err == nil {
+		a.overlay.err = errOverlaySavepoint
 	}
 }
 
@@ -551,6 +565,7 @@ func (a *transactionBatchAccumulator) Reset() {
 	a.stakeDeltaOrder = nil
 	a.opCertSequences = nil
 	a.opCertOrder = nil
+	a.overlay = nil
 }
 
 func (s *Store) NewBatchAccumulator() types.MetadataBatchAccumulator {
@@ -568,37 +583,36 @@ func (s *Store) FlushBatch(
 			accumulator,
 		)
 	}
-	if transaction, ok := txn.(*sqlTxn); ok {
+	transaction, _ := txn.(*sqlTxn)
+	if transaction != nil {
 		if err := transaction.bindBatch(batched); err != nil {
 			return err
 		}
 	}
 	if !batched.rows.empty() || len(batched.stakeDeltaOrder) > 0 ||
-		len(batched.opCertOrder) > 0 {
+		len(batched.opCertOrder) > 0 || batched.overlay != nil {
 		if err := s.withWriteTransaction(
 			txn,
 			func(db queryer, ctx context.Context) error {
 				if err := s.flushPoolOpCertSequences(ctx, db, batched); err != nil {
 					return err
 				}
+				if batched.overlay != nil {
+					return s.flushOverlay(ctx, db, batched)
+				}
 				if err := batched.rows.flush(
 					ctx, db, s.dialect.ParameterLimit(),
 				); err != nil {
 					return err
 				}
-				for _, key := range batched.stakeDeltaOrder {
-					pending := batched.stakeDeltas[key]
-					if err := s.refreshRewardLiveStakeAggregateDelta(
-						ctx, db, pending.ref, pending.slot, pending.delta,
-					); err != nil {
-						return err
-					}
-				}
-				return nil
+				return s.flushQueuedStakeDeltas(ctx, db, batched)
 			},
 		); err != nil {
 			return err
 		}
+	}
+	if transaction != nil && batched.overlay != nil {
+		transaction.setOverlayAccumulator(nil)
 	}
 	accumulator.Reset()
 	return nil
@@ -623,24 +637,21 @@ func (s *Store) FlushBatchStakeDeltas(
 			return err
 		}
 	}
+	if batched.overlay != nil {
+		// A block ends: the overlay keeps its deltas as one segment and
+		// writes them at FlushBatch or a read barrier.
+		batched.overlay.closeStakeSegment(batched)
+		return nil
+	}
 	if err := s.withWriteTransaction(
 		txn,
 		func(db queryer, ctx context.Context) error {
-			for _, key := range batched.stakeDeltaOrder {
-				pending := batched.stakeDeltas[key]
-				if err := s.refreshRewardLiveStakeAggregateDelta(
-					ctx, db, pending.ref, pending.slot, pending.delta,
-				); err != nil {
-					return err
-				}
-			}
-			return nil
+			return s.flushQueuedStakeDeltas(ctx, db, batched)
 		},
 	); err != nil {
 		return err
 	}
-	batched.stakeDeltas = nil
-	batched.stakeDeltaOrder = nil
+	batched.clearQueuedStakeDeltas()
 	return nil
 }
 
@@ -837,6 +848,10 @@ func (s *Store) setTransactionWithAccumulator(
 			return err
 		}
 	}
+	var overlay *utxoOverlay
+	if batchedAccumulator != nil {
+		overlay = batchedAccumulator.overlay
+	}
 	// Detail rows are staged here and reach the accumulator only once the
 	// write succeeds, so a failed write cannot leave rows queued for a
 	// transaction that was rolled back, nor drop the rows an earlier
@@ -852,11 +867,19 @@ func (s *Store) setTransactionWithAccumulator(
 	err := s.withWriteTransaction(
 		txn,
 		func(db queryer, ctx context.Context) error {
-			collateralFee, err := collateralFeeForTransaction(
-				ctx,
-				db,
-				transaction,
+			var (
+				collateralFee uint64
+				err           error
 			)
+			if overlay != nil {
+				collateralFee, err = overlay.collateralFee(
+					ctx, db, transaction,
+				)
+			} else {
+				collateralFee, err = collateralFeeForTransaction(
+					ctx, db, transaction,
+				)
+			}
 			if err != nil {
 				return err
 			}
@@ -970,6 +993,29 @@ func (s *Store) setTransactionWithAccumulator(
 				}
 				producedModels = append(producedModels, model)
 			}
+			if overlay != nil {
+				var produced, consumed, skipped []stakeCredentialDelta
+				produced, consumed, skipped, err = s.setTransactionOverlayUtxos(
+					ctx, db, overlay, transaction, point,
+					producedModels, uniqueConsumedInputs(transaction),
+				)
+				if err != nil {
+					return err
+				}
+				if historicalBackfill {
+					batchedStakeDeltas = mergeStakeCredentialDeltas(
+						consumed, produced,
+					)
+					return nil
+				}
+				batchedStakeDeltas = mergeStakeCredentialDeltas(
+					refsToStakeCredentialDeltas(certificateRefs),
+					consumed,
+					skipped,
+					produced,
+				)
+				return nil
+			}
 			producedModelPtrs := make([]*models.Utxo, len(producedModels))
 			for i := range producedModels {
 				producedModelPtrs[i] = &producedModels[i]
@@ -1030,44 +1076,20 @@ func (s *Store) setTransactionWithAccumulator(
 			// are still refreshed at zero delta so the set of credentials this
 			// write touches is unchanged from the full-scan path.
 			var spentRefs []models.UtxoId
-			if s.dialect.Name() != "sqlite" && !historicalBackfill {
+			if s.dialect.Name() != "sqlite" {
 				spentRefs = make([]models.UtxoId, 0, len(transaction.Consumed()))
 			}
 			var skippedRefs []models.UtxoId
-			var consumedStakeDeltas []stakeCredentialDelta
-			if !historicalBackfill {
-				consumedStakeDeltas = make(
-					[]stakeCredentialDelta, 0, len(transaction.Consumed()),
-				)
-			}
-			seenConsumed := make(
-				map[string]struct{},
-				len(transaction.Consumed()),
+			consumedStakeDeltas := make(
+				[]stakeCredentialDelta, 0, len(transaction.Consumed()),
 			)
-			uniqueConsumed := make(
-				[]models.UtxoId,
-				0,
-				len(transaction.Consumed()),
-			)
-			for _, input := range transaction.Consumed() {
-				refKey := utxoIdentityKey(input.Id().Bytes(), input.Index())
-				if _, ok := seenConsumed[refKey]; ok {
-					continue
-				}
-				seenConsumed[refKey] = struct{}{}
-				uniqueConsumed = append(uniqueConsumed, models.UtxoId{
-					Hash: input.Id().Bytes(),
-					Idx:  input.Index(),
-				})
-			}
+			uniqueConsumed := uniqueConsumedInputs(transaction)
 			for start := 0; start < len(uniqueConsumed); start += utxoSpendBatchSize {
 				end := min(start+utxoSpendBatchSize, len(uniqueConsumed))
 				batch := uniqueConsumed[start:end]
 				updated := make(map[string]struct{}, len(batch))
 				if s.dialect.Name() == "sqlite" && len(batch) > 1 {
-					query := consumeUtxosBatchQuery(
-						len(batch), !historicalBackfill,
-					)
+					query := consumeUtxosBatchQuery(len(batch), true)
 					args := make([]any, 0, 2+len(batch)*2)
 					args = append(args, point.Slot, hash)
 					for _, ref := range batch {
@@ -1077,15 +1099,13 @@ func (s *Store) setTransactionWithAccumulator(
 					if err != nil {
 						return err
 					}
-					updatedRows, deltas, scanErr := scanConsumedUtxoRows(
-						rows, !historicalBackfill,
-					)
+					updatedRows, deltas, scanErr := scanConsumedUtxoRows(rows, true)
 					if scanErr != nil {
 						return scanErr
 					}
 					updated = updatedRows
 					consumedStakeDeltas = append(consumedStakeDeltas, deltas...)
-				} else if s.dialect.Name() == "sqlite" && !historicalBackfill {
+				} else if s.dialect.Name() == "sqlite" {
 					rows, err := s.queryRowsCached(
 						ctx, db, consumeUtxoSQLiteReturningSQL,
 						point.Slot, hash, batch[0].Hash, batch[0].Idx,
@@ -1169,7 +1189,30 @@ func (s *Store) setTransactionWithAccumulator(
 				}
 			}
 			if historicalBackfill {
-				return nil
+				if s.dialect.Name() != "sqlite" {
+					consumedStakeDeltas, err = s.queryUtxoStakeConsumedDeltas(
+						ctx,
+						db,
+						spentRefs,
+					)
+					if err != nil {
+						return err
+					}
+				}
+				// Historical replay defers account-derived fields to the final
+				// rebuild, but it still changes the live UTxO set. Keep its
+				// running stake totals aligned with the outputs it inserts and
+				// inputs it spends.
+				batchedStakeDeltas = mergeStakeCredentialDeltas(
+					consumedStakeDeltas,
+					producedStakeDeltas,
+				)
+				if batchedAccumulator != nil {
+					return nil
+				}
+				return s.refreshRewardLiveStakeDeltas(
+					ctx, db, batchedStakeDeltas, point.Slot,
+				)
 			}
 			if s.dialect.Name() != "sqlite" {
 				consumedStakeDeltas, err = s.queryUtxoStakeConsumedDeltas(
@@ -1828,10 +1871,56 @@ func (s *Store) persistUtxoRelationsWithDeferredAssets(
 	return nil
 }
 
+// uniqueConsumedInputs returns transaction's consumed inputs, first
+// occurrence of each, in order.
+func uniqueConsumedInputs(transaction lcommon.Transaction) []models.UtxoId {
+	consumed := transaction.Consumed()
+	seen := make(map[string]struct{}, len(consumed))
+	ret := make([]models.UtxoId, 0, len(consumed))
+	for _, input := range consumed {
+		refKey := utxoIdentityKey(input.Id().Bytes(), input.Index())
+		if _, ok := seen[refKey]; ok {
+			continue
+		}
+		seen[refKey] = struct{}{}
+		ret = append(ret, models.UtxoId{
+			Hash: input.Id().Bytes(),
+			Idx:  input.Index(),
+		})
+	}
+	return ret
+}
+
 func collateralFeeForTransaction(
 	ctx context.Context,
 	db queryer,
 	transaction lcommon.Transaction,
+) (uint64, error) {
+	return collateralFeeWithLookup(transaction, func(
+		input lcommon.TransactionInput,
+	) (string, bool, error) {
+		var amount string
+		err := db.QueryRowContext(ctx, `-- name: GetUtxoAmountByOutput :one
+SELECT amount FROM utxo WHERE tx_id = ? AND output_idx = ?`,
+			input.Id().Bytes(),
+			input.Index(),
+		).Scan(&amount)
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", false, nil
+		}
+		if err != nil {
+			return "", false, err
+		}
+		return amount, true, nil
+	})
+}
+
+// collateralFeeWithLookup computes a phase-2-invalid transaction's collateral
+// fee, reading each collateral input's amount through lookup, which reports
+// false for an input it cannot find.
+func collateralFeeWithLookup(
+	transaction lcommon.Transaction,
+	lookup func(lcommon.TransactionInput) (string, bool, error),
 ) (uint64, error) {
 	if transaction.IsValid() {
 		return 0, nil
@@ -1851,17 +1940,12 @@ func collateralFeeForTransaction(
 			continue
 		}
 		seen[key] = struct{}{}
-		var amount string
-		err := db.QueryRowContext(ctx, `-- name: GetUtxoAmountByOutput :one
-SELECT amount FROM utxo WHERE tx_id = ? AND output_idx = ?`,
-			input.Id().Bytes(),
-			input.Index(),
-		).Scan(&amount)
-		if errors.Is(err, sql.ErrNoRows) {
-			continue
-		}
+		amount, found, err := lookup(input)
 		if err != nil {
 			return 0, err
+		}
+		if !found {
+			continue
 		}
 		value, err := parseUint64("collateral input", amount)
 		if err != nil {
@@ -2018,7 +2102,9 @@ func (s *Store) applyTransactionWithdrawals(
 		}
 		if !historicalBackfill {
 			ref := models.NewStakeCredentialRef(tag, stakeKey.Bytes())
-			pending, err := pendingUtxoStakeDelta(txn, batchedAccumulator, ref)
+			pending, err := pendingUtxoStakeDelta(
+				ctx, db, txn, batchedAccumulator, ref,
+			)
 			if err != nil {
 				return err
 			}

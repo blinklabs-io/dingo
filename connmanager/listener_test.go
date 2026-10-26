@@ -904,9 +904,8 @@ func TestTryReserveInboundSlot_Concurrent(t *testing.T) {
 func TestTryReserveInboundSlot_ConsumeAndRelease(t *testing.T) {
 	t.Parallel()
 
-	// Verify that consumeInboundSlot correctly decrements the reservation
-	// counter, allowing the slot to be tracked by the actual connection
-	// in the connections map instead.
+	// Verify that dropping a reservation lets the slot be tracked by the
+	// actual connection in the connections map instead.
 	const maxInbound = 2
 
 	cm := NewConnectionManager(ConnectionManagerConfig{
@@ -922,8 +921,8 @@ func TestTryReserveInboundSlot_ConsumeAndRelease(t *testing.T) {
 	require.True(t, ok2)
 	require.False(t, ok3, "should not reserve beyond limit")
 
-	// Consume one slot (simulating successful AddConnection)
-	cm.consumeInboundSlot()
+	// Drop one reservation (simulating successful AddConnection)
+	cm.releaseInboundSlot()
 
 	// Add a fake connection to represent the consumed slot
 	cm.connectionsMutex.Lock()

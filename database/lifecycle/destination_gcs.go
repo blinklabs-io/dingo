@@ -23,7 +23,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"os"
 	"path"
 	"path/filepath"
 	"strings"
@@ -186,52 +185,56 @@ func (d *gcsDestination) objectKey(fileName string) string {
 	return path.Join(d.prefix, fileName)
 }
 
-// UploadDir uploads every regular file directly inside localDir (not
-// recursive — Snapshot's output directory is flat) to the destination.
-func (d *gcsDestination) UploadDir(ctx context.Context, localDir string) error {
-	entries, err := os.ReadDir(localDir)
+// UploadDir uploads the manifest and its declared payloads to the destination.
+func (d *gcsDestination) UploadDir(
+	ctx context.Context,
+	localDir string,
+) (retErr error) {
+	_, err := d.uploadAuthenticatedSnapshot(ctx, localDir)
+	return err
+}
+
+func (d *gcsDestination) uploadAuthenticatedSnapshot(
+	ctx context.Context,
+	localDir string,
+	opts ...ManifestOption,
+) (_ Manifest, retErr error) {
+	files, manifest, err := openSnapshotUploadFiles(
+		ctx, localDir, d.maxManifestBytes, opts...,
+	)
 	if err != nil {
-		return fmt.Errorf("read snapshot directory %q: %w", localDir, err)
+		return Manifest{}, err
 	}
-	for _, entry := range orderEntriesManifestLast(entries) {
-		if !entry.Type().IsRegular() || entry.Name() == cloudMirrorMarkerName {
-			continue
-		}
-		localPath := filepath.Join(localDir, entry.Name())
-		f, err := os.Open(localPath)
-		if err != nil {
-			return fmt.Errorf("open %q for upload: %w", localPath, err)
-		}
-		key := d.objectKey(entry.Name())
+	defer func() {
+		retErr = errors.Join(retErr, closeSnapshotUploadFiles(files))
+	}()
+	for _, file := range files {
+		key := d.objectKey(file.name)
 		w := d.bucket.Object(key).NewWriter(ctx)
-		_, copyErr := io.Copy(w, f)
+		_, copyErr := io.Copy(w, file.file)
 		closeWErr := w.Close()
-		closeFErr := f.Close()
 		if copyErr != nil {
-			return fmt.Errorf(
-				"upload %q to gcs object %q: %w",
-				localPath,
+			return Manifest{}, fmt.Errorf(
+				"upload snapshot file %q to gcs object %q: %w",
+				file.name,
 				key,
 				copyErr,
 			)
 		}
 		if closeWErr != nil {
-			return fmt.Errorf(
+			return Manifest{}, fmt.Errorf(
 				"close gcs object %q after upload: %w",
 				key,
 				closeWErr,
 			)
 		}
-		if closeFErr != nil {
-			return fmt.Errorf("close %q after upload: %w", localPath, closeFErr)
-		}
 	}
 	key := d.objectKey(cloudMirrorMarkerName)
 	if err := d.bucket.Object(key).Delete(ctx); err != nil &&
 		!errors.Is(err, storage.ErrObjectNotExist) {
-		return fmt.Errorf("remove legacy cloud mirror marker object %q: %w", key, err)
+		return Manifest{}, fmt.Errorf("remove legacy cloud mirror marker object %q: %w", key, err)
 	}
-	return nil
+	return manifest, nil
 }
 
 // DownloadFiles downloads exactly the named objects into localDir, never

@@ -101,16 +101,17 @@ func (b *bootstrapExtractionBudget) reserveStreamBytes(size int64) error {
 	return nil
 }
 
-func (b *bootstrapExtractionBudget) reserveEntry() error {
-	if b == nil {
+func (b *bootstrapExtractionBudget) reserveEntries(count int) error {
+	if b == nil || count == 0 {
 		return nil
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if b.entries >= b.maxEntries {
+	if count < 0 || count > b.maxEntries ||
+		b.entries > b.maxEntries-count {
 		return fmt.Errorf("%w: bootstrap entry limit reached", ErrExtractLimitExceeded)
 	}
-	b.entries++
+	b.entries += count
 	return nil
 }
 

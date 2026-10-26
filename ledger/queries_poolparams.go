@@ -156,6 +156,54 @@ func rewardAccountAddress(
 	return lcommon.NewAddressFromParts(addrType, networkID, nil, keyHash[:])
 }
 
+// stakePoolParamsFromRegistration builds the ledger's StakePoolParams from a
+// stored registration row. includeBlsKey splices in the registered BLS voting
+// key, which the ledger only encodes from protocol version 12.
+func stakePoolParamsFromRegistration(
+	reg *models.PoolRegistration,
+	networkID uint8,
+	includeBlsKey bool,
+) (stakePoolParams, error) {
+	cert, err := poolRegistrationCertificate(&models.Pool{
+		PoolKeyHash:   reg.PoolKeyHash,
+		VrfKeyHash:    reg.VrfKeyHash,
+		RewardAccount: reg.RewardAccount,
+		Margin:        reg.Margin,
+		Pledge:        reg.Pledge,
+		Cost:          reg.Cost,
+	}, reg)
+	if err != nil {
+		return stakePoolParams{}, err
+	}
+	// Genesis registrations are parsed from textual IP addresses. Snapshot
+	// imports have no certificate ID either, but their relay bytes are
+	// already in ledger wire order.
+	if reg.CertificateID == 0 && reg.AddedSlot == 0 {
+		cert.Relays = wireOrderRelays(cert.Relays)
+	}
+	if includeBlsKey &&
+		len(reg.LeiosKeyPublic) > 0 &&
+		len(reg.LeiosKeyPossessionProof) > 0 {
+		cert.LeiosKey = &lcommon.LeiosKey{
+			PublicKey:       slices.Clone(reg.LeiosKeyPublic),
+			PossessionProof: slices.Clone(reg.LeiosKeyPossessionProof),
+		}
+	}
+	rewardAccount, err := rewardAccountAddress(
+		networkID,
+		reg.RewardAccountCredentialTag,
+		cert.RewardAccount,
+	)
+	if err != nil {
+		return stakePoolParams{}, fmt.Errorf(
+			"pool %x reward account: %w",
+			reg.PoolKeyHash,
+			err,
+		)
+	}
+	return newStakePoolParams(cert, rewardAccount, true), nil
+}
+
 // queryShelleyStakePoolParams answers GetStakePoolParams: the parameters in
 // effect for each requested pool that is currently registered. A
 // re-registration made during the current epoch is the ledger's future
@@ -204,48 +252,15 @@ func (ls *LedgerState) queryShelleyStakePoolParams(
 	}
 	for i := range regs {
 		reg := &regs[i]
-		cert, err := poolRegistrationCertificate(&models.Pool{
-			PoolKeyHash:   reg.PoolKeyHash,
-			VrfKeyHash:    reg.VrfKeyHash,
-			RewardAccount: reg.RewardAccount,
-			Margin:        reg.Margin,
-			Pledge:        reg.Pledge,
-			Cost:          reg.Cost,
-		}, reg)
+		params, err := stakePoolParamsFromRegistration(
+			reg,
+			networkID,
+			includeBlsKey,
+		)
 		if err != nil {
 			return nil, err
 		}
-		// Genesis registrations are parsed from textual IP addresses. Snapshot
-		// imports have no certificate ID either, but their relay bytes are
-		// already in ledger wire order.
-		if reg.CertificateID == 0 && reg.AddedSlot == 0 {
-			cert.Relays = wireOrderRelays(cert.Relays)
-		}
-		if includeBlsKey &&
-			len(reg.LeiosKeyPublic) > 0 &&
-			len(reg.LeiosKeyPossessionProof) > 0 {
-			cert.LeiosKey = &lcommon.LeiosKey{
-				PublicKey:       slices.Clone(reg.LeiosKeyPublic),
-				PossessionProof: slices.Clone(reg.LeiosKeyPossessionProof),
-			}
-		}
-		rewardAccount, err := rewardAccountAddress(
-			networkID,
-			reg.RewardAccountCredentialTag,
-			cert.RewardAccount,
-		)
-		if err != nil {
-			return nil, fmt.Errorf(
-				"pool %x reward account: %w",
-				reg.PoolKeyHash,
-				err,
-			)
-		}
-		result[ledger.PoolId(cert.Operator)] = newStakePoolParams(
-			cert,
-			rewardAccount,
-			true,
-		)
+		result[ledger.PoolId(params.Operator)] = params
 	}
 	return []any{result}, nil
 }

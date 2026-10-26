@@ -76,6 +76,9 @@ type fakeArchive struct {
 	notFoundRef *archive.BlockRef
 
 	fetchCalls int
+
+	fetchUserAgent    string
+	downloadUserAgent string
 }
 
 func (a *fakeArchive) FetchBlock(
@@ -83,6 +86,7 @@ func (a *fakeArchive) FetchBlock(
 	req *connect.Request[archive.FetchBlockRequest],
 ) (*connect.Response[archive.FetchBlockResponse], error) {
 	a.fetchCalls++
+	a.fetchUserAgent = req.Header().Get("User-Agent")
 	resp := &archive.FetchBlockResponse{}
 	for _, b := range req.Msg.GetBlocks() {
 		hashHex := b.GetHash()
@@ -141,6 +145,7 @@ func startFakeArchiveWithOptions(
 	mux.HandleFunc(
 		"/download",
 		func(w http.ResponseWriter, r *http.Request) {
+			a.downloadUserAgent = r.Header.Get("User-Agent")
 			if a.redirectURL != "" {
 				http.Redirect(w, r, a.redirectURL, http.StatusFound)
 				return
@@ -1030,6 +1035,31 @@ func serveArchiveBlock(
 // The "archive omits metadata" case is what proves the derivation: with the
 // archive reporting nothing, correct height and previous hash can only have
 // come from decoding the block bytes.
+// TestGetBlock_SendsSharedUserAgent cannot run in parallel: it sets the
+// process-wide user-agent override so the assertion distinguishes Dingo's
+// value from connect-go's and net/http's own defaults.
+func TestGetBlock_SendsSharedUserAgent(t *testing.T) {
+	t.Setenv("DINGO_HTTP_USER_AGENT", "dingo-test-agent/1")
+
+	block := archiveBlockFixtures(t, 2)[1]
+	hash := block.Hash()
+	db := newTestDB(t)
+	blocks, configure := serveArchiveBlock(t, block)
+	baseURL, fakeArch, httpClient := startFakeArchive(t, blocks)
+	configure(fakeArch)
+
+	store := newBarkBlobStoreForTest(t, db, baseURL, httpClient)
+	rTxn := store.NewTransaction(false)
+	t.Cleanup(func() { _ = rTxn.Rollback() })
+
+	_, _, err := store.GetBlock(rTxn, block.SlotNumber(), hash[:])
+	require.NoError(t, err)
+	assert.Equal(t, "dingo-test-agent/1", fakeArch.fetchUserAgent,
+		"archive RPC must carry the shared user-agent")
+	assert.Equal(t, "dingo-test-agent/1", fakeArch.downloadUserAgent,
+		"block download must carry the shared user-agent")
+}
+
 func TestGetBlock_AcceptsVerifiedArchiveBlock(t *testing.T) {
 	t.Parallel()
 

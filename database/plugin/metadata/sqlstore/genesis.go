@@ -21,6 +21,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/internal/certutil"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/leioskeyepoch"
 	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
@@ -91,6 +92,10 @@ func (s *Store) SetGenesisStakingWithDeposits(
 			registration.LeiosKeyPossessionProof = append(
 				[]byte(nil), certificate.LeiosKey.PossessionProof...,
 			)
+			// The ledger registers genesis pools with mkStakePoolState at nesEL
+			// (cardano-ledger 9df9f98c, Shelley/Transition.hs).
+			genesisEpoch := leioskeyepoch.GenesisEpoch
+			registration.LeiosKeyRegistrationEpoch = &genesisEpoch
 		}
 		if certificate.PoolMetadata != nil {
 			registration.MetadataUrl = certificate.PoolMetadata.Url

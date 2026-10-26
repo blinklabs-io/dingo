@@ -78,6 +78,9 @@ const (
 	// DefaultMaxConcurrentBulkRequests caps how many bulk read handlers run
 	// at once; further requests are refused with ResourceExhausted.
 	DefaultMaxConcurrentBulkRequests = 32
+	DefaultMaxConcurrentEvalRequests = 4
+	DefaultMaxEvalRequestsPerClient  = 2
+	defaultListenHost                = "127.0.0.1"
 	// DefaultBulkResponseWriteTimeout bounds delivery of a bulk unary
 	// response without imposing a deadline on streaming RPCs.
 	DefaultBulkResponseWriteTimeout = 30 * time.Second
@@ -95,9 +98,10 @@ type Utxorpc struct {
 	listener *apilistener.Listener
 	config   UtxorpcConfig
 	// bulkSlots is a counting semaphore sized by MaxConcurrentBulkRequests.
-	bulkSlots chan struct{}
-	streams   *streamLimiter
-	replays   *replayLimiter
+	bulkSlots    chan struct{}
+	streams      *streamLimiter
+	replays      *replayLimiter
+	evalRequests *streamLimiter
 	// watchHistory is the process-wide budget for WatchTx undo histories.
 	watchHistory *watchTxHistoryBudget
 }
@@ -129,8 +133,8 @@ type UtxorpcConfig struct {
 	// request (0 = use default).
 	MaxTxRefs int
 	// MaxStreams caps concurrent FollowTip, WatchTx, WatchMempool and WaitForTx streams
-	// across all clients; MaxStreamsPerClient caps them per remote host
-	// (0 = use default).
+	// across all clients; MaxStreamsPerClient caps them per client, an IPv4
+	// address or IPv6 /64 (0 = use default).
 	MaxStreams          int
 	MaxStreamsPerClient int
 	// MaxPredicateNodes caps the total nodes of a watch predicate
@@ -175,6 +179,10 @@ type UtxorpcConfig struct {
 	// MaxConcurrentBulkRequests caps concurrently running bulk read handlers
 	// (0 = use default).
 	MaxConcurrentBulkRequests int
+	// MaxConcurrentEvalRequests caps EvalTx handlers before transaction
+	// decoding; MaxEvalRequestsPerClient applies the same bound per client.
+	MaxConcurrentEvalRequests int
+	MaxEvalRequestsPerClient  int
 	// BulkResponseWriteTimeout bounds delivery of a bulk unary response
 	// (0 = use default).
 	BulkResponseWriteTimeout time.Duration
@@ -197,7 +205,7 @@ func NewUtxorpc(cfg UtxorpcConfig) *Utxorpc {
 	}
 	cfg.Logger = cfg.Logger.With("component", "utxorpc")
 	if cfg.Host == "" {
-		cfg.Host = "0.0.0.0"
+		cfg.Host = defaultListenHost
 	}
 	if cfg.Port == 0 {
 		cfg.Port = 9090
@@ -269,6 +277,12 @@ func NewUtxorpc(cfg UtxorpcConfig) *Utxorpc {
 	if cfg.MaxConcurrentBulkRequests <= 0 {
 		cfg.MaxConcurrentBulkRequests = DefaultMaxConcurrentBulkRequests
 	}
+	if cfg.MaxConcurrentEvalRequests <= 0 {
+		cfg.MaxConcurrentEvalRequests = DefaultMaxConcurrentEvalRequests
+	}
+	if cfg.MaxEvalRequestsPerClient <= 0 {
+		cfg.MaxEvalRequestsPerClient = DefaultMaxEvalRequestsPerClient
+	}
 	if cfg.BulkResponseWriteTimeout <= 0 {
 		cfg.BulkResponseWriteTimeout = DefaultBulkResponseWriteTimeout
 	}
@@ -282,6 +296,11 @@ func NewUtxorpc(cfg UtxorpcConfig) *Utxorpc {
 		config:    cfg,
 		bulkSlots: make(chan struct{}, cfg.MaxConcurrentBulkRequests),
 		streams:   newStreamLimiter(cfg.MaxStreams, cfg.MaxStreamsPerClient),
+		evalRequests: newRequestLimiter(
+			cfg.MaxConcurrentEvalRequests,
+			cfg.MaxEvalRequestsPerClient,
+			"EvalTx request",
+		),
 		watchHistory: newWatchTxHistoryBudget(
 			cfg.MaxWatchHistoryBytesTotal,
 		),

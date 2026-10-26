@@ -178,7 +178,19 @@ func (n *Node) quiesceComponentStops() []namedStop {
 	if n.leiosVoteManager != nil {
 		stops = append(stops, namedStop{
 			name: "leios vote manager",
-			stop: n.leiosVoteManager.Stop,
+			stop: func() error {
+				// Clearing the pointer first stops new loads from seeing a
+				// manager tied to the old ledger: a certificate callback
+				// that loads after this sees nil and retries the block.
+				// A callback that already loaded the manager may still run
+				// ValidateDijkstraCertificate during or after Stop. That
+				// is safe: the old ledger and database stay open until
+				// LedgerState.Close drains block processing, and a stopped
+				// manager's committee waiter returns ErrVoteManagerStopped,
+				// which the ledger retries rather than rejecting.
+				n.leiosCertificateVerifier.Store(nil)
+				return n.leiosVoteManager.Stop()
+			},
 		})
 	}
 	if n.snapshotMgr != nil {

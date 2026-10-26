@@ -41,12 +41,25 @@ func (v *recordingHeaderVerifier) ValidatePraosHeader(
 	return nil
 }
 
+func (v *recordingHeaderVerifier) ValidateTachysHeader(
+	_ context.Context,
+	_ ledgerpkg.Block,
+	advance bool,
+	deferState bool,
+) error {
+	v.called = true
+	v.advance = advance
+	v.deferState = deferState
+	return nil
+}
+
 type testScheduler struct{}
 
 func (*testScheduler) Start(context.Context) error          { return nil }
 func (*testScheduler) Stop() error                          { return nil }
 func (*testScheduler) ShouldProduceBlock(uint64) bool       { return false }
 func (*testScheduler) NextLeaderSlot(uint64) (uint64, bool) { return 0, false }
+func (*testScheduler) ConsensusStateRestored()              {}
 
 func TestPraosProviderRoutesConsensusDecisions(t *testing.T) {
 	t.Parallel()
@@ -62,14 +75,44 @@ func TestPraosProviderRoutesConsensusDecisions(t *testing.T) {
 
 	var gotIdentity string
 	scheduler, err := provider.NewLeaderScheduler(
-		func(identity string) (LeaderScheduler, error) {
+		func(identity string, kind LeaderScheduleKind) (LeaderScheduler, error) {
 			gotIdentity = identity
+			require.Equal(t, LeaderSchedulePraos, kind)
 			return &testScheduler{}, nil
 		},
 	)
 	require.NoError(t, err)
 	require.NotNil(t, scheduler)
 	require.Equal(t, PraosIdentity, gotIdentity)
+}
+
+func TestTachysProviderRoutesConsensusDecisions(t *testing.T) {
+	t.Parallel()
+
+	provider := NewTachysProvider()
+	verifier := &recordingHeaderVerifier{}
+	require.NoError(t, provider.ValidateHeader(
+		context.Background(), verifier, nil, false, true,
+	))
+	require.True(t, verifier.called)
+	require.False(t, verifier.advance)
+	require.True(t, verifier.deferState)
+	require.Equal(t, TachysIdentity, provider.NetworkIdentity())
+	require.Equal(t, TachysIdentity, provider.DatabaseIdentity())
+
+	var gotIdentity string
+	var gotKind LeaderScheduleKind
+	scheduler, err := provider.NewLeaderScheduler(
+		func(identity string, kind LeaderScheduleKind) (LeaderScheduler, error) {
+			gotIdentity = identity
+			gotKind = kind
+			return &testScheduler{}, nil
+		},
+	)
+	require.NoError(t, err)
+	require.NotNil(t, scheduler)
+	require.Equal(t, TachysIdentity, gotIdentity)
+	require.Equal(t, LeaderScheduleTachys, gotKind)
 }
 
 func TestPraosPluginInstancesAreNodeOwned(t *testing.T) {
@@ -94,5 +137,19 @@ func TestPraosPluginInstancesAreNodeOwned(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.NotSame(t, first, second)
+	require.NoError(t, host.Stop(context.Background()))
+}
+
+func TestTachysPluginInstancesAreNodeOwned(t *testing.T) {
+	t.Parallel()
+
+	host := plugin.NewHost()
+	require.NoError(t, RegisterProvider(host))
+	provider, err := plugin.Resolve[Provider](
+		context.Background(), host, plugin.CapabilityConsensus,
+		TachysProviderName, nil, struct{}{},
+	)
+	require.NoError(t, err)
+	require.Equal(t, TachysIdentity, provider.DatabaseIdentity())
 	require.NoError(t, host.Stop(context.Background()))
 }

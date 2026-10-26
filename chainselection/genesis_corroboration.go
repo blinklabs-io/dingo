@@ -336,14 +336,12 @@ func (cs *ChainSelector) ingressDecision(
 // the peer is untracked), and returns the context's error if it is cancelled
 // while waiting.
 //
-// The caller's chainsync callback blocks here, so the peer's cursor stays on
-// the held header. Withholding the header and letting the cursor move on
-// instead loses it: the ledger never receives it from this peer, and a peer
-// that runs ahead keeps only its most recent staged headers as corroboration
-// evidence. Once it is further ahead of every other peer than that window,
-// no peer can corroborate another, and the first header that does become
-// eligible no longer connects to the ledger's header tip. Holding keeps every
-// peer within one header of a witness.
+// The caller's chainsync callback blocks here while witnesses can advance.
+// The caller bounds that wait; on expiry it withholds the header but keeps the
+// session and staged candidate frontier so another peer can deliver the same
+// point. Re-intersecting immediately from the applied tip discards that
+// frontier and repeats the hold. Staged observations remain bounded, so a peer
+// that runs beyond the admission window cannot corroborate its entire prefix.
 func (cs *ChainSelector) AwaitIngressCorroboration(
 	ctx context.Context,
 	connId ouroboros.ConnectionId,

@@ -1732,6 +1732,16 @@ func newTestEraHistoryCfg(t testing.TB) *cardano.CardanoNodeConfig {
 	return cfg
 }
 
+// genesisConfigNoExtraConfigGolden is the consensus project's golden reply for
+// node-to-client versions 21 to 23: ouroboros-consensus
+// golden/cardano/QueryVersion3/CardanoNodeToClientVersion19/
+// Result_Conway_GenesisConfig at 840e789b, with the era result wrapper
+// removed. It is a 15-field record with 17-field protocol parameters.
+const genesisConfigNoExtraConfigGolden = "" +
+	"8f831907e4188700000082090a0a1864140a1a001e8480" +
+	"051b009fdf42f6e4800091000000190800000000001864d81e820001" +
+	"d81e820001d81e820001d81e82000181008202000000a0a082a0a0"
+
 func TestGenesisConfigResultUsesNegotiatedLayout(t *testing.T) {
 	t.Parallel()
 
@@ -1750,7 +1760,94 @@ func TestGenesisConfigResultUsesNegotiatedLayout(t *testing.T) {
 	require.True(t, ok)
 	require.Len(t, legacyValues, 1)
 	require.Same(t, genesis, legacyValues[0])
-	currentResult, err := ls.queryShelleyGenesisConfig(t.Context(), 21+protocol.ProtocolVersionNtCOffset)
+	legacyWire, err := cbor.Encode(legacyValues[0])
+	require.NoError(t, err)
+	var legacyWireFields []cbor.RawMessage
+	_, err = cbor.Decode(legacyWire, &legacyWireFields)
+	require.NoError(t, err)
+	require.Len(t, legacyWireFields, 15, "v20 keeps the legacy record")
+	var legacyPParams []cbor.RawMessage
+	_, err = cbor.Decode(legacyWireFields[11], &legacyPParams)
+	require.NoError(t, err)
+	require.Len(t, legacyPParams, 18, "v20 keeps the legacy 18-field pparams")
+	// Node-to-client versions 21 to 23 are the 15-field genesis record with
+	// the current 17-field protocol parameters and no extra config, which is
+	// what released clients (cardano-cli, Ogmios, db-sync) decode there;
+	// consensus 4.0.0.0 to 4.2.0.1 sent a sixteenth field that upstream
+	// treated as a regression (ouroboros-consensus #2251, #2258).
+	query := &olocalstatequery.BlockQuery{
+		Query: &olocalstatequery.ShelleyQuery{
+			Query: &olocalstatequery.ShelleyGenesisConfigQuery{},
+		},
+	}
+	golden, err := hex.DecodeString(genesisConfigNoExtraConfigGolden)
+	require.NoError(t, err)
+	var goldenFields []cbor.RawMessage
+	_, err = cbor.Decode(golden, &goldenFields)
+	require.NoError(t, err)
+	require.Len(t, goldenFields, 15)
+	var goldenPParams []cbor.RawMessage
+	_, err = cbor.Decode(goldenFields[11], &goldenPParams)
+	require.NoError(t, err)
+	require.Len(t, goldenPParams, 17)
+
+	for _, version := range []uint16{21, 22, 23} {
+		for name, run := range map[string]func() (any, error){
+			"direct": func() (any, error) {
+				return ls.queryShelleyGenesisConfig(
+					t.Context(), version+protocol.ProtocolVersionNtCOffset,
+				)
+			},
+			"query": func() (any, error) {
+				return ls.QueryWithProtocolVersion(t.Context(), query,
+					QueryPoint{}, version+protocol.ProtocolVersionNtCOffset,
+				)
+			},
+		} {
+			result, err := run()
+			require.NoError(t, err, "v%d %s", version, name)
+			values, ok := result.([]any)
+			require.True(t, ok)
+			require.Len(t, values, 1)
+			reply, ok := values[0].(olocalstatequery.GenesisConfigResult)
+			require.True(t, ok, "v%d %s", version, name)
+			require.Equal(
+				t,
+				olocalstatequery.GenesisConfigLayoutNoExtraConfig,
+				reply.Layout,
+				"v%d %s", version, name,
+			)
+			require.Nil(t, reply.ExtraConfig, "v%d %s", version, name)
+			wire, err := cbor.Encode(reply)
+			require.NoError(t, err)
+			var fields []cbor.RawMessage
+			_, err = cbor.Decode(wire, &fields)
+			require.NoError(t, err)
+			require.Len(t, fields, 15, "v%d %s: no extra config", version, name)
+			var pparams []cbor.RawMessage
+			_, err = cbor.Decode(fields[11], &pparams)
+			require.NoError(t, err)
+			require.Len(t, pparams, 17, "v%d %s: current pparams", version, name)
+			// The compacted funds and staking match the consensus golden.
+			require.Equal(t, hex.EncodeToString(goldenFields[13]), hex.EncodeToString(fields[13]))
+			require.Equal(t, hex.EncodeToString(goldenFields[14]), hex.EncodeToString(fields[14]))
+			var decoded olocalstatequery.GenesisConfigResult
+			_, err = cbor.Decode(wire, &decoded)
+			require.NoError(t, err)
+			require.Equal(
+				t,
+				olocalstatequery.GenesisConfigLayoutNoExtraConfig,
+				decoded.Layout,
+			)
+		}
+	}
+
+	// Version 24 is the 16-field record with the extra config. It is dormant:
+	// neither gouroboros nor Dingo negotiates it yet. Upstream's version 24
+	// writes the sixteenth field as an empty StrictMaybe because
+	// compactGenesis sets sgExtraConfig to SNothing, so this branch has to be
+	// revisited when version 24 exists.
+	currentResult, err := ls.queryShelleyGenesisConfig(t.Context(), 24+protocol.ProtocolVersionNtCOffset)
 	require.NoError(t, err)
 	currentValues, ok := currentResult.([]any)
 	require.True(t, ok)
@@ -1758,21 +1855,6 @@ func TestGenesisConfigResultUsesNegotiatedLayout(t *testing.T) {
 	currentGenesis, ok := currentValues[0].(olocalstatequery.GenesisConfigResult)
 	require.True(t, ok)
 	require.NotNil(t, currentGenesis.ExtraConfig)
-	query := &olocalstatequery.BlockQuery{
-		Query: &olocalstatequery.ShelleyQuery{
-			Query: &olocalstatequery.ShelleyGenesisConfigQuery{},
-		},
-	}
-	queried, err := ls.QueryWithProtocolVersion(t.Context(), query,
-		QueryPoint{},
-		21+protocol.ProtocolVersionNtCOffset,
-	)
-	require.NoError(t, err)
-	queriedValues, ok := queried.([]any)
-	require.True(t, ok)
-	queriedGenesis, ok := queriedValues[0].(olocalstatequery.GenesisConfigResult)
-	require.True(t, ok)
-	require.NotNil(t, queriedGenesis.ExtraConfig)
 
 	legacy, err := genesis.MarshalCBOR()
 	require.NoError(t, err)

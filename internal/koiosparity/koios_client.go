@@ -31,6 +31,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/blinklabs-io/dingo/internal/httpuseragent"
 	"github.com/blinklabs-io/dingo/internal/netguard"
 )
 
@@ -743,9 +744,9 @@ func validateKoiosHost(host string, allowPrivateAddresses bool) error {
 	return nil
 }
 
-// redactURLError strips the URL from a *url.Error so a parse failure cannot
-// carry credentials into a log. url.Parse wraps the offending string in the
-// error it returns, which is exactly the value being kept out of logs.
+// redactURLError strips the URL from a *url.Error so parsing and transport
+// failures cannot carry credentials into a log. The operation and underlying
+// cause remain available for diagnosis.
 func redactURLError(err error) error {
 	if urlErr, ok := errors.AsType[*url.Error](err); ok {
 		return fmt.Errorf("%s: %w", urlErr.Op, urlErr.Err)
@@ -934,8 +935,9 @@ func (k *KoiosClient) get(
 	url := k.baseURL + path
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return nil, fmt.Errorf("build request: %w", err)
+		return nil, fmt.Errorf("build request: %w", redactURLError(err))
 	}
+	httpuseragent.Set(req)
 	if k.apiKey != "" {
 		req.Header.Set("Authorization", "Bearer "+k.apiKey)
 	}
@@ -976,7 +978,7 @@ func (k *KoiosClient) get(
 		if doErr != nil {
 			if err := retryOrFail(otherAttempt,
 				koiosRetryBackoff5xx*time.Duration(otherAttempt+1),
-				"koios GET %s: %w", path, doErr,
+				"koios GET %s: %w", path, redactURLError(doErr),
 			); err != nil {
 				return nil, err
 			}
@@ -1175,9 +1177,10 @@ func (k *KoiosClient) post(
 			return nil, fmt.Errorf(
 				"koios POST %s: build request: %w",
 				path,
-				err,
+				redactURLError(err),
 			)
 		}
+		httpuseragent.Set(req)
 		if k.apiKey != "" {
 			req.Header.Set("Authorization", "Bearer "+k.apiKey)
 		}
@@ -1188,7 +1191,7 @@ func (k *KoiosClient) post(
 		if doErr != nil {
 			if err := retryOrFail(otherAttempt,
 				koiosRetryBackoff5xx*time.Duration(otherAttempt+1),
-				"koios POST %s: %w", path, doErr,
+				"koios POST %s: %w", path, redactURLError(doErr),
 			); err != nil {
 				return nil, err
 			}

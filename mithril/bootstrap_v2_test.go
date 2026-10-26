@@ -80,7 +80,9 @@ func testNodeConfigWithMithrilKeys(
 	)
 	require.NoError(t, cfg.LoadShelleyGenesisFromReader(strings.NewReader(`{
 		"epochLength": 2000,
-		"slotLength": 1
+		"slotLength": 1,
+		"activeSlotsCoeff": 0.05,
+		"securityParam": 2160
 	}`)))
 	return cfg
 }
