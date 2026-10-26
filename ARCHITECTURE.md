@@ -6401,7 +6401,15 @@ it. Dingo implements this as a **corroboration gate**
   including for observer connections. Headers enter that history only after
   producer authentication when the ledger requires it. A record counts only
   while its connection is live, eligible, and non-stale; it does not make a
-  candidate selectable or apply-eligible. A staged candidate cannot become a
+  candidate selectable or apply-eligible. A header still held for corroboration
+  is released without it when its point is already on the local chain:
+  `ChainSelectorConfig.AppliedTip` supplies the current applied tip (falling
+  back to the staged local tip) and `PointOnLocalChain` confirms the point
+  against that chain, so a block another source already applied cannot stall
+  behind a corroboration threshold. Delivered-history entries whose connection
+  has closed and that have no admission-frontier record are dropped by the
+  stale-peer sweep, so a record that raced a peer's removal cannot hold a
+  tracked-peer slot. A staged candidate cannot become a
   selectable peer frontier until the ledger accepts a header at its point, but
   it does count as corroboration evidence before admission: the gate checks the
   applicant's own staged frontier and counts every other connection's staged
