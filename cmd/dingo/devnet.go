@@ -110,9 +110,6 @@ func devnetRun(cmd *cobra.Command, _ []string) (retErr error) {
 			}
 		}()
 	}
-	if err := os.MkdirAll(runDir, 0o700); err != nil {
-		return fmt.Errorf("creating devnet data directory: %w", err)
-	}
 	startTime := time.Now().UTC().Add(devnetGenesisLeadTime).Truncate(time.Second)
 	releaseStateLock, err := prepareLockedDevnetState(
 		runDir,
@@ -226,10 +223,7 @@ func prepareLockedDevnetState(
 	persistent, reset bool,
 	startTime time.Time,
 ) (func() error, error) {
-	if err := os.MkdirAll(runDir, 0o700); err != nil {
-		return nil, fmt.Errorf("creating devnet data directory: %w", err)
-	}
-	root, err := openDevnetStateRoot(runDir)
+	root, err := openOrCreateDevnetStateRoot(runDir)
 	if err != nil {
 		return nil, err
 	}
@@ -238,6 +232,10 @@ func prepareLockedDevnetState(
 			_ = root.Close()
 			return nil, err
 		}
+	}
+	if err := devnetkeys.RestrictLocalTestDirectory(root); err != nil {
+		_ = root.Close()
+		return nil, fmt.Errorf("restricting devnet data directory: %w", err)
 	}
 	releaseStateLock, err := acquireDevnetStateLock(root, runDir)
 	if err != nil {
@@ -260,6 +258,85 @@ func prepareLockedDevnetState(
 	return func() error {
 		return errors.Join(releaseStateLock(), root.Close())
 	}, nil
+}
+
+func openOrCreateDevnetStateRoot(runDir string) (*os.Root, error) {
+	absRunDir, err := filepath.Abs(runDir)
+	if err != nil {
+		return nil, fmt.Errorf("resolving devnet data directory: %w", err)
+	}
+	volumeRoot := filepath.VolumeName(absRunDir) + string(filepath.Separator)
+	relRunDir, err := filepath.Rel(volumeRoot, absRunDir)
+	if err != nil {
+		return nil, fmt.Errorf("resolving devnet data directory: %w", err)
+	}
+	root, err := openDevnetStateRoot(volumeRoot)
+	if err != nil {
+		return nil, fmt.Errorf("opening devnet data volume: %w", err)
+	}
+	if relRunDir == "." {
+		return root, nil
+	}
+	for name := range strings.SplitSeq(relRunDir, string(filepath.Separator)) {
+		child, err := openOrCreateDevnetStateChild(root, name)
+		if err != nil {
+			_ = root.Close()
+			return nil, err
+		}
+		_ = root.Close()
+		root = child
+	}
+	return root, nil
+}
+
+func openOrCreateDevnetStateChild(
+	parent *os.Root,
+	name string,
+) (*os.Root, error) {
+	if err := parent.Mkdir(name, 0o700); err != nil &&
+		!errors.Is(err, fs.ErrExist) {
+		return nil, fmt.Errorf(
+			"creating devnet data directory %q: %w",
+			name,
+			err,
+		)
+	}
+	info, err := parent.Lstat(name)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"checking devnet data directory %q: %w",
+			name,
+			err,
+		)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return nil, fmt.Errorf("devnet data path %q is not a directory", name)
+	}
+	child, err := parent.OpenRoot(name)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"opening devnet data directory %q: %w",
+			name,
+			err,
+		)
+	}
+	opened, err := child.Stat(".")
+	if err != nil {
+		_ = child.Close()
+		return nil, fmt.Errorf(
+			"checking opened devnet data directory %q: %w",
+			name,
+			err,
+		)
+	}
+	if !opened.IsDir() || !os.SameFile(info, opened) {
+		_ = child.Close()
+		return nil, fmt.Errorf(
+			"devnet data directory %q changed while it was opened",
+			name,
+		)
+	}
+	return child, nil
 }
 
 func openDevnetStateRoot(runDir string) (*os.Root, error) {
@@ -285,10 +362,6 @@ func openDevnetStateRoot(runDir string) (*os.Root, error) {
 			"devnet data directory %q changed while it was opened",
 			runDir,
 		)
-	}
-	if err := devnetkeys.RestrictLocalTestDirectory(root); err != nil {
-		_ = root.Close()
-		return nil, fmt.Errorf("restricting devnet data directory: %w", err)
 	}
 	return root, nil
 }

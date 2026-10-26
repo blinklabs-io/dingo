@@ -130,19 +130,74 @@ func TestDevnetRunDirectoryResolvesSymlinkedDataDir(t *testing.T) {
 	require.NoError(t, root.Close())
 }
 
-func TestOpenDevnetStateRootRestrictsExistingDirectory(t *testing.T) {
+func TestPrepareLockedDevnetStateRejectsSymlinkedAncestor(t *testing.T) {
+	t.Parallel()
+
+	parent := t.TempDir()
+	victim := t.TempDir()
+	require.NoError(t, os.Mkdir(filepath.Join(victim, "existing"), 0o700))
+	redirect := filepath.Join(parent, "redirect")
+	require.NoError(t, os.Symlink(victim, redirect))
+	runDir := filepath.Join(redirect, "existing", "state")
+
+	release, err := prepareLockedDevnetState(
+		runDir,
+		true,
+		false,
+		time.Date(2026, time.October, 25, 12, 0, 0, 0, time.UTC),
+	)
+	if release != nil {
+		require.NoError(t, release())
+	}
+	require.ErrorContains(t, err, "is not a directory")
+	require.NoDirExists(t, filepath.Join(victim, "existing", "state"))
+}
+
+func TestPrepareLockedDevnetStateRestrictsExistingDirectory(t *testing.T) {
 	t.Parallel()
 
 	runDir := t.TempDir()
 	require.NoError(t, os.Chmod(runDir, 0o777))
 
-	root, err := openDevnetStateRoot(runDir)
+	release, err := prepareLockedDevnetState(
+		runDir,
+		true,
+		false,
+		time.Date(2026, time.October, 25, 12, 0, 0, 0, time.UTC),
+	)
 	require.NoError(t, err)
-	require.NoError(t, root.Close())
+	require.NoError(t, release())
 
 	info, err := os.Stat(runDir)
 	require.NoError(t, err)
 	require.Equal(t, os.FileMode(0o700), info.Mode().Perm())
+}
+
+func TestPrepareLockedDevnetStateDoesNotRestrictUnrecognizedDirectory(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	runDir := t.TempDir()
+	require.NoError(t, os.Chmod(runDir, 0o777))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(runDir, "keep"),
+		[]byte("user data"),
+		0o600,
+	))
+
+	release, err := prepareLockedDevnetState(
+		runDir,
+		true,
+		false,
+		time.Date(2026, time.October, 25, 12, 0, 0, 0, time.UTC),
+	)
+	require.Nil(t, release)
+	require.ErrorContains(t, err, "without a Dingo devnet marker")
+
+	info, err := os.Stat(runDir)
+	require.NoError(t, err)
+	require.Equal(t, os.FileMode(0o777), info.Mode().Perm())
 }
 
 func TestInstallLocalTestFaucetInRootRejectsSymlinkedIntermediate(t *testing.T) {
