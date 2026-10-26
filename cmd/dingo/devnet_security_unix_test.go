@@ -130,6 +130,44 @@ func TestDevnetRunDirectoryResolvesSymlinkedDataDir(t *testing.T) {
 	require.NoError(t, root.Close())
 }
 
+func TestDevnetRunDirectoryResolvesSymlinkedAncestorOfNewDir(t *testing.T) {
+	t.Parallel()
+
+	realParent := t.TempDir()
+	linkParent := filepath.Join(t.TempDir(), "link")
+	require.NoError(t, os.Symlink(realParent, linkParent))
+	wantParent, err := filepath.EvalSymlinks(realParent)
+	require.NoError(t, err)
+
+	got, err := devnetRunDirectory(filepath.Join(linkParent, "a", "devnet"))
+	require.NoError(t, err)
+	require.Equal(t, filepath.Join(wantParent, "a", "devnet"), got)
+
+	release, err := prepareLockedDevnetState(got, true, false, time.Now())
+	require.NoError(t, err)
+	require.NoError(t, release())
+	info, err := os.Stat(filepath.Join(realParent, "a", "devnet"))
+	require.NoError(t, err)
+	require.True(t, info.IsDir())
+}
+
+func TestDevnetRunDirectoryTemporaryUnderSymlinkedTempDir(t *testing.T) {
+	realTmp := t.TempDir()
+	linkTmp := filepath.Join(t.TempDir(), "tmp")
+	require.NoError(t, os.Symlink(realTmp, linkTmp))
+	t.Setenv("TMPDIR", linkTmp)
+	wantParent, err := filepath.EvalSymlinks(realTmp)
+	require.NoError(t, err)
+
+	got, err := devnetRunDirectory("")
+	require.NoError(t, err)
+	require.Equal(t, wantParent, filepath.Dir(got))
+
+	release, err := prepareLockedDevnetState(got, false, false, time.Now())
+	require.NoError(t, err)
+	require.NoError(t, release())
+}
+
 func TestPrepareLockedDevnetStateRejectsSymlinkedAncestor(t *testing.T) {
 	t.Parallel()
 

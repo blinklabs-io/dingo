@@ -204,18 +204,43 @@ func devnetRunDirectory(dataDir string) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("creating temporary devnet directory: %w", err)
 		}
-		return runDir, nil
+		return resolveExistingPrefix(runDir), nil
 	}
 	runDir, err := filepath.Abs(dataDir)
 	if err != nil {
 		return "", fmt.Errorf("resolving devnet data directory: %w", err)
 	}
-	// A symlinked --data-dir is resolved once here; the resolved directory is
-	// then opened and pinned, and any symlink swapped in later is rejected.
-	if resolved, err := filepath.EvalSymlinks(runDir); err == nil {
-		runDir = resolved
+	return resolveExistingPrefix(runDir), nil
+}
+
+// resolveExistingPrefix resolves symlinks in the longest existing prefix of
+// an absolute path and keeps the not-yet-created suffix as is. The state root
+// is opened by a component walk that rejects every symlink, so symlinked
+// ancestors the operator or the platform legitimately provides (a symlinked
+// temporary directory or data parent) must be resolved once up front, while
+// anything swapped in after this point is still rejected by the walk.
+func resolveExistingPrefix(path string) string {
+	existing := path
+	var suffix []string
+	for {
+		if _, err := os.Lstat(existing); err == nil {
+			break
+		}
+		parent := filepath.Dir(existing)
+		if parent == existing {
+			return path
+		}
+		suffix = append(suffix, filepath.Base(existing))
+		existing = parent
 	}
-	return runDir, nil
+	resolved, err := filepath.EvalSymlinks(existing)
+	if err != nil {
+		return path
+	}
+	for i := len(suffix) - 1; i >= 0; i-- {
+		resolved = filepath.Join(resolved, suffix[i])
+	}
+	return resolved
 }
 
 func prepareLockedDevnetState(
