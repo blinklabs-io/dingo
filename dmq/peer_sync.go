@@ -17,6 +17,7 @@ package dmq
 import (
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -357,10 +358,16 @@ func awaitReply[T any](p *PeerConn, replies <-chan T) (T, bool) {
 // dropped before it is verified, and a lookup that fails for want of chain
 // state ends the batch rather than being repeated for every message.
 func (s *Stack) acceptFromPeer(msgs []ocommon.DmqMessage) error {
+	// The KES period comes from the same chain state as the slot, so it too
+	// is resolved once, and a failure to resolve it is not retried.
+	kesPeriod := s.cfg.CurrentKESPeriod
+	if kesPeriod != nil {
+		kesPeriod = sync.OnceValues(kesPeriod)
+	}
 	batch := msgs[:0]
 	for i := range msgs {
 		msg := &msgs[i]
-		reason := s.precheck(msg)
+		reason := s.precheck(msg, kesPeriod)
 		if reason == nil && s.pool.Has(msg.ID()) {
 			reason = ocommon.AlreadyReceivedReason{}
 		}

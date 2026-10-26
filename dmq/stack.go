@@ -366,7 +366,7 @@ func (s *Stack) submit(msg *ocommon.DmqMessage) ocommon.RejectReason {
 }
 
 func (s *Stack) admit(msg *ocommon.DmqMessage) ocommon.RejectReason {
-	if reason := s.precheck(msg); reason != nil {
+	if reason := s.precheck(msg, s.cfg.CurrentKESPeriod); reason != nil {
 		return reason
 	}
 	if err := s.cfg.Authenticator.VerifyMessage(msg); err != nil {
@@ -376,7 +376,11 @@ func (s *Stack) admit(msg *ocommon.DmqMessage) ocommon.RejectReason {
 }
 
 // precheck runs every admission check that comes before authentication.
-func (s *Stack) precheck(msg *ocommon.DmqMessage) ocommon.RejectReason {
+// kesPeriod resolves the current KES period; nil skips the KES checks.
+func (s *Stack) precheck(
+	msg *ocommon.DmqMessage,
+	kesPeriod func() (uint64, error),
+) ocommon.RejectReason {
 	// A message that breaks CIP-0137's sizes is one dmq-node refuses to
 	// decode, so it is neither kept nor passed on.
 	if err := checkMessageShape(
@@ -387,8 +391,8 @@ func (s *Stack) precheck(msg *ocommon.DmqMessage) ocommon.RejectReason {
 	if !msg.IsValidAt(s.cfg.Now()) {
 		return ocommon.ExpiredReason{}
 	}
-	if s.cfg.CurrentKESPeriod != nil {
-		current, err := s.cfg.CurrentKESPeriod()
+	if kesPeriod != nil {
+		current, err := kesPeriod()
 		if err != nil {
 			return ocommon.OtherReason{Message: err.Error()}
 		}

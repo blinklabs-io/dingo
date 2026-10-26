@@ -8495,15 +8495,18 @@ some for the next round. It fetches only IDs the pool lacks, and sends its
 acknowledgement with the next ID request. A blocking request that gets nothing
 back, whether `[3]` or after a wait, is followed by a pause that starts at 100ms
 and doubles to 2s, so a peer that answers at once cannot keep the loop spinning.
-Each fetched message goes through `Stack.admit`, the check a local submission
-gets. An expired or duplicate message, or one refused because the pool is full,
+Each fetched reply goes through `Stack.acceptFromPeer`, which applies the
+checks a local submission gets to every message in it and authenticates the
+reply as one batch, described under DMQ Message Authentication. An expired or
+duplicate message, or one refused because the pool is full,
 is counted under `validation_failures_total` and dropped. An `invalid` one is a
 protocol violation and ends the connection. Two peers may fetch the same
 announced message at the same moment; the second is `alreadyReceived`, which
 costs a few hundred bytes and does not need cross-peer bookkeeping.
 
-`Stack.admit` first checks the sizes CIP-0137's CDDL fixes, because dmq-node
-refuses to decode a message that breaks them: a body of 90 to 2000 bytes
+`Stack.precheck`, which runs before authentication on both paths, first
+checks the sizes CIP-0137's CDDL fixes, because dmq-node refuses to decode a
+message that breaks them: a body of 90 to 2000 bytes
 (`StackConfig.MessageBodyMin` and `MessageBodyMax` override the limits), a
 448-byte KES signature, and 32, 64 and 32 bytes for the operational certificate's
 KES key, its cold signature, and the cold key. A message outside them is
@@ -8633,14 +8636,16 @@ A peer's reply to a message request is authenticated as one batch through
 cost of admitting a message, and a reply carries up to `fetchMessages` of
 them. The batch reads the current slot once, so every message in a reply is
 judged at the same slot, and it commits the operational-certificate issue
-numbers it observed only after the whole batch verifies. Before authentication, admission drops a
-message the pool already holds, so a message that arrived from another peer
-in the meantime costs no KES verification. A message failing authentication
-is a protocol violation: none of the reply is admitted, and the connection
-ends. A failure for want of chain state ends the batch at the first lookup
-instead of repeating it for every message, and counts each message as
-`other`. A local submission carries one message and is verified on its own
-through `VerifyMessage`.
+numbers it observed only after the whole batch verifies. The current KES
+period the admission checks compare against is likewise resolved once per
+reply. Before authentication, admission drops a message the pool already
+holds, so a message that arrived from another peer in the meantime costs no
+KES verification. A message failing authentication is a protocol violation:
+none of the reply is admitted, and the connection ends. A failure for want of
+chain state, whether resolving the KES period or during authentication, is
+not retried for the rest of the reply, and counts each message as `other`. A
+local submission carries one message and is verified on its own through
+`VerifyMessage`.
 
 ## Block Production
 

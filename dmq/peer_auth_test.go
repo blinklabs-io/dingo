@@ -238,3 +238,54 @@ func TestStackAcceptFromPeerStopsAtUnavailableChainState(t *testing.T) {
 		metricValue(t, reg, "dingo_dmq_validation_failures_total", reasonOther),
 	)
 }
+
+// node_dmq.go always configures CurrentKESPeriod, which reads the same chain
+// state as authentication, so a reply resolves it once as well.
+func TestStackAcceptFromPeerResolvesTheKESPeriodOncePerReply(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name     string
+		err      error
+		admitted int
+		other    float64
+	}{
+		{name: "available", admitted: 3},
+		{
+			name: "unavailable",
+			err: fmt.Errorf(
+				"%w: wall clock beyond forecast", ErrChainStateUnavailable,
+			),
+			other: 3,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			signer := newDMQSigner(t, 5)
+			lookups := stakedLookups(signer)
+			var kesLookups atomic.Int64
+			s, reg := newTestStack(t, StackConfig{
+				Authenticator: lookups.authenticator(t),
+				CurrentKESPeriod: func() (uint64, error) {
+					kesLookups.Add(1)
+					return 0, tc.err
+				},
+			})
+
+			require.NoError(
+				t, s.acceptFromPeer(signer.messages(t, tc.name, 3)),
+			)
+			require.Equal(t, int64(1), kesLookups.Load())
+			require.Equal(t, tc.admitted, s.pool.Len())
+			require.Equal(
+				t,
+				tc.other,
+				metricValue(
+					t, reg, "dingo_dmq_validation_failures_total", reasonOther,
+				),
+			)
+			if tc.err != nil {
+				require.Zero(t, lookups.stakeCalls.Load())
+			}
+		})
+	}
+}
