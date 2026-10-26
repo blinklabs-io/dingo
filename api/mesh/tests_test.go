@@ -890,14 +890,14 @@ func (f *fakeDatabase) GetTransactionsByBlockHash(ctx context.Context,
 
 // fakeLedgerState is a MeshLedgerState with per-test behavior.
 type fakeLedgerState struct {
-	pparams       lcommon.ProtocolParameters
-	slotToTime    func(slot uint64) (time.Time, error)
-	utxos         func(addrs []lcommon.Address) ([]models.Utxo, error)
+	pparams    lcommon.ProtocolParameters
+	slotToTime func(slot uint64) (time.Time, error)
+	utxos      func(addrs []lcommon.Address) ([]models.Utxo, error)
 	// completeLimit and completeCoinLimit record the maxResults and
 	// maxCoins of the latest complete read.
 	completeLimit     atomic.Int64
 	completeCoinLimit atomic.Int64
-	utxosComplete func(
+	utxosComplete     func(
 		ctx context.Context,
 		addrs []lcommon.Address,
 	) ([]models.Utxo, error)
