@@ -235,7 +235,7 @@ func closeRegistrations(regs []stmRegistration) *sealedRegistration {
 func (a *Aggregator) registerRoutes(
 	mux *http.ServeMux,
 	publicRequest func(http.HandlerFunc) http.HandlerFunc,
-	signatureRequest func(http.HandlerFunc) http.HandlerFunc,
+	signatureRequest func(signatureRequestHandler) http.HandlerFunc,
 ) {
 	mux.HandleFunc("POST /register-signer", a.handleRegisterSigner)
 	mux.HandleFunc("POST /close-registrations", a.handleCloseRegistrations)
@@ -285,6 +285,12 @@ func decodeJSONBody(w http.ResponseWriter, r *http.Request, v any) error {
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(v); err != nil {
+		return badRequest("invalid request body: %v", err)
+	}
+	if err := dec.Decode(&struct{}{}); err != io.EOF {
+		if err == nil {
+			return badRequest("invalid request body: multiple JSON values")
+		}
 		return badRequest("invalid request body: %v", err)
 	}
 	return nil
@@ -740,12 +746,8 @@ type registerSignatureRequest struct {
 func (a *Aggregator) handleRegisterSignatures(
 	w http.ResponseWriter,
 	r *http.Request,
+	req registerSignatureRequest,
 ) {
-	var req registerSignatureRequest
-	if err := decodeJSONBody(w, r, &req); err != nil {
-		writeAPIError(w, err)
-		return
-	}
 	if err := a.registerSignature(r.Context(), req); err != nil {
 		writeAPIError(w, err)
 		return
