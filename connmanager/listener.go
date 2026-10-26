@@ -252,12 +252,8 @@ func (c *ConnectionManager) startListener(
 			// Successful accept - reset consecutive error count
 			consecutiveErrors = 0
 
-			// Bound socket writes before handing the bearer to the
-			// connection setup goroutine. This must cover NtC as well as
-			// N2N: a local client that stops reading wedges a write just
-			// like a remote peer does. Helpers below that need the concrete
-			// socket type (SO_LINGER, Unix peer credentials) unwrap through
-			// the wrapper.
+			// Bound TCP writes before setup. Unix bearers receive the write
+			// wrapper after their unique remote-address wrapper is applied below.
 			conn = withSocketDeadlines(conn)
 			if !c.trackPendingConnection(conn) {
 				continue
@@ -384,8 +380,8 @@ func (c *ConnectionManager) setupAcceptedConnection(
 		stopOnCancel()
 	}()
 
-	// Wrap UNIX connections before applying the handshake wrapper so peer
-	// credentials and the unique Unix remote address remain available.
+	// Preserve the Unix socket identity before applying the write and handshake
+	// wrappers so remote-address reporting and socket-specific helpers still work.
 	if uConn, ok := conn.(*net.UnixConn); ok {
 		tmpConn, err := NewUnixConn(uConn)
 		if err != nil {
@@ -396,7 +392,7 @@ func (c *ConnectionManager) setupAcceptedConnection(
 			}
 			return
 		}
-		conn = tmpConn
+		conn = withSocketDeadlines(tmpConn)
 	}
 
 	ipKey := ""

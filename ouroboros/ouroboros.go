@@ -94,8 +94,11 @@ type Ouroboros struct {
 	// the node passes closures that resolve n.ouroboros when the callback
 	// fires, and gives connmanager lazy listener providers, so all three can
 	// be built before the Ouroboros they refer to.
-	connManager    *connmanager.ConnectionManager
-	peerGov        *peergov.PeerGovernor
+	connManager *connmanager.ConnectionManager
+	peerGov     *peergov.PeerGovernor
+	// peerShareSalt orders the peers offered to a ShareRequest. Its zero
+	// value is ready for use; tests replace its clock and salt source.
+	peerShareSalt  peerShareSalter
 	chainsyncState *chainsync.State
 	eventBus       *event.EventBus
 	mempool        mempool.Service

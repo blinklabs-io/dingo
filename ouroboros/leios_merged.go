@@ -813,7 +813,10 @@ func (o *Ouroboros) enqueueLeiosRelayOffers(
 		return
 	}
 	updated := *current
-	manifestOffer := !updated.relayManifestOffered
+	// An intent-only entry has no manifest to size the offer with. Receivers
+	// reject a zero-size offer by closing the connection, so defer until the
+	// manifest is stored (which re-enters here) and only then mark it offered.
+	manifestOffer := !updated.relayManifestOffered && updated.hasManifest()
 	if manifestOffer {
 		updated.relayManifestOffered = true
 	}
