@@ -13187,12 +13187,14 @@ fabricated the model before the chain enacted a real one — see "Protocol
 parameter resolution" above). Results are stored in
 `check_mismatches` and summarised in `check_epoch_status`.
 
-Epochs 0-1 predate a valid Shelley "go" stake snapshot (mark→set→go takes 3
-epoch boundaries, so the go snapshot backing epoch E's active_stake needs
-E-2 >= 0) and Koios permanently returns `active_stake=null` there — `fetch`
-commits a `pre_staking` marker row instead of erroring, so `check` skips
-comparison for that epoch and it's never re-proposed by future `fetch` runs.
-A null `active_stake` on any other epoch is treated as a real, retryable
+Epochs up to the network's pre-staking cutoff (`preStakingThroughEpoch`:
+1 by default, 5 on preprod, and 209 on mainnet) predate a valid Shelley "go"
+stake snapshot (mark→set→go takes 3 epoch boundaries, so the go snapshot
+backing epoch E's active_stake needs E-2 to be a Shelley epoch) and Koios
+permanently returns `active_stake=null` there — `fetch` commits a
+`pre_staking` marker row instead of erroring, so `check` skips comparison for
+that epoch and it's never re-proposed by future `fetch` runs. A null
+`active_stake` on any epoch above the cutoff is treated as a real, retryable
 error (Koios backend lag or an upstream problem), not silently marked
 permanent. `fetch` cancels the rest of its in-flight batch as soon as any
 epoch hits this or the analogous `end_time=0` ("epoch not fully closed yet")
@@ -13694,9 +13696,9 @@ never the reverse.
   429 backoff are unchanged, so a host that *does* rate-limit still behaves
   correctly. `NewKoiosClient` runs `validateKoiosNetwork` before it applies the
   override, so an override cannot be used to reach a network the tool does not
-  support — that check is what keeps `StakeAddressFromCredential`, which
-  hardcodes the testnet address network ID, from being handed a network it
-  would silently generate wrong-network stake addresses for. The override
+  support — the same allow-list `StakeAddressFromCredential` keys its address
+  network ID on, so a supported network always encodes stake addresses with
+  that network's ID. The override
   itself is validated too: a custom host must be `https`, since `get` and
   `post` attach the API key as a Bearer token to every request and forged
   reference data can make a comparison report a false PASS. `AllowInsecureHTTP` is the local dev/test escape
@@ -13916,9 +13918,9 @@ never the reverse.
   behavior for any caller that does not configure grace hours.
 - **Pre-staking epochs are excluded from account fetching too.**
   `koiosStakeEpoch`/`preStakingThroughEpoch` (`check.go`) reject every epoch
-  up to the network's pre-staking boundary (1 by default, 5 on preprod, whose
-  Byron epochs 0-3 precede Shelley and for which Koios reports a null
-  `active_stake` for epochs 0-5), not just epoch == 0, so
+  up to the network's pre-staking boundary (1 by default, 5 on preprod, and
+  209 on mainnet; Koios reports a null `active_stake` through each network's
+  pre-staking cutoff), not just epoch == 0, so
   `FetchEpochAccountsWithAddrs` skips all pre-staking epochs entirely instead
   of running a real (and meaningless) Koios `/account_reward_history` sweep
   against a nonexistent stake epoch. No pre-staking epoch ever gets a
