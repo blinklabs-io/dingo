@@ -15836,7 +15836,9 @@ environment > YAML > defaults source precedence like any other `Config` field.
 A secret can be supplied from a file instead of a literal value, so it need
 not appear in a process listing or environment. `koiosParity.apiKeyFile`
 (`DINGO_KOIOS_PARITY_API_KEY_FILE`, `--koios-parity-api-key-file`) pairs with
-`koiosParity.apiKey`, and any generic plugin config field accepts a
+`koiosParity.apiKey`. The literal Koios key is available through YAML or the
+environment, but intentionally has no CLI flag because command arguments are
+visible in process listings. Any generic plugin config field accepts a
 `DINGO_PLUGINS_<CAPABILITY>_CONFIG_<FIELD>_FILE` variable. The file must be a
 regular file of at most 64 KiB whose contents are not blank, and on Unix other
 users must have no access to it (`internal/secretfile` rejects mode bits
