@@ -90,13 +90,21 @@ func TestDeliveredHistoryCorroboratesAfterAdmissionFrontierPruning(t *testing.T)
 			Tip:          genesisTip(105, "h105", 105),
 			ObservedTip:  genesisTip(105, "h105", 105),
 		},
+		{
+			ConnectionId: witness,
+			AdmissionID:  3,
+			Tip:          genesisTip(110, "h110", 110),
+			ObservedTip:  genesisTip(110, "h110", 110),
+		},
 	}
 	for _, update := range updates {
 		require.Equal(t, PeerTipUpdateAccepted,
 			cs.PreparePeerTipAdmissionDisposition(update))
 		cs.RecordDeliveredPeerTip(update)
 	}
-	cs.RejectPeerTipAdmission(updates[0])
+	cs.mutex.Lock()
+	cs.truncatePendingPeerTipsLocked(witness, 0)
+	cs.mutex.Unlock()
 	require.Empty(t, cs.pendingPeerTips[witness])
 
 	require.True(t, cs.ShouldApplyIngress(applicant),
