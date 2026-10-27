@@ -322,11 +322,21 @@ until the child exits and rewrites the path-bearing node configuration when
 reusing copied state. State preparation and reset open the directory with
 `os.Root` and pin it by file identity: a symlinked `--data-dir` is resolved once
 at startup, and a symlink introduced while those operations run is rejected
-rather than followed. Each `cardano/keys/` directory component is opened the
-same way, so a symlinked intermediate directory cannot redirect key writes
-outside the state directory. The child node later opens its configuration,
-database, and keys from the generated absolute paths; the preparation handle
-does not pin those child-process opens.
+rather than followed. The state path is traversed from its volume root; each
+component is opened or created relative to the retained parent descriptor or
+handle before traversal continues. This prevents an ancestor rename from
+redirecting creation or opening into a different directory tree. Linux uses
+`O_PATH`, and platforms that provide `O_SEARCH` use it, so existing ancestors
+there need search permission but not read permission. DragonFly, NetBSD, and
+OpenBSD provide neither flag; their equally confined `O_RDONLY` walk also
+requires read permission on existing ancestors. Windows and WASI use Go's
+handle-backed and descriptor-backed `os.Root` traversal, respectively. Plan 9
+and JS/Wasm fail closed because their `os.Root` implementations cannot preserve
+this confinement across renames. Each `cardano/keys/` directory component is
+opened the same way, so a symlinked intermediate directory cannot redirect key
+writes outside the state directory. The child node later opens its
+configuration, database, and keys from the generated absolute paths; the
+preparation handle does not pin those child-process opens.
 
 Dingo's architecture is built on several key principles:
 

@@ -110,9 +110,6 @@ func devnetRun(cmd *cobra.Command, _ []string) (retErr error) {
 			}
 		}()
 	}
-	if err := os.MkdirAll(runDir, 0o700); err != nil {
-		return fmt.Errorf("creating devnet data directory: %w", err)
-	}
 	startTime := time.Now().UTC().Add(devnetGenesisLeadTime).Truncate(time.Second)
 	releaseStateLock, err := prepareLockedDevnetState(
 		runDir,
@@ -207,18 +204,40 @@ func devnetRunDirectory(dataDir string) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("creating temporary devnet directory: %w", err)
 		}
-		return runDir, nil
+		return resolveExistingPrefix(runDir), nil
 	}
 	runDir, err := filepath.Abs(dataDir)
 	if err != nil {
 		return "", fmt.Errorf("resolving devnet data directory: %w", err)
 	}
-	// A symlinked --data-dir is resolved once here; the resolved directory is
-	// then opened and pinned, and any symlink swapped in later is rejected.
-	if resolved, err := filepath.EvalSymlinks(runDir); err == nil {
-		runDir = resolved
+	return resolveExistingPrefix(runDir), nil
+}
+
+// resolveExistingPrefix resolves symlinks in the longest existing prefix of
+// an absolute path and keeps the not-yet-created suffix as is. The state root
+// is opened by a component walk that rejects every symlink, so symlinked
+// ancestors the operator or the platform legitimately provides (a symlinked
+// temporary directory or data parent) must be resolved once up front, while
+// anything swapped in after this point is still rejected by the walk.
+func resolveExistingPrefix(path string) string {
+	existing := path
+	tail := ""
+	for {
+		if _, err := os.Lstat(existing); err == nil {
+			break
+		}
+		parent := filepath.Dir(existing)
+		if parent == existing {
+			return path
+		}
+		tail = filepath.Join(filepath.Base(existing), tail)
+		existing = parent
 	}
-	return runDir, nil
+	resolved, err := filepath.EvalSymlinks(existing)
+	if err != nil {
+		return path
+	}
+	return filepath.Join(resolved, tail)
 }
 
 func prepareLockedDevnetState(
@@ -226,10 +245,7 @@ func prepareLockedDevnetState(
 	persistent, reset bool,
 	startTime time.Time,
 ) (func() error, error) {
-	if err := os.MkdirAll(runDir, 0o700); err != nil {
-		return nil, fmt.Errorf("creating devnet data directory: %w", err)
-	}
-	root, err := openDevnetStateRoot(runDir)
+	root, err := openOrCreateDevnetStateRoot(runDir)
 	if err != nil {
 		return nil, err
 	}
@@ -238,6 +254,10 @@ func prepareLockedDevnetState(
 			_ = root.Close()
 			return nil, err
 		}
+	}
+	if err := devnetkeys.RestrictLocalTestDirectory(root); err != nil {
+		_ = root.Close()
+		return nil, fmt.Errorf("restricting devnet data directory: %w", err)
 	}
 	releaseStateLock, err := acquireDevnetStateLock(root, runDir)
 	if err != nil {
@@ -262,13 +282,41 @@ func prepareLockedDevnetState(
 	}, nil
 }
 
-func openDevnetStateRoot(runDir string) (*os.Root, error) {
+func devnetStatePathComponents(runDir string) (string, string, []string, error) {
+	absRunDir, err := filepath.Abs(runDir)
+	if err != nil {
+		return "", "", nil, fmt.Errorf("resolving devnet data directory: %w", err)
+	}
+	volumeRoot := filepath.VolumeName(absRunDir) + string(filepath.Separator)
+	relRunDir, err := filepath.Rel(volumeRoot, absRunDir)
+	if err != nil {
+		return "", "", nil, fmt.Errorf("resolving devnet data directory: %w", err)
+	}
+	if relRunDir == "." {
+		return absRunDir, volumeRoot, nil, nil
+	}
+	return absRunDir,
+		volumeRoot,
+		strings.Split(relRunDir, string(filepath.Separator)),
+		nil
+}
+
+func openDevnetStateRootMatching(
+	runDir string,
+	anchored os.FileInfo,
+) (*os.Root, error) {
 	expected, err := os.Lstat(runDir)
 	if err != nil {
 		return nil, fmt.Errorf("checking devnet data directory: %w", err)
 	}
 	if expected.Mode()&os.ModeSymlink != 0 || !expected.IsDir() {
 		return nil, fmt.Errorf("devnet data path %q is not a directory", runDir)
+	}
+	if anchored != nil && !os.SameFile(anchored, expected) {
+		return nil, fmt.Errorf(
+			"devnet data directory %q changed while it was opened",
+			runDir,
+		)
 	}
 	root, err := os.OpenRoot(runDir)
 	if err != nil {
@@ -285,10 +333,6 @@ func openDevnetStateRoot(runDir string) (*os.Root, error) {
 			"devnet data directory %q changed while it was opened",
 			runDir,
 		)
-	}
-	if err := devnetkeys.RestrictLocalTestDirectory(root); err != nil {
-		_ = root.Close()
-		return nil, fmt.Errorf("restricting devnet data directory: %w", err)
 	}
 	return root, nil
 }
