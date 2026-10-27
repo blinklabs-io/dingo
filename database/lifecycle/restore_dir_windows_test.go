@@ -57,6 +57,7 @@ func TestCreatedRestoreDirectoryHasProtectedDACL(t *testing.T) {
 }
 
 func TestCreatedRestoreDirectoryLocksParentChain(t *testing.T) {
+	t.Parallel()
 	base := t.TempDir()
 	ancestor := filepath.Join(base, "ancestor")
 	parent := filepath.Join(ancestor, "parent")

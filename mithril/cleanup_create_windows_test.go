@@ -19,6 +19,7 @@ import (
 )
 
 func TestBootstrapDirectoryLocksParentForLifetime(t *testing.T) {
+	t.Parallel()
 	base := t.TempDir()
 	ancestor := filepath.Join(base, "ancestor")
 	parent := filepath.Join(ancestor, "parent")
@@ -35,6 +36,7 @@ func TestBootstrapDirectoryLocksParentForLifetime(t *testing.T) {
 }
 
 func TestBootstrapDirectoryLocksComposeForNestedWork(t *testing.T) {
+	t.Parallel()
 	base := t.TempDir()
 	_, tempOwned, err := createBootstrapDir(base, "dingo-mithril-*")
 	require.NoError(t, err)

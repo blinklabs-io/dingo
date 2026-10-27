@@ -362,6 +362,7 @@ func TestRestoreDirRenameDoesNotReplaceDestination(t *testing.T) {
 }
 
 func TestRestoreDirRenameReportsRollbackFailure(t *testing.T) {
+	t.Parallel()
 	parentPath := t.TempDir()
 	parent, err := os.OpenRoot(parentPath)
 	require.NoError(t, err)
