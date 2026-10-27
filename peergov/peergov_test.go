@@ -931,7 +931,7 @@ func TestPeerGovernor_TouchPeerByConnId(t *testing.T) {
 	assert.True(t, peers[0].LastActivity.After(oldActivity))
 }
 
-func TestPeerGovernor_DiversityGroupByConnId(t *testing.T) {
+func TestPeerGovernor_CorroborationIdentityByConnId(t *testing.T) {
 	t.Parallel()
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -954,14 +954,73 @@ func TestPeerGovernor_DiversityGroupByConnId(t *testing.T) {
 	pg.peers[1].Connection = &PeerConnection{Id: second, IsClient: true}
 	pg.mu.Unlock()
 
-	assert.Equal(t, "ipv4:44.0.0.0/24", pg.DiversityGroupByConnId(first))
+	assert.Equal(t, "ipv4:44.0.0.0/24", pg.CorroborationIdentityByConnId(first))
 	assert.Equal(
 		t,
-		pg.DiversityGroupByConnId(first),
-		pg.DiversityGroupByConnId(second),
+		pg.CorroborationIdentityByConnId(first),
+		pg.CorroborationIdentityByConnId(second),
 		"addresses in one /24 are one diversity group",
 	)
-	assert.Empty(t, pg.DiversityGroupByConnId(connFor("45.0.0.1:3001")))
+	assert.Empty(t, pg.CorroborationIdentityByConnId(connFor("45.0.0.1:3001")))
+}
+
+func TestPeerGovernor_CorroborationIdentityIgnoresGroup(t *testing.T) {
+	t.Parallel()
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	})
+	// One valency group holding relays of different operators, as a
+	// topology may list its own node beside public relays.
+	pg.LoadTopologyConfig(&topology.TopologyConfig{
+		LocalRoots: []topology.TopologyConfigP2PLocalRoot{
+			{
+				AccessPoints: []topology.TopologyConfigP2PAccessPoint{
+					{Address: "44.0.0.1", Port: 3001},
+					{Address: "44.0.0.9", Port: 3001},
+					{Address: "45.0.0.1", Port: 3001},
+				},
+				Trustable: true,
+				Valency:   3,
+			},
+		},
+	})
+
+	connFor := func(remote string) ouroboros.ConnectionId {
+		localAddr, _ := net.ResolveTCPAddr("tcp", "127.0.0.1:6000")
+		remoteAddr, _ := net.ResolveTCPAddr("tcp", remote)
+		return ouroboros.ConnectionId{
+			LocalAddr:  localAddr,
+			RemoteAddr: remoteAddr,
+		}
+	}
+	conns := make(map[string]ouroboros.ConnectionId)
+	pg.mu.Lock()
+	require.Len(t, pg.peers, 3)
+	for _, peer := range pg.peers {
+		require.NotEmpty(t, peer.GroupID, "topology peers carry a group")
+		conn := connFor(peer.Address)
+		peer.Connection = &PeerConnection{Id: conn, IsClient: true}
+		conns[peer.Address] = conn
+	}
+	pg.mu.Unlock()
+
+	assert.Equal(
+		t,
+		"ipv4:44.0.0.0/24",
+		pg.CorroborationIdentityByConnId(conns["44.0.0.1:3001"]),
+	)
+	assert.Equal(
+		t,
+		pg.CorroborationIdentityByConnId(conns["44.0.0.1:3001"]),
+		pg.CorroborationIdentityByConnId(conns["44.0.0.9:3001"]),
+		"addresses in one /24 stay one identity inside a group",
+	)
+	assert.NotEqual(
+		t,
+		pg.CorroborationIdentityByConnId(conns["44.0.0.1:3001"]),
+		pg.CorroborationIdentityByConnId(conns["45.0.0.1:3001"]),
+		"a valency group must not merge independent hosts into one identity",
+	)
 }
 
 func TestPeerGovernorAppendChainSelectionEventsLocked(t *testing.T) {

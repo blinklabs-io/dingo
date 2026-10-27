@@ -6328,9 +6328,15 @@ it. Dingo implements this as a **corroboration gate**
 - Witnesses are counted by distinct **peer identity**, and a witness with the
   candidate's own identity is excluded, so several connections from one operator
   cannot self-corroborate a private fork. The identity is peer governance's
-  diversity group (`PeerGovernor.DiversityGroupByConnId`, wired through
-  `ChainSelectorConfig.PeerIdentity`): the topology group ID, else the /24
-  (IPv4) or /64 (IPv6) prefix, else the host name. A connection the hook
+  address group (`PeerGovernor.CorroborationIdentityByConnId`, wired through
+  `ChainSelectorConfig.PeerIdentity`): the /24 (IPv4) or /64 (IPv6) prefix,
+  else the host name. It is never the topology group ID. A local-root group is
+  a valency target that can hold several operators' relays; counting it as
+  one identity left roots in a single group unable to corroborate each other,
+  so a node restarted in Genesis selection with only such roots eligible never
+  left it. The address group also gives a relay one identity whether it is a
+  root or a ledger peer. Hot-promotion diversity still uses the topology group
+  ID. A connection the hook
   cannot place, such as an inbound connection peer governance rejected and is
   closing at its peer-list cap, has no identity and fails closed: as a candidate
   it has no corroborators, and as a witness it does not count. Keying it by

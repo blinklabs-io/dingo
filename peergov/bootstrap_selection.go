@@ -47,7 +47,15 @@ func (p *PeerGovernor) peerDiversityGroup(peer *Peer) string {
 	if peer.GroupID != "" {
 		return "group:" + peer.GroupID
 	}
+	return peerAddressGroup(peer)
+}
 
+// peerAddressGroup derives a group label from the peer's address alone: the
+// /24 (IPv4) or /64 (IPv6) prefix, else the normalized hostname.
+func peerAddressGroup(peer *Peer) string {
+	if peer == nil {
+		return ""
+	}
 	address := peer.NormalizedAddress
 	if address == "" {
 		address = peer.Address
