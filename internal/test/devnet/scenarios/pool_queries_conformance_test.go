@@ -85,6 +85,9 @@ func poolStateSummary(
 // TestPoolQueriesMatchReference compares dingo-producer's answers to
 // GetRewardProvenance and GetPoolState with cardano-producer's at one block
 // both chains contain.
+//
+// Not t.Parallel: like every scenario in this package it drives the one
+// running DevNet, whose tip and epoch the sample must not race with.
 func TestPoolQueriesMatchReference(t *testing.T) {
 	cfg, err := devnet.LoadDevNetConfig()
 	require.NoError(t, err, "failed to load devnet config from testnet.yaml")
