@@ -114,10 +114,10 @@ const (
 	// crossing it means the tip is genuinely stuck, not merely quiet.
 	DefaultHealthReadyGapSlots = 1000
 	// DefaultForgeUpstreamStalenessSlots is 0, which disables the upstream
-	// staleness bound. It is opt-in because the newest block this node holds
-	// is a BLOCK while the upstream target is published at HEADER admission,
-	// so the two legitimately differ by the inter-block gap and a small
-	// always-on bound refuses leader slots during ordinary operation.
+	// staleness bound. The always-on forge gate covers the locally admitted,
+	// crypto-verified header frontier. This optional bound can also compare a
+	// policy-approved peer-advertised head within the bounded Genesis window,
+	// which is not authenticated evidence for an always-on consensus gate.
 	DefaultForgeUpstreamStalenessSlots = 0
 	// DefaultForgeAppliedTipStalenessSlots is 0, which disables the optional
 	// wall-clock age bound. The bound is ignored when no corroborated upstream

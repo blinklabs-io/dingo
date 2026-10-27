@@ -9095,10 +9095,18 @@ before VRF/KES signing (`selected parent changed during block assembly`)
 rather than relying solely on step 7's `Chain.AddLocalBlock` check, which
 still runs as the final backstop against any race not closed here.
 For a non-genesis parent, the candidate slot must be strictly later than the
-parent slot. Immediately before signing, the builder checks the parent again
-inside `Chain.WithTip`, which holds the primary chain mutex through header
-encoding and KES signing. External tip providers without that callback retain
-the final best-effort tip check; local chain admission remains authoritative.
+parent slot. Immediately before signing, the builder checks the parent and the
+crypto-verified queued-header frontier again inside `Chain.WithTipAndHeader`,
+which holds the primary chain mutex through header encoding and KES signing.
+Signing proceeds only when both frontiers still name the parent. External tip
+providers without that callback retain the final best-effort parent check;
+local chain admission remains authoritative.
+Production adoption uses `Chain.AddLocalBlockIfHeaderCurrent`, which repeats
+the header-frontier check under the same chain lock as the tip mutation. A
+verified peer header arriving after signing therefore refuses the local block
+instead of being discarded.
+Equal-slot sibling adoption performs the same coherent frontier check while
+holding the chain-sync mutation lock through its rollback and replacement.
 
 Neither rejection costs the leader slot. A candidate rejected by the snapshot
 check or the parent-tip check is re-selected inside the same slot, against the
@@ -9113,7 +9121,8 @@ fallback needs a `BlockBuilder` that accepts the empty-body constraint; an
 embedder's builder that does not simply loses the slot as before.
 
 Every build attempt for a slot -- the first, each retry, and the fallback --
-re-reads both tips and decides the slot again with the same function the
+re-reads the applied tip plus one coherent primary-chain/header-frontier
+snapshot and decides the slot again with the same function the
 pre-selection gates used at entry (`evaluateTipGates`, applied through
 `tipGatesRefuseSlot`), so the two decisions cannot drift apart. The entry gates
 decide the slot from evidence read before leader selection, and Leios
@@ -9122,14 +9131,14 @@ it; a retry or the fallback runs precisely because the primary chain tip moved
 during selection, so that is the one window in which the ledger-applied tip and
 the primary chain tip are guaranteed to have moved apart, and the applied tip
 alone says nothing about it. The re-check therefore applies every gate
-described below against fresh readings of both tips, in the order the entry
+described below against fresh readings of all three frontiers, in the order the entry
 gates take them: a parent slot (the greater of the two tips) past the forged
 slot declines it without building; a primary chain tip already holding an
 unapplied block at the slot is counted as `unapplied_rival_at_leader_slot`;
 an applied tip that has fallen more than `forgeSyncToleranceSlots` behind the
 network refuses on `dingo_forge_sync_skip_total`; `primary_tip_behind_applied`,
 `primary_tip_hash_diverged`, `applied_tip_not_primary_ancestor`,
-`unapplied_block_gap`, `peer_height_gap` and the opt-in staleness bounds refuse
+`unapplied_block_gap`, `admitted_header_ahead`, `peer_height_gap` and the opt-in staleness bounds refuse
 as they do at entry, counted on `dingo_forge_stale_tip_skip_total`; and last,
 an applied tip at the slot is counted once as a slot battle. When the chain
 context, durable forge fence and builder support it, the re-check refreshes
@@ -9324,9 +9333,9 @@ schedule lookup it would be taken from is already made here, for the log
 level. It is not added here. It would not make the two paths agree either,
 since the re-check records the same reading on `could_not_forge` instead, and
 which vector it belongs on is a metrics question of its own:
-`dingo_forge_stale_tip_skip_total` reports this node's two views of its own
-chain disagreeing, or its ledger trailing the network, and a chain past the
-slot clock is neither.
+`dingo_forge_stale_tip_skip_total` reports unsafe applied, selected-block, or
+admitted-header frontiers, or its ledger trailing the network, and a chain
+past the slot clock is neither.
 
 A slot the chain took from us is not a forge this node lost, and
 `{result="lost"}` should not absorb it: read the fallback vector, the three
@@ -9357,15 +9366,14 @@ fact is the only reason a lost slot previously took a field trace to diagnose.
 
 The forger tracks slot battles (competing blocks at the same slot) and skips forging when the node is not sufficiently synced, controlled by `forgeSyncToleranceSlots` and `forgeStaleGapThresholdSlots`.
 
-The forger additionally refuses to forge when the node's own two views of its
-chain disagree. Block production reads both: the builder takes the forged
-block's parent from the primary chain tip -- `chain.Tip()`, the newest
-block added to the chain, NOT the header frontier `chain.HeaderTip()` -- while
-transaction selection and validation, protocol parameters, the epoch nonce and
-leader eligibility all come from the ledger, which is at the applied tip. While
-the ledger pipeline works through blocks it has added to the chain but not yet
-applied, the primary chain tip runs ahead, and forging then signs a block whose
-contents were chosen against an older chain position than its parent.
+The forger additionally refuses to forge when its applied, selected-block, and
+admitted-header frontiers are unsafe. The builder takes the forged block's
+parent from the primary chain tip, while transaction selection and validation,
+protocol parameters, the epoch nonce and leader eligibility come from the
+ledger-applied tip. The third frontier is the longest crypto-verified prefix of
+the queued header chain. If it is ahead of the selected block, that selected
+block is stale as a forging parent even when the selected and applied tips
+agree.
 
 The local safety gate checks ancestry and limits a coherent parent to at most
 two unapplied blocks. It also keeps `forgeSyncToleranceSlots` as a coarse slot
@@ -9375,8 +9383,8 @@ when only one block is awaiting application. Same-slot forks are detected by
 the ancestry check, not by comparing their slots alone.
 
 For network catch-up, a corroborated upstream sync target is checked by block
-height against the current era's security parameter K. This catches a node
-whose peer is substantially ahead in blocks even when the slot gap is within
+height against the current era's security parameter K. A deficit of at least K
+blocks refuses forging even when the slot gap is within
 `forgeSyncToleranceSlots`. The ordinary sync gate continues to use its slot
 tolerance for bulk catch-up. Both limits use full tip snapshots, including
 block numbers.
@@ -9389,32 +9397,39 @@ keeps the local bound useful on both dense and sparse chains without sizing a
 slot threshold as a proxy for block count.
 
 Production slot-clock implementations must also provide `ForgeSafetyTipProvider`
-snapshots for the applied tip and K, primary-tip ancestry, and upstream block
-height. Forging returns an error when those snapshots are unavailable or K is
-not positive.
+snapshots for the applied tip and K, primary-tip ancestry, the crypto-verified
+queued-header frontier, and upstream block height. The primary tip, header
+frontier, and ancestry relation come from one chain lock; an impossible
+header frontier that does not descend from the primary tip fails closed.
+Forging returns an error when those snapshots are unavailable or K is not
+positive.
 
 `dingo_forge_stale_tip_skip_total` records the specific refusal reason, and
-`dingo_forge_tip_gap_slots` continues to report the slot backlog for diagnosis.
+`dingo_forge_tip_gap_slots` reports the network-relative slot backlog from the
+applied tip to the newest selected block or admitted verified header.
 The former `ForgePrimaryChainTipToleranceSlots` API field and
 `forgePrimaryChainTipToleranceSlots` YAML, environment, and CLI settings are
 removed. The local two-block limit and slot prefilter replace that slot-only
 setting; K remains the separate peer-height bound.
 The builder independently rechecks applied-tip ancestry before and after
 transaction selection against the tip it will actually use. Immediately before
-signing, `Chain.WithTip` holds the primary-chain lock while the builder confirms
-the parent and signs, preventing a tip change from invalidating the ancestry
+signing, `Chain.WithTipAndHeader` holds the primary-chain lock while the builder
+confirms that both the selected block tip and admitted verified header frontier
+still equal the parent, preventing either frontier from invalidating the safety
 check.
 
-The gate also covers header admission and ledger application stalling
-*together*. Both local tips then agree, every local gap reads 0, and the node
-can forge on a parent the network has long built past. A block-height check
-catches a corroborated peer more than K blocks ahead. An unknown upstream
-target is not evidence that the network has advanced; in that state the forger
-does not compare the local tip with the wall clock. `forgeUpstreamStalenessSlots`
-and `forgeEndorserBlockStalenessSlots` remain opt-in. The first compares
-`newestKnown` -- the latest block on the primary chain or corroborated Leios
-endorser block -- with the upstream header target, so it must account for their
-different pipeline stages:
+The always-on gate also covers block admission and ledger application stalling
+*together*: a locally admitted, crypto-verified header ahead of the selected
+block chain refuses forging even when the selected and applied tips agree.
+The header frontier is the longest verified prefix of the queue and is walked
+from the selected tip by previous hash under the same chain lock. A block-height
+check separately catches a corroborated peer at least K blocks ahead. An unknown
+upstream target is not evidence that the network has advanced; in that state the
+forger does not compare the local tip with the wall clock.
+`forgeUpstreamStalenessSlots` and `forgeEndorserBlockStalenessSlots` remain
+opt-in. The first compares `newestKnown` -- the latest selected block, locally
+admitted verified header, or corroborated Leios endorser block -- with the
+policy-approved upstream target:
 
 - `forgeUpstreamStalenessSlots` (**default 0 = disabled**, flag
   `--forge-upstream-staleness-slots`, env
@@ -9423,18 +9438,10 @@ different pipeline stages:
   rather than the wall clock on purpose: "how far behind the network am I" is
   ~0 on a quiet chain however long blocks take.
 
-  It is opt-in because the two sides are not sampled at the same pipeline
-  stage. `newestKnown` counts BLOCKS this node holds, while the upstream target
-  is published when a HEADER is admitted (`recordAdmittedHeaderFrontier`
-  advances the admitted frontier and publishes the target together). From a
-  header's admission at slot S until its body is fetched and applied, the
-  target reads S while `newestKnown` is still the previous block's slot -- a
-  difference equal to the inter-block gap, which is ordinary operation rather
-  than staleness. A small always-on bound therefore refuses leader slots
-  routinely: for exponentially distributed gaps with a 20-slot mean, a bound of
-  5 fires for roughly 78% of blocks. Set it well above the expected gap for the
-  network, or leave it off until the admitted header frontier is folded into
-  `newestKnown`.
+  It remains opt-in because the policy-approved target can include a
+  peer-advertised head within the bounded Genesis window. The local admitted
+  frontier has passed header crypto verification; the advertised head has not,
+  so it is sync-policy evidence rather than an always-on forging invariant.
 
   There is deliberately no fallback for a live upstream that has not published
   a target -- `(0, true)` from `UpstreamSyncStatus`, the window between an
@@ -9444,12 +9451,10 @@ different pipeline stages:
   node at tip passes it and forges, and the header it produces
   is what ends the window. What keeps this bound quiet there is its own
   `upstreamTarget > newestKnown` term, which a zero target cannot satisfy.
-  Filling the zero in from the admitted header frontier would compare a
-  header-stage value against `newestKnown`'s block-stage one and refuse leader
-  slots in exactly the window that lag bound opens, re-creating, for any
-  operator who enabled the knob, the wedge an outright refusal causes on an
-  all-producer network: no node forges the header that ends the window, so
-  the chain stops while every node reports healthy.
+  Filling the zero from another source would turn absent target evidence into
+  a synthetic network position and can recreate the all-producer wedge: no
+  node forges the header that ends the window, so the chain stops while every
+  node reports healthy.
   `TestUpstreamSyncStatusReachableStates` pins the reachable pairs;
   `TestForgeUpstreamStalenessIgnoresUnknownUpstreamTarget` pins this case.
 - `forgeAppliedTipStalenessSlots` (default 0 = disabled, flag
@@ -9494,20 +9499,21 @@ different pipeline stages:
   `TestForgeEndorserBlockStalenessIsOffByDefault` pins the default;
   `TestForgeProceedsWhenEndorserBlockIsWithinItsBound` pins the negative case.
 
-`dingo_forge_stale_tip_skip_total` carries a `reason` label with eight values:
+`dingo_forge_stale_tip_skip_total` carries a `reason` label with nine values:
 
 | `reason` | Meaning | Inputs |
 | --- | --- | --- |
 | `applied_tip_not_primary_ancestor` | The applied point is not an ancestor of the primary chain tip. | applied point, primary chain ancestry |
 | `unapplied_block_gap` | The applied tip exceeds the two-block local limit or the local slot prefilter. | applied and primary block heights and slots |
-| `peer_height_gap` | A corroborated upstream target is more than K blocks ahead of the applied tip. | applied and upstream block heights |
+| `admitted_header_ahead` | A locally admitted, crypto-verified header descends from and is ahead of the selected block chain, so that selected block is stale as a forging parent. | coherent primary-chain and verified-header snapshot |
+| `peer_height_gap` | A corroborated upstream target is at least K blocks ahead of the applied tip. | applied and upstream block heights |
 | `primary_tip_hash_diverged` | Primary chain tip and applied tip are at the same slot but name different blocks -- an equal-slot fork the ledger has not applied. | applied tip hash, primary chain tip hash |
 | `primary_tip_behind_applied` | The primary chain tip is at a lower slot than the applied tip, so the builder's parent is a block the ledger has already built past. | applied tip slot, primary chain tip slot |
 | `unapplied_rival_at_leader_slot` | The primary chain tip already holds a block at this slot that the ledger has not applied, so forging would parent a block for slot S on a tip already at slot S. | current slot, applied tip slot, primary chain tip slot |
 | `eb_manifest_ahead` | The local tips alone looked fine; a corroborated Leios endorser block leads the applied tip by more than `forgeEndorserBlockStalenessSlots`, proving a ranking block exists at a slot whose header this node has not admitted. **Opt-in and off by default (0 = disabled)**, governed by that bound alone -- so this series stays at 0 unless an operator sets it. | applied tip slot, highest corroborated endorser-block slot |
 | `applied_tip_stale` | Local evidence trails the corroborated upstream target beyond `forgeUpstreamStalenessSlots`, or with a usable target the optional `forgeAppliedTipStalenessSlots` wall-clock bound fires. | `newestKnown`, upstream sync target, current slot |
 
-The eight reasons do not share one diagnosis, and reading them as if they did
+The nine reasons do not share one diagnosis, and reading them as if they did
 sends an operator to the wrong component. The ancestry and block-gap reasons
 compare local ledger state with the primary chain; peer height and endorser
 block reasons use corroborated network evidence:
@@ -9521,6 +9527,10 @@ block reasons use corroborated network evidence:
   primary chain. That is chain/ledger reconciliation, the state the ledger
   resolves at startup by rolling its own tip back to the chain tip, not an
   apply backlog.
+- `admitted_header_ahead` means the **selected block chain is behind its own
+  authenticated header stream**. The queued frontier is hash-linked to the
+  selected tip under one chain lock, so a rollback cannot create a mixed
+  snapshot that spuriously triggers the refusal.
 - `peer_height_gap`, `eb_manifest_ahead` and the upstream-target half of
   `applied_tip_stale` are **not local checks**: they mean this node is
   **behind the network**, based on a corroborated peer target, an endorser
@@ -9538,8 +9548,8 @@ block reasons use corroborated network evidence:
   tip", and `stale_source` distinguishes the two bounds behind
   `applied_tip_stale`.
 
-All eight count lost blocks rather than leader checks, but they do not establish
-leadership the same way. Seven are counted after leader selection has proven
+All nine count lost blocks rather than leader checks, but they do not establish
+leadership the same way. Eight are counted after leader selection has proven
 this node elected. `unapplied_rival_at_leader_slot` is refused *before* the
 leader check -- it is the one gate that can drop a scheduled leader slot
 without moving `Forge_node_is_leader`, `Forge_node_not_leader` or
