@@ -188,6 +188,9 @@ func (s *Stack) registerPeer(conn net.Conn, dialed bool) (*PeerConn, error) {
 	if s.peersClosed {
 		return nil, errors.New("dmq: stack is stopped")
 	}
+	if s.maxPeers > 0 && len(s.peers) >= s.maxPeers {
+		return nil, ErrTooManyPeers
+	}
 	// gouroboros formats both addresses when it logs the connection.
 	if conn.LocalAddr() == nil || conn.RemoteAddr() == nil {
 		return nil, errors.New("dmq: connection has no network address")
@@ -224,6 +227,10 @@ func (s *Stack) forgetPeer(p *PeerConn) {
 	if _, ok := s.peers[p]; ok {
 		delete(s.peers, p)
 		s.peersCnt.Dec()
+		// A lost peer may leave the stack below its minimum.
+		if s.peerNet != nil && s.peerNet.manager != nil {
+			s.peerNet.manager.kick()
+		}
 	}
 }
 

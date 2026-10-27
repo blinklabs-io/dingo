@@ -34,7 +34,9 @@ tests are not built or are skipped, so `make test` is unaffected.
 | --- | --- |
 | `TestInteropDingoDialsDmqNode` | The handshake settles on version 2 and the connection stays up with keep-alive on mini-protocol 12. |
 | `TestInteropDmqNodeServesAMessageToDingo` | A message signed by the devnet pool's real KES key, accepted by dmq-node, is pulled by Dingo, which checks the signatures and certificate itself. |
-| `TestInteropDmqNodePullsAMessageFromDingo` | dmq-node dials Dingo, pulls a message from it and accepts it; a second Dingo stack then fetches it from dmq-node, which proves dmq-node kept it. |
+| `TestInteropDmqNodePullsAMessageFromDingo` | dmq-node dials Dingo's peer listener, pulls a message from it and accepts it; a second Dingo stack then fetches it from dmq-node, which proves dmq-node kept it. |
+| `TestInteropPeerManagerDialsDmqNode` | Dingo's peer manager dials dmq-node from a topology, as the node does, and the connection holds. |
+| `TestInteropNodeExchangesMessagesWithDmqNode` | Node mode only. A real Dingo binary with `dmq.enabled` dials dmq-node from its topology and accepts dmq-node's connection. A message dmq-node accepted reaches a consumer on the node's local socket after the node authenticates it against its own ledger, and a message the node accepted on that socket is accepted by dmq-node. |
 
 dmq-node accepts a pool's messages only once the pool's set stake snapshot,
 which it reads from the Cardano node once per epoch, is nonzero. On the devnet
@@ -59,10 +61,25 @@ message. Remove the container (`docker rm -f`) when done.
 | `DMQ_NODE_SEVERITY` | dmq-node's log level (default `Info`). |
 | `DMQ_INTEROP_WORKDIR` | Where downloads and builds are kept. |
 | `DMQ_INTEROP_KEEP` | Keep the container and working directory afterwards. |
+| `DMQ_INTEROP_NODE_MODE` | Also run a native Dingo with `dmq.enabled` and run only the node-mode test. It binds Dingo's default ports (3001, 3002, 12798) and `DMQ_INTEROP_LISTEN_PORT` on this machine. |
+| `DMQ_INTEROP_METRICS_PORT` | The node's metrics port in node mode (default 12798), for a machine where that port is in use. |
+| `DMQ_INTEROP_CARDANO_BIN` | A Linux Dingo binary for the Cardano node dmq-node talks to; see below. |
+
+## The Cardano node's idle limit
+
+Dingo closes a node-to-client connection after two minutes without traffic.
+dmq-node keeps one open to its Cardano node and sends nothing between epochs,
+so against a Dingo with that limit it exits within minutes with `BearerClosed`.
+Until dmq-node is exempted, point `DMQ_INTEROP_CARDANO_BIN` at a Linux build of
+Dingo from before the limit for the Cardano node. The Dingo under test is
+always built from this tree.
 
 ## gouroboros version
 
-The second and third tests need a gouroboros whose `MessageAuthenticator`
+`TestInteropDmqNodeServesAMessageToDingo`,
+`TestInteropDmqNodePullsAMessageFromDingo` and
+`TestInteropNodeExchangesMessagesWithDmqNode` need a gouroboros whose
+`MessageAuthenticator`
 verifies a message's KES signature over the payload's raw CBOR, which is what
 dmq-node signs and verifies. gouroboros v0.214.0 does; earlier releases verify a
 copy wrapped in a CBOR byte string, so Dingo would reject every message

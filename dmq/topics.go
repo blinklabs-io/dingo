@@ -23,6 +23,20 @@ var topicMagic = map[string]map[string]uint32{
 	},
 }
 
+// topicSRVPrefix maps a DMQ topic to the DNS SRV prefix its ledger peers are
+// registered under, as listed in the Cardano SRV registry. A pool registers
+// the bare domain on chain and the node prepends the prefix before the lookup.
+var topicSRVPrefix = map[string]string{
+	"mithril": "_dmq._mithril._cardano._tcp",
+}
+
+// TopicSRVPrefix returns the DNS SRV prefix for topic, for example
+// "_dmq._mithril._cardano._tcp". It reports false when the topic has none.
+func TopicSRVPrefix(topic string) (string, bool) {
+	prefix, ok := topicSRVPrefix[topic]
+	return prefix, ok
+}
+
 // TopicNetworkMagic returns the DMQ network magic for topic on the named
 // Cardano network. It reports false when the topic is unknown or has no magic
 // on that network.
