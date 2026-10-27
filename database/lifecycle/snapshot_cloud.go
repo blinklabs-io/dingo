@@ -92,7 +92,7 @@ func readCloudMirrorMarker(dir string) ([]byte, error) {
 	}
 	recorded, readErr := io.ReadAll(io.LimitReader(
 		marker,
-		maxCloudMirrorMarkerBytes+1,
+		int64(maxCloudMirrorMarkerBytes)+1,
 	))
 	if err := errors.Join(readErr, marker.Close()); err != nil {
 		return nil, err

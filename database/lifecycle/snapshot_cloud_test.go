@@ -20,6 +20,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/lifecycle"
@@ -194,6 +195,15 @@ func TestIsCloudMirroredToDetectsChangedDestination(t *testing.T) {
 	))
 	require.False(t, lifecycle.IsCloudMirroredTo(dir, cloudDest),
 		"legacy raw URI markers force a safe retry")
+
+	// Trailing whitespace would survive TrimSpace and match, so only the
+	// size bound rejects this marker.
+	oversized := string(marker) + strings.Repeat(" ", 4096)
+	require.NoError(t, os.WriteFile(
+		lifecycle.CloudMirrorMarkerPath(dir), []byte(oversized), 0o600,
+	))
+	require.False(t, lifecycle.IsCloudMirroredTo(dir, cloudDest),
+		"an oversized marker is rejected")
 }
 
 // swappingUploadDirDestination implements only CloudDestination.UploadDir.
