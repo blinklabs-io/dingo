@@ -1379,7 +1379,12 @@ func (ls *LedgerState) queryShelleyLeaf(ctx context.Context, query any,
 	case *olocalstatequery.ShelleyProposedProtocolParamsUpdatesQuery:
 		return ls.queryShelleyProposedProtocolParamsUpdates(ctx, q, at, txn)
 	case *olocalstatequery.ShelleyStakePoolParamsQuery:
-		return ls.queryShelleyStakePoolParams(ctx, q.PoolIds.Items())
+		return ls.queryShelleyStakePoolParams(
+			ctx,
+			q.PoolIds.Items(),
+			at,
+			txn,
+		)
 	case *olocalstatequery.ShelleyStakePoolStateQuery:
 		// Released nodes do not support GetStakePoolState, so only the Leios
 		// prototype answers it; elsewhere it is unsupported like any other
