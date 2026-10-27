@@ -22,11 +22,11 @@ import (
 	"log/slog"
 	"strings"
 	gosync "sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"connectrpc.com/connect"
-	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/mempool"
@@ -496,11 +496,15 @@ type datumBudgetStub struct {
 	datums map[string]*models.Datum
 }
 
-func (s *datumBudgetStub) Datum(key []byte) (*models.Datum, error) {
-	if d, ok := s.datums[string(key)]; ok {
-		return d, nil
+func (s *datumBudgetStub) Datums(
+	_ context.Context,
+	keys [][]byte,
+) ([]*models.Datum, error) {
+	out := make([]*models.Datum, len(keys))
+	for i, key := range keys {
+		out[i] = s.datums[string(key)]
 	}
-	return nil, database.ErrDatumNotFound
+	return out, nil
 }
 
 func TestReadData_ResponseByteBudget(t *testing.T) {
@@ -548,6 +552,79 @@ func TestReadData_ResponseByteBudget(t *testing.T) {
 	out, err = readWith(1, keys[:1])
 	require.NoError(t, err, "a single item larger than the budget is kept")
 	require.Len(t, out.GetValues(), 1)
+}
+
+// countingDatumStub counts Datums batches and the hashes they carry, and
+// honors cancellation like the real lookup.
+type countingDatumStub struct {
+	datumBudgetStub
+	batches atomic.Int32
+	hashes  atomic.Int32
+}
+
+func (s *countingDatumStub) Datums(
+	ctx context.Context,
+	keys [][]byte,
+) ([]*models.Datum, error) {
+	s.batches.Add(1)
+	s.hashes.Add(int32(len(keys)))
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return s.datumBudgetStub.Datums(ctx, keys)
+}
+
+// TestReadData_DuplicateKeysLookedUpOnce covers a request that repeats one
+// datum hash. It must be resolved once, in a single batched read, and returned
+// once, not looked up and returned per repeat.
+func TestReadData_DuplicateKeysLookedUpOnce(t *testing.T) {
+	t.Parallel()
+	key := bytes.Repeat([]byte{0x01}, 32)
+	stub := &countingDatumStub{
+		datumBudgetStub: datumBudgetStub{datums: map[string]*models.Datum{
+			string(key): {Hash: key, RawDatum: []byte{0x01}},
+		}},
+	}
+	srv := &queryServiceServer{utxorpc: NewUtxorpc(UtxorpcConfig{
+		Logger:      discardLogger(),
+		LedgerState: stub,
+	})}
+	keys := make([][]byte, 100)
+	for i := range keys {
+		keys[i] = key
+	}
+	out, err := srv.ReadData(context.Background(),
+		connect.NewRequest(&query.ReadDataRequest{Keys: keys}))
+	require.NoError(t, err)
+	require.Len(t, out.Msg.GetValues(), 1)
+	require.Equal(t, int32(1), stub.batches.Load(),
+		"one batched read per request")
+	require.Equal(t, int32(1), stub.hashes.Load(),
+		"duplicates are looked up once")
+}
+
+// TestReadData_CanceledContextStopsLookups covers a caller that has already
+// given up. ReadData must surface the cancellation as Canceled rather than
+// returning a response or a generic internal error.
+func TestReadData_CanceledContextStopsLookups(t *testing.T) {
+	t.Parallel()
+	stub := &countingDatumStub{
+		datumBudgetStub: datumBudgetStub{datums: map[string]*models.Datum{}},
+	}
+	srv := &queryServiceServer{utxorpc: NewUtxorpc(UtxorpcConfig{
+		Logger:      discardLogger(),
+		LedgerState: stub,
+	})}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	keys := [][]byte{
+		bytes.Repeat([]byte{0x01}, 32),
+		bytes.Repeat([]byte{0x02}, 32),
+	}
+	_, err := srv.ReadData(ctx,
+		connect.NewRequest(&query.ReadDataRequest{Keys: keys}))
+	require.Error(t, err)
+	require.Equal(t, connect.CodeCanceled, connect.CodeOf(err))
 }
 
 func TestFetchBlock_ResponseByteBudget(t *testing.T) {
