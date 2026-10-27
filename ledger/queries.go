@@ -1397,13 +1397,18 @@ func (ls *LedgerState) queryShelleyLeaf(ctx context.Context, query any,
 		return ls.queryShelleyRewardProvenance()
 	case *olocalstatequery.ShelleyPoolStateQuery:
 		return ls.queryShelleyPoolState(ctx, q, at, txn)
-	// TODO: implement the remaining Shelley ledger queries below.
-	/*
-		case *olocalstatequery.ShelleyNonMyopicMemberRewardsQuery:
-		case *olocalstatequery.ShelleyDebugEpochStateQuery:
-		case *olocalstatequery.ShelleyDebugNewEpochStateQuery:
-		case *olocalstatequery.ShelleyRewardInfoPoolsQuery:
-	*/
+	case *olocalstatequery.ShelleyNonMyopicMemberRewardsQuery:
+		return nil, queryNotAnswered(
+			"GetNonMyopicMemberRewards", missingPoolPerformance,
+		)
+	case *olocalstatequery.ShelleyRewardInfoPoolsQuery:
+		return nil, queryNotAnswered(
+			"GetRewardInfoPools", missingPoolPerformance,
+		)
+	case *olocalstatequery.ShelleyDebugEpochStateQuery:
+		return nil, queryNotAnswered("DebugEpochState", missingEpochState)
+	case *olocalstatequery.ShelleyDebugNewEpochStateQuery:
+		return nil, queryNotAnswered("DebugNewEpochState", missingEpochState)
 	default:
 		return nil, fmt.Errorf("unsupported query type: %T", q)
 	}
