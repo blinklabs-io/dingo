@@ -26,6 +26,7 @@ import (
 	archive "github.com/blinklabs-io/bark/proto/v1alpha1/archive"
 	archiveconnect "github.com/blinklabs-io/bark/proto/v1alpha1/archive/archivev1alpha1connect"
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/stretchr/testify/require"
 )
@@ -504,5 +505,112 @@ func TestArchiveFetchBlockStaleTailRefusedBeforeRetrying(t *testing.T) {
 		work,
 		int64(2*archiveBoundResolveLookups),
 		"refused retry still ran its probes",
+	)
+}
+
+// deleteBlockMetadata removes the metadata of blocks[from:to], leaving their
+// index entries behind as stale ones.
+func deleteBlockMetadata(
+	t *testing.T,
+	handler *archiveServiceHandler,
+	blocks []models.Block,
+	from, to int,
+) {
+	t.Helper()
+	db, release, err := handler.bark.Acquire()
+	require.NoError(t, err)
+	defer release()
+	txn := db.BlobTxn(true)
+	for _, block := range blocks[from:to] {
+		require.NoError(t, db.Blob().Delete(
+			txn.Blob(),
+			types.BlockBlobMetadataKey(
+				types.BlockBlobKey(block.Slot, block.Hash),
+			),
+		))
+	}
+	require.NoError(t, txn.Commit())
+}
+
+// TestArchiveFetchBlockHeightChargeCoversStaleInteriorEntries covers an index
+// whose newest entry is live but which has stale entries below it. Every
+// probe of the height search skips them, one metadata read each, and the
+// bound reports no restart, so the flat per-probe charge alone undercounts.
+// The skipped entries have to be charged as they are read.
+func TestArchiveFetchBlockHeightChargeCoversStaleInteriorEntries(t *testing.T) {
+	t.Parallel()
+
+	const blockCount = 1500
+	for _, stale := range []int{5, 50, 300} {
+		counts := &blobOpCounts{}
+		handler, blocks := newArchiveTestHandlerWithOptions(
+			t, blockCount, archiveTestOptions{counts: counts},
+		)
+		budget := newArchiveBudget(10_000_000, 10_000_000)
+		frozen := time.Now()
+		budget.now = func() time.Time { return frozen }
+		handler.bark.archiveBudget = budget
+		// Block IDs start at 1, so the first probe (ID 750) seeks forward
+		// from blocks[749]; start the run there so it walks the whole run.
+		mid := blockCount/2 - 1
+		deleteBlockMetadata(t, handler, blocks, mid, mid+stale)
+
+		counts.reset()
+		_, err := handler.FetchBlock(
+			t.Context(),
+			connect.NewRequest(&archive.FetchBlockRequest{
+				Blocks: []*archive.BlockRef{heightRef(1)},
+			}),
+		)
+		require.NoError(t, err)
+		work := counts.forwardIndexScans.Load() +
+			counts.metadataReads.Load() +
+			counts.blockReads.Load()
+		charged := float64(archiveBurst(10_000_000)) -
+			budget.callers[archiveCallerKey("")].TokensAt(frozen)
+		require.GreaterOrEqual(
+			t,
+			charged,
+			float64(work),
+			"%d stale interior entries: charged %v for %d operations",
+			stale, charged, work,
+		)
+	}
+}
+
+// TestArchiveFetchBlockStaleInteriorRefusedWhileSearching covers a caller
+// that can pay for the bound and the flat search charge but not for the stale
+// entries one probe has to skip. The search has to stop at the refusal, not
+// read them all first.
+func TestArchiveFetchBlockStaleInteriorRefusedWhileSearching(t *testing.T) {
+	t.Parallel()
+
+	const blockCount = 1500
+	counts := &blobOpCounts{}
+	handler, blocks := newArchiveTestHandlerWithOptions(
+		t, blockCount, archiveTestOptions{counts: counts},
+	)
+	// Burst 200: the up-front 67 and the 23 for one height reference leave
+	// about 110, far fewer than the 700 stale entries below.
+	budget := newArchiveBudget(100, 100)
+	frozen := time.Now()
+	budget.now = func() time.Time { return frozen }
+	handler.bark.archiveBudget = budget
+	deleteBlockMetadata(t, handler, blocks, blockCount/2-1, blockCount-1)
+
+	counts.reset()
+	_, err := handler.FetchBlock(
+		t.Context(),
+		connect.NewRequest(&archive.FetchBlockRequest{
+			Blocks: []*archive.BlockRef{heightRef(1)},
+		}),
+	)
+	require.Error(t, err)
+	require.Equal(t, connect.CodeResourceExhausted, connect.CodeOf(err))
+	require.Less(
+		t,
+		counts.metadataReads.Load(),
+		int64(200),
+		"refused search still read the stale entries",
 	)
 }

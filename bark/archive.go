@@ -193,6 +193,7 @@ func resolveBlockPoint(
 	db *database.Database,
 	ref blockRefRequest,
 	bound database.BlockNumberBound,
+	reserve func() bool,
 ) (common.Point, bool, error) {
 	switch {
 	case ref.hasHash && ref.hasSlot:
@@ -212,7 +213,9 @@ func resolveBlockPoint(
 		}
 		return common.NewPoint(block.Slot, block.Hash), true, nil
 	default:
-		block, err := database.BlockByNumberBounded(ctx, db, ref.height, bound)
+		block, err := database.BlockByNumberBoundedBudgeted(
+			ctx, db, ref.height, bound, reserve,
+		)
 		if err != nil {
 			return common.Point{}, false, err
 		}
@@ -332,7 +335,7 @@ func (a *archiveServiceHandler) FetchBlock(
 				)
 			},
 		)
-		if errors.Is(err, database.ErrBlockNumberBoundBudget) {
+		if errors.Is(err, database.ErrBlockIndexBudget) {
 			return nil, connect.NewError(
 				connect.CodeResourceExhausted,
 				errors.New(
@@ -371,7 +374,22 @@ func (a *archiveServiceHandler) FetchBlock(
 	}
 
 	for _, ref := range refs {
-		point, confirmed, err := resolveBlockPoint(ctx, db, ref, bound)
+		// A probe skips stale index entries, a metadata read each that the
+		// flat per-probe charge cannot know about; each one is reserved
+		// before the search moves on to the next.
+		point, confirmed, err := resolveBlockPoint(
+			ctx, db, ref, bound,
+			func() bool { return a.bark.archiveBudget.allow(caller, 1) },
+		)
+		if errors.Is(err, database.ErrBlockIndexBudget) {
+			return nil, connect.NewError(
+				connect.CodeResourceExhausted,
+				errors.New(
+					"archive lookup budget exhausted by stale index "+
+						"entries, retry later",
+				),
+			)
+		}
 		if err != nil {
 			if isBlockMissing(err) {
 				resp.NotFound = append(resp.NotFound, ref.requested())
