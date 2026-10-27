@@ -2191,3 +2191,28 @@ func TestDownloadSnapshotRemovesStaleStagingFiles(t *testing.T) {
 	require.FileExists(t, filepath.Join(dir, "archive.partial-fresh"))
 	require.FileExists(t, filepath.Join(dir, "other.partial-old"))
 }
+
+// TestDownloadSnapshotKeepsStagingWhenIdleDetectionDisabled pins that no
+// staging file is swept when idle detection is disabled: a live transfer may
+// then go unwritten indefinitely, so no age proves a file abandoned.
+func TestDownloadSnapshotKeepsStagingWhenIdleDetectionDisabled(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("staging ownership cannot be established on windows")
+	}
+	dir := t.TempDir()
+	p := filepath.Join(dir, "archive.partial-stalled")
+	require.NoError(t, os.WriteFile(p, []byte("x"), 0o600))
+	old := time.Now().Add(-24 * time.Hour)
+	require.NoError(t, os.Chtimes(p, old, old))
+	var ranges []string
+	_, err := DownloadSnapshot(context.Background(), DownloadConfig{
+		URL: "https://example.test/archive", AllowInsecureHTTP: true,
+		DestDir: dir, Filename: "archive",
+		HTTPClient:          rangeServingClient([]byte("abc"), &ranges),
+		IdleTimeout:         -1,
+		MaxTransientRetries: -1,
+	})
+	require.NoError(t, err)
+	require.FileExists(t, p)
+}

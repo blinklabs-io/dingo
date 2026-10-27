@@ -797,18 +797,27 @@ func downloadSnapshot(
 // stagingOrphanAge is how long a staging file must have gone unwritten before
 // it is treated as abandoned. A live transfer writes at least once per idle
 // timeout or it is aborted, so twice that cannot belong to a running download
-// of the same entry.
+// of the same entry. With idle detection disabled a live transfer has no such
+// bound, so it returns zero and no staging file is treated as abandoned.
 func (cfg DownloadConfig) stagingOrphanAge() time.Duration {
-	return 2 * max(cfg.idleTimeout(), defaultDownloadIdleTimeout)
+	idle := cfg.idleTimeout()
+	if idle <= 0 {
+		return 0
+	}
+	return 2 * max(idle, defaultDownloadIdleTimeout)
 }
 
 // removeStaleStaging deletes staging files a crashed process left beside the
 // cache entry. Their random names are never reused, so they would otherwise
 // hold disk space against the free-space reserve indefinitely. Only regular,
 // singly linked files owned by this process and older than minAge are
-// removed. It runs once per download, not per attempt, so it cannot race the
-// staging file of the attempt in progress.
+// removed, and nothing is removed when minAge is not positive. It runs once
+// per download, not per attempt, so it cannot race the staging file of the
+// attempt in progress.
 func removeStaleStaging(root *os.Root, filename string, minAge time.Duration) {
+	if minAge <= 0 {
+		return
+	}
 	dir, err := root.Open(".")
 	if err != nil {
 		return

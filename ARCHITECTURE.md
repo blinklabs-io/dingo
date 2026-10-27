@@ -9656,7 +9656,8 @@ files are replaced only after a complete download, and a non-regular entry such
 as a symlink is refused. An owned partial already over the size limit is removed
 before any request. Before the first attempt, staging files a crashed process
 left beside the entry are removed when they are owned by the node, singly
-linked, and unwritten for twice the idle timeout. A malformed-range restart truncates the private staging file
+linked, and unwritten for twice the idle timeout; with idle detection disabled
+none is removed, since no age then proves a transfer abandoned. A malformed-range restart truncates the private staging file
 before checking the replacement response. Transfer failures publish an owned
 partial atomically for the next retry. Size-limit, free-space-reserve, and
 filesystem-space failures discard the staging file and the owned partial, as
