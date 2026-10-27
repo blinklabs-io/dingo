@@ -46,6 +46,11 @@ func (q barrierQueryer) barrier(ctx context.Context, query string) error {
 		}
 		return err
 	}
+	if err := q.store.overlayTransactionBarrier(
+		ctx, q.queryer, q.accumulator, query,
+	); err != nil {
+		return err
+	}
 	if !readsOverlayTables(query) {
 		return nil
 	}
@@ -89,7 +94,11 @@ func (q barrierQueryer) QueryContext(
 }
 
 // QueryRowContext cannot return the barrier's error; the overlay records it
-// and FlushBatch returns it, so the batch fails before commit.
+// and FlushBatch returns it, so the batch fails before commit. A read or
+// write that fails earlier because the barrier did not write -- a missing
+// row, or a foreign key naming a transaction row that failed to insert --
+// gets the recorded error joined to its own by the ledger, through the
+// accumulator's BatchUtxoOverlayError.
 func (q barrierQueryer) QueryRowContext(
 	ctx context.Context,
 	query string,

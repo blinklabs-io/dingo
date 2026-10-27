@@ -112,6 +112,7 @@ func leiosApplyTestSeedKeyUtxo(
 			PaymentKey: pathSignerHash(),
 			AddedSlot:  1,
 			Amount:     types.Uint64(amount),
+			Cbor:       outputCbor,
 		}); err != nil {
 			return err
 		}

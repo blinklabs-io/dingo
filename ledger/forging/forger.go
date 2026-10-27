@@ -26,6 +26,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/blinklabs-io/dingo/internal/safedecode"
 	"github.com/blinklabs-io/dingo/utxoref"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -492,10 +493,14 @@ type LeiosCertifiedEndorserBlock struct {
 // inclusion after the certifying ranking block is adopted.
 type LeiosCertificateProvider interface {
 	EligibleCertifiedEndorserBlocks() []LeiosCertifiedEndorserBlock
-	CertifiedEndorserBlockTxHashes(
+	// CertifiedEndorserBlockTxs returns the manifest-order transactions of
+	// the complete endorser block at ebSlot, each as the block_transaction
+	// CBOR the endorser block serves. A ranking block that certifies it
+	// applies these transactions ahead of the endorser block it announces.
+	CertifiedEndorserBlockTxs(
 		ebHash lcommon.Blake2b256,
 		ebSlot uint64,
-	) (hashes []string, ok bool)
+	) (txs [][]byte, ok bool)
 	MarkEndorserBlockEmbedded(ebHash lcommon.Blake2b256, ebSlot uint64)
 }
 
@@ -1819,34 +1824,36 @@ func (f *BlockForger) checkAndForgeProduction(ctx context.Context) error {
 	leiosBlockData := leiosState.data
 	embeddedEb, embeddedEbSlot := leiosState.embeddedEb, leiosState.embeddedEbSlot
 	if altBlockContext == nil && f.leiosChecker != nil {
-		var excludedTxHashes map[string]struct{}
+		// The endorser block this ranking block announces must be a valid
+		// extension of the state the ranking block leaves (CIP-0164): its
+		// parent's state plus the certified closure it applies. Selection is
+		// therefore pinned to a ledger whose tip is the parent, and rebased
+		// onto the certified closure.
+		basis := leiosSelectionBasis{parentHash: gates.primaryTip.Hash}
 		canAnnounce := true
 		if embeddedEb != nil {
-			hashes, ok := f.leiosCerts.CertifiedEndorserBlockTxHashes(
+			closure, err := f.certifiedClosureForRebase(
 				*embeddedEb,
 				embeddedEbSlot,
 			)
-			if !ok {
+			if err != nil {
 				f.logger.Warn(
 					"leios EB announcement skipped: certified closure unavailable for mempool rebase",
 					"slot",
 					currentSlot,
 					"eb_hash",
 					embeddedEb.String(),
+					"error",
+					err,
 				)
 				canAnnounce = false
 			}
-			if canAnnounce {
-				excludedTxHashes = make(map[string]struct{}, len(hashes))
-				for _, hash := range hashes {
-					excludedTxHashes[hash] = struct{}{}
-				}
-			}
+			basis.closure = closure
 		}
 		if canAnnounce {
 			announcement, err := f.checkAndForgeLeiosEB(
 				ctx, currentSlot,
-				excludedTxHashes,
+				basis,
 			)
 			if err != nil {
 				f.logger.Warn(
@@ -4159,7 +4166,7 @@ func (f *BlockForger) ebSelectionBudget(slot uint64) (time.Time, bool) {
 func (f *BlockForger) checkAndForgeLeiosEB(
 	ctx context.Context,
 	slot uint64,
-	excludedTxHashes map[string]struct{},
+	basis leiosSelectionBasis,
 ) (*LeiosEndorserBlockAnnouncement, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -4200,10 +4207,10 @@ func (f *BlockForger) checkAndForgeLeiosEB(
 
 	allTxs := f.leiosMempool.Transactions()
 	txs := allTxs
-	if len(excludedTxHashes) > 0 {
+	if basis.closure != nil && len(basis.closure.txIDs) > 0 {
 		txs = make([]MempoolTransaction, 0, len(allTxs))
 		for _, tx := range allTxs {
-			if _, excluded := excludedTxHashes[tx.Hash]; excluded {
+			if basis.closure.applies(tx.Hash) {
 				continue
 			}
 			txs = append(txs, tx)
@@ -4223,6 +4230,7 @@ func (f *BlockForger) checkAndForgeLeiosEB(
 		txs,
 		f.leiosValidator,
 		limits,
+		basis,
 	)
 	selectDuration := f.now().Sub(selectStart)
 	if f.metrics != nil {
@@ -4230,6 +4238,23 @@ func (f *BlockForger) checkAndForgeLeiosEB(
 		if truncated {
 			f.metrics.leiosEbSelectionTruncated.Inc()
 		}
+	}
+	if errors.Is(err, ErrTxValidationParentMismatch) {
+		// The ledger has not applied the parent this ranking block is built
+		// on (the tip gates admit a short apply backlog), so the parent's
+		// state, and any certified closure it applied, cannot be validated
+		// against. Selecting against the older state could re-pack
+		// transactions that state has not yet seen applied.
+		f.logger.Debug(
+			"leios EB skipped: ledger tip is not the ranking block's parent",
+			"slot", slot,
+			"error", err,
+		)
+		if f.metrics != nil {
+			f.metrics.leiosEbSkipped.WithLabelValues("ledger_not_at_parent").
+				Inc()
+		}
+		return nil, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("validate leios EB transactions: %w", err)
@@ -4315,11 +4340,19 @@ func (f *BlockForger) checkAndForgeLeiosEB(
 // the same UTxO overlay semantics used at admission. Parent outputs are exposed
 // only after the parent passes, so rejecting a parent also rejects descendants
 // that depend on it. LedgerState pins the whole pass to one publication through
-// TxValidationSessionProvider.
+// TxValidationSessionProvider, and, given basis.parentHash, to a publication
+// whose tip is that parent (ParentPinnedTxValidationSessionProvider).
+//
+// basis.closure is the certified closure the announcing ranking block applies
+// ahead of the endorser block. Its transactions are already applied in the
+// state the endorser block extends, so they are never selected, and the inputs
+// they consume are seeded into the overlay so that no transaction conflicting
+// with them is selected either.
 func selectValidLeiosTransactions(ctx context.Context,
 	txs []MempoolTransaction,
 	validator TxValidator,
 	limits leiosSelectionLimits,
+	basis leiosSelectionBasis,
 ) ([]MempoolTransaction, bool, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, false, err
@@ -4329,13 +4362,14 @@ func selectValidLeiosTransactions(ctx context.Context,
 	}
 	truncated := false
 	selected := make([]MempoolTransaction, 0, len(txs))
-	err := withTxValidationSession(ctx,
+	err := withLeiosSelectionSession(ctx,
 		validator,
+		basis.parentHash,
 		func(
 			validate TxValidationFunc,
 			stillCurrent func() bool,
 		) error {
-			consumed := make(map[utxoref.Key]struct{})
+			consumed := basis.closure.consumedOverlay()
 			created := make(map[utxoref.Key]lcommon.Utxo)
 			accounts := utxoref.NewStateOverlay()
 			for _, mempoolTx := range txs {
@@ -4366,6 +4400,9 @@ func selectValidLeiosTransactions(ctx context.Context,
 				if !validLeiosTransactionReference(mempoolTx) {
 					continue
 				}
+				if basis.closure.applies(mempoolTx.Hash) {
+					continue
+				}
 				tx, err := decodeMempoolTx(mempoolTx)
 				if err != nil || validate(tx, consumed, created, accounts) != nil {
 					continue
@@ -4389,6 +4426,87 @@ func selectValidLeiosTransactions(ctx context.Context,
 		},
 	)
 	return selected, truncated, err
+}
+
+// leiosSelectionBasis is the ledger state an endorser-block selection pass
+// validates against: the announcing ranking block's parent, plus the certified
+// closure that ranking block applies. The zero value is an unpinned pass over
+// the current ledger state with no closure.
+type leiosSelectionBasis struct {
+	// parentHash, when non-empty, is the hash the validation session's
+	// ledger tip must equal.
+	parentHash []byte
+	// closure is the certified closure applied by the announcing ranking
+	// block, or nil when it certifies nothing.
+	closure *leiosCertifiedClosure
+}
+
+// leiosCertifiedClosure summarizes a certified endorser-block closure for
+// selection: the ids of its transactions and every input they consume.
+type leiosCertifiedClosure struct {
+	txIDs    map[string]struct{}
+	consumed map[utxoref.Key]struct{}
+}
+
+// newLeiosCertifiedClosure decodes the closure's block_transaction CBOR. The
+// mempool keys transactions by transaction id (the body hash); the manifest
+// references hash the full block_transaction bytes instead, so the ids are
+// taken from the decoded transactions, never from the manifest.
+func newLeiosCertifiedClosure(rawTxs [][]byte) (*leiosCertifiedClosure, error) {
+	closure := &leiosCertifiedClosure{
+		txIDs:    make(map[string]struct{}, len(rawTxs)),
+		consumed: make(map[utxoref.Key]struct{}, len(rawTxs)*2),
+	}
+	for i, raw := range rawTxs {
+		tx, err := safedecode.DijkstraBlockTransaction(raw)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"decode certified closure transaction %d: %w",
+				i,
+				err,
+			)
+		}
+		closure.txIDs[tx.Hash().String()] = struct{}{}
+		for _, input := range tx.Consumed() {
+			closure.consumed[utxoref.ForInput(input)] = struct{}{}
+		}
+	}
+	return closure, nil
+}
+
+// applies reports whether the closure applies the transaction with this id.
+func (c *leiosCertifiedClosure) applies(txID string) bool {
+	if c == nil {
+		return false
+	}
+	_, ok := c.txIDs[txID]
+	return ok
+}
+
+// consumedOverlay returns a fresh consumed-input overlay seeded with the
+// inputs the closure spends.
+func (c *leiosCertifiedClosure) consumedOverlay() map[utxoref.Key]struct{} {
+	if c == nil {
+		return make(map[utxoref.Key]struct{})
+	}
+	overlay := make(map[utxoref.Key]struct{}, len(c.consumed))
+	for key := range c.consumed {
+		overlay[key] = struct{}{}
+	}
+	return overlay
+}
+
+// certifiedClosureForRebase resolves the certified closure a ranking block
+// embedding ebHash's certificate applies.
+func (f *BlockForger) certifiedClosureForRebase(
+	ebHash lcommon.Blake2b256,
+	ebSlot uint64,
+) (*leiosCertifiedClosure, error) {
+	rawTxs, ok := f.leiosCerts.CertifiedEndorserBlockTxs(ebHash, ebSlot)
+	if !ok {
+		return nil, errors.New("closure transactions not cached")
+	}
+	return newLeiosCertifiedClosure(rawTxs)
 }
 
 // leiosSelectionLimits bounds one endorser-block selection pass. The zero

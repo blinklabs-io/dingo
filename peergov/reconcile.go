@@ -25,7 +25,16 @@ import (
 )
 
 func (p *PeerGovernor) reconcile(ctx context.Context) {
-	bootstrapProgress := p.bootstrapExitProgress()
+	// Progress providers must never run under p.mu, so decide under a brief
+	// lock whether they are needed, read them unlocked, and let
+	// shouldExitBootstrapLocked re-check eligibility under the main lock.
+	var bootstrapProgress bootstrapExitProgress
+	p.mu.Lock()
+	wantProgress := p.bootstrapExitProgressWantedLocked()
+	p.mu.Unlock()
+	if wantProgress {
+		bootstrapProgress = p.bootstrapExitProgress()
+	}
 	p.mu.Lock()
 	now := time.Now()
 	// Age stale scores before any ranking decision reads them.

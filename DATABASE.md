@@ -312,17 +312,31 @@ Migration `v48` (`governance-vote-cast`) adds the nullable `tx_hash` and
 `cert_index` columns to `governance_vote_history`; it backfills nothing, so
 entries written before it leave both `NULL`.
 
-Blockfrost asset-holder pages aggregate live quantities in metadata storage.
-`utxo_address` keeps each asset-bearing UTxO's canonical rendered address as
-bytes so every backend groups exact pointer and bootstrap identities and
-orders equal quantities with the same bytewise address order as the API.
-Migration v42 adds
-the table; API-mode startup backfills only live asset-bearing UTxOs in
-cancellable batches before APIs become available, records completion in
-sync_state, and logs progress. Startup fails if an output CBOR cannot be
+Blockfrost asset-holder pages aggregate live quantities in metadata storage,
+and historical Mesh balances aggregate address balances without materializing
+the matching UTxOs. Blockfrost address-list pages use the exact address index
+for SQL ordering, offset, and total count after API-mode startup backfill,
+avoiding CBOR scans of earlier outputs on deep pages. If that index is not
+available, address listing retains the bounded CBOR candidate scan. Historical
+balance queries scan at most
+`ExactAddressCandidateScanLimit + 1` matching rows and return
+`ErrTooManyUtxoResults` when the address exceeds that bound. `utxo_address`
+keeps each UTxO's canonical rendered address as bytes so exact pointer and
+bootstrap identities are available to both queries. Migration v42 adds the
+table; API-mode startup backfills all retained
+UTxOs in cancellable batches before APIs become available, records completion
+in sync_state, and logs progress. Startup fails if an output CBOR cannot be
 resolved. A failed backfill leaves completion unset, so the next startup
 resumes from rows still missing an address. Core-mode nodes skip the backfill.
-New UTxO writes persist the address in the same metadata transaction.
+The completion key `dingo:utxo-addresses:backfilled` replaces the earlier
+`dingo:asset-utxo-addresses:backfilled`, which covered only live asset-bearing
+outputs, so an existing API-mode database runs the backfill once on its first
+start after upgrade. The backfill runs inside database open: the node starts
+no API, sync, or block processing until it has resolved and decoded the output
+CBOR of every retained UTxO without an address row, so the pause grows with the
+retained UTxO set. Rows the earlier backfill already addressed are skipped.
+API-mode UTxO writes persist the address in the same metadata transaction;
+core-mode writes omit this API-only relation.
 SQLite uses an exact unsigned 64-bit aggregate that returns a fixed-width
 decimal key; PostgreSQL and MySQL use decimal aggregation with an explicit
 overflow check. Holder count and LIMIT/OFFSET page reads share the request's
@@ -4283,7 +4297,13 @@ by the API adapter, which compares each candidate output's decoded
 address bytes, because the pointer payload is not represented in the
 `utxo` table.
 
-### `GetUtxosByAddress`, `GetUtxosByAddressAsOf`, `GetUtxosByAddressAtSlot`, and `GetControlledAmountByCredential`
+Historical Mesh balance uses the exact rendered address stored in
+`utxo_address`, together with `added_slot <= requested_slot` and
+`deleted_slot = 0 OR deleted_slot > requested_slot`, and aggregates ADA and
+assets in metadata storage. This avoids materializing a potentially large
+historical UTxO set in the API process.
+
+### `GetUtxosByAddress`, `GetUtxosByAddressAsOf`, and `GetControlledAmountByCredential`
 
 `GetControlledAmountByCredential` sums live `utxo.amount` for the credential
 with the same overflow-free engine-side aggregate as
@@ -4447,11 +4467,12 @@ like CIP-68 (`onchain_metadata_extra`) datum-based metadata, is returned as
 `null` to match the Blockfrost response shape.
 
 The Blockfrost-compatible `GET /api/v0/assets/{asset}/addresses` endpoint
-uses `GetUtxosByAssets` for live candidate UTxOs, decodes each UTxO CBOR value
-to recover the exact original address, then aggregates matching asset
-quantities by that address. Decoding CBOR is required because some valid
-addresses, such as pointer addresses, cannot be reconstructed from the
-metadata credential-hash columns alone.
+groups live asset quantities by canonical address in metadata storage. The
+`utxo_address` index stores each UTxO's rendered address, including pointer
+payloads and bootstrap identities that cannot be reconstructed from credential
+columns alone. API-mode startup backfills missing address rows before exposing
+the API; core-mode nodes do not maintain this API-only index. See the
+historical Mesh balance notes above for its separate bounded row scan.
 
 The asset listing endpoints read the mint/burn history rather than live holdings.
 `ListMintedAssets` lists distinct assets with
@@ -4562,18 +4583,21 @@ live UTxOs can still read more than a live scan would. With an address filter
 the asset filter remains a per-row `EXISTS` over
 the already narrowed set.
 
-`AddressUTXOs` (exact address) cannot use `Offset`/`Count`, since an exact
-total requires CBOR-decoding every coarse candidate either way. Instead
-`MatchingUtxoRefsByAddressWithOrdering` scans coarse candidates in keyset
-batches (mirroring `GetUtxosByAddressWithOrdering`'s own exact-filter loop)
-with `SkipAssets` set, CBOR-decodes each only to confirm the match, and
-returns bare `(TxId, OutputIdx)` references rather than full rows — the
-result's length is the accurate total, and the caller slices it for one
-page's worth of references and fetches full rows (with assets) for just
-that page via `GetUtxosByRefs`. This bounds the expensive part (asset
-loading, full-row retention) to one page instead of the address's entire
-live UTxO history, while the CBOR-decode-only candidate scan remains
-unavoidable for the total.
+`AddressUTXOs` (exact address) pages through the API-mode `utxo_address`
+index once its startup backfill has completed: `UtxoRefsByIndexedAddressPage`
+applies the rendered-address predicate, ordering, `Offset`, and `Count` in SQL
+and counts the total in SQL, so deep and descending pages decode no CBOR.
+Without a completed index, or with an asset filter (the index carries no asset
+predicate), `MatchingUtxoRefsByAddressWithOrderingBounded` scans coarse
+candidates in the requested order in keyset batches with `SkipAssets` set,
+CBOR-decodes each only to confirm the match, and returns bare
+`(TxId, OutputIdx)` references. The scan stops after
+`ExactAddressCandidateScanLimit` candidates, and loading more than
+`DefaultPublicUtxoCborBudget` bytes of output CBOR returns
+`ErrUtxoQueryBudgetExceeded`. A page that ends before the scan is exhausted is
+served without a total, and a page the candidate budget cannot reach returns
+`ErrUtxoQueryBudgetExceeded`. Full rows (with assets) are fetched for just the
+page via `GetUtxosByRefs`.
 
 Both `AccountUTXOs` and `AddressUTXOs` open one read `Txn`
 (`Database.Transaction(ctx, false)`) and pass it to both their count/scan call
@@ -6120,7 +6144,7 @@ floor. `TruncateAfterSlot` restores spent UTxOs with an update. The
 `database/lifecycle.Truncate` refuses a target below the floor before
 `TruncateAfterSlot` begins, because already-deleted rows cannot be restored.
 Before a rollback marks retained spent UTxOs live again, it fills any missing
-`utxo_address` identity for asset-bearing rows from their retained output CBOR.
+`utxo_address` identity from their retained output CBOR.
 The address restoration and unspend update share the rollback transaction.
 
 # Trusted batch commit ordering
@@ -6142,17 +6166,37 @@ that range. API storage mode keeps spent rows for history queries, so it skips
 this delete.
 
 Rows a batch spends that an earlier batch committed are left marked spent by
-the block-apply transaction. After the commit, `ApplyTrustedBatch` runs the
-consumed-UTxO cleanup (`UtxosDeleteConsumed`, persisting the floor first) up
-to the committed tip, which lies at or below the certified immutable tip, in
-deletes of 1,000 rows until none is left or 30 seconds have passed; the
-periodic cleanup defers while the node is catching up, so without this they
-would stay for the whole catch-up. `Database.CountUtxosConsumedUpTo` reports
-the rows a sweep to a slot would remove, reading at most a given limit; the
-cleanup logs it as the remaining backlog when the time budget stops it. API
-storage mode skips it too. The block-apply transaction writes through the
-row-batching accumulator in every storage mode; the stored state is the same
-as on the unbatched path.
+the block-apply transaction. `ApplyTrustedBatch` runs the consumed-UTxO
+cleanup (`UtxosDeleteConsumed`, persisting the floor first) up to the
+committed tip, which lies at or below the certified immutable tip, after the
+first batch it commits in a process and then once every
+`trustedBatchPruneEvery` (16) committed batches, in deletes of
+`trustedBatchPruneRows` (20,000) rows until none is left or 30 seconds have
+passed. A spent row costs less to delete the more rows its transaction
+deletes with it, so draining several batches' spends in a few large
+transactions costs less than draining each batch's in one or two small ones.
+A cleanup that skips for a run already in flight, fails or runs out of
+budget is retried after the next batch. `LedgerState.DrainTrustedPrune` runs
+the cleanup still owed with no time budget, waiting out another run, until
+nothing prunable is left; the Mithril coordinator calls it before it resumes
+chain ingest, so a completed catch-up leaves the backlog an every-batch
+cleanup leaves. A catch-up that a lifecycle operation aborts or a node
+shutdown interrupts, or whose drain fails, leaves the rest marked spent for
+the periodic cleanup. The
+cleanup never reaches past the tip the last trusted batch committed, even
+once the live loop has moved the ledger tip on, so a cleanup still owed
+after the pause cannot raise the floor into the rollback window. The timer
+and epoch-boundary cleanup can also run during a catch-up, but only up to
+the tip minus the stability window and at most 1,000 rows per run, so on its
+own it would leave most of these rows for the whole catch-up. Until a
+cleanup reaches them they are ordinary spent rows (`deleted_slot` set), as
+rows inside the stability window are in live operation: live-UTxO reads
+skip them, and a rollback above the prune floor restores them.
+`Database.CountUtxosConsumedUpTo` reports the rows a sweep to a slot would
+remove, reading at most a given limit; the cleanup logs it as the remaining
+backlog when the time budget stops it. API storage mode skips it too. The
+block-apply transaction writes through the row-batching accumulator in every
+storage mode; the stored state is the same as on the unbatched path.
 
 A failure between the two steps leaves blocks in the blob store above the
 metadata tip. They are tolerated: a retry from the unchanged metadata tip
@@ -6187,8 +6231,9 @@ PostgreSQL and MySQL keep the per-row writes described above.
   multi-row `BatchOverlayInsertUtxos` statements (62 rows each) and their
   pointer rows, marks pre-batch spends with `UPDATE ... FROM (VALUES ...)`
   keyed by `utxo.id` (333 rows each), deletes by id the rows the per-row path
-  deletes before commit, and queues asset and `utxo_address` rows for the
-  surviving outputs into the accumulator's row batch. None of these statements
+  deletes before commit, and queues asset rows for the surviving outputs into
+  the accumulator's row batch. It writes no `utxo_address` rows, since the
+  overlay runs only in core storage mode. None of these statements
   carries a conflict clause; a `UNIQUE` failure is returned as
   `types.ErrBatchUtxoOverlayConflict`, and `ApplyTrustedBatch` applies the
   uncommitted blocks once more on the per-row path, which repairs rows a
@@ -6215,8 +6260,33 @@ PostgreSQL and MySQL keep the per-row writes described above.
   each credential's row is then written once -- updated in place, or
   inserted under its reserved id -- with the sequence raised to the last
   reserved id. Row values, ids and the sequence therefore match the per-row
-  path, while the per-credential statements run once per transaction instead
-  of once per block.
+  path. The replay reads the credentials' `reward_live_stake` and `account`
+  rows up front, 499 credentials per statement, through the unique
+  credential indexes (`idx_reward_live_stake_cred`,
+  `idx_account_credential`, neither deferred nor dropped for catch-up), and
+  writes the rows with multi-row statements: deletes by id first, then
+  explicit-id inserts, then `UPDATE ... FROM (VALUES ...)` keyed by id. Only
+  the re-sum of a credential with no running total stays per credential.
+- **Transaction rows.** The `transaction` row of each batch transaction is
+  staged too. `"transaction".id` is `AUTOINCREMENT`, so the per-row insert
+  continues from the larger of `MAX(id)` and the table's `sqlite_sequence`
+  entry, which still counts rows a rollback deleted; the overlay reads that
+  value once and hands out the following ids in apply order, which is the
+  same sequence because nothing else inserts `transaction` rows inside a
+  trusted batch, and the explicit-id inserts leave the sequence at the
+  highest id as the per-row inserts do. Staged rows
+  are written with explicit ids in multi-row `BatchOverlayInsertTransactions`
+  statements (90 rows each), with no conflict clause, and always before a
+  row that references them: before the overlay's own `utxo` writes, and,
+  through the read barrier, before any statement that names `transaction`
+  or a table with a foreign key to it (`certs`, the witness tables, `utxo`,
+  ...; read from `pragma_foreign_key_list` when the overlay is enabled).
+  Foreign keys therefore stay immediate and are checked against a parent
+  that exists; `defer_foreign_keys` is not used, because while deferred
+  violations are outstanding SQLite scans each child table on every parent
+  insert, and the child-side indexes are dropped during catch-up. A hash
+  that already has a row fails the insert with a `UNIQUE` error, which is an
+  overlay conflict: the per-row retry's `ON CONFLICT` branch reuses that row.
 - **Read barrier.** While the overlay holds unwritten rows, spend marks or
   closed stake segments, the transaction's handle is a `barrierQueryer`:
   before any statement that names `utxo`, `utxo_pointer` or
@@ -6227,8 +6297,8 @@ PostgreSQL and MySQL keep the per-row writes described above.
   such as a withdrawal's re-sum, therefore see what the per-row path would
   hold at that point. An output created and spent before the barrier is not
   in `utxo` at all, where the per-row path holds it marked spent; nothing
-  inside a trusted batch reads spent rows from the table. Asset and
-  `utxo_address` rows stay queued until `FlushBatch`, as on the per-row path.
+  inside a trusted batch reads spent rows from the table. Asset rows stay
+  queued until `FlushBatch`, as on the per-row path.
   A barrier writes every pending output, so outputs a later transaction
   spends go back to being inserted, marked and deleted; on withdrawal-heavy
   ranges the `barrier_flushes` count in the Debug line shows how often.
@@ -6239,9 +6309,18 @@ overlay keeps no undo log: a savepoint rollback across any overlay change,
 including a barrier write, fails the batch, and none occurs inside a trusted
 block-apply transaction. A UNIQUE failure counts as an overlay conflict only
 on the tables the overlay writes under its own ids (`utxo`, `asset`,
-`utxo_pointer`, `reward_live_stake`); any other would fail the per-row path
-too. A `FlushBatch` Debug line reports the outputs created and elided, the
-pre-batch spends, the prefetched keys and the barrier writes.
+`utxo_pointer`, `reward_live_stake`, `transaction`); any other would fail the
+per-row path too. A `FOREIGN KEY` failure in an overlay write is an overlay
+conflict as well. A barrier failure inside a statement that cannot return it
+(`QueryRowContext`) is recorded on the overlay. The statement, and any
+read or write after it, then sees tables the barrier did not write, and its
+caller may fail on that alone. `LedgerDeltaBatch.applyBatched`, which every
+statement of the overlay's lifetime returns through, joins the recorded
+error to whatever error it returns (`database.WithBatchUtxoOverlayError`),
+so `ApplyTrustedBatch` still sees the conflict and takes the fallback. A
+`FlushBatch` Debug line reports the outputs created and elided, the pre-batch
+spends, the prefetched keys, the barrier writes, the staged transaction rows
+and how many writes they took.
 
 # At-tip recovery repair
 

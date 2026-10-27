@@ -18,7 +18,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -32,6 +31,7 @@ import (
 	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/internal/safedecode"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger"
@@ -1044,31 +1044,45 @@ func TestFetchCachedLeiosEndorserBlockTxsReturnsCompleteCacheWithoutFetch(
 	require.Equal(t, txRaw, cached.txsRaw[0])
 }
 
-func TestEndorserBlockTxHashesByHashReturnsManifestHashes(t *testing.T) {
+// The forge loop rebases endorser-block selection onto the certified closure.
+// It needs the closure's transactions, not the manifest's references: a
+// reference hashes the whole block_transaction, while the mempool keys a
+// transaction by its id (the body hash), so excluding by reference hash never
+// matched a pooled transaction.
+func TestEndorserBlockClosureTxsByHashReturnsManifestOrderTransactions(
+	t *testing.T,
+) {
 	t.Parallel()
 
 	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 10, 2)
-	block, err := lcommon.NewLeiosEndorserBlockFromCbor(blockRaw)
-	require.NoError(t, err)
+	txsRaw := []cbor.RawMessage{testDijkstraTx(t, 0), testDijkstraTx(t, 1)}
 
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 	require.NoError(t, o.storeLeiosEndorserBlock(
 		point,
 		blockRaw,
-		[]cbor.RawMessage{testDijkstraTx(t, 0), testDijkstraTx(t, 1)},
+		txsRaw,
 		leiosStoreAuthoritative,
 	))
 
-	got, ok := o.EndorserBlockTxHashesByHash(point.Hash, point.Slot)
+	got, ok := o.EndorserBlockClosureTxsByHash(point.Hash, point.Slot)
 	require.True(t, ok)
-	require.Equal(t, []string{
-		hex.EncodeToString(
-			block.TransactionReferences[0].TransactionHash.Bytes(),
-		),
-		hex.EncodeToString(
-			block.TransactionReferences[1].TransactionHash.Bytes(),
-		),
-	}, got)
+	require.Equal(t, txsRaw, got)
+	for _, raw := range got {
+		tx, err := safedecode.DijkstraBlockTransaction(raw)
+		require.NoError(t, err)
+		require.NotEqual(
+			t,
+			lcommon.Blake2b256Hash(raw),
+			tx.Hash(),
+			"a manifest reference hash is not the transaction id",
+		)
+	}
+	// The result is a copy; the cached closure is unaffected by edits.
+	got[0][0] ^= 0xff
+	cached, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
+	require.True(t, ok)
+	require.Equal(t, testDijkstraTx(t, 0), cached.txsRaw[0])
 }
 
 // Covers the historical-serving path: after the in-memory EB cache is gone,

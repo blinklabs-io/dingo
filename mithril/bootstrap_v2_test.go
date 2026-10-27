@@ -353,6 +353,10 @@ type v2FixtureOptions struct {
 	// each file's first block names the previous file's last block as its
 	// parent (file 0's first block has a zero parent).
 	validAllImmutables bool
+	// undecodableImmutable, with validAllImmutables, serves that one file
+	// as placeholder bytes. Its digests are certified, so the download
+	// verifies and only the decode fails.
+	undecodableImmutable *uint64
 	// blocksPerChunk, with validAllImmutables, sets how many blocks (at most
 	// nine, so chunks never share a slot) immutable file num holds instead of
 	// two. Zero gives an empty chunk.
@@ -501,7 +505,9 @@ func newV2Fixture(t *testing.T, opts v2FixtureOptions) *v2Fixture {
 	for num := uint64(0); num <= opts.immutableFileNumber; num++ {
 		files := map[string][]byte{}
 		realTrio := (opts.validImmutable && num == 0) ||
-			opts.validAllImmutables
+			(opts.validAllImmutables &&
+				(opts.undecodableImmutable == nil ||
+					*opts.undecodableImmutable != num))
 		for _, ext := range []string{"chunk", "primary", "secondary"} {
 			name := fmt.Sprintf("%05d.%s", num, ext)
 			content := fmt.Appendf(nil, "immutable-%s-data", name)

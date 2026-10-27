@@ -3337,9 +3337,11 @@ func (p forgerTestMempoolProvider) Transactions() []MempoolTransaction {
 }
 
 type forgerTestLeiosCerts struct {
-	eligible       []LeiosCertifiedEndorserBlock
-	txHashes       []string
-	txHashesOK     bool
+	eligible []LeiosCertifiedEndorserBlock
+	// closureTxs is the certified closure as block_transaction CBOR, the
+	// form the production provider serves.
+	closureTxs     [][]byte
+	closureTxsOK   bool
 	marked         []lcommon.Blake2b256
 	markedSlots    []uint64
 	gotEbSlot      uint64
@@ -3350,13 +3352,13 @@ func (p *forgerTestLeiosCerts) EligibleCertifiedEndorserBlocks() []LeiosCertifie
 	return p.eligible
 }
 
-func (p *forgerTestLeiosCerts) CertifiedEndorserBlockTxHashes(
+func (p *forgerTestLeiosCerts) CertifiedEndorserBlockTxs(
 	_ lcommon.Blake2b256,
 	ebSlot uint64,
-) ([]string, bool) {
+) ([][]byte, bool) {
 	p.gotEbSlot = ebSlot
 	p.gotEbSlotCalls++
-	return p.txHashes, p.txHashesOK
+	return p.closureTxs, p.closureTxsOK
 }
 
 func (p *forgerTestLeiosCerts) MarkEndorserBlockEmbedded(
@@ -3945,12 +3947,12 @@ func TestCheckAndForgeProductionRejectsLeiosAnnouncementValidationFailure(
 
 func TestCheckAndForgeProductionCertifiesLeiosEBAfterAdoption(t *testing.T) {
 	for _, test := range []struct {
-		name        string
-		txHashesOK  bool
-		canAnnounce bool
+		name         string
+		closureTxsOK bool
+		canAnnounce  bool
 	}{
-		{name: "closure available", txHashesOK: true, canAnnounce: true},
-		{name: "closure unavailable", txHashesOK: false, canAnnounce: false},
+		{name: "closure available", closureTxsOK: true, canAnnounce: true},
+		{name: "closure unavailable", closureTxsOK: false, canAnnounce: false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			creds := setupTestCredentials(t)
@@ -3968,9 +3970,13 @@ func TestCheckAndForgeProductionCertifiesLeiosEBAfterAdoption(t *testing.T) {
 					lcommon.LeiosBlsSignatureSize,
 				),
 			}
+			closureTxCbor := makeMinimalTxCbor(t, 0x11, 0)
+			otherTxCbor := makeMinimalTxCbor(t, 0x22, 0)
 			leiosCerts := &forgerTestLeiosCerts{
-				txHashes:   []string{strings.Repeat("11", 32)},
-				txHashesOK: test.txHashesOK,
+				closureTxs: [][]byte{
+					blockTxFromMempool(t, closureTxCbor),
+				},
+				closureTxsOK: test.closureTxsOK,
 				eligible: []LeiosCertifiedEndorserBlock{
 					{
 						SlotNo:            9,
@@ -4007,16 +4013,20 @@ func TestCheckAndForgeProductionCertifiesLeiosEBAfterAdoption(t *testing.T) {
 				LeiosEBBroadcaster:              leiosCaster,
 				LeiosTxValidator:                &mockTxValidator{},
 				LeiosAnnouncementValidator:      acceptLeiosAnnouncement,
+				// Mempool entries are keyed by transaction id, as the
+				// real mempool keys them. The closure is served by the
+				// provider as block_transaction CBOR, whose manifest
+				// hash differs from that id.
 				LeiosMempool: forgerTestMempoolProvider{
 					txs: []MempoolTransaction{
 						{
-							Hash: strings.Repeat("11", 32),
-							Cbor: makeMinimalTxCbor(t, 0x11, 0),
+							Hash: forgerTestTxID(t, closureTxCbor),
+							Cbor: closureTxCbor,
 							Type: conway.TxTypeConway,
 						},
 						{
-							Hash: strings.Repeat("22", 32),
-							Cbor: makeMinimalTxCbor(t, 0x22, 0),
+							Hash: forgerTestTxID(t, otherTxCbor),
+							Cbor: otherTxCbor,
 							Type: conway.TxTypeConway,
 						},
 					},
@@ -4038,9 +4048,7 @@ func TestCheckAndForgeProductionCertifiesLeiosEBAfterAdoption(t *testing.T) {
 				require.NotEmpty(t, leiosCaster.hash)
 				require.Equal(
 					t,
-					[][]byte{blockTxFromMempool(
-						t, makeMinimalTxCbor(t, 0x22, 0),
-					)},
+					[][]byte{blockTxFromMempool(t, otherTxCbor)},
 					leiosCaster.txBodies,
 				)
 			} else {
@@ -4053,7 +4061,7 @@ func TestCheckAndForgeProductionCertifiesLeiosEBAfterAdoption(t *testing.T) {
 			// before the build to ensure endorser-block production did not
 			// move that parent. See buildBlockForSlot.
 			require.Equal(t, 2, parent.calls)
-			// CertifiedEndorserBlockTxHashes must be called with the
+			// CertifiedEndorserBlockTxs must be called with the
 			// eligible certificate's own slot (9, from eb.SlotNo above), not
 			// the forged ranking block's slot (10) or zero: the manifest is
 			// content-addressed, so the same hash could be a distinct,
@@ -4623,4 +4631,12 @@ func TestNewBlockForgerRequiresLeiosCertificationTimingChecker(t *testing.T) {
 		PromRegistry:                    prometheus.NewRegistry(),
 	})
 	require.ErrorContains(t, err, "LeiosCertificationTimingChecker")
+}
+
+// forgerTestTxID returns the transaction id the mempool keys a transaction by.
+func forgerTestTxID(t *testing.T, txCbor []byte) string {
+	t.Helper()
+	tx, err := conway.NewConwayTransactionFromCbor(txCbor)
+	require.NoError(t, err)
+	return tx.Hash().String()
 }

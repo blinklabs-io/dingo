@@ -5099,12 +5099,6 @@ func TestSharedSQLStoreUtxoReadParity(t *testing.T) {
 		nil,
 	)
 	require.NoError(t, err)
-	_, err = store.GetUtxosByAddressAtSlot(
-		pattern,
-		15,
-		nil,
-	)
-	require.NoError(t, err)
 	gotControlled, err := store.GetControlledAmountByCredential(
 		1,
 		stakingKey,

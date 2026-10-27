@@ -510,6 +510,23 @@ func TestPeerCloseReleasesItsState(t *testing.T) {
 	})
 }
 
+// A side that closes a socket while unread data is queued for it makes the
+// kernel reset the connection instead of finishing it. The other side's muxer
+// then reads ECONNRESET rather than EOF, which is still the remote hanging up.
+func TestPeerRemoteResetIsNotAFailure(t *testing.T) {
+	t.Parallel()
+	a, _ := newTestStack(t, StackConfig{})
+	b, _ := newTestStack(t, StackConfig{})
+	pa, pb := attachPair(t, a, b)
+
+	tcp, ok := pa.conn.(*net.TCPConn)
+	require.True(t, ok)
+	require.NoError(t, tcp.SetLinger(0))
+	pa.Close()
+	requireClosed(t, "b notices the reset", pb.Done())
+	require.NoError(t, pb.Err())
+}
+
 func TestStackStopClosesPeers(t *testing.T) {
 	t.Parallel()
 	a, regA := newTestStack(t, StackConfig{})

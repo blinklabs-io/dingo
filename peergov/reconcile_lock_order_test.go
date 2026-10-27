@@ -40,37 +40,77 @@ func (p *lockCheckingLedgerPeerProvider) CurrentSlot() uint64 {
 	return 0
 }
 
+type progressProbe struct {
+	pg                *PeerGovernor
+	slotCalls         atomic.Int32
+	progressCalls     atomic.Int32
+	calledWhileLocked atomic.Bool
+}
+
+func (pr *progressProbe) checkUnlocked(calls *atomic.Int32) {
+	calls.Add(1)
+	if !pr.pg.mu.TryLock() {
+		pr.calledWhileLocked.Store(true)
+		return
+	}
+	pr.pg.mu.Unlock()
+}
+
+func newProgressProbe(
+	peers ...*Peer,
+) *progressProbe {
+	pr := &progressProbe{}
+	pr.pg = NewPeerGovernor(PeerGovernorConfig{
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		LedgerPeerProvider: &lockCheckingLedgerPeerProvider{
+			check: func() { pr.checkUnlocked(&pr.slotCalls) },
+		},
+		UseLedgerAfterSlot: 1,
+		SyncProgressProvider: syncProgressProviderFunc(func() float64 {
+			pr.checkUnlocked(&pr.progressCalls)
+			return 0
+		}),
+		SyncProgressForExit: 0.95,
+	})
+	pr.pg.mu.Lock()
+	pr.pg.peers = append(pr.pg.peers, peers...)
+	pr.pg.mu.Unlock()
+	return pr
+}
+
+func warmBootstrapPeer() *Peer {
+	return &Peer{
+		Address: "127.0.0.1:3001",
+		Source:  PeerSourceTopologyBootstrapPeer,
+		State:   PeerStateWarm,
+	}
+}
+
 func TestReconcileReadsBootstrapProgressOutsidePeerGovernorLock(t *testing.T) {
-	var pg *PeerGovernor
-	var slotCalls atomic.Int32
-	var progressCalls atomic.Int32
-	var calledWhileLocked atomic.Bool
-	checkUnlocked := func(calls *atomic.Int32) {
-		calls.Add(1)
-		if !pg.mu.TryLock() {
-			calledWhileLocked.Store(true)
-			return
-		}
-		pg.mu.Unlock()
-	}
-	ledgerProvider := &lockCheckingLedgerPeerProvider{
-		check: func() { checkUnlocked(&slotCalls) },
-	}
-	progressProvider := syncProgressProviderFunc(func() float64 {
-		checkUnlocked(&progressCalls)
-		return 0
-	})
-	pg = NewPeerGovernor(PeerGovernorConfig{
-		Logger:               slog.New(slog.NewTextHandler(io.Discard, nil)),
-		LedgerPeerProvider:   ledgerProvider,
-		UseLedgerAfterSlot:   1,
-		SyncProgressProvider: progressProvider,
-		SyncProgressForExit:  0.95,
-	})
+	pr := newProgressProbe(warmBootstrapPeer())
 
-	pg.reconcile(context.Background())
+	pr.pg.reconcile(context.Background())
 
-	require.GreaterOrEqual(t, slotCalls.Load(), int32(1))
-	require.Equal(t, int32(1), progressCalls.Load())
-	require.False(t, calledWhileLocked.Load())
+	require.GreaterOrEqual(t, pr.slotCalls.Load(), int32(1))
+	require.Equal(t, int32(1), pr.progressCalls.Load())
+	require.False(t, pr.calledWhileLocked.Load())
+}
+
+func TestReconcileSkipsBootstrapProgressWithoutBootstrapPeers(t *testing.T) {
+	pr := newProgressProbe()
+
+	pr.pg.reconcile(context.Background())
+
+	require.Zero(t, pr.progressCalls.Load())
+}
+
+func TestReconcileSkipsBootstrapProgressAfterBootstrapExit(t *testing.T) {
+	pr := newProgressProbe(warmBootstrapPeer())
+	pr.pg.mu.Lock()
+	pr.pg.bootstrapExited = true
+	pr.pg.mu.Unlock()
+
+	pr.pg.reconcile(context.Background())
+
+	require.Zero(t, pr.progressCalls.Load())
 }

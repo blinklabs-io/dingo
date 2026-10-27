@@ -943,7 +943,21 @@ func (s *Store) setTransactionWithAccumulator(
 			if err != nil {
 				return err
 			}
-			if batched, ok := accumulator.(*transactionBatchAccumulator); ok {
+			if overlay != nil {
+				transactionID, err = overlay.stageTransaction(
+					hash,
+					point.Hash,
+					metadataValue,
+					point.Slot,
+					transaction.Type(),
+					decimalUint64(transactionFee(transaction)),
+					decimalUint64(types.Uint64(collateralFee)),
+					decimalUint64(types.Uint64(transaction.TTL())),
+					index,
+					transaction.IsValid(),
+				)
+				transactionIsNew = true
+			} else if batched := batchedAccumulator; batched != nil {
 				var id uint
 				id, transactionIsNew, err = batched.insertTransaction(ctx, db,
 					hash,
@@ -1854,7 +1868,7 @@ func (s *Store) persistUtxoRelations(
 	id uint,
 ) error {
 	utxo.ID = id
-	if err := persistUtxoAddress(ctx, db, int64(id), utxo); err != nil {
+	if err := s.persistUtxoAddress(ctx, db, int64(id), utxo); err != nil {
 		return err
 	}
 	if err := persistUtxoPointer(ctx, db, int64(id), utxo.Pointer); err != nil {
@@ -1902,12 +1916,12 @@ func (s *Store) persistUtxoRelationsWithDeferredAssets(
 	rows *rowBatch,
 ) error {
 	utxo.ID = id
-	address, err := assetUtxoAddress(utxo)
-	if err != nil {
-		return err
-	}
-	if len(address) > 0 {
-		rows.add(assetUtxoAddressShape, int64(id), address)
+	if s.storageMode == types.StorageModeAPI {
+		address, err := utxoAddress(utxo)
+		if err != nil {
+			return err
+		}
+		rows.add(utxoAddressShape, int64(id), address)
 	}
 	if err := persistUtxoPointer(ctx, db, int64(id), utxo.Pointer); err != nil {
 		return err

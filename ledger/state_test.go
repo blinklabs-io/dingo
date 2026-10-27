@@ -7388,11 +7388,16 @@ func seedSpentUtxoForCleanup(
 	addedSlot, deletedSlot uint64,
 ) {
 	t.Helper()
+	address := []byte(nil)
+	if db.StorageMode() == types.StorageModeAPI {
+		address = []byte("test-address")
+	}
 	mdTxn := db.MetadataTxn(context.Background(), true)
 	require.NoError(t, mdTxn.Do(func(txn *database.Txn) error {
 		return db.CreateUtxo(context.Background(), txn, &models.Utxo{
 			TxId:        txId,
 			OutputIdx:   outputIdx,
+			Address:     address,
 			AddedSlot:   addedSlot,
 			DeletedSlot: deletedSlot,
 			Amount:      types.Uint64(1),

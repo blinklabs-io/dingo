@@ -37,6 +37,7 @@ import (
 	"github.com/blinklabs-io/dingo/ledger/leios"
 	"github.com/blinklabs-io/dingo/ledger/snapshot"
 	"github.com/blinklabs-io/dingo/mempool"
+	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/consensus"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -1006,9 +1007,9 @@ func (n *Node) initBlockForger(
 	var leiosMempool forging.MempoolProvider
 	if n.leiosPipelineManager != nil && n.ouroboros() != nil {
 		adapter := &leiosPipelineAdapter{
-			mgr:                   n.leiosPipelineManager,
-			chain:                 n.chainManager.PrimaryChain(),
-			endorserBlockTxHashes: n.ouroboros().EndorserBlockTxHashesByHash,
+			mgr:              n.leiosPipelineManager,
+			chain:            n.chainManager.PrimaryChain(),
+			endorserBlockTxs: n.ouroboros().EndorserBlockClosureTxsByHash,
 		}
 		leiosChecker = adapter
 		leiosCerts = adapter
@@ -1099,9 +1100,11 @@ func (n *Node) initBlockForger(
 			}
 			// Before adoption the forged block is not the tip, so its
 			// endorser block is checked on the parent state. A locally
-			// built announcing block carries no transactions and its
-			// endorser block excludes the certified one's, so that state is
-			// equivalent to the block's own.
+			// built announcing block carries no transactions, and its
+			// endorser block was selected on the parent state rebased onto
+			// the certified closure (closure transactions and every
+			// transaction spending their inputs excluded), so a selection
+			// valid there is valid on the block's own state.
 			return classifyLeiosAnnouncementValidationError(
 				o.ValidateLeiosEndorserBlockForHeader(
 					ctx,
@@ -1588,9 +1591,9 @@ func (a *slotClockAdapter) SecurityParam() int {
 // leiosPipelineAdapter adapts leios.PipelineManager and the primary chain to
 // the narrow Leios interfaces the forge loop expects.
 type leiosPipelineAdapter struct {
-	mgr                   *leios.PipelineManager
-	chain                 leiosParentChain
-	endorserBlockTxHashes func(ebHash []byte, ebSlot uint64) ([]string, bool)
+	mgr              *leios.PipelineManager
+	chain            leiosParentChain
+	endorserBlockTxs func(ebHash []byte, ebSlot uint64) ([]cbor.RawMessage, bool)
 }
 
 type leiosParentChain interface {
@@ -1626,14 +1629,22 @@ func (a *leiosPipelineAdapter) EligibleCertifiedEndorserBlocks() []forging.Leios
 	return out
 }
 
-func (a *leiosPipelineAdapter) CertifiedEndorserBlockTxHashes(
+func (a *leiosPipelineAdapter) CertifiedEndorserBlockTxs(
 	ebHash lcommon.Blake2b256,
 	ebSlot uint64,
-) ([]string, bool) {
-	if a.endorserBlockTxHashes == nil {
+) ([][]byte, bool) {
+	if a.endorserBlockTxs == nil {
 		return nil, false
 	}
-	return a.endorserBlockTxHashes(ebHash.Bytes(), ebSlot)
+	raw, ok := a.endorserBlockTxs(ebHash.Bytes(), ebSlot)
+	if !ok {
+		return nil, false
+	}
+	txs := make([][]byte, len(raw))
+	for i, tx := range raw {
+		txs[i] = tx
+	}
+	return txs, true
 }
 
 func (a *leiosPipelineAdapter) MarkEndorserBlockEmbedded(
