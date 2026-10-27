@@ -2195,7 +2195,7 @@ func (n *Node) buildChainSelectorConfig(
 				n.connManager.GetConnectionById(connId) != nil
 		},
 		PeerIdentity: func(connId ouroboros.ConnectionId) string {
-			return n.peerDiversityGroupByConnId(connId)
+			return n.peerCorroborationIdentityByConnId(connId)
 		},
 		BlockfetchLatency: func(connId ouroboros.ConnectionId) (time.Duration, bool) {
 			if n.chainsyncState == nil {
@@ -2284,7 +2284,7 @@ func (n *Node) setPeerGovernor(peerGov *peergov.PeerGovernor) {
 	n.peerGovMu.Unlock()
 }
 
-func (n *Node) peerDiversityGroupByConnId(
+func (n *Node) peerCorroborationIdentityByConnId(
 	connId ouroboros.ConnectionId,
 ) string {
 	n.peerGovMu.RLock()
@@ -2292,7 +2292,7 @@ func (n *Node) peerDiversityGroupByConnId(
 	if n.peerGov == nil {
 		return ""
 	}
-	return n.peerGov.DiversityGroupByConnId(connId)
+	return n.peerGov.CorroborationIdentityByConnId(connId)
 }
 
 func (n *Node) isConfiguredRootConnection(
