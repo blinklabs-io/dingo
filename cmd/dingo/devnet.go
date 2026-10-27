@@ -282,122 +282,45 @@ func prepareLockedDevnetState(
 	}, nil
 }
 
-func openOrCreateDevnetStateRoot(runDir string) (*os.Root, error) {
+func openDevnetStateRoot(runDir string) (*os.Root, error) {
+	return openDevnetStateRootMatching(runDir, nil)
+}
+
+func devnetStatePathComponents(runDir string) (string, string, []string, error) {
 	absRunDir, err := filepath.Abs(runDir)
 	if err != nil {
-		return nil, fmt.Errorf("resolving devnet data directory: %w", err)
+		return "", "", nil, fmt.Errorf("resolving devnet data directory: %w", err)
 	}
 	volumeRoot := filepath.VolumeName(absRunDir) + string(filepath.Separator)
 	relRunDir, err := filepath.Rel(volumeRoot, absRunDir)
 	if err != nil {
-		return nil, fmt.Errorf("resolving devnet data directory: %w", err)
+		return "", "", nil, fmt.Errorf("resolving devnet data directory: %w", err)
 	}
-	var names []string
-	if relRunDir != "." {
-		names = strings.Split(relRunDir, string(filepath.Separator))
+	if relRunDir == "." {
+		return absRunDir, volumeRoot, nil, nil
 	}
-	// Existing ancestors are checked by path with Lstat, which needs only
-	// search permission on them; opening each one would also need read
-	// permission. The first missing component is created by path in the
-	// checked parent, and every component below it is created through the
-	// pinned handle of the one above.
-	existing := volumeRoot
-	for len(names) > 0 {
-		next := filepath.Join(existing, names[0])
-		info, err := os.Lstat(next)
-		if errors.Is(err, fs.ErrNotExist) {
-			break
-		}
-		if err != nil {
-			return nil, fmt.Errorf("checking devnet data directory: %w", err)
-		}
-		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-			return nil, fmt.Errorf("devnet data path %q is not a directory", next)
-		}
-		existing = next
-		names = names[1:]
-	}
-	if len(names) > 0 {
-		existing = filepath.Join(existing, names[0])
-		names = names[1:]
-		if err := os.Mkdir(existing, 0o700); err != nil &&
-			!errors.Is(err, fs.ErrExist) {
-			return nil, fmt.Errorf("creating devnet data directory: %w", err)
-		}
-	}
-	root, err := openDevnetStateRoot(existing)
-	if err != nil {
-		return nil, err
-	}
-	for _, name := range names {
-		child, err := openOrCreateDevnetStateChild(root, name)
-		if err != nil {
-			_ = root.Close()
-			return nil, err
-		}
-		_ = root.Close()
-		root = child
-	}
-	return root, nil
+	return absRunDir,
+		volumeRoot,
+		strings.Split(relRunDir, string(filepath.Separator)),
+		nil
 }
 
-func openOrCreateDevnetStateChild(
-	parent *os.Root,
-	name string,
+func openDevnetStateRootMatching(
+	runDir string,
+	anchored os.FileInfo,
 ) (*os.Root, error) {
-	if err := parent.Mkdir(name, 0o700); err != nil &&
-		!errors.Is(err, fs.ErrExist) {
-		return nil, fmt.Errorf(
-			"creating devnet data directory %q: %w",
-			name,
-			err,
-		)
-	}
-	info, err := parent.Lstat(name)
-	if err != nil {
-		return nil, fmt.Errorf(
-			"checking devnet data directory %q: %w",
-			name,
-			err,
-		)
-	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-		return nil, fmt.Errorf("devnet data path %q is not a directory", name)
-	}
-	child, err := parent.OpenRoot(name)
-	if err != nil {
-		return nil, fmt.Errorf(
-			"opening devnet data directory %q: %w",
-			name,
-			err,
-		)
-	}
-	opened, err := child.Stat(".")
-	if err != nil {
-		_ = child.Close()
-		return nil, fmt.Errorf(
-			"checking opened devnet data directory %q: %w",
-			name,
-			err,
-		)
-	}
-	if !opened.IsDir() || !os.SameFile(info, opened) {
-		_ = child.Close()
-		return nil, fmt.Errorf(
-			"devnet data directory %q changed while it was opened",
-			name,
-		)
-	}
-	return child, nil
-}
-
-func openDevnetStateRoot(runDir string) (*os.Root, error) {
 	expected, err := os.Lstat(runDir)
 	if err != nil {
 		return nil, fmt.Errorf("checking devnet data directory: %w", err)
 	}
 	if expected.Mode()&os.ModeSymlink != 0 || !expected.IsDir() {
 		return nil, fmt.Errorf("devnet data path %q is not a directory", runDir)
+	}
+	if anchored != nil && !os.SameFile(anchored, expected) {
+		return nil, fmt.Errorf(
+			"devnet data directory %q changed while it was opened",
+			runDir,
+		)
 	}
 	root, err := os.OpenRoot(runDir)
 	if err != nil {
