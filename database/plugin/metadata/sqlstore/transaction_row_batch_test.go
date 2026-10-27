@@ -1240,3 +1240,30 @@ func TestBatchedRowsResetOnRollbackBeforeFirstSavepointBinding(t *testing.T) {
 	require.NoError(t, store.FlushBatch(acc, txn))
 	require.Zero(t, keyWitnessCount(t, store, txn))
 }
+
+func TestLeiosClosureFreshRowsSkipCleanupButReplayReplacesWitnesses(t *testing.T) {
+	t.Parallel()
+	reg := prometheus.NewRegistry()
+	store := newAPIModeSQLiteStore(t, reg)
+	txn := store.Transaction(context.Background())
+	t.Cleanup(func() { _ = txn.Rollback() })
+	tx, point := witnessTx(t, 17, 2)
+	deletesBefore := counterValue(t, reg, "delete")
+	require.NoError(t, store.SetTransactionLeiosClosure(tx, point, 0, nil, true, txn, 0))
+	require.Equal(t, 2, keyWitnessCount(t, store, txn))
+	require.Equal(t, deletesBefore, counterValue(t, reg, "delete"), "a fresh ID cannot own old child rows")
+
+	// Same body ID with a replacement witness set must still clear old rows.
+	replay, replayPoint := witnessTx(t, 17, 1)
+	replayPoint.Slot++
+	require.NoError(t, store.SetTransactionLeiosClosure(replay, replayPoint, 1, nil, true, txn, 0))
+	require.Equal(t, 1, keyWitnessCount(t, store, txn))
+	require.Greater(t, counterValue(t, reg, "delete"), deletesBefore)
+	db, ctx, err := store.dbFromTxn(txn)
+	require.NoError(t, err)
+	var slot uint64
+	var blockIndex uint32
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT slot, block_index FROM "transaction" WHERE hash = ?`, tx.Hash().Bytes()).Scan(&slot, &blockIndex))
+	require.Equal(t, replayPoint.Slot, slot)
+	require.Equal(t, uint32(1), blockIndex)
+}

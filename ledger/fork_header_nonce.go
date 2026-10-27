@@ -29,7 +29,16 @@ import (
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
+type peerForkAncestorCryptoPrefix struct {
+	generation uint64
+	epoch      uint64
+	nonce      []byte
+	lastIndex  int
+	valid      bool
+}
+
 type peerForkPathPrefix struct {
+	ancestorCrypto peerForkAncestorCryptoPrefix
 	ancestor       models.Block
 	headers        []gledger.BlockHeader
 	generation     uint64
@@ -186,7 +195,7 @@ func (ls *LedgerState) verifyPeerForkTargetEpochAncestors(
 		return nil
 	}
 	epochEnd := epoch.StartSlot + uint64(epoch.LengthInSlots)
-	for _, header := range headers[:len(headers)-1] {
+	for index, header := range headers[:len(headers)-1] {
 		if header.SlotNumber() < epoch.StartSlot ||
 			header.SlotNumber() >= epochEnd || ls.headerApplied(header) {
 			continue
@@ -217,11 +226,14 @@ func (ls *LedgerState) verifyPeerForkTargetEpochAncestors(
 			)
 		}
 		block := headerOnlyBlock{header: header, peerRelative: true}
-		if err := ls.verifyBlockHeaderStatelessCryptoWithEpochNonce(
-			block,
-			epoch,
-			epochNonce,
-		); err != nil {
+		if err := ls.verifyPeerForkAncestorCrypto(connID, headers, index,
+			epoch.EpochId, epochNonce, snapshot.generation, func() error {
+				return ls.verifyBlockHeaderStatelessCryptoWithEpochNonce(
+					block,
+					epoch,
+					epochNonce,
+				)
+			}); err != nil {
 			return err
 		}
 		if err := chainSelectionHeaderStateError(
@@ -749,13 +761,23 @@ func (ls *LedgerState) peerHeaderForkPathContext(
 		cached.ancestor.Slot,
 		cached.ancestor.Hash,
 	)
-	if cachedOK && headerVerdictInContext(
-		cached.generation,
-		contextGeneration,
-		verificationGeneration,
-	) &&
-		ls.peerForkAncestorOnChain(ctx, cachedAncestor) &&
-		len(cached.headers) > 0 {
+	validCached := cachedOK && headerVerdictInContext(
+		cached.generation, contextGeneration, verificationGeneration,
+	) && ls.peerForkAncestorOnChain(ctx, cachedAncestor)
+	if validCached {
+		var err error
+		cached, err = ls.trimPeerForkPathAtAppliedTip(
+			ctx,
+			key,
+			cached,
+			verificationGeneration,
+		)
+		if err != nil {
+			return ocommon.Point{}, nil, false, err
+		}
+		cachedAncestor = ocommon.NewPoint(cached.ancestor.Slot, cached.ancestor.Hash)
+	}
+	if validCached && len(cached.headers) > 0 {
 		lastHeader := cached.headers[len(cached.headers)-1]
 		if bytes.Equal(lastHeader.Hash().Bytes(), header.Hash().Bytes()) {
 			tipOnCachedPath := false
@@ -970,6 +992,28 @@ func (ls *LedgerState) storePeerForkPathPrefix(
 	if ls.forkHeaderPathCache == nil {
 		ls.forkHeaderPathCache = make(map[string]peerForkPathPrefix)
 	}
+	var ancestorCrypto peerForkAncestorCryptoPrefix
+	if cached, ok := ls.forkHeaderPathCache[key]; ok &&
+		cached.generation == generation && cached.ancestor.Slot == ancestor.Slot &&
+		bytes.Equal(cached.ancestor.Hash, ancestor.Hash) &&
+		cached.ancestorCrypto.valid &&
+		cached.ancestorCrypto.generation == generation &&
+		cached.ancestorCrypto.lastIndex < len(cached.headers) &&
+		cached.ancestorCrypto.lastIndex < len(headers) {
+		matches := true
+		for index := 0; index <= cached.ancestorCrypto.lastIndex; index++ {
+			if !bytes.Equal(
+				cached.headers[index].Hash().Bytes(),
+				headers[index].Hash().Bytes(),
+			) {
+				matches = false
+				break
+			}
+		}
+		if matches {
+			ancestorCrypto = cached.ancestorCrypto
+		}
+	}
 	var opCertLastHash []byte
 	var opCertCounters map[lcommon.PoolKeyHash]opCertCounterSnapshot
 	if cached, ok := ls.forkHeaderPathCache[key]; ok &&
@@ -1002,6 +1046,7 @@ func (ls *LedgerState) storePeerForkPathPrefix(
 		}
 	}
 	ls.forkHeaderPathCache[key] = peerForkPathPrefix{
+		ancestorCrypto: ancestorCrypto,
 		ancestor:       ancestor,
 		headers:        slices.Clone(headers),
 		generation:     generation,
@@ -1060,4 +1105,110 @@ func (ls *LedgerState) foldHeaderEtaV(
 		evolvingNonce,
 		headerOnlyBlock{header: header, peerRelative: true},
 	)
+}
+
+// verifyPeerForkAncestorCrypto memoizes only stateless cryptography. The caller
+// still checks peer-scoped ancestry, lookup freshness and all stateful rules,
+// traversing ancestors in order so the marker covers only successful crypto.
+func (ls *LedgerState) verifyPeerForkAncestorCrypto(
+	connID ouroboros.ConnectionId,
+	headers []gledger.BlockHeader,
+	index int,
+	epoch uint64,
+	nonce []byte,
+	generation uint64,
+	verify func() error,
+) error {
+	key := connIdKey(connID)
+	hash := headers[index].Hash().Bytes()
+	ls.forkHeaderNonceCacheMutex.Lock()
+	entry, exists := ls.forkHeaderPathCache[key]
+	prefix := entry.ancestorCrypto
+	cached := exists && generation != 0 && entry.generation == generation &&
+		prefix.valid && prefix.generation == generation && prefix.epoch == epoch &&
+		bytes.Equal(prefix.nonce, nonce) && index <= prefix.lastIndex &&
+		index < len(
+			entry.headers,
+		) && bytes.Equal(entry.headers[index].Hash().Bytes(), hash)
+	ls.forkHeaderNonceCacheMutex.Unlock()
+	if cached {
+		return nil
+	}
+	if err := verify(); err != nil {
+		return err
+	}
+	ls.forkHeaderNonceCacheMutex.Lock()
+	defer ls.forkHeaderNonceCacheMutex.Unlock()
+	entry, exists = ls.forkHeaderPathCache[key]
+	if !exists || generation == 0 || entry.generation != generation ||
+		index >= len(entry.headers) ||
+		!bytes.Equal(entry.headers[index].Hash().Bytes(), hash) {
+		return nil
+	}
+	prefix = entry.ancestorCrypto
+	if !prefix.valid || prefix.generation != generation ||
+		prefix.epoch != epoch ||
+		!bytes.Equal(prefix.nonce, nonce) ||
+		index > prefix.lastIndex {
+		entry.ancestorCrypto = peerForkAncestorCryptoPrefix{
+			generation: generation,
+			epoch:      epoch,
+			nonce:      cloneNonce(nonce),
+			lastIndex:  index,
+			valid:      true,
+		}
+		ls.forkHeaderPathCache[key] = entry
+	}
+	return nil
+}
+
+// trimPeerForkPathAtAppliedTip advances only to an exact applied hash already
+// linked into this peer's validated path. Older peer records may be evicted
+// once that prefix is applied; keeping the old anchor would require them again.
+func (ls *LedgerState) trimPeerForkPathAtAppliedTip(
+	ctx context.Context,
+	key string,
+	cached peerForkPathPrefix,
+	generation uint64,
+) (peerForkPathPrefix, error) {
+	if err := ctx.Err(); err != nil {
+		return cached, err
+	}
+	tip := ls.loadTipSnapshot()
+	if tip == nil || generation == 0 || tip.generation != generation ||
+		len(tip.currentTip.Point.Hash) == 0 {
+		return cached, nil
+	}
+	point := tip.currentTip.Point
+	for index, header := range cached.headers {
+		if header.SlotNumber() != point.Slot ||
+			!bytes.Equal(header.Hash().Bytes(), point.Hash) {
+			continue
+		}
+		block, err := ls.blockByHash(ctx, point.Hash)
+		if err != nil {
+			return cached, fmt.Errorf(
+				"%w: read applied candidate anchor: %w",
+				errHeaderVerificationDeferred,
+				err,
+			)
+		}
+		if block.Slot != point.Slot || !bytes.Equal(block.Hash, point.Hash) ||
+			!ls.peerForkAncestorOnChain(ctx, point) {
+			return cached, fmt.Errorf(
+				"%w: applied candidate anchor changed",
+				errHeaderVerificationDeferred,
+			)
+		}
+		trimmed := peerForkPathPrefix{
+			ancestor:   block,
+			headers:    slices.Clone(cached.headers[index+1:]),
+			generation: generation,
+		}
+		// Nonce folding reloads this anchor's stored nonce. The old path's
+		// operational-certificate and crypto prefixes use a different anchor.
+		ls.storePeerForkPathPrefix(key, block, trimmed.headers, generation)
+		return trimmed, nil
+	}
+	return cached, nil
 }

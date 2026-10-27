@@ -265,3 +265,24 @@ func (b *rowBatch) clone() rowBatch {
 	}
 	return ret
 }
+
+// flushExceptClosureAPIRows keeps only API lookup/history rows queued. Assets,
+// datums and script-related rows remain visible before the next tx validates.
+func (b *rowBatch) flushExceptClosureAPIRows(ctx context.Context, db queryer, parameterLimit int) error {
+	var immediate, deferred rowBatch
+	for _, entry := range b.entries {
+		target := &immediate
+		switch entry.shape.table {
+		case "key_witness", "address_transaction", "transaction_metadata_label":
+			target = &deferred
+		}
+		for _, row := range entry.rows {
+			target.add(entry.shape, row...)
+		}
+	}
+	if err := immediate.flush(ctx, db, parameterLimit); err != nil {
+		return err
+	}
+	*b = deferred
+	return nil
+}

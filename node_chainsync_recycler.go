@@ -55,6 +55,15 @@ func (n *Node) chainsyncObservePeerTip(
 	return disposition
 }
 
+func (n *Node) chainsyncRecordDeliveredPeerTip(
+	e chainselection.PeerTipUpdateEvent,
+) {
+	if n.chainSelector == nil {
+		return
+	}
+	n.chainSelector.RecordDeliveredPeerTip(e)
+}
+
 // chainsyncResolvePeerTip removes rejected candidates immediately and promotes
 // admitted candidates before the event-bus notification is dispatched.
 func (n *Node) chainsyncResolvePeerTip(

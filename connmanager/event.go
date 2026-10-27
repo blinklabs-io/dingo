@@ -49,6 +49,9 @@ type InboundConnectionEvent struct {
 type ConnectionClosedEvent struct {
 	ConnectionId ouroboros.ConnectionId
 	Error        error
+	// LocalCloseReason identifies an owner-requested close. An empty reason
+	// leaves transport failures and unclassified closes unchanged.
+	LocalCloseReason string
 }
 
 // ConnectionRecycleRequestedEvent requests that a specific

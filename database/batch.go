@@ -38,6 +38,17 @@ func (d *Database) NewBatchAccumulator() BatchAccumulator {
 	return d.transactionStore().NewBatchAccumulator()
 }
 
+// NewLeiosClosureBatchAccumulator creates an API-detail accumulator when the
+// metadata provider supports ordered closure application; nil selects the
+// existing immediate path.
+func (d *Database) NewLeiosClosureBatchAccumulator() BatchAccumulator {
+	store, ok := d.transactionStore().(metadata.LeiosClosureBatcher)
+	if !ok {
+		return nil
+	}
+	return store.NewLeiosClosureBatchAccumulator()
+}
+
 // FlushBatch writes accumulated metadata rows for the active metadata plugin.
 func (d *Database) FlushBatch(
 	acc BatchAccumulator,
@@ -251,8 +262,13 @@ func (d *Database) SetTransactionBatchedWithOpts(
 	txn *Txn,
 	opts BatchedTxIngestOpts,
 ) (retErr error) {
-	if opts.LedgerContextSlot != nil {
+	closureAcc, markedClosure := acc.(metadata.LeiosClosureAccumulator)
+	closureBatch := markedClosure && closureAcc.LeiosClosureRowsOnly()
+	if opts.LedgerContextSlot != nil && !closureBatch {
 		return errors.New("prototype closure context requires unbatched ingestion")
+	}
+	if closureBatch && !opts.SkipConsumedInputRecovery {
+		return errors.New("closure accumulator requires closure input semantics")
 	}
 	if acc == nil {
 		return errors.New("batch accumulator must not be nil")
@@ -383,7 +399,16 @@ func (d *Database) SetTransactionBatchedWithOpts(
 		setter.SetBackfillStats(opts.Stats)
 	}
 	var metadataErr error
-	if store, ok := d.transactionStore().(transactionStoreHistoricalBackfill); ok {
+	if closureBatch {
+		store, ok := d.transactionStore().(metadata.LeiosClosureBatcher)
+		if !ok {
+			return errors.New("metadata provider does not support closure batching")
+		}
+		metadataErr = store.SetTransactionLeiosClosureBatched(
+			tx, point, idx, certDeposits, opts.SkipWithdrawalWitnessWrite,
+			opts.LedgerContextSlot, acc, metadataTxn, opts.ProtocolMajor,
+		)
+	} else if store, ok := d.transactionStore().(transactionStoreHistoricalBackfill); ok {
 		metadataErr = store.SetTransactionBatchedHistorical(
 			tx, point, idx, certDeposits,
 			opts.SkipWithdrawalWitnessWrite,

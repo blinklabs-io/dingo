@@ -55,6 +55,7 @@ func transactionFee(transaction lcommon.Transaction) types.Uint64 {
 // (and therefore to one caller transaction), because database/sql statements
 // prepared on a transaction must not escape it.
 type transactionBatchAccumulator struct {
+	leiosAPIRowsOnly  bool
 	transactionInsert *sql.Stmt
 	mysql             bool
 	// sqlOperations is the same counter instrumentedQueryer increments for
@@ -204,8 +205,8 @@ ON CONFLICT (hash) DO UPDATE SET
     collateral_fee = excluded.collateral_fee
 RETURNING id`
 
-// The batched path needs to distinguish a fresh ID from a replay so it can
-// skip child-table cleanup only when those rows cannot already exist.
+// A fresh transaction ID has no child rows, so both write paths can skip
+// replay cleanup after an insert that created the ID.
 const transactionBatchInsertSQL = `-- name: InsertTransactionIfAbsent :one
 INSERT INTO "transaction" (
     hash, block_hash, metadata, slot, type, fee, collateral_fee, ttl,
@@ -481,6 +482,37 @@ func (s *Store) repairConflictedUtxo(
 	return s.persistUtxoRelations(ctx, db, utxo, uint(id))
 }
 
+func (s *Store) insertTransactionUnbatched(
+	ctx context.Context,
+	db queryer,
+	args ...any,
+) (int64, bool, error) {
+	if len(args) != 10 {
+		return 0, false, fmt.Errorf("insert transaction: got %d arguments, want 10", len(args))
+	}
+	var id int64
+	if s.dialect.Name() == "mysql" {
+		err := s.queryRowCached(ctx, db, transactionInsertSQL, args...).Scan(&id)
+		return id, false, err
+	}
+	err := s.queryRowCached(ctx, db, transactionBatchInsertSQL, args...).Scan(&id)
+	if err == nil {
+		return id, true, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return 0, false, err
+	}
+	if _, err := s.execCached(ctx, db, transactionBatchConflictUpdateSQL,
+		args[1], args[8], args[3], args[6], args[0],
+	); err != nil {
+		return 0, false, fmt.Errorf("update existing transaction: %w", err)
+	}
+	if err := s.queryRowCached(ctx, db, transactionBatchConflictIDSQL, args[0]).Scan(&id); err != nil {
+		return 0, false, fmt.Errorf("find existing transaction: %w", err)
+	}
+	return id, false, nil
+}
+
 func (a *transactionBatchAccumulator) insertTransaction(
 	ctx context.Context,
 	db queryer,
@@ -747,14 +779,42 @@ func (s *Store) setTransactionBatched(
 	)
 }
 
-// SetTransactionLeiosClosure records a validated transaction on the Leios
-// endorser-block closure path. It behaves
-// like SetTransaction except that a consumed input already spent by a
-// *different* transaction is treated as a no-op instead of ErrUtxoConflict,
-// matching the reference ledger's applyLeiosClosure: two certified endorser
-// blocks may legitimately name the same input across blocks. Do
-// not use this for ranking-block application, where a real double-spend must
-// still fail.
+// NewLeiosClosureBatchAccumulator returns an API-only row accumulator. Its
+// immutable mode survives Reset so a flush cannot change closure semantics.
+func (s *Store) NewLeiosClosureBatchAccumulator() types.MetadataBatchAccumulator {
+	if s.storageMode != types.StorageModeAPI {
+		return nil
+	}
+	return &transactionBatchAccumulator{leiosAPIRowsOnly: true, sqlOperations: s.sqlOperations}
+}
+
+// LeiosClosureRowsOnly reports whether this accumulator defers only API detail rows.
+func (a *transactionBatchAccumulator) LeiosClosureRowsOnly() bool { return a.leiosAPIRowsOnly }
+
+// SetTransactionLeiosClosureBatched preserves the ordinary closure write order
+// and conflict tolerance while deferring only API detail rows until FlushBatch.
+func (s *Store) SetTransactionLeiosClosureBatched(
+	transaction lcommon.Transaction, point ocommon.Point, index uint32,
+	certDeposits map[int]uint64, skipWithdrawalWitness bool,
+	contextSlot *uint64, accumulator types.MetadataBatchAccumulator,
+	txn types.Txn, protocolMajor uint64,
+) error {
+	acc, ok := accumulator.(*transactionBatchAccumulator)
+	if !ok || !acc.leiosAPIRowsOnly || acc.overlay != nil {
+		return errors.New("closure batching requires an API-only accumulator")
+	}
+	if txn == nil {
+		return types.ErrNilTxn
+	}
+	if contextSlot != nil && *contextSlot >= point.Slot {
+		return errors.New("closure context must precede its certifying block")
+	}
+	return s.setTransactionWithAccumulator(transaction, point, index, certDeposits,
+		skipWithdrawalWitness, false, true, accumulator, contextSlot, txn, protocolMajor)
+}
+
+// SetTransactionLeiosClosure applies a certified closure, tolerating inputs
+// consumed by an earlier closure while preserving all other effects.
 func (s *Store) SetTransactionLeiosClosure(
 	transaction lcommon.Transaction,
 	point ocommon.Point,
@@ -899,7 +959,7 @@ func (s *Store) setTransactionWithAccumulator(
 				)
 				transactionID = int64(id)
 			} else {
-				err = s.queryRowCached(ctx, db, transactionInsertSQL,
+				transactionID, transactionIsNew, err = s.insertTransactionUnbatched(ctx, db,
 					hash,
 					point.Hash,
 					metadataValue,
@@ -910,7 +970,7 @@ func (s *Store) setTransactionWithAccumulator(
 					decimalUint64(types.Uint64(transaction.TTL())),
 					index,
 					transaction.IsValid(),
-				).Scan(&transactionID)
+				)
 			}
 			if err != nil {
 				return fmt.Errorf("create transaction %x: %w", hash, err)
@@ -1058,6 +1118,11 @@ func (s *Store) setTransactionWithAccumulator(
 				transactionIsNew,
 			); err != nil {
 				return err
+			}
+			if batchedAccumulator != nil && batchedAccumulator.leiosAPIRowsOnly {
+				if err := staged.flushExceptClosureAPIRows(ctx, db, s.dialect.ParameterLimit()); err != nil {
+					return err
+				}
 			}
 			if batchedAccumulator == nil {
 				if err := staged.flush(
@@ -1259,7 +1324,7 @@ func (s *Store) setTransactionWithAccumulator(
 				skippedStakeDeltas,
 				producedStakeDeltas,
 			)
-			if batchedAccumulator != nil {
+			if batchedAccumulator != nil && !batchedAccumulator.leiosAPIRowsOnly {
 				return nil
 			}
 			return s.refreshRewardLiveStakeDeltas(
@@ -1270,10 +1335,10 @@ func (s *Store) setTransactionWithAccumulator(
 	if err != nil || batchedAccumulator == nil {
 		return err
 	}
-	if err := batchedAccumulator.addStakeDeltas(
-		batchedStakeDeltas, point.Slot,
-	); err != nil {
-		return err
+	if !batchedAccumulator.leiosAPIRowsOnly {
+		if err := batchedAccumulator.addStakeDeltas(batchedStakeDeltas, point.Slot); err != nil {
+			return err
+		}
 	}
 	// The per-transaction cleanup deletes only reach flushed rows, so rows
 	// an earlier application of this transaction queued in the same window

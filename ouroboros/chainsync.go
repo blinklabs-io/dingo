@@ -1605,12 +1605,17 @@ func (o *Ouroboros) chainsyncClientRollBackward(
 		attribute.String("block.hash", hex.EncodeToString(point.Hash)),
 	)
 	defer func() { tracing.End(span, err) }()
+	var clientSession chainsync.ClientSessionToken
+	if o.chainsyncState != nil {
+		clientSession = o.chainsyncState.ClientSession(ctx.ConnectionId)
+	}
 	// The peer's protocol cursor moves whether or not the rollback is tracked
 	// below, so a withheld header can no longer stand in for it.
 	o.invalidateDeferredHeaderResolution(ctx.ConnectionId)
 	if o.recordHeldChainsyncTip(ctx.ConnectionId, tip) {
 		return ochainsync.ErrStopSyncProcess
 	}
+	o.clearObserverHeaderGapAtRollback(ctx.ConnectionId, clientSession, point)
 	if !o.reconcileChainsyncIngressAdmission(
 		ctx.ConnectionId,
 		o.shouldPublishChainsyncToLedger(ctx.ConnectionId),
@@ -1677,6 +1682,33 @@ func (o *Ouroboros) chainsyncClientRollBackward(
 		return fmt.Errorf("chainsync: publish rollback event: %w", err)
 	}
 	return nil
+}
+
+// clearObserverHeaderGapAtRollback only trusts origin or the exact applied
+// tip. A slot-only comparison could clear a gap on a competing fork.
+func (o *Ouroboros) clearObserverHeaderGapAtRollback(
+	connId ouroboros.ConnectionId,
+	session chainsync.ClientSessionToken,
+	point ocommon.Point,
+) {
+	if o.chainsyncState == nil || !o.chainsyncState.ClientObserverHeaderGap(connId) {
+		return
+	}
+	safe := point.Slot == 0 && len(point.Hash) == 0
+	if !safe && o.ledgerState != nil {
+		applied := o.ledgerState.Tip().Point
+		safe = point.Slot == applied.Slot && bytes.Equal(point.Hash, applied.Hash)
+	}
+	if !safe || !o.chainsyncState.ClearClientObserverHeaderGap(connId, session) {
+		return
+	}
+	o.futureHeaderResyncMu.Lock()
+	if scheduled := o.futureHeaderResyncs[connId]; scheduled != nil &&
+		!scheduled.fired && scheduled.reason == event.ChainsyncResyncReasonIngressPromotion {
+		scheduled.cancel()
+		delete(o.futureHeaderResyncs, connId)
+	}
+	o.futureHeaderResyncMu.Unlock()
 }
 
 // chainsyncCursorFarBehindLocalTip reports whether a header with the given
@@ -1773,6 +1805,10 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 ) (err error) {
 	switch v := blockData.(type) {
 	case gledger.BlockHeader:
+		var clientSession chainsync.ClientSessionToken
+		if o.chainsyncState != nil {
+			clientSession = o.chainsyncState.ClientSession(ctx.ConnectionId)
+		}
 		// Every path that does not accept this header clears the
 		// connection's accepted tip, so a later deferred header cannot count
 		// as a linear extension of one that never reached the ledger queue.
@@ -1842,6 +1878,7 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 			ctx.ConnectionId,
 			o.shouldPublishChainsyncToLedger(ctx.ConnectionId),
 		)
+		observerDelivery := !ingressEligible
 		patienceResume = ingressEligible
 		if ingressEligible && o.chainsyncHeaderBackpressure != nil {
 			admissionCtx, cancelAdmission := chainsyncAdmissionContext(ctx)
@@ -1913,11 +1950,10 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 			)
 			return nil
 		}
-		// An observer streams headers without recording them, so promoting it
-		// at a cursor above the ledger starts its candidate frontier there. Such
-		// a peer cannot be corroborated and cannot corroborate the header after
-		// the tip, so restart it from the local tip. The header is dropped
-		// unrecorded; the fresh session redelivers it.
+		// Raw observer history does not seed an admitted candidate frontier.
+		// Starting above the applied suffix would leave a gap that cannot
+		// corroborate or deliver the next block, so replay from a safe local
+		// intersection before admitting this promoted cursor.
 		if ingressEligible && wasObserver &&
 			o.promotedObserverAboveLocalTip(v.BlockNumber()) {
 			if o.scheduleHeaderResync(
@@ -1970,9 +2006,13 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 		// excludes the header and recycles the connection.
 		selectionEligible := ingressEligible
 		deferredVerification := false
+		shouldVerifyHeader := o.chainSelectionShouldVerifyHeaderCrypto != nil &&
+			o.chainSelectionShouldVerifyHeaderCrypto(blockSlot)
+		deliveryVerified := !shouldVerifyHeader
+		verificationAttempted := false
 		var verificationTipBaseline ochainsync.Tip
-		if ingressEligible && o.chainSelectionShouldVerifyHeaderCrypto != nil &&
-			o.chainSelectionShouldVerifyHeaderCrypto(blockSlot) {
+		if ingressEligible && shouldVerifyHeader {
+			verificationAttempted = true
 			if o.ledgerState != nil {
 				verificationTipBaseline = o.ledgerState.Tip()
 			}
@@ -2001,6 +2041,7 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 			}
 			if verifyErr == nil {
 				chainsyncEvent.HeaderCryptoVerificationGeneration = verificationGeneration
+				deliveryVerified = true
 			}
 			if errors.Is(verifyErr, ledger.ErrHeaderBeyondForecastHorizon) {
 				// The header cannot be validated yet, so it must not extend
@@ -2056,6 +2097,38 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 				}
 			}
 		}
+		// Observer deliveries may become corroboration evidence after promotion,
+		// so they need the same producer authentication as ingress candidates.
+		if !verificationAttempted && !deliveryVerified &&
+			o.config.ChainsyncRecordDeliveredPeerTip != nil {
+			verificationGeneration, verifyErr := o.chainSelectionVerifyHeaderCrypto(
+				ctx.ConnectionId,
+				v,
+			)
+			if verifyErr == nil {
+				chainsyncEvent.HeaderCryptoVerificationGeneration = verificationGeneration
+				deliveryVerified = true
+			}
+			if o.chainsyncState != nil && (verifyErr == nil ||
+				ledger.IsHeaderVerificationDeferred(verifyErr) ||
+				ledger.IsHeaderVerificationWithheld(verifyErr)) {
+				// Delivery authentication does not admit an observer header.
+				// Keep its raw ancestry unstamped so a linked child can be
+				// authenticated without trusting this header on promotion.
+				o.chainsyncState.RecordObservedHeaderForSession(
+					clientSession,
+					chainsync.ObservedHeader{
+						ConnectionId: ctx.ConnectionId,
+						Point:        point,
+						BlockHeader:  v,
+						ArrivalTime:  arrivalTime,
+						Tip:          tip,
+						BlockNumber:  v.BlockNumber(),
+						Type:         blockType,
+					},
+				)
+			}
+		}
 		extendsLocalChain := ingressEligible &&
 			o.deferredHeaderExtendsLocalChain(ctx.ConnectionId, v)
 		if deferredVerification {
@@ -2101,22 +2174,23 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 			Point:       point,
 			BlockNumber: v.BlockNumber(),
 		}
+		update := chainselection.PeerTipUpdateEvent{
+			ConnectionId: ctx.ConnectionId,
+			Tip:          tip,
+			ObservedTip:  observedTip,
+			HeaderCryptoVerificationGeneration: chainsyncEvent.
+				HeaderCryptoVerificationGeneration,
+			ObservedPrevHash: v.PrevHash().Bytes(),
+			ObservedBoundary: blockType == gledger.BlockTypeByronEbb,
+		}
+		if deliveryVerified && o.config.ChainsyncRecordDeliveredPeerTip != nil {
+			o.config.ChainsyncRecordDeliveredPeerTip(update)
+		}
 		var peerTipUpdate *chainselection.PeerTipUpdateEvent
 		if selectionEligible {
-			update := chainselection.PeerTipUpdateEvent{
-				ConnectionId: ctx.ConnectionId,
-				Tip:          tip,
-				ObservedTip:  observedTip,
-				VRFOutput:    vrfOutput,
-				PraosView:    praosView,
-				AdmissionID:  o.chainsyncAdmissionSequence.Add(1),
-				HeaderCryptoVerificationGeneration: chainsyncEvent.
-					HeaderCryptoVerificationGeneration,
-				// The parent hash is what lets the selector tell a connected
-				// header chain from a sequence of advancing numbers.
-				ObservedPrevHash: v.PrevHash().Bytes(),
-				ObservedBoundary: blockType == gledger.BlockTypeByronEbb,
-			}
+			update.AdmissionID = o.chainsyncAdmissionSequence.Add(1)
+			update.VRFOutput = vrfOutput
+			update.PraosView = praosView
 			disposition := chainselection.PeerTipUpdateUnhandled
 			if o.config.ChainsyncObservePeerTip != nil {
 				disposition = o.config.ChainsyncObservePeerTip(update)
@@ -2186,8 +2260,10 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 		// Limit on Eagerness: the tip was observed above, so the limit already
 		// accounts for this header. Wait before recording cross-peer dedup state:
 		// if the connection closes while held, another peer must still be able
-		// to deliver the same header to the ledger.
-		if applyEligible && o.config.ChainsyncAwaitEagerness != nil {
+		// to deliver the same header to the ledger. Uncorroborated ingress also
+		// advances observed history, so it must not run past the shared overlap
+		// while its blocks remain withheld from application.
+		if selectionEligible && ingressEligible && o.config.ChainsyncAwaitEagerness != nil {
 			var appliedTip func() ochainsync.Tip
 			if o.ledgerState != nil {
 				appliedTip = o.ledgerState.Tip
@@ -2252,6 +2328,14 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 			)
 		}
 		if !ingressEligible {
+			if observerDelivery && o.chainsyncState != nil &&
+				o.chainsyncState.RecordClientObserverHeaderGap(ctx.ConnectionId, clientSession) {
+				// Promotion may have raced the observer decision. Marking and
+				// reading the current role atomically closes that recovery gap.
+				o.reconcileChainsyncIngressAdmission(
+					ctx.ConnectionId, o.shouldPublishChainsyncToLedger(ctx.ConnectionId),
+				)
+			}
 			o.config.Logger.Debug(
 				"chainsync: header dropped (not ingress eligible)",
 				"component", "ouroboros",
@@ -2696,16 +2780,25 @@ func (o *Ouroboros) reconcileChainsyncIngressAdmission(
 		return false
 	}
 	if desiredEligible {
-		if !observabilityOnly {
-			return true
+		if observabilityOnly {
+			if !o.chainsyncState.SetClientObservabilityOnly(connId, false) {
+				return false
+			}
+			observabilityOnly, exists = o.chainsyncState.ClientObservabilityOnly(connId)
+			if !exists || observabilityOnly {
+				return false
+			}
 		}
-		if !o.chainsyncState.SetClientObservabilityOnly(connId, false) {
-			return false
+		if o.chainsyncState.ClientObserverHeaderGap(connId) {
+			// Let the promoting header's stale-cursor check install its more
+			// specific recovery reason before the fallback timer can fire.
+			o.scheduleHeaderResync(
+				connId,
+				time.Now().Add(100*time.Millisecond),
+				event.ChainsyncResyncReasonIngressPromotion,
+			)
 		}
-		observabilityOnly, exists = o.chainsyncState.ClientObservabilityOnly(
-			connId,
-		)
-		return exists && !observabilityOnly
+		return true
 	}
 	if !observabilityOnly {
 		_ = o.chainsyncState.SetClientObservabilityOnly(connId, true)
@@ -2904,7 +2997,7 @@ func (o *Ouroboros) SubscribeChainsyncResync(ctx context.Context) {
 						"connection_id",
 						connId.String(),
 					)
-					conn.Close()
+					_ = o.connManager.CloseConnectionWithReason(conn, e.Reason)
 				}
 				return
 			}
@@ -2934,7 +3027,7 @@ func (o *Ouroboros) SubscribeChainsyncResync(ctx context.Context) {
 					"connection_id", connId.String(),
 					"reason", e.Reason,
 				)
-				conn.Close()
+				_ = o.connManager.CloseConnectionWithReason(conn, e.Reason)
 			}
 		},
 	)

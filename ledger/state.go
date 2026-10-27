@@ -1181,9 +1181,10 @@ type LedgerStateConfig struct {
 	// on worker goroutines while earlier blocks of the chunk validate and
 	// write. Each result is bound to its transaction body and witness set, and
 	// every rule still runs against the write transaction, so verdicts and
-	// stored state are identical either way. Byron blocks, Dijkstra chunks
-	// and TrustedReplay (which preverifies the whole chunk itself) are not
-	// covered. Not consensus-affecting. The zero value is off; node
+	// stored state are identical either way. Dijkstra ranking bodies use this
+	// path independently of certified-closure signature verification. Byron
+	// blocks and TrustedReplay (which preverifies the whole chunk itself) are
+	// not covered. Not consensus-affecting. The zero value is off; node
 	// configuration turns it on by default.
 	LedgerValidateAheadEnabled bool
 	// BlockfetchLowWatermarkEnabled starts blockfetch once one blockfetch
@@ -1456,6 +1457,11 @@ type LedgerState struct {
 	// database connection.
 	txValidationCommitMutex sync.RWMutex
 	txValidationTransitions atomic.Int64
+	queuedBlockfetchFlushMu sync.Mutex
+	queuedBlockfetchFlush   *queuedBlockfetchFlush
+	// queuedBlockfetchSchedule substitutes only timer delivery in tests.
+	queuedBlockfetchSchedule func(time.Duration, func()) func()
+
 	// The fields below are writer-owned working state. Lock-free readers use
 	// consensus and tip snapshots; writers update these fields under Lock and
 	// publish a fresh immutable snapshot before unlocking.
@@ -3602,6 +3608,7 @@ func (ls *LedgerState) Close() (retErr error) {
 	}
 	ls.closed.Store(true)
 	ls.closeMu.Unlock()
+	ls.stopQueuedBlockfetchFlush()
 	defer func() {
 		ls.closeMu.Lock()
 		ls.closeErr = retErr
@@ -9411,13 +9418,12 @@ func (ls *LedgerState) processBlocksFromSource(
 					// filtered from the blocks alone.
 					var aheadSignatures *signaturePreverifyAhead
 					prefetchAhead := ls.config.LedgerPrefetchAheadEnabled &&
-						end-i > 1
+						end-i > 1 && !dijkstraEraGate(snapshotEra)
 					// Trusted replay preverifies the whole chunk's signatures
 					// before the transaction instead.
 					signaturesAhead := ls.config.LedgerValidateAheadEnabled &&
 						!trustedReplay
-					if (prefetchAhead || signaturesAhead) &&
-						!dijkstraEraGate(snapshotEra) {
+					if prefetchAhead || signaturesAhead {
 						chunk := nextBatch[i:end]
 						validated := chunkValidatedBlocks(
 							chunk,

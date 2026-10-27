@@ -3332,6 +3332,24 @@ already lost that metadata is a non-match rather than block ID zero.
 `GetBlock` performs; ChainSync FindIntersect uses it for peer-supplied points.
 An ID of zero marks a synthetic entry and is a non-match.
 
+Standalone `database.BlockByHash` resolves its hash index, retained metadata,
+and block body in one blob-only transaction. Those fields all belong to the
+blob store; no SQL transaction is acquired. Callers needing coordinated
+SQL/blob state still use the explicit coordinated snapshot helpers. The
+wrapper checks cancellation before opening and around the read, normalizes a
+nil context, and keeps `Txn.Do` for panic conversion, cleanup errors, and
+blob-store lifetime release.
+
+Persistent `Chain.HoldsPoint` reads that metadata ID and its active `bi` point
+from one blob-only snapshot. Both slot and hash must match, and the ID must
+fall within the chain's current index range. It fetches neither block content
+nor a SQL transaction. A chain-mutation generation captured before the reads
+must still match afterward; a raced mutation makes the result false. Reads
+remain outside the chain lock. An uncommitted append cannot prove its new
+point from the old store snapshot, while its committed prefix remains held.
+Pruning content preserves membership when the exact metadata/index pair stays
+canonical. Ephemeral and in-memory chains retain their own index checks.
+
 `Database.CountBlocksAndOldestSlot` (`database/block_inventory.go`) reads the retained block count and oldest retained slot from the checksummed `dingo:block-inventory:v1` blob record. `database.New` creates the record and an ordered retained-block membership index before the database becomes available, scanning legacy block content once only when the record is absent. Block insert, delete, history-expiry tombstone, rollback, truncate, and orphan cleanup paths update both in the same blob transaction as the block mutation. Stores without optimistic write-conflict detection serialize block-inventory mutations before opening backend transactions; conflict-detecting stores rely on backend write conflicts to prevent lost updates. Deleting or tombstoning the current oldest block seeks the first membership key to resolve its successor, including another retained block at the same slot, without walking block content. Bark's `GetDatabaseInfo` reads this record and never walks the block keyspace in request handling.
 
 `DOFF` references are 52 bytes:
@@ -3562,6 +3580,17 @@ donations from valid endorser transactions are accumulated in `network_donation`
 under the ranking block's slot, using the epoch in which the closure executes.
 Replayed endorser transactions (hashes already present) are
 skipped so certificate, governance, and UTxO effects are not applied twice.
+
+In API storage mode, providers may implement the optional
+`metadata.LeiosClosureBatcher` capability. Its dedicated accumulator queues only
+`key_witness`, `address_transaction`, and `transaction_metadata_label` rows for
+multi-row insertion at the end of one certified closure. Transaction rows,
+UTxOs and assets, datums and scripts, stake totals, certificates, governance and
+`leios_transaction_context` remain immediate and ordered. The dedicated setter
+retains the closure's consumed-input tolerance and unticked context; the generic
+batch setter keeps its existing semantics. Final flush failure aborts the outer
+transaction before transaction events are staged. Providers without the optional
+capability retain immediate closure ingestion.
 
 Earlier ranking-block deltas are applied before processing the next Leios
 closure, including during unvalidated historical sync. This preserves input
