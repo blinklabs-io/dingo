@@ -11100,7 +11100,10 @@ separate local policy that accepts only loopback resolutions. Loading stops afte
 chunk that reaches the `tip.json`
 slot, whose hash must then match the loaded block, or at the first chunk the
 root does not publish; a chunk whose `.chunk` exists without its indexes is an
-error. The downloader lives in `internal/node` rather than reusing the
+error. Chunks are uniform in slots, so the chunk numbered by the `tip.json`
+slot must hold the tip: nothing past it is fetched, and copying that chunk
+without reaching the tip fails the load instead of following empty chunks the
+root keeps serving. The downloader lives in `internal/node` rather than reusing the
 `mithril` one because `mithril` imports `internal/node`.
 
 Trust: remote chunk files carry no signature or digest, so authenticated

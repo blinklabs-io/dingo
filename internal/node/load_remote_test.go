@@ -521,6 +521,39 @@ func TestCopyBlocksRemoteStopsAtTheLastPublishedChunk(t *testing.T) {
 	)
 }
 
+func TestCopyBlocksRemoteStopsAtTheChunkHoldingTheRemoteTip(t *testing.T) {
+	t.Parallel()
+	root := newRemoteRoot(t, 2)
+	load := newRemoteLoad(t)
+	const tipChunk = 5
+	root.tip.Slot = tipChunk*load.limits.chunkSlots + 1
+	// Every chunk past the published ones is a valid empty triad, so only the
+	// remote tip can end the load. The handler gives up after a margin so a
+	// load that ignores the tip fails instead of running forever.
+	const giveUp = tipChunk + 2*remoteImmutablePrefetch
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	root.handle = func(w http.ResponseWriter, r *http.Request) bool {
+		number, ok := chunkNumber(strings.TrimPrefix(r.URL.Path, "/"))
+		if !ok || number < 2 {
+			return false
+		}
+		if number > giveUp {
+			cancel()
+			http.NotFound(w, r)
+			return true
+		}
+		if filepath.Ext(r.URL.Path) == ".primary" {
+			_, _ = w.Write([]byte{1, 0, 0, 0, 0})
+		}
+		return true
+	}
+	_, err := load.run(ctx, root.serve(t))
+	require.ErrorContains(t, err, "should hold tip.json slot")
+	require.NotErrorIs(t, err, context.Canceled)
+	require.False(t, root.requested(immutable.ChunkName(tipChunk+1)+".primary"))
+}
+
 func TestCopyBlocksRemoteEnforcesAggregateImportBudgetAndCleansStaging(
 	t *testing.T,
 ) {
