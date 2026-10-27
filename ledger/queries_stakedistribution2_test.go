@@ -15,11 +15,17 @@
 package ledger
 
 import (
+	"bytes"
 	"math/big"
+	"strings"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/config/cardano"
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -125,4 +131,97 @@ func TestQueryShelleyStakeDistribution2_ViaGetCBOR(t *testing.T) {
 	require.True(t, ok, "pool missing from the GetCBOR-wrapped distribution")
 	assert.Equal(t, uint64(3_000_000), entry.TotalPoolStake)
 	assert.Equal(t, uint64(4_000_000), decoded.TotalActiveStake)
+}
+
+// newHalfDelegatedLedger seeds two pools holding 1_000_000 each in the mark
+// snapshot of a network whose circulation (8_000_000 maximum supply minus
+// 4_000_000 reserves) is twice what the pools hold delegated between them.
+func newHalfDelegatedLedger(
+	t *testing.T,
+	db *database.Database,
+) (*LedgerState, lcommon.PoolKeyHash, lcommon.PoolKeyHash) {
+	t.Helper()
+	const snapshotEpoch = 0
+	pkhA := seedPoolDistr2Fixture(
+		t, db, repeatedBytes(28, 0xAA), repeatedBytes(32, 0x01),
+		1_000_000, snapshotEpoch,
+	)
+	pkhB := seedPoolDistr2Fixture(
+		t, db, repeatedBytes(28, 0xBB), repeatedBytes(32, 0x02),
+		1_000_000, snapshotEpoch,
+	)
+	cfg := &cardano.CardanoNodeConfig{
+		ShelleyGenesisHash: strings.Repeat("11", 32),
+	}
+	require.NoError(t, cfg.LoadShelleyGenesisFromReader(strings.NewReader(`{
+		"activeSlotsCoeff": 0.1,
+		"epochLength": 100,
+		"maxLovelaceSupply": 8000000,
+		"securityParam": 10,
+		"slotLength": 1,
+		"systemStart": "2022-10-25T00:00:00Z"
+	}`)))
+	require.NoError(t, db.Metadata().SetNetworkState(0, 4_000_000, 1, nil))
+	ls := newPoolDistr2Ledger(t, db)
+	ls.config.CardanoNodeConfig = cfg
+	seedEpochs(t, ls, map[uint64]uint64{0: 0})
+	tipHash := bytes.Repeat([]byte{0xEF}, 32)
+	seedBlockAtSlot(t, ls, 1, tipHash)
+	require.NoError(t, db.SetTip(ochainsync.Tip{
+		Point: ocommon.NewPoint(1, tipHash),
+	}, nil))
+	return ls, pkhA, pkhB
+}
+
+// TestQueryShelleyStakeDistribution2_FractionIsOverCirculatingSupply pins the
+// denominator of each pool's StakeFraction to circulating supply, as
+// cardano-node's poolsByTotalStakeFraction does, rather than to the sum of
+// delegated stake. Per-pool stake and the reply's total are unchanged.
+func TestQueryShelleyStakeDistribution2_FractionIsOverCirculatingSupply(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	ls, pkhA, pkhB := newHalfDelegatedLedger(t, db)
+
+	result, err := ls.Query(t.Context(), stakeDistribution2Query(), QueryPoint{})
+	require.NoError(t, err)
+	distr := decodePoolDistr2Result(t, result)
+
+	require.Len(t, distr.Pools, 2)
+	for _, pkh := range []lcommon.PoolKeyHash{pkhA, pkhB} {
+		entry, ok := distr.Pools[lcommon.PoolId(pkh)]
+		require.True(t, ok)
+		require.NotNil(t, entry.StakeFraction)
+		assert.Zero(t, entry.StakeFraction.Cmp(big.NewRat(1, 4)),
+			"GetStakeDistribution2 fraction must be over circulating supply, got %s",
+			entry.StakeFraction.Rat)
+		assert.Equal(t, uint64(1_000_000), entry.TotalPoolStake)
+	}
+	assert.Equal(t, uint64(2_000_000), distr.TotalActiveStake)
+}
+
+// TestQueryShelleyPoolDistr2_FractionStaysOverDelegatedStake pins that the
+// same half-delegated network still reports GetPoolDistr2 fractions over the
+// sum of delegated stake, which is the reference behavior for that query.
+func TestQueryShelleyPoolDistr2_FractionStaysOverDelegatedStake(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	ls, pkhA, pkhB := newHalfDelegatedLedger(t, db)
+
+	result, err := ls.Query(t.Context(), poolDistr2Query(), QueryPoint{})
+	require.NoError(t, err)
+	distr := decodePoolDistr2Result(t, result)
+
+	require.Len(t, distr.Pools, 2)
+	for _, pkh := range []lcommon.PoolKeyHash{pkhA, pkhB} {
+		entry, ok := distr.Pools[lcommon.PoolId(pkh)]
+		require.True(t, ok)
+		assert.Zero(t, entry.StakeFraction.Cmp(big.NewRat(1, 2)),
+			"GetPoolDistr2 fraction must stay over delegated stake, got %s",
+			entry.StakeFraction.Rat)
+	}
+	assert.Equal(t, uint64(2_000_000), distr.TotalActiveStake)
 }

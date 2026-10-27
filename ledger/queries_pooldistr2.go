@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"context"
+	"math/big"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -130,10 +131,13 @@ func (ls *LedgerState) queryShelleyPoolDistr(
 }
 
 // queryShelleyStakeDistribution2 answers GetStakeDistribution2, which replaces
-// GetStakeDistribution from node-to-client protocol version 21. It reports the
-// same pool distribution as GetPoolDistr2 with no pool filter, so both read
-// through PoolStakeDistribution and cannot disagree about the snapshot or the
-// VRF keys.
+// GetStakeDistribution from node-to-client protocol version 21. Pools, stakes
+// and VRF keys come from the same PoolStakeDistribution read as GetPoolDistr2,
+// so both agree about the snapshot.
+//
+// Unlike GetPoolDistr2, each StakeFraction is taken over total circulating
+// supply rather than over the sum of delegated stake, matching cardano-node's
+// poolsByTotalStakeFraction. The reply's total remains TotalActiveStake.
 //
 // Client.GetStakeDistribution2 decodes the reply into a StakeDistribution2Result,
 // a one-field struct around the distribution, so the result is a one-element
@@ -151,9 +155,14 @@ func (ls *LedgerState) queryShelleyStakeDistribution2(
 		map[ledger.PoolId]olocalstatequery.IndividualPoolStake,
 		len(dist.Pools),
 	)
+	circulation := new(big.Int).SetUint64(dist.TotalCirculatingSupply)
 	for _, pool := range dist.Pools {
+		fraction := new(big.Rat).SetFrac(
+			new(big.Int).SetUint64(pool.Stake),
+			circulation,
+		)
 		pools[ledger.PoolId(pool.PoolKeyHash)] = olocalstatequery.IndividualPoolStake{
-			StakeFraction:  pool.StakeFraction,
+			StakeFraction:  &cbor.Rat{Rat: fraction},
 			TotalPoolStake: pool.Stake,
 			VrfHash:        pool.VrfKeyHash,
 		}

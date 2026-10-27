@@ -5713,7 +5713,13 @@ this query. Routing both queries through the same mark-snapshot helper (as
 or first delegated after that snapshot was captured -- confirmed live
 against a real Preview cardano-node: 36 real pools reported by cardano-node
 were completely absent from dingo's reply for no reason other than that
-snapshot lag. `GetUTxOWhole` enumerates live references, resolves their stored
+snapshot lag. `GetStakeDistribution2` (`queryShelleyStakeDistribution2`)
+shares `GetPoolDistr2`'s `PoolStakeDistribution` read for its pools, stakes
+and VRF keys, but divides each pool's stake by total circulating supply
+(`TotalCirculatingSupply`), as `GetStakeDistribution` does, where
+`GetPoolDistr2` divides by delegated stake. Its reply total stays the
+delegated `TotalActiveStake`, as `poolsByTotalStakeFraction` returns it.
+`GetUTxOWhole` enumerates live references, resolves their stored
 CBOR through a fixed worker pool, and decodes them into the node-to-client
 reply shape. A successful response always contains the complete UTxO set at
 the acquired point. Pagination, offsets, item limits, byte limits, time limits,
