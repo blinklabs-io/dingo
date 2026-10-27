@@ -17,6 +17,7 @@ package chainselection
 import (
 	"context"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -64,7 +65,9 @@ func TestAwaitIngressCorroborationHoldsUntilWitnessDelivers(t *testing.T) {
 	require.True(t, result.eligible)
 }
 
-func TestDeliveredHistoryCorroboratesAfterAdmissionFrontierPruning(t *testing.T) {
+func TestDeliveredHistoryCorroboratesAfterAdmissionFrontierPruning(
+	t *testing.T,
+) {
 	t.Parallel()
 	cs := NewChainSelector(ChainSelectorConfig{
 		GenesisMode:           true,
@@ -109,8 +112,11 @@ func TestDeliveredHistoryCorroboratesAfterAdmissionFrontierPruning(t *testing.T)
 	cs.mutex.Unlock()
 	require.Empty(t, cs.pendingPeerTips[witness])
 
-	require.True(t, cs.ShouldApplyIngress(applicant),
-		"pruning the admission frontier must not erase the witness's delivered history")
+	require.True(
+		t,
+		cs.ShouldApplyIngress(applicant),
+		"pruning the admission frontier must not erase the witness's delivered history",
+	)
 }
 
 func TestDeliveredHistoryFromObserverCorroboratesAfterPromotion(t *testing.T) {
@@ -144,8 +150,11 @@ func TestDeliveredHistoryFromObserverCorroboratesAfterPromotion(t *testing.T) {
 	require.False(t, cs.ShouldApplyIngress(applicant),
 		"an observer cannot corroborate while it is ineligible")
 	cs.SetConnectionEligible(observer, true)
-	require.True(t, cs.ShouldApplyIngress(applicant),
-		"the promoted observer's delivered history should corroborate the held ingress frontier")
+	require.True(
+		t,
+		cs.ShouldApplyIngress(applicant),
+		"the promoted observer's delivered history should corroborate the held ingress frontier",
+	)
 }
 
 func TestDeliveredPeerHistoryIsBoundedAndRemoved(t *testing.T) {
@@ -324,8 +333,12 @@ func TestPeerTipAdmissionBoundsCatchUpByAppliedTip(t *testing.T) {
 	// Control: the applied tip has not moved, so 125 is past 100+2k and is
 	// held back as an unproven far claim.
 	require.NotEqual(t, PeerTipUpdateAccepted, run(t, 100))
-	require.Equal(t, PeerTipUpdateAccepted, run(t, 150),
-		"a frontier within 2k of the applied tip was bounded by a stale local tip")
+	require.Equal(
+		t,
+		PeerTipUpdateAccepted,
+		run(t, 150),
+		"a frontier within 2k of the applied tip was bounded by a stale local tip",
+	)
 }
 
 // A chain's first block can sit at slot 0, as Preview's does. It carries a
@@ -360,11 +373,81 @@ func TestPeerRollbackToSlotZeroBlockKeepsIt(t *testing.T) {
 	} {
 		pt.recordObservedPoint(point, uint64(i), 100, 100, true)
 	}
-	pt.ApplyRollback(ocommon.Point{Slot: 0, Hash: []byte("b0")}, ochainsync.Tip{})
+	pt.ApplyRollback(
+		ocommon.Point{Slot: 0, Hash: []byte("b0")},
+		ochainsync.Tip{},
+	)
 	require.Equal(t,
 		[]ocommon.Point{{Slot: 0, Hash: []byte("b0")}},
 		pt.observedPoints,
 	)
 	pt.ApplyRollback(ocommon.Point{}, ochainsync.Tip{})
 	require.Empty(t, pt.observedPoints)
+}
+
+func TestGenesisIngressReleasesGenerationPinBeforeAppliedLookup(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name                     string
+		genesis, tracked, lookup bool
+	}{
+		{"applied point", true, true, true},
+		{"untracked denial", true, false, false},
+		{"Praos admission", false, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var pin sync.RWMutex
+			releases, lookups := 0, 0
+			cs := NewChainSelector(
+				ChainSelectorConfig{
+					GenesisMode:           tc.genesis,
+					SecurityParam:         20,
+					MinCorroboratingPeers: 1,
+				},
+			)
+			peer := corrConn(8)
+			point := genesisTip(190, "applied-point", 190)
+			if tc.tracked {
+				feedFrontier(cs, peer, point)
+			}
+			cs.config.CurrentHeaderCryptoVerificationGeneration = func() uint64 { return 1 }
+			cs.config.PinHeaderCryptoVerificationGeneration = func(uint64) (func(), bool) {
+				pin.RLock()
+				return func() { releases++; pin.RUnlock() }, true
+			}
+			cs.config.AppliedTip = func() (ochainsync.Tip, bool) { return genesisTip(200, "tip", 200), true }
+			cs.config.PointOnLocalChain = func(got ocommon.Point) bool {
+				lookups++
+				unlocked := pin.TryLock()
+				if unlocked {
+					pin.Unlock()
+				}
+				require.True(
+					t,
+					unlocked,
+					"applied-chain I/O must not hold the generation pin",
+				)
+				require.Equal(t, point.Point, got)
+				return true
+			}
+			require.Equal(t, tc.tracked, cs.ShouldApplyIngress(peer))
+			require.Equal(
+				t,
+				1,
+				releases,
+				"every pinned verdict must release exactly once",
+			)
+			if tc.lookup {
+				require.Equal(t, 1, lookups)
+			} else {
+				require.Zero(t, lookups)
+			}
+			unlocked := pin.TryLock()
+			if unlocked {
+				pin.Unlock()
+			}
+			require.True(t, unlocked, "early verdicts must release the pin too")
+		})
+	}
 }

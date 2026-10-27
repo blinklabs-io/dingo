@@ -1051,6 +1051,23 @@ type UtxoStore interface {
 	) error
 }
 
+// LeiosClosureAccumulator identifies an accumulator that defers only API detail
+// rows while keeping UTxO, stake, certificates and closure context immediate.
+type LeiosClosureAccumulator interface {
+	types.MetadataBatchAccumulator
+	LeiosClosureRowsOnly() bool
+}
+
+// LeiosClosureBatcher is an optional performance capability. Providers without
+// it keep the ordinary closure setter and exactly the same ledger effects.
+type LeiosClosureBatcher interface {
+	NewLeiosClosureBatchAccumulator() types.MetadataBatchAccumulator
+	SetTransactionLeiosClosureBatched(
+		lcommon.Transaction, ocommon.Point, uint32, map[int]uint64, bool,
+		*uint64, types.MetadataBatchAccumulator, types.Txn, uint64,
+	) error
+}
+
 // TransactionStore owns chain transactions: the transaction table, the
 // per-transaction metadata it carries, and the address and metadata-label
 // indexes derived from it.

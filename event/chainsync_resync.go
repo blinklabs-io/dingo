@@ -73,11 +73,9 @@ const (
 	// the hold allows. The header was withheld, so the fresh intersection
 	// delivers it again. It is not a peer-fault signal.
 	ChainsyncResyncReasonGenesisCorroborationHoldExpired = "genesis corroboration hold expired"
-	// ChainsyncResyncReasonIngressPromotion re-intersects a ChainSync observer
-	// when it becomes ingress-eligible, so its headers pass through normal
-	// verification before contributing to Genesis corroboration. The request
-	// is a fallback: a promoting header that continues the local chain
-	// cancels it.
+	// ChainsyncResyncReasonIngressPromotion re-intersects an ingress-eligible
+	// client that skipped headers while observing, so normal admission can
+	// replay its complete chain from a safe local intersection.
 	ChainsyncResyncReasonIngressPromotion = "ingress promotion"
 	// ChainsyncResyncReasonForecastHorizonNoWork re-intersects a connected
 	// ChainSync peer when no local queued or in-flight blockfetch can advance
@@ -114,4 +112,27 @@ type ChainsyncResyncEvent struct {
 	ConnectionId ouroboros.ConnectionId
 	Reason       string
 	Point        ocommon.Point
+}
+
+// IsLocalChainsyncResyncReason reports whether reason describes local cursor
+// recovery rather than evidence of peer failure. Consumers must also require
+// a clean transport close; a reason never overrides an actual protocol error.
+// Unknown reasons remain subject to ordinary peer failure handling.
+func IsLocalChainsyncResyncReason(reason string) bool {
+	switch reason {
+	case ChainsyncResyncReasonIngressPromotion,
+		ChainsyncResyncReasonPromotedObserverAhead,
+		ChainsyncResyncReasonHeaderValidationRecovery,
+		ChainsyncResyncReasonForecastCorroborationRecovery,
+		ChainsyncResyncReasonFutureHeaderAdmissionRecovery,
+		ChainsyncResyncReasonDisconnectedHeaderAdmission,
+		ChainsyncResyncReasonGenesisCorroborationHoldExpired,
+		ChainsyncResyncReasonForecastHorizonNoWork,
+		ChainsyncResyncReasonBehindLocalTip,
+		ChainsyncResyncReasonNetworkIngestReleased,
+		ChainsyncResyncReasonLocalLedgerRollback:
+		return true
+	default:
+		return false
+	}
 }

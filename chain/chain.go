@@ -3005,10 +3005,23 @@ func (c *Chain) BlockBeforeSlot(
 
 // HoldsPoint reports whether point is currently part of this chain. A block
 // that remains resolvable only through the manager's retained-block cache
-// after a rollback, or that lives on a fork, is not held.
+// after a rollback, or that lives on a fork, is not held. Pruning block content
+// does not retract persistent membership while its metadata and active index
+// still identify the exact point.
+//
+//nolint:contextcheck // A nil caller has no context to inherit.
 func (c *Chain) HoldsPoint(ctx context.Context, point ocommon.Point) bool {
 	if c == nil || c.manager == nil {
 		return false
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if ctx.Err() != nil {
+		return false
+	}
+	if c.persistent {
+		return c.holdsPersistentPoint(ctx, point)
 	}
 	blk, err := c.BlockByPoint(ctx, point, nil)
 	if err != nil {
@@ -3017,6 +3030,43 @@ func (c *Chain) HoldsPoint(ctx context.Context, point ocommon.Point) bool {
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
 	return c.holdsBlockAtIndex(ctx, blk.ID, point.Hash)
+}
+
+// holdsPersistentPoint needs only the retained metadata and active index.
+// Read both from one blob snapshot without fetching CBOR or opening SQL. The
+// generation check rejects a result if rollback or another block mutation
+// raced these unlocked reads; no membership verdict survives the call.
+func (c *Chain) holdsPersistentPoint(
+	ctx context.Context,
+	point ocommon.Point,
+) bool {
+	if len(point.Hash) != lcommon.Blake2b256Size {
+		return false
+	}
+	c.mutex.RLock()
+	generation := c.mutationGeneration
+	c.mutex.RUnlock()
+	c.manager.mutex.RLock()
+	db := c.manager.db
+	c.manager.mutex.RUnlock()
+	if db == nil {
+		return false
+	}
+	txn := db.BlobTxn(false)
+	defer txn.Rollback() //nolint:errcheck
+	index, err := database.BlockIDByPointMetadataTxn(txn, point)
+	if err != nil || ctx.Err() != nil {
+		return false
+	}
+	indexed, err := db.BlockPointByIndex(index, txn)
+	if err != nil || indexed.Slot != point.Slot ||
+		!bytes.Equal(indexed.Hash, point.Hash) || ctx.Err() != nil {
+		return false
+	}
+	c.mutex.RLock()
+	defer c.mutex.RUnlock()
+	return generation == c.mutationGeneration &&
+		index >= initialBlockIndex && index <= c.tipBlockIndex
 }
 
 // holdsBlockAtIndex reports whether this chain currently has the block with

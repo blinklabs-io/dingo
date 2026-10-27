@@ -686,6 +686,16 @@ peer's header that does not extend them is buffered rather than clearing them. N
 starts BlockFetch immediately. An in-flight batch from another connection is
 never cancelled by a switch.
 
+Batch accumulation has a one-second maximum wait for the exact admitted queue
+head. Further headers keep its first deadline, so slow authentication or a
+quiet stream cannot indefinitely strand a partial batch. Expiry fetches only
+headers already in the authorized queue and only through the current selected
+live peer; it does not admit a new header, advance LoE, or bypass validation.
+An empty or replaced queue, missing selection, active fetch, canceled context,
+or closed ledger makes the callback a no-op. Queue clearing, normal dispatch,
+and Close cancel the deadline. The existing tracked continuation owns network
+work and shutdown draining; the timer does not own a separate network worker.
+
 The BlockFetch watchdog uses a five-second first-block policy for near-tip
 windows of at most four headers. This is deliberately stricter than the
 protocol client's 60-second timeout ceiling; after the first block arrives,
@@ -4284,6 +4294,22 @@ preserved while the ledger tip is unchanged, and normal progress tracking resets
 it if the tip advances. A block that connected peers cannot serve continues to
 count toward the halt threshold.
 
+Certified closure application preverifies selected transactions' witness
+signatures with bounded parallel workers. Results bind to the full transaction;
+ordinary era validation still checks witness presence and all ledger rules in
+transaction order. Invalid signatures abort the closure and roll back its writes.
+Preverification time belongs to the first transaction's validation sample, and
+results are discarded when the closure finishes.
+
+Certified closure application can use the metadata provider's optional
+`LeiosClosureBatcher` to collect API-only address history, metadata-label and key
+witness rows within one closure. Ledger validation and all consensus effects stay
+in transaction order, with UTxO and stake reads seeing earlier writes. The ledger
+flushes those API rows before publishing any closure events or proceeding to the
+certifier's epoch transition. Failure aborts the outer database transaction; a
+provider lacking the capability uses the existing immediate path. This does not
+activate the trusted UTxO overlay for Dijkstra.
+
 **Certified-closure consistency gate:** a certified EB is held to a stricter
 rule than the best-effort announcement prefetch described above.
 `ensureReferencedEndorserBlocks` resolves every CertRB's parent announcement and
@@ -5779,6 +5805,15 @@ chain/manager lock cycle used by chain creation. Iterator and reconciliation
 paths already hold the manager lock, so they call the locked index helper
 directly rather than re-entering the manager lock.
 
+Persistent point membership uses retained block metadata plus the active
+index, read from one blob-only snapshot without block-body reads or SQL.
+The exact slot and hash, the chain's index bounds, and an unchanged chain
+mutation generation must all agree. Blob reads run outside the chain lock;
+a concurrent mutation makes the answer false. Pending append writes cannot
+establish membership before commit, and pruning content alone does not remove
+a canonical point. Fork and in-memory chains continue to check their own
+index and common-prefix ownership.
+
 ### Retained block cache and the rollback-target invariant
 
 `ChainManager.removeBlockByIndex` deletes a rolled-back block's row but first
@@ -6324,6 +6359,25 @@ it. Dingo implements this as a **corroboration gate**
 (`chainselection/genesis_corroboration.go`), controlled by
 `genesisBootstrap.corroborationPeers` (`MinCorroboratingPeers`):
 
+A retained peer fork path also records the longest ancestor prefix whose
+stateless cryptography passed for one consensus context generation, epoch,
+and candidate nonce. Extending the same hash-linked path or publishing a tip
+within that context preserves the marker; a context change, nonce change,
+different anchor, or different prefix prevents reuse. The
+marker adds constant storage per retained connection and is discarded with its
+existing fork-path cache. It skips only repeated VRF, KES, and operational
+certificate signature verification. Peer-scoped ancestry lookup, recorded
+verdict freshness, pool registration, leader eligibility, and operational
+certificate counter checks still run through their existing paths. A successful
+cryptographic result does not stamp a raw header as fully verified: unavailable
+or invalid state continues to defer or reject it.
+
+While Genesis corroboration is active, a new ChainSync session intersects at
+the applied ledger tip through `LedgerState.LedgerTipIntersectPoints`, retaining
+older persisted intersection points when available. Starting at primary-chain
+headers ahead of the applied ledger can skip the prefix needed for progress.
+Ordinary Praos sessions continue to use primary-chain intersection points.
+
 - A candidate peer is **corroborated** when at least `corroborationPeers`
   independent witness peers *confirm the candidate's recent chain*
   (`confirmsRecentChain`): every block a witness observed within the slot range
@@ -6432,9 +6486,9 @@ it. Dingo implements this as a **corroboration gate**
   candidates are bounded per peer, so they cannot vouch for an arbitrarily old
   prefix. A header numbered at or below the applied tip is never held, since
   it cannot reach the ledger; a Byron epoch boundary block shares its
-  predecessor's number, so one numbered as the tip is still held. An
-  observer streams headers without recording them, so a connection promoted to
-  ingress-eligible whose header is more than one block above the applied tip
+  predecessor's number, so one numbered as the tip is still held. Raw observer
+  history is separate from admitted candidate frontiers. A connection promoted
+  to ingress-eligible whose header is more than one block above the applied tip
   is re-synced with `ChainsyncResyncReasonPromotedObserverAhead` instead of
   recording a frontier that starts above the ledger. While corroboration is
   active (`OuroborosConfig.ChainsyncIntersectAtLedgerTip`) new sessions
@@ -6455,7 +6509,23 @@ it. Dingo implements this as a **corroboration gate**
   including for observer connections. Headers enter that history only after
   producer authentication when the ledger requires it. A record counts only
   while its connection is live, eligible, and non-stale; it does not make a
-  candidate selectable or apply-eligible. Rollbacks keep both histories aligned:
+  candidate selectable or apply-eligible. Observer authentication also retains
+  successful, deferred, or withheld deliveries in the existing bounded,
+  connection-local raw ancestry history. This lets a later delivery reconstruct
+  its own peer's linked predecessor without repeatedly probing an absent block
+  body. A new observer raw record has verification generation zero, even when
+  the separate delivered-tip record is authenticated; raw ancestry alone cannot
+  authorize selection, admission, or application. Existing ingress verdicts are
+  not downgraded. The observer write checks the registration token captured
+  before authentication under the connection lock, so a delayed callback cannot
+  populate a replacement bearer with the same connection ID. The existing
+  history limit, rollback invalidation, and disconnect cleanup apply, and a
+  promoted observer still traverses normal future-header admission and crypto
+  validation. Genuinely invalid deliveries are not retained: a definite
+  verification failure marks the observer failed and requests connection
+  recycling. Further callbacks from that failed connection skip verification.
+  Deferred, withheld, and out-of-forecast results do not penalize the peer.
+  Rollbacks keep both histories aligned:
   `OuroborosConfig.ChainsyncRecordDeliveredPeerRollback` runs before the
   ingest-hold and ingress-admission checks, so an ineligible observer's
   existing delivered-history record is trimmed without registering the peer.
@@ -6813,8 +6883,13 @@ blockfetch latency, and then connection ID break the tie in place of the Praos
 comparison. `ChainSelector.SelectedTip` returns the selected
 peer's tip truncated at the limit.
 
-The limit also gates ledger ingress. After a header's tip is observed and
-before it is handed to the ledger, the ChainSync roll-forward callback calls
+The limit also bounds selection-eligible ingress streams, including headers
+whose ledger application is withheld by Genesis corroboration or whose
+corroboration hold has expired. These streams still advance candidate history;
+letting them bypass the limit could evict the shared overlap before they become
+corroborated. Observer deliveries and headers refused by producer verification
+or selector admission do not enter this wait. After a header's tip is observed
+and before it is handed to the ledger, the ChainSync roll-forward callback calls
 `ChainSelector.AwaitEagernessLimit` (wired as
 `OuroborosConfig.ChainsyncAwaitEagerness`). A header numbered past the limit
 blocks that peer's callback, which pauses only its header stream: nothing is
@@ -7147,6 +7222,7 @@ The `chainsync.State` tracks multiple concurrent chainsync clients:
 - Grace period before recycling stalled connections
 - Cooldown to prevent rapid reconnection flapping
 - Configured roots take client slots first. `chainsync.Config.IsRoot` (wired to `PeerGovernor.IsConfiguredRootConnection`, local and public roots with a client connection) lets a root displace the longest-idle non-root, non-active client when every slot is taken; the displaced client stays connected as an observer. A peer that finds every slot taken is tracked as an observer rather than left without a client, and an observed root is promoted into a slot freed by a disconnect or a demotion without waiting for its next message. The root check takes the peer governor mutex while the chainsync client lock is held, so the governor must not call into chainsync or ledger progress providers with that mutex held.
+- Observer promotion preserves its connection unless this tracked session actually dropped headers while observing. A bounded gap flag in `TrackedClient` survives demotion and promotion; the drop carries an opaque session token so a callback from a replaced bearer cannot mark its replacement. Marking also checks the current role atomically, so an eligibility event that promotes an observer before its callback finishes dropping the header still requests replay. Selector-pending admission does not mark an observer gap. A gap schedules a fresh intersection using `ChainsyncResyncReasonIngressPromotion`; a capacity-only observer with a fresh cursor continues without a reconnect. Returning to origin or the exact applied-tip point clears the flag and cancels only an unfired promotion timer; a different hash at the same slot cannot clear it. Disconnect and new registration discard the old session's flag.
 - `State.RecordBlockfetchThroughput` and `RecordBlockfetchLatency` keep a per-connection delivery model (first-block latency plus per-byte cost, both EWMA). `State.SelectBlockfetchPeer` ranks the header peer and every other eligible peer that announced the last header of the range (headers chain by hash, so that peer holds the whole range, while one that announced only its start may have forked away) by the time that model predicts for a typical batch. Estimates within 5% tie and a per-node salt decides, so near-equal peers do not flap. An unsampled peer is explored for one range in eight using the salted range hash; when every candidate is unsampled, the header peer is used outside those exploration ranges. With no other holder, the header peer is always used. The ledger asks once per batch window (`selectBlockfetchConnForWindow`): at the first batch, at each continuation, and during deep catch-up when a promoted pre-queued request would top its pipeline up, where a preference for another peer leaves the pipeline empty. A better peer therefore takes over at a batch boundary while the batch in flight finishes on its own peer. Decisions and peer changes are counted in `dingo_blockfetch_peer_selections_total` and `dingo_blockfetch_peer_handoffs_total`. The node no longer wires the shadow duplicate-dispatch inputs (`PeersWithBlockFunc`, `BlockfetchLatencyFunc`, `BlockfetchLatencyMedianFunc`), so that path stays off.
 - A rollback to the cursor a peer already sits at does not refresh its stall clock or clear a stalled status (`UpdateClientRollback`). The ledger recognizes a rollback to its own tip before tracking it; it keeps a bounded `maxRollbackHistory` event history and a separate per-connection/point count window so event eviction does not hide a repeated rollback.
 - When a `chainsync.resync` event identifies affected connections, the handler clears local history and generally closes those connections so peer governance can reconnect from fresh intersect points. `LocalLedgerRollback` first attempts ledger-side recovery and leaves connections open when recovery succeeds, no connections need recovery, or the chain is already past the rollback point. Only rollback/fork-resolution failures beyond K and Mithril trust-boundary failures add a peer cooldown; `PersistentFork` does not. Header-driven requests (`requestChainsyncResync`) are coalesced per connection for `chainsyncResyncCoalesceWindow`, and closing the connection clears that record so a reconnect can begin a new resync episode. While network ingest is held (see "Network ingest hold") the handler ignores every request except the release's `network ingest released`, which closes every tracked client.
@@ -7227,6 +7303,18 @@ Endorser-block arrival is measured separately from NtC serving. When an endorser
 ## Peer Governance
 
 The `PeerGovernor` (`peergov/peergov.go`) manages peer selection and topology:
+
+Connection teardown preserves the locally requested reason on the tracked
+connection owner and publishes it alongside the transport error. The shared
+reason predicate in event identifies known local ChainSync cursor recovery;
+peer governance and Ouroboros each also require a clean transport close.
+Those closes do not add session failures, inbound churn, or negative stability
+samples. The next reconnect uses the initial retry delay, replacing any
+pending instability delay, while retaining failure counters so a later genuine
+failure resumes its previous exponential backoff rung. Unknown reasons,
+peer-fault reasons, and transport/protocol errors retain ordinary scoring,
+backoff, and deny handling. The reason belongs to the connection object rather
+than its reusable ID, so stale close requests cannot mark a replacement.
 
 Network-learned gossip, ledger, and peer-sharing candidates are admitted only
 when their literal or resolved address passes `peergov.IsRoutableIP`. This
@@ -16245,7 +16333,9 @@ ChainSync admission callback runs under the ledger's pin, so
 `ChainSelector.CommitPeerTipAdmissionPinned`, and a selector commit that took
 its own admission pin, pass that pin to every peer-tip update, peer removal,
 and chain-selection evaluation they trigger instead of re-pinning the current
-generation.
+generation. The selector releases its current-generation pin together with
+its in-memory ingress decision, before checking applied-chain membership in the
+database, so a slow storage read cannot block snapshot publication.
 
 ## Configuration
 
@@ -19581,14 +19671,19 @@ state committed before the chunk:
   ignored and the signature is verified inline. The workers are cancelled and
   joined on every exit from the chunk callback, and their results are
   discarded with it, so a failed or rolled-back chunk leaves nothing behind.
-  Byron blocks are not covered, since their witnesses are always verified
-  inline, nor are Dijkstra chunks or `TrustedReplay`, which preverifies the
-  whole chunk's signatures before its transaction opens.
+  Dijkstra ranking-body transactions use these workers independently of any
+  certified closure's signature preverification. Dijkstra UTxO prefetch-ahead
+  remains excluded because ranking bodies do not name the inputs a closure
+  consumes; signature verification reads no ledger state. Byron blocks are
+  not covered, since their witnesses are always verified inline, nor is
+  `TrustedReplay`, which preverifies the whole chunk's signatures before its
+  transaction opens.
 
 Both flags change only when work happens, never what it computes: verdicts
 and stored state are identical to the serial path.
 `TestLedgerValidateAheadMatchesSerialState` and
-`TestLedgerValidateAheadRejectsBadSignature` (`ledger/`) replay one chain with
+`TestLedgerValidateAheadRejectsBadSignature`, and
+`TestDijkstraRankingValidateAheadMatchesSerial` (`ledger/`) replay chains with
 the flags off and on and compare stored state and rejection errors, and
 `TestConformanceVectorsPreverifiedSignaturesMatchInline`
 (`internal/test/conformance/`) validates every corpus transaction with and

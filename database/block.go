@@ -785,12 +785,23 @@ func BlockByHash(
 	db *Database,
 	hash []byte,
 ) (models.Block, error) {
+	ctx = nonNilContext(ctx)
+	if err := ctx.Err(); err != nil {
+		return models.Block{}, err
+	}
 	var ret models.Block
-	txn := db.Transaction(ctx, false)
+	// The hash index, metadata and block content all live in the blob store.
+	txn := db.BlobTxn(false)
 	err := txn.Do(func(txn *Txn) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		var err error
 		ret, err = BlockByHashTxn(txn, hash)
-		return err
+		if err != nil {
+			return err
+		}
+		return ctx.Err()
 	})
 	return ret, err
 }

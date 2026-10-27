@@ -24,6 +24,7 @@ import (
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	ouroboros "github.com/blinklabs-io/gouroboros"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -102,7 +103,7 @@ func TestRegisterTrackedChainsyncClientRootTakesSlotFromDiscoveredPeers(
 	assert.Equal(t, capacityTestSlots, o.chainsyncState.ClientConnCount())
 }
 
-func TestIngressPromotionRequestsFreshIntersection(t *testing.T) {
+func TestIngressPromotionAfterSkippedHeaderRequestsFreshIntersection(t *testing.T) {
 	t.Parallel()
 	bus := event.NewEventBus(nil, nil)
 	t.Cleanup(bus.Close)
@@ -124,6 +125,13 @@ func TestIngressPromotionRequestsFreshIntersection(t *testing.T) {
 		scheduled = fn
 		return func() {}
 	}
+
+	// Only a header actually skipped while observing requires replay.
+	o.config.ChainsyncIngressEligible = func(ouroboros.ConnectionId) bool { return false }
+	require.NoError(t, o.chainsyncClientRollForward(
+		ochainsync.CallbackContext{ConnectionId: connId},
+		0, newTestBlockHeader(100, 1, 0xaa), ochainsync.Tip{},
+	))
 
 	require.True(t, o.reconcileChainsyncIngressAdmission(connId, true))
 	require.NotNil(t, scheduled)

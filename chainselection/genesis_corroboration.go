@@ -211,7 +211,8 @@ func (cs *ChainSelector) corroboratingPeersIncludingCandidatesLocked(
 	seen := make(map[ouroboros.ConnectionId]struct{},
 		len(cs.peerTips)+len(cs.pendingPeerTips)+len(cs.deliveredPeerTips))
 	countWitness := func(connId ouroboros.ConnectionId, peerTip *PeerChainTip) {
-		if connId == candidate || !cs.peerCanCorroborateLocked(connId, peerTip) {
+		if connId == candidate ||
+			!cs.peerCanCorroborateLocked(connId, peerTip) {
 			return
 		}
 		if !candidateTip.confirmsRecentChainWithin(
@@ -340,11 +341,11 @@ func (cs *ChainSelector) ingressDecision(
 		}
 		return ingressDeny
 	}
-	defer releaseGeneration()
 	var observedPoint ocommon.Point
 	var observedBlock uint64
 	var localTip ochainsync.Tip
 	verdict := func() ingressVerdict {
+		defer releaseGeneration()
 		cs.mutex.RLock()
 		defer cs.mutex.RUnlock()
 		peerTip := cs.latestPeerTipCandidateLocked(connId)
