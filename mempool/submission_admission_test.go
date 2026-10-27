@@ -101,6 +101,42 @@ func TestAPISubmissionSaturationPreservesDirectSlot(t *testing.T) {
 	)
 }
 
+type singleSlotValidator struct {
+	*mockValidator
+}
+
+func (singleSlotValidator) MempoolSubmissionCapacity() int { return 1 }
+
+// With one process-wide slot the API share is zero, so API admission must
+// refuse while the slot is free and direct submission must still validate.
+func TestAPISubmissionUnavailableWithSingleSlot(t *testing.T) {
+	t.Parallel()
+	m, err := NewMempool(MempoolConfig{
+		Logger:          slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		EventBus:        event.NewEventBus(nil, nil),
+		PromRegistry:    prometheus.NewRegistry(),
+		Validator:       singleSlotValidator{newMockValidator()},
+		MempoolCapacity: 1 << 20,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = m.Stop(context.Background()) })
+	require.Equal(t, 1, cap(m.submissionSlots))
+
+	_, release, err := m.AdmitSubmission(context.Background())
+	if release != nil {
+		release()
+	}
+	require.ErrorIs(t, err, ErrSubmissionBusy)
+	require.Empty(t, m.submissionSlots)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	require.NoError(
+		t,
+		m.AddTransaction(ctx, uint(conway.EraIdConway), getTestTxBytes(t)),
+	)
+}
+
 // Direct callers (node-to-node and node-to-client submission, rolled-back
 // transaction restoration) have no client to answer with a busy status, so a
 // full gate must delay them rather than drop the transaction.
