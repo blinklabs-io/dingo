@@ -863,7 +863,10 @@ func prepareDownloadFile(
 			0o640,
 		)
 		if err != nil {
-			return nil, "", fmt.Errorf("creating download staging file: %w", err)
+			return nil, "", fmt.Errorf(
+				"creating download staging file: %w",
+				err,
+			)
 		}
 		return f, name, nil
 	}
@@ -873,7 +876,10 @@ func prepareDownloadFile(
 		return file, tmpName, 0, false, err
 	}
 	if err != nil {
-		return nil, "", 0, false, fmt.Errorf("inspecting partial download: %w", err)
+		return nil, "", 0, false, fmt.Errorf(
+			"inspecting partial download: %w",
+			err,
+		)
 	}
 	if !info.Mode().IsRegular() {
 		return nil, "", 0, false, fmt.Errorf(
@@ -918,7 +924,10 @@ func prepareDownloadFile(
 		if isDownloadSpaceError(err) {
 			_ = root.Remove(filename)
 		}
-		return nil, "", 0, false, fmt.Errorf("copying partial download: %w", err)
+		return nil, "", 0, false, fmt.Errorf(
+			"copying partial download: %w",
+			err,
+		)
 	}
 	// The Range offset is what was staged, not the size observed earlier.
 	return file, tmpName, copied, true, nil
@@ -928,7 +937,8 @@ func prepareDownloadFile(
 // by the filesystem itself; partial data is discarded so the pressure does
 // not outlive the failed attempt.
 func isDownloadSpaceError(err error) bool {
-	return errors.Is(err, errDownloadFreeSpace) || errors.Is(err, syscall.ENOSPC)
+	return errors.Is(err, errDownloadFreeSpace) ||
+		errors.Is(err, syscall.ENOSPC)
 }
 
 // stagingWriter returns the writer for the staging file, charged against
@@ -975,7 +985,11 @@ func downloadSnapshotOnce(
 	destPath := downloadDestinationPath(cfg)
 
 	file, tmpName, existingSize, ownedPartial, err := prepareDownloadFile(
-		root, filename, cfg.sizeLimit(), cfg.sizeLimitError(), cfg.stagingWriter,
+		root,
+		filename,
+		cfg.sizeLimit(),
+		cfg.sizeLimitError(),
+		cfg.stagingWriter,
 		cfg.afterPartialInspect,
 	)
 	if err != nil {
