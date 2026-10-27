@@ -6411,7 +6411,13 @@ it. Dingo implements this as a **corroboration gate**
   including for observer connections. Headers enter that history only after
   producer authentication when the ledger requires it. A record counts only
   while its connection is live, eligible, and non-stale; it does not make a
-  candidate selectable or apply-eligible. A header still held for corroboration
+  candidate selectable or apply-eligible. Rollbacks keep both histories aligned:
+  `OuroborosConfig.ChainsyncRecordDeliveredPeerRollback` trims an existing
+  delivered-history record before the admission check returns for an ineligible
+  observer, without registering it. For an eligible peer,
+  `OuroborosConfig.ChainsyncObservePeerRollback` synchronously trims the selector
+  frontier before apply eligibility is evaluated and returns true to suppress
+  the asynchronous rollback event. A header still held for corroboration
   is released without it when its point is already on the local chain:
   `ChainSelectorConfig.AppliedTip` supplies the current applied tip (falling
   back to the staged local tip) and `PointOnLocalChain` confirms the point
@@ -6446,16 +6452,8 @@ it. Dingo implements this as a **corroboration gate**
   client activity without moving the cursor, so the stall checker does not
   recycle a peer that is following the chain. This staged
   admission path applies when Genesis corroboration is disabled too, so a
-  rejected or discarded header cannot advance the selector frontier. Before
-  checking ingress eligibility on roll-backward, the
-  `OuroborosConfig.ChainsyncRecordDeliveredPeerRollback` callback trims an
-  existing delivered-history record without registering an observer. Once a
-  peer is eligible to publish ChainSync, the separate
-  `OuroborosConfig.ChainsyncObservePeerRollback` callback updates the selector
-  frontier synchronously before ledger-apply eligibility is evaluated; when it
-  handles the rollback, the asynchronous `PeerRollbackEvent` is skipped. Both
-  histories therefore stop corroborating the chain abandoned by the rollback.
-  With the gate disabled, rollback keeps its existing async observation path;
+  rejected or discarded header cannot advance the selector frontier. With the
+  gate disabled, rollback keeps its existing asynchronous observation path;
   roll-forward still stages and resolves tips around ledger admission.
 - The gate **denies application but does not disconnect** the fast source. Genesis
   wants the fast source kept connected so it can serve blocks as soon as
