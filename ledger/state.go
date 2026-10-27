@@ -3550,9 +3550,14 @@ func (ls *LedgerState) LatestOpCertSequence(
 	)
 }
 
-// Datum looks up a datum by hash & adding this for implementing query.ReadData
-func (ls *LedgerState) Datum(hash []byte) (*models.Datum, error) {
-	return ls.db.GetDatum(context.Background(), hash, nil)
+// Datums looks up datums by hash in one read transaction for
+// query.ReadData. The result is aligned with hashes; an entry is nil when
+// that datum is not stored.
+func (ls *LedgerState) Datums(
+	ctx context.Context,
+	hashes [][]byte,
+) ([]*models.Datum, error) {
+	return ls.db.GetDatums(ctx, hashes)
 }
 
 // CloseDBWorkerPoolShutdownTimeout, CloseProcessBlocksDrainTimeout, and
