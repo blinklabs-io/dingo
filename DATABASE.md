@@ -4391,9 +4391,12 @@ maximum lovelace supply minus the translated UTxO. SQLite plans it as a scan
 of the covering index `idx_utxo_deleted_payment_script` on `deleted_slot`:
 
 ```sql
-SELECT SUM(amount)
-FROM utxo
-WHERE deleted_slot = 0;
+-- SQLite
+SELECT dingo_bigint_sum(amount) FROM utxo WHERE deleted_slot = 0;
+-- PostgreSQL
+SELECT SUM(CAST(amount AS NUMERIC)) FROM utxo WHERE deleted_slot = 0;
+-- MySQL
+SELECT SUM(CAST(amount AS DECIMAL(65, 0))) FROM utxo WHERE deleted_slot = 0;
 ```
 
 ### `GetUtxosByAssets`, Asset Quantity, and Asset Holders
