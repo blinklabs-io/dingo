@@ -1603,7 +1603,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	if midnightServerActive(n.config.storageMode, n.config.midnight) {
 		var err error
 		n.midnightServer, err = midnightserver.New(
-			n.midnightServerConfig(ctx),
+			n.midnightServerConfig(),
 		)
 		if err != nil {
 			return fmt.Errorf("failed to create midnight gRPC server: %w", err)

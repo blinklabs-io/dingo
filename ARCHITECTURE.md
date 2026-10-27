@@ -2907,7 +2907,9 @@ that cursor from skipping rows while the live indexer is mid-block).
 `Config.BlockNumberByHash` (set to a closure over `database.BlockByHash`)
 resolves `GetUtxoEvents`' `end_block_hash` to a block number independent of
 the fetched event rows, so the boundary is honored even for a block with no
-Midnight events; `GetUtxoEvents` fails with `codes.FailedPrecondition` if
+Midnight events. The resolver receives the RPC's context, so a canceled or
+timed-out request stops the lookup and releases its admission slot;
+`GetUtxoEvents` fails with `codes.FailedPrecondition` if
 `end_block_hash` is set but no resolver was configured.
 `utxo_capacity`/`tx_capacity` are clamped server-side (`effectivePageSize`)
 to a bounded default/max instead of being forwarded to the store, since the
