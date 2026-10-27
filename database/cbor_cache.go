@@ -301,7 +301,11 @@ func (c *TieredCborCache) ResolveUtxoCbor(
 	// store just selected -- otherwise open one on that same store.
 	var txn types.Txn
 	if callerTxn != nil {
-		txn = callerTxn.Blob()
+		// An offset the caller's transaction committed separately is
+		// invisible to its snapshot and must not enter its read set.
+		var releaseRead func()
+		txn, releaseRead = callerTxn.utxoBlobHandle(txId, outputIdx)
+		defer releaseRead()
 	}
 	if txn == nil {
 		txn = blob.NewTransaction(false)
@@ -420,7 +424,9 @@ func (c *TieredCborCache) ResolveTxCbor(
 	blobTxn := types.Txn(nil)
 	cacheResolved := true
 	if txn != nil {
-		blobTxn = txn.Blob()
+		var releaseRead func()
+		blobTxn, releaseRead = txn.txBlobHandle(txHash)
+		defer releaseRead()
 		if blobTxn != nil && txn.IsReadWrite() {
 			cacheResolved = false
 		}

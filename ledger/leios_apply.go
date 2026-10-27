@@ -296,6 +296,23 @@ func (ls *LedgerState) applyEndorserBlockInContext(
 		}
 	}
 	txn.MarkBlockCborCommittedSeparately(ebSlot, ebHash)
+	// The offsets of a dense endorser block exceed one blob transaction, so
+	// they commit in bounded blob transactions of their own, after the blob
+	// they point at. See DATABASE.md, "Leios endorser-block storage".
+	var levels []lcommon.Transaction
+	for _, idx := range keepIndexes {
+		levels = append(levels, TransactionLevelsForApply(txs[idx])...)
+	}
+	if err := ls.db.PersistTransactionOffsets(
+		txn,
+		levels,
+		offsets,
+		ls.afterEndorserOffsetBatch,
+	); err != nil {
+		return 0, 0, &leiosEndorserBlockStorageError{
+			err: fmt.Errorf("store endorser block offsets: %w", err),
+		}
+	}
 	return applied, donation, nil
 }
 
@@ -425,6 +442,7 @@ func (ls *LedgerState) validateAndApplyEndorserBlockTransactions(
 		delta.expandedIndexOffset = expandedIndexOffset
 		delta.closureContextSlot = contextSlot
 		delta.skipConsumedInputRecovery = true
+		delta.offsetsPersisted = true
 		delta.stageApplyEvents = func(events []TransactionEvent) {
 			applyEvents = append(applyEvents, events...)
 		}

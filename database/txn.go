@@ -88,6 +88,12 @@ type Txn struct {
 	// separatelyCommittedBlocks lets blob reads bypass this transaction's stale
 	// snapshot; it is guarded by lock.
 	separatelyCommittedBlocks map[blockKey]struct{}
+	// separatelyCommittedOffsets holds the blob keys of transaction and UTxO
+	// offsets committed outside this transaction (PersistTransactionOffsets).
+	// Reads of those keys use a fresh snapshot: this transaction's own
+	// predates the commit, and reading a key through it would also put the key
+	// in its conflict read set, failing its commit. Guarded by lock.
+	separatelyCommittedOffsets map[string]struct{}
 	// readSnapshotAdmissionHeld keeps one coordinated snapshot slot for this
 	// transaction's lifetime. Releasing only after the read transaction ends
 	// caps established snapshots as well as callers waiting to construct one.
@@ -281,6 +287,7 @@ func (t *Txn) finishLocked() {
 		t.writeContext.release()
 	}
 	t.separatelyCommittedBlocks = nil
+	t.separatelyCommittedOffsets = nil
 	t.releaseCommitBarrierLocked()
 	t.releaseBlobPinLocked()
 	if t.readSnapshotAdmissionHeld {
@@ -774,6 +781,59 @@ func (t *Txn) blockCborCommittedSeparately(slot uint64, hash [32]byte) bool {
 	}
 	_, ok := t.separatelyCommittedBlocks[blockKey{slot: slot, hash: hash}]
 	return ok
+}
+
+// markOffsetsCommittedSeparately records blob keys written outside this
+// transaction so later reads of them bypass its snapshot.
+func (t *Txn) markOffsetsCommittedSeparately(keys [][]byte) {
+	if t == nil || len(keys) == 0 {
+		return
+	}
+	t.lock.Lock()
+	defer t.lock.Unlock()
+	if t.finished {
+		return
+	}
+	if t.separatelyCommittedOffsets == nil {
+		t.separatelyCommittedOffsets = make(map[string]struct{}, len(keys))
+	}
+	for _, key := range keys {
+		t.separatelyCommittedOffsets[string(key)] = struct{}{}
+	}
+}
+
+// blobHandleFor returns the blob handle a read of key must use. It is the
+// transaction's own handle, unless key was committed outside it, in which case
+// it is a fresh read snapshot that the returned release func discards. key is
+// built lazily because most transactions have no such keys.
+func (t *Txn) blobHandleFor(key func() []byte) (types.Txn, func()) {
+	noop := func() {}
+	if t == nil {
+		return nil, noop
+	}
+	t.lock.Lock()
+	routed := !t.finished && len(t.separatelyCommittedOffsets) > 0
+	if routed {
+		_, routed = t.separatelyCommittedOffsets[string(key())]
+	}
+	handle := t.blobTxn
+	store := t.blobStore
+	t.lock.Unlock()
+	if !routed || store == nil {
+		return handle, noop
+	}
+	snapshot := store.NewTransaction(false)
+	return snapshot, func() { _ = snapshot.Rollback() }
+}
+
+func (t *Txn) utxoBlobHandle(txId []byte, outputIdx uint32) (types.Txn, func()) {
+	return t.blobHandleFor(func() []byte {
+		return types.UtxoBlobKey(txId, outputIdx)
+	})
+}
+
+func (t *Txn) txBlobHandle(txHash []byte) (types.Txn, func()) {
+	return t.blobHandleFor(func() []byte { return types.TxBlobKey(txHash) })
 }
 
 // AfterCommit registers fn to run after this transaction commits durably.

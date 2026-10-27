@@ -3501,6 +3501,34 @@ reads the marked block through a fresh blob read transaction instead of the
 stale snapshot, which also keeps the block key out of the shared transaction's
 conflict-detection read set. The mark is dropped when the transaction finishes.
 
+The endorser transactions' own `t` and `u` offset entries are bounded the same
+way. A dense endorser block stages one `t` entry per transaction body and one
+`u` entry per produced output, which can exceed one Badger write transaction,
+and the shared transaction would fail with `ErrTxnTooBig` partway through the
+block. `applyEndorserBlock` therefore applies the transactions' metadata with
+`BatchedTxIngestOpts.OffsetsPersisted`, which leaves the blob writes out, and
+afterwards calls `Database.PersistTransactionOffsets`. That commits the entries
+for the applied transactions in blob-only transactions of their own, each sized
+from the store's `blob.TxnBudget` and committed before it fills; a store with no
+budget receives them in the shared transaction. The order is: the endorser blob
+commits, then the offset batches, then the metadata with the shared
+transaction's commit. Offsets therefore never name a blob that is not
+committed. A crash or error between batches, or a rejected or rolled-back
+block, leaves committed `t`/`u` entries whose transactions have no metadata
+rows. Metadata is the source of truth, so those entries are unreachable, and a
+re-apply finds no existing transaction rows, applies every transaction again,
+and rewrites the same values. A rollback of the ranking block deletes the
+entries through its metadata rows, subject to the same per-transaction staging
+limit as any rollback (`ErrBlobDeleteIncomplete`), so a rolled-back dense
+endorser block can strand some entries until a re-apply overwrites them. The
+shared transaction's snapshot predates these commits, so
+`PersistTransactionOffsets` marks each written key on the `Txn`, and reads of a
+marked `t`/`u` key (`ResolveUtxoCbor`, `ResolveTxCbor`, and the producer lookup
+and recovery paths) use a fresh read snapshot instead of the shared handle.
+Reading a key that was committed after the shared transaction began through
+that handle would also add it to the transaction's conflict read set and fail
+its commit.
+
 Transaction effects are stored under the certifying ranking block's
 point, so rolling back that ranking block removes the effects. A blob left
 behind by a crash or rollback is harmless and is overwritten on reprocessing.

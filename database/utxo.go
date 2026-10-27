@@ -263,7 +263,9 @@ func loadCbor(u *models.Utxo, txn *Txn) error {
 	if blob == nil {
 		return types.ErrBlobStoreUnavailable
 	}
-	val, err := blob.GetUtxo(txn.Blob(), u.TxId, u.OutputIdx)
+	readTxn, releaseRead := txn.utxoBlobHandle(u.TxId, u.OutputIdx)
+	defer releaseRead()
+	val, err := blob.GetUtxo(readTxn, u.TxId, u.OutputIdx)
 	if err != nil {
 		if errors.Is(err, types.ErrBlobKeyNotFound) {
 			recoveredCbor, recoverErr := recoverUtxoCbor(
@@ -501,7 +503,8 @@ func fetchTxBlobSlotAndHash(
 		return 0, blockHash, false, nil
 	}
 	blob := txn.BlobStore()
-	blobTxn := txn.Blob()
+	blobTxn, releaseRead := txn.txBlobHandle(txId)
+	defer releaseRead()
 	if blob == nil || blobTxn == nil {
 		return 0, blockHash, false, nil
 	}

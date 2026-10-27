@@ -2002,6 +2002,10 @@ type LedgerState struct {
 	// production; tests use it to hold the exact post-commit/pre-publication
 	// window without relying on scheduler timing.
 	beforeTransactionApplyPublish func()
+	// afterEndorserOffsetBatch is a test-only crash seam. Nil in production;
+	// it runs after each committed batch of endorser-block offsets, and an
+	// error from it stops the write there.
+	afterEndorserOffsetBatch func() error
 	// afterBlockApplyCommit is a test-only sequencing hook. Nil in
 	// production; it holds the durable-commit-before-snapshot-publication
 	// window in the normal block-apply path.
