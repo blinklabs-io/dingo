@@ -6446,14 +6446,17 @@ it. Dingo implements this as a **corroboration gate**
   client activity without moving the cursor, so the stall checker does not
   recycle a peer that is following the chain. This staged
   admission path applies when Genesis corroboration is disabled too, so a
-  rejected or discarded header cannot advance the selector frontier. The
-  roll-**backward** path does the same via `OuroborosConfig.ChainsyncObserveRollback`
-  (wired to apply the rollback into chain selection, skipping the async
-  `PeerRollbackEvent`): a rollback trims the peer's observed frontier and can
-  change its corroboration status, so the rollback apply decision must reflect
-  the post-rollback state rather than pre-trim corroboration. With the gate
-  disabled, rollback keeps its existing async observation path; roll-forward
-  still stages and resolves tips around ledger admission.
+  rejected or discarded header cannot advance the selector frontier. Before
+  checking ingress eligibility on roll-backward, the
+  `OuroborosConfig.ChainsyncRecordDeliveredPeerRollback` callback trims an
+  existing delivered-history record without registering an observer. Once a
+  peer is eligible to publish ChainSync, the separate
+  `OuroborosConfig.ChainsyncObservePeerRollback` callback updates the selector
+  frontier synchronously before ledger-apply eligibility is evaluated; when it
+  handles the rollback, the asynchronous `PeerRollbackEvent` is skipped. Both
+  histories therefore stop corroborating the chain abandoned by the rollback.
+  With the gate disabled, rollback keeps its existing async observation path;
+  roll-forward still stages and resolves tips around ledger admission.
 - The gate **denies application but does not disconnect** the fast source. Genesis
   wants the fast source kept connected so it can serve blocks as soon as
   corroboration arrives; demoting or dropping it would defeat the accelerator.
