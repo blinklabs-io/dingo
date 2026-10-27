@@ -6413,9 +6413,9 @@ it. Dingo implements this as a **corroboration gate**
   while its connection is live, eligible, and non-stale; it does not make a
   candidate selectable or apply-eligible. Rollbacks keep both histories aligned:
   `OuroborosConfig.ChainsyncRecordDeliveredPeerRollback` runs before the
-  ingress-admission check, so an ineligible observer's existing
-  delivered-history record is trimmed without registering the peer. For an
-  ingress-eligible peer while Genesis selection is active,
+  ingest-hold and ingress-admission checks, so an ineligible observer's
+  existing delivered-history record is trimmed without registering the peer.
+  For an ingress-eligible peer while Genesis selection is active,
   `OuroborosConfig.ChainsyncObservePeerRollback` synchronously trims the selector
   frontier before apply eligibility is evaluated and returns true to suppress
   the asynchronous rollback event; outside Genesis selection it returns false
