@@ -188,6 +188,12 @@ func retainOrCreateBootstrapDir(path string) (string, *bootstrapDir, error) {
 		return "", nil, err
 	}
 	clean := filepath.Clean(path)
+	// The download directory itself is created and retained by identity, but
+	// its missing ancestors are ordinary configured path components, the same
+	// as the extraction and download parents created elsewhere in this package.
+	if err := os.MkdirAll(filepath.Dir(clean), extractDirMode); err != nil {
+		return "", nil, fmt.Errorf("creating bootstrap download parent: %w", err)
+	}
 	return createBootstrapDirNamed(
 		filepath.Dir(clean), filepath.Base(clean), createPrivateBootstrapDirectory,
 	)

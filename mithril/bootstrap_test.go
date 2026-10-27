@@ -637,6 +637,20 @@ func TestBootstrapDirectoryCloseReleasesHandlesWithoutRemoving(t *testing.T) {
 	require.NoError(t, os.Rename(path, moved), "all lifetime locks must be released")
 }
 
+func TestRetainOrCreateBootstrapDirCreatesMissingAncestors(t *testing.T) {
+	t.Parallel()
+	downloadDir := filepath.Join(t.TempDir(), "a", "b", "download")
+
+	path, owned, err := retainOrCreateBootstrapDir(downloadDir)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, owned.close()) })
+	require.DirExists(t, downloadDir)
+	info, err := os.Stat(downloadDir)
+	require.NoError(t, err)
+	require.True(t, os.SameFile(info, owned.info))
+	require.Equal(t, filepath.Base(downloadDir), filepath.Base(path))
+}
+
 func TestVerifyCertificateChainAllowsDeepChains(t *testing.T) {
 	t.Parallel()
 
