@@ -17,9 +17,9 @@ require (
 	github.com/aws/smithy-go v1.28.6
 	github.com/blinklabs-io/bark v0.2.0
 	github.com/blinklabs-io/bursa v0.17.1
-	github.com/blinklabs-io/gouroboros v0.215.1
+	github.com/blinklabs-io/gouroboros v0.216.0
 	github.com/blinklabs-io/ouroboros-mock v0.21.1
-	github.com/blinklabs-io/plutigo v0.9.10
+	github.com/blinklabs-io/plutigo v0.10.0
 	github.com/blockfrost/blockfrost-go v0.5.0
 	github.com/btcsuite/btcd/btcutil v1.2.0
 	github.com/consensys/gnark-crypto v0.22.0
@@ -108,7 +108,7 @@ require (
 	github.com/bits-and-blooms/bitset v1.25.0 // indirect
 	github.com/blang/semver v3.5.1+incompatible // indirect
 	github.com/blinklabs-io/go-bip39 v0.2.0 // indirect
-	github.com/btcsuite/btcd/btcec/v2 v2.5.0 // indirect
+	github.com/btcsuite/btcd/btcec/v2 v2.5.1 // indirect
 	github.com/btcsuite/btcd/chaincfg/chainhash v1.2.0 // indirect
 	github.com/btcsuite/btcd/chainhash/v2 v2.0.0 // indirect
 	github.com/cenkalti/backoff/v4 v4.3.0 // indirect
@@ -118,7 +118,7 @@ require (
 	github.com/cncf/xds/go v0.0.0-20260202195803-dba9d589def2 // indirect
 	github.com/cpuguy83/go-md2man/v2 v2.0.7 // indirect
 	github.com/decred/dcrd/crypto/blake256 v1.1.0 // indirect
-	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.0 // indirect
+	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.1 // indirect
 	github.com/dgraph-io/ristretto/v2 v2.2.0 // indirect
 	github.com/dustin/go-humanize v1.1.0 // indirect
 	github.com/envoyproxy/go-control-plane/envoy v1.39.1-0.20260819172001-e6e3fd93e4be // indirect
