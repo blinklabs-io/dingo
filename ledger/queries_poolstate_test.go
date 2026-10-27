@@ -487,3 +487,52 @@ func TestQueryViewPoolStateUsesFrozenEpoch(t *testing.T) {
 	require.Equal(t, uint64(1_000_000), frozen.PState[pendingID].Pledge)
 	require.Equal(t, uint64(2_000_000), frozen.FState[pendingID].Pledge)
 }
+
+// TestQueryViewStakePoolParamsUsesFrozenEpoch proves a held view answers
+// GetStakePoolParams from the snapshot and epoch it froze, as GetPoolState
+// does: in the frozen epoch the re-registration is still pending, so the
+// first registration's pledge is in effect, while the live epoch already has
+// the re-registration in effect.
+func TestQueryViewStakePoolParamsUsesFrozenEpoch(t *testing.T) {
+	t.Parallel()
+
+	ls, db := newDiskTestLedger(t)
+	ls.config.CardanoNodeConfig = newTestEraHistoryCfg(t)
+	pending := repeatedBytes(28, 0x13)
+
+	// Epoch 3 starts at slot 300 and the frozen tip is slot 350.
+	seedStakePoolParamsPool(t, ls, pending, 0)
+	seedStakePoolParamsRegistration(t, ls, pending, 0, 320, 2_000_000)
+	seedEpochs(t, ls, map[uint64]uint64{300: 3, 600: 6})
+	view := freezeEpochThenCrossBoundary(
+		t, ls, db, eras.ConwayEraDesc, eras.ConwayEraDesc,
+	)
+	ls.currentEpoch = models.Epoch{
+		EpochId: 6, StartSlot: 600, LengthInSlots: 100,
+	}
+	ls.currentTip = ochainsync.Tip{
+		Point: ocommon.NewPoint(650, repeatedBytes(32, 0x0B)),
+	}
+	ls.publishSnapshotsLocked()
+	id := gledger.PoolId(gledger.NewBlake2b224(pending))
+	pledge := func(got any) uint64 {
+		t.Helper()
+		wrapped, ok := got.([]any)
+		require.True(t, ok)
+		require.Len(t, wrapped, 1)
+		result, ok := wrapped[0].(map[gledger.PoolId]stakePoolParams)
+		require.True(t, ok)
+		require.Contains(t, result, id)
+		return result[id].Pledge
+	}
+
+	got, err := view.Query(t.Context(), stakePoolParamsQuery(pending), 0)
+	require.NoError(t, err)
+	require.Equal(t, uint64(1_000_000), pledge(got))
+
+	live, err := ls.Query(
+		t.Context(), stakePoolParamsQuery(pending), QueryPoint{},
+	)
+	require.NoError(t, err)
+	require.Equal(t, uint64(2_000_000), pledge(live))
+}
