@@ -3670,7 +3670,7 @@ Key models in `database/models/`:
 | `PoolStakeSnapshot` | Per-pool stake at epoch boundary |
 | `EpochSummary` | Network-wide aggregates per epoch |
 | `BackfillCheckpoint` | Mithril backfill progress tracking |
-| `NetworkState` | Network-wide treasury/reserves state; initialized from genesis circulation or imported Mithril account state, then updated at epoch boundaries by rewards, treasury withdrawals, donations, MIR, and unclaimed pool-retirement deposit refunds |
+| `NetworkState` | Network-wide treasury/reserves state; initialized from genesis circulation or imported Mithril account state, then updated at epoch boundaries by rewards, treasury withdrawals, donations, MIR, unclaimed pool-retirement deposit refunds, and, on a Byron-prefix network, the Byron-to-Shelley reserves reset |
 | `NetworkDonation` | Per-block treasury donations, applied to treasury at the epoch boundary |
 | `GovernanceAction` | Governance proposals |
 | `CommitteeMember` | Constitutional committee members |
@@ -3692,6 +3692,12 @@ unchanged at that boundary. Preview's genesis `d = 1` instead forces performance
 to 1 and requires the first treasury transfer; omitting the round is incorrect.
 This follows cardano-ledger's [TICK input to RUPD](https://github.com/IntersectMBO/cardano-ledger/blob/9975f3d3f36869822eee7225c8422aacafe57790/eras/shelley/impl/src/Cardano/Ledger/Shelley/Rules/Tick.hs)
 and [startStep performance calculation](https://github.com/IntersectMBO/cardano-ledger/blob/9975f3d3f36869822eee7225c8422aacafe57790/eras/shelley/impl/src/Cardano/Ledger/Shelley/LedgerState/PulsingReward.hs).
+On a Byron-prefix network the Byron-to-Shelley rollover also resets reserves to
+the maximum lovelace supply minus the live UTxO balance
+(`applyByronTranslationReserves`), as cardano-ledger's `ByronTranslation.hs`
+does, so value that left circulation during Byron (fees) is reserves rather
+than missing from every pot. It runs before the first Shelley epoch's ADA pots
+are captured, because the first Shelley reward round reads them.
 Networks with a Byron prefix have no Shelley reward round at either of those
 boundaries, and `applyStakeRewards`' Byron-ended-epoch guard suppresses both
 there; networks that declare Shelley at genesis, such as preview, run both.

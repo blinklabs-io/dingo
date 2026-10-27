@@ -28,6 +28,7 @@ import (
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/hardfork"
@@ -289,6 +290,7 @@ func newByronShelleyBoundaryLedger(
 		"slotLength": 1,
 		"networkId": "Mainnet",
 		"networkMagic": 764824073,
+		"maxLovelaceSupply": 45000000000000000,
 		"protocolParams": {
 			"protocolVersion": {"major": 2, "minor": 0},
 			"decentralisationParam": 1,
@@ -896,4 +898,63 @@ func TestByronShelleyBoundaryPreprodHeaderMajorDoesNotSkipShelley(
 			ls.currentPParams)
 		assert.Equal(t, uint(2), pparams.ProtocolMajor)
 	})
+}
+
+// Value that leaves circulation during Byron (fees) is gone from the UTxO set
+// the Shelley ledger starts from, and cardano-ledger sets the initial reserves
+// to the maximum supply minus that set (Shelley/API/ByronTranslation.hs).
+// The genesis reserves written at slot 0 therefore overstate nothing and
+// understate the reserves by exactly the Byron-era loss.
+func TestByronShelleyBoundaryReservesExcludeLiveUtxoBalance(t *testing.T) {
+	t.Parallel()
+
+	const (
+		maxSupply       = uint64(45_000_000_000_000_000)
+		genesisUtxo     = uint64(1_000_000_000)
+		liveUtxo        = uint64(900_000_000)
+		spentUtxo       = uint64(50_000_000)
+		expectedReserve = maxSupply - liveUtxo
+	)
+
+	ls, _, firstShelley := newByronShelleyBoundaryLedger(t)
+	meta := ls.db.Metadata()
+	require.NoError(t, meta.SetNetworkState(
+		0, maxSupply-genesisUtxo, 0, nil,
+	))
+	txn := ls.db.Transaction(context.Background(), true)
+	require.NoError(t, ls.db.CreateUtxo(context.Background(), txn, &models.Utxo{
+		TxId:      bytes.Repeat([]byte{0x01}, 32),
+		AddedSlot: 0,
+		Amount:    types.Uint64(liveUtxo),
+	}))
+	require.NoError(t, ls.db.CreateUtxo(context.Background(), txn, &models.Utxo{
+		TxId:        bytes.Repeat([]byte{0x02}, 32),
+		AddedSlot:   0,
+		DeletedSlot: 100,
+		Amount:      types.Uint64(spentUtxo),
+	}))
+	require.NoError(t, txn.Commit())
+
+	results := make(chan readChainResult, 1)
+	results <- readChainResult{blocks: []gledger.Block{firstShelley}}
+	close(results)
+	require.NoError(t, ls.ledgerProcessBlocksFromSource(
+		context.Background(),
+		results,
+	))
+	require.Equal(t, eras.ShelleyEraDesc.Id, ls.currentEra.Id)
+
+	state, err := meta.GetNetworkState(nil)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	require.Equal(t, expectedReserve, uint64(state.Reserves))
+	require.Equal(t, uint64(0), uint64(state.Treasury))
+
+	pots, err := meta.GetRewardAdaPots(ls.currentEpoch.EpochId, nil)
+	require.NoError(t, err)
+	require.NotNil(t, pots)
+	require.Equal(
+		t, expectedReserve, uint64(pots.Reserves),
+		"the first Shelley epoch's pots must carry the corrected reserves",
+	)
 }

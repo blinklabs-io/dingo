@@ -9727,6 +9727,23 @@ func (ls *LedgerState) processEpochRolloverWithClassicPParamsContext(
 		}
 	}
 
+	if currentEpoch.EraId == eras.ByronEraDesc.Id &&
+		currentEra.Id != eras.ByronEraDesc.Id {
+		if err := ls.timeRolloverPhase(
+			currentEpoch.EpochId+1, "byron_translation", func() error {
+				return ls.applyByronTranslationReserves(
+					txn,
+					currentEpoch.EpochId+1,
+					epochStartSlot,
+				)
+			},
+		); err != nil {
+			return nil, fmt.Errorf(
+				"apply Byron-to-Shelley reserves: %w", err,
+			)
+		}
+	}
+
 	// Capture the new epoch's ADA pots (reserves/treasury/fees) after every
 	// boundary treasury/reserves mutation above (stake rewards, POOLREAP,
 	// governance withdrawals, donations, and any AVVM-removal reserves top-up).

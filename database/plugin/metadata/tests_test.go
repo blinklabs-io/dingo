@@ -149,6 +149,7 @@ var utxoStoreMethods = []string{
 	"GetUtxosWithHistory",
 	"CountUtxosByAddressWithOrdering",
 	"GetControlledAmountByCredential",
+	"GetLiveUtxoLovelace",
 	"GetUtxoPaymentScriptByCredential",
 	"GetScriptLockedSupply",
 	"GetUtxosByAssets",

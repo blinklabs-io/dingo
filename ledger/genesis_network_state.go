@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"errors"
 	"fmt"
 	"math/big"
 
@@ -82,4 +83,57 @@ func genesisReserveBalance(
 		)
 	}
 	return new(big.Int).Sub(maxSupply, circulating).Uint64(), nil
+}
+
+// applyByronTranslationReserves resets reserves at the Byron-to-Shelley
+// boundary to the maximum lovelace supply minus the live UTxO balance being
+// translated, as cardano-ledger's Shelley/API/ByronTranslation.hs does.
+// Value that left circulation during Byron, such as fees, is therefore
+// reserves rather than missing from every pot. It must run before the first
+// Shelley epoch's ADA pots are captured, since the first Shelley reward round
+// reads them.
+func (ls *LedgerState) applyByronTranslationReserves(
+	txn *database.Txn,
+	newEpoch uint64,
+	boundarySlot uint64,
+) error {
+	shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
+	if shelleyGenesis == nil {
+		return errors.New("missing Shelley genesis")
+	}
+	meta := ls.db.Metadata()
+	live, err := meta.GetLiveUtxoLovelace(txn.Metadata())
+	if err != nil {
+		return fmt.Errorf("sum live UTxO balance: %w", err)
+	}
+	if live > shelleyGenesis.MaxLovelaceSupply {
+		return fmt.Errorf(
+			"live UTxO balance %d exceeds max lovelace supply %d",
+			live,
+			shelleyGenesis.MaxLovelaceSupply,
+		)
+	}
+	reserves := shelleyGenesis.MaxLovelaceSupply - live
+	state, err := meta.GetNetworkState(txn.Metadata())
+	if err != nil {
+		return fmt.Errorf("get network state: %w", err)
+	}
+	var treasury uint64
+	if state != nil {
+		treasury = uint64(state.Treasury)
+	}
+	if err := meta.SetNetworkState(
+		treasury, reserves, boundarySlot, txn.Metadata(),
+	); err != nil {
+		return fmt.Errorf("set translated reserves: %w", err)
+	}
+	ls.config.Logger.Info(
+		"set Shelley reserves from Byron UTxO balance",
+		"reserves", reserves,
+		"live_utxo_lovelace", live,
+		"epoch", newEpoch,
+		"boundary_slot", boundarySlot,
+		"component", "ledger",
+	)
+	return nil
 }
