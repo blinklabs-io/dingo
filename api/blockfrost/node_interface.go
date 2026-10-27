@@ -292,7 +292,8 @@ type BlockfrostNode interface {
 	// AddressUTXOs returns the paginated current UTxOs for
 	// an address along with the total number of matching
 	// results before pagination.
-	AddressUTXOs(ctx context.Context,
+	AddressUTXOs(
+		ctx context.Context,
 		address string,
 		params PaginationParams,
 	) ([]AddressUTXOInfo, int, error)
@@ -310,6 +311,7 @@ type BlockfrostNode interface {
 	// MetadataTransactions returns the paginated transactions
 	// containing the requested metadata label, with JSON values.
 	MetadataTransactions(
+		ctx context.Context,
 		label uint64,
 		params PaginationParams,
 	) ([]MetadataTransactionJSONInfo, int, error)
@@ -317,6 +319,7 @@ type BlockfrostNode interface {
 	// MetadataTransactionsCBOR returns the paginated transactions
 	// containing the requested metadata label, with CBOR values.
 	MetadataTransactionsCBOR(
+		ctx context.Context,
 		label uint64,
 		params PaginationParams,
 	) ([]MetadataTransactionCBORInfo, int, error)

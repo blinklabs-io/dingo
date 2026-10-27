@@ -33,7 +33,7 @@ type secretFileSetting struct {
 	field, fileField string
 	yaml, fileYAML   string
 	env, fileEnv     string
-	flag, fileFlag   string
+	fileFlag         string
 }
 
 var secretFileSettings = []secretFileSetting{
@@ -44,7 +44,6 @@ var secretFileSettings = []secretFileSetting{
 		fileYAML:  "koiosParity.apiKeyFile",
 		env:       "DINGO_KOIOS_PARITY_API_KEY",
 		fileEnv:   "DINGO_KOIOS_PARITY_API_KEY_FILE",
-		flag:      "koios-parity-api-key",
 		fileFlag:  "koios-parity-api-key-file",
 	},
 }
@@ -125,19 +124,8 @@ func applySecretFileEnvironment(cfg *Config) error {
 
 func applySecretFileFlags(flags *pflag.FlagSet, cfg *Config) error {
 	for _, s := range secretFileSettings {
-		valueSet := flags.Changed(s.flag)
-		fileSet := flags.Changed(s.fileFlag)
-		switch {
-		case valueSet && fileSet:
-			return fmt.Errorf(
-				"--%s and --%s are both set; set only one",
-				s.flag,
-				s.fileFlag,
-			)
-		case fileSet:
+		if flags.Changed(s.fileFlag) {
 			configFieldValue(cfg, s.field).SetString("")
-		case valueSet:
-			configFieldValue(cfg, s.fileField).SetString("")
 		}
 	}
 	return nil

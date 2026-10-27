@@ -1220,6 +1220,65 @@ type expansionReader struct {
 	produced int64
 }
 
+type extractionEntryCounter struct {
+	maxEntries   int
+	headers      int
+	implicitDirs int
+	knownDirs    map[string]struct{}
+	sharedBudget *bootstrapExtractionBudget
+}
+
+func newExtractionEntryCounter(
+	maxEntries int,
+	sharedBudget *bootstrapExtractionBudget,
+) *extractionEntryCounter {
+	return &extractionEntryCounter{
+		maxEntries:   maxEntries,
+		knownDirs:    make(map[string]struct{}),
+		sharedBudget: sharedBudget,
+	}
+}
+
+func (c *extractionEntryCounter) reserveHeader() error {
+	if c.headers >= c.maxEntries {
+		return fmt.Errorf(
+			"%w: more than %d entries",
+			ErrExtractLimitExceeded, c.maxEntries,
+		)
+	}
+	c.headers++
+	return nil
+}
+
+func (c *extractionEntryCounter) reserveMaterialized(
+	name string,
+	isDir bool,
+) error {
+	var parents []string
+	for parent := path.Dir(name); parent != "."; parent = path.Dir(parent) {
+		if _, ok := c.knownDirs[parent]; !ok {
+			parents = append(parents, parent)
+		}
+	}
+	if c.headers+c.implicitDirs+len(parents) > c.maxEntries {
+		return fmt.Errorf(
+			"%w: materialized path entries exceed %d",
+			ErrExtractLimitExceeded, c.maxEntries,
+		)
+	}
+	if err := c.sharedBudget.reserveEntries(1 + len(parents)); err != nil {
+		return err
+	}
+	for _, parent := range parents {
+		c.knownDirs[parent] = struct{}{}
+	}
+	c.implicitDirs += len(parents)
+	if isDir {
+		c.knownDirs[name] = struct{}{}
+	}
+	return nil
+}
+
 func (r *expansionReader) Read(p []byte) (int, error) {
 	n, err := r.reader.Read(p)
 	r.produced += int64(n)
@@ -1342,7 +1401,11 @@ func extractArchiveFile(
 		maxBytes: archiveStreamLimit(limits.maxTotalBytes, limits.maxEntries),
 	})
 
-	var entries, filesExtracted int
+	entryCounter := newExtractionEntryCounter(
+		limits.maxEntries,
+		limits.budget,
+	)
+	var filesExtracted int
 	var totalExtracted int64
 	lastProgressLog := time.Time{}
 	lastLoggedPercent := -5.0
@@ -1363,12 +1426,8 @@ func extractArchiveFile(
 			)
 		}
 
-		entries++
-		if entries > limits.maxEntries {
-			return "", fmt.Errorf(
-				"%w: more than %d entries",
-				ErrExtractLimitExceeded, limits.maxEntries,
-			)
+		if err := entryCounter.reserveHeader(); err != nil {
+			return "", err
 		}
 
 		// Sanitize the path to prevent directory traversal.
@@ -1409,7 +1468,7 @@ func extractArchiveFile(
 
 		switch header.Typeflag {
 		case tar.TypeDir:
-			if err := limits.budget.reserveEntry(); err != nil {
+			if err := entryCounter.reserveMaterialized(name, true); err != nil {
 				return "", err
 			}
 			if err := mkdirExtracted(workDir, target); err != nil {
@@ -1421,7 +1480,7 @@ func extractArchiveFile(
 			}
 		case tar.TypeReg,
 			'\x00': // '\x00' is the legacy regular-file flag (tar.TypeRegA)
-			if err := limits.budget.reserveEntry(); err != nil {
+			if err := entryCounter.reserveMaterialized(name, false); err != nil {
 				return "", err
 			}
 			// Enforce per-file size limit (header.Size is

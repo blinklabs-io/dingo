@@ -983,12 +983,13 @@ func (o *Ouroboros) blockfetchClientBlock(
 			}
 
 			o.blockfetchMetrics.blockDelay.Set(delaySeconds)
-			o.blockfetchMetrics.recentDelays.record(
+			o.blockfetchMetrics.recordAtTipBlock(
 				block.BlockNumber(),
+				block.SlotNumber(),
 				block.Hash(),
+				leiosheader.RankingBlockKind(block.Header()),
 				delaySeconds,
 				fetchDuration.Seconds(),
-				leiosheader.RankingBlockKind(block.Header()),
 			)
 			o.blockfetchMetrics.recentForks.recordParticipant(
 				block.BlockNumber(),

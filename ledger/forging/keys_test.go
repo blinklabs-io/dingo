@@ -437,6 +437,27 @@ func TestPoolCredentialsLoadFromFiles(t *testing.T) {
 	requireVRFKeyPairCoherent(t, pc)
 }
 
+func TestParseSecretKeyBytesZeroizesTransientKESCopies(t *testing.T) {
+	t.Parallel()
+	envelope := []byte(testKESSKeyJSON)
+
+	key, err := parseSecretKeyBytes("kes.skey", envelope)
+	require.NoError(t, err)
+	require.NotEmpty(t, key.SKey)
+	require.NotEqual(t, make([]byte, len(key.SKey)), key.SKey)
+	requireZeroed(t, envelope, "KES key envelope")
+	requireZeroed(t, key.RawCBOR, "raw KES CBOR")
+}
+
+func TestParseSecretKeyBytesZeroizesInputOnFailure(t *testing.T) {
+	t.Parallel()
+	envelope := []byte(`{"type":`)
+
+	_, err := parseSecretKeyBytes("kes.skey", envelope)
+	require.Error(t, err)
+	requireZeroed(t, envelope, "invalid KES key envelope")
+}
+
 func TestPoolCredentialsRejectsMismatchedVRFEnvelopeAtStartup(t *testing.T) {
 	vrfPath, kesPath, opCertPath := createTestKeys(t)
 	pc := NewPoolCredentials()

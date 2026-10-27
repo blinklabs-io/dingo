@@ -17,7 +17,6 @@ package utxorpc
 import (
 	"errors"
 	"fmt"
-	"net"
 	"sync"
 
 	"connectrpc.com/connect"
@@ -35,8 +34,9 @@ const (
 
 // streamLimiter admits long-lived streams (FollowTip, WatchTx, WatchMempool,
 // WaitForTx)
-// under a process-wide and a per-client cap. A client is the remote host, so
-// clients behind one proxy share a budget.
+// under a process-wide and a per-client cap. A client is the remote IPv4
+// address or IPv6 /64 prefix (see clientKey), so clients behind one proxy
+// share a budget.
 type streamLimiter struct {
 	mu           sync.Mutex
 	total        int
@@ -70,10 +70,7 @@ func newRequestLimiter(
 // acquire reserves a stream slot for the client at peerAddr and returns the
 // function that releases it. A refused stream gets a ResourceExhausted error.
 func (l *streamLimiter) acquire(peerAddr string) (func(), error) {
-	client := peerAddr
-	if host, _, err := net.SplitHostPort(peerAddr); err == nil {
-		client = host
-	}
+	client := clientKey(peerAddr)
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.total >= l.maxTotal {

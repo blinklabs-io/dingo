@@ -717,7 +717,9 @@ type remoteImmutableTip struct {
 // ahead, in any order, and move into the ready directory strictly in chunk
 // order, so copyBlocksDirect only ever reads a contiguous prefix. Copying
 // stops when the chain reaches the remote tip or the root publishes no next
-// chunk.
+// chunk, and fails once the chunk that must hold the remote tip is copied
+// without reaching it: a root that keeps serving empty chunks would otherwise
+// keep the load fetching and rescanning without advancing the chain.
 // Copied chunks below the one holding the chain tip are evicted, and that
 // chunk stays, so a later run resumes from it.
 func copyBlocksRemote(
@@ -773,6 +775,12 @@ func copyBlocksRemote(
 			return 0, 0, err
 		}
 	}
+	if limits.chunkSlots == 0 {
+		return 0, 0, errors.New("remote ImmutableDB requires a positive chunk slot count")
+	}
+	// Chunks are uniform, so the tip's block lives in this chunk; no later
+	// chunk can bring the chain closer to it.
+	tipChunk := max(tip.Slot/limits.chunkSlots, first)
 	defer func() {
 		_ = os.RemoveAll(stagingDir)
 	}()
@@ -799,6 +807,9 @@ func copyBlocksRemote(
 	}()
 	next := first
 	fetchNext := func() {
+		if next > tipChunk {
+			return
+		}
 		done := make(chan error, 1)
 		go func(chunk uint64) {
 			done <- fetchRemoteChunkWithClient(
@@ -872,6 +883,13 @@ func copyBlocksRemote(
 				)
 			}
 			break
+		}
+		if chunk >= tipChunk {
+			return blocksCopied, tip.Slot, fmt.Errorf(
+				"remote ImmutableDB chunk %s should hold tip.json slot %d, "+
+					"but the chain stopped at slot %d",
+				immutable.ChunkName(chunk), tip.Slot, chainTip.Slot,
+			)
 		}
 	}
 	return blocksCopied, tip.Slot, nil

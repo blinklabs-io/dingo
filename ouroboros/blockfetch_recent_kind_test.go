@@ -53,9 +53,9 @@ func TestRecentBlockDelaysExportsLeiosKindPerSlot(t *testing.T) {
 	require.Empty(t, gatherRecentBlockKinds(t, reg))
 
 	both := leiosheader.KindAnnouncesEB | leiosheader.KindCertifiesEB
-	r.record(100, testBlockHash(1), 0.3, 0.3, leiosheader.KindAnnouncesEB)
-	r.record(101, testBlockHash(2), 0.3, 0.3, leiosheader.KindCertifiesEB)
-	r.record(102, testBlockHash(3), 0.3, 0.3, both)
+	r.record(100, testBlockHash(1), 0.3, 0.3, withBlockKind(leiosheader.KindAnnouncesEB))
+	r.record(101, testBlockHash(2), 0.3, 0.3, withBlockKind(leiosheader.KindCertifiesEB))
+	r.record(102, testBlockHash(3), 0.3, 0.3, withBlockKind(both))
 	r.record(103, testBlockHash(4), 0.3, 0.3)
 
 	slot := func(n uint64) string {
@@ -71,7 +71,7 @@ func TestRecentBlockDelaysExportsLeiosKindPerSlot(t *testing.T) {
 	// A different block at the same height replaces delay and kind together;
 	// a repeat of the same block keeps the first delivery's kind.
 	r.record(100, testBlockHash(9), 0.5, 0.5)
-	r.record(101, testBlockHash(2), 0.9, 0.9, 0)
+	r.record(101, testBlockHash(2), 0.9, 0.9, withBlockKind(0))
 	got := gatherRecentBlockKinds(t, reg)
 	require.Equal(t, 0.0, got[slot(100)])
 	require.Equal(t, 2.0, got[slot(101)])

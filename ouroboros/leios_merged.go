@@ -2304,28 +2304,27 @@ func (o *Ouroboros) EndorserBlockValidation(
 	}
 }
 
-// EndorserBlockTxHashesByHash returns the manifest-order transaction hashes of
-// a complete cached endorser block at ebSlot. The forge loop uses this to
-// build the prototype-2026w29 post-certificate mempool view: transactions in
-// the EB being certified are excluded from the new EB announced by the same
-// ranking block. See EndorserBlockTxsByHash for why ebSlot is required.
-func (o *Ouroboros) EndorserBlockTxHashesByHash(
+// EndorserBlockClosureTxsByHash returns the manifest-order transactions of a
+// complete, slot-verified cached endorser block at ebSlot, as the
+// block_transaction CBOR the endorser block serves. The forge loop uses this
+// to rebase endorser-block selection onto the certified closure a ranking
+// block applies, as the prototype's post-certificate mempool view does:
+// transactions in the EB being certified, and transactions spending the
+// inputs they consume, are kept out of the new EB announced by the same
+// ranking block. The manifest references hash the block_transaction bytes,
+// not the transaction id the mempool keys by, so the forge loop derives the
+// ids from these bodies. Unlike EndorserBlockTxsByHash, it does not wait for
+// this node's own semantic verdict: the closure is certified, and the forge
+// loop only reads it. See EndorserBlockTxsByHash for why ebSlot is required.
+func (o *Ouroboros) EndorserBlockClosureTxsByHash(
 	ebHash []byte,
 	ebSlot uint64,
-) ([]string, bool) {
+) ([]cbor.RawMessage, bool) {
 	data, ok := o.lookupLeiosEndorserBlock(ebSlot, ebHash)
 	if !ok || !data.completeTxCache() || !data.slotVerified {
 		return nil, false
 	}
-	block, err := decodeLeiosEndorserBlock(data.blockRaw)
-	if err != nil {
-		return nil, false
-	}
-	hashes := make([]string, len(block.TransactionReferences))
-	for i, ref := range block.TransactionReferences {
-		hashes[i] = hex.EncodeToString(ref.TransactionHash.Bytes())
-	}
-	return hashes, true
+	return cloneRawMessages(data.txsRaw), true
 }
 
 // leiosAnnouncementFromBlockCbor returns the endorser block announced by the

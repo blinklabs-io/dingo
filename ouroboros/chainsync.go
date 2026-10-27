@@ -34,6 +34,7 @@ import (
 	"github.com/blinklabs-io/dingo/ledger"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
+	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -274,6 +275,23 @@ func (o *Ouroboros) cancelFutureHeaderResync(
 		delete(o.futureHeaderResyncs, connId)
 	}
 	o.futureHeaderResyncMu.Unlock()
+}
+
+// cancelPendingIngressPromotionResync drops connId's promotion fallback timer
+// when it has not fired. It leaves any other pending recovery untouched, since
+// that one was scheduled for a reason the promoting header did not resolve.
+func (o *Ouroboros) cancelPendingIngressPromotionResync(
+	connId ouroboros.ConnectionId,
+) {
+	o.futureHeaderResyncMu.Lock()
+	defer o.futureHeaderResyncMu.Unlock()
+	scheduled := o.futureHeaderResyncs[connId]
+	if scheduled == nil || scheduled.fired ||
+		scheduled.reason != event.ChainsyncResyncReasonIngressPromotion {
+		return
+	}
+	scheduled.cancel()
+	delete(o.futureHeaderResyncs, connId)
 }
 
 func (o *Ouroboros) markDeferredHeaderRecovery(
@@ -919,10 +937,20 @@ func (o *Ouroboros) buildDefaultChainsyncIntersectPoints(
 			connId.String(),
 		)
 	}
-	intersectPoints, err := o.ledgerState.IntersectPoints(
-		ctx,
-		chainsyncIntersectPointCount,
-	)
+	var intersectPoints []ocommon.Point
+	var err error
+	if o.config.ChainsyncIntersectAtLedgerTip != nil &&
+		o.config.ChainsyncIntersectAtLedgerTip() {
+		intersectPoints, err = o.ledgerState.LedgerTipIntersectPoints(
+			ctx,
+			chainsyncIntersectPointCount,
+		)
+	} else {
+		intersectPoints, err = o.ledgerState.IntersectPoints(
+			ctx,
+			chainsyncIntersectPointCount,
+		)
+	}
 	if err != nil {
 		return nil, fmt.Errorf(
 			"LedgerState.IntersectPoints failed: %w",
@@ -1597,6 +1625,18 @@ func (o *Ouroboros) chainsyncClientRollBackward(
 	// The peer's protocol cursor moves whether or not the rollback is tracked
 	// below, so a withheld header can no longer stand in for it.
 	o.invalidateDeferredHeaderResolution(ctx.ConnectionId)
+	// The delivered history outlives admission, so an observer that is not
+	// ingress-eligible must still lose the frontier the rollback abandoned
+	// before promotion can let it corroborate a candidate.
+	if o.config.ChainsyncRecordDeliveredPeerRollback != nil {
+		o.config.ChainsyncRecordDeliveredPeerRollback(
+			chainselection.PeerRollbackEvent{
+				ConnectionId: ctx.ConnectionId,
+				Point:        point,
+				Tip:          tip,
+			},
+		)
+	}
 	if o.recordHeldChainsyncTip(ctx.ConnectionId, tip) {
 		return ochainsync.ErrStopSyncProcess
 	}
@@ -1699,6 +1739,35 @@ func (o *Ouroboros) chainsyncCursorFarBehindLocalTip(
 	return farBehind(headerBlockNumber) && !farBehind(peerTipBlockNumber)
 }
 
+// headerAtOrBelowLocalTip reports whether a header with the given block number
+// is not above the applied local tip. A Byron epoch boundary block carries its
+// predecessor's block number, so one numbered as the tip follows it and is
+// above it. Without a ledger the answer is false.
+func (o *Ouroboros) headerAtOrBelowLocalTip(header gledger.BlockHeader) bool {
+	if o.chainsyncLocalTipBlock == nil {
+		return false
+	}
+	tipBlock, _ := o.chainsyncLocalTipBlock()
+	if _, boundary := header.(*byron.ByronEpochBoundaryBlockHeader); boundary {
+		return header.BlockNumber() < tipBlock
+	}
+	return header.BlockNumber() <= tipBlock
+}
+
+// promotedObserverAboveLocalTip reports whether a header delivered to a
+// just-promoted observer is more than one block above the applied local tip,
+// so the connection's frontier would start above the block after the tip.
+func (o *Ouroboros) promotedObserverAboveLocalTip(
+	headerBlockNumber uint64,
+) bool {
+	if o.chainsyncLocalTipBlock == nil {
+		return false
+	}
+	tipBlock, _ := o.chainsyncLocalTipBlock()
+	return headerBlockNumber > tipBlock &&
+		headerBlockNumber-tipBlock > 1
+}
+
 // claimBehindTipRecycle reports whether a behind-local-tip recycle may be
 // requested at now, and records it when so. It admits one recycle per
 // chainsyncBehindTipRecycleCooldown across all connections.
@@ -1792,6 +1861,12 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 		// A full-duplex inbound from a configured upstream remains
 		// eligible here, so the node doesn't stall when the relay
 		// dials us first after a crash.
+		wasObserver := false
+		if o.chainsyncState != nil {
+			wasObserver, _ = o.chainsyncState.ClientObservabilityOnly(
+				ctx.ConnectionId,
+			)
+		}
 		ingressEligible := o.reconcileChainsyncIngressAdmission(
 			ctx.ConnectionId,
 			o.shouldPublishChainsyncToLedger(ctx.ConnectionId),
@@ -1867,6 +1942,26 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 			)
 			return nil
 		}
+		// An observer streams headers without recording them, so promoting it
+		// at a cursor above the ledger starts its candidate frontier there. Such
+		// a peer cannot be corroborated and cannot corroborate the header after
+		// the tip, so restart it from the local tip. The header is dropped
+		// unrecorded; the fresh session redelivers it.
+		if ingressEligible && wasObserver &&
+			o.promotedObserverAboveLocalTip(v.BlockNumber()) {
+			if o.scheduleHeaderResync(
+				ctx.ConnectionId,
+				time.Now(),
+				event.ChainsyncResyncReasonPromotedObserverAhead,
+			) {
+				return nil
+			}
+		}
+		// A promoting header that continues the local chain needs no fresh
+		// intersection: the observer contributes from the tip.
+		if ingressEligible && wasObserver {
+			o.cancelPendingIngressPromotionResync(ctx.ConnectionId)
+		}
 		// Enforce the future-header boundary on this peer's protocol callback,
 		// before any observed-tip, cursor, dedup, or ledger mutation. A
 		// permitted wait therefore blocks only this peer and never the shared
@@ -1909,9 +2004,13 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 		// excludes the header and recycles the connection.
 		selectionEligible := ingressEligible
 		deferredVerification := false
+		shouldVerifyHeader := o.chainSelectionShouldVerifyHeaderCrypto != nil &&
+			o.chainSelectionShouldVerifyHeaderCrypto(blockSlot)
+		deliveryVerified := !shouldVerifyHeader
+		verificationAttempted := false
 		var verificationTipBaseline ochainsync.Tip
-		if ingressEligible && o.chainSelectionShouldVerifyHeaderCrypto != nil &&
-			o.chainSelectionShouldVerifyHeaderCrypto(blockSlot) {
+		if ingressEligible && shouldVerifyHeader {
+			verificationAttempted = true
 			if o.ledgerState != nil {
 				verificationTipBaseline = o.ledgerState.Tip()
 			}
@@ -1940,6 +2039,7 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 			}
 			if verifyErr == nil {
 				chainsyncEvent.HeaderCryptoVerificationGeneration = verificationGeneration
+				deliveryVerified = true
 			}
 			if errors.Is(verifyErr, ledger.ErrHeaderBeyondForecastHorizon) {
 				// The header cannot be validated yet, so it must not extend
@@ -1995,6 +2095,19 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 				}
 			}
 		}
+		// Observer deliveries may become corroboration evidence after promotion,
+		// so they need the same producer authentication as ingress candidates.
+		if !verificationAttempted && !deliveryVerified &&
+			o.config.ChainsyncRecordDeliveredPeerTip != nil {
+			verificationGeneration, verifyErr := o.chainSelectionVerifyHeaderCrypto(
+				ctx.ConnectionId,
+				v,
+			)
+			if verifyErr == nil {
+				chainsyncEvent.HeaderCryptoVerificationGeneration = verificationGeneration
+				deliveryVerified = true
+			}
+		}
 		extendsLocalChain := ingressEligible &&
 			o.deferredHeaderExtendsLocalChain(ctx.ConnectionId, v)
 		if deferredVerification {
@@ -2040,22 +2153,23 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 			Point:       point,
 			BlockNumber: v.BlockNumber(),
 		}
+		update := chainselection.PeerTipUpdateEvent{
+			ConnectionId: ctx.ConnectionId,
+			Tip:          tip,
+			ObservedTip:  observedTip,
+			HeaderCryptoVerificationGeneration: chainsyncEvent.
+				HeaderCryptoVerificationGeneration,
+			ObservedPrevHash: v.PrevHash().Bytes(),
+			ObservedBoundary: blockType == gledger.BlockTypeByronEbb,
+		}
+		if deliveryVerified && o.config.ChainsyncRecordDeliveredPeerTip != nil {
+			o.config.ChainsyncRecordDeliveredPeerTip(update)
+		}
 		var peerTipUpdate *chainselection.PeerTipUpdateEvent
 		if selectionEligible {
-			update := chainselection.PeerTipUpdateEvent{
-				ConnectionId: ctx.ConnectionId,
-				Tip:          tip,
-				ObservedTip:  observedTip,
-				VRFOutput:    vrfOutput,
-				PraosView:    praosView,
-				AdmissionID:  o.chainsyncAdmissionSequence.Add(1),
-				HeaderCryptoVerificationGeneration: chainsyncEvent.
-					HeaderCryptoVerificationGeneration,
-				// The parent hash is what lets the selector tell a connected
-				// header chain from a sequence of advancing numbers.
-				ObservedPrevHash: v.PrevHash().Bytes(),
-				ObservedBoundary: blockType == gledger.BlockTypeByronEbb,
-			}
+			update.AdmissionID = o.chainsyncAdmissionSequence.Add(1)
+			update.VRFOutput = vrfOutput
+			update.PraosView = praosView
 			disposition := chainselection.PeerTipUpdateUnhandled
 			if o.config.ChainsyncObservePeerTip != nil {
 				disposition = o.config.ChainsyncObservePeerTip(update)
@@ -2090,8 +2204,11 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 		// A header withheld here is lost to the ledger: the peer's cursor moves
 		// past it. Hold only a selection-eligible header denied by Genesis
 		// corroboration; corroboration cannot override failed authentication.
+		// A header at or below the applied tip cannot reach the ledger, so
+		// waiting for witnesses only stalls the peer.
 		if selectionEligible && ingressEligible && !applyEligible &&
-			o.config.ChainsyncAwaitCorroboration != nil {
+			o.config.ChainsyncAwaitCorroboration != nil &&
+			!o.headerAtOrBelowLocalTip(v) {
 			admissionCtx, cancelAdmission := chainsyncAdmissionContext(ctx)
 			holdCtx, cancelHold := context.WithTimeout(
 				admissionCtx,
@@ -2641,7 +2758,17 @@ func (o *Ouroboros) reconcileChainsyncIngressAdmission(
 		observabilityOnly, exists = o.chainsyncState.ClientObservabilityOnly(
 			connId,
 		)
-		return exists && !observabilityOnly
+		promoted := exists && !observabilityOnly
+		if promoted {
+			// Let the promoting header's stale-cursor check install its more
+			// specific recovery reason before the fallback timer can fire.
+			o.scheduleHeaderResync(
+				connId,
+				time.Now().Add(100*time.Millisecond),
+				event.ChainsyncResyncReasonIngressPromotion,
+			)
+		}
+		return promoted
 	}
 	if !observabilityOnly {
 		_ = o.chainsyncState.SetClientObservabilityOnly(connId, true)

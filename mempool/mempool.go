@@ -164,6 +164,20 @@ type TxValidator interface {
 	) error
 }
 
+// CertifiedClosureProvider optionally resolves the certified endorser-block
+// closure a Leios certifying ranking block applies. Such a block carries no
+// transactions of its own, but the ledger applies its parent's announced
+// endorser block with it, so those transactions are confirmed (and, on a
+// rollback, unconfirmed) by the block exactly like a block's own. LedgerState
+// implements this interface; a validator without it confirms only the
+// transactions in the block body.
+type CertifiedClosureProvider interface {
+	CertifiedClosureTransactions(
+		ctx context.Context,
+		block gledger.Block,
+	) ([]lcommon.Transaction, error)
+}
+
 // TxValidationSessionProvider optionally pins a batch of validations to one
 // coherent ledger snapshot. LedgerState implements this interface; lightweight
 // validators used by tests and alternate embeddings may continue to implement
@@ -1147,7 +1161,9 @@ func (m *Mempool) processChainEvents(
 		m.done,
 		chainUpdateChan,
 		30*time.Second,
-		m.noteChainUpdate,
+		func(evt event.Event) {
+			m.noteChainUpdateContext(ctx, evt)
+		},
 		func() error {
 			return m.rebuildAfterChainUpdate(ctx)
 		},
@@ -1169,12 +1185,13 @@ func (m *Mempool) processChainEvents(
 	)
 }
 
-// noteChainUpdate records transactions confirmed by added blocks and retains
-// transactions from rolled-back blocks for revalidation after the next rebuild.
-func (m *Mempool) noteChainUpdate(evt event.Event) {
+// noteChainUpdateContext records transactions confirmed by added blocks and
+// retains transactions from rolled-back blocks for revalidation after the next
+// rebuild.
+func (m *Mempool) noteChainUpdateContext(ctx context.Context, evt event.Event) {
 	switch data := evt.Data.(type) {
 	case chain.ChainBlockEvent:
-		transactions := m.blockTransactions(data.Block)
+		transactions := m.blockTransactions(ctx, data.Block)
 		if len(transactions) == 0 {
 			return
 		}
@@ -1193,10 +1210,10 @@ func (m *Mempool) noteChainUpdate(evt event.Event) {
 	case chain.ChainRollbackEvent:
 		var transactions []MempoolTransaction
 		for _, block := range slices.Backward(data.RolledBackBlocks) {
-			for _, tx := range m.blockTransactions(block) {
+			for _, tx := range m.blockTransactions(ctx, block) {
 				transactions = append(transactions, MempoolTransaction{
 					Hash: tx.Hash().String(),
-					Cbor: slices.Clone(tx.Cbor()),
+					Cbor: standaloneTransactionCbor(tx.Cbor()),
 					Type: uint(tx.Type()),
 				})
 			}
@@ -1224,7 +1241,13 @@ func (m *Mempool) noteChainUpdate(evt event.Event) {
 	}
 }
 
-func (m *Mempool) blockTransactions(b models.Block) []gledger.Transaction {
+// blockTransactions returns every transaction the ledger applies with b, in
+// application order: the certified endorser-block closure a Leios certifying
+// ranking block applies, then the block's own transactions.
+func (m *Mempool) blockTransactions(
+	ctx context.Context,
+	b models.Block,
+) []gledger.Transaction {
 	if len(b.Cbor) == 0 {
 		return nil
 	}
@@ -1237,7 +1260,53 @@ func (m *Mempool) blockTransactions(b models.Block) []gledger.Transaction {
 		)
 		return nil
 	}
-	return block.Transactions()
+	transactions := block.Transactions()
+	provider, ok := m.validator.(CertifiedClosureProvider)
+	if !ok {
+		return transactions
+	}
+	closure, err := provider.CertifiedClosureTransactions(ctx, block)
+	if err != nil {
+		// Revalidation still drops the closure's transactions once the
+		// ledger has applied it; only the early, confirmed eviction is lost.
+		m.logger.Debug(
+			"could not resolve certified endorser-block closure of block",
+			"component", "mempool",
+			"slot", b.Slot,
+			"error", err,
+		)
+		return transactions
+	}
+	if len(closure) == 0 {
+		return transactions
+	}
+	ret := make([]gledger.Transaction, 0, len(closure)+len(transactions))
+	ret = append(ret, closure...)
+	return append(ret, transactions...)
+}
+
+// standaloneTransactionCbor returns a transaction's CBOR in the standalone
+// form the mempool admits, [body, witnesses, is_valid, auxiliary_data]. A
+// Dijkstra endorser-block closure carries block_transaction CBOR, [body,
+// witnesses, auxiliary_data, is_valid], with the validity flag last; that form
+// is reordered. Any other encoding is returned as a copy.
+func standaloneTransactionCbor(txCbor []byte) []byte {
+	var parts []cbor.RawMessage
+	if _, err := cbor.Decode(txCbor, &parts); err != nil || len(parts) != 4 {
+		return slices.Clone(txCbor)
+	}
+	isBool := func(raw cbor.RawMessage) bool {
+		return len(raw) == 1 && (raw[0] == 0xf4 || raw[0] == 0xf5)
+	}
+	if isBool(parts[2]) || !isBool(parts[3]) {
+		return slices.Clone(txCbor)
+	}
+	parts[2], parts[3] = parts[3], parts[2]
+	out, err := cbor.Encode(parts)
+	if err != nil {
+		return slices.Clone(txCbor)
+	}
+	return out
 }
 
 // rebuildAfterChainUpdate evicts confirmed transactions, rebuilds the pool,

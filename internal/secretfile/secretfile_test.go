@@ -26,7 +26,11 @@ import (
 
 func writeFile(t *testing.T, content string) string {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "secret")
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "secret")
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +121,11 @@ func TestReadRejectsNonRegularFile(t *testing.T) {
 func TestReadAcceptsSymlinkToSecureRegularFile(t *testing.T) {
 	t.Parallel()
 	target := writeFile(t, "s3cret\n")
-	path := filepath.Join(t.TempDir(), "secret-link")
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "secret-link")
 	if err := os.Symlink(target, path); err != nil {
 		t.Skipf("symlink is unavailable: %v", err)
 	}
