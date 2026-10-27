@@ -252,10 +252,12 @@ type BarkConfig struct {
 	ArchiveMaxConcurrentFetches int
 	// ArchiveLookupsPerSecond is the sustained rate of block lookups, each
 	// of which can cost cloud storage requests, that ArchiveService serves
-	// across all callers combined. A FetchBlock whose references do not fit
-	// the remaining budget is refused whole, so the bucket is never smaller
-	// than one maximum-size batch. Zero selects
-	// DefaultArchiveLookupsPerSecond; a negative value is invalid.
+	// across all callers combined. A reference by hash or slot costs one
+	// lookup; one by height alone also pays for the index search it runs
+	// (see archiveHeightSearchLookups). A FetchBlock whose references do not
+	// fit the remaining budget is refused whole, so the bucket is never
+	// smaller than one maximum-size batch of hash or slot references. Zero
+	// selects DefaultArchiveLookupsPerSecond; a negative value is invalid.
 	ArchiveLookupsPerSecond int
 	// ArchiveCallerLookupsPerSecond is the same rate for one caller, keyed
 	// by IPv4 address or IPv6 /64, so a single client cannot spend the whole

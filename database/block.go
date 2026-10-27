@@ -834,6 +834,12 @@ type BlockNumberBound struct {
 	// over an empty ID space that quietly reports the same thing for a
 	// different reason. An empty chain resolves to the same zero value.
 	Resolved bool
+	// StaleTailRestarts counts how many times resolving the bound found
+	// its highest index entry stale (its block metadata missing or filed
+	// under another ID) and had to search again below it. Each restart is
+	// a full further round of index probes, so a caller metering storage
+	// work charges for them; it is zero for an index with a live tail.
+	StaleTailRestarts int
 }
 
 // ResolveBlockNumberBound reads the highest indexed block to bound a
@@ -870,18 +876,22 @@ func ResolveBlockNumberBoundTxn(txn *Txn) (BlockNumberBound, error) {
 		return BlockNumberBound{}, types.ErrNilTxn
 	}
 	upper := uint64(math.MaxUint64)
+	restarts := 0
+	unresolved := func() BlockNumberBound {
+		return BlockNumberBound{StaleTailRestarts: restarts}
+	}
 	for {
 		// Search raw index keys first. Checking liveness while seeking from
 		// zero walks every stale entry left below the retained history.
 		highest, err := blockIndexSeekTxn(txn, 0, false)
 		if err != nil {
 			if errors.Is(err, models.ErrBlockNotFound) {
-				return BlockNumberBound{}, nil
+				return unresolved(), nil
 			}
 			return BlockNumberBound{}, err
 		}
 		if highest.id > upper {
-			return BlockNumberBound{}, nil
+			return unresolved(), nil
 		}
 		hi := upper
 		for highest.id < hi {
@@ -900,18 +910,20 @@ func ResolveBlockNumberBoundTxn(txn *Txn) (BlockNumberBound, error) {
 		metadata, err := blockMetadataByKey(txn, highest.blockKey)
 		if err == nil && metadata.ID == highest.id {
 			return BlockNumberBound{
-				HighestID:     highest.id,
-				HighestNumber: metadata.Height,
-				Resolved:      true,
+				HighestID:         highest.id,
+				HighestNumber:     metadata.Height,
+				Resolved:          true,
+				StaleTailRestarts: restarts,
 			}, nil
 		}
 		if err != nil && !errors.Is(err, models.ErrBlockNotFound) {
 			return BlockNumberBound{}, err
 		}
 		if highest.id == 0 {
-			return BlockNumberBound{}, nil
+			return unresolved(), nil
 		}
 		upper = highest.id - 1
+		restarts++
 	}
 }
 

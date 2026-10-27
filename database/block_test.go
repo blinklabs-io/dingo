@@ -1295,3 +1295,40 @@ func TestBlockIDByPointMetadataReadsNoBlockBody(t *testing.T) {
 	require.Equal(t, block.ID, blockID)
 	require.Zero(t, store.bodyReads)
 }
+
+// TestResolveBlockNumberBoundCountsStaleTailRestarts covers an index whose
+// newest entries have lost their block metadata. The bound still resolves to
+// the highest live block, and reports one restart per stale entry so a caller
+// metering storage work can charge for them.
+func TestResolveBlockNumberBoundCountsStaleTailRestarts(t *testing.T) {
+	t.Parallel()
+	db := newTestDB(t)
+	blocks := make([]models.Block, 0, 5)
+	for i := uint64(1); i <= 5; i++ {
+		block := testIndexedBlock(i*10, i, byte(i))
+		require.NoError(t, db.BlockCreate(block, nil))
+		blocks = append(blocks, block)
+	}
+
+	bound, err := ResolveBlockNumberBound(context.Background(), db)
+	require.NoError(t, err)
+	require.True(t, bound.Resolved)
+	require.Zero(t, bound.StaleTailRestarts, "a live tail needs no restart")
+
+	txn := db.BlobTxn(true)
+	for _, block := range blocks[3:] {
+		require.NoError(t, db.Blob().Delete(
+			txn.Blob(),
+			types.BlockBlobMetadataKey(
+				types.BlockBlobKey(block.Slot, block.Hash),
+			),
+		))
+	}
+	require.NoError(t, txn.Commit())
+
+	bound, err = ResolveBlockNumberBound(context.Background(), db)
+	require.NoError(t, err)
+	require.True(t, bound.Resolved)
+	require.Equal(t, blocks[2].Number, bound.HighestNumber)
+	require.Equal(t, 2, bound.StaleTailRestarts)
+}

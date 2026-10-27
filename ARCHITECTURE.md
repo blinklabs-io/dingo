@@ -15501,7 +15501,7 @@ reduced to its /64 so one subscriber prefix cannot mint an allowance per
 address. Bark reads no forwarding headers, so callers behind one proxy share an
 allowance, and a Dingo node reading expired history through `barkBaseUrl` is a
 single caller whose archive reads beyond its allowance fail rather than wait.
-Each bucket holds at least one maximum-size batch, a global refusal does not
+A reference that names a block by height alone is charged for the storage work it actually does: a batch with any such reference also pays `archiveBoundResolveLookups` (66: the index seeks and one metadata read that find the highest indexed block), and each one pays `archiveHeightSearchLookups` (two lookups per halving of that block's ID, a seek and a metadata read, plus the block read) once the bound is known, before any search runs. A stale entry at the top of the index makes the bound search again below it, which `database.BlockNumberBound.StaleTailRestarts` reports and the handler charges at one more bound round each; a batch the caller cannot afford is refused with `RESOURCE_EXHAUSTED` after the bound is resolved and before any search. Each bucket holds at least one maximum-size batch of hash or slot references, so a large height batch can exceed a bucket's burst and has to be split; a global refusal does not
 charge the caller, and the per-caller table is capped at 4096 entries with an
 overflow bucket beyond that. Every
 height lookup is a bounded probe rather than a scan of the index; there is no
