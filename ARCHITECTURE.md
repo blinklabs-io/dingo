@@ -6412,12 +6412,14 @@ it. Dingo implements this as a **corroboration gate**
   producer authentication when the ledger requires it. A record counts only
   while its connection is live, eligible, and non-stale; it does not make a
   candidate selectable or apply-eligible. Rollbacks keep both histories aligned:
-  `OuroborosConfig.ChainsyncRecordDeliveredPeerRollback` trims an existing
-  delivered-history record before the admission check returns for an ineligible
-  observer, without registering it. For an eligible peer,
+  `OuroborosConfig.ChainsyncRecordDeliveredPeerRollback` runs before the
+  ingress-admission check, so an ineligible observer's existing
+  delivered-history record is trimmed without registering the peer. For an
+  ingress-eligible peer while Genesis selection is active,
   `OuroborosConfig.ChainsyncObservePeerRollback` synchronously trims the selector
   frontier before apply eligibility is evaluated and returns true to suppress
-  the asynchronous rollback event. A header still held for corroboration
+  the asynchronous rollback event; outside Genesis selection it returns false
+  and the event is published. A header still held for corroboration
   is released without it when its point is already on the local chain:
   `ChainSelectorConfig.AppliedTip` supplies the current applied tip (falling
   back to the staged local tip) and `PointOnLocalChain` confirms the point
