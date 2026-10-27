@@ -50,8 +50,7 @@ func (p *PeerGovernor) peerDiversityGroup(peer *Peer) string {
 	return peerAddressGroup(peer)
 }
 
-// peerAddressGroup derives a group label from the peer's address alone: the
-// /24 (IPv4) or /64 (IPv6) prefix, else the normalized hostname.
+// peerAddressGroup derives a group label from the peer's address alone.
 func peerAddressGroup(peer *Peer) string {
 	if peer == nil {
 		return ""
@@ -60,6 +59,12 @@ func peerAddressGroup(peer *Peer) string {
 	if address == "" {
 		address = peer.Address
 	}
+	return addressGroup(address)
+}
+
+// addressGroup derives a group label from an address: the /24 (IPv4) or /64
+// (IPv6) prefix, else the lowercased hostname.
+func addressGroup(address string) string {
 	host, _, err := net.SplitHostPort(address)
 	if err != nil {
 		host = address

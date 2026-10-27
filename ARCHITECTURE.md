@@ -6329,8 +6329,11 @@ it. Dingo implements this as a **corroboration gate**
   candidate's own identity is excluded, so several connections from one operator
   cannot self-corroborate a private fork. The identity is peer governance's
   address group (`PeerGovernor.CorroborationIdentityByConnId`, wired through
-  `ChainSelectorConfig.PeerIdentity`): the /24 (IPv4) or /64 (IPv6) prefix,
-  else the host name. It is never the topology group ID. A local-root group is
+  `ChainSelectorConfig.PeerIdentity`): the /24 (IPv4) or /64 (IPv6) prefix
+  of the address the connection uses, else the host name. A hostname peer's
+  recorded address is the first one DNS returned when it was added, which a
+  later dial need not use, so it is only a fallback. It is never the topology
+  group ID. A local-root group is
   a valency target that can hold several operators' relays; counting it as
   one identity left roots in a single group unable to corroborate each other,
   so a node restarted in Genesis selection with only such roots eligible never

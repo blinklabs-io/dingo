@@ -1023,6 +1023,34 @@ func TestPeerGovernor_CorroborationIdentityIgnoresGroup(t *testing.T) {
 	)
 }
 
+func TestPeerGovernor_CorroborationIdentityUsesConnectedAddress(t *testing.T) {
+	t.Parallel()
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	})
+	// A hostname root is normalized to the first address DNS returned when
+	// the topology loaded; the live connection can use another one.
+	pg.AddPeer("44.0.0.1:3001", PeerSourceTopologyLocalRoot)
+	localAddr, _ := net.ResolveTCPAddr("tcp", "127.0.0.1:6000")
+	remoteAddr, _ := net.ResolveTCPAddr("tcp", "45.0.0.1:3001")
+	conn := ouroboros.ConnectionId{
+		LocalAddr:  localAddr,
+		RemoteAddr: remoteAddr,
+	}
+	pg.mu.Lock()
+	require.Len(t, pg.peers, 1)
+	require.Equal(t, "44.0.0.1:3001", pg.peers[0].NormalizedAddress)
+	pg.peers[0].Connection = &PeerConnection{Id: conn, IsClient: true}
+	pg.mu.Unlock()
+
+	assert.Equal(
+		t,
+		"ipv4:45.0.0.0/24",
+		pg.CorroborationIdentityByConnId(conn),
+		"identity follows the address the connection uses",
+	)
+}
+
 func TestPeerGovernorAppendChainSelectionEventsLocked(t *testing.T) {
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
