@@ -250,7 +250,22 @@ func (c *Chain) TipRelationAndHeader(
 	ancestor bool,
 	err error,
 ) {
-	return c.tipRelationAndHeaderContext(context.Background(), point, true)
+	return c.TipRelationAndHeaderContext(context.Background(), point)
+}
+
+// TipRelationAndHeaderContext is TipRelationAndHeader using ctx for chain
+// reconciliation and block lookups.
+func (c *Chain) TipRelationAndHeaderContext(
+	ctx context.Context,
+	point ocommon.Point,
+) (
+	tip ochainsync.Tip,
+	headerTip ochainsync.Tip,
+	depth uint64,
+	ancestor bool,
+	err error,
+) {
+	return c.tipRelationAndHeaderContext(ctx, point, true)
 }
 
 func (c *Chain) tipRelationAndHeaderContext(

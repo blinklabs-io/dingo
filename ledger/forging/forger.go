@@ -2528,8 +2528,7 @@ func (f *BlockForger) readTipEvidence(currentSlot uint64) forgeTipReading {
 		return reading
 	}
 
-	primaryTip, headerTip, unappliedBlocks, appliedTipAncestor, err :=
-		safetyTips.PrimaryChainTipRelationAndHeader(appliedTipInfo.Point)
+	primaryTip, headerTip, unappliedBlocks, appliedTipAncestor, err := safetyTips.PrimaryChainTipRelationAndHeader(appliedTipInfo.Point)
 	if err != nil {
 		reading.safetyErr = fmt.Errorf(
 			"failed to read forge safety frontier: %w",

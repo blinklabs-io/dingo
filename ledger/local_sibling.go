@@ -160,7 +160,8 @@ func (ls *LedgerState) AdoptLocalForgedSibling(ctx context.Context,
 	// snapshot remains authoritative through the rollback and replacement
 	// below. A verified descendant of the incumbent is stronger evidence than
 	// the locally forged sibling and must not be erased by replacing its parent.
-	selectedTip, headerTip, _, _, err := ls.chain.TipRelationAndHeader(
+	selectedTip, headerTip, _, _, err := ls.chain.TipRelationAndHeaderContext(
+		ctx,
 		incumbentTip.Point,
 	)
 	if err != nil {
