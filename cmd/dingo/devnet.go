@@ -292,14 +292,44 @@ func openOrCreateDevnetStateRoot(runDir string) (*os.Root, error) {
 	if err != nil {
 		return nil, fmt.Errorf("resolving devnet data directory: %w", err)
 	}
-	root, err := openDevnetStateRoot(volumeRoot)
+	var names []string
+	if relRunDir != "." {
+		names = strings.Split(relRunDir, string(filepath.Separator))
+	}
+	// Existing ancestors are checked by path with Lstat, which needs only
+	// search permission on them; opening each one would also need read
+	// permission. The first missing component is created by path in the
+	// checked parent, and every component below it is created through the
+	// pinned handle of the one above.
+	existing := volumeRoot
+	for len(names) > 0 {
+		next := filepath.Join(existing, names[0])
+		info, err := os.Lstat(next)
+		if errors.Is(err, fs.ErrNotExist) {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("checking devnet data directory: %w", err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			return nil, fmt.Errorf("devnet data path %q is not a directory", next)
+		}
+		existing = next
+		names = names[1:]
+	}
+	if len(names) > 0 {
+		existing = filepath.Join(existing, names[0])
+		names = names[1:]
+		if err := os.Mkdir(existing, 0o700); err != nil &&
+			!errors.Is(err, fs.ErrExist) {
+			return nil, fmt.Errorf("creating devnet data directory: %w", err)
+		}
+	}
+	root, err := openDevnetStateRoot(existing)
 	if err != nil {
-		return nil, fmt.Errorf("opening devnet data volume: %w", err)
+		return nil, err
 	}
-	if relRunDir == "." {
-		return root, nil
-	}
-	for name := range strings.SplitSeq(relRunDir, string(filepath.Separator)) {
+	for _, name := range names {
 		child, err := openOrCreateDevnetStateChild(root, name)
 		if err != nil {
 			_ = root.Close()

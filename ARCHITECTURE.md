@@ -321,7 +321,10 @@ until the child exits and rewrites the path-bearing node configuration when
 reusing copied state. State preparation and reset open the directory with
 `os.Root` and pin it by file identity: a symlinked `--data-dir` is resolved once
 at startup, and a symlink introduced while those operations run is rejected
-rather than followed. Each `cardano/keys/` directory component is opened the
+rather than followed. Missing components of the state directory path are
+created one at a time below its deepest existing ancestor and pinned the same
+way; existing ancestors are checked by path and must not be symlinks, so they
+need search permission but not read permission. Each `cardano/keys/` directory component is opened the
 same way, so a symlinked intermediate directory cannot redirect key writes
 outside the state directory. The child node later opens its configuration,
 database, and keys from the generated absolute paths; the preparation handle

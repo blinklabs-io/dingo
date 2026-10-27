@@ -177,6 +177,63 @@ func resolvedTempDir(t *testing.T) string {
 	return dir
 }
 
+// TestPrepareLockedDevnetStateNeedsOnlySearchOnAncestors covers ancestors the
+// user may traverse but not list: creating or reopening the state directory
+// needs search permission on them, and write permission only on the parent
+// a new component is created in.
+func TestPrepareLockedDevnetStateNeedsOnlySearchOnAncestors(t *testing.T) {
+	t.Parallel()
+	if os.Geteuid() == 0 {
+		t.Skip("permission bits do not restrict root")
+	}
+
+	restrict := func(t *testing.T, dir string, mode os.FileMode) {
+		t.Helper()
+		require.NoError(t, os.Chmod(dir, mode))
+		t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+	}
+	prepare := func(t *testing.T, runDir string) {
+		t.Helper()
+		release, err := prepareLockedDevnetState(
+			runDir,
+			true,
+			false,
+			time.Date(2026, time.October, 25, 12, 0, 0, 0, time.UTC),
+		)
+		require.NoError(t, err)
+		require.NoError(t, release())
+	}
+
+	t.Run("new directory in write-search parent", func(t *testing.T) {
+		t.Parallel()
+		parent := resolvedTempDir(t)
+		restrict(t, parent, 0o300)
+		prepare(t, filepath.Join(parent, "state"))
+	})
+	t.Run("new nested directory in write-search parent", func(t *testing.T) {
+		t.Parallel()
+		parent := resolvedTempDir(t)
+		restrict(t, parent, 0o300)
+		prepare(t, filepath.Join(parent, "a", "state"))
+	})
+	t.Run("new directory under search-only ancestor", func(t *testing.T) {
+		t.Parallel()
+		ancestor := resolvedTempDir(t)
+		parent := filepath.Join(ancestor, "parent")
+		require.NoError(t, os.Mkdir(parent, 0o700))
+		restrict(t, ancestor, 0o100)
+		prepare(t, filepath.Join(parent, "state"))
+	})
+	t.Run("existing state under search-only ancestor", func(t *testing.T) {
+		t.Parallel()
+		ancestor := resolvedTempDir(t)
+		runDir := filepath.Join(ancestor, "state")
+		prepare(t, runDir)
+		restrict(t, ancestor, 0o100)
+		prepare(t, runDir)
+	})
+}
+
 func TestPrepareLockedDevnetStateRejectsComponentSwappedAfterResolution(
 	t *testing.T,
 ) {
