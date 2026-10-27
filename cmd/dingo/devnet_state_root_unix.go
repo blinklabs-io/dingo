@@ -59,6 +59,14 @@ func openOrCreateDevnetStateRoot(runDir string) (*os.Root, error) {
 			}
 			childFd, openErr = openDevnetSearchDir(parentFd, name)
 		}
+		// O_NOFOLLOW|O_DIRECTORY reports a symlink as ENOTDIR on Linux and
+		// ELOOP elsewhere; both mean the component is not a real directory.
+		if errors.Is(openErr, unix.ENOTDIR) || errors.Is(openErr, unix.ELOOP) {
+			return nil, fmt.Errorf(
+				"devnet data path %q is not a directory",
+				filepath.Join(current, name),
+			)
+		}
 		if openErr != nil {
 			return nil, fmt.Errorf(
 				"opening devnet data directory %q: %w",
